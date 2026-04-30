@@ -1,0 +1,23 @@
+FROM rust:1.87-bookworm AS builder
+WORKDIR /workspace
+
+COPY Cargo.toml Cargo.lock ./
+COPY llamas-core/Cargo.toml llamas-core/Cargo.toml
+COPY llamas-server/Cargo.toml llamas-server/Cargo.toml
+COPY llamas-cli/Cargo.toml llamas-cli/Cargo.toml
+COPY llamas-quantize/Cargo.toml llamas-quantize/Cargo.toml
+COPY llamas-core/src llamas-core/src
+COPY llamas-core/benches llamas-core/benches
+COPY llamas-server/src llamas-server/src
+COPY llamas-cli/src llamas-cli/src
+COPY llamas-quantize/src llamas-quantize/src
+
+RUN cargo build --release --package llamas-server
+
+FROM debian:bookworm-slim
+RUN useradd --create-home --shell /usr/sbin/nologin llamas
+WORKDIR /app
+COPY --from=builder /workspace/target/release/llamas-server /usr/local/bin/llamas-server
+USER llamas
+EXPOSE 3000
+ENTRYPOINT ["/usr/local/bin/llamas-server"]

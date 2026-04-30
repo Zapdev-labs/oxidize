@@ -1,0 +1,7 @@
+target
+.git
+.github
+.firecrawl
+.ralphy-worktrees
+.ralphy-sandboxes
+**/*.md
