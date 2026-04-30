@@ -1,6 +1,7 @@
 /* tslint:disable */
 /* eslint-disable */
 export const memory: WebAssembly.Memory;
+export const wasm_collect_worker_stream: (a: number, b: number) => [number, number];
 export const wasm_handle_worker_message: (a: number, b: number) => [number, number];
 export const wasm_workspace_status: () => [number, number];
 export const __wbindgen_externrefs: WebAssembly.Table;

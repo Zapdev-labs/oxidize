@@ -18,12 +18,25 @@ export interface LlamasWorkerInferenceResponse {
     consumed_tokens: number;
 }
 
+export interface LlamasWorkerStreamChunk {
+    token: number;
+    index: number;
+}
+
 export interface LlamasWorkerMessageResponse {
     response: LlamasWorkerInferenceResponse | null;
     error: string | null;
 }
 
+export interface LlamasWorkerStreamResponse {
+    chunks: LlamasWorkerStreamChunk[];
+    response: LlamasWorkerInferenceResponse | null;
+    error: string | null;
+}
 
+
+
+export function wasm_collect_worker_stream(request_json: string): string;
 
 export function wasm_handle_worker_message(request_json: string): string;
 
@@ -33,6 +46,7 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
+    readonly wasm_collect_worker_stream: (a: number, b: number) => [number, number];
     readonly wasm_handle_worker_message: (a: number, b: number) => [number, number];
     readonly wasm_workspace_status: () => [number, number];
     readonly __wbindgen_externrefs: WebAssembly.Table;

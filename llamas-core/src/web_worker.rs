@@ -37,6 +37,12 @@ pub struct WorkerInferenceResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerStreamChunk {
+    pub token: Token,
+    pub index: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkerMessageResponse {
     pub response: Option<WorkerInferenceResponse>,
     pub error: Option<String>,
@@ -64,6 +70,16 @@ impl std::error::Error for WorkerInferenceError {}
 pub fn run_inference_in_background_worker(
     request: &WorkerInferenceRequest,
 ) -> Result<WorkerInferenceResponse, WorkerInferenceError> {
+    run_inference_streaming_in_background_worker(request, |_| {})
+}
+
+pub fn run_inference_streaming_in_background_worker<F>(
+    request: &WorkerInferenceRequest,
+    mut on_token: F,
+) -> Result<WorkerInferenceResponse, WorkerInferenceError>
+where
+    F: FnMut(WorkerStreamChunk),
+{
     if request.prompt_tokens.is_empty() {
         return Err(WorkerInferenceError::EmptyPrompt);
     }
@@ -99,7 +115,13 @@ pub fn run_inference_in_background_worker(
             std::pin::Pin::new(&mut stream),
             &mut std::task::Context::from_waker(std::task::Waker::noop()),
         ) {
-            std::task::Poll::Ready(Some(Ok(token))) => generated_tokens.push(token),
+            std::task::Poll::Ready(Some(Ok(token))) => {
+                generated_tokens.push(token);
+                on_token(WorkerStreamChunk {
+                    token,
+                    index: generated_tokens.len() - 1,
+                });
+            }
             std::task::Poll::Ready(Some(Err(err))) => {
                 return Err(WorkerInferenceError::Generation(err));
             }
@@ -138,6 +160,43 @@ pub fn handle_worker_message(request_json: &str) -> String {
     })
 }
 
+pub fn collect_worker_stream(request_json: &str) -> String {
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    struct WorkerStreamResponse {
+        chunks: Vec<WorkerStreamChunk>,
+        response: Option<WorkerInferenceResponse>,
+        error: Option<String>,
+    }
+
+    let mut chunks = Vec::new();
+    let message = match serde_json::from_str::<WorkerInferenceRequest>(request_json) {
+        Ok(request) => match run_inference_streaming_in_background_worker(&request, |chunk| {
+            chunks.push(chunk);
+        }) {
+            Ok(response) => WorkerStreamResponse {
+                chunks,
+                response: Some(response),
+                error: None,
+            },
+            Err(err) => WorkerStreamResponse {
+                chunks,
+                response: None,
+                error: Some(err.to_string()),
+            },
+        },
+        Err(err) => WorkerStreamResponse {
+            chunks,
+            response: None,
+            error: Some(format!("invalid request json: {err}")),
+        },
+    };
+
+    serde_json::to_string(&message).unwrap_or_else(|_| {
+        "{\"chunks\":[],\"response\":null,\"error\":\"failed to serialize worker stream response\"}"
+            .to_string()
+    })
+}
+
 pub const WASM_WORKER_TYPESCRIPT_BINDINGS: &str = r#"
 export interface LlamasWorkerModelConfig {
   vocab_size: number;
@@ -156,7 +215,18 @@ export interface LlamasWorkerInferenceResponse {
   consumed_tokens: number;
 }
 
+export interface LlamasWorkerStreamChunk {
+  token: number;
+  index: number;
+}
+
 export interface LlamasWorkerMessageResponse {
+  response: LlamasWorkerInferenceResponse | null;
+  error: string | null;
+}
+
+export interface LlamasWorkerStreamResponse {
+  chunks: LlamasWorkerStreamChunk[];
   response: LlamasWorkerInferenceResponse | null;
   error: string | null;
 }
@@ -171,6 +241,11 @@ pub const WASM_WORKER_TYPES: &str = WASM_WORKER_TYPESCRIPT_BINDINGS;
 #[cfg_attr(all(target_arch = "wasm32", feature = "wasm"), wasm_bindgen)]
 pub fn wasm_handle_worker_message(request_json: &str) -> String {
     handle_worker_message(request_json)
+}
+
+#[cfg_attr(all(target_arch = "wasm32", feature = "wasm"), wasm_bindgen)]
+pub fn wasm_collect_worker_stream(request_json: &str) -> String {
+    collect_worker_stream(request_json)
 }
 
 #[cfg(test)]
@@ -243,8 +318,56 @@ mod tests {
     }
 
     #[test]
+    fn streaming_worker_inference_emits_chunks_for_each_generated_token() {
+        let request = WorkerInferenceRequest {
+            prompt_tokens: vec![5],
+            max_new_tokens: 3,
+            model: WorkerModelConfig::default(),
+        };
+
+        let mut chunks = Vec::new();
+        let response = run_inference_streaming_in_background_worker(&request, |chunk| {
+            chunks.push(chunk);
+        })
+        .expect("streaming worker inference should produce response");
+
+        assert_eq!(
+            chunks,
+            vec![
+                WorkerStreamChunk { token: 5, index: 0 },
+                WorkerStreamChunk { token: 5, index: 1 },
+                WorkerStreamChunk { token: 5, index: 2 },
+            ]
+        );
+        assert_eq!(response.generated_tokens, vec![5, 5, 5]);
+    }
+
+    #[test]
+    fn collect_worker_stream_returns_chunks_and_final_response() {
+        let request = WorkerInferenceRequest {
+            prompt_tokens: vec![2],
+            max_new_tokens: 2,
+            model: WorkerModelConfig::default(),
+        };
+        let request_json =
+            serde_json::to_string(&request).expect("request serialization should succeed");
+
+        let response_json = collect_worker_stream(&request_json);
+        let response: serde_json::Value =
+            serde_json::from_str(&response_json).expect("stream response should decode");
+
+        assert_eq!(response["error"], serde_json::Value::Null);
+        assert_eq!(response["chunks"][0]["token"], 2);
+        assert_eq!(response["chunks"][0]["index"], 0);
+        assert_eq!(response["chunks"][1]["token"], 2);
+        assert_eq!(response["chunks"][1]["index"], 1);
+        assert_eq!(response["response"]["generated_tokens"], serde_json::json!([2, 2]));
+    }
+
+    #[test]
     fn worker_typescript_bindings_include_typed_contracts() {
         assert!(WASM_WORKER_TYPESCRIPT_BINDINGS.contains("interface LlamasWorkerInferenceRequest"));
         assert!(WASM_WORKER_TYPESCRIPT_BINDINGS.contains("interface LlamasWorkerMessageResponse"));
+        assert!(WASM_WORKER_TYPESCRIPT_BINDINGS.contains("interface LlamasWorkerStreamResponse"));
     }
 }
