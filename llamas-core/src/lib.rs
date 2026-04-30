@@ -12,6 +12,7 @@ pub mod offload;
 pub mod quantization;
 pub mod simd;
 pub mod tensor;
+pub mod tokenizer;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkspaceHealth {
