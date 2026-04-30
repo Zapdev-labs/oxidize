@@ -34,8 +34,13 @@ pub enum KvCacheEvictionStrategy {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum KvCacheError {
-    UnsupportedDType { dtype: DType },
-    LayerOutOfBounds { layer: usize, layer_count: usize },
+    UnsupportedDType {
+        dtype: DType,
+    },
+    LayerOutOfBounds {
+        layer: usize,
+        layer_count: usize,
+    },
     PositionEvicted {
         position: usize,
         oldest_available: usize,
@@ -47,7 +52,10 @@ pub enum KvCacheError {
         newest_available: usize,
         capacity: usize,
     },
-    ValueLengthMismatch { expected: usize, actual: usize },
+    ValueLengthMismatch {
+        expected: usize,
+        actual: usize,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -60,9 +68,15 @@ pub enum KvCachePersistenceError {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ContinuousBatchError {
-    SequenceAlreadyExists { sequence_id: u64 },
-    SequenceNotFound { sequence_id: u64 },
-    SequenceCapacityExceeded { max_sequences: usize },
+    SequenceAlreadyExists {
+        sequence_id: u64,
+    },
+    SequenceNotFound {
+        sequence_id: u64,
+    },
+    SequenceCapacityExceeded {
+        max_sequences: usize,
+    },
     TokenIndexOutOfBounds {
         sequence_id: u64,
         token_index: usize,
@@ -179,24 +193,46 @@ impl KvCache {
         self.config
     }
 
-    pub fn set(&mut self, layer: usize, position: usize, key: &[f32], value: &[f32]) -> Result<(), KvCacheError> {
+    pub fn set(
+        &mut self,
+        layer: usize,
+        position: usize,
+        key: &[f32],
+        value: &[f32],
+    ) -> Result<(), KvCacheError> {
         self.validate_write(layer, key, value)?;
         self.validate_write_position(position)?;
         let physical_position = self.physical_position(position);
         write_storage(&mut self.key, &self.config, layer, physical_position, key);
-        write_storage(&mut self.value, &self.config, layer, physical_position, value);
+        write_storage(
+            &mut self.value,
+            &self.config,
+            layer,
+            physical_position,
+            value,
+        );
         self.record_position(position);
         Ok(())
     }
 
-    pub fn get_key(&self, layer: usize, position: usize, out: &mut [f32]) -> Result<(), KvCacheError> {
+    pub fn get_key(
+        &self,
+        layer: usize,
+        position: usize,
+        out: &mut [f32],
+    ) -> Result<(), KvCacheError> {
         self.validate_read(layer, position, out)?;
         let physical_position = self.physical_position(position);
         read_storage(&self.key, &self.config, layer, physical_position, out);
         Ok(())
     }
 
-    pub fn get_value(&self, layer: usize, position: usize, out: &mut [f32]) -> Result<(), KvCacheError> {
+    pub fn get_value(
+        &self,
+        layer: usize,
+        position: usize,
+        out: &mut [f32],
+    ) -> Result<(), KvCacheError> {
         self.validate_read(layer, position, out)?;
         let physical_position = self.physical_position(position);
         read_storage(&self.value, &self.config, layer, physical_position, out);
@@ -208,10 +244,14 @@ impl KvCache {
             KvStorage::F32(data) => data.len() * std::mem::size_of::<f32>(),
             KvStorage::F16(data) => data.len() * std::mem::size_of::<u16>(),
             KvStorage::Q8 { data, scales, mins } => {
-                data.len() + (scales.len() * std::mem::size_of::<f32>()) + (mins.len() * std::mem::size_of::<f32>())
+                data.len()
+                    + (scales.len() * std::mem::size_of::<f32>())
+                    + (mins.len() * std::mem::size_of::<f32>())
             }
             KvStorage::Q4 { data, scales, mins } => {
-                data.len() + (scales.len() * std::mem::size_of::<f32>()) + (mins.len() * std::mem::size_of::<f32>())
+                data.len()
+                    + (scales.len() * std::mem::size_of::<f32>())
+                    + (mins.len() * std::mem::size_of::<f32>())
             }
         }
     }
@@ -220,10 +260,7 @@ impl KvCache {
         Some((self.oldest_available_position()?, self.newest_position?))
     }
 
-    pub fn save_to_file<P: AsRef<Path>>(
-        &self,
-        path: P,
-    ) -> Result<(), KvCachePersistenceError> {
+    pub fn save_to_file<P: AsRef<Path>>(&self, path: P) -> Result<(), KvCachePersistenceError> {
         let payload = serde_json::to_vec(self)?;
         std::fs::write(path, payload)?;
         Ok(())
@@ -235,12 +272,7 @@ impl KvCache {
         Ok(cache)
     }
 
-    fn validate_write(
-        &self,
-        layer: usize,
-        key: &[f32],
-        value: &[f32],
-    ) -> Result<(), KvCacheError> {
+    fn validate_write(&self, layer: usize, key: &[f32], value: &[f32]) -> Result<(), KvCacheError> {
         self.validate_layer(layer)?;
         let expected = self.config.token_size();
         if key.len() != expected {
@@ -328,14 +360,14 @@ impl KvCache {
     }
 
     fn record_position(&mut self, position: usize) {
-        let newest = self.newest_position.map_or(position, |current| current.max(position));
+        let newest = self
+            .newest_position
+            .map_or(position, |current| current.max(position));
         self.newest_position = Some(newest);
         let oldest = match self.eviction_strategy {
-            KvCacheEvictionStrategy::SlidingWindow => {
-                newest
-                    .saturating_add(1)
-                    .saturating_sub(self.config.context_size)
-            }
+            KvCacheEvictionStrategy::SlidingWindow => newest
+                .saturating_add(1)
+                .saturating_sub(self.config.context_size),
             KvCacheEvictionStrategy::StopAtCapacity => self.oldest_position.unwrap_or(position),
         };
         self.oldest_position = Some(oldest);
@@ -344,7 +376,6 @@ impl KvCache {
     fn physical_position(&self, position: usize) -> usize {
         position % self.config.context_size
     }
-
 }
 
 impl ContinuousBatchKvCache {
@@ -445,10 +476,7 @@ impl ContinuousBatchKvCache {
         &self.kv_cache
     }
 
-    pub fn save_to_file<P: AsRef<Path>>(
-        &self,
-        path: P,
-    ) -> Result<(), KvCachePersistenceError> {
+    pub fn save_to_file<P: AsRef<Path>>(&self, path: P) -> Result<(), KvCachePersistenceError> {
         let payload = serde_json::to_vec(self)?;
         std::fs::write(path, payload)?;
         Ok(())
@@ -469,15 +497,13 @@ impl ContinuousBatchKvCache {
             .sequences
             .get(&sequence_id)
             .ok_or(ContinuousBatchError::SequenceNotFound { sequence_id })?;
-        state
-            .positions
-            .get(token_index)
-            .copied()
-            .ok_or(ContinuousBatchError::TokenIndexOutOfBounds {
+        state.positions.get(token_index).copied().ok_or(
+            ContinuousBatchError::TokenIndexOutOfBounds {
                 sequence_id,
                 token_index,
                 token_count: state.positions.len(),
-            })
+            },
+        )
     }
 }
 
@@ -516,17 +542,31 @@ fn write_storage(
             let scale = if max <= min { 0.0 } else { (max - min) / 15.0 };
             scales[token_index] = scale;
             mins[token_index] = min;
-            for (idx, value) in src.iter().enumerate() {
-                let q = if scale == 0.0 {
+            let quantize = |value: f32| -> u8 {
+                if scale == 0.0 {
                     0
                 } else {
-                    ((*value - min) / scale).round().clamp(0.0, 15.0) as u8
-                };
-                let packed_idx = (range.start + idx) / 2;
-                if (range.start + idx).is_multiple_of(2) {
-                    data[packed_idx] = (data[packed_idx] & 0xF0) | (q & 0x0F);
-                } else {
-                    data[packed_idx] = (data[packed_idx] & 0x0F) | ((q & 0x0F) << 4);
+                    ((value - min) / scale).round().clamp(0.0, 15.0) as u8
+                }
+            };
+            let packed_start = range.start / 2;
+            if range.start.is_multiple_of(2) {
+                for (pair_index, pair) in src.chunks(2).enumerate() {
+                    let low = quantize(pair[0]);
+                    let high = if pair.len() == 2 {
+                        quantize(pair[1])
+                    } else {
+                        (data[packed_start + pair_index] >> 4) & 0x0F
+                    };
+                    data[packed_start + pair_index] = (high << 4) | (low & 0x0F);
+                }
+            } else {
+                let first_high = quantize(src[0]) << 4;
+                data[packed_start] = (data[packed_start] & 0x0F) | first_high;
+                for (pair_index, pair) in src[1..].chunks(2).enumerate() {
+                    let low = quantize(pair[0]);
+                    let high = if pair.len() == 2 { quantize(pair[1]) } else { 0 };
+                    data[packed_start + 1 + pair_index] = (high << 4) | (low & 0x0F);
                 }
             }
         }
@@ -559,15 +599,25 @@ fn read_storage(
         KvStorage::Q4 { data, scales, mins } => {
             let scale = scales[token_index];
             let min = mins[token_index];
-            for (idx, out) in dst.iter_mut().enumerate() {
-                let packed_idx = (range.start + idx) / 2;
-                let packed = data[packed_idx];
-                let q = if (range.start + idx).is_multiple_of(2) {
-                    packed & 0x0F
-                } else {
-                    (packed >> 4) & 0x0F
-                };
-                *out = (q as f32) * scale + min;
+            let packed_start = range.start / 2;
+            if range.start.is_multiple_of(2) {
+                for (pair_index, pair) in dst.chunks_mut(2).enumerate() {
+                    let byte = data[packed_start + pair_index];
+                    pair[0] = ((byte & 0x0F) as f32) * scale + min;
+                    if pair.len() == 2 {
+                        pair[1] = (((byte >> 4) & 0x0F) as f32) * scale + min;
+                    }
+                }
+            } else {
+                let first_byte = data[packed_start];
+                dst[0] = (((first_byte >> 4) & 0x0F) as f32) * scale + min;
+                for (pair_index, pair) in dst[1..].chunks_mut(2).enumerate() {
+                    let byte = data[packed_start + 1 + pair_index];
+                    pair[0] = ((byte & 0x0F) as f32) * scale + min;
+                    if pair.len() == 2 {
+                        pair[1] = (((byte >> 4) & 0x0F) as f32) * scale + min;
+                    }
+                }
             }
         }
     }
@@ -718,8 +768,14 @@ mod tests {
 
         assert_eq!(f32_cache.bytes_per_tensor(), 2 * 4 * 2 * 8 * 4);
         assert_eq!(f16_cache.bytes_per_tensor(), 2 * 4 * 2 * 8 * 2);
-        assert_eq!(q8_cache.bytes_per_tensor(), (2 * 4 * 2 * 8) + (2 * 4 * 4) + (2 * 4 * 4));
-        assert_eq!(q4_cache.bytes_per_tensor(), (2_usize * 4 * 2 * 8).div_ceil(2) + (2 * 4 * 4) + (2 * 4 * 4));
+        assert_eq!(
+            q8_cache.bytes_per_tensor(),
+            (2 * 4 * 2 * 8) + (2 * 4 * 4) + (2 * 4 * 4)
+        );
+        assert_eq!(
+            q4_cache.bytes_per_tensor(),
+            (2_usize * 4 * 2 * 8).div_ceil(2) + (2 * 4 * 4) + (2 * 4 * 4)
+        );
     }
 
     #[test]
@@ -851,6 +907,40 @@ mod tests {
         }
         for (actual, expected) in loaded_value.iter().zip(value.iter()) {
             assert!((actual - expected).abs() < 0.08);
+        }
+    }
+
+    #[test]
+    fn stores_i16_kv_vectors_with_odd_token_size() {
+        let mut cache = KvCache::new(KvCacheConfig {
+            layer_count: 1,
+            context_size: 2,
+            head_count: 1,
+            head_dim: 5,
+            dtype: DType::I16,
+        })
+        .expect("i16 kv cache should be supported");
+
+        let key = [-1.0_f32, -0.5, 0.0, 0.5, 1.0];
+        let value = [0.9_f32, 0.45, 0.0, -0.45, -0.9];
+        cache
+            .set(0, 1, &key, &value)
+            .expect("writing odd-sized kv entry should succeed");
+
+        let mut loaded_key = [0.0_f32; 5];
+        let mut loaded_value = [0.0_f32; 5];
+        cache
+            .get_key(0, 1, &mut loaded_key)
+            .expect("reading odd-sized key should succeed");
+        cache
+            .get_value(0, 1, &mut loaded_value)
+            .expect("reading odd-sized value should succeed");
+
+        for (actual, expected) in loaded_key.iter().zip(key.iter()) {
+            assert!((actual - expected).abs() < 0.1);
+        }
+        for (actual, expected) in loaded_value.iter().zip(value.iter()) {
+            assert!((actual - expected).abs() < 0.1);
         }
     }
 
