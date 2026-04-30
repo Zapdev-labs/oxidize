@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 pub mod gguf;
 pub mod model_loader;
 pub mod quantization;
+pub mod simd;
 pub mod tensor;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
