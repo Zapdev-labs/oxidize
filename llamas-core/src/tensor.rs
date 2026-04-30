@@ -640,6 +640,7 @@ pub fn scaled_dot_product_attention_f32(
     let mut running_sum = 0.0_f32;
     let mut token_offset = 0_usize;
     let mut block_acc = vec![0.0_f32; dim];
+    let mut block_scores = vec![0.0_f32; FLASH_ATTENTION_BLOCK_TOKENS];
 
     while token_offset < seq_len {
         let block_len = (seq_len - token_offset).min(FLASH_ATTENTION_BLOCK_TOKENS);
@@ -649,28 +650,21 @@ pub fn scaled_dot_product_attention_f32(
         let value_block = &value[block_start..block_end];
 
         let mut block_max = f32::NEG_INFINITY;
-        for key_row in key_block.chunks_exact(dim) {
+        for (idx, key_row) in key_block.chunks_exact(dim).enumerate() {
             let score = query
                 .iter()
                 .zip(key_row.iter())
                 .map(|(q, k)| q * k)
                 .sum::<f32>()
                 * scale;
+            block_scores[idx] = score;
             block_max = block_max.max(score);
         }
 
         block_acc.fill(0.0);
         let mut block_sum = 0.0_f32;
-        for (key_row, value_row) in key_block
-            .chunks_exact(dim)
-            .zip(value_block.chunks_exact(dim))
-        {
-            let score = query
-                .iter()
-                .zip(key_row.iter())
-                .map(|(q, k)| q * k)
-                .sum::<f32>()
-                * scale;
+        for (idx, value_row) in value_block.chunks_exact(dim).enumerate() {
+            let score = block_scores[idx];
             let weight = (score - block_max).exp();
             block_sum += weight;
             for (acc, v) in block_acc.iter_mut().zip(value_row.iter()) {
@@ -1406,6 +1400,31 @@ mod tests {
         let mut expected = vec![0.0_f32; dim];
         scaled_dot_product_attention_f32(&query, &key, &value, seq_len, dim, &mut actual)
             .expect("flash-style attention should succeed");
+        reference_attention(&query, &key, &value, seq_len, dim, &mut expected);
+
+        for (lhs, rhs) in actual.iter().zip(expected.iter()) {
+            assert!((lhs - rhs).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn scaled_dot_product_attention_matches_reference_for_long_contexts() {
+        let dim = 4;
+        let seq_len = FLASH_ATTENTION_BLOCK_TOKENS * 64;
+        let query = (0..dim)
+            .map(|i| ((i as f32 * 0.11).sin() * 0.7) - 0.1)
+            .collect::<Vec<_>>();
+        let key = (0..seq_len * dim)
+            .map(|i| ((i as f32 * 0.007).cos() * 0.8) + 0.05)
+            .collect::<Vec<_>>();
+        let value = (0..seq_len * dim)
+            .map(|i| ((i as f32 * 0.013).sin() * 1.1) - 0.2)
+            .collect::<Vec<_>>();
+
+        let mut actual = vec![0.0_f32; dim];
+        let mut expected = vec![0.0_f32; dim];
+        scaled_dot_product_attention_f32(&query, &key, &value, seq_len, dim, &mut actual)
+            .expect("flash attention should support long contexts");
         reference_attention(&query, &key, &value, seq_len, dim, &mut expected);
 
         for (lhs, rhs) in actual.iter().zip(expected.iter()) {
