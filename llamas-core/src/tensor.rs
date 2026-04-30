@@ -2,6 +2,7 @@ use crate::gguf::GgufQuantizationType;
 
 const QK8_0: usize = 32;
 const BLOCK_Q8_0_SIZE: usize = 2 + QK8_0;
+const FLASH_ATTENTION_BLOCK_TOKENS: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DType {
@@ -340,32 +341,52 @@ pub fn scaled_dot_product_attention_f32(
     let scale = 1.0_f32 / (dim as f32).sqrt();
     let mut running_max = f32::NEG_INFINITY;
     let mut running_sum = 0.0_f32;
+    let mut token_offset = 0_usize;
+    let mut block_acc = vec![0.0_f32; dim];
 
-    for (key_row, value_row) in key.chunks_exact(dim).zip(value.chunks_exact(dim)) {
-        let score = query
-            .iter()
-            .zip(key_row.iter())
-            .map(|(q, k)| q * k)
-            .sum::<f32>()
-            * scale;
+    while token_offset < seq_len {
+        let block_len = (seq_len - token_offset).min(FLASH_ATTENTION_BLOCK_TOKENS);
+        let block_start = token_offset * dim;
+        let block_end = block_start + block_len * dim;
+        let key_block = &key[block_start..block_end];
+        let value_block = &value[block_start..block_end];
 
-        if score > running_max {
-            let rescale = (running_max - score).exp();
-            for out in output.iter_mut() {
-                *out *= rescale;
-            }
-            running_sum = running_sum * rescale + 1.0;
-            running_max = score;
-            for (out, v) in output.iter_mut().zip(value_row.iter()) {
-                *out += v;
-            }
-        } else {
-            let weight = (score - running_max).exp();
-            running_sum += weight;
-            for (out, v) in output.iter_mut().zip(value_row.iter()) {
-                *out += weight * v;
+        let mut block_max = f32::NEG_INFINITY;
+        for key_row in key_block.chunks_exact(dim) {
+            let score = query
+                .iter()
+                .zip(key_row.iter())
+                .map(|(q, k)| q * k)
+                .sum::<f32>()
+                * scale;
+            block_max = block_max.max(score);
+        }
+
+        block_acc.fill(0.0);
+        let mut block_sum = 0.0_f32;
+        for (key_row, value_row) in key_block.chunks_exact(dim).zip(value_block.chunks_exact(dim)) {
+            let score = query
+                .iter()
+                .zip(key_row.iter())
+                .map(|(q, k)| q * k)
+                .sum::<f32>()
+                * scale;
+            let weight = (score - block_max).exp();
+            block_sum += weight;
+            for (acc, v) in block_acc.iter_mut().zip(value_row.iter()) {
+                *acc += weight * v;
             }
         }
+
+        let merged_max = running_max.max(block_max);
+        let running_scale = (running_max - merged_max).exp();
+        let block_scale = (block_max - merged_max).exp();
+        for (out, acc) in output.iter_mut().zip(block_acc.iter()) {
+            *out = *out * running_scale + acc * block_scale;
+        }
+        running_sum = running_sum * running_scale + block_sum * block_scale;
+        running_max = merged_max;
+        token_offset += block_len;
     }
 
     let inv_sum = 1.0_f32 / running_sum;
@@ -953,6 +974,31 @@ mod tests {
             .expect("attention should succeed");
 
         assert!(output.iter().all(|x| x.is_finite()));
+    }
+
+    #[test]
+    fn scaled_dot_product_attention_matches_reference_across_flash_blocks() {
+        let dim = 8;
+        let seq_len = FLASH_ATTENTION_BLOCK_TOKENS * 2 + 7;
+        let query = (0..dim)
+            .map(|i| (i as f32 * 0.13).sin() - 0.25)
+            .collect::<Vec<_>>();
+        let key = (0..seq_len * dim)
+            .map(|i| ((i as f32 * 0.017).cos() * 1.3) - 0.2)
+            .collect::<Vec<_>>();
+        let value = (0..seq_len * dim)
+            .map(|i| ((i as f32 * 0.031).sin() * 0.9) + 0.1)
+            .collect::<Vec<_>>();
+
+        let mut actual = vec![0.0_f32; dim];
+        let mut expected = vec![0.0_f32; dim];
+        scaled_dot_product_attention_f32(&query, &key, &value, seq_len, dim, &mut actual)
+            .expect("flash-style attention should succeed");
+        reference_attention(&query, &key, &value, seq_len, dim, &mut expected);
+
+        for (lhs, rhs) in actual.iter().zip(expected.iter()) {
+            assert!((lhs - rhs).abs() < 1e-5);
+        }
     }
 
     #[test]
