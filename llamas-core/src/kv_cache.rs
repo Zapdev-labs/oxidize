@@ -23,6 +23,12 @@ impl KvCacheConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KvCacheEvictionStrategy {
+    SlidingWindow,
+    StopAtCapacity,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum KvCacheError {
     UnsupportedDType { dtype: DType },
@@ -31,6 +37,12 @@ pub enum KvCacheError {
         position: usize,
         oldest_available: usize,
         newest_available: usize,
+    },
+    CacheFull {
+        requested_position: usize,
+        oldest_available: usize,
+        newest_available: usize,
+        capacity: usize,
     },
     ValueLengthMismatch { expected: usize, actual: usize },
 }
@@ -46,11 +58,20 @@ pub struct KvCache {
     config: KvCacheConfig,
     key: KvStorage,
     value: KvStorage,
+    eviction_strategy: KvCacheEvictionStrategy,
+    oldest_position: Option<usize>,
     newest_position: Option<usize>,
 }
 
 impl KvCache {
     pub fn new(config: KvCacheConfig) -> Result<Self, KvCacheError> {
+        Self::with_eviction_strategy(config, KvCacheEvictionStrategy::SlidingWindow)
+    }
+
+    pub fn with_eviction_strategy(
+        config: KvCacheConfig,
+        eviction_strategy: KvCacheEvictionStrategy,
+    ) -> Result<Self, KvCacheError> {
         let size = config.element_count();
         let (key, value) = match config.dtype {
             DType::F32 => (
@@ -68,6 +89,8 @@ impl KvCache {
             config,
             key,
             value,
+            eviction_strategy,
+            oldest_position: None,
             newest_position: None,
         })
     }
@@ -78,10 +101,11 @@ impl KvCache {
 
     pub fn set(&mut self, layer: usize, position: usize, key: &[f32], value: &[f32]) -> Result<(), KvCacheError> {
         self.validate_write(layer, key, value)?;
+        self.validate_write_position(position)?;
         let range = self.token_range(layer, self.physical_position(position));
         write_storage(&mut self.key, range.clone(), key);
         write_storage(&mut self.value, range, value);
-        self.newest_position = Some(self.newest_position.map_or(position, |newest| newest.max(position)));
+        self.record_position(position);
         Ok(())
     }
 
@@ -166,18 +190,50 @@ impl KvCache {
     }
 
     fn position_available(&self, position: usize) -> bool {
-        match self.newest_position {
-            None => false,
-            Some(newest) => {
-                let oldest = self.oldest_available_position().unwrap_or(0);
-                (oldest..=newest).contains(&position)
-            }
+        match (self.oldest_available_position(), self.newest_position) {
+            (Some(oldest), Some(newest)) => (oldest..=newest).contains(&position),
+            _ => false,
         }
     }
 
     fn oldest_available_position(&self) -> Option<usize> {
-        self.newest_position
-            .map(|newest| newest.saturating_add(1).saturating_sub(self.config.context_size))
+        self.oldest_position
+    }
+
+    fn validate_write_position(&self, position: usize) -> Result<(), KvCacheError> {
+        if self.eviction_strategy != KvCacheEvictionStrategy::StopAtCapacity {
+            return Ok(());
+        }
+        let (Some(oldest), Some(newest)) = (self.oldest_position, self.newest_position) else {
+            return Ok(());
+        };
+        if position <= newest {
+            return Ok(());
+        }
+        let used = newest.saturating_sub(oldest).saturating_add(1);
+        if used >= self.config.context_size {
+            return Err(KvCacheError::CacheFull {
+                requested_position: position,
+                oldest_available: oldest,
+                newest_available: newest,
+                capacity: self.config.context_size,
+            });
+        }
+        Ok(())
+    }
+
+    fn record_position(&mut self, position: usize) {
+        let newest = self.newest_position.map_or(position, |current| current.max(position));
+        self.newest_position = Some(newest);
+        let oldest = match self.eviction_strategy {
+            KvCacheEvictionStrategy::SlidingWindow => {
+                newest
+                    .saturating_add(1)
+                    .saturating_sub(self.config.context_size)
+            }
+            KvCacheEvictionStrategy::StopAtCapacity => self.oldest_position.unwrap_or(position),
+        };
+        self.oldest_position = Some(oldest);
     }
 
     fn physical_position(&self, position: usize) -> usize {
@@ -485,5 +541,66 @@ mod tests {
                 newest_available: 6
             }
         );
+    }
+
+    #[test]
+    fn stop_at_capacity_rejects_new_positions_when_full() {
+        let mut cache = KvCache::with_eviction_strategy(
+            KvCacheConfig {
+                layer_count: 1,
+                context_size: 2,
+                head_count: 1,
+                head_dim: 2,
+                dtype: DType::F32,
+            },
+            KvCacheEvictionStrategy::StopAtCapacity,
+        )
+        .expect("f32 kv cache should be supported");
+
+        cache
+            .set(0, 10, &[1.0, 1.0], &[2.0, 2.0])
+            .expect("write at position 10 should succeed");
+        cache
+            .set(0, 11, &[3.0, 3.0], &[4.0, 4.0])
+            .expect("write at position 11 should succeed");
+        let err = cache
+            .set(0, 12, &[5.0, 5.0], &[6.0, 6.0])
+            .expect_err("position 12 should be rejected when cache is full");
+        assert_eq!(
+            err,
+            KvCacheError::CacheFull {
+                requested_position: 12,
+                oldest_available: 10,
+                newest_available: 11,
+                capacity: 2
+            }
+        );
+    }
+
+    #[test]
+    fn stop_at_capacity_keeps_oldest_position_readable() {
+        let mut cache = KvCache::with_eviction_strategy(
+            KvCacheConfig {
+                layer_count: 1,
+                context_size: 2,
+                head_count: 1,
+                head_dim: 2,
+                dtype: DType::F32,
+            },
+            KvCacheEvictionStrategy::StopAtCapacity,
+        )
+        .expect("f32 kv cache should be supported");
+
+        cache
+            .set(0, 3, &[1.0, 2.0], &[3.0, 4.0])
+            .expect("write at position 3 should succeed");
+        cache
+            .set(0, 4, &[5.0, 6.0], &[7.0, 8.0])
+            .expect("write at position 4 should succeed");
+        let mut key = [0.0; 2];
+        cache
+            .get_key(0, 3, &mut key)
+            .expect("oldest position remains readable with stop-at-capacity");
+        assert_eq!(key, [1.0, 2.0]);
     }
 }
