@@ -8,6 +8,7 @@ pub enum LlamaArchitecture {
     Mixtral,
     Qwen,
     Gemma,
+    Phi,
     Falcon,
     Gpt2,
     GptJ,
@@ -71,6 +72,15 @@ impl LlamaConfig {
     pub fn gemma(vocab_size: usize, context_size: usize, layer_count: usize) -> Self {
         Self {
             architecture: LlamaArchitecture::Gemma,
+            vocab_size,
+            context_size,
+            layer_count,
+        }
+    }
+
+    pub fn phi(vocab_size: usize, context_size: usize, layer_count: usize) -> Self {
+        Self {
+            architecture: LlamaArchitecture::Phi,
             vocab_size,
             context_size,
             layer_count,
@@ -169,13 +179,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn supports_llama2_llama3_mistral_mixtral_qwen_gemma_falcon_and_gpt_configs() {
+    fn supports_llama2_llama3_mistral_mixtral_qwen_gemma_phi_falcon_and_gpt_configs() {
         let llama2 = LlamaModel::new(LlamaConfig::llama2(32_000, 4096, 32));
         let llama3 = LlamaModel::new(LlamaConfig::llama3(128_256, 8192, 32));
         let mistral = LlamaModel::new(LlamaConfig::mistral(32_000, 32_768, 32));
         let mixtral = LlamaModel::new(LlamaConfig::mixtral(32_000, 32_768, 32));
         let qwen = LlamaModel::new(LlamaConfig::qwen(151_936, 32_768, 28));
         let gemma = LlamaModel::new(LlamaConfig::gemma(256_000, 8192, 42));
+        let phi = LlamaModel::new(LlamaConfig::phi(51_200, 4096, 32));
         let falcon = LlamaModel::new(LlamaConfig::falcon(65_024, 2048, 60));
         let gpt2 = LlamaModel::new(LlamaConfig::gpt2(50_257, 1024, 12));
         let gptj = LlamaModel::new(LlamaConfig::gptj(50_400, 2048, 28));
@@ -187,6 +198,7 @@ mod tests {
         assert_eq!(mixtral.architecture(), LlamaArchitecture::Mixtral);
         assert_eq!(qwen.architecture(), LlamaArchitecture::Qwen);
         assert_eq!(gemma.architecture(), LlamaArchitecture::Gemma);
+        assert_eq!(phi.architecture(), LlamaArchitecture::Phi);
         assert_eq!(falcon.architecture(), LlamaArchitecture::Falcon);
         assert_eq!(gpt2.architecture(), LlamaArchitecture::Gpt2);
         assert_eq!(gptj.architecture(), LlamaArchitecture::GptJ);
@@ -197,6 +209,7 @@ mod tests {
         assert_eq!(mixtral.layer_count(), 32);
         assert_eq!(qwen.vocab_size(), 151_936);
         assert_eq!(gemma.layer_count(), 42);
+        assert_eq!(phi.context_size(), 4096);
         assert_eq!(falcon.context_size(), 2048);
         assert_eq!(gpt2.context_size(), 1024);
         assert_eq!(gptj.layer_count(), 28);

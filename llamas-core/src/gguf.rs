@@ -343,7 +343,7 @@ fn align_up(value: u64, alignment: u64) -> Result<u64, GgufParseError> {
 fn map_tensor_name(architecture: &str, name: &str) -> String {
     let architecture = architecture.to_ascii_lowercase();
     let mapped = match architecture.as_str() {
-        "llama" | "mistral" | "mixtral" | "qwen" | "qwen2" | "qwen2moe" | "gemma" => {
+        "llama" | "mistral" | "mixtral" | "qwen" | "qwen2" | "qwen2moe" | "gemma" | "phi" => {
             map_hf_decoder_name(name)
         }
         "falcon" => map_falcon_name(name),
@@ -721,6 +721,30 @@ mod tests {
         let mapped = file.mapped_tensor_infos();
         assert_eq!(mapped[0].name, "tok_embeddings.weight");
         assert_eq!(mapped[1].name, "blk.6.attn_output.weight");
+    }
+
+    #[test]
+    fn maps_phi_tensor_names_to_internal_format() {
+        let file = GgufFile {
+            version: 3,
+            tensor_count: 3,
+            metadata: BTreeMap::from([(
+                "general.architecture".to_owned(),
+                GgufMetadataValue::String("phi".to_owned()),
+            )]),
+            tensor_infos: vec![
+                tensor_info("model.embed_tokens.weight"),
+                tensor_info("model.layers.4.self_attn.v_proj.weight"),
+                tensor_info("model.layers.4.mlp.gate_proj.weight"),
+            ],
+            alignment: 32,
+            data_section_start: 0,
+        };
+
+        let mapped = file.mapped_tensor_infos();
+        assert_eq!(mapped[0].name, "tok_embeddings.weight");
+        assert_eq!(mapped[1].name, "blk.4.attn_v.weight");
+        assert_eq!(mapped[2].name, "blk.4.ffn_gate.weight");
     }
 
     #[test]
