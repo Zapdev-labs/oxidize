@@ -756,6 +756,7 @@ dependencies = [
 name = "llamas-py"
 version = "0.1.0"
 dependencies = [
+ "futures-core",
  "llamas-core",
  "pyo3",
 ]

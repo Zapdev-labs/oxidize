@@ -9,5 +9,6 @@ name = "llamas"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+futures-core = "0.3"
 llamas-core = { path = "../llamas-core" }
 pyo3.workspace = true
