@@ -344,6 +344,87 @@ pub fn gemm_f32(
     Ok(())
 }
 
+pub fn gemm_i8(
+    left_matrix: &[i8],
+    rows: usize,
+    shared_dim: usize,
+    right_matrix: &[i8],
+    cols: usize,
+    output: &mut [i32],
+) -> Result<(), GemmError> {
+    let expected_left_len = rows.saturating_mul(shared_dim);
+    if left_matrix.len() != expected_left_len {
+        return Err(GemmError::InvalidLeftMatrixLength {
+            expected: expected_left_len,
+            actual: left_matrix.len(),
+        });
+    }
+
+    let expected_right_len = shared_dim.saturating_mul(cols);
+    if right_matrix.len() != expected_right_len {
+        return Err(GemmError::InvalidRightMatrixLength {
+            expected: expected_right_len,
+            actual: right_matrix.len(),
+        });
+    }
+
+    let expected_output_len = rows.saturating_mul(cols);
+    if output.len() != expected_output_len {
+        return Err(GemmError::InvalidOutputLength {
+            expected: expected_output_len,
+            actual: output.len(),
+        });
+    }
+
+    gemm_i8_cpu(left_matrix, rows, shared_dim, right_matrix, cols, output);
+    Ok(())
+}
+
+pub fn gemm_i4(
+    left_matrix_packed: &[u8],
+    rows: usize,
+    shared_dim: usize,
+    right_matrix_packed: &[u8],
+    cols: usize,
+    output: &mut [i32],
+) -> Result<(), GemmError> {
+    let expected_left_values = rows.saturating_mul(shared_dim);
+    let expected_left_len = expected_left_values.div_ceil(2);
+    if left_matrix_packed.len() != expected_left_len {
+        return Err(GemmError::InvalidLeftMatrixLength {
+            expected: expected_left_len,
+            actual: left_matrix_packed.len(),
+        });
+    }
+
+    let expected_right_values = shared_dim.saturating_mul(cols);
+    let expected_right_len = expected_right_values.div_ceil(2);
+    if right_matrix_packed.len() != expected_right_len {
+        return Err(GemmError::InvalidRightMatrixLength {
+            expected: expected_right_len,
+            actual: right_matrix_packed.len(),
+        });
+    }
+
+    let expected_output_len = rows.saturating_mul(cols);
+    if output.len() != expected_output_len {
+        return Err(GemmError::InvalidOutputLength {
+            expected: expected_output_len,
+            actual: output.len(),
+        });
+    }
+
+    gemm_i4_cpu(
+        left_matrix_packed,
+        rows,
+        shared_dim,
+        right_matrix_packed,
+        cols,
+        output,
+    );
+    Ok(())
+}
+
 fn gemv_f32_cpu(matrix: &[f32], cols: usize, vector: &[f32], output: &mut [f32]) {
     for (row_values, out) in matrix.chunks_exact(cols).zip(output.iter_mut()) {
         *out = row_values
@@ -446,6 +527,72 @@ fn gemm_f32_cpu(
             *out_cell = sum;
         }
     }
+}
+
+fn gemm_i8_cpu(
+    left_matrix: &[i8],
+    rows: usize,
+    shared_dim: usize,
+    right_matrix: &[i8],
+    cols: usize,
+    output: &mut [i32],
+) {
+    let expected_right_len = shared_dim.saturating_mul(cols);
+    let mut right_transposed = vec![0_i8; expected_right_len];
+    for shared_idx in 0..shared_dim {
+        let row_start = shared_idx * cols;
+        let row_end = row_start + cols;
+        let right_row = &right_matrix[row_start..row_end];
+        for (col, value) in right_row.iter().enumerate() {
+            right_transposed[col * shared_dim + shared_idx] = *value;
+        }
+    }
+
+    for row in 0..rows {
+        let left_row = &left_matrix[row * shared_dim..(row + 1) * shared_dim];
+        let out_row = &mut output[row * cols..(row + 1) * cols];
+        for (col, out_cell) in out_row.iter_mut().enumerate() {
+            let right_col = &right_transposed[col * shared_dim..(col + 1) * shared_dim];
+            *out_cell = left_row
+                .iter()
+                .zip(right_col.iter())
+                .map(|(l, r)| i32::from(*l) * i32::from(*r))
+                .sum();
+        }
+    }
+}
+
+fn gemm_i4_cpu(
+    left_matrix_packed: &[u8],
+    rows: usize,
+    shared_dim: usize,
+    right_matrix_packed: &[u8],
+    cols: usize,
+    output: &mut [i32],
+) {
+    for row in 0..rows {
+        let out_row = &mut output[row * cols..(row + 1) * cols];
+        for (col, out_cell) in out_row.iter_mut().enumerate() {
+            let mut sum = 0_i32;
+            for k in 0..shared_dim {
+                let left_idx = row * shared_dim + k;
+                let right_idx = k * cols + col;
+                sum += unpack_i4(left_matrix_packed, left_idx)
+                    * unpack_i4(right_matrix_packed, right_idx);
+            }
+            *out_cell = sum;
+        }
+    }
+}
+
+fn unpack_i4(packed: &[u8], value_index: usize) -> i32 {
+    let byte = packed[value_index / 2];
+    let nibble = if value_index.is_multiple_of(2) {
+        byte & 0x0F
+    } else {
+        (byte >> 4) & 0x0F
+    };
+    i32::from(nibble as i8 - 8)
 }
 
 pub fn scaled_dot_product_attention_f32(
@@ -1008,6 +1155,112 @@ mod tests {
         for (actual, expected) in output.iter().zip(expected.iter()) {
             assert!((actual - expected).abs() < 1e-6);
         }
+    }
+
+    #[test]
+    fn gemm_i8_multiplies_matrices() {
+        let left = vec![
+            1_i8, -2, 3, //
+            4, 0, -1,
+        ];
+        let right = vec![
+            2_i8, -3, //
+            1, 5, //
+            -4, 2,
+        ];
+        let mut output = vec![0_i32; 4];
+
+        gemm_i8(&left, 2, 3, &right, 2, &mut output).expect("int8 gemm should succeed");
+
+        assert_eq!(output, vec![-12, -7, 12, -14]);
+    }
+
+    #[test]
+    fn gemm_i8_rejects_invalid_shapes() {
+        let right = vec![
+            1_i8, 2, //
+            3, 4, //
+            5, 6,
+        ];
+        let mut output = vec![0_i32; 4];
+
+        let err = gemm_i8(&[1_i8, 2, 3], 2, 3, &right, 2, &mut output)
+            .expect_err("left matrix length mismatch should fail");
+        assert!(matches!(err, GemmError::InvalidLeftMatrixLength { .. }));
+
+        let left = vec![
+            1_i8, 2, 3, //
+            4, 5, 6,
+        ];
+        let err = gemm_i8(&left, 2, 3, &[1_i8, 2, 3], 2, &mut output)
+            .expect_err("right matrix length mismatch should fail");
+        assert!(matches!(err, GemmError::InvalidRightMatrixLength { .. }));
+
+        let mut short_output = vec![0_i32; 3];
+        let err = gemm_i8(&left, 2, 3, &right, 2, &mut short_output)
+            .expect_err("output length mismatch should fail");
+        assert!(matches!(err, GemmError::InvalidOutputLength { .. }));
+    }
+
+    #[test]
+    fn gemm_i4_multiplies_packed_matrices() {
+        let left_values = [1_i8, -2, 3, 4, 0, -1];
+        let right_values = [2_i8, -3, 1, 5, -4, 2];
+        let left = pack_i4_values(&left_values);
+        let right = pack_i4_values(&right_values);
+        let mut output = vec![0_i32; 4];
+
+        gemm_i4(&left, 2, 3, &right, 2, &mut output).expect("int4 gemm should succeed");
+
+        assert_eq!(output, vec![-12, -7, 12, -14]);
+    }
+
+    #[test]
+    fn gemm_i4_supports_odd_value_count() {
+        let left_values = [1_i8, -2, 3];
+        let right_values = [2_i8, 4, -1];
+        let left = pack_i4_values(&left_values);
+        let right = pack_i4_values(&right_values);
+        let mut output = vec![0_i32; 1];
+
+        gemm_i4(&left, 1, 3, &right, 1, &mut output)
+            .expect("odd shared dim int4 gemm should succeed");
+
+        assert_eq!(output, vec![-9]);
+    }
+
+    #[test]
+    fn gemm_i4_rejects_invalid_shapes() {
+        let right = pack_i4_values(&[1_i8, 2, 3, 4, 5, 6]);
+        let mut output = vec![0_i32; 4];
+
+        let err = gemm_i4(&pack_i4_values(&[1_i8, 2, 3]), 2, 3, &right, 2, &mut output)
+            .expect_err("left matrix byte length mismatch should fail");
+        assert!(matches!(err, GemmError::InvalidLeftMatrixLength { .. }));
+
+        let left = pack_i4_values(&[1_i8, 2, 3, 4, 5, 6]);
+        let err = gemm_i4(&left, 2, 3, &pack_i4_values(&[1_i8, 2, 3]), 2, &mut output)
+            .expect_err("right matrix byte length mismatch should fail");
+        assert!(matches!(err, GemmError::InvalidRightMatrixLength { .. }));
+
+        let mut short_output = vec![0_i32; 3];
+        let err = gemm_i4(&left, 2, 3, &right, 2, &mut short_output)
+            .expect_err("output length mismatch should fail");
+        assert!(matches!(err, GemmError::InvalidOutputLength { .. }));
+    }
+
+    fn pack_i4_values(values: &[i8]) -> Vec<u8> {
+        let mut packed = Vec::with_capacity(values.len().div_ceil(2));
+        for chunk in values.chunks(2) {
+            let low = ((chunk[0] + 8) as u8) & 0x0F;
+            let high = if chunk.len() == 2 {
+                ((chunk[1] + 8) as u8) & 0x0F
+            } else {
+                0
+            };
+            packed.push(low | (high << 4));
+        }
+        packed
     }
 
     #[test]
