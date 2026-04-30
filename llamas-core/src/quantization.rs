@@ -31,6 +31,9 @@ pub enum QuantizationError {
         expected: usize,
         actual: usize,
     },
+    InvalidImportanceMatrix {
+        reason: &'static str,
+    },
     UnsupportedQuantizationType(GgufQuantizationType),
 }
 
@@ -53,6 +56,9 @@ impl std::fmt::Display for QuantizationError {
                 f,
                 "invalid output length for {quantization:?}: expected {expected}, got {actual}"
             ),
+            Self::InvalidImportanceMatrix { reason } => {
+                write!(f, "invalid importance matrix: {reason}")
+            }
             Self::UnsupportedQuantizationType(quantization) => {
                 write!(f, "unsupported quantization type: {quantization:?}")
             }
@@ -61,6 +67,36 @@ impl std::fmt::Display for QuantizationError {
 }
 
 impl std::error::Error for QuantizationError {}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct IMatrix {
+    values: Vec<f32>,
+}
+
+impl IMatrix {
+    pub fn from_values(values: Vec<f32>) -> Result<Self, QuantizationError> {
+        if values.is_empty() {
+            return Err(QuantizationError::InvalidImportanceMatrix {
+                reason: "matrix must not be empty",
+            });
+        }
+        if values.iter().any(|v| !v.is_finite()) {
+            return Err(QuantizationError::InvalidImportanceMatrix {
+                reason: "matrix values must be finite",
+            });
+        }
+        if values.iter().any(|v| *v < 0.0) {
+            return Err(QuantizationError::InvalidImportanceMatrix {
+                reason: "matrix values must be non-negative",
+            });
+        }
+        Ok(Self { values })
+    }
+
+    pub fn values(&self) -> &[f32] {
+        &self.values
+    }
+}
 
 pub fn quantized_size(
     quantization: GgufQuantizationType,
@@ -75,9 +111,9 @@ pub fn quantized_size(
         GgufQuantizationType::Q5_1 => (QK5_1, BLOCK_Q5_1_SIZE),
         GgufQuantizationType::Q8_0 => (QK8_0, BLOCK_Q8_0_SIZE),
         GgufQuantizationType::Q2_K => (QK_K, BLOCK_Q2_K_SIZE),
-        GgufQuantizationType::Q3_K_S | GgufQuantizationType::Q3_K_M | GgufQuantizationType::Q3_K_L => {
-            (QK_K, BLOCK_Q3_K_SIZE)
-        }
+        GgufQuantizationType::Q3_K_S
+        | GgufQuantizationType::Q3_K_M
+        | GgufQuantizationType::Q3_K_L => (QK_K, BLOCK_Q3_K_SIZE),
         GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M => (QK_K, BLOCK_Q4_K_SIZE),
         GgufQuantizationType::Q5_K_S | GgufQuantizationType::Q5_K_M => (QK_K, BLOCK_Q5_K_SIZE),
         GgufQuantizationType::Q6_K => (QK_K, BLOCK_Q6_K_SIZE),
@@ -137,6 +173,61 @@ pub fn quantize_scalar(
     let mut values = vec![0.0_f32; value_count];
     dequantize_scalar(source, input, &mut values)?;
     quantize_from_f32_scalar(target, &values, output)
+}
+
+pub fn quantize_scalar_with_imatrix(
+    source: GgufQuantizationType,
+    target: GgufQuantizationType,
+    input: &[u8],
+    output: &mut [u8],
+    imatrix: &IMatrix,
+) -> Result<(), QuantizationError> {
+    let value_count = match source {
+        GgufQuantizationType::F32 => {
+            if !input.len().is_multiple_of(4) {
+                return Err(QuantizationError::InvalidInputLength {
+                    quantization: source,
+                    expected_multiple: 4,
+                    actual: input.len(),
+                });
+            }
+            input.len() / 4
+        }
+        GgufQuantizationType::F16 => {
+            if !input.len().is_multiple_of(2) {
+                return Err(QuantizationError::InvalidInputLength {
+                    quantization: source,
+                    expected_multiple: 2,
+                    actual: input.len(),
+                });
+            }
+            input.len() / 2
+        }
+        other => return Err(QuantizationError::UnsupportedQuantizationType(other)),
+    };
+    if imatrix.values().len() != value_count {
+        return Err(QuantizationError::InvalidImportanceMatrix {
+            reason: "matrix length must match input value count",
+        });
+    }
+
+    let expected_output = quantized_size(target, value_count)?;
+    if output.len() != expected_output {
+        return Err(QuantizationError::InvalidOutputLength {
+            quantization: target,
+            expected: expected_output,
+            actual: output.len(),
+        });
+    }
+
+    let mut values = vec![0.0_f32; value_count];
+    dequantize_scalar(source, input, &mut values)?;
+    let weighted_values = values
+        .iter()
+        .zip(imatrix.values())
+        .map(|(value, importance)| value * importance)
+        .collect::<Vec<_>>();
+    quantize_from_f32_scalar(target, &weighted_values, output)
 }
 
 pub fn dequantize_scalar(
@@ -220,32 +311,17 @@ fn quantize_from_f32_scalar(
             2,
             1.5,
         ),
-        GgufQuantizationType::Q3_K_S | GgufQuantizationType::Q3_K_M | GgufQuantizationType::Q3_K_L => {
-            quantize_k_packed_scalar(
-                target,
-                input,
-                output,
-                BLOCK_Q3_K_SIZE,
-                3,
-                3.5,
-            )
+        GgufQuantizationType::Q3_K_S
+        | GgufQuantizationType::Q3_K_M
+        | GgufQuantizationType::Q3_K_L => {
+            quantize_k_packed_scalar(target, input, output, BLOCK_Q3_K_SIZE, 3, 3.5)
         }
-        GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M => quantize_k_packed_scalar(
-            target,
-            input,
-            output,
-            BLOCK_Q4_K_SIZE,
-            4,
-            8.0,
-        ),
-        GgufQuantizationType::Q5_K_S | GgufQuantizationType::Q5_K_M => quantize_k_packed_scalar(
-            target,
-            input,
-            output,
-            BLOCK_Q5_K_SIZE,
-            5,
-            16.0,
-        ),
+        GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M => {
+            quantize_k_packed_scalar(target, input, output, BLOCK_Q4_K_SIZE, 4, 8.0)
+        }
+        GgufQuantizationType::Q5_K_S | GgufQuantizationType::Q5_K_M => {
+            quantize_k_packed_scalar(target, input, output, BLOCK_Q5_K_SIZE, 5, 16.0)
+        }
         GgufQuantizationType::Q6_K => quantize_k_packed_scalar(
             GgufQuantizationType::Q6_K,
             input,
@@ -509,7 +585,11 @@ fn quantize_linear_4bit(
             min = min.min(*value);
             max = max.max(*value);
         }
-        let d = if max <= min { 0.0 } else { (max - min) / levels };
+        let d = if max <= min {
+            0.0
+        } else {
+            (max - min) / levels
+        };
         out_block[0..2].copy_from_slice(&f32_to_f16_bits(d).to_le_bytes());
         out_block[2..4].copy_from_slice(&f32_to_f16_bits(min).to_le_bytes());
         for i in 0..(values_per_block / 2) {
@@ -554,7 +634,9 @@ fn quantize_k_packed_scalar(
 
     let max_q = ((1_u32 << bits) - 1) as f32;
     let positive_span = zero_point.max(max_q - zero_point);
-    for (in_block, out_block) in input.chunks_exact(QK_K).zip(output.chunks_exact_mut(block_size))
+    for (in_block, out_block) in input
+        .chunks_exact(QK_K)
+        .zip(output.chunks_exact_mut(block_size))
     {
         let max_abs = in_block.iter().fold(0.0_f32, |acc, v| acc.max(v.abs()));
         let d = if max_abs == 0.0 {
@@ -607,7 +689,10 @@ pub fn dequantize_q4_0_scalar(input: &[u8], output: &mut [f32]) -> Result<(), Qu
         QK4_0,
     )?;
 
-    for (block, out) in input.chunks_exact(BLOCK_Q4_0_SIZE).zip(output.chunks_exact_mut(QK4_0)) {
+    for (block, out) in input
+        .chunks_exact(BLOCK_Q4_0_SIZE)
+        .zip(output.chunks_exact_mut(QK4_0))
+    {
         let d = f16_le_to_f32(&block[0..2]);
         for i in 0..16 {
             let packed = block[2 + i];
@@ -628,7 +713,10 @@ pub fn dequantize_q4_1_scalar(input: &[u8], output: &mut [f32]) -> Result<(), Qu
         QK4_1,
     )?;
 
-    for (block, out) in input.chunks_exact(BLOCK_Q4_1_SIZE).zip(output.chunks_exact_mut(QK4_1)) {
+    for (block, out) in input
+        .chunks_exact(BLOCK_Q4_1_SIZE)
+        .zip(output.chunks_exact_mut(QK4_1))
+    {
         let d = f16_le_to_f32(&block[0..2]);
         let m = f16_le_to_f32(&block[2..4]);
         for i in 0..16 {
@@ -650,7 +738,10 @@ pub fn dequantize_q5_0_scalar(input: &[u8], output: &mut [f32]) -> Result<(), Qu
         QK5_0,
     )?;
 
-    for (block, out) in input.chunks_exact(BLOCK_Q5_0_SIZE).zip(output.chunks_exact_mut(QK5_0)) {
+    for (block, out) in input
+        .chunks_exact(BLOCK_Q5_0_SIZE)
+        .zip(output.chunks_exact_mut(QK5_0))
+    {
         let d = f16_le_to_f32(&block[0..2]);
         let qh = &block[2..6];
         let qs = &block[6..22];
@@ -679,7 +770,10 @@ pub fn dequantize_q5_1_scalar(input: &[u8], output: &mut [f32]) -> Result<(), Qu
         QK5_1,
     )?;
 
-    for (block, out) in input.chunks_exact(BLOCK_Q5_1_SIZE).zip(output.chunks_exact_mut(QK5_1)) {
+    for (block, out) in input
+        .chunks_exact(BLOCK_Q5_1_SIZE)
+        .zip(output.chunks_exact_mut(QK5_1))
+    {
         let d = f16_le_to_f32(&block[0..2]);
         let m = f16_le_to_f32(&block[2..4]);
         let qh = &block[4..8];
@@ -709,7 +803,10 @@ pub fn dequantize_q8_0_scalar(input: &[u8], output: &mut [f32]) -> Result<(), Qu
         QK8_0,
     )?;
 
-    for (block, out) in input.chunks_exact(BLOCK_Q8_0_SIZE).zip(output.chunks_exact_mut(QK8_0)) {
+    for (block, out) in input
+        .chunks_exact(BLOCK_Q8_0_SIZE)
+        .zip(output.chunks_exact_mut(QK8_0))
+    {
         let d = f16_le_to_f32(&block[0..2]);
         for i in 0..QK8_0 {
             out[i] = (block[2 + i] as i8) as f32 * d;
@@ -784,7 +881,10 @@ fn dequantize_k_packed(
 ) -> Result<(), QuantizationError> {
     validate_layout(quantization, input, output, block_size, QK_K)?;
 
-    for (block, out) in input.chunks_exact(block_size).zip(output.chunks_exact_mut(QK_K)) {
+    for (block, out) in input
+        .chunks_exact(block_size)
+        .zip(output.chunks_exact_mut(QK_K))
+    {
         let d = f16_le_to_f32(&block[0..2]);
         let bitstream = &block[2..];
         for (idx, slot) in out.iter_mut().enumerate() {
@@ -973,11 +1073,12 @@ mod tests {
         dequantize_q4_0_scalar(&input, &mut out).expect("q4_0 dequant succeeds");
 
         assert!(out.iter().step_by(2).all(|v| (*v - 0.0).abs() < 1e-6));
-        assert!(out
-            .iter()
-            .skip(1)
-            .step_by(2)
-            .all(|v| (*v - 1.0).abs() < 1e-6));
+        assert!(
+            out.iter()
+                .skip(1)
+                .step_by(2)
+                .all(|v| (*v - 1.0).abs() < 1e-6)
+        );
     }
 
     #[test]
@@ -1022,8 +1123,7 @@ mod tests {
         input.extend(0_u8..32_u8);
         let mut out = vec![0.0_f32; 32];
 
-        dequantize_scalar(GgufQuantizationType::Q8_0, &input, &mut out)
-            .expect("dispatch succeeds");
+        dequantize_scalar(GgufQuantizationType::Q8_0, &input, &mut out).expect("dispatch succeeds");
         assert!((out[4] - 4.0).abs() < 1e-6);
     }
 
@@ -1198,6 +1298,76 @@ mod tests {
         let first_scale = f16_le_to_f32(&quantized[0..2]);
         let second_scale = f16_le_to_f32(&quantized[BLOCK_Q4_1_SIZE..BLOCK_Q4_1_SIZE + 2]);
         assert!(second_scale > first_scale * 20.0);
+    }
+
+    #[test]
+    fn creates_valid_imatrix() {
+        let matrix = IMatrix::from_values(vec![0.25, 1.0, 2.0]).expect("valid matrix");
+        assert_eq!(matrix.values(), &[0.25, 1.0, 2.0]);
+    }
+
+    #[test]
+    fn rejects_invalid_imatrix_values() {
+        let empty = IMatrix::from_values(Vec::new()).expect_err("empty should fail");
+        assert!(matches!(
+            empty,
+            QuantizationError::InvalidImportanceMatrix { .. }
+        ));
+        let negative = IMatrix::from_values(vec![1.0, -0.1]).expect_err("negative should fail");
+        assert!(matches!(
+            negative,
+            QuantizationError::InvalidImportanceMatrix { .. }
+        ));
+    }
+
+    #[test]
+    fn imatrix_quantization_requires_matching_value_count() {
+        let input = vec![0x00, 0x3C, 0x00, 0x40];
+        let matrix = IMatrix::from_values(vec![1.0]).expect("matrix should be valid");
+        let mut output = vec![0_u8; 4];
+
+        let err = quantize_scalar_with_imatrix(
+            GgufQuantizationType::F16,
+            GgufQuantizationType::F16,
+            &input,
+            &mut output,
+            &matrix,
+        )
+        .expect_err("mismatched matrix length should fail");
+        assert!(matches!(
+            err,
+            QuantizationError::InvalidImportanceMatrix { .. }
+        ));
+    }
+
+    #[test]
+    fn imatrix_quantization_biases_encoded_output() {
+        let values = [1.0_f32, 2.0_f32];
+        let mut input = Vec::new();
+        for value in values {
+            input.extend_from_slice(&value.to_le_bytes());
+        }
+        let matrix = IMatrix::from_values(vec![2.0, 0.5]).expect("matrix should be valid");
+        let mut with_matrix = vec![0_u8; 8];
+        let mut baseline = vec![0_u8; 8];
+
+        quantize_scalar(
+            GgufQuantizationType::F32,
+            GgufQuantizationType::F32,
+            &input,
+            &mut baseline,
+        )
+        .expect("baseline quantization should work");
+        quantize_scalar_with_imatrix(
+            GgufQuantizationType::F32,
+            GgufQuantizationType::F32,
+            &input,
+            &mut with_matrix,
+            &matrix,
+        )
+        .expect("imatrix quantization should work");
+
+        assert_ne!(with_matrix, baseline);
     }
 
     fn test_values_for_target(target: GgufQuantizationType, offset: f32, scale: f32) -> Vec<f32> {
