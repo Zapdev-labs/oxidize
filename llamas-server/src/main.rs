@@ -6,21 +6,22 @@ use std::{
 };
 
 use axum::{
+    Json, Router,
     extract::Request,
+    http::StatusCode,
     middleware::{self, Next},
     response::{
         IntoResponse, Response,
         sse::{Event, KeepAlive, Sse},
     },
     routing::{get, post},
-    Json, Router,
-    http::StatusCode,
 };
 use clap::Parser;
 use futures_util::stream;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{Mutex, Notify, OwnedSemaphorePermit, Semaphore};
+use tokio::time::{Instant as TokioInstant, sleep_until};
 
 #[derive(Debug, Parser)]
 #[command(name = "llamas-server")]
@@ -51,6 +52,7 @@ impl Default for RequestLimitConfig {
 #[derive(Clone)]
 struct AppState {
     limiter: Arc<RequestLimiter>,
+    batcher: Arc<ContinuousBatcher>,
     auth: AuthConfig,
 }
 
@@ -74,6 +76,7 @@ fn build_app_with_limits(config: RequestLimitConfig) -> Router {
 fn build_app_with_config(config: RequestLimitConfig, api_key: Option<String>) -> Router {
     let state = AppState {
         limiter: Arc::new(RequestLimiter::new(config)),
+        batcher: Arc::new(ContinuousBatcher::default()),
         auth: AuthConfig {
             api_key: api_key.map(Arc::<str>::from),
         },
@@ -230,6 +233,90 @@ struct RequestPermit {
     _active: OwnedSemaphorePermit,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ContinuousBatchConfig {
+    max_batch_size: usize,
+    max_wait: Duration,
+}
+
+impl Default for ContinuousBatchConfig {
+    fn default() -> Self {
+        Self {
+            max_batch_size: 8,
+            max_wait: Duration::from_millis(5),
+        }
+    }
+}
+
+struct ContinuousBatcher {
+    config: ContinuousBatchConfig,
+    state: Mutex<BatchState>,
+}
+
+struct BatchState {
+    open: Option<OpenBatch>,
+}
+
+struct OpenBatch {
+    size: usize,
+    deadline: TokioInstant,
+    notify: Arc<Notify>,
+}
+
+impl Default for ContinuousBatcher {
+    fn default() -> Self {
+        Self::new(ContinuousBatchConfig::default())
+    }
+}
+
+impl ContinuousBatcher {
+    fn new(config: ContinuousBatchConfig) -> Self {
+        Self {
+            config,
+            state: Mutex::new(BatchState { open: None }),
+        }
+    }
+
+    async fn wait_turn(&self) {
+        let (deadline, notify) = {
+            let now = TokioInstant::now();
+            let mut state = self.state.lock().await;
+            let max_batch_size = self.config.max_batch_size.max(1);
+
+            if state.open.as_ref().is_some_and(|batch| batch.deadline <= now) {
+                state.open = None;
+            }
+
+            if state.open.is_none() {
+                state.open = Some(OpenBatch {
+                    size: 0,
+                    deadline: now + self.config.max_wait,
+                    notify: Arc::new(Notify::new()),
+                });
+            }
+
+            let batch = state.open.as_mut().expect("batch should exist");
+            batch.size += 1;
+            let is_full = batch.size >= max_batch_size;
+            let deadline = batch.deadline;
+            let notify = Arc::clone(&batch.notify);
+
+            if is_full {
+                state.open = None;
+                notify.notify_waiters();
+                return;
+            }
+
+            (deadline, notify)
+        };
+
+        tokio::select! {
+            _ = sleep_until(deadline) => {}
+            _ = notify.notified() => {}
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RequestLimitError {
     RateLimited,
@@ -292,6 +379,9 @@ async fn enforce_request_limits(
     request: Request,
     next: Next,
 ) -> Response {
+    if is_generation_route(request.uri().path()) {
+        state.batcher.wait_turn().await;
+    }
     match state.limiter.try_acquire().await {
         Ok(_permit) => next.run(request).await,
         Err(RequestLimitError::RateLimited) => (
@@ -305,6 +395,10 @@ async fn enforce_request_limits(
         )
             .into_response(),
     }
+}
+
+fn is_generation_route(path: &str) -> bool {
+    matches!(path, "/v1/chat/completions" | "/v1/completions")
 }
 
 async fn enforce_api_key(
@@ -431,19 +525,22 @@ async fn chat_completions(Json(payload): Json<ChatCompletionRequest>) -> Respons
         let model_for_end = model.clone();
         let stream = stream::iter(vec![
             Ok::<Event, std::convert::Infallible>(
-                Event::default().data(json!({
-                    "id": "chatcmpl-placeholder",
-                    "object": "chat.completion.chunk",
-                    "created": 0,
-                    "model": model,
-                    "choices": [
-                        {
-                            "index": 0,
-                            "delta": { "role": "assistant", "content": response_content },
-                            "finish_reason": null
-                        }
-                    ]
-                }).to_string()),
+                Event::default().data(
+                    json!({
+                        "id": "chatcmpl-placeholder",
+                        "object": "chat.completion.chunk",
+                        "created": 0,
+                        "model": model,
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": { "role": "assistant", "content": response_content },
+                                "finish_reason": null
+                            }
+                        ]
+                    })
+                    .to_string(),
+                ),
             ),
             Ok(Event::default().data(
                 json!({
@@ -502,19 +599,22 @@ async fn completions(Json(payload): Json<CompletionRequest>) -> Response {
         let model_for_end = model.clone();
         let stream = stream::iter(vec![
             Ok::<Event, std::convert::Infallible>(
-                Event::default().data(json!({
-                    "id": "cmpl-placeholder",
-                    "object": "text_completion",
-                    "created": 0,
-                    "model": model,
-                    "choices": [
-                        {
-                            "index": 0,
-                            "text": response_text,
-                            "finish_reason": null
-                        }
-                    ]
-                }).to_string()),
+                Event::default().data(
+                    json!({
+                        "id": "cmpl-placeholder",
+                        "object": "text_completion",
+                        "created": 0,
+                        "model": model,
+                        "choices": [
+                            {
+                                "index": 0,
+                                "text": response_text,
+                                "finish_reason": null
+                            }
+                        ]
+                    })
+                    .to_string(),
+                ),
             ),
             Ok(Event::default().data(
                 json!({
@@ -696,8 +796,14 @@ mod tests {
             .expect("body should be readable");
         let parsed: Value = serde_json::from_slice(&bytes).expect("valid json response");
         assert_eq!(parsed["openapi"], "3.1.0");
-        assert_eq!(parsed["paths"]["/v1/chat/completions"]["post"]["summary"], "Create chat completion");
-        assert_eq!(parsed["components"]["securitySchemes"]["ApiKeyAuth"]["name"], "x-api-key");
+        assert_eq!(
+            parsed["paths"]["/v1/chat/completions"]["post"]["summary"],
+            "Create chat completion"
+        );
+        assert_eq!(
+            parsed["components"]["securitySchemes"]["ApiKeyAuth"]["name"],
+            "x-api-key"
+        );
     }
 
     #[tokio::test]
@@ -1172,7 +1278,10 @@ mod tests {
             .expect("first request should acquire active slot");
 
         let rejected_while_full = limiter.try_acquire().await;
-        assert!(matches!(rejected_while_full, Err(RequestLimitError::QueueFull)));
+        assert!(matches!(
+            rejected_while_full,
+            Err(RequestLimitError::QueueFull)
+        ));
         drop(held);
 
         let second = limiter
@@ -1183,5 +1292,63 @@ mod tests {
 
         let third = limiter.try_acquire().await;
         assert!(matches!(third, Err(RequestLimitError::RateLimited)));
+    }
+
+    #[tokio::test]
+    async fn continuous_batcher_waits_for_batch_window() {
+        let batcher = Arc::new(ContinuousBatcher::new(ContinuousBatchConfig {
+            max_batch_size: 4,
+            max_wait: Duration::from_millis(40),
+        }));
+        let started = TokioInstant::now();
+
+        let first = {
+            let batcher = Arc::clone(&batcher);
+            tokio::spawn(async move {
+                batcher.wait_turn().await;
+                TokioInstant::now()
+            })
+        };
+
+        sleep(Duration::from_millis(5)).await;
+
+        let second = {
+            let batcher = Arc::clone(&batcher);
+            tokio::spawn(async move {
+                batcher.wait_turn().await;
+                TokioInstant::now()
+            })
+        };
+
+        let first_done = first.await.expect("first task should complete");
+        let second_done = second.await.expect("second task should complete");
+        let first_elapsed = first_done.duration_since(started);
+        let second_elapsed = second_done.duration_since(started);
+        assert!(first_elapsed >= Duration::from_millis(30));
+        assert!(second_elapsed >= Duration::from_millis(30));
+    }
+
+    #[tokio::test]
+    async fn continuous_batcher_releases_early_when_batch_is_full() {
+        let batcher = Arc::new(ContinuousBatcher::new(ContinuousBatchConfig {
+            max_batch_size: 2,
+            max_wait: Duration::from_millis(200),
+        }));
+        let started = TokioInstant::now();
+
+        let first = {
+            let batcher = Arc::clone(&batcher);
+            tokio::spawn(async move {
+                batcher.wait_turn().await;
+                TokioInstant::now()
+            })
+        };
+
+        sleep(Duration::from_millis(20)).await;
+        batcher.wait_turn().await;
+
+        let first_done = first.await.expect("first task should complete");
+        let elapsed = first_done.duration_since(started);
+        assert!(elapsed < Duration::from_millis(150));
     }
 }
