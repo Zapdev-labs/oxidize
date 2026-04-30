@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 pub mod cuda;
 pub mod gguf;
 pub mod llama;
+pub mod lora;
 pub mod metal;
 pub mod model;
 pub mod model_loader;
@@ -94,9 +95,7 @@ mod tests {
             std::fs::read_to_string(crate_cargo_toml).expect("llamas-core Cargo.toml exists");
 
         assert!(cargo_toml.contains("metal = []"));
-        assert!(
-            cargo_toml.contains("[target.'cfg(target_os = \"macos\")'.build-dependencies]")
-        );
+        assert!(cargo_toml.contains("[target.'cfg(target_os = \"macos\")'.build-dependencies]"));
         assert!(cargo_toml.contains("metal = \"0.31\""));
     }
 

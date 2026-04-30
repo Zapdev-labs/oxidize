@@ -1,4 +1,5 @@
 use clap::Parser;
+use llamas_core::lora::{AdapterKind, LoraPlan, plan_lora_application};
 use llamas_core::model_loader::{GgufModelLoader, ModelLoader};
 use llamas_core::offload::{
     LayerOffloadPlan, MultiGpuConfig, MultiGpuOffloadPlan, ParallelismStrategy, plan_layer_offload,
@@ -19,6 +20,8 @@ struct Args {
     gpus: usize,
     #[arg(long, default_value = "pipeline")]
     parallelism: String,
+    #[arg(long = "lora")]
+    lora_paths: Vec<PathBuf>,
 }
 
 fn greeting(prompt: &str) -> String {
@@ -62,12 +65,37 @@ fn render_multi_gpu_offload_plan(plan: &MultiGpuOffloadPlan) -> String {
     )
 }
 
+fn render_lora_plan(plan: &LoraPlan) -> String {
+    let mode = match plan.kind {
+        AdapterKind::Lora => "lora",
+        AdapterKind::Qlora => "qlora",
+    };
+    format!(
+        "adapter plan: mode={mode} matched_targets={} missing_base_targets={}",
+        plan.targets.len(),
+        plan.missing_base_tensors.len()
+    )
+}
+
 fn main() {
     let args = Args::parse();
     if let Some(model_path) = args.model {
         let loader = GgufModelLoader;
         match loader.load(model_path) {
             Ok(mapped) => {
+                for lora_path in &args.lora_paths {
+                    match loader.load(lora_path) {
+                        Ok(adapter) => match plan_lora_application(
+                            &mapped.parsed().tensor_infos,
+                            &adapter.parsed().tensor_infos,
+                            mapped.parsed().quantization_type(),
+                        ) {
+                            Ok(plan) => println!("{}", render_lora_plan(&plan)),
+                            Err(error) => eprintln!("failed to plan adapter: {error:?}"),
+                        },
+                        Err(error) => eprintln!("failed to load adapter: {error}"),
+                    }
+                }
                 if args.gpus > 1 {
                     let Some(strategy) = parse_parallelism(&args.parallelism) else {
                         eprintln!(
@@ -83,7 +111,9 @@ fn main() {
                     };
                     match plan_multi_gpu_offload(&mapped.parsed().tensor_infos, &config) {
                         Ok(plan) => println!("{}", render_multi_gpu_offload_plan(&plan)),
-                        Err(error) => eprintln!("failed to build multi-gpu offload plan: {error:?}"),
+                        Err(error) => {
+                            eprintln!("failed to build multi-gpu offload plan: {error:?}")
+                        }
                     }
                 } else {
                     let plan = plan_layer_offload(&mapped.parsed().tensor_infos, args.n_gpu_layers);
@@ -122,7 +152,10 @@ mod tests {
 
     #[test]
     fn parses_parallelism_strategy() {
-        assert_eq!(parse_parallelism("tensor"), Some(ParallelismStrategy::Tensor));
+        assert_eq!(
+            parse_parallelism("tensor"),
+            Some(ParallelismStrategy::Tensor)
+        );
         assert_eq!(
             parse_parallelism("pipeline"),
             Some(ParallelismStrategy::Pipeline)
@@ -154,6 +187,23 @@ mod tests {
         assert_eq!(
             summary,
             "offload plan: strategy=pipeline gpu_layers=6/32 gpu_tensors=36 cpu_tensors=20 gpu0:layers=3 tensors=18 gpu1:layers=3 tensors=18"
+        );
+    }
+
+    #[test]
+    fn renders_lora_plan_summary() {
+        let summary = render_lora_plan(&LoraPlan {
+            kind: AdapterKind::Qlora,
+            targets: vec![llamas_core::lora::LoraTarget {
+                base_tensor: "blk.0.attn_q.weight".to_owned(),
+                lora_a_tensor: "blk.0.attn_q.weight.lora_a.weight".to_owned(),
+                lora_b_tensor: "blk.0.attn_q.weight.lora_b.weight".to_owned(),
+            }],
+            missing_base_tensors: vec!["blk.1.attn_q.weight".to_owned()],
+        });
+        assert_eq!(
+            summary,
+            "adapter plan: mode=qlora matched_targets=1 missing_base_targets=1"
         );
     }
 }
