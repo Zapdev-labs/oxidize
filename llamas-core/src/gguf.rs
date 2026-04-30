@@ -358,6 +358,16 @@ fn map_hf_decoder_name(name: &str) -> Option<String> {
         "model.norm.weight" => Some("norm.weight".to_owned()),
         _ => {
             let (layer, suffix) = name.strip_prefix("model.layers.")?.split_once('.')?;
+            if let Some(rest) = suffix.strip_prefix("block_sparse_moe.experts.") {
+                let (expert, expert_weight) = rest.split_once('.')?;
+                let mapped_expert_weight = match expert_weight {
+                    "w1.weight" => "ffn_gate",
+                    "w2.weight" => "ffn_down",
+                    "w3.weight" => "ffn_up",
+                    _ => return None,
+                };
+                return Some(format!("blk.{layer}.{mapped_expert_weight}.{expert}.weight"));
+            }
             let mapped_suffix = match suffix {
                 "input_layernorm.weight" => "attn_norm.weight",
                 "post_attention_layernorm.weight" => "ffn_norm.weight",
@@ -368,6 +378,7 @@ fn map_hf_decoder_name(name: &str) -> Option<String> {
                 "mlp.up_proj.weight" => "ffn_up.weight",
                 "mlp.gate_proj.weight" => "ffn_gate.weight",
                 "mlp.down_proj.weight" => "ffn_down.weight",
+                "block_sparse_moe.gate.weight" => "ffn_gate_inp.weight",
                 _ => return None,
             };
             Some(format!("blk.{layer}.{mapped_suffix}"))
@@ -482,7 +493,9 @@ impl<'a> ByteReader<'a> {
 
     fn read_string(&mut self) -> Result<String, GgufParseError> {
         let len = self.read_u64()?;
-        let len: usize = len.try_into().map_err(|_| GgufParseError::IntegerOverflow)?;
+        let len: usize = len
+            .try_into()
+            .map_err(|_| GgufParseError::IntegerOverflow)?;
         let bytes = self.read_exact(len)?;
         Ok(String::from_utf8(bytes.to_vec())?)
     }
@@ -654,7 +667,10 @@ mod tests {
             data_section_start: 0,
         };
 
-        assert_eq!(falcon.mapped_tensor_infos()[0].name, "tok_embeddings.weight");
+        assert_eq!(
+            falcon.mapped_tensor_infos()[0].name,
+            "tok_embeddings.weight"
+        );
         assert_eq!(gpt.mapped_tensor_infos()[0].name, "tok_embeddings.weight");
     }
 
@@ -671,6 +687,32 @@ mod tests {
 
         let mapped = file.mapped_tensor_infos();
         assert_eq!(mapped[0].name, "custom.tensor.weight");
+    }
+
+    #[test]
+    fn maps_mixtral_moe_tensor_names_to_internal_format() {
+        let file = GgufFile {
+            version: 3,
+            tensor_count: 4,
+            metadata: BTreeMap::from([(
+                "general.architecture".to_owned(),
+                GgufMetadataValue::String("mixtral".to_owned()),
+            )]),
+            tensor_infos: vec![
+                tensor_info("model.layers.2.block_sparse_moe.gate.weight"),
+                tensor_info("model.layers.2.block_sparse_moe.experts.3.w1.weight"),
+                tensor_info("model.layers.2.block_sparse_moe.experts.3.w2.weight"),
+                tensor_info("model.layers.2.block_sparse_moe.experts.3.w3.weight"),
+            ],
+            alignment: 32,
+            data_section_start: 0,
+        };
+
+        let mapped = file.mapped_tensor_infos();
+        assert_eq!(mapped[0].name, "blk.2.ffn_gate_inp.weight");
+        assert_eq!(mapped[1].name, "blk.2.ffn_gate.3.weight");
+        assert_eq!(mapped[2].name, "blk.2.ffn_down.3.weight");
+        assert_eq!(mapped[3].name, "blk.2.ffn_up.3.weight");
     }
 
     #[test]
