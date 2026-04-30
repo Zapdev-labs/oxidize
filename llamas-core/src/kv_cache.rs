@@ -1,4 +1,5 @@
 use crate::tensor::DType;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KvCacheConfig {
@@ -48,6 +49,25 @@ pub enum KvCacheError {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum ContinuousBatchError {
+    SequenceAlreadyExists { sequence_id: u64 },
+    SequenceNotFound { sequence_id: u64 },
+    SequenceCapacityExceeded { max_sequences: usize },
+    TokenIndexOutOfBounds {
+        sequence_id: u64,
+        token_index: usize,
+        token_count: usize,
+    },
+    KvCache(KvCacheError),
+}
+
+impl From<KvCacheError> for ContinuousBatchError {
+    fn from(value: KvCacheError) -> Self {
+        Self::KvCache(value)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 enum KvStorage {
     F32(Vec<f32>),
     F16(Vec<u16>),
@@ -71,6 +91,21 @@ pub struct KvCache {
     eviction_strategy: KvCacheEvictionStrategy,
     oldest_position: Option<usize>,
     newest_position: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SequenceState {
+    positions: Vec<usize>,
+    last_active_step: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContinuousBatchKvCache {
+    kv_cache: KvCache,
+    max_sequences: usize,
+    current_step: usize,
+    next_position: usize,
+    sequences: HashMap<u64, SequenceState>,
 }
 
 impl KvCache {
@@ -169,6 +204,10 @@ impl KvCache {
                 data.len() + (scales.len() * std::mem::size_of::<f32>()) + (mins.len() * std::mem::size_of::<f32>())
             }
         }
+    }
+
+    pub fn availability_window(&self) -> Option<(usize, usize)> {
+        Some((self.oldest_available_position()?, self.newest_position?))
     }
 
     fn validate_write(
@@ -281,6 +320,125 @@ impl KvCache {
         position % self.config.context_size
     }
 
+}
+
+impl ContinuousBatchKvCache {
+    pub fn new(kv_cache: KvCache, max_sequences: usize) -> Self {
+        Self {
+            kv_cache,
+            max_sequences,
+            current_step: 0,
+            next_position: 0,
+            sequences: HashMap::new(),
+        }
+    }
+
+    pub fn begin_step(&mut self) {
+        self.current_step = self.current_step.saturating_add(1);
+    }
+
+    pub fn add_sequence(&mut self, sequence_id: u64) -> Result<(), ContinuousBatchError> {
+        if self.sequences.contains_key(&sequence_id) {
+            return Err(ContinuousBatchError::SequenceAlreadyExists { sequence_id });
+        }
+        if self.sequences.len() >= self.max_sequences {
+            return Err(ContinuousBatchError::SequenceCapacityExceeded {
+                max_sequences: self.max_sequences,
+            });
+        }
+        self.sequences.insert(
+            sequence_id,
+            SequenceState {
+                positions: Vec::new(),
+                last_active_step: self.current_step,
+            },
+        );
+        Ok(())
+    }
+
+    pub fn remove_sequence(&mut self, sequence_id: u64) -> Result<(), ContinuousBatchError> {
+        self.sequences
+            .remove(&sequence_id)
+            .map(|_| ())
+            .ok_or(ContinuousBatchError::SequenceNotFound { sequence_id })
+    }
+
+    pub fn evict_inactive_sequences(&mut self, max_idle_steps: usize) {
+        let eviction_step = self.current_step.saturating_sub(max_idle_steps);
+        self.sequences
+            .retain(|_, state| state.last_active_step >= eviction_step);
+    }
+
+    pub fn append_token(
+        &mut self,
+        sequence_id: u64,
+        layer: usize,
+        key: &[f32],
+        value: &[f32],
+    ) -> Result<usize, ContinuousBatchError> {
+        let state = self
+            .sequences
+            .get_mut(&sequence_id)
+            .ok_or(ContinuousBatchError::SequenceNotFound { sequence_id })?;
+        let position = self.next_position;
+        self.kv_cache.set(layer, position, key, value)?;
+        state.positions.push(position);
+        state.last_active_step = self.current_step;
+        self.next_position = self.next_position.saturating_add(1);
+        Ok(position)
+    }
+
+    pub fn get_sequence_key(
+        &self,
+        sequence_id: u64,
+        layer: usize,
+        token_index: usize,
+        out: &mut [f32],
+    ) -> Result<(), ContinuousBatchError> {
+        let position = self.position_for(sequence_id, token_index)?;
+        self.kv_cache.get_key(layer, position, out)?;
+        Ok(())
+    }
+
+    pub fn get_sequence_value(
+        &self,
+        sequence_id: u64,
+        layer: usize,
+        token_index: usize,
+        out: &mut [f32],
+    ) -> Result<(), ContinuousBatchError> {
+        let position = self.position_for(sequence_id, token_index)?;
+        self.kv_cache.get_value(layer, position, out)?;
+        Ok(())
+    }
+
+    pub fn sequence_count(&self) -> usize {
+        self.sequences.len()
+    }
+
+    pub fn cache(&self) -> &KvCache {
+        &self.kv_cache
+    }
+
+    fn position_for(
+        &self,
+        sequence_id: u64,
+        token_index: usize,
+    ) -> Result<usize, ContinuousBatchError> {
+        let state = self
+            .sequences
+            .get(&sequence_id)
+            .ok_or(ContinuousBatchError::SequenceNotFound { sequence_id })?;
+        state
+            .positions
+            .get(token_index)
+            .copied()
+            .ok_or(ContinuousBatchError::TokenIndexOutOfBounds {
+                sequence_id,
+                token_index,
+                token_count: state.positions.len(),
+            })
+    }
 }
 
 fn write_storage(
@@ -810,5 +968,116 @@ mod tests {
             .get_key(0, 3, &mut key)
             .expect("oldest position remains readable with stop-at-capacity");
         assert_eq!(key, [1.0, 2.0]);
+    }
+
+    #[test]
+    fn continuous_batching_tracks_multiple_sequences_in_shared_cache() {
+        let cache = KvCache::new(KvCacheConfig {
+            layer_count: 1,
+            context_size: 8,
+            head_count: 1,
+            head_dim: 2,
+            dtype: DType::F32,
+        })
+        .expect("f32 kv cache should be supported");
+        let mut batch_cache = ContinuousBatchKvCache::new(cache, 4);
+        batch_cache
+            .add_sequence(100)
+            .expect("first sequence should be added");
+        batch_cache
+            .add_sequence(200)
+            .expect("second sequence should be added");
+
+        batch_cache
+            .append_token(100, 0, &[1.0, 2.0], &[0.1, 0.2])
+            .expect("sequence 100 token should be written");
+        batch_cache
+            .append_token(200, 0, &[3.0, 4.0], &[0.3, 0.4])
+            .expect("sequence 200 token should be written");
+        batch_cache
+            .append_token(100, 0, &[5.0, 6.0], &[0.5, 0.6])
+            .expect("sequence 100 second token should be written");
+
+        let mut first_seq_token_1 = [0.0_f32; 2];
+        let mut second_seq_token_0 = [0.0_f32; 2];
+        batch_cache
+            .get_sequence_key(100, 0, 1, &mut first_seq_token_1)
+            .expect("second token from sequence 100 should be readable");
+        batch_cache
+            .get_sequence_key(200, 0, 0, &mut second_seq_token_0)
+            .expect("first token from sequence 200 should be readable");
+        assert_eq!(first_seq_token_1, [5.0, 6.0]);
+        assert_eq!(second_seq_token_0, [3.0, 4.0]);
+    }
+
+    #[test]
+    fn continuous_batching_evicts_inactive_sequences() {
+        let cache = KvCache::new(KvCacheConfig {
+            layer_count: 1,
+            context_size: 8,
+            head_count: 1,
+            head_dim: 2,
+            dtype: DType::F32,
+        })
+        .expect("f32 kv cache should be supported");
+        let mut batch_cache = ContinuousBatchKvCache::new(cache, 2);
+        batch_cache
+            .add_sequence(10)
+            .expect("sequence 10 should be added");
+        batch_cache
+            .add_sequence(20)
+            .expect("sequence 20 should be added");
+
+        batch_cache.begin_step();
+        batch_cache
+            .append_token(20, 0, &[1.0, 1.0], &[2.0, 2.0])
+            .expect("sequence 20 should stay active");
+        batch_cache.begin_step();
+        batch_cache.evict_inactive_sequences(1);
+        assert_eq!(batch_cache.sequence_count(), 1);
+        assert_eq!(
+            batch_cache.add_sequence(30),
+            Ok(()),
+            "eviction should free sequence capacity"
+        );
+    }
+
+    #[test]
+    fn continuous_batching_surfaces_underlying_cache_eviction() {
+        let cache = KvCache::new(KvCacheConfig {
+            layer_count: 1,
+            context_size: 2,
+            head_count: 1,
+            head_dim: 2,
+            dtype: DType::F32,
+        })
+        .expect("f32 kv cache should be supported");
+        let mut batch_cache = ContinuousBatchKvCache::new(cache, 2);
+        batch_cache
+            .add_sequence(1)
+            .expect("sequence should be added");
+
+        batch_cache
+            .append_token(1, 0, &[1.0, 2.0], &[3.0, 4.0])
+            .expect("first token should be written");
+        batch_cache
+            .append_token(1, 0, &[5.0, 6.0], &[7.0, 8.0])
+            .expect("second token should be written");
+        batch_cache
+            .append_token(1, 0, &[9.0, 10.0], &[11.0, 12.0])
+            .expect("third token should be written");
+
+        let mut out = [0.0_f32; 2];
+        let err = batch_cache
+            .get_sequence_key(1, 0, 0, &mut out)
+            .expect_err("oldest token should be evicted in sliding window");
+        assert_eq!(
+            err,
+            ContinuousBatchError::KvCache(KvCacheError::PositionEvicted {
+                position: 0,
+                oldest_available: 1,
+                newest_available: 2
+            })
+        );
     }
 }
