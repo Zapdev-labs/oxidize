@@ -227,32 +227,45 @@ pub fn scaled_dot_product_attention_f32(
         });
     }
 
-    let scale = 1.0_f32 / (dim as f32).sqrt();
-    let mut scores = vec![0.0_f32; seq_len];
+    output.fill(0.0);
+    if seq_len == 0 {
+        return Ok(());
+    }
 
-    for (idx, key_row) in key.chunks_exact(dim).enumerate() {
-        let dot = query
+    let scale = 1.0_f32 / (dim as f32).sqrt();
+    let mut running_max = f32::NEG_INFINITY;
+    let mut running_sum = 0.0_f32;
+
+    for (key_row, value_row) in key.chunks_exact(dim).zip(value.chunks_exact(dim)) {
+        let score = query
             .iter()
             .zip(key_row.iter())
             .map(|(q, k)| q * k)
-            .sum::<f32>();
-        scores[idx] = dot * scale;
-    }
+            .sum::<f32>()
+            * scale;
 
-    let max_score = scores.iter().fold(f32::NEG_INFINITY, |acc, &x| acc.max(x));
-    for score in &mut scores {
-        *score = (*score - max_score).exp();
-    }
-    let sum_exp = scores.iter().sum::<f32>();
-    for score in &mut scores {
-        *score /= sum_exp;
-    }
-
-    output.fill(0.0);
-    for (weight, value_row) in scores.iter().zip(value.chunks_exact(dim)) {
-        for (out, v) in output.iter_mut().zip(value_row.iter()) {
-            *out += weight * v;
+        if score > running_max {
+            let rescale = (running_max - score).exp();
+            for out in output.iter_mut() {
+                *out *= rescale;
+            }
+            running_sum = running_sum * rescale + 1.0;
+            running_max = score;
+            for (out, v) in output.iter_mut().zip(value_row.iter()) {
+                *out += v;
+            }
+        } else {
+            let weight = (score - running_max).exp();
+            running_sum += weight;
+            for (out, v) in output.iter_mut().zip(value_row.iter()) {
+                *out += weight * v;
+            }
         }
+    }
+
+    let inv_sum = 1.0_f32 / running_sum;
+    for out in output.iter_mut() {
+        *out *= inv_sum;
     }
 
     Ok(())
@@ -452,6 +465,43 @@ impl Tensor {
 mod tests {
     use super::*;
 
+    fn reference_attention(
+        query: &[f32],
+        key: &[f32],
+        value: &[f32],
+        seq_len: usize,
+        dim: usize,
+        output: &mut [f32],
+    ) {
+        let scale = 1.0_f32 / (dim as f32).sqrt();
+        let mut scores = vec![0.0_f32; seq_len];
+
+        for (idx, key_row) in key.chunks_exact(dim).enumerate() {
+            let dot = query
+                .iter()
+                .zip(key_row.iter())
+                .map(|(q, k)| q * k)
+                .sum::<f32>();
+            scores[idx] = dot * scale;
+        }
+
+        let max_score = scores.iter().fold(f32::NEG_INFINITY, |acc, &x| acc.max(x));
+        for score in &mut scores {
+            *score = (*score - max_score).exp();
+        }
+        let sum_exp = scores.iter().sum::<f32>();
+        for score in &mut scores {
+            *score /= sum_exp;
+        }
+
+        output.fill(0.0);
+        for (weight, value_row) in scores.iter().zip(value.chunks_exact(dim)) {
+            for (out, v) in output.iter_mut().zip(value_row.iter()) {
+                *out += weight * v;
+            }
+        }
+    }
+
     #[test]
     fn creates_tensor_with_shape_strides_and_dtype() {
         let tensor = Tensor::new(vec![4, 8], vec![8, 1], DType::F32);
@@ -640,6 +690,62 @@ mod tests {
         )
         .expect_err("output length mismatch should fail");
         assert!(matches!(err, AttentionError::InvalidOutputLength { .. }));
+    }
+
+    #[test]
+    fn scaled_dot_product_attention_matches_reference_softmax() {
+        let dim = 4;
+        let seq_len = 6;
+        let query = vec![0.2_f32, -0.4, 1.2, 0.8];
+        let key = vec![
+            0.1_f32, 0.4, -0.2, 1.0, //
+            0.5, -0.7, 0.3, 0.0, //
+            -1.0, 0.1, 0.9, 0.2, //
+            0.7, 0.6, -0.8, 0.3, //
+            -0.4, 1.3, 0.2, -0.6, //
+            0.8, -0.2, -0.5, 0.4,
+        ];
+        let value = vec![
+            1.0_f32, 0.0, 2.0, -1.0, //
+            0.3, 1.5, -0.2, 0.7, //
+            -1.1, 0.6, 0.2, 0.4, //
+            0.9, -0.8, 1.0, 0.5, //
+            0.0, 0.2, -0.4, 1.2, //
+            -0.7, 0.3, 0.8, -0.9,
+        ];
+        let mut actual = vec![0.0_f32; dim];
+        let mut expected = vec![0.0_f32; dim];
+
+        scaled_dot_product_attention_f32(&query, &key, &value, seq_len, dim, &mut actual)
+            .expect("attention should succeed");
+        reference_attention(&query, &key, &value, seq_len, dim, &mut expected);
+
+        for (lhs, rhs) in actual.iter().zip(expected.iter()) {
+            assert!((lhs - rhs).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn scaled_dot_product_attention_is_stable_for_large_logits() {
+        let dim = 2;
+        let seq_len = 3;
+        let query = vec![10_000.0_f32, -10_000.0];
+        let key = vec![
+            1.0_f32, -1.0, //
+            -1.0, 1.0, //
+            0.5, -0.5,
+        ];
+        let value = vec![
+            2.0_f32, 4.0, //
+            -3.0, 5.0, //
+            7.0, -8.0,
+        ];
+        let mut output = vec![0.0_f32; dim];
+
+        scaled_dot_product_attention_f32(&query, &key, &value, seq_len, dim, &mut output)
+            .expect("attention should succeed");
+
+        assert!(output.iter().all(|x| x.is_finite()));
     }
 
     #[test]
