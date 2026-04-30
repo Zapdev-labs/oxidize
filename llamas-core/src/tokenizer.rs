@@ -72,6 +72,95 @@ impl LoadedTokenizer {
             .collect();
         self.decode(&filtered)
     }
+
+    pub fn streaming_detokenizer(&self) -> StreamingDetokenizer<'_> {
+        StreamingDetokenizer::new(self)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct StreamingDetokenizer<'a> {
+    tokenizer: &'a LoadedTokenizer,
+    pending_bytes: Vec<u8>,
+}
+
+impl<'a> StreamingDetokenizer<'a> {
+    pub fn new(tokenizer: &'a LoadedTokenizer) -> Self {
+        Self {
+            tokenizer,
+            pending_bytes: Vec::new(),
+        }
+    }
+
+    pub fn push(&mut self, id: u32) -> Result<String, TokenizerError> {
+        match self.tokenizer {
+            LoadedTokenizer::Bpe(tokenizer) => tokenizer
+                .id_to_token
+                .get(&id)
+                .cloned()
+                .ok_or(TokenizerError::UnknownToken(id)),
+            LoadedTokenizer::SentencePiece(tokenizer) => tokenizer
+                .id_to_token
+                .get(&id)
+                .cloned()
+                .ok_or(TokenizerError::UnknownToken(id)),
+            LoadedTokenizer::WordPiece(tokenizer) => tokenizer
+                .id_to_token
+                .get(&id)
+                .map(|piece| piece.strip_prefix("##").unwrap_or(piece).to_owned())
+                .ok_or(TokenizerError::UnknownToken(id)),
+            LoadedTokenizer::Tiktoken(tokenizer) => {
+                let Some(piece) = tokenizer.id_to_token.get(&id) else {
+                    return Err(TokenizerError::UnknownToken(id));
+                };
+                self.pending_bytes.extend_from_slice(piece);
+                Ok(consume_pending_utf8(&mut self.pending_bytes))
+            }
+        }
+    }
+
+    pub fn finish(&mut self) -> String {
+        if self.pending_bytes.is_empty() {
+            return String::new();
+        }
+        let out = String::from_utf8_lossy(&self.pending_bytes).into_owned();
+        self.pending_bytes.clear();
+        out
+    }
+}
+
+fn consume_pending_utf8(pending_bytes: &mut Vec<u8>) -> String {
+    if pending_bytes.is_empty() {
+        return String::new();
+    }
+
+    let mut out = String::new();
+    loop {
+        match std::str::from_utf8(pending_bytes) {
+            Ok(valid) => {
+                out.push_str(valid);
+                pending_bytes.clear();
+                break;
+            }
+            Err(error) => {
+                let valid_up_to = error.valid_up_to();
+                if valid_up_to > 0 {
+                    let valid = std::str::from_utf8(&pending_bytes[..valid_up_to])
+                        .expect("valid prefix from utf8_error.valid_up_to");
+                    out.push_str(valid);
+                    pending_bytes.drain(..valid_up_to);
+                    continue;
+                }
+
+                let Some(error_len) = error.error_len() else {
+                    break;
+                };
+                out.push_str(&String::from_utf8_lossy(&pending_bytes[..error_len]));
+                pending_bytes.drain(..error_len);
+            }
+        }
+    }
+    out
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1215,5 +1304,43 @@ mod tests {
             err,
             TokenizerLoadError::UnsupportedTokenizerModel("unknown".to_owned())
         );
+    }
+
+    #[test]
+    fn streaming_detokenizer_decodes_incrementally_for_wordpiece() {
+        let tokenizer = LoadedTokenizer::WordPiece(
+            WordPieceTokenizer::new(&["play", "##ing", " "]).with_unknown_token("<unk>"),
+        );
+        let mut stream = tokenizer.streaming_detokenizer();
+
+        assert_eq!(stream.push(0).expect("token should decode"), "play");
+        assert_eq!(stream.push(1).expect("token should decode"), "ing");
+        assert_eq!(stream.push(2).expect("token should decode"), " ");
+        assert_eq!(stream.finish(), "");
+    }
+
+    #[test]
+    fn streaming_detokenizer_buffers_partial_utf8_for_tiktoken() {
+        let tokenizer = LoadedTokenizer::Tiktoken(TiktokenTokenizer::new(
+            &[&[0xc3], &[0xa9], b"!"],
+            &[],
+        ));
+        let mut stream = tokenizer.streaming_detokenizer();
+
+        assert_eq!(stream.push(0).expect("first byte token should decode"), "");
+        assert_eq!(stream.push(1).expect("second byte token should decode"), "é");
+        assert_eq!(stream.push(2).expect("ascii token should decode"), "!");
+        assert_eq!(stream.finish(), "");
+    }
+
+    #[test]
+    fn streaming_detokenizer_reports_unknown_token() {
+        let tokenizer = LoadedTokenizer::Bpe(BpeTokenizer::train(&["ab"], 1));
+        let mut stream = tokenizer.streaming_detokenizer();
+
+        let err = stream
+            .push(999)
+            .expect_err("unknown token id should fail in stream");
+        assert_eq!(err, TokenizerError::UnknownToken(999));
     }
 }
