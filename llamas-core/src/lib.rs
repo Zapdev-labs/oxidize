@@ -1,11 +1,31 @@
+//! Core APIs for `llamas-cpp`.
+//!
+//! This crate exposes model/runtime primitives and a small public health surface
+//! used by CLI, server, and WASM integrations.
+//!
+//! # API quick check
+//!
+//! ```
+//! use llamas_core::{benchmark_input, workspace_health};
+//!
+//! assert_eq!(workspace_health().status, "ready");
+//! assert_eq!(benchmark_input().status, "ready");
+//! ```
+//!
+//! Build local API docs with:
+//!
+//! ```text
+//! cargo doc -p llamas-core --no-deps
+//! ```
+//!
 use serde::{Deserialize, Serialize};
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
+pub mod benchmark_suite;
 pub mod cuda;
 pub mod generation;
 pub mod gguf;
-pub mod benchmark_suite;
 pub mod kv_cache;
 pub mod llama;
 pub mod lora;
@@ -23,18 +43,38 @@ pub mod webgpu;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkspaceHealth {
+    /// Human-readable workspace readiness status.
     pub status: &'static str,
 }
 
+/// Returns the current workspace readiness signal.
+///
+/// # Examples
+///
+/// ```
+/// use llamas_core::workspace_health;
+///
+/// assert_eq!(workspace_health().status, "ready");
+/// ```
 pub fn workspace_health() -> WorkspaceHealth {
     WorkspaceHealth { status: "ready" }
 }
 
+/// Returns health input used by benchmark harnesses.
+///
+/// # Examples
+///
+/// ```
+/// use llamas_core::benchmark_input;
+///
+/// assert_eq!(benchmark_input().status, "ready");
+/// ```
 pub fn benchmark_input() -> WorkspaceHealth {
     workspace_health()
 }
 
 #[cfg_attr(all(target_arch = "wasm32", feature = "wasm"), wasm_bindgen)]
+/// Returns the workspace status string for WASM consumers.
 pub fn wasm_workspace_status() -> String {
     workspace_health().status.to_string()
 }
@@ -190,5 +230,16 @@ mod tests {
         assert!(js.contains("wasm_workspace_status"));
         assert!(js.contains("wasm_collect_worker_stream"));
         assert!(css.contains(".app"));
+    }
+
+    #[test]
+    fn llamas_core_docsrs_metadata_is_declared_for_rustdoc_builds() {
+        let crate_cargo_toml = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let cargo_toml =
+            std::fs::read_to_string(crate_cargo_toml).expect("llamas-core Cargo.toml exists");
+
+        assert!(cargo_toml.contains("[package.metadata.docs.rs]"));
+        assert!(cargo_toml.contains("all-features = true"));
+        assert!(cargo_toml.contains("rustdoc-args = [\"--cfg\", \"docsrs\"]"));
     }
 }

@@ -8,6 +8,10 @@ build = "build.rs"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [features]
 default = []
 cuda = ["dep:cublas-sys", "dep:cust"]
