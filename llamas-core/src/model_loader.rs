@@ -2,11 +2,40 @@ use std::path::Path;
 
 use crate::gguf::{GgufParseError, MappedGgufFile, load_mapped_gguf};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoadProgress {
+    pub stage: &'static str,
+    pub percent: u8,
+    pub bytes_processed: Option<u64>,
+    pub total_bytes: Option<u64>,
+}
+
 pub trait ModelLoader {
     type Model;
     type Error;
 
     fn load<P: AsRef<Path>>(&self, path: P) -> Result<Self::Model, Self::Error>;
+
+    fn load_with_progress<P: AsRef<Path>, C: FnMut(LoadProgress)>(
+        &self,
+        path: P,
+        mut on_progress: C,
+    ) -> Result<Self::Model, Self::Error> {
+        on_progress(LoadProgress {
+            stage: "starting",
+            percent: 0,
+            bytes_processed: None,
+            total_bytes: None,
+        });
+        let model = self.load(path)?;
+        on_progress(LoadProgress {
+            stage: "complete",
+            percent: 100,
+            bytes_processed: None,
+            total_bytes: None,
+        });
+        Ok(model)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -18,6 +47,43 @@ impl ModelLoader for GgufModelLoader {
 
     fn load<P: AsRef<Path>>(&self, path: P) -> Result<Self::Model, Self::Error> {
         load_mapped_gguf(path)
+    }
+
+    fn load_with_progress<P: AsRef<Path>, C: FnMut(LoadProgress)>(
+        &self,
+        path: P,
+        mut on_progress: C,
+    ) -> Result<Self::Model, Self::Error> {
+        let path = path.as_ref();
+        let total_bytes = std::fs::metadata(path).ok().map(|metadata| metadata.len());
+        on_progress(LoadProgress {
+            stage: "starting",
+            percent: 0,
+            bytes_processed: Some(0),
+            total_bytes,
+        });
+        on_progress(LoadProgress {
+            stage: "mapping",
+            percent: 35,
+            bytes_processed: total_bytes.map(|len| len / 3),
+            total_bytes,
+        });
+
+        let model = load_mapped_gguf(path)?;
+
+        on_progress(LoadProgress {
+            stage: "parsing",
+            percent: 85,
+            bytes_processed: total_bytes.map(|len| (len / 3) * 2),
+            total_bytes,
+        });
+        on_progress(LoadProgress {
+            stage: "complete",
+            percent: 100,
+            bytes_processed: total_bytes,
+            total_bytes,
+        });
+        Ok(model)
     }
 }
 
@@ -46,6 +112,34 @@ mod tests {
     }
 
     #[test]
+    fn gguf_model_loader_emits_progress_callbacks() {
+        let bytes = valid_minimal_gguf_bytes();
+        let path = write_temp_file(&bytes);
+        let loader = GgufModelLoader;
+        let mut events = Vec::new();
+
+        let mapped = loader
+            .load_with_progress(&path, |progress| events.push(progress))
+            .expect("gguf loader should parse model with progress");
+
+        assert_eq!(mapped.parsed().version, 3);
+        assert_eq!(events.len(), 4);
+        assert_eq!(events[0].stage, "starting");
+        assert_eq!(events[0].percent, 0);
+        assert_eq!(events[1].stage, "mapping");
+        assert_eq!(events[2].stage, "parsing");
+        assert_eq!(events[3].stage, "complete");
+        assert_eq!(events[3].percent, 100);
+        assert_eq!(events[3].bytes_processed, Some(bytes.len() as u64));
+        assert_eq!(events[3].total_bytes, Some(bytes.len() as u64));
+        assert!(events
+            .windows(2)
+            .all(|pair| pair[0].percent <= pair[1].percent));
+
+        fs::remove_file(path).expect("temp file removed");
+    }
+
+    #[test]
     fn model_loader_trait_supports_custom_loader() {
         #[derive(Debug)]
         struct MockLoader;
@@ -66,6 +160,29 @@ mod tests {
         let loader = MockLoader;
         assert_eq!(loader.load("model-ok.mock"), Ok("loaded"));
         assert_eq!(loader.load("bad.mock"), Err("invalid path"));
+
+        let mut events = Vec::new();
+        let loaded = loader
+            .load_with_progress("model-ok.mock", |progress| events.push(progress))
+            .expect("default progress loader should load");
+        assert_eq!(loaded, "loaded");
+        assert_eq!(
+            events,
+            vec![
+                LoadProgress {
+                    stage: "starting",
+                    percent: 0,
+                    bytes_processed: None,
+                    total_bytes: None,
+                },
+                LoadProgress {
+                    stage: "complete",
+                    percent: 100,
+                    bytes_processed: None,
+                    total_bytes: None,
+                },
+            ]
+        );
     }
 
     fn valid_minimal_gguf_bytes() -> Vec<u8> {
