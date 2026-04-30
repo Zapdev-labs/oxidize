@@ -109,6 +109,8 @@ pub fn gemm_f32(
     cols: usize,
     output: &mut [f32],
 ) -> Result<(), GemmError> {
+    const PREFETCH_DISTANCE: usize = 16;
+
     let expected_left_len = rows.saturating_mul(shared_dim);
     if left_matrix.len() != expected_left_len {
         return Err(GemmError::InvalidLeftMatrixLength {
@@ -133,13 +135,30 @@ pub fn gemm_f32(
         });
     }
 
+    let mut right_transposed = vec![0.0_f32; expected_right_len];
+    for shared_idx in 0..shared_dim {
+        let row_start = shared_idx * cols;
+        let row_end = row_start + cols;
+        let right_row = &right_matrix[row_start..row_end];
+        for (col, value) in right_row.iter().enumerate() {
+            right_transposed[col * shared_dim + shared_idx] = *value;
+        }
+    }
+
     for row in 0..rows {
         let left_row = &left_matrix[row * shared_dim..(row + 1) * shared_dim];
         let out_row = &mut output[row * cols..(row + 1) * cols];
         for (col, out_cell) in out_row.iter_mut().enumerate() {
+            let right_col = &right_transposed[col * shared_dim..(col + 1) * shared_dim];
             let mut sum = 0.0_f32;
             for (k, left_value) in left_row.iter().enumerate() {
-                sum += left_value * right_matrix[k * cols + col];
+                if let (Some(next_left), Some(next_right)) = (
+                    left_row.get(k + PREFETCH_DISTANCE),
+                    right_col.get(k + PREFETCH_DISTANCE),
+                ) {
+                    std::hint::black_box(*next_left + *next_right);
+                }
+                sum += left_value * right_col[k];
             }
             *out_cell = sum;
         }
@@ -502,6 +521,31 @@ mod tests {
         let err = gemm_f32(&left, 2, 3, &right, 2, &mut short_output)
             .expect_err("output length mismatch should fail");
         assert!(matches!(err, GemmError::InvalidOutputLength { .. }));
+    }
+
+    #[test]
+    fn gemm_multiplies_non_square_matrices() {
+        let left = vec![
+            1.0_f32, 2.0, //
+            3.0, 4.0, //
+            5.0, 6.0,
+        ];
+        let right = vec![
+            7.0_f32, 8.0, 9.0, 10.0, //
+            11.0, 12.0, 13.0, 14.0,
+        ];
+        let mut output = vec![0.0_f32; 12];
+
+        gemm_f32(&left, 3, 2, &right, 4, &mut output).expect("gemm should succeed");
+
+        let expected = [
+            29.0_f32, 32.0, 35.0, 38.0, //
+            65.0, 72.0, 79.0, 86.0, //
+            101.0, 112.0, 123.0, 134.0,
+        ];
+        for (actual, expected) in output.iter().zip(expected.iter()) {
+            assert!((actual - expected).abs() < 1e-6);
+        }
     }
 
     #[test]
