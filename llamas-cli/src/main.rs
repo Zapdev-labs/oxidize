@@ -1,6 +1,6 @@
 use clap::Parser;
 use llamas_core::lora::{plan_lora_application, AdapterKind, LoraPlan};
-use llamas_core::model_loader::{GgufModelLoader, ModelLoader};
+use llamas_core::model_loader::{GgufModelLoader, LoadProgress, ModelLoader};
 use llamas_core::offload::{
     plan_layer_offload, plan_multi_gpu_offload, LayerOffloadPlan, MultiGpuConfig,
     MultiGpuOffloadPlan, ParallelismStrategy,
@@ -155,8 +155,7 @@ fn run_chat_mode<R: BufRead, W: Write>(reader: &mut R, writer: &mut W) -> io::Re
             continue;
         }
 
-        let response = greeting(prompt);
-        writeln!(writer, "{response}")?;
+        let response = write_generated_response(prompt, writer)?;
         history.add_turn(prompt, &response);
     }
     Ok(())
@@ -167,7 +166,39 @@ fn run_single_shot_mode<W: Write>(prompt: &str, writer: &mut W) -> io::Result<()
     if prompt.is_empty() {
         return Ok(());
     }
-    writeln!(writer, "{}", greeting(prompt))
+    write_generated_response(prompt, writer).map(|_| ())
+}
+
+fn render_load_progress(progress: LoadProgress) -> String {
+    match (progress.bytes_processed, progress.total_bytes) {
+        (Some(bytes_processed), Some(total_bytes)) => {
+            format!(
+                "load progress: {}% stage={} bytes={}/{}",
+                progress.percent, progress.stage, bytes_processed, total_bytes
+            )
+        }
+        _ => format!(
+            "load progress: {}% stage={}",
+            progress.percent, progress.stage
+        ),
+    }
+}
+
+fn write_generated_response<W: Write>(prompt: &str, writer: &mut W) -> io::Result<String> {
+    let response = greeting(prompt);
+    let response_tokens = response.split_whitespace().count();
+    if response_tokens == 0 {
+        writeln!(writer, "{response}")?;
+        return Ok(response);
+    }
+    for generated in 1..=response_tokens {
+        writeln!(
+            writer,
+            "generation progress: {generated}/{response_tokens} tokens"
+        )?;
+    }
+    writeln!(writer, "{response}")?;
+    Ok(response)
 }
 
 fn main() {
@@ -184,7 +215,9 @@ fn main() {
     }
     if let Some(model_path) = args.model {
         let loader = GgufModelLoader;
-        match loader.load(model_path) {
+        match loader.load_with_progress(model_path, |progress| {
+            println!("{}", render_load_progress(progress))
+        }) {
             Ok(mapped) => {
                 for lora_path in &args.lora_paths {
                     match loader.load(lora_path) {
@@ -322,7 +355,8 @@ mod tests {
 
         let output = String::from_utf8(writer).expect("valid utf8 output");
         assert!(output.contains("llamas-cli chat mode. type 'exit' to quit."));
-        assert!(output.contains("> llamas-cli: hello"));
+        assert!(output.contains("generation progress: 1/2 tokens"));
+        assert!(output.contains("llamas-cli: hello"));
         assert!(output.contains("> bye"));
     }
 
@@ -360,7 +394,10 @@ mod tests {
         let mut writer = Vec::new();
         run_single_shot_mode("hello", &mut writer).expect("single-shot mode should succeed");
         let output = String::from_utf8(writer).expect("valid utf8 output");
-        assert_eq!(output, "llamas-cli: hello\n");
+        assert_eq!(
+            output,
+            "generation progress: 1/2 tokens\ngeneration progress: 2/2 tokens\nllamas-cli: hello\n"
+        );
     }
 
     #[test]
@@ -368,5 +405,43 @@ mod tests {
         let mut writer = Vec::new();
         run_single_shot_mode("   ", &mut writer).expect("single-shot mode should succeed");
         assert!(writer.is_empty());
+    }
+
+    #[test]
+    fn renders_load_progress_with_bytes_when_available() {
+        let rendered = render_load_progress(LoadProgress {
+            stage: "mapping",
+            percent: 35,
+            bytes_processed: Some(1024),
+            total_bytes: Some(4096),
+        });
+        assert_eq!(
+            rendered,
+            "load progress: 35% stage=mapping bytes=1024/4096"
+        );
+    }
+
+    #[test]
+    fn renders_load_progress_without_bytes_when_unavailable() {
+        let rendered = render_load_progress(LoadProgress {
+            stage: "starting",
+            percent: 0,
+            bytes_processed: None,
+            total_bytes: None,
+        });
+        assert_eq!(rendered, "load progress: 0% stage=starting");
+    }
+
+    #[test]
+    fn write_generated_response_emits_progress_and_final_response() {
+        let mut writer = Vec::new();
+        let response =
+            write_generated_response("there", &mut writer).expect("generation should succeed");
+        let output = String::from_utf8(writer).expect("valid utf8 output");
+        assert_eq!(response, "llamas-cli: there");
+        assert_eq!(
+            output,
+            "generation progress: 1/2 tokens\ngeneration progress: 2/2 tokens\nllamas-cli: there\n"
+        );
     }
 }
