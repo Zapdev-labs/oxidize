@@ -58,6 +58,11 @@ pub enum LayerNormError {
     InvalidOutputLength { expected: usize, actual: usize },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SoftmaxError {
+    InvalidInputLength { expected: usize, actual: usize },
+}
+
 pub fn gemv_f32(
     matrix: &[f32],
     rows: usize,
@@ -349,6 +354,31 @@ pub fn layer_norm_f32(
     {
         *out = (value - mean) * inv_std * scale + shift;
     }
+    Ok(())
+}
+
+pub fn softmax_f32(input: &[f32], output: &mut [f32]) -> Result<(), SoftmaxError> {
+    let expected_len = output.len();
+    if input.len() != expected_len {
+        return Err(SoftmaxError::InvalidInputLength {
+            expected: expected_len,
+            actual: input.len(),
+        });
+    }
+
+    let max_input = input.iter().fold(f32::NEG_INFINITY, |acc, &x| acc.max(x));
+    let mut sum_exp = 0.0_f64;
+    for (x, out) in input.iter().zip(output.iter_mut()) {
+        let exp_value = (x - max_input).exp();
+        *out = exp_value;
+        sum_exp += exp_value as f64;
+    }
+
+    let inv_sum = (1.0_f64 / sum_exp) as f32;
+    for out in output.iter_mut() {
+        *out *= inv_sum;
+    }
+
     Ok(())
 }
 
@@ -674,5 +704,39 @@ mod tests {
         let bias_err = layer_norm_f32(&[1.0_f32, 2.0], &[1.0_f32, 1.0], &[0.0_f32], 1e-5, &mut output)
             .expect_err("bias length mismatch should fail");
         assert!(matches!(bias_err, LayerNormError::InvalidBiasLength { .. }));
+    }
+
+    #[test]
+    fn softmax_outputs_probabilities_that_sum_to_one() {
+        let input = [1.0_f32, 2.0, 3.0];
+        let mut output = [0.0_f32; 3];
+
+        softmax_f32(&input, &mut output).expect("softmax should succeed");
+
+        assert!((output[0] - 0.090_030_57).abs() < 1e-7);
+        assert!((output[1] - 0.244_728_48).abs() < 1e-7);
+        assert!((output[2] - 0.665_240_94).abs() < 1e-7);
+        assert!((output.iter().sum::<f32>() - 1.0).abs() < 1e-7);
+    }
+
+    #[test]
+    fn softmax_is_numerically_stable_for_large_inputs() {
+        let input = [10_000.0_f32, 9_999.0, 9_998.0];
+        let mut output = [0.0_f32; 3];
+
+        softmax_f32(&input, &mut output).expect("softmax should succeed");
+
+        assert!(output.iter().all(|value| value.is_finite()));
+        assert!((output.iter().sum::<f32>() - 1.0).abs() < 1e-6);
+        assert!(output[0] > output[1]);
+        assert!(output[1] > output[2]);
+    }
+
+    #[test]
+    fn softmax_rejects_mismatched_lengths() {
+        let mut output = [0.0_f32; 2];
+        let err = softmax_f32(&[1.0_f32], &mut output)
+            .expect_err("mismatched input length should fail");
+        assert!(matches!(err, SoftmaxError::InvalidInputLength { .. }));
     }
 }
