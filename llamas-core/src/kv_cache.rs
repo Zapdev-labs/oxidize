@@ -51,6 +51,16 @@ pub enum KvCacheError {
 enum KvStorage {
     F32(Vec<f32>),
     F16(Vec<u16>),
+    Q8 {
+        data: Vec<u8>,
+        scales: Vec<f32>,
+        mins: Vec<f32>,
+    },
+    Q4 {
+        data: Vec<u8>,
+        scales: Vec<f32>,
+        mins: Vec<f32>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -73,6 +83,7 @@ impl KvCache {
         eviction_strategy: KvCacheEvictionStrategy,
     ) -> Result<Self, KvCacheError> {
         let size = config.element_count();
+        let token_slots = config.layer_count.saturating_mul(config.context_size);
         let (key, value) = match config.dtype {
             DType::F32 => (
                 KvStorage::F32(vec![0.0; size]),
@@ -81,6 +92,30 @@ impl KvCache {
             DType::F16 => (
                 KvStorage::F16(vec![f32_to_f16_bits(0.0); size]),
                 KvStorage::F16(vec![f32_to_f16_bits(0.0); size]),
+            ),
+            DType::I8 => (
+                KvStorage::Q8 {
+                    data: vec![0; size],
+                    scales: vec![0.0; token_slots],
+                    mins: vec![0.0; token_slots],
+                },
+                KvStorage::Q8 {
+                    data: vec![0; size],
+                    scales: vec![0.0; token_slots],
+                    mins: vec![0.0; token_slots],
+                },
+            ),
+            DType::I16 => (
+                KvStorage::Q4 {
+                    data: vec![0; size.div_ceil(2)],
+                    scales: vec![0.0; token_slots],
+                    mins: vec![0.0; token_slots],
+                },
+                KvStorage::Q4 {
+                    data: vec![0; size.div_ceil(2)],
+                    scales: vec![0.0; token_slots],
+                    mins: vec![0.0; token_slots],
+                },
             ),
             dtype => return Err(KvCacheError::UnsupportedDType { dtype }),
         };
@@ -102,24 +137,24 @@ impl KvCache {
     pub fn set(&mut self, layer: usize, position: usize, key: &[f32], value: &[f32]) -> Result<(), KvCacheError> {
         self.validate_write(layer, key, value)?;
         self.validate_write_position(position)?;
-        let range = self.token_range(layer, self.physical_position(position));
-        write_storage(&mut self.key, range.clone(), key);
-        write_storage(&mut self.value, range, value);
+        let physical_position = self.physical_position(position);
+        write_storage(&mut self.key, &self.config, layer, physical_position, key);
+        write_storage(&mut self.value, &self.config, layer, physical_position, value);
         self.record_position(position);
         Ok(())
     }
 
     pub fn get_key(&self, layer: usize, position: usize, out: &mut [f32]) -> Result<(), KvCacheError> {
         self.validate_read(layer, position, out)?;
-        let range = self.token_range(layer, self.physical_position(position));
-        read_storage(&self.key, range, out);
+        let physical_position = self.physical_position(position);
+        read_storage(&self.key, &self.config, layer, physical_position, out);
         Ok(())
     }
 
     pub fn get_value(&self, layer: usize, position: usize, out: &mut [f32]) -> Result<(), KvCacheError> {
         self.validate_read(layer, position, out)?;
-        let range = self.token_range(layer, self.physical_position(position));
-        read_storage(&self.value, range, out);
+        let physical_position = self.physical_position(position);
+        read_storage(&self.value, &self.config, layer, physical_position, out);
         Ok(())
     }
 
@@ -127,6 +162,12 @@ impl KvCache {
         match &self.key {
             KvStorage::F32(data) => data.len() * std::mem::size_of::<f32>(),
             KvStorage::F16(data) => data.len() * std::mem::size_of::<u16>(),
+            KvStorage::Q8 { data, scales, mins } => {
+                data.len() + (scales.len() * std::mem::size_of::<f32>()) + (mins.len() * std::mem::size_of::<f32>())
+            }
+            KvStorage::Q4 { data, scales, mins } => {
+                data.len() + (scales.len() * std::mem::size_of::<f32>()) + (mins.len() * std::mem::size_of::<f32>())
+            }
         }
     }
 
@@ -240,14 +281,17 @@ impl KvCache {
         position % self.config.context_size
     }
 
-    fn token_range(&self, layer: usize, position: usize) -> std::ops::Range<usize> {
-        let token_size = self.config.token_size();
-        let offset = layer * self.config.layer_size() + position * token_size;
-        offset..offset + token_size
-    }
 }
 
-fn write_storage(storage: &mut KvStorage, range: std::ops::Range<usize>, src: &[f32]) {
+fn write_storage(
+    storage: &mut KvStorage,
+    config: &KvCacheConfig,
+    layer: usize,
+    position: usize,
+    src: &[f32],
+) {
+    let range = token_range(config, layer, position);
+    let token_index = layer * config.context_size + position;
     match storage {
         KvStorage::F32(data) => data[range].copy_from_slice(src),
         KvStorage::F16(data) => {
@@ -255,10 +299,51 @@ fn write_storage(storage: &mut KvStorage, range: std::ops::Range<usize>, src: &[
                 *dst = f32_to_f16_bits(*value);
             }
         }
+        KvStorage::Q8 { data, scales, mins } => {
+            let (min, max) = min_max(src);
+            let scale = if max <= min { 0.0 } else { (max - min) / 255.0 };
+            scales[token_index] = scale;
+            mins[token_index] = min;
+            if scale == 0.0 {
+                data[range].fill(0);
+            } else {
+                for (dst, value) in data[range].iter_mut().zip(src.iter()) {
+                    let q = ((*value - min) / scale).round().clamp(0.0, 255.0) as u8;
+                    *dst = q;
+                }
+            }
+        }
+        KvStorage::Q4 { data, scales, mins } => {
+            let (min, max) = min_max(src);
+            let scale = if max <= min { 0.0 } else { (max - min) / 15.0 };
+            scales[token_index] = scale;
+            mins[token_index] = min;
+            for (idx, value) in src.iter().enumerate() {
+                let q = if scale == 0.0 {
+                    0
+                } else {
+                    ((*value - min) / scale).round().clamp(0.0, 15.0) as u8
+                };
+                let packed_idx = (range.start + idx) / 2;
+                if (range.start + idx).is_multiple_of(2) {
+                    data[packed_idx] = (data[packed_idx] & 0xF0) | (q & 0x0F);
+                } else {
+                    data[packed_idx] = (data[packed_idx] & 0x0F) | ((q & 0x0F) << 4);
+                }
+            }
+        }
     }
 }
 
-fn read_storage(storage: &KvStorage, range: std::ops::Range<usize>, dst: &mut [f32]) {
+fn read_storage(
+    storage: &KvStorage,
+    config: &KvCacheConfig,
+    layer: usize,
+    position: usize,
+    dst: &mut [f32],
+) {
+    let range = token_range(config, layer, position);
+    let token_index = layer * config.context_size + position;
     match storage {
         KvStorage::F32(data) => dst.copy_from_slice(&data[range]),
         KvStorage::F16(data) => {
@@ -266,7 +351,44 @@ fn read_storage(storage: &KvStorage, range: std::ops::Range<usize>, dst: &mut [f
                 *out = f16_bits_to_f32(*value);
             }
         }
+        KvStorage::Q8 { data, scales, mins } => {
+            let scale = scales[token_index];
+            let min = mins[token_index];
+            for (out, value) in dst.iter_mut().zip(data[range].iter()) {
+                *out = (*value as f32) * scale + min;
+            }
+        }
+        KvStorage::Q4 { data, scales, mins } => {
+            let scale = scales[token_index];
+            let min = mins[token_index];
+            for (idx, out) in dst.iter_mut().enumerate() {
+                let packed_idx = (range.start + idx) / 2;
+                let packed = data[packed_idx];
+                let q = if (range.start + idx).is_multiple_of(2) {
+                    packed & 0x0F
+                } else {
+                    (packed >> 4) & 0x0F
+                };
+                *out = (q as f32) * scale + min;
+            }
+        }
     }
+}
+
+fn token_range(config: &KvCacheConfig, layer: usize, position: usize) -> std::ops::Range<usize> {
+    let token_size = config.token_size();
+    let offset = layer * config.layer_size() + position * token_size;
+    offset..offset + token_size
+}
+
+fn min_max(values: &[f32]) -> (f32, f32) {
+    let mut min = f32::INFINITY;
+    let mut max = f32::NEG_INFINITY;
+    for value in values {
+        min = min.min(*value);
+        max = max.max(*value);
+    }
+    (min, max)
 }
 
 fn f16_bits_to_f32(bits: u16) -> f32 {
@@ -366,9 +488,27 @@ mod tests {
             dtype: DType::F16,
         })
         .expect("f16 kv cache should be supported");
+        let q8_cache = KvCache::new(KvCacheConfig {
+            layer_count: 2,
+            context_size: 4,
+            head_count: 2,
+            head_dim: 8,
+            dtype: DType::I8,
+        })
+        .expect("q8 kv cache should be supported");
+        let q4_cache = KvCache::new(KvCacheConfig {
+            layer_count: 2,
+            context_size: 4,
+            head_count: 2,
+            head_dim: 8,
+            dtype: DType::I16,
+        })
+        .expect("q4 kv cache should be supported");
 
         assert_eq!(f32_cache.bytes_per_tensor(), 2 * 4 * 2 * 8 * 4);
         assert_eq!(f16_cache.bytes_per_tensor(), 2 * 4 * 2 * 8 * 2);
+        assert_eq!(q8_cache.bytes_per_tensor(), (2 * 4 * 2 * 8) + (2 * 4 * 4) + (2 * 4 * 4));
+        assert_eq!(q4_cache.bytes_per_tensor(), (2_usize * 4 * 2 * 8).div_ceil(2) + (2 * 4 * 4) + (2 * 4 * 4));
     }
 
     #[test]
@@ -436,18 +576,86 @@ mod tests {
     }
 
     #[test]
+    fn stores_i8_kv_vectors_with_quantization_error_bound() {
+        let mut cache = KvCache::new(KvCacheConfig {
+            layer_count: 1,
+            context_size: 1,
+            head_count: 1,
+            head_dim: 8,
+            dtype: DType::I8,
+        })
+        .expect("i8 kv cache should be supported");
+
+        let key = [-1.0_f32, -0.75, -0.5, -0.25, 0.0, 0.25, 0.5, 1.0];
+        let value = [0.15_f32, 0.3, 0.45, 0.6, 0.75, -0.15, -0.3, -0.45];
+        cache
+            .set(0, 0, &key, &value)
+            .expect("writing kv entry should succeed");
+
+        let mut loaded_key = [0.0_f32; 8];
+        let mut loaded_value = [0.0_f32; 8];
+        cache
+            .get_key(0, 0, &mut loaded_key)
+            .expect("reading key should succeed");
+        cache
+            .get_value(0, 0, &mut loaded_value)
+            .expect("reading value should succeed");
+
+        for (actual, expected) in loaded_key.iter().zip(key.iter()) {
+            assert!((actual - expected).abs() < 0.01);
+        }
+        for (actual, expected) in loaded_value.iter().zip(value.iter()) {
+            assert!((actual - expected).abs() < 0.01);
+        }
+    }
+
+    #[test]
+    fn stores_i16_kv_vectors_with_4bit_quantization_error_bound() {
+        let mut cache = KvCache::new(KvCacheConfig {
+            layer_count: 1,
+            context_size: 1,
+            head_count: 1,
+            head_dim: 8,
+            dtype: DType::I16,
+        })
+        .expect("i16 kv cache should be supported");
+
+        let key = [-1.0_f32, -0.7, -0.4, -0.1, 0.2, 0.4, 0.7, 1.0];
+        let value = [1.0_f32, 0.75, 0.5, 0.25, 0.0, -0.25, -0.5, -0.75];
+        cache
+            .set(0, 0, &key, &value)
+            .expect("writing kv entry should succeed");
+
+        let mut loaded_key = [0.0_f32; 8];
+        let mut loaded_value = [0.0_f32; 8];
+        cache
+            .get_key(0, 0, &mut loaded_key)
+            .expect("reading key should succeed");
+        cache
+            .get_value(0, 0, &mut loaded_value)
+            .expect("reading value should succeed");
+
+        for (actual, expected) in loaded_key.iter().zip(key.iter()) {
+            assert!((actual - expected).abs() < 0.08);
+        }
+        for (actual, expected) in loaded_value.iter().zip(value.iter()) {
+            assert!((actual - expected).abs() < 0.08);
+        }
+    }
+
+    #[test]
     fn rejects_unsupported_dtype_and_out_of_bounds_access() {
         let unsupported = KvCache::new(KvCacheConfig {
             layer_count: 1,
             context_size: 1,
             head_count: 1,
             head_dim: 1,
-            dtype: DType::I8,
+            dtype: DType::I32,
         })
         .expect_err("non-fp dtype must be rejected");
         assert_eq!(
             unsupported,
-            KvCacheError::UnsupportedDType { dtype: DType::I8 }
+            KvCacheError::UnsupportedDType { dtype: DType::I32 }
         );
 
         let mut cache = KvCache::new(KvCacheConfig {
