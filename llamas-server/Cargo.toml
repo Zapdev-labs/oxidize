@@ -6,4 +6,5 @@ version.workspace = true
 
 [dependencies]
 axum.workspace = true
+clap.workspace = true
 tokio.workspace = true
