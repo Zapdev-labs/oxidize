@@ -134,6 +134,30 @@ impl Llama {
 
         Ok(buckets.into_iter().map(|value| value / norm).collect())
     }
+
+    #[pyo3(signature = (prompt_tokens, max_tokens=16, output_tensor=None))]
+    fn generate_from_tokens(
+        &mut self,
+        py: Python<'_>,
+        prompt_tokens: &Bound<'_, PyAny>,
+        max_tokens: usize,
+        output_tensor: Option<&str>,
+    ) -> PyResult<Py<PyAny>> {
+        let prompt_tokens = tensor_like_to_u32_vec(prompt_tokens)?;
+        let tokens = self.generate_tokens(&prompt_tokens, max_tokens)?;
+        convert_u32_output(py, &tokens, output_tensor)
+    }
+
+    #[pyo3(signature = (text, output_tensor=None))]
+    fn embed_tensor(
+        &self,
+        py: Python<'_>,
+        text: &str,
+        output_tensor: Option<&str>,
+    ) -> PyResult<Py<PyAny>> {
+        let embedding = self.embed(text)?;
+        convert_f32_output(py, &embedding, output_tensor)
+    }
 }
 
 impl Llama {
@@ -221,6 +245,91 @@ fn resolve_to_thread(py: Python<'_>) -> PyResult<Py<PyAny>> {
         .get_item("_llamas_to_thread")?
         .ok_or_else(|| PyValueError::new_err("failed to initialize to_thread fallback"))?;
     Ok(to_thread.unbind())
+}
+
+fn tensor_like_to_u32_vec(value: &Bound<'_, PyAny>) -> PyResult<Vec<u32>> {
+    if let Ok(values) = value.extract::<Vec<u32>>() {
+        return Ok(values);
+    }
+
+    if value.hasattr("tolist")? {
+        let values = value.call_method0("tolist")?;
+        return values.extract::<Vec<u32>>().map_err(|_| {
+            PyValueError::new_err("prompt_tokens tolist() must return a flat sequence of integers")
+        });
+    }
+
+    Err(PyValueError::new_err(
+        "prompt_tokens must be a sequence of integers, numpy array, or torch tensor",
+    ))
+}
+
+fn convert_u32_output(
+    py: Python<'_>,
+    values: &[u32],
+    output_tensor: Option<&str>,
+) -> PyResult<Py<PyAny>> {
+    let output_kind = output_tensor.unwrap_or("list");
+    match output_kind {
+        "list" => Ok(PyList::new(py, values)?.into_any().unbind()),
+        "numpy" => {
+            let np = py.import("numpy").map_err(|_| {
+                PyValueError::new_err("numpy is not available; install numpy or use output_tensor='list'")
+            })?;
+            let dtype = np.getattr("uint32")?;
+            Ok(np
+                .getattr("array")?
+                .call1((PyList::new(py, values)?,))?
+                .call_method1("astype", (dtype,))?
+                .unbind())
+        }
+        "torch" => {
+            let torch = py.import("torch").map_err(|_| {
+                PyValueError::new_err("torch is not available; install torch or use output_tensor='list'")
+            })?;
+            let dtype = torch.getattr("int64")?;
+            Ok(torch
+                .getattr("tensor")?
+                .call1((PyList::new(py, values)?,))?
+                .call_method1("to", (dtype,))?
+                .unbind())
+        }
+        _ => Err(PyValueError::new_err(
+            "output_tensor must be one of: list, numpy, torch",
+        )),
+    }
+}
+
+fn convert_f32_output(
+    py: Python<'_>,
+    values: &[f32],
+    output_tensor: Option<&str>,
+) -> PyResult<Py<PyAny>> {
+    let output_kind = output_tensor.unwrap_or("list");
+    match output_kind {
+        "list" => Ok(PyList::new(py, values)?.into_any().unbind()),
+        "numpy" => {
+            let np = py.import("numpy").map_err(|_| {
+                PyValueError::new_err("numpy is not available; install numpy or use output_tensor='list'")
+            })?;
+            let dtype = np.getattr("float32")?;
+            Ok(np.getattr("array")?.call1((PyList::new(py, values)?, dtype))?.unbind())
+        }
+        "torch" => {
+            let torch = py.import("torch").map_err(|_| {
+                PyValueError::new_err("torch is not available; install torch or use output_tensor='list'")
+            })?;
+            let dtype = torch.getattr("float32")?;
+            Ok(torch
+                .getattr("tensor")?
+                .call1((PyList::new(py, values)?,))?
+                .call_method1("to", (dtype,))?
+                .unbind())
+        }
+        _ => Err(PyValueError::new_err(
+            "output_tensor must be one of: list, numpy, torch",
+        )),
+    }
 }
 
 #[pymodule]
@@ -371,5 +480,83 @@ mod tests {
                 .to_owned()),
             Err(err) => Err(err),
         }
+    }
+
+    #[test]
+    fn generate_from_tokens_accepts_tensor_like_input() {
+        Python::initialize();
+        Python::attach(|py| {
+            let mut llama = Llama::new("model.gguf".to_owned(), 32_000, 4096, 32)
+                .expect("llama should initialize");
+            let locals = PyDict::new(py);
+            py.run(
+                c_str!(
+                    "class FakeTensor:\n    def __init__(self, values):\n        self._values = values\n    def tolist(self):\n        return self._values\nfake = FakeTensor([97, 98, 99])"
+                ),
+                None,
+                Some(&locals),
+            )
+            .expect("fake tensor type should be defined");
+            let fake = locals
+                .get_item("fake")
+                .expect("fake tensor should exist")
+                .expect("fake tensor should have value");
+            let generated = llama
+                .generate_from_tokens(py, &fake, 4, None)
+                .expect("tensor-like generation should succeed");
+            let generated = generated
+                .bind(py)
+                .extract::<Vec<u32>>()
+                .expect("default output should be a list");
+            assert_eq!(generated, vec![99, 99, 99, 99]);
+        });
+    }
+
+    #[test]
+    fn embed_tensor_supports_numpy_when_available() {
+        Python::initialize();
+        Python::attach(|py| {
+            if py.import("numpy").is_err() {
+                return;
+            }
+            let llama = Llama::new("model.gguf".to_owned(), 32_000, 4096, 32)
+                .expect("llama should initialize");
+            let embedding = llama
+                .embed_tensor(py, "hello", Some("numpy"))
+                .expect("numpy tensor conversion should succeed");
+            let class_name = embedding
+                .bind(py)
+                .getattr("__class__")
+                .expect("class lookup should succeed")
+                .getattr("__name__")
+                .expect("class name should exist")
+                .extract::<String>()
+                .expect("class name should be string");
+            assert_eq!(class_name, "ndarray");
+        });
+    }
+
+    #[test]
+    fn embed_tensor_supports_torch_when_available() {
+        Python::initialize();
+        Python::attach(|py| {
+            if py.import("torch").is_err() {
+                return;
+            }
+            let llama = Llama::new("model.gguf".to_owned(), 32_000, 4096, 32)
+                .expect("llama should initialize");
+            let embedding = llama
+                .embed_tensor(py, "hello", Some("torch"))
+                .expect("torch tensor conversion should succeed");
+            let class_name = embedding
+                .bind(py)
+                .getattr("__class__")
+                .expect("class lookup should succeed")
+                .getattr("__name__")
+                .expect("class name should exist")
+                .extract::<String>()
+                .expect("class name should be string");
+            assert_eq!(class_name, "Tensor");
+        });
     }
 }
