@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod cuda;
 pub mod gguf;
+pub mod kv_cache;
 pub mod llama;
 pub mod lora;
 pub mod metal;
