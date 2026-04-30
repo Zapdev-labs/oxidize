@@ -682,6 +682,28 @@ mod tests {
     }
 
     #[test]
+    fn maps_gemma_tensor_names_to_internal_format() {
+        let file = GgufFile {
+            version: 3,
+            tensor_count: 2,
+            metadata: BTreeMap::from([(
+                "general.architecture".to_owned(),
+                GgufMetadataValue::String("gemma".to_owned()),
+            )]),
+            tensor_infos: vec![
+                tensor_info("model.embed_tokens.weight"),
+                tensor_info("model.layers.6.self_attn.o_proj.weight"),
+            ],
+            alignment: 32,
+            data_section_start: 0,
+        };
+
+        let mapped = file.mapped_tensor_infos();
+        assert_eq!(mapped[0].name, "tok_embeddings.weight");
+        assert_eq!(mapped[1].name, "blk.6.attn_output.weight");
+    }
+
+    #[test]
     fn maps_falcon_and_gpt_embedding_names() {
         let falcon = GgufFile {
             version: 3,
