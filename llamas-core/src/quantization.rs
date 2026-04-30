@@ -34,6 +34,13 @@ pub enum QuantizationError {
     InvalidImportanceMatrix {
         reason: &'static str,
     },
+    InvalidMixedQuantizationPlan {
+        reason: &'static str,
+    },
+    InvalidMixedInputLength {
+        expected: usize,
+        actual: usize,
+    },
     UnsupportedQuantizationType(GgufQuantizationType),
 }
 
@@ -59,6 +66,15 @@ impl std::fmt::Display for QuantizationError {
             Self::InvalidImportanceMatrix { reason } => {
                 write!(f, "invalid importance matrix: {reason}")
             }
+            Self::InvalidMixedQuantizationPlan { reason } => {
+                write!(f, "invalid mixed quantization plan: {reason}")
+            }
+            Self::InvalidMixedInputLength { expected, actual } => {
+                write!(
+                    f,
+                    "invalid mixed quantization input length: expected {expected} bytes, got {actual}"
+                )
+            }
             Self::UnsupportedQuantizationType(quantization) => {
                 write!(f, "unsupported quantization type: {quantization:?}")
             }
@@ -71,6 +87,20 @@ impl std::error::Error for QuantizationError {}
 #[derive(Debug, Clone, PartialEq)]
 pub struct IMatrix {
     values: Vec<f32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MixedLayerPlan {
+    pub name: String,
+    pub value_count: usize,
+    pub target: GgufQuantizationType,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuantizedLayer {
+    pub name: String,
+    pub target: GgufQuantizationType,
+    pub bytes: Vec<u8>,
 }
 
 impl IMatrix {
@@ -228,6 +258,77 @@ pub fn quantize_scalar_with_imatrix(
         .map(|(value, importance)| value * importance)
         .collect::<Vec<_>>();
     quantize_from_f32_scalar(target, &weighted_values, output)
+}
+
+pub fn quantize_mixed_scalar(
+    source: GgufQuantizationType,
+    input: &[u8],
+    plans: &[MixedLayerPlan],
+) -> Result<Vec<QuantizedLayer>, QuantizationError> {
+    if plans.is_empty() {
+        return Err(QuantizationError::InvalidMixedQuantizationPlan {
+            reason: "at least one layer plan is required",
+        });
+    }
+
+    let source_bytes_per_value = match source {
+        GgufQuantizationType::F32 => 4,
+        GgufQuantizationType::F16 => 2,
+        other => return Err(QuantizationError::UnsupportedQuantizationType(other)),
+    };
+    let mut expected_total_bytes = 0_usize;
+    for plan in plans {
+        if plan.name.is_empty() {
+            return Err(QuantizationError::InvalidMixedQuantizationPlan {
+                reason: "layer name must not be empty",
+            });
+        }
+        if plan.value_count == 0 {
+            return Err(QuantizationError::InvalidMixedQuantizationPlan {
+                reason: "layer value_count must be greater than zero",
+            });
+        }
+        let layer_bytes = plan
+            .value_count
+            .checked_mul(source_bytes_per_value)
+            .ok_or(QuantizationError::InvalidMixedQuantizationPlan {
+                reason: "layer value_count overflows byte calculation",
+            })?;
+        expected_total_bytes = expected_total_bytes
+            .checked_add(layer_bytes)
+            .ok_or(QuantizationError::InvalidMixedQuantizationPlan {
+                reason: "total planned input size overflows byte calculation",
+            })?;
+    }
+
+    if input.len() != expected_total_bytes {
+        return Err(QuantizationError::InvalidMixedInputLength {
+            expected: expected_total_bytes,
+            actual: input.len(),
+        });
+    }
+
+    let mut offset = 0_usize;
+    let mut output_layers = Vec::with_capacity(plans.len());
+    for plan in plans {
+        let layer_input_len = plan
+            .value_count
+            .checked_mul(source_bytes_per_value)
+            .ok_or(QuantizationError::InvalidMixedQuantizationPlan {
+                reason: "layer value_count overflows byte calculation",
+            })?;
+        let layer_input = &input[offset..offset + layer_input_len];
+        let layer_output_len = quantized_size(plan.target, plan.value_count)?;
+        let mut layer_output = vec![0_u8; layer_output_len];
+        quantize_scalar(source, plan.target, layer_input, &mut layer_output)?;
+        output_layers.push(QuantizedLayer {
+            name: plan.name.clone(),
+            target: plan.target,
+            bytes: layer_output,
+        });
+        offset += layer_input_len;
+    }
+    Ok(output_layers)
 }
 
 pub fn dequantize_scalar(
@@ -1368,6 +1469,95 @@ mod tests {
         .expect("imatrix quantization should work");
 
         assert_ne!(with_matrix, baseline);
+    }
+
+    #[test]
+    fn quantizes_mixed_layers_with_distinct_targets() {
+        let first_values = (0..QK8_0).map(|i| i as f32 * 0.25);
+        let second_values = [1.0_f32, -2.0_f32];
+        let values = first_values
+            .chain(second_values)
+            .collect::<Vec<_>>();
+        let mut input = Vec::with_capacity(values.len() * 4);
+        for value in &values {
+            input.extend_from_slice(&value.to_le_bytes());
+        }
+
+        let plans = vec![
+            MixedLayerPlan {
+                name: "blk.0.attn_q.weight".to_owned(),
+                value_count: QK8_0,
+                target: GgufQuantizationType::Q8_0,
+            },
+            MixedLayerPlan {
+                name: "blk.0.ffn_down.weight".to_owned(),
+                value_count: 2,
+                target: GgufQuantizationType::F16,
+            },
+        ];
+
+        let output = quantize_mixed_scalar(GgufQuantizationType::F32, &input, &plans)
+            .expect("mixed quantization should succeed");
+
+        assert_eq!(output.len(), 2);
+        assert_eq!(output[0].name, "blk.0.attn_q.weight");
+        assert_eq!(output[0].target, GgufQuantizationType::Q8_0);
+        assert_eq!(output[0].bytes.len(), BLOCK_Q8_0_SIZE);
+        assert_eq!(output[1].name, "blk.0.ffn_down.weight");
+        assert_eq!(output[1].target, GgufQuantizationType::F16);
+        assert_eq!(output[1].bytes.len(), 4);
+
+        let mut recovered_q8 = vec![0.0_f32; QK8_0];
+        dequantize_scalar(
+            GgufQuantizationType::Q8_0,
+            &output[0].bytes,
+            &mut recovered_q8,
+        )
+        .expect("q8 output should dequantize");
+        assert!(recovered_q8.iter().all(|v| v.is_finite()));
+
+        let mut recovered_f16 = vec![0.0_f32; 2];
+        dequantize_scalar(
+            GgufQuantizationType::F16,
+            &output[1].bytes,
+            &mut recovered_f16,
+        )
+        .expect("f16 output should dequantize");
+        assert!(recovered_f16.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn mixed_quantization_rejects_input_length_mismatch() {
+        let input = vec![0_u8; 8];
+        let plans = vec![MixedLayerPlan {
+            name: "blk.0.attn_q.weight".to_owned(),
+            value_count: 4,
+            target: GgufQuantizationType::F16,
+        }];
+
+        let err = quantize_mixed_scalar(GgufQuantizationType::F32, &input, &plans)
+            .expect_err("mismatched source bytes should fail");
+        assert!(matches!(
+            err,
+            QuantizationError::InvalidMixedInputLength { .. }
+        ));
+    }
+
+    #[test]
+    fn mixed_quantization_rejects_empty_layer_name() {
+        let input = vec![0_u8; 8];
+        let plans = vec![MixedLayerPlan {
+            name: String::new(),
+            value_count: 2,
+            target: GgufQuantizationType::F16,
+        }];
+
+        let err = quantize_mixed_scalar(GgufQuantizationType::F32, &input, &plans)
+            .expect_err("empty layer name should fail");
+        assert!(matches!(
+            err,
+            QuantizationError::InvalidMixedQuantizationPlan { .. }
+        ));
     }
 
     fn test_values_for_target(target: GgufQuantizationType, offset: f32, scale: f32) -> Vec<f32> {
