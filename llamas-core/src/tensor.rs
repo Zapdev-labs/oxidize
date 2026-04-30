@@ -43,6 +43,21 @@ pub enum SwiGluError {
     InvalidUpLength { expected: usize, actual: usize },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RmsNormError {
+    InvalidInputLength { expected: usize, actual: usize },
+    InvalidWeightLength { expected: usize, actual: usize },
+    InvalidOutputLength { expected: usize, actual: usize },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LayerNormError {
+    InvalidInputLength { expected: usize, actual: usize },
+    InvalidWeightLength { expected: usize, actual: usize },
+    InvalidBiasLength { expected: usize, actual: usize },
+    InvalidOutputLength { expected: usize, actual: usize },
+}
+
 pub fn gemv_f32(
     matrix: &[f32],
     rows: usize,
@@ -255,6 +270,85 @@ pub fn apply_swiglu_f32(gate: &[f32], up: &[f32], output: &mut [f32]) -> Result<
         *out = gate_value * sigmoid * up_value;
     }
 
+    Ok(())
+}
+
+pub fn rms_norm_f32(
+    input: &[f32],
+    weight: &[f32],
+    eps: f32,
+    output: &mut [f32],
+) -> Result<(), RmsNormError> {
+    let hidden_dim = output.len();
+    if input.len() != hidden_dim {
+        return Err(RmsNormError::InvalidInputLength {
+            expected: hidden_dim,
+            actual: input.len(),
+        });
+    }
+    if weight.len() != hidden_dim {
+        return Err(RmsNormError::InvalidWeightLength {
+            expected: hidden_dim,
+            actual: weight.len(),
+        });
+    }
+
+    let sum_sq = input.iter().map(|value| value * value).sum::<f32>();
+    let mean_sq = sum_sq / hidden_dim as f32;
+    let inv_rms = 1.0 / (mean_sq + eps).sqrt();
+
+    for ((value, scale), out) in input.iter().zip(weight.iter()).zip(output.iter_mut()) {
+        *out = value * inv_rms * scale;
+    }
+    Ok(())
+}
+
+pub fn layer_norm_f32(
+    input: &[f32],
+    weight: &[f32],
+    bias: &[f32],
+    eps: f32,
+    output: &mut [f32],
+) -> Result<(), LayerNormError> {
+    let hidden_dim = output.len();
+    if input.len() != hidden_dim {
+        return Err(LayerNormError::InvalidInputLength {
+            expected: hidden_dim,
+            actual: input.len(),
+        });
+    }
+    if weight.len() != hidden_dim {
+        return Err(LayerNormError::InvalidWeightLength {
+            expected: hidden_dim,
+            actual: weight.len(),
+        });
+    }
+    if bias.len() != hidden_dim {
+        return Err(LayerNormError::InvalidBiasLength {
+            expected: hidden_dim,
+            actual: bias.len(),
+        });
+    }
+
+    let mean = input.iter().sum::<f32>() / hidden_dim as f32;
+    let variance = input
+        .iter()
+        .map(|value| {
+            let centered = value - mean;
+            centered * centered
+        })
+        .sum::<f32>()
+        / hidden_dim as f32;
+    let inv_std = 1.0 / (variance + eps).sqrt();
+
+    for (((value, scale), shift), out) in input
+        .iter()
+        .zip(weight.iter())
+        .zip(bias.iter())
+        .zip(output.iter_mut())
+    {
+        *out = (value - mean) * inv_std * scale + shift;
+    }
     Ok(())
 }
 
@@ -518,5 +612,67 @@ mod tests {
         let up_err = apply_swiglu_f32(&[1.0_f32, 2.0], &[1.0_f32], &mut output)
             .expect_err("up length mismatch should fail");
         assert!(matches!(up_err, SwiGluError::InvalidUpLength { .. }));
+    }
+
+    #[test]
+    fn rms_norm_scales_by_root_mean_square() {
+        let input = [1.0_f32, 2.0, 3.0];
+        let weight = [1.0_f32, 1.0, 1.0];
+        let mut output = [0.0_f32; 3];
+
+        rms_norm_f32(&input, &weight, 0.0, &mut output).expect("rms norm should succeed");
+
+        assert!((output[0] - 0.462_910_06).abs() < 1e-6);
+        assert!((output[1] - 0.925_820_1).abs() < 1e-6);
+        assert!((output[2] - 1.388_730_2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn rms_norm_rejects_mismatched_lengths() {
+        let mut output = [0.0_f32; 2];
+        let input_err = rms_norm_f32(&[1.0_f32], &[1.0_f32, 1.0], 1e-5, &mut output)
+            .expect_err("input length mismatch should fail");
+        assert!(matches!(input_err, RmsNormError::InvalidInputLength { .. }));
+
+        let weight_err = rms_norm_f32(&[1.0_f32, 2.0], &[1.0_f32], 1e-5, &mut output)
+            .expect_err("weight length mismatch should fail");
+        assert!(matches!(
+            weight_err,
+            RmsNormError::InvalidWeightLength { .. }
+        ));
+    }
+
+    #[test]
+    fn layer_norm_normalizes_and_applies_affine_transform() {
+        let input = [1.0_f32, 2.0, 3.0];
+        let weight = [1.0_f32, 1.0, 1.0];
+        let bias = [0.0_f32, 0.0, 0.0];
+        let mut output = [0.0_f32; 3];
+
+        layer_norm_f32(&input, &weight, &bias, 0.0, &mut output)
+            .expect("layer norm should succeed");
+
+        assert!((output[0] + 1.224_744_8).abs() < 1e-6);
+        assert!((output[1] - 0.0).abs() < 1e-6);
+        assert!((output[2] - 1.224_744_8).abs() < 1e-6);
+    }
+
+    #[test]
+    fn layer_norm_rejects_mismatched_lengths() {
+        let mut output = [0.0_f32; 2];
+        let input_err = layer_norm_f32(&[1.0_f32], &[1.0_f32, 1.0], &[0.0_f32, 0.0], 1e-5, &mut output)
+            .expect_err("input length mismatch should fail");
+        assert!(matches!(input_err, LayerNormError::InvalidInputLength { .. }));
+
+        let weight_err = layer_norm_f32(&[1.0_f32, 2.0], &[1.0_f32], &[0.0_f32, 0.0], 1e-5, &mut output)
+            .expect_err("weight length mismatch should fail");
+        assert!(matches!(
+            weight_err,
+            LayerNormError::InvalidWeightLength { .. }
+        ));
+
+        let bias_err = layer_norm_f32(&[1.0_f32, 2.0], &[1.0_f32, 1.0], &[0.0_f32], 1e-5, &mut output)
+            .expect_err("bias length mismatch should fail");
+        assert!(matches!(bias_err, LayerNormError::InvalidBiasLength { .. }));
     }
 }
