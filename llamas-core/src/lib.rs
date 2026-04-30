@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod gguf;
+pub mod tensor;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkspaceHealth {
