@@ -9,6 +9,29 @@ pub struct SamplingConfig {
     pub locally_typical_tau: Option<f32>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NewlinePenalty {
+    pub token_id: u32,
+    pub penalty: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RepetitionPenaltyConfig {
+    pub frequency_penalty: f32,
+    pub presence_penalty: f32,
+    pub newline_penalty: Option<NewlinePenalty>,
+}
+
+impl Default for RepetitionPenaltyConfig {
+    fn default() -> Self {
+        Self {
+            frequency_penalty: 0.0,
+            presence_penalty: 0.0,
+            newline_penalty: None,
+        }
+    }
+}
+
 impl Default for SamplingConfig {
     fn default() -> Self {
         Self {
@@ -40,6 +63,9 @@ pub enum SamplingError {
     InvalidTypicalP,
     InvalidTailFreeZ,
     InvalidLocallyTypicalTau,
+    InvalidFrequencyPenalty,
+    InvalidPresencePenalty,
+    InvalidNewlinePenalty,
     InvalidMirostat,
     InvalidRandom,
 }
@@ -57,6 +83,22 @@ pub fn greedy(logits: &[f32]) -> Result<u32, SamplingError> {
 }
 
 pub fn sample(logits: &[f32], config: SamplingConfig, random: f32) -> Result<u32, SamplingError> {
+    sample_with_repetition(
+        logits,
+        config,
+        random,
+        &[],
+        RepetitionPenaltyConfig::default(),
+    )
+}
+
+pub fn sample_with_repetition(
+    logits: &[f32],
+    config: SamplingConfig,
+    random: f32,
+    recent_tokens: &[u32],
+    repetition: RepetitionPenaltyConfig,
+) -> Result<u32, SamplingError> {
     if logits.is_empty() {
         return Err(SamplingError::EmptyLogits);
     }
@@ -91,16 +133,30 @@ pub fn sample(logits: &[f32], config: SamplingConfig, random: f32) -> Result<u32
     {
         return Err(SamplingError::InvalidLocallyTypicalTau);
     }
+    if !repetition.frequency_penalty.is_finite() || repetition.frequency_penalty < 0.0 {
+        return Err(SamplingError::InvalidFrequencyPenalty);
+    }
+    if !repetition.presence_penalty.is_finite() || repetition.presence_penalty < 0.0 {
+        return Err(SamplingError::InvalidPresencePenalty);
+    }
+    if let Some(newline_penalty) = repetition.newline_penalty
+        && (!newline_penalty.penalty.is_finite() || newline_penalty.penalty < 0.0)
+    {
+        return Err(SamplingError::InvalidNewlinePenalty);
+    }
     if !random.is_finite() || !(0.0..1.0).contains(&random) {
         return Err(SamplingError::InvalidRandom);
     }
 
-    let max_logit = logits
+    let mut adjusted_logits = logits.to_vec();
+    apply_repetition_penalties(&mut adjusted_logits, recent_tokens, repetition);
+
+    let max_logit = adjusted_logits
         .iter()
         .copied()
         .max_by(|a, b| a.total_cmp(b))
         .ok_or(SamplingError::EmptyLogits)?;
-    let mut indexed_probs: Vec<(usize, f32)> = logits
+    let mut indexed_probs: Vec<(usize, f32)> = adjusted_logits
         .iter()
         .copied()
         .enumerate()
@@ -172,6 +228,46 @@ pub fn sample(logits: &[f32], config: SamplingConfig, random: f32) -> Result<u32
     }
 
     greedy(logits)
+}
+
+fn apply_repetition_penalties(
+    logits: &mut [f32],
+    recent_tokens: &[u32],
+    repetition: RepetitionPenaltyConfig,
+) {
+    if logits.is_empty() {
+        return;
+    }
+    if repetition.frequency_penalty == 0.0
+        && repetition.presence_penalty == 0.0
+        && repetition.newline_penalty.is_none()
+    {
+        return;
+    }
+
+    let mut frequencies = vec![0_u32; logits.len()];
+    for token in recent_tokens {
+        let idx = *token as usize;
+        if idx < frequencies.len() {
+            frequencies[idx] = frequencies[idx].saturating_add(1);
+        }
+    }
+
+    for (idx, logit) in logits.iter_mut().enumerate() {
+        let freq = frequencies[idx];
+        if freq == 0 {
+            continue;
+        }
+        *logit -= repetition.frequency_penalty * freq as f32;
+        *logit -= repetition.presence_penalty;
+    }
+
+    if let Some(newline_penalty) = repetition.newline_penalty {
+        let idx = newline_penalty.token_id as usize;
+        if idx < logits.len() {
+            logits[idx] -= newline_penalty.penalty;
+        }
+    }
 }
 
 pub fn sample_mirostat(
@@ -568,6 +664,48 @@ mod tests {
             Err(SamplingError::InvalidLocallyTypicalTau)
         );
         assert_eq!(
+            sample_with_repetition(
+                &[1.0],
+                SamplingConfig::default(),
+                0.3,
+                &[0],
+                RepetitionPenaltyConfig {
+                    frequency_penalty: -0.1,
+                    ..RepetitionPenaltyConfig::default()
+                }
+            ),
+            Err(SamplingError::InvalidFrequencyPenalty)
+        );
+        assert_eq!(
+            sample_with_repetition(
+                &[1.0],
+                SamplingConfig::default(),
+                0.3,
+                &[0],
+                RepetitionPenaltyConfig {
+                    presence_penalty: -0.1,
+                    ..RepetitionPenaltyConfig::default()
+                }
+            ),
+            Err(SamplingError::InvalidPresencePenalty)
+        );
+        assert_eq!(
+            sample_with_repetition(
+                &[1.0, 1.0],
+                SamplingConfig::default(),
+                0.3,
+                &[],
+                RepetitionPenaltyConfig {
+                    newline_penalty: Some(NewlinePenalty {
+                        token_id: 1,
+                        penalty: -0.1
+                    }),
+                    ..RepetitionPenaltyConfig::default()
+                }
+            ),
+            Err(SamplingError::InvalidNewlinePenalty)
+        );
+        assert_eq!(
             sample(&[1.0], SamplingConfig::default(), 1.0),
             Err(SamplingError::InvalidRandom)
         );
@@ -584,5 +722,65 @@ mod tests {
             ),
             Err(SamplingError::InvalidMirostat)
         );
+    }
+
+    #[test]
+    fn frequency_penalty_discourages_frequent_tokens() {
+        let token = sample_with_repetition(
+            &[4.0, 3.9, 3.8],
+            SamplingConfig {
+                temperature: 0.3,
+                ..SamplingConfig::default()
+            },
+            0.7,
+            &[0, 0, 0, 0],
+            RepetitionPenaltyConfig {
+                frequency_penalty: 0.6,
+                ..RepetitionPenaltyConfig::default()
+            },
+        )
+        .expect("sampling should succeed");
+        assert_ne!(token, 0);
+    }
+
+    #[test]
+    fn presence_penalty_discourages_seen_tokens() {
+        let token = sample_with_repetition(
+            &[3.0, 2.9, 2.8],
+            SamplingConfig {
+                temperature: 0.3,
+                ..SamplingConfig::default()
+            },
+            0.6,
+            &[0],
+            RepetitionPenaltyConfig {
+                presence_penalty: 1.0,
+                ..RepetitionPenaltyConfig::default()
+            },
+        )
+        .expect("sampling should succeed");
+        assert_ne!(token, 0);
+    }
+
+    #[test]
+    fn newline_penalty_reduces_newline_token_choice() {
+        let token = sample_with_repetition(
+            &[5.0, 4.9],
+            SamplingConfig {
+                temperature: 0.2,
+                ..SamplingConfig::default()
+            },
+            0.4,
+            &[],
+            RepetitionPenaltyConfig {
+                newline_penalty: Some(NewlinePenalty {
+                    token_id: 0,
+                    penalty: 2.0,
+                }),
+                ..RepetitionPenaltyConfig::default()
+            },
+        )
+        .expect("sampling should succeed");
+        assert_eq!(token, 1);
     }
 }
