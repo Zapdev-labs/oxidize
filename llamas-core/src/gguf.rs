@@ -59,6 +59,11 @@ impl GgufFile {
             })
             .collect()
     }
+
+    pub fn quantization_type(&self) -> Option<GgufQuantizationType> {
+        let file_type = metadata_as_u32(self.metadata.get("general.file_type")?)?;
+        Some(GgufQuantizationType::from_file_type(file_type))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -68,6 +73,52 @@ pub struct GgufTensorInfo {
     pub ggml_type: u32,
     pub relative_offset: u64,
     pub absolute_offset: u64,
+}
+
+#[allow(non_camel_case_types)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GgufQuantizationType {
+    F32,
+    F16,
+    Q4_0,
+    Q4_1,
+    Q5_0,
+    Q5_1,
+    Q8_0,
+    Q2_K,
+    Q3_K_S,
+    Q3_K_M,
+    Q3_K_L,
+    Q4_K_S,
+    Q4_K_M,
+    Q5_K_S,
+    Q5_K_M,
+    Q6_K,
+    Unknown(u32),
+}
+
+impl GgufQuantizationType {
+    fn from_file_type(file_type: u32) -> Self {
+        match file_type {
+            0 => Self::F32,
+            1 => Self::F16,
+            2 => Self::Q4_0,
+            3 => Self::Q4_1,
+            6 => Self::Q5_0,
+            7 => Self::Q5_1,
+            8 => Self::Q8_0,
+            10 => Self::Q2_K,
+            11 => Self::Q3_K_S,
+            12 => Self::Q3_K_M,
+            13 => Self::Q3_K_L,
+            14 => Self::Q4_K_S,
+            15 => Self::Q4_K_M,
+            16 => Self::Q5_K_S,
+            17 => Self::Q5_K_M,
+            18 => Self::Q6_K,
+            other => Self::Unknown(other),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -264,6 +315,20 @@ fn alignment_from_metadata(value: &GgufMetadataValue) -> Result<u64, GgufParseEr
         GgufMetadataValue::Int32(v) if *v > 0 => Ok(*v as u64),
         GgufMetadataValue::Int64(v) if *v > 0 => Ok(*v as u64),
         _ => Err(GgufParseError::InvalidAlignment(0)),
+    }
+}
+
+fn metadata_as_u32(value: &GgufMetadataValue) -> Option<u32> {
+    match value {
+        GgufMetadataValue::Uint8(v) => Some((*v).into()),
+        GgufMetadataValue::Uint16(v) => Some((*v).into()),
+        GgufMetadataValue::Uint32(v) => Some(*v),
+        GgufMetadataValue::Uint64(v) => (*v).try_into().ok(),
+        GgufMetadataValue::Int8(v) if *v >= 0 => Some((*v as u8).into()),
+        GgufMetadataValue::Int16(v) if *v >= 0 => Some((*v as u16).into()),
+        GgufMetadataValue::Int32(v) if *v >= 0 => (*v).try_into().ok(),
+        GgufMetadataValue::Int64(v) if *v >= 0 => (*v).try_into().ok(),
+        _ => None,
     }
 }
 
@@ -633,6 +698,80 @@ mod tests {
 
         let mapped = file.mapped_tensor_infos();
         assert_eq!(mapped[0].name, "custom.tensor.weight");
+    }
+
+    #[test]
+    fn detects_known_quantization_types() {
+        let file = GgufFile {
+            version: 3,
+            tensor_count: 0,
+            metadata: BTreeMap::from([(
+                "general.file_type".to_owned(),
+                GgufMetadataValue::Uint32(15),
+            )]),
+            tensor_infos: Vec::new(),
+            alignment: 32,
+            data_section_start: 0,
+        };
+        assert_eq!(file.quantization_type(), Some(GgufQuantizationType::Q4_K_M));
+
+        let file = GgufFile {
+            version: 3,
+            tensor_count: 0,
+            metadata: BTreeMap::from([(
+                "general.file_type".to_owned(),
+                GgufMetadataValue::Uint8(17),
+            )]),
+            tensor_infos: Vec::new(),
+            alignment: 32,
+            data_section_start: 0,
+        };
+        assert_eq!(file.quantization_type(), Some(GgufQuantizationType::Q5_K_M));
+    }
+
+    #[test]
+    fn detects_unknown_quantization_type_value() {
+        let file = GgufFile {
+            version: 3,
+            tensor_count: 0,
+            metadata: BTreeMap::from([(
+                "general.file_type".to_owned(),
+                GgufMetadataValue::Uint32(999),
+            )]),
+            tensor_infos: Vec::new(),
+            alignment: 32,
+            data_section_start: 0,
+        };
+        assert_eq!(
+            file.quantization_type(),
+            Some(GgufQuantizationType::Unknown(999))
+        );
+    }
+
+    #[test]
+    fn returns_none_when_quantization_type_missing_or_invalid() {
+        let missing = GgufFile {
+            version: 3,
+            tensor_count: 0,
+            metadata: BTreeMap::new(),
+            tensor_infos: Vec::new(),
+            alignment: 32,
+            data_section_start: 0,
+        };
+        assert_eq!(missing.quantization_type(), None);
+
+        let invalid = GgufFile {
+            version: 3,
+            tensor_count: 0,
+            metadata: BTreeMap::from([(
+                "general.file_type".to_owned(),
+                GgufMetadataValue::String("Q4_K_M".to_owned()),
+            )]),
+            tensor_infos: Vec::new(),
+            alignment: 32,
+            data_section_start: 0,
+        };
+        assert_eq!(invalid.quantization_type(), None);
     }
 
     fn valid_minimal_gguf_bytes() -> Vec<u8> {
