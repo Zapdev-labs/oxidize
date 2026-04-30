@@ -174,4 +174,20 @@ mod tests {
         );
         assert!(makefile.contains("wasm-bindgen --target web --out-dir dist/wasm"));
     }
+
+    #[test]
+    fn web_demo_assets_exist_and_include_wasm_integration() {
+        let demo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("web-demo");
+        let html =
+            std::fs::read_to_string(demo_root.join("index.html")).expect("demo index.html exists");
+        let js = std::fs::read_to_string(demo_root.join("app.js")).expect("demo app.js exists");
+        let css =
+            std::fs::read_to_string(demo_root.join("styles.css")).expect("demo styles.css exists");
+
+        assert!(html.contains("<script type=\"module\" src=\"./app.js\"></script>"));
+        assert!(js.contains("from \"../../dist/wasm/llamas_core.js\""));
+        assert!(js.contains("wasm_workspace_status"));
+        assert!(js.contains("wasm_collect_worker_stream"));
+        assert!(css.contains(".app"));
+    }
 }

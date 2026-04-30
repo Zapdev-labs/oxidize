@@ -1,0 +1,59 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-family: system-ui, sans-serif;
+  background: #0b1220;
+  color: #e2e8f0;
+}
+
+.app {
+  width: min(680px, 92vw);
+  margin: 3rem auto;
+  padding: 1.25rem;
+  border: 1px solid #1e293b;
+  border-radius: 10px;
+  background: #111827;
+}
+
+h1 {
+  margin-top: 0;
+}
+
+.description {
+  color: #cbd5e1;
+}
+
+label,
+input,
+button {
+  display: block;
+  width: 100%;
+  margin-top: 0.75rem;
+}
+
+input,
+button {
+  padding: 0.65rem;
+  border-radius: 8px;
+  border: 1px solid #334155;
+  background: #0f172a;
+  color: #e2e8f0;
+}
+
+button {
+  cursor: pointer;
+}
+
+pre {
+  margin-top: 1rem;
+  padding: 0.75rem;
+  border-radius: 8px;
+  background: #020617;
+  border: 1px solid #1e293b;
+  min-height: 5rem;
+  white-space: pre-wrap;
+}
