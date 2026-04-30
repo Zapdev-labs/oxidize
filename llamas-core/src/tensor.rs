@@ -33,15 +33,28 @@ pub enum GemvError {
     },
     #[cfg(feature = "cuda")]
     Cuda(String),
+    #[cfg(feature = "metal")]
+    Metal(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GemmError {
-    InvalidLeftMatrixLength { expected: usize, actual: usize },
-    InvalidRightMatrixLength { expected: usize, actual: usize },
-    InvalidOutputLength { expected: usize, actual: usize },
+    InvalidLeftMatrixLength {
+        expected: usize,
+        actual: usize,
+    },
+    InvalidRightMatrixLength {
+        expected: usize,
+        actual: usize,
+    },
+    InvalidOutputLength {
+        expected: usize,
+        actual: usize,
+    },
     #[cfg(feature = "cuda")]
     Cuda(String),
+    #[cfg(feature = "metal")]
+    Metal(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,14 +131,15 @@ pub fn gemv_f32(
             .map_err(|err| GemvError::Cuda(format!("{err:?}")));
     }
 
-    for (row_values, out) in matrix.chunks_exact(cols).zip(output.iter_mut()) {
-        *out = row_values
-            .iter()
-            .zip(vector.iter())
-            .map(|(weight, value)| weight * value)
-            .sum();
+    #[cfg(feature = "metal")]
+    if crate::metal::should_use_mps_gemv(rows, cols) {
+        crate::metal::validate_gemv_dims(matrix, rows, cols, vector, output)
+            .map_err(|err| GemvError::Metal(format!("MPS GEMV validation failed: {err:?}")))?;
+        gemv_f32_cpu(matrix, cols, vector, output);
+        return Ok(());
     }
 
+    gemv_f32_cpu(matrix, cols, vector, output);
     Ok(())
 }
 
@@ -154,8 +168,8 @@ pub fn gemv_quantized_f32(
         .map_err(|err| GemvError::Cuda(format!("{err:?}")));
     }
 
-    crate::cuda::validate_q8_0_gemv_dims(quantized_matrix, rows, cols, vector, output)
-        .map_err(|err| match err {
+    crate::cuda::validate_q8_0_gemv_dims(quantized_matrix, rows, cols, vector, output).map_err(
+        |err| match err {
             crate::cuda::GemvCudaError::InvalidMatrixLength { expected, actual } => {
                 GemvError::InvalidMatrixLength { expected, actual }
             }
@@ -170,7 +184,8 @@ pub fn gemv_quantized_f32(
             }
             #[cfg(feature = "cuda")]
             crate::cuda::GemvCudaError::Cuda(message) => GemvError::Cuda(message),
-        })?;
+        },
+    )?;
     gemv_q8_0_f32_fused(quantized_matrix, cols, vector, output)
 }
 
@@ -184,11 +199,15 @@ fn gemv_q8_0_f32_fused(
     for (row_idx, out) in output.iter_mut().enumerate() {
         let mut sum = 0.0_f32;
         let row_start = row_idx * blocks_per_row * BLOCK_Q8_0_SIZE;
-        let row_blocks = &quantized_matrix[row_start..row_start + (blocks_per_row * BLOCK_Q8_0_SIZE)];
+        let row_blocks =
+            &quantized_matrix[row_start..row_start + (blocks_per_row * BLOCK_Q8_0_SIZE)];
         for (block_idx, block) in row_blocks.chunks_exact(BLOCK_Q8_0_SIZE).enumerate() {
             let scale = f16_le_to_f32([block[0], block[1]]);
             let vector_offset = block_idx * QK8_0;
-            for (q, v) in block[2..].iter().zip(&vector[vector_offset..vector_offset + QK8_0]) {
+            for (q, v) in block[2..]
+                .iter()
+                .zip(&vector[vector_offset..vector_offset + QK8_0])
+            {
                 sum += (*q as i8) as f32 * scale * *v;
             }
         }
@@ -234,8 +253,6 @@ pub fn gemm_f32(
     cols: usize,
     output: &mut [f32],
 ) -> Result<(), GemmError> {
-    const PREFETCH_DISTANCE: usize = 16;
-
     let expected_left_len = rows.saturating_mul(shared_dim);
     if left_matrix.len() != expected_left_len {
         return Err(GemmError::InvalidLeftMatrixLength {
@@ -262,10 +279,49 @@ pub fn gemm_f32(
 
     #[cfg(feature = "cuda")]
     if crate::cuda::cuda_build_info().detected_at_build {
-        return crate::cuda::gemm_f32_cuda(left_matrix, rows, shared_dim, right_matrix, cols, output)
-            .map_err(|err| GemmError::Cuda(format!("{err:?}")));
+        return crate::cuda::gemm_f32_cuda(
+            left_matrix,
+            rows,
+            shared_dim,
+            right_matrix,
+            cols,
+            output,
+        )
+        .map_err(|err| GemmError::Cuda(format!("{err:?}")));
     }
 
+    #[cfg(feature = "metal")]
+    if crate::metal::should_use_mps_gemm(rows, shared_dim, cols) {
+        crate::metal::validate_gemm_dims(left_matrix, rows, shared_dim, right_matrix, cols, output)
+            .map_err(|err| GemmError::Metal(format!("MPS GEMM validation failed: {err:?}")))?;
+        gemm_f32_cpu(left_matrix, rows, shared_dim, right_matrix, cols, output);
+        return Ok(());
+    }
+
+    gemm_f32_cpu(left_matrix, rows, shared_dim, right_matrix, cols, output);
+    Ok(())
+}
+
+fn gemv_f32_cpu(matrix: &[f32], cols: usize, vector: &[f32], output: &mut [f32]) {
+    for (row_values, out) in matrix.chunks_exact(cols).zip(output.iter_mut()) {
+        *out = row_values
+            .iter()
+            .zip(vector.iter())
+            .map(|(weight, value)| weight * value)
+            .sum();
+    }
+}
+
+fn gemm_f32_cpu(
+    left_matrix: &[f32],
+    rows: usize,
+    shared_dim: usize,
+    right_matrix: &[f32],
+    cols: usize,
+    output: &mut [f32],
+) {
+    const PREFETCH_DISTANCE: usize = 16;
+    let expected_right_len = shared_dim.saturating_mul(cols);
     let mut right_transposed = vec![0.0_f32; expected_right_len];
     for shared_idx in 0..shared_dim {
         let row_start = shared_idx * cols;
@@ -294,8 +350,6 @@ pub fn gemm_f32(
             *out_cell = sum;
         }
     }
-
-    Ok(())
 }
 
 pub fn scaled_dot_product_attention_f32(
@@ -364,7 +418,10 @@ pub fn scaled_dot_product_attention_f32(
 
         block_acc.fill(0.0);
         let mut block_sum = 0.0_f32;
-        for (key_row, value_row) in key_block.chunks_exact(dim).zip(value_block.chunks_exact(dim)) {
+        for (key_row, value_row) in key_block
+            .chunks_exact(dim)
+            .zip(value_block.chunks_exact(dim))
+        {
             let score = query
                 .iter()
                 .zip(key_row.iter())
@@ -683,14 +740,17 @@ mod tests {
         let matrix = (0..rows * cols)
             .map(|i| (i as f32 * 0.125) - 2.0)
             .collect::<Vec<_>>();
-        let vector = (0..cols).map(|i| (i as f32 * 0.05) - 0.6).collect::<Vec<_>>();
+        let vector = (0..cols)
+            .map(|i| (i as f32 * 0.05) - 0.6)
+            .collect::<Vec<_>>();
 
         let mut matrix_bytes = Vec::with_capacity(matrix.len() * 4);
         for value in &matrix {
             matrix_bytes.extend_from_slice(&value.to_le_bytes());
         }
-        let q8_bytes_len = crate::quantization::quantized_size(GgufQuantizationType::Q8_0, matrix.len())
-            .expect("quantized size is known");
+        let q8_bytes_len =
+            crate::quantization::quantized_size(GgufQuantizationType::Q8_0, matrix.len())
+                .expect("quantized size is known");
         let mut quantized_matrix = vec![0_u8; q8_bytes_len];
         crate::quantization::quantize_scalar(
             GgufQuantizationType::F32,
@@ -719,7 +779,8 @@ mod tests {
         )
         .expect("dequantization should succeed");
         let mut reference = vec![0.0_f32; rows];
-        gemv_f32(&dequantized, rows, cols, &vector, &mut reference).expect("f32 gemv should succeed");
+        gemv_f32(&dequantized, rows, cols, &vector, &mut reference)
+            .expect("f32 gemv should succeed");
 
         for (lhs, rhs) in quantized_out.iter().zip(reference.iter()) {
             assert!((lhs - rhs).abs() < 1e-4);
@@ -741,8 +802,9 @@ mod tests {
         for value in &matrix {
             matrix_bytes.extend_from_slice(&value.to_le_bytes());
         }
-        let q8_bytes_len = crate::quantization::quantized_size(GgufQuantizationType::Q8_0, matrix.len())
-            .expect("quantized size is known");
+        let q8_bytes_len =
+            crate::quantization::quantized_size(GgufQuantizationType::Q8_0, matrix.len())
+                .expect("quantized size is known");
         let mut quantized_matrix = vec![0_u8; q8_bytes_len];
         crate::quantization::quantize_scalar(
             GgufQuantizationType::F32,
@@ -771,7 +833,8 @@ mod tests {
         )
         .expect("dequantization should succeed");
         let mut reference = vec![0.0_f32; rows];
-        gemv_f32(&dequantized, rows, cols, &vector, &mut reference).expect("f32 gemv should succeed");
+        gemv_f32(&dequantized, rows, cols, &vector, &mut reference)
+            .expect("f32 gemv should succeed");
 
         for (lhs, rhs) in fused_out.iter().zip(reference.iter()) {
             assert!((lhs - rhs).abs() < 1e-4);
@@ -1118,19 +1181,40 @@ mod tests {
     #[test]
     fn layer_norm_rejects_mismatched_lengths() {
         let mut output = [0.0_f32; 2];
-        let input_err = layer_norm_f32(&[1.0_f32], &[1.0_f32, 1.0], &[0.0_f32, 0.0], 1e-5, &mut output)
-            .expect_err("input length mismatch should fail");
-        assert!(matches!(input_err, LayerNormError::InvalidInputLength { .. }));
+        let input_err = layer_norm_f32(
+            &[1.0_f32],
+            &[1.0_f32, 1.0],
+            &[0.0_f32, 0.0],
+            1e-5,
+            &mut output,
+        )
+        .expect_err("input length mismatch should fail");
+        assert!(matches!(
+            input_err,
+            LayerNormError::InvalidInputLength { .. }
+        ));
 
-        let weight_err = layer_norm_f32(&[1.0_f32, 2.0], &[1.0_f32], &[0.0_f32, 0.0], 1e-5, &mut output)
-            .expect_err("weight length mismatch should fail");
+        let weight_err = layer_norm_f32(
+            &[1.0_f32, 2.0],
+            &[1.0_f32],
+            &[0.0_f32, 0.0],
+            1e-5,
+            &mut output,
+        )
+        .expect_err("weight length mismatch should fail");
         assert!(matches!(
             weight_err,
             LayerNormError::InvalidWeightLength { .. }
         ));
 
-        let bias_err = layer_norm_f32(&[1.0_f32, 2.0], &[1.0_f32, 1.0], &[0.0_f32], 1e-5, &mut output)
-            .expect_err("bias length mismatch should fail");
+        let bias_err = layer_norm_f32(
+            &[1.0_f32, 2.0],
+            &[1.0_f32, 1.0],
+            &[0.0_f32],
+            1e-5,
+            &mut output,
+        )
+        .expect_err("bias length mismatch should fail");
         assert!(matches!(bias_err, LayerNormError::InvalidBiasLength { .. }));
     }
 
@@ -1163,8 +1247,8 @@ mod tests {
     #[test]
     fn softmax_rejects_mismatched_lengths() {
         let mut output = [0.0_f32; 2];
-        let err = softmax_f32(&[1.0_f32], &mut output)
-            .expect_err("mismatched input length should fail");
+        let err =
+            softmax_f32(&[1.0_f32], &mut output).expect_err("mismatched input length should fail");
         assert!(matches!(err, SoftmaxError::InvalidInputLength { .. }));
     }
 }

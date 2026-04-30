@@ -7,6 +7,8 @@ const PAGE_BYTES: usize = 4096;
 pub const GEMV_KERNEL_NAME: &str = "gemv_f32_kernel";
 pub const GEMV_Q8_0_KERNEL_NAME: &str = "gemv_q8_0_f32_kernel";
 const GEMV_F32_MSL: &str = include_str!("../kernels/gemv_f32.metal");
+const GEMV_MPS_MIN_WORK_ITEMS: usize = 4096;
+const GEMM_MPS_MIN_WORK_ITEMS: usize = 65_536;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetalBuildInfo {
@@ -24,15 +26,89 @@ pub fn gemv_msl_source() -> &'static str {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MetalKernelError {
+    InvalidMatrixLength { expected: usize, actual: usize },
+    InvalidVectorLength { expected: usize, actual: usize },
+    InvalidOutputLength { expected: usize, actual: usize },
+}
+
+pub fn should_use_mps_gemv(rows: usize, cols: usize) -> bool {
+    cfg!(feature = "metal")
+        && cfg!(metal_available)
+        && rows.saturating_mul(cols) >= GEMV_MPS_MIN_WORK_ITEMS
+}
+
+pub fn should_use_mps_gemm(rows: usize, shared_dim: usize, cols: usize) -> bool {
+    cfg!(feature = "metal")
+        && cfg!(metal_available)
+        && rows.saturating_mul(shared_dim).saturating_mul(cols) >= GEMM_MPS_MIN_WORK_ITEMS
+}
+
+pub fn validate_gemv_dims(
+    matrix: &[f32],
+    rows: usize,
+    cols: usize,
+    vector: &[f32],
+    output: &[f32],
+) -> Result<(), MetalKernelError> {
+    let expected_matrix_len = rows.saturating_mul(cols);
+    if matrix.len() != expected_matrix_len {
+        return Err(MetalKernelError::InvalidMatrixLength {
+            expected: expected_matrix_len,
+            actual: matrix.len(),
+        });
+    }
+    if vector.len() != cols {
+        return Err(MetalKernelError::InvalidVectorLength {
+            expected: cols,
+            actual: vector.len(),
+        });
+    }
+    if output.len() != rows {
+        return Err(MetalKernelError::InvalidOutputLength {
+            expected: rows,
+            actual: output.len(),
+        });
+    }
+    Ok(())
+}
+
+pub fn validate_gemm_dims(
+    left_matrix: &[f32],
+    rows: usize,
+    shared_dim: usize,
+    right_matrix: &[f32],
+    cols: usize,
+    output: &[f32],
+) -> Result<(), MetalKernelError> {
+    let expected_left_len = rows.saturating_mul(shared_dim);
+    if left_matrix.len() != expected_left_len {
+        return Err(MetalKernelError::InvalidMatrixLength {
+            expected: expected_left_len,
+            actual: left_matrix.len(),
+        });
+    }
+    let expected_right_len = shared_dim.saturating_mul(cols);
+    if right_matrix.len() != expected_right_len {
+        return Err(MetalKernelError::InvalidVectorLength {
+            expected: expected_right_len,
+            actual: right_matrix.len(),
+        });
+    }
+    let expected_output_len = rows.saturating_mul(cols);
+    if output.len() != expected_output_len {
+        return Err(MetalKernelError::InvalidOutputLength {
+            expected: expected_output_len,
+            actual: output.len(),
+        });
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnifiedMemoryError {
-    OutOfMemory {
-        requested: usize,
-        available: usize,
-    },
-    SizeMismatch {
-        expected: usize,
-        actual: usize,
-    },
+    OutOfMemory { requested: usize, available: usize },
+    SizeMismatch { expected: usize, actual: usize },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -325,5 +401,42 @@ mod tests {
         assert_eq!(PAGE_BYTES, 16384);
         #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
         assert_eq!(PAGE_BYTES, 4096);
+    }
+
+    #[test]
+    fn mps_selection_uses_size_thresholds_and_build_detection() {
+        let expect_small_gemv = false;
+        let expect_small_gemm = false;
+        assert_eq!(should_use_mps_gemv(8, 8), expect_small_gemv);
+        assert_eq!(should_use_mps_gemm(8, 8, 8), expect_small_gemm);
+
+        let expected_large = cfg!(feature = "metal") && cfg!(metal_available);
+        assert_eq!(should_use_mps_gemv(64, 64), expected_large);
+        assert_eq!(should_use_mps_gemm(64, 64, 64), expected_large);
+    }
+
+    #[test]
+    fn metal_dim_validators_reject_shape_mismatches() {
+        let gemv_err =
+            validate_gemv_dims(&[1.0_f32, 2.0, 3.0], 2, 2, &[1.0_f32, 1.0], &[0.0_f32, 0.0])
+                .expect_err("gemv matrix shape mismatch should fail");
+        assert!(matches!(
+            gemv_err,
+            MetalKernelError::InvalidMatrixLength { .. }
+        ));
+
+        let gemm_err = validate_gemm_dims(
+            &[1.0_f32, 2.0, 3.0, 4.0],
+            2,
+            2,
+            &[1.0_f32, 2.0, 3.0],
+            2,
+            &[0.0_f32; 4],
+        )
+        .expect_err("gemm right matrix shape mismatch should fail");
+        assert!(matches!(
+            gemm_err,
+            MetalKernelError::InvalidVectorLength { .. }
+        ));
     }
 }
