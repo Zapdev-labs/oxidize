@@ -10,6 +10,7 @@ pub mod model;
 pub mod model_loader;
 pub mod offload;
 pub mod quantization;
+pub mod sampling;
 pub mod simd;
 pub mod tensor;
 pub mod tokenizer;
