@@ -5,6 +5,7 @@ use wasm_bindgen::prelude::*;
 pub mod cuda;
 pub mod generation;
 pub mod gguf;
+pub mod benchmark_suite;
 pub mod kv_cache;
 pub mod llama;
 pub mod lora;
@@ -17,8 +18,8 @@ pub mod sampling;
 pub mod simd;
 pub mod tensor;
 pub mod tokenizer;
-pub mod webgpu;
 pub mod web_worker;
+pub mod webgpu;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkspaceHealth {
