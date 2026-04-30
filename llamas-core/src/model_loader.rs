@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::gguf::{GgufParseError, MappedGgufFile, load_mapped_gguf};
+use crate::gguf::{GgufFile, GgufParseError, MappedGgufFile, load_mapped_gguf, parse_gguf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LoadProgress {
@@ -40,6 +40,30 @@ pub trait ModelLoader {
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct GgufModelLoader;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BaselineGgufModel {
+    bytes: Vec<u8>,
+    parsed: GgufFile,
+}
+
+impl BaselineGgufModel {
+    pub fn parsed(&self) -> &GgufFile {
+        &self.parsed
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+pub fn load_gguf_llama_cpp_baseline<P: AsRef<Path>>(
+    path: P,
+) -> Result<BaselineGgufModel, GgufParseError> {
+    let bytes = std::fs::read(path)?;
+    let parsed = parse_gguf(&bytes)?;
+    Ok(BaselineGgufModel { bytes, parsed })
+}
 
 impl ModelLoader for GgufModelLoader {
     type Model = MappedGgufFile;
@@ -138,6 +162,32 @@ mod tests {
         assert!(events
             .windows(2)
             .all(|pair| pair[0].percent <= pair[1].percent));
+    }
+
+    #[test]
+    fn llama_cpp_baseline_loader_parses_valid_file() {
+        let path = fixture_path("valid-v3.gguf");
+        let bytes = fs::read(&path).expect("fixture file exists");
+
+        let baseline = load_gguf_llama_cpp_baseline(&path)
+            .expect("baseline loader should parse model");
+
+        assert_eq!(baseline.parsed().version, 3);
+        assert_eq!(baseline.parsed().tensor_count, 1);
+        assert_eq!(baseline.parsed().alignment, 64);
+        assert_eq!(baseline.bytes(), bytes.as_slice());
+    }
+
+    #[test]
+    fn baseline_and_mapped_loader_parse_the_same_header() {
+        let path = fixture_path("valid-v3.gguf");
+        let loader = GgufModelLoader;
+
+        let mapped = loader.load(&path).expect("mapped loader should parse model");
+        let baseline = load_gguf_llama_cpp_baseline(&path)
+            .expect("baseline loader should parse model");
+
+        assert_eq!(mapped.parsed(), baseline.parsed());
     }
 
     #[test]
