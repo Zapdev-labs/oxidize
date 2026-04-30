@@ -34,7 +34,8 @@ mod tests {
             .join("..")
             .join(".cargo")
             .join("config.toml");
-        let config = std::fs::read_to_string(config_path).expect("workspace .cargo/config.toml exists");
+        let config =
+            std::fs::read_to_string(config_path).expect("workspace .cargo/config.toml exists");
 
         assert!(config.contains("[target.aarch64-unknown-linux-gnu]"));
         assert!(config.contains("[target.wasm32-unknown-unknown]"));
