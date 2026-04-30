@@ -1,11 +1,16 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use axum::{
+    response::{
+        IntoResponse, Response,
+        sse::{Event, KeepAlive, Sse},
+    },
+    routing::{get, post},
     Json, Router,
     http::StatusCode,
-    routing::{get, post},
 };
 use clap::Parser;
+use futures_util::stream;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -35,6 +40,8 @@ async fn healthz() -> StatusCode {
 struct ChatCompletionRequest {
     model: String,
     messages: Vec<ChatMessageInput>,
+    #[serde(default)]
+    stream: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -47,6 +54,8 @@ struct ChatMessageInput {
 struct CompletionRequest {
     model: String,
     prompt: String,
+    #[serde(default)]
+    stream: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -68,14 +77,50 @@ struct ModelData {
     owned_by: &'static str,
 }
 
-async fn chat_completions(
-    Json(payload): Json<ChatCompletionRequest>,
-) -> (StatusCode, Json<Value>) {
+async fn chat_completions(Json(payload): Json<ChatCompletionRequest>) -> Response {
     let _input_size: usize = payload
         .messages
         .iter()
         .map(|message| message.role.len() + message.content.len())
         .sum();
+
+    if payload.stream {
+        let model = payload.model;
+        let model_for_end = model.clone();
+        let stream = stream::iter(vec![
+            Ok::<Event, std::convert::Infallible>(
+                Event::default().data(json!({
+                    "id": "chatcmpl-placeholder",
+                    "object": "chat.completion.chunk",
+                    "created": 0,
+                    "model": model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": { "role": "assistant", "content": "" },
+                            "finish_reason": null
+                        }
+                    ]
+                }).to_string()),
+            ),
+            Ok(Event::default().data(
+                json!({
+                    "id": "chatcmpl-placeholder",
+                    "object": "chat.completion.chunk",
+                    "created": 0,
+                    "model": model_for_end,
+                    "choices": [{ "index": 0, "delta": {}, "finish_reason": "stop" }]
+                })
+                .to_string(),
+            )),
+            Ok(Event::default().data("[DONE]")),
+        ]);
+
+        return Sse::new(stream)
+            .keep_alive(KeepAlive::default())
+            .into_response();
+    }
+
     (
         StatusCode::OK,
         Json(json!({
@@ -100,10 +145,49 @@ async fn chat_completions(
             }
         })),
     )
+        .into_response()
 }
 
-async fn completions(Json(payload): Json<CompletionRequest>) -> (StatusCode, Json<Value>) {
+async fn completions(Json(payload): Json<CompletionRequest>) -> Response {
     let _ = &payload.prompt;
+
+    if payload.stream {
+        let model = payload.model;
+        let model_for_end = model.clone();
+        let stream = stream::iter(vec![
+            Ok::<Event, std::convert::Infallible>(
+                Event::default().data(json!({
+                    "id": "cmpl-placeholder",
+                    "object": "text_completion",
+                    "created": 0,
+                    "model": model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "text": "",
+                            "finish_reason": null
+                        }
+                    ]
+                }).to_string()),
+            ),
+            Ok(Event::default().data(
+                json!({
+                    "id": "cmpl-placeholder",
+                    "object": "text_completion",
+                    "created": 0,
+                    "model": model_for_end,
+                    "choices": [{ "index": 0, "text": "", "finish_reason": "stop" }]
+                })
+                .to_string(),
+            )),
+            Ok(Event::default().data("[DONE]")),
+        ]);
+
+        return Sse::new(stream)
+            .keep_alive(KeepAlive::default())
+            .into_response();
+    }
+
     (
         StatusCode::OK,
         Json(json!({
@@ -125,6 +209,7 @@ async fn completions(Json(payload): Json<CompletionRequest>) -> (StatusCode, Jso
             }
         })),
     )
+        .into_response()
 }
 
 async fn models() -> Json<ModelsResponse> {
@@ -267,6 +352,72 @@ mod tests {
         let parsed: Value = serde_json::from_slice(&bytes).expect("valid json response");
         assert_eq!(parsed["object"], "text_completion");
         assert_eq!(parsed["model"], "llamas-default");
+    }
+
+    #[tokio::test]
+    async fn chat_completions_stream_returns_sse_events() {
+        let request_body = json!({
+            "model": "llamas-default",
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": true
+        });
+        let response = build_app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(request_body.to_string()))
+                    .expect("valid request"),
+            )
+            .await
+            .expect("request should be handled");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE),
+            Some(&header::HeaderValue::from_static("text/event-stream"))
+        );
+
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let body = String::from_utf8(bytes.to_vec()).expect("sse body should be utf-8");
+        assert!(body.contains("\"object\":\"chat.completion.chunk\""));
+        assert!(body.contains("data: [DONE]"));
+    }
+
+    #[tokio::test]
+    async fn completions_stream_returns_sse_events() {
+        let request_body = json!({
+            "model": "llamas-default",
+            "prompt": "hello",
+            "stream": true
+        });
+        let response = build_app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/completions")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(request_body.to_string()))
+                    .expect("valid request"),
+            )
+            .await
+            .expect("request should be handled");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE),
+            Some(&header::HeaderValue::from_static("text/event-stream"))
+        );
+
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let body = String::from_utf8(bytes.to_vec()).expect("sse body should be utf-8");
+        assert!(body.contains("\"object\":\"text_completion\""));
+        assert!(body.contains("data: [DONE]"));
     }
 
     #[tokio::test]
