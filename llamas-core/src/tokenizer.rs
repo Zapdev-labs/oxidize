@@ -79,6 +79,33 @@ impl LoadedTokenizer {
         self.decode(&filtered)
     }
 
+    pub fn heal_tokens(&self, ids: &[u32]) -> Result<Vec<u32>, TokenizerError> {
+        if ids.len() < 2 {
+            return Ok(ids.to_vec());
+        }
+
+        let mut healed = Vec::with_capacity(ids.len());
+        let mut span_start = 0usize;
+        let flush_span = |start: usize, end: usize, out: &mut Vec<u32>| -> Result<(), TokenizerError> {
+            if start >= end {
+                return Ok(());
+            }
+            let text = self.decode(&ids[start..end])?;
+            out.extend(self.encode(&text));
+            Ok(())
+        };
+
+        for (idx, id) in ids.iter().copied().enumerate() {
+            if self.special_tokens().is_special(id) {
+                flush_span(span_start, idx, &mut healed)?;
+                healed.push(id);
+                span_start = idx + 1;
+            }
+        }
+        flush_span(span_start, ids.len(), &mut healed)?;
+        Ok(healed)
+    }
+
     pub fn streaming_detokenizer(&self) -> StreamingDetokenizer<'_> {
         StreamingDetokenizer::new(self)
     }
@@ -1510,5 +1537,36 @@ mod tests {
             .push(999)
             .expect_err("unknown token id should fail in stream");
         assert_eq!(err, TokenizerError::UnknownToken(999));
+    }
+
+    #[test]
+    fn healing_merges_incomplete_bpe_tokens() {
+        let tokenizer = LoadedTokenizer::Bpe(BpeTokenizer::train(&["hello hello"], 8));
+        let mut split = tokenizer.encode("hel");
+        split.extend(tokenizer.encode("lo"));
+
+        let healed = tokenizer.heal_tokens(&split).expect("healing should succeed");
+        assert_eq!(healed, tokenizer.encode("hello"));
+    }
+
+    #[test]
+    fn healing_merges_wordpiece_continuations() {
+        let tokenizer = LoadedTokenizer::WordPiece(WordPieceTokenizer::new(&["play", "##ing", "playing"]));
+        let healed = tokenizer
+            .heal_tokens(&[0, 1])
+            .expect("healing should succeed for known ids");
+        assert_eq!(healed, tokenizer.encode("playing"));
+    }
+
+    #[test]
+    fn healing_merges_tiktoken_fragments() {
+        let tokenizer = LoadedTokenizer::Tiktoken(TiktokenTokenizer::new(
+            &[b"h", b"e", b"l", b"o", b"he", b"ll", b"hell", b"hello"],
+            &[(b"h", b"e"), (b"l", b"l"), (b"he", b"ll"), (b"hell", b"o")],
+        ));
+        let healed = tokenizer
+            .heal_tokens(&[0, 1, 2, 2, 3])
+            .expect("healing should succeed for known ids");
+        assert_eq!(healed, tokenizer.encode("hello"));
     }
 }
