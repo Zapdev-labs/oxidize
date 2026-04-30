@@ -86,14 +86,15 @@ impl LoadedTokenizer {
 
         let mut healed = Vec::with_capacity(ids.len());
         let mut span_start = 0usize;
-        let flush_span = |start: usize, end: usize, out: &mut Vec<u32>| -> Result<(), TokenizerError> {
-            if start >= end {
-                return Ok(());
-            }
-            let text = self.decode(&ids[start..end])?;
-            out.extend(self.encode(&text));
-            Ok(())
-        };
+        let flush_span =
+            |start: usize, end: usize, out: &mut Vec<u32>| -> Result<(), TokenizerError> {
+                if start >= end {
+                    return Ok(());
+                }
+                let text = self.decode(&ids[start..end])?;
+                out.extend(self.encode(&text));
+                Ok(())
+            };
 
         for (idx, id) in ids.iter().copied().enumerate() {
             if self.special_tokens().is_special(id) {
@@ -240,10 +241,14 @@ impl SpecialTokens {
     }
 
     fn apply_encode_options(&self, encoded: &mut Vec<u32>, options: EncodeOptions) {
-        if options.add_bos && let Some(bos) = self.bos {
+        if options.add_bos
+            && let Some(bos) = self.bos
+        {
             encoded.insert(0, bos);
         }
-        if options.add_eos && let Some(eos) = self.eos {
+        if options.add_eos
+            && let Some(eos) = self.eos
+        {
             encoded.push(eos);
         }
         if let Some(target_len) = options.pad_to
@@ -260,7 +265,9 @@ pub fn load_tokenizer_from_gguf_metadata(
 ) -> Result<LoadedTokenizer, TokenizerLoadError> {
     let model = metadata_string(metadata, "tokenizer.ggml.model")?;
     match model.as_str() {
-        "llama" => Ok(LoadedTokenizer::SentencePiece(load_sentencepiece(metadata)?)),
+        "llama" => Ok(LoadedTokenizer::SentencePiece(load_sentencepiece(
+            metadata,
+        )?)),
         "bert" => Ok(LoadedTokenizer::WordPiece(load_wordpiece(metadata)?)),
         "gpt2" => Ok(LoadedTokenizer::Bpe(load_bpe(metadata)?)),
         "tiktoken" => Ok(LoadedTokenizer::Tiktoken(load_tiktoken(metadata)?)),
@@ -303,7 +310,10 @@ pub fn process_chat_template_from_gguf_metadata(
 }
 
 fn render_for_messages_block(template: &str, messages: &[ChatMessage<'_>]) -> String {
-    let starts = ["{% for message in messages %}", "{%- for message in messages %}"];
+    let starts = [
+        "{% for message in messages %}",
+        "{%- for message in messages %}",
+    ];
     let ends = ["{% endfor %}", "{%- endfor %}"];
 
     let Some((start_idx, start_token)) = starts
@@ -314,10 +324,11 @@ fn render_for_messages_block(template: &str, messages: &[ChatMessage<'_>]) -> St
     };
 
     let loop_start = start_idx + start_token.len();
-    let Some((end_idx, end_token)) = ends
-        .iter()
-        .find_map(|token| template[loop_start..].find(token).map(|idx| (loop_start + idx, *token)))
-    else {
+    let Some((end_idx, end_token)) = ends.iter().find_map(|token| {
+        template[loop_start..]
+            .find(token)
+            .map(|idx| (loop_start + idx, *token))
+    }) else {
         return template.to_owned();
     };
 
@@ -349,10 +360,11 @@ fn render_if_generation_prompt(template: &str, add_generation_prompt: bool) -> S
     };
 
     let if_start = start_idx + start_token.len();
-    let Some((end_idx, end_token)) = ends
-        .iter()
-        .find_map(|token| template[if_start..].find(token).map(|idx| (if_start + idx, *token)))
-    else {
+    let Some((end_idx, end_token)) = ends.iter().find_map(|token| {
+        template[if_start..]
+            .find(token)
+            .map(|idx| (if_start + idx, *token))
+    }) else {
         return template.to_owned();
     };
 
@@ -428,7 +440,9 @@ fn load_wordpiece(
     })
 }
 
-fn load_bpe(metadata: &BTreeMap<String, GgufMetadataValue>) -> Result<BpeTokenizer, TokenizerLoadError> {
+fn load_bpe(
+    metadata: &BTreeMap<String, GgufMetadataValue>,
+) -> Result<BpeTokenizer, TokenizerLoadError> {
     let tokens = metadata_string_array(metadata, "tokenizer.ggml.tokens")?;
     let merges = metadata_string_array(metadata, "tokenizer.ggml.merges").unwrap_or_default();
 
@@ -685,7 +699,10 @@ impl BpeTokenizer {
             .chars()
             .filter_map(|ch| {
                 let key = ch.to_string();
-                self.vocab.get(&key).copied().or(self.special_tokens.unknown)
+                self.vocab
+                    .get(&key)
+                    .copied()
+                    .or(self.special_tokens.unknown)
             })
             .collect();
 
@@ -1065,7 +1082,10 @@ impl TiktokenTokenizer {
             .iter()
             .filter_map(|byte| {
                 let single = [*byte];
-                self.vocab.get(single.as_slice()).copied().or(self.special_tokens.unknown)
+                self.vocab
+                    .get(single.as_slice())
+                    .copied()
+                    .or(self.special_tokens.unknown)
             })
             .collect();
 
@@ -1340,7 +1360,8 @@ mod tests {
 
     #[test]
     fn tiktoken_supports_utf8_bytes() {
-        let tokenizer = TiktokenTokenizer::new(&[b"h", b"i", b" ", &[0xc3], &[0xa9], b"\xc3\xa9"], &[]);
+        let tokenizer =
+            TiktokenTokenizer::new(&[b"h", b"i", b" ", &[0xc3], &[0xa9], b"\xc3\xa9"], &[]);
         let encoded = tokenizer.encode("hi \u{00e9}");
         assert_eq!(
             tokenizer.decode(&encoded).expect("decode should succeed"),
@@ -1381,8 +1402,14 @@ mod tests {
 
         let tokenizer =
             load_tokenizer_from_gguf_metadata(&metadata).expect("metadata should load tokenizer");
-        assert_eq!(tokenizer.decode(&tokenizer.encode("hello")), Ok("hello".to_owned()));
-        assert_eq!(tokenizer.decode(&tokenizer.encode("x")), Ok("<unk>".to_owned()));
+        assert_eq!(
+            tokenizer.decode(&tokenizer.encode("hello")),
+            Ok("hello".to_owned())
+        );
+        assert_eq!(
+            tokenizer.decode(&tokenizer.encode("x")),
+            Ok("<unk>".to_owned())
+        );
     }
 
     #[test]
@@ -1396,15 +1423,19 @@ mod tests {
                 "tokenizer.ggml.tokens".to_owned(),
                 metadata_strings(&["h", "e", "l", "o", "he", "ll", "hell", "hello"]),
             ),
-            ("tokenizer.ggml.merges".to_owned(), metadata_strings(&["h e", "l l", "he ll", "hell o"])),
+            (
+                "tokenizer.ggml.merges".to_owned(),
+                metadata_strings(&["h e", "l l", "he ll", "hell o"]),
+            ),
         ]);
 
         let tokenizer =
             load_tokenizer_from_gguf_metadata(&metadata).expect("metadata should load tokenizer");
-        assert_eq!(tokenizer.decode(&tokenizer.encode("hello")), Ok("hello".to_owned()));
+        assert_eq!(
+            tokenizer.decode(&tokenizer.encode("hello")),
+            Ok("hello".to_owned())
+        );
     }
-
-
 
     #[test]
     fn loads_special_token_ids_from_gguf_metadata() {
@@ -1516,14 +1547,15 @@ mod tests {
 
     #[test]
     fn streaming_detokenizer_buffers_partial_utf8_for_tiktoken() {
-        let tokenizer = LoadedTokenizer::Tiktoken(TiktokenTokenizer::new(
-            &[&[0xc3], &[0xa9], b"!"],
-            &[],
-        ));
+        let tokenizer =
+            LoadedTokenizer::Tiktoken(TiktokenTokenizer::new(&[&[0xc3], &[0xa9], b"!"], &[]));
         let mut stream = tokenizer.streaming_detokenizer();
 
         assert_eq!(stream.push(0).expect("first byte token should decode"), "");
-        assert_eq!(stream.push(1).expect("second byte token should decode"), "é");
+        assert_eq!(
+            stream.push(1).expect("second byte token should decode"),
+            "é"
+        );
         assert_eq!(stream.push(2).expect("ascii token should decode"), "!");
         assert_eq!(stream.finish(), "");
     }
@@ -1545,13 +1577,16 @@ mod tests {
         let mut split = tokenizer.encode("hel");
         split.extend(tokenizer.encode("lo"));
 
-        let healed = tokenizer.heal_tokens(&split).expect("healing should succeed");
+        let healed = tokenizer
+            .heal_tokens(&split)
+            .expect("healing should succeed");
         assert_eq!(healed, tokenizer.encode("hello"));
     }
 
     #[test]
     fn healing_merges_wordpiece_continuations() {
-        let tokenizer = LoadedTokenizer::WordPiece(WordPieceTokenizer::new(&["play", "##ing", "playing"]));
+        let tokenizer =
+            LoadedTokenizer::WordPiece(WordPieceTokenizer::new(&["play", "##ing", "playing"]));
         let healed = tokenizer
             .heal_tokens(&[0, 1])
             .expect("healing should succeed for known ids");
@@ -1568,5 +1603,56 @@ mod tests {
             .heal_tokens(&[0, 1, 2, 2, 3])
             .expect("healing should succeed for known ids");
         assert_eq!(healed, tokenizer.encode("hello"));
+    }
+
+    #[test]
+    fn tokenizers_handle_seeded_inputs_without_panicking() {
+        fn seeded_ascii(seed: u64, len: usize) -> String {
+            let mut state = seed;
+            let mut out = String::with_capacity(len);
+            for _ in 0..len {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                let byte = b' ' + ((state as u8) % 95);
+                out.push(byte as char);
+            }
+            out
+        }
+
+        let tokenizers = [
+            LoadedTokenizer::Bpe(BpeTokenizer::train(&["hello world", "fuzz input"], 16)),
+            LoadedTokenizer::SentencePiece(
+                SentencePieceUnigramTokenizer::new(&[
+                    ("hello", -0.2),
+                    (" ", -0.1),
+                    ("world", -0.2),
+                    ("fuzz", -0.3),
+                    ("input", -0.3),
+                ])
+                .with_unknown_token("<unk>"),
+            ),
+            LoadedTokenizer::WordPiece(
+                WordPieceTokenizer::new(&["hello", "world", "fuzz", "input", " ", "<unk>"])
+                    .with_unknown_token("<unk>"),
+            ),
+            LoadedTokenizer::Tiktoken(TiktokenTokenizer::new(
+                &[
+                    b"h", b"e", b"l", b"o", b" ", b"w", b"r", b"d", b"f", b"u", b"z", b"i", b"n",
+                    b"p",
+                ],
+                &[],
+            )),
+        ];
+
+        for len in [0, 1, 2, 4, 8, 16, 32, 64, 128] {
+            let input = seeded_ascii(0x5EED_9EED_CAFE_BABE, len);
+            for tokenizer in &tokenizers {
+                let encoded = tokenizer.encode(&input);
+                let _ = tokenizer.decode(&encoded);
+                let _ = tokenizer.decode_without_special_tokens(&encoded);
+                let _ = tokenizer.heal_tokens(&encoded);
+            }
+        }
     }
 }

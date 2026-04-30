@@ -389,7 +389,9 @@ fn map_hf_decoder_name(name: &str) -> Option<String> {
                     "w3.weight" => "ffn_up",
                     _ => return None,
                 };
-                return Some(format!("blk.{layer}.{mapped_expert_weight}.{expert}.weight"));
+                return Some(format!(
+                    "blk.{layer}.{mapped_expert_weight}.{expert}.weight"
+                ));
             }
             let mapped_suffix = match suffix {
                 "input_layernorm.weight" => "attn_norm.weight",
@@ -819,7 +821,10 @@ mod tests {
         );
         assert_eq!(gpt2.mapped_tensor_infos()[0].name, "tok_embeddings.weight");
         assert_eq!(gptj.mapped_tensor_infos()[0].name, "tok_embeddings.weight");
-        assert_eq!(gptneox.mapped_tensor_infos()[0].name, "tok_embeddings.weight");
+        assert_eq!(
+            gptneox.mapped_tensor_infos()[0].name,
+            "tok_embeddings.weight"
+        );
     }
 
     #[test]
@@ -886,7 +891,10 @@ mod tests {
                     "general.architecture".to_owned(),
                     GgufMetadataValue::String("qwen2".to_owned()),
                 ),
-                ("llama.context_length".to_owned(), GgufMetadataValue::Uint32(4096)),
+                (
+                    "llama.context_length".to_owned(),
+                    GgufMetadataValue::Uint32(4096),
+                ),
             ]),
             tensor_infos: Vec::new(),
             alignment: 32,
@@ -1028,6 +1036,26 @@ mod tests {
             data_section_start: 0,
         };
         assert_eq!(invalid.quantization_type(), None);
+    }
+
+    #[test]
+    fn parser_handles_seeded_bytes_without_panicking() {
+        fn seeded_bytes(seed: u64, len: usize) -> Vec<u8> {
+            let mut state = seed;
+            let mut out = Vec::with_capacity(len);
+            for _ in 0..len {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                out.push((state & 0xFF) as u8);
+            }
+            out
+        }
+
+        for len in [0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024] {
+            let bytes = seeded_bytes(0x5EED_1234_5678_9ABC, len);
+            let _ = parse_gguf(&bytes);
+        }
     }
 
     fn tensor_info(name: &str) -> GgufTensorInfo {
