@@ -293,6 +293,130 @@ impl SentencePieceUnigramTokenizer {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WordPieceTokenizer {
+    vocab: HashMap<String, u32>,
+    id_to_token: HashMap<u32, String>,
+    unknown_token: Option<u32>,
+}
+
+impl WordPieceTokenizer {
+    pub fn new(vocab_tokens: &[&str]) -> Self {
+        let mut vocab = HashMap::new();
+        let mut id_to_token = HashMap::new();
+
+        for (idx, token) in vocab_tokens.iter().enumerate() {
+            let id = idx as u32;
+            let token = (*token).to_owned();
+            vocab.insert(token.clone(), id);
+            id_to_token.insert(id, token);
+        }
+
+        Self {
+            vocab,
+            id_to_token,
+            unknown_token: None,
+        }
+    }
+
+    pub fn with_unknown_token(mut self, token: &str) -> Self {
+        let token_id = if let Some(id) = self.vocab.get(token).copied() {
+            id
+        } else {
+            let id = self
+                .id_to_token
+                .keys()
+                .copied()
+                .max()
+                .map_or(0, |max_id| max_id.saturating_add(1));
+            self.vocab.insert(token.to_owned(), id);
+            self.id_to_token.insert(id, token.to_owned());
+            id
+        };
+        self.unknown_token = Some(token_id);
+        self
+    }
+
+    pub fn encode(&self, text: &str) -> Vec<u32> {
+        if text.is_empty() {
+            return Vec::new();
+        }
+
+        let mut encoded = Vec::new();
+        let mut current_word = String::new();
+
+        for ch in text.chars() {
+            if ch.is_whitespace() {
+                self.encode_word_into(&current_word, &mut encoded);
+                current_word.clear();
+
+                let ws = ch.to_string();
+                if let Some(id) = self.vocab.get(&ws).copied() {
+                    encoded.push(id);
+                } else if let Some(unk) = self.unknown_token {
+                    encoded.push(unk);
+                }
+            } else {
+                current_word.push(ch);
+            }
+        }
+        self.encode_word_into(&current_word, &mut encoded);
+
+        encoded
+    }
+
+    pub fn decode(&self, ids: &[u32]) -> Result<String, TokenizerError> {
+        let mut out = String::new();
+        for id in ids {
+            let Some(piece) = self.id_to_token.get(id) else {
+                return Err(TokenizerError::UnknownToken(*id));
+            };
+
+            if let Some(stripped) = piece.strip_prefix("##") {
+                out.push_str(stripped);
+            } else {
+                out.push_str(piece);
+            }
+        }
+        Ok(out)
+    }
+
+    fn encode_word_into(&self, word: &str, encoded: &mut Vec<u32>) {
+        if word.is_empty() {
+            return;
+        }
+
+        let boundaries = char_boundaries(word);
+        let mut start_idx = 0;
+        let token_count = boundaries.len().saturating_sub(1);
+
+        while start_idx < token_count {
+            let mut found: Option<(u32, usize)> = None;
+
+            for end_idx in ((start_idx + 1)..=token_count).rev() {
+                let mut candidate = word[boundaries[start_idx]..boundaries[end_idx]].to_owned();
+                if start_idx > 0 {
+                    candidate = format!("##{candidate}");
+                }
+                if let Some(id) = self.vocab.get(&candidate).copied() {
+                    found = Some((id, end_idx));
+                    break;
+                }
+            }
+
+            if let Some((id, next_idx)) = found {
+                encoded.push(id);
+                start_idx = next_idx;
+            } else {
+                if let Some(unk) = self.unknown_token {
+                    encoded.push(unk);
+                }
+                return;
+            }
+        }
+    }
+}
+
 fn count_adjacent_pairs(sequences: &[Vec<u32>]) -> HashMap<(u32, u32), usize> {
     let mut pair_counts = HashMap::new();
     for sequence in sequences {
@@ -404,5 +528,38 @@ mod tests {
             tokenizer.decode(&encoded).expect("decode should succeed"),
             "hello world"
         );
+    }
+
+    #[test]
+    fn wordpiece_encodes_with_greedy_longest_match() {
+        let tokenizer = WordPieceTokenizer::new(&["play", "##ing", "##er", " "]);
+        let encoded = tokenizer.encode("player playing");
+
+        assert_eq!(
+            tokenizer.decode(&encoded).expect("decode should succeed"),
+            "player playing"
+        );
+        assert_eq!(encoded.len(), 5);
+    }
+
+    #[test]
+    fn wordpiece_uses_unknown_for_unmatched_word() {
+        let tokenizer =
+            WordPieceTokenizer::new(&["hello", "world", " "]).with_unknown_token("<unk>");
+        let encoded = tokenizer.encode("hello mars");
+
+        assert_eq!(
+            tokenizer.decode(&encoded).expect("decode should succeed"),
+            "hello <unk>"
+        );
+    }
+
+    #[test]
+    fn wordpiece_decode_errors_on_unknown_id() {
+        let tokenizer = WordPieceTokenizer::new(&["a"]);
+        let err = tokenizer
+            .decode(&[42])
+            .expect_err("unknown token id should fail");
+        assert_eq!(err, TokenizerError::UnknownToken(42));
     }
 }
