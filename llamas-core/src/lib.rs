@@ -64,10 +64,12 @@ mod tests {
     #[test]
     fn llamas_core_declares_optional_cuda_pipeline() {
         let crate_cargo_toml = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
-        let cargo_toml = std::fs::read_to_string(crate_cargo_toml).expect("llamas-core Cargo.toml exists");
+        let cargo_toml =
+            std::fs::read_to_string(crate_cargo_toml).expect("llamas-core Cargo.toml exists");
 
         assert!(cargo_toml.contains("build = \"build.rs\""));
-        assert!(cargo_toml.contains("cuda = [\"dep:cust\"]"));
+        assert!(cargo_toml.contains("cuda = [\"dep:cublas-sys\", \"dep:cust\"]"));
+        assert!(cargo_toml.contains("cublas-sys = { version = \"0.1\", optional = true }"));
         assert!(cargo_toml.contains("cust = { version = \"0.3\", optional = true }"));
     }
 

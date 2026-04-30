@@ -7,10 +7,11 @@ build = "build.rs"
 
 [features]
 default = []
-cuda = ["dep:cust"]
+cuda = ["dep:cublas-sys", "dep:cust"]
 
 [dependencies]
 anyhow.workspace = true
+cublas-sys = { version = "0.1", optional = true }
 cust = { version = "0.3", optional = true }
 memmap2 = "0.9"
 rayon = "1"

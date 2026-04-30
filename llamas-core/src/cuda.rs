@@ -132,8 +132,33 @@ pub enum GemvCudaError {
     Cuda(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GemmCudaError {
+    InvalidLeftMatrixLength {
+        expected: usize,
+        actual: usize,
+    },
+    InvalidRightMatrixLength {
+        expected: usize,
+        actual: usize,
+    },
+    InvalidOutputLength {
+        expected: usize,
+        actual: usize,
+    },
+    #[cfg(feature = "cuda")]
+    Cuda(String),
+}
+
 #[cfg(feature = "cuda")]
 impl From<cust::error::CudaError> for GemvCudaError {
+    fn from(error: cust::error::CudaError) -> Self {
+        Self::Cuda(error.to_string())
+    }
+}
+
+#[cfg(feature = "cuda")]
+impl From<cust::error::CudaError> for GemmCudaError {
     fn from(error: cust::error::CudaError) -> Self {
         Self::Cuda(error.to_string())
     }
@@ -221,6 +246,120 @@ pub fn validate_gemv_dims(
     Ok(())
 }
 
+pub fn validate_gemm_dims(
+    left_matrix: &[f32],
+    rows: usize,
+    shared_dim: usize,
+    right_matrix: &[f32],
+    cols: usize,
+    output: &[f32],
+) -> Result<(), GemmCudaError> {
+    let expected_left_len = rows.saturating_mul(shared_dim);
+    if left_matrix.len() != expected_left_len {
+        return Err(GemmCudaError::InvalidLeftMatrixLength {
+            expected: expected_left_len,
+            actual: left_matrix.len(),
+        });
+    }
+
+    let expected_right_len = shared_dim.saturating_mul(cols);
+    if right_matrix.len() != expected_right_len {
+        return Err(GemmCudaError::InvalidRightMatrixLength {
+            expected: expected_right_len,
+            actual: right_matrix.len(),
+        });
+    }
+
+    let expected_output_len = rows.saturating_mul(cols);
+    if output.len() != expected_output_len {
+        return Err(GemmCudaError::InvalidOutputLength {
+            expected: expected_output_len,
+            actual: output.len(),
+        });
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+fn cublas_status_to_error(status: cublas_sys::cublasStatus_t, op: &str) -> Result<(), GemmCudaError> {
+    if status == cublas_sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS {
+        Ok(())
+    } else {
+        Err(GemmCudaError::Cuda(format!("{op} failed with status {status:?}")))
+    }
+}
+
+#[cfg(feature = "cuda")]
+pub fn gemm_f32_cuda(
+    left_matrix: &[f32],
+    rows: usize,
+    shared_dim: usize,
+    right_matrix: &[f32],
+    cols: usize,
+    output: &mut [f32],
+) -> Result<(), GemmCudaError> {
+    validate_gemm_dims(left_matrix, rows, shared_dim, right_matrix, cols, output)?;
+
+    let _context = initialize_cuda()?;
+    let left_device = cust::memory::DeviceBuffer::from_slice(left_matrix)?;
+    let right_device = cust::memory::DeviceBuffer::from_slice(right_matrix)?;
+    let output_device = cust::memory::DeviceBuffer::<f32>::zeroed(output.len())?;
+
+    let mut handle: cublas_sys::cublasHandle_t = std::ptr::null_mut();
+    // SAFETY: cuBLAS expects a valid out-pointer for handle creation.
+    unsafe { cublas_status_to_error(cublas_sys::cublasCreate_v2(&mut handle), "cublasCreate_v2")? };
+
+    let alpha = 1.0_f32;
+    let beta = 0.0_f32;
+    let m = i32::try_from(cols).map_err(|_| GemmCudaError::InvalidOutputLength {
+        expected: i32::MAX as usize,
+        actual: cols,
+    })?;
+    let n = i32::try_from(rows).map_err(|_| GemmCudaError::InvalidOutputLength {
+        expected: i32::MAX as usize,
+        actual: rows,
+    })?;
+    let k = i32::try_from(shared_dim).map_err(|_| GemmCudaError::InvalidOutputLength {
+        expected: i32::MAX as usize,
+        actual: shared_dim,
+    })?;
+
+    let lda = m;
+    let ldb = k;
+    let ldc = m;
+
+    // SAFETY: device buffers are allocated and valid, dimensions and leading dimensions are consistent.
+    let gemm_result = unsafe {
+        cublas_status_to_error(
+            cublas_sys::cublasSgemm_v2(
+                handle,
+                cublas_sys::cublasOperation_t::CUBLAS_OP_N,
+                cublas_sys::cublasOperation_t::CUBLAS_OP_N,
+                m,
+                n,
+                k,
+                &alpha,
+                right_device.as_device_ptr().as_raw() as *const f32,
+                lda,
+                left_device.as_device_ptr().as_raw() as *const f32,
+                ldb,
+                &beta,
+                output_device.as_device_ptr().as_raw_mut() as *mut f32,
+                ldc,
+            ),
+            "cublasSgemm_v2",
+        )
+    };
+
+    // SAFETY: handle is either null or created by cublasCreate_v2.
+    let destroy_result = unsafe { cublas_status_to_error(cublas_sys::cublasDestroy_v2(handle), "cublasDestroy_v2") };
+    gemm_result?;
+    destroy_result?;
+    output_device.copy_to(output)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,6 +427,28 @@ mod tests {
         let err = validate_gemv_dims(&[1.0_f32, 2.0, 3.0], 2, 2, &[1.0_f32, 1.0], &[0.0_f32; 2])
             .expect_err("matrix size mismatch should fail");
         assert!(matches!(err, GemvCudaError::InvalidMatrixLength { .. }));
+    }
+
+    #[test]
+    fn validates_gemm_cuda_dimensions() {
+        let left = [1.0_f32, 2.0, 3.0, 4.0];
+        let right = [1.0_f32, 2.0, 3.0, 4.0];
+        let output = [0.0_f32; 4];
+        validate_gemm_dims(&left, 2, 2, &right, 2, &output).expect("dimensions should be valid");
+    }
+
+    #[test]
+    fn rejects_gemm_cuda_dimension_mismatch() {
+        let err = validate_gemm_dims(
+            &[1.0_f32, 2.0, 3.0],
+            2,
+            2,
+            &[1.0_f32, 2.0, 3.0, 4.0],
+            2,
+            &[0.0_f32; 4],
+        )
+        .expect_err("left matrix size mismatch should fail");
+        assert!(matches!(err, GemmCudaError::InvalidLeftMatrixLength { .. }));
     }
 
     #[test]

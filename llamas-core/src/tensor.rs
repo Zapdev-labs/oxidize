@@ -31,6 +31,8 @@ pub enum GemmError {
     InvalidLeftMatrixLength { expected: usize, actual: usize },
     InvalidRightMatrixLength { expected: usize, actual: usize },
     InvalidOutputLength { expected: usize, actual: usize },
+    #[cfg(feature = "cuda")]
+    Cuda(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -150,6 +152,12 @@ pub fn gemm_f32(
             expected: expected_output_len,
             actual: output.len(),
         });
+    }
+
+    #[cfg(feature = "cuda")]
+    if crate::cuda::cuda_build_info().detected_at_build {
+        return crate::cuda::gemm_f32_cuda(left_matrix, rows, shared_dim, right_matrix, cols, output)
+            .map_err(|err| GemmError::Cuda(format!("{err:?}")));
     }
 
     let mut right_transposed = vec![0.0_f32; expected_right_len];
