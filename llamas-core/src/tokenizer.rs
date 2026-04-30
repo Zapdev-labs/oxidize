@@ -47,6 +47,90 @@ impl LoadedTokenizer {
             Self::Tiktoken(tokenizer) => tokenizer.decode(ids),
         }
     }
+
+    pub fn special_tokens(&self) -> &SpecialTokens {
+        match self {
+            Self::Bpe(tokenizer) => &tokenizer.special_tokens,
+            Self::SentencePiece(tokenizer) => &tokenizer.special_tokens,
+            Self::WordPiece(tokenizer) => &tokenizer.special_tokens,
+            Self::Tiktoken(tokenizer) => &tokenizer.special_tokens,
+        }
+    }
+
+    pub fn encode_with_special_tokens(&self, text: &str, options: EncodeOptions) -> Vec<u32> {
+        let mut encoded = self.encode(text);
+        self.special_tokens()
+            .apply_encode_options(&mut encoded, options);
+        encoded
+    }
+
+    pub fn decode_without_special_tokens(&self, ids: &[u32]) -> Result<String, TokenizerError> {
+        let filtered: Vec<u32> = ids
+            .iter()
+            .copied()
+            .filter(|id| !self.special_tokens().is_special(*id))
+            .collect();
+        self.decode(&filtered)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct EncodeOptions {
+    pub add_bos: bool,
+    pub add_eos: bool,
+    pub pad_to: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SpecialTokens {
+    pub unknown: Option<u32>,
+    pub bos: Option<u32>,
+    pub eos: Option<u32>,
+    pub pad: Option<u32>,
+    pub separator: Option<u32>,
+    pub cls: Option<u32>,
+    pub mask: Option<u32>,
+}
+
+impl SpecialTokens {
+    fn from_metadata(metadata: &BTreeMap<String, GgufMetadataValue>) -> Self {
+        Self {
+            unknown: metadata_u32(metadata, "tokenizer.ggml.unknown_token_id"),
+            bos: metadata_u32(metadata, "tokenizer.ggml.bos_token_id"),
+            eos: metadata_u32(metadata, "tokenizer.ggml.eos_token_id"),
+            pad: metadata_u32(metadata, "tokenizer.ggml.padding_token_id")
+                .or_else(|| metadata_u32(metadata, "tokenizer.ggml.pad_token_id")),
+            separator: metadata_u32(metadata, "tokenizer.ggml.separator_token_id")
+                .or_else(|| metadata_u32(metadata, "tokenizer.ggml.sep_token_id")),
+            cls: metadata_u32(metadata, "tokenizer.ggml.cls_token_id"),
+            mask: metadata_u32(metadata, "tokenizer.ggml.mask_token_id"),
+        }
+    }
+
+    fn is_special(&self, id: u32) -> bool {
+        self.unknown == Some(id)
+            || self.bos == Some(id)
+            || self.eos == Some(id)
+            || self.pad == Some(id)
+            || self.separator == Some(id)
+            || self.cls == Some(id)
+            || self.mask == Some(id)
+    }
+
+    fn apply_encode_options(&self, encoded: &mut Vec<u32>, options: EncodeOptions) {
+        if options.add_bos && let Some(bos) = self.bos {
+            encoded.insert(0, bos);
+        }
+        if options.add_eos && let Some(eos) = self.eos {
+            encoded.push(eos);
+        }
+        if let Some(target_len) = options.pad_to
+            && let Some(pad) = self.pad
+            && encoded.len() < target_len
+        {
+            encoded.resize(target_len, pad);
+        }
+    }
 }
 
 pub fn load_tokenizer_from_gguf_metadata(
@@ -87,7 +171,7 @@ fn load_sentencepiece(
         vocab,
         id_to_token,
         piece_scores,
-        unknown_token: metadata_u32(metadata, "tokenizer.ggml.unknown_token_id"),
+        special_tokens: SpecialTokens::from_metadata(metadata),
     })
 }
 
@@ -105,7 +189,7 @@ fn load_wordpiece(
     Ok(WordPieceTokenizer {
         vocab,
         id_to_token,
-        unknown_token: metadata_u32(metadata, "tokenizer.ggml.unknown_token_id"),
+        special_tokens: SpecialTokens::from_metadata(metadata),
     })
 }
 
@@ -147,7 +231,7 @@ fn load_bpe(metadata: &BTreeMap<String, GgufMetadataValue>) -> Result<BpeTokeniz
         id_to_token,
         merges: merge_ranks,
         merged_token_ids,
-        unknown_token: metadata_u32(metadata, "tokenizer.ggml.unknown_token_id"),
+        special_tokens: SpecialTokens::from_metadata(metadata),
     })
 }
 
@@ -193,7 +277,7 @@ fn load_tiktoken(
         id_to_token,
         merges: merge_ranks,
         merged_token_ids,
-        unknown_token: metadata_u32(metadata, "tokenizer.ggml.unknown_token_id"),
+        special_tokens: SpecialTokens::from_metadata(metadata),
     })
 }
 
@@ -264,7 +348,7 @@ pub struct BpeTokenizer {
     id_to_token: HashMap<u32, String>,
     merges: HashMap<(u32, u32), usize>,
     merged_token_ids: HashMap<(u32, u32), u32>,
-    unknown_token: Option<u32>,
+    special_tokens: SpecialTokens,
 }
 
 impl BpeTokenizer {
@@ -339,7 +423,7 @@ impl BpeTokenizer {
             id_to_token,
             merges,
             merged_token_ids,
-            unknown_token: None,
+            special_tokens: SpecialTokens::default(),
         }
     }
 
@@ -357,7 +441,7 @@ impl BpeTokenizer {
             self.id_to_token.insert(id, token.to_owned());
             id
         };
-        self.unknown_token = Some(token_id);
+        self.special_tokens.unknown = Some(token_id);
         self
     }
 
@@ -366,7 +450,7 @@ impl BpeTokenizer {
             .chars()
             .filter_map(|ch| {
                 let key = ch.to_string();
-                self.vocab.get(&key).copied().or(self.unknown_token)
+                self.vocab.get(&key).copied().or(self.special_tokens.unknown)
             })
             .collect();
 
@@ -417,7 +501,7 @@ pub struct SentencePieceUnigramTokenizer {
     vocab: HashMap<String, u32>,
     id_to_token: HashMap<u32, String>,
     piece_scores: HashMap<u32, f32>,
-    unknown_token: Option<u32>,
+    special_tokens: SpecialTokens,
 }
 
 impl SentencePieceUnigramTokenizer {
@@ -438,7 +522,7 @@ impl SentencePieceUnigramTokenizer {
             vocab,
             id_to_token,
             piece_scores,
-            unknown_token: None,
+            special_tokens: SpecialTokens::default(),
         }
     }
 
@@ -457,7 +541,7 @@ impl SentencePieceUnigramTokenizer {
             self.piece_scores.insert(id, f32::NEG_INFINITY);
             id
         };
-        self.unknown_token = Some(token_id);
+        self.special_tokens.unknown = Some(token_id);
         self
     }
 
@@ -480,7 +564,7 @@ impl SentencePieceUnigramTokenizer {
                 continue;
             }
 
-            if let Some(unk) = self.unknown_token {
+            if let Some(unk) = self.special_tokens.unknown {
                 encoded.push(unk);
             }
             boundary_idx += 1;
@@ -550,7 +634,7 @@ impl SentencePieceUnigramTokenizer {
 pub struct WordPieceTokenizer {
     vocab: HashMap<String, u32>,
     id_to_token: HashMap<u32, String>,
-    unknown_token: Option<u32>,
+    special_tokens: SpecialTokens,
 }
 
 impl WordPieceTokenizer {
@@ -568,7 +652,7 @@ impl WordPieceTokenizer {
         Self {
             vocab,
             id_to_token,
-            unknown_token: None,
+            special_tokens: SpecialTokens::default(),
         }
     }
 
@@ -586,7 +670,7 @@ impl WordPieceTokenizer {
             self.id_to_token.insert(id, token.to_owned());
             id
         };
-        self.unknown_token = Some(token_id);
+        self.special_tokens.unknown = Some(token_id);
         self
     }
 
@@ -606,7 +690,7 @@ impl WordPieceTokenizer {
                 let ws = ch.to_string();
                 if let Some(id) = self.vocab.get(&ws).copied() {
                     encoded.push(id);
-                } else if let Some(unk) = self.unknown_token {
+                } else if let Some(unk) = self.special_tokens.unknown {
                     encoded.push(unk);
                 }
             } else {
@@ -661,7 +745,7 @@ impl WordPieceTokenizer {
                 encoded.push(id);
                 start_idx = next_idx;
             } else {
-                if let Some(unk) = self.unknown_token {
+                if let Some(unk) = self.special_tokens.unknown {
                     encoded.push(unk);
                 }
                 return;
@@ -676,7 +760,7 @@ pub struct TiktokenTokenizer {
     id_to_token: HashMap<u32, Vec<u8>>,
     merges: HashMap<(u32, u32), usize>,
     merged_token_ids: HashMap<(u32, u32), u32>,
-    unknown_token: Option<u32>,
+    special_tokens: SpecialTokens,
 }
 
 impl TiktokenTokenizer {
@@ -718,7 +802,7 @@ impl TiktokenTokenizer {
             id_to_token,
             merges,
             merged_token_ids,
-            unknown_token: None,
+            special_tokens: SpecialTokens::default(),
         }
     }
 
@@ -736,7 +820,7 @@ impl TiktokenTokenizer {
             self.id_to_token.insert(id, token.to_vec());
             id
         };
-        self.unknown_token = Some(token_id);
+        self.special_tokens.unknown = Some(token_id);
         self
     }
 
@@ -746,7 +830,7 @@ impl TiktokenTokenizer {
             .iter()
             .filter_map(|byte| {
                 let single = [*byte];
-                self.vocab.get(single.as_slice()).copied().or(self.unknown_token)
+                self.vocab.get(single.as_slice()).copied().or(self.special_tokens.unknown)
             })
             .collect();
 
@@ -1034,6 +1118,88 @@ mod tests {
         let tokenizer =
             load_tokenizer_from_gguf_metadata(&metadata).expect("metadata should load tokenizer");
         assert_eq!(tokenizer.decode(&tokenizer.encode("hello")), Ok("hello".to_owned()));
+    }
+
+
+
+    #[test]
+    fn loads_special_token_ids_from_gguf_metadata() {
+        let metadata = BTreeMap::from([
+            (
+                "tokenizer.ggml.model".to_owned(),
+                GgufMetadataValue::String("llama".to_owned()),
+            ),
+            (
+                "tokenizer.ggml.tokens".to_owned(),
+                metadata_strings(&["a", "b", "<unk>", "<s>", "</s>", "<pad>"]),
+            ),
+            (
+                "tokenizer.ggml.scores".to_owned(),
+                metadata_scores(&[-1.0, -1.0, -99.0, -99.0, -99.0, -99.0]),
+            ),
+            (
+                "tokenizer.ggml.unknown_token_id".to_owned(),
+                GgufMetadataValue::Uint32(2),
+            ),
+            (
+                "tokenizer.ggml.bos_token_id".to_owned(),
+                GgufMetadataValue::Uint32(3),
+            ),
+            (
+                "tokenizer.ggml.eos_token_id".to_owned(),
+                GgufMetadataValue::Uint32(4),
+            ),
+            (
+                "tokenizer.ggml.padding_token_id".to_owned(),
+                GgufMetadataValue::Uint32(5),
+            ),
+        ]);
+
+        let tokenizer =
+            load_tokenizer_from_gguf_metadata(&metadata).expect("metadata should load tokenizer");
+        assert_eq!(
+            tokenizer.special_tokens(),
+            &SpecialTokens {
+                unknown: Some(2),
+                bos: Some(3),
+                eos: Some(4),
+                pad: Some(5),
+                separator: None,
+                cls: None,
+                mask: None,
+            }
+        );
+    }
+
+    #[test]
+    fn encode_with_special_tokens_adds_bos_eos_and_padding() {
+        let mut tokenizer = WordPieceTokenizer::new(&["h", "##i", "<unk>", "<s>", "</s>", "<pad>"]);
+        tokenizer.special_tokens = SpecialTokens {
+            unknown: Some(2),
+            bos: Some(3),
+            eos: Some(4),
+            pad: Some(5),
+            separator: None,
+            cls: None,
+            mask: None,
+        };
+
+        let tokenizer = LoadedTokenizer::WordPiece(tokenizer);
+        let encoded = tokenizer.encode_with_special_tokens(
+            "hi",
+            EncodeOptions {
+                add_bos: true,
+                add_eos: true,
+                pad_to: Some(6),
+            },
+        );
+        assert_eq!(encoded, vec![3, 0, 1, 4, 5, 5]);
+        assert_eq!(
+            tokenizer
+                .decode_without_special_tokens(&encoded)
+                .expect("decode should succeed"),
+            "hi"
+        );
     }
 
     #[test]
