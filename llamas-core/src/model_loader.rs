@@ -90,15 +90,20 @@ impl ModelLoader for GgufModelLoader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
-    use std::fs::{self, File};
-    use std::io::Write;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn fixture_path(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join(name)
+    }
 
     #[test]
     fn gguf_model_loader_loads_valid_file() {
-        let bytes = valid_minimal_gguf_bytes();
-        let path = write_temp_file(&bytes);
+        let path = fixture_path("valid-v3.gguf");
+        let bytes = fs::read(&path).expect("fixture file exists");
 
         let loader = GgufModelLoader;
         let mapped = loader.load(&path).expect("gguf loader should parse model");
@@ -107,14 +112,12 @@ mod tests {
         assert_eq!(mapped.parsed().tensor_count, 1);
         assert_eq!(mapped.parsed().alignment, 64);
         assert_eq!(mapped.bytes(), bytes.as_slice());
-
-        fs::remove_file(path).expect("temp file removed");
     }
 
     #[test]
     fn gguf_model_loader_emits_progress_callbacks() {
-        let bytes = valid_minimal_gguf_bytes();
-        let path = write_temp_file(&bytes);
+        let path = fixture_path("valid-v3.gguf");
+        let bytes = fs::read(&path).expect("fixture file exists");
         let loader = GgufModelLoader;
         let mut events = Vec::new();
 
@@ -135,8 +138,6 @@ mod tests {
         assert!(events
             .windows(2)
             .all(|pair| pair[0].percent <= pair[1].percent));
-
-        fs::remove_file(path).expect("temp file removed");
     }
 
     #[test]
@@ -185,52 +186,4 @@ mod tests {
         );
     }
 
-    fn valid_minimal_gguf_bytes() -> Vec<u8> {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(b"GGUF");
-        push_u32(&mut bytes, 3);
-        push_u64(&mut bytes, 1);
-        push_u64(&mut bytes, 1);
-
-        push_string(&mut bytes, "general.alignment");
-        push_u32(&mut bytes, 4);
-        push_u32(&mut bytes, 64);
-
-        push_string(&mut bytes, "tok_embeddings.weight");
-        push_u32(&mut bytes, 2);
-        push_u64(&mut bytes, 32000);
-        push_u64(&mut bytes, 4096);
-        push_u32(&mut bytes, 0);
-        push_u64(&mut bytes, 0);
-
-        while bytes.len() % 64 != 0 {
-            bytes.push(0);
-        }
-        bytes.extend_from_slice(&[1, 2, 3, 4]);
-        bytes
-    }
-
-    fn write_temp_file(bytes: &[u8]) -> std::path::PathBuf {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock is after epoch")
-            .as_nanos();
-        let path = env::temp_dir().join(format!("llamas-core-model-loader-{unique}.gguf"));
-        let mut file = File::create(&path).expect("temp file created");
-        file.write_all(bytes).expect("temp file written");
-        path
-    }
-
-    fn push_u32(bytes: &mut Vec<u8>, value: u32) {
-        bytes.extend_from_slice(&value.to_le_bytes());
-    }
-
-    fn push_u64(bytes: &mut Vec<u8>, value: u64) {
-        bytes.extend_from_slice(&value.to_le_bytes());
-    }
-
-    fn push_string(bytes: &mut Vec<u8>, value: &str) {
-        push_u64(bytes, value.len() as u64);
-        bytes.extend_from_slice(value.as_bytes());
-    }
 }

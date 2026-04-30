@@ -524,33 +524,24 @@ impl<'a> ByteReader<'a> {
 mod tests {
     use super::*;
     use std::env;
-    use std::fs::{self, File};
-    use std::io::Write;
+    use std::fs;
+    use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn fixture_path(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join(name)
+    }
+
+    fn fixture_bytes(name: &str) -> Vec<u8> {
+        fs::read(fixture_path(name)).expect("fixture file exists")
+    }
 
     #[test]
     fn parses_v3_header_tensor_info_and_alignment() {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(b"GGUF");
-        push_u32(&mut bytes, 3);
-        push_u64(&mut bytes, 1);
-        push_u64(&mut bytes, 1);
-
-        push_string(&mut bytes, "general.alignment");
-        push_u32(&mut bytes, GgufMetadataType::Uint32 as u32);
-        push_u32(&mut bytes, 64);
-
-        push_string(&mut bytes, "tok_embeddings.weight");
-        push_u32(&mut bytes, 2);
-        push_u64(&mut bytes, 32000);
-        push_u64(&mut bytes, 4096);
-        push_u32(&mut bytes, 0);
-        push_u64(&mut bytes, 0);
-
-        while bytes.len() % 64 != 0 {
-            bytes.push(0);
-        }
-        bytes.extend_from_slice(&[1, 2, 3, 4]);
+        let bytes = fixture_bytes("valid-v3.gguf");
 
         let parsed = parse_gguf(&bytes).expect("parse succeeds");
 
@@ -566,11 +557,7 @@ mod tests {
 
     #[test]
     fn rejects_invalid_magic() {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(b"ABCD");
-        push_u32(&mut bytes, 3);
-        push_u64(&mut bytes, 0);
-        push_u64(&mut bytes, 0);
+        let bytes = fixture_bytes("invalid-magic.gguf");
 
         let err = parse_gguf(&bytes).expect_err("must reject magic");
         assert_eq!(err, GgufParseError::InvalidMagic);
@@ -578,11 +565,7 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_version() {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(b"GGUF");
-        push_u32(&mut bytes, 1);
-        push_u64(&mut bytes, 0);
-        push_u64(&mut bytes, 0);
+        let bytes = fixture_bytes("unsupported-version.gguf");
 
         let err = parse_gguf(&bytes).expect_err("must reject version");
         assert_eq!(err, GgufParseError::UnsupportedVersion(1));
@@ -590,15 +573,7 @@ mod tests {
 
     #[test]
     fn rejects_invalid_alignment_value() {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(b"GGUF");
-        push_u32(&mut bytes, 2);
-        push_u64(&mut bytes, 0);
-        push_u64(&mut bytes, 1);
-
-        push_string(&mut bytes, "general.alignment");
-        push_u32(&mut bytes, GgufMetadataType::Uint32 as u32);
-        push_u32(&mut bytes, 3);
+        let bytes = fixture_bytes("invalid-alignment.gguf");
 
         let err = parse_gguf(&bytes).expect_err("must reject invalid alignment");
         assert_eq!(err, GgufParseError::InvalidAlignment(3));
@@ -606,8 +581,8 @@ mod tests {
 
     #[test]
     fn loads_gguf_via_memory_map() {
-        let bytes = valid_minimal_gguf_bytes();
-        let path = write_temp_file(&bytes);
+        let path = fixture_path("valid-v3.gguf");
+        let bytes = fixture_bytes("valid-v3.gguf");
 
         let mapped = load_mapped_gguf(&path).expect("mapped load succeeds");
 
@@ -616,8 +591,6 @@ mod tests {
         assert_eq!(mapped.parsed().alignment, 64);
         assert_eq!(mapped.parsed().tensor_infos[0].absolute_offset, 128);
         assert_eq!(mapped.bytes(), bytes.as_slice());
-
-        fs::remove_file(path).expect("temp file removed");
     }
 
     #[test]
@@ -772,55 +745,6 @@ mod tests {
             data_section_start: 0,
         };
         assert_eq!(invalid.quantization_type(), None);
-    }
-
-    fn valid_minimal_gguf_bytes() -> Vec<u8> {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(b"GGUF");
-        push_u32(&mut bytes, 3);
-        push_u64(&mut bytes, 1);
-        push_u64(&mut bytes, 1);
-
-        push_string(&mut bytes, "general.alignment");
-        push_u32(&mut bytes, GgufMetadataType::Uint32 as u32);
-        push_u32(&mut bytes, 64);
-
-        push_string(&mut bytes, "tok_embeddings.weight");
-        push_u32(&mut bytes, 2);
-        push_u64(&mut bytes, 32000);
-        push_u64(&mut bytes, 4096);
-        push_u32(&mut bytes, 0);
-        push_u64(&mut bytes, 0);
-
-        while bytes.len() % 64 != 0 {
-            bytes.push(0);
-        }
-        bytes.extend_from_slice(&[1, 2, 3, 4]);
-        bytes
-    }
-
-    fn write_temp_file(bytes: &[u8]) -> std::path::PathBuf {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock is after epoch")
-            .as_nanos();
-        let path = env::temp_dir().join(format!("llamas-core-{unique}.gguf"));
-        let mut file = File::create(&path).expect("temp file created");
-        file.write_all(bytes).expect("temp file written");
-        path
-    }
-
-    fn push_u32(bytes: &mut Vec<u8>, value: u32) {
-        bytes.extend_from_slice(&value.to_le_bytes());
-    }
-
-    fn push_u64(bytes: &mut Vec<u8>, value: u64) {
-        bytes.extend_from_slice(&value.to_le_bytes());
-    }
-
-    fn push_string(bytes: &mut Vec<u8>, value: &str) {
-        push_u64(bytes, value.len() as u64);
-        bytes.extend_from_slice(value.as_bytes());
     }
 
     fn tensor_info(name: &str) -> GgufTensorInfo {
