@@ -559,4 +559,11 @@ mod tests {
             assert_eq!(class_name, "Tensor");
         });
     }
+
+    #[test]
+    fn pyproject_configures_maturin_build_backend() {
+        let pyproject = include_str!("../pyproject.toml");
+        assert!(pyproject.contains("build-backend = \"maturin\""));
+        assert!(pyproject.contains("module-name = \"llamas\""));
+    }
 }
