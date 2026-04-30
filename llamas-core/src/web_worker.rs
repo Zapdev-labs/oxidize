@@ -138,6 +138,36 @@ pub fn handle_worker_message(request_json: &str) -> String {
     })
 }
 
+pub const WASM_WORKER_TYPESCRIPT_BINDINGS: &str = r#"
+export interface LlamasWorkerModelConfig {
+  vocab_size: number;
+  context_size: number;
+  layer_count: number;
+}
+
+export interface LlamasWorkerInferenceRequest {
+  prompt_tokens: number[];
+  max_new_tokens: number;
+  model: LlamasWorkerModelConfig;
+}
+
+export interface LlamasWorkerInferenceResponse {
+  generated_tokens: number[];
+  consumed_tokens: number;
+}
+
+export interface LlamasWorkerMessageResponse {
+  response: LlamasWorkerInferenceResponse | null;
+  error: string | null;
+}
+"#;
+
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    wasm_bindgen(typescript_custom_section)
+)]
+pub const WASM_WORKER_TYPES: &str = WASM_WORKER_TYPESCRIPT_BINDINGS;
+
 #[cfg_attr(all(target_arch = "wasm32", feature = "wasm"), wasm_bindgen)]
 pub fn wasm_handle_worker_message(request_json: &str) -> String {
     handle_worker_message(request_json)
@@ -210,5 +240,11 @@ mod tests {
             })
         );
         assert_eq!(message.error, None);
+    }
+
+    #[test]
+    fn worker_typescript_bindings_include_typed_contracts() {
+        assert!(WASM_WORKER_TYPESCRIPT_BINDINGS.contains("interface LlamasWorkerInferenceRequest"));
+        assert!(WASM_WORKER_TYPESCRIPT_BINDINGS.contains("interface LlamasWorkerMessageResponse"));
     }
 }
