@@ -1,6 +1,24 @@
 use std::collections::BTreeMap;
 
 const PAGE_BYTES: usize = 4096;
+pub const GEMV_KERNEL_NAME: &str = "gemv_f32_kernel";
+pub const GEMV_Q8_0_KERNEL_NAME: &str = "gemv_q8_0_f32_kernel";
+const GEMV_F32_MSL: &str = include_str!("../kernels/gemv_f32.metal");
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetalBuildInfo {
+    pub detected_at_build: bool,
+}
+
+pub fn metal_build_info() -> MetalBuildInfo {
+    MetalBuildInfo {
+        detected_at_build: cfg!(metal_available),
+    }
+}
+
+pub fn gemv_msl_source() -> &'static str {
+    GEMV_F32_MSL
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnifiedMemoryError {
@@ -147,6 +165,20 @@ fn page_align(len: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn metal_build_info_reports_cfg_detection() {
+        assert_eq!(metal_build_info().detected_at_build, cfg!(metal_available));
+    }
+
+    #[test]
+    fn gemv_msl_contains_expected_kernel_entries() {
+        let source = gemv_msl_source();
+        assert!(source.contains("kernel void gemv_f32_kernel"));
+        assert!(source.contains("kernel void gemv_q8_0_f32_kernel"));
+        assert_eq!(GEMV_KERNEL_NAME, "gemv_f32_kernel");
+        assert_eq!(GEMV_Q8_0_KERNEL_NAME, "gemv_q8_0_f32_kernel");
+    }
 
     #[test]
     fn allocates_buffer_with_page_aligned_capacity() {
