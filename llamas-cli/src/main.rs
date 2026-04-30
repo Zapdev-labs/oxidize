@@ -5,6 +5,7 @@ use llamas_core::offload::{
     plan_layer_offload, plan_multi_gpu_offload, LayerOffloadPlan, MultiGpuConfig,
     MultiGpuOffloadPlan, ParallelismStrategy,
 };
+use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -41,6 +42,22 @@ struct ConversationTurn {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct ConversationHistory {
     turns: Vec<ConversationTurn>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct PromptCache {
+    responses: HashMap<String, String>,
+}
+
+impl PromptCache {
+    fn get(&self, prompt: &str) -> Option<&str> {
+        self.responses.get(prompt).map(String::as_str)
+    }
+
+    fn insert(&mut self, prompt: &str, response: &str) {
+        self.responses
+            .insert(prompt.to_owned(), response.to_owned());
+    }
 }
 
 impl ConversationHistory {
@@ -128,6 +145,7 @@ fn render_lora_plan(plan: &LoraPlan) -> String {
 fn run_chat_mode<R: BufRead, W: Write>(reader: &mut R, writer: &mut W) -> io::Result<()> {
     writeln!(writer, "llamas-cli chat mode. type 'exit' to quit.")?;
     let mut history = ConversationHistory::default();
+    let mut prompt_cache = PromptCache::default();
     loop {
         write!(writer, "> ")?;
         writer.flush()?;
@@ -156,7 +174,7 @@ fn run_chat_mode<R: BufRead, W: Write>(reader: &mut R, writer: &mut W) -> io::Re
             continue;
         }
 
-        let response = write_generated_response(prompt, writer)?;
+        let response = write_generated_response_cached(prompt, &mut prompt_cache, writer)?;
         history.add_turn(prompt, &response);
     }
     Ok(())
@@ -187,6 +205,22 @@ fn render_load_progress(progress: LoadProgress) -> String {
 
 fn write_generated_response<W: Write>(prompt: &str, writer: &mut W) -> io::Result<String> {
     write_generated_response_with_clock(prompt, writer, Instant::now)
+}
+
+fn write_generated_response_cached<W: Write>(
+    prompt: &str,
+    prompt_cache: &mut PromptCache,
+    writer: &mut W,
+) -> io::Result<String> {
+    if let Some(cached_response) = prompt_cache.get(prompt) {
+        writeln!(writer, "{cached_response}")?;
+        writeln!(writer, "generation stats: tokens=0 speed=0.00 tok/s (cache hit)")?;
+        return Ok(cached_response.to_owned());
+    }
+
+    let response = write_generated_response(prompt, writer)?;
+    prompt_cache.insert(prompt, &response);
+    Ok(response)
 }
 
 fn format_generation_stats(tokens: usize, elapsed: Duration) -> String {
@@ -414,6 +448,45 @@ mod tests {
         assert!(output.contains("2. user: world\n   assistant: llamas-cli: world"));
         assert!(output.contains("conversation history cleared"));
         assert!(output.contains("no conversation history"));
+    }
+
+    #[test]
+    fn chat_mode_reuses_cached_prompt_response() {
+        let mut reader = io::Cursor::new("hello\nhello\nquit\n");
+        let mut writer = Vec::new();
+        run_chat_mode(&mut reader, &mut writer).expect("chat mode should succeed");
+
+        let output = String::from_utf8(writer).expect("valid utf8 output");
+        assert_eq!(output.matches("generation progress: 1/2 tokens").count(), 1);
+        assert_eq!(output.matches("generation progress: 2/2 tokens").count(), 1);
+        assert_eq!(output.matches("llamas-cli: hello").count(), 2);
+        assert_eq!(
+            output
+                .matches("generation stats: tokens=0 speed=0.00 tok/s (cache hit)")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn write_generated_response_cached_hits_cache() {
+        let mut prompt_cache = PromptCache::default();
+        let mut first_writer = Vec::new();
+        write_generated_response_cached("hello", &mut prompt_cache, &mut first_writer)
+            .expect("first response should succeed");
+        let first_output = String::from_utf8(first_writer).expect("valid utf8 output");
+        assert!(first_output.contains("generation progress: 1/2 tokens"));
+        assert!(first_output.contains("generation progress: 2/2 tokens"));
+
+        let mut second_writer = Vec::new();
+        let response = write_generated_response_cached("hello", &mut prompt_cache, &mut second_writer)
+            .expect("cached response should succeed");
+        let second_output = String::from_utf8(second_writer).expect("valid utf8 output");
+        assert_eq!(response, "llamas-cli: hello");
+        assert_eq!(
+            second_output,
+            "llamas-cli: hello\ngeneration stats: tokens=0 speed=0.00 tok/s (cache hit)\n"
+        );
     }
 
     #[test]
