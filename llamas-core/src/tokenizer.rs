@@ -1,8 +1,261 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+
+use crate::gguf::{GgufMetadataValue, GgufParseError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TokenizerError {
     UnknownToken(u32),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TokenizerLoadError {
+    MissingMetadata(&'static str),
+    InvalidMetadataType(&'static str),
+    UnsupportedTokenizerModel(String),
+    InvalidMergeEntry(String),
+}
+
+impl From<GgufParseError> for TokenizerLoadError {
+    fn from(_: GgufParseError) -> Self {
+        Self::InvalidMetadataType("gguf")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum LoadedTokenizer {
+    Bpe(BpeTokenizer),
+    SentencePiece(SentencePieceUnigramTokenizer),
+    WordPiece(WordPieceTokenizer),
+    Tiktoken(TiktokenTokenizer),
+}
+
+impl LoadedTokenizer {
+    pub fn encode(&self, text: &str) -> Vec<u32> {
+        match self {
+            Self::Bpe(tokenizer) => tokenizer.encode(text),
+            Self::SentencePiece(tokenizer) => tokenizer.encode(text),
+            Self::WordPiece(tokenizer) => tokenizer.encode(text),
+            Self::Tiktoken(tokenizer) => tokenizer.encode(text),
+        }
+    }
+
+    pub fn decode(&self, ids: &[u32]) -> Result<String, TokenizerError> {
+        match self {
+            Self::Bpe(tokenizer) => tokenizer.decode(ids),
+            Self::SentencePiece(tokenizer) => tokenizer.decode(ids),
+            Self::WordPiece(tokenizer) => tokenizer.decode(ids),
+            Self::Tiktoken(tokenizer) => tokenizer.decode(ids),
+        }
+    }
+}
+
+pub fn load_tokenizer_from_gguf_metadata(
+    metadata: &BTreeMap<String, GgufMetadataValue>,
+) -> Result<LoadedTokenizer, TokenizerLoadError> {
+    let model = metadata_string(metadata, "tokenizer.ggml.model")?;
+    match model.as_str() {
+        "llama" => Ok(LoadedTokenizer::SentencePiece(load_sentencepiece(metadata)?)),
+        "bert" => Ok(LoadedTokenizer::WordPiece(load_wordpiece(metadata)?)),
+        "gpt2" => Ok(LoadedTokenizer::Bpe(load_bpe(metadata)?)),
+        "tiktoken" => Ok(LoadedTokenizer::Tiktoken(load_tiktoken(metadata)?)),
+        _ => Err(TokenizerLoadError::UnsupportedTokenizerModel(model)),
+    }
+}
+
+fn load_sentencepiece(
+    metadata: &BTreeMap<String, GgufMetadataValue>,
+) -> Result<SentencePieceUnigramTokenizer, TokenizerLoadError> {
+    let tokens = metadata_string_array(metadata, "tokenizer.ggml.tokens")?;
+    let scores = metadata_f32_array(metadata, "tokenizer.ggml.scores")?;
+    if tokens.len() != scores.len() {
+        return Err(TokenizerLoadError::InvalidMetadataType(
+            "tokenizer.ggml.scores",
+        ));
+    }
+
+    let mut vocab = HashMap::new();
+    let mut id_to_token = HashMap::new();
+    let mut piece_scores = HashMap::new();
+    for (id, (token, score)) in tokens.into_iter().zip(scores).enumerate() {
+        let id = id as u32;
+        vocab.insert(token.clone(), id);
+        id_to_token.insert(id, token);
+        piece_scores.insert(id, score);
+    }
+
+    Ok(SentencePieceUnigramTokenizer {
+        vocab,
+        id_to_token,
+        piece_scores,
+        unknown_token: metadata_u32(metadata, "tokenizer.ggml.unknown_token_id"),
+    })
+}
+
+fn load_wordpiece(
+    metadata: &BTreeMap<String, GgufMetadataValue>,
+) -> Result<WordPieceTokenizer, TokenizerLoadError> {
+    let tokens = metadata_string_array(metadata, "tokenizer.ggml.tokens")?;
+    let mut vocab = HashMap::new();
+    let mut id_to_token = HashMap::new();
+    for (id, token) in tokens.into_iter().enumerate() {
+        let id = id as u32;
+        vocab.insert(token.clone(), id);
+        id_to_token.insert(id, token);
+    }
+    Ok(WordPieceTokenizer {
+        vocab,
+        id_to_token,
+        unknown_token: metadata_u32(metadata, "tokenizer.ggml.unknown_token_id"),
+    })
+}
+
+fn load_bpe(metadata: &BTreeMap<String, GgufMetadataValue>) -> Result<BpeTokenizer, TokenizerLoadError> {
+    let tokens = metadata_string_array(metadata, "tokenizer.ggml.tokens")?;
+    let merges = metadata_string_array(metadata, "tokenizer.ggml.merges").unwrap_or_default();
+
+    let mut vocab = HashMap::new();
+    let mut id_to_token = HashMap::new();
+    for (id, token) in tokens.into_iter().enumerate() {
+        let id = id as u32;
+        vocab.insert(token.clone(), id);
+        id_to_token.insert(id, token);
+    }
+
+    let mut merge_ranks = HashMap::new();
+    let mut merged_token_ids = HashMap::new();
+    for (rank, merge) in merges.into_iter().enumerate() {
+        let (left, right) = merge
+            .split_once(' ')
+            .ok_or_else(|| TokenizerLoadError::InvalidMergeEntry(merge.clone()))?;
+        let Some(left_id) = vocab.get(left).copied() else {
+            continue;
+        };
+        let Some(right_id) = vocab.get(right).copied() else {
+            continue;
+        };
+        let merged = format!("{left}{right}");
+        let Some(merged_id) = vocab.get(&merged).copied() else {
+            continue;
+        };
+        let pair = (left_id, right_id);
+        merge_ranks.insert(pair, rank);
+        merged_token_ids.insert(pair, merged_id);
+    }
+
+    Ok(BpeTokenizer {
+        vocab,
+        id_to_token,
+        merges: merge_ranks,
+        merged_token_ids,
+        unknown_token: metadata_u32(metadata, "tokenizer.ggml.unknown_token_id"),
+    })
+}
+
+fn load_tiktoken(
+    metadata: &BTreeMap<String, GgufMetadataValue>,
+) -> Result<TiktokenTokenizer, TokenizerLoadError> {
+    let tokens = metadata_string_array(metadata, "tokenizer.ggml.tokens")?;
+    let merges = metadata_string_array(metadata, "tokenizer.ggml.merges").unwrap_or_default();
+
+    let mut vocab = HashMap::new();
+    let mut id_to_token = HashMap::new();
+    for (id, token) in tokens.into_iter().enumerate() {
+        let id = id as u32;
+        let bytes = token.into_bytes();
+        vocab.insert(bytes.clone(), id);
+        id_to_token.insert(id, bytes);
+    }
+
+    let mut merge_ranks = HashMap::new();
+    let mut merged_token_ids = HashMap::new();
+    for (rank, merge) in merges.into_iter().enumerate() {
+        let (left, right) = merge
+            .split_once(' ')
+            .ok_or_else(|| TokenizerLoadError::InvalidMergeEntry(merge.clone()))?;
+        let Some(left_id) = vocab.get(left.as_bytes()).copied() else {
+            continue;
+        };
+        let Some(right_id) = vocab.get(right.as_bytes()).copied() else {
+            continue;
+        };
+        let mut merged = left.as_bytes().to_vec();
+        merged.extend_from_slice(right.as_bytes());
+        let Some(merged_id) = vocab.get(&merged).copied() else {
+            continue;
+        };
+        let pair = (left_id, right_id);
+        merge_ranks.insert(pair, rank);
+        merged_token_ids.insert(pair, merged_id);
+    }
+
+    Ok(TiktokenTokenizer {
+        vocab,
+        id_to_token,
+        merges: merge_ranks,
+        merged_token_ids,
+        unknown_token: metadata_u32(metadata, "tokenizer.ggml.unknown_token_id"),
+    })
+}
+
+fn metadata_string(
+    metadata: &BTreeMap<String, GgufMetadataValue>,
+    key: &'static str,
+) -> Result<String, TokenizerLoadError> {
+    match metadata.get(key) {
+        Some(GgufMetadataValue::String(value)) => Ok(value.clone()),
+        Some(_) => Err(TokenizerLoadError::InvalidMetadataType(key)),
+        None => Err(TokenizerLoadError::MissingMetadata(key)),
+    }
+}
+
+fn metadata_string_array(
+    metadata: &BTreeMap<String, GgufMetadataValue>,
+    key: &'static str,
+) -> Result<Vec<String>, TokenizerLoadError> {
+    match metadata.get(key) {
+        Some(GgufMetadataValue::Array(values)) => values
+            .values
+            .iter()
+            .map(|value| match value {
+                GgufMetadataValue::String(token) => Ok(token.clone()),
+                _ => Err(TokenizerLoadError::InvalidMetadataType(key)),
+            })
+            .collect(),
+        Some(_) => Err(TokenizerLoadError::InvalidMetadataType(key)),
+        None => Err(TokenizerLoadError::MissingMetadata(key)),
+    }
+}
+
+fn metadata_f32_array(
+    metadata: &BTreeMap<String, GgufMetadataValue>,
+    key: &'static str,
+) -> Result<Vec<f32>, TokenizerLoadError> {
+    match metadata.get(key) {
+        Some(GgufMetadataValue::Array(values)) => values
+            .values
+            .iter()
+            .map(|value| match value {
+                GgufMetadataValue::Float32(score) => Ok(*score),
+                _ => Err(TokenizerLoadError::InvalidMetadataType(key)),
+            })
+            .collect(),
+        Some(_) => Err(TokenizerLoadError::InvalidMetadataType(key)),
+        None => Err(TokenizerLoadError::MissingMetadata(key)),
+    }
+}
+
+fn metadata_u32(metadata: &BTreeMap<String, GgufMetadataValue>, key: &'static str) -> Option<u32> {
+    match metadata.get(key) {
+        Some(GgufMetadataValue::Uint8(value)) => Some((*value).into()),
+        Some(GgufMetadataValue::Uint16(value)) => Some((*value).into()),
+        Some(GgufMetadataValue::Uint32(value)) => Some(*value),
+        Some(GgufMetadataValue::Uint64(value)) => (*value).try_into().ok(),
+        Some(GgufMetadataValue::Int8(value)) if *value >= 0 => Some((*value as u8).into()),
+        Some(GgufMetadataValue::Int16(value)) if *value >= 0 => Some((*value as u16).into()),
+        Some(GgufMetadataValue::Int32(value)) if *value >= 0 => (*value).try_into().ok(),
+        Some(GgufMetadataValue::Int64(value)) if *value >= 0 => (*value).try_into().ok(),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -569,6 +822,27 @@ fn char_boundaries(text: &str) -> Vec<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gguf::{GgufMetadataArray, GgufMetadataType};
+
+    fn metadata_strings(values: &[&str]) -> GgufMetadataValue {
+        GgufMetadataValue::Array(GgufMetadataArray {
+            element_type: GgufMetadataType::String,
+            values: values
+                .iter()
+                .map(|value| GgufMetadataValue::String((*value).to_owned()))
+                .collect(),
+        })
+    }
+
+    fn metadata_scores(values: &[f32]) -> GgufMetadataValue {
+        GgufMetadataValue::Array(GgufMetadataArray {
+            element_type: GgufMetadataType::Float32,
+            values: values
+                .iter()
+                .map(|value| GgufMetadataValue::Float32(*value))
+                .collect(),
+        })
+    }
 
     #[test]
     fn trains_and_merges_common_pairs() {
@@ -713,6 +987,67 @@ mod tests {
         assert_eq!(
             tokenizer.decode(&encoded).expect("decode should succeed"),
             "a<unk>"
+        );
+    }
+
+    #[test]
+    fn loads_sentencepiece_tokenizer_from_gguf_metadata() {
+        let metadata = BTreeMap::from([
+            (
+                "tokenizer.ggml.model".to_owned(),
+                GgufMetadataValue::String("llama".to_owned()),
+            ),
+            (
+                "tokenizer.ggml.tokens".to_owned(),
+                metadata_strings(&["he", "llo", "hello", "<unk>"]),
+            ),
+            (
+                "tokenizer.ggml.scores".to_owned(),
+                metadata_scores(&[-1.0, -1.0, -0.1, -99.0]),
+            ),
+            (
+                "tokenizer.ggml.unknown_token_id".to_owned(),
+                GgufMetadataValue::Uint32(3),
+            ),
+        ]);
+
+        let tokenizer =
+            load_tokenizer_from_gguf_metadata(&metadata).expect("metadata should load tokenizer");
+        assert_eq!(tokenizer.decode(&tokenizer.encode("hello")), Ok("hello".to_owned()));
+        assert_eq!(tokenizer.decode(&tokenizer.encode("x")), Ok("<unk>".to_owned()));
+    }
+
+    #[test]
+    fn loads_gpt2_bpe_tokenizer_from_gguf_metadata() {
+        let metadata = BTreeMap::from([
+            (
+                "tokenizer.ggml.model".to_owned(),
+                GgufMetadataValue::String("gpt2".to_owned()),
+            ),
+            (
+                "tokenizer.ggml.tokens".to_owned(),
+                metadata_strings(&["h", "e", "l", "o", "he", "ll", "hell", "hello"]),
+            ),
+            ("tokenizer.ggml.merges".to_owned(), metadata_strings(&["h e", "l l", "he ll", "hell o"])),
+        ]);
+
+        let tokenizer =
+            load_tokenizer_from_gguf_metadata(&metadata).expect("metadata should load tokenizer");
+        assert_eq!(tokenizer.decode(&tokenizer.encode("hello")), Ok("hello".to_owned()));
+    }
+
+    #[test]
+    fn fails_for_unsupported_gguf_tokenizer_model() {
+        let metadata = BTreeMap::from([(
+            "tokenizer.ggml.model".to_owned(),
+            GgufMetadataValue::String("unknown".to_owned()),
+        )]);
+
+        let err = load_tokenizer_from_gguf_metadata(&metadata)
+            .expect_err("unsupported model should fail");
+        assert_eq!(
+            err,
+            TokenizerLoadError::UnsupportedTokenizerModel("unknown".to_owned())
         );
     }
 }
