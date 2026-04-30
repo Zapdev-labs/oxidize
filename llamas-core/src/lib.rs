@@ -1,4 +1,6 @@
 use serde::{Deserialize, Serialize};
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+use wasm_bindgen::prelude::*;
 
 pub mod cuda;
 pub mod generation;
@@ -27,6 +29,11 @@ pub fn workspace_health() -> WorkspaceHealth {
 
 pub fn benchmark_input() -> WorkspaceHealth {
     workspace_health()
+}
+
+#[cfg_attr(all(target_arch = "wasm32", feature = "wasm"), wasm_bindgen)]
+pub fn wasm_workspace_status() -> String {
+    workspace_health().status.to_string()
 }
 
 #[cfg(test)]
@@ -111,5 +118,38 @@ mod tests {
         assert!(build_script.contains("cargo:rustc-check-cfg=cfg(metal_available)"));
         assert!(build_script.contains("if detect_metal_available()"));
         assert!(build_script.contains("metal::Device::system_default().is_some()"));
+    }
+
+    #[test]
+    fn wasm_workspace_status_matches_workspace_health() {
+        assert_eq!(wasm_workspace_status(), workspace_health().status);
+    }
+
+    #[test]
+    fn llamas_core_declares_wasm_bindgen_build_surface() {
+        let crate_cargo_toml = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let cargo_toml =
+            std::fs::read_to_string(crate_cargo_toml).expect("llamas-core Cargo.toml exists");
+
+        assert!(cargo_toml.contains("crate-type = [\"cdylib\", \"rlib\"]"));
+        assert!(cargo_toml.contains("wasm = [\"dep:wasm-bindgen\"]"));
+        assert!(cargo_toml.contains("wasm-bindgen = { version = \"0.2\", optional = true }"));
+    }
+
+    #[test]
+    fn makefile_exposes_wasm_bindgen_build_target() {
+        let makefile = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("Makefile");
+        let makefile = std::fs::read_to_string(makefile).expect("workspace Makefile exists");
+
+        assert!(makefile.contains(".PHONY: help fmt lint audit test build wasm check ci"));
+        assert!(
+            makefile.contains("cargo build -p llamas-core --target wasm32-unknown-unknown --release --features wasm")
+        );
+        assert!(
+            makefile.contains("command -v wasm-bindgen >/dev/null || cargo install --locked wasm-bindgen-cli --version 0.2.120")
+        );
+        assert!(makefile.contains("wasm-bindgen --target web --out-dir dist/wasm"));
     }
 }
