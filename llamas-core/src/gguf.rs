@@ -32,6 +32,33 @@ impl MappedGgufFile {
     pub fn bytes(&self) -> &[u8] {
         &self.mmap
     }
+
+    pub fn mapped_tensor_infos(&self) -> Vec<GgufTensorInfo> {
+        self.parsed.mapped_tensor_infos()
+    }
+}
+
+impl GgufFile {
+    pub fn architecture(&self) -> Option<&str> {
+        match self.metadata.get("general.architecture") {
+            Some(GgufMetadataValue::String(value)) => Some(value.as_str()),
+            _ => None,
+        }
+    }
+
+    pub fn mapped_tensor_infos(&self) -> Vec<GgufTensorInfo> {
+        let architecture = self.architecture().unwrap_or("llama");
+        self.tensor_infos
+            .iter()
+            .map(|tensor| GgufTensorInfo {
+                name: map_tensor_name(architecture, &tensor.name),
+                dimensions: tensor.dimensions.clone(),
+                ggml_type: tensor.ggml_type,
+                relative_offset: tensor.relative_offset,
+                absolute_offset: tensor.absolute_offset,
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -246,6 +273,59 @@ fn align_up(value: u64, alignment: u64) -> Result<u64, GgufParseError> {
         .checked_add(mask)
         .map(|v| v & !mask)
         .ok_or(GgufParseError::IntegerOverflow)
+}
+
+fn map_tensor_name(architecture: &str, name: &str) -> String {
+    let architecture = architecture.to_ascii_lowercase();
+    let mapped = match architecture.as_str() {
+        "llama" | "mistral" | "mixtral" | "qwen2" | "gemma" => map_hf_decoder_name(name),
+        "falcon" => map_falcon_name(name),
+        "gpt2" | "gptj" | "gptneox" => map_gpt_name(name),
+        _ => None,
+    };
+    mapped.unwrap_or_else(|| name.to_owned())
+}
+
+fn map_hf_decoder_name(name: &str) -> Option<String> {
+    match name {
+        "model.embed_tokens.weight" => Some("tok_embeddings.weight".to_owned()),
+        "lm_head.weight" => Some("output.weight".to_owned()),
+        "model.norm.weight" => Some("norm.weight".to_owned()),
+        _ => {
+            let (layer, suffix) = name.strip_prefix("model.layers.")?.split_once('.')?;
+            let mapped_suffix = match suffix {
+                "input_layernorm.weight" => "attn_norm.weight",
+                "post_attention_layernorm.weight" => "ffn_norm.weight",
+                "self_attn.q_proj.weight" => "attn_q.weight",
+                "self_attn.k_proj.weight" => "attn_k.weight",
+                "self_attn.v_proj.weight" => "attn_v.weight",
+                "self_attn.o_proj.weight" => "attn_output.weight",
+                "mlp.up_proj.weight" => "ffn_up.weight",
+                "mlp.gate_proj.weight" => "ffn_gate.weight",
+                "mlp.down_proj.weight" => "ffn_down.weight",
+                _ => return None,
+            };
+            Some(format!("blk.{layer}.{mapped_suffix}"))
+        }
+    }
+}
+
+fn map_falcon_name(name: &str) -> Option<String> {
+    match name {
+        "transformer.word_embeddings.weight" => Some("tok_embeddings.weight".to_owned()),
+        "lm_head.weight" => Some("output.weight".to_owned()),
+        "transformer.ln_f.weight" => Some("norm.weight".to_owned()),
+        _ => None,
+    }
+}
+
+fn map_gpt_name(name: &str) -> Option<String> {
+    match name {
+        "transformer.wte.weight" => Some("tok_embeddings.weight".to_owned()),
+        "lm_head.weight" => Some("output.weight".to_owned()),
+        "transformer.ln_f.weight" => Some("norm.weight".to_owned()),
+        _ => None,
+    }
 }
 
 struct ByteReader<'a> {
@@ -487,6 +567,74 @@ mod tests {
         assert!(matches!(err, GgufParseError::Io(_)));
     }
 
+    #[test]
+    fn maps_llama_hf_tensor_names_to_internal_format() {
+        let file = GgufFile {
+            version: 3,
+            tensor_count: 3,
+            metadata: BTreeMap::from([(
+                "general.architecture".to_owned(),
+                GgufMetadataValue::String("llama".to_owned()),
+            )]),
+            tensor_infos: vec![
+                tensor_info("model.embed_tokens.weight"),
+                tensor_info("model.layers.3.self_attn.q_proj.weight"),
+                tensor_info("model.layers.3.mlp.down_proj.weight"),
+            ],
+            alignment: 32,
+            data_section_start: 0,
+        };
+
+        let mapped = file.mapped_tensor_infos();
+        assert_eq!(mapped[0].name, "tok_embeddings.weight");
+        assert_eq!(mapped[1].name, "blk.3.attn_q.weight");
+        assert_eq!(mapped[2].name, "blk.3.ffn_down.weight");
+    }
+
+    #[test]
+    fn maps_falcon_and_gpt_embedding_names() {
+        let falcon = GgufFile {
+            version: 3,
+            tensor_count: 1,
+            metadata: BTreeMap::from([(
+                "general.architecture".to_owned(),
+                GgufMetadataValue::String("falcon".to_owned()),
+            )]),
+            tensor_infos: vec![tensor_info("transformer.word_embeddings.weight")],
+            alignment: 32,
+            data_section_start: 0,
+        };
+        let gpt = GgufFile {
+            version: 3,
+            tensor_count: 1,
+            metadata: BTreeMap::from([(
+                "general.architecture".to_owned(),
+                GgufMetadataValue::String("gpt2".to_owned()),
+            )]),
+            tensor_infos: vec![tensor_info("transformer.wte.weight")],
+            alignment: 32,
+            data_section_start: 0,
+        };
+
+        assert_eq!(falcon.mapped_tensor_infos()[0].name, "tok_embeddings.weight");
+        assert_eq!(gpt.mapped_tensor_infos()[0].name, "tok_embeddings.weight");
+    }
+
+    #[test]
+    fn keeps_original_name_when_no_mapping_rule_matches() {
+        let file = GgufFile {
+            version: 3,
+            tensor_count: 1,
+            metadata: BTreeMap::new(),
+            tensor_infos: vec![tensor_info("custom.tensor.weight")],
+            alignment: 32,
+            data_section_start: 0,
+        };
+
+        let mapped = file.mapped_tensor_infos();
+        assert_eq!(mapped[0].name, "custom.tensor.weight");
+    }
+
     fn valid_minimal_gguf_bytes() -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(b"GGUF");
@@ -534,5 +682,15 @@ mod tests {
     fn push_string(bytes: &mut Vec<u8>, value: &str) {
         push_u64(bytes, value.len() as u64);
         bytes.extend_from_slice(value.as_bytes());
+    }
+
+    fn tensor_info(name: &str) -> GgufTensorInfo {
+        GgufTensorInfo {
+            name: name.to_owned(),
+            dimensions: vec![1],
+            ggml_type: 0,
+            relative_offset: 0,
+            absolute_offset: 0,
+        }
     }
 }
