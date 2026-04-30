@@ -186,6 +186,14 @@ pub enum SamplingError {
     InvalidRandom,
     InvalidGrammarConstraint,
     NoValidGrammarToken,
+    InvalidSpeculativeInputs,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpeculativeDecodeResult {
+    pub tokens: Vec<u32>,
+    pub accepted_draft_tokens: usize,
+    pub used_residual_fallback: bool,
 }
 
 pub fn greedy(logits: &[f32]) -> Result<u32, SamplingError> {
@@ -217,15 +225,7 @@ pub fn sample_with_repetition(
     recent_tokens: &[u32],
     repetition: RepetitionPenaltyConfig,
 ) -> Result<u32, SamplingError> {
-    sample_with_repetition_and_grammar(
-        logits,
-        config,
-        random,
-        recent_tokens,
-        repetition,
-        &[],
-        None,
-    )
+    sample_with_repetition_and_grammar(logits, config, random, recent_tokens, repetition, &[], None)
 }
 
 pub fn sample_with_repetition_and_grammar(
@@ -375,6 +375,64 @@ pub fn sample_with_repetition_and_grammar(
     greedy(logits)
 }
 
+pub fn speculative_decode(
+    draft_tokens: &[u32],
+    draft_logits: &[Vec<f32>],
+    target_logits: &[Vec<f32>],
+    sampling_config: SamplingConfig,
+    randoms: &[f32],
+) -> Result<SpeculativeDecodeResult, SamplingError> {
+    if draft_tokens.is_empty()
+        || draft_logits.len() != draft_tokens.len()
+        || target_logits.len() != draft_tokens.len() + 1
+        || randoms.len() < draft_tokens.len() + 1
+    {
+        return Err(SamplingError::InvalidSpeculativeInputs);
+    }
+
+    let mut emitted = Vec::with_capacity(draft_tokens.len() + 1);
+    for (step, draft_token) in draft_tokens.iter().copied().enumerate() {
+        let draft_probs = softmax_probs(&draft_logits[step], 1.0)?;
+        let target_probs = softmax_probs(&target_logits[step], 1.0)?;
+        if draft_probs.len() != target_probs.len() {
+            return Err(SamplingError::InvalidSpeculativeInputs);
+        }
+        let token_idx = draft_token as usize;
+        if token_idx >= draft_probs.len() {
+            return Err(SamplingError::InvalidSpeculativeInputs);
+        }
+        let q = draft_probs[token_idx].max(f32::MIN_POSITIVE);
+        let p = target_probs[token_idx];
+        let accept_prob = (p / q).min(1.0);
+
+        if randoms[step] <= accept_prob {
+            emitted.push(draft_token);
+            continue;
+        }
+
+        let residual = residual_probs(&target_probs, &draft_probs);
+        let sampled = sample_probabilities(&residual, randoms[step])?;
+        emitted.push(sampled as u32);
+        return Ok(SpeculativeDecodeResult {
+            tokens: emitted,
+            accepted_draft_tokens: step,
+            used_residual_fallback: true,
+        });
+    }
+
+    let final_token = sample(
+        &target_logits[draft_tokens.len()],
+        sampling_config,
+        randoms[draft_tokens.len()],
+    )?;
+    emitted.push(final_token);
+    Ok(SpeculativeDecodeResult {
+        tokens: emitted,
+        accepted_draft_tokens: draft_tokens.len(),
+        used_residual_fallback: false,
+    })
+}
+
 fn apply_repetition_penalties(
     logits: &mut [f32],
     recent_tokens: &[u32],
@@ -456,7 +514,10 @@ pub fn sample_mirostat(
     Ok((chosen.0 as u32, updated_mu))
 }
 
-fn build_sorted_probs(logits: &[f32], temperature: f32) -> Result<Vec<(usize, f32)>, SamplingError> {
+fn build_sorted_probs(
+    logits: &[f32],
+    temperature: f32,
+) -> Result<Vec<(usize, f32)>, SamplingError> {
     let max_logit = logits
         .iter()
         .copied()
@@ -586,6 +647,71 @@ fn weighted_pick(indexed_probs: &[(usize, f32)], random: f32) -> Option<(usize, 
         }
     }
     indexed_probs.last().copied()
+}
+
+fn softmax_probs(logits: &[f32], temperature: f32) -> Result<Vec<f32>, SamplingError> {
+    let max_logit = logits
+        .iter()
+        .copied()
+        .max_by(|a, b| a.total_cmp(b))
+        .ok_or(SamplingError::EmptyLogits)?;
+    let mut probs: Vec<f32> = logits
+        .iter()
+        .copied()
+        .map(|logit| ((logit - max_logit) / temperature).exp())
+        .collect();
+    let sum: f32 = probs.iter().sum();
+    if sum <= 0.0 || !sum.is_finite() {
+        return Err(SamplingError::EmptyLogits);
+    }
+    for prob in &mut probs {
+        *prob /= sum;
+    }
+    Ok(probs)
+}
+
+fn residual_probs(target_probs: &[f32], draft_probs: &[f32]) -> Vec<f32> {
+    let mut residual: Vec<f32> = target_probs
+        .iter()
+        .zip(draft_probs.iter())
+        .map(|(p, q)| (p - q).max(0.0))
+        .collect();
+    let sum: f32 = residual.iter().sum();
+    if sum > 0.0 && sum.is_finite() {
+        for prob in &mut residual {
+            *prob /= sum;
+        }
+    }
+    residual
+}
+
+fn sample_probabilities(probs: &[f32], random: f32) -> Result<usize, SamplingError> {
+    if !random.is_finite() || !(0.0..1.0).contains(&random) {
+        return Err(SamplingError::InvalidRandom);
+    }
+    if probs.is_empty() {
+        return Err(SamplingError::EmptyLogits);
+    }
+    let sum: f32 = probs.iter().sum();
+    if sum <= 0.0 || !sum.is_finite() {
+        return probs
+            .iter()
+            .copied()
+            .enumerate()
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(idx, _)| idx)
+            .ok_or(SamplingError::EmptyLogits);
+    }
+
+    let mut cumulative = 0.0_f32;
+    let target = random * sum;
+    for (idx, prob) in probs.iter().copied().enumerate() {
+        cumulative += prob;
+        if target <= cumulative {
+            return Ok(idx);
+        }
+    }
+    Ok(probs.len() - 1)
 }
 
 #[cfg(test)]
@@ -993,5 +1119,53 @@ mod tests {
             Some(&grammar),
         );
         assert_eq!(err, Err(SamplingError::NoValidGrammarToken));
+    }
+
+    #[test]
+    fn speculative_decode_accepts_all_draft_tokens_and_samples_one_more() {
+        let result = speculative_decode(
+            &[1, 2],
+            &[vec![0.0, 10.0, 0.0], vec![0.0, 0.0, 10.0]],
+            &[
+                vec![0.0, 10.0, 0.0],
+                vec![0.0, 0.0, 10.0],
+                vec![10.0, 0.0, 0.0],
+            ],
+            SamplingConfig::default(),
+            &[0.2, 0.3, 0.2],
+        )
+        .expect("speculative decode should succeed");
+
+        assert_eq!(result.tokens, vec![1, 2, 0]);
+        assert_eq!(result.accepted_draft_tokens, 2);
+        assert!(!result.used_residual_fallback);
+    }
+
+    #[test]
+    fn speculative_decode_rejects_and_samples_from_residual() {
+        let result = speculative_decode(
+            &[0],
+            &[vec![10.0, 0.0, 0.0]],
+            &[vec![0.0, 10.0, 0.0], vec![0.0, 0.0, 10.0]],
+            SamplingConfig::default(),
+            &[0.9, 0.1],
+        )
+        .expect("speculative decode should succeed");
+
+        assert_eq!(result.tokens, vec![1]);
+        assert_eq!(result.accepted_draft_tokens, 0);
+        assert!(result.used_residual_fallback);
+    }
+
+    #[test]
+    fn speculative_decode_rejects_invalid_lengths() {
+        let err = speculative_decode(
+            &[1],
+            &[],
+            &[vec![1.0, 0.0], vec![0.0, 1.0]],
+            SamplingConfig::default(),
+            &[0.2, 0.3],
+        );
+        assert_eq!(err, Err(SamplingError::InvalidSpeculativeInputs));
     }
 }
