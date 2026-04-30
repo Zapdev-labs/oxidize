@@ -10,54 +10,31 @@ pub enum DType {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GemvError {
-    InvalidMatrixLength {
-        expected: usize,
-        actual: usize,
-    },
-    InvalidVectorLength {
-        expected: usize,
-        actual: usize,
-    },
-    InvalidOutputLength {
-        expected: usize,
-        actual: usize,
-    },
+    InvalidMatrixLength { expected: usize, actual: usize },
+    InvalidVectorLength { expected: usize, actual: usize },
+    InvalidOutputLength { expected: usize, actual: usize },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GemmError {
-    InvalidLeftMatrixLength {
-        expected: usize,
-        actual: usize,
-    },
-    InvalidRightMatrixLength {
-        expected: usize,
-        actual: usize,
-    },
-    InvalidOutputLength {
-        expected: usize,
-        actual: usize,
-    },
+    InvalidLeftMatrixLength { expected: usize, actual: usize },
+    InvalidRightMatrixLength { expected: usize, actual: usize },
+    InvalidOutputLength { expected: usize, actual: usize },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttentionError {
-    InvalidQueryLength {
-        expected: usize,
-        actual: usize,
-    },
-    InvalidKeyLength {
-        expected: usize,
-        actual: usize,
-    },
-    InvalidValueLength {
-        expected: usize,
-        actual: usize,
-    },
-    InvalidOutputLength {
-        expected: usize,
-        actual: usize,
-    },
+    InvalidQueryLength { expected: usize, actual: usize },
+    InvalidKeyLength { expected: usize, actual: usize },
+    InvalidValueLength { expected: usize, actual: usize },
+    InvalidOutputLength { expected: usize, actual: usize },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RopeError {
+    InvalidInputLength { expected: usize, actual: usize },
+    InvalidOutputLength { expected: usize, actual: usize },
+    OddHeadDim { head_dim: usize },
 }
 
 pub fn gemv_f32(
@@ -211,6 +188,47 @@ pub fn scaled_dot_product_attention_f32(
     Ok(())
 }
 
+pub fn apply_rope_f32(
+    input: &[f32],
+    position: usize,
+    head_dim: usize,
+    theta: f32,
+    output: &mut [f32],
+) -> Result<(), RopeError> {
+    if input.len() != head_dim {
+        return Err(RopeError::InvalidInputLength {
+            expected: head_dim,
+            actual: input.len(),
+        });
+    }
+    if output.len() != head_dim {
+        return Err(RopeError::InvalidOutputLength {
+            expected: head_dim,
+            actual: output.len(),
+        });
+    }
+    if !head_dim.is_multiple_of(2) {
+        return Err(RopeError::OddHeadDim { head_dim });
+    }
+
+    let position_f = position as f32;
+    let half_dim = head_dim / 2;
+
+    for i in 0..half_dim {
+        let x0 = input[2 * i];
+        let x1 = input[2 * i + 1];
+        let freq = theta.powf(-(2.0 * i as f32) / head_dim as f32);
+        let angle = position_f * freq;
+        let cos_angle = angle.cos();
+        let sin_angle = angle.sin();
+
+        output[2 * i] = x0 * cos_angle - x1 * sin_angle;
+        output[2 * i + 1] = x0 * sin_angle + x1 * cos_angle;
+    }
+
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tensor {
     pub shape: Vec<usize>,
@@ -356,9 +374,15 @@ mod tests {
     #[test]
     fn scaled_dot_product_attention_rejects_invalid_shapes() {
         let mut output = vec![0.0_f32; 2];
-        let err =
-            scaled_dot_product_attention_f32(&[1.0_f32], &[1.0_f32, 0.0], &[1.0_f32, 0.0], 1, 2, &mut output)
-                .expect_err("query length mismatch should fail");
+        let err = scaled_dot_product_attention_f32(
+            &[1.0_f32],
+            &[1.0_f32, 0.0],
+            &[1.0_f32, 0.0],
+            1,
+            2,
+            &mut output,
+        )
+        .expect_err("query length mismatch should fail");
         assert!(matches!(err, AttentionError::InvalidQueryLength { .. }));
 
         let err = scaled_dot_product_attention_f32(
@@ -394,5 +418,50 @@ mod tests {
         )
         .expect_err("output length mismatch should fail");
         assert!(matches!(err, AttentionError::InvalidOutputLength { .. }));
+    }
+
+    #[test]
+    fn apply_rope_rotates_each_pair_by_position_dependent_angle() {
+        let input = vec![1.0_f32, 0.0, 0.0, 1.0];
+        let mut output = vec![0.0_f32; 4];
+
+        apply_rope_f32(&input, 1, 4, 10_000.0, &mut output).expect("rope should succeed");
+
+        assert!((output[0] - 1.0_f32.cos()).abs() < 1e-6);
+        assert!((output[1] - 1.0_f32.sin()).abs() < 1e-6);
+
+        let angle_1 = 1.0_f32 / 100.0;
+        assert!((output[2] + angle_1.sin()).abs() < 1e-6);
+        assert!((output[3] - angle_1.cos()).abs() < 1e-6);
+    }
+
+    #[test]
+    fn apply_rope_position_zero_is_identity() {
+        let input = vec![0.25_f32, -0.75, 1.5, 2.0];
+        let mut output = vec![0.0_f32; 4];
+
+        apply_rope_f32(&input, 0, 4, 10_000.0, &mut output).expect("rope should succeed");
+
+        for (actual, expected) in output.iter().zip(input.iter()) {
+            assert!((actual - expected).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn apply_rope_rejects_invalid_shapes() {
+        let mut output = vec![0.0_f32; 4];
+        let err = apply_rope_f32(&[1.0_f32, 2.0], 1, 4, 10_000.0, &mut output)
+            .expect_err("input length mismatch should fail");
+        assert!(matches!(err, RopeError::InvalidInputLength { .. }));
+
+        let mut short_output = vec![0.0_f32; 2];
+        let err = apply_rope_f32(&[1.0_f32, 2.0, 3.0, 4.0], 1, 4, 10_000.0, &mut short_output)
+            .expect_err("output length mismatch should fail");
+        assert!(matches!(err, RopeError::InvalidOutputLength { .. }));
+
+        let mut odd_output = vec![0.0_f32; 3];
+        let err = apply_rope_f32(&[1.0_f32, 2.0, 3.0], 1, 3, 10_000.0, &mut odd_output)
+            .expect_err("odd head dimension should fail");
+        assert!(matches!(err, RopeError::OddHeadDim { .. }));
     }
 }
