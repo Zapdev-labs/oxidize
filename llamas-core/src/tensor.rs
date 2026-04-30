@@ -10,9 +10,20 @@ pub enum DType {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GemvError {
-    InvalidMatrixLength { expected: usize, actual: usize },
-    InvalidVectorLength { expected: usize, actual: usize },
-    InvalidOutputLength { expected: usize, actual: usize },
+    InvalidMatrixLength {
+        expected: usize,
+        actual: usize,
+    },
+    InvalidVectorLength {
+        expected: usize,
+        actual: usize,
+    },
+    InvalidOutputLength {
+        expected: usize,
+        actual: usize,
+    },
+    #[cfg(feature = "cuda")]
+    Cuda(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,6 +99,12 @@ pub fn gemv_f32(
             expected: rows,
             actual: output.len(),
         });
+    }
+
+    #[cfg(feature = "cuda")]
+    if crate::cuda::cuda_build_info().detected_at_build {
+        return crate::cuda::gemv_f32_cuda(matrix, rows, cols, vector, output)
+            .map_err(|err| GemvError::Cuda(format!("{err:?}")));
     }
 
     for (row_values, out) in matrix.chunks_exact(cols).zip(output.iter_mut()) {

@@ -13,7 +13,10 @@ pub enum MemoryDevice {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MemoryError {
-    SizeMismatch { expected: usize, actual: usize },
+    SizeMismatch {
+        expected: usize,
+        actual: usize,
+    },
     #[cfg(feature = "cuda")]
     Cuda(String),
 }
@@ -111,6 +114,113 @@ pub fn initialize_cuda() -> Result<cust::context::Context, cust::error::CudaErro
     cust::quick_init()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GemvCudaError {
+    InvalidMatrixLength {
+        expected: usize,
+        actual: usize,
+    },
+    InvalidVectorLength {
+        expected: usize,
+        actual: usize,
+    },
+    InvalidOutputLength {
+        expected: usize,
+        actual: usize,
+    },
+    #[cfg(feature = "cuda")]
+    Cuda(String),
+}
+
+#[cfg(feature = "cuda")]
+impl From<cust::error::CudaError> for GemvCudaError {
+    fn from(error: cust::error::CudaError) -> Self {
+        Self::Cuda(error.to_string())
+    }
+}
+
+pub const GEMV_KERNEL_NAME: &str = "gemv_f32_kernel";
+
+#[cfg(feature = "cuda")]
+const GEMV_F32_PTX: &str = include_str!("../kernels/gemv_f32.ptx");
+
+#[cfg(feature = "cuda")]
+pub fn gemv_f32_cuda(
+    matrix: &[f32],
+    rows: usize,
+    cols: usize,
+    vector: &[f32],
+    output: &mut [f32],
+) -> Result<(), GemvCudaError> {
+    validate_gemv_dims(matrix, rows, cols, vector, output)?;
+
+    let _context = initialize_cuda()?;
+    let module = cust::module::Module::from_ptx(GEMV_F32_PTX, &[])?;
+    let stream = cust::stream::Stream::new(cust::stream::StreamFlags::DEFAULT, None)?;
+
+    let mut matrix_device = cust::memory::DeviceBuffer::from_slice(matrix)?;
+    let mut vector_device = cust::memory::DeviceBuffer::from_slice(vector)?;
+    let mut output_device = cust::memory::DeviceBuffer::zeroed(rows)?;
+
+    let block_size = 128_u32;
+    let grid_size = (rows as u32).div_ceil(block_size);
+    let rows_u32 = u32::try_from(rows).map_err(|_| GemvCudaError::InvalidOutputLength {
+        expected: u32::MAX as usize,
+        actual: rows,
+    })?;
+    let cols_u32 = u32::try_from(cols).map_err(|_| GemvCudaError::InvalidVectorLength {
+        expected: u32::MAX as usize,
+        actual: cols,
+    })?;
+
+    let function = module.get_function(GEMV_KERNEL_NAME)?;
+    // SAFETY: Kernel parameters are valid device buffers and scalar dimensions.
+    unsafe {
+        cust::launch!(
+            function<<<grid_size, block_size, 0, stream>>>(
+                matrix_device.as_device_ptr(),
+                vector_device.as_device_ptr(),
+                output_device.as_device_ptr(),
+                rows_u32,
+                cols_u32
+            )
+        )?;
+    }
+    stream.synchronize()?;
+    output_device.copy_to(output)?;
+    Ok(())
+}
+
+pub fn validate_gemv_dims(
+    matrix: &[f32],
+    rows: usize,
+    cols: usize,
+    vector: &[f32],
+    output: &[f32],
+) -> Result<(), GemvCudaError> {
+    let expected_matrix_len = rows.saturating_mul(cols);
+    if matrix.len() != expected_matrix_len {
+        return Err(GemvCudaError::InvalidMatrixLength {
+            expected: expected_matrix_len,
+            actual: matrix.len(),
+        });
+    }
+    if vector.len() != cols {
+        return Err(GemvCudaError::InvalidVectorLength {
+            expected: cols,
+            actual: vector.len(),
+        });
+    }
+    if output.len() != rows {
+        return Err(GemvCudaError::InvalidOutputLength {
+            expected: rows,
+            actual: output.len(),
+        });
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,5 +273,27 @@ mod tests {
                 actual: 2
             }
         );
+    }
+
+    #[test]
+    fn validates_gemv_cuda_dimensions() {
+        let matrix = [1.0_f32, 2.0, 3.0, 4.0];
+        let vector = [1.0_f32, 1.0];
+        let output = [0.0_f32; 2];
+        validate_gemv_dims(&matrix, 2, 2, &vector, &output).expect("dimensions should be valid");
+    }
+
+    #[test]
+    fn rejects_gemv_cuda_dimension_mismatch() {
+        let err = validate_gemv_dims(&[1.0_f32, 2.0, 3.0], 2, 2, &[1.0_f32, 1.0], &[0.0_f32; 2])
+            .expect_err("matrix size mismatch should fail");
+        assert!(matches!(err, GemvCudaError::InvalidMatrixLength { .. }));
+    }
+
+    #[test]
+    #[cfg(feature = "cuda")]
+    fn gemv_cuda_kernel_name_matches_ptx_entry() {
+        assert!(GEMV_F32_PTX.contains(".entry gemv_f32_kernel"));
+        assert_eq!(GEMV_KERNEL_NAME, "gemv_f32_kernel");
     }
 }
