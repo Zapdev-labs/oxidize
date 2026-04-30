@@ -38,6 +38,26 @@ make fmt
 make check
 ```
 
+## Release announcement: llamas-cpp 0.1.0
+
+Today we are announcing `llamas-cpp` `0.1.0`, the first stable workspace release for local-first LLM workflows in Rust.
+
+This release brings together a complete core-to-interface stack:
+
+- `llamas-core` for model loading, quantization primitives, and generation
+- `llamas-cli` for prompt and chat runs with profiling hooks
+- `llamas-server` for OpenAI-compatible HTTP endpoints
+- `llamas-py` for Python integration
+- `llamas-quantize` for offline model conversion
+
+What this means for early users:
+
+- Start quickly with one workspace and consistent commands (`make build`, `make test`, `make lint`)
+- Deploy the same inference behavior across CLI, server, and Python surfaces
+- Tune memory and latency tradeoffs using quantization targets that fit your hardware
+
+Thank you to everyone testing early builds and sharing feedback. `0.1.0` is our stability baseline, and future releases will focus on performance, platform parity, and better developer ergonomics.
+
 ## Common usage
 
 ### CLI single prompt
