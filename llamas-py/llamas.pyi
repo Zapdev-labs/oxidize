@@ -26,6 +26,17 @@ class ChatCompletionResponse(TypedDict):
     object: Literal["chat.completion"]
     choices: list[ChatCompletionChoice]
 
+class CompletionChoice(TypedDict):
+    index: int
+    text: str
+    finish_reason: Literal["length"]
+
+
+class CompletionResponse(TypedDict):
+    id: str
+    object: Literal["text_completion"]
+    choices: list[CompletionChoice]
+
 
 class Llama:
     def __init__(
@@ -40,15 +51,27 @@ class Llama:
     async def generate_async(self, prompt: str, max_tokens: int = 16) -> str: ...
     def create_chat_completion(
         self,
-        messages: Sequence[str],
+        messages: Sequence[str] | Sequence[dict[str, str]],
         max_tokens: int = 16,
     ) -> ChatCompletionResponse: ...
     async def create_chat_completion_async(
         self,
-        messages: Sequence[str],
+        messages: Sequence[str] | Sequence[dict[str, str]],
         max_tokens: int = 16,
     ) -> ChatCompletionResponse: ...
+    def create_completion(
+        self,
+        prompt: str,
+        max_tokens: int = 16,
+    ) -> CompletionResponse: ...
+    def __call__(
+        self,
+        prompt: str,
+        max_tokens: int = 16,
+    ) -> CompletionResponse: ...
     def embed(self, text: str) -> list[float]: ...
+    def tokenize(self, text: str, add_bos: bool = True) -> list[int]: ...
+    def detokenize(self, tokens: Sequence[int] | _TensorLike) -> bytes: ...
     @overload
     def generate_from_tokens(
         self,

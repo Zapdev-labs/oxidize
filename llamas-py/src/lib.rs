@@ -78,9 +78,10 @@ impl Llama {
     fn create_chat_completion(
         &mut self,
         py: Python<'_>,
-        messages: Vec<String>,
+        messages: &Bound<'_, PyAny>,
         max_tokens: usize,
     ) -> PyResult<Py<PyDict>> {
+        let messages = normalize_chat_messages(messages)?;
         if messages.is_empty() {
             return Err(PyValueError::new_err("messages cannot be empty"));
         }
@@ -102,19 +103,65 @@ impl Llama {
         Ok(response.unbind())
     }
 
+    #[pyo3(signature = (prompt, max_tokens=16))]
+    fn create_completion(
+        &mut self,
+        py: Python<'_>,
+        prompt: &str,
+        max_tokens: usize,
+    ) -> PyResult<Py<PyDict>> {
+        let completion_text = self.generate(prompt, max_tokens)?;
+        let choice = PyDict::new(py);
+        choice.set_item("index", 0)?;
+        choice.set_item("text", completion_text)?;
+        choice.set_item("finish_reason", "length")?;
+
+        let response = PyDict::new(py);
+        response.set_item("id", format!("cmpl-{}", self.model_path))?;
+        response.set_item("object", "text_completion")?;
+        response.set_item("choices", PyList::new(py, &[choice])?)?;
+        Ok(response.unbind())
+    }
+
+    #[pyo3(name = "__call__", signature = (prompt, max_tokens=16))]
+    fn call(&mut self, py: Python<'_>, prompt: &str, max_tokens: usize) -> PyResult<Py<PyDict>> {
+        self.create_completion(py, prompt, max_tokens)
+    }
+
     #[pyo3(signature = (messages, max_tokens=16))]
     fn create_chat_completion_async(
         slf: Py<Self>,
         py: Python<'_>,
-        messages: Vec<String>,
+        messages: Py<PyAny>,
         max_tokens: usize,
     ) -> PyResult<Py<PyAny>> {
         let to_thread = resolve_to_thread(py)?;
         let create_chat_completion = slf.bind(py).getattr("create_chat_completion")?;
         let coroutine = to_thread
             .bind(py)
-            .call1((create_chat_completion, messages, max_tokens))?;
+            .call1((create_chat_completion, messages.bind(py), max_tokens))?;
         Ok(coroutine.unbind())
+    }
+
+    #[pyo3(signature = (text, add_bos=true))]
+    fn tokenize(&self, text: &str, add_bos: bool) -> Vec<u32> {
+        let mut tokens = Vec::with_capacity(text.len() + usize::from(add_bos));
+        if add_bos {
+            tokens.push(1);
+        }
+        tokens.extend(text.bytes().map(u32::from));
+        tokens
+    }
+
+    #[pyo3(signature = (tokens))]
+    fn detokenize(&self, tokens: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
+        let tokens = tensor_like_to_u32_vec(tokens)?;
+        let bytes = tokens
+            .into_iter()
+            .filter(|token| *token != 1)
+            .map(|token| u8::try_from(token).unwrap_or(b'?'))
+            .collect();
+        Ok(bytes)
     }
 
     fn embed(&self, text: &str) -> PyResult<Vec<f32>> {
@@ -264,6 +311,38 @@ fn tensor_like_to_u32_vec(value: &Bound<'_, PyAny>) -> PyResult<Vec<u32>> {
     ))
 }
 
+fn normalize_chat_messages(messages: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
+    if let Ok(values) = messages.extract::<Vec<String>>() {
+        return Ok(values);
+    }
+
+    if let Ok(items) = messages.extract::<Vec<Bound<'_, PyAny>>>() {
+        let mut normalized = Vec::with_capacity(items.len());
+        for item in items {
+            if let Ok(content) = item.extract::<String>() {
+                normalized.push(content);
+                continue;
+            }
+
+            if let Ok(dict) = item.cast::<PyDict>()
+                && let Some(content) = dict.get_item("content")?
+            {
+                normalized.push(content.extract::<String>()?);
+                continue;
+            }
+
+            return Err(PyValueError::new_err(
+                "messages items must be strings or dicts containing a 'content' field",
+            ));
+        }
+        return Ok(normalized);
+    }
+
+    Err(PyValueError::new_err(
+        "messages must be a sequence of strings or message dictionaries",
+    ))
+}
+
 fn convert_u32_output(
     py: Python<'_>,
     values: &[u32],
@@ -398,8 +477,14 @@ mod tests {
         Python::attach(|py| {
             let mut llama = Llama::new("model.gguf".to_owned(), 32_000, 4096, 32)
                 .expect("llama should initialize");
+            let messages = PyList::new(
+                py,
+                &[PyDict::from_sequence(&PyList::new(py, [("content", "hi")]).expect("pairs should build"))
+                    .expect("dict should build")],
+            )
+            .expect("messages should build");
             let completion = llama
-                .create_chat_completion(py, vec!["hi".to_owned()], 2)
+                .create_chat_completion(py, &messages.into_any(), 2)
                 .expect("chat completion should succeed");
             let completion_ref = completion.bind(py);
 
@@ -453,8 +538,14 @@ mod tests {
             )
             .expect("python llama instance should initialize");
 
+            let messages = PyList::new(
+                py,
+                &[PyDict::from_sequence(&PyList::new(py, [("content", "hi")]).expect("pairs should build"))
+                    .expect("dict should build")],
+            )
+            .expect("messages should build");
             let coroutine =
-                Llama::create_chat_completion_async(llama, py, vec!["hi".to_owned()], 2)
+                Llama::create_chat_completion_async(llama, py, messages.into_any().unbind(), 2)
                     .expect("async chat completion should return coroutine");
             let completion = extract_coroutine_result(coroutine.bind(py))
                 .expect("coroutine should resolve to a value")
@@ -468,6 +559,54 @@ mod tests {
                 .extract::<String>()
                 .expect("object should be string");
             assert_eq!(object, "chat.completion");
+        });
+    }
+
+    #[test]
+    fn llama_create_completion_and_call_match_compat_shape() {
+        Python::initialize();
+        Python::attach(|py| {
+            let mut llama = Llama::new("model.gguf".to_owned(), 32_000, 4096, 32)
+                .expect("llama should initialize");
+            let completion = llama
+                .create_completion(py, "abc", 2)
+                .expect("completion should succeed");
+            let completion = completion.bind(py);
+
+            let object = completion
+                .get_item("object")
+                .expect("object key lookup should succeed")
+                .expect("object should exist")
+                .extract::<String>()
+                .expect("object should be string");
+            assert_eq!(object, "text_completion");
+
+            let called = llama.call(py, "abc", 2).expect("__call__ should succeed");
+            let called_object = called
+                .bind(py)
+                .get_item("object")
+                .expect("object key lookup should succeed")
+                .expect("object should exist")
+                .extract::<String>()
+                .expect("object should be string");
+            assert_eq!(called_object, "text_completion");
+        });
+    }
+
+    #[test]
+    fn llama_tokenize_and_detokenize_round_trip() {
+        Python::initialize();
+        Python::attach(|py| {
+            let llama = Llama::new("model.gguf".to_owned(), 32_000, 4096, 32)
+                .expect("llama should initialize");
+            let tokens = llama.tokenize("abc", true);
+            assert_eq!(tokens, vec![1, 97, 98, 99]);
+
+            let token_obj = PyList::new(py, &tokens).expect("token list should build");
+            let bytes = llama
+                .detokenize(&token_obj.into_any())
+                .expect("detokenize should succeed");
+            assert_eq!(bytes, b"abc".to_vec());
         });
     }
 
@@ -575,6 +714,10 @@ mod tests {
         assert!(stub.contains("def workspace_health() -> str: ..."));
         assert!(stub.contains("def version() -> str: ..."));
         assert!(stub.contains("def generate(self, prompt: str, max_tokens: int = 16) -> str: ..."));
+        assert!(stub.contains("def create_completion("));
+        assert!(stub.contains("def __call__("));
+        assert!(stub.contains("def tokenize("));
+        assert!(stub.contains("def detokenize("));
     }
 
     #[test]
