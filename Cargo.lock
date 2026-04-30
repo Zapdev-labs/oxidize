@@ -692,6 +692,7 @@ dependencies = [
  "criterion",
  "cublas-sys",
  "cust",
+ "futures-core",
  "memmap2",
  "metal",
  "rayon",

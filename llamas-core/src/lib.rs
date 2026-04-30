@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod cuda;
+pub mod generation;
 pub mod gguf;
 pub mod kv_cache;
 pub mod llama;
