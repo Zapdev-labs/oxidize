@@ -68,6 +68,14 @@ pub fn dequantize_scalar(
     output: &mut [f32],
 ) -> Result<(), QuantizationError> {
     match quantization {
+        GgufQuantizationType::F32 => {
+            dequantize_f32_scalar(input, output)?;
+            Ok(())
+        }
+        GgufQuantizationType::F16 => {
+            dequantize_f16_scalar(input, output)?;
+            Ok(())
+        }
         GgufQuantizationType::Q4_0 => {
             dequantize_q4_0_scalar(input, output)?;
             Ok(())
@@ -112,6 +120,26 @@ pub fn dequantize_scalar(
         }
         other => Err(QuantizationError::UnsupportedQuantizationType(other)),
     }
+}
+
+pub fn dequantize_f32_scalar(input: &[u8], output: &mut [f32]) -> Result<(), QuantizationError> {
+    validate_layout(GgufQuantizationType::F32, input, output, 4, 1)?;
+
+    for (src, dst) in input.chunks_exact(4).zip(output.iter_mut()) {
+        *dst = f32::from_le_bytes([src[0], src[1], src[2], src[3]]);
+    }
+
+    Ok(())
+}
+
+pub fn dequantize_f16_scalar(input: &[u8], output: &mut [f32]) -> Result<(), QuantizationError> {
+    validate_layout(GgufQuantizationType::F16, input, output, 2, 1)?;
+
+    for (src, dst) in input.chunks_exact(2).zip(output.iter_mut()) {
+        *dst = f16_le_to_f32(src);
+    }
+
+    Ok(())
 }
 
 pub fn dequantize_q4_0_scalar(input: &[u8], output: &mut [f32]) -> Result<(), QuantizationError> {
@@ -388,6 +416,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn dequantizes_f32_scalar_values() {
+        let mut input = Vec::new();
+        input.extend_from_slice(&1.25_f32.to_le_bytes());
+        input.extend_from_slice(&(-2.5_f32).to_le_bytes());
+
+        let mut out = vec![0.0_f32; 2];
+        dequantize_f32_scalar(&input, &mut out).expect("f32 dequant succeeds");
+
+        assert!((out[0] - 1.25).abs() < 1e-6);
+        assert!((out[1] + 2.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn dequantizes_f16_scalar_values() {
+        let input = vec![
+            0x00, 0x3C, // 1.0
+            0x00, 0xC1, // -2.5
+        ];
+
+        let mut out = vec![0.0_f32; 2];
+        dequantize_f16_scalar(&input, &mut out).expect("f16 dequant succeeds");
+
+        assert!((out[0] - 1.0).abs() < 1e-6);
+        assert!((out[1] + 2.5).abs() < 1e-6);
+    }
+
+    #[test]
     fn dequantizes_q4_0_scalar_block() {
         let mut input = vec![0x00, 0x3C];
         input.extend(std::iter::repeat_n(0x98, 16));
@@ -448,6 +503,25 @@ mod tests {
         dequantize_scalar(GgufQuantizationType::Q8_0, &input, &mut out)
             .expect("dispatch succeeds");
         assert!((out[4] - 4.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn dispatches_f16_and_f32_types() {
+        let f16_input = vec![0x00, 0x3C, 0x00, 0x40];
+        let mut f16_out = vec![0.0_f32; 2];
+        dequantize_scalar(GgufQuantizationType::F16, &f16_input, &mut f16_out)
+            .expect("f16 dispatch succeeds");
+        assert!((f16_out[0] - 1.0).abs() < 1e-6);
+        assert!((f16_out[1] - 2.0).abs() < 1e-6);
+
+        let mut f32_input = Vec::new();
+        f32_input.extend_from_slice(&3.0_f32.to_le_bytes());
+        f32_input.extend_from_slice(&(-4.0_f32).to_le_bytes());
+        let mut f32_out = vec![0.0_f32; 2];
+        dequantize_scalar(GgufQuantizationType::F32, &f32_input, &mut f32_out)
+            .expect("f32 dispatch succeeds");
+        assert!((f32_out[0] - 3.0).abs() < 1e-6);
+        assert!((f32_out[1] + 4.0).abs() < 1e-6);
     }
 
     #[test]
