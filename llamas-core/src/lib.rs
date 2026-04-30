@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+pub mod gguf;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkspaceHealth {
     pub status: &'static str,
