@@ -83,6 +83,20 @@ pub enum SwiGluError {
     InvalidUpLength { expected: usize, actual: usize },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivationFn {
+    Relu,
+    Gelu,
+    Silu,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinearActivationError {
+    InvalidMatrixLength { expected: usize, actual: usize },
+    InvalidVectorLength { expected: usize, actual: usize },
+    InvalidOutputLength { expected: usize, actual: usize },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RmsNormError {
     InvalidInputLength { expected: usize, actual: usize },
@@ -337,6 +351,60 @@ fn gemv_f32_cpu(matrix: &[f32], cols: usize, vector: &[f32], output: &mut [f32])
             .zip(vector.iter())
             .map(|(weight, value)| weight * value)
             .sum();
+    }
+}
+
+pub fn linear_activation_f32(
+    matrix: &[f32],
+    rows: usize,
+    cols: usize,
+    vector: &[f32],
+    activation: ActivationFn,
+    output: &mut [f32],
+) -> Result<(), LinearActivationError> {
+    let expected_matrix_len = rows.saturating_mul(cols);
+    if matrix.len() != expected_matrix_len {
+        return Err(LinearActivationError::InvalidMatrixLength {
+            expected: expected_matrix_len,
+            actual: matrix.len(),
+        });
+    }
+    if vector.len() != cols {
+        return Err(LinearActivationError::InvalidVectorLength {
+            expected: cols,
+            actual: vector.len(),
+        });
+    }
+    if output.len() != rows {
+        return Err(LinearActivationError::InvalidOutputLength {
+            expected: rows,
+            actual: output.len(),
+        });
+    }
+
+    for (row_values, out) in matrix.chunks_exact(cols).zip(output.iter_mut()) {
+        let linear = row_values
+            .iter()
+            .zip(vector.iter())
+            .map(|(weight, value)| weight * value)
+            .sum::<f32>();
+        *out = activate(linear, activation);
+    }
+
+    Ok(())
+}
+
+fn activate(value: f32, activation: ActivationFn) -> f32 {
+    match activation {
+        ActivationFn::Relu => value.max(0.0),
+        ActivationFn::Gelu => {
+            let k = (2.0_f32 / std::f32::consts::PI).sqrt();
+            0.5 * value * (1.0 + (k * (value + 0.044_715 * value.powi(3))).tanh())
+        }
+        ActivationFn::Silu => {
+            let sigmoid = 1.0_f32 / (1.0 + (-value).exp());
+            value * sigmoid
+        }
     }
 }
 
@@ -1161,6 +1229,94 @@ mod tests {
         let up_err = apply_swiglu_f32(&[1.0_f32, 2.0], &[1.0_f32], &mut output)
             .expect_err("up length mismatch should fail");
         assert!(matches!(up_err, SwiGluError::InvalidUpLength { .. }));
+    }
+
+    #[test]
+    fn linear_activation_fuses_gemv_and_relu() {
+        let matrix = [
+            1.0_f32, -2.0, 3.0, //
+            -4.0, 5.0, -6.0,
+        ];
+        let vector = [0.5_f32, 2.0, -1.0];
+        let mut output = [0.0_f32; 2];
+
+        linear_activation_f32(&matrix, 2, 3, &vector, ActivationFn::Relu, &mut output)
+            .expect("fused linear+relu should succeed");
+
+        let expected_linear = [-6.5_f32, 14.0];
+        let expected = [expected_linear[0].max(0.0), expected_linear[1].max(0.0)];
+        for (actual, expected) in output.iter().zip(expected.iter()) {
+            assert!((actual - expected).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn linear_activation_matches_reference_gelu_and_silu() {
+        let matrix = vec![
+            0.2_f32, -0.4, 1.1, -0.9, //
+            1.4, 0.3, -0.7, 0.5, //
+            -0.8, 0.6, 0.9, -1.2,
+        ];
+        let vector = vec![0.3_f32, -0.2, 1.7, 0.4];
+        let mut linear = vec![0.0_f32; 3];
+        gemv_f32(&matrix, 3, 4, &vector, &mut linear).expect("gemv should succeed");
+
+        for activation in [ActivationFn::Gelu, ActivationFn::Silu] {
+            let mut fused = vec![0.0_f32; 3];
+            linear_activation_f32(&matrix, 3, 4, &vector, activation, &mut fused)
+                .expect("fused linear activation should succeed");
+            let expected = linear
+                .iter()
+                .map(|value| activate(*value, activation))
+                .collect::<Vec<_>>();
+            for (actual, expected) in fused.iter().zip(expected.iter()) {
+                assert!((actual - expected).abs() < 1e-6);
+            }
+        }
+    }
+
+    #[test]
+    fn linear_activation_rejects_invalid_shapes() {
+        let matrix = [1.0_f32, 2.0, 3.0, 4.0];
+        let vector = [1.0_f32, 2.0];
+        let mut output = [0.0_f32; 2];
+
+        let matrix_err = linear_activation_f32(
+            &[1.0_f32, 2.0, 3.0],
+            2,
+            2,
+            &vector,
+            ActivationFn::Relu,
+            &mut output,
+        )
+        .expect_err("matrix length mismatch should fail");
+        assert!(matches!(
+            matrix_err,
+            LinearActivationError::InvalidMatrixLength { .. }
+        ));
+
+        let vector_err =
+            linear_activation_f32(&matrix, 2, 2, &[1.0_f32], ActivationFn::Relu, &mut output)
+                .expect_err("vector length mismatch should fail");
+        assert!(matches!(
+            vector_err,
+            LinearActivationError::InvalidVectorLength { .. }
+        ));
+
+        let mut short_output = [0.0_f32; 1];
+        let output_err = linear_activation_f32(
+            &matrix,
+            2,
+            2,
+            &vector,
+            ActivationFn::Relu,
+            &mut short_output,
+        )
+        .expect_err("output length mismatch should fail");
+        assert!(matches!(
+            output_err,
+            LinearActivationError::InvalidOutputLength { .. }
+        ));
     }
 
     #[test]
