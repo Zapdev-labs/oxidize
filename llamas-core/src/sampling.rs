@@ -187,6 +187,8 @@ pub enum SamplingError {
     InvalidGrammarConstraint,
     NoValidGrammarToken,
     InvalidSpeculativeInputs,
+    InvalidBeamWidth,
+    InvalidBeamSearchInputs,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -194,6 +196,12 @@ pub struct SpeculativeDecodeResult {
     pub tokens: Vec<u32>,
     pub accepted_draft_tokens: usize,
     pub used_residual_fallback: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BeamSearchResult {
+    pub tokens: Vec<u32>,
+    pub score: f32,
 }
 
 pub fn greedy(logits: &[f32]) -> Result<u32, SamplingError> {
@@ -430,6 +438,78 @@ pub fn speculative_decode(
         tokens: emitted,
         accepted_draft_tokens: draft_tokens.len(),
         used_residual_fallback: false,
+    })
+}
+
+pub fn beam_search(
+    logits_per_step: &[Vec<f32>],
+    beam_width: usize,
+    eos_token: Option<u32>,
+) -> Result<BeamSearchResult, SamplingError> {
+    if beam_width == 0 {
+        return Err(SamplingError::InvalidBeamWidth);
+    }
+    if logits_per_step.is_empty() || logits_per_step.iter().any(Vec::is_empty) {
+        return Err(SamplingError::InvalidBeamSearchInputs);
+    }
+
+    #[derive(Clone)]
+    struct Beam {
+        tokens: Vec<u32>,
+        score: f32,
+        finished: bool,
+    }
+
+    let mut beams = vec![Beam {
+        tokens: Vec::new(),
+        score: 0.0,
+        finished: false,
+    }];
+
+    for step_logits in logits_per_step {
+        let probs = softmax_probs(step_logits, 1.0)?;
+        let mut candidates = Vec::new();
+
+        for beam in &beams {
+            if beam.finished {
+                candidates.push(beam.clone());
+                continue;
+            }
+
+            for (token_idx, prob) in probs.iter().copied().enumerate() {
+                if prob <= 0.0 || !prob.is_finite() {
+                    continue;
+                }
+                let mut next_tokens = beam.tokens.clone();
+                next_tokens.push(token_idx as u32);
+                let is_finished = eos_token.is_some_and(|eos| eos == token_idx as u32);
+                candidates.push(Beam {
+                    tokens: next_tokens,
+                    score: beam.score + prob.ln(),
+                    finished: is_finished,
+                });
+            }
+        }
+
+        if candidates.is_empty() {
+            return Err(SamplingError::EmptyLogits);
+        }
+
+        candidates.sort_unstable_by(|a, b| b.score.total_cmp(&a.score));
+        beams = candidates.into_iter().take(beam_width).collect();
+
+        if beams.iter().all(|beam| beam.finished) {
+            break;
+        }
+    }
+
+    let best = beams
+        .into_iter()
+        .max_by(|a, b| a.score.total_cmp(&b.score))
+        .ok_or(SamplingError::EmptyLogits)?;
+    Ok(BeamSearchResult {
+        tokens: best.tokens,
+        score: best.score,
     })
 }
 
@@ -1167,5 +1247,44 @@ mod tests {
             &[0.2, 0.3],
         );
         assert_eq!(err, Err(SamplingError::InvalidSpeculativeInputs));
+    }
+
+    #[test]
+    fn beam_search_returns_best_sequence() {
+        let result = beam_search(
+            &[vec![2.0, 1.0], vec![0.1, 3.0], vec![4.0, 0.2]],
+            2,
+            None,
+        )
+        .expect("beam search should succeed");
+        assert_eq!(result.tokens, vec![0, 1, 0]);
+        assert!(result.score.is_finite());
+    }
+
+    #[test]
+    fn beam_search_stops_when_all_beams_hit_eos() {
+        let result = beam_search(
+            &[vec![0.1, 3.0], vec![10.0, 0.0], vec![10.0, 0.0]],
+            2,
+            Some(1),
+        )
+        .expect("beam search should succeed");
+        assert_eq!(result.tokens, vec![1]);
+    }
+
+    #[test]
+    fn beam_search_rejects_invalid_inputs() {
+        assert_eq!(
+            beam_search(&[vec![1.0]], 0, None),
+            Err(SamplingError::InvalidBeamWidth)
+        );
+        assert_eq!(
+            beam_search(&[], 1, None),
+            Err(SamplingError::InvalidBeamSearchInputs)
+        );
+        assert_eq!(
+            beam_search(&[vec![]], 1, None),
+            Err(SamplingError::InvalidBeamSearchInputs)
+        );
     }
 }
