@@ -106,6 +106,33 @@ make wasm
 
 WASM artifacts are written to `dist/wasm`.
 
+## Performance tuning guide
+
+Use this loop for predictable, low-risk tuning:
+
+1. Start with a stable baseline and record tokens/sec and latency:
+   ```bash
+   cargo run -p llamas-cli -- --model /path/to/model.gguf --prompt "benchmark prompt"
+   ```
+2. Profile one run to find bottlenecks:
+   ```bash
+   cargo run -p llamas-cli -- --model /path/to/model.gguf --prompt "benchmark prompt" --profile perf
+   ```
+3. Increase GPU offload gradually (`--n-gpu-layers`) and compare throughput after each step.
+4. If using multiple GPUs, test both parallel strategies and keep the faster one for your hardware:
+   ```bash
+   cargo run -p llamas-cli -- --model /path/to/model.gguf --gpus 2 --n-gpu-layers 20 --parallelism pipeline
+   cargo run -p llamas-cli -- --model /path/to/model.gguf --gpus 2 --n-gpu-layers 20 --parallelism tensor
+   ```
+5. Quantize only after offload strategy is stable; then re-run the same benchmark prompts and check quality.
+
+Practical tuning priorities:
+
+- **Largest speed gains first:** GPU layer offload and multi-GPU strategy.
+- **Memory pressure next:** quantization target (`F16`, `Q8_0`, `Q5_*`, `Q4_*`).
+- **Stability before peak speed:** benchmark with representative prompts, not one short prompt.
+- **Measure every change:** keep a small log of config -> tokens/sec -> latency -> quality notes.
+
 ## Workspace commands
 
 - Build all targets (release): `make build`

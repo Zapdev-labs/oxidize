@@ -805,6 +805,7 @@ mod tests {
         let readme = include_str!("../../README.md");
         for section in [
             "## Quick start",
+            "## Performance tuning guide",
             "### Clone and build",
             "### Run tests and lint",
             "## Common usage",
@@ -814,7 +815,14 @@ mod tests {
                 "README must include section: {section}"
             );
         }
-        for command in ["make build", "make test", "make lint"] {
+        for command in [
+            "make build",
+            "make test",
+            "make lint",
+            "--profile perf",
+            "--parallelism pipeline",
+            "--parallelism tensor",
+        ] {
             assert!(
                 readme.contains(command),
                 "README must include command: {command}"
