@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 pub mod cuda;
 pub mod gguf;
 pub mod model_loader;
+pub mod offload;
 pub mod quantization;
 pub mod simd;
 pub mod tensor;
