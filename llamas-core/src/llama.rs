@@ -8,6 +8,7 @@ pub enum LlamaArchitecture {
     Mixtral,
     Qwen,
     Gemma,
+    Falcon,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +73,15 @@ impl LlamaConfig {
             layer_count,
         }
     }
+
+    pub fn falcon(vocab_size: usize, context_size: usize, layer_count: usize) -> Self {
+        Self {
+            architecture: LlamaArchitecture::Falcon,
+            vocab_size,
+            context_size,
+            layer_count,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -129,13 +139,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn supports_llama2_llama3_mistral_mixtral_qwen_and_gemma_configs() {
+    fn supports_llama2_llama3_mistral_mixtral_qwen_gemma_and_falcon_configs() {
         let llama2 = LlamaModel::new(LlamaConfig::llama2(32_000, 4096, 32));
         let llama3 = LlamaModel::new(LlamaConfig::llama3(128_256, 8192, 32));
         let mistral = LlamaModel::new(LlamaConfig::mistral(32_000, 32_768, 32));
         let mixtral = LlamaModel::new(LlamaConfig::mixtral(32_000, 32_768, 32));
         let qwen = LlamaModel::new(LlamaConfig::qwen(151_936, 32_768, 28));
         let gemma = LlamaModel::new(LlamaConfig::gemma(256_000, 8192, 42));
+        let falcon = LlamaModel::new(LlamaConfig::falcon(65_024, 2048, 60));
 
         assert_eq!(llama2.architecture(), LlamaArchitecture::Llama2);
         assert_eq!(llama3.architecture(), LlamaArchitecture::Llama3);
@@ -143,12 +154,14 @@ mod tests {
         assert_eq!(mixtral.architecture(), LlamaArchitecture::Mixtral);
         assert_eq!(qwen.architecture(), LlamaArchitecture::Qwen);
         assert_eq!(gemma.architecture(), LlamaArchitecture::Gemma);
+        assert_eq!(falcon.architecture(), LlamaArchitecture::Falcon);
         assert_eq!(llama2.vocab_size(), 32_000);
         assert_eq!(llama3.vocab_size(), 128_256);
         assert_eq!(mistral.context_size(), 32_768);
         assert_eq!(mixtral.layer_count(), 32);
         assert_eq!(qwen.vocab_size(), 151_936);
         assert_eq!(gemma.layer_count(), 42);
+        assert_eq!(falcon.context_size(), 2048);
     }
 
     #[test]
