@@ -1,6 +1,6 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-use axum::Router;
+use axum::{Router, http::StatusCode, routing::get};
 use clap::Parser;
 
 #[derive(Debug, Parser)]
@@ -13,7 +13,11 @@ struct Args {
 }
 
 fn build_app() -> Router {
-    Router::new()
+    Router::new().route("/healthz", get(healthz))
+}
+
+async fn healthz() -> StatusCode {
+    StatusCode::OK
 }
 
 #[tokio::main]
@@ -30,6 +34,8 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
 
     #[test]
     fn args_use_expected_defaults() {
@@ -48,5 +54,20 @@ mod tests {
     #[test]
     fn app_builds() {
         let _ = build_app();
+    }
+
+    #[tokio::test]
+    async fn healthz_returns_200() {
+        let response = build_app()
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .body(Body::empty())
+                    .expect("valid request"),
+            )
+            .await
+            .expect("request should be handled");
+
+        assert_eq!(response.status(), StatusCode::OK);
     }
 }

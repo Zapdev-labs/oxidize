@@ -8,3 +8,6 @@ version.workspace = true
 axum.workspace = true
 clap.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }

@@ -750,6 +750,7 @@ dependencies = [
  "axum",
  "clap",
  "tokio",
+ "tower",
 ]
 
 [[package]]
