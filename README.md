@@ -81,6 +81,23 @@ cargo run -p llamas-quantize -- \
   --target F16
 ```
 
+#### Quantization guide
+
+1. Start from a floating-point model file (`F32` or `F16`) and pick a target that matches your latency/quality tradeoff.
+2. Use `F16` for a low-risk size reduction, or lower-bit targets (`Q8_0`, `Q4_0`, `Q4_1`, `Q5_0`, `Q5_1`) for stronger memory savings.
+3. Quantize to a new output path and keep the source model unchanged so you can benchmark both variants.
+4. Run inference/perplexity checks on representative prompts before promoting the quantized model.
+
+Example:
+
+```bash
+cargo run -p llamas-quantize -- \
+  --input /models/model-f32.bin \
+  --output /models/model-q4_0.bin \
+  --source F32 \
+  --target Q4_0
+```
+
 ### WASM build
 
 ```bash
