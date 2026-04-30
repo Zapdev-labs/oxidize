@@ -1,3 +1,5 @@
+use crate::gguf::GgufQuantizationType;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DType {
     F32,
@@ -21,6 +23,9 @@ pub enum GemvError {
     InvalidOutputLength {
         expected: usize,
         actual: usize,
+    },
+    UnsupportedQuantizationType {
+        quantization: GgufQuantizationType,
     },
     #[cfg(feature = "cuda")]
     Cuda(String),
@@ -118,6 +123,58 @@ pub fn gemv_f32(
     }
 
     Ok(())
+}
+
+pub fn gemv_quantized_f32(
+    quantization: GgufQuantizationType,
+    quantized_matrix: &[u8],
+    rows: usize,
+    cols: usize,
+    vector: &[f32],
+    output: &mut [f32],
+) -> Result<(), GemvError> {
+    if quantization != GgufQuantizationType::Q8_0 {
+        return Err(GemvError::UnsupportedQuantizationType { quantization });
+    }
+
+    #[cfg(feature = "cuda")]
+    if crate::cuda::cuda_build_info().detected_at_build {
+        return crate::cuda::gemv_quantized_cuda(
+            quantization,
+            quantized_matrix,
+            rows,
+            cols,
+            vector,
+            output,
+        )
+        .map_err(|err| GemvError::Cuda(format!("{err:?}")));
+    }
+
+    crate::cuda::validate_q8_0_gemv_dims(quantized_matrix, rows, cols, vector, output)
+        .map_err(|err| match err {
+            crate::cuda::GemvCudaError::InvalidMatrixLength { expected, actual } => {
+                GemvError::InvalidMatrixLength { expected, actual }
+            }
+            crate::cuda::GemvCudaError::InvalidVectorLength { expected, actual } => {
+                GemvError::InvalidVectorLength { expected, actual }
+            }
+            crate::cuda::GemvCudaError::InvalidOutputLength { expected, actual } => {
+                GemvError::InvalidOutputLength { expected, actual }
+            }
+            crate::cuda::GemvCudaError::UnsupportedQuantizationType { quantization } => {
+                GemvError::UnsupportedQuantizationType { quantization }
+            }
+            #[cfg(feature = "cuda")]
+            crate::cuda::GemvCudaError::Cuda(message) => GemvError::Cuda(message),
+        })?;
+
+    let mut dequantized = vec![0.0_f32; rows * cols];
+    crate::quantization::dequantize_scalar(quantization, quantized_matrix, &mut dequantized)
+        .map_err(|_| GemvError::InvalidMatrixLength {
+            expected: rows.saturating_mul(cols),
+            actual: quantized_matrix.len(),
+        })?;
+    gemv_f32(&dequantized, rows, cols, vector, output)
 }
 
 pub fn gemm_f32(
@@ -548,6 +605,56 @@ mod tests {
         let err = gemv_f32(&matrix, 2, 2, &[1.0_f32, 1.0], &mut short_output)
             .expect_err("output length mismatch should fail");
         assert!(matches!(err, GemvError::InvalidOutputLength { .. }));
+    }
+
+    #[test]
+    fn quantized_q8_0_gemv_matches_f32_reference() {
+        let rows = 2;
+        let cols = 32;
+        let matrix = (0..rows * cols)
+            .map(|i| (i as f32 * 0.125) - 2.0)
+            .collect::<Vec<_>>();
+        let vector = (0..cols).map(|i| (i as f32 * 0.05) - 0.6).collect::<Vec<_>>();
+
+        let mut matrix_bytes = Vec::with_capacity(matrix.len() * 4);
+        for value in &matrix {
+            matrix_bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        let q8_bytes_len = crate::quantization::quantized_size(GgufQuantizationType::Q8_0, matrix.len())
+            .expect("quantized size is known");
+        let mut quantized_matrix = vec![0_u8; q8_bytes_len];
+        crate::quantization::quantize_scalar(
+            GgufQuantizationType::F32,
+            GgufQuantizationType::Q8_0,
+            &matrix_bytes,
+            &mut quantized_matrix,
+        )
+        .expect("q8_0 quantization should succeed");
+
+        let mut quantized_out = vec![0.0_f32; rows];
+        gemv_quantized_f32(
+            GgufQuantizationType::Q8_0,
+            &quantized_matrix,
+            rows,
+            cols,
+            &vector,
+            &mut quantized_out,
+        )
+        .expect("quantized gemv should succeed");
+
+        let mut dequantized = vec![0.0_f32; rows * cols];
+        crate::quantization::dequantize_scalar(
+            GgufQuantizationType::Q8_0,
+            &quantized_matrix,
+            &mut dequantized,
+        )
+        .expect("dequantization should succeed");
+        let mut reference = vec![0.0_f32; rows];
+        gemv_f32(&dequantized, rows, cols, &vector, &mut reference).expect("f32 gemv should succeed");
+
+        for (lhs, rhs) in quantized_out.iter().zip(reference.iter()) {
+            assert!((lhs - rhs).abs() < 1e-4);
+        }
     }
 
     #[test]

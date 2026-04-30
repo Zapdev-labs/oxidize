@@ -1,3 +1,8 @@
+use crate::gguf::GgufQuantizationType;
+
+const QK8_0: usize = 32;
+const BLOCK_Q8_0_SIZE: usize = 2 + QK8_0;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CudaBuildInfo {
     pub detected_at_build: bool,
@@ -128,6 +133,9 @@ pub enum GemvCudaError {
         expected: usize,
         actual: usize,
     },
+    UnsupportedQuantizationType {
+        quantization: GgufQuantizationType,
+    },
     #[cfg(feature = "cuda")]
     Cuda(String),
 }
@@ -165,6 +173,7 @@ impl From<cust::error::CudaError> for GemmCudaError {
 }
 
 pub const GEMV_KERNEL_NAME: &str = "gemv_f32_kernel";
+pub const GEMV_Q8_0_KERNEL_NAME: &str = "gemv_q8_0_f32_kernel";
 
 #[cfg(feature = "cuda")]
 const GEMV_F32_PTX: &str = include_str!("../kernels/gemv_f32.ptx");
@@ -243,6 +252,97 @@ pub fn validate_gemv_dims(
         });
     }
 
+    Ok(())
+}
+
+pub fn validate_q8_0_gemv_dims(
+    quantized_matrix: &[u8],
+    rows: usize,
+    cols: usize,
+    vector: &[f32],
+    output: &[f32],
+) -> Result<(), GemvCudaError> {
+    if !cols.is_multiple_of(QK8_0) {
+        return Err(GemvCudaError::InvalidVectorLength {
+            expected: cols.div_ceil(QK8_0) * QK8_0,
+            actual: cols,
+        });
+    }
+
+    let blocks_per_row = cols / QK8_0;
+    let expected_matrix_len = rows
+        .saturating_mul(blocks_per_row)
+        .saturating_mul(BLOCK_Q8_0_SIZE);
+    if quantized_matrix.len() != expected_matrix_len {
+        return Err(GemvCudaError::InvalidMatrixLength {
+            expected: expected_matrix_len,
+            actual: quantized_matrix.len(),
+        });
+    }
+    if vector.len() != cols {
+        return Err(GemvCudaError::InvalidVectorLength {
+            expected: cols,
+            actual: vector.len(),
+        });
+    }
+    if output.len() != rows {
+        return Err(GemvCudaError::InvalidOutputLength {
+            expected: rows,
+            actual: output.len(),
+        });
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+pub fn gemv_quantized_cuda(
+    quantization: GgufQuantizationType,
+    quantized_matrix: &[u8],
+    rows: usize,
+    cols: usize,
+    vector: &[f32],
+    output: &mut [f32],
+) -> Result<(), GemvCudaError> {
+    if quantization != GgufQuantizationType::Q8_0 {
+        return Err(GemvCudaError::UnsupportedQuantizationType { quantization });
+    }
+    validate_q8_0_gemv_dims(quantized_matrix, rows, cols, vector, output)?;
+
+    let _context = initialize_cuda()?;
+    let module = cust::module::Module::from_ptx(GEMV_F32_PTX, &[])?;
+    let stream = cust::stream::Stream::new(cust::stream::StreamFlags::DEFAULT, None)?;
+
+    let matrix_device = cust::memory::DeviceBuffer::from_slice(quantized_matrix)?;
+    let vector_device = cust::memory::DeviceBuffer::from_slice(vector)?;
+    let output_device = cust::memory::DeviceBuffer::zeroed(rows)?;
+
+    let block_size = 128_u32;
+    let grid_size = (rows as u32).div_ceil(block_size);
+    let rows_u32 = u32::try_from(rows).map_err(|_| GemvCudaError::InvalidOutputLength {
+        expected: u32::MAX as usize,
+        actual: rows,
+    })?;
+    let cols_u32 = u32::try_from(cols).map_err(|_| GemvCudaError::InvalidVectorLength {
+        expected: u32::MAX as usize,
+        actual: cols,
+    })?;
+
+    let function = module.get_function(GEMV_Q8_0_KERNEL_NAME)?;
+    // SAFETY: Kernel parameters are valid device buffers and scalar dimensions.
+    unsafe {
+        cust::launch!(
+            function<<<grid_size, block_size, 0, stream>>>(
+                matrix_device.as_device_ptr(),
+                vector_device.as_device_ptr(),
+                output_device.as_device_ptr(),
+                rows_u32,
+                cols_u32
+            )
+        )?;
+    }
+    stream.synchronize()?;
+    output_device.copy_to(output)?;
     Ok(())
 }
 
@@ -427,6 +527,29 @@ mod tests {
         let err = validate_gemv_dims(&[1.0_f32, 2.0, 3.0], 2, 2, &[1.0_f32, 1.0], &[0.0_f32; 2])
             .expect_err("matrix size mismatch should fail");
         assert!(matches!(err, GemvCudaError::InvalidMatrixLength { .. }));
+    }
+
+    #[test]
+    fn validates_q8_0_gemv_cuda_dimensions() {
+        let rows = 2;
+        let cols = 32;
+        let matrix = vec![0_u8; rows * BLOCK_Q8_0_SIZE];
+        let vector = vec![1.0_f32; cols];
+        let output = vec![0.0_f32; rows];
+        validate_q8_0_gemv_dims(&matrix, rows, cols, &vector, &output)
+            .expect("dimensions should be valid");
+    }
+
+    #[test]
+    fn rejects_q8_0_gemv_cols_not_aligned() {
+        let rows = 1;
+        let cols = 31;
+        let matrix = vec![0_u8; BLOCK_Q8_0_SIZE];
+        let vector = vec![1.0_f32; cols];
+        let output = vec![0.0_f32; rows];
+        let err = validate_q8_0_gemv_dims(&matrix, rows, cols, &vector, &output)
+            .expect_err("non-aligned columns should fail");
+        assert!(matches!(err, GemvCudaError::InvalidVectorLength { .. }));
     }
 
     #[test]
