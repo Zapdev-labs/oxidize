@@ -1639,13 +1639,9 @@ mod tests {
             input.extend_from_slice(&value.to_le_bytes());
         }
 
-        let sequential = quantize_mixed_scalar_sequential(
-            GgufQuantizationType::F32,
-            4,
-            &input,
-            &plans,
-        )
-        .expect("sequential mixed quantization should succeed");
+        let sequential =
+            quantize_mixed_scalar_sequential(GgufQuantizationType::F32, 4, &input, &plans)
+                .expect("sequential mixed quantization should succeed");
         let parallel = quantize_mixed_scalar(GgufQuantizationType::F32, &input, &plans)
             .expect("parallel mixed quantization should succeed");
 
@@ -1734,6 +1730,62 @@ mod tests {
             16, 24, 32, 40, 48, 56, 64, 71, 79, 87, 95, 103, 111, 119,
         ];
         assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn quantized_size_matches_every_supported_scheme() {
+        let cases = [
+            (GgufQuantizationType::F32, 7, 28),
+            (GgufQuantizationType::F16, 7, 14),
+            (GgufQuantizationType::Q4_0, QK4_0, BLOCK_Q4_0_SIZE),
+            (GgufQuantizationType::Q4_1, QK4_1, BLOCK_Q4_1_SIZE),
+            (GgufQuantizationType::Q5_0, QK5_0, BLOCK_Q5_0_SIZE),
+            (GgufQuantizationType::Q5_1, QK5_1, BLOCK_Q5_1_SIZE),
+            (GgufQuantizationType::Q8_0, QK8_0, BLOCK_Q8_0_SIZE),
+            (GgufQuantizationType::Q2_K, QK_K, BLOCK_Q2_K_SIZE),
+            (GgufQuantizationType::Q3_K_S, QK_K, BLOCK_Q3_K_SIZE),
+            (GgufQuantizationType::Q3_K_M, QK_K, BLOCK_Q3_K_SIZE),
+            (GgufQuantizationType::Q3_K_L, QK_K, BLOCK_Q3_K_SIZE),
+            (GgufQuantizationType::Q4_K_S, QK_K, BLOCK_Q4_K_SIZE),
+            (GgufQuantizationType::Q4_K_M, QK_K, BLOCK_Q4_K_SIZE),
+            (GgufQuantizationType::Q5_K_S, QK_K, BLOCK_Q5_K_SIZE),
+            (GgufQuantizationType::Q5_K_M, QK_K, BLOCK_Q5_K_SIZE),
+            (GgufQuantizationType::Q6_K, QK_K, BLOCK_Q6_K_SIZE),
+        ];
+
+        for (quantization, value_count, expected) in cases {
+            let actual = quantized_size(quantization, value_count).expect("size should be known");
+            assert_eq!(actual, expected, "unexpected size for {quantization:?}");
+        }
+    }
+
+    #[test]
+    fn quantized_size_rejects_invalid_block_lengths() {
+        let blocked = [
+            (GgufQuantizationType::Q4_0, QK4_0),
+            (GgufQuantizationType::Q4_1, QK4_1),
+            (GgufQuantizationType::Q5_0, QK5_0),
+            (GgufQuantizationType::Q5_1, QK5_1),
+            (GgufQuantizationType::Q8_0, QK8_0),
+            (GgufQuantizationType::Q2_K, QK_K),
+            (GgufQuantizationType::Q3_K_S, QK_K),
+            (GgufQuantizationType::Q3_K_M, QK_K),
+            (GgufQuantizationType::Q3_K_L, QK_K),
+            (GgufQuantizationType::Q4_K_S, QK_K),
+            (GgufQuantizationType::Q4_K_M, QK_K),
+            (GgufQuantizationType::Q5_K_S, QK_K),
+            (GgufQuantizationType::Q5_K_M, QK_K),
+            (GgufQuantizationType::Q6_K, QK_K),
+        ];
+
+        for (quantization, block_size) in blocked {
+            let err = quantized_size(quantization, block_size - 1)
+                .expect_err("invalid lengths should be rejected");
+            assert!(matches!(
+                err,
+                QuantizationError::InvalidInputLength { .. }
+            ));
+        }
     }
 
     fn test_values_for_target(target: GgufQuantizationType, offset: f32, scale: f32) -> Vec<f32> {
