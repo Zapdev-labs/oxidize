@@ -40,4 +40,15 @@ mod tests {
         assert!(config.contains("[target.aarch64-unknown-linux-gnu]"));
         assert!(config.contains("[target.wasm32-unknown-unknown]"));
     }
+
+    #[test]
+    fn workspace_release_profile_enables_lto_and_abort_panic() {
+        let workspace_cargo_toml = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("Cargo.toml");
+        let cargo_toml =
+            std::fs::read_to_string(workspace_cargo_toml).expect("workspace Cargo.toml exists");
+
+        assert!(cargo_toml.contains("[profile.release]"));
+        assert!(cargo_toml.contains("lto = true"));
+        assert!(cargo_toml.contains("panic = \"abort\""));
+    }
 }
