@@ -40,10 +40,10 @@ impl MappedGgufFile {
 
 impl GgufFile {
     pub fn architecture(&self) -> Option<&str> {
-        match self.metadata.get("general.architecture") {
-            Some(GgufMetadataValue::String(value)) => Some(value.as_str()),
-            _ => None,
+        if let Some(GgufMetadataValue::String(value)) = self.metadata.get("general.architecture") {
+            return Some(value.as_str());
         }
+        detect_architecture_from_metadata_keys(&self.metadata)
     }
 
     pub fn mapped_tensor_infos(&self) -> Vec<GgufTensorInfo> {
@@ -330,6 +330,25 @@ fn metadata_as_u32(value: &GgufMetadataValue) -> Option<u32> {
         GgufMetadataValue::Int64(v) if *v >= 0 => (*v).try_into().ok(),
         _ => None,
     }
+}
+
+fn detect_architecture_from_metadata_keys(
+    metadata: &BTreeMap<String, GgufMetadataValue>,
+) -> Option<&str> {
+    for key in metadata.keys() {
+        let Some((namespace, _)) = key.split_once('.') else {
+            continue;
+        };
+        let architecture = match namespace {
+            "llama" | "mistral" | "mixtral" | "qwen" | "qwen2" | "qwen2moe" | "gemma" | "phi"
+            | "falcon" | "gpt2" | "gptj" | "gptneox" => Some(namespace),
+            _ => None,
+        };
+        if architecture.is_some() {
+            return architecture;
+        }
+    }
+    None
 }
 
 fn align_up(value: u64, alignment: u64) -> Result<u64, GgufParseError> {
@@ -855,6 +874,60 @@ mod tests {
 
         let mapped = file.mapped_tensor_infos();
         assert_eq!(mapped[0].name, "custom.tensor.weight");
+    }
+
+    #[test]
+    fn architecture_prefers_general_architecture_metadata_when_present() {
+        let file = GgufFile {
+            version: 3,
+            tensor_count: 0,
+            metadata: BTreeMap::from([
+                (
+                    "general.architecture".to_owned(),
+                    GgufMetadataValue::String("qwen2".to_owned()),
+                ),
+                ("llama.context_length".to_owned(), GgufMetadataValue::Uint32(4096)),
+            ]),
+            tensor_infos: Vec::new(),
+            alignment: 32,
+            data_section_start: 0,
+        };
+
+        assert_eq!(file.architecture(), Some("qwen2"));
+    }
+
+    #[test]
+    fn architecture_detects_namespace_when_general_architecture_is_missing() {
+        let file = GgufFile {
+            version: 3,
+            tensor_count: 0,
+            metadata: BTreeMap::from([(
+                "qwen2.context_length".to_owned(),
+                GgufMetadataValue::Uint32(32768),
+            )]),
+            tensor_infos: Vec::new(),
+            alignment: 32,
+            data_section_start: 0,
+        };
+
+        assert_eq!(file.architecture(), Some("qwen2"));
+    }
+
+    #[test]
+    fn architecture_returns_none_for_unknown_namespaces() {
+        let file = GgufFile {
+            version: 3,
+            tensor_count: 0,
+            metadata: BTreeMap::from([(
+                "tokenizer.ggml.model".to_owned(),
+                GgufMetadataValue::String("bpe".to_owned()),
+            )]),
+            tensor_infos: Vec::new(),
+            alignment: 32,
+            data_section_start: 0,
+        };
+
+        assert_eq!(file.architecture(), None);
     }
 
     #[test]
