@@ -1142,6 +1142,64 @@ mod tests {
         }
     }
 
+    #[test]
+    fn q8_0_quantization_uses_independent_scales_per_block() {
+        let mut values = vec![0.0_f32; QK8_0 * 2];
+        for (i, slot) in values[..QK8_0].iter_mut().enumerate() {
+            *slot = i as f32 * 0.5;
+        }
+        for (i, slot) in values[QK8_0..].iter_mut().enumerate() {
+            *slot = i as f32 * 6.0;
+        }
+
+        let mut src = Vec::with_capacity(values.len() * 4);
+        for value in &values {
+            src.extend_from_slice(&value.to_le_bytes());
+        }
+
+        let mut quantized = vec![0_u8; BLOCK_Q8_0_SIZE * 2];
+        quantize_scalar(
+            GgufQuantizationType::F32,
+            GgufQuantizationType::Q8_0,
+            &src,
+            &mut quantized,
+        )
+        .expect("q8_0 quantization succeeds");
+
+        let first_scale = f16_le_to_f32(&quantized[0..2]);
+        let second_scale = f16_le_to_f32(&quantized[BLOCK_Q8_0_SIZE..BLOCK_Q8_0_SIZE + 2]);
+        assert!(second_scale > first_scale * 8.0);
+    }
+
+    #[test]
+    fn q4_1_quantization_uses_independent_scales_per_block() {
+        let mut values = vec![0.0_f32; QK4_1 * 2];
+        for (i, slot) in values[..QK4_1].iter_mut().enumerate() {
+            *slot = -2.0 + i as f32 * 0.1;
+        }
+        for (i, slot) in values[QK4_1..].iter_mut().enumerate() {
+            *slot = -40.0 + i as f32 * 3.0;
+        }
+
+        let mut src = Vec::with_capacity(values.len() * 4);
+        for value in &values {
+            src.extend_from_slice(&value.to_le_bytes());
+        }
+
+        let mut quantized = vec![0_u8; BLOCK_Q4_1_SIZE * 2];
+        quantize_scalar(
+            GgufQuantizationType::F32,
+            GgufQuantizationType::Q4_1,
+            &src,
+            &mut quantized,
+        )
+        .expect("q4_1 quantization succeeds");
+
+        let first_scale = f16_le_to_f32(&quantized[0..2]);
+        let second_scale = f16_le_to_f32(&quantized[BLOCK_Q4_1_SIZE..BLOCK_Q4_1_SIZE + 2]);
+        assert!(second_scale > first_scale * 20.0);
+    }
+
     fn test_values_for_target(target: GgufQuantizationType, offset: f32, scale: f32) -> Vec<f32> {
         let value_count = if matches!(
             target,
