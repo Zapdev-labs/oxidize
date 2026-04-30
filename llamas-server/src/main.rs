@@ -51,15 +51,32 @@ impl Default for RequestLimitConfig {
 #[derive(Clone)]
 struct AppState {
     limiter: Arc<RequestLimiter>,
+    auth: AuthConfig,
+}
+
+#[derive(Clone)]
+struct AuthConfig {
+    api_key: Option<Arc<str>>,
 }
 
 fn build_app() -> Router {
-    build_app_with_limits(RequestLimitConfig::default())
+    let api_key = std::env::var("LLAMAS_API_KEY")
+        .ok()
+        .filter(|value| !value.is_empty());
+    build_app_with_config(RequestLimitConfig::default(), api_key)
 }
 
+#[cfg(test)]
 fn build_app_with_limits(config: RequestLimitConfig) -> Router {
+    build_app_with_config(config, None)
+}
+
+fn build_app_with_config(config: RequestLimitConfig, api_key: Option<String>) -> Router {
     let state = AppState {
         limiter: Arc::new(RequestLimiter::new(config)),
+        auth: AuthConfig {
+            api_key: api_key.map(Arc::<str>::from),
+        },
     };
     Router::new()
         .route("/healthz", get(healthz))
@@ -72,6 +89,10 @@ fn build_app_with_limits(config: RequestLimitConfig) -> Router {
         .layer(middleware::from_fn_with_state(
             state.clone(),
             enforce_request_limits,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            enforce_api_key,
         ))
         .layer(middleware::from_fn(log_request_response))
         .with_state(state)
@@ -188,6 +209,40 @@ async fn enforce_request_limits(
         )
             .into_response(),
     }
+}
+
+async fn enforce_api_key(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let path = request.uri().path();
+    if !path.starts_with("/v1/") {
+        return next.run(request).await;
+    }
+    let Some(expected_key) = state.auth.api_key.as_deref() else {
+        return next.run(request).await;
+    };
+    if request_has_api_key(request.headers(), expected_key) {
+        return next.run(request).await;
+    }
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(json!({"error": "invalid api key"})),
+    )
+        .into_response()
+}
+
+fn request_has_api_key(headers: &axum::http::HeaderMap, expected_key: &str) -> bool {
+    headers
+        .get("x-api-key")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value == expected_key)
+        || headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "))
+            .is_some_and(|token| token == expected_key)
 }
 
 fn request_log_message(method: &str, path: &str) -> String {
@@ -808,6 +863,64 @@ mod tests {
         assert_eq!(parsed["object"], "list");
         assert_eq!(parsed["model"], "llamas-default");
         assert_eq!(parsed["data"][0]["object"], "embedding");
+    }
+
+    #[tokio::test]
+    async fn api_key_auth_rejects_missing_key_on_v1_routes() {
+        let response = build_app_with_config(RequestLimitConfig::default(), Some("secret".into()))
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/models")
+                    .body(Body::empty())
+                    .expect("valid request"),
+            )
+            .await
+            .expect("request should be handled");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn api_key_auth_allows_x_api_key_header() {
+        let response = build_app_with_config(RequestLimitConfig::default(), Some("secret".into()))
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/models")
+                    .header("x-api-key", "secret")
+                    .body(Body::empty())
+                    .expect("valid request"),
+            )
+            .await
+            .expect("request should be handled");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn api_key_auth_allows_bearer_token() {
+        let response = build_app_with_config(RequestLimitConfig::default(), Some("secret".into()))
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/models")
+                    .header(header::AUTHORIZATION, "Bearer secret")
+                    .body(Body::empty())
+                    .expect("valid request"),
+            )
+            .await
+            .expect("request should be handled");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn api_key_auth_does_not_gate_health_endpoints() {
+        let response = build_app_with_config(RequestLimitConfig::default(), Some("secret".into()))
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .body(Body::empty())
+                    .expect("valid request"),
+            )
+            .await
+            .expect("request should be handled");
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
