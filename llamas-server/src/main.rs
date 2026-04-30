@@ -82,6 +82,7 @@ fn build_app_with_config(config: RequestLimitConfig, api_key: Option<String>) ->
         .route("/healthz", get(healthz))
         .route("/livez", get(livez))
         .route("/readyz", get(readyz))
+        .route("/openapi.json", get(openapi))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/completions", post(completions))
         .route("/v1/models", get(models))
@@ -108,6 +109,101 @@ async fn livez() -> StatusCode {
 
 async fn readyz() -> StatusCode {
     StatusCode::OK
+}
+
+async fn openapi() -> Json<Value> {
+    Json(openapi_spec())
+}
+
+fn openapi_spec() -> Value {
+    json!({
+        "openapi": "3.1.0",
+        "info": {
+            "title": "llamas-server API",
+            "version": env!("CARGO_PKG_VERSION"),
+            "description": "OpenAI-compatible endpoints exposed by llamas-server."
+        },
+        "servers": [{ "url": "/" }],
+        "paths": {
+            "/healthz": {
+                "get": {
+                    "summary": "Health check",
+                    "responses": {
+                        "200": { "description": "OK" }
+                    }
+                }
+            },
+            "/livez": {
+                "get": {
+                    "summary": "Liveness check",
+                    "responses": {
+                        "200": { "description": "OK" }
+                    }
+                }
+            },
+            "/readyz": {
+                "get": {
+                    "summary": "Readiness check",
+                    "responses": {
+                        "200": { "description": "OK" }
+                    }
+                }
+            },
+            "/v1/chat/completions": {
+                "post": {
+                    "summary": "Create chat completion",
+                    "security": [{ "ApiKeyAuth": [] }, { "BearerAuth": [] }],
+                    "responses": {
+                        "200": { "description": "Chat completion response" },
+                        "401": { "description": "Invalid API key" }
+                    }
+                }
+            },
+            "/v1/completions": {
+                "post": {
+                    "summary": "Create text completion",
+                    "security": [{ "ApiKeyAuth": [] }, { "BearerAuth": [] }],
+                    "responses": {
+                        "200": { "description": "Completion response" },
+                        "401": { "description": "Invalid API key" }
+                    }
+                }
+            },
+            "/v1/models": {
+                "get": {
+                    "summary": "List models",
+                    "security": [{ "ApiKeyAuth": [] }, { "BearerAuth": [] }],
+                    "responses": {
+                        "200": { "description": "Model list" },
+                        "401": { "description": "Invalid API key" }
+                    }
+                }
+            },
+            "/v1/embeddings": {
+                "post": {
+                    "summary": "Create embeddings",
+                    "security": [{ "ApiKeyAuth": [] }, { "BearerAuth": [] }],
+                    "responses": {
+                        "200": { "description": "Embeddings response" },
+                        "401": { "description": "Invalid API key" }
+                    }
+                }
+            }
+        },
+        "components": {
+            "securitySchemes": {
+                "ApiKeyAuth": {
+                    "type": "apiKey",
+                    "in": "header",
+                    "name": "x-api-key"
+                },
+                "BearerAuth": {
+                    "type": "http",
+                    "scheme": "bearer"
+                }
+            }
+        }
+    })
 }
 
 async fn log_request_response(request: Request, next: Next) -> Response {
@@ -580,6 +676,62 @@ mod tests {
             .expect("request should be handled");
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn openapi_endpoint_returns_expected_shape() {
+        let response = build_app()
+            .oneshot(
+                Request::builder()
+                    .uri("/openapi.json")
+                    .body(Body::empty())
+                    .expect("valid request"),
+            )
+            .await
+            .expect("request should be handled");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let parsed: Value = serde_json::from_slice(&bytes).expect("valid json response");
+        assert_eq!(parsed["openapi"], "3.1.0");
+        assert_eq!(parsed["paths"]["/v1/chat/completions"]["post"]["summary"], "Create chat completion");
+        assert_eq!(parsed["components"]["securitySchemes"]["ApiKeyAuth"]["name"], "x-api-key");
+    }
+
+    #[tokio::test]
+    async fn openapi_endpoint_lists_all_public_routes() {
+        let response = build_app()
+            .oneshot(
+                Request::builder()
+                    .uri("/openapi.json")
+                    .body(Body::empty())
+                    .expect("valid request"),
+            )
+            .await
+            .expect("request should be handled");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let parsed: Value = serde_json::from_slice(&bytes).expect("valid json response");
+
+        for path in [
+            "/healthz",
+            "/livez",
+            "/readyz",
+            "/v1/chat/completions",
+            "/v1/completions",
+            "/v1/models",
+            "/v1/embeddings",
+        ] {
+            assert!(
+                parsed["paths"].get(path).is_some(),
+                "openapi spec should include {path}"
+            );
+        }
     }
 
     #[test]
