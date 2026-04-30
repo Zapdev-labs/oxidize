@@ -3,6 +3,8 @@ use crate::llama::{LlamaConfig, LlamaModel};
 use crate::model::{Session, Token};
 use crate::sampling::SamplingConfig;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
@@ -48,6 +50,38 @@ pub struct WorkerMessageResponse {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerModelCacheAction {
+    CacheDownloadedModel,
+    GetCachedModel,
+    RemoveCachedModel,
+    ClearCache,
+    CacheStats,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerModelCacheRequest {
+    pub action: WorkerModelCacheAction,
+    pub model_id: Option<String>,
+    pub model_bytes: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerModelCacheResponse {
+    pub model_id: Option<String>,
+    pub model_bytes: Option<Vec<u8>>,
+    pub cached: Option<bool>,
+    pub cached_models: usize,
+    pub cached_bytes: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerModelCacheMessageResponse {
+    pub response: Option<WorkerModelCacheResponse>,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkerInferenceError {
     EmptyPrompt,
@@ -66,6 +100,125 @@ impl std::fmt::Display for WorkerInferenceError {
 }
 
 impl std::error::Error for WorkerInferenceError {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkerModelCacheError {
+    MissingModelId,
+    MissingModelBytes,
+}
+
+impl std::fmt::Display for WorkerModelCacheError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingModelId => write!(f, "model_id is required for this action"),
+            Self::MissingModelBytes => write!(f, "model_bytes is required for cache_downloaded_model"),
+        }
+    }
+}
+
+impl std::error::Error for WorkerModelCacheError {}
+
+fn worker_model_cache() -> &'static Mutex<HashMap<String, Vec<u8>>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Vec<u8>>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn cache_stats(cache: &HashMap<String, Vec<u8>>) -> (usize, usize) {
+    (cache.len(), cache.values().map(std::vec::Vec::len).sum())
+}
+
+pub fn handle_worker_model_cache_message(request_json: &str) -> String {
+    fn run_request(
+        request: WorkerModelCacheRequest,
+    ) -> Result<WorkerModelCacheResponse, WorkerModelCacheError> {
+        let mut cache = worker_model_cache()
+            .lock()
+            .expect("worker model cache mutex should not be poisoned");
+        match request.action {
+            WorkerModelCacheAction::CacheDownloadedModel => {
+                let model_id = request.model_id.ok_or(WorkerModelCacheError::MissingModelId)?;
+                let model_bytes = request
+                    .model_bytes
+                    .ok_or(WorkerModelCacheError::MissingModelBytes)?;
+                cache.insert(model_id.clone(), model_bytes.clone());
+                let (cached_models, cached_bytes) = cache_stats(&cache);
+                Ok(WorkerModelCacheResponse {
+                    model_id: Some(model_id),
+                    model_bytes: Some(model_bytes),
+                    cached: Some(true),
+                    cached_models,
+                    cached_bytes,
+                })
+            }
+            WorkerModelCacheAction::GetCachedModel => {
+                let model_id = request.model_id.ok_or(WorkerModelCacheError::MissingModelId)?;
+                let model_bytes = cache.get(&model_id).cloned();
+                let (cached_models, cached_bytes) = cache_stats(&cache);
+                Ok(WorkerModelCacheResponse {
+                    model_id: Some(model_id),
+                    cached: Some(model_bytes.is_some()),
+                    model_bytes,
+                    cached_models,
+                    cached_bytes,
+                })
+            }
+            WorkerModelCacheAction::RemoveCachedModel => {
+                let model_id = request.model_id.ok_or(WorkerModelCacheError::MissingModelId)?;
+                let cached = cache.remove(&model_id).is_some();
+                let (cached_models, cached_bytes) = cache_stats(&cache);
+                Ok(WorkerModelCacheResponse {
+                    model_id: Some(model_id),
+                    model_bytes: None,
+                    cached: Some(cached),
+                    cached_models,
+                    cached_bytes,
+                })
+            }
+            WorkerModelCacheAction::ClearCache => {
+                cache.clear();
+                Ok(WorkerModelCacheResponse {
+                    model_id: None,
+                    model_bytes: None,
+                    cached: None,
+                    cached_models: 0,
+                    cached_bytes: 0,
+                })
+            }
+            WorkerModelCacheAction::CacheStats => {
+                let (cached_models, cached_bytes) = cache_stats(&cache);
+                Ok(WorkerModelCacheResponse {
+                    model_id: None,
+                    model_bytes: None,
+                    cached: None,
+                    cached_models,
+                    cached_bytes,
+                })
+            }
+        }
+    }
+
+    let message = match serde_json::from_str::<WorkerModelCacheRequest>(request_json) {
+        Ok(request) => match run_request(request) {
+            Ok(response) => WorkerModelCacheMessageResponse {
+                response: Some(response),
+                error: None,
+            },
+            Err(err) => WorkerModelCacheMessageResponse {
+                response: None,
+                error: Some(err.to_string()),
+            },
+        },
+        Err(err) => WorkerModelCacheMessageResponse {
+            response: None,
+            error: Some(format!("invalid request json: {err}")),
+        },
+    };
+
+    serde_json::to_string(&message).unwrap_or_else(|_| {
+        "{\"response\":null,\"error\":\"failed to serialize worker model cache response\"}"
+            .to_string()
+    })
+}
 
 pub fn run_inference_in_background_worker(
     request: &WorkerInferenceRequest,
@@ -225,6 +378,32 @@ export interface LlamasWorkerMessageResponse {
   error: string | null;
 }
 
+export type LlamasWorkerModelCacheAction =
+  | "cache_downloaded_model"
+  | "get_cached_model"
+  | "remove_cached_model"
+  | "clear_cache"
+  | "cache_stats";
+
+export interface LlamasWorkerModelCacheRequest {
+  action: LlamasWorkerModelCacheAction;
+  model_id?: string;
+  model_bytes?: number[];
+}
+
+export interface LlamasWorkerModelCacheResponse {
+  model_id: string | null;
+  model_bytes: number[] | null;
+  cached: boolean | null;
+  cached_models: number;
+  cached_bytes: number;
+}
+
+export interface LlamasWorkerModelCacheMessageResponse {
+  response: LlamasWorkerModelCacheResponse | null;
+  error: string | null;
+}
+
 export interface LlamasWorkerStreamResponse {
   chunks: LlamasWorkerStreamChunk[];
   response: LlamasWorkerInferenceResponse | null;
@@ -248,9 +427,26 @@ pub fn wasm_collect_worker_stream(request_json: &str) -> String {
     collect_worker_stream(request_json)
 }
 
+#[cfg_attr(all(target_arch = "wasm32", feature = "wasm"), wasm_bindgen)]
+pub fn wasm_handle_worker_model_cache_message(request_json: &str) -> String {
+    handle_worker_model_cache_message(request_json)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn worker_model_cache_test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn clear_worker_model_cache_for_test() {
+        let response_json = handle_worker_model_cache_message(r#"{"action":"clear_cache"}"#);
+        let message: WorkerModelCacheMessageResponse =
+            serde_json::from_str(&response_json).expect("clear cache response should decode");
+        assert_eq!(message.error, None);
+    }
 
     #[test]
     fn background_worker_inference_generates_expected_number_of_tokens() {
@@ -369,5 +565,111 @@ mod tests {
         assert!(WASM_WORKER_TYPESCRIPT_BINDINGS.contains("interface LlamasWorkerInferenceRequest"));
         assert!(WASM_WORKER_TYPESCRIPT_BINDINGS.contains("interface LlamasWorkerMessageResponse"));
         assert!(WASM_WORKER_TYPESCRIPT_BINDINGS.contains("interface LlamasWorkerStreamResponse"));
+        assert!(WASM_WORKER_TYPESCRIPT_BINDINGS.contains("type LlamasWorkerModelCacheAction"));
+        assert!(WASM_WORKER_TYPESCRIPT_BINDINGS.contains("interface LlamasWorkerModelCacheRequest"));
+        assert!(
+            WASM_WORKER_TYPESCRIPT_BINDINGS
+                .contains("interface LlamasWorkerModelCacheMessageResponse")
+        );
+    }
+
+    #[test]
+    fn worker_model_cache_can_store_and_read_model_bytes() {
+        let _guard = worker_model_cache_test_lock()
+            .lock()
+            .expect("test lock should not be poisoned");
+        clear_worker_model_cache_for_test();
+
+        let put_response_json = handle_worker_model_cache_message(
+            r#"{"action":"cache_downloaded_model","model_id":"tiny","model_bytes":[1,2,3]}"#,
+        );
+        let put_message: WorkerModelCacheMessageResponse =
+            serde_json::from_str(&put_response_json).expect("cache put response should decode");
+        assert_eq!(put_message.error, None);
+
+        let put_response = put_message.response.expect("cache put should have response");
+        assert_eq!(put_response.model_id, Some("tiny".to_string()));
+        assert_eq!(put_response.model_bytes, Some(vec![1, 2, 3]));
+        assert_eq!(put_response.cached, Some(true));
+        assert_eq!(put_response.cached_models, 1);
+        assert_eq!(put_response.cached_bytes, 3);
+
+        let get_response_json =
+            handle_worker_model_cache_message(r#"{"action":"get_cached_model","model_id":"tiny"}"#);
+        let get_message: WorkerModelCacheMessageResponse =
+            serde_json::from_str(&get_response_json).expect("cache get response should decode");
+        assert_eq!(get_message.error, None);
+
+        let get_response = get_message.response.expect("cache get should have response");
+        assert_eq!(get_response.model_id, Some("tiny".to_string()));
+        assert_eq!(get_response.model_bytes, Some(vec![1, 2, 3]));
+        assert_eq!(get_response.cached, Some(true));
+        assert_eq!(get_response.cached_models, 1);
+        assert_eq!(get_response.cached_bytes, 3);
+    }
+
+    #[test]
+    fn worker_model_cache_remove_and_clear_update_cache_stats() {
+        let _guard = worker_model_cache_test_lock()
+            .lock()
+            .expect("test lock should not be poisoned");
+        clear_worker_model_cache_for_test();
+        handle_worker_model_cache_message(
+            r#"{"action":"cache_downloaded_model","model_id":"tiny","model_bytes":[1,2,3]}"#,
+        );
+        handle_worker_model_cache_message(
+            r#"{"action":"cache_downloaded_model","model_id":"small","model_bytes":[7,8]}"#,
+        );
+
+        let stats_response_json = handle_worker_model_cache_message(r#"{"action":"cache_stats"}"#);
+        let stats_message: WorkerModelCacheMessageResponse =
+            serde_json::from_str(&stats_response_json).expect("stats response should decode");
+        let stats = stats_message.response.expect("stats should be present");
+        assert_eq!(stats.cached_models, 2);
+        assert_eq!(stats.cached_bytes, 5);
+
+        let remove_response_json = handle_worker_model_cache_message(
+            r#"{"action":"remove_cached_model","model_id":"tiny"}"#,
+        );
+        let remove_message: WorkerModelCacheMessageResponse =
+            serde_json::from_str(&remove_response_json).expect("remove response should decode");
+        let remove = remove_message.response.expect("remove should be present");
+        assert_eq!(remove.cached, Some(true));
+        assert_eq!(remove.cached_models, 1);
+        assert_eq!(remove.cached_bytes, 2);
+
+        let clear_response_json = handle_worker_model_cache_message(r#"{"action":"clear_cache"}"#);
+        let clear_message: WorkerModelCacheMessageResponse =
+            serde_json::from_str(&clear_response_json).expect("clear response should decode");
+        let clear = clear_message.response.expect("clear should be present");
+        assert_eq!(clear.cached_models, 0);
+        assert_eq!(clear.cached_bytes, 0);
+    }
+
+    #[test]
+    fn worker_model_cache_rejects_missing_required_fields() {
+        let _guard = worker_model_cache_test_lock()
+            .lock()
+            .expect("test lock should not be poisoned");
+        clear_worker_model_cache_for_test();
+
+        let missing_id_json =
+            handle_worker_model_cache_message(r#"{"action":"get_cached_model"}"#);
+        let missing_id: WorkerModelCacheMessageResponse =
+            serde_json::from_str(&missing_id_json).expect("missing-id response should decode");
+        assert_eq!(
+            missing_id.error,
+            Some("model_id is required for this action".to_string())
+        );
+
+        let missing_bytes_json = handle_worker_model_cache_message(
+            r#"{"action":"cache_downloaded_model","model_id":"tiny"}"#,
+        );
+        let missing_bytes: WorkerModelCacheMessageResponse =
+            serde_json::from_str(&missing_bytes_json).expect("missing-bytes response should decode");
+        assert_eq!(
+            missing_bytes.error,
+            Some("model_bytes is required for cache_downloaded_model".to_string())
+        );
     }
 }
