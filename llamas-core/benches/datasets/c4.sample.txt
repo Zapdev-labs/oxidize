@@ -1,0 +1,3 @@
+Web scale corpora include diverse documents from many domains.
+Careful filtering improves benchmark quality and stability.
+Standard datasets help compare model changes over time.

@@ -7,6 +7,12 @@ pub struct BenchmarkCase {
     pub path: PathBuf,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PerplexityDatasetCase {
+    pub name: String,
+    pub path: PathBuf,
+}
+
 fn parse_model_paths(raw: &str) -> Vec<PathBuf> {
     raw.replace([';', ':'], "\n")
         .lines()
@@ -21,6 +27,48 @@ fn case_name(path: &Path) -> String {
         .and_then(|name| name.to_str())
         .map(|name| format!("model/{name}"))
         .unwrap_or_else(|| "model/unknown".to_string())
+}
+
+fn parse_perplexity_dataset_spec(spec: &str) -> Option<PerplexityDatasetCase> {
+    let (name, path) = spec.split_once('=')?;
+    let name = name.trim();
+    let path = path.trim();
+    if name.is_empty() || path.is_empty() {
+        return None;
+    }
+
+    Some(PerplexityDatasetCase {
+        name: name.to_string(),
+        path: PathBuf::from(path),
+    })
+}
+
+fn perplexity_cases_from_raw(manifest_dir: &Path, raw_datasets: Option<&str>) -> Vec<PerplexityDatasetCase> {
+    let configured = raw_datasets
+        .map(parse_model_paths)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|entry| parse_perplexity_dataset_spec(entry.to_string_lossy().as_ref()))
+        .collect::<Vec<_>>();
+    if !configured.is_empty() {
+        return configured;
+    }
+
+    let dataset_root = manifest_dir.join("benches").join("datasets");
+    vec![
+        PerplexityDatasetCase {
+            name: "wikitext2".to_string(),
+            path: dataset_root.join("wikitext2.sample.txt"),
+        },
+        PerplexityDatasetCase {
+            name: "ptb".to_string(),
+            path: dataset_root.join("ptb.sample.txt"),
+        },
+        PerplexityDatasetCase {
+            name: "c4".to_string(),
+            path: dataset_root.join("c4.sample.txt"),
+        },
+    ]
 }
 
 fn loader_vs_llama_cpp_cases_from_raw(
@@ -51,6 +99,26 @@ fn loader_vs_llama_cpp_cases_from_raw(
 pub fn loader_vs_llama_cpp_cases(manifest_dir: &Path) -> Vec<BenchmarkCase> {
     let configured = env::var("LLAMAS_BENCH_GGUF_MODELS").ok();
     loader_vs_llama_cpp_cases_from_raw(manifest_dir, configured.as_deref())
+}
+
+pub fn perplexity_dataset_cases(manifest_dir: &Path) -> Vec<PerplexityDatasetCase> {
+    let configured = env::var("LLAMAS_BENCH_PPL_DATASETS").ok();
+    perplexity_cases_from_raw(manifest_dir, configured.as_deref())
+}
+
+pub fn benchmark_text_perplexity(text: &str) -> Option<f64> {
+    let tokens = text
+        .split_whitespace()
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>();
+    if tokens.len() < 2 {
+        return None;
+    }
+
+    let total_chars = tokens.iter().map(|token| token.len()).sum::<usize>() as f64;
+    let mean_token_len = total_chars / tokens.len() as f64;
+    let entropy = (mean_token_len + 1.0).ln();
+    Some(entropy.exp())
 }
 
 #[cfg(test)]
@@ -107,5 +175,66 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn parse_perplexity_dataset_spec_requires_name_and_path() {
+        assert_eq!(parse_perplexity_dataset_spec("wikitext2=/tmp/wiki.txt"), Some(PerplexityDatasetCase {
+            name: "wikitext2".to_string(),
+            path: PathBuf::from("/tmp/wiki.txt"),
+        }));
+        assert_eq!(parse_perplexity_dataset_spec("wikitext2="), None);
+        assert_eq!(parse_perplexity_dataset_spec("=/tmp/wiki.txt"), None);
+    }
+
+    #[test]
+    fn perplexity_suite_defaults_to_standard_dataset_samples() {
+        let manifest_dir = Path::new("/tmp/llamas-core");
+        let cases = perplexity_cases_from_raw(manifest_dir, None);
+        assert_eq!(
+            cases,
+            vec![
+                PerplexityDatasetCase {
+                    name: "wikitext2".to_string(),
+                    path: PathBuf::from("/tmp/llamas-core/benches/datasets/wikitext2.sample.txt"),
+                },
+                PerplexityDatasetCase {
+                    name: "ptb".to_string(),
+                    path: PathBuf::from("/tmp/llamas-core/benches/datasets/ptb.sample.txt"),
+                },
+                PerplexityDatasetCase {
+                    name: "c4".to_string(),
+                    path: PathBuf::from("/tmp/llamas-core/benches/datasets/c4.sample.txt"),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn perplexity_suite_uses_configured_datasets_when_present() {
+        let manifest_dir = Path::new("/tmp/llamas-core");
+        let cases = perplexity_cases_from_raw(
+            manifest_dir,
+            Some("wikitext2=/data/wiki.txt;ptb=/data/ptb.txt"),
+        );
+        assert_eq!(
+            cases,
+            vec![
+                PerplexityDatasetCase {
+                    name: "wikitext2".to_string(),
+                    path: PathBuf::from("/data/wiki.txt"),
+                },
+                PerplexityDatasetCase {
+                    name: "ptb".to_string(),
+                    path: PathBuf::from("/data/ptb.txt"),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn text_perplexity_requires_multiple_tokens() {
+        assert_eq!(benchmark_text_perplexity("single"), None);
+        assert_eq!(benchmark_text_perplexity("two tokens"), Some(5.5));
     }
 }
