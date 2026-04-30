@@ -40,6 +40,26 @@ pub enum GemmError {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AttentionError {
+    InvalidQueryLength {
+        expected: usize,
+        actual: usize,
+    },
+    InvalidKeyLength {
+        expected: usize,
+        actual: usize,
+    },
+    InvalidValueLength {
+        expected: usize,
+        actual: usize,
+    },
+    InvalidOutputLength {
+        expected: usize,
+        actual: usize,
+    },
+}
+
 pub fn gemv_f32(
     matrix: &[f32],
     rows: usize,
@@ -119,6 +139,72 @@ pub fn gemm_f32(
                 sum += left_value * right_matrix[k * cols + col];
             }
             *out_cell = sum;
+        }
+    }
+
+    Ok(())
+}
+
+pub fn scaled_dot_product_attention_f32(
+    query: &[f32],
+    key: &[f32],
+    value: &[f32],
+    seq_len: usize,
+    dim: usize,
+    output: &mut [f32],
+) -> Result<(), AttentionError> {
+    if query.len() != dim {
+        return Err(AttentionError::InvalidQueryLength {
+            expected: dim,
+            actual: query.len(),
+        });
+    }
+
+    let expected_kv_len = seq_len.saturating_mul(dim);
+    if key.len() != expected_kv_len {
+        return Err(AttentionError::InvalidKeyLength {
+            expected: expected_kv_len,
+            actual: key.len(),
+        });
+    }
+    if value.len() != expected_kv_len {
+        return Err(AttentionError::InvalidValueLength {
+            expected: expected_kv_len,
+            actual: value.len(),
+        });
+    }
+    if output.len() != dim {
+        return Err(AttentionError::InvalidOutputLength {
+            expected: dim,
+            actual: output.len(),
+        });
+    }
+
+    let scale = 1.0_f32 / (dim as f32).sqrt();
+    let mut scores = vec![0.0_f32; seq_len];
+
+    for (idx, key_row) in key.chunks_exact(dim).enumerate() {
+        let dot = query
+            .iter()
+            .zip(key_row.iter())
+            .map(|(q, k)| q * k)
+            .sum::<f32>();
+        scores[idx] = dot * scale;
+    }
+
+    let max_score = scores.iter().fold(f32::NEG_INFINITY, |acc, &x| acc.max(x));
+    for score in &mut scores {
+        *score = (*score - max_score).exp();
+    }
+    let sum_exp = scores.iter().sum::<f32>();
+    for score in &mut scores {
+        *score /= sum_exp;
+    }
+
+    output.fill(0.0);
+    for (weight, value_row) in scores.iter().zip(value.chunks_exact(dim)) {
+        for (out, v) in output.iter_mut().zip(value_row.iter()) {
+            *out += weight * v;
         }
     }
 
@@ -245,5 +331,68 @@ mod tests {
         let err = gemm_f32(&left, 2, 3, &right, 2, &mut short_output)
             .expect_err("output length mismatch should fail");
         assert!(matches!(err, GemmError::InvalidOutputLength { .. }));
+    }
+
+    #[test]
+    fn scaled_dot_product_attention_computes_weighted_output() {
+        let query = vec![1.0_f32, 0.0];
+        let key = vec![
+            1.0_f32, 0.0, //
+            0.0, 1.0,
+        ];
+        let value = vec![
+            10.0_f32, 0.0, //
+            0.0, 20.0,
+        ];
+        let mut output = vec![0.0_f32; 2];
+
+        scaled_dot_product_attention_f32(&query, &key, &value, 2, 2, &mut output)
+            .expect("attention should succeed");
+
+        assert!((output[0] - 6.697615).abs() < 1e-5);
+        assert!((output[1] - 6.604_77).abs() < 1e-5);
+    }
+
+    #[test]
+    fn scaled_dot_product_attention_rejects_invalid_shapes() {
+        let mut output = vec![0.0_f32; 2];
+        let err =
+            scaled_dot_product_attention_f32(&[1.0_f32], &[1.0_f32, 0.0], &[1.0_f32, 0.0], 1, 2, &mut output)
+                .expect_err("query length mismatch should fail");
+        assert!(matches!(err, AttentionError::InvalidQueryLength { .. }));
+
+        let err = scaled_dot_product_attention_f32(
+            &[1.0_f32, 0.0],
+            &[1.0_f32, 0.0, 1.0],
+            &[1.0_f32, 0.0, 1.0, 0.0],
+            2,
+            2,
+            &mut output,
+        )
+        .expect_err("key length mismatch should fail");
+        assert!(matches!(err, AttentionError::InvalidKeyLength { .. }));
+
+        let err = scaled_dot_product_attention_f32(
+            &[1.0_f32, 0.0],
+            &[1.0_f32, 0.0, 1.0, 0.0],
+            &[1.0_f32, 0.0, 1.0],
+            2,
+            2,
+            &mut output,
+        )
+        .expect_err("value length mismatch should fail");
+        assert!(matches!(err, AttentionError::InvalidValueLength { .. }));
+
+        let mut short_output = vec![0.0_f32; 1];
+        let err = scaled_dot_product_attention_f32(
+            &[1.0_f32, 0.0],
+            &[1.0_f32, 0.0, 1.0, 0.0],
+            &[1.0_f32, 0.0, 1.0, 0.0],
+            2,
+            2,
+            &mut short_output,
+        )
+        .expect_err("output length mismatch should fail");
+        assert!(matches!(err, AttentionError::InvalidOutputLength { .. }));
     }
 }
