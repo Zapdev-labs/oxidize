@@ -27,11 +27,17 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+
       - name: Check formatting
         run: cargo fmt --all --check
 
       - name: Lint
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Dependency/license audit
+        run: cargo deny check
 
       - name: Run tests
         run: cargo test --workspace --all-targets
