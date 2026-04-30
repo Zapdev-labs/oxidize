@@ -3,9 +3,15 @@ name = "llamas-core"
 edition.workspace = true
 license.workspace = true
 version.workspace = true
+build = "build.rs"
+
+[features]
+default = []
+cuda = ["dep:cust"]
 
 [dependencies]
 anyhow.workspace = true
+cust = { version = "0.3", optional = true }
 memmap2 = "0.9"
 rayon = "1"
 serde.workspace = true

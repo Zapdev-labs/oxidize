@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+pub mod cuda;
 pub mod gguf;
 pub mod model_loader;
 pub mod quantization;
@@ -49,12 +50,34 @@ mod tests {
 
     #[test]
     fn workspace_release_profile_enables_lto_and_abort_panic() {
-        let workspace_cargo_toml = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("Cargo.toml");
+        let workspace_cargo_toml = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("Cargo.toml");
         let cargo_toml =
             std::fs::read_to_string(workspace_cargo_toml).expect("workspace Cargo.toml exists");
 
         assert!(cargo_toml.contains("[profile.release]"));
         assert!(cargo_toml.contains("lto = true"));
         assert!(cargo_toml.contains("panic = \"abort\""));
+    }
+
+    #[test]
+    fn llamas_core_declares_optional_cuda_pipeline() {
+        let crate_cargo_toml = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let cargo_toml = std::fs::read_to_string(crate_cargo_toml).expect("llamas-core Cargo.toml exists");
+
+        assert!(cargo_toml.contains("build = \"build.rs\""));
+        assert!(cargo_toml.contains("cuda = [\"dep:cust\"]"));
+        assert!(cargo_toml.contains("cust = { version = \"0.3\", optional = true }"));
+    }
+
+    #[test]
+    fn cuda_build_script_tracks_expected_environment_inputs() {
+        let build_script_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("build.rs");
+        let build_script = std::fs::read_to_string(build_script_path).expect("build.rs exists");
+
+        assert!(build_script.contains("cargo:rerun-if-env-changed=CUDA_HOME"));
+        assert!(build_script.contains("cargo:rerun-if-env-changed=CUDA_PATH"));
+        assert!(build_script.contains("cargo:rustc-check-cfg=cfg(cuda_available)"));
     }
 }
