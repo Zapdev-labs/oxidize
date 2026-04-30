@@ -105,6 +105,14 @@ fn run_chat_mode<R: BufRead, W: Write>(reader: &mut R, writer: &mut W) -> io::Re
     Ok(())
 }
 
+fn run_single_shot_mode<W: Write>(prompt: &str, writer: &mut W) -> io::Result<()> {
+    let prompt = prompt.trim();
+    if prompt.is_empty() {
+        return Ok(());
+    }
+    writeln!(writer, "{}", greeting(prompt))
+}
+
 fn main() {
     let args = Args::parse();
     if args.chat {
@@ -162,7 +170,11 @@ fn main() {
         }
         return;
     }
-    println!("{}", greeting(&args.prompt));
+    let stdout = io::stdout();
+    let mut writer = stdout.lock();
+    if let Err(error) = run_single_shot_mode(&args.prompt, &mut writer) {
+        eprintln!("single-shot mode failed: {error}");
+    }
 }
 
 #[cfg(test)]
@@ -265,5 +277,20 @@ mod tests {
 
         let output = String::from_utf8(writer).expect("valid utf8 output");
         assert!(output.contains("llamas-cli: world"));
+    }
+
+    #[test]
+    fn single_shot_mode_writes_one_response() {
+        let mut writer = Vec::new();
+        run_single_shot_mode("hello", &mut writer).expect("single-shot mode should succeed");
+        let output = String::from_utf8(writer).expect("valid utf8 output");
+        assert_eq!(output, "llamas-cli: hello\n");
+    }
+
+    #[test]
+    fn single_shot_mode_skips_blank_prompt() {
+        let mut writer = Vec::new();
+        run_single_shot_mode("   ", &mut writer).expect("single-shot mode should succeed");
+        assert!(writer.is_empty());
     }
 }
