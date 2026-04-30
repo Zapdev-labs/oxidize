@@ -514,6 +514,7 @@ mod tests {
                     tensor_count: 18,
                 },
             ],
+            pipeline_stages: vec![],
         });
         assert_eq!(
             summary,
