@@ -113,10 +113,7 @@ impl BpeTokenizer {
             .chars()
             .filter_map(|ch| {
                 let key = ch.to_string();
-                self.vocab
-                    .get(&key)
-                    .copied()
-                    .or(self.unknown_token)
+                self.vocab.get(&key).copied().or(self.unknown_token)
             })
             .collect();
 
@@ -153,7 +150,146 @@ impl BpeTokenizer {
             .iter()
             .filter(|(pair, _)| present_pairs.contains(pair))
             .min_by_key(|(_, rank)| *rank)
-            .and_then(|(pair, _)| self.merged_token_ids.get(pair).copied().map(|id| (*pair, id)))
+            .and_then(|(pair, _)| {
+                self.merged_token_ids
+                    .get(pair)
+                    .copied()
+                    .map(|id| (*pair, id))
+            })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SentencePieceUnigramTokenizer {
+    vocab: HashMap<String, u32>,
+    id_to_token: HashMap<u32, String>,
+    piece_scores: HashMap<u32, f32>,
+    unknown_token: Option<u32>,
+}
+
+impl SentencePieceUnigramTokenizer {
+    pub fn new(pieces: &[(&str, f32)]) -> Self {
+        let mut vocab = HashMap::new();
+        let mut id_to_token = HashMap::new();
+        let mut piece_scores = HashMap::new();
+
+        for (idx, (piece, score)) in pieces.iter().enumerate() {
+            let id = idx as u32;
+            let token = (*piece).to_owned();
+            vocab.insert(token.clone(), id);
+            id_to_token.insert(id, token);
+            piece_scores.insert(id, *score);
+        }
+
+        Self {
+            vocab,
+            id_to_token,
+            piece_scores,
+            unknown_token: None,
+        }
+    }
+
+    pub fn with_unknown_token(mut self, token: &str) -> Self {
+        let token_id = if let Some(id) = self.vocab.get(token).copied() {
+            id
+        } else {
+            let id = self
+                .id_to_token
+                .keys()
+                .copied()
+                .max()
+                .map_or(0, |max_id| max_id.saturating_add(1));
+            self.vocab.insert(token.to_owned(), id);
+            self.id_to_token.insert(id, token.to_owned());
+            self.piece_scores.insert(id, f32::NEG_INFINITY);
+            id
+        };
+        self.unknown_token = Some(token_id);
+        self
+    }
+
+    pub fn encode(&self, text: &str) -> Vec<u32> {
+        if text.is_empty() {
+            return Vec::new();
+        }
+
+        let boundaries = char_boundaries(text);
+        let mut encoded = Vec::new();
+        let mut boundary_idx = 0;
+
+        while boundary_idx + 1 < boundaries.len() {
+            let start = boundaries[boundary_idx];
+            let segment = &text[start..];
+
+            if let Some((ids, consumed)) = self.best_segmentation(segment) {
+                encoded.extend(ids);
+                boundary_idx += consumed;
+                continue;
+            }
+
+            if let Some(unk) = self.unknown_token {
+                encoded.push(unk);
+            }
+            boundary_idx += 1;
+        }
+
+        encoded
+    }
+
+    pub fn decode(&self, ids: &[u32]) -> Result<String, TokenizerError> {
+        let mut out = String::new();
+        for id in ids {
+            let Some(piece) = self.id_to_token.get(id) else {
+                return Err(TokenizerError::UnknownToken(*id));
+            };
+            out.push_str(piece);
+        }
+        Ok(out)
+    }
+
+    fn best_segmentation(&self, text: &str) -> Option<(Vec<u32>, usize)> {
+        let boundaries = char_boundaries(text);
+        let token_count = boundaries.len().saturating_sub(1);
+        if token_count == 0 {
+            return Some((Vec::new(), 0));
+        }
+
+        let mut best_scores = vec![f32::NEG_INFINITY; token_count + 1];
+        let mut backtrack: Vec<Option<(usize, u32)>> = vec![None; token_count + 1];
+        best_scores[0] = 0.0;
+
+        for i in 0..token_count {
+            if !best_scores[i].is_finite() {
+                continue;
+            }
+
+            for j in (i + 1)..=token_count {
+                let piece = &text[boundaries[i]..boundaries[j]];
+                let Some(id) = self.vocab.get(piece).copied() else {
+                    continue;
+                };
+                let score = *self.piece_scores.get(&id).unwrap_or(&0.0);
+                let candidate = best_scores[i] + score;
+                if candidate > best_scores[j] {
+                    best_scores[j] = candidate;
+                    backtrack[j] = Some((i, id));
+                }
+            }
+        }
+
+        let end = (1..=token_count)
+            .rev()
+            .find(|idx| best_scores[*idx].is_finite())?;
+
+        let mut ids = Vec::new();
+        let mut cursor = end;
+        while cursor > 0 {
+            let (prev, id) = backtrack[cursor]?;
+            ids.push(id);
+            cursor = prev;
+        }
+        ids.reverse();
+        Some((ids, end))
     }
 }
 
@@ -180,6 +316,12 @@ fn apply_merge(sequence: &[u32], pair: (u32, u32), merged_id: u32) -> Vec<u32> {
         idx += 1;
     }
     merged
+}
+
+fn char_boundaries(text: &str) -> Vec<usize> {
+    let mut boundaries: Vec<usize> = text.char_indices().map(|(idx, _)| idx).collect();
+    boundaries.push(text.len());
+    boundaries
 }
 
 #[cfg(test)]
@@ -216,5 +358,51 @@ mod tests {
             .decode(&[999])
             .expect_err("unknown token id should fail");
         assert_eq!(err, TokenizerError::UnknownToken(999));
+    }
+
+    #[test]
+    fn sentencepiece_prefers_higher_probability_path() {
+        let tokenizer = SentencePieceUnigramTokenizer::new(&[
+            ("a", -3.0),
+            ("b", -3.0),
+            ("ab", -0.5),
+            ("aba", -0.1),
+        ]);
+
+        let encoded = tokenizer.encode("aba");
+        assert_eq!(encoded.len(), 1);
+        assert_eq!(
+            tokenizer.decode(&encoded).expect("decode should succeed"),
+            "aba"
+        );
+    }
+
+    #[test]
+    fn sentencepiece_uses_unknown_for_unmatched_text() {
+        let tokenizer = SentencePieceUnigramTokenizer::new(&[("a", -0.5), ("b", -0.5)])
+            .with_unknown_token("<unk>");
+
+        let encoded = tokenizer.encode("abz");
+        assert_eq!(
+            tokenizer.decode(&encoded).expect("decode should succeed"),
+            "ab<unk>"
+        );
+    }
+
+    #[test]
+    fn sentencepiece_round_trips_known_pieces() {
+        let tokenizer = SentencePieceUnigramTokenizer::new(&[
+            ("hello", -0.2),
+            (" ", -0.1),
+            ("world", -0.2),
+            ("hell", -1.5),
+            ("o", -1.0),
+        ]);
+
+        let encoded = tokenizer.encode("hello world");
+        assert_eq!(
+            tokenizer.decode(&encoded).expect("decode should succeed"),
+            "hello world"
+        );
     }
 }
