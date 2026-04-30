@@ -1,0 +1,10 @@
+[package]
+name = "llamas-cli"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+clap.workspace = true
+llamas-core = { path = "../llamas-core" }
+tracing.workspace = true
