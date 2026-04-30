@@ -1,3 +1,119 @@
+use std::collections::{HashMap, HashSet, VecDeque};
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum GrammarSymbol {
+    Terminal(u32),
+    NonTerminal(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrammarConstraint {
+    start: String,
+    productions: HashMap<String, Vec<Vec<GrammarSymbol>>>,
+}
+
+impl GrammarConstraint {
+    pub fn new(
+        start: impl Into<String>,
+        productions: HashMap<String, Vec<Vec<GrammarSymbol>>>,
+    ) -> Result<Self, SamplingError> {
+        let start = start.into();
+        if start.is_empty() || !productions.contains_key(&start) {
+            return Err(SamplingError::InvalidGrammarConstraint);
+        }
+        for alternatives in productions.values() {
+            for production in alternatives {
+                for symbol in production {
+                    if let GrammarSymbol::NonTerminal(non_terminal) = symbol
+                        && !productions.contains_key(non_terminal)
+                    {
+                        return Err(SamplingError::InvalidGrammarConstraint);
+                    }
+                }
+            }
+        }
+        Ok(Self { start, productions })
+    }
+
+    pub fn allows_token(&self, generated_tokens: &[u32], token: u32) -> bool {
+        let mut candidate = Vec::with_capacity(generated_tokens.len() + 1);
+        candidate.extend_from_slice(generated_tokens);
+        candidate.push(token);
+        self.accepts_prefix(&candidate)
+    }
+
+    fn accepts_prefix(&self, prefix: &[u32]) -> bool {
+        #[derive(Clone, PartialEq, Eq, Hash)]
+        struct ParseState {
+            stack: Vec<GrammarSymbol>,
+            consumed: usize,
+        }
+
+        const MAX_STATES: usize = 20_000;
+        const MAX_STACK_LEN: usize = 256;
+
+        let mut queue = VecDeque::new();
+        let mut seen = HashSet::new();
+        let initial = ParseState {
+            stack: vec![GrammarSymbol::NonTerminal(self.start.clone())],
+            consumed: 0,
+        };
+        seen.insert(initial.clone());
+        queue.push_back(initial);
+
+        while let Some(state) = queue.pop_front() {
+            if state.consumed == prefix.len() {
+                return true;
+            }
+            if seen.len() >= MAX_STATES || state.stack.is_empty() {
+                continue;
+            }
+
+            let mut next_stack = state.stack;
+            let Some(symbol) = next_stack.pop() else {
+                continue;
+            };
+
+            match symbol {
+                GrammarSymbol::Terminal(token) => {
+                    if prefix[state.consumed] == token {
+                        let next = ParseState {
+                            stack: next_stack,
+                            consumed: state.consumed + 1,
+                        };
+                        if seen.insert(next.clone()) {
+                            queue.push_back(next);
+                        }
+                    }
+                }
+                GrammarSymbol::NonTerminal(non_terminal) => {
+                    let Some(alternatives) = self.productions.get(&non_terminal) else {
+                        continue;
+                    };
+                    for production in alternatives {
+                        let mut expanded = next_stack.clone();
+                        for item in production.iter().rev() {
+                            expanded.push(item.clone());
+                        }
+                        if expanded.len() > MAX_STACK_LEN {
+                            continue;
+                        }
+                        let next = ParseState {
+                            stack: expanded,
+                            consumed: state.consumed,
+                        };
+                        if seen.insert(next.clone()) {
+                            queue.push_back(next);
+                        }
+                    }
+                }
+            }
+        }
+
+        false
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SamplingConfig {
     pub temperature: f32,
@@ -68,6 +184,8 @@ pub enum SamplingError {
     InvalidNewlinePenalty,
     InvalidMirostat,
     InvalidRandom,
+    InvalidGrammarConstraint,
+    NoValidGrammarToken,
 }
 
 pub fn greedy(logits: &[f32]) -> Result<u32, SamplingError> {
@@ -98,6 +216,26 @@ pub fn sample_with_repetition(
     random: f32,
     recent_tokens: &[u32],
     repetition: RepetitionPenaltyConfig,
+) -> Result<u32, SamplingError> {
+    sample_with_repetition_and_grammar(
+        logits,
+        config,
+        random,
+        recent_tokens,
+        repetition,
+        &[],
+        None,
+    )
+}
+
+pub fn sample_with_repetition_and_grammar(
+    logits: &[f32],
+    config: SamplingConfig,
+    random: f32,
+    recent_tokens: &[u32],
+    repetition: RepetitionPenaltyConfig,
+    generated_tokens: &[u32],
+    grammar: Option<&GrammarConstraint>,
 ) -> Result<u32, SamplingError> {
     if logits.is_empty() {
         return Err(SamplingError::EmptyLogits);
@@ -209,7 +347,14 @@ pub fn sample_with_repetition(
         apply_locally_typical_sampling(&mut indexed_probs, locally_typical_tau);
     }
 
+    if let Some(grammar) = grammar {
+        indexed_probs.retain(|(idx, _)| grammar.allows_token(generated_tokens, *idx as u32));
+    }
+
     if indexed_probs.is_empty() {
+        if grammar.is_some() {
+            return Err(SamplingError::NoValidGrammarToken);
+        }
         return greedy(logits);
     }
 
@@ -446,6 +591,26 @@ fn weighted_pick(indexed_probs: &[(usize, f32)], random: f32) -> Option<(usize, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn two_digit_grammar() -> GrammarConstraint {
+        let productions = HashMap::from([
+            (
+                "S".to_string(),
+                vec![vec![
+                    GrammarSymbol::NonTerminal("D".to_string()),
+                    GrammarSymbol::NonTerminal("D".to_string()),
+                ]],
+            ),
+            (
+                "D".to_string(),
+                vec![
+                    vec![GrammarSymbol::Terminal(0)],
+                    vec![GrammarSymbol::Terminal(1)],
+                ],
+            ),
+        ]);
+        GrammarConstraint::new("S", productions).expect("grammar should be valid")
+    }
 
     #[test]
     fn greedy_returns_highest_logit_index() {
@@ -782,5 +947,51 @@ mod tests {
         )
         .expect("sampling should succeed");
         assert_eq!(token, 1);
+    }
+
+    #[test]
+    fn grammar_constraint_rejects_unknown_start_and_symbols() {
+        let missing_start = GrammarConstraint::new("S", HashMap::new());
+        assert_eq!(missing_start, Err(SamplingError::InvalidGrammarConstraint));
+
+        let invalid_symbol = GrammarConstraint::new(
+            "S",
+            HashMap::from([(
+                "S".to_string(),
+                vec![vec![GrammarSymbol::NonTerminal("MISSING".to_string())]],
+            )]),
+        );
+        assert_eq!(invalid_symbol, Err(SamplingError::InvalidGrammarConstraint));
+    }
+
+    #[test]
+    fn grammar_constraint_filters_candidate_tokens() {
+        let grammar = two_digit_grammar();
+        let token = sample_with_repetition_and_grammar(
+            &[5.0, 4.0, 10.0],
+            SamplingConfig::default(),
+            0.4,
+            &[],
+            RepetitionPenaltyConfig::default(),
+            &[0],
+            Some(&grammar),
+        )
+        .expect("sampling should succeed");
+        assert!(token <= 1);
+    }
+
+    #[test]
+    fn grammar_constraint_errors_when_no_tokens_are_valid() {
+        let grammar = two_digit_grammar();
+        let err = sample_with_repetition_and_grammar(
+            &[3.0, 2.0],
+            SamplingConfig::default(),
+            0.2,
+            &[],
+            RepetitionPenaltyConfig::default(),
+            &[0, 1],
+            Some(&grammar),
+        );
+        assert_eq!(err, Err(SamplingError::NoValidGrammarToken));
     }
 }
