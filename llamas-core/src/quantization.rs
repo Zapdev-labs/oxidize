@@ -1,4 +1,5 @@
 use crate::gguf::GgufQuantizationType;
+use rayon::prelude::*;
 
 const QK4_0: usize = 32;
 const QK4_1: usize = 32;
@@ -288,17 +289,16 @@ pub fn quantize_mixed_scalar(
                 reason: "layer value_count must be greater than zero",
             });
         }
-        let layer_bytes = plan
-            .value_count
-            .checked_mul(source_bytes_per_value)
-            .ok_or(QuantizationError::InvalidMixedQuantizationPlan {
+        let layer_bytes = plan.value_count.checked_mul(source_bytes_per_value).ok_or(
+            QuantizationError::InvalidMixedQuantizationPlan {
                 reason: "layer value_count overflows byte calculation",
-            })?;
-        expected_total_bytes = expected_total_bytes
-            .checked_add(layer_bytes)
-            .ok_or(QuantizationError::InvalidMixedQuantizationPlan {
+            },
+        )?;
+        expected_total_bytes = expected_total_bytes.checked_add(layer_bytes).ok_or(
+            QuantizationError::InvalidMixedQuantizationPlan {
                 reason: "total planned input size overflows byte calculation",
-            })?;
+            },
+        )?;
     }
 
     if input.len() != expected_total_bytes {
@@ -308,15 +308,69 @@ pub fn quantize_mixed_scalar(
         });
     }
 
+    if plans.len() <= 1 {
+        return quantize_mixed_scalar_sequential(source, source_bytes_per_value, input, plans);
+    }
+
+    let mut offset = 0_usize;
+    let mut jobs = Vec::with_capacity(plans.len());
+    for (index, plan) in plans.iter().enumerate() {
+        let layer_input_len = plan.value_count.checked_mul(source_bytes_per_value).ok_or(
+            QuantizationError::InvalidMixedQuantizationPlan {
+                reason: "layer value_count overflows byte calculation",
+            },
+        )?;
+        jobs.push((index, plan, offset, layer_input_len));
+        offset += layer_input_len;
+    }
+
+    let thread_count = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .min(plans.len());
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(thread_count.max(1))
+        .build()
+        .map_err(|_| QuantizationError::InvalidMixedQuantizationPlan {
+            reason: "failed to initialize layer thread pool",
+        })?;
+
+    let mut indexed_layers = pool.install(|| {
+        jobs.par_iter()
+            .map(|(index, plan, offset, layer_input_len)| {
+                let layer_input = &input[*offset..*offset + *layer_input_len];
+                let layer_output_len = quantized_size(plan.target, plan.value_count)?;
+                let mut layer_output = vec![0_u8; layer_output_len];
+                quantize_scalar(source, plan.target, layer_input, &mut layer_output)?;
+                Ok::<_, QuantizationError>((
+                    *index,
+                    QuantizedLayer {
+                        name: plan.name.clone(),
+                        target: plan.target,
+                        bytes: layer_output,
+                    },
+                ))
+            })
+            .collect::<Result<Vec<_>, _>>()
+    })?;
+    indexed_layers.sort_unstable_by_key(|(index, _)| *index);
+    Ok(indexed_layers.into_iter().map(|(_, layer)| layer).collect())
+}
+
+fn quantize_mixed_scalar_sequential(
+    source: GgufQuantizationType,
+    source_bytes_per_value: usize,
+    input: &[u8],
+    plans: &[MixedLayerPlan],
+) -> Result<Vec<QuantizedLayer>, QuantizationError> {
     let mut offset = 0_usize;
     let mut output_layers = Vec::with_capacity(plans.len());
     for plan in plans {
-        let layer_input_len = plan
-            .value_count
-            .checked_mul(source_bytes_per_value)
-            .ok_or(QuantizationError::InvalidMixedQuantizationPlan {
+        let layer_input_len = plan.value_count.checked_mul(source_bytes_per_value).ok_or(
+            QuantizationError::InvalidMixedQuantizationPlan {
                 reason: "layer value_count overflows byte calculation",
-            })?;
+            },
+        )?;
         let layer_input = &input[offset..offset + layer_input_len];
         let layer_output_len = quantized_size(plan.target, plan.value_count)?;
         let mut layer_output = vec![0_u8; layer_output_len];
@@ -1475,9 +1529,7 @@ mod tests {
     fn quantizes_mixed_layers_with_distinct_targets() {
         let first_values = (0..QK8_0).map(|i| i as f32 * 0.25);
         let second_values = [1.0_f32, -2.0_f32];
-        let values = first_values
-            .chain(second_values)
-            .collect::<Vec<_>>();
+        let values = first_values.chain(second_values).collect::<Vec<_>>();
         let mut input = Vec::with_capacity(values.len() * 4);
         for value in &values {
             input.extend_from_slice(&value.to_le_bytes());
@@ -1561,6 +1613,46 @@ mod tests {
     }
 
     #[test]
+    fn mixed_quantization_parallel_matches_sequential_output() {
+        let plans = vec![
+            MixedLayerPlan {
+                name: "blk.0.attn_q.weight".to_owned(),
+                value_count: QK8_0,
+                target: GgufQuantizationType::Q8_0,
+            },
+            MixedLayerPlan {
+                name: "blk.0.attn_k.weight".to_owned(),
+                value_count: QK8_0,
+                target: GgufQuantizationType::Q4_0,
+            },
+            MixedLayerPlan {
+                name: "blk.0.ffn_down.weight".to_owned(),
+                value_count: 2,
+                target: GgufQuantizationType::F16,
+            },
+        ];
+        let values = (0..(QK8_0 * 2 + 2))
+            .map(|i| (i as f32 * 0.25) - 8.0)
+            .collect::<Vec<_>>();
+        let mut input = Vec::with_capacity(values.len() * 4);
+        for value in values {
+            input.extend_from_slice(&value.to_le_bytes());
+        }
+
+        let sequential = quantize_mixed_scalar_sequential(
+            GgufQuantizationType::F32,
+            4,
+            &input,
+            &plans,
+        )
+        .expect("sequential mixed quantization should succeed");
+        let parallel = quantize_mixed_scalar(GgufQuantizationType::F32, &input, &plans)
+            .expect("parallel mixed quantization should succeed");
+
+        assert_eq!(parallel, sequential);
+    }
+
+    #[test]
     fn q4_0_encoding_matches_llama_cpp_reference_block_layout() {
         let mut values = Vec::with_capacity(QK4_0);
         for i in 0..QK4_0 {
@@ -1638,8 +1730,8 @@ mod tests {
 
         let expected = vec![
             0x08, 0x30, // d = 16/127 in f16
-            129, 137, 145, 153, 161, 169, 177, 185, 192, 200, 208, 216, 224, 232, 240, 248, 0,
-            8, 16, 24, 32, 40, 48, 56, 64, 71, 79, 87, 95, 103, 111, 119,
+            129, 137, 145, 153, 161, 169, 177, 185, 192, 200, 208, 216, 224, 232, 240, 248, 0, 8,
+            16, 24, 32, 40, 48, 56, 64, 71, 79, 87, 95, 103, 111, 119,
         ];
         assert_eq!(output, expected);
     }

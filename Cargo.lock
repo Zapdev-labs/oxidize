@@ -518,6 +518,7 @@ dependencies = [
  "anyhow",
  "criterion",
  "memmap2",
+ "rayon",
  "serde",
  "thiserror",
 ]

@@ -7,6 +7,7 @@ version.workspace = true
 [dependencies]
 anyhow.workspace = true
 memmap2 = "0.9"
+rayon = "1"
 serde.workspace = true
 thiserror.workspace = true
 
