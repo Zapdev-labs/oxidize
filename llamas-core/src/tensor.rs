@@ -37,6 +37,12 @@ pub enum RopeError {
     OddHeadDim { head_dim: usize },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SwiGluError {
+    InvalidGateLength { expected: usize, actual: usize },
+    InvalidUpLength { expected: usize, actual: usize },
+}
+
 pub fn gemv_f32(
     matrix: &[f32],
     rows: usize,
@@ -224,6 +230,29 @@ pub fn apply_rope_f32(
 
         output[2 * i] = x0 * cos_angle - x1 * sin_angle;
         output[2 * i + 1] = x0 * sin_angle + x1 * cos_angle;
+    }
+
+    Ok(())
+}
+
+pub fn apply_swiglu_f32(gate: &[f32], up: &[f32], output: &mut [f32]) -> Result<(), SwiGluError> {
+    let expected_len = output.len();
+    if gate.len() != expected_len {
+        return Err(SwiGluError::InvalidGateLength {
+            expected: expected_len,
+            actual: gate.len(),
+        });
+    }
+    if up.len() != expected_len {
+        return Err(SwiGluError::InvalidUpLength {
+            expected: expected_len,
+            actual: up.len(),
+        });
+    }
+
+    for ((gate_value, up_value), out) in gate.iter().zip(up.iter()).zip(output.iter_mut()) {
+        let sigmoid = 1.0_f32 / (1.0 + (-gate_value).exp());
+        *out = gate_value * sigmoid * up_value;
     }
 
     Ok(())
@@ -463,5 +492,31 @@ mod tests {
         let err = apply_rope_f32(&[1.0_f32, 2.0, 3.0], 1, 3, 10_000.0, &mut odd_output)
             .expect_err("odd head dimension should fail");
         assert!(matches!(err, RopeError::OddHeadDim { .. }));
+    }
+
+    #[test]
+    fn swiglu_applies_silu_gate_times_up_projection() {
+        let gate = [0.0_f32, 2.0, -2.0];
+        let up = [1.0_f32, 3.0, -4.0];
+        let mut output = [0.0_f32; 3];
+
+        apply_swiglu_f32(&gate, &up, &mut output).expect("swiglu should succeed");
+
+        assert!((output[0] - 0.0).abs() < 1e-6);
+        assert!((output[1] - 5.284_782_4).abs() < 1e-6);
+        assert!((output[2] - 0.953_623_35).abs() < 1e-6);
+    }
+
+    #[test]
+    fn swiglu_rejects_mismatched_input_lengths() {
+        let mut output = [0.0_f32; 2];
+
+        let gate_err = apply_swiglu_f32(&[1.0_f32], &[1.0_f32, 2.0], &mut output)
+            .expect_err("gate length mismatch should fail");
+        assert!(matches!(gate_err, SwiGluError::InvalidGateLength { .. }));
+
+        let up_err = apply_swiglu_f32(&[1.0_f32, 2.0], &[1.0_f32], &mut output)
+            .expect_err("up length mismatch should fail");
+        assert!(matches!(up_err, SwiGluError::InvalidUpLength { .. }));
     }
 }
