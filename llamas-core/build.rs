@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(cuda_available)");
     println!("cargo:rustc-check-cfg=cfg(metal_available)");
+    println!("cargo:rustc-check-cfg=cfg(webgpu_available)");
     println!("cargo:rerun-if-env-changed=CUDA_HOME");
     println!("cargo:rerun-if-env-changed=CUDA_PATH");
 
@@ -20,6 +21,10 @@ fn main() {
 
     if detect_metal_available() {
         println!("cargo:rustc-cfg=metal_available");
+    }
+
+    if detect_webgpu_available() {
+        println!("cargo:rustc-cfg=webgpu_available");
     }
 }
 
@@ -48,4 +53,8 @@ fn detect_metal_available() -> bool {
 #[cfg(not(target_os = "macos"))]
 fn detect_metal_available() -> bool {
     false
+}
+
+fn detect_webgpu_available() -> bool {
+    env::var_os("CARGO_FEATURE_WEBGPU").is_some()
 }

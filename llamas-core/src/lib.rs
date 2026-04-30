@@ -17,6 +17,7 @@ pub mod sampling;
 pub mod simd;
 pub mod tensor;
 pub mod tokenizer;
+pub mod webgpu;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkspaceHealth {
@@ -121,6 +122,26 @@ mod tests {
     }
 
     #[test]
+    fn llamas_core_declares_webgpu_feature_and_dependency() {
+        let crate_cargo_toml = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let cargo_toml =
+            std::fs::read_to_string(crate_cargo_toml).expect("llamas-core Cargo.toml exists");
+
+        assert!(cargo_toml.contains("webgpu = [\"dep:wgpu\"]"));
+        assert!(cargo_toml.contains("wgpu = { version = \"25\", optional = true }"));
+    }
+
+    #[test]
+    fn webgpu_build_script_sets_expected_cfg_and_feature_detection() {
+        let build_script_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("build.rs");
+        let build_script = std::fs::read_to_string(build_script_path).expect("build.rs exists");
+
+        assert!(build_script.contains("cargo:rustc-check-cfg=cfg(webgpu_available)"));
+        assert!(build_script.contains("if detect_webgpu_available()"));
+        assert!(build_script.contains("env::var_os(\"CARGO_FEATURE_WEBGPU\").is_some()"));
+    }
+
+    #[test]
     fn wasm_workspace_status_matches_workspace_health() {
         assert_eq!(wasm_workspace_status(), workspace_health().status);
     }
@@ -144,9 +165,9 @@ mod tests {
         let makefile = std::fs::read_to_string(makefile).expect("workspace Makefile exists");
 
         assert!(makefile.contains(".PHONY: help fmt lint audit test build wasm check ci"));
-        assert!(
-            makefile.contains("cargo build -p llamas-core --target wasm32-unknown-unknown --release --features wasm")
-        );
+        assert!(makefile.contains(
+            "cargo build -p llamas-core --target wasm32-unknown-unknown --release --features wasm"
+        ));
         assert!(
             makefile.contains("command -v wasm-bindgen >/dev/null || cargo install --locked wasm-bindgen-cli --version 0.2.120")
         );

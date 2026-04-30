@@ -36,6 +36,8 @@ pub enum GemvError {
     Cuda(String),
     #[cfg(feature = "metal")]
     Metal(String),
+    #[cfg(feature = "webgpu")]
+    WebGpu(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,6 +58,8 @@ pub enum GemmError {
     Cuda(String),
     #[cfg(feature = "metal")]
     Metal(String),
+    #[cfg(feature = "webgpu")]
+    WebGpu(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,6 +134,14 @@ pub fn gemv_f32(
     if crate::cuda::cuda_build_info().detected_at_build {
         return crate::cuda::gemv_f32_cuda(matrix, rows, cols, vector, output)
             .map_err(|err| GemvError::Cuda(format!("{err:?}")));
+    }
+
+    #[cfg(feature = "webgpu")]
+    if crate::webgpu::should_use_webgpu_gemv(rows, cols) {
+        crate::webgpu::validate_gemv_dims(matrix, rows, cols, vector, output)
+            .map_err(|err| GemvError::WebGpu(format!("WebGPU GEMV validation failed: {err:?}")))?;
+        gemv_f32_cpu(matrix, cols, vector, output);
+        return Ok(());
     }
 
     #[cfg(feature = "metal")]
@@ -289,6 +301,21 @@ pub fn gemm_f32(
             output,
         )
         .map_err(|err| GemmError::Cuda(format!("{err:?}")));
+    }
+
+    #[cfg(feature = "webgpu")]
+    if crate::webgpu::should_use_webgpu_gemm(rows, shared_dim, cols) {
+        crate::webgpu::validate_gemm_dims(
+            left_matrix,
+            rows,
+            shared_dim,
+            right_matrix,
+            cols,
+            output,
+        )
+        .map_err(|err| GemmError::WebGpu(format!("WebGPU GEMM validation failed: {err:?}")))?;
+        gemm_f32_cpu(left_matrix, rows, shared_dim, right_matrix, cols, output);
+        return Ok(());
     }
 
     #[cfg(feature = "metal")]
