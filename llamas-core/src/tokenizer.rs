@@ -15,6 +15,12 @@ pub enum TokenizerLoadError {
     InvalidMergeEntry(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChatMessage<'a> {
+    pub role: &'a str,
+    pub content: &'a str,
+}
+
 impl From<GgufParseError> for TokenizerLoadError {
     fn from(_: GgufParseError) -> Self {
         Self::InvalidMetadataType("gguf")
@@ -233,6 +239,119 @@ pub fn load_tokenizer_from_gguf_metadata(
         "tiktoken" => Ok(LoadedTokenizer::Tiktoken(load_tiktoken(metadata)?)),
         _ => Err(TokenizerLoadError::UnsupportedTokenizerModel(model)),
     }
+}
+
+pub fn process_chat_template(
+    template: &str,
+    messages: &[ChatMessage<'_>],
+    add_generation_prompt: bool,
+) -> String {
+    let mut rendered = template.to_owned();
+
+    rendered = render_for_messages_block(&rendered, messages);
+    rendered = render_if_generation_prompt(&rendered, add_generation_prompt);
+
+    rendered
+}
+
+pub fn process_chat_template_from_gguf_metadata(
+    metadata: &BTreeMap<String, GgufMetadataValue>,
+    messages: &[ChatMessage<'_>],
+    add_generation_prompt: bool,
+) -> Result<Option<String>, TokenizerLoadError> {
+    let template = metadata
+        .get("tokenizer.chat_template")
+        .or_else(|| metadata.get("tokenizer.ggml.chat_template"));
+    match template {
+        Some(GgufMetadataValue::String(template)) => Ok(Some(process_chat_template(
+            template,
+            messages,
+            add_generation_prompt,
+        ))),
+        Some(_) => Err(TokenizerLoadError::InvalidMetadataType(
+            "tokenizer.chat_template",
+        )),
+        None => Ok(None),
+    }
+}
+
+fn render_for_messages_block(template: &str, messages: &[ChatMessage<'_>]) -> String {
+    let starts = ["{% for message in messages %}", "{%- for message in messages %}"];
+    let ends = ["{% endfor %}", "{%- endfor %}"];
+
+    let Some((start_idx, start_token)) = starts
+        .iter()
+        .find_map(|token| template.find(token).map(|idx| (idx, *token)))
+    else {
+        return template.to_owned();
+    };
+
+    let loop_start = start_idx + start_token.len();
+    let Some((end_idx, end_token)) = ends
+        .iter()
+        .find_map(|token| template[loop_start..].find(token).map(|idx| (loop_start + idx, *token)))
+    else {
+        return template.to_owned();
+    };
+
+    let loop_body = &template[loop_start..end_idx];
+    let mut expanded = String::new();
+    for message in messages {
+        expanded.push_str(&render_message_template(loop_body, message));
+    }
+
+    let mut out = String::with_capacity(template.len() + expanded.len());
+    out.push_str(&template[..start_idx]);
+    out.push_str(&expanded);
+    out.push_str(&template[end_idx + end_token.len()..]);
+    out
+}
+
+fn render_if_generation_prompt(template: &str, add_generation_prompt: bool) -> String {
+    let starts = [
+        "{% if add_generation_prompt %}",
+        "{%- if add_generation_prompt %}",
+    ];
+    let ends = ["{% endif %}", "{%- endif %}"];
+
+    let Some((start_idx, start_token)) = starts
+        .iter()
+        .find_map(|token| template.find(token).map(|idx| (idx, *token)))
+    else {
+        return template.to_owned();
+    };
+
+    let if_start = start_idx + start_token.len();
+    let Some((end_idx, end_token)) = ends
+        .iter()
+        .find_map(|token| template[if_start..].find(token).map(|idx| (if_start + idx, *token)))
+    else {
+        return template.to_owned();
+    };
+
+    let condition_body = if add_generation_prompt {
+        &template[if_start..end_idx]
+    } else {
+        ""
+    };
+
+    let mut out = String::with_capacity(template.len());
+    out.push_str(&template[..start_idx]);
+    out.push_str(condition_body);
+    out.push_str(&template[end_idx + end_token.len()..]);
+    out
+}
+
+fn render_message_template(template: &str, message: &ChatMessage<'_>) -> String {
+    template
+        .replace("{{ message['role'] }}", message.role)
+        .replace("{{message['role']}}", message.role)
+        .replace("{{ message.role }}", message.role)
+        .replace("{{message.role}}", message.role)
+        .replace("{{ message['content'] }}", message.content)
+        .replace("{{message['content']}}", message.content)
+        .replace("{{ message.content }}", message.content)
+        .replace("{{message.content}}", message.content)
 }
 
 fn load_sentencepiece(
@@ -1015,6 +1134,55 @@ mod tests {
                 .map(|value| GgufMetadataValue::Float32(*value))
                 .collect(),
         })
+    }
+
+    #[test]
+    fn processes_chat_template_for_messages_and_generation_prompt() {
+        let template = "{% for message in messages %}<|{{ message['role'] }}|>\n{{ message['content'] }}\n{% endfor %}{% if add_generation_prompt %}<|assistant|>\n{% endif %}";
+        let messages = [
+            ChatMessage {
+                role: "system",
+                content: "You are helpful.",
+            },
+            ChatMessage {
+                role: "user",
+                content: "Hi",
+            },
+        ];
+
+        let rendered = process_chat_template(template, &messages, true);
+        assert_eq!(
+            rendered,
+            "<|system|>\nYou are helpful.\n<|user|>\nHi\n<|assistant|>\n"
+        );
+    }
+
+    #[test]
+    fn processes_chat_template_from_gguf_metadata() {
+        let metadata = BTreeMap::from([(
+            "tokenizer.chat_template".to_owned(),
+            GgufMetadataValue::String(
+                "{% for message in messages %}{{message.role}}: {{message.content}}\n{% endfor %}"
+                    .to_owned(),
+            ),
+        )]);
+        let messages = [ChatMessage {
+            role: "user",
+            content: "hello",
+        }];
+
+        let rendered = process_chat_template_from_gguf_metadata(&metadata, &messages, false)
+            .expect("chat template metadata should parse")
+            .expect("template should exist");
+        assert_eq!(rendered, "user: hello\n");
+    }
+
+    #[test]
+    fn chat_template_metadata_returns_none_when_missing() {
+        let metadata = BTreeMap::new();
+        let rendered = process_chat_template_from_gguf_metadata(&metadata, &[], false)
+            .expect("missing template should not error");
+        assert_eq!(rendered, None);
     }
 
     #[test]
