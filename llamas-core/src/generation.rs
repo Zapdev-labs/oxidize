@@ -4,10 +4,11 @@ use futures_core::Stream;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct GenerationConfig {
     pub max_new_tokens: usize,
     pub stop_token: Option<Token>,
+    pub stop_sequences: Vec<Vec<Token>>,
     pub sampling: SamplingConfig,
 }
 
@@ -16,6 +17,7 @@ impl Default for GenerationConfig {
         Self {
             max_new_tokens: 128,
             stop_token: None,
+            stop_sequences: Vec::new(),
             sampling: SamplingConfig::default(),
         }
     }
@@ -53,6 +55,8 @@ pub struct GenerationStream<'a, M: Model> {
     config: GenerationConfig,
     generated: usize,
     last_token: Option<Token>,
+    recent_tokens: Vec<Token>,
+    max_stop_sequence_len: usize,
     random: Box<dyn FnMut() -> f32 + 'a>,
 }
 
@@ -64,6 +68,12 @@ impl<'a, M: Model> GenerationStream<'a, M> {
         config: GenerationConfig,
         random: impl FnMut() -> f32 + 'a,
     ) -> Self {
+        let max_stop_sequence_len = config
+            .stop_sequences
+            .iter()
+            .map(Vec::len)
+            .max()
+            .unwrap_or(0);
         Self {
             model: Some(model),
             session: Some(session),
@@ -72,6 +82,8 @@ impl<'a, M: Model> GenerationStream<'a, M> {
             config,
             generated: 0,
             last_token: None,
+            recent_tokens: Vec::with_capacity(max_stop_sequence_len),
+            max_stop_sequence_len,
             random: Box::new(random),
         }
     }
@@ -145,7 +157,20 @@ impl<M: Model> Stream for GenerationStream<'_, M> {
         self.session = Some(session);
         self.generated = self.generated.saturating_add(1);
         self.last_token = Some(token);
-        if self.config.stop_token == Some(token) {
+        if self.max_stop_sequence_len > 0 {
+            self.recent_tokens.push(token);
+            if self.recent_tokens.len() > self.max_stop_sequence_len {
+                let to_drop = self.recent_tokens.len() - self.max_stop_sequence_len;
+                self.recent_tokens.drain(..to_drop);
+            }
+        }
+        let matched_stop_sequence = self
+            .config
+            .stop_sequences
+            .iter()
+            .filter(|sequence| !sequence.is_empty())
+            .any(|sequence| self.recent_tokens.ends_with(sequence));
+        if self.config.stop_token == Some(token) || matched_stop_sequence {
             self.state = GenerationState::Done;
         }
 
@@ -220,12 +245,61 @@ mod tests {
                     temperature: 0.01,
                     ..SamplingConfig::default()
                 },
+                ..GenerationConfig::default()
             },
             || 0.1,
         );
 
         let items = collect_stream(&mut stream);
         assert_eq!(items, vec![Ok(5)]);
+    }
+
+    #[test]
+    fn stops_when_stop_sequence_is_generated() {
+        let mut model = LlamaModel::new(LlamaConfig::llama2(16, 32, 2));
+        let mut session = Session::new();
+        let mut stream = GenerationStream::new(
+            &mut model,
+            &mut session,
+            &[3],
+            GenerationConfig {
+                max_new_tokens: 8,
+                stop_sequences: vec![vec![3, 3]],
+                sampling: SamplingConfig {
+                    temperature: 0.01,
+                    ..SamplingConfig::default()
+                },
+                ..GenerationConfig::default()
+            },
+            || 0.1,
+        );
+
+        let items = collect_stream(&mut stream);
+        assert_eq!(items, vec![Ok(3), Ok(3)]);
+    }
+
+    #[test]
+    fn ignores_empty_stop_sequences() {
+        let mut model = LlamaModel::new(LlamaConfig::llama2(16, 32, 2));
+        let mut session = Session::new();
+        let mut stream = GenerationStream::new(
+            &mut model,
+            &mut session,
+            &[3],
+            GenerationConfig {
+                max_new_tokens: 3,
+                stop_sequences: vec![Vec::new()],
+                sampling: SamplingConfig {
+                    temperature: 0.01,
+                    ..SamplingConfig::default()
+                },
+                ..GenerationConfig::default()
+            },
+            || 0.1,
+        );
+
+        let items = collect_stream(&mut stream);
+        assert_eq!(items, vec![Ok(3), Ok(3), Ok(3)]);
     }
 
     #[test]
@@ -240,6 +314,7 @@ mod tests {
                 max_new_tokens: 4,
                 stop_token: None,
                 sampling: SamplingConfig::default(),
+                ..GenerationConfig::default()
             },
             || 0.2,
         );
