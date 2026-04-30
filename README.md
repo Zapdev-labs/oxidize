@@ -194,6 +194,14 @@ Practical tuning priorities:
 - **Stability before peak speed:** benchmark with representative prompts, not one short prompt.
 - **Measure every change:** keep a small log of config -> tokens/sec -> latency -> quality notes.
 
+## Troubleshooting guide
+
+- **Model path errors:** verify the model file exists and is readable, then rerun with an absolute path to avoid shell-relative path mistakes.
+- **Slow or no GPU acceleration:** increase `--n-gpu-layers` gradually and compare throughput after each change; if speed does not improve, fall back to CPU and confirm baseline correctness.
+- **Server auth failures (`401`):** set `LLAMAS_API_KEY` before starting `llamas-server`, then send the same value with `x-api-key` or `Authorization: Bearer <key>`.
+- **WASM build failures:** install the wasm target (`rustup target add wasm32-unknown-unknown`) and ensure `wasm-bindgen` is available, then run `make wasm` again.
+- **Unexpected output quality after quantization:** keep the original model, benchmark both variants on representative prompts, and move to a less aggressive target if quality regresses.
+
 ## Workspace commands
 
 - Build all targets (release): `make build`

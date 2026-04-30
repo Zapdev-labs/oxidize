@@ -70,3 +70,24 @@ fn readme_includes_examples_section() {
         );
     }
 }
+
+#[test]
+fn readme_includes_troubleshooting_guide() {
+    let path = workspace_readme_path();
+    let readme = fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed reading {}: {err}", path.display()));
+
+    for required in [
+        "## Troubleshooting guide",
+        "Model path errors",
+        "Slow or no GPU acceleration",
+        "Server auth failures (`401`)",
+        "WASM build failures",
+        "Unexpected output quality after quantization",
+    ] {
+        assert!(
+            readme.contains(required),
+            "README troubleshooting guide missing required text: {required}"
+        );
+    }
+}
