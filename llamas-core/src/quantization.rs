@@ -1560,6 +1560,90 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn q4_0_encoding_matches_llama_cpp_reference_block_layout() {
+        let mut values = Vec::with_capacity(QK4_0);
+        for i in 0..QK4_0 {
+            values.push((i % 16) as f32 - 8.0);
+        }
+        let mut input = Vec::with_capacity(values.len() * 4);
+        for value in values {
+            input.extend_from_slice(&value.to_le_bytes());
+        }
+
+        let mut output = vec![0_u8; BLOCK_Q4_0_SIZE];
+        quantize_scalar(
+            GgufQuantizationType::F32,
+            GgufQuantizationType::Q4_0,
+            &input,
+            &mut output,
+        )
+        .expect("q4_0 quantization should succeed");
+
+        let expected = vec![
+            0x00, 0x3C, 0x10, 0x32, 0x54, 0x76, 0x98, 0xBA, 0xDC, 0xFE, 0x10, 0x32, 0x54, 0x76,
+            0x98, 0xBA, 0xDC, 0xFE,
+        ];
+        assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn q5_0_encoding_matches_llama_cpp_reference_block_layout() {
+        let mut values = Vec::with_capacity(QK5_0);
+        for i in 0..QK5_0 {
+            values.push(i as f32 - 16.0);
+        }
+        let mut input = Vec::with_capacity(values.len() * 4);
+        for value in values {
+            input.extend_from_slice(&value.to_le_bytes());
+        }
+
+        let mut output = vec![0_u8; BLOCK_Q5_0_SIZE];
+        quantize_scalar(
+            GgufQuantizationType::F32,
+            GgufQuantizationType::Q5_0,
+            &input,
+            &mut output,
+        )
+        .expect("q5_0 quantization should succeed");
+
+        let expected = vec![
+            0x00, 0x3C, // d = 1.0
+            0x00, 0x00, 0xFF, 0xFF, // qh
+            0x10, 0x32, 0x54, 0x76, 0x98, 0xBA, 0xDC, 0xFE, // qs[0..8]
+            0x10, 0x32, 0x54, 0x76, 0x98, 0xBA, 0xDC, 0xFE, // qs[8..16]
+        ];
+        assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn q8_0_encoding_matches_llama_cpp_reference_block_layout() {
+        let mut values = Vec::with_capacity(QK8_0);
+        for i in 0..QK8_0 {
+            values.push(i as f32 - 16.0);
+        }
+        let mut input = Vec::with_capacity(values.len() * 4);
+        for value in values {
+            input.extend_from_slice(&value.to_le_bytes());
+        }
+
+        let mut output = vec![0_u8; BLOCK_Q8_0_SIZE];
+        quantize_scalar(
+            GgufQuantizationType::F32,
+            GgufQuantizationType::Q8_0,
+            &input,
+            &mut output,
+        )
+        .expect("q8_0 quantization should succeed");
+
+        let expected = vec![
+            0x08, 0x30, // d = 16/127 in f16
+            129, 137, 145, 153, 161, 169, 177, 185, 192, 200, 208, 216, 224, 232, 240, 248, 0,
+            8, 16, 24, 32, 40, 48, 56, 64, 71, 79, 87, 95, 103, 111, 119,
+        ];
+        assert_eq!(output, expected);
+    }
+
     fn test_values_for_target(target: GgufQuantizationType, offset: f32, scale: f32) -> Vec<f32> {
         let value_count = if matches!(
             target,
