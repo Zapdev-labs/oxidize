@@ -347,7 +347,9 @@ fn map_tensor_name(architecture: &str, name: &str) -> String {
             map_hf_decoder_name(name)
         }
         "falcon" => map_falcon_name(name),
-        "gpt2" | "gptj" | "gptneox" => map_gpt_name(name),
+        "gpt2" => map_gpt2_name(name),
+        "gptj" => map_gptj_name(name),
+        "gptneox" => map_gpt_neox_name(name),
         _ => None,
     };
     mapped.unwrap_or_else(|| name.to_owned())
@@ -397,11 +399,29 @@ fn map_falcon_name(name: &str) -> Option<String> {
     }
 }
 
-fn map_gpt_name(name: &str) -> Option<String> {
+fn map_gpt2_name(name: &str) -> Option<String> {
     match name {
         "transformer.wte.weight" => Some("tok_embeddings.weight".to_owned()),
         "lm_head.weight" => Some("output.weight".to_owned()),
         "transformer.ln_f.weight" => Some("norm.weight".to_owned()),
+        _ => None,
+    }
+}
+
+fn map_gptj_name(name: &str) -> Option<String> {
+    match name {
+        "transformer.wte.weight" => Some("tok_embeddings.weight".to_owned()),
+        "lm_head.weight" => Some("output.weight".to_owned()),
+        "transformer.ln_f.weight" => Some("norm.weight".to_owned()),
+        _ => None,
+    }
+}
+
+fn map_gpt_neox_name(name: &str) -> Option<String> {
+    match name {
+        "gpt_neox.embed_in.weight" => Some("tok_embeddings.weight".to_owned()),
+        "embed_out.weight" | "lm_head.weight" => Some("output.weight".to_owned()),
+        "gpt_neox.final_layer_norm.weight" => Some("norm.weight".to_owned()),
         _ => None,
     }
 }
@@ -704,7 +724,7 @@ mod tests {
     }
 
     #[test]
-    fn maps_falcon_and_gpt_embedding_names() {
+    fn maps_falcon_gpt2_gptj_and_gptneox_embedding_names() {
         let falcon = GgufFile {
             version: 3,
             tensor_count: 1,
@@ -716,7 +736,7 @@ mod tests {
             alignment: 32,
             data_section_start: 0,
         };
-        let gpt = GgufFile {
+        let gpt2 = GgufFile {
             version: 3,
             tensor_count: 1,
             metadata: BTreeMap::from([(
@@ -727,12 +747,75 @@ mod tests {
             alignment: 32,
             data_section_start: 0,
         };
+        let gptj = GgufFile {
+            version: 3,
+            tensor_count: 1,
+            metadata: BTreeMap::from([(
+                "general.architecture".to_owned(),
+                GgufMetadataValue::String("gptj".to_owned()),
+            )]),
+            tensor_infos: vec![tensor_info("transformer.wte.weight")],
+            alignment: 32,
+            data_section_start: 0,
+        };
+        let gptneox = GgufFile {
+            version: 3,
+            tensor_count: 1,
+            metadata: BTreeMap::from([(
+                "general.architecture".to_owned(),
+                GgufMetadataValue::String("gptneox".to_owned()),
+            )]),
+            tensor_infos: vec![tensor_info("gpt_neox.embed_in.weight")],
+            alignment: 32,
+            data_section_start: 0,
+        };
 
         assert_eq!(
             falcon.mapped_tensor_infos()[0].name,
             "tok_embeddings.weight"
         );
-        assert_eq!(gpt.mapped_tensor_infos()[0].name, "tok_embeddings.weight");
+        assert_eq!(gpt2.mapped_tensor_infos()[0].name, "tok_embeddings.weight");
+        assert_eq!(gptj.mapped_tensor_infos()[0].name, "tok_embeddings.weight");
+        assert_eq!(gptneox.mapped_tensor_infos()[0].name, "tok_embeddings.weight");
+    }
+
+    #[test]
+    fn maps_gpt_output_and_norm_names() {
+        let gpt2 = GgufFile {
+            version: 3,
+            tensor_count: 2,
+            metadata: BTreeMap::from([(
+                "general.architecture".to_owned(),
+                GgufMetadataValue::String("gpt2".to_owned()),
+            )]),
+            tensor_infos: vec![
+                tensor_info("lm_head.weight"),
+                tensor_info("transformer.ln_f.weight"),
+            ],
+            alignment: 32,
+            data_section_start: 0,
+        };
+        let gptneox = GgufFile {
+            version: 3,
+            tensor_count: 2,
+            metadata: BTreeMap::from([(
+                "general.architecture".to_owned(),
+                GgufMetadataValue::String("gptneox".to_owned()),
+            )]),
+            tensor_infos: vec![
+                tensor_info("embed_out.weight"),
+                tensor_info("gpt_neox.final_layer_norm.weight"),
+            ],
+            alignment: 32,
+            data_section_start: 0,
+        };
+
+        let gpt2_mapped = gpt2.mapped_tensor_infos();
+        let gptneox_mapped = gptneox.mapped_tensor_infos();
+        assert_eq!(gpt2_mapped[0].name, "output.weight");
+        assert_eq!(gpt2_mapped[1].name, "norm.weight");
+        assert_eq!(gptneox_mapped[0].name, "output.weight");
+        assert_eq!(gptneox_mapped[1].name, "norm.weight");
     }
 
     #[test]

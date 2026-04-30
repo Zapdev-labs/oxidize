@@ -9,6 +9,9 @@ pub enum LlamaArchitecture {
     Qwen,
     Gemma,
     Falcon,
+    Gpt2,
+    GptJ,
+    GptNeoX,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,6 +85,33 @@ impl LlamaConfig {
             layer_count,
         }
     }
+
+    pub fn gpt2(vocab_size: usize, context_size: usize, layer_count: usize) -> Self {
+        Self {
+            architecture: LlamaArchitecture::Gpt2,
+            vocab_size,
+            context_size,
+            layer_count,
+        }
+    }
+
+    pub fn gptj(vocab_size: usize, context_size: usize, layer_count: usize) -> Self {
+        Self {
+            architecture: LlamaArchitecture::GptJ,
+            vocab_size,
+            context_size,
+            layer_count,
+        }
+    }
+
+    pub fn gpt_neox(vocab_size: usize, context_size: usize, layer_count: usize) -> Self {
+        Self {
+            architecture: LlamaArchitecture::GptNeoX,
+            vocab_size,
+            context_size,
+            layer_count,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,7 +169,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn supports_llama2_llama3_mistral_mixtral_qwen_gemma_and_falcon_configs() {
+    fn supports_llama2_llama3_mistral_mixtral_qwen_gemma_falcon_and_gpt_configs() {
         let llama2 = LlamaModel::new(LlamaConfig::llama2(32_000, 4096, 32));
         let llama3 = LlamaModel::new(LlamaConfig::llama3(128_256, 8192, 32));
         let mistral = LlamaModel::new(LlamaConfig::mistral(32_000, 32_768, 32));
@@ -147,6 +177,9 @@ mod tests {
         let qwen = LlamaModel::new(LlamaConfig::qwen(151_936, 32_768, 28));
         let gemma = LlamaModel::new(LlamaConfig::gemma(256_000, 8192, 42));
         let falcon = LlamaModel::new(LlamaConfig::falcon(65_024, 2048, 60));
+        let gpt2 = LlamaModel::new(LlamaConfig::gpt2(50_257, 1024, 12));
+        let gptj = LlamaModel::new(LlamaConfig::gptj(50_400, 2048, 28));
+        let gpt_neox = LlamaModel::new(LlamaConfig::gpt_neox(50_432, 2048, 44));
 
         assert_eq!(llama2.architecture(), LlamaArchitecture::Llama2);
         assert_eq!(llama3.architecture(), LlamaArchitecture::Llama3);
@@ -155,6 +188,9 @@ mod tests {
         assert_eq!(qwen.architecture(), LlamaArchitecture::Qwen);
         assert_eq!(gemma.architecture(), LlamaArchitecture::Gemma);
         assert_eq!(falcon.architecture(), LlamaArchitecture::Falcon);
+        assert_eq!(gpt2.architecture(), LlamaArchitecture::Gpt2);
+        assert_eq!(gptj.architecture(), LlamaArchitecture::GptJ);
+        assert_eq!(gpt_neox.architecture(), LlamaArchitecture::GptNeoX);
         assert_eq!(llama2.vocab_size(), 32_000);
         assert_eq!(llama3.vocab_size(), 128_256);
         assert_eq!(mistral.context_size(), 32_768);
@@ -162,6 +198,9 @@ mod tests {
         assert_eq!(qwen.vocab_size(), 151_936);
         assert_eq!(gemma.layer_count(), 42);
         assert_eq!(falcon.context_size(), 2048);
+        assert_eq!(gpt2.context_size(), 1024);
+        assert_eq!(gptj.layer_count(), 28);
+        assert_eq!(gpt_neox.vocab_size(), 50_432);
     }
 
     #[test]
