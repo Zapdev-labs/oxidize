@@ -799,4 +799,26 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn readme_includes_quick_start_and_validation_commands() {
+        let readme = include_str!("../../README.md");
+        for section in [
+            "## Quick start",
+            "### Clone and build",
+            "### Run tests and lint",
+            "## Common usage",
+        ] {
+            assert!(
+                readme.contains(section),
+                "README must include section: {section}"
+            );
+        }
+        for command in ["make build", "make test", "make lint"] {
+            assert!(
+                readme.contains(command),
+                "README must include command: {command}"
+            );
+        }
+    }
 }
