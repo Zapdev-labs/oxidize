@@ -102,6 +102,22 @@ WASM artifacts are written to `dist/wasm`.
 - `LLAMAS_API_KEY`: optional API key for `llamas-server` `/v1/*` routes. Supports `x-api-key` or `Authorization: Bearer <key>`.
 - `LLAMAS_PROFILE_CHILD`: internal flag used by `llamas-cli` profiling flow.
 
+## Architecture
+
+`llamas-cpp` is organized as a layered workspace:
+
+- **Core compute layer (`llamas-core`)**: owns GGUF parsing, tensor + quantization primitives, model loading, token generation loop, and backend-specific execution paths (CPU, CUDA, Metal, WASM).
+- **Interface layer (`llamas-cli`, `llamas-server`, `llamas-py`)**: exposes core capabilities through a CLI, OpenAI-compatible HTTP routes, and Python bindings without duplicating inference logic.
+- **Utility layer (`llamas-quantize`)**: handles offline model weight conversion and quantization workflows.
+
+At runtime, request flow is: input prompt -> interface crate -> `llamas-core` model/session setup -> token generation + sampling -> streamed or buffered output to the caller.
+
+Design goals:
+
+- Keep inference and model logic centralized in `llamas-core` so all frontends share the same behavior.
+- Keep transport/UI concerns at the edge crates (`llamas-cli`, `llamas-server`, `llamas-py`) for maintainability.
+- Support multiple acceleration targets behind stable core APIs to keep feature parity across platforms.
+
 ## License
 
 MIT
