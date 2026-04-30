@@ -60,6 +60,10 @@ pub enum GemmError {
     Metal(String),
     #[cfg(feature = "webgpu")]
     WebGpu(String),
+    InvalidTensorParallelShardCount {
+        shared_dim: usize,
+        shard_count: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -340,8 +344,127 @@ pub fn gemm_f32(
         return Ok(());
     }
 
+    let shard_count = choose_tensor_parallel_shard_count(shared_dim);
+    if shard_count > 1 {
+        gemm_f32_tensor_parallel(
+            left_matrix,
+            rows,
+            shared_dim,
+            right_matrix,
+            cols,
+            shard_count,
+            output,
+        )?;
+        return Ok(());
+    }
+
     gemm_f32_cpu(left_matrix, rows, shared_dim, right_matrix, cols, output);
     Ok(())
+}
+
+pub fn gemm_f32_tensor_parallel(
+    left_matrix: &[f32],
+    rows: usize,
+    shared_dim: usize,
+    right_matrix: &[f32],
+    cols: usize,
+    shard_count: usize,
+    output: &mut [f32],
+) -> Result<(), GemmError> {
+    validate_tensor_parallel_dims(left_matrix, rows, shared_dim, right_matrix, cols, output)?;
+    if shard_count == 0 || !shared_dim.is_multiple_of(shard_count) {
+        return Err(GemmError::InvalidTensorParallelShardCount {
+            shared_dim,
+            shard_count,
+        });
+    }
+    if shard_count == 1 {
+        gemm_f32_cpu(left_matrix, rows, shared_dim, right_matrix, cols, output);
+        return Ok(());
+    }
+
+    let partials = std::thread::scope(|scope| {
+        let mut jobs = Vec::with_capacity(shard_count);
+        let chunk = shared_dim / shard_count;
+        for shard_idx in 0..shard_count {
+            let start_k = shard_idx * chunk;
+            let end_k = start_k + chunk;
+            jobs.push(scope.spawn(move || {
+                let mut partial = vec![0.0_f32; rows * cols];
+                for row in 0..rows {
+                    let out_row = &mut partial[row * cols..(row + 1) * cols];
+                    for k in start_k..end_k {
+                        let left = left_matrix[row * shared_dim + k];
+                        let right_row = &right_matrix[k * cols..(k + 1) * cols];
+                        for (col, out_cell) in out_row.iter_mut().enumerate() {
+                            *out_cell += left * right_row[col];
+                        }
+                    }
+                }
+                partial
+            }));
+        }
+        jobs.into_iter()
+            .map(|job| job.join().expect("tensor-parallel worker should not panic"))
+            .collect::<Vec<_>>()
+    });
+
+    output.fill(0.0);
+    for partial in partials {
+        for (out, value) in output.iter_mut().zip(partial.iter()) {
+            *out += *value;
+        }
+    }
+    Ok(())
+}
+
+fn validate_tensor_parallel_dims(
+    left_matrix: &[f32],
+    rows: usize,
+    shared_dim: usize,
+    right_matrix: &[f32],
+    cols: usize,
+    output: &[f32],
+) -> Result<(), GemmError> {
+    let expected_left_len = rows.saturating_mul(shared_dim);
+    if left_matrix.len() != expected_left_len {
+        return Err(GemmError::InvalidLeftMatrixLength {
+            expected: expected_left_len,
+            actual: left_matrix.len(),
+        });
+    }
+
+    let expected_right_len = shared_dim.saturating_mul(cols);
+    if right_matrix.len() != expected_right_len {
+        return Err(GemmError::InvalidRightMatrixLength {
+            expected: expected_right_len,
+            actual: right_matrix.len(),
+        });
+    }
+
+    let expected_output_len = rows.saturating_mul(cols);
+    if output.len() != expected_output_len {
+        return Err(GemmError::InvalidOutputLength {
+            expected: expected_output_len,
+            actual: output.len(),
+        });
+    }
+    Ok(())
+}
+
+fn choose_tensor_parallel_shard_count(shared_dim: usize) -> usize {
+    const MIN_SHARED_DIM_FOR_TP: usize = 1024;
+    if shared_dim < MIN_SHARED_DIM_FOR_TP {
+        return 1;
+    }
+    let max_threads = std::thread::available_parallelism().map_or(1, usize::from);
+    let max_shards = max_threads.min(8).min(shared_dim);
+    for shards in (2..=max_shards).rev() {
+        if shared_dim.is_multiple_of(shards) {
+            return shards;
+        }
+    }
+    1
 }
 
 pub fn gemm_i8(
@@ -1149,6 +1272,46 @@ mod tests {
         for (actual, expected) in output.iter().zip(expected.iter()) {
             assert!((actual - expected).abs() < 1e-6);
         }
+    }
+
+    #[test]
+    fn tensor_parallel_gemm_matches_cpu_reference() {
+        let rows = 4;
+        let shared_dim = 8;
+        let cols = 3;
+        let left = (0..rows * shared_dim)
+            .map(|i| (i as f32 * 0.125) - 1.0)
+            .collect::<Vec<_>>();
+        let right = (0..shared_dim * cols)
+            .map(|i| (i as f32 * 0.05) + 0.25)
+            .collect::<Vec<_>>();
+
+        let mut expected = vec![0.0_f32; rows * cols];
+        gemm_f32_cpu(&left, rows, shared_dim, &right, cols, &mut expected);
+
+        let mut actual = vec![0.0_f32; rows * cols];
+        gemm_f32_tensor_parallel(&left, rows, shared_dim, &right, cols, 4, &mut actual)
+            .expect("tensor parallel gemm should succeed");
+
+        for (lhs, rhs) in actual.iter().zip(expected.iter()) {
+            assert!((lhs - rhs).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn tensor_parallel_gemm_rejects_invalid_shard_count() {
+        let left = vec![1.0_f32; 6];
+        let right = vec![1.0_f32; 6];
+        let mut output = vec![0.0_f32; 4];
+        let err = gemm_f32_tensor_parallel(&left, 2, 3, &right, 2, 2, &mut output)
+            .expect_err("non-divisible shard count should fail");
+        assert_eq!(
+            err,
+            GemmError::InvalidTensorParallelShardCount {
+                shared_dim: 3,
+                shard_count: 2
+            }
+        );
     }
 
     #[test]
