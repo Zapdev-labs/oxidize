@@ -48,3 +48,25 @@ fn readme_includes_quantization_guide() {
         );
     }
 }
+
+#[test]
+fn readme_includes_examples_section() {
+    let path = workspace_readme_path();
+    let readme = fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed reading {}: {err}", path.display()));
+
+    for required in [
+        "## Examples",
+        "### Basic inference",
+        "### Chat completion",
+        "### Streaming generation",
+        "### Batch processing",
+        "### Custom sampling",
+        "### Embedding extraction",
+    ] {
+        assert!(
+            readme.contains(required),
+            "README examples docs missing required text: {required}"
+        );
+    }
+}

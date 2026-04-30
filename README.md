@@ -98,6 +98,67 @@ cargo run -p llamas-quantize -- \
   --target Q4_0
 ```
 
+## Examples
+
+### Basic inference
+
+```bash
+cargo run -p llamas-cli -- \
+  --model /path/to/model.gguf \
+  --prompt "Summarize Rust ownership in one paragraph."
+```
+
+### Chat completion
+
+```bash
+cargo run -p llamas-cli -- \
+  --model /path/to/model.gguf \
+  --chat
+```
+
+### Streaming generation
+
+```bash
+curl -N http://127.0.0.1:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "default",
+    "messages": [{"role":"user","content":"Write a short poem about systems programming."}],
+    "stream": true
+  }'
+```
+
+### Batch processing
+
+```bash
+cargo run -p llamas-cli -- \
+  --model /path/to/model.gguf \
+  --batch-size 4 \
+  --prompt "Classify: Rust is memory-safe."
+```
+
+### Custom sampling
+
+```bash
+cargo run -p llamas-cli -- \
+  --model /path/to/model.gguf \
+  --prompt "Generate a release note title." \
+  --temperature 0.7 \
+  --top-p 0.9 \
+  --top-k 40
+```
+
+### Embedding extraction
+
+```bash
+curl http://127.0.0.1:8080/v1/embeddings \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "default",
+    "input": ["Rust is fast.", "Rust is memory-safe."]
+  }'
+```
+
 ### WASM build
 
 ```bash
