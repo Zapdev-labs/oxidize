@@ -130,6 +130,8 @@ pub struct ContinuousBatchKvCache {
     current_step: usize,
     next_position: usize,
     sequences: HashMap<u64, SequenceState>,
+    #[serde(skip)]
+    pooled_positions: Vec<Vec<usize>>,
 }
 
 impl KvCache {
@@ -386,6 +388,7 @@ impl ContinuousBatchKvCache {
             current_step: 0,
             next_position: 0,
             sequences: HashMap::new(),
+            pooled_positions: Vec::new(),
         }
     }
 
@@ -402,10 +405,11 @@ impl ContinuousBatchKvCache {
                 max_sequences: self.max_sequences,
             });
         }
+        let positions = self.pooled_positions.pop().unwrap_or_default();
         self.sequences.insert(
             sequence_id,
             SequenceState {
-                positions: Vec::new(),
+                positions,
                 last_active_step: self.current_step,
             },
         );
@@ -413,16 +417,28 @@ impl ContinuousBatchKvCache {
     }
 
     pub fn remove_sequence(&mut self, sequence_id: u64) -> Result<(), ContinuousBatchError> {
-        self.sequences
+        let state = self
+            .sequences
             .remove(&sequence_id)
-            .map(|_| ())
-            .ok_or(ContinuousBatchError::SequenceNotFound { sequence_id })
+            .ok_or(ContinuousBatchError::SequenceNotFound { sequence_id })?;
+        self.recycle_positions(state.positions);
+        Ok(())
     }
 
     pub fn evict_inactive_sequences(&mut self, max_idle_steps: usize) {
         let eviction_step = self.current_step.saturating_sub(max_idle_steps);
-        self.sequences
-            .retain(|_, state| state.last_active_step >= eviction_step);
+        let evicted_ids = self
+            .sequences
+            .iter()
+            .filter_map(|(sequence_id, state)| {
+                (state.last_active_step < eviction_step).then_some(*sequence_id)
+            })
+            .collect::<Vec<_>>();
+        for sequence_id in evicted_ids {
+            if let Some(state) = self.sequences.remove(&sequence_id) {
+                self.recycle_positions(state.positions);
+            }
+        }
     }
 
     pub fn append_token(
@@ -505,6 +521,19 @@ impl ContinuousBatchKvCache {
             },
         )
     }
+
+    fn recycle_positions(&mut self, mut positions: Vec<usize>) {
+        if self.pooled_positions.len() >= self.max_sequences {
+            return;
+        }
+        positions.clear();
+        self.pooled_positions.push(positions);
+    }
+
+    #[cfg(test)]
+    fn pooled_position_buffer_count(&self) -> usize {
+        self.pooled_positions.len()
+    }
 }
 
 fn write_storage(
@@ -565,7 +594,11 @@ fn write_storage(
                 data[packed_start] = (data[packed_start] & 0x0F) | first_high;
                 for (pair_index, pair) in src[1..].chunks(2).enumerate() {
                     let low = quantize(pair[0]);
-                    let high = if pair.len() == 2 { quantize(pair[1]) } else { 0 };
+                    let high = if pair.len() == 2 {
+                        quantize(pair[1])
+                    } else {
+                        0
+                    };
                     data[packed_start + 1 + pair_index] = (high << 4) | (low & 0x0F);
                 }
             }
@@ -1183,6 +1216,34 @@ mod tests {
             Ok(()),
             "eviction should free sequence capacity"
         );
+    }
+
+    #[test]
+    fn continuous_batching_reuses_position_buffers_from_pool() {
+        let cache = KvCache::new(KvCacheConfig {
+            layer_count: 1,
+            context_size: 8,
+            head_count: 1,
+            head_dim: 2,
+            dtype: DType::F32,
+        })
+        .expect("f32 kv cache should be supported");
+        let mut batch_cache = ContinuousBatchKvCache::new(cache, 2);
+        batch_cache
+            .add_sequence(1)
+            .expect("sequence should be added");
+        batch_cache
+            .append_token(1, 0, &[1.0, 2.0], &[3.0, 4.0])
+            .expect("token should be appended");
+        batch_cache
+            .remove_sequence(1)
+            .expect("sequence removal should succeed");
+        assert_eq!(batch_cache.pooled_position_buffer_count(), 1);
+
+        batch_cache
+            .add_sequence(2)
+            .expect("pooled position buffer should be reused");
+        assert_eq!(batch_cache.pooled_position_buffer_count(), 0);
     }
 
     #[test]
