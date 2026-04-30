@@ -15,6 +15,13 @@ fn configured_model_paths() -> Option<Vec<PathBuf>> {
     if paths.is_empty() { None } else { Some(paths) }
 }
 
+fn configured_compatibility_model_count() -> usize {
+    env::var("LLAMAS_TEST_GGUF_COMPAT_MIN_MODELS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .unwrap_or(100)
+}
+
 #[test]
 fn real_gguf_models_load_consistently_across_loaders() {
     let Some(model_paths) = configured_model_paths() else {
@@ -27,7 +34,11 @@ fn real_gguf_models_load_consistently_across_loaders() {
     let loader = GgufModelLoader;
     for path in model_paths {
         assert!(path.exists(), "model path must exist: {}", path.display());
-        assert!(path.is_file(), "model path must be a file: {}", path.display());
+        assert!(
+            path.is_file(),
+            "model path must be a file: {}",
+            path.display()
+        );
 
         let mapped = loader
             .load(&path)
@@ -37,7 +48,11 @@ fn real_gguf_models_load_consistently_across_loaders() {
 
         let parsed = mapped.parsed();
         assert!(parsed.version == 2 || parsed.version == 3);
-        assert!(parsed.tensor_count > 0, "expected tensors in {}", path.display());
+        assert!(
+            parsed.tensor_count > 0,
+            "expected tensors in {}",
+            path.display()
+        );
         assert!(
             !parsed.tensor_infos.is_empty(),
             "expected tensor infos in {}",
@@ -63,6 +78,40 @@ fn real_gguf_models_load_consistently_across_loaders() {
 }
 
 #[test]
+fn real_gguf_models_compatibility_suite_covers_100_plus_models() {
+    let Some(model_paths) = configured_model_paths() else {
+        eprintln!(
+            "skipping GGUF compatibility suite: set LLAMAS_TEST_GGUF_MODELS to 100+ model paths"
+        );
+        return;
+    };
+
+    let min_model_count = configured_compatibility_model_count();
+    assert!(
+        model_paths.len() >= min_model_count,
+        "compatibility suite requires at least {min_model_count} models, got {}",
+        model_paths.len()
+    );
+
+    let loader = GgufModelLoader;
+    for path in model_paths {
+        assert!(path.exists(), "model path must exist: {}", path.display());
+        assert!(
+            path.is_file(),
+            "model path must be a file: {}",
+            path.display()
+        );
+
+        loader.load(&path).unwrap_or_else(|err| {
+            panic!(
+                "compatibility loader failed for {}: {err}",
+                path.display()
+            )
+        });
+    }
+}
+
+#[test]
 fn real_gguf_models_emit_monotonic_progress_events() {
     let Some(model_paths) = configured_model_paths() else {
         eprintln!(
@@ -74,7 +123,11 @@ fn real_gguf_models_emit_monotonic_progress_events() {
     let loader = GgufModelLoader;
     for path in model_paths {
         assert!(path.exists(), "model path must exist: {}", path.display());
-        assert!(path.is_file(), "model path must be a file: {}", path.display());
+        assert!(
+            path.is_file(),
+            "model path must be a file: {}",
+            path.display()
+        );
 
         let mut events = Vec::new();
         let model = loader
@@ -88,7 +141,11 @@ fn real_gguf_models_emit_monotonic_progress_events() {
         assert_eq!(events.first().map(|event| event.percent), Some(0));
         assert_eq!(events.last().map(|event| event.stage), Some("complete"));
         assert_eq!(events.last().map(|event| event.percent), Some(100));
-        assert!(events.windows(2).all(|pair| pair[0].percent <= pair[1].percent));
+        assert!(
+            events
+                .windows(2)
+                .all(|pair| pair[0].percent <= pair[1].percent)
+        );
 
         let expected_total = model.bytes().len() as u64;
         assert_eq!(
