@@ -1,7 +1,9 @@
 use crate::tensor::DType;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::Path;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct KvCacheConfig {
     pub layer_count: usize,
     pub context_size: usize,
@@ -24,7 +26,7 @@ impl KvCacheConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum KvCacheEvictionStrategy {
     SlidingWindow,
     StopAtCapacity,
@@ -48,6 +50,14 @@ pub enum KvCacheError {
     ValueLengthMismatch { expected: usize, actual: usize },
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum KvCachePersistenceError {
+    #[error("failed to read or write cache file: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("failed to serialize or deserialize cache: {0}")]
+    Serde(#[from] serde_json::Error),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ContinuousBatchError {
     SequenceAlreadyExists { sequence_id: u64 },
@@ -67,7 +77,7 @@ impl From<KvCacheError> for ContinuousBatchError {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 enum KvStorage {
     F32(Vec<f32>),
     F16(Vec<u16>),
@@ -83,7 +93,7 @@ enum KvStorage {
     },
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct KvCache {
     config: KvCacheConfig,
     key: KvStorage,
@@ -93,13 +103,13 @@ pub struct KvCache {
     newest_position: Option<usize>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct SequenceState {
     positions: Vec<usize>,
     last_active_step: usize,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ContinuousBatchKvCache {
     kv_cache: KvCache,
     max_sequences: usize,
@@ -208,6 +218,21 @@ impl KvCache {
 
     pub fn availability_window(&self) -> Option<(usize, usize)> {
         Some((self.oldest_available_position()?, self.newest_position?))
+    }
+
+    pub fn save_to_file<P: AsRef<Path>>(
+        &self,
+        path: P,
+    ) -> Result<(), KvCachePersistenceError> {
+        let payload = serde_json::to_vec(self)?;
+        std::fs::write(path, payload)?;
+        Ok(())
+    }
+
+    pub fn load_from_file<P: AsRef<Path>>(path: P) -> Result<Self, KvCachePersistenceError> {
+        let payload = std::fs::read(path)?;
+        let cache = serde_json::from_slice(&payload)?;
+        Ok(cache)
     }
 
     fn validate_write(
@@ -420,6 +445,21 @@ impl ContinuousBatchKvCache {
         &self.kv_cache
     }
 
+    pub fn save_to_file<P: AsRef<Path>>(
+        &self,
+        path: P,
+    ) -> Result<(), KvCachePersistenceError> {
+        let payload = serde_json::to_vec(self)?;
+        std::fs::write(path, payload)?;
+        Ok(())
+    }
+
+    pub fn load_from_file<P: AsRef<Path>>(path: P) -> Result<Self, KvCachePersistenceError> {
+        let payload = std::fs::read(path)?;
+        let cache = serde_json::from_slice(&payload)?;
+        Ok(cache)
+    }
+
     fn position_for(
         &self,
         sequence_id: u64,
@@ -627,6 +667,15 @@ fn f32_to_f16_bits(value: f32) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_temp_path(prefix: &str) -> std::path::PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("{prefix}-{unique}.json"))
+    }
 
     #[test]
     fn allocates_kv_cache_with_requested_dtype() {
@@ -1079,5 +1128,83 @@ mod tests {
                 newest_available: 2
             })
         );
+    }
+
+    #[test]
+    fn kv_cache_persists_and_restores_across_sessions() {
+        let path = unique_temp_path("kv-cache");
+        let mut cache = KvCache::new(KvCacheConfig {
+            layer_count: 1,
+            context_size: 4,
+            head_count: 1,
+            head_dim: 4,
+            dtype: DType::F32,
+        })
+        .expect("f32 cache should be supported");
+        cache
+            .set(0, 3, &[0.5, 1.5, 2.5, 3.5], &[4.5, 5.5, 6.5, 7.5])
+            .expect("cache write should succeed");
+
+        cache
+            .save_to_file(&path)
+            .expect("cache should be serialized to disk");
+        let restored = KvCache::load_from_file(&path).expect("cache should load from disk");
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(restored.config(), cache.config());
+        assert_eq!(restored.availability_window(), cache.availability_window());
+        let mut key = [0.0_f32; 4];
+        let mut value = [0.0_f32; 4];
+        restored
+            .get_key(0, 3, &mut key)
+            .expect("restored key should be readable");
+        restored
+            .get_value(0, 3, &mut value)
+            .expect("restored value should be readable");
+        assert_eq!(key, [0.5, 1.5, 2.5, 3.5]);
+        assert_eq!(value, [4.5, 5.5, 6.5, 7.5]);
+    }
+
+    #[test]
+    fn continuous_batch_cache_persists_and_restores_sequence_state() {
+        let path = unique_temp_path("batch-kv-cache");
+        let cache = KvCache::new(KvCacheConfig {
+            layer_count: 1,
+            context_size: 8,
+            head_count: 1,
+            head_dim: 2,
+            dtype: DType::F32,
+        })
+        .expect("f32 cache should be supported");
+        let mut batch_cache = ContinuousBatchKvCache::new(cache, 2);
+        batch_cache
+            .add_sequence(44)
+            .expect("sequence should be added");
+        batch_cache
+            .append_token(44, 0, &[1.0, 2.0], &[3.0, 4.0])
+            .expect("token write should succeed");
+        batch_cache.begin_step();
+        batch_cache
+            .append_token(44, 0, &[5.0, 6.0], &[7.0, 8.0])
+            .expect("second token write should succeed");
+
+        batch_cache
+            .save_to_file(&path)
+            .expect("batch cache should be serialized to disk");
+        let restored =
+            ContinuousBatchKvCache::load_from_file(&path).expect("batch cache should load");
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(restored.sequence_count(), 1);
+        let mut token0 = [0.0_f32; 2];
+        let mut token1 = [0.0_f32; 2];
+        restored
+            .get_sequence_key(44, 0, 0, &mut token0)
+            .expect("first token should still be mapped");
+        restored
+            .get_sequence_key(44, 0, 1, &mut token1)
+            .expect("second token should still be mapped");
+        assert_eq!(token0, [1.0, 2.0]);
+        assert_eq!(token1, [5.0, 6.0]);
     }
 }

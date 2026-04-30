@@ -1,10 +1,11 @@
 use crate::gguf::GgufQuantizationType;
+use serde::{Deserialize, Serialize};
 
 const QK8_0: usize = 32;
 const BLOCK_Q8_0_SIZE: usize = 2 + QK8_0;
 const FLASH_ATTENTION_BLOCK_TOKENS: usize = 64;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum DType {
     F32,
     F16,

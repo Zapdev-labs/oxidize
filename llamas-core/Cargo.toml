@@ -17,6 +17,7 @@ cust = { version = "0.3", optional = true }
 memmap2 = "0.9"
 rayon = "1"
 serde.workspace = true
+serde_json = "1"
 thiserror.workspace = true
 
 [dev-dependencies]
