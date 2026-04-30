@@ -1,5 +1,8 @@
 use std::collections::BTreeMap;
+use std::fs::File;
+use std::path::Path;
 
+use memmap2::Mmap;
 use thiserror::Error;
 
 const GGUF_MAGIC: &[u8; 4] = b"GGUF";
@@ -13,6 +16,22 @@ pub struct GgufFile {
     pub tensor_infos: Vec<GgufTensorInfo>,
     pub alignment: u64,
     pub data_section_start: u64,
+}
+
+#[derive(Debug)]
+pub struct MappedGgufFile {
+    mmap: Mmap,
+    parsed: GgufFile,
+}
+
+impl MappedGgufFile {
+    pub fn parsed(&self) -> &GgufFile {
+        &self.parsed
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        &self.mmap
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -88,7 +107,7 @@ impl TryFrom<u32> for GgufMetadataType {
     }
 }
 
-#[derive(Debug, Error, PartialEq)]
+#[derive(Debug, Error)]
 pub enum GgufParseError {
     #[error("invalid gguf magic")]
     InvalidMagic,
@@ -104,6 +123,33 @@ pub enum GgufParseError {
     InvalidAlignment(u64),
     #[error("integer overflow while parsing")]
     IntegerOverflow,
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+impl PartialEq for GgufParseError {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::InvalidMagic, Self::InvalidMagic) => true,
+            (Self::UnsupportedVersion(a), Self::UnsupportedVersion(b)) => a == b,
+            (Self::UnexpectedEof, Self::UnexpectedEof) => true,
+            (Self::InvalidUtf8(a), Self::InvalidUtf8(b)) => a.utf8_error() == b.utf8_error(),
+            (Self::UnknownMetadataType(a), Self::UnknownMetadataType(b)) => a == b,
+            (Self::InvalidAlignment(a), Self::InvalidAlignment(b)) => a == b,
+            (Self::IntegerOverflow, Self::IntegerOverflow) => true,
+            (Self::Io(a), Self::Io(b)) => a.kind() == b.kind(),
+            _ => false,
+        }
+    }
+}
+
+pub fn load_mapped_gguf<P: AsRef<Path>>(path: P) -> Result<MappedGgufFile, GgufParseError> {
+    let file = File::open(path)?;
+    // SAFETY: The returned mapping is read-only and we keep it alive for as long as
+    // parsed metadata is exposed from MappedGgufFile.
+    let mmap = unsafe { Mmap::map(&file)? };
+    let parsed = parse_gguf(&mmap)?;
+    Ok(MappedGgufFile { mmap, parsed })
 }
 
 pub fn parse_gguf(bytes: &[u8]) -> Result<GgufFile, GgufParseError> {
@@ -332,6 +378,10 @@ impl<'a> ByteReader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::env;
+    use std::fs::{self, File};
+    use std::io::Write;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn parses_v3_header_tensor_info_and_alignment() {
@@ -407,6 +457,70 @@ mod tests {
 
         let err = parse_gguf(&bytes).expect_err("must reject invalid alignment");
         assert_eq!(err, GgufParseError::InvalidAlignment(3));
+    }
+
+    #[test]
+    fn loads_gguf_via_memory_map() {
+        let bytes = valid_minimal_gguf_bytes();
+        let path = write_temp_file(&bytes);
+
+        let mapped = load_mapped_gguf(&path).expect("mapped load succeeds");
+
+        assert_eq!(mapped.parsed().version, 3);
+        assert_eq!(mapped.parsed().tensor_count, 1);
+        assert_eq!(mapped.parsed().alignment, 64);
+        assert_eq!(mapped.parsed().tensor_infos[0].absolute_offset, 128);
+        assert_eq!(mapped.bytes(), bytes.as_slice());
+
+        fs::remove_file(path).expect("temp file removed");
+    }
+
+    #[test]
+    fn mapped_load_returns_io_error_for_missing_file() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock is after epoch")
+            .as_nanos();
+        let path = env::temp_dir().join(format!("llamas-core-missing-{unique}.gguf"));
+
+        let err = load_mapped_gguf(&path).expect_err("missing file should error");
+        assert!(matches!(err, GgufParseError::Io(_)));
+    }
+
+    fn valid_minimal_gguf_bytes() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"GGUF");
+        push_u32(&mut bytes, 3);
+        push_u64(&mut bytes, 1);
+        push_u64(&mut bytes, 1);
+
+        push_string(&mut bytes, "general.alignment");
+        push_u32(&mut bytes, GgufMetadataType::Uint32 as u32);
+        push_u32(&mut bytes, 64);
+
+        push_string(&mut bytes, "tok_embeddings.weight");
+        push_u32(&mut bytes, 2);
+        push_u64(&mut bytes, 32000);
+        push_u64(&mut bytes, 4096);
+        push_u32(&mut bytes, 0);
+        push_u64(&mut bytes, 0);
+
+        while bytes.len() % 64 != 0 {
+            bytes.push(0);
+        }
+        bytes.extend_from_slice(&[1, 2, 3, 4]);
+        bytes
+    }
+
+    fn write_temp_file(bytes: &[u8]) -> std::path::PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock is after epoch")
+            .as_nanos();
+        let path = env::temp_dir().join(format!("llamas-core-{unique}.gguf"));
+        let mut file = File::create(&path).expect("temp file created");
+        file.write_all(bytes).expect("temp file written");
+        path
     }
 
     fn push_u32(bytes: &mut Vec<u8>, value: u32) {
