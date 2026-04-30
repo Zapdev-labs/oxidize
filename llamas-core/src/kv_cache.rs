@@ -26,8 +26,12 @@ impl KvCacheConfig {
 #[derive(Debug, Clone, PartialEq)]
 pub enum KvCacheError {
     UnsupportedDType { dtype: DType },
-    PositionOutOfBounds { position: usize, context_size: usize },
     LayerOutOfBounds { layer: usize, layer_count: usize },
+    PositionEvicted {
+        position: usize,
+        oldest_available: usize,
+        newest_available: usize,
+    },
     ValueLengthMismatch { expected: usize, actual: usize },
 }
 
@@ -42,6 +46,7 @@ pub struct KvCache {
     config: KvCacheConfig,
     key: KvStorage,
     value: KvStorage,
+    newest_position: Option<usize>,
 }
 
 impl KvCache {
@@ -63,6 +68,7 @@ impl KvCache {
             config,
             key,
             value,
+            newest_position: None,
         })
     }
 
@@ -71,23 +77,24 @@ impl KvCache {
     }
 
     pub fn set(&mut self, layer: usize, position: usize, key: &[f32], value: &[f32]) -> Result<(), KvCacheError> {
-        self.validate_write(layer, position, key, value)?;
-        let range = self.token_range(layer, position);
+        self.validate_write(layer, key, value)?;
+        let range = self.token_range(layer, self.physical_position(position));
         write_storage(&mut self.key, range.clone(), key);
         write_storage(&mut self.value, range, value);
+        self.newest_position = Some(self.newest_position.map_or(position, |newest| newest.max(position)));
         Ok(())
     }
 
     pub fn get_key(&self, layer: usize, position: usize, out: &mut [f32]) -> Result<(), KvCacheError> {
         self.validate_read(layer, position, out)?;
-        let range = self.token_range(layer, position);
+        let range = self.token_range(layer, self.physical_position(position));
         read_storage(&self.key, range, out);
         Ok(())
     }
 
     pub fn get_value(&self, layer: usize, position: usize, out: &mut [f32]) -> Result<(), KvCacheError> {
         self.validate_read(layer, position, out)?;
-        let range = self.token_range(layer, position);
+        let range = self.token_range(layer, self.physical_position(position));
         read_storage(&self.value, range, out);
         Ok(())
     }
@@ -102,11 +109,10 @@ impl KvCache {
     fn validate_write(
         &self,
         layer: usize,
-        position: usize,
         key: &[f32],
         value: &[f32],
     ) -> Result<(), KvCacheError> {
-        self.validate_indices(layer, position)?;
+        self.validate_layer(layer)?;
         let expected = self.config.token_size();
         if key.len() != expected {
             return Err(KvCacheError::ValueLengthMismatch {
@@ -129,7 +135,16 @@ impl KvCache {
         position: usize,
         out: &[f32],
     ) -> Result<(), KvCacheError> {
-        self.validate_indices(layer, position)?;
+        self.validate_layer(layer)?;
+        if !self.position_available(position) {
+            let newest_available = self.newest_position.unwrap_or(0);
+            let oldest_available = self.oldest_available_position().unwrap_or(0);
+            return Err(KvCacheError::PositionEvicted {
+                position,
+                oldest_available,
+                newest_available,
+            });
+        }
         let expected = self.config.token_size();
         if out.len() != expected {
             return Err(KvCacheError::ValueLengthMismatch {
@@ -140,20 +155,33 @@ impl KvCache {
         Ok(())
     }
 
-    fn validate_indices(&self, layer: usize, position: usize) -> Result<(), KvCacheError> {
+    fn validate_layer(&self, layer: usize) -> Result<(), KvCacheError> {
         if layer >= self.config.layer_count {
             return Err(KvCacheError::LayerOutOfBounds {
                 layer,
                 layer_count: self.config.layer_count,
             });
         }
-        if position >= self.config.context_size {
-            return Err(KvCacheError::PositionOutOfBounds {
-                position,
-                context_size: self.config.context_size,
-            });
-        }
         Ok(())
+    }
+
+    fn position_available(&self, position: usize) -> bool {
+        match self.newest_position {
+            None => false,
+            Some(newest) => {
+                let oldest = self.oldest_available_position().unwrap_or(0);
+                (oldest..=newest).contains(&position)
+            }
+        }
+    }
+
+    fn oldest_available_position(&self) -> Option<usize> {
+        self.newest_position
+            .map(|newest| newest.saturating_add(1).saturating_sub(self.config.context_size))
+    }
+
+    fn physical_position(&self, position: usize) -> usize {
+        position % self.config.context_size
     }
 
     fn token_range(&self, layer: usize, position: usize) -> std::ops::Range<usize> {
@@ -385,16 +413,6 @@ mod tests {
             }
         );
         let err = cache
-            .set(0, 3, &[0.0, 1.0], &[2.0, 3.0])
-            .expect_err("position out of bounds should fail");
-        assert_eq!(
-            err,
-            KvCacheError::PositionOutOfBounds {
-                position: 3,
-                context_size: 2
-            }
-        );
-        let err = cache
             .set(0, 0, &[0.0], &[1.0, 2.0])
             .expect_err("mismatched vector length should fail");
         assert_eq!(
@@ -402,6 +420,69 @@ mod tests {
             KvCacheError::ValueLengthMismatch {
                 expected: 2,
                 actual: 1
+            }
+        );
+    }
+
+    #[test]
+    fn sliding_window_overwrites_physical_slots_for_new_positions() {
+        let mut cache = KvCache::new(KvCacheConfig {
+            layer_count: 1,
+            context_size: 2,
+            head_count: 1,
+            head_dim: 2,
+            dtype: DType::F32,
+        })
+        .expect("f32 kv cache should be supported");
+
+        cache
+            .set(0, 0, &[1.0, 2.0], &[3.0, 4.0])
+            .expect("write at position 0 should succeed");
+        cache
+            .set(0, 1, &[5.0, 6.0], &[7.0, 8.0])
+            .expect("write at position 1 should succeed");
+        cache
+            .set(0, 2, &[9.0, 10.0], &[11.0, 12.0])
+            .expect("write at position 2 should succeed");
+
+        let mut key = [0.0; 2];
+        cache
+            .get_key(0, 2, &mut key)
+            .expect("most recent key should remain available");
+        assert_eq!(key, [9.0, 10.0]);
+    }
+
+    #[test]
+    fn sliding_window_rejects_evicted_positions() {
+        let mut cache = KvCache::new(KvCacheConfig {
+            layer_count: 1,
+            context_size: 2,
+            head_count: 1,
+            head_dim: 2,
+            dtype: DType::F32,
+        })
+        .expect("f32 kv cache should be supported");
+
+        cache
+            .set(0, 4, &[1.0, 1.0], &[2.0, 2.0])
+            .expect("write at position 4 should succeed");
+        cache
+            .set(0, 5, &[3.0, 3.0], &[4.0, 4.0])
+            .expect("write at position 5 should succeed");
+        cache
+            .set(0, 6, &[5.0, 5.0], &[6.0, 6.0])
+            .expect("write at position 6 should succeed");
+
+        let mut key = [0.0; 2];
+        let err = cache
+            .get_key(0, 4, &mut key)
+            .expect_err("position 4 should be evicted after position 6");
+        assert_eq!(
+            err,
+            KvCacheError::PositionEvicted {
+                position: 4,
+                oldest_available: 5,
+                newest_available: 6
             }
         );
     }
