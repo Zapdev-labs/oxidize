@@ -489,7 +489,7 @@ fn write_storage(
     src: &[f32],
 ) {
     let range = token_range(config, layer, position);
-    let token_index = layer * config.context_size + position;
+    let token_index = token_slot_index(config, layer, position);
     match storage {
         KvStorage::F32(data) => data[range].copy_from_slice(src),
         KvStorage::F16(data) => {
@@ -541,7 +541,7 @@ fn read_storage(
     dst: &mut [f32],
 ) {
     let range = token_range(config, layer, position);
-    let token_index = layer * config.context_size + position;
+    let token_index = token_slot_index(config, layer, position);
     match storage {
         KvStorage::F32(data) => dst.copy_from_slice(&data[range]),
         KvStorage::F16(data) => {
@@ -575,8 +575,12 @@ fn read_storage(
 
 fn token_range(config: &KvCacheConfig, layer: usize, position: usize) -> std::ops::Range<usize> {
     let token_size = config.token_size();
-    let offset = layer * config.layer_size() + position * token_size;
+    let offset = token_slot_index(config, layer, position) * token_size;
     offset..offset + token_size
+}
+
+fn token_slot_index(config: &KvCacheConfig, layer: usize, position: usize) -> usize {
+    position * config.layer_count + layer
 }
 
 fn min_max(values: &[f32]) -> (f32, f32) {
@@ -1206,5 +1210,40 @@ mod tests {
             .expect("second token should still be mapped");
         assert_eq!(token0, [1.0, 2.0]);
         assert_eq!(token1, [5.0, 6.0]);
+    }
+
+    #[test]
+    fn token_slot_index_is_contiguous_across_layers_for_same_position() {
+        let config = KvCacheConfig {
+            layer_count: 4,
+            context_size: 8,
+            head_count: 2,
+            head_dim: 3,
+            dtype: DType::F32,
+        };
+
+        assert_eq!(token_slot_index(&config, 0, 2), 8);
+        assert_eq!(token_slot_index(&config, 1, 2), 9);
+        assert_eq!(token_slot_index(&config, 2, 2), 10);
+        assert_eq!(token_slot_index(&config, 3, 2), 11);
+    }
+
+    #[test]
+    fn token_range_advances_by_one_token_across_adjacent_layers() {
+        let config = KvCacheConfig {
+            layer_count: 3,
+            context_size: 4,
+            head_count: 1,
+            head_dim: 5,
+            dtype: DType::F32,
+        };
+
+        let token_size = config.token_size();
+        let layer0 = token_range(&config, 0, 1);
+        let layer1 = token_range(&config, 1, 1);
+        let layer2 = token_range(&config, 2, 1);
+
+        assert_eq!(layer1.start - layer0.start, token_size);
+        assert_eq!(layer2.start - layer1.start, token_size);
     }
 }
