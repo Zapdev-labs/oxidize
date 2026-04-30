@@ -9,6 +9,7 @@ pub struct GenerationConfig {
     pub max_new_tokens: usize,
     pub stop_token: Option<Token>,
     pub stop_sequences: Vec<Vec<Token>>,
+    pub prefill_batch_size: usize,
     pub sampling: SamplingConfig,
 }
 
@@ -18,6 +19,7 @@ impl Default for GenerationConfig {
             max_new_tokens: 128,
             stop_token: None,
             stop_sequences: Vec::new(),
+            prefill_batch_size: 256,
             sampling: SamplingConfig::default(),
         }
     }
@@ -93,7 +95,8 @@ impl<M: Model> Stream for GenerationStream<'_, M> {
     type Item = Result<Token, GenerationError>;
 
     fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        if self.generated >= self.config.max_new_tokens || matches!(self.state, GenerationState::Done)
+        if self.generated >= self.config.max_new_tokens
+            || matches!(self.state, GenerationState::Done)
         {
             self.state = GenerationState::Done;
             return Poll::Ready(None);
@@ -112,14 +115,31 @@ impl<M: Model> Stream for GenerationStream<'_, M> {
             GenerationState::Prefill => {
                 self.state = GenerationState::Decode;
                 let prompt = self.prompt;
-                match model.forward(prompt, session) {
-                    Ok(logits) => logits,
-                    Err(err) => {
-                        self.model = Some(model);
-                        self.session = Some(session);
-                        self.state = GenerationState::Done;
-                        return Poll::Ready(Some(Err(err.into())));
+                if prompt.is_empty() {
+                    match model.forward(prompt, session) {
+                        Ok(logits) => logits,
+                        Err(err) => {
+                            self.model = Some(model);
+                            self.session = Some(session);
+                            self.state = GenerationState::Done;
+                            return Poll::Ready(Some(Err(err.into())));
+                        }
                     }
+                } else {
+                    let batch_size = self.config.prefill_batch_size.max(1);
+                    let mut logits = None;
+                    for chunk in prompt.chunks(batch_size) {
+                        match model.forward(chunk, session) {
+                            Ok(chunk_logits) => logits = Some(chunk_logits),
+                            Err(err) => {
+                                self.model = Some(model);
+                                self.session = Some(session);
+                                self.state = GenerationState::Done;
+                                return Poll::Ready(Some(Err(err.into())));
+                            }
+                        }
+                    }
+                    logits.expect("non-empty prompt chunks should produce logits")
                 }
             }
             GenerationState::Decode => {
@@ -182,6 +202,8 @@ impl<M: Model> Stream for GenerationStream<'_, M> {
 mod tests {
     use super::*;
     use crate::llama::{LlamaConfig, LlamaModel};
+    use std::cell::RefCell;
+    use std::rc::Rc;
     use std::sync::Arc;
     use std::task::{Wake, Waker};
 
@@ -192,7 +214,9 @@ mod tests {
         fn wake(self: Arc<Self>) {}
     }
 
-    fn collect_stream<M: Model>(stream: &mut GenerationStream<'_, M>) -> Vec<Result<Token, GenerationError>> {
+    fn collect_stream<M: Model>(
+        stream: &mut GenerationStream<'_, M>,
+    ) -> Vec<Result<Token, GenerationError>> {
         let waker: Waker = Waker::from(Arc::new(NoopWaker));
         let mut cx = Context::from_waker(&waker);
         let mut pinned = Pin::new(stream);
@@ -320,6 +344,81 @@ mod tests {
         );
 
         let items = collect_stream(&mut stream);
-        assert_eq!(items, vec![Err(GenerationError::Model(ModelError::EmptyInput))]);
+        assert_eq!(
+            items,
+            vec![Err(GenerationError::Model(ModelError::EmptyInput))]
+        );
+    }
+
+    #[derive(Debug)]
+    struct RecordingModel {
+        vocab_size: usize,
+        context_size: usize,
+        layer_count: usize,
+        batch_sizes: Rc<RefCell<Vec<usize>>>,
+    }
+
+    impl Model for RecordingModel {
+        fn forward(&mut self, tokens: &[Token], session: &mut Session) -> Result<Vec<f32>, ModelError> {
+            self.batch_sizes.borrow_mut().push(tokens.len());
+            if tokens.is_empty() {
+                return Err(ModelError::EmptyInput);
+            }
+            let requested_total_tokens = session.consumed_tokens().saturating_add(tokens.len());
+            if requested_total_tokens > self.context_size {
+                return Err(ModelError::ContextExceeded {
+                    context_size: self.context_size,
+                    requested_total_tokens,
+                });
+            }
+            session.record_tokens(tokens.len());
+            let mut logits = vec![0.0; self.vocab_size];
+            let next_token = (tokens[tokens.len() - 1] as usize) % self.vocab_size;
+            logits[next_token] = 1.0;
+            Ok(logits)
+        }
+
+        fn vocab_size(&self) -> usize {
+            self.vocab_size
+        }
+
+        fn context_size(&self) -> usize {
+            self.context_size
+        }
+
+        fn layer_count(&self) -> usize {
+            self.layer_count
+        }
+    }
+
+    #[test]
+    fn prefill_processes_prompt_in_batches() {
+        let batch_sizes = Rc::new(RefCell::new(Vec::new()));
+        let mut model = RecordingModel {
+            vocab_size: 32,
+            context_size: 64,
+            layer_count: 2,
+            batch_sizes: Rc::clone(&batch_sizes),
+        };
+        let mut session = Session::new();
+        let mut stream = GenerationStream::new(
+            &mut model,
+            &mut session,
+            &[1, 2, 3, 4, 5],
+            GenerationConfig {
+                max_new_tokens: 1,
+                prefill_batch_size: 2,
+                sampling: SamplingConfig {
+                    temperature: 0.01,
+                    ..SamplingConfig::default()
+                },
+                ..GenerationConfig::default()
+            },
+            || 0.4,
+        );
+
+        let items = collect_stream(&mut stream);
+        assert_eq!(items, vec![Ok(5)]);
+        assert_eq!(*batch_sizes.borrow(), vec![2, 2, 1]);
     }
 }
