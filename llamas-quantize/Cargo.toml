@@ -6,3 +6,5 @@ version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+clap.workspace = true
+llamas-core = { path = "../llamas-core" }
