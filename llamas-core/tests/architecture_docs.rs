@@ -8,6 +8,13 @@ fn workspace_readme_path() -> PathBuf {
         .join("README.md")
 }
 
+fn workspace_contributing_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("llamas-core should have workspace root parent")
+        .join("CONTRIBUTING.md")
+}
+
 #[test]
 fn readme_includes_architecture_section() {
     let path = workspace_readme_path();
@@ -88,6 +95,28 @@ fn readme_includes_troubleshooting_guide() {
         assert!(
             readme.contains(required),
             "README troubleshooting guide missing required text: {required}"
+        );
+    }
+}
+
+#[test]
+fn contributing_guide_includes_required_sections() {
+    let path = workspace_contributing_path();
+    let guide = fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed reading {}: {err}", path.display()));
+
+    for required in [
+        "# Contributing to llamas-cpp",
+        "## Development setup",
+        "## Workflow",
+        "## Quality checks",
+        "## Pull requests",
+        "make test",
+        "make lint",
+    ] {
+        assert!(
+            guide.contains(required),
+            "CONTRIBUTING guide missing required text: {required}"
         );
     }
 }
