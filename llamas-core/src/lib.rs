@@ -18,6 +18,7 @@ pub mod simd;
 pub mod tensor;
 pub mod tokenizer;
 pub mod webgpu;
+pub mod web_worker;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkspaceHealth {
