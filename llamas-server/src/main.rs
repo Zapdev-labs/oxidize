@@ -63,6 +63,8 @@ fn build_app_with_limits(config: RequestLimitConfig) -> Router {
     };
     Router::new()
         .route("/healthz", get(healthz))
+        .route("/livez", get(livez))
+        .route("/readyz", get(readyz))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/completions", post(completions))
         .route("/v1/models", get(models))
@@ -76,6 +78,14 @@ fn build_app_with_limits(config: RequestLimitConfig) -> Router {
 }
 
 async fn healthz() -> StatusCode {
+    StatusCode::OK
+}
+
+async fn livez() -> StatusCode {
+    StatusCode::OK
+}
+
+async fn readyz() -> StatusCode {
     StatusCode::OK
 }
 
@@ -478,6 +488,36 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/healthz")
+                    .body(Body::empty())
+                    .expect("valid request"),
+            )
+            .await
+            .expect("request should be handled");
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn livez_returns_200() {
+        let response = build_app()
+            .oneshot(
+                Request::builder()
+                    .uri("/livez")
+                    .body(Body::empty())
+                    .expect("valid request"),
+            )
+            .await
+            .expect("request should be handled");
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn readyz_returns_200() {
+        let response = build_app()
+            .oneshot(
+                Request::builder()
+                    .uri("/readyz")
                     .body(Body::empty())
                     .expect("valid request"),
             )
