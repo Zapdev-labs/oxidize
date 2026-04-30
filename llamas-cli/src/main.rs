@@ -1,9 +1,9 @@
 use clap::Parser;
-use llamas_core::lora::{AdapterKind, LoraPlan, plan_lora_application};
+use llamas_core::lora::{plan_lora_application, AdapterKind, LoraPlan};
 use llamas_core::model_loader::{GgufModelLoader, ModelLoader};
 use llamas_core::offload::{
-    LayerOffloadPlan, MultiGpuConfig, MultiGpuOffloadPlan, ParallelismStrategy, plan_layer_offload,
-    plan_multi_gpu_offload,
+    plan_layer_offload, plan_multi_gpu_offload, LayerOffloadPlan, MultiGpuConfig,
+    MultiGpuOffloadPlan, ParallelismStrategy,
 };
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
@@ -29,6 +29,50 @@ struct Args {
 
 fn greeting(prompt: &str) -> String {
     format!("llamas-cli: {prompt}")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConversationTurn {
+    user: String,
+    assistant: String,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct ConversationHistory {
+    turns: Vec<ConversationTurn>,
+}
+
+impl ConversationHistory {
+    fn add_turn(&mut self, user: &str, assistant: &str) {
+        self.turns.push(ConversationTurn {
+            user: user.to_owned(),
+            assistant: assistant.to_owned(),
+        });
+    }
+
+    fn clear(&mut self) {
+        self.turns.clear();
+    }
+
+    fn render(&self) -> String {
+        if self.turns.is_empty() {
+            return "no conversation history".to_owned();
+        }
+
+        self.turns
+            .iter()
+            .enumerate()
+            .map(|(index, turn)| {
+                format!(
+                    "{}. user: {}\n   assistant: {}",
+                    index + 1,
+                    turn.user,
+                    turn.assistant
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 }
 
 fn render_offload_plan(plan: &LayerOffloadPlan) -> String {
@@ -82,6 +126,7 @@ fn render_lora_plan(plan: &LoraPlan) -> String {
 
 fn run_chat_mode<R: BufRead, W: Write>(reader: &mut R, writer: &mut W) -> io::Result<()> {
     writeln!(writer, "llamas-cli chat mode. type 'exit' to quit.")?;
+    let mut history = ConversationHistory::default();
     loop {
         write!(writer, "> ")?;
         writer.flush()?;
@@ -100,7 +145,19 @@ fn run_chat_mode<R: BufRead, W: Write>(reader: &mut R, writer: &mut W) -> io::Re
             continue;
         }
 
-        writeln!(writer, "{}", greeting(prompt))?;
+        if prompt.eq_ignore_ascii_case("/history") {
+            writeln!(writer, "{}", history.render())?;
+            continue;
+        }
+        if prompt.eq_ignore_ascii_case("/clear") {
+            history.clear();
+            writeln!(writer, "conversation history cleared")?;
+            continue;
+        }
+
+        let response = greeting(prompt);
+        writeln!(writer, "{response}")?;
+        history.add_turn(prompt, &response);
     }
     Ok(())
 }
@@ -277,6 +334,25 @@ mod tests {
 
         let output = String::from_utf8(writer).expect("valid utf8 output");
         assert!(output.contains("llamas-cli: world"));
+    }
+
+    #[test]
+    fn chat_mode_renders_and_clears_conversation_history() {
+        let mut reader = io::Cursor::new("hello\nworld\n/history\n/clear\n/history\nquit\n");
+        let mut writer = Vec::new();
+        run_chat_mode(&mut reader, &mut writer).expect("chat mode should succeed");
+
+        let output = String::from_utf8(writer).expect("valid utf8 output");
+        assert!(output.contains("1. user: hello\n   assistant: llamas-cli: hello"));
+        assert!(output.contains("2. user: world\n   assistant: llamas-cli: world"));
+        assert!(output.contains("conversation history cleared"));
+        assert!(output.contains("no conversation history"));
+    }
+
+    #[test]
+    fn conversation_history_render_uses_empty_state() {
+        let history = ConversationHistory::default();
+        assert_eq!(history.render(), "no conversation history");
     }
 
     #[test]
