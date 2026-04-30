@@ -1,14 +1,17 @@
-use clap::Parser;
-use llamas_core::lora::{plan_lora_application, AdapterKind, LoraPlan};
+use clap::{Parser, ValueEnum};
+use llamas_core::lora::{AdapterKind, LoraPlan, plan_lora_application};
 use llamas_core::model_loader::{GgufModelLoader, LoadProgress, ModelLoader};
 use llamas_core::offload::{
-    plan_layer_offload, plan_multi_gpu_offload, LayerOffloadPlan, MultiGpuConfig,
-    MultiGpuOffloadPlan, ParallelismStrategy,
+    LayerOffloadPlan, MultiGpuConfig, MultiGpuOffloadPlan, ParallelismStrategy, plan_layer_offload,
+    plan_multi_gpu_offload,
 };
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
+use std::process::{Command, ExitStatus};
 use std::time::{Duration, Instant};
+
+const PROFILE_CHILD_ENV: &str = "LLAMAS_PROFILE_CHILD";
 
 #[derive(Debug, Parser)]
 #[command(name = "llamas-cli")]
@@ -27,10 +30,20 @@ struct Args {
     lora_paths: Vec<PathBuf>,
     #[arg(long, default_value_t = false)]
     chat: bool,
+    #[arg(long, value_enum)]
+    profile: Option<Profiler>,
+    #[arg(long)]
+    profile_output: Option<PathBuf>,
 }
 
 fn greeting(prompt: &str) -> String {
     format!("llamas-cli: {prompt}")
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+enum Profiler {
+    Perf,
+    Samply,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -246,7 +259,10 @@ fn write_generated_response_cached<W: Write>(
 ) -> io::Result<String> {
     if let Some(cached_response) = prompt_cache.get(prompt) {
         writeln!(writer, "{cached_response}")?;
-        writeln!(writer, "generation stats: tokens=0 speed=0.00 tok/s (cache hit)")?;
+        writeln!(
+            writer,
+            "generation stats: tokens=0 speed=0.00 tok/s (cache hit)"
+        )?;
         return Ok(cached_response.to_owned());
     }
 
@@ -300,8 +316,83 @@ fn write_generated_response_with_clock<W: Write, F: FnMut() -> Instant>(
     Ok(response)
 }
 
+fn is_profiling_child() -> bool {
+    std::env::var_os(PROFILE_CHILD_ENV).is_some()
+}
+
+fn current_args_without_profile_flags() -> Vec<String> {
+    filter_passthrough_args(std::env::args().skip(1))
+}
+
+fn filter_passthrough_args<I>(input: I) -> Vec<String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut filtered = Vec::new();
+    let mut args = input.into_iter().peekable();
+    while let Some(arg) = args.next() {
+        let remove_next = arg == "--profile" || arg == "--profile-output";
+        let remove_current =
+            remove_next || arg.starts_with("--profile=") || arg.starts_with("--profile-output=");
+        if !remove_current {
+            filtered.push(arg);
+        }
+        if remove_next {
+            let _ = args.next();
+        }
+    }
+    filtered
+}
+
+fn profiler_command(
+    profiler: Profiler,
+    output: Option<&PathBuf>,
+    exe: &PathBuf,
+    passthrough_args: &[String],
+) -> Command {
+    let mut command = match profiler {
+        Profiler::Perf => {
+            let mut cmd = Command::new("perf");
+            cmd.arg("record").arg("--call-graph=dwarf");
+            if let Some(path) = output {
+                cmd.arg("-o").arg(path);
+            }
+            cmd
+        }
+        Profiler::Samply => {
+            let mut cmd = Command::new("samply");
+            cmd.arg("record");
+            if let Some(path) = output {
+                cmd.arg("-o").arg(path);
+            }
+            cmd
+        }
+    };
+    command.env(PROFILE_CHILD_ENV, "1");
+    command.arg(exe).args(passthrough_args);
+    command
+}
+
+fn run_profiled_inference(profiler: Profiler, output: Option<&PathBuf>) -> io::Result<ExitStatus> {
+    let exe = std::env::current_exe()?;
+    let passthrough_args = current_args_without_profile_flags();
+    let mut command = profiler_command(profiler, output, &exe, &passthrough_args);
+    command.status()
+}
+
 fn main() {
     let args = Args::parse();
+    if let Some(profiler) = args.profile
+        && !is_profiling_child()
+    {
+        match run_profiled_inference(profiler, args.profile_output.as_ref()) {
+            Ok(status) => std::process::exit(status.code().unwrap_or(1)),
+            Err(error) => {
+                eprintln!("failed to run profiler: {error}");
+                std::process::exit(1);
+            }
+        }
+    }
     if args.chat {
         let stdin = io::stdin();
         let mut reader = stdin.lock();
@@ -369,6 +460,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
 
     #[test]
     fn greeting_uses_prompt() {
@@ -522,8 +614,9 @@ mod tests {
         assert!(first_output.contains("generation progress: 2/2 tokens"));
 
         let mut second_writer = Vec::new();
-        let response = write_generated_response_cached("hello", &mut prompt_cache, &mut second_writer)
-            .expect("cached response should succeed");
+        let response =
+            write_generated_response_cached("hello", &mut prompt_cache, &mut second_writer)
+                .expect("cached response should succeed");
         let second_output = String::from_utf8(second_writer).expect("valid utf8 output");
         assert_eq!(response, "llamas-cli: hello");
         assert_eq!(
@@ -572,10 +665,7 @@ mod tests {
             bytes_processed: Some(1024),
             total_bytes: Some(4096),
         });
-        assert_eq!(
-            rendered,
-            "load progress: 35% stage=mapping bytes=1024/4096"
-        );
+        assert_eq!(rendered, "load progress: 35% stage=mapping bytes=1024/4096");
     }
 
     #[test]
@@ -613,5 +703,99 @@ mod tests {
     fn format_generation_stats_reports_tokens_and_speed() {
         let stats = format_generation_stats(12, Duration::from_secs(3));
         assert_eq!(stats, "generation stats: tokens=12 speed=4.00 tok/s");
+    }
+
+    #[test]
+    fn profiler_command_builds_perf_record_invocation() {
+        let output = PathBuf::from("cpu.perf.data");
+        let exe = PathBuf::from("target/debug/llamas-cli");
+        let args = vec!["--prompt".to_owned(), "ping".to_owned()];
+        let command = profiler_command(Profiler::Perf, Some(&output), &exe, &args);
+
+        assert_eq!(command.get_program().to_string_lossy(), "perf");
+        let got = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            got,
+            vec![
+                "record",
+                "--call-graph=dwarf",
+                "-o",
+                "cpu.perf.data",
+                "target/debug/llamas-cli",
+                "--prompt",
+                "ping"
+            ]
+        );
+    }
+
+    #[test]
+    fn profiler_command_builds_samply_record_invocation() {
+        let exe = PathBuf::from("target/debug/llamas-cli");
+        let args = vec!["--prompt".to_owned(), "ping".to_owned()];
+        let command = profiler_command(Profiler::Samply, None, &exe, &args);
+
+        assert_eq!(command.get_program().to_string_lossy(), "samply");
+        let got = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            got,
+            vec!["record", "target/debug/llamas-cli", "--prompt", "ping"]
+        );
+    }
+
+    #[test]
+    fn strips_profile_flags_from_passthrough_arguments() {
+        let result = filter_passthrough_args(
+            [
+                "--prompt",
+                "ping",
+                "--profile",
+                "perf",
+                "--profile-output",
+                "perf.data",
+                "--chat",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        );
+        assert_eq!(result, vec!["--prompt", "ping", "--chat"]);
+
+        let result_equals = filter_passthrough_args(
+            [
+                "--prompt=ping",
+                "--profile=samply",
+                "--profile-output=out.json",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        );
+        assert_eq!(result_equals, vec!["--prompt=ping"]);
+    }
+
+    #[test]
+    fn detects_profiling_child_environment() {
+        let key = OsString::from(PROFILE_CHILD_ENV);
+        let prior = std::env::var_os(&key);
+        // SAFETY: tests mutate process env in a scoped way and restore previous value.
+        unsafe { std::env::remove_var(&key) };
+        assert!(!is_profiling_child());
+        // SAFETY: tests mutate process env in a scoped way and restore previous value.
+        unsafe { std::env::set_var(&key, "1") };
+        assert!(is_profiling_child());
+        match prior {
+            Some(value) => {
+                // SAFETY: restore previous env value for this process.
+                unsafe { std::env::set_var(&key, value) }
+            }
+            None => {
+                // SAFETY: restore previous env absence for this process.
+                unsafe { std::env::remove_var(&key) }
+            }
+        }
     }
 }
