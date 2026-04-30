@@ -8,3 +8,10 @@ version.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "criterion"
+harness = false

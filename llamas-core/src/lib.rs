@@ -9,6 +9,10 @@ pub fn workspace_health() -> WorkspaceHealth {
     WorkspaceHealth { status: "ready" }
 }
 
+pub fn benchmark_input() -> WorkspaceHealth {
+    workspace_health()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -17,6 +21,11 @@ mod tests {
     #[test]
     fn workspace_health_is_ready() {
         assert_eq!(workspace_health().status, "ready");
+    }
+
+    #[test]
+    fn benchmark_input_is_ready() {
+        assert_eq!(benchmark_input().status, "ready");
     }
 
     #[test]
