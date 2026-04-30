@@ -3,6 +3,7 @@ use llamas_core::llama::{LlamaConfig, LlamaModel};
 use llamas_core::model::Session;
 use llamas_core::sampling::SamplingConfig;
 use pyo3::exceptions::PyValueError;
+use pyo3::ffi::c_str;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use std::pin::Pin;
@@ -58,6 +59,21 @@ impl Llama {
         Ok(Self::decode_tokens(&sampled_tokens))
     }
 
+    #[pyo3(signature = (prompt, max_tokens=16))]
+    fn generate_async(
+        slf: Py<Self>,
+        py: Python<'_>,
+        prompt: String,
+        max_tokens: usize,
+    ) -> PyResult<Py<PyAny>> {
+        let to_thread = resolve_to_thread(py)?;
+        let generate = slf.bind(py).getattr("generate")?;
+        let coroutine = to_thread
+            .bind(py)
+            .call1((generate, prompt, max_tokens))?;
+        Ok(coroutine.unbind())
+    }
+
     #[pyo3(signature = (messages, max_tokens=16))]
     fn create_chat_completion(
         &mut self,
@@ -84,6 +100,21 @@ impl Llama {
         response.set_item("object", "chat.completion")?;
         response.set_item("choices", PyList::new(py, &[choice])?)?;
         Ok(response.unbind())
+    }
+
+    #[pyo3(signature = (messages, max_tokens=16))]
+    fn create_chat_completion_async(
+        slf: Py<Self>,
+        py: Python<'_>,
+        messages: Vec<String>,
+        max_tokens: usize,
+    ) -> PyResult<Py<PyAny>> {
+        let to_thread = resolve_to_thread(py)?;
+        let create_chat_completion = slf.bind(py).getattr("create_chat_completion")?;
+        let coroutine = to_thread
+            .bind(py)
+            .call1((create_chat_completion, messages, max_tokens))?;
+        Ok(coroutine.unbind())
     }
 
     fn embed(&self, text: &str) -> PyResult<Vec<f32>> {
@@ -173,6 +204,25 @@ fn version() -> &'static str {
     PYTHON_PACKAGE_VERSION
 }
 
+fn resolve_to_thread(py: Python<'_>) -> PyResult<Py<PyAny>> {
+    if let Ok(asyncio) = py.import("asyncio") {
+        return Ok(asyncio.getattr("to_thread")?.unbind());
+    }
+
+    let fallback_scope = PyDict::new(py);
+    py.run(
+        c_str!(
+            "async def _llamas_to_thread(fn, *args, **kwargs):\n    return fn(*args, **kwargs)"
+        ),
+        None,
+        Some(&fallback_scope),
+    )?;
+    let to_thread = fallback_scope
+        .get_item("_llamas_to_thread")?
+        .ok_or_else(|| PyValueError::new_err("failed to initialize to_thread fallback"))?;
+    Ok(to_thread.unbind())
+}
+
 #[pymodule]
 fn llamas(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<Llama>()?;
@@ -186,6 +236,7 @@ fn llamas(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pyo3::exceptions::PyStopIteration;
     use pyo3::Python;
 
     #[test]
@@ -258,5 +309,67 @@ mod tests {
                 .expect("choices should be list of dicts");
             assert_eq!(choices.len(), 1);
         });
+    }
+
+    #[test]
+    fn llama_generate_async_supports_asyncio() {
+        Python::initialize();
+        Python::attach(|py| {
+            let llama = Py::new(
+                py,
+                Llama::new("model.gguf".to_owned(), 32_000, 4096, 32)
+                    .expect("llama should initialize"),
+            )
+            .expect("python llama instance should initialize");
+
+            let coroutine = Llama::generate_async(llama, py, "abc".to_owned(), 4)
+                .expect("async generation should return coroutine");
+            let generated = extract_coroutine_result(coroutine.bind(py))
+                .expect("coroutine should resolve to a value")
+                .extract::<String>()
+                .expect("generated response should be string");
+
+            assert_eq!(generated, "cccc");
+        });
+    }
+
+    #[test]
+    fn llama_create_chat_completion_async_supports_asyncio() {
+        Python::initialize();
+        Python::attach(|py| {
+            let llama = Py::new(
+                py,
+                Llama::new("model.gguf".to_owned(), 32_000, 4096, 32)
+                    .expect("llama should initialize"),
+            )
+            .expect("python llama instance should initialize");
+
+            let coroutine =
+                Llama::create_chat_completion_async(llama, py, vec!["hi".to_owned()], 2)
+                    .expect("async chat completion should return coroutine");
+            let completion = extract_coroutine_result(coroutine.bind(py))
+                .expect("coroutine should resolve to a value")
+                .extract::<Bound<'_, PyDict>>()
+                .expect("chat completion should be dict");
+
+            let object = completion
+                .get_item("object")
+                .expect("object key lookup should succeed")
+                .expect("object should have value")
+                .extract::<String>()
+                .expect("object should be string");
+            assert_eq!(object, "chat.completion");
+        });
+    }
+
+    fn extract_coroutine_result<'py>(coroutine: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+        match coroutine.call_method1("send", (coroutine.py().None(),)) {
+            Ok(_) => Err(PyValueError::new_err("coroutine unexpectedly yielded")),
+            Err(err) if err.is_instance_of::<PyStopIteration>(coroutine.py()) => Ok(err
+                .value(coroutine.py())
+                .getattr("value")?
+                .to_owned()),
+            Err(err) => Err(err),
+        }
     }
 }
