@@ -142,6 +142,39 @@ fn render_lora_plan(plan: &LoraPlan) -> String {
     )
 }
 
+fn read_chat_prompt<R: BufRead, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+) -> io::Result<Option<String>> {
+    let mut lines = Vec::new();
+    loop {
+        let mut input = String::new();
+        if reader.read_line(&mut input)? == 0 {
+            if lines.is_empty() {
+                return Ok(None);
+            }
+            break;
+        }
+
+        let trimmed = input.trim_end_matches(['\r', '\n']);
+        let continues = trimmed.ends_with('\\');
+        let line = if continues {
+            trimmed[..trimmed.len() - 1].to_owned()
+        } else {
+            trimmed.to_owned()
+        };
+        lines.push(line);
+
+        if continues {
+            write!(writer, "| ")?;
+            writer.flush()?;
+            continue;
+        }
+        break;
+    }
+    Ok(Some(lines.join("\n")))
+}
+
 fn run_chat_mode<R: BufRead, W: Write>(reader: &mut R, writer: &mut W) -> io::Result<()> {
     writeln!(writer, "llamas-cli chat mode. type 'exit' to quit.")?;
     let mut history = ConversationHistory::default();
@@ -150,10 +183,9 @@ fn run_chat_mode<R: BufRead, W: Write>(reader: &mut R, writer: &mut W) -> io::Re
         write!(writer, "> ")?;
         writer.flush()?;
 
-        let mut input = String::new();
-        if reader.read_line(&mut input)? == 0 {
+        let Some(input) = read_chat_prompt(reader, writer)? else {
             break;
-        }
+        };
 
         let prompt = input.trim();
         if prompt.eq_ignore_ascii_case("exit") || prompt.eq_ignore_ascii_case("quit") {
@@ -435,6 +467,17 @@ mod tests {
 
         let output = String::from_utf8(writer).expect("valid utf8 output");
         assert!(output.contains("llamas-cli: world"));
+    }
+
+    #[test]
+    fn chat_mode_supports_multiline_prompt_input() {
+        let mut reader = io::Cursor::new("hello \\\nworld\nquit\n");
+        let mut writer = Vec::new();
+        run_chat_mode(&mut reader, &mut writer).expect("chat mode should succeed");
+
+        let output = String::from_utf8(writer).expect("valid utf8 output");
+        assert!(output.contains("| "));
+        assert!(output.contains("llamas-cli: hello \nworld"));
     }
 
     #[test]
