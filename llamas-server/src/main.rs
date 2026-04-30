@@ -132,14 +132,14 @@ impl RequestLimiter {
     }
 
     async fn try_acquire(&self) -> Result<RequestPermit, RequestLimitError> {
-        if !self.try_accept_rate().await {
-            return Err(RequestLimitError::RateLimited);
-        }
         let queue = self
             .queue_slots
             .clone()
             .try_acquire_owned()
             .map_err(|_| RequestLimitError::QueueFull)?;
+        if !self.try_accept_rate().await {
+            return Err(RequestLimitError::RateLimited);
+        }
         let active = self
             .active_slots
             .clone()
@@ -867,5 +867,56 @@ mod tests {
             .expect("queued task should complete")
             .expect("queued request should eventually acquire");
         drop(queued);
+    }
+
+    #[tokio::test]
+    async fn limiter_allows_concurrent_in_flight_requests_up_to_limit() {
+        let limiter = Arc::new(RequestLimiter::new(RequestLimitConfig {
+            requests_per_second: 100,
+            max_in_flight: 2,
+            max_queue: 0,
+        }));
+
+        let first = limiter
+            .try_acquire()
+            .await
+            .expect("first request should acquire active slot");
+        let second = limiter
+            .try_acquire()
+            .await
+            .expect("second request should acquire active slot");
+
+        let third = limiter.try_acquire().await;
+        assert!(matches!(third, Err(RequestLimitError::QueueFull)));
+
+        drop(first);
+        drop(second);
+    }
+
+    #[tokio::test]
+    async fn queue_full_does_not_consume_rate_limit_capacity() {
+        let limiter = Arc::new(RequestLimiter::new(RequestLimitConfig {
+            requests_per_second: 2,
+            max_in_flight: 1,
+            max_queue: 0,
+        }));
+
+        let held = limiter
+            .try_acquire()
+            .await
+            .expect("first request should acquire active slot");
+
+        let rejected_while_full = limiter.try_acquire().await;
+        assert!(matches!(rejected_while_full, Err(RequestLimitError::QueueFull)));
+        drop(held);
+
+        let second = limiter
+            .try_acquire()
+            .await
+            .expect("queue-full rejection should not consume rate budget");
+        drop(second);
+
+        let third = limiter.try_acquire().await;
+        assert!(matches!(third, Err(RequestLimitError::RateLimited)));
     }
 }
