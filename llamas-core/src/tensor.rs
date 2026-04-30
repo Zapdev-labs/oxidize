@@ -1523,6 +1523,34 @@ mod tests {
     }
 
     #[test]
+    fn scaled_dot_product_attention_matches_pytorch_reference() {
+        let query = vec![0.3_f32, -0.8, 1.1, 0.2];
+        let key = vec![
+            0.4_f32, -0.7, 0.9, -0.1, //
+            -1.2, 0.3, 0.5, 0.8, //
+            0.6, 1.0, -0.4, 0.2, //
+            0.1, -0.2, 0.7, 1.3, //
+            -0.5, 0.9, -1.1, 0.4,
+        ];
+        let value = vec![
+            1.0_f32, -0.5, 0.3, 0.9, //
+            -0.7, 1.2, 0.4, -1.1, //
+            0.6, 0.8, -0.2, 0.5, //
+            1.4, -0.9, 1.1, -0.3, //
+            -0.4, 0.2, -1.3, 0.7,
+        ];
+        let expected = [0.704_716_4_f32, -0.158_690_65, 0.412_106_54, 0.145_940_9];
+        let mut actual = vec![0.0_f32; 4];
+
+        scaled_dot_product_attention_f32(&query, &key, &value, 5, 4, &mut actual)
+            .expect("attention should succeed");
+
+        for (lhs, rhs) in actual.iter().zip(expected.iter()) {
+            assert!((lhs - rhs).abs() < 1e-6);
+        }
+    }
+
+    #[test]
     fn scaled_dot_product_attention_is_stable_for_large_logits() {
         let dim = 2;
         let seq_len = 3;
@@ -1768,6 +1796,26 @@ mod tests {
     }
 
     #[test]
+    fn rms_norm_matches_pytorch_reference() {
+        let input = [0.25_f32, -1.5, 3.0, 0.75, -0.5];
+        let weight = [1.2_f32, 0.8, -0.6, 2.0, 0.5];
+        let expected = [
+            0.192_648_f32,
+            -0.770_592_03,
+            -1.155_888_1,
+            0.963_24,
+            -0.160_54,
+        ];
+        let mut output = [0.0_f32; 5];
+
+        rms_norm_f32(&input, &weight, 1e-5, &mut output).expect("rms norm should succeed");
+
+        for (actual, expected) in output.iter().zip(expected.iter()) {
+            assert!((actual - expected).abs() < 1e-6);
+        }
+    }
+
+    #[test]
     fn rms_norm_rejects_mismatched_lengths() {
         let mut output = [0.0_f32; 2];
         let input_err = rms_norm_f32(&[1.0_f32], &[1.0_f32, 1.0], 1e-5, &mut output)
@@ -1795,6 +1843,27 @@ mod tests {
         assert!((output[0] + 1.224_744_8).abs() < 1e-6);
         assert!((output[1] - 0.0).abs() < 1e-6);
         assert!((output[2] - 1.224_744_8).abs() < 1e-6);
+    }
+
+    #[test]
+    fn layer_norm_matches_pytorch_reference() {
+        let input = [0.25_f32, -1.5, 3.0, 0.75, -0.5];
+        let weight = [1.2_f32, 0.8, -0.6, 2.0, 0.5];
+        let bias = [0.1_f32, -0.2, 0.3, -0.4, 0.9];
+        let expected = [
+            -0.019_601_732_f32,
+            -1.209_970_1,
+            -0.736_548_3,
+            0.065_117_806,
+            0.600_995_66,
+        ];
+        let mut output = [0.0_f32; 5];
+
+        layer_norm_f32(&input, &weight, &bias, 1e-5, &mut output).expect("layer norm should succeed");
+
+        for (actual, expected) in output.iter().zip(expected.iter()) {
+            assert!((actual - expected).abs() < 1e-6);
+        }
     }
 
     #[test]
@@ -1848,6 +1917,25 @@ mod tests {
         assert!((output[1] - 0.244_728_48).abs() < 1e-7);
         assert!((output[2] - 0.665_240_94).abs() < 1e-7);
         assert!((output.iter().sum::<f32>() - 1.0).abs() < 1e-7);
+    }
+
+    #[test]
+    fn softmax_matches_pytorch_reference() {
+        let input = [1.25_f32, -0.5, 3.75, 0.0, -2.25];
+        let expected = [
+            0.073_137_f32,
+            0.012_709_305,
+            0.890_991_1,
+            0.020_954_102,
+            0.002_208_546_3,
+        ];
+        let mut output = [0.0_f32; 5];
+
+        softmax_f32(&input, &mut output).expect("softmax should succeed");
+
+        for (actual, expected) in output.iter().zip(expected.iter()) {
+            assert!((actual - expected).abs() < 1e-7);
+        }
     }
 
     #[test]
