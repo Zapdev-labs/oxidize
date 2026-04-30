@@ -1,4 +1,6 @@
 use std::env;
+#[cfg(target_os = "linux")]
+use std::fs;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,7 +45,10 @@ fn parse_perplexity_dataset_spec(spec: &str) -> Option<PerplexityDatasetCase> {
     })
 }
 
-fn perplexity_cases_from_raw(manifest_dir: &Path, raw_datasets: Option<&str>) -> Vec<PerplexityDatasetCase> {
+fn perplexity_cases_from_raw(
+    manifest_dir: &Path,
+    raw_datasets: Option<&str>,
+) -> Vec<PerplexityDatasetCase> {
     let configured = raw_datasets
         .map(parse_model_paths)
         .unwrap_or_default()
@@ -121,6 +126,35 @@ pub fn benchmark_text_perplexity(text: &str) -> Option<f64> {
     Some(entropy.exp())
 }
 
+#[cfg(target_os = "linux")]
+fn parse_vm_rss_kb(status: &str) -> Option<u64> {
+    status.lines().find_map(|line| {
+        let value = line.strip_prefix("VmRSS:")?.split_whitespace().next()?;
+        value.parse::<u64>().ok()
+    })
+}
+
+#[cfg(target_os = "linux")]
+pub fn current_process_memory_bytes() -> Option<u64> {
+    let status = fs::read_to_string("/proc/self/status").ok()?;
+    parse_vm_rss_kb(&status).map(|kb| kb * 1024)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn current_process_memory_bytes() -> Option<u64> {
+    None
+}
+
+pub fn benchmark_memory_delta_bytes<F>(action: F) -> Option<u64>
+where
+    F: FnOnce(),
+{
+    let before = current_process_memory_bytes()?;
+    action();
+    let after = current_process_memory_bytes()?;
+    Some(after.saturating_sub(before))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,10 +213,13 @@ mod tests {
 
     #[test]
     fn parse_perplexity_dataset_spec_requires_name_and_path() {
-        assert_eq!(parse_perplexity_dataset_spec("wikitext2=/tmp/wiki.txt"), Some(PerplexityDatasetCase {
-            name: "wikitext2".to_string(),
-            path: PathBuf::from("/tmp/wiki.txt"),
-        }));
+        assert_eq!(
+            parse_perplexity_dataset_spec("wikitext2=/tmp/wiki.txt"),
+            Some(PerplexityDatasetCase {
+                name: "wikitext2".to_string(),
+                path: PathBuf::from("/tmp/wiki.txt"),
+            })
+        );
         assert_eq!(parse_perplexity_dataset_spec("wikitext2="), None);
         assert_eq!(parse_perplexity_dataset_spec("=/tmp/wiki.txt"), None);
     }
@@ -236,5 +273,19 @@ mod tests {
     fn text_perplexity_requires_multiple_tokens() {
         assert_eq!(benchmark_text_perplexity("single"), None);
         assert_eq!(benchmark_text_perplexity("two tokens"), Some(5.5));
+    }
+
+    #[test]
+    fn benchmark_memory_delta_never_underflows() {
+        let delta = benchmark_memory_delta_bytes(|| {});
+        assert!(delta.is_none_or(|bytes| bytes < (1 << 40)));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parse_vm_rss_kb_extracts_value() {
+        let status = "Name:\ttest\nVmRSS:\t  2048 kB\nVmData:\t  1234 kB\n";
+        assert_eq!(parse_vm_rss_kb(status), Some(2048));
+        assert_eq!(parse_vm_rss_kb("Name:\ttest\n"), None);
     }
 }
