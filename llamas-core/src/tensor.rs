@@ -9,6 +9,60 @@ pub enum DType {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GemvError {
+    InvalidMatrixLength {
+        expected: usize,
+        actual: usize,
+    },
+    InvalidVectorLength {
+        expected: usize,
+        actual: usize,
+    },
+    InvalidOutputLength {
+        expected: usize,
+        actual: usize,
+    },
+}
+
+pub fn gemv_f32(
+    matrix: &[f32],
+    rows: usize,
+    cols: usize,
+    vector: &[f32],
+    output: &mut [f32],
+) -> Result<(), GemvError> {
+    let expected_matrix_len = rows.saturating_mul(cols);
+    if matrix.len() != expected_matrix_len {
+        return Err(GemvError::InvalidMatrixLength {
+            expected: expected_matrix_len,
+            actual: matrix.len(),
+        });
+    }
+    if vector.len() != cols {
+        return Err(GemvError::InvalidVectorLength {
+            expected: cols,
+            actual: vector.len(),
+        });
+    }
+    if output.len() != rows {
+        return Err(GemvError::InvalidOutputLength {
+            expected: rows,
+            actual: output.len(),
+        });
+    }
+
+    for (row_values, out) in matrix.chunks_exact(cols).zip(output.iter_mut()) {
+        *out = row_values
+            .iter()
+            .zip(vector.iter())
+            .map(|(weight, value)| weight * value)
+            .sum();
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tensor {
     pub shape: Vec<usize>,
     pub strides: Vec<usize>,
@@ -47,5 +101,38 @@ mod tests {
     #[should_panic(expected = "shape and strides must have the same rank")]
     fn rejects_mismatched_shape_and_strides() {
         let _ = Tensor::new(vec![2, 3], vec![3], DType::I8);
+    }
+
+    #[test]
+    fn gemv_multiplies_matrix_and_vector() {
+        let matrix = vec![
+            1.0_f32, 2.0, 3.0, //
+            4.0, 5.0, 6.0,
+        ];
+        let vector = vec![0.5_f32, -1.0, 2.0];
+        let mut output = vec![0.0_f32; 2];
+
+        gemv_f32(&matrix, 2, 3, &vector, &mut output).expect("gemv should succeed");
+
+        assert!((output[0] - 4.5).abs() < 1e-6);
+        assert!((output[1] - 9.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn gemv_rejects_invalid_input_shapes() {
+        let mut output = vec![0.0_f32; 2];
+        let err = gemv_f32(&[1.0_f32, 2.0, 3.0], 2, 2, &[1.0, 2.0], &mut output)
+            .expect_err("matrix length mismatch should fail");
+        assert!(matches!(err, GemvError::InvalidMatrixLength { .. }));
+
+        let matrix = vec![1.0_f32, 2.0, 3.0, 4.0];
+        let err = gemv_f32(&matrix, 2, 2, &[1.0_f32], &mut output)
+            .expect_err("vector length mismatch should fail");
+        assert!(matches!(err, GemvError::InvalidVectorLength { .. }));
+
+        let mut short_output = vec![0.0_f32; 1];
+        let err = gemv_f32(&matrix, 2, 2, &[1.0_f32, 1.0], &mut short_output)
+            .expect_err("output length mismatch should fail");
+        assert!(matches!(err, GemvError::InvalidOutputLength { .. }));
     }
 }
