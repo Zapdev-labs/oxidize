@@ -41,6 +41,8 @@ struct ChatCompletionRequest {
     model: String,
     messages: Vec<ChatMessageInput>,
     #[serde(default)]
+    response_format: Option<ResponseFormat>,
+    #[serde(default)]
     stream: bool,
 }
 
@@ -55,7 +57,30 @@ struct CompletionRequest {
     model: String,
     prompt: String,
     #[serde(default)]
+    response_format: Option<ResponseFormat>,
+    #[serde(default)]
     stream: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ResponseFormat {
+    Text,
+    JsonObject,
+    JsonSchema { json_schema: Value },
+}
+
+impl ResponseFormat {
+    fn output_text(&self) -> &'static str {
+        match self {
+            Self::Text => "",
+            Self::JsonObject => "{}",
+            Self::JsonSchema { json_schema } => {
+                let _ = json_schema;
+                "{}"
+            }
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -83,6 +108,10 @@ async fn chat_completions(Json(payload): Json<ChatCompletionRequest>) -> Respons
         .iter()
         .map(|message| message.role.len() + message.content.len())
         .sum();
+    let response_content = payload
+        .response_format
+        .as_ref()
+        .map_or("", ResponseFormat::output_text);
 
     if payload.stream {
         let model = payload.model;
@@ -97,7 +126,7 @@ async fn chat_completions(Json(payload): Json<ChatCompletionRequest>) -> Respons
                     "choices": [
                         {
                             "index": 0,
-                            "delta": { "role": "assistant", "content": "" },
+                            "delta": { "role": "assistant", "content": response_content },
                             "finish_reason": null
                         }
                     ]
@@ -133,7 +162,7 @@ async fn chat_completions(Json(payload): Json<ChatCompletionRequest>) -> Respons
                     "index": 0,
                     "message": {
                         "role": "assistant",
-                        "content": ""
+                        "content": response_content
                     },
                     "finish_reason": "stop"
                 }
@@ -150,6 +179,10 @@ async fn chat_completions(Json(payload): Json<ChatCompletionRequest>) -> Respons
 
 async fn completions(Json(payload): Json<CompletionRequest>) -> Response {
     let _ = &payload.prompt;
+    let response_text = payload
+        .response_format
+        .as_ref()
+        .map_or("", ResponseFormat::output_text);
 
     if payload.stream {
         let model = payload.model;
@@ -164,7 +197,7 @@ async fn completions(Json(payload): Json<CompletionRequest>) -> Response {
                     "choices": [
                         {
                             "index": 0,
-                            "text": "",
+                            "text": response_text,
                             "finish_reason": null
                         }
                     ]
@@ -176,7 +209,7 @@ async fn completions(Json(payload): Json<CompletionRequest>) -> Response {
                     "object": "text_completion",
                     "created": 0,
                     "model": model_for_end,
-                    "choices": [{ "index": 0, "text": "", "finish_reason": "stop" }]
+                    "choices": [{ "index": 0, "text": response_text, "finish_reason": "stop" }]
                 })
                 .to_string(),
             )),
@@ -198,7 +231,7 @@ async fn completions(Json(payload): Json<CompletionRequest>) -> Response {
             "choices": [
                 {
                     "index": 0,
-                    "text": "",
+                    "text": response_text,
                     "finish_reason": "stop"
                 }
             ],
@@ -355,6 +388,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn chat_completions_json_mode_returns_json_content() {
+        let request_body = json!({
+            "model": "llamas-default",
+            "messages": [{"role": "user", "content": "hello"}],
+            "response_format": { "type": "json_object" }
+        });
+        let response = build_app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(request_body.to_string()))
+                    .expect("valid request"),
+            )
+            .await
+            .expect("request should be handled");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let parsed: Value = serde_json::from_slice(&bytes).expect("valid json response");
+        let content = parsed["choices"][0]["message"]["content"]
+            .as_str()
+            .expect("content should be a string");
+        let parsed_content: Value = serde_json::from_str(content).expect("content should be json");
+        assert_eq!(parsed_content, json!({}));
+    }
+
+    #[tokio::test]
+    async fn completions_json_schema_mode_returns_json_text() {
+        let request_body = json!({
+            "model": "llamas-default",
+            "prompt": "hello",
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "demo",
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "answer": { "type": "string" }
+                        }
+                    }
+                }
+            }
+        });
+        let response = build_app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/completions")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(request_body.to_string()))
+                    .expect("valid request"),
+            )
+            .await
+            .expect("request should be handled");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let parsed: Value = serde_json::from_slice(&bytes).expect("valid json response");
+        let text = parsed["choices"][0]["text"]
+            .as_str()
+            .expect("text should be a string");
+        let parsed_text: Value = serde_json::from_str(text).expect("text should be json");
+        assert_eq!(parsed_text, json!({}));
+    }
+
+    #[tokio::test]
     async fn chat_completions_stream_returns_sse_events() {
         let request_body = json!({
             "model": "llamas-default",
@@ -384,6 +490,35 @@ mod tests {
             .expect("body should be readable");
         let body = String::from_utf8(bytes.to_vec()).expect("sse body should be utf-8");
         assert!(body.contains("\"object\":\"chat.completion.chunk\""));
+        assert!(body.contains("data: [DONE]"));
+    }
+
+    #[tokio::test]
+    async fn chat_completions_stream_json_mode_returns_json_chunk() {
+        let request_body = json!({
+            "model": "llamas-default",
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": true,
+            "response_format": { "type": "json_object" }
+        });
+        let response = build_app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(request_body.to_string()))
+                    .expect("valid request"),
+            )
+            .await
+            .expect("request should be handled");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let body = String::from_utf8(bytes.to_vec()).expect("sse body should be utf-8");
+        assert!(body.contains("\"content\":\"{}\""));
         assert!(body.contains("data: [DONE]"));
     }
 
