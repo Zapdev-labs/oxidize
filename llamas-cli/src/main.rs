@@ -7,6 +7,7 @@ use llamas_core::offload::{
 };
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Parser)]
 #[command(name = "llamas-cli")]
@@ -185,10 +186,37 @@ fn render_load_progress(progress: LoadProgress) -> String {
 }
 
 fn write_generated_response<W: Write>(prompt: &str, writer: &mut W) -> io::Result<String> {
+    write_generated_response_with_clock(prompt, writer, Instant::now)
+}
+
+fn format_generation_stats(tokens: usize, elapsed: Duration) -> String {
+    let elapsed_seconds = elapsed.as_secs_f64();
+    let speed = if elapsed_seconds > 0.0 {
+        tokens as f64 / elapsed_seconds
+    } else {
+        0.0
+    };
+    format!(
+        "generation stats: tokens={} speed={:.2} tok/s",
+        tokens, speed
+    )
+}
+
+fn write_generated_response_with_clock<W: Write, F: FnMut() -> Instant>(
+    prompt: &str,
+    writer: &mut W,
+    mut now: F,
+) -> io::Result<String> {
+    let started_at = now();
     let response = greeting(prompt);
     let response_tokens = response.split_whitespace().count();
     if response_tokens == 0 {
         writeln!(writer, "{response}")?;
+        writeln!(
+            writer,
+            "{}",
+            format_generation_stats(response_tokens, now().saturating_duration_since(started_at))
+        )?;
         return Ok(response);
     }
     for generated in 1..=response_tokens {
@@ -198,6 +226,11 @@ fn write_generated_response<W: Write>(prompt: &str, writer: &mut W) -> io::Resul
         )?;
     }
     writeln!(writer, "{response}")?;
+    writeln!(
+        writer,
+        "{}",
+        format_generation_stats(response_tokens, now().saturating_duration_since(started_at))
+    )?;
     Ok(response)
 }
 
@@ -392,11 +425,19 @@ mod tests {
     #[test]
     fn single_shot_mode_writes_one_response() {
         let mut writer = Vec::new();
-        run_single_shot_mode("hello", &mut writer).expect("single-shot mode should succeed");
+        write_generated_response_with_clock("hello", &mut writer, {
+            let mut ticks = [0u64, 500].into_iter();
+            move || {
+                Instant::now()
+                    .checked_add(Duration::from_millis(ticks.next().expect("clock tick")))
+                    .expect("valid instant")
+            }
+        })
+        .expect("single-shot mode should succeed");
         let output = String::from_utf8(writer).expect("valid utf8 output");
         assert_eq!(
             output,
-            "generation progress: 1/2 tokens\ngeneration progress: 2/2 tokens\nllamas-cli: hello\n"
+            "generation progress: 1/2 tokens\ngeneration progress: 2/2 tokens\nllamas-cli: hello\ngeneration stats: tokens=2 speed=4.00 tok/s\n"
         );
     }
 
@@ -435,13 +476,26 @@ mod tests {
     #[test]
     fn write_generated_response_emits_progress_and_final_response() {
         let mut writer = Vec::new();
-        let response =
-            write_generated_response("there", &mut writer).expect("generation should succeed");
+        let response = write_generated_response_with_clock("there", &mut writer, {
+            let mut ticks = [0u64, 200].into_iter();
+            move || {
+                Instant::now()
+                    .checked_add(Duration::from_millis(ticks.next().expect("clock tick")))
+                    .expect("valid instant")
+            }
+        })
+        .expect("generation should succeed");
         let output = String::from_utf8(writer).expect("valid utf8 output");
         assert_eq!(response, "llamas-cli: there");
         assert_eq!(
             output,
-            "generation progress: 1/2 tokens\ngeneration progress: 2/2 tokens\nllamas-cli: there\n"
+            "generation progress: 1/2 tokens\ngeneration progress: 2/2 tokens\nllamas-cli: there\ngeneration stats: tokens=2 speed=10.00 tok/s\n"
         );
+    }
+
+    #[test]
+    fn format_generation_stats_reports_tokens_and_speed() {
+        let stats = format_generation_stats(12, Duration::from_secs(3));
+        assert_eq!(stats, "generation stats: tokens=12 speed=4.00 tok/s");
     }
 }
