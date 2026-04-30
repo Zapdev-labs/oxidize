@@ -1,0 +1,13 @@
+[package]
+name = "llamas-py"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[lib]
+name = "llamas"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+llamas-core = { path = "../llamas-core" }
+pyo3.workspace = true
