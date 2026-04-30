@@ -83,4 +83,27 @@ mod tests {
         assert!(build_script.contains("cargo:rerun-if-env-changed=CUDA_PATH"));
         assert!(build_script.contains("cargo:rustc-check-cfg=cfg(cuda_available)"));
     }
+
+    #[test]
+    fn llamas_core_declares_metal_feature_and_macos_build_dependency() {
+        let crate_cargo_toml = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let cargo_toml =
+            std::fs::read_to_string(crate_cargo_toml).expect("llamas-core Cargo.toml exists");
+
+        assert!(cargo_toml.contains("metal = []"));
+        assert!(
+            cargo_toml.contains("[target.'cfg(target_os = \"macos\")'.build-dependencies]")
+        );
+        assert!(cargo_toml.contains("metal = \"0.31\""));
+    }
+
+    #[test]
+    fn metal_build_script_sets_expected_cfg_and_detection_path() {
+        let build_script_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("build.rs");
+        let build_script = std::fs::read_to_string(build_script_path).expect("build.rs exists");
+
+        assert!(build_script.contains("cargo:rustc-check-cfg=cfg(metal_available)"));
+        assert!(build_script.contains("if detect_metal_available()"));
+        assert!(build_script.contains("metal::Device::system_default().is_some()"));
+    }
 }

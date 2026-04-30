@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(cuda_available)");
+    println!("cargo:rustc-check-cfg=cfg(metal_available)");
     println!("cargo:rerun-if-env-changed=CUDA_HOME");
     println!("cargo:rerun-if-env-changed=CUDA_PATH");
 
@@ -15,6 +16,10 @@ fn main() {
             println!("cargo:rustc-link-search=native={}", lib64.display());
             println!("cargo:rustc-link-lib=dylib=cudart");
         }
+    }
+
+    if detect_metal_available() {
+        println!("cargo:rustc-cfg=metal_available");
     }
 }
 
@@ -33,4 +38,14 @@ fn detect_cuda_root() -> Option<PathBuf> {
     } else {
         None
     }
+}
+
+#[cfg(target_os = "macos")]
+fn detect_metal_available() -> bool {
+    metal::Device::system_default().is_some()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn detect_metal_available() -> bool {
+    false
 }
