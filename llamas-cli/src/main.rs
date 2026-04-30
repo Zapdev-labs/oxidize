@@ -5,6 +5,7 @@ use llamas_core::offload::{
     LayerOffloadPlan, MultiGpuConfig, MultiGpuOffloadPlan, ParallelismStrategy, plan_layer_offload,
     plan_multi_gpu_offload,
 };
+use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
@@ -22,6 +23,8 @@ struct Args {
     parallelism: String,
     #[arg(long = "lora")]
     lora_paths: Vec<PathBuf>,
+    #[arg(long, default_value_t = false)]
+    chat: bool,
 }
 
 fn greeting(prompt: &str) -> String {
@@ -77,8 +80,43 @@ fn render_lora_plan(plan: &LoraPlan) -> String {
     )
 }
 
+fn run_chat_mode<R: BufRead, W: Write>(reader: &mut R, writer: &mut W) -> io::Result<()> {
+    writeln!(writer, "llamas-cli chat mode. type 'exit' to quit.")?;
+    loop {
+        write!(writer, "> ")?;
+        writer.flush()?;
+
+        let mut input = String::new();
+        if reader.read_line(&mut input)? == 0 {
+            break;
+        }
+
+        let prompt = input.trim();
+        if prompt.eq_ignore_ascii_case("exit") || prompt.eq_ignore_ascii_case("quit") {
+            writeln!(writer, "bye")?;
+            break;
+        }
+        if prompt.is_empty() {
+            continue;
+        }
+
+        writeln!(writer, "{}", greeting(prompt))?;
+    }
+    Ok(())
+}
+
 fn main() {
     let args = Args::parse();
+    if args.chat {
+        let stdin = io::stdin();
+        let mut reader = stdin.lock();
+        let stdout = io::stdout();
+        let mut writer = stdout.lock();
+        if let Err(error) = run_chat_mode(&mut reader, &mut writer) {
+            eprintln!("chat mode failed: {error}");
+        }
+        return;
+    }
     if let Some(model_path) = args.model {
         let loader = GgufModelLoader;
         match loader.load(model_path) {
@@ -205,5 +243,27 @@ mod tests {
             summary,
             "adapter plan: mode=qlora matched_targets=1 missing_base_targets=1"
         );
+    }
+
+    #[test]
+    fn chat_mode_replies_and_exits() {
+        let mut reader = io::Cursor::new("hello\nexit\n");
+        let mut writer = Vec::new();
+        run_chat_mode(&mut reader, &mut writer).expect("chat mode should succeed");
+
+        let output = String::from_utf8(writer).expect("valid utf8 output");
+        assert!(output.contains("llamas-cli chat mode. type 'exit' to quit."));
+        assert!(output.contains("> llamas-cli: hello"));
+        assert!(output.contains("> bye"));
+    }
+
+    #[test]
+    fn chat_mode_ignores_blank_lines() {
+        let mut reader = io::Cursor::new("\nworld\nquit\n");
+        let mut writer = Vec::new();
+        run_chat_mode(&mut reader, &mut writer).expect("chat mode should succeed");
+
+        let output = String::from_utf8(writer).expect("valid utf8 output");
+        assert!(output.contains("llamas-cli: world"));
     }
 }
