@@ -1,6 +1,8 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use axum::{
+    extract::Request,
+    middleware::{self, Next},
     response::{
         IntoResponse, Response,
         sse::{Event, KeepAlive, Sse},
@@ -30,10 +32,31 @@ fn build_app() -> Router {
         .route("/v1/completions", post(completions))
         .route("/v1/models", get(models))
         .route("/v1/embeddings", post(embeddings))
+        .layer(middleware::from_fn(log_request_response))
 }
 
 async fn healthz() -> StatusCode {
     StatusCode::OK
+}
+
+async fn log_request_response(request: Request, next: Next) -> Response {
+    let method = request.method().clone();
+    let path = request.uri().path().to_owned();
+    tracing::info!("{}", request_log_message(method.as_ref(), &path));
+    let response = next.run(request).await;
+    tracing::info!(
+        "{}",
+        response_log_message(method.as_ref(), &path, response.status())
+    );
+    response
+}
+
+fn request_log_message(method: &str, path: &str) -> String {
+    format!("request {method} {path}")
+}
+
+fn response_log_message(method: &str, path: &str, status: StatusCode) -> String {
+    format!("response {method} {path} {}", status.as_u16())
 }
 
 #[derive(Debug, Deserialize)]
@@ -280,6 +303,7 @@ async fn embeddings(Json(payload): Json<EmbeddingsRequest>) -> (StatusCode, Json
 
 #[tokio::main]
 async fn main() {
+    tracing_subscriber::fmt::init();
     let args = Args::parse();
     let listener = tokio::net::TcpListener::bind(SocketAddr::new(args.host, args.port))
         .await
@@ -331,6 +355,18 @@ mod tests {
             .expect("request should be handled");
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn request_log_message_has_expected_shape() {
+        let message = request_log_message("GET", "/healthz");
+        assert_eq!(message, "request GET /healthz");
+    }
+
+    #[test]
+    fn response_log_message_has_expected_shape() {
+        let message = response_log_message("GET", "/healthz", StatusCode::OK);
+        assert_eq!(message, "response GET /healthz 200");
     }
 
     #[tokio::test]
