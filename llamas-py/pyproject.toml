@@ -16,3 +16,4 @@ classifiers = [
 [tool.maturin]
 module-name = "llamas"
 bindings = "pyo3"
+include = ["llamas.pyi", "py.typed"]

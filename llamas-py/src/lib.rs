@@ -565,5 +565,21 @@ mod tests {
         let pyproject = include_str!("../pyproject.toml");
         assert!(pyproject.contains("build-backend = \"maturin\""));
         assert!(pyproject.contains("module-name = \"llamas\""));
+        assert!(pyproject.contains("include = [\"llamas.pyi\", \"py.typed\"]"));
+    }
+
+    #[test]
+    fn python_type_stub_defines_public_api() {
+        let stub = include_str!("../llamas.pyi");
+        assert!(stub.contains("class Llama:"));
+        assert!(stub.contains("def workspace_health() -> str: ..."));
+        assert!(stub.contains("def version() -> str: ..."));
+        assert!(stub.contains("def generate(self, prompt: str, max_tokens: int = 16) -> str: ..."));
+    }
+
+    #[test]
+    fn py_typed_marker_file_exists() {
+        let marker = include_str!("../py.typed");
+        assert!(marker.trim().is_empty());
     }
 }
