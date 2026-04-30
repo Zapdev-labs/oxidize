@@ -343,7 +343,9 @@ fn align_up(value: u64, alignment: u64) -> Result<u64, GgufParseError> {
 fn map_tensor_name(architecture: &str, name: &str) -> String {
     let architecture = architecture.to_ascii_lowercase();
     let mapped = match architecture.as_str() {
-        "llama" | "mistral" | "mixtral" | "qwen2" | "gemma" => map_hf_decoder_name(name),
+        "llama" | "mistral" | "mixtral" | "qwen" | "qwen2" | "qwen2moe" | "gemma" => {
+            map_hf_decoder_name(name)
+        }
         "falcon" => map_falcon_name(name),
         "gpt2" | "gptj" | "gptneox" => map_gpt_name(name),
         _ => None,
@@ -640,6 +642,43 @@ mod tests {
         assert_eq!(mapped[0].name, "tok_embeddings.weight");
         assert_eq!(mapped[1].name, "blk.3.attn_q.weight");
         assert_eq!(mapped[2].name, "blk.3.ffn_down.weight");
+    }
+
+    #[test]
+    fn maps_qwen_tensor_names_to_internal_format() {
+        let qwen2 = GgufFile {
+            version: 3,
+            tensor_count: 2,
+            metadata: BTreeMap::from([(
+                "general.architecture".to_owned(),
+                GgufMetadataValue::String("qwen2".to_owned()),
+            )]),
+            tensor_infos: vec![
+                tensor_info("model.embed_tokens.weight"),
+                tensor_info("model.layers.1.self_attn.k_proj.weight"),
+            ],
+            alignment: 32,
+            data_section_start: 0,
+        };
+        let qwen2moe = GgufFile {
+            version: 3,
+            tensor_count: 1,
+            metadata: BTreeMap::from([(
+                "general.architecture".to_owned(),
+                GgufMetadataValue::String("qwen2moe".to_owned()),
+            )]),
+            tensor_infos: vec![tensor_info(
+                "model.layers.4.block_sparse_moe.experts.2.w1.weight",
+            )],
+            alignment: 32,
+            data_section_start: 0,
+        };
+
+        let qwen2_mapped = qwen2.mapped_tensor_infos();
+        let qwen2moe_mapped = qwen2moe.mapped_tensor_infos();
+        assert_eq!(qwen2_mapped[0].name, "tok_embeddings.weight");
+        assert_eq!(qwen2_mapped[1].name, "blk.1.attn_k.weight");
+        assert_eq!(qwen2moe_mapped[0].name, "blk.4.ffn_gate.2.weight");
     }
 
     #[test]
