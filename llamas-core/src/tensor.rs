@@ -1,5 +1,8 @@
 use crate::gguf::GgufQuantizationType;
 
+const QK8_0: usize = 32;
+const BLOCK_Q8_0_SIZE: usize = 2 + QK8_0;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DType {
     F32,
@@ -167,14 +170,59 @@ pub fn gemv_quantized_f32(
             #[cfg(feature = "cuda")]
             crate::cuda::GemvCudaError::Cuda(message) => GemvError::Cuda(message),
         })?;
+    gemv_q8_0_f32_fused(quantized_matrix, cols, vector, output)
+}
 
-    let mut dequantized = vec![0.0_f32; rows * cols];
-    crate::quantization::dequantize_scalar(quantization, quantized_matrix, &mut dequantized)
-        .map_err(|_| GemvError::InvalidMatrixLength {
-            expected: rows.saturating_mul(cols),
-            actual: quantized_matrix.len(),
-        })?;
-    gemv_f32(&dequantized, rows, cols, vector, output)
+fn gemv_q8_0_f32_fused(
+    quantized_matrix: &[u8],
+    cols: usize,
+    vector: &[f32],
+    output: &mut [f32],
+) -> Result<(), GemvError> {
+    let blocks_per_row = cols / QK8_0;
+    for (row_idx, out) in output.iter_mut().enumerate() {
+        let mut sum = 0.0_f32;
+        let row_start = row_idx * blocks_per_row * BLOCK_Q8_0_SIZE;
+        let row_blocks = &quantized_matrix[row_start..row_start + (blocks_per_row * BLOCK_Q8_0_SIZE)];
+        for (block_idx, block) in row_blocks.chunks_exact(BLOCK_Q8_0_SIZE).enumerate() {
+            let scale = f16_le_to_f32([block[0], block[1]]);
+            let vector_offset = block_idx * QK8_0;
+            for (q, v) in block[2..].iter().zip(&vector[vector_offset..vector_offset + QK8_0]) {
+                sum += (*q as i8) as f32 * scale * *v;
+            }
+        }
+        *out = sum;
+    }
+    Ok(())
+}
+
+fn f16_le_to_f32(bytes: [u8; 2]) -> f32 {
+    let bits = u16::from_le_bytes(bytes);
+    let sign = ((bits >> 15) & 1) as u32;
+    let exp = ((bits >> 10) & 0x1F) as u32;
+    let frac = (bits & 0x03FF) as u32;
+
+    let f32_bits = if exp == 0 {
+        if frac == 0 {
+            sign << 31
+        } else {
+            let mut frac_norm = frac;
+            let mut e = -14_i32;
+            while (frac_norm & 0x0400) == 0 {
+                frac_norm <<= 1;
+                e -= 1;
+            }
+            frac_norm &= 0x03FF;
+            (sign << 31) | (((e + 127) as u32) << 23) | (frac_norm << 13)
+        }
+    } else if exp == 0x1F {
+        (sign << 31) | 0x7F80_0000 | (frac << 13)
+    } else {
+        let e = exp as i32 - 15 + 127;
+        (sign << 31) | ((e as u32) << 23) | (frac << 13)
+    };
+
+    f32::from_bits(f32_bits)
 }
 
 pub fn gemm_f32(
@@ -653,6 +701,58 @@ mod tests {
         gemv_f32(&dequantized, rows, cols, &vector, &mut reference).expect("f32 gemv should succeed");
 
         for (lhs, rhs) in quantized_out.iter().zip(reference.iter()) {
+            assert!((lhs - rhs).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn fused_q8_0_gemv_matches_dequantize_then_gemv_reference() {
+        let rows = 3;
+        let cols = QK8_0 * 2;
+        let matrix = (0..rows * cols)
+            .map(|i| ((i as f32 * 0.03125).sin() * 6.0) - 1.0)
+            .collect::<Vec<_>>();
+        let vector = (0..cols)
+            .map(|i| ((i as f32 * 0.11).cos() * 0.5) + 0.25)
+            .collect::<Vec<_>>();
+
+        let mut matrix_bytes = Vec::with_capacity(matrix.len() * 4);
+        for value in &matrix {
+            matrix_bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        let q8_bytes_len = crate::quantization::quantized_size(GgufQuantizationType::Q8_0, matrix.len())
+            .expect("quantized size is known");
+        let mut quantized_matrix = vec![0_u8; q8_bytes_len];
+        crate::quantization::quantize_scalar(
+            GgufQuantizationType::F32,
+            GgufQuantizationType::Q8_0,
+            &matrix_bytes,
+            &mut quantized_matrix,
+        )
+        .expect("q8_0 quantization should succeed");
+
+        let mut fused_out = vec![0.0_f32; rows];
+        gemv_quantized_f32(
+            GgufQuantizationType::Q8_0,
+            &quantized_matrix,
+            rows,
+            cols,
+            &vector,
+            &mut fused_out,
+        )
+        .expect("fused q8_0 gemv should succeed");
+
+        let mut dequantized = vec![0.0_f32; rows * cols];
+        crate::quantization::dequantize_scalar(
+            GgufQuantizationType::Q8_0,
+            &quantized_matrix,
+            &mut dequantized,
+        )
+        .expect("dequantization should succeed");
+        let mut reference = vec![0.0_f32; rows];
+        gemv_f32(&dequantized, rows, cols, &vector, &mut reference).expect("f32 gemv should succeed");
+
+        for (lhs, rhs) in fused_out.iter().zip(reference.iter()) {
             assert!((lhs - rhs).abs() < 1e-4);
         }
     }
