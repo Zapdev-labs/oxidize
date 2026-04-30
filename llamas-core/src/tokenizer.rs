@@ -417,6 +417,124 @@ impl WordPieceTokenizer {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TiktokenTokenizer {
+    vocab: HashMap<Vec<u8>, u32>,
+    id_to_token: HashMap<u32, Vec<u8>>,
+    merges: HashMap<(u32, u32), usize>,
+    merged_token_ids: HashMap<(u32, u32), u32>,
+    unknown_token: Option<u32>,
+}
+
+impl TiktokenTokenizer {
+    pub fn new(vocab_tokens: &[&[u8]], merge_pairs: &[(&[u8], &[u8])]) -> Self {
+        let mut vocab = HashMap::new();
+        let mut id_to_token = HashMap::new();
+
+        for (idx, token) in vocab_tokens.iter().enumerate() {
+            let id = idx as u32;
+            let token = (*token).to_vec();
+            vocab.insert(token.clone(), id);
+            id_to_token.insert(id, token);
+        }
+
+        let mut merges = HashMap::new();
+        let mut merged_token_ids = HashMap::new();
+        for (rank, (left, right)) in merge_pairs.iter().enumerate() {
+            let Some(left_id) = vocab.get(*left).copied() else {
+                continue;
+            };
+            let Some(right_id) = vocab.get(*right).copied() else {
+                continue;
+            };
+
+            let mut merged = Vec::with_capacity(left.len() + right.len());
+            merged.extend_from_slice(left);
+            merged.extend_from_slice(right);
+            let Some(merged_id) = vocab.get(&merged).copied() else {
+                continue;
+            };
+
+            let pair = (left_id, right_id);
+            merges.insert(pair, rank);
+            merged_token_ids.insert(pair, merged_id);
+        }
+
+        Self {
+            vocab,
+            id_to_token,
+            merges,
+            merged_token_ids,
+            unknown_token: None,
+        }
+    }
+
+    pub fn with_unknown_token(mut self, token: &[u8]) -> Self {
+        let token_id = if let Some(id) = self.vocab.get(token).copied() {
+            id
+        } else {
+            let id = self
+                .id_to_token
+                .keys()
+                .copied()
+                .max()
+                .map_or(0, |max_id| max_id.saturating_add(1));
+            self.vocab.insert(token.to_vec(), id);
+            self.id_to_token.insert(id, token.to_vec());
+            id
+        };
+        self.unknown_token = Some(token_id);
+        self
+    }
+
+    pub fn encode(&self, text: &str) -> Vec<u32> {
+        let mut sequence: Vec<u32> = text
+            .as_bytes()
+            .iter()
+            .filter_map(|byte| {
+                let single = [*byte];
+                self.vocab.get(single.as_slice()).copied().or(self.unknown_token)
+            })
+            .collect();
+
+        if sequence.len() < 2 {
+            return sequence;
+        }
+
+        while let Some((pair, merged_id)) = self.best_merge_for_sequence(&sequence) {
+            sequence = apply_merge(&sequence, pair, merged_id);
+        }
+
+        sequence
+    }
+
+    pub fn decode(&self, ids: &[u32]) -> Result<String, TokenizerError> {
+        let mut bytes = Vec::new();
+        for id in ids {
+            let Some(piece) = self.id_to_token.get(id) else {
+                return Err(TokenizerError::UnknownToken(*id));
+            };
+            bytes.extend_from_slice(piece);
+        }
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    fn best_merge_for_sequence(&self, sequence: &[u32]) -> Option<((u32, u32), u32)> {
+        let present_pairs: HashSet<(u32, u32)> =
+            sequence.windows(2).map(|w| (w[0], w[1])).collect();
+        self.merges
+            .iter()
+            .filter(|(pair, _)| present_pairs.contains(pair))
+            .min_by_key(|(_, rank)| *rank)
+            .and_then(|(pair, _)| {
+                self.merged_token_ids
+                    .get(pair)
+                    .copied()
+                    .map(|id| (*pair, id))
+            })
+    }
+}
+
 fn count_adjacent_pairs(sequences: &[Vec<u32>]) -> HashMap<(u32, u32), usize> {
     let mut pair_counts = HashMap::new();
     for sequence in sequences {
@@ -561,5 +679,40 @@ mod tests {
             .decode(&[42])
             .expect_err("unknown token id should fail");
         assert_eq!(err, TokenizerError::UnknownToken(42));
+    }
+
+    #[test]
+    fn tiktoken_merges_by_rank_and_round_trips() {
+        let tokenizer = TiktokenTokenizer::new(
+            &[b"h", b"e", b"l", b"o", b"he", b"ll", b"hell", b"hello"],
+            &[(b"h", b"e"), (b"l", b"l"), (b"he", b"ll"), (b"hell", b"o")],
+        );
+
+        let encoded = tokenizer.encode("hello");
+        assert_eq!(encoded.len(), 1);
+        assert_eq!(
+            tokenizer.decode(&encoded).expect("decode should succeed"),
+            "hello"
+        );
+    }
+
+    #[test]
+    fn tiktoken_supports_utf8_bytes() {
+        let tokenizer = TiktokenTokenizer::new(&[b"h", b"i", b" ", &[0xc3], &[0xa9], b"\xc3\xa9"], &[]);
+        let encoded = tokenizer.encode("hi \u{00e9}");
+        assert_eq!(
+            tokenizer.decode(&encoded).expect("decode should succeed"),
+            "hi \u{00e9}"
+        );
+    }
+
+    #[test]
+    fn tiktoken_uses_unknown_token_for_missing_bytes() {
+        let tokenizer = TiktokenTokenizer::new(&[b"a"], &[]).with_unknown_token(b"<unk>");
+        let encoded = tokenizer.encode("ab");
+        assert_eq!(
+            tokenizer.decode(&encoded).expect("decode should succeed"),
+            "a<unk>"
+        );
     }
 }
