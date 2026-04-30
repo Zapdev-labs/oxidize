@@ -1,5 +1,8 @@
 use std::collections::BTreeMap;
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const PAGE_BYTES: usize = 16384;
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
 const PAGE_BYTES: usize = 4096;
 pub const GEMV_KERNEL_NAME: &str = "gemv_f32_kernel";
 pub const GEMV_Q8_0_KERNEL_NAME: &str = "gemv_q8_0_f32_kernel";
@@ -106,7 +109,12 @@ impl UnifiedBufferManager {
             });
         }
 
-        let available = self.budget_bytes.saturating_sub(self.resident_bytes);
+        let mut available = self.budget_bytes.saturating_sub(self.resident_bytes);
+        if capacity > available {
+            let needed_bytes = capacity - available;
+            self.evict_cached_bytes(needed_bytes);
+            available = self.budget_bytes.saturating_sub(self.resident_bytes);
+        }
         if capacity > available {
             return Err(UnifiedMemoryError::OutOfMemory {
                 requested: capacity,
@@ -151,6 +159,33 @@ impl UnifiedBufferManager {
             .iter()
             .map(|(capacity, cached)| capacity.saturating_mul(cached.len()))
             .sum()
+    }
+
+    fn evict_cached_bytes(&mut self, target_bytes: usize) {
+        if target_bytes == 0 || self.cache.is_empty() {
+            return;
+        }
+
+        let mut freed = 0_usize;
+        let capacities = self.cache.keys().copied().collect::<Vec<_>>();
+        for capacity in capacities.into_iter().rev() {
+            let Some(entries) = self.cache.get_mut(&capacity) else {
+                continue;
+            };
+            while entries.pop().is_some() {
+                freed = freed.saturating_add(capacity);
+                self.resident_bytes = self.resident_bytes.saturating_sub(capacity);
+                if freed >= target_bytes {
+                    break;
+                }
+            }
+            if entries.is_empty() {
+                self.cache.remove(&capacity);
+            }
+            if freed >= target_bytes {
+                break;
+            }
+        }
     }
 }
 
@@ -249,5 +284,46 @@ mod tests {
         let stats = manager.stats();
         assert_eq!(stats.cached_bytes, 0);
         assert_eq!(stats.resident_bytes, 0);
+    }
+
+    #[test]
+    fn evicts_cached_pages_to_satisfy_new_allocation() {
+        let mut manager = UnifiedBufferManager::new(PAGE_BYTES * 3);
+        let first = manager
+            .allocate(PAGE_BYTES)
+            .expect("first allocation should succeed");
+        let second = manager
+            .allocate(PAGE_BYTES)
+            .expect("second allocation should succeed");
+        let third = manager
+            .allocate(PAGE_BYTES)
+            .expect("third allocation should succeed");
+
+        manager.release(first);
+        manager.release(second);
+
+        let stats_before = manager.stats();
+        assert_eq!(stats_before.resident_bytes, PAGE_BYTES * 3);
+        assert_eq!(stats_before.cached_bytes, PAGE_BYTES * 2);
+        assert_eq!(stats_before.active_bytes, PAGE_BYTES);
+
+        let fourth = manager
+            .allocate(PAGE_BYTES)
+            .expect("allocation should evict cached pages instead of failing");
+        let stats_after = manager.stats();
+        assert_eq!(stats_after.resident_bytes, PAGE_BYTES * 3);
+        assert_eq!(stats_after.active_bytes, PAGE_BYTES * 2);
+        assert_eq!(stats_after.cached_bytes, PAGE_BYTES);
+
+        manager.release(third);
+        manager.release(fourth);
+    }
+
+    #[test]
+    fn page_size_matches_target_architecture() {
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        assert_eq!(PAGE_BYTES, 16384);
+        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+        assert_eq!(PAGE_BYTES, 4096);
     }
 }
