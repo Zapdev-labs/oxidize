@@ -3,6 +3,9 @@ use serde::{Deserialize, Serialize};
 
 const QK8_0: usize = 32;
 const BLOCK_Q8_0_SIZE: usize = 2 + QK8_0;
+const QK_K: usize = 256;
+const BLOCK_Q4_K_SIZE: usize = 2 + 128;
+const BLOCK_Q6_K_SIZE: usize = 2 + 192;
 const FLASH_ATTENTION_BLOCK_TOKENS: usize = 64;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -182,10 +185,6 @@ pub fn gemv_quantized_f32(
     vector: &[f32],
     output: &mut [f32],
 ) -> Result<(), GemvError> {
-    if quantization != GgufQuantizationType::Q8_0 {
-        return Err(GemvError::UnsupportedQuantizationType { quantization });
-    }
-
     #[cfg(feature = "cuda")]
     if crate::cuda::cuda_build_info().detected_at_build {
         return crate::cuda::gemv_quantized_cuda(
@@ -199,25 +198,82 @@ pub fn gemv_quantized_f32(
         .map_err(|err| GemvError::Cuda(format!("{err:?}")));
     }
 
-    crate::cuda::validate_q8_0_gemv_dims(quantized_matrix, rows, cols, vector, output).map_err(
-        |err| match err {
-            crate::cuda::GemvCudaError::InvalidMatrixLength { expected, actual } => {
-                GemvError::InvalidMatrixLength { expected, actual }
+    match quantization {
+        GgufQuantizationType::Q8_0 => {
+            gemv_q8_0_f32_fused(quantized_matrix, cols, vector, output)
+        }
+        GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M => {
+            gemv_qk_f32_fused(quantized_matrix, rows, cols, vector, output, BLOCK_Q4_K_SIZE, 4, 8.0)
+        }
+        GgufQuantizationType::Q6_K => {
+            gemv_qk_f32_fused(quantized_matrix, rows, cols, vector, output, BLOCK_Q6_K_SIZE, 6, 32.0)
+        }
+        _ => Err(GemvError::UnsupportedQuantizationType { quantization }),
+    }
+}
+
+fn gemv_qk_f32_fused(
+    quantized_matrix: &[u8],
+    rows: usize,
+    cols: usize,
+    vector: &[f32],
+    output: &mut [f32],
+    block_size: usize,
+    bits: usize,
+    zero_point: f32,
+) -> Result<(), GemvError> {
+    let blocks_per_row = cols / QK_K;
+    let expected_matrix_len = rows * blocks_per_row * block_size;
+    if quantized_matrix.len() != expected_matrix_len {
+        return Err(GemvError::InvalidMatrixLength {
+            expected: expected_matrix_len,
+            actual: quantized_matrix.len(),
+        });
+    }
+    if vector.len() != cols {
+        return Err(GemvError::InvalidVectorLength {
+            expected: cols,
+            actual: vector.len(),
+        });
+    }
+    if output.len() != rows {
+        return Err(GemvError::InvalidOutputLength {
+            expected: rows,
+            actual: output.len(),
+        });
+    }
+
+    for (row_idx, out) in output.iter_mut().enumerate() {
+        let mut sum = 0.0_f32;
+        let row_start = row_idx * blocks_per_row * block_size;
+        let row_blocks = &quantized_matrix[row_start..row_start + (blocks_per_row * block_size)];
+        for (block_idx, block) in row_blocks.chunks_exact(block_size).enumerate() {
+            let d = f16_le_to_f32([block[0], block[1]]);
+            let bitstream = &block[2..];
+            let vector_offset = block_idx * QK_K;
+            for idx in 0..QK_K {
+                let q = extract_bits(bitstream, idx, bits) as f32;
+                sum += (q - zero_point) * d * vector[vector_offset + idx];
             }
-            crate::cuda::GemvCudaError::InvalidVectorLength { expected, actual } => {
-                GemvError::InvalidVectorLength { expected, actual }
-            }
-            crate::cuda::GemvCudaError::InvalidOutputLength { expected, actual } => {
-                GemvError::InvalidOutputLength { expected, actual }
-            }
-            crate::cuda::GemvCudaError::UnsupportedQuantizationType { quantization } => {
-                GemvError::UnsupportedQuantizationType { quantization }
-            }
-            #[cfg(feature = "cuda")]
-            crate::cuda::GemvCudaError::Cuda(message) => GemvError::Cuda(message),
-        },
-    )?;
-    gemv_q8_0_f32_fused(quantized_matrix, cols, vector, output)
+        }
+        *out = sum;
+    }
+    Ok(())
+}
+
+pub fn extract_bits(bitstream: &[u8], index: usize, bits: usize) -> u32 {
+    let bit_offset = index * bits;
+    let byte_index = bit_offset / 8;
+    let shift = bit_offset % 8;
+
+    let mut acc = 0_u32;
+    for i in 0..4 {
+        if let Some(byte) = bitstream.get(byte_index + i) {
+            acc |= (*byte as u32) << (8 * i);
+        }
+    }
+
+    (acc >> shift) & ((1_u32 << bits) - 1)
 }
 
 fn gemv_q8_0_f32_fused(
@@ -247,7 +303,166 @@ fn gemv_q8_0_f32_fused(
     Ok(())
 }
 
-fn f16_le_to_f32(bytes: [u8; 2]) -> f32 {
+// Transposed GEMV functions for GGUF weight matrices stored as [input_dim, output_dim]
+fn gemv_f32_transposed_cpu(matrix: &[f32], rows: usize, cols: usize, vector: &[f32], output: &mut [f32]) {
+    output.fill(0.0);
+    for (row_values, &vi) in matrix.chunks_exact(cols).zip(vector.iter()).take(rows) {
+        for (j, &weight) in row_values.iter().enumerate() {
+            output[j] += weight * vi;
+        }
+    }
+}
+
+pub fn gemv_f32_transposed(
+    matrix: &[f32],
+    rows: usize,
+    cols: usize,
+    vector: &[f32],
+    output: &mut [f32],
+) -> Result<(), GemvError> {
+    let expected_matrix_len = rows.saturating_mul(cols);
+    if matrix.len() != expected_matrix_len {
+        return Err(GemvError::InvalidMatrixLength {
+            expected: expected_matrix_len,
+            actual: matrix.len(),
+        });
+    }
+    if vector.len() != rows {
+        return Err(GemvError::InvalidVectorLength {
+            expected: rows,
+            actual: vector.len(),
+        });
+    }
+    if output.len() != cols {
+        return Err(GemvError::InvalidOutputLength {
+            expected: cols,
+            actual: output.len(),
+        });
+    }
+    gemv_f32_transposed_cpu(matrix, rows, cols, vector, output);
+    Ok(())
+}
+
+fn gemv_qk_f32_transposed(
+    quantized_matrix: &[u8],
+    rows: usize,
+    cols: usize,
+    vector: &[f32],
+    output: &mut [f32],
+    block_size: usize,
+    bits: usize,
+    zero_point: f32,
+) -> Result<(), GemvError> {
+    let blocks_per_row = cols / QK_K;
+    let expected_matrix_len = rows * blocks_per_row * block_size;
+    if quantized_matrix.len() != expected_matrix_len {
+        return Err(GemvError::InvalidMatrixLength {
+            expected: expected_matrix_len,
+            actual: quantized_matrix.len(),
+        });
+    }
+    if vector.len() != rows {
+        return Err(GemvError::InvalidVectorLength {
+            expected: rows,
+            actual: vector.len(),
+        });
+    }
+    if output.len() != cols {
+        return Err(GemvError::InvalidOutputLength {
+            expected: cols,
+            actual: output.len(),
+        });
+    }
+
+    output.fill(0.0);
+    for (row_idx, &vi) in vector.iter().enumerate().take(rows) {
+        let row_start = row_idx * blocks_per_row * block_size;
+        let row_blocks = &quantized_matrix[row_start..row_start + (blocks_per_row * block_size)];
+        for (block_idx, block) in row_blocks.chunks_exact(block_size).enumerate() {
+            let d = f16_le_to_f32([block[0], block[1]]);
+            let bitstream = &block[2..];
+            let col_start = block_idx * QK_K;
+            for idx in 0..QK_K {
+                if col_start + idx >= cols {
+                    break;
+                }
+                let q = extract_bits(bitstream, idx, bits) as f32;
+                output[col_start + idx] += (q - zero_point) * d * vi;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn gemv_q8_0_f32_transposed(
+    quantized_matrix: &[u8],
+    rows: usize,
+    cols: usize,
+    vector: &[f32],
+    output: &mut [f32],
+) -> Result<(), GemvError> {
+    let blocks_per_row = cols / QK8_0;
+    let expected_matrix_len = rows * blocks_per_row * BLOCK_Q8_0_SIZE;
+    if quantized_matrix.len() != expected_matrix_len {
+        return Err(GemvError::InvalidMatrixLength {
+            expected: expected_matrix_len,
+            actual: quantized_matrix.len(),
+        });
+    }
+    if vector.len() != rows {
+        return Err(GemvError::InvalidVectorLength {
+            expected: rows,
+            actual: vector.len(),
+        });
+    }
+    if output.len() != cols {
+        return Err(GemvError::InvalidOutputLength {
+            expected: cols,
+            actual: output.len(),
+        });
+    }
+
+    output.fill(0.0);
+    for (row_idx, &vi) in vector.iter().enumerate().take(rows) {
+        let row_start = row_idx * blocks_per_row * BLOCK_Q8_0_SIZE;
+        let row_blocks = &quantized_matrix[row_start..row_start + (blocks_per_row * BLOCK_Q8_0_SIZE)];
+        for (block_idx, block) in row_blocks.chunks_exact(BLOCK_Q8_0_SIZE).enumerate() {
+            let scale = f16_le_to_f32([block[0], block[1]]);
+            let col_start = block_idx * QK8_0;
+            for (idx, q_byte) in block[2..].iter().enumerate() {
+                if col_start + idx >= cols {
+                    break;
+                }
+                output[col_start + idx] += (*q_byte as i8) as f32 * scale * vi;
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn gemv_quantized_f32_transposed(
+    quantization: GgufQuantizationType,
+    quantized_matrix: &[u8],
+    rows: usize,
+    cols: usize,
+    vector: &[f32],
+    output: &mut [f32],
+) -> Result<(), GemvError> {
+    match quantization {
+        GgufQuantizationType::Q8_0 => {
+            gemv_q8_0_f32_transposed(quantized_matrix, rows, cols, vector, output)
+        }
+        GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M => {
+            gemv_qk_f32_transposed(quantized_matrix, rows, cols, vector, output, BLOCK_Q4_K_SIZE, 4, 8.0)
+        }
+        GgufQuantizationType::Q6_K => {
+            gemv_qk_f32_transposed(quantized_matrix, rows, cols, vector, output, BLOCK_Q6_K_SIZE, 6, 32.0)
+        }
+        _ => Err(GemvError::UnsupportedQuantizationType { quantization }),
+    }
+}
+
+pub fn f16_le_to_f32(bytes: [u8; 2]) -> f32 {
     let bits = u16::from_le_bytes(bytes);
     let sign = ((bits >> 15) & 1) as u32;
     let exp = ((bits >> 10) & 0x1F) as u32;
@@ -1859,7 +2074,8 @@ mod tests {
         ];
         let mut output = [0.0_f32; 5];
 
-        layer_norm_f32(&input, &weight, &bias, 1e-5, &mut output).expect("layer norm should succeed");
+        layer_norm_f32(&input, &weight, &bias, 1e-5, &mut output)
+            .expect("layer norm should succeed");
 
         for (actual, expected) in output.iter().zip(expected.iter()) {
             assert!((actual - expected).abs() < 1e-6);

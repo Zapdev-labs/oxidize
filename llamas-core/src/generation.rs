@@ -359,7 +359,11 @@ mod tests {
     }
 
     impl Model for RecordingModel {
-        fn forward(&mut self, tokens: &[Token], session: &mut Session) -> Result<Vec<f32>, ModelError> {
+        fn forward(
+            &mut self,
+            tokens: &[Token],
+            session: &mut Session,
+        ) -> Result<Vec<f32>, ModelError> {
             self.batch_sizes.borrow_mut().push(tokens.len());
             if tokens.is_empty() {
                 return Err(ModelError::EmptyInput);

@@ -111,7 +111,9 @@ impl std::fmt::Display for WorkerModelCacheError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::MissingModelId => write!(f, "model_id is required for this action"),
-            Self::MissingModelBytes => write!(f, "model_bytes is required for cache_downloaded_model"),
+            Self::MissingModelBytes => {
+                write!(f, "model_bytes is required for cache_downloaded_model")
+            }
         }
     }
 }
@@ -136,7 +138,9 @@ pub fn handle_worker_model_cache_message(request_json: &str) -> String {
             .expect("worker model cache mutex should not be poisoned");
         match request.action {
             WorkerModelCacheAction::CacheDownloadedModel => {
-                let model_id = request.model_id.ok_or(WorkerModelCacheError::MissingModelId)?;
+                let model_id = request
+                    .model_id
+                    .ok_or(WorkerModelCacheError::MissingModelId)?;
                 let model_bytes = request
                     .model_bytes
                     .ok_or(WorkerModelCacheError::MissingModelBytes)?;
@@ -151,7 +155,9 @@ pub fn handle_worker_model_cache_message(request_json: &str) -> String {
                 })
             }
             WorkerModelCacheAction::GetCachedModel => {
-                let model_id = request.model_id.ok_or(WorkerModelCacheError::MissingModelId)?;
+                let model_id = request
+                    .model_id
+                    .ok_or(WorkerModelCacheError::MissingModelId)?;
                 let model_bytes = cache.get(&model_id).cloned();
                 let (cached_models, cached_bytes) = cache_stats(&cache);
                 Ok(WorkerModelCacheResponse {
@@ -163,7 +169,9 @@ pub fn handle_worker_model_cache_message(request_json: &str) -> String {
                 })
             }
             WorkerModelCacheAction::RemoveCachedModel => {
-                let model_id = request.model_id.ok_or(WorkerModelCacheError::MissingModelId)?;
+                let model_id = request
+                    .model_id
+                    .ok_or(WorkerModelCacheError::MissingModelId)?;
                 let cached = cache.remove(&model_id).is_some();
                 let (cached_models, cached_bytes) = cache_stats(&cache);
                 Ok(WorkerModelCacheResponse {
@@ -236,7 +244,9 @@ where
     if request.prompt_tokens.is_empty() {
         return Err(WorkerInferenceError::EmptyPrompt);
     }
-    if request.model.vocab_size == 0 || request.model.context_size == 0 || request.model.layer_count == 0
+    if request.model.vocab_size == 0
+        || request.model.context_size == 0
+        || request.model.layer_count == 0
     {
         return Err(WorkerInferenceError::InvalidModelConfig);
     }
@@ -557,7 +567,10 @@ mod tests {
         assert_eq!(response["chunks"][0]["index"], 0);
         assert_eq!(response["chunks"][1]["token"], 2);
         assert_eq!(response["chunks"][1]["index"], 1);
-        assert_eq!(response["response"]["generated_tokens"], serde_json::json!([2, 2]));
+        assert_eq!(
+            response["response"]["generated_tokens"],
+            serde_json::json!([2, 2])
+        );
     }
 
     #[test]
@@ -566,7 +579,9 @@ mod tests {
         assert!(WASM_WORKER_TYPESCRIPT_BINDINGS.contains("interface LlamasWorkerMessageResponse"));
         assert!(WASM_WORKER_TYPESCRIPT_BINDINGS.contains("interface LlamasWorkerStreamResponse"));
         assert!(WASM_WORKER_TYPESCRIPT_BINDINGS.contains("type LlamasWorkerModelCacheAction"));
-        assert!(WASM_WORKER_TYPESCRIPT_BINDINGS.contains("interface LlamasWorkerModelCacheRequest"));
+        assert!(
+            WASM_WORKER_TYPESCRIPT_BINDINGS.contains("interface LlamasWorkerModelCacheRequest")
+        );
         assert!(
             WASM_WORKER_TYPESCRIPT_BINDINGS
                 .contains("interface LlamasWorkerModelCacheMessageResponse")
@@ -587,7 +602,9 @@ mod tests {
             serde_json::from_str(&put_response_json).expect("cache put response should decode");
         assert_eq!(put_message.error, None);
 
-        let put_response = put_message.response.expect("cache put should have response");
+        let put_response = put_message
+            .response
+            .expect("cache put should have response");
         assert_eq!(put_response.model_id, Some("tiny".to_string()));
         assert_eq!(put_response.model_bytes, Some(vec![1, 2, 3]));
         assert_eq!(put_response.cached, Some(true));
@@ -600,7 +617,9 @@ mod tests {
             serde_json::from_str(&get_response_json).expect("cache get response should decode");
         assert_eq!(get_message.error, None);
 
-        let get_response = get_message.response.expect("cache get should have response");
+        let get_response = get_message
+            .response
+            .expect("cache get should have response");
         assert_eq!(get_response.model_id, Some("tiny".to_string()));
         assert_eq!(get_response.model_bytes, Some(vec![1, 2, 3]));
         assert_eq!(get_response.cached, Some(true));
@@ -653,8 +672,7 @@ mod tests {
             .expect("test lock should not be poisoned");
         clear_worker_model_cache_for_test();
 
-        let missing_id_json =
-            handle_worker_model_cache_message(r#"{"action":"get_cached_model"}"#);
+        let missing_id_json = handle_worker_model_cache_message(r#"{"action":"get_cached_model"}"#);
         let missing_id: WorkerModelCacheMessageResponse =
             serde_json::from_str(&missing_id_json).expect("missing-id response should decode");
         assert_eq!(
@@ -666,7 +684,8 @@ mod tests {
             r#"{"action":"cache_downloaded_model","model_id":"tiny"}"#,
         );
         let missing_bytes: WorkerModelCacheMessageResponse =
-            serde_json::from_str(&missing_bytes_json).expect("missing-bytes response should decode");
+            serde_json::from_str(&missing_bytes_json)
+                .expect("missing-bytes response should decode");
         assert_eq!(
             missing_bytes.error,
             Some("model_bytes is required for cache_downloaded_model".to_string())

@@ -26,6 +26,7 @@ pub mod benchmark_suite;
 pub mod cuda;
 pub mod generation;
 pub mod gguf;
+pub mod inference;
 pub mod kv_cache;
 pub mod llama;
 pub mod lora;

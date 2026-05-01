@@ -68,9 +68,7 @@ impl Llama {
     ) -> PyResult<Py<PyAny>> {
         let to_thread = resolve_to_thread(py)?;
         let generate = slf.bind(py).getattr("generate")?;
-        let coroutine = to_thread
-            .bind(py)
-            .call1((generate, prompt, max_tokens))?;
+        let coroutine = to_thread.bind(py).call1((generate, prompt, max_tokens))?;
         Ok(coroutine.unbind())
     }
 
@@ -137,9 +135,10 @@ impl Llama {
     ) -> PyResult<Py<PyAny>> {
         let to_thread = resolve_to_thread(py)?;
         let create_chat_completion = slf.bind(py).getattr("create_chat_completion")?;
-        let coroutine = to_thread
-            .bind(py)
-            .call1((create_chat_completion, messages.bind(py), max_tokens))?;
+        let coroutine =
+            to_thread
+                .bind(py)
+                .call1((create_chat_completion, messages.bind(py), max_tokens))?;
         Ok(coroutine.unbind())
     }
 
@@ -232,9 +231,7 @@ impl Llama {
             match futures_core::Stream::poll_next(pinned.as_mut(), &mut cx) {
                 Poll::Ready(Some(Ok(token))) => tokens.push(token),
                 Poll::Ready(Some(Err(err))) => {
-                    return Err(PyValueError::new_err(format!(
-                        "generation failed: {err:?}"
-                    )));
+                    return Err(PyValueError::new_err(format!("generation failed: {err:?}")));
                 }
                 Poll::Ready(None) => break,
                 Poll::Pending => {
@@ -282,9 +279,7 @@ fn resolve_to_thread(py: Python<'_>) -> PyResult<Py<PyAny>> {
 
     let fallback_scope = PyDict::new(py);
     py.run(
-        c_str!(
-            "async def _llamas_to_thread(fn, *args, **kwargs):\n    return fn(*args, **kwargs)"
-        ),
+        c_str!("async def _llamas_to_thread(fn, *args, **kwargs):\n    return fn(*args, **kwargs)"),
         None,
         Some(&fallback_scope),
     )?;
@@ -353,7 +348,9 @@ fn convert_u32_output(
         "list" => Ok(PyList::new(py, values)?.into_any().unbind()),
         "numpy" => {
             let np = py.import("numpy").map_err(|_| {
-                PyValueError::new_err("numpy is not available; install numpy or use output_tensor='list'")
+                PyValueError::new_err(
+                    "numpy is not available; install numpy or use output_tensor='list'",
+                )
             })?;
             let dtype = np.getattr("uint32")?;
             Ok(np
@@ -364,7 +361,9 @@ fn convert_u32_output(
         }
         "torch" => {
             let torch = py.import("torch").map_err(|_| {
-                PyValueError::new_err("torch is not available; install torch or use output_tensor='list'")
+                PyValueError::new_err(
+                    "torch is not available; install torch or use output_tensor='list'",
+                )
             })?;
             let dtype = torch.getattr("int64")?;
             Ok(torch
@@ -389,14 +388,21 @@ fn convert_f32_output(
         "list" => Ok(PyList::new(py, values)?.into_any().unbind()),
         "numpy" => {
             let np = py.import("numpy").map_err(|_| {
-                PyValueError::new_err("numpy is not available; install numpy or use output_tensor='list'")
+                PyValueError::new_err(
+                    "numpy is not available; install numpy or use output_tensor='list'",
+                )
             })?;
             let dtype = np.getattr("float32")?;
-            Ok(np.getattr("array")?.call1((PyList::new(py, values)?, dtype))?.unbind())
+            Ok(np
+                .getattr("array")?
+                .call1((PyList::new(py, values)?, dtype))?
+                .unbind())
         }
         "torch" => {
             let torch = py.import("torch").map_err(|_| {
-                PyValueError::new_err("torch is not available; install torch or use output_tensor='list'")
+                PyValueError::new_err(
+                    "torch is not available; install torch or use output_tensor='list'",
+                )
             })?;
             let dtype = torch.getattr("float32")?;
             Ok(torch
@@ -424,8 +430,8 @@ fn llamas(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pyo3::exceptions::PyStopIteration;
     use pyo3::Python;
+    use pyo3::exceptions::PyStopIteration;
 
     #[test]
     fn health_status_matches_core_workspace_health() {
@@ -439,7 +445,10 @@ mod tests {
 
     #[test]
     fn python_package_exports_expected_symbols() {
-        assert_eq!(PYTHON_PACKAGE_EXPORTS, ["workspace_health", "version", "Llama"]);
+        assert_eq!(
+            PYTHON_PACKAGE_EXPORTS,
+            ["workspace_health", "version", "Llama"]
+        );
     }
 
     #[test]
@@ -453,8 +462,8 @@ mod tests {
 
     #[test]
     fn llama_generate_returns_text_for_valid_prompt() {
-        let mut llama = Llama::new("model.gguf".to_owned(), 32_000, 4096, 32)
-            .expect("llama should initialize");
+        let mut llama =
+            Llama::new("model.gguf".to_owned(), 32_000, 4096, 32).expect("llama should initialize");
         let generated = llama.generate("abc", 4).expect("generation should succeed");
 
         assert_eq!(generated, "cccc");
@@ -462,8 +471,8 @@ mod tests {
 
     #[test]
     fn llama_embed_returns_normalized_vector() {
-        let llama = Llama::new("model.gguf".to_owned(), 32_000, 4096, 32)
-            .expect("llama should initialize");
+        let llama =
+            Llama::new("model.gguf".to_owned(), 32_000, 4096, 32).expect("llama should initialize");
         let embedding = llama.embed("hello").expect("embedding should succeed");
 
         assert_eq!(embedding.len(), 8);
@@ -479,8 +488,10 @@ mod tests {
                 .expect("llama should initialize");
             let messages = PyList::new(
                 py,
-                &[PyDict::from_sequence(&PyList::new(py, [("content", "hi")]).expect("pairs should build"))
-                    .expect("dict should build")],
+                &[PyDict::from_sequence(
+                    &PyList::new(py, [("content", "hi")]).expect("pairs should build"),
+                )
+                .expect("dict should build")],
             )
             .expect("messages should build");
             let completion = llama
@@ -540,8 +551,10 @@ mod tests {
 
             let messages = PyList::new(
                 py,
-                &[PyDict::from_sequence(&PyList::new(py, [("content", "hi")]).expect("pairs should build"))
-                    .expect("dict should build")],
+                &[PyDict::from_sequence(
+                    &PyList::new(py, [("content", "hi")]).expect("pairs should build"),
+                )
+                .expect("dict should build")],
             )
             .expect("messages should build");
             let coroutine =
@@ -613,10 +626,9 @@ mod tests {
     fn extract_coroutine_result<'py>(coroutine: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
         match coroutine.call_method1("send", (coroutine.py().None(),)) {
             Ok(_) => Err(PyValueError::new_err("coroutine unexpectedly yielded")),
-            Err(err) if err.is_instance_of::<PyStopIteration>(coroutine.py()) => Ok(err
-                .value(coroutine.py())
-                .getattr("value")?
-                .to_owned()),
+            Err(err) if err.is_instance_of::<PyStopIteration>(coroutine.py()) => {
+                Ok(err.value(coroutine.py()).getattr("value")?.to_owned())
+            }
             Err(err) => Err(err),
         }
     }

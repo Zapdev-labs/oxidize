@@ -1251,12 +1251,8 @@ mod tests {
 
     #[test]
     fn beam_search_returns_best_sequence() {
-        let result = beam_search(
-            &[vec![2.0, 1.0], vec![0.1, 3.0], vec![4.0, 0.2]],
-            2,
-            None,
-        )
-        .expect("beam search should succeed");
+        let result = beam_search(&[vec![2.0, 1.0], vec![0.1, 3.0], vec![4.0, 0.2]], 2, None)
+            .expect("beam search should succeed");
         assert_eq!(result.tokens, vec![0, 1, 0]);
         assert!(result.score.is_finite());
     }

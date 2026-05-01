@@ -1,14 +1,22 @@
 use clap::{Parser, ValueEnum};
+use llamas_core::generation::{GenerationConfig, GenerationStream};
+use llamas_core::inference::{InferenceConfig, InferenceModel};
 use llamas_core::lora::{AdapterKind, LoraPlan, plan_lora_application};
+use llamas_core::model::{Model, Session};
 use llamas_core::model_loader::{GgufModelLoader, LoadProgress, ModelLoader};
 use llamas_core::offload::{
     LayerOffloadPlan, MultiGpuConfig, MultiGpuOffloadPlan, ParallelismStrategy, plan_layer_offload,
     plan_multi_gpu_offload,
 };
+use llamas_core::sampling::SamplingConfig;
+use llamas_core::tokenizer::{EncodeOptions, load_tokenizer_from_gguf_metadata, LoadedTokenizer};
+
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::process::{Command, ExitStatus};
+use std::sync::Arc;
+use std::task::Wake;
 use std::time::{Duration, Instant};
 
 const PROFILE_CHILD_ENV: &str = "LLAMAS_PROFILE_CHILD";
@@ -34,6 +42,14 @@ struct Args {
     profile: Option<Profiler>,
     #[arg(long)]
     profile_output: Option<PathBuf>,
+    #[arg(long, default_value_t = 512)]
+    max_tokens: usize,
+    #[arg(long, default_value_t = 0.8)]
+    temperature: f32,
+    #[arg(long)]
+    top_p: Option<f32>,
+    #[arg(long)]
+    top_k: Option<usize>,
 }
 
 fn greeting(prompt: &str) -> String {
@@ -316,6 +332,106 @@ fn write_generated_response_with_clock<W: Write, F: FnMut() -> Instant>(
     Ok(response)
 }
 
+fn generate_with_model<W: Write, M: Model>(
+    prompt: &str,
+    model: &mut M,
+    tokenizer: &LoadedTokenizer,
+    max_tokens: usize,
+    temperature: f32,
+    top_p: Option<f32>,
+    top_k: Option<usize>,
+    writer: &mut W,
+) -> io::Result<String> {
+    use futures_core::Stream;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Waker};
+
+    let started_at = Instant::now();
+    let mut session = Session::new();
+    
+    // Encode prompt using the model's tokenizer (add BOS for generation)
+    let prompt_tokens = tokenizer.encode_with_special_tokens(
+        prompt,
+        EncodeOptions {
+            add_bos: true,
+            add_eos: false,
+            pad_to: None,
+        },
+    );
+    
+    let eos_token = tokenizer.special_tokens().eos;
+    
+    let config = GenerationConfig {
+        max_new_tokens: max_tokens,
+        stop_token: eos_token,
+        sampling: SamplingConfig {
+            temperature,
+            top_p,
+            top_k,
+            ..SamplingConfig::default()
+        },
+        ..GenerationConfig::default()
+    };
+
+    let mut rng = rand::thread_rng();
+    let mut stream = GenerationStream::new(
+        model,
+        &mut session,
+        &prompt_tokens,
+        config,
+        || rand::Rng::r#gen::<f32>(&mut rng),
+    );
+
+    let waker = Waker::from(Arc::new(NoopWaker));
+    let mut cx = Context::from_waker(&waker);
+    let mut pinned = Pin::new(&mut stream);
+    
+    let mut generated_tokens: Vec<u32> = Vec::new();
+    
+    loop {
+        match Stream::poll_next(pinned.as_mut(), &mut cx) {
+            Poll::Ready(Some(Ok(token))) => {
+                generated_tokens.push(token);
+            }
+            Poll::Ready(Some(Err(e))) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("generation error: {:?}", e),
+                ));
+            }
+            Poll::Ready(None) => break,
+            Poll::Pending => break,
+        }
+    }
+
+    // Decode generated tokens back to text
+    let response = tokenizer
+        .decode_without_special_tokens(&generated_tokens)
+        .unwrap_or_default();
+    
+    if !response.is_empty() {
+        write!(writer, "{response}")?;
+        writer.flush()?;
+    }
+    
+    let elapsed = started_at.elapsed();
+    writeln!(writer)?;
+    writeln!(
+        writer,
+        "{}",
+        format_generation_stats(generated_tokens.len(), elapsed)
+    )?;
+    
+    Ok(response)
+}
+
+struct NoopWaker;
+
+impl Wake for NoopWaker {
+    fn wake(self: Arc<Self>) {}
+}
+
 fn is_profiling_child() -> bool {
     std::env::var_os(PROFILE_CHILD_ENV).is_some()
 }
@@ -405,7 +521,7 @@ fn main() {
     }
     if let Some(model_path) = args.model {
         let loader = GgufModelLoader;
-        match loader.load_with_progress(model_path, |progress| {
+        match loader.load_with_progress(&model_path, |progress| {
             println!("{}", render_load_progress(progress))
         }) {
             Ok(mapped) => {
@@ -445,6 +561,118 @@ fn main() {
                     let plan = plan_layer_offload(&mapped.parsed().tensor_infos, args.n_gpu_layers);
                     println!("{}", render_offload_plan(&plan));
                 }
+
+                // Debug: dump key tensor dimensions
+                for name in [
+                    "token_embd.weight", "output.weight",
+                    "blk.0.attn_qkv.weight", "blk.0.attn_gate.weight", "blk.0.ssm_conv1d.weight",
+                    "blk.3.attn_q.weight", "blk.3.attn_k.weight", "blk.3.attn_v.weight", "blk.3.attn_output.weight",
+                    "blk.3.ffn_gate.weight", "blk.3.ffn_up.weight", "blk.3.ffn_down.weight",
+                    "blk.0.attn_norm.weight", "blk.0.ffn_norm.weight", "blk.0.post_attention_norm.weight",
+                    "blk.3.attn_norm.weight", "blk.3.ffn_norm.weight", "blk.3.post_attention_norm.weight",
+                ] {
+                    if let Some(dims) = tensor_dims(&mapped, name) {
+                        println!("  {}: {:?}", name, dims);
+                    }
+                }
+
+                // Extract model config from GGUF metadata and run generation
+                let metadata = &mapped.parsed().metadata;
+                let vocab_size = metadata_u32(metadata, "llama.vocab_size")
+                    .or_else(|| metadata_u32(metadata, "qwen35.vocab_size"))
+                    .or_else(|| metadata_u32(metadata, "qwen2.vocab_size"))
+                    .or_else(|| metadata_u32(metadata, "qwen.vocab_size"))
+                    .or_else(|| metadata_u32(metadata, "general.vocab_size"))
+                    .or_else(|| metadata_u32(metadata, "tokenizer.ggml.tokens.count"))
+                    .or_else(|| tensor_dims(&mapped, "tok_embeddings.weight").and_then(|d| d.get(1).copied()).map(|v| v as u32))
+                    .or_else(|| tensor_dims(&mapped, "token_embd.weight").and_then(|d| d.get(1).copied()).map(|v| v as u32))
+                    .unwrap_or(32000) as usize;
+                let context_size = metadata_u32(metadata, "llama.context_length")
+                    .or_else(|| metadata_u32(metadata, "qwen35.context_length"))
+                    .or_else(|| metadata_u32(metadata, "qwen2.context_length"))
+                    .or_else(|| metadata_u32(metadata, "qwen.context_length"))
+                    .or_else(|| metadata_u32(metadata, "llama.embedding_length"))
+                    .unwrap_or(4096) as usize;
+                let layer_count = metadata_u32(metadata, "llama.block_count")
+                    .or_else(|| metadata_u32(metadata, "qwen35.block_count"))
+                    .or_else(|| metadata_u32(metadata, "qwen2.block_count"))
+                    .or_else(|| metadata_u32(metadata, "qwen.block_count"))
+                    .unwrap_or(32) as usize;
+                let hidden_size = metadata_u32(metadata, "llama.embedding_length")
+                    .or_else(|| metadata_u32(metadata, "qwen35.embedding_length"))
+                    .or_else(|| metadata_u32(metadata, "qwen2.embedding_length"))
+                    .or_else(|| metadata_u32(metadata, "qwen.embedding_length"))
+                    .or_else(|| tensor_dims(&mapped, "tok_embeddings.weight").and_then(|d| d.get(0).copied()).map(|v| v as u32))
+                    .or_else(|| tensor_dims(&mapped, "token_embd.weight").and_then(|d| d.get(0).copied()).map(|v| v as u32))
+                    .unwrap_or(4096) as usize;
+                let intermediate_size = metadata_u32(metadata, "llama.feed_forward_length")
+                    .or_else(|| metadata_u32(metadata, "qwen35.feed_forward_length"))
+                    .or_else(|| metadata_u32(metadata, "qwen2.feed_forward_length"))
+                    .or_else(|| metadata_u32(metadata, "qwen.feed_forward_length"))
+                    .unwrap_or(11008) as usize;
+                let num_attention_heads = metadata_u32(metadata, "llama.attention.head_count")
+                    .or_else(|| metadata_u32(metadata, "qwen35.attention.head_count"))
+                    .or_else(|| metadata_u32(metadata, "qwen2.attention.head_count"))
+                    .or_else(|| metadata_u32(metadata, "qwen.attention.head_count"))
+                    .unwrap_or(32) as usize;
+                let num_key_value_heads = metadata_u32(metadata, "llama.attention.head_count_kv")
+                    .or_else(|| metadata_u32(metadata, "qwen35.attention.head_count_kv"))
+                    .or_else(|| metadata_u32(metadata, "qwen2.attention.head_count_kv"))
+                    .or_else(|| metadata_u32(metadata, "qwen.attention.head_count_kv"))
+                    .unwrap_or(num_attention_heads as u32) as usize;
+                let rms_norm_eps = metadata_f32(metadata, "llama.attention.layer_norm_rms_epsilon")
+                    .or_else(|| metadata_f32(metadata, "qwen35.attention.layer_norm_rms_epsilon"))
+                    .or_else(|| metadata_f32(metadata, "qwen2.attention.layer_norm_rms_epsilon"))
+                    .or_else(|| metadata_f32(metadata, "qwen.attention.layer_norm_rms_epsilon"))
+                    .unwrap_or(1e-5);
+                let rope_theta = metadata_f32(metadata, "llama.rope.freq_base")
+                    .or_else(|| metadata_f32(metadata, "qwen35.rope.freq_base"))
+                    .or_else(|| metadata_f32(metadata, "qwen2.rope.freq_base"))
+                    .or_else(|| metadata_f32(metadata, "qwen.rope.freq_base"))
+                    .unwrap_or(10000.0);
+
+                let config = InferenceConfig {
+                    vocab_size,
+                    context_size,
+                    layer_count,
+                    hidden_size,
+                    intermediate_size,
+                    num_attention_heads,
+                    num_key_value_heads,
+                    rms_norm_eps,
+                    rope_theta,
+                };
+                let mut model = match InferenceModel::load_from_gguf(&mapped, config) {
+                    Ok(m) => m,
+                    Err(error) => {
+                        eprintln!("failed to load model weights: {error}");
+                        return;
+                    }
+                };
+                
+                // Load tokenizer from GGUF metadata
+                let tokenizer = match load_tokenizer_from_gguf_metadata(metadata) {
+                    Ok(t) => t,
+                    Err(error) => {
+                        eprintln!("failed to load tokenizer: {error:?}");
+                        return;
+                    }
+                };
+                
+                let stdout = io::stdout();
+                let mut writer = stdout.lock();
+                if let Err(error) = generate_with_model(
+                    &args.prompt,
+                    &mut model,
+                    &tokenizer,
+                    args.max_tokens,
+                    args.temperature,
+                    args.top_p,
+                    args.top_k,
+                    &mut writer,
+                ) {
+                    eprintln!("generation failed: {error}");
+                }
             }
             Err(error) => eprintln!("failed to load model: {error}"),
         }
@@ -454,6 +682,46 @@ fn main() {
     let mut writer = stdout.lock();
     if let Err(error) = run_single_shot_mode(&args.prompt, &mut writer) {
         eprintln!("single-shot mode failed: {error}");
+    }
+}
+
+fn metadata_u32(metadata: &std::collections::BTreeMap<String, llamas_core::gguf::GgufMetadataValue>, key: &str) -> Option<u32> {
+    use llamas_core::gguf::GgufMetadataValue;
+    match metadata.get(key) {
+        Some(GgufMetadataValue::Uint8(value)) => Some((*value).into()),
+        Some(GgufMetadataValue::Uint16(value)) => Some((*value).into()),
+        Some(GgufMetadataValue::Uint32(value)) => Some(*value),
+        Some(GgufMetadataValue::Uint64(value)) => (*value).try_into().ok(),
+        Some(GgufMetadataValue::Int8(value)) if *value >= 0 => Some((*value as u8).into()),
+        Some(GgufMetadataValue::Int16(value)) if *value >= 0 => Some((*value as u16).into()),
+        Some(GgufMetadataValue::Int32(value)) if *value >= 0 => (*value).try_into().ok(),
+        Some(GgufMetadataValue::Int64(value)) if *value >= 0 => (*value).try_into().ok(),
+        _ => None,
+    }
+}
+
+fn tensor_dims(mapped: &llamas_core::gguf::MappedGgufFile, name: &str) -> Option<Vec<u64>> {
+    mapped
+        .mapped_tensor_infos()
+        .iter()
+        .find(|t| t.name == name)
+        .map(|t| t.dimensions.clone())
+}
+
+fn metadata_f32(metadata: &std::collections::BTreeMap<String, llamas_core::gguf::GgufMetadataValue>, key: &str) -> Option<f32> {
+    use llamas_core::gguf::GgufMetadataValue;
+    match metadata.get(key) {
+        Some(GgufMetadataValue::Float32(value)) => Some(*value),
+        Some(GgufMetadataValue::Float64(value)) => Some(*value as f32),
+        Some(GgufMetadataValue::Int8(value)) => Some(*value as f32),
+        Some(GgufMetadataValue::Int16(value)) => Some(*value as f32),
+        Some(GgufMetadataValue::Int32(value)) => Some(*value as f32),
+        Some(GgufMetadataValue::Int64(value)) => Some(*value as f32),
+        Some(GgufMetadataValue::Uint8(value)) => Some(*value as f32),
+        Some(GgufMetadataValue::Uint16(value)) => Some(*value as f32),
+        Some(GgufMetadataValue::Uint32(value)) => Some(*value as f32),
+        Some(GgufMetadataValue::Uint64(value)) => Some(*value as f32),
+        _ => None,
     }
 }
 

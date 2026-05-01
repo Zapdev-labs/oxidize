@@ -28,6 +28,32 @@ export interface LlamasWorkerMessageResponse {
     error: string | null;
 }
 
+export type LlamasWorkerModelCacheAction =
+| "cache_downloaded_model"
+| "get_cached_model"
+| "remove_cached_model"
+| "clear_cache"
+| "cache_stats";
+
+export interface LlamasWorkerModelCacheRequest {
+    action: LlamasWorkerModelCacheAction;
+    model_id?: string;
+    model_bytes?: number[];
+}
+
+export interface LlamasWorkerModelCacheResponse {
+    model_id: string | null;
+    model_bytes: number[] | null;
+    cached: boolean | null;
+    cached_models: number;
+    cached_bytes: number;
+}
+
+export interface LlamasWorkerModelCacheMessageResponse {
+    response: LlamasWorkerModelCacheResponse | null;
+    error: string | null;
+}
+
 export interface LlamasWorkerStreamResponse {
     chunks: LlamasWorkerStreamChunk[];
     response: LlamasWorkerInferenceResponse | null;
@@ -40,6 +66,8 @@ export function wasm_collect_worker_stream(request_json: string): string;
 
 export function wasm_handle_worker_message(request_json: string): string;
 
+export function wasm_handle_worker_model_cache_message(request_json: string): string;
+
 export function wasm_workspace_status(): string;
 
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
@@ -48,6 +76,7 @@ export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly wasm_collect_worker_stream: (a: number, b: number) => [number, number];
     readonly wasm_handle_worker_message: (a: number, b: number) => [number, number];
+    readonly wasm_handle_worker_model_cache_message: (a: number, b: number) => [number, number];
     readonly wasm_workspace_status: () => [number, number];
     readonly __wbindgen_externrefs: WebAssembly.Table;
     readonly __wbindgen_malloc: (a: number, b: number) => number;

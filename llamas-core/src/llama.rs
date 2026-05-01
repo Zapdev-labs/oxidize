@@ -236,7 +236,10 @@ mod tests {
         let mut model = LlamaModel::new(LlamaConfig::llama2(32, 2, 2));
         let mut session = Session::new();
 
-        assert_eq!(model.forward(&[], &mut session), Err(ModelError::EmptyInput));
+        assert_eq!(
+            model.forward(&[], &mut session),
+            Err(ModelError::EmptyInput)
+        );
         assert_eq!(
             model.forward(&[4, 5, 6], &mut session),
             Err(ModelError::ContextExceeded {

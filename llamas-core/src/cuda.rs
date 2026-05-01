@@ -382,11 +382,16 @@ pub fn validate_gemm_dims(
 }
 
 #[cfg(feature = "cuda")]
-fn cublas_status_to_error(status: cublas_sys::cublasStatus_t, op: &str) -> Result<(), GemmCudaError> {
+fn cublas_status_to_error(
+    status: cublas_sys::cublasStatus_t,
+    op: &str,
+) -> Result<(), GemmCudaError> {
     if status == cublas_sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS {
         Ok(())
     } else {
-        Err(GemmCudaError::Cuda(format!("{op} failed with status {status:?}")))
+        Err(GemmCudaError::Cuda(format!(
+            "{op} failed with status {status:?}"
+        )))
     }
 }
 
@@ -453,7 +458,8 @@ pub fn gemm_f32_cuda(
     };
 
     // SAFETY: handle is either null or created by cublasCreate_v2.
-    let destroy_result = unsafe { cublas_status_to_error(cublas_sys::cublasDestroy_v2(handle), "cublasDestroy_v2") };
+    let destroy_result =
+        unsafe { cublas_status_to_error(cublas_sys::cublasDestroy_v2(handle), "cublasDestroy_v2") };
     gemm_result?;
     destroy_result?;
     output_device.copy_to(output)?;

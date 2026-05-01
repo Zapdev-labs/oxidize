@@ -1781,10 +1781,7 @@ mod tests {
         for (quantization, block_size) in blocked {
             let err = quantized_size(quantization, block_size - 1)
                 .expect_err("invalid lengths should be rejected");
-            assert!(matches!(
-                err,
-                QuantizationError::InvalidInputLength { .. }
-            ));
+            assert!(matches!(err, QuantizationError::InvalidInputLength { .. }));
         }
     }
 

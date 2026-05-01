@@ -283,7 +283,11 @@ impl ContinuousBatcher {
             let mut state = self.state.lock().await;
             let max_batch_size = self.config.max_batch_size.max(1);
 
-            if state.open.as_ref().is_some_and(|batch| batch.deadline <= now) {
+            if state
+                .open
+                .as_ref()
+                .is_some_and(|batch| batch.deadline <= now)
+            {
                 state.open = None;
             }
 

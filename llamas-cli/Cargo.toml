@@ -11,6 +11,8 @@ path = "src/main.rs"
 [dependencies]
 clap.workspace = true
 llamas-core = { path = "../llamas-core" }
+futures-core = "0.3"
+rand = "0.8"
 tracing.workspace = true
 
 [dev-dependencies]

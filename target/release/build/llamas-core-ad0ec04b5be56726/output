@@ -1,0 +1,5 @@
+cargo:rustc-check-cfg=cfg(cuda_available)
+cargo:rustc-check-cfg=cfg(metal_available)
+cargo:rustc-check-cfg=cfg(webgpu_available)
+cargo:rerun-if-env-changed=CUDA_HOME
+cargo:rerun-if-env-changed=CUDA_PATH

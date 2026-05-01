@@ -98,7 +98,7 @@ pub enum GgufQuantizationType {
 }
 
 impl GgufQuantizationType {
-    fn from_file_type(file_type: u32) -> Self {
+    pub fn from_file_type(file_type: u32) -> Self {
         match file_type {
             0 => Self::F32,
             1 => Self::F16,
@@ -340,7 +340,7 @@ fn detect_architecture_from_metadata_keys(
             continue;
         };
         let architecture = match namespace {
-            "llama" | "mistral" | "mixtral" | "qwen" | "qwen2" | "qwen2moe" | "gemma" | "phi"
+            "llama" | "mistral" | "mixtral" | "qwen" | "qwen2" | "qwen2moe" | "qwen35" | "gemma" | "phi"
             | "falcon" | "gpt2" | "gptj" | "gptneox" => Some(namespace),
             _ => None,
         };
@@ -362,7 +362,7 @@ fn align_up(value: u64, alignment: u64) -> Result<u64, GgufParseError> {
 fn map_tensor_name(architecture: &str, name: &str) -> String {
     let architecture = architecture.to_ascii_lowercase();
     let mapped = match architecture.as_str() {
-        "llama" | "mistral" | "mixtral" | "qwen" | "qwen2" | "qwen2moe" | "gemma" | "phi" => {
+        "llama" | "mistral" | "mixtral" | "qwen" | "qwen2" | "qwen2moe" | "qwen35" | "gemma" | "phi" => {
             map_hf_decoder_name(name)
         }
         "falcon" => map_falcon_name(name),

@@ -40,6 +40,7 @@ pub enum ModelError {
         context_size: usize,
         requested_total_tokens: usize,
     },
+    InferenceFailed(String),
 }
 
 #[cfg(test)]

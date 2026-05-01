@@ -159,9 +159,11 @@ mod tests {
         assert_eq!(events[3].percent, 100);
         assert_eq!(events[3].bytes_processed, Some(bytes.len() as u64));
         assert_eq!(events[3].total_bytes, Some(bytes.len() as u64));
-        assert!(events
-            .windows(2)
-            .all(|pair| pair[0].percent <= pair[1].percent));
+        assert!(
+            events
+                .windows(2)
+                .all(|pair| pair[0].percent <= pair[1].percent)
+        );
     }
 
     #[test]
@@ -169,8 +171,8 @@ mod tests {
         let path = fixture_path("valid-v3.gguf");
         let bytes = fs::read(&path).expect("fixture file exists");
 
-        let baseline = load_gguf_llama_cpp_baseline(&path)
-            .expect("baseline loader should parse model");
+        let baseline =
+            load_gguf_llama_cpp_baseline(&path).expect("baseline loader should parse model");
 
         assert_eq!(baseline.parsed().version, 3);
         assert_eq!(baseline.parsed().tensor_count, 1);
@@ -183,9 +185,11 @@ mod tests {
         let path = fixture_path("valid-v3.gguf");
         let loader = GgufModelLoader;
 
-        let mapped = loader.load(&path).expect("mapped loader should parse model");
-        let baseline = load_gguf_llama_cpp_baseline(&path)
-            .expect("baseline loader should parse model");
+        let mapped = loader
+            .load(&path)
+            .expect("mapped loader should parse model");
+        let baseline =
+            load_gguf_llama_cpp_baseline(&path).expect("baseline loader should parse model");
 
         assert_eq!(mapped.parsed(), baseline.parsed());
     }
@@ -235,5 +239,4 @@ mod tests {
             ]
         );
     }
-
 }
