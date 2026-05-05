@@ -265,7 +265,7 @@ pub fn load_tokenizer_from_gguf_metadata(
 ) -> Result<LoadedTokenizer, TokenizerLoadError> {
     let model = metadata_string(metadata, "tokenizer.ggml.model")?;
     match model.as_str() {
-        "llama" => Ok(LoadedTokenizer::SentencePiece(load_sentencepiece(
+        "llama" | "gemma" | "gemma4" => Ok(LoadedTokenizer::SentencePiece(load_sentencepiece(
             metadata,
         )?)),
         "bert" => Ok(LoadedTokenizer::WordPiece(load_wordpiece(metadata)?)),
@@ -1409,6 +1409,35 @@ mod tests {
         assert_eq!(
             tokenizer.decode(&tokenizer.encode("x")),
             Ok("<unk>".to_owned())
+        );
+    }
+
+    #[test]
+    fn loads_gemma4_sentencepiece_tokenizer_from_gguf_metadata() {
+        let metadata = BTreeMap::from([
+            (
+                "tokenizer.ggml.model".to_owned(),
+                GgufMetadataValue::String("gemma4".to_owned()),
+            ),
+            (
+                "tokenizer.ggml.tokens".to_owned(),
+                metadata_strings(&["he", "llo", "hello", "<unk>"]),
+            ),
+            (
+                "tokenizer.ggml.scores".to_owned(),
+                metadata_scores(&[-1.0, -1.0, -0.1, -99.0]),
+            ),
+            (
+                "tokenizer.ggml.unknown_token_id".to_owned(),
+                GgufMetadataValue::Uint32(3),
+            ),
+        ]);
+
+        let tokenizer =
+            load_tokenizer_from_gguf_metadata(&metadata).expect("metadata should load tokenizer");
+        assert_eq!(
+            tokenizer.decode(&tokenizer.encode("hello")),
+            Ok("hello".to_owned())
         );
     }
 

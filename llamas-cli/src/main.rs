@@ -9,7 +9,7 @@ use llamas_core::offload::{
     plan_multi_gpu_offload,
 };
 use llamas_core::sampling::SamplingConfig;
-use llamas_core::tokenizer::{EncodeOptions, load_tokenizer_from_gguf_metadata, LoadedTokenizer};
+use llamas_core::tokenizer::{EncodeOptions, LoadedTokenizer, load_tokenizer_from_gguf_metadata};
 
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
@@ -332,6 +332,7 @@ fn write_generated_response_with_clock<W: Write, F: FnMut() -> Instant>(
     Ok(response)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn generate_with_model<W: Write, M: Model>(
     prompt: &str,
     model: &mut M,
@@ -349,7 +350,7 @@ fn generate_with_model<W: Write, M: Model>(
 
     let started_at = Instant::now();
     let mut session = Session::new();
-    
+
     // Encode prompt using the model's tokenizer (add BOS for generation)
     let prompt_tokens = tokenizer.encode_with_special_tokens(
         prompt,
@@ -359,9 +360,9 @@ fn generate_with_model<W: Write, M: Model>(
             pad_to: None,
         },
     );
-    
+
     let eos_token = tokenizer.special_tokens().eos;
-    
+
     let config = GenerationConfig {
         max_new_tokens: max_tokens,
         stop_token: eos_token,
@@ -375,30 +376,23 @@ fn generate_with_model<W: Write, M: Model>(
     };
 
     let mut rng = rand::thread_rng();
-    let mut stream = GenerationStream::new(
-        model,
-        &mut session,
-        &prompt_tokens,
-        config,
-        || rand::Rng::r#gen::<f32>(&mut rng),
-    );
+    let mut stream = GenerationStream::new(model, &mut session, &prompt_tokens, config, || {
+        rand::Rng::r#gen::<f32>(&mut rng)
+    });
 
     let waker = Waker::from(Arc::new(NoopWaker));
     let mut cx = Context::from_waker(&waker);
     let mut pinned = Pin::new(&mut stream);
-    
+
     let mut generated_tokens: Vec<u32> = Vec::new();
-    
+
     loop {
         match Stream::poll_next(pinned.as_mut(), &mut cx) {
             Poll::Ready(Some(Ok(token))) => {
                 generated_tokens.push(token);
             }
             Poll::Ready(Some(Err(e))) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("generation error: {:?}", e),
-                ));
+                return Err(io::Error::other(format!("generation error: {:?}", e)));
             }
             Poll::Ready(None) => break,
             Poll::Pending => break,
@@ -409,12 +403,12 @@ fn generate_with_model<W: Write, M: Model>(
     let response = tokenizer
         .decode_without_special_tokens(&generated_tokens)
         .unwrap_or_default();
-    
+
     if !response.is_empty() {
         write!(writer, "{response}")?;
         writer.flush()?;
     }
-    
+
     let elapsed = started_at.elapsed();
     writeln!(writer)?;
     writeln!(
@@ -422,7 +416,7 @@ fn generate_with_model<W: Write, M: Model>(
         "{}",
         format_generation_stats(generated_tokens.len(), elapsed)
     )?;
-    
+
     Ok(response)
 }
 
@@ -564,12 +558,24 @@ fn main() {
 
                 // Debug: dump key tensor dimensions
                 for name in [
-                    "token_embd.weight", "output.weight",
-                    "blk.0.attn_qkv.weight", "blk.0.attn_gate.weight", "blk.0.ssm_conv1d.weight",
-                    "blk.3.attn_q.weight", "blk.3.attn_k.weight", "blk.3.attn_v.weight", "blk.3.attn_output.weight",
-                    "blk.3.ffn_gate.weight", "blk.3.ffn_up.weight", "blk.3.ffn_down.weight",
-                    "blk.0.attn_norm.weight", "blk.0.ffn_norm.weight", "blk.0.post_attention_norm.weight",
-                    "blk.3.attn_norm.weight", "blk.3.ffn_norm.weight", "blk.3.post_attention_norm.weight",
+                    "token_embd.weight",
+                    "output.weight",
+                    "blk.0.attn_qkv.weight",
+                    "blk.0.attn_gate.weight",
+                    "blk.0.ssm_conv1d.weight",
+                    "blk.3.attn_q.weight",
+                    "blk.3.attn_k.weight",
+                    "blk.3.attn_v.weight",
+                    "blk.3.attn_output.weight",
+                    "blk.3.ffn_gate.weight",
+                    "blk.3.ffn_up.weight",
+                    "blk.3.ffn_down.weight",
+                    "blk.0.attn_norm.weight",
+                    "blk.0.ffn_norm.weight",
+                    "blk.0.post_attention_norm.weight",
+                    "blk.3.attn_norm.weight",
+                    "blk.3.ffn_norm.weight",
+                    "blk.3.post_attention_norm.weight",
                 ] {
                     if let Some(dims) = tensor_dims(&mapped, name) {
                         println!("  {}: {:?}", name, dims);
@@ -584,51 +590,100 @@ fn main() {
                     .or_else(|| metadata_u32(metadata, "qwen.vocab_size"))
                     .or_else(|| metadata_u32(metadata, "general.vocab_size"))
                     .or_else(|| metadata_u32(metadata, "tokenizer.ggml.tokens.count"))
-                    .or_else(|| tensor_dims(&mapped, "tok_embeddings.weight").and_then(|d| d.get(1).copied()).map(|v| v as u32))
-                    .or_else(|| tensor_dims(&mapped, "token_embd.weight").and_then(|d| d.get(1).copied()).map(|v| v as u32))
+                    .or_else(|| {
+                        tensor_dims(&mapped, "tok_embeddings.weight")
+                            .and_then(|d| d.get(1).copied())
+                            .map(|v| v as u32)
+                    })
+                    .or_else(|| {
+                        tensor_dims(&mapped, "token_embd.weight")
+                            .and_then(|d| d.get(1).copied())
+                            .map(|v| v as u32)
+                    })
                     .unwrap_or(32000) as usize;
                 let context_size = metadata_u32(metadata, "llama.context_length")
                     .or_else(|| metadata_u32(metadata, "qwen35.context_length"))
                     .or_else(|| metadata_u32(metadata, "qwen2.context_length"))
                     .or_else(|| metadata_u32(metadata, "qwen.context_length"))
+                    .or_else(|| metadata_u32(metadata, "gemma4.context_length"))
+                    .or_else(|| metadata_u32(metadata, "gemma.context_length"))
                     .or_else(|| metadata_u32(metadata, "llama.embedding_length"))
                     .unwrap_or(4096) as usize;
                 let layer_count = metadata_u32(metadata, "llama.block_count")
                     .or_else(|| metadata_u32(metadata, "qwen35.block_count"))
                     .or_else(|| metadata_u32(metadata, "qwen2.block_count"))
                     .or_else(|| metadata_u32(metadata, "qwen.block_count"))
+                    .or_else(|| metadata_u32(metadata, "gemma4.block_count"))
+                    .or_else(|| metadata_u32(metadata, "gemma.block_count"))
                     .unwrap_or(32) as usize;
                 let hidden_size = metadata_u32(metadata, "llama.embedding_length")
                     .or_else(|| metadata_u32(metadata, "qwen35.embedding_length"))
                     .or_else(|| metadata_u32(metadata, "qwen2.embedding_length"))
                     .or_else(|| metadata_u32(metadata, "qwen.embedding_length"))
-                    .or_else(|| tensor_dims(&mapped, "tok_embeddings.weight").and_then(|d| d.get(0).copied()).map(|v| v as u32))
-                    .or_else(|| tensor_dims(&mapped, "token_embd.weight").and_then(|d| d.get(0).copied()).map(|v| v as u32))
+                    .or_else(|| metadata_u32(metadata, "gemma4.embedding_length"))
+                    .or_else(|| metadata_u32(metadata, "gemma.embedding_length"))
+                    .or_else(|| {
+                        tensor_dims(&mapped, "tok_embeddings.weight")
+                            .and_then(|d| d.first().copied())
+                            .map(|v| v as u32)
+                    })
+                    .or_else(|| {
+                        tensor_dims(&mapped, "token_embd.weight")
+                            .and_then(|d| d.first().copied())
+                            .map(|v| v as u32)
+                    })
                     .unwrap_or(4096) as usize;
                 let intermediate_size = metadata_u32(metadata, "llama.feed_forward_length")
                     .or_else(|| metadata_u32(metadata, "qwen35.feed_forward_length"))
                     .or_else(|| metadata_u32(metadata, "qwen2.feed_forward_length"))
                     .or_else(|| metadata_u32(metadata, "qwen.feed_forward_length"))
+                    .or_else(|| metadata_u32(metadata, "gemma4.feed_forward_length"))
+                    .or_else(|| metadata_u32(metadata, "gemma.feed_forward_length"))
                     .unwrap_or(11008) as usize;
                 let num_attention_heads = metadata_u32(metadata, "llama.attention.head_count")
                     .or_else(|| metadata_u32(metadata, "qwen35.attention.head_count"))
                     .or_else(|| metadata_u32(metadata, "qwen2.attention.head_count"))
                     .or_else(|| metadata_u32(metadata, "qwen.attention.head_count"))
+                    .or_else(|| metadata_u32(metadata, "gemma4.attention.head_count"))
+                    .or_else(|| metadata_u32(metadata, "gemma.attention.head_count"))
                     .unwrap_or(32) as usize;
                 let num_key_value_heads = metadata_u32(metadata, "llama.attention.head_count_kv")
                     .or_else(|| metadata_u32(metadata, "qwen35.attention.head_count_kv"))
                     .or_else(|| metadata_u32(metadata, "qwen2.attention.head_count_kv"))
                     .or_else(|| metadata_u32(metadata, "qwen.attention.head_count_kv"))
-                    .unwrap_or(num_attention_heads as u32) as usize;
+                    .or_else(|| metadata_u32(metadata, "gemma4.attention.head_count_kv"))
+                    .or_else(|| metadata_u32(metadata, "gemma.attention.head_count_kv"))
+                    .unwrap_or(num_attention_heads as u32)
+                    as usize;
+                let key_value_head_dim = first_layer_tensor_dims(&mapped, "attn_k.weight")
+                    .and_then(|d| d.get(1).copied())
+                    .and_then(|width| width.checked_div(num_key_value_heads as u64))
+                    .and_then(|value| value.try_into().ok())
+                    .or_else(|| metadata_u32(metadata, "llama.attention.key_length"))
+                    .or_else(|| metadata_u32(metadata, "qwen35.attention.key_length"))
+                    .or_else(|| metadata_u32(metadata, "qwen2.attention.key_length"))
+                    .or_else(|| metadata_u32(metadata, "qwen.attention.key_length"))
+                    .or_else(|| {
+                        first_layer_tensor_dims(&mapped, "attn_k.weight")
+                            .and_then(|d| d.get(1).copied())
+                            .and_then(|width| width.checked_div(num_key_value_heads as u64))
+                            .and_then(|value| value.try_into().ok())
+                    })
+                    .unwrap_or((hidden_size / num_attention_heads) as u32)
+                    as usize;
                 let rms_norm_eps = metadata_f32(metadata, "llama.attention.layer_norm_rms_epsilon")
                     .or_else(|| metadata_f32(metadata, "qwen35.attention.layer_norm_rms_epsilon"))
                     .or_else(|| metadata_f32(metadata, "qwen2.attention.layer_norm_rms_epsilon"))
                     .or_else(|| metadata_f32(metadata, "qwen.attention.layer_norm_rms_epsilon"))
+                    .or_else(|| metadata_f32(metadata, "gemma4.attention.layer_norm_rms_epsilon"))
+                    .or_else(|| metadata_f32(metadata, "gemma.attention.layer_norm_rms_epsilon"))
                     .unwrap_or(1e-5);
                 let rope_theta = metadata_f32(metadata, "llama.rope.freq_base")
                     .or_else(|| metadata_f32(metadata, "qwen35.rope.freq_base"))
                     .or_else(|| metadata_f32(metadata, "qwen2.rope.freq_base"))
                     .or_else(|| metadata_f32(metadata, "qwen.rope.freq_base"))
+                    .or_else(|| metadata_f32(metadata, "gemma4.rope.freq_base"))
+                    .or_else(|| metadata_f32(metadata, "gemma.rope.freq_base"))
                     .unwrap_or(10000.0);
 
                 let config = InferenceConfig {
@@ -639,6 +694,7 @@ fn main() {
                     intermediate_size,
                     num_attention_heads,
                     num_key_value_heads,
+                    key_value_head_dim,
                     rms_norm_eps,
                     rope_theta,
                 };
@@ -649,7 +705,7 @@ fn main() {
                         return;
                     }
                 };
-                
+
                 // Load tokenizer from GGUF metadata
                 let tokenizer = match load_tokenizer_from_gguf_metadata(metadata) {
                     Ok(t) => t,
@@ -658,7 +714,7 @@ fn main() {
                         return;
                     }
                 };
-                
+
                 let stdout = io::stdout();
                 let mut writer = stdout.lock();
                 if let Err(error) = generate_with_model(
@@ -685,7 +741,10 @@ fn main() {
     }
 }
 
-fn metadata_u32(metadata: &std::collections::BTreeMap<String, llamas_core::gguf::GgufMetadataValue>, key: &str) -> Option<u32> {
+fn metadata_u32(
+    metadata: &std::collections::BTreeMap<String, llamas_core::gguf::GgufMetadataValue>,
+    key: &str,
+) -> Option<u32> {
     use llamas_core::gguf::GgufMetadataValue;
     match metadata.get(key) {
         Some(GgufMetadataValue::Uint8(value)) => Some((*value).into()),
@@ -708,7 +767,21 @@ fn tensor_dims(mapped: &llamas_core::gguf::MappedGgufFile, name: &str) -> Option
         .map(|t| t.dimensions.clone())
 }
 
-fn metadata_f32(metadata: &std::collections::BTreeMap<String, llamas_core::gguf::GgufMetadataValue>, key: &str) -> Option<f32> {
+fn first_layer_tensor_dims(
+    mapped: &llamas_core::gguf::MappedGgufFile,
+    suffix: &str,
+) -> Option<Vec<u64>> {
+    mapped
+        .mapped_tensor_infos()
+        .iter()
+        .find(|t| t.name.starts_with("blk.") && t.name.ends_with(suffix))
+        .map(|t| t.dimensions.clone())
+}
+
+fn metadata_f32(
+    metadata: &std::collections::BTreeMap<String, llamas_core::gguf::GgufMetadataValue>,
+    key: &str,
+) -> Option<f32> {
     use llamas_core::gguf::GgufMetadataValue;
     match metadata.get(key) {
         Some(GgufMetadataValue::Float32(value)) => Some(*value),

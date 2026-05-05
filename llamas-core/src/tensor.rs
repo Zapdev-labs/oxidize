@@ -1,4 +1,5 @@
 use crate::gguf::GgufQuantizationType;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 const QK8_0: usize = 32;
@@ -7,6 +8,25 @@ const QK_K: usize = 256;
 const BLOCK_Q4_K_SIZE: usize = 2 + 128;
 const BLOCK_Q6_K_SIZE: usize = 2 + 192;
 const FLASH_ATTENTION_BLOCK_TOKENS: usize = 64;
+const PARALLEL_GEMV_MIN_OPS: usize = 1 << 20;
+
+fn parallel_row_ranges(rows: usize) -> Vec<(usize, usize)> {
+    let chunk_count = rayon::current_num_threads().min(rows).max(1);
+    let chunk_rows = rows.div_ceil(chunk_count);
+    (0..rows)
+        .step_by(chunk_rows)
+        .map(|start| (start, (start + chunk_rows).min(rows)))
+        .collect()
+}
+
+fn reduce_partials(output: &mut [f32], partials: Vec<Vec<f32>>) {
+    output.fill(0.0);
+    for partial in partials {
+        for (out, value) in output.iter_mut().zip(partial) {
+            *out += value;
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum DType {
@@ -199,19 +219,32 @@ pub fn gemv_quantized_f32(
     }
 
     match quantization {
-        GgufQuantizationType::Q8_0 => {
-            gemv_q8_0_f32_fused(quantized_matrix, cols, vector, output)
-        }
-        GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M => {
-            gemv_qk_f32_fused(quantized_matrix, rows, cols, vector, output, BLOCK_Q4_K_SIZE, 4, 8.0)
-        }
-        GgufQuantizationType::Q6_K => {
-            gemv_qk_f32_fused(quantized_matrix, rows, cols, vector, output, BLOCK_Q6_K_SIZE, 6, 32.0)
-        }
+        GgufQuantizationType::Q8_0 => gemv_q8_0_f32_fused(quantized_matrix, cols, vector, output),
+        GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M => gemv_qk_f32_fused(
+            quantized_matrix,
+            rows,
+            cols,
+            vector,
+            output,
+            BLOCK_Q4_K_SIZE,
+            4,
+            8.0,
+        ),
+        GgufQuantizationType::Q6_K => gemv_qk_f32_fused(
+            quantized_matrix,
+            rows,
+            cols,
+            vector,
+            output,
+            BLOCK_Q6_K_SIZE,
+            6,
+            32.0,
+        ),
         _ => Err(GemvError::UnsupportedQuantizationType { quantization }),
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn gemv_qk_f32_fused(
     quantized_matrix: &[u8],
     rows: usize,
@@ -243,7 +276,7 @@ fn gemv_qk_f32_fused(
         });
     }
 
-    for (row_idx, out) in output.iter_mut().enumerate() {
+    let compute_row = |row_idx: usize| {
         let mut sum = 0.0_f32;
         let row_start = row_idx * blocks_per_row * block_size;
         let row_blocks = &quantized_matrix[row_start..row_start + (blocks_per_row * block_size)];
@@ -256,7 +289,18 @@ fn gemv_qk_f32_fused(
                 sum += (q - zero_point) * d * vector[vector_offset + idx];
             }
         }
-        *out = sum;
+        sum
+    };
+
+    if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
+        output
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(row_idx, out)| *out = compute_row(row_idx));
+    } else {
+        for (row_idx, out) in output.iter_mut().enumerate() {
+            *out = compute_row(row_idx);
+        }
     }
     Ok(())
 }
@@ -282,8 +326,9 @@ fn gemv_q8_0_f32_fused(
     vector: &[f32],
     output: &mut [f32],
 ) -> Result<(), GemvError> {
+    let rows = output.len();
     let blocks_per_row = cols / QK8_0;
-    for (row_idx, out) in output.iter_mut().enumerate() {
+    let compute_row = |row_idx: usize| {
         let mut sum = 0.0_f32;
         let row_start = row_idx * blocks_per_row * BLOCK_Q8_0_SIZE;
         let row_blocks =
@@ -298,17 +343,52 @@ fn gemv_q8_0_f32_fused(
                 sum += (*q as i8) as f32 * scale * *v;
             }
         }
-        *out = sum;
+        sum
+    };
+
+    if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
+        output
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(row_idx, out)| *out = compute_row(row_idx));
+    } else {
+        for (row_idx, out) in output.iter_mut().enumerate() {
+            *out = compute_row(row_idx);
+        }
     }
     Ok(())
 }
 
 // Transposed GEMV functions for GGUF weight matrices stored as [input_dim, output_dim]
-fn gemv_f32_transposed_cpu(matrix: &[f32], rows: usize, cols: usize, vector: &[f32], output: &mut [f32]) {
-    output.fill(0.0);
-    for (row_values, &vi) in matrix.chunks_exact(cols).zip(vector.iter()).take(rows) {
-        for (j, &weight) in row_values.iter().enumerate() {
-            output[j] += weight * vi;
+fn gemv_f32_transposed_cpu(
+    matrix: &[f32],
+    rows: usize,
+    cols: usize,
+    vector: &[f32],
+    output: &mut [f32],
+) {
+    if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
+        let partials: Vec<Vec<f32>> = parallel_row_ranges(rows)
+            .into_par_iter()
+            .map(|(start, end)| {
+                let mut partial = vec![0.0_f32; cols];
+                for row in start..end {
+                    let vi = vector[row];
+                    let row_values = &matrix[row * cols..(row + 1) * cols];
+                    for (out, &weight) in partial.iter_mut().zip(row_values) {
+                        *out += weight * vi;
+                    }
+                }
+                partial
+            })
+            .collect();
+        reduce_partials(output, partials);
+    } else {
+        output.fill(0.0);
+        for (row_values, &vi) in matrix.chunks_exact(cols).zip(vector.iter()).take(rows) {
+            for (j, &weight) in row_values.iter().enumerate() {
+                output[j] += weight * vi;
+            }
         }
     }
 }
@@ -343,6 +423,7 @@ pub fn gemv_f32_transposed(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn gemv_qk_f32_transposed(
     quantized_matrix: &[u8],
     rows: usize,
@@ -374,20 +455,49 @@ fn gemv_qk_f32_transposed(
         });
     }
 
-    output.fill(0.0);
-    for (row_idx, &vi) in vector.iter().enumerate().take(rows) {
-        let row_start = row_idx * blocks_per_row * block_size;
-        let row_blocks = &quantized_matrix[row_start..row_start + (blocks_per_row * block_size)];
-        for (block_idx, block) in row_blocks.chunks_exact(block_size).enumerate() {
-            let d = f16_le_to_f32([block[0], block[1]]);
-            let bitstream = &block[2..];
-            let col_start = block_idx * QK_K;
-            for idx in 0..QK_K {
-                if col_start + idx >= cols {
-                    break;
+    if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
+        let partials: Vec<Vec<f32>> = parallel_row_ranges(rows)
+            .into_par_iter()
+            .map(|(start, end)| {
+                let mut partial = vec![0.0_f32; cols];
+                for (row_idx, &vi) in vector.iter().enumerate().take(end).skip(start) {
+                    let row_start = row_idx * blocks_per_row * block_size;
+                    let row_blocks =
+                        &quantized_matrix[row_start..row_start + (blocks_per_row * block_size)];
+                    for (block_idx, block) in row_blocks.chunks_exact(block_size).enumerate() {
+                        let d = f16_le_to_f32([block[0], block[1]]);
+                        let bitstream = &block[2..];
+                        let col_start = block_idx * QK_K;
+                        for idx in 0..QK_K {
+                            if col_start + idx >= cols {
+                                break;
+                            }
+                            let q = extract_bits(bitstream, idx, bits) as f32;
+                            partial[col_start + idx] += (q - zero_point) * d * vi;
+                        }
+                    }
                 }
-                let q = extract_bits(bitstream, idx, bits) as f32;
-                output[col_start + idx] += (q - zero_point) * d * vi;
+                partial
+            })
+            .collect();
+        reduce_partials(output, partials);
+    } else {
+        output.fill(0.0);
+        for (row_idx, &vi) in vector.iter().enumerate().take(rows) {
+            let row_start = row_idx * blocks_per_row * block_size;
+            let row_blocks =
+                &quantized_matrix[row_start..row_start + (blocks_per_row * block_size)];
+            for (block_idx, block) in row_blocks.chunks_exact(block_size).enumerate() {
+                let d = f16_le_to_f32([block[0], block[1]]);
+                let bitstream = &block[2..];
+                let col_start = block_idx * QK_K;
+                for idx in 0..QK_K {
+                    if col_start + idx >= cols {
+                        break;
+                    }
+                    let q = extract_bits(bitstream, idx, bits) as f32;
+                    output[col_start + idx] += (q - zero_point) * d * vi;
+                }
             }
         }
     }
@@ -422,18 +532,45 @@ fn gemv_q8_0_f32_transposed(
         });
     }
 
-    output.fill(0.0);
-    for (row_idx, &vi) in vector.iter().enumerate().take(rows) {
-        let row_start = row_idx * blocks_per_row * BLOCK_Q8_0_SIZE;
-        let row_blocks = &quantized_matrix[row_start..row_start + (blocks_per_row * BLOCK_Q8_0_SIZE)];
-        for (block_idx, block) in row_blocks.chunks_exact(BLOCK_Q8_0_SIZE).enumerate() {
-            let scale = f16_le_to_f32([block[0], block[1]]);
-            let col_start = block_idx * QK8_0;
-            for (idx, q_byte) in block[2..].iter().enumerate() {
-                if col_start + idx >= cols {
-                    break;
+    if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
+        let partials: Vec<Vec<f32>> = parallel_row_ranges(rows)
+            .into_par_iter()
+            .map(|(start, end)| {
+                let mut partial = vec![0.0_f32; cols];
+                for (row_idx, &vi) in vector.iter().enumerate().take(end).skip(start) {
+                    let row_start = row_idx * blocks_per_row * BLOCK_Q8_0_SIZE;
+                    let row_blocks = &quantized_matrix
+                        [row_start..row_start + (blocks_per_row * BLOCK_Q8_0_SIZE)];
+                    for (block_idx, block) in row_blocks.chunks_exact(BLOCK_Q8_0_SIZE).enumerate() {
+                        let scale = f16_le_to_f32([block[0], block[1]]);
+                        let col_start = block_idx * QK8_0;
+                        for (idx, q_byte) in block[2..].iter().enumerate() {
+                            if col_start + idx >= cols {
+                                break;
+                            }
+                            partial[col_start + idx] += (*q_byte as i8) as f32 * scale * vi;
+                        }
+                    }
                 }
-                output[col_start + idx] += (*q_byte as i8) as f32 * scale * vi;
+                partial
+            })
+            .collect();
+        reduce_partials(output, partials);
+    } else {
+        output.fill(0.0);
+        for (row_idx, &vi) in vector.iter().enumerate().take(rows) {
+            let row_start = row_idx * blocks_per_row * BLOCK_Q8_0_SIZE;
+            let row_blocks =
+                &quantized_matrix[row_start..row_start + (blocks_per_row * BLOCK_Q8_0_SIZE)];
+            for (block_idx, block) in row_blocks.chunks_exact(BLOCK_Q8_0_SIZE).enumerate() {
+                let scale = f16_le_to_f32([block[0], block[1]]);
+                let col_start = block_idx * QK8_0;
+                for (idx, q_byte) in block[2..].iter().enumerate() {
+                    if col_start + idx >= cols {
+                        break;
+                    }
+                    output[col_start + idx] += (*q_byte as i8) as f32 * scale * vi;
+                }
             }
         }
     }
@@ -452,12 +589,26 @@ pub fn gemv_quantized_f32_transposed(
         GgufQuantizationType::Q8_0 => {
             gemv_q8_0_f32_transposed(quantized_matrix, rows, cols, vector, output)
         }
-        GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M => {
-            gemv_qk_f32_transposed(quantized_matrix, rows, cols, vector, output, BLOCK_Q4_K_SIZE, 4, 8.0)
-        }
-        GgufQuantizationType::Q6_K => {
-            gemv_qk_f32_transposed(quantized_matrix, rows, cols, vector, output, BLOCK_Q6_K_SIZE, 6, 32.0)
-        }
+        GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M => gemv_qk_f32_transposed(
+            quantized_matrix,
+            rows,
+            cols,
+            vector,
+            output,
+            BLOCK_Q4_K_SIZE,
+            4,
+            8.0,
+        ),
+        GgufQuantizationType::Q6_K => gemv_qk_f32_transposed(
+            quantized_matrix,
+            rows,
+            cols,
+            vector,
+            output,
+            BLOCK_Q6_K_SIZE,
+            6,
+            32.0,
+        ),
         _ => Err(GemvError::UnsupportedQuantizationType { quantization }),
     }
 }
@@ -764,12 +915,26 @@ pub fn gemm_i4(
 }
 
 fn gemv_f32_cpu(matrix: &[f32], cols: usize, vector: &[f32], output: &mut [f32]) {
-    for (row_values, out) in matrix.chunks_exact(cols).zip(output.iter_mut()) {
-        *out = row_values
-            .iter()
-            .zip(vector.iter())
-            .map(|(weight, value)| weight * value)
-            .sum();
+    let rows = output.len();
+    if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
+        matrix
+            .par_chunks_exact(cols)
+            .zip(output.par_iter_mut())
+            .for_each(|(row_values, out)| {
+                *out = row_values
+                    .iter()
+                    .zip(vector.iter())
+                    .map(|(weight, value)| weight * value)
+                    .sum();
+            });
+    } else {
+        for (row_values, out) in matrix.chunks_exact(cols).zip(output.iter_mut()) {
+            *out = row_values
+                .iter()
+                .zip(vector.iter())
+                .map(|(weight, value)| weight * value)
+                .sum();
+        }
     }
 }
 

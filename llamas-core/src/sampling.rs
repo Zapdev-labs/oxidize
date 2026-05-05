@@ -302,28 +302,57 @@ pub fn sample_with_repetition_and_grammar(
         .copied()
         .max_by(|a, b| a.total_cmp(b))
         .ok_or(SamplingError::EmptyLogits)?;
-    let mut indexed_probs: Vec<(usize, f32)> = adjusted_logits
-        .iter()
-        .copied()
-        .enumerate()
-        .map(|(idx, logit)| (idx, ((logit - max_logit) / config.temperature).exp()))
-        .collect();
+    let top_k_limit = config.top_k.filter(|top_k| *top_k < adjusted_logits.len());
+    let mut indexed_probs = if let Some(top_k) = top_k_limit {
+        let mut raw_sum = 0.0_f32;
+        let mut top_candidates: Vec<(usize, f32)> = Vec::with_capacity(top_k);
+        for (idx, logit) in adjusted_logits.iter().copied().enumerate() {
+            let prob = ((logit - max_logit) / config.temperature).exp();
+            raw_sum += prob;
+            if top_candidates.len() < top_k {
+                top_candidates.push((idx, prob));
+            } else if let Some((min_idx, _)) = top_candidates
+                .iter()
+                .enumerate()
+                .min_by(|a, b| a.1.1.total_cmp(&b.1.1))
+                && prob > top_candidates[min_idx].1
+            {
+                top_candidates[min_idx] = (idx, prob);
+            }
+        }
+        if raw_sum <= 0.0 || !raw_sum.is_finite() {
+            return greedy(logits);
+        }
+        for (_, p) in &mut top_candidates {
+            *p /= raw_sum;
+        }
+        top_candidates.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
+        top_candidates
+    } else {
+        let mut indexed_probs: Vec<(usize, f32)> = adjusted_logits
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(idx, logit)| (idx, ((logit - max_logit) / config.temperature).exp()))
+            .collect();
 
-    let raw_sum: f32 = indexed_probs.iter().map(|(_, p)| *p).sum();
-    if raw_sum <= 0.0 || !raw_sum.is_finite() {
-        return greedy(logits);
-    }
-    for (_, p) in &mut indexed_probs {
-        *p /= raw_sum;
-    }
+        let raw_sum: f32 = indexed_probs.iter().map(|(_, p)| *p).sum();
+        if raw_sum <= 0.0 || !raw_sum.is_finite() {
+            return greedy(logits);
+        }
+        for (_, p) in &mut indexed_probs {
+            *p /= raw_sum;
+        }
 
-    indexed_probs.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
+        indexed_probs.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
 
-    if let Some(top_k) = config.top_k
-        && indexed_probs.len() > top_k
-    {
-        indexed_probs.truncate(top_k);
-    }
+        if let Some(top_k) = config.top_k
+            && indexed_probs.len() > top_k
+        {
+            indexed_probs.truncate(top_k);
+        }
+        indexed_probs
+    };
 
     if let Some(top_p) = config.top_p {
         let mut cumulative = 0.0_f32;
