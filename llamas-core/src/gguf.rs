@@ -340,8 +340,8 @@ fn detect_architecture_from_metadata_keys(
             continue;
         };
         let architecture = match namespace {
-            "llama" | "mistral" | "mixtral" | "qwen" | "qwen2" | "qwen2moe" | "qwen35" | "gemma" | "phi"
-            | "falcon" | "gpt2" | "gptj" | "gptneox" => Some(namespace),
+            "llama" | "mistral" | "mixtral" | "qwen" | "qwen2" | "qwen2moe" | "qwen35"
+            | "gemma" | "phi" | "falcon" | "gpt2" | "gptj" | "gptneox" => Some(namespace),
             _ => None,
         };
         if architecture.is_some() {
@@ -362,9 +362,8 @@ fn align_up(value: u64, alignment: u64) -> Result<u64, GgufParseError> {
 fn map_tensor_name(architecture: &str, name: &str) -> String {
     let architecture = architecture.to_ascii_lowercase();
     let mapped = match architecture.as_str() {
-        "llama" | "mistral" | "mixtral" | "qwen" | "qwen2" | "qwen2moe" | "qwen35" | "gemma" | "phi" => {
-            map_hf_decoder_name(name)
-        }
+        "llama" | "mistral" | "mixtral" | "qwen" | "qwen2" | "qwen2moe" | "qwen35" | "gemma"
+        | "phi" => map_hf_decoder_name(name),
         "falcon" => map_falcon_name(name),
         "gpt2" => map_gpt2_name(name),
         "gptj" => map_gptj_name(name),

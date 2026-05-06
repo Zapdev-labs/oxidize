@@ -1,6 +1,10 @@
 use crate::gguf::GgufQuantizationType;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+#[cfg(target_arch = "x86")]
+use std::arch::x86::*;
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::*;
 
 const QK8_0: usize = 32;
 const BLOCK_Q8_0_SIZE: usize = 2 + QK8_0;
@@ -9,24 +13,7 @@ const BLOCK_Q4_K_SIZE: usize = 2 + 128;
 const BLOCK_Q6_K_SIZE: usize = 2 + 192;
 const FLASH_ATTENTION_BLOCK_TOKENS: usize = 64;
 const PARALLEL_GEMV_MIN_OPS: usize = 1 << 20;
-
-fn parallel_row_ranges(rows: usize) -> Vec<(usize, usize)> {
-    let chunk_count = rayon::current_num_threads().min(rows).max(1);
-    let chunk_rows = rows.div_ceil(chunk_count);
-    (0..rows)
-        .step_by(chunk_rows)
-        .map(|start| (start, (start + chunk_rows).min(rows)))
-        .collect()
-}
-
-fn reduce_partials(output: &mut [f32], partials: Vec<Vec<f32>>) {
-    output.fill(0.0);
-    for partial in partials {
-        for (out, value) in output.iter_mut().zip(partial) {
-            *out += value;
-        }
-    }
-}
+const TRANSPOSED_GEMV_COL_CHUNK: usize = QK_K * 16;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum DType {
@@ -368,21 +355,20 @@ fn gemv_f32_transposed_cpu(
     output: &mut [f32],
 ) {
     if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
-        let partials: Vec<Vec<f32>> = parallel_row_ranges(rows)
-            .into_par_iter()
-            .map(|(start, end)| {
-                let mut partial = vec![0.0_f32; cols];
-                for row in start..end {
-                    let vi = vector[row];
-                    let row_values = &matrix[row * cols..(row + 1) * cols];
-                    for (out, &weight) in partial.iter_mut().zip(row_values) {
+        output
+            .par_chunks_mut(TRANSPOSED_GEMV_COL_CHUNK)
+            .enumerate()
+            .for_each(|(chunk_idx, out_chunk)| {
+                let col_start = chunk_idx * TRANSPOSED_GEMV_COL_CHUNK;
+                out_chunk.fill(0.0);
+                let col_end = col_start + out_chunk.len();
+                for (row_values, &vi) in matrix.chunks_exact(cols).zip(vector.iter()).take(rows) {
+                    let row_chunk = &row_values[col_start..col_end];
+                    for (out, &weight) in out_chunk.iter_mut().zip(row_chunk) {
                         *out += weight * vi;
                     }
                 }
-                partial
-            })
-            .collect();
-        reduce_partials(output, partials);
+            });
     } else {
         output.fill(0.0);
         for (row_values, &vi) in matrix.chunks_exact(cols).zip(vector.iter()).take(rows) {
@@ -456,31 +442,42 @@ fn gemv_qk_f32_transposed(
     }
 
     if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
-        let partials: Vec<Vec<f32>> = parallel_row_ranges(rows)
-            .into_par_iter()
-            .map(|(start, end)| {
-                let mut partial = vec![0.0_f32; cols];
-                for (row_idx, &vi) in vector.iter().enumerate().take(end).skip(start) {
+        let use_q4_avx2 = bits == 4 && q4_avx2_available();
+        output
+            .par_chunks_mut(TRANSPOSED_GEMV_COL_CHUNK)
+            .enumerate()
+            .for_each(|(chunk_idx, out_chunk)| {
+                let col_start = chunk_idx * TRANSPOSED_GEMV_COL_CHUNK;
+                let block_start = col_start / QK_K;
+                let block_end = (col_start + out_chunk.len()).div_ceil(QK_K);
+                out_chunk.fill(0.0);
+                for (row_idx, &vi) in vector.iter().enumerate().take(rows) {
+                    if vi == 0.0 {
+                        continue;
+                    }
                     let row_start = row_idx * blocks_per_row * block_size;
                     let row_blocks =
                         &quantized_matrix[row_start..row_start + (blocks_per_row * block_size)];
-                    for (block_idx, block) in row_blocks.chunks_exact(block_size).enumerate() {
+                    for block_idx in block_start..block_end {
+                        let block_offset = block_idx * block_size;
+                        let block = &row_blocks[block_offset..block_offset + block_size];
                         let d = f16_le_to_f32([block[0], block[1]]);
-                        let bitstream = &block[2..];
-                        let col_start = block_idx * QK_K;
-                        for idx in 0..QK_K {
-                            if col_start + idx >= cols {
-                                break;
+                        let factor = d * vi;
+                        let local_col = block_idx * QK_K - col_start;
+                        let block_output_len = (out_chunk.len() - local_col).min(QK_K);
+                        let out_block = &mut out_chunk[local_col..local_col + block_output_len];
+                        if bits == 4 && zero_point == 8.0 && block_output_len == QK_K {
+                            accumulate_q4_block(&block[2..], factor, out_block, use_q4_avx2);
+                        } else {
+                            let bitstream = &block[2..];
+                            for (idx, out) in out_block.iter_mut().enumerate() {
+                                let q = extract_bits(bitstream, idx, bits) as f32;
+                                *out += (q - zero_point) * factor;
                             }
-                            let q = extract_bits(bitstream, idx, bits) as f32;
-                            partial[col_start + idx] += (q - zero_point) * d * vi;
                         }
                     }
                 }
-                partial
-            })
-            .collect();
-        reduce_partials(output, partials);
+            });
     } else {
         output.fill(0.0);
         for (row_idx, &vi) in vector.iter().enumerate().take(rows) {
@@ -502,6 +499,69 @@ fn gemv_qk_f32_transposed(
         }
     }
     Ok(())
+}
+
+#[inline]
+fn q4_avx2_available() -> bool {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        is_x86_feature_detected!("avx2")
+    }
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+    {
+        false
+    }
+}
+
+#[inline]
+fn accumulate_q4_block(bitstream: &[u8], factor: f32, output: &mut [f32], use_avx2: bool) {
+    debug_assert!(bitstream.len() >= QK_K / 2);
+    debug_assert!(output.len() >= QK_K);
+
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    if use_avx2 {
+        unsafe {
+            accumulate_q4_block_avx2(bitstream.as_ptr(), factor, output.as_mut_ptr());
+        }
+        return;
+    }
+
+    for (pair_idx, &packed) in bitstream.iter().take(QK_K / 2).enumerate() {
+        let out_idx = pair_idx * 2;
+        output[out_idx] += ((packed & 0x0F) as f32 - 8.0) * factor;
+        output[out_idx + 1] += ((packed >> 4) as f32 - 8.0) * factor;
+    }
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn accumulate_q4_block_avx2(bitstream: *const u8, factor: f32, output: *mut f32) {
+    let mask = _mm_set1_epi8(0x0F);
+    let zero_point = _mm_set1_epi8(8);
+    let factor = _mm256_set1_ps(factor);
+
+    for byte_offset in (0..QK_K / 2).step_by(16) {
+        let packed = unsafe { _mm_loadu_si128(bitstream.add(byte_offset).cast::<__m128i>()) };
+        let low = _mm_and_si128(packed, mask);
+        let high = _mm_and_si128(_mm_srli_epi16(packed, 4), mask);
+        let interleaved_lo = _mm_sub_epi8(_mm_unpacklo_epi8(low, high), zero_point);
+        let interleaved_hi = _mm_sub_epi8(_mm_unpackhi_epi8(low, high), zero_point);
+
+        let groups = [
+            interleaved_lo,
+            _mm_srli_si128(interleaved_lo, 8),
+            interleaved_hi,
+            _mm_srli_si128(interleaved_hi, 8),
+        ];
+        for (group_idx, group) in groups.into_iter().enumerate() {
+            let q_i32 = _mm256_cvtepi8_epi32(group);
+            let q_f32 = _mm256_cvtepi32_ps(q_i32);
+            let out_ptr = unsafe { output.add(byte_offset * 2 + group_idx * 8) };
+            let current = unsafe { _mm256_loadu_ps(out_ptr) };
+            let updated = _mm256_add_ps(current, _mm256_mul_ps(q_f32, factor));
+            unsafe { _mm256_storeu_ps(out_ptr, updated) };
+        }
+    }
 }
 
 fn gemv_q8_0_f32_transposed(
@@ -533,29 +593,35 @@ fn gemv_q8_0_f32_transposed(
     }
 
     if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
-        let partials: Vec<Vec<f32>> = parallel_row_ranges(rows)
-            .into_par_iter()
-            .map(|(start, end)| {
-                let mut partial = vec![0.0_f32; cols];
-                for (row_idx, &vi) in vector.iter().enumerate().take(end).skip(start) {
+        output
+            .par_chunks_mut(TRANSPOSED_GEMV_COL_CHUNK)
+            .enumerate()
+            .for_each(|(chunk_idx, out_chunk)| {
+                let col_start = chunk_idx * TRANSPOSED_GEMV_COL_CHUNK;
+                let block_start = col_start / QK8_0;
+                let block_end = (col_start + out_chunk.len()).div_ceil(QK8_0);
+                out_chunk.fill(0.0);
+                for (row_idx, &vi) in vector.iter().enumerate().take(rows) {
+                    if vi == 0.0 {
+                        continue;
+                    }
                     let row_start = row_idx * blocks_per_row * BLOCK_Q8_0_SIZE;
                     let row_blocks = &quantized_matrix
                         [row_start..row_start + (blocks_per_row * BLOCK_Q8_0_SIZE)];
-                    for (block_idx, block) in row_blocks.chunks_exact(BLOCK_Q8_0_SIZE).enumerate() {
+                    for block_idx in block_start..block_end {
+                        let block_offset = block_idx * BLOCK_Q8_0_SIZE;
+                        let block = &row_blocks[block_offset..block_offset + BLOCK_Q8_0_SIZE];
                         let scale = f16_le_to_f32([block[0], block[1]]);
-                        let col_start = block_idx * QK8_0;
-                        for (idx, q_byte) in block[2..].iter().enumerate() {
-                            if col_start + idx >= cols {
-                                break;
-                            }
-                            partial[col_start + idx] += (*q_byte as i8) as f32 * scale * vi;
+                        let factor = scale * vi;
+                        let local_col = block_idx * QK8_0 - col_start;
+                        let block_output_len = (out_chunk.len() - local_col).min(QK8_0);
+                        let out_block = &mut out_chunk[local_col..local_col + block_output_len];
+                        for (out, q_byte) in out_block.iter_mut().zip(block[2..].iter()) {
+                            *out += (*q_byte as i8) as f32 * factor;
                         }
                     }
                 }
-                partial
-            })
-            .collect();
-        reduce_partials(output, partials);
+            });
     } else {
         output.fill(0.0);
         for (row_idx, &vi) in vector.iter().enumerate().take(rows) {

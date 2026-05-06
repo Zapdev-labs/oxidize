@@ -294,6 +294,19 @@ pub fn sample_with_repetition_and_grammar(
         return Err(SamplingError::InvalidRandom);
     }
 
+    let has_repetition_penalty = repetition.frequency_penalty != 0.0
+        || repetition.presence_penalty != 0.0
+        || repetition.newline_penalty.is_some();
+    let has_rank_filter = config.top_k.is_some()
+        || config.top_p.is_some()
+        || config.min_p.is_some()
+        || config.typical_p.is_some()
+        || config.tail_free_z.is_some()
+        || config.locally_typical_tau.is_some();
+    if logits.len() >= 4096 && !has_repetition_penalty && !has_rank_filter && grammar.is_none() {
+        return sample_unfiltered(logits, config.temperature, random);
+    }
+
     let mut adjusted_logits = logits.to_vec();
     apply_repetition_penalties(&mut adjusted_logits, recent_tokens, repetition);
 
@@ -404,6 +417,33 @@ pub fn sample_with_repetition_and_grammar(
     let target = random * filtered_sum;
     for (idx, prob) in indexed_probs {
         cumulative += prob;
+        if target <= cumulative {
+            return Ok(idx as u32);
+        }
+    }
+
+    greedy(logits)
+}
+
+fn sample_unfiltered(logits: &[f32], temperature: f32, random: f32) -> Result<u32, SamplingError> {
+    let max_logit = logits
+        .iter()
+        .copied()
+        .max_by(|a, b| a.total_cmp(b))
+        .ok_or(SamplingError::EmptyLogits)?;
+
+    let mut raw_sum = 0.0_f32;
+    for logit in logits {
+        raw_sum += ((*logit - max_logit) / temperature).exp();
+    }
+    if raw_sum <= 0.0 || !raw_sum.is_finite() {
+        return greedy(logits);
+    }
+
+    let target = random * raw_sum;
+    let mut cumulative = 0.0_f32;
+    for (idx, logit) in logits.iter().enumerate() {
+        cumulative += ((*logit - max_logit) / temperature).exp();
         if target <= cumulative {
             return Ok(idx as u32);
         }

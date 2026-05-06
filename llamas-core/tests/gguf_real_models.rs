@@ -103,10 +103,7 @@ fn real_gguf_models_compatibility_suite_covers_100_plus_models() {
         );
 
         loader.load(&path).unwrap_or_else(|err| {
-            panic!(
-                "compatibility loader failed for {}: {err}",
-                path.display()
-            )
+            panic!("compatibility loader failed for {}: {err}", path.display())
         });
     }
 }

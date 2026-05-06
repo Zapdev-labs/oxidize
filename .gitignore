@@ -1,0 +1,17 @@
+/target/
+/dist/wasm/
+
+# Rust/profiling artifacts
+*.profraw
+*.profdata
+*.perf.data
+perf.data*
+
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Local environment and model staging
+.env
+.env.*
+/models/
