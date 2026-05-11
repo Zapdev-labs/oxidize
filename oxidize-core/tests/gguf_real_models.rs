@@ -1,9 +1,10 @@
 use std::env;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use oxidize_core::model_loader::{GgufModelLoader, ModelLoader, load_gguf_llama_cpp_baseline};
 
-const DEFAULT_LOCAL_GGUF_DIR: &str = "/run/media/dih/driveendsin41/AI";
+const SKIP_MODEL_HINT: &str = "set OXIDIZE_TEST_GGUF_MODELS, or place .gguf files under /run/media/<user>/<mount>/AI (removable drives on Linux)";
 
 fn model_paths_from_env() -> Option<Vec<PathBuf>> {
     let raw = env::var("OXIDIZE_TEST_GGUF_MODELS").ok()?;
@@ -43,11 +44,41 @@ fn discover_gguf_files_in_dir(dir: &Path) -> Option<Vec<PathBuf>> {
     Some(paths)
 }
 
+fn discover_gguf_under_run_media_ai() -> Option<Vec<PathBuf>> {
+    let media = Path::new("/run/media");
+    if !media.is_dir() {
+        return None;
+    }
+    let mut paths = Vec::new();
+    for user_entry in fs::read_dir(media).ok()?.filter_map(Result::ok) {
+        let user_path = user_entry.path();
+        if !user_path.is_dir() {
+            continue;
+        }
+        let mount_dirs = match fs::read_dir(&user_path) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+        for mount_entry in mount_dirs.filter_map(Result::ok) {
+            let ai = mount_entry.path().join("AI");
+            if let Some(mut found) = discover_gguf_files_in_dir(&ai) {
+                paths.append(&mut found);
+            }
+        }
+    }
+    if paths.is_empty() {
+        return None;
+    }
+    paths.sort();
+    paths.dedup();
+    Some(paths)
+}
+
 fn configured_model_paths() -> Option<Vec<PathBuf>> {
     if let Some(paths) = model_paths_from_env() {
         return Some(paths);
     }
-    discover_gguf_files_in_dir(Path::new(DEFAULT_LOCAL_GGUF_DIR))
+    discover_gguf_under_run_media_ai()
 }
 
 fn configured_compatibility_model_count() -> usize {
@@ -60,9 +91,7 @@ fn configured_compatibility_model_count() -> usize {
 #[test]
 fn real_gguf_models_load_consistently_across_loaders() {
     let Some(model_paths) = configured_model_paths() else {
-        eprintln!(
-            "skipping real GGUF integration test: set OXIDIZE_TEST_GGUF_MODELS or place .gguf files under {DEFAULT_LOCAL_GGUF_DIR}"
-        );
+        eprintln!("skipping real GGUF integration test: {SKIP_MODEL_HINT}");
         return;
     };
 
@@ -115,9 +144,7 @@ fn real_gguf_models_load_consistently_across_loaders() {
 #[test]
 fn real_gguf_models_compatibility_suite_covers_100_plus_models() {
     let Some(model_paths) = configured_model_paths() else {
-        eprintln!(
-            "skipping GGUF compatibility suite: set OXIDIZE_TEST_GGUF_MODELS or place .gguf files under {DEFAULT_LOCAL_GGUF_DIR}"
-        );
+        eprintln!("skipping GGUF compatibility suite: {SKIP_MODEL_HINT}");
         return;
     };
 
@@ -146,9 +173,7 @@ fn real_gguf_models_compatibility_suite_covers_100_plus_models() {
 #[test]
 fn real_gguf_models_emit_monotonic_progress_events() {
     let Some(model_paths) = configured_model_paths() else {
-        eprintln!(
-            "skipping real GGUF integration progress test: set OXIDIZE_TEST_GGUF_MODELS or place .gguf files under {DEFAULT_LOCAL_GGUF_DIR}"
-        );
+        eprintln!("skipping real GGUF integration progress test: {SKIP_MODEL_HINT}");
         return;
     };
 
