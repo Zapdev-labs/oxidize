@@ -19,7 +19,7 @@
 ### Clone and build
 
 ```bash
-git clone <your-fork-or-remote> llamas-cpp
+git clone https://github.com/Zapdev-labs/llamas-cpp llamas-cpp
 cd llamas-cpp
 make build
 ```
