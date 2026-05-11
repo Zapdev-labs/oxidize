@@ -1,10 +1,11 @@
 use std::env;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use oxidize_core::model_loader::{GgufModelLoader, ModelLoader, load_gguf_llama_cpp_baseline};
 
-const SKIP_MODEL_HINT: &str = "set OXIDIZE_TEST_GGUF_MODELS, or place .gguf files under /run/media/<user>/<mount>/AI (removable drives on Linux)";
+const SKIP_MODEL_HINT: &str = "set OXIDIZE_TEST_GGUF_MODELS, or place .gguf files under /run/media/<user>/<mount>/AI (searched recursively, e.g. AI/models/...)";
 
 fn model_paths_from_env() -> Option<Vec<PathBuf>> {
     let raw = env::var("OXIDIZE_TEST_GGUF_MODELS").ok()?;
@@ -18,30 +19,26 @@ fn model_paths_from_env() -> Option<Vec<PathBuf>> {
     if paths.is_empty() { None } else { Some(paths) }
 }
 
-fn discover_gguf_files_in_dir(dir: &Path) -> Option<Vec<PathBuf>> {
+fn collect_gguf_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
     if !dir.is_dir() {
-        return None;
+        return;
     }
-    let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
-        .ok()?
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let path = entry.path();
-            if !path.is_file() {
-                return None;
-            }
-            let is_gguf = path
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_gguf_files_recursive(&path, out);
+        } else if path.is_file()
+            && path
                 .extension()
                 .and_then(|ext| ext.to_str())
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"));
-            is_gguf.then_some(path)
-        })
-        .collect();
-    if paths.is_empty() {
-        return None;
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"))
+        {
+            out.push(path);
+        }
     }
-    paths.sort();
-    Some(paths)
 }
 
 fn discover_gguf_under_run_media_ai() -> Option<Vec<PathBuf>> {
@@ -61,9 +58,7 @@ fn discover_gguf_under_run_media_ai() -> Option<Vec<PathBuf>> {
         };
         for mount_entry in mount_dirs.filter_map(Result::ok) {
             let ai = mount_entry.path().join("AI");
-            if let Some(mut found) = discover_gguf_files_in_dir(&ai) {
-                paths.append(&mut found);
-            }
+            collect_gguf_files_recursive(&ai, &mut paths);
         }
     }
     if paths.is_empty() {
@@ -74,11 +69,43 @@ fn discover_gguf_under_run_media_ai() -> Option<Vec<PathBuf>> {
     Some(paths)
 }
 
-fn configured_model_paths() -> Option<Vec<PathBuf>> {
-    if let Some(paths) = model_paths_from_env() {
-        return Some(paths);
+fn discovery_max_bytes() -> u64 {
+    env::var("OXIDIZE_TEST_GGUF_MAX_BYTES")
+        .ok()
+        .and_then(|raw| raw.trim().parse().ok())
+        .unwrap_or(12 * 1024 * 1024 * 1024)
+}
+
+fn passes_auto_discovery_sanity(path: &Path, max_bytes: u64) -> bool {
+    let Ok(meta) = fs::metadata(path) else {
+        return false;
+    };
+    if meta.len() > max_bytes {
+        return false;
     }
-    discover_gguf_under_run_media_ai()
+    let Ok(mut file) = fs::File::open(path) else {
+        return false;
+    };
+    let mut magic = [0_u8; 4];
+    file.read_exact(&mut magic).is_ok() && magic == *b"GGUF"
+}
+
+fn model_paths_from_discovery_filtered() -> Option<Vec<PathBuf>> {
+    let candidates = discover_gguf_under_run_media_ai()?;
+    let max_bytes = discovery_max_bytes();
+    let filtered: Vec<PathBuf> = candidates
+        .into_iter()
+        .filter(|path| passes_auto_discovery_sanity(path, max_bytes))
+        .collect();
+    if filtered.is_empty() {
+        None
+    } else {
+        Some(filtered)
+    }
+}
+
+fn configured_model_paths_for_loader_tests() -> Option<Vec<PathBuf>> {
+    model_paths_from_env().or_else(model_paths_from_discovery_filtered)
 }
 
 fn configured_compatibility_model_count() -> usize {
@@ -90,7 +117,7 @@ fn configured_compatibility_model_count() -> usize {
 
 #[test]
 fn real_gguf_models_load_consistently_across_loaders() {
-    let Some(model_paths) = configured_model_paths() else {
+    let Some(model_paths) = configured_model_paths_for_loader_tests() else {
         eprintln!("skipping real GGUF integration test: {SKIP_MODEL_HINT}");
         return;
     };
@@ -143,8 +170,11 @@ fn real_gguf_models_load_consistently_across_loaders() {
 
 #[test]
 fn real_gguf_models_compatibility_suite_covers_100_plus_models() {
-    let Some(model_paths) = configured_model_paths() else {
-        eprintln!("skipping GGUF compatibility suite: {SKIP_MODEL_HINT}");
+    let Some(model_paths) = model_paths_from_env() else {
+        eprintln!(
+            "skipping GGUF compatibility suite: set OXIDIZE_TEST_GGUF_MODELS with {}+ model paths (not driven by /run/media auto-discovery)",
+            configured_compatibility_model_count()
+        );
         return;
     };
 
@@ -172,7 +202,7 @@ fn real_gguf_models_compatibility_suite_covers_100_plus_models() {
 
 #[test]
 fn real_gguf_models_emit_monotonic_progress_events() {
-    let Some(model_paths) = configured_model_paths() else {
+    let Some(model_paths) = configured_model_paths_for_loader_tests() else {
         eprintln!("skipping real GGUF integration progress test: {SKIP_MODEL_HINT}");
         return;
     };
