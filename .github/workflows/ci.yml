@@ -53,10 +53,10 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Build server image
-        run: docker build -f Dockerfile.server -t llamas-server:test .
+        run: docker build -f Dockerfile.server -t oxidize-server:test .
 
       - name: Build CLI image
-        run: docker build -f Dockerfile.cli -t llamas-cli:test .
+        run: docker build -f Dockerfile.cli -t oxidize-cli:test .
 
   benchmarks:
     name: Benchmarks and regression detection
@@ -78,7 +78,7 @@ jobs:
         run: python3 -m unittest scripts/test_ci_benchmark_dashboard.py
 
       - name: Run criterion benchmarks
-        run: cargo bench -p llamas-core --bench criterion -- --noplot
+        run: cargo bench -p oxidize-core --bench criterion -- --noplot
 
       - name: Detect benchmark regressions
         run: python3 scripts/ci_benchmark_regression.py

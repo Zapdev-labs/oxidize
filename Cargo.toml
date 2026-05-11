@@ -1,5 +1,5 @@
 [workspace]
-members = ["llamas-core", "llamas-cli", "llamas-server", "llamas-quantize", "llamas-py"]
+members = ["oxidize-core", "oxidize-cli", "oxidize-server", "oxidize-quantize", "oxidize-py"]
 resolver = "3"
 
 [workspace.package]

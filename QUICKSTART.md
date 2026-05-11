@@ -9,8 +9,8 @@
 ## Build
 
 ```bash
-git clone <your-fork-or-remote> llamas-cpp
-cd llamas-cpp
+git clone <your-fork-or-remote> oxidize
+cd oxidize
 make build
 ```
 
@@ -19,13 +19,13 @@ make build
 ### CLI single prompt
 
 ```bash
-cargo run -p llamas-cli -- --prompt "hello"
+cargo run -p oxidize-cli -- --prompt "hello"
 ```
 
 ### CLI with model + TPS tracking
 
 ```bash
-cargo run -p llamas-cli --release -- \
+cargo run -p oxidize-cli --release -- \
   --model /path/to/model.gguf \
   --prompt "Your prompt here" \
   --max-tokens 512 \
@@ -35,7 +35,7 @@ cargo run -p llamas-cli --release -- \
 **Example with your model:**
 
 ```bash
-cargo run -p llamas-cli --release -- \
+cargo run -p oxidize-cli --release -- \
   --model "/run/media/dih/8CEDA5F938E73A48/AI/models/HauhauCS/Qwen3.5-4B-Uncensored-HauhauCS-Aggressive/Qwen3.5-4B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf" \
   --prompt "Write a 3 page essay on why llama cpp is better than LM Studio" \
   --max-tokens 1500 \
@@ -56,13 +56,13 @@ generation stats: tokens=200 speed=4540.92 tok/s
 ### CLI chat mode
 
 ```bash
-cargo run -p llamas-cli -- --chat
+cargo run -p oxidize-cli -- --chat
 ```
 
 ### Server (OpenAI-compatible API)
 
 ```bash
-cargo run -p llamas-server -- --host 127.0.0.1 --port 8080
+cargo run -p oxidize-server -- --host 127.0.0.1 --port 8080
 ```
 
 Health check:
@@ -74,7 +74,7 @@ curl http://127.0.0.1:8080/healthz
 ### Quantization utility
 
 ```bash
-cargo run -p llamas-quantize -- \
+cargo run -p oxidize-quantize -- \
   --input /path/to/input.bin \
   --output /path/to/output.bin \
   --source F32 \
@@ -95,6 +95,6 @@ make lint
 - `make audit` - Run cargo-deny license/security audit
 - `make test` - Run workspace tests
 - `make build` - Build release binaries for all targets
-- `make wasm` - Build llamas-core with wasm-bindgen output
+- `make wasm` - Build oxidize-core with wasm-bindgen output
 - `make check` - Run fmt + lint + test
 - `make ci` - Run check + build

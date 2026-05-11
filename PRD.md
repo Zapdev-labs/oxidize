@@ -1,6 +1,6 @@
 # Product Requirements Document (PRD)
 
-## Project: llamas — A Rust-Based LLM Inference Engine
+## Project: oxidize — A Rust-Based LLM Inference Engine
 
 **Date:** April 30, 2026
 **Status:** Draft v0.1
@@ -55,7 +55,7 @@ Build a high-performance, dependency-light LLM inference engine in Rust that run
 - [x] **TODO-1.1:** Initialize Cargo workspace with workspace-level dependencies
   ```toml
   [workspace]
-  members = ["llamas-core", "llamas-cli", "llamas-server", "llamas-quantize"]
+  members = ["oxidize-core", "oxidize-cli", "oxidize-server", "oxidize-quantize"]
   resolver = "3"
   ```
 - [x] **TODO-1.2:** Set up CI/CD (GitHub Actions) for Linux, macOS, Windows builds
@@ -108,7 +108,7 @@ Build a high-performance, dependency-light LLM inference engine in Rust that run
 - [x] **TODO-3.3:** Add quantization from f16/f32 to all supported formats
 - [x] **TODO-3.4:** Implement block-wise quantization with per-block scales
 - [x] **TODO-3.5:** Add importance matrix support (IMatrix) for better quality
-- [x] **TODO-3.6:** Create quantization CLI tool (`llamas-quantize`)
+- [x] **TODO-3.6:** Create quantization CLI tool (`oxidize-quantize`)
 - [x] **TODO-3.7:** Add mixed quantization support (different types per layer)
 - [x] **TODO-3.8:** Validate output against llama.cpp reference implementation
 
@@ -292,7 +292,7 @@ pub trait Quantization {
 
 **Objective:** Command-line interface for inference
 
-- [x] **TODO-11.1:** Create `llamas-cli` binary
+- [x] **TODO-11.1:** Create `oxidize-cli` binary
 - [x] **TODO-11.2:** Implement argument parsing (`clap`)
   - Model path
   - Prompt (interactive, file, stdin)
@@ -319,7 +319,7 @@ pub trait Quantization {
 
 **Objective:** OpenAI-compatible HTTP API server
 
-- [x] **TODO-12.1:** Create `llamas-server` binary with `axum` or `actix-web`
+- [x] **TODO-12.1:** Create `oxidize-server` binary with `axum` or `actix-web`
 - [x] **TODO-12.2:** Implement OpenAI-compatible endpoints:
   - `POST /v1/chat/completions`
   - `POST /v1/completions`
@@ -344,7 +344,7 @@ pub trait Quantization {
 **Objective:** Python interface via PyO3
 
 - [x] **TODO-13.1:** Set up `pyo3` workspace
-- [x] **TODO-13.2:** Create `llamas` Python package
+- [x] **TODO-13.2:** Create `oxidize` Python package
 - [x] **TODO-13.3:** Implement `Llama` class with methods:
   - `__init__`
   - `generate`

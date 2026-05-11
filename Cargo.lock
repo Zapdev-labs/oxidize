@@ -1007,70 +1007,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
-name = "llamas-cli"
-version = "0.1.0"
-dependencies = [
- "assert_cmd",
- "clap",
- "futures-core",
- "llamas-core",
- "rand",
- "tracing",
-]
-
-[[package]]
-name = "llamas-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "criterion",
- "cublas-sys",
- "cust",
- "futures-core",
- "memmap2",
- "metal",
- "rayon",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "wasm-bindgen",
- "wgpu",
-]
-
-[[package]]
-name = "llamas-py"
-version = "0.1.0"
-dependencies = [
- "futures-core",
- "llamas-core",
- "pyo3",
-]
-
-[[package]]
-name = "llamas-quantize"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "llamas-core",
-]
-
-[[package]]
-name = "llamas-server"
-version = "0.1.0"
-dependencies = [
- "axum",
- "clap",
- "futures-util",
- "serde",
- "serde_json",
- "tokio",
- "tower",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1249,6 +1185,70 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7bb71e1b3fa6ca1c61f383464aaf2bb0e2f8e772a1f01d486832464de363b951"
 dependencies = [
  "num-traits",
+]
+
+[[package]]
+name = "oxidize-cli"
+version = "0.1.0"
+dependencies = [
+ "assert_cmd",
+ "clap",
+ "futures-core",
+ "oxidize-core",
+ "rand",
+ "tracing",
+]
+
+[[package]]
+name = "oxidize-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "criterion",
+ "cublas-sys",
+ "cust",
+ "futures-core",
+ "memmap2",
+ "metal",
+ "rayon",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "wasm-bindgen",
+ "wgpu",
+]
+
+[[package]]
+name = "oxidize-py"
+version = "0.1.0"
+dependencies = [
+ "futures-core",
+ "oxidize-core",
+ "pyo3",
+]
+
+[[package]]
+name = "oxidize-quantize"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "oxidize-core",
+]
+
+[[package]]
+name = "oxidize-server"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "clap",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

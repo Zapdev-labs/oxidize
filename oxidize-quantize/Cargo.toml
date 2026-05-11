@@ -1,0 +1,10 @@
+[package]
+name = "oxidize-quantize"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+oxidize-core = { path = "../oxidize-core" }

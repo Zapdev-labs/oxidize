@@ -1,4 +1,4 @@
-# Contributing to llamas-cpp
+# Contributing to oxidize
 
 Thanks for contributing.
 

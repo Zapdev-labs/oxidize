@@ -1,0 +1,14 @@
+[package]
+name = "oxidize-py"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[lib]
+name = "oxidize"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+futures-core = "0.3"
+oxidize-core = { path = "../oxidize-core" }
+pyo3.workspace = true

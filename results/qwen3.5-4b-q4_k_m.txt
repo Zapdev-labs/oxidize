@@ -1,0 +1,8 @@
+load progress: 0% stage=starting bytes=0/2707513696
+load progress: 35% stage=mapping bytes=902504565/2707513696
+load progress: 85% stage=parsing bytes=1805009130/2707513696
+load progress: 100% stage=complete bytes=2707513696/2707513696
+offload plan: gpu_layers=0/32 gpu_tensors=0 cpu_tensors=426
+InferenceConfig: vocab=248320, context=262144, layers=32, hidden=2560, intermediate=9216, heads=16, kv_heads=4, kv_head_dim=256, eps=0.000001, theta=10000000
+
+generation stats: tokens=1 speed=0.08 tok/s

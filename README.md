@@ -1,12 +1,12 @@
-# llamas-cpp
+# oxidize
 
-`llamas-cpp` is a Rust workspace for local LLM tooling:
+`oxidize` is a Rust workspace for local LLM tooling:
 
-- `llamas-core`: model loading, quantization, tensor/sampling primitives, and optional WASM support
-- `llamas-cli`: local CLI for prompt runs, chat mode, model planning, and profiling hooks
-- `llamas-server`: OpenAI-compatible HTTP API surface
-- `llamas-quantize`: file quantization utility
-- `llamas-py`: Python bindings built with `pyo3`
+- `oxidize-core`: model loading, quantization, tensor/sampling primitives, and optional WASM support
+- `oxidize-cli`: local CLI for prompt runs, chat mode, model planning, and profiling hooks
+- `oxidize-server`: OpenAI-compatible HTTP API surface
+- `oxidize-quantize`: file quantization utility
+- `oxidize-py`: Python bindings built with `pyo3`
 
 ## Quick start
 
@@ -19,8 +19,8 @@
 ### Clone and build
 
 ```bash
-git clone https://github.com/Zapdev-labs/llamas-cpp llamas-cpp
-cd llamas-cpp
+git clone https://github.com/Zapdev-labs/llamas-cpp.git oxidize
+cd oxidize
 make build
 ```
 
@@ -38,17 +38,17 @@ make fmt
 make check
 ```
 
-## Release announcement: llamas-cpp 0.1.0
+## Release announcement: oxidize 0.1.0
 
-Today we are announcing `llamas-cpp` `0.1.0`, the first stable workspace release for local-first LLM workflows in Rust.
+Today we are announcing `oxidize` `0.1.0`, the first stable workspace release for local-first LLM workflows in Rust.
 
 This release brings together a complete core-to-interface stack:
 
-- `llamas-core` for model loading, quantization primitives, and generation
-- `llamas-cli` for prompt and chat runs with profiling hooks
-- `llamas-server` for OpenAI-compatible HTTP endpoints
-- `llamas-py` for Python integration
-- `llamas-quantize` for offline model conversion
+- `oxidize-core` for model loading, quantization primitives, and generation
+- `oxidize-cli` for prompt and chat runs with profiling hooks
+- `oxidize-server` for OpenAI-compatible HTTP endpoints
+- `oxidize-py` for Python integration
+- `oxidize-quantize` for offline model conversion
 
 What this means for early users:
 
@@ -63,25 +63,25 @@ Thank you to everyone testing early builds and sharing feedback. `0.1.0` is our 
 ### CLI single prompt
 
 ```bash
-cargo run -p llamas-cli -- --prompt "hello"
+cargo run -p oxidize-cli -- --prompt "hello"
 ```
 
 ### CLI chat mode
 
 ```bash
-cargo run -p llamas-cli -- --chat
+cargo run -p oxidize-cli -- --chat
 ```
 
 ### CLI with model loading + GPU planning
 
 ```bash
-cargo run -p llamas-cli -- --model /path/to/model.gguf --n-gpu-layers 20 --gpus 2 --parallelism pipeline
+cargo run -p oxidize-cli -- --model /path/to/model.gguf --n-gpu-layers 20 --gpus 2 --parallelism pipeline
 ```
 
 ### Server (OpenAI-compatible endpoints)
 
 ```bash
-cargo run -p llamas-server -- --host 127.0.0.1 --port 8080
+cargo run -p oxidize-server -- --host 127.0.0.1 --port 8080
 ```
 
 Health checks:
@@ -94,7 +94,7 @@ curl http://127.0.0.1:8080/openapi.json
 ### Quantization utility
 
 ```bash
-cargo run -p llamas-quantize -- \
+cargo run -p oxidize-quantize -- \
   --input /path/to/input.bin \
   --output /path/to/output.bin \
   --source F32 \
@@ -111,7 +111,7 @@ cargo run -p llamas-quantize -- \
 Example:
 
 ```bash
-cargo run -p llamas-quantize -- \
+cargo run -p oxidize-quantize -- \
   --input /models/model-f32.bin \
   --output /models/model-q4_0.bin \
   --source F32 \
@@ -123,7 +123,7 @@ cargo run -p llamas-quantize -- \
 ### Basic inference
 
 ```bash
-cargo run -p llamas-cli -- \
+cargo run -p oxidize-cli -- \
   --model /path/to/model.gguf \
   --prompt "Summarize Rust ownership in one paragraph."
 ```
@@ -131,7 +131,7 @@ cargo run -p llamas-cli -- \
 ### Chat completion
 
 ```bash
-cargo run -p llamas-cli -- \
+cargo run -p oxidize-cli -- \
   --model /path/to/model.gguf \
   --chat
 ```
@@ -151,7 +151,7 @@ curl -N http://127.0.0.1:8080/v1/chat/completions \
 ### Batch processing
 
 ```bash
-cargo run -p llamas-cli -- \
+cargo run -p oxidize-cli -- \
   --model /path/to/model.gguf \
   --batch-size 4 \
   --prompt "Classify: Rust is memory-safe."
@@ -160,7 +160,7 @@ cargo run -p llamas-cli -- \
 ### Custom sampling
 
 ```bash
-cargo run -p llamas-cli -- \
+cargo run -p oxidize-cli -- \
   --model /path/to/model.gguf \
   --prompt "Generate a release note title." \
   --temperature 0.7 \
@@ -193,17 +193,17 @@ Use this loop for predictable, low-risk tuning:
 
 1. Start with a stable baseline and record tokens/sec and latency:
    ```bash
-   cargo run -p llamas-cli -- --model /path/to/model.gguf --prompt "benchmark prompt"
+   cargo run -p oxidize-cli -- --model /path/to/model.gguf --prompt "benchmark prompt"
    ```
 2. Profile one run to find bottlenecks:
    ```bash
-   cargo run -p llamas-cli -- --model /path/to/model.gguf --prompt "benchmark prompt" --profile perf
+   cargo run -p oxidize-cli -- --model /path/to/model.gguf --prompt "benchmark prompt" --profile perf
    ```
 3. Increase GPU offload gradually (`--n-gpu-layers`) and compare throughput after each step.
 4. If using multiple GPUs, test both parallel strategies and keep the faster one for your hardware:
    ```bash
-   cargo run -p llamas-cli -- --model /path/to/model.gguf --gpus 2 --n-gpu-layers 20 --parallelism pipeline
-   cargo run -p llamas-cli -- --model /path/to/model.gguf --gpus 2 --n-gpu-layers 20 --parallelism tensor
+   cargo run -p oxidize-cli -- --model /path/to/model.gguf --gpus 2 --n-gpu-layers 20 --parallelism pipeline
+   cargo run -p oxidize-cli -- --model /path/to/model.gguf --gpus 2 --n-gpu-layers 20 --parallelism tensor
    ```
 5. Quantize only after offload strategy is stable; then re-run the same benchmark prompts and check quality.
 
@@ -218,7 +218,7 @@ Practical tuning priorities:
 
 - **Model path errors:** verify the model file exists and is readable, then rerun with an absolute path to avoid shell-relative path mistakes.
 - **Slow or no GPU acceleration:** increase `--n-gpu-layers` gradually and compare throughput after each change; if speed does not improve, fall back to CPU and confirm baseline correctness.
-- **Server auth failures (`401`):** set `LLAMAS_API_KEY` before starting `llamas-server`, then send the same value with `x-api-key` or `Authorization: Bearer <key>`.
+- **Server auth failures (`401`):** set `OXIDIZE_API_KEY` before starting `oxidize-server`, then send the same value with `x-api-key` or `Authorization: Bearer <key>`.
 - **WASM build failures:** install the wasm target (`rustup target add wasm32-unknown-unknown`) and ensure `wasm-bindgen` is available, then run `make wasm` again.
 - **Unexpected output quality after quantization:** keep the original model, benchmark both variants on representative prompts, and move to a less aggressive target if quality regresses.
 
@@ -232,23 +232,23 @@ Practical tuning priorities:
 
 ## Environment variables
 
-- `LLAMAS_API_KEY`: optional API key for `llamas-server` `/v1/*` routes. Supports `x-api-key` or `Authorization: Bearer <key>`.
-- `LLAMAS_PROFILE_CHILD`: internal flag used by `llamas-cli` profiling flow.
+- `OXIDIZE_API_KEY`: optional API key for `oxidize-server` `/v1/*` routes. Supports `x-api-key` or `Authorization: Bearer <key>`.
+- `OXIDIZE_PROFILE_CHILD`: internal flag used by `oxidize-cli` profiling flow.
 
 ## Architecture
 
-`llamas-cpp` is organized as a layered workspace:
+`oxidize` is organized as a layered workspace:
 
-- **Core compute layer (`llamas-core`)**: owns GGUF parsing, tensor + quantization primitives, model loading, token generation loop, and backend-specific execution paths (CPU, CUDA, Metal, WASM).
-- **Interface layer (`llamas-cli`, `llamas-server`, `llamas-py`)**: exposes core capabilities through a CLI, OpenAI-compatible HTTP routes, and Python bindings without duplicating inference logic.
-- **Utility layer (`llamas-quantize`)**: handles offline model weight conversion and quantization workflows.
+- **Core compute layer (`oxidize-core`)**: owns GGUF parsing, tensor + quantization primitives, model loading, token generation loop, and backend-specific execution paths (CPU, CUDA, Metal, WASM).
+- **Interface layer (`oxidize-cli`, `oxidize-server`, `oxidize-py`)**: exposes core capabilities through a CLI, OpenAI-compatible HTTP routes, and Python bindings without duplicating inference logic.
+- **Utility layer (`oxidize-quantize`)**: handles offline model weight conversion and quantization workflows.
 
-At runtime, request flow is: input prompt -> interface crate -> `llamas-core` model/session setup -> token generation + sampling -> streamed or buffered output to the caller.
+At runtime, request flow is: input prompt -> interface crate -> `oxidize-core` model/session setup -> token generation + sampling -> streamed or buffered output to the caller.
 
 Design goals:
 
-- Keep inference and model logic centralized in `llamas-core` so all frontends share the same behavior.
-- Keep transport/UI concerns at the edge crates (`llamas-cli`, `llamas-server`, `llamas-py`) for maintainability.
+- Keep inference and model logic centralized in `oxidize-core` so all frontends share the same behavior.
+- Keep transport/UI concerns at the edge crates (`oxidize-cli`, `oxidize-server`, `oxidize-py`) for maintainability.
 - Support multiple acceleration targets behind stable core APIs to keep feature parity across platforms.
 
 ## License
