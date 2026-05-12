@@ -50,6 +50,12 @@ struct Args {
     top_p: Option<f32>,
     #[arg(long)]
     top_k: Option<usize>,
+    #[arg(long, default_value_t = false)]
+    layer_wise: bool,
+    #[arg(long, default_value_t = 1)]
+    layer_cache: usize,
+    #[arg(long, default_value_t = false)]
+    turboquant: bool,
 }
 
 fn greeting(prompt: &str) -> String {
@@ -368,9 +374,9 @@ fn write_generated_response_with_clock<W: Write, F: FnMut() -> Instant>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn generate_with_model<W: Write, M: Model>(
+fn generate_with_model<W: Write>(
     prompt: &str,
-    model: &mut M,
+    model: &mut dyn Model,
     tokenizer: &LoadedTokenizer,
     max_tokens: usize,
     temperature: f32,
@@ -720,11 +726,21 @@ fn main() {
 
                 let stdout = io::stdout();
                 let mut writer = stdout.lock();
-                let mut model = match InferenceModel::load_from_gguf(&mapped, config) {
-                    Ok(m) => m,
-                    Err(error) => {
-                        eprintln!("failed to load model weights: {error}");
-                        return;
+                let mut model: Box<dyn Model> = if args.layer_wise {
+                    match oxidize_core::layer_wise::LayerWiseModel::load_from_gguf(&mapped, config, args.layer_cache) {
+                        Ok(m) => Box::new(m),
+                        Err(error) => {
+                            eprintln!("failed to load layer-wise model: {error}");
+                            return;
+                        }
+                    }
+                } else {
+                    match InferenceModel::load_from_gguf(&mapped, config) {
+                        Ok(m) => Box::new(m),
+                        Err(error) => {
+                            eprintln!("failed to load model weights: {error}");
+                            return;
+                        }
                     }
                 };
 

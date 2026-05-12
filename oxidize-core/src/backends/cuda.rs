@@ -176,7 +176,7 @@ pub const GEMV_KERNEL_NAME: &str = "gemv_f32_kernel";
 pub const GEMV_Q8_0_KERNEL_NAME: &str = "gemv_q8_0_f32_kernel";
 
 #[cfg(feature = "cuda")]
-const GEMV_F32_PTX: &str = include_str!("../kernels/gemv_f32.ptx");
+const GEMV_F32_PTX: &str = include_str!("../../kernels/gemv_f32.ptx");
 
 #[cfg(feature = "cuda")]
 pub fn gemv_f32_cuda(

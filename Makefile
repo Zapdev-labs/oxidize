@@ -8,7 +8,7 @@ help:
 	@echo "  make lint   - Run clippy with warnings denied"
 	@echo "  make audit  - Run cargo-deny license/security audit"
 	@echo "  make test   - Run workspace tests"
-	@echo "  make build  - Build release binaries for all targets"
+	@echo "  make build  - Build release binaries for workspace crates"
 	@echo "  make wasm   - Build oxidize-core with wasm-bindgen output"
 	@echo "  make check  - Run fmt + lint + test"
 	@echo "  make ci     - Run check + build"
@@ -26,7 +26,7 @@ test:
 	cargo test --workspace --all-targets
 
 build:
-	cargo build --workspace --all-targets --release
+	cargo build --workspace --release
 
 wasm:
 	cargo build -p oxidize-core --target wasm32-unknown-unknown --release --features wasm

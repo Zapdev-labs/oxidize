@@ -43,7 +43,7 @@ jobs:
         run: cargo test --workspace --all-targets
 
       - name: Build
-        run: cargo build --workspace --all-targets --release
+        run: cargo build --workspace --release
 
   docker:
     name: Docker build smoke tests

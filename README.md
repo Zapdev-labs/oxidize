@@ -224,7 +224,7 @@ Practical tuning priorities:
 
 ## Workspace commands
 
-- Build all targets (release): `make build`
+- Build workspace crates (release): `make build`
 - Test all targets: `make test`
 - Lint with denied warnings: `make lint`
 - Format check: `make fmt`

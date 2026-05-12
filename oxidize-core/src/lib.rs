@@ -22,24 +22,49 @@ use serde::{Deserialize, Serialize};
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
+pub use futures_core::Stream;
+
+#[path = "util/benchmark_suite.rs"]
 pub mod benchmark_suite;
+#[path = "backends/cuda.rs"]
 pub mod cuda;
+#[path = "model/generation.rs"]
 pub mod generation;
+#[path = "format/gguf.rs"]
 pub mod gguf;
+#[path = "model/inference.rs"]
 pub mod inference;
+#[path = "compute/kv_cache.rs"]
 pub mod kv_cache;
+#[path = "model/layer_wise.rs"]
+pub mod layer_wise;
+#[path = "model/llama.rs"]
 pub mod llama;
+#[path = "model/lora.rs"]
 pub mod lora;
+#[path = "backends/metal.rs"]
 pub mod metal;
+#[path = "model/model.rs"]
 pub mod model;
+#[path = "model/loader.rs"]
 pub mod model_loader;
+#[path = "model/offload.rs"]
 pub mod offload;
+#[path = "compute/quantization.rs"]
 pub mod quantization;
+#[path = "model/sampling.rs"]
 pub mod sampling;
+#[path = "compute/simd.rs"]
 pub mod simd;
+#[path = "compute/tensor.rs"]
 pub mod tensor;
+#[path = "format/tokenizer.rs"]
 pub mod tokenizer;
+#[path = "compute/turboquant.rs"]
+pub mod turboquant;
+#[path = "util/web_worker.rs"]
 pub mod web_worker;
+#[path = "backends/webgpu.rs"]
 pub mod webgpu;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

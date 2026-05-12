@@ -6,7 +6,7 @@ const PAGE_BYTES: usize = 16384;
 const PAGE_BYTES: usize = 4096;
 pub const GEMV_KERNEL_NAME: &str = "gemv_f32_kernel";
 pub const GEMV_Q8_0_KERNEL_NAME: &str = "gemv_q8_0_f32_kernel";
-const GEMV_F32_MSL: &str = include_str!("../kernels/gemv_f32.metal");
+const GEMV_F32_MSL: &str = include_str!("../../kernels/gemv_f32.metal");
 const GEMV_MPS_MIN_WORK_ITEMS: usize = 4096;
 const GEMM_MPS_MIN_WORK_ITEMS: usize = 65_536;
 

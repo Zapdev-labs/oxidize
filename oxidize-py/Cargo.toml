@@ -9,6 +9,5 @@ name = "oxidize"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-futures-core = "0.3"
 oxidize-core = { path = "../oxidize-core" }
 pyo3.workspace = true
