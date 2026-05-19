@@ -19,7 +19,7 @@
 ### Clone and build
 
 ```bash
-git clone https://github.com/Zapdev-labs/llamas-cpp.git oxidize
+git clone https://github.com/Zapdev-labs/oxidize.git oxidize
 cd oxidize
 make build
 ```
