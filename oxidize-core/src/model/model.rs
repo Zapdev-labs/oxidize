@@ -33,6 +33,21 @@ pub trait Model {
     fn layer_count(&self) -> usize;
 }
 
+impl Model for Box<dyn Model> {
+    fn forward(&mut self, tokens: &[Token], session: &mut Session) -> Result<Logits, ModelError> {
+        (**self).forward(tokens, session)
+    }
+    fn vocab_size(&self) -> usize {
+        (**self).vocab_size()
+    }
+    fn context_size(&self) -> usize {
+        (**self).context_size()
+    }
+    fn layer_count(&self) -> usize {
+        (**self).layer_count()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModelError {
     EmptyInput,

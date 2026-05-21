@@ -2,6 +2,7 @@ use crate::gguf::{GgufQuantizationType, MappedGgufFile};
 use crate::kv_cache::{KvCache, KvCacheConfig};
 use crate::model::{Logits, Model, ModelError, Session, Token};
 use crate::quantization::{dequantize_scalar, quantized_size};
+use crate::flash_attention::flash_attention_decode_f32;
 use crate::tensor::{
     DType, apply_rope_f32, apply_swiglu_f32, extract_bits, f16_le_to_f32, gemv_f32_transposed,
     gemv_quantized_f32_transposed, rms_norm_f32, scaled_dot_product_attention_f32,
@@ -36,7 +37,7 @@ impl InferenceConfig {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-enum WeightStorage {
+pub enum WeightStorage {
     F32(Vec<f32>),
     Quantized(GgufQuantizationType, Vec<u8>),
 }
@@ -48,14 +49,14 @@ impl Default for WeightStorage {
 }
 
 impl WeightStorage {
-    fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         match self {
             WeightStorage::F32(v) => v.is_empty(),
             WeightStorage::Quantized(_, v) => v.is_empty(),
         }
     }
 
-    fn output_dim(&self, input_dim: usize) -> usize {
+    pub fn output_dim(&self, input_dim: usize) -> usize {
         match self {
             WeightStorage::F32(v) => v.len() / input_dim,
             WeightStorage::Quantized(qtype, v) => {
@@ -832,25 +833,18 @@ impl InferenceModel {
                         .set(layer_idx, pos, &k_vec, &v_vec)
                         .map_err(|e| ModelError::InferenceFailed(format!("kv set: {:?}", e)))?;
 
-                    // retrieve full key/value sequence up to pos
+                    // retrieve full key/value sequence up to pos in one copy
                     let seq_len = pos + 1;
                     let mut key_cache = vec![0.0_f32; seq_len * kv_len];
                     let mut value_cache = vec![0.0_f32; seq_len * kv_len];
-                    for p in 0..seq_len {
-                        let k_off = p * kv_len;
-                        self.kv_cache
-                            .get_key(layer_idx, p, &mut key_cache[k_off..k_off + kv_len])
-                            .map_err(|e| {
-                                ModelError::InferenceFailed(format!("kv get_key: {:?}", e))
-                            })?;
-                        self.kv_cache
-                            .get_value(layer_idx, p, &mut value_cache[k_off..k_off + kv_len])
-                            .map_err(|e| {
-                                ModelError::InferenceFailed(format!("kv get_value: {:?}", e))
-                            })?;
-                    }
+                    self.kv_cache
+                        .copy_layer_keys(layer_idx, seq_len, &mut key_cache)
+                        .map_err(|e| ModelError::InferenceFailed(format!("kv copy keys: {:?}", e)))?;
+                    self.kv_cache
+                        .copy_layer_values(layer_idx, seq_len, &mut value_cache)
+                        .map_err(|e| ModelError::InferenceFailed(format!("kv copy values: {:?}", e)))?;
 
-                    // compute attention per head
+                    // compute attention per head using flash attention decode
                     let mut attn_result = vec![0.0_f32; q_len_used];
                     let actual_kv_group_size = q_heads
                         .checked_div(kv_heads)
@@ -865,19 +859,6 @@ impl InferenceModel {
                         }
                         let q_head = &q[q_head_start..q_head_end];
 
-                        let mut key_seq = vec![0.0_f32; seq_len * kv_head_dim];
-                        let mut value_seq = vec![0.0_f32; seq_len * kv_head_dim];
-                        for p in 0..seq_len {
-                            let src_off = p * kv_len + kv_head * kv_head_dim;
-                            let dst_off = p * kv_head_dim;
-                            if src_off + kv_head_dim <= key_cache.len() {
-                                key_seq[dst_off..dst_off + kv_head_dim]
-                                    .copy_from_slice(&key_cache[src_off..src_off + kv_head_dim]);
-                                value_seq[dst_off..dst_off + kv_head_dim]
-                                    .copy_from_slice(&value_cache[src_off..src_off + kv_head_dim]);
-                            }
-                        }
-
                         // In MLA-style architectures, Q may have larger head_dim than KV.
                         let q_head_for_attn = if q_head_dim > kv_head_dim {
                             &q_head[..kv_head_dim]
@@ -886,15 +867,17 @@ impl InferenceModel {
                         };
 
                         let mut out_head = vec![0.0_f32; kv_head_dim];
-                        scaled_dot_product_attention_f32(
+                        flash_attention_decode_f32(
                             q_head_for_attn,
-                            &key_seq,
-                            &value_seq,
+                            &key_cache,
+                            &value_cache,
                             seq_len,
                             kv_head_dim,
+                            kv_len,
+                            kv_head,
                             &mut out_head,
                         )
-                        .map_err(|e| ModelError::InferenceFailed(format!("attention: {:?}", e)))?;
+                        .map_err(|e| ModelError::InferenceFailed(format!("flash attention: {:?}", e)))?;
 
                         let write_start = head * kv_head_dim;
                         if write_start + out_head.len() <= attn_result.len() {

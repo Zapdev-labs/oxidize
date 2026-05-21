@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::Path;
+use std::sync::Arc;
 
 use memmap2::Mmap;
 use thiserror::Error;
@@ -18,10 +19,16 @@ pub struct GgufFile {
     pub data_section_start: u64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MappedGgufFile {
-    mmap: Mmap,
+    mmap: Arc<Mmap>,
     parsed: GgufFile,
+}
+
+impl PartialEq for MappedGgufFile {
+    fn eq(&self, other: &Self) -> bool {
+        self.parsed == other.parsed
+    }
 }
 
 impl MappedGgufFile {
@@ -252,7 +259,7 @@ pub fn load_mapped_gguf<P: AsRef<Path>>(path: P) -> Result<MappedGgufFile, GgufP
     // parsed metadata is exposed from MappedGgufFile.
     let mmap = unsafe { Mmap::map(&file)? };
     let parsed = parse_gguf(&mmap)?;
-    Ok(MappedGgufFile { mmap, parsed })
+    Ok(MappedGgufFile { mmap: Arc::new(mmap), parsed })
 }
 
 pub fn parse_gguf(bytes: &[u8]) -> Result<GgufFile, GgufParseError> {

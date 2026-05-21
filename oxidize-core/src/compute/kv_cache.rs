@@ -241,6 +241,74 @@ impl KvCache {
         Ok(())
     }
 
+    /// Copy all keys for positions [0, seq_len) in a layer into a contiguous output buffer.
+    /// Output layout: [position][head][head_dim] — seq_len * token_size elements.
+    pub fn copy_layer_keys(
+        &self,
+        layer: usize,
+        seq_len: usize,
+        out: &mut [f32],
+    ) -> Result<(), KvCacheError> {
+        self.validate_layer(layer)?;
+        let token_size = self.config.token_size();
+        let expected = seq_len.saturating_mul(token_size);
+        if out.len() != expected {
+            return Err(KvCacheError::ValueLengthMismatch {
+                expected,
+                actual: out.len(),
+            });
+        }
+        for p in 0..seq_len {
+            if !self.position_available(p) {
+                continue;
+            }
+            let physical_position = self.physical_position(p);
+            let out_off = p * token_size;
+            read_storage(
+                &self.key,
+                &self.config,
+                layer,
+                physical_position,
+                &mut out[out_off..out_off + token_size],
+            );
+        }
+        Ok(())
+    }
+
+    /// Copy all values for positions [0, seq_len) in a layer into a contiguous output buffer.
+    /// Output layout: [position][head][head_dim] — seq_len * token_size elements.
+    pub fn copy_layer_values(
+        &self,
+        layer: usize,
+        seq_len: usize,
+        out: &mut [f32],
+    ) -> Result<(), KvCacheError> {
+        self.validate_layer(layer)?;
+        let token_size = self.config.token_size();
+        let expected = seq_len.saturating_mul(token_size);
+        if out.len() != expected {
+            return Err(KvCacheError::ValueLengthMismatch {
+                expected,
+                actual: out.len(),
+            });
+        }
+        for p in 0..seq_len {
+            if !self.position_available(p) {
+                continue;
+            }
+            let physical_position = self.physical_position(p);
+            let out_off = p * token_size;
+            read_storage(
+                &self.value,
+                &self.config,
+                layer,
+                physical_position,
+                &mut out[out_off..out_off + token_size],
+            );
+        }
+        Ok(())
+    }
+
     pub fn bytes_per_tensor(&self) -> usize {
         match &self.key {
             KvStorage::F32(data) => data.len() * std::mem::size_of::<f32>(),

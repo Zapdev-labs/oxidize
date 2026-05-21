@@ -86,7 +86,7 @@ impl TurboQuantData {
     pub fn gemv(input: &[f32], tq: &TurboQuantData, out: &mut [f32]) {
         let block_size = TURBOQUANT_BLOCK_SIZE;
         let bits = if tq.qtype == TurboQuantType::Int4 { 4 } else { 8 };
-        let max_val = (1 << (bits - 1)) - 1) as f32;
+        let max_val = ((1 << (bits - 1)) - 1) as f32;
         let blocks_per_row = (tq.cols + block_size - 1) / block_size;
         assert_eq!(input.len(), tq.cols);
         assert_eq!(out.len(), tq.rows);

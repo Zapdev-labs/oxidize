@@ -32,6 +32,8 @@ pub mod cuda;
 pub mod generation;
 #[path = "format/gguf.rs"]
 pub mod gguf;
+#[path = "format/safetensors.rs"]
+pub mod safetensors;
 #[path = "model/inference.rs"]
 pub mod inference;
 #[path = "compute/kv_cache.rs"]
@@ -54,6 +56,8 @@ pub mod offload;
 pub mod quantization;
 #[path = "model/sampling.rs"]
 pub mod sampling;
+#[path = "compute/flash_attention.rs"]
+pub mod flash_attention;
 #[path = "compute/simd.rs"]
 pub mod simd;
 #[path = "compute/tensor.rs"]

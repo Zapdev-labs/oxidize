@@ -217,7 +217,8 @@ impl LayerWiseModel {
 
         let mut ssm_states = Vec::with_capacity(config.layer_count);
         let mut ssm_conv_buffers = Vec::with_capacity(config.layer_count);
-        for _ in 0..config.layer_count {
+        let layer_count = config.layer_count;
+        for _ in 0..layer_count {
             ssm_states.push(vec![0.0_f32; 1]);
             ssm_conv_buffers.push(Vec::new());
         }
@@ -233,7 +234,7 @@ impl LayerWiseModel {
             kv_cache,
             ssm_states,
             ssm_conv_buffers,
-            cache: LayerCache::new(layer_cache_size, config.layer_count),
+            cache: LayerCache::new(layer_cache_size, layer_count),
         })
     }
 

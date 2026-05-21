@@ -374,9 +374,9 @@ fn write_generated_response_with_clock<W: Write, F: FnMut() -> Instant>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn generate_with_model<W: Write>(
+fn generate_with_model<W: Write, M: Model>(
     prompt: &str,
-    model: &mut dyn Model,
+    model: &mut M,
     tokenizer: &LoadedTokenizer,
     max_tokens: usize,
     temperature: f32,
