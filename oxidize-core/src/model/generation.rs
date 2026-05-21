@@ -1,4 +1,3 @@
-use crate::model::{Model, ModelError, Session, Token};
 use crate::dflash::DFlashDraftModel;
 use crate::model::{Model, ModelError, Session, Token};
 use crate::sampling::{SamplingConfig, SamplingError, sample, speculative_decode};
