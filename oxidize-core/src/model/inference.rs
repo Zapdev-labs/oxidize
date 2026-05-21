@@ -5,7 +5,7 @@ use crate::quantization::{dequantize_scalar, quantized_size};
 use crate::flash_attention::flash_attention_decode_f32;
 use crate::tensor::{
     DType, apply_rope_f32, apply_swiglu_f32, extract_bits, f16_le_to_f32, gemv_f32_transposed,
-    gemv_quantized_f32_transposed, rms_norm_f32, scaled_dot_product_attention_f32,
+    gemv_quantized_f32_transposed, rms_norm_f32,
 };
 
 #[derive(Debug, Clone, PartialEq)]

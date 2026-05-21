@@ -1,6 +1,6 @@
 use crate::tensor::DType;
 use memmap2::Mmap;
-use safetensors::tensor::{SafeTensors, TensorView};
+use safetensors::tensor::SafeTensors;
 use std::fs::File;
 use std::path::Path;
 use thiserror::Error;
@@ -59,7 +59,7 @@ pub fn load_mapped_safetensors<P: AsRef<Path>>(
     let header_len = u64::from_le_bytes([
         mmap[0], mmap[1], mmap[2], mmap[3], mmap[4], mmap[5], mmap[6], mmap[7],
     ]) as usize;
-    let data_start = 8 + header_len;
+    let _data_start = 8 + header_len;
 
     let mut tensors = Vec::with_capacity(st.len());
     for (name, view) in st.tensors() {

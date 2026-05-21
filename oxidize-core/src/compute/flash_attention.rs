@@ -30,19 +30,19 @@ unsafe fn dot_product_f32_avx2(a: &[f32], b: &[f32]) -> f32 {
 
     let chunks = len / 8;
     for i in 0..chunks {
-        let va = _mm256_loadu_ps(a.as_ptr().add(i * 8));
-        let vb = _mm256_loadu_ps(b.as_ptr().add(i * 8));
-        sum = _mm256_fmadd_ps(va, vb, sum);
+        let va = unsafe { _mm256_loadu_ps(a.as_ptr().add(i * 8)) };
+        let vb = unsafe { _mm256_loadu_ps(b.as_ptr().add(i * 8)) };
+        sum = unsafe { _mm256_fmadd_ps(va, vb, sum) };
     }
 
     // Horizontal sum of 8 floats
     let mut result = [0.0_f32; 8];
-    _mm256_storeu_ps(result.as_mut_ptr(), sum);
+    unsafe { _mm256_storeu_ps(result.as_mut_ptr(), sum) };
     let mut total = result.iter().sum::<f32>();
 
     // Tail
     for i in (chunks * 8)..len {
-        total += a.get_unchecked(i) * b.get_unchecked(i);
+        total += unsafe { a.get_unchecked(i) * b.get_unchecked(i) };
     }
 
     total
