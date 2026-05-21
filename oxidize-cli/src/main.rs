@@ -9,6 +9,7 @@ use oxidize_core::offload::{
     plan_multi_gpu_offload,
 };
 use oxidize_core::sampling::SamplingConfig;
+use oxidize_core::tensor::DType;
 use oxidize_core::tokenizer::{EncodeOptions, LoadedTokenizer, load_tokenizer_from_gguf_metadata};
 
 use std::collections::{HashMap, HashSet};
@@ -56,6 +57,14 @@ struct Args {
     layer_cache: usize,
     #[arg(long, default_value_t = false)]
     turboquant: bool,
+    #[arg(long, default_value_t = false)]
+    cpu_optimized: bool,
+    #[arg(long)]
+    ctx_size: Option<usize>,
+    #[arg(long)]
+    threads: Option<usize>,
+    #[arg(long, value_enum, default_value_t = KvCacheDType::F32)]
+    kv_cache_dtype: KvCacheDType,
 }
 
 fn greeting(prompt: &str) -> String {
@@ -66,6 +75,25 @@ fn greeting(prompt: &str) -> String {
 enum Profiler {
     Perf,
     Samply,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+enum KvCacheDType {
+    F32,
+    F16,
+    Q8,
+    Q4,
+}
+
+impl KvCacheDType {
+    fn dtype(self) -> DType {
+        match self {
+            Self::F32 => DType::F32,
+            Self::F16 => DType::F16,
+            Self::Q8 => DType::I8,
+            Self::Q4 => DType::I16,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -535,6 +563,25 @@ fn run_profiled_inference(profiler: Profiler, output: Option<&PathBuf>) -> io::R
 
 fn main() {
     let args = Args::parse();
+    let cpu_opt = args.cpu_optimized;
+    let threads = if let Some(t) = args.threads.filter(|t| *t > 0) {
+        t
+    } else if cpu_opt {
+        std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(8)
+    } else {
+        std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(8)
+    };
+    if let Err(error) = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build_global()
+    {
+        eprintln!("failed to set rayon thread pool: {error}");
+        return;
+    }
     if let Some(profiler) = args.profile
         && !is_profiling_child()
     {
@@ -625,7 +672,9 @@ fn main() {
                     .or_else(|| metadata_u32(metadata, "gemma4.context_length"))
                     .or_else(|| metadata_u32(metadata, "gemma.context_length"))
                     .or_else(|| metadata_u32(metadata, "llama.embedding_length"))
-                    .unwrap_or(4096) as usize;
+                    .map(|value| value as usize)
+                    .unwrap_or(4096);
+                let context_size = args.ctx_size.unwrap_or(context_size);
                 let layer_count = metadata_u32(metadata, "llama.block_count")
                     .or_else(|| metadata_u32(metadata, "qwen35.block_count"))
                     .or_else(|| metadata_u32(metadata, "qwen2.block_count"))
@@ -712,6 +761,7 @@ fn main() {
                     num_attention_heads,
                     num_key_value_heads,
                     key_value_head_dim,
+                    kv_cache_dtype: args.kv_cache_dtype.dtype(),
                     rms_norm_eps,
                     rope_theta,
                 };
@@ -727,7 +777,11 @@ fn main() {
                 let stdout = io::stdout();
                 let mut writer = stdout.lock();
                 let mut model: Box<dyn Model> = if args.layer_wise {
-                    match oxidize_core::layer_wise::LayerWiseModel::load_from_gguf(&mapped, config, args.layer_cache) {
+                    match oxidize_core::layer_wise::LayerWiseModel::load_from_gguf(
+                        &mapped,
+                        config,
+                        args.layer_cache,
+                    ) {
                         Ok(m) => Box::new(m),
                         Err(error) => {
                             eprintln!("failed to load layer-wise model: {error}");
@@ -735,7 +789,8 @@ fn main() {
                         }
                     }
                 } else {
-                    match InferenceModel::load_from_gguf(&mapped, config) {
+                    let use_mmap = args.cpu_optimized;
+                    match InferenceModel::load_from_gguf(&mapped, config, use_mmap) {
                         Ok(m) => Box::new(m),
                         Err(error) => {
                             eprintln!("failed to load model weights: {error}");

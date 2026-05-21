@@ -40,6 +40,10 @@ impl MappedGgufFile {
         &self.mmap
     }
 
+    pub fn mmap(&self) -> Arc<Mmap> {
+        self.mmap.clone()
+    }
+
     pub fn mapped_tensor_infos(&self) -> Vec<GgufTensorInfo> {
         self.parsed.mapped_tensor_infos()
     }
@@ -259,7 +263,10 @@ pub fn load_mapped_gguf<P: AsRef<Path>>(path: P) -> Result<MappedGgufFile, GgufP
     // parsed metadata is exposed from MappedGgufFile.
     let mmap = unsafe { Mmap::map(&file)? };
     let parsed = parse_gguf(&mmap)?;
-    Ok(MappedGgufFile { mmap: Arc::new(mmap), parsed })
+    Ok(MappedGgufFile {
+        mmap: Arc::new(mmap),
+        parsed,
+    })
 }
 
 pub fn parse_gguf(bytes: &[u8]) -> Result<GgufFile, GgufParseError> {
@@ -373,7 +380,7 @@ fn detect_architecture_from_metadata_keys(
         };
         let architecture = match namespace {
             "llama" | "mistral" | "mixtral" | "qwen" | "qwen2" | "qwen2moe" | "qwen35"
-            | "gemma" | "phi" | "falcon" | "gpt2" | "gptj" | "gptneox" => Some(namespace),
+            | "gemma" | "phi" | "falcon" | "gpt2" | "gptj" | "gptneox" | "dflash-draft" => Some(namespace),
             _ => None,
         };
         if architecture.is_some() {
