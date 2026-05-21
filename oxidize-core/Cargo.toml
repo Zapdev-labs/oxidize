@@ -16,6 +16,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 default = []
 cuda = ["dep:cublas-sys", "dep:cust"]
 metal = []
+vulkan = []
 wasm = ["dep:wasm-bindgen"]
 webgpu = ["dep:wgpu"]
 

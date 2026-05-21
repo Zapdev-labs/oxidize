@@ -82,6 +82,8 @@ pub enum AttentionError {
     InvalidKeyLength { expected: usize, actual: usize },
     InvalidValueLength { expected: usize, actual: usize },
     InvalidOutputLength { expected: usize, actual: usize },
+    InvalidKvHead { kv_head: usize, kv_heads: usize },
+    InvalidHeadGrouping { num_heads: usize, kv_heads: usize },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1350,6 +1352,59 @@ pub fn rms_norm_f32(
 
     for ((value, scale), out) in input.iter().zip(weight.iter()).zip(output.iter_mut()) {
         *out = value * inv_rms * scale;
+    }
+    Ok(())
+}
+
+/// Fused RMS-normalization + transposed GEMV for the attention Q projection.
+/// Computes RMSNorm of `input`, then performs transposed GEMV using the
+/// normalized vector as the GEMV input.
+#[allow(clippy::too_many_arguments)]
+pub fn rms_norm_gemv_f32_transposed(
+    input: &[f32],
+    weight: &[f32],
+    eps: f32,
+    matrix: &[f32],
+    rows: usize,
+    cols: usize,
+    output: &mut [f32],
+) -> Result<(), RmsNormError> {
+    if input.len() != rows {
+        return Err(RmsNormError::InvalidInputLength {
+            expected: rows,
+            actual: input.len(),
+        });
+    }
+    if weight.len() != rows {
+        return Err(RmsNormError::InvalidWeightLength {
+            expected: rows,
+            actual: weight.len(),
+        });
+    }
+    if matrix.len() != rows * cols {
+        return Err(RmsNormError::InvalidOutputLength {
+            expected: rows * cols,
+            actual: matrix.len(),
+        });
+    }
+    if output.len() != cols {
+        return Err(RmsNormError::InvalidOutputLength {
+            expected: cols,
+            actual: output.len(),
+        });
+    }
+
+    let sum_sq = input.iter().map(|v| v * v).sum::<f32>();
+    let mean_sq = sum_sq / rows as f32;
+    let inv_rms = 1.0 / (mean_sq + eps).sqrt();
+
+    output.fill(0.0);
+    for (i, (value, scale)) in input.iter().zip(weight.iter()).enumerate() {
+        let scaled = value * inv_rms * scale;
+        let row = &matrix[i * cols..(i + 1) * cols];
+        for (j, &mat_val) in row.iter().enumerate() {
+            output[j] += mat_val * scaled;
+        }
     }
     Ok(())
 }

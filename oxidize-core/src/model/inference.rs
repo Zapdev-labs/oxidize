@@ -833,11 +833,11 @@ impl InferenceModel {
                         rms_norm_gemv_f32_transposed(
                             x, &layer.attn_norm, cfg.rms_norm_eps,
                             match &layer.attn_q {
-                                WeightStorage::F32(data) => data,
+                                WeightStorage::F32(data) => data.as_slice(),
                                 _ => { gemv_weight(&layer.attn_q, q_len, h, normed, q_full)
                                     .map_err(|e| ModelError::InferenceFailed(format!("attn_q: {:?}", e)))?;
                                     // fallthrough handled below
-                                    &[]
+                                    &[][..]
                                 }
                             },
                             h, q_len, q_full,

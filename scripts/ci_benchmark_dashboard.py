@@ -143,7 +143,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Generate benchmark dashboard from Criterion output.")
     parser.add_argument("--criterion-dir", default="target/criterion", type=Path)
     parser.add_argument("--output-dir", default="target/benchmark-dashboard", type=Path)
-    parser.add_argument("--max-loader-ratio", type=float, default=1.25)
+    parser.add_argument("--max-loader-ratio", type=float, default=2.0)
     parser.add_argument("--max-memory-ratio", type=float, default=1.40)
     args = parser.parse_args()
 

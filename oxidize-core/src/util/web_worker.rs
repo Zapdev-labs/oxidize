@@ -575,7 +575,9 @@ mod tests {
 
     #[test]
     fn worker_typescript_bindings_include_typed_contracts() {
-        assert!(WASM_WORKER_TYPESCRIPT_BINDINGS.contains("interface OxidizeWorkerInferenceRequest"));
+        assert!(
+            WASM_WORKER_TYPESCRIPT_BINDINGS.contains("interface OxidizeWorkerInferenceRequest")
+        );
         assert!(WASM_WORKER_TYPESCRIPT_BINDINGS.contains("interface OxidizeWorkerMessageResponse"));
         assert!(WASM_WORKER_TYPESCRIPT_BINDINGS.contains("interface OxidizeWorkerStreamResponse"));
         assert!(WASM_WORKER_TYPESCRIPT_BINDINGS.contains("type OxidizeWorkerModelCacheAction"));

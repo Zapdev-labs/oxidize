@@ -1196,6 +1196,7 @@ dependencies = [
  "futures-core",
  "oxidize-core",
  "rand",
+ "rayon",
  "tracing",
 ]
 

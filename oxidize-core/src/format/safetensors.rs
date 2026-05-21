@@ -53,8 +53,8 @@ pub fn load_mapped_safetensors<P: AsRef<Path>>(
     // SAFETY: The returned mapping is read-only and we keep it alive for as long as
     // the metadata is exposed from MappedSafeTensorsFile.
     let mmap = unsafe { Mmap::map(&file)? };
-    let st = SafeTensors::deserialize(&mmap)
-        .map_err(|e| SafeTensorsError::Parse(format!("{e:?}")))?;
+    let st =
+        SafeTensors::deserialize(&mmap).map_err(|e| SafeTensorsError::Parse(format!("{e:?}")))?;
 
     let header_len = u64::from_le_bytes([
         mmap[0], mmap[1], mmap[2], mmap[3], mmap[4], mmap[5], mmap[6], mmap[7],
@@ -63,7 +63,7 @@ pub fn load_mapped_safetensors<P: AsRef<Path>>(
 
     let mut tensors = Vec::with_capacity(st.len());
     for (name, view) in st.tensors() {
-        let shape: Vec<usize> = view.shape().iter().map(|&d| d as usize).collect();
+        let shape: Vec<usize> = view.shape().to_vec();
         let dtype = convert_dtype(view.dtype())?;
         let size_bytes = view.data().len();
 
@@ -118,8 +118,7 @@ mod tests {
 
     #[test]
     fn loads_mapped_safetensors() {
-        let tmp = std::env::temp_dir().join(format!(
-            "test-{}.safetensors", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("test-{}.safetensors", std::process::id()));
         create_test_safetensors(&tmp);
 
         let mapped = load_mapped_safetensors(&tmp).expect("should load safetensors");

@@ -85,6 +85,41 @@ pub enum ContinuousBatchError {
     KvCache(KvCacheError),
 }
 
+const KV_CACHE_STORAGE_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+enum KvCacheStorageLayout {
+    /// Storage is grouped by layer, then position: `[layer][position][head][head_dim]`.
+    LayerMajor,
+    /// Legacy serialized storage grouped by position, then layer.
+    PositionMajor,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+struct KvCacheStorageMetadata {
+    version: u32,
+    layout: KvCacheStorageLayout,
+}
+
+impl Default for KvCacheStorageMetadata {
+    fn default() -> Self {
+        // Missing metadata means a legacy persisted cache. Older cache files used
+        // position-major storage, while the runtime layout is now layer-major so
+        // layer prefixes can be borrowed without copying.
+        Self {
+            version: 0,
+            layout: KvCacheStorageLayout::PositionMajor,
+        }
+    }
+}
+
+fn current_storage_metadata() -> KvCacheStorageMetadata {
+    KvCacheStorageMetadata {
+        version: KV_CACHE_STORAGE_VERSION,
+        layout: KvCacheStorageLayout::LayerMajor,
+    }
+}
+
 impl From<KvCacheError> for ContinuousBatchError {
     fn from(value: KvCacheError) -> Self {
         Self::KvCache(value)
@@ -109,6 +144,8 @@ enum KvStorage {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct KvCache {
+    #[serde(default)]
+    storage_metadata: KvCacheStorageMetadata,
     config: KvCacheConfig,
     key: KvStorage,
     value: KvStorage,
@@ -182,6 +219,7 @@ impl KvCache {
         };
 
         Ok(Self {
+            storage_metadata: current_storage_metadata(),
             config,
             key,
             value,
@@ -260,7 +298,13 @@ impl KvCache {
         }
         for p in 0..seq_len {
             if !self.position_available(p) {
-                continue;
+                let newest_available = self.newest_position.unwrap_or(0);
+                let oldest_available = self.oldest_available_position().unwrap_or(0);
+                return Err(KvCacheError::PositionEvicted {
+                    position: p,
+                    oldest_available,
+                    newest_available,
+                });
             }
             let physical_position = self.physical_position(p);
             let out_off = p * token_size;
@@ -294,7 +338,13 @@ impl KvCache {
         }
         for p in 0..seq_len {
             if !self.position_available(p) {
-                continue;
+                let newest_available = self.newest_position.unwrap_or(0);
+                let oldest_available = self.oldest_available_position().unwrap_or(0);
+                return Err(KvCacheError::PositionEvicted {
+                    position: p,
+                    oldest_available,
+                    newest_available,
+                });
             }
             let physical_position = self.physical_position(p);
             let out_off = p * token_size;
@@ -307,6 +357,33 @@ impl KvCache {
             );
         }
         Ok(())
+    }
+
+    /// Borrow all F32 keys for positions [0, seq_len) in a layer when they are
+    /// already contiguous in the cache storage.
+    ///
+    /// Returns `Ok(None)` instead of copying when the cache dtype is not F32, the
+    /// requested logical prefix is not fully available, or the sliding-window
+    /// mapping has wrapped and the prefix no longer maps to a contiguous storage
+    /// range. The returned layout is `[position][head][head_dim]`.
+    pub fn f32_layer_key_prefix(
+        &self,
+        layer: usize,
+        seq_len: usize,
+    ) -> Result<Option<&[f32]>, KvCacheError> {
+        self.f32_layer_prefix(&self.key, layer, seq_len)
+    }
+
+    /// Borrow all F32 values for positions [0, seq_len) in a layer when they are
+    /// already contiguous in the cache storage.
+    ///
+    /// See [`Self::f32_layer_key_prefix`] for validity requirements.
+    pub fn f32_layer_value_prefix(
+        &self,
+        layer: usize,
+        seq_len: usize,
+    ) -> Result<Option<&[f32]>, KvCacheError> {
+        self.f32_layer_prefix(&self.value, layer, seq_len)
     }
 
     pub fn bytes_per_tensor(&self) -> usize {
@@ -338,8 +415,20 @@ impl KvCache {
 
     pub fn load_from_file<P: AsRef<Path>>(path: P) -> Result<Self, KvCachePersistenceError> {
         let payload = std::fs::read(path)?;
-        let cache = serde_json::from_slice(&payload)?;
+        let mut cache: Self = serde_json::from_slice(&payload)?;
+        cache.migrate_legacy_storage_layout();
         Ok(cache)
+    }
+
+    fn migrate_legacy_storage_layout(&mut self) {
+        if self.storage_metadata.layout != KvCacheStorageLayout::PositionMajor {
+            self.storage_metadata = current_storage_metadata();
+            return;
+        }
+
+        migrate_storage_from_position_major(&mut self.key, &self.config);
+        migrate_storage_from_position_major(&mut self.value, &self.config);
+        self.storage_metadata = current_storage_metadata();
     }
 
     fn validate_write(&self, layer: usize, key: &[f32], value: &[f32]) -> Result<(), KvCacheError> {
@@ -396,6 +485,45 @@ impl KvCache {
         Ok(())
     }
 
+    fn f32_layer_prefix<'a>(
+        &self,
+        storage: &'a KvStorage,
+        layer: usize,
+        seq_len: usize,
+    ) -> Result<Option<&'a [f32]>, KvCacheError> {
+        self.validate_layer(layer)?;
+        if seq_len == 0 {
+            return match storage {
+                KvStorage::F32(data) => Ok(Some(&data[0..0])),
+                _ => Ok(None),
+            };
+        }
+        if self.config.dtype != DType::F32 || !self.prefix_is_contiguous_and_available(seq_len) {
+            return Ok(None);
+        }
+
+        let KvStorage::F32(data) = storage else {
+            return Ok(None);
+        };
+        let token_size = self.config.token_size();
+        let start = token_range(&self.config, layer, 0).start;
+        let end = start + seq_len.saturating_mul(token_size);
+        Ok(data.get(start..end))
+    }
+
+    fn prefix_is_contiguous_and_available(&self, seq_len: usize) -> bool {
+        if seq_len > self.config.context_size {
+            return false;
+        }
+        let Some(oldest) = self.oldest_available_position() else {
+            return false;
+        };
+        let Some(newest) = self.newest_position else {
+            return false;
+        };
+        oldest == 0 && newest >= seq_len - 1
+    }
+
     fn position_available(&self, position: usize) -> bool {
         match (self.oldest_available_position(), self.newest_position) {
             (Some(oldest), Some(newest)) => (oldest..=newest).contains(&position),
@@ -427,6 +555,22 @@ impl KvCache {
             });
         }
         Ok(())
+    }
+
+    /// Drop KV entries after `position` (inclusive). Used to roll back speculative verify runs.
+    pub fn rewind_to(&mut self, position: usize) -> Result<(), KvCacheError> {
+        match self.newest_position {
+            None => Ok(()),
+            Some(newest) if position <= newest => {
+                self.newest_position = Some(position);
+                Ok(())
+            }
+            Some(newest) => Err(KvCacheError::PositionEvicted {
+                position,
+                oldest_available: self.oldest_available_position().unwrap_or(0),
+                newest_available: newest,
+            }),
+        }
     }
 
     fn record_position(&mut self, position: usize) {
@@ -568,7 +712,8 @@ impl ContinuousBatchKvCache {
 
     pub fn load_from_file<P: AsRef<Path>>(path: P) -> Result<Self, KvCachePersistenceError> {
         let payload = std::fs::read(path)?;
-        let cache = serde_json::from_slice(&payload)?;
+        let mut cache: Self = serde_json::from_slice(&payload)?;
+        cache.kv_cache.migrate_legacy_storage_layout();
         Ok(cache)
     }
 
@@ -724,6 +869,96 @@ fn read_storage(
     }
 }
 
+fn migrate_storage_from_position_major(storage: &mut KvStorage, config: &KvCacheConfig) {
+    match storage {
+        KvStorage::F32(data) => migrate_flat_elements_from_position_major(data, config),
+        KvStorage::F16(data) => migrate_flat_elements_from_position_major(data, config),
+        KvStorage::Q8 { data, scales, mins } => {
+            migrate_flat_elements_from_position_major(data, config);
+            migrate_token_slots_from_position_major(scales, config);
+            migrate_token_slots_from_position_major(mins, config);
+        }
+        KvStorage::Q4 { data, scales, mins } => {
+            migrate_q4_elements_from_position_major(data, config);
+            migrate_token_slots_from_position_major(scales, config);
+            migrate_token_slots_from_position_major(mins, config);
+        }
+    }
+}
+
+fn migrate_flat_elements_from_position_major<T: Copy>(data: &mut [T], config: &KvCacheConfig) {
+    let token_size = config.token_size();
+    let expected = config.element_count();
+    if data.len() != expected || token_size == 0 {
+        return;
+    }
+
+    let old = data.to_owned();
+    for layer in 0..config.layer_count {
+        for position in 0..config.context_size {
+            let old_start = (position * config.layer_count + layer) * token_size;
+            let new_start = token_range(config, layer, position).start;
+            data[new_start..new_start + token_size]
+                .copy_from_slice(&old[old_start..old_start + token_size]);
+        }
+    }
+}
+
+fn migrate_token_slots_from_position_major<T: Copy>(data: &mut [T], config: &KvCacheConfig) {
+    let expected = config.layer_count.saturating_mul(config.context_size);
+    if data.len() != expected {
+        return;
+    }
+
+    let old = data.to_owned();
+    for layer in 0..config.layer_count {
+        for position in 0..config.context_size {
+            let old_index = position * config.layer_count + layer;
+            let new_index = token_slot_index(config, layer, position);
+            data[new_index] = old[old_index];
+        }
+    }
+}
+
+fn migrate_q4_elements_from_position_major(data: &mut [u8], config: &KvCacheConfig) {
+    let expected_elements = config.element_count();
+    if data.len() != expected_elements.div_ceil(2) {
+        return;
+    }
+
+    let old_nibbles = unpack_q4_nibbles(data, expected_elements);
+    let mut new_nibbles = vec![0_u8; expected_elements];
+    let token_size = config.token_size();
+    for layer in 0..config.layer_count {
+        for position in 0..config.context_size {
+            let old_start = (position * config.layer_count + layer) * token_size;
+            let new_start = token_range(config, layer, position).start;
+            new_nibbles[new_start..new_start + token_size]
+                .copy_from_slice(&old_nibbles[old_start..old_start + token_size]);
+        }
+    }
+    pack_q4_nibbles(&new_nibbles, data);
+}
+
+fn unpack_q4_nibbles(data: &[u8], element_count: usize) -> Vec<u8> {
+    let mut nibbles = Vec::with_capacity(element_count);
+    for byte in data {
+        nibbles.push(byte & 0x0F);
+        if nibbles.len() < element_count {
+            nibbles.push((byte >> 4) & 0x0F);
+        }
+    }
+    nibbles
+}
+
+fn pack_q4_nibbles(nibbles: &[u8], data: &mut [u8]) {
+    for (index, byte) in data.iter_mut().enumerate() {
+        let low = nibbles.get(index * 2).copied().unwrap_or(0) & 0x0F;
+        let high = nibbles.get(index * 2 + 1).copied().unwrap_or(0) & 0x0F;
+        *byte = (high << 4) | low;
+    }
+}
+
 fn token_range(config: &KvCacheConfig, layer: usize, position: usize) -> std::ops::Range<usize> {
     let token_size = config.token_size();
     let offset = token_slot_index(config, layer, position) * token_size;
@@ -731,7 +966,7 @@ fn token_range(config: &KvCacheConfig, layer: usize, position: usize) -> std::op
 }
 
 fn token_slot_index(config: &KvCacheConfig, layer: usize, position: usize) -> usize {
-    position * config.layer_count + layer
+    layer * config.context_size + position
 }
 
 fn min_max(values: &[f32]) -> (f32, f32) {
@@ -822,6 +1057,7 @@ fn f32_to_f16_bits(value: f32) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::flash_attention::flash_attention_decode_f32;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn unique_temp_path(prefix: &str) -> std::path::PathBuf {
@@ -907,6 +1143,166 @@ mod tests {
 
         assert_eq!(loaded_key, key);
         assert_eq!(loaded_value, value);
+    }
+
+    #[test]
+    fn borrows_contiguous_f32_layer_prefixes() {
+        let mut cache = KvCache::new(KvCacheConfig {
+            layer_count: 2,
+            context_size: 3,
+            head_count: 1,
+            head_dim: 2,
+            dtype: DType::F32,
+        })
+        .expect("f32 kv cache should be supported");
+
+        cache
+            .set(0, 0, &[1.0, 2.0], &[10.0, 20.0])
+            .expect("first layer position 0 should write");
+        cache
+            .set(1, 0, &[3.0, 4.0], &[30.0, 40.0])
+            .expect("second layer position 0 should write");
+        cache
+            .set(0, 1, &[5.0, 6.0], &[50.0, 60.0])
+            .expect("first layer position 1 should write");
+        cache
+            .set(1, 1, &[7.0, 8.0], &[70.0, 80.0])
+            .expect("second layer position 1 should write");
+
+        let layer_zero_keys = cache
+            .f32_layer_key_prefix(0, 2)
+            .expect("borrow should validate")
+            .expect("f32 prefix should be contiguous");
+        let layer_one_values = cache
+            .f32_layer_value_prefix(1, 2)
+            .expect("borrow should validate")
+            .expect("f32 prefix should be contiguous");
+
+        assert_eq!(layer_zero_keys, &[1.0, 2.0, 5.0, 6.0]);
+        assert_eq!(layer_one_values, &[30.0, 40.0, 70.0, 80.0]);
+    }
+
+    #[test]
+    fn borrowed_layer_prefix_matches_copy_and_flash_attention_output() {
+        let mut cache = KvCache::new(KvCacheConfig {
+            layer_count: 1,
+            context_size: 3,
+            head_count: 2,
+            head_dim: 2,
+            dtype: DType::F32,
+        })
+        .expect("f32 kv cache should be supported");
+
+        cache
+            .set(0, 0, &[1.0, 2.0, 3.0, 4.0], &[0.1, 0.2, 0.3, 0.4])
+            .expect("position 0 should write");
+        cache
+            .set(0, 1, &[5.0, 6.0, 7.0, 8.0], &[0.5, 0.6, 0.7, 0.8])
+            .expect("position 1 should write");
+        cache
+            .set(0, 2, &[9.0, 10.0, 11.0, 12.0], &[0.9, 1.0, 1.1, 1.2])
+            .expect("position 2 should write");
+
+        let borrowed_keys = cache
+            .f32_layer_key_prefix(0, 3)
+            .expect("borrow should validate")
+            .expect("keys should be borrowable");
+        let borrowed_values = cache
+            .f32_layer_value_prefix(0, 3)
+            .expect("borrow should validate")
+            .expect("values should be borrowable");
+
+        let mut copied_keys = vec![0.0_f32; 12];
+        let mut copied_values = vec![0.0_f32; 12];
+        cache
+            .copy_layer_keys(0, 3, &mut copied_keys)
+            .expect("keys should copy");
+        cache
+            .copy_layer_values(0, 3, &mut copied_values)
+            .expect("values should copy");
+
+        assert_eq!(borrowed_keys, copied_keys.as_slice());
+        assert_eq!(borrowed_values, copied_values.as_slice());
+
+        let query = [0.25_f32, -0.5];
+        let mut borrowed_output = [0.0_f32; 2];
+        let mut copied_output = [0.0_f32; 2];
+        flash_attention_decode_f32(
+            &query,
+            borrowed_keys,
+            borrowed_values,
+            3,
+            2,
+            4,
+            1,
+            &mut borrowed_output,
+        )
+        .expect("borrowed cache should be valid flash attention input");
+        flash_attention_decode_f32(
+            &query,
+            &copied_keys,
+            &copied_values,
+            3,
+            2,
+            4,
+            1,
+            &mut copied_output,
+        )
+        .expect("copied cache should be valid flash attention input");
+
+        assert_eq!(borrowed_output, copied_output);
+    }
+
+    #[test]
+    fn refuses_to_borrow_when_f32_prefix_has_wrapped() {
+        let mut cache = KvCache::new(KvCacheConfig {
+            layer_count: 1,
+            context_size: 2,
+            head_count: 1,
+            head_dim: 2,
+            dtype: DType::F32,
+        })
+        .expect("f32 kv cache should be supported");
+
+        cache
+            .set(0, 0, &[1.0, 2.0], &[3.0, 4.0])
+            .expect("position 0 should write");
+        cache
+            .set(0, 1, &[5.0, 6.0], &[7.0, 8.0])
+            .expect("position 1 should write");
+        cache
+            .set(0, 2, &[9.0, 10.0], &[11.0, 12.0])
+            .expect("position 2 should wrap");
+
+        assert_eq!(
+            cache
+                .f32_layer_key_prefix(0, 2)
+                .expect("borrow should validate"),
+            None
+        );
+    }
+
+    #[test]
+    fn refuses_to_borrow_non_f32_layer_prefixes() {
+        let mut cache = KvCache::new(KvCacheConfig {
+            layer_count: 1,
+            context_size: 2,
+            head_count: 1,
+            head_dim: 2,
+            dtype: DType::F16,
+        })
+        .expect("f16 kv cache should be supported");
+
+        cache
+            .set(0, 0, &[1.0, 2.0], &[3.0, 4.0])
+            .expect("position 0 should write");
+
+        assert_eq!(
+            cache
+                .f32_layer_key_prefix(0, 1)
+                .expect("borrow should validate"),
+            None
+        );
     }
 
     #[test]
@@ -1154,6 +1550,41 @@ mod tests {
     }
 
     #[test]
+    fn copy_layer_keys_rejects_evicted_positions() {
+        let mut cache = KvCache::new(KvCacheConfig {
+            layer_count: 1,
+            context_size: 2,
+            head_count: 1,
+            head_dim: 2,
+            dtype: DType::F32,
+        })
+        .expect("f32 kv cache should be supported");
+
+        cache
+            .set(0, 4, &[1.0, 1.0], &[2.0, 2.0])
+            .expect("write at position 4 should succeed");
+        cache
+            .set(0, 5, &[3.0, 3.0], &[4.0, 4.0])
+            .expect("write at position 5 should succeed");
+        cache
+            .set(0, 6, &[5.0, 5.0], &[6.0, 6.0])
+            .expect("write at position 6 should succeed");
+
+        let mut out = vec![0.0_f32; 6];
+        let err = cache
+            .copy_layer_keys(0, 3, &mut out)
+            .expect_err("bulk copy should fail when position 0 is evicted");
+        assert_eq!(
+            err,
+            KvCacheError::PositionEvicted {
+                position: 0,
+                oldest_available: 5,
+                newest_available: 6
+            }
+        );
+    }
+
+    #[test]
     fn stop_at_capacity_rejects_new_positions_when_full() {
         let mut cache = KvCache::with_eviction_strategy(
             KvCacheConfig {
@@ -1389,6 +1820,67 @@ mod tests {
     }
 
     #[test]
+    fn kv_cache_persistence_writes_explicit_storage_metadata() {
+        let path = unique_temp_path("kv-cache-metadata");
+        let cache = KvCache::new(KvCacheConfig {
+            layer_count: 1,
+            context_size: 1,
+            head_count: 1,
+            head_dim: 1,
+            dtype: DType::F32,
+        })
+        .expect("f32 cache should be supported");
+
+        cache
+            .save_to_file(&path)
+            .expect("cache should be serialized to disk");
+        let payload = std::fs::read_to_string(&path).expect("cache file should be readable");
+        let _ = std::fs::remove_file(&path);
+
+        assert!(payload.contains(r#""storage_metadata""#));
+        assert!(payload.contains(r#""version":1"#));
+        assert!(payload.contains(r#""layout":"LayerMajor""#));
+    }
+
+    #[test]
+    fn kv_cache_load_migrates_unversioned_position_major_storage() {
+        let path = unique_temp_path("legacy-kv-cache");
+        let legacy_payload = r#"
+        {
+            "config":{"layer_count":2,"context_size":3,"head_count":1,"head_dim":2,"dtype":"F32"},
+            "key":{"F32":[1.0,2.0,101.0,102.0,3.0,4.0,103.0,104.0,5.0,6.0,105.0,106.0]},
+            "value":{"F32":[10.0,20.0,110.0,120.0,30.0,40.0,130.0,140.0,50.0,60.0,150.0,160.0]},
+            "eviction_strategy":"SlidingWindow",
+            "oldest_position":0,
+            "newest_position":2
+        }
+        "#;
+        std::fs::write(&path, legacy_payload).expect("legacy cache should be written");
+
+        let restored = KvCache::load_from_file(&path).expect("legacy cache should load");
+        let _ = std::fs::remove_file(&path);
+
+        let mut layer_one_position_one_key = [0.0_f32; 2];
+        let mut layer_zero_position_two_value = [0.0_f32; 2];
+        restored
+            .get_key(1, 1, &mut layer_one_position_one_key)
+            .expect("migrated layer 1 position 1 key should be readable");
+        restored
+            .get_value(0, 2, &mut layer_zero_position_two_value)
+            .expect("migrated layer 0 position 2 value should be readable");
+
+        assert_eq!(layer_one_position_one_key, [103.0, 104.0]);
+        assert_eq!(layer_zero_position_two_value, [50.0, 60.0]);
+        assert_eq!(
+            restored
+                .f32_layer_key_prefix(0, 3)
+                .expect("borrow should validate")
+                .expect("migrated layer-major prefix should be borrowable"),
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+        );
+    }
+
+    #[test]
     fn continuous_batch_cache_persists_and_restores_sequence_state() {
         let path = unique_temp_path("batch-kv-cache");
         let cache = KvCache::new(KvCacheConfig {
@@ -1432,7 +1924,7 @@ mod tests {
     }
 
     #[test]
-    fn token_slot_index_is_contiguous_across_layers_for_same_position() {
+    fn token_slot_index_is_contiguous_across_positions_for_same_layer() {
         let config = KvCacheConfig {
             layer_count: 4,
             context_size: 8,
@@ -1441,14 +1933,14 @@ mod tests {
             dtype: DType::F32,
         };
 
-        assert_eq!(token_slot_index(&config, 0, 2), 8);
-        assert_eq!(token_slot_index(&config, 1, 2), 9);
-        assert_eq!(token_slot_index(&config, 2, 2), 10);
-        assert_eq!(token_slot_index(&config, 3, 2), 11);
+        assert_eq!(token_slot_index(&config, 2, 0), 16);
+        assert_eq!(token_slot_index(&config, 2, 1), 17);
+        assert_eq!(token_slot_index(&config, 2, 2), 18);
+        assert_eq!(token_slot_index(&config, 2, 3), 19);
     }
 
     #[test]
-    fn token_range_advances_by_one_token_across_adjacent_layers() {
+    fn token_range_advances_by_one_token_across_adjacent_positions() {
         let config = KvCacheConfig {
             layer_count: 3,
             context_size: 4,
@@ -1458,11 +1950,11 @@ mod tests {
         };
 
         let token_size = config.token_size();
-        let layer0 = token_range(&config, 0, 1);
-        let layer1 = token_range(&config, 1, 1);
-        let layer2 = token_range(&config, 2, 1);
+        let position0 = token_range(&config, 1, 0);
+        let position1 = token_range(&config, 1, 1);
+        let position2 = token_range(&config, 1, 2);
 
-        assert_eq!(layer1.start - layer0.start, token_size);
-        assert_eq!(layer2.start - layer1.start, token_size);
+        assert_eq!(position1.start - position0.start, token_size);
+        assert_eq!(position2.start - position1.start, token_size);
     }
 }

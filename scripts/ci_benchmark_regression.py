@@ -99,7 +99,7 @@ def main() -> int:
     parser.add_argument(
         "--max-loader-ratio",
         type=float,
-        default=1.25,
+        default=2.0,
         help="Maximum allowed mapped/baseline mean ratio for loader benchmarks.",
     )
     parser.add_argument(

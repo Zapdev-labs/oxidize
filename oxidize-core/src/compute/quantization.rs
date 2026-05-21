@@ -14,16 +14,22 @@ const BLOCK_Q5_0_SIZE: usize = 2 + 4 + 16;
 const BLOCK_Q5_1_SIZE: usize = 2 + 2 + 4 + 16;
 const BLOCK_Q8_0_SIZE: usize = 2 + 32;
 
-const fn sizeof_of_f16() -> usize { 2 }
-const fn sizeof_of_f32() -> usize { 4 }
-const fn sizeof_of_i16() -> usize { 2 }
+const fn sizeof_of_f16() -> usize {
+    2
+}
+const fn sizeof_of_f32() -> usize {
+    4
+}
+const fn sizeof_of_i16() -> usize {
+    2
+}
 
-const BLOCK_Q2_K_SIZE: usize = 2*sizeof_of_f16() + QK_K/16 + QK_K/4;
-const BLOCK_Q3_K_SIZE: usize = sizeof_of_f16() + QK_K/4 + QK_K/8 + 12;
-const BLOCK_Q4_K_SIZE: usize = 2*sizeof_of_f16() + 12 + QK_K/2;
-const BLOCK_Q5_K_SIZE: usize = 2*sizeof_of_f16() + 12 + QK_K/2 + QK_K/8;
-const BLOCK_Q6_K_SIZE: usize = sizeof_of_f16() + QK_K/16 + 3*QK_K/4;
-const BLOCK_Q8_K_SIZE: usize = sizeof_of_f32() + QK_K + QK_K/16*sizeof_of_i16();
+const BLOCK_Q2_K_SIZE: usize = 2 * sizeof_of_f16() + QK_K / 16 + QK_K / 4;
+const BLOCK_Q3_K_SIZE: usize = sizeof_of_f16() + QK_K / 4 + QK_K / 8 + 12;
+const BLOCK_Q4_K_SIZE: usize = 2 * sizeof_of_f16() + 12 + QK_K / 2;
+const BLOCK_Q5_K_SIZE: usize = 2 * sizeof_of_f16() + 12 + QK_K / 2 + QK_K / 8;
+const BLOCK_Q6_K_SIZE: usize = sizeof_of_f16() + QK_K / 16 + 3 * QK_K / 4;
+const BLOCK_Q8_K_SIZE: usize = sizeof_of_f32() + QK_K + QK_K / 16 * sizeof_of_i16();
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QuantizationError {
@@ -977,8 +983,17 @@ pub fn dequantize_q8_0_scalar(input: &[u8], output: &mut [f32]) -> Result<(), Qu
 }
 
 pub fn dequantize_q2_k_scalar(input: &[u8], output: &mut [f32]) -> Result<(), QuantizationError> {
-    validate_layout(GgufQuantizationType::Q2_K, input, output, BLOCK_Q2_K_SIZE, QK_K)?;
-    for (block, out) in input.chunks_exact(BLOCK_Q2_K_SIZE).zip(output.chunks_exact_mut(QK_K)) {
+    validate_layout(
+        GgufQuantizationType::Q2_K,
+        input,
+        output,
+        BLOCK_Q2_K_SIZE,
+        QK_K,
+    )?;
+    for (block, out) in input
+        .chunks_exact(BLOCK_Q2_K_SIZE)
+        .zip(output.chunks_exact_mut(QK_K))
+    {
         let d = f16_le_to_f32(&block[80..82]);
         let min = f16_le_to_f32(&block[82..84]);
         let scales = &block[0..16];
@@ -1010,8 +1025,17 @@ pub fn dequantize_q2_k_scalar(input: &[u8], output: &mut [f32]) -> Result<(), Qu
 }
 
 pub fn dequantize_q3_k_scalar(input: &[u8], output: &mut [f32]) -> Result<(), QuantizationError> {
-    validate_layout(GgufQuantizationType::Q3_K_S, input, output, BLOCK_Q3_K_SIZE, QK_K)?;
-    for (block, out) in input.chunks_exact(BLOCK_Q3_K_SIZE).zip(output.chunks_exact_mut(QK_K)) {
+    validate_layout(
+        GgufQuantizationType::Q3_K_S,
+        input,
+        output,
+        BLOCK_Q3_K_SIZE,
+        QK_K,
+    )?;
+    for (block, out) in input
+        .chunks_exact(BLOCK_Q3_K_SIZE)
+        .zip(output.chunks_exact_mut(QK_K))
+    {
         let d_all = f16_le_to_f32(&block[108..110]);
         let hmask = &block[0..32];
         let qs = &block[32..96];
@@ -1022,7 +1046,7 @@ pub fn dequantize_q3_k_scalar(input: &[u8], output: &mut [f32]) -> Result<(), Qu
         let tmp = scales_raw[2];
         scales_raw[2] = ((scales_raw[0] >> 4) & 0x0F0F0F0F) | (((tmp >> 4) & 0x03030303) << 4);
         scales_raw[3] = ((scales_raw[1] >> 4) & 0x0F0F0F0F) | (((tmp >> 6) & 0x03030303) << 4);
-        scales_raw[0] = (scales_raw[0] & 0x0F0F0F0F) | (((tmp >> 0) & 0x03030303) << 4);
+        scales_raw[0] = (scales_raw[0] & 0x0F0F0F0F) | ((tmp & 0x03030303) << 4);
         scales_raw[1] = (scales_raw[1] & 0x0F0F0F0F) | (((tmp >> 2) & 0x03030303) << 4);
         let scales = unsafe { std::slice::from_raw_parts(scales_raw.as_ptr() as *const i8, 16) };
 
@@ -1067,8 +1091,17 @@ fn get_scale_min_k4(j: usize, scales: &[u8]) -> (u8, u8) {
 }
 
 pub fn dequantize_q4_k_scalar(input: &[u8], output: &mut [f32]) -> Result<(), QuantizationError> {
-    validate_layout(GgufQuantizationType::Q4_K_S, input, output, BLOCK_Q4_K_SIZE, QK_K)?;
-    for (block, out) in input.chunks_exact(BLOCK_Q4_K_SIZE).zip(output.chunks_exact_mut(QK_K)) {
+    validate_layout(
+        GgufQuantizationType::Q4_K_S,
+        input,
+        output,
+        BLOCK_Q4_K_SIZE,
+        QK_K,
+    )?;
+    for (block, out) in input
+        .chunks_exact(BLOCK_Q4_K_SIZE)
+        .zip(output.chunks_exact_mut(QK_K))
+    {
         let d = f16_le_to_f32(&block[0..2]);
         let min = f16_le_to_f32(&block[2..4]);
         let scales = &block[4..16];
@@ -1096,8 +1129,17 @@ pub fn dequantize_q4_k_scalar(input: &[u8], output: &mut [f32]) -> Result<(), Qu
 }
 
 pub fn dequantize_q5_k_scalar(input: &[u8], output: &mut [f32]) -> Result<(), QuantizationError> {
-    validate_layout(GgufQuantizationType::Q5_K_S, input, output, BLOCK_Q5_K_SIZE, QK_K)?;
-    for (block, out) in input.chunks_exact(BLOCK_Q5_K_SIZE).zip(output.chunks_exact_mut(QK_K)) {
+    validate_layout(
+        GgufQuantizationType::Q5_K_S,
+        input,
+        output,
+        BLOCK_Q5_K_SIZE,
+        QK_K,
+    )?;
+    for (block, out) in input
+        .chunks_exact(BLOCK_Q5_K_SIZE)
+        .zip(output.chunks_exact_mut(QK_K))
+    {
         let d = f16_le_to_f32(&block[0..2]);
         let min = f16_le_to_f32(&block[2..4]);
         let scales = &block[4..16];
@@ -1132,8 +1174,17 @@ pub fn dequantize_q5_k_scalar(input: &[u8], output: &mut [f32]) -> Result<(), Qu
 }
 
 pub fn dequantize_q6_k_scalar(input: &[u8], output: &mut [f32]) -> Result<(), QuantizationError> {
-    validate_layout(GgufQuantizationType::Q6_K, input, output, BLOCK_Q6_K_SIZE, QK_K)?;
-    for (block, out) in input.chunks_exact(BLOCK_Q6_K_SIZE).zip(output.chunks_exact_mut(QK_K)) {
+    validate_layout(
+        GgufQuantizationType::Q6_K,
+        input,
+        output,
+        BLOCK_Q6_K_SIZE,
+        QK_K,
+    )?;
+    for (block, out) in input
+        .chunks_exact(BLOCK_Q6_K_SIZE)
+        .zip(output.chunks_exact_mut(QK_K))
+    {
         let d = f16_le_to_f32(&block[208..210]);
         let ql = &block[0..128];
         let qh = &block[128..192];
@@ -1142,7 +1193,7 @@ pub fn dequantize_q6_k_scalar(input: &[u8], output: &mut [f32]) -> Result<(), Qu
         for _ in 0..2 {
             for l in 0..32 {
                 let is = l / 16;
-                let q1 = ((ql[l] & 0xF) as i32 | ((((qh[l] >> 0) & 3) as i32) << 4)) - 32;
+                let q1 = ((ql[l] & 0xF) as i32 | (((qh[l] & 3) as i32) << 4)) - 32;
                 let q2 = ((ql[l + 32] & 0xF) as i32 | ((((qh[l] >> 2) & 3) as i32) << 4)) - 32;
                 let q3 = ((ql[l] >> 4) as i32 | ((((qh[l] >> 4) & 3) as i32) << 4)) - 32;
                 let q4 = ((ql[l + 32] >> 4) as i32 | ((((qh[l] >> 6) & 3) as i32) << 4)) - 32;
@@ -1158,8 +1209,17 @@ pub fn dequantize_q6_k_scalar(input: &[u8], output: &mut [f32]) -> Result<(), Qu
 }
 
 pub fn dequantize_q8_k_scalar(input: &[u8], output: &mut [f32]) -> Result<(), QuantizationError> {
-    validate_layout(GgufQuantizationType::Q8_0, input, output, BLOCK_Q8_K_SIZE, QK_K)?;
-    for (block, out) in input.chunks_exact(BLOCK_Q8_K_SIZE).zip(output.chunks_exact_mut(QK_K)) {
+    validate_layout(
+        GgufQuantizationType::Q8_0,
+        input,
+        output,
+        BLOCK_Q8_K_SIZE,
+        QK_K,
+    )?;
+    for (block, out) in input
+        .chunks_exact(BLOCK_Q8_K_SIZE)
+        .zip(output.chunks_exact_mut(QK_K))
+    {
         let d = f32::from_le_bytes([block[0], block[1], block[2], block[3]]);
         let qs = unsafe { std::slice::from_raw_parts(block[4..260].as_ptr() as *const i8, 256) };
         for j in 0..QK_K {
@@ -1194,21 +1254,6 @@ fn validate_layout(
     }
 
     Ok(())
-}
-
-fn extract_bits(bitstream: &[u8], index: usize, bits: usize) -> u32 {
-    let bit_offset = index * bits;
-    let byte_index = bit_offset / 8;
-    let shift = bit_offset % 8;
-
-    let mut acc = 0_u32;
-    for i in 0..4 {
-        if let Some(byte) = bitstream.get(byte_index + i) {
-            acc |= (*byte as u32) << (8 * i);
-        }
-    }
-
-    (acc >> shift) & ((1_u32 << bits) - 1)
 }
 
 fn f16_le_to_f32(bytes: &[u8]) -> f32 {

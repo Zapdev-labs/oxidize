@@ -5,6 +5,7 @@ fn main() {
     println!("cargo:rustc-check-cfg=cfg(cuda_available)");
     println!("cargo:rustc-check-cfg=cfg(metal_available)");
     println!("cargo:rustc-check-cfg=cfg(webgpu_available)");
+    println!("cargo:rustc-check-cfg=cfg(vulkan_available)");
     println!("cargo:rerun-if-env-changed=CUDA_HOME");
     println!("cargo:rerun-if-env-changed=CUDA_PATH");
 
@@ -26,14 +27,17 @@ fn main() {
     if detect_webgpu_available() {
         println!("cargo:rustc-cfg=webgpu_available");
     }
+
+    if detect_vulkan_available() {
+        println!("cargo:rustc-cfg=vulkan_available");
+    }
 }
 
 fn detect_cuda_root() -> Option<PathBuf> {
     for key in ["CUDA_HOME", "CUDA_PATH"] {
-        if let Some(path) = env::var_os(key).map(PathBuf::from)
-            && path.is_dir()
-        {
-            return Some(path);
+        match env::var_os(key).map(PathBuf::from) {
+            Some(path) if path.is_dir() => return Some(path),
+            _ => {}
         }
     }
 
@@ -57,4 +61,8 @@ fn detect_metal_available() -> bool {
 
 fn detect_webgpu_available() -> bool {
     env::var_os("CARGO_FEATURE_WEBGPU").is_some()
+}
+
+fn detect_vulkan_available() -> bool {
+    env::var_os("CARGO_FEATURE_VULKAN").is_some()
 }

@@ -34,7 +34,7 @@ struct GgufTensorRef {
     value_count: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct LayerCache {
     capacity: usize,
     entries: Vec<Option<LayerWeights>>,

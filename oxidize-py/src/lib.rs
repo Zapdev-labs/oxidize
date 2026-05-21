@@ -1,8 +1,8 @@
+use oxidize_core::Stream;
 use oxidize_core::generation::{GenerationConfig, GenerationStream};
 use oxidize_core::llama::{LlamaConfig, LlamaModel};
 use oxidize_core::model::Session;
 use oxidize_core::sampling::SamplingConfig;
-use oxidize_core::Stream;
 use pyo3::exceptions::PyValueError;
 use pyo3::ffi::c_str;
 use pyo3::prelude::*;
@@ -280,7 +280,9 @@ fn resolve_to_thread(py: Python<'_>) -> PyResult<Py<PyAny>> {
 
     let fallback_scope = PyDict::new(py);
     py.run(
-        c_str!("async def _oxidize_to_thread(fn, *args, **kwargs):\n    return fn(*args, **kwargs)"),
+        c_str!(
+            "async def _oxidize_to_thread(fn, *args, **kwargs):\n    return fn(*args, **kwargs)"
+        ),
         None,
         Some(&fallback_scope),
     )?;

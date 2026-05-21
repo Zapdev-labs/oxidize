@@ -1,16 +1,30 @@
 use crate::tensor::AttentionError;
+use rayon::prelude::*;
 
 const FLASH_BLOCK_SIZE: usize = 64;
+const PARALLEL_FLASH_ATTN_MIN_SEQ_LEN: usize = 128;
 
 /// Compute dot product of two equal-length f32 slices.
-/// Uses AVX2 when available on x86-64, otherwise falls back to scalar.
+/// Uses AVX-512 > AVX2 > NEON > scalar based on target features.
 #[inline]
-fn dot_product_f32(a: &[f32], b: &[f32]) -> f32 {
+pub fn dot_product_f32(a: &[f32], b: &[f32]) -> f32 {
     assert_eq!(a.len(), b.len());
 
     #[cfg(target_arch = "x86_64")]
-    if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
-        return unsafe { dot_product_f32_avx2(a, b) };
+    {
+        if is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512vl") {
+            return unsafe { dot_product_f32_avx512(a, b) };
+        }
+        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+            return unsafe { dot_product_f32_avx2(a, b) };
+        }
+    }
+
+    #[cfg(any(target_arch = "aarch64", target_arch = "arm"))]
+    {
+        if std::arch::is_aarch64_feature_detected!("neon") {
+            return unsafe { dot_product_f32_neon(a, b) };
+        }
     }
 
     let mut sum = 0.0_f32;
@@ -18,6 +32,30 @@ fn dot_product_f32(a: &[f32], b: &[f32]) -> f32 {
         sum += x * y;
     }
     sum
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,avx512vl")]
+unsafe fn dot_product_f32_avx512(a: &[f32], b: &[f32]) -> f32 {
+    use std::arch::x86_64::*;
+
+    let len = a.len();
+    let mut sum = _mm512_setzero_ps();
+
+    let chunks = len / 16;
+    for i in 0..chunks {
+        let va = _mm512_loadu_ps(a.as_ptr().add(i * 16));
+        let vb = _mm512_loadu_ps(b.as_ptr().add(i * 16));
+        sum = _mm512_fmadd_ps(va, vb, sum);
+    }
+
+    let mut total = _mm512_reduce_add_ps(sum);
+
+    for i in (chunks * 16)..len {
+        total += a.get_unchecked(i) * b.get_unchecked(i);
+    }
+
+    total
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -30,19 +68,43 @@ unsafe fn dot_product_f32_avx2(a: &[f32], b: &[f32]) -> f32 {
 
     let chunks = len / 8;
     for i in 0..chunks {
-        let va = unsafe { _mm256_loadu_ps(a.as_ptr().add(i * 8)) };
-        let vb = unsafe { _mm256_loadu_ps(b.as_ptr().add(i * 8)) };
-        sum = unsafe { _mm256_fmadd_ps(va, vb, sum) };
+        let va = _mm256_loadu_ps(a.as_ptr().add(i * 8));
+        let vb = _mm256_loadu_ps(b.as_ptr().add(i * 8));
+        sum = _mm256_fmadd_ps(va, vb, sum);
     }
 
     // Horizontal sum of 8 floats
     let mut result = [0.0_f32; 8];
-    unsafe { _mm256_storeu_ps(result.as_mut_ptr(), sum) };
+    _mm256_storeu_ps(result.as_mut_ptr(), sum);
     let mut total = result.iter().sum::<f32>();
 
     // Tail
     for i in (chunks * 8)..len {
-        total += unsafe { a.get_unchecked(i) * b.get_unchecked(i) };
+        total += a.get_unchecked(i) * b.get_unchecked(i);
+    }
+
+    total
+}
+
+#[cfg(any(target_arch = "aarch64", target_arch = "arm"))]
+#[target_feature(enable = "neon")]
+unsafe fn dot_product_f32_neon(a: &[f32], b: &[f32]) -> f32 {
+    use std::arch::aarch64::*;
+
+    let len = a.len();
+    let mut sum = vdupq_n_f32(0.0);
+
+    let chunks = len / 4;
+    for i in 0..chunks {
+        let va = vld1q_f32(a.as_ptr().add(i * 4));
+        let vb = vld1q_f32(b.as_ptr().add(i * 4));
+        sum = vfmaq_f32(sum, va, vb);
+    }
+
+    let mut total = vaddvq_f32(sum);
+
+    for i in (chunks * 4)..len {
+        total += a.get_unchecked(i) * b.get_unchecked(i);
     }
 
     total
@@ -60,6 +122,7 @@ unsafe fn dot_product_f32_avx2(a: &[f32], b: &[f32]) -> f32 {
 /// - `value_layer`: `[seq_len][kv_len]` — full value cache for this layer, row-major
 /// - `kv_head`: which kv head within each row to read (offset `kv_head * head_dim`)
 /// - `output`: `[head_dim]` — single output vector
+#[allow(clippy::too_many_arguments)]
 pub fn flash_attention_decode_f32(
     query: &[f32],
     key_layer: &[f32],
@@ -99,9 +162,19 @@ pub fn flash_attention_decode_f32(
         output.fill(0.0);
         return Ok(());
     }
+    if head_dim == 0 || !kv_len.is_multiple_of(head_dim) {
+        return Err(AttentionError::InvalidKeyLength {
+            expected: seq_len.saturating_mul(kv_len),
+            actual: key_layer.len(),
+        });
+    }
+    let kv_heads = kv_len / head_dim;
+    if kv_head >= kv_heads {
+        return Err(AttentionError::InvalidKvHead { kv_head, kv_heads });
+    }
 
     let scale = 1.0_f32 / (head_dim as f32).sqrt();
-    let kv_offset = kv_head.saturating_mul(head_dim);
+    let kv_offset = kv_head * head_dim;
 
     // Online softmax with running accumulation.
     // See "Online normalizer calculation for softmax" (Milakov & Gimelshein, 2018)
@@ -154,6 +227,88 @@ pub fn flash_attention_decode_f32(
         let inv_sum = 1.0 / running_sum;
         for out in output.iter_mut() {
             *out *= inv_sum;
+        }
+    }
+
+    Ok(())
+}
+
+/// Parallel flash attention decode over multiple heads.
+/// Each head is processed independently; heads are parallelized when seq_len
+/// exceeds a threshold to amortize rayon overhead.
+#[allow(clippy::too_many_arguments)]
+pub fn flash_attention_decode_heads_f32(
+    query_heads: &[f32],
+    key_layer: &[f32],
+    value_layer: &[f32],
+    seq_len: usize,
+    head_dim: usize,
+    kv_len: usize,
+    num_heads: usize,
+    kv_heads: usize,
+    output_heads: &mut [f32],
+) -> Result<(), AttentionError> {
+    let q_len = num_heads * head_dim;
+    if query_heads.len() != q_len {
+        return Err(AttentionError::InvalidQueryLength {
+            expected: q_len,
+            actual: query_heads.len(),
+        });
+    }
+    let expected_kv = seq_len.saturating_mul(kv_len);
+    if key_layer.len() != expected_kv {
+        return Err(AttentionError::InvalidKeyLength {
+            expected: expected_kv,
+            actual: key_layer.len(),
+        });
+    }
+    if value_layer.len() != expected_kv {
+        return Err(AttentionError::InvalidValueLength {
+            expected: expected_kv,
+            actual: value_layer.len(),
+        });
+    }
+    if output_heads.len() != q_len {
+        return Err(AttentionError::InvalidOutputLength {
+            expected: q_len,
+            actual: output_heads.len(),
+        });
+    }
+
+    if kv_heads == 0 || !num_heads.is_multiple_of(kv_heads) {
+        return Err(AttentionError::InvalidHeadGrouping {
+            num_heads,
+            kv_heads,
+        });
+    }
+    let group_size = num_heads / kv_heads;
+
+    // Parallelize over heads when the sequence is long enough to justify overhead.
+    let use_parallel = seq_len >= PARALLEL_FLASH_ATTN_MIN_SEQ_LEN && num_heads > 1;
+
+    if use_parallel {
+        let results: Vec<Result<(), AttentionError>> = output_heads
+            .par_chunks_exact_mut(head_dim)
+            .enumerate()
+            .map(|(head, out_head)| {
+                let kv_head = head / group_size;
+                let q_head = &query_heads[head * head_dim..(head + 1) * head_dim];
+                flash_attention_decode_f32(
+                    q_head, key_layer, value_layer, seq_len, head_dim, kv_len, kv_head, out_head,
+                )
+            })
+            .collect();
+        for result in results {
+            result?;
+        }
+    } else {
+        for head in 0..num_heads {
+            let kv_head = head / group_size;
+            let q_head = &query_heads[head * head_dim..(head + 1) * head_dim];
+            let out_head = &mut output_heads[head * head_dim..(head + 1) * head_dim];
+            flash_attention_decode_f32(
+                q_head, key_layer, value_layer, seq_len, head_dim, kv_len, kv_head, out_head,
+            )?;
         }
     }
 
@@ -272,14 +427,14 @@ mod tests {
         let kv_offset = kv_head * head_dim;
 
         let mut scores = vec![0.0_f32; seq_len];
-        for t in 0..seq_len {
+        for (t, score) in scores.iter_mut().enumerate().take(seq_len) {
             let row_off = t * kv_len + kv_offset;
             let key_row = &key_layer[row_off..row_off + head_dim];
             let mut dot = 0.0_f32;
             for (q, k) in query.iter().zip(key_row.iter()) {
                 dot += q * k;
             }
-            scores[t] = dot * scale;
+            *score = dot * scale;
         }
 
         let max_score = scores.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
@@ -292,14 +447,75 @@ mod tests {
         }
 
         let mut output = vec![0.0_f32; head_dim];
-        for t in 0..seq_len {
+        for (t, score) in scores.iter().enumerate().take(seq_len) {
             let val_row_off = t * kv_len + kv_offset;
             let value_row = &value_layer[val_row_off..val_row_off + head_dim];
             for (out, v) in output.iter_mut().zip(value_row.iter()) {
-                *out += scores[t] * v;
+                *out += score * v;
             }
         }
         output
+    }
+
+    #[test]
+    fn flash_decode_rejects_out_of_range_kv_head() {
+        let head_dim = 4;
+        let kv_len = 8;
+        let seq_len = 2;
+        let query = vec![0.0_f32; head_dim];
+        let key_layer = vec![0.0_f32; seq_len * kv_len];
+        let value_layer = vec![0.0_f32; seq_len * kv_len];
+        let mut output = vec![0.0_f32; head_dim];
+
+        let err = flash_attention_decode_f32(
+            &query,
+            &key_layer,
+            &value_layer,
+            seq_len,
+            head_dim,
+            kv_len,
+            2,
+            &mut output,
+        )
+        .expect_err("kv_head beyond kv_heads should fail");
+        assert!(matches!(
+            err,
+            AttentionError::InvalidKvHead {
+                kv_head: 2,
+                kv_heads: 2
+            }
+        ));
+    }
+
+    #[test]
+    fn flash_decode_heads_rejects_non_divisible_grouping() {
+        let head_dim = 4;
+        let kv_len = 8;
+        let seq_len = 2;
+        let query_heads = vec![0.0_f32; 5 * head_dim];
+        let key_layer = vec![0.0_f32; seq_len * kv_len];
+        let value_layer = vec![0.0_f32; seq_len * kv_len];
+        let mut output = vec![0.0_f32; 5 * head_dim];
+
+        let err = flash_attention_decode_heads_f32(
+            &query_heads,
+            &key_layer,
+            &value_layer,
+            seq_len,
+            head_dim,
+            kv_len,
+            5,
+            2,
+            &mut output,
+        )
+        .expect_err("non-divisible num_heads/kv_heads should fail");
+        assert!(matches!(
+            err,
+            AttentionError::InvalidHeadGrouping {
+                num_heads: 5,
+                kv_heads: 2
+            }
+        ));
     }
 
     #[test]
@@ -319,7 +535,13 @@ mod tests {
 
         for kv_head in 0..kv_heads {
             let expected = reference_attention_decode(
-                &query, &key_layer, &value_layer, seq_len, head_dim, kv_len, kv_head,
+                &query,
+                &key_layer,
+                &value_layer,
+                seq_len,
+                head_dim,
+                kv_len,
+                kv_head,
             );
             let mut actual = vec![0.0_f32; head_dim];
             flash_attention_decode_f32(
@@ -335,7 +557,13 @@ mod tests {
             .expect("flash decode should succeed");
 
             for (a, e) in actual.iter().zip(expected.iter()) {
-                assert!((a - e).abs() < 1e-5, "head {} mismatch: {} vs {}", kv_head, a, e);
+                assert!(
+                    (a - e).abs() < 1e-5,
+                    "head {} mismatch: {} vs {}",
+                    kv_head,
+                    a,
+                    e
+                );
             }
         }
     }
@@ -359,7 +587,13 @@ mod tests {
 
         for kv_head in 0..kv_heads {
             let expected = reference_attention_decode(
-                &query, &key_layer, &value_layer, seq_len, head_dim, kv_len, kv_head,
+                &query,
+                &key_layer,
+                &value_layer,
+                seq_len,
+                head_dim,
+                kv_len,
+                kv_head,
             );
             let mut actual = vec![0.0_f32; head_dim];
             flash_attention_decode_f32(
@@ -375,7 +609,64 @@ mod tests {
             .expect("flash decode long seq should succeed");
 
             for (a, e) in actual.iter().zip(expected.iter()) {
-                assert!((a - e).abs() < 1e-4, "head {} mismatch: {} vs {}", kv_head, a, e);
+                assert!(
+                    (a - e).abs() < 1e-4,
+                    "head {} mismatch: {} vs {}",
+                    kv_head,
+                    a,
+                    e
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn flash_decode_heads_matches_single_head_reference() {
+        let head_dim = 4;
+        let kv_heads = 2;
+        let num_heads = 4;
+        let kv_len = kv_heads * head_dim;
+        let seq_len = 5;
+
+        let query_heads: Vec<f32> = (0..num_heads * head_dim)
+            .map(|i| ((i as f32 * 0.07).cos() * 1.3) - 0.2)
+            .collect();
+        let key_layer: Vec<f32> = (0..seq_len * kv_len)
+            .map(|i| ((i as f32 * 0.07).cos() * 1.3) - 0.2)
+            .collect();
+        let value_layer: Vec<f32> = (0..seq_len * kv_len)
+            .map(|i| ((i as f32 * 0.13).sin() * 0.9) + 0.1)
+            .collect();
+
+        let mut actual = vec![0.0_f32; num_heads * head_dim];
+        flash_attention_decode_heads_f32(
+            &query_heads,
+            &key_layer,
+            &value_layer,
+            seq_len,
+            head_dim,
+            kv_len,
+            num_heads,
+            kv_heads,
+            &mut actual,
+        )
+        .expect("flash decode heads should succeed");
+
+        for head in 0..num_heads {
+            let expected = reference_attention_decode(
+                &query_heads[head * head_dim..(head + 1) * head_dim],
+                &key_layer,
+                &value_layer,
+                seq_len,
+                head_dim,
+                kv_len,
+                head / (num_heads / kv_heads),
+            );
+            for (a, e) in actual[head * head_dim..(head + 1) * head_dim]
+                .iter()
+                .zip(expected.iter())
+            {
+                assert!((a - e).abs() < 1e-5, "head {} mismatch: {} vs {}", head, a, e);
             }
         }
     }
@@ -408,13 +699,13 @@ mod tests {
 
             let scale = 1.0_f32 / (head_dim as f32).sqrt();
             let mut scores = vec![0.0_f32; kv_seq];
-            for t in 0..kv_seq {
+            for (t, score) in scores.iter_mut().enumerate().take(kv_seq) {
                 let k_off = t * head_dim;
                 let mut dot = 0.0_f32;
                 for (q, k) in q_vec.iter().zip(key[k_off..k_off + head_dim].iter()) {
                     dot += q * k;
                 }
-                scores[t] = dot * scale;
+                *score = dot * scale;
             }
             let max_score = scores.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
             for s in scores.iter_mut() {
@@ -424,15 +715,21 @@ mod tests {
             for s in scores.iter_mut() {
                 *s /= sum;
             }
-            for t in 0..kv_seq {
+            for (t, score) in scores.iter().enumerate().take(kv_seq) {
                 let v_off = t * head_dim;
-                for (out, v) in expected.iter_mut().zip(value[v_off..v_off + head_dim].iter()) {
-                    *out += scores[t] * v;
+                for (out, v) in expected
+                    .iter_mut()
+                    .zip(value[v_off..v_off + head_dim].iter())
+                {
+                    *out += score * v;
                 }
             }
 
             let out_off = q_i * head_dim;
-            for (a, e) in actual[out_off..out_off + head_dim].iter().zip(expected.iter()) {
+            for (a, e) in actual[out_off..out_off + head_dim]
+                .iter()
+                .zip(expected.iter())
+            {
                 assert!((a - e).abs() < 1e-5, "q_i {} mismatch: {} vs {}", q_i, a, e);
             }
         }

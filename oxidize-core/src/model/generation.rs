@@ -176,28 +176,22 @@ impl<'a, T: Model> SpeculativeGenerationStream<'a, T> {
             current_token = token;
         }
 
-        // 2. Target model verifies draft tokens in a single forward pass.
-        // Build the full sequence: start_token + draft_tokens.
+        // 2. Target model verifies draft tokens: replay each prefix from a fixed KV checkpoint.
+        let verify_start = session.consumed_tokens();
         let mut verify_sequence = vec![start_token];
         verify_sequence.extend_from_slice(&draft_tokens);
-        let target_logits_all = target_model
-            .forward(&verify_sequence, session)
-            .map_err(GenerationError::Model)?;
 
-        // Extract per-token logits. The target model returns logits for the last token only
-        // in a typical implementation, but for speculative decoding we need logits for each
-        // position. Since our Model trait only returns final logits, we'll approximate by
-        // running forward for each token individually. This is less efficient but works with
-        // the current trait.
-        // TODO: Optimize with batched forward or multi-token output.
         let mut target_logits = Vec::with_capacity(draft_tokens.len() + 1);
-        for i in 1..=draft_tokens.len() {
-            let seq = &verify_sequence[..=i];
+        for i in 0..=draft_tokens.len() {
+            target_model.rewind_to(verify_start);
+            session.rewind_to(verify_start);
             let logits = target_model
-                .forward(seq, session)
+                .forward(&verify_sequence[..=i], session)
                 .map_err(GenerationError::Model)?;
             target_logits.push(logits);
         }
+
+        let mut accepted_sequence = vec![start_token];
 
         // 3. Speculative decode: accept/reject draft tokens.
         let randoms: Vec<f32> = (0..=draft_tokens.len())
@@ -213,7 +207,13 @@ impl<'a, T: Model> SpeculativeGenerationStream<'a, T> {
         )
         .map_err(GenerationError::Sampling)?;
 
-        // 4. Queue accepted tokens for emission.
+        accepted_sequence.extend_from_slice(&result.tokens);
+        target_model.rewind_to(verify_start);
+        session.rewind_to(verify_start);
+        target_model
+            .forward(&accepted_sequence, session)
+            .map_err(GenerationError::Model)?;
+
         for token in result.tokens {
             self.emit_buffer.push(token);
         }
@@ -242,7 +242,8 @@ impl<T: Model> Stream for SpeculativeGenerationStream<'_, T> {
 
     fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         // Emit buffered tokens first.
-        if let Some(token) = self.emit_buffer.pop() {
+        if !self.emit_buffer.is_empty() {
+            let token = self.emit_buffer.remove(0);
             return Poll::Ready(self.emit_token(token));
         }
 
@@ -287,8 +288,8 @@ impl<T: Model> Stream for SpeculativeGenerationStream<'_, T> {
                     self.state = GenerationState::Done;
                     return Poll::Ready(Some(Err(e)));
                 }
-                // After speculative step, emit the first buffered token.
-                if let Some(token) = self.emit_buffer.pop() {
+                if !self.emit_buffer.is_empty() {
+                    let token = self.emit_buffer.remove(0);
                     return Poll::Ready(self.emit_token(token));
                 }
                 self.state = GenerationState::Done;
