@@ -369,13 +369,12 @@ impl DFlashDraftModel {
             Ok(Some((f32_data, info.dimensions.clone())))
         };
 
-        // Load output projection (dflash_fc.weight is the lm_head in this model).
+        // Load FC fusion layer (merges target model hidden states with draft hidden).
         if let Some((data, dims)) = load_f32_with_dims("dflash_fc.weight")? {
-            let gguf_rows = dims[0] as usize;  // output dim (vocab)
-            let gguf_cols = dims[1] as usize;  // input dim (hidden)
+            let gguf_rows = dims[0] as usize;  // hidden output
+            let gguf_cols = dims[1] as usize;  // target features input
             let transposed = transpose_f32(&data, gguf_rows, gguf_cols);
-            // F32Weight(rows=output_size, cols=input_size)
-            model.output = F32Weight::from_slice(transposed, gguf_rows, gguf_cols);
+            model.fc = F32Weight::from_slice(transposed, gguf_rows, gguf_cols);
         }
 
         // Load hidden norm.
