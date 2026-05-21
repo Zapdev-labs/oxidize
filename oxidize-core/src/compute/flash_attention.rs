@@ -2,6 +2,52 @@ use crate::tensor::AttentionError;
 
 const FLASH_BLOCK_SIZE: usize = 64;
 
+/// Compute dot product of two equal-length f32 slices.
+/// Uses AVX2 when available on x86-64, otherwise falls back to scalar.
+#[inline]
+fn dot_product_f32(a: &[f32], b: &[f32]) -> f32 {
+    assert_eq!(a.len(), b.len());
+
+    #[cfg(target_arch = "x86_64")]
+    if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+        return unsafe { dot_product_f32_avx2(a, b) };
+    }
+
+    let mut sum = 0.0_f32;
+    for (x, y) in a.iter().zip(b.iter()) {
+        sum += x * y;
+    }
+    sum
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn dot_product_f32_avx2(a: &[f32], b: &[f32]) -> f32 {
+    use std::arch::x86_64::*;
+
+    let len = a.len();
+    let mut sum = _mm256_setzero_ps();
+
+    let chunks = len / 8;
+    for i in 0..chunks {
+        let va = _mm256_loadu_ps(a.as_ptr().add(i * 8));
+        let vb = _mm256_loadu_ps(b.as_ptr().add(i * 8));
+        sum = _mm256_fmadd_ps(va, vb, sum);
+    }
+
+    // Horizontal sum of 8 floats
+    let mut result = [0.0_f32; 8];
+    _mm256_storeu_ps(result.as_mut_ptr(), sum);
+    let mut total = result.iter().sum::<f32>();
+
+    // Tail
+    for i in (chunks * 8)..len {
+        total += a.get_unchecked(i) * b.get_unchecked(i);
+    }
+
+    total
+}
+
 /// Decode-phase flash attention: single query attends to a full key/value sequence.
 ///
 /// This is optimized for the decode phase (one query vector, many key/value vectors)
@@ -75,11 +121,7 @@ pub fn flash_attention_decode_f32(
             let row_off = t * kv_len + kv_offset;
             let key_row = &key_layer[row_off..row_off + head_dim];
 
-            let mut score = 0.0_f32;
-            // Scalar dot product — can be replaced with AVX2 in the SIMD task
-            for (q, k) in query.iter().zip(key_row.iter()) {
-                score += q * k;
-            }
+            let mut score = dot_product_f32(query, key_row);
             score *= scale;
 
             let new_max = running_max.max(score);
@@ -176,10 +218,7 @@ pub fn flash_attention_prefill_f32(
                 let k_off = t * head_dim;
                 let key_row = &key[k_off..k_off + head_dim];
 
-                let mut score = 0.0_f32;
-                for (q, k) in q_vec.iter().zip(key_row.iter()) {
-                    score += q * k;
-                }
+                let mut score = dot_product_f32(q_vec, key_row);
                 score *= scale;
 
                 let new_max = running_max.max(score);
