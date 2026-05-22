@@ -567,14 +567,14 @@ impl KvCache {
                 newest_available: newest,
             }),
             Some(newest) => {
-                if let Some(oldest) = self.oldest_available_position() {
-                    if position < oldest {
-                        return Err(KvCacheError::PositionEvicted {
-                            position,
-                            oldest_available: oldest,
-                            newest_available: newest,
-                        });
-                    }
+                if let Some(oldest) = self.oldest_available_position()
+                    && position < oldest
+                {
+                    return Err(KvCacheError::PositionEvicted {
+                        position,
+                        oldest_available: oldest,
+                        newest_available: newest,
+                    });
                 }
                 self.newest_position = Some(position);
                 Ok(())

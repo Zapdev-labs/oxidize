@@ -348,7 +348,8 @@ impl DFlashDraftModel {
             result
         }
 
-        let load_f32_with_dims = |name: &str| -> Result<Option<(Vec<f32>, Vec<u64>)>, String> {
+        type LoadF32Result = Result<Option<(Vec<f32>, Vec<u64>)>, String>;
+        let load_f32_with_dims = |name: &str| -> LoadF32Result {
             let info = match tensor_infos.iter().find(|t| t.name == name) {
                 Some(i) => i,
                 None => return Ok(None),
@@ -525,19 +526,19 @@ impl DFlashDraftModel {
         }
 
         // If target_hidden provided, fuse via FC layer.
-        if let Some(th) = target_hidden {
-            if !self.fc.data.is_empty() {
-                let mut fused = vec![0.0_f32; h];
-                self.fc.gemv(th, &mut fused)?;
-                if !self.fc_bias.is_empty() {
-                    for i in 0..h {
-                        fused[i] += self.fc_bias[i];
-                    }
+        if let Some(th) = target_hidden
+            && !self.fc.data.is_empty()
+        {
+            let mut fused = vec![0.0_f32; h];
+            self.fc.gemv(th, &mut fused)?;
+            if !self.fc_bias.is_empty() {
+                for (i, fused_i) in fused.iter_mut().enumerate().take(h) {
+                    *fused_i += self.fc_bias[i];
                 }
-                // Add residual: noise_embedding + fc(target_hidden)
-                for i in 0..h {
-                    hidden[i] += fused[i];
-                }
+            }
+            // Add residual: noise_embedding + fc(target_hidden)
+            for (hidden_i, fused_i) in hidden.iter_mut().zip(fused.iter()).take(h) {
+                *hidden_i += *fused_i;
             }
         }
 
@@ -681,14 +682,14 @@ impl DFlashDraftModel {
                     let q_offset = h_idx * head_dim;
                     let mut attn_weights = vec![0.0_f32; seq_len];
 
-                    for t in 0..seq_len {
+                    for (t, attn_w) in attn_weights.iter_mut().enumerate().take(seq_len) {
                         let (ref k_cache, _) = self.kv_cache[layer_idx][t];
                         let k_offset = kv_h * head_dim;
                         let mut score = 0.0_f32;
                         for d in 0..head_dim {
                             score += q[q_offset + d] * k_cache[k_offset + d];
                         }
-                        attn_weights[t] = score / (head_dim as f32).sqrt();
+                        *attn_w = score / (head_dim as f32).sqrt();
                     }
 
                     // Softmax.
@@ -697,22 +698,22 @@ impl DFlashDraftModel {
                         .copied()
                         .fold(f32::NEG_INFINITY, f32::max);
                     let mut sum_exp = 0.0_f32;
-                    for t in 0..seq_len {
-                        attn_weights[t] = (attn_weights[t] - max_score).exp();
-                        sum_exp += attn_weights[t];
+                    for attn_w in attn_weights.iter_mut().take(seq_len) {
+                        *attn_w = (*attn_w - max_score).exp();
+                        sum_exp += *attn_w;
                     }
-                    for t in 0..seq_len {
-                        attn_weights[t] /= sum_exp;
+                    for attn_w in attn_weights.iter_mut().take(seq_len) {
+                        *attn_w /= sum_exp;
                     }
 
                     // Weighted sum of values.
                     let out_offset = h_idx * head_dim;
                     for d in 0..head_dim {
                         let mut val = 0.0_f32;
-                        for t in 0..seq_len {
+                        for (t, attn_w) in attn_weights.iter().enumerate().take(seq_len) {
                             let (_, ref v_cache) = self.kv_cache[layer_idx][t];
                             let v_offset = kv_h * head_dim;
-                            val += attn_weights[t] * v_cache[v_offset + d];
+                            val += *attn_w * v_cache[v_offset + d];
                         }
                         attn_out[out_offset + d] = val;
                     }
@@ -812,13 +813,13 @@ impl Model for DFlashDraftModel {
             // In speculative decoding, forward_token with target_hidden will be called directly.
             hidden = self
                 .forward_token(token, None)
-                .map_err(|e| ModelError::InferenceFailed(e))?;
+                .map_err(ModelError::InferenceFailed)?;
             self.position_offset += 1;
         }
 
         let logits = self
             .logits(&hidden)
-            .map_err(|e| ModelError::InferenceFailed(e))?;
+            .map_err(ModelError::InferenceFailed)?;
         session.record_tokens(tokens.len());
         Ok(logits)
     }

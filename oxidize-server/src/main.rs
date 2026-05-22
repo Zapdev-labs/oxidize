@@ -1122,7 +1122,6 @@ fn generate_text_blocking(
             tail_free_z: request.tail_free_z,
             ..SamplingConfig::default()
         },
-        ..GenerationConfig::default()
     };
     let mut seeded_rng = request.seed.map(StdRng::seed_from_u64);
     let mut thread_rng = rand::thread_rng();

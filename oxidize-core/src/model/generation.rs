@@ -247,11 +247,11 @@ impl<'a, T: Model> SpeculativeGenerationStream<'a, T> {
         // Reset and replay accepted tokens through draft model.
         draft_model.reset_cache();
         let mut replay_token = start_token;
-        for i in 0..accepted_count {
+        for (_i, &dt) in draft_tokens.iter().enumerate().take(accepted_count) {
             let _ = draft_model
                 .forward_token(replay_token, None)
                 .map_err(|e| GenerationError::Model(ModelError::InferenceFailed(e)))?;
-            replay_token = draft_tokens[i];
+            replay_token = dt;
         }
 
         draft_tokens.clear();
@@ -311,7 +311,7 @@ impl<T: Model> Stream for SpeculativeGenerationStream<'_, T> {
                 self.session = Some(session);
                 self.last_token = Some(token);
                 self.last_token_pending_kv = true;
-                return Poll::Ready(self.emit_token(token));
+                Poll::Ready(self.emit_token(token))
             }
             GenerationState::Decode => {
                 if let Err(e) = self.run_speculative_step() {

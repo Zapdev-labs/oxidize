@@ -634,13 +634,8 @@ fn main() {
         oxidize_core::backend::Backend::Cpu => "CPU",
     };
     println!("backend: {} ({})", effective_backend.as_str(), backend_label);
-    let cpu_opt = args.cpu_optimized;
     let threads = if let Some(t) = args.threads.filter(|t| *t > 0) {
         t
-    } else if cpu_opt {
-        std::thread::available_parallelism()
-            .map(usize::from)
-            .unwrap_or(8)
     } else {
         std::thread::available_parallelism()
             .map(usize::from)
@@ -676,7 +671,7 @@ fn main() {
     }
     if let Some(model_path) = args.model.as_ref() {
         let loader = GgufModelLoader;
-        match loader.load_with_progress(&model_path, |progress| {
+        match loader.load_with_progress(model_path, |progress| {
             println!("{}", render_load_progress(progress))
         }) {
             Ok(mapped) => {
@@ -751,7 +746,7 @@ fn main() {
                     return;
                 }
                 let mut context_size = args.ctx_size.unwrap_or(context_size);
-                if cpu_opt {
+                if args.cpu_optimized {
                     context_size = context_size.min(2048);
                 }
                 let layer_count = metadata_u32(metadata, "llama.block_count")
