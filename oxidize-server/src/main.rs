@@ -1654,6 +1654,7 @@ fn inference_config_from_gguf(mapped: &MappedGgufFile, ctx_size: Option<usize>) 
         kv_cache_dtype: DType::F32,
         rms_norm_eps,
         rope_theta,
+        ..Default::default()
     }
 }
 

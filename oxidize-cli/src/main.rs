@@ -838,6 +838,7 @@ fn main() {
                     kv_cache_dtype: args.kv_cache_dtype.dtype(),
                     rms_norm_eps,
                     rope_theta,
+                    ..Default::default()
                 };
                 // Load tokenizer from GGUF metadata
                 let tokenizer = match load_tokenizer_from_gguf_metadata(metadata) {

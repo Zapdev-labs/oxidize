@@ -496,6 +496,201 @@ mod mlx_impl {
         }
     }
 
+    impl MlxComputeBackend {
+        /// Compute Alibi linear bias slopes for `num_heads`.
+        ///
+        /// Slope for head h is `-(2^( -(8 / num_heads) * h ))`.
+        /// Returns a 1-D MLX array of length `num_heads`.
+        pub fn alibi_slopes(&self, num_heads: usize) -> Result<MlxTensor, String> {
+            let base: f32 = 2.0_f32.powf(-(8.0_f32 / num_heads as f32));
+            let slopes: Vec<f32> = (0..num_heads)
+                .map(|h| -(base.powf(h as f32 + 1.0)))
+                .collect();
+            let array = mlx_rs::Array::from_slice(&slopes, &[num_heads as i32]);
+            Ok(MlxTensor::from_array(array))
+        }
+
+        /// Apply Alibi bias to a 1-D attention score vector per head.
+        ///
+        /// `scores` shape: [num_heads * seq_len].  For each head, adds
+        /// `slope * (token_idx - seq_len + 1)` to the raw attention score.
+        pub fn apply_alibi(
+            &self,
+            scores: &MlxTensor,
+            slopes: &MlxTensor,
+            seq_len: usize,
+            num_heads: usize,
+        ) -> Result<MlxTensor, String> {
+            // Build bias matrix [num_heads, seq_len] on host then copy to MLX.
+            let mut bias = vec![0.0_f32; num_heads * seq_len];
+            let slope_slice = slopes
+                .array
+                .try_as_slice::<f32>()
+                .map_err(|e| format!("alibi slopes as_slice: {e:?}"))?;
+            for h in 0..num_heads {
+                let slope = slope_slice[h];
+                for t in 0..seq_len {
+                    // Alibi adds negative slope * distance, closer = less penalty
+                    bias[h * seq_len + t] = slope * ((t as i32 - seq_len as i32 + 1) as f32);
+                }
+            }
+            let bias_array = mlx_rs::Array::from_slice(&bias, &[num_heads as i32, seq_len as i32]);
+            let scores_2d = mlx_rs::ops::reshape(&scores.array, &[num_heads as i32, seq_len as i32], &self.stream)
+                .map_err(|e| format!("reshape scores: {e:?}"))?;
+            let biased = mlx_rs::ops::add(&scores_2d, &bias_array, &self.stream)
+                .map_err(|e| format!("alibi add: {e:?}"))?;
+            let flat = mlx_rs::ops::flatten(&biased, None, None, &self.stream)
+                .map_err(|e| format!("flatten biased: {e:?}"))?;
+            Ok(MlxTensor::from_array(flat))
+        }
+
+        /// Scaled dot-product attention with a sliding-window causal mask.
+        ///
+        /// Only attends to the most recent `window_size` tokens; positions
+        beyond that are masked to `-inf`.
+        pub fn sliding_window_attention_decode(
+            &self,
+            query: &MlxTensor,
+            key_cache: &MlxTensor,
+            value_cache: &MlxTensor,
+            seq_len: usize,
+            head_dim: usize,
+            scale: f32,
+            window_size: usize,
+        ) -> Result<MlxTensor, String> {
+            let q = mlx_rs::ops::reshape(
+                &query.array,
+                &[1, 1, 1, head_dim as i32],
+                &self.stream,
+            )
+            .map_err(|e| format!("reshape query failed: {e:?}"))?;
+
+            let k = mlx_rs::ops::reshape(
+                &key_cache.array,
+                &[1, 1, seq_len as i32, head_dim as i32],
+                &self.stream,
+            )
+            .map_err(|e| format!("reshape key failed: {e:?}"))?;
+
+            let v = mlx_rs::ops::reshape(
+                &value_cache.array,
+                &[1, 1, seq_len as i32, head_dim as i32],
+                &self.stream,
+            )
+            .map_err(|e| format!("reshape value failed: {e:?}"))?;
+
+            // MLX fast_attention with causal mask handles causal masking natively.
+            // For sliding window we fall back to explicit mask construction when
+            // window_size < seq_len, otherwise standard causal is sufficient.
+            let result = if window_size > 0 && window_size < seq_len {
+                // Build a custom mask: [1, 1, 1, seq_len] where out-of-window = -inf
+                let mut mask_vals = vec![f32::NEG_INFINITY; seq_len];
+                let start = seq_len.saturating_sub(window_size);
+                for i in start..seq_len {
+                    mask_vals[i] = 0.0_f32;
+                }
+                let mask = mlx_rs::Array::from_slice(&mask_vals, &[1, 1, 1, seq_len as i32]);
+                let scores = mlx_rs::ops::matmul(&q, &k, &self.stream)
+                    .map_err(|e| format!("sliding-window matmul qk: {e:?}"))?;
+                let scaled = mlx_rs::ops::multiply(&scores, &mlx_rs::Array::from_slice(&[scale], &[1]), &self.stream)
+                    .map_err(|e| format!("sliding-window scale: {e:?}"))?;
+                let masked = mlx_rs::ops::add(&scaled, &mask, &self.stream)
+                    .map_err(|e| format!("sliding-window mask add: {e:?}"))?;
+                let weights = mlx_rs::ops::softmax(&masked, true, &self.stream)
+                    .map_err(|e| format!("sliding-window softmax: {e:?}"))?;
+                let out = mlx_rs::ops::matmul(&weights, &v, &self.stream)
+                    .map_err(|e| format!("sliding-window matmul wv: {e:?}"))?;
+                out
+            } else {
+                mlx_rs::fast::scaled_dot_product_attention(
+                    &q, &k, &v, scale, None::<&[Array]>, &self.stream,
+                )
+                .map_err(|e| format!("MLX fast_attention failed: {e:?}"))?
+            };
+
+            let flat = mlx_rs::ops::flatten(&result, None, None, &self.stream)
+                .map_err(|e| format!("flatten failed: {e:?}"))?;
+            Ok(MlxTensor::from_array(flat))
+        }
+
+        /// MoE top-k router: given input x and gate weight W, compute
+        /// scores = softmax(x @ W.T), then select top-k experts.
+        ///
+        /// Returns (expert_indices [k], gate_weights [k]).
+        pub fn moe_topk(
+            &self,
+            input: &MlxTensor,
+            gate_weight: &MlxWeightStorage,
+            num_experts: usize,
+            k: usize,
+        ) -> Result<(Vec<usize>, Vec<f32>), String> {
+            let h = input.shape[0];
+            let scores_tensor = self
+                .gemv(gate_weight, input, num_experts, h)
+                .map_err(|e| format!("moe gate gemv: {e}"))?;
+            let softmaxed = mlx_rs::ops::softmax(&scores_tensor.array, true, &self.stream)
+                .map_err(|e| format!("moe softmax: {e:?}"))?;
+            let scores_slice = softmaxed
+                .try_as_slice::<f32>()
+                .map_err(|e| format!("moe scores slice: {e:?}"))?;
+
+            // Argmax top-k manually (small vector, num_experts <= 256).
+            let mut indexed: Vec<(usize, f32)> = scores_slice
+                .iter()
+                .enumerate()
+                .map(|(i, &v)| (i, v))
+                .collect();
+            indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            let top_k = indexed.into_iter().take(k).collect::<Vec<_>>();
+            let indices = top_k.iter().map(|(i, _)| *i).collect();
+            let weights = top_k.iter().map(|(_, w)| *w).collect();
+            Ok((indices, weights))
+        }
+
+        /// DeepSeek MLA: project input to compressed latent, then expand to Q/KV.
+        ///
+        /// `input` is [hidden_size].
+        /// `latent_w` projects [hidden_size] -> [latent_dim].
+        /// `q_up_w` projects [latent_dim] -> [q_out_dim].
+        /// `kv_up_w` projects [latent_dim] -> [kv_out_dim].
+        ///
+        /// Returns (q_vec, k_vec, v_vec) as host f32 slices.
+        pub fn mla_project_qkv(
+            &self,
+            input: &MlxTensor,
+            latent_w: &MlxWeightStorage,
+            q_up_w: &MlxWeightStorage,
+            kv_up_w: &MlxWeightStorage,
+            latent_dim: usize,
+            q_out_dim: usize,
+            kv_out_dim: usize,
+            hidden_size: usize,
+        ) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>), String> {
+            let latent = self
+                .gemv(latent_w, input, latent_dim, hidden_size)
+                .map_err(|e| format!("mla latent gemv: {e}"))?;
+            let q = self
+                .gemv(q_up_w, &latent, q_out_dim, latent_dim)
+                .map_err(|e| format!("mla q_up gemv: {e}"))?;
+            let kv = self
+                .gemv(kv_up_w, &latent, kv_out_dim, latent_dim)
+                .map_err(|e| format!("mla kv_up gemv: {e}"))?;
+
+            let mut q_host = vec![0.0_f32; q_out_dim];
+            let mut kv_host = vec![0.0_f32; kv_out_dim];
+            self.tensor_to_f32(&q, &mut q_host)
+                .map_err(|e| format!("mla q to host: {e}"))?;
+            self.tensor_to_f32(&kv, &mut kv_host)
+                .map_err(|e| format!("mla kv to host: {e}"))?;
+
+            // Split KV into K and V halves.
+            let half = kv_out_dim / 2;
+            let k = kv_host[..half].to_vec();
+            let v = kv_host[half..].to_vec();
+            Ok((q_host, k, v))
+        }
+    }
+
     // ------------------------------------------------------------------
     //  Helper: map mlx_rs::Dtype -> oxidize_core::tensor::DType
     // ------------------------------------------------------------------
@@ -1001,6 +1196,145 @@ mod tests {
                     "quantized matmul mismatch at row {i}: cpu={cpu} mlx={mlx} rel_diff={rel_diff}"
                 );
             }
+        }
+
+        #[test]
+        fn mlx_alibi_slopes_computed_correctly() {
+            let backend = MlxComputeBackend::new();
+            let num_heads = 8usize;
+            let slopes_tensor = backend.alibi_slopes(num_heads).expect("alibi slopes should succeed");
+            let mut host = vec![0.0_f32; num_heads];
+            backend.tensor_to_f32(&slopes_tensor, &mut host).unwrap();
+
+            let base: f32 = 2.0_f32.powf(-(8.0_f32 / num_heads as f32));
+            for (i, &slope) in host.iter().enumerate() {
+                let expected = -(base.powf(i as f32 + 1.0));
+                assert!((slope - expected).abs() < 1e-4, "alibi slope mismatch at head {i}: got {slope}, expected {expected}");
+            }
+        }
+
+        #[test]
+        fn mlx_sliding_window_attention_decode_runs() {
+            let backend = MlxComputeBackend::new();
+            let head_dim = 4usize;
+            let seq_len = 8usize;
+            let window_size = 4usize;
+            let q = backend.tensor_from_f32(&[0.3_f32, -0.8, 1.1, 0.2]).unwrap();
+            let keys: Vec<f32> = (0..seq_len * head_dim)
+                .map(|i| ((i as f32 * 0.07).cos() * 1.3) - 0.2)
+                .collect();
+            let values: Vec<f32> = (0..seq_len * head_dim)
+                .map(|i| ((i as f32 * 0.13).sin() * 0.9) + 0.1)
+                .collect();
+            let scale = 1.0_f32 / (head_dim as f32).sqrt();
+
+            let k_tensor = backend.tensor_from_f32(&keys).unwrap();
+            let v_tensor = backend.tensor_from_f32(&values).unwrap();
+
+            let out = backend
+                .sliding_window_attention_decode(
+                    &q, &k_tensor, &v_tensor, seq_len, head_dim, scale, window_size,
+                )
+                .expect("sliding window attention should succeed");
+
+            assert_eq!(backend.tensor_shape(&out), vec![head_dim]);
+        }
+
+        #[test]
+        fn mlx_sliding_window_attention_matches_standard_when_window_gte_seq_len() {
+            let backend = MlxComputeBackend::new();
+            let head_dim = 4usize;
+            let seq_len = 3usize;
+            let q = backend.tensor_from_f32(&[0.3_f32, -0.8, 1.1, 0.2]).unwrap();
+            let keys: Vec<f32> = (0..seq_len * head_dim)
+                .map(|i| ((i as f32 * 0.07).cos() * 1.3) - 0.2)
+                .collect();
+            let values: Vec<f32> = (0..seq_len * head_dim)
+                .map(|i| ((i as f32 * 0.13).sin() * 0.9) + 0.1)
+                .collect();
+            let scale = 1.0_f32 / (head_dim as f32).sqrt();
+
+            let k_tensor = backend.tensor_from_f32(&keys).unwrap();
+            let v_tensor = backend.tensor_from_f32(&values).unwrap();
+
+            let standard = backend
+                .attention_decode(&q, &k_tensor, &v_tensor, seq_len, head_dim, scale)
+                .unwrap();
+            let sliding = backend
+                .sliding_window_attention_decode(
+                    &q, &k_tensor, &v_tensor, seq_len, head_dim, scale, seq_len,
+                )
+                .unwrap();
+
+            let mut std_host = vec![0.0_f32; head_dim];
+            let mut slide_host = vec![0.0_f32; head_dim];
+            backend.tensor_to_f32(&standard, &mut std_host).unwrap();
+            backend.tensor_to_f32(&sliding, &mut slide_host).unwrap();
+
+            for (i, (s, sl)) in std_host.iter().zip(slide_host.iter()).enumerate() {
+                assert!((s - sl).abs() < 1e-4, "sliding_window vs standard mismatch at dim {i}: std={s} slide={sl}");
+            }
+        }
+
+        #[test]
+        fn mlx_moe_topk_selects_k_experts() {
+            let backend = MlxComputeBackend::new();
+            let num_experts = 4usize;
+            let k = 2usize;
+            let hidden_size = 8usize;
+
+            // Build a synthetic gate weight that maps hidden_size -> num_experts.
+            let gate_weights: Vec<f32> = (0..num_experts * hidden_size)
+                .map(|i| (i as f32 * 0.01).sin() * 0.5)
+                .collect();
+            let gate_storage = MlxWeightStorage::F32(
+                mlx_rs::Array::from_slice(&gate_weights, &[num_experts as i32, hidden_size as i32]),
+            );
+            let input = backend.tensor_from_f32(&[1.0_f32; hidden_size]).unwrap();
+
+            let (indices, weights) = backend
+                .moe_topk(&input, &gate_storage, num_experts, k)
+                .expect("moe_topk should succeed");
+
+            assert_eq!(indices.len(), k);
+            assert_eq!(weights.len(), k);
+            assert!(weights.iter().all(|&w| w >= 0.0 && w <= 1.0));
+            // Top-k indices should be unique.
+            let mut uniq = indices.clone();
+            uniq.sort_unstable();
+            uniq.dedup();
+            assert_eq!(uniq.len(), k, "top-k expert indices should be unique");
+        }
+
+        #[test]
+        fn mlx_mla_project_qkv_shapes_correct() {
+            let backend = MlxComputeBackend::new();
+            let hidden_size = 8usize;
+            let latent_dim = 4usize;
+            let q_out_dim = 6usize;
+            let kv_out_dim = 6usize; // split into k=3, v=3
+
+            let latent_w = MlxWeightStorage::F32(
+                mlx_rs::Array::from_slice(&vec![0.1_f32; latent_dim * hidden_size], &[latent_dim as i32, hidden_size as i32]),
+            );
+            let q_up_w = MlxWeightStorage::F32(
+                mlx_rs::Array::from_slice(&vec![0.2_f32; q_out_dim * latent_dim], &[q_out_dim as i32, latent_dim as i32]),
+            );
+            let kv_up_w = MlxWeightStorage::F32(
+                mlx_rs::Array::from_slice(&vec![0.3_f32; kv_out_dim * latent_dim], &[kv_out_dim as i32, latent_dim as i32]),
+            );
+
+            let input = backend.tensor_from_f32(&[0.5_f32; hidden_size]).unwrap();
+            let (q, k, v) = backend
+                .mla_project_qkv(
+                    &input, &latent_w, &q_up_w, &kv_up_w,
+                    latent_dim, q_out_dim, kv_out_dim, hidden_size,
+                )
+                .expect("mla_project_qkv should succeed");
+
+            assert_eq!(q.len(), q_out_dim, "mla q length mismatch");
+            assert_eq!(k.len(), kv_out_dim / 2, "mla k length mismatch");
+            assert_eq!(v.len(), kv_out_dim / 2, "mla v length mismatch");
         }
     }
 }

@@ -10,6 +10,73 @@ use crate::tensor::{
 use memmap2::Mmap;
 use std::sync::Arc;
 
+/// Detected model architecture from GGUF metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ModelArchitecture {
+    #[default]
+    Llama,
+    Mistral,
+    Mixtral,
+    DeepSeek,
+    Qwen,
+    Gemma,
+    Phi,
+    Falcon,
+    Gpt2,
+    GptJ,
+    GptNeoX,
+}
+
+impl ModelArchitecture {
+    /// Detect architecture from GGUF metadata.
+    pub fn from_gguf(mapped: &MappedGgufFile) -> Self {
+        let parsed = mapped.parsed();
+        if let Some(arch) = parsed.architecture() {
+            match arch {
+                "llama" => Self::Llama,
+                "mistral" => Self::Mistral,
+                "mixtral" => Self::Mixtral,
+                "deepseek" | "deepseek_v2" | "deepseek_v3" | "deepseek_moe" => Self::DeepSeek,
+                "qwen" | "qwen2" | "qwen2moe" | "qwen35" => Self::Qwen,
+                "gemma" | "gemma4" => Self::Gemma,
+                "phi" | "phi3" => Self::Phi,
+                "falcon" => Self::Falcon,
+                "gpt2" => Self::Gpt2,
+                "gptj" => Self::GptJ,
+                "gptneox" => Self::GptNeoX,
+                _ => Self::Llama,
+            }
+        } else {
+            Self::Llama
+        }
+    }
+
+    /// Whether this architecture uses Alibi positional encoding (no RoPE).
+    pub fn uses_alibi(&self) -> bool {
+        matches!(self, Self::Falcon | Self::Gpt2 | Self::GptJ | Self::GptNeoX)
+    }
+
+    /// Whether this architecture uses sliding window attention.
+    pub fn uses_sliding_window(&self) -> bool {
+        matches!(self, Self::Qwen | Self::Mistral)
+    }
+
+    /// Whether this architecture uses MoE FFN.
+    pub fn uses_moe(&self) -> bool {
+        matches!(self, Self::Mixtral)
+    }
+
+    /// Whether this architecture uses parallel attention + FFN (fused residual).
+    pub fn uses_parallel_attn_ffn(&self) -> bool {
+        matches!(self, Self::Gemma | Self::Phi)
+    }
+
+    /// Whether this architecture uses MLA compressed attention.
+    pub fn uses_mla(&self) -> bool {
+        matches!(self, Self::DeepSeek)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct InferenceConfig {
     pub vocab_size: usize,
@@ -23,6 +90,38 @@ pub struct InferenceConfig {
     pub kv_cache_dtype: DType,
     pub rms_norm_eps: f32,
     pub rope_theta: f32,
+    pub architecture: ModelArchitecture,
+    /// Sliding window size (0 = full attention). Used by Qwen/Mistral.
+    pub sliding_window: usize,
+    /// Number of MoE experts (0 = dense). Used by Mixtral.
+    pub num_experts: usize,
+    /// Number of active MoE experts per token. Used by Mixtral.
+    pub num_experts_per_tok: usize,
+    /// Alibi number of heads for slope computation (0 = not used).
+    pub alibi_num_heads: usize,
+}
+
+impl Default for InferenceConfig {
+    fn default() -> Self {
+        Self {
+            vocab_size: 32000,
+            context_size: 4096,
+            layer_count: 32,
+            hidden_size: 4096,
+            intermediate_size: 11008,
+            num_attention_heads: 32,
+            num_key_value_heads: 32,
+            key_value_head_dim: 0,
+            kv_cache_dtype: DType::F32,
+            rms_norm_eps: 1e-5,
+            rope_theta: 10000.0,
+            architecture: ModelArchitecture::Llama,
+            sliding_window: 0,
+            num_experts: 0,
+            num_experts_per_tok: 0,
+            alibi_num_heads: 0,
+        }
+    }
 }
 
 impl InferenceConfig {
@@ -280,9 +379,14 @@ pub(crate) fn lookup_quantized_embedding(
 impl InferenceModel {
     pub fn load_from_gguf(
         mapped: &MappedGgufFile,
-        config: InferenceConfig,
+        mut config: InferenceConfig,
         use_mmap: bool,
     ) -> Result<Self, String> {
+        // Architecture-aware configuration
+        config.architecture = ModelArchitecture::from_gguf(mapped);
+        if config.alibi_num_heads == 0 {
+            config.alibi_num_heads = config.num_attention_heads;
+        }
         let mut tok_embeddings: Option<WeightStorage> = None;
         let mut tok_embeddings_cols: usize = config.hidden_size;
         let mut norm_weight: Option<Vec<f32>> = None;
@@ -1247,6 +1351,7 @@ mod tests {
             kv_cache_dtype: DType::F32,
             rms_norm_eps: 1e-6,
             rope_theta: 10_000.0,
+            ..Default::default()
         };
         let kv_cache_config = KvCacheConfig {
             layer_count: config.layer_count,
@@ -1284,6 +1389,7 @@ mod tests {
             kv_cache_dtype: DType::F32,
             rms_norm_eps: 1e-6,
             rope_theta: 10_000.0,
+            ..Default::default()
         };
         let ws = Workspace::for_config(&config);
 

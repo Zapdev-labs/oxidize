@@ -44,6 +44,21 @@ impl MappedGgufFile {
         self.mmap.clone()
     }
 
+    #[cfg(test)]
+    pub fn from_parsed_for_test(parsed: GgufFile) -> Self {
+        Self {
+            mmap: std::sync::Arc::new(
+                memmap2::MmapOptions::new()
+                    .len(1)
+                    .map_anon()
+                    .unwrap()
+                    .make_read_only()
+                    .unwrap(),
+            ),
+            parsed,
+        }
+    }
+
     pub fn advise_random_access(&self) -> std::io::Result<()> {
         self.mmap.advise(Advice::Random)
     }
