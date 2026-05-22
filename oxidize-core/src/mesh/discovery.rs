@@ -16,6 +16,7 @@ use libp2p::yamux;
 use serde::{Deserialize, Serialize};
 
 use super::node::{MeshConfig, NodeCapabilities};
+use super::sharding::{ShardPlan, local_assignment};
 
 /// Events emitted by the discovery layer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -177,6 +178,29 @@ fn publish_envelope<T: serde::Serialize>(
     Ok(())
 }
 
+/// Broadcast a [`ShardPlan`] on the `COMMANDS` topic.
+///
+/// Called by the master node after it has computed the placement.
+pub fn broadcast_shard_plan(
+    swarm: &mut Swarm<crate::mesh::gossip::MeshBehaviour>,
+    namespace: &str,
+    clock: u64,
+    plan: &ShardPlan,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    println!("broadcast shard plan: model={} strategy={:?}", plan.model_id, plan.strategy);
+    for (peer_id, assignment) in &plan.assignments {
+        match assignment {
+            crate::mesh::sharding::ShardAssignment::Pipeline { start_layer, end_layer } => {
+                println!("  pipeline [{start_layer}-{end_layer}]->{peer_id}");
+            }
+            crate::mesh::sharding::ShardAssignment::Tensor { split_index, total_splits } => {
+                println!("  tensor shard {split_index}/{total_splits}->{peer_id}");
+            }
+        }
+    }
+    publish_envelope(swarm, namespace, crate::mesh::gossip::TopicKind::Commands, clock, plan)
+}
+
 /// Run a mesh node: build swarm, listen on `mesh_port`, drive the event loop,
 /// converge on a leader via Bully election, and gracefully shut down on
 /// SIGINT / SIGTERM.
@@ -322,6 +346,27 @@ pub async fn run_mesh_node(mesh_port: u16) -> Result<(), Box<dyn std::error::Err
                                                 }
                                                 if let crate::mesh::election::ElectionState::Elected { clock, master } = &election.state {
                                                     println!("Election result accepted: master={} clock={}", master, clock);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    crate::mesh::gossip::TopicKind::Commands => {
+                                        if let Ok((clock, inner)) = crate::mesh::gossip::MeshEnvelope::unpack(&message.data) {
+                                            if !router.accept(clock) {
+                                                println!("Stale command dropped (clock {} < active {})", clock, router.active_clock);
+                                                continue;
+                                            }
+                                            if let Ok(plan) = serde_json::from_slice::<crate::mesh::sharding::ShardPlan>(&inner) {
+                                                println!("Received COMMAND: shard plan model={} strategy={:?}", plan.model_id, plan.strategy);
+                                                if let Some(assignment) = local_assignment(&plan, &local_peer_id_str) {
+                                                    match assignment {
+                                                        crate::mesh::sharding::ShardAssignment::Pipeline { start_layer, end_layer } => {
+                                                            println!("  load shard layers {}-{}", start_layer, end_layer);
+                                                        }
+                                                        crate::mesh::sharding::ShardAssignment::Tensor { split_index, total_splits } => {
+                                                            println!("  load tensor shard {}/{}", split_index, total_splits);
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
