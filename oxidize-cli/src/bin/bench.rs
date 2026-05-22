@@ -34,24 +34,37 @@ fn main() {
 
         // Extract config from metadata
         let metadata = &mapped.parsed().metadata;
-        let hidden_size =
-            metadata_u32(metadata, "dflash-draft.embedding_length").unwrap_or(5120) as usize;
-        let num_layers = metadata_u32(metadata, "dflash-draft.block_count").unwrap_or(5) as usize;
-        let num_attention_heads =
-            metadata_u32(metadata, "dflash-draft.attention.head_count").unwrap_or(32) as usize;
-        let num_key_value_heads =
-            metadata_u32(metadata, "dflash-draft.attention.head_count_kv").unwrap_or(8) as usize;
-        let intermediate_size =
-            metadata_u32(metadata, "dflash-draft.feed_forward_length").unwrap_or(17408) as usize;
-        let block_size =
-            metadata_u32(metadata, "dflash-draft.dflash.block_size").unwrap_or(16) as usize;
-        let mask_token_id =
-            metadata_u32(metadata, "dflash-draft.dflash.mask_token_id").unwrap_or(151665);
-        let n_target_features = metadata_u32(metadata, "dflash-draft.dflash.n_target_features")
+        let hidden_size = metadata_u32(metadata, "dflash-draft.hidden_size")
+            .or_else(|| metadata_u32(metadata, "dflash-draft.embedding_length"))
+            .unwrap_or(5120) as usize;
+        let num_layers = metadata_u32(metadata, "dflash-draft.num_hidden_layers")
+            .or_else(|| metadata_u32(metadata, "dflash-draft.block_count"))
+            .unwrap_or(5) as usize;
+        let num_attention_heads = metadata_u32(metadata, "dflash-draft.num_attention_heads")
+            .or_else(|| metadata_u32(metadata, "dflash-draft.attention.head_count"))
+            .unwrap_or(32) as usize;
+        let num_key_value_heads = metadata_u32(metadata, "dflash-draft.num_key_value_heads")
+            .or_else(|| metadata_u32(metadata, "dflash-draft.attention.head_count_kv"))
+            .unwrap_or(8) as usize;
+        let intermediate_size = metadata_u32(metadata, "dflash-draft.intermediate_size")
+            .or_else(|| metadata_u32(metadata, "dflash-draft.feed_forward_length"))
+            .unwrap_or(17408) as usize;
+        let block_size = metadata_u32(metadata, "dflash-draft.block_size")
+            .or_else(|| metadata_u32(metadata, "dflash-draft.dflash.block_size"))
+            .unwrap_or(16) as usize;
+        let mask_token_id = metadata_u32(metadata, "dflash-draft.mask_token_id")
+            .or_else(|| metadata_u32(metadata, "dflash-draft.dflash.mask_token_id"))
+            .unwrap_or(151665);
+        let n_target_features = metadata_u32(metadata, "dflash-draft.vocab_size")
+            .or_else(|| metadata_u32(metadata, "dflash-draft.n_target_features"))
+            .or_else(|| metadata_u32(metadata, "dflash-draft.dflash.n_target_features"))
             .unwrap_or(25600) as usize;
-        let rope_theta = metadata_f32(metadata, "dflash-draft.rope.freq_base").unwrap_or(1e7);
-        let rms_norm_eps =
-            metadata_f32(metadata, "dflash-draft.attention.layer_norm_rms_epsilon").unwrap_or(1e-5);
+        let rope_theta = metadata_f32(metadata, "dflash-draft.rope_theta")
+            .or_else(|| metadata_f32(metadata, "dflash-draft.rope.freq_base"))
+            .unwrap_or(1e7);
+        let rms_norm_eps = metadata_f32(metadata, "dflash-draft.rms_norm_eps")
+            .or_else(|| metadata_f32(metadata, "dflash-draft.attention.layer_norm_rms_epsilon"))
+            .unwrap_or(1e-5);
         let context_length =
             metadata_u32(metadata, "dflash-draft.context_length").unwrap_or(262144) as usize;
 

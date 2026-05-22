@@ -742,6 +742,13 @@ fn main() {
 
                 // Extract model config from GGUF metadata and run generation
                 let metadata = &mapped.parsed().metadata;
+                if mapped.parsed().architecture() == Some("dflash-draft") {
+                    eprintln!(
+                        "DFlash draft GGUF loaded successfully, but it is not a standalone text model: it has no token embeddings/lm_head. Use `oxidize-bench --model {}` to benchmark draft forward passes, or pair it with a target model for speculative decoding.",
+                        model_path.display()
+                    );
+                    return;
+                }
                 let vocab_size = metadata_u32(metadata, "llama.vocab_size")
                     .or_else(|| metadata_u32(metadata, "qwen35.vocab_size"))
                     .or_else(|| metadata_u32(metadata, "qwen2.vocab_size"))

@@ -2,7 +2,9 @@ use crate::gguf::{GgufQuantizationType, MappedGgufFile};
 use crate::model::{Logits, Model, ModelError, Session, Token};
 use crate::quantization::{dequantize_scalar, quantized_size};
 use crate::safetensors::MappedSafeTensorsFile;
-use crate::tensor::{DType, apply_rope_f32, f16_le_to_f32, gemv_f32_transposed, rms_norm_f32};
+use crate::tensor::{
+    DType, apply_rope_f32, f16_le_to_f32, gemv_f32_transposed, gemv_quantized_f32, rms_norm_f32,
+};
 
 /// DFlash configuration matching the HuggingFace config.json.
 #[derive(Debug, Clone, PartialEq)]
@@ -76,22 +78,87 @@ pub fn implemented_dflash_features() -> &'static [DFlashFeature] {
     ]
 }
 
-/// Simple F32 weight matrix wrapper for clarity.
+/// Raw quantized weight kept in its native GGUF row-major layout
+/// (`out_dim` rows of `in_dim` columns). Dequantization happens on-the-fly
+/// inside the GEMV kernel, so the matrix is read at ~0.5 bytes/weight (Q4_K)
+/// instead of 4 bytes/weight, which is the dominant cost during decode.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuantWeight {
+    pub bytes: Vec<u8>,
+    pub qtype: GgufQuantizationType,
+    pub out_dim: usize,
+    pub in_dim: usize,
+}
+
+/// A projection weight, stored either as on-the-fly-dequantized quantized
+/// bytes (fast, memory-bandwidth-friendly decode path) or as a plain f32
+/// matrix in the transposed layout expected by `gemv_f32_transposed`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct F32Weight {
     pub data: Vec<f32>,
     pub rows: usize,
     pub cols: usize,
+    pub quant: Option<QuantWeight>,
 }
 
 impl F32Weight {
     pub fn from_slice(data: Vec<f32>, rows: usize, cols: usize) -> Self {
-        Self { data, rows, cols }
+        Self {
+            data,
+            rows,
+            cols,
+            quant: None,
+        }
+    }
+
+    /// Build a weight backed by raw quantized GGUF bytes. `out_dim`/`in_dim`
+    /// are the native GGUF dimensions (rows = output features, cols = input
+    /// features).
+    pub fn from_quantized(
+        bytes: Vec<u8>,
+        qtype: GgufQuantizationType,
+        out_dim: usize,
+        in_dim: usize,
+    ) -> Self {
+        Self {
+            data: Vec::new(),
+            rows: in_dim,
+            cols: out_dim,
+            quant: Some(QuantWeight {
+                bytes,
+                qtype,
+                out_dim,
+                in_dim,
+            }),
+        }
+    }
+
+    /// True when this weight holds either f32 data or quantized bytes.
+    pub fn is_loaded(&self) -> bool {
+        !self.data.is_empty() || self.quant.is_some()
     }
 
     pub fn gemv(&self, input: &[f32], output: &mut [f32]) -> Result<(), String> {
-        gemv_f32_transposed(&self.data, self.cols, self.rows, input, output)
-            .map_err(|e| format!("{:?}", e))
+        if let Some(q) = &self.quant {
+            gemv_quantized_f32(q.qtype, &q.bytes, q.out_dim, q.in_dim, input, output)
+                .map_err(|e| format!("{:?}", e))
+        } else {
+            gemv_f32_transposed(&self.data, self.cols, self.rows, input, output)
+                .map_err(|e| format!("{:?}", e))
+        }
+    }
+}
+
+/// Whether the fused on-the-fly quantized GEMV kernel supports `qtype` for an
+/// input dimension of `in_dim`. The kernels iterate full quantization blocks,
+/// so `in_dim` must be block-aligned.
+fn quantized_gemv_supported(qtype: GgufQuantizationType, in_dim: usize) -> bool {
+    match qtype {
+        GgufQuantizationType::Q4_K_S
+        | GgufQuantizationType::Q4_K_M
+        | GgufQuantizationType::Q6_K => in_dim % 256 == 0,
+        GgufQuantizationType::Q8_0 => in_dim % 32 == 0,
+        _ => false,
     }
 }
 
@@ -419,12 +486,73 @@ impl DFlashDraftModel {
             Ok(Some((f32_data, info.dimensions.clone())))
         };
 
+        // Load a projection weight, preferring the on-the-fly quantized GEMV
+        // path (8x less memory traffic during decode) and falling back to a
+        // dequantized f32 transpose for unsupported quant types / shapes.
+        let bytes_all = mapped.bytes();
+        let load_proj = |name: &str| -> Result<F32Weight, String> {
+            let info = match tensor_infos.iter().find(|t| t.name == name) {
+                Some(i) => i,
+                None => return Ok(F32Weight::from_slice(Vec::new(), 0, 0)),
+            };
+            if info.dimensions.len() != 2 {
+                // Fall back to the f32 path for non-2D tensors.
+                return load_f32_with_dims(name).map(|opt| match opt {
+                    Some((data, dims)) => {
+                        let r = dims[0] as usize;
+                        let c = dims[1] as usize;
+                        F32Weight::from_slice(transpose_f32(&data, r, c), c, r)
+                    }
+                    None => F32Weight::from_slice(Vec::new(), 0, 0),
+                });
+            }
+            let qtype = GgufQuantizationType::from_ggml_type(info.ggml_type);
+            // GGUF stores the innermost dim (dims[0]) as the input/contiguous
+            // axis and dims[1] as the output rows, so the native row-major
+            // bytes are exactly `out_dim` rows of `in_dim` quantized elements —
+            // precisely the layout the fused GEMV kernel consumes.
+            let in_dim = info.dimensions[0] as usize;
+            let out_dim = info.dimensions[1] as usize;
+
+            if quantized_gemv_supported(qtype, in_dim) {
+                let value_count = out_dim * in_dim;
+                let qsize = quantized_size(qtype, value_count)
+                    .map_err(|e| format!("quantized_size for {}: {:?}", name, e))?;
+                let offset = info.absolute_offset as usize;
+                let end = offset.checked_add(qsize).ok_or_else(|| {
+                    format!("tensor {name}: offset overflow (offset={offset}, size={qsize})")
+                })?;
+                if end > bytes_all.len() {
+                    return Err(format!(
+                        "tensor {name}: data out of bounds (offset={offset}, size={qsize}, file_len={})",
+                        bytes_all.len()
+                    ));
+                }
+                return Ok(F32Weight::from_quantized(
+                    bytes_all[offset..end].to_vec(),
+                    qtype,
+                    out_dim,
+                    in_dim,
+                ));
+            }
+
+            // Fallback: dequantize to f32 and store in transposed layout
+            // (matches the original f32 load: transpose [dims0,dims1] then
+            // store rows = dims1, cols = dims0).
+            match load_f32_with_dims(name)? {
+                Some((data, _)) => Ok(F32Weight::from_slice(
+                    transpose_f32(&data, in_dim, out_dim),
+                    out_dim,
+                    in_dim,
+                )),
+                None => Ok(F32Weight::from_slice(Vec::new(), 0, 0)),
+            }
+        };
+
         // Load FC fusion layer (merges target model hidden states with draft hidden).
-        if let Some((data, dims)) = load_f32_with_dims("dflash_fc.weight")? {
-            let gguf_rows = dims[0] as usize; // hidden output
-            let gguf_cols = dims[1] as usize; // target features input
-            let transposed = transpose_f32(&data, gguf_rows, gguf_cols);
-            model.fc = F32Weight::from_slice(transposed, gguf_cols, gguf_rows);
+        let fc = load_proj("dflash_fc.weight")?;
+        if fc.is_loaded() {
+            model.fc = fc;
         }
 
         // Load hidden norm.
@@ -449,45 +577,10 @@ impl DFlashDraftModel {
                     .map(|(d, _)| d)
                     .unwrap_or_else(|| vec![1.0_f32; config.hidden_size]);
 
-            let q_proj = match load_f32_with_dims(&format!("{}.attn_q.weight", prefix))? {
-                Some((data, dims)) => {
-                    let gguf_rows = dims[0] as usize;
-                    let gguf_cols = dims[1] as usize;
-                    let transposed = transpose_f32(&data, gguf_rows, gguf_cols);
-                    F32Weight::from_slice(transposed, gguf_cols, gguf_rows)
-                }
-                None => F32Weight::from_slice(Vec::new(), 0, 0),
-            };
-
-            let k_proj = match load_f32_with_dims(&format!("{}.attn_k.weight", prefix))? {
-                Some((data, dims)) => {
-                    let gguf_rows = dims[0] as usize;
-                    let gguf_cols = dims[1] as usize;
-                    let transposed = transpose_f32(&data, gguf_rows, gguf_cols);
-                    F32Weight::from_slice(transposed, gguf_cols, gguf_rows)
-                }
-                None => F32Weight::from_slice(Vec::new(), 0, 0),
-            };
-
-            let v_proj = match load_f32_with_dims(&format!("{}.attn_v.weight", prefix))? {
-                Some((data, dims)) => {
-                    let gguf_rows = dims[0] as usize;
-                    let gguf_cols = dims[1] as usize;
-                    let transposed = transpose_f32(&data, gguf_rows, gguf_cols);
-                    F32Weight::from_slice(transposed, gguf_cols, gguf_rows)
-                }
-                None => F32Weight::from_slice(Vec::new(), 0, 0),
-            };
-
-            let o_proj = match load_f32_with_dims(&format!("{}.attn_output.weight", prefix))? {
-                Some((data, dims)) => {
-                    let gguf_rows = dims[0] as usize;
-                    let gguf_cols = dims[1] as usize;
-                    let transposed = transpose_f32(&data, gguf_rows, gguf_cols);
-                    F32Weight::from_slice(transposed, gguf_cols, gguf_rows)
-                }
-                None => F32Weight::from_slice(Vec::new(), 0, 0),
-            };
+            let q_proj = load_proj(&format!("{}.attn_q.weight", prefix))?;
+            let k_proj = load_proj(&format!("{}.attn_k.weight", prefix))?;
+            let v_proj = load_proj(&format!("{}.attn_v.weight", prefix))?;
+            let o_proj = load_proj(&format!("{}.attn_output.weight", prefix))?;
 
             let q_norm = load_f32_with_dims(&format!("{}.attn_q_norm.weight", prefix))?
                 .map(|(d, _)| d)
@@ -496,35 +589,9 @@ impl DFlashDraftModel {
                 .map(|(d, _)| d)
                 .unwrap_or_else(|| vec![1.0_f32; config.head_dim()]);
 
-            let mlp_gate = match load_f32_with_dims(&format!("{}.ffn_gate.weight", prefix))? {
-                Some((data, dims)) => {
-                    let gguf_rows = dims[0] as usize;
-                    let gguf_cols = dims[1] as usize;
-                    let transposed = transpose_f32(&data, gguf_rows, gguf_cols);
-                    F32Weight::from_slice(transposed, gguf_cols, gguf_rows)
-                }
-                None => F32Weight::from_slice(Vec::new(), 0, 0),
-            };
-
-            let mlp_up = match load_f32_with_dims(&format!("{}.ffn_up.weight", prefix))? {
-                Some((data, dims)) => {
-                    let gguf_rows = dims[0] as usize;
-                    let gguf_cols = dims[1] as usize;
-                    let transposed = transpose_f32(&data, gguf_rows, gguf_cols);
-                    F32Weight::from_slice(transposed, gguf_cols, gguf_rows)
-                }
-                None => F32Weight::from_slice(Vec::new(), 0, 0),
-            };
-
-            let mlp_down = match load_f32_with_dims(&format!("{}.ffn_down.weight", prefix))? {
-                Some((data, dims)) => {
-                    let gguf_rows = dims[0] as usize;
-                    let gguf_cols = dims[1] as usize;
-                    let transposed = transpose_f32(&data, gguf_rows, gguf_cols);
-                    F32Weight::from_slice(transposed, gguf_cols, gguf_rows)
-                }
-                None => F32Weight::from_slice(Vec::new(), 0, 0),
-            };
+            let mlp_gate = load_proj(&format!("{}.ffn_gate.weight", prefix))?;
+            let mlp_up = load_proj(&format!("{}.ffn_up.weight", prefix))?;
+            let mlp_down = load_proj(&format!("{}.ffn_down.weight", prefix))?;
 
             let attention = DFlashAttentionLayer {
                 q_proj,
@@ -570,7 +637,7 @@ impl DFlashDraftModel {
 
         // If target_hidden provided, fuse via FC layer.
         if let Some(th) = target_hidden
-            && !self.fc.data.is_empty()
+            && self.fc.is_loaded()
         {
             let mut fused = vec![0.0_f32; h];
             self.fc.gemv(th, &mut fused)?;
@@ -628,7 +695,7 @@ impl DFlashDraftModel {
 
                 // Q projection (on noise/normed hidden only).
                 let mut q = vec![0.0_f32; q_size];
-                if !layer.attention.q_proj.data.is_empty() {
+                if layer.attention.q_proj.is_loaded() {
                     layer.attention.q_proj.gemv(&normed, &mut q)?;
                 }
 
@@ -643,10 +710,10 @@ impl DFlashDraftModel {
 
                 let mut k = vec![0.0_f32; kv_len];
                 let mut v = vec![0.0_f32; kv_len];
-                if !layer.attention.k_proj.data.is_empty() {
+                if layer.attention.k_proj.is_loaded() {
                     layer.attention.k_proj.gemv(&kv_input, &mut k)?;
                 }
-                if !layer.attention.v_proj.data.is_empty() {
+                if layer.attention.v_proj.is_loaded() {
                     layer.attention.v_proj.gemv(&kv_input, &mut v)?;
                 }
 
@@ -764,7 +831,7 @@ impl DFlashDraftModel {
 
                 // O projection: attn_out[q_size] -> hidden[h]
                 let mut o_result = vec![0.0_f32; h];
-                if !layer.attention.o_proj.data.is_empty() {
+                if layer.attention.o_proj.is_loaded() {
                     layer.attention.o_proj.gemv(&attn_out, &mut o_result)?;
                 } else {
                     o_result.copy_from_slice(&attn_out);
@@ -790,10 +857,10 @@ impl DFlashDraftModel {
 
                 let mut gate = vec![0.0_f32; self.config.intermediate_size];
                 let mut up = vec![0.0_f32; self.config.intermediate_size];
-                if !layer.mlp_gate.data.is_empty() {
+                if layer.mlp_gate.is_loaded() {
                     layer.mlp_gate.gemv(&normed, &mut gate)?;
                 }
-                if !layer.mlp_up.data.is_empty() {
+                if layer.mlp_up.is_loaded() {
                     layer.mlp_up.gemv(&normed, &mut up)?;
                 }
 
@@ -803,7 +870,7 @@ impl DFlashDraftModel {
                     gate[i] = g * (1.0 / (1.0 + (-g).exp())) * up[i];
                 }
 
-                if !layer.mlp_down.data.is_empty() {
+                if layer.mlp_down.is_loaded() {
                     layer.mlp_down.gemv(&gate, &mut mlp_out)?;
                 }
             }
@@ -831,7 +898,7 @@ impl DFlashDraftModel {
     /// Compute logits from hidden state.
     pub fn logits(&self, hidden: &[f32]) -> Result<Vec<f32>, String> {
         let mut logits = vec![0.0_f32; self.config.vocab_size];
-        if !self.output.data.is_empty() {
+        if self.output.is_loaded() {
             self.output.gemv(hidden, &mut logits)?;
         }
         Ok(logits)

@@ -225,31 +225,377 @@ pub fn gemv_quantized_f32(
 
     match quantization {
         GgufQuantizationType::Q8_0 => gemv_q8_0_f32_fused(quantized_matrix, cols, vector, output),
-        GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M => gemv_qk_f32_fused(
-            quantized_matrix,
-            rows,
-            cols,
-            vector,
-            output,
-            BLOCK_Q4_K_SIZE,
-            4,
-            8.0,
-        ),
-        GgufQuantizationType::Q6_K => gemv_qk_f32_fused(
-            quantized_matrix,
-            rows,
-            cols,
-            vector,
-            output,
-            BLOCK_Q6_K_SIZE,
-            6,
-            32.0,
-        ),
+        GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M => {
+            gemv_q4_k_f32_fused(quantized_matrix, rows, cols, vector, output)
+        }
+        GgufQuantizationType::Q6_K => {
+            gemv_q6_k_f32_fused(quantized_matrix, rows, cols, vector, output)
+        }
         _ => Err(GemvError::UnsupportedQuantizationType { quantization }),
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[inline]
+fn get_scale_min_k4(j: usize, scales: &[u8]) -> (u8, u8) {
+    if j < 4 {
+        (scales[j] & 63, scales[j + 4] & 63)
+    } else {
+        (
+            (scales[j + 4] & 0x0f) | ((scales[j - 4] >> 6) << 4),
+            (scales[j + 4] >> 4) | ((scales[j] >> 6) << 4),
+        )
+    }
+}
+
+#[inline]
+fn q4_k_value(block: &[u8], idx: usize) -> f32 {
+    let d = f16_le_to_f32([block[0], block[1]]);
+    let min = f16_le_to_f32([block[2], block[3]]);
+    let scales = &block[4..16];
+    let qs = &block[16..144];
+    let group = idx / 32;
+    let pair = group / 2;
+    let (scale, min_scale) = get_scale_min_k4(group, scales);
+    let q = if group.is_multiple_of(2) {
+        qs[pair * 32 + (idx % 32)] & 0x0f
+    } else {
+        qs[pair * 32 + (idx % 32)] >> 4
+    };
+    d * scale as f32 * q as f32 - min * min_scale as f32
+}
+
+#[inline]
+fn q4_k_dot(block: &[u8], vector: &[f32]) -> f32 {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+            return unsafe { q4_k_dot_avx2(block, vector) };
+        }
+    }
+    q4_k_dot_scalar(block, vector)
+}
+
+/// AVX2 + FMA dot product between a dequantized Q4_K block (256 weights) and a
+/// 256-element vector slice. Dequantizes nibbles on the fly so the matrix is
+/// read at 4-bit density — this is the decode hot path.
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn q4_k_dot_avx2(block: &[u8], vector: &[f32]) -> f32 {
+    let d = f16_le_to_f32([block[0], block[1]]);
+    let min = f16_le_to_f32([block[2], block[3]]);
+    let scales = &block[4..16];
+    let qs = block.as_ptr().wrapping_add(16);
+    let mask = _mm_set1_epi8(0x0f);
+    let mut acc = _mm256_setzero_ps();
+    for group_pair in 0..4 {
+        let group1 = group_pair * 2;
+        let group2 = group1 + 1;
+        let (scale1, min_scale1) = get_scale_min_k4(group1, scales);
+        let (scale2, min_scale2) = get_scale_min_k4(group2, scales);
+        let d1 = _mm256_set1_ps(d * scale1 as f32);
+        let min1 = _mm256_set1_ps(min * min_scale1 as f32);
+        let d2 = _mm256_set1_ps(d * scale2 as f32);
+        let min2 = _mm256_set1_ps(min * min_scale2 as f32);
+        let q_base = group_pair * 32;
+        let v_base = group_pair * 64;
+        for l in (0..32).step_by(8) {
+            let packed = unsafe { _mm_loadl_epi64(qs.add(q_base + l).cast::<__m128i>()) };
+            let low_u8 = _mm_and_si128(packed, mask);
+            let high_u8 = _mm_and_si128(_mm_srli_epi16(packed, 4), mask);
+            let low = _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(low_u8));
+            let high = _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(high_u8));
+            // term = d * q - min
+            let term1 = _mm256_fmsub_ps(low, d1, min1);
+            let term2 = _mm256_fmsub_ps(high, d2, min2);
+            let v1 = unsafe { _mm256_loadu_ps(vector.as_ptr().add(v_base + l)) };
+            let v2 = unsafe { _mm256_loadu_ps(vector.as_ptr().add(v_base + 32 + l)) };
+            acc = _mm256_fmadd_ps(term1, v1, acc);
+            acc = _mm256_fmadd_ps(term2, v2, acc);
+        }
+    }
+    // Horizontal sum of the 8 lanes.
+    let lo = _mm256_castps256_ps128(acc);
+    let hi = _mm256_extractf128_ps(acc, 1);
+    let sum128 = _mm_add_ps(lo, hi);
+    let shuf = _mm_movehdup_ps(sum128);
+    let sums = _mm_add_ps(sum128, shuf);
+    let shuf2 = _mm_movehl_ps(shuf, sums);
+    let result = _mm_add_ss(sums, shuf2);
+    _mm_cvtss_f32(result)
+}
+
+#[inline]
+fn q4_k_dot_scalar(block: &[u8], vector: &[f32]) -> f32 {
+    let d = f16_le_to_f32([block[0], block[1]]);
+    let min = f16_le_to_f32([block[2], block[3]]);
+    let scales = &block[4..16];
+    let qs = &block[16..144];
+    let mut sum = 0.0_f32;
+    for group_pair in 0..4 {
+        let group1 = group_pair * 2;
+        let group2 = group1 + 1;
+        let (scale1, min_scale1) = get_scale_min_k4(group1, scales);
+        let (scale2, min_scale2) = get_scale_min_k4(group2, scales);
+        let d1 = d * scale1 as f32;
+        let min1 = min * min_scale1 as f32;
+        let d2 = d * scale2 as f32;
+        let min2 = min * min_scale2 as f32;
+        let q_base = group_pair * 32;
+        let v_base = group_pair * 64;
+        for l in 0..32 {
+            let packed = qs[q_base + l];
+            sum += (d1 * (packed & 0x0f) as f32 - min1) * vector[v_base + l];
+            sum += (d2 * (packed >> 4) as f32 - min2) * vector[v_base + 32 + l];
+        }
+    }
+    sum
+}
+
+#[inline]
+fn accumulate_q4_k_block(block: &[u8], factor: f32, output: &mut [f32]) {
+    let d = f16_le_to_f32([block[0], block[1]]);
+    let min = f16_le_to_f32([block[2], block[3]]);
+    let scales = &block[4..16];
+    let qs = &block[16..144];
+    for group_pair in 0..4 {
+        let group1 = group_pair * 2;
+        let group2 = group1 + 1;
+        let (scale1, min_scale1) = get_scale_min_k4(group1, scales);
+        let (scale2, min_scale2) = get_scale_min_k4(group2, scales);
+        let d1 = d * scale1 as f32;
+        let min1 = min * min_scale1 as f32;
+        let d2 = d * scale2 as f32;
+        let min2 = min * min_scale2 as f32;
+        let q_base = group_pair * 32;
+        let out_base = group_pair * 64;
+        for l in 0..32 {
+            let packed = qs[q_base + l];
+            output[out_base + l] += (d1 * (packed & 0x0f) as f32 - min1) * factor;
+            output[out_base + 32 + l] += (d2 * (packed >> 4) as f32 - min2) * factor;
+        }
+    }
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+#[allow(dead_code)]
+unsafe fn accumulate_q4_k_block_avx2(block: *const u8, factor: f32, output: *mut f32) {
+    let d = f16_le_to_f32(unsafe { [*block, *block.add(1)] });
+    let min = f16_le_to_f32(unsafe { [*block.add(2), *block.add(3)] });
+    let scales = unsafe { std::slice::from_raw_parts(block.add(4), 12) };
+    let qs = unsafe { block.add(16) };
+    let mask = _mm_set1_epi8(0x0f);
+    let factor_v = _mm256_set1_ps(factor);
+
+    for group_pair in 0..4 {
+        let group1 = group_pair * 2;
+        let group2 = group1 + 1;
+        let (scale1, min_scale1) = get_scale_min_k4(group1, scales);
+        let (scale2, min_scale2) = get_scale_min_k4(group2, scales);
+        let d1 = _mm256_set1_ps(d * scale1 as f32);
+        let min1 = _mm256_set1_ps(min * min_scale1 as f32);
+        let d2 = _mm256_set1_ps(d * scale2 as f32);
+        let min2 = _mm256_set1_ps(min * min_scale2 as f32);
+        let q_base = group_pair * 32;
+        let out_base = group_pair * 64;
+        for l in (0..32).step_by(8) {
+            let packed = unsafe { _mm_loadl_epi64(qs.add(q_base + l).cast::<__m128i>()) };
+            let low_u8 = _mm_and_si128(packed, mask);
+            let high_u8 = _mm_and_si128(_mm_srli_epi16(packed, 4), mask);
+            let low = _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(low_u8));
+            let high = _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(high_u8));
+            let vals1 = _mm256_mul_ps(_mm256_sub_ps(_mm256_mul_ps(low, d1), min1), factor_v);
+            let vals2 = _mm256_mul_ps(_mm256_sub_ps(_mm256_mul_ps(high, d2), min2), factor_v);
+            let out1 = unsafe { output.add(out_base + l) };
+            let out2 = unsafe { output.add(out_base + 32 + l) };
+            let cur1 = unsafe { _mm256_loadu_ps(out1) };
+            let cur2 = unsafe { _mm256_loadu_ps(out2) };
+            unsafe {
+                _mm256_storeu_ps(out1, _mm256_add_ps(cur1, vals1));
+                _mm256_storeu_ps(out2, _mm256_add_ps(cur2, vals2));
+            }
+        }
+    }
+}
+
+fn gemv_q4_k_f32_fused(
+    quantized_matrix: &[u8],
+    rows: usize,
+    cols: usize,
+    vector: &[f32],
+    output: &mut [f32],
+) -> Result<(), GemvError> {
+    let blocks_per_row = cols / QK_K;
+    let expected_matrix_len = rows * blocks_per_row * BLOCK_Q4_K_SIZE;
+    if quantized_matrix.len() != expected_matrix_len {
+        return Err(GemvError::InvalidMatrixLength {
+            expected: expected_matrix_len,
+            actual: quantized_matrix.len(),
+        });
+    }
+    if vector.len() != cols {
+        return Err(GemvError::InvalidVectorLength {
+            expected: cols,
+            actual: vector.len(),
+        });
+    }
+    if output.len() != rows {
+        return Err(GemvError::InvalidOutputLength {
+            expected: rows,
+            actual: output.len(),
+        });
+    }
+
+    let compute_row = |row_idx: usize| {
+        let mut sum = 0.0_f32;
+        let row_start = row_idx * blocks_per_row * BLOCK_Q4_K_SIZE;
+        let row_blocks =
+            &quantized_matrix[row_start..row_start + (blocks_per_row * BLOCK_Q4_K_SIZE)];
+        for (block_idx, block) in row_blocks.chunks_exact(BLOCK_Q4_K_SIZE).enumerate() {
+            let vector_offset = block_idx * QK_K;
+            sum += q4_k_dot(block, &vector[vector_offset..vector_offset + QK_K]);
+        }
+        sum
+    };
+
+    if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
+        output
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(row_idx, out)| *out = compute_row(row_idx));
+    } else {
+        for (row_idx, out) in output.iter_mut().enumerate() {
+            *out = compute_row(row_idx);
+        }
+    }
+    Ok(())
+}
+
+#[inline]
+fn q6_k_value(block: &[u8], idx: usize) -> f32 {
+    let d = f16_le_to_f32([block[208], block[209]]);
+    let ql = &block[0..128];
+    let qh = &block[128..192];
+    let sc = &block[192..208];
+    let half = idx / 128;
+    let rem = idx % 128;
+    let l = rem % 32;
+    let group = rem / 32;
+    let (q_low, q_high, scale_idx) = match group {
+        0 => (ql[l] & 0x0f, qh[l] & 0x03, l / 16),
+        1 => (ql[l + 32] & 0x0f, (qh[l] >> 2) & 0x03, l / 16 + 2),
+        2 => (ql[l] >> 4, (qh[l] >> 4) & 0x03, l / 16 + 4),
+        _ => (ql[l + 32] >> 4, (qh[l] >> 6) & 0x03, l / 16 + 6),
+    };
+    let scale = sc[scale_idx + half * 8] as i8 as f32;
+    let q = ((q_low as i32) | ((q_high as i32) << 4)) - 32;
+    d * scale * q as f32
+}
+
+#[inline]
+fn q6_k_dot(block: &[u8], vector: &[f32]) -> f32 {
+    let d = f16_le_to_f32([block[208], block[209]]);
+    let ql = &block[0..128];
+    let qh = &block[128..192];
+    let sc = &block[192..208];
+    let mut sum = 0.0_f32;
+    let mut q_ptr = 0;
+    for half in 0..2 {
+        let scale_base = half * 8;
+        for l in 0..32 {
+            let is = l / 16;
+            let q1 = ((ql[l] & 0x0f) as i32 | (((qh[l] & 3) as i32) << 4)) - 32;
+            let q2 = ((ql[l + 32] & 0x0f) as i32 | ((((qh[l] >> 2) & 3) as i32) << 4)) - 32;
+            let q3 = ((ql[l] >> 4) as i32 | ((((qh[l] >> 4) & 3) as i32) << 4)) - 32;
+            let q4 = ((ql[l + 32] >> 4) as i32 | ((((qh[l] >> 6) & 3) as i32) << 4)) - 32;
+            sum += d * sc[scale_base + is] as i8 as f32 * q1 as f32 * vector[q_ptr + l];
+            sum += d * sc[scale_base + is + 2] as i8 as f32 * q2 as f32 * vector[q_ptr + 32 + l];
+            sum += d * sc[scale_base + is + 4] as i8 as f32 * q3 as f32 * vector[q_ptr + 64 + l];
+            sum += d * sc[scale_base + is + 6] as i8 as f32 * q4 as f32 * vector[q_ptr + 96 + l];
+        }
+        q_ptr += 128;
+    }
+    sum
+}
+
+#[inline]
+fn accumulate_q6_k_block(block: &[u8], factor: f32, output: &mut [f32]) {
+    let d = f16_le_to_f32([block[208], block[209]]);
+    let ql = &block[0..128];
+    let qh = &block[128..192];
+    let sc = &block[192..208];
+    let mut q_ptr = 0;
+    for half in 0..2 {
+        let scale_base = half * 8;
+        for l in 0..32 {
+            let is = l / 16;
+            let q1 = ((ql[l] & 0x0f) as i32 | (((qh[l] & 3) as i32) << 4)) - 32;
+            let q2 = ((ql[l + 32] & 0x0f) as i32 | ((((qh[l] >> 2) & 3) as i32) << 4)) - 32;
+            let q3 = ((ql[l] >> 4) as i32 | ((((qh[l] >> 4) & 3) as i32) << 4)) - 32;
+            let q4 = ((ql[l + 32] >> 4) as i32 | ((((qh[l] >> 6) & 3) as i32) << 4)) - 32;
+            output[q_ptr + l] += d * sc[scale_base + is] as i8 as f32 * q1 as f32 * factor;
+            output[q_ptr + 32 + l] += d * sc[scale_base + is + 2] as i8 as f32 * q2 as f32 * factor;
+            output[q_ptr + 64 + l] += d * sc[scale_base + is + 4] as i8 as f32 * q3 as f32 * factor;
+            output[q_ptr + 96 + l] += d * sc[scale_base + is + 6] as i8 as f32 * q4 as f32 * factor;
+        }
+        q_ptr += 128;
+    }
+}
+
+fn gemv_q6_k_f32_fused(
+    quantized_matrix: &[u8],
+    rows: usize,
+    cols: usize,
+    vector: &[f32],
+    output: &mut [f32],
+) -> Result<(), GemvError> {
+    let blocks_per_row = cols / QK_K;
+    let expected_matrix_len = rows * blocks_per_row * BLOCK_Q6_K_SIZE;
+    if quantized_matrix.len() != expected_matrix_len {
+        return Err(GemvError::InvalidMatrixLength {
+            expected: expected_matrix_len,
+            actual: quantized_matrix.len(),
+        });
+    }
+    if vector.len() != cols {
+        return Err(GemvError::InvalidVectorLength {
+            expected: cols,
+            actual: vector.len(),
+        });
+    }
+    if output.len() != rows {
+        return Err(GemvError::InvalidOutputLength {
+            expected: rows,
+            actual: output.len(),
+        });
+    }
+
+    let compute_row = |row_idx: usize| {
+        let mut sum = 0.0_f32;
+        let row_start = row_idx * blocks_per_row * BLOCK_Q6_K_SIZE;
+        let row_blocks =
+            &quantized_matrix[row_start..row_start + (blocks_per_row * BLOCK_Q6_K_SIZE)];
+        for (block_idx, block) in row_blocks.chunks_exact(BLOCK_Q6_K_SIZE).enumerate() {
+            let vector_offset = block_idx * QK_K;
+            sum += q6_k_dot(block, &vector[vector_offset..vector_offset + QK_K]);
+        }
+        sum
+    };
+
+    if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
+        output
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(row_idx, out)| *out = compute_row(row_idx));
+    } else {
+        for (row_idx, out) in output.iter_mut().enumerate() {
+            *out = compute_row(row_idx);
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments, dead_code)]
 fn gemv_qk_f32_fused(
     quantized_matrix: &[u8],
     rows: usize,
@@ -427,7 +773,7 @@ pub fn gemv_f32_transposed(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, dead_code)]
 fn gemv_qk_f32_transposed(
     quantized_matrix: &[u8],
     rows: usize,
@@ -526,7 +872,174 @@ fn gemv_qk_f32_transposed(
     Ok(())
 }
 
+fn gemv_q4_k_f32_transposed(
+    quantized_matrix: &[u8],
+    rows: usize,
+    cols: usize,
+    vector: &[f32],
+    output: &mut [f32],
+) -> Result<(), GemvError> {
+    let blocks_per_row = cols / QK_K;
+    let expected_matrix_len = rows * blocks_per_row * BLOCK_Q4_K_SIZE;
+    if quantized_matrix.len() != expected_matrix_len {
+        return Err(GemvError::InvalidMatrixLength {
+            expected: expected_matrix_len,
+            actual: quantized_matrix.len(),
+        });
+    }
+    if vector.len() != rows {
+        return Err(GemvError::InvalidVectorLength {
+            expected: rows,
+            actual: vector.len(),
+        });
+    }
+    if output.len() != cols {
+        return Err(GemvError::InvalidOutputLength {
+            expected: cols,
+            actual: output.len(),
+        });
+    }
+
+    if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
+        output
+            .par_chunks_mut(TRANSPOSED_GEMV_COL_CHUNK)
+            .enumerate()
+            .for_each(|(chunk_idx, out_chunk)| {
+                let col_start = chunk_idx * TRANSPOSED_GEMV_COL_CHUNK;
+                let block_start = col_start / QK_K;
+                let block_end = ((col_start + out_chunk.len()).div_ceil(QK_K)).min(blocks_per_row);
+                out_chunk.fill(0.0);
+                for (row_idx, &vi) in vector.iter().enumerate().take(rows) {
+                    if vi == 0.0 {
+                        continue;
+                    }
+                    let row_start = row_idx * blocks_per_row * BLOCK_Q4_K_SIZE;
+                    let row_blocks = &quantized_matrix
+                        [row_start..row_start + (blocks_per_row * BLOCK_Q4_K_SIZE)];
+                    for block_idx in block_start..block_end {
+                        let block_offset = block_idx * BLOCK_Q4_K_SIZE;
+                        let block = &row_blocks[block_offset..block_offset + BLOCK_Q4_K_SIZE];
+                        let local_col = block_idx * QK_K - col_start;
+                        let block_output_len = (out_chunk.len() - local_col).min(QK_K);
+                        let out_block = &mut out_chunk[local_col..local_col + block_output_len];
+                        if block_output_len == QK_K {
+                            accumulate_q4_k_block(block, vi, out_block);
+                        } else {
+                            for (idx, out) in out_block.iter_mut().enumerate() {
+                                *out += q4_k_value(block, idx) * vi;
+                            }
+                        }
+                    }
+                }
+            });
+    } else {
+        output.fill(0.0);
+        for (row_idx, &vi) in vector.iter().enumerate().take(rows) {
+            if vi == 0.0 {
+                continue;
+            }
+            let row_start = row_idx * blocks_per_row * BLOCK_Q4_K_SIZE;
+            let row_blocks =
+                &quantized_matrix[row_start..row_start + (blocks_per_row * BLOCK_Q4_K_SIZE)];
+            for (block_idx, block) in row_blocks.chunks_exact(BLOCK_Q4_K_SIZE).enumerate() {
+                let col_start = block_idx * QK_K;
+                for idx in 0..QK_K {
+                    if col_start + idx >= cols {
+                        break;
+                    }
+                    output[col_start + idx] += q4_k_value(block, idx) * vi;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn gemv_q6_k_f32_transposed(
+    quantized_matrix: &[u8],
+    rows: usize,
+    cols: usize,
+    vector: &[f32],
+    output: &mut [f32],
+) -> Result<(), GemvError> {
+    let blocks_per_row = cols / QK_K;
+    let expected_matrix_len = rows * blocks_per_row * BLOCK_Q6_K_SIZE;
+    if quantized_matrix.len() != expected_matrix_len {
+        return Err(GemvError::InvalidMatrixLength {
+            expected: expected_matrix_len,
+            actual: quantized_matrix.len(),
+        });
+    }
+    if vector.len() != rows {
+        return Err(GemvError::InvalidVectorLength {
+            expected: rows,
+            actual: vector.len(),
+        });
+    }
+    if output.len() != cols {
+        return Err(GemvError::InvalidOutputLength {
+            expected: cols,
+            actual: output.len(),
+        });
+    }
+
+    if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
+        output
+            .par_chunks_mut(TRANSPOSED_GEMV_COL_CHUNK)
+            .enumerate()
+            .for_each(|(chunk_idx, out_chunk)| {
+                let col_start = chunk_idx * TRANSPOSED_GEMV_COL_CHUNK;
+                let block_start = col_start / QK_K;
+                let block_end = ((col_start + out_chunk.len()).div_ceil(QK_K)).min(blocks_per_row);
+                out_chunk.fill(0.0);
+                for (row_idx, &vi) in vector.iter().enumerate().take(rows) {
+                    if vi == 0.0 {
+                        continue;
+                    }
+                    let row_start = row_idx * blocks_per_row * BLOCK_Q6_K_SIZE;
+                    let row_blocks = &quantized_matrix
+                        [row_start..row_start + (blocks_per_row * BLOCK_Q6_K_SIZE)];
+                    for block_idx in block_start..block_end {
+                        let block_offset = block_idx * BLOCK_Q6_K_SIZE;
+                        let block = &row_blocks[block_offset..block_offset + BLOCK_Q6_K_SIZE];
+                        let local_col = block_idx * QK_K - col_start;
+                        let block_output_len = (out_chunk.len() - local_col).min(QK_K);
+                        let out_block = &mut out_chunk[local_col..local_col + block_output_len];
+                        if block_output_len == QK_K {
+                            accumulate_q6_k_block(block, vi, out_block);
+                        } else {
+                            for (idx, out) in out_block.iter_mut().enumerate() {
+                                *out += q6_k_value(block, idx) * vi;
+                            }
+                        }
+                    }
+                }
+            });
+    } else {
+        output.fill(0.0);
+        for (row_idx, &vi) in vector.iter().enumerate().take(rows) {
+            if vi == 0.0 {
+                continue;
+            }
+            let row_start = row_idx * blocks_per_row * BLOCK_Q6_K_SIZE;
+            let row_blocks =
+                &quantized_matrix[row_start..row_start + (blocks_per_row * BLOCK_Q6_K_SIZE)];
+            for (block_idx, block) in row_blocks.chunks_exact(BLOCK_Q6_K_SIZE).enumerate() {
+                let col_start = block_idx * QK_K;
+                for idx in 0..QK_K {
+                    if col_start + idx >= cols {
+                        break;
+                    }
+                    output[col_start + idx] += q6_k_value(block, idx) * vi;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 #[inline]
+#[allow(dead_code)]
 fn q4_avx2_available() -> bool {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
@@ -539,6 +1052,7 @@ fn q4_avx2_available() -> bool {
 }
 
 #[inline]
+#[allow(dead_code)]
 fn q4_avx512_available() -> bool {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
@@ -551,6 +1065,7 @@ fn q4_avx512_available() -> bool {
 }
 
 #[inline]
+#[allow(dead_code)]
 fn accumulate_q4_block(
     bitstream: &[u8],
     factor: f32,
@@ -586,6 +1101,7 @@ fn accumulate_q4_block(
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f,avx512bw")]
+#[allow(dead_code)]
 unsafe fn accumulate_q4_block_avx512(bitstream: *const u8, factor: f32, output: *mut f32) {
     let mask = _mm_set1_epi8(0x0F);
     let zero_point = _mm_set1_epi8(8);
@@ -612,6 +1128,7 @@ unsafe fn accumulate_q4_block_avx512(bitstream: *const u8, factor: f32, output: 
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
+#[allow(dead_code)]
 unsafe fn accumulate_q4_block_avx2(bitstream: *const u8, factor: f32, output: *mut f32) {
     let mask = _mm_set1_epi8(0x0F);
     let zero_point = _mm_set1_epi8(8);
@@ -732,26 +1249,12 @@ pub fn gemv_quantized_f32_transposed(
         GgufQuantizationType::Q8_0 => {
             gemv_q8_0_f32_transposed(quantized_matrix, rows, cols, vector, output)
         }
-        GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M => gemv_qk_f32_transposed(
-            quantized_matrix,
-            rows,
-            cols,
-            vector,
-            output,
-            BLOCK_Q4_K_SIZE,
-            4,
-            8.0,
-        ),
-        GgufQuantizationType::Q6_K => gemv_qk_f32_transposed(
-            quantized_matrix,
-            rows,
-            cols,
-            vector,
-            output,
-            BLOCK_Q6_K_SIZE,
-            6,
-            32.0,
-        ),
+        GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M => {
+            gemv_q4_k_f32_transposed(quantized_matrix, rows, cols, vector, output)
+        }
+        GgufQuantizationType::Q6_K => {
+            gemv_q6_k_f32_transposed(quantized_matrix, rows, cols, vector, output)
+        }
         _ => Err(GemvError::UnsupportedQuantizationType { quantization }),
     }
 }
@@ -1589,6 +2092,37 @@ impl Tensor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[test]
+    fn q4_k_dot_avx2_matches_scalar() {
+        if !(is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma")) {
+            return;
+        }
+        // Deterministic pseudo-random Q4_K block (BLOCK_Q4_K_SIZE bytes) + vector.
+        let mut block = vec![0u8; BLOCK_Q4_K_SIZE];
+        let mut state: u32 = 0x1234_5678;
+        let mut next = || {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 16) as u8
+        };
+        for b in block.iter_mut() {
+            *b = next();
+        }
+        // Use small, valid f16 scale/min so values are finite.
+        block[0] = 0x00;
+        block[1] = 0x3c; // d = 1.0 in f16
+        block[2] = 0x00;
+        block[3] = 0x38; // min = 0.5 in f16
+        let vector: Vec<f32> = (0..QK_K).map(|i| ((i % 17) as f32 - 8.0) * 0.1).collect();
+
+        let scalar = q4_k_dot_scalar(&block, &vector);
+        let simd = unsafe { q4_k_dot_avx2(&block, &vector) };
+        assert!(
+            (scalar - simd).abs() <= 1e-3 * (1.0 + scalar.abs()),
+            "AVX2 Q4_K dot ({simd}) diverged from scalar ({scalar})"
+        );
+    }
 
     fn reference_attention(
         query: &[f32],
