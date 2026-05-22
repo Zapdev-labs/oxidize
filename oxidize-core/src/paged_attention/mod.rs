@@ -8,6 +8,6 @@ pub mod scheduler;
 
 pub use block_pool::{BlockId, BlockPool, BlockPoolConfig, BlockTable, PhysicalBlock};
 pub use scheduler::{
-    Scheduler, SchedulerConfig, SchedulerError, SchedulerStepResult, SeqId, Sequence,
-    SequenceStatus,
+    InputBatch, Scheduler, SchedulerConfig, SchedulerError, SchedulerStepResult, SeqId,
+    Sequence, SequenceStatus,
 };

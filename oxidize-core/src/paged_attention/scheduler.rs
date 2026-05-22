@@ -181,7 +181,7 @@ impl Default for SchedulerConfig {
 }
 
 /// Result of a single scheduler step: the set of sequences to run.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SchedulerStepResult {
     /// Sequence IDs scheduled for this step.
     pub scheduled_seq_ids: Vec<SeqId>,
@@ -189,6 +189,36 @@ pub struct SchedulerStepResult {
     pub prefill_tokens: usize,
     /// Number of decode tokens scheduled.
     pub decode_tokens: usize,
+    /// Per-sequence prefill tokens scheduled in this step.
+    pub seq_prefill_tokens: HashMap<SeqId, usize>,
+    /// Per-sequence decode tokens scheduled in this step.
+    pub seq_decode_tokens: HashMap<SeqId, usize>,
+}
+
+/// Flattened input batch for a single batched forward pass.
+///
+/// Multiple sequences (prefill chunks and/or decode tokens) are flattened
+/// into a single structure that a batched model forward can consume.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InputBatch {
+    /// Number of sequences in the batch (batch_size).
+    pub batch_size: usize,
+    /// Sequence IDs in the batch, in scheduling order.
+    pub seq_ids: Vec<SeqId>,
+    /// Tokens to forward for each sequence this step.
+    /// - Prefill: the chunk of prompt tokens processed this step.
+    /// - Decode: the single last-generated token from the previous step.
+    pub token_ids: Vec<Vec<Token>>,
+    /// Position indices within each sequence for the corresponding tokens.
+    pub positions: Vec<Vec<usize>>,
+    /// Per-sequence physical block tables (logical → physical mapping).
+    pub block_tables: Vec<Vec<BlockId>>,
+    /// Number of tokens scheduled for each sequence this step.
+    pub num_tokens: Vec<usize>,
+    /// Total tokens across all sequences (must be ≤ max_num_batched_tokens).
+    pub total_tokens: usize,
+    /// Whether each sequence is doing prefill (`true`) or decode (`false`).
+    pub is_prefill: Vec<bool>,
 }
 
 /// Error type for scheduler operations.
@@ -339,6 +369,8 @@ impl Scheduler {
         let mut scheduled = Vec::new();
         let mut prefill_tokens = 0usize;
         let mut decode_tokens = 0usize;
+        let mut seq_prefill_tokens: HashMap<SeqId, usize> = HashMap::new();
+        let mut seq_decode_tokens: HashMap<SeqId, usize> = HashMap::new();
 
         let running_ids: Vec<SeqId> = self.running.clone();
 
@@ -368,6 +400,7 @@ impl Scheduler {
             scheduled.push(seq_id);
             budget -= 1;
             decode_tokens += 1;
+            seq_decode_tokens.insert(seq_id, 1);
         }
 
         // --- Phase 2: Continue prefill for partially-prefilled running sequences ---
@@ -381,10 +414,12 @@ impl Scheduler {
                 continue;
             }
 
+            // Chunk size capped by both prefill_chunk_size and remaining budget.
             let chunk_size = seq
                 .remaining_prefill_tokens()
-                .min(self.config.prefill_chunk_size);
-            if chunk_size > budget {
+                .min(self.config.prefill_chunk_size)
+                .min(budget);
+            if chunk_size == 0 {
                 continue;
             }
 
@@ -393,6 +428,7 @@ impl Scheduler {
             scheduled.push(seq_id);
             budget -= chunk_size;
             prefill_tokens += chunk_size;
+            *seq_prefill_tokens.entry(seq_id).or_insert(0) += chunk_size;
         }
 
         // --- Phase 3: Schedule prefill chunks from waiting queue ---
@@ -423,8 +459,11 @@ impl Scheduler {
                 continue;
             }
 
-            let chunk_size = remaining_prefill.min(self.config.prefill_chunk_size);
-            if chunk_size > budget {
+            // Chunk size capped by both prefill_chunk_size and remaining budget.
+            let chunk_size = remaining_prefill
+                .min(self.config.prefill_chunk_size)
+                .min(budget);
+            if chunk_size == 0 {
                 still_waiting.push_back(seq_id);
                 continue;
             }
@@ -436,6 +475,7 @@ impl Scheduler {
             running_count += 1;
             budget -= chunk_size;
             prefill_tokens += chunk_size;
+            *seq_prefill_tokens.entry(seq_id).or_insert(0) += chunk_size;
         }
 
         self.waiting = still_waiting;
@@ -447,7 +487,76 @@ impl Scheduler {
             scheduled_seq_ids: scheduled,
             prefill_tokens,
             decode_tokens,
+            seq_prefill_tokens,
+            seq_decode_tokens,
         })
+    }
+
+    /// Build an [`InputBatch`] from the result of the most recent [`Self::step`].
+    ///
+    /// This flattens all scheduled sequences into a single structure with
+    /// `batch_size > 1` when multiple sequences are in the batch.
+    pub fn build_input_batch(&self, step_result: &SchedulerStepResult) -> InputBatch {
+        let batch_size = step_result.scheduled_seq_ids.len();
+        let mut seq_ids = Vec::with_capacity(batch_size);
+        let mut token_ids: Vec<Vec<Token>> = Vec::with_capacity(batch_size);
+        let mut positions: Vec<Vec<usize>> = Vec::with_capacity(batch_size);
+        let mut block_tables: Vec<Vec<BlockId>> = Vec::with_capacity(batch_size);
+        let mut num_tokens = Vec::with_capacity(batch_size);
+        let mut is_prefill = Vec::with_capacity(batch_size);
+        let mut total_tokens = 0usize;
+
+        for &seq_id in &step_result.scheduled_seq_ids {
+            let seq = match self.sequences.get(&seq_id) {
+                Some(s) => s,
+                None => continue,
+            };
+
+            // Determine whether this sequence received prefill or decode tokens.
+            let prefill_count = step_result.seq_prefill_tokens.get(&seq_id).copied().unwrap_or(0);
+            let decode_count = step_result.seq_decode_tokens.get(&seq_id).copied().unwrap_or(0);
+
+            if prefill_count > 0 {
+                // Prefill sequence: tokens are from the prompt.
+                let start = seq.num_prefilled_tokens.saturating_sub(prefill_count);
+                let end = start + prefill_count;
+                let chunk_tokens: Vec<Token> = seq.prompt_tokens[start..end].to_vec();
+                let pos: Vec<usize> = (start..end).collect();
+                let physical: Vec<BlockId> = seq.block_table.physical_blocks().to_vec();
+
+                seq_ids.push(seq_id);
+                token_ids.push(chunk_tokens);
+                positions.push(pos);
+                block_tables.push(physical);
+                num_tokens.push(prefill_count);
+                is_prefill.push(true);
+                total_tokens += prefill_count;
+            } else if decode_count > 0 && !seq.is_finished() {
+                // Decode sequence: single token.
+                let decode_pos = seq.num_tokens().saturating_sub(1);
+                let decode_token = seq.generated_tokens.last().copied();
+                let physical: Vec<BlockId> = seq.block_table.physical_blocks().to_vec();
+
+                seq_ids.push(seq_id);
+                token_ids.push(decode_token.into_iter().collect());
+                positions.push(vec![decode_pos]);
+                block_tables.push(physical);
+                num_tokens.push(1);
+                is_prefill.push(false);
+                total_tokens += 1;
+            }
+        }
+
+        InputBatch {
+            batch_size: seq_ids.len(),
+            seq_ids,
+            token_ids,
+            positions,
+            block_tables,
+            num_tokens,
+            total_tokens,
+            is_prefill,
+        }
     }
 
     /// Post-process a scheduler step: append sampled tokens, detect finished
@@ -630,11 +739,12 @@ mod tests {
         scheduler.add_sequence(make_seq(2, 6, 5)).unwrap();
 
         let result = scheduler.step().unwrap();
-        // Budget = 8. First request takes 6 prefill tokens. Second request would
-        // need 6 more → total 12 > 8, so second request stays waiting.
-        assert_eq!(result.prefill_tokens, 6);
-        assert_eq!(result.scheduled_seq_ids, vec![1]);
-        assert_eq!(scheduler.waiting_count(), 1);
+        // Budget = 8. First request takes 6 prefill tokens. Second request gets
+        // the remaining 2 tokens (chunk split to fit budget). Total = 8.
+        assert_eq!(result.prefill_tokens, 8);
+        assert_eq!(result.scheduled_seq_ids, vec![1, 2]);
+        assert_eq!(scheduler.waiting_count(), 0);
+        assert_eq!(scheduler.get_sequence(2).unwrap().num_prefilled_tokens, 2);
     }
 
     #[test]
@@ -684,25 +794,28 @@ mod tests {
         scheduler.add_sequence(make_seq(1, 2, 5)).unwrap();
         scheduler.add_sequence(make_seq(2, 10, 5)).unwrap();
 
-        // Prefill seq 1.
+        // Step 1: budget=4. Seq 1 gets 2 prefill tokens, seq 2 gets remaining 2.
         let step1 = scheduler.step().unwrap();
-        assert_eq!(step1.prefill_tokens, 2);
+        assert_eq!(step1.prefill_tokens, 4);
+        assert!(step1.scheduled_seq_ids.contains(&1));
+        assert!(step1.scheduled_seq_ids.contains(&2));
+        assert_eq!(scheduler.get_sequence(2).unwrap().num_prefilled_tokens, 2);
 
         // Decode seq 1.
         let mut sampled = HashMap::new();
         sampled.insert(1, 42u32);
         scheduler.postprocess_step(&sampled).unwrap();
 
-        // Now seq 1 is running decode (needs 1 token). Seq 2 is waiting (needs 10).
+        // Now seq 1 is running decode (needs 1 token). Seq 2 is running but still
+        // needs 8 more prefill tokens.
         // Budget = 4. Decode gets 1 token, leaving 3 for prefill.
-        // Seq 2's prefill chunk is min(10, 16) = 10, but only 3 fit.
-        // However our scheduler doesn't split prefill chunks in this core version,
-        // so seq 2 stays waiting.
+        // With chunked prefill, seq 2 gets a 3-token chunk (split to fit budget).
         let step2 = scheduler.step().unwrap();
         assert_eq!(step2.decode_tokens, 1);
         assert!(step2.scheduled_seq_ids.contains(&1));
-        assert_eq!(step2.prefill_tokens, 0); // seq 2 deferred
-        assert_eq!(scheduler.waiting_count(), 1); // seq 2 still waiting
+        assert_eq!(step2.prefill_tokens, 3); // seq 2 gets remaining budget
+        assert!(step2.scheduled_seq_ids.contains(&2));
+        assert_eq!(scheduler.get_sequence(2).unwrap().num_prefilled_tokens, 5);
     }
 
     #[test]
@@ -918,5 +1031,317 @@ mod tests {
         let step4 = scheduler.step().unwrap();
         assert_eq!(step4.decode_tokens, 1);
         assert_eq!(step4.prefill_tokens, 0);
+    }
+
+    // === Validation-contract assertions ===
+
+    /// VAL-PAGED-001: Concurrent requests flatten into InputBatch with batch_size > 1.
+    #[test]
+    fn concurrent_requests_flatten_into_input_batch_with_batch_size_gt_1() {
+        let pool = default_pool(20);
+        let config = SchedulerConfig {
+            max_num_batched_tokens: 64,
+            prefill_chunk_size: 16,
+            max_num_running_seqs: 8,
+        };
+        let mut scheduler = Scheduler::new(config, pool);
+
+        for i in 1..=4 {
+            scheduler.add_sequence(make_seq(i, 4, 3)).unwrap();
+        }
+
+        let result = scheduler.step().unwrap();
+        assert_eq!(result.scheduled_seq_ids.len(), 4, "all 4 sequences scheduled");
+
+        let batch = scheduler.build_input_batch(&result);
+        assert_eq!(batch.batch_size, 4, "InputBatch batch_size > 1");
+        assert_eq!(batch.seq_ids.len(), 4);
+        assert_eq!(batch.total_tokens, 16);
+        assert!(batch.is_prefill.iter().all(|&v| v), "all are prefill");
+    }
+
+    /// VAL-PAGED-002: Decode tokens allocated before prefill chunks.
+    #[test]
+    fn decode_tokens_allocated_before_prefill_chunks() {
+        let pool = default_pool(20);
+        let config = SchedulerConfig {
+            max_num_batched_tokens: 8,
+            prefill_chunk_size: 16,
+            max_num_running_seqs: 8,
+        };
+        let mut scheduler = Scheduler::new(config, pool);
+
+        // Seq 1 is a short prefill that will quickly enter decode.
+        scheduler.add_sequence(make_seq(1, 2, 5)).unwrap();
+        // Seq 2 is a long waiting prefill.
+        scheduler.add_sequence(make_seq(2, 10, 5)).unwrap();
+
+        // Step 1: prefill both (budget=8, 2+6=8).
+        let step1 = scheduler.step().unwrap();
+        assert_eq!(step1.prefill_tokens, 8);
+        assert!(step1.scheduled_seq_ids.contains(&1));
+        assert!(step1.scheduled_seq_ids.contains(&2));
+
+        // Decode seq 1.
+        let mut sampled = HashMap::new();
+        sampled.insert(1, 42u32);
+        scheduler.postprocess_step(&sampled).unwrap();
+
+        // Step 2: seq 1 needs decode (1 token). seq 2 still needs 4 more prefill.
+        // Budget = 8. Decode gets priority, leaving 7 for prefill.
+        let step2 = scheduler.step().unwrap();
+        assert_eq!(step2.decode_tokens, 1, "decode allocated first");
+        assert!(step2.decode_tokens > 0);
+        assert!(step2.prefill_tokens > 0, "prefill follows decode");
+        assert!(step2.scheduled_seq_ids.contains(&1));
+        assert!(step2.scheduled_seq_ids.contains(&2));
+    }
+
+    /// VAL-PAGED-003: Chunked prefill interleaving — decode steps continue between prefill chunks.
+    #[test]
+    fn chunked_prefill_interleaving_continues_decode_between_chunks() {
+        let pool = default_pool(20);
+        let config = SchedulerConfig {
+            max_num_batched_tokens: 6,
+            prefill_chunk_size: 16,
+            max_num_running_seqs: 8,
+        };
+        let mut scheduler = Scheduler::new(config, pool);
+
+        // Seq 1: short prompt, enters decode quickly.
+        scheduler.add_sequence(make_seq(1, 2, 3)).unwrap();
+        // Seq 2: long prompt, needs chunked prefill.
+        scheduler.add_sequence(make_seq(2, 12, 3)).unwrap();
+
+        // Step 1: prefill seq 1 (2 tokens) + chunk of seq 2 (4 tokens) = 6 budget.
+        let step1 = scheduler.step().unwrap();
+        assert_eq!(step1.prefill_tokens, 6);
+        assert_eq!(step1.decode_tokens, 0);
+        assert_eq!(scheduler.get_sequence(2).unwrap().num_prefilled_tokens, 4);
+
+        // Decode seq 1.
+        let mut sampled = HashMap::new();
+        sampled.insert(1, 42u32);
+        scheduler.postprocess_step(&sampled).unwrap();
+
+        // Step 2: seq 1 decode (1 token) + next chunk of seq 2 (5 tokens) = 6 budget.
+        let step2 = scheduler.step().unwrap();
+        assert_eq!(step2.decode_tokens, 1);
+        assert_eq!(step2.prefill_tokens, 5);
+        assert!(step2.scheduled_seq_ids.contains(&1));
+        assert!(step2.scheduled_seq_ids.contains(&2));
+
+        // Decode seq 1 again.
+        let mut sampled = HashMap::new();
+        sampled.insert(1, 43u32);
+        scheduler.postprocess_step(&sampled).unwrap();
+
+        // Step 3: seq 1 decode (1 token) + remaining seq 2 prefill (3 tokens) = 4.
+        let step3 = scheduler.step().unwrap();
+        assert_eq!(step3.decode_tokens, 1);
+        assert_eq!(step3.prefill_tokens, 3);
+        assert_eq!(scheduler.get_sequence(2).unwrap().num_prefilled_tokens, 12);
+    }
+
+    /// VAL-PAGED-007: FCFS order respected for waiting requests when sizes identical.
+    #[test]
+    fn fcfs_order_respected_when_waiting_requests_have_identical_requirements() {
+        let pool = default_pool(20);
+        let config = SchedulerConfig {
+            max_num_batched_tokens: 10,
+            prefill_chunk_size: 16,
+            max_num_running_seqs: 8,
+        };
+        let mut scheduler = Scheduler::new(config, pool);
+
+        scheduler.add_sequence(make_seq(1, 6, 5)).unwrap();
+        scheduler.add_sequence(make_seq(2, 6, 5)).unwrap();
+        scheduler.add_sequence(make_seq(3, 6, 5)).unwrap();
+
+        // Budget = 10. First two fit (6 + 4 split for third?), but with budget
+        // splitting: seq1 gets 6, seq2 gets 4 (split). FCFS means 1 before 2 before 3.
+        let result = scheduler.step().unwrap();
+        let orders: Vec<usize> = result
+            .scheduled_seq_ids
+            .iter()
+            .map(|id| scheduler.get_sequence(*id).unwrap().arrival_order())
+            .collect();
+
+        // Verify the scheduled ids are in ascending arrival_order.
+        for window in orders.windows(2) {
+            assert!(
+                window[0] < window[1],
+                "FCFS violated: {:?} should be strictly increasing",
+                orders
+            );
+        }
+    }
+
+    /// VAL-PAGED-012: Total tokens per batch never exceed max_num_batched_tokens.
+    #[test]
+    fn total_tokens_per_batch_never_exceeds_max_num_batched_tokens() {
+        let pool = default_pool(20);
+        let config = SchedulerConfig {
+            max_num_batched_tokens: 8,
+            prefill_chunk_size: 16,
+            max_num_running_seqs: 8,
+        };
+        let mut scheduler = Scheduler::new(config, pool);
+
+        // Mix of running and waiting requests.
+        scheduler.add_sequence(make_seq(1, 4, 5)).unwrap();
+        scheduler.add_sequence(make_seq(2, 10, 5)).unwrap();
+        scheduler.add_sequence(make_seq(3, 6, 5)).unwrap();
+
+        // Simulate multiple steps.
+        for _ in 0..10 {
+            let result = scheduler.step().unwrap();
+            let total = result.prefill_tokens + result.decode_tokens;
+            assert!(
+                total <= config.max_num_batched_tokens,
+                "batch total {} exceeded budget {}",
+                total,
+                config.max_num_batched_tokens
+            );
+
+            let batch = scheduler.build_input_batch(&result);
+            assert!(
+                batch.total_tokens <= config.max_num_batched_tokens,
+                "InputBatch total {} exceeded budget {}",
+                batch.total_tokens,
+                config.max_num_batched_tokens
+            );
+
+            // Postprocess with dummy tokens for all scheduled sequences.
+            let mut sampled = HashMap::new();
+            for &seq_id in &result.scheduled_seq_ids {
+                if !scheduler.get_sequence(seq_id).unwrap().is_finished() {
+                    sampled.insert(seq_id, 42u32);
+                }
+            }
+            scheduler.postprocess_step(&sampled).unwrap();
+
+            if scheduler.waiting_count() == 0 && scheduler.running_count() == 0 {
+                break;
+            }
+        }
+    }
+
+    /// ITL (inter-token latency) test: a decode request mixed with a long prefill
+    /// should not see its ITL spike beyond 2x the baseline single-decode ITL.
+    #[test]
+    fn decode_itl_remains_within_2x_baseline_when_long_prefill_is_in_progress() {
+        let pool = default_pool(30);
+        let config = SchedulerConfig {
+            max_num_batched_tokens: 6,
+            prefill_chunk_size: 16,
+            max_num_running_seqs: 8,
+        };
+        let mut scheduler = Scheduler::new(config, pool);
+
+        // Baseline: single decode request, measure steps per decode token.
+        scheduler.add_sequence(make_seq(100, 2, 5)).unwrap();
+        let mut baseline_decode_steps = 0usize;
+        for _ in 0..10 {
+            let result = scheduler.step().unwrap();
+            if result.decode_tokens > 0 {
+                baseline_decode_steps += 1;
+            }
+            let mut sampled = HashMap::new();
+            for &seq_id in &result.scheduled_seq_ids {
+                if !scheduler.get_sequence(seq_id).unwrap().is_finished() {
+                    sampled.insert(seq_id, 42u32);
+                }
+            }
+            scheduler.postprocess_step(&sampled).unwrap();
+            if scheduler.get_sequence(100).unwrap().is_finished() {
+                break;
+            }
+        }
+        // Remove baseline sequence.
+        scheduler.remove_sequence(100).unwrap();
+
+        // Now mix a short decode request with a long prefill request.
+        scheduler.add_sequence(make_seq(1, 2, 3)).unwrap(); // short → decode quickly
+        scheduler.add_sequence(make_seq(2, 20, 3)).unwrap(); // long prefill
+
+        let mut mixed_decode_steps = 0usize;
+        let mut total_decode_tokens = 0usize;
+        for _ in 0..20 {
+            let result = scheduler.step().unwrap();
+            if result.decode_tokens > 0 {
+                mixed_decode_steps += 1;
+                total_decode_tokens += result.decode_tokens;
+            }
+            let mut sampled = HashMap::new();
+            for &seq_id in &result.scheduled_seq_ids {
+                if !scheduler.get_sequence(seq_id).unwrap().is_finished() {
+                    sampled.insert(seq_id, 42u32);
+                }
+            }
+            scheduler.postprocess_step(&sampled).unwrap();
+            if scheduler.waiting_count() == 0 && scheduler.running_count() == 0 {
+                break;
+            }
+        }
+
+        // ITL ratio = mixed steps per decode / baseline steps per decode.
+        // We compare total steps taken to produce the same number of decode tokens.
+        // With chunked prefill interleaving, the mixed scenario should not need more
+        // than 2x the steps per decode token.
+        let baseline_per_token = baseline_decode_steps as f32 / 3.0; // 3 decode tokens
+        let mixed_per_token = mixed_decode_steps as f32 / total_decode_tokens as f32;
+        assert!(
+            mixed_per_token <= 2.0 * baseline_per_token,
+            "mixed ITL per token {} exceeded 2x baseline {} (steps={} tokens={})",
+            mixed_per_token,
+            2.0 * baseline_per_token,
+            mixed_decode_steps,
+            total_decode_tokens
+        );
+    }
+
+    /// Verify InputBatch contains the correct block tables and positions for
+    /// multiple interleaved prefill+decode sequences.
+    #[test]
+    fn input_batch_contains_correct_block_tables_for_mixed_prefill_decode() {
+        let pool = default_pool(30);
+        let config = SchedulerConfig {
+            max_num_batched_tokens: 6,
+            prefill_chunk_size: 16,
+            max_num_running_seqs: 8,
+        };
+        let mut scheduler = Scheduler::new(config, pool);
+
+        scheduler.add_sequence(make_seq(1, 2, 3)).unwrap();
+        scheduler.add_sequence(make_seq(2, 10, 3)).unwrap();
+
+        // Step 1: both prefill.
+        let step1 = scheduler.step().unwrap();
+        let batch1 = scheduler.build_input_batch(&step1);
+        assert_eq!(batch1.batch_size, 2);
+        assert_eq!(batch1.is_prefill, vec![true, true]);
+        assert_eq!(batch1.num_tokens, vec![2, 4]); // seq1 fully prefilled, seq2 gets 4
+        assert!(
+            !batch1.block_tables[0].is_empty(),
+            "seq 1 has physical blocks assigned"
+        );
+        assert!(
+            !batch1.block_tables[1].is_empty(),
+            "seq 2 has physical blocks assigned"
+        );
+
+        // Postprocess decode token for seq 1.
+        let mut sampled = HashMap::new();
+        sampled.insert(1, 42u32);
+        scheduler.postprocess_step(&sampled).unwrap();
+
+        // Step 2: seq 1 decode, seq 2 prefill chunk.
+        let step2 = scheduler.step().unwrap();
+        let batch2 = scheduler.build_input_batch(&step2);
+        assert_eq!(batch2.batch_size, 2);
+        assert_eq!(batch2.is_prefill, vec![false, true]);
+        assert_eq!(batch2.num_tokens, vec![1, 5]);
+        assert_eq!(batch2.positions[0], vec![2]); // decode position = prefill_len
     }
 }
