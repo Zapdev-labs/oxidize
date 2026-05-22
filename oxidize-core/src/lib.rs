@@ -80,7 +80,11 @@ pub mod tensor;
 pub mod tokenizer;
 #[path = "compute/turboquant.rs"]
 pub mod turboquant;
+#[cfg(feature = "vulkan")]
 #[path = "backends/vulkan.rs"]
+pub mod vulkan;
+#[cfg(not(feature = "vulkan"))]
+#[path = "backends/vulkan_stub.rs"]
 pub mod vulkan;
 #[path = "util/web_worker.rs"]
 pub mod web_worker;
@@ -207,6 +211,29 @@ mod tests {
         assert!(build_script.contains("cargo:rustc-check-cfg=cfg(metal_available)"));
         assert!(build_script.contains("if detect_metal_available()"));
         assert!(build_script.contains("metal::Device::system_default().is_some()"));
+    }
+
+    #[test]
+    fn oxidize_core_declares_vulkan_feature_and_dependencies() {
+        let crate_cargo_toml = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let cargo_toml =
+            std::fs::read_to_string(crate_cargo_toml).expect("oxidize-core Cargo.toml exists");
+
+        assert!(cargo_toml.contains("vulkan = [\"dep:ash\", \"dep:gpu-allocator\", \"dep:shaderc\"]"));
+        assert!(cargo_toml.contains("ash = { version = \"0.38\", optional = true }"));
+        assert!(cargo_toml.contains("gpu-allocator = { version = \"0.27\", optional = true }"));
+        assert!(cargo_toml.contains("shaderc = { version = \"0.8.3\", optional = true }"));
+    }
+
+    #[test]
+    fn vulkan_build_script_sets_expected_cfg_and_loader_detection() {
+        let build_script_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("build.rs");
+        let build_script = std::fs::read_to_string(build_script_path).expect("build.rs exists");
+
+        assert!(build_script.contains("cargo:rustc-check-cfg=cfg(vulkan_available)"));
+        assert!(build_script.contains("if detect_vulkan_available()"));
+        assert!(build_script.contains("env::var_os(\"CARGO_FEATURE_VULKAN\").is_none()"));
+        assert!(build_script.contains("libvulkan.so.1"));
     }
 
     #[test]

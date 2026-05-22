@@ -9,6 +9,7 @@ pub enum Backend {
     Metal,
     Cuda,
     Mlx,
+    Vulkan,
 }
 
 impl std::str::FromStr for Backend {
@@ -20,6 +21,7 @@ impl std::str::FromStr for Backend {
             "metal" => Ok(Backend::Metal),
             "cuda" => Ok(Backend::Cuda),
             "mlx" => Ok(Backend::Mlx),
+            "vulkan" => Ok(Backend::Vulkan),
             _ => Err(()),
         }
     }
@@ -33,6 +35,7 @@ impl Backend {
             Backend::Metal => "metal",
             Backend::Cuda => "cuda",
             Backend::Mlx => "mlx",
+            Backend::Vulkan => "vulkan",
         }
     }
 
@@ -46,6 +49,7 @@ impl Backend {
                 Backend::Cpu,
                 Some("MLX backend requested but unavailable on Linux; falling back to CPU"),
             ),
+            Backend::Vulkan => (Backend::Vulkan, None),
             other => (other, None),
         }
     }
@@ -152,12 +156,13 @@ mod tests {
         assert_eq!(Backend::from_str("metal"), Ok(Backend::Metal));
         assert_eq!(Backend::from_str("cuda"), Ok(Backend::Cuda));
         assert_eq!(Backend::from_str("mlx"), Ok(Backend::Mlx));
+        assert_eq!(Backend::from_str("vulkan"), Ok(Backend::Vulkan));
         assert_eq!(Backend::from_str("unknown"), Err(()));
     }
 
     #[test]
     fn backend_roundtrips_through_str() {
-        for backend in [Backend::Cpu, Backend::Metal, Backend::Cuda, Backend::Mlx] {
+        for backend in [Backend::Cpu, Backend::Metal, Backend::Cuda, Backend::Mlx, Backend::Vulkan] {
             assert_eq!(Backend::from_str(backend.as_str()), Ok(backend));
         }
     }
@@ -196,6 +201,13 @@ mod tests {
     fn cuda_always_effective() {
         let (effective, warning) = Backend::Cuda.effective();
         assert_eq!(effective, Backend::Cuda);
+        assert!(warning.is_none());
+    }
+
+    #[test]
+    fn vulkan_always_effective() {
+        let (effective, warning) = Backend::Vulkan.effective();
+        assert_eq!(effective, Backend::Vulkan);
         assert!(warning.is_none());
     }
 }

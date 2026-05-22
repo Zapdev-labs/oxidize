@@ -118,6 +118,7 @@ enum Backend {
     /// macOS only
     Mlx,
     Cuda,
+    Vulkan,
 }
 
 impl Backend {
@@ -127,6 +128,7 @@ impl Backend {
             Backend::Metal => oxidize_core::backend::Backend::Metal,
             Backend::Mlx => oxidize_core::backend::Backend::Mlx,
             Backend::Cuda => oxidize_core::backend::Backend::Cuda,
+            Backend::Vulkan => oxidize_core::backend::Backend::Vulkan,
         }
     }
 }
@@ -638,6 +640,7 @@ fn main() {
         oxidize_core::backend::Backend::Metal => "Metal GPU",
         oxidize_core::backend::Backend::Cuda => "CUDA GPU",
         oxidize_core::backend::Backend::Cpu => "CPU",
+        oxidize_core::backend::Backend::Vulkan => "Vulkan GPU",
     };
     println!("backend: {} ({})", effective_backend.as_str(), backend_label);
     let threads = if let Some(t) = args.threads.filter(|t| *t > 0) {

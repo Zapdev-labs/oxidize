@@ -52,6 +52,17 @@ pub enum TimedResult<T> {
     Err(String),
 }
 
+impl<T> TimedResult<T> {
+    /// Map the success value, leaving TimedOut and Err unchanged.
+    pub fn map<U>(self, f: impl FnOnce(T) -> U) -> TimedResult<U> {
+        match self {
+            TimedResult::Ok(v) => TimedResult::Ok(f(v)),
+            TimedResult::TimedOut => TimedResult::TimedOut,
+            TimedResult::Err(e) => TimedResult::Err(e),
+        }
+    }
+}
+
 /// Evaluate an async future with a hard timeout.
 ///
 /// If the future does not complete within `deadline`, it is cancelled and
