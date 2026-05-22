@@ -109,6 +109,7 @@ impl KvCacheDType {
 enum Backend {
     Cpu,
     Metal,
+    /// macOS only
     Mlx,
     Cuda,
 }
@@ -864,6 +865,41 @@ fn main() {
                         Err(error) => {
                             eprintln!("failed to load layer-wise model: {error}");
                             return;
+                        }
+                    }
+                } else if effective_backend == oxidize_core::backend::Backend::Mlx {
+                    #[cfg(target_os = "macos")]
+                    {
+                        match oxidize_core::mlx_inference::MlxInferenceModel::load_from_gguf(
+                            &mapped, config,
+                        ) {
+                            Ok(m) => {
+                                println!("MLX backend: loaded model into unified memory");
+                                Box::new(m)
+                            }
+                            Err(error) => {
+                                eprintln!("MLX initialization failed: {error}; falling back to CPU");
+                                let use_mmap = args.cpu_optimized;
+                                match InferenceModel::load_from_gguf(&mapped, config, use_mmap) {
+                                    Ok(m) => Box::new(m),
+                                    Err(error) => {
+                                        eprintln!("failed to load model weights: {error}");
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        eprintln!("MLX backend requested but unavailable on Linux; falling back to CPU");
+                        let use_mmap = args.cpu_optimized;
+                        match InferenceModel::load_from_gguf(&mapped, config, use_mmap) {
+                            Ok(m) => Box::new(m),
+                            Err(error) => {
+                                eprintln!("failed to load model weights: {error}");
+                                return;
+                            }
                         }
                     }
                 } else {

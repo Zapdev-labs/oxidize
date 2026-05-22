@@ -47,6 +47,7 @@ use tokio::time::{Instant as TokioInstant, sleep_until};
 enum Backend {
     Cpu,
     Metal,
+    /// macOS only
     Mlx,
     Cuda,
 }
@@ -151,6 +152,11 @@ struct GenerationDefaults {
 enum LoadedModel {
     Inference(Box<InferenceModel>),
     LayerWise(Box<LayerWiseModel>),
+    #[cfg(target_os = "macos")]
+    Mlx(Box<oxidize_core::mlx_inference::MlxInferenceModel>),
+    #[cfg(not(target_os = "macos"))]
+    #[allow(dead_code)]
+    Mlx(Box<InferenceModel>),
 }
 
 impl Model for LoadedModel {
@@ -162,6 +168,10 @@ impl Model for LoadedModel {
         match self {
             Self::Inference(model) => model.forward(tokens, session),
             Self::LayerWise(model) => model.forward(tokens, session),
+            #[cfg(target_os = "macos")]
+            Self::Mlx(model) => model.forward(tokens, session),
+            #[cfg(not(target_os = "macos"))]
+            Self::Mlx(model) => model.forward(tokens, session),
         }
     }
 
@@ -169,6 +179,10 @@ impl Model for LoadedModel {
         match self {
             Self::Inference(model) => model.vocab_size(),
             Self::LayerWise(model) => model.vocab_size(),
+            #[cfg(target_os = "macos")]
+            Self::Mlx(model) => model.vocab_size(),
+            #[cfg(not(target_os = "macos"))]
+            Self::Mlx(model) => model.vocab_size(),
         }
     }
 
@@ -176,6 +190,10 @@ impl Model for LoadedModel {
         match self {
             Self::Inference(model) => model.context_size(),
             Self::LayerWise(model) => model.context_size(),
+            #[cfg(target_os = "macos")]
+            Self::Mlx(model) => model.context_size(),
+            #[cfg(not(target_os = "macos"))]
+            Self::Mlx(model) => model.context_size(),
         }
     }
 
@@ -183,6 +201,10 @@ impl Model for LoadedModel {
         match self {
             Self::Inference(model) => model.layer_count(),
             Self::LayerWise(model) => model.layer_count(),
+            #[cfg(target_os = "macos")]
+            Self::Mlx(model) => model.layer_count(),
+            #[cfg(not(target_os = "macos"))]
+            Self::Mlx(model) => model.layer_count(),
         }
     }
 
@@ -190,6 +212,10 @@ impl Model for LoadedModel {
         match self {
             Self::Inference(model) => model.rewind_to(consumed_tokens),
             Self::LayerWise(model) => model.rewind_to(consumed_tokens),
+            #[cfg(target_os = "macos")]
+            Self::Mlx(model) => model.rewind_to(consumed_tokens),
+            #[cfg(not(target_os = "macos"))]
+            Self::Mlx(model) => model.rewind_to(consumed_tokens),
         }
     }
 }
@@ -1406,6 +1432,10 @@ fn load_model_runtime(args: &Args) -> Result<Option<Arc<ModelRuntime>>, String> 
     let Some(model_path) = args.model.as_ref() else {
         return Ok(None);
     };
+    let (effective_backend, warning) = args.backend.to_core_backend().effective();
+    if let Some(msg) = warning {
+        tracing::warn!("{msg}");
+    }
     let loader = GgufModelLoader;
     let mapped = loader
         .load_with_progress(model_path, |progress| {
@@ -1436,6 +1466,31 @@ fn load_model_runtime(args: &Args) -> Result<Option<Arc<ModelRuntime>>, String> 
             LayerWiseModel::load_from_gguf(&mapped, config, args.layer_cache)
                 .map_err(|error| format!("failed to load layer-wise model: {error}"))?,
         ))
+    } else if effective_backend == oxidize_core::backend::Backend::Mlx {
+        #[cfg(target_os = "macos")]
+        {
+            match oxidize_core::mlx_inference::MlxInferenceModel::load_from_gguf(&mapped, config) {
+                Ok(m) => {
+                    tracing::info!("MLX backend: loaded model into unified memory");
+                    LoadedModel::Mlx(Box::new(m))
+                }
+                Err(error) => {
+                    tracing::warn!("MLX initialization failed: {error}; falling back to CPU");
+                    LoadedModel::Inference(Box::new(
+                        InferenceModel::load_from_gguf(&mapped, config, args.cpu_optimized)
+                            .map_err(|error| format!("failed to load model weights: {error}"))?,
+                    ))
+                }
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            tracing::warn!("MLX backend requested but unavailable on Linux; falling back to CPU");
+            LoadedModel::Inference(Box::new(
+                InferenceModel::load_from_gguf(&mapped, config, args.cpu_optimized)
+                    .map_err(|error| format!("failed to load model weights: {error}"))?,
+            ))
+        }
     } else {
         LoadedModel::Inference(Box::new(
             InferenceModel::load_from_gguf(&mapped, config, args.cpu_optimized)

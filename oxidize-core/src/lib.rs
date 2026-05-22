@@ -47,6 +47,8 @@ pub mod kv_cache;
 pub mod layer_wise;
 #[path = "model/llama.rs"]
 pub mod llama;
+#[path = "model/mlx_inference.rs"]
+pub mod mlx_inference;
 #[path = "model/lora.rs"]
 pub mod lora;
 #[path = "backends/metal.rs"]
