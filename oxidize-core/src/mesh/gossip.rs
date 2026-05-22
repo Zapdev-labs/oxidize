@@ -92,10 +92,16 @@ impl From<identify::Event> for MeshEvent {
 }
 
 /// Router that tracks subscriptions and routes inbound messages.
+///
+/// Also enforces session invalidation: events tagged with an election
+/// clock older than the current one are dropped.
 #[derive(Debug, Default)]
 pub struct GossipRouter {
     /// Map from topic hash to the known [`TopicKind`].
     pub topics: HashMap<TopicHash, TopicKind>,
+    /// Current election clock. Messages with `clock < active_clock`
+    /// are considered stale and dropped.
+    pub active_clock: u64,
 }
 
 impl GossipRouter {
@@ -115,6 +121,19 @@ impl GossipRouter {
     /// Map a GossipSub topic hash to our [`TopicKind`], if known.
     pub fn resolve(&self, hash: &TopicHash) -> Option<TopicKind> {
         self.topics.get(hash).copied()
+    }
+
+    /// Advance the active election clock. All messages from older clocks
+    /// will be rejected by [`Self::accept`].
+    pub fn invalidate_session(&mut self, new_clock: u64) {
+        self.active_clock = new_clock;
+    }
+
+    /// Return `true` if a message with the given election clock should be
+    /// processed. `clock == 0` means the message is not session-tagged and
+    /// is always accepted.
+    pub fn accept(&self, clock: u64) -> bool {
+        clock == 0 || clock >= self.active_clock
     }
 }
 
@@ -174,5 +193,30 @@ mod tests {
         // Just exercise the From impls compile and execute.
         let mdns_event = MeshEvent::from(mdns::Event::Discovered(vec![]));
         assert!(matches!(mdns_event, MeshEvent::Mdns(_)));
+    }
+
+    #[test]
+    fn router_accepts_untagged_messages() {
+        let router = GossipRouter::default();
+        assert!(router.accept(0));
+    }
+
+    #[test]
+    fn router_rejects_stale_session_messages() {
+        let mut router = GossipRouter::default();
+        router.invalidate_session(5);
+        assert!(router.accept(5));
+        assert!(router.accept(6));
+        assert!(!router.accept(4));
+        assert!(!router.accept(3));
+    }
+
+    #[test]
+    fn router_session_invalidation_advances_clock() {
+        let mut router = GossipRouter::default();
+        router.invalidate_session(3);
+        assert_eq!(router.active_clock, 3);
+        router.invalidate_session(7);
+        assert_eq!(router.active_clock, 7);
     }
 }
