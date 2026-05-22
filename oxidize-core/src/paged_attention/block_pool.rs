@@ -1,7 +1,21 @@
 use crate::tensor::DType;
+use std::collections::HashMap;
 
 /// Unique identifier for a physical block in the pool.
 pub type BlockId = usize;
+
+/// Hash value for a KV block, used by the prefix cache.
+pub type BlockHash = u64;
+
+/// Compute a deterministic hash for a slice of tokens.
+pub fn compute_block_hash(tokens: &[crate::model::Token]) -> BlockHash {
+    let mut h: BlockHash = 0xcbf29ce484222325; // FNV offset basis
+    for &token in tokens {
+        h = h.wrapping_mul(0x100000001b3); // FNV prime
+        h ^= token as BlockHash;
+    }
+    h
+}
 
 /// A physical KV block managed by the [`BlockPool`].
 ///
@@ -14,12 +28,23 @@ pub type BlockId = usize;
 pub struct PhysicalBlock {
     pub id: BlockId,
     pub ref_count: usize,
+    /// Hash value for prefix caching. `None` if this block has not been
+    /// inserted into the prefix cache (or the hash is stale).
+    pub block_hash: Option<BlockHash>,
+    /// For LRU eviction: number of times this block has been accessed
+    /// via the prefix cache.
+    pub last_accessed: usize,
 }
 
 impl PhysicalBlock {
     /// Create a new physical block with the given id.
     pub fn new(id: BlockId) -> Self {
-        Self { id, ref_count: 0 }
+        Self {
+            id,
+            ref_count: 0,
+            block_hash: None,
+            last_accessed: 0,
+        }
     }
 
     /// Increment the reference count.
@@ -88,11 +113,27 @@ impl BlockPoolConfig {
 /// Blocks are allocated on-demand from a free list. When a sequence no longer
 /// needs a block, it is returned to the free list. Shared blocks (used for
 /// prefix caching) are tracked via reference counting on [`PhysicalBlock`].
+///
+/// # Prefix caching
+///
+/// A **global hash table** maps `BlockHash → physical BlockId`. When a new
+/// sequence is prefilled, the scheduler can check the cache for each logical
+/// block by computing its hash over all tokens up to and including that block.
+/// If a cache hit occurs, the existing physical block is shared (ref_count
+/// incremented) instead of allocating a new block.
+///
+/// Copy-on-Write (COW) is triggered when a sequence writes to a shared block:
+/// a new physical block is allocated, the original block's ref_count is
+/// decremented, and the sequence's block table is updated.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockPool {
     config: BlockPoolConfig,
     blocks: Vec<PhysicalBlock>,
     free_list: Vec<BlockId>,
+    /// Global prefix cache: hash → physical block id.
+    prefix_cache: HashMap<BlockHash, BlockId>,
+    /// Monotonically increasing access counter for LRU within the cache.
+    access_counter: usize,
 }
 
 /// Error type for block pool operations.
@@ -138,7 +179,93 @@ impl BlockPool {
             config,
             blocks,
             free_list,
+            prefix_cache: HashMap::new(),
+            access_counter: 0,
         }
+    }
+
+    /// Return the number of entries in the prefix cache.
+    pub fn prefix_cache_len(&self) -> usize {
+        self.prefix_cache.len()
+    }
+
+    /// Clear all prefix cache entries. Used when switching models.
+    pub fn clear_prefix_cache(&mut self) {
+        // Decrement ref counts for all cached blocks so they can be reclaimed.
+        for (&hash, &block_id) in &self.prefix_cache {
+            if let Some(block) = self.blocks.get_mut(block_id)
+                && block.block_hash == Some(hash)
+            {
+                block.block_hash = None;
+                // The block may still be held by sequences; we just remove
+                // the cache entry.  dec_ref is called only when sequences
+                // release the block.
+            }
+        }
+        self.prefix_cache.clear();
+    }
+
+    /// Look up a block hash in the prefix cache.
+    ///
+    /// Returns the physical block id if found, updating the LRU counter.
+    pub fn lookup_prefix_cache(&mut self, hash: BlockHash) -> Option<BlockId> {
+        let block_id = *self.prefix_cache.get(&hash)?;
+        let block = self.blocks.get_mut(block_id)?;
+        // Only return if the block is still allocated and the hash matches.
+        if block.ref_count == 0 {
+            // Stale entry: block was freed but not yet evicted from cache.
+            self.prefix_cache.remove(&hash);
+            return None;
+        }
+        self.access_counter += 1;
+        block.last_accessed = self.access_counter;
+        Some(block_id)
+    }
+
+    /// Insert a physical block into the prefix cache.
+    ///
+    /// The block must be allocated (`ref_count > 0`). If the hash already
+    /// exists, the existing entry is left in place (first-seen wins).
+    pub fn insert_prefix_cache(&mut self, hash: BlockHash, block_id: BlockId) {
+        if let Some(block) = self.blocks.get_mut(block_id) {
+            if block.ref_count == 0 {
+                return; // cannot cache a free block
+            }
+            block.block_hash = Some(hash);
+            self.access_counter += 1;
+            block.last_accessed = self.access_counter;
+        }
+        // Use entry API to avoid overwriting an existing mapping.
+        self.prefix_cache.entry(hash).or_insert(block_id);
+    }
+
+    /// Evict the least-recently-used prefix cache entry whose ref_count == 0.
+    ///
+    /// Returns `true` if an entry was evicted.
+    pub fn evict_lru_prefix_cache_entry(&mut self) -> bool {
+        let mut victim: Option<(BlockHash, BlockId, usize)> = None;
+        for (&hash, &block_id) in &self.prefix_cache {
+            if let Some(block) = self.blocks.get(block_id)
+                && block.ref_count == 0
+            {
+                // Candidate for eviction.
+                match victim {
+                    None => victim = Some((hash, block_id, block.last_accessed)),
+                    Some((_, _, old_access)) if block.last_accessed < old_access => {
+                        victim = Some((hash, block_id, block.last_accessed));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if let Some((hash, block_id, _)) = victim {
+            self.prefix_cache.remove(&hash);
+            if let Some(block) = self.blocks.get_mut(block_id) {
+                block.block_hash = None;
+            }
+            return true;
+        }
+        false
     }
 
     /// Return the pool configuration.
@@ -163,7 +290,8 @@ impl BlockPool {
 
     /// Allocate a single physical block from the free list.
     ///
-    /// The block's reference count is set to 1.
+    /// The block's reference count is set to 1 and its prefix cache hash is
+    /// cleared so it starts fresh.
     pub fn allocate_block(&mut self) -> Result<BlockId, BlockPoolError> {
         let id = self
             .free_list
@@ -174,6 +302,7 @@ impl BlockPool {
             .get_mut(id)
             .ok_or(BlockPoolError::InvalidBlockId { id })?;
         block.ref_count = 1;
+        block.block_hash = None;
         Ok(id)
     }
 
@@ -196,6 +325,7 @@ impl BlockPool {
                 .get_mut(id)
                 .ok_or(BlockPoolError::InvalidBlockId { id })?;
             block.ref_count = 1;
+            block.block_hash = None;
             ids.push(id);
         }
         Ok(ids)
@@ -709,5 +839,86 @@ mod tests {
         let mut pool = BlockPool::new(default_config(3));
         let err = pool.inc_ref(0).expect_err("should fail");
         assert_eq!(err, BlockPoolError::BlockNotAllocated { id: 0 });
+    }
+
+    // === Prefix cache tests ===
+
+    #[test]
+    fn prefix_cache_lookup_returns_cached_block_id() {
+        let mut pool = BlockPool::new(default_config(5));
+        let id = pool.allocate_block().unwrap();
+        let hash: BlockHash = 0x1234_5678_9abc_def0;
+        pool.insert_prefix_cache(hash, id);
+        assert_eq!(pool.lookup_prefix_cache(hash), Some(id));
+    }
+
+    #[test]
+    fn prefix_cache_miss_returns_none() {
+        let mut pool = BlockPool::new(default_config(5));
+        assert_eq!(pool.lookup_prefix_cache(0xdead_beef), None);
+    }
+
+    #[test]
+    fn prefix_cache_stale_entry_removed_when_block_freed() {
+        let mut pool = BlockPool::new(default_config(5));
+        let id = pool.allocate_block().unwrap();
+        let hash: BlockHash = 0xabcd_ef01;
+        pool.insert_prefix_cache(hash, id);
+        pool.dec_ref(id).unwrap(); // free block
+        assert_eq!(pool.lookup_prefix_cache(hash), None);
+    }
+
+    #[test]
+    fn clear_prefix_cache_removes_all_entries() {
+        let mut pool = BlockPool::new(default_config(5));
+        let id1 = pool.allocate_block().unwrap();
+        let id2 = pool.allocate_block().unwrap();
+        pool.insert_prefix_cache(0x1111, id1);
+        pool.insert_prefix_cache(0x2222, id2);
+        assert_eq!(pool.prefix_cache_len(), 2);
+        pool.clear_prefix_cache();
+        assert_eq!(pool.prefix_cache_len(), 0);
+        assert_eq!(pool.lookup_prefix_cache(0x1111), None);
+        assert_eq!(pool.lookup_prefix_cache(0x2222), None);
+    }
+
+    #[test]
+    fn prefix_cache_evicts_lru_when_ref_count_zero() {
+        let mut pool = BlockPool::new(default_config(5));
+        let id1 = pool.allocate_block().unwrap();
+        let id2 = pool.allocate_block().unwrap();
+        pool.insert_prefix_cache(0x1111, id1);
+        pool.insert_prefix_cache(0x2222, id2);
+        // Access id1 so it becomes more recent.
+        pool.lookup_prefix_cache(0x1111);
+        // Free id2 (ref_count goes to 0).
+        pool.dec_ref(id2).unwrap();
+        // Evict should remove id2 (least recently used among ref_count==0).
+        assert!(pool.evict_lru_prefix_cache_entry());
+        assert_eq!(pool.lookup_prefix_cache(0x2222), None);
+        assert_eq!(pool.lookup_prefix_cache(0x1111), Some(id1));
+    }
+
+    #[test]
+    fn prefix_cache_does_not_evict_when_all_ref_count_nonzero() {
+        let mut pool = BlockPool::new(default_config(5));
+        let id = pool.allocate_block().unwrap();
+        pool.insert_prefix_cache(0x1111, id);
+        assert!(!pool.evict_lru_prefix_cache_entry());
+    }
+
+    #[test]
+    fn prefix_cache_hash_computation_is_deterministic() {
+        let tokens: Vec<u32> = vec![1, 2, 3, 4, 5];
+        let h1 = compute_block_hash(&tokens);
+        let h2 = compute_block_hash(&tokens);
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn prefix_cache_hash_changes_with_tokens() {
+        let h1 = compute_block_hash(&[1, 2, 3]);
+        let h2 = compute_block_hash(&[1, 2, 4]);
+        assert_ne!(h1, h2);
     }
 }
