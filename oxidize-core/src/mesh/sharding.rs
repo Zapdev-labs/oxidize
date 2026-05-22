@@ -14,9 +14,15 @@ use super::topology::TopologyGraph;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ShardAssignment {
     /// Pipeline stage: contiguous layer range [start, end).
-    Pipeline { start_layer: usize, end_layer: usize },
+    Pipeline {
+        start_layer: usize,
+        end_layer: usize,
+    },
     /// Tensor-parallel shard: column or row split index.
-    Tensor { split_index: usize, total_splits: usize },
+    Tensor {
+        split_index: usize,
+        total_splits: usize,
+    },
 }
 
 /// Full sharding plan broadcast by the master.
@@ -116,16 +122,16 @@ pub fn local_assignment<'a>(
 /// pipeline ordering).
 ///
 /// Uses the ring transport for the data plane.
-pub async fn pipeline_send(
-    ring: &mut RingBackend,
-    activations: Vec<f32>,
-) -> Result<(), RingError> {
+pub async fn pipeline_send(ring: &mut RingBackend, activations: Vec<f32>) -> Result<(), RingError> {
     let bytes = f32_slice_to_bytes(&activations);
     ring.transport.send_to_right(bytes).await
 }
 
 /// Receive activations from the previous pipeline stage (left neighbour).
-pub async fn pipeline_recv(ring: &mut RingBackend, num_floats: usize) -> Result<Vec<f32>, RingError> {
+pub async fn pipeline_recv(
+    ring: &mut RingBackend,
+    num_floats: usize,
+) -> Result<Vec<f32>, RingError> {
     let bytes = ring.transport.recv_from_left().await?;
     let mut out = vec![0.0_f32; num_floats];
     bytes_to_f32_slice_into(&bytes, &mut out)?;
@@ -155,8 +161,8 @@ pub async fn tensor_parallel_all_gather(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mesh::topology::TopologyGraph;
     use crate::mesh::node::NodeCapabilities;
+    use crate::mesh::topology::TopologyGraph;
     use std::collections::HashMap;
 
     fn dummy_caps(can_shard: bool) -> NodeCapabilities {

@@ -4,14 +4,19 @@
 //! prompt broadcasting, simulated distributed forward passes, and token
 //! streaming across the mesh.
 
+use super::fault_tolerance::{
+    DEFAULT_COLLECTIVE_TIMEOUT, RunnerStatus, RunnerStatusUpdated, TimedResult, eval_with_timeout,
+};
+use super::gossip::MeshEnvelope;
+use super::ring::RingBackend;
+use super::sharding::{
+    ShardAssignment, ShardPlan, local_assignment, pipeline_recv, pipeline_send,
+    tensor_parallel_all_gather, tensor_parallel_all_sum,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
-use super::fault_tolerance::{eval_with_timeout, RunnerStatus, RunnerStatusUpdated, TimedResult, DEFAULT_COLLECTIVE_TIMEOUT};
-use super::gossip::MeshEnvelope;
-use super::ring::RingBackend;
-use super::sharding::{ShardAssignment, ShardPlan, local_assignment, pipeline_send, pipeline_recv, tensor_parallel_all_sum, tensor_parallel_all_gather};
+use tokio::sync::{Mutex, mpsc};
 
 /// A chat prompt broadcast by a client (CLI or HTTP) to the mesh master
 /// via the `COMMANDS` topic.
@@ -109,11 +114,7 @@ impl MeshChatEngine {
     }
 
     /// Register a token sink so the CLI can receive streaming tokens.
-    pub async fn register_sink(
-        &self,
-        request_id: &str,
-        tx: mpsc::UnboundedSender<MeshChatToken>,
-    ) {
+    pub async fn register_sink(&self, request_id: &str, tx: mpsc::UnboundedSender<MeshChatToken>) {
         let mut sinks = self.token_sinks.lock().await;
         sinks.insert(request_id.to_string(), tx);
     }
@@ -142,10 +143,7 @@ impl MeshChatEngine {
     ///
     /// Returns a sequence of tokens that the caller (master) should
     /// broadcast on `GLOBAL_EVENTS`.
-    pub async fn handle_prompt(
-        &mut self,
-        prompt: &MeshChatPrompt,
-    ) -> Vec<MeshChatToken> {
+    pub async fn handle_prompt(&mut self, prompt: &MeshChatPrompt) -> Vec<MeshChatToken> {
         let request_id = prompt.request_id.clone();
         let max_tokens = prompt.max_tokens;
 
@@ -175,7 +173,8 @@ impl MeshChatEngine {
                         &self.status_tx,
                         timeout,
                         i,
-                    ).await;
+                    )
+                    .await;
                     if matches!(result, TimedResult::TimedOut | TimedResult::Err(_)) {
                         // Abort token generation on timeout or ring error.
                         break;
@@ -205,7 +204,8 @@ impl MeshChatEngine {
                         &self.status_tx,
                         timeout,
                         i,
-                    ).await;
+                    )
+                    .await;
                 }
             }
             Vec::new()
@@ -226,7 +226,9 @@ impl MeshChatEngine {
         _step: usize,
     ) -> TimedResult<()> {
         let result = Self::run_pipeline_stage_raw(ring, shard_plan, local_peer_id, timeout).await;
-        if matches!(result, TimedResult::TimedOut) && let Some(tx) = status_tx {
+        if matches!(result, TimedResult::TimedOut)
+            && let Some(tx) = status_tx
+        {
             let _ = tx.send(RunnerStatusUpdated {
                 peer_id: local_peer_id.to_string(),
                 status: RunnerStatus::RunnerFailed {
@@ -250,11 +252,13 @@ impl MeshChatEngine {
         local_peer_id: &str,
         timeout: std::time::Duration,
     ) -> TimedResult<()> {
-        let assignment = shard_plan
-            .and_then(|plan| local_assignment(plan, local_peer_id));
+        let assignment = shard_plan.and_then(|plan| local_assignment(plan, local_peer_id));
 
         match assignment {
-            Some(ShardAssignment::Pipeline { start_layer, end_layer }) => {
+            Some(ShardAssignment::Pipeline {
+                start_layer,
+                end_layer,
+            }) => {
                 // Determine whether we are first, last, or middle stage.
                 let num_workers = ring.num_ranks;
                 let stage_index = ring.rank;
@@ -270,16 +274,12 @@ impl MeshChatEngine {
                 ];
 
                 if is_first {
-                    let r = eval_with_timeout(
-                        pipeline_send(ring, synthetic),
-                        timeout,
-                    ).await;
-                    if !matches!(r, TimedResult::Ok(())) { return r; }
+                    let r = eval_with_timeout(pipeline_send(ring, synthetic), timeout).await;
+                    if !matches!(r, TimedResult::Ok(())) {
+                        return r;
+                    }
                 } else if is_last {
-                    let r = eval_with_timeout(
-                        pipeline_recv(ring, 4),
-                        timeout,
-                    ).await;
+                    let r = eval_with_timeout(pipeline_recv(ring, 4), timeout).await;
                     let received = match r {
                         TimedResult::Ok(v) => v,
                         TimedResult::TimedOut => return TimedResult::TimedOut,
@@ -290,23 +290,22 @@ impl MeshChatEngine {
                     let r = eval_with_timeout(
                         tensor_parallel_all_gather(ring, &received, &mut gathered),
                         timeout,
-                    ).await;
-                    if !matches!(r, TimedResult::Ok(())) { return r; }
+                    )
+                    .await;
+                    if !matches!(r, TimedResult::Ok(())) {
+                        return r;
+                    }
                 } else {
-                    let r = eval_with_timeout(
-                        pipeline_recv(ring, 4),
-                        timeout,
-                    ).await;
+                    let r = eval_with_timeout(pipeline_recv(ring, 4), timeout).await;
                     let received = match r {
                         TimedResult::Ok(v) => v,
                         TimedResult::TimedOut => return TimedResult::TimedOut,
                         TimedResult::Err(e) => return TimedResult::Err(e),
                     };
-                    let r = eval_with_timeout(
-                        pipeline_send(ring, received),
-                        timeout,
-                    ).await;
-                    if !matches!(r, TimedResult::Ok(())) { return r; }
+                    let r = eval_with_timeout(pipeline_send(ring, received), timeout).await;
+                    if !matches!(r, TimedResult::Ok(())) {
+                        return r;
+                    }
                 }
                 TimedResult::Ok(())
             }
@@ -314,10 +313,7 @@ impl MeshChatEngine {
                 // Tensor parallelism: all_sum a small synthetic partial.
                 let partial = vec![ring.rank as f32; 4];
                 let mut buf = partial.clone();
-                eval_with_timeout(
-                    tensor_parallel_all_sum(ring, &mut buf),
-                    timeout,
-                ).await
+                eval_with_timeout(tensor_parallel_all_sum(ring, &mut buf), timeout).await
             }
             None => {
                 // No assignment — nothing to do.
@@ -364,10 +360,10 @@ pub fn decode_mesh_command(data: &[u8]) -> Result<(u64, MeshCommand), serde_json
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mesh::ring::create_mock_ring;
-    use crate::mesh::sharding::{compute_shard_plan, ParallelismStrategy};
-    use crate::mesh::topology::TopologyGraph;
     use crate::mesh::node::NodeCapabilities;
+    use crate::mesh::ring::create_mock_ring;
+    use crate::mesh::sharding::{ParallelismStrategy, compute_shard_plan};
+    use crate::mesh::topology::TopologyGraph;
 
     fn dummy_caps() -> NodeCapabilities {
         NodeCapabilities {

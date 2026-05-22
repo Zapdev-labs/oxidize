@@ -6,8 +6,10 @@
 pub mod block_pool;
 pub mod scheduler;
 
-pub use block_pool::{BlockHash, BlockId, BlockPool, BlockPoolConfig, BlockTable, PhysicalBlock, compute_block_hash};
+pub use block_pool::{
+    BlockHash, BlockId, BlockPool, BlockPoolConfig, BlockTable, PhysicalBlock, compute_block_hash,
+};
 pub use scheduler::{
-    InputBatch, Scheduler, SchedulerConfig, SchedulerError, SchedulerStepResult, SeqId,
-    Sequence, SequenceStatus,
+    InputBatch, Scheduler, SchedulerConfig, SchedulerError, SchedulerStepResult, SeqId, Sequence,
+    SequenceStatus,
 };

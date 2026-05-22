@@ -1,24 +1,19 @@
 //! libp2p peer discovery with mDNS and namespace isolation.
 
 use futures_util::StreamExt;
-use tokio::sync::mpsc;
-use libp2p::{
-    gossipsub,
-    identify,
-    identity::Keypair,
-    mdns,
-    swarm::Swarm,
-    PeerId, Transport,
-};
 use libp2p::core::upgrade::Version;
 use libp2p::noise;
 use libp2p::tcp::tokio::Transport as TokioTcpTransport;
 use libp2p::yamux;
+use libp2p::{PeerId, Transport, gossipsub, identify, identity::Keypair, mdns, swarm::Swarm};
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
 
 use super::chat::{MeshChatEngine, MeshChatPrompt, MeshChatToken, MeshCommand};
 use super::node::{MeshConfig, NodeCapabilities};
-use super::progress::{AggregatedProgress, LoadProgressReport, aggregate_progress, render_cluster_progress_bar};
+use super::progress::{
+    AggregatedProgress, LoadProgressReport, aggregate_progress, render_cluster_progress_bar,
+};
 use super::sharding::{ShardPlan, compute_shard_plan, local_assignment};
 
 /// Events emitted by the discovery layer.
@@ -90,10 +85,7 @@ pub fn build_swarm(
     keypair: &Keypair,
     namespace: &str,
     agent_version: String,
-) -> Result<
-    Swarm<crate::mesh::gossip::MeshBehaviour>,
-    Box<dyn std::error::Error + Send + Sync>,
-> {
+) -> Result<Swarm<crate::mesh::gossip::MeshBehaviour>, Box<dyn std::error::Error + Send + Sync>> {
     use libp2p::swarm::Config as SwarmConfig;
 
     let peer_id = PeerId::from(keypair.public());
@@ -120,11 +112,8 @@ pub fn build_swarm(
             gossipsub_config,
         )?,
         identify: libp2p::identify::Behaviour::new(
-            libp2p::identify::Config::new(
-                "/oxidize/mesh/0.1.0".to_string(),
-                keypair.public(),
-            )
-            .with_agent_version(agent_version),
+            libp2p::identify::Config::new("/oxidize/mesh/0.1.0".to_string(), keypair.public())
+                .with_agent_version(agent_version),
         ),
     };
 
@@ -190,18 +179,33 @@ pub fn broadcast_shard_plan(
     clock: u64,
     plan: &ShardPlan,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    println!("broadcast shard plan: model={} strategy={:?}", plan.model_id, plan.strategy);
+    println!(
+        "broadcast shard plan: model={} strategy={:?}",
+        plan.model_id, plan.strategy
+    );
     for (peer_id, assignment) in &plan.assignments {
         match assignment {
-            crate::mesh::sharding::ShardAssignment::Pipeline { start_layer, end_layer } => {
+            crate::mesh::sharding::ShardAssignment::Pipeline {
+                start_layer,
+                end_layer,
+            } => {
                 println!("  pipeline [{start_layer}-{end_layer}]->{peer_id}");
             }
-            crate::mesh::sharding::ShardAssignment::Tensor { split_index, total_splits } => {
+            crate::mesh::sharding::ShardAssignment::Tensor {
+                split_index,
+                total_splits,
+            } => {
                 println!("  tensor shard {split_index}/{total_splits}->{peer_id}");
             }
         }
     }
-    publish_envelope(swarm, namespace, crate::mesh::gossip::TopicKind::Commands, clock, plan)
+    publish_envelope(
+        swarm,
+        namespace,
+        crate::mesh::gossip::TopicKind::Commands,
+        clock,
+        plan,
+    )
 }
 
 /// Run a mesh node: build swarm, listen on `mesh_port`, drive the event loop,
@@ -225,8 +229,8 @@ pub async fn run_mesh_node(
     prompt_rx: Option<mpsc::UnboundedReceiver<MeshChatPrompt>>,
     token_tx: Option<mpsc::UnboundedSender<MeshChatToken>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use libp2p::swarm::SwarmEvent;
     use libp2p::gossipsub::Event as GossipsubEvent;
+    use libp2p::swarm::SwarmEvent;
     use std::time::Duration;
 
     let namespace = MeshConfig::default_namespace();
@@ -261,13 +265,10 @@ pub async fn run_mesh_node(
     } else {
         format!("0.0.0.0:{}", mesh_port).parse().unwrap()
     };
-    let multiaddr: libp2p::Multiaddr = format!(
-        "/ip4/{}/tcp/{}",
-        listen_addr.ip(),
-        listen_addr.port()
-    )
-    .parse()
-    .map_err(|e| format!("invalid multiaddr: {e}"))?;
+    let multiaddr: libp2p::Multiaddr =
+        format!("/ip4/{}/tcp/{}", listen_addr.ip(), listen_addr.port())
+            .parse()
+            .map_err(|e| format!("invalid multiaddr: {e}"))?;
 
     swarm.listen_on(multiaddr)?;
 
@@ -289,7 +290,8 @@ pub async fn run_mesh_node(
 
     // Fault-tolerance channel: timeout in pipeline stage emits RunnerFailed,
     // which the master turns into a ShutdownTask broadcast on COMMANDS.
-    let (status_tx, mut status_rx) = mpsc::unbounded_channel::<crate::mesh::fault_tolerance::RunnerStatusUpdated>();
+    let (status_tx, mut status_rx) =
+        mpsc::unbounded_channel::<crate::mesh::fault_tolerance::RunnerStatusUpdated>();
     chat_engine.status_tx = Some(status_tx);
 
     // Heartbeat / stale-peer timeout (≤15 s per VAL-MESH-010)
@@ -302,10 +304,13 @@ pub async fn run_mesh_node(
     // Main event loop.
     'outer: loop {
         // Only arm the periodic timer when there is actual work to do.
-        let needs_timer = matches!(election.state, crate::mesh::election::ElectionState::Electing { .. })
-            || (matches!(election.state, crate::mesh::election::ElectionState::Idle)
+        let needs_timer =
+            matches!(
+                election.state,
+                crate::mesh::election::ElectionState::Electing { .. }
+            ) || (matches!(election.state, crate::mesh::election::ElectionState::Idle)
                 && known_peers.len() >= 2)
-            || election.is_master();
+                || election.is_master();
 
         let maybe_timer = if needs_timer {
             tokio::time::sleep(Duration::from_millis(100))
@@ -639,9 +644,12 @@ pub async fn run_mesh_node(
     };
     if let Ok(disconnect_data) = serde_json::to_vec(&disconnect) {
         let topic = gossipsub::IdentTopic::new(
-            crate::mesh::gossip::TopicKind::ConnectionMessages.topic_name(&namespace)
+            crate::mesh::gossip::TopicKind::ConnectionMessages.topic_name(&namespace),
         );
-        let _ = swarm.behaviour_mut().gossipsub.publish(topic, disconnect_data);
+        let _ = swarm
+            .behaviour_mut()
+            .gossipsub
+            .publish(topic, disconnect_data);
     }
 
     // Brief drain so the disconnect message has a chance to hit the wire.

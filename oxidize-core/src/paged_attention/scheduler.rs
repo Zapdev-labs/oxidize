@@ -3,7 +3,7 @@
 
 use super::{BlockId, BlockPool, BlockTable};
 use crate::model::Token;
-use crate::paged_attention::block_pool::{compute_block_hash, BlockPoolError};
+use crate::paged_attention::block_pool::{BlockPoolError, compute_block_hash};
 use crate::sampling::SamplingConfig;
 use std::collections::{HashMap, VecDeque};
 
@@ -88,7 +88,9 @@ impl Sequence {
 
     /// Total tokens in the sequence (prompt + generated).
     pub fn num_tokens(&self) -> usize {
-        self.prompt_tokens.len().saturating_add(self.generated_tokens.len())
+        self.prompt_tokens
+            .len()
+            .saturating_add(self.generated_tokens.len())
     }
 
     /// Number of prompt tokens.
@@ -531,8 +533,16 @@ impl Scheduler {
             };
 
             // Determine whether this sequence received prefill or decode tokens.
-            let prefill_count = step_result.seq_prefill_tokens.get(&seq_id).copied().unwrap_or(0);
-            let decode_count = step_result.seq_decode_tokens.get(&seq_id).copied().unwrap_or(0);
+            let prefill_count = step_result
+                .seq_prefill_tokens
+                .get(&seq_id)
+                .copied()
+                .unwrap_or(0);
+            let decode_count = step_result
+                .seq_decode_tokens
+                .get(&seq_id)
+                .copied()
+                .unwrap_or(0);
 
             if prefill_count > 0 {
                 // Prefill sequence: tokens are from the prompt.
@@ -735,7 +745,9 @@ impl Scheduler {
         // --- How many tokens in *this chunk* are already cached? ---
         let chunk_end = already_prefilled + this_chunk;
         let cached_in_chunk = if cached_tokens_total > already_prefilled {
-            cached_tokens_total.min(chunk_end).saturating_sub(already_prefilled)
+            cached_tokens_total
+                .min(chunk_end)
+                .saturating_sub(already_prefilled)
         } else {
             0
         };
@@ -946,7 +958,10 @@ mod tests {
         let step1 = scheduler.step().unwrap();
         assert_eq!(step1.prefill_tokens, 2);
         assert_eq!(step1.decode_tokens, 0);
-        assert_eq!(scheduler.get_sequence(1).unwrap().status(), SequenceStatus::Running);
+        assert_eq!(
+            scheduler.get_sequence(1).unwrap().status(),
+            SequenceStatus::Running
+        );
 
         // Step 2: decode
         let mut sampled = HashMap::new();
@@ -970,7 +985,10 @@ mod tests {
         sampled.insert(1, 44u32);
         scheduler.postprocess_step(&sampled).unwrap();
 
-        assert_eq!(scheduler.get_sequence(1).unwrap().status(), SequenceStatus::Finished);
+        assert_eq!(
+            scheduler.get_sequence(1).unwrap().status(),
+            SequenceStatus::Finished
+        );
         assert_eq!(scheduler.running_count(), 0);
     }
 
@@ -1115,7 +1133,10 @@ mod tests {
         sampled.insert(1, 99u32);
         scheduler.postprocess_step(&sampled).unwrap();
 
-        assert_eq!(scheduler.get_sequence(1).unwrap().status(), SequenceStatus::Finished);
+        assert_eq!(
+            scheduler.get_sequence(1).unwrap().status(),
+            SequenceStatus::Finished
+        );
         let free_after = scheduler.block_pool().free_block_count();
         assert_eq!(free_after, free_before); // blocks reclaimed
     }
@@ -1193,7 +1214,10 @@ mod tests {
         sampled.insert(1, 0u32);
         scheduler.postprocess_step(&sampled).unwrap();
 
-        assert_eq!(scheduler.get_sequence(1).unwrap().status(), SequenceStatus::Finished);
+        assert_eq!(
+            scheduler.get_sequence(1).unwrap().status(),
+            SequenceStatus::Finished
+        );
     }
 
     #[test]
@@ -1222,7 +1246,10 @@ mod tests {
         scheduler.add_sequence(make_seq(1, 20, 5)).unwrap();
 
         let err = scheduler.step().expect_err("should fail out of blocks");
-        assert!(matches!(err, SchedulerError::BlockPool(BlockPoolError::OutOfBlocks)));
+        assert!(matches!(
+            err,
+            SchedulerError::BlockPool(BlockPoolError::OutOfBlocks)
+        ));
     }
 
     #[test]
@@ -1241,7 +1268,10 @@ mod tests {
         scheduler.postprocess_step(&sampled).unwrap();
 
         assert_eq!(scheduler.running_count(), 0);
-        assert_eq!(scheduler.get_sequence(1).unwrap().status(), SequenceStatus::Finished);
+        assert_eq!(
+            scheduler.get_sequence(1).unwrap().status(),
+            SequenceStatus::Finished
+        );
     }
 
     #[test]
@@ -1261,7 +1291,10 @@ mod tests {
         let step1 = scheduler.step().unwrap();
         assert_eq!(step1.prefill_tokens, 8);
         assert_eq!(step1.decode_tokens, 0);
-        assert_eq!(scheduler.get_sequence(1).unwrap().status(), SequenceStatus::Running);
+        assert_eq!(
+            scheduler.get_sequence(1).unwrap().status(),
+            SequenceStatus::Running
+        );
 
         // Step 2: next 8 tokens prefilled (still running, not finished).
         let step2 = scheduler.step().unwrap();
@@ -1301,7 +1334,11 @@ mod tests {
         }
 
         let result = scheduler.step().unwrap();
-        assert_eq!(result.scheduled_seq_ids.len(), 4, "all 4 sequences scheduled");
+        assert_eq!(
+            result.scheduled_seq_ids.len(),
+            4,
+            "all 4 sequences scheduled"
+        );
 
         let batch = scheduler.build_input_batch(&result);
         assert_eq!(batch.batch_size, 4, "InputBatch batch_size > 1");
@@ -1611,11 +1648,7 @@ mod tests {
     /// Directly prefill a sequence using the prefix cache without going through
     /// the scheduler step loop.  This lets us test prefix cache mechanics in
     /// isolation.
-    fn direct_prefill(
-        scheduler: &mut Scheduler,
-        seq_id: SeqId,
-        chunk_size: usize,
-    ) -> usize {
+    fn direct_prefill(scheduler: &mut Scheduler, seq_id: SeqId, chunk_size: usize) -> usize {
         scheduler
             .apply_prefill_chunk_with_prefix_cache(seq_id, chunk_size)
             .unwrap()
@@ -1633,7 +1666,9 @@ mod tests {
         let prompt: Vec<u32> = (1..=20).collect();
 
         // First request: full prefill using direct_prefill.
-        scheduler.add_sequence(make_seq_with_tokens(1, prompt.clone(), 3)).unwrap();
+        scheduler
+            .add_sequence(make_seq_with_tokens(1, prompt.clone(), 3))
+            .unwrap();
         let pre1a = direct_prefill(&mut scheduler, 1, 16);
         assert_eq!(pre1a, 16);
         let pre1b = direct_prefill(&mut scheduler, 1, 16);
@@ -1641,7 +1676,9 @@ mod tests {
         assert_eq!(scheduler.get_sequence(1).unwrap().num_prefilled_tokens, 20);
 
         // Second request with identical prompt.
-        scheduler.add_sequence(make_seq_with_tokens(2, prompt.clone(), 3)).unwrap();
+        scheduler
+            .add_sequence(make_seq_with_tokens(2, prompt.clone(), 3))
+            .unwrap();
         let cached = scheduler.find_prefix_cache_hits(2).unwrap();
         assert!(cached > 0, "second request should have prefix cache hits");
 
@@ -1678,12 +1715,16 @@ mod tests {
         let prompt: Vec<u32> = (1..=16).collect();
 
         // Seq 1: prefill full prompt, populate prefix cache.
-        scheduler.add_sequence(make_seq_with_tokens(1, prompt.clone(), 3)).unwrap();
+        scheduler
+            .add_sequence(make_seq_with_tokens(1, prompt.clone(), 3))
+            .unwrap();
         let _ = direct_prefill(&mut scheduler, 1, 16);
         assert_eq!(scheduler.get_sequence(1).unwrap().num_prefilled_tokens, 16);
 
         // Seq 2: same prompt — will share the single block via prefix cache.
-        scheduler.add_sequence(make_seq_with_tokens(2, prompt.clone(), 3)).unwrap();
+        scheduler
+            .add_sequence(make_seq_with_tokens(2, prompt.clone(), 3))
+            .unwrap();
         let cached = scheduler.find_prefix_cache_hits(2).unwrap();
         assert!(cached >= 16, "single block should be fully cached");
 
@@ -1701,12 +1742,14 @@ mod tests {
             .block_table
             .get_physical_block(0)
             .unwrap();
-        assert_eq!(
-            seq2_block0, seq1_block0,
-            "seq2 should share seq1's block"
-        );
+        assert_eq!(seq2_block0, seq1_block0, "seq2 should share seq1's block");
         assert!(
-            scheduler.block_pool().get_block(seq1_block0).unwrap().ref_count > 1,
+            scheduler
+                .block_pool()
+                .get_block(seq1_block0)
+                .unwrap()
+                .ref_count
+                > 1,
             "shared block should have ref_count > 1"
         );
 
@@ -1734,11 +1777,15 @@ mod tests {
         let prompt: Vec<u32> = (1..=15).collect();
 
         // Prefill seq1 and populate cache.
-        scheduler.add_sequence(make_seq_with_tokens(1, prompt.clone(), 3)).unwrap();
+        scheduler
+            .add_sequence(make_seq_with_tokens(1, prompt.clone(), 3))
+            .unwrap();
         let _ = direct_prefill(&mut scheduler, 1, 16);
 
         // Share prefix with seq2.
-        scheduler.add_sequence(make_seq_with_tokens(2, prompt.clone(), 3)).unwrap();
+        scheduler
+            .add_sequence(make_seq_with_tokens(2, prompt.clone(), 3))
+            .unwrap();
         let _ = direct_prefill(&mut scheduler, 2, 16);
 
         let shared_before = scheduler
@@ -1748,7 +1795,12 @@ mod tests {
             .get_physical_block(0)
             .unwrap();
         assert!(
-            scheduler.block_pool().get_block(shared_before).unwrap().ref_count > 1
+            scheduler
+                .block_pool()
+                .get_block(shared_before)
+                .unwrap()
+                .ref_count
+                > 1
         );
 
         // Trigger COW on seq1.  Append a decode token (index 15) inside the same block.
@@ -1775,7 +1827,11 @@ mod tests {
 
         // Original block ref_count should now be 1.
         assert_eq!(
-            scheduler.block_pool().get_block(shared_before).unwrap().ref_count,
+            scheduler
+                .block_pool()
+                .get_block(shared_before)
+                .unwrap()
+                .ref_count,
             1
         );
     }
@@ -1791,12 +1847,16 @@ mod tests {
         let prompt: Vec<u32> = (1..=15).collect();
 
         // Seq 1: prefill full prompt, populate prefix cache.
-        scheduler.add_sequence(make_seq_with_tokens(1, prompt.clone(), 3)).unwrap();
+        scheduler
+            .add_sequence(make_seq_with_tokens(1, prompt.clone(), 3))
+            .unwrap();
         let _ = direct_prefill(&mut scheduler, 1, 16);
         assert_eq!(scheduler.get_sequence(1).unwrap().num_prefilled_tokens, 15);
 
         // Seq 2: same prompt — will share the single block via prefix cache.
-        scheduler.add_sequence(make_seq_with_tokens(2, prompt.clone(), 3)).unwrap();
+        scheduler
+            .add_sequence(make_seq_with_tokens(2, prompt.clone(), 3))
+            .unwrap();
         let _ = direct_prefill(&mut scheduler, 2, 16);
 
         let shared_block = scheduler
@@ -1806,7 +1866,11 @@ mod tests {
             .get_physical_block(0)
             .unwrap();
         assert_eq!(
-            scheduler.block_pool().get_block(shared_block).unwrap().ref_count,
+            scheduler
+                .block_pool()
+                .get_block(shared_block)
+                .unwrap()
+                .ref_count,
             2
         );
 
@@ -1839,7 +1903,11 @@ mod tests {
 
         // The original block's ref_count should be back to 1 (only seq2 holds it).
         assert_eq!(
-            scheduler.block_pool().get_block(seq2_block0).unwrap().ref_count,
+            scheduler
+                .block_pool()
+                .get_block(seq2_block0)
+                .unwrap()
+                .ref_count,
             1,
             "original block ref_count should be 1 after COW"
         );
@@ -1857,12 +1925,16 @@ mod tests {
         let prompt: Vec<u32> = (1..=16).collect(); // 16 tokens = 1 block
 
         // Seq 1: prefill and populate cache.
-        scheduler.add_sequence(make_seq_with_tokens(1, prompt.clone(), 10)).unwrap();
+        scheduler
+            .add_sequence(make_seq_with_tokens(1, prompt.clone(), 10))
+            .unwrap();
         let _ = direct_prefill(&mut scheduler, 1, 16);
         assert_eq!(scheduler.get_sequence(1).unwrap().num_prefilled_tokens, 16);
 
         // Seq 2: same prompt — shares the prefix block, keeping it alive in cache.
-        scheduler.add_sequence(make_seq_with_tokens(2, prompt.clone(), 10)).unwrap();
+        scheduler
+            .add_sequence(make_seq_with_tokens(2, prompt.clone(), 10))
+            .unwrap();
         let _ = direct_prefill(&mut scheduler, 2, 16);
 
         // Preempt seq1.  Seq2 still holds the shared block, so cache entry stays valid.
@@ -1906,7 +1978,9 @@ mod tests {
         let prompt: Vec<u32> = (1..=20).collect();
 
         // Prefill seq1 and populate cache.
-        scheduler.add_sequence(make_seq_with_tokens(1, prompt.clone(), 3)).unwrap();
+        scheduler
+            .add_sequence(make_seq_with_tokens(1, prompt.clone(), 3))
+            .unwrap();
         let _ = direct_prefill(&mut scheduler, 1, 16);
         let _ = direct_prefill(&mut scheduler, 1, 16);
 
@@ -1915,7 +1989,9 @@ mod tests {
         assert_eq!(scheduler.block_pool().prefix_cache_len(), 0);
 
         // Add identical prompt — should get zero cache hits.
-        scheduler.add_sequence(make_seq_with_tokens(2, prompt.clone(), 3)).unwrap();
+        scheduler
+            .add_sequence(make_seq_with_tokens(2, prompt.clone(), 3))
+            .unwrap();
         let cached = scheduler.find_prefix_cache_hits(2).unwrap();
         assert_eq!(
             cached, 0,
@@ -1934,11 +2010,15 @@ mod tests {
         let prompt: Vec<u32> = (1..=16).collect();
 
         // Seq1 prefill + cache.
-        scheduler.add_sequence(make_seq_with_tokens(1, prompt.clone(), 3)).unwrap();
+        scheduler
+            .add_sequence(make_seq_with_tokens(1, prompt.clone(), 3))
+            .unwrap();
         let _ = direct_prefill(&mut scheduler, 1, 16);
 
         // Seq2 shares the first block.
-        scheduler.add_sequence(make_seq_with_tokens(2, prompt.clone(), 3)).unwrap();
+        scheduler
+            .add_sequence(make_seq_with_tokens(2, prompt.clone(), 3))
+            .unwrap();
         let _ = direct_prefill(&mut scheduler, 2, 16);
 
         let shared_block = scheduler
@@ -1948,7 +2028,11 @@ mod tests {
             .get_physical_block(0)
             .unwrap();
         assert_eq!(
-            scheduler.block_pool().get_block(shared_block).unwrap().ref_count,
+            scheduler
+                .block_pool()
+                .get_block(shared_block)
+                .unwrap()
+                .ref_count,
             2
         );
 
@@ -1960,7 +2044,11 @@ mod tests {
 
         // Original block ref_count should now be 1.
         assert_eq!(
-            scheduler.block_pool().get_block(shared_block).unwrap().ref_count,
+            scheduler
+                .block_pool()
+                .get_block(shared_block)
+                .unwrap()
+                .ref_count,
             1
         );
 
@@ -1985,14 +2073,18 @@ mod tests {
         let prompt: Vec<u32> = (1..=32).collect();
 
         // First request — full prefill.
-        scheduler.add_sequence(make_seq_with_tokens(1, prompt.clone(), 3)).unwrap();
+        scheduler
+            .add_sequence(make_seq_with_tokens(1, prompt.clone(), 3))
+            .unwrap();
         let _ = direct_prefill(&mut scheduler, 1, 16);
         let _ = direct_prefill(&mut scheduler, 1, 16);
         let first_computed = scheduler.get_sequence(1).unwrap().num_prefilled_tokens;
         assert_eq!(first_computed, 32);
 
         // Second request — should reuse cached prefix.
-        scheduler.add_sequence(make_seq_with_tokens(2, prompt.clone(), 3)).unwrap();
+        scheduler
+            .add_sequence(make_seq_with_tokens(2, prompt.clone(), 3))
+            .unwrap();
         let cached = scheduler.find_prefix_cache_hits(2).unwrap();
         let recomputed = direct_prefill(&mut scheduler, 2, 16);
 

@@ -30,7 +30,10 @@ impl std::fmt::Display for RingError {
                 write!(f, "expected {expected} ranks, got {actual}")
             }
             RingError::WrongChunkSize { expected, actual } => {
-                write!(f, "expected chunk size multiple of {expected}, got remainder {actual}")
+                write!(
+                    f,
+                    "expected chunk size multiple of {expected}, got remainder {actual}"
+                )
             }
             RingError::ByteLengthMismatch { expected, actual } => {
                 write!(f, "expected {expected} bytes, got {actual}")
@@ -352,8 +355,9 @@ impl RingBackend {
 pub fn create_mock_ring(num_ranks: usize) -> Vec<RingBackend> {
     let mut right_txs: Vec<tokio::sync::mpsc::UnboundedSender<Vec<u8>>> =
         Vec::with_capacity(num_ranks);
-    let mut left_rxs: Vec<Option<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>>>> =
-        Vec::with_capacity(num_ranks);
+    let mut left_rxs: Vec<
+        Option<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>>>,
+    > = Vec::with_capacity(num_ranks);
     for _ in 0..num_ranks {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         right_txs.push(tx);
@@ -378,7 +382,9 @@ pub async fn tcp_bind_ephemeral() -> Result<(TcpListener, std::net::SocketAddr),
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .map_err(|e| RingError::Io(e.to_string()))?;
-    let addr = listener.local_addr().map_err(|e| RingError::Io(e.to_string()))?;
+    let addr = listener
+        .local_addr()
+        .map_err(|e| RingError::Io(e.to_string()))?;
     Ok((listener, addr))
 }
 
@@ -481,10 +487,7 @@ mod tests {
         let mut data1 = vec![10.0_f32, 20.0, 30.0, 40.0];
 
         let (mut b0, mut b1) = (backends.remove(0), backends.remove(0));
-        let (res0, res1) = tokio::join!(
-            b0.all_sum(&mut data0),
-            b1.all_sum(&mut data1),
-        );
+        let (res0, res1) = tokio::join!(b0.all_sum(&mut data0), b1.all_sum(&mut data1),);
         res0.expect("rank 0 all_sum should succeed");
         res1.expect("rank 1 all_sum should succeed");
 
@@ -568,7 +571,9 @@ mod tests {
         // 1 MiB = 262_144 f32 values.  Must be divisible by 4.
         let n_elems = 262_144;
         let num_ranks = 4;
-        let backends = create_tcp_ring(num_ranks).await.expect("tcp ring should bind");
+        let backends = create_tcp_ring(num_ranks)
+            .await
+            .expect("tcp ring should bind");
 
         let mut handles = Vec::with_capacity(num_ranks);
         for (rank, mut backend) in backends.into_iter().enumerate() {

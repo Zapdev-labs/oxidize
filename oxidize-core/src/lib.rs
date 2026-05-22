@@ -27,8 +27,16 @@ pub use futures_core::Stream;
 #[path = "backend.rs"]
 pub mod backend;
 pub use backend::ComputeBackend;
+#[path = "model/advanced_features.rs"]
+pub mod advanced_features;
 #[path = "util/benchmark_suite.rs"]
 pub mod benchmark_suite;
+#[path = "format/conversion.rs"]
+pub mod conversion;
+#[path = "compute/cpu_kernels.rs"]
+pub mod cpu_kernels;
+#[path = "validation/cross_validation.rs"]
+pub mod cross_validation;
 #[path = "backends/cuda.rs"]
 pub mod cuda;
 #[path = "model/dflash.rs"]
@@ -47,41 +55,39 @@ pub mod kv_cache;
 pub mod layer_wise;
 #[path = "model/llama.rs"]
 pub mod llama;
-#[path = "mesh/mod.rs"]
-pub mod mesh;
-#[path = "model/mlx_inference.rs"]
-pub mod mlx_inference;
 #[path = "model/lora.rs"]
 pub mod lora;
+#[path = "mesh/mod.rs"]
+pub mod mesh;
 #[path = "backends/metal.rs"]
 pub mod metal;
 #[cfg(target_os = "macos")]
 #[path = "backends/mlx.rs"]
 pub mod mlx;
+#[path = "model/mlx_inference.rs"]
+pub mod mlx_inference;
 #[path = "model/model.rs"]
 pub mod model;
 #[path = "model/loader.rs"]
 pub mod model_loader;
 #[path = "model/offload.rs"]
 pub mod offload;
-#[path = "compute/quantization.rs"]
-pub mod quantization;
 #[path = "paged_attention/mod.rs"]
 pub mod paged_attention;
+#[path = "compute/quantization.rs"]
+pub mod quantization;
 #[path = "format/safetensors.rs"]
 pub mod safetensors;
 #[path = "model/sampling.rs"]
 pub mod sampling;
 #[path = "compute/simd.rs"]
 pub mod simd;
+#[path = "backends/strix.rs"]
+pub mod strix;
 #[path = "compute/tensor.rs"]
 pub mod tensor;
 #[path = "format/tokenizer.rs"]
 pub mod tokenizer;
-#[path = "validation/cross_validation.rs"]
-pub mod cross_validation;
-#[path = "backends/strix.rs"]
-pub mod strix;
 #[path = "compute/turboquant.rs"]
 pub mod turboquant;
 #[cfg(feature = "vulkan")]
@@ -223,7 +229,9 @@ mod tests {
         let cargo_toml =
             std::fs::read_to_string(crate_cargo_toml).expect("oxidize-core Cargo.toml exists");
 
-        assert!(cargo_toml.contains("vulkan = [\"dep:ash\", \"dep:gpu-allocator\", \"dep:shaderc\"]"));
+        assert!(
+            cargo_toml.contains("vulkan = [\"dep:ash\", \"dep:gpu-allocator\", \"dep:shaderc\"]")
+        );
         assert!(cargo_toml.contains("ash = { version = \"0.38\", optional = true }"));
         assert!(cargo_toml.contains("gpu-allocator = { version = \"0.27\", optional = true }"));
         assert!(cargo_toml.contains("shaderc = { version = \"0.8.3\", optional = true }"));

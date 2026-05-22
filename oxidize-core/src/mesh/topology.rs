@@ -88,8 +88,10 @@ impl TopologyGraph {
                 existing.heartbeat();
             }
             None => {
-                self.nodes
-                    .insert(peer_id.to_string(), TopologyNode::new(peer_id.to_string(), capabilities));
+                self.nodes.insert(
+                    peer_id.to_string(),
+                    TopologyNode::new(peer_id.to_string(), capabilities),
+                );
             }
         }
     }
@@ -102,9 +104,10 @@ impl TopologyGraph {
 
     /// Record a directed edge (both directions are usually added).
     pub fn add_edge(&mut self, from: &str, to: &str) {
-        let already = self.edges.iter().any(|e| {
-            (e.from == from && e.to == to) || (e.from == to && e.to == from)
-        });
+        let already = self
+            .edges
+            .iter()
+            .any(|e| (e.from == from && e.to == to) || (e.from == to && e.to == from));
         if !already {
             self.edges.push(TopologyEdge {
                 from: from.to_string(),
@@ -130,12 +133,10 @@ impl TopologyGraph {
         if stale.is_empty() {
             return stale;
         }
-        let stale_set: std::collections::HashSet<&str> =
-            stale.iter().map(|s| s.as_str()).collect();
+        let stale_set: std::collections::HashSet<&str> = stale.iter().map(|s| s.as_str()).collect();
         self.nodes.retain(|id, _| !stale_set.contains(id.as_str()));
-        self.edges.retain(|e| {
-            !stale_set.contains(e.from.as_str()) && !stale_set.contains(e.to.as_str())
-        });
+        self.edges
+            .retain(|e| !stale_set.contains(e.from.as_str()) && !stale_set.contains(e.to.as_str()));
         stale
     }
 

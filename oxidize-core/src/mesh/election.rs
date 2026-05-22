@@ -87,7 +87,10 @@ pub enum ElectionState {
     /// No election in progress.
     Idle,
     /// Election is running; we are collecting `Declare` messages.
-    Electing { clock: ElectionClock, deadline: std::time::Instant },
+    Electing {
+        clock: ElectionClock,
+        deadline: std::time::Instant,
+    },
     /// Election finished; `master` is the winner for this `clock`.
     Elected {
         clock: ElectionClock,
@@ -163,7 +166,10 @@ impl BullyElection {
             commands_seen,
             ..
         } = msg
-            && let ElectionState::Electing { clock: active_clock, .. } = &self.state
+            && let ElectionState::Electing {
+                clock: active_clock,
+                ..
+            } = &self.state
         {
             if *clock != *active_clock {
                 // Stale declare from an older or future election — ignore.
@@ -240,7 +246,10 @@ impl BullyElection {
                 self.record_concede(msg);
                 None
             }
-            ElectionMessage::Result { clock, master_peer_id } => {
+            ElectionMessage::Result {
+                clock,
+                master_peer_id,
+            } => {
                 // Accept result if it matches our current election or a newer one.
                 if *clock >= self.clock {
                     self.clock = *clock;
@@ -282,7 +291,11 @@ impl BullyElection {
     pub fn time_remaining(&self) -> Option<std::time::Duration> {
         if let ElectionState::Electing { deadline, .. } = &self.state {
             let now = std::time::Instant::now();
-            Some(if *deadline > now { *deadline - now } else { std::time::Duration::ZERO })
+            Some(if *deadline > now {
+                *deadline - now
+            } else {
+                std::time::Duration::ZERO
+            })
         } else {
             None
         }
@@ -361,7 +374,9 @@ mod tests {
         assert_eq!(e.clock, 0);
         let msg = e.start_election();
         assert_eq!(e.clock, 1);
-        assert!(matches!(msg, ElectionMessage::Declare { clock: 1, peer_id, .. } if peer_id == "a"));
+        assert!(
+            matches!(msg, ElectionMessage::Declare { clock: 1, peer_id, .. } if peer_id == "a")
+        );
         assert!(matches!(e.state, ElectionState::Electing { clock: 1, .. }));
     }
 
@@ -663,7 +678,10 @@ mod tests {
         let mut e = make_election("a", 1);
         e.start_election();
         // Manually set deadline to the past.
-        if let ElectionState::Electing { ref mut deadline, .. } = e.state {
+        if let ElectionState::Electing {
+            ref mut deadline, ..
+        } = e.state
+        {
             *deadline = std::time::Instant::now() - Duration::from_secs(1);
         }
         let rem = e.time_remaining().unwrap();

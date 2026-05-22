@@ -44,8 +44,7 @@ impl AggregatedProgress {
         if self.total_workers == 0 {
             return false;
         }
-        self.reports.len() >= self.total_workers
-            && self.reports.values().all(|r| r.percent >= 100)
+        self.reports.len() >= self.total_workers && self.reports.values().all(|r| r.percent >= 100)
     }
 
     /// Mean percent across all known reports.
@@ -59,10 +58,7 @@ impl AggregatedProgress {
 }
 
 /// Merge a fresh worker report into the aggregated state.
-pub fn aggregate_progress(
-    agg: &mut AggregatedProgress,
-    report: LoadProgressReport,
-) {
+pub fn aggregate_progress(agg: &mut AggregatedProgress, report: LoadProgressReport) {
     agg.reports.insert(report.peer_id.clone(), report);
 }
 

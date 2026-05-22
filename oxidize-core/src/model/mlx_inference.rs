@@ -178,26 +178,32 @@ impl MlxInferenceModel {
 
         let metadata = &mapped.parsed().metadata;
         if config.sliding_window == 0 {
-            config.sliding_window = metadata_u32(metadata, "llama.attention.sliding_window")
-                .unwrap_or(0) as usize;
+            config.sliding_window =
+                metadata_u32(metadata, "llama.attention.sliding_window").unwrap_or(0) as usize;
         }
         if config.num_experts == 0 {
-            config.num_experts = metadata_u32(metadata, "llama.expert_count")
-                .unwrap_or(0) as usize;
+            config.num_experts = metadata_u32(metadata, "llama.expert_count").unwrap_or(0) as usize;
         }
         if config.num_experts_per_tok == 0 {
-            config.num_experts_per_tok = metadata_u32(metadata, "llama.expert_used_count")
-                .unwrap_or(0) as usize;
+            config.num_experts_per_tok =
+                metadata_u32(metadata, "llama.expert_used_count").unwrap_or(0) as usize;
         }
 
-        let metadata_u32 = |metadata: &std::collections::BTreeMap<String, crate::gguf::GgufMetadataValue>, key: &str| -> Option<u32> {
+        let metadata_u32 = |metadata: &std::collections::BTreeMap<
+            String,
+            crate::gguf::GgufMetadataValue,
+        >,
+                            key: &str|
+         -> Option<u32> {
             match metadata.get(key) {
                 Some(crate::gguf::GgufMetadataValue::Uint8(v)) => Some((*v).into()),
                 Some(crate::gguf::GgufMetadataValue::Uint16(v)) => Some((*v).into()),
                 Some(crate::gguf::GgufMetadataValue::Uint32(v)) => Some(*v),
                 Some(crate::gguf::GgufMetadataValue::Uint64(v)) => (*v).try_into().ok(),
                 Some(crate::gguf::GgufMetadataValue::Int8(v)) if *v >= 0 => Some((*v as u8).into()),
-                Some(crate::gguf::GgufMetadataValue::Int16(v)) if *v >= 0 => Some((*v as u16).into()),
+                Some(crate::gguf::GgufMetadataValue::Int16(v)) if *v >= 0 => {
+                    Some((*v as u16).into())
+                }
                 Some(crate::gguf::GgufMetadataValue::Int32(v)) if *v >= 0 => (*v).try_into().ok(),
                 Some(crate::gguf::GgufMetadataValue::Int64(v)) if *v >= 0 => (*v).try_into().ok(),
                 _ => None,
@@ -237,8 +243,7 @@ impl MlxInferenceModel {
                         | GgufQuantizationType::Q6_K
                 );
                 if is_supported_quant {
-                    let shape: Vec<usize> =
-                        tensor.dimensions.iter().map(|&d| d as usize).collect();
+                    let shape: Vec<usize> = tensor.dimensions.iter().map(|&d| d as usize).collect();
                     MlxWeightStorage::from_gguf_tensor_quantized(qtype, qdata, &shape, 64, 4)
                         .or_else(|_| MlxWeightStorage::from_gguf_tensor(qtype, qdata, &shape))
                 } else {
@@ -251,13 +256,15 @@ impl MlxInferenceModel {
                 }
             };
 
-            let load_vec =
-                |qtype: GgufQuantizationType, qdata: &[u8], count: usize| -> Result<Vec<f32>, String> {
-                    let mut f32_data = vec![0.0_f32; count];
-                    dequantize_scalar(qtype, qdata, &mut f32_data)
-                        .map_err(|e| format!("dequantize: {:?}", e))?;
-                    Ok(f32_data)
-                };
+            let load_vec = |qtype: GgufQuantizationType,
+                            qdata: &[u8],
+                            count: usize|
+             -> Result<Vec<f32>, String> {
+                let mut f32_data = vec![0.0_f32; count];
+                dequantize_scalar(qtype, qdata, &mut f32_data)
+                    .map_err(|e| format!("dequantize: {:?}", e))?;
+                Ok(f32_data)
+            };
 
             match tensor.name.as_str() {
                 "tok_embeddings.weight" | "token_embd.weight" => {
@@ -290,32 +297,28 @@ impl MlxInferenceModel {
                     let suffix = parts.get(3).copied();
                     match (weight_name, suffix) {
                         ("attn_norm", _) => {
-                            layers[layer_idx].attn_norm =
-                                load_vec(qtype, qdata, value_count)?;
+                            layers[layer_idx].attn_norm = load_vec(qtype, qdata, value_count)?;
                         }
                         ("attn_q", Some("weight")) => {
                             layers[layer_idx].attn_q =
                                 load_weight(name, qtype, qdata, value_count)?;
                         }
                         ("attn_q", Some("bias")) => {
-                            layers[layer_idx].attn_q_bias =
-                                load_vec(qtype, qdata, value_count)?;
+                            layers[layer_idx].attn_q_bias = load_vec(qtype, qdata, value_count)?;
                         }
                         ("attn_k", Some("weight")) => {
                             layers[layer_idx].attn_k =
                                 load_weight(name, qtype, qdata, value_count)?;
                         }
                         ("attn_k", Some("bias")) => {
-                            layers[layer_idx].attn_k_bias =
-                                load_vec(qtype, qdata, value_count)?;
+                            layers[layer_idx].attn_k_bias = load_vec(qtype, qdata, value_count)?;
                         }
                         ("attn_v", Some("weight")) => {
                             layers[layer_idx].attn_v =
                                 load_weight(name, qtype, qdata, value_count)?;
                         }
                         ("attn_v", Some("bias")) => {
-                            layers[layer_idx].attn_v_bias =
-                                load_vec(qtype, qdata, value_count)?;
+                            layers[layer_idx].attn_v_bias = load_vec(qtype, qdata, value_count)?;
                         }
                         ("attn_output", Some("weight")) => {
                             layers[layer_idx].attn_output =
@@ -326,8 +329,7 @@ impl MlxInferenceModel {
                                 load_vec(qtype, qdata, value_count)?;
                         }
                         ("ffn_norm", _) => {
-                            layers[layer_idx].ffn_norm =
-                                load_vec(qtype, qdata, value_count)?;
+                            layers[layer_idx].ffn_norm = load_vec(qtype, qdata, value_count)?;
                         }
                         ("post_attention_norm", _) => {
                             layers[layer_idx].post_attention_norm =
@@ -346,8 +348,7 @@ impl MlxInferenceModel {
                                 load_weight(name, qtype, qdata, value_count)?;
                         }
                         ("ffn_down", Some("bias")) => {
-                            layers[layer_idx].ffn_down_bias =
-                                load_vec(qtype, qdata, value_count)?;
+                            layers[layer_idx].ffn_down_bias = load_vec(qtype, qdata, value_count)?;
                         }
                         ("attn_qkv", _) => {
                             layers[layer_idx].attn_qkv =
@@ -365,11 +366,16 @@ impl MlxInferenceModel {
                                 .and_then(|(prefix, _)| prefix.parse::<usize>().ok())
                                 .is_some() =>
                         {
-                            let expert_idx = expert_and_weight.split_once('.').unwrap().0.parse::<usize>().unwrap();
+                            let expert_idx = expert_and_weight
+                                .split_once('.')
+                                .unwrap()
+                                .0
+                                .parse::<usize>()
+                                .unwrap();
                             while layers[layer_idx].moe_ffn_gate.len() <= expert_idx {
-                                layers[layer_idx].moe_ffn_gate.push(
-                                    MlxWeightStorage::F32(MlxTensor::from_f32(&[]).array),
-                                );
+                                layers[layer_idx]
+                                    .moe_ffn_gate
+                                    .push(MlxWeightStorage::F32(MlxTensor::from_f32(&[]).array));
                             }
                             layers[layer_idx].moe_ffn_gate[expert_idx] =
                                 load_weight(name, qtype, qdata, value_count)?;
@@ -380,11 +386,16 @@ impl MlxInferenceModel {
                                 .and_then(|(prefix, _)| prefix.parse::<usize>().ok())
                                 .is_some() =>
                         {
-                            let expert_idx = expert_and_weight.split_once('.').unwrap().0.parse::<usize>().unwrap();
+                            let expert_idx = expert_and_weight
+                                .split_once('.')
+                                .unwrap()
+                                .0
+                                .parse::<usize>()
+                                .unwrap();
                             while layers[layer_idx].moe_ffn_up.len() <= expert_idx {
-                                layers[layer_idx].moe_ffn_up.push(
-                                    MlxWeightStorage::F32(MlxTensor::from_f32(&[]).array),
-                                );
+                                layers[layer_idx]
+                                    .moe_ffn_up
+                                    .push(MlxWeightStorage::F32(MlxTensor::from_f32(&[]).array));
                             }
                             layers[layer_idx].moe_ffn_up[expert_idx] =
                                 load_weight(name, qtype, qdata, value_count)?;
@@ -395,11 +406,16 @@ impl MlxInferenceModel {
                                 .and_then(|(prefix, _)| prefix.parse::<usize>().ok())
                                 .is_some() =>
                         {
-                            let expert_idx = expert_and_weight.split_once('.').unwrap().0.parse::<usize>().unwrap();
+                            let expert_idx = expert_and_weight
+                                .split_once('.')
+                                .unwrap()
+                                .0
+                                .parse::<usize>()
+                                .unwrap();
                             while layers[layer_idx].moe_ffn_down.len() <= expert_idx {
-                                layers[layer_idx].moe_ffn_down.push(
-                                    MlxWeightStorage::F32(MlxTensor::from_f32(&[]).array),
-                                );
+                                layers[layer_idx]
+                                    .moe_ffn_down
+                                    .push(MlxWeightStorage::F32(MlxTensor::from_f32(&[]).array));
                             }
                             layers[layer_idx].moe_ffn_down[expert_idx] =
                                 load_weight(name, qtype, qdata, value_count)?;
@@ -575,9 +591,7 @@ impl MlxInferenceModel {
                             cfg.rope_theta,
                             rotated,
                         )
-                        .map_err(|e| {
-                            ModelError::InferenceFailed(format!("mla rope q: {:?}", e))
-                        })?;
+                        .map_err(|e| ModelError::InferenceFailed(format!("mla rope q: {:?}", e)))?;
                         q[off..off + q_head_dim].copy_from_slice(rotated);
                     }
                     for head in 0..kv_heads {
@@ -594,9 +608,7 @@ impl MlxInferenceModel {
                             cfg.rope_theta,
                             rotated,
                         )
-                        .map_err(|e| {
-                            ModelError::InferenceFailed(format!("mla rope k: {:?}", e))
-                        })?;
+                        .map_err(|e| ModelError::InferenceFailed(format!("mla rope k: {:?}", e)))?;
                         k_vec[off..off + kv_head_dim].copy_from_slice(rotated);
                     }
 
@@ -645,7 +657,12 @@ impl MlxInferenceModel {
                         } else {
                             backend
                                 .attention_decode(
-                                    &q_tensor, &k_tensor, &v_tensor, seq_len, kv_head_dim, scale,
+                                    &q_tensor,
+                                    &k_tensor,
+                                    &v_tensor,
+                                    seq_len,
+                                    kv_head_dim,
+                                    scale,
                                 )
                                 .map_err(|e| {
                                     ModelError::InferenceFailed(format!("mla attention: {}", e))
@@ -678,9 +695,7 @@ impl MlxInferenceModel {
                             .map_err(|e| ModelError::InferenceFailed(e))?;
                         let out = backend
                             .gemv(&layer.mla_out, &attn_tensor, h, attn_input.len())
-                            .map_err(|e| {
-                                ModelError::InferenceFailed(format!("mla_out: {}", e))
-                            })?;
+                            .map_err(|e| ModelError::InferenceFailed(format!("mla_out: {}", e)))?;
                         backend
                             .tensor_to_f32(&out, attn_out)
                             .map_err(|e| ModelError::InferenceFailed(e))?;
@@ -721,9 +736,7 @@ impl MlxInferenceModel {
                     if !layer.attn_qkv.is_empty() {
                         let qkv_out = backend
                             .gemv(&layer.attn_qkv, &normed_tensor, q_len, h)
-                            .map_err(|e| {
-                                ModelError::InferenceFailed(format!("attn_qkv: {}", e))
-                            })?;
+                            .map_err(|e| ModelError::InferenceFailed(format!("attn_qkv: {}", e)))?;
                         let copied = backend
                             .tensor_to_f32(&qkv_out, q_full)
                             .map_err(|e| ModelError::InferenceFailed(e))?;
@@ -731,9 +744,7 @@ impl MlxInferenceModel {
                     } else {
                         let q_out = backend
                             .gemv(&layer.attn_q, &normed_tensor, q_len, h)
-                            .map_err(|e| {
-                                ModelError::InferenceFailed(format!("attn_q: {}", e))
-                            })?;
+                            .map_err(|e| ModelError::InferenceFailed(format!("attn_q: {}", e)))?;
                         let copied = backend
                             .tensor_to_f32(&q_out, q_full)
                             .map_err(|e| ModelError::InferenceFailed(e))?;
@@ -762,9 +773,7 @@ impl MlxInferenceModel {
                     if !layer.attn_k.is_empty() {
                         let k_out = backend
                             .gemv(&layer.attn_k, &normed_tensor, kv_len, h)
-                            .map_err(|e| {
-                                ModelError::InferenceFailed(format!("attn_k: {}", e))
-                            })?;
+                            .map_err(|e| ModelError::InferenceFailed(format!("attn_k: {}", e)))?;
                         backend
                             .tensor_to_f32(&k_out, k_vec)
                             .map_err(|e| ModelError::InferenceFailed(e))?;
@@ -777,9 +786,7 @@ impl MlxInferenceModel {
                     if !layer.attn_v.is_empty() {
                         let v_out = backend
                             .gemv(&layer.attn_v, &normed_tensor, kv_len, h)
-                            .map_err(|e| {
-                                ModelError::InferenceFailed(format!("attn_v: {}", e))
-                            })?;
+                            .map_err(|e| ModelError::InferenceFailed(format!("attn_v: {}", e)))?;
                         backend
                             .tensor_to_f32(&v_out, v_vec)
                             .map_err(|e| ModelError::InferenceFailed(e))?;
@@ -811,7 +818,8 @@ impl MlxInferenceModel {
                         let alibi_num = self.alibi_slopes.len();
                         if alibi_num > 0 {
                             let copy_len = alibi_num.min(ws.alibi_slopes.len());
-                            ws.alibi_slopes[..copy_len].copy_from_slice(&self.alibi_slopes[..copy_len]);
+                            ws.alibi_slopes[..copy_len]
+                                .copy_from_slice(&self.alibi_slopes[..copy_len]);
                         }
                         // Q and K remain unrotated.
                     } else {
@@ -830,9 +838,7 @@ impl MlxInferenceModel {
                                 cfg.rope_theta,
                                 rotated,
                             )
-                            .map_err(|e| {
-                                ModelError::InferenceFailed(format!("rope q: {:?}", e))
-                            })?;
+                            .map_err(|e| ModelError::InferenceFailed(format!("rope q: {:?}", e)))?;
                             q[off..off + q_head_dim].copy_from_slice(rotated);
                         }
                         for head in 0..kv_heads {
@@ -849,9 +855,7 @@ impl MlxInferenceModel {
                                 cfg.rope_theta,
                                 rotated,
                             )
-                            .map_err(|e| {
-                                ModelError::InferenceFailed(format!("rope k: {:?}", e))
-                            })?;
+                            .map_err(|e| ModelError::InferenceFailed(format!("rope k: {:?}", e)))?;
                             k_vec[off..off + kv_head_dim].copy_from_slice(rotated);
                         }
                     }
@@ -875,14 +879,10 @@ impl MlxInferenceModel {
                             .tensor_from_f32(q_slice)
                             .map_err(|e| ModelError::InferenceFailed(e))?;
                         let k_tensor = backend
-                            .tensor_from_f32(
-                                &key_cache[kv_off..kv_off + seq_len * kv_head_dim],
-                            )
+                            .tensor_from_f32(&key_cache[kv_off..kv_off + seq_len * kv_head_dim])
                             .map_err(|e| ModelError::InferenceFailed(e))?;
                         let v_tensor = backend
-                            .tensor_from_f32(
-                                &value_cache[kv_off..kv_off + seq_len * kv_head_dim],
-                            )
+                            .tensor_from_f32(&value_cache[kv_off..kv_off + seq_len * kv_head_dim])
                             .map_err(|e| ModelError::InferenceFailed(e))?;
 
                         let out_tensor = if cfg.sliding_window > 0 {
@@ -913,10 +913,7 @@ impl MlxInferenceModel {
                                     scale,
                                 )
                                 .map_err(|e| {
-                                    ModelError::InferenceFailed(format!(
-                                        "mlx attention: {}",
-                                        e
-                                    ))
+                                    ModelError::InferenceFailed(format!("mlx attention: {}", e))
                                 })?
                         };
 
@@ -975,10 +972,9 @@ impl MlxInferenceModel {
                     } else {
                         &layer.ffn_norm
                     };
-                    rms_norm_f32(x, ffn_norm_weight, cfg.rms_norm_eps, normed)
-                        .map_err(|e| {
-                            ModelError::InferenceFailed(format!("parallel ffn_norm: {:?}", e))
-                        })?;
+                    rms_norm_f32(x, ffn_norm_weight, cfg.rms_norm_eps, normed).map_err(|e| {
+                        ModelError::InferenceFailed(format!("parallel ffn_norm: {:?}", e))
+                    })?;
 
                     let normed_tensor = backend
                         .tensor_from_f32(&normed[..h])
@@ -1040,9 +1036,7 @@ impl MlxInferenceModel {
                 }
 
                 // --- Mixtral MoE FFN ---
-                if cfg.architecture.uses_moe()
-                    && !layer.moe_gate.is_empty()
-                    && cfg.num_experts > 0
+                if cfg.architecture.uses_moe() && !layer.moe_gate.is_empty() && cfg.num_experts > 0
                 {
                     let moe_out = &mut ws.hidden_a[..h];
                     moe_out.fill(0.0_f32);
@@ -1057,9 +1051,7 @@ impl MlxInferenceModel {
                                 cfg.num_experts,
                                 cfg.num_experts_per_tok.max(1),
                             )
-                            .map_err(|e| {
-                                ModelError::InferenceFailed(format!("moe_topk: {}", e))
-                            })?;
+                            .map_err(|e| ModelError::InferenceFailed(format!("moe_topk: {}", e)))?;
 
                         let mut expert_outputs: Vec<Vec<f32>> = Vec::new();
                         for &expert_idx in &experts {
@@ -1162,13 +1154,9 @@ impl MlxInferenceModel {
                             } else {
                                 &layer.ffn_norm
                             };
-                            rms_norm_f32(x, ffn_norm_weight, cfg.rms_norm_eps, normed)
-                                .map_err(|e| {
-                                    ModelError::InferenceFailed(format!(
-                                        "ffn_norm: {:?}",
-                                        e
-                                    ))
-                                })?;
+                            rms_norm_f32(x, ffn_norm_weight, cfg.rms_norm_eps, normed).map_err(
+                                |e| ModelError::InferenceFailed(format!("ffn_norm: {:?}", e)),
+                            )?;
 
                             let normed_tensor = backend
                                 .tensor_from_f32(&normed[..h])
@@ -1502,10 +1490,13 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     mod macos_architecture_tests {
+        use super::super::{
+            MlxComputeBackend, MlxInferenceModel, MlxKvCache, MlxLayerWeights, MlxTensor,
+            MlxWeightStorage, MlxWorkspace,
+        };
         use super::ModelArchitecture;
         use crate::inference::InferenceConfig;
         use crate::model::{Model, Session};
-        use super::super::{MlxInferenceModel, MlxLayerWeights, MlxKvCache, MlxWorkspace, MlxComputeBackend, MlxTensor, MlxWeightStorage};
 
         fn tiny_mlx_model_config(arch: ModelArchitecture) -> InferenceConfig {
             InferenceConfig {
@@ -1533,7 +1524,9 @@ mod tests {
             let cfg = tiny_mlx_model_config(ModelArchitecture::Llama);
             let model = build_tiny_mlx_model(cfg);
             let mut session = Session::new();
-            let logits = model.forward(&[1], &mut session).expect("llama forward should succeed");
+            let logits = model
+                .forward(&[1], &mut session)
+                .expect("llama forward should succeed");
             assert_eq!(logits.len(), 4);
         }
 
@@ -1542,7 +1535,9 @@ mod tests {
             let cfg = tiny_mlx_model_config(ModelArchitecture::Mixtral);
             let model = build_tiny_mlx_model(cfg);
             let mut session = Session::new();
-            let logits = model.forward(&[1], &mut session).expect("mixtral forward should succeed");
+            let logits = model
+                .forward(&[1], &mut session)
+                .expect("mixtral forward should succeed");
             assert_eq!(logits.len(), 4);
         }
 
@@ -1551,7 +1546,9 @@ mod tests {
             let cfg = tiny_mlx_model_config(ModelArchitecture::DeepSeek);
             let model = build_tiny_mlx_model(cfg);
             let mut session = Session::new();
-            let logits = model.forward(&[1], &mut session).expect("deepseek forward should succeed");
+            let logits = model
+                .forward(&[1], &mut session)
+                .expect("deepseek forward should succeed");
             assert_eq!(logits.len(), 4);
         }
 
@@ -1560,7 +1557,9 @@ mod tests {
             let cfg = tiny_mlx_model_config(ModelArchitecture::Falcon);
             let model = build_tiny_mlx_model(cfg);
             let mut session = Session::new();
-            let logits = model.forward(&[1], &mut session).expect("falcon forward should succeed");
+            let logits = model
+                .forward(&[1], &mut session)
+                .expect("falcon forward should succeed");
             assert_eq!(logits.len(), 4);
         }
 
@@ -1569,7 +1568,9 @@ mod tests {
             let cfg = tiny_mlx_model_config(ModelArchitecture::Qwen);
             let model = build_tiny_mlx_model(cfg);
             let mut session = Session::new();
-            let logits = model.forward(&[1], &mut session).expect("qwen forward should succeed");
+            let logits = model
+                .forward(&[1], &mut session)
+                .expect("qwen forward should succeed");
             assert_eq!(logits.len(), 4);
         }
 
@@ -1578,7 +1579,9 @@ mod tests {
             let cfg = tiny_mlx_model_config(ModelArchitecture::Gemma);
             let model = build_tiny_mlx_model(cfg);
             let mut session = Session::new();
-            let logits = model.forward(&[1], &mut session).expect("gemma forward should succeed");
+            let logits = model
+                .forward(&[1], &mut session)
+                .expect("gemma forward should succeed");
             assert_eq!(logits.len(), 4);
         }
 
@@ -1587,7 +1590,9 @@ mod tests {
             let cfg = tiny_mlx_model_config(ModelArchitecture::Phi);
             let model = build_tiny_mlx_model(cfg);
             let mut session = Session::new();
-            let logits = model.forward(&[1], &mut session).expect("phi forward should succeed");
+            let logits = model
+                .forward(&[1], &mut session)
+                .expect("phi forward should succeed");
             assert_eq!(logits.len(), 4);
         }
 
@@ -1604,41 +1609,78 @@ mod tests {
                 let mut lw = MlxLayerWeights::default_weights();
                 lw.attn_norm = vec![1.0_f32; h];
                 lw.attn_q = MlxWeightStorage::F32(
-                    backend.tensor_from_f32_2d(&vec![0.01_f32; q_len * h], q_len, h).unwrap().array,
+                    backend
+                        .tensor_from_f32_2d(&vec![0.01_f32; q_len * h], q_len, h)
+                        .unwrap()
+                        .array,
                 );
                 lw.attn_k = MlxWeightStorage::F32(
-                    backend.tensor_from_f32_2d(&vec![0.01_f32; kv_len * h], kv_len, h).unwrap().array,
+                    backend
+                        .tensor_from_f32_2d(&vec![0.01_f32; kv_len * h], kv_len, h)
+                        .unwrap()
+                        .array,
                 );
                 lw.attn_v = MlxWeightStorage::F32(
-                    backend.tensor_from_f32_2d(&vec![0.01_f32; kv_len * h], kv_len, h).unwrap().array,
+                    backend
+                        .tensor_from_f32_2d(&vec![0.01_f32; kv_len * h], kv_len, h)
+                        .unwrap()
+                        .array,
                 );
                 lw.attn_output = MlxWeightStorage::F32(
-                    backend.tensor_from_f32_2d(&vec![0.01_f32; h * q_len], h, q_len).unwrap().array,
+                    backend
+                        .tensor_from_f32_2d(&vec![0.01_f32; h * q_len], h, q_len)
+                        .unwrap()
+                        .array,
                 );
                 lw.ffn_norm = vec![1.0_f32; h];
                 lw.ffn_gate = MlxWeightStorage::F32(
-                    backend.tensor_from_f32_2d(&vec![0.01_f32; inter * h], inter, h).unwrap().array,
+                    backend
+                        .tensor_from_f32_2d(&vec![0.01_f32; inter * h], inter, h)
+                        .unwrap()
+                        .array,
                 );
                 lw.ffn_up = MlxWeightStorage::F32(
-                    backend.tensor_from_f32_2d(&vec![0.01_f32; inter * h], inter, h).unwrap().array,
+                    backend
+                        .tensor_from_f32_2d(&vec![0.01_f32; inter * h], inter, h)
+                        .unwrap()
+                        .array,
                 );
                 lw.ffn_down = MlxWeightStorage::F32(
-                    backend.tensor_from_f32_2d(&vec![0.01_f32; h * inter], h, inter).unwrap().array,
+                    backend
+                        .tensor_from_f32_2d(&vec![0.01_f32; h * inter], h, inter)
+                        .unwrap()
+                        .array,
                 );
 
                 if config.architecture.uses_moe() {
                     lw.moe_gate = MlxWeightStorage::F32(
-                        backend.tensor_from_f32_2d(&vec![0.01_f32; config.num_experts * h], config.num_experts, h).unwrap().array,
+                        backend
+                            .tensor_from_f32_2d(
+                                &vec![0.01_f32; config.num_experts * h],
+                                config.num_experts,
+                                h,
+                            )
+                            .unwrap()
+                            .array,
                     );
                     for _ in 0..config.num_experts {
                         lw.moe_ffn_gate.push(MlxWeightStorage::F32(
-                            backend.tensor_from_f32_2d(&vec![0.01_f32; inter * h], inter, h).unwrap().array,
+                            backend
+                                .tensor_from_f32_2d(&vec![0.01_f32; inter * h], inter, h)
+                                .unwrap()
+                                .array,
                         ));
                         lw.moe_ffn_up.push(MlxWeightStorage::F32(
-                            backend.tensor_from_f32_2d(&vec![0.01_f32; inter * h], inter, h).unwrap().array,
+                            backend
+                                .tensor_from_f32_2d(&vec![0.01_f32; inter * h], inter, h)
+                                .unwrap()
+                                .array,
                         ));
                         lw.moe_ffn_down.push(MlxWeightStorage::F32(
-                            backend.tensor_from_f32_2d(&vec![0.01_f32; h * inter], h, inter).unwrap().array,
+                            backend
+                                .tensor_from_f32_2d(&vec![0.01_f32; h * inter], h, inter)
+                                .unwrap()
+                                .array,
                         ));
                     }
                 }
@@ -1648,16 +1690,36 @@ mod tests {
                     let q_out = q_len;
                     let kv_out = kv_len * 2;
                     lw.mla_latent = MlxWeightStorage::F32(
-                        backend.tensor_from_f32_2d(&vec![0.01_f32; latent_dim * h], latent_dim, h).unwrap().array,
+                        backend
+                            .tensor_from_f32_2d(&vec![0.01_f32; latent_dim * h], latent_dim, h)
+                            .unwrap()
+                            .array,
                     );
                     lw.mla_q_up = MlxWeightStorage::F32(
-                        backend.tensor_from_f32_2d(&vec![0.01_f32; q_out * latent_dim], q_out, latent_dim).unwrap().array,
+                        backend
+                            .tensor_from_f32_2d(
+                                &vec![0.01_f32; q_out * latent_dim],
+                                q_out,
+                                latent_dim,
+                            )
+                            .unwrap()
+                            .array,
                     );
                     lw.mla_kv_up = MlxWeightStorage::F32(
-                        backend.tensor_from_f32_2d(&vec![0.01_f32; kv_out * latent_dim], kv_out, latent_dim).unwrap().array,
+                        backend
+                            .tensor_from_f32_2d(
+                                &vec![0.01_f32; kv_out * latent_dim],
+                                kv_out,
+                                latent_dim,
+                            )
+                            .unwrap()
+                            .array,
                     );
                     lw.mla_out = MlxWeightStorage::F32(
-                        backend.tensor_from_f32_2d(&vec![0.01_f32; h * q_out], h, q_out).unwrap().array,
+                        backend
+                            .tensor_from_f32_2d(&vec![0.01_f32; h * q_out], h, q_out)
+                            .unwrap()
+                            .array,
                     );
                 }
 
@@ -1670,9 +1732,11 @@ mod tests {
                 tok_embeddings: vec![0.1_f32; h * config.vocab_size],
                 tok_embeddings_cols: config.vocab_size,
                 norm_weight: vec![1.0_f32; h],
-                output_weight: MlxWeightStorage::F32(
-                    MlxTensor::from_f32(&vec![0.01_f32; config.vocab_size * h]),
-                ),
+                output_weight: MlxWeightStorage::F32(MlxTensor::from_f32(&vec![
+                    0.01_f32;
+                    config.vocab_size
+                        * h
+                ])),
                 layers,
                 kv_cache: MlxKvCache::new(&config),
                 workspace: MlxWorkspace::for_config(&config),

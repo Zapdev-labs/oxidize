@@ -6,9 +6,9 @@
 #[cfg(target_os = "macos")]
 use crate::backend::ComputeBackend;
 #[cfg(target_os = "macos")]
-use crate::tensor::DType;
-#[cfg(target_os = "macos")]
 use crate::gguf::GgufQuantizationType;
+#[cfg(target_os = "macos")]
+use crate::tensor::DType;
 
 // ---------------------------------------------------------------------------
 //  Build-info (always available, even on Linux)
@@ -59,7 +59,11 @@ mod mlx_impl {
         pub fn from_array(array: Array) -> Self {
             let shape = array.shape().iter().map(|&d| d as usize).collect();
             let dtype = mlx_dtype_to_core(array.dtype());
-            Self { array, shape, dtype }
+            Self {
+                array,
+                shape,
+                dtype,
+            }
         }
 
         /// Create a new tensor from a slice of `f32` values.
@@ -76,7 +80,9 @@ mod mlx_impl {
 
         /// Evaluate the array (materialize lazy graph) and copy data back to host.
         pub fn to_f32(&self, out: &mut [f32]) -> Result<usize, String> {
-            self.array.eval().map_err(|e| format!("MLX eval failed: {e:?}"))?;
+            self.array
+                .eval()
+                .map_err(|e| format!("MLX eval failed: {e:?}"))?;
             let slice = self
                 .array
                 .try_as_slice::<f32>()
@@ -368,12 +374,8 @@ mod mlx_impl {
             //
             // For decode, q_seq_len == 1.  We reshape the 1-D buffers that
             // oxidize-core uses into 4-D MLX arrays.
-            let q = mlx_rs::ops::reshape(
-                &query.array,
-                &[1, 1, 1, head_dim as i32],
-                &self.stream,
-            )
-            .map_err(|e| format!("reshape query failed: {e:?}"))?;
+            let q = mlx_rs::ops::reshape(&query.array, &[1, 1, 1, head_dim as i32], &self.stream)
+                .map_err(|e| format!("reshape query failed: {e:?}"))?;
 
             let k = mlx_rs::ops::reshape(
                 &key_cache.array,
@@ -390,7 +392,12 @@ mod mlx_impl {
             .map_err(|e| format!("reshape value failed: {e:?}"))?;
 
             let result = mlx_rs::fast::scaled_dot_product_attention(
-                &q, &k, &v, scale, None::<&[Array]>, &self.stream,
+                &q,
+                &k,
+                &v,
+                scale,
+                None::<&[Array]>,
+                &self.stream,
             )
             .map_err(|e| format!("MLX fast_attention failed: {e:?}"))?;
 
@@ -443,7 +450,14 @@ mod mlx_impl {
                             .map_err(|e| format!("reshape vector failed: {e:?}"))?
                     };
                     let result = mlx_rs::ops::quantized_matmul(
-                        &vec, weights, scales, biases, true, Some(*group_size), Some(*bits), &self.stream,
+                        &vec,
+                        weights,
+                        scales,
+                        biases,
+                        true,
+                        Some(*group_size),
+                        Some(*bits),
+                        &self.stream,
                     )
                     .map_err(|e| format!("MLX quantized_matmul failed: {e:?}"))?;
                     let flat = mlx_rs::ops::flatten(&result, None, None, &self.stream)
@@ -479,8 +493,8 @@ mod mlx_impl {
         }
 
         fn sigmoid(&self, x: &MlxTensor) -> Result<MlxTensor, String> {
-            let result = mlx_rs::nn::sigmoid(&x.array)
-                .map_err(|e| format!("MLX sigmoid failed: {e:?}"))?;
+            let result =
+                mlx_rs::nn::sigmoid(&x.array).map_err(|e| format!("MLX sigmoid failed: {e:?}"))?;
             Ok(MlxTensor::from_array(result))
         }
 
@@ -491,8 +505,7 @@ mod mlx_impl {
         }
 
         fn synchronize(&self) -> Result<(), String> {
-            mlx_rs::Stream::synchronize()
-                .map_err(|e| format!("MLX synchronize failed: {e:?}"))
+            mlx_rs::Stream::synchronize().map_err(|e| format!("MLX synchronize failed: {e:?}"))
         }
     }
 
@@ -524,12 +537,8 @@ mod mlx_impl {
             scale: f32,
             window_size: usize,
         ) -> Result<MlxTensor, String> {
-            let q = mlx_rs::ops::reshape(
-                &query.array,
-                &[1, 1, 1, head_dim as i32],
-                &self.stream,
-            )
-            .map_err(|e| format!("reshape query failed: {e:?}"))?;
+            let q = mlx_rs::ops::reshape(&query.array, &[1, 1, 1, head_dim as i32], &self.stream)
+                .map_err(|e| format!("reshape query failed: {e:?}"))?;
 
             let k = mlx_rs::ops::reshape(
                 &key_cache.array,
@@ -558,8 +567,12 @@ mod mlx_impl {
                 let mask = mlx_rs::Array::from_slice(&mask_vals, &[1, 1, 1, seq_len as i32]);
                 let scores = mlx_rs::ops::matmul(&q, &k, &self.stream)
                     .map_err(|e| format!("sliding-window matmul qk: {e:?}"))?;
-                let scaled = mlx_rs::ops::multiply(&scores, &mlx_rs::Array::from_slice(&[scale], &[1]), &self.stream)
-                    .map_err(|e| format!("sliding-window scale: {e:?}"))?;
+                let scaled = mlx_rs::ops::multiply(
+                    &scores,
+                    &mlx_rs::Array::from_slice(&[scale], &[1]),
+                    &self.stream,
+                )
+                .map_err(|e| format!("sliding-window scale: {e:?}"))?;
                 let masked = mlx_rs::ops::add(&scaled, &mask, &self.stream)
                     .map_err(|e| format!("sliding-window mask add: {e:?}"))?;
                 let weights = mlx_rs::ops::softmax(&masked, true, &self.stream)
@@ -569,7 +582,12 @@ mod mlx_impl {
                 out
             } else {
                 mlx_rs::fast::scaled_dot_product_attention(
-                    &q, &k, &v, scale, None::<&[Array]>, &self.stream,
+                    &q,
+                    &k,
+                    &v,
+                    scale,
+                    None::<&[Array]>,
+                    &self.stream,
                 )
                 .map_err(|e| format!("MLX fast_attention failed: {e:?}"))?
             };
@@ -695,7 +713,10 @@ mod tests {
 
     #[test]
     fn mlx_build_info_reports_macos_detection() {
-        assert_eq!(mlx_build_info().detected_at_build, cfg!(target_os = "macos"));
+        assert_eq!(
+            mlx_build_info().detected_at_build,
+            cfg!(target_os = "macos")
+        );
     }
 
     #[cfg(target_os = "macos")]
@@ -707,12 +728,16 @@ mod tests {
         fn mlx_tensor_roundtrip() {
             let backend = MlxComputeBackend::new();
             let data = vec![1.0_f32, 2.0, 3.0, 4.0];
-            let tensor = backend.tensor_from_f32(&data).expect("tensor creation should succeed");
+            let tensor = backend
+                .tensor_from_f32(&data)
+                .expect("tensor creation should succeed");
             assert_eq!(backend.tensor_shape(&tensor), vec![4]);
             assert_eq!(backend.tensor_dtype(&tensor), crate::tensor::DType::F32);
 
             let mut out = vec![0.0_f32; 4];
-            let copied = backend.tensor_to_f32(&tensor, &mut out).expect("copy to host should succeed");
+            let copied = backend
+                .tensor_to_f32(&tensor, &mut out)
+                .expect("copy to host should succeed");
             assert_eq!(copied, 4);
             assert_eq!(out, data);
         }
@@ -792,8 +817,12 @@ mod tests {
         #[test]
         fn mlx_gemm_2x3_3x2() {
             let backend = MlxComputeBackend::new();
-            let a = backend.tensor_from_f32_2d(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], 2, 3).unwrap();
-            let b = backend.tensor_from_f32_2d(&[7.0, 8.0, 9.0, 10.0, 11.0, 12.0], 3, 2).unwrap();
+            let a = backend
+                .tensor_from_f32_2d(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], 2, 3)
+                .unwrap();
+            let b = backend
+                .tensor_from_f32_2d(&[7.0, 8.0, 9.0, 10.0, 11.0, 12.0], 3, 2)
+                .unwrap();
             let c = backend.gemm(&a, &b, 2, 3, 2).unwrap();
             let mut out = vec![0.0_f32; 4];
             backend.tensor_to_f32(&c, &mut out).unwrap();
@@ -823,10 +852,7 @@ mod tests {
         fn mlx_weight_storage_from_gguf_f32_direct() {
             // F32 weights should be loaded directly without dequantization.
             let f32_data: Vec<f32> = (0..64).map(|i| i as f32 * 0.1).collect();
-            let bytes: Vec<u8> = f32_data
-                .iter()
-                .flat_map(|v| v.to_le_bytes())
-                .collect();
+            let bytes: Vec<u8> = f32_data.iter().flat_map(|v| v.to_le_bytes()).collect();
             let shape = vec![8usize, 8];
             let storage = MlxWeightStorage::from_gguf_tensor(
                 crate::gguf::GgufQuantizationType::F32,
@@ -848,10 +874,8 @@ mod tests {
             // Create a synthetic Q8_0 block to verify from_gguf_tensor round-trips.
             let q8_block = vec![
                 0x00, 0x3C, // scale d = 1.0 (f16)
-                0, 1, 2, 3, 4, 5, 6, 7,
-                8, 9, 10, 11, 12, 13, 14, 15,
-                16, 17, 18, 19, 20, 21, 22, 23,
-                24, 25, 26, 27, 28, 29, 30, 31,
+                0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
+                23, 24, 25, 26, 27, 28, 29, 30, 31,
             ];
             // Q8_0 block is 34 bytes for 32 values; we need shape divisible by 32.
             let shape = vec![32usize];
@@ -898,10 +922,8 @@ mod tests {
             // Keep the existing shape-only test for backward compatibility.
             let q8_block = vec![
                 0x00, 0x3C, // scale d = 1.0 (f16)
-                0, 1, 2, 3, 4, 5, 6, 7,
-                8, 9, 10, 11, 12, 13, 14, 15,
-                16, 17, 18, 19, 20, 21, 22, 23,
-                24, 25, 26, 27, 28, 29, 30, 31,
+                0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
+                23, 24, 25, 26, 27, 28, 29, 30, 31,
             ];
             let shape = vec![32usize];
             let storage = MlxWeightStorage::from_gguf_tensor(
@@ -986,7 +1008,9 @@ mod tests {
                 .expect("mlx attention should succeed");
 
             let mut mlx_out = vec![0.0_f32; num_heads * head_dim];
-            backend.tensor_to_f32(&mlx_out_tensor, &mut mlx_out).unwrap();
+            backend
+                .tensor_to_f32(&mlx_out_tensor, &mut mlx_out)
+                .unwrap();
 
             let mut max_diff = 0.0_f32;
             for (cpu, mlx) in cpu_out.iter().zip(mlx_out.iter()) {
@@ -1023,7 +1047,9 @@ mod tests {
                 .expect("mlx rms_norm should succeed");
 
             let mut mlx_out = vec![0.0_f32; hidden_dim];
-            backend.tensor_to_f32(&mlx_out_tensor, &mut mlx_out).unwrap();
+            backend
+                .tensor_to_f32(&mlx_out_tensor, &mut mlx_out)
+                .unwrap();
 
             let mut max_diff = 0.0_f32;
             for (cpu, mlx) in cpu_out.iter().zip(mlx_out.iter()) {
@@ -1057,7 +1083,9 @@ mod tests {
                 .expect("mlx rope should succeed");
 
             let mut mlx_out = vec![0.0_f32; head_dim];
-            backend.tensor_to_f32(&mlx_out_tensor, &mut mlx_out).unwrap();
+            backend
+                .tensor_to_f32(&mlx_out_tensor, &mut mlx_out)
+                .unwrap();
 
             let mut max_diff = 0.0_f32;
             for (cpu, mlx) in cpu_out.iter().zip(mlx_out.iter()) {
@@ -1113,10 +1141,7 @@ mod tests {
                 .collect();
 
             // --- CPU reference: quantize to GGUF, dequantize back, then GEMV ---
-            let src_bytes: Vec<u8> = weights_f32
-                .iter()
-                .flat_map(|v| v.to_le_bytes())
-                .collect();
+            let src_bytes: Vec<u8> = weights_f32.iter().flat_map(|v| v.to_le_bytes()).collect();
             let quantized_len = crate::quantization::quantized_size(qtype, weights_f32.len())
                 .expect("quantized size must be known");
             let mut quantized_bytes = vec![0_u8; quantized_len];
@@ -1158,7 +1183,11 @@ mod tests {
                 .expect("copy to host should succeed");
 
             // --- Compare with 1e-3 relative tolerance ---
-            let max_abs_ref = cpu_out.iter().map(|v| v.abs()).fold(0.0_f32, f32::max).max(1e-6);
+            let max_abs_ref = cpu_out
+                .iter()
+                .map(|v| v.abs())
+                .fold(0.0_f32, f32::max)
+                .max(1e-6);
             for (i, (cpu, mlx)) in cpu_out.iter().zip(mlx_out.iter()).enumerate() {
                 let abs_diff = (cpu - mlx).abs();
                 let rel_diff = abs_diff / max_abs_ref;
@@ -1173,14 +1202,19 @@ mod tests {
         fn mlx_alibi_slopes_computed_correctly() {
             let backend = MlxComputeBackend::new();
             let num_heads = 8usize;
-            let slopes_tensor = backend.alibi_slopes(num_heads).expect("alibi slopes should succeed");
+            let slopes_tensor = backend
+                .alibi_slopes(num_heads)
+                .expect("alibi slopes should succeed");
             let mut host = vec![0.0_f32; num_heads];
             backend.tensor_to_f32(&slopes_tensor, &mut host).unwrap();
 
             let base: f32 = 2.0_f32.powf(-(8.0_f32 / num_heads as f32));
             for (i, &slope) in host.iter().enumerate() {
                 let expected = -(base.powf(i as f32 + 1.0));
-                assert!((slope - expected).abs() < 1e-4, "alibi slope mismatch at head {i}: got {slope}, expected {expected}");
+                assert!(
+                    (slope - expected).abs() < 1e-4,
+                    "alibi slope mismatch at head {i}: got {slope}, expected {expected}"
+                );
             }
         }
 
@@ -1204,7 +1238,13 @@ mod tests {
 
             let out = backend
                 .sliding_window_attention_decode(
-                    &q, &k_tensor, &v_tensor, seq_len, head_dim, scale, window_size,
+                    &q,
+                    &k_tensor,
+                    &v_tensor,
+                    seq_len,
+                    head_dim,
+                    scale,
+                    window_size,
                 )
                 .expect("sliding window attention should succeed");
 
@@ -1243,7 +1283,10 @@ mod tests {
             backend.tensor_to_f32(&sliding, &mut slide_host).unwrap();
 
             for (i, (s, sl)) in std_host.iter().zip(slide_host.iter()).enumerate() {
-                assert!((s - sl).abs() < 1e-4, "sliding_window vs standard mismatch at dim {i}: std={s} slide={sl}");
+                assert!(
+                    (s - sl).abs() < 1e-4,
+                    "sliding_window vs standard mismatch at dim {i}: std={s} slide={sl}"
+                );
             }
         }
 
@@ -1258,9 +1301,10 @@ mod tests {
             let gate_weights: Vec<f32> = (0..num_experts * hidden_size)
                 .map(|i| (i as f32 * 0.01).sin() * 0.5)
                 .collect();
-            let gate_storage = MlxWeightStorage::F32(
-                mlx_rs::Array::from_slice(&gate_weights, &[num_experts as i32, hidden_size as i32]),
-            );
+            let gate_storage = MlxWeightStorage::F32(mlx_rs::Array::from_slice(
+                &gate_weights,
+                &[num_experts as i32, hidden_size as i32],
+            ));
             let input = backend.tensor_from_f32(&[1.0_f32; hidden_size]).unwrap();
 
             let (indices, weights) = backend
@@ -1285,21 +1329,30 @@ mod tests {
             let q_out_dim = 6usize;
             let kv_out_dim = 6usize; // split into k=3, v=3
 
-            let latent_w = MlxWeightStorage::F32(
-                mlx_rs::Array::from_slice(&vec![0.1_f32; latent_dim * hidden_size], &[latent_dim as i32, hidden_size as i32]),
-            );
-            let q_up_w = MlxWeightStorage::F32(
-                mlx_rs::Array::from_slice(&vec![0.2_f32; q_out_dim * latent_dim], &[q_out_dim as i32, latent_dim as i32]),
-            );
-            let kv_up_w = MlxWeightStorage::F32(
-                mlx_rs::Array::from_slice(&vec![0.3_f32; kv_out_dim * latent_dim], &[kv_out_dim as i32, latent_dim as i32]),
-            );
+            let latent_w = MlxWeightStorage::F32(mlx_rs::Array::from_slice(
+                &vec![0.1_f32; latent_dim * hidden_size],
+                &[latent_dim as i32, hidden_size as i32],
+            ));
+            let q_up_w = MlxWeightStorage::F32(mlx_rs::Array::from_slice(
+                &vec![0.2_f32; q_out_dim * latent_dim],
+                &[q_out_dim as i32, latent_dim as i32],
+            ));
+            let kv_up_w = MlxWeightStorage::F32(mlx_rs::Array::from_slice(
+                &vec![0.3_f32; kv_out_dim * latent_dim],
+                &[kv_out_dim as i32, latent_dim as i32],
+            ));
 
             let input = backend.tensor_from_f32(&[0.5_f32; hidden_size]).unwrap();
             let (q, k, v) = backend
                 .mla_project_qkv(
-                    &input, &latent_w, &q_up_w, &kv_up_w,
-                    latent_dim, q_out_dim, kv_out_dim, hidden_size,
+                    &input,
+                    &latent_w,
+                    &q_up_w,
+                    &kv_up_w,
+                    latent_dim,
+                    q_out_dim,
+                    kv_out_dim,
+                    hidden_size,
                 )
                 .expect("mla_project_qkv should succeed");
 

@@ -2,8 +2,7 @@
 
 use libp2p::{
     gossipsub::{self, TopicHash},
-    identify,
-    mdns,
+    identify, mdns,
     swarm::NetworkBehaviour,
 };
 use serde::{Deserialize, Serialize};

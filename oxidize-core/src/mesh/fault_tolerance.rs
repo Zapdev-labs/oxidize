@@ -76,10 +76,7 @@ impl<T> TimedResult<T> {
 ///     DEFAULT_COLLECTIVE_TIMEOUT,
 /// ).await;
 /// ```
-pub async fn eval_with_timeout<F, T>(
-    fut: F,
-    deadline: Duration,
-) -> TimedResult<T>
+pub async fn eval_with_timeout<F, T>(fut: F, deadline: Duration) -> TimedResult<T>
 where
     F: Future<Output = Result<T, crate::mesh::ring::RingError>>,
 {
@@ -141,7 +138,10 @@ mod tests {
     async fn eval_with_timeout_propagates_error() {
         let fut = async { Err::<(), _>(crate::mesh::ring::RingError::NotConnected) };
         let result = eval_with_timeout(fut, Duration::from_secs(5)).await;
-        assert_eq!(result, TimedResult::Err("ring transport not connected".to_string()));
+        assert_eq!(
+            result,
+            TimedResult::Err("ring transport not connected".to_string())
+        );
     }
 
     #[tokio::test]
@@ -151,14 +151,11 @@ mod tests {
             tokio::time::sleep(Duration::from_secs(3600)).await;
             Ok::<_, crate::mesh::ring::RingError>(())
         };
-        let result = eval_with_timeout_and_notify(
-            fut,
-            Duration::from_millis(50),
-            "peer-a",
-            7,
-            |ev| received = Some(ev),
-        )
-        .await;
+        let result =
+            eval_with_timeout_and_notify(fut, Duration::from_millis(50), "peer-a", 7, |ev| {
+                received = Some(ev)
+            })
+            .await;
         assert_eq!(result, TimedResult::TimedOut);
         let ev = received.unwrap();
         assert_eq!(ev.peer_id, "peer-a");
@@ -170,7 +167,9 @@ mod tests {
     fn runner_status_serializes_roundtrip() {
         let statuses = vec![
             RunnerStatus::Healthy,
-            RunnerStatus::RunnerFailed { reason: "oom".into() },
+            RunnerStatus::RunnerFailed {
+                reason: "oom".into(),
+            },
             RunnerStatus::ShuttingDown,
             RunnerStatus::Offline,
         ];

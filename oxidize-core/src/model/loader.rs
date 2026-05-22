@@ -250,9 +250,11 @@ mod tests {
             // Write valid GGUF magic followed by truncated header so parsing fails after mmap.
             file.write_all(b"GGUF").expect("write magic");
             file.write_all(&3_u32.to_le_bytes()).expect("write version");
-            file.write_all(&1_u64.to_le_bytes()).expect("write tensor_count");
+            file.write_all(&1_u64.to_le_bytes())
+                .expect("write tensor_count");
             // metadata_count = 0 (ok), but tensor info will be missing bytes.
-            file.write_all(&0_u64.to_le_bytes()).expect("write metadata_count");
+            file.write_all(&0_u64.to_le_bytes())
+                .expect("write metadata_count");
         }
 
         let loader = GgufModelLoader;

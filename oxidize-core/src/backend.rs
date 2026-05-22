@@ -71,7 +71,12 @@ pub trait ComputeBackend: Send + Sync {
     fn tensor_from_f32(&self, data: &[f32]) -> Result<Self::Tensor, String>;
 
     /// Create a 2-D tensor from a slice of `f32` values.
-    fn tensor_from_f32_2d(&self, data: &[f32], rows: usize, cols: usize) -> Result<Self::Tensor, String>;
+    fn tensor_from_f32_2d(
+        &self,
+        data: &[f32],
+        rows: usize,
+        cols: usize,
+    ) -> Result<Self::Tensor, String>;
 
     /// Copy tensor data back to host as `f32`.  Returns the number of elements copied.
     fn tensor_to_f32(&self, tensor: &Self::Tensor, out: &mut [f32]) -> Result<usize, String>;
@@ -162,7 +167,13 @@ mod tests {
 
     #[test]
     fn backend_roundtrips_through_str() {
-        for backend in [Backend::Cpu, Backend::Metal, Backend::Cuda, Backend::Mlx, Backend::Vulkan] {
+        for backend in [
+            Backend::Cpu,
+            Backend::Metal,
+            Backend::Cuda,
+            Backend::Mlx,
+            Backend::Vulkan,
+        ] {
             assert_eq!(Backend::from_str(backend.as_str()), Ok(backend));
         }
     }

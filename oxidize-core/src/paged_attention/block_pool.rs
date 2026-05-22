@@ -293,10 +293,7 @@ impl BlockPool {
     /// The block's reference count is set to 1 and its prefix cache hash is
     /// cleared so it starts fresh.
     pub fn allocate_block(&mut self) -> Result<BlockId, BlockPoolError> {
-        let id = self
-            .free_list
-            .pop()
-            .ok_or(BlockPoolError::OutOfBlocks)?;
+        let id = self.free_list.pop().ok_or(BlockPoolError::OutOfBlocks)?;
         let block = self
             .blocks
             .get_mut(id)
