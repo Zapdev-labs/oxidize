@@ -213,7 +213,14 @@ pub fn broadcast_shard_plan(
 /// 4. Broadcasts `ElectionMessage::Result` so every peer converges.
 /// 5. Invalidates the GossipSub session so stale events are dropped.
 /// 6. On shutdown, emits a `CONNECTION_MESSAGES` disconnect and closes the swarm.
-pub async fn run_mesh_node(mesh_port: u16) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+///
+/// If `is_master_flag` is provided, it is set to `true` whenever the local
+/// node wins an election and cleared to `false` when it loses (or when the
+/// election is in progress).
+pub async fn run_mesh_node(
+    mesh_port: u16,
+    is_master_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use libp2p::swarm::SwarmEvent;
     use libp2p::gossipsub::Event as GossipsubEvent;
     use std::time::Duration;
@@ -372,12 +379,23 @@ pub async fn run_mesh_node(mesh_port: u16) -> Result<(), Box<dyn std::error::Err
                                             }
                                             if let Ok(msg) = serde_json::from_slice::<crate::mesh::election::ElectionMessage>(&inner) {
                                                 let old_clock = election.clock;
+                                                let old_master = election.is_master();
                                                 election.handle_message(&msg);
                                                 if election.clock != old_clock {
                                                     router.invalidate_session(election.clock);
                                                 }
+                                                let now_master = election.is_master();
+                                                if let Some(ref flag) = is_master_flag
+                                                    && old_master != now_master
+                                                {
+                                                    flag.store(now_master, std::sync::atomic::Ordering::Relaxed);
+                                                }
                                                 if let crate::mesh::election::ElectionState::Elected { clock, master } = &election.state {
-                                                    println!("Election result accepted: master={} clock={}", master, clock);
+                                                    if old_master != now_master {
+                                                        println!("Master status changed: is_master={} master={} clock={}", now_master, master, clock);
+                                                    } else {
+                                                        println!("Election result accepted: master={} clock={}", master, clock);
+                                                    }
                                                 }
                                             }
                                         }

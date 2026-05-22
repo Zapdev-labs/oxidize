@@ -275,6 +275,16 @@ fn build_app_with_config(
     api_key: Option<String>,
     model: Option<Arc<ModelRuntime>>,
 ) -> Router {
+    build_app_with_full_config(config, api_key, model, None)
+}
+
+#[allow(dead_code)]
+fn build_app_with_full_config(
+    config: RequestLimitConfig,
+    api_key: Option<String>,
+    model: Option<Arc<ModelRuntime>>,
+    mesh: Option<mesh_cluster::MeshClusterState>,
+) -> Router {
     let state = AppState {
         limiter: Arc::new(RequestLimiter::new(config)),
         batcher: Arc::new(ContinuousBatcher::default()),
@@ -283,7 +293,7 @@ fn build_app_with_config(
         },
         model: model.clone(),
         paged: None,
-        mesh: None,
+        mesh,
     };
     build_app_with_state(state)
 }
@@ -291,8 +301,7 @@ fn build_app_with_config(
 const MAX_BODY_SIZE_BYTES: usize = 10 * 1024 * 1024;
 
 fn build_app_with_state(state: AppState) -> Router {
-    let mesh_enabled = state.mesh.is_some();
-    let mut router = Router::new()
+    Router::new()
         .route("/healthz", get(healthz))
         .route("/livez", get(livez))
         .route("/readyz", get(readyz))
@@ -300,16 +309,8 @@ fn build_app_with_state(state: AppState) -> Router {
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/completions", post(completions))
         .route("/v1/models", get(models))
-        .route("/v1/embeddings", post(embeddings));
-
-    if mesh_enabled {
-        router = router.route(
-            "/v1/mesh/chat/completions",
-            post(mesh_chat_completions_handler),
-        );
-    }
-
-    router
+        .route("/v1/embeddings", post(embeddings))
+        .route("/v1/mesh/chat/completions", post(mesh_chat_completions_handler))
         .layer(DefaultBodyLimit::max(MAX_BODY_SIZE_BYTES))
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -2380,7 +2381,19 @@ async fn main() {
     };
 
     let mesh = if args.mesh {
-        Some(mesh_cluster::MeshClusterState::new())
+        let state = mesh_cluster::MeshClusterState::new();
+        let is_master = Arc::clone(&state.is_master);
+        let mesh_handle = state.mesh_handle.clone();
+        let port = args.mesh_port;
+        tokio::spawn(async move {
+            let result = oxidize_core::mesh::run_mesh_node(port, Some(is_master)).await;
+            if let Err(ref e) = result {
+                tracing::error!("mesh node error: {}", e);
+            }
+            let mut lock = mesh_handle.lock().await;
+            *lock = None;
+        });
+        Some(state)
     } else {
         None
     };
@@ -3371,5 +3384,116 @@ mod tests {
         assert!(parsed["usage"]["prompt_tokens"].is_number(), "usage.prompt_tokens should be a number");
         assert!(parsed["usage"]["completion_tokens"].is_number(), "usage.completion_tokens should be a number");
         assert!(parsed["usage"]["total_tokens"].is_number(), "usage.total_tokens should be a number");
+    }
+
+    // === Mesh server tests ===
+
+    #[tokio::test]
+    async fn mesh_chat_completions_returns_503_when_mesh_disabled() {
+        let app = build_app();
+        let request_body = json!({
+            "model": "oxidize-default",
+            "messages": [{"role": "user", "content": "hello"}]
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/mesh/chat/completions")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(request_body.to_string()))
+                    .expect("valid request"),
+            )
+            .await
+            .expect("request should be handled");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let parsed: Value = serde_json::from_slice(&bytes).expect("valid json response");
+        assert_eq!(parsed["error"]["type"], "mesh_disabled");
+    }
+
+    #[tokio::test]
+    async fn mesh_chat_completions_returns_503_when_not_master() {
+        let mesh = mesh_cluster::MeshClusterState::new();
+        let app = build_app_with_full_config(
+            RequestLimitConfig::default(),
+            None,
+            None,
+            Some(mesh),
+        );
+        let request_body = json!({
+            "model": "oxidize-default",
+            "messages": [{"role": "user", "content": "hello"}]
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/mesh/chat/completions")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(request_body.to_string()))
+                    .expect("valid request"),
+            )
+            .await
+            .expect("request should be handled");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let parsed: Value = serde_json::from_slice(&bytes).expect("valid json response");
+        assert_eq!(parsed["error"]["type"], "mesh_not_master");
+        assert!(
+            parsed["error"]["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("contact the master"),
+            "503 should suggest contacting the master node"
+        );
+    }
+
+    #[tokio::test]
+    async fn mesh_chat_completions_returns_echo_when_master() {
+        let mesh = mesh_cluster::MeshClusterState::new();
+        mesh.is_master
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let app = build_app_with_full_config(
+            RequestLimitConfig::default(),
+            None,
+            None,
+            Some(mesh),
+        );
+        let request_body = json!({
+            "model": "oxidize-default",
+            "messages": [{"role": "user", "content": "hello"}]
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/mesh/chat/completions")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(request_body.to_string()))
+                    .expect("valid request"),
+            )
+            .await
+            .expect("request should be handled");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let parsed: Value = serde_json::from_slice(&bytes).expect("valid json response");
+        assert_eq!(parsed["object"], "chat.completion");
+        assert_eq!(parsed["model"], "oxidize-default");
+        assert!(
+            parsed["choices"][0]["message"]["content"]
+                .as_str()
+                .unwrap_or("")
+                .contains("mesh echo:"),
+            "master should echo the request"
+        );
+        assert!(parsed["usage"]["prompt_tokens"].is_number());
+        assert!(parsed["usage"]["completion_tokens"].is_number());
     }
 }

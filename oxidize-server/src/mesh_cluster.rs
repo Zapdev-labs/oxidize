@@ -143,7 +143,7 @@ pub async fn mesh_chat_completions(
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({
                 "error": {
-                    "message": "this node is not the mesh master",
+                    "message": "this node is not the mesh master; please contact the master node",
                     "type": "mesh_not_master"
                 }
             })),

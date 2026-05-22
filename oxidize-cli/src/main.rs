@@ -1018,7 +1018,7 @@ fn run_mesh_mode(mesh_port: u16) -> io::Result<()> {
     let rt = tokio::runtime::Runtime::new()
         .map_err(|e| io::Error::other(format!("tokio runtime: {e}")))?;
     rt.block_on(async {
-        oxidize_core::mesh::run_mesh_node(mesh_port)
+        oxidize_core::mesh::run_mesh_node(mesh_port, None)
             .await
             .map_err(|e| io::Error::other(format!("mesh node error: {e}")))
     })
@@ -1035,7 +1035,7 @@ fn run_mesh_chat_mode(mesh_port: u16) -> io::Result<()> {
 
     // Spawn the mesh node in a background task within the same runtime.
     let mesh_handle = rt.spawn(async move {
-        let result = oxidize_core::mesh::run_mesh_node(mesh_port).await;
+        let result = oxidize_core::mesh::run_mesh_node(mesh_port, None).await;
         if let Err(ref e) = result {
             eprintln!("mesh node error: {e}");
         }
