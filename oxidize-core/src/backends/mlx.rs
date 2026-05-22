@@ -231,7 +231,7 @@ mod mlx_impl {
                         weights,
                         scales,
                         biases,
-                        false,
+                        true,
                         Some(*group_size),
                         Some(*bits),
                         stream,
@@ -443,7 +443,7 @@ mod mlx_impl {
                             .map_err(|e| format!("reshape vector failed: {e:?}"))?
                     };
                     let result = mlx_rs::ops::quantized_matmul(
-                        &vec, weights, scales, biases, false, Some(*group_size), Some(*bits), &self.stream,
+                        &vec, weights, scales, biases, true, Some(*group_size), Some(*bits), &self.stream,
                     )
                     .map_err(|e| format!("MLX quantized_matmul failed: {e:?}"))?;
                     let flat = mlx_rs::ops::flatten(&result, None, None, &self.stream)
