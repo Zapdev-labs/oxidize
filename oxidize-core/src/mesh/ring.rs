@@ -17,6 +17,7 @@ pub enum RingError {
     Timeout,
     MismatchedRankCount { expected: usize, actual: usize },
     WrongChunkSize { expected: usize, actual: usize },
+    ByteLengthMismatch { expected: usize, actual: usize },
     NotConnected,
 }
 
@@ -30,6 +31,9 @@ impl std::fmt::Display for RingError {
             }
             RingError::WrongChunkSize { expected, actual } => {
                 write!(f, "expected chunk size multiple of {expected}, got remainder {actual}")
+            }
+            RingError::ByteLengthMismatch { expected, actual } => {
+                write!(f, "expected {expected} bytes, got {actual}")
             }
             RingError::NotConnected => write!(f, "ring transport not connected"),
         }
@@ -386,8 +390,7 @@ pub async fn create_tcp_ring(num_ranks: usize) -> Result<Vec<RingBackend>, RingE
 
     // Spawn accept tasks first so connections don't deadlock.
     let mut accept_tasks = Vec::with_capacity(num_ranks);
-    for rank in 0..num_ranks {
-        let listener = listeners.remove(0);
+    for (rank, listener) in listeners.into_iter().enumerate() {
         accept_tasks.push(tokio::spawn(async move {
             let (stream, _peer) = listener
                 .accept()
@@ -396,9 +399,6 @@ pub async fn create_tcp_ring(num_ranks: usize) -> Result<Vec<RingBackend>, RingE
             Ok::<_, RingError>((rank, stream))
         }));
     }
-
-    // Give accept tasks a moment to start listening.
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     // Each rank connects to its right neighbour.
     let mut connect_tasks = Vec::with_capacity(num_ranks);
@@ -437,7 +437,8 @@ pub async fn create_tcp_ring(num_ranks: usize) -> Result<Vec<RingBackend>, RingE
 
 // ---- byte conversion helpers ----
 
-fn f32_slice_to_bytes(data: &[f32]) -> Vec<u8> {
+/// Convert a slice of `f32` into little-endian bytes.
+pub fn f32_slice_to_bytes(data: &[f32]) -> Vec<u8> {
     let mut out = Vec::with_capacity(data.len() * 4);
     for v in data {
         out.extend_from_slice(&v.to_le_bytes());
@@ -445,9 +446,10 @@ fn f32_slice_to_bytes(data: &[f32]) -> Vec<u8> {
     out
 }
 
-fn bytes_to_f32_slice_into(bytes: &[u8], out: &mut [f32]) -> Result<(), RingError> {
+/// Convert little-endian bytes back into a pre-allocated `f32` slice.
+pub fn bytes_to_f32_slice_into(bytes: &[u8], out: &mut [f32]) -> Result<(), RingError> {
     if bytes.len() != out.len() * 4 {
-        return Err(RingError::WrongChunkSize {
+        return Err(RingError::ByteLengthMismatch {
             expected: out.len() * 4,
             actual: bytes.len(),
         });

@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::ring::{RingBackend, RingError};
+use super::ring::{RingBackend, RingError, bytes_to_f32_slice_into, f32_slice_to_bytes};
 use super::topology::TopologyGraph;
 
 /// A shard assignment for a single worker.
@@ -84,11 +84,11 @@ pub fn compute_shard_plan(
             }
         }
         ParallelismStrategy::Tensor => {
-            for peer_id in &peers {
+            for (i, peer_id) in peers.iter().enumerate() {
                 assignments.insert(
                     peer_id.clone(),
                     ShardAssignment::Tensor {
-                        split_index: 0,
+                        split_index: i,
                         total_splits: num_workers,
                     },
                 );
@@ -162,29 +162,6 @@ pub async fn tensor_parallel_all_gather(
     out: &mut [f32],
 ) -> Result<(), RingError> {
     ring.all_gather(partial, out).await
-}
-
-// ---- byte helpers (duplicated from ring.rs to keep module self-contained) ----
-
-fn f32_slice_to_bytes(data: &[f32]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(data.len() * 4);
-    for v in data {
-        out.extend_from_slice(&v.to_le_bytes());
-    }
-    out
-}
-
-fn bytes_to_f32_slice_into(bytes: &[u8], out: &mut [f32]) -> Result<(), RingError> {
-    if bytes.len() != out.len() * 4 {
-        return Err(RingError::WrongChunkSize {
-            expected: out.len() * 4,
-            actual: bytes.len(),
-        });
-    }
-    for (i, chunk) in bytes.chunks_exact(4).enumerate() {
-        out[i] = f32::from_le_bytes(chunk.try_into().unwrap());
-    }
-    Ok(())
 }
 
 #[cfg(test)]
