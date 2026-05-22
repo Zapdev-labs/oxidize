@@ -22,6 +22,7 @@ oxidize-core = { path = "../oxidize-core" }
 futures-core = "0.3"
 rand = "0.8"
 rayon = "1"
+tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

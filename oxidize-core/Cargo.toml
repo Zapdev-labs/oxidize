@@ -25,12 +25,15 @@ anyhow.workspace = true
 cublas-sys = { version = "0.1", optional = true }
 cust = { version = "0.3", optional = true }
 futures-core = "0.3"
+futures-util = "0.3"
+libp2p = { version = "0.56", features = ["mdns", "gossipsub", "tcp", "tokio", "noise", "yamux", "ed25519", "identify", "macros"] }
 memmap2 = "0.9"
 rayon = "1"
 safetensors = "0.4"
 serde.workspace = true
 serde_json = "1"
 thiserror.workspace = true
+tokio.workspace = true
 wasm-bindgen = { version = "0.2", optional = true }
 wgpu = { version = "25", optional = true }
 

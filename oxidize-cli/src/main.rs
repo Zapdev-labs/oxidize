@@ -74,6 +74,12 @@ struct Args {
     threads: Option<usize>,
     #[arg(long, value_enum, default_value_t = KvCacheDType::F32)]
     kv_cache_dtype: KvCacheDType,
+    /// Start a distributed mesh node instead of loading a model locally.
+    #[arg(long, default_value_t = false)]
+    mesh: bool,
+    /// Port for libp2p mesh listener (0 = ephemeral). Only used with --mesh.
+    #[arg(long, default_value_t = 0)]
+    mesh_port: u16,
 }
 
 fn greeting(prompt: &str) -> String {
@@ -669,6 +675,13 @@ fn main() {
         }
         return;
     }
+    if args.mesh {
+        if let Err(error) = run_mesh_mode(args.mesh_port) {
+            eprintln!("mesh mode failed: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if let Some(model_path) = args.model.as_ref() {
         let loader = GgufModelLoader;
         match loader.load_with_progress(model_path, |progress| {
@@ -988,6 +1001,20 @@ fn metadata_f32(
         Some(GgufMetadataValue::Uint64(value)) => Some(*value as f32),
         _ => None,
     }
+}
+
+/// Run the CLI in distributed mesh node mode.
+/// Delegates to `oxidize_core::mesh::run_mesh_node` which builds the
+/// libp2p swarm, starts mDNS, subscribes to all 6 GossipSub topics, and
+/// drives the event loop.
+fn run_mesh_mode(mesh_port: u16) -> io::Result<()> {
+    let rt = tokio::runtime::Runtime::new()
+        .map_err(|e| io::Error::other(format!("tokio runtime: {e}")))?;
+    rt.block_on(async {
+        oxidize_core::mesh::run_mesh_node(mesh_port)
+            .await
+            .map_err(|e| io::Error::other(format!("mesh node error: {e}")))
+    })
 }
 
 #[cfg(test)]
