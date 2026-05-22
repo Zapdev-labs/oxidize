@@ -26,6 +26,7 @@ pub use futures_core::Stream;
 
 #[path = "backend.rs"]
 pub mod backend;
+pub use backend::ComputeBackend;
 #[path = "util/benchmark_suite.rs"]
 pub mod benchmark_suite;
 #[path = "backends/cuda.rs"]
