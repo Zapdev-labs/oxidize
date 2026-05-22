@@ -294,7 +294,14 @@ pub fn flash_attention_decode_heads_f32(
                 let kv_head = head / group_size;
                 let q_head = &query_heads[head * head_dim..(head + 1) * head_dim];
                 flash_attention_decode_f32(
-                    q_head, key_layer, value_layer, seq_len, head_dim, kv_len, kv_head, out_head,
+                    q_head,
+                    key_layer,
+                    value_layer,
+                    seq_len,
+                    head_dim,
+                    kv_len,
+                    kv_head,
+                    out_head,
                 )
             })
             .collect();
@@ -307,7 +314,14 @@ pub fn flash_attention_decode_heads_f32(
             let q_head = &query_heads[head * head_dim..(head + 1) * head_dim];
             let out_head = &mut output_heads[head * head_dim..(head + 1) * head_dim];
             flash_attention_decode_f32(
-                q_head, key_layer, value_layer, seq_len, head_dim, kv_len, kv_head, out_head,
+                q_head,
+                key_layer,
+                value_layer,
+                seq_len,
+                head_dim,
+                kv_len,
+                kv_head,
+                out_head,
             )?;
         }
     }
@@ -666,7 +680,13 @@ mod tests {
                 .iter()
                 .zip(expected.iter())
             {
-                assert!((a - e).abs() < 1e-5, "head {} mismatch: {} vs {}", head, a, e);
+                assert!(
+                    (a - e).abs() < 1e-5,
+                    "head {} mismatch: {} vs {}",
+                    head,
+                    a,
+                    e
+                );
             }
         }
     }

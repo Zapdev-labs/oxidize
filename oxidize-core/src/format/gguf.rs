@@ -3,7 +3,7 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
 
-use memmap2::Mmap;
+use memmap2::{Advice, Mmap};
 use thiserror::Error;
 
 const GGUF_MAGIC: &[u8; 4] = b"GGUF";
@@ -42,6 +42,37 @@ impl MappedGgufFile {
 
     pub fn mmap(&self) -> Arc<Mmap> {
         self.mmap.clone()
+    }
+
+    pub fn advise_random_access(&self) -> std::io::Result<()> {
+        self.mmap.advise(Advice::Random)
+    }
+
+    pub fn advise_will_need(&self) -> std::io::Result<()> {
+        self.mmap.advise(Advice::WillNeed)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn advise_huge_pages(&self) -> std::io::Result<()> {
+        self.mmap.advise(Advice::HugePage)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn advise_huge_pages(&self) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    pub fn prefault_pages(&self) -> u8 {
+        let bytes = self.bytes();
+        let mut checksum = 0_u8;
+        for offset in (0..bytes.len()).step_by(4096) {
+            // SAFETY: offset is in-bounds by construction and this read only faults pages in.
+            checksum ^= unsafe { std::ptr::read_volatile(bytes.as_ptr().add(offset)) };
+        }
+        if let Some(last) = bytes.last() {
+            checksum ^= *last;
+        }
+        checksum
     }
 
     pub fn mapped_tensor_infos(&self) -> Vec<GgufTensorInfo> {
@@ -380,7 +411,9 @@ fn detect_architecture_from_metadata_keys(
         };
         let architecture = match namespace {
             "llama" | "mistral" | "mixtral" | "qwen" | "qwen2" | "qwen2moe" | "qwen35"
-            | "gemma" | "phi" | "falcon" | "gpt2" | "gptj" | "gptneox" | "dflash-draft" => Some(namespace),
+            | "gemma" | "phi" | "falcon" | "gpt2" | "gptj" | "gptneox" | "dflash-draft" => {
+                Some(namespace)
+            }
             _ => None,
         };
         if architecture.is_some() {

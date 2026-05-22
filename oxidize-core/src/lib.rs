@@ -28,10 +28,10 @@ pub use futures_core::Stream;
 pub mod benchmark_suite;
 #[path = "backends/cuda.rs"]
 pub mod cuda;
+#[path = "model/dflash.rs"]
+pub mod dflash;
 #[path = "compute/flash_attention.rs"]
 pub mod flash_attention;
-#[path = "backends/vulkan.rs"]
-pub mod vulkan;
 #[path = "model/generation.rs"]
 pub mod generation;
 #[path = "format/gguf.rs"]
@@ -44,8 +44,6 @@ pub mod kv_cache;
 pub mod layer_wise;
 #[path = "model/llama.rs"]
 pub mod llama;
-#[path = "model/dflash.rs"]
-pub mod dflash;
 #[path = "model/lora.rs"]
 pub mod lora;
 #[path = "backends/metal.rs"]
@@ -70,6 +68,8 @@ pub mod tensor;
 pub mod tokenizer;
 #[path = "compute/turboquant.rs"]
 pub mod turboquant;
+#[path = "backends/vulkan.rs"]
+pub mod vulkan;
 #[path = "util/web_worker.rs"]
 pub mod web_worker;
 #[path = "backends/webgpu.rs"]

@@ -35,10 +35,7 @@ pub fn should_use_vulkan_gemv(rows: usize, cols: usize) -> bool {
 pub fn should_use_vulkan_gemm(rows: usize, shared_dim: usize, cols: usize) -> bool {
     cfg!(feature = "vulkan")
         && cfg!(vulkan_available)
-        && rows
-            .saturating_mul(shared_dim)
-            .saturating_mul(cols)
-            >= GEMM_VULKAN_MIN_WORK_ITEMS
+        && rows.saturating_mul(shared_dim).saturating_mul(cols) >= GEMM_VULKAN_MIN_WORK_ITEMS
 }
 
 pub fn validate_gemv_dims(

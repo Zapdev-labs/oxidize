@@ -229,11 +229,12 @@ impl DFlashDraftModel {
 
             let input_layernorm = load_f32(&format!("{}.input_layernorm.weight", prefix))?
                 .unwrap_or_else(|| vec![1.0_f32; config.hidden_size]);
-            let post_attention_layernorm = load_f32(&format!("{}.post_attention_layernorm.weight", prefix))?
-                .unwrap_or_else(|| vec![1.0_f32; config.hidden_size]);
+            let post_attention_layernorm =
+                load_f32(&format!("{}.post_attention_layernorm.weight", prefix))?
+                    .unwrap_or_else(|| vec![1.0_f32; config.hidden_size]);
 
-            let q_data = load_f32(&format!("{}.self_attn.q_proj.weight", prefix))?
-                .unwrap_or_default();
+            let q_data =
+                load_f32(&format!("{}.self_attn.q_proj.weight", prefix))?.unwrap_or_default();
             let q_proj = if q_data.is_empty() {
                 F32Weight::from_slice(Vec::new(), 0, 0)
             } else {
@@ -242,8 +243,8 @@ impl DFlashDraftModel {
                 F32Weight::from_slice(q_data, rows, cols)
             };
 
-            let k_data = load_f32(&format!("{}.self_attn.k_proj.weight", prefix))?
-                .unwrap_or_default();
+            let k_data =
+                load_f32(&format!("{}.self_attn.k_proj.weight", prefix))?.unwrap_or_default();
             let k_proj = if k_data.is_empty() {
                 F32Weight::from_slice(Vec::new(), 0, 0)
             } else {
@@ -252,8 +253,8 @@ impl DFlashDraftModel {
                 F32Weight::from_slice(k_data, rows, cols)
             };
 
-            let v_data = load_f32(&format!("{}.self_attn.v_proj.weight", prefix))?
-                .unwrap_or_default();
+            let v_data =
+                load_f32(&format!("{}.self_attn.v_proj.weight", prefix))?.unwrap_or_default();
             let v_proj = if v_data.is_empty() {
                 F32Weight::from_slice(Vec::new(), 0, 0)
             } else {
@@ -262,8 +263,8 @@ impl DFlashDraftModel {
                 F32Weight::from_slice(v_data, rows, cols)
             };
 
-            let o_data = load_f32(&format!("{}.self_attn.o_proj.weight", prefix))?
-                .unwrap_or_default();
+            let o_data =
+                load_f32(&format!("{}.self_attn.o_proj.weight", prefix))?.unwrap_or_default();
             let o_proj = if o_data.is_empty() {
                 F32Weight::from_slice(Vec::new(), 0, 0)
             } else {
@@ -277,8 +278,8 @@ impl DFlashDraftModel {
             let k_norm = load_f32(&format!("{}.self_attn.k_norm.weight", prefix))?
                 .unwrap_or_else(|| vec![1.0_f32; config.head_dim()]);
 
-            let gate_data = load_f32(&format!("{}.mlp.gate_proj.weight", prefix))?
-                .unwrap_or_default();
+            let gate_data =
+                load_f32(&format!("{}.mlp.gate_proj.weight", prefix))?.unwrap_or_default();
             let mlp_gate = if gate_data.is_empty() {
                 F32Weight::from_slice(Vec::new(), 0, 0)
             } else {
@@ -287,8 +288,7 @@ impl DFlashDraftModel {
                 F32Weight::from_slice(gate_data, rows, cols)
             };
 
-            let up_data = load_f32(&format!("{}.mlp.up_proj.weight", prefix))?
-                .unwrap_or_default();
+            let up_data = load_f32(&format!("{}.mlp.up_proj.weight", prefix))?.unwrap_or_default();
             let mlp_up = if up_data.is_empty() {
                 F32Weight::from_slice(Vec::new(), 0, 0)
             } else {
@@ -297,8 +297,8 @@ impl DFlashDraftModel {
                 F32Weight::from_slice(up_data, rows, cols)
             };
 
-            let down_data = load_f32(&format!("{}.mlp.down_proj.weight", prefix))?
-                .unwrap_or_default();
+            let down_data =
+                load_f32(&format!("{}.mlp.down_proj.weight", prefix))?.unwrap_or_default();
             let mlp_down = if down_data.is_empty() {
                 F32Weight::from_slice(Vec::new(), 0, 0)
             } else {
@@ -331,10 +331,7 @@ impl DFlashDraftModel {
     }
 
     /// Load DFlash draft model from a mapped GGUF file (llama.cpp format).
-    pub fn load_from_gguf(
-        mapped: &MappedGgufFile,
-        config: DFlashConfig,
-    ) -> Result<Self, String> {
+    pub fn load_from_gguf(mapped: &MappedGgufFile, config: DFlashConfig) -> Result<Self, String> {
         let mut model = Self::new(config.clone());
 
         let tensor_infos = mapped.mapped_tensor_infos();
@@ -371,8 +368,8 @@ impl DFlashDraftModel {
 
         // Load FC fusion layer (merges target model hidden states with draft hidden).
         if let Some((data, dims)) = load_f32_with_dims("dflash_fc.weight")? {
-            let gguf_rows = dims[0] as usize;  // hidden output
-            let gguf_cols = dims[1] as usize;  // target features input
+            let gguf_rows = dims[0] as usize; // hidden output
+            let gguf_cols = dims[1] as usize; // target features input
             let transposed = transpose_f32(&data, gguf_rows, gguf_cols);
             model.fc = F32Weight::from_slice(transposed, gguf_rows, gguf_cols);
         }
@@ -394,9 +391,10 @@ impl DFlashDraftModel {
             let input_layernorm = load_f32_with_dims(&format!("{}.attn_norm.weight", prefix))?
                 .map(|(d, _)| d)
                 .unwrap_or_else(|| vec![1.0_f32; config.hidden_size]);
-            let post_attention_layernorm = load_f32_with_dims(&format!("{}.post_attention_norm.weight", prefix))?
-                .map(|(d, _)| d)
-                .unwrap_or_else(|| vec![1.0_f32; config.hidden_size]);
+            let post_attention_layernorm =
+                load_f32_with_dims(&format!("{}.post_attention_norm.weight", prefix))?
+                    .map(|(d, _)| d)
+                    .unwrap_or_else(|| vec![1.0_f32; config.hidden_size]);
 
             let q_proj = match load_f32_with_dims(&format!("{}.attn_q.weight", prefix))? {
                 Some((data, dims)) => {
@@ -537,7 +535,13 @@ impl DFlashDraftModel {
         // Hidden norm.
         if !self.hidden_norm.is_empty() {
             let mut normed_hidden = hidden.clone();
-            rms_norm_f32(&hidden, &self.hidden_norm, self.config.rms_norm_eps, &mut normed_hidden).map_err(|e| format!("rms_norm: {:?}", e))?;
+            rms_norm_f32(
+                &hidden,
+                &self.hidden_norm,
+                self.config.rms_norm_eps,
+                &mut normed_hidden,
+            )
+            .map_err(|e| format!("rms_norm: {:?}", e))?;
             hidden = normed_hidden;
         }
 
@@ -561,7 +565,13 @@ impl DFlashDraftModel {
             // Attention branch.
             {
                 let mut normed = hidden.clone();
-                rms_norm_f32(&hidden, &layer.input_layernorm, self.config.rms_norm_eps, &mut normed).map_err(|e| format!("rms_norm: {:?}", e))?;
+                rms_norm_f32(
+                    &hidden,
+                    &layer.input_layernorm,
+                    self.config.rms_norm_eps,
+                    &mut normed,
+                )
+                .map_err(|e| format!("rms_norm: {:?}", e))?;
 
                 // Q projection (on noise/normed hidden only).
                 let mut q = vec![0.0_f32; q_size];
@@ -673,7 +683,10 @@ impl DFlashDraftModel {
                     }
 
                     // Softmax.
-                    let max_score = attn_weights.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                    let max_score = attn_weights
+                        .iter()
+                        .copied()
+                        .fold(f32::NEG_INFINITY, f32::max);
                     let mut sum_exp = 0.0_f32;
                     for t in 0..seq_len {
                         attn_weights[t] = (attn_weights[t] - max_score).exp();
@@ -714,7 +727,13 @@ impl DFlashDraftModel {
             // MLP branch.
             {
                 let mut normed = hidden.clone();
-                rms_norm_f32(&hidden, &layer.post_attention_layernorm, self.config.rms_norm_eps, &mut normed).map_err(|e| format!("rms_norm: {:?}", e))?;
+                rms_norm_f32(
+                    &hidden,
+                    &layer.post_attention_layernorm,
+                    self.config.rms_norm_eps,
+                    &mut normed,
+                )
+                .map_err(|e| format!("rms_norm: {:?}", e))?;
 
                 let mut gate = vec![0.0_f32; self.config.intermediate_size];
                 let mut up = vec![0.0_f32; self.config.intermediate_size];
@@ -744,7 +763,13 @@ impl DFlashDraftModel {
 
         // Final norm.
         let mut normed_final = hidden.clone();
-        rms_norm_f32(&hidden, &self.norm, self.config.rms_norm_eps, &mut normed_final).map_err(|e| format!("rms_norm: {:?}", e))?;
+        rms_norm_f32(
+            &hidden,
+            &self.norm,
+            self.config.rms_norm_eps,
+            &mut normed_final,
+        )
+        .map_err(|e| format!("rms_norm: {:?}", e))?;
         hidden = normed_final;
 
         Ok(hidden)

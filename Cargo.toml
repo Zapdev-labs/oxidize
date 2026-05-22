@@ -1,5 +1,12 @@
 [workspace]
-members = ["oxidize-core", "oxidize-cli", "oxidize-server", "oxidize-quantize", "oxidize-py"]
+members = [
+    "oxidize-core",
+    "oxidize-cli",
+    "oxidize-server",
+    "oxidize-quantize",
+    "oxidize-py",
+    "oxidize-train",
+]
 resolver = "3"
 
 [workspace.package]

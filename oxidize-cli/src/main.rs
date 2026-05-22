@@ -1,5 +1,6 @@
 use clap::{Parser, ValueEnum};
 use oxidize_core::generation::{GenerationConfig, GenerationStream};
+use oxidize_core::gguf::MappedGgufFile;
 use oxidize_core::inference::{InferenceConfig, InferenceModel};
 use oxidize_core::lora::{AdapterKind, LoraPlan, plan_lora_application};
 use oxidize_core::model::{Model, Session};
@@ -59,6 +60,12 @@ struct Args {
     turboquant: bool,
     #[arg(long, default_value_t = false)]
     cpu_optimized: bool,
+    #[arg(long, default_value_t = false)]
+    ram_offload: bool,
+    #[arg(long, default_value_t = false)]
+    mmap_prefetch: bool,
+    #[arg(long, default_value_t = false)]
+    mmap_hugepages: bool,
     #[arg(long)]
     ctx_size: Option<usize>,
     #[arg(long)]
@@ -561,6 +568,37 @@ fn run_profiled_inference(profiler: Profiler, output: Option<&PathBuf>) -> io::R
     command.status()
 }
 
+fn optimize_mapped_model_memory(mapped: &MappedGgufFile, args: &Args) {
+    let apply_hints =
+        args.cpu_optimized || args.ram_offload || args.mmap_prefetch || args.mmap_hugepages;
+    if !apply_hints {
+        return;
+    }
+
+    if let Err(error) = mapped.advise_random_access() {
+        eprintln!("mmap random-access hint failed: {error}");
+    }
+    if (args.cpu_optimized || args.ram_offload || args.mmap_prefetch)
+        && let Err(error) = mapped.advise_will_need()
+    {
+        eprintln!("mmap prefetch hint failed: {error}");
+    }
+    if (args.cpu_optimized || args.mmap_hugepages)
+        && let Err(error) = mapped.advise_huge_pages()
+    {
+        eprintln!("mmap hugepage hint failed: {error}");
+    }
+    if args.ram_offload {
+        let started = Instant::now();
+        let checksum = mapped.prefault_pages();
+        println!(
+            "ram offload: prefaulted {:.2} GiB into page cache in {:.2?} (checksum={checksum})",
+            mapped.bytes().len() as f64 / 1024.0 / 1024.0 / 1024.0,
+            started.elapsed()
+        );
+    }
+}
+
 fn main() {
     let args = Args::parse();
     let cpu_opt = args.cpu_optimized;
@@ -603,12 +641,13 @@ fn main() {
         }
         return;
     }
-    if let Some(model_path) = args.model {
+    if let Some(model_path) = args.model.as_ref() {
         let loader = GgufModelLoader;
         match loader.load_with_progress(&model_path, |progress| {
             println!("{}", render_load_progress(progress))
         }) {
             Ok(mapped) => {
+                optimize_mapped_model_memory(&mapped, &args);
                 for lora_path in &args.lora_paths {
                     match loader.load(lora_path) {
                         Ok(adapter) => match plan_lora_application(
@@ -674,7 +713,10 @@ fn main() {
                     .or_else(|| metadata_u32(metadata, "llama.embedding_length"))
                     .map(|value| value as usize)
                     .unwrap_or(4096);
-                let context_size = args.ctx_size.unwrap_or(context_size);
+                let mut context_size = args.ctx_size.unwrap_or(context_size);
+                if cpu_opt {
+                    context_size = context_size.min(2048);
+                }
                 let layer_count = metadata_u32(metadata, "llama.block_count")
                     .or_else(|| metadata_u32(metadata, "qwen35.block_count"))
                     .or_else(|| metadata_u32(metadata, "qwen2.block_count"))

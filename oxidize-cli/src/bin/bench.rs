@@ -34,28 +34,26 @@ fn main() {
 
         // Extract config from metadata
         let metadata = &mapped.parsed().metadata;
-        let hidden_size = metadata_u32(metadata, "dflash-draft.embedding_length")
-            .unwrap_or(5120) as usize;
-        let num_layers = metadata_u32(metadata, "dflash-draft.block_count")
-            .unwrap_or(5) as usize;
-        let num_attention_heads = metadata_u32(metadata, "dflash-draft.attention.head_count")
-            .unwrap_or(32) as usize;
-        let num_key_value_heads = metadata_u32(metadata, "dflash-draft.attention.head_count_kv")
-            .unwrap_or(8) as usize;
-        let intermediate_size = metadata_u32(metadata, "dflash-draft.feed_forward_length")
-            .unwrap_or(17408) as usize;
-        let block_size = metadata_u32(metadata, "dflash-draft.dflash.block_size")
-            .unwrap_or(16) as usize;
-        let mask_token_id = metadata_u32(metadata, "dflash-draft.dflash.mask_token_id")
-            .unwrap_or(151665);
+        let hidden_size =
+            metadata_u32(metadata, "dflash-draft.embedding_length").unwrap_or(5120) as usize;
+        let num_layers = metadata_u32(metadata, "dflash-draft.block_count").unwrap_or(5) as usize;
+        let num_attention_heads =
+            metadata_u32(metadata, "dflash-draft.attention.head_count").unwrap_or(32) as usize;
+        let num_key_value_heads =
+            metadata_u32(metadata, "dflash-draft.attention.head_count_kv").unwrap_or(8) as usize;
+        let intermediate_size =
+            metadata_u32(metadata, "dflash-draft.feed_forward_length").unwrap_or(17408) as usize;
+        let block_size =
+            metadata_u32(metadata, "dflash-draft.dflash.block_size").unwrap_or(16) as usize;
+        let mask_token_id =
+            metadata_u32(metadata, "dflash-draft.dflash.mask_token_id").unwrap_or(151665);
         let n_target_features = metadata_u32(metadata, "dflash-draft.dflash.n_target_features")
             .unwrap_or(25600) as usize;
-        let rope_theta = metadata_f32(metadata, "dflash-draft.rope.freq_base")
-            .unwrap_or(1e7);
-        let rms_norm_eps = metadata_f32(metadata, "dflash-draft.attention.layer_norm_rms_epsilon")
-            .unwrap_or(1e-5);
-        let context_length = metadata_u32(metadata, "dflash-draft.context_length")
-            .unwrap_or(262144) as usize;
+        let rope_theta = metadata_f32(metadata, "dflash-draft.rope.freq_base").unwrap_or(1e7);
+        let rms_norm_eps =
+            metadata_f32(metadata, "dflash-draft.attention.layer_norm_rms_epsilon").unwrap_or(1e-5);
+        let context_length =
+            metadata_u32(metadata, "dflash-draft.context_length").unwrap_or(262144) as usize;
 
         config = DFlashConfig {
             hidden_size,
@@ -129,8 +127,13 @@ fn main() {
 
         if args.verbose {
             let tps = tokens_generated as f64 / elapsed.as_secs_f64();
-            println!("  Iteration {}: {} tokens in {:.2?} ({:.2} tok/s)",
-                i + 1, tokens_generated, elapsed, tps);
+            println!(
+                "  Iteration {}: {} tokens in {:.2?} ({:.2} tok/s)",
+                i + 1,
+                tokens_generated,
+                elapsed,
+                tps
+            );
         }
 
         draft_model.reset_cache();
@@ -158,7 +161,10 @@ fn greedy_sample(logits: &[f32]) -> u32 {
         .unwrap_or(0)
 }
 
-fn metadata_u32(metadata: &std::collections::BTreeMap<String, oxidize_core::gguf::GgufMetadataValue>, key: &str) -> Option<u32> {
+fn metadata_u32(
+    metadata: &std::collections::BTreeMap<String, oxidize_core::gguf::GgufMetadataValue>,
+    key: &str,
+) -> Option<u32> {
     use oxidize_core::gguf::GgufMetadataValue;
     match metadata.get(key)? {
         GgufMetadataValue::Uint32(v) => Some(*v),
@@ -170,7 +176,10 @@ fn metadata_u32(metadata: &std::collections::BTreeMap<String, oxidize_core::gguf
     }
 }
 
-fn metadata_f32(metadata: &std::collections::BTreeMap<String, oxidize_core::gguf::GgufMetadataValue>, key: &str) -> Option<f32> {
+fn metadata_f32(
+    metadata: &std::collections::BTreeMap<String, oxidize_core::gguf::GgufMetadataValue>,
+    key: &str,
+) -> Option<f32> {
     use oxidize_core::gguf::GgufMetadataValue;
     match metadata.get(key)? {
         GgufMetadataValue::Float32(v) => Some(*v),
@@ -182,7 +191,7 @@ fn metadata_f32(metadata: &std::collections::BTreeMap<String, oxidize_core::gguf
 }
 
 fn create_random_draft_model(config: &DFlashConfig) -> DFlashDraftModel {
-    use oxidize_core::dflash::{DFlashDecoderLayer, DFlashAttentionLayer, F32Weight};
+    use oxidize_core::dflash::{DFlashAttentionLayer, DFlashDecoderLayer, F32Weight};
     let vocab_size = config.vocab_size;
     let hidden = config.hidden_size;
     let layers = config.num_hidden_layers;

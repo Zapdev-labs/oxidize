@@ -141,10 +141,14 @@ impl<'a, T: Model> SpeculativeGenerationStream<'a, T> {
 
     fn run_speculative_step(&mut self) -> Result<(), GenerationError> {
         let draft_model = self.draft_model.take().ok_or_else(|| {
-            GenerationError::Model(ModelError::InferenceFailed("draft model missing".to_string()))
+            GenerationError::Model(ModelError::InferenceFailed(
+                "draft model missing".to_string(),
+            ))
         })?;
         let target_model = self.target_model.take().ok_or_else(|| {
-            GenerationError::Model(ModelError::InferenceFailed("target model missing".to_string()))
+            GenerationError::Model(ModelError::InferenceFailed(
+                "target model missing".to_string(),
+            ))
         })?;
         let session = self.session.take().ok_or_else(|| {
             GenerationError::Model(ModelError::InferenceFailed("session missing".to_string()))
@@ -262,13 +266,17 @@ impl<T: Model> Stream for SpeculativeGenerationStream<'_, T> {
                 let prompt = self.prompt;
 
                 let logits = if prompt.is_empty() {
-                    target_model.forward(prompt, session).map_err(GenerationError::Model)?
+                    target_model
+                        .forward(prompt, session)
+                        .map_err(GenerationError::Model)?
                 } else {
                     let batch_size = self.config.generation.prefill_batch_size.max(1);
                     let mut last_logits = None;
                     for chunk in prompt.chunks(batch_size) {
                         last_logits = Some(
-                            target_model.forward(chunk, session).map_err(GenerationError::Model)?,
+                            target_model
+                                .forward(chunk, session)
+                                .map_err(GenerationError::Model)?,
                         );
                     }
                     last_logits.expect("non-empty prompt should produce logits")

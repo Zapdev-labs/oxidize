@@ -1,4 +1,5 @@
 use crate::flash_attention::flash_attention_decode_f32;
+use crate::flash_attention::flash_attention_decode_heads_f32;
 use crate::gguf::{GgufQuantizationType, MappedGgufFile};
 use crate::kv_cache::{KvCache, KvCacheConfig};
 use crate::model::{Logits, Model, ModelError, Session, Token};
@@ -7,7 +8,6 @@ use crate::tensor::{
     DType, apply_rope_f32, apply_swiglu_f32, extract_bits, f16_le_to_f32, gemv_f32_transposed,
     gemv_quantized_f32_transposed, rms_norm_f32, rms_norm_gemv_f32_transposed,
 };
-use crate::flash_attention::flash_attention_decode_heads_f32;
 use memmap2::Mmap;
 use std::sync::Arc;
 
@@ -114,8 +114,13 @@ impl PartialEq for WeightStorage {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (WeightStorage::F32(a), WeightStorage::F32(b)) => a == b,
-            (WeightStorage::Quantized(qa, a), WeightStorage::Quantized(qb, b)) => qa == qb && a == b,
-            (WeightStorage::MmapQuantized(qa, _, oa, sa), WeightStorage::MmapQuantized(qb, _, ob, sb)) => qa == qb && oa == ob && sa == sb,
+            (WeightStorage::Quantized(qa, a), WeightStorage::Quantized(qb, b)) => {
+                qa == qb && a == b
+            }
+            (
+                WeightStorage::MmapQuantized(qa, _, oa, sa),
+                WeightStorage::MmapQuantized(qb, _, ob, sb),
+            ) => qa == qb && oa == ob && sa == sb,
             _ => false,
         }
     }
@@ -161,8 +166,8 @@ impl WeightStorage {
 
 fn weight_block_info(qtype: GgufQuantizationType) -> (usize, usize) {
     match qtype {
-        GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M => (256, 130),
-        GgufQuantizationType::Q6_K => (256, 194),
+        GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M => (256, 144),
+        GgufQuantizationType::Q6_K => (256, 210),
         GgufQuantizationType::Q8_0 => (32, 34),
         _ => (1, 4), // fallback to f32
     }
@@ -250,10 +255,8 @@ pub(crate) fn lookup_quantized_embedding(
     x: &mut [f32],
 ) {
     let (block_width, block_size, bits, zero_point) = match qtype {
-        GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M => {
-            (256, 130, 4, 8.0)
-        }
-        GgufQuantizationType::Q6_K => (256, 194, 6, 32.0),
+        GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M => (256, 144, 4, 8.0),
+        GgufQuantizationType::Q6_K => (256, 210, 6, 32.0),
         GgufQuantizationType::Q8_0 => (32, 34, 8, 0.0),
         _ => (256, 130, 4, 8.0),
     };
@@ -317,7 +320,12 @@ impl InferenceModel {
                 );
                 if should_keep_quantized(name) && is_supported_quant_gemv {
                     if let Some(ref arc) = mmap_arc {
-                        Ok(WeightStorage::MmapQuantized(qtype, arc.clone(), offset, qsize))
+                        Ok(WeightStorage::MmapQuantized(
+                            qtype,
+                            arc.clone(),
+                            offset,
+                            qsize,
+                        ))
                     } else {
                         Ok(WeightStorage::Quantized(qtype, qdata.to_vec()))
                     }
@@ -614,10 +622,9 @@ impl InferenceModel {
                     if gate_len > 0 {
                         let gate = &mut ws.intermediate_a[..gate_len];
                         gate.fill(0.0_f32);
-                        gemv_weight(&layer.attn_gate, gate_len, h, normed, gate)
-                            .map_err(|e| {
-                                ModelError::InferenceFailed(format!("attn_gate: {:?}", e))
-                            })?;
+                        gemv_weight(&layer.attn_gate, gate_len, h, normed, gate).map_err(|e| {
+                            ModelError::InferenceFailed(format!("attn_gate: {:?}", e))
+                        })?;
                     }
 
                     // SSM branch projection: [h] -> [qkv_out_len]
@@ -831,17 +838,24 @@ impl InferenceModel {
                     // Use fused RMSNorm+GEMV for attention Q projection when bias is absent.
                     if layer.attn_q_bias.is_empty() {
                         rms_norm_gemv_f32_transposed(
-                            x, &layer.attn_norm, cfg.rms_norm_eps,
+                            x,
+                            &layer.attn_norm,
+                            cfg.rms_norm_eps,
                             match &layer.attn_q {
                                 WeightStorage::F32(data) => data.as_slice(),
-                                _ => { gemv_weight(&layer.attn_q, q_len, h, normed, q_full)
-                                    .map_err(|e| ModelError::InferenceFailed(format!("attn_q: {:?}", e)))?;
+                                _ => {
+                                    gemv_weight(&layer.attn_q, q_len, h, normed, q_full).map_err(
+                                        |e| ModelError::InferenceFailed(format!("attn_q: {:?}", e)),
+                                    )?;
                                     // fallthrough handled below
                                     &[][..]
                                 }
                             },
-                            h, q_len, q_full,
-                        ).unwrap_or_else(|_| {
+                            h,
+                            q_len,
+                            q_full,
+                        )
+                        .unwrap_or_else(|_| {
                             gemv_weight(&layer.attn_q, q_len, h, normed, q_full)
                                 .expect("attn_q fallback");
                         });
@@ -922,9 +936,7 @@ impl InferenceModel {
                                 cfg.rms_norm_eps,
                                 normed_head,
                             )
-                            .map_err(|e| {
-                                ModelError::InferenceFailed(format!("q_norm: {:?}", e))
-                            })?;
+                            .map_err(|e| ModelError::InferenceFailed(format!("q_norm: {:?}", e)))?;
                             q[start..end].copy_from_slice(normed_head);
                         }
                     }
@@ -943,9 +955,7 @@ impl InferenceModel {
                                 cfg.rms_norm_eps,
                                 normed_head,
                             )
-                            .map_err(|e| {
-                                ModelError::InferenceFailed(format!("k_norm: {:?}", e))
-                            })?;
+                            .map_err(|e| ModelError::InferenceFailed(format!("k_norm: {:?}", e)))?;
                             k_vec[start..end].copy_from_slice(normed_head);
                         }
                     }
@@ -1124,14 +1134,8 @@ impl InferenceModel {
                     gate.fill(0.0_f32);
                     let up = &mut ws.intermediate_b[..cfg.intermediate_size];
                     up.fill(0.0_f32);
-                    gemv_weight(
-                        &layer.ffn_gate,
-                        cfg.intermediate_size,
-                        h,
-                        normed,
-                        gate,
-                    )
-                    .map_err(|e| ModelError::InferenceFailed(format!("ffn_gate: {:?}", e)))?;
+                    gemv_weight(&layer.ffn_gate, cfg.intermediate_size, h, normed, gate)
+                        .map_err(|e| ModelError::InferenceFailed(format!("ffn_gate: {:?}", e)))?;
                     gemv_weight(&layer.ffn_up, cfg.intermediate_size, h, normed, up)
                         .map_err(|e| ModelError::InferenceFailed(format!("ffn_up: {:?}", e)))?;
 
@@ -1141,14 +1145,8 @@ impl InferenceModel {
                         *g = *g * sigmoid * *u;
                     }
 
-                    gemv_weight(
-                        &layer.ffn_down,
-                        h,
-                        cfg.intermediate_size,
-                        gate,
-                        ffn_out,
-                    )
-                    .map_err(|e| ModelError::InferenceFailed(format!("ffn_down: {:?}", e)))?;
+                    gemv_weight(&layer.ffn_down, h, cfg.intermediate_size, gate, ffn_out)
+                        .map_err(|e| ModelError::InferenceFailed(format!("ffn_down: {:?}", e)))?;
                     if !layer.ffn_down_bias.is_empty() {
                         for (i, out) in ffn_out.iter_mut().enumerate() {
                             *out += layer.ffn_down_bias[i % layer.ffn_down_bias.len()];
@@ -1188,9 +1186,7 @@ impl Model for InferenceModel {
             let _ = self.kv_cache.rewind_to(0);
             return;
         }
-        let _ = self
-            .kv_cache
-            .rewind_to(consumed_tokens.saturating_sub(1));
+        let _ = self.kv_cache.rewind_to(consumed_tokens.saturating_sub(1));
     }
 
     fn forward(&mut self, tokens: &[Token], session: &mut Session) -> Result<Logits, ModelError> {

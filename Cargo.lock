@@ -1244,12 +1244,25 @@ dependencies = [
  "axum",
  "clap",
  "futures-util",
+ "oxidize-core",
+ "rand",
  "serde",
  "serde_json",
  "tokio",
  "tower",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "oxidize-train"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "rand",
+ "rayon",
+ "serde",
 ]
 
 [[package]]

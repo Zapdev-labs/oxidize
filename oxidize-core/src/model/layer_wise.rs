@@ -136,8 +136,8 @@ fn weight_output_dim(ws: &WeightStorage, input_dim: usize) -> usize {
         WeightStorage::F32(v) => v.len() / input_dim,
         WeightStorage::Quantized(qtype, v) => {
             let (block_width, block_size) = match qtype {
-                GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M => (256, 130),
-                GgufQuantizationType::Q6_K => (256, 194),
+                GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M => (256, 144),
+                GgufQuantizationType::Q6_K => (256, 210),
                 GgufQuantizationType::Q8_0 => (32, 34),
                 _ => (1, 4),
             };
@@ -149,8 +149,8 @@ fn weight_output_dim(ws: &WeightStorage, input_dim: usize) -> usize {
         }
         WeightStorage::MmapQuantized(qtype, _, _, size) => {
             let (block_width, block_size) = match qtype {
-                GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M => (256, 130),
-                GgufQuantizationType::Q6_K => (256, 194),
+                GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M => (256, 144),
+                GgufQuantizationType::Q6_K => (256, 210),
                 GgufQuantizationType::Q8_0 => (32, 34),
                 _ => (1, 4),
             };
@@ -863,9 +863,7 @@ impl Model for LayerWiseModel {
             let _ = self.kv_cache.rewind_to(0);
             return;
         }
-        let _ = self
-            .kv_cache
-            .rewind_to(consumed_tokens.saturating_sub(1));
+        let _ = self.kv_cache.rewind_to(consumed_tokens.saturating_sub(1));
     }
 
     fn forward(&mut self, tokens: &[Token], session: &mut Session) -> Result<Logits, ModelError> {
