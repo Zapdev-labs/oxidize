@@ -510,40 +510,6 @@ mod mlx_impl {
             Ok(MlxTensor::from_array(array))
         }
 
-        /// Apply Alibi bias to a 1-D attention score vector per head.
-        ///
-        /// `scores` shape: [num_heads * seq_len].  For each head, adds
-        /// `slope * (token_idx - seq_len + 1)` to the raw attention score.
-        pub fn apply_alibi(
-            &self,
-            scores: &MlxTensor,
-            slopes: &MlxTensor,
-            seq_len: usize,
-            num_heads: usize,
-        ) -> Result<MlxTensor, String> {
-            // Build bias matrix [num_heads, seq_len] on host then copy to MLX.
-            let mut bias = vec![0.0_f32; num_heads * seq_len];
-            let slope_slice = slopes
-                .array
-                .try_as_slice::<f32>()
-                .map_err(|e| format!("alibi slopes as_slice: {e:?}"))?;
-            for h in 0..num_heads {
-                let slope = slope_slice[h];
-                for t in 0..seq_len {
-                    // Alibi adds negative slope * distance, closer = less penalty
-                    bias[h * seq_len + t] = slope * ((t as i32 - seq_len as i32 + 1) as f32);
-                }
-            }
-            let bias_array = mlx_rs::Array::from_slice(&bias, &[num_heads as i32, seq_len as i32]);
-            let scores_2d = mlx_rs::ops::reshape(&scores.array, &[num_heads as i32, seq_len as i32], &self.stream)
-                .map_err(|e| format!("reshape scores: {e:?}"))?;
-            let biased = mlx_rs::ops::add(&scores_2d, &bias_array, &self.stream)
-                .map_err(|e| format!("alibi add: {e:?}"))?;
-            let flat = mlx_rs::ops::flatten(&biased, None, None, &self.stream)
-                .map_err(|e| format!("flatten biased: {e:?}"))?;
-            Ok(MlxTensor::from_array(flat))
-        }
-
         /// Scaled dot-product attention with a sliding-window causal mask.
         ///
         /// Only attends to the most recent `window_size` tokens; positions
@@ -634,16 +600,21 @@ mod mlx_impl {
                 .try_as_slice::<f32>()
                 .map_err(|e| format!("moe scores slice: {e:?}"))?;
 
-            // Argmax top-k manually (small vector, num_experts <= 256).
+            // Partial top-k via select_nth_unstable (small vector, num_experts <= 256).
             let mut indexed: Vec<(usize, f32)> = scores_slice
                 .iter()
                 .enumerate()
                 .map(|(i, &v)| (i, v))
                 .collect();
+            if k < indexed.len() {
+                indexed.select_nth_unstable_by(k, |a, b| {
+                    b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+                });
+                indexed.truncate(k);
+            }
             indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            let top_k = indexed.into_iter().take(k).collect::<Vec<_>>();
-            let indices = top_k.iter().map(|(i, _)| *i).collect();
-            let weights = top_k.iter().map(|(_, w)| *w).collect();
+            let indices = indexed.iter().map(|(i, _)| *i).collect();
+            let weights = indexed.iter().map(|(_, w)| *w).collect();
             Ok((indices, weights))
         }
 

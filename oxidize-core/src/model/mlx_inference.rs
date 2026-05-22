@@ -33,6 +33,8 @@ pub struct MlxInferenceModel {
     layers: Vec<MlxLayerWeights>,
     kv_cache: MlxKvCache,
     workspace: MlxWorkspace,
+    /// Precomputed Alibi slopes [num_heads], constant per model.
+    alibi_slopes: Vec<f32>,
 }
 
 #[cfg(target_os = "macos")]
@@ -180,11 +182,6 @@ impl MlxInferenceModel {
                 .unwrap_or(0) as usize;
         }
 
-        let is_moe = config.architecture.uses_moe();
-        let uses_mla = config.architecture.uses_mla();
-        let _ = is_moe;
-        let _ = uses_mla;
-
         let metadata_u32 = |metadata: &std::collections::BTreeMap<String, crate::gguf::GgufMetadataValue>, key: &str| -> Option<u32> {
             match metadata.get(key) {
                 Some(crate::gguf::GgufMetadataValue::Uint8(v)) => Some((*v).into()),
@@ -198,6 +195,11 @@ impl MlxInferenceModel {
                 _ => None,
             }
         };
+
+        let is_moe = config.architecture.uses_moe();
+        let uses_mla = config.architecture.uses_mla();
+        let _ = is_moe;
+        let _ = uses_mla;
 
         let mut tok_embeddings: Option<Vec<f32>> = None;
         let mut tok_embeddings_cols: usize = config.hidden_size;
@@ -351,17 +353,11 @@ impl MlxInferenceModel {
                         // Mixtral MoE per-expert weights
                         ("ffn_gate", Some(expert_and_weight))
                             if expert_and_weight
-                                .split('.')
-                                .next()
-                                .and_then(|s| s.parse::<usize>().ok())
+                                .split_once('.')
+                                .and_then(|(prefix, _)| prefix.parse::<usize>().ok())
                                 .is_some() =>
                         {
-                            let expert_idx = expert_and_weight
-                                .split('.')
-                                .next()
-                                .unwrap()
-                                .parse::<usize>()
-                                .unwrap();
+                            let expert_idx = expert_and_weight.split_once('.').unwrap().0.parse::<usize>().unwrap();
                             while layers[layer_idx].moe_ffn_gate.len() <= expert_idx {
                                 layers[layer_idx].moe_ffn_gate.push(
                                     MlxWeightStorage::F32(MlxTensor::from_f32(&[]).array),
@@ -372,17 +368,11 @@ impl MlxInferenceModel {
                         }
                         ("ffn_up", Some(expert_and_weight))
                             if expert_and_weight
-                                .split('.')
-                                .next()
-                                .and_then(|s| s.parse::<usize>().ok())
+                                .split_once('.')
+                                .and_then(|(prefix, _)| prefix.parse::<usize>().ok())
                                 .is_some() =>
                         {
-                            let expert_idx = expert_and_weight
-                                .split('.')
-                                .next()
-                                .unwrap()
-                                .parse::<usize>()
-                                .unwrap();
+                            let expert_idx = expert_and_weight.split_once('.').unwrap().0.parse::<usize>().unwrap();
                             while layers[layer_idx].moe_ffn_up.len() <= expert_idx {
                                 layers[layer_idx].moe_ffn_up.push(
                                     MlxWeightStorage::F32(MlxTensor::from_f32(&[]).array),
@@ -393,17 +383,11 @@ impl MlxInferenceModel {
                         }
                         ("ffn_down", Some(expert_and_weight))
                             if expert_and_weight
-                                .split('.')
-                                .next()
-                                .and_then(|s| s.parse::<usize>().ok())
+                                .split_once('.')
+                                .and_then(|(prefix, _)| prefix.parse::<usize>().ok())
                                 .is_some() =>
                         {
-                            let expert_idx = expert_and_weight
-                                .split('.')
-                                .next()
-                                .unwrap()
-                                .parse::<usize>()
-                                .unwrap();
+                            let expert_idx = expert_and_weight.split_once('.').unwrap().0.parse::<usize>().unwrap();
                             while layers[layer_idx].moe_ffn_down.len() <= expert_idx {
                                 layers[layer_idx].moe_ffn_down.push(
                                     MlxWeightStorage::F32(MlxTensor::from_f32(&[]).array),
@@ -454,6 +438,17 @@ impl MlxInferenceModel {
         let kv_cache = MlxKvCache::new(&config);
         let workspace = MlxWorkspace::for_config(&config);
 
+        // Precompute Alibi slopes once at load time if needed.
+        let alibi_slopes = if config.architecture.uses_alibi() {
+            let alibi_num = n.min(config.alibi_num_heads);
+            let base: f32 = 2.0_f32.powf(-(8.0_f32 / alibi_num as f32));
+            (0..alibi_num)
+                .map(|h| -(base.powf(h as f32 + 1.0)))
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         Ok(Self {
             config,
             backend,
@@ -464,6 +459,7 @@ impl MlxInferenceModel {
             layers,
             kv_cache,
             workspace,
+            alibi_slopes,
         })
     }
 
@@ -803,12 +799,11 @@ impl MlxInferenceModel {
                     let kv_heads = kv_len.checked_div(kv_head_dim).unwrap_or(1);
 
                     if cfg.architecture.uses_alibi() {
-                        // Alibi: no RoPE; instead compute per-head linear bias slopes.
-                        let alibi_num = n.min(cfg.alibi_num_heads);
-                        let slopes = &mut ws.alibi_slopes[..alibi_num];
-                        let base: f32 = 2.0_f32.powf(-(8.0_f32 / alibi_num as f32));
-                        for h_idx in 0..alibi_num {
-                            slopes[h_idx] = -(base.powf(h_idx as f32 + 1.0));
+                        // Alibi: no RoPE; copy precomputed slopes into workspace.
+                        let alibi_num = self.alibi_slopes.len();
+                        if alibi_num > 0 {
+                            let copy_len = alibi_num.min(ws.alibi_slopes.len());
+                            ws.alibi_slopes[..copy_len].copy_from_slice(&self.alibi_slopes[..copy_len]);
                         }
                         // Q and K remain unrotated.
                     } else {
