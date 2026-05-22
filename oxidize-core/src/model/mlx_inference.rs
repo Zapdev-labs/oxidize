@@ -1404,7 +1404,6 @@ impl crate::model::Model for MlxInferenceModel {
 #[cfg(test)]
 mod tests {
     use crate::inference::ModelArchitecture;
-    use crate::gguf::MappedGgufFile;
 
     #[test]
     fn mlx_inference_model_exists() {
