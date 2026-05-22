@@ -34,19 +34,23 @@ impl CpuWorkspace {
 }
 
 pub fn fused_rms_norm_gemv_f32_transposed(
-    input: &[f32],
-    norm_weight: &[f32],
-    eps: f32,
-    matrix: &[f32],
-    rows: usize,
-    cols: usize,
+    params: FusedRmsNormGemv<'_>,
     workspace: &mut CpuWorkspace,
     output: &mut [f32],
 ) -> Result<(), FusedCpuError> {
-    let normalized = workspace.get(input.len());
-    rms_norm_f32(input, norm_weight, eps, normalized)?;
-    gemv_f32_transposed(matrix, rows, cols, normalized, output)?;
+    let normalized = workspace.get(params.input.len());
+    rms_norm_f32(params.input, params.norm_weight, params.eps, normalized)?;
+    gemv_f32_transposed(params.matrix, params.rows, params.cols, normalized, output)?;
     Ok(())
+}
+
+pub struct FusedRmsNormGemv<'a> {
+    pub input: &'a [f32],
+    pub norm_weight: &'a [f32],
+    pub eps: f32,
+    pub matrix: &'a [f32],
+    pub rows: usize,
+    pub cols: usize,
 }
 
 pub fn matmul_reuse_workspace<'a>(
@@ -109,12 +113,14 @@ mod tests {
         let mut workspace = CpuWorkspace::default();
         let mut fused = [0.0; 2];
         fused_rms_norm_gemv_f32_transposed(
-            &input,
-            &weight,
-            1e-5,
-            &matrix,
-            4,
-            2,
+            FusedRmsNormGemv {
+                input: &input,
+                norm_weight: &weight,
+                eps: 1e-5,
+                matrix: &matrix,
+                rows: 4,
+                cols: 2,
+            },
             &mut workspace,
             &mut fused,
         )

@@ -40,7 +40,8 @@ pub fn validate_mesh_prompt(prompt: &MeshChatPrompt) -> MeshValidationReport {
 pub fn validate_mesh_command(command: &MeshCommand) -> MeshValidationReport {
     match command {
         MeshCommand::ChatPrompt(prompt) => validate_mesh_prompt(prompt),
-        MeshCommand::Shutdown(_) | MeshCommand::ShardPlan(_) => MeshValidationReport::ok(),
+        MeshCommand::ShardPlan(plan) => validate_shard_plan(plan),
+        MeshCommand::Shutdown(_) => MeshValidationReport::ok(),
     }
 }
 
@@ -82,5 +83,18 @@ mod tests {
         let report = validate_mesh_prompt(&prompt);
         assert!(!report.valid);
         assert!(report.issues.len() >= 3);
+    }
+
+    #[test]
+    fn scrutiny_rejects_empty_shard_plan_command() {
+        let plan = ShardPlan {
+            model_id: "model".into(),
+            total_layers: 1,
+            strategy: super::super::sharding::ParallelismStrategy::Pipeline,
+            assignments: std::collections::HashMap::new(),
+        };
+        let report = validate_mesh_command(&MeshCommand::ShardPlan(plan));
+        assert!(!report.valid);
+        assert_eq!(report.issues, vec!["shard plan has no assignments"]);
     }
 }

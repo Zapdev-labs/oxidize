@@ -138,7 +138,7 @@ mod tests {
 
     #[test]
     fn vulkan_build_info_reports_cfg_detection() {
-        assert_eq!(vulkan_build_info().detected_at_build, false);
+        assert!(!vulkan_build_info().detected_at_build);
     }
 
     #[test]

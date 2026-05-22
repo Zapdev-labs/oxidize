@@ -4,7 +4,10 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use oxidize_core::mesh::{BullyElection, ElectionMessage, ElectionState, GossipRouter, MeshChatEngine, MeshChatPrompt, MeshChatToken, MeshEnvelope, NodeCapabilities};
+use oxidize_core::mesh::{
+    BullyElection, ElectionMessage, ElectionState, GossipRouter, MeshChatEngine, MeshChatPrompt,
+    MeshChatToken, MeshEnvelope, NodeCapabilities,
+};
 
 fn dummy_caps() -> NodeCapabilities {
     NodeCapabilities {
@@ -39,13 +42,22 @@ fn three_node_election_converges() {
     }
 
     // Pretend timeout expired.
-    if let ElectionState::Electing { ref mut deadline, .. } = node_a.state {
+    if let ElectionState::Electing {
+        ref mut deadline, ..
+    } = node_a.state
+    {
         *deadline = std::time::Instant::now();
     }
-    if let ElectionState::Electing { ref mut deadline, .. } = node_b.state {
+    if let ElectionState::Electing {
+        ref mut deadline, ..
+    } = node_b.state
+    {
         *deadline = std::time::Instant::now();
     }
-    if let ElectionState::Electing { ref mut deadline, .. } = node_c.state {
+    if let ElectionState::Electing {
+        ref mut deadline, ..
+    } = node_c.state
+    {
         *deadline = std::time::Instant::now();
     }
 
@@ -126,13 +138,22 @@ fn re_election_invalidates_old_session() {
     }
 
     // Force timeout and finalize on all nodes.
-    if let ElectionState::Electing { ref mut deadline, .. } = node_a.state {
+    if let ElectionState::Electing {
+        ref mut deadline, ..
+    } = node_a.state
+    {
         *deadline = std::time::Instant::now();
     }
-    if let ElectionState::Electing { ref mut deadline, .. } = node_b.state {
+    if let ElectionState::Electing {
+        ref mut deadline, ..
+    } = node_b.state
+    {
         *deadline = std::time::Instant::now();
     }
-    if let ElectionState::Electing { ref mut deadline, .. } = node_c.state {
+    if let ElectionState::Electing {
+        ref mut deadline, ..
+    } = node_c.state
+    {
         *deadline = std::time::Instant::now();
     }
 
@@ -156,10 +177,16 @@ fn re_election_invalidates_old_session() {
     node_c.handle_message(&d2_a);
     node_c.handle_message(&d2_c);
 
-    if let ElectionState::Electing { ref mut deadline, .. } = node_a.state {
+    if let ElectionState::Electing {
+        ref mut deadline, ..
+    } = node_a.state
+    {
         *deadline = std::time::Instant::now();
     }
-    if let ElectionState::Electing { ref mut deadline, .. } = node_c.state {
+    if let ElectionState::Electing {
+        ref mut deadline, ..
+    } = node_c.state
+    {
         *deadline = std::time::Instant::now();
     }
 

@@ -30,9 +30,7 @@ use oxidize_core::{
     layer_wise::LayerWiseModel,
     model::{Model, ModelError, Session, Token},
     model_loader::{GgufModelLoader, ModelLoader},
-    paged_attention::{
-        BlockPool, BlockPoolConfig, Scheduler, SchedulerConfig, Sequence,
-    },
+    paged_attention::{BlockPool, BlockPoolConfig, Scheduler, SchedulerConfig, Sequence},
     sampling::{SamplingConfig, sample},
     tensor::DType,
     tokenizer::{
@@ -310,7 +308,10 @@ fn build_app_with_state(state: AppState) -> Router {
         .route("/v1/completions", post(completions))
         .route("/v1/models", get(models))
         .route("/v1/embeddings", post(embeddings))
-        .route("/v1/mesh/chat/completions", post(mesh_chat_completions_handler))
+        .route(
+            "/v1/mesh/chat/completions",
+            post(mesh_chat_completions_handler),
+        )
         .layer(DefaultBodyLimit::max(MAX_BODY_SIZE_BYTES))
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -884,7 +885,10 @@ async fn chat_completions(
             min_p: payload.min_p,
             typical_p: payload.typical_p,
             tail_free_z: payload.tail_free_z,
-            stop: payload.stop.map(StopSequences::into_vec).unwrap_or_default(),
+            stop: payload
+                .stop
+                .map(StopSequences::into_vec)
+                .unwrap_or_default(),
             seed: payload.seed,
             echo: false,
         };
@@ -895,16 +899,20 @@ async fn chat_completions(
             let cancel_for_task = Arc::clone(&cancel);
             let paged_for_task = Arc::clone(&paged);
             tokio::task::spawn_blocking(move || {
-                generate_with_scheduler_streaming_blocking(paged_for_task, req, tx, cancel_for_task);
+                generate_with_scheduler_streaming_blocking(
+                    paged_for_task,
+                    req,
+                    tx,
+                    cancel_for_task,
+                );
             });
             return chat_completion_stream_response_paged(model_id, rx, cancel);
         }
 
-        let generated = tokio::task::spawn_blocking(move || {
-            generate_with_scheduler_blocking(&paged, req)
-        })
-        .await
-        .map_err(|e| GenerationError::Other(format!("generation task failed: {e}")));
+        let generated =
+            tokio::task::spawn_blocking(move || generate_with_scheduler_blocking(&paged, req))
+                .await
+                .map_err(|e| GenerationError::Other(format!("generation task failed: {e}")));
 
         return match generated {
             Ok(Ok(result)) => chat_completion_response(model_id, result),
@@ -1055,7 +1063,10 @@ async fn completions(
             min_p: payload.min_p,
             typical_p: payload.typical_p,
             tail_free_z: payload.tail_free_z,
-            stop: payload.stop.map(StopSequences::into_vec).unwrap_or_default(),
+            stop: payload
+                .stop
+                .map(StopSequences::into_vec)
+                .unwrap_or_default(),
             seed: payload.seed,
             echo: payload.echo,
         };
@@ -1066,16 +1077,20 @@ async fn completions(
             let cancel_for_task = Arc::clone(&cancel);
             let paged_for_task = Arc::clone(&paged);
             tokio::task::spawn_blocking(move || {
-                generate_with_scheduler_streaming_blocking(paged_for_task, req, tx, cancel_for_task);
+                generate_with_scheduler_streaming_blocking(
+                    paged_for_task,
+                    req,
+                    tx,
+                    cancel_for_task,
+                );
             });
             return chat_completion_stream_response_paged(model_id, rx, cancel);
         }
 
-        let generated = tokio::task::spawn_blocking(move || {
-            generate_with_scheduler_blocking(&paged, req)
-        })
-        .await
-        .map_err(|e| GenerationError::Other(format!("generation task failed: {e}")));
+        let generated =
+            tokio::task::spawn_blocking(move || generate_with_scheduler_blocking(&paged, req))
+                .await
+                .map_err(|e| GenerationError::Other(format!("generation task failed: {e}")));
 
         return match generated {
             Ok(Ok(result)) => completion_response(model_id, result),
@@ -1304,7 +1319,9 @@ fn generate_text_blocking(
         match Stream::poll_next(pinned.as_mut(), &mut cx) {
             Poll::Ready(Some(Ok(token))) => generated_tokens.push(token),
             Poll::Ready(Some(Err(error))) => {
-                return Err(GenerationError::Other(format!("generation error: {error:?}")))
+                return Err(GenerationError::Other(format!(
+                    "generation error: {error:?}"
+                )));
             }
             Poll::Ready(None) | Poll::Pending => break,
         }
@@ -1347,20 +1364,21 @@ fn generate_with_scheduler_blocking(
         .map_err(|e| GenerationError::Other(format!("failed to reset model KV cache: {e:?}")))?;
 
     let mut session = Session::new();
-    let prompt_tokens = paged
-        .runtime
-        .tokenizer
-        .encode_with_special_tokens(
-            &request.prompt,
-            EncodeOptions {
-                add_bos: true,
-                add_eos: false,
-                pad_to: None,
-            },
-        );
+    let prompt_tokens = paged.runtime.tokenizer.encode_with_special_tokens(
+        &request.prompt,
+        EncodeOptions {
+            add_bos: true,
+            add_eos: false,
+            pad_to: None,
+        },
+    );
 
-    let max_tokens = request.max_tokens.unwrap_or(paged.runtime.defaults.max_tokens);
-    let temperature = request.temperature.unwrap_or(paged.runtime.defaults.temperature);
+    let max_tokens = request
+        .max_tokens
+        .unwrap_or(paged.runtime.defaults.max_tokens);
+    let temperature = request
+        .temperature
+        .unwrap_or(paged.runtime.defaults.temperature);
     let top_p = request.top_p.or(paged.runtime.defaults.top_p);
     let top_k = request.top_k.or(paged.runtime.defaults.top_k);
     let stop_token = paged.runtime.tokenizer.special_tokens().eos;
@@ -1388,16 +1406,16 @@ fn generate_with_scheduler_blocking(
         stop_token,
         sampling,
     );
-    scheduler.add_sequence(seq).map_err(|e| {
-        GenerationError::Other(format!("scheduler add_sequence failed: {e}"))
-    })?;
+    scheduler
+        .add_sequence(seq)
+        .map_err(|e| GenerationError::Other(format!("scheduler add_sequence failed: {e}")))?;
 
     let mut generated_tokens: Vec<Token> = Vec::new();
 
     // Prefill step: scheduler allocates blocks for prompt tokens.
-    let step_result = scheduler.step().map_err(|e| {
-        GenerationError::Other(format!("scheduler step failed: {e}"))
-    })?;
+    let step_result = scheduler
+        .step()
+        .map_err(|e| GenerationError::Other(format!("scheduler step failed: {e}")))?;
 
     if !step_result.scheduled_seq_ids.contains(&seq_id) {
         // Could not schedule (e.g. OOM) — clean up and return error.
@@ -1412,18 +1430,14 @@ fn generate_with_scheduler_blocking(
 
     // Sample the first token.
     let mut rng = rand::thread_rng();
-    let first_token = sample(
-        &prefill_logits,
-        sampling,
-        rand::Rng::r#gen::<f32>(&mut rng),
-    )
-    .map_err(|e| GenerationError::Other(format!("sampling failed: {e:?}")))?;
+    let first_token = sample(&prefill_logits, sampling, rand::Rng::r#gen::<f32>(&mut rng))
+        .map_err(|e| GenerationError::Other(format!("sampling failed: {e:?}")))?;
 
     let mut sampled = std::collections::HashMap::new();
     sampled.insert(seq_id, first_token);
-    scheduler.postprocess_step(&sampled).map_err(|e| {
-        GenerationError::Other(format!("scheduler postprocess_step failed: {e}"))
-    })?;
+    scheduler
+        .postprocess_step(&sampled)
+        .map_err(|e| GenerationError::Other(format!("scheduler postprocess_step failed: {e}")))?;
     generated_tokens.push(first_token);
 
     // Decode loop.
@@ -1433,9 +1447,9 @@ fn generate_with_scheduler_blocking(
             break;
         }
 
-        let step_result = scheduler.step().map_err(|e| {
-            GenerationError::Other(format!("scheduler step failed: {e}"))
-        })?;
+        let step_result = scheduler
+            .step()
+            .map_err(|e| GenerationError::Other(format!("scheduler step failed: {e}")))?;
 
         if !step_result.scheduled_seq_ids.contains(&seq_id) {
             break;
@@ -1446,16 +1460,10 @@ fn generate_with_scheduler_blocking(
                 &[*generated_tokens.last().unwrap_or(&first_token)],
                 &mut session,
             )
-            .map_err(|e| {
-                GenerationError::Other(format!("model forward failed: {e:?}"))
-            })?;
+            .map_err(|e| GenerationError::Other(format!("model forward failed: {e:?}")))?;
 
-        let token = sample(
-            &decode_logits,
-            sampling,
-            rand::Rng::r#gen::<f32>(&mut rng),
-        )
-        .map_err(|e| GenerationError::Other(format!("sampling failed: {e:?}")))?;
+        let token = sample(&decode_logits, sampling, rand::Rng::r#gen::<f32>(&mut rng))
+            .map_err(|e| GenerationError::Other(format!("sampling failed: {e:?}")))?;
 
         let mut sampled = std::collections::HashMap::new();
         sampled.insert(seq_id, token);
@@ -1467,8 +1475,9 @@ fn generate_with_scheduler_blocking(
 
     let seq = scheduler.get_sequence(seq_id);
     let prompt_tokens_count = seq.map(|s| s.prompt_len()).unwrap_or(prompt_tokens.len());
-    let completion_tokens_count =
-        seq.map(|s| s.generated_len()).unwrap_or(generated_tokens.len());
+    let completion_tokens_count = seq
+        .map(|s| s.generated_len())
+        .unwrap_or(generated_tokens.len());
 
     let text = paged
         .runtime
@@ -1526,20 +1535,21 @@ fn generate_with_scheduler_streaming_inner(
         .map_err(|e| GenerationError::Other(format!("failed to reset model KV cache: {e:?}")))?;
 
     let mut session = Session::new();
-    let prompt_tokens = paged
-        .runtime
-        .tokenizer
-        .encode_with_special_tokens(
-            &request.prompt,
-            EncodeOptions {
-                add_bos: true,
-                add_eos: false,
-                pad_to: None,
-            },
-        );
+    let prompt_tokens = paged.runtime.tokenizer.encode_with_special_tokens(
+        &request.prompt,
+        EncodeOptions {
+            add_bos: true,
+            add_eos: false,
+            pad_to: None,
+        },
+    );
 
-    let max_tokens = request.max_tokens.unwrap_or(paged.runtime.defaults.max_tokens);
-    let temperature = request.temperature.unwrap_or(paged.runtime.defaults.temperature);
+    let max_tokens = request
+        .max_tokens
+        .unwrap_or(paged.runtime.defaults.max_tokens);
+    let temperature = request
+        .temperature
+        .unwrap_or(paged.runtime.defaults.temperature);
     let top_p = request.top_p.or(paged.runtime.defaults.top_p);
     let top_k = request.top_k.or(paged.runtime.defaults.top_k);
     let stop_token = paged.runtime.tokenizer.special_tokens().eos;
@@ -1582,7 +1592,9 @@ fn generate_with_scheduler_streaming_inner(
         Ok(r) => r,
         Err(e) => {
             cleanup(&mut scheduler);
-            return Err(GenerationError::Other(format!("scheduler step failed: {e}")));
+            return Err(GenerationError::Other(format!(
+                "scheduler step failed: {e}"
+            )));
         }
     };
 
@@ -1595,16 +1607,14 @@ fn generate_with_scheduler_streaming_inner(
         Ok(l) => l,
         Err(e) => {
             cleanup(&mut scheduler);
-            return Err(GenerationError::Other(format!("model forward failed: {e:?}")));
+            return Err(GenerationError::Other(format!(
+                "model forward failed: {e:?}"
+            )));
         }
     };
 
     let mut rng = rand::thread_rng();
-    let first_token = match sample(
-        &prefill_logits,
-        sampling,
-        rand::Rng::r#gen::<f32>(&mut rng),
-    ) {
+    let first_token = match sample(&prefill_logits, sampling, rand::Rng::r#gen::<f32>(&mut rng)) {
         Ok(t) => t,
         Err(e) => {
             cleanup(&mut scheduler);
@@ -1621,7 +1631,11 @@ fn generate_with_scheduler_streaming_inner(
         )));
     }
 
-    let piece = paged.runtime.tokenizer.decode(&[first_token]).unwrap_or_default();
+    let piece = paged
+        .runtime
+        .tokenizer
+        .decode(&[first_token])
+        .unwrap_or_default();
     if tx.blocking_send(Ok(piece)).is_err() {
         // Receiver dropped (client disconnected) — clean up and exit.
         cleanup(&mut scheduler);
@@ -1644,7 +1658,9 @@ fn generate_with_scheduler_streaming_inner(
             Ok(r) => r,
             Err(e) => {
                 cleanup(&mut scheduler);
-                return Err(GenerationError::Other(format!("scheduler step failed: {e}")));
+                return Err(GenerationError::Other(format!(
+                    "scheduler step failed: {e}"
+                )));
             }
         };
 
@@ -1667,17 +1683,11 @@ fn generate_with_scheduler_streaming_inner(
             }
         };
 
-        let token = match sample(
-            &decode_logits,
-            sampling,
-            rand::Rng::r#gen::<f32>(&mut rng),
-        ) {
+        let token = match sample(&decode_logits, sampling, rand::Rng::r#gen::<f32>(&mut rng)) {
             Ok(t) => t,
             Err(e) => {
                 cleanup(&mut scheduler);
-                return Err(GenerationError::Other(format!(
-                    "sampling failed: {e:?}"
-                )));
+                return Err(GenerationError::Other(format!("sampling failed: {e:?}")));
             }
         };
 
@@ -1869,7 +1879,10 @@ fn chat_completion_stream_response_paged(
                         })
                         .to_string(),
                     );
-                    Some((Ok::<Event, std::convert::Infallible>(event), (model, false, rx, cancel)))
+                    Some((
+                        Ok::<Event, std::convert::Infallible>(event),
+                        (model, false, rx, cancel),
+                    ))
                 }
                 Some(Err(_error)) => {
                     // Error during generation — emit finish_reason=stop and close.
@@ -2360,7 +2373,11 @@ async fn main() {
     tracing::info!(
         backend = effective_backend.as_str(),
         batch_mode = args.batch_mode.as_str(),
-        platform = if cfg!(target_os = "macos") { "macos" } else { "linux" },
+        platform = if cfg!(target_os = "macos") {
+            "macos"
+        } else {
+            "linux"
+        },
         "starting oxidize-server"
     );
     let model = load_model_runtime(&args)
@@ -2427,10 +2444,7 @@ impl BatchMode {
 }
 
 fn build_paged_runtime(args: &Args, runtime: Arc<ModelRuntime>) -> Arc<PagedModelRuntime> {
-    let inference_model = runtime
-        .model
-        .lock()
-        .expect("model lock poisoned");
+    let inference_model = runtime.model.lock().expect("model lock poisoned");
     let config = match inference_model.context_size().checked_div(16).unwrap_or(0) {
         0 => BlockPoolConfig::default(),
         blocks => BlockPoolConfig {
@@ -2451,34 +2465,22 @@ fn build_paged_runtime(args: &Args, runtime: Arc<ModelRuntime>) -> Arc<PagedMode
         match &*model_guard {
             LoadedModel::Inference(m) => {
                 let cfg = m.config();
-                (
-                    cfg.num_key_value_heads,
-                    cfg.kv_head_dim(),
-                )
+                (cfg.num_key_value_heads, cfg.kv_head_dim())
             }
             LoadedModel::LayerWise(m) => {
                 // LayerWiseModel doesn't expose config directly; use defaults.
                 let cfg = m.config();
-                (
-                    cfg.num_key_value_heads,
-                    cfg.kv_head_dim(),
-                )
+                (cfg.num_key_value_heads, cfg.kv_head_dim())
             }
             #[cfg(target_os = "macos")]
             LoadedModel::Mlx(m) => {
                 let cfg = m.config();
-                (
-                    cfg.num_key_value_heads,
-                    cfg.kv_head_dim(),
-                )
+                (cfg.num_key_value_heads, cfg.kv_head_dim())
             }
             #[cfg(not(target_os = "macos"))]
             LoadedModel::Mlx(m) => {
                 let cfg = m.config();
-                (
-                    cfg.num_key_value_heads,
-                    cfg.kv_head_dim(),
-                )
+                (cfg.num_key_value_heads, cfg.kv_head_dim())
             }
         }
     };
@@ -3220,7 +3222,10 @@ mod tests {
     async fn oversized_request_body_returns_413() {
         let app = build_app_with_config(RequestLimitConfig::default(), None, None);
         let big_payload = "x".repeat(15 * 1024 * 1024);
-        let request_body = format!("{{\"model\":\"oxidize-default\",\"prompt\":\"{}\"}}", big_payload);
+        let request_body = format!(
+            "{{\"model\":\"oxidize-default\",\"prompt\":\"{}\"}}",
+            big_payload
+        );
 
         let started = TokioInstant::now();
         let response = app
@@ -3250,7 +3255,10 @@ mod tests {
         let app = build_app_with_config(RequestLimitConfig::default(), None, None);
         // 9.5 MB body (under the 10 MB limit).
         let big_payload = "x".repeat(9_500_000);
-        let request_body = format!("{{\"model\":\"oxidize-default\",\"prompt\":\"{}\"}}", big_payload);
+        let request_body = format!(
+            "{{\"model\":\"oxidize-default\",\"prompt\":\"{}\"}}",
+            big_payload
+        );
 
         let response = app
             .oneshot(
@@ -3352,8 +3360,14 @@ mod tests {
             .await
             .expect("body should be readable");
         let body = String::from_utf8(bytes.to_vec()).expect("sse body should be utf-8");
-        assert!(body.contains("\"finish_reason\":\"stop\""), "stream should contain finish_reason=stop");
-        assert!(body.contains("data: [DONE]"), "stream should end with [DONE]");
+        assert!(
+            body.contains("\"finish_reason\":\"stop\""),
+            "stream should contain finish_reason=stop"
+        );
+        assert!(
+            body.contains("data: [DONE]"),
+            "stream should end with [DONE]"
+        );
     }
 
     /// VAL-PAGED-014 (server-level): Usage counts are present in non-streaming response.
@@ -3381,9 +3395,18 @@ mod tests {
             .expect("body should be readable");
         let parsed: Value = serde_json::from_slice(&bytes).expect("valid json response");
 
-        assert!(parsed["usage"]["prompt_tokens"].is_number(), "usage.prompt_tokens should be a number");
-        assert!(parsed["usage"]["completion_tokens"].is_number(), "usage.completion_tokens should be a number");
-        assert!(parsed["usage"]["total_tokens"].is_number(), "usage.total_tokens should be a number");
+        assert!(
+            parsed["usage"]["prompt_tokens"].is_number(),
+            "usage.prompt_tokens should be a number"
+        );
+        assert!(
+            parsed["usage"]["completion_tokens"].is_number(),
+            "usage.completion_tokens should be a number"
+        );
+        assert!(
+            parsed["usage"]["total_tokens"].is_number(),
+            "usage.total_tokens should be a number"
+        );
     }
 
     // === Mesh server tests ===
@@ -3417,12 +3440,7 @@ mod tests {
     #[tokio::test]
     async fn mesh_chat_completions_returns_503_when_not_master() {
         let mesh = mesh_cluster::MeshClusterState::new();
-        let app = build_app_with_full_config(
-            RequestLimitConfig::default(),
-            None,
-            None,
-            Some(mesh),
-        );
+        let app = build_app_with_full_config(RequestLimitConfig::default(), None, None, Some(mesh));
         let request_body = json!({
             "model": "oxidize-default",
             "messages": [{"role": "user", "content": "hello"}]
@@ -3458,12 +3476,7 @@ mod tests {
         let mesh = mesh_cluster::MeshClusterState::new();
         mesh.is_master
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        let app = build_app_with_full_config(
-            RequestLimitConfig::default(),
-            None,
-            None,
-            Some(mesh),
-        );
+        let app = build_app_with_full_config(RequestLimitConfig::default(), None, None, Some(mesh));
         let request_body = json!({
             "model": "oxidize-default",
             "messages": [{"role": "user", "content": "hello"}]

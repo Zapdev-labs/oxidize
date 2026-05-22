@@ -27,7 +27,9 @@ pub fn detect_architecture(metadata: &BTreeMap<String, String>) -> ModelArchitec
     match arch.as_deref() {
         Some("llama") => ModelArchitecture::Llama,
         Some("mistral") => ModelArchitecture::Mistral,
-        Some("qwen") | Some("qwen2") | Some("qwen3") => ModelArchitecture::Qwen,
+        Some("qwen") | Some("qwen2") | Some("qwen2moe") | Some("qwen3") | Some("qwen35") => {
+            ModelArchitecture::Qwen
+        }
         Some("gemma") => ModelArchitecture::Gemma,
         Some("phi") => ModelArchitecture::Phi,
         Some(other) => ModelArchitecture::Unknown(other.to_string()),
@@ -36,16 +38,47 @@ pub fn detect_architecture(metadata: &BTreeMap<String, String>) -> ModelArchitec
 }
 
 pub fn map_hf_tensor_name(name: &str) -> String {
-    name.strip_prefix("model.")
-        .unwrap_or(name)
-        .replace("embed_tokens", "token_embd")
-        .replace("self_attn.q_proj", "attn_q")
-        .replace("self_attn.k_proj", "attn_k")
-        .replace("self_attn.v_proj", "attn_v")
-        .replace("self_attn.o_proj", "attn_output")
-        .replace("mlp.gate_proj", "ffn_gate")
-        .replace("mlp.up_proj", "ffn_up")
-        .replace("mlp.down_proj", "ffn_down")
+    match name {
+        "model.embed_tokens.weight" => "tok_embeddings.weight".to_owned(),
+        "lm_head.weight" => "output.weight".to_owned(),
+        "model.norm.weight" => "norm.weight".to_owned(),
+        _ => {
+            let Some((layer, suffix)) = name
+                .strip_prefix("model.layers.")
+                .and_then(|rest| rest.split_once('.'))
+            else {
+                return name.to_owned();
+            };
+
+            if let Some(rest) = suffix.strip_prefix("block_sparse_moe.experts.") {
+                let Some((expert, expert_weight)) = rest.split_once('.') else {
+                    return name.to_owned();
+                };
+                let mapped_expert_weight = match expert_weight {
+                    "w1.weight" => "ffn_gate",
+                    "w2.weight" => "ffn_down",
+                    "w3.weight" => "ffn_up",
+                    _ => return name.to_owned(),
+                };
+                return format!("blk.{layer}.{mapped_expert_weight}.{expert}.weight");
+            }
+
+            let mapped_suffix = match suffix {
+                "input_layernorm.weight" => "attn_norm.weight",
+                "post_attention_layernorm.weight" => "ffn_norm.weight",
+                "self_attn.q_proj.weight" => "attn_q.weight",
+                "self_attn.k_proj.weight" => "attn_k.weight",
+                "self_attn.v_proj.weight" => "attn_v.weight",
+                "self_attn.o_proj.weight" => "attn_output.weight",
+                "mlp.up_proj.weight" => "ffn_up.weight",
+                "mlp.gate_proj.weight" => "ffn_gate.weight",
+                "mlp.down_proj.weight" => "ffn_down.weight",
+                "block_sparse_moe.gate.weight" => "ffn_gate_inp.weight",
+                _ => return name.to_owned(),
+            };
+            format!("blk.{layer}.{mapped_suffix}")
+        }
+    }
 }
 
 pub fn build_conversion_plan(
@@ -90,7 +123,33 @@ mod tests {
         assert_eq!(plan.architecture, ModelArchitecture::Qwen);
         assert_eq!(
             plan.tensor_name_map["model.layers.0.self_attn.q_proj.weight"],
-            "layers.0.attn_q.weight"
+            "blk.0.attn_q.weight"
+        );
+    }
+
+    #[test]
+    fn conversion_detects_qwen_metadata_variants() {
+        let mut metadata = BTreeMap::new();
+        metadata.insert("model_type".into(), "qwen35".into());
+        assert_eq!(detect_architecture(&metadata), ModelArchitecture::Qwen);
+
+        metadata.insert("model_type".into(), "qwen2moe".into());
+        assert_eq!(detect_architecture(&metadata), ModelArchitecture::Qwen);
+    }
+
+    #[test]
+    fn conversion_maps_hf_tensor_names_to_canonical_names() {
+        assert_eq!(
+            map_hf_tensor_name("model.embed_tokens.weight"),
+            "tok_embeddings.weight"
+        );
+        assert_eq!(
+            map_hf_tensor_name("model.layers.2.mlp.down_proj.weight"),
+            "blk.2.ffn_down.weight"
+        );
+        assert_eq!(
+            map_hf_tensor_name("model.layers.3.block_sparse_moe.experts.7.w1.weight"),
+            "blk.3.ffn_gate.7.weight"
         );
     }
 }

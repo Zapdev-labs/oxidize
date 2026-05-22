@@ -642,7 +642,11 @@ fn main() {
         oxidize_core::backend::Backend::Cpu => "CPU",
         oxidize_core::backend::Backend::Vulkan => "Vulkan GPU",
     };
-    println!("backend: {} ({})", effective_backend.as_str(), backend_label);
+    println!(
+        "backend: {} ({})",
+        effective_backend.as_str(),
+        backend_label
+    );
     let threads = if let Some(t) = args.threads.filter(|t| *t > 0) {
         t
     } else {
@@ -897,7 +901,9 @@ fn main() {
                                 Box::new(m)
                             }
                             Err(error) => {
-                                eprintln!("MLX initialization failed: {error}; falling back to CPU");
+                                eprintln!(
+                                    "MLX initialization failed: {error}; falling back to CPU"
+                                );
                                 let use_mmap = args.cpu_optimized;
                                 match InferenceModel::load_from_gguf(&mapped, config, use_mmap) {
                                     Ok(m) => Box::new(m),
@@ -911,7 +917,9 @@ fn main() {
                     }
                     #[cfg(not(target_os = "macos"))]
                     {
-                        eprintln!("MLX backend requested but unavailable on Linux; falling back to CPU");
+                        eprintln!(
+                            "MLX backend requested but unavailable on Linux; falling back to CPU"
+                        );
                         let use_mmap = args.cpu_optimized;
                         match InferenceModel::load_from_gguf(&mapped, config, use_mmap) {
                             Ok(m) => Box::new(m),
@@ -1044,7 +1052,9 @@ fn run_mesh_chat_mode(mesh_port: u16) -> io::Result<()> {
 
     // Spawn the mesh node in a background task within the same runtime.
     let mesh_handle = rt.spawn(async move {
-        let result = oxidize_core::mesh::run_mesh_node(mesh_port, None, Some(prompt_rx), Some(token_tx)).await;
+        let result =
+            oxidize_core::mesh::run_mesh_node(mesh_port, None, Some(prompt_rx), Some(token_tx))
+                .await;
         if let Err(ref e) = result {
             eprintln!("mesh node error: {e}");
         }
@@ -1095,7 +1105,10 @@ fn run_mesh_chat_mode(mesh_port: u16) -> io::Result<()> {
         let cached = prompt_cache.get(prompt);
         let response = if let Some(cached) = cached {
             writeln!(writer, "{cached}")?;
-            writeln!(writer, "generation stats: tokens=0 speed=0.00 tok/s (cache hit)")?;
+            writeln!(
+                writer,
+                "generation stats: tokens=0 speed=0.00 tok/s (cache hit)"
+            )?;
             cached.to_owned()
         } else {
             request_counter += 1;

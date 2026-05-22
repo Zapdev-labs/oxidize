@@ -111,7 +111,8 @@ pub fn render_tool_call_json(call: &ToolCall) -> String {
         "type": "function",
         "function": {
             "name": call.function_name,
-            "arguments": call.arguments,
+            "arguments": serde_json::to_string(&call.arguments)
+                .expect("serde_json::Value serialization cannot fail"),
         }
     })
     .to_string()
@@ -154,6 +155,10 @@ mod tests {
             function_name: "lookup".into(),
             arguments: serde_json::json!({"q":"rust"}),
         };
-        assert!(render_tool_call_json(&call).contains("\"type\":\"function\""));
+        let rendered: serde_json::Value =
+            serde_json::from_str(&render_tool_call_json(&call)).unwrap();
+        assert_eq!(rendered["type"], "function");
+        assert_eq!(rendered["function"]["name"], "lookup");
+        assert_eq!(rendered["function"]["arguments"], r#"{"q":"rust"}"#);
     }
 }

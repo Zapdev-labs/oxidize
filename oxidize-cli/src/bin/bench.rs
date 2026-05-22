@@ -248,6 +248,7 @@ fn create_random_draft_model(config: &DFlashConfig) -> DFlashDraftModel {
         output: F32Weight::from_slice(output_weight, vocab_size, hidden),
         tok_embeddings: F32Weight::from_slice(token_embeddings, vocab_size, hidden),
         kv_cache: vec![Vec::new(); config.num_hidden_layers],
+        target_hidden_cache: Vec::new(),
         position_offset: 0,
     }
 }

@@ -11,13 +11,12 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use oxidize_core::mesh::{
-    RunnerStatus, RunnerStatusUpdated, ShutdownTask, TimedResult, DEFAULT_COLLECTIVE_TIMEOUT, eval_with_timeout,
-};
+#[cfg(test)]
+use oxidize_core::mesh::{DEFAULT_COLLECTIVE_TIMEOUT, TimedResult, eval_with_timeout};
+use oxidize_core::mesh::{RunnerStatus, RunnerStatusUpdated, ShutdownTask};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
-use std::time::Duration;
 
 /// Mesh-specific application state extension.
 #[derive(Clone)]
@@ -27,6 +26,7 @@ pub struct MeshClusterState {
     /// Whether the local node is currently the elected master.
     pub is_master: Arc<std::sync::atomic::AtomicBool>,
     /// Known runner statuses per peer.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub runner_statuses: Arc<tokio::sync::RwLock<std::collections::HashMap<String, RunnerStatus>>>,
 }
 
@@ -40,12 +40,14 @@ impl MeshClusterState {
     }
 
     /// Record a status update from a worker.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub async fn update_runner_status(&self, update: RunnerStatusUpdated) {
         let mut map = self.runner_statuses.write().await;
         map.insert(update.peer_id, update.status);
     }
 
     /// Issue a shutdown for an unhealthy worker.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub async fn issue_shutdown(&self, task: ShutdownTask) {
         tracing::warn!(
             instance_id = %task.instance_id,
@@ -157,7 +159,11 @@ pub async fn mesh_chat_completions(
         format!("mesh echo: {}", payload.messages.last().unwrap().content)
     };
 
-    let prompt_tokens = payload.messages.iter().map(|m| m.content.split_whitespace().count()).sum::<usize>();
+    let prompt_tokens = payload
+        .messages
+        .iter()
+        .map(|m| m.content.split_whitespace().count())
+        .sum::<usize>();
     let completion_tokens = content.split_whitespace().count();
 
     (
