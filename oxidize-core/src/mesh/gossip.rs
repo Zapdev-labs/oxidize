@@ -22,16 +22,21 @@ pub enum TopicKind {
 }
 
 impl TopicKind {
-    /// String identifier used for GossipSub topic creation.
+    /// Short string identifier (suffix) for the topic.
     pub fn as_str(&self) -> &'static str {
         match self {
-            TopicKind::GlobalEvents => "oxidize/mesh/global_events",
-            TopicKind::LocalEvents => "oxidize/mesh/local_events",
-            TopicKind::Commands => "oxidize/mesh/commands",
-            TopicKind::ElectionMessages => "oxidize/mesh/election_messages",
-            TopicKind::ConnectionMessages => "oxidize/mesh/connection_messages",
-            TopicKind::DownloadCommands => "oxidize/mesh/download_commands",
+            TopicKind::GlobalEvents => "global_events",
+            TopicKind::LocalEvents => "local_events",
+            TopicKind::Commands => "commands",
+            TopicKind::ElectionMessages => "election_messages",
+            TopicKind::ConnectionMessages => "connection_messages",
+            TopicKind::DownloadCommands => "download_commands",
         }
+    }
+
+    /// Full namespaced topic string used for GossipSub subscription.
+    pub fn topic_name(&self, namespace: &str) -> String {
+        format!("oxidize/mesh/{}/{}", namespace, self.as_str())
     }
 
     /// All six topics.
@@ -95,20 +100,35 @@ impl From<identify::Event> for MeshEvent {
 ///
 /// Also enforces session invalidation: events tagged with an election
 /// clock older than the current one are dropped.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct GossipRouter {
     /// Map from topic hash to the known [`TopicKind`].
     pub topics: HashMap<TopicHash, TopicKind>,
     /// Current election clock. Messages with `clock < active_clock`
     /// are considered stale and dropped.
     pub active_clock: u64,
+    /// Namespace used for topic isolation.
+    pub namespace: String,
+    /// Pre-computed topic prefix for fast filtering.
+    topic_prefix: String,
 }
 
 impl GossipRouter {
+    /// Create a router for a given namespace.
+    pub fn new(namespace: String) -> Self {
+        let topic_prefix = format!("oxidize/mesh/{}/", namespace);
+        Self {
+            namespace,
+            topic_prefix,
+            topics: HashMap::new(),
+            active_clock: 0,
+        }
+    }
+
     /// Register all six topics so inbound messages can be mapped to [`TopicKind`].
     pub fn register_all_topics(&mut self) {
         for kind in TopicKind::all() {
-            let hash = gossipsub::IdentTopic::new(kind.as_str()).hash();
+            let hash = gossipsub::IdentTopic::new(kind.topic_name(&self.namespace)).hash();
             self.topics.insert(hash, kind);
         }
     }
@@ -121,6 +141,11 @@ impl GossipRouter {
     /// Map a GossipSub topic hash to our [`TopicKind`], if known.
     pub fn resolve(&self, hash: &TopicHash) -> Option<TopicKind> {
         self.topics.get(hash).copied()
+    }
+
+    /// Check whether a raw topic string belongs to our namespace.
+    pub fn is_our_namespace(&self, topic_str: &str) -> bool {
+        topic_str.starts_with(&self.topic_prefix)
     }
 
     /// Advance the active election clock. All messages from older clocks
@@ -156,24 +181,49 @@ mod tests {
 
     #[test]
     fn gossip_router_registers_all_six_topics() {
-        let mut router = GossipRouter::default();
+        let mut router = GossipRouter::new("default".to_string());
         router.register_all_topics();
         assert_eq!(router.topic_count(), 6);
     }
 
     #[test]
     fn gossip_router_resolves_known_topic() {
-        let mut router = GossipRouter::default();
+        let mut router = GossipRouter::new("default".to_string());
         router.register_all_topics();
-        let hash = gossipsub::IdentTopic::new(TopicKind::Commands.as_str()).hash();
+        let hash = gossipsub::IdentTopic::new(TopicKind::Commands.topic_name("default")).hash();
         assert_eq!(router.resolve(&hash), Some(TopicKind::Commands));
     }
 
     #[test]
     fn gossip_router_resolves_unknown_to_none() {
-        let router = GossipRouter::default();
+        let router = GossipRouter::new("default".to_string());
         let hash = gossipsub::IdentTopic::new("unknown/topic").hash();
         assert_eq!(router.resolve(&hash), None);
+    }
+
+    #[test]
+    fn gossip_router_namespace_isolation() {
+        let mut prod = GossipRouter::new("prod".to_string());
+        prod.register_all_topics();
+        let mut dev = GossipRouter::new("dev".to_string());
+        dev.register_all_topics();
+
+        // A message on prod's Commands topic should resolve in prod but not in dev.
+        let prod_hash = gossipsub::IdentTopic::new(TopicKind::Commands.topic_name("prod")).hash();
+        let dev_hash = gossipsub::IdentTopic::new(TopicKind::Commands.topic_name("dev")).hash();
+
+        assert_eq!(prod.resolve(&prod_hash), Some(TopicKind::Commands));
+        assert_eq!(dev.resolve(&prod_hash), None);
+        assert_eq!(dev.resolve(&dev_hash), Some(TopicKind::Commands));
+        assert_eq!(prod.resolve(&dev_hash), None);
+    }
+
+    #[test]
+    fn gossip_router_is_our_namespace() {
+        let router = GossipRouter::new("test-ns".to_string());
+        assert!(router.is_our_namespace("oxidize/mesh/test-ns/commands"));
+        assert!(!router.is_our_namespace("oxidize/mesh/other-ns/commands"));
+        assert!(!router.is_our_namespace("oxidize/mesh/test-ns-extra/commands"));
     }
 
     #[test]
@@ -197,13 +247,13 @@ mod tests {
 
     #[test]
     fn router_accepts_untagged_messages() {
-        let router = GossipRouter::default();
+        let router = GossipRouter::new("test".to_string());
         assert!(router.accept(0));
     }
 
     #[test]
     fn router_rejects_stale_session_messages() {
-        let mut router = GossipRouter::default();
+        let mut router = GossipRouter::new("test".to_string());
         router.invalidate_session(5);
         assert!(router.accept(5));
         assert!(router.accept(6));
@@ -213,7 +263,7 @@ mod tests {
 
     #[test]
     fn router_session_invalidation_advances_clock() {
-        let mut router = GossipRouter::default();
+        let mut router = GossipRouter::new("test".to_string());
         router.invalidate_session(3);
         assert_eq!(router.active_clock, 3);
         router.invalidate_session(7);

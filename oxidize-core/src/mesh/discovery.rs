@@ -3,6 +3,7 @@
 use futures_util::StreamExt;
 use libp2p::{
     gossipsub,
+    identify,
     identity::Keypair,
     mdns,
     swarm::Swarm,
@@ -80,8 +81,11 @@ impl DiscoveryService {
 /// Creates a libp2p swarm configured for mesh use.
 ///
 /// The swarm enables TCP + Noise + Yamux and mDNS v2 for local discovery.
+/// Topics are namespaced so that different namespaces cannot see each other's messages.
 pub fn build_swarm(
     keypair: &Keypair,
+    namespace: &str,
+    agent_version: String,
 ) -> Result<
     Swarm<crate::mesh::gossip::MeshBehaviour>,
     Box<dyn std::error::Error + Send + Sync>,
@@ -111,15 +115,18 @@ pub fn build_swarm(
             gossipsub::MessageAuthenticity::Signed(keypair.clone()),
             gossipsub_config,
         )?,
-        identify: libp2p::identify::Behaviour::new(libp2p::identify::Config::new(
-            "/oxidize/mesh/0.1.0".to_string(),
-            keypair.public(),
-        )),
+        identify: libp2p::identify::Behaviour::new(
+            libp2p::identify::Config::new(
+                "/oxidize/mesh/0.1.0".to_string(),
+                keypair.public(),
+            )
+            .with_agent_version(agent_version),
+        ),
     };
 
-    // Subscribe to all 6 topics
+    // Subscribe to all 6 topics under the given namespace
     for topic in crate::mesh::gossip::TopicKind::all() {
-        let t = gossipsub::IdentTopic::new(topic.as_str());
+        let t = gossipsub::IdentTopic::new(topic.topic_name(namespace));
         behaviour.gossipsub.subscribe(&t)?;
     }
 
@@ -138,6 +145,7 @@ pub fn build_swarm(
 /// loop indefinitely.  This is the top-level entry point for `--mesh`.
 pub async fn run_mesh_node(mesh_port: u16) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use libp2p::swarm::SwarmEvent;
+    use libp2p::gossipsub::Event as GossipsubEvent;
 
     let namespace = MeshConfig::default_namespace();
     let (keypair, peer_id) = generate_identity();
@@ -146,7 +154,13 @@ pub async fn run_mesh_node(mesh_port: u16) -> Result<(), Box<dyn std::error::Err
         peer_id, namespace
     );
 
-    let mut swarm = build_swarm(&keypair)?;
+    let capabilities = MeshConfig::default().capabilities;
+    let discovery = DiscoveryService::new(peer_id, namespace.clone());
+    let payload_json = serde_json::to_string(&discovery.payload(&capabilities)).unwrap_or_default();
+
+    let mut swarm = build_swarm(&keypair, &namespace, payload_json)?;
+    let mut router = crate::mesh::gossip::GossipRouter::new(namespace.clone());
+    router.register_all_topics();
 
     let listen_addr: std::net::SocketAddr = if mesh_port == 0 {
         "0.0.0.0:0".parse().unwrap()
@@ -162,19 +176,83 @@ pub async fn run_mesh_node(mesh_port: u16) -> Result<(), Box<dyn std::error::Err
     .map_err(|e| format!("invalid multiaddr: {e}"))?;
 
     swarm.listen_on(multiaddr)?;
-    let _discovery = DiscoveryService::new(peer_id, namespace);
 
     let mut printed = false;
+    let mut known_peers = std::collections::HashSet::<PeerId>::new();
+
     // Drive the swarm forever so mDNS, identify, and GossipSub stay alive.
     loop {
         let event = swarm.select_next_some().await;
-        if let SwarmEvent::NewListenAddr { address, .. } = &event && !printed {
-            println!("  listening on: {}", address);
-            printed = true;
-            println!("mesh node ready — waiting for peers (Ctrl-C to exit)");
+        match &event {
+            SwarmEvent::NewListenAddr { address, .. } if !printed => {
+                println!("  listening on: {}", address);
+                printed = true;
+                println!("mesh node ready — waiting for peers (Ctrl-C to exit)");
+            }
+            SwarmEvent::Behaviour(b) => match b {
+                crate::mesh::gossip::MeshEvent::Mdns(mdns::Event::Discovered(list)) => {
+                    for (discovered_peer, addr) in list {
+                        if *discovered_peer == discovery.local_peer_id {
+                            continue;
+                        }
+                        // Dial the discovered address so the identify protocol
+                        // exchanges capabilities/namespace and we can filter.
+                        let _ = swarm.dial(addr.clone());
+                    }
+                }
+                crate::mesh::gossip::MeshEvent::Mdns(mdns::Event::Expired(list)) => {
+                    for (expired_peer, _addr) in list {
+                        known_peers.remove(expired_peer);
+                    }
+                }
+                crate::mesh::gossip::MeshEvent::Identify(identify::Event::Received { peer_id: remote_peer, info, .. }) => {
+                    let protocol_version = &info.protocol_version;
+                    // Short-circuit: skip parsing if we already know this peer.
+                    if !known_peers.contains(remote_peer)
+                        && protocol_version.starts_with("/oxidize/mesh/")
+                        && let Ok(payload) = serde_json::from_str::<DiscoveryPayload>(&info.agent_version)
+                        && discovery.accept_peer(&payload)
+                    {
+                        known_peers.insert(*remote_peer);
+                        println!(
+                            "Discovered peer {} (namespace match) device={} memory={}B can_shard={}",
+                            remote_peer,
+                            payload.capabilities.device_type,
+                            payload.capabilities.memory_bytes,
+                            payload.capabilities.can_shard
+                        );
+                    }
+                }
+                crate::mesh::gossip::MeshEvent::Gossipsub(GossipsubEvent::Message { message, .. }) => {
+                    let topic = message.topic.as_str();
+                    if !router.is_our_namespace(topic) {
+                        // Message belongs to a different namespace — drop it.
+                        continue;
+                    }
+                    if let Some(kind) = router.resolve(&message.topic) {
+                        // Only log for now; future milestones route to election, commands, etc.
+                        println!(
+                            "GossipSub message on {:?} from {} ({} bytes)",
+                            kind,
+                            message.source.map(|p| p.to_string()).unwrap_or_default(),
+                            message.data.len()
+                        );
+                    }
+                }
+                crate::mesh::gossip::MeshEvent::Gossipsub(GossipsubEvent::Subscribed { peer_id: remote_peer, topic }) => {
+                    if let Some(kind) = router.resolve(topic) {
+                        println!("Peer {} subscribed to {:?}", remote_peer, kind);
+                    }
+                }
+                crate::mesh::gossip::MeshEvent::Gossipsub(GossipsubEvent::Unsubscribed { peer_id: remote_peer, topic }) => {
+                    if let Some(kind) = router.resolve(topic) {
+                        println!("Peer {} unsubscribed from {:?}", remote_peer, kind);
+                    }
+                }
+                _ => {}
+            }
+            _ => {}
         }
-        // Future milestones will handle GossipSub messages, peer discovery,
-        // leader election, etc. in this loop.
     }
 }
 
