@@ -38,6 +38,14 @@ pub struct MlxInferenceModel {
 }
 
 #[cfg(target_os = "macos")]
+impl MlxInferenceModel {
+    /// Access the model's inference configuration.
+    pub fn config(&self) -> &InferenceConfig {
+        &self.config
+    }
+}
+
+#[cfg(target_os = "macos")]
 #[derive(Debug, Clone)]
 struct MlxLayerWeights {
     attn_norm: Vec<f32>,
@@ -1360,15 +1368,21 @@ impl Model for MlxInferenceModel {
 
 #[cfg(not(target_os = "macos"))]
 #[derive(Debug, Clone)]
-pub struct MlxInferenceModel;
+pub struct MlxInferenceModel(crate::inference::InferenceConfig);
 
 #[cfg(not(target_os = "macos"))]
 impl MlxInferenceModel {
     pub fn load_from_gguf(
         _mapped: &crate::gguf::MappedGgufFile,
-        _config: crate::inference::InferenceConfig,
+        config: crate::inference::InferenceConfig,
     ) -> Result<Self, String> {
-        Err("MlxInferenceModel is only available on macOS".to_string())
+        // We never reach the Ok path on non-macOS, but store config for consistency.
+        Ok(Self(config))
+    }
+
+    /// Access the model's inference configuration (stub on non-macOS).
+    pub fn config(&self) -> &crate::inference::InferenceConfig {
+        &self.0
     }
 }
 

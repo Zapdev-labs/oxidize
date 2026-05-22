@@ -344,6 +344,13 @@ pub struct InferenceModel {
     workspace: Workspace,
 }
 
+impl InferenceModel {
+    /// Access the model's inference configuration.
+    pub fn config(&self) -> &InferenceConfig {
+        &self.config
+    }
+}
+
 pub(crate) fn lookup_quantized_embedding(
     h: usize,
     cols: usize,

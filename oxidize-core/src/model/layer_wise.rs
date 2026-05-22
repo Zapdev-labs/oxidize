@@ -187,6 +187,11 @@ fn gemv_weight(
 }
 
 impl LayerWiseModel {
+    /// Access the model's inference configuration.
+    pub fn config(&self) -> &InferenceConfig {
+        &self.config
+    }
+
     pub fn load_from_gguf(
         mapped: &MappedGgufFile,
         config: InferenceConfig,

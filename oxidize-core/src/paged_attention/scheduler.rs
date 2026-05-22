@@ -101,6 +101,16 @@ impl Sequence {
         self.generated_tokens.len()
     }
 
+    /// Reference to the generated tokens.
+    pub fn generated_tokens(&self) -> &[Token] {
+        &self.generated_tokens
+    }
+
+    /// Reference to the prompt tokens.
+    pub fn prompt_tokens(&self) -> &[Token] {
+        &self.prompt_tokens
+    }
+
     /// Reference to the block table.
     pub fn block_table(&self) -> &BlockTable {
         &self.block_table
