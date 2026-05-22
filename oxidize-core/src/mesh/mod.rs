@@ -4,6 +4,7 @@
 //! leader election, topology tracking, ring collectives, sharding,
 //! fault tolerance, and distributed progress indicators.
 
+mod chat;
 mod discovery;
 mod election;
 mod fault_tolerance;
@@ -14,6 +15,7 @@ mod ring;
 mod sharding;
 mod topology;
 
+pub use chat::{MeshChatEngine, MeshChatPrompt, MeshChatResponse, MeshChatToken, MeshCommand, encode_mesh_command, decode_mesh_command};
 pub use discovery::{broadcast_shard_plan, build_swarm, generate_identity, run_mesh_node, DiscoveryEvent, DiscoveryPayload, DiscoveryService, same_namespace};
 pub use election::{BullyElection, ElectionClock, ElectionMessage, ElectionState, Priority, run_election_round};
 pub use fault_tolerance::{DEFAULT_COLLECTIVE_TIMEOUT, RunnerStatus, RunnerStatusUpdated, ShutdownTask, TimedResult, eval_with_timeout, eval_with_timeout_and_notify};

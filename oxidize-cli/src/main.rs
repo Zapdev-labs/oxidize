@@ -1018,7 +1018,7 @@ fn run_mesh_mode(mesh_port: u16) -> io::Result<()> {
     let rt = tokio::runtime::Runtime::new()
         .map_err(|e| io::Error::other(format!("tokio runtime: {e}")))?;
     rt.block_on(async {
-        oxidize_core::mesh::run_mesh_node(mesh_port, None)
+        oxidize_core::mesh::run_mesh_node(mesh_port, None, None, None)
             .await
             .map_err(|e| io::Error::other(format!("mesh node error: {e}")))
     })
@@ -1027,15 +1027,21 @@ fn run_mesh_mode(mesh_port: u16) -> io::Result<()> {
 /// Run the CLI in mesh + chat combined mode.
 ///
 /// Starts a background mesh node, waits for leader election, then opens an
-/// interactive REPL.  Each user prompt is streamed to the mesh cluster via
-/// GossipSub `COMMANDS` and responses stream back token-by-token.
+/// interactive REPL.  Each user prompt is broadcast to the mesh master via
+/// GossipSub `COMMANDS` and response tokens stream back through the mesh data
+/// plane (real or local fallback) and are printed token-by-token.
 fn run_mesh_chat_mode(mesh_port: u16) -> io::Result<()> {
+    use oxidize_core::mesh::{MeshChatPrompt, MeshChatToken};
+
     let rt = tokio::runtime::Runtime::new()
         .map_err(|e| io::Error::other(format!("tokio runtime: {e}")))?;
 
+    let (prompt_tx, prompt_rx) = tokio::sync::mpsc::unbounded_channel::<MeshChatPrompt>();
+    let (token_tx, mut token_rx) = tokio::sync::mpsc::unbounded_channel::<MeshChatToken>();
+
     // Spawn the mesh node in a background task within the same runtime.
     let mesh_handle = rt.spawn(async move {
-        let result = oxidize_core::mesh::run_mesh_node(mesh_port, None).await;
+        let result = oxidize_core::mesh::run_mesh_node(mesh_port, None, Some(prompt_rx), Some(token_tx)).await;
         if let Err(ref e) = result {
             eprintln!("mesh node error: {e}");
         }
@@ -1055,6 +1061,7 @@ fn run_mesh_chat_mode(mesh_port: u16) -> io::Result<()> {
     writeln!(writer, "oxidize-cli mesh chat mode. type 'exit' to quit.")?;
     let mut history = ConversationHistory::default();
     let mut prompt_cache = PromptCache::default();
+    let mut request_counter: usize = 0;
 
     loop {
         write!(writer, "> ")?;
@@ -1082,32 +1089,80 @@ fn run_mesh_chat_mode(mesh_port: u16) -> io::Result<()> {
             continue;
         }
 
-        // In a full implementation the prompt would be broadcast to the mesh
-        // master via GossipSub COMMANDS and tokens would stream back through
-        // the mesh data plane.  Here we emulate streaming by generating the
-        // greeting response token-by-token so the TUI shows progress.
-        let response = if let Some(cached) = prompt_cache.get(prompt) {
+        let cached = prompt_cache.get(prompt);
+        let response = if let Some(cached) = cached {
             writeln!(writer, "{cached}")?;
             writeln!(writer, "generation stats: tokens=0 speed=0.00 tok/s (cache hit)")?;
             cached.to_owned()
         } else {
-            let response = greeting(prompt);
-            let tokens: Vec<&str> = response.split_whitespace().collect();
-            for (i, token) in tokens.iter().enumerate() {
-                write!(writer, "{token} ")?;
-                writer.flush()?;
-                // Tiny artificial delay so the user sees streaming.
-                std::thread::sleep(Duration::from_millis(20));
-                if i % 8 == 7 {
-                    writeln!(writer)?;
-                    writer.flush()?;
+            request_counter += 1;
+            let request_id = format!("cli-{}", request_counter);
+
+            // Broadcast the prompt to the mesh via the chat engine.
+            let mesh_prompt = MeshChatPrompt {
+                request_id: request_id.clone(),
+                prompt: prompt.to_string(),
+                max_tokens: 8, // short deterministic tokens for the demo
+                temperature: 0.0,
+                top_p: 0.0,
+            };
+            if prompt_tx.send(mesh_prompt).is_err() {
+                writeln!(writer, "mesh prompt channel closed")?;
+                break;
+            }
+
+            // Drain streaming tokens from the mesh data plane.
+            let mut token_count = 0usize;
+            let mut response_parts = Vec::new();
+            let start = Instant::now();
+
+            // Give the master a moment to receive the prompt and start generating.
+            std::thread::sleep(Duration::from_millis(100));
+
+            loop {
+                match token_rx.try_recv() {
+                    Ok(token) => {
+                        if token.request_id == request_id {
+                            write!(writer, "{}", token.token)?;
+                            writer.flush()?;
+                            token_count += 1;
+                            response_parts.push(token.token);
+                            if token.is_final {
+                                writeln!(writer)?;
+                                break;
+                            } else {
+                                write!(writer, " ")?;
+                            }
+                            // Tiny artificial pacing so the TUI shows progress.
+                            std::thread::sleep(Duration::from_millis(20));
+                        }
+                    }
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                        // Poll briefly then give up if nothing arrives.
+                        std::thread::sleep(Duration::from_millis(50));
+                        if start.elapsed() > Duration::from_secs(5) {
+                            // Timeout waiting for tokens.
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                        writeln!(writer, "mesh token channel disconnected")?;
+                        break;
+                    }
                 }
             }
-            if !tokens.is_empty() && !tokens.len().is_multiple_of(8) {
-                writeln!(writer)?;
-            }
-            let token_count = tokens.len();
-            writeln!(writer, "generation stats: tokens={token_count} speed=~tok/s (mesh)")?;
+
+            let elapsed = start.elapsed().as_secs_f64();
+            let speed = if elapsed > 0.0 {
+                token_count as f64 / elapsed
+            } else {
+                0.0
+            };
+            writeln!(
+                writer,
+                "generation stats: tokens={token_count} speed={speed:.2} tok/s (mesh)"
+            )?;
+            let response = response_parts.join(" ");
             prompt_cache.insert(prompt, &response);
             response
         };

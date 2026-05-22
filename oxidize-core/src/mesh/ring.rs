@@ -48,7 +48,7 @@ impl std::error::Error for RingError {}
 /// Methods take `&self` so that send and receive futures can be created
 /// concurrently without violating Rust's aliasing rules.  Implementations
 /// use interior mutability (e.g. [`tokio::sync::Mutex`]) where needed.
-pub trait RingTransport: Send {
+pub trait RingTransport: Send + Sync {
     fn send_to_right(
         &self,
         data: Vec<u8>,
@@ -200,6 +200,16 @@ pub struct RingBackend {
     pub rank: usize,
     pub num_ranks: usize,
     pub transport: Box<dyn RingTransport>,
+}
+
+impl std::fmt::Debug for RingBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RingBackend")
+            .field("rank", &self.rank)
+            .field("num_ranks", &self.num_ranks)
+            .field("transport", &"<dyn RingTransport>")
+            .finish()
+    }
 }
 
 impl RingBackend {

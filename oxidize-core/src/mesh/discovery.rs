@@ -1,6 +1,7 @@
 //! libp2p peer discovery with mDNS and namespace isolation.
 
 use futures_util::StreamExt;
+use tokio::sync::mpsc;
 use libp2p::{
     gossipsub,
     identify,
@@ -15,6 +16,7 @@ use libp2p::tcp::tokio::Transport as TokioTcpTransport;
 use libp2p::yamux;
 use serde::{Deserialize, Serialize};
 
+use super::chat::{MeshChatEngine, MeshChatPrompt, MeshChatToken, MeshCommand};
 use super::node::{MeshConfig, NodeCapabilities};
 use super::progress::{AggregatedProgress, LoadProgressReport, aggregate_progress, render_cluster_progress_bar};
 use super::sharding::{ShardPlan, compute_shard_plan, local_assignment};
@@ -220,6 +222,8 @@ pub fn broadcast_shard_plan(
 pub async fn run_mesh_node(
     mesh_port: u16,
     is_master_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    prompt_rx: Option<mpsc::UnboundedReceiver<MeshChatPrompt>>,
+    token_tx: Option<mpsc::UnboundedSender<MeshChatToken>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use libp2p::swarm::SwarmEvent;
     use libp2p::gossipsub::Event as GossipsubEvent;
@@ -273,6 +277,15 @@ pub async fn run_mesh_node(
 
     // Progress aggregation state (master only)
     let mut progress_agg = AggregatedProgress::default();
+
+    // Distributed chat engine.
+    let mut chat_engine = MeshChatEngine::new(false, local_peer_id_str.clone(), 0);
+    if let Some(rx) = prompt_rx {
+        chat_engine.prompt_rx = Some(rx);
+    }
+    if let Some(tx) = token_tx {
+        chat_engine.token_tx = Some(tx);
+    }
 
     // Heartbeat / stale-peer timeout (≤15 s per VAL-MESH-010)
     let heartbeat_timeout = Duration::from_secs(15);
@@ -390,6 +403,10 @@ pub async fn run_mesh_node(
                                                 {
                                                     flag.store(now_master, std::sync::atomic::Ordering::Relaxed);
                                                 }
+                                                // Sync chat engine master flag.
+                                                if old_master != now_master {
+                                                    chat_engine.is_master = now_master;
+                                                }
                                                 if let crate::mesh::election::ElectionState::Elected { clock, master } = &election.state {
                                                     if old_master != now_master {
                                                         println!("Master status changed: is_master={} master={} clock={}", now_master, master, clock);
@@ -406,8 +423,11 @@ pub async fn run_mesh_node(
                                                 println!("Stale command dropped (clock {} < active {})", clock, router.active_clock);
                                                 continue;
                                             }
+                                            // Update chat engine clock so it stays in sync with the router.
+                                            chat_engine.clock = clock;
                                             if let Ok(plan) = serde_json::from_slice::<crate::mesh::sharding::ShardPlan>(&inner) {
                                                 println!("Received COMMAND: shard plan model={} strategy={:?}", plan.model_id, plan.strategy);
+                                                chat_engine.shard_plan = Some(plan.clone());
                                                 if let Some(assignment) = local_assignment(&plan, &local_peer_id_str) {
                                                     match assignment {
                                                         crate::mesh::sharding::ShardAssignment::Pipeline { start_layer, end_layer } => {
@@ -418,6 +438,32 @@ pub async fn run_mesh_node(
                                                         }
                                                     }
                                                 }
+                                            }
+                                            if let Ok(MeshCommand::ChatPrompt(prompt)) = serde_json::from_slice::<MeshCommand>(&inner) {
+                                                println!("Received chat prompt request={} prompt_len={}", prompt.request_id, prompt.prompt.len());
+                                                let tokens = chat_engine.handle_prompt(&prompt).await;
+                                                if chat_engine.is_master {
+                                                    for token in tokens {
+                                                        if let Ok(data) = crate::mesh::gossip::MeshEnvelope::pack(clock, &token) {
+                                                            let topic = gossipsub::IdentTopic::new(
+                                                                crate::mesh::gossip::TopicKind::GlobalEvents.topic_name(&namespace)
+                                                            );
+                                                            let _ = swarm.behaviour_mut().gossipsub.publish(topic, data);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    crate::mesh::gossip::TopicKind::GlobalEvents => {
+                                        if let Ok((clock, inner)) = crate::mesh::gossip::MeshEnvelope::unpack(&message.data) {
+                                            if !router.accept(clock) {
+                                                println!("Stale global event dropped (clock {} < active {})", clock, router.active_clock);
+                                                continue;
+                                            }
+                                            // Try to decode as a chat token.
+                                            if let Ok(token) = serde_json::from_slice::<MeshChatToken>(&inner) {
+                                                chat_engine.handle_token(token).await;
                                             }
                                         }
                                     }
@@ -456,6 +502,38 @@ pub async fn run_mesh_node(
                         _ => {}
                     }
                     _ => {}
+                }
+            }
+            // Poll local CLI prompt channel.
+            maybe_prompt = async {
+                if let Some(ref mut rx) = chat_engine.prompt_rx {
+                    rx.recv().await
+                } else {
+                    std::future::pending().await
+                }
+            } => {
+                if let Some(prompt) = maybe_prompt {
+                    println!("Local chat prompt injected: request_id={} prompt_len={}", prompt.request_id, prompt.prompt.len());
+                    if chat_engine.is_master {
+                        // Master handles locally and broadcasts tokens.
+                        let tokens = chat_engine.handle_prompt(&prompt).await;
+                        for token in tokens {
+                            if let Ok(data) = crate::mesh::gossip::MeshEnvelope::pack(chat_engine.clock, &token) {
+                                let topic = gossipsub::IdentTopic::new(
+                                    crate::mesh::gossip::TopicKind::GlobalEvents.topic_name(&namespace)
+                                );
+                                let _ = swarm.behaviour_mut().gossipsub.publish(topic, data);
+                            }
+                        }
+                    } else {
+                        // Worker forwards prompt to COMMANDS topic so master sees it.
+                        if let Ok(data) = crate::mesh::gossip::MeshEnvelope::pack(chat_engine.clock, &MeshCommand::ChatPrompt(prompt)) {
+                            let topic = gossipsub::IdentTopic::new(
+                                crate::mesh::gossip::TopicKind::Commands.topic_name(&namespace)
+                            );
+                            let _ = swarm.behaviour_mut().gossipsub.publish(topic, data);
+                        }
+                    }
                 }
             }
             _ = &mut maybe_timer => {

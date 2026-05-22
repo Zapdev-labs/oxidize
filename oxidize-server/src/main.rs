@@ -2386,7 +2386,7 @@ async fn main() {
         let mesh_handle = state.mesh_handle.clone();
         let port = args.mesh_port;
         tokio::spawn(async move {
-            let result = oxidize_core::mesh::run_mesh_node(port, Some(is_master)).await;
+            let result = oxidize_core::mesh::run_mesh_node(port, Some(is_master), None, None).await;
             if let Err(ref e) = result {
                 tracing::error!("mesh node error: {}", e);
             }
