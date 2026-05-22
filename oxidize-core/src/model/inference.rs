@@ -1,11 +1,10 @@
-use crate::flash_attention::flash_attention_decode_f32;
 use crate::flash_attention::flash_attention_decode_heads_f32;
 use crate::gguf::{GgufQuantizationType, MappedGgufFile};
 use crate::kv_cache::{KvCache, KvCacheConfig};
 use crate::model::{Logits, Model, ModelError, Session, Token};
 use crate::quantization::{dequantize_scalar, quantized_size};
 use crate::tensor::{
-    DType, apply_rope_f32, apply_swiglu_f32, extract_bits, f16_le_to_f32, gemv_f32_transposed,
+    DType, apply_rope_f32, extract_bits, f16_le_to_f32, gemv_f32_transposed,
     gemv_quantized_f32_transposed, rms_norm_f32, rms_norm_gemv_f32_transposed,
 };
 use memmap2::Mmap;

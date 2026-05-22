@@ -44,15 +44,15 @@ unsafe fn dot_product_f32_avx512(a: &[f32], b: &[f32]) -> f32 {
 
     let chunks = len / 16;
     for i in 0..chunks {
-        let va = _mm512_loadu_ps(a.as_ptr().add(i * 16));
-        let vb = _mm512_loadu_ps(b.as_ptr().add(i * 16));
+        let va = unsafe { _mm512_loadu_ps(a.as_ptr().add(i * 16)) };
+        let vb = unsafe { _mm512_loadu_ps(b.as_ptr().add(i * 16)) };
         sum = _mm512_fmadd_ps(va, vb, sum);
     }
 
     let mut total = _mm512_reduce_add_ps(sum);
 
     for i in (chunks * 16)..len {
-        total += a.get_unchecked(i) * b.get_unchecked(i);
+        total += unsafe { a.get_unchecked(i) * b.get_unchecked(i) };
     }
 
     total
@@ -68,19 +68,19 @@ unsafe fn dot_product_f32_avx2(a: &[f32], b: &[f32]) -> f32 {
 
     let chunks = len / 8;
     for i in 0..chunks {
-        let va = _mm256_loadu_ps(a.as_ptr().add(i * 8));
-        let vb = _mm256_loadu_ps(b.as_ptr().add(i * 8));
+        let va = unsafe { _mm256_loadu_ps(a.as_ptr().add(i * 8)) };
+        let vb = unsafe { _mm256_loadu_ps(b.as_ptr().add(i * 8)) };
         sum = _mm256_fmadd_ps(va, vb, sum);
     }
 
     // Horizontal sum of 8 floats
     let mut result = [0.0_f32; 8];
-    _mm256_storeu_ps(result.as_mut_ptr(), sum);
+    unsafe { _mm256_storeu_ps(result.as_mut_ptr(), sum) };
     let mut total = result.iter().sum::<f32>();
 
     // Tail
     for i in (chunks * 8)..len {
-        total += a.get_unchecked(i) * b.get_unchecked(i);
+        total += unsafe { a.get_unchecked(i) * b.get_unchecked(i) };
     }
 
     total
@@ -96,15 +96,15 @@ unsafe fn dot_product_f32_neon(a: &[f32], b: &[f32]) -> f32 {
 
     let chunks = len / 4;
     for i in 0..chunks {
-        let va = vld1q_f32(a.as_ptr().add(i * 4));
-        let vb = vld1q_f32(b.as_ptr().add(i * 4));
+        let va = unsafe { vld1q_f32(a.as_ptr().add(i * 4)) };
+        let vb = unsafe { vld1q_f32(b.as_ptr().add(i * 4)) };
         sum = vfmaq_f32(sum, va, vb);
     }
 
     let mut total = vaddvq_f32(sum);
 
     for i in (chunks * 4)..len {
-        total += a.get_unchecked(i) * b.get_unchecked(i);
+        total += unsafe { a.get_unchecked(i) * b.get_unchecked(i) };
     }
 
     total

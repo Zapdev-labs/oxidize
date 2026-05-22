@@ -36,6 +36,7 @@ use oxidize_core::{
         process_chat_template,
     },
 };
+use rand::{SeedableRng, rngs::StdRng};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::Mutex as StdMutex;
@@ -63,6 +64,8 @@ struct Args {
     top_k: Option<usize>,
     #[arg(long)]
     ctx_size: Option<usize>,
+    #[arg(long, default_value_t = 512)]
+    prefill_batch_size: usize,
     #[arg(long, default_value_t = false)]
     cpu_optimized: bool,
     #[arg(long, default_value_t = false)]
@@ -121,6 +124,7 @@ struct GenerationDefaults {
     temperature: f32,
     top_p: Option<f32>,
     top_k: Option<usize>,
+    prefill_batch_size: usize,
 }
 
 enum LoadedModel {
@@ -572,15 +576,39 @@ struct ChatCompletionRequest {
     #[serde(default)]
     response_format: Option<ResponseFormat>,
     #[serde(default)]
+    guided_json: Option<Value>,
+    #[serde(default)]
+    json_schema: Option<Value>,
+    #[serde(default)]
+    guided_regex: Option<String>,
+    #[serde(default)]
+    guided_choice: Option<Vec<String>>,
+    #[serde(default)]
     stream: bool,
     #[serde(default)]
     max_tokens: Option<usize>,
+    #[serde(default)]
+    max_completion_tokens: Option<usize>,
     #[serde(default)]
     temperature: Option<f32>,
     #[serde(default)]
     top_p: Option<f32>,
     #[serde(default)]
     top_k: Option<usize>,
+    #[serde(default)]
+    min_p: Option<f32>,
+    #[serde(default)]
+    typical_p: Option<f32>,
+    #[serde(default)]
+    tail_free_z: Option<f32>,
+    #[serde(default)]
+    stop: Option<StopSequences>,
+    #[serde(default)]
+    seed: Option<u64>,
+    #[serde(default)]
+    n: Option<usize>,
+    #[serde(default)]
+    best_of: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -596,6 +624,14 @@ struct CompletionRequest {
     #[serde(default)]
     response_format: Option<ResponseFormat>,
     #[serde(default)]
+    guided_json: Option<Value>,
+    #[serde(default)]
+    json_schema: Option<Value>,
+    #[serde(default)]
+    guided_regex: Option<String>,
+    #[serde(default)]
+    guided_choice: Option<Vec<String>>,
+    #[serde(default)]
     stream: bool,
     #[serde(default)]
     max_tokens: Option<usize>,
@@ -605,6 +641,38 @@ struct CompletionRequest {
     top_p: Option<f32>,
     #[serde(default)]
     top_k: Option<usize>,
+    #[serde(default)]
+    min_p: Option<f32>,
+    #[serde(default)]
+    typical_p: Option<f32>,
+    #[serde(default)]
+    tail_free_z: Option<f32>,
+    #[serde(default)]
+    stop: Option<StopSequences>,
+    #[serde(default)]
+    seed: Option<u64>,
+    #[serde(default)]
+    echo: bool,
+    #[serde(default)]
+    n: Option<usize>,
+    #[serde(default)]
+    best_of: Option<usize>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum StopSequences {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl StopSequences {
+    fn into_vec(self) -> Vec<String> {
+        match self {
+            Self::One(value) => vec![value],
+            Self::Many(values) => values,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -654,6 +722,12 @@ struct GenerationRequest {
     temperature: Option<f32>,
     top_p: Option<f32>,
     top_k: Option<usize>,
+    min_p: Option<f32>,
+    typical_p: Option<f32>,
+    tail_free_z: Option<f32>,
+    stop: Vec<String>,
+    seed: Option<u64>,
+    echo: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -667,6 +741,9 @@ async fn chat_completions(
     State(state): State<AppState>,
     Json(payload): Json<ChatCompletionRequest>,
 ) -> Response {
+    if let Some(response) = validate_candidate_count(payload.n, payload.best_of) {
+        return response;
+    }
     if let Some(runtime) = state.model.clone() {
         if payload.model != runtime.id {
             return model_not_found(&payload.model);
@@ -678,10 +755,19 @@ async fn chat_completions(
             runtime,
             GenerationRequest {
                 prompt,
-                max_tokens: payload.max_tokens,
+                max_tokens: payload.max_tokens.or(payload.max_completion_tokens),
                 temperature: payload.temperature,
                 top_p: payload.top_p,
                 top_k: payload.top_k,
+                min_p: payload.min_p,
+                typical_p: payload.typical_p,
+                tail_free_z: payload.tail_free_z,
+                stop: payload
+                    .stop
+                    .map(StopSequences::into_vec)
+                    .unwrap_or_default(),
+                seed: payload.seed,
+                echo: false,
             },
         )
         .await;
@@ -701,6 +787,17 @@ async fn chat_completions(
         .response_format
         .as_ref()
         .map_or("", ResponseFormat::output_text);
+    let response_content = if let Some(choices) = payload.guided_choice.as_ref()
+        && let Some(choice) = choices.first()
+    {
+        choice.as_str()
+    } else if payload.guided_json.is_some() || payload.json_schema.is_some() {
+        "{}"
+    } else if let Some(regex) = payload.guided_regex.as_ref() {
+        regex.as_str()
+    } else {
+        response_content
+    };
 
     if payload.stream {
         let model = payload.model;
@@ -773,6 +870,9 @@ async fn completions(
     State(state): State<AppState>,
     Json(payload): Json<CompletionRequest>,
 ) -> Response {
+    if let Some(response) = validate_candidate_count(payload.n, payload.best_of) {
+        return response;
+    }
     if let Some(runtime) = state.model.clone() {
         if payload.model != runtime.id {
             return model_not_found(&payload.model);
@@ -787,6 +887,15 @@ async fn completions(
                 temperature: payload.temperature,
                 top_p: payload.top_p,
                 top_k: payload.top_k,
+                min_p: payload.min_p,
+                typical_p: payload.typical_p,
+                tail_free_z: payload.tail_free_z,
+                stop: payload
+                    .stop
+                    .map(StopSequences::into_vec)
+                    .unwrap_or_default(),
+                seed: payload.seed,
+                echo: payload.echo,
             },
         )
         .await;
@@ -802,6 +911,17 @@ async fn completions(
         .response_format
         .as_ref()
         .map_or("", ResponseFormat::output_text);
+    let response_text = if let Some(choices) = payload.guided_choice.as_ref()
+        && let Some(choice) = choices.first()
+    {
+        choice.as_str()
+    } else if payload.guided_json.is_some() || payload.json_schema.is_some() {
+        "{}"
+    } else if let Some(regex) = payload.guided_regex.as_ref() {
+        regex.as_str()
+    } else {
+        response_text
+    };
 
     if payload.stream {
         let model = payload.model;
@@ -925,22 +1045,46 @@ fn generate_text_blocking(
     let temperature = request.temperature.unwrap_or(runtime.defaults.temperature);
     let top_p = request.top_p.or(runtime.defaults.top_p);
     let top_k = request.top_k.or(runtime.defaults.top_k);
+    let stop_sequences = request
+        .stop
+        .iter()
+        .map(|stop| {
+            runtime.tokenizer.encode_with_special_tokens(
+                stop,
+                EncodeOptions {
+                    add_bos: false,
+                    add_eos: false,
+                    pad_to: None,
+                },
+            )
+        })
+        .filter(|tokens| !tokens.is_empty())
+        .collect();
     let config = GenerationConfig {
         max_new_tokens: max_tokens,
         stop_token: runtime.tokenizer.special_tokens().eos,
+        stop_sequences,
+        prefill_batch_size: runtime.defaults.prefill_batch_size,
         suppressed_tokens: suppressed_generation_tokens(&runtime.tokenizer, model.vocab_size()),
         sampling: SamplingConfig {
             temperature,
             top_p,
             top_k,
+            min_p: request.min_p,
+            typical_p: request.typical_p,
+            tail_free_z: request.tail_free_z,
             ..SamplingConfig::default()
         },
         ..GenerationConfig::default()
     };
-    let mut rng = rand::thread_rng();
+    let mut seeded_rng = request.seed.map(StdRng::seed_from_u64);
+    let mut thread_rng = rand::thread_rng();
     let mut stream =
         GenerationStream::new(&mut *model, &mut session, &prompt_tokens, config, || {
-            rand::Rng::r#gen::<f32>(&mut rng)
+            seeded_rng.as_mut().map_or_else(
+                || rand::Rng::r#gen::<f32>(&mut thread_rng),
+                rand::Rng::r#gen::<f32>,
+            )
         });
     let waker = Waker::from(Arc::new(NoopWaker));
     let mut cx = Context::from_waker(&waker);
@@ -959,11 +1103,29 @@ fn generate_text_blocking(
         .tokenizer
         .decode_without_special_tokens(&generated_tokens)
         .unwrap_or_default();
+    let text = trim_stop_text(&text, &request.stop);
+    let text = if request.echo {
+        format!("{}{}", request.prompt, text)
+    } else {
+        text
+    };
     Ok(GenerationResult {
         text,
         prompt_tokens: prompt_tokens.len(),
         completion_tokens: generated_tokens.len(),
     })
+}
+
+fn trim_stop_text(text: &str, stop: &[String]) -> String {
+    let Some(idx) = stop
+        .iter()
+        .filter(|stop| !stop.is_empty())
+        .filter_map(|stop| text.find(stop))
+        .min()
+    else {
+        return text.to_owned();
+    };
+    text[..idx].to_owned()
 }
 
 fn chat_completion_response(model: String, result: GenerationResult) -> Response {
@@ -1101,6 +1263,26 @@ fn generation_error_response(error: String) -> Response {
         Json(json!({"error": {"message": error, "type": "generation_error"}})),
     )
         .into_response()
+}
+
+fn validate_candidate_count(n: Option<usize>, best_of: Option<usize>) -> Option<Response> {
+    let n = n.unwrap_or(1);
+    let best_of = best_of.unwrap_or(n);
+    if n == 1 && best_of == 1 {
+        return None;
+    }
+    Some(
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": {
+                    "message": "oxidize-server currently supports only n=1 and best_of=1",
+                    "type": "unsupported_parameter"
+                }
+            })),
+        )
+            .into_response(),
+    )
 }
 
 fn model_not_found(model: &str) -> Response {
@@ -1250,6 +1432,7 @@ fn load_model_runtime(args: &Args) -> Result<Option<Arc<ModelRuntime>>, String> 
             temperature: args.temperature,
             top_p: args.top_p,
             top_k: args.top_k,
+            prefill_batch_size: args.prefill_batch_size,
         },
     })))
 }
@@ -1737,6 +1920,60 @@ mod tests {
             .expect("text should be a string");
         let parsed_text: Value = serde_json::from_str(text).expect("text should be json");
         assert_eq!(parsed_text, json!({}));
+    }
+
+    #[tokio::test]
+    async fn chat_completions_accepts_vllm_sglang_guided_choice() {
+        let request_body = json!({
+            "model": "oxidize-default",
+            "messages": [{"role": "user", "content": "pick"}],
+            "guided_choice": ["yes", "no"],
+            "top_k": 20,
+            "min_p": 0.05,
+            "typical_p": 0.9,
+            "tail_free_z": 0.95,
+            "stop": ["\n"],
+            "seed": 7
+        });
+        let response = build_app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(request_body.to_string()))
+                    .expect("valid request"),
+            )
+            .await
+            .expect("request should be handled");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let parsed: Value = serde_json::from_slice(&bytes).expect("valid json response");
+        assert_eq!(parsed["choices"][0]["message"]["content"], "yes");
+    }
+
+    #[tokio::test]
+    async fn completions_rejects_multiple_candidates_until_supported() {
+        let request_body = json!({
+            "model": "oxidize-default",
+            "prompt": "hello",
+            "n": 2
+        });
+        let response = build_app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/completions")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(request_body.to_string()))
+                    .expect("valid request"),
+            )
+            .await
+            .expect("request should be handled");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

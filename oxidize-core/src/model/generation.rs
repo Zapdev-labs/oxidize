@@ -2,6 +2,7 @@ use crate::dflash::DFlashDraftModel;
 use crate::model::{Model, ModelError, Session, Token};
 use crate::sampling::{SamplingConfig, SamplingError, sample, speculative_decode};
 use futures_core::Stream;
+use std::collections::VecDeque;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -80,7 +81,7 @@ pub struct SpeculativeGenerationStream<'a, T: Model> {
     /// Buffer for draft tokens generated in the current speculative step.
     draft_token_buffer: Vec<Token>,
     /// Buffer for accepted tokens waiting to be emitted.
-    emit_buffer: Vec<Token>,
+    emit_buffer: VecDeque<Token>,
     /// True when `last_token` was sampled but not yet written to the target KV cache.
     last_token_pending_kv: bool,
 }
@@ -101,6 +102,7 @@ impl<'a, T: Model> SpeculativeGenerationStream<'a, T> {
             .map(Vec::len)
             .max()
             .unwrap_or(0);
+        let draft_tokens_per_step = config.draft_tokens_per_step;
         Self {
             target_model: Some(target_model),
             draft_model: Some(draft_model),
@@ -113,8 +115,8 @@ impl<'a, T: Model> SpeculativeGenerationStream<'a, T> {
             recent_tokens: Vec::with_capacity(max_stop_sequence_len),
             max_stop_sequence_len,
             random: Box::new(random),
-            draft_token_buffer: Vec::new(),
-            emit_buffer: Vec::new(),
+            draft_token_buffer: Vec::with_capacity(draft_tokens_per_step),
+            emit_buffer: VecDeque::with_capacity(draft_tokens_per_step + 1),
             last_token_pending_kv: false,
         }
     }
@@ -163,7 +165,8 @@ impl<'a, T: Model> SpeculativeGenerationStream<'a, T> {
 
         // 1. Draft model generates K tokens autoregressively.
         let k = self.config.draft_tokens_per_step;
-        let mut draft_tokens = Vec::with_capacity(k);
+        let mut draft_tokens = std::mem::take(&mut self.draft_token_buffer);
+        draft_tokens.clear();
         let mut draft_logits = Vec::with_capacity(k);
         let mut current_token = start_token;
 
@@ -235,14 +238,14 @@ impl<'a, T: Model> SpeculativeGenerationStream<'a, T> {
             .map_err(GenerationError::Model)?;
         self.last_token_pending_kv = false;
 
+        let accepted_count = result.accepted_draft_tokens;
         for token in result.tokens {
-            self.emit_buffer.push(token);
+            self.emit_buffer.push_back(token);
         }
 
         // 5. Update draft model KV cache to match accepted tokens.
         // Reset and replay accepted tokens through draft model.
         draft_model.reset_cache();
-        let accepted_count = result.accepted_draft_tokens;
         let mut replay_token = start_token;
         for i in 0..accepted_count {
             let _ = draft_model
@@ -251,6 +254,8 @@ impl<'a, T: Model> SpeculativeGenerationStream<'a, T> {
             replay_token = draft_tokens[i];
         }
 
+        draft_tokens.clear();
+        self.draft_token_buffer = draft_tokens;
         self.draft_model = Some(draft_model);
         self.target_model = Some(target_model);
         self.session = Some(session);
@@ -263,8 +268,7 @@ impl<T: Model> Stream for SpeculativeGenerationStream<'_, T> {
 
     fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         // Emit buffered tokens first.
-        if !self.emit_buffer.is_empty() {
-            let token = self.emit_buffer.remove(0);
+        if let Some(token) = self.emit_buffer.pop_front() {
             return Poll::Ready(self.emit_token(token));
         }
 
@@ -314,8 +318,7 @@ impl<T: Model> Stream for SpeculativeGenerationStream<'_, T> {
                     self.state = GenerationState::Done;
                     return Poll::Ready(Some(Err(e)));
                 }
-                if !self.emit_buffer.is_empty() {
-                    let token = self.emit_buffer.remove(0);
+                if let Some(token) = self.emit_buffer.pop_front() {
                     return Poll::Ready(self.emit_token(token));
                 }
                 self.state = GenerationState::Done;

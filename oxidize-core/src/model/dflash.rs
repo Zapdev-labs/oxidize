@@ -128,7 +128,6 @@ pub struct DFlashDraftModel {
 
 impl DFlashDraftModel {
     pub fn new(config: DFlashConfig) -> Self {
-        let h = config.hidden_size;
         let layers = vec![];
         Self {
             config: config.clone(),
@@ -707,7 +706,7 @@ impl DFlashDraftModel {
                     }
 
                     // Weighted sum of values.
-                    let mut out_offset = h_idx * head_dim;
+                    let out_offset = h_idx * head_dim;
                     for d in 0..head_dim {
                         let mut val = 0.0_f32;
                         for t in 0..seq_len {
@@ -808,7 +807,7 @@ impl Model for DFlashDraftModel {
         }
 
         let mut hidden = Vec::new();
-        for (i, &token) in tokens.iter().enumerate() {
+        for &token in tokens {
             // For simple draft-only forward, no target_hidden fusion.
             // In speculative decoding, forward_token with target_hidden will be called directly.
             hidden = self

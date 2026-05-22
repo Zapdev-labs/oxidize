@@ -110,7 +110,7 @@ fn main() {
         let mut tokens_generated = 0;
 
         let noise_token = config.mask_token_id;
-        let mut current_token = noise_token;
+        let current_token = noise_token;
 
         // For draft-only models without lm_head, benchmark forward_token directly.
         for _ in 0..args.draft_tokens {
@@ -150,15 +150,6 @@ fn main() {
     println!("\nNote: Draft-only model has no lm_head; benchmarked forward_token() only.");
 
     println!("\nBenchmark complete.");
-}
-
-fn greedy_sample(logits: &[f32]) -> u32 {
-    logits
-        .iter()
-        .enumerate()
-        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
-        .map(|(idx, _)| idx as u32)
-        .unwrap_or(0)
 }
 
 fn metadata_u32(

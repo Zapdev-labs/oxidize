@@ -2385,8 +2385,8 @@ mod tests {
 
     #[test]
     fn rms_norm_rejects_zero_dimension() {
-        let err = rms_norm_f32(&[], &[], 1e-5, &mut [])
-            .expect_err("zero-length output should fail");
+        let err =
+            rms_norm_f32(&[], &[], 1e-5, &mut []).expect_err("zero-length output should fail");
         assert_eq!(err, RmsNormError::ZeroDimension);
     }
 
