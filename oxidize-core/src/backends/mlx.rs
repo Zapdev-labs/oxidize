@@ -158,6 +158,48 @@ mod mlx_impl {
             }
         }
 
+        /// Build `MlxWeightStorage::Quantized` from a raw GGUF tensor byte blob.
+        ///
+        /// The GGUF payload is first dequantized to f32, then re-quantized
+        /// using MLX's native `quantize` operation so that the resulting
+        /// `weights`/`scales`/`biases` arrays can be used directly with
+        /// `mlx_quantized_matmul`.
+        pub fn from_gguf_tensor_quantized(
+            qtype: GgufQuantizationType,
+            data: &[u8],
+            shape: &[usize],
+            group_size: i32,
+            bits: i32,
+        ) -> Result<Self, String> {
+            if shape.len() != 2 {
+                return Err(format!(
+                    "from_gguf_tensor_quantized requires a 2-D shape, got {:?}",
+                    shape
+                ));
+            }
+            let value_count: usize = shape.iter().product();
+            let mut f32_data = vec![0.0_f32; value_count];
+            crate::quantization::dequantize_scalar(qtype, data, &mut f32_data)
+                .map_err(|e| format!("dequantize failed: {e:?}"))?;
+
+            // MLX quantize requires a 2-D array with columns divisible by group_size.
+            let rows = shape[0] as i32;
+            let cols = shape[1] as i32;
+            let array = Array::from_slice(&f32_data, &[rows, cols]);
+            // Drop the host buffer immediately after the MLX copy to minimize peak memory.
+            drop(f32_data);
+            let (weights, scales, biases) = mlx_rs::ops::quantize(&array, group_size, bits)
+                .map_err(|e| format!("MLX quantize failed: {e:?}"))?;
+
+            Ok(MlxWeightStorage::Quantized {
+                weights,
+                scales,
+                biases,
+                group_size,
+                bits,
+            })
+        }
+
         /// Verify that the array is usable on the GPU stream, confirming
         /// it resides in the Apple Silicon unified memory pool.
         ///
@@ -391,17 +433,22 @@ mod mlx_impl {
                     group_size,
                     bits,
                 } => {
-                    let vec = if vector.array.ndim() == 1 {
+                    // mlx_quantized_matmul expects a 2-D input.  Reshape the
+                    // 1-D vector to [1, cols], run the op, then flatten the
+                    // [1, rows] result back to [rows].
+                    let vec = if vector.array.ndim() == 2 && vector.array.shape()[0] == 1 {
                         vector.array.clone()
                     } else {
-                        mlx_rs::ops::reshape(&vector.array, &[cols as i32], &self.stream)
+                        mlx_rs::ops::reshape(&vector.array, &[1, cols as i32], &self.stream)
                             .map_err(|e| format!("reshape vector failed: {e:?}"))?
                     };
                     let result = mlx_rs::ops::quantized_matmul(
                         &vec, weights, scales, biases, false, Some(*group_size), Some(*bits), &self.stream,
                     )
                     .map_err(|e| format!("MLX quantized_matmul failed: {e:?}"))?;
-                    Ok(MlxTensor::from_array(result))
+                    let flat = mlx_rs::ops::flatten(&result, None, None, &self.stream)
+                        .map_err(|e| format!("flatten quantized result failed: {e:?}"))?;
+                    Ok(MlxTensor::from_array(flat))
                 }
             }
         }
@@ -727,6 +774,106 @@ mod tests {
                 .expect("attention decode should succeed");
 
             assert_eq!(backend.tensor_shape(&out), vec![head_dim]);
+        }
+
+        #[test]
+        fn mlx_quantized_matmul_q4km_accuracy() {
+            let rows = 32usize;
+            let cols = 256usize;
+            let qtype = crate::gguf::GgufQuantizationType::Q4_K_M;
+            run_quantized_matmul_test(qtype, rows, cols, 4, 64);
+        }
+
+        #[test]
+        fn mlx_quantized_matmul_q6k_accuracy() {
+            let rows = 32usize;
+            let cols = 256usize;
+            let qtype = crate::gguf::GgufQuantizationType::Q6_K;
+            run_quantized_matmul_test(qtype, rows, cols, 6, 64);
+        }
+
+        #[test]
+        fn mlx_quantized_matmul_q8_0_accuracy() {
+            let rows = 32usize;
+            let cols = 128usize;
+            let qtype = crate::gguf::GgufQuantizationType::Q8_0;
+            run_quantized_matmul_test(qtype, rows, cols, 8, 32);
+        }
+
+        fn run_quantized_matmul_test(
+            qtype: crate::gguf::GgufQuantizationType,
+            rows: usize,
+            cols: usize,
+            bits: i32,
+            group_size: i32,
+        ) {
+            let backend = MlxComputeBackend::new();
+
+            // Synthetic f32 weights.
+            let weights_f32: Vec<f32> = (0..rows * cols)
+                .map(|i| ((i as f32 * 0.0713).sin() * 2.5) - 0.8)
+                .collect();
+
+            // Random input vector.
+            let vector_f32: Vec<f32> = (0..cols)
+                .map(|i| ((i as f32 * 0.113).cos() * 1.2) + 0.3)
+                .collect();
+
+            // --- CPU reference: quantize to GGUF, dequantize back, then GEMV ---
+            let src_bytes: Vec<u8> = weights_f32
+                .iter()
+                .flat_map(|v| v.to_le_bytes())
+                .collect();
+            let quantized_len = crate::quantization::quantized_size(qtype, weights_f32.len())
+                .expect("quantized size must be known");
+            let mut quantized_bytes = vec![0_u8; quantized_len];
+            crate::quantization::quantize_scalar(
+                crate::gguf::GgufQuantizationType::F32,
+                qtype,
+                &src_bytes,
+                &mut quantized_bytes,
+            )
+            .expect("scalar quantization should succeed");
+
+            let mut dequantized = vec![0.0_f32; weights_f32.len()];
+            crate::quantization::dequantize_scalar(qtype, &quantized_bytes, &mut dequantized)
+                .expect("dequantization should succeed");
+
+            let mut cpu_out = vec![0.0_f32; rows];
+            crate::tensor::gemv_f32(&dequantized, rows, cols, &vector_f32, &mut cpu_out)
+                .expect("cpu gemv should succeed");
+
+            // --- MLX quantized path: create quantized storage, run gemv ---
+            let shape = vec![rows, cols];
+            let mlx_storage = MlxWeightStorage::from_gguf_tensor_quantized(
+                qtype,
+                &quantized_bytes,
+                &shape,
+                group_size,
+                bits,
+            )
+            .expect("from_gguf_tensor_quantized should succeed");
+
+            let vector_tensor = backend.tensor_from_f32(&vector_f32).unwrap();
+            let mlx_out_tensor = backend
+                .gemv(&mlx_storage, &vector_tensor, rows, cols)
+                .expect("mlx quantized gemv should succeed");
+
+            let mut mlx_out = vec![0.0_f32; rows];
+            backend
+                .tensor_to_f32(&mlx_out_tensor, &mut mlx_out)
+                .expect("copy to host should succeed");
+
+            // --- Compare with 1e-3 relative tolerance ---
+            let max_abs_ref = cpu_out.iter().map(|v| v.abs()).fold(0.0_f32, f32::max).max(1e-6);
+            for (i, (cpu, mlx)) in cpu_out.iter().zip(mlx_out.iter()).enumerate() {
+                let abs_diff = (cpu - mlx).abs();
+                let rel_diff = abs_diff / max_abs_ref;
+                assert!(
+                    rel_diff < 1e-3,
+                    "quantized matmul mismatch at row {i}: cpu={cpu} mlx={mlx} rel_diff={rel_diff}"
+                );
+            }
         }
     }
 }
