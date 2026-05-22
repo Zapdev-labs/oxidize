@@ -777,6 +777,133 @@ mod tests {
         }
 
         #[test]
+        fn mlx_fast_attention_matches_cpu_reference() {
+            let backend = MlxComputeBackend::new();
+            let head_dim = 64usize;
+            let seq_len = 17usize;
+            let num_heads = 1usize;
+            let kv_heads = 1usize;
+            let kv_len = kv_heads * head_dim;
+
+            let query: Vec<f32> = (0..num_heads * head_dim)
+                .map(|i| ((i as f32 * 0.0713).sin() * 2.5) - 0.8)
+                .collect();
+            let key_layer: Vec<f32> = (0..seq_len * kv_len)
+                .map(|i| ((i as f32 * 0.113).cos() * 1.3) - 0.2)
+                .collect();
+            let value_layer: Vec<f32> = (0..seq_len * kv_len)
+                .map(|i| ((i as f32 * 0.0517).sin() * 0.9) + 0.1)
+                .collect();
+            let scale = 1.0_f32 / (head_dim as f32).sqrt();
+
+            // CPU reference
+            let mut cpu_out = vec![0.0_f32; num_heads * head_dim];
+            crate::flash_attention::flash_attention_decode_heads_f32(
+                &query,
+                &key_layer,
+                &value_layer,
+                seq_len,
+                head_dim,
+                kv_len,
+                num_heads,
+                kv_heads,
+                &mut cpu_out,
+            )
+            .expect("cpu reference should succeed");
+
+            // MLX fast primitive
+            let q_tensor = backend.tensor_from_f32(&query).unwrap();
+            let k_tensor = backend.tensor_from_f32(&key_layer).unwrap();
+            let v_tensor = backend.tensor_from_f32(&value_layer).unwrap();
+            let mlx_out_tensor = backend
+                .attention_decode(&q_tensor, &k_tensor, &v_tensor, seq_len, head_dim, scale)
+                .expect("mlx attention should succeed");
+
+            let mut mlx_out = vec![0.0_f32; num_heads * head_dim];
+            backend.tensor_to_f32(&mlx_out_tensor, &mut mlx_out).unwrap();
+
+            let mut max_diff = 0.0_f32;
+            for (cpu, mlx) in cpu_out.iter().zip(mlx_out.iter()) {
+                max_diff = max_diff.max((cpu - mlx).abs());
+            }
+            assert!(
+                max_diff < 1e-4,
+                "fast_scaled_dot_product_attention mismatch: max_abs_diff={max_diff}"
+            );
+        }
+
+        #[test]
+        fn mlx_fast_rms_norm_matches_cpu_reference() {
+            let backend = MlxComputeBackend::new();
+            let hidden_dim = 128usize;
+            let input: Vec<f32> = (0..hidden_dim)
+                .map(|i| ((i as f32 * 0.0713).sin() * 2.5) - 0.8)
+                .collect();
+            let weight: Vec<f32> = (0..hidden_dim)
+                .map(|i| ((i as f32 * 0.113).cos() * 1.3) - 0.2)
+                .collect();
+            let eps = 1e-6_f32;
+
+            // CPU reference
+            let mut cpu_out = vec![0.0_f32; hidden_dim];
+            crate::tensor::rms_norm_f32(&input, &weight, eps, &mut cpu_out)
+                .expect("cpu rms_norm should succeed");
+
+            // MLX fast primitive
+            let input_tensor = backend.tensor_from_f32(&input).unwrap();
+            let weight_tensor = backend.tensor_from_f32(&weight).unwrap();
+            let mlx_out_tensor = backend
+                .rms_norm(&input_tensor, &weight_tensor, eps)
+                .expect("mlx rms_norm should succeed");
+
+            let mut mlx_out = vec![0.0_f32; hidden_dim];
+            backend.tensor_to_f32(&mlx_out_tensor, &mut mlx_out).unwrap();
+
+            let mut max_diff = 0.0_f32;
+            for (cpu, mlx) in cpu_out.iter().zip(mlx_out.iter()) {
+                max_diff = max_diff.max((cpu - mlx).abs());
+            }
+            assert!(
+                max_diff < 1e-4,
+                "fast_rms_norm mismatch: max_abs_diff={max_diff}"
+            );
+        }
+
+        #[test]
+        fn mlx_fast_rope_matches_cpu_reference() {
+            let backend = MlxComputeBackend::new();
+            let head_dim = 64usize;
+            let position = 7usize;
+            let theta = 10000.0_f32;
+            let input: Vec<f32> = (0..head_dim)
+                .map(|i| ((i as f32 * 0.0713).sin() * 2.5) - 0.8)
+                .collect();
+
+            // CPU reference
+            let mut cpu_out = vec![0.0_f32; head_dim];
+            crate::tensor::apply_rope_f32(&input, position, head_dim, theta, &mut cpu_out)
+                .expect("cpu apply_rope should succeed");
+
+            // MLX fast primitive
+            let input_tensor = backend.tensor_from_f32(&input).unwrap();
+            let mlx_out_tensor = backend
+                .apply_rope(&input_tensor, position, head_dim, theta)
+                .expect("mlx rope should succeed");
+
+            let mut mlx_out = vec![0.0_f32; head_dim];
+            backend.tensor_to_f32(&mlx_out_tensor, &mut mlx_out).unwrap();
+
+            let mut max_diff = 0.0_f32;
+            for (cpu, mlx) in cpu_out.iter().zip(mlx_out.iter()) {
+                max_diff = max_diff.max((cpu - mlx).abs());
+            }
+            assert!(
+                max_diff < 1e-4,
+                "fast_rope mismatch: max_abs_diff={max_diff}"
+            );
+        }
+
+        #[test]
         fn mlx_quantized_matmul_q4km_accuracy() {
             let rows = 32usize;
             let cols = 256usize;
