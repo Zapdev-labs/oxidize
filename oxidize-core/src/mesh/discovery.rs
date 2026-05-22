@@ -141,14 +141,61 @@ pub fn build_swarm(
     Ok(swarm)
 }
 
-/// Run a mesh node: build swarm, listen on `mesh_port`, and drive the event
-/// loop indefinitely.  This is the top-level entry point for `--mesh`.
+/// Build a future that resolves on the first shutdown signal (Ctrl-C or SIGTERM).
+async fn shutdown_signal() {
+    let ctrl_c = tokio::signal::ctrl_c();
+    #[cfg(unix)]
+    let sigterm = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut s) => {
+                s.recv().await;
+            }
+            Err(_) => std::future::pending().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let sigterm = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = sigterm => {},
+    }
+}
+
+/// Publish a serializable payload on a mesh topic, wrapping it in a
+/// [`MeshEnvelope`] tagged with the given election clock.
+fn publish_envelope<T: serde::Serialize>(
+    swarm: &mut Swarm<crate::mesh::gossip::MeshBehaviour>,
+    namespace: &str,
+    kind: crate::mesh::gossip::TopicKind,
+    clock: u64,
+    payload: &T,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let data = crate::mesh::gossip::MeshEnvelope::pack(clock, payload)?;
+    let topic = gossipsub::IdentTopic::new(kind.topic_name(namespace));
+    let _ = swarm.behaviour_mut().gossipsub.publish(topic, data);
+    Ok(())
+}
+
+/// Run a mesh node: build swarm, listen on `mesh_port`, drive the event loop,
+/// converge on a leader via Bully election, and gracefully shut down on
+/// SIGINT / SIGTERM.
+///
+/// The node:
+/// 1. Starts an election when ≥2 peers are discovered.
+/// 2. Broadcasts `ElectionMessage::Declare` on `ELECTION_MESSAGES`.
+/// 3. Waits for the election timeout (default 3 s), then finalizes.
+/// 4. Broadcasts `ElectionMessage::Result` so every peer converges.
+/// 5. Invalidates the GossipSub session so stale events are dropped.
+/// 6. On shutdown, emits a `CONNECTION_MESSAGES` disconnect and closes the swarm.
 pub async fn run_mesh_node(mesh_port: u16) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use libp2p::swarm::SwarmEvent;
     use libp2p::gossipsub::Event as GossipsubEvent;
+    use std::time::Duration;
 
     let namespace = MeshConfig::default_namespace();
     let (keypair, peer_id) = generate_identity();
+    let local_peer_id_str = peer_id.to_string();
     println!(
         "oxidize mesh node starting…\n  PeerId: {}\n  namespace: {}\n  mDNS discovery started",
         peer_id, namespace
@@ -161,6 +208,17 @@ pub async fn run_mesh_node(mesh_port: u16) -> Result<(), Box<dyn std::error::Err
     let mut swarm = build_swarm(&keypair, &namespace, payload_json)?;
     let mut router = crate::mesh::gossip::GossipRouter::new(namespace.clone());
     router.register_all_topics();
+
+    let mut topology = crate::mesh::topology::TopologyGraph::new();
+    topology.local_peer_id = Some(local_peer_id_str.clone());
+
+    let election_timeout = Duration::from_secs(3);
+    let mut election = crate::mesh::election::BullyElection::new(
+        local_peer_id_str.clone(),
+        0,
+        capabilities.clone(),
+        election_timeout,
+    );
 
     let listen_addr: std::net::SocketAddr = if mesh_port == 0 {
         "0.0.0.0:0".parse().unwrap()
@@ -180,80 +238,178 @@ pub async fn run_mesh_node(mesh_port: u16) -> Result<(), Box<dyn std::error::Err
     let mut printed = false;
     let mut known_peers = std::collections::HashSet::<PeerId>::new();
 
-    // Drive the swarm forever so mDNS, identify, and GossipSub stay alive.
-    loop {
-        let event = swarm.select_next_some().await;
-        match &event {
-            SwarmEvent::NewListenAddr { address, .. } if !printed => {
-                println!("  listening on: {}", address);
-                printed = true;
-                println!("mesh node ready — waiting for peers (Ctrl-C to exit)");
+    let shutdown = shutdown_signal();
+    tokio::pin!(shutdown);
+
+    // Main event loop.
+    'outer: loop {
+        // Only arm the periodic timer when there is actual work to do.
+        let needs_timer = matches!(election.state, crate::mesh::election::ElectionState::Electing { .. })
+            || (matches!(election.state, crate::mesh::election::ElectionState::Idle)
+                && known_peers.len() >= 2);
+
+        let maybe_timer = if needs_timer {
+            tokio::time::sleep(Duration::from_millis(100))
+        } else {
+            // Sleep for a very long time when nothing needs polling.
+            tokio::time::sleep(Duration::from_secs(3600))
+        };
+        tokio::pin!(maybe_timer);
+
+        tokio::select! {
+            _ = &mut shutdown => {
+                println!("Received SIGINT/SIGTERM, shutting down…");
+                break 'outer;
             }
-            SwarmEvent::Behaviour(b) => match b {
-                crate::mesh::gossip::MeshEvent::Mdns(mdns::Event::Discovered(list)) => {
-                    for (discovered_peer, addr) in list {
-                        if *discovered_peer == discovery.local_peer_id {
-                            continue;
+            event = swarm.select_next_some() => {
+                match &event {
+                    SwarmEvent::NewListenAddr { address, .. } if !printed => {
+                        println!("  listening on: {}", address);
+                        printed = true;
+                        println!("mesh node ready — waiting for peers (Ctrl-C to exit)");
+                    }
+                    SwarmEvent::Behaviour(b) => match b {
+                        crate::mesh::gossip::MeshEvent::Mdns(mdns::Event::Discovered(list)) => {
+                            for (discovered_peer, addr) in list {
+                                if *discovered_peer == discovery.local_peer_id {
+                                    continue;
+                                }
+                                let _ = swarm.dial(addr.clone());
+                            }
                         }
-                        // Dial the discovered address so the identify protocol
-                        // exchanges capabilities/namespace and we can filter.
-                        let _ = swarm.dial(addr.clone());
+                        crate::mesh::gossip::MeshEvent::Mdns(mdns::Event::Expired(list)) => {
+                            for (expired_peer, _addr) in list {
+                                if known_peers.remove(expired_peer) {
+                                    let pid = expired_peer.to_string();
+                                    topology.remove_node(&pid);
+                                    println!("Peer {} expired / disconnected", pid);
+                                }
+                            }
+                        }
+                        crate::mesh::gossip::MeshEvent::Identify(identify::Event::Received { peer_id: remote_peer, info, .. }) => {
+                            let protocol_version = &info.protocol_version;
+                            if !known_peers.contains(remote_peer)
+                                && protocol_version.starts_with("/oxidize/mesh/")
+                                && let Ok(payload) = serde_json::from_str::<DiscoveryPayload>(&info.agent_version)
+                                && discovery.accept_peer(&payload)
+                            {
+                                known_peers.insert(*remote_peer);
+                                let peer_id_str = remote_peer.to_string();
+                                topology.add_or_update_node(&peer_id_str, payload.capabilities.clone());
+                                println!(
+                                    "Discovered peer {} (namespace match) device={} memory={}B can_shard={}",
+                                    remote_peer,
+                                    payload.capabilities.device_type,
+                                    payload.capabilities.memory_bytes,
+                                    payload.capabilities.can_shard
+                                );
+                            }
+                        }
+                        crate::mesh::gossip::MeshEvent::Gossipsub(GossipsubEvent::Message { message, .. }) => {
+                            if let Some(kind) = router.resolve(&message.topic) {
+                                match kind {
+                                    crate::mesh::gossip::TopicKind::ElectionMessages => {
+                                        if let Ok((clock, inner)) = crate::mesh::gossip::MeshEnvelope::unpack(&message.data) {
+                                            if !router.accept(clock) {
+                                                println!("Stale election message dropped (clock {} < active {})", clock, router.active_clock);
+                                                continue;
+                                            }
+                                            if let Ok(msg) = serde_json::from_slice::<crate::mesh::election::ElectionMessage>(&inner) {
+                                                let old_clock = election.clock;
+                                                election.handle_message(&msg);
+                                                if election.clock != old_clock {
+                                                    router.invalidate_session(election.clock);
+                                                }
+                                                if let crate::mesh::election::ElectionState::Elected { clock, master } = &election.state {
+                                                    println!("Election result accepted: master={} clock={}", master, clock);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    crate::mesh::gossip::TopicKind::ConnectionMessages => {
+                                        let source = message.source.map(|p| p.to_string()).unwrap_or_default();
+                                        println!("Connection message from {} ({} bytes)", source, message.data.len());
+                                    }
+                                    _ => {
+                                        let source = message.source.map(|p| p.to_string()).unwrap_or_default();
+                                        println!(
+                                            "GossipSub message on {:?} from {} ({} bytes)",
+                                            kind, source, message.data.len()
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        crate::mesh::gossip::MeshEvent::Gossipsub(GossipsubEvent::Subscribed { peer_id: remote_peer, topic }) => {
+                            if let Some(kind) = router.resolve(topic) {
+                                println!("Peer {} subscribed to {:?}", remote_peer, kind);
+                            }
+                        }
+                        crate::mesh::gossip::MeshEvent::Gossipsub(GossipsubEvent::Unsubscribed { peer_id: remote_peer, topic }) => {
+                            if let Some(kind) = router.resolve(topic) {
+                                println!("Peer {} unsubscribed from {:?}", remote_peer, kind);
+                            }
+                        }
+                        _ => {}
                     }
+                    _ => {}
                 }
-                crate::mesh::gossip::MeshEvent::Mdns(mdns::Event::Expired(list)) => {
-                    for (expired_peer, _addr) in list {
-                        known_peers.remove(expired_peer);
-                    }
-                }
-                crate::mesh::gossip::MeshEvent::Identify(identify::Event::Received { peer_id: remote_peer, info, .. }) => {
-                    let protocol_version = &info.protocol_version;
-                    // Short-circuit: skip parsing if we already know this peer.
-                    if !known_peers.contains(remote_peer)
-                        && protocol_version.starts_with("/oxidize/mesh/")
-                        && let Ok(payload) = serde_json::from_str::<DiscoveryPayload>(&info.agent_version)
-                        && discovery.accept_peer(&payload)
-                    {
-                        known_peers.insert(*remote_peer);
-                        println!(
-                            "Discovered peer {} (namespace match) device={} memory={}B can_shard={}",
-                            remote_peer,
-                            payload.capabilities.device_type,
-                            payload.capabilities.memory_bytes,
-                            payload.capabilities.can_shard
-                        );
-                    }
-                }
-                crate::mesh::gossip::MeshEvent::Gossipsub(GossipsubEvent::Message { message, .. }) => {
-                    let topic = message.topic.as_str();
-                    if !router.is_our_namespace(topic) {
-                        // Message belongs to a different namespace — drop it.
-                        continue;
-                    }
-                    if let Some(kind) = router.resolve(&message.topic) {
-                        // Only log for now; future milestones route to election, commands, etc.
-                        println!(
-                            "GossipSub message on {:?} from {} ({} bytes)",
-                            kind,
-                            message.source.map(|p| p.to_string()).unwrap_or_default(),
-                            message.data.len()
-                        );
-                    }
-                }
-                crate::mesh::gossip::MeshEvent::Gossipsub(GossipsubEvent::Subscribed { peer_id: remote_peer, topic }) => {
-                    if let Some(kind) = router.resolve(topic) {
-                        println!("Peer {} subscribed to {:?}", remote_peer, kind);
-                    }
-                }
-                crate::mesh::gossip::MeshEvent::Gossipsub(GossipsubEvent::Unsubscribed { peer_id: remote_peer, topic }) => {
-                    if let Some(kind) = router.resolve(topic) {
-                        println!("Peer {} unsubscribed from {:?}", remote_peer, kind);
-                    }
-                }
-                _ => {}
             }
-            _ => {}
+            _ = &mut maybe_timer => {
+                // Election timeout handling.
+                if let crate::mesh::election::ElectionState::Electing { .. } = election.state
+                    && election.is_timed_out()
+                    && let Some(result) = election.finalize_election()
+                {
+                    publish_envelope(&mut swarm, &namespace, crate::mesh::gossip::TopicKind::ElectionMessages, election.clock, &result)?;
+                    router.invalidate_session(election.clock);
+                    println!(
+                        "Election finalized: master={} clock={}",
+                        election.current_master().unwrap_or("?"),
+                        election.clock
+                    );
+                }
+
+                // Auto-trigger election when we have ≥2 peers and are idle.
+                if matches!(election.state, crate::mesh::election::ElectionState::Idle)
+                    && known_peers.len() >= 2
+                {
+                    let declare = election.start_election();
+                    publish_envelope(&mut swarm, &namespace, crate::mesh::gossip::TopicKind::ElectionMessages, election.clock, &declare)?;
+                    println!("Election started (clock={})", election.clock);
+                }
+            }
         }
     }
+
+    // Graceful shutdown: emit disconnect and give the swarm a moment to flush.
+    let disconnect = crate::mesh::gossip::GossipMessage {
+        topic: crate::mesh::gossip::TopicKind::ConnectionMessages,
+        payload: local_peer_id_str.clone().into_bytes(),
+        source_peer_id: Some(local_peer_id_str.clone()),
+    };
+    if let Ok(disconnect_data) = serde_json::to_vec(&disconnect) {
+        let topic = gossipsub::IdentTopic::new(
+            crate::mesh::gossip::TopicKind::ConnectionMessages.topic_name(&namespace)
+        );
+        let _ = swarm.behaviour_mut().gossipsub.publish(topic, disconnect_data);
+    }
+
+    // Brief drain so the disconnect message has a chance to hit the wire.
+    let drain_deadline = tokio::time::Instant::now() + Duration::from_millis(500);
+    loop {
+        tokio::select! {
+            biased;
+            _ = tokio::time::sleep_until(drain_deadline) => break,
+            _ = swarm.select_next_some() => {},
+        }
+    }
+
+    println!("swarm closed");
+    println!("ring disconnected");
+    println!("mesh node shutdown complete");
+
+    Ok(())
 }
 
 #[cfg(test)]

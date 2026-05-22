@@ -277,6 +277,17 @@ impl BullyElection {
         self.clock == clock
     }
 
+    /// Return the remaining time until the election deadline, if electing.
+    /// Returns `Some(Duration::ZERO)` when the deadline has already passed.
+    pub fn time_remaining(&self) -> Option<std::time::Duration> {
+        if let ElectionState::Electing { deadline, .. } = &self.state {
+            let now = std::time::Instant::now();
+            Some(if *deadline > now { *deadline - now } else { std::time::Duration::ZERO })
+        } else {
+            None
+        }
+    }
+
     /// Increment local commands-seen counter.
     pub fn inc_local_commands(&mut self) {
         self.local_commands += 1;
@@ -634,5 +645,28 @@ mod tests {
         e.inc_local_commands();
         e.inc_local_commands();
         assert_eq!(e.local_commands, 2);
+    }
+
+    #[test]
+    fn time_remaining_when_electing() {
+        let mut e = make_election("a", 1);
+        assert!(e.time_remaining().is_none());
+        e.start_election();
+        assert!(e.time_remaining().is_some());
+        let rem = e.time_remaining().unwrap();
+        assert!(rem > Duration::from_secs(0));
+        assert!(rem <= Duration::from_millis(100));
+    }
+
+    #[test]
+    fn time_remaining_zero_after_timeout() {
+        let mut e = make_election("a", 1);
+        e.start_election();
+        // Manually set deadline to the past.
+        if let ElectionState::Electing { ref mut deadline, .. } = e.state {
+            *deadline = std::time::Instant::now() - Duration::from_secs(1);
+        }
+        let rem = e.time_remaining().unwrap();
+        assert_eq!(rem, Duration::from_secs(0));
     }
 }

@@ -96,6 +96,36 @@ impl From<identify::Event> for MeshEvent {
     }
 }
 
+/// A mesh envelope wraps an application payload with a session tag so
+/// the [`GossipRouter`] can reject stale messages after a new election.
+///
+/// When `election_clock` is `0` the message is considered untagged and
+/// is always accepted.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MeshEnvelope {
+    pub election_clock: u64,
+    pub payload: Vec<u8>,
+}
+
+impl MeshEnvelope {
+    /// Wrap an arbitrary serializable payload with the current clock.
+    pub fn pack<T: Serialize>(clock: u64, payload: &T) -> Result<Vec<u8>, serde_json::Error> {
+        let inner = serde_json::to_vec(payload)?;
+        let envelope = MeshEnvelope {
+            election_clock: clock,
+            payload: inner,
+        };
+        serde_json::to_vec(&envelope)
+    }
+
+    /// Unpack the envelope and return the inner payload bytes together
+    /// with the attached election clock.
+    pub fn unpack(data: &[u8]) -> Result<(u64, Vec<u8>), serde_json::Error> {
+        let env: MeshEnvelope = serde_json::from_slice(data)?;
+        Ok((env.election_clock, env.payload))
+    }
+}
+
 /// Router that tracks subscriptions and routes inbound messages.
 ///
 /// Also enforces session invalidation: events tagged with an election
@@ -165,6 +195,9 @@ impl GossipRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mesh::election::ElectionMessage;
+    use crate::mesh::node::NodeCapabilities;
+    use std::collections::HashMap;
 
     #[test]
     fn topic_kind_all_returns_six() {
@@ -268,5 +301,73 @@ mod tests {
         assert_eq!(router.active_clock, 3);
         router.invalidate_session(7);
         assert_eq!(router.active_clock, 7);
+    }
+
+    #[test]
+    fn mesh_envelope_pack_unpack_roundtrip() {
+        let payload = b"hello world".to_vec();
+        let envelope = MeshEnvelope {
+            election_clock: 42,
+            payload: payload.clone(),
+        };
+        let bytes = serde_json::to_vec(&envelope).unwrap();
+        let (clock, inner) = MeshEnvelope::unpack(&bytes).unwrap();
+        assert_eq!(clock, 42);
+        assert_eq!(inner, payload);
+    }
+
+    #[test]
+    fn mesh_envelope_pack_with_struct() {
+        let msg = ElectionMessage::Declare {
+            clock: 7,
+            peer_id: "p".to_string(),
+            seniority: 3,
+            commands_seen: 12,
+            capabilities: NodeCapabilities {
+                device_type: "cpu".to_string(),
+                memory_bytes: 8_000_000_000,
+                cpu_threads: 8,
+                can_shard: true,
+                tags: HashMap::new(),
+            },
+        };
+        let packed = MeshEnvelope::pack(7, &msg).unwrap();
+        let (clock, inner) = MeshEnvelope::unpack(&packed).unwrap();
+        assert_eq!(clock, 7);
+        let back: ElectionMessage = serde_json::from_slice(&inner).unwrap();
+        assert_eq!(back, msg);
+    }
+
+    #[test]
+    fn stale_envelope_rejected_by_router() {
+        let mut router = GossipRouter::new("test".to_string());
+        router.invalidate_session(5);
+
+        // Envelope with clock 4 is stale.
+        let stale_env = MeshEnvelope {
+            election_clock: 4,
+            payload: vec![1, 2, 3],
+        };
+        let stale_bytes = serde_json::to_vec(&stale_env).unwrap();
+        let (clock, _) = MeshEnvelope::unpack(&stale_bytes).unwrap();
+        assert!(!router.accept(clock));
+
+        // Envelope with clock 5 is valid.
+        let valid_env = MeshEnvelope {
+            election_clock: 5,
+            payload: vec![1, 2, 3],
+        };
+        let valid_bytes = serde_json::to_vec(&valid_env).unwrap();
+        let (clock, _) = MeshEnvelope::unpack(&valid_bytes).unwrap();
+        assert!(router.accept(clock));
+
+        // Envelope with clock 6 (newer) is also valid.
+        let newer_env = MeshEnvelope {
+            election_clock: 6,
+            payload: vec![1, 2, 3],
+        };
+        let newer_bytes = serde_json::to_vec(&newer_env).unwrap();
+        let (clock, _) = MeshEnvelope::unpack(&newer_bytes).unwrap();
+        assert!(router.accept(clock));
     }
 }

@@ -11,6 +11,6 @@ mod topology;
 
 pub use discovery::{build_swarm, generate_identity, run_mesh_node, DiscoveryEvent, DiscoveryPayload, DiscoveryService, same_namespace};
 pub use election::{BullyElection, ElectionClock, ElectionMessage, ElectionState, Priority, run_election_round};
-pub use gossip::{GossipMessage, GossipRouter, MeshBehaviour, MeshEvent, TopicKind};
+pub use gossip::{GossipMessage, GossipRouter, MeshBehaviour, MeshEvent, MeshEnvelope, TopicKind};
 pub use node::{MeshConfig, MeshNode, NodeCapabilities};
 pub use topology::{AggregateCapabilities, TopologyEdge, TopologyGraph, TopologyNode};
