@@ -78,6 +78,7 @@ pub enum GemmError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttentionError {
+    ZeroHeadDim,
     InvalidQueryLength { expected: usize, actual: usize },
     InvalidKeyLength { expected: usize, actual: usize },
     InvalidValueLength { expected: usize, actual: usize },
@@ -115,6 +116,7 @@ pub enum LinearActivationError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RmsNormError {
+    ZeroDimension,
     InvalidInputLength { expected: usize, actual: usize },
     InvalidWeightLength { expected: usize, actual: usize },
     InvalidOutputLength { expected: usize, actual: usize },
@@ -1392,6 +1394,9 @@ pub fn rms_norm_f32(
     output: &mut [f32],
 ) -> Result<(), RmsNormError> {
     let hidden_dim = output.len();
+    if hidden_dim == 0 {
+        return Err(RmsNormError::ZeroDimension);
+    }
     if input.len() != hidden_dim {
         return Err(RmsNormError::InvalidInputLength {
             expected: hidden_dim,
@@ -1451,6 +1456,9 @@ pub fn rms_norm_gemv_f32_transposed(
             expected: cols,
             actual: output.len(),
         });
+    }
+    if rows == 0 {
+        return Err(RmsNormError::ZeroDimension);
     }
 
     let sum_sq = input.iter().map(|v| v * v).sum::<f32>();
@@ -2373,6 +2381,13 @@ mod tests {
         for (actual, expected) in output.iter().zip(expected.iter()) {
             assert!((actual - expected).abs() < 1e-6);
         }
+    }
+
+    #[test]
+    fn rms_norm_rejects_zero_dimension() {
+        let err = rms_norm_f32(&[], &[], 1e-5, &mut [])
+            .expect_err("zero-length output should fail");
+        assert_eq!(err, RmsNormError::ZeroDimension);
     }
 
     #[test]

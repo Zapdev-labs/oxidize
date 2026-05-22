@@ -359,7 +359,17 @@ impl DFlashDraftModel {
             let qsize = quantized_size(qtype, value_count)
                 .map_err(|e| format!("quantized_size for {}: {:?}", name, e))?;
             let offset = info.absolute_offset as usize;
-            let qdata = &mapped.bytes()[offset..offset + qsize];
+            let end = offset.checked_add(qsize).ok_or_else(|| {
+                format!("tensor {name}: offset overflow (offset={offset}, size={qsize})")
+            })?;
+            let bytes = mapped.bytes();
+            if end > bytes.len() {
+                return Err(format!(
+                    "tensor {name}: data out of bounds (offset={offset}, size={qsize}, file_len={})",
+                    bytes.len()
+                ));
+            }
+            let qdata = &bytes[offset..end];
             let mut f32_data = vec![0.0_f32; value_count];
             dequantize_scalar(qtype, qdata, &mut f32_data)
                 .map_err(|e| format!("dequantize_scalar for {}: {:?}", name, e))?;
@@ -371,7 +381,7 @@ impl DFlashDraftModel {
             let gguf_rows = dims[0] as usize; // hidden output
             let gguf_cols = dims[1] as usize; // target features input
             let transposed = transpose_f32(&data, gguf_rows, gguf_cols);
-            model.fc = F32Weight::from_slice(transposed, gguf_rows, gguf_cols);
+            model.fc = F32Weight::from_slice(transposed, gguf_cols, gguf_rows);
         }
 
         // Load hidden norm.

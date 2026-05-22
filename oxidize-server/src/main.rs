@@ -27,7 +27,7 @@ use oxidize_core::{
     gguf::{GgufMetadataValue, MappedGgufFile},
     inference::{InferenceConfig, InferenceModel},
     layer_wise::LayerWiseModel,
-    model::{Model, Session, Token},
+    model::{Model, ModelError, Session, Token},
     model_loader::{GgufModelLoader, ModelLoader},
     sampling::SamplingConfig,
     tensor::DType,
@@ -161,7 +161,7 @@ impl Model for LoadedModel {
         }
     }
 
-    fn rewind_to(&mut self, consumed_tokens: usize) {
+    fn rewind_to(&mut self, consumed_tokens: usize) -> Result<(), ModelError> {
         match self {
             Self::Inference(model) => model.rewind_to(consumed_tokens),
             Self::LayerWise(model) => model.rewind_to(consumed_tokens),
@@ -909,7 +909,9 @@ fn generate_text_blocking(
         .model
         .lock()
         .map_err(|_| "model lock poisoned".to_owned())?;
-    model.rewind_to(0);
+    model
+        .rewind_to(0)
+        .map_err(|e| format!("failed to reset model KV cache: {e:?}"))?;
     let mut session = Session::new();
     let prompt_tokens = runtime.tokenizer.encode_with_special_tokens(
         &request.prompt,
@@ -1213,6 +1215,9 @@ fn load_model_runtime(args: &Args) -> Result<Option<Arc<ModelRuntime>>, String> 
         .map_err(|error| format!("failed to load model: {error:?}"))?;
     optimize_mapped_model_memory(&mapped, args);
     let metadata = &mapped.parsed().metadata;
+    if args.ctx_size == Some(0) {
+        return Err("invalid --ctx-size: must be greater than 0".into());
+    }
     let config = inference_config_from_gguf(&mapped, args.ctx_size);
     let tokenizer = load_tokenizer_from_gguf_metadata(metadata)
         .map_err(|error| format!("failed to load tokenizer: {error:?}"))?;

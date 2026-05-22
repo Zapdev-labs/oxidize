@@ -37,8 +37,9 @@ pub trait Model {
     fn layer_count(&self) -> usize;
 
     /// Reset KV state to match `consumed_tokens` (exclusive upper bound on positions).
-    fn rewind_to(&mut self, consumed_tokens: usize) {
-        let _ = consumed_tokens;
+    /// Models with a KV cache must override this; the default is a no-op for stateless models.
+    fn rewind_to(&mut self, _consumed_tokens: usize) -> Result<(), ModelError> {
+        Ok(())
     }
 }
 
@@ -55,8 +56,8 @@ impl Model for Box<dyn Model> {
     fn layer_count(&self) -> usize {
         (**self).layer_count()
     }
-    fn rewind_to(&mut self, consumed_tokens: usize) {
-        (**self).rewind_to(consumed_tokens);
+    fn rewind_to(&mut self, consumed_tokens: usize) -> Result<(), ModelError> {
+        (**self).rewind_to(consumed_tokens)
     }
 }
 

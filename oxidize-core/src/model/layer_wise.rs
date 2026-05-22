@@ -858,12 +858,15 @@ impl LayerWiseModel {
 }
 
 impl Model for LayerWiseModel {
-    fn rewind_to(&mut self, consumed_tokens: usize) {
-        if consumed_tokens == 0 {
-            let _ = self.kv_cache.rewind_to(0);
-            return;
-        }
-        let _ = self.kv_cache.rewind_to(consumed_tokens.saturating_sub(1));
+    fn rewind_to(&mut self, consumed_tokens: usize) -> Result<(), ModelError> {
+        let position = if consumed_tokens == 0 {
+            0
+        } else {
+            consumed_tokens.saturating_sub(1)
+        };
+        self.kv_cache
+            .rewind_to(position)
+            .map_err(|e| ModelError::InferenceFailed(format!("{e:?}")))
     }
 
     fn forward(&mut self, tokens: &[Token], session: &mut Session) -> Result<Logits, ModelError> {

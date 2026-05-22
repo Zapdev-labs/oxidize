@@ -275,6 +275,9 @@ pub fn flash_attention_decode_heads_f32(
         });
     }
 
+    if head_dim == 0 {
+        return Err(AttentionError::ZeroHeadDim);
+    }
     if kv_heads == 0 || !num_heads.is_multiple_of(kv_heads) {
         return Err(AttentionError::InvalidHeadGrouping {
             num_heads,

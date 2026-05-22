@@ -837,7 +837,7 @@ impl InferenceModel {
                     q_full.fill(0.0_f32);
                     // Use fused RMSNorm+GEMV for attention Q projection when bias is absent.
                     if layer.attn_q_bias.is_empty() {
-                        rms_norm_gemv_f32_transposed(
+                        if rms_norm_gemv_f32_transposed(
                             x,
                             &layer.attn_norm,
                             cfg.rms_norm_eps,
@@ -847,7 +847,6 @@ impl InferenceModel {
                                     gemv_weight(&layer.attn_q, q_len, h, normed, q_full).map_err(
                                         |e| ModelError::InferenceFailed(format!("attn_q: {:?}", e)),
                                     )?;
-                                    // fallthrough handled below
                                     &[][..]
                                 }
                             },
@@ -855,10 +854,12 @@ impl InferenceModel {
                             q_len,
                             q_full,
                         )
-                        .unwrap_or_else(|_| {
-                            gemv_weight(&layer.attn_q, q_len, h, normed, q_full)
-                                .expect("attn_q fallback");
-                        });
+                        .is_err()
+                        {
+                            gemv_weight(&layer.attn_q, q_len, h, normed, q_full).map_err(|e| {
+                                ModelError::InferenceFailed(format!("attn_q: {:?}", e))
+                            })?;
+                        }
                     } else {
                         gemv_weight(&layer.attn_q, q_len, h, normed, q_full)
                             .map_err(|e| ModelError::InferenceFailed(format!("attn_q: {:?}", e)))?;
@@ -1181,12 +1182,15 @@ impl InferenceModel {
 }
 
 impl Model for InferenceModel {
-    fn rewind_to(&mut self, consumed_tokens: usize) {
-        if consumed_tokens == 0 {
-            let _ = self.kv_cache.rewind_to(0);
-            return;
-        }
-        let _ = self.kv_cache.rewind_to(consumed_tokens.saturating_sub(1));
+    fn rewind_to(&mut self, consumed_tokens: usize) -> Result<(), ModelError> {
+        let position = if consumed_tokens == 0 {
+            0
+        } else {
+            consumed_tokens.saturating_sub(1)
+        };
+        self.kv_cache
+            .rewind_to(position)
+            .map_err(|e| ModelError::InferenceFailed(format!("{e:?}")))
     }
 
     fn forward(&mut self, tokens: &[Token], session: &mut Session) -> Result<Logits, ModelError> {

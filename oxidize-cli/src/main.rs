@@ -713,6 +713,10 @@ fn main() {
                     .or_else(|| metadata_u32(metadata, "llama.embedding_length"))
                     .map(|value| value as usize)
                     .unwrap_or(4096);
+                if args.ctx_size == Some(0) {
+                    eprintln!("invalid --ctx-size: must be greater than 0");
+                    return;
+                }
                 let mut context_size = args.ctx_size.unwrap_or(context_size);
                 if cpu_opt {
                     context_size = context_size.min(2048);

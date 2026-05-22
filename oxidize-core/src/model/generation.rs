@@ -81,6 +81,8 @@ pub struct SpeculativeGenerationStream<'a, T: Model> {
     draft_token_buffer: Vec<Token>,
     /// Buffer for accepted tokens waiting to be emitted.
     emit_buffer: Vec<Token>,
+    /// True when `last_token` was sampled but not yet written to the target KV cache.
+    last_token_pending_kv: bool,
 }
 
 impl<'a, T: Model> SpeculativeGenerationStream<'a, T> {
@@ -113,6 +115,7 @@ impl<'a, T: Model> SpeculativeGenerationStream<'a, T> {
             random: Box::new(random),
             draft_token_buffer: Vec::new(),
             emit_buffer: Vec::new(),
+            last_token_pending_kv: false,
         }
     }
 
@@ -182,20 +185,31 @@ impl<'a, T: Model> SpeculativeGenerationStream<'a, T> {
 
         // 2. Target model verifies draft tokens: replay each prefix from a fixed KV checkpoint.
         let verify_start = session.consumed_tokens();
-        let mut verify_sequence = vec![start_token];
-        verify_sequence.extend_from_slice(&draft_tokens);
+        let verify_sequence = if self.last_token_pending_kv {
+            let mut sequence = vec![start_token];
+            sequence.extend_from_slice(&draft_tokens);
+            sequence
+        } else {
+            draft_tokens.clone()
+        };
 
         let mut target_logits = Vec::with_capacity(draft_tokens.len() + 1);
         for i in 0..=draft_tokens.len() {
-            target_model.rewind_to(verify_start);
+            target_model
+                .rewind_to(verify_start)
+                .map_err(GenerationError::Model)?;
             session.rewind_to(verify_start);
             let logits = target_model
-                .forward(&verify_sequence[..=i], session)
+                .forward(&verify_sequence[..i + 1], session)
                 .map_err(GenerationError::Model)?;
             target_logits.push(logits);
         }
 
-        let mut accepted_sequence = vec![start_token];
+        let mut accepted_sequence = if self.last_token_pending_kv {
+            vec![start_token]
+        } else {
+            Vec::new()
+        };
 
         // 3. Speculative decode: accept/reject draft tokens.
         let randoms: Vec<f32> = (0..=draft_tokens.len())
@@ -212,11 +226,14 @@ impl<'a, T: Model> SpeculativeGenerationStream<'a, T> {
         .map_err(GenerationError::Sampling)?;
 
         accepted_sequence.extend_from_slice(&result.tokens);
-        target_model.rewind_to(verify_start);
+        target_model
+            .rewind_to(verify_start)
+            .map_err(GenerationError::Model)?;
         session.rewind_to(verify_start);
         target_model
             .forward(&accepted_sequence, session)
             .map_err(GenerationError::Model)?;
+        self.last_token_pending_kv = false;
 
         for token in result.tokens {
             self.emit_buffer.push(token);
@@ -289,6 +306,7 @@ impl<T: Model> Stream for SpeculativeGenerationStream<'_, T> {
                 self.target_model = Some(target_model);
                 self.session = Some(session);
                 self.last_token = Some(token);
+                self.last_token_pending_kv = true;
                 return Poll::Ready(self.emit_token(token));
             }
             GenerationState::Decode => {

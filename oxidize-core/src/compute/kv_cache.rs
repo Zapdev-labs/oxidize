@@ -561,15 +561,24 @@ impl KvCache {
     pub fn rewind_to(&mut self, position: usize) -> Result<(), KvCacheError> {
         match self.newest_position {
             None => Ok(()),
-            Some(newest) if position <= newest => {
-                self.newest_position = Some(position);
-                Ok(())
-            }
-            Some(newest) => Err(KvCacheError::PositionEvicted {
+            Some(newest) if position > newest => Err(KvCacheError::PositionEvicted {
                 position,
                 oldest_available: self.oldest_available_position().unwrap_or(0),
                 newest_available: newest,
             }),
+            Some(newest) => {
+                if let Some(oldest) = self.oldest_available_position() {
+                    if position < oldest {
+                        return Err(KvCacheError::PositionEvicted {
+                            position,
+                            oldest_available: oldest,
+                            newest_available: newest,
+                        });
+                    }
+                }
+                self.newest_position = Some(position);
+                Ok(())
+            }
         }
     }
 
@@ -1547,6 +1556,45 @@ mod tests {
                 newest_available: 6
             }
         );
+    }
+
+    #[test]
+    fn rewind_to_rejects_evicted_positions() {
+        let mut cache = KvCache::new(KvCacheConfig {
+            layer_count: 1,
+            context_size: 2,
+            head_count: 1,
+            head_dim: 2,
+            dtype: DType::F32,
+        })
+        .expect("f32 kv cache should be supported");
+
+        cache
+            .set(0, 4, &[1.0, 1.0], &[2.0, 2.0])
+            .expect("write at position 4 should succeed");
+        cache
+            .set(0, 5, &[3.0, 3.0], &[4.0, 4.0])
+            .expect("write at position 5 should succeed");
+        cache
+            .set(0, 6, &[5.0, 5.0], &[6.0, 6.0])
+            .expect("write at position 6 should succeed");
+
+        let err = cache
+            .rewind_to(4)
+            .expect_err("rewind to evicted position should fail");
+        assert_eq!(
+            err,
+            KvCacheError::PositionEvicted {
+                position: 4,
+                oldest_available: 5,
+                newest_available: 6
+            }
+        );
+
+        cache
+            .rewind_to(5)
+            .expect("rewind to oldest available position should succeed");
+        assert_eq!(cache.newest_position, Some(5));
     }
 
     #[test]
