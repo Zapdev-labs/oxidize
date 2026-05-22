@@ -64,6 +64,8 @@ pub mod model_loader;
 pub mod offload;
 #[path = "compute/quantization.rs"]
 pub mod quantization;
+#[path = "paged_attention/mod.rs"]
+pub mod paged_attention;
 #[path = "format/safetensors.rs"]
 pub mod safetensors;
 #[path = "model/sampling.rs"]
