@@ -8,11 +8,21 @@ version.workspace = true
 name = "oxidize-cli"
 path = "src/main.rs"
 
+[[bin]]
+name = "oxidize-bench"
+path = "src/bin/bench.rs"
+
+[[bin]]
+name = "inspect_gguf"
+path = "src/bin/inspect_gguf.rs"
+
 [dependencies]
 clap.workspace = true
 oxidize-core = { path = "../oxidize-core" }
 futures-core = "0.3"
 rand = "0.8"
+rayon = "1"
+tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

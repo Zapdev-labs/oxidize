@@ -1,16 +1,20 @@
-FROM rust:1.87-bookworm AS builder
+FROM rust:1.88-bookworm AS builder
 WORKDIR /workspace
 
 COPY Cargo.toml Cargo.lock ./
 COPY oxidize-core/Cargo.toml oxidize-core/Cargo.toml
+COPY oxidize-core/build.rs oxidize-core/build.rs
 COPY oxidize-server/Cargo.toml oxidize-server/Cargo.toml
 COPY oxidize-cli/Cargo.toml oxidize-cli/Cargo.toml
 COPY oxidize-quantize/Cargo.toml oxidize-quantize/Cargo.toml
+COPY oxidize-py/Cargo.toml oxidize-py/Cargo.toml
 COPY oxidize-core/src oxidize-core/src
 COPY oxidize-core/benches oxidize-core/benches
+COPY oxidize-core/kernels oxidize-core/kernels
 COPY oxidize-server/src oxidize-server/src
 COPY oxidize-cli/src oxidize-cli/src
 COPY oxidize-quantize/src oxidize-quantize/src
+COPY oxidize-py/src oxidize-py/src
 
 RUN cargo build --release --package oxidize-server
 

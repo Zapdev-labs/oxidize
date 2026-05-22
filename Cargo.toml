@@ -1,5 +1,12 @@
 [workspace]
-members = ["oxidize-core", "oxidize-cli", "oxidize-server", "oxidize-quantize", "oxidize-py"]
+members = [
+    "oxidize-core",
+    "oxidize-cli",
+    "oxidize-server",
+    "oxidize-quantize",
+    "oxidize-py",
+    "oxidize-train",
+]
 resolver = "3"
 
 [workspace.package]
@@ -14,7 +21,7 @@ clap = { version = "4", features = ["derive"] }
 pyo3 = "0.28"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time"] }
 tracing = "0.1"
 
 [profile.release]

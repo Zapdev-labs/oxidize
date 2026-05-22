@@ -1,5 +1,6 @@
 use clap::{Parser, ValueEnum};
 use oxidize_core::generation::{GenerationConfig, GenerationStream};
+use oxidize_core::gguf::MappedGgufFile;
 use oxidize_core::inference::{InferenceConfig, InferenceModel};
 use oxidize_core::lora::{AdapterKind, LoraPlan, plan_lora_application};
 use oxidize_core::model::{Model, Session};
@@ -9,6 +10,7 @@ use oxidize_core::offload::{
     plan_multi_gpu_offload,
 };
 use oxidize_core::sampling::SamplingConfig;
+use oxidize_core::tensor::DType;
 use oxidize_core::tokenizer::{EncodeOptions, LoadedTokenizer, load_tokenizer_from_gguf_metadata};
 
 use std::collections::{HashMap, HashSet};
@@ -28,6 +30,8 @@ struct Args {
     prompt: String,
     #[arg(long)]
     model: Option<PathBuf>,
+    #[arg(long, value_enum, default_value_t = Backend::Cpu)]
+    backend: Backend,
     #[arg(long, default_value_t = 0)]
     n_gpu_layers: usize,
     #[arg(long, default_value_t = 1)]
@@ -56,6 +60,26 @@ struct Args {
     layer_cache: usize,
     #[arg(long, default_value_t = false)]
     turboquant: bool,
+    #[arg(long, default_value_t = false)]
+    cpu_optimized: bool,
+    #[arg(long, default_value_t = false)]
+    ram_offload: bool,
+    #[arg(long, default_value_t = false)]
+    mmap_prefetch: bool,
+    #[arg(long, default_value_t = false)]
+    mmap_hugepages: bool,
+    #[arg(long)]
+    ctx_size: Option<usize>,
+    #[arg(long)]
+    threads: Option<usize>,
+    #[arg(long, value_enum, default_value_t = KvCacheDType::F32)]
+    kv_cache_dtype: KvCacheDType,
+    /// Start a distributed mesh node instead of loading a model locally.
+    #[arg(long, default_value_t = false)]
+    mesh: bool,
+    /// Port for libp2p mesh listener (0 = ephemeral). Only used with --mesh.
+    #[arg(long, default_value_t = 0)]
+    mesh_port: u16,
 }
 
 fn greeting(prompt: &str) -> String {
@@ -66,6 +90,47 @@ fn greeting(prompt: &str) -> String {
 enum Profiler {
     Perf,
     Samply,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+enum KvCacheDType {
+    F32,
+    F16,
+    Q8,
+    Q4,
+}
+
+impl KvCacheDType {
+    fn dtype(self) -> DType {
+        match self {
+            Self::F32 => DType::F32,
+            Self::F16 => DType::F16,
+            Self::Q8 => DType::I8,
+            Self::Q4 => DType::I16,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+enum Backend {
+    Cpu,
+    Metal,
+    /// macOS only
+    Mlx,
+    Cuda,
+    Vulkan,
+}
+
+impl Backend {
+    fn to_core_backend(self) -> oxidize_core::backend::Backend {
+        match self {
+            Backend::Cpu => oxidize_core::backend::Backend::Cpu,
+            Backend::Metal => oxidize_core::backend::Backend::Metal,
+            Backend::Mlx => oxidize_core::backend::Backend::Mlx,
+            Backend::Cuda => oxidize_core::backend::Backend::Cuda,
+            Backend::Vulkan => oxidize_core::backend::Backend::Vulkan,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -374,9 +439,9 @@ fn write_generated_response_with_clock<W: Write, F: FnMut() -> Instant>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn generate_with_model<W: Write>(
+fn generate_with_model<W: Write, M: Model>(
     prompt: &str,
-    model: &mut dyn Model,
+    model: &mut M,
     tokenizer: &LoadedTokenizer,
     max_tokens: usize,
     temperature: f32,
@@ -533,8 +598,69 @@ fn run_profiled_inference(profiler: Profiler, output: Option<&PathBuf>) -> io::R
     command.status()
 }
 
+fn optimize_mapped_model_memory(mapped: &MappedGgufFile, args: &Args) {
+    let apply_hints =
+        args.cpu_optimized || args.ram_offload || args.mmap_prefetch || args.mmap_hugepages;
+    if !apply_hints {
+        return;
+    }
+
+    if let Err(error) = mapped.advise_random_access() {
+        eprintln!("mmap random-access hint failed: {error}");
+    }
+    if (args.cpu_optimized || args.ram_offload || args.mmap_prefetch)
+        && let Err(error) = mapped.advise_will_need()
+    {
+        eprintln!("mmap prefetch hint failed: {error}");
+    }
+    if (args.cpu_optimized || args.mmap_hugepages)
+        && let Err(error) = mapped.advise_huge_pages()
+    {
+        eprintln!("mmap hugepage hint failed: {error}");
+    }
+    if args.ram_offload {
+        let started = Instant::now();
+        let checksum = mapped.prefault_pages();
+        println!(
+            "ram offload: prefaulted {:.2} GiB into page cache in {:.2?} (checksum={checksum})",
+            mapped.bytes().len() as f64 / 1024.0 / 1024.0 / 1024.0,
+            started.elapsed()
+        );
+    }
+}
+
 fn main() {
     let args = Args::parse();
+    let (effective_backend, warning) = args.backend.to_core_backend().effective();
+    if let Some(msg) = warning {
+        eprintln!("warning: {msg}");
+    }
+    let backend_label = match effective_backend {
+        oxidize_core::backend::Backend::Mlx => "Apple Silicon",
+        oxidize_core::backend::Backend::Metal => "Metal GPU",
+        oxidize_core::backend::Backend::Cuda => "CUDA GPU",
+        oxidize_core::backend::Backend::Cpu => "CPU",
+        oxidize_core::backend::Backend::Vulkan => "Vulkan GPU",
+    };
+    println!(
+        "backend: {} ({})",
+        effective_backend.as_str(),
+        backend_label
+    );
+    let threads = if let Some(t) = args.threads.filter(|t| *t > 0) {
+        t
+    } else {
+        std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(8)
+    };
+    if let Err(error) = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build_global()
+    {
+        eprintln!("failed to set rayon thread pool: {error}");
+        return;
+    }
     if let Some(profiler) = args.profile
         && !is_profiling_child()
     {
@@ -546,6 +672,13 @@ fn main() {
             }
         }
     }
+    if args.mesh && args.chat {
+        if let Err(error) = run_mesh_chat_mode(args.mesh_port) {
+            eprintln!("mesh chat mode failed: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if args.chat {
         let stdin = io::stdin();
         let mut reader = stdin.lock();
@@ -556,12 +689,20 @@ fn main() {
         }
         return;
     }
-    if let Some(model_path) = args.model {
+    if args.mesh {
+        if let Err(error) = run_mesh_mode(args.mesh_port) {
+            eprintln!("mesh mode failed: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if let Some(model_path) = args.model.as_ref() {
         let loader = GgufModelLoader;
-        match loader.load_with_progress(&model_path, |progress| {
+        match loader.load_with_progress(model_path, |progress| {
             println!("{}", render_load_progress(progress))
         }) {
             Ok(mapped) => {
+                optimize_mapped_model_memory(&mapped, &args);
                 for lora_path in &args.lora_paths {
                     match loader.load(lora_path) {
                         Ok(adapter) => match plan_lora_application(
@@ -625,7 +766,16 @@ fn main() {
                     .or_else(|| metadata_u32(metadata, "gemma4.context_length"))
                     .or_else(|| metadata_u32(metadata, "gemma.context_length"))
                     .or_else(|| metadata_u32(metadata, "llama.embedding_length"))
-                    .unwrap_or(4096) as usize;
+                    .map(|value| value as usize)
+                    .unwrap_or(4096);
+                if args.ctx_size == Some(0) {
+                    eprintln!("invalid --ctx-size: must be greater than 0");
+                    return;
+                }
+                let mut context_size = args.ctx_size.unwrap_or(context_size);
+                if args.cpu_optimized {
+                    context_size = context_size.min(2048);
+                }
                 let layer_count = metadata_u32(metadata, "llama.block_count")
                     .or_else(|| metadata_u32(metadata, "qwen35.block_count"))
                     .or_else(|| metadata_u32(metadata, "qwen2.block_count"))
@@ -712,8 +862,10 @@ fn main() {
                     num_attention_heads,
                     num_key_value_heads,
                     key_value_head_dim,
+                    kv_cache_dtype: args.kv_cache_dtype.dtype(),
                     rms_norm_eps,
                     rope_theta,
+                    ..Default::default()
                 };
                 // Load tokenizer from GGUF metadata
                 let tokenizer = match load_tokenizer_from_gguf_metadata(metadata) {
@@ -727,15 +879,59 @@ fn main() {
                 let stdout = io::stdout();
                 let mut writer = stdout.lock();
                 let mut model: Box<dyn Model> = if args.layer_wise {
-                    match oxidize_core::layer_wise::LayerWiseModel::load_from_gguf(&mapped, config, args.layer_cache) {
+                    match oxidize_core::layer_wise::LayerWiseModel::load_from_gguf(
+                        &mapped,
+                        config,
+                        args.layer_cache,
+                    ) {
                         Ok(m) => Box::new(m),
                         Err(error) => {
                             eprintln!("failed to load layer-wise model: {error}");
                             return;
                         }
                     }
+                } else if effective_backend == oxidize_core::backend::Backend::Mlx {
+                    #[cfg(target_os = "macos")]
+                    {
+                        match oxidize_core::mlx_inference::MlxInferenceModel::load_from_gguf(
+                            &mapped, config,
+                        ) {
+                            Ok(m) => {
+                                println!("MLX backend: loaded model into unified memory");
+                                Box::new(m)
+                            }
+                            Err(error) => {
+                                eprintln!(
+                                    "MLX initialization failed: {error}; falling back to CPU"
+                                );
+                                let use_mmap = args.cpu_optimized;
+                                match InferenceModel::load_from_gguf(&mapped, config, use_mmap) {
+                                    Ok(m) => Box::new(m),
+                                    Err(error) => {
+                                        eprintln!("failed to load model weights: {error}");
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        eprintln!(
+                            "MLX backend requested but unavailable on Linux; falling back to CPU"
+                        );
+                        let use_mmap = args.cpu_optimized;
+                        match InferenceModel::load_from_gguf(&mapped, config, use_mmap) {
+                            Ok(m) => Box::new(m),
+                            Err(error) => {
+                                eprintln!("failed to load model weights: {error}");
+                                return;
+                            }
+                        }
+                    }
                 } else {
-                    match InferenceModel::load_from_gguf(&mapped, config) {
+                    let use_mmap = args.cpu_optimized;
+                    match InferenceModel::load_from_gguf(&mapped, config, use_mmap) {
                         Ok(m) => Box::new(m),
                         Err(error) => {
                             eprintln!("failed to load model weights: {error}");
@@ -823,6 +1019,177 @@ fn metadata_f32(
         Some(GgufMetadataValue::Uint64(value)) => Some(*value as f32),
         _ => None,
     }
+}
+
+/// Run the CLI in distributed mesh node mode.
+/// Delegates to `oxidize_core::mesh::run_mesh_node` which builds the
+/// libp2p swarm, starts mDNS, subscribes to all 6 GossipSub topics, and
+/// drives the event loop.
+fn run_mesh_mode(mesh_port: u16) -> io::Result<()> {
+    let rt = tokio::runtime::Runtime::new()
+        .map_err(|e| io::Error::other(format!("tokio runtime: {e}")))?;
+    rt.block_on(async {
+        oxidize_core::mesh::run_mesh_node(mesh_port, None, None, None)
+            .await
+            .map_err(|e| io::Error::other(format!("mesh node error: {e}")))
+    })
+}
+
+/// Run the CLI in mesh + chat combined mode.
+///
+/// Starts a background mesh node, waits for leader election, then opens an
+/// interactive REPL.  Each user prompt is broadcast to the mesh master via
+/// GossipSub `COMMANDS` and response tokens stream back through the mesh data
+/// plane (real or local fallback) and are printed token-by-token.
+fn run_mesh_chat_mode(mesh_port: u16) -> io::Result<()> {
+    use oxidize_core::mesh::{MeshChatPrompt, MeshChatToken};
+
+    let rt = tokio::runtime::Runtime::new()
+        .map_err(|e| io::Error::other(format!("tokio runtime: {e}")))?;
+
+    let (prompt_tx, prompt_rx) = tokio::sync::mpsc::unbounded_channel::<MeshChatPrompt>();
+    let (token_tx, mut token_rx) = tokio::sync::mpsc::unbounded_channel::<MeshChatToken>();
+
+    // Spawn the mesh node in a background task within the same runtime.
+    let mesh_handle = rt.spawn(async move {
+        let result =
+            oxidize_core::mesh::run_mesh_node(mesh_port, None, Some(prompt_rx), Some(token_tx))
+                .await;
+        if let Err(ref e) = result {
+            eprintln!("mesh node error: {e}");
+        }
+        result
+    });
+
+    // Give the mesh node a moment to start up and discover peers.
+    rt.block_on(async {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    });
+
+    let stdin = io::stdin();
+    let mut reader = stdin.lock();
+    let stdout = io::stdout();
+    let mut writer = stdout.lock();
+
+    writeln!(writer, "oxidize-cli mesh chat mode. type 'exit' to quit.")?;
+    let mut history = ConversationHistory::default();
+    let mut prompt_cache = PromptCache::default();
+    let mut request_counter: usize = 0;
+
+    loop {
+        write!(writer, "> ")?;
+        writer.flush()?;
+
+        let Some(input) = read_chat_prompt(&mut reader, &mut writer)? else {
+            break;
+        };
+
+        let prompt = input.trim();
+        if prompt.eq_ignore_ascii_case("exit") || prompt.eq_ignore_ascii_case("quit") {
+            writeln!(writer, "bye")?;
+            break;
+        }
+        if prompt.is_empty() {
+            continue;
+        }
+        if prompt.eq_ignore_ascii_case("/history") {
+            writeln!(writer, "{}", history.render())?;
+            continue;
+        }
+        if prompt.eq_ignore_ascii_case("/clear") {
+            history.clear();
+            writeln!(writer, "conversation history cleared")?;
+            continue;
+        }
+
+        let cached = prompt_cache.get(prompt);
+        let response = if let Some(cached) = cached {
+            writeln!(writer, "{cached}")?;
+            writeln!(
+                writer,
+                "generation stats: tokens=0 speed=0.00 tok/s (cache hit)"
+            )?;
+            cached.to_owned()
+        } else {
+            request_counter += 1;
+            let request_id = format!("cli-{}", request_counter);
+
+            // Broadcast the prompt to the mesh via the chat engine.
+            let mesh_prompt = MeshChatPrompt {
+                request_id: request_id.clone(),
+                prompt: prompt.to_string(),
+                max_tokens: 8, // short deterministic tokens for the demo
+                temperature: 0.0,
+                top_p: 0.0,
+            };
+            if prompt_tx.send(mesh_prompt).is_err() {
+                writeln!(writer, "mesh prompt channel closed")?;
+                break;
+            }
+
+            // Drain streaming tokens from the mesh data plane.
+            let mut token_count = 0usize;
+            let mut response_parts = Vec::new();
+            let start = Instant::now();
+
+            // Give the master a moment to receive the prompt and start generating.
+            std::thread::sleep(Duration::from_millis(100));
+
+            loop {
+                match token_rx.try_recv() {
+                    Ok(token) => {
+                        if token.request_id == request_id {
+                            write!(writer, "{}", token.token)?;
+                            writer.flush()?;
+                            token_count += 1;
+                            response_parts.push(token.token);
+                            if token.is_final {
+                                writeln!(writer)?;
+                                break;
+                            } else {
+                                write!(writer, " ")?;
+                            }
+                            // Tiny artificial pacing so the TUI shows progress.
+                            std::thread::sleep(Duration::from_millis(20));
+                        }
+                    }
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                        // Poll briefly then give up if nothing arrives.
+                        std::thread::sleep(Duration::from_millis(50));
+                        if start.elapsed() > Duration::from_secs(5) {
+                            // Timeout waiting for tokens.
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                        writeln!(writer, "mesh token channel disconnected")?;
+                        break;
+                    }
+                }
+            }
+
+            let elapsed = start.elapsed().as_secs_f64();
+            let speed = if elapsed > 0.0 {
+                token_count as f64 / elapsed
+            } else {
+                0.0
+            };
+            writeln!(
+                writer,
+                "generation stats: tokens={token_count} speed={speed:.2} tok/s (mesh)"
+            )?;
+            let response = response_parts.join(" ");
+            prompt_cache.insert(prompt, &response);
+            response
+        };
+
+        history.add_turn(prompt, &response);
+    }
+
+    // Abort the mesh node when chat exits.
+    mesh_handle.abort();
+    let _ = rt.block_on(mesh_handle);
+    Ok(())
 }
 
 #[cfg(test)]

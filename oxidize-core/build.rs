@@ -5,8 +5,11 @@ fn main() {
     println!("cargo:rustc-check-cfg=cfg(cuda_available)");
     println!("cargo:rustc-check-cfg=cfg(metal_available)");
     println!("cargo:rustc-check-cfg=cfg(webgpu_available)");
+    println!("cargo:rustc-check-cfg=cfg(vulkan_available)");
+    println!("cargo:rustc-check-cfg=cfg(mlx_available)");
     println!("cargo:rerun-if-env-changed=CUDA_HOME");
     println!("cargo:rerun-if-env-changed=CUDA_PATH");
+    println!("cargo:rerun-if-env-changed=VULKAN_SDK");
 
     if let Some(cuda_root) = detect_cuda_root() {
         println!("cargo:rustc-cfg=cuda_available");
@@ -26,14 +29,21 @@ fn main() {
     if detect_webgpu_available() {
         println!("cargo:rustc-cfg=webgpu_available");
     }
+
+    if detect_vulkan_available() {
+        println!("cargo:rustc-cfg=vulkan_available");
+    }
+
+    if detect_mlx_available() {
+        println!("cargo:rustc-cfg=mlx_available");
+    }
 }
 
 fn detect_cuda_root() -> Option<PathBuf> {
     for key in ["CUDA_HOME", "CUDA_PATH"] {
-        if let Some(path) = env::var_os(key).map(PathBuf::from)
-            && path.is_dir()
-        {
-            return Some(path);
+        match env::var_os(key).map(PathBuf::from) {
+            Some(path) if path.is_dir() => return Some(path),
+            _ => {}
         }
     }
 
@@ -57,4 +67,75 @@ fn detect_metal_available() -> bool {
 
 fn detect_webgpu_available() -> bool {
     env::var_os("CARGO_FEATURE_WEBGPU").is_some()
+}
+
+fn detect_vulkan_available() -> bool {
+    // The vulkan feature must be enabled for us to even check
+    if env::var_os("CARGO_FEATURE_VULKAN").is_none() {
+        return false;
+    }
+
+    // Check for VULKAN_SDK environment variable
+    if env::var_os("VULKAN_SDK").is_some() {
+        return true;
+    }
+
+    // Check for Vulkan loader on the system
+    #[cfg(target_os = "linux")]
+    {
+        for path in [
+            "/usr/lib/x86_64-linux-gnu/libvulkan.so.1",
+            "/usr/lib64/libvulkan.so.1",
+            "/usr/lib/libvulkan.so.1",
+            "/lib/x86_64-linux-gnu/libvulkan.so.1",
+            "/lib64/libvulkan.so.1",
+        ] {
+            if Path::new(path).exists() {
+                return true;
+            }
+        }
+        // Also check via pkg-config or ldconfig fallback
+        if env::var_os("LD_LIBRARY_PATH").is_some() {
+            // If LD_LIBRARY_PATH is set, user may have a custom Vulkan loader;
+            // be optimistic when the feature is enabled.
+            return true;
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        for path in [
+            "C:\\Windows\\System32\\vulkan-1.dll",
+            "C:\\Windows\\SysWOW64\\vulkan-1.dll",
+        ] {
+            if Path::new(path).exists() {
+                return true;
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        for path in [
+            "/usr/local/lib/libvulkan.dylib",
+            "/opt/homebrew/lib/libvulkan.dylib",
+            "/usr/lib/libvulkan.dylib",
+        ] {
+            if Path::new(path).exists() {
+                return true;
+            }
+        }
+        // Check for MoltenVK
+        if Path::new("/usr/local/lib/libMoltenVK.dylib").exists()
+            || Path::new("/opt/homebrew/lib/libMoltenVK.dylib").exists()
+        {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn detect_mlx_available() -> bool {
+    detect_metal_available()
 }

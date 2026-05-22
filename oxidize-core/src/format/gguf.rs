@@ -1,8 +1,9 @@
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::Path;
+use std::sync::Arc;
 
-use memmap2::Mmap;
+use memmap2::{Advice, Mmap};
 use thiserror::Error;
 
 const GGUF_MAGIC: &[u8; 4] = b"GGUF";
@@ -18,10 +19,16 @@ pub struct GgufFile {
     pub data_section_start: u64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MappedGgufFile {
-    mmap: Mmap,
+    mmap: Arc<Mmap>,
     parsed: GgufFile,
+}
+
+impl PartialEq for MappedGgufFile {
+    fn eq(&self, other: &Self) -> bool {
+        self.parsed == other.parsed
+    }
 }
 
 impl MappedGgufFile {
@@ -31,6 +38,56 @@ impl MappedGgufFile {
 
     pub fn bytes(&self) -> &[u8] {
         &self.mmap
+    }
+
+    pub fn mmap(&self) -> Arc<Mmap> {
+        self.mmap.clone()
+    }
+
+    #[cfg(test)]
+    pub fn from_parsed_for_test(parsed: GgufFile) -> Self {
+        Self {
+            mmap: std::sync::Arc::new(
+                memmap2::MmapOptions::new()
+                    .len(1)
+                    .map_anon()
+                    .unwrap()
+                    .make_read_only()
+                    .unwrap(),
+            ),
+            parsed,
+        }
+    }
+
+    pub fn advise_random_access(&self) -> std::io::Result<()> {
+        self.mmap.advise(Advice::Random)
+    }
+
+    pub fn advise_will_need(&self) -> std::io::Result<()> {
+        self.mmap.advise(Advice::WillNeed)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn advise_huge_pages(&self) -> std::io::Result<()> {
+        self.mmap.advise(Advice::HugePage)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn advise_huge_pages(&self) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    pub fn prefault_pages(&self) -> u8 {
+        let bytes = self.bytes();
+        let mut checksum = 0_u8;
+        for offset in (0..bytes.len()).step_by(4096) {
+            // SAFETY: offset is in-bounds by construction and this read only faults pages in.
+            checksum ^= unsafe { std::ptr::read_volatile(bytes.as_ptr().add(offset)) };
+        }
+        if let Some(last) = bytes.last() {
+            checksum ^= *last;
+        }
+        checksum
     }
 
     pub fn mapped_tensor_infos(&self) -> Vec<GgufTensorInfo> {
@@ -252,7 +309,10 @@ pub fn load_mapped_gguf<P: AsRef<Path>>(path: P) -> Result<MappedGgufFile, GgufP
     // parsed metadata is exposed from MappedGgufFile.
     let mmap = unsafe { Mmap::map(&file)? };
     let parsed = parse_gguf(&mmap)?;
-    Ok(MappedGgufFile { mmap, parsed })
+    Ok(MappedGgufFile {
+        mmap: Arc::new(mmap),
+        parsed,
+    })
 }
 
 pub fn parse_gguf(bytes: &[u8]) -> Result<GgufFile, GgufParseError> {
@@ -366,7 +426,9 @@ fn detect_architecture_from_metadata_keys(
         };
         let architecture = match namespace {
             "llama" | "mistral" | "mixtral" | "qwen" | "qwen2" | "qwen2moe" | "qwen35"
-            | "gemma" | "phi" | "falcon" | "gpt2" | "gptj" | "gptneox" => Some(namespace),
+            | "gemma" | "phi" | "falcon" | "gpt2" | "gptj" | "gptneox" | "dflash-draft" => {
+                Some(namespace)
+            }
             _ => None,
         };
         if architecture.is_some() {

@@ -5,6 +5,7 @@ use oxidize_core::benchmark_suite::{
     benchmark_memory_delta_bytes, benchmark_text_perplexity, loader_vs_llama_cpp_cases,
     perplexity_dataset_cases,
 };
+use oxidize_core::flash_attention::{flash_attention_decode_f32, flash_attention_prefill_f32};
 use oxidize_core::model_loader::{GgufModelLoader, ModelLoader, load_gguf_llama_cpp_baseline};
 
 fn benchmark_loader_against_llama_cpp_baseline(c: &mut Criterion) {
@@ -80,10 +81,77 @@ fn benchmark_loader_memory_usage(c: &mut Criterion) {
     }
 }
 
+fn benchmark_flash_attention_decode(c: &mut Criterion) {
+    let head_dim = 128;
+    let kv_heads = 8;
+    let kv_len = kv_heads * head_dim;
+    for seq_len in [64, 256, 512, 1024, 2048] {
+        let query: Vec<f32> = (0..head_dim).map(|i| (i as f32 * 0.01).sin()).collect();
+        let key_layer: Vec<f32> = (0..seq_len * kv_len)
+            .map(|i| ((i as f32 * 0.007).cos() * 0.5) - 0.1)
+            .collect();
+        let value_layer: Vec<f32> = (0..seq_len * kv_len)
+            .map(|i| ((i as f32 * 0.013).sin() * 0.4) + 0.05)
+            .collect();
+        let mut output = vec![0.0_f32; head_dim];
+
+        c.bench_function(&format!("flash_attention/decode/{seq_len}"), |b| {
+            b.iter(|| {
+                flash_attention_decode_f32(
+                    black_box(&query),
+                    black_box(&key_layer),
+                    black_box(&value_layer),
+                    seq_len,
+                    head_dim,
+                    kv_len,
+                    0,
+                    &mut output,
+                )
+                .expect("decode should succeed");
+                black_box(&output);
+            });
+        });
+    }
+}
+
+fn benchmark_flash_attention_prefill(c: &mut Criterion) {
+    let head_dim = 128;
+    for (q_seq, kv_seq) in [(64, 64), (128, 128), (256, 256), (512, 512)] {
+        let query: Vec<f32> = (0..q_seq * head_dim)
+            .map(|i| (i as f32 * 0.01).sin())
+            .collect();
+        let key: Vec<f32> = (0..kv_seq * head_dim)
+            .map(|i| (i as f32 * 0.007).cos())
+            .collect();
+        let value: Vec<f32> = (0..kv_seq * head_dim)
+            .map(|i| (i as f32 * 0.013).sin())
+            .collect();
+        let mut output = vec![0.0_f32; q_seq * head_dim];
+
+        c.bench_function(&format!("flash_attention/prefill/{q_seq}x{kv_seq}"), |b| {
+            b.iter(|| {
+                flash_attention_prefill_f32(
+                    black_box(&query),
+                    black_box(&key),
+                    black_box(&value),
+                    q_seq,
+                    kv_seq,
+                    head_dim,
+                    &mut output,
+                )
+                .expect("prefill should succeed");
+                black_box(&output);
+            });
+        });
+    }
+}
+
 criterion_group!(
     benches,
     benchmark_loader_against_llama_cpp_baseline,
     benchmark_perplexity_on_standard_datasets,
-    benchmark_loader_memory_usage
+    benchmark_loader_memory_usage,
+    benchmark_flash_attention_decode,
+    benchmark_flash_attention_prefill,
 );
 criterion_main!(benches);

@@ -760,10 +760,7 @@ impl BpeTokenizer {
 /// All other bytes are mapped to code points starting at 256 in insertion order.
 fn gpt2_char_to_byte(ch: char) -> Option<u8> {
     let cp = ch as u32;
-    if (33..=126).contains(&cp)
-        || (161..=172).contains(&cp)
-        || (174..=255).contains(&cp)
-    {
+    if (33..=126).contains(&cp) || (161..=172).contains(&cp) || (174..=255).contains(&cp) {
         return Some(cp as u8);
     }
     // Build the inverse of the extended mapping on-the-fly.
@@ -771,9 +768,7 @@ fn gpt2_char_to_byte(ch: char) -> Option<u8> {
     let missing: Vec<u8> = (0u8..=255)
         .filter(|b| {
             let b = *b as u32;
-            !((33..=126).contains(&b)
-                || (161..=172).contains(&b)
-                || (174..=255).contains(&b))
+            !((33..=126).contains(&b) || (161..=172).contains(&b) || (174..=255).contains(&b))
         })
         .collect();
     missing.get((cp.wrapping_sub(256)) as usize).copied()

@@ -9,11 +9,11 @@ use std::arch::x86_64::*;
 const QK8_0: usize = 32;
 const BLOCK_Q8_0_SIZE: usize = 2 + QK8_0;
 const QK_K: usize = 256;
-const BLOCK_Q4_K_SIZE: usize = 2 + 128;
-const BLOCK_Q6_K_SIZE: usize = 2 + 192;
+const BLOCK_Q4_K_SIZE: usize = 2 * std::mem::size_of::<u16>() + 12 + QK_K / 2;
+const BLOCK_Q6_K_SIZE: usize = std::mem::size_of::<u16>() + QK_K / 16 + 3 * QK_K / 4;
 const FLASH_ATTENTION_BLOCK_TOKENS: usize = 64;
 const PARALLEL_GEMV_MIN_OPS: usize = 1 << 20;
-const TRANSPOSED_GEMV_COL_CHUNK: usize = QK_K * 16;
+const TRANSPOSED_GEMV_COL_CHUNK: usize = QK_K;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum DType {
@@ -23,6 +23,20 @@ pub enum DType {
     I16,
     I32,
     I64,
+}
+
+impl DType {
+    /// Return the size of a single element in bytes.
+    pub fn size_in_bytes(&self) -> usize {
+        match self {
+            DType::F32 => 4,
+            DType::F16 => 2,
+            DType::I8 => 1,
+            DType::I16 => 2,
+            DType::I32 => 4,
+            DType::I64 => 8,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,10 +92,13 @@ pub enum GemmError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttentionError {
+    ZeroHeadDim,
     InvalidQueryLength { expected: usize, actual: usize },
     InvalidKeyLength { expected: usize, actual: usize },
     InvalidValueLength { expected: usize, actual: usize },
     InvalidOutputLength { expected: usize, actual: usize },
+    InvalidKvHead { kv_head: usize, kv_heads: usize },
+    InvalidHeadGrouping { num_heads: usize, kv_heads: usize },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,6 +130,7 @@ pub enum LinearActivationError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RmsNormError {
+    ZeroDimension,
     InvalidInputLength { expected: usize, actual: usize },
     InvalidWeightLength { expected: usize, actual: usize },
     InvalidOutputLength { expected: usize, actual: usize },
@@ -420,8 +438,8 @@ fn gemv_qk_f32_transposed(
     bits: usize,
     zero_point: f32,
 ) -> Result<(), GemvError> {
-    let blocks_per_row = rows / QK_K;
-    let expected_matrix_len = cols * blocks_per_row * block_size;
+    let blocks_per_row = cols / QK_K;
+    let expected_matrix_len = rows * blocks_per_row * block_size;
     if quantized_matrix.len() != expected_matrix_len {
         return Err(GemvError::InvalidMatrixLength {
             expected: expected_matrix_len,
@@ -442,14 +460,15 @@ fn gemv_qk_f32_transposed(
     }
 
     if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
-        let use_q4_avx2 = bits == 4 && q4_avx2_available();
+        let use_q4_avx512 = bits == 4 && q4_avx512_available();
+        let use_q4_avx2 = bits == 4 && !use_q4_avx512 && q4_avx2_available();
         output
             .par_chunks_mut(TRANSPOSED_GEMV_COL_CHUNK)
             .enumerate()
             .for_each(|(chunk_idx, out_chunk)| {
                 let col_start = chunk_idx * TRANSPOSED_GEMV_COL_CHUNK;
                 let block_start = col_start / QK_K;
-                let block_end = (col_start + out_chunk.len()).div_ceil(QK_K);
+                let block_end = ((col_start + out_chunk.len()).div_ceil(QK_K)).min(blocks_per_row);
                 out_chunk.fill(0.0);
                 for (row_idx, &vi) in vector.iter().enumerate().take(rows) {
                     if vi == 0.0 {
@@ -467,7 +486,13 @@ fn gemv_qk_f32_transposed(
                         let block_output_len = (out_chunk.len() - local_col).min(QK_K);
                         let out_block = &mut out_chunk[local_col..local_col + block_output_len];
                         if bits == 4 && zero_point == 8.0 && block_output_len == QK_K {
-                            accumulate_q4_block(&block[2..], factor, out_block, use_q4_avx2);
+                            accumulate_q4_block(
+                                &block[2..],
+                                factor,
+                                out_block,
+                                use_q4_avx512,
+                                use_q4_avx2,
+                            );
                         } else {
                             let bitstream = &block[2..];
                             for (idx, out) in out_block.iter_mut().enumerate() {
@@ -514,9 +539,35 @@ fn q4_avx2_available() -> bool {
 }
 
 #[inline]
-fn accumulate_q4_block(bitstream: &[u8], factor: f32, output: &mut [f32], use_avx2: bool) {
+fn q4_avx512_available() -> bool {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512bw")
+    }
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+    {
+        false
+    }
+}
+
+#[inline]
+fn accumulate_q4_block(
+    bitstream: &[u8],
+    factor: f32,
+    output: &mut [f32],
+    use_avx512: bool,
+    use_avx2: bool,
+) {
     debug_assert!(bitstream.len() >= QK_K / 2);
     debug_assert!(output.len() >= QK_K);
+
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    if use_avx512 {
+        unsafe {
+            accumulate_q4_block_avx512(bitstream.as_ptr(), factor, output.as_mut_ptr());
+        }
+        return;
+    }
 
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     if use_avx2 {
@@ -530,6 +581,32 @@ fn accumulate_q4_block(bitstream: &[u8], factor: f32, output: &mut [f32], use_av
         let out_idx = pair_idx * 2;
         output[out_idx] += ((packed & 0x0F) as f32 - 8.0) * factor;
         output[out_idx + 1] += ((packed >> 4) as f32 - 8.0) * factor;
+    }
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f,avx512bw")]
+unsafe fn accumulate_q4_block_avx512(bitstream: *const u8, factor: f32, output: *mut f32) {
+    let mask = _mm_set1_epi8(0x0F);
+    let zero_point = _mm_set1_epi8(8);
+    let factor = _mm512_set1_ps(factor);
+
+    for byte_offset in (0..QK_K / 2).step_by(16) {
+        let packed = unsafe { _mm_loadu_si128(bitstream.add(byte_offset).cast::<__m128i>()) };
+        let low = _mm_and_si128(packed, mask);
+        let high = _mm_and_si128(_mm_srli_epi16(packed, 4), mask);
+        let interleaved_lo = _mm_sub_epi8(_mm_unpacklo_epi8(low, high), zero_point);
+        let interleaved_hi = _mm_sub_epi8(_mm_unpackhi_epi8(low, high), zero_point);
+
+        let groups = [interleaved_lo, interleaved_hi];
+        for (group_idx, group) in groups.into_iter().enumerate() {
+            let q_i32 = _mm512_cvtepi8_epi32(group);
+            let q_f32 = _mm512_cvtepi32_ps(q_i32);
+            let out_ptr = unsafe { output.add(byte_offset * 2 + group_idx * 16) };
+            let current = unsafe { _mm512_loadu_ps(out_ptr) };
+            let updated = _mm512_add_ps(current, _mm512_mul_ps(q_f32, factor));
+            unsafe { _mm512_storeu_ps(out_ptr, updated) };
+        }
     }
 }
 
@@ -599,7 +676,7 @@ fn gemv_q8_0_f32_transposed(
             .for_each(|(chunk_idx, out_chunk)| {
                 let col_start = chunk_idx * TRANSPOSED_GEMV_COL_CHUNK;
                 let block_start = col_start / QK8_0;
-                let block_end = (col_start + out_chunk.len()).div_ceil(QK8_0);
+                let block_end = ((col_start + out_chunk.len()).div_ceil(QK8_0)).min(blocks_per_row);
                 out_chunk.fill(0.0);
                 for (row_idx, &vi) in vector.iter().enumerate().take(rows) {
                     if vi == 0.0 {
@@ -1331,6 +1408,9 @@ pub fn rms_norm_f32(
     output: &mut [f32],
 ) -> Result<(), RmsNormError> {
     let hidden_dim = output.len();
+    if hidden_dim == 0 {
+        return Err(RmsNormError::ZeroDimension);
+    }
     if input.len() != hidden_dim {
         return Err(RmsNormError::InvalidInputLength {
             expected: hidden_dim,
@@ -1350,6 +1430,62 @@ pub fn rms_norm_f32(
 
     for ((value, scale), out) in input.iter().zip(weight.iter()).zip(output.iter_mut()) {
         *out = value * inv_rms * scale;
+    }
+    Ok(())
+}
+
+/// Fused RMS-normalization + transposed GEMV for the attention Q projection.
+/// Computes RMSNorm of `input`, then performs transposed GEMV using the
+/// normalized vector as the GEMV input.
+#[allow(clippy::too_many_arguments)]
+pub fn rms_norm_gemv_f32_transposed(
+    input: &[f32],
+    weight: &[f32],
+    eps: f32,
+    matrix: &[f32],
+    rows: usize,
+    cols: usize,
+    output: &mut [f32],
+) -> Result<(), RmsNormError> {
+    if input.len() != rows {
+        return Err(RmsNormError::InvalidInputLength {
+            expected: rows,
+            actual: input.len(),
+        });
+    }
+    if weight.len() != rows {
+        return Err(RmsNormError::InvalidWeightLength {
+            expected: rows,
+            actual: weight.len(),
+        });
+    }
+    if matrix.len() != rows * cols {
+        return Err(RmsNormError::InvalidOutputLength {
+            expected: rows * cols,
+            actual: matrix.len(),
+        });
+    }
+    if output.len() != cols {
+        return Err(RmsNormError::InvalidOutputLength {
+            expected: cols,
+            actual: output.len(),
+        });
+    }
+    if rows == 0 {
+        return Err(RmsNormError::ZeroDimension);
+    }
+
+    let sum_sq = input.iter().map(|v| v * v).sum::<f32>();
+    let mean_sq = sum_sq / rows as f32;
+    let inv_rms = 1.0 / (mean_sq + eps).sqrt();
+
+    output.fill(0.0);
+    for (i, (value, scale)) in input.iter().zip(weight.iter()).enumerate() {
+        let scaled = value * inv_rms * scale;
+        let row = &matrix[i * cols..(i + 1) * cols];
+        for (j, &mat_val) in row.iter().enumerate() {
+            output[j] += mat_val * scaled;
+        }
     }
     Ok(())
 }
@@ -2259,6 +2395,13 @@ mod tests {
         for (actual, expected) in output.iter().zip(expected.iter()) {
             assert!((actual - expected).abs() < 1e-6);
         }
+    }
+
+    #[test]
+    fn rms_norm_rejects_zero_dimension() {
+        let err =
+            rms_norm_f32(&[], &[], 1e-5, &mut []).expect_err("zero-length output should fail");
+        assert_eq!(err, RmsNormError::ZeroDimension);
     }
 
     #[test]

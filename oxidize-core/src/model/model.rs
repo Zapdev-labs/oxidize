@@ -15,6 +15,10 @@ impl Session {
     pub fn record_tokens(&mut self, token_count: usize) {
         self.consumed_tokens = self.consumed_tokens.saturating_add(token_count);
     }
+
+    pub fn rewind_to(&mut self, consumed_tokens: usize) {
+        self.consumed_tokens = consumed_tokens;
+    }
 }
 
 impl Default for Session {
@@ -31,6 +35,30 @@ pub trait Model {
     fn vocab_size(&self) -> usize;
     fn context_size(&self) -> usize;
     fn layer_count(&self) -> usize;
+
+    /// Reset KV state to match `consumed_tokens` (exclusive upper bound on positions).
+    /// Models with a KV cache must override this; the default is a no-op for stateless models.
+    fn rewind_to(&mut self, _consumed_tokens: usize) -> Result<(), ModelError> {
+        Ok(())
+    }
+}
+
+impl Model for Box<dyn Model> {
+    fn forward(&mut self, tokens: &[Token], session: &mut Session) -> Result<Logits, ModelError> {
+        (**self).forward(tokens, session)
+    }
+    fn vocab_size(&self) -> usize {
+        (**self).vocab_size()
+    }
+    fn context_size(&self) -> usize {
+        (**self).context_size()
+    }
+    fn layer_count(&self) -> usize {
+        (**self).layer_count()
+    }
+    fn rewind_to(&mut self, consumed_tokens: usize) -> Result<(), ModelError> {
+        (**self).rewind_to(consumed_tokens)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

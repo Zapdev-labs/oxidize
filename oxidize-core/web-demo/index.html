@@ -3,19 +3,13 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Oxidize WASM Demo</title>
+    <title>Oxidize Web Demo</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
     <main class="app">
-      <h1>Oxidize WASM Demo</h1>
-      <p class="description">
-        Loads the generated WASM module and runs worker-backed inference in the browser.
-      </p>
-      <label for="prompt">Prompt tokens (comma-separated integers)</label>
-      <input id="prompt" value="1,2,3" />
-      <button id="run-button" type="button">Run Inference</button>
-      <pre id="output" aria-live="polite">Idle</pre>
+      <h1>Oxidize Web Demo</h1>
+      <pre id="output">Loading...</pre>
     </main>
     <script type="module" src="./app.js"></script>
   </body>

@@ -24,10 +24,25 @@ use wasm_bindgen::prelude::*;
 
 pub use futures_core::Stream;
 
+#[path = "backend.rs"]
+pub mod backend;
+pub use backend::ComputeBackend;
+#[path = "model/advanced_features.rs"]
+pub mod advanced_features;
 #[path = "util/benchmark_suite.rs"]
 pub mod benchmark_suite;
+#[path = "format/conversion.rs"]
+pub mod conversion;
+#[path = "compute/cpu_kernels.rs"]
+pub mod cpu_kernels;
+#[path = "validation/cross_validation.rs"]
+pub mod cross_validation;
 #[path = "backends/cuda.rs"]
 pub mod cuda;
+#[path = "model/dflash.rs"]
+pub mod dflash;
+#[path = "compute/flash_attention.rs"]
+pub mod flash_attention;
 #[path = "model/generation.rs"]
 pub mod generation;
 #[path = "format/gguf.rs"]
@@ -42,26 +57,45 @@ pub mod layer_wise;
 pub mod llama;
 #[path = "model/lora.rs"]
 pub mod lora;
+#[path = "mesh/mod.rs"]
+pub mod mesh;
 #[path = "backends/metal.rs"]
 pub mod metal;
+#[cfg(target_os = "macos")]
+#[path = "backends/mlx.rs"]
+pub mod mlx;
+#[path = "model/mlx_inference.rs"]
+pub mod mlx_inference;
 #[path = "model/model.rs"]
 pub mod model;
 #[path = "model/loader.rs"]
 pub mod model_loader;
 #[path = "model/offload.rs"]
 pub mod offload;
+#[path = "paged_attention/mod.rs"]
+pub mod paged_attention;
 #[path = "compute/quantization.rs"]
 pub mod quantization;
+#[path = "format/safetensors.rs"]
+pub mod safetensors;
 #[path = "model/sampling.rs"]
 pub mod sampling;
 #[path = "compute/simd.rs"]
 pub mod simd;
+#[path = "backends/strix.rs"]
+pub mod strix;
 #[path = "compute/tensor.rs"]
 pub mod tensor;
 #[path = "format/tokenizer.rs"]
 pub mod tokenizer;
 #[path = "compute/turboquant.rs"]
 pub mod turboquant;
+#[cfg(feature = "vulkan")]
+#[path = "backends/vulkan.rs"]
+pub mod vulkan;
+#[cfg(not(feature = "vulkan"))]
+#[path = "backends/vulkan_stub.rs"]
+pub mod vulkan;
 #[path = "util/web_worker.rs"]
 pub mod web_worker;
 #[path = "backends/webgpu.rs"]
@@ -187,6 +221,31 @@ mod tests {
         assert!(build_script.contains("cargo:rustc-check-cfg=cfg(metal_available)"));
         assert!(build_script.contains("if detect_metal_available()"));
         assert!(build_script.contains("metal::Device::system_default().is_some()"));
+    }
+
+    #[test]
+    fn oxidize_core_declares_vulkan_feature_and_dependencies() {
+        let crate_cargo_toml = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let cargo_toml =
+            std::fs::read_to_string(crate_cargo_toml).expect("oxidize-core Cargo.toml exists");
+
+        assert!(
+            cargo_toml.contains("vulkan = [\"dep:ash\", \"dep:gpu-allocator\", \"dep:shaderc\"]")
+        );
+        assert!(cargo_toml.contains("ash = { version = \"0.38\", optional = true }"));
+        assert!(cargo_toml.contains("gpu-allocator = { version = \"0.27\", optional = true }"));
+        assert!(cargo_toml.contains("shaderc = { version = \"0.8.3\", optional = true }"));
+    }
+
+    #[test]
+    fn vulkan_build_script_sets_expected_cfg_and_loader_detection() {
+        let build_script_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("build.rs");
+        let build_script = std::fs::read_to_string(build_script_path).expect("build.rs exists");
+
+        assert!(build_script.contains("cargo:rustc-check-cfg=cfg(vulkan_available)"));
+        assert!(build_script.contains("if detect_vulkan_available()"));
+        assert!(build_script.contains("env::var_os(\"CARGO_FEATURE_VULKAN\").is_none()"));
+        assert!(build_script.contains("libvulkan.so.1"));
     }
 
     #[test]

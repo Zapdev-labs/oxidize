@@ -16,24 +16,39 @@ rustdoc-args = ["--cfg", "docsrs"]
 default = []
 cuda = ["dep:cublas-sys", "dep:cust"]
 metal = []
+vulkan = ["dep:ash", "dep:gpu-allocator", "dep:shaderc"]
 wasm = ["dep:wasm-bindgen"]
 webgpu = ["dep:wgpu"]
 
 [dependencies]
 anyhow.workspace = true
+ash = { version = "0.38", optional = true }
 cublas-sys = { version = "0.1", optional = true }
 cust = { version = "0.3", optional = true }
 futures-core = "0.3"
+futures-util = "0.3"
+gpu-allocator = { version = "0.27", optional = true }
+libp2p = { version = "0.56", features = ["mdns", "gossipsub", "tcp", "tokio", "noise", "yamux", "ed25519", "identify", "macros"] }
 memmap2 = "0.9"
 rayon = "1"
+safetensors = "0.4"
 serde.workspace = true
 serde_json = "1"
+shaderc = { version = "0.8.3", optional = true }
 thiserror.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time", "net", "io-util", "sync"] }
 wasm-bindgen = { version = "0.2", optional = true }
 wgpu = { version = "25", optional = true }
 
+[build-dependencies]
+shaderc = { version = "0.8.3", optional = true }
+
 [dev-dependencies]
 criterion = "0.5"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+mlx-rs = "0.25"
+mlx-sys = "0.1"
 
 [target.'cfg(target_os = "macos")'.build-dependencies]
 metal = "0.31"

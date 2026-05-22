@@ -1,0 +1,155 @@
+use crate::gguf::GgufQuantizationType;
+use std::collections::BTreeMap;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelArchitecture {
+    Llama,
+    Mistral,
+    Qwen,
+    Gemma,
+    Phi,
+    Unknown(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConversionPlan {
+    pub architecture: ModelArchitecture,
+    pub tensor_name_map: BTreeMap<String, String>,
+    pub target_quantization: Option<GgufQuantizationType>,
+    pub special_tokens: BTreeMap<String, u32>,
+}
+
+pub fn detect_architecture(metadata: &BTreeMap<String, String>) -> ModelArchitecture {
+    let arch = metadata
+        .get("general.architecture")
+        .or_else(|| metadata.get("model_type"))
+        .map(|value| value.to_ascii_lowercase());
+    match arch.as_deref() {
+        Some("llama") => ModelArchitecture::Llama,
+        Some("mistral") => ModelArchitecture::Mistral,
+        Some("qwen") | Some("qwen2") | Some("qwen2moe") | Some("qwen3") | Some("qwen35") => {
+            ModelArchitecture::Qwen
+        }
+        Some("gemma") => ModelArchitecture::Gemma,
+        Some("phi") => ModelArchitecture::Phi,
+        Some(other) => ModelArchitecture::Unknown(other.to_string()),
+        None => ModelArchitecture::Unknown("missing".to_string()),
+    }
+}
+
+pub fn map_hf_tensor_name(name: &str) -> String {
+    match name {
+        "model.embed_tokens.weight" => "tok_embeddings.weight".to_owned(),
+        "lm_head.weight" => "output.weight".to_owned(),
+        "model.norm.weight" => "norm.weight".to_owned(),
+        _ => {
+            let Some((layer, suffix)) = name
+                .strip_prefix("model.layers.")
+                .and_then(|rest| rest.split_once('.'))
+            else {
+                return name.to_owned();
+            };
+
+            if let Some(rest) = suffix.strip_prefix("block_sparse_moe.experts.") {
+                let Some((expert, expert_weight)) = rest.split_once('.') else {
+                    return name.to_owned();
+                };
+                let mapped_expert_weight = match expert_weight {
+                    "w1.weight" => "ffn_gate",
+                    "w2.weight" => "ffn_down",
+                    "w3.weight" => "ffn_up",
+                    _ => return name.to_owned(),
+                };
+                return format!("blk.{layer}.{mapped_expert_weight}.{expert}.weight");
+            }
+
+            let mapped_suffix = match suffix {
+                "input_layernorm.weight" => "attn_norm.weight",
+                "post_attention_layernorm.weight" => "ffn_norm.weight",
+                "self_attn.q_proj.weight" => "attn_q.weight",
+                "self_attn.k_proj.weight" => "attn_k.weight",
+                "self_attn.v_proj.weight" => "attn_v.weight",
+                "self_attn.o_proj.weight" => "attn_output.weight",
+                "mlp.up_proj.weight" => "ffn_up.weight",
+                "mlp.gate_proj.weight" => "ffn_gate.weight",
+                "mlp.down_proj.weight" => "ffn_down.weight",
+                "block_sparse_moe.gate.weight" => "ffn_gate_inp.weight",
+                _ => return name.to_owned(),
+            };
+            format!("blk.{layer}.{mapped_suffix}")
+        }
+    }
+}
+
+pub fn build_conversion_plan(
+    metadata: &BTreeMap<String, String>,
+    tensors: impl IntoIterator<Item = String>,
+    target_quantization: Option<GgufQuantizationType>,
+) -> ConversionPlan {
+    let tensor_name_map = tensors
+        .into_iter()
+        .map(|name| {
+            let mapped = map_hf_tensor_name(&name);
+            (name, mapped)
+        })
+        .collect();
+    ConversionPlan {
+        architecture: detect_architecture(metadata),
+        tensor_name_map,
+        target_quantization,
+        special_tokens: BTreeMap::new(),
+    }
+}
+
+pub fn parse_special_token_id(metadata: &BTreeMap<String, String>, key: &str) -> Option<u32> {
+    metadata
+        .get(key)
+        .and_then(|value| value.parse::<u32>().ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn conversion_detects_arch_and_maps_tensors() {
+        let mut metadata = BTreeMap::new();
+        metadata.insert("model_type".into(), "qwen2".into());
+        let plan = build_conversion_plan(
+            &metadata,
+            ["model.layers.0.self_attn.q_proj.weight".to_string()],
+            Some(GgufQuantizationType::Q4_K_M),
+        );
+        assert_eq!(plan.architecture, ModelArchitecture::Qwen);
+        assert_eq!(
+            plan.tensor_name_map["model.layers.0.self_attn.q_proj.weight"],
+            "blk.0.attn_q.weight"
+        );
+    }
+
+    #[test]
+    fn conversion_detects_qwen_metadata_variants() {
+        let mut metadata = BTreeMap::new();
+        metadata.insert("model_type".into(), "qwen35".into());
+        assert_eq!(detect_architecture(&metadata), ModelArchitecture::Qwen);
+
+        metadata.insert("model_type".into(), "qwen2moe".into());
+        assert_eq!(detect_architecture(&metadata), ModelArchitecture::Qwen);
+    }
+
+    #[test]
+    fn conversion_maps_hf_tensor_names_to_canonical_names() {
+        assert_eq!(
+            map_hf_tensor_name("model.embed_tokens.weight"),
+            "tok_embeddings.weight"
+        );
+        assert_eq!(
+            map_hf_tensor_name("model.layers.2.mlp.down_proj.weight"),
+            "blk.2.ffn_down.weight"
+        );
+        assert_eq!(
+            map_hf_tensor_name("model.layers.3.block_sparse_moe.experts.7.w1.weight"),
+            "blk.3.ffn_gate.7.weight"
+        );
+    }
+}
