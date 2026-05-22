@@ -1062,23 +1062,23 @@ fn render_chat_prompt(runtime: &ModelRuntime, messages: &[ChatMessageInput]) -> 
 async fn generate_text(
     runtime: Arc<ModelRuntime>,
     request: GenerationRequest,
-) -> Result<GenerationResult, String> {
+) -> Result<GenerationResult, GenerationError> {
     tokio::task::spawn_blocking(move || generate_text_blocking(&runtime, request))
         .await
-        .map_err(|error| format!("generation task failed: {error}"))?
+        .map_err(|error| GenerationError::Other(format!("generation task failed: {error}")))?
 }
 
 fn generate_text_blocking(
     runtime: &ModelRuntime,
     request: GenerationRequest,
-) -> Result<GenerationResult, String> {
+) -> Result<GenerationResult, GenerationError> {
     let mut model = runtime
         .model
         .lock()
-        .map_err(|_| "model lock poisoned".to_owned())?;
+        .map_err(|_| GenerationError::Other("model lock poisoned".to_owned()))?;
     model
         .rewind_to(0)
-        .map_err(|e| format!("failed to reset model KV cache: {e:?}"))?;
+        .map_err(|e| GenerationError::Other(format!("failed to reset model KV cache: {e:?}")))?;
     let mut session = Session::new();
     let prompt_tokens = runtime.tokenizer.encode_with_special_tokens(
         &request.prompt,
@@ -1140,7 +1140,9 @@ fn generate_text_blocking(
     loop {
         match Stream::poll_next(pinned.as_mut(), &mut cx) {
             Poll::Ready(Some(Ok(token))) => generated_tokens.push(token),
-            Poll::Ready(Some(Err(error))) => return Err(format!("generation error: {error:?}")),
+            Poll::Ready(Some(Err(error))) => {
+                return Err(GenerationError::Other(format!("generation error: {error:?}")))
+            }
             Poll::Ready(None) | Poll::Pending => break,
         }
     }
@@ -1303,12 +1305,41 @@ fn usage_json(prompt_tokens: usize, completion_tokens: usize) -> Value {
     })
 }
 
-fn generation_error_response(error: String) -> Response {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(json!({"error": {"message": error, "type": "generation_error"}})),
-    )
-        .into_response()
+/// Structured generation error so the HTTP layer can distinguish KV-cache
+/// exhaustion from other failures and return the correct status code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GenerationError {
+    KvCacheExhausted,
+    Other(String),
+}
+
+impl std::fmt::Display for GenerationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GenerationError::KvCacheExhausted => write!(f, "KV cache exhausted"),
+            GenerationError::Other(msg) => write!(f, "{msg}"),
+        }
+    }
+}
+
+fn generation_error_response(error: GenerationError) -> Response {
+    match error {
+        GenerationError::KvCacheExhausted => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "error": {
+                    "message": "KV cache exhausted",
+                    "type": "insufficient_memory"
+                }
+            })),
+        )
+            .into_response(),
+        GenerationError::Other(msg) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": {"message": msg, "type": "generation_error"}})),
+        )
+            .into_response(),
+    }
 }
 
 fn validate_candidate_count(n: Option<usize>, best_of: Option<usize>) -> Option<Response> {

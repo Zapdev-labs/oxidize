@@ -219,6 +219,10 @@ pub struct InputBatch {
     pub total_tokens: usize,
     /// Whether each sequence is doing prefill (`true`) or decode (`false`).
     pub is_prefill: Vec<bool>,
+    /// Per-sequence context length (number of valid tokens up to this step).
+    /// Used to mask out unused slots in partially-filled blocks during
+    /// paged attention.
+    pub context_lens: Vec<usize>,
 }
 
 /// Error type for scheduler operations.
@@ -507,6 +511,7 @@ impl Scheduler {
         let mut block_tables: Vec<Vec<BlockId>> = Vec::with_capacity(batch_size);
         let mut num_tokens = Vec::with_capacity(batch_size);
         let mut is_prefill = Vec::with_capacity(batch_size);
+        let mut context_lens = Vec::with_capacity(batch_size);
         let mut total_tokens = 0usize;
 
         for &seq_id in &step_result.scheduled_seq_ids {
@@ -533,6 +538,7 @@ impl Scheduler {
                 block_tables.push(physical);
                 num_tokens.push(prefill_count);
                 is_prefill.push(true);
+                context_lens.push(seq.num_prefilled_tokens);
                 total_tokens += prefill_count;
             } else if decode_count > 0 && !seq.is_finished() {
                 // Decode sequence: single token.
@@ -546,6 +552,7 @@ impl Scheduler {
                 block_tables.push(physical);
                 num_tokens.push(1);
                 is_prefill.push(false);
+                context_lens.push(seq.num_tokens());
                 total_tokens += 1;
             }
         }
@@ -559,6 +566,7 @@ impl Scheduler {
             num_tokens,
             total_tokens,
             is_prefill,
+            context_lens,
         }
     }
 
@@ -840,6 +848,29 @@ impl Scheduler {
     /// Called when switching models so that stale KV blocks are not reused.
     pub fn invalidate_prefix_cache(&mut self) {
         self.block_pool.clear_prefix_cache();
+    }
+
+    /// Drain all sequences, free their blocks, and reinitialize the scheduler
+    /// state so it can accept a new backend or model.
+    ///
+    /// This is called when the compute backend is switched (e.g. CPU → MLX)
+    /// so that no stale KV block data leaks across backends.
+    pub fn drain_and_reinitialize(&mut self) -> Result<(), SchedulerError> {
+        // Free blocks for every sequence still in the scheduler.
+        for seq in self.sequences.values() {
+            for &block_id in seq.block_table.physical_blocks() {
+                // Ignore errors — blocks may already be on the free list
+                // if the sequence was finished.
+                let _ = self.block_pool.dec_ref(block_id);
+            }
+        }
+        // Clear prefix cache and reset queues.
+        self.block_pool.clear_prefix_cache();
+        self.sequences.clear();
+        self.waiting.clear();
+        self.running.clear();
+        self.next_arrival_order = 0;
+        Ok(())
     }
 }
 
@@ -1964,5 +1995,195 @@ mod tests {
             32
         );
         assert_eq!(recomputed, 32 - cached);
+    }
+
+    // === Feature assertions for pagedattention-memory-oom ===
+
+    /// VAL-PAGED-008: Finished request blocks returned to free pool
+    /// immediately (verified within the same scheduler step).
+    #[test]
+    fn finished_request_blocks_returned_to_free_pool_immediately() {
+        let pool = default_pool(10);
+        let config = SchedulerConfig::default();
+        let mut scheduler = Scheduler::new(config, pool);
+
+        // 20 tokens needs 2 blocks (block_size=16).
+        let seq = make_seq(1, 20, 1);
+        scheduler.add_sequence(seq).unwrap();
+
+        let free_before = scheduler.block_pool().free_block_count();
+
+        // Step 1: prefill chunk (default chunk_size=16)
+        let step1 = scheduler.step().unwrap();
+        assert_eq!(step1.prefill_tokens, 16);
+
+        // Step 2: remaining 4 tokens prefilled.
+        let step2 = scheduler.step().unwrap();
+        assert_eq!(step2.prefill_tokens, 4);
+
+        // Step 3: decode (max_new=1 → finished after this)
+        let mut sampled = HashMap::new();
+        sampled.insert(1, 99u32);
+        scheduler.postprocess_step(&sampled).unwrap();
+
+        assert_eq!(
+            scheduler.get_sequence(1).unwrap().status(),
+            SequenceStatus::Finished
+        );
+        let free_after = scheduler.block_pool().free_block_count();
+        assert_eq!(free_after, free_before); // blocks reclaimed immediately
+
+        // Blocks must be allocatable in the very next step.
+        let next = make_seq(2, 20, 1);
+        scheduler.add_sequence(next).unwrap();
+        let step_next = scheduler.step().unwrap();
+        assert!(
+            step_next.scheduled_seq_ids.contains(&2),
+            "new request must be schedulable after reclamation"
+        );
+    }
+
+    /// VAL-PAGED-010: OOM graceful degradation — when block allocation
+    /// exceeds remaining free blocks on a later step, the step returns an
+    /// OutOfMemory error.  With 1 block in the pool, a 20-token prompt
+    /// (needs 2 blocks) succeeds for the first 16-token chunk, then fails
+    /// on the second chunk.
+    #[test]
+    fn oom_graceful_degradation_returns_error() {
+        let pool = default_pool(1); // only 1 block
+        let config = SchedulerConfig::default();
+        let mut scheduler = Scheduler::new(config, pool);
+
+        // 20 tokens needs 2 blocks (block_size=16), but pool only has 1.
+        let seq = make_seq(1, 20, 5);
+        scheduler.add_sequence(seq).unwrap();
+
+        // First chunk (16 tokens) fits in the single block.
+        let step1 = scheduler.step().unwrap();
+        assert_eq!(step1.prefill_tokens, 16);
+
+        // Second chunk needs another block — fails.
+        let err = scheduler.step().expect_err("should fail out of blocks");
+        assert!(
+            matches!(err, SchedulerError::OutOfMemory)
+                || matches!(err, SchedulerError::BlockPool(BlockPoolError::OutOfBlocks)),
+            "expected OutOfMemory or OutOfBlocks, got {err:?}"
+        );
+    }
+
+    /// VAL-PAGED-013: Block size defaults to 16 tokens and 17-token prompt
+    /// allocates exactly 2 blocks, with context_len showing 17 (not 32).
+    #[test]
+    fn seventeen_token_prompt_allocates_exactly_two_blocks() {
+        let pool = default_pool(10);
+        let config = SchedulerConfig {
+            max_num_batched_tokens: 64,
+            prefill_chunk_size: 32, // large enough to prefill full prompt in one step
+            max_num_running_seqs: 8,
+        };
+        let mut scheduler = Scheduler::new(config, pool);
+
+        let prompt: Vec<u32> = (1..=17).collect();
+        scheduler
+            .add_sequence(make_seq_with_tokens(1, prompt, 3))
+            .unwrap();
+
+        let result = scheduler.step().unwrap();
+        assert_eq!(result.prefill_tokens, 17);
+        let seq = scheduler.get_sequence(1).unwrap();
+        assert_eq!(seq.block_table().num_blocks(), 2);
+
+        // InputBatch context_lens should reflect actual token count, not padded block size.
+        let batch = scheduler.build_input_batch(&result);
+        assert_eq!(batch.context_lens.len(), 1);
+        assert_eq!(batch.context_lens[0], 17);
+    }
+
+    /// VAL-PAGED-013: Partially-filled block — a sequence with 5 tokens in
+    /// one block still reports context_len=5, not 16.
+    #[test]
+    fn partial_block_context_len_equals_token_count() {
+        let pool = default_pool(10);
+        let config = SchedulerConfig::default();
+        let mut scheduler = Scheduler::new(config, pool);
+
+        scheduler.add_sequence(make_seq(1, 5, 3)).unwrap();
+        let result = scheduler.step().unwrap();
+        let batch = scheduler.build_input_batch(&result);
+        assert_eq!(batch.context_lens[0], 5);
+    }
+
+    /// VAL-ERR-004: Backend switch drains BlockPool and reinitializes cleanly.
+    #[test]
+    fn backend_switch_drains_block_pool_and_reinitializes() {
+        let pool = default_pool(10);
+        let config = SchedulerConfig::default();
+        let mut scheduler = Scheduler::new(config, pool);
+
+        // Run a request to allocate some blocks.
+        scheduler.add_sequence(make_seq(1, 10, 2)).unwrap();
+        let step1 = scheduler.step().unwrap();
+        assert_eq!(step1.prefill_tokens, 10);
+        assert_eq!(scheduler.block_pool().allocated_block_count(), 1);
+
+        // Simulate backend switch: drain and reinitialize.
+        scheduler.drain_and_reinitialize().unwrap();
+        assert_eq!(scheduler.block_pool().free_block_count(), 10);
+        assert_eq!(scheduler.block_pool().allocated_block_count(), 0);
+        assert_eq!(scheduler.block_pool().prefix_cache_len(), 0);
+        assert_eq!(scheduler.waiting_count(), 0);
+        assert_eq!(scheduler.running_count(), 0);
+        assert_eq!(scheduler.sequence_count(), 0);
+
+        // New request works cleanly after drain.
+        scheduler.add_sequence(make_seq(2, 8, 2)).unwrap();
+        let step2 = scheduler.step().unwrap();
+        assert_eq!(step2.prefill_tokens, 8);
+    }
+
+    /// VAL-ERR-004: Drain and reinitialize with multiple sequences in
+    /// various states.
+    #[test]
+    fn backend_switch_drains_with_mixed_states() {
+        let pool = default_pool(10);
+        let config = SchedulerConfig::default();
+        let mut scheduler = Scheduler::new(config, pool);
+
+        // Waiting, running, and finished sequences.
+        scheduler.add_sequence(make_seq(1, 4, 3)).unwrap();
+        scheduler.add_sequence(make_seq(2, 4, 3)).unwrap();
+        scheduler.step().unwrap(); // both running
+
+        let mut sampled = HashMap::new();
+        sampled.insert(1, 0u32); // EOS → finished
+        scheduler.postprocess_step(&sampled).unwrap();
+
+        scheduler.drain_and_reinitialize().unwrap();
+        assert_eq!(scheduler.block_pool().free_block_count(), 10);
+        assert_eq!(scheduler.sequence_count(), 0);
+    }
+
+    /// VAL-PAGED-006: Block pool memory efficiency — no per-sequence
+    /// contiguous pre-allocation; concurrent RUNNING count is higher than
+    /// old sequential approach.
+    #[test]
+    fn block_pool_memory_efficiency_allows_multiple_concurrent_sequences() {
+        let pool = default_pool(6);
+        let config = SchedulerConfig::default();
+        let mut scheduler = Scheduler::new(config, pool);
+
+        // 6 short prompts of 5 tokens each → 1 block each.
+        for i in 1..=6 {
+            scheduler.add_sequence(make_seq(i, 5, 3)).unwrap();
+        }
+
+        let result = scheduler.step().unwrap();
+        // All 6 should fit because we only allocate 1 block per sequence.
+        assert_eq!(result.scheduled_seq_ids.len(), 6);
+        assert_eq!(scheduler.running_count(), 6);
+
+        // Under a naive per-sequence contiguous buffer sized to context_size,
+        // this would require 6 * 4096 slots, exhausting memory. With the block
+        // pool we use only 6 * 16 = 96 slots.
     }
 }
