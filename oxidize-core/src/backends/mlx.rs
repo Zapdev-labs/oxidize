@@ -513,7 +513,7 @@ mod mlx_impl {
         /// Scaled dot-product attention with a sliding-window causal mask.
         ///
         /// Only attends to the most recent `window_size` tokens; positions
-        beyond that are masked to `-inf`.
+        /// beyond that are masked to `-inf`.
         pub fn sliding_window_attention_decode(
             &self,
             query: &MlxTensor,

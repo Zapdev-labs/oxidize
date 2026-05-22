@@ -287,6 +287,11 @@ pub async fn run_mesh_node(
         chat_engine.token_tx = Some(tx);
     }
 
+    // Fault-tolerance channel: timeout in pipeline stage emits RunnerFailed,
+    // which the master turns into a ShutdownTask broadcast on COMMANDS.
+    let (status_tx, mut status_rx) = mpsc::unbounded_channel::<crate::mesh::fault_tolerance::RunnerStatusUpdated>();
+    chat_engine.status_tx = Some(status_tx);
+
     // Heartbeat / stale-peer timeout (≤15 s per VAL-MESH-010)
     let heartbeat_timeout = Duration::from_secs(15);
     let mut last_heartbeat_check = std::time::Instant::now();
@@ -534,6 +539,39 @@ pub async fn run_mesh_node(
                             let _ = swarm.behaviour_mut().gossipsub.publish(topic, data);
                         }
                     }
+                }
+            }
+            // Poll fault-tolerance status channel.
+            maybe_status = async {
+                if election.is_master() {
+                    status_rx.recv().await
+                } else {
+                    std::future::pending().await
+                }
+            } => {
+                if let Some(status) = maybe_status
+                    && matches!(status.status, crate::mesh::fault_tolerance::RunnerStatus::RunnerFailed { .. })
+                {
+                    println!("Runner failed on peer {} — broadcasting shutdown (clock={})", status.peer_id, status.clock);
+                    let task = crate::mesh::fault_tolerance::ShutdownTask {
+                        instance_id: status.peer_id.clone(),
+                        reason: "timeout in distributed collective".to_string(),
+                        clock: status.clock,
+                    };
+                    if let Ok(data) = crate::mesh::gossip::MeshEnvelope::pack(status.clock, &crate::mesh::chat::MeshCommand::Shutdown(task)) {
+                        let topic = gossipsub::IdentTopic::new(
+                            crate::mesh::gossip::TopicKind::Commands.topic_name(&namespace)
+                        );
+                        let _ = swarm.behaviour_mut().gossipsub.publish(topic, data);
+                    }
+                    // Trigger re-shard on remaining healthy nodes.
+                    let plan = compute_shard_plan(
+                        &topology,
+                        "reshard".to_string(),
+                        32,
+                        crate::mesh::sharding::ParallelismStrategy::Pipeline,
+                    );
+                    let _ = broadcast_shard_plan(&mut swarm, &namespace, election.clock, &plan);
                 }
             }
             _ = &mut maybe_timer => {

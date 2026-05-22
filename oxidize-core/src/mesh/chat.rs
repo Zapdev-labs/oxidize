@@ -8,9 +8,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
-
+use super::fault_tolerance::{eval_with_timeout, RunnerStatus, RunnerStatusUpdated, TimedResult, DEFAULT_COLLECTIVE_TIMEOUT};
 use super::gossip::MeshEnvelope;
-use super::ring::{RingBackend, RingError};
+use super::ring::RingBackend;
 use super::sharding::{ShardAssignment, ShardPlan, local_assignment, pipeline_send, pipeline_recv, tensor_parallel_all_sum, tensor_parallel_all_gather};
 
 /// A chat prompt broadcast by a client (CLI or HTTP) to the mesh master
@@ -82,6 +82,10 @@ pub struct MeshChatEngine {
     pub prompt_rx: Option<mpsc::UnboundedReceiver<MeshChatPrompt>>,
     /// Sender for streaming tokens back to the local CLI.
     pub token_tx: Option<mpsc::UnboundedSender<MeshChatToken>>,
+    /// Sender for runner status updates (used to wire timeouts to shutdown).
+    pub status_tx: Option<mpsc::UnboundedSender<RunnerStatusUpdated>>,
+    /// Timeout override for distributed collectives (tests may set this short).
+    pub timeout: Option<std::time::Duration>,
 }
 
 impl MeshChatEngine {
@@ -95,7 +99,13 @@ impl MeshChatEngine {
             ring: None,
             prompt_rx: None,
             token_tx: None,
+            status_tx: None,
+            timeout: None,
         }
+    }
+
+    fn collective_timeout(&self) -> std::time::Duration {
+        self.timeout.unwrap_or(DEFAULT_COLLECTIVE_TIMEOUT)
     }
 
     /// Register a token sink so the CLI can receive streaming tokens.
@@ -153,10 +163,23 @@ impl MeshChatEngine {
                     words.get(i % words.len()).unwrap_or(&"tok").to_string()
                 };
 
-                // --- simulated pipeline stage ---
+                // --- real distributed pipeline stage with timeout ---
+                let timeout = self.collective_timeout();
                 if let Some(ref mut ring) = self.ring {
                     let plan_ref = self.shard_plan.as_ref();
-                    let _ = Self::run_pipeline_stage(ring, plan_ref, &self.local_peer_id, i).await;
+                    let result = Self::run_pipeline_stage_timed(
+                        ring,
+                        plan_ref,
+                        &self.local_peer_id,
+                        self.clock,
+                        &self.status_tx,
+                        timeout,
+                        i,
+                    ).await;
+                    if matches!(result, TimedResult::TimedOut | TimedResult::Err(_)) {
+                        // Abort token generation on timeout or ring error.
+                        break;
+                    }
                 }
 
                 let is_final = i == max_tokens.saturating_sub(1);
@@ -170,14 +193,49 @@ impl MeshChatEngine {
             tokens
         } else {
             // Worker: participate in the forward pass if we have a ring.
+            let timeout = self.collective_timeout();
             if let Some(ref mut ring) = self.ring {
                 let plan_ref = self.shard_plan.as_ref();
                 for i in 0..max_tokens {
-                    let _ = Self::run_pipeline_stage(ring, plan_ref, &self.local_peer_id, i).await;
+                    let _ = Self::run_pipeline_stage_timed(
+                        ring,
+                        plan_ref,
+                        &self.local_peer_id,
+                        self.clock,
+                        &self.status_tx,
+                        timeout,
+                        i,
+                    ).await;
                 }
             }
             Vec::new()
         }
+    }
+
+    /// Run one pipeline stage wrapped with a hard timeout.
+    ///
+    /// On timeout, emits a [`RunnerStatusUpdated(RunnerFailed)`] so the
+    /// master can trigger recovery (re-shard / shutdown).
+    async fn run_pipeline_stage_timed(
+        ring: &mut RingBackend,
+        shard_plan: Option<&ShardPlan>,
+        local_peer_id: &str,
+        clock: u64,
+        status_tx: &Option<mpsc::UnboundedSender<RunnerStatusUpdated>>,
+        timeout: std::time::Duration,
+        _step: usize,
+    ) -> TimedResult<()> {
+        let result = Self::run_pipeline_stage_raw(ring, shard_plan, local_peer_id, timeout).await;
+        if matches!(result, TimedResult::TimedOut) && let Some(tx) = status_tx {
+            let _ = tx.send(RunnerStatusUpdated {
+                peer_id: local_peer_id.to_string(),
+                status: RunnerStatus::RunnerFailed {
+                    reason: format!("collective timed out after {}s", timeout.as_secs()),
+                },
+                clock,
+            });
+        }
+        result
     }
 
     /// Simulate one pipeline stage using the real ring backend.
@@ -186,12 +244,12 @@ impl MeshChatEngine {
     /// activations to the right.  If it holds the last stage, it receives
     /// from the left and then `all_gather`s the result back.  Intermediate
     /// stages receive from left and send to right.
-    async fn run_pipeline_stage(
+    async fn run_pipeline_stage_raw(
         ring: &mut RingBackend,
         shard_plan: Option<&ShardPlan>,
         local_peer_id: &str,
-        _step: usize,
-    ) -> Result<(), RingError> {
+        timeout: std::time::Duration,
+    ) -> TimedResult<()> {
         let assignment = shard_plan
             .and_then(|plan| local_assignment(plan, local_peer_id));
 
@@ -212,28 +270,58 @@ impl MeshChatEngine {
                 ];
 
                 if is_first {
-                    pipeline_send(ring, synthetic).await?;
+                    let r = eval_with_timeout(
+                        pipeline_send(ring, synthetic),
+                        timeout,
+                    ).await;
+                    if !matches!(r, TimedResult::Ok(())) { return r; }
                 } else if is_last {
-                    let received = pipeline_recv(ring, 4).await?;
+                    let r = eval_with_timeout(
+                        pipeline_recv(ring, 4),
+                        timeout,
+                    ).await;
+                    let received = match r {
+                        TimedResult::Ok(v) => v,
+                        TimedResult::TimedOut => return TimedResult::TimedOut,
+                        TimedResult::Err(e) => return TimedResult::Err(e),
+                    };
                     // all_gather back to every rank so all have the result.
                     let mut gathered = vec![0.0_f32; 4 * num_workers];
-                    tensor_parallel_all_gather(ring, &received, &mut gathered).await?;
+                    let r = eval_with_timeout(
+                        tensor_parallel_all_gather(ring, &received, &mut gathered),
+                        timeout,
+                    ).await;
+                    if !matches!(r, TimedResult::Ok(())) { return r; }
                 } else {
-                    let received = pipeline_recv(ring, 4).await?;
-                    pipeline_send(ring, received).await?;
+                    let r = eval_with_timeout(
+                        pipeline_recv(ring, 4),
+                        timeout,
+                    ).await;
+                    let received = match r {
+                        TimedResult::Ok(v) => v,
+                        TimedResult::TimedOut => return TimedResult::TimedOut,
+                        TimedResult::Err(e) => return TimedResult::Err(e),
+                    };
+                    let r = eval_with_timeout(
+                        pipeline_send(ring, received),
+                        timeout,
+                    ).await;
+                    if !matches!(r, TimedResult::Ok(())) { return r; }
                 }
-                Ok(())
+                TimedResult::Ok(())
             }
             Some(ShardAssignment::Tensor { .. }) => {
                 // Tensor parallelism: all_sum a small synthetic partial.
                 let partial = vec![ring.rank as f32; 4];
                 let mut buf = partial.clone();
-                tensor_parallel_all_sum(ring, &mut buf).await?;
-                Ok(())
+                eval_with_timeout(
+                    tensor_parallel_all_sum(ring, &mut buf),
+                    timeout,
+                ).await
             }
             None => {
                 // No assignment — nothing to do.
-                Ok(())
+                TimedResult::Ok(())
             }
         }
     }
@@ -454,5 +542,80 @@ mod tests {
         engine.handle_token(token).await;
         // No panic and no message delivered.
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn engine_pipeline_stage_timed_emits_runner_failed() {
+        // Build a mock ring where rank-1 is the local node.
+        // Rank-1 is NOT first, so it must recv from left (rank-0).
+        // We keep the other backend alive but never send anything,
+        // so recv hangs and eval_with_timeout kills it after 50 ms.
+        let (tx0, rx0) = tokio::sync::mpsc::unbounded_channel();
+        let (tx1, rx1) = tokio::sync::mpsc::unbounded_channel();
+        let transport = crate::mesh::ring::ChannelTransport {
+            right_tx: tx1.clone(),
+            left_rx: tokio::sync::Mutex::new(rx0),
+        };
+        let ring = crate::mesh::ring::RingBackend::new(1, 2, Box::new(transport));
+
+        let mut graph = TopologyGraph::new();
+        graph.local_peer_id = Some("rank-1".into());
+        graph.add_or_update_node("rank-0", dummy_caps());
+        graph.add_or_update_node("rank-1", dummy_caps());
+        let plan = compute_shard_plan(&graph, "m".into(), 4, ParallelismStrategy::Pipeline);
+
+        let (status_tx, mut status_rx) = mpsc::unbounded_channel();
+        let mut engine = MeshChatEngine::new(true, "rank-1".into(), 1);
+        engine.shard_plan = Some(plan);
+        engine.ring = Some(ring);
+        engine.status_tx = Some(status_tx);
+        engine.timeout = Some(std::time::Duration::from_millis(50));
+
+        // Keep the other end alive so the channel isn't closed.
+        let _keep_alive = (tx0, rx1);
+
+        let prompt = MeshChatPrompt {
+            request_id: "r".into(),
+            prompt: "hello".into(),
+            max_tokens: 1,
+            temperature: 0.0,
+            top_p: 0.0,
+        };
+        let tokens = engine.handle_prompt(&prompt).await;
+        // Generation should abort because the ring stage timed out.
+        assert!(tokens.is_empty());
+
+        let status = status_rx.recv().await;
+        assert!(status.is_some());
+        let status = status.unwrap();
+        assert_eq!(status.peer_id, "rank-1");
+        assert!(matches!(status.status, RunnerStatus::RunnerFailed { .. }));
+    }
+
+    #[tokio::test]
+    async fn engine_pipeline_stage_raw_succeeds_with_mock_ring() {
+        let mut rings = create_mock_ring(2);
+        let mut graph = TopologyGraph::new();
+        graph.local_peer_id = Some("rank-0".into());
+        graph.add_or_update_node("rank-0", dummy_caps());
+        graph.add_or_update_node("rank-1", dummy_caps());
+        let plan = compute_shard_plan(&graph, "m".into(), 4, ParallelismStrategy::Pipeline);
+
+        let mut engine = MeshChatEngine::new(true, "rank-0".into(), 1);
+        engine.shard_plan = Some(plan);
+        engine.ring = Some(rings.remove(0));
+
+        let prompt = MeshChatPrompt {
+            request_id: "r".into(),
+            prompt: "hello world".into(),
+            max_tokens: 3,
+            temperature: 0.0,
+            top_p: 0.0,
+        };
+        let tokens = engine.handle_prompt(&prompt).await;
+        assert_eq!(tokens.len(), 3);
+        assert_eq!(tokens[0].token, "hello");
+        assert_eq!(tokens[1].token, "world");
+        assert_eq!(tokens[2].token, "hello");
     }
 }

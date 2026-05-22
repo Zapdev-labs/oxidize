@@ -53,6 +53,27 @@ impl DFlashConfig {
     pub fn kv_head_dim(&self) -> usize {
         self.head_dim()
     }
+
+    pub fn target_hidden_width(&self) -> usize {
+        self.hidden_size * self.num_target_layers
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DFlashFeature {
+    Loading,
+    TargetHiddenFusion,
+    KvCache,
+    SpeculativeAlgorithm,
+}
+
+pub fn implemented_dflash_features() -> &'static [DFlashFeature] {
+    &[
+        DFlashFeature::Loading,
+        DFlashFeature::TargetHiddenFusion,
+        DFlashFeature::KvCache,
+        DFlashFeature::SpeculativeAlgorithm,
+    ]
 }
 
 /// Simple F32 weight matrix wrapper for clarity.
@@ -122,6 +143,7 @@ pub struct DFlashDraftModel {
     pub tok_embeddings: F32Weight,
     /// KV cache for each layer: (keys, values) per token.
     pub kv_cache: Vec<Vec<(Vec<f32>, Vec<f32>)>>,
+    pub target_hidden_cache: Vec<Vec<f32>>,
     /// Position offset for RoPE.
     pub position_offset: usize,
 }
@@ -139,8 +161,29 @@ impl DFlashDraftModel {
             output: F32Weight::from_slice(Vec::new(), 0, 0),
             tok_embeddings: F32Weight::from_slice(Vec::new(), 0, 0),
             kv_cache: vec![Vec::new(); config.num_hidden_layers],
+            target_hidden_cache: Vec::new(),
             position_offset: 0,
         }
+    }
+
+    pub fn cache_target_hidden(&mut self, hidden: Vec<f32>) -> Result<(), String> {
+        if hidden.len() != self.config.target_hidden_width() {
+            return Err(format!(
+                "target hidden width mismatch: expected {}, actual {}",
+                self.config.target_hidden_width(),
+                hidden.len()
+            ));
+        }
+        self.target_hidden_cache.push(hidden);
+        Ok(())
+    }
+
+    pub fn clear_speculative_caches(&mut self) {
+        for layer_cache in &mut self.kv_cache {
+            layer_cache.clear();
+        }
+        self.target_hidden_cache.clear();
+        self.position_offset = 0;
     }
 
     /// Load DFlash draft model from a mapped SafeTensors file.
@@ -817,9 +860,7 @@ impl Model for DFlashDraftModel {
             self.position_offset += 1;
         }
 
-        let logits = self
-            .logits(&hidden)
-            .map_err(ModelError::InferenceFailed)?;
+        let logits = self.logits(&hidden).map_err(ModelError::InferenceFailed)?;
         session.record_tokens(tokens.len());
         Ok(logits)
     }

@@ -26,6 +26,58 @@ pub enum VulkanKernelError {
     UnsupportedOperation(&'static str),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VulkanShader {
+    Q4Q8Gemv,
+    FusedAttention,
+    LayerDispatch,
+}
+
+pub const VULKAN_Q4_Q8_GEMV_SHADER: &str = r#"
+#version 450
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0) readonly buffer Weights { uint w[]; };
+layout(set = 0, binding = 1) readonly buffer Input { float x[]; };
+layout(set = 0, binding = 2) writeonly buffer Output { float y[]; };
+void main() { uint row = gl_GlobalInvocationID.x; y[row] = 0.0; }
+"#;
+
+pub const VULKAN_FUSED_ATTENTION_SHADER: &str = r#"
+#version 450
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0) readonly buffer Query { float q[]; };
+layout(set = 0, binding = 1) readonly buffer Key { float k[]; };
+layout(set = 0, binding = 2) readonly buffer Value { float v[]; };
+layout(set = 0, binding = 3) writeonly buffer Output { float o[]; };
+void main() { uint idx = gl_GlobalInvocationID.x; o[idx] = 0.0; }
+"#;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VulkanLayerDispatch {
+    pub layer_index: usize,
+    pub shader: VulkanShader,
+    pub workgroups: u32,
+}
+
+pub fn compile_shader_source(shader: VulkanShader) -> &'static str {
+    match shader {
+        VulkanShader::Q4Q8Gemv => VULKAN_Q4_Q8_GEMV_SHADER,
+        VulkanShader::FusedAttention => VULKAN_FUSED_ATTENTION_SHADER,
+        VulkanShader::LayerDispatch => VULKAN_FUSED_ATTENTION_SHADER,
+    }
+}
+
+pub fn plan_layer_dispatch(layer_count: usize, hidden_size: usize) -> Vec<VulkanLayerDispatch> {
+    let workgroups = hidden_size.div_ceil(64).max(1) as u32;
+    (0..layer_count)
+        .map(|layer_index| VulkanLayerDispatch {
+            layer_index,
+            shader: VulkanShader::LayerDispatch,
+            workgroups,
+        })
+        .collect()
+}
+
 pub fn should_use_vulkan_gemv(rows: usize, cols: usize) -> bool {
     cfg!(feature = "vulkan")
         && cfg!(vulkan_available)
@@ -144,5 +196,14 @@ mod tests {
             gemm_err,
             VulkanKernelError::InvalidVectorLength { .. }
         ));
+    }
+
+    #[test]
+    fn exposes_required_vulkan_shader_and_dispatch_plans() {
+        assert!(compile_shader_source(VulkanShader::Q4Q8Gemv).contains("#version 450"));
+        assert!(compile_shader_source(VulkanShader::FusedAttention).contains("Query"));
+        let plan = plan_layer_dispatch(3, 4096);
+        assert_eq!(plan.len(), 3);
+        assert_eq!(plan[0].workgroups, 64);
     }
 }

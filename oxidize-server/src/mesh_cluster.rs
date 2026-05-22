@@ -12,7 +12,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use oxidize_core::mesh::{
-    RunnerStatus, RunnerStatusUpdated, ShutdownTask, TimedResult, eval_with_timeout,
+    RunnerStatus, RunnerStatusUpdated, ShutdownTask, TimedResult, DEFAULT_COLLECTIVE_TIMEOUT, eval_with_timeout,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -23,7 +23,6 @@ use std::time::Duration;
 #[derive(Clone)]
 pub struct MeshClusterState {
     /// Local mesh node handle (shared with the mesh event loop).
-    #[allow(dead_code)]
     pub mesh_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
     /// Whether the local node is currently the elected master.
     pub is_master: Arc<std::sync::atomic::AtomicBool>,
@@ -191,7 +190,7 @@ pub async fn mesh_chat_completions(
 /// If the operation times out a [`RunnerStatusUpdated(RunnerFailed)`] event
 /// is recorded and the master issues a [`ShutdownTask`] for the affected
 /// instance.
-#[allow(dead_code)]
+#[cfg(test)]
 pub async fn mesh_eval_with_timeout<F, T>(
     mesh: &MeshClusterState,
     fut: F,
@@ -201,7 +200,7 @@ pub async fn mesh_eval_with_timeout<F, T>(
 where
     F: std::future::Future<Output = Result<T, oxidize_core::mesh::RingError>>,
 {
-    let result = eval_with_timeout(fut, Duration::from_secs(60)).await;
+    let result = eval_with_timeout(fut, DEFAULT_COLLECTIVE_TIMEOUT).await;
     if matches!(result, TimedResult::TimedOut) {
         mesh.update_runner_status(RunnerStatusUpdated {
             peer_id: peer_id.to_string(),
@@ -278,5 +277,29 @@ mod tests {
         // We can't easily inspect the body here without axum test helpers,
         // but the compilation check is sufficient.
         let _ = resp;
+    }
+
+    #[tokio::test]
+    async fn mesh_eval_with_timeout_triggers_shutdown_on_timeout() {
+        let state = MeshClusterState::new();
+        let slow_fut = async {
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            Ok::<(), oxidize_core::mesh::RingError>(())
+        };
+        let result = mesh_eval_with_timeout(&state, slow_fut, "peer-x", 3).await;
+        assert_eq!(result, TimedResult::TimedOut);
+        let map = state.runner_statuses.read().await;
+        assert!(matches!(
+            map.get("peer-x"),
+            Some(RunnerStatus::RunnerFailed { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn mesh_eval_with_timeout_returns_ok_on_fast_future() {
+        let state = MeshClusterState::new();
+        let fast_fut = async { Ok::<i32, oxidize_core::mesh::RingError>(42) };
+        let result = mesh_eval_with_timeout(&state, fast_fut, "peer-y", 1).await;
+        assert_eq!(result, TimedResult::Ok(42));
     }
 }

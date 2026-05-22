@@ -112,18 +112,6 @@ pub fn local_assignment<'a>(
     plan.assignments.get(local_peer_id)
 }
 
-/// Pipeline stage result: activations passed to the next node.
-#[allow(dead_code)]
-pub struct PipelineStageResult {
-    pub activations: Vec<f32>,
-}
-
-/// Tensor-parallel partial result.
-#[allow(dead_code)]
-pub struct TensorParallelResult {
-    pub partial_output: Vec<f32>,
-}
-
 /// Send activations to the next pipeline stage (right neighbour in the
 /// pipeline ordering).
 ///

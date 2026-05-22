@@ -78,6 +78,10 @@ pub mod simd;
 pub mod tensor;
 #[path = "format/tokenizer.rs"]
 pub mod tokenizer;
+#[path = "validation/cross_validation.rs"]
+pub mod cross_validation;
+#[path = "backends/strix.rs"]
+pub mod strix;
 #[path = "compute/turboquant.rs"]
 pub mod turboquant;
 #[cfg(feature = "vulkan")]

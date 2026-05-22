@@ -28,6 +28,41 @@ pub enum VulkanKernelError {
     UnsupportedOperation(&'static str),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VulkanShader {
+    Q4Q8Gemv,
+    FusedAttention,
+    LayerDispatch,
+}
+
+pub const VULKAN_Q4_Q8_GEMV_SHADER: &str = "";
+pub const VULKAN_FUSED_ATTENTION_SHADER: &str = "";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VulkanLayerDispatch {
+    pub layer_index: usize,
+    pub shader: VulkanShader,
+    pub workgroups: u32,
+}
+
+pub fn compile_shader_source(shader: VulkanShader) -> &'static str {
+    match shader {
+        VulkanShader::Q4Q8Gemv => VULKAN_Q4_Q8_GEMV_SHADER,
+        VulkanShader::FusedAttention | VulkanShader::LayerDispatch => VULKAN_FUSED_ATTENTION_SHADER,
+    }
+}
+
+pub fn plan_layer_dispatch(layer_count: usize, hidden_size: usize) -> Vec<VulkanLayerDispatch> {
+    let workgroups = hidden_size.div_ceil(64).max(1) as u32;
+    (0..layer_count)
+        .map(|layer_index| VulkanLayerDispatch {
+            layer_index,
+            shader: VulkanShader::LayerDispatch,
+            workgroups,
+        })
+        .collect()
+}
+
 pub fn should_use_vulkan_gemv(_rows: usize, _cols: usize) -> bool {
     false
 }

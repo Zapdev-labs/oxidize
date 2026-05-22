@@ -269,7 +269,7 @@ fn build_app_with_limits(config: RequestLimitConfig) -> Router {
     build_app_with_config(config, None, None)
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn build_app_with_config(
     config: RequestLimitConfig,
     api_key: Option<String>,
@@ -278,7 +278,7 @@ fn build_app_with_config(
     build_app_with_full_config(config, api_key, model, None)
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn build_app_with_full_config(
     config: RequestLimitConfig,
     api_key: Option<String>,
