@@ -37,6 +37,10 @@ wgpu = { version = "25", optional = true }
 [dev-dependencies]
 criterion = "0.5"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+mlx-rs = "0.25"
+mlx-sys = "0.1"
+
 [target.'cfg(target_os = "macos")'.build-dependencies]
 metal = "0.31"
 

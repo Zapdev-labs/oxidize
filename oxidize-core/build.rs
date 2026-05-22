@@ -6,6 +6,7 @@ fn main() {
     println!("cargo:rustc-check-cfg=cfg(metal_available)");
     println!("cargo:rustc-check-cfg=cfg(webgpu_available)");
     println!("cargo:rustc-check-cfg=cfg(vulkan_available)");
+    println!("cargo:rustc-check-cfg=cfg(mlx_available)");
     println!("cargo:rerun-if-env-changed=CUDA_HOME");
     println!("cargo:rerun-if-env-changed=CUDA_PATH");
 
@@ -30,6 +31,10 @@ fn main() {
 
     if detect_vulkan_available() {
         println!("cargo:rustc-cfg=vulkan_available");
+    }
+
+    if detect_mlx_available() {
+        println!("cargo:rustc-cfg=mlx_available");
     }
 }
 
@@ -65,4 +70,8 @@ fn detect_webgpu_available() -> bool {
 
 fn detect_vulkan_available() -> bool {
     env::var_os("CARGO_FEATURE_VULKAN").is_some()
+}
+
+fn detect_mlx_available() -> bool {
+    detect_metal_available()
 }

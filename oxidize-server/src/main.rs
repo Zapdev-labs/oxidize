@@ -20,7 +20,7 @@ use axum::{
     },
     routing::{get, post},
 };
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use futures_util::{Stream, stream};
 use oxidize_core::{
     generation::{GenerationConfig, GenerationStream},
@@ -43,6 +43,25 @@ use std::sync::Mutex as StdMutex;
 use tokio::sync::{Mutex, Notify, OwnedSemaphorePermit, Semaphore};
 use tokio::time::{Instant as TokioInstant, sleep_until};
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+enum Backend {
+    Cpu,
+    Metal,
+    Mlx,
+    Cuda,
+}
+
+impl Backend {
+    fn to_core_backend(self) -> oxidize_core::backend::Backend {
+        match self {
+            Backend::Cpu => oxidize_core::backend::Backend::Cpu,
+            Backend::Metal => oxidize_core::backend::Backend::Metal,
+            Backend::Mlx => oxidize_core::backend::Backend::Mlx,
+            Backend::Cuda => oxidize_core::backend::Backend::Cuda,
+        }
+    }
+}
+
 #[derive(Debug, Parser)]
 #[command(name = "oxidize-server")]
 struct Args {
@@ -52,6 +71,8 @@ struct Args {
     port: u16,
     #[arg(long)]
     model: Option<PathBuf>,
+    #[arg(long, value_enum, default_value_t = Backend::Cpu)]
+    backend: Backend,
     #[arg(long, default_value = "oxidize-default")]
     model_id: String,
     #[arg(long, default_value_t = 512)]
@@ -1632,6 +1653,15 @@ fn first_layer_tensor_dims(mapped: &MappedGgufFile, suffix: &str) -> Option<Vec<
 async fn main() {
     tracing_subscriber::fmt::init();
     let args = Args::parse();
+    let (effective_backend, warning) = args.backend.to_core_backend().effective();
+    if let Some(msg) = warning {
+        tracing::warn!("{msg}");
+    }
+    tracing::info!(
+        backend = effective_backend.as_str(),
+        platform = if cfg!(target_os = "macos") { "macos" } else { "linux" },
+        "starting oxidize-server"
+    );
     let model = load_model_runtime(&args)
         .unwrap_or_else(|error| panic!("failed to initialize model runtime: {error}"));
     let api_key = std::env::var("OXIDIZE_API_KEY")

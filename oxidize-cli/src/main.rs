@@ -30,6 +30,8 @@ struct Args {
     prompt: String,
     #[arg(long)]
     model: Option<PathBuf>,
+    #[arg(long, value_enum, default_value_t = Backend::Cpu)]
+    backend: Backend,
     #[arg(long, default_value_t = 0)]
     n_gpu_layers: usize,
     #[arg(long, default_value_t = 1)]
@@ -99,6 +101,25 @@ impl KvCacheDType {
             Self::F16 => DType::F16,
             Self::Q8 => DType::I8,
             Self::Q4 => DType::I16,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+enum Backend {
+    Cpu,
+    Metal,
+    Mlx,
+    Cuda,
+}
+
+impl Backend {
+    fn to_core_backend(self) -> oxidize_core::backend::Backend {
+        match self {
+            Backend::Cpu => oxidize_core::backend::Backend::Cpu,
+            Backend::Metal => oxidize_core::backend::Backend::Metal,
+            Backend::Mlx => oxidize_core::backend::Backend::Mlx,
+            Backend::Cuda => oxidize_core::backend::Backend::Cuda,
         }
     }
 }
@@ -601,6 +622,17 @@ fn optimize_mapped_model_memory(mapped: &MappedGgufFile, args: &Args) {
 
 fn main() {
     let args = Args::parse();
+    let (effective_backend, warning) = args.backend.to_core_backend().effective();
+    if let Some(msg) = warning {
+        eprintln!("warning: {msg}");
+    }
+    let backend_label = match effective_backend {
+        oxidize_core::backend::Backend::Mlx => "Apple Silicon",
+        oxidize_core::backend::Backend::Metal => "Metal GPU",
+        oxidize_core::backend::Backend::Cuda => "CUDA GPU",
+        oxidize_core::backend::Backend::Cpu => "CPU",
+    };
+    println!("backend: {} ({})", effective_backend.as_str(), backend_label);
     let cpu_opt = args.cpu_optimized;
     let threads = if let Some(t) = args.threads.filter(|t| *t > 0) {
         t

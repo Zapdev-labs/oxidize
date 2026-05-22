@@ -24,6 +24,8 @@ use wasm_bindgen::prelude::*;
 
 pub use futures_core::Stream;
 
+#[path = "backend.rs"]
+pub mod backend;
 #[path = "util/benchmark_suite.rs"]
 pub mod benchmark_suite;
 #[path = "backends/cuda.rs"]
@@ -48,6 +50,9 @@ pub mod llama;
 pub mod lora;
 #[path = "backends/metal.rs"]
 pub mod metal;
+#[cfg(target_os = "macos")]
+#[path = "backends/mlx.rs"]
+pub mod mlx;
 #[path = "model/model.rs"]
 pub mod model;
 #[path = "model/loader.rs"]
