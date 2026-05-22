@@ -16,7 +16,8 @@ use libp2p::yamux;
 use serde::{Deserialize, Serialize};
 
 use super::node::{MeshConfig, NodeCapabilities};
-use super::sharding::{ShardPlan, local_assignment};
+use super::progress::{AggregatedProgress, LoadProgressReport, aggregate_progress, render_cluster_progress_bar};
+use super::sharding::{ShardPlan, compute_shard_plan, local_assignment};
 
 /// Events emitted by the discovery layer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -261,6 +262,14 @@ pub async fn run_mesh_node(mesh_port: u16) -> Result<(), Box<dyn std::error::Err
 
     let mut printed = false;
     let mut known_peers = std::collections::HashSet::<PeerId>::new();
+    let mut last_topology_peer_count = 0usize;
+
+    // Progress aggregation state (master only)
+    let mut progress_agg = AggregatedProgress::default();
+
+    // Heartbeat / stale-peer timeout (≤15 s per VAL-MESH-010)
+    let heartbeat_timeout = Duration::from_secs(15);
+    let mut last_heartbeat_check = std::time::Instant::now();
 
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
@@ -270,7 +279,8 @@ pub async fn run_mesh_node(mesh_port: u16) -> Result<(), Box<dyn std::error::Err
         // Only arm the periodic timer when there is actual work to do.
         let needs_timer = matches!(election.state, crate::mesh::election::ElectionState::Electing { .. })
             || (matches!(election.state, crate::mesh::election::ElectionState::Idle)
-                && known_peers.len() >= 2);
+                && known_peers.len() >= 2)
+            || election.is_master();
 
         let maybe_timer = if needs_timer {
             tokio::time::sleep(Duration::from_millis(100))
@@ -302,12 +312,24 @@ pub async fn run_mesh_node(mesh_port: u16) -> Result<(), Box<dyn std::error::Err
                             }
                         }
                         crate::mesh::gossip::MeshEvent::Mdns(mdns::Event::Expired(list)) => {
+                            let mut topology_changed = false;
                             for (expired_peer, _addr) in list {
                                 if known_peers.remove(expired_peer) {
                                     let pid = expired_peer.to_string();
                                     topology.remove_node(&pid);
+                                    topology_changed = true;
                                     println!("Peer {} expired / disconnected", pid);
                                 }
+                            }
+                            if topology_changed && election.is_master() {
+                                println!("Topology changed after peer loss — re-sharding on remaining nodes");
+                                let plan = compute_shard_plan(
+                                    &topology,
+                                    "reshard".to_string(),
+                                    32, // placeholder total_layers; real model would be known
+                                    crate::mesh::sharding::ParallelismStrategy::Pipeline,
+                                );
+                                let _ = broadcast_shard_plan(&mut swarm, &namespace, election.clock, &plan);
                             }
                         }
                         crate::mesh::gossip::MeshEvent::Identify(identify::Event::Received { peer_id: remote_peer, info, .. }) => {
@@ -327,6 +349,16 @@ pub async fn run_mesh_node(mesh_port: u16) -> Result<(), Box<dyn std::error::Err
                                     payload.capabilities.memory_bytes,
                                     payload.capabilities.can_shard
                                 );
+                                if election.is_master() && last_topology_peer_count > 0 && known_peers.len() != last_topology_peer_count {
+                                    println!("New node joined active mesh — triggering re-shard");
+                                    let plan = compute_shard_plan(
+                                        &topology,
+                                        "reshard".to_string(),
+                                        32,
+                                        crate::mesh::sharding::ParallelismStrategy::Pipeline,
+                                    );
+                                    let _ = broadcast_shard_plan(&mut swarm, &namespace, election.clock, &plan);
+                                }
                             }
                         }
                         crate::mesh::gossip::MeshEvent::Gossipsub(GossipsubEvent::Message { message, .. }) => {
@@ -368,6 +400,14 @@ pub async fn run_mesh_node(mesh_port: u16) -> Result<(), Box<dyn std::error::Err
                                                         }
                                                     }
                                                 }
+                                            }
+                                        }
+                                    }
+                                    crate::mesh::gossip::TopicKind::LocalEvents => {
+                                        if let Ok(report) = serde_json::from_slice::<LoadProgressReport>(&message.data) {
+                                            aggregate_progress(&mut progress_agg, report.clone());
+                                            if election.is_master() {
+                                                println!("{}", render_cluster_progress_bar(&progress_agg));
                                             }
                                         }
                                     }
@@ -422,6 +462,36 @@ pub async fn run_mesh_node(mesh_port: u16) -> Result<(), Box<dyn std::error::Err
                     let declare = election.start_election();
                     publish_envelope(&mut swarm, &namespace, crate::mesh::gossip::TopicKind::ElectionMessages, election.clock, &declare)?;
                     println!("Election started (clock={})", election.clock);
+                }
+
+                // Stale-peer eviction (heartbeat timeout ≤15 s).
+                let now = std::time::Instant::now();
+                if now.duration_since(last_heartbeat_check) >= heartbeat_timeout {
+                    last_heartbeat_check = now;
+                    let evicted = topology.evict_stale(heartbeat_timeout);
+                    if !evicted.is_empty() {
+                        for pid in &evicted {
+                            known_peers.retain(|p| p.to_string() != *pid);
+                            println!("Peer {} evicted after heartbeat timeout", pid);
+                        }
+                        if election.is_master() && !evicted.is_empty() {
+                            println!("Topology changed after stale eviction — re-sharding on remaining nodes");
+                            let plan = compute_shard_plan(
+                                &topology,
+                                "reshard".to_string(),
+                                32,
+                                crate::mesh::sharding::ParallelismStrategy::Pipeline,
+                            );
+                            let _ = broadcast_shard_plan(&mut swarm, &namespace, election.clock, &plan);
+                        }
+                    }
+                }
+
+                // Master: if peer count changed since last tick, update progress total.
+                let current_peer_count = topology.peer_count().saturating_sub(1);
+                if election.is_master() && current_peer_count != last_topology_peer_count {
+                    last_topology_peer_count = current_peer_count;
+                    progress_agg.total_workers = current_peer_count.max(1);
                 }
             }
         }

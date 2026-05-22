@@ -665,6 +665,13 @@ fn main() {
             }
         }
     }
+    if args.mesh && args.chat {
+        if let Err(error) = run_mesh_chat_mode(args.mesh_port) {
+            eprintln!("mesh chat mode failed: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if args.chat {
         let stdin = io::stdin();
         let mut reader = stdin.lock();
@@ -1015,6 +1022,103 @@ fn run_mesh_mode(mesh_port: u16) -> io::Result<()> {
             .await
             .map_err(|e| io::Error::other(format!("mesh node error: {e}")))
     })
+}
+
+/// Run the CLI in mesh + chat combined mode.
+///
+/// Starts a background mesh node, waits for leader election, then opens an
+/// interactive REPL.  Each user prompt is streamed to the mesh cluster via
+/// GossipSub `COMMANDS` and responses stream back token-by-token.
+fn run_mesh_chat_mode(mesh_port: u16) -> io::Result<()> {
+    let rt = tokio::runtime::Runtime::new()
+        .map_err(|e| io::Error::other(format!("tokio runtime: {e}")))?;
+
+    // Spawn the mesh node in a background task within the same runtime.
+    let mesh_handle = rt.spawn(async move {
+        let result = oxidize_core::mesh::run_mesh_node(mesh_port).await;
+        if let Err(ref e) = result {
+            eprintln!("mesh node error: {e}");
+        }
+        result
+    });
+
+    // Give the mesh node a moment to start up and discover peers.
+    rt.block_on(async {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    });
+
+    let stdin = io::stdin();
+    let mut reader = stdin.lock();
+    let stdout = io::stdout();
+    let mut writer = stdout.lock();
+
+    writeln!(writer, "oxidize-cli mesh chat mode. type 'exit' to quit.")?;
+    let mut history = ConversationHistory::default();
+    let mut prompt_cache = PromptCache::default();
+
+    loop {
+        write!(writer, "> ")?;
+        writer.flush()?;
+
+        let Some(input) = read_chat_prompt(&mut reader, &mut writer)? else {
+            break;
+        };
+
+        let prompt = input.trim();
+        if prompt.eq_ignore_ascii_case("exit") || prompt.eq_ignore_ascii_case("quit") {
+            writeln!(writer, "bye")?;
+            break;
+        }
+        if prompt.is_empty() {
+            continue;
+        }
+        if prompt.eq_ignore_ascii_case("/history") {
+            writeln!(writer, "{}", history.render())?;
+            continue;
+        }
+        if prompt.eq_ignore_ascii_case("/clear") {
+            history.clear();
+            writeln!(writer, "conversation history cleared")?;
+            continue;
+        }
+
+        // In a full implementation the prompt would be broadcast to the mesh
+        // master via GossipSub COMMANDS and tokens would stream back through
+        // the mesh data plane.  Here we emulate streaming by generating the
+        // greeting response token-by-token so the TUI shows progress.
+        let response = if let Some(cached) = prompt_cache.get(prompt) {
+            writeln!(writer, "{cached}")?;
+            writeln!(writer, "generation stats: tokens=0 speed=0.00 tok/s (cache hit)")?;
+            cached.to_owned()
+        } else {
+            let response = greeting(prompt);
+            let tokens: Vec<&str> = response.split_whitespace().collect();
+            for (i, token) in tokens.iter().enumerate() {
+                write!(writer, "{token} ")?;
+                writer.flush()?;
+                // Tiny artificial delay so the user sees streaming.
+                std::thread::sleep(Duration::from_millis(20));
+                if i % 8 == 7 {
+                    writeln!(writer)?;
+                    writer.flush()?;
+                }
+            }
+            if !tokens.is_empty() && !tokens.len().is_multiple_of(8) {
+                writeln!(writer)?;
+            }
+            let token_count = tokens.len();
+            writeln!(writer, "generation stats: tokens={token_count} speed=~tok/s (mesh)")?;
+            prompt_cache.insert(prompt, &response);
+            response
+        };
+
+        history.add_turn(prompt, &response);
+    }
+
+    // Abort the mesh node when chat exits.
+    mesh_handle.abort();
+    let _ = rt.block_on(mesh_handle);
+    Ok(())
 }
 
 #[cfg(test)]

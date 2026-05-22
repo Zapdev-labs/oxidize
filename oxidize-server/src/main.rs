@@ -40,6 +40,8 @@ use oxidize_core::{
         process_chat_template,
     },
 };
+
+mod mesh_cluster;
 use rand::{SeedableRng, rngs::StdRng};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -112,6 +114,13 @@ struct Args {
     layer_wise: bool,
     #[arg(long, default_value_t = 1)]
     layer_cache: usize,
+    /// Enable mesh cluster mode: this node becomes the master that routes
+    /// OpenAI-compatible requests to worker shards over the mesh data plane.
+    #[arg(long, default_value_t = false)]
+    mesh: bool,
+    /// Port for the mesh libp2p listener (0 = ephemeral).
+    #[arg(long, default_value_t = 0)]
+    mesh_port: u16,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -138,6 +147,7 @@ struct AppState {
     auth: AuthConfig,
     model: Option<Arc<ModelRuntime>>,
     paged: Option<Arc<PagedModelRuntime>>,
+    mesh: Option<mesh_cluster::MeshClusterState>,
 }
 
 #[derive(Clone)]
@@ -273,6 +283,7 @@ fn build_app_with_config(
         },
         model: model.clone(),
         paged: None,
+        mesh: None,
     };
     build_app_with_state(state)
 }
@@ -280,7 +291,8 @@ fn build_app_with_config(
 const MAX_BODY_SIZE_BYTES: usize = 10 * 1024 * 1024;
 
 fn build_app_with_state(state: AppState) -> Router {
-    Router::new()
+    let mesh_enabled = state.mesh.is_some();
+    let mut router = Router::new()
         .route("/healthz", get(healthz))
         .route("/livez", get(livez))
         .route("/readyz", get(readyz))
@@ -288,7 +300,16 @@ fn build_app_with_state(state: AppState) -> Router {
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/completions", post(completions))
         .route("/v1/models", get(models))
-        .route("/v1/embeddings", post(embeddings))
+        .route("/v1/embeddings", post(embeddings));
+
+    if mesh_enabled {
+        router = router.route(
+            "/v1/mesh/chat/completions",
+            post(mesh_chat_completions_handler),
+        );
+    }
+
+    router
         .layer(DefaultBodyLimit::max(MAX_BODY_SIZE_BYTES))
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -300,6 +321,20 @@ fn build_app_with_state(state: AppState) -> Router {
         ))
         .layer(middleware::from_fn(log_request_response))
         .with_state(state)
+}
+
+async fn mesh_chat_completions_handler(
+    State(state): State<AppState>,
+    Json(payload): Json<mesh_cluster::MeshChatRequest>,
+) -> Response {
+    let Some(mesh) = state.mesh.clone() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": {"message": "mesh not enabled", "type": "mesh_disabled"}})),
+        )
+            .into_response();
+    };
+    mesh_cluster::mesh_chat_completions(axum::extract::State(mesh), Json(payload)).await
 }
 
 async fn healthz() -> StatusCode {
@@ -2344,6 +2379,12 @@ async fn main() {
         (model, None)
     };
 
+    let mesh = if args.mesh {
+        Some(mesh_cluster::MeshClusterState::new())
+    } else {
+        None
+    };
+
     let state = AppState {
         limiter: Arc::new(RequestLimiter::new(RequestLimitConfig::default())),
         batcher: Arc::new(ContinuousBatcher::default()),
@@ -2352,6 +2393,7 @@ async fn main() {
         },
         model: model_opt,
         paged: paged_opt,
+        mesh,
     };
     let app = build_app_with_state(state);
     let listener = tokio::net::TcpListener::bind(SocketAddr::new(args.host, args.port))
