@@ -1,9 +1,11 @@
+use crate::flash_attention::flash_attention_decode_heads_f32;
 use crate::gguf::{GgufQuantizationType, MappedGgufFile};
 use crate::model::{Logits, Model, ModelError, Session, Token};
 use crate::quantization::{dequantize_scalar, quantized_size};
 use crate::safetensors::MappedSafeTensorsFile;
 use crate::tensor::{
-    DType, apply_rope_f32, f16_le_to_f32, gemv_f32_transposed, gemv_quantized_f32, rms_norm_f32,
+    DType, apply_rope_f32, f16_le_to_f32, gemm_f32, gemm_quantized_f32, gemv_f32_transposed,
+    gemv_quantized_f32, rms_norm_f32,
 };
 
 /// DFlash configuration matching the HuggingFace config.json.
@@ -147,6 +149,37 @@ impl F32Weight {
                 .map_err(|e| format!("{:?}", e))
         }
     }
+
+    /// Batched matmul: `inputs` is row-major `[batch, in_dim]`, `outputs` is
+    /// row-major `[batch, out_dim]`. Falls back to [`Self::gemv`] for batch=1.
+    pub fn gemm(
+        &self,
+        inputs: &[f32],
+        outputs: &mut [f32],
+        batch: usize,
+    ) -> Result<(), String> {
+        if batch <= 1 {
+            return self.gemv(inputs, outputs);
+        }
+        if let Some(q) = &self.quant {
+            gemm_quantized_f32(
+                q.qtype,
+                &q.bytes,
+                q.out_dim,
+                q.in_dim,
+                inputs,
+                outputs,
+                batch,
+            )
+            .map_err(|e| format!("{:?}", e))
+        } else {
+            // Non-quant weight is stored as [in_dim × out_dim] row-major
+            // (`self.cols = in_dim`, `self.rows = out_dim`). gemm_f32 expects
+            // C[batch × out_dim] = A[batch × in_dim] · B[in_dim × out_dim].
+            gemm_f32(inputs, batch, self.cols, &self.data, self.rows, outputs)
+                .map_err(|e| format!("{:?}", e))
+        }
+    }
 }
 
 /// Whether the fused on-the-fly quantized GEMV kernel supports `qtype` for an
@@ -156,8 +189,9 @@ fn quantized_gemv_supported(qtype: GgufQuantizationType, in_dim: usize) -> bool 
     match qtype {
         GgufQuantizationType::Q4_K_S
         | GgufQuantizationType::Q4_K_M
-        | GgufQuantizationType::Q6_K => in_dim % 256 == 0,
-        GgufQuantizationType::Q8_0 => in_dim % 32 == 0,
+        | GgufQuantizationType::Q2_K
+        | GgufQuantizationType::Q6_K => in_dim.is_multiple_of(256),
+        GgufQuantizationType::Q8_0 => in_dim.is_multiple_of(32),
         _ => false,
     }
 }
@@ -184,6 +218,41 @@ pub struct DFlashDecoderLayer {
     pub mlp_down: F32Weight,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct DFlashKvLayerCache {
+    pub keys: Vec<f32>,
+    pub values: Vec<f32>,
+    pub seq_len: usize,
+}
+
+impl DFlashKvLayerCache {
+    pub fn new() -> Self {
+        Self {
+            keys: Vec::new(),
+            values: Vec::new(),
+            seq_len: 0,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.keys.clear();
+        self.values.clear();
+        self.seq_len = 0;
+    }
+
+    fn reserve_tokens(&mut self, additional_tokens: usize, kv_len: usize) {
+        let additional = additional_tokens.saturating_mul(kv_len);
+        self.keys.reserve(additional);
+        self.values.reserve(additional);
+    }
+}
+
+impl Default for DFlashKvLayerCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// DFlash draft model.
 ///
 /// Forward pass:
@@ -208,8 +277,8 @@ pub struct DFlashDraftModel {
     pub output: F32Weight,
     /// Token embeddings (shared with output or separate).
     pub tok_embeddings: F32Weight,
-    /// KV cache for each layer: (keys, values) per token.
-    pub kv_cache: Vec<Vec<(Vec<f32>, Vec<f32>)>>,
+    /// Contiguous KV cache for each layer, laid out as [seq_len][kv_heads * head_dim].
+    pub kv_cache: Vec<DFlashKvLayerCache>,
     pub target_hidden_cache: Vec<Vec<f32>>,
     /// Position offset for RoPE.
     pub position_offset: usize,
@@ -227,7 +296,7 @@ impl DFlashDraftModel {
             norm: Vec::new(),
             output: F32Weight::from_slice(Vec::new(), 0, 0),
             tok_embeddings: F32Weight::from_slice(Vec::new(), 0, 0),
-            kv_cache: vec![Vec::new(); config.num_hidden_layers],
+            kv_cache: vec![DFlashKvLayerCache::new(); config.num_hidden_layers],
             target_hidden_cache: Vec::new(),
             position_offset: 0,
         }
@@ -677,7 +746,6 @@ impl DFlashDraftModel {
             let num_kv_heads = self.config.num_key_value_heads;
             let q_size = num_heads * head_dim;
             let kv_len = num_kv_heads * head_dim;
-            let queries_per_kv = num_heads / num_kv_heads;
 
             let mut attn_out = vec![0.0_f32; q_size];
             let mut mlp_out = vec![0.0_f32; h];
@@ -717,7 +785,7 @@ impl DFlashDraftModel {
                     layer.attention.v_proj.gemv(&kv_input, &mut v)?;
                 }
 
-                let pos = self.position_offset + self.kv_cache[layer_idx].len();
+                let pos = self.position_offset;
                 let mut head_scratch = vec![0.0_f32; head_dim];
 
                 if !layer.attention.q_norm_weight.is_empty()
@@ -782,52 +850,23 @@ impl DFlashDraftModel {
                     k[start..start + head_dim].copy_from_slice(&head_scratch);
                 }
 
-                self.kv_cache[layer_idx].push((k.clone(), v.clone()));
+                let layer_cache = &mut self.kv_cache[layer_idx];
+                layer_cache.keys.extend_from_slice(&k);
+                layer_cache.values.extend_from_slice(&v);
+                layer_cache.seq_len += 1;
 
-                // Simple attention: compute scores with all past tokens.
-                let seq_len = self.kv_cache[layer_idx].len();
-
-                for h_idx in 0..num_heads {
-                    let kv_h = h_idx / queries_per_kv;
-                    let q_offset = h_idx * head_dim;
-                    let mut attn_weights = vec![0.0_f32; seq_len];
-
-                    for (t, attn_w) in attn_weights.iter_mut().enumerate().take(seq_len) {
-                        let (ref k_cache, _) = self.kv_cache[layer_idx][t];
-                        let k_offset = kv_h * head_dim;
-                        let mut score = 0.0_f32;
-                        for d in 0..head_dim {
-                            score += q[q_offset + d] * k_cache[k_offset + d];
-                        }
-                        *attn_w = score / (head_dim as f32).sqrt();
-                    }
-
-                    // Softmax.
-                    let max_score = attn_weights
-                        .iter()
-                        .copied()
-                        .fold(f32::NEG_INFINITY, f32::max);
-                    let mut sum_exp = 0.0_f32;
-                    for attn_w in attn_weights.iter_mut().take(seq_len) {
-                        *attn_w = (*attn_w - max_score).exp();
-                        sum_exp += *attn_w;
-                    }
-                    for attn_w in attn_weights.iter_mut().take(seq_len) {
-                        *attn_w /= sum_exp;
-                    }
-
-                    // Weighted sum of values.
-                    let out_offset = h_idx * head_dim;
-                    for d in 0..head_dim {
-                        let mut val = 0.0_f32;
-                        for (t, attn_w) in attn_weights.iter().enumerate().take(seq_len) {
-                            let (_, ref v_cache) = self.kv_cache[layer_idx][t];
-                            let v_offset = kv_h * head_dim;
-                            val += *attn_w * v_cache[v_offset + d];
-                        }
-                        attn_out[out_offset + d] = val;
-                    }
-                }
+                flash_attention_decode_heads_f32(
+                    &q,
+                    &layer_cache.keys,
+                    &layer_cache.values,
+                    layer_cache.seq_len,
+                    head_dim,
+                    kv_len,
+                    num_heads,
+                    num_kv_heads,
+                    &mut attn_out,
+                )
+                .map_err(|e| format!("flash attention decode: {:?}", e))?;
 
                 // O projection: attn_out[q_size] -> hidden[h]
                 let mut o_result = vec![0.0_f32; h];
@@ -895,6 +934,258 @@ impl DFlashDraftModel {
         Ok(hidden)
     }
 
+    /// Batched prefill: process `tokens` in one pass with batched projections.
+    ///
+    /// Returns the hidden state of the last token (sufficient for the next-token
+    /// logits). All linear layers are batched matmuls; attention is still
+    /// sequential per token because each `q_t` must see the cache populated
+    /// through position `t`. Target-hidden fusion is not supported here — use
+    /// `forward_token` for speculative-decoding paths.
+    pub fn forward_batch(&mut self, tokens: &[u32]) -> Result<Vec<f32>, String> {
+        if tokens.is_empty() {
+            return Err("empty token batch".into());
+        }
+        let b = tokens.len();
+        if b == 1 {
+            let h = self.forward_token(tokens[0], None)?;
+            self.position_offset += 1;
+            return Ok(h);
+        }
+
+        let h = self.config.hidden_size;
+
+        // Embedding lookup: hidden[b * h] row-major.
+        let mut hidden = vec![0.0_f32; b * h];
+        if !self.tok_embeddings.data.is_empty() {
+            for (t, &token) in tokens.iter().enumerate() {
+                let idx = (token as usize).min(self.config.vocab_size - 1);
+                let emb = &self.tok_embeddings.data[idx * h..(idx + 1) * h];
+                hidden[t * h..(t + 1) * h].copy_from_slice(emb);
+            }
+        }
+
+        // Hidden norm per token.
+        if !self.hidden_norm.is_empty() {
+            let src = hidden.clone();
+            for t in 0..b {
+                rms_norm_f32(
+                    &src[t * h..(t + 1) * h],
+                    &self.hidden_norm,
+                    self.config.rms_norm_eps,
+                    &mut hidden[t * h..(t + 1) * h],
+                )
+                .map_err(|e| format!("rms_norm: {:?}", e))?;
+            }
+        }
+
+        for (layer_idx, layer) in self.layers.iter().enumerate() {
+            let head_dim = if !layer.attention.q_norm_weight.is_empty() {
+                layer.attention.q_norm_weight.len()
+            } else {
+                self.config.head_dim()
+            };
+            let num_heads = self.config.num_attention_heads;
+            let num_kv_heads = self.config.num_key_value_heads;
+            let q_size = num_heads * head_dim;
+            let kv_len = num_kv_heads * head_dim;
+
+            // Attention branch: pre-attn norm per token.
+            let mut normed = vec![0.0_f32; b * h];
+            for t in 0..b {
+                rms_norm_f32(
+                    &hidden[t * h..(t + 1) * h],
+                    &layer.input_layernorm,
+                    self.config.rms_norm_eps,
+                    &mut normed[t * h..(t + 1) * h],
+                )
+                .map_err(|e| format!("rms_norm: {:?}", e))?;
+            }
+
+            let mut q_all = vec![0.0_f32; b * q_size];
+            if layer.attention.q_proj.is_loaded() {
+                layer.attention.q_proj.gemm(&normed, &mut q_all, b)?;
+            }
+
+            let mut k_all = vec![0.0_f32; b * kv_len];
+            let mut v_all = vec![0.0_f32; b * kv_len];
+            if layer.attention.k_proj.is_loaded() {
+                layer.attention.k_proj.gemm(&normed, &mut k_all, b)?;
+            }
+            if layer.attention.v_proj.is_loaded() {
+                layer.attention.v_proj.gemm(&normed, &mut v_all, b)?;
+            }
+
+            let mut head_scratch = vec![0.0_f32; head_dim];
+
+            if !layer.attention.q_norm_weight.is_empty()
+                && layer.attention.q_norm_weight.len() == head_dim
+            {
+                for t in 0..b {
+                    let q = &mut q_all[t * q_size..(t + 1) * q_size];
+                    for h_idx in 0..num_heads {
+                        let start = h_idx * head_dim;
+                        let end = start + head_dim;
+                        head_scratch.fill(0.0);
+                        rms_norm_f32(
+                            &q[start..end],
+                            &layer.attention.q_norm_weight,
+                            self.config.rms_norm_eps,
+                            &mut head_scratch,
+                        )
+                        .map_err(|e| format!("q_norm: {:?}", e))?;
+                        q[start..end].copy_from_slice(&head_scratch);
+                    }
+                }
+            }
+            if !layer.attention.k_norm_weight.is_empty()
+                && layer.attention.k_norm_weight.len() == head_dim
+            {
+                for t in 0..b {
+                    let k = &mut k_all[t * kv_len..(t + 1) * kv_len];
+                    for kv_h in 0..num_kv_heads {
+                        let start = kv_h * head_dim;
+                        let end = start + head_dim;
+                        head_scratch.fill(0.0);
+                        rms_norm_f32(
+                            &k[start..end],
+                            &layer.attention.k_norm_weight,
+                            self.config.rms_norm_eps,
+                            &mut head_scratch,
+                        )
+                        .map_err(|e| format!("k_norm: {:?}", e))?;
+                        k[start..end].copy_from_slice(&head_scratch);
+                    }
+                }
+            }
+
+            // RoPE per (token, head). Position = position_offset + t.
+            for t in 0..b {
+                let pos = self.position_offset + t;
+                let q = &mut q_all[t * q_size..(t + 1) * q_size];
+                let k = &mut k_all[t * kv_len..(t + 1) * kv_len];
+                for h_idx in 0..num_heads {
+                    let start = h_idx * head_dim;
+                    head_scratch.fill(0.0);
+                    apply_rope_f32(
+                        &q[start..start + head_dim],
+                        pos,
+                        head_dim,
+                        self.config.rope_theta,
+                        &mut head_scratch,
+                    )
+                    .map_err(|e| format!("rope q: {:?}", e))?;
+                    q[start..start + head_dim].copy_from_slice(&head_scratch);
+                }
+                for kv_h in 0..num_kv_heads {
+                    let start = kv_h * head_dim;
+                    head_scratch.fill(0.0);
+                    apply_rope_f32(
+                        &k[start..start + head_dim],
+                        pos,
+                        head_dim,
+                        self.config.rope_theta,
+                        &mut head_scratch,
+                    )
+                    .map_err(|e| format!("rope k: {:?}", e))?;
+                    k[start..start + head_dim].copy_from_slice(&head_scratch);
+                }
+            }
+
+            // Append KV and run decode-attention per token (causal correctness).
+            let mut attn_pre_o = vec![0.0_f32; b * q_size];
+            {
+                let layer_cache = &mut self.kv_cache[layer_idx];
+                for t in 0..b {
+                    let k = &k_all[t * kv_len..(t + 1) * kv_len];
+                    let v = &v_all[t * kv_len..(t + 1) * kv_len];
+                    layer_cache.keys.extend_from_slice(k);
+                    layer_cache.values.extend_from_slice(v);
+                    layer_cache.seq_len += 1;
+
+                    let q = &q_all[t * q_size..(t + 1) * q_size];
+                    let out = &mut attn_pre_o[t * q_size..(t + 1) * q_size];
+                    flash_attention_decode_heads_f32(
+                        q,
+                        &layer_cache.keys,
+                        &layer_cache.values,
+                        layer_cache.seq_len,
+                        head_dim,
+                        kv_len,
+                        num_heads,
+                        num_kv_heads,
+                        out,
+                    )
+                    .map_err(|e| format!("flash attention decode: {:?}", e))?;
+                }
+            }
+
+            // O projection batched.
+            let mut attn_out_all = vec![0.0_f32; b * h];
+            if layer.attention.o_proj.is_loaded() {
+                layer
+                    .attention
+                    .o_proj
+                    .gemm(&attn_pre_o, &mut attn_out_all, b)?;
+            } else if q_size == h {
+                attn_out_all.copy_from_slice(&attn_pre_o);
+            }
+
+            // Residual after attention.
+            for i in 0..b * h {
+                hidden[i] += attn_out_all[i];
+            }
+
+            // MLP branch.
+            let mut normed_mlp = vec![0.0_f32; b * h];
+            for t in 0..b {
+                rms_norm_f32(
+                    &hidden[t * h..(t + 1) * h],
+                    &layer.post_attention_layernorm,
+                    self.config.rms_norm_eps,
+                    &mut normed_mlp[t * h..(t + 1) * h],
+                )
+                .map_err(|e| format!("rms_norm: {:?}", e))?;
+            }
+
+            let inter = self.config.intermediate_size;
+            let mut gate = vec![0.0_f32; b * inter];
+            let mut up = vec![0.0_f32; b * inter];
+            if layer.mlp_gate.is_loaded() {
+                layer.mlp_gate.gemm(&normed_mlp, &mut gate, b)?;
+            }
+            if layer.mlp_up.is_loaded() {
+                layer.mlp_up.gemm(&normed_mlp, &mut up, b)?;
+            }
+            for i in 0..b * inter {
+                let g = gate[i];
+                gate[i] = g * (1.0 / (1.0 + (-g).exp())) * up[i];
+            }
+            let mut mlp_out_all = vec![0.0_f32; b * h];
+            if layer.mlp_down.is_loaded() {
+                layer.mlp_down.gemm(&gate, &mut mlp_out_all, b)?;
+            }
+
+            for i in 0..b * h {
+                hidden[i] += mlp_out_all[i];
+            }
+        }
+
+        // Final norm per token.
+        let mut out_hidden = vec![0.0_f32; b * h];
+        for t in 0..b {
+            rms_norm_f32(
+                &hidden[t * h..(t + 1) * h],
+                &self.norm,
+                self.config.rms_norm_eps,
+                &mut out_hidden[t * h..(t + 1) * h],
+            )
+            .map_err(|e| format!("rms_norm: {:?}", e))?;
+        }
+
+        self.position_offset += b;
+        Ok(out_hidden[(b - 1) * h..b * h].to_vec())
+    }
+
     /// Compute logits from hidden state.
     pub fn logits(&self, hidden: &[f32]) -> Result<Vec<f32>, String> {
         let mut logits = vec![0.0_f32; self.config.vocab_size];
@@ -906,8 +1197,15 @@ impl DFlashDraftModel {
 
     /// Reset KV cache and position offset.
     pub fn reset_cache(&mut self) {
-        self.kv_cache = vec![Vec::new(); self.config.num_hidden_layers];
+        self.kv_cache = vec![DFlashKvLayerCache::new(); self.config.num_hidden_layers];
         self.position_offset = 0;
+    }
+
+    pub fn reserve_cache_tokens(&mut self, tokens: usize) {
+        let kv_len = self.config.num_key_value_heads * self.config.head_dim();
+        for layer_cache in &mut self.kv_cache {
+            layer_cache.reserve_tokens(tokens, kv_len);
+        }
     }
 }
 
@@ -917,15 +1215,12 @@ impl Model for DFlashDraftModel {
             return Err(ModelError::EmptyInput);
         }
 
-        let mut hidden = Vec::new();
-        for &token in tokens {
-            // For simple draft-only forward, no target_hidden fusion.
-            // In speculative decoding, forward_token with target_hidden will be called directly.
-            hidden = self
-                .forward_token(token, None)
-                .map_err(ModelError::InferenceFailed)?;
-            self.position_offset += 1;
-        }
+        // Prefer batched prefill: every linear is computed with a single
+        // weight scan amortized over all tokens. Falls back to forward_token
+        // for batch=1 (decode).
+        let hidden = self
+            .forward_batch(tokens)
+            .map_err(ModelError::InferenceFailed)?;
 
         let logits = self.logits(&hidden).map_err(ModelError::InferenceFailed)?;
         session.record_tokens(tokens.len());

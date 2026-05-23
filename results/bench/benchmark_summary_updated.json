@@ -1,0 +1,65 @@
+[
+  {
+    "model": "Qwen3.6-27B-DFlash",
+    "weight": "Q4_K_M",
+    "test": "draft_forward",
+    "phase": "before",
+    "tps": 14.81,
+    "latency_ms": 67.52,
+    "source": "oxidize_qwen36_dflash_q4km.log"
+  },
+  {
+    "model": "Qwen3.6-27B-DFlash",
+    "weight": "Q4_K_M",
+    "test": "draft_forward",
+    "phase": "after_flash",
+    "tps": 16.51,
+    "latency_ms": 60.56,
+    "source": "oxidize_qwen36_dflash_q4km_after_flash.log"
+  },
+  {
+    "model": "Qwen3.6-27B-DFlash",
+    "weight": "Q4_K_M",
+    "test": "draft_forward",
+    "phase": "after_flash_reserve",
+    "tps": 16.98,
+    "latency_ms": 58.9,
+    "source": "oxidize_qwen36_dflash_q4km_after_reserve.log"
+  },
+  {
+    "model": "Qwen3.6-27B-DFlash",
+    "weight": "llamacpp-export",
+    "test": "draft_forward",
+    "phase": "before",
+    "tps": 14.04,
+    "latency_ms": 71.23,
+    "source": "oxidize_qwen36_dflash_llamacpp.log"
+  },
+  {
+    "model": "Qwen3.6-27B-DFlash",
+    "weight": "llamacpp-export",
+    "test": "draft_forward",
+    "phase": "after_flash",
+    "tps": 17.09,
+    "latency_ms": 58.52,
+    "source": "oxidize_qwen36_dflash_llamacpp_after_flash.log"
+  },
+  {
+    "model": "gemma4 31B Q2_K - Medium",
+    "weight": "Q2_K_M",
+    "test": "pp32",
+    "phase": "baseline",
+    "tps": 6.43,
+    "latency_ms": "",
+    "source": "llama_cpp_q2k_baseline.log"
+  },
+  {
+    "model": "gemma4 31B Q2_K - Medium",
+    "weight": "Q2_K_M",
+    "test": "tg32",
+    "phase": "baseline",
+    "tps": 1.18,
+    "latency_ms": "",
+    "source": "llama_cpp_q2k_baseline.log"
+  }
+]

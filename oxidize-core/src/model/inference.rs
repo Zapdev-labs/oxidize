@@ -37,7 +37,7 @@ impl ModelArchitecture {
                 "mistral" => Self::Mistral,
                 "mixtral" => Self::Mixtral,
                 "deepseek" | "deepseek_v2" | "deepseek_v3" | "deepseek_moe" => Self::DeepSeek,
-                "qwen" | "qwen2" | "qwen2moe" | "qwen35" => Self::Qwen,
+                "qwen" | "qwen2" | "qwen2moe" | "qwen3" | "qwen35" => Self::Qwen,
                 "gemma" | "gemma4" => Self::Gemma,
                 "phi" | "phi3" => Self::Phi,
                 "falcon" => Self::Falcon,
@@ -188,7 +188,7 @@ impl Workspace {
             q_full: vec![0.0_f32; max_qkv],
             k_vec: vec![0.0_f32; max_kv_len],
             v_vec: vec![0.0_f32; max_kv_len],
-            attn_result: vec![0.0_f32; h],
+            attn_result: vec![0.0_f32; max_qkv],
             head_scratch: vec![0.0_f32; head_dim],
             kv_keys_copy: vec![0.0_f32; kv_copy_size],
             kv_values_copy: vec![0.0_f32; kv_copy_size],
@@ -665,6 +665,29 @@ impl InferenceModel {
             ssm_conv_buffers,
             workspace,
         })
+    }
+
+    pub fn forward_tokens_no_logits(
+        &mut self,
+        tokens: &[Token],
+        session: &mut Session,
+    ) -> Result<(), ModelError> {
+        if tokens.is_empty() {
+            return Err(ModelError::EmptyInput);
+        }
+        let requested_total = session.consumed_tokens().saturating_add(tokens.len());
+        if requested_total > self.config.context_size {
+            return Err(ModelError::ContextExceeded {
+                context_size: self.config.context_size,
+                requested_total_tokens: requested_total,
+            });
+        }
+        let start_pos = session.consumed_tokens();
+        for (i, &token) in tokens.iter().enumerate() {
+            self.forward_single(token, start_pos + i, false)?;
+        }
+        session.record_tokens(tokens.len());
+        Ok(())
     }
 
     fn forward_single(
@@ -1413,7 +1436,7 @@ mod tests {
         let max_kv_len = config.num_key_value_heads * config.kv_head_dim();
         assert_eq!(ws.k_vec.len(), max_kv_len);
         assert_eq!(ws.v_vec.len(), max_kv_len);
-        assert_eq!(ws.attn_result.len(), config.hidden_size);
+        assert_eq!(ws.attn_result.len(), max_qkv);
 
         let head_dim = config.head_dim().max(config.kv_head_dim());
         assert_eq!(ws.head_scratch.len(), head_dim);

@@ -1,0 +1,7 @@
+engine,test,tps,source
+Oxidize DFlash,decode32,10.02,oxidize_qwen3_4b_q4km_decode32_fixedpos.log
+Oxidize DFlash,pp32,9.95,oxidize_qwen3_4b_q4km_prompt32_fixedpos.log
+Oxidize Inference,decode32 no logits,3.77,oxidize_inference_qwen3_4b_decode32_nologits.log
+Oxidize Inference,pp32 no logits,3.94,oxidize_inference_qwen3_4b_prompt32_nologits.log
+llama.cpp,pp32,31.95,llama_cpp_qwen3_4b_q4km_pp_tg32.log
+llama.cpp,tg32,3.54,llama_cpp_qwen3_4b_q4km_pp_tg32.log

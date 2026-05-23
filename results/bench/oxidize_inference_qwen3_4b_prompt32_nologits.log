@@ -1,0 +1,41 @@
+=== Oxidize DFlash Benchmark ===
+
+Loading model from: /home/dih/oxidize/models/Qwen3-4B-Q4_K_M.gguf
+
+Model config from GGUF:
+  hidden_size: 2560
+  num_layers: 36
+  num_attention_heads: 32
+  num_key_value_heads: 8
+  key_value_head_dim: 128
+  intermediate_size: 9728
+  block_size: 16
+  mask_token_id: 151665
+  n_target_features (vocab): 151936
+  rope_theta: 1000000
+  rms_norm_eps: 0.000001
+  context_length: 40960
+
+Running inference model benchmark (no final logits)...
+
+  engine: inference
+  mode: prompt
+  draft_tokens_per_step: 128
+  prompt_tokens: 32
+  iterations: 5
+
+  Iteration 1: 32 tokens in 8.20s (3.90 tok/s)
+  Iteration 2: 32 tokens in 8.09s (3.95 tok/s)
+  Iteration 3: 32 tokens in 8.06s (3.97 tok/s)
+  Iteration 4: 32 tokens in 8.07s (3.97 tok/s)
+  Iteration 5: 32 tokens in 8.22s (3.89 tok/s)
+
+=== Results ===
+Total tokens: 160
+Total time: 40.65s
+Throughput: 3.94 tok/s
+Avg latency/token: 254.05ms
+
+Note: inference benchmark skips final logits to measure token processing.
+
+Benchmark complete.

@@ -33,10 +33,14 @@ pub enum VulkanShader {
     Q4Q8Gemv,
     FusedAttention,
     LayerDispatch,
+    F32Gemm,
+    Q4KGemv,
 }
 
 pub const VULKAN_Q4_Q8_GEMV_SHADER: &str = "";
+pub const VULKAN_Q4_K_GEMV_SHADER: &str = "";
 pub const VULKAN_FUSED_ATTENTION_SHADER: &str = "";
+pub const VULKAN_F32_GEMM_SHADER: &str = "";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VulkanLayerDispatch {
@@ -47,8 +51,9 @@ pub struct VulkanLayerDispatch {
 
 pub fn compile_shader_source(shader: VulkanShader) -> &'static str {
     match shader {
-        VulkanShader::Q4Q8Gemv => VULKAN_Q4_Q8_GEMV_SHADER,
+        VulkanShader::Q4Q8Gemv | VulkanShader::Q4KGemv => VULKAN_Q4_K_GEMV_SHADER,
         VulkanShader::FusedAttention | VulkanShader::LayerDispatch => VULKAN_FUSED_ATTENTION_SHADER,
+        VulkanShader::F32Gemm => VULKAN_F32_GEMM_SHADER,
     }
 }
 

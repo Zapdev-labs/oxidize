@@ -1,0 +1,34 @@
+[
+  {
+    "model": "Qwen3.6-27B-DFlash",
+    "weight": "Q4_K_M",
+    "test": "draft_forward",
+    "tps": 14.81,
+    "latency_ms": 67.52,
+    "source": "oxidize_qwen36_dflash_q4km.log"
+  },
+  {
+    "model": "Qwen3.6-27B-DFlash",
+    "weight": "llamacpp-export",
+    "test": "draft_forward",
+    "tps": 14.04,
+    "latency_ms": 71.23,
+    "source": "oxidize_qwen36_dflash_llamacpp.log"
+  },
+  {
+    "model": "gemma4 31B Q2_K - Medium",
+    "weight": "Q2_K_M",
+    "test": "pp32",
+    "tps": 6.43,
+    "latency_ms": "",
+    "source": "llama_cpp_q2k_baseline.log"
+  },
+  {
+    "model": "gemma4 31B Q2_K - Medium",
+    "weight": "Q2_K_M",
+    "test": "tg32",
+    "tps": 1.18,
+    "latency_ms": "",
+    "source": "llama_cpp_q2k_baseline.log"
+  }
+]

@@ -1,0 +1,4 @@
+| model | backend | ngl | n_batch | threads | test | t/s |
+| --- | --- | --: | --: | --: | --- | --: |
+| /home/dih/oxidize/models/Qwen3.6-27B-DFlash-llamacpp.gguf | CPU | 0 | 2048 | 16 | pp 32 | 118.77 +/- 1.09 |
+| /home/dih/oxidize/models/Qwen3.6-27B-DFlash-llamacpp.gguf | CPU | 0 | 2048 | 16 | tg 32 | 118.77 +/- 1.09 |

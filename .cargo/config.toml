@@ -1,12 +1,8 @@
 [build]
 target-dir = "target"
 
-# Make AVX2 + FMA the compile-time baseline on x86_64. The decode hot path
-# (Q4_K GEMV) is hand-vectorized with runtime detection, but enabling these
-# features at build time lets the compiler autovectorize the scalar fallbacks
-# and surrounding kernels too. Requires a Haswell-era (2013+) or newer CPU.
-[target.x86_64-unknown-linux-gnu]
-rustflags = ["-C", "target-feature=+avx2,+fma"]
+# Keep the default x86_64 build portable. Hot kernels use runtime CPU feature
+# detection and #[target_feature] so AVX2/FMA machines still take fast paths.
 
 [target.aarch64-unknown-linux-gnu]
 linker = "aarch64-linux-gnu-gcc"
