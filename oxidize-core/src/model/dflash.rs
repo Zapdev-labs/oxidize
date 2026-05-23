@@ -1188,10 +1188,11 @@ impl DFlashDraftModel {
 
     /// Compute logits from hidden state.
     pub fn logits(&self, hidden: &[f32]) -> Result<Vec<f32>, String> {
-        let mut logits = vec![0.0_f32; self.config.vocab_size];
-        if self.output.is_loaded() {
-            self.output.gemv(hidden, &mut logits)?;
+        if !self.output.is_loaded() {
+            return Ok(Vec::new());
         }
+        let mut logits = vec![0.0_f32; self.config.vocab_size];
+        self.output.gemv(hidden, &mut logits)?;
         Ok(logits)
     }
 

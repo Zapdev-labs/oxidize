@@ -1359,15 +1359,12 @@ fn q6_k_dot_scalar(block: &[u8], vector: &[f32]) -> f32 {
         let qh_base = half * 32;
         for l in 0..32 {
             let is = l / 16;
-            let q1 = ((ql[ql_base + l] & 0x0f) as i32
-                | (((qh[qh_base + l] & 3) as i32) << 4))
-                - 32;
+            let q1 = ((ql[ql_base + l] & 0x0f) as i32 | (((qh[qh_base + l] & 3) as i32) << 4)) - 32;
             let q2 = ((ql[ql_base + l + 32] & 0x0f) as i32
                 | ((((qh[qh_base + l] >> 2) & 3) as i32) << 4))
                 - 32;
-            let q3 = ((ql[ql_base + l] >> 4) as i32
-                | ((((qh[qh_base + l] >> 4) & 3) as i32) << 4))
-                - 32;
+            let q3 =
+                ((ql[ql_base + l] >> 4) as i32 | ((((qh[qh_base + l] >> 4) & 3) as i32) << 4)) - 32;
             let q4 = ((ql[ql_base + l + 32] >> 4) as i32
                 | ((((qh[qh_base + l] >> 6) & 3) as i32) << 4))
                 - 32;
@@ -1453,15 +1450,12 @@ fn accumulate_q6_k_block(block: &[u8], factor: f32, output: &mut [f32]) {
         let qh_base = half * 32;
         for l in 0..32 {
             let is = l / 16;
-            let q1 = ((ql[ql_base + l] & 0x0f) as i32
-                | (((qh[qh_base + l] & 3) as i32) << 4))
-                - 32;
+            let q1 = ((ql[ql_base + l] & 0x0f) as i32 | (((qh[qh_base + l] & 3) as i32) << 4)) - 32;
             let q2 = ((ql[ql_base + l + 32] & 0x0f) as i32
                 | ((((qh[qh_base + l] >> 2) & 3) as i32) << 4))
                 - 32;
-            let q3 = ((ql[ql_base + l] >> 4) as i32
-                | ((((qh[qh_base + l] >> 4) & 3) as i32) << 4))
-                - 32;
+            let q3 =
+                ((ql[ql_base + l] >> 4) as i32 | ((((qh[qh_base + l] >> 4) & 3) as i32) << 4)) - 32;
             let q4 = ((ql[ql_base + l + 32] >> 4) as i32
                 | ((((qh[qh_base + l] >> 6) & 3) as i32) << 4))
                 - 32;
