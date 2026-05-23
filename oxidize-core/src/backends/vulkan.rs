@@ -46,11 +46,12 @@ pub enum VulkanShader {
 /// 256-weight block, repeating `cols/256` times per output row.
 pub const VULKAN_Q4_K_GEMV_SHADER: &str = r#"
 #version 450
-#extension GL_KHR_shader_subgroup_arithmetic : require
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 
 layout(local_size_x = 64) in;
+
+shared float partials[64];
 
 layout(set = 0, binding = 0) readonly buffer Weights { uint8_t w[]; };
 layout(set = 0, binding = 1) readonly buffer Input   { float    x[]; };
@@ -130,11 +131,14 @@ void main() {
             }
         }
     }
-    float reduced = subgroupAdd(partial);
-    if (subgroupElect()) {
-        // Multiple subgroups in a 64-lane workgroup will race here — fix by
-        // using shared memory + single-thread write in the production version.
-        y[row] = reduced;
+    partials[lane] = partial;
+    barrier();
+    if (lane == 0u) {
+        float sum = 0.0;
+        for (uint i = 0u; i < 64u; ++i) {
+            sum += partials[i];
+        }
+        y[row] = sum;
     }
 }
 "#;
@@ -392,8 +396,7 @@ pub mod device {
 
         let devices = unsafe { instance.enumerate_physical_devices().ok()? };
         for pd in devices {
-            let qfs =
-                unsafe { instance.get_physical_device_queue_family_properties(pd) };
+            let qfs = unsafe { instance.get_physical_device_queue_family_properties(pd) };
             for (idx, q) in qfs.iter().enumerate() {
                 if q.queue_flags.contains(vk::QueueFlags::COMPUTE) {
                     return Some(VulkanContext {

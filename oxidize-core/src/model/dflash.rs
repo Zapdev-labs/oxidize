@@ -152,24 +152,13 @@ impl F32Weight {
 
     /// Batched matmul: `inputs` is row-major `[batch, in_dim]`, `outputs` is
     /// row-major `[batch, out_dim]`. Falls back to [`Self::gemv`] for batch=1.
-    pub fn gemm(
-        &self,
-        inputs: &[f32],
-        outputs: &mut [f32],
-        batch: usize,
-    ) -> Result<(), String> {
+    pub fn gemm(&self, inputs: &[f32], outputs: &mut [f32], batch: usize) -> Result<(), String> {
         if batch <= 1 {
             return self.gemv(inputs, outputs);
         }
         if let Some(q) = &self.quant {
             gemm_quantized_f32(
-                q.qtype,
-                &q.bytes,
-                q.out_dim,
-                q.in_dim,
-                inputs,
-                outputs,
-                batch,
+                q.qtype, &q.bytes, q.out_dim, q.in_dim, inputs, outputs, batch,
             )
             .map_err(|e| format!("{:?}", e))
         } else {
@@ -567,11 +556,18 @@ impl DFlashDraftModel {
             if info.dimensions.len() != 2 {
                 // Fall back to the f32 path for non-2D tensors.
                 return load_f32_with_dims(name).map(|opt| match opt {
-                    Some((data, dims)) => {
-                        let r = dims[0] as usize;
-                        let c = dims[1] as usize;
-                        F32Weight::from_slice(transpose_f32(&data, r, c), c, r)
-                    }
+                    Some((data, dims)) => match dims.len() {
+                        0 => F32Weight::from_slice(Vec::new(), 0, 0),
+                        1 => {
+                            let n = dims[0] as usize;
+                            F32Weight::from_slice(data, n, 1)
+                        }
+                        _ => {
+                            let r = dims[0] as usize;
+                            let c = dims[1] as usize;
+                            F32Weight::from_slice(transpose_f32(&data, r, c), c, r)
+                        }
+                    },
                     None => F32Weight::from_slice(Vec::new(), 0, 0),
                 });
             }
@@ -931,6 +927,11 @@ impl DFlashDraftModel {
         .map_err(|e| format!("rms_norm: {:?}", e))?;
         hidden = normed_final;
 
+        // Advance the absolute position so the next call sees the correct
+        // RoPE base. Without this, speculative-decode loops that repeatedly
+        // call `forward_token` would apply position 0 to every token.
+        self.position_offset += 1;
+
         Ok(hidden)
     }
 
@@ -947,9 +948,8 @@ impl DFlashDraftModel {
         }
         let b = tokens.len();
         if b == 1 {
-            let h = self.forward_token(tokens[0], None)?;
-            self.position_offset += 1;
-            return Ok(h);
+            // `forward_token` advances `position_offset` itself.
+            return self.forward_token(tokens[0], None);
         }
 
         let h = self.config.hidden_size;
