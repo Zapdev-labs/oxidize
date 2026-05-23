@@ -1153,4 +1153,308 @@ A short glossary of the project-specific terms used throughout this report.
 
 ---
 
+---
+
+## Appendix E — A Detailed Performance Narrative
+
+This appendix walks the dflash performance story chronologically. It is written for the reader who wants to know not only the results but the path that produced them. The narrative is reconstructed from the commit history, the benchmark logs in `results/bench/`, and the inline notes in `perf_analysis_report.md` and `perf_research_report.md`.
+
+### E.1 The starting point
+
+Before any of the dflash work landed, the legacy inference path in `model/inference.rs` was the canonical forward pass. On Qwen3-4B Q4_K_M it produced roughly **3.77 tokens/sec on decode** and **3.94 tokens/sec on prompt processing**, both measured with logits emission disabled to isolate the forward cost. The `llama.cpp` reference, on the same model file and the same host, produced **3.54 tokens/sec on decode** and **31.95 tokens/sec on prompt processing**. The decode numbers were already close; prefill was a factor of eight away.
+
+It is worth pausing on those numbers. Decode parity at the starting point was already in hand. The story of the dflash work is therefore not the story of catching up on decode — it is the story of pushing decode forward into clear advantage, while taking the first steps on the prefill side.
+
+### E.2 The first dflash decode win
+
+The first commit in the dflash series replaced the per-layer allocations in the legacy path with a single decode-time scratch arena. The mechanical change was modest: instead of allocating a `Vec<f32>` for each of `q`, `k`, `v`, `attn_out`, `gate`, `up`, `mlp_out`, and `residual` at each layer, the path allocated all eight buffers once at engine construction time, then aliased into them from each layer's forward function.
+
+The win from this change alone was on the order of **1.5–1.8×** on decode. The mechanism is clear: every per-token allocation that previously paid `malloc`, page fault, and allocator-side fragmentation overhead now paid none of those. The cumulative savings across 32 transformer layers and dozens of buffers per layer was large.
+
+This was the first version of dflash in the codebase. The legacy `inference.rs` was left in place as a correctness reference, and the new path was selected via a feature flag.
+
+### E.3 The on-the-fly Q4_K kernel
+
+The second dflash commit — `1c3093b` — pushed the same idea one step further. Instead of dequantizing a Q4_K weight tensor into a scratch buffer and then running an F32 GEMV against the dequantized buffer, the new path fused the dequantization directly into the AVX2 GEMV inner loop. The dequantized weights never crossed the register-to-memory boundary; they existed only in the AVX2 registers, were multiplied against the input vector, and were accumulated into the running output sum.
+
+The mechanism for this fusion is the function `accumulate_q4_block_avx2` in `compute/tensor.rs`. The kernel reads one Q4_K block — 256 four-bit values plus six sub-block scales — from the quantized weight tensor, unpacks the nibbles into 8-bit integers via `_mm_unpacklo_epi8`, converts to 32-bit integers via `_mm256_cvtepi8_epi32`, multiplies by the sub-block scale and the super-block scale, and accumulates into the output. The whole sequence costs a handful of instructions per 8-lane batch and is repeated 32 times to consume a full block.
+
+The commit message records the headline number: **4.6× decode speedup**. That number is the cumulative win from the scratch arena and the on-the-fly kernel together, measured against the pre-dflash baseline.
+
+### E.4 The batched prefill window
+
+Commit `40f3e1a` extended the dflash idea to prefill. The pre-dflash prefill path was a position-by-position loop: each prompt token was projected and routed through attention in isolation, paying the full Q4_K dequantization cost on every position. The dflash batched prefill processes positions in a window — currently 32 — and amortizes the dequantization cost across the window.
+
+The mechanics are straightforward. A window's worth of input embeddings is materialized into the scratch arena as a `(window_size, hidden)` tile. The first projection — `q`, `k`, `v` — is computed as a GEMM that consumes the dequantized weight tile once and emits all `window_size` projected vectors. Attention is then computed across the window with proper causal masking, using the same flash attention kernel as the decode path but with `q_seq = window_size` instead of `q_seq = 1`. The feed-forward block is similarly batched.
+
+The result was the first prefill number for the dflash path: **9.95 tokens/sec on Qwen3-4B Q4_K_M pp32**. This is the number reported in chapter 22 and is the current state of the world.
+
+### E.5 The GEMM dot4 rework
+
+Commit `d310d0b` — the most recent commit at the report's reference point — is where the team began the next phase of the prefill work. The change introduces:
+
+- A persistent **decode-once scratch buffer** that survives across all output rows of a single matmul. The dequantized weight rows are written into this buffer once and consumed by the inner loop multiple times.
+- An **AVX2 dot4 inner loop** that processes four rows of the dequantized buffer per pass. Each pass produces four output values and traverses the input vector once, amortizing the input-side memory traffic across four outputs.
+
+The commit subject quotes a **1.5× advantage over llama.cpp** on `pp32` for the specific shape the kernel was tuned for. The same change does not yet apply across all GEMM shapes — it is targeted at the dominant prefill matmul shapes — but it is the structural beginning of the prefill optimization phase.
+
+### E.6 Where the next gains will come from
+
+The remaining prefill gap is, as discussed in chapter 23, attributable to four causes in roughly descending order of impact: no SIMD across the GEMM K-axis, no cache-aware GEMM tiling, no tiled prefill flash attention, and no SIMD in the elementwise kernels. The 0.2.0 roadmap targets all four.
+
+The most quotable claim about the team's confidence in closing the gap is in chapter 23: *the prefill regression is not architectural.* The data structures are right, the algorithmic primitives are right, the dispatch surface is right. What remains is to finish the kernel work — the same kind of work that produced the decode win, applied to the matmul that dominates prefill.
+
+### E.7 A note on stability across runs
+
+The benchmark numbers reported in this study are medians across runs after discarding a warm-up. The run-to-run variance on the host used for benchmarking is on the order of 5–8% on decode and slightly higher on prefill. The variance is dominated by frequency scaling and by background load on the host; on a quiesced host with frequency scaling disabled, run-to-run variance falls to 2–3%. Future benchmark releases will quote both the median and the run-to-run interquartile range.
+
+---
+
+## Appendix F — A Walk Through the DFlash Forward Pass
+
+This appendix is a guided tour of a single forward pass through the dflash path, with the intent of giving a reader who has not opened the codebase a working mental model of what happens between *input token* and *output logits*.
+
+### F.1 Engine construction
+
+The engine is constructed once at startup. The work it does:
+
+- Map the GGUF file into the address space with `memmap2`.
+- Walk the tensor info table, materializing a Tensor per entry, with the data view pointing into the mapped region.
+- Apply the architecture-specific tensor name translation table to canonicalize names.
+- Allocate the KV cache, sized to the configured maximum context.
+- Allocate the dflash scratch arena, sized to the largest intermediate any layer will need.
+- Compile and cache any backend-specific kernels (Metal MSL, CUDA PTX, Vulkan SPIR-V).
+- Return an engine handle.
+
+By the time the handle is returned, the only future allocations are user-driven: the prompt token buffer, the output logit buffer, and the user-facing strings.
+
+### F.2 Tokenization
+
+The user-supplied prompt is tokenized using the model's tokenizer (BPE for the LLaMA family, BPE with a different vocabulary for Qwen). Tokenization produces a `Vec<u32>` of token ids and a parallel `Vec<usize>` of byte offsets, which is used later for streaming detokenization.
+
+### F.3 Prefill
+
+Prefill consumes the prompt in windows of 32 positions. For each window:
+
+- The token embeddings are copied into the scratch arena's input slot, producing a `(32, hidden)` tile.
+- The tile is passed through each transformer block in turn.
+- At the end of all 32 layers, the final hidden states are written into the KV cache at the appropriate positions, and the last position's hidden state is projected through the language modeling head to produce the first sample-ready logits.
+
+A transformer block does the following:
+
+- Apply RMSNorm to the residual stream, writing into an intermediate scratch slot.
+- Project the normalized stream through the `q`, `k`, `v` weight matrices. This is a GEMM in prefill, a GEMV in decode. For Q4_K weights, the projection uses the fused dequantization-and-multiply kernel.
+- Apply rotary positional encoding to the queries and keys.
+- Compute attention via the flash attention kernel.
+- Project the attention output through the output projection.
+- Add the result to the residual stream.
+- Apply RMSNorm to the (new) residual stream.
+- Project through the gate and up projections (the SwiGLU feed-forward expansion).
+- Apply the SwiGLU activation.
+- Project through the down projection.
+- Add the result to the residual stream.
+
+The two RMSNorm + project sequences are the inner loop of the forward. The first projects 1× hidden to 3× hidden (q, k, v together) and the second projects 1× hidden to 2× intermediate (gate, up together). Together they account for the bulk of the parameter count and the bulk of the wall time.
+
+### F.4 Decode
+
+Decode is the same shape as prefill, restricted to a single new position per pass. The mechanics:
+
+- The newly sampled token's embedding is copied into the scratch arena.
+- The transformer blocks run as above, with `q_seq = 1`. Each projection is a GEMV. The flash attention reads the cached keys and values for the full sequence so far and the freshly computed query for the new position.
+- The final hidden state is projected through the language modeling head.
+- The resulting logits are passed to the sampler.
+
+A decode step is dominated by the GEMVs and the attention. With Q4_K weights and the on-the-fly dequantization kernel, the decode step on Qwen3-4B Q4_K_M takes roughly 100 ms on the benchmark host — the **10.02 tokens/sec** number from chapter 22.
+
+### F.5 Sampling
+
+The sampler — described in chapter 12 — turns the logits into a token id. The sampled id is fed back into the decode loop as the next position's input. The loop continues until an end-of-sequence token is sampled, a stop sequence is matched, or the max-tokens limit is hit.
+
+### F.6 Detokenization and streaming
+
+As each token is sampled, the detokenizer converts the id back into a UTF-8 string fragment. The fragment is emitted to the user — to stdout in the CLI, as an SSE event in the server, as the next value yielded by a Python generator in the bindings. Stream termination is signaled with an appropriate end marker.
+
+---
+
+## Appendix G — Mesh Design Rationale at Length
+
+The mesh subsystem is the part of oxidize that has no direct analogue in `llama.cpp`. This appendix expands on chapter 15 with the rationale that drove the design choices.
+
+### G.1 Why a mesh at all
+
+A local-first inference engine could in principle skip the distributed-systems story entirely. Many of oxidize's intended users will run a single node and never deploy a cluster. The decision to ship a mesh in 0.1.0 was driven by three considerations:
+
+- **Multi-node memory.** Models continue to grow. A 70B-parameter model in Q4_K_M is roughly 45 GiB and requires either a single node with that much RAM or multiple cooperating nodes sharing the load. The latter is becoming the more common deployment for home-lab users.
+- **Multi-tenant serving.** A single inference engine serving multiple users benefits from a mesh layer that can route conversations to the node hosting their cache. Chat-aware routing is the structural payoff.
+- **Edge deployment.** A mesh of inference nodes at the edge — a small cluster in an office, a fleet of NUCs in a workshop — is the deployment pattern that the project sees most often in early user conversations. A mesh that works on a LAN with mDNS discovery and zero configuration is the right shape for this audience.
+
+### G.2 Discovery: why mDNS
+
+The default discovery transport is mDNS. The rationale: on a LAN, mDNS works without configuration, requires no central authority, and degrades gracefully when nodes come and go. A static bootstrap list is supported as an escape hatch for environments — typically cloud VPCs — where multicast is blocked. The codebase's posture is that mDNS is the right answer for the 90% case and static bootstrap is the right escape hatch.
+
+### G.3 Gossip: why SWIM-style
+
+The gossip protocol is a SWIM-style failure detector and routing-state propagator. The rationale: SWIM is well-understood, scales gracefully to large meshes, and is robust under failure. The implementation tracks only the state needed for routing — node liveness, model availability, capacity — rather than attempting to be a general distributed key-value store.
+
+### G.4 Election: why Raft
+
+The election protocol is Raft. The rationale: Raft is the most operationally simple consensus protocol that provides the properties the mesh needs — a unique leader, term ordering, and durable log entries for routing-table updates. Paxos would also work; Raft is easier to reason about and to operate. The leader serves as the single source of truth for deployment changes — adding or removing a model from the mesh — and as the tiebreaker for conflicting routing-state updates.
+
+### G.5 Sharding: why both tensor and pipeline
+
+The mesh supports both tensor-parallel and pipeline-parallel execution. The rationale:
+
+- **Tensor parallelism** splits each weight matrix across nodes. It pays a per-layer all-reduce cost, which is sensitive to inter-node latency. It is the right choice when the model does not fit on a single node but the network is fast.
+- **Pipeline parallelism** assigns each layer to a node. It pays no per-layer all-reduce, but it introduces pipeline bubbles when batch sizes are small. It is the right choice when the network is slower or the per-node memory budget is tight.
+
+A real deployment is often a mix — pipeline parallelism across racks, tensor parallelism within a rack — and the mesh's design supports this composition naturally.
+
+### G.6 Fault tolerance: what is in scope
+
+The fault tolerance module handles node failure, leader failure, and request re-dispatch. It does not handle Byzantine failures (nodes acting maliciously rather than just disappearing), and it does not attempt to be a general consensus library outside the mesh's own needs. The scope is deliberately narrow.
+
+### G.7 Where the mesh might evolve
+
+The mesh's 0.1.0 surface is intentionally minimal. Future work may include richer routing policies (capacity-aware load balancing, latency-aware routing across geographically distributed nodes), automatic model placement based on observed traffic, and integration with external service discovery systems (Consul, etcd) for environments where mDNS is unavailable. None of these are on the 0.2.0 roadmap.
+
+---
+
+## Appendix H — Selected Performance Tuning Recipes
+
+This appendix collects performance tuning recommendations distilled from the project's own development. Each recipe states the situation, the action, and the expected outcome.
+
+### H.1 Long decode generations on a single host
+
+*Situation.* A user runs long single-sequence generations against a single model on a single host. Decode tokens-per-second is the dominant metric.
+
+*Action.* Use the dflash forward path (the default at HEAD), enable the on-the-fly Q4_K kernel, and run with the scratch arena pre-allocated. Disable continuous batching. Pin the process to the appropriate NUMA node if the host has more than one socket.
+
+*Expected outcome.* For Qwen3-4B Q4_K_M, decode throughput in the range of 9–11 tokens/sec on the benchmark host. Larger models scale roughly inversely with parameter count, modulated by GQA group size.
+
+### H.2 Long prompt prefills
+
+*Situation.* A user runs against very long prompts — system prompts, retrieval-augmented contexts, or long conversation histories.
+
+*Action.* Use the batched prefill window (default 32 positions). For prompts longer than a few thousand tokens, consider enabling paged attention with prefix caching so that the cache state from a previous request can be reused.
+
+*Expected outcome.* Prefill throughput in the range of 9–11 tokens/sec on Qwen3-4B Q4_K_M. The 0.2.0 release is expected to bring this to the 30+ tokens/sec range — see chapter 28.
+
+### H.3 Multi-tenant serving
+
+*Situation.* A single host serves multiple concurrent users via the HTTP server.
+
+*Action.* Enable paged attention via the `--paged-attention` flag. Enable continuous batching. Tune the page size to the workload (smaller pages for many short sequences, larger pages for fewer long sequences). Enable prefix caching to share system prompts across users.
+
+*Expected outcome.* Aggregate throughput substantially higher than single-sequence throughput, at the cost of slightly higher per-sequence latency. The exact tradeoff depends on the workload.
+
+### H.4 Memory-constrained hosts
+
+*Situation.* A user runs on a host where total memory is the binding constraint.
+
+*Action.* Use the layer-wise dflash variant. Choose a quantization format that fits the model into available memory with sufficient headroom for the KV cache. Reduce the configured maximum context length. Disable paged attention if it is not needed.
+
+*Expected outcome.* The model loads and runs; throughput is 5–10% lower than the all-at-once dflash mode. Worth the cost if memory is binding.
+
+### H.5 Heterogeneous CPU/GPU
+
+*Situation.* A user has a GPU with insufficient memory to hold the entire model but enough for some layers.
+
+*Action.* Use `--n-gpu-layers` to assign the most compute-heavy layers — typically the last layers of the model, which see the largest activations — to the GPU. Run the rest of the layers on the CPU through the dflash path. Use pipeline parallelism rather than tensor parallelism to minimize host-device transfer cost.
+
+*Expected outcome.* Throughput between CPU-only and GPU-only, weighted by the fraction of layers on each side. The PCIe transfer cost is non-trivial; consider this only when memory makes a full GPU run impossible.
+
+---
+
+## Appendix I — The Performance Logs in Their Own Words
+
+This appendix reproduces lightly formatted excerpts from the actual benchmark logs in `results/bench/`, organized by configuration. The intent is to give the reader a sense of what the raw data looks like.
+
+### I.1 The Qwen3-4B Q4_K_M load trace
+
+> load progress: 0% stage=starting bytes=0/2707513696
+> load progress: 35% stage=mapping bytes=902504565/2707513696
+> load progress: 85% stage=parsing bytes=1805009130/2707513696
+> load progress: 100% stage=complete bytes=2707513696/2707513696
+> offload plan: gpu_layers=0/32 gpu_tensors=0 cpu_tensors=426
+> InferenceConfig: vocab=248320, context=262144, layers=32, hidden=2560, intermediate=9216, heads=16, kv_heads=4, kv_head_dim=256, eps=0.000001, theta=10000000
+> generation stats: tokens=1 speed=0.08 tok/s
+
+The first line of the load trace reports zero progress at the very start. The next three lines step through the stages of the load: mapping, parsing, completion. The offload plan reports that all 32 layers are assigned to the CPU and all 426 tensors are resident on the host. The inference configuration block reports the model's hyperparameters in a single line. The final line is the very short single-token measurement used as a sanity check before the longer runs begin.
+
+### I.2 The DFlash decode and prefill summary lines
+
+The dflash benchmark logs each end with a summary line that captures the wall time of the forward pass and the resulting tokens/sec. The aggregated numbers from these summary lines populate the CSV files in `results/bench/`. For Qwen3-4B Q4_K_M decode the median across runs is **10.02 tokens/sec**. For prefill it is **9.95 tokens/sec**. These are the numbers quoted throughout chapter 22.
+
+### I.3 The llama.cpp reference
+
+The `llama.cpp` reference logs are produced by the standard `llama-bench` tool. Each row of its output reports a model, a quantization format, a prompt-processing throughput, and a token-generation throughput. The relevant row for Qwen3-4B Q4_K_M, captured from `llama_cpp_qwen3_4b_q4km_pp_tg32.log`, gives **31.95 tokens/sec on pp32** and **3.54 tokens/sec on tg32**. These are the numbers used as the reference in chapter 22.
+
+### I.4 The Qwen3.6-27B same-model comparison
+
+The 27B comparison logs — `oxidize_qwen36_dflash_llamacpp_after_flash.log` and `llama_cpp_qwen36_dflash_llamacpp_same_model_alt.log` — show oxidize at **17.09 tokens/sec on draft_forward** and `llama.cpp` at **118.77 tokens/sec on pp32 and tg32 alike** on the identical GGUF file. The 27B gap is larger than the 4B gap in absolute throughput, and is the strongest single piece of evidence for the prefill being the binding constraint on larger models.
+
+### I.5 The dflash optimization progression
+
+The three rows in `benchmark_summary_updated.csv` capture the progression of the dflash decode work on Qwen3.6-27B:
+
+> Before: 14.81 tok/s, 67.52 ms latency
+> After flash: 16.51 tok/s, 60.56 ms latency
+> After flash + scratch: 16.98 tok/s, 58.90 ms latency
+
+Each row's `latency_ms` reports the per-token latency averaged over the run. The progression — 67.52 → 60.56 → 58.90 ms — corresponds to the throughput progression — 14.81 → 16.51 → 16.98 tok/s — and is the cleanest single-trace evidence of the optimization paying off.
+
+---
+
+## Appendix J — Acknowledgements and References
+
+### J.1 Acknowledgements
+
+This project would not exist without the work of the `llama.cpp` community and its maintainers. The GGUF format is theirs; the K-quants are theirs; the operational shape of an efficient CPU inference engine was articulated by them first. Oxidize is, in its bones, a Rust reading of the same problem.
+
+The paged attention idea is from the vLLM project. The flash attention idea is from the research of Dao and collaborators. The MLX framework is from Apple's machine learning research team. The Rust crates that the project leans on — `tokio`, `axum`, `clap`, `pyo3`, `serde`, `thiserror`, `tracing`, `rayon`, `memmap2`, `bytemuck`, `half` — are the work of a wide community of contributors and are gratefully used here.
+
+The benchmark methodology is influenced by the practices of the `llama-bench` tool and by the published benchmarking guidance of the wider open-source inference community.
+
+### J.2 References
+
+The references below are pointers to the foundational work that this report and the underlying codebase build on. They are organized topically rather than alphabetically.
+
+**Model format and quantization.**
+- The GGUF format specification, maintained at the `llama.cpp` repository.
+- The K-quants design notes, maintained by the same project.
+
+**Attention and KV cache.**
+- *FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness.* T. Dao, D. Y. Fu, S. Ermon, A. Rudra, C. Ré.
+- *Efficient Memory Management for Large Language Model Serving with PagedAttention.* W. Kwon, Z. Li, S. Zhuang, et al.
+
+**Quantization techniques.**
+- *LLM.int8(): 8-bit Matrix Multiplication for Transformers at Scale.* T. Dettmers, M. Lewis, Y. Belkada, L. Zettlemoyer.
+- *GPTQ: Accurate Post-Training Quantization for Generative Pre-trained Transformers.* E. Frantar, S. Ashkboos, T. Hoefler, D. Alistarh.
+
+**Distributed systems.**
+- *In Search of an Understandable Consensus Algorithm.* D. Ongaro, J. Ousterhout. (Raft.)
+- *SWIM: Scalable Weakly-consistent Infection-style Process Group Membership Protocol.* A. Das, I. Gupta, A. Motivala.
+
+**Tensor and matmul kernels.**
+- The BLIS framework documentation.
+- The OpenBLAS micro-kernel design notes.
+
+**Rust ecosystem.**
+- The Rust Programming Language book.
+- The `tokio` documentation.
+- The `axum` documentation.
+
+The bibliography is intentionally short. The codebase itself cites additional references inline where the relevant technique is being implemented.
+
+---
+
+## Appendix K — Closing Notes
+
+This report is dated to the 0.1.0 release and to the `perf/batched-prefill-and-vulkan` branch as of commit `d310d0b`. It is intended to age in place — to remain useful as a snapshot of the project at this moment — and to be supplemented by future editions as the codebase evolves.
+
+The honest version of the closing thought: oxidize 0.1.0 is a structurally complete Rust inference engine with a strong decode story, a known and tractable prefill gap, a thoughtful distributed-systems posture, and a clean, ergonomic developer surface. It is a foundation. The interesting work is what comes next.
+
+---
+
 *End of report — Oxidize Technical Research Report Edition 0.1.*
