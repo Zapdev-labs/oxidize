@@ -88,6 +88,8 @@ pub struct InferenceConfig {
     pub num_key_value_heads: usize,
     pub key_value_head_dim: usize,
     pub kv_cache_dtype: DType,
+    /// Quantization scheme for I8/I16 KV cache (no effect on F32/F16).
+    pub kv_quantization: crate::kv_cache::KvQuantization,
     pub rms_norm_eps: f32,
     pub rope_theta: f32,
     pub architecture: ModelArchitecture,
@@ -113,6 +115,7 @@ impl Default for InferenceConfig {
             num_key_value_heads: 32,
             key_value_head_dim: 0,
             kv_cache_dtype: DType::F32,
+            kv_quantization: Default::default(),
             rms_norm_eps: 1e-5,
             rope_theta: 10000.0,
             architecture: ModelArchitecture::Llama,
@@ -231,6 +234,7 @@ impl InferenceConfig {
             num_key_value_heads,
             key_value_head_dim,
             kv_cache_dtype: DType::F32,
+            kv_quantization: crate::kv_cache::KvQuantization::default(),
             rms_norm_eps,
             rope_theta,
             architecture,
@@ -870,6 +874,7 @@ impl InferenceModel {
             head_count: config.num_key_value_heads,
             head_dim: config.kv_head_dim(),
             dtype: config.kv_cache_dtype,
+            quantization: config.kv_quantization,
         };
         let kv_cache = KvCache::new(kv_cache_config).map_err(|e| format!("kv_cache: {:?}", e))?;
 
@@ -2060,6 +2065,7 @@ mod tests {
             head_count: config.num_key_value_heads,
             head_dim: config.kv_head_dim(),
             dtype: DType::F32,
+            quantization: Default::default(),
         };
 
         InferenceModel {

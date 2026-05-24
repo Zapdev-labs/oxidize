@@ -1,7 +1,22 @@
 use crate::tensor::DType;
+use crate::turboquant::TURBOQUANT_BLOCK_SIZE;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
+
+/// Quantization scheme for I8/I16 KV cache storage.
+///
+/// `Asymmetric` keeps the original per-token (scale, min) layout: one pair of
+/// floats per (layer, position). `TurboQuant` switches to per-block symmetric
+/// scales using 32-element blocks (see [`crate::turboquant`]). The block scheme
+/// is more accurate at long context because each 32-channel slice gets its own
+/// scale, at the cost of `blocks_per_token` extra f32 scales per token.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum KvQuantization {
+    #[default]
+    Asymmetric,
+    TurboQuant,
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct KvCacheConfig {
@@ -10,6 +25,8 @@ pub struct KvCacheConfig {
     pub head_count: usize,
     pub head_dim: usize,
     pub dtype: DType,
+    #[serde(default)]
+    pub quantization: KvQuantization,
 }
 
 impl KvCacheConfig {
@@ -23,6 +40,11 @@ impl KvCacheConfig {
 
     pub fn element_count(&self) -> usize {
         self.layer_count.saturating_mul(self.layer_size())
+    }
+
+    /// Number of TurboQuant scale entries per (layer, position) token.
+    pub(crate) fn blocks_per_token(&self) -> usize {
+        self.token_size().div_ceil(TURBOQUANT_BLOCK_SIZE)
     }
 }
 
@@ -140,6 +162,12 @@ enum KvStorage {
         scales: Vec<f32>,
         mins: Vec<f32>,
     },
+    /// TurboQuant INT8: per-block (32 channels) symmetric signed scale,
+    /// stored as `q + 127` so the on-disk byte is unsigned.
+    TurboQ8 { data: Vec<u8>, scales: Vec<f32> },
+    /// TurboQuant INT4: per-block (32 channels) symmetric signed scale,
+    /// two 4-bit values packed per byte. Each nibble stores `q + 7`.
+    TurboQ4 { data: Vec<u8>, scales: Vec<f32> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -182,16 +210,17 @@ impl KvCache {
     ) -> Result<Self, KvCacheError> {
         let size = config.element_count();
         let token_slots = config.layer_count.saturating_mul(config.context_size);
-        let (key, value) = match config.dtype {
-            DType::F32 => (
+        let tq_scale_slots = token_slots.saturating_mul(config.blocks_per_token());
+        let (key, value) = match (config.dtype, config.quantization) {
+            (DType::F32, _) => (
                 KvStorage::F32(vec![0.0; size]),
                 KvStorage::F32(vec![0.0; size]),
             ),
-            DType::F16 => (
+            (DType::F16, _) => (
                 KvStorage::F16(vec![f32_to_f16_bits(0.0); size]),
                 KvStorage::F16(vec![f32_to_f16_bits(0.0); size]),
             ),
-            DType::I8 => (
+            (DType::I8, KvQuantization::Asymmetric) => (
                 KvStorage::Q8 {
                     data: vec![0; size],
                     scales: vec![0.0; token_slots],
@@ -203,7 +232,7 @@ impl KvCache {
                     mins: vec![0.0; token_slots],
                 },
             ),
-            DType::I16 => (
+            (DType::I16, KvQuantization::Asymmetric) => (
                 KvStorage::Q4 {
                     data: vec![0; size.div_ceil(2)],
                     scales: vec![0.0; token_slots],
@@ -215,7 +244,27 @@ impl KvCache {
                     mins: vec![0.0; token_slots],
                 },
             ),
-            dtype => return Err(KvCacheError::UnsupportedDType { dtype }),
+            (DType::I8, KvQuantization::TurboQuant) => (
+                KvStorage::TurboQ8 {
+                    data: vec![0; size],
+                    scales: vec![0.0; tq_scale_slots],
+                },
+                KvStorage::TurboQ8 {
+                    data: vec![0; size],
+                    scales: vec![0.0; tq_scale_slots],
+                },
+            ),
+            (DType::I16, KvQuantization::TurboQuant) => (
+                KvStorage::TurboQ4 {
+                    data: vec![0; size.div_ceil(2)],
+                    scales: vec![0.0; tq_scale_slots],
+                },
+                KvStorage::TurboQ4 {
+                    data: vec![0; size.div_ceil(2)],
+                    scales: vec![0.0; tq_scale_slots],
+                },
+            ),
+            (dtype, _) => return Err(KvCacheError::UnsupportedDType { dtype }),
         };
 
         Ok(Self {
@@ -399,6 +448,12 @@ impl KvCache {
                 data.len()
                     + (scales.len() * std::mem::size_of::<f32>())
                     + (mins.len() * std::mem::size_of::<f32>())
+            }
+            KvStorage::TurboQ8 { data, scales } => {
+                data.len() + (scales.len() * std::mem::size_of::<f32>())
+            }
+            KvStorage::TurboQ4 { data, scales } => {
+                data.len() + (scales.len() * std::mem::size_of::<f32>())
             }
         }
     }
@@ -825,6 +880,82 @@ fn write_storage(
                 }
             }
         }
+        KvStorage::TurboQ8 { data, scales } => {
+            write_turboquant_token::<8>(
+                data,
+                scales,
+                config,
+                range.start,
+                token_index,
+                src,
+            );
+        }
+        KvStorage::TurboQ4 { data, scales } => {
+            write_turboquant_token::<4>(
+                data,
+                scales,
+                config,
+                range.start,
+                token_index,
+                src,
+            );
+        }
+    }
+}
+
+/// Encode one token into TurboQuant block-quantized form.
+///
+/// `BITS` is 4 or 8. Each 32-element block of `src` produces one scale
+/// (`max_abs / max_val`) and a stream of unsigned codes `q + max_val` written
+/// into `data` starting at element offset `data_element_start`. For `BITS=4`
+/// the codes are packed two-per-byte (low nibble first); for `BITS=8` they are
+/// written one-byte-per-code.
+///
+/// Requires `data_element_start` to be even when `BITS=4` (guaranteed by
+/// `token_range` because `token_size` is always head_count * head_dim, both even).
+fn write_turboquant_token<const BITS: u8>(
+    data: &mut [u8],
+    scales: &mut [f32],
+    config: &KvCacheConfig,
+    data_element_start: usize,
+    token_index: usize,
+    src: &[f32],
+) {
+    let block_size = TURBOQUANT_BLOCK_SIZE;
+    let max_val = ((1u32 << (BITS - 1)) - 1) as f32;
+    let blocks_per_token = config.blocks_per_token();
+    let scale_off = token_index * blocks_per_token;
+
+    for b in 0..blocks_per_token {
+        let s = b * block_size;
+        let e = (s + block_size).min(src.len());
+        let chunk = &src[s..e];
+        let mut max_abs = 0.0_f32;
+        for &v in chunk {
+            max_abs = max_abs.max(v.abs());
+        }
+        let scale = if max_abs > 0.0 { max_abs / max_val } else { 1.0 };
+        scales[scale_off + b] = scale;
+
+        if BITS == 4 {
+            let packed_start = (data_element_start + s) / 2;
+            for (i, &v) in chunk.iter().enumerate() {
+                let q = (v / scale).round().clamp(-max_val, max_val) as i32;
+                let uq = (q + max_val as i32) as u8 & 0x0F;
+                let byte_idx = packed_start + (i / 2);
+                if i % 2 == 0 {
+                    data[byte_idx] = (data[byte_idx] & 0xF0) | uq;
+                } else {
+                    data[byte_idx] = (data[byte_idx] & 0x0F) | (uq << 4);
+                }
+            }
+        } else {
+            let byte_start = data_element_start + s;
+            for (i, &v) in chunk.iter().enumerate() {
+                let q = (v / scale).round().clamp(-max_val, max_val) as i32;
+                data[byte_start + i] = (q + max_val as i32) as u8;
+            }
+        }
     }
 }
 
@@ -875,6 +1006,49 @@ fn read_storage(
                 }
             }
         }
+        KvStorage::TurboQ8 { data, scales } => {
+            read_turboquant_token::<8>(data, scales, config, range.start, token_index, dst);
+        }
+        KvStorage::TurboQ4 { data, scales } => {
+            read_turboquant_token::<4>(data, scales, config, range.start, token_index, dst);
+        }
+    }
+}
+
+fn read_turboquant_token<const BITS: u8>(
+    data: &[u8],
+    scales: &[f32],
+    config: &KvCacheConfig,
+    data_element_start: usize,
+    token_index: usize,
+    dst: &mut [f32],
+) {
+    let block_size = TURBOQUANT_BLOCK_SIZE;
+    let max_val = ((1u32 << (BITS - 1)) - 1) as f32;
+    let blocks_per_token = config.blocks_per_token();
+    let scale_off = token_index * blocks_per_token;
+
+    for b in 0..blocks_per_token {
+        let s = b * block_size;
+        let e = (s + block_size).min(dst.len());
+        let scale = scales[scale_off + b];
+        if BITS == 4 {
+            let packed_start = (data_element_start + s) / 2;
+            for i in 0..(e - s) {
+                let byte = data[packed_start + (i / 2)];
+                let nibble = if i % 2 == 0 {
+                    byte & 0x0F
+                } else {
+                    (byte >> 4) & 0x0F
+                };
+                dst[s + i] = (nibble as f32 - max_val) * scale;
+            }
+        } else {
+            let byte_start = data_element_start + s;
+            for i in 0..(e - s) {
+                dst[s + i] = (data[byte_start + i] as f32 - max_val) * scale;
+            }
+        }
     }
 }
 
@@ -892,6 +1066,9 @@ fn migrate_storage_from_position_major(storage: &mut KvStorage, config: &KvCache
             migrate_token_slots_from_position_major(scales, config);
             migrate_token_slots_from_position_major(mins, config);
         }
+        // TurboQuant variants were introduced after the layer-major migration,
+        // so no legacy position-major data ever exists for them.
+        KvStorage::TurboQ8 { .. } | KvStorage::TurboQ4 { .. } => {}
     }
 }
 
@@ -1085,6 +1262,7 @@ mod tests {
             head_count: 2,
             head_dim: 8,
             dtype: DType::F32,
+            quantization: Default::default(),
         })
         .expect("f32 kv cache should be supported");
         let f16_cache = KvCache::new(KvCacheConfig {
@@ -1093,6 +1271,7 @@ mod tests {
             head_count: 2,
             head_dim: 8,
             dtype: DType::F16,
+            quantization: Default::default(),
         })
         .expect("f16 kv cache should be supported");
         let q8_cache = KvCache::new(KvCacheConfig {
@@ -1101,6 +1280,7 @@ mod tests {
             head_count: 2,
             head_dim: 8,
             dtype: DType::I8,
+            quantization: Default::default(),
         })
         .expect("q8 kv cache should be supported");
         let q4_cache = KvCache::new(KvCacheConfig {
@@ -1109,6 +1289,7 @@ mod tests {
             head_count: 2,
             head_dim: 8,
             dtype: DType::I16,
+            quantization: Default::default(),
         })
         .expect("q4 kv cache should be supported");
 
@@ -1132,6 +1313,7 @@ mod tests {
             head_count: 1,
             head_dim: 4,
             dtype: DType::F32,
+            quantization: Default::default(),
         })
         .expect("f32 kv cache should be supported");
 
@@ -1162,6 +1344,7 @@ mod tests {
             head_count: 1,
             head_dim: 2,
             dtype: DType::F32,
+            quantization: Default::default(),
         })
         .expect("f32 kv cache should be supported");
 
@@ -1199,6 +1382,7 @@ mod tests {
             head_count: 2,
             head_dim: 2,
             dtype: DType::F32,
+            quantization: Default::default(),
         })
         .expect("f32 kv cache should be supported");
 
@@ -1270,6 +1454,7 @@ mod tests {
             head_count: 1,
             head_dim: 2,
             dtype: DType::F32,
+            quantization: Default::default(),
         })
         .expect("f32 kv cache should be supported");
 
@@ -1299,6 +1484,7 @@ mod tests {
             head_count: 1,
             head_dim: 2,
             dtype: DType::F16,
+            quantization: Default::default(),
         })
         .expect("f16 kv cache should be supported");
 
@@ -1322,6 +1508,7 @@ mod tests {
             head_count: 1,
             head_dim: 4,
             dtype: DType::F16,
+            quantization: Default::default(),
         })
         .expect("f16 kv cache should be supported");
 
@@ -1356,6 +1543,7 @@ mod tests {
             head_count: 1,
             head_dim: 8,
             dtype: DType::I8,
+            quantization: Default::default(),
         })
         .expect("i8 kv cache should be supported");
 
@@ -1390,6 +1578,7 @@ mod tests {
             head_count: 1,
             head_dim: 8,
             dtype: DType::I16,
+            quantization: Default::default(),
         })
         .expect("i16 kv cache should be supported");
 
@@ -1424,6 +1613,7 @@ mod tests {
             head_count: 1,
             head_dim: 5,
             dtype: DType::I16,
+            quantization: Default::default(),
         })
         .expect("i16 kv cache should be supported");
 
@@ -1458,6 +1648,7 @@ mod tests {
             head_count: 1,
             head_dim: 1,
             dtype: DType::I32,
+            quantization: Default::default(),
         })
         .expect_err("non-fp dtype must be rejected");
         assert_eq!(
@@ -1471,6 +1662,7 @@ mod tests {
             head_count: 1,
             head_dim: 2,
             dtype: DType::F32,
+            quantization: Default::default(),
         })
         .expect("f32 kv cache should be supported");
         let err = cache
@@ -1503,6 +1695,7 @@ mod tests {
             head_count: 1,
             head_dim: 2,
             dtype: DType::F32,
+            quantization: Default::default(),
         })
         .expect("f32 kv cache should be supported");
 
@@ -1531,6 +1724,7 @@ mod tests {
             head_count: 1,
             head_dim: 2,
             dtype: DType::F32,
+            quantization: Default::default(),
         })
         .expect("f32 kv cache should be supported");
 
@@ -1566,6 +1760,7 @@ mod tests {
             head_count: 1,
             head_dim: 2,
             dtype: DType::F32,
+            quantization: Default::default(),
         })
         .expect("f32 kv cache should be supported");
 
@@ -1605,6 +1800,7 @@ mod tests {
             head_count: 1,
             head_dim: 2,
             dtype: DType::F32,
+            quantization: Default::default(),
         })
         .expect("f32 kv cache should be supported");
 
@@ -1641,6 +1837,7 @@ mod tests {
                 head_count: 1,
                 head_dim: 2,
                 dtype: DType::F32,
+                quantization: Default::default(),
             },
             KvCacheEvictionStrategy::StopAtCapacity,
         )
@@ -1675,6 +1872,7 @@ mod tests {
                 head_count: 1,
                 head_dim: 2,
                 dtype: DType::F32,
+                quantization: Default::default(),
             },
             KvCacheEvictionStrategy::StopAtCapacity,
         )
@@ -1701,6 +1899,7 @@ mod tests {
             head_count: 1,
             head_dim: 2,
             dtype: DType::F32,
+            quantization: Default::default(),
         })
         .expect("f32 kv cache should be supported");
         let mut batch_cache = ContinuousBatchKvCache::new(cache, 4);
@@ -1741,6 +1940,7 @@ mod tests {
             head_count: 1,
             head_dim: 2,
             dtype: DType::F32,
+            quantization: Default::default(),
         })
         .expect("f32 kv cache should be supported");
         let mut batch_cache = ContinuousBatchKvCache::new(cache, 2);
@@ -1773,6 +1973,7 @@ mod tests {
             head_count: 1,
             head_dim: 2,
             dtype: DType::F32,
+            quantization: Default::default(),
         })
         .expect("f32 kv cache should be supported");
         let mut batch_cache = ContinuousBatchKvCache::new(cache, 2);
@@ -1801,6 +2002,7 @@ mod tests {
             head_count: 1,
             head_dim: 2,
             dtype: DType::F32,
+            quantization: Default::default(),
         })
         .expect("f32 kv cache should be supported");
         let mut batch_cache = ContinuousBatchKvCache::new(cache, 2);
@@ -1841,6 +2043,7 @@ mod tests {
             head_count: 1,
             head_dim: 4,
             dtype: DType::F32,
+            quantization: Default::default(),
         })
         .expect("f32 cache should be supported");
         cache
@@ -1876,6 +2079,7 @@ mod tests {
             head_count: 1,
             head_dim: 1,
             dtype: DType::F32,
+            quantization: Default::default(),
         })
         .expect("f32 cache should be supported");
 
@@ -1937,6 +2141,7 @@ mod tests {
             head_count: 1,
             head_dim: 2,
             dtype: DType::F32,
+            quantization: Default::default(),
         })
         .expect("f32 cache should be supported");
         let mut batch_cache = ContinuousBatchKvCache::new(cache, 2);
@@ -1979,6 +2184,7 @@ mod tests {
             head_count: 2,
             head_dim: 3,
             dtype: DType::F32,
+            quantization: Default::default(),
         };
 
         assert_eq!(token_slot_index(&config, 2, 0), 16);
@@ -1995,6 +2201,7 @@ mod tests {
             head_count: 1,
             head_dim: 5,
             dtype: DType::F32,
+            quantization: Default::default(),
         };
 
         let token_size = config.token_size();
@@ -2004,5 +2211,144 @@ mod tests {
 
         assert_eq!(position1.start - position0.start, token_size);
         assert_eq!(position2.start - position1.start, token_size);
+    }
+
+    // === TurboQuant KV cache tests ===
+
+    fn tq_kv_config(dtype: DType) -> KvCacheConfig {
+        KvCacheConfig {
+            layer_count: 2,
+            context_size: 4,
+            head_count: 2,
+            head_dim: 64, // token_size = 128 → 4 turboquant blocks per token
+            dtype,
+            quantization: KvQuantization::TurboQuant,
+        }
+    }
+
+    #[test]
+    fn turboquant_q8_kv_roundtrip_is_within_expected_error() {
+        let config = tq_kv_config(DType::I8);
+        let mut cache = KvCache::new(config).expect("cache should construct");
+        let token_size = config.token_size();
+        let key: Vec<f32> = (0..token_size)
+            .map(|i| ((i as f32) * 0.013).sin() * 4.0)
+            .collect();
+        let value: Vec<f32> = (0..token_size)
+            .map(|i| ((i as f32) * 0.027).cos() * 2.5)
+            .collect();
+
+        cache.set(0, 0, &key, &value).expect("set");
+        let mut out_k = vec![0.0_f32; token_size];
+        let mut out_v = vec![0.0_f32; token_size];
+        cache.get_key(0, 0, &mut out_k).expect("get_key");
+        cache.get_value(0, 0, &mut out_v).expect("get_value");
+
+        for (a, b) in key.iter().zip(out_k.iter()) {
+            assert!((a - b).abs() < 0.1, "q8 key drift {} vs {}", a, b);
+        }
+        for (a, b) in value.iter().zip(out_v.iter()) {
+            assert!((a - b).abs() < 0.1, "q8 value drift {} vs {}", a, b);
+        }
+    }
+
+    #[test]
+    fn turboquant_q4_kv_roundtrip_is_within_expected_error() {
+        let config = tq_kv_config(DType::I16);
+        let mut cache = KvCache::new(config).expect("cache should construct");
+        let token_size = config.token_size();
+        let key: Vec<f32> = (0..token_size)
+            .map(|i| ((i as f32) * 0.013).sin() * 4.0)
+            .collect();
+        let value: Vec<f32> = (0..token_size)
+            .map(|i| ((i as f32) * 0.027).cos() * 2.5)
+            .collect();
+
+        cache.set(0, 0, &key, &value).expect("set");
+        let mut out_k = vec![0.0_f32; token_size];
+        let mut out_v = vec![0.0_f32; token_size];
+        cache.get_key(0, 0, &mut out_k).expect("get_key");
+        cache.get_value(0, 0, &mut out_v).expect("get_value");
+
+        for (a, b) in key.iter().zip(out_k.iter()) {
+            assert!((a - b).abs() < 1.0, "q4 key drift {} vs {}", a, b);
+        }
+        for (a, b) in value.iter().zip(out_v.iter()) {
+            assert!((a - b).abs() < 1.0, "q4 value drift {} vs {}", a, b);
+        }
+    }
+
+    #[test]
+    fn turboquant_q4_data_smaller_than_q8_data() {
+        let q8 = KvCache::new(tq_kv_config(DType::I8)).expect("q8 cache");
+        let q4 = KvCache::new(tq_kv_config(DType::I16)).expect("q4 cache");
+        assert!(
+            q4.bytes_per_tensor() < q8.bytes_per_tensor(),
+            "q4 {} should pack smaller than q8 {}",
+            q4.bytes_per_tensor(),
+            q8.bytes_per_tensor()
+        );
+    }
+
+    #[test]
+    fn turboquant_kv_isolates_layers_and_positions() {
+        let config = tq_kv_config(DType::I8);
+        let mut cache = KvCache::new(config).expect("cache");
+        let token_size = config.token_size();
+
+        let key_a: Vec<f32> = (0..token_size).map(|i| i as f32 * 0.01).collect();
+        let key_b: Vec<f32> = (0..token_size).map(|i| -(i as f32) * 0.02).collect();
+        cache.set(0, 0, &key_a, &key_a).expect("set a");
+        cache.set(1, 2, &key_b, &key_b).expect("set b");
+
+        let mut out_a = vec![0.0_f32; token_size];
+        let mut out_b = vec![0.0_f32; token_size];
+        cache.get_key(0, 0, &mut out_a).expect("get a");
+        cache.get_key(1, 2, &mut out_b).expect("get b");
+
+        assert!((out_a[1] - key_a[1]).abs() < 0.05);
+        assert!((out_b[1] - key_b[1]).abs() < 0.05);
+        assert!((out_a[1] - out_b[1]).abs() > 0.005);
+    }
+
+    #[test]
+    fn turboquant_kv_preserves_small_values_alongside_large_ones() {
+        // First 32 channels are large, remaining channels are tiny. Per-block
+        // scaling must preserve both regions; per-token quantization would
+        // crush the small values to zero.
+        let config = tq_kv_config(DType::I16);
+        let mut cache = KvCache::new(config).expect("cache");
+        let token_size = config.token_size();
+        let mut key = vec![0.0_f32; token_size];
+        for elem in key.iter_mut().take(32) {
+            *elem = 100.0;
+        }
+        for elem in key.iter_mut().skip(32) {
+            *elem = 0.05;
+        }
+        cache.set(0, 0, &key, &key).expect("set");
+        let mut out = vec![0.0_f32; token_size];
+        cache.get_key(0, 0, &mut out).expect("get");
+
+        let small_region_avg: f32 = out[32..].iter().map(|v| v.abs()).sum::<f32>()
+            / (token_size - 32) as f32;
+        assert!(
+            small_region_avg > 0.01,
+            "per-block scales should preserve the small region; got |avg|={}",
+            small_region_avg
+        );
+    }
+
+    #[test]
+    fn turboquant_default_is_asymmetric() {
+        let cfg = KvCacheConfig {
+            layer_count: 1,
+            context_size: 1,
+            head_count: 1,
+            head_dim: 32,
+            dtype: DType::I8,
+            quantization: Default::default(),
+        };
+        assert_eq!(cfg.quantization, KvQuantization::Asymmetric);
     }
 }

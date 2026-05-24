@@ -290,6 +290,7 @@ impl LayerWiseModel {
             head_count: config.num_key_value_heads,
             head_dim: config.kv_head_dim(),
             dtype: config.kv_cache_dtype,
+            quantization: config.kv_quantization,
         };
         let kv_cache = KvCache::new(kv_cache_config).map_err(|e| format!("kv_cache: {:?}", e))?;
 

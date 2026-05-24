@@ -815,6 +815,10 @@ fn main() {
                 }
                 let mut config = InferenceConfig::from_gguf(&mapped);
                 config.kv_cache_dtype = args.kv_cache_dtype.dtype();
+                if args.turboquant {
+                    config.kv_quantization =
+                        oxidize_core::kv_cache::KvQuantization::TurboQuant;
+                }
                 if let Some(ctx) = args.ctx_size {
                     config.context_size = ctx;
                 }

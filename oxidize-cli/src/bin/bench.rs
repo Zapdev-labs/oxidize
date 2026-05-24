@@ -366,6 +366,7 @@ fn inference_config_from_dflash(
         num_key_value_heads: config.num_key_value_heads,
         key_value_head_dim,
         kv_cache_dtype: oxidize_core::tensor::DType::F32,
+        kv_quantization: Default::default(),
         rms_norm_eps: config.rms_norm_eps,
         rope_theta: config.rope_theta,
         architecture: Default::default(),
