@@ -1000,7 +1000,11 @@ pub fn dequantize_q2_k_scalar(input: &[u8], output: &mut [f32]) -> Result<(), Qu
         let qs = &block[16..80];
         let mut q_ptr = 0;
         let mut is = 0;
-        for _ in 0..2 {
+        // Match llama.cpp dequantize_row_q2_K: each outer iteration consumes a
+        // fresh 32-byte slab of qs (qs_base advances by 32), and the four inner
+        // iterations re-read the same slab with shifts 0/2/4/6.
+        for outer in 0..2 {
+            let qs_base = outer * 32;
             for _ in 0..4 {
                 let sc1 = scales[is];
                 let dl1 = d * ((sc1 & 0xF) as f32);
@@ -1012,10 +1016,11 @@ pub fn dequantize_q2_k_scalar(input: &[u8], output: &mut [f32]) -> Result<(), Qu
                 is += 1;
                 let shift = ((is / 2 - 1) % 4) * 2;
                 for l in 0..16 {
-                    out[q_ptr + l] = dl1 * (((qs[l] >> shift) & 3) as f32) - ml1;
+                    out[q_ptr + l] = dl1 * (((qs[qs_base + l] >> shift) & 3) as f32) - ml1;
                 }
                 for l in 0..16 {
-                    out[q_ptr + 16 + l] = dl2 * (((qs[l + 16] >> shift) & 3) as f32) - ml2;
+                    out[q_ptr + 16 + l] =
+                        dl2 * (((qs[qs_base + 16 + l] >> shift) & 3) as f32) - ml2;
                 }
                 q_ptr += 32;
             }

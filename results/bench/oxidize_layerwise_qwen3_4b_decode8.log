@@ -1,0 +1,24 @@
+=== Oxidize DFlash Benchmark ===
+
+Loading model from: /home/dih/oxidize/models/Qwen3-4B-Q4_K_M.gguf
+
+Model config from GGUF:
+  hidden_size: 2560
+  num_layers: 36
+  num_attention_heads: 32
+  num_key_value_heads: 8
+  intermediate_size: 9728
+  block_size: 16
+  mask_token_id: 151665
+  n_target_features (vocab): 25600
+  rope_theta: 1000000
+  rms_norm_eps: 0.000001
+  context_length: 40960
+
+Running standard model benchmark...
+
+  engine: layerwise
+  mode: decode
+  draft_tokens_per_step: 8
+  iterations: 2
+

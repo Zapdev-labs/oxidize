@@ -4,10 +4,7 @@ use crate::inference::{InferenceConfig, WeightStorage, lookup_quantized_embeddin
 use crate::kv_cache::KvCache;
 use crate::model::{Logits, Model, ModelError, Session, Token};
 use crate::quantization::{dequantize_scalar, quantized_size};
-use crate::tensor::{
-    apply_rope_f32, apply_swiglu_f32, gemv_f32_transposed, gemv_quantized_f32_transposed,
-    rms_norm_f32,
-};
+use crate::tensor::{apply_rope_f32, apply_swiglu_f32, gemv_f32, gemv_quantized_f32, rms_norm_f32};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -172,15 +169,15 @@ fn gemv_weight(
 ) -> Result<(), String> {
     match storage {
         WeightStorage::F32(data) => {
-            gemv_f32_transposed(data, cols, rows, input, output).map_err(|e| format!("{:?}", e))
+            gemv_f32(data, rows, cols, input, output).map_err(|e| format!("{:?}", e))
         }
         WeightStorage::Quantized(qtype, data) => {
-            gemv_quantized_f32_transposed(*qtype, data, cols, rows, input, output)
+            gemv_quantized_f32(*qtype, data, rows, cols, input, output)
                 .map_err(|e| format!("{:?}", e))
         }
         WeightStorage::MmapQuantized(qtype, mmap, offset, size) => {
             let data = &mmap[*offset..*offset + *size];
-            gemv_quantized_f32_transposed(*qtype, data, cols, rows, input, output)
+            gemv_quantized_f32(*qtype, data, rows, cols, input, output)
                 .map_err(|e| format!("{:?}", e))
         }
     }
@@ -434,30 +431,14 @@ impl LayerWiseModel {
         let token_idx = (token as usize).min(cfg.vocab_size.saturating_sub(1));
         match &self.tok_embeddings {
             WeightStorage::F32(data) => {
-                for (i, xi) in x.iter_mut().enumerate().take(h) {
-                    *xi = data[i * self.tok_embeddings_cols + token_idx];
-                }
+                x.copy_from_slice(&data[token_idx * h..(token_idx + 1) * h]);
             }
             WeightStorage::Quantized(qtype, data) => {
-                lookup_quantized_embedding(
-                    h,
-                    self.tok_embeddings_cols,
-                    *qtype,
-                    data,
-                    token_idx,
-                    &mut x,
-                );
+                lookup_quantized_embedding(h, *qtype, data, token_idx, &mut x);
             }
             WeightStorage::MmapQuantized(qtype, mmap, offset, size) => {
                 let data = &mmap[*offset..*offset + *size];
-                lookup_quantized_embedding(
-                    h,
-                    self.tok_embeddings_cols,
-                    *qtype,
-                    data,
-                    token_idx,
-                    &mut x,
-                );
+                lookup_quantized_embedding(h, *qtype, data, token_idx, &mut x);
             }
         }
 

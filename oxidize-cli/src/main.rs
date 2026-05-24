@@ -742,131 +742,25 @@ fn main() {
 
                 // Extract model config from GGUF metadata and run generation
                 let metadata = &mapped.parsed().metadata;
-                let vocab_size = metadata_u32(metadata, "llama.vocab_size")
-                    .or_else(|| metadata_u32(metadata, "qwen35.vocab_size"))
-                    .or_else(|| metadata_u32(metadata, "qwen2.vocab_size"))
-                    .or_else(|| metadata_u32(metadata, "qwen.vocab_size"))
-                    .or_else(|| metadata_u32(metadata, "general.vocab_size"))
-                    .or_else(|| metadata_u32(metadata, "tokenizer.ggml.tokens.count"))
-                    .or_else(|| {
-                        tensor_dims(&mapped, "tok_embeddings.weight")
-                            .and_then(|d| d.get(1).copied())
-                            .map(|v| v as u32)
-                    })
-                    .or_else(|| {
-                        tensor_dims(&mapped, "token_embd.weight")
-                            .and_then(|d| d.get(1).copied())
-                            .map(|v| v as u32)
-                    })
-                    .unwrap_or(32000) as usize;
-                let context_size = metadata_u32(metadata, "llama.context_length")
-                    .or_else(|| metadata_u32(metadata, "qwen35.context_length"))
-                    .or_else(|| metadata_u32(metadata, "qwen2.context_length"))
-                    .or_else(|| metadata_u32(metadata, "qwen.context_length"))
-                    .or_else(|| metadata_u32(metadata, "gemma4.context_length"))
-                    .or_else(|| metadata_u32(metadata, "gemma.context_length"))
-                    .or_else(|| metadata_u32(metadata, "llama.embedding_length"))
-                    .map(|value| value as usize)
-                    .unwrap_or(4096);
+                if mapped.parsed().architecture() == Some("dflash-draft") {
+                    eprintln!(
+                        "DFlash draft GGUF loaded successfully, but it is not a standalone text model: it has no token embeddings/lm_head. Use `oxidize-bench --model {}` to benchmark draft forward passes, or pair it with a target model for speculative decoding.",
+                        model_path.display()
+                    );
+                    return;
+                }
                 if args.ctx_size == Some(0) {
                     eprintln!("invalid --ctx-size: must be greater than 0");
                     return;
                 }
-                let mut context_size = args.ctx_size.unwrap_or(context_size);
-                if args.cpu_optimized {
-                    context_size = context_size.min(2048);
+                let mut config = InferenceConfig::from_gguf(&mapped);
+                config.kv_cache_dtype = args.kv_cache_dtype.dtype();
+                if let Some(ctx) = args.ctx_size {
+                    config.context_size = ctx;
                 }
-                let layer_count = metadata_u32(metadata, "llama.block_count")
-                    .or_else(|| metadata_u32(metadata, "qwen35.block_count"))
-                    .or_else(|| metadata_u32(metadata, "qwen2.block_count"))
-                    .or_else(|| metadata_u32(metadata, "qwen.block_count"))
-                    .or_else(|| metadata_u32(metadata, "gemma4.block_count"))
-                    .or_else(|| metadata_u32(metadata, "gemma.block_count"))
-                    .unwrap_or(32) as usize;
-                let hidden_size = metadata_u32(metadata, "llama.embedding_length")
-                    .or_else(|| metadata_u32(metadata, "qwen35.embedding_length"))
-                    .or_else(|| metadata_u32(metadata, "qwen2.embedding_length"))
-                    .or_else(|| metadata_u32(metadata, "qwen.embedding_length"))
-                    .or_else(|| metadata_u32(metadata, "gemma4.embedding_length"))
-                    .or_else(|| metadata_u32(metadata, "gemma.embedding_length"))
-                    .or_else(|| {
-                        tensor_dims(&mapped, "tok_embeddings.weight")
-                            .and_then(|d| d.first().copied())
-                            .map(|v| v as u32)
-                    })
-                    .or_else(|| {
-                        tensor_dims(&mapped, "token_embd.weight")
-                            .and_then(|d| d.first().copied())
-                            .map(|v| v as u32)
-                    })
-                    .unwrap_or(4096) as usize;
-                let intermediate_size = metadata_u32(metadata, "llama.feed_forward_length")
-                    .or_else(|| metadata_u32(metadata, "qwen35.feed_forward_length"))
-                    .or_else(|| metadata_u32(metadata, "qwen2.feed_forward_length"))
-                    .or_else(|| metadata_u32(metadata, "qwen.feed_forward_length"))
-                    .or_else(|| metadata_u32(metadata, "gemma4.feed_forward_length"))
-                    .or_else(|| metadata_u32(metadata, "gemma.feed_forward_length"))
-                    .unwrap_or(11008) as usize;
-                let num_attention_heads = metadata_u32(metadata, "llama.attention.head_count")
-                    .or_else(|| metadata_u32(metadata, "qwen35.attention.head_count"))
-                    .or_else(|| metadata_u32(metadata, "qwen2.attention.head_count"))
-                    .or_else(|| metadata_u32(metadata, "qwen.attention.head_count"))
-                    .or_else(|| metadata_u32(metadata, "gemma4.attention.head_count"))
-                    .or_else(|| metadata_u32(metadata, "gemma.attention.head_count"))
-                    .unwrap_or(32) as usize;
-                let num_key_value_heads = metadata_u32(metadata, "llama.attention.head_count_kv")
-                    .or_else(|| metadata_u32(metadata, "qwen35.attention.head_count_kv"))
-                    .or_else(|| metadata_u32(metadata, "qwen2.attention.head_count_kv"))
-                    .or_else(|| metadata_u32(metadata, "qwen.attention.head_count_kv"))
-                    .or_else(|| metadata_u32(metadata, "gemma4.attention.head_count_kv"))
-                    .or_else(|| metadata_u32(metadata, "gemma.attention.head_count_kv"))
-                    .unwrap_or(num_attention_heads as u32)
-                    as usize;
-                let key_value_head_dim = first_layer_tensor_dims(&mapped, "attn_k.weight")
-                    .and_then(|d| d.get(1).copied())
-                    .and_then(|width| width.checked_div(num_key_value_heads as u64))
-                    .and_then(|value| value.try_into().ok())
-                    .or_else(|| metadata_u32(metadata, "llama.attention.key_length"))
-                    .or_else(|| metadata_u32(metadata, "qwen35.attention.key_length"))
-                    .or_else(|| metadata_u32(metadata, "qwen2.attention.key_length"))
-                    .or_else(|| metadata_u32(metadata, "qwen.attention.key_length"))
-                    .or_else(|| {
-                        first_layer_tensor_dims(&mapped, "attn_k.weight")
-                            .and_then(|d| d.get(1).copied())
-                            .and_then(|width| width.checked_div(num_key_value_heads as u64))
-                            .and_then(|value| value.try_into().ok())
-                    })
-                    .unwrap_or((hidden_size / num_attention_heads) as u32)
-                    as usize;
-                let rms_norm_eps = metadata_f32(metadata, "llama.attention.layer_norm_rms_epsilon")
-                    .or_else(|| metadata_f32(metadata, "qwen35.attention.layer_norm_rms_epsilon"))
-                    .or_else(|| metadata_f32(metadata, "qwen2.attention.layer_norm_rms_epsilon"))
-                    .or_else(|| metadata_f32(metadata, "qwen.attention.layer_norm_rms_epsilon"))
-                    .or_else(|| metadata_f32(metadata, "gemma4.attention.layer_norm_rms_epsilon"))
-                    .or_else(|| metadata_f32(metadata, "gemma.attention.layer_norm_rms_epsilon"))
-                    .unwrap_or(1e-5);
-                let rope_theta = metadata_f32(metadata, "llama.rope.freq_base")
-                    .or_else(|| metadata_f32(metadata, "qwen35.rope.freq_base"))
-                    .or_else(|| metadata_f32(metadata, "qwen2.rope.freq_base"))
-                    .or_else(|| metadata_f32(metadata, "qwen.rope.freq_base"))
-                    .or_else(|| metadata_f32(metadata, "gemma4.rope.freq_base"))
-                    .or_else(|| metadata_f32(metadata, "gemma.rope.freq_base"))
-                    .unwrap_or(10000.0);
-
-                let config = InferenceConfig {
-                    vocab_size,
-                    context_size,
-                    layer_count,
-                    hidden_size,
-                    intermediate_size,
-                    num_attention_heads,
-                    num_key_value_heads,
-                    key_value_head_dim,
-                    kv_cache_dtype: args.kv_cache_dtype.dtype(),
-                    rms_norm_eps,
-                    rope_theta,
-                    ..Default::default()
-                };
+                if args.cpu_optimized {
+                    config.context_size = config.context_size.min(2048);
+                }
                 // Load tokenizer from GGUF metadata
                 let tokenizer = match load_tokenizer_from_gguf_metadata(metadata) {
                     Ok(t) => t,
@@ -961,63 +855,6 @@ fn main() {
     let mut writer = stdout.lock();
     if let Err(error) = run_single_shot_mode(&args.prompt, &mut writer) {
         eprintln!("single-shot mode failed: {error}");
-    }
-}
-
-fn metadata_u32(
-    metadata: &std::collections::BTreeMap<String, oxidize_core::gguf::GgufMetadataValue>,
-    key: &str,
-) -> Option<u32> {
-    use oxidize_core::gguf::GgufMetadataValue;
-    match metadata.get(key) {
-        Some(GgufMetadataValue::Uint8(value)) => Some((*value).into()),
-        Some(GgufMetadataValue::Uint16(value)) => Some((*value).into()),
-        Some(GgufMetadataValue::Uint32(value)) => Some(*value),
-        Some(GgufMetadataValue::Uint64(value)) => (*value).try_into().ok(),
-        Some(GgufMetadataValue::Int8(value)) if *value >= 0 => Some((*value as u8).into()),
-        Some(GgufMetadataValue::Int16(value)) if *value >= 0 => Some((*value as u16).into()),
-        Some(GgufMetadataValue::Int32(value)) if *value >= 0 => (*value).try_into().ok(),
-        Some(GgufMetadataValue::Int64(value)) if *value >= 0 => (*value).try_into().ok(),
-        _ => None,
-    }
-}
-
-fn tensor_dims(mapped: &oxidize_core::gguf::MappedGgufFile, name: &str) -> Option<Vec<u64>> {
-    mapped
-        .mapped_tensor_infos()
-        .iter()
-        .find(|t| t.name == name)
-        .map(|t| t.dimensions.clone())
-}
-
-fn first_layer_tensor_dims(
-    mapped: &oxidize_core::gguf::MappedGgufFile,
-    suffix: &str,
-) -> Option<Vec<u64>> {
-    mapped
-        .mapped_tensor_infos()
-        .iter()
-        .find(|t| t.name.starts_with("blk.") && t.name.ends_with(suffix))
-        .map(|t| t.dimensions.clone())
-}
-
-fn metadata_f32(
-    metadata: &std::collections::BTreeMap<String, oxidize_core::gguf::GgufMetadataValue>,
-    key: &str,
-) -> Option<f32> {
-    use oxidize_core::gguf::GgufMetadataValue;
-    match metadata.get(key) {
-        Some(GgufMetadataValue::Float32(value)) => Some(*value),
-        Some(GgufMetadataValue::Float64(value)) => Some(*value as f32),
-        Some(GgufMetadataValue::Int8(value)) => Some(*value as f32),
-        Some(GgufMetadataValue::Int16(value)) => Some(*value as f32),
-        Some(GgufMetadataValue::Int32(value)) => Some(*value as f32),
-        Some(GgufMetadataValue::Int64(value)) => Some(*value as f32),
-        Some(GgufMetadataValue::Uint8(value)) => Some(*value as f32),
-        Some(GgufMetadataValue::Uint16(value)) => Some(*value as f32),
-        Some(GgufMetadataValue::Uint32(value)) => Some(*value as f32),
-        Some(GgufMetadataValue::Uint64(value)) => Some(*value as f32),
-        _ => None,
     }
 }
 

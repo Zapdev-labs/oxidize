@@ -1,0 +1,4 @@
+engine,model,test,tps,source
+Oxidize,Qwen3-4B-Q4_K_M.gguf,draft_forward_32,10.21,oxidize_qwen3_4b_q4km_same_model.log
+llama.cpp,Qwen3-4B-Q4_K_M.gguf,pp32,33.56,llama_cpp_dflash_qwen3_4b_q4km_same_model.log
+llama.cpp,Qwen3-4B-Q4_K_M.gguf,tg32,3.3,llama_cpp_dflash_qwen3_4b_q4km_same_model.log

@@ -20,10 +20,17 @@ pub fn dot_product_f32(a: &[f32], b: &[f32]) -> f32 {
         }
     }
 
-    #[cfg(any(target_arch = "aarch64", target_arch = "arm"))]
+    #[cfg(target_arch = "aarch64")]
     {
         if std::arch::is_aarch64_feature_detected!("neon") {
-            return unsafe { dot_product_f32_neon(a, b) };
+            return unsafe { dot_product_f32_neon_aarch64(a, b) };
+        }
+    }
+
+    #[cfg(target_arch = "arm")]
+    {
+        if std::arch::is_arm_feature_detected!("neon") {
+            return unsafe { dot_product_f32_neon_arm(a, b) };
         }
     }
 
@@ -86,9 +93,9 @@ unsafe fn dot_product_f32_avx2(a: &[f32], b: &[f32]) -> f32 {
     total
 }
 
-#[cfg(any(target_arch = "aarch64", target_arch = "arm"))]
+#[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
-unsafe fn dot_product_f32_neon(a: &[f32], b: &[f32]) -> f32 {
+unsafe fn dot_product_f32_neon_aarch64(a: &[f32], b: &[f32]) -> f32 {
     use std::arch::aarch64::*;
 
     let len = a.len();
@@ -102,6 +109,32 @@ unsafe fn dot_product_f32_neon(a: &[f32], b: &[f32]) -> f32 {
     }
 
     let mut total = vaddvq_f32(sum);
+
+    for i in (chunks * 4)..len {
+        total += unsafe { a.get_unchecked(i) * b.get_unchecked(i) };
+    }
+
+    total
+}
+
+#[cfg(target_arch = "arm")]
+#[target_feature(enable = "neon")]
+unsafe fn dot_product_f32_neon_arm(a: &[f32], b: &[f32]) -> f32 {
+    use std::arch::arm::*;
+
+    let len = a.len();
+    let mut sum = vdupq_n_f32(0.0);
+
+    let chunks = len / 4;
+    for i in 0..chunks {
+        let va = unsafe { vld1q_f32(a.as_ptr().add(i * 4)) };
+        let vb = unsafe { vld1q_f32(b.as_ptr().add(i * 4)) };
+        sum = vmlaq_f32(sum, va, vb);
+    }
+
+    let pair = vadd_f32(vget_low_f32(sum), vget_high_f32(sum));
+    let pair = vpadd_f32(pair, pair);
+    let mut total = vget_lane_f32(pair, 0);
 
     for i in (chunks * 4)..len {
         total += unsafe { a.get_unchecked(i) * b.get_unchecked(i) };

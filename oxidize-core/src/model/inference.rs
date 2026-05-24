@@ -4,8 +4,8 @@ use crate::kv_cache::{KvCache, KvCacheConfig};
 use crate::model::{Logits, Model, ModelError, Session, Token};
 use crate::quantization::{dequantize_scalar, quantized_size};
 use crate::tensor::{
-    DType, apply_rope_f32, extract_bits, f16_le_to_f32, gemv_f32_transposed,
-    gemv_quantized_f32_transposed, rms_norm_f32, rms_norm_gemv_f32_transposed,
+    DType, apply_rope_f32, f16_le_to_f32, gemm_quantized_f32, gemv_f32, gemv_quantized_f32,
+    rms_norm_f32,
 };
 use memmap2::Mmap;
 use std::sync::Arc;
@@ -37,7 +37,7 @@ impl ModelArchitecture {
                 "mistral" => Self::Mistral,
                 "mixtral" => Self::Mixtral,
                 "deepseek" | "deepseek_v2" | "deepseek_v3" | "deepseek_moe" => Self::DeepSeek,
-                "qwen" | "qwen2" | "qwen2moe" | "qwen35" => Self::Qwen,
+                "qwen" | "qwen2" | "qwen2moe" | "qwen3" | "qwen35" => Self::Qwen,
                 "gemma" | "gemma4" => Self::Gemma,
                 "phi" | "phi3" => Self::Phi,
                 "falcon" => Self::Falcon,
@@ -136,6 +136,164 @@ impl InferenceConfig {
             self.head_dim()
         }
     }
+
+    /// Build an InferenceConfig from a mapped GGUF file by reading metadata under
+    /// the actual architecture prefix (e.g. `qwen3.*`, `llama.*`, `gemma3.*`).
+    /// Falls back to weight tensor dimensions when metadata is missing.
+    pub fn from_gguf(mapped: &MappedGgufFile) -> Self {
+        let metadata = &mapped.parsed().metadata;
+        let arch = mapped
+            .parsed()
+            .architecture()
+            .unwrap_or("llama")
+            .to_string();
+        let architecture = ModelArchitecture::from_gguf(mapped);
+
+        let key = |suffix: &str| format!("{arch}.{suffix}");
+        let arch_u32 = |suffix: &str| metadata_u32_lookup(metadata, &key(suffix));
+        let arch_f32 = |suffix: &str| metadata_f32_lookup(metadata, &key(suffix));
+
+        let token_embd_dims = first_tensor_dims(mapped, "tok_embeddings.weight")
+            .or_else(|| first_tensor_dims(mapped, "token_embd.weight"));
+
+        let hidden_size = arch_u32("embedding_length")
+            .or_else(|| {
+                token_embd_dims
+                    .as_ref()
+                    .and_then(|d| d.first().copied())
+                    .map(|v| v as u32)
+            })
+            .unwrap_or(4096) as usize;
+
+        let vocab_size = arch_u32("vocab_size")
+            .or_else(|| metadata_u32_lookup(metadata, "general.vocab_size"))
+            .or_else(|| metadata_u32_lookup(metadata, "tokenizer.ggml.tokens.count"))
+            .or_else(|| {
+                token_embd_dims
+                    .as_ref()
+                    .and_then(|d| d.get(1).copied())
+                    .map(|v| v as u32)
+            })
+            .unwrap_or(32000) as usize;
+
+        let context_size = arch_u32("context_length")
+            .map(|v| v as usize)
+            .unwrap_or(4096);
+
+        let layer_count = arch_u32("block_count").unwrap_or(32) as usize;
+
+        let intermediate_size = arch_u32("feed_forward_length")
+            .map(|v| v as usize)
+            .or_else(|| {
+                first_layer_tensor_dims(mapped, "ffn_gate.weight")
+                    .or_else(|| first_layer_tensor_dims(mapped, "ffn_up.weight"))
+                    .and_then(|d| d.get(1).copied())
+                    .map(|v| v as usize)
+            })
+            .unwrap_or(11008);
+
+        let num_attention_heads = arch_u32("attention.head_count").unwrap_or(32) as usize;
+
+        // GQA: KV heads. Default to num_attention_heads only when key is absent
+        // AND we can't infer from attn_k dims.
+        let attn_k_out =
+            first_layer_tensor_dims(mapped, "attn_k.weight").and_then(|d| d.get(1).copied());
+        let num_key_value_heads = arch_u32("attention.head_count_kv")
+            .map(|v| v as usize)
+            .unwrap_or(num_attention_heads);
+
+        // Per-head dim for K (and V). Prefer explicit key_length; otherwise
+        // infer from attn_k_out / num_kv_heads. Falls back to hidden/n_heads.
+        let key_value_head_dim = arch_u32("attention.key_length")
+            .map(|v| v as usize)
+            .or_else(|| {
+                attn_k_out.and_then(|width| (width as usize).checked_div(num_key_value_heads))
+            })
+            .unwrap_or_else(|| hidden_size.checked_div(num_attention_heads).unwrap_or(0));
+
+        let rms_norm_eps = arch_f32("attention.layer_norm_rms_epsilon").unwrap_or(1e-5);
+        let rope_theta = arch_f32("rope.freq_base").unwrap_or(10000.0);
+        let sliding_window = arch_u32("attention.sliding_window")
+            .map(|v| v as usize)
+            .unwrap_or(0);
+        let num_experts = arch_u32("expert_count").map(|v| v as usize).unwrap_or(0);
+        let num_experts_per_tok = arch_u32("expert_used_count")
+            .map(|v| v as usize)
+            .unwrap_or(0);
+
+        Self {
+            vocab_size,
+            context_size,
+            layer_count,
+            hidden_size,
+            intermediate_size,
+            num_attention_heads,
+            num_key_value_heads,
+            key_value_head_dim,
+            kv_cache_dtype: DType::F32,
+            rms_norm_eps,
+            rope_theta,
+            architecture,
+            sliding_window,
+            num_experts,
+            num_experts_per_tok,
+            alibi_num_heads: 0,
+        }
+    }
+}
+
+fn metadata_u32_lookup(
+    metadata: &std::collections::BTreeMap<String, crate::gguf::GgufMetadataValue>,
+    key: &str,
+) -> Option<u32> {
+    use crate::gguf::GgufMetadataValue;
+    match metadata.get(key) {
+        Some(GgufMetadataValue::Uint8(v)) => Some((*v).into()),
+        Some(GgufMetadataValue::Uint16(v)) => Some((*v).into()),
+        Some(GgufMetadataValue::Uint32(v)) => Some(*v),
+        Some(GgufMetadataValue::Uint64(v)) => (*v).try_into().ok(),
+        Some(GgufMetadataValue::Int8(v)) if *v >= 0 => Some((*v as u8).into()),
+        Some(GgufMetadataValue::Int16(v)) if *v >= 0 => Some((*v as u16).into()),
+        Some(GgufMetadataValue::Int32(v)) if *v >= 0 => (*v).try_into().ok(),
+        Some(GgufMetadataValue::Int64(v)) if *v >= 0 => (*v).try_into().ok(),
+        _ => None,
+    }
+}
+
+fn metadata_f32_lookup(
+    metadata: &std::collections::BTreeMap<String, crate::gguf::GgufMetadataValue>,
+    key: &str,
+) -> Option<f32> {
+    use crate::gguf::GgufMetadataValue;
+    match metadata.get(key) {
+        Some(GgufMetadataValue::Float32(v)) => Some(*v),
+        Some(GgufMetadataValue::Float64(v)) => Some(*v as f32),
+        Some(GgufMetadataValue::Int8(v)) => Some(*v as f32),
+        Some(GgufMetadataValue::Int16(v)) => Some(*v as f32),
+        Some(GgufMetadataValue::Int32(v)) => Some(*v as f32),
+        Some(GgufMetadataValue::Int64(v)) => Some(*v as f32),
+        Some(GgufMetadataValue::Uint8(v)) => Some(*v as f32),
+        Some(GgufMetadataValue::Uint16(v)) => Some(*v as f32),
+        Some(GgufMetadataValue::Uint32(v)) => Some(*v as f32),
+        Some(GgufMetadataValue::Uint64(v)) => Some(*v as f32),
+        _ => None,
+    }
+}
+
+fn first_tensor_dims(mapped: &MappedGgufFile, name: &str) -> Option<Vec<u64>> {
+    mapped
+        .mapped_tensor_infos()
+        .iter()
+        .find(|t| t.name == name)
+        .map(|t| t.dimensions.clone())
+}
+
+fn first_layer_tensor_dims(mapped: &MappedGgufFile, suffix: &str) -> Option<Vec<u64>> {
+    mapped
+        .mapped_tensor_infos()
+        .iter()
+        .find(|t| t.name.starts_with("blk.0.") && t.name.ends_with(suffix))
+        .map(|t| t.dimensions.clone())
 }
 
 /// Pre-allocated scratch buffers reused across tokens and layers to eliminate
@@ -157,6 +315,8 @@ pub struct Workspace {
     pub v_vec: Vec<f32>,
     // Attention result scratch.
     pub attn_result: Vec<f32>,
+    // Q scratch for flash-attention when Q heads must be truncated.
+    pub flash_q: Vec<f32>,
     // Per-head scratch (flash-attn output, RoPE, per-head norm).
     pub head_scratch: Vec<f32>,
     // KV cache copy fallback buffers.
@@ -188,7 +348,8 @@ impl Workspace {
             q_full: vec![0.0_f32; max_qkv],
             k_vec: vec![0.0_f32; max_kv_len],
             v_vec: vec![0.0_f32; max_kv_len],
-            attn_result: vec![0.0_f32; h],
+            attn_result: vec![0.0_f32; max_qkv],
+            flash_q: vec![0.0_f32; max_qkv],
             head_scratch: vec![0.0_f32; head_dim],
             kv_keys_copy: vec![0.0_f32; kv_copy_size],
             kv_values_copy: vec![0.0_f32; kv_copy_size],
@@ -278,20 +439,76 @@ fn gemv_weight(
     input: &[f32],
     output: &mut [f32],
 ) -> Result<(), String> {
-    // GGUF stores linear weights as [input_dim, output_dim] (transposed vs PyTorch convention)
-    // so we use transposed GEMV: output[j] = sum_i W[i][j] * input[i]
-    // Callers pass rows=output_dim, cols=input_dim; we swap for transposed GEMV
+    // GGUF stores linear weights in natural row-major layout: `rows` (output
+    // features) of `cols` (input features) contiguous floats/quantized blocks.
+    // For `y = W @ x` we use the fused natural GEMV: `output[j] = sum_i W[j, i] * input[i]`.
     match storage {
         WeightStorage::F32(data) => {
-            gemv_f32_transposed(data, cols, rows, input, output).map_err(|e| format!("{:?}", e))
+            gemv_f32(data, rows, cols, input, output).map_err(|e| format!("{:?}", e))
         }
         WeightStorage::Quantized(qtype, data) => {
-            gemv_quantized_f32_transposed(*qtype, data, cols, rows, input, output)
+            gemv_quantized_f32(*qtype, data, rows, cols, input, output)
                 .map_err(|e| format!("{:?}", e))
         }
         WeightStorage::MmapQuantized(qtype, mmap, offset, size) => {
             let data = &mmap[*offset..*offset + *size];
-            gemv_quantized_f32_transposed(*qtype, data, cols, rows, input, output)
+            gemv_quantized_f32(*qtype, data, rows, cols, input, output)
+                .map_err(|e| format!("{:?}", e))
+        }
+    }
+}
+
+/// Add a per-row bias (repeating modulo `bias.len()` when shorter than a row)
+/// to every position of a `[batch, row]`-style buffer. Used to apply attention
+/// biases across all batch tokens after a batched GEMM.
+fn add_repeating_bias(buf: &mut [f32], bias: &[f32]) {
+    if bias.is_empty() {
+        return;
+    }
+    let bl = bias.len();
+    for (i, x) in buf.iter_mut().enumerate() {
+        *x += bias[i % bl];
+    }
+}
+
+/// Batched GEMM against a model weight. `inputs` is `[batch, cols]` row-major
+/// and `outputs` is `[batch, rows]` row-major (same natural GGUF layout as
+/// [`gemv_weight`]). For quantized weights this reaches the decode-once fast
+/// path that amortizes one dequantization across all batch tokens — the main
+/// reason batched prefill is much faster than a `forward_single` loop.
+fn gemm_weight(
+    storage: &WeightStorage,
+    rows: usize,
+    cols: usize,
+    inputs: &[f32],
+    outputs: &mut [f32],
+    batch: usize,
+) -> Result<(), String> {
+    if batch == 0 {
+        return Ok(());
+    }
+    if batch == 1 {
+        return gemv_weight(storage, rows, cols, inputs, outputs);
+    }
+    match storage {
+        WeightStorage::F32(data) => {
+            // No batched fp32 GEMM in the natural layout; fall back to a per-batch
+            // GEMV loop. F32 weights are rare in practice (quantized models only
+            // hold the norms as f32, and those don't go through this path).
+            for b in 0..batch {
+                let in_slice = &inputs[b * cols..(b + 1) * cols];
+                let out_slice = &mut outputs[b * rows..(b + 1) * rows];
+                gemv_f32(data, rows, cols, in_slice, out_slice).map_err(|e| format!("{:?}", e))?;
+            }
+            Ok(())
+        }
+        WeightStorage::Quantized(qtype, data) => {
+            gemm_quantized_f32(*qtype, data, rows, cols, inputs, outputs, batch)
+                .map_err(|e| format!("{:?}", e))
+        }
+        WeightStorage::MmapQuantized(qtype, mmap, offset, size) => {
+            let data = &mmap[*offset..*offset + *size];
+            gemm_quantized_f32(*qtype, data, rows, cols, inputs, outputs, batch)
                 .map_err(|e| format!("{:?}", e))
         }
     }
@@ -351,35 +568,49 @@ impl InferenceModel {
     }
 }
 
+/// Decode token `token_idx`'s embedding (length `h`) out of a quantized
+/// `vocab × h` matrix stored in GGUF natural layout (one contiguous row per
+/// token, each row consisting of `h / block_width` quantized blocks).
 pub(crate) fn lookup_quantized_embedding(
     h: usize,
-    cols: usize,
     qtype: GgufQuantizationType,
     data: &[u8],
     token_idx: usize,
     x: &mut [f32],
 ) {
-    let (block_width, block_size, bits, zero_point) = match qtype {
-        GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M => (256, 144, 4, 8.0),
-        GgufQuantizationType::Q6_K => (256, 210, 6, 32.0),
-        GgufQuantizationType::Q8_0 => (32, 34, 8, 0.0),
-        _ => (256, 130, 4, 8.0),
+    let block_size = match qtype {
+        GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M => 144,
+        GgufQuantizationType::Q6_K => 210,
+        GgufQuantizationType::Q8_0 => 34,
+        _ => return,
     };
-    let blocks_per_row = cols / block_width;
-    let block_idx = token_idx / block_width;
-    let pos_in_block = token_idx % block_width;
-    for (i, value) in x.iter_mut().enumerate().take(h) {
-        let row_start = i * blocks_per_row * block_size;
-        let block_start = row_start + block_idx * block_size;
-        let block = &data[block_start..block_start + block_size];
-        let d = f16_le_to_f32([block[0], block[1]]);
-        if qtype == GgufQuantizationType::Q8_0 {
-            *value = (block[2 + pos_in_block] as i8) as f32 * d;
-        } else {
-            let bitstream = &block[2..];
-            let q = extract_bits(bitstream, pos_in_block, bits) as f32;
-            *value = (q - zero_point) * d;
+    let block_width = match qtype {
+        GgufQuantizationType::Q8_0 => 32,
+        _ => 256,
+    };
+    let blocks_per_row = h / block_width;
+    let row_start = token_idx * blocks_per_row * block_size;
+    let row = &data[row_start..row_start + blocks_per_row * block_size];
+    match qtype {
+        GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M => {
+            let _ =
+                crate::quantization::dequantize_q4_k_scalar(row, &mut x[..blocks_per_row * 256]);
         }
+        GgufQuantizationType::Q6_K => {
+            let _ =
+                crate::quantization::dequantize_q6_k_scalar(row, &mut x[..blocks_per_row * 256]);
+        }
+        GgufQuantizationType::Q8_0 => {
+            // Q8_0: block = [d_f16 (2 bytes), 32× int8].
+            for (block_idx, block) in row.chunks_exact(block_size).enumerate() {
+                let d = f16_le_to_f32([block[0], block[1]]);
+                let out = &mut x[block_idx * 32..block_idx * 32 + 32];
+                for (i, b) in block[2..2 + 32].iter().enumerate() {
+                    out[i] = (*b as i8) as f32 * d;
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -667,6 +898,434 @@ impl InferenceModel {
         })
     }
 
+    pub fn forward_tokens_no_logits(
+        &mut self,
+        tokens: &[Token],
+        session: &mut Session,
+    ) -> Result<(), ModelError> {
+        if tokens.is_empty() {
+            return Err(ModelError::EmptyInput);
+        }
+        let requested_total = session.consumed_tokens().saturating_add(tokens.len());
+        if requested_total > self.config.context_size {
+            return Err(ModelError::ContextExceeded {
+                context_size: self.config.context_size,
+                requested_total_tokens: requested_total,
+            });
+        }
+        let start_pos = session.consumed_tokens();
+        if tokens.len() > 1 && self.layers_supported_for_batched() {
+            self.forward_batched(tokens, start_pos, false)?;
+        } else {
+            for (i, &token) in tokens.iter().enumerate() {
+                self.forward_single(token, start_pos + i, false)?;
+            }
+        }
+        session.record_tokens(tokens.len());
+        Ok(())
+    }
+
+    /// True when all layers use the standard attention + FFN path that
+    /// [`forward_batched`] can handle. Mamba/SSM and MoE layers need per-token
+    /// state and aren't supported by the batched path yet.
+    fn layers_supported_for_batched(&self) -> bool {
+        if self.layers.is_empty() {
+            return false;
+        }
+        for layer in &self.layers {
+            let is_mamba = !layer.attn_qkv.is_empty() && layer.attn_q.is_empty();
+            if is_mamba {
+                return false;
+            }
+            // No standard attention → can't batch the layer (degenerate case).
+            if layer.attn_q.is_empty() {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Batched prefill: process `tokens` in one shot, sharing each weight
+    /// matrix across all batch positions via [`gemm_weight`]. Per-token work
+    /// (per-head Q/K norms, RoPE, KV cache writes, attention) stays in a
+    /// position loop — only the matmuls are batched, but those dominate.
+    ///
+    /// Only the final token's logits are computed when `need_logits` is true;
+    /// intermediate tokens' logits would be discarded anyway.
+    #[allow(clippy::too_many_lines)]
+    fn forward_batched(
+        &mut self,
+        tokens: &[Token],
+        start_pos: usize,
+        need_logits: bool,
+    ) -> Result<Option<Logits>, ModelError> {
+        let batch = tokens.len();
+        debug_assert!(batch >= 1);
+        let cfg = self.config.clone();
+        let h = cfg.hidden_size;
+        let n = cfg.num_attention_heads;
+        let kvh = cfg.num_key_value_heads;
+
+        // 1. Embedding lookup for every batch position into x_batch[batch, h].
+        let mut x_batch = vec![0.0_f32; batch * h];
+        for (i, &token) in tokens.iter().enumerate() {
+            let token_idx = (token as usize).min(cfg.vocab_size.saturating_sub(1));
+            let target = &mut x_batch[i * h..(i + 1) * h];
+            match &self.tok_embeddings {
+                WeightStorage::F32(data) => {
+                    let row = &data[token_idx * h..(token_idx + 1) * h];
+                    target.copy_from_slice(row);
+                }
+                WeightStorage::Quantized(qtype, data) => {
+                    lookup_quantized_embedding(h, *qtype, data, token_idx, target);
+                }
+                WeightStorage::MmapQuantized(qtype, mmap, offset, size) => {
+                    let data = &mmap[*offset..*offset + *size];
+                    lookup_quantized_embedding(h, *qtype, data, token_idx, target);
+                }
+            }
+        }
+
+        // Scratch buffers reused across layers. Allocated once per call (batched
+        // prefill is not in the per-token hot path, so this is fine).
+        let layer0 = &self.layers[0];
+        let q_len = layer0.attn_q.output_dim(h);
+        let kv_len = if !layer0.attn_k.is_empty() {
+            layer0.attn_k.output_dim(h)
+        } else {
+            0
+        };
+        let aoil0 = if !layer0.attn_output.is_empty() {
+            layer0.attn_output.output_dim(h)
+        } else {
+            0
+        };
+        let q_len_used0 = if aoil0 > 0 {
+            q_len.min(aoil0)
+        } else if q_len > h {
+            h
+        } else {
+            q_len
+        };
+        let q_head_dim = if n > 0 && q_len_used0.is_multiple_of(n) {
+            q_len_used0 / n
+        } else {
+            q_len_used0
+        };
+        let kv_head_dim = if kvh > 0 && kv_len > 0 && kv_len.is_multiple_of(kvh) {
+            kv_len / kvh
+        } else if kv_len > 0 {
+            kv_len
+        } else {
+            q_head_dim
+        };
+        let i_size = cfg.intermediate_size;
+
+        let mut normed_batch = vec![0.0_f32; batch * h];
+        let mut q_batch = vec![0.0_f32; batch * q_len];
+        let mut k_batch = vec![0.0_f32; batch * kv_len.max(1)];
+        let mut v_batch = vec![0.0_f32; batch * kv_len.max(1)];
+        let mut attn_result_batch = vec![0.0_f32; batch * q_len_used0];
+        let mut attn_proj_batch = vec![0.0_f32; batch * h];
+        let mut gate_batch = vec![0.0_f32; batch * i_size];
+        let mut up_batch = vec![0.0_f32; batch * i_size];
+        let mut ffn_out_batch = vec![0.0_f32; batch * h];
+        let mut head_scratch = vec![0.0_f32; q_head_dim.max(kv_head_dim)];
+
+        for layer_idx in 0..cfg.layer_count {
+            let layer = &self.layers[layer_idx];
+
+            let ffn_norm_weight: &[f32] = if !layer.post_attention_norm.is_empty() {
+                &layer.post_attention_norm
+            } else if !layer.ffn_norm.is_empty() {
+                &layer.ffn_norm
+            } else {
+                &[]
+            };
+
+            // 2. Per-token attn RMSNorm into normed_batch.
+            for i in 0..batch {
+                rms_norm_f32(
+                    &x_batch[i * h..(i + 1) * h],
+                    &layer.attn_norm,
+                    cfg.rms_norm_eps,
+                    &mut normed_batch[i * h..(i + 1) * h],
+                )
+                .map_err(|e| ModelError::InferenceFailed(format!("rms_norm: {:?}", e)))?;
+            }
+
+            // 3. Batched Q/K/V via GEMM — the main win over per-token GEMV.
+            gemm_weight(&layer.attn_q, q_len, h, &normed_batch, &mut q_batch, batch)
+                .map_err(|e| ModelError::InferenceFailed(format!("attn_q: {:?}", e)))?;
+            if !layer.attn_q_bias.is_empty() {
+                add_repeating_bias(&mut q_batch, &layer.attn_q_bias);
+            }
+            if kv_len > 0 {
+                gemm_weight(
+                    &layer.attn_k,
+                    kv_len,
+                    h,
+                    &normed_batch,
+                    &mut k_batch[..batch * kv_len],
+                    batch,
+                )
+                .map_err(|e| ModelError::InferenceFailed(format!("attn_k: {:?}", e)))?;
+                if !layer.attn_k_bias.is_empty() {
+                    add_repeating_bias(&mut k_batch[..batch * kv_len], &layer.attn_k_bias);
+                }
+                gemm_weight(
+                    &layer.attn_v,
+                    kv_len,
+                    h,
+                    &normed_batch,
+                    &mut v_batch[..batch * kv_len],
+                    batch,
+                )
+                .map_err(|e| ModelError::InferenceFailed(format!("attn_v: {:?}", e)))?;
+                if !layer.attn_v_bias.is_empty() {
+                    add_repeating_bias(&mut v_batch[..batch * kv_len], &layer.attn_v_bias);
+                }
+            }
+
+            let q_heads = q_len_used0 / q_head_dim.max(1);
+            let kv_heads = kv_len.checked_div(kv_head_dim).unwrap_or(0);
+
+            // 4. Per-token: Q/K norm, RoPE, KV cache writes.
+            for i in 0..batch {
+                let pos = start_pos + i;
+                let q = &mut q_batch[i * q_len..i * q_len + q_len_used0];
+                let k = &mut k_batch[i * kv_len..(i + 1) * kv_len];
+                let v = &v_batch[i * kv_len..(i + 1) * kv_len];
+
+                if !layer.attn_q_norm.is_empty() && q_head_dim == layer.attn_q_norm.len() {
+                    for head in 0..q_heads {
+                        let start = head * q_head_dim;
+                        let end = start + q_head_dim;
+                        if end > q.len() {
+                            break;
+                        }
+                        let normed_head = &mut head_scratch[..q_head_dim];
+                        normed_head.fill(0.0_f32);
+                        rms_norm_f32(
+                            &q[start..end],
+                            &layer.attn_q_norm,
+                            cfg.rms_norm_eps,
+                            normed_head,
+                        )
+                        .map_err(|e| ModelError::InferenceFailed(format!("q_norm: {:?}", e)))?;
+                        q[start..end].copy_from_slice(normed_head);
+                    }
+                }
+                if !layer.attn_k_norm.is_empty() && kv_head_dim == layer.attn_k_norm.len() {
+                    for head in 0..kv_heads {
+                        let start = head * kv_head_dim;
+                        let end = start + kv_head_dim;
+                        if end > k.len() {
+                            break;
+                        }
+                        let normed_head = &mut head_scratch[..kv_head_dim];
+                        normed_head.fill(0.0_f32);
+                        rms_norm_f32(
+                            &k[start..end],
+                            &layer.attn_k_norm,
+                            cfg.rms_norm_eps,
+                            normed_head,
+                        )
+                        .map_err(|e| ModelError::InferenceFailed(format!("k_norm: {:?}", e)))?;
+                        k[start..end].copy_from_slice(normed_head);
+                    }
+                }
+
+                // RoPE Q
+                for head in 0..q_heads {
+                    let off = head * q_head_dim;
+                    if off + q_head_dim > q.len() {
+                        break;
+                    }
+                    let rotated = &mut head_scratch[..q_head_dim];
+                    rotated.fill(0.0_f32);
+                    apply_rope_f32(
+                        &q[off..off + q_head_dim],
+                        pos,
+                        q_head_dim,
+                        cfg.rope_theta,
+                        rotated,
+                    )
+                    .map_err(|e| ModelError::InferenceFailed(format!("rope q: {:?}", e)))?;
+                    q[off..off + q_head_dim].copy_from_slice(rotated);
+                }
+                // RoPE K
+                for head in 0..kv_heads {
+                    let off = head * kv_head_dim;
+                    if off + kv_head_dim > k.len() {
+                        break;
+                    }
+                    let rotated = &mut head_scratch[..kv_head_dim];
+                    rotated.fill(0.0_f32);
+                    apply_rope_f32(
+                        &k[off..off + kv_head_dim],
+                        pos,
+                        kv_head_dim,
+                        cfg.rope_theta,
+                        rotated,
+                    )
+                    .map_err(|e| ModelError::InferenceFailed(format!("rope k: {:?}", e)))?;
+                    k[off..off + kv_head_dim].copy_from_slice(rotated);
+                }
+
+                self.kv_cache
+                    .set(layer_idx, pos, k, v)
+                    .map_err(|e| ModelError::InferenceFailed(format!("kv set: {:?}", e)))?;
+            }
+
+            // 5. Per-token: attention. Each position attends to its own causal
+            // prefix (positions 0..=pos).
+            for i in 0..batch {
+                let pos = start_pos + i;
+                let seq_len = pos + 1;
+                let q = &q_batch[i * q_len..i * q_len + q_len_used0];
+                let attn_out_slice = &mut attn_result_batch[i * q_len_used0..(i + 1) * q_len_used0];
+                attn_out_slice.fill(0.0_f32);
+
+                let key_cache_borrow = self
+                    .kv_cache
+                    .f32_layer_key_prefix(layer_idx, seq_len)
+                    .map_err(|e| ModelError::InferenceFailed(format!("kv borrow keys: {:?}", e)))?;
+                let value_cache_borrow = self
+                    .kv_cache
+                    .f32_layer_value_prefix(layer_idx, seq_len)
+                    .map_err(|e| {
+                    ModelError::InferenceFailed(format!("kv borrow vals: {:?}", e))
+                })?;
+
+                let key_cache: &[f32] = key_cache_borrow.ok_or_else(|| {
+                    ModelError::InferenceFailed(
+                        "kv f32 prefix not borrowable (batched)".to_string(),
+                    )
+                })?;
+                let value_cache: &[f32] = value_cache_borrow.ok_or_else(|| {
+                    ModelError::InferenceFailed(
+                        "kv f32 prefix not borrowable (batched)".to_string(),
+                    )
+                })?;
+
+                flash_attention_decode_heads_f32(
+                    q,
+                    key_cache,
+                    value_cache,
+                    seq_len,
+                    kv_head_dim,
+                    kv_len,
+                    q_heads,
+                    kv_heads,
+                    attn_out_slice,
+                )
+                .map_err(|e| ModelError::InferenceFailed(format!("flash attn: {:?}", e)))?;
+            }
+
+            // 6. Batched attn_output projection.
+            if !layer.attn_output.is_empty() && aoil0 > 0 {
+                gemm_weight(
+                    &layer.attn_output,
+                    h,
+                    aoil0,
+                    &attn_result_batch,
+                    &mut attn_proj_batch,
+                    batch,
+                )
+                .map_err(|e| ModelError::InferenceFailed(format!("attn_output: {:?}", e)))?;
+                if !layer.attn_output_bias.is_empty() {
+                    add_repeating_bias(&mut attn_proj_batch, &layer.attn_output_bias);
+                }
+            } else {
+                attn_proj_batch.fill(0.0_f32);
+            }
+
+            // 7. Residual add (attn).
+            for i in 0..batch * h {
+                x_batch[i] += attn_proj_batch[i];
+            }
+
+            // 8. FFN: per-token RMSNorm, batched gate+up, SwiGLU, batched down.
+            let has_ffn = !layer.ffn_gate.is_empty()
+                && !layer.ffn_up.is_empty()
+                && !layer.ffn_down.is_empty()
+                && !ffn_norm_weight.is_empty();
+            if has_ffn {
+                for i in 0..batch {
+                    rms_norm_f32(
+                        &x_batch[i * h..(i + 1) * h],
+                        ffn_norm_weight,
+                        cfg.rms_norm_eps,
+                        &mut normed_batch[i * h..(i + 1) * h],
+                    )
+                    .map_err(|e| ModelError::InferenceFailed(format!("ffn_norm: {:?}", e)))?;
+                }
+
+                gemm_weight(
+                    &layer.ffn_gate,
+                    i_size,
+                    h,
+                    &normed_batch,
+                    &mut gate_batch,
+                    batch,
+                )
+                .map_err(|e| ModelError::InferenceFailed(format!("ffn_gate: {:?}", e)))?;
+                gemm_weight(
+                    &layer.ffn_up,
+                    i_size,
+                    h,
+                    &normed_batch,
+                    &mut up_batch,
+                    batch,
+                )
+                .map_err(|e| ModelError::InferenceFailed(format!("ffn_up: {:?}", e)))?;
+
+                for (g, u) in gate_batch.iter_mut().zip(up_batch.iter()) {
+                    let sigmoid = 1.0_f32 / (1.0 + (-*g).exp());
+                    *g = *g * sigmoid * *u;
+                }
+
+                gemm_weight(
+                    &layer.ffn_down,
+                    h,
+                    i_size,
+                    &gate_batch,
+                    &mut ffn_out_batch,
+                    batch,
+                )
+                .map_err(|e| ModelError::InferenceFailed(format!("ffn_down: {:?}", e)))?;
+                if !layer.ffn_down_bias.is_empty() {
+                    add_repeating_bias(&mut ffn_out_batch, &layer.ffn_down_bias);
+                }
+
+                for i in 0..batch * h {
+                    x_batch[i] += ffn_out_batch[i];
+                }
+            }
+        }
+
+        if !need_logits {
+            return Ok(None);
+        }
+
+        // Final norm + lm_head only for the last batch position.
+        let last = &x_batch[(batch - 1) * h..batch * h];
+        let mut final_normed = vec![0.0_f32; h];
+        rms_norm_f32(last, &self.norm_weight, cfg.rms_norm_eps, &mut final_normed)
+            .map_err(|e| ModelError::InferenceFailed(format!("final_norm: {:?}", e)))?;
+        let mut logits = vec![0.0_f32; cfg.vocab_size];
+        gemv_weight(
+            &self.output_weight,
+            cfg.vocab_size,
+            h,
+            &final_normed,
+            &mut logits,
+        )
+        .map_err(|e| ModelError::InferenceFailed(format!("output: {:?}", e)))?;
+        Ok(Some(logits))
+    }
+
     fn forward_single(
         &mut self,
         token: Token,
@@ -680,23 +1339,23 @@ impl InferenceModel {
 
         let ws = &mut self.workspace;
 
-        // embedding lookup
-        // token_embd.weight is stored as [hidden_size, vocab_size] row-major (transposed vs PyTorch)
+        // Embedding lookup. GGUF natural layout: `token_embd.weight` is stored
+        // as `vocab_size` rows of `hidden_size` contiguous values, so token `t`'s
+        // embedding is the contiguous row at offset `t * hidden_size`.
         let x = &mut ws.x[..h];
         x.fill(0.0_f32);
         let token_idx = (token as usize).min(cfg.vocab_size.saturating_sub(1));
         match &self.tok_embeddings {
             WeightStorage::F32(data) => {
-                for (i, value) in x.iter_mut().enumerate().take(h) {
-                    *value = data[i * self.tok_embeddings_cols + token_idx];
-                }
+                let row = &data[token_idx * h..(token_idx + 1) * h];
+                x.copy_from_slice(row);
             }
             WeightStorage::Quantized(qtype, data) => {
-                lookup_quantized_embedding(h, self.tok_embeddings_cols, *qtype, data, token_idx, x);
+                lookup_quantized_embedding(h, *qtype, data, token_idx, x);
             }
             WeightStorage::MmapQuantized(qtype, mmap, offset, size) => {
                 let data = &mmap[*offset..*offset + *size];
-                lookup_quantized_embedding(h, self.tok_embeddings_cols, *qtype, data, token_idx, x);
+                lookup_quantized_embedding(h, *qtype, data, token_idx, x);
             }
         }
 
@@ -945,35 +1604,8 @@ impl InferenceModel {
 
                     let q_full = &mut ws.q_full[..q_len];
                     q_full.fill(0.0_f32);
-                    // Use fused RMSNorm+GEMV for attention Q projection when bias is absent.
-                    if layer.attn_q_bias.is_empty() {
-                        if rms_norm_gemv_f32_transposed(
-                            x,
-                            &layer.attn_norm,
-                            cfg.rms_norm_eps,
-                            match &layer.attn_q {
-                                WeightStorage::F32(data) => data.as_slice(),
-                                _ => {
-                                    gemv_weight(&layer.attn_q, q_len, h, normed, q_full).map_err(
-                                        |e| ModelError::InferenceFailed(format!("attn_q: {:?}", e)),
-                                    )?;
-                                    &[][..]
-                                }
-                            },
-                            h,
-                            q_len,
-                            q_full,
-                        )
-                        .is_err()
-                        {
-                            gemv_weight(&layer.attn_q, q_len, h, normed, q_full).map_err(|e| {
-                                ModelError::InferenceFailed(format!("attn_q: {:?}", e))
-                            })?;
-                        }
-                    } else {
-                        gemv_weight(&layer.attn_q, q_len, h, normed, q_full)
-                            .map_err(|e| ModelError::InferenceFailed(format!("attn_q: {:?}", e)))?;
-                    }
+                    gemv_weight(&layer.attn_q, q_len, h, normed, q_full)
+                        .map_err(|e| ModelError::InferenceFailed(format!("attn_q: {:?}", e)))?;
                     if !layer.attn_q_bias.is_empty() {
                         for (i, q) in q_full.iter_mut().enumerate() {
                             *q += layer.attn_q_bias[i % layer.attn_q_bias.len()];
@@ -1158,10 +1790,10 @@ impl InferenceModel {
                     let attn_result = &mut ws.attn_result[..q_len_used];
                     attn_result.fill(0.0_f32);
 
-                    // For MLA-style where q_head_dim > kv_head_dim, we need to truncate Q heads.
-                    // Build a temporary truncated Q buffer if needed.
-                    let q_for_flash: Vec<f32> = if q_head_dim > kv_head_dim {
-                        let mut q_truncated = vec![0.0_f32; q_heads * kv_head_dim];
+                    // For MLA-style where q_head_dim > kv_head_dim, truncate Q heads into scratch.
+                    // Otherwise pass the Q projection directly and avoid a per-layer allocation.
+                    let q_for_flash: &[f32] = if q_head_dim > kv_head_dim {
+                        let q_truncated = &mut ws.flash_q[..q_heads * kv_head_dim];
                         for head in 0..q_heads {
                             let src_start = head * q_head_dim;
                             let dst_start = head * kv_head_dim;
@@ -1170,10 +1802,10 @@ impl InferenceModel {
                         }
                         q_truncated
                     } else {
-                        q.to_vec()
+                        q
                     };
                     flash_attention_decode_heads_f32(
-                        &q_for_flash,
+                        q_for_flash,
                         key_cache,
                         value_cache,
                         seq_len,
@@ -1245,9 +1877,13 @@ impl InferenceModel {
                     gate.fill(0.0_f32);
                     let up = &mut ws.intermediate_b[..cfg.intermediate_size];
                     up.fill(0.0_f32);
-                    gemv_weight(&layer.ffn_gate, cfg.intermediate_size, h, normed, gate)
+                    let (gate_result, up_result) = rayon::join(
+                        || gemv_weight(&layer.ffn_gate, cfg.intermediate_size, h, normed, gate),
+                        || gemv_weight(&layer.ffn_up, cfg.intermediate_size, h, normed, up),
+                    );
+                    gate_result
                         .map_err(|e| ModelError::InferenceFailed(format!("ffn_gate: {:?}", e)))?;
-                    gemv_weight(&layer.ffn_up, cfg.intermediate_size, h, normed, up)
+                    up_result
                         .map_err(|e| ModelError::InferenceFailed(format!("ffn_up: {:?}", e)))?;
 
                     // Inline SwiGLU into the gate buffer to avoid an intermediate allocation.
@@ -1316,14 +1952,24 @@ impl Model for InferenceModel {
         }
 
         let start_pos = session.consumed_tokens();
-        let mut logits = Vec::new();
-        for (i, &token) in tokens.iter().enumerate() {
-            let pos = start_pos + i;
-            let need_logits = i + 1 == tokens.len();
-            if let Some(final_logits) = self.forward_single(token, pos, need_logits)? {
-                logits = final_logits;
+        let logits = if tokens.len() > 1 && self.layers_supported_for_batched() {
+            // Prefill the prompt in one batched pass so every weight matmul is a
+            // GEMM (decode-once per weight block) rather than `tokens.len()`
+            // separate GEMVs. Intermediate logits are discarded so only the
+            // last token's lm_head is computed.
+            self.forward_batched(tokens, start_pos, true)?
+                .unwrap_or_default()
+        } else {
+            let mut logits = Vec::new();
+            for (i, &token) in tokens.iter().enumerate() {
+                let pos = start_pos + i;
+                let need_logits = i + 1 == tokens.len();
+                if let Some(final_logits) = self.forward_single(token, pos, need_logits)? {
+                    logits = final_logits;
+                }
             }
-        }
+            logits
+        };
         session.record_tokens(tokens.len());
         Ok(logits)
     }
@@ -1413,7 +2059,7 @@ mod tests {
         let max_kv_len = config.num_key_value_heads * config.kv_head_dim();
         assert_eq!(ws.k_vec.len(), max_kv_len);
         assert_eq!(ws.v_vec.len(), max_kv_len);
-        assert_eq!(ws.attn_result.len(), config.hidden_size);
+        assert_eq!(ws.attn_result.len(), max_qkv);
 
         let head_dim = config.head_dim().max(config.kv_head_dim());
         assert_eq!(ws.head_scratch.len(), head_dim);

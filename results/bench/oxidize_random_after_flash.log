@@ -1,0 +1,22 @@
+=== Oxidize DFlash Benchmark ===
+
+Using random weights for testing...
+
+Running draft model forward pass benchmark...
+
+  draft_tokens_per_step: 64
+  iterations: 3
+
+  Iteration 1: 64 tokens in 6.92s (9.25 tok/s)
+  Iteration 2: 64 tokens in 7.18s (8.92 tok/s)
+  Iteration 3: 64 tokens in 7.26s (8.81 tok/s)
+
+=== Results ===
+Total tokens: 192
+Total time: 21.35s
+Throughput: 8.99 tok/s
+Avg latency/token: 111.21ms
+
+Note: Draft-only model has no lm_head; benchmarked forward_token() only.
+
+Benchmark complete.
