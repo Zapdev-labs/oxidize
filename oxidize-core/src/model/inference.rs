@@ -4,7 +4,8 @@ use crate::kv_cache::{KvCache, KvCacheConfig};
 use crate::model::{Logits, Model, ModelError, Session, Token};
 use crate::quantization::{dequantize_scalar, quantized_size};
 use crate::tensor::{
-    DType, apply_rope_f32, f16_le_to_f32, gemv_f32, gemv_quantized_f32, rms_norm_f32,
+    DType, apply_rope_f32, f16_le_to_f32, gemm_quantized_f32, gemv_f32, gemv_quantized_f32,
+    rms_norm_f32,
 };
 use memmap2::Mmap;
 use std::sync::Arc;
@@ -457,6 +458,63 @@ fn gemv_weight(
     }
 }
 
+/// Add a per-row bias (repeating modulo `bias.len()` when shorter than a row)
+/// to every position of a `[batch, row]`-style buffer. Used to apply attention
+/// biases across all batch tokens after a batched GEMM.
+fn add_repeating_bias(buf: &mut [f32], bias: &[f32]) {
+    if bias.is_empty() {
+        return;
+    }
+    let bl = bias.len();
+    for (i, x) in buf.iter_mut().enumerate() {
+        *x += bias[i % bl];
+    }
+}
+
+/// Batched GEMM against a model weight. `inputs` is `[batch, cols]` row-major
+/// and `outputs` is `[batch, rows]` row-major (same natural GGUF layout as
+/// [`gemv_weight`]). For quantized weights this reaches the decode-once fast
+/// path that amortizes one dequantization across all batch tokens — the main
+/// reason batched prefill is much faster than a `forward_single` loop.
+fn gemm_weight(
+    storage: &WeightStorage,
+    rows: usize,
+    cols: usize,
+    inputs: &[f32],
+    outputs: &mut [f32],
+    batch: usize,
+) -> Result<(), String> {
+    if batch == 0 {
+        return Ok(());
+    }
+    if batch == 1 {
+        return gemv_weight(storage, rows, cols, inputs, outputs);
+    }
+    match storage {
+        WeightStorage::F32(data) => {
+            // No batched fp32 GEMM in the natural layout; fall back to a per-batch
+            // GEMV loop. F32 weights are rare in practice (quantized models only
+            // hold the norms as f32, and those don't go through this path).
+            for b in 0..batch {
+                let in_slice = &inputs[b * cols..(b + 1) * cols];
+                let out_slice = &mut outputs[b * rows..(b + 1) * rows];
+                gemv_f32(data, rows, cols, in_slice, out_slice)
+                    .map_err(|e| format!("{:?}", e))?;
+            }
+            Ok(())
+        }
+        WeightStorage::Quantized(qtype, data) => {
+            gemm_quantized_f32(*qtype, data, rows, cols, inputs, outputs, batch)
+                .map_err(|e| format!("{:?}", e))
+        }
+        WeightStorage::MmapQuantized(qtype, mmap, offset, size) => {
+            let data = &mmap[*offset..*offset + *size];
+            gemm_quantized_f32(*qtype, data, rows, cols, inputs, outputs, batch)
+                .map_err(|e| format!("{:?}", e))
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 struct LayerWeights {
     attn_norm: Vec<f32>,
@@ -855,11 +913,419 @@ impl InferenceModel {
             });
         }
         let start_pos = session.consumed_tokens();
-        for (i, &token) in tokens.iter().enumerate() {
-            self.forward_single(token, start_pos + i, false)?;
+        if tokens.len() > 1 && self.layers_supported_for_batched() {
+            self.forward_batched(tokens, start_pos, false)?;
+        } else {
+            for (i, &token) in tokens.iter().enumerate() {
+                self.forward_single(token, start_pos + i, false)?;
+            }
         }
         session.record_tokens(tokens.len());
         Ok(())
+    }
+
+    /// True when all layers use the standard attention + FFN path that
+    /// [`forward_batched`] can handle. Mamba/SSM and MoE layers need per-token
+    /// state and aren't supported by the batched path yet.
+    fn layers_supported_for_batched(&self) -> bool {
+        for layer in &self.layers {
+            let is_mamba = !layer.attn_qkv.is_empty() && layer.attn_q.is_empty();
+            if is_mamba {
+                return false;
+            }
+            // No standard attention → can't batch the layer (degenerate case).
+            if layer.attn_q.is_empty() {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Batched prefill: process `tokens` in one shot, sharing each weight
+    /// matrix across all batch positions via [`gemm_weight`]. Per-token work
+    /// (per-head Q/K norms, RoPE, KV cache writes, attention) stays in a
+    /// position loop — only the matmuls are batched, but those dominate.
+    ///
+    /// Only the final token's logits are computed when `need_logits` is true;
+    /// intermediate tokens' logits would be discarded anyway.
+    #[allow(clippy::too_many_lines)]
+    fn forward_batched(
+        &mut self,
+        tokens: &[Token],
+        start_pos: usize,
+        need_logits: bool,
+    ) -> Result<Option<Logits>, ModelError> {
+        let batch = tokens.len();
+        debug_assert!(batch >= 1);
+        let cfg = self.config.clone();
+        let h = cfg.hidden_size;
+        let n = cfg.num_attention_heads;
+        let kvh = cfg.num_key_value_heads;
+
+        // 1. Embedding lookup for every batch position into x_batch[batch, h].
+        let mut x_batch = vec![0.0_f32; batch * h];
+        for (i, &token) in tokens.iter().enumerate() {
+            let token_idx = (token as usize).min(cfg.vocab_size.saturating_sub(1));
+            let target = &mut x_batch[i * h..(i + 1) * h];
+            match &self.tok_embeddings {
+                WeightStorage::F32(data) => {
+                    let row = &data[token_idx * h..(token_idx + 1) * h];
+                    target.copy_from_slice(row);
+                }
+                WeightStorage::Quantized(qtype, data) => {
+                    lookup_quantized_embedding(h, *qtype, data, token_idx, target);
+                }
+                WeightStorage::MmapQuantized(qtype, mmap, offset, size) => {
+                    let data = &mmap[*offset..*offset + *size];
+                    lookup_quantized_embedding(h, *qtype, data, token_idx, target);
+                }
+            }
+        }
+
+        // Scratch buffers reused across layers. Allocated once per call (batched
+        // prefill is not in the per-token hot path, so this is fine).
+        let layer0 = &self.layers[0];
+        let q_len = layer0.attn_q.output_dim(h);
+        let kv_len = if !layer0.attn_k.is_empty() {
+            layer0.attn_k.output_dim(h)
+        } else {
+            0
+        };
+        let aoil0 = if !layer0.attn_output.is_empty() {
+            layer0.attn_output.output_dim(h)
+        } else {
+            0
+        };
+        let q_len_used0 = if aoil0 > 0 {
+            q_len.min(aoil0)
+        } else if q_len > h {
+            h
+        } else {
+            q_len
+        };
+        let q_head_dim = if n > 0 && q_len_used0.is_multiple_of(n) {
+            q_len_used0 / n
+        } else {
+            q_len_used0
+        };
+        let kv_head_dim = if kvh > 0 && kv_len > 0 && kv_len.is_multiple_of(kvh) {
+            kv_len / kvh
+        } else if kv_len > 0 {
+            kv_len
+        } else {
+            q_head_dim
+        };
+        let i_size = cfg.intermediate_size;
+
+        let mut normed_batch = vec![0.0_f32; batch * h];
+        let mut q_batch = vec![0.0_f32; batch * q_len];
+        let mut k_batch = vec![0.0_f32; batch * kv_len.max(1)];
+        let mut v_batch = vec![0.0_f32; batch * kv_len.max(1)];
+        let mut attn_result_batch = vec![0.0_f32; batch * q_len_used0];
+        let mut attn_proj_batch = vec![0.0_f32; batch * h];
+        let mut gate_batch = vec![0.0_f32; batch * i_size];
+        let mut up_batch = vec![0.0_f32; batch * i_size];
+        let mut ffn_out_batch = vec![0.0_f32; batch * h];
+        let mut head_scratch = vec![0.0_f32; q_head_dim.max(kv_head_dim)];
+
+        for layer_idx in 0..cfg.layer_count {
+            let layer = &self.layers[layer_idx];
+
+            let ffn_norm_weight: &[f32] = if !layer.post_attention_norm.is_empty() {
+                &layer.post_attention_norm
+            } else if !layer.ffn_norm.is_empty() {
+                &layer.ffn_norm
+            } else {
+                &[]
+            };
+
+            // 2. Per-token attn RMSNorm into normed_batch.
+            for i in 0..batch {
+                rms_norm_f32(
+                    &x_batch[i * h..(i + 1) * h],
+                    &layer.attn_norm,
+                    cfg.rms_norm_eps,
+                    &mut normed_batch[i * h..(i + 1) * h],
+                )
+                .map_err(|e| ModelError::InferenceFailed(format!("rms_norm: {:?}", e)))?;
+            }
+
+            // 3. Batched Q/K/V via GEMM — the main win over per-token GEMV.
+            gemm_weight(
+                &layer.attn_q,
+                q_len,
+                h,
+                &normed_batch,
+                &mut q_batch,
+                batch,
+            )
+            .map_err(|e| ModelError::InferenceFailed(format!("attn_q: {:?}", e)))?;
+            if !layer.attn_q_bias.is_empty() {
+                add_repeating_bias(&mut q_batch, &layer.attn_q_bias);
+            }
+            if kv_len > 0 {
+                gemm_weight(
+                    &layer.attn_k,
+                    kv_len,
+                    h,
+                    &normed_batch,
+                    &mut k_batch[..batch * kv_len],
+                    batch,
+                )
+                .map_err(|e| ModelError::InferenceFailed(format!("attn_k: {:?}", e)))?;
+                if !layer.attn_k_bias.is_empty() {
+                    add_repeating_bias(&mut k_batch[..batch * kv_len], &layer.attn_k_bias);
+                }
+                gemm_weight(
+                    &layer.attn_v,
+                    kv_len,
+                    h,
+                    &normed_batch,
+                    &mut v_batch[..batch * kv_len],
+                    batch,
+                )
+                .map_err(|e| ModelError::InferenceFailed(format!("attn_v: {:?}", e)))?;
+                if !layer.attn_v_bias.is_empty() {
+                    add_repeating_bias(&mut v_batch[..batch * kv_len], &layer.attn_v_bias);
+                }
+            }
+
+            let q_heads = q_len_used0 / q_head_dim.max(1);
+            let kv_heads = if kv_head_dim > 0 {
+                kv_len / kv_head_dim
+            } else {
+                0
+            };
+
+            // 4. Per-token: Q/K norm, RoPE, KV cache writes.
+            for i in 0..batch {
+                let pos = start_pos + i;
+                let q = &mut q_batch[i * q_len..i * q_len + q_len_used0];
+                let k = &mut k_batch[i * kv_len..(i + 1) * kv_len];
+                let v = &v_batch[i * kv_len..(i + 1) * kv_len];
+
+                if !layer.attn_q_norm.is_empty() && q_head_dim == layer.attn_q_norm.len() {
+                    for head in 0..q_heads {
+                        let start = head * q_head_dim;
+                        let end = start + q_head_dim;
+                        if end > q.len() {
+                            break;
+                        }
+                        let normed_head = &mut head_scratch[..q_head_dim];
+                        normed_head.fill(0.0_f32);
+                        rms_norm_f32(
+                            &q[start..end],
+                            &layer.attn_q_norm,
+                            cfg.rms_norm_eps,
+                            normed_head,
+                        )
+                        .map_err(|e| ModelError::InferenceFailed(format!("q_norm: {:?}", e)))?;
+                        q[start..end].copy_from_slice(normed_head);
+                    }
+                }
+                if !layer.attn_k_norm.is_empty() && kv_head_dim == layer.attn_k_norm.len() {
+                    for head in 0..kv_heads {
+                        let start = head * kv_head_dim;
+                        let end = start + kv_head_dim;
+                        if end > k.len() {
+                            break;
+                        }
+                        let normed_head = &mut head_scratch[..kv_head_dim];
+                        normed_head.fill(0.0_f32);
+                        rms_norm_f32(
+                            &k[start..end],
+                            &layer.attn_k_norm,
+                            cfg.rms_norm_eps,
+                            normed_head,
+                        )
+                        .map_err(|e| ModelError::InferenceFailed(format!("k_norm: {:?}", e)))?;
+                        k[start..end].copy_from_slice(normed_head);
+                    }
+                }
+
+                // RoPE Q
+                for head in 0..q_heads {
+                    let off = head * q_head_dim;
+                    if off + q_head_dim > q.len() {
+                        break;
+                    }
+                    let rotated = &mut head_scratch[..q_head_dim];
+                    rotated.fill(0.0_f32);
+                    apply_rope_f32(
+                        &q[off..off + q_head_dim],
+                        pos,
+                        q_head_dim,
+                        cfg.rope_theta,
+                        rotated,
+                    )
+                    .map_err(|e| ModelError::InferenceFailed(format!("rope q: {:?}", e)))?;
+                    q[off..off + q_head_dim].copy_from_slice(rotated);
+                }
+                // RoPE K
+                for head in 0..kv_heads {
+                    let off = head * kv_head_dim;
+                    if off + kv_head_dim > k.len() {
+                        break;
+                    }
+                    let rotated = &mut head_scratch[..kv_head_dim];
+                    rotated.fill(0.0_f32);
+                    apply_rope_f32(
+                        &k[off..off + kv_head_dim],
+                        pos,
+                        kv_head_dim,
+                        cfg.rope_theta,
+                        rotated,
+                    )
+                    .map_err(|e| ModelError::InferenceFailed(format!("rope k: {:?}", e)))?;
+                    k[off..off + kv_head_dim].copy_from_slice(rotated);
+                }
+
+                self.kv_cache
+                    .set(layer_idx, pos, k, v)
+                    .map_err(|e| ModelError::InferenceFailed(format!("kv set: {:?}", e)))?;
+            }
+
+            // 5. Per-token: attention. Each position attends to its own causal
+            // prefix (positions 0..=pos).
+            for i in 0..batch {
+                let pos = start_pos + i;
+                let seq_len = pos + 1;
+                let q = &q_batch[i * q_len..i * q_len + q_len_used0];
+                let attn_out_slice =
+                    &mut attn_result_batch[i * q_len_used0..(i + 1) * q_len_used0];
+                attn_out_slice.fill(0.0_f32);
+
+                let key_cache_borrow = self
+                    .kv_cache
+                    .f32_layer_key_prefix(layer_idx, seq_len)
+                    .map_err(|e| ModelError::InferenceFailed(format!("kv borrow keys: {:?}", e)))?;
+                let value_cache_borrow = self
+                    .kv_cache
+                    .f32_layer_value_prefix(layer_idx, seq_len)
+                    .map_err(|e| ModelError::InferenceFailed(format!("kv borrow vals: {:?}", e)))?;
+
+                let key_cache: &[f32] = key_cache_borrow.ok_or_else(|| {
+                    ModelError::InferenceFailed("kv f32 prefix not borrowable (batched)".to_string())
+                })?;
+                let value_cache: &[f32] = value_cache_borrow.ok_or_else(|| {
+                    ModelError::InferenceFailed("kv f32 prefix not borrowable (batched)".to_string())
+                })?;
+
+                flash_attention_decode_heads_f32(
+                    q,
+                    key_cache,
+                    value_cache,
+                    seq_len,
+                    kv_head_dim,
+                    kv_len,
+                    q_heads,
+                    kv_heads,
+                    attn_out_slice,
+                )
+                .map_err(|e| ModelError::InferenceFailed(format!("flash attn: {:?}", e)))?;
+            }
+
+            // 6. Batched attn_output projection.
+            if !layer.attn_output.is_empty() && aoil0 > 0 {
+                gemm_weight(
+                    &layer.attn_output,
+                    h,
+                    aoil0,
+                    &attn_result_batch,
+                    &mut attn_proj_batch,
+                    batch,
+                )
+                .map_err(|e| ModelError::InferenceFailed(format!("attn_output: {:?}", e)))?;
+                if !layer.attn_output_bias.is_empty() {
+                    add_repeating_bias(&mut attn_proj_batch, &layer.attn_output_bias);
+                }
+            } else {
+                attn_proj_batch.fill(0.0_f32);
+            }
+
+            // 7. Residual add (attn).
+            for i in 0..batch * h {
+                x_batch[i] += attn_proj_batch[i];
+            }
+
+            // 8. FFN: per-token RMSNorm, batched gate+up, SwiGLU, batched down.
+            let has_ffn = !layer.ffn_gate.is_empty()
+                && !layer.ffn_up.is_empty()
+                && !layer.ffn_down.is_empty()
+                && !ffn_norm_weight.is_empty();
+            if has_ffn {
+                for i in 0..batch {
+                    rms_norm_f32(
+                        &x_batch[i * h..(i + 1) * h],
+                        ffn_norm_weight,
+                        cfg.rms_norm_eps,
+                        &mut normed_batch[i * h..(i + 1) * h],
+                    )
+                    .map_err(|e| ModelError::InferenceFailed(format!("ffn_norm: {:?}", e)))?;
+                }
+
+                gemm_weight(
+                    &layer.ffn_gate,
+                    i_size,
+                    h,
+                    &normed_batch,
+                    &mut gate_batch,
+                    batch,
+                )
+                .map_err(|e| ModelError::InferenceFailed(format!("ffn_gate: {:?}", e)))?;
+                gemm_weight(
+                    &layer.ffn_up,
+                    i_size,
+                    h,
+                    &normed_batch,
+                    &mut up_batch,
+                    batch,
+                )
+                .map_err(|e| ModelError::InferenceFailed(format!("ffn_up: {:?}", e)))?;
+
+                for (g, u) in gate_batch.iter_mut().zip(up_batch.iter()) {
+                    let sigmoid = 1.0_f32 / (1.0 + (-*g).exp());
+                    *g = *g * sigmoid * *u;
+                }
+
+                gemm_weight(
+                    &layer.ffn_down,
+                    h,
+                    i_size,
+                    &gate_batch,
+                    &mut ffn_out_batch,
+                    batch,
+                )
+                .map_err(|e| ModelError::InferenceFailed(format!("ffn_down: {:?}", e)))?;
+                if !layer.ffn_down_bias.is_empty() {
+                    add_repeating_bias(&mut ffn_out_batch, &layer.ffn_down_bias);
+                }
+
+                for i in 0..batch * h {
+                    x_batch[i] += ffn_out_batch[i];
+                }
+            }
+        }
+
+        if !need_logits {
+            return Ok(None);
+        }
+
+        // Final norm + lm_head only for the last batch position.
+        let last = &x_batch[(batch - 1) * h..batch * h];
+        let mut final_normed = vec![0.0_f32; h];
+        rms_norm_f32(last, &self.norm_weight, cfg.rms_norm_eps, &mut final_normed)
+            .map_err(|e| ModelError::InferenceFailed(format!("final_norm: {:?}", e)))?;
+        let mut logits = vec![0.0_f32; cfg.vocab_size];
+        gemv_weight(
+            &self.output_weight,
+            cfg.vocab_size,
+            h,
+            &final_normed,
+            &mut logits,
+        )
+        .map_err(|e| ModelError::InferenceFailed(format!("output: {:?}", e)))?;
+        Ok(Some(logits))
     }
 
     fn forward_single(
@@ -1488,14 +1954,24 @@ impl Model for InferenceModel {
         }
 
         let start_pos = session.consumed_tokens();
-        let mut logits = Vec::new();
-        for (i, &token) in tokens.iter().enumerate() {
-            let pos = start_pos + i;
-            let need_logits = i + 1 == tokens.len();
-            if let Some(final_logits) = self.forward_single(token, pos, need_logits)? {
-                logits = final_logits;
+        let logits = if tokens.len() > 1 && self.layers_supported_for_batched() {
+            // Prefill the prompt in one batched pass so every weight matmul is a
+            // GEMM (decode-once per weight block) rather than `tokens.len()`
+            // separate GEMVs. Intermediate logits are discarded so only the
+            // last token's lm_head is computed.
+            self.forward_batched(tokens, start_pos, true)?
+                .unwrap_or_default()
+        } else {
+            let mut logits = Vec::new();
+            for (i, &token) in tokens.iter().enumerate() {
+                let pos = start_pos + i;
+                let need_logits = i + 1 == tokens.len();
+                if let Some(final_logits) = self.forward_single(token, pos, need_logits)? {
+                    logits = final_logits;
+                }
             }
-        }
+            logits
+        };
         session.record_tokens(tokens.len());
         Ok(logits)
     }

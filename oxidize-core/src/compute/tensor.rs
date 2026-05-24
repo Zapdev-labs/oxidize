@@ -255,6 +255,9 @@ pub fn gemm_quantized_f32(
         {
             return gemm_q4_k_decode_once(quantized_matrix, rows, cols, inputs, outputs, batch);
         }
+        GgufQuantizationType::Q6_K if cols.is_multiple_of(QK_K) => {
+            return gemm_q6_k_decode_once(quantized_matrix, rows, cols, inputs, outputs, batch);
+        }
         GgufQuantizationType::Q8_0 if cols.is_multiple_of(QK8_0) => {
             return gemm_q8_0_decode_once(quantized_matrix, rows, cols, inputs, outputs, batch);
         }
@@ -778,6 +781,132 @@ fn gemm_q8_0_decode_once(
         }
     }
     Ok(())
+}
+
+/// Q6_K batched GEMM with decode-once optimization. Mirrors
+/// `gemm_q4_k_decode_once` for 6-bit super-blocks: decode each 256-element
+/// block to f32 once, then fan out a fast f32 dot against every batch token.
+fn gemm_q6_k_decode_once(
+    quantized_matrix: &[u8],
+    rows: usize,
+    cols: usize,
+    inputs: &[f32],
+    outputs: &mut [f32],
+    batch: usize,
+) -> Result<(), GemvError> {
+    let blocks_per_row = cols / QK_K;
+    let expected_matrix_len = rows
+        .saturating_mul(blocks_per_row)
+        .saturating_mul(BLOCK_Q6_K_SIZE);
+    if quantized_matrix.len() != expected_matrix_len {
+        return Err(GemvError::InvalidMatrixLength {
+            expected: expected_matrix_len,
+            actual: quantized_matrix.len(),
+        });
+    }
+
+    let mut row_major = vec![0.0_f32; rows.saturating_mul(batch)];
+    let qm_ptr_addr = quantized_matrix.as_ptr() as usize;
+    let in_ptr_addr = inputs.as_ptr() as usize;
+    let row_stride_bytes = blocks_per_row * BLOCK_Q6_K_SIZE;
+
+    const ROW_CHUNK: usize = 16;
+    row_major
+        .par_chunks_mut(ROW_CHUNK * batch)
+        .enumerate()
+        .for_each(|(chunk_idx, chunk)| {
+            let qm_ptr = qm_ptr_addr as *const u8;
+            let in_ptr = in_ptr_addr as *const f32;
+            let start = chunk_idx * ROW_CHUNK;
+            let end = (start + ROW_CHUNK).min(rows);
+            let mut scratch = [0.0_f32; QK_K];
+            for row in start..end {
+                let local = row - start;
+                let partial = &mut chunk[local * batch..(local + 1) * batch];
+                partial.fill(0.0);
+                let row_base = unsafe { qm_ptr.add(row * row_stride_bytes) };
+                for block_idx in 0..blocks_per_row {
+                    let block_ptr =
+                        unsafe { row_base.add(block_idx * BLOCK_Q6_K_SIZE) };
+                    let block = unsafe {
+                        std::slice::from_raw_parts(block_ptr, BLOCK_Q6_K_SIZE)
+                    };
+                    decode_q6_k_block(block, &mut scratch);
+                    let in_offset_floats = block_idx * QK_K;
+                    let chunks = batch / 4;
+                    let tail = batch % 4;
+                    for ck in 0..chunks {
+                        let t0 = ck * 4;
+                        let v0 = unsafe { in_ptr.add(t0 * cols + in_offset_floats) };
+                        let v1 =
+                            unsafe { in_ptr.add((t0 + 1) * cols + in_offset_floats) };
+                        let v2 =
+                            unsafe { in_ptr.add((t0 + 2) * cols + in_offset_floats) };
+                        let v3 =
+                            unsafe { in_ptr.add((t0 + 3) * cols + in_offset_floats) };
+                        let (s0, s1, s2, s3) = unsafe {
+                            dot4_f32_avx2(scratch.as_ptr(), v0, v1, v2, v3, QK_K)
+                        };
+                        partial[t0] += s0;
+                        partial[t0 + 1] += s1;
+                        partial[t0 + 2] += s2;
+                        partial[t0 + 3] += s3;
+                    }
+                    for ti in 0..tail {
+                        let t = chunks * 4 + ti;
+                        let v_ptr = unsafe { in_ptr.add(t * cols + in_offset_floats) };
+                        partial[t] +=
+                            unsafe { dot_f32_avx2(scratch.as_ptr(), v_ptr, QK_K) };
+                    }
+                }
+            }
+        });
+
+    for r in 0..rows {
+        let src = &row_major[r * batch..(r + 1) * batch];
+        for (t, &val) in src.iter().enumerate() {
+            outputs[t * rows + r] = val;
+        }
+    }
+    Ok(())
+}
+
+/// Decode a single 210-byte Q6_K block into 256 f32 values, matching
+/// `q6_k_dot_scalar`'s semantics.
+#[inline]
+fn decode_q6_k_block(block: &[u8], out: &mut [f32]) {
+    debug_assert!(out.len() >= QK_K);
+    debug_assert!(block.len() >= BLOCK_Q6_K_SIZE);
+    let d = f16_le_to_f32([block[208], block[209]]);
+    let ql = &block[0..128];
+    let qh = &block[128..192];
+    let sc = &block[192..208];
+    let mut q_ptr = 0;
+    for half in 0..2 {
+        let scale_base = half * 8;
+        let ql_base = half * 64;
+        let qh_base = half * 32;
+        for l in 0..32 {
+            let is = l / 16;
+            let q1 = ((ql[ql_base + l] & 0x0f) as i32
+                | (((qh[qh_base + l] & 3) as i32) << 4))
+                - 32;
+            let q2 = ((ql[ql_base + l + 32] & 0x0f) as i32
+                | ((((qh[qh_base + l] >> 2) & 3) as i32) << 4))
+                - 32;
+            let q3 = ((ql[ql_base + l] >> 4) as i32
+                | ((((qh[qh_base + l] >> 4) & 3) as i32) << 4))
+                - 32;
+            let q4 = ((ql[ql_base + l + 32] >> 4) as i32
+                | ((((qh[qh_base + l] >> 6) & 3) as i32) << 4))
+                - 32;
+            out[q_ptr + l] = d * sc[scale_base + is] as i8 as f32 * q1 as f32;
+            out[q_ptr + 32 + l] = d * sc[scale_base + is + 2] as i8 as f32 * q2 as f32;
+            out[q_ptr + 64 + l] = d * sc[scale_base + is + 4] as i8 as f32 * q3 as f32;
+            out[q_ptr + 96 + l] = d * sc[scale_base + is + 6] as i8 as f32 * q4 as f32;
+        }
+        q_ptr += 128;
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
