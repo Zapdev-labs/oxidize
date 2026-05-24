@@ -1,3 +1,5 @@
+mod pipeline;
+
 use clap::{Parser, ValueEnum};
 use oxidize_core::generation::{GenerationConfig, GenerationStream};
 use oxidize_core::gguf::MappedGgufFile;
@@ -80,6 +82,23 @@ struct Args {
     /// Port for libp2p mesh listener (0 = ephemeral). Only used with --mesh.
     #[arg(long, default_value_t = 0)]
     mesh_port: u16,
+    /// Run as pipeline head (stage 0): tokenize prompt, run first half of
+    /// layers, ship hidden state to --pipe-peer, print tail-sampled tokens.
+    #[arg(long, default_value_t = false)]
+    pipe_head: bool,
+    /// Run as pipeline tail (last stage): listen on --pipe-listen, run second
+    /// half of layers + lm_head, send sampled tokens back.
+    #[arg(long, default_value_t = false)]
+    pipe_tail: bool,
+    /// TCP address of the next pipeline stage (head connects here).
+    #[arg(long)]
+    pipe_peer: Option<String>,
+    /// TCP address to listen on for the previous pipeline stage (tail binds).
+    #[arg(long)]
+    pipe_listen: Option<String>,
+    /// Maximum tokens to generate in pipeline mode.
+    #[arg(long, default_value_t = 64)]
+    pipe_max_tokens: usize,
 }
 
 fn greeting(prompt: &str) -> String {
@@ -671,6 +690,47 @@ fn main() {
                 std::process::exit(1);
             }
         }
+    }
+    if args.pipe_head {
+        let model = match args.model.as_ref() {
+            Some(m) => m.clone(),
+            None => {
+                eprintln!("--pipe-head requires --model PATH");
+                std::process::exit(1);
+            }
+        };
+        let peer = match args.pipe_peer.as_ref() {
+            Some(p) => p.clone(),
+            None => {
+                eprintln!("--pipe-head requires --pipe-peer HOST:PORT");
+                std::process::exit(1);
+            }
+        };
+        if let Err(e) =
+            pipeline::run_head(&model, &peer, &args.prompt, args.pipe_max_tokens, true)
+        {
+            eprintln!("pipeline head failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if args.pipe_tail {
+        let model = match args.model.as_ref() {
+            Some(m) => m.clone(),
+            None => {
+                eprintln!("--pipe-tail requires --model PATH");
+                std::process::exit(1);
+            }
+        };
+        let listen = args
+            .pipe_listen
+            .clone()
+            .unwrap_or_else(|| "0.0.0.0:42424".to_string());
+        if let Err(e) = pipeline::run_tail(&model, &listen, true) {
+            eprintln!("pipeline tail failed: {e}");
+            std::process::exit(1);
+        }
+        return;
     }
     if args.mesh && args.chat {
         if let Err(error) = run_mesh_chat_mode(args.mesh_port) {

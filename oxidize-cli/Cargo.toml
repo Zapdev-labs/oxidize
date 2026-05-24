@@ -20,6 +20,7 @@ path = "src/bin/inspect_gguf.rs"
 clap.workspace = true
 oxidize-core = { path = "../oxidize-core" }
 futures-core = "0.3"
+libc = "0.2"
 rand = "0.8"
 rayon = "1"
 tokio.workspace = true
