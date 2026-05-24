@@ -2,8 +2,8 @@ mod pipeline;
 
 use clap::{CommandFactory, FromArgMatches, Parser, ValueEnum};
 use oxidize_core::generation::{GenerationConfig, GenerationStream};
-use oxidize_core::hardware::{HardwareTier, InferenceOverrides, ResolvedInference};
 use oxidize_core::gguf::MappedGgufFile;
+use oxidize_core::hardware::{HardwareTier, InferenceOverrides, ResolvedInference};
 use oxidize_core::inference::{InferenceConfig, InferenceModel};
 use oxidize_core::lora::{AdapterKind, LoraPlan, plan_lora_application};
 use oxidize_core::model::{Model, Session};
@@ -152,17 +152,22 @@ impl KvCacheDType {
             Self::Q4 => DType::I16,
         }
     }
-
 }
 
 fn inference_overrides_from_args(args: &Args, matches: &clap::ArgMatches) -> InferenceOverrides {
     InferenceOverrides {
         threads: args.threads,
         ctx_size: args.ctx_size,
-        cpu_optimized: matches.get_flag("cpu_optimized").then_some(args.cpu_optimized),
+        cpu_optimized: matches
+            .get_flag("cpu_optimized")
+            .then_some(args.cpu_optimized),
         ram_offload: matches.get_flag("ram_offload").then_some(args.ram_offload),
-        mmap_prefetch: matches.get_flag("mmap_prefetch").then_some(args.mmap_prefetch),
-        mmap_hugepages: matches.get_flag("mmap_hugepages").then_some(args.mmap_hugepages),
+        mmap_prefetch: matches
+            .get_flag("mmap_prefetch")
+            .then_some(args.mmap_prefetch),
+        mmap_hugepages: matches
+            .get_flag("mmap_hugepages")
+            .then_some(args.mmap_hugepages),
         layer_wise: matches.get_flag("layer_wise").then_some(args.layer_wise),
         layer_cache: matches
             .contains_id("layer_cache")
@@ -659,10 +664,8 @@ fn run_profiled_inference(profiler: Profiler, output: Option<&PathBuf>) -> io::R
 }
 
 fn optimize_mapped_model_memory(mapped: &MappedGgufFile, flags: &ResolvedInference) {
-    let apply_hints = flags.cpu_optimized
-        || flags.ram_offload
-        || flags.mmap_prefetch
-        || flags.mmap_hugepages;
+    let apply_hints =
+        flags.cpu_optimized || flags.ram_offload || flags.mmap_prefetch || flags.mmap_hugepages;
     if !apply_hints {
         return;
     }
@@ -745,8 +748,7 @@ fn main() {
                 std::process::exit(1);
             }
         };
-        if let Err(e) =
-            pipeline::run_head(&model, &peer, &args.prompt, args.pipe_max_tokens, true)
+        if let Err(e) = pipeline::run_head(&model, &peer, &args.prompt, args.pipe_max_tokens, true)
         {
             eprintln!("pipeline head failed: {e}");
             std::process::exit(1);

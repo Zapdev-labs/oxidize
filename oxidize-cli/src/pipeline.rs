@@ -92,13 +92,12 @@ fn config_from_metadata(mapped: &MappedGgufFile) -> InferenceConfig {
         .unwrap_or(32000);
     let rope_theta = f32_of(&key("rope.freq_base")).unwrap_or(10000.0);
     let rms_norm_eps = f32_of(&key("attention.layer_norm_rms_epsilon")).unwrap_or(1e-5);
-    let key_value_head_dim = u32_of(&key("attention.key_length")).unwrap_or(
-        if num_attention_heads > 0 {
+    let key_value_head_dim =
+        u32_of(&key("attention.key_length")).unwrap_or(if num_attention_heads > 0 {
             hidden_size / num_attention_heads
         } else {
             hidden_size
-        },
-    );
+        });
     InferenceConfig {
         vocab_size,
         context_size,
@@ -215,9 +214,8 @@ fn send_hidden(
     header[5] = wants_token as u8;
     header[6..10].copy_from_slice(&payload_bytes.to_le_bytes());
     write_all(stream, &header)?;
-    let bytes: &[u8] = unsafe {
-        std::slice::from_raw_parts(scratch.as_ptr() as *const u8, scratch.len() * 2)
-    };
+    let bytes: &[u8] =
+        unsafe { std::slice::from_raw_parts(scratch.as_ptr() as *const u8, scratch.len() * 2) };
     write_all(stream, bytes)
 }
 
@@ -255,9 +253,8 @@ fn recv_hidden_payload(
     }
     let n = nbytes / 2;
     f16_scratch.resize(n, 0);
-    let bytes: &mut [u8] = unsafe {
-        std::slice::from_raw_parts_mut(f16_scratch.as_mut_ptr() as *mut u8, nbytes)
-    };
+    let bytes: &mut [u8] =
+        unsafe { std::slice::from_raw_parts_mut(f16_scratch.as_mut_ptr() as *mut u8, nbytes) };
     read_exact(stream, bytes)?;
     into.resize(n, 0.0);
     for (dst, &src) in into.iter_mut().zip(f16_scratch.iter()) {
@@ -364,7 +361,13 @@ pub fn run_head(
             .map_err(|e| std::io::Error::other(format!("head forward: {e:?}")))?;
         let wants_token = pos + 1 == n_prompt;
         let hidden = model.hidden_state().to_vec();
-        send_hidden(&mut stream, pos as u32, wants_token, &hidden, &mut f16_scratch)?;
+        send_hidden(
+            &mut stream,
+            pos as u32,
+            wants_token,
+            &hidden,
+            &mut f16_scratch,
+        )?;
     }
     let prefill_done = Instant::now();
     log(
@@ -410,7 +413,13 @@ pub fn run_head(
             .run_layer_range_in_workspace(decode_pos, head_range.clone())
             .map_err(|e| std::io::Error::other(format!("head forward: {e:?}")))?;
         let hidden = model.hidden_state().to_vec();
-        send_hidden(&mut stream, decode_pos as u32, true, &hidden, &mut f16_scratch)?;
+        send_hidden(
+            &mut stream,
+            decode_pos as u32,
+            true,
+            &hidden,
+            &mut f16_scratch,
+        )?;
         let tok = match recv_tag(&mut stream)? {
             TAG_TOKEN => recv_token_payload(&mut stream)?,
             other => {
@@ -452,11 +461,7 @@ pub fn run_head(
 
 /// Stage 1 / tail. Listens at `listen_addr`, accepts head, then loops:
 ///   recv hidden → set hidden → run tail layers → final_head → argmax → send token
-pub fn run_tail(
-    model_path: &Path,
-    listen_addr: &str,
-    use_mmap: bool,
-) -> std::io::Result<()> {
+pub fn run_tail(model_path: &Path, listen_addr: &str, use_mmap: bool) -> std::io::Result<()> {
     log("tail", format!("loading model {}", model_path.display()));
     let mut model = load_model(model_path, use_mmap)
         .map_err(|e| std::io::Error::other(format!("model: {e}")))?;

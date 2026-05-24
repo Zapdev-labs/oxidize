@@ -940,8 +940,7 @@ impl InferenceModel {
                 for chunk in tokens.chunks(micro) {
                     let pos = start_pos + offset;
                     let is_final = offset + chunk.len() == tokens.len();
-                    let chunk_logits =
-                        self.forward_batched(chunk, pos, need_logits && is_final)?;
+                    let chunk_logits = self.forward_batched(chunk, pos, need_logits && is_final)?;
                     if need_logits && is_final {
                         logits = chunk_logits;
                     }
@@ -2208,15 +2207,10 @@ mod tests {
             split
                 .run_layer_range_in_workspace(pos, k..l)
                 .expect("tail layers ok");
-            let split_logits = split
-                .final_head_from_workspace()
-                .expect("final head ok");
+            let split_logits = split.final_head_from_workspace().expect("final head ok");
             assert_eq!(full.len(), split_logits.len());
             for (i, (a, b)) in full.iter().zip(split_logits.iter()).enumerate() {
-                assert!(
-                    (a - b).abs() < 1e-4,
-                    "pos={pos} idx={i} full={a} split={b}"
-                );
+                assert!((a - b).abs() < 1e-4, "pos={pos} idx={i} full={a} split={b}");
             }
         }
     }

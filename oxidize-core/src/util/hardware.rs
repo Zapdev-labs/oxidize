@@ -201,13 +201,9 @@ impl ResolvedInference {
         let mmap_prefetch = overrides.mmap_prefetch.unwrap_or(profile.mmap_prefetch);
         let mmap_hugepages = overrides.mmap_hugepages.unwrap_or(profile.mmap_hugepages);
         let layer_wise = overrides.layer_wise.unwrap_or(profile.layer_wise);
-        let layer_cache = overrides.layer_cache.unwrap_or_else(|| {
-            if layer_wise {
-                profile.layer_cache
-            } else {
-                1
-            }
-        });
+        let layer_cache = overrides
+            .layer_cache
+            .unwrap_or_else(|| if layer_wise { profile.layer_cache } else { 1 });
         let ctx_size = overrides.ctx_size.or(Some(profile.default_ctx_size));
         let kv_cache_dtype = overrides.kv_cache_dtype.unwrap_or(profile.kv_cache_dtype);
 
@@ -654,7 +650,10 @@ mod tests {
         let snapshot = snapshot_ram_cpus(24, 8);
         let profile = HardwareProfile::from_snapshot(HardwareTier::Mid, &snapshot);
         assert_eq!(profile.thread_count, 7);
-        assert_eq!(profile.parallel_gemv_min_ops(), DEFAULT_PARALLEL_GEMV_MIN_OPS);
+        assert_eq!(
+            profile.parallel_gemv_min_ops(),
+            DEFAULT_PARALLEL_GEMV_MIN_OPS
+        );
     }
 
     #[test]
@@ -722,6 +721,9 @@ mod tests {
         let high = HardwareProfile::from_snapshot(HardwareTier::High, &snapshot_ram_cpus(64, 16));
         assert!(low.gemm_row_chunk() < mid.gemm_row_chunk());
         assert!(mid.gemm_row_chunk() <= high.gemm_row_chunk());
+        assert!(low.gemm_batch_dot_chunk() < mid.gemm_batch_dot_chunk());
+        assert_eq!(low.gemm_batch_dot_chunk(), 2);
+        assert_eq!(mid.gemm_batch_dot_chunk(), 4);
         assert!(low.vulkan_gemm_min_work_items() > high.vulkan_gemm_min_work_items());
     }
 

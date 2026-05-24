@@ -31,8 +31,6 @@ pub use backend::ComputeBackend;
 pub mod advanced_features;
 #[path = "util/benchmark_suite.rs"]
 pub mod benchmark_suite;
-#[path = "util/hardware.rs"]
-pub mod hardware;
 #[path = "format/conversion.rs"]
 pub mod conversion;
 #[path = "compute/cpu_kernels.rs"]
@@ -49,6 +47,8 @@ pub mod flash_attention;
 pub mod generation;
 #[path = "format/gguf.rs"]
 pub mod gguf;
+#[path = "util/hardware.rs"]
+pub mod hardware;
 #[path = "model/inference.rs"]
 pub mod inference;
 #[path = "compute/kv_cache.rs"]

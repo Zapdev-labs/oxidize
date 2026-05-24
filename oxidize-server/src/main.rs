@@ -117,10 +117,16 @@ fn server_inference_overrides(args: &Args, matches: &clap::ArgMatches) -> Infere
     InferenceOverrides {
         threads: args.threads,
         ctx_size: args.ctx_size,
-        cpu_optimized: matches.get_flag("cpu_optimized").then_some(args.cpu_optimized),
+        cpu_optimized: matches
+            .get_flag("cpu_optimized")
+            .then_some(args.cpu_optimized),
         ram_offload: matches.get_flag("ram_offload").then_some(args.ram_offload),
-        mmap_prefetch: matches.get_flag("mmap_prefetch").then_some(args.mmap_prefetch),
-        mmap_hugepages: matches.get_flag("mmap_hugepages").then_some(args.mmap_hugepages),
+        mmap_prefetch: matches
+            .get_flag("mmap_prefetch")
+            .then_some(args.mmap_prefetch),
+        mmap_hugepages: matches
+            .get_flag("mmap_hugepages")
+            .then_some(args.mmap_hugepages),
         layer_wise: matches.get_flag("layer_wise").then_some(args.layer_wise),
         layer_cache: matches
             .contains_id("layer_cache")
@@ -2270,7 +2276,10 @@ fn optimize_mapped_model_memory(mapped: &MappedGgufFile, inference: &ResolvedInf
     }
 }
 
-fn inference_config_from_gguf(mapped: &MappedGgufFile, inference: &ResolvedInference) -> InferenceConfig {
+fn inference_config_from_gguf(
+    mapped: &MappedGgufFile,
+    inference: &ResolvedInference,
+) -> InferenceConfig {
     let mut config = InferenceConfig::from_gguf(mapped);
     config.kv_cache_dtype = inference.kv_cache_dtype;
     if let Some(ctx) = inference.ctx_size {

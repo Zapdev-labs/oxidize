@@ -1,5 +1,6 @@
 use crate::flash_attention::flash_attention_decode_heads_f32;
 use crate::gguf::{GgufQuantizationType, MappedGgufFile};
+use crate::hardware;
 use crate::model::{Logits, Model, ModelError, Session, Token};
 use crate::quantization::{dequantize_scalar, quantized_size};
 use crate::safetensors::MappedSafeTensorsFile;
@@ -943,6 +944,24 @@ impl DFlashDraftModel {
     /// through position `t`. Target-hidden fusion is not supported here — use
     /// `forward_token` for speculative-decoding paths.
     pub fn forward_batch(&mut self, tokens: &[u32]) -> Result<Vec<f32>, String> {
+        if tokens.is_empty() {
+            return Err("empty token batch".into());
+        }
+        if tokens.len() > 1 {
+            if let Some(micro) = hardware::global_profile().prefill_micro_batch_size() {
+                if tokens.len() > micro {
+                    let mut hidden = None;
+                    for chunk in tokens.chunks(micro) {
+                        hidden = Some(self.forward_batch_chunk(chunk)?);
+                    }
+                    return hidden.ok_or_else(|| "empty token batch".into());
+                }
+            }
+        }
+        self.forward_batch_chunk(tokens)
+    }
+
+    fn forward_batch_chunk(&mut self, tokens: &[u32]) -> Result<Vec<f32>, String> {
         if tokens.is_empty() {
             return Err("empty token batch".into());
         }
