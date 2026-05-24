@@ -49,40 +49,48 @@ fn main() {
         let arch_key = |suffix: &str| arch.as_ref().map(|a| format!("{a}.{suffix}"));
         let arch_u32 = |suffix: &str| arch_key(suffix).and_then(|key| metadata_u32(metadata, &key));
         let arch_f32 = |suffix: &str| arch_key(suffix).and_then(|key| metadata_f32(metadata, &key));
+        let inferred = infer_dflash_config_from_tensors(&mapped);
         let hidden_size = metadata_u32(metadata, "dflash-draft.hidden_size")
             .or_else(|| metadata_u32(metadata, "dflash-draft.embedding_length"))
             .or_else(|| arch_u32("embedding_length"))
+            .or(inferred.hidden_size.map(|v| v as u32))
             .unwrap_or(5120) as usize;
         let num_layers = metadata_u32(metadata, "dflash-draft.num_hidden_layers")
             .or_else(|| metadata_u32(metadata, "dflash-draft.block_count"))
             .or_else(|| arch_u32("block_count"))
+            .or(inferred.num_layers.map(|v| v as u32))
             .unwrap_or(5) as usize;
         let num_attention_heads = metadata_u32(metadata, "dflash-draft.num_attention_heads")
             .or_else(|| metadata_u32(metadata, "dflash-draft.attention.head_count"))
             .or_else(|| arch_u32("attention.head_count"))
+            .or(inferred.num_attention_heads.map(|v| v as u32))
             .unwrap_or(32) as usize;
         let num_key_value_heads = metadata_u32(metadata, "dflash-draft.num_key_value_heads")
             .or_else(|| metadata_u32(metadata, "dflash-draft.attention.head_count_kv"))
             .or_else(|| arch_u32("attention.head_count_kv"))
+            .or(inferred.num_key_value_heads.map(|v| v as u32))
             .unwrap_or(8) as usize;
         let key_value_head_dim = metadata_u32(metadata, "dflash-draft.attention.key_length")
             .or_else(|| arch_u32("attention.key_length"))
+            .or(inferred.head_dim.map(|v| v as u32))
             .unwrap_or((hidden_size / num_attention_heads) as u32)
             as usize;
         let intermediate_size = metadata_u32(metadata, "dflash-draft.intermediate_size")
             .or_else(|| metadata_u32(metadata, "dflash-draft.feed_forward_length"))
             .or_else(|| arch_u32("feed_forward_length"))
+            .or(inferred.intermediate_size.map(|v| v as u32))
             .unwrap_or(17408) as usize;
         let block_size = metadata_u32(metadata, "dflash-draft.block_size")
             .or_else(|| metadata_u32(metadata, "dflash-draft.dflash.block_size"))
-            .unwrap_or(16) as usize;
+            .unwrap_or(if hidden_size == 7168 { 8 } else { 16 }) as usize;
         let mask_token_id = metadata_u32(metadata, "dflash-draft.mask_token_id")
             .or_else(|| metadata_u32(metadata, "dflash-draft.dflash.mask_token_id"))
-            .unwrap_or(151665);
+            .unwrap_or(if hidden_size == 7168 { 163838 } else { 151665 });
         let n_target_features = metadata_u32(metadata, "dflash-draft.vocab_size")
             .or_else(|| metadata_u32(metadata, "dflash-draft.n_target_features"))
             .or_else(|| metadata_u32(metadata, "dflash-draft.dflash.n_target_features"))
             .or_else(|| arch_u32("vocab_size"))
+            .or(inferred.vocab_size.map(|v| v as u32))
             .or_else(|| token_embedding_vocab(&mapped))
             .unwrap_or(25600) as usize;
         let rope_theta = metadata_f32(metadata, "dflash-draft.rope_theta")
@@ -349,6 +357,66 @@ fn run_inference_model_benchmark(args: &Args, model: &mut InferenceModel, token:
     println!("Avg latency/token: {:.2?}", avg_latency);
     println!("\nNote: inference benchmark skips final logits to measure token processing.");
     println!("\nBenchmark complete.");
+}
+
+#[derive(Default)]
+struct InferredDFlashConfig {
+    hidden_size: Option<usize>,
+    num_layers: Option<usize>,
+    num_attention_heads: Option<usize>,
+    num_key_value_heads: Option<usize>,
+    head_dim: Option<usize>,
+    intermediate_size: Option<usize>,
+    vocab_size: Option<usize>,
+}
+
+fn infer_dflash_config_from_tensors(
+    mapped: &oxidize_core::gguf::MappedGgufFile,
+) -> InferredDFlashConfig {
+    let mut out = InferredDFlashConfig::default();
+    let tensors = &mapped.parsed().tensor_infos;
+    out.num_layers = tensors
+        .iter()
+        .filter_map(|t| t.name.strip_prefix("blk."))
+        .filter_map(|rest| rest.split_once('.'))
+        .filter_map(|(idx, _)| idx.parse::<usize>().ok())
+        .max()
+        .map(|idx| idx + 1);
+    if let Some(t) = tensors
+        .iter()
+        .find(|t| t.name == "blk.0.attn_q_norm.weight")
+    {
+        if let Some(&dim) = t.dimensions.first() {
+            out.head_dim = Some(dim as usize);
+        }
+    }
+    if let Some(t) = tensors.iter().find(|t| t.name == "blk.0.attn_q.weight") {
+        if t.dimensions.len() >= 2 {
+            out.hidden_size = Some(t.dimensions[0] as usize);
+            if let Some(head_dim) = out.head_dim {
+                out.num_attention_heads = Some((t.dimensions[1] as usize) / head_dim.max(1));
+            }
+        }
+    }
+    if let (Some(head_dim), Some(t)) = (
+        out.head_dim,
+        tensors.iter().find(|t| t.name == "blk.0.attn_k.weight"),
+    ) {
+        if t.dimensions.len() >= 2 {
+            out.num_key_value_heads = Some((t.dimensions[1] as usize) / head_dim.max(1));
+        }
+    }
+    if let Some(t) = tensors.iter().find(|t| t.name == "blk.0.ffn_down.weight") {
+        if let Some(&dim) = t.dimensions.first() {
+            out.intermediate_size = Some(dim as usize);
+        }
+    }
+    if let Some(t) = tensors.iter().find(|t| t.name == "output.weight") {
+        if let Some(&dim) = t.dimensions.first() {
+            out.vocab_size = Some(dim as usize);
+        }
+    }
+    out
 }
 
 fn inference_config_from_dflash(
