@@ -290,7 +290,11 @@ fn parse_tier_env(raw: &str) -> Option<HardwareTier> {
 fn classify_auto(snapshot: &HardwareSnapshot) -> HardwareTier {
     if snapshot.total_ram_bytes < LOW_RAM_BYTES || snapshot.logical_cpus <= 4 {
         HardwareTier::Low
-    } else if snapshot.total_ram_bytes > MID_RAM_MAX_BYTES || snapshot.logical_cpus >= 12 {
+    } else if snapshot.total_ram_bytes > MID_RAM_MAX_BYTES && snapshot.logical_cpus >= 8
+        || snapshot.total_ram_bytes >= 48 * GIB
+    {
+        // High = ample RAM *and* cores, or very large memory (workstations / APUs with 48+ GiB).
+        // Laptops with many SMT threads but <=32 GiB stay Mid (e.g. Ryzen 6850H + 28 GiB).
         HardwareTier::High
     } else {
         HardwareTier::Mid
@@ -624,9 +628,16 @@ mod tests {
 
     #[test]
     fn auto_classifies_high_cpus() {
-        let snapshot = snapshot_ram_cpus(16, 16);
+        let snapshot = snapshot_ram_cpus(64, 16);
         let profile = HardwareProfile::from_snapshot(HardwareTier::Auto, &snapshot);
         assert_eq!(profile.tier, HardwareTier::High);
+    }
+
+    #[test]
+    fn auto_classifies_many_threads_but_mid_ram_as_mid() {
+        let snapshot = snapshot_ram_cpus(28, 16);
+        let profile = HardwareProfile::from_snapshot(HardwareTier::Auto, &snapshot);
+        assert_eq!(profile.tier, HardwareTier::Mid);
     }
 
     #[test]
