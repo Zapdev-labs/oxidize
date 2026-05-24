@@ -157,13 +157,23 @@ impl InferenceConfig {
             .or_else(|| first_tensor_dims(mapped, "token_embd.weight"));
 
         let hidden_size = arch_u32("embedding_length")
-            .or_else(|| token_embd_dims.as_ref().and_then(|d| d.first().copied()).map(|v| v as u32))
+            .or_else(|| {
+                token_embd_dims
+                    .as_ref()
+                    .and_then(|d| d.first().copied())
+                    .map(|v| v as u32)
+            })
             .unwrap_or(4096) as usize;
 
         let vocab_size = arch_u32("vocab_size")
             .or_else(|| metadata_u32_lookup(metadata, "general.vocab_size"))
             .or_else(|| metadata_u32_lookup(metadata, "tokenizer.ggml.tokens.count"))
-            .or_else(|| token_embd_dims.as_ref().and_then(|d| d.get(1).copied()).map(|v| v as u32))
+            .or_else(|| {
+                token_embd_dims
+                    .as_ref()
+                    .and_then(|d| d.get(1).copied())
+                    .map(|v| v as u32)
+            })
             .unwrap_or(32000) as usize;
 
         let context_size = arch_u32("context_length")
@@ -186,8 +196,8 @@ impl InferenceConfig {
 
         // GQA: KV heads. Default to num_attention_heads only when key is absent
         // AND we can't infer from attn_k dims.
-        let attn_k_out = first_layer_tensor_dims(mapped, "attn_k.weight")
-            .and_then(|d| d.get(1).copied());
+        let attn_k_out =
+            first_layer_tensor_dims(mapped, "attn_k.weight").and_then(|d| d.get(1).copied());
         let num_key_value_heads = arch_u32("attention.head_count_kv")
             .map(|v| v as usize)
             .unwrap_or(num_attention_heads);
@@ -197,21 +207,9 @@ impl InferenceConfig {
         let key_value_head_dim = arch_u32("attention.key_length")
             .map(|v| v as usize)
             .or_else(|| {
-                attn_k_out.and_then(|width| {
-                    if num_key_value_heads == 0 {
-                        None
-                    } else {
-                        Some((width as usize) / num_key_value_heads)
-                    }
-                })
+                attn_k_out.and_then(|width| (width as usize).checked_div(num_key_value_heads))
             })
-            .unwrap_or_else(|| {
-                if num_attention_heads == 0 {
-                    0
-                } else {
-                    hidden_size / num_attention_heads
-                }
-            });
+            .unwrap_or_else(|| hidden_size.checked_div(num_attention_heads).unwrap_or(0));
 
         let rms_norm_eps = arch_f32("attention.layer_norm_rms_epsilon").unwrap_or(1e-5);
         let rope_theta = arch_f32("rope.freq_base").unwrap_or(10000.0);
@@ -219,7 +217,9 @@ impl InferenceConfig {
             .map(|v| v as usize)
             .unwrap_or(0);
         let num_experts = arch_u32("expert_count").map(|v| v as usize).unwrap_or(0);
-        let num_experts_per_tok = arch_u32("expert_used_count").map(|v| v as usize).unwrap_or(0);
+        let num_experts_per_tok = arch_u32("expert_used_count")
+            .map(|v| v as usize)
+            .unwrap_or(0);
 
         Self {
             vocab_size,
@@ -498,8 +498,7 @@ fn gemm_weight(
             for b in 0..batch {
                 let in_slice = &inputs[b * cols..(b + 1) * cols];
                 let out_slice = &mut outputs[b * rows..(b + 1) * rows];
-                gemv_f32(data, rows, cols, in_slice, out_slice)
-                    .map_err(|e| format!("{:?}", e))?;
+                gemv_f32(data, rows, cols, in_slice, out_slice).map_err(|e| format!("{:?}", e))?;
             }
             Ok(())
         }
@@ -594,10 +593,12 @@ pub(crate) fn lookup_quantized_embedding(
     let row = &data[row_start..row_start + blocks_per_row * block_size];
     match qtype {
         GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M => {
-            let _ = crate::quantization::dequantize_q4_k_scalar(row, &mut x[..blocks_per_row * 256]);
+            let _ =
+                crate::quantization::dequantize_q4_k_scalar(row, &mut x[..blocks_per_row * 256]);
         }
         GgufQuantizationType::Q6_K => {
-            let _ = crate::quantization::dequantize_q6_k_scalar(row, &mut x[..blocks_per_row * 256]);
+            let _ =
+                crate::quantization::dequantize_q6_k_scalar(row, &mut x[..blocks_per_row * 256]);
         }
         GgufQuantizationType::Q8_0 => {
             // Q8_0: block = [d_f16 (2 bytes), 32× int8].
@@ -928,6 +929,9 @@ impl InferenceModel {
     /// [`forward_batched`] can handle. Mamba/SSM and MoE layers need per-token
     /// state and aren't supported by the batched path yet.
     fn layers_supported_for_batched(&self) -> bool {
+        if self.layers.is_empty() {
+            return false;
+        }
         for layer in &self.layers {
             let is_mamba = !layer.attn_qkv.is_empty() && layer.attn_q.is_empty();
             if is_mamba {
@@ -1051,15 +1055,8 @@ impl InferenceModel {
             }
 
             // 3. Batched Q/K/V via GEMM — the main win over per-token GEMV.
-            gemm_weight(
-                &layer.attn_q,
-                q_len,
-                h,
-                &normed_batch,
-                &mut q_batch,
-                batch,
-            )
-            .map_err(|e| ModelError::InferenceFailed(format!("attn_q: {:?}", e)))?;
+            gemm_weight(&layer.attn_q, q_len, h, &normed_batch, &mut q_batch, batch)
+                .map_err(|e| ModelError::InferenceFailed(format!("attn_q: {:?}", e)))?;
             if !layer.attn_q_bias.is_empty() {
                 add_repeating_bias(&mut q_batch, &layer.attn_q_bias);
             }
@@ -1091,11 +1088,7 @@ impl InferenceModel {
             }
 
             let q_heads = q_len_used0 / q_head_dim.max(1);
-            let kv_heads = if kv_head_dim > 0 {
-                kv_len / kv_head_dim
-            } else {
-                0
-            };
+            let kv_heads = kv_len.checked_div(kv_head_dim).unwrap_or(0);
 
             // 4. Per-token: Q/K norm, RoPE, KV cache writes.
             for i in 0..batch {
@@ -1191,8 +1184,7 @@ impl InferenceModel {
                 let pos = start_pos + i;
                 let seq_len = pos + 1;
                 let q = &q_batch[i * q_len..i * q_len + q_len_used0];
-                let attn_out_slice =
-                    &mut attn_result_batch[i * q_len_used0..(i + 1) * q_len_used0];
+                let attn_out_slice = &mut attn_result_batch[i * q_len_used0..(i + 1) * q_len_used0];
                 attn_out_slice.fill(0.0_f32);
 
                 let key_cache_borrow = self
@@ -1202,13 +1194,19 @@ impl InferenceModel {
                 let value_cache_borrow = self
                     .kv_cache
                     .f32_layer_value_prefix(layer_idx, seq_len)
-                    .map_err(|e| ModelError::InferenceFailed(format!("kv borrow vals: {:?}", e)))?;
+                    .map_err(|e| {
+                    ModelError::InferenceFailed(format!("kv borrow vals: {:?}", e))
+                })?;
 
                 let key_cache: &[f32] = key_cache_borrow.ok_or_else(|| {
-                    ModelError::InferenceFailed("kv f32 prefix not borrowable (batched)".to_string())
+                    ModelError::InferenceFailed(
+                        "kv f32 prefix not borrowable (batched)".to_string(),
+                    )
                 })?;
                 let value_cache: &[f32] = value_cache_borrow.ok_or_else(|| {
-                    ModelError::InferenceFailed("kv f32 prefix not borrowable (batched)".to_string())
+                    ModelError::InferenceFailed(
+                        "kv f32 prefix not borrowable (batched)".to_string(),
+                    )
                 })?;
 
                 flash_attention_decode_heads_f32(
