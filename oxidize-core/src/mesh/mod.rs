@@ -1,6 +1,6 @@
 //! Distributed mesh networking layer.
 //!
-//! Provides peer discovery via libp2p + mDNS, GossipSub control plane,
+//! Provides peer communication via libp2p + GossipSub control plane,
 //! leader election, topology tracking, ring collectives, sharding,
 //! fault tolerance, and distributed progress indicators.
 

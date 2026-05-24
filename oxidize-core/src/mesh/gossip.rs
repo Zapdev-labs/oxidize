@@ -2,7 +2,7 @@
 
 use libp2p::{
     gossipsub::{self, TopicHash},
-    identify, mdns,
+    identify,
     swarm::NetworkBehaviour,
 };
 use serde::{Deserialize, Serialize};
@@ -63,7 +63,6 @@ pub struct GossipMessage {
 #[derive(NetworkBehaviour)]
 #[behaviour(to_swarm = "MeshEvent")]
 pub struct MeshBehaviour {
-    pub mdns: mdns::tokio::Behaviour,
     pub gossipsub: gossipsub::Behaviour,
     pub identify: identify::Behaviour,
 }
@@ -72,15 +71,8 @@ pub struct MeshBehaviour {
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
 pub enum MeshEvent {
-    Mdns(mdns::Event),
     Gossipsub(gossipsub::Event),
     Identify(identify::Event),
-}
-
-impl From<mdns::Event> for MeshEvent {
-    fn from(event: mdns::Event) -> Self {
-        MeshEvent::Mdns(event)
-    }
 }
 
 impl From<gossipsub::Event> for MeshEvent {
@@ -268,13 +260,6 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         let back: GossipMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(msg, back);
-    }
-
-    #[test]
-    fn mesh_event_from_variants() {
-        // Just exercise the From impls compile and execute.
-        let mdns_event = MeshEvent::from(mdns::Event::Discovered(vec![]));
-        assert!(matches!(mdns_event, MeshEvent::Mdns(_)));
     }
 
     #[test]

@@ -30,7 +30,9 @@ below for replacing the guesswork with real apples-to-apples runs.
 
 **Recent perf history** (last 5 commits): AVX2 Q4_K kernel rewrite, batched
 Q4_K/Q8_K GEMM, batched prefill via `gemm_quantized_f32`, normal-model decode
-correctness fixes. The momentum is on decode; prefill is the next obvious win.
+correctness fixes, and mDNS removal from the mesh dependency graph to clear the
+`hickory-proto` Dependabot advisory. The momentum is on decode; prefill is the
+next obvious win.
 
 ---
 
