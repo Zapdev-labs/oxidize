@@ -1332,19 +1332,22 @@ impl InferenceModel {
         pos: usize,
         need_logits: bool,
     ) -> Result<Option<Logits>, ModelError> {
-        let cfg = &self.config;
-        let h = cfg.hidden_size;
-        let n = cfg.num_attention_heads;
-        let k = cfg.num_key_value_heads;
+        self.embed_token_into_workspace(token);
+        let layer_count = self.config.layer_count;
+        self.run_layer_range_in_workspace(pos, 0..layer_count)?;
+        if !need_logits {
+            return Ok(None);
+        }
+        self.final_head_from_workspace().map(Some)
+    }
 
-        let ws = &mut self.workspace;
-
-        // Embedding lookup. GGUF natural layout: `token_embd.weight` is stored
-        // as `vocab_size` rows of `hidden_size` contiguous values, so token `t`'s
-        // embedding is the contiguous row at offset `t * hidden_size`.
-        let x = &mut ws.x[..h];
+    /// Write `token`'s embedding into `workspace.x[..hidden_size]`. First stage
+    /// of pipeline-parallel decode.
+    pub fn embed_token_into_workspace(&mut self, token: Token) {
+        let h = self.config.hidden_size;
+        let x = &mut self.workspace.x[..h];
         x.fill(0.0_f32);
-        let token_idx = (token as usize).min(cfg.vocab_size.saturating_sub(1));
+        let token_idx = (token as usize).min(self.config.vocab_size.saturating_sub(1));
         match &self.tok_embeddings {
             WeightStorage::F32(data) => {
                 let row = &data[token_idx * h..(token_idx + 1) * h];
@@ -1358,8 +1361,70 @@ impl InferenceModel {
                 lookup_quantized_embedding(h, *qtype, data, token_idx, x);
             }
         }
+    }
 
-        for layer_idx in 0..cfg.layer_count {
+    /// Read the current hidden state from `workspace.x[..hidden_size]`.
+    pub fn hidden_state(&self) -> &[f32] {
+        &self.workspace.x[..self.config.hidden_size]
+    }
+
+    /// Hidden size from the loaded config (so pipeline drivers can size
+    /// activation buffers without re-parsing GGUF metadata).
+    pub fn config_hidden_size(&self) -> usize {
+        self.config.hidden_size
+    }
+
+    /// Overwrite the current hidden state with `hidden`. Used by pipeline-
+    /// parallel stages that receive activations over the ring.
+    pub fn set_hidden_state(&mut self, hidden: &[f32]) -> Result<(), ModelError> {
+        let h = self.config.hidden_size;
+        if hidden.len() != h {
+            return Err(ModelError::InferenceFailed(format!(
+                "set_hidden_state: expected {} floats, got {}",
+                h,
+                hidden.len()
+            )));
+        }
+        self.workspace.x[..h].copy_from_slice(hidden);
+        Ok(())
+    }
+
+    /// Apply final RMSNorm + lm_head to the current hidden state in
+    /// `workspace.x` and return the logits. Last stage of pipeline-parallel.
+    pub fn final_head_from_workspace(&mut self) -> Result<Logits, ModelError> {
+        let cfg = &self.config;
+        let h = cfg.hidden_size;
+        let ws = &mut self.workspace;
+        let x = &ws.x[..h];
+        let normed = &mut ws.hidden_a[..h];
+        normed.fill(0.0_f32);
+        rms_norm_f32(x, &self.norm_weight, cfg.rms_norm_eps, normed)
+            .map_err(|e| ModelError::InferenceFailed(format!("final_norm: {:?}", e)))?;
+        let logits = &mut ws.logits[..cfg.vocab_size];
+        logits.fill(0.0_f32);
+        gemv_weight(&self.output_weight, cfg.vocab_size, h, normed, logits)
+            .map_err(|e| ModelError::InferenceFailed(format!("output: {:?}", e)))?;
+        Ok(logits.to_vec())
+    }
+
+    /// Run layers `range` against the hidden state currently in
+    /// `workspace.x[..hidden_size]`, mutating it in place. `pos` is the
+    /// absolute position for KV cache writes / RoPE.
+    pub fn run_layer_range_in_workspace(
+        &mut self,
+        pos: usize,
+        range: std::ops::Range<usize>,
+    ) -> Result<(), ModelError> {
+        let cfg = &self.config;
+        let h = cfg.hidden_size;
+        let n = cfg.num_attention_heads;
+        let k = cfg.num_key_value_heads;
+        let ws = &mut self.workspace;
+        let x = &mut ws.x[..h];
+        // Silence unused warnings for paths that don't reference both names.
+        let _ = (n, k);
+
+        for layer_idx in range {
             let layer = &self.layers[layer_idx];
 
             // Detect Mamba layers (have attn_qkv but no attn_q)
@@ -1906,24 +1971,7 @@ impl InferenceModel {
                 }
             }
         }
-
-        if !need_logits {
-            return Ok(None);
-        }
-
-        let normed = &mut ws.hidden_a[..h];
-        normed.fill(0.0_f32);
-        rms_norm_f32(x, &self.norm_weight, cfg.rms_norm_eps, normed)
-            .map_err(|e| ModelError::InferenceFailed(format!("final_norm: {:?}", e)))?;
-
-        let logits = &mut ws.logits[..cfg.vocab_size];
-        logits.fill(0.0_f32);
-        gemv_weight(&self.output_weight, cfg.vocab_size, h, normed, logits)
-            .map_err(|e| ModelError::InferenceFailed(format!("output: {:?}", e)))?;
-
-        // Return a clone of the logits slice. This is the only allocation in the
-        // hot path for the final token of each forward call.
-        Ok(Some(logits.to_vec()))
+        Ok(())
     }
 }
 
@@ -2105,5 +2153,45 @@ mod tests {
         assert_eq!(prefill_logits, single_logits);
         assert_eq!(prefill_session.consumed_tokens(), 2);
         assert_eq!(single_session.consumed_tokens(), 1);
+    }
+
+    /// Whole-model forward(0..L) must equal split forward(0..K) + forward(K..L)
+    /// on the same hidden state across many sequential positions. Detects bugs
+    /// in run_layer_range_in_workspace that only show up with longer prompts.
+    #[test]
+    fn split_layer_range_matches_full_forward_long_sequence() {
+        let mut whole = tiny_inference_model();
+        let mut split = tiny_inference_model();
+        let l = whole.config.layer_count;
+        let k = l / 2;
+        let positions = 20_usize; // long enough to exercise KV cache
+        for pos in 0..positions {
+            let tok = (pos % whole.config.vocab_size) as u32;
+            let full = whole
+                .forward_single(tok, pos, true)
+                .expect("full forward ok")
+                .expect("logits");
+            // Split path: embed, run head layers, snapshot hidden,
+            // set hidden, run tail layers, final head.
+            split.embed_token_into_workspace(tok);
+            split
+                .run_layer_range_in_workspace(pos, 0..k)
+                .expect("head layers ok");
+            let mid_hidden = split.hidden_state().to_vec();
+            split.set_hidden_state(&mid_hidden).expect("set hidden ok");
+            split
+                .run_layer_range_in_workspace(pos, k..l)
+                .expect("tail layers ok");
+            let split_logits = split
+                .final_head_from_workspace()
+                .expect("final head ok");
+            assert_eq!(full.len(), split_logits.len());
+            for (i, (a, b)) in full.iter().zip(split_logits.iter()).enumerate() {
+                assert!(
+                    (a - b).abs() < 1e-4,
+                    "pos={pos} idx={i} full={a} split={b}"
+                );
+            }
+        }
     }
 }
