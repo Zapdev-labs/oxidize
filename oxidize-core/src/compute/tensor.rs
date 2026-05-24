@@ -26,6 +26,59 @@ fn gemm_row_chunk() -> usize {
     hardware::global_gemm_row_chunk().max(1)
 }
 
+#[inline]
+fn gemm_batch_dot_chunk() -> usize {
+    hardware::global_gemm_batch_dot_chunk().clamp(1, 4)
+}
+
+/// Fan a decoded weight block across `batch` prompt tokens using tier-aware width.
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,fma")]
+#[inline]
+#[allow(unsafe_op_in_unsafe_fn)]
+unsafe fn accumulate_batched_block_dots_avx2(
+    scratch: *const f32,
+    in_ptr: *const f32,
+    cols: usize,
+    in_offset_floats: usize,
+    partial: &mut [f32],
+    batch: usize,
+) {
+    let width = gemm_batch_dot_chunk();
+    let mut t = 0usize;
+    while t + width <= batch {
+        match width {
+            4 => {
+                let v0 = in_ptr.add(t * cols + in_offset_floats);
+                let v1 = in_ptr.add((t + 1) * cols + in_offset_floats);
+                let v2 = in_ptr.add((t + 2) * cols + in_offset_floats);
+                let v3 = in_ptr.add((t + 3) * cols + in_offset_floats);
+                let (s0, s1, s2, s3) = dot4_f32_avx2(scratch, v0, v1, v2, v3, QK_K);
+                partial[t] += s0;
+                partial[t + 1] += s1;
+                partial[t + 2] += s2;
+                partial[t + 3] += s3;
+            }
+            2 => {
+                let v0 = in_ptr.add(t * cols + in_offset_floats);
+                let v1 = in_ptr.add((t + 1) * cols + in_offset_floats);
+                partial[t] += dot_f32_avx2(scratch, v0, QK_K);
+                partial[t + 1] += dot_f32_avx2(scratch, v1, QK_K);
+            }
+            _ => {
+                let v_ptr = in_ptr.add(t * cols + in_offset_floats);
+                partial[t] += dot_f32_avx2(scratch, v_ptr, QK_K);
+            }
+        }
+        t += width;
+    }
+    while t < batch {
+        let v_ptr = in_ptr.add(t * cols + in_offset_floats);
+        partial[t] += dot_f32_avx2(scratch, v_ptr, QK_K);
+        t += 1;
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum DType {
     F32,
@@ -742,28 +795,15 @@ unsafe fn gemm_q4_k_decode_once_avx2(
                 }
             }
             let in_offset_floats = block_idx * QK_K;
-            // Process batch in groups of 4 — sweet spot for the 16 ymm
-            // register file (1 scratch broadcast + 4 inputs + 4 accumulators
-            // fits with headroom). dot8 was tried and regresses due to spill.
-            let chunks = batch / 4;
-            let tail = batch % 4;
-            for ck in 0..chunks {
-                let t0 = ck * 4;
-                let v0 = unsafe { in_ptr.add((t0) * cols + in_offset_floats) };
-                let v1 = unsafe { in_ptr.add((t0 + 1) * cols + in_offset_floats) };
-                let v2 = unsafe { in_ptr.add((t0 + 2) * cols + in_offset_floats) };
-                let v3 = unsafe { in_ptr.add((t0 + 3) * cols + in_offset_floats) };
-                let (s0, s1, s2, s3) =
-                    unsafe { dot4_f32_avx2(scratch.as_ptr(), v0, v1, v2, v3, QK_K) };
-                partial[t0] += s0;
-                partial[t0 + 1] += s1;
-                partial[t0 + 2] += s2;
-                partial[t0 + 3] += s3;
-            }
-            for ti in 0..tail {
-                let t = chunks * 4 + ti;
-                let v_ptr = unsafe { in_ptr.add(t * cols + in_offset_floats) };
-                partial[t] += unsafe { dot_f32_avx2(scratch.as_ptr(), v_ptr, QK_K) };
+            unsafe {
+                accumulate_batched_block_dots_avx2(
+                    scratch.as_ptr(),
+                    in_ptr,
+                    cols,
+                    in_offset_floats,
+                    partial,
+                    batch,
+                );
             }
         }
     };
@@ -893,25 +933,15 @@ fn gemm_q6_k_decode_once(
                     let block = unsafe { std::slice::from_raw_parts(block_ptr, BLOCK_Q6_K_SIZE) };
                     decode_q6_k_block(block, &mut scratch);
                     let in_offset_floats = block_idx * QK_K;
-                    let chunks = batch / 4;
-                    let tail = batch % 4;
-                    for ck in 0..chunks {
-                        let t0 = ck * 4;
-                        let v0 = unsafe { in_ptr.add(t0 * cols + in_offset_floats) };
-                        let v1 = unsafe { in_ptr.add((t0 + 1) * cols + in_offset_floats) };
-                        let v2 = unsafe { in_ptr.add((t0 + 2) * cols + in_offset_floats) };
-                        let v3 = unsafe { in_ptr.add((t0 + 3) * cols + in_offset_floats) };
-                        let (s0, s1, s2, s3) =
-                            unsafe { dot4_f32_avx2(scratch.as_ptr(), v0, v1, v2, v3, QK_K) };
-                        partial[t0] += s0;
-                        partial[t0 + 1] += s1;
-                        partial[t0 + 2] += s2;
-                        partial[t0 + 3] += s3;
-                    }
-                    for ti in 0..tail {
-                        let t = chunks * 4 + ti;
-                        let v_ptr = unsafe { in_ptr.add(t * cols + in_offset_floats) };
-                        partial[t] += unsafe { dot_f32_avx2(scratch.as_ptr(), v_ptr, QK_K) };
+                    unsafe {
+                        accumulate_batched_block_dots_avx2(
+                            scratch.as_ptr(),
+                            in_ptr,
+                            cols,
+                            in_offset_floats,
+                            partial,
+                            batch,
+                        );
                     }
                 }
             }

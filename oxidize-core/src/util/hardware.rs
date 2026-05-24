@@ -90,11 +90,12 @@ impl HardwareProfile {
             .build_global();
     }
 
-    /// Low-tier RAM pressure: split batched prefill into smaller micro-batches.
+    /// RAM pressure: split batched prefill into smaller micro-batches.
     /// Returns `None` when the full prompt can be processed in one batched pass.
     pub fn prefill_micro_batch_size(&self) -> Option<usize> {
         match self.tier {
             HardwareTier::Low => Some(32),
+            HardwareTier::Mid if self.ram_offload || self.layer_wise => Some(64),
             _ => None,
         }
     }
@@ -123,7 +124,10 @@ impl HardwareProfile {
             }
             HardwareTier::Low => "prefill micro-batches=32; consider --cpu-optimized",
             HardwareTier::Mid if self.layer_wise => {
-                "tight RAM: --layer-wise; mmap_prefetch enabled"
+                "tight RAM: --layer-wise; prefill micro-batches=64"
+            }
+            HardwareTier::Mid if self.prefill_micro_batch_size().is_some() => {
+                "prefill micro-batches=64; mmap_prefetch on"
             }
             HardwareTier::Mid => "mmap_prefetch on; one thread reserved for OS",
             HardwareTier::High if self.prefer_vulkan => {
@@ -239,6 +243,10 @@ pub fn global_parallel_gemv_min_ops() -> usize {
 
 pub fn global_gemm_row_chunk() -> usize {
     global_profile().gemm_row_chunk()
+}
+
+pub fn global_gemm_batch_dot_chunk() -> usize {
+    global_profile().gemm_batch_dot_chunk().max(1)
 }
 
 pub fn global_max_parallel_shards() -> usize {
@@ -677,10 +685,23 @@ mod tests {
     }
 
     #[test]
+    fn mid_tier_tight_ram_uses_prefill_micro_batches() {
+        let snapshot = snapshot_ram_cpus(14, 8);
+        let profile = HardwareProfile::from_snapshot(HardwareTier::Mid, &snapshot);
+        assert_eq!(profile.prefill_micro_batch_size(), Some(64));
+    }
+
+    #[test]
     fn high_tier_skips_prefill_micro_batches() {
         let snapshot = snapshot_ram_cpus(64, 16);
         let profile = HardwareProfile::from_snapshot(HardwareTier::High, &snapshot);
         assert_eq!(profile.prefill_micro_batch_size(), None);
+    }
+
+    #[test]
+    fn low_tier_uses_narrower_batch_dot_chunk() {
+        let profile = HardwareProfile::from_snapshot(HardwareTier::Low, &snapshot_ram_cpus(8, 8));
+        assert_eq!(profile.gemm_batch_dot_chunk(), 2);
     }
 
     #[test]
