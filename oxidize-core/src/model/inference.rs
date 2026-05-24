@@ -4,8 +4,7 @@ use crate::kv_cache::{KvCache, KvCacheConfig};
 use crate::model::{Logits, Model, ModelError, Session, Token};
 use crate::quantization::{dequantize_scalar, quantized_size};
 use crate::tensor::{
-    DType, apply_rope_f32, extract_bits, f16_le_to_f32, gemv_f32_transposed,
-    gemv_quantized_f32_transposed, rms_norm_f32, rms_norm_gemv_f32_transposed,
+    DType, apply_rope_f32, f16_le_to_f32, gemv_f32, gemv_quantized_f32, rms_norm_f32,
 };
 use memmap2::Mmap;
 use std::sync::Arc;
@@ -136,6 +135,164 @@ impl InferenceConfig {
             self.head_dim()
         }
     }
+
+    /// Build an InferenceConfig from a mapped GGUF file by reading metadata under
+    /// the actual architecture prefix (e.g. `qwen3.*`, `llama.*`, `gemma3.*`).
+    /// Falls back to weight tensor dimensions when metadata is missing.
+    pub fn from_gguf(mapped: &MappedGgufFile) -> Self {
+        let metadata = &mapped.parsed().metadata;
+        let arch = mapped
+            .parsed()
+            .architecture()
+            .unwrap_or("llama")
+            .to_string();
+        let architecture = ModelArchitecture::from_gguf(mapped);
+
+        let key = |suffix: &str| format!("{arch}.{suffix}");
+        let arch_u32 = |suffix: &str| metadata_u32_lookup(metadata, &key(suffix));
+        let arch_f32 = |suffix: &str| metadata_f32_lookup(metadata, &key(suffix));
+
+        let token_embd_dims = first_tensor_dims(mapped, "tok_embeddings.weight")
+            .or_else(|| first_tensor_dims(mapped, "token_embd.weight"));
+
+        let hidden_size = arch_u32("embedding_length")
+            .or_else(|| token_embd_dims.as_ref().and_then(|d| d.first().copied()).map(|v| v as u32))
+            .unwrap_or(4096) as usize;
+
+        let vocab_size = arch_u32("vocab_size")
+            .or_else(|| metadata_u32_lookup(metadata, "general.vocab_size"))
+            .or_else(|| metadata_u32_lookup(metadata, "tokenizer.ggml.tokens.count"))
+            .or_else(|| token_embd_dims.as_ref().and_then(|d| d.get(1).copied()).map(|v| v as u32))
+            .unwrap_or(32000) as usize;
+
+        let context_size = arch_u32("context_length")
+            .map(|v| v as usize)
+            .unwrap_or(4096);
+
+        let layer_count = arch_u32("block_count").unwrap_or(32) as usize;
+
+        let intermediate_size = arch_u32("feed_forward_length")
+            .map(|v| v as usize)
+            .or_else(|| {
+                first_layer_tensor_dims(mapped, "ffn_gate.weight")
+                    .or_else(|| first_layer_tensor_dims(mapped, "ffn_up.weight"))
+                    .and_then(|d| d.get(1).copied())
+                    .map(|v| v as usize)
+            })
+            .unwrap_or(11008);
+
+        let num_attention_heads = arch_u32("attention.head_count").unwrap_or(32) as usize;
+
+        // GQA: KV heads. Default to num_attention_heads only when key is absent
+        // AND we can't infer from attn_k dims.
+        let attn_k_out = first_layer_tensor_dims(mapped, "attn_k.weight")
+            .and_then(|d| d.get(1).copied());
+        let num_key_value_heads = arch_u32("attention.head_count_kv")
+            .map(|v| v as usize)
+            .unwrap_or(num_attention_heads);
+
+        // Per-head dim for K (and V). Prefer explicit key_length; otherwise
+        // infer from attn_k_out / num_kv_heads. Falls back to hidden/n_heads.
+        let key_value_head_dim = arch_u32("attention.key_length")
+            .map(|v| v as usize)
+            .or_else(|| {
+                attn_k_out.and_then(|width| {
+                    if num_key_value_heads == 0 {
+                        None
+                    } else {
+                        Some((width as usize) / num_key_value_heads)
+                    }
+                })
+            })
+            .unwrap_or_else(|| {
+                if num_attention_heads == 0 {
+                    0
+                } else {
+                    hidden_size / num_attention_heads
+                }
+            });
+
+        let rms_norm_eps = arch_f32("attention.layer_norm_rms_epsilon").unwrap_or(1e-5);
+        let rope_theta = arch_f32("rope.freq_base").unwrap_or(10000.0);
+        let sliding_window = arch_u32("attention.sliding_window")
+            .map(|v| v as usize)
+            .unwrap_or(0);
+        let num_experts = arch_u32("expert_count").map(|v| v as usize).unwrap_or(0);
+        let num_experts_per_tok = arch_u32("expert_used_count").map(|v| v as usize).unwrap_or(0);
+
+        Self {
+            vocab_size,
+            context_size,
+            layer_count,
+            hidden_size,
+            intermediate_size,
+            num_attention_heads,
+            num_key_value_heads,
+            key_value_head_dim,
+            kv_cache_dtype: DType::F32,
+            rms_norm_eps,
+            rope_theta,
+            architecture,
+            sliding_window,
+            num_experts,
+            num_experts_per_tok,
+            alibi_num_heads: 0,
+        }
+    }
+}
+
+fn metadata_u32_lookup(
+    metadata: &std::collections::BTreeMap<String, crate::gguf::GgufMetadataValue>,
+    key: &str,
+) -> Option<u32> {
+    use crate::gguf::GgufMetadataValue;
+    match metadata.get(key) {
+        Some(GgufMetadataValue::Uint8(v)) => Some((*v).into()),
+        Some(GgufMetadataValue::Uint16(v)) => Some((*v).into()),
+        Some(GgufMetadataValue::Uint32(v)) => Some(*v),
+        Some(GgufMetadataValue::Uint64(v)) => (*v).try_into().ok(),
+        Some(GgufMetadataValue::Int8(v)) if *v >= 0 => Some((*v as u8).into()),
+        Some(GgufMetadataValue::Int16(v)) if *v >= 0 => Some((*v as u16).into()),
+        Some(GgufMetadataValue::Int32(v)) if *v >= 0 => (*v).try_into().ok(),
+        Some(GgufMetadataValue::Int64(v)) if *v >= 0 => (*v).try_into().ok(),
+        _ => None,
+    }
+}
+
+fn metadata_f32_lookup(
+    metadata: &std::collections::BTreeMap<String, crate::gguf::GgufMetadataValue>,
+    key: &str,
+) -> Option<f32> {
+    use crate::gguf::GgufMetadataValue;
+    match metadata.get(key) {
+        Some(GgufMetadataValue::Float32(v)) => Some(*v),
+        Some(GgufMetadataValue::Float64(v)) => Some(*v as f32),
+        Some(GgufMetadataValue::Int8(v)) => Some(*v as f32),
+        Some(GgufMetadataValue::Int16(v)) => Some(*v as f32),
+        Some(GgufMetadataValue::Int32(v)) => Some(*v as f32),
+        Some(GgufMetadataValue::Int64(v)) => Some(*v as f32),
+        Some(GgufMetadataValue::Uint8(v)) => Some(*v as f32),
+        Some(GgufMetadataValue::Uint16(v)) => Some(*v as f32),
+        Some(GgufMetadataValue::Uint32(v)) => Some(*v as f32),
+        Some(GgufMetadataValue::Uint64(v)) => Some(*v as f32),
+        _ => None,
+    }
+}
+
+fn first_tensor_dims(mapped: &MappedGgufFile, name: &str) -> Option<Vec<u64>> {
+    mapped
+        .mapped_tensor_infos()
+        .iter()
+        .find(|t| t.name == name)
+        .map(|t| t.dimensions.clone())
+}
+
+fn first_layer_tensor_dims(mapped: &MappedGgufFile, suffix: &str) -> Option<Vec<u64>> {
+    mapped
+        .mapped_tensor_infos()
+        .iter()
+        .find(|t| t.name.starts_with("blk.0.") && t.name.ends_with(suffix))
+        .map(|t| t.dimensions.clone())
 }
 
 /// Pre-allocated scratch buffers reused across tokens and layers to eliminate
@@ -157,6 +314,8 @@ pub struct Workspace {
     pub v_vec: Vec<f32>,
     // Attention result scratch.
     pub attn_result: Vec<f32>,
+    // Q scratch for flash-attention when Q heads must be truncated.
+    pub flash_q: Vec<f32>,
     // Per-head scratch (flash-attn output, RoPE, per-head norm).
     pub head_scratch: Vec<f32>,
     // KV cache copy fallback buffers.
@@ -189,6 +348,7 @@ impl Workspace {
             k_vec: vec![0.0_f32; max_kv_len],
             v_vec: vec![0.0_f32; max_kv_len],
             attn_result: vec![0.0_f32; max_qkv],
+            flash_q: vec![0.0_f32; max_qkv],
             head_scratch: vec![0.0_f32; head_dim],
             kv_keys_copy: vec![0.0_f32; kv_copy_size],
             kv_values_copy: vec![0.0_f32; kv_copy_size],
@@ -278,20 +438,20 @@ fn gemv_weight(
     input: &[f32],
     output: &mut [f32],
 ) -> Result<(), String> {
-    // GGUF stores linear weights as [input_dim, output_dim] (transposed vs PyTorch convention)
-    // so we use transposed GEMV: output[j] = sum_i W[i][j] * input[i]
-    // Callers pass rows=output_dim, cols=input_dim; we swap for transposed GEMV
+    // GGUF stores linear weights in natural row-major layout: `rows` (output
+    // features) of `cols` (input features) contiguous floats/quantized blocks.
+    // For `y = W @ x` we use the fused natural GEMV: `output[j] = sum_i W[j, i] * input[i]`.
     match storage {
         WeightStorage::F32(data) => {
-            gemv_f32_transposed(data, cols, rows, input, output).map_err(|e| format!("{:?}", e))
+            gemv_f32(data, rows, cols, input, output).map_err(|e| format!("{:?}", e))
         }
         WeightStorage::Quantized(qtype, data) => {
-            gemv_quantized_f32_transposed(*qtype, data, cols, rows, input, output)
+            gemv_quantized_f32(*qtype, data, rows, cols, input, output)
                 .map_err(|e| format!("{:?}", e))
         }
         WeightStorage::MmapQuantized(qtype, mmap, offset, size) => {
             let data = &mmap[*offset..*offset + *size];
-            gemv_quantized_f32_transposed(*qtype, data, cols, rows, input, output)
+            gemv_quantized_f32(*qtype, data, rows, cols, input, output)
                 .map_err(|e| format!("{:?}", e))
         }
     }
@@ -351,35 +511,47 @@ impl InferenceModel {
     }
 }
 
+/// Decode token `token_idx`'s embedding (length `h`) out of a quantized
+/// `vocab × h` matrix stored in GGUF natural layout (one contiguous row per
+/// token, each row consisting of `h / block_width` quantized blocks).
 pub(crate) fn lookup_quantized_embedding(
     h: usize,
-    cols: usize,
     qtype: GgufQuantizationType,
     data: &[u8],
     token_idx: usize,
     x: &mut [f32],
 ) {
-    let (block_width, block_size, bits, zero_point) = match qtype {
-        GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M => (256, 144, 4, 8.0),
-        GgufQuantizationType::Q6_K => (256, 210, 6, 32.0),
-        GgufQuantizationType::Q8_0 => (32, 34, 8, 0.0),
-        _ => (256, 130, 4, 8.0),
+    let block_size = match qtype {
+        GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M => 144,
+        GgufQuantizationType::Q6_K => 210,
+        GgufQuantizationType::Q8_0 => 34,
+        _ => return,
     };
-    let blocks_per_row = cols / block_width;
-    let block_idx = token_idx / block_width;
-    let pos_in_block = token_idx % block_width;
-    for (i, value) in x.iter_mut().enumerate().take(h) {
-        let row_start = i * blocks_per_row * block_size;
-        let block_start = row_start + block_idx * block_size;
-        let block = &data[block_start..block_start + block_size];
-        let d = f16_le_to_f32([block[0], block[1]]);
-        if qtype == GgufQuantizationType::Q8_0 {
-            *value = (block[2 + pos_in_block] as i8) as f32 * d;
-        } else {
-            let bitstream = &block[2..];
-            let q = extract_bits(bitstream, pos_in_block, bits) as f32;
-            *value = (q - zero_point) * d;
+    let block_width = match qtype {
+        GgufQuantizationType::Q8_0 => 32,
+        _ => 256,
+    };
+    let blocks_per_row = h / block_width;
+    let row_start = token_idx * blocks_per_row * block_size;
+    let row = &data[row_start..row_start + blocks_per_row * block_size];
+    match qtype {
+        GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M => {
+            let _ = crate::quantization::dequantize_q4_k_scalar(row, &mut x[..blocks_per_row * 256]);
         }
+        GgufQuantizationType::Q6_K => {
+            let _ = crate::quantization::dequantize_q6_k_scalar(row, &mut x[..blocks_per_row * 256]);
+        }
+        GgufQuantizationType::Q8_0 => {
+            // Q8_0: block = [d_f16 (2 bytes), 32× int8].
+            for (block_idx, block) in row.chunks_exact(block_size).enumerate() {
+                let d = f16_le_to_f32([block[0], block[1]]);
+                let out = &mut x[block_idx * 32..block_idx * 32 + 32];
+                for (i, b) in block[2..2 + 32].iter().enumerate() {
+                    out[i] = (*b as i8) as f32 * d;
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -703,23 +875,23 @@ impl InferenceModel {
 
         let ws = &mut self.workspace;
 
-        // embedding lookup
-        // token_embd.weight is stored as [hidden_size, vocab_size] row-major (transposed vs PyTorch)
+        // Embedding lookup. GGUF natural layout: `token_embd.weight` is stored
+        // as `vocab_size` rows of `hidden_size` contiguous values, so token `t`'s
+        // embedding is the contiguous row at offset `t * hidden_size`.
         let x = &mut ws.x[..h];
         x.fill(0.0_f32);
         let token_idx = (token as usize).min(cfg.vocab_size.saturating_sub(1));
         match &self.tok_embeddings {
             WeightStorage::F32(data) => {
-                for (i, value) in x.iter_mut().enumerate().take(h) {
-                    *value = data[i * self.tok_embeddings_cols + token_idx];
-                }
+                let row = &data[token_idx * h..(token_idx + 1) * h];
+                x.copy_from_slice(row);
             }
             WeightStorage::Quantized(qtype, data) => {
-                lookup_quantized_embedding(h, self.tok_embeddings_cols, *qtype, data, token_idx, x);
+                lookup_quantized_embedding(h, *qtype, data, token_idx, x);
             }
             WeightStorage::MmapQuantized(qtype, mmap, offset, size) => {
                 let data = &mmap[*offset..*offset + *size];
-                lookup_quantized_embedding(h, self.tok_embeddings_cols, *qtype, data, token_idx, x);
+                lookup_quantized_embedding(h, *qtype, data, token_idx, x);
             }
         }
 
@@ -968,35 +1140,8 @@ impl InferenceModel {
 
                     let q_full = &mut ws.q_full[..q_len];
                     q_full.fill(0.0_f32);
-                    // Use fused RMSNorm+GEMV for attention Q projection when bias is absent.
-                    if layer.attn_q_bias.is_empty() {
-                        if rms_norm_gemv_f32_transposed(
-                            x,
-                            &layer.attn_norm,
-                            cfg.rms_norm_eps,
-                            match &layer.attn_q {
-                                WeightStorage::F32(data) => data.as_slice(),
-                                _ => {
-                                    gemv_weight(&layer.attn_q, q_len, h, normed, q_full).map_err(
-                                        |e| ModelError::InferenceFailed(format!("attn_q: {:?}", e)),
-                                    )?;
-                                    &[][..]
-                                }
-                            },
-                            h,
-                            q_len,
-                            q_full,
-                        )
-                        .is_err()
-                        {
-                            gemv_weight(&layer.attn_q, q_len, h, normed, q_full).map_err(|e| {
-                                ModelError::InferenceFailed(format!("attn_q: {:?}", e))
-                            })?;
-                        }
-                    } else {
-                        gemv_weight(&layer.attn_q, q_len, h, normed, q_full)
-                            .map_err(|e| ModelError::InferenceFailed(format!("attn_q: {:?}", e)))?;
-                    }
+                    gemv_weight(&layer.attn_q, q_len, h, normed, q_full)
+                        .map_err(|e| ModelError::InferenceFailed(format!("attn_q: {:?}", e)))?;
                     if !layer.attn_q_bias.is_empty() {
                         for (i, q) in q_full.iter_mut().enumerate() {
                             *q += layer.attn_q_bias[i % layer.attn_q_bias.len()];
@@ -1181,10 +1326,10 @@ impl InferenceModel {
                     let attn_result = &mut ws.attn_result[..q_len_used];
                     attn_result.fill(0.0_f32);
 
-                    // For MLA-style where q_head_dim > kv_head_dim, we need to truncate Q heads.
-                    // Build a temporary truncated Q buffer if needed.
-                    let q_for_flash: Vec<f32> = if q_head_dim > kv_head_dim {
-                        let mut q_truncated = vec![0.0_f32; q_heads * kv_head_dim];
+                    // For MLA-style where q_head_dim > kv_head_dim, truncate Q heads into scratch.
+                    // Otherwise pass the Q projection directly and avoid a per-layer allocation.
+                    let q_for_flash: &[f32] = if q_head_dim > kv_head_dim {
+                        let q_truncated = &mut ws.flash_q[..q_heads * kv_head_dim];
                         for head in 0..q_heads {
                             let src_start = head * q_head_dim;
                             let dst_start = head * kv_head_dim;
@@ -1193,10 +1338,10 @@ impl InferenceModel {
                         }
                         q_truncated
                     } else {
-                        q.to_vec()
+                        q
                     };
                     flash_attention_decode_heads_f32(
-                        &q_for_flash,
+                        q_for_flash,
                         key_cache,
                         value_cache,
                         seq_len,
@@ -1268,9 +1413,13 @@ impl InferenceModel {
                     gate.fill(0.0_f32);
                     let up = &mut ws.intermediate_b[..cfg.intermediate_size];
                     up.fill(0.0_f32);
-                    gemv_weight(&layer.ffn_gate, cfg.intermediate_size, h, normed, gate)
+                    let (gate_result, up_result) = rayon::join(
+                        || gemv_weight(&layer.ffn_gate, cfg.intermediate_size, h, normed, gate),
+                        || gemv_weight(&layer.ffn_up, cfg.intermediate_size, h, normed, up),
+                    );
+                    gate_result
                         .map_err(|e| ModelError::InferenceFailed(format!("ffn_gate: {:?}", e)))?;
-                    gemv_weight(&layer.ffn_up, cfg.intermediate_size, h, normed, up)
+                    up_result
                         .map_err(|e| ModelError::InferenceFailed(format!("ffn_up: {:?}", e)))?;
 
                     // Inline SwiGLU into the gate buffer to avoid an intermediate allocation.

@@ -557,10 +557,9 @@ fn dot_f32_fast(a: &[f32], b: &[f32]) -> f32 {
 
 /// Fast batched Q4_K GEMM path: for each output row, walk each 144-byte block
 /// once, decode it into a 256-element f32 scratch buffer, then for each batch
-/// token compute `scratch · input_chunk` with AVX2 FMA. Decode cost (~96 muls
-/// + ~30 reads per block) is paid once per (row, block); the dot product
-/// (256 muls + 256 adds per (row, block, token)) is paid `batch` times but
-/// hits L1 since both operands are tiny.
+/// token compute `scratch · input_chunk` with AVX2 FMA. Decode cost is paid
+/// once per row block; the dot product is paid per token but hits L1 since both
+/// operands are tiny.
 fn gemm_q4_k_decode_once(
     quantized_matrix: &[u8],
     rows: usize,
@@ -868,6 +867,11 @@ pub fn gemv_quantized_f32(
 
     match quantization {
         GgufQuantizationType::Q8_0 => gemv_q8_0_f32_fused(quantized_matrix, cols, vector, output),
+        GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M
+            if cols.is_multiple_of(QK_K) && q4_k_q8_k_avx2_available() =>
+        {
+            gemv_q4_k_q8_k_fused(quantized_matrix, rows, cols, vector, output)
+        }
         GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M => {
             gemv_q4_k_f32_fused(quantized_matrix, rows, cols, vector, output)
         }
@@ -879,6 +883,461 @@ pub fn gemv_quantized_f32(
         }
         _ => Err(GemvError::UnsupportedQuantizationType { quantization }),
     }
+}
+
+#[inline]
+fn q4_k_q8_k_avx2_available() -> bool {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma")
+    }
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+    {
+        false
+    }
+}
+
+/// Q4_K × Q8_K fused GEMV. Quantizes the input vector to Q8_K (int8 + scale
+/// per 256-element block, plus per-16 sums for the min correction) once, then
+/// computes each output row using AVX2 `maddubs`/`madd` integer dot products
+/// instead of fp32 FMA. This matches llama.cpp's `ggml_vec_dot_q4_K_q8_K`
+/// strategy and is the main reason llama.cpp decode is fast on CPUs without
+/// AVX-512.
+fn gemv_q4_k_q8_k_fused(
+    weights: &[u8],
+    rows: usize,
+    cols: usize,
+    vector: &[f32],
+    output: &mut [f32],
+) -> Result<(), GemvError> {
+    debug_assert!(cols.is_multiple_of(QK_K));
+    let blocks_per_row = cols / QK_K;
+    let expected_matrix_len = rows * blocks_per_row * BLOCK_Q4_K_SIZE;
+    if weights.len() != expected_matrix_len {
+        return Err(GemvError::InvalidMatrixLength {
+            expected: expected_matrix_len,
+            actual: weights.len(),
+        });
+    }
+    if vector.len() != cols {
+        return Err(GemvError::InvalidVectorLength {
+            expected: cols,
+            actual: vector.len(),
+        });
+    }
+    if output.len() != rows {
+        return Err(GemvError::InvalidOutputLength {
+            expected: rows,
+            actual: output.len(),
+        });
+    }
+
+    // Quantize the input vector once into `blocks_per_row` Q8_K blocks of size
+    // `BLOCK_Q8_K_BYTES` each. Layout matches llama.cpp's block_q8_K: f32 d,
+    // then 256 int8 quants, then 16 int16 bsums.
+    let q8k = quantize_vector_q8_k(vector, blocks_per_row);
+
+    let row_bytes = blocks_per_row * BLOCK_Q4_K_SIZE;
+    let compute_row = |row_idx: usize| -> f32 {
+        let row_start = row_idx * row_bytes;
+        let row = &weights[row_start..row_start + row_bytes];
+        // Safety: q4_k_q8_k_avx2_available() was checked before dispatch.
+        unsafe { q4_k_q8_k_row_dot_avx2(row, blocks_per_row, &q8k) }
+    };
+
+    if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
+        output
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(row_idx, out)| *out = compute_row(row_idx));
+    } else {
+        for (row_idx, out) in output.iter_mut().enumerate() {
+            *out = compute_row(row_idx);
+        }
+    }
+    Ok(())
+}
+
+/// Per-block Q8_K layout (matches llama.cpp's `block_q8_K`):
+///   bytes 0..4   : f32 d (1/iscale)
+///   bytes 4..260 : 256 int8 quants
+///   bytes 260..292 : 16 int16 bsums (sum of int8 quants in groups of 16)
+const BLOCK_Q8_K_BYTES: usize = 4 + 256 + 32;
+
+/// Quantize `vector` (length `n_blocks * 256`) into `n_blocks` Q8_K blocks.
+fn quantize_vector_q8_k(vector: &[f32], n_blocks: usize) -> Vec<u8> {
+    let mut out = vec![0_u8; n_blocks * BLOCK_Q8_K_BYTES];
+    for (b, block_in) in vector.chunks_exact(QK_K).enumerate().take(n_blocks) {
+        let block_out = &mut out[b * BLOCK_Q8_K_BYTES..(b + 1) * BLOCK_Q8_K_BYTES];
+        quantize_block_q8_k_scalar(block_in, block_out);
+    }
+    out
+}
+
+fn quantize_block_q8_k_scalar(block_in: &[f32], block_out: &mut [u8]) {
+    debug_assert_eq!(block_in.len(), QK_K);
+    debug_assert_eq!(block_out.len(), BLOCK_Q8_K_BYTES);
+    let mut amax = 0.0_f32;
+    let mut max = 0.0_f32;
+    for &v in block_in {
+        let av = v.abs();
+        if av > amax {
+            amax = av;
+            max = v;
+        }
+    }
+    if amax == 0.0 {
+        // d = 0, all qs = 0, bsums = 0.
+        block_out[..4].copy_from_slice(&0.0_f32.to_le_bytes());
+        for byte in &mut block_out[4..] {
+            *byte = 0;
+        }
+        return;
+    }
+    // iscale = -128 / max (sign-preserving to keep symmetry with [-128, 127])
+    let iscale = -128.0_f32 / max;
+    let d = 1.0_f32 / iscale;
+    block_out[..4].copy_from_slice(&d.to_le_bytes());
+    let qs_off = 4;
+    for (i, &v) in block_in.iter().enumerate() {
+        let scaled = iscale * v;
+        let q = scaled.round() as i32;
+        let q = q.clamp(-128, 127) as i8;
+        block_out[qs_off + i] = q as u8;
+    }
+    // bsums: 16 int16 sums, one per 16-element group.
+    let bsums_off = qs_off + QK_K;
+    for g in 0..(QK_K / 16) {
+        let mut sum: i32 = 0;
+        for i in 0..16 {
+            sum += (block_out[qs_off + g * 16 + i] as i8) as i32;
+        }
+        let sum16 = sum.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+        let lo = (sum16 as u16) as u8;
+        let hi = ((sum16 as u16) >> 8) as u8;
+        block_out[bsums_off + g * 2] = lo;
+        block_out[bsums_off + g * 2 + 1] = hi;
+    }
+}
+
+/// Per-row Q4_K × Q8_K dot product using AVX2 integer multiply-adds.
+/// Returns the f32 dot product for one output row across all blocks in the row.
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn q4_k_q8_k_row_dot_avx2(row: &[u8], blocks_per_row: usize, q8k: &[u8]) -> f32 {
+    // Per-block accumulator (f32) — we cannot stay in int32 across blocks
+    // because each block has its own f32 scale `d` and `dmin`.
+    let mut acc = 0.0_f32;
+    for block_idx in 0..blocks_per_row {
+        let w_ptr = row.as_ptr().wrapping_add(block_idx * BLOCK_Q4_K_SIZE);
+        let q8_ptr = q8k.as_ptr().wrapping_add(block_idx * BLOCK_Q8_K_BYTES);
+
+        // f16 scales: weight block d and dmin.
+        let d_w = f16_le_to_f32([unsafe { *w_ptr }, unsafe { *w_ptr.add(1) }]);
+        let dmin_w = f16_le_to_f32([unsafe { *w_ptr.add(2) }, unsafe { *w_ptr.add(3) }]);
+        // f32 scale of input block.
+        let d_q8 = f32::from_le_bytes([
+            unsafe { *q8_ptr },
+            unsafe { *q8_ptr.add(1) },
+            unsafe { *q8_ptr.add(2) },
+            unsafe { *q8_ptr.add(3) },
+        ]);
+        let scales = unsafe { std::slice::from_raw_parts(w_ptr.add(4), 12) };
+        let qs = unsafe { w_ptr.add(16) };
+        let q8 = unsafe { q8_ptr.add(4) }; // 256 int8 values
+        let bsums = unsafe { q8_ptr.add(4 + 256) }; // 16 int16 sums
+
+        let d_scale = d_w * d_q8;
+        let dmin_scale = dmin_w * d_q8;
+
+        // Accumulate (int32) Σ q4 * q8 across all 8 sub-groups, weighted by per-group scale.
+        let mut pos_acc: i32 = 0;
+        let mut min_acc: i32 = 0;
+        for group_pair in 0..4 {
+            let group1 = group_pair * 2;
+            let group2 = group1 + 1;
+            let (scale1, min_scale1) = get_scale_min_k4(group1, scales);
+            let (scale2, min_scale2) = get_scale_min_k4(group2, scales);
+
+            // 32 packed nibbles = 32 bytes (low + high). Low → group1, high → group2.
+            let packed = unsafe { _mm256_loadu_si256(qs.add(group_pair * 32) as *const __m256i) };
+            let mask = _mm256_set1_epi8(0x0f);
+            let q4_low = _mm256_and_si256(packed, mask); // group1 (uint8 0..15)
+            let q4_high = _mm256_and_si256(_mm256_srli_epi16(packed, 4), mask); // group2
+
+            // Load corresponding 32 int8 input values for each group.
+            let q8_low = unsafe { _mm256_loadu_si256(q8.add(group1 * 32) as *const __m256i) };
+            let q8_high = unsafe { _mm256_loadu_si256(q8.add(group2 * 32) as *const __m256i) };
+
+            // maddubs: uint8 × int8 → int16 pairs sum. 32 byte pairs → 16 int16.
+            let p16_low = _mm256_maddubs_epi16(q4_low, q8_low);
+            let p16_high = _mm256_maddubs_epi16(q4_high, q8_high);
+
+            // madd: sum adjacent int16 pairs → int32. 16 int16 → 8 int32.
+            // Multiply by 1 (sum-only).
+            let ones = _mm256_set1_epi16(1);
+            let p32_low = _mm256_madd_epi16(p16_low, ones);
+            let p32_high = _mm256_madd_epi16(p16_high, ones);
+
+            // Reduce 8 int32 → scalar.
+            let sum_low = hsum_i32_avx2(p32_low);
+            let sum_high = hsum_i32_avx2(p32_high);
+
+            pos_acc += scale1 as i32 * sum_low;
+            pos_acc += scale2 as i32 * sum_high;
+
+            // Min correction: sum of input quants (bsums) × min_scale.
+            // bsums groups of 16; group of 32 = bsums[g*2] + bsums[g*2+1].
+            let bs1 = i16::from_le_bytes([
+                unsafe { *bsums.add(group1 * 4) },
+                unsafe { *bsums.add(group1 * 4 + 1) },
+            ]) as i32
+                + i16::from_le_bytes([
+                    unsafe { *bsums.add(group1 * 4 + 2) },
+                    unsafe { *bsums.add(group1 * 4 + 3) },
+                ]) as i32;
+            let bs2 = i16::from_le_bytes([
+                unsafe { *bsums.add(group2 * 4) },
+                unsafe { *bsums.add(group2 * 4 + 1) },
+            ]) as i32
+                + i16::from_le_bytes([
+                    unsafe { *bsums.add(group2 * 4 + 2) },
+                    unsafe { *bsums.add(group2 * 4 + 3) },
+                ]) as i32;
+            min_acc += min_scale1 as i32 * bs1;
+            min_acc += min_scale2 as i32 * bs2;
+        }
+        acc += d_scale * pos_acc as f32 - dmin_scale * min_acc as f32;
+    }
+    acc
+}
+
+/// Q6_K × Q8_K fused GEMV. Same idea as the Q4_K variant but adapted to the
+/// 6-bit super-block layout. Q6_K stores 4 low bits in `ql` and 2 high bits in
+/// `qh`, with one signed int8 scale per 16-element sub-group.
+///
+/// NOTE: this implementation produces incorrect output (suspected bug in the
+/// `_mm256_sign_epi8`/`maddubs` pipeline for the 6-bit signed weight path).
+/// Kept around for future debugging; not dispatched.
+#[allow(dead_code)]
+fn gemv_q6_k_q8_k_fused(
+    weights: &[u8],
+    rows: usize,
+    cols: usize,
+    vector: &[f32],
+    output: &mut [f32],
+) -> Result<(), GemvError> {
+    debug_assert!(cols.is_multiple_of(QK_K));
+    let blocks_per_row = cols / QK_K;
+    let expected_matrix_len = rows * blocks_per_row * BLOCK_Q6_K_SIZE;
+    if weights.len() != expected_matrix_len {
+        return Err(GemvError::InvalidMatrixLength {
+            expected: expected_matrix_len,
+            actual: weights.len(),
+        });
+    }
+    if vector.len() != cols {
+        return Err(GemvError::InvalidVectorLength {
+            expected: cols,
+            actual: vector.len(),
+        });
+    }
+    if output.len() != rows {
+        return Err(GemvError::InvalidOutputLength {
+            expected: rows,
+            actual: output.len(),
+        });
+    }
+
+    let q8k = quantize_vector_q8_k(vector, blocks_per_row);
+
+    let row_bytes = blocks_per_row * BLOCK_Q6_K_SIZE;
+    let compute_row = |row_idx: usize| -> f32 {
+        let row_start = row_idx * row_bytes;
+        let row = &weights[row_start..row_start + row_bytes];
+        unsafe { q6_k_q8_k_row_dot_avx2(row, blocks_per_row, &q8k) }
+    };
+
+    if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
+        output
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(row_idx, out)| *out = compute_row(row_idx));
+    } else {
+        for (row_idx, out) in output.iter_mut().enumerate() {
+            *out = compute_row(row_idx);
+        }
+    }
+    Ok(())
+}
+
+/// Per-row Q6_K × Q8_K dot product using AVX2 integer multiply-adds.
+/// The Q6_K block layout (per 256 elements):
+///   ql[0..128]   : 4 low bits per weight, packed 2-per-byte
+///   qh[128..192] : 2 high bits per weight, packed 4-per-byte
+///   sc[192..208] : 16 signed int8 scales (one per 16-element sub-group)
+///   d  [208..210]: f16 block scale
+/// Weight value for index i: ((ql[...] | (qh[...] << 4)) - 32) * d * sc[i/16].
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,fma")]
+#[allow(dead_code)]
+unsafe fn q6_k_q8_k_row_dot_avx2(row: &[u8], blocks_per_row: usize, q8k: &[u8]) -> f32 {
+    let mut acc = 0.0_f32;
+    let mask_low = _mm256_set1_epi8(0x0f);
+    let mask_high = _mm256_set1_epi8(0x03);
+    let bias32 = _mm256_set1_epi8(32);
+    for block_idx in 0..blocks_per_row {
+        let w_ptr = row.as_ptr().wrapping_add(block_idx * BLOCK_Q6_K_SIZE);
+        let q8_ptr = q8k.as_ptr().wrapping_add(block_idx * BLOCK_Q8_K_BYTES);
+
+        let d_w = f16_le_to_f32([unsafe { *w_ptr.add(208) }, unsafe { *w_ptr.add(209) }]);
+        let d_q8 = f32::from_le_bytes([
+            unsafe { *q8_ptr },
+            unsafe { *q8_ptr.add(1) },
+            unsafe { *q8_ptr.add(2) },
+            unsafe { *q8_ptr.add(3) },
+        ]);
+        let ql = w_ptr;
+        let qh = w_ptr.wrapping_add(128);
+        let sc = unsafe { std::slice::from_raw_parts(w_ptr.add(192), 16) };
+        let q8 = unsafe { q8_ptr.add(4) };
+
+        // Process the block in 2 halves of 128 weights, then 4 sub-groups of 32 per half.
+        let mut block_sum: i32 = 0;
+        for half in 0..2 {
+            let ql_base = half * 64;
+            let qh_base = half * 32;
+            let v_base = half * 128;
+            let scale_base = half * 8;
+
+            // Load 32 bytes of ql for this half (low 4 bits × 32 + low 4 bits × 32 packed).
+            // Actually per half: ql[ql_base..ql_base+64] = 64 bytes = 128 4-bit weights.
+            // Layout: ql[ql_base+l] gives weight indices (l, l+32) low 4 bits;
+            //         (ql[ql_base+l+32]) gives weight indices (l+64, l+96) low 4 bits.
+            // qh[qh_base..qh_base+32] = 32 bytes = 128 2-bit weights.
+            //         qh[qh_base+l] gives high 2 bits of weights (l, l+32, l+64, l+96).
+
+            // Load 32 ql bytes from ql_base..ql_base+32 and another 32 from +32..+64.
+            let ql1 = unsafe { _mm256_loadu_si256(ql.add(ql_base) as *const __m256i) };
+            let ql2 = unsafe { _mm256_loadu_si256(ql.add(ql_base + 32) as *const __m256i) };
+            let qh32 = unsafe { _mm256_loadu_si256(qh.add(qh_base) as *const __m256i) };
+
+            // 4 sub-groups of 32 weights each. Indices (per half):
+            //   g0 (0..32):    low(ql1) | (qh32 & 0x3) << 4
+            //   g1 (32..64):   low(ql2) | (qh32 >> 2 & 0x3) << 4
+            //   g2 (64..96):   high(ql1) | (qh32 >> 4 & 0x3) << 4
+            //   g3 (96..128):  high(ql2) | (qh32 >> 6 & 0x3) << 4
+            let low1 = _mm256_and_si256(ql1, mask_low);
+            let low2 = _mm256_and_si256(ql2, mask_low);
+            let high1 = _mm256_and_si256(_mm256_srli_epi16(ql1, 4), mask_low);
+            let high2 = _mm256_and_si256(_mm256_srli_epi16(ql2, 4), mask_low);
+
+            let h_bits1 = _mm256_slli_epi16(_mm256_and_si256(qh32, mask_high), 4);
+            let h_bits2 =
+                _mm256_slli_epi16(_mm256_and_si256(_mm256_srli_epi16(qh32, 2), mask_high), 4);
+            let h_bits3 =
+                _mm256_slli_epi16(_mm256_and_si256(_mm256_srli_epi16(qh32, 4), mask_high), 4);
+            let h_bits4 =
+                _mm256_slli_epi16(_mm256_and_si256(_mm256_srli_epi16(qh32, 6), mask_high), 4);
+
+            // Combine to get 6-bit weights, then subtract 32 to get int8 in [-32, 31].
+            // q_g{i}: 32 packed signed int8.
+            let q_u_g0 = _mm256_or_si256(low1, h_bits1);
+            let q_u_g1 = _mm256_or_si256(low2, h_bits2);
+            let q_u_g2 = _mm256_or_si256(high1, h_bits3);
+            let q_u_g3 = _mm256_or_si256(high2, h_bits4);
+
+            // Sub 32 to centre weights at 0.
+            let q_s_g0 = _mm256_sub_epi8(q_u_g0, bias32);
+            let q_s_g1 = _mm256_sub_epi8(q_u_g1, bias32);
+            let q_s_g2 = _mm256_sub_epi8(q_u_g2, bias32);
+            let q_s_g3 = _mm256_sub_epi8(q_u_g3, bias32);
+
+            // Load corresponding q8 values for each 32-element sub-group.
+            let q8_g0 = unsafe { _mm256_loadu_si256(q8.add(v_base) as *const __m256i) };
+            let q8_g1 = unsafe { _mm256_loadu_si256(q8.add(v_base + 32) as *const __m256i) };
+            let q8_g2 = unsafe { _mm256_loadu_si256(q8.add(v_base + 64) as *const __m256i) };
+            let q8_g3 = unsafe { _mm256_loadu_si256(q8.add(v_base + 96) as *const __m256i) };
+
+            // maddubs needs uint8 × int8. Our weights are int8 in [-32, 31].
+            // Use the negate-and-swap trick: maddubs(|q|*sign(q8), |q8|*sign(q))?
+            // Simpler: take the absolute weights as uint8 and use _mm256_sign_epi8 on q8.
+            // The pattern from llama.cpp: q8_signed = sign_epi8(q8, q_signed);
+            //                              dot = maddubs(absolute_weight, q8_signed);
+            // But we already have q_signed = q_s_g{i}. Use:
+            //   sign of (q_s * q8) = sign(q_s) * sign(q8)
+            //   abs(q_s) * sign(q8) * q_s? No, simpler:
+            //   `_mm256_sign_epi8(q8, q_s)` gives q8 with the sign of q_s applied,
+            //   then maddubs with `_mm256_abs_epi8(q_s)` gives Σ |q_s| * sign(q_s)*q8 = Σ q_s*q8.
+            macro_rules! dot_signed_into_i16 {
+                ($qw:expr, $qv:expr) => {{
+                    let abs_w = _mm256_abs_epi8($qw);
+                    let signed_v = _mm256_sign_epi8($qv, $qw);
+                    _mm256_maddubs_epi16(abs_w, signed_v)
+                }};
+            }
+
+            let p16_g0 = dot_signed_into_i16!(q_s_g0, q8_g0);
+            let p16_g1 = dot_signed_into_i16!(q_s_g1, q8_g1);
+            let p16_g2 = dot_signed_into_i16!(q_s_g2, q8_g2);
+            let p16_g3 = dot_signed_into_i16!(q_s_g3, q8_g3);
+
+            let ones = _mm256_set1_epi16(1);
+            let p32_g0 = _mm256_madd_epi16(p16_g0, ones);
+            let p32_g1 = _mm256_madd_epi16(p16_g1, ones);
+            let p32_g2 = _mm256_madd_epi16(p16_g2, ones);
+            let p32_g3 = _mm256_madd_epi16(p16_g3, ones);
+
+            // Q6_K scales are per 16-element sub-group; each 32-element group spans 2 scales.
+            // sc[scale_base + g0_idx] applies to elements 0..16 of g0,
+            // sc[scale_base + g0_idx + 1] applies to elements 16..32 of g0, etc.
+            // For now, sum the int32 with the matching scale at full block resolution
+            // by extracting the lower and upper 128-bit halves of each p32_g{i}.
+            macro_rules! scale_apply_g {
+                ($p32:expr, $g_idx:expr) => {{
+                    let p32 = $p32;
+                    let lo = _mm256_castsi256_si128(p32);
+                    let hi = _mm256_extracti128_si256(p32, 1);
+                    // Each 128-bit half has 4 int32 values from 16 weights.
+                    let sum_lo = {
+                        let s64 = _mm_add_epi32(lo, _mm_shuffle_epi32(lo, 0b1110));
+                        let s32 = _mm_add_epi32(s64, _mm_shuffle_epi32(s64, 0b01));
+                        _mm_cvtsi128_si32(s32)
+                    };
+                    let sum_hi = {
+                        let s64 = _mm_add_epi32(hi, _mm_shuffle_epi32(hi, 0b1110));
+                        let s32 = _mm_add_epi32(s64, _mm_shuffle_epi32(s64, 0b01));
+                        _mm_cvtsi128_si32(s32)
+                    };
+                    let scale_lo = sc[scale_base + $g_idx * 2] as i8 as i32;
+                    let scale_hi = sc[scale_base + $g_idx * 2 + 1] as i8 as i32;
+                    sum_lo * scale_lo + sum_hi * scale_hi
+                }};
+            }
+
+            block_sum += scale_apply_g!(p32_g0, 0);
+            block_sum += scale_apply_g!(p32_g1, 1);
+            block_sum += scale_apply_g!(p32_g2, 2);
+            block_sum += scale_apply_g!(p32_g3, 3);
+        }
+        acc += d_w * d_q8 * block_sum as f32;
+    }
+    acc
+}
+
+/// Horizontal sum of 8 packed int32 values.
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+#[inline]
+unsafe fn hsum_i32_avx2(v: __m256i) -> i32 {
+    let lo = _mm256_castsi256_si128(v);
+    let hi = _mm256_extracti128_si256(v, 1);
+    let sum128 = _mm_add_epi32(lo, hi);
+    let shuf = _mm_shuffle_epi32(sum128, 0b1110);
+    let sum64 = _mm_add_epi32(sum128, shuf);
+    let shuf2 = _mm_shuffle_epi32(sum64, 0b01);
+    let sum32 = _mm_add_epi32(sum64, shuf2);
+    _mm_cvtsi128_si32(sum32)
 }
 
 #[inline]
@@ -1092,14 +1551,26 @@ fn gemv_q4_k_f32_fused(
         });
     }
 
-    let compute_row = |row_idx: usize| {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    let use_avx2 = is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma");
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+    let use_avx2 = false;
+
+    let row_bytes = blocks_per_row * BLOCK_Q4_K_SIZE;
+    let compute_row = |row_idx: usize| -> f32 {
+        let row_start = row_idx * row_bytes;
+        let row = &quantized_matrix[row_start..row_start + row_bytes];
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        {
+            if use_avx2 {
+                return unsafe { q4_k_row_dot_avx2(row, blocks_per_row, vector) };
+            }
+        }
+        let _ = use_avx2;
         let mut sum = 0.0_f32;
-        let row_start = row_idx * blocks_per_row * BLOCK_Q4_K_SIZE;
-        let row_blocks =
-            &quantized_matrix[row_start..row_start + (blocks_per_row * BLOCK_Q4_K_SIZE)];
-        for (block_idx, block) in row_blocks.chunks_exact(BLOCK_Q4_K_SIZE).enumerate() {
-            let vector_offset = block_idx * QK_K;
-            sum += q4_k_dot(block, &vector[vector_offset..vector_offset + QK_K]);
+        for (block_idx, block) in row.chunks_exact(BLOCK_Q4_K_SIZE).enumerate() {
+            let v_off = block_idx * QK_K;
+            sum += q4_k_dot_scalar(block, &vector[v_off..v_off + QK_K]);
         }
         sum
     };
@@ -1115,6 +1586,98 @@ fn gemv_q4_k_f32_fused(
         }
     }
     Ok(())
+}
+
+/// Whole-row Q4_K dot product. Accumulates over all `blocks_per_row` blocks
+/// into four independent AVX2 registers (broken-up dependency chain so the
+/// CPU can keep 4 FMA ops in flight per cycle on Zen 3/4) and does a single
+/// horizontal reduce at the end.
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn q4_k_row_dot_avx2(row: &[u8], blocks_per_row: usize, vector: &[f32]) -> f32 {
+    let mask = _mm_set1_epi8(0x0f);
+    let mut acc0 = _mm256_setzero_ps();
+    let mut acc1 = _mm256_setzero_ps();
+    let mut acc2 = _mm256_setzero_ps();
+    let mut acc3 = _mm256_setzero_ps();
+    for block_idx in 0..blocks_per_row {
+        let block_ptr = row.as_ptr().wrapping_add(block_idx * BLOCK_Q4_K_SIZE);
+        let v_ptr = vector.as_ptr().wrapping_add(block_idx * QK_K);
+
+        let d = f16_le_to_f32([unsafe { *block_ptr }, unsafe { *block_ptr.add(1) }]);
+        let min = f16_le_to_f32([unsafe { *block_ptr.add(2) }, unsafe { *block_ptr.add(3) }]);
+        let scales = unsafe { std::slice::from_raw_parts(block_ptr.add(4), 12) };
+        let qs = unsafe { block_ptr.add(16) };
+
+        for group_pair in 0..4 {
+            let group1 = group_pair * 2;
+            let group2 = group1 + 1;
+            let (scale1, min_scale1) = get_scale_min_k4(group1, scales);
+            let (scale2, min_scale2) = get_scale_min_k4(group2, scales);
+            let d1 = _mm256_set1_ps(d * scale1 as f32);
+            let min1 = _mm256_set1_ps(min * min_scale1 as f32);
+            let d2 = _mm256_set1_ps(d * scale2 as f32);
+            let min2 = _mm256_set1_ps(min * min_scale2 as f32);
+            let q_base = group_pair * 32;
+            let v_base = group_pair * 64;
+            // Unroll inner loop to 4 lanes feeding 4 accumulators.
+            let p0 = unsafe { _mm_loadl_epi64(qs.add(q_base).cast::<__m128i>()) };
+            let p1 = unsafe { _mm_loadl_epi64(qs.add(q_base + 8).cast::<__m128i>()) };
+            let p2 = unsafe { _mm_loadl_epi64(qs.add(q_base + 16).cast::<__m128i>()) };
+            let p3 = unsafe { _mm_loadl_epi64(qs.add(q_base + 24).cast::<__m128i>()) };
+
+            let l0 = _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(_mm_and_si128(p0, mask)));
+            let h0 =
+                _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(_mm_and_si128(_mm_srli_epi16(p0, 4), mask)));
+            let l1 = _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(_mm_and_si128(p1, mask)));
+            let h1 =
+                _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(_mm_and_si128(_mm_srli_epi16(p1, 4), mask)));
+            let l2 = _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(_mm_and_si128(p2, mask)));
+            let h2 =
+                _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(_mm_and_si128(_mm_srli_epi16(p2, 4), mask)));
+            let l3 = _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(_mm_and_si128(p3, mask)));
+            let h3 =
+                _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(_mm_and_si128(_mm_srli_epi16(p3, 4), mask)));
+
+            let v_l0 = unsafe { _mm256_loadu_ps(v_ptr.add(v_base)) };
+            let v_l1 = unsafe { _mm256_loadu_ps(v_ptr.add(v_base + 8)) };
+            let v_l2 = unsafe { _mm256_loadu_ps(v_ptr.add(v_base + 16)) };
+            let v_l3 = unsafe { _mm256_loadu_ps(v_ptr.add(v_base + 24)) };
+            let v_h0 = unsafe { _mm256_loadu_ps(v_ptr.add(v_base + 32)) };
+            let v_h1 = unsafe { _mm256_loadu_ps(v_ptr.add(v_base + 40)) };
+            let v_h2 = unsafe { _mm256_loadu_ps(v_ptr.add(v_base + 48)) };
+            let v_h3 = unsafe { _mm256_loadu_ps(v_ptr.add(v_base + 56)) };
+
+            let t_l0 = _mm256_fmsub_ps(l0, d1, min1);
+            let t_l1 = _mm256_fmsub_ps(l1, d1, min1);
+            let t_l2 = _mm256_fmsub_ps(l2, d1, min1);
+            let t_l3 = _mm256_fmsub_ps(l3, d1, min1);
+            let t_h0 = _mm256_fmsub_ps(h0, d2, min2);
+            let t_h1 = _mm256_fmsub_ps(h1, d2, min2);
+            let t_h2 = _mm256_fmsub_ps(h2, d2, min2);
+            let t_h3 = _mm256_fmsub_ps(h3, d2, min2);
+
+            acc0 = _mm256_fmadd_ps(t_l0, v_l0, acc0);
+            acc1 = _mm256_fmadd_ps(t_l1, v_l1, acc1);
+            acc2 = _mm256_fmadd_ps(t_l2, v_l2, acc2);
+            acc3 = _mm256_fmadd_ps(t_l3, v_l3, acc3);
+            acc0 = _mm256_fmadd_ps(t_h0, v_h0, acc0);
+            acc1 = _mm256_fmadd_ps(t_h1, v_h1, acc1);
+            acc2 = _mm256_fmadd_ps(t_h2, v_h2, acc2);
+            acc3 = _mm256_fmadd_ps(t_h3, v_h3, acc3);
+        }
+    }
+
+    let acc01 = _mm256_add_ps(acc0, acc1);
+    let acc23 = _mm256_add_ps(acc2, acc3);
+    let acc = _mm256_add_ps(acc01, acc23);
+    let lo = _mm256_castps256_ps128(acc);
+    let hi = _mm256_extractf128_ps(acc, 1);
+    let sum128 = _mm_add_ps(lo, hi);
+    let shuf = _mm_movehdup_ps(sum128);
+    let sums = _mm_add_ps(sum128, shuf);
+    let shuf2 = _mm_movehl_ps(shuf, sums);
+    _mm_cvtss_f32(_mm_add_ss(sums, shuf2))
 }
 
 #[inline]
@@ -1496,14 +2059,26 @@ fn gemv_q6_k_f32_fused(
         });
     }
 
-    let compute_row = |row_idx: usize| {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    let use_avx2 = is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma");
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+    let use_avx2 = false;
+
+    let row_bytes = blocks_per_row * BLOCK_Q6_K_SIZE;
+    let compute_row = |row_idx: usize| -> f32 {
+        let row_start = row_idx * row_bytes;
+        let row = &quantized_matrix[row_start..row_start + row_bytes];
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        {
+            if use_avx2 {
+                return unsafe { q6_k_row_dot_avx2(row, blocks_per_row, vector) };
+            }
+        }
+        let _ = use_avx2;
         let mut sum = 0.0_f32;
-        let row_start = row_idx * blocks_per_row * BLOCK_Q6_K_SIZE;
-        let row_blocks =
-            &quantized_matrix[row_start..row_start + (blocks_per_row * BLOCK_Q6_K_SIZE)];
-        for (block_idx, block) in row_blocks.chunks_exact(BLOCK_Q6_K_SIZE).enumerate() {
-            let vector_offset = block_idx * QK_K;
-            sum += q6_k_dot(block, &vector[vector_offset..vector_offset + QK_K]);
+        for (block_idx, block) in row.chunks_exact(BLOCK_Q6_K_SIZE).enumerate() {
+            let v_off = block_idx * QK_K;
+            sum += q6_k_dot_scalar(block, &vector[v_off..v_off + QK_K]);
         }
         sum
     };
@@ -1519,6 +2094,79 @@ fn gemv_q6_k_f32_fused(
         }
     }
     Ok(())
+}
+
+/// Whole-row Q6_K dot product. Same idea as `q4_k_row_dot_avx2`: one final
+/// horizontal reduce instead of one per block.
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn q6_k_row_dot_avx2(row: &[u8], blocks_per_row: usize, vector: &[f32]) -> f32 {
+    let mask_low = _mm_set1_epi8(0x0f);
+    let mask_high = _mm_set1_epi8(0x03);
+    let offset = _mm256_set1_ps(32.0);
+    let mut acc = _mm256_setzero_ps();
+
+    for block_idx in 0..blocks_per_row {
+        let block_ptr = row.as_ptr().wrapping_add(block_idx * BLOCK_Q6_K_SIZE);
+        let v_ptr = vector.as_ptr().wrapping_add(block_idx * QK_K);
+
+        let d = f16_le_to_f32([unsafe { *block_ptr.add(208) }, unsafe { *block_ptr.add(209) }]);
+        let ql = block_ptr;
+        let qh = block_ptr.wrapping_add(128);
+        let sc = unsafe { std::slice::from_raw_parts(block_ptr.add(192), 16) };
+
+        for half in 0..2 {
+            let scale_base = half * 8;
+            let v_base = half * 128;
+            let ql_base = half * 64;
+            let qh_base = half * 32;
+            for l in (0..32).step_by(8) {
+                let is = l / 16;
+                let ql1 = unsafe { _mm_loadl_epi64(ql.add(ql_base + l).cast::<__m128i>()) };
+                let ql2 = unsafe { _mm_loadl_epi64(ql.add(ql_base + l + 32).cast::<__m128i>()) };
+                let qh_v = unsafe { _mm_loadl_epi64(qh.add(qh_base + l).cast::<__m128i>()) };
+
+                let low1 = _mm_and_si128(ql1, mask_low);
+                let low2 = _mm_and_si128(ql2, mask_low);
+                let low3 = _mm_and_si128(_mm_srli_epi16(ql1, 4), mask_low);
+                let low4 = _mm_and_si128(_mm_srli_epi16(ql2, 4), mask_low);
+                let high1 = _mm_slli_epi16(_mm_and_si128(qh_v, mask_high), 4);
+                let high2 =
+                    _mm_slli_epi16(_mm_and_si128(_mm_srli_epi16(qh_v, 2), mask_high), 4);
+                let high3 =
+                    _mm_slli_epi16(_mm_and_si128(_mm_srli_epi16(qh_v, 4), mask_high), 4);
+                let high4 =
+                    _mm_slli_epi16(_mm_and_si128(_mm_srli_epi16(qh_v, 6), mask_high), 4);
+
+                macro_rules! acc_group {
+                    ($low:expr, $high:expr, $scale_idx:expr, $vec_off:expr) => {{
+                        let q_u8 = _mm_or_si128($low, $high);
+                        let q = _mm256_sub_ps(
+                            _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(q_u8)),
+                            offset,
+                        );
+                        let scale = _mm256_set1_ps(d * sc[$scale_idx] as i8 as f32);
+                        let w = _mm256_mul_ps(q, scale);
+                        let v = unsafe { _mm256_loadu_ps(v_ptr.add($vec_off)) };
+                        acc = _mm256_fmadd_ps(w, v, acc);
+                    }};
+                }
+
+                acc_group!(low1, high1, scale_base + is, v_base + l);
+                acc_group!(low2, high2, scale_base + is + 2, v_base + 32 + l);
+                acc_group!(low3, high3, scale_base + is + 4, v_base + 64 + l);
+                acc_group!(low4, high4, scale_base + is + 6, v_base + 96 + l);
+            }
+        }
+    }
+
+    let lo = _mm256_castps256_ps128(acc);
+    let hi = _mm256_extractf128_ps(acc, 1);
+    let sum128 = _mm_add_ps(lo, hi);
+    let shuf = _mm_movehdup_ps(sum128);
+    let sums = _mm_add_ps(sum128, shuf);
+    let shuf2 = _mm_movehl_ps(shuf, sums);
+    _mm_cvtss_f32(_mm_add_ss(sums, shuf2))
 }
 
 #[allow(clippy::too_many_arguments, dead_code)]
@@ -2855,6 +3503,11 @@ pub fn scaled_dot_product_attention_f32(
     Ok(())
 }
 
+/// Apply rotary position embedding in NeoX/HF style (split-half), matching
+/// llama.cpp's `GGML_ROPE_TYPE_NEOX` mode used by Llama, Mistral, Qwen, Gemma,
+/// Phi and most other modern decoder-only transformers. Pairs index `i` with
+/// index `head_dim/2 + i` rather than `2i` with `2i+1` (which is the GPT-J /
+/// "norm" mode and produces garbage on NeoX-trained weights).
 pub fn apply_rope_f32(
     input: &[f32],
     position: usize,
@@ -2880,17 +3533,18 @@ pub fn apply_rope_f32(
 
     let position_f = position as f32;
     let half_dim = head_dim / 2;
+    let inv_head_dim = 1.0_f32 / head_dim as f32;
 
     for i in 0..half_dim {
-        let x0 = input[2 * i];
-        let x1 = input[2 * i + 1];
-        let freq = theta.powf(-(2.0 * i as f32) / head_dim as f32);
+        let x0 = input[i];
+        let x1 = input[half_dim + i];
+        let freq = theta.powf(-(2.0 * i as f32) * inv_head_dim);
         let angle = position_f * freq;
         let cos_angle = angle.cos();
         let sin_angle = angle.sin();
 
-        output[2 * i] = x0 * cos_angle - x1 * sin_angle;
-        output[2 * i + 1] = x0 * sin_angle + x1 * cos_angle;
+        output[i] = x0 * cos_angle - x1 * sin_angle;
+        output[half_dim + i] = x0 * sin_angle + x1 * cos_angle;
     }
 
     Ok(())
