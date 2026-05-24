@@ -21,11 +21,12 @@ use axum::{
     },
     routing::{get, post},
 };
-use clap::{Parser, ValueEnum};
+use clap::{CommandFactory, FromArgMatches, Parser, ValueEnum};
 use futures_util::{Stream, StreamExt, stream};
 use oxidize_core::{
     generation::{GenerationConfig, GenerationStream},
     gguf::{GgufMetadataValue, MappedGgufFile},
+    hardware::{HardwareTier, InferenceOverrides, ResolvedInference},
     inference::{InferenceConfig, InferenceModel},
     layer_wise::LayerWiseModel,
     model::{Model, ModelError, Session, Token},
@@ -73,6 +74,61 @@ enum BatchMode {
     Paged,
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum, Default)]
+enum ServerHardwareTier {
+    #[default]
+    Auto,
+    Low,
+    Mid,
+    High,
+}
+
+impl From<ServerHardwareTier> for HardwareTier {
+    fn from(value: ServerHardwareTier) -> Self {
+        match value {
+            ServerHardwareTier::Auto => Self::Auto,
+            ServerHardwareTier::Low => Self::Low,
+            ServerHardwareTier::Mid => Self::Mid,
+            ServerHardwareTier::High => Self::High,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+enum ServerKvCacheDType {
+    F32,
+    F16,
+    Q8,
+    Q4,
+}
+
+impl ServerKvCacheDType {
+    fn dtype(self) -> DType {
+        match self {
+            Self::F32 => DType::F32,
+            Self::F16 => DType::F16,
+            Self::Q8 => DType::I8,
+            Self::Q4 => DType::I16,
+        }
+    }
+}
+
+fn server_inference_overrides(args: &Args, matches: &clap::ArgMatches) -> InferenceOverrides {
+    InferenceOverrides {
+        threads: args.threads,
+        ctx_size: args.ctx_size,
+        cpu_optimized: matches.get_flag("cpu_optimized").then_some(args.cpu_optimized),
+        ram_offload: matches.get_flag("ram_offload").then_some(args.ram_offload),
+        mmap_prefetch: matches.get_flag("mmap_prefetch").then_some(args.mmap_prefetch),
+        mmap_hugepages: matches.get_flag("mmap_hugepages").then_some(args.mmap_hugepages),
+        layer_wise: matches.get_flag("layer_wise").then_some(args.layer_wise),
+        layer_cache: matches
+            .contains_id("layer_cache")
+            .then_some(args.layer_cache),
+        kv_cache_dtype: args.kv_cache_dtype.map(ServerKvCacheDType::dtype),
+    }
+}
+
 #[derive(Debug, Parser)]
 #[command(name = "oxidize-server")]
 struct Args {
@@ -98,6 +154,13 @@ struct Args {
     top_k: Option<usize>,
     #[arg(long)]
     ctx_size: Option<usize>,
+    #[arg(long)]
+    threads: Option<usize>,
+    #[arg(long, value_enum)]
+    kv_cache_dtype: Option<ServerKvCacheDType>,
+    /// Hardware profile tier (auto-detect RAM/CPU or force low|mid|high).
+    #[arg(long, value_enum, default_value_t = ServerHardwareTier::Auto)]
+    hardware_tier: ServerHardwareTier,
     #[arg(long, default_value_t = 512)]
     prefill_batch_size: usize,
     #[arg(long, default_value_t = false)]
@@ -2085,7 +2148,10 @@ fn suppressed_generation_tokens(tokenizer: &LoadedTokenizer, vocab_size: usize) 
     suppressed
 }
 
-fn load_model_runtime(args: &Args) -> Result<Option<Arc<ModelRuntime>>, String> {
+fn load_model_runtime(
+    args: &Args,
+    inference: &ResolvedInference,
+) -> Result<Option<Arc<ModelRuntime>>, String> {
     let Some(model_path) = args.model.as_ref() else {
         return Ok(None);
     };
@@ -2103,12 +2169,12 @@ fn load_model_runtime(args: &Args) -> Result<Option<Arc<ModelRuntime>>, String> 
             );
         })
         .map_err(|error| format!("failed to load model: {error:?}"))?;
-    optimize_mapped_model_memory(&mapped, args);
+    optimize_mapped_model_memory(&mapped, inference);
     let metadata = &mapped.parsed().metadata;
-    if args.ctx_size == Some(0) {
+    if inference.ctx_size == Some(0) {
         return Err("invalid --ctx-size: must be greater than 0".into());
     }
-    let config = inference_config_from_gguf(&mapped, args.ctx_size);
+    let config = inference_config_from_gguf(&mapped, inference);
     let tokenizer = load_tokenizer_from_gguf_metadata(metadata)
         .map_err(|error| format!("failed to load tokenizer: {error:?}"))?;
     let chat_template = metadata
@@ -2118,9 +2184,9 @@ fn load_model_runtime(args: &Args) -> Result<Option<Arc<ModelRuntime>>, String> 
             GgufMetadataValue::String(template) => Some(template.clone()),
             _ => None,
         });
-    let model = if args.layer_wise {
+    let model = if inference.layer_wise {
         LoadedModel::LayerWise(Box::new(
-            LayerWiseModel::load_from_gguf(&mapped, config, args.layer_cache)
+            LayerWiseModel::load_from_gguf(&mapped, config, inference.layer_cache)
                 .map_err(|error| format!("failed to load layer-wise model: {error}"))?,
         ))
     } else if effective_backend == oxidize_core::backend::Backend::Mlx {
@@ -2134,7 +2200,7 @@ fn load_model_runtime(args: &Args) -> Result<Option<Arc<ModelRuntime>>, String> 
                 Err(error) => {
                     tracing::warn!("MLX initialization failed: {error}; falling back to CPU");
                     LoadedModel::Inference(Box::new(
-                        InferenceModel::load_from_gguf(&mapped, config, args.cpu_optimized)
+                        InferenceModel::load_from_gguf(&mapped, config, inference.cpu_optimized)
                             .map_err(|error| format!("failed to load model weights: {error}"))?,
                     ))
                 }
@@ -2144,13 +2210,13 @@ fn load_model_runtime(args: &Args) -> Result<Option<Arc<ModelRuntime>>, String> 
         {
             tracing::warn!("MLX backend requested but unavailable on Linux; falling back to CPU");
             LoadedModel::Inference(Box::new(
-                InferenceModel::load_from_gguf(&mapped, config, args.cpu_optimized)
+                InferenceModel::load_from_gguf(&mapped, config, inference.cpu_optimized)
                     .map_err(|error| format!("failed to load model weights: {error}"))?,
             ))
         }
     } else {
         LoadedModel::Inference(Box::new(
-            InferenceModel::load_from_gguf(&mapped, config, args.cpu_optimized)
+            InferenceModel::load_from_gguf(&mapped, config, inference.cpu_optimized)
                 .map_err(|error| format!("failed to load model weights: {error}"))?,
         ))
     };
@@ -2170,9 +2236,11 @@ fn load_model_runtime(args: &Args) -> Result<Option<Arc<ModelRuntime>>, String> 
     })))
 }
 
-fn optimize_mapped_model_memory(mapped: &MappedGgufFile, args: &Args) {
-    let apply_hints =
-        args.cpu_optimized || args.ram_offload || args.mmap_prefetch || args.mmap_hugepages;
+fn optimize_mapped_model_memory(mapped: &MappedGgufFile, inference: &ResolvedInference) {
+    let apply_hints = inference.cpu_optimized
+        || inference.ram_offload
+        || inference.mmap_prefetch
+        || inference.mmap_hugepages;
     if !apply_hints {
         return;
     }
@@ -2180,17 +2248,17 @@ fn optimize_mapped_model_memory(mapped: &MappedGgufFile, args: &Args) {
     if let Err(error) = mapped.advise_random_access() {
         tracing::warn!(%error, "mmap random-access hint failed");
     }
-    if (args.cpu_optimized || args.ram_offload || args.mmap_prefetch)
+    if (inference.cpu_optimized || inference.ram_offload || inference.mmap_prefetch)
         && let Err(error) = mapped.advise_will_need()
     {
         tracing::warn!(%error, "mmap prefetch hint failed");
     }
-    if (args.cpu_optimized || args.mmap_hugepages)
+    if (inference.cpu_optimized || inference.mmap_hugepages)
         && let Err(error) = mapped.advise_huge_pages()
     {
         tracing::warn!(%error, "mmap hugepage hint failed");
     }
-    if args.ram_offload {
+    if inference.ram_offload {
         let started = Instant::now();
         let checksum = mapped.prefault_pages();
         tracing::info!(
@@ -2202,10 +2270,14 @@ fn optimize_mapped_model_memory(mapped: &MappedGgufFile, args: &Args) {
     }
 }
 
-fn inference_config_from_gguf(mapped: &MappedGgufFile, ctx_size: Option<usize>) -> InferenceConfig {
+fn inference_config_from_gguf(mapped: &MappedGgufFile, inference: &ResolvedInference) -> InferenceConfig {
     let mut config = InferenceConfig::from_gguf(mapped);
-    if let Some(ctx) = ctx_size {
+    config.kv_cache_dtype = inference.kv_cache_dtype;
+    if let Some(ctx) = inference.ctx_size {
         config.context_size = ctx;
+    }
+    if inference.cpu_optimized {
+        config.context_size = config.context_size.min(2048);
     }
     config
 }
@@ -2259,7 +2331,17 @@ fn first_layer_tensor_dims(mapped: &MappedGgufFile, suffix: &str) -> Option<Vec<
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
-    let args = Args::parse();
+    let matches = Args::command().get_matches();
+    let args = Args::from_arg_matches(&matches).expect("validated server arguments");
+    let threads_explicit = args.threads.is_some();
+    let inference = ResolvedInference::resolve(
+        args.hardware_tier.into(),
+        server_inference_overrides(&args, &matches),
+    );
+    inference.apply_runtime(threads_explicit);
+    tracing::info!("{}", inference.profile.summary_line());
+    inference.profile.print_recommendations();
+
     let (effective_backend, warning) = args.backend.to_core_backend().effective();
     if let Some(msg) = warning {
         tracing::warn!("{msg}");
@@ -2274,7 +2356,7 @@ async fn main() {
         },
         "starting oxidize-server"
     );
-    let model = load_model_runtime(&args)
+    let model = load_model_runtime(&args, &inference)
         .unwrap_or_else(|error| panic!("failed to initialize model runtime: {error}"));
     let api_key = std::env::var("OXIDIZE_API_KEY")
         .ok()

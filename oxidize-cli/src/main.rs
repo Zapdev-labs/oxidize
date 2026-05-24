@@ -1,7 +1,8 @@
 mod pipeline;
 
-use clap::{Parser, ValueEnum};
+use clap::{CommandFactory, FromArgMatches, Parser, ValueEnum};
 use oxidize_core::generation::{GenerationConfig, GenerationStream};
+use oxidize_core::hardware::{HardwareTier, InferenceOverrides, ResolvedInference};
 use oxidize_core::gguf::MappedGgufFile;
 use oxidize_core::inference::{InferenceConfig, InferenceModel};
 use oxidize_core::lora::{AdapterKind, LoraPlan, plan_lora_application};
@@ -74,8 +75,11 @@ struct Args {
     ctx_size: Option<usize>,
     #[arg(long)]
     threads: Option<usize>,
-    #[arg(long, value_enum, default_value_t = KvCacheDType::F32)]
-    kv_cache_dtype: KvCacheDType,
+    #[arg(long, value_enum)]
+    kv_cache_dtype: Option<KvCacheDType>,
+    /// Hardware profile tier (auto-detect RAM/CPU or force low|mid|high).
+    #[arg(long, value_enum, default_value_t = CliHardwareTier::Auto)]
+    hardware_tier: CliHardwareTier,
     /// Start a distributed mesh node instead of loading a model locally.
     #[arg(long, default_value_t = false)]
     mesh: bool,
@@ -111,6 +115,26 @@ enum Profiler {
     Samply,
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum, Default)]
+enum CliHardwareTier {
+    #[default]
+    Auto,
+    Low,
+    Mid,
+    High,
+}
+
+impl From<CliHardwareTier> for HardwareTier {
+    fn from(value: CliHardwareTier) -> Self {
+        match value {
+            CliHardwareTier::Auto => Self::Auto,
+            CliHardwareTier::Low => Self::Low,
+            CliHardwareTier::Mid => Self::Mid,
+            CliHardwareTier::High => Self::High,
+        }
+    }
+}
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 enum KvCacheDType {
     F32,
@@ -127,6 +151,23 @@ impl KvCacheDType {
             Self::Q8 => DType::I8,
             Self::Q4 => DType::I16,
         }
+    }
+
+}
+
+fn inference_overrides_from_args(args: &Args, matches: &clap::ArgMatches) -> InferenceOverrides {
+    InferenceOverrides {
+        threads: args.threads,
+        ctx_size: args.ctx_size,
+        cpu_optimized: matches.get_flag("cpu_optimized").then_some(args.cpu_optimized),
+        ram_offload: matches.get_flag("ram_offload").then_some(args.ram_offload),
+        mmap_prefetch: matches.get_flag("mmap_prefetch").then_some(args.mmap_prefetch),
+        mmap_hugepages: matches.get_flag("mmap_hugepages").then_some(args.mmap_hugepages),
+        layer_wise: matches.get_flag("layer_wise").then_some(args.layer_wise),
+        layer_cache: matches
+            .contains_id("layer_cache")
+            .then_some(args.layer_cache),
+        kv_cache_dtype: args.kv_cache_dtype.map(KvCacheDType::dtype),
     }
 }
 
@@ -617,9 +658,11 @@ fn run_profiled_inference(profiler: Profiler, output: Option<&PathBuf>) -> io::R
     command.status()
 }
 
-fn optimize_mapped_model_memory(mapped: &MappedGgufFile, args: &Args) {
-    let apply_hints =
-        args.cpu_optimized || args.ram_offload || args.mmap_prefetch || args.mmap_hugepages;
+fn optimize_mapped_model_memory(mapped: &MappedGgufFile, flags: &ResolvedInference) {
+    let apply_hints = flags.cpu_optimized
+        || flags.ram_offload
+        || flags.mmap_prefetch
+        || flags.mmap_hugepages;
     if !apply_hints {
         return;
     }
@@ -627,17 +670,17 @@ fn optimize_mapped_model_memory(mapped: &MappedGgufFile, args: &Args) {
     if let Err(error) = mapped.advise_random_access() {
         eprintln!("mmap random-access hint failed: {error}");
     }
-    if (args.cpu_optimized || args.ram_offload || args.mmap_prefetch)
+    if (flags.cpu_optimized || flags.ram_offload || flags.mmap_prefetch)
         && let Err(error) = mapped.advise_will_need()
     {
         eprintln!("mmap prefetch hint failed: {error}");
     }
-    if (args.cpu_optimized || args.mmap_hugepages)
+    if (flags.cpu_optimized || flags.mmap_hugepages)
         && let Err(error) = mapped.advise_huge_pages()
     {
         eprintln!("mmap hugepage hint failed: {error}");
     }
-    if args.ram_offload {
+    if flags.ram_offload {
         let started = Instant::now();
         let checksum = mapped.prefault_pages();
         println!(
@@ -649,7 +692,17 @@ fn optimize_mapped_model_memory(mapped: &MappedGgufFile, args: &Args) {
 }
 
 fn main() {
-    let args = Args::parse();
+    let matches = Args::command().get_matches();
+    let args = Args::from_arg_matches(&matches).expect("validated CLI arguments");
+    let threads_explicit = args.threads.is_some();
+    let inference = ResolvedInference::resolve(
+        args.hardware_tier.into(),
+        inference_overrides_from_args(&args, &matches),
+    );
+    inference.apply_runtime(threads_explicit);
+    println!("{}", inference.profile.summary_line());
+    inference.profile.print_recommendations();
+
     let (effective_backend, warning) = args.backend.to_core_backend().effective();
     if let Some(msg) = warning {
         eprintln!("warning: {msg}");
@@ -666,20 +719,6 @@ fn main() {
         effective_backend.as_str(),
         backend_label
     );
-    let threads = if let Some(t) = args.threads.filter(|t| *t > 0) {
-        t
-    } else {
-        std::thread::available_parallelism()
-            .map(usize::from)
-            .unwrap_or(8)
-    };
-    if let Err(error) = rayon::ThreadPoolBuilder::new()
-        .num_threads(threads)
-        .build_global()
-    {
-        eprintln!("failed to set rayon thread pool: {error}");
-        return;
-    }
     if let Some(profiler) = args.profile
         && !is_profiling_child()
     {
@@ -762,7 +801,7 @@ fn main() {
             println!("{}", render_load_progress(progress))
         }) {
             Ok(mapped) => {
-                optimize_mapped_model_memory(&mapped, &args);
+                optimize_mapped_model_memory(&mapped, &inference);
                 for lora_path in &args.lora_paths {
                     match loader.load(lora_path) {
                         Ok(adapter) => match plan_lora_application(
@@ -809,16 +848,16 @@ fn main() {
                     );
                     return;
                 }
-                if args.ctx_size == Some(0) {
+                if inference.ctx_size == Some(0) {
                     eprintln!("invalid --ctx-size: must be greater than 0");
                     return;
                 }
                 let mut config = InferenceConfig::from_gguf(&mapped);
-                config.kv_cache_dtype = args.kv_cache_dtype.dtype();
-                if let Some(ctx) = args.ctx_size {
+                config.kv_cache_dtype = inference.kv_cache_dtype;
+                if let Some(ctx) = inference.ctx_size {
                     config.context_size = ctx;
                 }
-                if args.cpu_optimized {
+                if inference.cpu_optimized {
                     config.context_size = config.context_size.min(2048);
                 }
                 // Load tokenizer from GGUF metadata
@@ -832,11 +871,11 @@ fn main() {
 
                 let stdout = io::stdout();
                 let mut writer = stdout.lock();
-                let mut model: Box<dyn Model> = if args.layer_wise {
+                let mut model: Box<dyn Model> = if inference.layer_wise {
                     match oxidize_core::layer_wise::LayerWiseModel::load_from_gguf(
                         &mapped,
                         config,
-                        args.layer_cache,
+                        inference.layer_cache,
                     ) {
                         Ok(m) => Box::new(m),
                         Err(error) => {
@@ -858,7 +897,7 @@ fn main() {
                                 eprintln!(
                                     "MLX initialization failed: {error}; falling back to CPU"
                                 );
-                                let use_mmap = args.cpu_optimized;
+                                let use_mmap = inference.cpu_optimized;
                                 match InferenceModel::load_from_gguf(&mapped, config, use_mmap) {
                                     Ok(m) => Box::new(m),
                                     Err(error) => {
@@ -874,7 +913,7 @@ fn main() {
                         eprintln!(
                             "MLX backend requested but unavailable on Linux; falling back to CPU"
                         );
-                        let use_mmap = args.cpu_optimized;
+                        let use_mmap = inference.cpu_optimized;
                         match InferenceModel::load_from_gguf(&mapped, config, use_mmap) {
                             Ok(m) => Box::new(m),
                             Err(error) => {
@@ -884,7 +923,7 @@ fn main() {
                         }
                     }
                 } else {
-                    let use_mmap = args.cpu_optimized;
+                    let use_mmap = inference.cpu_optimized;
                     match InferenceModel::load_from_gguf(&mapped, config, use_mmap) {
                         Ok(m) => Box::new(m),
                         Err(error) => {
@@ -1430,6 +1469,40 @@ mod tests {
                 unsafe { std::env::remove_var(&key) }
             }
         }
+    }
+
+    #[test]
+    fn parses_hardware_tier_low() {
+        let args = Args::try_parse_from([
+            "oxidize-cli",
+            "--hardware-tier",
+            "low",
+            "--model",
+            "model.gguf",
+        ])
+        .expect("parse hardware tier");
+        assert_eq!(args.hardware_tier, CliHardwareTier::Low);
+    }
+
+    #[test]
+    fn explicit_threads_override_profile() {
+        let matches = Args::command()
+            .try_get_matches_from([
+                "oxidize-cli",
+                "--hardware-tier",
+                "low",
+                "--threads",
+                "4",
+                "--model",
+                "model.gguf",
+            ])
+            .expect("parse threads override");
+        let args = Args::from_arg_matches(&matches).expect("from_arg_matches");
+        let inference = ResolvedInference::resolve(
+            args.hardware_tier.into(),
+            inference_overrides_from_args(&args, &matches),
+        );
+        assert_eq!(inference.threads, 4);
     }
 
     #[test]

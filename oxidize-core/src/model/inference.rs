@@ -1,5 +1,6 @@
 use crate::flash_attention::flash_attention_decode_heads_f32;
 use crate::gguf::{GgufQuantizationType, MappedGgufFile};
+use crate::hardware;
 use crate::kv_cache::{KvCache, KvCacheConfig};
 use crate::model::{Logits, Model, ModelError, Session, Token};
 use crate::quantization::{dequantize_scalar, quantized_size};
@@ -915,7 +916,7 @@ impl InferenceModel {
         }
         let start_pos = session.consumed_tokens();
         if tokens.len() > 1 && self.layers_supported_for_batched() {
-            self.forward_batched(tokens, start_pos, false)?;
+            self.forward_batched_prefill(tokens, start_pos, false)?;
         } else {
             for (i, &token) in tokens.iter().enumerate() {
                 self.forward_single(token, start_pos + i, false)?;
@@ -923,6 +924,33 @@ impl InferenceModel {
         }
         session.record_tokens(tokens.len());
         Ok(())
+    }
+
+    /// Batched prefill with optional tier-aware micro-batching on low-RAM hosts.
+    fn forward_batched_prefill(
+        &mut self,
+        tokens: &[Token],
+        start_pos: usize,
+        need_logits: bool,
+    ) -> Result<Option<Logits>, ModelError> {
+        if let Some(micro) = hardware::global_profile().prefill_micro_batch_size() {
+            if tokens.len() > micro {
+                let mut logits = None;
+                let mut offset = 0usize;
+                for chunk in tokens.chunks(micro) {
+                    let pos = start_pos + offset;
+                    let is_final = offset + chunk.len() == tokens.len();
+                    let chunk_logits =
+                        self.forward_batched(chunk, pos, need_logits && is_final)?;
+                    if need_logits && is_final {
+                        logits = chunk_logits;
+                    }
+                    offset += chunk.len();
+                }
+                return Ok(logits);
+            }
+        }
+        self.forward_batched(tokens, start_pos, need_logits)
     }
 
     /// True when all layers use the standard attention + FFN path that
@@ -2001,11 +2029,9 @@ impl Model for InferenceModel {
 
         let start_pos = session.consumed_tokens();
         let logits = if tokens.len() > 1 && self.layers_supported_for_batched() {
-            // Prefill the prompt in one batched pass so every weight matmul is a
-            // GEMM (decode-once per weight block) rather than `tokens.len()`
-            // separate GEMVs. Intermediate logits are discarded so only the
-            // last token's lm_head is computed.
-            self.forward_batched(tokens, start_pos, true)?
+            // Prefill via batched GEMM (decode-once per weight block). Low-tier
+            // hosts may split into micro-batches to cap peak activation memory.
+            self.forward_batched_prefill(tokens, start_pos, true)?
                 .unwrap_or_default()
         } else {
             let mut logits = Vec::new();

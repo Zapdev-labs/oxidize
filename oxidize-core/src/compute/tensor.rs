@@ -1,4 +1,5 @@
 use crate::gguf::GgufQuantizationType;
+use crate::hardware;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 #[cfg(target_arch = "x86")]
@@ -13,8 +14,17 @@ const BLOCK_Q4_K_SIZE: usize = 2 * std::mem::size_of::<u16>() + 12 + QK_K / 2;
 const BLOCK_Q2_K_SIZE: usize = 2 * std::mem::size_of::<u16>() + QK_K / 16 + QK_K / 4;
 const BLOCK_Q6_K_SIZE: usize = std::mem::size_of::<u16>() + QK_K / 16 + 3 * QK_K / 4;
 const FLASH_ATTENTION_BLOCK_TOKENS: usize = 64;
-const PARALLEL_GEMV_MIN_OPS: usize = 1 << 20;
 const TRANSPOSED_GEMV_COL_CHUNK: usize = QK_K;
+
+#[inline]
+fn parallel_gemv_min_ops() -> usize {
+    hardware::global_parallel_gemv_min_ops()
+}
+
+#[inline]
+fn gemm_row_chunk() -> usize {
+    hardware::global_gemm_row_chunk().max(1)
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum DType {
@@ -556,11 +566,59 @@ fn dot_f32_fast(a: &[f32], b: &[f32]) -> f32 {
     debug_assert_eq!(a.len(), b.len());
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
+        if is_x86_feature_detected!("avx512f") {
+            return unsafe { dot_f32_avx512(a.as_ptr(), b.as_ptr(), a.len()) };
+        }
         if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
             return unsafe { dot_f32_avx2(a.as_ptr(), b.as_ptr(), a.len()) };
         }
     }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if std::arch::is_aarch64_feature_detected!("neon") {
+            return unsafe { dot_f32_neon_aarch64(a.as_ptr(), b.as_ptr(), a.len()) };
+        }
+    }
     a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f")]
+#[inline]
+#[allow(unsafe_op_in_unsafe_fn)]
+unsafe fn dot_f32_avx512(a: *const f32, b: *const f32, len: usize) -> f32 {
+    let mut acc = _mm512_setzero_ps();
+    let mut i = 0;
+    while i + 16 <= len {
+        acc = _mm512_fmadd_ps(_mm512_loadu_ps(a.add(i)), _mm512_loadu_ps(b.add(i)), acc);
+        i += 16;
+    }
+    let mut sum = _mm512_reduce_add_ps(acc);
+    while i < len {
+        sum += *a.add(i) * *b.add(i);
+        i += 1;
+    }
+    sum
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+#[inline]
+#[allow(unsafe_op_in_unsafe_fn)]
+unsafe fn dot_f32_neon_aarch64(a: *const f32, b: *const f32, len: usize) -> f32 {
+    use std::arch::aarch64::*;
+    let mut acc = vdupq_n_f32(0.0);
+    let mut i = 0;
+    while i + 4 <= len {
+        acc = vfmaq_f32(acc, vld1q_f32(a.add(i)), vld1q_f32(b.add(i)));
+        i += 4;
+    }
+    let mut sum = vaddvq_f32(acc);
+    while i < len {
+        sum += *a.add(i) * *b.add(i);
+        i += 1;
+    }
+    sum
 }
 
 /// Fast batched Q4_K GEMM path: for each output row, walk each 144-byte block
@@ -654,7 +712,7 @@ unsafe fn gemm_q4_k_decode_once_avx2(
     let row_stride_bytes = blocks_per_row * BLOCK_Q4_K_SIZE;
 
     // Rows are processed in chunks to amortize rayon task dispatch overhead.
-    const ROW_CHUNK: usize = 16;
+    let row_chunk = gemm_row_chunk();
     let process_row = |row_idx: usize, partial: &mut [f32]| {
         let qm_ptr = qm_ptr_addr as *const u8;
         let in_ptr = in_ptr_addr as *const f32;
@@ -717,11 +775,11 @@ unsafe fn gemm_q4_k_decode_once_avx2(
     // linear and much cheaper than that false sharing.
     let mut row_major = vec![0.0_f32; rows.saturating_mul(batch)];
     row_major
-        .par_chunks_mut(ROW_CHUNK * batch)
+        .par_chunks_mut(row_chunk * batch)
         .enumerate()
         .for_each(|(chunk_idx, chunk)| {
-            let start = chunk_idx * ROW_CHUNK;
-            let end = (start + ROW_CHUNK).min(rows);
+            let start = chunk_idx * row_chunk;
+            let end = (start + row_chunk).min(rows);
             for row in start..end {
                 let local = row - start;
                 let partial = &mut chunk[local * batch..(local + 1) * batch];
@@ -815,15 +873,15 @@ fn gemm_q6_k_decode_once(
     let in_ptr_addr = inputs.as_ptr() as usize;
     let row_stride_bytes = blocks_per_row * BLOCK_Q6_K_SIZE;
 
-    const ROW_CHUNK: usize = 16;
+    let row_chunk = gemm_row_chunk();
     row_major
-        .par_chunks_mut(ROW_CHUNK * batch)
+        .par_chunks_mut(row_chunk * batch)
         .enumerate()
         .for_each(|(chunk_idx, chunk)| {
             let qm_ptr = qm_ptr_addr as *const u8;
             let in_ptr = in_ptr_addr as *const f32;
-            let start = chunk_idx * ROW_CHUNK;
-            let end = (start + ROW_CHUNK).min(rows);
+            let start = chunk_idx * row_chunk;
+            let end = (start + row_chunk).min(rows);
             let mut scratch = [0.0_f32; QK_K];
             for row in start..end {
                 let local = row - start;
@@ -947,7 +1005,7 @@ fn gemm_k_quant_block(
     };
 
     let total_ops = rows.saturating_mul(cols).saturating_mul(batch);
-    if total_ops >= PARALLEL_GEMV_MIN_OPS {
+    if total_ops >= parallel_gemv_min_ops() {
         row_major
             .par_chunks_mut(batch)
             .enumerate()
@@ -1069,7 +1127,7 @@ fn gemv_q4_k_q8_k_fused(
         unsafe { q4_k_q8_k_row_dot_avx2(row, blocks_per_row, &q8k) }
     };
 
-    if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
+    if rows.saturating_mul(cols) >= parallel_gemv_min_ops() {
         output
             .par_iter_mut()
             .enumerate()
@@ -1167,16 +1225,16 @@ unsafe fn gemm_q4_k_q8_k_fused_avx2(
         });
     let q8_panel_slice = &q8_panel[..];
 
-    const ROW_CHUNK: usize = 16;
+    let row_chunk = gemm_row_chunk();
     let row_bytes = blocks_per_row * BLOCK_Q4_K_SIZE;
     let mut row_major = vec![0.0_f32; rows.saturating_mul(batch)];
 
     row_major
-        .par_chunks_mut(ROW_CHUNK * batch)
+        .par_chunks_mut(row_chunk * batch)
         .enumerate()
         .for_each(|(chunk_idx, chunk)| {
-            let start = chunk_idx * ROW_CHUNK;
-            let end = (start + ROW_CHUNK).min(rows);
+            let start = chunk_idx * row_chunk;
+            let end = (start + row_chunk).min(rows);
             for row_idx in start..end {
                 let row_start = row_idx * row_bytes;
                 let row = &weights[row_start..row_start + row_bytes];
@@ -1684,7 +1742,7 @@ fn gemv_q4_k_f32_fused(
         sum
     };
 
-    if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
+    if rows.saturating_mul(cols) >= parallel_gemv_min_ops() {
         output
             .par_iter_mut()
             .enumerate()
@@ -1964,7 +2022,7 @@ fn gemv_q2_k_f32_fused(
         sum
     };
 
-    if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
+    if rows.saturating_mul(cols) >= parallel_gemv_min_ops() {
         output
             .par_iter_mut()
             .enumerate()
@@ -2200,7 +2258,7 @@ fn gemv_q6_k_f32_fused(
         sum
     };
 
-    if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
+    if rows.saturating_mul(cols) >= parallel_gemv_min_ops() {
         output
             .par_iter_mut()
             .enumerate()
@@ -2331,7 +2389,7 @@ fn gemv_qk_f32_fused(
         sum
     };
 
-    if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
+    if rows.saturating_mul(cols) >= parallel_gemv_min_ops() {
         output
             .par_iter_mut()
             .enumerate()
@@ -2379,7 +2437,7 @@ fn gemv_q8_0_f32_fused(
         sum
     };
 
-    if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
+    if rows.saturating_mul(cols) >= parallel_gemv_min_ops() {
         output
             .par_iter_mut()
             .enumerate()
@@ -2495,7 +2553,7 @@ fn gemv_f32_transposed_cpu(
     vector: &[f32],
     output: &mut [f32],
 ) {
-    if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
+    if rows.saturating_mul(cols) >= parallel_gemv_min_ops() {
         output
             .par_chunks_mut(TRANSPOSED_GEMV_COL_CHUNK)
             .enumerate()
@@ -2582,7 +2640,7 @@ fn gemv_qk_f32_transposed(
         });
     }
 
-    if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
+    if rows.saturating_mul(cols) >= parallel_gemv_min_ops() {
         let use_q4_avx512 = bits == 4 && q4_avx512_available();
         let use_q4_avx2 = bits == 4 && !use_q4_avx512 && q4_avx2_available();
         output
@@ -2677,7 +2735,7 @@ fn gemv_q4_k_f32_transposed(
         });
     }
 
-    if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
+    if rows.saturating_mul(cols) >= parallel_gemv_min_ops() {
         output
             .par_chunks_mut(TRANSPOSED_GEMV_COL_CHUNK)
             .enumerate()
@@ -2760,7 +2818,7 @@ fn gemv_q6_k_f32_transposed(
         });
     }
 
-    if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
+    if rows.saturating_mul(cols) >= parallel_gemv_min_ops() {
         output
             .par_chunks_mut(TRANSPOSED_GEMV_COL_CHUNK)
             .enumerate()
@@ -2963,7 +3021,7 @@ fn gemv_q8_0_f32_transposed(
         });
     }
 
-    if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
+    if rows.saturating_mul(cols) >= parallel_gemv_min_ops() {
         output
             .par_chunks_mut(TRANSPOSED_GEMV_COL_CHUNK)
             .enumerate()
@@ -3246,8 +3304,7 @@ fn choose_tensor_parallel_shard_count(shared_dim: usize) -> usize {
     if shared_dim < MIN_SHARED_DIM_FOR_TP {
         return 1;
     }
-    let max_threads = std::thread::available_parallelism().map_or(1, usize::from);
-    let max_shards = max_threads.min(8).min(shared_dim);
+    let max_shards = hardware::global_max_parallel_shards().min(shared_dim);
     for shards in (2..=max_shards).rev() {
         if shared_dim.is_multiple_of(shards) {
             return shards;
@@ -3339,7 +3396,7 @@ pub fn gemm_i4(
 
 fn gemv_f32_cpu(matrix: &[f32], cols: usize, vector: &[f32], output: &mut [f32]) {
     let rows = output.len();
-    if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
+    if rows.saturating_mul(cols) >= parallel_gemv_min_ops() {
         matrix
             .par_chunks_exact(cols)
             .zip(output.par_iter_mut())
@@ -4134,6 +4191,64 @@ mod tests {
             assert!(
                 (actual - reference).abs() <= 1e-4 * (1.0 + reference.abs()),
                 "batched q4_k gemm value {actual} diverged from repeated gemv {reference}"
+            );
+        }
+    }
+
+    /// Smoke: batch=4 batched GEMM must match four independent batch=1 GEMVs.
+    #[test]
+    fn gemm_quantized_f32_batch4_matches_batch1_accumulation() {
+        let rows = 3;
+        let blocks_per_row = 2;
+        let cols = blocks_per_row * QK_K;
+        let batch = 4;
+        let mut weights = vec![0_u8; rows * blocks_per_row * BLOCK_Q4_K_SIZE];
+        for (bi, block) in weights.chunks_exact_mut(BLOCK_Q4_K_SIZE).enumerate() {
+            block[0] = 0x00;
+            block[1] = 0x34;
+            block[2] = 0x00;
+            block[3] = 0x28;
+            for (i, scale) in block[4..16].iter_mut().enumerate() {
+                *scale = ((bi + i) & 0x3f) as u8;
+            }
+            for (i, byte) in block[16..].iter_mut().enumerate() {
+                *byte = ((bi * 17 + i) & 0xff) as u8;
+            }
+        }
+        let inputs: Vec<f32> = (0..batch * cols)
+            .map(|i| (i as f32 * 0.02).sin() * 0.5)
+            .collect();
+
+        let mut batched = vec![0.0_f32; batch * rows];
+        gemm_quantized_f32(
+            GgufQuantizationType::Q4_K_M,
+            &weights,
+            rows,
+            cols,
+            &inputs,
+            &mut batched,
+            batch,
+        )
+        .expect("batch-4 gemm");
+
+        let mut reference = vec![0.0_f32; batch * rows];
+        for token in 0..batch {
+            gemv_quantized_f32(
+                GgufQuantizationType::Q4_K_M,
+                &weights,
+                rows,
+                cols,
+                &inputs[token * cols..(token + 1) * cols],
+                &mut reference[token * rows..(token + 1) * rows],
+            )
+            .expect("batch-1 gemv");
+        }
+
+        const EPS: f32 = 1e-4;
+        for (actual, expected) in batched.iter().zip(reference.iter()) {
+            assert!(
+                (actual - expected).abs() <= EPS * (1.0 + expected.abs()),
+                "batch=4 value {actual} diverged from batch=1 reference {expected}"
             );
         }
     }

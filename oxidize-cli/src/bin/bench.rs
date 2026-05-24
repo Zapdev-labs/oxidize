@@ -1,5 +1,6 @@
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches, Parser, ValueEnum};
 use oxidize_core::dflash::{DFlashConfig, DFlashDraftModel, DFlashKvLayerCache};
+use oxidize_core::hardware::{HardwareTier, InferenceOverrides, ResolvedInference};
 use oxidize_core::inference::{InferenceConfig, InferenceModel};
 use oxidize_core::layer_wise::LayerWiseModel;
 use oxidize_core::model::{Model, Session};
@@ -28,10 +29,38 @@ struct Args {
     verbose: bool,
     #[arg(long, default_value_t = false)]
     random_weights: bool,
+    /// Hardware profile tier for consistent benchmarking across machines.
+    #[arg(long, value_enum)]
+    hardware_tier: Option<BenchHardwareTier>,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+enum BenchHardwareTier {
+    Auto,
+    Low,
+    Mid,
+    High,
+}
+
+impl From<BenchHardwareTier> for HardwareTier {
+    fn from(value: BenchHardwareTier) -> Self {
+        match value {
+            BenchHardwareTier::Auto => Self::Auto,
+            BenchHardwareTier::Low => Self::Low,
+            BenchHardwareTier::Mid => Self::Mid,
+            BenchHardwareTier::High => Self::High,
+        }
+    }
 }
 
 fn main() {
-    let args = Args::parse();
+    let matches = Args::command().get_matches();
+    let args = Args::from_arg_matches(&matches).expect("validated bench arguments");
+    if let Some(tier) = args.hardware_tier {
+        let inference = ResolvedInference::resolve(tier.into(), InferenceOverrides::default());
+        inference.apply_runtime(false);
+        println!("{}", inference.profile.summary_line());
+    }
 
     println!("=== Oxidize DFlash Benchmark ===\n");
 
@@ -136,8 +165,15 @@ fn main() {
         println!();
 
         if args.engine == "inference" || args.engine == "layerwise" {
-            let inference_config =
+            let mut inference_config =
                 inference_config_from_dflash(&config, context_length, key_value_head_dim);
+            if let Some(tier) = args.hardware_tier {
+                let hw = ResolvedInference::resolve(tier.into(), InferenceOverrides::default());
+                if let Some(ctx) = hw.ctx_size {
+                    inference_config.context_size = ctx;
+                }
+                inference_config.kv_cache_dtype = hw.kv_cache_dtype;
+            }
             if args.engine == "inference" {
                 let mut model = InferenceModel::load_from_gguf(&mapped, inference_config, true)
                     .expect("Failed to load inference GGUF model");

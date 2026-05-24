@@ -335,10 +335,7 @@ pub fn quantize_mixed_scalar(
         offset += layer_input_len;
     }
 
-    let thread_count = std::thread::available_parallelism()
-        .map(usize::from)
-        .unwrap_or(1)
-        .min(plans.len());
+    let thread_count = crate::hardware::rayon_thread_count().min(plans.len());
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(thread_count.max(1))
         .build()

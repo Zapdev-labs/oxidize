@@ -31,6 +31,8 @@ pub use backend::ComputeBackend;
 pub mod advanced_features;
 #[path = "util/benchmark_suite.rs"]
 pub mod benchmark_suite;
+#[path = "util/hardware.rs"]
+pub mod hardware;
 #[path = "format/conversion.rs"]
 pub mod conversion;
 #[path = "compute/cpu_kernels.rs"]
