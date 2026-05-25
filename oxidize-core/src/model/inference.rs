@@ -2005,7 +2005,10 @@ impl Model for InferenceModel {
         }
 
         let start_pos = session.consumed_tokens();
-        let logits = if tokens.len() > 1 && self.layers_supported_for_batched() {
+        let logits = if tokens.len() > 1
+            && self.config.kv_cache_dtype == DType::F32
+            && self.layers_supported_for_batched()
+        {
             // Prefill the prompt in one batched pass so every weight matmul is a
             // GEMM (decode-once per weight block) rather than `tokens.len()`
             // separate GEMVs. Intermediate logits are discarded so only the
@@ -2188,15 +2191,10 @@ mod tests {
             split
                 .run_layer_range_in_workspace(pos, k..l)
                 .expect("tail layers ok");
-            let split_logits = split
-                .final_head_from_workspace()
-                .expect("final head ok");
+            let split_logits = split.final_head_from_workspace().expect("final head ok");
             assert_eq!(full.len(), split_logits.len());
             for (i, (a, b)) in full.iter().zip(split_logits.iter()).enumerate() {
-                assert!(
-                    (a - b).abs() < 1e-4,
-                    "pos={pos} idx={i} full={a} split={b}"
-                );
+                assert!((a - b).abs() < 1e-4, "pos={pos} idx={i} full={a} split={b}");
             }
         }
     }

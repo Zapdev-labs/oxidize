@@ -12,6 +12,7 @@ pub enum Backend {
     /// macOS only
     Mlx,
     Cuda,
+    Vulkan,
 }
 
 impl Backend {
@@ -21,6 +22,7 @@ impl Backend {
             Backend::Metal => oxidize_core::backend::Backend::Metal,
             Backend::Mlx => oxidize_core::backend::Backend::Mlx,
             Backend::Cuda => oxidize_core::backend::Backend::Cuda,
+            Backend::Vulkan => oxidize_core::backend::Backend::Vulkan,
         }
     }
 }
@@ -89,6 +91,10 @@ pub struct Args {
     /// Port for the mesh libp2p listener (0 = ephemeral).
     #[arg(long, default_value_t = 0)]
     pub mesh_port: u16,
+    /// External GGUF file that contains the tokenizer metadata.
+    /// Useful for draft models (e.g. DFlash) that do not embed a tokenizer.
+    #[arg(long)]
+    pub tokenizer_model: Option<PathBuf>,
 }
 
 #[cfg(test)]

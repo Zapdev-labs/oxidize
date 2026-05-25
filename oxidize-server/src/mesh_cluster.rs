@@ -57,6 +57,12 @@ impl MeshClusterState {
     }
 }
 
+impl Default for MeshClusterState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Mesh chat completions request (same shape as standard OpenAI request).
 #[derive(Debug, Deserialize)]
 pub struct MeshChatRequest {

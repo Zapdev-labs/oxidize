@@ -1,11 +1,6 @@
 //! Request/response tracing middleware.
 
-use axum::{
-    extract::Request,
-    http::StatusCode,
-    middleware::Next,
-    response::Response,
-};
+use axum::{extract::Request, http::StatusCode, middleware::Next, response::Response};
 
 pub async fn log_request_response(request: Request, next: Next) -> Response {
     let method = request.method().clone();

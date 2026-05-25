@@ -21,8 +21,8 @@ use crate::routes::responses::{
     generation_error_response, model_not_found, validate_candidate_count,
 };
 use crate::runtime::generate::{
-    GenerationError, GenerationRequest, generate_text,
-    generate_with_scheduler_blocking, generate_with_scheduler_streaming_blocking,
+    GenerationError, GenerationRequest, generate_text, generate_with_scheduler_blocking,
+    generate_with_scheduler_streaming_blocking,
 };
 use crate::schema::{CompletionRequest, ResponseFormat, StopSequences};
 

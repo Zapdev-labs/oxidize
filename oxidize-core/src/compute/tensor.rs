@@ -1294,7 +1294,7 @@ unsafe fn q4_k_q8_k_row_dot_avx2(row: &[u8], blocks_per_row: usize, q8k: &[u8]) 
         let scales = unsafe { std::slice::from_raw_parts(w_ptr.add(4), 12) };
         let qs = unsafe { w_ptr.add(16) };
         let q8 = unsafe { q8_ptr.add(4) };
-        let bsums_ptr = unsafe { q8_ptr.add(4 + QK_K) as *const i16 };
+        let bsums = unsafe { q8_ptr.add(4 + QK_K) };
 
         // Single vector accumulator across all 8 sub-groups → 1 hsum per block.
         let mut vec_pos = _mm256_setzero_si256();
@@ -1318,10 +1318,10 @@ unsafe fn q4_k_q8_k_row_dot_avx2(row: &[u8], blocks_per_row: usize, q8k: &[u8]) 
             vec_pos = _mm256_add_epi32(vec_pos, _mm256_mullo_epi32(p32_low, s1_v));
             vec_pos = _mm256_add_epi32(vec_pos, _mm256_mullo_epi32(p32_high, s2_v));
 
-            let bs1 = unsafe { *bsums_ptr.add(g1 * 2) } as i32
-                + unsafe { *bsums_ptr.add(g1 * 2 + 1) } as i32;
-            let bs2 = unsafe { *bsums_ptr.add(g2 * 2) } as i32
-                + unsafe { *bsums_ptr.add(g2 * 2 + 1) } as i32;
+            let bs1 = unsafe { read_q8_k_bsum(bsums, g1 * 2) } as i32
+                + unsafe { read_q8_k_bsum(bsums, g1 * 2 + 1) } as i32;
+            let bs2 = unsafe { read_q8_k_bsum(bsums, g2 * 2) } as i32
+                + unsafe { read_q8_k_bsum(bsums, g2 * 2 + 1) } as i32;
             min_acc += ms1 as i32 * bs1;
             min_acc += ms2 as i32 * bs2;
         }
@@ -1384,7 +1384,7 @@ unsafe fn q4_k_q8_k_row_dot_chunk_avx2(
             _mm256_set1_epi32(g_scales[7]),
         ];
 
-        for token in 0..token_count {
+        for (token, out_value) in out.iter_mut().enumerate().take(token_count) {
             let q8_base = q8_panel
                 .as_ptr()
                 .wrapping_add((token_start + token) * q8_stride + block_idx * BLOCK_Q8_K_BYTES);
@@ -1395,7 +1395,7 @@ unsafe fn q4_k_q8_k_row_dot_chunk_avx2(
                 unsafe { *q8_base.add(3) },
             ]);
             let q8 = unsafe { q8_base.add(4) };
-            let bsums_ptr = unsafe { q8_base.add(4 + QK_K) as *const i16 };
+            let bsums = unsafe { q8_base.add(4 + QK_K) };
 
             // Single vector accumulator across all 8 groups → 1 hsum per block.
             let mut vec_pos = _mm256_setzero_si256();
@@ -1418,19 +1418,24 @@ unsafe fn q4_k_q8_k_row_dot_chunk_avx2(
             // Min correction: scalar over 8 groups is cheap, but use the
             // precomputed bsums directly as i16.
             let mut min: i32 = 0;
-            for g in 0..8 {
-                let bs = unsafe { *bsums_ptr.add(g * 2) } as i32
-                    + unsafe { *bsums_ptr.add(g * 2 + 1) } as i32;
-                min += g_min_scales[g] * bs;
+            for (g, min_scale) in g_min_scales.iter().enumerate() {
+                let bs = unsafe { read_q8_k_bsum(bsums, g * 2) } as i32
+                    + unsafe { read_q8_k_bsum(bsums, g * 2 + 1) } as i32;
+                min += min_scale * bs;
             }
 
             let d_scale = d_w * d_q8;
             let dmin_scale = dmin_w * d_q8;
-            out[token] += d_scale * pos as f32 - dmin_scale * min as f32;
+            *out_value += d_scale * pos as f32 - dmin_scale * min as f32;
         }
     }
 }
 
+#[inline]
+unsafe fn read_q8_k_bsum(bsums: *const u8, index: usize) -> i16 {
+    let ptr = unsafe { bsums.add(index * 2) };
+    i16::from_le_bytes([unsafe { *ptr }, unsafe { *ptr.add(1) }])
+}
 
 /// Horizontal sum of 8 packed int32 values.
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]

@@ -17,8 +17,12 @@ use crate::logging::log_request_response;
 use crate::mesh_cluster::MeshClusterState;
 use crate::openapi::openapi;
 use crate::routes::{
-    chat::chat_completions, completions::completions, embeddings::embeddings,
-    health::{healthz, livez, readyz}, mesh::mesh_chat_completions_handler, models::models,
+    chat::chat_completions,
+    completions::completions,
+    embeddings::embeddings,
+    health::{healthz, livez, readyz},
+    mesh::mesh_chat_completions_handler,
+    models::models,
 };
 use crate::runtime::model::ModelRuntime;
 use crate::runtime::paged::PagedModelRuntime;

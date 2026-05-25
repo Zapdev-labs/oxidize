@@ -50,6 +50,104 @@ impl DFlashConfig {
         Self::default()
     }
 
+    /// Build a DFlashConfig from GGUF metadata keys.
+    pub fn from_gguf(mapped: &MappedGgufFile) -> Self {
+        use crate::gguf::GgufMetadataValue;
+        let metadata = &mapped.parsed().metadata;
+        let arch = mapped.parsed().architecture().unwrap_or("dflash-draft");
+        let arch_key = |suffix: &str| format!("{arch}.{suffix}");
+        let arch_u32 = |suffix: &str| {
+            metadata.get(&arch_key(suffix)).and_then(|v| match v {
+                GgufMetadataValue::Uint8(x) => Some(*x as u32),
+                GgufMetadataValue::Uint16(x) => Some(*x as u32),
+                GgufMetadataValue::Uint32(x) => Some(*x),
+                GgufMetadataValue::Uint64(x) => (*x).try_into().ok(),
+                GgufMetadataValue::Int8(x) if *x >= 0 => Some(*x as u32),
+                GgufMetadataValue::Int16(x) if *x >= 0 => Some(*x as u32),
+                GgufMetadataValue::Int32(x) if *x >= 0 => Some(*x as u32),
+                GgufMetadataValue::Int64(x) if *x >= 0 => (*x).try_into().ok(),
+                _ => None,
+            })
+        };
+        let arch_f32 = |suffix: &str| {
+            metadata.get(&arch_key(suffix)).and_then(|v| match v {
+                GgufMetadataValue::Float32(x) => Some(*x),
+                GgufMetadataValue::Float64(x) => Some(*x as f32),
+                GgufMetadataValue::Int8(x) => Some(*x as f32),
+                GgufMetadataValue::Int16(x) => Some(*x as f32),
+                GgufMetadataValue::Int32(x) => Some(*x as f32),
+                GgufMetadataValue::Int64(x) => Some(*x as f32),
+                GgufMetadataValue::Uint8(x) => Some(*x as f32),
+                GgufMetadataValue::Uint16(x) => Some(*x as f32),
+                GgufMetadataValue::Uint32(x) => Some(*x as f32),
+                GgufMetadataValue::Uint64(x) => Some(*x as f32),
+                _ => None,
+            })
+        };
+
+        let hidden_size = arch_u32("hidden_size")
+            .or_else(|| arch_u32("embedding_length"))
+            .unwrap_or(2048) as usize;
+        let num_hidden_layers = arch_u32("num_hidden_layers")
+            .or_else(|| arch_u32("block_count"))
+            .unwrap_or(8) as usize;
+        let num_target_layers =
+            arch_u32("num_target_layers").unwrap_or(num_hidden_layers as u32) as usize;
+        let block_size = arch_u32("block_size").unwrap_or(16) as usize;
+        let mask_token_id = arch_u32("mask_token_id").unwrap_or(151665);
+        let vocab_size = arch_u32("vocab_size")
+            .or_else(|| arch_u32("n_target_features"))
+            .unwrap_or(248320) as usize;
+        let num_attention_heads = arch_u32("num_attention_heads")
+            .or_else(|| arch_u32("attention.head_count"))
+            .unwrap_or(32) as usize;
+        let num_key_value_heads = arch_u32("num_key_value_heads")
+            .or_else(|| arch_u32("attention.head_count_kv"))
+            .unwrap_or(8) as usize;
+        let intermediate_size = arch_u32("intermediate_size")
+            .or_else(|| arch_u32("feed_forward_length"))
+            .unwrap_or(8192) as usize;
+        let rms_norm_eps = arch_f32("rms_norm_eps")
+            .or_else(|| arch_f32("attention.layer_norm_rms_epsilon"))
+            .unwrap_or(1e-5);
+        let rope_theta = arch_f32("rope_theta")
+            .or_else(|| arch_f32("rope.freq_base"))
+            .unwrap_or(10000.0);
+
+        let target_layer_ids = metadata
+            .get(&arch_key("target_layer_ids"))
+            .and_then(|v| match v {
+                GgufMetadataValue::Array(arr) => arr
+                    .values
+                    .iter()
+                    .map(|elem| match elem {
+                        GgufMetadataValue::Int32(x) => Some(*x as usize),
+                        GgufMetadataValue::Int64(x) => Some(*x as usize),
+                        GgufMetadataValue::Uint32(x) => Some(*x as usize),
+                        GgufMetadataValue::Uint64(x) => Some(*x as usize),
+                        _ => None,
+                    })
+                    .collect::<Option<Vec<_>>>(),
+                _ => None,
+            })
+            .unwrap_or_else(|| (0..num_target_layers).collect());
+
+        Self {
+            hidden_size,
+            num_hidden_layers,
+            num_target_layers,
+            block_size,
+            target_layer_ids,
+            mask_token_id,
+            vocab_size,
+            num_attention_heads,
+            num_key_value_heads,
+            intermediate_size,
+            rms_norm_eps,
+            rope_theta,
+        }
+    }
+
     pub fn head_dim(&self) -> usize {
         self.hidden_size / self.num_attention_heads
     }
@@ -167,6 +265,42 @@ impl F32Weight {
             // C[batch × out_dim] = A[batch × in_dim] · B[in_dim × out_dim].
             gemm_f32(inputs, batch, self.cols, &self.data, self.rows, outputs)
                 .map_err(|e| format!("{:?}", e))
+        }
+    }
+
+    pub fn row(&self, row_idx: usize, output: &mut [f32]) -> Result<(), String> {
+        if let Some(q) = &self.quant {
+            if row_idx >= q.out_dim || output.len() != q.in_dim {
+                return Err(format!(
+                    "row bounds mismatch: row={row_idx}, out_dim={}, output_len={}, in_dim={}",
+                    q.out_dim,
+                    output.len(),
+                    q.in_dim
+                ));
+            }
+            let row_values = q.in_dim;
+            let row_bytes = quantized_size(q.qtype, row_values).map_err(|e| format!("{e:?}"))?;
+            let start = row_idx
+                .checked_mul(row_bytes)
+                .ok_or_else(|| "quantized row offset overflow".to_string())?;
+            let end = start
+                .checked_add(row_bytes)
+                .ok_or_else(|| "quantized row end overflow".to_string())?;
+            if end > q.bytes.len() {
+                return Err("quantized row extends past tensor data".to_string());
+            }
+            dequantize_scalar(q.qtype, &q.bytes[start..end], output).map_err(|e| format!("{e:?}"))
+        } else {
+            if row_idx >= self.rows || output.len() != self.cols {
+                return Err(format!(
+                    "row bounds mismatch: row={row_idx}, rows={}, output_len={}, cols={}",
+                    self.rows,
+                    output.len(),
+                    self.cols
+                ));
+            }
+            output.copy_from_slice(&self.data[row_idx * self.cols..(row_idx + 1) * self.cols]);
+            Ok(())
         }
     }
 }
@@ -630,6 +764,16 @@ impl DFlashDraftModel {
             model.norm = data;
         }
 
+        let output = load_proj("lm_head.weight")?;
+        if output.is_loaded() {
+            model.output = output;
+        }
+
+        let tok_embeddings = load_proj("model.embed_tokens.weight")?;
+        if tok_embeddings.is_loaded() {
+            model.tok_embeddings = tok_embeddings;
+        }
+
         // Load layers using llama.cpp blk.N naming.
         for layer_idx in 0..config.num_hidden_layers {
             let prefix = format!("blk.{}", layer_idx);
@@ -694,10 +838,9 @@ impl DFlashDraftModel {
         let mut hidden = vec![0.0_f32; h];
 
         // Token embedding lookup.
-        if !self.tok_embeddings.data.is_empty() {
+        if self.tok_embeddings.is_loaded() {
             let idx = (token as usize).min(self.config.vocab_size - 1);
-            let emb = &self.tok_embeddings.data[idx * h..(idx + 1) * h];
-            hidden.copy_from_slice(emb);
+            self.tok_embeddings.row(idx, &mut hidden)?;
         }
 
         // If target_hidden provided, fuse via FC layer.
@@ -1189,7 +1332,10 @@ impl DFlashDraftModel {
     /// Compute logits from hidden state.
     pub fn logits(&self, hidden: &[f32]) -> Result<Vec<f32>, String> {
         if !self.output.is_loaded() {
-            return Ok(Vec::new());
+            return Err(
+                "DFlash draft model is missing an output projection/logits head; it cannot generate standalone tokens"
+                    .to_string(),
+            );
         }
         let mut logits = vec![0.0_f32; self.config.vocab_size];
         self.output.gemv(hidden, &mut logits)?;

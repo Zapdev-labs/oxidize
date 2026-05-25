@@ -164,10 +164,16 @@ enum KvStorage {
     },
     /// TurboQuant INT8: per-block (32 channels) symmetric signed scale,
     /// stored as `q + 127` so the on-disk byte is unsigned.
-    TurboQ8 { data: Vec<u8>, scales: Vec<f32> },
+    TurboQ8 {
+        data: Vec<u8>,
+        scales: Vec<f32>,
+    },
     /// TurboQuant INT4: per-block (32 channels) symmetric signed scale,
     /// two 4-bit values packed per byte. Each nibble stores `q + 7`.
-    TurboQ4 { data: Vec<u8>, scales: Vec<f32> },
+    TurboQ4 {
+        data: Vec<u8>,
+        scales: Vec<f32>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -881,24 +887,10 @@ fn write_storage(
             }
         }
         KvStorage::TurboQ8 { data, scales } => {
-            write_turboquant_token::<8>(
-                data,
-                scales,
-                config,
-                range.start,
-                token_index,
-                src,
-            );
+            write_turboquant_token::<8>(data, scales, config, range.start, token_index, src);
         }
         KvStorage::TurboQ4 { data, scales } => {
-            write_turboquant_token::<4>(
-                data,
-                scales,
-                config,
-                range.start,
-                token_index,
-                src,
-            );
+            write_turboquant_token::<4>(data, scales, config, range.start, token_index, src);
         }
     }
 }
@@ -934,7 +926,11 @@ fn write_turboquant_token<const BITS: u8>(
         for &v in chunk {
             max_abs = max_abs.max(v.abs());
         }
-        let scale = if max_abs > 0.0 { max_abs / max_val } else { 1.0 };
+        let scale = if max_abs > 0.0 {
+            max_abs / max_val
+        } else {
+            1.0
+        };
         scales[scale_off + b] = scale;
 
         if BITS == 4 {
@@ -2330,8 +2326,8 @@ mod tests {
         let mut out = vec![0.0_f32; token_size];
         cache.get_key(0, 0, &mut out).expect("get");
 
-        let small_region_avg: f32 = out[32..].iter().map(|v| v.abs()).sum::<f32>()
-            / (token_size - 32) as f32;
+        let small_region_avg: f32 =
+            out[32..].iter().map(|v| v.abs()).sum::<f32>() / (token_size - 32) as f32;
         assert!(
             small_region_avg > 0.01,
             "per-block scales should preserve the small region; got |avg|={}",

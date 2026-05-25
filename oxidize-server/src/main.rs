@@ -9,8 +9,7 @@ use clap::Parser;
 
 use oxidize_server::{
     AppState, Args, AuthConfig, BatchMode, ContinuousBatcher, RequestLimitConfig, RequestLimiter,
-    build_app_with_state, build_paged_runtime, load_model_runtime,
-    mesh_cluster::MeshClusterState,
+    build_app_with_state, build_paged_runtime, load_model_runtime, mesh_cluster::MeshClusterState,
 };
 
 #[tokio::main]
@@ -32,8 +31,13 @@ async fn main() {
         "starting oxidize-server"
     );
 
-    let model = load_model_runtime(&args)
-        .unwrap_or_else(|error| panic!("failed to initialize model runtime: {error}"));
+    let model = match load_model_runtime(&args) {
+        Ok(m) => m,
+        Err(error) => {
+            tracing::error!("failed to initialize model runtime: {error}");
+            std::process::exit(1);
+        }
+    };
     let api_key = std::env::var("OXIDIZE_API_KEY")
         .ok()
         .filter(|value| !value.is_empty());
@@ -55,8 +59,7 @@ async fn main() {
         let mesh_handle = state.mesh_handle.clone();
         let port = args.mesh_port;
         tokio::spawn(async move {
-            let result =
-                oxidize_core::mesh::run_mesh_node(port, Some(is_master), None, None).await;
+            let result = oxidize_core::mesh::run_mesh_node(port, Some(is_master), None, None).await;
             if let Err(ref e) = result {
                 tracing::error!("mesh node error: {}", e);
             }

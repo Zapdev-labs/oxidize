@@ -52,6 +52,10 @@ pub fn build_paged_runtime(args: &Args, runtime: Arc<ModelRuntime>) -> Arc<Paged
                 let cfg = m.config();
                 (cfg.num_key_value_heads, cfg.kv_head_dim())
             }
+            LoadedModel::DFlash(m) => {
+                let cfg = &m.config;
+                (cfg.num_key_value_heads, cfg.kv_head_dim())
+            }
             #[cfg(target_os = "macos")]
             LoadedModel::Mlx(m) => {
                 let cfg = m.config();

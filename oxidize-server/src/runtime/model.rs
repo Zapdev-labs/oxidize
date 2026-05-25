@@ -10,12 +10,15 @@ use std::sync::Mutex as StdMutex;
 use std::time::Instant;
 
 use oxidize_core::{
+    dflash::{DFlashConfig, DFlashDraftModel},
     gguf::{GgufMetadataValue, MappedGgufFile},
     inference::{InferenceConfig, InferenceModel},
     layer_wise::LayerWiseModel,
     model::{Model, ModelError, Session, Token},
     model_loader::{GgufModelLoader, ModelLoader},
-    tokenizer::{LoadedTokenizer, load_tokenizer_from_gguf_metadata},
+    tokenizer::{
+        LoadedTokenizer, load_tokenizer_from_gguf_file, load_tokenizer_from_gguf_metadata,
+    },
 };
 
 use crate::cli::Args;
@@ -40,6 +43,7 @@ pub struct GenerationDefaults {
 pub enum LoadedModel {
     Inference(Box<InferenceModel>),
     LayerWise(Box<LayerWiseModel>),
+    DFlash(Box<DFlashDraftModel>),
     #[cfg(target_os = "macos")]
     Mlx(Box<oxidize_core::mlx_inference::MlxInferenceModel>),
     #[cfg(not(target_os = "macos"))]
@@ -52,6 +56,7 @@ impl Model for LoadedModel {
         match self {
             Self::Inference(model) => model.forward(tokens, session),
             Self::LayerWise(model) => model.forward(tokens, session),
+            Self::DFlash(model) => model.forward(tokens, session),
             #[cfg(target_os = "macos")]
             Self::Mlx(model) => model.forward(tokens, session),
             #[cfg(not(target_os = "macos"))]
@@ -63,6 +68,7 @@ impl Model for LoadedModel {
         match self {
             Self::Inference(model) => model.vocab_size(),
             Self::LayerWise(model) => model.vocab_size(),
+            Self::DFlash(model) => model.vocab_size(),
             #[cfg(target_os = "macos")]
             Self::Mlx(model) => model.vocab_size(),
             #[cfg(not(target_os = "macos"))]
@@ -74,6 +80,7 @@ impl Model for LoadedModel {
         match self {
             Self::Inference(model) => model.context_size(),
             Self::LayerWise(model) => model.context_size(),
+            Self::DFlash(model) => model.context_size(),
             #[cfg(target_os = "macos")]
             Self::Mlx(model) => model.context_size(),
             #[cfg(not(target_os = "macos"))]
@@ -85,6 +92,7 @@ impl Model for LoadedModel {
         match self {
             Self::Inference(model) => model.layer_count(),
             Self::LayerWise(model) => model.layer_count(),
+            Self::DFlash(model) => model.layer_count(),
             #[cfg(target_os = "macos")]
             Self::Mlx(model) => model.layer_count(),
             #[cfg(not(target_os = "macos"))]
@@ -96,6 +104,7 @@ impl Model for LoadedModel {
         match self {
             Self::Inference(model) => model.rewind_to(consumed_tokens),
             Self::LayerWise(model) => model.rewind_to(consumed_tokens),
+            Self::DFlash(model) => model.rewind_to(consumed_tokens),
             #[cfg(target_os = "macos")]
             Self::Mlx(model) => model.rewind_to(consumed_tokens),
             #[cfg(not(target_os = "macos"))]
@@ -124,14 +133,21 @@ pub fn load_model_runtime(args: &Args) -> Result<Option<Arc<ModelRuntime>>, Stri
         .map_err(|error| format!("failed to load model: {error:?}"))?;
     optimize_mapped_model_memory(&mapped, args);
     let metadata = &mapped.parsed().metadata;
+    let is_dflash = mapped.parsed().architecture() == Some("dflash-draft");
     if args.ctx_size == Some(0) {
         return Err("invalid --ctx-size: must be greater than 0".into());
     }
-    let mut config = inference_config_from_gguf(&mapped, args.ctx_size);
-    if args.turboquant_kv {
-        config.kv_quantization = oxidize_core::kv_cache::KvQuantization::TurboQuant;
-    }
+
+    // Try to load tokenizer from the model GGUF first, then fall back to an
+    // external tokenizer model (e.g. the target model paired with a draft).
     let tokenizer = load_tokenizer_from_gguf_metadata(metadata)
+        .or_else(|_| {
+            load_tokenizer_from_gguf_file(args.tokenizer_model.as_deref()).and_then(|opt| {
+                opt.ok_or_else(|| {
+                    "external tokenizer model did not contain tokenizer metadata".to_string()
+                })
+            })
+        })
         .map_err(|error| format!("failed to load tokenizer: {error:?}"))?;
     let chat_template = metadata
         .get("tokenizer.chat_template")
@@ -140,12 +156,42 @@ pub fn load_model_runtime(args: &Args) -> Result<Option<Arc<ModelRuntime>>, Stri
             GgufMetadataValue::String(template) => Some(template.clone()),
             _ => None,
         });
-    let model = if args.layer_wise {
+
+    let model = if is_dflash {
+        let has_output_projection = mapped
+            .mapped_tensor_infos()
+            .iter()
+            .any(|tensor| matches!(tensor.name.as_str(), "lm_head.weight" | "output.weight"));
+        if !has_output_projection {
+            return Err(
+                "DFlash draft GGUF cannot be used as a standalone generation model: missing output projection/logits head. Use a full target model for the API server."
+                    .to_string(),
+            );
+        }
+        let dflash_config = DFlashConfig::from_gguf(&mapped);
+        let dflash = DFlashDraftModel::load_from_gguf(&mapped, dflash_config)
+            .map_err(|error| format!("failed to load DFlash model: {error}"))?;
+        if !dflash.output.is_loaded() {
+            return Err(
+                "DFlash draft GGUF cannot be used as a standalone generation model: missing output projection/logits head. Use a full target model for the API server."
+                    .to_string(),
+            );
+        }
+        LoadedModel::DFlash(Box::new(dflash))
+    } else if args.layer_wise {
+        let mut config = inference_config_from_gguf(&mapped, args);
+        if args.turboquant_kv {
+            config.kv_quantization = oxidize_core::kv_cache::KvQuantization::TurboQuant;
+        }
         LoadedModel::LayerWise(Box::new(
             LayerWiseModel::load_from_gguf(&mapped, config, args.layer_cache)
                 .map_err(|error| format!("failed to load layer-wise model: {error}"))?,
         ))
     } else if effective_backend == oxidize_core::backend::Backend::Mlx {
+        let mut config = inference_config_from_gguf(&mapped, args);
+        if args.turboquant_kv {
+            config.kv_quantization = oxidize_core::kv_cache::KvQuantization::TurboQuant;
+        }
         #[cfg(target_os = "macos")]
         {
             match oxidize_core::mlx_inference::MlxInferenceModel::load_from_gguf(&mapped, config) {
@@ -171,6 +217,10 @@ pub fn load_model_runtime(args: &Args) -> Result<Option<Arc<ModelRuntime>>, Stri
             ))
         }
     } else {
+        let mut config = inference_config_from_gguf(&mapped, args);
+        if args.turboquant_kv {
+            config.kv_quantization = oxidize_core::kv_cache::KvQuantization::TurboQuant;
+        }
         LoadedModel::Inference(Box::new(
             InferenceModel::load_from_gguf(&mapped, config, args.cpu_optimized)
                 .map_err(|error| format!("failed to load model weights: {error}"))?,
@@ -224,10 +274,13 @@ fn optimize_mapped_model_memory(mapped: &MappedGgufFile, args: &Args) {
     }
 }
 
-fn inference_config_from_gguf(mapped: &MappedGgufFile, ctx_size: Option<usize>) -> InferenceConfig {
+fn inference_config_from_gguf(mapped: &MappedGgufFile, args: &Args) -> InferenceConfig {
     let mut config = InferenceConfig::from_gguf(mapped);
-    if let Some(ctx) = ctx_size {
+    if let Some(ctx) = args.ctx_size {
         config.context_size = ctx;
+    }
+    if args.cpu_optimized {
+        config.context_size = config.context_size.min(2048);
     }
     config
 }

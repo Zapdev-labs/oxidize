@@ -16,9 +16,10 @@ use oxidize_core::tensor::DType;
 use oxidize_core::tokenizer::{EncodeOptions, LoadedTokenizer, load_tokenizer_from_gguf_metadata};
 
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
-use std::process::{Command, ExitStatus};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::Arc;
 use std::task::Wake;
 use std::time::{Duration, Instant};
@@ -26,7 +27,7 @@ use std::time::{Duration, Instant};
 const PROFILE_CHILD_ENV: &str = "OXIDIZE_PROFILE_CHILD";
 
 #[derive(Debug, Parser)]
-#[command(name = "oxidize-cli")]
+#[command(name = "oxidize")]
 struct Args {
     #[arg(long, default_value = "hello")]
     prompt: String,
@@ -99,6 +100,198 @@ struct Args {
     /// Maximum tokens to generate in pipeline mode.
     #[arg(long, default_value_t = 64)]
     pipe_max_tokens: usize,
+    #[arg(long, hide = true, default_value_t = false)]
+    serve_api: bool,
+    #[arg(long, hide = true, default_value_t = false)]
+    api_only: bool,
+    #[arg(long, hide = true, default_value = "127.0.0.1")]
+    api_host: String,
+    #[arg(long, hide = true, default_value_t = 8080)]
+    api_port: u16,
+    /// External GGUF file that contains the tokenizer metadata.
+    /// Useful for draft models (e.g. DFlash) that do not embed a tokenizer.
+    #[arg(long)]
+    tokenizer_model: Option<PathBuf>,
+}
+
+fn print_run_help() {
+    println!(
+        "Usage: oxidize run <model> [prompt] [options]\n\n\
+         Models can be local .gguf files or Hugging Face GGUF repos.\n\n\
+         Examples:\n\
+           oxidize run ./models/model.gguf \"hello\"\n\
+           oxidize run Qwen/Qwen2.5-0.5B-Instruct-GGUF --file qwen2.5-0.5b-instruct-q4_k_m.gguf --chat\n\
+           oxidize run TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF \"write a haiku\" --max-tokens 128\n\n\
+         `run` also starts the OpenAI-compatible API server at http://127.0.0.1:8080.\n\
+         Common options: --chat, --prompt, --max-tokens, --temperature, --backend, --threads, --api-port"
+    );
+}
+
+fn resolve_model_spec(spec: &str, hf_file: Option<&str>) -> io::Result<PathBuf> {
+    let path = PathBuf::from(spec);
+    if path.exists() || !spec.contains('/') {
+        return Ok(path);
+    }
+
+    let api = hf_hub::api::sync::Api::new()
+        .map_err(|error| io::Error::other(format!("hugging face init failed: {error}")))?;
+    let repo = api.model(spec.to_owned());
+    let filename = if let Some(file) = hf_file {
+        file.to_owned()
+    } else {
+        let info = repo.info().map_err(|error| {
+            io::Error::other(format!("failed to inspect HF repo {spec}: {error}"))
+        })?;
+        let mut ggufs = info
+            .siblings
+            .into_iter()
+            .map(|sibling| sibling.rfilename)
+            .filter(|name| name.to_ascii_lowercase().ends_with(".gguf"))
+            .collect::<Vec<_>>();
+        ggufs.sort();
+        match ggufs.as_slice() {
+            [only] => only.clone(),
+            [] => {
+                return Err(io::Error::other(format!(
+                    "HF repo {spec} does not list any .gguf files"
+                )));
+            }
+            many => {
+                return Err(io::Error::other(format!(
+                    "HF repo {spec} has multiple .gguf files; rerun with --file <name>. Candidates:\n{}",
+                    many.iter()
+                        .take(25)
+                        .map(|name| format!("  {name}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                )));
+            }
+        }
+    };
+
+    eprintln!("downloading hf://{spec}/{filename}");
+    repo.get(&filename).map_err(|error| {
+        io::Error::other(format!(
+            "failed to download hf://{spec}/{filename}: {error}"
+        ))
+    })
+}
+
+fn has_flag(args: &[OsString], name: &str) -> bool {
+    args.iter()
+        .any(|arg| arg == name || arg.to_string_lossy().starts_with(&format!("{name}=")))
+}
+
+fn rewrite_run_args<I>(input: I) -> io::Result<Vec<OsString>>
+where
+    I: IntoIterator<Item = OsString>,
+{
+    let raw = input.into_iter().collect::<Vec<_>>();
+    if raw.get(1).and_then(|arg| arg.to_str()) != Some("run") {
+        return Ok(raw);
+    }
+    if raw.len() == 2
+        || matches!(
+            raw.get(2).and_then(|arg| arg.to_str()),
+            Some("-h" | "--help")
+        )
+    {
+        print_run_help();
+        std::process::exit(0);
+    }
+
+    let program = raw[0].clone();
+    let mut model: Option<String> = None;
+    let mut hf_file: Option<String> = None;
+    let mut prompt: Option<OsString> = None;
+    let mut rewritten = vec![program];
+    let mut args = raw.into_iter().skip(2).peekable();
+
+    while let Some(arg) = args.next() {
+        match arg.to_str() {
+            Some("--file") | Some("--hf-file") => {
+                let Some(file) = args.next() else {
+                    return Err(io::Error::other("--file requires a GGUF filename"));
+                };
+                hf_file = Some(file.to_string_lossy().into_owned());
+            }
+            Some(value) if value.starts_with("--file=") => {
+                hf_file = Some(value["--file=".len()..].to_owned());
+            }
+            Some(value) if value.starts_with("--hf-file=") => {
+                hf_file = Some(value["--hf-file=".len()..].to_owned());
+            }
+            Some("--api-host") => {
+                rewritten.push("--api-host".into());
+                let Some(value) = args.next() else {
+                    return Err(io::Error::other("--api-host requires a value"));
+                };
+                rewritten.push(value);
+            }
+            Some(value) if value.starts_with("--api-host=") => {
+                rewritten.push("--api-host".into());
+                rewritten.push(value["--api-host=".len()..].into());
+            }
+            Some("--api-port") => {
+                rewritten.push("--api-port".into());
+                let Some(value) = args.next() else {
+                    return Err(io::Error::other("--api-port requires a value"));
+                };
+                rewritten.push(value);
+            }
+            Some(value) if value.starts_with("--api-port=") => {
+                rewritten.push("--api-port".into());
+                rewritten.push(value["--api-port=".len()..].into());
+            }
+            Some(value) if !value.starts_with('-') && model.is_none() => {
+                model = Some(value.to_owned());
+            }
+            Some(value) if !value.starts_with('-') && prompt.is_none() => {
+                prompt = Some(arg);
+            }
+            Some(
+                "--prompt" | "--model" | "--backend" | "--n-gpu-layers" | "--gpus"
+                | "--parallelism" | "--lora" | "--profile" | "--profile-output" | "--max-tokens"
+                | "--temperature" | "--top-p" | "--top-k" | "--layer-cache" | "--ctx-size"
+                | "--threads" | "--kv-cache-dtype" | "--mesh-port" | "--pipe-peer"
+                | "--pipe-listen" | "--pipe-max-tokens" | "--tokenizer-model",
+            ) => {
+                rewritten.push(arg);
+                let Some(value) = args.next() else {
+                    return Err(io::Error::other("option requires a value"));
+                };
+                rewritten.push(value);
+            }
+            _ => rewritten.push(arg),
+        }
+    }
+
+    let Some(model) = model else {
+        return Err(io::Error::other(
+            "oxidize run requires a model name or local .gguf path",
+        ));
+    };
+    let model_path = resolve_model_spec(&model, hf_file.as_deref())?;
+    rewritten.push("--serve-api".into());
+    rewritten.push("--model".into());
+    rewritten.push(model_path.into_os_string());
+    if let Some(prompt) = prompt {
+        rewritten.push("--prompt".into());
+        rewritten.push(prompt);
+    } else {
+        rewritten.push("--api-only".into());
+    }
+
+    for flag in ["--cpu-optimized", "--mmap-prefetch", "--mmap-hugepages"] {
+        if !has_flag(&rewritten, flag) {
+            rewritten.push(flag.into());
+        }
+    }
+    if !has_flag(&rewritten, "--kv-cache-dtype") {
+        rewritten.push("--kv-cache-dtype".into());
+        rewritten.push("q8".into());
+    }
+    Ok(rewritten)
 }
 
 fn greeting(prompt: &str) -> String {
@@ -148,6 +341,16 @@ impl Backend {
             Backend::Mlx => oxidize_core::backend::Backend::Mlx,
             Backend::Cuda => oxidize_core::backend::Backend::Cuda,
             Backend::Vulkan => oxidize_core::backend::Backend::Vulkan,
+        }
+    }
+
+    fn as_arg(self) -> &'static str {
+        match self {
+            Backend::Cpu => "cpu",
+            Backend::Metal => "metal",
+            Backend::Mlx => "mlx",
+            Backend::Cuda => "cuda",
+            Backend::Vulkan => "vulkan",
         }
     }
 }
@@ -617,6 +820,67 @@ fn run_profiled_inference(profiler: Profiler, output: Option<&PathBuf>) -> io::R
     command.status()
 }
 
+fn server_binary_path() -> io::Result<PathBuf> {
+    let exe = std::env::current_exe()?;
+    let sibling = exe.with_file_name("oxidize-server");
+    if sibling.exists() {
+        return Ok(sibling);
+    }
+    Ok(PathBuf::from("oxidize-server"))
+}
+
+fn start_api_server(args: &Args) -> io::Result<Option<Child>> {
+    let Some(model_path) = args.model.as_ref() else {
+        return Ok(None);
+    };
+    let server = server_binary_path()?;
+    let mut command = Command::new(server);
+    command
+        .arg("--host")
+        .arg(&args.api_host)
+        .arg("--port")
+        .arg(args.api_port.to_string())
+        .arg("--model")
+        .arg(model_path)
+        .arg("--backend")
+        .arg(args.backend.as_arg())
+        .arg("--max-tokens")
+        .arg(args.max_tokens.to_string())
+        .arg("--temperature")
+        .arg(args.temperature.to_string())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+
+    if let Some(ctx_size) = args.ctx_size {
+        command.arg("--ctx-size").arg(ctx_size.to_string());
+    }
+    if args.cpu_optimized {
+        command.arg("--cpu-optimized");
+    }
+    if args.ram_offload {
+        command.arg("--ram-offload");
+    }
+    if args.mmap_prefetch {
+        command.arg("--mmap-prefetch");
+    }
+    if args.mmap_hugepages {
+        command.arg("--mmap-hugepages");
+    }
+    if args.layer_wise {
+        command.arg("--layer-wise");
+    }
+    if let Some(tokenizer_model) = &args.tokenizer_model {
+        command.arg("--tokenizer-model").arg(tokenizer_model);
+    }
+
+    let child = command.spawn()?;
+    eprintln!(
+        "api server: starting at http://{}:{} (OpenAI-compatible /v1/chat/completions)",
+        args.api_host, args.api_port
+    );
+    Ok(Some(child))
+}
+
 fn optimize_mapped_model_memory(mapped: &MappedGgufFile, args: &Args) {
     let apply_hints =
         args.cpu_optimized || args.ram_offload || args.mmap_prefetch || args.mmap_hugepages;
@@ -649,7 +913,17 @@ fn optimize_mapped_model_memory(mapped: &MappedGgufFile, args: &Args) {
 }
 
 fn main() {
-    let args = Args::parse();
+    let rewritten_args = match rewrite_run_args(std::env::args_os()) {
+        Ok(args) => args,
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+    };
+    let args = match Args::try_parse_from(rewritten_args) {
+        Ok(args) => args,
+        Err(error) => error.exit(),
+    };
     let (effective_backend, warning) = args.backend.to_core_backend().effective();
     if let Some(msg) = warning {
         eprintln!("warning: {msg}");
@@ -691,6 +965,29 @@ fn main() {
             }
         }
     }
+    let mut api_server = if args.serve_api {
+        match start_api_server(&args) {
+            Ok(child) => child,
+            Err(error) => {
+                eprintln!("failed to start API server: {error}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    if args.api_only {
+        match api_server.as_mut() {
+            Some(child) => match child.wait() {
+                Ok(status) => std::process::exit(status.code().unwrap_or(1)),
+                Err(error) => {
+                    eprintln!("api server failed: {error}");
+                    std::process::exit(1);
+                }
+            },
+            None => std::process::exit(1),
+        }
+    }
     if args.pipe_head {
         let model = match args.model.as_ref() {
             Some(m) => m.clone(),
@@ -706,8 +1003,7 @@ fn main() {
                 std::process::exit(1);
             }
         };
-        if let Err(e) =
-            pipeline::run_head(&model, &peer, &args.prompt, args.pipe_max_tokens, true)
+        if let Err(e) = pipeline::run_head(&model, &peer, &args.prompt, args.pipe_max_tokens, true)
         {
             eprintln!("pipeline head failed: {e}");
             std::process::exit(1);
@@ -802,13 +1098,7 @@ fn main() {
 
                 // Extract model config from GGUF metadata and run generation
                 let metadata = &mapped.parsed().metadata;
-                if mapped.parsed().architecture() == Some("dflash-draft") {
-                    eprintln!(
-                        "DFlash draft GGUF loaded successfully, but it is not a standalone text model: it has no token embeddings/lm_head. Use `oxidize-bench --model {}` to benchmark draft forward passes, or pair it with a target model for speculative decoding.",
-                        model_path.display()
-                    );
-                    return;
-                }
+                let is_dflash = mapped.parsed().architecture() == Some("dflash-draft");
                 if args.ctx_size == Some(0) {
                     eprintln!("invalid --ctx-size: must be greater than 0");
                     return;
@@ -816,8 +1106,7 @@ fn main() {
                 let mut config = InferenceConfig::from_gguf(&mapped);
                 config.kv_cache_dtype = args.kv_cache_dtype.dtype();
                 if args.turboquant {
-                    config.kv_quantization =
-                        oxidize_core::kv_cache::KvQuantization::TurboQuant;
+                    config.kv_quantization = oxidize_core::kv_cache::KvQuantization::TurboQuant;
                 }
                 if let Some(ctx) = args.ctx_size {
                     config.context_size = ctx;
@@ -825,8 +1114,23 @@ fn main() {
                 if args.cpu_optimized {
                     config.context_size = config.context_size.min(2048);
                 }
-                // Load tokenizer from GGUF metadata
-                let tokenizer = match load_tokenizer_from_gguf_metadata(metadata) {
+                // Load tokenizer from GGUF metadata, falling back to an external model.
+                let tokenizer = match load_tokenizer_from_gguf_metadata(metadata).or_else(|_| {
+                    oxidize_core::tokenizer::load_tokenizer_from_gguf_file(
+                        args.tokenizer_model.as_deref(),
+                    )
+                    .and_then(|opt| {
+                        opt.ok_or_else(|| {
+                            "external tokenizer model did not contain tokenizer metadata"
+                                .to_string()
+                        })
+                    })
+                    .map_err(|_e| {
+                        oxidize_core::tokenizer::TokenizerLoadError::MissingMetadata(
+                            "tokenizer.ggml.model",
+                        )
+                    })
+                }) {
                     Ok(t) => t,
                     Err(error) => {
                         eprintln!("failed to load tokenizer: {error:?}");
@@ -836,7 +1140,19 @@ fn main() {
 
                 let stdout = io::stdout();
                 let mut writer = stdout.lock();
-                let mut model: Box<dyn Model> = if args.layer_wise {
+                let mut model: Box<dyn Model> = if is_dflash {
+                    let dflash_config = oxidize_core::dflash::DFlashConfig::from_gguf(&mapped);
+                    match oxidize_core::dflash::DFlashDraftModel::load_from_gguf(
+                        &mapped,
+                        dflash_config,
+                    ) {
+                        Ok(m) => Box::new(m),
+                        Err(error) => {
+                            eprintln!("failed to load DFlash model: {error}");
+                            return;
+                        }
+                    }
+                } else if args.layer_wise {
                     match oxidize_core::layer_wise::LayerWiseModel::load_from_gguf(
                         &mapped,
                         config,
@@ -1412,6 +1728,66 @@ mod tests {
             .map(str::to_owned),
         );
         assert_eq!(result_equals, vec!["--prompt=ping"]);
+    }
+
+    #[test]
+    fn rewrites_run_command_to_model_flags() {
+        let args = rewrite_run_args(
+            ["oxidize", "run", "local.gguf", "hello", "--max-tokens", "7"]
+                .into_iter()
+                .map(OsString::from),
+        )
+        .expect("run args should rewrite");
+        assert!(args.contains(&OsString::from("--model")));
+        assert!(args.contains(&OsString::from("local.gguf")));
+        assert!(args.contains(&OsString::from("--serve-api")));
+        assert!(args.contains(&OsString::from("--prompt")));
+        assert!(args.contains(&OsString::from("hello")));
+        assert!(args.contains(&OsString::from("--max-tokens")));
+        assert!(args.contains(&OsString::from("7")));
+        assert!(args.contains(&OsString::from("--cpu-optimized")));
+        assert!(args.contains(&OsString::from("--mmap-prefetch")));
+        assert!(args.contains(&OsString::from("--mmap-hugepages")));
+        assert!(args.contains(&OsString::from("--kv-cache-dtype")));
+        assert!(args.contains(&OsString::from("q8")));
+    }
+
+    #[test]
+    fn run_rewrite_accepts_api_port() {
+        let args = rewrite_run_args(
+            ["oxidize", "run", "local.gguf", "--api-port", "3000"]
+                .into_iter()
+                .map(OsString::from),
+        )
+        .expect("run args should rewrite");
+        assert!(args.contains(&OsString::from("--api-port")));
+        assert!(args.contains(&OsString::from("3000")));
+        assert!(args.contains(&OsString::from("--api-only")));
+    }
+
+    #[test]
+    fn run_rewrite_does_not_treat_option_values_as_prompt() {
+        let args = rewrite_run_args(
+            ["oxidize", "run", "local.gguf", "--max-tokens", "7"]
+                .into_iter()
+                .map(OsString::from),
+        )
+        .expect("run args should rewrite");
+        assert!(args.contains(&OsString::from("--max-tokens")));
+        assert!(!args.contains(&OsString::from("--prompt")));
+        assert!(args.contains(&OsString::from("--api-only")));
+    }
+
+    #[test]
+    fn run_rewrite_with_prompt_is_not_api_only() {
+        let args = rewrite_run_args(
+            ["oxidize", "run", "local.gguf", "hello"]
+                .into_iter()
+                .map(OsString::from),
+        )
+        .expect("run args should rewrite");
+        assert!(args.contains(&OsString::from("--prompt")));
+        assert!(!args.contains(&OsString::from("--api-only")));
     }
 
     #[test]
