@@ -29,6 +29,8 @@ pub mod backend;
 pub use backend::ComputeBackend;
 #[path = "model/advanced_features.rs"]
 pub mod advanced_features;
+#[path = "vision/mod.rs"]
+pub mod vision;
 #[path = "util/benchmark_suite.rs"]
 pub mod benchmark_suite;
 #[path = "format/conversion.rs"]
@@ -72,6 +74,10 @@ pub mod model;
 pub mod model_loader;
 #[path = "model/offload.rs"]
 pub mod offload;
+#[path = "model/speculative.rs"]
+pub mod speculative;
+#[path = "model/prefix_cache.rs"]
+pub mod prefix_cache;
 #[path = "paged_attention/mod.rs"]
 pub mod paged_attention;
 #[path = "compute/quantization.rs"]

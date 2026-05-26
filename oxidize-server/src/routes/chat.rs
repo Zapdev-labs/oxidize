@@ -16,13 +16,14 @@ use futures_util::stream;
 use serde_json::json;
 
 use crate::app::AppState;
+use crate::audit::{AuditEvent, AuditLogger};
 use crate::routes::responses::{
     chat_completion_response, chat_completion_stream_response,
     chat_completion_stream_response_paged, generation_error_response, model_not_found,
     validate_candidate_count,
 };
 use crate::runtime::generate::{
-    GenerationError, GenerationRequest, generate_text, generate_with_scheduler_blocking,
+    GenerationError, GenerationRequest, GenerationResult, generate_text, generate_with_scheduler_blocking,
     generate_with_scheduler_streaming_blocking, render_chat_prompt,
 };
 use crate::schema::{ChatCompletionRequest, ResponseFormat, StopSequences};
@@ -31,6 +32,9 @@ pub async fn chat_completions(
     State(state): State<AppState>,
     Json(payload): Json<ChatCompletionRequest>,
 ) -> Response {
+    let start_time = std::time::Instant::now();
+    let request_id = uuid::Uuid::new_v4().to_string();
+
     if let Some(response) = validate_candidate_count(payload.n, payload.best_of) {
         return response;
     }
@@ -82,10 +86,44 @@ pub async fn chat_completions(
                 .await
                 .map_err(|e| GenerationError::Other(format!("generation task failed: {e}")));
 
-        return match generated {
-            Ok(Ok(result)) => chat_completion_response(model_id, result),
-            Ok(Err(err)) => generation_error_response(err),
-            Err(err) => generation_error_response(err),
+        let result = match generated {
+            Ok(Ok(result)) => {
+                let duration = start_time.elapsed();
+                let event = AuditEvent::new(request_id.clone(), "generation_complete")
+                    .with_model(&model_id)
+                    .with_tokens(result.prompt_tokens, result.completion_tokens)
+                    .with_duration(duration)
+                    .with_temperature(payload.temperature)
+                    .with_stop_reason("stop")
+                    .with_streamed(stream);
+                state.audit.log(event);
+                state.metrics.record_tokens(
+                    result.prompt_tokens,
+                    result.completion_tokens,
+                    duration.as_secs_f64(),
+                );
+                return chat_completion_response(model_id, result);
+            }
+            Ok(Err(err)) => {
+                let duration = start_time.elapsed();
+                let event = AuditEvent::new(request_id.clone(), "generation_error")
+                    .with_model(&model_id)
+                    .with_duration(duration)
+                    .with_error(&err.to_string());
+                state.audit.log(event);
+                state.metrics.record_error("generation");
+                return generation_error_response(err);
+            }
+            Err(err) => {
+                let duration = start_time.elapsed();
+                let event = AuditEvent::new(request_id.clone(), "generation_error")
+                    .with_model(&model_id)
+                    .with_duration(duration)
+                    .with_error(&err.to_string());
+                state.audit.log(event);
+                state.metrics.record_error("task_panic");
+                return generation_error_response(err);
+            }
         };
     }
 
@@ -116,9 +154,50 @@ pub async fn chat_completions(
         )
         .await;
         return match generated {
-            Ok(result) if stream => chat_completion_stream_response(model_id, result.text),
-            Ok(result) => chat_completion_response(model_id, result),
-            Err(error) => generation_error_response(error),
+            Ok(result) if stream => {
+                let duration = start_time.elapsed();
+                let event = AuditEvent::new(request_id.clone(), "generation_complete")
+                    .with_model(&model_id)
+                    .with_tokens(result.prompt_tokens, result.completion_tokens)
+                    .with_duration(duration)
+                    .with_temperature(payload.temperature)
+                    .with_stop_reason("stop")
+                    .with_streamed(true);
+                state.audit.log(event);
+                state.metrics.record_tokens(
+                    result.prompt_tokens,
+                    result.completion_tokens,
+                    duration.as_secs_f64(),
+                );
+                chat_completion_stream_response(model_id, result.text)
+            }
+            Ok(result) => {
+                let duration = start_time.elapsed();
+                let event = AuditEvent::new(request_id.clone(), "generation_complete")
+                    .with_model(&model_id)
+                    .with_tokens(result.prompt_tokens, result.completion_tokens)
+                    .with_duration(duration)
+                    .with_temperature(payload.temperature)
+                    .with_stop_reason("stop")
+                    .with_streamed(false);
+                state.audit.log(event);
+                state.metrics.record_tokens(
+                    result.prompt_tokens,
+                    result.completion_tokens,
+                    duration.as_secs_f64(),
+                );
+                chat_completion_response(model_id, result)
+            }
+            Err(error) => {
+                let duration = start_time.elapsed();
+                let event = AuditEvent::new(request_id.clone(), "generation_error")
+                    .with_model(&model_id)
+                    .with_duration(duration)
+                    .with_error(&error.to_string());
+                state.audit.log(event);
+                state.metrics.record_error("generation");
+                generation_error_response(error)
+            }
         };
     }
 

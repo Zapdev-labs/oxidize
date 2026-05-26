@@ -79,6 +79,13 @@ pub fn render_chat_prompt(runtime: &ModelRuntime, messages: &[ChatMessageInput])
             for message in messages {
                 prompt.push_str(&message.role);
                 prompt.push_str(": ");
+                if let Some(images) = &message.images {
+                    for image_url in images {
+                        prompt.push_str("[IMAGE: ");
+                        prompt.push_str(image_url);
+                        prompt.push_str("] ");
+                    }
+                }
                 prompt.push_str(&message.content);
                 prompt.push('\n');
             }

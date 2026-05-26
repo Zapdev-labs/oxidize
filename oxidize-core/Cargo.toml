@@ -25,6 +25,7 @@ anyhow.workspace = true
 ash = { version = "0.38", optional = true }
 cublas-sys = { version = "0.1", optional = true }
 cust = { version = "0.3", optional = true }
+fastrand = "2.4.1"
 futures-core = "0.3"
 futures-util = "0.3"
 gpu-allocator = { version = "0.27", optional = true }

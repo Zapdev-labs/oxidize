@@ -9,6 +9,7 @@ use clap::Parser;
 
 use oxidize_server::{
     AppState, Args, AuthConfig, BatchMode, ContinuousBatcher, RequestLimitConfig, RequestLimiter,
+    audit::AuditLogger, metrics::MetricsRegistry, shutdown::serve_with_graceful_shutdown,
     build_app_with_state, build_paged_runtime, load_model_runtime, mesh_cluster::MeshClusterState,
 };
 
@@ -80,12 +81,13 @@ async fn main() {
         model: model_opt,
         paged: paged_opt,
         mesh,
+        audit: Arc::new(AuditLogger::new()),
+        metrics: Arc::new(MetricsRegistry::new().expect("failed to create metrics registry")),
     };
     let app = build_app_with_state(state);
     let listener = tokio::net::TcpListener::bind(SocketAddr::new(args.host, args.port))
         .await
         .expect("failed to bind TCP listener");
-    axum::serve(listener, app)
-        .await
-        .expect("server runtime error");
+    let shutdown_signal = oxidize_server::shutdown::ShutdownSignal::new();
+    serve_with_graceful_shutdown(listener, app, shutdown_signal).await;
 }

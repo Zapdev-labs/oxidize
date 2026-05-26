@@ -464,6 +464,105 @@ impl KvCache {
         }
     }
 
+    /// Quantize the KV cache from F32/F16 to Q8_0 (8-bit asymmetric quantization).
+    /// This reduces memory usage by ~4x compared to F32 and ~2x compared to F16.
+    pub fn quantize_to_q8(&mut self) -> Result<(), KvCacheError> {
+        if matches!(self.config.dtype, DType::I8 | DType::I16) {
+            return Ok(()); // Already quantized
+        }
+
+        let size = self.config.element_count();
+        let token_slots = self.config.layer_count.saturating_mul(self.config.context_size);
+
+        // Convert key storage
+        let key_data = match &self.key {
+            KvStorage::F32(data) => data.clone(),
+            KvStorage::F16(data) => data.iter().map(|&b| f16_bits_to_f32(b)).collect(),
+            _ => return Ok(()),
+        };
+
+        let mut q8_key_data = vec![0u8; size];
+        let mut q8_key_scales = vec![0.0f32; token_slots];
+        let mut q8_key_mins = vec![0.0f32; token_slots];
+
+        for layer in 0..self.config.layer_count {
+            for position in 0..self.config.context_size {
+                let range = token_range(&self.config, layer, position);
+                let token_index = token_slot_index(&self.config, layer, position);
+                let src = &key_data[range.clone()];
+                let (min, max) = min_max(src);
+                let scale = if max <= min { 0.0 } else { (max - min) / 255.0 };
+                q8_key_scales[token_index] = scale;
+                q8_key_mins[token_index] = min;
+                if scale == 0.0 {
+                    q8_key_data[range].fill(0);
+                } else {
+                    for (dst, &value) in q8_key_data[range.clone()].iter_mut().zip(src.iter()) {
+                        let q = ((value - min) / scale).round().clamp(0.0, 255.0) as u8;
+                        *dst = q;
+                    }
+                }
+            }
+        }
+
+        // Convert value storage
+        let value_data = match &self.value {
+            KvStorage::F32(data) => data.clone(),
+            KvStorage::F16(data) => data.iter().map(|&b| f16_bits_to_f32(b)).collect(),
+            _ => return Ok(()),
+        };
+
+        let mut q8_value_data = vec![0u8; size];
+        let mut q8_value_scales = vec![0.0f32; token_slots];
+        let mut q8_value_mins = vec![0.0f32; token_slots];
+
+        for layer in 0..self.config.layer_count {
+            for position in 0..self.config.context_size {
+                let range = token_range(&self.config, layer, position);
+                let token_index = token_slot_index(&self.config, layer, position);
+                let src = &value_data[range.clone()];
+                let (min, max) = min_max(src);
+                let scale = if max <= min { 0.0 } else { (max - min) / 255.0 };
+                q8_value_scales[token_index] = scale;
+                q8_value_mins[token_index] = min;
+                if scale == 0.0 {
+                    q8_value_data[range].fill(0);
+                } else {
+                    for (dst, &value) in q8_value_data[range.clone()].iter_mut().zip(src.iter()) {
+                        let q = ((value - min) / scale).round().clamp(0.0, 255.0) as u8;
+                        *dst = q;
+                    }
+                }
+            }
+        }
+
+        self.key = KvStorage::Q8 {
+            data: q8_key_data,
+            scales: q8_key_scales,
+            mins: q8_key_mins,
+        };
+        self.value = KvStorage::Q8 {
+            data: q8_value_data,
+            scales: q8_value_scales,
+            mins: q8_value_mins,
+        };
+        self.config.dtype = DType::I8;
+        self.config.quantization = KvQuantization::Asymmetric;
+
+        Ok(())
+    }
+
+    /// Returns the compression ratio compared to F32 storage.
+    pub fn compression_ratio(&self) -> f32 {
+        let f32_size = self.config.element_count() * std::mem::size_of::<f32>();
+        let current_size = self.bytes_per_tensor();
+        if current_size == 0 {
+            1.0
+        } else {
+            f32_size as f32 / current_size as f32
+        }
+    }
+
     pub fn availability_window(&self) -> Option<(usize, usize)> {
         Some((self.oldest_available_position()?, self.newest_position?))
     }

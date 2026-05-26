@@ -9,12 +9,14 @@ use axum::{
     routing::{get, post},
 };
 
+use crate::audit::{AuditLogger, audit_middleware};
 use crate::auth::{AuthConfig, enforce_api_key};
 #[cfg(test)]
 use crate::limits::RequestLimitConfig;
 use crate::limits::{ContinuousBatcher, RequestLimiter, enforce_request_limits};
 use crate::logging::log_request_response;
 use crate::mesh_cluster::MeshClusterState;
+use crate::metrics::{MetricsRegistry, metrics_handler, metrics_middleware};
 use crate::openapi::openapi;
 use crate::routes::{
     chat::chat_completions,
@@ -37,6 +39,8 @@ pub struct AppState {
     pub model: Option<Arc<ModelRuntime>>,
     pub paged: Option<Arc<PagedModelRuntime>>,
     pub mesh: Option<MeshClusterState>,
+    pub audit: Arc<AuditLogger>,
+    pub metrics: Arc<MetricsRegistry>,
 }
 
 pub fn build_app_with_state(state: AppState) -> Router {
@@ -44,6 +48,7 @@ pub fn build_app_with_state(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         .route("/livez", get(livez))
         .route("/readyz", get(readyz))
+        .route("/metrics", get(metrics_handler))
         .route("/openapi.json", get(openapi))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/completions", post(completions))
@@ -61,6 +66,10 @@ pub fn build_app_with_state(state: AppState) -> Router {
         .layer(middleware::from_fn_with_state(
             state.clone(),
             enforce_api_key,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            metrics_middleware,
         ))
         .layer(middleware::from_fn(log_request_response))
         .with_state(state)
@@ -104,6 +113,8 @@ pub fn build_app_with_full_config(
         model: model.clone(),
         paged: None,
         mesh,
+        audit: Arc::new(AuditLogger::new()),
+        metrics: Arc::new(MetricsRegistry::new().expect("failed to create metrics registry")),
     };
     build_app_with_state(state)
 }

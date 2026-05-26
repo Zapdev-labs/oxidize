@@ -112,6 +112,18 @@ struct Args {
     /// Useful for draft models (e.g. DFlash) that do not embed a tokenizer.
     #[arg(long)]
     tokenizer_model: Option<PathBuf>,
+    /// Enable vision/multimodal mode for image understanding.
+    #[arg(long, default_value_t = false)]
+    vision: bool,
+    /// Path to image file for multimodal inference.
+    #[arg(long)]
+    image: Option<PathBuf>,
+    /// Path to DFlash draft model for speculative decoding.
+    #[arg(long)]
+    draft_model: Option<PathBuf>,
+    /// Number of draft tokens per speculative step.
+    #[arg(long, default_value_t = 4)]
+    draft_tokens: usize,
 }
 
 fn print_run_help() {

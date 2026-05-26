@@ -49,6 +49,8 @@ pub struct ChatCompletionRequest {
 pub struct ChatMessageInput {
     pub role: String,
     pub content: String,
+    #[serde(default)]
+    pub images: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
