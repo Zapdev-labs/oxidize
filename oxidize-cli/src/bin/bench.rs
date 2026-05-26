@@ -28,6 +28,8 @@ struct Args {
     verbose: bool,
     #[arg(long, default_value_t = false)]
     random_weights: bool,
+    #[arg(long)]
+    min_throughput: Option<f64>,
 }
 
 fn main() {
@@ -216,11 +218,7 @@ fn main() {
     let avg_tps = total_tokens as f64 / total_duration.as_secs_f64();
     let avg_latency = total_duration / total_tokens as u32;
 
-    println!("\n=== Results ===");
-    println!("Total tokens: {}", total_tokens);
-    println!("Total time: {:.2?}", total_duration);
-    println!("Throughput: {:.2} tok/s", avg_tps);
-    println!("Avg latency/token: {:.2?}", avg_latency);
+    print_benchmark_results(total_tokens, total_duration, avg_tps, avg_latency, &args);
     if args.mode == "decode" {
         println!("\nNote: decode mode benchmarks forward_token() only.");
     } else {
@@ -285,11 +283,7 @@ fn run_standard_model_benchmark(args: &Args, model: &mut dyn Model, token: u32) 
 
     let avg_tps = total_tokens as f64 / total_duration.as_secs_f64();
     let avg_latency = total_duration / total_tokens as u32;
-    println!("\n=== Results ===");
-    println!("Total tokens: {}", total_tokens);
-    println!("Total time: {:.2?}", total_duration);
-    println!("Throughput: {:.2} tok/s", avg_tps);
-    println!("Avg latency/token: {:.2?}", avg_latency);
+    print_benchmark_results(total_tokens, total_duration, avg_tps, avg_latency, args);
     println!("\nBenchmark complete.");
 }
 
@@ -350,13 +344,43 @@ fn run_inference_model_benchmark(args: &Args, model: &mut InferenceModel, token:
 
     let avg_tps = total_tokens as f64 / total_duration.as_secs_f64();
     let avg_latency = total_duration / total_tokens as u32;
+    print_benchmark_results(total_tokens, total_duration, avg_tps, avg_latency, args);
+    println!("\nNote: inference benchmark skips final logits to measure token processing.");
+    println!("\nBenchmark complete.");
+}
+
+fn print_benchmark_results(
+    total_tokens: usize,
+    total_duration: Duration,
+    throughput: f64,
+    avg_latency: Duration,
+    args: &Args,
+) {
     println!("\n=== Results ===");
     println!("Total tokens: {}", total_tokens);
     println!("Total time: {:.2?}", total_duration);
-    println!("Throughput: {:.2} tok/s", avg_tps);
+    println!("Throughput: {:.2} tok/s", throughput);
     println!("Avg latency/token: {:.2?}", avg_latency);
-    println!("\nNote: inference benchmark skips final logits to measure token processing.");
-    println!("\nBenchmark complete.");
+
+    if let Some(min_throughput) = args.min_throughput {
+        if !min_throughput.is_finite() || min_throughput <= 0.0 {
+            eprintln!("Error: --min-throughput must be a positive finite number");
+            std::process::exit(2);
+        }
+
+        if throughput < min_throughput {
+            eprintln!(
+                "Benchmark throughput regression: {:.2} tok/s below required {:.2} tok/s",
+                throughput, min_throughput
+            );
+            std::process::exit(1);
+        }
+
+        println!(
+            "Throughput gate: passed ({:.2} >= {:.2} tok/s)",
+            throughput, min_throughput
+        );
+    }
 }
 
 #[derive(Default)]
@@ -434,6 +458,7 @@ fn inference_config_from_dflash(
         num_key_value_heads: config.num_key_value_heads,
         key_value_head_dim,
         kv_cache_dtype: oxidize_core::tensor::DType::F32,
+        kv_quantization: Default::default(),
         rms_norm_eps: config.rms_norm_eps,
         rope_theta: config.rope_theta,
         architecture: Default::default(),
@@ -601,4 +626,27 @@ fn random_weight(rows: usize, cols: usize) -> oxidize_core::dflash::F32Weight {
         *v = (rand::random::<f32>() - 0.5) * 0.02;
     }
     F32Weight::from_slice(data, rows, cols)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_min_throughput_gate() {
+        let args = Args::parse_from([
+            "oxidize-bench",
+            "--random-weights",
+            "--mode",
+            "pp",
+            "--prompt-tokens",
+            "512",
+            "--min-throughput",
+            "30.1",
+        ]);
+
+        assert_eq!(args.min_throughput, Some(30.1));
+        assert_eq!(args.mode, "pp");
+        assert_eq!(args.prompt_tokens, Some(512));
+    }
 }

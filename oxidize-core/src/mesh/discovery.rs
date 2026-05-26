@@ -5,7 +5,7 @@ use libp2p::core::upgrade::Version;
 use libp2p::noise;
 use libp2p::tcp::tokio::Transport as TokioTcpTransport;
 use libp2p::yamux;
-use libp2p::{PeerId, Transport, gossipsub, identify, identity::Keypair, mdns, swarm::Swarm};
+use libp2p::{PeerId, Transport, gossipsub, identify, identity::Keypair, swarm::Swarm};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
@@ -79,7 +79,7 @@ impl DiscoveryService {
 
 /// Creates a libp2p swarm configured for mesh use.
 ///
-/// The swarm enables TCP + Noise + Yamux and mDNS v2 for local discovery.
+/// The swarm enables TCP + Noise + Yamux for mesh communication.
 /// Topics are namespaced so that different namespaces cannot see each other's messages.
 pub fn build_swarm(
     keypair: &Keypair,
@@ -106,7 +106,6 @@ pub fn build_swarm(
         .map_err(|e| format!("gossipsub config: {e}"))?;
 
     let mut behaviour = crate::mesh::gossip::MeshBehaviour {
-        mdns: mdns::tokio::Behaviour::new(mdns::Config::default(), peer_id)?,
         gossipsub: gossipsub::Behaviour::new(
             gossipsub::MessageAuthenticity::Signed(keypair.clone()),
             gossipsub_config,
@@ -333,35 +332,6 @@ pub async fn run_mesh_node(
                         println!("mesh node ready — waiting for peers (Ctrl-C to exit)");
                     }
                     SwarmEvent::Behaviour(b) => match b {
-                        crate::mesh::gossip::MeshEvent::Mdns(mdns::Event::Discovered(list)) => {
-                            for (discovered_peer, addr) in list {
-                                if *discovered_peer == discovery.local_peer_id {
-                                    continue;
-                                }
-                                let _ = swarm.dial(addr.clone());
-                            }
-                        }
-                        crate::mesh::gossip::MeshEvent::Mdns(mdns::Event::Expired(list)) => {
-                            let mut topology_changed = false;
-                            for (expired_peer, _addr) in list {
-                                if known_peers.remove(expired_peer) {
-                                    let pid = expired_peer.to_string();
-                                    topology.remove_node(&pid);
-                                    topology_changed = true;
-                                    println!("Peer {} expired / disconnected", pid);
-                                }
-                            }
-                            if topology_changed && election.is_master() {
-                                println!("Topology changed after peer loss — re-sharding on remaining nodes");
-                                let plan = compute_shard_plan(
-                                    &topology,
-                                    "reshard".to_string(),
-                                    32, // placeholder total_layers; real model would be known
-                                    crate::mesh::sharding::ParallelismStrategy::Pipeline,
-                                );
-                                let _ = broadcast_shard_plan(&mut swarm, &namespace, election.clock, &plan);
-                            }
-                        }
                         crate::mesh::gossip::MeshEvent::Identify(identify::Event::Received { peer_id: remote_peer, info, .. }) => {
                             let protocol_version = &info.protocol_version;
                             if !known_peers.contains(remote_peer)

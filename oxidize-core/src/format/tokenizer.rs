@@ -275,6 +275,25 @@ pub fn load_tokenizer_from_gguf_metadata(
     }
 }
 
+/// Load a tokenizer from an external GGUF file (e.g. the target model that
+/// the draft model is paired with). Returns `None` when the path is `None`.
+pub fn load_tokenizer_from_gguf_file(
+    path: Option<&std::path::Path>,
+) -> Result<Option<LoadedTokenizer>, String> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    use crate::model_loader::{GgufModelLoader, ModelLoader};
+    let loader = GgufModelLoader;
+    let mapped = loader
+        .load(path)
+        .map_err(|e| format!("failed to load tokenizer GGUF: {e}"))?;
+    let metadata = &mapped.parsed().metadata;
+    load_tokenizer_from_gguf_metadata(metadata)
+        .map(Some)
+        .map_err(|e| format!("failed to load tokenizer from external GGUF: {e:?}"))
+}
+
 pub fn process_chat_template(
     template: &str,
     messages: &[ChatMessage<'_>],

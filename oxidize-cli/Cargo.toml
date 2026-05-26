@@ -9,6 +9,10 @@ name = "oxidize-cli"
 path = "src/main.rs"
 
 [[bin]]
+name = "oxidize"
+path = "src/main.rs"
+
+[[bin]]
 name = "oxidize-bench"
 path = "src/bin/bench.rs"
 
@@ -20,6 +24,8 @@ path = "src/bin/inspect_gguf.rs"
 clap.workspace = true
 oxidize-core = { path = "../oxidize-core" }
 futures-core = "0.3"
+hf-hub = "0.4"
+libc = "0.2"
 rand = "0.8"
 rayon = "1"
 tokio.workspace = true

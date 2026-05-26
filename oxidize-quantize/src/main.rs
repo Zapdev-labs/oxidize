@@ -20,7 +20,11 @@ struct Args {
     #[arg(long, value_parser = parse_quantization_type)]
     source: Option<GgufQuantizationType>,
     #[arg(long, value_parser = parse_quantization_type)]
-    target: GgufQuantizationType,
+    target: Option<GgufQuantizationType>,
+    /// Append an already-encoded tensor to an input GGUF without requantizing
+    /// existing tensors. Format: name:path:dim0,dim1:type
+    #[arg(long)]
+    append_tensor: Vec<String>,
 }
 
 fn parse_quantization_type(value: &str) -> Result<GgufQuantizationType, String> {
@@ -61,24 +65,38 @@ fn source_value_count(source: GgufQuantizationType, byte_len: usize) -> Result<u
 }
 
 fn run(args: Args) -> Result<()> {
-    quantize_file(&args.input, &args.output, args.source, args.target)
+    quantize_file(
+        &args.input,
+        &args.output,
+        args.source,
+        args.target,
+        &args.append_tensor,
+    )
 }
 
 fn quantize_file(
     input_path: &Path,
     output_path: &Path,
     source: Option<GgufQuantizationType>,
-    target: GgufQuantizationType,
+    target: Option<GgufQuantizationType>,
+    append_specs: &[String],
 ) -> Result<()> {
     let input = fs::read(input_path)
         .with_context(|| format!("failed to read input file: {}", input_path.display()))?;
     if input.starts_with(b"GGUF") {
-        let output = quantize_gguf_bytes(&input, target)?;
+        let output = if append_specs.is_empty() {
+            let target =
+                target.ok_or_else(|| anyhow!("--target is required for GGUF quantization"))?;
+            quantize_gguf_bytes(&input, target)?
+        } else {
+            append_gguf_tensors(&input, append_specs)?
+        };
         fs::write(output_path, &output)
             .with_context(|| format!("failed to write output file: {}", output_path.display()))?;
         return Ok(());
     }
 
+    let target = target.ok_or_else(|| anyhow!("--target is required for raw tensor inputs"))?;
     let source = source.ok_or_else(|| anyhow!("--source is required for raw tensor inputs"))?;
     let value_count = source_value_count(source, input.len())?;
     let output_size = quantized_size(target, value_count)
@@ -111,6 +129,81 @@ fn quantize_gguf_bytes(input: &[u8], target: GgufQuantizationType) -> Result<Vec
     );
     let tensors = build_output_tensors(&parsed, input, target)?;
     write_gguf(parsed.version, &metadata, &tensors, parsed.alignment)
+}
+
+fn append_gguf_tensors(input: &[u8], append_specs: &[String]) -> Result<Vec<u8>> {
+    let parsed = parse_gguf(input).map_err(|err| anyhow!(err))?;
+    let mut tensors = copy_existing_tensors(&parsed, input)?;
+    for spec in append_specs {
+        tensors.push(parse_append_tensor_spec(spec)?);
+    }
+    write_gguf(parsed.version, &parsed.metadata, &tensors, parsed.alignment)
+}
+
+fn copy_existing_tensors(parsed: &GgufFile, input: &[u8]) -> Result<Vec<OutputTensor>> {
+    let mut tensors = Vec::with_capacity(parsed.tensor_infos.len());
+    for tensor in &parsed.tensor_infos {
+        let source = GgufQuantizationType::from_ggml_type(tensor.ggml_type);
+        let value_count = tensor_value_count(tensor)?;
+        let input_size = quantized_size(source, value_count)
+            .map_err(|err| anyhow!(err))
+            .with_context(|| format!("unsupported input tensor type for {}", tensor.name))?;
+        let start = tensor.absolute_offset as usize;
+        let end = start
+            .checked_add(input_size)
+            .ok_or_else(|| anyhow!("tensor {} byte range overflows", tensor.name))?;
+        if end > input.len() {
+            bail!("tensor {} extends past end of input GGUF", tensor.name);
+        }
+        tensors.push(OutputTensor {
+            name: tensor.name.clone(),
+            dimensions: tensor.dimensions.clone(),
+            ggml_type: tensor.ggml_type,
+            data: input[start..end].to_vec(),
+        });
+    }
+    Ok(tensors)
+}
+
+fn parse_append_tensor_spec(spec: &str) -> Result<OutputTensor> {
+    let parts = spec.splitn(4, ':').collect::<Vec<_>>();
+    if parts.len() != 4 {
+        bail!("append tensor must be name:path:dim0,dim1:type, got {spec}");
+    }
+    let dimensions = parts[2]
+        .split(',')
+        .map(|dim| {
+            dim.parse::<u64>()
+                .with_context(|| format!("invalid tensor dimension '{dim}'"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if dimensions.is_empty() {
+        bail!("append tensor dimensions must not be empty");
+    }
+    let qtype = parse_quantization_type(parts[3]).map_err(anyhow::Error::msg)?;
+    let data = fs::read(parts[1])
+        .with_context(|| format!("failed to read append tensor data: {}", parts[1]))?;
+    let value_count = dimensions.iter().try_fold(1_usize, |acc, dim| {
+        let dim = usize::try_from(*dim).context("append tensor dimension overflows usize")?;
+        acc.checked_mul(dim)
+            .ok_or_else(|| anyhow!("append tensor value count overflows"))
+    })?;
+    let expected = quantized_size(qtype, value_count).map_err(|err| anyhow!(err))?;
+    if data.len() != expected {
+        bail!(
+            "append tensor {} has {} bytes, expected {expected} for {:?} dims {:?}",
+            parts[0],
+            data.len(),
+            qtype,
+            dimensions
+        );
+    }
+    Ok(OutputTensor {
+        name: parts[0].to_owned(),
+        dimensions,
+        ggml_type: gguf_type_id(qtype)?,
+        data,
+    })
 }
 
 fn build_output_tensors(
