@@ -84,6 +84,12 @@ pub struct SpeculativeGenerationStream<'a, T: Model> {
     emit_buffer: VecDeque<Token>,
     /// True when `last_token` was sampled but not yet written to the target KV cache.
     last_token_pending_kv: bool,
+    /// Target logits for the token immediately after the committed prefix.
+    pending_target_logits: Option<Vec<f32>>,
+    drafted_tokens: usize,
+    accepted_draft_tokens: usize,
+    zero_acceptance_rounds: usize,
+    speculation_disabled: bool,
 }
 
 impl<'a, T: Model> SpeculativeGenerationStream<'a, T> {
@@ -118,6 +124,11 @@ impl<'a, T: Model> SpeculativeGenerationStream<'a, T> {
             draft_token_buffer: Vec::with_capacity(draft_tokens_per_step),
             emit_buffer: VecDeque::with_capacity(draft_tokens_per_step + 1),
             last_token_pending_kv: false,
+            pending_target_logits: None,
+            drafted_tokens: 0,
+            accepted_draft_tokens: 0,
+            zero_acceptance_rounds: 0,
+            speculation_disabled: false,
         }
     }
 
@@ -142,6 +153,62 @@ impl<'a, T: Model> SpeculativeGenerationStream<'a, T> {
             self.state = GenerationState::Done;
         }
         Some(Ok(token))
+    }
+
+    fn run_target_step(&mut self) -> Result<(), GenerationError> {
+        let target_model = self.target_model.take().ok_or_else(|| {
+            GenerationError::Model(ModelError::InferenceFailed(
+                "target model missing".to_string(),
+            ))
+        })?;
+        let session = self.session.take().ok_or_else(|| {
+            GenerationError::Model(ModelError::InferenceFailed("session missing".to_string()))
+        })?;
+        let last_token = self.last_token.ok_or_else(|| {
+            GenerationError::Model(ModelError::InferenceFailed("no last token".to_string()))
+        })?;
+
+        let logits = if self.last_token_pending_kv {
+            self.pending_target_logits = None;
+            target_model
+                .forward(&[last_token], session)
+                .map_err(GenerationError::Model)?
+        } else if let Some(logits) = self.pending_target_logits.take() {
+            logits
+        } else {
+            target_model
+                .forward(&[last_token], session)
+                .map_err(GenerationError::Model)?
+        };
+
+        let random = (self.random.as_mut())();
+        let token = sample(&logits, self.config.generation.sampling, random)
+            .map_err(GenerationError::Sampling)?;
+        self.last_token_pending_kv = true;
+        self.emit_buffer.push_back(token);
+        self.target_model = Some(target_model);
+        self.session = Some(session);
+        Ok(())
+    }
+
+    fn update_speculation_health(&mut self, drafted: usize, accepted: usize) {
+        self.drafted_tokens = self.drafted_tokens.saturating_add(drafted);
+        self.accepted_draft_tokens = self.accepted_draft_tokens.saturating_add(accepted);
+        if accepted == 0 {
+            self.zero_acceptance_rounds = self.zero_acceptance_rounds.saturating_add(1);
+        } else {
+            self.zero_acceptance_rounds = 0;
+        }
+
+        let enough_samples = self.drafted_tokens >= self.config.draft_tokens_per_step.max(1) * 4;
+        let acceptance_rate = if self.drafted_tokens == 0 {
+            1.0
+        } else {
+            self.accepted_draft_tokens as f32 / self.drafted_tokens as f32
+        };
+        if self.zero_acceptance_rounds >= 2 || (enough_samples && acceptance_rate < 0.2) {
+            self.speculation_disabled = true;
+        }
     }
 
     fn run_speculative_step(&mut self) -> Result<(), GenerationError> {
@@ -171,6 +238,7 @@ impl<'a, T: Model> SpeculativeGenerationStream<'a, T> {
         let mut current_token = start_token;
 
         draft_model.reset_cache();
+        draft_model.reserve_cache_tokens(k);
         for _ in 0..k {
             let hidden = draft_model
                 .forward_token(current_token, None)
@@ -186,27 +254,30 @@ impl<'a, T: Model> SpeculativeGenerationStream<'a, T> {
             current_token = token;
         }
 
-        // 2. Target model verifies draft tokens: replay each prefix from a fixed KV checkpoint.
+        // 2. Target model verifies draft tokens from a fixed KV checkpoint.
         let verify_start = session.consumed_tokens();
-        let verify_sequence = if self.last_token_pending_kv {
-            let mut sequence = vec![start_token];
-            sequence.extend_from_slice(&draft_tokens);
-            sequence
-        } else {
-            draft_tokens.clone()
-        };
-
         let mut target_logits = Vec::with_capacity(draft_tokens.len() + 1);
-        for i in 0..=draft_tokens.len() {
+        if self.last_token_pending_kv {
             target_model
                 .rewind_to(verify_start)
                 .map_err(GenerationError::Model)?;
             session.rewind_to(verify_start);
             let logits = target_model
-                .forward(&verify_sequence[..i + 1], session)
+                .forward(&[start_token], session)
                 .map_err(GenerationError::Model)?;
             target_logits.push(logits);
+        } else if let Some(logits) = self.pending_target_logits.take() {
+            target_logits.push(logits);
+        } else {
+            return Err(GenerationError::Model(ModelError::InferenceFailed(
+                "missing target logits for speculative verification".to_string(),
+            )));
         }
+
+        let verified_logits = target_model
+            .forward_many(&draft_tokens, session)
+            .map_err(GenerationError::Model)?;
+        target_logits.extend(verified_logits);
 
         let mut accepted_sequence = if self.last_token_pending_kv {
             vec![start_token]
@@ -233,25 +304,16 @@ impl<'a, T: Model> SpeculativeGenerationStream<'a, T> {
             .rewind_to(verify_start)
             .map_err(GenerationError::Model)?;
         session.rewind_to(verify_start);
-        target_model
+        let next_target_logits = target_model
             .forward(&accepted_sequence, session)
             .map_err(GenerationError::Model)?;
+        self.pending_target_logits = Some(next_target_logits);
         self.last_token_pending_kv = false;
 
         let accepted_count = result.accepted_draft_tokens;
+        self.update_speculation_health(draft_tokens.len(), accepted_count);
         for token in result.tokens {
             self.emit_buffer.push_back(token);
-        }
-
-        // 5. Update draft model KV cache to match accepted tokens.
-        // Reset and replay accepted tokens through draft model.
-        draft_model.reset_cache();
-        let mut replay_token = start_token;
-        for (_i, &dt) in draft_tokens.iter().enumerate().take(accepted_count) {
-            let _ = draft_model
-                .forward_token(replay_token, None)
-                .map_err(|e| GenerationError::Model(ModelError::InferenceFailed(e)))?;
-            replay_token = dt;
         }
 
         draft_tokens.clear();
@@ -311,10 +373,16 @@ impl<T: Model> Stream for SpeculativeGenerationStream<'_, T> {
                 self.session = Some(session);
                 self.last_token = Some(token);
                 self.last_token_pending_kv = true;
+                self.pending_target_logits = None;
                 Poll::Ready(self.emit_token(token))
             }
             GenerationState::Decode => {
-                if let Err(e) = self.run_speculative_step() {
+                let result = if self.speculation_disabled {
+                    self.run_target_step()
+                } else {
+                    self.run_speculative_step()
+                };
+                if let Err(e) = result {
                     self.state = GenerationState::Done;
                     return Poll::Ready(Some(Err(e)));
                 }

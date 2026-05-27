@@ -52,9 +52,7 @@ impl PrefixCache {
     }
 
     /// Try to find a cached prefix matching the start of the given tokens.
-    pub fn lookup(&self,
-        tokens: &[Token],
-    ) -> Option<(&CachedPrefix, usize)> {
+    pub fn lookup(&self, tokens: &[Token]) -> Option<(&CachedPrefix, usize)> {
         if tokens.len() < self.min_prefix_length {
             return None;
         }
@@ -72,10 +70,7 @@ impl PrefixCache {
     }
 
     /// Store a prefix in the cache.
-    pub fn store(&mut self,
-        tokens: &[Token],
-        kv_cache: KvCache,
-    ) -> Result<(), PrefixCacheError> {
+    pub fn store(&mut self, tokens: &[Token], kv_cache: KvCache) -> Result<(), PrefixCacheError> {
         if tokens.len() < self.min_prefix_length {
             return Ok(());
         }
@@ -239,7 +234,7 @@ mod tests {
 
         cache.record_miss();
         cache.record_miss();
-        
+
         if let Some((entry, _)) = cache.lookup(&tokens) {
             let hash = entry.hash.clone();
             cache.record_hit(&hash);

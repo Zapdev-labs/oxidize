@@ -29,8 +29,6 @@ pub mod backend;
 pub use backend::ComputeBackend;
 #[path = "model/advanced_features.rs"]
 pub mod advanced_features;
-#[path = "vision/mod.rs"]
-pub mod vision;
 #[path = "util/benchmark_suite.rs"]
 pub mod benchmark_suite;
 #[path = "format/conversion.rs"]
@@ -74,12 +72,10 @@ pub mod model;
 pub mod model_loader;
 #[path = "model/offload.rs"]
 pub mod offload;
-#[path = "model/speculative.rs"]
-pub mod speculative;
-#[path = "model/prefix_cache.rs"]
-pub mod prefix_cache;
 #[path = "paged_attention/mod.rs"]
 pub mod paged_attention;
+#[path = "model/prefix_cache.rs"]
+pub mod prefix_cache;
 #[path = "compute/quantization.rs"]
 pub mod quantization;
 #[path = "format/safetensors.rs"]
@@ -88,6 +84,8 @@ pub mod safetensors;
 pub mod sampling;
 #[path = "compute/simd.rs"]
 pub mod simd;
+#[path = "model/speculative.rs"]
+pub mod speculative;
 #[path = "backends/strix.rs"]
 pub mod strix;
 #[path = "compute/tensor.rs"]
@@ -96,6 +94,8 @@ pub mod tensor;
 pub mod tokenizer;
 #[path = "compute/turboquant.rs"]
 pub mod turboquant;
+#[path = "vision/mod.rs"]
+pub mod vision;
 #[cfg(feature = "vulkan")]
 #[path = "backends/vulkan.rs"]
 pub mod vulkan;

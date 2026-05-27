@@ -426,9 +426,8 @@ fn detect_architecture_from_metadata_keys(
         };
         let architecture = match namespace {
             "llama" | "mistral" | "mixtral" | "qwen" | "qwen2" | "qwen2moe" | "qwen35"
-            | "gemma" | "phi" | "falcon" | "gpt2" | "gptj" | "gptneox" | "dflash-draft" => {
-                Some(namespace)
-            }
+            | "gemma" | "phi" | "falcon" | "gpt2" | "gptj" | "gptneox" | "dflash"
+            | "dflash-draft" => Some(namespace),
             _ => None,
         };
         if architecture.is_some() {
@@ -1005,6 +1004,23 @@ mod tests {
         };
 
         assert_eq!(file.architecture(), Some("qwen2"));
+    }
+
+    #[test]
+    fn architecture_detects_dflash_namespace_when_general_architecture_is_missing() {
+        let file = GgufFile {
+            version: 3,
+            tensor_count: 0,
+            metadata: BTreeMap::from([(
+                "dflash.embedding_length".to_owned(),
+                GgufMetadataValue::Uint32(2048),
+            )]),
+            tensor_infos: Vec::new(),
+            alignment: 32,
+            data_section_start: 0,
+        };
+
+        assert_eq!(file.architecture(), Some("dflash"));
     }
 
     #[test]

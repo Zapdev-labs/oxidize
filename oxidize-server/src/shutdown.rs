@@ -100,21 +100,13 @@ pub async fn shutdown_guard_middleware(
     next: Next,
 ) -> Response {
     if signal.is_shutting_down() {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Server is shutting down",
-        )
-            .into_response();
+        return (StatusCode::SERVICE_UNAVAILABLE, "Server is shutting down").into_response();
     }
 
     let response = next.run(request).await;
 
     if signal.is_shutting_down() {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Server is shutting down",
-        )
-            .into_response();
+        return (StatusCode::SERVICE_UNAVAILABLE, "Server is shutting down").into_response();
     }
 
     response

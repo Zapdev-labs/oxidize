@@ -36,6 +36,23 @@ pub trait Model {
     fn context_size(&self) -> usize;
     fn layer_count(&self) -> usize;
 
+    /// Return logits after each token in `tokens`, advancing the model state once
+    /// through the suffix. Implementations can override this with a batched path.
+    fn forward_many(
+        &mut self,
+        tokens: &[Token],
+        session: &mut Session,
+    ) -> Result<Vec<Logits>, ModelError> {
+        if tokens.is_empty() {
+            return Err(ModelError::EmptyInput);
+        }
+        let mut logits = Vec::with_capacity(tokens.len());
+        for &token in tokens {
+            logits.push(self.forward(&[token], session)?);
+        }
+        Ok(logits)
+    }
+
     /// Reset KV state to match `consumed_tokens` (exclusive upper bound on positions).
     /// Models with a KV cache must override this; the default is a no-op for stateless models.
     fn rewind_to(&mut self, _consumed_tokens: usize) -> Result<(), ModelError> {
@@ -55,6 +72,13 @@ impl Model for Box<dyn Model> {
     }
     fn layer_count(&self) -> usize {
         (**self).layer_count()
+    }
+    fn forward_many(
+        &mut self,
+        tokens: &[Token],
+        session: &mut Session,
+    ) -> Result<Vec<Logits>, ModelError> {
+        (**self).forward_many(tokens, session)
     }
     fn rewind_to(&mut self, consumed_tokens: usize) -> Result<(), ModelError> {
         (**self).rewind_to(consumed_tokens)

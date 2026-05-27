@@ -169,9 +169,8 @@ impl AuditEvent {
     }
 
     pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_else(|_| {
-            json!({"error": "failed to serialize audit event"}).to_string()
-        })
+        serde_json::to_string(self)
+            .unwrap_or_else(|_| json!({"error": "failed to serialize audit event"}).to_string())
     }
 }
 
@@ -192,7 +191,9 @@ impl AuditLogger {
                     match event.severity {
                         AuditSeverity::Error => tracing::error!(target: "audit", "{}", json),
                         AuditSeverity::Warning => tracing::warn!(target: "audit", "{}", json),
-                        AuditSeverity::Security => tracing::error!(target: "audit_security", "{}", json),
+                        AuditSeverity::Security => {
+                            tracing::error!(target: "audit_security", "{}", json)
+                        }
                         AuditSeverity::Info => tracing::info!(target: "audit", "{}", json),
                     }
                 }

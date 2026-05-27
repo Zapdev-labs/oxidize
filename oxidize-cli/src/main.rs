@@ -1,7 +1,9 @@
 mod pipeline;
 
 use clap::{Parser, ValueEnum};
-use oxidize_core::generation::{GenerationConfig, GenerationStream};
+use oxidize_core::generation::{
+    GenerationConfig, GenerationStream, SpeculativeGenerationConfig, SpeculativeGenerationStream,
+};
 use oxidize_core::gguf::MappedGgufFile;
 use oxidize_core::inference::{InferenceConfig, InferenceModel};
 use oxidize_core::lora::{AdapterKind, LoraPlan, plan_lora_application};
@@ -25,6 +27,26 @@ use std::task::Wake;
 use std::time::{Duration, Instant};
 
 const PROFILE_CHILD_ENV: &str = "OXIDIZE_PROFILE_CHILD";
+
+// #region agent log
+fn agent_debug_log_cli(hypothesis_id: &str, location: &str, message: &str, data: &str) {
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0);
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/home/dih/oxidize/.cursor/debug-49b0b9.log")
+    {
+        let _ = writeln!(
+            file,
+            "{{\"sessionId\":\"49b0b9\",\"runId\":\"initial\",\"hypothesisId\":\"{}\",\"location\":\"{}\",\"message\":\"{}\",\"data\":{},\"timestamp\":{}}}",
+            hypothesis_id, location, message, data, timestamp
+        );
+    }
+}
+// #endregion
 
 #[derive(Debug, Parser)]
 #[command(name = "oxidize")]
@@ -762,6 +784,95 @@ fn generate_with_model<W: Write, M: Model>(
     Ok(response)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn generate_with_dflash_draft<W: Write>(
+    prompt: &str,
+    target_model: &mut InferenceModel,
+    draft_model: &mut oxidize_core::dflash::DFlashDraftModel,
+    tokenizer: &LoadedTokenizer,
+    max_tokens: usize,
+    temperature: f32,
+    top_p: Option<f32>,
+    top_k: Option<usize>,
+    draft_tokens: usize,
+    writer: &mut W,
+) -> io::Result<String> {
+    use futures_core::Stream;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Waker};
+
+    let started_at = Instant::now();
+    let mut session = Session::new();
+    let prompt_tokens = tokenizer.encode_with_special_tokens(
+        prompt,
+        EncodeOptions {
+            add_bos: true,
+            add_eos: false,
+            pad_to: None,
+        },
+    );
+    let eos_token = tokenizer.special_tokens().eos;
+    let suppressed_tokens = suppressed_generation_tokens(tokenizer, target_model.vocab_size());
+    let generation = GenerationConfig {
+        max_new_tokens: max_tokens,
+        stop_token: eos_token,
+        suppressed_tokens,
+        sampling: SamplingConfig {
+            temperature,
+            top_p,
+            top_k,
+            ..SamplingConfig::default()
+        },
+        ..GenerationConfig::default()
+    };
+    let config = SpeculativeGenerationConfig {
+        generation,
+        draft_tokens_per_step: draft_tokens.max(1),
+    };
+
+    let mut rng = rand::thread_rng();
+    let mut stream = SpeculativeGenerationStream::new(
+        target_model,
+        draft_model,
+        &mut session,
+        &prompt_tokens,
+        config,
+        || rand::Rng::r#gen::<f32>(&mut rng),
+    );
+    let waker = Waker::from(Arc::new(NoopWaker));
+    let mut cx = Context::from_waker(&waker);
+    let mut pinned = Pin::new(&mut stream);
+    let mut generated_tokens: Vec<u32> = Vec::new();
+
+    loop {
+        match Stream::poll_next(pinned.as_mut(), &mut cx) {
+            Poll::Ready(Some(Ok(token))) => generated_tokens.push(token),
+            Poll::Ready(Some(Err(e))) => {
+                return Err(io::Error::other(format!("generation error: {:?}", e)));
+            }
+            Poll::Ready(None) => break,
+            Poll::Pending => break,
+        }
+    }
+
+    let response = tokenizer
+        .decode_without_special_tokens(&generated_tokens)
+        .unwrap_or_default();
+    if !response.is_empty() {
+        write!(writer, "{response}")?;
+        writer.flush()?;
+    }
+    let elapsed = started_at.elapsed();
+    writeln!(writer)?;
+    writeln!(
+        writer,
+        "{}",
+        format_generation_stats(generated_tokens.len(), elapsed)
+    )?;
+    Ok(response)
+}
+
 struct NoopWaker;
 
 impl Wake for NoopWaker {
@@ -1110,9 +1221,55 @@ fn main() {
 
                 // Extract model config from GGUF metadata and run generation
                 let metadata = &mapped.parsed().metadata;
-                let is_dflash = mapped.parsed().architecture() == Some("dflash-draft");
+                let is_dflash = matches!(
+                    mapped.parsed().architecture(),
+                    Some("dflash" | "dflash-draft")
+                );
+                // #region agent log
+                let mapped_infos = mapped.mapped_tensor_infos();
+                let architecture = mapped.parsed().architecture().unwrap_or("<none>");
+                let has_lm_head = mapped_infos
+                    .iter()
+                    .any(|tensor| tensor.name == "lm_head.weight");
+                let has_output = mapped_infos
+                    .iter()
+                    .any(|tensor| tensor.name == "output.weight");
+                let has_embed_tokens = mapped_infos
+                    .iter()
+                    .any(|tensor| tensor.name == "model.embed_tokens.weight");
+                let has_tok_embeddings = mapped_infos
+                    .iter()
+                    .any(|tensor| tensor.name == "tok_embeddings.weight");
+                agent_debug_log_cli(
+                    "H0_REPRO_PATH,H2_TENSOR_NAMES,H5_OUTPUT_PROJECTION",
+                    "oxidize-cli/src/main.rs:run_model_mode",
+                    "classified GGUF before CLI model construction",
+                    &format!(
+                        "{{\"architecture\":\"{}\",\"is_dflash\":{},\"tensor_count\":{},\"has_lm_head\":{},\"has_output\":{},\"has_embed_tokens\":{},\"has_tok_embeddings\":{}}}",
+                        architecture,
+                        is_dflash,
+                        mapped_infos.len(),
+                        has_lm_head,
+                        has_output,
+                        has_embed_tokens,
+                        has_tok_embeddings
+                    ),
+                );
+                // #endregion
                 if args.ctx_size == Some(0) {
                     eprintln!("invalid --ctx-size: must be greater than 0");
+                    return;
+                }
+                if is_dflash && args.draft_model.is_none() {
+                    agent_debug_log_cli(
+                        "H5_OUTPUT_PROJECTION",
+                        "oxidize-cli/src/main.rs:run_model_mode",
+                        "rejecting standalone dflash draft as generation target",
+                        "{\"reason\":\"dflash_requires_target_model_context\"}",
+                    );
+                    eprintln!(
+                        "DFlash draft GGUF cannot be used as --model for normal generation. Use the full target GGUF with --model and pass this DFlash file via --draft-model."
+                    );
                     return;
                 }
                 let mut config = InferenceConfig::from_gguf(&mapped);
@@ -1127,7 +1284,9 @@ fn main() {
                     config.context_size = config.context_size.min(2048);
                 }
                 // Load tokenizer from GGUF metadata, falling back to an external model.
-                let tokenizer = match load_tokenizer_from_gguf_metadata(metadata).or_else(|_| {
+                // For DFlash smoke runs with borrowed IO, prefer the external
+                // tokenizer so sampled ids match the borrowed output head.
+                let tokenizer_result = if is_dflash && args.tokenizer_model.is_some() {
                     oxidize_core::tokenizer::load_tokenizer_from_gguf_file(
                         args.tokenizer_model.as_deref(),
                     )
@@ -1142,7 +1301,26 @@ fn main() {
                             "tokenizer.ggml.model",
                         )
                     })
-                }) {
+                    .or_else(|_| load_tokenizer_from_gguf_metadata(metadata))
+                } else {
+                    load_tokenizer_from_gguf_metadata(metadata).or_else(|_| {
+                        oxidize_core::tokenizer::load_tokenizer_from_gguf_file(
+                            args.tokenizer_model.as_deref(),
+                        )
+                        .and_then(|opt| {
+                            opt.ok_or_else(|| {
+                                "external tokenizer model did not contain tokenizer metadata"
+                                    .to_string()
+                            })
+                        })
+                        .map_err(|_e| {
+                            oxidize_core::tokenizer::TokenizerLoadError::MissingMetadata(
+                                "tokenizer.ggml.model",
+                            )
+                        })
+                    })
+                };
+                let tokenizer = match tokenizer_result {
                     Ok(t) => t,
                     Err(error) => {
                         eprintln!("failed to load tokenizer: {error:?}");
@@ -1152,13 +1330,162 @@ fn main() {
 
                 let stdout = io::stdout();
                 let mut writer = stdout.lock();
+                if let Some(draft_model_path) = args.draft_model.as_deref() {
+                    if is_dflash {
+                        eprintln!(
+                            "DFlash GGUFs are draft models, not target models. Use --model with the full target GGUF and --draft-model with the DFlash GGUF."
+                        );
+                        return;
+                    }
+
+                    let use_mmap = args.cpu_optimized;
+                    let mut target_model =
+                        match InferenceModel::load_from_gguf(&mapped, config, use_mmap) {
+                            Ok(model) => model,
+                            Err(error) => {
+                                eprintln!("failed to load target model weights: {error}");
+                                return;
+                            }
+                        };
+
+                    let draft_mapped = match loader.load(draft_model_path) {
+                        Ok(mapped) => mapped,
+                        Err(error) => {
+                            eprintln!(
+                                "failed to load DFlash draft model {}: {error}",
+                                draft_model_path.display()
+                            );
+                            return;
+                        }
+                    };
+                    let draft_arch = draft_mapped.parsed().architecture();
+                    if !matches!(draft_arch, Some("dflash" | "dflash-draft")) {
+                        eprintln!(
+                            "--draft-model must point to a DFlash GGUF, got architecture {:?}",
+                            draft_arch
+                        );
+                        return;
+                    }
+                    let draft_config = oxidize_core::dflash::DFlashConfig::from_gguf(&draft_mapped);
+                    let mut draft_model =
+                        match oxidize_core::dflash::DFlashDraftModel::load_from_gguf(
+                            &draft_mapped,
+                            draft_config,
+                        ) {
+                            Ok(model) => model,
+                            Err(error) => {
+                                eprintln!("failed to load DFlash draft model: {error}");
+                                return;
+                            }
+                        };
+                    if let Err(error) = draft_model.load_external_io_from_gguf(&mapped) {
+                        eprintln!(
+                            "failed to borrow draft token embeddings/output from target GGUF: {error}"
+                        );
+                        return;
+                    }
+                    let target_hidden_size = target_model.config_hidden_size();
+                    let incompatible_hidden = draft_model.config.hidden_size != target_hidden_size;
+                    let incompatible_layers = draft_model
+                        .config
+                        .target_layer_ids
+                        .iter()
+                        .any(|&layer| layer >= target_model.layer_count());
+                    if incompatible_hidden || incompatible_layers {
+                        eprintln!(
+                            "DFlash draft is incompatible with target (draft_hidden={}, target_hidden={}, draft_target_layers={:?}, target_layers={}); falling back to target-only generation",
+                            draft_model.config.hidden_size,
+                            target_hidden_size,
+                            draft_model.config.target_layer_ids,
+                            target_model.layer_count()
+                        );
+                        if let Err(error) = generate_with_model(
+                            &args.prompt,
+                            &mut target_model,
+                            &tokenizer,
+                            args.max_tokens,
+                            args.temperature,
+                            args.top_p,
+                            args.top_k,
+                            &mut writer,
+                        ) {
+                            eprintln!("generation failed: {error}");
+                        }
+                        return;
+                    }
+                    if draft_model.vocab_size() != target_model.vocab_size() {
+                        eprintln!(
+                            "DFlash draft vocab ({}) does not match target vocab ({}) after borrowing target IO",
+                            draft_model.vocab_size(),
+                            target_model.vocab_size()
+                        );
+                        return;
+                    }
+                    eprintln!(
+                        "using DFlash speculative decoding: target={} draft={} draft_tokens={}",
+                        model_path.display(),
+                        draft_model_path.display(),
+                        args.draft_tokens
+                    );
+                    if let Err(error) = generate_with_dflash_draft(
+                        &args.prompt,
+                        &mut target_model,
+                        &mut draft_model,
+                        &tokenizer,
+                        args.max_tokens,
+                        args.temperature,
+                        args.top_p,
+                        args.top_k,
+                        args.draft_tokens,
+                        &mut writer,
+                    ) {
+                        eprintln!("generation failed: {error}");
+                    }
+                    return;
+                }
+
                 let mut model: Box<dyn Model> = if is_dflash {
                     let dflash_config = oxidize_core::dflash::DFlashConfig::from_gguf(&mapped);
                     match oxidize_core::dflash::DFlashDraftModel::load_from_gguf(
                         &mapped,
                         dflash_config,
                     ) {
-                        Ok(m) => Box::new(m),
+                        Ok(mut m) => {
+                            if (!m.output.is_loaded() || !m.tok_embeddings.is_loaded())
+                                && let Some(io_model_path) = args.tokenizer_model.as_deref()
+                            {
+                                match loader.load(io_model_path) {
+                                    Ok(io_mapped) => {
+                                        if let Err(error) = m.load_external_io_from_gguf(&io_mapped)
+                                        {
+                                            eprintln!(
+                                                "failed to borrow DFlash IO tensors from {}: {error}",
+                                                io_model_path.display()
+                                            );
+                                            return;
+                                        }
+                                        eprintln!(
+                                            "borrowed DFlash token embeddings/output from {} for smoke-test generation",
+                                            io_model_path.display()
+                                        );
+                                    }
+                                    Err(error) => {
+                                        eprintln!(
+                                            "failed to load DFlash IO model {}: {error}",
+                                            io_model_path.display()
+                                        );
+                                        return;
+                                    }
+                                }
+                            }
+                            if !m.output.is_loaded() {
+                                eprintln!(
+                                    "DFlash draft GGUF is still missing an output projection/logits head; pass --tokenizer-model with a GGUF that has output.weight."
+                                );
+                                return;
+                            }
+                            Box::new(m)
+                        }
                         Err(error) => {
                             eprintln!("failed to load DFlash model: {error}");
                             return;

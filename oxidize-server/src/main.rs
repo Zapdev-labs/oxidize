@@ -9,8 +9,9 @@ use clap::Parser;
 
 use oxidize_server::{
     AppState, Args, AuthConfig, BatchMode, ContinuousBatcher, RequestLimitConfig, RequestLimiter,
-    audit::AuditLogger, metrics::MetricsRegistry, shutdown::serve_with_graceful_shutdown,
-    build_app_with_state, build_paged_runtime, load_model_runtime, mesh_cluster::MeshClusterState,
+    audit::AuditLogger, build_app_with_state, build_paged_runtime, load_model_runtime,
+    mesh_cluster::MeshClusterState, metrics::MetricsRegistry,
+    shutdown::serve_with_graceful_shutdown,
 };
 
 #[tokio::main]

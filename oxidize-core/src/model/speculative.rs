@@ -191,10 +191,7 @@ impl<'a, T: Model> SpeculativeDecoder<'a, T> {
     /// Generate tokens from a prompt using speculative decoding.
     ///
     /// Returns all generated tokens (not including the prompt).
-    pub fn generate(
-        &mut self,
-        prompt_tokens: &[Token],
-    ) -> Result<Vec<Token>, SpeculativeError> {
+    pub fn generate(&mut self, prompt_tokens: &[Token]) -> Result<Vec<Token>, SpeculativeError> {
         let mut generated = Vec::with_capacity(self.config.max_new_tokens);
 
         // Prefill: run prompt through target model
@@ -219,8 +216,7 @@ impl<'a, T: Model> SpeculativeDecoder<'a, T> {
     }
 
     /// Generate a single token, using speculative decoding when possible.
-    fn generate_one_token(&mut self,
-    ) -> Result<Option<Token>, SpeculativeError> {
+    fn generate_one_token(&mut self) -> Result<Option<Token>, SpeculativeError> {
         // Emit buffered tokens first
         if let Some(token) = self.emit_buffer.pop_front() {
             return Ok(Some(token));
@@ -259,9 +255,7 @@ impl<'a, T: Model> SpeculativeDecoder<'a, T> {
     }
 
     /// Run the prompt through the target model to initialize KV caches.
-    fn prefill(&mut self,
-        prompt_tokens: &[Token],
-    ) -> Result<(), SpeculativeError> {
+    fn prefill(&mut self, prompt_tokens: &[Token]) -> Result<(), SpeculativeError> {
         // Run target model prefill
         let batch_size = 256;
         for chunk in prompt_tokens.chunks(batch_size) {
@@ -279,12 +273,8 @@ impl<'a, T: Model> SpeculativeDecoder<'a, T> {
             )
             .map_err(SpeculativeError::Model)?;
 
-        let token = sample(
-            &last_logits,
-            self.config.sampling,
-            fastrand::f32(),
-        )
-        .map_err(SpeculativeError::Sampling)?;
+        let token = sample(&last_logits, self.config.sampling, fastrand::f32())
+            .map_err(SpeculativeError::Sampling)?;
 
         self.recent_tokens.push(token);
         self.emit_buffer.push_back(token);
@@ -305,11 +295,12 @@ impl<'a, T: Model> SpeculativeDecoder<'a, T> {
     /// 1. Draft model generates K tokens autoregressively.
     /// 2. Target model verifies all K+1 positions in parallel (batched).
     /// 3. Accept/reject based on probability ratios.
-    fn run_speculative_step(
-        &mut self,
-    ) -> Result<Option<Token>, SpeculativeError> {
+    fn run_speculative_step(&mut self) -> Result<Option<Token>, SpeculativeError> {
         let k = self.config.draft_tokens_per_step;
-        let start_token = *self.recent_tokens.last().ok_or(SpeculativeError::NoContext)?;
+        let start_token = *self
+            .recent_tokens
+            .last()
+            .ok_or(SpeculativeError::NoContext)?;
 
         // 1. Draft model generates K tokens
         let mut draft_tokens = Vec::with_capacity(k);
@@ -345,15 +336,16 @@ impl<'a, T: Model> SpeculativeDecoder<'a, T> {
         let verify_start = self.target_session.consumed_tokens();
         let start_logits = self
             .target_model
-            .forward(&[if self.last_token_pending_kv {
-                start_token
-            } else {
-                // Start token is already in cache, just get next logits
-                start_token
-            }],
-            &mut self.target_session,
-        )
-        .map_err(SpeculativeError::Model)?;
+            .forward(
+                &[if self.last_token_pending_kv {
+                    start_token
+                } else {
+                    // Start token is already in cache, just get next logits
+                    start_token
+                }],
+                &mut self.target_session,
+            )
+            .map_err(SpeculativeError::Model)?;
         target_logits.push(start_logits);
 
         // Subsequent positions: verify each draft token
@@ -369,10 +361,8 @@ impl<'a, T: Model> SpeculativeDecoder<'a, T> {
 
             let logits = self
                 .target_model
-                .forward(&verify_sequence[..i + 1],
-                &mut self.target_session,
-            )
-            .map_err(SpeculativeError::Model)?;
+                .forward(&verify_sequence[..i + 1], &mut self.target_session)
+                .map_err(SpeculativeError::Model)?;
             target_logits.push(logits);
         }
 
@@ -433,21 +423,23 @@ impl<'a, T: Model> SpeculativeDecoder<'a, T> {
     }
 
     /// Run direct target model sampling without speculative decoding.
-    fn run_fallback_step(
-        &mut self,
-    ) -> Result<Option<Token>, SpeculativeError> {
-        let last_token = *self.recent_tokens.last().ok_or(SpeculativeError::NoContext)?;
+    fn run_fallback_step(&mut self) -> Result<Option<Token>, SpeculativeError> {
+        let last_token = *self
+            .recent_tokens
+            .last()
+            .ok_or(SpeculativeError::NoContext)?;
 
         let logits = self
             .target_model
-            .forward(&[if self.last_token_pending_kv {
-                last_token
-            } else {
-                last_token
-            }],
-            &mut self.target_session,
-        )
-        .map_err(SpeculativeError::Model)?;
+            .forward(
+                &[if self.last_token_pending_kv {
+                    last_token
+                } else {
+                    last_token
+                }],
+                &mut self.target_session,
+            )
+            .map_err(SpeculativeError::Model)?;
 
         let token = sample(&logits, self.config.sampling, fastrand::f32())
             .map_err(SpeculativeError::Sampling)?;
@@ -555,9 +547,9 @@ impl Default for SpeculativeConfigBuilder {
 pub fn load_draft_model_for_speculative(
     model_path: &std::path::Path,
 ) -> Result<DFlashDraftModel, String> {
-    use crate::model_loader::{GgufModelLoader, ModelLoader};
-    use crate::gguf::MappedGgufFile;
     use crate::dflash::DFlashConfig;
+    use crate::gguf::MappedGgufFile;
+    use crate::model_loader::{GgufModelLoader, ModelLoader};
 
     let loader = GgufModelLoader;
     let mapped: MappedGgufFile = loader

@@ -8,6 +8,38 @@ use crate::tensor::{
     gemv_quantized_f32, rms_norm_f32,
 };
 
+// #region agent log
+fn agent_debug_log(
+    run_id: &str,
+    hypothesis_id: &str,
+    location: &str,
+    message: &str,
+    data: serde_json::Value,
+) {
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0);
+    let payload = serde_json::json!({
+        "sessionId": "49b0b9",
+        "runId": run_id,
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data,
+        "timestamp": timestamp
+    });
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/home/dih/oxidize/.cursor/debug-49b0b9.log")
+    {
+        use std::io::Write;
+        let _ = writeln!(file, "{payload}");
+    }
+}
+// #endregion
+
 /// DFlash configuration matching the HuggingFace config.json.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DFlashConfig {
@@ -55,34 +87,53 @@ impl DFlashConfig {
         use crate::gguf::GgufMetadataValue;
         let metadata = &mapped.parsed().metadata;
         let arch = mapped.parsed().architecture().unwrap_or("dflash-draft");
-        let arch_key = |suffix: &str| format!("{arch}.{suffix}");
+        let namespaced_key = |namespace: &str, suffix: &str| format!("{namespace}.{suffix}");
+        let arch_key = |suffix: &str| namespaced_key(arch, suffix);
         let arch_u32 = |suffix: &str| {
-            metadata.get(&arch_key(suffix)).and_then(|v| match v {
-                GgufMetadataValue::Uint8(x) => Some(*x as u32),
-                GgufMetadataValue::Uint16(x) => Some(*x as u32),
-                GgufMetadataValue::Uint32(x) => Some(*x),
-                GgufMetadataValue::Uint64(x) => (*x).try_into().ok(),
-                GgufMetadataValue::Int8(x) if *x >= 0 => Some(*x as u32),
-                GgufMetadataValue::Int16(x) if *x >= 0 => Some(*x as u32),
-                GgufMetadataValue::Int32(x) if *x >= 0 => Some(*x as u32),
-                GgufMetadataValue::Int64(x) if *x >= 0 => (*x).try_into().ok(),
-                _ => None,
-            })
+            for key in [
+                arch_key(suffix),
+                namespaced_key("dflash", suffix),
+                namespaced_key("dflash-draft", suffix),
+            ] {
+                if let Some(value) = metadata.get(&key).and_then(|v| match v {
+                    GgufMetadataValue::Uint8(x) => Some(*x as u32),
+                    GgufMetadataValue::Uint16(x) => Some(*x as u32),
+                    GgufMetadataValue::Uint32(x) => Some(*x),
+                    GgufMetadataValue::Uint64(x) => (*x).try_into().ok(),
+                    GgufMetadataValue::Int8(x) if *x >= 0 => Some(*x as u32),
+                    GgufMetadataValue::Int16(x) if *x >= 0 => Some(*x as u32),
+                    GgufMetadataValue::Int32(x) if *x >= 0 => Some(*x as u32),
+                    GgufMetadataValue::Int64(x) if *x >= 0 => (*x).try_into().ok(),
+                    _ => None,
+                }) {
+                    return Some(value);
+                }
+            }
+            None
         };
         let arch_f32 = |suffix: &str| {
-            metadata.get(&arch_key(suffix)).and_then(|v| match v {
-                GgufMetadataValue::Float32(x) => Some(*x),
-                GgufMetadataValue::Float64(x) => Some(*x as f32),
-                GgufMetadataValue::Int8(x) => Some(*x as f32),
-                GgufMetadataValue::Int16(x) => Some(*x as f32),
-                GgufMetadataValue::Int32(x) => Some(*x as f32),
-                GgufMetadataValue::Int64(x) => Some(*x as f32),
-                GgufMetadataValue::Uint8(x) => Some(*x as f32),
-                GgufMetadataValue::Uint16(x) => Some(*x as f32),
-                GgufMetadataValue::Uint32(x) => Some(*x as f32),
-                GgufMetadataValue::Uint64(x) => Some(*x as f32),
-                _ => None,
-            })
+            for key in [
+                arch_key(suffix),
+                namespaced_key("dflash", suffix),
+                namespaced_key("dflash-draft", suffix),
+            ] {
+                if let Some(value) = metadata.get(&key).and_then(|v| match v {
+                    GgufMetadataValue::Float32(x) => Some(*x),
+                    GgufMetadataValue::Float64(x) => Some(*x as f32),
+                    GgufMetadataValue::Int8(x) => Some(*x as f32),
+                    GgufMetadataValue::Int16(x) => Some(*x as f32),
+                    GgufMetadataValue::Int32(x) => Some(*x as f32),
+                    GgufMetadataValue::Int64(x) => Some(*x as f32),
+                    GgufMetadataValue::Uint8(x) => Some(*x as f32),
+                    GgufMetadataValue::Uint16(x) => Some(*x as f32),
+                    GgufMetadataValue::Uint32(x) => Some(*x as f32),
+                    GgufMetadataValue::Uint64(x) => Some(*x as f32),
+                    _ => None,
+                }) {
+                    return Some(value);
+                }
+            }
+            None
         };
 
         let hidden_size = arch_u32("hidden_size")
@@ -91,8 +142,6 @@ impl DFlashConfig {
         let num_hidden_layers = arch_u32("num_hidden_layers")
             .or_else(|| arch_u32("block_count"))
             .unwrap_or(8) as usize;
-        let num_target_layers =
-            arch_u32("num_target_layers").unwrap_or(num_hidden_layers as u32) as usize;
         let block_size = arch_u32("block_size").unwrap_or(16) as usize;
         let mask_token_id = arch_u32("mask_token_id").unwrap_or(151665);
         let vocab_size = arch_u32("vocab_size")
@@ -114,23 +163,81 @@ impl DFlashConfig {
             .or_else(|| arch_f32("rope.freq_base"))
             .unwrap_or(10000.0);
 
-        let target_layer_ids = metadata
-            .get(&arch_key("target_layer_ids"))
+        let parse_target_layer_ids = |key: &str| {
+            metadata
+                .get(key)
+                .and_then(|v| match v {
+                    GgufMetadataValue::Array(arr) => arr
+                        .values
+                        .iter()
+                        .map(|elem| match elem {
+                            GgufMetadataValue::Int32(x) if *x >= 0 => (*x).try_into().ok(),
+                            GgufMetadataValue::Int64(x) if *x >= 0 => (*x).try_into().ok(),
+                            GgufMetadataValue::Uint32(x) => Some(*x as usize),
+                            GgufMetadataValue::Uint64(x) => (*x).try_into().ok(),
+                            _ => None,
+                        })
+                        .collect::<Option<Vec<_>>>(),
+                    _ => None,
+                })
+                .filter(|ids| !ids.is_empty())
+        };
+        let target_layer_ids_from_metadata = parse_target_layer_ids(&arch_key("target_layer_ids"))
+            .or_else(|| parse_target_layer_ids(&namespaced_key("dflash", "target_layer_ids")))
+            .or_else(|| {
+                parse_target_layer_ids(&namespaced_key("dflash-draft", "target_layer_ids"))
+            });
+        let num_target_layers_from_fc = mapped
+            .mapped_tensor_infos()
+            .iter()
+            .find(|tensor| {
+                matches!(
+                    tensor.name.as_str(),
+                    "fc.weight" | "dflash_fc.weight" | "model.fc.weight"
+                )
+            })
             .and_then(|v| match v {
-                GgufMetadataValue::Array(arr) => arr
-                    .values
-                    .iter()
-                    .map(|elem| match elem {
-                        GgufMetadataValue::Int32(x) => Some(*x as usize),
-                        GgufMetadataValue::Int64(x) => Some(*x as usize),
-                        GgufMetadataValue::Uint32(x) => Some(*x as usize),
-                        GgufMetadataValue::Uint64(x) => Some(*x as usize),
-                        _ => None,
-                    })
-                    .collect::<Option<Vec<_>>>(),
+                tensor if tensor.dimensions.len() == 2 => {
+                    let input_width = tensor.dimensions[0] as usize;
+                    let output_width = tensor.dimensions[1] as usize;
+                    (output_width == hidden_size && input_width.is_multiple_of(hidden_size))
+                        .then_some(input_width / hidden_size)
+                }
                 _ => None,
             })
-            .unwrap_or_else(|| (0..num_target_layers).collect());
+            .filter(|layers| *layers > 0);
+        let num_target_layers = target_layer_ids_from_metadata
+            .as_ref()
+            .map(Vec::len)
+            .or(num_target_layers_from_fc)
+            .or_else(|| arch_u32("num_target_layers").map(|layers| layers as usize))
+            .unwrap_or(num_hidden_layers);
+        let target_layer_ids =
+            target_layer_ids_from_metadata.unwrap_or_else(|| (0..num_target_layers).collect());
+
+        // #region agent log
+        agent_debug_log(
+            "initial",
+            "H1_CONFIG_METADATA",
+            "oxidize-core/src/model/dflash.rs:DFlashConfig::from_gguf",
+            "derived dflash config from GGUF metadata",
+            serde_json::json!({
+                "architecture": arch,
+                "hidden_size": hidden_size,
+                "num_hidden_layers": num_hidden_layers,
+                "num_target_layers": num_target_layers,
+                "block_size": block_size,
+                "mask_token_id": mask_token_id,
+                "vocab_size": vocab_size,
+                "num_attention_heads": num_attention_heads,
+                "num_key_value_heads": num_key_value_heads,
+                "intermediate_size": intermediate_size,
+                "target_layer_ids_len": target_layer_ids.len(),
+                "target_layer_ids_first": target_layer_ids.iter().take(8).copied().collect::<Vec<_>>(),
+                "has_target_layer_ids_metadata": metadata.contains_key(&arch_key("target_layer_ids"))
+            }),
+        );
+        // #endregion
 
         Self {
             hidden_size,
@@ -238,6 +345,14 @@ impl F32Weight {
         !self.data.is_empty() || self.quant.is_some()
     }
 
+    fn input_dim(&self) -> usize {
+        self.quant.as_ref().map_or(self.cols, |q| q.in_dim)
+    }
+
+    fn output_dim(&self) -> usize {
+        self.quant.as_ref().map_or(self.rows, |q| q.out_dim)
+    }
+
     pub fn gemv(&self, input: &[f32], output: &mut [f32]) -> Result<(), String> {
         if let Some(q) = &self.quant {
             gemv_quantized_f32(q.qtype, &q.bytes, q.out_dim, q.in_dim, input, output)
@@ -305,6 +420,16 @@ impl F32Weight {
     }
 }
 
+fn transpose_f32(data: &[f32], gguf_rows: usize, gguf_cols: usize) -> Vec<f32> {
+    let mut result = vec![0.0f32; data.len()];
+    for r in 0..gguf_rows {
+        for c in 0..gguf_cols {
+            result[c * gguf_rows + r] = data[r * gguf_cols + c];
+        }
+    }
+    result
+}
+
 /// Whether the fused on-the-fly quantized GEMV kernel supports `qtype` for an
 /// input dimension of `in_dim`. The kernels iterate full quantization blocks,
 /// so `in_dim` must be block-aligned.
@@ -319,7 +444,7 @@ fn quantized_gemv_supported(qtype: GgufQuantizationType, in_dim: usize) -> bool 
     }
 }
 
-/// DFlash attention layer: q_proj on noise, k/v_proj on concatenated target+noise.
+/// DFlash attention layer: q_proj on noise, k/v_proj on target context and noise.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DFlashAttentionLayer {
     pub q_proj: F32Weight,
@@ -379,9 +504,9 @@ impl Default for DFlashKvLayerCache {
 /// DFlash draft model.
 ///
 /// Forward pass:
-/// 1. noise_embedding → target_hidden fusion via fc layer
-/// 2. hidden_norm
-/// 3. layer loop (custom attention + MLP)
+/// 1. token embedding becomes the noise stream
+/// 2. optional target hidden states are projected into a context stream
+/// 3. layer loop lets noise attend to target context plus draft KV cache
 /// 4. final norm
 /// 5. output projection
 #[derive(Debug, Clone, PartialEq)]
@@ -637,19 +762,6 @@ impl DFlashDraftModel {
 
         let tensor_infos = mapped.mapped_tensor_infos();
 
-        // GGUF stores weight matrices in row-major with dims [output, input].
-        // gemv_f32_transposed expects column-major (transposed) layout with
-        // rows = input_len, cols = output_len, so we need to transpose.
-        fn transpose_f32(data: &[f32], gguf_rows: usize, gguf_cols: usize) -> Vec<f32> {
-            let mut result = vec![0.0f32; data.len()];
-            for r in 0..gguf_rows {
-                for c in 0..gguf_cols {
-                    result[c * gguf_rows + r] = data[r * gguf_cols + c];
-                }
-            }
-            result
-        }
-
         type LoadF32Result = Result<Option<(Vec<f32>, Vec<u64>)>, String>;
         let load_f32_with_dims = |name: &str| -> LoadF32Result {
             let info = match tensor_infos.iter().find(|t| t.name == name) {
@@ -747,32 +859,88 @@ impl DFlashDraftModel {
                 None => Ok(F32Weight::from_slice(Vec::new(), 0, 0)),
             }
         };
+        let load_proj_any = |names: &[&str]| -> Result<F32Weight, String> {
+            for name in names {
+                let weight = load_proj(name)?;
+                if weight.is_loaded() {
+                    return Ok(weight);
+                }
+            }
+            Ok(F32Weight::from_slice(Vec::new(), 0, 0))
+        };
+        let load_f32_any = |names: &[&str]| -> LoadF32Result {
+            for name in names {
+                if let Some(tensor) = load_f32_with_dims(name)? {
+                    return Ok(Some(tensor));
+                }
+            }
+            Ok(None)
+        };
 
         // Load FC fusion layer (merges target model hidden states with draft hidden).
-        let fc = load_proj("dflash_fc.weight")?;
+        let fc = load_proj_any(&["fc.weight", "dflash_fc.weight", "model.fc.weight"])?;
         if fc.is_loaded() {
             model.fc = fc;
         }
 
         // Load hidden norm.
-        if let Some((data, _)) = load_f32_with_dims("dflash_hidden_norm.weight")? {
+        if let Some((data, _)) = load_f32_any(&[
+            "hidden_norm.weight",
+            "dflash_hidden_norm.weight",
+            "model.hidden_norm.weight",
+        ])? {
             model.hidden_norm = data;
         }
 
         // Load final norm (output_norm in GGUF).
-        if let Some((data, _)) = load_f32_with_dims("output_norm.weight")? {
+        if let Some((data, _)) =
+            load_f32_any(&["output_norm.weight", "norm.weight", "model.norm.weight"])?
+        {
             model.norm = data;
         }
 
-        let output = load_proj("lm_head.weight")?;
+        let output = load_proj_any(&["lm_head.weight", "output.weight"])?;
         if output.is_loaded() {
             model.output = output;
         }
 
-        let tok_embeddings = load_proj("model.embed_tokens.weight")?;
+        let tok_embeddings = load_proj_any(&[
+            "model.embed_tokens.weight",
+            "tok_embeddings.weight",
+            "token_embd.weight",
+        ])?;
         if tok_embeddings.is_loaded() {
             model.tok_embeddings = tok_embeddings;
         }
+
+        // #region agent log
+        agent_debug_log(
+            "initial",
+            "H2_TENSOR_NAMES,H3_QUANT_WEIGHT_LAYOUT,H5_OUTPUT_PROJECTION",
+            "oxidize-core/src/model/dflash.rs:DFlashDraftModel::load_from_gguf",
+            "loaded top-level dflash tensors",
+            serde_json::json!({
+                "tensor_count": tensor_infos.len(),
+                "fc_loaded": model.fc.is_loaded(),
+                "fc_quant": model.fc.quant.is_some(),
+                "fc_rows": model.fc.rows,
+                "fc_cols": model.fc.cols,
+                "hidden_norm_len": model.hidden_norm.len(),
+                "norm_len": model.norm.len(),
+                "output_loaded": model.output.is_loaded(),
+                "output_quant": model.output.quant.is_some(),
+                "output_rows": model.output.rows,
+                "output_cols": model.output.cols,
+                "tok_embeddings_loaded": model.tok_embeddings.is_loaded(),
+                "tok_embeddings_quant": model.tok_embeddings.quant.is_some(),
+                "tok_embeddings_rows": model.tok_embeddings.rows,
+                "tok_embeddings_cols": model.tok_embeddings.cols,
+                "has_lm_head_tensor": tensor_infos.iter().any(|tensor| tensor.name == "lm_head.weight"),
+                "has_output_tensor": tensor_infos.iter().any(|tensor| tensor.name == "output.weight"),
+                "has_embed_tokens_tensor": tensor_infos.iter().any(|tensor| tensor.name == "model.embed_tokens.weight")
+            }),
+        );
+        // #endregion
 
         // Load layers using llama.cpp blk.N naming.
         for layer_idx in 0..config.num_hidden_layers {
@@ -781,10 +949,14 @@ impl DFlashDraftModel {
             let input_layernorm = load_f32_with_dims(&format!("{}.attn_norm.weight", prefix))?
                 .map(|(d, _)| d)
                 .unwrap_or_else(|| vec![1.0_f32; config.hidden_size]);
-            let post_attention_layernorm =
-                load_f32_with_dims(&format!("{}.post_attention_norm.weight", prefix))?
-                    .map(|(d, _)| d)
-                    .unwrap_or_else(|| vec![1.0_f32; config.hidden_size]);
+            let post_attention_norm_name = format!("{}.post_attention_norm.weight", prefix);
+            let ffn_norm_name = format!("{}.ffn_norm.weight", prefix);
+            let post_attention_layernorm = match load_f32_with_dims(&post_attention_norm_name)? {
+                Some((data, _)) => data,
+                None => load_f32_with_dims(&ffn_norm_name)?
+                    .map(|(data, _)| data)
+                    .unwrap_or_else(|| vec![1.0_f32; config.hidden_size]),
+            };
 
             let q_proj = load_proj(&format!("{}.attn_q.weight", prefix))?;
             let k_proj = load_proj(&format!("{}.attn_k.weight", prefix))?;
@@ -822,7 +994,181 @@ impl DFlashDraftModel {
             model.layers.push(layer);
         }
 
+        // #region agent log
+        agent_debug_log(
+            "initial",
+            "H2_TENSOR_NAMES,H3_QUANT_WEIGHT_LAYOUT",
+            "oxidize-core/src/model/dflash.rs:DFlashDraftModel::load_from_gguf",
+            "loaded dflash decoder layers",
+            serde_json::json!({
+                "layers_loaded": model.layers.len(),
+                "expected_layers": config.num_hidden_layers,
+                "first_layer_q_loaded": model.layers.first().is_some_and(|layer| layer.attention.q_proj.is_loaded()),
+                "first_layer_k_loaded": model.layers.first().is_some_and(|layer| layer.attention.k_proj.is_loaded()),
+                "first_layer_v_loaded": model.layers.first().is_some_and(|layer| layer.attention.v_proj.is_loaded()),
+                "first_layer_o_loaded": model.layers.first().is_some_and(|layer| layer.attention.o_proj.is_loaded()),
+                "first_layer_mlp_gate_loaded": model.layers.first().is_some_and(|layer| layer.mlp_gate.is_loaded()),
+                "first_layer_mlp_up_loaded": model.layers.first().is_some_and(|layer| layer.mlp_up.is_loaded()),
+                "first_layer_mlp_down_loaded": model.layers.first().is_some_and(|layer| layer.mlp_down.is_loaded())
+            }),
+        );
+        // #endregion
+
         Ok(model)
+    }
+
+    /// Borrow token embeddings and output projection from a compatible-ish
+    /// causal LM GGUF. This is useful for smoke-testing draft-only DFlash GGUFs
+    /// that omit standalone IO tensors. If widths differ, forward/logits use
+    /// the overlapping prefix and zero-fill the rest.
+    pub fn load_external_io_from_gguf(&mut self, mapped: &MappedGgufFile) -> Result<(), String> {
+        let tensor_infos = mapped.mapped_tensor_infos();
+        let bytes_all = mapped.bytes();
+
+        type LoadF32Result = Result<Option<(Vec<f32>, Vec<u64>)>, String>;
+        let load_f32_with_dims = |name: &str| -> LoadF32Result {
+            let info = match tensor_infos.iter().find(|t| t.name == name) {
+                Some(i) => i,
+                None => return Ok(None),
+            };
+            let qtype = GgufQuantizationType::from_ggml_type(info.ggml_type);
+            let value_count: usize = info.dimensions.iter().map(|&d| d as usize).product();
+            let qsize = quantized_size(qtype, value_count)
+                .map_err(|e| format!("quantized_size for {}: {:?}", name, e))?;
+            let offset = info.absolute_offset as usize;
+            let end = offset.checked_add(qsize).ok_or_else(|| {
+                format!("tensor {name}: offset overflow (offset={offset}, size={qsize})")
+            })?;
+            let bytes = mapped.bytes();
+            if end > bytes.len() {
+                return Err(format!(
+                    "tensor {name}: data out of bounds (offset={offset}, size={qsize}, file_len={})",
+                    bytes.len()
+                ));
+            }
+            let mut f32_data = vec![0.0_f32; value_count];
+            dequantize_scalar(qtype, &bytes[offset..end], &mut f32_data)
+                .map_err(|e| format!("dequantize_scalar for {}: {:?}", name, e))?;
+            Ok(Some((f32_data, info.dimensions.clone())))
+        };
+
+        let load_proj = |name: &str| -> Result<F32Weight, String> {
+            let info = match tensor_infos.iter().find(|t| t.name == name) {
+                Some(i) => i,
+                None => return Ok(F32Weight::from_slice(Vec::new(), 0, 0)),
+            };
+            if info.dimensions.len() != 2 {
+                return Ok(F32Weight::from_slice(Vec::new(), 0, 0));
+            }
+            let qtype = GgufQuantizationType::from_ggml_type(info.ggml_type);
+            let in_dim = info.dimensions[0] as usize;
+            let out_dim = info.dimensions[1] as usize;
+            if quantized_gemv_supported(qtype, in_dim) {
+                let value_count = out_dim * in_dim;
+                let qsize = quantized_size(qtype, value_count)
+                    .map_err(|e| format!("quantized_size for {}: {:?}", name, e))?;
+                let offset = info.absolute_offset as usize;
+                let end = offset.checked_add(qsize).ok_or_else(|| {
+                    format!("tensor {name}: offset overflow (offset={offset}, size={qsize})")
+                })?;
+                if end > bytes_all.len() {
+                    return Err(format!(
+                        "tensor {name}: data out of bounds (offset={offset}, size={qsize}, file_len={})",
+                        bytes_all.len()
+                    ));
+                }
+                return Ok(F32Weight::from_quantized(
+                    bytes_all[offset..end].to_vec(),
+                    qtype,
+                    out_dim,
+                    in_dim,
+                ));
+            }
+            match load_f32_with_dims(name)? {
+                Some((data, _)) => Ok(F32Weight::from_slice(
+                    transpose_f32(&data, in_dim, out_dim),
+                    out_dim,
+                    in_dim,
+                )),
+                None => Ok(F32Weight::from_slice(Vec::new(), 0, 0)),
+            }
+        };
+
+        let load_row_weight = |name: &str| -> Result<F32Weight, String> {
+            let info = match tensor_infos.iter().find(|t| t.name == name) {
+                Some(i) => i,
+                None => return Ok(F32Weight::from_slice(Vec::new(), 0, 0)),
+            };
+            if info.dimensions.len() != 2 {
+                return Ok(F32Weight::from_slice(Vec::new(), 0, 0));
+            }
+            let qtype = GgufQuantizationType::from_ggml_type(info.ggml_type);
+            let in_dim = info.dimensions[0] as usize;
+            let out_dim = info.dimensions[1] as usize;
+            let value_count = out_dim * in_dim;
+            let qsize = quantized_size(qtype, value_count)
+                .map_err(|e| format!("quantized_size for {}: {:?}", name, e))?;
+            let offset = info.absolute_offset as usize;
+            let end = offset.checked_add(qsize).ok_or_else(|| {
+                format!("tensor {name}: offset overflow (offset={offset}, size={qsize})")
+            })?;
+            if end <= bytes_all.len() {
+                return Ok(F32Weight::from_quantized(
+                    bytes_all[offset..end].to_vec(),
+                    qtype,
+                    out_dim,
+                    in_dim,
+                ));
+            }
+            Err(format!(
+                "tensor {name}: data out of bounds (offset={offset}, size={qsize}, file_len={})",
+                bytes_all.len()
+            ))
+        };
+
+        for name in ["lm_head.weight", "output.weight"] {
+            let weight = load_proj(name)?;
+            if weight.is_loaded() {
+                self.output = weight;
+                self.config.vocab_size = self.output.output_dim();
+                break;
+            }
+        }
+
+        for name in [
+            "model.embed_tokens.weight",
+            "tok_embeddings.weight",
+            "token_embd.weight",
+        ] {
+            let weight = load_row_weight(name)?;
+            if weight.is_loaded() {
+                self.tok_embeddings = weight;
+                if !self.output.is_loaded() {
+                    self.config.vocab_size = self.tok_embeddings.output_dim();
+                }
+                break;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn fill_token_embedding(&self, token: u32, output: &mut [f32]) -> Result<(), String> {
+        if !self.tok_embeddings.is_loaded() {
+            return Ok(());
+        }
+        let vocab_size = self.tok_embeddings.output_dim().max(1);
+        let idx = (token as usize).min(vocab_size - 1);
+        let embedding_width = self.tok_embeddings.input_dim();
+        if embedding_width == output.len() {
+            return self.tok_embeddings.row(idx, output);
+        }
+
+        let mut embedding = vec![0.0_f32; embedding_width];
+        self.tok_embeddings.row(idx, &mut embedding)?;
+        let copy_len = output.len().min(embedding.len());
+        output[..copy_len].copy_from_slice(&embedding[..copy_len]);
+        Ok(())
     }
 
     /// Forward pass for a single token with target_hidden fusion.
@@ -838,13 +1184,9 @@ impl DFlashDraftModel {
         let mut hidden = vec![0.0_f32; h];
 
         // Token embedding lookup.
-        if self.tok_embeddings.is_loaded() {
-            let idx = (token as usize).min(self.config.vocab_size - 1);
-            self.tok_embeddings.row(idx, &mut hidden)?;
-        }
+        self.fill_token_embedding(token, &mut hidden)?;
 
-        // If target_hidden provided, fuse via FC layer.
-        if let Some(th) = target_hidden
+        let target_context = if let Some(th) = target_hidden
             && self.fc.is_loaded()
         {
             let mut fused = vec![0.0_f32; h];
@@ -854,24 +1196,22 @@ impl DFlashDraftModel {
                     *fused_i += self.fc_bias[i];
                 }
             }
-            // Add residual: noise_embedding + fc(target_hidden)
-            for (hidden_i, fused_i) in hidden.iter_mut().zip(fused.iter()).take(h) {
-                *hidden_i += *fused_i;
+            if !self.hidden_norm.is_empty() {
+                let mut context = fused.clone();
+                rms_norm_f32(
+                    &fused,
+                    &self.hidden_norm,
+                    self.config.rms_norm_eps,
+                    &mut context,
+                )
+                .map_err(|e| format!("hidden_norm: {:?}", e))?;
+                Some(context)
+            } else {
+                Some(fused)
             }
-        }
-
-        // Hidden norm.
-        if !self.hidden_norm.is_empty() {
-            let mut normed_hidden = hidden.clone();
-            rms_norm_f32(
-                &hidden,
-                &self.hidden_norm,
-                self.config.rms_norm_eps,
-                &mut normed_hidden,
-            )
-            .map_err(|e| format!("rms_norm: {:?}", e))?;
-            hidden = normed_hidden;
-        }
+        } else {
+            None
+        };
 
         // Layer loop.
         for (layer_idx, layer) in self.layers.iter().enumerate() {
@@ -906,23 +1246,31 @@ impl DFlashDraftModel {
                     layer.attention.q_proj.gemv(&normed, &mut q)?;
                 }
 
-                // K/V projection on concatenated target_hidden + normed hidden.
-                let kv_input = if let Some(th) = target_hidden {
-                    let mut concat = th.to_vec();
-                    concat.extend_from_slice(&normed);
-                    concat
-                } else {
-                    normed.clone()
-                };
-
                 let mut k = vec![0.0_f32; kv_len];
                 let mut v = vec![0.0_f32; kv_len];
                 if layer.attention.k_proj.is_loaded() {
-                    layer.attention.k_proj.gemv(&kv_input, &mut k)?;
+                    layer.attention.k_proj.gemv(&normed, &mut k)?;
                 }
                 if layer.attention.v_proj.is_loaded() {
-                    layer.attention.v_proj.gemv(&kv_input, &mut v)?;
+                    layer.attention.v_proj.gemv(&normed, &mut v)?;
                 }
+                let context_kv = target_context.as_ref().and_then(|context| {
+                    let can_project_context = layer.attention.k_proj.is_loaded()
+                        && layer.attention.v_proj.is_loaded()
+                        && layer.attention.k_proj.input_dim() == context.len()
+                        && layer.attention.v_proj.input_dim() == context.len();
+                    can_project_context.then(|| {
+                        let mut k_ctx = vec![0.0_f32; kv_len];
+                        let mut v_ctx = vec![0.0_f32; kv_len];
+                        layer.attention.k_proj.gemv(context, &mut k_ctx)?;
+                        layer.attention.v_proj.gemv(context, &mut v_ctx)?;
+                        Ok::<_, String>((k_ctx, v_ctx))
+                    })
+                });
+                let mut context_kv = match context_kv {
+                    Some(result) => Some(result?),
+                    None => None,
+                };
 
                 let pos = self.position_offset;
                 let mut head_scratch = vec![0.0_f32; head_dim];
@@ -961,6 +1309,24 @@ impl DFlashDraftModel {
                         k[start..end].copy_from_slice(&head_scratch);
                     }
                 }
+                if let Some((k_ctx, _)) = context_kv.as_mut()
+                    && !layer.attention.k_norm_weight.is_empty()
+                    && layer.attention.k_norm_weight.len() == head_dim
+                {
+                    for kv_h in 0..num_kv_heads {
+                        let start = kv_h * head_dim;
+                        let end = start + head_dim;
+                        head_scratch.fill(0.0_f32);
+                        rms_norm_f32(
+                            &k_ctx[start..end],
+                            &layer.attention.k_norm_weight,
+                            self.config.rms_norm_eps,
+                            &mut head_scratch,
+                        )
+                        .map_err(|e| format!("k_norm ctx: {:?}", e))?;
+                        k_ctx[start..end].copy_from_slice(&head_scratch);
+                    }
+                }
 
                 for h_idx in 0..num_heads {
                     let start = h_idx * head_dim;
@@ -988,8 +1354,28 @@ impl DFlashDraftModel {
                     .map_err(|e| format!("rope k: {:?}", e))?;
                     k[start..start + head_dim].copy_from_slice(&head_scratch);
                 }
+                if let Some((k_ctx, _)) = context_kv.as_mut() {
+                    for kv_h in 0..num_kv_heads {
+                        let start = kv_h * head_dim;
+                        head_scratch.fill(0.0_f32);
+                        apply_rope_f32(
+                            &k_ctx[start..start + head_dim],
+                            pos,
+                            head_dim,
+                            self.config.rope_theta,
+                            &mut head_scratch,
+                        )
+                        .map_err(|e| format!("rope k ctx: {:?}", e))?;
+                        k_ctx[start..start + head_dim].copy_from_slice(&head_scratch);
+                    }
+                }
 
                 let layer_cache = &mut self.kv_cache[layer_idx];
+                if let Some((k_ctx, v_ctx)) = context_kv {
+                    layer_cache.keys.extend_from_slice(&k_ctx);
+                    layer_cache.values.extend_from_slice(&v_ctx);
+                    layer_cache.seq_len += 1;
+                }
                 layer_cache.keys.extend_from_slice(&k);
                 layer_cache.values.extend_from_slice(&v);
                 layer_cache.seq_len += 1;
@@ -1099,11 +1485,29 @@ impl DFlashDraftModel {
 
         // Embedding lookup: hidden[b * h] row-major.
         let mut hidden = vec![0.0_f32; b * h];
-        if !self.tok_embeddings.data.is_empty() {
+        // #region agent log
+        agent_debug_log(
+            "initial",
+            "H3_QUANT_EMBED_PREFILL,H4_RUNTIME_BATCH",
+            "oxidize-core/src/model/dflash.rs:DFlashDraftModel::forward_batch",
+            "entering dflash batched forward embedding path",
+            serde_json::json!({
+                "batch": b,
+                "hidden_size": h,
+                "first_token": tokens.first().copied(),
+                "position_offset_before": self.position_offset,
+                "tok_embeddings_loaded": self.tok_embeddings.is_loaded(),
+                "tok_embeddings_data_len": self.tok_embeddings.data.len(),
+                "tok_embeddings_quant": self.tok_embeddings.quant.is_some(),
+                "tok_embeddings_rows": self.tok_embeddings.rows,
+                "tok_embeddings_cols": self.tok_embeddings.cols,
+                "will_use_f32_embedding_slice": !self.tok_embeddings.data.is_empty()
+            }),
+        );
+        // #endregion
+        if self.tok_embeddings.is_loaded() {
             for (t, &token) in tokens.iter().enumerate() {
-                let idx = (token as usize).min(self.config.vocab_size - 1);
-                let emb = &self.tok_embeddings.data[idx * h..(idx + 1) * h];
-                hidden[t * h..(t + 1) * h].copy_from_slice(emb);
+                self.fill_token_embedding(token, &mut hidden[t * h..(t + 1) * h])?;
             }
         }
 
@@ -1337,14 +1741,30 @@ impl DFlashDraftModel {
                     .to_string(),
             );
         }
-        let mut logits = vec![0.0_f32; self.config.vocab_size];
-        self.output.gemv(hidden, &mut logits)?;
+        let vocab_size = self.output.output_dim();
+        let input_dim = self.output.input_dim();
+        if hidden.len() < input_dim {
+            return Err(format!(
+                "DFlash hidden width {} is smaller than output projection input width {}",
+                hidden.len(),
+                input_dim
+            ));
+        }
+        let mut logits = vec![0.0_f32; vocab_size];
+        self.output.gemv(&hidden[..input_dim], &mut logits)?;
         Ok(logits)
     }
 
     /// Reset KV cache and position offset.
     pub fn reset_cache(&mut self) {
-        self.kv_cache = vec![DFlashKvLayerCache::new(); self.config.num_hidden_layers];
+        if self.kv_cache.len() != self.config.num_hidden_layers {
+            self.kv_cache = vec![DFlashKvLayerCache::new(); self.config.num_hidden_layers];
+        } else {
+            for layer_cache in &mut self.kv_cache {
+                layer_cache.clear();
+            }
+        }
+        self.target_hidden_cache.clear();
         self.position_offset = 0;
     }
 
@@ -1361,6 +1781,24 @@ impl Model for DFlashDraftModel {
         if tokens.is_empty() {
             return Err(ModelError::EmptyInput);
         }
+
+        // #region agent log
+        agent_debug_log(
+            "initial",
+            "H4_RUNTIME_BATCH,H5_OUTPUT_PROJECTION",
+            "oxidize-core/src/model/dflash.rs:Model::forward",
+            "dflash model forward entry",
+            serde_json::json!({
+                "tokens_len": tokens.len(),
+                "session_consumed_tokens": session.consumed_tokens(),
+                "position_offset_before": self.position_offset,
+                "output_loaded": self.output.is_loaded(),
+                "output_quant": self.output.quant.is_some(),
+                "norm_len": self.norm.len(),
+                "layers_loaded": self.layers.len()
+            }),
+        );
+        // #endregion
 
         // Prefer batched prefill: every linear is computed with a single
         // weight scan amortized over all tokens. Falls back to forward_token
@@ -1390,6 +1828,11 @@ impl Model for DFlashDraftModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gguf::{
+        GgufFile, GgufMetadataArray, GgufMetadataType, GgufMetadataValue, GgufTensorInfo,
+        MappedGgufFile,
+    };
+    use std::collections::BTreeMap;
 
     #[test]
     fn dflash_config_defaults() {
@@ -1406,5 +1849,127 @@ mod tests {
         let model = DFlashDraftModel::new(cfg);
         assert_eq!(model.layers.len(), 0);
         assert_eq!(model.config.vocab_size, 248320);
+    }
+
+    #[test]
+    fn dflash_config_uses_real_gguf_target_layer_shape() {
+        let mapped = MappedGgufFile::from_parsed_for_test(GgufFile {
+            version: 3,
+            tensor_count: 1,
+            metadata: BTreeMap::from([
+                (
+                    "general.architecture".to_owned(),
+                    GgufMetadataValue::String("dflash".to_owned()),
+                ),
+                (
+                    "dflash.embedding_length".to_owned(),
+                    GgufMetadataValue::Uint32(2048),
+                ),
+                (
+                    "dflash.block_count".to_owned(),
+                    GgufMetadataValue::Uint32(8),
+                ),
+                (
+                    "dflash.attention.head_count".to_owned(),
+                    GgufMetadataValue::Uint32(32),
+                ),
+                (
+                    "dflash.attention.head_count_kv".to_owned(),
+                    GgufMetadataValue::Uint32(4),
+                ),
+                (
+                    "dflash.feed_forward_length".to_owned(),
+                    GgufMetadataValue::Uint32(6144),
+                ),
+                (
+                    "dflash.vocab_size".to_owned(),
+                    GgufMetadataValue::Uint32(248320),
+                ),
+                (
+                    "dflash.target_layer_ids".to_owned(),
+                    GgufMetadataValue::Array(GgufMetadataArray {
+                        element_type: GgufMetadataType::Int32,
+                        values: [2, 11, 20, 29, 38]
+                            .into_iter()
+                            .map(GgufMetadataValue::Int32)
+                            .collect(),
+                    }),
+                ),
+            ]),
+            tensor_infos: vec![GgufTensorInfo {
+                name: "fc.weight".to_owned(),
+                dimensions: vec![10240, 2048],
+                ggml_type: 8,
+                relative_offset: 0,
+                absolute_offset: 0,
+            }],
+            alignment: 32,
+            data_section_start: 0,
+        });
+
+        let cfg = DFlashConfig::from_gguf(&mapped);
+
+        assert_eq!(cfg.hidden_size, 2048);
+        assert_eq!(cfg.num_hidden_layers, 8);
+        assert_eq!(cfg.num_target_layers, 5);
+        assert_eq!(cfg.target_layer_ids, vec![2, 11, 20, 29, 38]);
+        assert_eq!(cfg.target_hidden_width(), 10240);
+        assert_eq!(cfg.num_key_value_heads, 4);
+        assert_eq!(cfg.intermediate_size, 6144);
+    }
+
+    #[test]
+    fn borrowed_io_allows_mismatched_embedding_and_output_widths() {
+        let mut model = DFlashDraftModel::new(DFlashConfig {
+            hidden_size: 4,
+            num_hidden_layers: 0,
+            num_target_layers: 0,
+            block_size: 1,
+            target_layer_ids: Vec::new(),
+            mask_token_id: 0,
+            vocab_size: 2,
+            num_attention_heads: 1,
+            num_key_value_heads: 1,
+            intermediate_size: 4,
+            rms_norm_eps: 1e-5,
+            rope_theta: 10000.0,
+        });
+        model.tok_embeddings = F32Weight::from_slice(vec![1.0, 2.0, 3.0, 4.0], 2, 2);
+        model.output = F32Weight::from_slice(vec![1.0, 0.0, 0.0, 1.0], 2, 2);
+
+        let mut hidden = vec![0.0; 4];
+        model.fill_token_embedding(0, &mut hidden).unwrap();
+        assert_eq!(hidden, vec![1.0, 2.0, 0.0, 0.0]);
+
+        let logits = model.logits(&hidden).unwrap();
+        assert_eq!(logits, vec![1.0, 2.0]);
+    }
+
+    #[test]
+    fn target_hidden_does_not_residual_add_to_noise_embedding() {
+        let mut model = DFlashDraftModel::new(DFlashConfig {
+            hidden_size: 2,
+            num_hidden_layers: 0,
+            num_target_layers: 1,
+            block_size: 1,
+            target_layer_ids: vec![0],
+            mask_token_id: 0,
+            vocab_size: 1,
+            num_attention_heads: 1,
+            num_key_value_heads: 1,
+            intermediate_size: 2,
+            rms_norm_eps: 1e-6,
+            rope_theta: 10000.0,
+        });
+        model.tok_embeddings = F32Weight::from_slice(vec![1.0, 1.0], 1, 2);
+        model.fc = F32Weight::from_slice(vec![10.0, 0.0, 0.0, 0.0], 2, 2);
+        model.hidden_norm = vec![1.0, 1.0];
+        model.norm = vec![1.0, 1.0];
+
+        let with_context = model.forward_token(0, Some(&[1.0, 0.0])).unwrap();
+        model.reset_cache();
+        let without_context = model.forward_token(0, None).unwrap();
+
+        assert_eq!(with_context, without_context);
     }
 }

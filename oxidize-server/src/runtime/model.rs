@@ -23,6 +23,37 @@ use oxidize_core::{
 
 use crate::cli::Args;
 
+// #region agent log
+fn agent_debug_log_runtime(
+    hypothesis_id: &str,
+    location: &str,
+    message: &str,
+    data: serde_json::Value,
+) {
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0);
+    let payload = serde_json::json!({
+        "sessionId": "49b0b9",
+        "runId": "initial",
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data,
+        "timestamp": timestamp
+    });
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/home/dih/oxidize/.cursor/debug-49b0b9.log")
+    {
+        use std::io::Write;
+        let _ = writeln!(file, "{payload}");
+    }
+}
+// #endregion
+
 pub struct ModelRuntime {
     pub id: String,
     pub tokenizer: LoadedTokenizer,
@@ -133,7 +164,27 @@ pub fn load_model_runtime(args: &Args) -> Result<Option<Arc<ModelRuntime>>, Stri
         .map_err(|error| format!("failed to load model: {error:?}"))?;
     optimize_mapped_model_memory(&mapped, args);
     let metadata = &mapped.parsed().metadata;
-    let is_dflash = mapped.parsed().architecture() == Some("dflash-draft");
+    let is_dflash = matches!(
+        mapped.parsed().architecture(),
+        Some("dflash" | "dflash-draft")
+    );
+    // #region agent log
+    let mapped_infos = mapped.mapped_tensor_infos();
+    agent_debug_log_runtime(
+        "H0_REPRO_PATH,H2_TENSOR_NAMES,H5_OUTPUT_PROJECTION",
+        "oxidize-server/src/runtime/model.rs:load_model_runtime",
+        "classified GGUF before server model construction",
+        serde_json::json!({
+            "architecture": mapped.parsed().architecture(),
+            "is_dflash": is_dflash,
+            "tensor_count": mapped_infos.len(),
+            "has_lm_head": mapped_infos.iter().any(|tensor| tensor.name == "lm_head.weight"),
+            "has_output": mapped_infos.iter().any(|tensor| tensor.name == "output.weight"),
+            "has_embed_tokens": mapped_infos.iter().any(|tensor| tensor.name == "model.embed_tokens.weight"),
+            "has_tok_embeddings": mapped_infos.iter().any(|tensor| tensor.name == "tok_embeddings.weight")
+        }),
+    );
+    // #endregion
     if args.ctx_size == Some(0) {
         return Err("invalid --ctx-size: must be greater than 0".into());
     }

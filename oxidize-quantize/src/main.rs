@@ -485,7 +485,8 @@ mod tests {
             &input_path,
             &output_path,
             Some(GgufQuantizationType::F32),
-            GgufQuantizationType::F16,
+            Some(GgufQuantizationType::F16),
+            &[],
         )
         .expect("quantization should succeed");
 
@@ -548,8 +549,14 @@ mod tests {
         .expect("tiny GGUF should be written");
         fs::write(&input_path, input).expect("tiny GGUF input should be written");
 
-        quantize_file(&input_path, &output_path, None, GgufQuantizationType::Q8_0)
-            .expect("GGUF quantization should succeed");
+        quantize_file(
+            &input_path,
+            &output_path,
+            None,
+            Some(GgufQuantizationType::Q8_0),
+            &[],
+        )
+        .expect("GGUF quantization should succeed");
 
         let output = fs::read(&output_path).expect("output GGUF should exist");
         let parsed = parse_gguf(&output).expect("output GGUF should parse");
@@ -583,8 +590,14 @@ mod tests {
         let output_path = temp_dir.join("output.bin");
         fs::write(&input_path, [0_u8; 8]).expect("input file should be written");
 
-        let err = quantize_file(&input_path, &output_path, None, GgufQuantizationType::F16)
-            .expect_err("raw input without source should fail");
+        let err = quantize_file(
+            &input_path,
+            &output_path,
+            None,
+            Some(GgufQuantizationType::F16),
+            &[],
+        )
+        .expect_err("raw input without source should fail");
         assert!(err.to_string().contains("--source is required"));
     }
 

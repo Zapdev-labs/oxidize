@@ -1992,6 +1992,34 @@ impl Model for InferenceModel {
             .map_err(|e| ModelError::InferenceFailed(format!("{e:?}")))
     }
 
+    fn forward_many(
+        &mut self,
+        tokens: &[Token],
+        session: &mut Session,
+    ) -> Result<Vec<Logits>, ModelError> {
+        if tokens.is_empty() {
+            return Err(ModelError::EmptyInput);
+        }
+        let requested_total = session.consumed_tokens().saturating_add(tokens.len());
+        if requested_total > self.config.context_size {
+            return Err(ModelError::ContextExceeded {
+                context_size: self.config.context_size,
+                requested_total_tokens: requested_total,
+            });
+        }
+
+        let start_pos = session.consumed_tokens();
+        let mut logits = Vec::with_capacity(tokens.len());
+        for (i, &token) in tokens.iter().enumerate() {
+            let pos = start_pos + i;
+            if let Some(step_logits) = self.forward_single(token, pos, true)? {
+                logits.push(step_logits);
+            }
+        }
+        session.record_tokens(tokens.len());
+        Ok(logits)
+    }
+
     fn forward(&mut self, tokens: &[Token], session: &mut Session) -> Result<Logits, ModelError> {
         if tokens.is_empty() {
             return Err(ModelError::EmptyInput);

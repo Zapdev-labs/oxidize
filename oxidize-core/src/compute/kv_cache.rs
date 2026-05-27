@@ -472,7 +472,10 @@ impl KvCache {
         }
 
         let size = self.config.element_count();
-        let token_slots = self.config.layer_count.saturating_mul(self.config.context_size);
+        let token_slots = self
+            .config
+            .layer_count
+            .saturating_mul(self.config.context_size);
 
         // Convert key storage
         let key_data = match &self.key {

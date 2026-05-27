@@ -11,8 +11,8 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use prometheus::{
-    Counter, CounterVec, Gauge, Histogram, HistogramOpts, HistogramVec, IntCounter, IntGauge,
-    Opts, Registry, TextEncoder, Encoder,
+    Counter, CounterVec, Encoder, Gauge, Histogram, HistogramOpts, HistogramVec, IntCounter,
+    IntGauge, Opts, Registry, TextEncoder,
 };
 
 use crate::app::AppState;
@@ -206,13 +206,7 @@ impl MetricsRegistry {
         })
     }
 
-    pub fn record_request(
-        &self,
-        method: &str,
-        path: &str,
-        status: u16,
-        duration_secs: f64,
-    ) {
+    pub fn record_request(&self, method: &str, path: &str, status: u16, duration_secs: f64) {
         self.requests_total
             .with_label_values(&[method, path, &status.to_string()])
             .inc();
@@ -307,12 +301,9 @@ pub async fn metrics_middleware(
     let status = response.status().as_u16();
 
     state.metrics.requests_in_flight.dec();
-    state.metrics.record_request(
-        method.as_str(),
-        &path,
-        status,
-        duration.as_secs_f64(),
-    );
+    state
+        .metrics
+        .record_request(method.as_str(), &path, status, duration.as_secs_f64());
 
     response
 }
