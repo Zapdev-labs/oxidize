@@ -20,6 +20,7 @@ use oxidize_core::tokenizer::{EncodeOptions, LoadedTokenizer, load_tokenizer_fro
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::io::{self, BufRead, Write};
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::Arc;
@@ -156,9 +157,64 @@ fn print_run_help() {
            oxidize run ./models/model.gguf \"hello\"\n\
            oxidize run Qwen/Qwen2.5-0.5B-Instruct-GGUF --file qwen2.5-0.5b-instruct-q4_k_m.gguf --chat\n\
            oxidize run TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF \"write a haiku\" --max-tokens 128\n\n\
-         `run` also starts the OpenAI-compatible API server at http://127.0.0.1:8080.\n\
-         Common options: --chat, --prompt, --max-tokens, --temperature, --backend, --threads, --api-port"
+         Common options: --chat, --prompt, --max-tokens, --temperature, --backend, --threads"
     );
+}
+
+fn print_serve_help() {
+    println!(
+        "Usage: oxidize serve [model] [options]\n\n\
+         Starts the OpenAI-compatible API server.\n\n\
+         Examples:\n\
+           oxidize serve ./models/Qwen3-4B-Q4_K_M.gguf\n\
+           oxidize serve --host 0.0.0.0 --port 11434\n\
+           oxidize serve ./models/model.gguf --temperature 0 --top-k 1\n\n\
+         Common options: --host, --port, --model, --max-tokens, --temperature, --top-p, --top-k, --threads"
+    );
+}
+
+fn print_ollama_help() {
+    println!(
+        "Usage: oxidize <command> [args]\n\n\
+         Commands:\n\
+           run <model> [prompt]     Run a model locally\n\
+           serve [model]            Start the OpenAI-compatible server\n\
+           list                     List local GGUF models in ./models\n\n\
+         Examples:\n\
+           oxidize run ./models/Qwen3-4B-Q4_K_M.gguf \"hello\"\n\
+           oxidize serve ./models/Qwen3-4B-Q4_K_M.gguf\n\
+           oxidize list"
+    );
+}
+
+fn print_model_list() -> io::Result<()> {
+    let models_dir = std::env::current_dir()?.join("models");
+    let mut rows = Vec::new();
+    if models_dir.is_dir() {
+        for entry in std::fs::read_dir(&models_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"))
+            {
+                let metadata = entry.metadata()?;
+                let size_gib = metadata.len() as f64 / 1024.0 / 1024.0 / 1024.0;
+                rows.push((path, size_gib));
+            }
+        }
+    }
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    println!("{:<48} {:>9} PATH", "NAME", "SIZE");
+    for (path, size_gib) in rows {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("<invalid>");
+        println!("{name:<48} {size_gib:>8.2}G {}", path.display());
+    }
+    Ok(())
 }
 
 fn resolve_model_spec(spec: &str, hf_file: Option<&str>) -> io::Result<PathBuf> {
@@ -221,6 +277,21 @@ where
     I: IntoIterator<Item = OsString>,
 {
     let raw = input.into_iter().collect::<Vec<_>>();
+    match raw.get(1).and_then(|arg| arg.to_str()) {
+        Some("-h" | "--help") => {
+            print_ollama_help();
+            std::process::exit(0);
+        }
+        Some("list" | "ls") => {
+            print_model_list()?;
+            std::process::exit(0);
+        }
+        Some("serve") => return rewrite_serve_args(raw),
+        Some("run") => {}
+        _ => {
+            return Ok(raw);
+        }
+    }
     if raw.get(1).and_then(|arg| arg.to_str()) != Some("run") {
         return Ok(raw);
     }
@@ -306,14 +377,11 @@ where
         ));
     };
     let model_path = resolve_model_spec(&model, hf_file.as_deref())?;
-    rewritten.push("--serve-api".into());
     rewritten.push("--model".into());
     rewritten.push(model_path.into_os_string());
     if let Some(prompt) = prompt {
         rewritten.push("--prompt".into());
         rewritten.push(prompt);
-    } else {
-        rewritten.push("--api-only".into());
     }
 
     for flag in ["--cpu-optimized", "--mmap-prefetch", "--mmap-hugepages"] {
@@ -324,6 +392,91 @@ where
     if !has_flag(&rewritten, "--kv-cache-dtype") {
         rewritten.push("--kv-cache-dtype".into());
         rewritten.push("q8".into());
+    }
+    Ok(rewritten)
+}
+
+fn rewrite_serve_args(raw: Vec<OsString>) -> io::Result<Vec<OsString>> {
+    if raw.len() >= 3
+        && matches!(
+            raw.get(2).and_then(|arg| arg.to_str()),
+            Some("-h" | "--help")
+        )
+    {
+        print_serve_help();
+        std::process::exit(0);
+    }
+
+    let program = raw[0].clone();
+    let mut rewritten = vec![program, "--serve-api".into(), "--api-only".into()];
+    let mut model: Option<String> = None;
+    let mut hf_file: Option<String> = None;
+    let mut args = raw.into_iter().skip(2).peekable();
+
+    while let Some(arg) = args.next() {
+        match arg.to_str() {
+            Some("--host") => {
+                rewritten.push("--api-host".into());
+                let Some(value) = args.next() else {
+                    return Err(io::Error::other("--host requires a value"));
+                };
+                rewritten.push(value);
+            }
+            Some(value) if value.starts_with("--host=") => {
+                rewritten.push("--api-host".into());
+                rewritten.push(value["--host=".len()..].into());
+            }
+            Some("--port") => {
+                rewritten.push("--api-port".into());
+                let Some(value) = args.next() else {
+                    return Err(io::Error::other("--port requires a value"));
+                };
+                rewritten.push(value);
+            }
+            Some(value) if value.starts_with("--port=") => {
+                rewritten.push("--api-port".into());
+                rewritten.push(value["--port=".len()..].into());
+            }
+            Some("--file") | Some("--hf-file") => {
+                let Some(file) = args.next() else {
+                    return Err(io::Error::other("--file requires a GGUF filename"));
+                };
+                hf_file = Some(file.to_string_lossy().into_owned());
+            }
+            Some(value) if value.starts_with("--file=") => {
+                hf_file = Some(value["--file=".len()..].to_owned());
+            }
+            Some(value) if value.starts_with("--hf-file=") => {
+                hf_file = Some(value["--hf-file=".len()..].to_owned());
+            }
+            Some(value) if !value.starts_with('-') && model.is_none() => {
+                model = Some(value.to_owned());
+            }
+            Some(
+                "--model" | "--backend" | "--max-tokens" | "--temperature" | "--top-p" | "--top-k"
+                | "--ctx-size" | "--threads" | "--kv-cache-dtype" | "--tokenizer-model",
+            ) => {
+                rewritten.push(arg);
+                let Some(value) = args.next() else {
+                    return Err(io::Error::other("option requires a value"));
+                };
+                rewritten.push(value);
+            }
+            _ => rewritten.push(arg),
+        }
+    }
+
+    if let Some(model) = model {
+        let model_path = resolve_model_spec(&model, hf_file.as_deref())?;
+        rewritten.push("--model".into());
+        rewritten.push(model_path.into_os_string());
+    }
+    if !has_flag(&rewritten, "--kv-cache-dtype") {
+        rewritten.push("--kv-cache-dtype".into());
+        rewritten.push("q8".into());
+    }
+    if !has_flag(&rewritten, "--cpu-optimized") {
+        rewritten.push("--cpu-optimized".into());
     }
     Ok(rewritten)
 }
@@ -365,6 +518,8 @@ enum Backend {
     Mlx,
     Cuda,
     Vulkan,
+    /// Intel Arc GPUs via Vulkan compute
+    IntelArc,
 }
 
 impl Backend {
@@ -375,6 +530,7 @@ impl Backend {
             Backend::Mlx => oxidize_core::backend::Backend::Mlx,
             Backend::Cuda => oxidize_core::backend::Backend::Cuda,
             Backend::Vulkan => oxidize_core::backend::Backend::Vulkan,
+            Backend::IntelArc => oxidize_core::backend::Backend::IntelArc,
         }
     }
 
@@ -385,6 +541,7 @@ impl Backend {
             Backend::Mlx => "mlx",
             Backend::Cuda => "cuda",
             Backend::Vulkan => "vulkan",
+            Backend::IntelArc => "intel-arc",
         }
     }
 }
@@ -1004,6 +1161,114 @@ fn start_api_server(args: &Args) -> io::Result<Option<Child>> {
     Ok(Some(child))
 }
 
+fn server_backend_from_cli(backend: Backend) -> oxidize_server::Backend {
+    match backend {
+        Backend::Cpu => oxidize_server::Backend::Cpu,
+        Backend::Metal => oxidize_server::Backend::Metal,
+        Backend::Mlx => oxidize_server::Backend::Mlx,
+        Backend::Cuda => oxidize_server::Backend::Cuda,
+        Backend::Vulkan => oxidize_server::Backend::Vulkan,
+        Backend::IntelArc => oxidize_server::Backend::IntelArc,
+    }
+}
+
+fn server_args_from_cli(args: &Args) -> io::Result<oxidize_server::Args> {
+    let host = args
+        .api_host
+        .parse::<IpAddr>()
+        .map_err(|error| io::Error::other(format!("invalid --host/--api-host: {error}")))?;
+    let model_id = args
+        .model
+        .as_ref()
+        .and_then(|path| path.file_stem())
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("oxidize-default")
+        .to_string();
+    Ok(oxidize_server::Args {
+        host,
+        port: args.api_port,
+        model: args.model.clone(),
+        backend: server_backend_from_cli(args.backend),
+        batch_mode: oxidize_server::BatchMode::Sequential,
+        model_id,
+        max_tokens: args.max_tokens,
+        temperature: args.temperature,
+        top_p: args.top_p,
+        top_k: args.top_k,
+        ctx_size: args.ctx_size,
+        prefill_batch_size: 512,
+        cpu_optimized: args.cpu_optimized,
+        ram_offload: args.ram_offload,
+        mmap_prefetch: args.mmap_prefetch,
+        mmap_hugepages: args.mmap_hugepages,
+        layer_wise: args.layer_wise,
+        layer_cache: args.layer_cache,
+        turboquant_kv: args.turboquant,
+        mesh: args.mesh,
+        mesh_port: args.mesh_port,
+        tokenizer_model: args.tokenizer_model.clone(),
+    })
+}
+
+fn run_api_server_in_process(args: &Args) -> io::Result<()> {
+    let server_args = server_args_from_cli(args)?;
+    let rt = tokio::runtime::Runtime::new()
+        .map_err(|error| io::Error::other(format!("tokio runtime: {error}")))?;
+    rt.block_on(async move {
+        let (effective_backend, warning) = server_args.backend.to_core_backend().effective();
+        if let Some(msg) = warning {
+            eprintln!("warning: {msg}");
+        }
+        eprintln!(
+            "server: loading model={} backend={} addr={}:{}",
+            server_args
+                .model
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "<none>".to_string()),
+            effective_backend.as_str(),
+            server_args.host,
+            server_args.port
+        );
+        let model = oxidize_server::load_model_runtime(&server_args).map_err(|error| {
+            io::Error::other(format!("failed to initialize server model: {error}"))
+        })?;
+        let api_key = std::env::var("OXIDIZE_API_KEY")
+            .ok()
+            .filter(|value| !value.is_empty());
+        let state = oxidize_server::AppState {
+            limiter: Arc::new(oxidize_server::RequestLimiter::new(
+                oxidize_server::RequestLimitConfig::default(),
+            )),
+            batcher: Arc::new(oxidize_server::ContinuousBatcher::default()),
+            auth: oxidize_server::AuthConfig {
+                api_key: api_key.map(Arc::<str>::from),
+            },
+            model,
+            paged: None,
+            mesh: None,
+            audit: Arc::new(oxidize_server::audit::AuditLogger::new()),
+            metrics: Arc::new(
+                oxidize_server::metrics::MetricsRegistry::new()
+                    .map_err(|error| io::Error::other(format!("metrics registry: {error}")))?,
+            ),
+        };
+        let app = oxidize_server::build_app_with_state(state);
+        let listener =
+            tokio::net::TcpListener::bind(SocketAddr::new(server_args.host, server_args.port))
+                .await
+                .map_err(|error| io::Error::other(format!("failed to bind server: {error}")))?;
+        eprintln!(
+            "server: listening on http://{}:{}",
+            server_args.host, server_args.port
+        );
+        let shutdown_signal = oxidize_server::shutdown::ShutdownSignal::new();
+        oxidize_server::shutdown::serve_with_graceful_shutdown(listener, app, shutdown_signal)
+            .await;
+        Ok(())
+    })
+}
+
 fn optimize_mapped_model_memory(mapped: &MappedGgufFile, args: &Args) {
     let apply_hints =
         args.cpu_optimized || args.ram_offload || args.mmap_prefetch || args.mmap_hugepages;
@@ -1057,6 +1322,7 @@ fn main() {
         oxidize_core::backend::Backend::Cuda => "CUDA GPU",
         oxidize_core::backend::Backend::Cpu => "CPU",
         oxidize_core::backend::Backend::Vulkan => "Vulkan GPU",
+        oxidize_core::backend::Backend::IntelArc => "Intel Arc GPU (Vulkan)",
     };
     println!(
         "backend: {} ({})",
@@ -1087,6 +1353,13 @@ fn main() {
                 std::process::exit(1);
             }
         }
+    }
+    if args.serve_api && args.api_only {
+        if let Err(error) = run_api_server_in_process(&args) {
+            eprintln!("server failed: {error}");
+            std::process::exit(1);
+        }
+        return;
     }
     let mut api_server = if args.serve_api {
         match start_api_server(&args) {
@@ -2079,7 +2352,7 @@ mod tests {
         .expect("run args should rewrite");
         assert!(args.contains(&OsString::from("--model")));
         assert!(args.contains(&OsString::from("local.gguf")));
-        assert!(args.contains(&OsString::from("--serve-api")));
+        assert!(!args.contains(&OsString::from("--serve-api")));
         assert!(args.contains(&OsString::from("--prompt")));
         assert!(args.contains(&OsString::from("hello")));
         assert!(args.contains(&OsString::from("--max-tokens")));
@@ -2092,15 +2365,16 @@ mod tests {
     }
 
     #[test]
-    fn run_rewrite_accepts_api_port() {
+    fn serve_rewrite_accepts_port() {
         let args = rewrite_run_args(
-            ["oxidize", "run", "local.gguf", "--api-port", "3000"]
+            ["oxidize", "serve", "local.gguf", "--port", "3000"]
                 .into_iter()
                 .map(OsString::from),
         )
-        .expect("run args should rewrite");
+        .expect("serve args should rewrite");
         assert!(args.contains(&OsString::from("--api-port")));
         assert!(args.contains(&OsString::from("3000")));
+        assert!(args.contains(&OsString::from("--serve-api")));
         assert!(args.contains(&OsString::from("--api-only")));
     }
 
@@ -2114,7 +2388,7 @@ mod tests {
         .expect("run args should rewrite");
         assert!(args.contains(&OsString::from("--max-tokens")));
         assert!(!args.contains(&OsString::from("--prompt")));
-        assert!(args.contains(&OsString::from("--api-only")));
+        assert!(!args.contains(&OsString::from("--api-only")));
     }
 
     #[test]

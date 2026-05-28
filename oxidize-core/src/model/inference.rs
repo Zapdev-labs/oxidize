@@ -25,6 +25,7 @@ pub enum ModelArchitecture {
     Gpt2,
     GptJ,
     GptNeoX,
+    MiniMax,
 }
 
 impl ModelArchitecture {
@@ -44,6 +45,7 @@ impl ModelArchitecture {
                 "gpt2" => Self::Gpt2,
                 "gptj" => Self::GptJ,
                 "gptneox" => Self::GptNeoX,
+                "minimax" | "minimax-m2" | "minimax-text-01" => Self::MiniMax,
                 _ => Self::Llama,
             }
         } else {
@@ -63,7 +65,7 @@ impl ModelArchitecture {
 
     /// Whether this architecture uses MoE FFN.
     pub fn uses_moe(&self) -> bool {
-        matches!(self, Self::Mixtral)
+        matches!(self, Self::Mixtral | Self::MiniMax)
     }
 
     /// Whether this architecture uses parallel attention + FFN (fused residual).
@@ -219,8 +221,12 @@ impl InferenceConfig {
         let sliding_window = arch_u32("attention.sliding_window")
             .map(|v| v as usize)
             .unwrap_or(0);
-        let num_experts = arch_u32("expert_count").map(|v| v as usize).unwrap_or(0);
+        let num_experts = arch_u32("expert_count")
+            .or_else(|| metadata_u32_lookup(metadata, "expert_count"))
+            .map(|v| v as usize)
+            .unwrap_or(0);
         let num_experts_per_tok = arch_u32("expert_used_count")
+            .or_else(|| metadata_u32_lookup(metadata, "expert_used_count"))
             .map(|v| v as usize)
             .unwrap_or(0);
 
@@ -328,6 +334,9 @@ pub struct Workspace {
     pub kv_values_copy: Vec<f32>,
     // Final logits buffer.
     pub logits: Vec<f32>,
+    // MoE router scratch reused across layers.
+    pub moe_router_logits: Vec<f32>,
+    pub moe_expert_scores: Vec<(usize, f32)>,
     // Mamba/SSM scratch.
     pub mamba_scratch: Vec<f32>,
     pub conv_out: Vec<f32>,
@@ -358,6 +367,8 @@ impl Workspace {
             kv_keys_copy: vec![0.0_f32; kv_copy_size],
             kv_values_copy: vec![0.0_f32; kv_copy_size],
             logits: vec![0.0_f32; config.vocab_size],
+            moe_router_logits: vec![0.0_f32; config.num_experts.max(1)],
+            moe_expert_scores: vec![(0, 0.0_f32); config.num_experts.max(1)],
             mamba_scratch: vec![0.0_f32; h * 2],
             conv_out: vec![0.0_f32; max_qkv],
         }
@@ -432,7 +443,73 @@ fn weight_block_info(qtype: GgufQuantizationType) -> (usize, usize) {
         GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M => (256, 144),
         GgufQuantizationType::Q6_K => (256, 210),
         GgufQuantizationType::Q8_0 => (32, 34),
+        GgufQuantizationType::NVFP4 => (64, 36),
+        GgufQuantizationType::IQ1_S => (256, 50),
+        GgufQuantizationType::IQ1_M => (256, 56),
         _ => (1, 4), // fallback to f32
+    }
+}
+
+fn gemv_expert_weight(
+    storage: &WeightStorage,
+    expert_idx: usize,
+    n_experts: usize,
+    rows: usize,
+    cols: usize,
+    input: &[f32],
+    output: &mut [f32],
+) -> Result<(), String> {
+    let values_per_expert = rows * cols;
+    match storage {
+        WeightStorage::F32(data) => {
+            let start = expert_idx * values_per_expert;
+            let end = start + values_per_expert;
+            if end > data.len() {
+                return Err(format!(
+                    "expert {} out of range: need {} values, have {}",
+                    expert_idx,
+                    n_experts * values_per_expert,
+                    data.len()
+                ));
+            }
+            gemv_f32(&data[start..end], rows, cols, input, output).map_err(|e| format!("{:?}", e))
+        }
+        WeightStorage::Quantized(qtype, data) => {
+            let (block_width, block_size) = weight_block_info(*qtype);
+            let blocks_per_row = cols / block_width;
+            let values_per_expert_blocks = rows * blocks_per_row;
+            let expert_size = values_per_expert_blocks * block_size;
+            let start = expert_idx * expert_size;
+            let end = start + expert_size;
+            if end > data.len() {
+                return Err(format!(
+                    "expert {} out of range for quant {:?}: need {} bytes, have {}",
+                    expert_idx,
+                    qtype,
+                    n_experts * expert_size,
+                    data.len()
+                ));
+            }
+            gemv_quantized_f32(*qtype, &data[start..end], rows, cols, input, output)
+                .map_err(|e| format!("{:?}", e))
+        }
+        WeightStorage::MmapQuantized(qtype, mmap, base_offset, total_size) => {
+            let (block_width, block_size) = weight_block_info(*qtype);
+            let blocks_per_row = cols / block_width;
+            let values_per_expert_blocks = rows * blocks_per_row;
+            let expert_size = values_per_expert_blocks * block_size;
+            let start = *base_offset + expert_idx * expert_size;
+            let end = start + expert_size;
+            let mmap_total = *base_offset + *total_size;
+            if end > mmap_total {
+                return Err(format!(
+                    "expert {} out of range for mmap quant {:?}: need offset {}, have {}",
+                    expert_idx, qtype, end, mmap_total
+                ));
+            }
+            gemv_quantized_f32(*qtype, &mmap[start..end], rows, cols, input, output)
+                .map_err(|e| format!("{:?}", e))
+        }
     }
 }
 
@@ -531,10 +608,19 @@ struct LayerWeights {
     attn_output_bias: Vec<f32>,
     ffn_norm: Vec<f32>,
     post_attention_norm: Vec<f32>,
+    // Dense FFN weights (used when num_experts == 0)
     ffn_gate: WeightStorage,
     ffn_up: WeightStorage,
     ffn_down: WeightStorage,
     ffn_down_bias: Vec<f32>,
+    // MoE expert weights (used when num_experts > 0)
+    // Shape: [n_experts, intermediate_size, hidden_size] for gate/up
+    //         [n_experts, hidden_size, intermediate_size] for down
+    ffn_gate_exps: WeightStorage,
+    ffn_up_exps: WeightStorage,
+    ffn_down_exps: WeightStorage,
+    // MoE router: [hidden_size, n_experts]
+    ffn_gate_inp: WeightStorage,
     attn_qkv: WeightStorage,
     // SSM / Mamba tensors
     attn_gate: WeightStorage,
@@ -586,10 +672,14 @@ pub(crate) fn lookup_quantized_embedding(
         GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M => 144,
         GgufQuantizationType::Q6_K => 210,
         GgufQuantizationType::Q8_0 => 34,
+        GgufQuantizationType::NVFP4 => 36,
+        GgufQuantizationType::IQ1_S => 50,
+        GgufQuantizationType::IQ1_M => 56,
         _ => return,
     };
     let block_width = match qtype {
         GgufQuantizationType::Q8_0 => 32,
+        GgufQuantizationType::NVFP4 => 64,
         _ => 256,
     };
     let blocks_per_row = h / block_width;
@@ -613,6 +703,18 @@ pub(crate) fn lookup_quantized_embedding(
                     out[i] = (*b as i8) as f32 * d;
                 }
             }
+        }
+        GgufQuantizationType::IQ1_S => {
+            let _ =
+                crate::quantization::dequantize_iq1_s_scalar(row, &mut x[..blocks_per_row * 256]);
+        }
+        GgufQuantizationType::IQ1_M => {
+            let _ =
+                crate::quantization::dequantize_iq1_m_scalar(row, &mut x[..blocks_per_row * 256]);
+        }
+        GgufQuantizationType::NVFP4 => {
+            let _ =
+                crate::quantization::dequantize_nvfp4_scalar(row, &mut x[..blocks_per_row * 64]);
         }
         _ => {}
     }
@@ -662,6 +764,9 @@ impl InferenceModel {
                         | GgufQuantizationType::Q4_K_S
                         | GgufQuantizationType::Q4_K_M
                         | GgufQuantizationType::Q6_K
+                        | GgufQuantizationType::IQ1_S
+                        | GgufQuantizationType::IQ1_M
+                        | GgufQuantizationType::NVFP4
                 );
                 if should_keep_quantized(name) && is_supported_quant_gemv {
                     if let Some(ref arc) = mmap_arc {
@@ -802,6 +907,23 @@ impl InferenceModel {
                         }
                         ("ffn_down", Some("bias")) => {
                             layers[layer_idx].ffn_down_bias = load_bias(qtype, qdata, value_count)?
+                        }
+                        // MoE expert weights
+                        ("ffn_gate_exps", _) => {
+                            layers[layer_idx].ffn_gate_exps =
+                                load_tensor(name, qtype, qdata, value_count)?
+                        }
+                        ("ffn_up_exps", _) => {
+                            layers[layer_idx].ffn_up_exps =
+                                load_tensor(name, qtype, qdata, value_count)?
+                        }
+                        ("ffn_down_exps", _) => {
+                            layers[layer_idx].ffn_down_exps =
+                                load_tensor(name, qtype, qdata, value_count)?
+                        }
+                        ("ffn_gate_inp", _) => {
+                            layers[layer_idx].ffn_gate_inp =
+                                load_tensor(name, qtype, qdata, value_count)?
                         }
                         ("ssm_a", _) => {
                             let mut f32_data = vec![0.0_f32; value_count];
@@ -1185,6 +1307,13 @@ impl InferenceModel {
 
             // 5. Per-token: attention. Each position attends to its own causal
             // prefix (positions 0..=pos).
+            //
+            // For F32 KV caches we try to borrow the prefix directly (zero-copy).
+            // For quantized KV caches we copy into temporary buffers. Both paths
+            // use the same flash attention kernel.
+            let mut key_copy_buf: Vec<f32> = Vec::new();
+            let mut value_copy_buf: Vec<f32> = Vec::new();
+
             for i in 0..batch {
                 let pos = start_pos + i;
                 let seq_len = pos + 1;
@@ -1192,27 +1321,44 @@ impl InferenceModel {
                 let attn_out_slice = &mut attn_result_batch[i * q_len_used0..(i + 1) * q_len_used0];
                 attn_out_slice.fill(0.0_f32);
 
-                let key_cache_borrow = self
-                    .kv_cache
-                    .f32_layer_key_prefix(layer_idx, seq_len)
-                    .map_err(|e| ModelError::InferenceFailed(format!("kv borrow keys: {:?}", e)))?;
-                let value_cache_borrow = self
-                    .kv_cache
-                    .f32_layer_value_prefix(layer_idx, seq_len)
-                    .map_err(|e| {
-                    ModelError::InferenceFailed(format!("kv borrow vals: {:?}", e))
-                })?;
+                let (key_cache, value_cache): (&[f32], &[f32]) = {
+                    let key_borrow = self
+                        .kv_cache
+                        .f32_layer_key_prefix(layer_idx, seq_len)
+                        .map_err(|e| {
+                            ModelError::InferenceFailed(format!("kv borrow keys: {:?}", e))
+                        })?;
+                    let value_borrow = self
+                        .kv_cache
+                        .f32_layer_value_prefix(layer_idx, seq_len)
+                        .map_err(|e| {
+                            ModelError::InferenceFailed(format!("kv borrow vals: {:?}", e))
+                        })?;
 
-                let key_cache: &[f32] = key_cache_borrow.ok_or_else(|| {
-                    ModelError::InferenceFailed(
-                        "kv f32 prefix not borrowable (batched)".to_string(),
-                    )
-                })?;
-                let value_cache: &[f32] = value_cache_borrow.ok_or_else(|| {
-                    ModelError::InferenceFailed(
-                        "kv f32 prefix not borrowable (batched)".to_string(),
-                    )
-                })?;
+                    if let (Some(keys), Some(values)) = (key_borrow, value_borrow) {
+                        (keys, values)
+                    } else {
+                        // Quantized KV cache: copy into reusable buffers.
+                        let needed = seq_len * kv_len;
+                        if key_copy_buf.len() < needed {
+                            key_copy_buf.resize(needed, 0.0_f32);
+                        }
+                        if value_copy_buf.len() < needed {
+                            value_copy_buf.resize(needed, 0.0_f32);
+                        }
+                        self.kv_cache
+                            .copy_layer_keys(layer_idx, seq_len, &mut key_copy_buf[..needed])
+                            .map_err(|e| {
+                                ModelError::InferenceFailed(format!("kv copy keys: {:?}", e))
+                            })?;
+                        self.kv_cache
+                            .copy_layer_values(layer_idx, seq_len, &mut value_copy_buf[..needed])
+                            .map_err(|e| {
+                                ModelError::InferenceFailed(format!("kv copy vals: {:?}", e))
+                            })?;
+                        (&key_copy_buf[..needed], &value_copy_buf[..needed])
+                    }
+                };
 
                 flash_attention_decode_heads_f32(
                     q,
@@ -1930,11 +2076,18 @@ impl InferenceModel {
             }
 
             // ---- FFN (shared between Mamba and standard layers) ----
-            let has_ffn = !layer.ffn_gate.is_empty()
+            let has_dense_ffn = !layer.ffn_gate.is_empty()
                 && !layer.ffn_up.is_empty()
                 && !layer.ffn_down.is_empty()
                 && !ffn_norm_weight.is_empty();
-            if has_ffn {
+            let has_moe = cfg.num_experts > 0
+                && !layer.ffn_gate_exps.is_empty()
+                && !layer.ffn_up_exps.is_empty()
+                && !layer.ffn_down_exps.is_empty()
+                && !layer.ffn_gate_inp.is_empty()
+                && !ffn_norm_weight.is_empty();
+
+            if has_dense_ffn || has_moe {
                 let ffn_out = &mut ws.hidden_a[..h];
                 ffn_out.fill(0.0_f32);
                 {
@@ -1943,30 +2096,50 @@ impl InferenceModel {
                     rms_norm_f32(x, ffn_norm_weight, cfg.rms_norm_eps, normed)
                         .map_err(|e| ModelError::InferenceFailed(format!("ffn_norm: {:?}", e)))?;
 
-                    let gate = &mut ws.intermediate_a[..cfg.intermediate_size];
-                    gate.fill(0.0_f32);
-                    let up = &mut ws.intermediate_b[..cfg.intermediate_size];
-                    up.fill(0.0_f32);
-                    let (gate_result, up_result) = rayon::join(
-                        || gemv_weight(&layer.ffn_gate, cfg.intermediate_size, h, normed, gate),
-                        || gemv_weight(&layer.ffn_up, cfg.intermediate_size, h, normed, up),
-                    );
-                    gate_result
-                        .map_err(|e| ModelError::InferenceFailed(format!("ffn_gate: {:?}", e)))?;
-                    up_result
-                        .map_err(|e| ModelError::InferenceFailed(format!("ffn_up: {:?}", e)))?;
+                    if has_moe {
+                        let gate_scratch = &mut ws.intermediate_a[..cfg.intermediate_size];
+                        let up_scratch = &mut ws.intermediate_b[..cfg.intermediate_size];
+                        let expert_out = &mut ws.intermediate_c[..h];
+                        Self::moe_ffn_forward_single(
+                            layer,
+                            cfg,
+                            normed,
+                            ffn_out,
+                            gate_scratch,
+                            up_scratch,
+                            expert_out,
+                            &mut ws.moe_router_logits[..cfg.num_experts],
+                            &mut ws.moe_expert_scores[..cfg.num_experts],
+                        )?;
+                    } else {
+                        let gate = &mut ws.intermediate_a[..cfg.intermediate_size];
+                        gate.fill(0.0_f32);
+                        let up = &mut ws.intermediate_b[..cfg.intermediate_size];
+                        up.fill(0.0_f32);
+                        let (gate_result, up_result) = rayon::join(
+                            || gemv_weight(&layer.ffn_gate, cfg.intermediate_size, h, normed, gate),
+                            || gemv_weight(&layer.ffn_up, cfg.intermediate_size, h, normed, up),
+                        );
+                        gate_result.map_err(|e| {
+                            ModelError::InferenceFailed(format!("ffn_gate: {:?}", e))
+                        })?;
+                        up_result
+                            .map_err(|e| ModelError::InferenceFailed(format!("ffn_up: {:?}", e)))?;
 
-                    // Inline SwiGLU into the gate buffer to avoid an intermediate allocation.
-                    for (g, u) in gate.iter_mut().zip(up.iter()) {
-                        let sigmoid = 1.0_f32 / (1.0 + (-*g).exp());
-                        *g = *g * sigmoid * *u;
-                    }
+                        // Inline SwiGLU into the gate buffer to avoid an intermediate allocation.
+                        for (g, u) in gate.iter_mut().zip(up.iter()) {
+                            let sigmoid = 1.0_f32 / (1.0 + (-*g).exp());
+                            *g = *g * sigmoid * *u;
+                        }
 
-                    gemv_weight(&layer.ffn_down, h, cfg.intermediate_size, gate, ffn_out)
-                        .map_err(|e| ModelError::InferenceFailed(format!("ffn_down: {:?}", e)))?;
-                    if !layer.ffn_down_bias.is_empty() {
-                        for (i, out) in ffn_out.iter_mut().enumerate() {
-                            *out += layer.ffn_down_bias[i % layer.ffn_down_bias.len()];
+                        gemv_weight(&layer.ffn_down, h, cfg.intermediate_size, gate, ffn_out)
+                            .map_err(|e| {
+                                ModelError::InferenceFailed(format!("ffn_down: {:?}", e))
+                            })?;
+                        if !layer.ffn_down_bias.is_empty() {
+                            for (i, out) in ffn_out.iter_mut().enumerate() {
+                                *out += layer.ffn_down_bias[i % layer.ffn_down_bias.len()];
+                            }
                         }
                     }
                 }
@@ -1976,6 +2149,113 @@ impl InferenceModel {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// MoE FFN forward for a single token.
+    /// 1. Compute router logits: normed @ ffn_gate_inp
+    /// 2. Softmax + top-k expert selection
+    /// 3. For each selected expert, compute gate/up/down
+    /// 4. Weighted sum of expert outputs
+    fn moe_ffn_forward_single(
+        layer: &LayerWeights,
+        cfg: &InferenceConfig,
+        normed: &[f32],
+        ffn_out: &mut [f32],
+        gate_scratch: &mut [f32],
+        up_scratch: &mut [f32],
+        expert_out: &mut [f32],
+        router_logits: &mut [f32],
+        expert_scores: &mut [(usize, f32)],
+    ) -> Result<(), ModelError> {
+        let h = cfg.hidden_size;
+        let i_size = cfg.intermediate_size;
+        let n_experts = cfg.num_experts;
+        let n_experts_per_tok = cfg.num_experts_per_tok.max(1).min(n_experts);
+
+        // 1. Router logits: [n_experts]
+        router_logits.fill(0.0_f32);
+        gemv_weight(&layer.ffn_gate_inp, n_experts, h, normed, router_logits)
+            .map_err(|e| ModelError::InferenceFailed(format!("moe router: {:?}", e)))?;
+
+        // 2. Softmax
+        let max_logit = router_logits
+            .iter()
+            .fold(f32::NEG_INFINITY, |a, &b| a.max(b));
+        let mut sum_exp = 0.0_f32;
+        for logit in router_logits.iter_mut() {
+            *logit = (*logit - max_logit).exp();
+            sum_exp += *logit;
+        }
+        if sum_exp > 0.0 {
+            for logit in router_logits.iter_mut() {
+                *logit /= sum_exp;
+            }
+        }
+
+        // 3. Top-k expert selection
+        for (i, score) in router_logits.iter().copied().enumerate() {
+            expert_scores[i] = (i, score);
+        }
+        let compare_score = |a: &(usize, f32), b: &(usize, f32)| {
+            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+        };
+        if n_experts_per_tok < expert_scores.len() {
+            let (selected, _, _) =
+                expert_scores.select_nth_unstable_by(n_experts_per_tok, compare_score);
+            selected.sort_by(compare_score);
+        } else {
+            expert_scores.sort_by(compare_score);
+        }
+
+        // 4. For each selected expert, compute FFN and accumulate weighted output
+        for &(expert_idx, score) in expert_scores.iter().take(n_experts_per_tok) {
+            gate_scratch.fill(0.0_f32);
+            up_scratch.fill(0.0_f32);
+            expert_out.fill(0.0_f32);
+
+            gemv_expert_weight(
+                &layer.ffn_gate_exps,
+                expert_idx,
+                n_experts,
+                i_size,
+                h,
+                normed,
+                gate_scratch,
+            )
+            .map_err(|e| ModelError::InferenceFailed(format!("moe gate: {:?}", e)))?;
+            gemv_expert_weight(
+                &layer.ffn_up_exps,
+                expert_idx,
+                n_experts,
+                i_size,
+                h,
+                normed,
+                up_scratch,
+            )
+            .map_err(|e| ModelError::InferenceFailed(format!("moe up: {:?}", e)))?;
+
+            for (g, u) in gate_scratch.iter_mut().zip(up_scratch.iter()) {
+                let sigmoid = 1.0_f32 / (1.0 + (-*g).exp());
+                *g = *g * sigmoid * *u;
+            }
+
+            gemv_expert_weight(
+                &layer.ffn_down_exps,
+                expert_idx,
+                n_experts,
+                h,
+                i_size,
+                gate_scratch,
+                expert_out,
+            )
+            .map_err(|e| ModelError::InferenceFailed(format!("moe down: {:?}", e)))?;
+
+            for (out, val) in ffn_out.iter_mut().zip(expert_out.iter()) {
+                *out += score * val;
+            }
+        }
+
         Ok(())
     }
 }
@@ -2033,14 +2313,15 @@ impl Model for InferenceModel {
         }
 
         let start_pos = session.consumed_tokens();
-        let logits = if tokens.len() > 1
-            && self.config.kv_cache_dtype == DType::F32
-            && self.layers_supported_for_batched()
-        {
+        let logits = if tokens.len() > 1 && self.layers_supported_for_batched() {
             // Prefill the prompt in one batched pass so every weight matmul is a
             // GEMM (decode-once per weight block) rather than `tokens.len()`
             // separate GEMVs. Intermediate logits are discarded so only the
             // last token's lm_head is computed.
+            //
+            // Batched prefill is now enabled for all KV cache dtypes (not just
+            // F32). The KV cache writes in forward_batched use kv_cache.set()
+            // which already handles all quant types correctly.
             self.forward_batched(tokens, start_pos, true)?
                 .unwrap_or_default()
         } else {

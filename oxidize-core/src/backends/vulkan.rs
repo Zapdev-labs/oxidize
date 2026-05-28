@@ -12,10 +12,57 @@ pub struct VulkanBuildInfo {
     pub detected_at_build: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VulkanDeviceClass {
+    IntelArc,
+    IntelIntegrated,
+    Nvidia,
+    Amd,
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VulkanDeviceInfo {
+    pub vendor_id: u32,
+    pub device_id: u32,
+    pub device_name: String,
+    pub device_class: VulkanDeviceClass,
+    pub compute_queue_family: u32,
+}
+
 pub fn vulkan_build_info() -> VulkanBuildInfo {
     VulkanBuildInfo {
         detected_at_build: cfg!(vulkan_available),
     }
+}
+
+pub fn classify_vulkan_device(
+    vendor_id: u32,
+    device_id: u32,
+    device_name: &str,
+) -> VulkanDeviceClass {
+    let name = device_name.to_ascii_lowercase();
+    match vendor_id {
+        0x8086 if name.contains("arc") || is_likely_intel_arc_device_id(device_id) => {
+            VulkanDeviceClass::IntelArc
+        }
+        0x8086 => VulkanDeviceClass::IntelIntegrated,
+        0x10de => VulkanDeviceClass::Nvidia,
+        0x1002 | 0x1022 => VulkanDeviceClass::Amd,
+        _ => VulkanDeviceClass::Other,
+    }
+}
+
+pub fn is_likely_intel_arc_device_id(device_id: u32) -> bool {
+    matches!(
+        device_id,
+        0x4905..=0x4908
+            | 0x4f80..=0x4f87
+            | 0x5690..=0x56bf
+            | 0x56c0..=0x56cf
+            | 0x6420..=0x64ff
+            | 0x7d40..=0x7d7f
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -369,7 +416,7 @@ pub fn validate_gemm_dims(
 /// `UnsupportedOperation` until the pipeline plumbing lands in a follow-up.
 #[cfg(feature = "vulkan")]
 pub mod device {
-    use super::VulkanKernelError;
+    use super::{VulkanDeviceInfo, VulkanKernelError, classify_vulkan_device};
     use ash::{Entry, Instance, vk};
     use std::ffi::CString;
 
@@ -377,6 +424,7 @@ pub mod device {
         pub entry: Entry,
         pub instance: Instance,
         pub physical_device: vk::PhysicalDevice,
+        pub device_info: VulkanDeviceInfo,
         pub compute_queue_family: u32,
     }
 
@@ -399,10 +447,27 @@ pub mod device {
             let qfs = unsafe { instance.get_physical_device_queue_family_properties(pd) };
             for (idx, q) in qfs.iter().enumerate() {
                 if q.queue_flags.contains(vk::QueueFlags::COMPUTE) {
+                    let props = unsafe { instance.get_physical_device_properties(pd) };
+                    let device_name = unsafe {
+                        std::ffi::CStr::from_ptr(props.device_name.as_ptr())
+                            .to_string_lossy()
+                            .into_owned()
+                    };
                     return Some(VulkanContext {
                         entry,
                         instance,
                         physical_device: pd,
+                        device_info: VulkanDeviceInfo {
+                            vendor_id: props.vendor_id,
+                            device_id: props.device_id,
+                            device_class: classify_vulkan_device(
+                                props.vendor_id,
+                                props.device_id,
+                                &device_name,
+                            ),
+                            device_name,
+                            compute_queue_family: idx as u32,
+                        },
                         compute_queue_family: idx as u32,
                     });
                 }
@@ -457,6 +522,22 @@ mod tests {
         let expected_large = cfg!(feature = "vulkan") && cfg!(vulkan_available);
         assert_eq!(should_use_vulkan_gemv(64, 64), expected_large);
         assert_eq!(should_use_vulkan_gemm(64, 64, 64), expected_large);
+    }
+
+    #[test]
+    fn classifies_intel_arc_devices() {
+        assert_eq!(
+            classify_vulkan_device(0x8086, 0x56a0, "Intel(R) Arc(TM) A770 Graphics"),
+            VulkanDeviceClass::IntelArc
+        );
+        assert_eq!(
+            classify_vulkan_device(0x8086, 0x9a49, "Intel(R) Iris Xe Graphics"),
+            VulkanDeviceClass::IntelIntegrated
+        );
+        assert_eq!(
+            classify_vulkan_device(0x10de, 0x2684, "NVIDIA GeForce RTX"),
+            VulkanDeviceClass::Nvidia
+        );
     }
 
     #[test]

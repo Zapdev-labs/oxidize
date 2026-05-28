@@ -13,6 +13,8 @@ pub enum Backend {
     Mlx,
     Cuda,
     Vulkan,
+    /// Intel Arc GPUs via Vulkan compute
+    IntelArc,
 }
 
 impl Backend {
@@ -23,6 +25,7 @@ impl Backend {
             Backend::Mlx => oxidize_core::backend::Backend::Mlx,
             Backend::Cuda => oxidize_core::backend::Backend::Cuda,
             Backend::Vulkan => oxidize_core::backend::Backend::Vulkan,
+            Backend::IntelArc => oxidize_core::backend::Backend::IntelArc,
         }
     }
 }

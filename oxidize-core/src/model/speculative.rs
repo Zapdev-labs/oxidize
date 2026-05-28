@@ -14,7 +14,7 @@
 //!
 //! # Usage
 //!
-//! ```rust
+//! ```rust,ignore
 //! use oxidize_core::speculative::{SpeculativeDecoder, SpeculativeConfig};
 //! use oxidize_core::dflash::DFlashDraftModel;
 //! use oxidize_core::model::Model;

@@ -3270,6 +3270,7 @@ dependencies = [
  "hf-hub",
  "libc",
  "oxidize-core",
+ "oxidize-server",
  "rand 0.8.6",
  "rayon",
  "tokio",

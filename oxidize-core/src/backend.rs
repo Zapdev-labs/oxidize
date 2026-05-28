@@ -10,6 +10,8 @@ pub enum Backend {
     Cuda,
     Mlx,
     Vulkan,
+    /// Intel Arc GPUs via the Vulkan compute path.
+    IntelArc,
 }
 
 impl std::str::FromStr for Backend {
@@ -22,6 +24,7 @@ impl std::str::FromStr for Backend {
             "cuda" => Ok(Backend::Cuda),
             "mlx" => Ok(Backend::Mlx),
             "vulkan" => Ok(Backend::Vulkan),
+            "intel-arc" | "arc" => Ok(Backend::IntelArc),
             _ => Err(()),
         }
     }
@@ -36,6 +39,7 @@ impl Backend {
             Backend::Cuda => "cuda",
             Backend::Mlx => "mlx",
             Backend::Vulkan => "vulkan",
+            Backend::IntelArc => "intel-arc",
         }
     }
 
@@ -50,6 +54,13 @@ impl Backend {
                 Some("MLX backend requested but unavailable on Linux; falling back to CPU"),
             ),
             Backend::Vulkan => (Backend::Vulkan, None),
+            Backend::IntelArc if cfg!(vulkan_available) => (Backend::IntelArc, None),
+            Backend::IntelArc => (
+                Backend::Vulkan,
+                Some(
+                    "Intel Arc backend requested but Vulkan was not detected at build time; using Vulkan fallback path",
+                ),
+            ),
             other => (other, None),
         }
     }
@@ -162,6 +173,8 @@ mod tests {
         assert_eq!(Backend::from_str("cuda"), Ok(Backend::Cuda));
         assert_eq!(Backend::from_str("mlx"), Ok(Backend::Mlx));
         assert_eq!(Backend::from_str("vulkan"), Ok(Backend::Vulkan));
+        assert_eq!(Backend::from_str("intel-arc"), Ok(Backend::IntelArc));
+        assert_eq!(Backend::from_str("arc"), Ok(Backend::IntelArc));
         assert_eq!(Backend::from_str("unknown"), Err(()));
     }
 
@@ -173,6 +186,7 @@ mod tests {
             Backend::Cuda,
             Backend::Mlx,
             Backend::Vulkan,
+            Backend::IntelArc,
         ] {
             assert_eq!(Backend::from_str(backend.as_str()), Ok(backend));
         }
@@ -220,5 +234,17 @@ mod tests {
         let (effective, warning) = Backend::Vulkan.effective();
         assert_eq!(effective, Backend::Vulkan);
         assert!(warning.is_none());
+    }
+
+    #[test]
+    fn intel_arc_uses_vulkan_path() {
+        let (effective, warning) = Backend::IntelArc.effective();
+        if cfg!(vulkan_available) {
+            assert_eq!(effective, Backend::IntelArc);
+            assert!(warning.is_none());
+        } else {
+            assert_eq!(effective, Backend::Vulkan);
+            assert!(warning.is_some());
+        }
     }
 }

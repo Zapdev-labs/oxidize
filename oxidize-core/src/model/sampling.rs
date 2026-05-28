@@ -248,7 +248,7 @@ pub fn sample_with_repetition_and_grammar(
     if logits.is_empty() {
         return Err(SamplingError::EmptyLogits);
     }
-    if !config.temperature.is_finite() || config.temperature <= 0.0 {
+    if !config.temperature.is_finite() {
         return Err(SamplingError::InvalidTemperature);
     }
     if config.top_k == Some(0) {
@@ -297,6 +297,15 @@ pub fn sample_with_repetition_and_grammar(
     let has_repetition_penalty = repetition.frequency_penalty != 0.0
         || repetition.presence_penalty != 0.0
         || repetition.newline_penalty.is_some();
+    if (config.temperature <= 0.0 || config.top_k == Some(1))
+        && !has_repetition_penalty
+        && grammar.is_none()
+    {
+        return greedy(logits);
+    }
+    if config.temperature <= 0.0 {
+        return Err(SamplingError::InvalidTemperature);
+    }
     let has_rank_filter = config.top_k.is_some()
         || config.top_p.is_some()
         || config.min_p.is_some()

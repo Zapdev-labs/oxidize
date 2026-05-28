@@ -9,9 +9,15 @@ use std::arch::x86_64::*;
 const QK8_0: usize = 32;
 const BLOCK_Q8_0_SIZE: usize = 2 + QK8_0;
 const QK_K: usize = 256;
+const QK_NVFP4: usize = 64;
+const QK_NVFP4_SUB: usize = 16;
 const BLOCK_Q4_K_SIZE: usize = 2 * std::mem::size_of::<u16>() + 12 + QK_K / 2;
 const BLOCK_Q2_K_SIZE: usize = 2 * std::mem::size_of::<u16>() + QK_K / 16 + QK_K / 4;
 const BLOCK_Q6_K_SIZE: usize = std::mem::size_of::<u16>() + QK_K / 16 + 3 * QK_K / 4;
+const BLOCK_NVFP4_SIZE: usize = QK_NVFP4 / QK_NVFP4_SUB + QK_NVFP4 / 2;
+const E2M1_DOUBLED_VALUES: [f32; 16] = [
+    0.0, 1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0, 0.0, -1.0, -2.0, -3.0, -4.0, -6.0, -8.0, -12.0,
+];
 const FLASH_ATTENTION_BLOCK_TOKENS: usize = 64;
 const PARALLEL_GEMV_MIN_OPS: usize = 1 << 20;
 const TRANSPOSED_GEMV_COL_CHUNK: usize = QK_K;
@@ -265,6 +271,15 @@ pub fn gemm_quantized_f32(
         }
         GgufQuantizationType::Q8_0 if cols.is_multiple_of(QK8_0) => {
             return gemm_q8_0_decode_once(quantized_matrix, rows, cols, inputs, outputs, batch);
+        }
+        GgufQuantizationType::IQ1_S if cols.is_multiple_of(QK_K) => {
+            return gemm_iq1_s_decode_once(quantized_matrix, rows, cols, inputs, outputs, batch);
+        }
+        GgufQuantizationType::IQ1_M if cols.is_multiple_of(QK_K) => {
+            return gemm_iq1_m_decode_once(quantized_matrix, rows, cols, inputs, outputs, batch);
+        }
+        GgufQuantizationType::NVFP4 if cols.is_multiple_of(QK_NVFP4) => {
+            return gemm_nvfp4_decode_once(quantized_matrix, rows, cols, inputs, outputs, batch);
         }
         _ => {}
     }
@@ -903,6 +918,167 @@ fn decode_q6_k_block(block: &[u8], out: &mut [f32]) {
     }
 }
 
+fn gemm_iq1_s_decode_once(
+    quantized_matrix: &[u8],
+    rows: usize,
+    cols: usize,
+    inputs: &[f32],
+    outputs: &mut [f32],
+    batch: usize,
+) -> Result<(), GemvError> {
+    let blocks_per_row = cols / QK_K;
+    let expected_matrix_len = rows * blocks_per_row * BLOCK_IQ1_S_SIZE;
+    if quantized_matrix.len() != expected_matrix_len {
+        return Err(GemvError::InvalidMatrixLength {
+            expected: expected_matrix_len,
+            actual: quantized_matrix.len(),
+        });
+    }
+
+    let mut row_major = vec![0.0_f32; rows.saturating_mul(batch)];
+    let compute_row = |row_idx: usize, partial: &mut [f32]| {
+        let row_start = row_idx * blocks_per_row * BLOCK_IQ1_S_SIZE;
+        let row_blocks =
+            &quantized_matrix[row_start..row_start + blocks_per_row * BLOCK_IQ1_S_SIZE];
+        let mut scratch = [0.0_f32; QK_K];
+        for (block_idx, block) in row_blocks.chunks_exact(BLOCK_IQ1_S_SIZE).enumerate() {
+            iq1s_dequantize_block(block, &mut scratch);
+            let in_offset = block_idx * QK_K;
+            for t in 0..batch {
+                let v = &inputs[t * cols + in_offset..t * cols + in_offset + QK_K];
+                partial[t] += crate::flash_attention::dot_product_f32(&scratch, v);
+            }
+        }
+    };
+
+    let total_ops = rows.saturating_mul(cols).saturating_mul(batch);
+    if total_ops >= PARALLEL_GEMV_MIN_OPS {
+        row_major
+            .par_chunks_mut(batch)
+            .enumerate()
+            .for_each(|(row_idx, slice)| compute_row(row_idx, slice));
+    } else {
+        for (row_idx, slice) in row_major.chunks_mut(batch).enumerate() {
+            compute_row(row_idx, slice);
+        }
+    }
+
+    for r in 0..rows {
+        let src = &row_major[r * batch..(r + 1) * batch];
+        for (t, &val) in src.iter().enumerate() {
+            outputs[t * rows + r] = val;
+        }
+    }
+    Ok(())
+}
+
+fn gemm_iq1_m_decode_once(
+    quantized_matrix: &[u8],
+    rows: usize,
+    cols: usize,
+    inputs: &[f32],
+    outputs: &mut [f32],
+    batch: usize,
+) -> Result<(), GemvError> {
+    let blocks_per_row = cols / QK_K;
+    let expected_matrix_len = rows * blocks_per_row * BLOCK_IQ1_M_SIZE;
+    if quantized_matrix.len() != expected_matrix_len {
+        return Err(GemvError::InvalidMatrixLength {
+            expected: expected_matrix_len,
+            actual: quantized_matrix.len(),
+        });
+    }
+
+    let mut row_major = vec![0.0_f32; rows.saturating_mul(batch)];
+    let compute_row = |row_idx: usize, partial: &mut [f32]| {
+        let row_start = row_idx * blocks_per_row * BLOCK_IQ1_M_SIZE;
+        let row_blocks =
+            &quantized_matrix[row_start..row_start + blocks_per_row * BLOCK_IQ1_M_SIZE];
+        let mut scratch = [0.0_f32; QK_K];
+        for (block_idx, block) in row_blocks.chunks_exact(BLOCK_IQ1_M_SIZE).enumerate() {
+            iq1m_dequantize_block(block, &mut scratch);
+            let in_offset = block_idx * QK_K;
+            for t in 0..batch {
+                let v = &inputs[t * cols + in_offset..t * cols + in_offset + QK_K];
+                partial[t] += crate::flash_attention::dot_product_f32(&scratch, v);
+            }
+        }
+    };
+
+    let total_ops = rows.saturating_mul(cols).saturating_mul(batch);
+    if total_ops >= PARALLEL_GEMV_MIN_OPS {
+        row_major
+            .par_chunks_mut(batch)
+            .enumerate()
+            .for_each(|(row_idx, slice)| compute_row(row_idx, slice));
+    } else {
+        for (row_idx, slice) in row_major.chunks_mut(batch).enumerate() {
+            compute_row(row_idx, slice);
+        }
+    }
+
+    for r in 0..rows {
+        let src = &row_major[r * batch..(r + 1) * batch];
+        for (t, &val) in src.iter().enumerate() {
+            outputs[t * rows + r] = val;
+        }
+    }
+    Ok(())
+}
+
+fn gemm_nvfp4_decode_once(
+    quantized_matrix: &[u8],
+    rows: usize,
+    cols: usize,
+    inputs: &[f32],
+    outputs: &mut [f32],
+    batch: usize,
+) -> Result<(), GemvError> {
+    let blocks_per_row = cols / QK_NVFP4;
+    let expected_matrix_len = rows * blocks_per_row * BLOCK_NVFP4_SIZE;
+    if quantized_matrix.len() != expected_matrix_len {
+        return Err(GemvError::InvalidMatrixLength {
+            expected: expected_matrix_len,
+            actual: quantized_matrix.len(),
+        });
+    }
+
+    let mut row_major = vec![0.0_f32; rows.saturating_mul(batch)];
+    let compute_row = |row_idx: usize, partial: &mut [f32]| {
+        let row_start = row_idx * blocks_per_row * BLOCK_NVFP4_SIZE;
+        let row_blocks =
+            &quantized_matrix[row_start..row_start + blocks_per_row * BLOCK_NVFP4_SIZE];
+        let mut scratch = [0.0_f32; QK_NVFP4];
+        for (block_idx, block) in row_blocks.chunks_exact(BLOCK_NVFP4_SIZE).enumerate() {
+            nvfp4_dequantize_block(block, &mut scratch);
+            let in_offset = block_idx * QK_NVFP4;
+            for t in 0..batch {
+                let v = &inputs[t * cols + in_offset..t * cols + in_offset + QK_NVFP4];
+                partial[t] += dot_f32_fast(&scratch, v);
+            }
+        }
+    };
+
+    if rows.saturating_mul(cols).saturating_mul(batch) >= PARALLEL_GEMV_MIN_OPS {
+        row_major
+            .par_chunks_mut(batch)
+            .enumerate()
+            .for_each(|(row_idx, slice)| compute_row(row_idx, slice));
+    } else {
+        for (row_idx, slice) in row_major.chunks_mut(batch).enumerate() {
+            compute_row(row_idx, slice);
+        }
+    }
+
+    for r in 0..rows {
+        let src = &row_major[r * batch..(r + 1) * batch];
+        for (t, &val) in src.iter().enumerate() {
+            outputs[t * rows + r] = val;
+        }
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn gemm_k_quant_block(
     quantized_matrix: &[u8],
@@ -1003,6 +1179,15 @@ pub fn gemv_quantized_f32(
         }
         GgufQuantizationType::Q6_K => {
             gemv_q6_k_f32_fused(quantized_matrix, rows, cols, vector, output)
+        }
+        GgufQuantizationType::IQ1_S if cols.is_multiple_of(QK_K) => {
+            gemv_iq1_s_f32_fused(quantized_matrix, rows, cols, vector, output)
+        }
+        GgufQuantizationType::IQ1_M if cols.is_multiple_of(QK_K) => {
+            gemv_iq1_m_f32_fused(quantized_matrix, rows, cols, vector, output)
+        }
+        GgufQuantizationType::NVFP4 if cols.is_multiple_of(QK_NVFP4) => {
+            gemv_nvfp4_f32_fused(quantized_matrix, rows, cols, vector, output)
         }
         _ => Err(GemvError::UnsupportedQuantizationType { quantization }),
     }
@@ -2153,6 +2338,332 @@ fn accumulate_q6_k_block(block: &[u8], factor: f32, output: &mut [f32]) {
     }
 }
 
+// IQ1_S GEMV: decode-once approach.
+// Each block is 50 bytes for 256 values. We dequantize each block to f32
+// in a scratch buffer, then do a standard f32 dot product.
+// This is slower than native IQ1_S dot products but requires no large
+// lookup table and is correct.
+const BLOCK_IQ1_S_SIZE: usize = 2 + 32 + 16; // ggml_half d + qs[32] + qh[16]
+const IQ1S_DELTA: f32 = 0.125;
+
+#[inline]
+fn iq1s_grid_decode(index: u16, out: &mut [i8; 8]) {
+    let mut idx = index;
+    for i in 0..8 {
+        let bits = (idx & 3) as i8;
+        out[i] = match bits {
+            0 => -1,
+            1 => 0,
+            _ => 1,
+        };
+        idx >>= 2;
+        if i == 3 {
+            idx = (index >> 8) as u16;
+        }
+    }
+}
+
+#[inline]
+fn iq1s_dequantize_block(block: &[u8], out: &mut [f32]) {
+    assert_eq!(block.len(), BLOCK_IQ1_S_SIZE);
+    assert_eq!(out.len(), QK_K);
+    let d = f16_le_to_f32([block[0], block[1]]);
+    let qs = &block[2..34];
+    let qh = &block[34..50];
+    let qh_u16: &[u16] = unsafe { std::slice::from_raw_parts(qh.as_ptr() as *const u16, 16) };
+    let mut out_ptr = 0_usize;
+    let mut grid_vals = [0_i8; 8];
+    for ib in 0..(QK_K / 32) {
+        let dl = d * (2.0 * (((qh_u16[ib] >> 12) & 7) as f32) + 1.0);
+        let delta = if qh_u16[ib] & 0x8000 != 0 {
+            -IQ1S_DELTA
+        } else {
+            IQ1S_DELTA
+        };
+        for l in 0..4 {
+            let grid_idx = (qs[l + ib * 4] as u16) | (((qh_u16[ib] >> (3 * l)) & 7) << 8);
+            iq1s_grid_decode(grid_idx, &mut grid_vals);
+            for j in 0..8 {
+                out[out_ptr + j] = dl * (grid_vals[j] as f32 + delta);
+            }
+            out_ptr += 8;
+        }
+    }
+}
+
+#[inline]
+fn ue4m3_to_f32(byte: u8) -> f32 {
+    let exp = (byte >> 3) & 0x0f;
+    let mant = byte & 0x07;
+    if exp == 0 {
+        (mant as f32) * 2.0_f32.powi(-9)
+    } else {
+        (1.0 + (mant as f32) / 8.0) * 2.0_f32.powi(exp as i32 - 7)
+    }
+}
+
+#[inline]
+fn nvfp4_dequantize_block(block: &[u8], out: &mut [f32]) {
+    assert_eq!(block.len(), BLOCK_NVFP4_SIZE);
+    assert_eq!(out.len(), QK_NVFP4);
+    let scales = &block[..QK_NVFP4 / QK_NVFP4_SUB];
+    let qs = &block[QK_NVFP4 / QK_NVFP4_SUB..];
+    for sub in 0..(QK_NVFP4 / QK_NVFP4_SUB) {
+        let scale = ue4m3_to_f32(scales[sub]);
+        let q_base = sub * (QK_NVFP4_SUB / 2);
+        let out_base = sub * QK_NVFP4_SUB;
+        for j in 0..(QK_NVFP4_SUB / 2) {
+            let packed = qs[q_base + j];
+            out[out_base + j] = scale * E2M1_DOUBLED_VALUES[(packed & 0x0f) as usize];
+            out[out_base + j + QK_NVFP4_SUB / 2] =
+                scale * E2M1_DOUBLED_VALUES[(packed >> 4) as usize];
+        }
+    }
+}
+
+fn gemv_nvfp4_f32_fused(
+    quantized_matrix: &[u8],
+    rows: usize,
+    cols: usize,
+    vector: &[f32],
+    output: &mut [f32],
+) -> Result<(), GemvError> {
+    let blocks_per_row = cols / QK_NVFP4;
+    let expected_matrix_len = rows * blocks_per_row * BLOCK_NVFP4_SIZE;
+    if quantized_matrix.len() != expected_matrix_len {
+        return Err(GemvError::InvalidMatrixLength {
+            expected: expected_matrix_len,
+            actual: quantized_matrix.len(),
+        });
+    }
+    if vector.len() != cols {
+        return Err(GemvError::InvalidVectorLength {
+            expected: cols,
+            actual: vector.len(),
+        });
+    }
+    if output.len() != rows {
+        return Err(GemvError::InvalidOutputLength {
+            expected: rows,
+            actual: output.len(),
+        });
+    }
+
+    let compute_row = |row_idx: usize, scratch: &mut [f32; QK_NVFP4]| {
+        let mut sum = 0.0_f32;
+        let row_start = row_idx * blocks_per_row * BLOCK_NVFP4_SIZE;
+        let row_blocks =
+            &quantized_matrix[row_start..row_start + blocks_per_row * BLOCK_NVFP4_SIZE];
+        for (block_idx, block) in row_blocks.chunks_exact(BLOCK_NVFP4_SIZE).enumerate() {
+            let v_off = block_idx * QK_NVFP4;
+            nvfp4_dequantize_block(block, scratch);
+            sum += dot_f32_fast(scratch, &vector[v_off..v_off + QK_NVFP4]);
+        }
+        sum
+    };
+
+    if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
+        output
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(row_idx, out)| {
+                let mut scratch = [0.0_f32; QK_NVFP4];
+                *out = compute_row(row_idx, &mut scratch);
+            });
+    } else {
+        let mut scratch = [0.0_f32; QK_NVFP4];
+        for (row_idx, out) in output.iter_mut().enumerate() {
+            *out = compute_row(row_idx, &mut scratch);
+        }
+    }
+    Ok(())
+}
+
+fn gemv_iq1_s_f32_fused(
+    quantized_matrix: &[u8],
+    rows: usize,
+    cols: usize,
+    vector: &[f32],
+    output: &mut [f32],
+) -> Result<(), GemvError> {
+    let blocks_per_row = cols / QK_K;
+    let expected_matrix_len = rows * blocks_per_row * BLOCK_IQ1_S_SIZE;
+    if quantized_matrix.len() != expected_matrix_len {
+        return Err(GemvError::InvalidMatrixLength {
+            expected: expected_matrix_len,
+            actual: quantized_matrix.len(),
+        });
+    }
+    if vector.len() != cols {
+        return Err(GemvError::InvalidVectorLength {
+            expected: cols,
+            actual: vector.len(),
+        });
+    }
+    if output.len() != rows {
+        return Err(GemvError::InvalidOutputLength {
+            expected: rows,
+            actual: output.len(),
+        });
+    }
+
+    let compute_row = |row_idx: usize, scratch: &mut [f32; QK_K]| {
+        let mut sum = 0.0_f32;
+        let row_start = row_idx * blocks_per_row * BLOCK_IQ1_S_SIZE;
+        let row_blocks =
+            &quantized_matrix[row_start..row_start + (blocks_per_row * BLOCK_IQ1_S_SIZE)];
+        for (block_idx, block) in row_blocks.chunks_exact(BLOCK_IQ1_S_SIZE).enumerate() {
+            let v_off = block_idx * QK_K;
+            iq1s_dequantize_block(block, scratch);
+            sum += crate::flash_attention::dot_product_f32(scratch, &vector[v_off..v_off + QK_K]);
+        }
+        sum
+    };
+
+    if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
+        output
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(row_idx, out)| {
+                let mut scratch = [0.0_f32; QK_K];
+                *out = compute_row(row_idx, &mut scratch);
+            });
+    } else {
+        let mut scratch = [0.0_f32; QK_K];
+        for (row_idx, out) in output.iter_mut().enumerate() {
+            *out = compute_row(row_idx, &mut scratch);
+        }
+    }
+    Ok(())
+}
+
+// IQ1_M GEMV: similar decode-once approach.
+const BLOCK_IQ1_M_SIZE: usize = 32 + 16 + 8; // qs[32] + qh[16] + scales[8]
+
+#[inline]
+fn iq1m_dequantize_block(block: &[u8], out: &mut [f32]) {
+    assert_eq!(block.len(), BLOCK_IQ1_M_SIZE);
+    assert_eq!(out.len(), QK_K);
+    let qs = &block[0..32];
+    let qh = &block[32..48];
+    let scales = &block[48..56];
+    let sc: &[u16] = unsafe { std::slice::from_raw_parts(scales.as_ptr() as *const u16, 4) };
+    let scale_u16 =
+        (sc[0] >> 12) | ((sc[1] >> 8) & 0x00f0) | ((sc[2] >> 4) & 0x0f00) | (sc[3] & 0xf000);
+    let d = f16_bits_to_f32(scale_u16);
+    let mut out_ptr = 0_usize;
+    let mut grid_vals = [0_i8; 8];
+    for ib in 0..(QK_K / 32) {
+        let sc_ib = scales[ib / 2];
+        let dl1 = d * (2.0 * (((sc_ib >> (6 * (ib % 2) + 0)) & 0x7) as f32) + 1.0);
+        let dl2 = d * (2.0 * (((sc_ib >> (6 * (ib % 2) + 3)) & 0x7) as f32) + 1.0);
+        let idx0 = qs[ib * 4 + 0] as u16 | ((qh[ib * 2 + 0] as u16) << 8 & 0x700);
+        let idx1 = qs[ib * 4 + 1] as u16 | ((qh[ib * 2 + 0] as u16) << 4 & 0x700);
+        let idx2 = qs[ib * 4 + 2] as u16 | ((qh[ib * 2 + 1] as u16) << 8 & 0x700);
+        let idx3 = qs[ib * 4 + 3] as u16 | ((qh[ib * 2 + 1] as u16) << 4 & 0x700);
+        let deltas = [
+            if qh[ib * 2 + 0] & 0x08 != 0 {
+                -IQ1S_DELTA
+            } else {
+                IQ1S_DELTA
+            },
+            if qh[ib * 2 + 0] & 0x80 != 0 {
+                -IQ1S_DELTA
+            } else {
+                IQ1S_DELTA
+            },
+            if qh[ib * 2 + 1] & 0x08 != 0 {
+                -IQ1S_DELTA
+            } else {
+                IQ1S_DELTA
+            },
+            if qh[ib * 2 + 1] & 0x80 != 0 {
+                -IQ1S_DELTA
+            } else {
+                IQ1S_DELTA
+            },
+        ];
+        iq1s_grid_decode(idx0, &mut grid_vals);
+        for j in 0..8 {
+            out[out_ptr + j] = dl1 * (grid_vals[j] as f32 + deltas[0]);
+        }
+        out_ptr += 8;
+        iq1s_grid_decode(idx1, &mut grid_vals);
+        for j in 0..8 {
+            out[out_ptr + j] = dl1 * (grid_vals[j] as f32 + deltas[1]);
+        }
+        out_ptr += 8;
+        iq1s_grid_decode(idx2, &mut grid_vals);
+        for j in 0..8 {
+            out[out_ptr + j] = dl2 * (grid_vals[j] as f32 + deltas[2]);
+        }
+        out_ptr += 8;
+        iq1s_grid_decode(idx3, &mut grid_vals);
+        for j in 0..8 {
+            out[out_ptr + j] = dl2 * (grid_vals[j] as f32 + deltas[3]);
+        }
+        out_ptr += 8;
+    }
+}
+
+fn gemv_iq1_m_f32_fused(
+    quantized_matrix: &[u8],
+    rows: usize,
+    cols: usize,
+    vector: &[f32],
+    output: &mut [f32],
+) -> Result<(), GemvError> {
+    let blocks_per_row = cols / QK_K;
+    let expected_matrix_len = rows * blocks_per_row * BLOCK_IQ1_M_SIZE;
+    if quantized_matrix.len() != expected_matrix_len {
+        return Err(GemvError::InvalidMatrixLength {
+            expected: expected_matrix_len,
+            actual: quantized_matrix.len(),
+        });
+    }
+    if vector.len() != cols {
+        return Err(GemvError::InvalidVectorLength {
+            expected: cols,
+            actual: vector.len(),
+        });
+    }
+    if output.len() != rows {
+        return Err(GemvError::InvalidOutputLength {
+            expected: rows,
+            actual: output.len(),
+        });
+    }
+
+    let compute_row = |row_idx: usize, scratch: &mut [f32; QK_K]| {
+        let mut sum = 0.0_f32;
+        let row_start = row_idx * blocks_per_row * BLOCK_IQ1_M_SIZE;
+        let row_blocks =
+            &quantized_matrix[row_start..row_start + (blocks_per_row * BLOCK_IQ1_M_SIZE)];
+        for (block_idx, block) in row_blocks.chunks_exact(BLOCK_IQ1_M_SIZE).enumerate() {
+            let v_off = block_idx * QK_K;
+            iq1m_dequantize_block(block, scratch);
+            sum += crate::flash_attention::dot_product_f32(scratch, &vector[v_off..v_off + QK_K]);
+        }
+        sum
+    };
+
+    if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
+        output
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(row_idx, out)| {
+                let mut scratch = [0.0_f32; QK_K];
+                *out = compute_row(row_idx, &mut scratch);
+            });
+    } else {
+        let mut scratch = [0.0_f32; QK_K];
+        for (row_idx, out) in output.iter_mut().enumerate() {
+            *out = compute_row(row_idx, &mut scratch);
+        }
+    }
+    Ok(())
+}
+
 fn gemv_q6_k_f32_fused(
     quantized_matrix: &[u8],
     rows: usize,
@@ -3043,6 +3554,10 @@ pub fn gemv_quantized_f32_transposed(
 
 pub fn f16_le_to_f32(bytes: [u8; 2]) -> f32 {
     let bits = u16::from_le_bytes(bytes);
+    f16_bits_to_f32(bits)
+}
+
+pub fn f16_bits_to_f32(bits: u16) -> f32 {
     let sign = ((bits >> 15) & 1) as u32;
     let exp = ((bits >> 10) & 0x1F) as u32;
     let frac = (bits & 0x03FF) as u32;
@@ -4044,6 +4559,82 @@ mod tests {
             (reference - fused).abs() <= 1e-4 * (1.0 + reference.abs()),
             "Q2_K fused dot ({fused}) diverged from dequant-then-dot reference ({reference})"
         );
+    }
+
+    #[test]
+    fn nvfp4_gemv_and_gemm_match_dequant_reference() {
+        let rows = 3;
+        let blocks_per_row = 2;
+        let cols = blocks_per_row * QK_NVFP4;
+        let batch = 4;
+        let mut weights = vec![0_u8; rows * blocks_per_row * BLOCK_NVFP4_SIZE];
+        for (block_idx, block) in weights.chunks_exact_mut(BLOCK_NVFP4_SIZE).enumerate() {
+            block[0] = 0x38;
+            block[1] = 0x40;
+            block[2] = 0x30;
+            block[3] = 0x00;
+            for (i, q) in block[4..].iter_mut().enumerate() {
+                *q = (((i + block_idx) & 0x0f) | ((((15 - (i & 0x0f)) + block_idx) & 0x0f) << 4))
+                    as u8;
+            }
+        }
+        let inputs = (0..batch * cols)
+            .map(|i| ((i % 17) as f32 - 8.0) * 0.03125)
+            .collect::<Vec<_>>();
+
+        let mut dequant = vec![0.0_f32; rows * cols];
+        for r in 0..rows {
+            for b in 0..blocks_per_row {
+                let src = (r * blocks_per_row + b) * BLOCK_NVFP4_SIZE;
+                let dst = r * cols + b * QK_NVFP4;
+                nvfp4_dequantize_block(
+                    &weights[src..src + BLOCK_NVFP4_SIZE],
+                    (&mut dequant[dst..dst + QK_NVFP4]).try_into().unwrap(),
+                );
+            }
+        }
+
+        let mut gemv = vec![0.0_f32; rows];
+        gemv_quantized_f32(
+            GgufQuantizationType::NVFP4,
+            &weights,
+            rows,
+            cols,
+            &inputs[..cols],
+            &mut gemv,
+        )
+        .expect("nvfp4 gemv succeeds");
+        for r in 0..rows {
+            let expected: f32 = dequant[r * cols..(r + 1) * cols]
+                .iter()
+                .zip(inputs[..cols].iter())
+                .map(|(a, b)| a * b)
+                .sum();
+            assert!((gemv[r] - expected).abs() <= 1e-5 * (1.0 + expected.abs()));
+        }
+
+        let mut gemm = vec![0.0_f32; batch * rows];
+        gemm_quantized_f32(
+            GgufQuantizationType::NVFP4,
+            &weights,
+            rows,
+            cols,
+            &inputs,
+            &mut gemm,
+            batch,
+        )
+        .expect("nvfp4 gemm succeeds");
+        for token in 0..batch {
+            for r in 0..rows {
+                let expected: f32 = dequant[r * cols..(r + 1) * cols]
+                    .iter()
+                    .zip(inputs[token * cols..(token + 1) * cols].iter())
+                    .map(|(a, b)| a * b)
+                    .sum();
+                let actual = gemm[token * rows + r];
+                assert!((actual - expected).abs() <= 1e-5 * (1.0 + expected.abs()));
+            }
+        }
     }
 
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]

@@ -45,6 +45,50 @@ fn main() {
         let loader = oxidize_core::model_loader::GgufModelLoader;
         let mapped = loader.load(model_path).expect("Failed to load GGUF");
 
+        if args.engine == "inference" || args.engine == "layerwise" {
+            let inference_config = InferenceConfig::from_gguf(&mapped);
+            let benchmark_token = 0_u32;
+            println!("InferenceConfig from GGUF:");
+            println!("  vocab_size: {}", inference_config.vocab_size);
+            println!("  context_size: {}", inference_config.context_size);
+            println!("  layer_count: {}", inference_config.layer_count);
+            println!("  hidden_size: {}", inference_config.hidden_size);
+            println!(
+                "  intermediate_size: {}",
+                inference_config.intermediate_size
+            );
+            println!(
+                "  num_attention_heads: {}",
+                inference_config.num_attention_heads
+            );
+            println!(
+                "  num_key_value_heads: {}",
+                inference_config.num_key_value_heads
+            );
+            println!(
+                "  key_value_head_dim: {}",
+                inference_config.key_value_head_dim
+            );
+            println!("  rms_norm_eps: {}", inference_config.rms_norm_eps);
+            println!("  rope_theta: {}", inference_config.rope_theta);
+            println!("  benchmark_token: {}", benchmark_token);
+            println!();
+
+            if args.engine == "inference" {
+                let mut model = InferenceModel::load_from_gguf(&mapped, inference_config, true)
+                    .expect("Failed to load inference GGUF model");
+                run_inference_model_benchmark(&args, &mut model, benchmark_token);
+                return;
+            }
+
+            let mut model: Box<dyn Model> = Box::new(
+                LayerWiseModel::load_from_gguf(&mapped, inference_config, args.layer_cache_size)
+                    .expect("Failed to load layer-wise GGUF model"),
+            );
+            run_standard_model_benchmark(&args, model.as_mut(), benchmark_token);
+            return;
+        }
+
         // Extract config from metadata
         let metadata = &mapped.parsed().metadata;
         let arch = metadata_string(metadata, "general.architecture");
@@ -92,23 +136,6 @@ fn main() {
         println!("  rms_norm_eps: {}", rms_norm_eps);
         println!("  context_length: {}", context_length);
         println!();
-
-        if args.engine == "inference" || args.engine == "layerwise" {
-            let inference_config =
-                inference_config_from_dflash(&config, context_length, key_value_head_dim);
-            if args.engine == "inference" {
-                let mut model = InferenceModel::load_from_gguf(&mapped, inference_config, true)
-                    .expect("Failed to load inference GGUF model");
-                run_inference_model_benchmark(&args, &mut model, config.mask_token_id);
-                return;
-            }
-            let mut model: Box<dyn Model> = Box::new(
-                LayerWiseModel::load_from_gguf(&mapped, inference_config, args.layer_cache_size)
-                    .expect("Failed to load layer-wise GGUF model"),
-            );
-            run_standard_model_benchmark(&args, model.as_mut(), config.mask_token_id);
-            return;
-        }
 
         draft_model = DFlashDraftModel::load_from_gguf(&mapped, config.clone())
             .expect("Failed to load DFlash model from GGUF");

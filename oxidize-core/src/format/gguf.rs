@@ -151,6 +151,16 @@ pub enum GgufQuantizationType {
     Q5_K_S,
     Q5_K_M,
     Q6_K,
+    IQ2_XXS,
+    IQ2_XS,
+    IQ3_XXS,
+    IQ1_S,
+    IQ4_NL,
+    IQ3_S,
+    IQ2_S,
+    IQ4_XS,
+    IQ1_M,
+    NVFP4,
     Unknown(u32),
 }
 
@@ -195,9 +205,16 @@ impl GgufQuantizationType {
             13 => Self::Q5_K_S,
             14 => Self::Q6_K,
             15 => Self::Q8_0,
-            16 => Self::Q8_0,
-            17 => Self::Q8_0,
-            18 => Self::Q8_0,
+            16 => Self::IQ2_XXS,
+            17 => Self::IQ2_XS,
+            18 => Self::IQ3_XXS,
+            19 => Self::IQ1_S,
+            20 => Self::IQ4_NL,
+            21 => Self::IQ3_S,
+            22 => Self::IQ2_S,
+            23 => Self::IQ4_XS,
+            29 => Self::IQ1_M,
+            40 => Self::NVFP4,
             other => Self::Unknown(other),
         }
     }
@@ -1093,6 +1110,10 @@ mod tests {
             data_section_start: 0,
         };
         assert_eq!(file.quantization_type(), Some(GgufQuantizationType::Q5_K_M));
+        assert_eq!(
+            GgufQuantizationType::from_ggml_type(40),
+            GgufQuantizationType::NVFP4
+        );
     }
 
     #[test]

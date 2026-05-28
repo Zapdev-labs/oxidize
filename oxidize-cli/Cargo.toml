@@ -23,6 +23,7 @@ path = "src/bin/inspect_gguf.rs"
 [dependencies]
 clap.workspace = true
 oxidize-core = { path = "../oxidize-core" }
+oxidize-server = { path = "../oxidize-server" }
 futures-core = "0.3"
 hf-hub = "0.4"
 libc = "0.2"

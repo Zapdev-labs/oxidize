@@ -14,10 +14,57 @@ pub struct VulkanBuildInfo {
     pub detected_at_build: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VulkanDeviceClass {
+    IntelArc,
+    IntelIntegrated,
+    Nvidia,
+    Amd,
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VulkanDeviceInfo {
+    pub vendor_id: u32,
+    pub device_id: u32,
+    pub device_name: String,
+    pub device_class: VulkanDeviceClass,
+    pub compute_queue_family: u32,
+}
+
 pub fn vulkan_build_info() -> VulkanBuildInfo {
     VulkanBuildInfo {
         detected_at_build: false,
     }
+}
+
+pub fn classify_vulkan_device(
+    vendor_id: u32,
+    device_id: u32,
+    device_name: &str,
+) -> VulkanDeviceClass {
+    let name = device_name.to_ascii_lowercase();
+    match vendor_id {
+        0x8086 if name.contains("arc") || is_likely_intel_arc_device_id(device_id) => {
+            VulkanDeviceClass::IntelArc
+        }
+        0x8086 => VulkanDeviceClass::IntelIntegrated,
+        0x10de => VulkanDeviceClass::Nvidia,
+        0x1002 | 0x1022 => VulkanDeviceClass::Amd,
+        _ => VulkanDeviceClass::Other,
+    }
+}
+
+pub fn is_likely_intel_arc_device_id(device_id: u32) -> bool {
+    matches!(
+        device_id,
+        0x4905..=0x4908
+            | 0x4f80..=0x4f87
+            | 0x5690..=0x56bf
+            | 0x56c0..=0x56cf
+            | 0x6420..=0x64ff
+            | 0x7d40..=0x7d7f
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -152,6 +199,18 @@ mod tests {
         assert!(!should_use_vulkan_gemm(8, 8, 8));
         assert!(!should_use_vulkan_gemv(64, 64));
         assert!(!should_use_vulkan_gemm(64, 64, 64));
+    }
+
+    #[test]
+    fn classifies_intel_arc_devices() {
+        assert_eq!(
+            classify_vulkan_device(0x8086, 0x56a0, "Intel(R) Arc(TM) A770 Graphics"),
+            VulkanDeviceClass::IntelArc
+        );
+        assert_eq!(
+            classify_vulkan_device(0x8086, 0x9a49, "Intel(R) Iris Xe Graphics"),
+            VulkanDeviceClass::IntelIntegrated
+        );
     }
 
     #[test]
