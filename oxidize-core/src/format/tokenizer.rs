@@ -717,16 +717,33 @@ impl BpeTokenizer {
     }
 
     pub fn encode(&self, text: &str) -> Vec<u32> {
-        let mut sequence: Vec<u32> = text
-            .chars()
-            .filter_map(|ch| {
-                let key = ch.to_string();
-                self.vocab
-                    .get(&key)
-                    .copied()
-                    .or(self.special_tokens.unknown)
-            })
-            .collect();
+        // Byte-level (GPT-2) BPE stores its base vocabulary using the
+        // `bytes_to_unicode` mapping (e.g. a space is 'Ġ', newline 'Ċ'). The raw
+        // input bytes must be mapped through the same table before lookup —
+        // otherwise spaces and other control bytes are missing from the vocab
+        // and get dropped, fusing adjacent words into wrong tokens.
+        let mut sequence: Vec<u32> = if self.use_byte_fallback {
+            text.as_bytes()
+                .iter()
+                .filter_map(|&b| {
+                    let key = byte_to_gpt2_char(b).to_string();
+                    self.vocab
+                        .get(&key)
+                        .copied()
+                        .or(self.special_tokens.unknown)
+                })
+                .collect()
+        } else {
+            text.chars()
+                .filter_map(|ch| {
+                    let key = ch.to_string();
+                    self.vocab
+                        .get(&key)
+                        .copied()
+                        .or(self.special_tokens.unknown)
+                })
+                .collect()
+        };
 
         if sequence.len() < 2 {
             return sequence;
@@ -771,6 +788,26 @@ impl BpeTokenizer {
                     .copied()
                     .map(|id| (*pair, id))
             })
+    }
+}
+
+/// Bytes that map to themselves under the GPT-2 `bytes_to_unicode` table.
+fn gpt2_byte_is_printable(b: u32) -> bool {
+    (33..=126).contains(&b) || (161..=172).contains(&b) || (174..=255).contains(&b)
+}
+
+/// Forward GPT-2 `bytes_to_unicode` mapping: raw byte -> placeholder char.
+/// Printable bytes map to themselves; the remaining 68 bytes map to code points
+/// 256.. in ascending byte order (e.g. space 0x20 -> U+0120 'Ġ').
+fn byte_to_gpt2_char(b: u8) -> char {
+    let bu = b as u32;
+    if gpt2_byte_is_printable(bu) {
+        return char::from_u32(bu).unwrap_or('\u{fffd}');
+    }
+    let index = (0u32..=255).filter(|x| !gpt2_byte_is_printable(*x)).position(|x| x == bu);
+    match index {
+        Some(i) => char::from_u32(256 + i as u32).unwrap_or('\u{fffd}'),
+        None => '\u{fffd}',
     }
 }
 
@@ -1223,6 +1260,46 @@ fn char_boundaries(text: &str) -> Vec<usize> {
 mod tests {
     use super::*;
     use crate::gguf::{GgufMetadataArray, GgufMetadataType};
+
+    #[test]
+    fn gpt2_byte_mapping_round_trips_and_maps_space_to_g_dot() {
+        // The space byte (0x20) must map to 'Ġ' (U+0120), matching GPT-2's
+        // bytes_to_unicode. A regression here drops spaces during BPE encoding
+        // and fuses adjacent words into the wrong tokens.
+        assert_eq!(byte_to_gpt2_char(0x20), '\u{0120}');
+        assert_eq!(byte_to_gpt2_char(b'A'), 'A');
+        for b in 0u8..=255 {
+            let ch = byte_to_gpt2_char(b);
+            assert_eq!(gpt2_char_to_byte(ch), Some(b), "round-trip failed for byte {b}");
+        }
+    }
+
+    #[test]
+    fn byte_level_bpe_encodes_leading_space_word_via_g_dot() {
+        // A byte-level BPE vocab stores leading spaces as 'Ġ'. Encoding a word
+        // with a leading space must find the 'Ġ'-prefixed token, not drop the
+        // space and fall back to the bare word.
+        let mut vocab = HashMap::new();
+        let mut id_to_token = HashMap::new();
+        for (id, tok) in ["a", "\u{0120}", "\u{0120}a"].into_iter().enumerate() {
+            vocab.insert(tok.to_owned(), id as u32);
+            id_to_token.insert(id as u32, tok.to_owned());
+        }
+        // Merge rule: 'Ġ' + 'a' -> 'Ġa'.
+        let mut merges = HashMap::new();
+        merges.insert((1u32, 0u32), 0usize);
+        let mut merged_token_ids = HashMap::new();
+        merged_token_ids.insert((1u32, 0u32), 2u32);
+        let bpe = BpeTokenizer {
+            vocab,
+            id_to_token,
+            merges,
+            merged_token_ids,
+            special_tokens: SpecialTokens::default(),
+            use_byte_fallback: true,
+        };
+        assert_eq!(bpe.encode(" a"), vec![2]);
+    }
 
     fn metadata_strings(values: &[&str]) -> GgufMetadataValue {
         GgufMetadataValue::Array(GgufMetadataArray {

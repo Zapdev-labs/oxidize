@@ -409,7 +409,11 @@ fn inference_config_from_dflash(
         sliding_window: 0,
         num_experts: 0,
         num_experts_per_tok: 0,
+        expert_intermediate_size: 0,
         alibi_num_heads: 0,
+        shortconv_l_cache: 0,
+        leading_dense_layers: 0,
+        expert_gating_sigmoid: false,
     }
 }
 
