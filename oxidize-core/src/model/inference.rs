@@ -4,8 +4,8 @@ use crate::kv_cache::{KvCache, KvCacheConfig};
 use crate::model::{Logits, Model, ModelError, Session, Token};
 use crate::quantization::{dequantize_scalar, quantized_size};
 use crate::tensor::{
-    DType, apply_rope_f32, f16_le_to_f32, gemm_quantized_f32, gemv_f32, gemv_quantized_f32,
-    rms_norm_f32,
+    DType, apply_rope_f32, f16_le_to_f32, gemm_quantized_f32, gemv_f32, gemv_quantized_experts_f32,
+    gemv_quantized_f32, rms_norm_f32,
 };
 use memmap2::Mmap;
 use std::sync::Arc;
@@ -545,6 +545,18 @@ fn weight_block_info(qtype: GgufQuantizationType) -> (usize, usize) {
         GgufQuantizationType::IQ1_S => (256, 50),
         GgufQuantizationType::IQ1_M => (256, 56),
         _ => (1, 4), // fallback to f32
+    }
+}
+
+/// Borrow a quantized weight tensor's raw bytes for the batched expert GEMV.
+/// Returns `None` for f32 weights (which use the per-expert fallback path).
+fn expert_matrix(weight: &WeightStorage) -> Option<(GgufQuantizationType, &[u8])> {
+    match weight {
+        WeightStorage::Quantized(qtype, data) => Some((*qtype, data.as_slice())),
+        WeightStorage::MmapQuantized(qtype, mmap, offset, size) => {
+            Some((*qtype, &mmap[*offset..*offset + *size]))
+        }
+        WeightStorage::F32(_) => None,
     }
 }
 
@@ -2442,13 +2454,57 @@ impl InferenceModel {
             1.0
         };
 
-        // 4. For each selected expert, compute FFN and accumulate weighted output
-        for &(expert_idx, sel_score) in expert_scores.iter().take(n_experts_per_tok) {
-            let weight = if sigmoid_gating {
+        // 4. Gather the selected experts and their routing weights.
+        let n_sel = n_experts_per_tok;
+        let mut selected: Vec<usize> = Vec::with_capacity(n_sel);
+        let mut weights: Vec<f32> = Vec::with_capacity(n_sel);
+        for &(expert_idx, sel_score) in expert_scores.iter().take(n_sel) {
+            selected.push(expert_idx);
+            weights.push(if sigmoid_gating {
                 router_logits[expert_idx] / weight_norm
             } else {
                 sel_score
-            };
+            });
+        }
+
+        // 5. Expert FFN. Prefer the batched path (one parallel region per
+        // projection across all selected experts) for quantized experts; this
+        // avoids 12 separate rayon dispatches per MoE layer. Fall back to the
+        // per-expert path for f32 experts.
+        if let (Some((gq, gm)), Some((uq, um)), Some((dq, dm))) = (
+            expert_matrix(&layer.ffn_gate_exps),
+            expert_matrix(&layer.ffn_up_exps),
+            expert_matrix(&layer.ffn_down_exps),
+        ) {
+            let mut gate_all = vec![0.0_f32; n_sel * i_size];
+            let mut up_all = vec![0.0_f32; n_sel * i_size];
+            gemv_quantized_experts_f32(gq, gm, n_experts, &selected, i_size, h, normed, 0, &mut gate_all)
+                .map_err(|e| ModelError::InferenceFailed(format!("moe gate: {:?}", e)))?;
+            gemv_quantized_experts_f32(uq, um, n_experts, &selected, i_size, h, normed, 0, &mut up_all)
+                .map_err(|e| ModelError::InferenceFailed(format!("moe up: {:?}", e)))?;
+            // SwiGLU into gate_all; it then becomes the down-projection input
+            // (one contiguous [n_sel, i_size] buffer, stride i_size per expert).
+            for (g, u) in gate_all.iter_mut().zip(up_all.iter()) {
+                let sigmoid = 1.0_f32 / (1.0 + (-*g).exp());
+                *g = *g * sigmoid * *u;
+            }
+            let mut down_all = vec![0.0_f32; n_sel * h];
+            gemv_quantized_experts_f32(
+                dq, dm, n_experts, &selected, h, i_size, &gate_all, i_size, &mut down_all,
+            )
+            .map_err(|e| ModelError::InferenceFailed(format!("moe down: {:?}", e)))?;
+            for (slot, &weight) in weights.iter().enumerate() {
+                let d = &down_all[slot * h..(slot + 1) * h];
+                for (out, val) in ffn_out.iter_mut().zip(d.iter()) {
+                    *out += weight * val;
+                }
+            }
+            return Ok(());
+        }
+
+        // Fallback: per-expert FFN for f32 expert weights.
+        for (slot, &expert_idx) in selected.iter().enumerate() {
+            let weight = weights[slot];
             let gate = &mut gate_scratch[..i_size];
             let up = &mut up_scratch[..i_size];
             gate.fill(0.0_f32);
