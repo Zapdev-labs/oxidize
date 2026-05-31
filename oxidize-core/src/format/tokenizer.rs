@@ -269,7 +269,7 @@ pub fn load_tokenizer_from_gguf_metadata(
             metadata,
         )?)),
         "bert" => Ok(LoadedTokenizer::WordPiece(load_wordpiece(metadata)?)),
-        "gpt2" => Ok(LoadedTokenizer::Bpe(load_bpe(metadata)?)),
+        "gpt2" | "lfm2" | "lfm2moe" => Ok(LoadedTokenizer::Bpe(load_bpe(metadata)?)),
         "tiktoken" => Ok(LoadedTokenizer::Tiktoken(load_tiktoken(metadata)?)),
         _ => Err(TokenizerLoadError::UnsupportedTokenizerModel(model)),
     }
@@ -299,6 +299,27 @@ pub fn process_chat_template(
     messages: &[ChatMessage<'_>],
     add_generation_prompt: bool,
 ) -> String {
+    // ChatML-family templates (LFM2, Qwen, etc.) use full Jinja2 with macros and
+    // HF-specific tags the naive renderer can't execute. Detect the ChatML
+    // markers and emit the canonical ChatML formatting directly. The bos token
+    // is added separately by the caller, so it is not emitted here.
+    if template.contains("<|im_start|>") {
+        let mut out = String::new();
+        for message in messages {
+            out.push_str("<|im_start|>");
+            out.push_str(message.role);
+            out.push('\n');
+            out.push_str(message.content);
+            out.push_str("<|");
+            out.push_str("im_end");
+            out.push_str("|>\n");
+        }
+        if add_generation_prompt {
+            out.push_str("<|im_start|>assistant\n");
+        }
+        return out;
+    }
+
     let mut rendered = template.to_owned();
 
     rendered = render_for_messages_block(&rendered, messages);
@@ -494,6 +515,27 @@ fn load_bpe(
         merged_token_ids.insert(pair, merged_id);
     }
 
+    // Collect CONTROL (3) / USER_DEFINED (4) token pieces so chat-template
+    // markers like <|im_start|> tokenize to their single id instead of bytes.
+    let mut special_pieces: Vec<(String, u32)> = Vec::new();
+    if let Some(GgufMetadataValue::Array(types)) = metadata.get("tokenizer.ggml.token_type") {
+        for (id, ty) in types.values.iter().enumerate() {
+            let t = match ty {
+                GgufMetadataValue::Int32(v) => *v,
+                GgufMetadataValue::Uint32(v) => *v as i32,
+                _ => continue,
+            };
+            if (t == 3 || t == 4)
+                && let Some(piece) = id_to_token.get(&(id as u32))
+                && !piece.is_empty()
+            {
+                special_pieces.push((piece.clone(), id as u32));
+            }
+        }
+        // Longest pieces first so overlapping markers match greedily.
+        special_pieces.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+    }
+
     Ok(BpeTokenizer {
         vocab,
         id_to_token,
@@ -501,6 +543,7 @@ fn load_bpe(
         merged_token_ids,
         special_tokens: SpecialTokens::from_metadata(metadata),
         use_byte_fallback: true,
+        special_pieces,
     })
 }
 
@@ -619,6 +662,11 @@ pub struct BpeTokenizer {
     merged_token_ids: HashMap<(u32, u32), u32>,
     special_tokens: SpecialTokens,
     use_byte_fallback: bool,
+    /// Control / user-defined token pieces (e.g. `<|im_start|>`) and their ids,
+    /// sorted by descending length. These are matched verbatim in the input and
+    /// emitted as single ids before byte-level BPE runs on the surrounding text,
+    /// so chat-template markers tokenize the way the model was trained.
+    special_pieces: Vec<(String, u32)>,
 }
 
 impl BpeTokenizer {
@@ -695,6 +743,7 @@ impl BpeTokenizer {
             merged_token_ids,
             special_tokens: SpecialTokens::default(),
             use_byte_fallback: false,
+            special_pieces: Vec::new(),
         }
     }
 
@@ -717,6 +766,40 @@ impl BpeTokenizer {
     }
 
     pub fn encode(&self, text: &str) -> Vec<u32> {
+        // Split out control / user-defined pieces (chat markers) first so they
+        // map to their single ids; byte-level BPE runs on the segments between.
+        if self.special_pieces.is_empty() {
+            return self.encode_segment(text);
+        }
+        let mut out = Vec::new();
+        let mut rest = text;
+        while !rest.is_empty() {
+            let mut hit: Option<(usize, usize, u32)> = None; // (byte_pos, piece_len, id)
+            for (piece, id) in &self.special_pieces {
+                if let Some(pos) = rest.find(piece.as_str())
+                    && hit.is_none_or(|(bp, _, _)| pos < bp)
+                {
+                    hit = Some((pos, piece.len(), *id));
+                }
+            }
+            match hit {
+                Some((pos, len, id)) => {
+                    if pos > 0 {
+                        out.extend(self.encode_segment(&rest[..pos]));
+                    }
+                    out.push(id);
+                    rest = &rest[pos + len..];
+                }
+                None => {
+                    out.extend(self.encode_segment(rest));
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    fn encode_segment(&self, text: &str) -> Vec<u32> {
         // Byte-level (GPT-2) BPE stores its base vocabulary using the
         // `bytes_to_unicode` mapping (e.g. a space is 'Ġ', newline 'Ċ'). The raw
         // input bytes must be mapped through the same table before lookup —
@@ -804,7 +887,9 @@ fn byte_to_gpt2_char(b: u8) -> char {
     if gpt2_byte_is_printable(bu) {
         return char::from_u32(bu).unwrap_or('\u{fffd}');
     }
-    let index = (0u32..=255).filter(|x| !gpt2_byte_is_printable(*x)).position(|x| x == bu);
+    let index = (0u32..=255)
+        .filter(|x| !gpt2_byte_is_printable(*x))
+        .position(|x| x == bu);
     match index {
         Some(i) => char::from_u32(256 + i as u32).unwrap_or('\u{fffd}'),
         None => '\u{fffd}',
@@ -1270,7 +1355,11 @@ mod tests {
         assert_eq!(byte_to_gpt2_char(b'A'), 'A');
         for b in 0u8..=255 {
             let ch = byte_to_gpt2_char(b);
-            assert_eq!(gpt2_char_to_byte(ch), Some(b), "round-trip failed for byte {b}");
+            assert_eq!(
+                gpt2_char_to_byte(ch),
+                Some(b),
+                "round-trip failed for byte {b}"
+            );
         }
     }
 
@@ -1297,6 +1386,7 @@ mod tests {
             merged_token_ids,
             special_tokens: SpecialTokens::default(),
             use_byte_fallback: true,
+            special_pieces: Vec::new(),
         };
         assert_eq!(bpe.encode(" a"), vec![2]);
     }
@@ -1340,6 +1430,20 @@ mod tests {
             rendered,
             "<|system|>\nYou are helpful.\n<|user|>\nHi\n<|assistant|>\n"
         );
+    }
+
+    #[test]
+    fn chatml_fast_path_renders_im_start_and_im_end() {
+        let template = "{% for message in messages %}<|im_start|>{{ message.role }}\n{{ message.content }}\n{% endfor %}{% if add_generation_prompt %}<|im_start|>assistant\n{% endif %}";
+        let messages = [ChatMessage {
+            role: "user",
+            content: "Hello",
+        }];
+        let rendered = process_chat_template(template, &messages, true);
+        assert!(rendered.contains("<|im_start|>user"));
+        assert!(rendered.contains("Hello"));
+        assert!(rendered.contains("im_end"));
+        assert!(rendered.ends_with("<|im_start|>assistant\n"));
     }
 
     #[test]

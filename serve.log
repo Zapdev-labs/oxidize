@@ -1,0 +1,17 @@
+[2m2026-05-30T16:27:18.964022Z[0m [32m INFO[0m [2moxidize_server[0m[2m:[0m starting oxidize-server [3mbackend[0m[2m=[0m"cpu" [3mbatch_mode[0m[2m=[0m"sequential" [3mplatform[0m[2m=[0m"linux"
+[2m2026-05-30T16:27:18.964051Z[0m [32m INFO[0m [2moxidize_server::runtime::model[0m[2m:[0m loading model [3mstage[0m[2m=[0m"starting" [3mpercent[0m[2m=[0m0
+[2m2026-05-30T16:27:18.964074Z[0m [32m INFO[0m [2moxidize_server::runtime::model[0m[2m:[0m loading model [3mstage[0m[2m=[0m"mapping" [3mpercent[0m[2m=[0m35
+[2m2026-05-30T16:27:18.993138Z[0m [32m INFO[0m [2moxidize_server::runtime::model[0m[2m:[0m loading model [3mstage[0m[2m=[0m"parsing" [3mpercent[0m[2m=[0m85
+[2m2026-05-30T16:27:18.993159Z[0m [32m INFO[0m [2moxidize_server::runtime::model[0m[2m:[0m loading model [3mstage[0m[2m=[0m"complete" [3mpercent[0m[2m=[0m100
+InferenceConfig: vocab=128000, context=128000, layers=24, hidden=2048, intermediate=7168, heads=32, kv_heads=8, kv_head_dim=64, eps=0.00001, theta=5000000
+[2m2026-05-30T16:27:23.007638Z[0m [32m INFO[0m [2moxidize_server::logging[0m[2m:[0m request GET /v1/models
+[2m2026-05-30T16:27:23.007700Z[0m [32m INFO[0m [2moxidize_server::logging[0m[2m:[0m response GET /v1/models 200
+[2m2026-05-30T16:27:23.314940Z[0m [32m INFO[0m [2moxidize_server::logging[0m[2m:[0m request POST /v1/chat/completions
+[2m2026-05-30T16:27:32.296584Z[0m [32m INFO[0m [2moxidize_server::logging[0m[2m:[0m request GET /v1/models
+[2m2026-05-30T16:27:32.296634Z[0m [32m INFO[0m [2moxidize_server::logging[0m[2m:[0m response GET /v1/models 200
+[2m2026-05-30T16:36:44.926259Z[0m [32m INFO[0m [2maudit[0m[2m:[0m {"request_id":"01000a88-2cc0-4d24-ab01-dc425437f992","timestamp":"2026-05-30T16:36:44.926230613+00:00","event_type":"generation_complete","severity":"info","client_ip":null,"api_key_hash":null,"method":"","path":"","model":"LFM2.5-8B-A1B-Q4_K_M","prompt_tokens":11557,"completion_tokens":168,"total_tokens":11725,"duration_ms":561604,"status_code":null,"temperature":0.0,"stop_reason":"stop","streamed":false,"error":null,"rate_limited":null}
+[2m2026-05-30T16:36:44.926269Z[0m [32m INFO[0m [2moxidize_server::logging[0m[2m:[0m response POST /v1/chat/completions 200
+[2m2026-05-30T16:36:44.932610Z[0m [32m INFO[0m [2moxidize_server::logging[0m[2m:[0m request POST /v1/chat/completions
+[2m2026-05-30T16:42:38.096670Z[0m [32m INFO[0m [2moxidize_server::logging[0m[2m:[0m request GET /v1/models
+[2m2026-05-30T16:42:38.096740Z[0m [32m INFO[0m [2moxidize_server::logging[0m[2m:[0m response GET /v1/models 200
+[2m2026-05-30T16:44:26.757260Z[0m [32m INFO[0m [2moxidize_server::logging[0m[2m:[0m request POST /v1/chat/completions

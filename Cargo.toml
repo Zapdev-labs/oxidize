@@ -6,6 +6,7 @@ members = [
     "oxidize-quantize",
     "oxidize-py",
     "oxidize-train",
+    "oxidize-finetuning",
 ]
 resolver = "3"
 
