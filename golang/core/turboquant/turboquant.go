@@ -94,7 +94,7 @@ func (d *Data) GEMV(vector, output []float32) {
 	if len(output) < d.Rows {
 		return
 	}
-	row := make([]float32, d.Cols)
+	row := make([]float32, d.Rows*d.Cols)
 	d.DequantizeF32(row)
 	for r := 0; r < d.Rows; r++ {
 		var sum float32
@@ -128,7 +128,7 @@ func quantizeBlock(values []float32, qtype Type) Block {
 	if scale == 0 {
 		scale = 1
 	}
-	inv := float32(levels) / scale
+	inv := 1 / scale
 	out := make([]uint8, len(values))
 	for i, v := range values {
 		switch qtype {
