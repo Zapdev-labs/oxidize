@@ -143,6 +143,8 @@ func (t Type) String() string {
 		return "IQ1_M"
 	case TypeNVFP4:
 		return "NVFP4"
+	case TypeQ8_K:
+		return "Q8_K"
 	default:
 		return fmt.Sprintf("Unknown(%d)", uint32(t))
 	}
@@ -299,6 +301,8 @@ func ParseType(name string) (Type, error) {
 		return TypeIQ1_M, nil
 	case "NVFP4":
 		return TypeNVFP4, nil
+	case "Q8_K":
+		return TypeQ8_K, nil
 	default:
 		return TypeUnknown, &Error{Message: fmt.Sprintf("unknown type %q", name)}
 	}

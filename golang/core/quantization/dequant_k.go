@@ -24,13 +24,8 @@ func DequantQ2_K(input []byte, output []float32) error {
 		out := output[b*QK_K:]
 		var sc, mn [QK_K/16]float32
 		for j := 0; j < QK_K/16; j++ {
-			if j < 4 {
-				sc[j] = float32(scales[j]&0x0F) * d
-				mn[j] = float32(scales[j]>>4) * dmin
-			} else {
-				sc[j] = float32(scales[j+4]&0x0F) * d
-				mn[j] = float32(scales[j+4]>>4) * dmin
-			}
+			sc[j] = float32(scales[j]&0x0F) * d
+			mn[j] = float32(scales[j]>>4) * dmin
 		}
 		for n := 0; n < QK_K; n++ {
 			idx := n / 32

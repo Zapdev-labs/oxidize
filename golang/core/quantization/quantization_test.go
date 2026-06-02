@@ -28,7 +28,7 @@ func TestQuantizedSize(t *testing.T) {
 }
 
 func TestQuantizeDequantizeRoundtrip(t *testing.T) {
-	src := make([]float32, 64)
+	src := make([]float32, 256)
 	for i := range src {
 		src[i] = float32(i) * 0.01
 	}
