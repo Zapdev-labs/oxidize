@@ -1,0 +1,21 @@
+golang/core/tokenizer/tokenizer.go
+  s_b884af7059773d::t_c8db4d265cfc78 321-334
+golang/core/tokenizer/bpe.go
+  s_b884af7059773d::t_1169fd8701fd89 49-55
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "a5e4fd799afaff6f318d78c422a305ef60c706b2",
+  "prompts": {},
+  "sessions": {
+    "s_b884af7059773d": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_17743e93dffecYdtaN3rU3Q2D6",
+        "model": "minimax-m3-free"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
