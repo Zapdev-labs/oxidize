@@ -145,11 +145,16 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 	}
 }
 
-// AddRequest enqueues a new request.
+// AddRequest enqueues a new request. The MaxRequests limit applies to
+// the active set, not the queue, so callers can buffer more requests
+// than the concurrency limit and let the scheduler pick/preempt from
+// the queue as needed.
 func (s *Scheduler) AddRequest(tokens []int, maxTokens int) (*Request, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(s.active)+len(s.queue) >= s.cfg.MaxRequests {
+	if len(s.active) >= s.cfg.MaxRequests && len(s.queue) > 0 {
+		// The queue is non-empty and the active set is already full;
+		// refuse rather than growing unboundedly.
 		return nil, &SchedulerError{Message: "max requests reached"}
 	}
 	s.sequence++
