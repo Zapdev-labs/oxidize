@@ -125,6 +125,8 @@ func (c *ChannelTransport) Recv() []byte {
 	select {
 	case m := <-c.In:
 		return m
+	case m := <-c.Out:
+		return m
 	default:
 		return nil
 	}

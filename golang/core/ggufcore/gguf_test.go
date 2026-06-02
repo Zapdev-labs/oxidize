@@ -1,6 +1,10 @@
 package ggufcore
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/Zapdev-labs/oxidize/golang/core/quantization"
+)
 
 func TestArchitectureEmpty(t *testing.T) {
 	if got := Architecture(File{}); got != "" {

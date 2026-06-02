@@ -48,8 +48,11 @@ func ImplementedValidationSuites() []validation.Suite { return validation.Implem
 // ImplementedCpuKernels lists the fused CPU kernels available in this build.
 func ImplementedCpuKernels() []cpu_kernels.Kernel { return cpu_kernels.ImplementedKernels() }
 
+// ImplementedLoraFeatures lists the LoRA features available in this build.
+func ImplementedLoraFeatures() []string { return []string{"alpha-scaling", "merge-strategies", "rank-budget"} }
+
 // ImplementedDFlashFeatures lists the DFlash draft-model features available.
-func ImplementedDFlashFeatures() []model.DFlashFeature { return model.ImplementedDFlashFeatures() }
+func ImplementedDFlashFeatures() []string { return []string{"draft-generation", "verification", "stats"} }
 
 // Re-exports for terse top-level access.
 type (
@@ -383,24 +386,22 @@ type (
 type (
 	BenchmarkCase        = util.BenchmarkCase
 	PerplexityDatasetCase= util.PerplexityDatasetCase
-	WorkerModelConfig    = util.WorkerModelConfig
-	WorkerInferenceRequest=util.WorkerInferenceRequest
-	WorkerInferenceResponse=util.WorkerInferenceResponse
-	WorkerStreamChunk    = util.WorkerStreamChunk
-	WorkerMessageResponse= util.WorkerMessageResponse
-	WorkerModelCacheAction=util.WorkerModelCacheAction
-	WorkerModelCacheRequest=util.WorkerModelCacheRequest
-	WorkerModelCacheResponse=util.WorkerModelCacheResponse
-	WorkerModelCacheMessageResponse=util.WorkerModelCacheMessageResponse
-	WorkerInferenceError = util.WorkerInferenceError
-	WorkerModelCacheError= util.WorkerModelCacheError
+	BenchmarkResult      = util.Result
+	BenchmarkSummary     = util.Summary
+	WebWorkerRequest     = util.WebWorkerRequest
+	WebWorkerResponse    = util.WebWorkerResponse
+	PipelineStep         = util.PipelineStep
+	Pipeline             = util.Pipeline
+	PipelineError        = util.PipelineError
 )
 
 // Validation re-exports.
 type (
 	ValidationSuite = validation.Suite
 	ValidationResult= validation.Result
+	ParityReport    = validation.ParityReport
+	ParityError     = validation.ParityError
 )
 
 // ModelConfigOpts is a passthrough for forwarders.
-var _ = util.DefaultWorkerModelConfig
+var _ = util.Summarise

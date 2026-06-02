@@ -146,7 +146,7 @@ func QuantizationOf(file File) (QuantizationType, bool) {
 			return quantization.FromLLamaFType(uint32(n)), true
 		}
 	}
-	return quantization.TypeUnknown, false
+	return 0, false
 }
 
 // MappedTensorInfos returns the tensor infos with their GGUF names mapped
