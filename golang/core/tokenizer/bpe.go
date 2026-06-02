@@ -46,13 +46,14 @@ func (b *BpeTokenizer) Encode(text string, opts EncodeOptions) ([]uint32, error)
 }
 
 func (b *BpeTokenizer) bpe(word []byte) []uint32 {
-	if len(word) == 1 {
-		if id, ok := b.vocab[string(word)]; ok {
-			return []uint32{id}
-		}
-		return []uint32{b.special.Unknown}
+	if len(word) == 0 {
+		return nil
 	}
-	parts := []string{string(word)}
+	// Standard BPE begins with single-character pieces.
+	parts := make([]string, len(word))
+	for i, c := range word {
+		parts[i] = string(c)
+	}
 	for {
 		pairs := make([][2]string, 0, len(parts)-1)
 		for i := 0; i < len(parts)-1; i++ {

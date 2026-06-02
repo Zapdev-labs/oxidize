@@ -318,10 +318,20 @@ func expandForLoops(template string, messages []ChatMessage) string {
 		// repeat body for each message
 		for _, m := range messages {
 			rendered := body
-			rendered = strings.ReplaceAll(rendered, varName+`["role"]`, m.Role)
-			rendered = strings.ReplaceAll(rendered, varName+`["content"]`, m.Content)
-			rendered = strings.ReplaceAll(rendered, varName+".role", m.Role)
-			rendered = strings.ReplaceAll(rendered, varName+".content", m.Content)
+			// Replace the full `{{ var['field'] }}` (or `{{ var["field"] }}`)
+			// expression with the literal value so substituteVars does not
+			// see an unresolvable identifier afterwards.
+			fieldReplacements := []struct{ src, dst string }{
+				{`{{ ` + varName + `["role"] }}`, m.Role},
+				{`{{ ` + varName + `["content"] }}`, m.Content},
+				{`{{ ` + varName + `['role'] }}`, m.Role},
+				{`{{ ` + varName + `['content'] }}`, m.Content},
+				{`{{ ` + varName + `.role }}`, m.Role},
+				{`{{ ` + varName + `.content }}`, m.Content},
+			}
+			for _, r := range fieldReplacements {
+				rendered = strings.ReplaceAll(rendered, r.src, r.dst)
+			}
 			out.WriteString(rendered)
 		}
 		template = template[start+endLoop+len("{% endfor %}"):]
