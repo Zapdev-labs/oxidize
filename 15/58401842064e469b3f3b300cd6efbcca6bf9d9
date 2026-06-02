@@ -1,0 +1,103 @@
+golang/internal/serviceinfo/test_helpers_test.go
+  s_1a3d3c1a9b4408::t_ccdbfb9700cb38 1-19
+golang/internal/cli/test_helpers_test.go
+  s_1a3d3c1a9b4408::t_ccdbfb9700cb38 1-19
+golang/internal/server/config.go
+  s_1a3d3c1a9b4408::t_c765c29d91db41 1-17
+golang/internal/server/response.go
+  s_1a3d3c1a9b4408::t_c765c29d91db41 1-27
+golang/internal/gguf/metadata.go
+  s_1a3d3c1a9b4408::t_e6c3fd921d7913 1-90
+golang/internal/server/routes.go
+  s_1a3d3c1a9b4408::t_c765c29d91db41 1-107
+golang/internal/gguf/gguf_test.go
+  s_1a3d3c1a9b4408::t_ccdbfb9700cb38 1-48
+.github/workflows/go.yml
+  s_1a3d3c1a9b4408::t_c765c29d91db41 1-36
+plans/go-initial-oxidize-port.md
+  s_1a3d3c1a9b4408::t_c7493d4d401f3f 1-611
+golang/internal/server/app.go
+  s_1a3d3c1a9b4408::t_c765c29d91db41 1-83
+golang/go.mod
+  s_1a3d3c1a9b4408::t_ccdbfb9700cb38 1-3
+golang/internal/cli/cli_test.go
+  s_1a3d3c1a9b4408::t_ccdbfb9700cb38 1-33,45-54
+  s_1a3d3c1a9b4408::t_18edf640f0c047 34-44
+golang/internal/buildinfo/buildinfo.go
+  s_1a3d3c1a9b4408::t_e6c3fd921d7913 1-7
+golang/scripts/manual_qa_test.go
+  s_1a3d3c1a9b4408::t_cf00acc142d30a 24
+  s_1a3d3c1a9b4408::t_ccdbfb9700cb38 1-23,25-33
+golang/internal/api/schema.go
+  s_1a3d3c1a9b4408::t_e6c3fd921d7913 1-107
+golang/scripts/manual_qa.sh
+  s_1a3d3c1a9b4408::t_05fdab8faadeaa 50
+  s_1a3d3c1a9b4408::t_988c10ca6357df 62
+  s_1a3d3c1a9b4408::t_c765c29d91db41 1-33,36-38,41-43,46-49,51-58,60-61,63
+  s_1a3d3c1a9b4408::t_66b393b51f7033 59
+  s_1a3d3c1a9b4408::t_d42a2958405697 34-35,39-40,44-45
+golang/internal/api/responses_test.go
+  s_1a3d3c1a9b4408::t_6dae7a388c3145 49-57
+  s_1a3d3c1a9b4408::t_ccdbfb9700cb38 1-48,58-95
+golang/internal/api/schema_test.go
+  s_1a3d3c1a9b4408::t_ccdbfb9700cb38 1-60
+golang/cmd/oxidize/main.go
+  s_1a3d3c1a9b4408::t_c765c29d91db41 1-19
+golang/internal/generate/generate_test.go
+  s_1a3d3c1a9b4408::t_ccdbfb9700cb38 1-37
+golang/internal/auth/auth_test.go
+  s_1a3d3c1a9b4408::t_ccdbfb9700cb38 1-67
+golang/internal/gguf/parse.go
+  s_1a3d3c1a9b4408::t_e6c3fd921d7913 1-94
+golang/internal/generate/generate.go
+  s_1a3d3c1a9b4408::t_e6c3fd921d7913 1-35
+golang/internal/serviceinfo/serviceinfo_test.go
+  s_1a3d3c1a9b4408::t_ccdbfb9700cb38 1-47
+golang/internal/gguf/reader.go
+  s_1a3d3c1a9b4408::t_e6c3fd921d7913 1-119
+golang/internal/serviceinfo/models.go
+  s_1a3d3c1a9b4408::t_e6c3fd921d7913 1-55
+golang/internal/api/responses.go
+  s_1a3d3c1a9b4408::t_21ff0e756f7791 41-42,88,99,101
+  s_1a3d3c1a9b4408::t_e6c3fd921d7913 1-30,37-39,44-73,77-87,90-98,100,102-111,113-172
+  s_1a3d3c1a9b4408::t_b742aae37f19d4 40,43
+  s_1a3d3c1a9b4408::t_e8fc98b856dcf1 31-36,74-76,89,112
+golang/internal/gguf/errors.go
+  s_1a3d3c1a9b4408::t_e6c3fd921d7913 1-27
+golang/internal/gguf/types.go
+  s_1a3d3c1a9b4408::t_e6c3fd921d7913 1-58
+golang/internal/server/server_test.go
+  s_1a3d3c1a9b4408::t_ccdbfb9700cb38 1-100
+golang/internal/serviceinfo/docs.go
+  s_1a3d3c1a9b4408::t_e6c3fd921d7913 1-34,42-44
+  s_1a3d3c1a9b4408::t_e8fc98b856dcf1 35-41
+golang/internal/cli/cli.go
+  s_1a3d3c1a9b4408::t_c765c29d91db41 1-22,24-47,49-53,58-111
+  s_1a3d3c1a9b4408::t_2824193ea27e1c 23,48,54-57
+golang/internal/buildinfo/buildinfo_test.go
+  s_1a3d3c1a9b4408::t_ccdbfb9700cb38 1-15
+golang/internal/serviceinfo/metrics.go
+  s_1a3d3c1a9b4408::t_e6c3fd921d7913 1-16
+golang/README.md
+  s_1a3d3c1a9b4408::t_ccdbfb9700cb38 1-3
+golang/internal/server/test_helpers_test.go
+  s_1a3d3c1a9b4408::t_ccdbfb9700cb38 1-19
+golang/internal/auth/auth.go
+  s_1a3d3c1a9b4408::t_e6c3fd921d7913 1-39
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "1558401842064e469b3f3b300cd6efbcca6bf9d9",
+  "prompts": {},
+  "sessions": {
+    "s_1a3d3c1a9b4408": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e8852-99ff-74f0-bde1-c32a32deddfa",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
