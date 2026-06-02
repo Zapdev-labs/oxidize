@@ -1,0 +1,11 @@
+# github.com/Zapdev-labs/oxidize/golang/internal/api [github.com/Zapdev-labs/oxidize/golang/internal/api.test]
+internal/api/responses_test.go:11:13: undefined: ValidateCandidateCount
+internal/api/responses_test.go:24:10: undefined: BuildChatCompletion
+internal/api/responses_test.go:36:10: undefined: BuildModelsResponse
+internal/api/responses_test.go:43:10: undefined: BuildTextCompletion
+internal/api/responses_test.go:50:10: undefined: BuildEmbeddingsResponse
+internal/api/schema_test.go:32:10: undefined: ChatCompletionRequest
+internal/api/schema_test.go:37:61: undefined: ResponseFormatJSONObject
+internal/api/schema_test.go:51:10: undefined: CompletionRequest
+FAIL	github.com/Zapdev-labs/oxidize/golang/internal/api [build failed]
+FAIL

@@ -1,0 +1,8 @@
+# github.com/Zapdev-labs/oxidize/golang/internal/buildinfo [github.com/Zapdev-labs/oxidize/golang/internal/buildinfo.test]
+internal/buildinfo/buildinfo_test.go:6:5: undefined: Name
+internal/buildinfo/buildinfo_test.go:7:25: undefined: Name
+internal/buildinfo/buildinfo_test.go:9:5: undefined: ModulePath
+internal/buildinfo/buildinfo_test.go:10:31: undefined: ModulePath
+internal/buildinfo/buildinfo_test.go:12:5: undefined: Version
+FAIL	github.com/Zapdev-labs/oxidize/golang/internal/buildinfo [build failed]
+FAIL

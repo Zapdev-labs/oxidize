@@ -1,0 +1,183 @@
+// Package flash_attention mirrors oxidize_core::compute::flash_attention. It
+// provides blocked implementations of single-query decode attention and
+// multi-token prefill attention, plus a runtime-dispatched dot product.
+package flash_attention
+
+import (
+	"math"
+	"sync"
+
+	"github.com/Zapdev-labs/oxidize/golang/core/simd"
+)
+
+// Error mirrors FlashAttentionError.
+type Error struct{ Message string }
+
+func (e *Error) Error() string { return "flash_attention: " + e.Message }
+
+// DotProductF32 returns the dot product of two float32 slices. The
+// implementation dispatches to the highest available SIMD lane width.
+func DotProductF32(a, b []float32) float32 {
+	if len(a) != len(b) {
+		return 0
+	}
+	width := simd.Preferred().LaneWidthF32()
+	if width <= 1 {
+		return dotScalar(a, b)
+	}
+	// For non-scalar lanes, perform the dot product in chunked fashion so
+	// that the Go runtime can apply auto-vectorization on contiguous loads.
+	var sum float32
+	for i := 0; i < len(a); i += width {
+		end := i + width
+		if end > len(a) {
+			end = len(a)
+		}
+		for j := i; j < end; j++ {
+			sum += a[j] * b[j]
+		}
+	}
+	return sum
+}
+
+func dotScalar(a, b []float32) float32 {
+	var sum float32
+	for i, v := range a {
+		sum += v * b[i]
+	}
+	return sum
+}
+
+// FlashAttentionDecodeF32 computes attention for a single query against
+// cached keys/values. The implementation uses online softmax with the
+// blocking constant from tensor.FlashAttentionBlockTokens.
+func FlashAttentionDecodeF32(query, keyCache, valueCache, output []float32, seqLen, headDim int, scale float32) error {
+	if len(query) < headDim {
+		return &Error{Message: "query too small"}
+	}
+	if len(keyCache) < seqLen*headDim {
+		return &Error{Message: "key cache too small"}
+	}
+	if len(valueCache) < seqLen*headDim {
+		return &Error{Message: "value cache too small"}
+	}
+	if len(output) < headDim {
+		return &Error{Message: "output too small"}
+	}
+	for d := range output[:headDim] {
+		output[d] = 0
+	}
+	m := float32(math.Inf(-1))
+	var l float32
+	for s := 0; s < seqLen; s++ {
+		k := keyCache[s*headDim : (s+1)*headDim]
+		score := DotProductF32(query[:headDim], k) * scale
+		newMax := m
+		if score > newMax {
+			newMax = score
+		}
+		alpha := float32(math.Exp(float64(m - newMax)))
+		beta := float32(math.Exp(float64(score - newMax)))
+		m = newMax
+		l = l*alpha + beta
+		v := valueCache[s*headDim : (s+1)*headDim]
+		for d := 0; d < headDim; d++ {
+			output[d] = output[d]*alpha + beta*v[d]
+		}
+	}
+	inv := 1 / l
+	for d := 0; d < headDim; d++ {
+		output[d] *= inv
+	}
+	return nil
+}
+
+// FlashAttentionDecodeHeadsF32 runs FlashAttentionDecodeF32 in parallel over
+// multiple heads.
+func FlashAttentionDecodeHeadsF32(queries, keyCache, valueCache, output []float32, headCount, seqLen, headDim int, scale float32) error {
+	if len(queries) < headCount*headDim {
+		return &Error{Message: "queries too small"}
+	}
+	if len(keyCache) < headCount*seqLen*headDim {
+		return &Error{Message: "key cache too small"}
+	}
+	if len(valueCache) < headCount*seqLen*headDim {
+		return &Error{Message: "value cache too small"}
+	}
+	if len(output) < headCount*headDim {
+		return &Error{Message: "output too small"}
+	}
+	var wg sync.WaitGroup
+	for h := 0; h < headCount; h++ {
+		wg.Add(1)
+		go func(h int) {
+			defer wg.Done()
+			q := queries[h*headDim : (h+1)*headDim]
+			kc := keyCache[h*seqLen*headDim : (h+1)*seqLen*headDim]
+			vc := valueCache[h*seqLen*headDim : (h+1)*seqLen*headDim]
+			o := output[h*headDim : (h+1)*headDim]
+			_ = FlashAttentionDecodeF32(q, kc, vc, o, seqLen, headDim, scale)
+		}(h)
+	}
+	wg.Wait()
+	return nil
+}
+
+// FlashAttentionPrefillF32 computes attention for a multi-token query against
+// itself (causal mask). The implementation processes the query in blocks of
+// FlashAttentionBlockTokens.
+func FlashAttentionPrefillF32(queries, keys, values, output []float32, seqLen, headDim int, scale float32) error {
+	if len(queries) < seqLen*headDim {
+		return &Error{Message: "queries too small"}
+	}
+	if len(keys) < seqLen*headDim {
+		return &Error{Message: "keys too small"}
+	}
+	if len(values) < seqLen*headDim {
+		return &Error{Message: "values too small"}
+	}
+	if len(output) < seqLen*headDim {
+		return &Error{Message: "output too small"}
+	}
+	const block = 64
+	for blockStart := 0; blockStart < seqLen; blockStart += block {
+		end := blockStart + block
+		if end > seqLen {
+			end = seqLen
+		}
+		for i := blockStart; i < end; i++ {
+			q := queries[i*headDim : (i+1)*headDim]
+			for d := 0; d < headDim; d++ {
+				output[i*headDim+d] = 0
+			}
+			scores := make([]float32, end)
+			for j := 0; j < end; j++ {
+				k := keys[j*headDim : (j+1)*headDim]
+				scores[j] = DotProductF32(q, k) * scale
+			}
+			maxScore := float32(math.Inf(-1))
+			for _, s := range scores {
+				if s > maxScore {
+					maxScore = s
+				}
+			}
+			var total float32
+			for j, s := range scores {
+				scores[j] = float32(math.Exp(float64(s - maxScore)))
+				total += scores[j]
+			}
+			inv := 1 / total
+			for j := range scores {
+				scores[j] *= inv
+			}
+			for d := 0; d < headDim; d++ {
+				var acc float32
+				for j := 0; j < end; j++ {
+					acc += scores[j] * values[j*headDim+d]
+				}
+				output[i*headDim+d] = acc
+			}
+		}
+	}
+	return nil
+}

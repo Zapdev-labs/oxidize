@@ -1,0 +1,6 @@
+=== RUN   TestManualQAScriptShape
+    manual_qa_test.go:30: script missing "/v1/completions"
+--- FAIL: TestManualQAScriptShape (0.00s)
+FAIL
+FAIL	github.com/Zapdev-labs/oxidize/golang/scripts	0.002s
+FAIL

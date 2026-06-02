@@ -1,0 +1,110 @@
+Protected by Socket Firewall
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 27 tests
+test tests::detects_profiling_child_environment ... ok
+test tests::chat_mode_ignores_blank_lines ... ok
+test tests::chat_mode_supports_multiline_prompt_input ... ok
+test tests::chat_mode_replies_and_exits ... ok
+test tests::chat_mode_reuses_cached_prompt_response ... ok
+test tests::chat_mode_renders_and_clears_conversation_history ... ok
+test tests::format_generation_stats_reports_tokens_and_speed ... ok
+test tests::greeting_uses_prompt ... ok
+test tests::conversation_history_render_uses_empty_state ... ok
+test tests::parses_parallelism_strategy ... ok
+test tests::profiler_command_builds_perf_record_invocation ... ok
+test tests::profiler_command_builds_samply_record_invocation ... ok
+test tests::renders_load_progress_with_bytes_when_available ... ok
+test tests::renders_load_progress_without_bytes_when_unavailable ... ok
+test tests::renders_lora_plan_summary ... ok
+test tests::renders_multi_gpu_offload_plan_summary ... ok
+test tests::renders_offload_plan_summary ... ok
+test tests::readme_includes_quick_start_and_validation_commands ... ok
+test tests::single_shot_mode_skips_blank_prompt ... ok
+test tests::single_shot_mode_writes_one_response ... ok
+test tests::strips_profile_flags_from_passthrough_arguments ... ok
+test tests::write_generated_response_cached_hits_cache ... ok
+test tests::write_generated_response_emits_progress_and_final_response ... ok
+test tests::rewrites_run_command_to_model_flags ... ok
+test tests::serve_rewrite_accepts_port ... ok
+test tests::run_rewrite_with_prompt_is_not_api_only ... ok
+test tests::run_rewrite_does_not_treat_option_values_as_prompt ... ok
+
+test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 1 test
+test tests::parses_min_throughput_gate ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 27 tests
+test tests::format_generation_stats_reports_tokens_and_speed ... ok
+test tests::chat_mode_ignores_blank_lines ... ok
+test tests::chat_mode_replies_and_exits ... ok
+test tests::chat_mode_renders_and_clears_conversation_history ... ok
+test tests::profiler_command_builds_perf_record_invocation ... ok
+test tests::chat_mode_reuses_cached_prompt_response ... ok
+test tests::parses_parallelism_strategy ... ok
+test tests::greeting_uses_prompt ... ok
+test tests::profiler_command_builds_samply_record_invocation ... ok
+test tests::chat_mode_supports_multiline_prompt_input ... ok
+test tests::conversation_history_render_uses_empty_state ... ok
+test tests::renders_load_progress_with_bytes_when_available ... ok
+test tests::renders_load_progress_without_bytes_when_unavailable ... ok
+test tests::detects_profiling_child_environment ... ok
+test tests::renders_lora_plan_summary ... ok
+test tests::renders_offload_plan_summary ... ok
+test tests::renders_multi_gpu_offload_plan_summary ... ok
+test tests::run_rewrite_does_not_treat_option_values_as_prompt ... ok
+test tests::rewrites_run_command_to_model_flags ... ok
+test tests::run_rewrite_with_prompt_is_not_api_only ... ok
+test tests::readme_includes_quick_start_and_validation_commands ... ok
+test tests::single_shot_mode_skips_blank_prompt ... ok
+test tests::serve_rewrite_accepts_port ... ok
+test tests::single_shot_mode_writes_one_response ... ok
+test tests::strips_profile_flags_from_passthrough_arguments ... ok
+test tests::write_generated_response_emits_progress_and_final_response ... ok
+test tests::write_generated_response_cached_hits_cache ... ok
+
+test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 2 tests
+test help_reports_oxidize_cli_binary ... FAILED
+test default_mode_runs_single_shot_inference ... ok
+
+failures:
+
+---- help_reports_oxidize_cli_binary stdout ----
+
+thread 'help_reports_oxidize_cli_binary' (883656) panicked at oxidize-cli/tests/cli_binary.rs:8:5:
+expected help output to contain binary name, got: Usage: oxidize <command> [args]
+
+Commands:
+run <model> [prompt]     Run a model locally
+serve [model]            Start the OpenAI-compatible server
+list                     List local GGUF models in ./models
+
+Examples:
+oxidize run ./models/Qwen3-4B-Q4_K_M.gguf "hello"
+oxidize serve ./models/Qwen3-4B-Q4_K_M.gguf
+oxidize list
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    help_reports_oxidize_cli_binary
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+=== Socket Firewall ===
+
+

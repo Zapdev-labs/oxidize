@@ -1,0 +1,7 @@
+# github.com/Zapdev-labs/oxidize/golang/internal/auth [github.com/Zapdev-labs/oxidize/golang/internal/auth.test]
+internal/auth/auth_test.go:11:13: undefined: Middleware
+internal/auth/auth_test.go:27:13: undefined: Middleware
+internal/auth/auth_test.go:43:13: undefined: Middleware
+internal/auth/auth_test.go:57:13: undefined: Middleware
+FAIL	github.com/Zapdev-labs/oxidize/golang/internal/auth [build failed]
+FAIL

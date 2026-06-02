@@ -1,0 +1,6 @@
+# github.com/Zapdev-labs/oxidize/golang/internal/cli [github.com/Zapdev-labs/oxidize/golang/internal/cli.test]
+internal/cli/cli_test.go:13:12: undefined: Run
+internal/cli/cli_test.go:26:12: undefined: Run
+internal/cli/cli_test.go:39:9: undefined: Run
+FAIL	github.com/Zapdev-labs/oxidize/golang/internal/cli [build failed]
+FAIL

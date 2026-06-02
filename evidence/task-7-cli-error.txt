@@ -1,0 +1,3 @@
+oxidize run requires a model name or local .gguf path
+oxidize run requires a model name or local .gguf path
+exit status 1

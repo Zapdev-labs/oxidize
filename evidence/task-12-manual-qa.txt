@@ -1,0 +1,15 @@
+generation progress: 1/2 tokens
+generation progress: 2/2 tokens
+oxidize-cli: hello
+generation stats: tokens=2 speed=4.00 tok/s
+valid-v3	valid-v3.gguf	version=3	arch=unknown
+{"object":"list","data":[{"id":"valid-v3","object":"model","owned_by":"oxidize"}]}
+{"id":"chatcmpl-placeholder","object":"chat.completion","created":0,"model":"valid-v3","choices":[{"index":0,"message":{"role":"assistant","content":""},"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":0,"total_tokens":0}}
+{"id":"cmpl-placeholder","object":"text_completion","created":0,"model":"valid-v3","choices":[{"index":0,"text":"hello","finish_reason":"stop"}],"usage":{"prompt_tokens":0,"total_tokens":0}}
+{"object":"list","data":[{"object":"embedding","embedding":[],"index":0}],"model":"valid-v3","usage":{"prompt_tokens":0,"total_tokens":0}}
+data: {"id":"chatcmpl-placeholder","object":"chat.completion.chunk","created":0,"model":"valid-v3","choices":[{"index":0,"message":{"role":"","content":""},"delta":{"role":"assistant"},"finish_reason":null}],"usage":{"prompt_tokens":0,"total_tokens":0}}
+
+data: {"id":"chatcmpl-placeholder","object":"chat.completion.chunk","created":0,"model":"valid-v3","choices":[{"index":0,"message":{"role":"","content":""},"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":0,"total_tokens":0}}
+
+data: [DONE]
+
