@@ -1,0 +1,20 @@
+golang/core/turboquant/turboquant.go
+  s_b884af7059773d::t_2c629dedde979e 131
+  s_b884af7059773d::t_9245908720ac76 97
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "e9d16787ad1341ba552804fa2cfafa5e9f93e603",
+  "prompts": {},
+  "sessions": {
+    "s_b884af7059773d": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_17743e93dffecYdtaN3rU3Q2D6",
+        "model": "minimax-m3-free"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
