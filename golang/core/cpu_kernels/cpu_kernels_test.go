@@ -24,25 +24,35 @@ func TestWorkspace(t *testing.T) {
 }
 
 func TestFusedRMSNormGEMV(t *testing.T) {
-	cols := 4
-	rows := 3
+	// Convention (mirrors oxidize_core::compute::cpu_kernels::fused_rms_norm_gemv_f32_transposed):
+	//   - input/normalized length = rows
+	//   - output length = cols
+	//   - matrix is rows*cols row-major
+	// output[c] = sum_r matrix[r][c] * normalized[r]
+	rows := 4
+	cols := 3
 	input := []float32{1, 2, 3, 4}
 	weight := []float32{1, 1, 1, 1}
+	// 4x3 matrix that picks out normalized[0] in the first column.
 	matrix := []float32{
-		1, 0, 0, 0,
-		0, 1, 0, 0,
-		0, 0, 1, 0,
+		1, 0, 0,
+		0, 0, 0,
+		0, 0, 0,
+		0, 0, 0,
 	}
-	output := make([]float32, rows)
-	w := NewWorkspace(cols)
+	output := make([]float32, cols)
+	w := NewWorkspace(rows)
 	if err := FusedRMSNormGEMVF32Transposed(FusedRmsNormGemv{
 		Input: input, NormWeight: weight, Eps: 1e-6,
 		Matrix: matrix, Rows: rows, Cols: cols,
 	}, w, output); err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if math.Abs(float64(output[0])-1) > 1e-3 {
-		t.Fatalf("output[0] = %f", output[0])
+	// normalized[0] = input[0] / sqrt(mean(input^2) + eps) = 1 / sqrt(7.5+1e-6)
+	const mean = (1.0 + 4.0 + 9.0 + 16.0) / 4.0
+	want := 1.0 / float32(math.Sqrt(mean))
+	if math.Abs(float64(output[0]-want)) > 1e-3 {
+		t.Fatalf("output[0] = %f, want %f", output[0], want)
 	}
 }
 

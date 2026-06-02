@@ -84,10 +84,11 @@ type FusedRmsNormGemv struct {
 }
 
 // FusedRMSNormGEMVF32Transposed applies RMSNorm to the input, then performs
-// a transposed GEMV with the normalized vector.
+// a transposed GEMV with the normalized vector. The convention matches
+// gemv_f32_transposed: len(input) == rows, len(output) == cols.
 func FusedRMSNormGEMVF32Transposed(params FusedRmsNormGemv, workspace *Workspace, output []float32) error {
-	normalized := workspace.Get(params.Cols)
-	if err := tensor.RMSNormF32(params.Input[:params.Cols], params.NormWeight[:params.Cols], normalized, params.Eps); err != nil {
+	normalized := workspace.Get(params.Rows)
+	if err := tensor.RMSNormF32(params.Input[:params.Rows], params.NormWeight[:params.Rows], normalized, params.Eps); err != nil {
 		return &FusedError{Message: err.Error()}
 	}
 	return tensor.GemvF32Transposed(params.Matrix, params.Rows, params.Cols, normalized, output)
