@@ -54,8 +54,13 @@ func TestRmsNorm(t *testing.T) {
 	if err := RMSNormF32(input, weight, output, 1e-6); err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if math.Abs(float64(output[0]-1/float32(math.Sqrt((1+4+9+16)/4)))) > 1e-3 {
-		t.Fatalf("rms[0] = %f", output[0])
+	// input[0] * inv * weight[0] where inv = 1 / sqrt(mean + eps) and
+	// mean = (1+4+9+16)/4. The test must compute the mean as a float to
+	// avoid integer truncation.
+	const mean = (1.0 + 4.0 + 9.0 + 16.0) / 4.0
+	want := 1.0 / float32(math.Sqrt(mean))
+	if math.Abs(float64(output[0]-want)) > 1e-3 {
+		t.Fatalf("rms[0] = %f, want %f", output[0], want)
 	}
 }
 
