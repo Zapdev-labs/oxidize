@@ -127,7 +127,7 @@ func Parse(raw []byte) (*MappedFile, error) {
 	var infos []TensorInfo
 	dataStart := int(8 + headerLen)
 	cursor := dataStart
-	for name, raw := range header {
+	for name, metaJSON := range header {
 		if name == "__metadata__" {
 			continue
 		}
@@ -136,7 +136,7 @@ func Parse(raw []byte) (*MappedFile, error) {
 			Shape   []int  `json:"shape"`
 			Offsets [2]int `json:"data_offsets"`
 		}
-		if err := json.Unmarshal(raw, &meta); err != nil {
+		if err := json.Unmarshal(metaJSON, &meta); err != nil {
 			return nil, &Error{Message: "tensor " + name + ": " + err.Error()}
 		}
 		dt, err := parseDType(meta.DType)
