@@ -1,0 +1,36 @@
+name: Go
+
+on:
+  pull_request:
+    paths:
+      - "golang/**"
+      - ".github/workflows/go.yml"
+  push:
+    paths:
+      - "golang/**"
+      - ".github/workflows/go.yml"
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: golang/go.mod
+      - name: gofmt
+        run: |
+          cd golang
+          test -z "$(gofmt -l .)"
+      - name: go vet
+        run: |
+          cd golang
+          go vet ./...
+      - name: go test
+        run: |
+          cd golang
+          go test ./...
+      - name: go test -race
+        run: |
+          cd golang
+          go test -race ./...
