@@ -1,0 +1,19 @@
+golang/core/tensor/tensor_test.go
+  s_b884af7059773d::t_45f8c0054b118b 57-63
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "843533bfd2fa0e6cc23539f3f377baec8b22702a",
+  "prompts": {},
+  "sessions": {
+    "s_b884af7059773d": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_17743e93dffecYdtaN3rU3Q2D6",
+        "model": "minimax-m3-free"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
