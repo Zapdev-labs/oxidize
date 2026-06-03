@@ -141,8 +141,30 @@ func GemmF32(left, right []float32, rows, shared, cols int, output []float32) er
 	return nil
 }
 
-// GemmQuantizedF32 computes the GEMM of a dequantized left factor with right.
-func GemmQuantizedF32(qbytes []byte, dequant func([]byte, []float32) error, rows, shared, cols int, right, output []float32, scratch []float32) error {
+// GemmQuantizedF32 computes batched GEMM: output[batch, rows, cols] = dequant(matrix) * right[batch, shared, cols].
+func GemmQuantizedF32(qbytes []byte, dequant func([]byte, []float32) error, rows, shared, cols, batch int, right, output []float32, scratch []float32) error {
+	if batch <= 0 {
+		return nil
+	}
+	expectedIn := batch * shared * cols
+	if len(right) < expectedIn {
+		return &GemmError{Message: fmt.Sprintf("right buffer too small: need %d, have %d", expectedIn, len(right))}
+	}
+	expectedOut := batch * rows * cols
+	if len(output) < expectedOut {
+		return &GemmError{Message: fmt.Sprintf("output buffer too small: need %d, have %d", expectedOut, len(output))}
+	}
+	for t := 0; t < batch; t++ {
+		in := right[t*shared*cols : (t+1)*shared*cols]
+		out := output[t*rows*cols : (t+1)*rows*cols]
+		if err := gemmQuantizedF32One(qbytes, dequant, rows, shared, cols, in, out, scratch); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func gemmQuantizedF32One(qbytes []byte, dequant func([]byte, []float32) error, rows, shared, cols int, right, output []float32, scratch []float32) error {
 	if scratch == nil || len(scratch) < shared {
 		scratch = make([]float32, shared)
 	}

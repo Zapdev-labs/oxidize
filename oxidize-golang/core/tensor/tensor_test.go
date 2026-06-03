@@ -47,6 +47,22 @@ func TestGemmF32(t *testing.T) {
 	}
 }
 
+func TestGemmQuantizedF32Batch(t *testing.T) {
+	qbytes := []byte{0, 0, 128, 63, 0, 0, 0, 64} // 1.0, 2.0 as f32 LE
+	dequant := func(block []byte, out []float32) error {
+		copy(out, []float32{1, 2})
+		return nil
+	}
+	right := []float32{1, 0, 0, 1}
+	output := make([]float32, 2)
+	if err := GemmQuantizedF32(qbytes, dequant, 1, 2, 1, 2, right, output, nil); err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if math.Abs(float64(output[0]-1)) > 1e-6 || math.Abs(float64(output[1]-2)) > 1e-6 {
+		t.Fatalf("output = %v, want [1, 2]", output)
+	}
+}
+
 func TestRmsNorm(t *testing.T) {
 	input := []float32{1, 2, 3, 4}
 	weight := []float32{1, 1, 1, 1}

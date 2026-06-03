@@ -2,6 +2,36 @@ package tensor
 
 import "math"
 
+// ApplyRopeHeadF32 applies RoPE to a single head vector (len headDim), matching
+// oxidize-core apply_rope_f32.
+func ApplyRopeHeadF32(input, output []float32, position, headDim int, theta float32) error {
+	if headDim <= 0 || headDim%2 != 0 {
+		return &RopeError{Message: "headDim must be positive and even"}
+	}
+	if len(input) < headDim || len(output) < headDim {
+		return &RopeError{Message: "buffer too small for headDim"}
+	}
+	if position == 0 {
+		copy(output[:headDim], input[:headDim])
+		return nil
+	}
+	half := headDim / 2
+	invHead := 1.0 / float32(headDim)
+	freqMul := float32(math.Pow(float64(theta), -2.0*float64(invHead)))
+	freq := float32(1)
+	for i := 0; i < half; i++ {
+		angle := float32(float64(position) * float64(freq))
+		cos := float32(math.Cos(float64(angle)))
+		sin := float32(math.Sin(float64(angle)))
+		x0 := input[i]
+		x1 := input[half+i]
+		output[i] = x0*cos - x1*sin
+		output[half+i] = x0*sin + x1*cos
+		freq *= freqMul
+	}
+	return nil
+}
+
 // ApplyRopeF32 applies rotary position embedding to `input` (size headDim*2)
 // starting at the given `position`.
 func ApplyRopeF32(input, output []float32, position, headDim int, theta float32) error {
