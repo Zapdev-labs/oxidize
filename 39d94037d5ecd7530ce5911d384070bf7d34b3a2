@@ -1,0 +1,60 @@
+oxidize-golang/core/model/loader.go
+  s_df9c78e59b2a5c::t_cc442f92c0080f 131-136
+  s_df9c78e59b2a5c::t_e95228c6d4b47b 11
+  s_df9c78e59b2a5c::t_323332fef62aab 126,137-140
+  s_df9c78e59b2a5c::t_2e139efe0c9b25 7-10
+  s_df9c78e59b2a5c::t_60123c7c99c5d4 46-47
+  s_df9c78e59b2a5c::t_c50f1c9c0b1e28 86,92-102,105,111-123
+oxidize-golang/core/model/decoder_ffn.go
+  s_df9c78e59b2a5c::t_cb1c41067782f8 1-43
+oxidize-golang/core/model/llama_decoder_forward.go
+  s_df9c78e59b2a5c::t_8fcd16b1bbac96 186-193,197-198
+  s_d9a61c121d09ae::t_11912aab8d215b 1-105,114,116,118-119,128-139,162-177,184-185,195-196,199-402
+  s_df9c78e59b2a5c::t_c71c927fe4d85b 178-183,194
+  s_df9c78e59b2a5c::t_694bb7a6015590 106-113,115,117,120-127,140-161
+oxidize-golang/core/model/gguf_decoder_load.go
+  s_df9c78e59b2a5c::t_0c9b1409aae1c6 240
+  s_df9c78e59b2a5c::t_e1608a04a22e8c 1-207,234-239,241-252
+  s_df9c78e59b2a5c::t_0fa7eb4c2619fc 208-233
+oxidize-golang/core/model/llama_decoder.go
+  s_df9c78e59b2a5c::t_ff47f0a86f72fa 1-13,19-38,43,58-80,82-85,87-132,134-137,139-141,146-149,151-199
+  s_df9c78e59b2a5c::t_4d82ac6e495f2f 81,86
+  s_df9c78e59b2a5c::t_703debdc340a0c 14-18
+  s_df9c78e59b2a5c::t_93a5ea56b857d9 138,142-145
+  s_df9c78e59b2a5c::t_282aa7e7b567af 133
+  s_df9c78e59b2a5c::t_59664935234007 39-42,44-57
+  s_df9c78e59b2a5c::t_94018db37a959f 150
+oxidize-golang/core/model/inference_config.go
+  s_df9c78e59b2a5c::t_754674a363e911 1-3,6-87,101-163
+  s_df9c78e59b2a5c::t_c57d10b61339b4 4-5
+  s_df9c78e59b2a5c::t_c443da2bd4bfbc 88-100
+oxidize-golang/core/model/inference.go
+  s_df9c78e59b2a5c::t_5c84b5b1145965 206-210,213-214,229,233-234,238-239,242,245-274
+  s_df9c78e59b2a5c::t_c2a3efc0919ffd 286,288-297
+oxidize-golang/core/model/alibi.go
+  s_df9c78e59b2a5c::t_e6cb42a16c5740 1-17
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "39d94037d5ecd7530ce5911d384070bf7d34b3a2",
+  "prompts": {},
+  "sessions": {
+    "s_d9a61c121d09ae": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "e9de5fd3-e609-40c2-ac05-b69f37d22d70",
+        "model": "default"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_df9c78e59b2a5c": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "d22a59f1-9349-430c-8998-8ced993f2fad",
+        "model": "default"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
