@@ -1,0 +1,133 @@
+golang/go.mod
+  s_e9e468670afde4::t_857bb80e934a76 8-38
+  s_e9e468670afde4::t_636e8973325c39 3,6-7
+  s_e9e468670afde4::t_3090ff07230c50 4-5,39
+  s_e9e468670afde4::t_ea6aadfb6d86ba 1-2
+golang/internal/server/server.go
+  s_e9e468670afde4::t_9513af1e8dd20e 1-154
+golang/internal/backend/backend.go
+  s_e9e468670afde4::t_ab8ed51e6ab88e 1-194
+golang/Makefile
+  s_e9e468670afde4::t_aceebc30e669bd 1-29
+golang/internal/server/server_test.go
+  s_e9e468670afde4::t_f4057584cf982e 1-283
+golang/internal/format/safetensors/safetensors.go
+  s_e9e468670afde4::t_2c964b022814ef 1-184
+golang/internal/compute/quantization/quantization.go
+  s_e9e468670afde4::t_5ccf25fef349dc 1-646
+golang/internal/compute/kvcache/kvcache.go
+  s_e9e468670afde4::t_2106d80aaf2817 1-245
+golang/internal/model/llama/llama.go
+  s_e9e468670afde4::t_58649800389b49 1-418
+golang/internal/model/offload/offload.go
+  s_e9e468670afde4::t_e7b421b6b9b5ac 1-191
+golang/internal/model/speculative/speculative.go
+  s_e9e468670afde4::t_d5c6008f318a05 1-544
+golang/internal/compute/tensor/tensor_test.go
+  s_e9e468670afde4::t_7f955a073030d7 1-177
+golang/internal/model/generation/generation.go
+  s_e9e468670afde4::t_4901445a719517 493-501
+  s_e9e468670afde4::t_2e7414d730ed15 202,241,262,288
+  s_e9e468670afde4::t_345c3c90666ef9 1-201,203-240,242-261,263-287,289-492
+golang/internal/model/inference/inference.go
+  s_e9e468670afde4::t_d4aea54caa9c8c 1-1032
+golang/internal/server/middleware.go
+  s_e9e468670afde4::t_1633a99fc2e64c 1-89
+golang/cmd/oxidize/main.go
+  s_e9e468670afde4::t_3e07b68330c93c 357
+  s_e9e468670afde4::t_58977b19cab736 14
+  s_e9e468670afde4::t_d99befdad49e10 1-13,15-356,358-498
+golang/internal/mesh/election.go
+  s_e9e468670afde4::t_9db6e37ef7b141 1-186
+golang/internal/model/lora/lora.go
+  s_e9e468670afde4::t_0a895f117656fb 1-730
+golang/internal/model/prefixcache/prefixcache.go
+  s_e9e468670afde4::t_d5490c00dc0de6 1-172
+golang/internal/integration/integration_test.go
+  s_e9e468670afde4::t_1c7d6d6d4659e3 1-281
+golang/internal/model/model.go
+  s_e9e468670afde4::t_af530a7e7474d3 1-421
+golang/internal/server/schema.go
+  s_e9e468670afde4::t_2af1e55b5dcfb1 1-371
+golang/internal/paged/scheduler.go
+  s_e9e468670afde4::t_15e943d77249a5 193
+  s_e9e468670afde4::t_3e07b68330c93c 225,248
+  s_e9e468670afde4::t_04f88ffde9168d 1-192,194-224,226-247,249-292
+golang/internal/mesh/sharding.go
+  s_e9e468670afde4::t_fc009dc1712a91 49-52
+  s_e9e468670afde4::t_3c642f479d5be0 125
+  s_e9e468670afde4::t_50faa8232fab8e 306,308
+  s_e9e468670afde4::t_8825e5329dd1a0 180
+  s_e9e468670afde4::t_8afb94a9033b41 325-326,330,335,337,349
+  s_e9e468670afde4::t_5759e075aa9844 114
+  s_e9e468670afde4::t_92479c30425036 150
+  s_e9e468670afde4::t_c373ee905721c6 1-48,53-113,115-124,126-149,151-174,176-179,181-305,307,309-324,327-329,331-334,336,338-348,350-354
+  s_e9e468670afde4::t_c6ae750f37ee5d 175
+golang/internal/server/metrics.go
+  s_e9e468670afde4::t_13398b814733a4 1-214
+golang/internal/compute/tensor/ops.go
+  s_e9e468670afde4::t_1344875ed70b3f 1-334
+golang/internal/vision/vision.go
+  s_e9e468670afde4::t_b5f5c4a52a9924 1-409
+golang/internal/model/loader/loader.go
+  s_e9e468670afde4::t_76ef8f69d52884 1-393
+golang/internal/backend/backend_test.go
+  s_e9e468670afde4::t_5749f02496c946 1-183
+golang/internal/compute/kvcache/kvcache_test.go
+  s_e9e468670afde4::t_0701910da83eca 1-5,7-338
+  s_e9e468670afde4::t_d59fb4837124d0 6
+golang/internal/server/completions.go
+  s_e9e468670afde4::t_52d50a2b77d96c 28-46
+  s_e9e468670afde4::t_c1dc8a95b91d23 16-27,47-57
+  s_e9e468670afde4::t_8930813ffdbe95 1-15,58-568
+golang/internal/compute/quantization/quantization_test.go
+  s_e9e468670afde4::t_1b07616aee0d2a 1-190
+golang/internal/compute/tensor/types.go
+  s_e9e468670afde4::t_5ac4c8ffbd5ff9 218-223
+  s_e9e468670afde4::t_7fb736fb74df40 1-217,224-309
+golang/cmd/server/main.go
+  s_e9e468670afde4::t_157a5d1ed2110d 1-423
+golang/internal/mesh/mesh.go
+  s_e9e468670afde4::t_49139815e94697 1-427
+golang/internal/server/auth.go
+  s_e9e468670afde4::t_996999717f7b7f 1-71
+golang/cmd/quantize/main.go
+  s_e9e468670afde4::t_f91a883f557c2b 1-526
+golang/internal/paged/paged.go
+  s_e9e468670afde4::t_81752def61637d 1-156
+golang/internal/format/gguf/gguf.go
+  s_e9e468670afde4::t_19801cb98cedc0 633-636
+  s_e9e468670afde4::t_c5855895396333 1-632,637-717
+golang/internal/backends/cpu/cpu.go
+  s_e9e468670afde4::t_83a851bb06a374 1-456
+golang/internal/model/sampling/sampling_test.go
+  s_e9e468670afde4::t_8686c0dbf5ca8a 1-230
+golang/internal/model/sampling/sampling.go
+  s_e9e468670afde4::t_978bd39de90186 1-296
+golang/internal/compute/flash/flash.go
+  s_e9e468670afde4::t_47a4973c080a9b 7
+  s_e9e468670afde4::t_0b290b8454a4e2 98,118,122-124,126,129,143-145,249,269,273-275,281,288-290,307-309,316,325
+  s_e9e468670afde4::t_59b54ceb2c069f 1-6,8-97,99-117,119-121,125,127-128,130-142,146-248,250-268,270-272,276-280,282-287,291-306,310-315,317-324,326-343
+golang/internal/format/tokenizer/tokenizer.go
+  s_e9e468670afde4::t_a747f871cea41a 1-544
+golang/internal/mesh/discovery.go
+  s_e9e468670afde4::t_9e88dbb6598adf 1-67,71-86,93-259
+  s_e9e468670afde4::t_94a4df041a9f61 68-70
+  s_e9e468670afde4::t_92344c9ba2649b 87-92
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "ca28c68f2ac5e734ac8e6e6aca609241c37280da",
+  "prompts": {},
+  "sessions": {
+    "s_e9e468670afde4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5f00471e-35a8-45d1-991f-6e967f799761",
+        "model": "claude-sonnet-4-6"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
