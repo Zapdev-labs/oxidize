@@ -33,7 +33,10 @@ pub async fn enforce_api_key(
     let Some(expected_key) = state.auth.api_key.as_deref() else {
         return next.run(request).await;
     };
-    if request_has_api_key(request.headers(), expected_key) {
+    let query = request.uri().query().map(str::to_owned);
+    if request_has_api_key(request.headers(), expected_key)
+        || query_has_api_key(query.as_deref(), expected_key)
+    {
         return next.run(request).await;
     }
     (
@@ -60,6 +63,19 @@ pub fn request_has_api_key(headers: &axum::http::HeaderMap, expected_key: &str) 
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.strip_prefix("Bearer "))
             .is_some_and(|token| constant_time_eq(token, expected_key))
+}
+
+/// Constant-time check of an `api_key=<key>` query parameter (WebSocket browser
+/// fallback, since browsers cannot set custom headers on a WS upgrade).
+pub fn query_has_api_key(query: Option<&str>, expected_key: &str) -> bool {
+    use subtle::ConstantTimeEq;
+    let Some(query) = query else {
+        return false;
+    };
+    query
+        .split('&')
+        .filter_map(|pair| pair.strip_prefix("api_key="))
+        .any(|value| value.as_bytes().ct_eq(expected_key.as_bytes()).into())
 }
 
 #[cfg(test)]
@@ -114,5 +130,13 @@ mod tests {
             ratio >= 0.95,
             "constant-time comparison variance exceeded 5%: avg_correct={avg_correct:.0}ns avg_incorrect={avg_incorrect:.0}ns ratio={ratio:.4}"
         );
+    }
+
+    #[test]
+    fn query_param_api_key_is_accepted() {
+        assert!(query_has_api_key(Some("api_key=secret"), "secret"));
+        assert!(query_has_api_key(Some("foo=1&api_key=secret&bar=2"), "secret"));
+        assert!(!query_has_api_key(Some("api_key=wrong"), "secret"));
+        assert!(!query_has_api_key(None, "secret"));
     }
 }

@@ -12,6 +12,7 @@ pub mod logging;
 pub mod mesh_cluster;
 pub mod metrics;
 pub mod openapi;
+pub mod realtime;
 pub mod routes;
 pub mod runtime;
 pub mod schema;
