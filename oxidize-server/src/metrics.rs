@@ -54,6 +54,10 @@ pub struct MetricsRegistry {
     // Model metrics
     pub model_load_duration: Histogram,
     pub model_inference_duration: Histogram,
+
+    // Realtime websocket metrics
+    pub realtime_connections: IntGauge,
+    pub realtime_responses_total: IntCounter,
 }
 
 impl MetricsRegistry {
@@ -183,6 +187,18 @@ impl MetricsRegistry {
         )?;
         registry.register(Box::new(model_inference_duration.clone()))?;
 
+        let realtime_connections = IntGauge::with_opts(Opts::new(
+            "oxidize_realtime_connections",
+            "Number of active realtime websocket connections",
+        ))?;
+        registry.register(Box::new(realtime_connections.clone()))?;
+
+        let realtime_responses_total = IntCounter::with_opts(Opts::new(
+            "oxidize_realtime_responses_total",
+            "Total number of realtime responses generated",
+        ))?;
+        registry.register(Box::new(realtime_responses_total.clone()))?;
+
         Ok(Self {
             registry,
             requests_total,
@@ -203,6 +219,8 @@ impl MetricsRegistry {
             rate_limits_total,
             model_load_duration,
             model_inference_duration,
+            realtime_connections,
+            realtime_responses_total,
         })
     }
 
@@ -344,5 +362,16 @@ mod tests {
         metrics.record_cache_hit();
         metrics.record_cache_miss();
         assert_eq!(metrics.cache_hit_ratio.get(), 0.5);
+    }
+
+    #[test]
+    fn realtime_metrics_track_connections_and_responses() {
+        let metrics = MetricsRegistry::new().unwrap();
+        metrics.realtime_connections.inc();
+        metrics.realtime_responses_total.inc();
+        assert_eq!(metrics.realtime_connections.get(), 1);
+        assert_eq!(metrics.realtime_responses_total.get(), 1);
+        metrics.realtime_connections.dec();
+        assert_eq!(metrics.realtime_connections.get(), 0);
     }
 }
