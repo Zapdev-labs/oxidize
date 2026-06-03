@@ -27,22 +27,79 @@ type Encoder interface {
 // Vec is an n-dimensional float vector.
 type Vec []float32
 
+var clipImageMean = [3]float32{0.48145466, 0.4578275, 0.40821073}
+var clipImageStd = [3]float32{0.26862954, 0.26130258, 0.27577711}
+
 // Config mirrors VisionConfig.
 type Config struct {
-	ImageSize     int
-	PatchSize     int
-	NumPatches    int
-	NumChannels   int
-	HiddenSize    int
-	NumHeads      int
-	ModelName     string
-	PatchGridCols int
-	PatchGridRows int
+	ImageSize           int
+	PatchSize           int
+	NumPatches          int
+	NumChannels         int
+	HiddenSize          int
+	NumHeads            int
+	NumHiddenLayers     int
+	IntermediateSize    int
+	LayerNormEps        float32
+	ProjectionDim       int
+	ImageMean           [3]float32
+	ImageStd            [3]float32
+	NumImageTokens      int
+	ModelName           string
+	PatchGridCols       int
+	PatchGridRows       int
 }
 
-// DefaultConfig returns ViT-B/16 defaults.
-func DefaultConfig() Config {
-	return Config{ImageSize: 224, PatchSize: 16, NumChannels: 3, HiddenSize: 768, NumHeads: 12, ModelName: "vit-b/16"}
+// DefaultConfig returns CLIP-Large / LLaVA 1.5 defaults.
+func DefaultConfig() Config { return ClipLarge() }
+
+// ClipLarge mirrors VisionConfig::clip_large.
+func ClipLarge() Config {
+	return withClipNormalization(336, 14, 1024, 16, 24, 4096, 1e-5, 4096, "clip-large")
+}
+
+// LLaVA15 mirrors VisionConfig::llava_1_5.
+func LLaVA15() Config { return ClipLarge() }
+
+// ClipBase mirrors VisionConfig::clip_base.
+func ClipBase() Config {
+	return withClipNormalization(224, 14, 768, 12, 12, 3072, 1e-5, 2048, "clip-base")
+}
+
+// QwenVL mirrors VisionConfig::qwen_vl.
+func QwenVL() Config {
+	return withClipNormalization(448, 14, 1664, 16, 48, 6656, 1e-6, 4096, "qwen-vl")
+}
+
+func withClipNormalization(imageSize, patchSize, hidden, heads, layers, intermediate int, eps float32, projection int, name string) Config {
+	side := imageSize / patchSize
+	if patchSize == 0 {
+		side = 0
+	}
+	return Config{
+		ImageSize:        imageSize,
+		PatchSize:        patchSize,
+		NumPatches:       side * side,
+		NumChannels:      3,
+		HiddenSize:       hidden,
+		NumHeads:         heads,
+		NumHiddenLayers:  layers,
+		IntermediateSize: intermediate,
+		LayerNormEps:     eps,
+		ProjectionDim:    projection,
+		ImageMean:        clipImageMean,
+		ImageStd:         clipImageStd,
+		NumImageTokens:   side * side,
+		ModelName:        name,
+	}
+}
+
+// NumPatchesPerSide returns image_size / patch_size.
+func (c Config) NumPatchesPerSide() int {
+	if c.PatchSize == 0 {
+		return 0
+	}
+	return c.ImageSize / c.PatchSize
 }
 
 // Patch returns (cols, rows) for the configured image size.
