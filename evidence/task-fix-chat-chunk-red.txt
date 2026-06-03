@@ -1,0 +1,6 @@
+=== RUN   TestChatChunkOmitsMessage
+    responses_test.go:53: chunk contains message field: {"id":"chatcmpl-placeholder","object":"chat.completion.chunk","created":0,"model":"demo","choices":[{"index":0,"message":{"role":"","content":""},"delta":{"role":"assistant","content":"hello"},"finish_reason":null}],"usage":{"prompt_tokens":0,"total_tokens":0}}
+--- FAIL: TestChatChunkOmitsMessage (0.00s)
+FAIL
+FAIL	github.com/Zapdev-labs/oxidize/golang/internal/api	0.002s
+FAIL

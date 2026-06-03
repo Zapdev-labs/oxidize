@@ -1,0 +1,31 @@
+name: Python
+
+on:
+  pull_request:
+    paths:
+      - "oxidize-python/**"
+      - ".github/workflows/python.yml"
+  push:
+    paths:
+      - "oxidize-python/**"
+      - ".github/workflows/python.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install uv
+        run: pip install uv
+      - name: Sync and test
+        run: |
+          cd oxidize-python
+          uv sync --extra dev
+          uv run ruff check oxidize_python
+          uv run pytest -q

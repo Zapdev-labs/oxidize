@@ -1,0 +1,71 @@
+package cli
+
+import (
+	"bytes"
+	"context"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/Zapdev-labs/oxidize/golang/internal/testutil"
+)
+
+func TestLegacyPromptFlag(t *testing.T) {
+	var stdout bytes.Buffer
+	if err := Run(context.Background(), []string{"--prompt", "ping"}, &stdout, &bytes.Buffer{}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if stdout.String() == "" {
+		t.Fatal("expected output")
+	}
+}
+
+func TestListCommand(t *testing.T) {
+	dir := t.TempDir()
+	testutil.CopyFixture(t, filepath.Join(dir, "valid-v3.gguf"))
+
+	var stdout bytes.Buffer
+	if err := Run(context.Background(), []string{"list", "--models-dir", dir}, &stdout, &bytes.Buffer{}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if got := stdout.String(); got == "" {
+		t.Fatal("expected list output")
+	}
+}
+
+func TestRunCommandRejectsMissingModel(t *testing.T) {
+	var stderr bytes.Buffer
+	err := Run(context.Background(), []string{"run"}, &bytes.Buffer{}, &stderr)
+	if err == nil {
+		t.Fatal("expected missing model error")
+	}
+	if err.Error() != "oxidize run requires a model name or local .gguf path" {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if stderr.String() != "" {
+		t.Fatalf("unexpected stderr: %q", stderr.String())
+	}
+}
+
+func TestHelpCommand(t *testing.T) {
+	var stdout bytes.Buffer
+	if err := Run(context.Background(), []string{"help"}, &stdout, &bytes.Buffer{}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "serve") {
+		t.Fatal("expected serve in help output")
+	}
+}
+
+func TestServeCommandHonorsContextCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	time.AfterFunc(150*time.Millisecond, cancel)
+
+	dir := t.TempDir()
+	err := Run(ctx, []string{"serve", "--host", "127.0.0.1", "--port", "0", "--models-dir", dir}, &bytes.Buffer{}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+}

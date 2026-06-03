@@ -1,0 +1,6 @@
+=== RUN   TestRunCommandRejectsMissingModel
+    cli_test.go:38: expected missing model error
+--- FAIL: TestRunCommandRejectsMissingModel (0.00s)
+FAIL
+FAIL	github.com/Zapdev-labs/oxidize/golang/internal/cli	0.002s
+FAIL

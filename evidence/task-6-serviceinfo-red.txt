@@ -1,0 +1,10 @@
+# github.com/Zapdev-labs/oxidize/golang/internal/serviceinfo [github.com/Zapdev-labs/oxidize/golang/internal/serviceinfo.test]
+internal/serviceinfo/serviceinfo_test.go:9:12: undefined: DefaultModelID
+internal/serviceinfo/serviceinfo_test.go:13:14: undefined: ModelInfo
+internal/serviceinfo/serviceinfo_test.go:14:12: undefined: DefaultModelID
+internal/serviceinfo/serviceinfo_test.go:24:17: undefined: DiscoverModels
+internal/serviceinfo/serviceinfo_test.go:34:10: undefined: OpenAPI
+internal/serviceinfo/serviceinfo_test.go:43:10: undefined: MetricsSnapshot
+internal/serviceinfo/serviceinfo_test.go:43:26: undefined: MetricsData
+FAIL	github.com/Zapdev-labs/oxidize/golang/internal/serviceinfo [build failed]
+FAIL

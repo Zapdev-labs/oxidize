@@ -1,0 +1,11 @@
+# github.com/Zapdev-labs/oxidize/golang/internal/server [github.com/Zapdev-labs/oxidize/golang/internal/server.test]
+internal/server/server_test.go:13:18: undefined: NewHandler
+internal/server/server_test.go:13:29: undefined: Config
+internal/server/server_test.go:30:18: undefined: NewHandler
+internal/server/server_test.go:30:29: undefined: Config
+internal/server/server_test.go:43:18: undefined: NewHandler
+internal/server/server_test.go:43:29: undefined: Config
+internal/server/server_test.go:62:18: undefined: NewHandler
+internal/server/server_test.go:62:29: undefined: Config
+FAIL	github.com/Zapdev-labs/oxidize/golang/internal/server [build failed]
+FAIL

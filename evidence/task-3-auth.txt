@@ -1,0 +1,10 @@
+=== RUN   TestAuthAcceptsXAPIKey
+--- PASS: TestAuthAcceptsXAPIKey (0.00s)
+=== RUN   TestAuthAcceptsBearer
+--- PASS: TestAuthAcceptsBearer (0.00s)
+=== RUN   TestAuthSkipsNonV1Routes
+--- PASS: TestAuthSkipsNonV1Routes (0.00s)
+=== RUN   TestAuthRejectsMissingKey
+--- PASS: TestAuthRejectsMissingKey (0.00s)
+PASS
+ok  	github.com/Zapdev-labs/oxidize/golang/internal/auth	0.003s
