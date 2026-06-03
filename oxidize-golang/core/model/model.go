@@ -175,7 +175,9 @@ func (a Architecture) UsesMoE() bool {
 
 // UsesParallelAttnFFN returns true if the architecture parallelizes the
 // attention and FFN computations.
-func (a Architecture) UsesParallelAttnFFN() bool { return a == ArchFalconModel }
+func (a Architecture) UsesParallelAttnFFN() bool {
+	return a == ArchGemmaModel || a == ArchPhiModel
+}
 
 // UsesMLA returns true if the architecture uses multi-latent attention.
 func (a Architecture) UsesMLA() bool { return a == ArchDeepSeekModel }

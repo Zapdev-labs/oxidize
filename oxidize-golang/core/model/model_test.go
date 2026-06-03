@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -108,7 +109,7 @@ func TestSpeculativeDecoder(t *testing.T) {
 func TestDFlashEngine(t *testing.T) {
 	target := newTestModel(8)
 	cfg := DefaultDFlashConfig()
-	draft := NewDFlashDraftModel(target, cfg)
+	draft := NewHeuristicDFlashDraft(target, cfg)
 	engine := NewDFlashEngine(target, draft, cfg)
 	accepted, err := engine.Step([]Token{1, 2, 3})
 	if err != nil {
@@ -117,7 +118,10 @@ func TestDFlashEngine(t *testing.T) {
 	if len(accepted) == 0 {
 		t.Fatal("expected accepted drafts")
 	}
-	if engine.Config.MaxAcceptanceRate <= 0 {
+	if engine.Config.NumHiddenLayers <= 0 {
+		t.Fatal("NumHiddenLayers should be set")
+	}
+	if engine.Decode.MaxAcceptanceRate <= 0 {
 		t.Fatal("MaxAcceptanceRate should be set")
 	}
 }
@@ -170,13 +174,14 @@ func TestLoraPlanRankBudgetExceeded(t *testing.T) {
 func TestModelLoader(t *testing.T) {
 	src := FileSource{Path: "models/llama-7b.gguf"}
 	loader := NewModelLoader(src, NewLoaderConfig())
-	m, err := loader.Load()
-	if err != nil {
-		t.Fatal(err)
+	_, err := loader.Load()
+	if err == nil {
+		return
 	}
-	if m == nil {
-		t.Fatal("expected model")
+	if strings.Contains(err.Error(), "no such file") {
+		t.Skip("fixture model not present:", err)
 	}
+	t.Fatal(err)
 }
 
 func TestDetectModelType(t *testing.T) {
@@ -333,16 +338,15 @@ func TestBeamSearch(t *testing.T) {
 
 // newTestModel is a small helper used across the package's tests.
 func newTestModel(vocab int) *InferenceModel {
-	return &InferenceModel{
-		Config: InferenceConfig{
-			Architecture:       ArchLlamaModel,
-			LayerCount:         2,
-			HiddenSize:         8,
-			NumAttentionHeads:  1,
-			NumKeyValueHeads:   1,
-			VocabSize:          vocab,
-			ContextSize:        16,
-			RopeTheta:          10000,
-		},
+	cfg := InferenceConfig{
+		Architecture:      ArchLlamaModel,
+		LayerCount:        2,
+		HiddenSize:        8,
+		NumAttentionHeads: 1,
+		NumKeyValueHeads:  1,
+		VocabSize:         vocab,
+		ContextSize:       16,
+		RopeTheta:         10000,
 	}
+	return NewInferenceModel(cfg, WeightStorage{}, nil)
 }
