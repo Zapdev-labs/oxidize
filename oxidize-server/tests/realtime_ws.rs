@@ -39,7 +39,9 @@ async fn spawn_server() -> SocketAddr {
 async fn realtime_lifecycle_emits_session_created_and_response_events() {
     let addr = spawn_server().await;
     let url = format!("ws://{addr}/v1/realtime");
-    let (mut socket, _) = tokio_tungstenite::connect_async(url).await.expect("connect");
+    let (mut socket, _) = tokio_tungstenite::connect_async(url)
+        .await
+        .expect("connect");
 
     // First server event must be session.created.
     let first = next_json(&mut socket).await;
@@ -64,7 +66,9 @@ async fn realtime_lifecycle_emits_session_created_and_response_events() {
     assert_eq!(created["type"], "conversation.item.created");
 
     socket
-        .send(Message::Text(json!({ "type": "response.create" }).to_string()))
+        .send(Message::Text(
+            json!({ "type": "response.create" }).to_string(),
+        ))
         .await
         .unwrap();
 

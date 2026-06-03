@@ -102,7 +102,10 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 }
             }
             ClientEvent::ResponseCreate => {
-                if in_flight.as_ref().is_some_and(|(_, handle)| !handle.is_finished()) {
+                if in_flight
+                    .as_ref()
+                    .is_some_and(|(_, handle)| !handle.is_finished())
+                {
                     let _ = tx
                         .send(ServerEvent::Error {
                             error: json!({ "type": "invalid_request_error", "message": "a response is already in progress" }),
@@ -156,7 +159,9 @@ fn spawn_response(
 
     tokio::spawn(async move {
         let _ = tx
-            .send(ServerEvent::ResponseCreated { response: json!({ "status": "in_progress" }) })
+            .send(ServerEvent::ResponseCreated {
+                response: json!({ "status": "in_progress" }),
+            })
             .await;
         state.metrics.realtime_responses_total.inc();
 
@@ -244,13 +249,13 @@ fn spawn_response(
                 })
                 .await;
         } else {
-            let _ = tx
-                .send(ServerEvent::ResponseTextDone { text: full })
-                .await;
+            let _ = tx.send(ServerEvent::ResponseTextDone { text: full }).await;
         }
 
         let _ = tx
-            .send(ServerEvent::ResponseDone { response: json!({ "status": "completed" }) })
+            .send(ServerEvent::ResponseDone {
+                response: json!({ "status": "completed" }),
+            })
             .await;
     })
 }

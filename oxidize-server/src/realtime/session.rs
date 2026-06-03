@@ -1,8 +1,6 @@
 //! Socket-independent realtime session state. Unit-tested directly.
 
-use crate::realtime::protocol::{
-    ConversationItemInput, RealtimeTool, SessionUpdate, ToolChoice,
-};
+use crate::realtime::protocol::{ConversationItemInput, RealtimeTool, SessionUpdate, ToolChoice};
 
 /// Mutable per-connection config, seeded from server defaults.
 #[derive(Debug, Clone, Default)]
@@ -247,12 +245,17 @@ mod tests {
         assert!(system.content.contains("get_weather"));
         assert!(system.content.contains("tool_call"));
         // user turn preserved
-        assert!(messages.iter().any(|m| m.role == "user" && m.content == "weather?"));
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.role == "user" && m.content == "weather?")
+        );
     }
 
     #[test]
     fn parse_tool_call_hit() {
-        let text = "sure\n```tool_call\n{\"name\":\"get_weather\",\"arguments\":{\"city\":\"SF\"}}\n```";
+        let text =
+            "sure\n```tool_call\n{\"name\":\"get_weather\",\"arguments\":{\"city\":\"SF\"}}\n```";
         let parsed = parse_tool_call(text).expect("should parse");
         assert_eq!(parsed.name, "get_weather");
         assert_eq!(parsed.arguments, "{\"city\":\"SF\"}");

@@ -18,6 +18,7 @@ use crate::logging::log_request_response;
 use crate::mesh_cluster::MeshClusterState;
 use crate::metrics::{MetricsRegistry, metrics_handler, metrics_middleware};
 use crate::openapi::openapi;
+use crate::realtime::realtime_handler;
 use crate::routes::{
     chat::chat_completions,
     completions::completions,
@@ -26,7 +27,6 @@ use crate::routes::{
     mesh::mesh_chat_completions_handler,
     models::models,
 };
-use crate::realtime::realtime_handler;
 use crate::runtime::model::ModelRuntime;
 use crate::runtime::paged::PagedModelRuntime;
 

@@ -103,7 +103,11 @@ pub enum ServerEvent {
     #[serde(rename = "response.function_call_arguments.delta")]
     ResponseFunctionCallArgumentsDelta { call_id: String, delta: String },
     #[serde(rename = "response.function_call_arguments.done")]
-    ResponseFunctionCallArgumentsDone { call_id: String, name: String, arguments: String },
+    ResponseFunctionCallArgumentsDone {
+        call_id: String,
+        name: String,
+        arguments: String,
+    },
     #[serde(rename = "response.done")]
     ResponseDone { response: Value },
     #[serde(rename = "error")]
@@ -140,7 +144,9 @@ mod tests {
 
     #[test]
     fn serializes_text_delta_event_with_type_tag() {
-        let event = ServerEvent::ResponseTextDelta { delta: "hi".to_owned() };
+        let event = ServerEvent::ResponseTextDelta {
+            delta: "hi".to_owned(),
+        };
         let value = serde_json::to_value(&event).expect("serializable");
         assert_eq!(value["type"], "response.text.delta");
         assert_eq!(value["delta"], "hi");

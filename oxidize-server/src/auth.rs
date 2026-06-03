@@ -135,7 +135,10 @@ mod tests {
     #[test]
     fn query_param_api_key_is_accepted() {
         assert!(query_has_api_key(Some("api_key=secret"), "secret"));
-        assert!(query_has_api_key(Some("foo=1&api_key=secret&bar=2"), "secret"));
+        assert!(query_has_api_key(
+            Some("foo=1&api_key=secret&bar=2"),
+            "secret"
+        ));
         assert!(!query_has_api_key(Some("api_key=wrong"), "secret"));
         assert!(!query_has_api_key(None, "secret"));
     }

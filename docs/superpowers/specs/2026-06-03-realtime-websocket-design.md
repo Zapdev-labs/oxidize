@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-03
 **Crate:** `oxidize-server`
-**Status:** Approved for planning
+**Status:** Implemented
 
 ## Goal
 
