@@ -29,3 +29,7 @@ func errIntegerOverflow() error {
 func errUnknownGGMLType(value uint32) error {
 	return fmt.Errorf("unknown ggml type: %d", value)
 }
+
+func errStringTooLong(length uint64) error {
+	return fmt.Errorf("gguf string length %d exceeds limit %d", length, maxGGUFStringBytes)
+}

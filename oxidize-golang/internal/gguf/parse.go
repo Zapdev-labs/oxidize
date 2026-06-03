@@ -2,6 +2,7 @@ package gguf
 
 import (
 	"bytes"
+	"io"
 	"os"
 )
 
@@ -33,6 +34,75 @@ func LoadMetadata(path string) (Header, error) {
 		return Header{}, err
 	}
 	return Header{Version: version, Metadata: metadata}, nil
+}
+
+// ValidateFile checks GGUF structure by parsing metadata and tensor headers
+// from disk without loading tensor payloads into memory.
+func ValidateFile(path string) error {
+	stat, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = file.Close() }()
+
+	r := newReader(io.LimitReader(file, stat.Size()))
+	version, tensorCount, metadata, err := parseHeader(r)
+	if err != nil {
+		return err
+	}
+	tensors := make([]TensorInfo, 0, tensorCount)
+	for range tensorCount {
+		tensor, readErr := r.readTensor()
+		if readErr != nil {
+			return readErr
+		}
+		tensors = append(tensors, tensor)
+	}
+	alignment := defaultAlignment
+	if value, ok := metadata["general.alignment"]; ok {
+		number, ok := value.AsUint64()
+		if !ok || number == 0 || number&(number-1) != 0 {
+			return errInvalidAlignment(number)
+		}
+		alignment = number
+	}
+	dataStart, err := alignUp(uint64(r.position()), alignment)
+	if err != nil {
+		return err
+	}
+	limit := uint64(stat.Size())
+	if dataStart > limit {
+		return errUnexpectedEOF()
+	}
+	for index := range tensors {
+		absOff := dataStart + tensors[index].RelativeOffset
+		if absOff < dataStart {
+			return errIntegerOverflow()
+		}
+		elementCount, err := tensorElementCount(tensors[index].Dimensions)
+		if err != nil {
+			return err
+		}
+		byteSize, err := tensorByteSize(tensors[index].GGMLType, elementCount)
+		if err != nil {
+			return err
+		}
+		if absOff > limit {
+			return errUnexpectedEOF()
+		}
+		if byteSize > limit-absOff {
+			return errUnexpectedEOF()
+		}
+	}
+	if uint64(r.position()) > limit {
+		return errUnexpectedEOF()
+	}
+	_ = version
+	return nil
 }
 
 func Parse(raw []byte) (File, error) {

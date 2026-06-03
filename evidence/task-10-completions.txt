@@ -1,1 +1,1 @@
-{"id":"cmpl-placeholder","object":"text_completion","created":0,"model":"valid-v3","choices":[{"index":0,"text":"hello","finish_reason":"stop"}],"usage":{"prompt_tokens":0,"total_tokens":0}}
+{"id":"cmpl-placeholder","object":"text_completion","created":0,"model":"valid-v3","choices":[{"index":0,"text":"hello","finish_reason":"stop"}],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}

@@ -186,8 +186,10 @@ func ggufBlockSize(ggmlType uint32) int {
 		return 0
 	case 2, 3, 6, 7, 8:
 		return 32
-	case 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24:
+	case 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 29:
 		return 256
+	case 40:
+		return 64
 	}
 	return 0
 }
@@ -229,8 +231,10 @@ func blockBytes(ggmlType uint32) int {
 		return quantization.BLOCK_IQ4_XS_SIZE
 	case 23:
 		return quantization.BLOCK_IQ1_S_SIZE
-	case 24:
+	case 24, 40:
 		return quantization.BLOCK_NVFP4_SIZE
+	case 29:
+		return quantization.BLOCK_IQ1_M_SIZE
 	}
 	return 0
 }

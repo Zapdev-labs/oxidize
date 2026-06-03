@@ -9,6 +9,8 @@ import (
 	"github.com/Zapdev-labs/oxidize/golang/internal/gguf"
 )
 
+const minGGUFFullValidationBytes = 1024
+
 type ModelInfo struct {
 	ID           string
 	Path         string
@@ -37,6 +39,15 @@ func DiscoverModels(dir string) ([]ModelInfo, error) {
 			continue
 		}
 		path := filepath.Join(dir, entry.Name())
+		stat, statErr := os.Stat(path)
+		if statErr != nil {
+			return nil, statErr
+		}
+		if stat.Size() >= minGGUFFullValidationBytes {
+			if loadErr := gguf.ValidateFile(path); loadErr != nil {
+				return nil, loadErr
+			}
+		}
 		header, loadErr := gguf.LoadMetadata(path)
 		if loadErr != nil {
 			return nil, loadErr

@@ -150,8 +150,8 @@ func FlashAttentionPrefillF32(queries, keys, values, output []float32, seqLen, h
 			for d := 0; d < headDim; d++ {
 				output[i*headDim+d] = 0
 			}
-			scores := make([]float32, end)
-			for j := 0; j < end; j++ {
+			scores := make([]float32, i+1)
+			for j := 0; j <= i; j++ {
 				k := keys[j*headDim : (j+1)*headDim]
 				scores[j] = DotProductF32(q, k) * scale
 			}
@@ -172,7 +172,7 @@ func FlashAttentionPrefillF32(queries, keys, values, output []float32, seqLen, h
 			}
 			for d := 0; d < headDim; d++ {
 				var acc float32
-				for j := 0; j < end; j++ {
+				for j := 0; j <= i; j++ {
 					acc += scores[j] * values[j*headDim+d]
 				}
 				output[i*headDim+d] = acc

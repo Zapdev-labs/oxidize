@@ -6,6 +6,8 @@ import (
 	"math"
 )
 
+const maxGGUFStringBytes = 16 * 1024 * 1024
+
 type reader struct {
 	src    io.Reader
 	cursor int
@@ -113,6 +115,9 @@ func (r *reader) readString() (string, error) {
 	}
 	if length > uint64(^uint(0)>>1) {
 		return "", errIntegerOverflow()
+	}
+	if length > maxGGUFStringBytes {
+		return "", errStringTooLong(length)
 	}
 	raw, err := r.readExact(int(length))
 	if err != nil {

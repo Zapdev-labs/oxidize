@@ -23,8 +23,8 @@ pick_port() {
       printf 'ss failed while probing port %s\n' "${port}" >&2
       return 1
     fi
-    mapfile -t lines <<<"${output}"
-    if [[ ${#lines[@]} -le 1 ]]; then
+    line_count="$(printf '%s\n' "${output}" | wc -l | tr -d '[:space:]')"
+    if [[ "${line_count}" -le 1 ]]; then
       printf '%s' "${port}"
       return 0
     fi
@@ -37,17 +37,17 @@ cp "${ROOT_DIR}/oxidize-core/tests/fixtures/valid-v3.gguf" "${TMP_DIR}/models/va
 PORT="$(pick_port)"
 
 (
-  cd "${ROOT_DIR}/golang"
+  cd "${ROOT_DIR}/oxidize-golang"
   go run ./cmd/oxidize --prompt "hello"
 ) | tee "${EVIDENCE_DIR}/task-10-cli-prompt.txt"
 
 (
-  cd "${ROOT_DIR}/golang"
+  cd "${ROOT_DIR}/oxidize-golang"
   go run ./cmd/oxidize list --models-dir "${TMP_DIR}/models"
 ) | tee "${EVIDENCE_DIR}/task-10-cli-list.txt"
 
 (
-  cd "${ROOT_DIR}/golang"
+  cd "${ROOT_DIR}/oxidize-golang"
   OXIDIZE_API_KEY=secret go run ./cmd/oxidize serve --host 127.0.0.1 --port "${PORT}" --models-dir "${TMP_DIR}/models"
 ) >"${EVIDENCE_DIR}/task-10-server.log" 2>&1 &
 SERVER_PID="$!"

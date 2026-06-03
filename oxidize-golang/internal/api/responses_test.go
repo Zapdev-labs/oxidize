@@ -45,6 +45,7 @@ func TestTextCompletionResponseShape(t *testing.T) {
 	raw := mustJSON(t, resp)
 	assertJSONContains(t, raw, `"object":"text_completion"`)
 	assertJSONContains(t, raw, `"finish_reason":"stop"`)
+	assertJSONContains(t, raw, `"completion_tokens":0`)
 }
 
 func TestChatChunkOmitsMessage(t *testing.T) {
@@ -60,7 +61,7 @@ func TestEmbeddingsResponseShape(t *testing.T) {
 	resp := BuildEmbeddingsResponse("demo")
 	raw := mustJSON(t, resp)
 	assertJSONContains(t, raw, `"object":"list"`)
-	assertJSONContains(t, raw, `"embedding":[]`)
+	assertJSONContains(t, raw, `"embedding":[0,0,0,0,0,0,0,0]`)
 }
 
 // TestEmbeddingsResponseAcceptsFloatValues guards against a regression where

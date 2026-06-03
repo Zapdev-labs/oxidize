@@ -6,7 +6,6 @@ import (
 )
 
 // DequantQ2_K dequantizes Q2_K super-blocks (256 values, 84 bytes).
-// Layout: scales[16] u8 (4-bit pairs), qs[64] (2-bit packed), d/m f16, dmin f16.
 func DequantQ2_K(input []byte, output []float32) error {
 	if len(input)%BLOCK_Q2_K_SIZE != 0 {
 		return &Error{Message: "q2_k input not aligned"}
@@ -17,30 +16,39 @@ func DequantQ2_K(input []byte, output []float32) error {
 	}
 	for b := 0; b < blocks; b++ {
 		blk := input[b*BLOCK_Q2_K_SIZE:]
-		qs := blk[0:64]
-		scales := blk[64:80]
 		d := f16BitsToF32(binary.LittleEndian.Uint16(blk[80:82]))
-		dmin := f16BitsToF32(binary.LittleEndian.Uint16(blk[82:84]))
+		min := f16BitsToF32(binary.LittleEndian.Uint16(blk[82:84]))
+		scales := blk[0:16]
+		qs := blk[16:80]
 		out := output[b*QK_K:]
-		var sc, mn [QK_K/16]float32
-		for j := 0; j < QK_K/16; j++ {
-			sc[j] = float32(scales[j]&0x0F) * d
-			mn[j] = float32(scales[j]>>4) * dmin
-		}
-		for n := 0; n < QK_K; n++ {
-			idx := n / 32
-			shift := (n % 32) * 2
-			q := (qs[idx] >> shift) & 0x3
-			l := n / 16
-			out[n] = float32(q)*sc[l] - mn[l]
+		qPtr := 0
+		is := 0
+		for outer := 0; outer < 2; outer++ {
+			qsBase := outer * 32
+			for range 4 {
+				sc1 := scales[is]
+				dl1 := d * float32(sc1&0xF)
+				ml1 := min * float32(sc1>>4)
+				is++
+				sc2 := scales[is]
+				dl2 := d * float32(sc2&0xF)
+				ml2 := min * float32(sc2>>4)
+				is++
+				shift := ((is/2 - 1) % 4) * 2
+				for l := 0; l < 16; l++ {
+					out[qPtr+l] = dl1*float32((qs[qsBase+l]>>shift)&3) - ml1
+				}
+				for l := 0; l < 16; l++ {
+					out[qPtr+16+l] = dl2*float32((qs[qsBase+16+l]>>shift)&3) - ml2
+				}
+				qPtr += 32
+			}
 		}
 	}
 	return nil
 }
 
 // DequantQ3_K dequantizes Q3_K super-blocks (256 values, 110 bytes).
-// Layout: hmask[32] (1-bit per element), qs[64] (4-bit nibbles), scales[16] i8,
-// d f16 (subtracted from each scale before use).
 func DequantQ3_K(input []byte, output []float32) error {
 	if len(input)%BLOCK_Q3_K_SIZE != 0 {
 		return &Error{Message: "q3_k input not aligned"}
@@ -51,26 +59,68 @@ func DequantQ3_K(input []byte, output []float32) error {
 	}
 	for b := 0; b < blocks; b++ {
 		blk := input[b*BLOCK_Q3_K_SIZE:]
+		dAll := f16BitsToF32(binary.LittleEndian.Uint16(blk[108:110]))
 		hmask := blk[0:32]
 		qs := blk[32:96]
-		scales := blk[96:112]
-		d := f16BitsToF32(binary.LittleEndian.Uint16(blk[108:110]))
-		out := output[b*QK_K:]
-		var sc [QK_K/16]float32
-		for j := 0; j < QK_K/16; j++ {
-			sc[j] = (float32(int8(scales[j])) - 32) * d
+		scalesRaw := [4]uint32{
+			binary.LittleEndian.Uint32(blk[96:100]),
+			binary.LittleEndian.Uint32(blk[100:104]),
+			binary.LittleEndian.Uint32(blk[104:108]),
+			0,
 		}
-		for n := 0; n < QK_K; n++ {
-			idx := n / 32
-			shift := (n % 32) * 2
-			q := (qs[idx] >> shift) & 0x3
-			hbit := (hmask[n/8] >> (n % 8)) & 1
-			val := float32(int(q) - int(hbit)*4) // sign flip in 3-bit signed
-			l := n / 16
-			out[n] = val * sc[l]
+		tmp := scalesRaw[2]
+		scalesRaw[2] = ((scalesRaw[0] >> 4) & 0x0F0F0F0F) | (((tmp >> 4) & 0x03030303) << 4)
+		scalesRaw[3] = ((scalesRaw[1] >> 4) & 0x0F0F0F0F) | (((tmp >> 6) & 0x03030303) << 4)
+		scalesRaw[0] = (scalesRaw[0] & 0x0F0F0F0F) | ((tmp & 0x03030303) << 4)
+		scalesRaw[1] = (scalesRaw[1] & 0x0F0F0F0F) | (((tmp >> 2) & 0x03030303) << 4)
+		var scaleBytes [16]byte
+		for i := 0; i < 4; i++ {
+			binary.LittleEndian.PutUint32(scaleBytes[i*4:(i+1)*4], scalesRaw[i])
+		}
+		scales := make([]int8, 16)
+		for i := range scales {
+			scales[i] = int8(scaleBytes[i])
+		}
+		out := output[b*QK_K:]
+		qPtr := 0
+		is := 0
+		m := uint8(1)
+		for range 2 {
+			for range 4 {
+				dl := dAll * float32(int32(scales[is])-32)
+				is++
+				shift := ((is - 1) % 4) * 2
+				for l := 0; l < 16; l++ {
+					qv := int32((qs[l] >> shift) & 3)
+					hbit := int32(0)
+					if (hmask[l] & m) == 0 {
+						hbit = 4
+					}
+					out[qPtr+l] = dl * float32(qv-hbit)
+				}
+				dl2 := dAll * float32(int32(scales[is])-32)
+				is++
+				for l := 0; l < 16; l++ {
+					qv := int32((qs[l+16] >> shift) & 3)
+					hbit := int32(0)
+					if (hmask[l+16] & m) == 0 {
+						hbit = 4
+					}
+					out[qPtr+16+l] = dl2 * float32(qv-hbit)
+				}
+				qPtr += 32
+				m <<= 1
+			}
 		}
 	}
 	return nil
+}
+
+func scaleMinK4(j int, scales []byte) (uint8, uint8) {
+	if j < 4 {
+		return scales[j] & 63, scales[j+4] & 63
+	}
+	return (scales[j+4] & 0xF) | ((scales[j-4] >> 6) << 4), (scales[j+4] >> 4) | ((scales[j] >> 6) << 4)
 }
 
 // DequantQ4_K dequantizes Q4_K super-blocks (256 values, 144 bytes).
@@ -85,21 +135,27 @@ func DequantQ4_K(input []byte, output []float32) error {
 	for b := 0; b < blocks; b++ {
 		blk := input[b*BLOCK_Q4_K_SIZE:]
 		d := f16BitsToF32(binary.LittleEndian.Uint16(blk[0:2]))
-		dmin := f16BitsToF32(binary.LittleEndian.Uint16(blk[2:4]))
+		min := f16BitsToF32(binary.LittleEndian.Uint16(blk[2:4]))
 		scales := blk[4:16]
-		qs := blk[16 : 16+128]
+		qs := blk[16:144]
 		out := output[b*QK_K:]
-		var sc, mn [QK_K/32]float32
-		for j := 0; j < QK_K/32; j++ {
-			sc[j] = float32(scales[j]&0x3F) * d
-			mn[j] = float32(scales[j]>>6) * dmin
-		}
-		for n := 0; n < QK_K; n++ {
-			idx := n / 32
-			shift := (n % 32) * 4
-			q := (qs[idx] >> shift) & 0xF
-			l := n / 32
-			out[n] = float32(q)*sc[l] - mn[l]
+		qPtr := 0
+		is := 0
+		for range 4 {
+			sc1, m1 := scaleMinK4(is, scales)
+			sc2, m2 := scaleMinK4(is+1, scales)
+			d1 := d * float32(sc1)
+			min1 := min * float32(m1)
+			d2 := d * float32(sc2)
+			min2 := min * float32(m2)
+			for l := 0; l < 32; l++ {
+				out[qPtr+l] = d1*float32(qs[l]&0xF) - min1
+			}
+			for l := 0; l < 32; l++ {
+				out[qPtr+32+l] = d2*float32(qs[l]>>4) - min2
+			}
+			qPtr += 64
+			is += 2
 		}
 	}
 	return nil
@@ -117,24 +173,40 @@ func DequantQ5_K(input []byte, output []float32) error {
 	for b := 0; b < blocks; b++ {
 		blk := input[b*BLOCK_Q5_K_SIZE:]
 		d := f16BitsToF32(binary.LittleEndian.Uint16(blk[0:2]))
-		dmin := f16BitsToF32(binary.LittleEndian.Uint16(blk[2:4]))
-		scales := blk[4:20]
-		qh := blk[20:52]
-		qs := blk[52 : 52+128]
+		min := f16BitsToF32(binary.LittleEndian.Uint16(blk[2:4]))
+		scales := blk[4:16]
+		qh := blk[16:48]
+		qs := blk[48:176]
 		out := output[b*QK_K:]
-		var sc, mn [QK_K/32]float32
-		for j := 0; j < QK_K/32; j++ {
-			sc[j] = float32(scales[j]&0x1F) * d
-			mn[j] = float32(scales[j]>>5) * dmin
-		}
-		for n := 0; n < QK_K; n++ {
-			idx := n / 32
-			shift := (n % 32) * 4
-			q := (qs[idx] >> shift) & 0xF
-			hb := (qh[n/8] >> (n % 8)) & 1
-			val := int(q) | int(hb)<<4
-			l := n / 32
-			out[n] = float32(val)*sc[l] - mn[l]
+		qPtr := 0
+		is := 0
+		u1 := uint8(1)
+		u2 := uint8(2)
+		for range 4 {
+			sc1, m1 := scaleMinK4(is, scales)
+			sc2, m2 := scaleMinK4(is+1, scales)
+			d1 := d * float32(sc1)
+			min1 := min * float32(m1)
+			d2 := d * float32(sc2)
+			min2 := min * float32(m2)
+			for l := 0; l < 32; l++ {
+				qv1 := uint32(qs[l]&0xF)
+				if (qh[l] & u1) != 0 {
+					qv1 += 16
+				}
+				out[qPtr+l] = d1*float32(qv1) - min1
+			}
+			for l := 0; l < 32; l++ {
+				qv2 := uint32(qs[l] >> 4)
+				if (qh[l] & u2) != 0 {
+					qv2 += 16
+				}
+				out[qPtr+32+l] = d2*float32(qv2) - min2
+			}
+			qPtr += 64
+			is += 2
+			u1 <<= 2
+			u2 <<= 2
 		}
 	}
 	return nil
@@ -151,19 +223,28 @@ func DequantQ6_K(input []byte, output []float32) error {
 	}
 	for b := 0; b < blocks; b++ {
 		blk := input[b*BLOCK_Q6_K_SIZE:]
+		d := f16BitsToF32(binary.LittleEndian.Uint16(blk[208:210]))
 		ql := blk[0:128]
 		qh := blk[128:192]
-		scales := blk[192:208]
-		d := f16BitsToF32(binary.LittleEndian.Uint16(blk[208:210]))
+		sc := make([]int8, 16)
+		for i := range sc {
+			sc[i] = int8(blk[192+i])
+		}
 		out := output[b*QK_K:]
-		for n := 0; n < QK_K; n++ {
-			idx := n / 32
-			shift := (n % 32) * 2
-			qlo := (ql[idx] >> shift) & 0x3
-			qhi := (qh[idx] >> shift) & 0x3
-			q := int8((qhi<<2)|qlo) - 32
-			l := n / 16
-			out[n] = float32(q) * float32(int8(scales[l])) * d
+		qPtr := 0
+		for range 2 {
+			for l := 0; l < 32; l++ {
+				is := l / 16
+				q1 := int32((ql[l]&0xF)|(((qh[l]&3)<<4))) - 32
+				q2 := int32((ql[l+32]&0xF)|((((qh[l]>>2)&3)<<4))) - 32
+				q3 := int32((ql[l]>>4)|((((qh[l]>>4)&3)<<4))) - 32
+				q4 := int32((ql[l+32]>>4)|((((qh[l]>>6)&3)<<4))) - 32
+				out[qPtr+l] = d * float32(sc[is]) * float32(q1)
+				out[qPtr+32+l] = d * float32(sc[is+2]) * float32(q2)
+				out[qPtr+64+l] = d * float32(sc[is+4]) * float32(q3)
+				out[qPtr+96+l] = d * float32(sc[is+6]) * float32(q4)
+			}
+			qPtr += 128
 		}
 	}
 	return nil

@@ -70,7 +70,7 @@ func (b Backend) Effective() (Backend, string, bool) {
 		return BackendCpu, "MLX backend requested but unavailable on Linux; falling back to CPU", true
 	}
 	if b == BackendIntelArc && !vulkanDetected() {
-		return BackendVulkan, "Intel Arc backend requested but Vulkan was not detected at build time; using Vulkan fallback path", true
+		return BackendCpu, "Intel Arc backend requested but Vulkan was not detected at build time; falling back to CPU", true
 	}
 	return b, "", false
 }

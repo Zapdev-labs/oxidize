@@ -59,6 +59,13 @@ func TestEffective(t *testing.T) {
 	if got, _, _ := BackendCpu.Effective(); got != BackendCpu {
 		t.Fatalf("cpu must always be effective, got %v", got)
 	}
+	got, msg, warned := BackendIntelArc.Effective()
+	if got != BackendCpu {
+		t.Fatalf("intel arc without vulkan should fall back to cpu, got %v", got)
+	}
+	if !warned || msg == "" {
+		t.Fatal("expected warning when Intel Arc is unavailable")
+	}
 }
 
 func TestDTypeSizeInBytes(t *testing.T) {

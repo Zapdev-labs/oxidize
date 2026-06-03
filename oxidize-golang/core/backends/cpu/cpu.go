@@ -126,26 +126,23 @@ func (c *Cpu) Gemv(matrix backend.WeightStorage, vector backend.TensorHandle, ro
 	if !ok {
 		return nil, &cpuError{Message: "vector must be cpu tensor"}
 	}
-	row := make([]float32, cols)
+	weights := make([]float32, rows*cols)
 	if ws.Dequant != nil {
-		if err := ws.Dequant(ws.Bytes, row); err != nil {
+		if err := ws.Dequant(ws.Bytes, weights); err != nil {
 			return nil, err
 		}
 	} else {
-		// No dequant: bytes are interpreted as a float32 view of equal size.
-		// This is a fallback for raw f32 weights loaded into WeightStorage.
-		if len(ws.Bytes) < cols*4 {
+		if len(ws.Bytes) < rows*cols*4 {
 			return nil, &cpuError{Message: "weight storage too small"}
 		}
-		for i := 0; i < cols; i++ {
-			row[i] = math.Float32frombits(binary.LittleEndian.Uint32(ws.Bytes[i*4:]))
+		for i := 0; i < rows*cols; i++ {
+			weights[i] = math.Float32frombits(binary.LittleEndian.Uint32(ws.Bytes[i*4:]))
 		}
 	}
 	out := make([]float32, rows)
-	if err := tensor.GemvF32(row, 1, cols, v.Data, out); err != nil {
+	if err := tensor.GemvF32(weights, rows, cols, v.Data, out); err != nil {
 		return nil, err
 	}
-	_ = rows
 	return &CpuTensor{Data: out, Shape: []int{rows}}, nil
 }
 

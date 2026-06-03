@@ -44,6 +44,45 @@ func TestRejectsInvalidFixtures(t *testing.T) {
 	}
 }
 
+func TestEncodeArrayMetadataRoundTrip(t *testing.T) {
+	raw, err := Encode(WriterHeader{
+		Version: 3,
+		Metadata: map[string]MetadataValue{
+			"tokenizer.ggml.tokens": {
+				Type: MetadataArray,
+				Array: []MetadataValue{
+					{Type: MetadataString, String: "a"},
+					{Type: MetadataString, String: "b"},
+				},
+			},
+		},
+		Tensors:   []TensorInfo{{Name: "weight", Dimensions: []uint64{1}, GGMLType: 0, RelativeOffset: 0}},
+		Alignment: 32,
+	}, []byte{1, 2, 3, 4})
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	file, err := Parse(raw)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	arr := file.Metadata["tokenizer.ggml.tokens"].Array
+	if len(arr) != 2 || arr[0].String != "a" || arr[1].String != "b" {
+		t.Fatalf("array = %#v", arr)
+	}
+}
+
+func TestValidateFile(t *testing.T) {
+	path := t.TempDir() + "/encoded.gguf"
+	raw := encodedFixture(t)
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	if err := ValidateFile(path); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+}
+
 func TestLoadMetadata(t *testing.T) {
 	path := t.TempDir() + "/encoded.gguf"
 	raw := encodedFixture(t)

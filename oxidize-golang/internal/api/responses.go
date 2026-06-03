@@ -6,14 +6,19 @@ type ErrorResponse struct {
 }
 
 type APIError struct {
-	Message string `json:"message"`
-	Type    string `json:"type"`
+	Message string  `json:"message"`
+	Type    string  `json:"type"`
+	Code    *string `json:"code,omitempty"`
 }
 
 type Usage struct {
 	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens,omitempty"`
+	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
+}
+
+func placeholderUsage() Usage {
+	return Usage{PromptTokens: 0, CompletionTokens: 0, TotalTokens: 0}
 }
 
 type ModelsResponse struct {
@@ -86,7 +91,7 @@ func BuildChatCompletion(model string, content string) ChatCompletionResponse {
 	return ChatCompletionResponse{
 		ID: "chatcmpl-placeholder", Object: "chat.completion", Created: 0, Model: model,
 		Choices: []ChatChoice{{Index: 0, Message: &ChatMessage{Role: "assistant", Content: NewMessageContentText(content)}, FinishReason: &stop}},
-		Usage:   Usage{},
+		Usage:   placeholderUsage(),
 	}
 }
 
@@ -109,7 +114,7 @@ func BuildTextCompletion(model string, text string) TextCompletionResponse {
 	return TextCompletionResponse{
 		ID: "cmpl-placeholder", Object: "text_completion", Created: 0, Model: model,
 		Choices: []TextChoice{{Index: 0, Text: text, FinishReason: &stop}},
-		Usage:   Usage{},
+		Usage:   placeholderUsage(),
 	}
 }
 
@@ -119,8 +124,9 @@ func BuildTextChunk(model string, text string, finished bool) TextCompletionResp
 	if finished {
 		stop := "stop"
 		finish = &stop
+		out = ""
 	}
-	return TextCompletionResponse{ID: "cmpl-placeholder", Object: "text_completion", Created: 0, Model: model, Choices: []TextChoice{{Index: 0, Text: out, FinishReason: finish}}}
+	return TextCompletionResponse{ID: "cmpl-placeholder", Object: "text_completion", Created: 0, Model: model, Choices: []TextChoice{{Index: 0, Text: out, FinishReason: finish}}, Usage: placeholderUsage()}
 }
 
 func BuildModelsResponse(modelIDs ...string) ModelsResponse {
@@ -135,9 +141,10 @@ func BuildModelsResponse(modelIDs ...string) ModelsResponse {
 }
 
 func BuildEmbeddingsResponse(model string) EmbeddingsResponse {
+	embedding := make([]float64, 8)
 	return EmbeddingsResponse{
 		Object: "list",
-		Data:   []EmbeddingData{{Object: "embedding", Embedding: []float64{}, Index: 0}},
+		Data:   []EmbeddingData{{Object: "embedding", Embedding: embedding, Index: 0}},
 		Model:  model,
 		Usage:  EmbeddingsUsage{},
 	}
@@ -164,7 +171,8 @@ func ModelNotFound(model string) ErrorResponse {
 }
 
 func InvalidAPIKey() ErrorResponse {
-	return ErrorResponse{StatusCode: 401, Error: APIError{Message: "invalid api key", Type: "invalid_api_key"}}
+	code := "invalid_api_key"
+	return ErrorResponse{StatusCode: 401, Error: APIError{Message: "Incorrect API key provided", Type: "invalid_request_error", Code: &code}}
 }
 
 func MalformedJSON() ErrorResponse {

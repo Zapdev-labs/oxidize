@@ -53,7 +53,6 @@ func runCommand(args []string, stdout io.Writer, stderr io.Writer) error {
 		return err
 	}
 	if fs.NArg() == 0 {
-		_, _ = io.WriteString(stderr, "oxidize run requires a model name or local .gguf path\n")
 		return fmt.Errorf("oxidize run requires a model name or local .gguf path")
 	}
 	if strings.TrimSpace(*prompt) == "" {

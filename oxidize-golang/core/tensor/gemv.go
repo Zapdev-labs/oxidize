@@ -79,7 +79,7 @@ func GemvQuantizedF32(qbytes []byte, dequant func([]byte, []float32) error, rows
 		return &GemvError{Message: "qbytes not aligned to row boundary"}
 	}
 	parallelizeRows(rows, func(start, end int) {
-		buf := scratch[:cols]
+		buf := make([]float32, cols)
 		for r := start; r < end; r++ {
 			if err := dequant(qbytes[r*bytesPerRow:(r+1)*bytesPerRow], buf); err != nil {
 				continue
@@ -151,7 +151,7 @@ func GemmQuantizedF32(qbytes []byte, dequant func([]byte, []float32) error, rows
 		return &GemmError{Message: "qbytes not aligned to row boundary"}
 	}
 	parallelizeRows(rows, func(start, end int) {
-		row := scratch[:shared]
+		row := make([]float32, shared)
 		for r := start; r < end; r++ {
 			if err := dequant(qbytes[r*bytesPerRow:(r+1)*bytesPerRow], row); err != nil {
 				continue

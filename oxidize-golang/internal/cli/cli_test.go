@@ -39,8 +39,11 @@ func TestRunCommandRejectsMissingModel(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected missing model error")
 	}
-	if got := stderr.String(); got != "oxidize run requires a model name or local .gguf path\n" {
-		t.Fatalf("unexpected stderr: %q", got)
+	if err.Error() != "oxidize run requires a model name or local .gguf path" {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if stderr.String() != "" {
+		t.Fatalf("unexpected stderr: %q", stderr.String())
 	}
 }
 

@@ -109,6 +109,10 @@ func writeValue(buf *bytes.Buffer, v MetadataValue) error {
 	if err := binary.Write(buf, binary.LittleEndian, uint32(v.Type)); err != nil {
 		return err
 	}
+	return writeValueBody(buf, v)
+}
+
+func writeValueBody(buf *bytes.Buffer, v MetadataValue) error {
 	switch v.Type {
 	case MetadataUint8:
 		return binary.Write(buf, binary.LittleEndian, uint8(v.Uint64))
@@ -148,7 +152,7 @@ func writeValue(buf *bytes.Buffer, v MetadataValue) error {
 			return err
 		}
 		for _, e := range v.Array {
-			if err := writeValue(buf, e); err != nil {
+			if err := writeValueBody(buf, e); err != nil {
 				return err
 			}
 		}
