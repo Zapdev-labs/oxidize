@@ -3287,6 +3287,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxidize-convert"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "memmap2",
+ "oxidize-core",
+ "safetensors",
+ "serde_json",
+]
+
+[[package]]
 name = "oxidize-core"
 version = "0.1.0"
 dependencies = [
