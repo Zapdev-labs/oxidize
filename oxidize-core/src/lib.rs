@@ -94,6 +94,10 @@ pub mod tensor;
 pub mod tokenizer;
 #[path = "compute/turboquant.rs"]
 pub mod turboquant;
+#[path = "video/mod.rs"]
+pub mod video;
+#[path = "model/video.rs"]
+pub mod video_model;
 #[path = "vision/mod.rs"]
 pub mod vision;
 #[cfg(feature = "vulkan")]
