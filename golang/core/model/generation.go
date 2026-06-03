@@ -8,12 +8,12 @@ import (
 
 // GenerationConfig mirrors GenerationConfig.
 type GenerationConfig struct {
-	MaxNewTokens      int
-	StopToken         Token
-	StopSequences     [][]Token
-	PrefillBatchSize  int
-	Sampling          SamplingConfig
-	SuppressedTokens  []Token
+	MaxNewTokens     int
+	StopToken        Token
+	StopSequences    [][]Token
+	PrefillBatchSize int
+	Sampling         SamplingConfig
+	SuppressedTokens []Token
 }
 
 // DefaultGenerationConfig returns sensible defaults.
@@ -38,14 +38,14 @@ func (e *GenerationError) IsModelError() bool { return false }
 
 // SpeculativeGenerationConfig mirrors SpeculativeGenerationConfig.
 type SpeculativeGenerationConfig struct {
-	Generation        GenerationConfig
+	Generation         GenerationConfig
 	DraftTokensPerStep int
 }
 
 // DefaultSpeculativeGenerationConfig returns sensible defaults.
 func DefaultSpeculativeGenerationConfig() SpeculativeGenerationConfig {
 	return SpeculativeGenerationConfig{
-		Generation:        DefaultGenerationConfig(),
+		Generation:         DefaultGenerationConfig(),
 		DraftTokensPerStep: 4,
 	}
 }
@@ -163,7 +163,9 @@ func (s *SpeculativeGenerationStream) Next(ctx context.Context) (Token, bool, er
 		s.done = true
 		return 0, true, nil
 	}
-	return tokens[accepted-1], accepted == 0, nil
+	// `accepted == 0` is unreachable here (handled above), so the stream is
+	// not finished after returning an accepted token.
+	return tokens[accepted-1], false, nil
 }
 
 // errGenerationFinished is returned when a stream has been fully consumed.

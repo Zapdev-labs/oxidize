@@ -22,7 +22,14 @@ func Middleware(next http.Handler) http.Handler {
 }
 
 func hasAPIKey(r *http.Request, expected string) bool {
-	return constantTimeEqual(r.Header.Get("x-api-key"), expected) || constantTimeEqual(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "), expected)
+	if constantTimeEqual(r.Header.Get("x-api-key"), expected) {
+		return true
+	}
+	header := r.Header.Get("Authorization")
+	if rest, ok := strings.CutPrefix(header, "Bearer "); ok {
+		return constantTimeEqual(rest, expected)
+	}
+	return false
 }
 
 func constantTimeEqual(actual string, expected string) bool {

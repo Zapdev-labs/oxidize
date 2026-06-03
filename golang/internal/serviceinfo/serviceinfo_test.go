@@ -3,6 +3,8 @@ package serviceinfo
 import (
 	"path/filepath"
 	"testing"
+
+	"github.com/Zapdev-labs/oxidize/golang/internal/testutil"
 )
 
 func TestDefaultModelID(t *testing.T) {
@@ -19,7 +21,7 @@ func TestDefaultModelID(t *testing.T) {
 func TestDiscoverModels(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "valid-v3.gguf")
-	copyFixture(t, path)
+	testutil.CopyFixture(t, path)
 
 	models, err := DiscoverModels(dir)
 	if err != nil {

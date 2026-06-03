@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
+
+	"github.com/Zapdev-labs/oxidize/golang/internal/testutil"
 )
 
 func TestHealthAndDocs(t *testing.T) {
@@ -26,7 +28,7 @@ func TestHealthAndDocs(t *testing.T) {
 
 func TestModelsAndPlaceholderRoutes(t *testing.T) {
 	dir := t.TempDir()
-	copyFixture(t, filepath.Join(dir, "valid-v3.gguf"))
+	testutil.CopyFixture(t, filepath.Join(dir, "valid-v3.gguf"))
 	handler, err := NewHandler(Config{ModelsDir: dir})
 	if err != nil {
 		t.Fatalf("handler: %v", err)
@@ -55,6 +57,24 @@ func TestAuthAndErrors(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d", rec.Code)
+	}
+}
+
+func TestRejectsOversizedRequestBody(t *testing.T) {
+	handler, err := NewHandler(Config{})
+	if err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+
+	body := append([]byte(`{"model":"demo","prompt":"`), bytes.Repeat([]byte("a"), maxJSONBodyBytes)...)
+	body = append(body, []byte(`"}`)...)
+	req := httptest.NewRequest(http.MethodPost, "/v1/completions", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
 	}
 }
 

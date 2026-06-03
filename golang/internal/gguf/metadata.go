@@ -10,7 +10,7 @@ func (r *reader) readTensor() (TensorInfo, error) {
 		return TensorInfo{}, err
 	}
 	dimensions := make([]uint64, 0, dimensionCount)
-	for range make([]struct{}, dimensionCount) {
+	for range dimensionCount {
 		value, readErr := r.readU64()
 		if readErr != nil {
 			return TensorInfo{}, readErr
@@ -67,7 +67,7 @@ func (r *reader) readValue(kind MetadataType) (MetadataValue, error) {
 			return MetadataValue{}, err
 		}
 		values := make([]MetadataValue, 0, length)
-		for range make([]struct{}, length) {
+		for range length {
 			value, readErr := r.readValue(MetadataType(elementType))
 			if readErr != nil {
 				return MetadataValue{}, readErr

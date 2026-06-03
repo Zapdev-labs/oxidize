@@ -18,7 +18,13 @@ trap cleanup EXIT
 
 pick_port() {
   for port in $(seq 18080 18120); do
-    if ! ss -ltn "( sport = :${port} )" | tail -n +2 | grep -q .; then
+    local output
+    if ! output="$(ss -ltn "( sport = :${port} )" 2>/dev/null)"; then
+      printf 'ss failed while probing port %s\n' "${port}" >&2
+      return 1
+    fi
+    mapfile -t lines <<<"${output}"
+    if [[ ${#lines[@]} -le 1 ]]; then
       printf '%s' "${port}"
       return 0
     fi
@@ -61,3 +67,8 @@ curl -fsS -H "x-api-key: secret" -H "content-type: application/json" -d '{"model
 curl -fsS -N -H "x-api-key: secret" -H "content-type: application/json" -d '{"model":"valid-v3","messages":[{"role":"user","content":"hi"}],"stream":true}' "http://127.0.0.1:${PORT}/v1/chat/completions" | tee "${EVIDENCE_DIR}/task-10-stream.txt"
 grep -F "[DONE]" "${EVIDENCE_DIR}/task-10-stream.txt" > "${EVIDENCE_DIR}/task-10-stream-done.txt"
 curl -sS -o "${EVIDENCE_DIR}/task-10-auth.txt" -w "%{http_code}\n" "http://127.0.0.1:${PORT}/v1/models" > "${EVIDENCE_DIR}/task-10-auth-status.txt"
+auth_status="$(<"${EVIDENCE_DIR}/task-10-auth-status.txt")"
+if [[ "${auth_status}" != "401" ]]; then
+  printf 'expected 401 from unauthenticated request, got %s\n' "${auth_status}" >&2
+  exit 1
+fi

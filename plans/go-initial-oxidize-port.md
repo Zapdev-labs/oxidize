@@ -17,12 +17,12 @@
 ### Must have
 - Create branch `go/initial-oxidize-port` from `master` before implementation.
 - Add all Go product code under `golang/`, with module path `github.com/Zapdev-labs/oxidize/golang`.
-- Preserve the Rust workspace in [Cargo.toml](/home/dih/oxidize-3/oxidize/Cargo.toml:1) and the current Rust CI behavior in [.github/workflows/ci.yml](/home/dih/oxidize-3/oxidize/.github/workflows/ci.yml:10).
-- Mirror the key Rust CLI surfaces from [oxidize-cli/src/main.rs](/home/dih/oxidize-3/oxidize/oxidize-cli/src/main.rs:152): `run`, `serve`, `list`, and the existing no-model `--prompt` test behavior from [oxidize-cli/tests/cli_binary.rs](/home/dih/oxidize-3/oxidize/oxidize-cli/tests/cli_binary.rs:15).
-- Mirror the key server routes from [oxidize-server/src/app.rs](/home/dih/oxidize-3/oxidize/oxidize-server/src/app.rs:46): `/healthz`, `/livez`, `/readyz`, `/metrics`, `/openapi.json`, `/v1/models`, `/v1/chat/completions`, `/v1/completions`, and `/v1/embeddings`.
-- Mirror request fields from [oxidize-server/src/schema.rs](/home/dih/oxidize-3/oxidize/oxidize-server/src/schema.rs:6), including structured-output fields and `n`/`best_of`.
-- Mirror Rust no-model placeholder response rules from [oxidize-server/src/routes/chat.rs](/home/dih/oxidize-3/oxidize/oxidize-server/src/routes/chat.rs:205) and [oxidize-server/src/routes/completions.rs](/home/dih/oxidize-3/oxidize/oxidize-server/src/routes/completions.rs:201).
-- Mirror auth behavior from [oxidize-server/src/auth.rs](/home/dih/oxidize-3/oxidize/oxidize-server/src/auth.rs:24): only `/v1/*` is gated, empty/missing env disables auth, accepted headers are `x-api-key` and `Authorization: Bearer`.
+- Preserve the Rust workspace in [Cargo.toml](../Cargo.toml) and the current Rust CI behavior in [.github/workflows/ci.yml](../.github/workflows/ci.yml).
+- Mirror the key Rust CLI surfaces from [oxidize-cli/src/main.rs](../oxidize-cli/src/main.rs): `run`, `serve`, `list`, and the existing no-model `--prompt` test behavior from [oxidize-cli/tests/cli_binary.rs](../oxidize-cli/tests/cli_binary.rs).
+- Mirror the key server routes from [oxidize-server/src/app.rs](../oxidize-server/src/app.rs): `/healthz`, `/livez`, `/readyz`, `/metrics`, `/openapi.json`, `/v1/models`, `/v1/chat/completions`, `/v1/completions`, and `/v1/embeddings`.
+- Mirror request fields from [oxidize-server/src/schema.rs](../oxidize-server/src/schema.rs), including structured-output fields and `n`/`best_of`.
+- Mirror Rust no-model placeholder response rules from [oxidize-server/src/routes/chat.rs](../oxidize-server/src/routes/chat.rs) and [oxidize-server/src/routes/completions.rs](../oxidize-server/src/routes/completions.rs).
+- Mirror auth behavior from [oxidize-server/src/auth.rs](../oxidize-server/src/auth.rs): only `/v1/*` is gated, empty/missing env disables auth, accepted headers are `x-api-key` and `Authorization: Bearer`.
 - Use Go standard library first: `flag`, `net/http`, `encoding/json`, `httptest`, `testing`, `log/slog`, `crypto/subtle`, `context`, and `os/signal`.
 - Add a new Go CI workflow that runs `gofmt`, `go vet`, `go test`, and `go test -race` in `golang/`.
 - Capture TDD red/green evidence and manual CLI/server QA under `evidence/`.

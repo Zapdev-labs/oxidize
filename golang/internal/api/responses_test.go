@@ -30,6 +30,7 @@ func TestChatResponseFormatJsonObject(t *testing.T) {
 	if decoded["object"] != "chat.completion" {
 		t.Fatalf("object = %#v", decoded["object"])
 	}
+	assertJSONContains(t, raw, `"content":"{}"`)
 }
 
 func TestModelsResponseDefaultID(t *testing.T) {
@@ -60,6 +61,19 @@ func TestEmbeddingsResponseShape(t *testing.T) {
 	raw := mustJSON(t, resp)
 	assertJSONContains(t, raw, `"object":"list"`)
 	assertJSONContains(t, raw, `"embedding":[]`)
+}
+
+// TestEmbeddingsResponseAcceptsFloatValues guards against a regression where
+// EmbeddingData.Embedding was typed as []int, which would cause a compile
+// error when the OpenAI-shaped response is populated with float values.
+func TestEmbeddingsResponseAcceptsFloatValues(t *testing.T) {
+	resp := EmbeddingsResponse{
+		Object: "list",
+		Data:   []EmbeddingData{{Object: "embedding", Embedding: []float64{0.5, -1.25, 3.0}, Index: 0}},
+		Model:  "demo",
+	}
+	raw := mustJSON(t, resp)
+	assertJSONContains(t, raw, `"embedding":[0.5,-1.25,3]`)
 }
 
 func mustJSON(t *testing.T, value any) []byte {

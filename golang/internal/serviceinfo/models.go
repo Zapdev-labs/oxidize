@@ -37,15 +37,15 @@ func DiscoverModels(dir string) ([]ModelInfo, error) {
 			continue
 		}
 		path := filepath.Join(dir, entry.Name())
-		file, loadErr := gguf.LoadFile(path)
+		header, loadErr := gguf.LoadMetadata(path)
 		if loadErr != nil {
 			return nil, loadErr
 		}
 		models = append(models, ModelInfo{
 			ID:           strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name())),
 			Path:         path,
-			Version:      file.Version,
-			Architecture: file.Metadata["general.architecture"].String,
+			Version:      header.Version,
+			Architecture: header.Metadata["general.architecture"].String,
 		})
 	}
 	sort.Slice(models, func(i int, j int) bool {

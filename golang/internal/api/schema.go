@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 type ResponseFormatType string
@@ -37,9 +38,90 @@ type ChatCompletionRequest struct {
 }
 
 type ChatMessage struct {
-	Role    string   `json:"role"`
-	Content string   `json:"content"`
-	Images  []string `json:"images,omitempty"`
+	Role    string         `json:"role"`
+	Content MessageContent `json:"content"`
+	Images  []string       `json:"images,omitempty"`
+}
+
+type MessageContent struct {
+	text  string
+	parts []ContentPart
+	mode  messageContentMode
+}
+
+type messageContentMode uint8
+
+const (
+	messageContentText messageContentMode = iota
+	messageContentParts
+)
+
+type ContentPart struct {
+	Type     string           `json:"type"`
+	Text     string           `json:"text,omitempty"`
+	ImageURL *ContentImageURL `json:"image_url,omitempty"`
+}
+
+type ContentImageURL struct {
+	URL    string `json:"url"`
+	Detail string `json:"detail,omitempty"`
+}
+
+func NewMessageContentText(text string) MessageContent {
+	return MessageContent{text: text, mode: messageContentText}
+}
+
+func NewMessageContentParts(parts []ContentPart) MessageContent {
+	return MessageContent{parts: append([]ContentPart(nil), parts...), mode: messageContentParts}
+}
+
+func (c MessageContent) Text() string {
+	if c.mode != messageContentParts {
+		return c.text
+	}
+	var b strings.Builder
+	for _, part := range c.parts {
+		if part.Type == "text" {
+			b.WriteString(part.Text)
+		}
+	}
+	return b.String()
+}
+
+func (c MessageContent) Parts() []ContentPart {
+	return append([]ContentPart(nil), c.parts...)
+}
+
+func (c MessageContent) MarshalJSON() ([]byte, error) {
+	if c.mode == messageContentParts {
+		return json.Marshal(c.parts)
+	}
+	return json.Marshal(c.text)
+}
+
+func (c *MessageContent) UnmarshalJSON(data []byte) error {
+	var text string
+	if err := json.Unmarshal(data, &text); err == nil {
+		*c = NewMessageContentText(text)
+		return nil
+	}
+	var parts []ContentPart
+	if err := json.Unmarshal(data, &parts); err == nil {
+		for _, part := range parts {
+			switch part.Type {
+			case "text":
+			case "image_url":
+				if part.ImageURL == nil || strings.TrimSpace(part.ImageURL.URL) == "" {
+					return fmt.Errorf("decode content parts")
+				}
+			default:
+				return fmt.Errorf("decode content parts")
+			}
+		}
+		*c = NewMessageContentParts(parts)
+		return nil
+	}
+	return fmt.Errorf("decode chat message content")
 }
 
 type CompletionRequest struct {

@@ -71,9 +71,9 @@ type EmbeddingsResponse struct {
 }
 
 type EmbeddingData struct {
-	Object    string `json:"object"`
-	Embedding []int  `json:"embedding"`
-	Index     int    `json:"index"`
+	Object    string    `json:"object"`
+	Embedding []float64 `json:"embedding"`
+	Index     int       `json:"index"`
 }
 
 type EmbeddingsUsage struct {
@@ -85,7 +85,7 @@ func BuildChatCompletion(model string, content string) ChatCompletionResponse {
 	stop := "stop"
 	return ChatCompletionResponse{
 		ID: "chatcmpl-placeholder", Object: "chat.completion", Created: 0, Model: model,
-		Choices: []ChatChoice{{Index: 0, Message: &ChatMessage{Role: "assistant", Content: content}, FinishReason: &stop}},
+		Choices: []ChatChoice{{Index: 0, Message: &ChatMessage{Role: "assistant", Content: NewMessageContentText(content)}, FinishReason: &stop}},
 		Usage:   Usage{},
 	}
 }
@@ -137,7 +137,7 @@ func BuildModelsResponse(modelIDs ...string) ModelsResponse {
 func BuildEmbeddingsResponse(model string) EmbeddingsResponse {
 	return EmbeddingsResponse{
 		Object: "list",
-		Data:   []EmbeddingData{{Object: "embedding", Embedding: []int{}, Index: 0}},
+		Data:   []EmbeddingData{{Object: "embedding", Embedding: []float64{}, Index: 0}},
 		Model:  model,
 		Usage:  EmbeddingsUsage{},
 	}

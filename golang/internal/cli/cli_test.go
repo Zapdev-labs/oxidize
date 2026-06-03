@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/Zapdev-labs/oxidize/golang/internal/testutil"
 )
 
 func TestLegacyPromptFlag(t *testing.T) {
@@ -20,7 +22,7 @@ func TestLegacyPromptFlag(t *testing.T) {
 
 func TestListCommand(t *testing.T) {
 	dir := t.TempDir()
-	copyFixture(t, filepath.Join(dir, "valid-v3.gguf"))
+	testutil.CopyFixture(t, filepath.Join(dir, "valid-v3.gguf"))
 
 	var stdout bytes.Buffer
 	if err := Run(context.Background(), []string{"list", "--models-dir", dir}, &stdout, &bytes.Buffer{}); err != nil {

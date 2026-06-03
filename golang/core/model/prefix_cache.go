@@ -53,11 +53,13 @@ func NewPrefixCache(limit int) *PrefixCache {
 	return &PrefixCache{entries: map[PrefixHash]*CachedPrefix{}, limit: limit}
 }
 
-// Lookup returns the cached prefix and true if present.
+// Lookup returns the cached prefix and true if present. It mutates the
+// hit/miss counters, so it must take the full write lock to avoid data
+// races with concurrent callers.
 func (c *PrefixCache) Lookup(prefix []Token) (*CachedPrefix, bool) {
 	h := ComputePrefixHash(prefix)
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	entry, ok := c.entries[h]
 	if ok {
 		c.hits++
@@ -143,9 +145,9 @@ func (m *PrefixMatcher) CanReuseState(prefix []Token) bool {
 
 // PrefixCacheConfig mirrors PrefixCacheConfig.
 type PrefixCacheConfig struct {
-	MaxEntries int
+	MaxEntries      int
 	MinPrefixLength int
-	EnableLRU bool
+	EnableLRU       bool
 }
 
 // DefaultPrefixCacheConfig returns sensible defaults.

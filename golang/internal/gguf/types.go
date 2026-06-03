@@ -50,7 +50,7 @@ func (v MetadataValue) AsUint64() (uint64, bool) {
 	case MetadataUint8, MetadataUint16, MetadataUint32, MetadataUint64:
 		return v.Uint64, true
 	case MetadataInt8, MetadataInt16, MetadataInt32, MetadataInt64:
-		if v.Int64 > 0 {
+		if v.Int64 >= 0 {
 			return uint64(v.Int64), true
 		}
 	}

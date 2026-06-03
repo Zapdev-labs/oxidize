@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/Zapdev-labs/oxidize/golang/internal/api"
@@ -9,6 +10,8 @@ import (
 	"github.com/Zapdev-labs/oxidize/golang/internal/generate"
 	"github.com/Zapdev-labs/oxidize/golang/internal/serviceinfo"
 )
+
+const maxJSONBodyBytes = 1 << 20
 
 func (a *application) health(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
@@ -68,7 +71,7 @@ func (a *application) completions(w http.ResponseWriter, r *http.Request) {
 	}
 	text := generate.PlaceholderText(generate.PlaceholderSpec{ResponseFormat: payload.ResponseFormat, GuidedJSON: payload.GuidedJSON, JSONSchema: payload.JSONSchema, GuidedRegex: payload.GuidedRegex, GuidedChoice: payload.GuidedChoice})
 	if payload.Stream {
-		writeSSE(w, api.BuildTextChunk(payload.Model, text, false), api.BuildTextChunk(payload.Model, text, true))
+		writeSSE(w, api.BuildTextChunk(payload.Model, text, false), api.BuildTextChunk(payload.Model, "", true))
 		return
 	}
 	writeJSON(w, http.StatusOK, api.BuildTextCompletion(payload.Model, text))
@@ -98,7 +101,13 @@ func (a *application) ensureModel(w http.ResponseWriter, model string) bool {
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, target any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(target); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, api.ErrorResponse{StatusCode: http.StatusRequestEntityTooLarge, Error: api.APIError{Message: "request body too large", Type: "invalid_request_error"}})
+			return false
+		}
 		resp := api.MalformedJSON()
 		writeJSON(w, resp.StatusCode, resp)
 		return false

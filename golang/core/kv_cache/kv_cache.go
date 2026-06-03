@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"sync"
 )
@@ -44,13 +45,13 @@ func (e EvictionStrategy) String() string {
 
 // Config is the KV cache configuration.
 type Config struct {
-	LayerCount        int           `json:"layer_count"`
-	ContextSize       int           `json:"context_size"`
-	HeadCount         int           `json:"head_count"`
-	HeadDim           int           `json:"head_dim"`
-	DType             string        `json:"dtype"`
-	Quantization      Quantization  `json:"quantization"`
-	Eviction          EvictionStrategy `json:"eviction"`
+	LayerCount   int              `json:"layer_count"`
+	ContextSize  int              `json:"context_size"`
+	HeadCount    int              `json:"head_count"`
+	HeadDim      int              `json:"head_dim"`
+	DType        string           `json:"dtype"`
+	Quantization Quantization     `json:"quantization"`
+	Eviction     EvictionStrategy `json:"eviction"`
 }
 
 // DefaultConfig returns sensible defaults.
@@ -100,7 +101,7 @@ type Cache struct {
 	values   [][]float32
 	occupied int
 	// per-layer metadata: how many tokens are currently stored
-	lengths  []int
+	lengths []int
 }
 
 // NewCache returns a fresh cache with the given configuration.
@@ -193,8 +194,8 @@ func (c *Cache) SaveToDisk(path string) error {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	snap := struct {
-		Config Config `json:"config"`
-		Lengths []int `json:"lengths"`
+		Config  Config `json:"config"`
+		Lengths []int  `json:"lengths"`
 	}{Config: c.config, Lengths: c.lengths}
 	header, err := json.Marshal(snap)
 	if err != nil {
@@ -237,8 +238,8 @@ func LoadFromDisk(path string) (*Cache, error) {
 	headerLen := binary.LittleEndian.Uint32(raw[:4])
 	headerBytes := raw[4 : 4+headerLen]
 	var snap struct {
-		Config Config `json:"config"`
-		Lengths []int `json:"lengths"`
+		Config  Config `json:"config"`
+		Lengths []int  `json:"lengths"`
 	}
 	if err := json.Unmarshal(headerBytes, &snap); err != nil {
 		return nil, &PersistenceError{Err: err}
@@ -276,14 +277,11 @@ func bytesAsF32(data []byte) []float32 {
 }
 
 func float32bits(f float32) uint32 {
-	// Imported via binary.Float32bits equivalent
-	return binary.LittleEndian.Uint32(asBytesF32([]float32{f})[:4])
+	return math.Float32bits(f)
 }
 
 func float32frombits(b uint32) float32 {
-	var f float32
-	binary.LittleEndian.PutUint32(asBytesF32([]float32{f})[:4], b)
-	return f
+	return math.Float32frombits(b)
 }
 
 // ContinuousBatchError mirrors ContinuousBatchError.

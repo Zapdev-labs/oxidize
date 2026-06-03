@@ -58,3 +58,23 @@ func TestCompletionRequestAcceptsStringStop(t *testing.T) {
 		t.Fatalf("stop = %#v", got)
 	}
 }
+
+func TestChatMessageContentAcceptsStringAndParts(t *testing.T) {
+	var msg ChatMessage
+	if err := json.Unmarshal([]byte(`{"role":"user","content":"hello"}`), &msg); err != nil {
+		t.Fatalf("unmarshal string: %v", err)
+	}
+	if got := msg.Content.Text(); got != "hello" {
+		t.Fatalf("string text = %q", got)
+	}
+
+	if err := json.Unmarshal([]byte(`{"role":"user","content":[{"type":"text","text":"hello "},{"type":"image_url","image_url":{"url":"https://example.com/a.png"}},{"type":"text","text":"world"}]}`), &msg); err != nil {
+		t.Fatalf("unmarshal parts: %v", err)
+	}
+	if got := msg.Content.Text(); got != "hello world" {
+		t.Fatalf("parts text = %q", got)
+	}
+	if got := len(msg.Content.Parts()); got != 3 {
+		t.Fatalf("parts len = %d", got)
+	}
+}

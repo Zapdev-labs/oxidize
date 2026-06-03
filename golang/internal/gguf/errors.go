@@ -25,3 +25,7 @@ func errInvalidAlignment(value uint64) error {
 func errIntegerOverflow() error {
 	return fmt.Errorf("integer overflow while parsing")
 }
+
+func errUnknownGGMLType(value uint32) error {
+	return fmt.Errorf("unknown ggml type: %d", value)
+}

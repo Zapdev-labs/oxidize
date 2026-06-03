@@ -2,16 +2,17 @@ package gguf
 
 import (
 	"encoding/binary"
+	"io"
 	"math"
 )
 
 type reader struct {
-	bytes  []byte
+	src    io.Reader
 	cursor int
 }
 
-func newReader(raw []byte) *reader {
-	return &reader{bytes: raw}
+func newReader(src io.Reader) *reader {
+	return &reader{src: src}
 }
 
 func (r *reader) position() int {
@@ -19,15 +20,17 @@ func (r *reader) position() int {
 }
 
 func (r *reader) readExact(length int) ([]byte, error) {
-	end := r.cursor + length
-	if end < r.cursor {
+	if length < 0 {
 		return nil, errIntegerOverflow()
 	}
-	if end > len(r.bytes) {
-		return nil, errUnexpectedEOF()
+	out := make([]byte, length)
+	if _, err := io.ReadFull(r.src, out); err != nil {
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
+			return nil, errUnexpectedEOF()
+		}
+		return nil, err
 	}
-	out := r.bytes[r.cursor:end]
-	r.cursor = end
+	r.cursor += length
 	return out, nil
 }
 
@@ -108,7 +111,7 @@ func (r *reader) readString() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if length > uint64(len(r.bytes)) {
+	if length > uint64(^uint(0)>>1) {
 		return "", errIntegerOverflow()
 	}
 	raw, err := r.readExact(int(length))
