@@ -124,6 +124,38 @@ func (c *MessageContent) UnmarshalJSON(data []byte) error {
 	return fmt.Errorf("decode chat message content")
 }
 
+// MaxTokensOr returns max_tokens or max_completion_tokens, else defaultMax.
+func (r ChatCompletionRequest) MaxTokensOr(defaultMax int) int {
+	if r.MaxCompletionTokens != nil && *r.MaxCompletionTokens > 0 {
+		return *r.MaxCompletionTokens
+	}
+	if r.MaxTokens != nil && *r.MaxTokens > 0 {
+		return *r.MaxTokens
+	}
+	return defaultMax
+}
+
+// FirstUserMessage returns the last user message text in the chat.
+func (r ChatCompletionRequest) FirstUserMessage() string {
+	for i := len(r.Messages) - 1; i >= 0; i-- {
+		if r.Messages[i].Role == "user" {
+			return r.Messages[i].Content.Text()
+		}
+	}
+	if len(r.Messages) > 0 {
+		return r.Messages[len(r.Messages)-1].Content.Text()
+	}
+	return ""
+}
+
+// MaxTokensOr returns max_tokens or defaultMax when unset.
+func (r CompletionRequest) MaxTokensOr(defaultMax int) int {
+	if r.MaxTokens != nil && *r.MaxTokens > 0 {
+		return *r.MaxTokens
+	}
+	return defaultMax
+}
+
 type CompletionRequest struct {
 	Model          string          `json:"model"`
 	Prompt         string          `json:"prompt"`

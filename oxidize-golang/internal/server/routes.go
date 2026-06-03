@@ -49,7 +49,10 @@ func (a *application) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	if !a.ensureModel(w, payload.Model) {
 		return
 	}
-	text := generate.PlaceholderText(generate.PlaceholderSpec{ResponseFormat: payload.ResponseFormat, GuidedJSON: payload.GuidedJSON, JSONSchema: payload.JSONSchema, GuidedRegex: payload.GuidedRegex, GuidedChoice: payload.GuidedChoice})
+	text := a.completionText(r.Context(), payload.Model, payload.FirstUserMessage(), payload.MaxTokensOr(128))
+	if text == "" {
+		text = generate.PlaceholderText(generate.PlaceholderSpec{ResponseFormat: payload.ResponseFormat, GuidedJSON: payload.GuidedJSON, JSONSchema: payload.JSONSchema, GuidedRegex: payload.GuidedRegex, GuidedChoice: payload.GuidedChoice})
+	}
 	if payload.Stream {
 		writeSSE(w, api.BuildChatChunk(payload.Model, text, false), api.BuildChatChunk(payload.Model, "", true))
 		return
@@ -69,7 +72,10 @@ func (a *application) completions(w http.ResponseWriter, r *http.Request) {
 	if !a.ensureModel(w, payload.Model) {
 		return
 	}
-	text := generate.PlaceholderText(generate.PlaceholderSpec{ResponseFormat: payload.ResponseFormat, GuidedJSON: payload.GuidedJSON, JSONSchema: payload.JSONSchema, GuidedRegex: payload.GuidedRegex, GuidedChoice: payload.GuidedChoice})
+	text := a.completionText(r.Context(), payload.Model, payload.Prompt, payload.MaxTokensOr(128))
+	if text == "" {
+		text = generate.PlaceholderText(generate.PlaceholderSpec{ResponseFormat: payload.ResponseFormat, GuidedJSON: payload.GuidedJSON, JSONSchema: payload.JSONSchema, GuidedRegex: payload.GuidedRegex, GuidedChoice: payload.GuidedChoice})
+	}
 	if payload.Stream {
 		writeSSE(w, api.BuildTextChunk(payload.Model, text, false), api.BuildTextChunk(payload.Model, "", true))
 		return
