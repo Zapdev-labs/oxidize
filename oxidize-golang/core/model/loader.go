@@ -4,6 +4,11 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
+	"strings"
+
+	"github.com/Zapdev-labs/oxidize/golang/core/ggufcore"
+	"github.com/Zapdev-labs/oxidize/golang/hf"
 )
 
 // ModelSource represents where a model can be loaded from.
@@ -38,6 +43,8 @@ type LoaderConfig struct {
 	PreferredDType  string
 	MaxMemoryBudget int64
 	AllowFallback   bool
+	HFFilename      string
+	HFCacheDir      string
 }
 
 // NewLoaderConfig returns sensible defaults.
@@ -76,43 +83,61 @@ func (l *ModelLoader) Load() (Model, error) {
 	}
 }
 
-// LoadGGUFModelFromPath is a stub that returns a LlamaModel with the
-// architecture inferred from the file name.
+// LoadGGUFModelFromPath loads a GGUF file from disk into an InferenceModel.
 func LoadGGUFModelFromPath(path string, config LoaderConfig) (Model, error) {
 	if path == "" {
 		return nil, errors.New("loader: empty path")
 	}
-	arch := guessArchFromPath(path)
-	cfg := InferenceConfig{
-		Architecture:       arch,
-		LayerCount:         32,
-		HiddenSize:         4096,
-		NumAttentionHeads:  32,
-		NumKeyValueHeads:   8,
-		VocabSize:          32000,
-		ContextSize:        4096,
-		RopeTheta:          10000,
-	}
 	_ = config
-	return &InferenceModel{Config: cfg, Storage: WeightStorage{}, Workspace: NewWorkspace(0), KVCache: nil}, nil
+	if strings.HasSuffix(strings.ToLower(path), ".gguf") {
+		mapped, err := ggufcore.LoadMapped(path)
+		if err != nil {
+			return nil, fmt.Errorf("loader: %w", err)
+		}
+		return LoadInferenceFromGGUF(mapped)
+	}
+	if _, err := os.Stat(path); err != nil {
+		return nil, fmt.Errorf("loader: %w", err)
+	}
+	return nil, fmt.Errorf("loader: unsupported model path %q", path)
 }
 
-// LoadGGUFModelFromBytes builds an in-memory model stub.
+// LoadGGUFModelFromBytes loads a GGUF blob from memory.
 func LoadGGUFModelFromBytes(data []byte, config LoaderConfig) (Model, error) {
 	if len(data) == 0 {
 		return nil, errors.New("loader: empty bytes")
 	}
-	cfg := InferenceConfig{Architecture: ArchLlamaModel, LayerCount: 1, HiddenSize: 16, NumAttentionHeads: 1, NumKeyValueHeads: 1, VocabSize: 8, ContextSize: 64}
 	_ = config
-	return &InferenceModel{Config: cfg, Workspace: NewWorkspace(0), KVCache: nil}, nil
+	tmp, err := os.CreateTemp("", "oxidize-*.gguf")
+	if err != nil {
+		return nil, err
+	}
+	path := tmp.Name()
+	defer func() {
+		_ = tmp.Close()
+		_ = os.Remove(path)
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		return nil, err
+	}
+	return LoadGGUFModelFromPath(path, config)
 }
 
-// LoadGGUFModelFromHF is a placeholder for HF model loading.
+// LoadGGUFModelFromHF downloads a GGUF from Hugging Face and loads it.
 func LoadGGUFModelFromHF(repo, revision string, config LoaderConfig) (Model, error) {
 	if repo == "" {
 		return nil, errors.New("loader: empty HF repo")
 	}
-	return LoadGGUFModelFromPath(repo, config)
+	path, err := hf.ResolveGGUF(hf.ResolveOptions{
+		Repo:     repo,
+		Revision: revision,
+		Filename: config.HFFilename,
+		CacheDir: config.HFCacheDir,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return LoadGGUFModelFromPath(path, config)
 }
 
 // ModelType describes the on-disk format of a model.

@@ -203,17 +203,15 @@ type WeightStorage struct {
 
 // InferenceModel is the canonical inference implementation.
 type InferenceModel struct {
-	Config     InferenceConfig
-	Workspace  *Workspace
-	Storage    WeightStorage
-	KVCache    *kv_cache.Cache
-	// Loaded weights and projections live here in a real build; this
-	// Go port is a structural port that returns placeholder logits.
-	hiddenActivations []float32
+	Config    InferenceConfig
+	Workspace *Workspace
+	Storage   WeightStorage
+	KVCache   *kv_cache.Cache
+	Stack     *LlamaDecoderStack
 }
 
-// NewInferenceModel constructs a placeholder InferenceModel.
-func NewInferenceModel(config InferenceConfig, storage WeightStorage) *InferenceModel {
+// NewInferenceModel constructs an InferenceModel with optional loaded weights.
+func NewInferenceModel(config InferenceConfig, storage WeightStorage, stack *LlamaDecoderStack) *InferenceModel {
 	cfg := kv_cache.Config{
 		LayerCount:   config.LayerCount,
 		ContextSize:  config.ContextSize,
@@ -228,22 +226,52 @@ func NewInferenceModel(config InferenceConfig, storage WeightStorage) *Inference
 		Workspace: NewWorkspace(config.HiddenSize * 4),
 		Storage:   storage,
 		KVCache:   kv_cache.NewCache(cfg),
+		Stack:     stack,
 	}
 }
 
-// Forward returns a placeholder zero-logits vector. A real implementation
-// would walk the layers, apply RoPE, attention, FFN, and the final norm.
-func (m *InferenceModel) Forward(tokens []Token, _ *Session) (Logits, error) {
+// Forward runs prefill or single-token decode and returns logits for the last token.
+func (m *InferenceModel) Forward(tokens []Token, session *Session) (Logits, error) {
 	if len(tokens) == 0 {
 		return nil, EmptyInputError
 	}
-	if m.Config.ContextSize > 0 && len(tokens) > m.Config.ContextSize {
+	requested := session.ConsumedTokens() + len(tokens)
+	if m.Config.ContextSize > 0 && requested > m.Config.ContextSize {
 		return nil, &ContextExceededError{
 			ContextSize:          m.Config.ContextSize,
-			RequestedTotalTokens: len(tokens),
+			RequestedTotalTokens: requested,
 		}
 	}
-	return make(Logits, m.Config.VocabSize), nil
+	if m.Stack == nil || !m.Stack.Loaded() {
+		return make(Logits, m.Config.VocabSize), nil
+	}
+
+	startPos := session.ConsumedTokens()
+	if m.Stack.PositionOffset != startPos {
+		m.Stack.ResetCache()
+		m.Stack.PositionOffset = startPos
+	}
+
+	var hidden []float32
+	var err error
+	if len(tokens) > 1 {
+		batch := make([]uint32, len(tokens))
+		for i, t := range tokens {
+			batch[i] = uint32(t)
+		}
+		hidden, err = m.Stack.ForwardBatch(batch)
+	} else {
+		hidden, err = m.Stack.ForwardToken(uint32(tokens[0]))
+	}
+	if err != nil {
+		return nil, NewErrorf("%v", err)
+	}
+	logits, err := m.Stack.Logits(hidden)
+	if err != nil {
+		return nil, NewErrorf("%v", err)
+	}
+	session.RecordTokens(len(tokens))
+	return logits, nil
 }
 
 // VocabSize returns the configured vocabulary size.
@@ -255,10 +283,18 @@ func (m *InferenceModel) ContextSize() int { return m.Config.ContextSize }
 // LayerCount returns the configured layer count.
 func (m *InferenceModel) LayerCount() int { return m.Config.LayerCount }
 
-// RewindTo advances the KV cache back to a previous token count.
+// RewindTo resets the decoder KV cache to a previous token count.
 func (m *InferenceModel) RewindTo(_ *Session, n int) {
-	m.KVCache = kv_cache.NewCache(m.KVCache.Config())
-	_ = n
+	if n < 0 {
+		n = 0
+	}
+	if m.Stack != nil {
+		m.Stack.ResetCache()
+		m.Stack.PositionOffset = n
+	}
+	if m.KVCache != nil {
+		m.KVCache = kv_cache.NewCache(m.KVCache.Config())
+	}
 }
 
 // String returns a description of the model.
