@@ -10,7 +10,7 @@ type SpeculativeConfig struct {
 	DraftTokensPerStep int
 	MaxNewTokens       int
 	Sampling           SamplingConfig
-	StopToken          Token
+	StopToken          *Token
 	StrictMode         bool
 	MinAcceptanceRate  float32
 }
@@ -21,9 +21,9 @@ func DefaultSpeculativeConfig() SpeculativeConfig {
 		DraftTokensPerStep: 4,
 		MaxNewTokens:       128,
 		Sampling:           DefaultSamplingConfig(),
-		StopToken:          2,
+		StopToken:          nil,
 		StrictMode:         false,
-		MinAcceptanceRate:  0.5,
+		MinAcceptanceRate:  0.3,
 	}
 }
 
@@ -46,9 +46,15 @@ func Aggressive() SpeculativeConfig {
 
 // SpeculativeStats mirrors SpeculativeStats.
 type SpeculativeStats struct {
-	Accepted int
-	Rejected int
-	Total    int
+	TotalDraftTokens     int
+	TotalAcceptedTokens  int
+	TotalRejectedTokens  int
+	DraftForwardPasses   int
+	TargetForwardPasses  int
+	FallbackTokens       int
+	Accepted             int
+	Rejected             int
+	Total                int
 }
 
 // AcceptanceRate returns the ratio of accepted drafts to total.
