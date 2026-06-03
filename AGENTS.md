@@ -1,41 +1,48 @@
 # PROJECT KNOWLEDGE BASE
 
-**Generated:** 2026-05-26
-**Commit:** d9fb076
-**Branch:** master
+**Generated:** 2026-06-03
+**Commit:** d9fb076 (master)
+**Workspace:** Local-first LLM inference in Rust with Go and Python ports
 
 ## OVERVIEW
-Local-first LLM inference workspace in Rust. Core compute (`oxidize-core`) with CLI, server, Python bindings, and quantization utility frontends.
+This workspace contains the core Rust LLM inference engine (`oxidize-core`) and multiple frontends/bindings (CLI, server, Python bindings), plus parallel language ports in Go and pure Python for cross-platform deployment.
 
 ## STRUCTURE
 ```
 .
-├── oxidize-core/     # GGUF parsing, tensors, quantization, generation, backends
-│   ├── src/backends/ # CUDA, Metal, Vulkan, MLX, WASM, WebGPU
-│   ├── src/compute/  # Tensor ops, KV cache, flash attention, quantization
-│   ├── src/format/   # GGUF, SafeTensors, tokenizer
-│   ├── src/mesh/     # Distributed inference (submodule hierarchy)
-│   ├── src/model/    # Inference engine, sampling, DFlash speculative decoding
-│   ├── src/paged_attention/ # vLLM-style paging scheduler
-│   └── src/vision/   # Vision encoder / multimodal
-├── oxidize-cli/      # Prompt/chat CLI, profiling, pipeline modes
-├── oxidize-server/   # OpenAI-compatible HTTP API (axum)
-├── oxidize-quantize/ # Offline weight conversion
-├── oxidize-py/       # Python bindings (pyo3 + maturin)
-├── oxidize-train/    # CSV classifier training
-└── scripts/          # CI benchmark regression + dashboard
+├── oxidize-core/      # Rust core: GGUF, tensors, quantization, generation, backends
+│   ├── src/backends/  # CUDA, Metal, Vulkan, MLX, WebGPU (see backends/AGENTS.md)
+│   ├── src/compute/   # Tensor ops, KV cache, flash attention, quantization (see compute/AGENTS.md)
+│   ├── src/format/    # GGUF, SafeTensors, tokenizer (see format/AGENTS.md)
+│   ├── src/mesh/      # Distributed inference (see mesh/AGENTS.md)
+│   ├── src/model/     # Inference engine, sampling, DFlash (see model/AGENTS.md)
+│   ├── src/paged_attention/ # vLLM-style paging scheduler (see paged_attention/AGENTS.md)
+│   └── src/vision/    # Vision encoder / multimodal
+├── oxidize-cli/       # Prompt/chat CLI, profiling, pipeline modes (see AGENTS.md)
+├── oxidize-server/    # OpenAI-compatible HTTP API (axum) (see src/AGENTS.md)
+├── oxidize-quantize/  # Offline weight conversion (see AGENTS.md)
+├── oxidize-py/        # Python bindings (pyo3 + maturin) (see AGENTS.md)
+├── oxidize-train/     # CSV classifier training
+├── oxidize-golang/    # Go port of oxidize-core (see AGENTS.md)
+├── oxidize-python/    # Pure-Python port (see AGENTS.md)
+└── scripts/           # CI benchmark regression + dashboard
 ```
 
-## WHERE TO LOOK
-| Task | Location | Notes |
-|------|----------|-------|
-| Add model architecture | `oxidize-core/src/model/inference.rs` | Extend `ModelArchitecture` enum |
-| Add backend | `oxidize-core/src/backends/` | Implement `ComputeBackend` trait, add `XxxBuildInfo` |
-| Add quantization type | `oxidize-core/src/compute/quantization.rs` | Also update `GgufQuantizationType` in `format/gguf.rs` |
-| Tokenizer change | `oxidize-core/src/format/tokenizer.rs` | 4 formats: SP, WordPiece, BPE, Tiktoken |
-| Server route | `oxidize-server/src/routes/` | OpenAI-compatible endpoints |
-| CLI subcommand | `oxidize-cli/src/main.rs` | Also check `src/bin/` for aux tools |
-| Distributed logic | `oxidize-core/src/mesh/` | Only dir with real `mod.rs` + privacy boundaries |
+## SUBDIRECTORY AGENTS.md MAP
+| Directory | File | Domain |
+|-----------|------|--------|
+| `oxidize-core/src/compute/` | `compute/AGENTS.md` | CPU tensor ops, quantization, KV cache, flash attention |
+| `oxidize-core/src/model/` | `model/AGENTS.md` | Inference engine, model loading, speculative decoding |
+| `oxidize-core/src/mesh/` | `mesh/AGENTS.md` | Distributed inference (libp2p mesh) |
+| `oxidize-core/src/backends/` | `backends/AGENTS.md` | Hardware compute backends |
+| `oxidize-core/src/format/` | `format/AGENTS.md` | GGUF, SafeTensors, tokenizer |
+| `oxidize-core/src/paged_attention/` | `paged_attention/AGENTS.md` | vLLM-style PagedAttention scheduler |
+| `oxidize-server/src/` | `src/AGENTS.md` | OpenAI-compatible HTTP API (Axum) |
+| `oxidize-cli/` | `AGENTS.md` | CLI for prompt/chat, benchmarking |
+| `oxidize-quantize/` | `AGENTS.md` | Offline weight quantization utility |
+| `oxidize-py/` | `AGENTS.md` | PyO3 Python bindings |
+| `oxidize-golang/` | `AGENTS.md` | Go port of oxidize-core |
+| `oxidize-python/` | `AGENTS.md` | Pure-Python port |
 
 ## CODE MAP
 
@@ -47,6 +54,19 @@ Local-first LLM inference workspace in Rust. Core compute (`oxidize-core`) with 
 | `tensor.rs` | module | `oxidize-core/src/compute/` | 5,153 lines; 135 unsafe blocks; SIMD kernels |
 | `scheduler.rs` | module | `oxidize-core/src/paged_attention/` | vLLM-style request scheduling |
 | `app.rs` | module | `oxidize-server/src/` | Axum route assembly |
+
+## WHERE TO LOOK (High-Level)
+| Task | Location | Notes |
+|------|----------|-------|
+| Add model architecture | `oxidize-core/src/model/inference.rs` | Extend `ModelArchitecture` enum |
+| Add backend | `oxidize-core/src/backends/` | Implement `ComputeBackend` trait, add `XxxBuildInfo` |
+| Add quantization type | `oxidize-core/src/compute/quantization.rs` | Also update `GgufQuantizationType` in `format/gguf.rs` |
+| Tokenizer change | `oxidize-core/src/format/tokenizer.rs` | 4 formats: SP, WordPiece, BPE, Tiktoken |
+| Server route | `oxidize-server/src/routes/` | OpenAI-compatible endpoints |
+| CLI subcommand | `oxidize-cli/src/main.rs` | Also check `src/bin/` for aux tools |
+| Distributed logic | `oxidize-core/src/mesh/` | Only dir with real `mod.rs` + privacy boundaries |
+| Port to Go | `oxidize-golang/` | Mirror Rust structure; see `oxidize-golang/AGENTS.md` |
+| Port to Python | `oxidize-python/` | Mirror Go structure; see `oxidize-python/AGENTS.md` |
 
 ## CONVENTIONS
 - **Flat module system**: `lib.rs` uses `#[path = "..."]` to flatten all modules into crate root. Only `mesh/`, `paged_attention/`, `vision/` have real `mod.rs` files.
@@ -92,10 +112,9 @@ make wasm     # outputs to dist/wasm
 - `.cargo/config.toml` sets custom linker for `aarch64-unknown-linux-gnu` and WASM runner.
 - `oxidize-core/fuzz/` exists but is NOT in workspace members/exclude.
 - `models/` is gitignored but contains tracked files.
-- GGUF/SafeTensors draft-model loading + speculative generation (DFlash) is active development area.
+- GGUF/SafeTensors draft-model loading + speculative generation summarizing is active development area.
 
 ## Learned User Preferences
-
 - When adding `oxidize-python` or expanding `oxidize-golang`, keep all Rust crates and features; do not delete or replace the Rust workspace.
 - Parallel language ports should reach feature parity with `oxidize-core` (user asked for every Rust feature in Python/Go, with Python targeting similar CLOC to Rust).
 - Keep `oxidize-py` (PyO3/maturin bindings) alongside the pure-Python `oxidize-python` package.
@@ -103,7 +122,6 @@ make wasm     # outputs to dist/wasm
 - On feature branches, stage and commit only files related to the task; exclude unrelated workspace changes.
 
 ## Learned Workspace Facts
-
 - `oxidize-golang/` is the active Go port of `oxidize-core` (e.g. branch `go/initial-oxidize-port`, PR review/fix cycles).
 - `oxidize-python/` is a pure-Python implementation (`oxidize_python` package, `pyproject.toml`, uv/pytest); initial layout mirrors `oxidize-golang`, then expands toward Rust-scale modules (e.g. `compute/tensor.rs`).
 - Do not modify Rust crates when extending `oxidize-python`; port from `oxidize-golang` or Rust sources.
