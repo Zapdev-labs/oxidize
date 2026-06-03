@@ -84,6 +84,90 @@ impl RealtimeSession {
     }
 }
 
+/// A rendered chat message ready for `render_chat_prompt`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RenderedMessage {
+    pub role: String,
+    pub content: String,
+}
+
+/// A successfully parsed tool call extracted from generated text.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParsedToolCall {
+    pub name: String,
+    pub arguments: String,
+}
+
+const TOOL_CALL_FENCE_OPEN: &str = "```tool_call";
+const TOOL_CALL_FENCE_CLOSE: &str = "```";
+
+impl RealtimeSession {
+    /// Render the transcript into chat messages, injecting a system message that
+    /// combines user instructions with a tool-call preamble (when tools exist).
+    pub fn build_messages(&self) -> Vec<RenderedMessage> {
+        let mut messages = Vec::new();
+        let mut system = self.config.instructions.clone().unwrap_or_default();
+        if !self.config.tools.is_empty() {
+            if !system.is_empty() {
+                system.push_str("\n\n");
+            }
+            system.push_str(&tool_preamble(&self.config.tools));
+        }
+        if !system.is_empty() {
+            messages.push(RenderedMessage {
+                role: "system".to_owned(),
+                content: system,
+            });
+        }
+        for item in &self.items {
+            match item {
+                ConversationItem::Message { role, text } => messages.push(RenderedMessage {
+                    role: role.clone(),
+                    content: text.clone(),
+                }),
+                ConversationItem::FunctionCallOutput { call_id, output } => {
+                    messages.push(RenderedMessage {
+                        role: "tool".to_owned(),
+                        content: format!("[tool result for {call_id}]: {output}"),
+                    });
+                }
+            }
+        }
+        messages
+    }
+}
+
+fn tool_preamble(tools: &[RealtimeTool]) -> String {
+    let schemas = serde_json::to_string_pretty(tools).unwrap_or_else(|_| "[]".to_owned());
+    format!(
+        "You can call the following tools. When you decide to call a tool, emit \
+         EXACTLY one fenced block and nothing else:\n\
+         ```tool_call\n{{\"name\": \"<tool name>\", \"arguments\": {{ ... }}}}\n```\n\
+         Available tools (JSON schemas):\n{schemas}"
+    )
+}
+
+/// Scan generated text for a `tool_call` fenced block. Returns the call on hit.
+pub fn parse_tool_call(text: &str) -> Option<ParsedToolCall> {
+    let start = text.find(TOOL_CALL_FENCE_OPEN)? + TOOL_CALL_FENCE_OPEN.len();
+    let rest = &text[start..];
+    let end = rest.find(TOOL_CALL_FENCE_CLOSE)?;
+    let body = rest[..end].trim();
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    let name = value.get("name")?.as_str()?.to_owned();
+    let arguments = value
+        .get("arguments")
+        .map(|args| {
+            if args.is_string() {
+                args.as_str().unwrap_or_default().to_owned()
+            } else {
+                args.to_string()
+            }
+        })
+        .unwrap_or_else(|| "{}".to_owned());
+    Some(ParsedToolCall { name, arguments })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -140,5 +224,42 @@ mod tests {
         });
         assert!(!ok);
         assert!(session.items.is_empty());
+    }
+
+    #[test]
+    fn build_prompt_includes_tool_preamble_when_tools_present() {
+        let mut session = RealtimeSession::new();
+        session.config.instructions = Some("be helpful".to_owned());
+        session.config.tools = vec![RealtimeTool {
+            tool_type: "function".to_owned(),
+            name: "get_weather".to_owned(),
+            description: Some("Get weather".to_owned()),
+            parameters: Some(serde_json::json!({"type": "object"})),
+        }];
+        session.items.push(ConversationItem::Message {
+            role: "user".to_owned(),
+            text: "weather?".to_owned(),
+        });
+        let messages = session.build_messages();
+        let system = &messages[0];
+        assert_eq!(system.role, "system");
+        assert!(system.content.contains("be helpful"));
+        assert!(system.content.contains("get_weather"));
+        assert!(system.content.contains("tool_call"));
+        // user turn preserved
+        assert!(messages.iter().any(|m| m.role == "user" && m.content == "weather?"));
+    }
+
+    #[test]
+    fn parse_tool_call_hit() {
+        let text = "sure\n```tool_call\n{\"name\":\"get_weather\",\"arguments\":{\"city\":\"SF\"}}\n```";
+        let parsed = parse_tool_call(text).expect("should parse");
+        assert_eq!(parsed.name, "get_weather");
+        assert_eq!(parsed.arguments, "{\"city\":\"SF\"}");
+    }
+
+    #[test]
+    fn parse_tool_call_miss_returns_none() {
+        assert!(parse_tool_call("just plain text").is_none());
     }
 }
