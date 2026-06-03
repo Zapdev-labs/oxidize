@@ -93,3 +93,20 @@ make wasm     # outputs to dist/wasm
 - `oxidize-core/fuzz/` exists but is NOT in workspace members/exclude.
 - `models/` is gitignored but contains tracked files.
 - GGUF/SafeTensors draft-model loading + speculative generation (DFlash) is active development area.
+
+## Learned User Preferences
+
+- When adding `oxidize-python` or expanding `oxidize-golang`, keep all Rust crates and features; do not delete or replace the Rust workspace.
+- Parallel language ports should reach feature parity with `oxidize-core` (user asked for every Rust feature in Python/Go, with Python targeting similar CLOC to Rust).
+- Keep `oxidize-py` (PyO3/maturin bindings) alongside the pure-Python `oxidize-python` package.
+- When syncing ports, bring new `master` Rust features into `oxidize-golang` (and follow-on Python work) rather than leaving ports stale.
+- On feature branches, stage and commit only files related to the task; exclude unrelated workspace changes.
+
+## Learned Workspace Facts
+
+- `oxidize-golang/` is the active Go port of `oxidize-core` (e.g. branch `go/initial-oxidize-port`, PR review/fix cycles).
+- `oxidize-python/` is a pure-Python implementation (`oxidize_python` package, `pyproject.toml`, uv/pytest); initial layout mirrors `oxidize-golang`, then expands toward Rust-scale modules (e.g. `compute/tensor.rs`).
+- Do not modify Rust crates when extending `oxidize-python`; port from `oxidize-golang` or Rust sources.
+- `oxidize-py/` is the PyO3 bindings crate, separate from `oxidize-python`.
+- Go and Python port tests reuse GGUF fixtures under `oxidize-core/tests/fixtures/` (e.g. `valid-v3.gguf`).
+- DFlash speculative decoding in `oxidize-core/src/model/dflash.rs` is an active port target for `oxidize-golang` (and downstream Python).
