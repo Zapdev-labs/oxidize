@@ -1227,18 +1227,33 @@ pub fn dequantize_q6_k_scalar(input: &[u8], output: &mut [f32]) -> Result<(), Qu
         let ql = &block[0..128];
         let qh = &block[128..192];
         let sc = unsafe { std::slice::from_raw_parts(block[192..208].as_ptr() as *const i8, 16) };
+        // QK_K=256 values are processed in two 128-element groups. Each group
+        // advances into ql/qh/scales (ql+=64, qh+=32, scales+=8), matching the
+        // reference dequantize_row_q6_K. Without these per-group offsets the
+        // second half of every block is decoded from the first half's data.
         let mut q_ptr = 0;
-        for _ in 0..2 {
+        for group in 0..2 {
+            let ql_off = group * 64;
+            let qh_off = group * 32;
+            let sc_off = group * 8;
             for l in 0..32 {
                 let is = l / 16;
-                let q1 = ((ql[l] & 0xF) as i32 | (((qh[l] & 3) as i32) << 4)) - 32;
-                let q2 = ((ql[l + 32] & 0xF) as i32 | ((((qh[l] >> 2) & 3) as i32) << 4)) - 32;
-                let q3 = ((ql[l] >> 4) as i32 | ((((qh[l] >> 4) & 3) as i32) << 4)) - 32;
-                let q4 = ((ql[l + 32] >> 4) as i32 | ((((qh[l] >> 6) & 3) as i32) << 4)) - 32;
-                out[q_ptr + l] = d * sc[is] as f32 * q1 as f32;
-                out[q_ptr + 32 + l] = d * sc[is + 2] as f32 * q2 as f32;
-                out[q_ptr + 64 + l] = d * sc[is + 4] as f32 * q3 as f32;
-                out[q_ptr + 96 + l] = d * sc[is + 6] as f32 * q4 as f32;
+                let q1 = ((ql[ql_off + l] & 0xF) as i32
+                    | (((qh[qh_off + l] & 3) as i32) << 4))
+                    - 32;
+                let q2 = ((ql[ql_off + l + 32] & 0xF) as i32
+                    | ((((qh[qh_off + l] >> 2) & 3) as i32) << 4))
+                    - 32;
+                let q3 = ((ql[ql_off + l] >> 4) as i32
+                    | ((((qh[qh_off + l] >> 4) & 3) as i32) << 4))
+                    - 32;
+                let q4 = ((ql[ql_off + l + 32] >> 4) as i32
+                    | ((((qh[qh_off + l] >> 6) & 3) as i32) << 4))
+                    - 32;
+                out[q_ptr + l] = d * sc[sc_off + is] as f32 * q1 as f32;
+                out[q_ptr + 32 + l] = d * sc[sc_off + is + 2] as f32 * q2 as f32;
+                out[q_ptr + 64 + l] = d * sc[sc_off + is + 4] as f32 * q3 as f32;
+                out[q_ptr + 96 + l] = d * sc[sc_off + is + 6] as f32 * q4 as f32;
             }
             q_ptr += 128;
         }
@@ -1602,6 +1617,39 @@ pub fn dequantize_iq1_m_scalar(input: &[u8], output: &mut [f32]) -> Result<(), Q
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn q6_k_dequant_decodes_both_128_groups_independently() {
+        // Regression: the second 128-element group of a Q6_K block must advance
+        // into ql/qh/scales (ql+=64, qh+=32, scales+=8). With all quant nibbles
+        // zero, every value decodes to (0 - 32) = -32 scaled by its group's
+        // scale. Distinct scales per group expose a missing-offset bug where the
+        // tail of every block is decoded from the head's scales.
+        let mut block = vec![0u8; BLOCK_Q6_K_SIZE];
+        // scales: bytes 192..208 (16× int8). Group 0 -> 1, group 1 -> 2.
+        for s in block.iter_mut().take(208).skip(192).take(8) {
+            *s = 1;
+        }
+        for s in block.iter_mut().take(208).skip(200) {
+            *s = 2;
+        }
+        // super-block scale d (f16) at 208..210 = 1.0.
+        block[208..210].copy_from_slice(&half_to_le_bytes_one());
+
+        let mut out = vec![0.0_f32; QK_K];
+        dequantize_q6_k_scalar(&block, &mut out).expect("q6_k dequant succeeds");
+
+        // First 128 use group-0 scale (1): -32. Last 128 use group-1 scale (2): -64.
+        assert!((out[0] - (-32.0)).abs() < 1e-3, "head: {}", out[0]);
+        assert!((out[127] - (-32.0)).abs() < 1e-3, "head end: {}", out[127]);
+        assert!((out[128] - (-64.0)).abs() < 1e-3, "tail: {}", out[128]);
+        assert!((out[255] - (-64.0)).abs() < 1e-3, "tail end: {}", out[255]);
+    }
+
+    /// Little-endian IEEE half-precision bytes for 1.0 (0x3C00).
+    fn half_to_le_bytes_one() -> [u8; 2] {
+        [0x00, 0x3C]
+    }
 
     #[test]
     fn dequantizes_f32_scalar_values() {

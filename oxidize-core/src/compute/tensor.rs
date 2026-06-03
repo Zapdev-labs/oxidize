@@ -1143,6 +1143,117 @@ fn gemm_k_quant_block(
     Ok(())
 }
 
+/// Batched expert GEMV over a set of selected experts for one projection.
+///
+/// `matrix` holds `n_experts` contiguous row-major `[rows, cols]` expert weight
+/// blocks. For each selected expert `selected[slot]` this writes
+/// `output[slot*rows + r] = W_expert[r] · input_slot`. `input_stride == 0` means
+/// every expert shares `inputs[..cols]` (gate / up projections); otherwise expert
+/// `slot` uses `inputs[slot*input_stride .. slot*input_stride + cols]` (down
+/// projection, where each expert has its own activation).
+///
+/// The whole thing runs as a single parallel region over all `(slot, row)` pairs,
+/// which avoids the per-expert, per-projection rayon dispatch overhead that
+/// dominates MoE decode (12 separate parallel calls per layer otherwise).
+pub fn gemv_quantized_experts_f32(
+    quantization: GgufQuantizationType,
+    matrix: &[u8],
+    n_experts: usize,
+    selected: &[usize],
+    rows: usize,
+    cols: usize,
+    inputs: &[f32],
+    input_stride: usize,
+    output: &mut [f32],
+) -> Result<(), GemvError> {
+    let n_sel = selected.len();
+    if output.len() != n_sel * rows {
+        return Err(GemvError::InvalidOutputLength {
+            expected: n_sel * rows,
+            actual: output.len(),
+        });
+    }
+    if n_experts == 0 || matrix.is_empty() {
+        return Err(GemvError::InvalidMatrixLength {
+            expected: 1,
+            actual: matrix.len(),
+        });
+    }
+    let expert_bytes = matrix.len() / n_experts;
+    let row_bytes = expert_bytes / rows.max(1);
+    let shared = input_stride == 0;
+    let input_for = |slot: usize| -> &[f32] {
+        let base = if shared { 0 } else { slot * input_stride };
+        &inputs[base..base + cols]
+    };
+
+    // Fast path: Q4_K × Q8_K AVX2. Quantize each distinct input to Q8_K once.
+    if matches!(
+        quantization,
+        GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M
+    ) && cols.is_multiple_of(QK_K)
+        && q4_k_q8_k_avx2_available()
+    {
+        let blocks_per_row = cols / QK_K;
+        let q8_stride = blocks_per_row * BLOCK_Q8_K_BYTES;
+        let n_inputs = if shared { 1 } else { n_sel };
+        let mut q8k = vec![0_u8; n_inputs * q8_stride];
+        for s in 0..n_inputs {
+            quantize_vector_q8_k_into(
+                input_for(s),
+                blocks_per_row,
+                &mut q8k[s * q8_stride..(s + 1) * q8_stride],
+            );
+        }
+        output.par_iter_mut().enumerate().for_each(|(i, out)| {
+            let slot = i / rows;
+            let row = i % rows;
+            let expert = selected[slot];
+            let row_start = expert * expert_bytes + row * row_bytes;
+            let rowb = &matrix[row_start..row_start + row_bytes];
+            let qs = if shared { 0 } else { slot };
+            let q8 = &q8k[qs * q8_stride..(qs + 1) * q8_stride];
+            // Safety: q4_k_q8_k_avx2_available() checked above.
+            *out = unsafe { q4_k_q8_k_row_dot_avx2(rowb, blocks_per_row, q8) };
+        });
+        return Ok(());
+    }
+
+    // Fast path: Q6_K AVX2 (F32 input).
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    if matches!(quantization, GgufQuantizationType::Q6_K)
+        && cols.is_multiple_of(QK_K)
+        && is_x86_feature_detected!("avx2")
+        && is_x86_feature_detected!("fma")
+    {
+        let blocks_per_row = cols / QK_K;
+        output.par_iter_mut().enumerate().for_each(|(i, out)| {
+            let slot = i / rows;
+            let row = i % rows;
+            let expert = selected[slot];
+            let row_start = expert * expert_bytes + row * row_bytes;
+            let rowb = &matrix[row_start..row_start + row_bytes];
+            // Safety: avx2+fma checked above.
+            *out = unsafe { q6_k_row_dot_avx2(rowb, blocks_per_row, input_for(slot)) };
+        });
+        return Ok(());
+    }
+
+    // Generic fallback: one parallel gemv per expert.
+    for (slot, &expert) in selected.iter().enumerate() {
+        let start = expert * expert_bytes;
+        gemv_quantized_f32(
+            quantization,
+            &matrix[start..start + expert_bytes],
+            rows,
+            cols,
+            input_for(slot),
+            &mut output[slot * rows..(slot + 1) * rows],
+        )?;
+    }
+    Ok(())
+}
+
 pub fn gemv_quantized_f32(
     quantization: GgufQuantizationType,
     quantized_matrix: &[u8],
@@ -4501,6 +4612,82 @@ impl Tensor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn batched_expert_gemv_matches_per_expert_q4_k() {
+        use crate::quantization::{quantize_scalar, quantized_size};
+        let (n_experts, rows, cols) = (3usize, 4usize, 256usize);
+        let total = n_experts * rows * cols;
+        let mut bytes = vec![0u8; total * 4];
+        for i in 0..total {
+            let v = (((i * 31 + 7) % 101) as f32) / 50.0 - 1.0; // spread across [-1, 1]
+            bytes[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
+        }
+        let q_size = quantized_size(GgufQuantizationType::Q4_K_M, total).unwrap();
+        let mut q = vec![0u8; q_size];
+        quantize_scalar(
+            GgufQuantizationType::F32,
+            GgufQuantizationType::Q4_K_M,
+            &bytes,
+            &mut q,
+        )
+        .unwrap();
+        let expert_bytes = q.len() / n_experts;
+        let selected = [2usize, 0usize];
+
+        // Shared input (gate/up): input_stride = 0.
+        let input: Vec<f32> =
+            (0..cols).map(|i| (((i * 17 + 3) % 97) as f32) / 48.0 - 1.0).collect();
+        let mut batched = vec![0.0f32; selected.len() * rows];
+        gemv_quantized_experts_f32(
+            GgufQuantizationType::Q4_K_M, &q, n_experts, &selected, rows, cols, &input, 0,
+            &mut batched,
+        )
+        .unwrap();
+        for (slot, &e) in selected.iter().enumerate() {
+            let mut want = vec![0.0f32; rows];
+            gemv_quantized_f32(
+                GgufQuantizationType::Q4_K_M,
+                &q[e * expert_bytes..(e + 1) * expert_bytes],
+                rows, cols, &input, &mut want,
+            )
+            .unwrap();
+            for r in 0..rows {
+                assert!(
+                    (batched[slot * rows + r] - want[r]).abs() < 1e-4,
+                    "shared slot {slot} e {e} row {r}: batched={} want={}",
+                    batched[slot * rows + r],
+                    want[r]
+                );
+            }
+        }
+
+        // Per-expert input (down): input_stride = cols.
+        let mut inputs = vec![0.0f32; selected.len() * cols];
+        for s in 0..selected.len() {
+            for i in 0..cols {
+                inputs[s * cols + i] = (((i * 23 + s * 5 + 1) % 89) as f32) / 44.0 - 1.0;
+            }
+        }
+        let mut batched2 = vec![0.0f32; selected.len() * rows];
+        gemv_quantized_experts_f32(
+            GgufQuantizationType::Q4_K_M, &q, n_experts, &selected, rows, cols, &inputs, cols,
+            &mut batched2,
+        )
+        .unwrap();
+        for (slot, &e) in selected.iter().enumerate() {
+            let mut want = vec![0.0f32; rows];
+            gemv_quantized_f32(
+                GgufQuantizationType::Q4_K_M,
+                &q[e * expert_bytes..(e + 1) * expert_bytes],
+                rows, cols, &inputs[slot * cols..(slot + 1) * cols], &mut want,
+            )
+            .unwrap();
+            for r in 0..rows {
+                assert!((batched2[slot * rows + r] - want[r]).abs() < 1e-4);
+            }
+        }
+    }
 
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     #[test]
