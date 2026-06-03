@@ -26,6 +26,7 @@ use crate::routes::{
     mesh::mesh_chat_completions_handler,
     models::models,
 };
+use crate::realtime::realtime_handler;
 use crate::runtime::model::ModelRuntime;
 use crate::runtime::paged::PagedModelRuntime;
 
@@ -58,6 +59,7 @@ pub fn build_app_with_state(state: AppState) -> Router {
             "/v1/mesh/chat/completions",
             post(mesh_chat_completions_handler),
         )
+        .route("/v1/realtime", get(realtime_handler))
         .layer(DefaultBodyLimit::max(MAX_BODY_SIZE_BYTES))
         .layer(middleware::from_fn_with_state(
             state.clone(),
