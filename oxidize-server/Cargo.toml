@@ -13,7 +13,7 @@ name = "oxidize-server"
 path = "src/main.rs"
 
 [dependencies]
-axum.workspace = true
+axum = { workspace = true, features = ["ws"] }
 clap.workspace = true
 oxidize-core = { path = "../oxidize-core" }
 serde.workspace = true
@@ -30,3 +30,5 @@ chrono = "0.4.44"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
