@@ -5,9 +5,11 @@
 package tokenizer
 
 import (
-	"errors"
 	"fmt"
+	"os"
 	"strings"
+
+	"github.com/Zapdev-labs/oxidize/golang/internal/gguf"
 )
 
 // Error mirrors TokenizerError.
@@ -268,9 +270,19 @@ func HealTokens(tok Tokenizer, tokens []uint32) []uint32 {
 // LoadFromGGUFFile loads a tokenizer from a GGUF file's metadata. Mirrors
 // load_tokenizer_from_gguf_file.
 func LoadFromGGUFFile(path string) (Tokenizer, error) {
-	// Implementation reads metadata; for simplicity we accept that the
-	// caller has already loaded the file and pass via LoadFromGGUFMetadata.
-	return nil, errors.New("load from file is provided by the integration layer; use FromGGUFMetadata with parsed metadata")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	file, err := gguf.Parse(raw)
+	if err != nil {
+		return nil, err
+	}
+	meta := make(map[string]string, len(file.Metadata))
+	for key, value := range file.Metadata {
+		meta[key] = value.String
+	}
+	return FromGGUFMetadata(meta)
 }
 
 // ProcessChatTemplate mirrors process_chat_template. It implements a small

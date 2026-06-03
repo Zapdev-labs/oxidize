@@ -52,7 +52,14 @@ func ImplementedCpuKernels() []cpu_kernels.Kernel { return cpu_kernels.Implement
 func ImplementedLoraFeatures() []string { return []string{"alpha-scaling", "merge-strategies", "rank-budget"} }
 
 // ImplementedDFlashFeatures lists the DFlash draft-model features available.
-func ImplementedDFlashFeatures() []string { return []string{"draft-generation", "verification", "stats"} }
+func ImplementedDFlashFeatures() []string {
+	features := model.ImplementedDFlashFeatures()
+	out := make([]string, len(features))
+	for i, f := range features {
+		out[i] = string(f)
+	}
+	return out
+}
 
 // Re-exports for terse top-level access.
 type (

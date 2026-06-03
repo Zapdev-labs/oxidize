@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -47,12 +48,23 @@ func TestRunCommandRejectsMissingModel(t *testing.T) {
 	}
 }
 
+func TestHelpCommand(t *testing.T) {
+	var stdout bytes.Buffer
+	if err := Run(context.Background(), []string{"help"}, &stdout, &bytes.Buffer{}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "serve") {
+		t.Fatal("expected serve in help output")
+	}
+}
+
 func TestServeCommandHonorsContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	time.AfterFunc(150*time.Millisecond, cancel)
 
-	err := Run(ctx, []string{"serve", "--host", "127.0.0.1", "--port", "0"}, &bytes.Buffer{}, &bytes.Buffer{})
+	dir := t.TempDir()
+	err := Run(ctx, []string{"serve", "--host", "127.0.0.1", "--port", "0", "--models-dir", dir}, &bytes.Buffer{}, &bytes.Buffer{})
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}

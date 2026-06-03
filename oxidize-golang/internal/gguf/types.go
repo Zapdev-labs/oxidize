@@ -56,3 +56,15 @@ func (v MetadataValue) AsUint64() (uint64, bool) {
 	}
 	return 0, false
 }
+
+func (v MetadataValue) AsFloat32() (float32, bool) {
+	switch v.Type {
+	case MetadataFloat32, MetadataFloat64:
+		return float32(v.Float64), true
+	default:
+		if n, ok := v.AsUint64(); ok {
+			return float32(n), true
+		}
+	}
+	return 0, false
+}
