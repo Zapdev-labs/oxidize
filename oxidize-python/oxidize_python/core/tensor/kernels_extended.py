@@ -113,9 +113,7 @@ def flash_attention_prefill_f32(
     scale: float,
     output: list[float],
 ) -> None:
-    scaled_dot_product_attention_f32(
-        query, key, value, num_heads, head_dim, seq_len, scale, output
-    )
+    scaled_dot_product_attention_f32(query, key, value, num_heads, head_dim, seq_len, scale, output)
 
 
 def flash_attention_decode_f32(

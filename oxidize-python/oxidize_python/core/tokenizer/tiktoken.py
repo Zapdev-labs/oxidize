@@ -54,9 +54,7 @@ class TiktokenTokenizer:
             if best_idx < 0:
                 break
             parts = (
-                parts[:best_idx]
-                + [parts[best_idx] + parts[best_idx + 1]]
-                + parts[best_idx + 2 :]
+                parts[:best_idx] + [parts[best_idx] + parts[best_idx + 1]] + parts[best_idx + 2 :]
             )
         return [self._lookup(p) for p in parts]
 

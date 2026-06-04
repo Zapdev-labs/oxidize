@@ -28,9 +28,7 @@ class Matrix:
     def from_vec(cls, rows: int, cols: int, data: list[float]) -> Matrix:
         expected = rows * cols
         if len(data) != expected:
-            raise TrainingError(
-                f"invalid matrix data length: expected {expected}, got {len(data)}"
-            )
+            raise TrainingError(f"invalid matrix data length: expected {expected}, got {len(data)}")
         return cls(rows, cols, list(data))
 
 
@@ -97,9 +95,10 @@ class Linear:
             for o in range(output.cols):
                 s = self.bias[o]
                 for c in range(inputs.cols):
-                    s += inputs.data[r * inputs.cols + c] * self.weights.data[
-                        o * self.weights.cols + c
-                    ]
+                    s += (
+                        inputs.data[r * inputs.cols + c]
+                        * self.weights.data[o * self.weights.cols + c]
+                    )
                 output.data[r * output.cols + o] = s
 
     def backward(
@@ -183,7 +182,10 @@ class MlpClassifier:
 
     def predict(self, inputs: Matrix) -> list[int]:
         _, _, logits = self._forward(inputs)
-        return [_argmax(logits.data[r * self.classes : (r + 1) * self.classes]) for r in range(inputs.rows)]
+        return [
+            _argmax(logits.data[r * self.classes : (r + 1) * self.classes])
+            for r in range(inputs.rows)
+        ]
 
     def _forward(self, inputs: Matrix) -> tuple[Matrix, Matrix, Matrix]:
         hidden_pre = Matrix.zeros(inputs.rows, self.hidden_size)
@@ -309,9 +311,7 @@ def _subset_rows(matrix: Matrix, indices: list[int]) -> Matrix:
     return Matrix(len(indices), cols, data)
 
 
-def _softmax_cross_entropy(
-    logits: Matrix, labels: list[int], classes: int
-) -> tuple[float, Matrix]:
+def _softmax_cross_entropy(logits: Matrix, labels: list[int], classes: int) -> tuple[float, Matrix]:
     grad = Matrix.zeros(logits.rows, classes)
     loss = 0.0
     for r, label in enumerate(labels):

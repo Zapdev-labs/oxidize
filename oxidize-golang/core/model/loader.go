@@ -45,6 +45,12 @@ type LoaderConfig struct {
 	AllowFallback   bool
 	HFFilename      string
 	HFCacheDir      string
+	Backend         string
+	Threads         int
+	ContextSize     int
+	NGPULayers      int
+	GPUs            int
+	Parallelism     string
 }
 
 // NewLoaderConfig returns sensible defaults.
@@ -88,13 +94,17 @@ func LoadGGUFModelFromPath(path string, config LoaderConfig) (Model, error) {
 	if path == "" {
 		return nil, errors.New("loader: empty path")
 	}
-	_ = config
 	if strings.HasSuffix(strings.ToLower(path), ".gguf") {
 		mapped, err := ggufcore.LoadMapped(path)
 		if err != nil {
 			return nil, fmt.Errorf("loader: %w", err)
 		}
-		return LoadInferenceFromGGUF(mapped)
+		inference, err := LoadInferenceFromGGUF(mapped)
+		if err != nil {
+			return nil, err
+		}
+		ApplyLoaderConfig(inference, config)
+		return inference, nil
 	}
 	if _, err := os.Stat(path); err != nil {
 		return nil, fmt.Errorf("loader: %w", err)

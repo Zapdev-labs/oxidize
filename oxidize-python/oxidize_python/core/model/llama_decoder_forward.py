@@ -313,9 +313,7 @@ def logits(stack: LlamaDecoderStack, hidden: list[float]) -> Logits:
     vocab = stack.output._output_dim()
     in_dim = stack.output._input_dim()
     if len(hidden) < in_dim:
-        raise ValueError(
-            f"hidden width {len(hidden)} smaller than output input width {in_dim}"
-        )
+        raise ValueError(f"hidden width {len(hidden)} smaller than output input width {in_dim}")
     out: Logits = [0.0] * vocab
     stack.output.gemv(hidden[:in_dim], out)
     return out

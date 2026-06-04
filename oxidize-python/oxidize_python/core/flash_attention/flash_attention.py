@@ -50,7 +50,7 @@ def flash_attention_decode_f32(
     for d in range(head_dim):
         output[d] = 0.0
     m = float("-inf")
-    l = 0.0
+    norm = 0.0
     for s in range(seq_len):
         k = key_cache[s * head_dim : (s + 1) * head_dim]
         score = dot_product_f32(query[:head_dim], k) * scale
@@ -58,11 +58,11 @@ def flash_attention_decode_f32(
         alpha = math.exp(m - new_max)
         beta = math.exp(score - new_max)
         m = new_max
-        l = l * alpha + beta
+        norm = norm * alpha + beta
         v = value_cache[s * head_dim : (s + 1) * head_dim]
         for d in range(head_dim):
             output[d] = output[d] * alpha + beta * v[d]
-    inv = 1.0 / l
+    inv = 1.0 / norm
     for d in range(head_dim):
         output[d] *= inv
 
@@ -96,7 +96,7 @@ def flash_attention_decode_gqa(
     scale = 1.0 / math.sqrt(head_dim)
     kv_off = kv_head * head_dim
     m = float("-inf")
-    l = 0.0
+    norm = 0.0
     for i in range(head_dim):
         output[i] = 0.0
     for t in range(seq_len):
@@ -107,12 +107,12 @@ def flash_attention_decode_gqa(
         alpha = math.exp(m - new_max)
         beta = math.exp(score - new_max)
         m = new_max
-        l = l * alpha + beta
+        norm = norm * alpha + beta
         val = value_layer[row : row + head_dim]
         for d in range(head_dim):
             output[d] = output[d] * alpha + beta * val[d]
-    if l > 0:
-        inv = 1.0 / l
+    if norm > 0:
+        inv = 1.0 / norm
         for d in range(head_dim):
             output[d] *= inv
 

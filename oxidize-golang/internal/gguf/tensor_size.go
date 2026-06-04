@@ -1,5 +1,14 @@
 package gguf
 
+// TensorStorageBytes returns the on-disk payload size for a tensor header.
+func TensorStorageBytes(info TensorInfo) (uint64, error) {
+	count, err := tensorElementCount(info.Dimensions)
+	if err != nil {
+		return 0, err
+	}
+	return tensorByteSize(info.GGMLType, count)
+}
+
 func tensorElementCount(dimensions []uint64) (uint64, error) {
 	count := uint64(1)
 	for _, dimension := range dimensions {

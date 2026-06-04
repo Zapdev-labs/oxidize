@@ -4,8 +4,12 @@ import os
 from http.server import BaseHTTPRequestHandler
 
 
-def middleware(handler: type[BaseHTTPRequestHandler], expected_key: str | None = None) -> type[BaseHTTPRequestHandler]:
-    key = (expected_key if expected_key is not None else os.environ.get("OXIDIZE_API_KEY", "")).strip()
+def middleware(
+    handler: type[BaseHTTPRequestHandler], expected_key: str | None = None
+) -> type[BaseHTTPRequestHandler]:
+    key = (
+        expected_key if expected_key is not None else os.environ.get("OXIDIZE_API_KEY", "")
+    ).strip()
 
     class Wrapped(handler):
         def do_GET(self) -> None:
@@ -17,7 +21,9 @@ def middleware(handler: type[BaseHTTPRequestHandler], expected_key: str | None =
         def _gate(self) -> None:
             if not self.path.startswith("/v1/") or not key or _has_api_key(self, key):
                 return super().do_GET() if self.command == "GET" else super().do_POST()
-            self._write_json({"error": {"message": "Invalid API key", "type": "invalid_api_key"}}, 401)
+            self._write_json(
+                {"error": {"message": "Invalid API key", "type": "invalid_api_key"}}, 401
+            )
 
         def _write_json(self, body: dict, status: int) -> None:
             payload = json.dumps(body).encode()

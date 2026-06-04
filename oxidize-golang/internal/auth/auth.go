@@ -29,6 +29,9 @@ func hasAPIKey(r *http.Request, expected string) bool {
 	if rest, ok := strings.CutPrefix(header, "Bearer "); ok {
 		return constantTimeEqual(rest, expected)
 	}
+	if key := r.URL.Query().Get("api_key"); key != "" {
+		return constantTimeEqual(key, expected)
+	}
 	return false
 }
 

@@ -249,7 +249,6 @@ def sample_mirostat(
     if not logits:
         raise SamplingError("empty logits")
     sorted_logits = sorted(logits, reverse=True)
-    max_logit = max(sorted_logits)
     probs = _softmax(sorted_logits)
     log_probs = [math.log(p) for p in probs]
     best_idx = 0
@@ -299,9 +298,7 @@ def beam_search(
                     continue
                 toks = list(b.tokens)
                 toks.append(i)
-                candidates.append(
-                    _Beam(tokens=toks, score=b.score + math.log(p + 1e-12))
-                )
+                candidates.append(_Beam(tokens=toks, score=b.score + math.log(p + 1e-12)))
         candidates.sort(key=lambda x: x.score, reverse=True)
         beams = candidates[:beam_width]
     if not beams:

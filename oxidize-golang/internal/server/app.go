@@ -5,17 +5,26 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/Zapdev-labs/oxidize/golang/internal/auth"
+	"github.com/Zapdev-labs/oxidize/golang/internal/generate"
 	"github.com/Zapdev-labs/oxidize/golang/internal/serviceinfo"
 )
 
 type application struct {
-	models  []serviceinfo.ModelInfo
-	modelID map[string]struct{}
-	mu      sync.Mutex
-	metrics serviceinfo.MetricsData
+	models           []serviceinfo.ModelInfo
+	modelID          map[string]struct{}
+	defaultModelPath string
+	loader           generate.LoaderConfig
+	defaultMaxTokens int
+	defaultTemp      float32
+	defaultTopP      float32
+	defaultTopK      int
+	mu               sync.Mutex
+	metrics          serviceinfo.MetricsData
 }
 
 func NewHandler(cfg Config) (http.Handler, error) {
@@ -24,9 +33,34 @@ func NewHandler(cfg Config) (http.Handler, error) {
 	if err != nil {
 		return nil, fmt.Errorf("discover models: %w", err)
 	}
-	app := &application{models: models, modelID: make(map[string]struct{}, len(models))}
+	app := &application{
+		models:           models,
+		modelID:          make(map[string]struct{}, len(models)),
+		defaultModelPath: cfg.DefaultModel,
+		loader:           cfg.Loader,
+		defaultMaxTokens: cfg.MaxTokens,
+		defaultTemp:      cfg.Temperature,
+		defaultTopP:      cfg.TopP,
+		defaultTopK:      cfg.TopK,
+	}
 	for _, model := range models {
 		app.modelID[model.ID] = struct{}{}
+	}
+	if cfg.DefaultModel != "" {
+		id := modelIDFromPath(cfg.DefaultModel)
+		if id != "" {
+			app.modelID[id] = struct{}{}
+			found := false
+			for _, m := range models {
+				if m.Path == cfg.DefaultModel {
+					found = true
+					break
+				}
+			}
+			if !found {
+				app.models = append(app.models, serviceinfo.ModelInfo{ID: id, Path: cfg.DefaultModel})
+			}
+		}
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", app.health)
@@ -38,6 +72,8 @@ func NewHandler(cfg Config) (http.Handler, error) {
 	mux.HandleFunc("/v1/chat/completions", app.chatCompletions)
 	mux.HandleFunc("/v1/completions", app.completions)
 	mux.HandleFunc("/v1/embeddings", app.embeddings)
+	mux.HandleFunc("/v1/realtime", app.realtime)
+	mux.HandleFunc("/v1/mesh/chat/completions", app.meshChatCompletions)
 	return app.instrument(auth.Middleware(mux)), nil
 }
 
@@ -65,6 +101,11 @@ func Listen(ctx context.Context, cfg Config) error {
 		return <-shutdownDone
 	}
 	return serveErr
+}
+
+func modelIDFromPath(path string) string {
+	base := filepath.Base(path)
+	return strings.TrimSuffix(base, filepath.Ext(base))
 }
 
 func (a *application) instrument(next http.Handler) http.Handler {

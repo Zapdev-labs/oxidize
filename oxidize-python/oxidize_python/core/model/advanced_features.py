@@ -120,10 +120,7 @@ class TypicalPStep:
             return logits
         probs = _softmax(logits)
         entropy = sum(-p * math.log(p) for p in probs if p > 0)
-        cands = [
-            (i, abs(-math.log(p + 1e-12) - entropy))
-            for i, p in enumerate(probs)
-        ]
+        cands = [(i, abs(-math.log(p + 1e-12) - entropy)) for i, p in enumerate(probs)]
         cands.sort(key=lambda x: x[1])
         cum_prob = 0.0
         keep = [False] * len(probs)

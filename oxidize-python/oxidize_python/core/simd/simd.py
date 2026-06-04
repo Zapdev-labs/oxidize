@@ -50,9 +50,7 @@ def _detect() -> None:
     _detected = [Backend.SCALAR]
     arch = platform.machine().lower()
     if arch in ("x86_64", "amd64"):
-        _detected.extend(
-            [Backend.SSE2, Backend.AVX, Backend.AVX2, Backend.AVX512F]
-        )
+        _detected.extend([Backend.SSE2, Backend.AVX, Backend.AVX2, Backend.AVX512F])
         _preferred = Backend.AVX512F
     elif arch in ("aarch64", "arm64"):
         _detected.append(Backend.NEON)

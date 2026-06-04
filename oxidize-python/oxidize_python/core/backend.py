@@ -49,13 +49,18 @@ def _vulkan_detected() -> bool:
 
 def effective_backend(b: Backend) -> tuple[Backend, str, bool]:
     if b == Backend.MLX and sys.platform != "darwin":
-        return Backend.CPU, "MLX backend requested but unavailable on Linux; falling back to CPU", True
+        return (
+            Backend.CPU,
+            "MLX backend requested but unavailable on Linux; falling back to CPU",
+            True,
+        )
     if b == Backend.INTEL_ARC:
         if _vulkan_detected():
             return Backend.INTEL_ARC, "", False
         return (
             Backend.VULKAN,
-            "Intel Arc backend requested but Vulkan was not detected at build time; using Vulkan fallback path",
+            "Intel Arc backend requested but Vulkan was not detected at build time; "
+            "using Vulkan fallback path",
             True,
         )
     return b, "", False

@@ -53,7 +53,9 @@ def encode_web_worker_request(req: WebWorkerRequest) -> bytes:
         payload = json.dumps(payload).encode()
     elif payload is None:
         payload = b""
-    return json.dumps({"type": req.type, "payload": payload.decode("latin-1") if payload else None}).encode()
+    return json.dumps(
+        {"type": req.type, "payload": payload.decode("latin-1") if payload else None}
+    ).encode()
 
 
 def decode_web_worker_request(data: bytes) -> WebWorkerRequest:

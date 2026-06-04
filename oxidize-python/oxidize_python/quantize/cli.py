@@ -40,9 +40,7 @@ def main(argv: list[str] | None = None) -> int:
     body = raw[body_start:]
     if ns.target is not None:
         meta = dict(file.metadata)
-        meta["general.quantization_version"] = MetadataValue(
-            type=MetadataType.UINT32, uint64=2
-        )
+        meta["general.quantization_version"] = MetadataValue(type=MetadataType.UINT32, uint64=2)
         header = WriterHeader(
             version=file.version,
             metadata=meta,

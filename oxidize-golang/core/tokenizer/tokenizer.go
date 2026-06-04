@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/Zapdev-labs/oxidize/golang/core/ggufcore"
 	"github.com/Zapdev-labs/oxidize/golang/internal/gguf"
 )
 
@@ -270,19 +271,77 @@ func HealTokens(tok Tokenizer, tokens []uint32) []uint32 {
 // LoadFromGGUFFile loads a tokenizer from a GGUF file's metadata. Mirrors
 // load_tokenizer_from_gguf_file.
 func LoadFromGGUFFile(path string) (Tokenizer, error) {
-	raw, err := os.ReadFile(path)
+	mapped, err := ggufcore.LoadMapped(path)
 	if err != nil {
-		return nil, err
+		if _, statErr := os.Stat(path); statErr != nil {
+			return nil, err
+		}
+		raw, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return nil, err
+		}
+		file, parseErr := gguf.Parse(raw)
+		if parseErr != nil {
+			return nil, err
+		}
+		return FromGGUFMetadata(metadataStringMap(file.Metadata))
 	}
-	file, err := gguf.Parse(raw)
-	if err != nil {
-		return nil, err
+	return FromGGUFMetadata(metadataStringMapGGUF(mapped.Parsed.Metadata))
+}
+
+func metadataStringMapGGUF(md map[string]ggufcore.MetadataValue) map[string]string {
+	out := make(map[string]string, len(md))
+	for key, value := range md {
+		out[key] = metadataValueString(value)
 	}
-	meta := make(map[string]string, len(file.Metadata))
-	for key, value := range file.Metadata {
-		meta[key] = value.String
+	return out
+}
+
+func metadataStringMap(md map[string]gguf.MetadataValue) map[string]string {
+	out := make(map[string]string, len(md))
+	for key, value := range md {
+		out[key] = metadataValueStringGGUF(value)
 	}
-	return FromGGUFMetadata(meta)
+	return out
+}
+
+func metadataValueString(v ggufcore.MetadataValue) string {
+	if v.String != "" {
+		return v.String
+	}
+	if s, ok := scalarMetadataString(v); ok {
+		return s
+	}
+	return ""
+}
+
+func metadataValueStringGGUF(v gguf.MetadataValue) string {
+	if v.String != "" {
+		return v.String
+	}
+	if n, ok := v.AsUint64(); ok {
+		return fmt.Sprintf("%d", n)
+	}
+	if f, ok := v.AsFloat32(); ok {
+		return fmt.Sprintf("%g", f)
+	}
+	if v.Bool {
+		return "true"
+	}
+	return ""
+}
+
+func scalarMetadataString(v ggufcore.MetadataValue) (string, bool) {
+	if n, ok := v.AsUint64(); ok {
+		return fmt.Sprintf("%d", n), true
+	}
+	if f, ok := v.AsFloat32(); ok {
+		return fmt.Sprintf("%g", f), true
+	}
+	if v.Bool {
+		return "true", true
+	}
+	return "", false
 }
 
 // ProcessChatTemplate mirrors process_chat_template. It implements a small

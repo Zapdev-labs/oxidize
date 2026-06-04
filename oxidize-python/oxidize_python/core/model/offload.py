@@ -113,9 +113,7 @@ class LayerOffloadPlanner:
         else:
             for i in range(layer_count):
                 dev = self.devices[i % len(self.devices)]
-                plan.layers.append(
-                    LayerAssignment(i, dev.device_id, dev.backend, bytes_per_layer)
-                )
+                plan.layers.append(LayerAssignment(i, dev.device_id, dev.backend, bytes_per_layer))
         return plan
 
 

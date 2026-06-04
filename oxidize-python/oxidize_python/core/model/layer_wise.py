@@ -69,6 +69,10 @@ def new_layer_wise_from_gguf(file: object, cache_size: int) -> LayerWiseModel:
         inference_config_from_gguf,
     )
 
-    cfg = inference_config_from_gguf(file) if hasattr(file, "metadata") else default_inference_config()
+    cfg = (
+        inference_config_from_gguf(file)
+        if hasattr(file, "metadata")
+        else default_inference_config()
+    )
     storage = WeightStorage(file=MappedFile(bytes_data=None, parsed=file))
     return LayerWiseModel(cfg, storage, cache_size)

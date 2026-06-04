@@ -49,13 +49,16 @@ func (a *application) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	if !a.ensureModel(w, payload.Model) {
 		return
 	}
-	text := a.completionText(r.Context(), payload.Model, payload.FirstUserMessage(), payload.MaxTokensOr(128))
+	temp, topP, topK := samplingFromChat(payload)
+	prompt := payload.FirstUserMessage()
+	maxTok := payload.MaxTokensOr(a.defaultMaxTokens)
+	if payload.Stream {
+		a.streamChatCompletion(w, r, payload.Model, prompt, maxTok, temp, topP, topK, payload)
+		return
+	}
+	text := a.completionText(r.Context(), payload.Model, prompt, maxTok, temp, topP, topK)
 	if text == "" {
 		text = generate.PlaceholderText(generate.PlaceholderSpec{ResponseFormat: payload.ResponseFormat, GuidedJSON: payload.GuidedJSON, JSONSchema: payload.JSONSchema, GuidedRegex: payload.GuidedRegex, GuidedChoice: payload.GuidedChoice})
-	}
-	if payload.Stream {
-		writeSSE(w, api.BuildChatChunk(payload.Model, text, false), api.BuildChatChunk(payload.Model, "", true))
-		return
 	}
 	writeJSON(w, http.StatusOK, api.BuildChatCompletion(payload.Model, text))
 }
@@ -72,13 +75,15 @@ func (a *application) completions(w http.ResponseWriter, r *http.Request) {
 	if !a.ensureModel(w, payload.Model) {
 		return
 	}
-	text := a.completionText(r.Context(), payload.Model, payload.Prompt, payload.MaxTokensOr(128))
+	temp, topP, topK := samplingFromCompletion(payload)
+	maxTok := payload.MaxTokensOr(a.defaultMaxTokens)
+	if payload.Stream {
+		a.streamTextCompletion(w, r, payload.Model, payload.Prompt, maxTok, temp, topP, topK, payload)
+		return
+	}
+	text := a.completionText(r.Context(), payload.Model, payload.Prompt, maxTok, temp, topP, topK)
 	if text == "" {
 		text = generate.PlaceholderText(generate.PlaceholderSpec{ResponseFormat: payload.ResponseFormat, GuidedJSON: payload.GuidedJSON, JSONSchema: payload.JSONSchema, GuidedRegex: payload.GuidedRegex, GuidedChoice: payload.GuidedChoice})
-	}
-	if payload.Stream {
-		writeSSE(w, api.BuildTextChunk(payload.Model, text, false), api.BuildTextChunk(payload.Model, "", true))
-		return
 	}
 	writeJSON(w, http.StatusOK, api.BuildTextCompletion(payload.Model, text))
 }

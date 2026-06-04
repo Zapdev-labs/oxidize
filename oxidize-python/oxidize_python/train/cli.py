@@ -34,8 +34,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     save_report(Path(ns.output), report)
     print(
-        f"accuracy={report.accuracy:.4f} loss={report.final_loss:.4f} "
-        f"samples={report.samples}",
+        f"accuracy={report.accuracy:.4f} loss={report.final_loss:.4f} samples={report.samples}",
         file=sys.stderr,
     )
     return 0

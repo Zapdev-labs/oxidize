@@ -75,9 +75,7 @@ class Runner:
         with self._mu:
             enabled = [s for s, on in self._suites.items() if on]
         now = time.time()
-        results = [
-            Result(suite=s, passed=True, elapsed=1e-6, output="ok") for s in enabled
-        ]
+        results = [Result(suite=s, passed=True, elapsed=1e-6, output="ok") for s in enabled]
         with self._mu:
             self._results = results
         rep = ParityReport(run_at=now, total=len(results), passed=len(results))

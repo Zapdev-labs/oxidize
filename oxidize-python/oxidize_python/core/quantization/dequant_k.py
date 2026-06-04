@@ -62,10 +62,10 @@ def dequant_q2_k(input_: bytes | bytearray, output: list[float]) -> None:
                 ml2 = min_v * float(sc2 >> 4)
                 is_ += 1
                 shift = ((is_ // 2 - 1) % 4) * 2
-                for l in range(16):
-                    out[q_ptr + l] = dl1 * float((qs[qs_base + l] >> shift) & 3) - ml1
-                for l in range(16):
-                    out[q_ptr + 16 + l] = dl2 * float((qs[qs_base + 16 + l] >> shift) & 3) - ml2
+                for idx in range(16):
+                    out[q_ptr + idx] = dl1 * float((qs[qs_base + idx] >> shift) & 3) - ml1
+                for idx in range(16):
+                    out[q_ptr + 16 + idx] = dl2 * float((qs[qs_base + 16 + idx] >> shift) & 3) - ml2
                 q_ptr += 32
 
 
@@ -102,16 +102,16 @@ def dequant_q3_k(input_: bytes | bytearray, output: list[float]) -> None:
                 dl = d_all * float(scales[is_] - 32)
                 is_ += 1
                 shift = ((is_ - 1) % 4) * 2
-                for l in range(16):
-                    qv = (qs[l] >> shift) & 3
-                    hbit = 0 if (hmask[l] & m) else 4
-                    out[q_ptr + l] = dl * float(qv - hbit)
+                for idx in range(16):
+                    qv = (qs[idx] >> shift) & 3
+                    hbit = 0 if (hmask[idx] & m) else 4
+                    out[q_ptr + idx] = dl * float(qv - hbit)
                 dl2 = d_all * float(scales[is_] - 32)
                 is_ += 1
-                for l in range(16):
-                    qv = (qs[l + 16] >> shift) & 3
-                    hbit = 0 if (hmask[l + 16] & m) else 4
-                    out[q_ptr + 16 + l] = dl2 * float(qv - hbit)
+                for idx in range(16):
+                    qv = (qs[idx + 16] >> shift) & 3
+                    hbit = 0 if (hmask[idx + 16] & m) else 4
+                    out[q_ptr + 16 + idx] = dl2 * float(qv - hbit)
                 q_ptr += 32
                 m <<= 1
 
@@ -119,7 +119,9 @@ def dequant_q3_k(input_: bytes | bytearray, output: list[float]) -> None:
 def _scale_min_k4(j: int, scales: bytes | bytearray) -> tuple[int, int]:
     if j < 4:
         return scales[j] & 63, scales[j + 4] & 63
-    return (scales[j + 4] & 0xF) | ((scales[j - 4] >> 6) << 4), (scales[j + 4] >> 4) | ((scales[j] >> 6) << 4)
+    return (scales[j + 4] & 0xF) | ((scales[j - 4] >> 6) << 4), (scales[j + 4] >> 4) | (
+        (scales[j] >> 6) << 4
+    )
 
 
 def dequant_q4_k(input_: bytes | bytearray, output: list[float]) -> None:
@@ -144,10 +146,10 @@ def dequant_q4_k(input_: bytes | bytearray, output: list[float]) -> None:
             min1 = min_v * float(m1)
             d2 = d * float(sc2)
             min2 = min_v * float(m2)
-            for l in range(32):
-                out[q_ptr + l] = d1 * float(qs[l] & 0xF) - min1
-            for l in range(32):
-                out[q_ptr + 32 + l] = d2 * float(qs[l] >> 4) - min2
+            for idx in range(32):
+                out[q_ptr + idx] = d1 * float(qs[idx] & 0xF) - min1
+            for idx in range(32):
+                out[q_ptr + 32 + idx] = d2 * float(qs[idx] >> 4) - min2
             q_ptr += 64
             is_ += 2
 
@@ -176,16 +178,16 @@ def dequant_q5_k(input_: bytes | bytearray, output: list[float]) -> None:
             min1 = min_v * float(m1)
             d2 = d * float(sc2)
             min2 = min_v * float(m2)
-            for l in range(32):
-                qv1 = qs[l] & 0xF
-                if qh[l] & u1:
+            for idx in range(32):
+                qv1 = qs[idx] & 0xF
+                if qh[idx] & u1:
                     qv1 += 16
-                out[q_ptr + l] = d1 * float(qv1) - min1
-            for l in range(32):
-                qv2 = qs[l] >> 4
-                if qh[l] & u2:
+                out[q_ptr + idx] = d1 * float(qv1) - min1
+            for idx in range(32):
+                qv2 = qs[idx] >> 4
+                if qh[idx] & u2:
                     qv2 += 16
-                out[q_ptr + 32 + l] = d2 * float(qv2) - min2
+                out[q_ptr + 32 + idx] = d2 * float(qv2) - min2
             q_ptr += 64
             is_ += 2
             u1 <<= 2
@@ -207,16 +209,16 @@ def dequant_q6_k(input_: bytes | bytearray, output: list[float]) -> None:
         out = output[b * QK_K : (b + 1) * QK_K]
         q_ptr = 0
         for _ in range(2):
-            for l in range(32):
-                is_ = l // 16
-                q1 = ((ql[l] & 0xF) | (((qh[l] & 3) << 4))) - 32
-                q2 = ((ql[l + 32] & 0xF) | ((((qh[l] >> 2) & 3) << 4))) - 32
-                q3 = ((ql[l] >> 4) | ((((qh[l] >> 4) & 3) << 4))) - 32
-                q4 = ((ql[l + 32] >> 4) | ((((qh[l] >> 6) & 3) << 4))) - 32
-                out[q_ptr + l] = d * float(sc[is_]) * float(q1)
-                out[q_ptr + 32 + l] = d * float(sc[is_ + 2]) * float(q2)
-                out[q_ptr + 64 + l] = d * float(sc[is_ + 4]) * float(q3)
-                out[q_ptr + 96 + l] = d * float(sc[is_ + 6]) * float(q4)
+            for idx in range(32):
+                is_ = idx // 16
+                q1 = ((ql[idx] & 0xF) | ((qh[idx] & 3) << 4)) - 32
+                q2 = ((ql[idx + 32] & 0xF) | (((qh[idx] >> 2) & 3) << 4)) - 32
+                q3 = ((ql[idx] >> 4) | (((qh[idx] >> 4) & 3) << 4)) - 32
+                q4 = ((ql[idx + 32] >> 4) | (((qh[idx] >> 6) & 3) << 4)) - 32
+                out[q_ptr + idx] = d * float(sc[is_]) * float(q1)
+                out[q_ptr + 32 + idx] = d * float(sc[is_ + 2]) * float(q2)
+                out[q_ptr + 64 + idx] = d * float(sc[is_ + 4]) * float(q3)
+                out[q_ptr + 96 + idx] = d * float(sc[is_ + 6]) * float(q4)
             q_ptr += 128
 
 

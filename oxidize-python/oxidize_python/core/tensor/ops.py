@@ -185,7 +185,8 @@ def scaled_dot_product_attention_f32(
     if len(output) < head_dim:
         raise AttentionError("output too small")
     scores = [
-        scale * sum(query[d] * keys[s * head_dim + d] for d in range(head_dim)) for s in range(seq_len)
+        scale * sum(query[d] * keys[s * head_dim + d] for d in range(head_dim))
+        for s in range(seq_len)
     ]
     max_score = max(scores)
     exps = [math.exp(s - max_score) for s in scores]

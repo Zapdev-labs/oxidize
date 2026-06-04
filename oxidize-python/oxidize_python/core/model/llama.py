@@ -48,39 +48,27 @@ class LlamaModel:
 
 
 def new_llama2() -> LlamaModel:
-    return LlamaModel(
-        LlamaConfig(LlamaArchitecture.LLAMA2, 32000, 2048, 32)
-    )
+    return LlamaModel(LlamaConfig(LlamaArchitecture.LLAMA2, 32000, 2048, 32))
 
 
 def new_llama3() -> LlamaModel:
-    return LlamaModel(
-        LlamaConfig(LlamaArchitecture.LLAMA3, 128256, 8192, 32)
-    )
+    return LlamaModel(LlamaConfig(LlamaArchitecture.LLAMA3, 128256, 8192, 32))
 
 
 def new_mistral() -> LlamaModel:
-    return LlamaModel(
-        LlamaConfig(LlamaArchitecture.MISTRAL, 32000, 32768, 32)
-    )
+    return LlamaModel(LlamaConfig(LlamaArchitecture.MISTRAL, 32000, 32768, 32))
 
 
 def new_mixtral() -> LlamaModel:
-    return LlamaModel(
-        LlamaConfig(LlamaArchitecture.MIXTRAL, 32000, 32768, 32)
-    )
+    return LlamaModel(LlamaConfig(LlamaArchitecture.MIXTRAL, 32000, 32768, 32))
 
 
 def new_qwen() -> LlamaModel:
-    return LlamaModel(
-        LlamaConfig(LlamaArchitecture.QWEN, 151936, 32768, 32)
-    )
+    return LlamaModel(LlamaConfig(LlamaArchitecture.QWEN, 151936, 32768, 32))
 
 
 def new_gemma() -> LlamaModel:
-    return LlamaModel(
-        LlamaConfig(LlamaArchitecture.GEMMA, 256000, 8192, 18)
-    )
+    return LlamaModel(LlamaConfig(LlamaArchitecture.GEMMA, 256000, 8192, 18))
 
 
 def new_phi() -> LlamaModel:
@@ -88,9 +76,7 @@ def new_phi() -> LlamaModel:
 
 
 def new_falcon() -> LlamaModel:
-    return LlamaModel(
-        LlamaConfig(LlamaArchitecture.FALCON, 65024, 2048, 32)
-    )
+    return LlamaModel(LlamaConfig(LlamaArchitecture.FALCON, 65024, 2048, 32))
 
 
 def new_gpt2() -> LlamaModel:
@@ -102,6 +88,4 @@ def new_gptj() -> LlamaModel:
 
 
 def new_gpt_neox() -> LlamaModel:
-    return LlamaModel(
-        LlamaConfig(LlamaArchitecture.GPT_NEOX, 50432, 2048, 32)
-    )
+    return LlamaModel(LlamaConfig(LlamaArchitecture.GPT_NEOX, 50432, 2048, 32))

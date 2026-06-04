@@ -95,11 +95,32 @@ class Type(IntEnum):
                 return 1
             case Type.Q4_0 | Type.Q4_1 | Type.Q5_0 | Type.Q5_1 | Type.Q8_0:
                 return QK4_0
-            case Type.Q2_K | Type.Q3_K_S | Type.Q3_K_M | Type.Q3_K_L | Type.Q4_K_S | Type.Q4_K_M | Type.Q5_K_S | Type.Q5_K_M | Type.Q6_K | Type.Q8_K:
+            case (
+                Type.Q2_K
+                | Type.Q3_K_S
+                | Type.Q3_K_M
+                | Type.Q3_K_L
+                | Type.Q4_K_S
+                | Type.Q4_K_M
+                | Type.Q5_K_S
+                | Type.Q5_K_M
+                | Type.Q6_K
+                | Type.Q8_K
+            ):
                 return QK_K
             case Type.NVFP4:
                 return QK_NVFP4
-            case Type.IQ1_S | Type.IQ1_M | Type.IQ2_XXS | Type.IQ2_XS | Type.IQ2_S | Type.IQ3_XXS | Type.IQ3_S | Type.IQ4_NL | Type.IQ4_XS:
+            case (
+                Type.IQ1_S
+                | Type.IQ1_M
+                | Type.IQ2_XXS
+                | Type.IQ2_XS
+                | Type.IQ2_S
+                | Type.IQ3_XXS
+                | Type.IQ3_S
+                | Type.IQ4_NL
+                | Type.IQ4_XS
+            ):
                 return QK_K
         return 0
 

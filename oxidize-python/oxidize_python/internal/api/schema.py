@@ -88,8 +88,23 @@ class ChatCompletionRequest:
     n: int | None = None
     best_of: int | None = None
 
+    def max_tokens_or(self, default_max: int) -> int:
+        if self.max_completion_tokens is not None and self.max_completion_tokens > 0:
+            return self.max_completion_tokens
+        if self.max_tokens is not None and self.max_tokens > 0:
+            return self.max_tokens
+        return default_max
+
+    def first_user_message(self) -> str:
+        for msg in reversed(self.messages):
+            if msg.role == "user":
+                return msg.content.text_value()
+        if self.messages:
+            return self.messages[-1].content.text_value()
+        return ""
+
     @classmethod
-    def from_json(cls, raw: bytes | str) -> ChatCompletionRequest:
+    def from_json(cls, raw: bytes | str | dict[str, Any]) -> ChatCompletionRequest:
         data = json.loads(raw) if isinstance(raw, (bytes, str)) else raw
         messages: list[ChatMessage] = []
         for m in data.get("messages", []):
@@ -101,12 +116,82 @@ class ChatCompletionRequest:
                     ContentPart(
                         type=p.get("type", "text"),
                         text=p.get("text", ""),
-                        image_url=ContentImageURL(**p["image_url"])
-                        if "image_url" in p
-                        else None,
+                        image_url=ContentImageURL(**p["image_url"]) if "image_url" in p else None,
                     )
                     for p in content
                 ]
                 mc = MessageContent.from_parts(parts)
             messages.append(ChatMessage(role=m.get("role", "user"), content=mc))
-        return cls(model=data.get("model", ""), messages=messages, stream=data.get("stream", False))
+        rf = data.get("response_format")
+        response_format = None
+        if isinstance(rf, dict):
+            response_format = ResponseFormat(
+                type=ResponseFormatType(rf.get("type", "text")),
+                schema=rf.get("json_schema"),
+            )
+        return cls(
+            model=data.get("model", ""),
+            messages=messages,
+            stream=bool(data.get("stream", False)),
+            max_tokens=data.get("max_tokens"),
+            max_completion_tokens=data.get("max_completion_tokens"),
+            temperature=data.get("temperature"),
+            top_p=data.get("top_p"),
+            top_k=data.get("top_k"),
+            n=data.get("n"),
+            best_of=data.get("best_of"),
+            response_format=response_format,
+        )
+
+
+@dataclass
+class CompletionRequest:
+    model: str = ""
+    prompt: str = ""
+    stream: bool = False
+    max_tokens: int | None = None
+    temperature: float | None = None
+    top_p: float | None = None
+    top_k: int | None = None
+    n: int | None = None
+    best_of: int | None = None
+    response_format: ResponseFormat | None = None
+
+    def max_tokens_or(self, default_max: int) -> int:
+        if self.max_tokens is not None and self.max_tokens > 0:
+            return self.max_tokens
+        return default_max
+
+    @classmethod
+    def from_json(cls, raw: bytes | str | dict[str, Any]) -> CompletionRequest:
+        data = json.loads(raw) if isinstance(raw, (bytes, str)) else raw
+        rf = data.get("response_format")
+        response_format = None
+        if isinstance(rf, dict):
+            response_format = ResponseFormat(
+                type=ResponseFormatType(rf.get("type", "text")),
+                schema=rf.get("json_schema"),
+            )
+        return cls(
+            model=data.get("model", ""),
+            prompt=str(data.get("prompt", "")),
+            stream=bool(data.get("stream", False)),
+            max_tokens=data.get("max_tokens"),
+            temperature=data.get("temperature"),
+            top_p=data.get("top_p"),
+            top_k=data.get("top_k"),
+            n=data.get("n"),
+            best_of=data.get("best_of"),
+            response_format=response_format,
+        )
+
+
+@dataclass
+class EmbeddingsRequest:
+    model: str = ""
+    input: Any = None
+
+    @classmethod
+    def from_json(cls, raw: bytes | str | dict[str, Any]) -> EmbeddingsRequest:
+        data = json.loads(raw) if isinstance(raw, (bytes, str)) else raw
+        return cls(model=data.get("model", ""), input=data.get("input"))

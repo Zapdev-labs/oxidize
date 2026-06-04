@@ -123,6 +123,12 @@ class SpeculativeGenerationStream:
         self._session = session
         self._config = config
         self._done = False
+        self._tokens: list[Token] = []
+
+    def seed(self, prompt: list[Token]) -> None:
+        with self._mu:
+            if not self._tokens:
+                self._tokens = list(prompt)
 
     def next(self) -> tuple[Token, bool, GenerationError | None]:
         with self._mu:

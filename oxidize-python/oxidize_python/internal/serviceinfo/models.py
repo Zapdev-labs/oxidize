@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from oxidize_python.internal.gguf import parse as gguf_parse
+from oxidize_python.internal.gguf.parse import parse as parse_gguf
 
 MIN_GGUF_FULL_VALIDATION_BYTES = 1024
 
@@ -35,8 +35,8 @@ def discover_models(dir_path: str) -> list[ModelInfo]:
         stat = path.stat()
         raw = path.read_bytes()
         if stat.st_size >= MIN_GGUF_FULL_VALIDATION_BYTES:
-            gguf_parse.parse(raw)
-        parsed = gguf_parse.parse(raw)
+            parse_gguf(raw)
+        parsed = parse_gguf(raw)
         arch = ""
         if v := parsed.metadata.get("general.architecture"):
             arch = v.string

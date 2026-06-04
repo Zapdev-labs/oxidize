@@ -16,6 +16,8 @@ class ParseError(Exception):
     def __init__(self, err: Exception) -> None:
         super().__init__(f"gguf: {err}")
         self.err = err
+
+
 QuantizationType = quant.Type
 
 
@@ -172,4 +174,3 @@ def _quantized_byte_size(info: TensorInfo) -> int:
 
 def load_mapped(path: str) -> MappedFile:
     return MappedFile.load_mapped(path)
-

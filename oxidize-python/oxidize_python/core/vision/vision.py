@@ -63,7 +63,17 @@ class Config:
         return cols, rows
 
 
-def _with_clip(image_size: int, patch_size: int, hidden: int, heads: int, layers: int, intermediate: int, eps: float, projection: int, name: str) -> Config:
+def _with_clip(
+    image_size: int,
+    patch_size: int,
+    hidden: int,
+    heads: int,
+    layers: int,
+    intermediate: int,
+    eps: float,
+    projection: int,
+    name: str,
+) -> Config:
     side = image_size // patch_size if patch_size else 0
     return Config(
         image_size=image_size,

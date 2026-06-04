@@ -145,6 +145,14 @@ func NewSpeculativeGenerationStream(draft, target Model, session *Session, confi
 	return &SpeculativeGenerationStream{draft: draft, target: target, session: session, config: config}
 }
 
+// Seed runs a prefill on the target model for the prompt tokens.
+func (s *SpeculativeGenerationStream) Seed(prompt []Token) {
+	if len(prompt) == 0 {
+		return
+	}
+	_, _ = s.target.Forward(prompt, s.session)
+}
+
 // Next returns the next accepted draft token plus a done flag.
 func (s *SpeculativeGenerationStream) Next(ctx context.Context) (Token, bool, error) {
 	s.mu.Lock()

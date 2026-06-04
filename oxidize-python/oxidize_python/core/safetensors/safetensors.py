@@ -67,7 +67,9 @@ class TensorInfo:
 
 
 class MappedFile:
-    def __init__(self, path: str = "", raw: bytes = b"", tensors: list[TensorInfo] | None = None) -> None:
+    def __init__(
+        self, path: str = "", raw: bytes = b"", tensors: list[TensorInfo] | None = None
+    ) -> None:
         self.path = path
         self._bytes = raw
         self._tensors = tensors or []

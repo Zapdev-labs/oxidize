@@ -81,6 +81,7 @@ class RingTransport:
 class ChannelTransport:
     def __init__(self) -> None:
         import queue
+
         self.in_q: queue.Queue[bytes] = queue.Queue(maxsize=64)
         self.out_q: queue.Queue[bytes] = queue.Queue(maxsize=64)
 

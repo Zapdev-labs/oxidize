@@ -205,7 +205,9 @@ def encode_with_special_tokens(tok: Tokenizer, text: str, opts: EncodeOptions) -
     return tokens
 
 
-def process_chat_template(template: str, messages: list[ChatMessage], add_generation_prompt: bool) -> str:
+def process_chat_template(
+    template: str, messages: list[ChatMessage], add_generation_prompt: bool
+) -> str:
     out = _expand_for_loops(template, messages)
     out = _expand_conditionals(out, add_generation_prompt)
     return _substitute_vars(out, messages, add_generation_prompt)
@@ -227,8 +229,8 @@ def _expand_for_loops(template: str, messages: list[ChatMessage]) -> str:
         for m in messages:
             r = body
             for src, dst in (
-                (f"{{{{ {var_name}[\"role\"] }}}}", m.role),
-                (f"{{{{ {var_name}[\"content\"] }}}}", m.content),
+                (f'{{{{ {var_name}["role"] }}}}', m.role),
+                (f'{{{{ {var_name}["content"] }}}}', m.content),
                 (f"{{{{ {var_name}['role'] }}}}", m.role),
                 (f"{{{{ {var_name}['content'] }}}}", m.content),
                 (f"{{{{ {var_name}.role }}}}", m.role),

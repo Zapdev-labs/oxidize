@@ -63,7 +63,9 @@ class Cpu:
     def tensor_dtype(self, _t: be.TensorHandle) -> be.DType:
         return be.DType.F32
 
-    def rms_norm(self, input_: be.TensorHandle, weight: be.TensorHandle, eps: float) -> be.TensorHandle:
+    def rms_norm(
+        self, input_: be.TensorHandle, weight: be.TensorHandle, eps: float
+    ) -> be.TensorHandle:
         inp, w = _as_cpu(input_), _as_cpu(weight)
         out = [0.0] * len(inp.data)
         rms_norm_f32(inp.data, w.data, out, eps)

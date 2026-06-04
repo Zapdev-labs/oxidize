@@ -38,6 +38,4 @@ def err_unknown_ggml_type(value: int) -> GgufError:
 
 
 def err_string_too_long(length: int) -> GgufError:
-    return GgufError(
-        f"gguf string length {length} exceeds limit {MAX_GGUF_STRING_BYTES}"
-    )
+    return GgufError(f"gguf string length {length} exceeds limit {MAX_GGUF_STRING_BYTES}")

@@ -41,6 +41,13 @@ class LoaderConfig:
     preferred_dtype: str = ""
     max_memory_budget: int = 8 << 30
     allow_fallback: bool = True
+    backend: str = "cpu"
+    n_gpu_layers: int = 0
+    gpus: str = ""
+    threads: int = 0
+    ctx_size: int = 0
+    draft_model: str = ""
+    draft_tokens: int = 4
 
 
 def new_loader_config() -> LoaderConfig:
@@ -137,7 +144,10 @@ def load_gguf_model_from_bytes(data: bytes, config: LoaderConfig) -> Model:
 def load_gguf_model_from_hf(repo: str, revision: str, config: LoaderConfig) -> Model:
     if not repo:
         raise ValueError("loader: empty HF repo")
-    return load_gguf_model_from_path(repo, config)
+    from oxidize_python.hf.hub import ResolveOptions, resolve_gguf
+
+    path = resolve_gguf(ResolveOptions(repo=repo, revision=revision))
+    return load_gguf_model_from_path(path, config)
 
 
 @dataclass
@@ -162,9 +172,7 @@ class BaselineGgufModel:
     def forward(self, tokens: list[Token], session: Session) -> list[float]:
         if self.vocab <= 0:
             raise ValueError("baseline: empty vocab")
-        return [
-            float(math.sin(len(tokens) + i)) * 0.01 for i in range(self.vocab)
-        ]
+        return [float(math.sin(len(tokens) + i)) * 0.01 for i in range(self.vocab)]
 
     def vocab_size(self) -> int:
         return self.vocab

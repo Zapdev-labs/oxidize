@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"flag"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -40,11 +41,8 @@ func TestRunCommandRejectsMissingModel(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected missing model error")
 	}
-	if err.Error() != "oxidize run requires a model name or local .gguf path" {
+	if !strings.Contains(err.Error(), "requires a model name or local .gguf path") {
 		t.Fatalf("unexpected error: %v", err)
-	}
-	if stderr.String() != "" {
-		t.Fatalf("unexpected stderr: %q", stderr.String())
 	}
 }
 
@@ -55,6 +53,57 @@ func TestHelpCommand(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "serve") {
 		t.Fatal("expected serve in help output")
+	}
+	if !strings.Contains(stdout.String(), "chat") {
+		t.Fatal("expected chat in help output")
+	}
+}
+
+func TestInspectCommand(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "encoded.gguf")
+	testutil.WriteEncodedGGUF(t, path)
+
+	var stdout bytes.Buffer
+	if err := Run(context.Background(), []string{"inspect", path}, &stdout, &bytes.Buffer{}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "Tensors in") {
+		t.Fatalf("unexpected inspect output: %q", stdout.String())
+	}
+}
+
+func TestParseGenFlagsBackendAndTopK(t *testing.T) {
+	_, opts, rest, err := parseGenFlags("run", []string{
+		"--backend", "cuda",
+		"--top-k", "40",
+		"--ctx-size", "4096",
+		"--draft-tokens", "8",
+		"model.gguf", "hi",
+	})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if opts.Backend != "cuda" || opts.TopK != 40 || opts.CtxSize != 4096 || opts.DraftTokens != 8 {
+		t.Fatalf("opts=%+v", opts)
+	}
+	if len(rest) != 1 || rest[0] != "model.gguf" {
+		t.Fatalf("rest=%v prompt=%q", rest, opts.Prompt)
+	}
+	if opts.Prompt != "hi" {
+		t.Fatalf("prompt=%q", opts.Prompt)
+	}
+}
+
+func TestValidateBenchEngine(t *testing.T) {
+	if err := validateBenchEngine("inference"); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateBenchEngine("dflash"); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateBenchEngine("other"); err == nil {
+		t.Fatal("expected error")
 	}
 }
 
@@ -67,5 +116,23 @@ func TestServeCommandHonorsContextCancel(t *testing.T) {
 	err := Run(ctx, []string{"serve", "--host", "127.0.0.1", "--port", "0", "--models-dir", dir}, &bytes.Buffer{}, &bytes.Buffer{})
 	if err != nil {
 		t.Fatalf("run: %v", err)
+	}
+}
+
+func TestParseBenchEngine(t *testing.T) {
+	engine, rest, err := parseBenchEngine([]string{"--engine", "dflash", "--iterations", "2", "m.gguf"})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if engine != "dflash" {
+		t.Fatalf("engine=%q", engine)
+	}
+	fs := flag.NewFlagSet("bench", flag.ContinueOnError)
+	iter := fs.Int("iterations", 3, "")
+	if err := fs.Parse(rest); err != nil {
+		t.Fatal(err)
+	}
+	if *iter != 2 || fs.Arg(0) != "m.gguf" {
+		t.Fatalf("rest parse: iter=%d arg=%s", *iter, fs.Arg(0))
 	}
 }

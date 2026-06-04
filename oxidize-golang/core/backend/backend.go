@@ -57,6 +57,8 @@ func ParseBackend(name string) (Backend, error) {
 		return BackendVulkan, nil
 	case "intel-arc", "arc":
 		return BackendIntelArc, nil
+	case "webgpu":
+		return BackendVulkan, nil
 	default:
 		return 0, fmt.Errorf("unknown backend: %q", name)
 	}

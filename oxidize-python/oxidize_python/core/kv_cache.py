@@ -72,7 +72,6 @@ class Cache:
 
     @classmethod
     def new(cls, config: Config) -> Cache:
-        dim_cap = config.context_size * config.token_size() // 2
         keys = [[] for _ in range(config.layer_count)]
         vals = [[] for _ in range(config.layer_count)]
         for i in range(config.layer_count):
@@ -152,7 +151,9 @@ class Cache:
         off += 4
         snap = json.loads(raw[off : off + hdr_len].decode())
         off += hdr_len
-        cfg = Config(**{k: v for k, v in snap["config"].items() if k in Config.__dataclass_fields__})
+        cfg = Config(
+            **{k: v for k, v in snap["config"].items() if k in Config.__dataclass_fields__}
+        )
         cache = cls.new(cfg)
         cache.lengths = list(snap["lengths"])
         dim = cfg.head_count * cfg.head_dim

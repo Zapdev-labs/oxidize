@@ -28,7 +28,9 @@ def clear_speculative_caches(model: DFlashDraftModel) -> None:
         model.target_hidden_cache.clear()
 
 
-def dflash_target_context(model: DFlashDraftModel, target_hidden: list[float]) -> list[float] | None:
+def dflash_target_context(
+    model: DFlashDraftModel, target_hidden: list[float]
+) -> list[float] | None:
     h = model.config.hidden_size
     if not target_hidden or not getattr(model, "fc", None) or not model.fc.is_loaded():
         return None
@@ -48,13 +50,13 @@ def forward_token(
     if model.stack is None:
         raise DFlashForwardError("DFlash draft model has no decoder stack")
     target_context = dflash_target_context(model, target_hidden or [])
-    return model.stack.forward_token_with_context(
-        token, target_context, _kv_context_factory(model)
-    )
+    return model.stack.forward_token_with_context(token, target_context, _kv_context_factory(model))
 
 
 def _kv_context_factory(model: DFlashDraftModel):
-    def kv_context(layer_idx: int, ctx: list[float] | None) -> tuple[list[float] | None, list[float] | None]:
+    def kv_context(
+        layer_idx: int, ctx: list[float] | None
+    ) -> tuple[list[float] | None, list[float] | None]:
         if ctx is None or model.stack is None:
             return None, None
         layer = model.stack.layers[layer_idx]

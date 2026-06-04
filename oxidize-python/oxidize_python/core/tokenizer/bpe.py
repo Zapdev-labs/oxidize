@@ -50,7 +50,9 @@ class BpeTokenizer:
                     best_idx, best_rank = i, rank
             if best_idx < 0:
                 break
-            merged = parts[:best_idx] + [parts[best_idx] + parts[best_idx + 1]] + parts[best_idx + 2 :]
+            merged = (
+                parts[:best_idx] + [parts[best_idx] + parts[best_idx + 1]] + parts[best_idx + 2 :]
+            )
             parts = merged
         return [self.vocab.get(p, self.special.unknown) for p in parts]
 

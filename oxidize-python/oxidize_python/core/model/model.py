@@ -47,9 +47,7 @@ class ContextExceededError(Exception):
     def __init__(self, context_size: int, requested_total_tokens: int) -> None:
         self.context_size = context_size
         self.requested_total_tokens = requested_total_tokens
-        super().__init__(
-            f"model: context exceeded: {requested_total_tokens} > {context_size}"
-        )
+        super().__init__(f"model: context exceeded: {requested_total_tokens} > {context_size}")
 
 
 class Model(Protocol):
