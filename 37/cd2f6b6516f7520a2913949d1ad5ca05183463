@@ -1,0 +1,85 @@
+oxidize-cli/src/main.rs
+  s_60cf989533bf83::t_d7dcd7cf4d7c72 1740,1742,1746-1749
+  s_9022acb0039b4f::t_e11faa9157696c 27
+  s_9022acb0039b4f::t_eef39ff1bec3e0 2345
+  s_60cf989533bf83::t_7a55fdf2920666 18-20
+  s_9022acb0039b4f::t_0ee68911743d69 130-132
+  s_60cf989533bf83::t_16804fea5b8460 965-966,968
+  s_9022acb0039b4f::t_ef9a92128861f4 404-410
+  s_9022acb0039b4f::t_e9dcc94a87a977 1269
+  s_60cf989533bf83::t_1f88263d0fded1 1518,1526
+  s_60cf989533bf83::t_24af1c85ab5bae 869-890
+  s_9022acb0039b4f::t_da861fdba2c359 1364-1366
+  s_60cf989533bf83::t_c02ed41df6b648 1562-1566,1568-1579
+  s_9022acb0039b4f::t_18202c5c2588ab 165
+  s_9022acb0039b4f::t_8886ee8be90bcd 362-364
+  s_9022acb0039b4f::t_427d03513fac26 2394-2406
+  s_9022acb0039b4f::t_c14a3363faf9f6 1140-1195,1198-1200,1202-1211,1213-1214,1216
+.cursor/hooks/state/continual-learning-index.json
+  s_f41e3adcc6a57e::t_e2658323e6391c 3-4,6-7,9-10,12-13,15-16,18-58
+oxidize-core/src/format/safetensors_to_gguf.rs
+  s_3cf1642b2e3eaa::t_ab3c7319fe71cd 1-44,47,52-576,578-633
+  s_3cf1642b2e3eaa::t_9abb59a46096eb 577
+  s_3cf1642b2e3eaa::t_7e38984209f056 45-46,48-51
+.cursor/debug-49b0b9.log
+  s_60cf989533bf83::t_698347e13f304e 149-150
+  s_60cf989533bf83::t_c2f686c6020def 162-190
+  s_60cf989533bf83::t_f05815d1cd1143 161
+  s_60cf989533bf83::t_7724fb403e63f5 198
+  s_60cf989533bf83::t_d0529f4b316b88 151-154
+  s_60cf989533bf83::t_b3d7e48095f5c3 191-193
+  s_60cf989533bf83::t_70fe7c47819564 194-197
+  s_60cf989533bf83::t_9aea69c9a65fc0 155-158
+oxidize-core/src/format/AGENTS.md
+  s_3cf1642b2e3eaa::t_d3e89e6d0e0bf6 25
+oxidize-server/tests/realtime_ws.rs
+  s_9022acb0039b4f::t_90f8c599d07076 84-113
+AGENTS.md
+  s_f41e3adcc6a57e::t_b43c1e7de570d1 123-124,127-128,133
+oxidize-convert/src/main.rs
+  s_3cf1642b2e3eaa::t_f0bdad822d045e 1,3,5,10,13,19,22-27,31-39,42
+scripts/run_kimi_k26_dflash_ai.sh
+  s_60cf989533bf83::t_299885c9a4c153 1-36
+oxidize-core/src/lib.rs
+  s_3cf1642b2e3eaa::t_de69c3adbe3fac 36-37
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "37cd2f6b6516f7520a2913949d1ad5ca05183463",
+  "prompts": {},
+  "sessions": {
+    "s_3cf1642b2e3eaa": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "b5b530d1-d359-407c-a76f-27700a8c4174",
+        "model": "default"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_60cf989533bf83": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "776173db-1372-42c2-823a-1d5a72dfdc21",
+        "model": "default"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_9022acb0039b4f": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "9591a273-f23a-49a1-b763-1ca9d021d1ea",
+        "model": "default"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_f41e3adcc6a57e": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "451858ae-a13e-4a88-9d6a-d2ecc5b6453e",
+        "model": "default"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
