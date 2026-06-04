@@ -1,0 +1,280 @@
+oxidize-golang/internal/testutil/testutil.go
+  s_b94a1810a9d230::t_f85a7b6118247a 8-9
+  s_b94a1810a9d230::t_557f6eddc895bc 27-45
+oxidize-golang/internal/cli/cli.go
+  s_c26d9eabf1e4ff::t_75f62663098209 174-182,184-193
+  s_c26d9eabf1e4ff::t_cb7bbbd42c23ba 226,230,235-236,238
+  s_b94a1810a9d230::t_c7ba381b4b61d6 18,22-28,43,47,51-52,55-69,73,91,94-95,101-103,118-119,121,132,135-137,147-149,202-204,210-212,224
+  s_c26d9eabf1e4ff::t_1719b974304c23 98,113-115
+  s_b94a1810a9d230::t_0667a919462e58 105-106,108,117
+  s_c26d9eabf1e4ff::t_b9cb7329154005 79-83,86-90,96
+  s_b94a1810a9d230::t_325d90ae9095f4 109-110
+  s_c26d9eabf1e4ff::t_927e9552643cfa 169-170
+  s_c26d9eabf1e4ff::t_40b0ea82171004 74-77
+oxidize-golang/internal/cli/cli_test.go
+  s_b94a1810a9d230::t_2ac96f959a70dd 57-63,66-72,104
+  s_c26d9eabf1e4ff::t_9b3cf555a9e859 6,73-103,105-107,121-136
+  s_b94a1810a9d230::t_c0d122c8ea15e3 44
+  s_b94a1810a9d230::t_3ec753201ef879 64-65
+oxidize-golang/internal/generate/loader.go
+  s_c26d9eabf1e4ff::t_ef0e7b8ef84529 1-94
+oxidize-golang/internal/cli/inspect.go
+  s_c26d9eabf1e4ff::t_9433fac6343581 4,16,19-25,28
+  s_b94a1810a9d230::t_8f44cb27e1ff4c 1-3,5-15,17-18,26-27,29-52,55-108
+  s_b94a1810a9d230::t_aabd34617377b8 53-54
+oxidize-python/oxidize_python/internal/api/responses.py
+  s_707604e6d1df93::t_d4ed6382729329 118-123
+  s_707604e6d1df93::t_506d6b73baedf5 23-28
+  s_707604e6d1df93::t_0853f48f69f954 160-165
+  s_707604e6d1df93::t_a542070f4b0084 29-51
+  s_707604e6d1df93::t_bc6c6180be0e1e 124-159,166-241
+oxidize-python/oxidize_python/hf/hub.py
+  s_b94a1810a9d230::t_d519dd7619eb18 1-39,46-101
+  s_b94a1810a9d230::t_e13de2b04e4e9c 40-45
+oxidize-python/oxidize_python/internal/serviceinfo/models.py
+  s_707604e6d1df93::t_a648113d45b54d 8
+  s_707604e6d1df93::t_9c8cadb1d31519 38-39
+oxidize-python/oxidize_python/hf/test_hub.py
+  s_b94a1810a9d230::t_6b57f81664680c 1-15
+oxidize-golang/internal/cli/flags.go
+  s_c26d9eabf1e4ff::t_c9b874a1d5c885 4
+  s_c26d9eabf1e4ff::t_e75e7a86c860d3 8
+  s_b94a1810a9d230::t_1c7194b5b58df6 1-3,5-7,9-10,12-19
+  s_c26d9eabf1e4ff::t_d0d9ed20acfb25 11
+oxidize-golang/internal/cli/bench.go
+  s_b94a1810a9d230::t_9fc2bd876ea583 1-4,6-11,13-21,23-24,28-29,47-48,54-57,60-62,64-66,72-74,76-82,112-114,116-118,125,140,156-157,159-172
+  s_c26d9eabf1e4ff::t_feb55d5c4bf157 12,22,26-27,30-36,38,42-46,53,58-59,63,67-71,85,87,91-111,119-124,126-139,141-155,158
+  s_b94a1810a9d230::t_ac26abe9b0d01e 5,25,37,39-41,49-52,75,83-84,86,88-90,115
+oxidize-golang/internal/cli/genflags.go
+  s_b94a1810a9d230::t_0ebebcd9d490b7 107
+  s_b94a1810a9d230::t_894abd1eb24e19 29-39
+  s_c26d9eabf1e4ff::t_e74f09f117f1fb 42,69-75
+  s_b94a1810a9d230::t_877a26df597dbe 108
+  s_b94a1810a9d230::t_290805145e9747 58-68
+  s_c26d9eabf1e4ff::t_d4bf06bdd4b07e 1-28,40-41,43-57,76-106,111-127,140,142-151
+  s_c26d9eabf1e4ff::t_6b66106af93776 128-139,141
+  s_b94a1810a9d230::t_2d59aedbbb7001 109-110
+oxidize-golang/internal/cli/pipeline.go
+  s_b94a1810a9d230::t_6b061954106429 1-86
+oxidize-python/oxidize_python/internal/generate/cache.py
+  s_b94a1810a9d230::t_49195abde53b6c 38,44
+  s_b94a1810a9d230::t_7a5feb25962324 36-37,39-43
+  s_b94a1810a9d230::t_f90b8e36906aed 1-7,9-35,45-57
+  s_b94a1810a9d230::t_72af2572a921df 8
+oxidize-python/oxidize_python/internal/generate/__init__.py
+  s_707604e6d1df93::t_22a6aea6d3b182 1-2
+oxidize-python/oxidize_python/test_cli.py
+  s_707604e6d1df93::t_cf33939baac733 114
+  s_b94a1810a9d230::t_d001bc6edbbddf 1-3,5-6,8-31,50-58
+  s_707604e6d1df93::t_baa2c79cf519d0 7
+  s_707604e6d1df93::t_bf45be0f2e8e98 4,32-49,59-78,80-91,98-113,115-120
+  s_707604e6d1df93::t_64e1d7b0db55cf 92-97
+  s_707604e6d1df93::t_fcf8e5576977e7 79
+oxidize-python/oxidize_python/core/model/generation.py
+  s_707604e6d1df93::t_f09124db8c1de2 126-131
+oxidize-golang/internal/generate/paged_run.go
+  s_b94a1810a9d230::t_636a8f84923ea5 159
+  s_b94a1810a9d230::t_7cad64605a799b 1-14,97-121,123-125,127-133,135-158,160-162
+  s_b94a1810a9d230::t_8f870b2eaa8837 15-96,122,126,134
+oxidize-python/oxidize_python/core/flash_attention/flash_attention.py
+  s_091653dcd3c447::t_ce1463d5e16ce5 53,61,65,99,110,114-115
+oxidize-golang/internal/gguf/tensor_size.go
+  s_b94a1810a9d230::t_1bfa5c1e423c20 3-11
+oxidize-python/oxidize_python/cli_extras.py
+  s_b94a1810a9d230::t_e6163c5dd461d8 1-8,10-19,22-60,62-89
+  s_b94a1810a9d230::t_a8cfcc92a18329 20-21
+  s_b94a1810a9d230::t_f3dc265c1c0651 61
+  s_b94a1810a9d230::t_2ca386b274ef07 9
+oxidize-python/oxidize_python/internal/server.py
+  s_091653dcd3c447::t_4f451c360d6031 94-106,223-229,327
+  s_091653dcd3c447::t_d6217b9c97829d 177-184,382-384
+  s_b94a1810a9d230::t_e0ba5b9db44bb3 231-298
+  s_b94a1810a9d230::t_aff3ee7ffa336b 329-334
+  s_b94a1810a9d230::t_a1bf0160be8972 1,52,68,71-75,77-79,341-344,348,364,380,386-390
+  s_707604e6d1df93::t_42649c8302ee82 7,11-30,34-36,41-43,49-50,53-67,69-70,76,84-88,90-91,107-121,132-148,159-175,194,196,206,208-213,230,299-321,346-347,349,359-363,365,375-379,381,385
+  s_b94a1810a9d230::t_90422cf0213fc8 32-33
+  s_b94a1810a9d230::t_1689ef9d818a25 122-131
+  s_b94a1810a9d230::t_fedde2f46f31aa 350-358,366-374
+  s_b94a1810a9d230::t_e43e429805b671 44
+  s_707604e6d1df93::t_4a08df09f519b9 197-205
+  s_b94a1810a9d230::t_0ffce94406bb02 149-158
+oxidize-python/pyproject.toml
+  s_60cf989533bf83::t_d5bf6e617ec005 12-14
+oxidize-golang/internal/server/app.go
+  s_c26d9eabf1e4ff::t_5a6039c8e3c551 50,53-62
+  s_091653dcd3c447::t_9cf9dee2d6ca43 75-76
+  s_c26d9eabf1e4ff::t_d7f1d36747bd0d 18-27,36-45,49,51-52,63
+  s_c26d9eabf1e4ff::t_f09bd7cd4f7a6c 106-110
+  s_c26d9eabf1e4ff::t_61eefd4bb838cc 13
+  s_c26d9eabf1e4ff::t_656a46e9ca632f 8-9
+oxidize-python/oxidize_python/core/backends/__init__.py
+  s_707604e6d1df93::t_d93c698a3fce4a 3,5
+oxidize-golang/internal/cli/chat.go
+  s_c26d9eabf1e4ff::t_f52e994252431d 19-20,22,58
+  s_b94a1810a9d230::t_1896bfbd4ffc12 1-18,21,23-57,59
+oxidize-python/oxidize_python/core/backends/factory.py
+  s_707604e6d1df93::t_631d4f01d6daf6 1-27
+oxidize-golang/internal/generate/cache.go
+  s_b94a1810a9d230::t_1a7b46da94c0c8 1-78
+oxidize-golang/internal/server/mesh.go
+  s_091653dcd3c447::t_7d7ab5c55440be 1-25
+oxidize-golang/internal/server/server_test.go
+  s_091653dcd3c447::t_aab8d2bfb367b0 4,6,8-10,14,109-153,172-245
+oxidize-golang/core/model/loader_opts.go
+  s_c26d9eabf1e4ff::t_8905f6871aff13 7,20
+  s_c26d9eabf1e4ff::t_71362adb1847f4 1-6,8-19,21-43
+oxidize-golang/internal/server/sampling.go
+  s_c26d9eabf1e4ff::t_ea04d9e728a149 5-6,8,22
+  s_c26d9eabf1e4ff::t_9056d55fb73488 1-4,7,9-21,23-33
+oxidize-golang/internal/server/stream.go
+  s_b94a1810a9d230::t_0a84b7d0bda388 1-116
+oxidize-python/oxidize_python/core/model/loader.py
+  s_707604e6d1df93::t_2ce12b63692ea0 147-150
+  s_707604e6d1df93::t_6fb0ea99d71088 44-50
+oxidize-python/oxidize_python/cli.py
+  s_b94a1810a9d230::t_7248e83e72e72d 199-200
+  s_b94a1810a9d230::t_a3506b2c2dc56a 341-342
+  s_b94a1810a9d230::t_3d26d392082e96 90,95-96
+  s_707604e6d1df93::t_cb9b4a630c674c 41,44,53,55,66,69-74,77,80,82,91,94,108,111,113,117,120,132,138,141,143-147,152,160,172,188-189,210-211,301-302,306-309,314-317,359,362-381,383
+  s_b94a1810a9d230::t_32c4ab8e622312 173
+  s_b94a1810a9d230::t_3c37c844e99762 282
+  s_b94a1810a9d230::t_c8b12721de12cf 28-30
+  s_b94a1810a9d230::t_c4fa1b23eb6634 263
+  s_b94a1810a9d230::t_a8e00690c86c6c 336-340
+  s_b94a1810a9d230::t_82ead7b0bc859d 156-158
+  s_b94a1810a9d230::t_24f102454ce753 353
+  s_b94a1810a9d230::t_e9e3be6026a5ad 20-27,31-40,42-43,45-52,54,56-61,67,75-76,78-79,81,83-86,92-93,97-102,104-106,110,112,114-115,119,121-123,130,133-137,139-140,142,149,151,153-155,161-162,164-166,168-171,174-187,190-198,201-209,212-250,254-262,264-281,283-293,322-323,348-350,355-358,360-361,382,385-388
+  s_b94a1810a9d230::t_999d845aff035d 124-129,131
+  s_707604e6d1df93::t_0df77e29ec0f98 10
+oxidize-golang/internal/auth/auth.go
+  s_091653dcd3c447::t_8cf232d62952e5 32-34
+oxidize-golang/internal/server/routes.go
+  s_c26d9eabf1e4ff::t_195a8065eba4b4 78
+  s_b94a1810a9d230::t_1d0b5846872cb9 53-54,56,59-61
+  s_c26d9eabf1e4ff::t_6925e346947649 52
+  s_b94a1810a9d230::t_80af36ed9f7647 79,81,84-86
+oxidize-golang/core/model/loader.go
+  s_c26d9eabf1e4ff::t_2edd03b4b7c732 48-53
+  s_c26d9eabf1e4ff::t_86ef74d23877b6 102-107
+oxidize-python/oxidize_python/internal/api/schema.py
+  s_707604e6d1df93::t_29949da4da6f62 91-105,107,119,125-197
+oxidize-golang/internal/cli/mesh.go
+  s_b94a1810a9d230::t_d94bb464baf8a5 19-24,41-45
+  s_b94a1810a9d230::t_0fd084f5e1089d 18
+  s_b94a1810a9d230::t_7b148203630a2d 1-17,25-40,46-52
+oxidize-python/oxidize_python/internal/generate/stream.py
+  s_b94a1810a9d230::t_2c7224674365d4 1-61,63-64,66-102
+oxidize-python/oxidize_python/hf/__init__.py
+  s_b94a1810a9d230::t_8a825b4144e1ba 1-3
+oxidize-golang/internal/generate/completion.go
+  s_c26d9eabf1e4ff::t_a131eb363cba97 12-32,37-38,63-71,77
+  s_b94a1810a9d230::t_df18efd12ac5c7 41,45
+oxidize-golang/internal/server/realtime.go
+  s_091653dcd3c447::t_78e0cc97d45a16 1-149
+oxidize-python/oxidize_python/test_api.py
+  s_091653dcd3c447::t_ecfa018ba660e1 65-66,68-69
+  s_707604e6d1df93::t_e847ba7542f382 1-47
+  s_091653dcd3c447::t_838175e683daee 48-64,67
+oxidize-golang/internal/generate/runtime.go
+  s_b94a1810a9d230::t_3ee4e69a15f716 13
+  s_b94a1810a9d230::t_e5533ca534ff14 104-105,107-111
+  s_b94a1810a9d230::t_8781e7d4f04227 106
+  s_b94a1810a9d230::t_2561c6bdbf938f 172
+  s_c26d9eabf1e4ff::t_fe692603b92f97 23-33,48-49,53-92,117-120,129,131,142,155,199-202
+  s_b94a1810a9d230::t_9339246c67d755 36
+  s_b94a1810a9d230::t_a04e7f048bcd63 35,37-38
+  s_b94a1810a9d230::t_e39343bde5fbff 101-103,113
+  s_c26d9eabf1e4ff::t_2993ce9ad5ef22 204-223,225-245
+  s_b94a1810a9d230::t_0d89c189565c0e 145-152,156-171,173-196
+  s_b94a1810a9d230::t_29b0f1752f9748 121,123
+  s_b94a1810a9d230::t_c1dcbb3d0cb0ef 7
+oxidize-golang/core/backend/backend.go
+  s_c26d9eabf1e4ff::t_c63aa9b99e6664 60-61
+oxidize-python/oxidize_python/cli_flags.py
+  s_707604e6d1df93::t_f48b890d0f6bb9 1-27,39-61,66-82,94-122,134-141,145
+  s_b94a1810a9d230::t_25b44848c90a84 28-38
+  s_b94a1810a9d230::t_f10876c80098b0 123-133
+  s_b94a1810a9d230::t_db2e9c6a2fb79c 142-144
+  s_b94a1810a9d230::t_d4b5c4ff11e244 83-93
+  s_b94a1810a9d230::t_cc2657c501d364 62-65
+oxidize-python/oxidize_python/internal/generate/paged_run.py
+  s_b94a1810a9d230::t_58542f3a7b5914 1-5,10-17,28-79,81-117
+  s_b94a1810a9d230::t_02ae9fa044eea8 7-9
+  s_b94a1810a9d230::t_d1b023ad5f8c91 18-27
+  s_b94a1810a9d230::t_63c26159c73bcd 80
+oxidize-python/oxidize_python/core/backend.py
+  s_091653dcd3c447::t_705b0a0f8a0367 62-63
+oxidize-golang/internal/server/completion.go
+  s_c26d9eabf1e4ff::t_33aa976828bb63 9,11-13,17-19,21,24-36,44-46
+  s_c26d9eabf1e4ff::t_8520055b3744b0 20,23
+oxidize-golang/internal/cli/helpers.go
+  s_b94a1810a9d230::t_7e4514b139ff35 1-41
+oxidize-golang/internal/server/config.go
+  s_c26d9eabf1e4ff::t_9c0ee692e39764 3-6,8-17,27-43
+oxidize-golang/internal/generate/stream.go
+  s_b94a1810a9d230::t_e3da721a68873d 1-89
+oxidize-golang/internal/cli/resolve.go
+  s_b94a1810a9d230::t_983536f14d4195 1-70
+oxidize-python/oxidize_python/internal/generate/runtime.py
+  s_707604e6d1df93::t_87dba47d513e4a 6-17,20,42-46,58,62,64,67-88,96-113,152,219-226,233-238,240-244
+  s_b94a1810a9d230::t_dad6fe7f15d2ff 138
+  s_b94a1810a9d230::t_7bd94fe4222fa7 21-25,29-31
+  s_b94a1810a9d230::t_f9047506a60398 217-218,227-232,239
+  s_b94a1810a9d230::t_9c945ec11c83e2 214
+  s_b94a1810a9d230::t_01147c9e600006 116-121,124-136,139-149,153-163,165-206,212-213,215-216
+  s_b94a1810a9d230::t_084573b158a378 47-50
+  s_b94a1810a9d230::t_0071d2a3ec5717 164
+oxidize-golang/core/model/generation.go
+  s_c26d9eabf1e4ff::t_d6cd3182c5fac9 148-155
+oxidize-golang/core/tokenizer/tokenizer.go
+  s_c26d9eabf1e4ff::t_e9670286a35099 12
+  s_60cf989533bf83::t_fa02b253b1f3bc 274,276-287,289-339,341-342,344
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "29a7db30bae63c47a2ddceeb53905ea6e2e76095",
+  "prompts": {},
+  "sessions": {
+    "s_091653dcd3c447": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "8f987aaa-2126-4291-a76f-cdbbd9be3c6e",
+        "model": "custom:GPT-5.5-[ChatGPT]-0"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_60cf989533bf83": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "776173db-1372-42c2-823a-1d5a72dfdc21",
+        "model": "default"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_707604e6d1df93": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "85e63602-f46a-47ca-a9c8-481388bbeba9",
+        "model": "default"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_b94a1810a9d230": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "96d123a5-3fa2-417a-9589-da29791fdca5",
+        "model": "default"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_c26d9eabf1e4ff": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "cead9477-936e-45b9-8af2-6a1e90b22cf9",
+        "model": "default"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
