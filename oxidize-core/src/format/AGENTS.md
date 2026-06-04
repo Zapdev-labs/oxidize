@@ -22,7 +22,7 @@ format/
 | GGUF metadata read | `gguf.rs` | `GgufMetadataValue`, `GgufMetadataArray` |
 | Tokenizer format | `tokenizer.rs` | `TokenizerFormat::{SentencePiece,WordPiece,Bpe,Tiktoken}` |
 | SafeTensors mmap | `safetensors.rs` | Memory-mapped tensor loading |
-| Format conversion | `conversion.rs` | `convert_gguf_to_safetensors()`, `convert_safetensors_to_gguf()` |
+| Format conversion | `conversion.rs`, `safetensors_to_gguf.rs` | `map_hf_tensor_name()`, `convert_safetensors_to_gguf()` (CLI: `oxidize-convert`) |
 | Add new format | New `*.rs` + update `lib.rs` path | Follow `GgufFile` / `SafeTensorsFile` pattern |
 
 ## CONVENTIONS

@@ -81,6 +81,36 @@ async fn realtime_lifecycle_emits_session_created_and_response_events() {
     assert_eq!(next["error"]["message"], "no model loaded");
 }
 
+#[tokio::test]
+async fn realtime_rejects_missing_api_key_when_auth_enabled() {
+    let mut state = test_state();
+    state.auth = AuthConfig {
+        api_key: Some(Arc::from("secret-key")),
+    };
+    let app = build_app_with_state(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let url = format!("ws://{addr}/v1/realtime");
+    let error = tokio_tungstenite::connect_async(url)
+        .await
+        .expect_err("unauthenticated upgrade should fail");
+    assert!(
+        error.to_string().contains("401") || error.to_string().contains("Unauthorized"),
+        "unexpected error: {error}"
+    );
+
+    let url = format!("ws://{addr}/v1/realtime?api_key=secret-key");
+    let (mut socket, _) = tokio_tungstenite::connect_async(url)
+        .await
+        .expect("authenticated connect");
+    let first = next_json(&mut socket).await;
+    assert_eq!(first["type"], "session.created");
+}
+
 async fn next_json<S>(socket: &mut S) -> Value
 where
     S: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,

@@ -33,6 +33,8 @@ pub mod advanced_features;
 pub mod benchmark_suite;
 #[path = "format/conversion.rs"]
 pub mod conversion;
+#[path = "format/safetensors_to_gguf.rs"]
+pub mod safetensors_to_gguf;
 #[path = "compute/cpu_kernels.rs"]
 pub mod cpu_kernels;
 #[path = "validation/cross_validation.rs"]

@@ -15,14 +15,16 @@ use oxidize_core::offload::{
 };
 use oxidize_core::sampling::SamplingConfig;
 use oxidize_core::tensor::DType;
-use oxidize_core::tokenizer::{EncodeOptions, LoadedTokenizer, load_tokenizer_from_gguf_metadata};
+use oxidize_core::tokenizer::{
+    EncodeOptions, LoadedTokenizer, TiktokenTokenizer, load_tokenizer_from_gguf_metadata,
+};
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::io::{self, BufRead, Write};
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Command, ExitStatus};
 use std::sync::Arc;
 use std::task::Wake;
 use std::time::{Duration, Instant};
@@ -125,6 +127,9 @@ struct Args {
     pipe_max_tokens: usize,
     #[arg(long, hide = true, default_value_t = false)]
     serve_api: bool,
+    /// Skip starting the OpenAI-compatible API/WebSocket server during `oxidize run`.
+    #[arg(long, default_value_t = false)]
+    no_api: bool,
     #[arg(long, hide = true, default_value_t = false)]
     api_only: bool,
     #[arg(long, hide = true, default_value = "127.0.0.1")]
@@ -157,7 +162,7 @@ fn print_run_help() {
            oxidize run ./models/model.gguf \"hello\"\n\
            oxidize run Qwen/Qwen2.5-0.5B-Instruct-GGUF --file qwen2.5-0.5b-instruct-q4_k_m.gguf --chat\n\
            oxidize run TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF \"write a haiku\" --max-tokens 128\n\n\
-         Common options: --chat, --prompt, --max-tokens, --temperature, --backend, --threads"
+         Common options: --chat, --prompt, --max-tokens, --temperature, --backend, --threads, --no-api"
     );
 }
 
@@ -354,6 +359,9 @@ where
             Some(value) if !value.starts_with('-') && prompt.is_none() => {
                 prompt = Some(arg);
             }
+            Some("--no-api") => {
+                rewritten.push("--no-api".into());
+            }
             Some(
                 "--prompt" | "--model" | "--backend" | "--n-gpu-layers" | "--gpus"
                 | "--parallelism" | "--lora" | "--profile" | "--profile-output" | "--max-tokens"
@@ -392,6 +400,13 @@ where
     if !has_flag(&rewritten, "--kv-cache-dtype") {
         rewritten.push("--kv-cache-dtype".into());
         rewritten.push("q8".into());
+    }
+    let skip_api = has_flag(&rewritten, "--no-api")
+        || has_flag(&rewritten, "--mesh")
+        || has_flag(&rewritten, "--pipe-head")
+        || has_flag(&rewritten, "--pipe-tail");
+    if !skip_api && !has_flag(&rewritten, "--serve-api") {
+        rewritten.push("--serve-api".into());
     }
     Ok(rewritten)
 }
@@ -851,6 +866,28 @@ fn write_generated_response_with_clock<W: Write, F: FnMut() -> Instant>(
     Ok(response)
 }
 
+fn dflash_gguf_has_io_tensors(mapped: &MappedGgufFile) -> bool {
+    let infos = mapped.mapped_tensor_infos();
+    let has_output = infos
+        .iter()
+        .any(|tensor| tensor.name == "lm_head.weight" || tensor.name == "output.weight");
+    let has_embed = infos.iter().any(|tensor| {
+        tensor.name == "model.embed_tokens.weight" || tensor.name == "tok_embeddings.weight"
+    });
+    has_output && has_embed
+}
+
+fn dflash_byte_smoke_tokenizer() -> LoadedTokenizer {
+    static TOK: std::sync::OnceLock<LoadedTokenizer> = std::sync::OnceLock::new();
+    TOK.get_or_init(|| {
+        let bytes: &'static [[u8; 1]] =
+            Box::leak((0u8..=255).map(|byte| [byte]).collect::<Vec<_>>().into_boxed_slice());
+        let vocab: Vec<&[u8]> = bytes.iter().map(|entry| entry.as_slice()).collect();
+        LoadedTokenizer::Tiktoken(TiktokenTokenizer::new(&vocab, &[]))
+    })
+    .clone()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn generate_with_model<W: Write, M: Model>(
     prompt: &str,
@@ -920,15 +957,15 @@ fn generate_with_model<W: Write, M: Model>(
         }
     }
 
-    // Decode generated tokens back to text
     let response = tokenizer
         .decode_without_special_tokens(&generated_tokens)
         .unwrap_or_default();
-
     if !response.is_empty() {
         write!(writer, "{response}")?;
-        writer.flush()?;
+    } else if !generated_tokens.is_empty() {
+        write!(writer, "[generated token ids: {generated_tokens:?}]")?;
     }
+    writer.flush()?;
 
     let elapsed = started_at.elapsed();
     writeln!(writer)?;
@@ -1100,65 +1137,83 @@ fn run_profiled_inference(profiler: Profiler, output: Option<&PathBuf>) -> io::R
     command.status()
 }
 
-fn server_binary_path() -> io::Result<PathBuf> {
-    let exe = std::env::current_exe()?;
-    let sibling = exe.with_file_name("oxidize-server");
-    if sibling.exists() {
-        return Ok(sibling);
-    }
-    Ok(PathBuf::from("oxidize-server"))
+fn run_api_server_blocking(server_args: oxidize_server::Args) -> io::Result<()> {
+    let rt = tokio::runtime::Runtime::new()
+        .map_err(|error| io::Error::other(format!("tokio runtime: {error}")))?;
+    rt.block_on(async move {
+        let (effective_backend, warning) = server_args.backend.to_core_backend().effective();
+        if let Some(msg) = warning {
+            eprintln!("warning: {msg}");
+        }
+        eprintln!(
+            "server: loading model={} backend={} addr={}:{}",
+            server_args
+                .model
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "<none>".to_string()),
+            effective_backend.as_str(),
+            server_args.host,
+            server_args.port
+        );
+        let model = oxidize_server::load_model_runtime(&server_args).map_err(|error| {
+            io::Error::other(format!("failed to initialize server model: {error}"))
+        })?;
+        let api_key = std::env::var("OXIDIZE_API_KEY")
+            .ok()
+            .filter(|value| !value.is_empty());
+        let state = oxidize_server::AppState {
+            limiter: Arc::new(oxidize_server::RequestLimiter::new(
+                oxidize_server::RequestLimitConfig::default(),
+            )),
+            batcher: Arc::new(oxidize_server::ContinuousBatcher::default()),
+            auth: oxidize_server::AuthConfig {
+                api_key: api_key.map(Arc::<str>::from),
+            },
+            model,
+            paged: None,
+            mesh: None,
+            audit: Arc::new(oxidize_server::audit::AuditLogger::new()),
+            metrics: Arc::new(
+                oxidize_server::metrics::MetricsRegistry::new()
+                    .map_err(|error| io::Error::other(format!("metrics registry: {error}")))?,
+            ),
+        };
+        let app = oxidize_server::build_app_with_state(state);
+        let listener =
+            tokio::net::TcpListener::bind(SocketAddr::new(server_args.host, server_args.port))
+                .await
+                .map_err(|error| io::Error::other(format!("failed to bind server: {error}")))?;
+        eprintln!(
+            "server: listening on http://{}:{} (REST /v1/*, WebSocket ws://{}:{}/v1/realtime)",
+            server_args.host, server_args.port, server_args.host, server_args.port
+        );
+        let shutdown_signal = oxidize_server::shutdown::ShutdownSignal::new();
+        oxidize_server::shutdown::serve_with_graceful_shutdown(listener, app, shutdown_signal)
+            .await;
+        Ok(())
+    })
 }
 
-fn start_api_server(args: &Args) -> io::Result<Option<Child>> {
-    let Some(model_path) = args.model.as_ref() else {
-        return Ok(None);
-    };
-    let server = server_binary_path()?;
-    let mut command = Command::new(server);
-    command
-        .arg("--host")
-        .arg(&args.api_host)
-        .arg("--port")
-        .arg(args.api_port.to_string())
-        .arg("--model")
-        .arg(model_path)
-        .arg("--backend")
-        .arg(args.backend.as_arg())
-        .arg("--max-tokens")
-        .arg(args.max_tokens.to_string())
-        .arg("--temperature")
-        .arg(args.temperature.to_string())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
-
-    if let Some(ctx_size) = args.ctx_size {
-        command.arg("--ctx-size").arg(ctx_size.to_string());
+fn spawn_api_server_background(args: &Args) -> io::Result<()> {
+    if args.model.is_none() {
+        return Ok(());
     }
-    if args.cpu_optimized {
-        command.arg("--cpu-optimized");
-    }
-    if args.ram_offload {
-        command.arg("--ram-offload");
-    }
-    if args.mmap_prefetch {
-        command.arg("--mmap-prefetch");
-    }
-    if args.mmap_hugepages {
-        command.arg("--mmap-hugepages");
-    }
-    if args.layer_wise {
-        command.arg("--layer-wise");
-    }
-    if let Some(tokenizer_model) = &args.tokenizer_model {
-        command.arg("--tokenizer-model").arg(tokenizer_model);
-    }
-
-    let child = command.spawn()?;
+    let server_args = server_args_from_cli(args)?;
+    let host = server_args.host;
+    let port = server_args.port;
+    std::thread::Builder::new()
+        .name("oxidize-api".into())
+        .spawn(move || {
+            if let Err(error) = run_api_server_blocking(server_args) {
+                eprintln!("api server failed: {error}");
+            }
+        })?;
     eprintln!(
-        "api server: starting at http://{}:{} (OpenAI-compatible /v1/chat/completions)",
-        args.api_host, args.api_port
+        "api server: starting in background at http://{}:{} (REST /v1/*, WebSocket /v1/realtime)",
+        host, port
     );
-    Ok(Some(child))
+    Ok(())
 }
 
 fn server_backend_from_cli(backend: Backend) -> oxidize_server::Backend {
@@ -1211,62 +1266,7 @@ fn server_args_from_cli(args: &Args) -> io::Result<oxidize_server::Args> {
 }
 
 fn run_api_server_in_process(args: &Args) -> io::Result<()> {
-    let server_args = server_args_from_cli(args)?;
-    let rt = tokio::runtime::Runtime::new()
-        .map_err(|error| io::Error::other(format!("tokio runtime: {error}")))?;
-    rt.block_on(async move {
-        let (effective_backend, warning) = server_args.backend.to_core_backend().effective();
-        if let Some(msg) = warning {
-            eprintln!("warning: {msg}");
-        }
-        eprintln!(
-            "server: loading model={} backend={} addr={}:{}",
-            server_args
-                .model
-                .as_ref()
-                .map(|path| path.display().to_string())
-                .unwrap_or_else(|| "<none>".to_string()),
-            effective_backend.as_str(),
-            server_args.host,
-            server_args.port
-        );
-        let model = oxidize_server::load_model_runtime(&server_args).map_err(|error| {
-            io::Error::other(format!("failed to initialize server model: {error}"))
-        })?;
-        let api_key = std::env::var("OXIDIZE_API_KEY")
-            .ok()
-            .filter(|value| !value.is_empty());
-        let state = oxidize_server::AppState {
-            limiter: Arc::new(oxidize_server::RequestLimiter::new(
-                oxidize_server::RequestLimitConfig::default(),
-            )),
-            batcher: Arc::new(oxidize_server::ContinuousBatcher::default()),
-            auth: oxidize_server::AuthConfig {
-                api_key: api_key.map(Arc::<str>::from),
-            },
-            model,
-            paged: None,
-            mesh: None,
-            audit: Arc::new(oxidize_server::audit::AuditLogger::new()),
-            metrics: Arc::new(
-                oxidize_server::metrics::MetricsRegistry::new()
-                    .map_err(|error| io::Error::other(format!("metrics registry: {error}")))?,
-            ),
-        };
-        let app = oxidize_server::build_app_with_state(state);
-        let listener =
-            tokio::net::TcpListener::bind(SocketAddr::new(server_args.host, server_args.port))
-                .await
-                .map_err(|error| io::Error::other(format!("failed to bind server: {error}")))?;
-        eprintln!(
-            "server: listening on http://{}:{}",
-            server_args.host, server_args.port
-        );
-        let shutdown_signal = oxidize_server::shutdown::ShutdownSignal::new();
-        oxidize_server::shutdown::serve_with_graceful_shutdown(listener, app, shutdown_signal)
-            .await;
-        Ok(())
-    })
+    run_api_server_blocking(server_args_from_cli(args)?)
 }
 
 fn optimize_mapped_model_memory(mapped: &MappedGgufFile, args: &Args) {
@@ -1361,27 +1361,9 @@ fn main() {
         }
         return;
     }
-    let mut api_server = if args.serve_api {
-        match start_api_server(&args) {
-            Ok(child) => child,
-            Err(error) => {
-                eprintln!("failed to start API server: {error}");
-                None
-            }
-        }
-    } else {
-        None
-    };
-    if args.api_only {
-        match api_server.as_mut() {
-            Some(child) => match child.wait() {
-                Ok(status) => std::process::exit(status.code().unwrap_or(1)),
-                Err(error) => {
-                    eprintln!("api server failed: {error}");
-                    std::process::exit(1);
-                }
-            },
-            None => std::process::exit(1),
+    if args.serve_api && !args.no_api {
+        if let Err(error) = spawn_api_server_background(&args) {
+            eprintln!("failed to start API server: {error}");
         }
     }
     if args.pipe_head {
@@ -1533,7 +1515,7 @@ fn main() {
                     eprintln!("invalid --ctx-size: must be greater than 0");
                     return;
                 }
-                if is_dflash && args.draft_model.is_none() {
+                if is_dflash && args.draft_model.is_none() && !dflash_gguf_has_io_tensors(&mapped) {
                     agent_debug_log_cli(
                         "H5_OUTPUT_PROJECTION",
                         "oxidize-cli/src/main.rs:run_model_mode",
@@ -1541,7 +1523,7 @@ fn main() {
                         "{\"reason\":\"dflash_requires_target_model_context\"}",
                     );
                     eprintln!(
-                        "DFlash draft GGUF cannot be used as --model for normal generation. Use the full target GGUF with --model and pass this DFlash file via --draft-model."
+                        "DFlash draft GGUF cannot be used as --model for normal generation. Use the full target GGUF with --model and pass this DFlash file via --draft-model, or use a DFlash GGUF that includes lm_head.weight and model.embed_tokens.weight (e.g. *-fullhead.gguf)."
                     );
                     return;
                 }
@@ -1577,20 +1559,24 @@ fn main() {
                     .or_else(|_| load_tokenizer_from_gguf_metadata(metadata))
                 } else {
                     load_tokenizer_from_gguf_metadata(metadata).or_else(|_| {
-                        oxidize_core::tokenizer::load_tokenizer_from_gguf_file(
-                            args.tokenizer_model.as_deref(),
-                        )
-                        .and_then(|opt| {
-                            opt.ok_or_else(|| {
-                                "external tokenizer model did not contain tokenizer metadata"
-                                    .to_string()
-                            })
-                        })
-                        .map_err(|_e| {
-                            oxidize_core::tokenizer::TokenizerLoadError::MissingMetadata(
-                                "tokenizer.ggml.model",
+                        if is_dflash && dflash_gguf_has_io_tensors(&mapped) {
+                            Ok(dflash_byte_smoke_tokenizer())
+                        } else {
+                            oxidize_core::tokenizer::load_tokenizer_from_gguf_file(
+                                args.tokenizer_model.as_deref(),
                             )
-                        })
+                            .and_then(|opt| {
+                                opt.ok_or_else(|| {
+                                    "external tokenizer model did not contain tokenizer metadata"
+                                        .to_string()
+                                })
+                            })
+                            .map_err(|_e| {
+                                oxidize_core::tokenizer::TokenizerLoadError::MissingMetadata(
+                                    "tokenizer.ggml.model",
+                                )
+                            })
+                        }
                     })
                 };
                 let tokenizer = match tokenizer_result {
@@ -1751,12 +1737,16 @@ fn main() {
                                     }
                                 }
                             }
-                            if !m.output.is_loaded() {
+                            if !m.output.is_loaded() || !m.tok_embeddings.is_loaded() {
                                 eprintln!(
-                                    "DFlash draft GGUF is still missing an output projection/logits head; pass --tokenizer-model with a GGUF that has output.weight."
+                                    "DFlash draft GGUF is still missing token embeddings or lm_head; use *-fullhead.gguf or pass --tokenizer-model with a GGUF that has output.weight and embed_tokens."
                                 );
                                 return;
                             }
+                            eprintln!(
+                                "DFlash standalone generation using builtin lm_head/embeddings in {}",
+                                model_path.display()
+                            );
                             Box::new(m)
                         }
                         Err(error) => {
@@ -2352,7 +2342,7 @@ mod tests {
         .expect("run args should rewrite");
         assert!(args.contains(&OsString::from("--model")));
         assert!(args.contains(&OsString::from("local.gguf")));
-        assert!(!args.contains(&OsString::from("--serve-api")));
+        assert!(args.contains(&OsString::from("--serve-api")));
         assert!(args.contains(&OsString::from("--prompt")));
         assert!(args.contains(&OsString::from("hello")));
         assert!(args.contains(&OsString::from("--max-tokens")));
@@ -2401,6 +2391,19 @@ mod tests {
         .expect("run args should rewrite");
         assert!(args.contains(&OsString::from("--prompt")));
         assert!(!args.contains(&OsString::from("--api-only")));
+        assert!(args.contains(&OsString::from("--serve-api")));
+    }
+
+    #[test]
+    fn run_rewrite_no_api_skips_server() {
+        let args = rewrite_run_args(
+            ["oxidize", "run", "local.gguf", "--no-api"]
+                .into_iter()
+                .map(OsString::from),
+        )
+        .expect("run args should rewrite");
+        assert!(args.contains(&OsString::from("--no-api")));
+        assert!(!args.contains(&OsString::from("--serve-api")));
     }
 
     #[test]

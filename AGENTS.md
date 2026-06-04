@@ -120,11 +120,14 @@ make wasm     # outputs to dist/wasm
 - Keep `oxidize-py` (PyO3/maturin bindings) alongside the pure-Python `oxidize-python` package.
 - When syncing ports, bring new `master` Rust features into `oxidize-golang` (and follow-on Python work) rather than leaving ports stale.
 - On feature branches, stage and commit only files related to the task; exclude unrelated workspace changes.
+- `oxidize run <model>` should start the OpenAI-compatible HTTP/WebSocket server by default; use `--no-api` for local inference only.
+- Contributions should keep tests passing and use clear, ethical PR/markdown descriptions; include benchmarks when claiming performance changes.
 
 ## Learned Workspace Facts
-- `oxidize-golang/` is the active Go port of `oxidize-core` (e.g. branch `go/initial-oxidize-port`, PR review/fix cycles).
-- `oxidize-python/` is a pure-Python implementation (`oxidize_python` package, `pyproject.toml`, uv/pytest); initial layout mirrors `oxidize-golang`, then expands toward Rust-scale modules (e.g. `compute/tensor.rs`).
+- `oxidize-golang/` is the active Go port of `oxidize-core`; CLI lives in `internal/cli/` (`run`, `chat`, `bench`, `inspect`, `list`, `serve`); HF GGUF resolver in `hf/`.
+- `oxidize-python/` is a pure-Python implementation (`oxidize_python`, `pyproject.toml`, uv/pytest); CLI mirrors Go subcommands; HF resolver in `oxidize_python/hf/hub.py` with cache `~/.cache/oxidize/hf`.
 - Do not modify Rust crates when extending `oxidize-python`; port from `oxidize-golang` or Rust sources.
 - `oxidize-py/` is the PyO3 bindings crate, separate from `oxidize-python`.
 - Go and Python port tests reuse GGUF fixtures under `oxidize-core/tests/fixtures/` (e.g. `valid-v3.gguf`).
 - DFlash speculative decoding in `oxidize-core/src/model/dflash.rs` is an active port target for `oxidize-golang` (and downstream Python).
+- Rust `oxidize run` rewrites to `--serve-api` by default (background in-process server on `--api-host`/`--api-port`); realtime WebSocket at `ws://HOST:PORT/v1/realtime` (`oxidize-server/tests/realtime_ws.rs`).
