@@ -70,9 +70,19 @@ pub fn map_hf_tensor_name(name: &str) -> String {
                 "self_attn.k_proj.weight" => "attn_k.weight",
                 "self_attn.v_proj.weight" => "attn_v.weight",
                 "self_attn.o_proj.weight" => "attn_output.weight",
+                // Attention QKV/output biases (present in Qwen2 and similar
+                // architectures). Dropping these silently breaks attention and
+                // yields fluent-but-incoherent output.
+                "self_attn.q_proj.bias" => "attn_q.bias",
+                "self_attn.k_proj.bias" => "attn_k.bias",
+                "self_attn.v_proj.bias" => "attn_v.bias",
+                "self_attn.o_proj.bias" => "attn_output.bias",
                 "mlp.up_proj.weight" => "ffn_up.weight",
                 "mlp.gate_proj.weight" => "ffn_gate.weight",
                 "mlp.down_proj.weight" => "ffn_down.weight",
+                "mlp.up_proj.bias" => "ffn_up.bias",
+                "mlp.gate_proj.bias" => "ffn_gate.bias",
+                "mlp.down_proj.bias" => "ffn_down.bias",
                 "block_sparse_moe.gate.weight" => "ffn_gate_inp.weight",
                 _ => return name.to_owned(),
             };
@@ -110,6 +120,20 @@ pub fn parse_special_token_id(metadata: &BTreeMap<String, String>, key: &str) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn maps_qkv_attention_biases() {
+        // Qwen2-style attention biases must be preserved with canonical names;
+        // dropping them silently breaks attention (fluent-but-incoherent output).
+        for (hf, gguf) in [
+            ("model.layers.3.self_attn.q_proj.bias", "blk.3.attn_q.bias"),
+            ("model.layers.3.self_attn.k_proj.bias", "blk.3.attn_k.bias"),
+            ("model.layers.3.self_attn.v_proj.bias", "blk.3.attn_v.bias"),
+            ("model.layers.3.self_attn.o_proj.bias", "blk.3.attn_output.bias"),
+        ] {
+            assert_eq!(map_hf_tensor_name(hf), gguf, "bias mapping for {hf}");
+        }
+    }
 
     #[test]
     fn conversion_detects_arch_and_maps_tensors() {

@@ -13,6 +13,7 @@ use oxidize_core::offload::{
     LayerOffloadPlan, MultiGpuConfig, MultiGpuOffloadPlan, ParallelismStrategy, plan_layer_offload,
     plan_multi_gpu_offload,
 };
+use oxidize_core::safetensors_to_gguf::{SafetensorsToGgufConfig, convert_safetensors_to_gguf};
 use oxidize_core::sampling::SamplingConfig;
 use oxidize_core::tensor::DType;
 use oxidize_core::tokenizer::{
@@ -23,7 +24,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::io::{self, BufRead, Write};
 use std::net::{IpAddr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 use std::sync::Arc;
 use std::task::Wake;
@@ -230,46 +231,213 @@ fn resolve_model_spec(spec: &str, hf_file: Option<&str>) -> io::Result<PathBuf> 
 
     let api = hf_hub::api::sync::Api::new()
         .map_err(|error| io::Error::other(format!("hugging face init failed: {error}")))?;
-    let repo = api.model(spec.to_owned());
-    let filename = if let Some(file) = hf_file {
-        file.to_owned()
+    resolve_hf_model_spec(&api, spec, hf_file)
+}
+
+fn model_files_for_repo(
+    repo: &hf_hub::api::sync::ApiRepo,
+    spec: &str,
+) -> io::Result<(Vec<String>, Vec<String>)> {
+    let info = repo
+        .info()
+        .map_err(|error| io::Error::other(format!("failed to inspect HF repo {spec}: {error}")))?;
+    let mut ggufs = Vec::new();
+    let mut safetensors = Vec::new();
+    for sibling in info.siblings {
+        let name = sibling.rfilename;
+        let lower = name.to_ascii_lowercase();
+        if lower.ends_with(".gguf") {
+            ggufs.push(name);
+        } else if lower.ends_with(".safetensors") {
+            // Skip LoRA/PEFT adapter shards — they are low-rank deltas, not full
+            // weights. Merging them into the base GGUF as standalone tensors
+            // corrupts the model (produces real-token gibberish). Only the base
+            // model weights should be converted.
+            let base = lower.rsplit('/').next().unwrap_or(&lower);
+            if base.starts_with("adapter_model") || base.starts_with("adapter.") {
+                continue;
+            }
+            safetensors.push(name);
+        }
+    }
+    ggufs.sort();
+    safetensors.sort();
+    Ok((ggufs, safetensors))
+}
+
+fn select_default_gguf(ggufs: &[String]) -> Option<String> {
+    const PREFERRED: &[&str] = &[
+        "q4_k_m", "q4_k_s", "q4_0", "q5_k_m", "q5_0", "q3_k_m", "q8_0",
+    ];
+    for needle in PREFERRED {
+        if let Some(name) = ggufs
+            .iter()
+            .find(|name| name.to_ascii_lowercase().contains(needle))
+        {
+            return Some(name.clone());
+        }
+    }
+    ggufs.first().cloned()
+}
+
+fn oxidize_cache_dir() -> io::Result<PathBuf> {
+    if let Some(home) = std::env::var_os("HOME") {
+        Ok(PathBuf::from(home).join(".cache").join("oxidize"))
     } else {
-        let info = repo.info().map_err(|error| {
-            io::Error::other(format!("failed to inspect HF repo {spec}: {error}"))
-        })?;
-        let mut ggufs = info
-            .siblings
-            .into_iter()
-            .map(|sibling| sibling.rfilename)
-            .filter(|name| name.to_ascii_lowercase().ends_with(".gguf"))
-            .collect::<Vec<_>>();
-        ggufs.sort();
-        match ggufs.as_slice() {
-            [only] => only.clone(),
-            [] => {
-                return Err(io::Error::other(format!(
-                    "HF repo {spec} does not list any .gguf files"
-                )));
-            }
-            many => {
-                return Err(io::Error::other(format!(
-                    "HF repo {spec} has multiple .gguf files; rerun with --file <name>. Candidates:\n{}",
-                    many.iter()
-                        .take(25)
-                        .map(|name| format!("  {name}"))
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                )));
-            }
+        Ok(std::env::temp_dir().join("oxidize"))
+    }
+}
+
+fn cache_safe_name(spec: &str) -> String {
+    spec.chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+        .collect()
+}
+
+fn copy_hf_file_to_dir(
+    repo: &hf_hub::api::sync::ApiRepo,
+    filename: &str,
+    dir: &Path,
+) -> io::Result<PathBuf> {
+    let source = repo.get(filename).map_err(|error| {
+        io::Error::other(format!("failed to download hf file {filename}: {error}"))
+    })?;
+    let target = dir.join(filename);
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if !target.exists() {
+        std::fs::copy(&source, &target)?;
+    }
+    Ok(target)
+}
+
+fn convert_hf_safetensors_repo(
+    repo: &hf_hub::api::sync::ApiRepo,
+    spec: &str,
+    safetensors: &[String],
+) -> io::Result<PathBuf> {
+    let cache_root = oxidize_cache_dir()?
+        .join("hf-converted")
+        .join(cache_safe_name(spec));
+    let source_dir = cache_root.join("source");
+    std::fs::create_dir_all(&source_dir)?;
+    let output = cache_root.join("model.gguf");
+    if output.exists() {
+        eprintln!("using cached converted GGUF {}", output.display());
+        return Ok(output);
+    }
+
+    eprintln!(
+        "hf://{spec}: no .gguf files, downloading {} SafeTensors file(s) for local GGUF conversion",
+        safetensors.len()
+    );
+    for filename in safetensors {
+        copy_hf_file_to_dir(repo, filename, &source_dir)?;
+    }
+    let config_path = match copy_hf_file_to_dir(repo, "config.json", &source_dir) {
+        Ok(path) => Some(path),
+        Err(error) => {
+            eprintln!("hf://{spec}: config.json unavailable during conversion: {error}");
+            None
         }
     };
+    // The tokenizer ships separately from the weights on HF. Fetch the standard
+    // tokenizer files so the converter can embed tokenizer.ggml.* metadata into
+    // the GGUF; without them the model loads but has no usable tokenizer.
+    for filename in [
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "special_tokens_map.json",
+    ] {
+        if let Err(error) = copy_hf_file_to_dir(repo, filename, &source_dir) {
+            eprintln!("hf://{spec}: {filename} unavailable during conversion: {error}");
+        }
+    }
 
-    eprintln!("downloading hf://{spec}/{filename}");
-    repo.get(&filename).map_err(|error| {
+    // Always convert from the directory so the converter can resolve the
+    // architecture and tokenizer from config.json / tokenizer.json sitting
+    // alongside the weights. Passing a single .safetensors file would hide
+    // those and fall back to deriving the arch from the filename.
+    let input = source_dir.clone();
+    let config = SafetensorsToGgufConfig {
+        config_path,
+        ..SafetensorsToGgufConfig::default()
+    };
+    eprintln!("converting hf://{spec} SafeTensors to {}", output.display());
+    convert_safetensors_to_gguf(&input, &output, &config).map_err(|error| {
         io::Error::other(format!(
-            "failed to download hf://{spec}/{filename}: {error}"
+            "failed to convert hf://{spec} SafeTensors to GGUF: {error}"
         ))
-    })
+    })?;
+    Ok(output)
+}
+
+fn gguf_repo_candidates(spec: &str) -> Vec<String> {
+    let mut candidates = Vec::new();
+    if spec.ends_with("-GGUF") || spec.ends_with("-gguf") {
+        candidates.push(spec.to_owned());
+        return candidates;
+    }
+    candidates.push(format!("{spec}-GGUF"));
+    if let Some((_, model)) = spec.rsplit_once('/') {
+        candidates.push(format!("bartowski/{model}-GGUF"));
+        candidates.push(format!("unsloth/{model}-GGUF"));
+        candidates.push(format!("TheBloke/{model}-GGUF"));
+    }
+    candidates
+}
+
+fn resolve_hf_model_spec(
+    api: &hf_hub::api::sync::Api,
+    spec: &str,
+    hf_file: Option<&str>,
+) -> io::Result<PathBuf> {
+    let mut attempted = Vec::new();
+    for candidate in std::iter::once(spec.to_owned()).chain(gguf_repo_candidates(spec).into_iter())
+    {
+        if attempted.contains(&candidate) {
+            continue;
+        }
+        attempted.push(candidate.clone());
+        let repo = api.model(candidate.clone());
+        let (ggufs, safetensors) = match model_files_for_repo(&repo, &candidate) {
+            Ok(files) => files,
+            Err(error) if candidate != spec => {
+                eprintln!("hf://{candidate}: {error}; trying next GGUF mirror");
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        let filename = if let Some(file) = hf_file {
+            file.to_owned()
+        } else if let Some(filename) = select_default_gguf(&ggufs) {
+            if ggufs.len() > 1 {
+                eprintln!(
+                    "hf://{candidate}: selected {filename} (use --file <name> to choose another quant)"
+                );
+            }
+            filename
+        } else {
+            if candidate == spec && !safetensors.is_empty() {
+                return convert_hf_safetensors_repo(&repo, &candidate, &safetensors);
+            }
+            eprintln!("hf://{candidate}: no .gguf files; trying known GGUF mirrors");
+            continue;
+        };
+
+        eprintln!("downloading hf://{candidate}/{filename}");
+        return repo.get(&filename).map_err(|error| {
+            io::Error::other(format!(
+                "failed to download hf://{candidate}/{filename}: {error}"
+            ))
+        });
+    }
+
+    Err(io::Error::other(format!(
+        "could not find a downloadable GGUF for {spec}; tried: {}. Pass an exact GGUF repo with --file <name> if needed.",
+        attempted.join(", ")
+    )))
 }
 
 fn has_flag(args: &[OsString], name: &str) -> bool {
@@ -390,6 +558,8 @@ where
     if let Some(prompt) = prompt {
         rewritten.push("--prompt".into());
         rewritten.push(prompt);
+    } else if !has_flag(&rewritten, "--chat") {
+        rewritten.push("--chat".into());
     }
 
     for flag in ["--cpu-optimized", "--mmap-prefetch", "--mmap-hugepages"] {
@@ -549,6 +719,7 @@ impl Backend {
         }
     }
 
+    #[allow(dead_code)]
     fn as_arg(self) -> &'static str {
         match self {
             Backend::Cpu => "cpu",
@@ -740,6 +911,76 @@ fn run_chat_mode<R: BufRead, W: Write>(reader: &mut R, writer: &mut W) -> io::Re
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn run_model_chat_mode<R: BufRead, W: Write, M: Model>(
+    reader: &mut R,
+    writer: &mut W,
+    model: &mut M,
+    tokenizer: &LoadedTokenizer,
+    max_tokens: usize,
+    temperature: f32,
+    top_p: Option<f32>,
+    top_k: Option<usize>,
+) -> io::Result<()> {
+    writeln!(
+        writer,
+        "╭─ oxidize chat ─────────────────────────────────────╮"
+    )?;
+    writeln!(
+        writer,
+        "│ API server is running if enabled; type /exit to quit │"
+    )?;
+    writeln!(
+        writer,
+        "│ multiline: end a line with \\                         │"
+    )?;
+    writeln!(
+        writer,
+        "╰──────────────────────────────────────────────────────╯"
+    )?;
+    let mut history = ConversationHistory::default();
+    loop {
+        write!(writer, "\nYou › ")?;
+        writer.flush()?;
+        let Some(input) = read_chat_prompt(reader, writer)? else {
+            break;
+        };
+        let prompt = input.trim();
+        if prompt.eq_ignore_ascii_case("/exit")
+            || prompt.eq_ignore_ascii_case("exit")
+            || prompt.eq_ignore_ascii_case("quit")
+        {
+            writeln!(writer, "bye")?;
+            break;
+        }
+        if prompt.eq_ignore_ascii_case("/history") {
+            writeln!(writer, "{}", history.render())?;
+            continue;
+        }
+        if prompt.eq_ignore_ascii_case("/clear") {
+            history.clear();
+            writeln!(writer, "conversation history cleared")?;
+            continue;
+        }
+        if prompt.is_empty() {
+            continue;
+        }
+        writeln!(writer, "\nAssistant ›")?;
+        let response = generate_with_model(
+            prompt,
+            model,
+            tokenizer,
+            max_tokens,
+            temperature,
+            top_p,
+            top_k,
+            writer,
+        )?;
+        history.add_turn(prompt, &response);
+    }
+    Ok(())
+}
+
 fn run_single_shot_mode<W: Write>(prompt: &str, writer: &mut W) -> io::Result<()> {
     let prompt = prompt.trim();
     if prompt.is_empty() {
@@ -880,8 +1121,12 @@ fn dflash_gguf_has_io_tensors(mapped: &MappedGgufFile) -> bool {
 fn dflash_byte_smoke_tokenizer() -> LoadedTokenizer {
     static TOK: std::sync::OnceLock<LoadedTokenizer> = std::sync::OnceLock::new();
     TOK.get_or_init(|| {
-        let bytes: &'static [[u8; 1]] =
-            Box::leak((0u8..=255).map(|byte| [byte]).collect::<Vec<_>>().into_boxed_slice());
+        let bytes: &'static [[u8; 1]] = Box::leak(
+            (0u8..=255)
+                .map(|byte| [byte])
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        );
         let vocab: Vec<&[u8]> = bytes.iter().map(|entry| entry.as_slice()).collect();
         LoadedTokenizer::Tiktoken(TiktokenTokenizer::new(&vocab, &[]))
     })
@@ -1413,7 +1658,7 @@ fn main() {
         }
         return;
     }
-    if args.chat {
+    if args.chat && args.model.is_none() {
         let stdin = io::stdin();
         let mut reader = stdin.lock();
         let stdout = io::stdout();
@@ -1816,6 +2061,24 @@ fn main() {
                     }
                 };
 
+                if args.chat {
+                    let stdin = io::stdin();
+                    let mut reader = stdin.lock();
+                    if let Err(error) = run_model_chat_mode(
+                        &mut reader,
+                        &mut writer,
+                        &mut model,
+                        &tokenizer,
+                        args.max_tokens,
+                        args.temperature,
+                        args.top_p,
+                        args.top_k,
+                    ) {
+                        eprintln!("chat mode failed: {error}");
+                    }
+                    return;
+                }
+
                 if let Err(error) = generate_with_model(
                     &args.prompt,
                     &mut model,
@@ -2046,6 +2309,27 @@ mod tests {
             Some(ParallelismStrategy::Pipeline)
         );
         assert_eq!(parse_parallelism("invalid"), None);
+    }
+
+    #[test]
+    fn selects_preferred_gguf_quantization() {
+        let files = vec![
+            "model-q8_0.gguf".to_owned(),
+            "model-q4_k_m.gguf".to_owned(),
+            "model-q5_0.gguf".to_owned(),
+        ];
+        assert_eq!(
+            select_default_gguf(&files),
+            Some("model-q4_k_m.gguf".to_owned())
+        );
+    }
+
+    #[test]
+    fn cache_safe_name_removes_repo_separator() {
+        assert_eq!(
+            cache_safe_name("freakyskittle/codeforge-slm-1.5b"),
+            "freakyskittle-codeforge-slm-1-5b"
+        );
     }
 
     #[test]
@@ -2378,7 +2662,21 @@ mod tests {
         .expect("run args should rewrite");
         assert!(args.contains(&OsString::from("--max-tokens")));
         assert!(!args.contains(&OsString::from("--prompt")));
+        assert!(args.contains(&OsString::from("--chat")));
         assert!(!args.contains(&OsString::from("--api-only")));
+    }
+
+    #[test]
+    fn run_rewrite_without_prompt_opens_chat_tui_and_server() {
+        let args = rewrite_run_args(
+            ["oxidize", "run", "local.gguf"]
+                .into_iter()
+                .map(OsString::from),
+        )
+        .expect("run args should rewrite");
+        assert!(args.contains(&OsString::from("--chat")));
+        assert!(args.contains(&OsString::from("--serve-api")));
+        assert!(!args.contains(&OsString::from("--prompt")));
     }
 
     #[test]

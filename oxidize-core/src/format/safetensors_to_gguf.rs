@@ -51,6 +51,22 @@ pub fn convert_safetensors_to_gguf(
         merge_hf_config_metadata(&mut metadata, &arch, cfg_path)?;
     }
 
+    // Embed tokenizer metadata so the converted GGUF is self-contained. HF
+    // models ship the tokenizer separately (tokenizer.json + config), which the
+    // GGUF tokenizer loader cannot read directly — without this the model loads
+    // but fails with MissingMetadata("tokenizer.ggml.model").
+    let tokenizer_dir = config_dir
+        .clone()
+        .or_else(|| cfg_path.and_then(|p| p.parent().map(Path::to_path_buf)));
+    if let Some(dir) = tokenizer_dir {
+        if let Err(error) = merge_hf_tokenizer_metadata(&mut metadata, &dir) {
+            eprintln!(
+                "warning: failed to embed tokenizer metadata from {}: {error:#}",
+                dir.display()
+            );
+        }
+    }
+
     let output_tensors = build_output_tensors(&tensors, config.map_hf_tensor_names)?;
     let gguf_bytes = write_gguf(3, &metadata, &output_tensors, 32)?;
     std::fs::write(output, &gguf_bytes)
@@ -315,6 +331,26 @@ fn merge_hf_config_metadata(
     insert_u32(meta, &prefix("feed_forward_length"), "intermediate_size");
     insert_u32(meta, &prefix("attention.head_count"), "num_attention_heads");
     insert_u32(meta, &prefix("attention.head_count_kv"), "num_key_value_heads");
+
+    // Per-head dimension. Prefer an explicit `head_dim` field; otherwise derive
+    // it from hidden_size / num_attention_heads. Writing key_length/value_length
+    // lets the engine size the KV cache from metadata instead of inferring it
+    // from tensor dimensions (which would otherwise mis-derive GQA head dims).
+    let head_dim = cfg
+        .get("head_dim")
+        .and_then(json_u32)
+        .or_else(|| {
+            let hidden = cfg.get("hidden_size").and_then(json_u32)?;
+            let heads = cfg.get("num_attention_heads").and_then(json_u32)?;
+            (heads > 0).then(|| hidden / heads)
+        });
+    if let Some(head_dim) = head_dim {
+        meta.insert(prefix("attention.key_length"), GgufMetadataValue::Uint32(head_dim));
+        meta.insert(
+            prefix("attention.value_length"),
+            GgufMetadataValue::Uint32(head_dim),
+        );
+    }
     insert_u32(meta, &prefix("vocab_size"), "vocab_size");
     insert_u32(
         meta,
@@ -350,6 +386,215 @@ fn json_f32(v: &Value) -> Option<f32> {
     v.as_f64().map(|n| n as f32)
 }
 
+/// Parse the HuggingFace tokenizer files in `dir` and embed the equivalent
+/// `tokenizer.ggml.*` metadata into the GGUF. Supports BPE (gpt2-style, e.g.
+/// Qwen/Llama-3) and Unigram (SentencePiece, e.g. Llama/Gemma) tokenizers.
+fn merge_hf_tokenizer_metadata(
+    meta: &mut BTreeMap<String, GgufMetadataValue>,
+    dir: &Path,
+) -> Result<()> {
+    let tok_path = dir.join("tokenizer.json");
+    if !tok_path.is_file() {
+        bail!(
+            "tokenizer.json not found in {} (HF repo may omit it)",
+            dir.display()
+        );
+    }
+    let raw = std::fs::read_to_string(&tok_path)
+        .with_context(|| format!("failed to read {}", tok_path.display()))?;
+    let tok: Value = serde_json::from_str(&raw).context("invalid tokenizer.json")?;
+    let model = tok
+        .get("model")
+        .ok_or_else(|| anyhow!("tokenizer.json missing model section"))?;
+    let model_type = model.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+    // vocab: token -> id. Determine the highest id so the GGUF token arrays are
+    // dense (id == array index), which the loader relies on.
+    let vocab = model
+        .get("vocab")
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| anyhow!("tokenizer.json model.vocab missing or not an object"))?;
+    let mut max_id = 0u64;
+    for v in vocab.values() {
+        if let Some(id) = v.as_u64() {
+            max_id = max_id.max(id);
+        }
+    }
+
+    // added_tokens (special markers like <|im_start|>) may sit above the base
+    // vocab and define the real upper bound.
+    let added = tok.get("added_tokens").and_then(|v| v.as_array());
+    if let Some(added) = added {
+        for entry in added {
+            if let Some(id) = entry.get("id").and_then(|v| v.as_u64()) {
+                max_id = max_id.max(id);
+            }
+        }
+    }
+
+    let len = (max_id + 1) as usize;
+    let mut tokens: Vec<String> = vec![String::new(); len];
+    // 1 = NORMAL, 3 = CONTROL (matches ggml token_type values).
+    let mut token_types: Vec<i32> = vec![1; len];
+    let mut scores: Vec<f32> = vec![0.0; len];
+
+    for (token, id_val) in vocab {
+        if let Some(id) = id_val.as_u64() {
+            tokens[id as usize] = token.clone();
+        }
+    }
+    // Unigram stores [token, score] pairs instead of a flat map.
+    if model_type.eq_ignore_ascii_case("unigram") {
+        if let Some(arr) = model.get("vocab").and_then(|v| v.as_array()) {
+            for (id, pair) in arr.iter().enumerate() {
+                if id >= len {
+                    break;
+                }
+                if let Some(p) = pair.as_array() {
+                    if let Some(t) = p.first().and_then(|v| v.as_str()) {
+                        tokens[id] = t.to_owned();
+                    }
+                    if let Some(s) = p.get(1).and_then(|v| v.as_f64()) {
+                        scores[id] = s as f32;
+                    }
+                }
+            }
+        }
+    }
+    if let Some(added) = added {
+        for entry in added {
+            let Some(id) = entry.get("id").and_then(|v| v.as_u64()) else {
+                continue;
+            };
+            let id = id as usize;
+            if id >= len {
+                continue;
+            }
+            if let Some(content) = entry.get("content").and_then(|v| v.as_str()) {
+                tokens[id] = content.to_owned();
+            }
+            if entry.get("special").and_then(|v| v.as_bool()).unwrap_or(false) {
+                token_types[id] = 3;
+            }
+        }
+    }
+
+    let ggml_model = match model_type.to_ascii_lowercase().as_str() {
+        "bpe" => "gpt2",
+        "unigram" => "llama",
+        "wordpiece" => "bert",
+        other => bail!("unsupported tokenizer.json model.type {other:?}"),
+    };
+    meta.insert(
+        "tokenizer.ggml.model".to_owned(),
+        GgufMetadataValue::String(ggml_model.to_owned()),
+    );
+    meta.insert(
+        "tokenizer.ggml.tokens".to_owned(),
+        string_array(tokens),
+    );
+    meta.insert(
+        "tokenizer.ggml.token_type".to_owned(),
+        i32_array(token_types),
+    );
+    if ggml_model == "llama" {
+        meta.insert("tokenizer.ggml.scores".to_owned(), f32_array(scores));
+    }
+
+    if ggml_model == "gpt2" {
+        let merges = parse_merges(model.get("merges"))?;
+        meta.insert("tokenizer.ggml.merges".to_owned(), string_array(merges));
+    }
+
+    // Special token ids and chat template come from config.json /
+    // tokenizer_config.json. tokenizer_config.json wins when both are present.
+    apply_special_token_ids(meta, dir);
+
+    Ok(())
+}
+
+/// Merges are stored either as `"a b"` strings (older tokenizers) or as
+/// `["a", "b"]` pairs (tokenizers >= 0.20). Normalize both to `"a b"`.
+fn parse_merges(merges: Option<&Value>) -> Result<Vec<String>> {
+    let Some(Value::Array(arr)) = merges else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::with_capacity(arr.len());
+    for entry in arr {
+        match entry {
+            Value::String(s) => out.push(s.clone()),
+            Value::Array(pair) => {
+                let left = pair.first().and_then(|v| v.as_str());
+                let right = pair.get(1).and_then(|v| v.as_str());
+                if let (Some(l), Some(r)) = (left, right) {
+                    out.push(format!("{l} {r}"));
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(out)
+}
+
+fn apply_special_token_ids(meta: &mut BTreeMap<String, GgufMetadataValue>, dir: &Path) {
+    let mut set_id = |meta: &mut BTreeMap<_, _>, key: &str, json: &Value, field: &str| {
+        if let Some(id) = json.get(field).and_then(json_u32) {
+            meta.insert(key.to_owned(), GgufMetadataValue::Uint32(id));
+        }
+    };
+
+    for name in ["config.json", "tokenizer_config.json"] {
+        let path = dir.join(name);
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(json) = serde_json::from_str::<Value>(&raw) else {
+            continue;
+        };
+        set_id(meta, "tokenizer.ggml.bos_token_id", &json, "bos_token_id");
+        set_id(meta, "tokenizer.ggml.eos_token_id", &json, "eos_token_id");
+        set_id(
+            meta,
+            "tokenizer.ggml.padding_token_id",
+            &json,
+            "pad_token_id",
+        );
+        set_id(
+            meta,
+            "tokenizer.ggml.unknown_token_id",
+            &json,
+            "unk_token_id",
+        );
+        if let Some(tmpl) = json.get("chat_template").and_then(|v| v.as_str()) {
+            meta.insert(
+                "tokenizer.chat_template".to_owned(),
+                GgufMetadataValue::String(tmpl.to_owned()),
+            );
+        }
+    }
+}
+
+fn string_array(values: Vec<String>) -> GgufMetadataValue {
+    GgufMetadataValue::Array(GgufMetadataArray {
+        element_type: GgufMetadataType::String,
+        values: values.into_iter().map(GgufMetadataValue::String).collect(),
+    })
+}
+
+fn i32_array(values: Vec<i32>) -> GgufMetadataValue {
+    GgufMetadataValue::Array(GgufMetadataArray {
+        element_type: GgufMetadataType::Int32,
+        values: values.into_iter().map(GgufMetadataValue::Int32).collect(),
+    })
+}
+
+fn f32_array(values: Vec<f32>) -> GgufMetadataValue {
+    GgufMetadataValue::Array(GgufMetadataArray {
+        element_type: GgufMetadataType::Float32,
+        values: values.into_iter().map(GgufMetadataValue::Float32).collect(),
+    })
+}
+
 fn build_output_tensors(
     tensors: &[(String, Dtype, Vec<usize>, Vec<u8>)],
     map_hf_names: bool,
@@ -365,7 +610,20 @@ fn build_output_tensors(
         let (ggml_type, data) = match dtype {
             Dtype::F32 => (0_u32, raw_data.clone()),
             Dtype::F16 => (1_u32, raw_data.clone()),
-            Dtype::BF16 => (0_u32, bf16_to_f32(raw_data)),
+            // ggml does not have a distinct unsigned byte tensor type. For
+            // byte-packed quantized payloads (for example NF4 stored as U8 in
+            // SafeTensors), preserve the bytes losslessly and mark the tensor
+            // as ggml I8. Consumers that understand the model-specific
+            // quantization metadata can reinterpret the payload as unsigned
+            // bytes without changing the file contents.
+            Dtype::U8 | Dtype::I8 => (24_u32, raw_data.clone()),
+            Dtype::I16 => (25_u32, raw_data.clone()),
+            Dtype::I32 => (26_u32, raw_data.clone()),
+            Dtype::I64 => (27_u32, raw_data.clone()),
+            // GGUF/ggml supports BF16 tensors directly (ggml_type 30). Keep
+            // BF16 payloads packed instead of expanding them to F32, which is
+            // both lossless and avoids doubling large text-encoder weights.
+            Dtype::BF16 => (30_u32, raw_data.clone()),
             other => bail!("unsupported SafeTensors dtype {other:?} in tensor {name}"),
         };
         out.push(OutputTensor {
@@ -377,16 +635,6 @@ fn build_output_tensors(
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(out)
-}
-
-fn bf16_to_f32(bytes: &[u8]) -> Vec<u8> {
-    assert!(bytes.len() % 2 == 0, "BF16 buffer length must be even");
-    let mut out = Vec::with_capacity(bytes.len() * 2);
-    for chunk in bytes.chunks_exact(2) {
-        let bits = u32::from(u16::from_le_bytes([chunk[0], chunk[1]])) << 16;
-        out.extend_from_slice(&bits.to_le_bytes());
-    }
-    out
 }
 
 fn write_gguf(

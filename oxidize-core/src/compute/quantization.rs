@@ -160,6 +160,12 @@ pub fn quantized_size(
     let (values_per_block, bytes_per_block) = match quantization {
         GgufQuantizationType::F32 => (1, 4),
         GgufQuantizationType::F16 => (1, 2),
+        GgufQuantizationType::I8 => (1, 1),
+        GgufQuantizationType::I16 => (1, 2),
+        GgufQuantizationType::I32 => (1, 4),
+        GgufQuantizationType::I64 => (1, 8),
+        GgufQuantizationType::F64 => (1, 8),
+        GgufQuantizationType::BF16 => (1, 2),
         GgufQuantizationType::Q4_0 => (QK4_0, BLOCK_Q4_0_SIZE),
         GgufQuantizationType::Q4_1 => (QK4_1, BLOCK_Q4_1_SIZE),
         GgufQuantizationType::Q5_0 => (QK5_0, BLOCK_Q5_0_SIZE),
@@ -429,6 +435,10 @@ pub fn dequantize_scalar(
         }
         GgufQuantizationType::F16 => {
             dequantize_f16_scalar(input, output)?;
+            Ok(())
+        }
+        GgufQuantizationType::BF16 => {
+            dequantize_bf16_scalar(input, output)?;
             Ok(())
         }
         GgufQuantizationType::Q4_0 => {
@@ -874,6 +884,19 @@ pub fn dequantize_f16_scalar(input: &[u8], output: &mut [f32]) -> Result<(), Qua
 
     for (src, dst) in input.chunks_exact(2).zip(output.iter_mut()) {
         *dst = f16_le_to_f32(src);
+    }
+
+    Ok(())
+}
+
+pub fn dequantize_bf16_scalar(input: &[u8], output: &mut [f32]) -> Result<(), QuantizationError> {
+    validate_layout(GgufQuantizationType::BF16, input, output, 2, 1)?;
+
+    // BF16 is the high 16 bits of an IEEE-754 f32, so widening is a left shift
+    // by 16 bits with zero-filled mantissa — exact, no rounding.
+    for (src, dst) in input.chunks_exact(2).zip(output.iter_mut()) {
+        let bits = u32::from(u16::from_le_bytes([src[0], src[1]])) << 16;
+        *dst = f32::from_bits(bits);
     }
 
     Ok(())
@@ -1617,6 +1640,23 @@ pub fn dequantize_iq1_m_scalar(input: &[u8], output: &mut [f32]) -> Result<(), Q
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bf16_dequant_widens_to_exact_f32() {
+        // BF16 is the top 16 bits of an f32; widening must be exact (no rounding).
+        let values = [0.0_f32, 1.0, -2.0, 0.5, 123.5, -0.015625];
+        let mut input = Vec::new();
+        for &v in &values {
+            let bf16 = (v.to_bits() >> 16) as u16;
+            input.extend_from_slice(&bf16.to_le_bytes());
+        }
+        let mut output = vec![0.0_f32; values.len()];
+        dequantize_bf16_scalar(&input, &mut output).expect("bf16 dequant should succeed");
+        for (got, want) in output.iter().zip(values.iter()) {
+            // All chosen values are exactly representable in BF16.
+            assert_eq!(got, want, "bf16 dequant mismatch");
+        }
+    }
 
     #[test]
     fn q6_k_dequant_decodes_both_128_groups_independently() {
