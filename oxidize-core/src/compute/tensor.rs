@@ -1213,8 +1213,9 @@ pub fn gemv_quantized_experts_f32(
             let rowb = &matrix[row_start..row_start + row_bytes];
             let qs = if shared { 0 } else { slot };
             let q8 = &q8k[qs * q8_stride..(qs + 1) * q8_stride];
-            // Safety: q4_k_q8_k_avx2_available() checked above.
-            *out = unsafe { q4_k_q8_k_row_dot_avx2(rowb, blocks_per_row, q8) };
+            // Safety: q4_k_q8_k_avx2_available() checked above; dispatcher picks
+            // the VNNI kernel when the runtime supports it.
+            *out = unsafe { q4_k_q8_k_row_dot(rowb, blocks_per_row, q8) };
         });
         return Ok(());
     }
@@ -1316,6 +1317,34 @@ fn q4_k_q8_k_avx2_available() -> bool {
     }
 }
 
+#[inline]
+fn q4_k_q8_k_vnni_available() -> bool {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        is_x86_feature_detected!("avx512f")
+            && is_x86_feature_detected!("avx512bw")
+            && is_x86_feature_detected!("avx512vnni")
+    }
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+    {
+        false
+    }
+}
+
+/// Dispatch one Q4_K × Q8_K row dot to the best available kernel. VNNI is
+/// preferred; AVX2 is the fallback. The caller must have verified
+/// [`q4_k_q8_k_avx2_available`] (VNNI implies AVX2-class availability here).
+#[inline]
+unsafe fn q4_k_q8_k_row_dot(row: &[u8], blocks_per_row: usize, q8k: &[u8]) -> f32 {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        if q4_k_q8_k_vnni_available() {
+            return unsafe { q4_k_q8_k_row_dot_vnni(row, blocks_per_row, q8k) };
+        }
+    }
+    unsafe { q4_k_q8_k_row_dot_avx2(row, blocks_per_row, q8k) }
+}
+
 /// Q4_K × Q8_K fused GEMV. Quantizes the input vector to Q8_K (int8 + scale
 /// per 256-element block, plus per-16 sums for the min correction) once, then
 /// computes each output row using AVX2 `maddubs`/`madd` integer dot products
@@ -1361,8 +1390,9 @@ fn gemv_q4_k_q8_k_fused(
     let compute_row = |row_idx: usize| -> f32 {
         let row_start = row_idx * row_bytes;
         let row = &weights[row_start..row_start + row_bytes];
-        // Safety: q4_k_q8_k_avx2_available() was checked before dispatch.
-        unsafe { q4_k_q8_k_row_dot_avx2(row, blocks_per_row, &q8k) }
+        // Safety: q4_k_q8_k_avx2_available() was checked before dispatch;
+        // dispatcher picks the VNNI kernel when the runtime supports it.
+        unsafe { q4_k_q8_k_row_dot(row, blocks_per_row, &q8k) }
     };
 
     if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
@@ -1622,6 +1652,72 @@ unsafe fn q4_k_q8_k_row_dot_avx2(row: &[u8], blocks_per_row: usize, q8k: &[u8]) 
             min_acc += ms2 as i32 * bs2;
         }
         let pos_acc = unsafe { hsum_i32_avx2(vec_pos) };
+        acc += d_w * d_q8 * pos_acc as f32 - dmin_w * d_q8 * min_acc as f32;
+    }
+    acc
+}
+
+/// AVX-512 VNNI variant of [`q4_k_q8_k_row_dot_avx2`]. Uses `_mm512_dpbusd_epi32`
+/// to fuse the `maddubs` + `madd(ones)` int8→int32 reduction into a single
+/// instruction, and processes the two scale sub-groups (g1, g2) of each `gp`
+/// iteration together in one 512-bit lane group. Integer math is identical to
+/// the AVX2 kernel; only the instruction sequence differs, so results match
+/// bit-for-bit in the integer domain.
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f,avx512bw,avx512vnni")]
+#[allow(unsafe_op_in_unsafe_fn)]
+unsafe fn q4_k_q8_k_row_dot_vnni(row: &[u8], blocks_per_row: usize, q8k: &[u8]) -> f32 {
+    let mask = _mm256_set1_epi8(0x0f);
+    let mut acc = 0.0_f32;
+    for block_idx in 0..blocks_per_row {
+        let w_ptr = row.as_ptr().wrapping_add(block_idx * BLOCK_Q4_K_SIZE);
+        let q8_ptr = q8k.as_ptr().wrapping_add(block_idx * BLOCK_Q8_K_BYTES);
+
+        let d_w = f16_le_to_f32([*w_ptr, *w_ptr.add(1)]);
+        let dmin_w = f16_le_to_f32([*w_ptr.add(2), *w_ptr.add(3)]);
+        let d_q8 = f32::from_le_bytes([
+            *q8_ptr,
+            *q8_ptr.add(1),
+            *q8_ptr.add(2),
+            *q8_ptr.add(3),
+        ]);
+        let scales = std::slice::from_raw_parts(w_ptr.add(4), 12);
+        let qs = w_ptr.add(16);
+        let q8 = q8_ptr.add(4);
+        let bsums = q8_ptr.add(4 + QK_K);
+
+        let mut vec_pos = _mm512_setzero_si512();
+        let mut min_acc: i32 = 0;
+        for gp in 0..4 {
+            let g1 = gp * 2;
+            let g2 = g1 + 1;
+            let (s1, ms1) = get_scale_min_k4(g1, scales);
+            let (s2, ms2) = get_scale_min_k4(g2, scales);
+            let packed = _mm256_loadu_si256(qs.add(gp * 32) as *const __m256i);
+            // q4_low pairs with group g1's q8 (low half), q4_high with g2 (high half).
+            let q4_low = _mm256_and_si256(packed, mask);
+            let q4_high = _mm256_and_si256(_mm256_srli_epi16(packed, 4), mask);
+            // g1 and g2 q8 quants are contiguous (g2 = g1 + 1) → one 512-bit load.
+            let q8_512 = _mm512_loadu_si512(q8.add(g1 * 32) as *const __m512i);
+            let q4_512 = _mm512_inserti64x4(_mm512_castsi256_si512(q4_low), q4_high, 1);
+            // dpbusd: unsigned q4 (0..15) × signed q8 → int32, 16 lanes.
+            // Lanes 0..8 = group g1 (scale s1), lanes 8..16 = group g2 (scale s2).
+            let prod = _mm512_dpbusd_epi32(_mm512_setzero_si512(), q4_512, q8_512);
+            let scale_v = _mm512_inserti64x4(
+                _mm512_castsi256_si512(_mm256_set1_epi32(s1 as i32)),
+                _mm256_set1_epi32(s2 as i32),
+                1,
+            );
+            vec_pos = _mm512_add_epi32(vec_pos, _mm512_mullo_epi32(prod, scale_v));
+
+            let bs1 = read_q8_k_bsum(bsums, g1 * 2) as i32
+                + read_q8_k_bsum(bsums, g1 * 2 + 1) as i32;
+            let bs2 = read_q8_k_bsum(bsums, g2 * 2) as i32
+                + read_q8_k_bsum(bsums, g2 * 2 + 1) as i32;
+            min_acc += ms1 as i32 * bs1;
+            min_acc += ms2 as i32 * bs2;
+        }
+        let pos_acc = _mm512_reduce_add_epi32(vec_pos);
         acc += d_w * d_q8 * pos_acc as f32 - dmin_w * d_q8 * min_acc as f32;
     }
     acc
@@ -4919,6 +5015,48 @@ mod tests {
                 "batched q4_k gemm value {actual} diverged from repeated gemv {reference}"
             );
         }
+    }
+
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[test]
+    fn q4_k_q8_k_row_dot_vnni_matches_avx2() {
+        if !q4_k_q8_k_vnni_available() || !q4_k_q8_k_avx2_available() {
+            return; // No VNNI hardware in this environment; nothing to compare.
+        }
+
+        let blocks_per_row = 4;
+        let cols = blocks_per_row * QK_K;
+        let mut row = vec![0_u8; blocks_per_row * BLOCK_Q4_K_SIZE];
+        let mut state: u32 = 0x1357_9BDF;
+        let mut next = || {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 16) as u8
+        };
+        for block in row.chunks_exact_mut(BLOCK_Q4_K_SIZE) {
+            block[0] = 0x00;
+            block[1] = 0x34; // d = 0.25
+            block[2] = 0x00;
+            block[3] = 0x28; // min = 0.03125
+            for (i, scale) in block[4..16].iter_mut().enumerate() {
+                *scale = ((i * 7 + 1) & 0x3f) as u8;
+            }
+            for byte in &mut block[16..] {
+                *byte = next();
+            }
+        }
+
+        let vector = (0..cols)
+            .map(|i| ((i as f32 * 0.021).sin() * 0.6) + ((i % 5) as f32 - 2.0) * 0.05)
+            .collect::<Vec<_>>();
+        let mut q8k = vec![0_u8; blocks_per_row * BLOCK_Q8_K_BYTES];
+        quantize_vector_q8_k_into(&vector, blocks_per_row, &mut q8k);
+
+        let avx2 = unsafe { q4_k_q8_k_row_dot_avx2(&row, blocks_per_row, &q8k) };
+        let vnni = unsafe { q4_k_q8_k_row_dot_vnni(&row, blocks_per_row, &q8k) };
+        assert!(
+            (avx2 - vnni).abs() <= 1e-4 * (1.0 + avx2.abs()),
+            "VNNI row dot {vnni} diverged from AVX2 {avx2}"
+        );
     }
 
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
