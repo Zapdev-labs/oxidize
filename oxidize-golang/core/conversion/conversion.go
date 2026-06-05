@@ -87,15 +87,20 @@ func MapHFTensorName(name string) string {
 				return "blk." + layer + ".attn"
 			}
 			child := rest[1]
+			// Preserve the trailing ".weight"/".bias" so attention biases
+			// (present in Qwen2 etc.) map to attn_*.bias instead of colliding
+			// with the weight tensor. Dropping/mis-naming them silently breaks
+			// attention and yields fluent-but-incoherent output.
+			suffix := rest[len(rest)-1]
 			switch child {
 			case "q_proj":
-				return "blk." + layer + ".attn_q.weight"
+				return "blk." + layer + ".attn_q." + suffix
 			case "k_proj":
-				return "blk." + layer + ".attn_k.weight"
+				return "blk." + layer + ".attn_k." + suffix
 			case "v_proj":
-				return "blk." + layer + ".attn_v.weight"
+				return "blk." + layer + ".attn_v." + suffix
 			case "o_proj":
-				return "blk." + layer + ".attn_output.weight"
+				return "blk." + layer + ".attn_output." + suffix
 			case "q_norm":
 				return "blk." + layer + ".attn_q_norm.weight"
 			case "k_norm":
@@ -107,13 +112,14 @@ func MapHFTensorName(name string) string {
 				return "blk." + layer + ".ffn"
 			}
 			child := rest[1]
+			suffix := rest[len(rest)-1]
 			switch child {
 			case "gate_proj":
-				return "blk." + layer + ".ffn_gate.weight"
+				return "blk." + layer + ".ffn_gate." + suffix
 			case "up_proj":
-				return "blk." + layer + ".ffn_up.weight"
+				return "blk." + layer + ".ffn_up." + suffix
 			case "down_proj":
-				return "blk." + layer + ".ffn_down.weight"
+				return "blk." + layer + ".ffn_down." + suffix
 			case "experts":
 				return "blk." + layer + ".ffn_gate_exps.weight"
 			}

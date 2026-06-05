@@ -66,11 +66,16 @@ def map_hf_tensor_name(name: str) -> str:
                     if len(rest) < 2:
                         return f"blk.{layer}.attn"
                     child = rest[1]
+                    # Preserve the trailing ".weight"/".bias" so attention
+                    # biases (Qwen2 etc.) map to attn_*.bias instead of
+                    # colliding with the weight tensor. Mis-naming them
+                    # silently breaks attention (fluent-but-incoherent output).
+                    suffix = rest[-1]
                     mapping = {
-                        "q_proj": f"blk.{layer}.attn_q.weight",
-                        "k_proj": f"blk.{layer}.attn_k.weight",
-                        "v_proj": f"blk.{layer}.attn_v.weight",
-                        "o_proj": f"blk.{layer}.attn_output.weight",
+                        "q_proj": f"blk.{layer}.attn_q.{suffix}",
+                        "k_proj": f"blk.{layer}.attn_k.{suffix}",
+                        "v_proj": f"blk.{layer}.attn_v.{suffix}",
+                        "o_proj": f"blk.{layer}.attn_output.{suffix}",
                         "q_norm": f"blk.{layer}.attn_q_norm.weight",
                         "k_norm": f"blk.{layer}.attn_k_norm.weight",
                     }
@@ -79,10 +84,11 @@ def map_hf_tensor_name(name: str) -> str:
                     if len(rest) < 2:
                         return f"blk.{layer}.ffn"
                     child = rest[1]
+                    suffix = rest[-1]
                     mapping = {
-                        "gate_proj": f"blk.{layer}.ffn_gate.weight",
-                        "up_proj": f"blk.{layer}.ffn_up.weight",
-                        "down_proj": f"blk.{layer}.ffn_down.weight",
+                        "gate_proj": f"blk.{layer}.ffn_gate.{suffix}",
+                        "up_proj": f"blk.{layer}.ffn_up.{suffix}",
+                        "down_proj": f"blk.{layer}.ffn_down.{suffix}",
                         "experts": f"blk.{layer}.ffn_gate_exps.weight",
                     }
                     return mapping.get(child, f"blk.{layer}.ffn_" + "_".join(rest[1:]))

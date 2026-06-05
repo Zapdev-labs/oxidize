@@ -33,6 +33,12 @@ func TestMapHFTensorName(t *testing.T) {
 		"model.layers.1.mlp.gate_proj.weight":   "blk.1.ffn_gate.weight",
 		"model.layers.2.input_layernorm.weight": "blk.2.attn_norm.weight",
 		"lm_head.weight":                "output.weight",
+		// Attention biases (Qwen2 etc.) must keep the .bias suffix and not
+		// collide with the weight tensor.
+		"model.layers.0.self_attn.q_proj.bias": "blk.0.attn_q.bias",
+		"model.layers.0.self_attn.k_proj.bias": "blk.0.attn_k.bias",
+		"model.layers.0.self_attn.v_proj.bias": "blk.0.attn_v.bias",
+		"model.layers.0.self_attn.o_proj.bias": "blk.0.attn_output.bias",
 	}
 	for in, want := range cases {
 		if got := MapHFTensorName(in); got != want {
