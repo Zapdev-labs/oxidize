@@ -217,7 +217,7 @@ pub fn quantize_scalar(
             }
             input.len() / 4
         }
-        GgufQuantizationType::F16 => {
+        GgufQuantizationType::F16 | GgufQuantizationType::BF16 => {
             if !input.len().is_multiple_of(2) {
                 return Err(QuantizationError::InvalidInputLength {
                     quantization: source,
@@ -262,7 +262,7 @@ pub fn quantize_scalar_with_imatrix(
             }
             input.len() / 4
         }
-        GgufQuantizationType::F16 => {
+        GgufQuantizationType::F16 | GgufQuantizationType::BF16 => {
             if !input.len().is_multiple_of(2) {
                 return Err(QuantizationError::InvalidInputLength {
                     quantization: source,
@@ -312,7 +312,7 @@ pub fn quantize_mixed_scalar(
 
     let source_bytes_per_value = match source {
         GgufQuantizationType::F32 => 4,
-        GgufQuantizationType::F16 => 2,
+        GgufQuantizationType::F16 | GgufQuantizationType::BF16 => 2,
         other => return Err(QuantizationError::UnsupportedQuantizationType(other)),
     };
     let mut expected_total_bytes = 0_usize;

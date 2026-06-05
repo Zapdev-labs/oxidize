@@ -1,5 +1,6 @@
 use crate::conversion::map_hf_tensor_name;
-use crate::gguf::{GgufMetadataArray, GgufMetadataType, GgufMetadataValue};
+use crate::gguf::{GgufMetadataArray, GgufMetadataType, GgufMetadataValue, GgufQuantizationType};
+use crate::quantization::{quantize_scalar, quantized_size};
 use anyhow::{Context, Result, anyhow, bail};
 use safetensors::tensor::{Dtype, SafeTensors};
 use serde_json::Value;
@@ -30,6 +31,96 @@ struct OutputTensor {
     dimensions: Vec<u64>,
     ggml_type: u32,
     data: Vec<u8>,
+}
+
+/// Requantize every quantizable tensor in an existing GGUF to `target`.
+///
+/// Tensors that are already quantized (not F32/F16/BF16) or are 1-D
+/// (embeddings/biases) are copied verbatim.  The returned bytes are a
+/// valid GGUF v3 file ready to be written to disk.
+pub fn quantize_gguf_to_target(
+    input: &[u8],
+    target: GgufQuantizationType,
+) -> Result<Vec<u8>> {
+    use crate::gguf::parse_gguf;
+
+    let parsed = parse_gguf(input).map_err(|e| anyhow!("{e:?}"))?;
+    let mut metadata = parsed.metadata.clone();
+
+    // Map GgufQuantizationType → ggml_type ID used in file_type metadata.
+    let file_type_id: u32 = match target {
+        GgufQuantizationType::Q8_0 => 7,
+        GgufQuantizationType::Q4_0 => 2,
+        GgufQuantizationType::Q4_1 => 3,
+        GgufQuantizationType::Q5_0 => 8,
+        GgufQuantizationType::Q5_1 => 9,
+        _ => u32::MAX,
+    };
+    if file_type_id != u32::MAX {
+        metadata.insert(
+            "general.file_type".to_owned(),
+            GgufMetadataValue::Uint32(file_type_id),
+        );
+    }
+
+    let mut tensors: Vec<OutputTensor> = Vec::with_capacity(parsed.tensor_infos.len());
+    for info in &parsed.tensor_infos {
+        let source = GgufQuantizationType::from_ggml_type(info.ggml_type);
+        let value_count: usize = info.dimensions.iter().map(|&d| d as usize).product();
+
+        let input_size = quantized_size(source, value_count).map_err(|e| anyhow!("{e:?}"))?;
+        let start = info.absolute_offset as usize;
+        let tensor_bytes = &input[start..start + input_size];
+
+        let can_quantize = info.dimensions.len() >= 2
+            && matches!(
+                source,
+                GgufQuantizationType::F32
+                    | GgufQuantizationType::F16
+                    | GgufQuantizationType::BF16
+            )
+            && quantized_size(target, value_count).is_ok();
+
+        let (ggml_type, data) = if can_quantize {
+            let out_size = quantized_size(target, value_count).map_err(|e| anyhow!("{e:?}"))?;
+            let mut out = vec![0_u8; out_size];
+            quantize_scalar(source, target, tensor_bytes, &mut out)
+                .map_err(|e| anyhow!("quantize {}: {e:?}", info.name))?;
+            let type_id: u32 = match target {
+                GgufQuantizationType::F32 => 0,
+                GgufQuantizationType::F16 => 1,
+                GgufQuantizationType::Q4_0 => 2,
+                GgufQuantizationType::Q4_1 => 3,
+                GgufQuantizationType::Q5_0 => 6,
+                GgufQuantizationType::Q5_1 => 7,
+                GgufQuantizationType::Q8_0 => 8,
+                GgufQuantizationType::Q2_K => 10,
+                GgufQuantizationType::Q3_K_S => 11,
+                GgufQuantizationType::Q3_K_M => 12,
+                GgufQuantizationType::Q3_K_L => 13,
+                GgufQuantizationType::Q4_K_S => 14,
+                GgufQuantizationType::Q4_K_M => 15,
+                GgufQuantizationType::Q5_K_S => 16,
+                GgufQuantizationType::Q5_K_M => 17,
+                GgufQuantizationType::Q6_K => 18,
+                other => {
+                    bail!("unsupported GGUF target type {other:?}")
+                }
+            };
+            (type_id, out)
+        } else {
+            (info.ggml_type, tensor_bytes.to_vec())
+        };
+
+        tensors.push(OutputTensor {
+            name: info.name.clone(),
+            dimensions: info.dimensions.clone(),
+            ggml_type,
+            data,
+        });
+    }
+
+    write_gguf(parsed.version, &metadata, &tensors, parsed.alignment)
 }
 
 /// Convert a single SafeTensors file or a HuggingFace model directory to GGUF v3.

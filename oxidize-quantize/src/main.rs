@@ -230,7 +230,7 @@ fn build_output_tensors(
         let should_quantize = tensor.dimensions.len() >= 2
             && matches!(
                 source,
-                GgufQuantizationType::F32 | GgufQuantizationType::F16
+                GgufQuantizationType::F32 | GgufQuantizationType::F16 | GgufQuantizationType::BF16
             )
             && quantized_size(target, value_count).is_ok();
         let (ggml_type, data) = if should_quantize {
@@ -262,9 +262,18 @@ fn ensure_gguf_target_supported(target: GgufQuantizationType) -> Result<()> {
         | GgufQuantizationType::Q4_1
         | GgufQuantizationType::Q5_0
         | GgufQuantizationType::Q5_1
-        | GgufQuantizationType::Q8_0 => Ok(()),
+        | GgufQuantizationType::Q8_0
+        | GgufQuantizationType::Q2_K
+        | GgufQuantizationType::Q3_K_S
+        | GgufQuantizationType::Q3_K_M
+        | GgufQuantizationType::Q3_K_L
+        | GgufQuantizationType::Q4_K_S
+        | GgufQuantizationType::Q4_K_M
+        | GgufQuantizationType::Q5_K_S
+        | GgufQuantizationType::Q5_K_M
+        | GgufQuantizationType::Q6_K => Ok(()),
         other => bail!(
-            "GGUF writing currently supports F32/F16/Q4_0/Q4_1/Q5_0/Q5_1/Q8_0 targets, got {other:?}"
+            "unsupported quantization target: {other:?}"
         ),
     }
 }
@@ -288,6 +297,15 @@ fn gguf_type_id(quantization: GgufQuantizationType) -> Result<u32> {
         GgufQuantizationType::Q5_0 => Ok(6),
         GgufQuantizationType::Q5_1 => Ok(7),
         GgufQuantizationType::Q8_0 => Ok(8),
+        GgufQuantizationType::Q2_K => Ok(10),
+        GgufQuantizationType::Q3_K_S => Ok(11),
+        GgufQuantizationType::Q3_K_M => Ok(12),
+        GgufQuantizationType::Q3_K_L => Ok(13),
+        GgufQuantizationType::Q4_K_S => Ok(14),
+        GgufQuantizationType::Q4_K_M => Ok(15),
+        GgufQuantizationType::Q5_K_S => Ok(16),
+        GgufQuantizationType::Q5_K_M => Ok(17),
+        GgufQuantizationType::Q6_K => Ok(18),
         other => bail!("unsupported GGUF tensor type: {other:?}"),
     }
 }
