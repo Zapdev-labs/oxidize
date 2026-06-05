@@ -30,7 +30,16 @@ Three independently shippable units in `oxidize-core`/`oxidize-server`, then por
 - **Ports:** Mirror into `oxidize-golang` (conversion package) and `oxidize-python`.
 - **Validation:** Round-trip test — convert fixture, load via normal loader, one forward pass.
 
-## Component 3 — Continuous batching (Feature/Speed)
+## Component 3 — Continuous batching (Feature/Speed) — DEFERRED
+**Finding (2026-06-05):** Not implementable at the server layer. `Model::forward`
+drives a single contiguous KV cache; `forward_many` is sequential single-sequence
+forwards; the paged scheduler only does block accounting, not real paged KV in the
+forward pass. Genuine batching needs a paged KV cache threaded through every
+architecture's attention in `inference.rs` (~3456 lines) + backends, plus a batched
+multi-sequence decode step. Large, high-risk prerequisite — deferred, not faked.
+See memory `continuous-batching-blocked-on-paged-kv`.
+
+### Original plan (pending prerequisite)
 - **Files:** `oxidize-server/src/runtime/`, paged-attention `scheduler.rs`.
 - **Change:** Decode-step request merging so concurrent generations share a forward
   pass; admission + step-merge loop threaded through the OpenAI streaming handler.
