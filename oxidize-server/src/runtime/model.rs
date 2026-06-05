@@ -7,7 +7,6 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use std::time::Instant;
 
 use oxidize_core::{
     dflash::{DFlashConfig, DFlashDraftModel},
@@ -314,13 +313,17 @@ fn optimize_mapped_model_memory(mapped: &MappedGgufFile, args: &Args) {
         tracing::warn!(%error, "mmap hugepage hint failed");
     }
     if args.ram_offload {
-        let started = Instant::now();
-        let checksum = mapped.prefault_pages();
+        let threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(8);
+        let (mlocked, checksum, elapsed_ms) = mapped.prefault_pages_locked(threads);
         tracing::info!(
             gib = mapped.bytes().len() as f64 / 1024.0 / 1024.0 / 1024.0,
-            elapsed_ms = started.elapsed().as_millis(),
+            elapsed_ms,
+            threads,
+            mlocked,
             checksum,
-            "ram offload prefaulted model pages"
+            "ram offload prefaulted model pages in parallel"
         );
     }
 }
