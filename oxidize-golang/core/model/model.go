@@ -174,10 +174,19 @@ func (a Architecture) UsesMoE() bool {
 }
 
 // UsesParallelAttnFFN returns true if the architecture parallelizes the
-// attention and FFN computations.
+// attention and FFN computations. Gemma is sequential (with sandwich norms),
+// so only Phi qualifies.
 func (a Architecture) UsesParallelAttnFFN() bool {
-	return a == ArchGemmaModel || a == ArchPhiModel
+	return a == ArchPhiModel
 }
+
+// UsesSandwichNorm reports whether the architecture applies post-attention and
+// post-FFN normalization before each residual add (Gemma 2/3/4).
+func (a Architecture) UsesSandwichNorm() bool { return a == ArchGemmaModel }
+
+// UsesGeluFFN reports whether the dense FFN uses GeGLU (tanh-GELU) rather than
+// SwiGLU (SiLU). Gemma uses GeGLU.
+func (a Architecture) UsesGeluFFN() bool { return a == ArchGemmaModel }
 
 // UsesMLA returns true if the architecture uses multi-latent attention.
 func (a Architecture) UsesMLA() bool { return a == ArchDeepSeekModel }

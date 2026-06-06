@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from oxidize_python.core.quantization import types as quant
-from oxidize_python.internal.gguf import parse as gguf_parse
+from oxidize_python.internal.gguf.parse import parse as parse_gguf
 from oxidize_python.internal.gguf.errors import GgufError
 from oxidize_python.internal.gguf.types import File, MetadataType, MetadataValue, TensorInfo
 
@@ -39,7 +39,7 @@ class MappedFile:
     def load_mapped(cls, path: str) -> MappedFile:
         raw = Path(path).read_bytes()
         try:
-            parsed = gguf_parse.parse(raw)
+            parsed = parse_gguf(raw)
         except GgufError as err:
             raise ParseError(err) from err
         except OSError as err:

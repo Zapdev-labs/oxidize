@@ -8,6 +8,7 @@ members = [
     "oxidize-train",
     "oxidize-finetuning",
     "oxidize-convert",
+    "oxidize-ffi",
 ]
 resolver = "3"
 

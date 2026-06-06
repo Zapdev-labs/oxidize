@@ -27,17 +27,56 @@ func (s *LlamaDecoderStack) runDenseOrMoEFFN(layer *DecoderLayer, normed, out []
 	if err := layer.MLPUp.Gemv(normed, up); err != nil {
 		return err
 	}
-	for i := 0; i < inter; i++ {
+	applyGLU(gate, up, s.Config.GeluFFN)
+	return layer.MLPDown.Gemv(gate, out)
+}
+
+// applyGLU computes gate[i] = activation(gate[i]) * up[i] in place, using
+// GeGLU (tanh-GELU) when gelu is true, otherwise SwiGLU (SiLU).
+func applyGLU(gate, up []float32, gelu bool) {
+	n := len(gate)
+	if len(up) < n {
+		n = len(up)
+	}
+	if gelu {
+		const k = 0.7978845608 // sqrt(2/pi)
+		for i := 0; i < n; i++ {
+			g := gate[i]
+			act := 0.5 * g * (1 + float32(math.Tanh(float64(k*(g+0.044715*g*g*g)))))
+			gate[i] = act * up[i]
+		}
+		return
+	}
+	for i := 0; i < n; i++ {
 		g := gate[i]
 		gate[i] = g * (1 / (1 + float32(math.Exp(float64(-g))))) * up[i]
 	}
-	return layer.MLPDown.Gemv(gate, out)
+}
+
+// mlpNorm returns the pre-MLP normalization weights: PreFFNLayernorm for Gemma
+// sandwich models, otherwise PostAttentionLayernorm.
+func (s *LlamaDecoderStack) mlpNorm(layer *DecoderLayer) []float32 {
+	if s.Config.SandwichNorm && len(layer.PreFFNLayernorm) > 0 {
+		return layer.PreFFNLayernorm
+	}
+	return layer.PostAttentionLayernorm
 }
 
 func (s *LlamaDecoderStack) runPostAttentionFFN(layer *DecoderLayer, hidden, out []float32) error {
 	normed := make([]float32, len(hidden))
-	if err := tensor.RMSNormF32(hidden, layer.PostAttentionLayernorm, normed, s.Config.RMSNormEps); err != nil {
+	if err := tensor.RMSNormF32(hidden, s.mlpNorm(layer), normed, s.Config.RMSNormEps); err != nil {
 		return err
 	}
-	return s.runDenseOrMoEFFN(layer, normed, out)
+	if err := s.runDenseOrMoEFFN(layer, normed, out); err != nil {
+		return err
+	}
+	// Gemma sandwich norm: normalize the FFN output before its residual add.
+	if s.Config.SandwichNorm && len(layer.PostFFNLayernorm) > 0 {
+		normedOut := make([]float32, len(out))
+		if err := tensor.RMSNormF32(out, layer.PostFFNLayernorm, normedOut, s.Config.RMSNormEps); err != nil {
+			return err
+		}
+		copy(out, normedOut)
+	}
+	return nil
 }

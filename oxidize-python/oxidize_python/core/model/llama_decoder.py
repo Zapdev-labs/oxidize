@@ -18,6 +18,13 @@ class LlamaDecoderConfig:
     vocab_size: int
     rms_norm_eps: float
     rope_theta: float
+    # Gemma-family fields.
+    sliding_window: int = 0
+    rope_theta_swa: float = 0.0
+    sliding_window_pattern: int = 0
+    embedding_scale: float = 1.0
+    gelu_ffn: bool = False
+    sandwich_norm: bool = False
 
     def head_dim(self) -> int:
         if self.num_attention_heads == 0:
@@ -29,13 +36,35 @@ class LlamaDecoderConfig:
             return self.key_value_head_dim
         return self.head_dim()
 
+    def layer_is_global(self, idx: int) -> bool:
+        """Whether layer idx uses global (full) attention rather than SWA.
+
+        No window -> global. Window but no interleave pattern (Mistral) ->
+        local. Gemma: every Nth layer (1-indexed) is global.
+        """
+        if self.sliding_window == 0:
+            return True
+        if self.sliding_window_pattern == 0:
+            return False
+        return (idx + 1) % self.sliding_window_pattern == 0
+
+    def layer_rope_theta(self, idx: int) -> float:
+        if self.rope_theta_swa > 0 and not self.layer_is_global(idx):
+            return self.rope_theta_swa
+        return self.rope_theta
+
+    def layer_sliding_window(self, idx: int) -> int:
+        if self.sliding_window > 0 and not self.layer_is_global(idx):
+            return self.sliding_window
+        return 0
+
 
 @dataclass
 class DecoderAttentionLayer:
-    q_proj: F32Weight = field(default_factory=F32Weight)
-    k_proj: F32Weight = field(default_factory=F32Weight)
-    v_proj: F32Weight = field(default_factory=F32Weight)
-    o_proj: F32Weight = field(default_factory=F32Weight)
+    q_proj: F32Weight = field(default_factory=F32Weight.empty)
+    k_proj: F32Weight = field(default_factory=F32Weight.empty)
+    v_proj: F32Weight = field(default_factory=F32Weight.empty)
+    o_proj: F32Weight = field(default_factory=F32Weight.empty)
     q_norm_weight: list[float] = field(default_factory=list)
     k_norm_weight: list[float] = field(default_factory=list)
 
@@ -43,11 +72,16 @@ class DecoderAttentionLayer:
 @dataclass
 class DecoderLayer:
     input_layernorm: list[float] = field(default_factory=list)
+    # For Gemma (sandwich norm) post_attention_layernorm is the true
+    # post-attention norm, pre_ffn_layernorm is the pre-MLP norm, and
+    # post_ffn_layernorm is applied to the FFN output before its residual.
     post_attention_layernorm: list[float] = field(default_factory=list)
+    pre_ffn_layernorm: list[float] = field(default_factory=list)
+    post_ffn_layernorm: list[float] = field(default_factory=list)
     attention: DecoderAttentionLayer = field(default_factory=DecoderAttentionLayer)
-    mlp_gate: F32Weight = field(default_factory=F32Weight)
-    mlp_up: F32Weight = field(default_factory=F32Weight)
-    mlp_down: F32Weight = field(default_factory=F32Weight)
+    mlp_gate: F32Weight = field(default_factory=F32Weight.empty)
+    mlp_up: F32Weight = field(default_factory=F32Weight.empty)
+    mlp_down: F32Weight = field(default_factory=F32Weight.empty)
 
 
 @dataclass
@@ -73,8 +107,8 @@ class DecoderKvLayerCache:
 class LlamaDecoderStack:
     config: LlamaDecoderConfig
     layers: list[DecoderLayer] = field(default_factory=list)
-    tok_embeddings: F32Weight = field(default_factory=F32Weight)
-    output: F32Weight = field(default_factory=F32Weight)
+    tok_embeddings: F32Weight = field(default_factory=F32Weight.empty)
+    output: F32Weight = field(default_factory=F32Weight.empty)
     norm: list[float] = field(default_factory=list)
     kv_cache: list[DecoderKvLayerCache] = field(default_factory=list)
     position_offset: int = 0
@@ -101,6 +135,14 @@ class LlamaDecoderStack:
         kv_len = self.config.num_key_value_heads * self.config.kv_head_dim()
         for c in self.kv_cache:
             c.reserve_tokens(tokens, kv_len)
+
+    def scale_embedding(self, x: list[float]) -> None:
+        """Multiply embedding by config.embedding_scale (Gemma uses sqrt(hidden))."""
+        scale = self.config.embedding_scale
+        if scale in (0.0, 1.0):
+            return
+        for i in range(len(x)):
+            x[i] *= scale
 
     def fill_token_embedding(self, token: int, output: list[float]) -> None:
         if not self.tok_embeddings.is_loaded():

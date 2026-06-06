@@ -1,0 +1,13 @@
+[package]
+name = "oxidize-ffi"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[lib]
+name = "oxidize_ffi"
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+oxidize-core = { path = "../oxidize-core" }
+rayon = "1"

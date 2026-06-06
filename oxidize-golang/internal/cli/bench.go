@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Zapdev-labs/oxidize/golang/core/model"
+	"github.com/Zapdev-labs/oxidize/golang/core/quantization"
 	"github.com/Zapdev-labs/oxidize/golang/core/tokenizer"
 	"github.com/Zapdev-labs/oxidize/golang/internal/generate"
 )
@@ -88,6 +89,42 @@ Options:
 		*iterations,
 		*maxTokens,
 	)
+
+	// Fast path: use Rust FFI model (same AVX2+Rayon kernels as the Rust binary).
+	if rm, err2 := quantization.LoadRustModel(modelPath); err2 == nil {
+		defer rm.Close()
+		var totalTokens int
+		var totalSeconds float64
+		for round := 1; round <= *iterations; round++ {
+			rm.ResetSession()
+			start := time.Now()
+			if _, ferr := rm.Forward([]uint32{1}); ferr != nil {
+				_, _ = fmt.Fprintf(stdout, "rust forward failed: %v\n", ferr)
+				break
+			}
+			tok := rm.SampleArgmax()
+			generated := 1
+			for i := 0; i < *maxTokens; i++ {
+				if err3 := ctx.Err(); err3 != nil {
+					return err3
+				}
+				if _, ferr := rm.Forward([]uint32{tok}); ferr != nil {
+					_, _ = fmt.Fprintf(stdout, "rust forward failed: %v\n", ferr)
+					break
+				}
+				tok = rm.SampleArgmax()
+				generated++
+			}
+			elapsed := time.Since(start).Seconds()
+			speed := float64(generated) / elapsed
+			totalTokens += generated
+			totalSeconds += elapsed
+			_, _ = fmt.Fprintf(stdout, "round %d: tokens=%d elapsed=%.3fs speed=%.2f tok/s\n", round, generated, elapsed, speed)
+		}
+		avg := float64(totalTokens) / totalSeconds
+		_, _ = fmt.Fprintf(stdout, "\naverage: %.2f tok/s over %d tokens\n", avg, totalTokens)
+		return nil
+	}
 
 	genCfg := model.DefaultGenerationConfig()
 	genCfg.MaxNewTokens = *maxTokens

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -38,6 +39,12 @@ class InferenceConfig:
     num_experts: int = 0
     num_experts_per_token: int = 1
     alibi_num_heads: int = 0
+    # Gemma-family fields (see oxidize-core inference.rs).
+    rope_theta_swa: float = 0.0
+    sliding_window_pattern: int = 0
+    embedding_scale: float = 1.0
+    gelu_ffn: bool = False
+    sandwich_norm: bool = False
 
     def head_dim(self) -> int:
         if self.num_attention_heads == 0:
@@ -80,7 +87,7 @@ def architecture_from_gguf_string(arch: str) -> Architecture:
             return Architecture.DEEPSEEK
         case "qwen" | "qwen2" | "qwen2moe" | "qwen3" | "qwen35":
             return Architecture.QWEN
-        case "gemma" | "gemma3" | "gemma4":
+        case "gemma" | "gemma2" | "gemma3" | "gemma4":
             return Architecture.GEMMA
         case "phi" | "phi2" | "phi3":
             return Architecture.PHI
@@ -96,6 +103,16 @@ def architecture_from_gguf_string(arch: str) -> Architecture:
             return Architecture.MINIMAX
         case _:
             return Architecture.LLAMA
+
+
+def _apply_token_embedding_dims(out: InferenceConfig, dims: list[int]) -> None:
+    """GGUF token_embd dims are [embedding_length, vocab_size] (oxidize-core)."""
+    if len(dims) < 2:
+        return
+    if out.hidden_size == 0:
+        out.hidden_size = int(dims[0])
+    if out.vocab_size == 0:
+        out.vocab_size = int(dims[1])
 
 
 def inference_config_from_gguf(mapped: MappedFile) -> InferenceConfig:
@@ -154,11 +171,26 @@ def inference_config_from_gguf(mapped: MappedFile) -> InferenceConfig:
             "tok_embeddings.weight",
             "model.embed_tokens.weight",
         ):
-            if len(info.dimensions) >= 2:
-                out.vocab_size = int(info.dimensions[-2])
-                out.hidden_size = int(info.dimensions[-1])
+            _apply_token_embedding_dims(out, info.dimensions)
     if out.vocab_size == 0:
         out.vocab_size = 32000
+
+    # Gemma 2/3/4: interleaved local/global attention with dual RoPE theta,
+    # embedding scaling, GeGLU, and sandwich normalization. Gated behind the
+    # Gemma architecture so other models are unaffected.
+    if out.architecture == Architecture.GEMMA:
+        pattern = 2 if arch == "gemma2" else 6
+        if n := arch_u32("attention.sliding_window_pattern"):
+            pattern = n
+        out.sliding_window_pattern = pattern
+        if f := arch_f32("rope.freq_base_swa"):
+            out.rope_theta_swa = f
+        else:
+            out.rope_theta_swa = 10000.0
+        if out.hidden_size > 0:
+            out.embedding_scale = math.sqrt(out.hidden_size)
+        out.gelu_ffn = True
+        out.sandwich_norm = True
     return out
 
 
@@ -191,4 +223,10 @@ def llama_decoder_config_from_inference(cfg: InferenceConfig):
         vocab_size=cfg.vocab_size,
         rms_norm_eps=cfg.rms_norm_eps,
         rope_theta=cfg.rope_theta,
+        sliding_window=cfg.sliding_window,
+        rope_theta_swa=cfg.rope_theta_swa,
+        sliding_window_pattern=cfg.sliding_window_pattern,
+        embedding_scale=cfg.embedding_scale,
+        gelu_ffn=cfg.gelu_ffn,
+        sandwich_norm=cfg.sandwich_norm,
     )

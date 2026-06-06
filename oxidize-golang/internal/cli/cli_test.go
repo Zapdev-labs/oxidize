@@ -13,25 +13,46 @@ import (
 )
 
 func TestLegacyPromptFlag(t *testing.T) {
+	testutil.RequireSlowTests(t)
+	model := testutil.QwenModelPath(t)
 	var stdout bytes.Buffer
-	if err := Run(context.Background(), []string{"--prompt", "ping"}, &stdout, &bytes.Buffer{}); err != nil {
+	if err := Run(context.Background(), []string{
+		"--prompt", "Write a Python function that returns the factorial of n.",
+		"--model", model,
+	}, &stdout, &bytes.Buffer{}); err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if stdout.String() == "" {
-		t.Fatal("expected output")
+	testutil.AssertGenerationText(t, stdout.String())
+}
+
+func TestRunCommandQwenPrompt(t *testing.T) {
+	testutil.RequireSlowTests(t)
+	model := testutil.QwenModelPath(t)
+	var stdout bytes.Buffer
+	err := Run(context.Background(), []string{
+		"run", model, "Write a Python function that returns the factorial of n.",
+		"--max-tokens", "32", "--temperature", "0.7", "--top-p", "0.9",
+	}, &stdout, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("run: %v", err)
 	}
+	testutil.AssertGenerationText(t, stdout.String())
 }
 
 func TestListCommand(t *testing.T) {
 	dir := t.TempDir()
-	testutil.CopyFixture(t, filepath.Join(dir, "valid-v3.gguf"))
+	testutil.LinkQwenModel(t, dir)
 
 	var stdout bytes.Buffer
 	if err := Run(context.Background(), []string{"list", "--models-dir", dir}, &stdout, &bytes.Buffer{}); err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if got := stdout.String(); got == "" {
+	got := stdout.String()
+	if got == "" {
 		t.Fatal("expected list output")
+	}
+	if !strings.Contains(got, testutil.QwenModelID) {
+		t.Fatalf("expected %q in list output: %q", testutil.QwenModelID, got)
 	}
 }
 

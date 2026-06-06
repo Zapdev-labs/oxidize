@@ -1,10 +1,25 @@
 package model
 
 import (
+	"math"
 	"strings"
 
 	"github.com/Zapdev-labs/oxidize/golang/core/ggufcore"
 )
+
+// applyTokenEmbeddingDims fills hidden/vocab from token_embd when metadata is missing.
+// GGUF stores token_embd as [embedding_length, vocab_size] (see oxidize-core inference.rs).
+func applyTokenEmbeddingDims(out *InferenceConfig, dims []uint64) {
+	if len(dims) < 2 {
+		return
+	}
+	if out.HiddenSize == 0 {
+		out.HiddenSize = int(dims[0])
+	}
+	if out.VocabSize == 0 {
+		out.VocabSize = int(dims[1])
+	}
+}
 
 // InferenceConfigFromGGUF builds config from GGUF metadata and tensor shapes.
 func InferenceConfigFromGGUF(mapped *ggufcore.MappedFile) InferenceConfig {
@@ -102,14 +117,35 @@ func InferenceConfigFromGGUF(mapped *ggufcore.MappedFile) InferenceConfig {
 	for _, info := range ggufcore.MappedTensorInfos(file) {
 		switch info.Name {
 		case "token_embd.weight", "tok_embeddings.weight", "model.embed_tokens.weight":
-			if len(info.Dimensions) >= 2 {
-				out.VocabSize = int(info.Dimensions[len(info.Dimensions)-2])
-				out.HiddenSize = int(info.Dimensions[len(info.Dimensions)-1])
-			}
+			applyTokenEmbeddingDims(&out, info.Dimensions)
 		}
 	}
 	if out.VocabSize == 0 {
 		out.VocabSize = 32000
+	}
+
+	// Gemma 2/3/4 specifics: interleaved local/global attention with dual RoPE
+	// theta, embedding scaling, GeGLU, and sandwich normalization. Gated behind
+	// the Gemma architecture so other models are unaffected.
+	if out.Architecture == ArchGemmaModel {
+		pattern := 6
+		if arch == "gemma2" {
+			pattern = 2
+		}
+		if n, ok := archU32("attention.sliding_window_pattern"); ok && n > 0 {
+			pattern = int(n)
+		}
+		out.SlidingWindowPattern = pattern
+		if f, ok := archF32("rope.freq_base_swa"); ok && f > 0 {
+			out.RopeThetaSWA = f
+		} else {
+			out.RopeThetaSWA = 10000.0
+		}
+		if out.HiddenSize > 0 {
+			out.EmbeddingScale = float32(math.Sqrt(float64(out.HiddenSize)))
+		}
+		out.GeluFFN = true
+		out.SandwichNorm = true
 	}
 	return out
 }
@@ -126,7 +162,7 @@ func architectureFromGGUFString(arch string) Architecture {
 		return ArchDeepSeekModel
 	case "qwen", "qwen2", "qwen2moe", "qwen3", "qwen35":
 		return ArchQwenModel
-	case "gemma", "gemma3", "gemma4":
+	case "gemma", "gemma2", "gemma3", "gemma4":
 		return ArchGemmaModel
 	case "phi", "phi2", "phi3":
 		return ArchPhiModel

@@ -31,6 +31,21 @@ def test_encode_minimal_roundtrip() -> None:
     assert len(file.tensor_infos) == 1
 
 
+def test_parse_qwen_fixture_if_present() -> None:
+    from io import BytesIO
+
+    from oxidize_python.internal.gguf.parse import parse_header
+    from oxidize_python.internal.gguf.reader import BinaryReader
+    from oxidize_python.testutil import qwen_model_path
+
+    path = qwen_model_path()
+    raw = path.read_bytes()
+    version, tensor_count, metadata, _ = parse_header(BinaryReader(BytesIO(raw)))
+    assert version == 3
+    assert tensor_count >= 1
+    assert metadata
+
+
 def test_parse_fixture_if_present() -> None:
     import os
 

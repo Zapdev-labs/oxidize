@@ -51,6 +51,12 @@ type InferenceConfig struct {
 	NumExperts          int
 	NumExpertsPerToken  int
 	AlibiNumHeads       int
+	// Gemma-family fields (see oxidize-core inference.rs).
+	RopeThetaSWA         float32 // RoPE base for local sliding-window layers (0 = use RopeTheta)
+	SlidingWindowPattern int     // every Nth layer is global (gemma2=2, gemma3/4=6); 0 = none
+	EmbeddingScale       float32 // multiplier applied to token embeddings (1.0 = none)
+	GeluFFN              bool    // use GeGLU instead of SwiGLU
+	SandwichNorm         bool    // post-attention + post-FFN norms before each residual
 }
 
 // DefaultInferenceConfig returns sensible defaults.
@@ -70,6 +76,7 @@ func DefaultInferenceConfig() InferenceConfig {
 		RopeTheta:          10000.0,
 		Architecture:       DefaultArchitecture,
 		NumExpertsPerToken: 1,
+		EmbeddingScale:     1.0,
 	}
 }
 
@@ -132,11 +139,9 @@ func (c InferenceConfig) FromGGUF(file ggufcore.File) InferenceConfig {
 			out.VocabSize = int(n)
 		}
 	}
-	// Try to recover vocab size from the embedding tensor if metadata is missing.
 	for _, info := range file.TensorInfos {
 		if info.Name == "token_embd.weight" && len(info.Dimensions) >= 2 {
-			out.VocabSize = int(info.Dimensions[len(info.Dimensions)-2])
-			out.HiddenSize = int(info.Dimensions[len(info.Dimensions)-1])
+			applyTokenEmbeddingDims(&out, info.Dimensions)
 		}
 	}
 	if v, ok := file.Metadata["general.architecture"]; ok {

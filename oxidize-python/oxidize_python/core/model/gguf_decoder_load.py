@@ -55,11 +55,11 @@ class _GgufWeightLoader:
     def load_proj(self, name: str) -> F32Weight:
         info = self._find(name)
         if info is None:
-            return F32Weight([], 0, 0)
+            return F32Weight.empty()
         if len(info.dimensions) != 2:
             data, dims, ok = self.load_f32_with_dims(name)
             if not ok:
-                return F32Weight([], 0, 0)
+                return F32Weight.empty()
             return f32_weight_from_dims(data, dims)
         qtype = quant.from_ggml_type(info.ggml_type)
         in_dim = int(info.dimensions[0])
@@ -75,7 +75,7 @@ class _GgufWeightLoader:
             return F32Weight.from_quantized(raw, qtype, out_dim, in_dim)
         data, _, ok = self.load_f32_with_dims(name)
         if not ok:
-            return F32Weight([], 0, 0)
+            return F32Weight.empty()
         return F32Weight.from_slice(transpose_f32(data, in_dim, out_dim), out_dim, in_dim)
 
     def load_proj_any(self, *names: str) -> F32Weight:
@@ -83,7 +83,7 @@ class _GgufWeightLoader:
             w = self.load_proj(name)
             if w.is_loaded():
                 return w
-        return F32Weight([], 0, 0)
+        return F32Weight.empty()
 
     def load_f32_any(self, *names: str) -> list[float] | None:
         for name in names:
@@ -132,6 +132,20 @@ def load_llama_decoder_stack_from_gguf(
                 data, _, ok = loader.load_f32_with_dims(f"{prefix}.ffn_norm.weight")
                 if ok:
                     post_ln = data
+            # Gemma sandwich norm: load the three extra norms separately so the
+            # forward pass can apply post-attention, pre-MLP, and post-MLP norms.
+            pre_ffn: list[float] = []
+            post_ffn: list[float] = []
+            if config.sandwich_norm:
+                data, _, ok = loader.load_f32_with_dims(f"{prefix}.post_attention_norm.weight")
+                if ok:
+                    post_ln = data
+                data, _, ok = loader.load_f32_with_dims(f"{prefix}.ffn_norm.weight")
+                pre_ffn = data if ok else ones(config.hidden_size)
+                data, _, ok = loader.load_f32_with_dims(f"{prefix}.post_ffw_norm.weight")
+                if not ok:
+                    data, _, ok = loader.load_f32_with_dims(f"{prefix}.post_ffn_norm.weight")
+                post_ffn = data if ok else ones(config.hidden_size)
             q_norm = ones(config.kv_head_dim() or config.head_dim())
             data, _, ok = loader.load_f32_with_dims(f"{prefix}.attn_q_norm.weight")
             if ok:
@@ -144,6 +158,8 @@ def load_llama_decoder_stack_from_gguf(
                 DecoderLayer(
                     input_layernorm=in_ln,
                     post_attention_layernorm=post_ln,
+                    pre_ffn_layernorm=pre_ffn,
+                    post_ffn_layernorm=post_ffn,
                     mlp_gate=loader.load_proj(f"{prefix}.ffn_gate.weight"),
                     mlp_up=loader.load_proj(f"{prefix}.ffn_up.weight"),
                     mlp_down=loader.load_proj(f"{prefix}.ffn_down.weight"),
