@@ -203,4 +203,5 @@ class RustModel:
         try:
             self.close()
         except Exception:
+            # Destructors must not raise; ignore best-effort cleanup failures.
             pass
