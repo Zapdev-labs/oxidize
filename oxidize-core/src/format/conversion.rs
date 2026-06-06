@@ -129,7 +129,10 @@ mod tests {
             ("model.layers.3.self_attn.q_proj.bias", "blk.3.attn_q.bias"),
             ("model.layers.3.self_attn.k_proj.bias", "blk.3.attn_k.bias"),
             ("model.layers.3.self_attn.v_proj.bias", "blk.3.attn_v.bias"),
-            ("model.layers.3.self_attn.o_proj.bias", "blk.3.attn_output.bias"),
+            (
+                "model.layers.3.self_attn.o_proj.bias",
+                "blk.3.attn_output.bias",
+            ),
         ] {
             assert_eq!(map_hf_tensor_name(hf), gguf, "bias mapping for {hf}");
         }

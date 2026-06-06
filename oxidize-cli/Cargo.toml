@@ -25,12 +25,14 @@ clap.workspace = true
 oxidize-core = { path = "../oxidize-core" }
 oxidize-server = { path = "../oxidize-server" }
 futures-core = "0.3"
-hf-hub = "0.4"
 libc = "0.2"
 rand = "0.8"
 rayon = "1"
+serde = { workspace = true }
+serde_json = "1"
 tokio.workspace = true
 tracing.workspace = true
+ureq = { version = "2", default-features = false, features = ["json", "native-tls"] }
 
 [dev-dependencies]
 assert_cmd = "2"

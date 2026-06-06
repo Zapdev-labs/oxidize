@@ -33,8 +33,6 @@ pub mod advanced_features;
 pub mod benchmark_suite;
 #[path = "format/conversion.rs"]
 pub mod conversion;
-#[path = "format/safetensors_to_gguf.rs"]
-pub mod safetensors_to_gguf;
 #[path = "compute/cpu_kernels.rs"]
 pub mod cpu_kernels;
 #[path = "validation/cross_validation.rs"]
@@ -82,6 +80,8 @@ pub mod prefix_cache;
 pub mod quantization;
 #[path = "format/safetensors.rs"]
 pub mod safetensors;
+#[path = "format/safetensors_to_gguf.rs"]
+pub mod safetensors_to_gguf;
 #[path = "model/sampling.rs"]
 pub mod sampling;
 #[path = "compute/simd.rs"]

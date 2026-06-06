@@ -414,6 +414,7 @@ fn inference_config_from_dflash(
         shortconv_l_cache: 0,
         leading_dense_layers: 0,
         expert_gating_sigmoid: false,
+        rope_dim: 0,
     }
 }
 

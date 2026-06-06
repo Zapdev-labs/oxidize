@@ -38,10 +38,7 @@ struct OutputTensor {
 /// Tensors that are already quantized (not F32/F16/BF16) or are 1-D
 /// (embeddings/biases) are copied verbatim.  The returned bytes are a
 /// valid GGUF v3 file ready to be written to disk.
-pub fn quantize_gguf_to_target(
-    input: &[u8],
-    target: GgufQuantizationType,
-) -> Result<Vec<u8>> {
+pub fn quantize_gguf_to_target(input: &[u8], target: GgufQuantizationType) -> Result<Vec<u8>> {
     use crate::gguf::parse_gguf;
 
     let parsed = parse_gguf(input).map_err(|e| anyhow!("{e:?}"))?;
@@ -75,9 +72,7 @@ pub fn quantize_gguf_to_target(
         let can_quantize = info.dimensions.len() >= 2
             && matches!(
                 source,
-                GgufQuantizationType::F32
-                    | GgufQuantizationType::F16
-                    | GgufQuantizationType::BF16
+                GgufQuantizationType::F32 | GgufQuantizationType::F16 | GgufQuantizationType::BF16
             )
             && quantized_size(target, value_count).is_ok();
 
@@ -134,10 +129,7 @@ pub fn convert_safetensors_to_gguf(
 
     let mut metadata = build_base_metadata(&st_meta, &arch, input);
     let auto_config = config_dir.as_ref().map(|d| d.join("config.json"));
-    let cfg_path = config
-        .config_path
-        .as_ref()
-        .or(auto_config.as_ref());
+    let cfg_path = config.config_path.as_ref().or(auto_config.as_ref());
     if let Some(cfg_path) = cfg_path.filter(|p| p.is_file()) {
         merge_hf_config_metadata(&mut metadata, &arch, cfg_path)?;
     }
@@ -221,13 +213,20 @@ fn normalize_hf_arch(model_type: &str) -> String {
 
 fn load_all_tensors(
     input: &Path,
-) -> Result<(Vec<(String, Dtype, Vec<usize>, Vec<u8>)>, BTreeMap<String, String>, Option<PathBuf>)> {
+) -> Result<(
+    Vec<(String, Dtype, Vec<usize>, Vec<u8>)>,
+    BTreeMap<String, String>,
+    Option<PathBuf>,
+)> {
     if input.is_file() {
         let (tensors, meta) = load_safetensors_file(input)?;
         return Ok((tensors, meta, None));
     }
     if !input.is_dir() {
-        bail!("input path {} is neither a file nor a directory", input.display());
+        bail!(
+            "input path {} is neither a file nor a directory",
+            input.display()
+        );
     }
 
     let index_path = find_weight_index(input)?;
@@ -253,9 +252,9 @@ fn load_all_tensors(
         let mut shard_cache: BTreeMap<String, Vec<(String, Dtype, Vec<usize>, Vec<u8>)>> =
             BTreeMap::new();
         for (tensor_name, shard_name) in weight_map {
-            let shard_name = shard_name.as_str().ok_or_else(|| {
-                anyhow!("weight_map entry for {tensor_name} is not a string")
-            })?;
+            let shard_name = shard_name
+                .as_str()
+                .ok_or_else(|| anyhow!("weight_map entry for {tensor_name} is not a string"))?;
             let shard_path = input.join(shard_name);
             if !shard_cache.contains_key(shard_name) {
                 let (tensors, meta) = load_safetensors_file(&shard_path)?;
@@ -292,7 +291,11 @@ fn load_all_tensors(
         st_meta.extend(meta);
         for tensor in tensors {
             if out.iter().any(|(n, ..)| n == &tensor.0) {
-                bail!("duplicate tensor {} in directory {}", tensor.0, input.display());
+                bail!(
+                    "duplicate tensor {} in directory {}",
+                    tensor.0,
+                    input.display()
+                );
             }
             out.push(tensor);
         }
@@ -316,7 +319,10 @@ fn find_weight_index(dir: &Path) -> Result<Option<PathBuf>> {
 
 fn load_safetensors_file(
     path: &Path,
-) -> Result<(Vec<(String, Dtype, Vec<usize>, Vec<u8>)>, BTreeMap<String, String>)> {
+) -> Result<(
+    Vec<(String, Dtype, Vec<usize>, Vec<u8>)>,
+    BTreeMap<String, String>,
+)> {
     let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     // SAFETY: read-only mapping; file handle kept alive for the mapping's lifetime.
     let mmap = unsafe { memmap2::Mmap::map(&file) }
@@ -381,7 +387,10 @@ fn build_base_metadata(
     }
 
     for (key, value) in st_meta {
-        if matches!(key.as_str(), "model_type" | "architecture" | "model_name" | "name") {
+        if matches!(
+            key.as_str(),
+            "model_type" | "architecture" | "model_name" | "name"
+        ) {
             continue;
         }
         meta.insert(
@@ -421,33 +430,33 @@ fn merge_hf_config_metadata(
     insert_u32(meta, &prefix("block_count"), "num_hidden_layers");
     insert_u32(meta, &prefix("feed_forward_length"), "intermediate_size");
     insert_u32(meta, &prefix("attention.head_count"), "num_attention_heads");
-    insert_u32(meta, &prefix("attention.head_count_kv"), "num_key_value_heads");
+    insert_u32(
+        meta,
+        &prefix("attention.head_count_kv"),
+        "num_key_value_heads",
+    );
 
     // Per-head dimension. Prefer an explicit `head_dim` field; otherwise derive
     // it from hidden_size / num_attention_heads. Writing key_length/value_length
     // lets the engine size the KV cache from metadata instead of inferring it
     // from tensor dimensions (which would otherwise mis-derive GQA head dims).
-    let head_dim = cfg
-        .get("head_dim")
-        .and_then(json_u32)
-        .or_else(|| {
-            let hidden = cfg.get("hidden_size").and_then(json_u32)?;
-            let heads = cfg.get("num_attention_heads").and_then(json_u32)?;
-            (heads > 0).then(|| hidden / heads)
-        });
+    let head_dim = cfg.get("head_dim").and_then(json_u32).or_else(|| {
+        let hidden = cfg.get("hidden_size").and_then(json_u32)?;
+        let heads = cfg.get("num_attention_heads").and_then(json_u32)?;
+        (heads > 0).then(|| hidden / heads)
+    });
     if let Some(head_dim) = head_dim {
-        meta.insert(prefix("attention.key_length"), GgufMetadataValue::Uint32(head_dim));
+        meta.insert(
+            prefix("attention.key_length"),
+            GgufMetadataValue::Uint32(head_dim),
+        );
         meta.insert(
             prefix("attention.value_length"),
             GgufMetadataValue::Uint32(head_dim),
         );
     }
     insert_u32(meta, &prefix("vocab_size"), "vocab_size");
-    insert_u32(
-        meta,
-        &prefix("context_length"),
-        "max_position_embeddings",
-    );
+    insert_u32(meta, &prefix("context_length"), "max_position_embeddings");
     insert_f32(
         meta,
         &prefix("attention.layer_norm_rms_epsilon"),
@@ -564,7 +573,11 @@ fn merge_hf_tokenizer_metadata(
             if let Some(content) = entry.get("content").and_then(|v| v.as_str()) {
                 tokens[id] = content.to_owned();
             }
-            if entry.get("special").and_then(|v| v.as_bool()).unwrap_or(false) {
+            if entry
+                .get("special")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
                 token_types[id] = 3;
             }
         }
@@ -580,10 +593,7 @@ fn merge_hf_tokenizer_metadata(
         "tokenizer.ggml.model".to_owned(),
         GgufMetadataValue::String(ggml_model.to_owned()),
     );
-    meta.insert(
-        "tokenizer.ggml.tokens".to_owned(),
-        string_array(tokens),
-    );
+    meta.insert("tokenizer.ggml.tokens".to_owned(), string_array(tokens));
     meta.insert(
         "tokenizer.ggml.token_type".to_owned(),
         i32_array(token_types),
@@ -815,9 +825,7 @@ fn write_metadata_payload(
         }
         (GgufMetadataType::Bool, GgufMetadataValue::Bool(v)) => out.push(u8::from(*v)),
         (GgufMetadataType::String, GgufMetadataValue::String(v)) => write_string(out, v),
-        (GgufMetadataType::Array, GgufMetadataValue::Array(arr)) => {
-            write_metadata_array(out, arr)?
-        }
+        (GgufMetadataType::Array, GgufMetadataValue::Array(arr)) => write_metadata_array(out, arr)?,
         (GgufMetadataType::Uint64, GgufMetadataValue::Uint64(v)) => {
             out.extend_from_slice(&v.to_le_bytes())
         }

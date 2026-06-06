@@ -19,6 +19,7 @@ use oxidize_core::tensor::DType;
 use oxidize_core::tokenizer::{
     EncodeOptions, LoadedTokenizer, TiktokenTokenizer, load_tokenizer_from_gguf_metadata,
 };
+use serde::Deserialize;
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
@@ -93,6 +94,9 @@ struct Args {
     cpu_optimized: bool,
     #[arg(long, default_value_t = false)]
     ram_offload: bool,
+    /// Number of threads for parallel RAM prefault (0 = auto = logical CPUs).
+    #[arg(long, default_value_t = 0)]
+    ram_offload_threads: usize,
     #[arg(long, default_value_t = false)]
     mmap_prefetch: bool,
     #[arg(long, default_value_t = false)]
@@ -229,13 +233,98 @@ fn resolve_model_spec(spec: &str, hf_file: Option<&str>) -> io::Result<PathBuf> 
         return Ok(path);
     }
 
-    let api = hf_hub::api::sync::Api::new()
-        .map_err(|error| io::Error::other(format!("hugging face init failed: {error}")))?;
+    let api = HfApi::new()?;
     resolve_hf_model_spec(&api, spec, hf_file)
 }
 
+#[derive(Debug, Clone)]
+struct HfApi {
+    cache_dir: PathBuf,
+    agent: ureq::Agent,
+}
+
+#[derive(Debug, Clone)]
+struct HfRepo {
+    id: String,
+    cache_dir: PathBuf,
+    agent: ureq::Agent,
+}
+
+#[derive(Debug, Deserialize)]
+struct HfRepoInfo {
+    #[serde(default)]
+    siblings: Vec<HfSibling>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HfSibling {
+    rfilename: String,
+}
+
+impl HfApi {
+    fn new() -> io::Result<Self> {
+        Ok(Self {
+            cache_dir: oxidize_cache_dir()?.join("hf"),
+            agent: ureq::AgentBuilder::new()
+                .timeout_connect(Duration::from_secs(30))
+                .timeout_read(Duration::from_secs(600))
+                .build(),
+        })
+    }
+
+    fn model(&self, id: String) -> HfRepo {
+        HfRepo {
+            id,
+            cache_dir: self.cache_dir.clone(),
+            agent: self.agent.clone(),
+        }
+    }
+}
+
+impl HfRepo {
+    fn info(&self) -> io::Result<HfRepoInfo> {
+        let url = format!("https://huggingface.co/api/models/{}", self.id);
+        self.agent
+            .get(&url)
+            .call()
+            .map_err(|error| io::Error::other(format!("{error}")))?
+            .into_json::<HfRepoInfo>()
+            .map_err(|error| io::Error::other(format!("{error}")))
+    }
+
+    fn get(&self, filename: &str) -> io::Result<PathBuf> {
+        let target = self
+            .cache_dir
+            .join(cache_safe_name(&self.id))
+            .join("main")
+            .join(filename);
+        if target.exists() {
+            return Ok(target);
+        }
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let url = format!(
+            "https://huggingface.co/{}/resolve/main/{}",
+            self.id, filename
+        );
+        let mut response = self
+            .agent
+            .get(&url)
+            .call()
+            .map_err(|error| io::Error::other(format!("{error}")))?
+            .into_reader();
+        let partial = target.with_extension("partial");
+        let mut file = std::fs::File::create(&partial)?;
+        io::copy(&mut response, &mut file)?;
+        std::fs::rename(&partial, &target)?;
+        Ok(target)
+    }
+}
+
 fn model_files_for_repo(
-    repo: &hf_hub::api::sync::ApiRepo,
+    repo: &HfRepo,
     spec: &str,
 ) -> io::Result<(Vec<String>, Vec<String>)> {
     let info = repo
@@ -295,7 +384,7 @@ fn cache_safe_name(spec: &str) -> String {
 }
 
 fn copy_hf_file_to_dir(
-    repo: &hf_hub::api::sync::ApiRepo,
+    repo: &HfRepo,
     filename: &str,
     dir: &Path,
 ) -> io::Result<PathBuf> {
@@ -313,7 +402,7 @@ fn copy_hf_file_to_dir(
 }
 
 fn convert_hf_safetensors_repo(
-    repo: &hf_hub::api::sync::ApiRepo,
+    repo: &HfRepo,
     spec: &str,
     safetensors: &[String],
 ) -> io::Result<PathBuf> {
@@ -424,7 +513,7 @@ fn gguf_repo_candidates(spec: &str) -> Vec<String> {
 }
 
 fn resolve_hf_model_spec(
-    api: &hf_hub::api::sync::Api,
+    api: &HfApi,
     spec: &str,
     hf_file: Option<&str>,
 ) -> io::Result<PathBuf> {
@@ -570,7 +659,8 @@ where
                 | "--parallelism" | "--lora" | "--profile" | "--profile-output" | "--max-tokens"
                 | "--temperature" | "--top-p" | "--top-k" | "--layer-cache" | "--ctx-size"
                 | "--threads" | "--kv-cache-dtype" | "--mesh-port" | "--pipe-peer"
-                | "--pipe-listen" | "--pipe-max-tokens" | "--tokenizer-model",
+                | "--pipe-listen" | "--pipe-max-tokens" | "--tokenizer-model"
+                | "--ram-offload-threads",
             ) => {
                 rewritten.push(arg);
                 let Some(value) = args.next() else {
@@ -1570,12 +1660,26 @@ fn optimize_mapped_model_memory(mapped: &MappedGgufFile, args: &Args) {
         eprintln!("mmap hugepage hint failed: {error}");
     }
     if args.ram_offload {
-        let started = Instant::now();
-        let checksum = mapped.prefault_pages();
-        println!(
-            "ram offload: prefaulted {:.2} GiB into page cache in {:.2?} (checksum={checksum})",
-            mapped.bytes().len() as f64 / 1024.0 / 1024.0 / 1024.0,
-            started.elapsed()
+        let n_threads = if args.ram_offload_threads > 0 {
+            args.ram_offload_threads
+        } else {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(8)
+        };
+        let gib = mapped.bytes().len() as f64 / (1024.0 * 1024.0 * 1024.0);
+        eprintln!(
+            "ram offload: locking {gib:.2} GiB with {n_threads} threads (mlock + parallel prefault)"
+        );
+        let (mlocked, checksum, ms) = mapped.prefault_pages_locked(n_threads);
+        let throughput = gib / (ms as f64 / 1000.0);
+        let lock_status = if mlocked {
+            "mlocked (pages pinned, eviction-proof)"
+        } else {
+            "MADV_WILLNEED only (model too large to mlock safely, or no CAP_IPC_LOCK)"
+        };
+        eprintln!(
+            "ram offload: done in {ms}ms ({throughput:.1} GB/s) checksum={checksum:#04x} | {lock_status}"
         );
     }
 }
@@ -1818,6 +1922,42 @@ fn main() {
                 if args.cpu_optimized {
                     config.context_size = config.context_size.min(2048);
                 }
+                // Auto-cap context to what fits in available RAM.
+                // KV cache = layers × ctx × kv_heads × head_dim × 2 (K+V) × dtype_bytes.
+                // If the full context would need more than available RAM headroom, shrink it.
+                if args.ctx_size.is_none() && !args.cpu_optimized {
+                    let kv_bytes_per_token = config.layer_count
+                        * config.num_key_value_heads
+                        * config.kv_head_dim()
+                        * 2  // K + V
+                        * config.kv_cache_dtype.size_in_bytes();
+                    let kv_full: u64 =
+                        (config.context_size as u64).saturating_mul(kv_bytes_per_token as u64);
+                    #[cfg(target_os = "linux")]
+                    let available = oxidize_core::gguf::linux_mem_available_bytes().unwrap_or(u64::MAX);
+                    #[cfg(not(target_os = "linux"))]
+                    let available = u64::MAX;
+                    // Reserve headroom for the model weights (file-backed but needed during
+                    // inference) plus 8 GiB for OS/workspace/overhead.
+                    let model_bytes = mapped.bytes().len() as u64;
+                    let overhead = 8u64 << 30; // 8 GiB
+                    let kv_budget = available
+                        .saturating_sub(model_bytes)
+                        .saturating_sub(overhead);
+                    if kv_full > kv_budget && kv_bytes_per_token > 0 {
+                        let capped = (kv_budget / kv_bytes_per_token as u64) as usize;
+                        // Round down to nearest power-of-2 multiple of 512.
+                        let capped = (capped / 512).max(1) * 512;
+                        eprintln!(
+                            "context: capped {} → {} tokens (KV cache would need {:.1} GiB, budget {:.1} GiB)",
+                            config.context_size,
+                            capped,
+                            kv_full as f64 / (1 << 30) as f64,
+                            kv_budget as f64 / (1 << 30) as f64,
+                        );
+                        config.context_size = capped;
+                    }
+                }
                 // Load tokenizer from GGUF metadata, falling back to an external model.
                 // For DFlash smoke runs with borrowed IO, prefer the external
                 // tokenizer so sampled ids match the borrowed output head.
@@ -1866,7 +2006,6 @@ fn main() {
                         return;
                     }
                 };
-
                 let stdout = io::stdout();
                 let mut writer = stdout.lock();
                 if let Some(draft_model_path) = args.draft_model.as_deref() {
@@ -1877,7 +2016,7 @@ fn main() {
                         return;
                     }
 
-                    let use_mmap = args.cpu_optimized;
+                    let use_mmap = true;
                     let mut target_model =
                         match InferenceModel::load_from_gguf(&mapped, config, use_mmap) {
                             Ok(model) => model,
@@ -2060,7 +2199,7 @@ fn main() {
                                 eprintln!(
                                     "MLX initialization failed: {error}; falling back to CPU"
                                 );
-                                let use_mmap = args.cpu_optimized;
+                                let use_mmap = true;
                                 match InferenceModel::load_from_gguf(&mapped, config, use_mmap) {
                                     Ok(m) => Box::new(m),
                                     Err(error) => {
@@ -2076,7 +2215,7 @@ fn main() {
                         eprintln!(
                             "MLX backend requested but unavailable on Linux; falling back to CPU"
                         );
-                        let use_mmap = args.cpu_optimized;
+                        let use_mmap = true;
                         match InferenceModel::load_from_gguf(&mapped, config, use_mmap) {
                             Ok(m) => Box::new(m),
                             Err(error) => {
@@ -2086,7 +2225,7 @@ fn main() {
                         }
                     }
                 } else {
-                    let use_mmap = args.cpu_optimized;
+                    let use_mmap = true;
                     match InferenceModel::load_from_gguf(&mapped, config, use_mmap) {
                         Ok(m) => Box::new(m),
                         Err(error) => {

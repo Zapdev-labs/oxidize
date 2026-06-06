@@ -122,7 +122,7 @@ make wasm     # outputs to dist/wasm
 - On feature branches, stage and commit only files related to the task; exclude unrelated workspace changes.
 - `oxidize run <model>` should start the OpenAI-compatible HTTP/WebSocket server by default; use `--no-api` for local inference only.
 - Contributions should keep tests passing and use clear, ethical PR/markdown descriptions; include benchmarks when claiming performance changes.
-
+- When a user asks to run a model. It means run it using oxidize 
 ## Learned Workspace Facts
 - `oxidize-golang/` is the active Go port of `oxidize-core`; CLI lives in `internal/cli/` (`run`, `chat`, `bench`, `inspect`, `list`, `serve`); HF GGUF resolver in `hf/`.
 - `oxidize-python/` is a pure-Python implementation (`oxidize_python`, `pyproject.toml`, uv/pytest); CLI mirrors Go subcommands; HF resolver in `oxidize_python/hf/hub.py` with cache `~/.cache/oxidize/hf`.

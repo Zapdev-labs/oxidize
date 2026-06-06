@@ -1167,9 +1167,12 @@ pub fn dequantize_q4_k_scalar(input: &[u8], output: &mut [f32]) -> Result<(), Qu
         let min = f16_le_to_f32(&block[2..4]);
         let scales = &block[4..16];
         let qs = &block[16..144];
-        let mut q_ptr = 0;
+        let mut out_ptr = 0;
         let mut is = 0;
-        for _ in 0..4 {
+        // Each of 4 group_pairs covers 64 output values (32 from low nibbles + 32 from high nibbles)
+        // and reads from qs[group_pair*32 .. group_pair*32+32] — must advance q_base.
+        for group_pair in 0..4 {
+            let q_base = group_pair * 32;
             let (sc1, m1) = get_scale_min_k4(is, scales);
             let (sc2, m2) = get_scale_min_k4(is + 1, scales);
             let d1 = d * sc1 as f32;
@@ -1177,12 +1180,12 @@ pub fn dequantize_q4_k_scalar(input: &[u8], output: &mut [f32]) -> Result<(), Qu
             let d2 = d * sc2 as f32;
             let min2 = min * m2 as f32;
             for l in 0..32 {
-                out[q_ptr + l] = d1 * ((qs[l] & 0xF) as f32) - min1;
+                out[out_ptr + l] = d1 * ((qs[q_base + l] & 0xF) as f32) - min1;
             }
             for l in 0..32 {
-                out[q_ptr + 32 + l] = d2 * ((qs[l] >> 4) as f32) - min2;
+                out[out_ptr + 32 + l] = d2 * ((qs[q_base + l] >> 4) as f32) - min2;
             }
-            q_ptr += 64;
+            out_ptr += 64;
             is += 2;
         }
     }
@@ -1261,9 +1264,8 @@ pub fn dequantize_q6_k_scalar(input: &[u8], output: &mut [f32]) -> Result<(), Qu
             let sc_off = group * 8;
             for l in 0..32 {
                 let is = l / 16;
-                let q1 = ((ql[ql_off + l] & 0xF) as i32
-                    | (((qh[qh_off + l] & 3) as i32) << 4))
-                    - 32;
+                let q1 =
+                    ((ql[ql_off + l] & 0xF) as i32 | (((qh[qh_off + l] & 3) as i32) << 4)) - 32;
                 let q2 = ((ql[ql_off + l + 32] & 0xF) as i32
                     | ((((qh[qh_off + l] >> 2) & 3) as i32) << 4))
                     - 32;

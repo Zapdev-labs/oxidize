@@ -3,11 +3,27 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
 
+#[cfg(target_os = "linux")]
+use libc;
 use memmap2::{Advice, Mmap};
 use thiserror::Error;
 
 const GGUF_MAGIC: &[u8; 4] = b"GGUF";
 const DEFAULT_ALIGNMENT: u64 = 32;
+
+/// Read `MemAvailable` from `/proc/meminfo` (Linux only).
+/// Returns `None` on any parse failure; callers treat that as "unlimited" to be safe.
+#[cfg(target_os = "linux")]
+pub fn linux_mem_available_bytes() -> Option<u64> {
+    let data = std::fs::read_to_string("/proc/meminfo").ok()?;
+    for line in data.lines() {
+        if let Some(rest) = line.strip_prefix("MemAvailable:") {
+            let kb: u64 = rest.split_whitespace().next()?.parse().ok()?;
+            return Some(kb * 1024);
+        }
+    }
+    None
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct GgufFile {
@@ -67,9 +83,21 @@ impl MappedGgufFile {
         self.mmap.advise(Advice::WillNeed)
     }
 
+    /// Enable THP only when the model fits in RAM with ≥2× headroom.
+    /// On file-backed MAP_PRIVATE mmaps, MADV_HUGEPAGE causes khugepaged to
+    /// create anonymous 2 MiB copies of every file page, consuming as much RAM
+    /// as the model size in anonymous memory — defeating the purpose of mmap for
+    /// large models.  Skip it when the model would exhaust available RAM.
     #[cfg(target_os = "linux")]
     pub fn advise_huge_pages(&self) -> std::io::Result<()> {
-        self.mmap.advise(Advice::HugePage)
+        let model_bytes = self.bytes().len() as u64;
+        let available = linux_mem_available_bytes().unwrap_or(0);
+        // Only enable THP when model is <50% of available RAM (2× headroom).
+        if model_bytes > 0 && available > 0 && model_bytes * 2 <= available {
+            self.mmap.advise(Advice::HugePage)
+        } else {
+            Ok(())
+        }
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -77,17 +105,94 @@ impl MappedGgufFile {
         Ok(())
     }
 
+    /// Touch every page sequentially to fault them into the page cache.
     pub fn prefault_pages(&self) -> u8 {
         let bytes = self.bytes();
         let mut checksum = 0_u8;
         for offset in (0..bytes.len()).step_by(4096) {
-            // SAFETY: offset is in-bounds by construction and this read only faults pages in.
+            // SAFETY: offset is in-bounds by construction.
             checksum ^= unsafe { std::ptr::read_volatile(bytes.as_ptr().add(offset)) };
         }
         if let Some(last) = bytes.last() {
             checksum ^= *last;
         }
         checksum
+    }
+
+    /// Lock pages into physical RAM and fault every page in parallel.
+    ///
+    /// On Linux with `CAP_IPC_LOCK`:
+    /// 1. Raise `RLIMIT_MEMLOCK` to unlimited.
+    /// 2. Check `MemAvailable` — only call `mlock` when model fits with headroom
+    ///    (model_bytes < available_bytes * 70%).  Plain `mlock` faults every page
+    ///    immediately; without headroom it races the model loader for physical RAM
+    ///    and triggers the OOM killer.
+    /// 3. When mlock is skipped, fall back to `madvise(WILLNEED)` which queues
+    ///    async readahead without reserving physical pages.
+    /// 4. Parallel read_volatile sweep to saturate all memory channels.
+    ///
+    /// Returns `(mlocked, checksum, duration_ms)`.
+    pub fn prefault_pages_locked(&self, threads: usize) -> (bool, u8, u64) {
+        let t0 = std::time::Instant::now();
+        let bytes = self.bytes();
+        let mut mlocked = false;
+
+        #[cfg(target_os = "linux")]
+        {
+            // Raise RLIMIT_MEMLOCK (requires CAP_IPC_LOCK or root).
+            let unlimited = libc::rlimit {
+                rlim_cur: libc::RLIM_INFINITY,
+                rlim_max: libc::RLIM_INFINITY,
+            };
+            // SAFETY: valid rlimit struct.
+            unsafe { libc::setrlimit(libc::RLIMIT_MEMLOCK, &unlimited) };
+
+            // Only mlock when the model fits with ≥30% headroom so the model loader
+            // and KV-cache allocator have room to breathe.
+            let available = linux_mem_available_bytes().unwrap_or(u64::MAX);
+            let model_bytes = bytes.len() as u64;
+            let safe_to_lock = model_bytes < available.saturating_mul(7) / 10;
+
+            if safe_to_lock {
+                // Plain mlock faults ALL pages synchronously and pins them so the
+                // kernel cannot evict them under memory pressure.
+                // SAFETY: valid pointer + length for the mmap region we own.
+                let rc = unsafe { libc::mlock(bytes.as_ptr() as *const libc::c_void, bytes.len()) };
+                mlocked = rc == 0;
+            }
+
+            if !mlocked {
+                // Headroom too tight for mlock — fall back to async readahead only.
+                // Pages land in page-cache and will be warm for inference but can be
+                // evicted under pressure.
+                let _ = self.mmap.advise(Advice::WillNeed);
+            }
+        }
+
+        // Parallel read_volatile sweep — saturates all memory channels and ensures
+        // every page is faulted in even when mlock wasn't used.
+        use rayon::prelude::*;
+        let page_size = 4096_usize;
+        let n_threads = threads.max(1);
+
+        let offsets: Vec<usize> = (0..bytes.len()).step_by(page_size).collect();
+        let ptr = bytes.as_ptr() as usize;
+
+        let checksum: u8 = offsets
+            .par_chunks(offsets.len().div_ceil(n_threads).max(1))
+            .map(|chunk| {
+                let mut c = 0_u8;
+                for &off in chunk {
+                    // SAFETY: off is in-bounds by construction; ptr is valid for the
+                    // lifetime of `self` which outlives this closure.
+                    c ^= unsafe { std::ptr::read_volatile((ptr + off) as *const u8) };
+                }
+                c
+            })
+            .reduce(|| 0_u8, |a, b| a ^ b);
+
+        let ms = t0.elapsed().as_millis() as u64;
+        (mlocked, checksum, ms)
     }
 
     pub fn mapped_tensor_infos(&self) -> Vec<GgufTensorInfo> {
@@ -206,14 +311,12 @@ impl GgufQuantizationType {
             7 => Self::Q5_1,
             8 => Self::Q8_0,
             10 => Self::Q2_K,
-            11 => Self::Q3_K_S,
-            12 => Self::Q3_K_M,
-            13 => Self::Q3_K_L,
-            14 => Self::Q4_K_S,
-            15 => Self::Q4_K_M,
-            16 => Self::Q5_K_S,
-            17 => Self::Q5_K_M,
-            18 => Self::Q6_K,
+            11 => Self::Q3_K_S, // ggml Q3_K
+            12 => Self::Q4_K_M, // ggml Q4_K (S/M distinction is metadata-level, not type-level)
+            13 => Self::Q5_K_M, // ggml Q5_K
+            14 => Self::Q6_K,   // ggml Q6_K
+            15 => Self::Q4_K_M, // ggml Q8_K — no Q8_K enum variant; closest supported type
+            // 16-18 = IQ2_XXS, IQ2_XS, IQ3_XXS in ggml — not in our enum, fall through to Unknown
             19 => Self::IQ1_S,
             20 => Self::IQ4_NL,
             21 => Self::IQ3_S,
@@ -342,6 +445,11 @@ pub fn load_mapped_gguf<P: AsRef<Path>>(path: P) -> Result<MappedGgufFile, GgufP
     // SAFETY: The returned mapping is read-only and we keep it alive for as long as
     // parsed metadata is exposed from MappedGgufFile.
     let mmap = unsafe { Mmap::map(&file)? };
+    // Tell the kernel we'll read the whole file front-to-back and that it should
+    // start prefetching it immediately.  This queues async readahead so pages are
+    // warm by the time inference begins — critical for multi-hundred-GB models.
+    let _ = mmap.advise(Advice::Sequential);
+    let _ = mmap.advise(Advice::WillNeed);
     let parsed = parse_gguf(&mmap)?;
     Ok(MappedGgufFile {
         mmap: Arc::new(mmap),
@@ -1206,5 +1314,93 @@ mod tests {
             relative_offset: 0,
             absolute_offset: 0,
         }
+    }
+
+    // ── from_ggml_type correctness ────────────────────────────────────────────
+
+    #[test]
+    fn from_ggml_type_k_quants_map_correctly() {
+        // These mappings must match the ggml spec (ggml.h enum ggml_type).
+        // Real ggml.h mapping: Q2_K=10, Q3_K=11, Q4_K=12, Q5_K=13, Q6_K=14, Q8_K=15.
+        // Oxidize uses Q4_K_M for type 12 (S/M is metadata-level in ggml, not type-level).
+        let cases = [
+            (10, GgufQuantizationType::Q2_K),
+            (11, GgufQuantizationType::Q3_K_S),
+            (12, GgufQuantizationType::Q4_K_M),
+            (13, GgufQuantizationType::Q5_K_M),
+            (14, GgufQuantizationType::Q6_K),
+            (15, GgufQuantizationType::Q4_K_M),
+            (30, GgufQuantizationType::BF16),
+        ];
+        for (id, expected) in cases {
+            assert_eq!(
+                GgufQuantizationType::from_ggml_type(id),
+                expected,
+                "ggml_type {id} should map to {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn from_ggml_type_basic_types_unchanged() {
+        assert_eq!(
+            GgufQuantizationType::from_ggml_type(0),
+            GgufQuantizationType::F32
+        );
+        assert_eq!(
+            GgufQuantizationType::from_ggml_type(1),
+            GgufQuantizationType::F16
+        );
+        assert_eq!(
+            GgufQuantizationType::from_ggml_type(8),
+            GgufQuantizationType::Q8_0
+        );
+    }
+
+    // ── prefault_pages_locked ─────────────────────────────────────────────────
+
+    /// Build a minimal GGUF with a small payload and verify that
+    /// `prefault_pages_locked` returns and produces the same checksum as
+    /// `prefault_pages` across several thread counts.
+    fn make_padded_gguf() -> (tempfile::NamedTempFile, Vec<u8>) {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut f = NamedTempFile::new().expect("tmpfile");
+        let mut data = Vec::new();
+        data.extend_from_slice(b"GGUF");
+        data.extend_from_slice(&3_u32.to_le_bytes()); // version
+        data.extend_from_slice(&0_u64.to_le_bytes()); // n_tensors
+        data.extend_from_slice(&0_u64.to_le_bytes()); // n_kv
+        // Pad out to several pages so parallel chunking exercises all branches.
+        data.resize(4096 * 8, 0xAB_u8);
+        f.write_all(&data).unwrap();
+        f.flush().unwrap();
+        (f, data)
+    }
+
+    #[test]
+    fn prefault_pages_locked_consistent_across_thread_counts() {
+        let (f, _) = make_padded_gguf();
+        let mapped = load_mapped_gguf(f.path()).expect("open tmpfile");
+
+        // All thread counts must produce identical checksums since they
+        // XOR the same set of page offsets.
+        let (_mlocked, base, _) = mapped.prefault_pages_locked(1);
+        for threads in [2, 4, 8] {
+            let (_mlocked, checksum, ms) = mapped.prefault_pages_locked(threads);
+            assert_eq!(
+                checksum, base,
+                "checksum mismatch with {threads} threads (took {ms}ms)"
+            );
+        }
+    }
+
+    #[test]
+    fn prefault_pages_locked_completes_quickly() {
+        let (f, _) = make_padded_gguf();
+        let mapped = load_mapped_gguf(f.path()).expect("open tmpfile");
+        let (_, _, ms) = mapped.prefault_pages_locked(4);
+        assert!(ms < 5000, "prefault should be fast (took {ms}ms)");
     }
 }

@@ -30,6 +30,7 @@ futures-core = "0.3"
 futures-util = "0.3"
 gpu-allocator = { version = "0.27", optional = true }
 libp2p = { version = "0.56", features = ["gossipsub", "tcp", "tokio", "noise", "yamux", "ed25519", "identify", "macros"] }
+libc = "0.2"
 memmap2 = "0.9"
 rayon = "1"
 safetensors = "0.4"
@@ -46,6 +47,7 @@ shaderc = { version = "0.8.3", optional = true }
 
 [dev-dependencies]
 criterion = "0.5"
+tempfile = "3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 mlx-rs = "0.25"
