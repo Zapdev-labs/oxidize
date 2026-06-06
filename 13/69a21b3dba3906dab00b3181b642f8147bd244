@@ -1,0 +1,88 @@
+oxidize-python/oxidize_python/core/ffi.py
+  s_afe0dad027b6f0::t_aa60d7ae40851c 23
+  s_afe0dad027b6f0::t_c736b323c540c9 113-131
+oxidize-python/oxidize_python/cli.py
+  s_dc30242038de8f::t_c8ea3d2468a433 203-206
+  s_afe0dad027b6f0::t_05990541e31c66 220-221
+  s_afe0dad027b6f0::t_0c634ec2988541 222
+  s_dc30242038de8f::t_175d4884074e85 230-233
+oxidize-convert/src/main.rs
+  s_dc30242038de8f::t_d4bda064e5e356 40
+oxidize-python/oxidize_python/core/model/dflash_weights.py
+  s_afe0dad027b6f0::t_e1cf3b7cf051b4 73-76
+oxidize-cli/tests/cli_binary.rs
+  s_dc30242038de8f::t_c09d6120b9d199 9
+oxidize-golang/core/model/decoder_ffn.go
+  s_afe0dad027b6f0::t_f7c0256a1a16fc 74-75,77,80
+oxidize-finetuning/src/export.rs
+  s_dc30242038de8f::t_d4bda064e5e356 7,47-48
+oxidize-cli/src/main.rs
+  s_dc30242038de8f::t_d4bda064e5e356 326,383,478-479,482-483,506,645-666,1941-1942
+oxidize-python/oxidize_python/core/model/generation.py
+  s_afe0dad027b6f0::t_1c3532af4515b1 105
+oxidize-finetuning/src/lora.rs
+  s_dc30242038de8f::t_d4bda064e5e356 67-74,148-155
+oxidize-golang/core/model/dflash_weights.go
+  s_afe0dad027b6f0::t_abb88bbf0bb49f 79-82,85-86
+oxidize-python/oxidize_python/core/flash_attention/flash_attention.py
+  s_dc30242038de8f::t_d2912b4ce46407 95-97
+oxidize-python/oxidize_python/core/ggufcore/gguf.py
+  s_dc30242038de8f::t_985d750c0be829 11
+oxidize-finetuning/src/dataset.rs
+  s_dc30242038de8f::t_d4bda064e5e356 45-46
+oxidize-python/oxidize_python/core/model/inference_config.py
+  s_afe0dad027b6f0::t_2eab1c365501b5 191-198
+  s_afe0dad027b6f0::t_d08ba7750844e7 177
+  s_afe0dad027b6f0::t_5d3b9c92d2094e 108-122,125,127
+  s_afe0dad027b6f0::t_432421d183ab59 154-155,158
+oxidize-python/oxidize_python/core/tensor/gemv.py
+  s_dc30242038de8f::t_9bda1a3205db01 117-119
+  s_dc30242038de8f::t_3b2c21812725a0 213-215
+oxidize-golang/core/quantization/gemv_rust.go
+  s_afe0dad027b6f0::t_04d3b757c09c5d 61-63,65
+oxidize-finetuning/src/trainer.rs
+  s_dc30242038de8f::t_d4bda064e5e356 95,160
+oxidize-quantize/src/main.rs
+  s_dc30242038de8f::t_d4bda064e5e356 275
+oxidize-golang/core/tensor/gemv.go
+  s_afe0dad027b6f0::t_c8e230a0617a77 309
+oxidize-golang/core/model/llama_decoder_forward.go
+  s_afe0dad027b6f0::t_d7b2665b1aff0a 308-314,316-321
+  s_afe0dad027b6f0::t_e425a899aefa4a 336-346,353-356
+oxidize-core/src/compute/tensor.rs
+  s_dc30242038de8f::t_d4bda064e5e356 1690,1720-1723,4870-4872,4875-4882,4891-4894,4916-4923,4932-4935
+oxidize-golang/internal/cli/bench.go
+  s_afe0dad027b6f0::t_bb2c69638cfc84 100-103,105
+  s_afe0dad027b6f0::t_547ab1e9ac0f55 128-131
+oxidize-core/src/model/inference.rs
+  s_afe0dad027b6f0::t_85286462a1303f 211-218,220,223-224
+  s_afe0dad027b6f0::t_3f3756ce750e19 3597-3611
+  s_dc30242038de8f::t_d4bda064e5e356 1926,2834
+oxidize-ffi/src/lib.rs
+  s_dc30242038de8f::t_d4bda064e5e356 11,15,248
+  s_afe0dad027b6f0::t_675c4c76a0464f 230-234,236
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.3",
+  "base_commit_sha": "1369a21b3dba3906dab00b3181b642f8147bd244",
+  "prompts": {},
+  "sessions": {
+    "s_afe0dad027b6f0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f67fc79a-c8cc-4032-bb3e-12f3867d5222",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_dc30242038de8f": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_161d666bcffe74MEjzhlRJfxi1",
+        "model": "k2p6"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
