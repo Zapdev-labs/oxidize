@@ -20,7 +20,7 @@ def _find_lib() -> str | None:
         Path(__file__).parents[3] / "target" / "release" / "liboxidize_ffi.dylib",
         *(Path(d) / name
           for d in os.environ.get("LD_LIBRARY_PATH", "").split(":")
-          if d
+          if d  # Skip empty paths to avoid current-dir loading
           for name in ("liboxidize_ffi.so", "liboxidize_ffi.dylib")),
     ]
     for c in candidates:
@@ -30,14 +30,12 @@ def _find_lib() -> str | None:
 
 
 _lib: ctypes.CDLL | None = None
-_loaded: bool = False
 
 
 def _ensure_loaded() -> bool:
-    global _lib, _loaded
-    if _loaded:
-        return _lib is not None
-    _loaded = True
+    global _lib
+    if _lib is not None:
+        return True
     path = _find_lib()
     if path is None:
         return False
@@ -110,12 +108,9 @@ def gemv_quantized_rust(
     qt = _QUANT_TYPES.get(quant_type_name)
     if qt is None:
         return False
-    if rows < 0 or cols < 0:
+    if rows <= 0 or cols <= 0:
         return False
     # Validate buffers are large enough before handing raw pointers to native
-    # code: the kernel reads `cols` floats from the vector, writes `rows`
-    # floats to the output, and reads `rows * quantized_size(qt, cols)` bytes
-    # from the quantized weight buffer.
     if vector.shape[0] < cols or output.shape[0] < rows:
         return False
     try:
@@ -189,8 +184,23 @@ class RustModel:
             self._vocab_size,
         ))
 
-    def __del__(self) -> None:
+    def close(self) -> None:
+        """Deterministic resource cleanup."""
         if hasattr(self, "_session") and self._session:
             _lib.oxidize_session_free(self._session)
+            self._session = None
         if hasattr(self, "_handle") and self._handle:
             _lib.oxidize_model_free(self._handle)
+            self._handle = None
+
+    def __enter__(self) -> RustModel:
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
