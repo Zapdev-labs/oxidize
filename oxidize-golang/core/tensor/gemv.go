@@ -306,7 +306,7 @@ func parallelWorkers(n int) int {
 	if n < 64 {
 		return 1
 	}
-	cpus := runtime.NumCPU()
+	cpus := runtime.GOMAXPROCS(0)
 	if cpus < 1 {
 		cpus = 1
 	}

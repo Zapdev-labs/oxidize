@@ -42,11 +42,8 @@ pub fn load_jsonl_sft(path: impl AsRef<Path>) -> Result<Vec<SftExample>> {
         if trimmed.is_empty() {
             continue;
         }
-        let row: JsonlRow =
-            serde_json::from_str(trimmed).map_err(|e| FinetuneError::Model(format!(
-                "jsonl line {}: {e}",
-                line_no + 1
-            )))?;
+        let row: JsonlRow = serde_json::from_str(trimmed)
+            .map_err(|e| FinetuneError::Model(format!("jsonl line {}: {e}", line_no + 1)))?;
         let text = row_to_text(&row);
         if !text.is_empty() {
             out.push(SftExample {

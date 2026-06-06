@@ -92,7 +92,9 @@ def flash_attention_decode_gqa(
     # Gather this KV head's rows: shape (seq_len, head_dim)
     kv_arr = np.asarray(key_layer[: seq_len * kv_len], dtype=np.float32).reshape(seq_len, kv_len)
     K = kv_arr[:, kv_off : kv_off + head_dim]
-    V = np.asarray(value_layer[: seq_len * kv_len], dtype=np.float32).reshape(seq_len, kv_len)[:, kv_off : kv_off + head_dim]
+    V = np.asarray(value_layer[: seq_len * kv_len], dtype=np.float32).reshape(
+        seq_len, kv_len
+    )[:, kv_off : kv_off + head_dim]
     scores = (K @ q) * scale
     scores -= scores.max()
     weights = np.exp(scores)

@@ -1687,12 +1687,7 @@ unsafe fn q4_k_q8_k_row_dot_vnni(row: &[u8], blocks_per_row: usize, q8k: &[u8]) 
 
         let d_w = f16_le_to_f32([*w_ptr, *w_ptr.add(1)]);
         let dmin_w = f16_le_to_f32([*w_ptr.add(2), *w_ptr.add(3)]);
-        let d_q8 = f32::from_le_bytes([
-            *q8_ptr,
-            *q8_ptr.add(1),
-            *q8_ptr.add(2),
-            *q8_ptr.add(3),
-        ]);
+        let d_q8 = f32::from_le_bytes([*q8_ptr, *q8_ptr.add(1), *q8_ptr.add(2), *q8_ptr.add(3)]);
         let scales = std::slice::from_raw_parts(w_ptr.add(4), 12);
         let qs = w_ptr.add(16);
         let q8 = q8_ptr.add(4);
@@ -1722,10 +1717,10 @@ unsafe fn q4_k_q8_k_row_dot_vnni(row: &[u8], blocks_per_row: usize, q8k: &[u8]) 
             );
             vec_pos = _mm512_add_epi32(vec_pos, _mm512_mullo_epi32(prod, scale_v));
 
-            let bs1 = read_q8_k_bsum(bsums, g1 * 2) as i32
-                + read_q8_k_bsum(bsums, g1 * 2 + 1) as i32;
-            let bs2 = read_q8_k_bsum(bsums, g2 * 2) as i32
-                + read_q8_k_bsum(bsums, g2 * 2 + 1) as i32;
+            let bs1 =
+                read_q8_k_bsum(bsums, g1 * 2) as i32 + read_q8_k_bsum(bsums, g1 * 2 + 1) as i32;
+            let bs2 =
+                read_q8_k_bsum(bsums, g2 * 2) as i32 + read_q8_k_bsum(bsums, g2 * 2 + 1) as i32;
             min_acc += ms1 as i32 * bs1;
             min_acc += ms2 as i32 * bs2;
         }
@@ -4872,11 +4867,19 @@ mod tests {
         let selected = [2usize, 0usize];
 
         // Shared input (gate/up): input_stride = 0.
-        let input: Vec<f32> =
-            (0..cols).map(|i| (((i * 17 + 3) % 97) as f32) / 48.0 - 1.0).collect();
+        let input: Vec<f32> = (0..cols)
+            .map(|i| (((i * 17 + 3) % 97) as f32) / 48.0 - 1.0)
+            .collect();
         let mut batched = vec![0.0f32; selected.len() * rows];
         gemv_quantized_experts_f32(
-            GgufQuantizationType::Q4_K_M, &q, n_experts, &selected, rows, cols, &input, 0,
+            GgufQuantizationType::Q4_K_M,
+            &q,
+            n_experts,
+            &selected,
+            rows,
+            cols,
+            &input,
+            0,
             &mut batched,
         )
         .unwrap();
@@ -4885,7 +4888,10 @@ mod tests {
             gemv_quantized_f32(
                 GgufQuantizationType::Q4_K_M,
                 &q[e * expert_bytes..(e + 1) * expert_bytes],
-                rows, cols, &input, &mut want,
+                rows,
+                cols,
+                &input,
+                &mut want,
             )
             .unwrap();
             for r in 0..rows {
@@ -4907,7 +4913,14 @@ mod tests {
         }
         let mut batched2 = vec![0.0f32; selected.len() * rows];
         gemv_quantized_experts_f32(
-            GgufQuantizationType::Q4_K_M, &q, n_experts, &selected, rows, cols, &inputs, cols,
+            GgufQuantizationType::Q4_K_M,
+            &q,
+            n_experts,
+            &selected,
+            rows,
+            cols,
+            &inputs,
+            cols,
             &mut batched2,
         )
         .unwrap();
@@ -4916,7 +4929,10 @@ mod tests {
             gemv_quantized_f32(
                 GgufQuantizationType::Q4_K_M,
                 &q[e * expert_bytes..(e + 1) * expert_bytes],
-                rows, cols, &inputs[slot * cols..(slot + 1) * cols], &mut want,
+                rows,
+                cols,
+                &inputs[slot * cols..(slot + 1) * cols],
+                &mut want,
             )
             .unwrap();
             for r in 0..rows {

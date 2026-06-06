@@ -102,7 +102,7 @@ class GenerationStream:
 
     def _suppress_tokens(self, logits: Logits) -> None:
         for tok in self._config.suppressed_tokens or []:
-            if int(tok) < len(logits):
+            if 0 <= int(tok) < len(logits):
                 logits[int(tok)] = -math.inf
 
     def _finish_after_token(self, tok: Token) -> bool:

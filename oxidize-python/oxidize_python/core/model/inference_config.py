@@ -105,13 +105,26 @@ def architecture_from_gguf_string(arch: str) -> Architecture:
             return Architecture.LLAMA
 
 
-def _apply_token_embedding_dims(out: InferenceConfig, dims: list[int]) -> None:
-    """GGUF token_embd dims are [embedding_length, vocab_size] (oxidize-core)."""
+def _apply_token_embedding_dims(
+    out: InferenceConfig,
+    dims: list[int],
+    *,
+    fill_hidden: bool = True,
+    fill_vocab: bool = True,
+) -> None:
+    """GGUF token_embd dims are [embedding_length, vocab_size] (oxidize-core).
+
+    ``fill_hidden`` / ``fill_vocab`` indicate that the corresponding field was
+    not provided by GGUF metadata, so the token_embd tensor shape should be
+    used as the fallback. Without these flags the non-zero config defaults
+    (hidden_size=4096, vocab_size=32000) would mask any ``== 0`` check and the
+    fallback would never fire.
+    """
     if len(dims) < 2:
         return
-    if out.hidden_size == 0:
+    if fill_hidden:
         out.hidden_size = int(dims[0])
-    if out.vocab_size == 0:
+    if fill_vocab:
         out.vocab_size = int(dims[1])
 
 
@@ -138,8 +151,11 @@ def inference_config_from_gguf(mapped: MappedFile) -> InferenceConfig:
 
     if n := arch_u32("context_length"):
         out.context_size = n
+    hidden_from_meta = False
+    vocab_from_meta = False
     if n := arch_u32("embedding_length"):
         out.hidden_size = n
+        hidden_from_meta = True
     if n := arch_u32("attention.head_count"):
         out.num_attention_heads = n
     if n := arch_u32("attention.head_count_kv"):
@@ -158,6 +174,7 @@ def inference_config_from_gguf(mapped: MappedFile) -> InferenceConfig:
         out.rope_theta = f
     if n := arch_u32("vocab_size"):
         out.vocab_size = n
+        vocab_from_meta = True
     if n := arch_u32("attention.sliding_window"):
         out.sliding_window = n
     if n := arch_u32("expert_count"):
@@ -171,7 +188,14 @@ def inference_config_from_gguf(mapped: MappedFile) -> InferenceConfig:
             "tok_embeddings.weight",
             "model.embed_tokens.weight",
         ):
-            _apply_token_embedding_dims(out, info.dimensions)
+            _apply_token_embedding_dims(
+                out,
+                info.dimensions,
+                fill_hidden=not hidden_from_meta,
+                fill_vocab=not vocab_from_meta,
+            )
+            hidden_from_meta = True
+            vocab_from_meta = True
     if out.vocab_size == 0:
         out.vocab_size = 32000
 

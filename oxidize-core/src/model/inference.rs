@@ -208,12 +208,20 @@ impl InferenceConfig {
     }
 
     /// Whether layer `layer_idx` uses global (full-context) attention rather than
-    /// sliding-window attention. When `sliding_window_pattern` interleaving is
-    /// disabled (0) or there is no sliding window, every layer is global.
-    /// Gemma's convention: every `pattern`-th layer (1-indexed) is global.
+    /// sliding-window attention.
+    ///
+    /// - No sliding window configured (`sliding_window == 0`): every layer is global.
+    /// - Uniform-SWA models (Mistral/Qwen) set `sliding_window > 0` but leave
+    ///   `sliding_window_pattern == 0`, meaning *every* layer is local (SWA applies
+    ///   to all layers); none are global.
+    /// - Gemma interleaving (`sliding_window_pattern > 0`): every `pattern`-th layer
+    ///   (1-indexed) is global, the rest are local.
     pub fn layer_is_global(&self, layer_idx: usize) -> bool {
-        if self.sliding_window_pattern == 0 || self.sliding_window == 0 {
+        if self.sliding_window == 0 {
             return true;
+        }
+        if self.sliding_window_pattern == 0 {
+            return false;
         }
         (layer_idx + 1).is_multiple_of(self.sliding_window_pattern)
     }
@@ -1915,9 +1923,7 @@ impl InferenceModel {
                         cfg.rms_norm_eps,
                         &mut normed_batch[range.clone()],
                     )
-                    .map_err(|e| {
-                        ModelError::InferenceFailed(format!("post_attn_norm: {:?}", e))
-                    })?;
+                    .map_err(|e| ModelError::InferenceFailed(format!("post_attn_norm: {:?}", e)))?;
                     attn_proj_batch[range.clone()].copy_from_slice(&normed_batch[range]);
                 }
             }
@@ -2825,9 +2831,7 @@ impl InferenceModel {
                         cfg.rms_norm_eps,
                         normed_attn,
                     )
-                    .map_err(|e| {
-                        ModelError::InferenceFailed(format!("post_attn_norm: {:?}", e))
-                    })?;
+                    .map_err(|e| ModelError::InferenceFailed(format!("post_attn_norm: {:?}", e)))?;
                     attn_out.copy_from_slice(normed_attn);
                 }
 
@@ -3588,6 +3592,21 @@ mod tests {
         assert!(cfg.layer_is_global(7));
         assert_eq!(cfg.layer_rope_theta(3), 10_000.0);
         assert_eq!(cfg.layer_sliding_window(3), 0);
+    }
+
+    #[test]
+    fn uniform_swa_models_apply_sliding_window_to_every_layer() {
+        // Mistral/Qwen: sliding_window set, pattern 0 -> SWA on every layer.
+        let cfg = InferenceConfig {
+            sliding_window: 4096,
+            sliding_window_pattern: 0,
+            rope_theta: 1_000_000.0,
+            ..Default::default()
+        };
+        for l in [0usize, 1, 5, 31] {
+            assert!(!cfg.layer_is_global(l), "layer {l} should be local SWA");
+            assert_eq!(cfg.layer_sliding_window(l), 4096);
+        }
     }
 
     fn tiny_inference_model() -> InferenceModel {

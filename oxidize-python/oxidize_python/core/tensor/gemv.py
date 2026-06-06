@@ -6,13 +6,11 @@ The pure-Python fallbacks are kept for correctness reference only.
 
 from __future__ import annotations
 
-import math
 from collections.abc import Callable
 
 import numpy as np
 
 from oxidize_python.core.tensor.errors import GemmError, GemvError
-from oxidize_python.core.tensor.parallel import parallelize_rows
 
 
 def gemv_f32(
@@ -116,9 +114,9 @@ def gemm_f32(
     if len(output) < rows * cols:
         raise GemmError("output buffer too small")
 
-    l = np.asarray(left[: rows * shared], dtype=np.float32).reshape(rows, shared)
-    r = np.asarray(right[: shared * cols], dtype=np.float32).reshape(shared, cols)
-    result = (l @ r).ravel()
+    lhs = np.asarray(left[: rows * shared], dtype=np.float32).reshape(rows, shared)
+    rhs = np.asarray(right[: shared * cols], dtype=np.float32).reshape(shared, cols)
+    result = (lhs @ rhs).ravel()
     output[: rows * cols] = result.tolist()
 
 
@@ -212,9 +210,9 @@ def gemm_i8(
         raise GemmError("right buffer too small")
     if len(output) < rows * cols:
         raise GemmError("output buffer too small")
-    l = np.asarray(left[: rows * shared], dtype=np.int32).reshape(rows, shared)
-    r = np.asarray(right[: shared * cols], dtype=np.int32).reshape(shared, cols)
-    result = (l @ r).ravel().tolist()
+    lhs = np.asarray(left[: rows * shared], dtype=np.int32).reshape(rows, shared)
+    rhs = np.asarray(right[: shared * cols], dtype=np.int32).reshape(shared, cols)
+    result = (lhs @ rhs).ravel().tolist()
     output[: rows * cols] = result
 
 

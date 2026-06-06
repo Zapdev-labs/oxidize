@@ -71,12 +71,13 @@ func (s *LlamaDecoderStack) runPostAttentionFFN(layer *DecoderLayer, hidden, out
 		return err
 	}
 	// Gemma sandwich norm: normalize the FFN output before its residual add.
+	// Reuse the pre-MLP `normed` buffer as scratch (RMSNorm needs distinct
+	// in/out buffers) to avoid a per-call allocation in this hot path.
 	if s.Config.SandwichNorm && len(layer.PostFFNLayernorm) > 0 {
-		normedOut := make([]float32, len(out))
-		if err := tensor.RMSNormF32(out, layer.PostFFNLayernorm, normedOut, s.Config.RMSNormEps); err != nil {
+		if err := tensor.RMSNormF32(out, layer.PostFFNLayernorm, normed, s.Config.RMSNormEps); err != nil {
 			return err
 		}
-		copy(out, normedOut)
+		copy(out, normed)
 	}
 	return nil
 }

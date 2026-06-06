@@ -200,7 +200,10 @@ def _bench_command(args: list[str]) -> int:
 
     from oxidize_python.core.ffi import RustModel, _ensure_loaded
 
-    print(f"=== Oxidize bench ===\nmodel: {path}\niterations: {ns.iterations} max_tokens: {ns.max_tokens}\n")
+    print(
+        f"=== Oxidize bench ===\nmodel: {path}\n"
+        f"iterations: {ns.iterations} max_tokens: {ns.max_tokens}\n"
+    )
 
     # Fast path: use Rust FFI model (same kernels as the Rust binary)
     if _ensure_loaded():
@@ -214,8 +217,9 @@ def _bench_command(args: list[str]) -> int:
                 start = time.monotonic()
                 model.forward(prompt_tokens)
                 tok = model.sample_argmax()
-                generated = len(prompt_tokens)
-                for _ in range(ns.max_tokens):
+                # Prefill already produced the first generated token.
+                generated = 1
+                for _ in range(max(ns.max_tokens - 1, 0)):
                     model.forward([tok])
                     tok = model.sample_argmax()
                     generated += 1
@@ -223,7 +227,10 @@ def _bench_command(args: list[str]) -> int:
                 speed = generated / elapsed if elapsed > 0 else 0.0
                 total_tokens += generated
                 total_seconds += elapsed
-                print(f"round {round_i}: tokens={generated} elapsed={elapsed:.3f}s speed={speed:.2f} tok/s")
+                print(
+                    f"round {round_i}: tokens={generated} "
+                    f"elapsed={elapsed:.3f}s speed={speed:.2f} tok/s"
+                )
             avg = total_tokens / total_seconds if total_seconds > 0 else 0.0
             print(f"\naverage: {avg:.2f} tok/s over {total_tokens} tokens")
             return 0

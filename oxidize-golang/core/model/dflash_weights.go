@@ -76,8 +76,14 @@ func (w F32Weight) Gemv(input, output []float32) error {
 	if w.Quant != nil {
 		q := w.Quant
 		// Fast path: delegate to Rust AVX2+FMA kernel via CGo.
-		if ok, err := quantization.GemvRust(q.Bytes, q.QType, q.OutDim, q.InDim, input, output); ok {
+		// ok=false means the type is unsupported -> fall back to pure-Go.
+		// ok=true with a non-nil error is a genuine failure -> propagate it.
+		ok, err := quantization.GemvRust(q.Bytes, q.QType, q.OutDim, q.InDim, input, output)
+		if err != nil {
 			return err
+		}
+		if ok {
+			return nil
 		}
 		// Fallback: pure-Go dequant+dot for any type Rust doesn't handle.
 		return tensor.GemvQuantizedF32(q.Bytes, w.dequantFn(), q.OutDim, q.InDim, input, output, nil)

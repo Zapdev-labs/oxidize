@@ -8,11 +8,11 @@
 //!   - oxidize_session_new / oxidize_session_free
 //!   - oxidize_ffi_version
 
-use oxidize_core::gguf::{load_mapped_gguf, GgufQuantizationType};
+use oxidize_core::gguf::{GgufQuantizationType, load_mapped_gguf};
 use oxidize_core::inference::{InferenceConfig, InferenceModel};
 use oxidize_core::model::{Model, Session};
 use oxidize_core::tensor;
-use std::ffi::{c_char, CStr};
+use std::ffi::{CStr, c_char};
 use std::sync::Once;
 
 // ── thread pool init ──────────────────────────────────────────────────────────
@@ -227,9 +227,13 @@ pub unsafe extern "C" fn oxidize_model_forward(
     let toks: Vec<u32> = std::slice::from_raw_parts(tokens, n_tokens).to_vec();
     match h.model.forward(&toks, s) {
         Ok(logits) => {
+            // Refuse to copy a partial/truncated result: the caller-provided buffer
+            // length must exactly match the produced logits length.
+            if logits.len() != vocab_size {
+                return -1;
+            }
             let out = std::slice::from_raw_parts_mut(logits_out, vocab_size);
-            let n = logits.len().min(vocab_size);
-            out[..n].copy_from_slice(&logits[..n]);
+            out.copy_from_slice(&logits);
             0
         }
         Err(_) => -1,
@@ -241,10 +245,7 @@ pub unsafe extern "C" fn oxidize_model_forward(
 /// # Safety
 /// `logits` must be valid for `vocab_size` f32 values.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn oxidize_sample_argmax(
-    logits: *const f32,
-    vocab_size: usize,
-) -> u32 {
+pub unsafe extern "C" fn oxidize_sample_argmax(logits: *const f32, vocab_size: usize) -> u32 {
     let l = std::slice::from_raw_parts(logits, vocab_size);
     l.iter()
         .enumerate()

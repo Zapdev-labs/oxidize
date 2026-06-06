@@ -323,10 +323,7 @@ impl HfRepo {
     }
 }
 
-fn model_files_for_repo(
-    repo: &HfRepo,
-    spec: &str,
-) -> io::Result<(Vec<String>, Vec<String>)> {
+fn model_files_for_repo(repo: &HfRepo, spec: &str) -> io::Result<(Vec<String>, Vec<String>)> {
     let info = repo
         .info()
         .map_err(|error| io::Error::other(format!("failed to inspect HF repo {spec}: {error}")))?;
@@ -383,11 +380,7 @@ fn cache_safe_name(spec: &str) -> String {
         .collect()
 }
 
-fn copy_hf_file_to_dir(
-    repo: &HfRepo,
-    filename: &str,
-    dir: &Path,
-) -> io::Result<PathBuf> {
+fn copy_hf_file_to_dir(repo: &HfRepo, filename: &str, dir: &Path) -> io::Result<PathBuf> {
     let source = repo.get(filename).map_err(|error| {
         io::Error::other(format!("failed to download hf file {filename}: {error}"))
     })?;
@@ -482,14 +475,12 @@ fn requantize_gguf_to_q8(input: &std::path::Path, output: &std::path::Path) -> i
         input.display(),
         output.display()
     );
-    let input_bytes = std::fs::read(input).map_err(|e| {
-        io::Error::other(format!("failed to read GGUF for requantization: {e}"))
-    })?;
+    let input_bytes = std::fs::read(input)
+        .map_err(|e| io::Error::other(format!("failed to read GGUF for requantization: {e}")))?;
     let quantized = quantize_gguf_to_target(&input_bytes, GgufQuantizationType::Q8_0)
         .map_err(|e| io::Error::other(format!("Q8_0 requantization failed: {e}")))?;
-    std::fs::write(output, &quantized).map_err(|e| {
-        io::Error::other(format!("failed to write Q8_0 GGUF: {e}"))
-    })?;
+    std::fs::write(output, &quantized)
+        .map_err(|e| io::Error::other(format!("failed to write Q8_0 GGUF: {e}")))?;
     eprintln!(
         "Q8_0 GGUF written ({:.1} MB) — model ready",
         quantized.len() as f64 / 1_048_576.0
@@ -512,11 +503,7 @@ fn gguf_repo_candidates(spec: &str) -> Vec<String> {
     candidates
 }
 
-fn resolve_hf_model_spec(
-    api: &HfApi,
-    spec: &str,
-    hf_file: Option<&str>,
-) -> io::Result<PathBuf> {
+fn resolve_hf_model_spec(api: &HfApi, spec: &str, hf_file: Option<&str>) -> io::Result<PathBuf> {
     let mut attempted = Vec::new();
     for candidate in std::iter::once(spec.to_owned()).chain(gguf_repo_candidates(spec).into_iter())
     {
@@ -655,11 +642,28 @@ where
                 rewritten.push("--no-api".into());
             }
             Some(
-                "--prompt" | "--model" | "--backend" | "--n-gpu-layers" | "--gpus"
-                | "--parallelism" | "--lora" | "--profile" | "--profile-output" | "--max-tokens"
-                | "--temperature" | "--top-p" | "--top-k" | "--layer-cache" | "--ctx-size"
-                | "--threads" | "--kv-cache-dtype" | "--mesh-port" | "--pipe-peer"
-                | "--pipe-listen" | "--pipe-max-tokens" | "--tokenizer-model"
+                "--prompt"
+                | "--model"
+                | "--backend"
+                | "--n-gpu-layers"
+                | "--gpus"
+                | "--parallelism"
+                | "--lora"
+                | "--profile"
+                | "--profile-output"
+                | "--max-tokens"
+                | "--temperature"
+                | "--top-p"
+                | "--top-k"
+                | "--layer-cache"
+                | "--ctx-size"
+                | "--threads"
+                | "--kv-cache-dtype"
+                | "--mesh-port"
+                | "--pipe-peer"
+                | "--pipe-listen"
+                | "--pipe-max-tokens"
+                | "--tokenizer-model"
                 | "--ram-offload-threads",
             ) => {
                 rewritten.push(arg);
@@ -1934,7 +1938,8 @@ fn main() {
                     let kv_full: u64 =
                         (config.context_size as u64).saturating_mul(kv_bytes_per_token as u64);
                     #[cfg(target_os = "linux")]
-                    let available = oxidize_core::gguf::linux_mem_available_bytes().unwrap_or(u64::MAX);
+                    let available =
+                        oxidize_core::gguf::linux_mem_available_bytes().unwrap_or(u64::MAX);
                     #[cfg(not(target_os = "linux"))]
                     let available = u64::MAX;
                     // Reserve headroom for the model weights (file-backed but needed during

@@ -70,6 +70,10 @@ class F32Weight:
     def gemv(self, input_: list[float], output: list[float]) -> None:
         if self.quant is not None:
             q = self.quant
+            if len(input_) < q.in_dim:
+                raise ValueError(
+                    f"gemv input too short: have {len(input_)} want {q.in_dim}"
+                )
             v_np = np.asarray(input_[: q.in_dim], dtype=np.float32)
             o_np = np.zeros(q.out_dim, dtype=np.float32)
             if gemv_quantized_rust(q.bytes, q.q_type.name, q.out_dim, q.in_dim, v_np, o_np):

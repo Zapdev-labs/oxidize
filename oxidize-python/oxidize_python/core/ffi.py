@@ -20,6 +20,7 @@ def _find_lib() -> str | None:
         Path(__file__).parents[3] / "target" / "release" / "liboxidize_ffi.dylib",
         *(Path(d) / name
           for d in os.environ.get("LD_LIBRARY_PATH", "").split(":")
+          if d
           for name in ("liboxidize_ffi.so", "liboxidize_ffi.dylib")),
     ]
     for c in candidates:
@@ -108,6 +109,25 @@ def gemv_quantized_rust(
         return False
     qt = _QUANT_TYPES.get(quant_type_name)
     if qt is None:
+        return False
+    if rows < 0 or cols < 0:
+        return False
+    # Validate buffers are large enough before handing raw pointers to native
+    # code: the kernel reads `cols` floats from the vector, writes `rows`
+    # floats to the output, and reads `rows * quantized_size(qt, cols)` bytes
+    # from the quantized weight buffer.
+    if vector.shape[0] < cols or output.shape[0] < rows:
+        return False
+    try:
+        from oxidize_python.core.quantization.types import (
+            parse_type,
+            quantized_size,
+        )
+
+        expected_weight_bytes = rows * quantized_size(parse_type(quant_type_name), cols)
+    except Exception:
+        return False
+    if len(qbytes) < expected_weight_bytes:
         return False
     v = np.ascontiguousarray(vector[:cols], dtype=np.float32)
     o = np.ascontiguousarray(output[:rows], dtype=np.float32)

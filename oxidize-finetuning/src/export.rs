@@ -3,8 +3,8 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use crate::lora::LoRAAdapter;
 use crate::error::{FinetuneError, Result};
+use crate::lora::LoRAAdapter;
 
 #[derive(Debug, Serialize)]
 struct LoRAExportManifest {
@@ -44,8 +44,8 @@ pub fn export_lora_gguf(
             })
             .collect(),
     };
-    let json = serde_json::to_string_pretty(&manifest)
-        .map_err(|e| FinetuneError::Model(e.to_string()))?;
+    let json =
+        serde_json::to_string_pretty(&manifest).map_err(|e| FinetuneError::Model(e.to_string()))?;
     fs::write(dir.join("adapter_manifest.json"), json)
         .map_err(|e| FinetuneError::Model(e.to_string()))?;
     Ok(())

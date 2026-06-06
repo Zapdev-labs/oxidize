@@ -97,8 +97,12 @@ Options:
 		var totalSeconds float64
 		for round := 1; round <= *iterations; round++ {
 			rm.ResetSession()
+			promptIDs := make([]uint32, len(promptTokens))
+			for i, t := range promptTokens {
+				promptIDs[i] = uint32(t)
+			}
 			start := time.Now()
-			if _, ferr := rm.Forward([]uint32{1}); ferr != nil {
+			if _, ferr := rm.Forward(promptIDs); ferr != nil {
 				_, _ = fmt.Fprintf(stdout, "rust forward failed: %v\n", ferr)
 				break
 			}
@@ -121,7 +125,10 @@ Options:
 			totalSeconds += elapsed
 			_, _ = fmt.Fprintf(stdout, "round %d: tokens=%d elapsed=%.3fs speed=%.2f tok/s\n", round, generated, elapsed, speed)
 		}
-		avg := float64(totalTokens) / totalSeconds
+		avg := 0.0
+		if totalSeconds > 0 {
+			avg = float64(totalTokens) / totalSeconds
+		}
 		_, _ = fmt.Fprintf(stdout, "\naverage: %.2f tok/s over %d tokens\n", avg, totalTokens)
 		return nil
 	}

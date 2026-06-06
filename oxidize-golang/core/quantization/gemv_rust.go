@@ -58,8 +58,11 @@ func GemvRust(qbytes []byte, qtype Type, rows, cols int, vector, output []float3
 	if !ok {
 		return false, nil
 	}
+	if rows <= 0 || cols <= 0 {
+		return true, &Error{Message: "non-positive dimension for GemvRust"}
+	}
 	if len(qbytes) == 0 || len(vector) < cols || len(output) < rows {
-		return false, &Error{Message: "buffer too small for GemvRust"}
+		return true, &Error{Message: "buffer too small for GemvRust"}
 	}
 	rc := C.oxidize_gemv_quantized(
 		rt,

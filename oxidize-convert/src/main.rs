@@ -37,11 +37,7 @@ fn run(args: Args) -> Result<()> {
             config_path: args.config,
         },
     )?;
-    println!(
-        "Converted {} tensors → {}",
-        count,
-        args.output.display()
-    );
+    println!("Converted {} tensors → {}", count, args.output.display());
     Ok(())
 }
 

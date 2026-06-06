@@ -305,19 +305,21 @@ func (s *LlamaDecoderStack) ForwardBatch(tokens []uint32) ([]float32, error) {
 					copy(k[start:start+headDim], headScratch)
 				}
 			}
-			for hi := 0; hi < numHeads; hi++ {
-				start := hi * headDim
-				if err := tensor.ApplyRopeHeadF32(q[start:start+headDim], headScratch, pos, headDim, layerRope); err != nil {
-					return nil, err
+			if !s.Config.UseAlibi {
+				for hi := 0; hi < numHeads; hi++ {
+					start := hi * headDim
+					if err := tensor.ApplyRopeHeadF32(q[start:start+headDim], headScratch, pos, headDim, layerRope); err != nil {
+						return nil, err
+					}
+					copy(q[start:start+headDim], headScratch)
 				}
-				copy(q[start:start+headDim], headScratch)
-			}
-			for hi := 0; hi < numKV; hi++ {
-				start := hi * headDim
-				if err := tensor.ApplyRopeHeadF32(k[start:start+headDim], headScratch, pos, headDim, layerRope); err != nil {
-					return nil, err
+				for hi := 0; hi < numKV; hi++ {
+					start := hi * headDim
+					if err := tensor.ApplyRopeHeadF32(k[start:start+headDim], headScratch, pos, headDim, layerRope); err != nil {
+						return nil, err
+					}
+					copy(k[start:start+headDim], headScratch)
 				}
-				copy(k[start:start+headDim], headScratch)
 			}
 		}
 
@@ -331,18 +333,30 @@ func (s *LlamaDecoderStack) ForwardBatch(tokens []uint32) ([]float32, error) {
 			cache.SeqLen++
 			q := qAll[t*qSize : (t+1)*qSize]
 			out := attnPreO[t*qSize : (t+1)*qSize]
-			if layerWindow > 0 {
+			pos := s.PositionOffset + t
+			switch {
+			case s.Config.UseAlibi && len(s.AlibiSlopes) > 0:
+				if err := flash_attention.FlashAttentionDecodeHeadsGQAAlibi(
+					q, cache.Keys, cache.Values, out,
+					cache.SeqLen, headDim, kvLen, numHeads, numKV,
+					s.AlibiSlopes, pos, layerWindow,
+				); err != nil {
+					return nil, err
+				}
+			case layerWindow > 0:
 				if err := flash_attention.FlashAttentionDecodeHeadsGQAWindow(
 					q, cache.Keys, cache.Values, out,
 					cache.SeqLen, headDim, kvLen, numHeads, numKV, layerWindow,
 				); err != nil {
 					return nil, err
 				}
-			} else if err := flash_attention.FlashAttentionDecodeHeadsGQA(
-				q, cache.Keys, cache.Values, out,
-				cache.SeqLen, headDim, kvLen, numHeads, numKV,
-			); err != nil {
-				return nil, err
+			default:
+				if err := flash_attention.FlashAttentionDecodeHeadsGQA(
+					q, cache.Keys, cache.Values, out,
+					cache.SeqLen, headDim, kvLen, numHeads, numKV,
+				); err != nil {
+					return nil, err
+				}
 			}
 		}
 
