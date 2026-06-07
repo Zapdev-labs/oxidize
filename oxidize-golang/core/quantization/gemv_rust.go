@@ -1,3 +1,5 @@
+// +build cgo,rust_ffi
+
 package quantization
 
 /*

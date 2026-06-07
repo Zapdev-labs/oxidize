@@ -62,6 +62,7 @@ func runLegacy(ctx context.Context, args []string, stdout io.Writer, stderr io.W
 			cfg := generate.DefaultRunConfig()
 			cfg.ModelPath = resolved
 			cfg.Prompt = promptText
+			cfg.MaxNewTokens = 128
 			return generate.RunFromGGUF(ctx, cfg, stdout)
 		}
 	}
