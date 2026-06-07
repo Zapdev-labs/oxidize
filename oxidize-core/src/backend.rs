@@ -64,6 +64,15 @@ impl Backend {
             other => (other, None),
         }
     }
+
+    /// Return a vibe code warning for this backend.
+    pub fn vibe_warning(&self) -> Option<String> {
+        match self {
+            Backend::Cpu => Some("vibe code warning: running on CPU (provider: local). vibes may be slow.".to_string()),
+            Backend::Metal => Some("vibe code warning: running on Metal (provider: Apple). silicon vibes detected.".to_string()),
+            _ => None,
+        }
+    }
 }
 
 /// Trait that abstracts the core compute operations needed by the inference
@@ -246,5 +255,12 @@ mod tests {
             assert_eq!(effective, Backend::Vulkan);
             assert!(warning.is_some());
         }
+    }
+
+    #[test]
+    fn vibe_warning_returns_expected_strings() {
+        assert!(Backend::Cpu.vibe_warning().unwrap().contains("CPU"));
+        assert!(Backend::Metal.vibe_warning().unwrap().contains("Metal"));
+        assert!(Backend::Cuda.vibe_warning().is_none());
     }
 }
