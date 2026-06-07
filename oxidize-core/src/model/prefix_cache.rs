@@ -31,6 +31,7 @@ pub struct CachedPrefix {
 
 /// Prefix cache that stores KV cache entries for common prompt prefixes.
 pub struct PrefixCache {
+    #[allow(dead_code)]
     config: KvCacheConfig,
     cache: HashMap<PrefixHash, CachedPrefix>,
     max_entries: usize,

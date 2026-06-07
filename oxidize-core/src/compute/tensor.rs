@@ -332,6 +332,7 @@ pub fn gemm_quantized_f32(
 /// the lower 4 bits.
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
+#[allow(unsafe_op_in_unsafe_fn)]
 #[inline]
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn decode_q4_k_group_avx2(
@@ -423,6 +424,7 @@ fn decode_q8_0_block(block: &[u8], out: &mut [f32]) {
 /// multiple of 8; a tail loop handles any remainder.
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
+#[allow(unsafe_op_in_unsafe_fn)]
 #[inline]
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn dot_f32_avx2(a: *const f32, b: *const f32, len: usize) -> f32 {
@@ -475,6 +477,7 @@ unsafe fn dot_f32_avx2(a: *const f32, b: *const f32, len: usize) -> f32 {
 /// effect.
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
+#[allow(unsafe_op_in_unsafe_fn)]
 #[inline]
 #[allow(unsafe_op_in_unsafe_fn, dead_code)]
 unsafe fn dot8_f32_avx2(a: *const f32, b: [*const f32; 8], len: usize, out: &mut [f32; 8]) {
@@ -519,6 +522,7 @@ unsafe fn dot8_f32_avx2(a: *const f32, b: [*const f32; 8], len: usize, out: &mut
 /// weight scan amortization.
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
+#[allow(unsafe_op_in_unsafe_fn)]
 #[inline]
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn dot4_f32_avx2(
@@ -653,6 +657,7 @@ fn gemm_q4_k_decode_once(
 /// the compiler inline `decode_q4_k_group_avx2` + the dot kernel directly.
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
+#[allow(unsafe_op_in_unsafe_fn)]
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn gemm_q4_k_decode_once_avx2(
     quantized_matrix: &[u8],
@@ -1480,6 +1485,7 @@ fn gemm_q4_k_q8_k_fused(
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
 #[allow(unsafe_op_in_unsafe_fn)]
+#[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn gemm_q4_k_q8_k_fused_avx2(
     weights: &[u8],
     rows: usize,
@@ -1613,6 +1619,7 @@ fn quantize_block_q8_k_scalar(block_in: &[f32], block_out: &mut [u8]) {
 /// Returns the f32 dot product for one output row across all blocks in the row.
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
+#[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn q4_k_q8_k_row_dot_avx2(row: &[u8], blocks_per_row: usize, q8k: &[u8]) -> f32 {
     let mask = _mm256_set1_epi8(0x0f);
     let ones = _mm256_set1_epi16(1);
@@ -1678,6 +1685,7 @@ unsafe fn q4_k_q8_k_row_dot_avx2(row: &[u8], blocks_per_row: usize, q8k: &[u8]) 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f,avx512bw,avx512vnni")]
 #[allow(unsafe_op_in_unsafe_fn)]
+#[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn q4_k_q8_k_row_dot_vnni(row: &[u8], blocks_per_row: usize, q8k: &[u8]) -> f32 {
     let mask = _mm256_set1_epi8(0x0f);
     let mut acc = 0.0_f32;
@@ -1732,6 +1740,7 @@ unsafe fn q4_k_q8_k_row_dot_vnni(row: &[u8], blocks_per_row: usize, q8k: &[u8]) 
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
+#[allow(unsafe_op_in_unsafe_fn)]
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn q4_k_q8_k_row_dot_chunk_avx2(
     row: &[u8],
@@ -1839,6 +1848,7 @@ unsafe fn read_q8_k_bsum(bsums: *const u8, index: usize) -> i16 {
 /// Horizontal sum of 8 packed int32 values.
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
+#[allow(unsafe_op_in_unsafe_fn)]
 #[inline]
 unsafe fn hsum_i32_avx2(v: __m256i) -> i32 {
     let lo = _mm256_castsi256_si128(v);
@@ -1897,6 +1907,7 @@ fn q4_k_dot(block: &[u8], vector: &[f32]) -> f32 {
 /// read at 4-bit density — this is the decode hot path.
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
+#[allow(unsafe_op_in_unsafe_fn)]
 #[allow(dead_code)]
 unsafe fn q4_k_dot_avx2(block: &[u8], vector: &[f32]) -> f32 {
     let d = f16_le_to_f32([block[0], block[1]]);
@@ -1996,6 +2007,7 @@ fn accumulate_q4_k_block(block: &[u8], factor: f32, output: &mut [f32]) {
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
+#[allow(unsafe_op_in_unsafe_fn)]
 #[allow(dead_code)]
 unsafe fn accumulate_q4_k_block_avx2(block: *const u8, factor: f32, output: *mut f32) {
     let d = f16_le_to_f32(unsafe { [*block, *block.add(1)] });
@@ -2107,6 +2119,7 @@ fn gemv_q4_k_f32_fused(
 /// horizontal reduce at the end.
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
+#[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn q4_k_row_dot_avx2(row: &[u8], blocks_per_row: usize, vector: &[f32]) -> f32 {
     let mask = _mm_set1_epi8(0x0f);
     let mut acc0 = _mm256_setzero_ps();
@@ -2253,6 +2266,7 @@ fn q2_k_dot(block: &[u8], vector: &[f32]) -> f32 {
 /// decode hot path for Q2_K-quantized models.
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
+#[allow(unsafe_op_in_unsafe_fn)]
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn q2_k_dot_avx2(block: &[u8], vector: &[f32]) -> f32 {
     let scales = &block[0..16];
@@ -2464,6 +2478,7 @@ fn q6_k_dot_scalar(block: &[u8], vector: &[f32]) -> f32 {
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
+#[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn q6_k_dot_avx2(block: &[u8], vector: &[f32]) -> f32 {
     let d = f16_le_to_f32([block[208], block[209]]);
     let ql = block.as_ptr();
@@ -2947,6 +2962,7 @@ fn gemv_q6_k_f32_fused(
 /// horizontal reduce instead of one per block.
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
+#[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn q6_k_row_dot_avx2(row: &[u8], blocks_per_row: usize, vector: &[f32]) -> f32 {
     let mask_low = _mm_set1_epi8(0x0f);
     let mask_high = _mm_set1_epi8(0x03);
@@ -3157,6 +3173,7 @@ fn q8_0_dot_scalar(block: &[u8], vector: &[f32]) -> f32 {
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
+#[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn q8_0_dot_avx2(block: &[u8], vector: &[f32]) -> f32 {
     let scale = _mm256_set1_ps(f16_le_to_f32([block[0], block[1]]));
     let mut acc = _mm256_setzero_ps();
@@ -3177,6 +3194,7 @@ unsafe fn q8_0_dot_avx2(block: &[u8], vector: &[f32]) -> f32 {
 
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
+#[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn q8_0_dot_neon_aarch64(block: &[u8], vector: &[f32]) -> f32 {
     use std::arch::aarch64::*;
 
@@ -3197,6 +3215,7 @@ unsafe fn q8_0_dot_neon_aarch64(block: &[u8], vector: &[f32]) -> f32 {
 
 #[cfg(target_arch = "arm")]
 #[target_feature(enable = "neon")]
+#[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn q8_0_dot_neon_arm(block: &[u8], vector: &[f32]) -> f32 {
     use std::arch::arm::*;
 
@@ -3608,7 +3627,9 @@ fn accumulate_q4_block(
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f,avx512bw")]
+#[allow(unsafe_op_in_unsafe_fn)]
 #[allow(dead_code)]
+#[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn accumulate_q4_block_avx512(bitstream: *const u8, factor: f32, output: *mut f32) {
     let mask = _mm_set1_epi8(0x0F);
     let zero_point = _mm_set1_epi8(8);
@@ -3635,6 +3656,7 @@ unsafe fn accumulate_q4_block_avx512(bitstream: *const u8, factor: f32, output: 
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
+#[allow(unsafe_op_in_unsafe_fn)]
 #[allow(dead_code)]
 unsafe fn accumulate_q4_block_avx2(bitstream: *const u8, factor: f32, output: *mut f32) {
     let mask = _mm_set1_epi8(0x0F);
@@ -4415,6 +4437,7 @@ pub fn apply_rope_f32(
 /// Followed by one Newton-Raphson step on the reciprocal for better precision.
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
+#[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn swiglu_avx2(gate: &[f32], up: &[f32], output: &mut [f32]) {
     let n = output.len();
     let chunks = n / 8;
@@ -4487,6 +4510,7 @@ pub fn apply_swiglu_inplace_f32(gate: &mut [f32], up: &[f32]) {
 /// AVX2 SwiGLU inplace: reads gate[i], computes silu(gate[i])*up[i], writes back.
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
+#[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn swiglu_avx2_inplace(g_ptr: *mut f32, u_ptr: *const f32, n: usize) {
     let chunks = n / 8;
     // SAFETY: All AVX2 intrinsics are unsafe; we are inside an `unsafe fn`
@@ -4610,6 +4634,7 @@ pub fn rms_norm_f32(
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
+#[allow(unsafe_op_in_unsafe_fn)]
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn rms_norm_f32_avx2(input: &[f32], weight: &[f32], eps: f32, output: &mut [f32]) {
     let len = output.len();

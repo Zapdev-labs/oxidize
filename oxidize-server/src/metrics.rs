@@ -3,15 +3,13 @@
 //! Exposes request latency histograms, token counters, queue depth gauges,
 //! cache hit ratios, and GPU memory usage via the standard `/metrics` endpoint.
 
-use std::sync::Arc;
-
 use axum::{
     extract::State,
     http::StatusCode,
     response::{IntoResponse, Response},
 };
 use prometheus::{
-    Counter, CounterVec, Encoder, Gauge, Histogram, HistogramOpts, HistogramVec, IntCounter,
+    CounterVec, Encoder, Gauge, Histogram, HistogramOpts, HistogramVec, IntCounter,
     IntGauge, Opts, Registry, TextEncoder,
 };
 

@@ -8,7 +8,6 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use axum::{
-    body::Body,
     extract::Request,
     http::StatusCode,
     middleware::Next,

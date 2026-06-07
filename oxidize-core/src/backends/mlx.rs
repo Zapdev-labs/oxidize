@@ -260,6 +260,11 @@ mod mlx_impl {
         stream: Stream,
     }
 
+    // SAFETY: MLX C API is thread-safe; Device/Stream may contain raw pointers
+    // but they are reference-counted and safe to share across threads.
+    unsafe impl Send for MlxComputeBackend {}
+    unsafe impl Sync for MlxComputeBackend {}
+
     impl Default for MlxComputeBackend {
         fn default() -> Self {
             Self::new()

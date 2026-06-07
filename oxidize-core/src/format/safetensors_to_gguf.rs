@@ -638,7 +638,7 @@ fn parse_merges(merges: Option<&Value>) -> Result<Vec<String>> {
 }
 
 fn apply_special_token_ids(meta: &mut BTreeMap<String, GgufMetadataValue>, dir: &Path) {
-    let mut set_id = |meta: &mut BTreeMap<_, _>, key: &str, json: &Value, field: &str| {
+    let set_id = |meta: &mut BTreeMap<_, _>, key: &str, json: &Value, field: &str| {
         if let Some(id) = json.get(field).and_then(json_u32) {
             meta.insert(key.to_owned(), GgufMetadataValue::Uint32(id));
         }

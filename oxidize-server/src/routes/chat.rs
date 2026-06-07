@@ -16,14 +16,14 @@ use futures_util::stream;
 use serde_json::json;
 
 use crate::app::AppState;
-use crate::audit::{AuditEvent, AuditLogger};
+use crate::audit::AuditEvent;
 use crate::routes::responses::{
     chat_completion_response, chat_completion_stream_response,
     chat_completion_stream_response_paged, generation_error_response, model_not_found,
     validate_candidate_count,
 };
 use crate::runtime::generate::{
-    GenerationError, GenerationRequest, GenerationResult, generate_text,
+    GenerationError, GenerationRequest, generate_text,
     generate_with_scheduler_blocking, generate_with_scheduler_streaming_blocking,
     render_chat_prompt,
 };
@@ -87,7 +87,7 @@ pub async fn chat_completions(
                 .await
                 .map_err(|e| GenerationError::Other(format!("generation task failed: {e}")));
 
-        let result = match generated {
+        let _result = match generated {
             Ok(Ok(result)) => {
                 let duration = start_time.elapsed();
                 let event = AuditEvent::new(request_id.clone(), "generation_complete")

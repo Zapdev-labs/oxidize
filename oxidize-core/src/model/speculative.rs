@@ -24,9 +24,9 @@
 //! let tokens = decoder.generate(prompt_tokens, max_tokens)?;
 //! ```
 
-use crate::dflash::{DFlashConfig, DFlashDraftModel};
-use crate::generation::{GenerationConfig, GenerationError};
-use crate::model::{Logits, Model, ModelError, Session, Token};
+use crate::dflash::DFlashDraftModel;
+
+use crate::model::{Model, ModelError, Session, Token};
 use crate::sampling::{SamplingConfig, SamplingError, sample, speculative_decode};
 use std::collections::VecDeque;
 
@@ -156,6 +156,7 @@ pub struct SpeculativeDecoder<'a, T: Model> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 enum DecoderState {
     Prefill,
     Speculating,

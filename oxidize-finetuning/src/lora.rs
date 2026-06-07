@@ -138,7 +138,7 @@ fn init_lora_a(a: &mut [f32], rank: usize, seed: u64) {
     }
 }
 
-fn lora_down(a: &[f32], x: &[f32], in_dim: usize, rank: usize, out: &mut [f32]) {
+fn lora_down(a: &[f32], x: &[f32], in_dim: usize, _rank: usize, out: &mut [f32]) {
     out.par_iter_mut().enumerate().for_each(|(r, o)| {
         let row = &a[r * in_dim..(r + 1) * in_dim];
         *o = row.iter().zip(x.iter()).map(|(w, xi)| w * xi).sum::<f32>();

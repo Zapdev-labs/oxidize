@@ -62,6 +62,7 @@ impl SftTrainer {
         }
         let h = model.config_hidden_size();
         let vocab = model.config().vocab_size;
+        #[allow(unused_assignments)]
         let mut session = Session::new();
         let mut epoch_losses = Vec::with_capacity(self.config.epochs);
         let mut total_loss = 0.0_f32;
@@ -160,6 +161,7 @@ impl SftTrainer {
     pub fn eval_loss(&self, model: &mut InferenceModel, examples: &[SftExample]) -> Result<f32> {
         let h = model.config_hidden_size();
         let vocab = model.config().vocab_size;
+        #[allow(unused_assignments)]
         let mut session = Session::new();
         let mut normed = vec![0.0_f32; h];
         let mut logits = vec![0.0_f32; vocab];

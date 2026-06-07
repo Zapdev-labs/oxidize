@@ -6,7 +6,6 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::{
@@ -18,7 +17,6 @@ use axum::{
 use serde::Serialize;
 use serde_json::json;
 use tokio::sync::mpsc;
-use tracing::{Level, info, span};
 use uuid::Uuid;
 
 /// Unique identifier for a request.

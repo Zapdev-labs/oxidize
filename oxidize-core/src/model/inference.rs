@@ -3209,7 +3209,7 @@ impl InferenceModel {
         for head in 0..n_heads {
             let q_off = head * k_head_dim;
             let k_off = head * k_head_dim;
-            let v_off = head * v_head_dim;
+            let _v_off = head * v_head_dim;
             let q_h = &q[q_off..q_off + k_head_dim];
             let mut scores = vec![0.0_f32; seq_len];
             for t in 0..seq_len {

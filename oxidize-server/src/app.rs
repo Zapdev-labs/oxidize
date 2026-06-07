@@ -9,7 +9,7 @@ use axum::{
     routing::{get, post},
 };
 
-use crate::audit::{AuditLogger, audit_middleware};
+use crate::audit::AuditLogger;
 use crate::auth::{AuthConfig, enforce_api_key};
 #[cfg(test)]
 use crate::limits::RequestLimitConfig;

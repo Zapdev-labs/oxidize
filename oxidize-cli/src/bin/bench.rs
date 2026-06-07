@@ -392,6 +392,7 @@ fn infer_dflash_config_from_tensors(
     out
 }
 
+#[allow(dead_code)]
 fn inference_config_from_dflash(
     config: &DFlashConfig,
     context_length: usize,
