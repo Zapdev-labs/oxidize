@@ -1,0 +1,21 @@
+oxidize-ffi/src/lib.rs
+  s_9be9193dce4a26::t_e2ecac8a29d98c 105-107,127,154,167,186,198,225-227,235,249
+oxidize-core/src/compute/tensor.rs
+  s_9be9193dce4a26::t_e2ecac8a29d98c 4422-4457,4492-4523
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.3",
+  "base_commit_sha": "192710536b80bdb60d796a4e2b208a9fdbcf9f2d",
+  "prompts": {},
+  "sessions": {
+    "s_9be9193dce4a26": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_15e377a37ffe7GMeC36rwZH6Yx",
+        "model": "k2p6"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
