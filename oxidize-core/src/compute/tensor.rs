@@ -4419,38 +4419,42 @@ unsafe fn swiglu_avx2(gate: &[f32], up: &[f32], output: &mut [f32]) {
     let n = output.len();
     let chunks = n / 8;
 
-    let log2e = _mm256_set1_ps(1.4426950409f32); // log2(e)
-    let scale23 = _mm256_set1_ps((1u32 << 23) as f32);
-    let bias23 = _mm256_set1_ps((127u32 << 23) as f32);
-    let one = _mm256_set1_ps(1.0_f32);
-    let two = _mm256_set1_ps(2.0_f32);
-    let zero = _mm256_setzero_ps();
-    let clamp_hi = _mm256_set1_ps(12.0_f32);
-    let clamp_lo = _mm256_set1_ps(-12.0_f32);
+    // SAFETY: All AVX2 intrinsics are unsafe; we are inside an `unsafe fn`
+    // that is only called after runtime feature detection confirms AVX2+FMA.
+    unsafe {
+        let log2e = _mm256_set1_ps(1.4426950409f32); // log2(e)
+        let scale23 = _mm256_set1_ps((1u32 << 23) as f32);
+        let _bias23 = _mm256_set1_ps((127u32 << 23) as f32);
+        let one = _mm256_set1_ps(1.0_f32);
+        let two = _mm256_set1_ps(2.0_f32);
+        let zero = _mm256_setzero_ps();
+        let clamp_hi = _mm256_set1_ps(12.0_f32);
+        let clamp_lo = _mm256_set1_ps(-12.0_f32);
 
-    for i in 0..chunks {
-        let g = _mm256_loadu_ps(gate[i * 8..].as_ptr());
-        let u = _mm256_loadu_ps(up[i * 8..].as_ptr());
+        for i in 0..chunks {
+            let g = _mm256_loadu_ps(gate[i * 8..].as_ptr());
+            let u = _mm256_loadu_ps(up[i * 8..].as_ptr());
 
-        // neg_g clamped to [-12, 12] to keep 2^(neg_g·log2e) in valid i32 range
-        let neg_g = _mm256_sub_ps(zero, g);
-        let neg_g = _mm256_max_ps(_mm256_min_ps(neg_g, clamp_hi), clamp_lo);
+            // neg_g clamped to [-12, 12] to keep 2^(neg_g·log2e) in valid i32 range
+            let neg_g = _mm256_sub_ps(zero, g);
+            let neg_g = _mm256_max_ps(_mm256_min_ps(neg_g, clamp_hi), clamp_lo);
 
-        // exp(-g) ≈ 2^(neg_g·log₂e): multiply, add the float-domain bias 127·2²³,
-        // then reinterpret the bits as f32 (standard Schraudolph approximation).
-        let exp_arg = _mm256_fmadd_ps(neg_g, log2e, _mm256_set1_ps(127.0_f32));
-        let exp_bits = _mm256_cvtps_epi32(_mm256_mul_ps(exp_arg, scale23));
-        let exp_neg_g = _mm256_castsi256_ps(exp_bits);
+            // exp(-g) ≈ 2^(neg_g·log₂e): multiply, add the float-domain bias 127·2²³,
+            // then reinterpret the bits as f32 (standard Schraudolph approximation).
+            let exp_arg = _mm256_fmadd_ps(neg_g, log2e, _mm256_set1_ps(127.0_f32));
+            let exp_bits = _mm256_cvtps_epi32(_mm256_mul_ps(exp_arg, scale23));
+            let exp_neg_g = _mm256_castsi256_ps(exp_bits);
 
-        // sigmoid = 1 / (1 + exp(-g))
-        let denom = _mm256_add_ps(one, exp_neg_g);
-        // rcp + one Newton-Raphson step: r2 = r·(2 - denom·r)
-        let rcp = _mm256_rcp_ps(denom);
-        let sigmoid = _mm256_mul_ps(rcp, _mm256_fnmadd_ps(denom, rcp, two));
+            // sigmoid = 1 / (1 + exp(-g))
+            let denom = _mm256_add_ps(one, exp_neg_g);
+            // rcp + one Newton-Raphson step: r2 = r·(2 - denom·r)
+            let rcp = _mm256_rcp_ps(denom);
+            let sigmoid = _mm256_mul_ps(rcp, _mm256_fnmadd_ps(denom, rcp, two));
 
-        // silu(g)·up = g·sigmoid(g)·up
-        let result = _mm256_mul_ps(_mm256_mul_ps(g, sigmoid), u);
-        _mm256_storeu_ps(output[i * 8..].as_mut_ptr(), result);
+            // silu(g)·up = g·sigmoid(g)·up
+            let result = _mm256_mul_ps(_mm256_mul_ps(g, sigmoid), u);
+            _mm256_storeu_ps(output[i * 8..].as_mut_ptr(), result);
+        }
     }
 
     // Scalar tail for remainder elements
@@ -4485,34 +4489,38 @@ pub fn apply_swiglu_inplace_f32(gate: &mut [f32], up: &[f32]) {
 #[target_feature(enable = "avx2,fma")]
 unsafe fn swiglu_avx2_inplace(g_ptr: *mut f32, u_ptr: *const f32, n: usize) {
     let chunks = n / 8;
-    let log2e = _mm256_set1_ps(1.4426950409_f32);
-    let scale23 = _mm256_set1_ps((1u32 << 23) as f32);
-    let one = _mm256_set1_ps(1.0_f32);
-    let two = _mm256_set1_ps(2.0_f32);
-    let zero = _mm256_setzero_ps();
-    let clamp_hi = _mm256_set1_ps(12.0_f32);
-    let clamp_lo = _mm256_set1_ps(-12.0_f32);
+    // SAFETY: All AVX2 intrinsics are unsafe; we are inside an `unsafe fn`
+    // that is only called after runtime feature detection confirms AVX2+FMA.
+    unsafe {
+        let log2e = _mm256_set1_ps(1.4426950409_f32);
+        let scale23 = _mm256_set1_ps((1u32 << 23) as f32);
+        let one = _mm256_set1_ps(1.0_f32);
+        let two = _mm256_set1_ps(2.0_f32);
+        let zero = _mm256_setzero_ps();
+        let clamp_hi = _mm256_set1_ps(12.0_f32);
+        let clamp_lo = _mm256_set1_ps(-12.0_f32);
 
-    for i in 0..chunks {
-        let off = i * 8;
-        let g = _mm256_loadu_ps(g_ptr.add(off));
-        let u = _mm256_loadu_ps(u_ptr.add(off));
+        for i in 0..chunks {
+            let off = i * 8;
+            let g = _mm256_loadu_ps(g_ptr.add(off));
+            let u = _mm256_loadu_ps(u_ptr.add(off));
 
-        let neg_g = _mm256_sub_ps(zero, g);
-        let neg_g = _mm256_max_ps(_mm256_min_ps(neg_g, clamp_hi), clamp_lo);
-        let exp_arg = _mm256_fmadd_ps(neg_g, log2e, _mm256_set1_ps(127.0_f32));
-        let exp_bits = _mm256_cvtps_epi32(_mm256_mul_ps(exp_arg, scale23));
-        let exp_neg_g = _mm256_castsi256_ps(exp_bits);
-        let denom = _mm256_add_ps(one, exp_neg_g);
-        let rcp = _mm256_rcp_ps(denom);
-        let sigmoid = _mm256_mul_ps(rcp, _mm256_fnmadd_ps(denom, rcp, two));
-        let result = _mm256_mul_ps(_mm256_mul_ps(g, sigmoid), u);
-        _mm256_storeu_ps(g_ptr.add(off), result);
-    }
-    for i in (chunks * 8)..n {
-        let g = *g_ptr.add(i);
-        let sigmoid = 1.0_f32 / (1.0_f32 + (-g).exp());
-        *g_ptr.add(i) = g * sigmoid * *u_ptr.add(i);
+            let neg_g = _mm256_sub_ps(zero, g);
+            let neg_g = _mm256_max_ps(_mm256_min_ps(neg_g, clamp_hi), clamp_lo);
+            let exp_arg = _mm256_fmadd_ps(neg_g, log2e, _mm256_set1_ps(127.0_f32));
+            let exp_bits = _mm256_cvtps_epi32(_mm256_mul_ps(exp_arg, scale23));
+            let exp_neg_g = _mm256_castsi256_ps(exp_bits);
+            let denom = _mm256_add_ps(one, exp_neg_g);
+            let rcp = _mm256_rcp_ps(denom);
+            let sigmoid = _mm256_mul_ps(rcp, _mm256_fnmadd_ps(denom, rcp, two));
+            let result = _mm256_mul_ps(_mm256_mul_ps(g, sigmoid), u);
+            _mm256_storeu_ps(g_ptr.add(off), result);
+        }
+        for i in (chunks * 8)..n {
+            let g = *g_ptr.add(i);
+            let sigmoid = 1.0_f32 / (1.0_f32 + (-g).exp());
+            *g_ptr.add(i) = g * sigmoid * *u_ptr.add(i);
+        }
     }
 }
 

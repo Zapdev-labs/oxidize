@@ -102,9 +102,9 @@ pub unsafe extern "C" fn oxidize_gemv_quantized(
     let Some(qt) = to_gguf_type(quant_type) else {
         return -1;
     };
-    let qb = std::slice::from_raw_parts(qbytes, qbytes_len);
-    let v = std::slice::from_raw_parts(vector, cols);
-    let o = std::slice::from_raw_parts_mut(output, rows);
+    let qb = unsafe { std::slice::from_raw_parts(qbytes, qbytes_len) };
+    let v = unsafe { std::slice::from_raw_parts(vector, cols) };
+    let o = unsafe { std::slice::from_raw_parts_mut(output, rows) };
     match tensor::gemv_quantized_f32(qt, qb, rows, cols, v, o) {
         Ok(()) => 0,
         Err(_) => -1,
@@ -124,7 +124,7 @@ struct ModelHandle {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn oxidize_model_load(path: *const c_char) -> *mut std::ffi::c_void {
     init_thread_pool();
-    let Ok(path_str) = CStr::from_ptr(path).to_str() else {
+    let Ok(path_str) = unsafe { CStr::from_ptr(path) }.to_str() else {
         return std::ptr::null_mut();
     };
     let mapped = match load_mapped_gguf(path_str) {
@@ -151,7 +151,7 @@ pub unsafe extern "C" fn oxidize_model_load(path: *const c_char) -> *mut std::ff
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn oxidize_model_free(handle: *mut std::ffi::c_void) {
     if !handle.is_null() {
-        drop(Box::from_raw(handle as *mut ModelHandle));
+        unsafe { drop(Box::from_raw(handle as *mut ModelHandle)) };
     }
 }
 
@@ -164,7 +164,7 @@ pub unsafe extern "C" fn oxidize_model_vocab_size(handle: *mut std::ffi::c_void)
     if handle.is_null() {
         return 0;
     }
-    let h = &*(handle as *mut ModelHandle);
+    let h = unsafe { &*(handle as *mut ModelHandle) };
     h.model.config().vocab_size as u32
 }
 
@@ -183,7 +183,7 @@ pub extern "C" fn oxidize_session_new() -> *mut std::ffi::c_void {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn oxidize_session_reset(session: *mut std::ffi::c_void) {
     if !session.is_null() {
-        let s = &mut *(session as *mut Session);
+        let s = unsafe { &mut *(session as *mut Session) };
         *s = Session::new();
     }
 }
@@ -195,7 +195,7 @@ pub unsafe extern "C" fn oxidize_session_reset(session: *mut std::ffi::c_void) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn oxidize_session_free(session: *mut std::ffi::c_void) {
     if !session.is_null() {
-        drop(Box::from_raw(session as *mut Session));
+        unsafe { drop(Box::from_raw(session as *mut Session)) };
     }
 }
 
@@ -222,9 +222,9 @@ pub unsafe extern "C" fn oxidize_model_forward(
     if handle.is_null() || session.is_null() || tokens.is_null() || logits_out.is_null() {
         return -1;
     }
-    let h = &mut *(handle as *mut ModelHandle);
-    let s = &mut *(session as *mut Session);
-    let toks: Vec<u32> = std::slice::from_raw_parts(tokens, n_tokens).to_vec();
+    let h = unsafe { &mut *(handle as *mut ModelHandle) };
+    let s = unsafe { &mut *(session as *mut Session) };
+    let toks: Vec<u32> = unsafe { std::slice::from_raw_parts(tokens, n_tokens) }.to_vec();
     match h.model.forward(&toks, s) {
         Ok(logits) => {
             // Refuse to copy a partial/truncated result: the caller-provided buffer
@@ -232,7 +232,7 @@ pub unsafe extern "C" fn oxidize_model_forward(
             if logits.len() != vocab_size {
                 return -1;
             }
-            let out = std::slice::from_raw_parts_mut(logits_out, vocab_size);
+            let out = unsafe { std::slice::from_raw_parts_mut(logits_out, vocab_size) };
             out.copy_from_slice(&logits);
             0
         }
@@ -246,7 +246,7 @@ pub unsafe extern "C" fn oxidize_model_forward(
 /// `logits` must be valid for `vocab_size` f32 values.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn oxidize_sample_argmax(logits: *const f32, vocab_size: usize) -> u32 {
-    let l = std::slice::from_raw_parts(logits, vocab_size);
+    let l = unsafe { std::slice::from_raw_parts(logits, vocab_size) };
     l.iter()
         .enumerate()
         .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
