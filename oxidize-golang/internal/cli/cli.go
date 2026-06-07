@@ -59,11 +59,10 @@ func runLegacy(ctx context.Context, args []string, stdout io.Writer, stderr io.W
 			return err
 		}
 		if err := validateGGUFPath(resolved); err == nil {
-			return generate.RunFromGGUF(ctx, generate.RunConfig{
-				ModelPath:    resolved,
-				Prompt:       promptText,
-				MaxNewTokens: 128,
-			}, stdout)
+			cfg := generate.DefaultRunConfig()
+			cfg.ModelPath = resolved
+			cfg.Prompt = promptText
+			return generate.RunFromGGUF(ctx, cfg, stdout)
 		}
 	}
 	_, err := io.WriteString(stdout, generate.CLITranscript(promptText))

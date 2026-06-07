@@ -50,6 +50,14 @@ func DefaultSpeculativeGenerationConfig() SpeculativeGenerationConfig {
 	}
 }
 
+type generationState int
+
+const (
+	generationPrefill generationState = iota
+	generationDecode
+	generationDone
+)
+
 // GenerationStream is a small in-process representation of the async stream
 // that the Rust crate returns from `Model::generate`. It blocks on the
 // supplied model + session for each token.
@@ -58,23 +66,100 @@ type GenerationStream struct {
 	model   Model
 	session *Session
 	config  GenerationConfig
+	state   generationState
 	done    bool
-	tokens  []Token
+	prompt  []Token
+	generated int
+	lastToken Token
+	hasLast   bool
+	recent    []Token
+	maxStop   int
 }
 
 // NewGenerationStream constructs a stream bound to the given model and
 // session.
 func NewGenerationStream(model Model, session *Session, config GenerationConfig) *GenerationStream {
-	return &GenerationStream{model: model, session: session, config: config}
+	maxStop := 0
+	for _, seq := range config.StopSequences {
+		if len(seq) > maxStop {
+			maxStop = len(seq)
+		}
+	}
+	return &GenerationStream{
+		model:   model,
+		session: session,
+		config:  config,
+		state:   generationPrefill,
+		recent:  make([]Token, 0, maxStop),
+		maxStop: maxStop,
+	}
 }
 
 // Seed prepends tokens to the stream's internal state.
 func (s *GenerationStream) Seed(prompt []Token) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(s.tokens) == 0 {
-		s.tokens = append(s.tokens, prompt...)
+	if len(s.prompt) == 0 && len(prompt) > 0 {
+		s.prompt = append(s.prompt, prompt...)
 	}
+}
+
+func (s *GenerationStream) forwardPrefill() (Logits, error) {
+	batch := s.config.PrefillBatchSize
+	if batch <= 0 {
+		batch = 1
+	}
+	var logits Logits
+	for i := 0; i < len(s.prompt); i += batch {
+		end := i + batch
+		if end > len(s.prompt) {
+			end = len(s.prompt)
+		}
+		chunk := s.prompt[i:end]
+		out, err := s.model.Forward(chunk, s.session)
+		if err != nil {
+			return nil, err
+		}
+		logits = out
+	}
+	return logits, nil
+}
+
+func (s *GenerationStream) suppressTokens(logits Logits) {
+	for _, tok := range s.config.SuppressedTokens {
+		if int(tok) < len(logits) {
+			logits[tok] = negInfF32
+		}
+	}
+}
+
+func (s *GenerationStream) finishAfterToken(tok Token) bool {
+	if tok == s.config.StopToken {
+		return true
+	}
+	if s.maxStop == 0 {
+		return false
+	}
+	s.recent = append(s.recent, tok)
+	if len(s.recent) > s.maxStop {
+		s.recent = s.recent[len(s.recent)-s.maxStop:]
+	}
+	for _, seq := range s.config.StopSequences {
+		if len(seq) == 0 || len(s.recent) < len(seq) {
+			continue
+		}
+		ok := true
+		for i, x := range seq {
+			if s.recent[len(s.recent)-len(seq)+i] != x {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return true
+		}
+	}
+	return false
 }
 
 // Next produces the next token. When generation is finished, returns
@@ -82,49 +167,52 @@ func (s *GenerationStream) Seed(prompt []Token) {
 func (s *GenerationStream) Next(ctx context.Context) (Token, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.done {
+	if s.done || s.state == generationDone {
 		return 0, true, nil
 	}
-	if s.config.MaxNewTokens > 0 && len(s.tokens) >= s.config.MaxNewTokens {
+	if s.config.MaxNewTokens > 0 && s.generated >= s.config.MaxNewTokens {
 		s.done = true
+		s.state = generationDone
 		return 0, true, nil
 	}
 	if err := ctx.Err(); err != nil {
 		return 0, true, &GenerationError{Message: err.Error()}
 	}
-	logits, err := s.model.Forward(s.tokens, s.session)
+
+	var logits Logits
+	var err error
+	switch s.state {
+	case generationPrefill:
+		s.state = generationDecode
+		logits, err = s.forwardPrefill()
+	case generationDecode:
+		if !s.hasLast {
+			s.done = true
+			s.state = generationDone
+			return 0, true, nil
+		}
+		logits, err = s.model.Forward([]Token{s.lastToken}, s.session)
+	default:
+		return 0, true, nil
+	}
 	if err != nil {
 		return 0, true, &GenerationError{Message: err.Error()}
 	}
 	if len(logits) == 0 {
 		return 0, true, &GenerationError{Message: "empty logits"}
 	}
+	s.suppressTokens(logits)
 	tok, err := Sample(logits, s.config.Sampling, nil)
 	if err != nil {
 		return 0, true, &GenerationError{Message: err.Error()}
 	}
-	s.tokens = append(s.tokens, tok)
-	if tok == s.config.StopToken {
+	s.generated++
+	s.lastToken = tok
+	s.hasLast = true
+	if s.finishAfterToken(tok) {
 		s.done = true
+		s.state = generationDone
 		return tok, true, nil
-	}
-	for _, seq := range s.config.StopSequences {
-		if len(seq) == 0 {
-			continue
-		}
-		if len(s.tokens) >= len(seq) {
-			ok := true
-			for i, x := range seq {
-				if s.tokens[len(s.tokens)-len(seq)+i] != x {
-					ok = false
-					break
-				}
-			}
-			if ok {
-				s.done = true
-				return tok, true, nil
-			}
-		}
 	}
 	return tok, false, nil
 }
@@ -171,8 +259,6 @@ func (s *SpeculativeGenerationStream) Next(ctx context.Context) (Token, bool, er
 		s.done = true
 		return 0, true, nil
 	}
-	// `accepted == 0` is unreachable here (handled above), so the stream is
-	// not finished after returning an accepted token.
 	return tokens[accepted-1], false, nil
 }
 

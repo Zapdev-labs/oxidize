@@ -92,8 +92,7 @@ impl SftTrainer {
                     let token = ids[pos];
                     let target = ids[pos + 1] as usize;
 
-                    model
-                        .embed_token_into_workspace(token);
+                    model.embed_token_into_workspace(token);
                     model
                         .run_layer_range_in_workspace(pos, 0..model.config().layer_count)
                         .map_err(|e| FinetuneError::Model(format!("{e:?}")))?;
@@ -158,11 +157,7 @@ impl SftTrainer {
         })
     }
 
-    pub fn eval_loss(
-        &self,
-        model: &mut InferenceModel,
-        examples: &[SftExample],
-    ) -> Result<f32> {
+    pub fn eval_loss(&self, model: &mut InferenceModel, examples: &[SftExample]) -> Result<f32> {
         let h = model.config_hidden_size();
         let vocab = model.config().vocab_size;
         let mut session = Session::new();

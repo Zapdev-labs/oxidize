@@ -5,7 +5,9 @@ from __future__ import annotations
 import math
 from concurrent.futures import ThreadPoolExecutor
 
-from oxidize_python.core import simd
+import numpy as np
+
+from oxidize_python.core.simd import simd
 
 
 class Error(Exception):
@@ -47,24 +49,15 @@ def flash_attention_decode_f32(
         raise Error("value cache too small")
     if len(output) < head_dim:
         raise Error("output too small")
-    for d in range(head_dim):
-        output[d] = 0.0
-    m = float("-inf")
-    norm = 0.0
-    for s in range(seq_len):
-        k = key_cache[s * head_dim : (s + 1) * head_dim]
-        score = dot_product_f32(query[:head_dim], k) * scale
-        new_max = max(m, score)
-        alpha = math.exp(m - new_max)
-        beta = math.exp(score - new_max)
-        m = new_max
-        norm = norm * alpha + beta
-        v = value_cache[s * head_dim : (s + 1) * head_dim]
-        for d in range(head_dim):
-            output[d] = output[d] * alpha + beta * v[d]
-    inv = 1.0 / norm
-    for d in range(head_dim):
-        output[d] *= inv
+    q = np.asarray(query[:head_dim], dtype=np.float32)
+    K = np.asarray(key_cache[: seq_len * head_dim], dtype=np.float32).reshape(seq_len, head_dim)
+    V = np.asarray(value_cache[: seq_len * head_dim], dtype=np.float32).reshape(seq_len, head_dim)
+    scores = (K @ q) * scale
+    scores -= scores.max()
+    weights = np.exp(scores)
+    weights /= weights.sum()
+    result = (weights[:, None] * V).sum(axis=0)
+    output[:head_dim] = result.tolist()
 
 
 def flash_attention_decode_gqa(
@@ -95,26 +88,19 @@ def flash_attention_decode_gqa(
         raise Error("invalid kv_head")
     scale = 1.0 / math.sqrt(head_dim)
     kv_off = kv_head * head_dim
-    m = float("-inf")
-    norm = 0.0
-    for i in range(head_dim):
-        output[i] = 0.0
-    for t in range(seq_len):
-        row = t * kv_len + kv_off
-        key = key_layer[row : row + head_dim]
-        score = dot_product_f32(query[:head_dim], key) * scale
-        new_max = max(m, score)
-        alpha = math.exp(m - new_max)
-        beta = math.exp(score - new_max)
-        m = new_max
-        norm = norm * alpha + beta
-        val = value_layer[row : row + head_dim]
-        for d in range(head_dim):
-            output[d] = output[d] * alpha + beta * val[d]
-    if norm > 0:
-        inv = 1.0 / norm
-        for d in range(head_dim):
-            output[d] *= inv
+    q = np.asarray(query[:head_dim], dtype=np.float32)
+    # Gather this KV head's rows: shape (seq_len, head_dim)
+    kv_arr = np.asarray(key_layer[: seq_len * kv_len], dtype=np.float32).reshape(seq_len, kv_len)
+    K = kv_arr[:, kv_off : kv_off + head_dim]
+    V = np.asarray(value_layer[: seq_len * kv_len], dtype=np.float32).reshape(
+        seq_len, kv_len
+    )[:, kv_off : kv_off + head_dim]
+    scores = (K @ q) * scale
+    scores -= scores.max()
+    weights = np.exp(scores)
+    weights /= weights.sum()
+    result = (weights[:, None] * V).sum(axis=0)
+    output[:head_dim] = result.tolist()
 
 
 def flash_attention_decode_heads_gqa(

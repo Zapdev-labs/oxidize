@@ -163,6 +163,25 @@ func LoadLlamaDecoderStackFromGGUF(mapped *ggufcore.MappedFile, config LlamaDeco
 		} else if data, _, ok, _ := loader.loadF32WithDims(prefix + ".ffn_norm.weight"); ok {
 			postLN = data
 		}
+		// Gemma sandwich norm: post_attention_norm is the true post-attention
+		// norm, ffn_norm is the pre-MLP norm, and post_ffw_norm is the post-FFN
+		// norm. Load them separately so the forward pass can apply all four.
+		var preFFN, postFFN []float32
+		if config.SandwichNorm {
+			if data, _, ok, _ := loader.loadF32WithDims(prefix + ".post_attention_norm.weight"); ok {
+				postLN = data
+			}
+			if data, _, ok, _ := loader.loadF32WithDims(prefix + ".ffn_norm.weight"); ok {
+				preFFN = data
+			} else {
+				preFFN = ones(config.HiddenSize)
+			}
+			if data, _ := loader.loadF32Any(prefix+".post_ffw_norm.weight", prefix+".post_ffn_norm.weight"); len(data) > 0 {
+				postFFN = data
+			} else {
+				postFFN = ones(config.HiddenSize)
+			}
+		}
 		qProj, err := loader.loadProj(prefix + ".attn_q.weight")
 		if err != nil {
 			return nil, err
@@ -234,6 +253,8 @@ func LoadLlamaDecoderStackFromGGUF(mapped *ggufcore.MappedFile, config LlamaDeco
 		stack.Layers = append(stack.Layers, DecoderLayer{
 			InputLayernorm:         inLN,
 			PostAttentionLayernorm: postLN,
+			PreFFNLayernorm:        preFFN,
+			PostFFNLayernorm:       postFFN,
 			MLPGate:                gate,
 			MLPUp:                  up,
 			MLPDown:                down,

@@ -1,7 +1,6 @@
 package serviceinfo
 
 import (
-	"path/filepath"
 	"testing"
 
 	"github.com/Zapdev-labs/oxidize/golang/internal/testutil"
@@ -12,22 +11,21 @@ func TestDefaultModelID(t *testing.T) {
 		t.Fatalf("default id = %q", got)
 	}
 
-	models := []ModelInfo{{ID: "valid-v3", Path: "/tmp/valid-v3.gguf"}}
-	if got := DefaultModelID(models); got != "valid-v3" {
+	models := []ModelInfo{{ID: testutil.QwenModelID, Path: "/tmp/" + testutil.QwenModelFileName}}
+	if got := DefaultModelID(models); got != testutil.QwenModelID {
 		t.Fatalf("model id = %q", got)
 	}
 }
 
 func TestDiscoverModels(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "valid-v3.gguf")
-	testutil.CopyFixture(t, path)
+	testutil.LinkQwenModel(t, dir)
 
 	models, err := DiscoverModels(dir)
 	if err != nil {
 		t.Fatalf("discover: %v", err)
 	}
-	if len(models) != 1 || models[0].ID != "valid-v3" {
+	if len(models) != 1 || models[0].ID != testutil.QwenModelID {
 		t.Fatalf("models = %#v", models)
 	}
 }

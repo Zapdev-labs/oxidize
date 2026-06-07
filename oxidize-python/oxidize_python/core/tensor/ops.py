@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
+
 from oxidize_python.core.tensor.dtype import ActivationFn
 from oxidize_python.core.tensor.errors import (
     AttentionError,
@@ -55,17 +57,17 @@ def apply_rope_head_f32(
         output[:head_dim] = input_[:head_dim]
         return
     half = head_dim // 2
-    inv_head = 1.0 / head_dim
-    freq_mul = theta ** (-2.0 * inv_head)
-    freq = 1.0
-    for i in range(half):
-        angle = position * freq
-        cos_a = math.cos(angle)
-        sin_a = math.sin(angle)
-        x0, x1 = input_[i], input_[half + i]
-        output[i] = x0 * cos_a - x1 * sin_a
-        output[half + i] = x0 * sin_a + x1 * cos_a
-        freq *= freq_mul
+    exponents = np.arange(0, head_dim, 2, dtype=np.float64)
+    freqs = 1.0 / (theta ** (exponents / head_dim))
+    angles = position * freqs
+    cos_a = np.cos(angles).astype(np.float32)
+    sin_a = np.sin(angles).astype(np.float32)
+    x = np.asarray(input_[:head_dim], dtype=np.float32)
+    x0, x1 = x[:half], x[half:]
+    rotated = np.empty(head_dim, dtype=np.float32)
+    rotated[:half] = x0 * cos_a - x1 * sin_a
+    rotated[half:] = x0 * sin_a + x1 * cos_a
+    output[:head_dim] = rotated.tolist()
 
 
 def rms_norm_f32(input_: list[float], weight: list[float], output: list[float], eps: float) -> None:
@@ -75,10 +77,11 @@ def rms_norm_f32(input_: list[float], weight: list[float], output: list[float], 
         raise RmsNormError("weight too small")
     if len(output) < len(input_):
         raise RmsNormError("output too small")
-    sum_sq = sum(v * v for v in input_)
-    inv = 1.0 / math.sqrt(sum_sq / len(input_) + eps)
-    for i, v in enumerate(input_):
-        output[i] = v * inv * weight[i]
+    x = np.asarray(input_, dtype=np.float32)
+    w = np.asarray(weight[: len(input_)], dtype=np.float32)
+    inv = 1.0 / np.sqrt(np.mean(x * x) + eps)
+    result = (x * inv * w).tolist()
+    output[: len(input_)] = result
 
 
 def rms_norm_gemv_f32_transposed(

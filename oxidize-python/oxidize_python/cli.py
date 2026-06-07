@@ -198,29 +198,57 @@ def _bench_command(args: list[str]) -> int:
         return 1
     import time
 
+    from oxidize_python.core.ffi import RustModel, _ensure_loaded
+
+    print(
+        f"=== Oxidize bench ===\nmodel: {path}\n"
+        f"iterations: {ns.iterations} max_tokens: {ns.max_tokens}\n"
+    )
+
+    # Fast path: use Rust FFI model (same kernels as the Rust binary)
+    if _ensure_loaded():
+        try:
+            model = RustModel(path)
+            prompt_tokens = [1]  # BOS — good enough for throughput bench
+            total_tokens = 0
+            total_seconds = 0.0
+            for round_i in range(1, ns.iterations + 1):
+                model.reset_session()
+                start = time.monotonic()
+                model.forward(prompt_tokens)
+                tok = model.sample_argmax()
+                # Prefill already produced the first generated token.
+                generated = 1
+                for _ in range(max(ns.max_tokens - 1, 0)):
+                    model.forward([tok])
+                    tok = model.sample_argmax()
+                    generated += 1
+                elapsed = time.monotonic() - start
+                speed = generated / elapsed if elapsed > 0 else 0.0
+                total_tokens += generated
+                total_seconds += elapsed
+                print(
+                    f"round {round_i}: tokens={generated} "
+                    f"elapsed={elapsed:.3f}s speed={speed:.2f} tok/s"
+                )
+            avg = total_tokens / total_seconds if total_seconds > 0 else 0.0
+            print(f"\naverage: {avg:.2f} tok/s over {total_tokens} tokens")
+            return 0
+        except Exception as e:
+            print(f"Rust FFI failed ({e}), falling back to pure-Python model...", file=sys.stderr)
+
+    # Fallback: pure-Python model
     from oxidize_python.core.model.generation import GenerationStream, default_generation_config
     from oxidize_python.core.model.inference import InferenceModel
     from oxidize_python.core.model.loader import LoaderConfig, load_gguf_model_from_path
     from oxidize_python.core.model.model import Session
-    from oxidize_python.core.tokenizer import from_gguf_metadata
-    from oxidize_python.core.tokenizer.bpe import BpeTokenizer
-    from oxidize_python.core.tokenizer.tokenizer import EncodeOptions, SpecialTokens
-    from oxidize_python.internal.gguf.parse import load_file
 
     loader = LoaderConfig(threads=ns.threads, ctx_size=ns.ctx_size)
     loaded = load_gguf_model_from_path(path, loader)
     if not isinstance(loaded, InferenceModel) or loaded.stack is None or not loaded.stack.loaded():
         print(f"bench: model {path!r} has no loadable weights", file=sys.stderr)
         return 1
-    try:
-        gguf = load_file(path)
-        meta = {k: v.string for k, v in gguf.metadata.items() if v.string}
-        tok = from_gguf_metadata(meta)
-    except Exception:
-        tok = BpeTokenizer([], [], SpecialTokens(bos=1, eos=2))
-    prompt_tokens = tok.encode(ns.prompt, EncodeOptions()) or [1]
-
-    print(f"=== Oxidize bench ===\nmodel: {path}\niterations: {ns.iterations}\n")
+    prompt_tokens = [1]
     total_tokens = 0
     total_seconds = 0.0
     for round_i in range(1, ns.iterations + 1):

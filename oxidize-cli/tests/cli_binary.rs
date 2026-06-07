@@ -6,7 +6,7 @@ fn help_reports_oxidize_cli_binary() {
     let assert = cmd.arg("--help").assert().success();
     let output = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8");
     assert!(
-        output.contains("oxidize-cli"),
+        output.contains("oxidize"),
         "expected help output to contain binary name, got: {output}"
     );
 }

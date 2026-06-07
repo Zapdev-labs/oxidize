@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import numpy as np
+
+from oxidize_python.core.ffi import gemv_quantized_rust
 from oxidize_python.core.quantization import types as quant
 from oxidize_python.core.quantization.dequant_k import dequantize
 from oxidize_python.core.tensor import gemv
@@ -23,6 +26,10 @@ class F32Weight:
     rows: int
     cols: int
     quant: QuantWeight | None = None
+
+    @staticmethod
+    def empty() -> F32Weight:
+        return F32Weight(data=[], rows=0, cols=0)
 
     @staticmethod
     def from_slice(data: list[float], rows: int, cols: int) -> F32Weight:
@@ -63,14 +70,18 @@ class F32Weight:
     def gemv(self, input_: list[float], output: list[float]) -> None:
         if self.quant is not None:
             q = self.quant
+            if len(input_) < q.in_dim:
+                raise ValueError(
+                    f"gemv input too short: have {len(input_)} want {q.in_dim}"
+                )
+            v_np = np.asarray(input_[: q.in_dim], dtype=np.float32)
+            o_np = np.zeros(q.out_dim, dtype=np.float32)
+            if gemv_quantized_rust(q.bytes, q.q_type.name, q.out_dim, q.in_dim, v_np, o_np):
+                output[: q.out_dim] = o_np.tolist()
+                return
+            # Fallback: numpy dot per row (dequant still Python, but dot is fast)
             gemv.gemv_quantized_f32(
-                q.bytes,
-                self._dequant_fn(),
-                q.out_dim,
-                q.in_dim,
-                input_,
-                output,
-                None,
+                q.bytes, self._dequant_fn(), q.out_dim, q.in_dim, input_, output, None
             )
             return
         gemv.gemv_f32_transposed(self.data, self.cols, self.rows, input_, output)
@@ -141,7 +152,7 @@ def quantized_gemv_supported(qtype: quant.Type, in_dim: int) -> bool:
 
 def f32_weight_from_dims(data: list[float], dims: list[int]) -> F32Weight:
     if not dims:
-        return F32Weight([], 0, 0)
+        return F32Weight.empty()
     if len(dims) == 1:
         n = dims[0]
         return F32Weight.from_slice(data, n, 1)
@@ -151,7 +162,7 @@ def f32_weight_from_dims(data: list[float], dims: list[int]) -> F32Weight:
 
 def weight_from_2d(data: list[float], rows: int, cols: int) -> F32Weight:
     if not data:
-        return F32Weight([], 0, 0)
+        return F32Weight.empty()
     if cols == 0:
         cols = len(data) // rows if rows else 0
     return F32Weight.from_slice(data, rows, cols)

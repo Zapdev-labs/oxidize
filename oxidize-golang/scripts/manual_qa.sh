@@ -32,23 +32,34 @@ pick_port() {
   return 1
 }
 
-mkdir -p "${EVIDENCE_DIR}" "${TMP_DIR}/models"
-cp "${ROOT_DIR}/oxidize-core/tests/fixtures/valid-v3.gguf" "${TMP_DIR}/models/valid-v3.gguf"
+# Full Qwen3-4B CPU inference is slow; use this script (not go test) for end-to-end checks.
+export OXIDIZE_SLOW_TESTS=1
+
+MODELS_DIR="${ROOT_DIR}/models"
+MODEL_FILE="${MODELS_DIR}/Qwen3-4B-Q4_K_M.gguf"
+MODEL_ID="Qwen3-4B-Q4_K_M"
+if [[ ! -f "${MODEL_FILE}" ]]; then
+  printf 'missing integration model: %s\n' "${MODEL_FILE}" >&2
+  exit 1
+fi
+
+mkdir -p "${EVIDENCE_DIR}"
 PORT="$(pick_port)"
 
 (
   cd "${ROOT_DIR}/oxidize-golang"
-  go run ./cmd/oxidize --prompt "hello"
+  go run ./cmd/oxidize run "${MODEL_FILE}" "Write a Python function that returns the factorial of n." \
+    --max-tokens 80 --temperature 0.7 --top-p 0.9
 ) | tee "${EVIDENCE_DIR}/task-10-cli-prompt.txt"
 
 (
   cd "${ROOT_DIR}/oxidize-golang"
-  go run ./cmd/oxidize list --models-dir "${TMP_DIR}/models"
+  go run ./cmd/oxidize list --models-dir "${MODELS_DIR}"
 ) | tee "${EVIDENCE_DIR}/task-10-cli-list.txt"
 
 (
   cd "${ROOT_DIR}/oxidize-golang"
-  OXIDIZE_API_KEY=secret go run ./cmd/oxidize serve --host 127.0.0.1 --port "${PORT}" --models-dir "${TMP_DIR}/models"
+  OXIDIZE_API_KEY=secret go run ./cmd/oxidize serve --host 127.0.0.1 --port "${PORT}" --models-dir "${MODELS_DIR}"
 ) >"${EVIDENCE_DIR}/task-10-server.log" 2>&1 &
 SERVER_PID="$!"
 
@@ -61,10 +72,10 @@ done
 
 curl -fsS "http://127.0.0.1:${PORT}/healthz" | tee "${EVIDENCE_DIR}/task-10-health.txt"
 curl -fsS -H "x-api-key: secret" "http://127.0.0.1:${PORT}/v1/models" | tee "${EVIDENCE_DIR}/task-10-models.txt"
-curl -fsS -H "x-api-key: secret" -H "content-type: application/json" -d '{"model":"valid-v3","messages":[{"role":"user","content":"hi"}]}' "http://127.0.0.1:${PORT}/v1/chat/completions" | tee "${EVIDENCE_DIR}/task-10-chat.txt"
-curl -fsS -H "x-api-key: secret" -H "content-type: application/json" -d '{"model":"valid-v3","prompt":"hi","guided_choice":["hello"]}' "http://127.0.0.1:${PORT}/v1/completions" | tee "${EVIDENCE_DIR}/task-10-completions.txt"
-curl -fsS -H "x-api-key: secret" -H "content-type: application/json" -d '{"model":"valid-v3","input":"hi"}' "http://127.0.0.1:${PORT}/v1/embeddings" | tee "${EVIDENCE_DIR}/task-10-embeddings.txt"
-curl -fsS -N -H "x-api-key: secret" -H "content-type: application/json" -d '{"model":"valid-v3","messages":[{"role":"user","content":"hi"}],"stream":true}' "http://127.0.0.1:${PORT}/v1/chat/completions" | tee "${EVIDENCE_DIR}/task-10-stream.txt"
+curl -fsS -H "x-api-key: secret" -H "content-type: application/json" -d "{\"model\":\"${MODEL_ID}\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}" "http://127.0.0.1:${PORT}/v1/chat/completions" | tee "${EVIDENCE_DIR}/task-10-chat.txt"
+curl -fsS -H "x-api-key: secret" -H "content-type: application/json" -d "{\"model\":\"${MODEL_ID}\",\"prompt\":\"hi\",\"guided_choice\":[\"hello\"]}" "http://127.0.0.1:${PORT}/v1/completions" | tee "${EVIDENCE_DIR}/task-10-completions.txt"
+curl -fsS -H "x-api-key: secret" -H "content-type: application/json" -d "{\"model\":\"${MODEL_ID}\",\"input\":\"hi\"}" "http://127.0.0.1:${PORT}/v1/embeddings" | tee "${EVIDENCE_DIR}/task-10-embeddings.txt"
+curl -fsS -N -H "x-api-key: secret" -H "content-type: application/json" -d "{\"model\":\"${MODEL_ID}\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"stream\":true}" "http://127.0.0.1:${PORT}/v1/chat/completions" | tee "${EVIDENCE_DIR}/task-10-stream.txt"
 grep -F "[DONE]" "${EVIDENCE_DIR}/task-10-stream.txt" > "${EVIDENCE_DIR}/task-10-stream-done.txt"
 curl -sS -o "${EVIDENCE_DIR}/task-10-auth.txt" -w "%{http_code}\n" "http://127.0.0.1:${PORT}/v1/models" > "${EVIDENCE_DIR}/task-10-auth-status.txt"
 auth_status="$(<"${EVIDENCE_DIR}/task-10-auth-status.txt")"

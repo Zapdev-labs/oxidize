@@ -2,7 +2,6 @@ package model
 
 import (
 	"fmt"
-	"math"
 
 	"github.com/Zapdev-labs/oxidize/golang/core/flash_attention"
 	"github.com/Zapdev-labs/oxidize/golang/core/tensor"
@@ -26,6 +25,7 @@ func (s *LlamaDecoderStack) forwardTokenWithContext(
 	if err := s.fillTokenEmbedding(token, hidden); err != nil {
 		return nil, err
 	}
+	s.scaleEmbedding(hidden)
 
 	for layerIdx := range s.Layers {
 		layer := &s.Layers[layerIdx]
@@ -103,11 +103,12 @@ func (s *LlamaDecoderStack) forwardTokenWithContext(
 				}
 			}
 
+			layerRope := s.Config.LayerRopeTheta(layerIdx)
 			if !s.Config.UseAlibi {
 				applyRope := func(vec []float32, heads int) error {
 					for hi := 0; hi < heads; hi++ {
 						start := hi * headDim
-						if err := tensor.ApplyRopeHeadF32(vec[start:start+headDim], headScratch, pos, headDim, s.Config.RopeTheta); err != nil {
+						if err := tensor.ApplyRopeHeadF32(vec[start:start+headDim], headScratch, pos, headDim, layerRope); err != nil {
 							return err
 						}
 						copy(vec[start:start+headDim], headScratch)
@@ -137,7 +138,7 @@ func (s *LlamaDecoderStack) forwardTokenWithContext(
 			cache.Values = append(cache.Values, v...)
 			cache.SeqLen++
 
-			window := s.Config.SlidingWindow
+			window := s.Config.LayerSlidingWindow(layerIdx)
 			var attnErr error
 			switch {
 			case s.Config.UseAlibi && len(s.AlibiSlopes) > 0:
@@ -188,6 +189,14 @@ func (s *LlamaDecoderStack) forwardTokenWithContext(
 				hidden[i] += attnOut[i] + mlpOut[i]
 			}
 		} else {
+			// Gemma sandwich norm: normalize the attention output before residual.
+			if s.Config.SandwichNorm && len(layer.PostAttentionLayernorm) == h {
+				normedAttn := make([]float32, h)
+				if err := tensor.RMSNormF32(attnOut, layer.PostAttentionLayernorm, normedAttn, s.Config.RMSNormEps); err != nil {
+					return nil, err
+				}
+				attnOut = normedAttn
+			}
 			for i := 0; i < h; i++ {
 				hidden[i] += attnOut[i]
 			}
@@ -230,6 +239,7 @@ func (s *LlamaDecoderStack) ForwardBatch(tokens []uint32) ([]float32, error) {
 			if err := s.fillTokenEmbedding(tok, hidden[t*h:(t+1)*h]); err != nil {
 				return nil, err
 			}
+			s.scaleEmbedding(hidden[t*h : (t+1)*h])
 		}
 	}
 
@@ -243,6 +253,8 @@ func (s *LlamaDecoderStack) ForwardBatch(tokens []uint32) ([]float32, error) {
 		numKV := s.Config.NumKeyValueHeads
 		qSize := numHeads * headDim
 		kvLen := numKV * headDim
+		layerRope := s.Config.LayerRopeTheta(layerIdx)
+		layerWindow := s.Config.LayerSlidingWindow(layerIdx)
 
 		normed := make([]float32, b*h)
 		for t := 0; t < b; t++ {
@@ -293,19 +305,21 @@ func (s *LlamaDecoderStack) ForwardBatch(tokens []uint32) ([]float32, error) {
 					copy(k[start:start+headDim], headScratch)
 				}
 			}
-			for hi := 0; hi < numHeads; hi++ {
-				start := hi * headDim
-				if err := tensor.ApplyRopeHeadF32(q[start:start+headDim], headScratch, pos, headDim, s.Config.RopeTheta); err != nil {
-					return nil, err
+			if !s.Config.UseAlibi {
+				for hi := 0; hi < numHeads; hi++ {
+					start := hi * headDim
+					if err := tensor.ApplyRopeHeadF32(q[start:start+headDim], headScratch, pos, headDim, layerRope); err != nil {
+						return nil, err
+					}
+					copy(q[start:start+headDim], headScratch)
 				}
-				copy(q[start:start+headDim], headScratch)
-			}
-			for hi := 0; hi < numKV; hi++ {
-				start := hi * headDim
-				if err := tensor.ApplyRopeHeadF32(k[start:start+headDim], headScratch, pos, headDim, s.Config.RopeTheta); err != nil {
-					return nil, err
+				for hi := 0; hi < numKV; hi++ {
+					start := hi * headDim
+					if err := tensor.ApplyRopeHeadF32(k[start:start+headDim], headScratch, pos, headDim, layerRope); err != nil {
+						return nil, err
+					}
+					copy(k[start:start+headDim], headScratch)
 				}
-				copy(k[start:start+headDim], headScratch)
 			}
 		}
 
@@ -319,11 +333,30 @@ func (s *LlamaDecoderStack) ForwardBatch(tokens []uint32) ([]float32, error) {
 			cache.SeqLen++
 			q := qAll[t*qSize : (t+1)*qSize]
 			out := attnPreO[t*qSize : (t+1)*qSize]
-			if err := flash_attention.FlashAttentionDecodeHeadsGQA(
-				q, cache.Keys, cache.Values, out,
-				cache.SeqLen, headDim, kvLen, numHeads, numKV,
-			); err != nil {
-				return nil, err
+			pos := s.PositionOffset + t
+			switch {
+			case s.Config.UseAlibi && len(s.AlibiSlopes) > 0:
+				if err := flash_attention.FlashAttentionDecodeHeadsGQAAlibi(
+					q, cache.Keys, cache.Values, out,
+					cache.SeqLen, headDim, kvLen, numHeads, numKV,
+					s.AlibiSlopes, pos, layerWindow,
+				); err != nil {
+					return nil, err
+				}
+			case layerWindow > 0:
+				if err := flash_attention.FlashAttentionDecodeHeadsGQAWindow(
+					q, cache.Keys, cache.Values, out,
+					cache.SeqLen, headDim, kvLen, numHeads, numKV, layerWindow,
+				); err != nil {
+					return nil, err
+				}
+			default:
+				if err := flash_attention.FlashAttentionDecodeHeadsGQA(
+					q, cache.Keys, cache.Values, out,
+					cache.SeqLen, headDim, kvLen, numHeads, numKV,
+				); err != nil {
+					return nil, err
+				}
 			}
 		}
 
@@ -335,13 +368,25 @@ func (s *LlamaDecoderStack) ForwardBatch(tokens []uint32) ([]float32, error) {
 		} else if qSize == h {
 			copy(attnOutAll, attnPreO)
 		}
+		// Gemma sandwich norm: normalize attention output before residual.
+		if s.Config.SandwichNorm && len(layer.PostAttentionLayernorm) == h {
+			scratch := make([]float32, h)
+			for t := 0; t < b; t++ {
+				slice := attnOutAll[t*h : (t+1)*h]
+				if err := tensor.RMSNormF32(slice, layer.PostAttentionLayernorm, scratch, s.Config.RMSNormEps); err != nil {
+					return nil, err
+				}
+				copy(slice, scratch)
+			}
+		}
 		for i := range hidden {
 			hidden[i] += attnOutAll[i]
 		}
 
+		mlpNorm := s.mlpNorm(layer)
 		normedMLP := make([]float32, b*h)
 		for t := 0; t < b; t++ {
-			if err := tensor.RMSNormF32(hidden[t*h:(t+1)*h], layer.PostAttentionLayernorm, normedMLP[t*h:(t+1)*h], s.Config.RMSNormEps); err != nil {
+			if err := tensor.RMSNormF32(hidden[t*h:(t+1)*h], mlpNorm, normedMLP[t*h:(t+1)*h], s.Config.RMSNormEps); err != nil {
 				return nil, err
 			}
 		}
@@ -358,14 +403,22 @@ func (s *LlamaDecoderStack) ForwardBatch(tokens []uint32) ([]float32, error) {
 				return nil, err
 			}
 		}
-		for i := range gate {
-			g := gate[i]
-			gate[i] = g * (1 / (1 + float32(math.Exp(float64(-g))))) * up[i]
-		}
+		applyGLU(gate, up, s.Config.GeluFFN)
 		mlpOutAll := make([]float32, b*h)
 		if layer.MLPDown.IsLoaded() {
 			if err := layer.MLPDown.Gemm(gate, mlpOutAll, b); err != nil {
 				return nil, err
+			}
+		}
+		// Gemma sandwich norm: normalize FFN output before residual.
+		if s.Config.SandwichNorm && len(layer.PostFFNLayernorm) == h {
+			scratch := make([]float32, h)
+			for t := 0; t < b; t++ {
+				slice := mlpOutAll[t*h : (t+1)*h]
+				if err := tensor.RMSNormF32(slice, layer.PostFFNLayernorm, scratch, s.Config.RMSNormEps); err != nil {
+					return nil, err
+				}
+				copy(slice, scratch)
 			}
 		}
 		for i := range hidden {

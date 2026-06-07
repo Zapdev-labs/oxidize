@@ -272,9 +272,7 @@ fn ensure_gguf_target_supported(target: GgufQuantizationType) -> Result<()> {
         | GgufQuantizationType::Q5_K_S
         | GgufQuantizationType::Q5_K_M
         | GgufQuantizationType::Q6_K => Ok(()),
-        other => bail!(
-            "unsupported quantization target: {other:?}"
-        ),
+        other => bail!("unsupported quantization target: {other:?}"),
     }
 }
 

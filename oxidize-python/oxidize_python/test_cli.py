@@ -58,6 +58,45 @@ def test_inspect_minimal_gguf(tmp_path: Path) -> None:
     assert "general.architecture" in out
 
 
+def test_list_qwen_models_dir() -> None:
+    from oxidize_python.testutil import QWEN_MODEL_ID, qwen_model_path
+
+    models_dir = qwen_model_path().parent
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        assert cli.main(["list", "--models-dir", str(models_dir)]) == 0
+    assert QWEN_MODEL_ID in buf.getvalue()
+
+
+def test_run_qwen_prompt() -> None:
+    from oxidize_python.testutil import (
+        assert_generation_text,
+        qwen_model_path,
+        require_slow_tests,
+    )
+
+    require_slow_tests()
+    path = qwen_model_path()
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        code = cli.main(
+            [
+                "run",
+                str(path),
+                "--prompt",
+                "Write a Python function that returns the factorial of n.",
+                "--max-tokens",
+                "32",
+                "--temperature",
+                "0.7",
+                "--top-p",
+                "0.9",
+            ]
+        )
+    assert code == 0
+    assert_generation_text(buf.getvalue())
+
+
 def test_run_unknown_backend_exits_nonzero() -> None:
     assert cli.main(["run", "model.gguf", "hi", "--backend", "quantum"]) == 1
 

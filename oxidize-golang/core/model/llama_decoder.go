@@ -16,6 +16,43 @@ type LlamaDecoderConfig struct {
 	SlidingWindow       int
 	UseAlibi            bool
 	ParallelAttnFFN     bool
+	// Gemma-family fields.
+	RopeThetaSWA         float32
+	SlidingWindowPattern int
+	EmbeddingScale       float32
+	GeluFFN              bool
+	SandwichNorm         bool
+}
+
+// LayerIsGlobal reports whether layer idx uses global (full-context) attention
+// rather than sliding-window attention. Without a window, every layer is
+// global. With a window but no interleaving pattern (Mistral), every layer is
+// local. Gemma: every Nth layer (1-indexed) is global.
+func (c LlamaDecoderConfig) LayerIsGlobal(idx int) bool {
+	if c.SlidingWindow == 0 {
+		return true
+	}
+	if c.SlidingWindowPattern == 0 {
+		return false
+	}
+	return (idx+1)%c.SlidingWindowPattern == 0
+}
+
+// LayerRopeTheta returns the RoPE base for layer idx: global layers use
+// RopeTheta; sliding-window layers use RopeThetaSWA when set.
+func (c LlamaDecoderConfig) LayerRopeTheta(idx int) float32 {
+	if c.RopeThetaSWA > 0 && !c.LayerIsGlobal(idx) {
+		return c.RopeThetaSWA
+	}
+	return c.RopeTheta
+}
+
+// LayerSlidingWindow returns the effective window for layer idx (0 = full).
+func (c LlamaDecoderConfig) LayerSlidingWindow(idx int) int {
+	if c.SlidingWindow > 0 && !c.LayerIsGlobal(idx) {
+		return c.SlidingWindow
+	}
+	return 0
 }
 
 // HeadDim returns hidden_size / num_attention_heads.
@@ -55,6 +92,11 @@ func LlamaDecoderConfigFromInference(cfg InferenceConfig) LlamaDecoderConfig {
 		SlidingWindow:      window,
 		UseAlibi:           cfg.Architecture.UsesAlibi(),
 		ParallelAttnFFN:    cfg.Architecture.UsesParallelAttnFFN(),
+		RopeThetaSWA:         cfg.RopeThetaSWA,
+		SlidingWindowPattern: cfg.SlidingWindowPattern,
+		EmbeddingScale:       cfg.EmbeddingScale,
+		GeluFFN:              cfg.GeluFFN,
+		SandwichNorm:         cfg.SandwichNorm,
 	}
 }
 
@@ -79,8 +121,14 @@ type DecoderAttentionLayer struct {
 }
 
 // DecoderLayer is norm → attention → MLP (dense and/or MoE).
+//
+// For most architectures PostAttentionLayernorm holds the pre-MLP norm. For
+// Gemma (sandwich norm) it is the true post-attention norm (applied to the
+// attention output before the residual), PreFFNLayernorm is the pre-MLP norm,
+// and PostFFNLayernorm is applied to the FFN output before its residual.
 type DecoderLayer struct {
 	InputLayernorm, PostAttentionLayernorm []float32
+	PreFFNLayernorm, PostFFNLayernorm      []float32
 	Attention                              DecoderAttentionLayer
 	MLPGate, MLPUp, MLPDown                F32Weight
 	MoE                                    MoELayer
@@ -167,6 +215,18 @@ func (s *LlamaDecoderStack) ReserveCacheTokens(tokens int) {
 	kvLen := s.Config.NumKeyValueHeads * s.Config.KVHeadDim()
 	for i := range s.KVCache {
 		s.KVCache[i].reserveTokens(tokens, kvLen)
+	}
+}
+
+// scaleEmbedding multiplies the embedding by Config.EmbeddingScale (Gemma uses
+// sqrt(hidden_size)); a scale of 0 or 1 is a no-op.
+func (s *LlamaDecoderStack) scaleEmbedding(x []float32) {
+	scale := s.Config.EmbeddingScale
+	if scale == 0 || scale == 1 {
+		return
+	}
+	for i := range x {
+		x[i] *= scale
 	}
 }
 

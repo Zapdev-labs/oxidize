@@ -1,12 +1,16 @@
-"""GEMV/GEMM kernels mirroring oxidize-golang/core/tensor/gemv.go."""
+"""GEMV/GEMM kernels mirroring oxidize-golang/core/tensor/gemv.go.
+
+numpy fast paths are used when numpy is available (virtually always).
+The pure-Python fallbacks are kept for correctness reference only.
+"""
 
 from __future__ import annotations
 
-import math
 from collections.abc import Callable
 
+import numpy as np
+
 from oxidize_python.core.tensor.errors import GemmError, GemvError
-from oxidize_python.core.tensor.parallel import parallelize_rows
 
 
 def gemv_f32(
@@ -25,12 +29,10 @@ def gemv_f32(
     if len(output) < rows:
         raise GemvError("output buffer too small")
 
-    def _rows(start: int, end: int) -> None:
-        for r in range(start, end):
-            row = matrix[r * cols : (r + 1) * cols]
-            output[r] = sum(row[c] * vector[c] for c in range(cols))
-
-    parallelize_rows(rows, _rows)
+    m = np.asarray(matrix[: rows * cols], dtype=np.float32).reshape(rows, cols)
+    v = np.asarray(vector[:cols], dtype=np.float32)
+    result = m @ v
+    output[:rows] = result.tolist()
 
 
 def gemv_f32_transposed(
@@ -47,19 +49,11 @@ def gemv_f32_transposed(
     if len(output) < cols:
         raise GemvError("output buffer too small")
 
-    from oxidize_python.core.tensor.constants import TRANSPOSED_GEMV_COL_CHUNK
-
-    c = 0
-    while c < cols:
-        end = min(c + TRANSPOSED_GEMV_COL_CHUNK, cols)
-
-        def _cols(start: int, stop: int) -> None:
-            for k in range(start, stop):
-                col = c + k
-                output[col] = sum(matrix[r * cols + col] * vector[r] for r in range(rows))
-
-        parallelize_rows(end - c, _cols)
-        c = end
+    # matrix is row-major (rows×cols) but used transposed: output = M^T @ v
+    m = np.asarray(matrix[: rows * cols], dtype=np.float32).reshape(rows, cols)
+    v = np.asarray(vector[:rows], dtype=np.float32)
+    result = m.T @ v
+    output[:cols] = result.tolist()
 
 
 def gemv_quantized_f32(
@@ -71,10 +65,6 @@ def gemv_quantized_f32(
     output: list[float],
     scratch: list[float] | None = None,
 ) -> None:
-    if scratch is None:
-        scratch = [0.0] * cols
-    elif len(scratch) < cols:
-        raise GemvError("scratch too small")
     if rows == 0:
         return
     bytes_per_row = len(qbytes) // rows
@@ -82,14 +72,11 @@ def gemv_quantized_f32(
         raise GemvError("qbytes not aligned to row boundary")
 
     buf = [0.0] * cols
-
-    def _rows(start: int, end: int) -> None:
-        for r in range(start, end):
-            block = qbytes[r * bytes_per_row : (r + 1) * bytes_per_row]
-            dequant(block, buf)
-            output[r] = sum(buf[c] * vector[c] for c in range(cols))
-
-    parallelize_rows(rows, _rows)
+    v = np.asarray(vector[:cols], dtype=np.float32)
+    for r in range(rows):
+        block = qbytes[r * bytes_per_row : (r + 1) * bytes_per_row]
+        dequant(block, buf)
+        output[r] = float(np.dot(np.asarray(buf, dtype=np.float32), v))
 
 
 def gemv_quantized_f32_transposed(
@@ -101,17 +88,15 @@ def gemv_quantized_f32_transposed(
     output: list[float],
     scratch: list[float] | None = None,
 ) -> None:
-    if scratch is None or len(scratch) < cols:
-        scratch = [0.0] * cols
     bytes_per_row = len(qbytes) // rows
     if bytes_per_row * rows != len(qbytes):
         raise GemvError("qbytes not aligned to row boundary")
     row = [0.0] * cols
+    out = np.asarray(output[:cols], dtype=np.float32)
     for r in range(rows):
         dequant(qbytes[r * bytes_per_row : (r + 1) * bytes_per_row], row)
-        v = vector[r]
-        for c in range(cols):
-            output[c] += row[c] * v
+        out += np.asarray(row, dtype=np.float32) * vector[r]
+    output[:cols] = out.tolist()
 
 
 def gemm_f32(
@@ -129,14 +114,10 @@ def gemm_f32(
     if len(output) < rows * cols:
         raise GemmError("output buffer too small")
 
-    def _rows(start: int, end: int) -> None:
-        for r in range(start, end):
-            for c in range(cols):
-                output[r * cols + c] = sum(
-                    left[r * shared + k] * right[k * cols + c] for k in range(shared)
-                )
-
-    parallelize_rows(rows, _rows)
+    lhs = np.asarray(left[: rows * shared], dtype=np.float32).reshape(rows, shared)
+    rhs = np.asarray(right[: shared * cols], dtype=np.float32).reshape(shared, cols)
+    result = (lhs @ rhs).ravel()
+    output[: rows * cols] = result.tolist()
 
 
 def gemm_quantized_f32(
@@ -186,22 +167,16 @@ def _gemm_quantized_f32_one(
     *,
     out_offset: int = 0,
 ) -> None:
-    if scratch is None or len(scratch) < shared:
-        scratch = [0.0] * shared
     bytes_per_row = len(qbytes) // rows
     if bytes_per_row * rows != len(qbytes):
         raise GemmError("qbytes not aligned to row boundary")
     row = [0.0] * shared
-
-    def _rows(start: int, end: int) -> None:
-        for r in range(start, end):
-            dequant(qbytes[r * bytes_per_row : (r + 1) * bytes_per_row], row)
-            for c in range(cols):
-                output[out_offset + r * cols + c] = sum(
-                    row[k] * right[k * cols + c] for k in range(shared)
-                )
-
-    parallelize_rows(rows, _rows)
+    r_np = np.asarray(right, dtype=np.float32).reshape(shared, cols)
+    for r in range(rows):
+        dequant(qbytes[r * bytes_per_row : (r + 1) * bytes_per_row], row)
+        row_np = np.asarray(row, dtype=np.float32)
+        result = row_np @ r_np
+        output[out_offset + r * cols : out_offset + (r + 1) * cols] = result.tolist()
 
 
 def gemm_f32_tensor_parallel(
@@ -215,8 +190,10 @@ def gemm_f32_tensor_parallel(
 ) -> None:
     gemm_f32(left, right, rows, shared, cols, output)
     if reduce_buf is not None and len(reduce_buf) >= len(output):
-        for i, v in enumerate(output):
-            output[i] = v + reduce_buf[i]
+        out = np.asarray(output, dtype=np.float32)
+        rb = np.asarray(reduce_buf[: len(output)], dtype=np.float32)
+        result = (out + rb).tolist()
+        output[: len(output)] = result
 
 
 def gemm_i8(
@@ -233,11 +210,10 @@ def gemm_i8(
         raise GemmError("right buffer too small")
     if len(output) < rows * cols:
         raise GemmError("output buffer too small")
-    for r in range(rows):
-        for c in range(cols):
-            output[r * cols + c] = sum(
-                int(left[r * shared + k]) * int(right[k * cols + c]) for k in range(shared)
-            )
+    lhs = np.asarray(left[: rows * shared], dtype=np.int32).reshape(rows, shared)
+    rhs = np.asarray(right[: shared * cols], dtype=np.int32).reshape(shared, cols)
+    result = (lhs @ rhs).ravel().tolist()
+    output[: rows * cols] = result
 
 
 def _unpack_nibble(n: int) -> int:
@@ -264,10 +240,7 @@ def gemm_i4(
             for k in range(shared):
                 idx = k * cols + c
                 packed = right[idx // 2]
-                if idx % 2 == 0:
-                    nibble = _unpack_nibble(packed & 0x0F)
-                else:
-                    nibble = _unpack_nibble((packed >> 4) & 0x0F)
+                nibble = _unpack_nibble(packed & 0x0F if idx % 2 == 0 else (packed >> 4) & 0x0F)
                 s += int(left[r * shared + k]) * nibble
             output[r * cols + c] = s
 
@@ -275,5 +248,5 @@ def gemm_i4(
 def sigmoid(x: list[float], out: list[float]) -> None:
     if len(out) < len(x):
         raise GemvError("out too small")
-    for i, v in enumerate(x):
-        out[i] = 1.0 / (1.0 + math.exp(-v))
+    result = (1.0 / (1.0 + np.exp(-np.asarray(x, dtype=np.float32)))).tolist()
+    out[: len(x)] = result

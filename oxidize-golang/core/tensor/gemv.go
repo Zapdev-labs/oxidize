@@ -3,6 +3,7 @@ package tensor
 import (
 	"fmt"
 	"math"
+	"runtime"
 	"sync"
 )
 
@@ -265,7 +266,7 @@ func unpackNibble(n uint8) int8 {
 }
 
 func parallelizeRows(rows int, fn func(start, end int)) {
-	if rows <= ParallelGemvMinOps/4 || rows < 32 {
+	if rows < 64 {
 		fn(0, rows)
 		return
 	}
@@ -302,10 +303,25 @@ func parallelWorkers(n int) int {
 	if n < 1 {
 		return 1
 	}
-	if n < 256 {
+	if n < 64 {
 		return 1
 	}
-	return 8
+	cpus := runtime.GOMAXPROCS(0)
+	if cpus < 1 {
+		cpus = 1
+	}
+	if n < cpus*8 {
+		// not enough rows to keep all cores busy
+		w := (n + 7) / 8
+		if w < 1 {
+			return 1
+		}
+		if w > cpus {
+			return cpus
+		}
+		return w
+	}
+	return cpus
 }
 
 // Sigmoid computes element-wise sigmoid.

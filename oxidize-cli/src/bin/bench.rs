@@ -30,6 +30,8 @@ struct Args {
     random_weights: bool,
     #[arg(long)]
     min_throughput: Option<f64>,
+    #[arg(long, default_value_t = 8192)]
+    max_context: usize,
 }
 
 fn main() {
@@ -46,7 +48,10 @@ fn main() {
         let mapped = loader.load(model_path).expect("Failed to load GGUF");
 
         if args.engine == "inference" || args.engine == "layerwise" {
-            let inference_config = InferenceConfig::from_gguf(&mapped);
+            let mut inference_config = InferenceConfig::from_gguf(&mapped);
+            if inference_config.context_size > args.max_context {
+                inference_config.context_size = args.max_context;
+            }
             let benchmark_token = 0_u32;
             println!("InferenceConfig from GGUF:");
             println!("  vocab_size: {}", inference_config.vocab_size);
@@ -415,6 +420,11 @@ fn inference_config_from_dflash(
         leading_dense_layers: 0,
         expert_gating_sigmoid: false,
         rope_dim: 0,
+        rope_theta_swa: 0.0,
+        sliding_window_pattern: 0,
+        embedding_scale: 1.0,
+        gelu_ffn: false,
+        sandwich_norm: false,
     }
 }
 

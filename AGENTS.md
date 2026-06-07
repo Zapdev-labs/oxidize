@@ -81,7 +81,7 @@ This workspace contains the core Rust LLM inference engine (`oxidize-core`) and 
 - `tensor.rs` monolith — 5,153 lines mixing kernels, types, and ops. Refactor candidate.
 - Quantization constants shadowed in `tensor.rs` and `cuda.rs` — should be shared.
 - `unwrap()/expect()` proliferation — 1000+ instances in non-test code.
-
+- Stop trying to use C for tasks that can be done in rust (Claude)
 ## UNIQUE STYLES
 - **Bottom-up file organization** (`tensor.rs`): constants → errors → low-level kernels → high-level functions → `Tensor` struct (inverse of typical Rust).
 - **WASM worker type embedding**: `util/web_worker.rs` embeds complete TypeScript interface contracts as 60+ line string literals.
@@ -123,11 +123,14 @@ make wasm     # outputs to dist/wasm
 - `oxidize run <model>` should start the OpenAI-compatible HTTP/WebSocket server by default; use `--no-api` for local inference only.
 - Contributions should keep tests passing and use clear, ethical PR/markdown descriptions; include benchmarks when claiming performance changes.
 - When a user asks to run a model. It means run it using oxidize 
+- Prefer building and testing over starting development servers unless the user explicitly asks to run or serve.
 ## Learned Workspace Facts
 - `oxidize-golang/` is the active Go port of `oxidize-core`; CLI lives in `internal/cli/` (`run`, `chat`, `bench`, `inspect`, `list`, `serve`); HF GGUF resolver in `hf/`.
 - `oxidize-python/` is a pure-Python implementation (`oxidize_python`, `pyproject.toml`, uv/pytest); CLI mirrors Go subcommands; HF resolver in `oxidize_python/hf/hub.py` with cache `~/.cache/oxidize/hf`.
 - Do not modify Rust crates when extending `oxidize-python`; port from `oxidize-golang` or Rust sources.
 - `oxidize-py/` is the PyO3 bindings crate, separate from `oxidize-python`.
 - Go and Python port tests reuse GGUF fixtures under `oxidize-core/tests/fixtures/` (e.g. `valid-v3.gguf`).
-- DFlash speculative decoding in `oxidize-core/src/model/dflash.rs` is an active port target for `oxidize-golang` (and downstream Python).
+- DFlash speculative decoding in `oxidize-core/src/model/dflash.rs` is an active port target for `oxidize-golang` (and downstream Python); inference needs a compatible target GGUF paired with the draft (hidden-size mismatch falls back to target-only).
 - Rust `oxidize run` rewrites to `--serve-api` by default (background in-process server on `--api-host`/`--api-port`); realtime WebSocket at `ws://HOST:PORT/v1/realtime` (`oxidize-server/tests/realtime_ws.rs`).
+- `oxidize-convert` converts HuggingFace SafeTensors (file or model directory with `config.json`) to GGUF; core logic in `oxidize-core/src/format/safetensors_to_gguf.rs`.
+- Git installs must name `oxidize-cli` explicitly (`cargo install --git … oxidize-cli --bin oxidize`) because the workspace ships multiple binary crates.

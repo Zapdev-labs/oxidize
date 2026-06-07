@@ -10,7 +10,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -34,16 +33,17 @@ func TestHealthAndDocs(t *testing.T) {
 
 func TestModelsAndPlaceholderRoutes(t *testing.T) {
 	dir := t.TempDir()
-	testutil.CopyFixture(t, filepath.Join(dir, "valid-v3.gguf"))
+	testutil.LinkQwenModel(t, dir)
+	modelID := testutil.QwenModelID
 	handler, err := NewHandler(Config{ModelsDir: dir})
 	if err != nil {
 		t.Fatalf("handler: %v", err)
 	}
 
 	assertStatus(t, handler, http.MethodGet, "/v1/models", nil, "", http.StatusOK)
-	assertStatus(t, handler, http.MethodPost, "/v1/chat/completions", []byte(`{"model":"valid-v3","messages":[{"role":"user","content":"hi"}]}`), "application/json", http.StatusOK)
-	assertStatus(t, handler, http.MethodPost, "/v1/completions", []byte(`{"model":"valid-v3","prompt":"hi"}`), "application/json", http.StatusOK)
-	assertStatus(t, handler, http.MethodPost, "/v1/embeddings", []byte(`{"model":"valid-v3","input":"hi"}`), "application/json", http.StatusOK)
+	assertStatus(t, handler, http.MethodPost, "/v1/chat/completions", []byte(`{"model":"`+modelID+`","messages":[{"role":"user","content":"hi"}]}`), "application/json", http.StatusOK)
+	assertStatus(t, handler, http.MethodPost, "/v1/completions", []byte(`{"model":"`+modelID+`","prompt":"hi"}`), "application/json", http.StatusOK)
+	assertStatus(t, handler, http.MethodPost, "/v1/embeddings", []byte(`{"model":"`+modelID+`","input":"hi"}`), "application/json", http.StatusOK)
 }
 
 func TestAuthAndErrors(t *testing.T) {

@@ -4,8 +4,8 @@ use crate::kv_cache::{KvCache, KvCacheConfig};
 use crate::model::{Logits, Model, ModelError, Session, Token};
 use crate::quantization::{dequantize_scalar, quantized_size};
 use crate::tensor::{
-    DType, apply_rope_f32, f16_le_to_f32, gemm_quantized_f32, gemv_f32, gemv_quantized_experts_f32,
-    gemv_quantized_f32, rms_norm_f32,
+    DType, apply_geglu_inplace_f32, apply_rope_f32, apply_swiglu_inplace_f32, f16_le_to_f32,
+    gemm_quantized_f32, gemv_f32, gemv_quantized_experts_f32, gemv_quantized_f32, rms_norm_f32,
 };
 use memmap2::Mmap;
 use std::sync::Arc;
@@ -45,7 +45,7 @@ impl ModelArchitecture {
                     Self::DeepSeek
                 }
                 "qwen" | "qwen2" | "qwen2moe" | "qwen3" | "qwen35" => Self::Qwen,
-                "gemma" | "gemma4" => Self::Gemma,
+                "gemma" | "gemma2" | "gemma3" | "gemma4" => Self::Gemma,
                 "phi" | "phi3" => Self::Phi,
                 "falcon" => Self::Falcon,
                 "gpt2" => Self::Gpt2,
@@ -132,6 +132,22 @@ pub struct InferenceConfig {
     /// Models like MiniMax-M2 use partial RoPE: first `rope_dim` dims are rotated,
     /// remaining dims (NoPE) are left unchanged.
     pub rope_dim: usize,
+    /// RoPE theta for sliding-window (local) attention layers (0 = use `rope_theta`
+    /// for all layers). Gemma 3/4 use 10000 on local layers and 1000000 on global.
+    pub rope_theta_swa: f32,
+    /// Interleaving period for global attention layers when sliding window is in
+    /// use: every `sliding_window_pattern`-th layer is global, the rest are local
+    /// SWA (0 = no interleaving). Gemma 2 = 2, Gemma 3/4 = 6.
+    pub sliding_window_pattern: usize,
+    /// Multiplier applied to token embeddings after lookup (1.0 = none).
+    /// Gemma scales by sqrt(hidden_size).
+    pub embedding_scale: f32,
+    /// Use GeGLU (tanh-GELU) instead of SwiGLU (SiLU) for dense FFN. Gemma uses GeGLU.
+    pub gelu_ffn: bool,
+    /// Gemma "sandwich" normalization: a post-attention norm is applied to the
+    /// attention output and a post-FFN norm to the FFN output, each *before* the
+    /// residual add (in addition to the standard pre-attention / pre-FFN norms).
+    pub sandwich_norm: bool,
 }
 
 impl Default for InferenceConfig {
@@ -159,6 +175,11 @@ impl Default for InferenceConfig {
             leading_dense_layers: 0,
             expert_gating_sigmoid: false,
             rope_dim: 0,
+            rope_theta_swa: 0.0,
+            sliding_window_pattern: 0,
+            embedding_scale: 1.0,
+            gelu_ffn: false,
+            sandwich_norm: false,
         }
     }
 }
@@ -183,6 +204,44 @@ impl InferenceConfig {
             self.key_value_head_dim
         } else {
             self.head_dim()
+        }
+    }
+
+    /// Whether layer `layer_idx` uses global (full-context) attention rather than
+    /// sliding-window attention.
+    ///
+    /// - No sliding window configured (`sliding_window == 0`): every layer is global.
+    /// - Uniform-SWA models (Mistral/Qwen) set `sliding_window > 0` but leave
+    ///   `sliding_window_pattern == 0`, meaning *every* layer is local (SWA applies
+    ///   to all layers); none are global.
+    /// - Gemma interleaving (`sliding_window_pattern > 0`): every `pattern`-th layer
+    ///   (1-indexed) is global, the rest are local.
+    pub fn layer_is_global(&self, layer_idx: usize) -> bool {
+        if self.sliding_window == 0 {
+            return true;
+        }
+        if self.sliding_window_pattern == 0 {
+            return false;
+        }
+        (layer_idx + 1).is_multiple_of(self.sliding_window_pattern)
+    }
+
+    /// RoPE theta for `layer_idx`: global layers use `rope_theta`; sliding-window
+    /// layers use `rope_theta_swa` when set, otherwise fall back to `rope_theta`.
+    pub fn layer_rope_theta(&self, layer_idx: usize) -> f32 {
+        if self.rope_theta_swa > 0.0 && !self.layer_is_global(layer_idx) {
+            self.rope_theta_swa
+        } else {
+            self.rope_theta
+        }
+    }
+
+    /// Effective sliding-window size for `layer_idx` (0 = full attention).
+    pub fn layer_sliding_window(&self, layer_idx: usize) -> usize {
+        if self.sliding_window > 0 && !self.layer_is_global(layer_idx) {
+            self.sliding_window
+        } else {
+            0
         }
     }
 
@@ -357,6 +416,40 @@ impl InferenceConfig {
             .map(|v| v as usize)
             .unwrap_or(0);
 
+        // ---- Gemma-family specifics ----
+        // Gemma 2/3/4 interleave local sliding-window and global attention layers,
+        // use dual RoPE theta, scale embeddings by sqrt(hidden), use GeGLU, and
+        // apply sandwich normalization. All gated behind the Gemma architecture so
+        // other models are unaffected.
+        let is_gemma = architecture == ModelArchitecture::Gemma;
+        let sliding_window_pattern = if is_gemma {
+            // GGUF may record it explicitly; otherwise fall back to the known
+            // per-generation default (Gemma 2 = every 2nd, Gemma 3/4 = every 6th).
+            arch_u32("attention.sliding_window_pattern")
+                .map(|v| v as usize)
+                .filter(|&v| v > 0)
+                .unwrap_or(match arch.as_str() {
+                    "gemma2" => 2,
+                    _ => 6,
+                })
+        } else {
+            0
+        };
+        let rope_theta_swa = if is_gemma {
+            arch_f32("rope.freq_base_swa")
+                .filter(|&v| v > 0.0)
+                .unwrap_or(10000.0)
+        } else {
+            0.0
+        };
+        let embedding_scale = if is_gemma {
+            (hidden_size as f32).sqrt()
+        } else {
+            1.0
+        };
+        let gelu_ffn = is_gemma;
+        let sandwich_norm = is_gemma;
+
         Self {
             vocab_size,
             context_size,
@@ -380,6 +473,11 @@ impl InferenceConfig {
             leading_dense_layers,
             expert_gating_sigmoid,
             rope_dim,
+            rope_theta_swa,
+            sliding_window_pattern,
+            embedding_scale,
+            gelu_ffn,
+            sandwich_norm,
         }
     }
 }
@@ -842,6 +940,8 @@ struct LayerWeights {
     attn_output_bias: Vec<f32>,
     ffn_norm: Vec<f32>,
     post_attention_norm: Vec<f32>,
+    /// Gemma post-feedforward norm (applied to FFN output before the residual add).
+    post_ffn_norm: Vec<f32>,
     // Dense FFN weights (used when num_experts == 0)
     ffn_gate: WeightStorage,
     ffn_up: WeightStorage,
@@ -1155,6 +1255,12 @@ impl InferenceModel {
                             dequantize_scalar(qtype, qdata, &mut f32_data)
                                 .map_err(|e| format!("dequantize: {:?}", e))?;
                             layers[layer_idx].post_attention_norm = f32_data;
+                        }
+                        ("post_ffw_norm", _) | ("post_ffn_norm", _) => {
+                            let mut f32_data = vec![0.0_f32; value_count];
+                            dequantize_scalar(qtype, qdata, &mut f32_data)
+                                .map_err(|e| format!("dequantize: {:?}", e))?;
+                            layers[layer_idx].post_ffn_norm = f32_data;
                         }
                         ("ffn_gate", _) => {
                             layers[layer_idx].ffn_gate =
@@ -1479,6 +1585,11 @@ impl InferenceModel {
                     lookup_quantized_embedding(h, *qtype, data, token_idx, target);
                 }
             }
+            if cfg.embedding_scale != 1.0 {
+                for v in target.iter_mut() {
+                    *v *= cfg.embedding_scale;
+                }
+            }
         }
 
         // Scratch buffers reused across layers. Allocated once per call (batched
@@ -1538,13 +1649,22 @@ impl InferenceModel {
                 .flatten()
                 .unwrap_or(layer_idx);
 
-            let ffn_norm_weight: &[f32] = if !layer.post_attention_norm.is_empty() {
+            let ffn_norm_weight: &[f32] = if cfg.sandwich_norm {
+                // Gemma: post_attention_norm is a sandwich norm (applied to the
+                // attention output), NOT the pre-FFN norm. Use ffn_norm here.
+                &layer.ffn_norm
+            } else if !layer.post_attention_norm.is_empty() {
                 &layer.post_attention_norm
             } else if !layer.ffn_norm.is_empty() {
                 &layer.ffn_norm
             } else {
                 &[]
             };
+
+            // Per-layer RoPE theta and sliding-window size (Gemma interleaves
+            // local SWA and global attention layers with distinct RoPE bases).
+            let layer_rope = cfg.layer_rope_theta(layer_idx);
+            let layer_window = cfg.layer_sliding_window(layer_idx);
 
             // 2. Per-token attn RMSNorm into normed_batch.
             for i in 0..batch {
@@ -1662,7 +1782,7 @@ impl InferenceModel {
                         &q[off..off + q_rope_len],
                         pos,
                         q_rope_len,
-                        cfg.rope_theta,
+                        layer_rope,
                         rotated,
                     )
                     .map_err(|e| ModelError::InferenceFailed(format!("rope q: {:?}", e)))?;
@@ -1681,7 +1801,7 @@ impl InferenceModel {
                         &k[off..off + k_rope_len],
                         pos,
                         k_rope_len,
-                        cfg.rope_theta,
+                        layer_rope,
                         rotated,
                     )
                     .map_err(|e| ModelError::InferenceFailed(format!("rope k: {:?}", e)))?;
@@ -1748,11 +1868,23 @@ impl InferenceModel {
                     }
                 };
 
+                // Sliding-window attention: a local layer attends only to the most
+                // recent `layer_window` positions. Since RoPE encodes absolute
+                // positions, slicing off the oldest key/value rows yields exactly
+                // the windowed-causal mask with relative positions preserved.
+                let (eff_seq_len, key_cache, value_cache) =
+                    if layer_window > 0 && seq_len > layer_window {
+                        let skip = (seq_len - layer_window) * kv_len;
+                        (layer_window, &key_cache[skip..], &value_cache[skip..])
+                    } else {
+                        (seq_len, key_cache, value_cache)
+                    };
+
                 flash_attention_decode_heads_f32(
                     q,
                     key_cache,
                     value_cache,
-                    seq_len,
+                    eff_seq_len,
                     kv_head_dim,
                     kv_len,
                     q_heads,
@@ -1778,6 +1910,22 @@ impl InferenceModel {
                 }
             } else {
                 attn_proj_batch.fill(0.0_f32);
+            }
+
+            // 6b. Gemma sandwich norm: normalize the attention output before the
+            // residual add (post_attention_norm).
+            if cfg.sandwich_norm && !layer.post_attention_norm.is_empty() {
+                for i in 0..batch {
+                    let range = i * h..(i + 1) * h;
+                    rms_norm_f32(
+                        &attn_proj_batch[range.clone()],
+                        &layer.post_attention_norm,
+                        cfg.rms_norm_eps,
+                        &mut normed_batch[range.clone()],
+                    )
+                    .map_err(|e| ModelError::InferenceFailed(format!("post_attn_norm: {:?}", e)))?;
+                    attn_proj_batch[range.clone()].copy_from_slice(&normed_batch[range]);
+                }
             }
 
             // 7. Residual add (attn).
@@ -1820,9 +1968,13 @@ impl InferenceModel {
                 )
                 .map_err(|e| ModelError::InferenceFailed(format!("ffn_up: {:?}", e)))?;
 
-                for (g, u) in gate_batch.iter_mut().zip(up_batch.iter()) {
-                    let sigmoid = 1.0_f32 / (1.0 + (-*g).exp());
-                    *g = *g * sigmoid * *u;
+                if cfg.gelu_ffn {
+                    apply_geglu_inplace_f32(&mut gate_batch, &up_batch);
+                } else {
+                    for (g, u) in gate_batch.iter_mut().zip(up_batch.iter()) {
+                        let sigmoid = 1.0_f32 / (1.0 + (-*g).exp());
+                        *g = *g * sigmoid * *u;
+                    }
                 }
 
                 gemm_weight(
@@ -1836,6 +1988,23 @@ impl InferenceModel {
                 .map_err(|e| ModelError::InferenceFailed(format!("ffn_down: {:?}", e)))?;
                 if !layer.ffn_down_bias.is_empty() {
                     add_repeating_bias(&mut ffn_out_batch, &layer.ffn_down_bias);
+                }
+
+                // Gemma sandwich norm: normalize the FFN output before residual.
+                if cfg.sandwich_norm && !layer.post_ffn_norm.is_empty() {
+                    for i in 0..batch {
+                        let range = i * h..(i + 1) * h;
+                        rms_norm_f32(
+                            &ffn_out_batch[range.clone()],
+                            &layer.post_ffn_norm,
+                            cfg.rms_norm_eps,
+                            &mut normed_batch[range.clone()],
+                        )
+                        .map_err(|e| {
+                            ModelError::InferenceFailed(format!("post_ffn_norm: {:?}", e))
+                        })?;
+                        ffn_out_batch[range.clone()].copy_from_slice(&normed_batch[range]);
+                    }
                 }
 
                 for i in 0..batch * h {
@@ -1898,6 +2067,12 @@ impl InferenceModel {
             WeightStorage::MmapQuantized(qtype, mmap, offset, size) => {
                 let data = &mmap[*offset..*offset + *size];
                 lookup_quantized_embedding(h, *qtype, data, token_idx, x);
+            }
+        }
+        let scale = self.config.embedding_scale;
+        if scale != 1.0 {
+            for v in x.iter_mut() {
+                *v *= scale;
             }
         }
     }
@@ -2021,13 +2196,21 @@ impl InferenceModel {
             let is_mamba = !layer.attn_qkv.is_empty() && layer.attn_q.is_empty();
 
             // Determine which norm weight to use for FFN
-            let ffn_norm_weight: &[f32] = if !layer.post_attention_norm.is_empty() {
+            let ffn_norm_weight: &[f32] = if cfg.sandwich_norm {
+                // Gemma: post_attention_norm is a sandwich norm (applied to the
+                // attention output), NOT the pre-FFN norm. Use ffn_norm here.
+                &layer.ffn_norm
+            } else if !layer.post_attention_norm.is_empty() {
                 &layer.post_attention_norm
             } else if !layer.ffn_norm.is_empty() {
                 &layer.ffn_norm
             } else {
                 &[]
             };
+
+            // Per-layer RoPE theta and sliding-window size (Gemma local/global mix).
+            let layer_rope = cfg.layer_rope_theta(layer_idx);
+            let layer_window = cfg.layer_sliding_window(layer_idx);
 
             if is_shortconv {
                 // ---- LFM2 short-convolution token mixing ----
@@ -2343,11 +2526,53 @@ impl InferenceModel {
 
                     let q_full = &mut ws.q_full[..q_len];
                     q_full.fill(0.0_f32);
-                    gemv_weight(&layer.attn_q, q_len, h, normed, q_full)
-                        .map_err(|e| ModelError::InferenceFailed(format!("attn_q: {:?}", e)))?;
+                    let k_vec = &mut ws.k_vec[..kv_len];
+                    k_vec.fill(0.0_f32);
+                    let v_vec = &mut ws.v_vec[..kv_len];
+                    v_vec.fill(0.0_f32);
+
+                    // Run Q, K, V projections in parallel — they write to non-overlapping
+                    // buffers (q_full, k_vec, v_vec) and share only an immutable normed view.
+                    // Same pattern as the gate||up join below; reborrow semantics preserve
+                    // all three slice bindings after the join returns.
+                    let ((qr, kr), vr) = rayon::join(
+                        || {
+                            rayon::join(
+                                || gemv_weight(&layer.attn_q, q_len, h, normed, q_full),
+                                || {
+                                    if layer.attn_k.is_empty() {
+                                        Ok(())
+                                    } else {
+                                        gemv_weight(&layer.attn_k, kv_len, h, normed, k_vec)
+                                    }
+                                },
+                            )
+                        },
+                        || {
+                            if layer.attn_v.is_empty() {
+                                Ok(())
+                            } else {
+                                gemv_weight(&layer.attn_v, kv_len, h, normed, v_vec)
+                            }
+                        },
+                    );
+                    qr.map_err(|e| ModelError::InferenceFailed(format!("attn_q: {:?}", e)))?;
+                    kr.map_err(|e| ModelError::InferenceFailed(format!("attn_k: {:?}", e)))?;
+                    vr.map_err(|e| ModelError::InferenceFailed(format!("attn_v: {:?}", e)))?;
+
                     if !layer.attn_q_bias.is_empty() {
                         for (i, q) in q_full.iter_mut().enumerate() {
                             *q += layer.attn_q_bias[i % layer.attn_q_bias.len()];
+                        }
+                    }
+                    if !layer.attn_k_bias.is_empty() {
+                        for (i, k) in k_vec.iter_mut().enumerate() {
+                            *k += layer.attn_k_bias[i % layer.attn_k_bias.len()];
+                        }
+                    }
+                    if !layer.attn_v_bias.is_empty() {
+                        for (i, v) in v_vec.iter_mut().enumerate() {
+                            *v += layer.attn_v_bias[i % layer.attn_v_bias.len()];
                         }
                     }
 
@@ -2360,29 +2585,6 @@ impl InferenceModel {
                         q_len
                     };
                     let q = &mut ws.q_full[..q_len_actual];
-
-                    let k_vec = &mut ws.k_vec[..kv_len];
-                    k_vec.fill(0.0_f32);
-                    let v_vec = &mut ws.v_vec[..kv_len];
-                    v_vec.fill(0.0_f32);
-                    if !layer.attn_k.is_empty() {
-                        gemv_weight(&layer.attn_k, kv_len, h, normed, k_vec)
-                            .map_err(|e| ModelError::InferenceFailed(format!("attn_k: {:?}", e)))?;
-                        if !layer.attn_k_bias.is_empty() {
-                            for (i, k) in k_vec.iter_mut().enumerate() {
-                                *k += layer.attn_k_bias[i % layer.attn_k_bias.len()];
-                            }
-                        }
-                    }
-                    if !layer.attn_v.is_empty() {
-                        gemv_weight(&layer.attn_v, kv_len, h, normed, v_vec)
-                            .map_err(|e| ModelError::InferenceFailed(format!("attn_v: {:?}", e)))?;
-                        if !layer.attn_v_bias.is_empty() {
-                            for (i, v) in v_vec.iter_mut().enumerate() {
-                                *v += layer.attn_v_bias[i % layer.attn_v_bias.len()];
-                            }
-                        }
-                    }
 
                     // Compute head dimensions based on ACTUAL Q length after splitting
                     let q_len_used = q.len();
@@ -2468,7 +2670,7 @@ impl InferenceModel {
                             &q[off..off + q_rope_len],
                             pos,
                             q_rope_len,
-                            cfg.rope_theta,
+                            layer_rope,
                             rotated,
                         )
                         .map_err(|e| ModelError::InferenceFailed(format!("rope q: {:?}", e)))?;
@@ -2488,7 +2690,7 @@ impl InferenceModel {
                             &k_vec[off..off + k_rope_len],
                             pos,
                             k_rope_len,
-                            cfg.rope_theta,
+                            layer_rope,
                             rotated,
                         )
                         .map_err(|e| ModelError::InferenceFailed(format!("rope k: {:?}", e)))?;
@@ -2558,11 +2760,22 @@ impl InferenceModel {
                     } else {
                         q
                     };
+                    // Sliding-window attention: a local layer attends only to the
+                    // most recent `layer_window` positions. RoPE encodes absolute
+                    // positions, so slicing off the oldest rows yields the
+                    // windowed-causal mask with relative positions preserved.
+                    let (eff_seq_len, key_cache, value_cache) =
+                        if layer_window > 0 && seq_len > layer_window {
+                            let skip = (seq_len - layer_window) * kv_len;
+                            (layer_window, &key_cache[skip..], &value_cache[skip..])
+                        } else {
+                            (seq_len, key_cache, value_cache)
+                        };
                     flash_attention_decode_heads_f32(
                         q_for_flash,
                         key_cache,
                         value_cache,
-                        seq_len,
+                        eff_seq_len,
                         kv_head_dim,
                         kv_len,
                         q_heads,
@@ -2606,6 +2819,20 @@ impl InferenceModel {
                             }
                         }
                     }
+                }
+
+                // Gemma sandwich norm: normalize the attention output before the
+                // residual add (post_attention_norm).
+                if cfg.sandwich_norm && !layer.post_attention_norm.is_empty() {
+                    let normed_attn = &mut ws.hidden_b[..h];
+                    rms_norm_f32(
+                        attn_out,
+                        &layer.post_attention_norm,
+                        cfg.rms_norm_eps,
+                        normed_attn,
+                    )
+                    .map_err(|e| ModelError::InferenceFailed(format!("post_attn_norm: {:?}", e)))?;
+                    attn_out.copy_from_slice(normed_attn);
                 }
 
                 for i in 0..h {
@@ -2676,10 +2903,7 @@ impl InferenceModel {
                             gemv_weight(&layer.ffn_up_shexp, shexp_i, h, normed, up).map_err(
                                 |e| ModelError::InferenceFailed(format!("shexp up: {:?}", e)),
                             )?;
-                            for (g, u) in gate.iter_mut().zip(up.iter()) {
-                                let sigmoid = 1.0_f32 / (1.0 + (-*g).exp());
-                                *g = *g * sigmoid * *u;
-                            }
+                            apply_swiglu_inplace_f32(gate, up);
                             gemv_weight(&layer.ffn_down_shexp, h, shexp_i, gate, shexp_out)
                                 .map_err(|e| {
                                     ModelError::InferenceFailed(format!("shexp down: {:?}", e))
@@ -2703,10 +2927,11 @@ impl InferenceModel {
                         up_result
                             .map_err(|e| ModelError::InferenceFailed(format!("ffn_up: {:?}", e)))?;
 
-                        // Inline SwiGLU into the gate buffer to avoid an intermediate allocation.
-                        for (g, u) in gate.iter_mut().zip(up.iter()) {
-                            let sigmoid = 1.0_f32 / (1.0 + (-*g).exp());
-                            *g = *g * sigmoid * *u;
+                        // GeGLU for Gemma, otherwise SwiGLU (AVX2 fast path).
+                        if cfg.gelu_ffn {
+                            apply_geglu_inplace_f32(gate, up);
+                        } else {
+                            apply_swiglu_inplace_f32(gate, up);
                         }
 
                         gemv_weight(&layer.ffn_down, h, cfg.intermediate_size, gate, ffn_out)
@@ -2719,6 +2944,16 @@ impl InferenceModel {
                             }
                         }
                     }
+                }
+
+                // Gemma sandwich norm: normalize the FFN output before residual.
+                if cfg.sandwich_norm && !layer.post_ffn_norm.is_empty() {
+                    let normed_ffn = &mut ws.hidden_b[..h];
+                    rms_norm_f32(ffn_out, &layer.post_ffn_norm, cfg.rms_norm_eps, normed_ffn)
+                        .map_err(|e| {
+                            ModelError::InferenceFailed(format!("post_ffn_norm: {:?}", e))
+                        })?;
+                    ffn_out.copy_from_slice(normed_ffn);
                 }
 
                 for i in 0..h {
@@ -3321,6 +3556,58 @@ impl Model for InferenceModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gemma_sliding_window_pattern_selects_global_layers() {
+        // Gemma 3/4: every 6th layer (1-indexed) is global, the rest local SWA.
+        let cfg = InferenceConfig {
+            architecture: ModelArchitecture::Gemma,
+            sliding_window: 1024,
+            sliding_window_pattern: 6,
+            rope_theta: 1_000_000.0,
+            rope_theta_swa: 10_000.0,
+            ..Default::default()
+        };
+        // Layers 0..4 are local (SWA), layer 5 (1-indexed 6th) is global.
+        for l in 0..5 {
+            assert!(!cfg.layer_is_global(l), "layer {l} should be local");
+            assert_eq!(cfg.layer_rope_theta(l), 10_000.0);
+            assert_eq!(cfg.layer_sliding_window(l), 1024);
+        }
+        assert!(cfg.layer_is_global(5), "layer 5 should be global");
+        assert_eq!(cfg.layer_rope_theta(5), 1_000_000.0);
+        assert_eq!(cfg.layer_sliding_window(5), 0);
+        assert!(cfg.layer_is_global(11));
+    }
+
+    #[test]
+    fn non_gemma_layers_are_all_global() {
+        let cfg = InferenceConfig {
+            sliding_window_pattern: 0,
+            sliding_window: 0,
+            rope_theta: 10_000.0,
+            ..Default::default()
+        };
+        assert!(cfg.layer_is_global(0));
+        assert!(cfg.layer_is_global(7));
+        assert_eq!(cfg.layer_rope_theta(3), 10_000.0);
+        assert_eq!(cfg.layer_sliding_window(3), 0);
+    }
+
+    #[test]
+    fn uniform_swa_models_apply_sliding_window_to_every_layer() {
+        // Mistral/Qwen: sliding_window set, pattern 0 -> SWA on every layer.
+        let cfg = InferenceConfig {
+            sliding_window: 4096,
+            sliding_window_pattern: 0,
+            rope_theta: 1_000_000.0,
+            ..Default::default()
+        };
+        for l in [0usize, 1, 5, 31] {
+            assert!(!cfg.layer_is_global(l), "layer {l} should be local SWA");
+            assert_eq!(cfg.layer_sliding_window(l), 4096);
+        }
+    }
 
     fn tiny_inference_model() -> InferenceModel {
         let config = InferenceConfig {

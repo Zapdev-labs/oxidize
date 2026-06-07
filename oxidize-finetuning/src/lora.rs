@@ -64,7 +64,14 @@ impl LoRAAdapter {
         }
         let mut hidden = vec![0.0_f32; self.rank];
         lora_down(&self.a, x, self.in_dim, self.rank, &mut hidden);
-        lora_up_add(&self.b, &hidden, self.rank, self.out_dim, self.scale, base_out);
+        lora_up_add(
+            &self.b,
+            &hidden,
+            self.rank,
+            self.out_dim,
+            self.scale,
+            base_out,
+        );
         Ok(())
     }
 
@@ -138,7 +145,14 @@ fn lora_down(a: &[f32], x: &[f32], in_dim: usize, rank: usize, out: &mut [f32]) 
     });
 }
 
-fn lora_up_add(b: &[f32], hidden: &[f32], rank: usize, out_dim: usize, scale: f32, out: &mut [f32]) {
+fn lora_up_add(
+    b: &[f32],
+    hidden: &[f32],
+    rank: usize,
+    out_dim: usize,
+    scale: f32,
+    out: &mut [f32],
+) {
     for o in 0..out_dim {
         let row = &b[o * rank..(o + 1) * rank];
         let delta: f32 = row.iter().zip(hidden.iter()).map(|(w, h)| w * h).sum();
