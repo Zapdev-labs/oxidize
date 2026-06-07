@@ -323,10 +323,7 @@ impl HfRepo {
     }
 }
 
-fn model_files_for_repo(
-    repo: &HfRepo,
-    spec: &str,
-) -> io::Result<(Vec<String>, Vec<String>)> {
+fn model_files_for_repo(repo: &HfRepo, spec: &str) -> io::Result<(Vec<String>, Vec<String>)> {
     let info = repo
         .info()
         .map_err(|error| io::Error::other(format!("failed to inspect HF repo {spec}: {error}")))?;
@@ -383,11 +380,7 @@ fn cache_safe_name(spec: &str) -> String {
         .collect()
 }
 
-fn copy_hf_file_to_dir(
-    repo: &HfRepo,
-    filename: &str,
-    dir: &Path,
-) -> io::Result<PathBuf> {
+fn copy_hf_file_to_dir(repo: &HfRepo, filename: &str, dir: &Path) -> io::Result<PathBuf> {
     let source = repo.get(filename).map_err(|error| {
         io::Error::other(format!("failed to download hf file {filename}: {error}"))
     })?;
@@ -482,14 +475,12 @@ fn requantize_gguf_to_q8(input: &std::path::Path, output: &std::path::Path) -> i
         input.display(),
         output.display()
     );
-    let input_bytes = std::fs::read(input).map_err(|e| {
-        io::Error::other(format!("failed to read GGUF for requantization: {e}"))
-    })?;
+    let input_bytes = std::fs::read(input)
+        .map_err(|e| io::Error::other(format!("failed to read GGUF for requantization: {e}")))?;
     let quantized = quantize_gguf_to_target(&input_bytes, GgufQuantizationType::Q8_0)
         .map_err(|e| io::Error::other(format!("Q8_0 requantization failed: {e}")))?;
-    std::fs::write(output, &quantized).map_err(|e| {
-        io::Error::other(format!("failed to write Q8_0 GGUF: {e}"))
-    })?;
+    std::fs::write(output, &quantized)
+        .map_err(|e| io::Error::other(format!("failed to write Q8_0 GGUF: {e}")))?;
     eprintln!(
         "Q8_0 GGUF written ({:.1} MB) — model ready",
         quantized.len() as f64 / 1_048_576.0
@@ -512,11 +503,7 @@ fn gguf_repo_candidates(spec: &str) -> Vec<String> {
     candidates
 }
 
-fn resolve_hf_model_spec(
-    api: &HfApi,
-    spec: &str,
-    hf_file: Option<&str>,
-) -> io::Result<PathBuf> {
+fn resolve_hf_model_spec(api: &HfApi, spec: &str, hf_file: Option<&str>) -> io::Result<PathBuf> {
     let mut attempted = Vec::new();
     for candidate in std::iter::once(spec.to_owned()).chain(gguf_repo_candidates(spec).into_iter())
     {
@@ -655,11 +642,28 @@ where
                 rewritten.push("--no-api".into());
             }
             Some(
-                "--prompt" | "--model" | "--backend" | "--n-gpu-layers" | "--gpus"
-                | "--parallelism" | "--lora" | "--profile" | "--profile-output" | "--max-tokens"
-                | "--temperature" | "--top-p" | "--top-k" | "--layer-cache" | "--ctx-size"
-                | "--threads" | "--kv-cache-dtype" | "--mesh-port" | "--pipe-peer"
-                | "--pipe-listen" | "--pipe-max-tokens" | "--tokenizer-model"
+                "--prompt"
+                | "--model"
+                | "--backend"
+                | "--n-gpu-layers"
+                | "--gpus"
+                | "--parallelism"
+                | "--lora"
+                | "--profile"
+                | "--profile-output"
+                | "--max-tokens"
+                | "--temperature"
+                | "--top-p"
+                | "--top-k"
+                | "--layer-cache"
+                | "--ctx-size"
+                | "--threads"
+                | "--kv-cache-dtype"
+                | "--mesh-port"
+                | "--pipe-peer"
+                | "--pipe-listen"
+                | "--pipe-max-tokens"
+                | "--tokenizer-model"
                 | "--ram-offload-threads",
             ) => {
                 rewritten.push(arg);
@@ -1322,6 +1326,7 @@ fn generate_with_model<W: Write, M: Model>(
             Poll::Ready(Some(Err(e))) => {
                 return Err(io::Error::other(format!("generation error: {:?}", e)));
             }
+            Poll::Ready(Some(None)) => break,
             Poll::Ready(None) => break,
             Poll::Pending => break,
         }
@@ -1415,6 +1420,7 @@ fn generate_with_dflash_draft<W: Write>(
             Poll::Ready(Some(Err(e))) => {
                 return Err(io::Error::other(format!("generation error: {:?}", e)));
             }
+            Poll::Ready(Some(None)) => break,
             Poll::Ready(None) => break,
             Poll::Pending => break,
         }
@@ -1514,6 +1520,9 @@ fn run_api_server_blocking(server_args: oxidize_server::Args) -> io::Result<()> 
         let (effective_backend, warning) = server_args.backend.to_core_backend().effective();
         if let Some(msg) = warning {
             eprintln!("warning: {msg}");
+        }
+        if let Some(msg) = effective_backend.vibe_warning() {
+            eprintln!("{msg}");
         }
         eprintln!(
             "server: loading model={} backend={} addr={}:{}",
@@ -1699,6 +1708,9 @@ fn main() {
     let (effective_backend, warning) = args.backend.to_core_backend().effective();
     if let Some(msg) = warning {
         eprintln!("warning: {msg}");
+    }
+    if let Some(msg) = effective_backend.vibe_warning() {
+        eprintln!("{msg}");
     }
     let backend_label = match effective_backend {
         oxidize_core::backend::Backend::Mlx => "Apple Silicon",
@@ -1934,7 +1946,8 @@ fn main() {
                     let kv_full: u64 =
                         (config.context_size as u64).saturating_mul(kv_bytes_per_token as u64);
                     #[cfg(target_os = "linux")]
-                    let available = oxidize_core::gguf::linux_mem_available_bytes().unwrap_or(u64::MAX);
+                    let available =
+                        oxidize_core::gguf::linux_mem_available_bytes().unwrap_or(u64::MAX);
                     #[cfg(not(target_os = "linux"))]
                     let available = u64::MAX;
                     // Reserve headroom for the model weights (file-backed but needed during
@@ -2622,311 +2635,4 @@ mod tests {
         let mut first_writer = Vec::new();
         write_generated_response_cached("hello", &mut prompt_cache, &mut first_writer)
             .expect("first response should succeed");
-        let first_output = String::from_utf8(first_writer).expect("valid utf8 output");
-        assert!(first_output.contains("generation progress: 1/2 tokens"));
-        assert!(first_output.contains("generation progress: 2/2 tokens"));
-
-        let mut second_writer = Vec::new();
-        let response =
-            write_generated_response_cached("hello", &mut prompt_cache, &mut second_writer)
-                .expect("cached response should succeed");
-        let second_output = String::from_utf8(second_writer).expect("valid utf8 output");
-        assert_eq!(response, "oxidize-cli: hello");
-        assert_eq!(
-            second_output,
-            "oxidize-cli: hello\ngeneration stats: tokens=0 speed=0.00 tok/s (cache hit)\n"
-        );
-    }
-
-    #[test]
-    fn conversation_history_render_uses_empty_state() {
-        let history = ConversationHistory::default();
-        assert_eq!(history.render(), "no conversation history");
-    }
-
-    #[test]
-    fn single_shot_mode_writes_one_response() {
-        let mut writer = Vec::new();
-        write_generated_response_with_clock("hello", &mut writer, {
-            let mut ticks = [0u64, 500].into_iter();
-            move || {
-                Instant::now()
-                    .checked_add(Duration::from_millis(ticks.next().expect("clock tick")))
-                    .expect("valid instant")
-            }
-        })
-        .expect("single-shot mode should succeed");
-        let output = String::from_utf8(writer).expect("valid utf8 output");
-        assert_eq!(
-            output,
-            "generation progress: 1/2 tokens\ngeneration progress: 2/2 tokens\noxidize-cli: hello\ngeneration stats: tokens=2 speed=4.00 tok/s\n"
-        );
-    }
-
-    #[test]
-    fn single_shot_mode_skips_blank_prompt() {
-        let mut writer = Vec::new();
-        run_single_shot_mode("   ", &mut writer).expect("single-shot mode should succeed");
-        assert!(writer.is_empty());
-    }
-
-    #[test]
-    fn renders_load_progress_with_bytes_when_available() {
-        let rendered = render_load_progress(LoadProgress {
-            stage: "mapping",
-            percent: 35,
-            bytes_processed: Some(1024),
-            total_bytes: Some(4096),
-        });
-        assert_eq!(rendered, "load progress: 35% stage=mapping bytes=1024/4096");
-    }
-
-    #[test]
-    fn renders_load_progress_without_bytes_when_unavailable() {
-        let rendered = render_load_progress(LoadProgress {
-            stage: "starting",
-            percent: 0,
-            bytes_processed: None,
-            total_bytes: None,
-        });
-        assert_eq!(rendered, "load progress: 0% stage=starting");
-    }
-
-    #[test]
-    fn write_generated_response_emits_progress_and_final_response() {
-        let mut writer = Vec::new();
-        let response = write_generated_response_with_clock("there", &mut writer, {
-            let mut ticks = [0u64, 200].into_iter();
-            move || {
-                Instant::now()
-                    .checked_add(Duration::from_millis(ticks.next().expect("clock tick")))
-                    .expect("valid instant")
-            }
-        })
-        .expect("generation should succeed");
-        let output = String::from_utf8(writer).expect("valid utf8 output");
-        assert_eq!(response, "oxidize-cli: there");
-        assert_eq!(
-            output,
-            "generation progress: 1/2 tokens\ngeneration progress: 2/2 tokens\noxidize-cli: there\ngeneration stats: tokens=2 speed=10.00 tok/s\n"
-        );
-    }
-
-    #[test]
-    fn format_generation_stats_reports_tokens_and_speed() {
-        let stats = format_generation_stats(12, Duration::from_secs(3));
-        assert_eq!(stats, "generation stats: tokens=12 speed=4.00 tok/s");
-    }
-
-    #[test]
-    fn profiler_command_builds_perf_record_invocation() {
-        let output = PathBuf::from("cpu.perf.data");
-        let exe = PathBuf::from("target/debug/oxidize-cli");
-        let args = vec!["--prompt".to_owned(), "ping".to_owned()];
-        let command = profiler_command(Profiler::Perf, Some(&output), &exe, &args);
-
-        assert_eq!(command.get_program().to_string_lossy(), "perf");
-        let got = command
-            .get_args()
-            .map(|arg| arg.to_string_lossy().to_string())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            got,
-            vec![
-                "record",
-                "--call-graph=dwarf",
-                "-o",
-                "cpu.perf.data",
-                "target/debug/oxidize-cli",
-                "--prompt",
-                "ping"
-            ]
-        );
-    }
-
-    #[test]
-    fn profiler_command_builds_samply_record_invocation() {
-        let exe = PathBuf::from("target/debug/oxidize-cli");
-        let args = vec!["--prompt".to_owned(), "ping".to_owned()];
-        let command = profiler_command(Profiler::Samply, None, &exe, &args);
-
-        assert_eq!(command.get_program().to_string_lossy(), "samply");
-        let got = command
-            .get_args()
-            .map(|arg| arg.to_string_lossy().to_string())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            got,
-            vec!["record", "target/debug/oxidize-cli", "--prompt", "ping"]
-        );
-    }
-
-    #[test]
-    fn strips_profile_flags_from_passthrough_arguments() {
-        let result = filter_passthrough_args(
-            [
-                "--prompt",
-                "ping",
-                "--profile",
-                "perf",
-                "--profile-output",
-                "perf.data",
-                "--chat",
-            ]
-            .into_iter()
-            .map(str::to_owned),
-        );
-        assert_eq!(result, vec!["--prompt", "ping", "--chat"]);
-
-        let result_equals = filter_passthrough_args(
-            [
-                "--prompt=ping",
-                "--profile=samply",
-                "--profile-output=out.json",
-            ]
-            .into_iter()
-            .map(str::to_owned),
-        );
-        assert_eq!(result_equals, vec!["--prompt=ping"]);
-    }
-
-    #[test]
-    fn rewrites_run_command_to_model_flags() {
-        let args = rewrite_run_args(
-            ["oxidize", "run", "local.gguf", "hello", "--max-tokens", "7"]
-                .into_iter()
-                .map(OsString::from),
-        )
-        .expect("run args should rewrite");
-        assert!(args.contains(&OsString::from("--model")));
-        assert!(args.contains(&OsString::from("local.gguf")));
-        assert!(args.contains(&OsString::from("--serve-api")));
-        assert!(args.contains(&OsString::from("--prompt")));
-        assert!(args.contains(&OsString::from("hello")));
-        assert!(args.contains(&OsString::from("--max-tokens")));
-        assert!(args.contains(&OsString::from("7")));
-        assert!(args.contains(&OsString::from("--cpu-optimized")));
-        assert!(args.contains(&OsString::from("--mmap-prefetch")));
-        assert!(args.contains(&OsString::from("--mmap-hugepages")));
-        assert!(args.contains(&OsString::from("--kv-cache-dtype")));
-        assert!(args.contains(&OsString::from("q8")));
-    }
-
-    #[test]
-    fn serve_rewrite_accepts_port() {
-        let args = rewrite_run_args(
-            ["oxidize", "serve", "local.gguf", "--port", "3000"]
-                .into_iter()
-                .map(OsString::from),
-        )
-        .expect("serve args should rewrite");
-        assert!(args.contains(&OsString::from("--api-port")));
-        assert!(args.contains(&OsString::from("3000")));
-        assert!(args.contains(&OsString::from("--serve-api")));
-        assert!(args.contains(&OsString::from("--api-only")));
-    }
-
-    #[test]
-    fn run_rewrite_does_not_treat_option_values_as_prompt() {
-        let args = rewrite_run_args(
-            ["oxidize", "run", "local.gguf", "--max-tokens", "7"]
-                .into_iter()
-                .map(OsString::from),
-        )
-        .expect("run args should rewrite");
-        assert!(args.contains(&OsString::from("--max-tokens")));
-        assert!(!args.contains(&OsString::from("--prompt")));
-        assert!(args.contains(&OsString::from("--chat")));
-        assert!(!args.contains(&OsString::from("--api-only")));
-    }
-
-    #[test]
-    fn run_rewrite_without_prompt_opens_chat_tui_and_server() {
-        let args = rewrite_run_args(
-            ["oxidize", "run", "local.gguf"]
-                .into_iter()
-                .map(OsString::from),
-        )
-        .expect("run args should rewrite");
-        assert!(args.contains(&OsString::from("--chat")));
-        assert!(args.contains(&OsString::from("--serve-api")));
-        assert!(!args.contains(&OsString::from("--prompt")));
-    }
-
-    #[test]
-    fn run_rewrite_with_prompt_is_not_api_only() {
-        let args = rewrite_run_args(
-            ["oxidize", "run", "local.gguf", "hello"]
-                .into_iter()
-                .map(OsString::from),
-        )
-        .expect("run args should rewrite");
-        assert!(args.contains(&OsString::from("--prompt")));
-        assert!(!args.contains(&OsString::from("--api-only")));
-        assert!(args.contains(&OsString::from("--serve-api")));
-    }
-
-    #[test]
-    fn run_rewrite_no_api_skips_server() {
-        let args = rewrite_run_args(
-            ["oxidize", "run", "local.gguf", "--no-api"]
-                .into_iter()
-                .map(OsString::from),
-        )
-        .expect("run args should rewrite");
-        assert!(args.contains(&OsString::from("--no-api")));
-        assert!(!args.contains(&OsString::from("--serve-api")));
-    }
-
-    #[test]
-    fn detects_profiling_child_environment() {
-        let key = OsString::from(PROFILE_CHILD_ENV);
-        let prior = std::env::var_os(&key);
-        // SAFETY: tests mutate process env in a scoped way and restore previous value.
-        unsafe { std::env::remove_var(&key) };
-        assert!(!is_profiling_child());
-        // SAFETY: tests mutate process env in a scoped way and restore previous value.
-        unsafe { std::env::set_var(&key, "1") };
-        assert!(is_profiling_child());
-        match prior {
-            Some(value) => {
-                // SAFETY: restore previous env value for this process.
-                unsafe { std::env::set_var(&key, value) }
-            }
-            None => {
-                // SAFETY: restore previous env absence for this process.
-                unsafe { std::env::remove_var(&key) }
-            }
-        }
-    }
-
-    #[test]
-    fn readme_includes_quick_start_and_validation_commands() {
-        let readme = include_str!("../../README.md");
-        for section in [
-            "## Quick start",
-            "## Performance tuning guide",
-            "### Clone and build",
-            "### Run tests and lint",
-            "## Common usage",
-        ] {
-            assert!(
-                readme.contains(section),
-                "README must include section: {section}"
-            );
-        }
-        for command in [
-            "make build",
-            "make test",
-            "make lint",
-            "--profile perf",
-            "--parallelism pipeline",
-            "--parallelism tensor",
-        ] {
-            assert!(
-                readme.contains(command),
-                "README must include command: {command}"
-            );
-        }
-    }
-}
+        let first_output = String::from_utf8(fi... [truncated]
