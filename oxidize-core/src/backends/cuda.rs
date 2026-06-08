@@ -418,7 +418,13 @@ pub fn gemv_f32_transposed_cuda(
     vector: &[f32],
     output: &mut [f32],
 ) -> Result<(), GemvCudaError> {
-    validate_gemv_dims(matrix, rows, cols, vector, output)?;
+    let expected_matrix_len = rows.saturating_mul(cols);
+    if matrix.len() != expected_matrix_len {
+        return Err(GemvCudaError::InvalidMatrixLength {
+            expected: expected_matrix_len,
+            actual: matrix.len(),
+        });
+    }
 
     let cols_i32 = i32::try_from(cols).map_err(|_| GemvCudaError::InvalidOutputLength {
         expected: i32::MAX as usize,
