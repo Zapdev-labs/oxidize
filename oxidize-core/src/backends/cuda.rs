@@ -555,10 +555,12 @@ pub fn gemv_quantized_cuda(
             gpu.resident_f16.insert(key, weight);
         }
 
-        let matrix_device = gpu
+        let matrix_ptr = gpu
             .resident_f16
             .get(&key)
-            .expect("weight just dequantized into resident cache");
+            .expect("weight just dequantized into resident cache")
+            .as_device_ptr()
+            .as_raw();
 
         // Upload input vector to GPU (pooled buffer) then convert f32 -> f16.
         let mut vector_device = gpu.get_f32_buffer(cols).map_err(stringify)?;
@@ -597,7 +599,7 @@ pub fn gemv_quantized_cuda(
                 1,
                 cols_i32,
                 &alpha_half,
-                matrix_device.as_device_ptr().as_raw() as *const cublas_sys::__half,
+                matrix_ptr as *const cublas_sys::__half,
                 cols_i32,
                 vector_f16.as_device_ptr().as_raw() as *const cublas_sys::__half,
                 cols_i32,
@@ -706,7 +708,7 @@ pub fn gemm_f32_cuda(
             let buffer = cust::memory::DeviceBuffer::from_slice(left_matrix).map_err(stringify)?;
             gpu.resident_f32.insert(left_key, buffer);
         }
-        let left_device = gpu.resident_f32.get(&left_key).unwrap();
+        let left_ptr = gpu.resident_f32.get(&left_key).unwrap().as_device_ptr().as_raw();
 
         // Cache right matrix (also often static / reused).
         let right_key = (right_matrix.as_ptr() as usize, right_matrix.len());
@@ -714,7 +716,7 @@ pub fn gemm_f32_cuda(
             let buffer = cust::memory::DeviceBuffer::from_slice(right_matrix).map_err(stringify)?;
             gpu.resident_f32.insert(right_key, buffer);
         }
-        let right_device = gpu.resident_f32.get(&right_key).unwrap();
+        let right_ptr = gpu.resident_f32.get(&right_key).unwrap().as_device_ptr().as_raw();
 
         let mut output_device =
             cust::memory::DeviceBuffer::<f32>::zeroed(output.len()).map_err(stringify)?;
@@ -737,9 +739,9 @@ pub fn gemm_f32_cuda(
                 n,
                 k,
                 &alpha,
-                right_device.as_device_ptr().as_raw() as *const f32,
+                right_ptr as *const f32,
                 lda,
-                left_device.as_device_ptr().as_raw() as *const f32,
+                left_ptr as *const f32,
                 ldb,
                 &beta,
                 output_device.as_device_ptr().as_raw() as *mut f32,
