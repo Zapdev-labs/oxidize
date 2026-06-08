@@ -416,13 +416,15 @@ pub fn set_layer_config(config: CudaLayerConfig) -> Result<(), String> {
     })
 }
 
-/// Mark a layer as needed and upload its weights if they are not already
+/// Mark a layer as needed and upload its f32 weights if they are not already
 /// resident.  Evicts LRU layers when over budget.
+///
+/// * `f32_weights` – slice of `(matrix_data, rows, cols)` for each f32 weight
+///   matrix belonging to this layer.
 #[cfg(feature = "cuda")]
 pub fn preload_layer(
     layer: LayerId,
     f32_weights: &[(&[f32], usize, usize)],
-    f16_weights: &[(&[u8], usize, usize)],
 ) -> Result<(), String> {
     with_gpu(|gpu| {
         if gpu.layer_map.contains_key(&layer) {
@@ -437,7 +439,7 @@ pub fn preload_layer(
             bytes: 0,
         };
 
-        for (matrix, rows, cols) in f32_weights {
+        for (matrix, _rows, _cols) in f32_weights {
             let key = (matrix.as_ptr() as usize, matrix.len());
             if !gpu.resident_f32.contains_key(&key) {
                 let buf = cust::memory::DeviceBuffer::from_slice(*matrix).map_err(stringify)?;
@@ -445,16 +447,6 @@ pub fn preload_layer(
                 gpu.resident_f32.insert(key, buf);
             }
             entry.f32_keys.push(key);
-        }
-
-        for (matrix, rows, cols) in f16_weights {
-            let key = (matrix.as_ptr() as usize, matrix.len());
-            if !gpu.resident_f16.contains_key(&key) {
-                let buf = cust::memory::DeviceBuffer::from_slice(*matrix).map_err(stringify)?;
-                entry.bytes += buf.len() * std::mem::size_of::<u16>();
-                gpu.resident_f16.insert(key, buf);
-            }
-            entry.f16_keys.push(key);
         }
 
         gpu.resident_bytes += entry.bytes;
