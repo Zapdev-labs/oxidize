@@ -234,8 +234,7 @@ struct GpuState {
     resident_f32: std::collections::HashMap<(usize, usize), cust::memory::DeviceBuffer<f32>>,
     /// Pool of reusable f32 device buffers keyed by length.
     f32_pool: std::collections::HashMap<usize, Vec<cust::memory::DeviceBuffer<f32>>>,
-    /// Pool of reusable u16 device buffers keyed by length.
-    u16_pool: std::collections::HashMap<usize, Vec<cust::memory::DeviceBuffer<u16>>>,
+
 }
 
 #[cfg(feature = "cuda")]
@@ -257,25 +256,6 @@ impl GpuState {
     ) {
         let len = buf.len();
         self.f32_pool.entry(len).or_default().push(buf);
-    }
-
-    fn get_u16_buffer(
-        &mut self,
-        len: usize,
-    ) -> Result<cust::memory::DeviceBuffer<u16>, String> {
-        if let Some(pool) = self.u16_pool.get_mut(&len) {
-            if let Some(buf) = pool.pop() {
-                return Ok(buf);
-            }
-        }
-        cust::memory::DeviceBuffer::<u16>::zeroed(len).map_err(stringify)
-    }
-
-    fn return_u16_buffer(&mut self,
-        buf: cust::memory::DeviceBuffer<u16>,
-    ) {
-        let len = buf.len();
-        self.u16_pool.entry(len).or_default().push(buf);
     }
 }
 
@@ -305,7 +285,6 @@ fn gpu_init() -> Result<GpuState, String> {
         resident_f16: std::collections::HashMap::new(),
         resident_f32: std::collections::HashMap::new(),
         f32_pool: std::collections::HashMap::new(),
-        u16_pool: std::collections::HashMap::new(),
     })
 }
 
