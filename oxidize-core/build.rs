@@ -20,6 +20,38 @@ fn main() {
             println!("cargo:rustc-link-search=native={}", lib64.display());
             println!("cargo:rustc-link-lib=dylib=cudart");
         }
+
+        // Compile CUDA kernels to PTX at build time so the Rust backend loads
+        // fresh, forward-compatible PTX instead of a stale checked-in file.
+        let nvcc = cuda_root.join("bin").join("nvcc");
+        if nvcc.is_file() {
+            let out_dir = env::var_os("OUT_DIR").map(PathBuf::from).unwrap_or_default();
+            let ptx_path = out_dir.join("gemv_f32.ptx");
+            let cu_path = Path::new("kernels/gemv_f32.cu");
+            println!("cargo:rerun-if-changed={}", cu_path.display());
+            let status = std::process::Command::new(&nvcc)
+                .args(&[
+                    "-ptx",
+                    "-O3",
+                    "--use_fast_math",
+                    "-arch=sm_52",
+                ])
+                .arg(cu_path)
+                .arg("-o")
+                .arg(&ptx_path)
+                .status();
+            match status {
+                Ok(s) if s.success() => {
+                    println!("cargo:rustc-env=OXIDIZE_CUDA_PTX={}", ptx_path.display());
+                }
+                Ok(s) => {
+                    eprintln!("warning: nvcc PTX compilation failed with status {}", s);
+                }
+                Err(e) => {
+                    eprintln!("warning: failed to run nvcc: {}", e);
+                }
+            }
+        }
     }
 
     if detect_metal_available() {
