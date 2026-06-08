@@ -555,87 +555,40 @@ pub fn gemv_quantized_cuda(
             gpu.resident_f16.insert(key, weight);
         }
 
-        let matrix_ptr = gpu
+        let matrix_device = gpu
             .resident_f16
             .get(&key)
-            .expect("weight just dequantized into resident cache")
-            .as_device_ptr()
-            .as_raw();
+            .expect("weight just dequantized into resident cache");
 
-        // Upload input vector to GPU (pooled buffer) then convert f32 -> f16.
-        let mut vector_device = gpu.get_f32_buffer(cols).map_err(stringify)?;
-        vector_device.copy_from(vector).map_err(stringify)?;
-        let vector_f16 = gpu.get_u16_buffer(cols).map_err(stringify)?;
-        {
-            let block_size = 256_u32;
-            let grid_size = (cols as u32).div_ceil(block_size);
-            let function = gpu.module.get_function("f32_to_f16_kernel").map_err(stringify)?;
-            let stream = &gpu.stream;
-            unsafe {
-                cust::launch!(
-                    function<<<grid_size, block_size, 0, stream>>>(
-                        vector_device.as_device_ptr(),
-                        vector_f16.as_device_ptr(),
-                        cols as u32
-                    )
-                )
-                .map_err(stringify)?;
-            }
-        }
-
-        // Allocate f16 output buffer (pooled).
-        let output_f16 = gpu.get_u16_buffer(rows).map_err(stringify)?;
-
-        // cuBLAS Hgemm: treat vector as a cols×1 matrix, result is rows×1.
-        let alpha_half = cublas_sys::__half { x: 0x3C00 }; // 1.0 in f16
-        let beta_half = cublas_sys::__half { x: 0x0000 };  // 0.0 in f16
-
-        let status = unsafe {
-            cublas_sys::cublasHgemm(
-                gpu.cublas,
-                cublas_sys::cublasOperation_t::CUBLAS_OP_T,
-                cublas_sys::cublasOperation_t::CUBLAS_OP_N,
-                rows_i32,
-                1,
-                cols_i32,
-                &alpha_half,
-                matrix_ptr as *const cublas_sys::__half,
-                cols_i32,
-                vector_f16.as_device_ptr().as_raw() as *const cublas_sys::__half,
-                cols_i32,
-                &beta_half,
-                output_f16.as_device_ptr().as_raw() as *mut cublas_sys::__half,
-                rows_i32,
-            )
-        };
-        if status != cublas_sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS {
-            return Err(format!("cublasHgemm failed with status {status:?}"));
-        }
-
-        // Convert output f16 -> f32 on GPU into a temp device buffer, then copy to host.
+        // Upload vector (pooled buffer reused when size matches).
+        let vector_device = cust::memory::DeviceBuffer::from_slice(vector).map_err(stringify)?;
         let output_device = gpu.get_f32_buffer(rows).map_err(stringify)?;
-        {
-            let block_size = 256_u32;
-            let grid_size = (rows as u32).div_ceil(block_size);
-            let function = gpu.module.get_function("f16_to_f32_kernel").map_err(stringify)?;
-            let stream = &gpu.stream;
-            unsafe {
-                cust::launch!(
-                    function<<<grid_size, block_size, 0, stream>>>(
-                        output_f16.as_device_ptr(),
-                        output_device.as_device_ptr(),
-                        rows as u32
-                    )
+
+        // Use the custom f16 GEMV kernel (not cuBLAS Hgemm) because the kernel
+        // accumulates dot-products in f32 precision before writing f32 output.
+        // cuBLAS Hgemm accumulates in f16, which causes unacceptable numerical
+        // drift for LLM inference.
+        let block_size = 256_u32;
+        let grid_size = rows_u32.saturating_mul(32).div_ceil(block_size);
+        let function = gpu
+            .module
+            .get_function(GEMV_F16_KERNEL_NAME)
+            .map_err(stringify)?;
+        let stream = &gpu.stream;
+        unsafe {
+            cust::launch!(
+                function<<<grid_size, block_size, 0, stream>>>(
+                    matrix_device.as_device_ptr(),
+                    vector_device.as_device_ptr(),
+                    output_device.as_device_ptr(),
+                    rows_u32,
+                    cols_u32
                 )
-                .map_err(stringify)?;
-            }
+            )
+            .map_err(stringify)?;
         }
 
         output_device.copy_to(output).map_err(stringify)?;
-
-        gpu.return_f32_buffer(vector_device);
-        gpu.return_u16_buffer(vector_f16);
-        gpu.return_u16_buffer(output_f16);
         gpu.return_f32_buffer(output_device);
         Ok(())
     })
