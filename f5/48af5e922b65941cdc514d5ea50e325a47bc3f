@@ -1,0 +1,27 @@
+oxidize-core/src/backends/cuda.rs
+  s_1330dccb364bc7::t_ca6f36ee33281f 3-5,180-206,209-239,242-329,341-342,345-346,350-386,388-398,480-512,515-516,519-520,523-556,558-562,566-574,576-606,608-612,615-623,625-631,633,635-636,638-640,702-720,722-731,733,745,747-755,822-824,846-848
+  s_1330dccb364bc7::t_22c11b28444ea5 563-565,575
+  s_1330dccb364bc7::t_948595b168edd1 208
+  s_1330dccb364bc7::t_85d604580e0942 613-614,624,632,634,637
+oxidize-core/kernels/gemv_f32.cu
+  s_1330dccb364bc7::t_8ba258a7a6e724 1-167
+  s_1330dccb364bc7::t_66d90b8dc3ca71 168-189
+oxidize-core/build.rs
+  s_1330dccb364bc7::t_1cc1929a2cacb9 23-54
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.3",
+  "base_commit_sha": "f548af5e922b65941cdc514d5ea50e325a47bc3f",
+  "prompts": {},
+  "sessions": {
+    "s_1330dccb364bc7": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_1591f6c3cffeJjEJP6ngXiqODO",
+        "model": "k2p6"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
