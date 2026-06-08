@@ -1270,15 +1270,35 @@ pub fn gemv_quantized_f32(
 ) -> Result<(), GemvError> {
     #[cfg(feature = "cuda")]
     if crate::cuda::cuda_build_info().detected_at_build {
-        return crate::cuda::gemv_quantized_cuda(
-            quantization,
-            quantized_matrix,
-            rows,
-            cols,
-            vector,
-            output,
-        )
-        .map_err(|err| GemvError::Cuda(format!("{err:?}")));
+        // Fast path: on-the-fly kernels that never materialize f16.
+        // These stream quantized weights directly and are essential for
+        // layer-by-layer inference on 4GB GPUs.
+        match quantization {
+            GgufQuantizationType::Q8_0 => {
+                return crate::cuda::gemv_q8_0_direct_cuda(
+                    quantized_matrix, rows, cols, vector, output,
+                )
+                .map_err(|err| GemvError::Cuda(format!("{err:?}")));
+            }
+            GgufQuantizationType::Q4_0 => {
+                return crate::cuda::gemv_q4_0_direct_cuda(
+                    quantized_matrix, rows, cols, vector, output,
+                )
+                .map_err(|err| GemvError::Cuda(format!("{err:?}")));
+            }
+            _ => {
+                // Fall back to dequant-to-f16 path for other types.
+                return crate::cuda::gemv_quantized_cuda(
+                    quantization,
+                    quantized_matrix,
+                    rows,
+                    cols,
+                    vector,
+                    output,
+                )
+                .map_err(|err| GemvError::Cuda(format!("{err:?}")));
+            }
+        }
     }
 
     match quantization {
