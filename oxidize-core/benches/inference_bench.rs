@@ -82,7 +82,7 @@ fn bench_model(
 ) -> Duration {
     // Random weights
     let mut tok_emb = vec![0.0_f32; vocab * h];
-    let mut norm_w = vec![1.0_f32; h];
+    let norm_w = vec![1.0_f32; h];
     let mut lm_head = vec![0.0_f32; vocab * h];
     let mut attn_q = vec![0.0_f32; layers * h * h];
     let mut attn_k = vec![0.0_f32; layers * h * h];
@@ -108,6 +108,7 @@ fn bench_model(
 
     let mut x_normed = vec![0.0_f32; h];
     let mut logits = vec![0.0_f32; vocab];
+    let mut probs = vec![0.0_f32; vocab];
 
     // Warmup
     x.copy_from_slice(&tok_emb[token_id * h..(token_id + 1) * h]);
@@ -128,7 +129,7 @@ fn bench_model(
     }
     rms_norm(&x, &norm_w, 1e-5, &mut x_normed);
     gemv(vocab, h, &lm_head, &x_normed, &mut logits);
-    softmax(&logits, &mut logits);
+    softmax(&logits, &mut probs);
 
     // Benchmark
     let start = Instant::now();
