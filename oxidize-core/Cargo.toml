@@ -67,3 +67,7 @@ harness = false
 [[bench]]
 name = "inference_bench"
 harness = false
+
+[[bench]]
+name = "layer_bench"
+harness = false
