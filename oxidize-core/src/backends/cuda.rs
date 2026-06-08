@@ -178,6 +178,10 @@ impl From<cust::error::CudaError> for GemmCudaError {
 pub const GEMV_KERNEL_NAME: &str = "gemv_f32_kernel";
 pub const GEMV_Q8_0_KERNEL_NAME: &str = "gemv_q8_0_f32_kernel";
 pub const GEMV_F16_KERNEL_NAME: &str = "gemv_f16_kernel";
+/// On-the-fly Q8_0 GEMV (no f16 materialization).
+pub const GEMV_Q8_0_DIRECT_KERNEL_NAME: &str = "gemv_q8_0_kernel";
+/// On-the-fly Q4_0 GEMV (no f16 materialization).
+pub const GEMV_Q4_0_DIRECT_KERNEL_NAME: &str = "gemv_q4_0_kernel";
 
 /// Whether [`gemv_quantized_cuda`] has a GPU dequant kernel for this type.
 /// Callers should fall back to the CPU quantized path when this is `false`.
@@ -636,6 +640,157 @@ pub fn gemv_f32_transposed_cuda(
 
         output_device.copy_to(output).map_err(stringify)?;
         gpu.return_f32_buffer(output_device);
+        Ok(())
+    })
+    .map_err(GemvCudaError::Cuda)
+}
+
+// ---------------------------------------------------------------------------
+// On-the-fly quantized GEMV (no f16 materialization)
+//
+// These paths keep weights in their compressed form on the GPU and
+// dequantize inside the GEMV kernel one block at a time.  This is the
+// key to fitting 70B models on 4GB GPUs:
+//   Q8_0: 1.06 bytes/param  -> 70B = ~74 GB in CPU RAM
+//   Q4_0: 0.56 bytes/param  -> 70B = ~39 GB in CPU RAM
+// Each layer (~2-4 GB compressed) is streamed to GPU, computed, then
+// evicted — only activations stay resident.
+// ---------------------------------------------------------------------------
+
+/// Q8_0 on-the-fly GEMV: read quantized blocks [scale_f16 + 32 int8]
+/// directly in the dot-product loop.  No dequantization pass.
+#[cfg(feature = "cuda")]
+pub fn gemv_q8_0_direct_cuda(
+    quantized_matrix: &[u8],
+    rows: usize,
+    cols: usize,
+    vector: &[f32],
+    output: &mut [f32],
+) -> Result<(), GemvCudaError> {
+    validate_q8_0_gemv_dims(quantized_matrix, rows, cols, vector, output)?;
+
+    let rows_u32 = u32::try_from(rows).map_err(|_| GemvCudaError::InvalidOutputLength {
+        expected: u32::MAX as usize,
+        actual: rows,
+    })?;
+    let cols_u32 = u32::try_from(cols).map_err(|_| GemvCudaError::InvalidVectorLength {
+        expected: u32::MAX as usize,
+        actual: cols,
+    })?;
+
+    with_gpu(|gpu| {
+        // Upload quantized weights (compressed, small transfer).
+        let matrix_device =
+            cust::memory::DeviceBuffer::from_slice(quantized_matrix).map_err(stringify)?;
+        let vector_device =
+            cust::memory::DeviceBuffer::from_slice(vector).map_err(stringify)?;
+        let output_device =
+            cust::memory::DeviceBuffer::<f32>::zeroed(rows).map_err(stringify)?;
+
+        let block_size = 256_u32;
+        let grid_size = rows_u32.saturating_mul(32).div_ceil(block_size);
+        let function = gpu
+            .module
+            .get_function(GEMV_Q8_0_DIRECT_KERNEL_NAME)
+            .map_err(stringify)?;
+        let stream = &gpu.stream;
+        unsafe {
+            cust::launch!(
+                function<<<grid_size, block_size, 0, stream>>>(
+                    matrix_device.as_device_ptr(),
+                    vector_device.as_device_ptr(),
+                    output_device.as_device_ptr(),
+                    rows_u32,
+                    cols_u32
+                )
+            )
+            .map_err(stringify)?;
+        }
+        output_device.copy_to(output).map_err(stringify)?;
+        Ok(())
+    })
+    .map_err(GemvCudaError::Cuda)
+}
+
+/// Q4_0 on-the-fly GEMV: read 18-byte blocks [scale_f16 + 16 bytes of
+/// nibbles] directly.  Only 0.56 bytes per parameter.
+#[cfg(feature = "cuda")]
+pub fn gemv_q4_0_direct_cuda(
+    quantized_matrix: &[u8],
+    rows: usize,
+    cols: usize,
+    vector: &[f32],
+    output: &mut [f32],
+) -> Result<(), GemvCudaError> {
+    const QK4_0: usize = 32;
+    const BLOCK_Q4_0_SIZE: usize = 2 + 16; // f16 scale + 16 nibbles
+
+    if !cols.is_multiple_of(QK4_0) {
+        return Err(GemvCudaError::InvalidVectorLength {
+            expected: cols.div_ceil(QK4_0) * QK4_0,
+            actual: cols,
+        });
+    }
+    let blocks_per_row = cols / QK4_0;
+    let expected_matrix_len = rows
+        .saturating_mul(blocks_per_row)
+        .saturating_mul(BLOCK_Q4_0_SIZE);
+    if quantized_matrix.len() != expected_matrix_len {
+        return Err(GemvCudaError::InvalidMatrixLength {
+            expected: expected_matrix_len,
+            actual: quantized_matrix.len(),
+        });
+    }
+    if vector.len() != cols {
+        return Err(GemvCudaError::InvalidVectorLength {
+            expected: cols,
+            actual: vector.len(),
+        });
+    }
+    if output.len() != rows {
+        return Err(GemvCudaError::InvalidOutputLength {
+            expected: rows,
+            actual: output.len(),
+        });
+    }
+
+    let rows_u32 = u32::try_from(rows).map_err(|_| GemvCudaError::InvalidOutputLength {
+        expected: u32::MAX as usize,
+        actual: rows,
+    })?;
+    let cols_u32 = u32::try_from(cols).map_err(|_| GemvCudaError::InvalidVectorLength {
+        expected: u32::MAX as usize,
+        actual: cols,
+    })?;
+
+    with_gpu(|gpu| {
+        let matrix_device =
+            cust::memory::DeviceBuffer::from_slice(quantized_matrix).map_err(stringify)?;
+        let vector_device =
+            cust::memory::DeviceBuffer::from_slice(vector).map_err(stringify)?;
+        let output_device =
+            cust::memory::DeviceBuffer::<f32>::zeroed(rows).map_err(stringify)?;
+
+        let block_size = 256_u32;
+        let grid_size = rows_u32.saturating_mul(32).div_ceil(block_size);
+        let function = gpu
+            .module
+            .get_function(GEMV_Q4_0_DIRECT_KERNEL_NAME)
+            .map_err(stringify)?;
+        let stream = &gpu.stream;
+        unsafe {
+            cust::launch!(
+                function<<<grid_size, block_size, 0, stream>>>(
+                    matrix_device.as_device_ptr(),
+                    vector_device.as_device_ptr(),
+                    output_device.as_device_ptr(),
+                    rows_u32,
+                    cols_u32
+                )
+            )
+            .map_err(stringify)?;
+        }
+        output_device.copy_to(output).map_err(stringify)?;
         Ok(())
     })
     .map_err(GemvCudaError::Cuda)
