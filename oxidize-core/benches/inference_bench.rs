@@ -4,12 +4,12 @@ fn gemv(rows: usize, cols: usize, matrix: &[f32], vector: &[f32], output: &mut [
     oxidize_core::tensor::gemv_f32(matrix, rows, cols, vector, output).unwrap();
 }
 
-fn rms_norm(x: &mut [f32], weight: &[f32], eps: f32) {
-    oxidize_core::tensor::rms_norm_f32(x, weight, eps);
+fn rms_norm(input: &[f32], weight: &[f32], eps: f32, output: &mut [f32]) {
+    oxidize_core::tensor::rms_norm_f32(input, weight, eps, output).unwrap();
 }
 
-fn softmax(x: &mut [f32]) {
-    oxidize_core::tensor::softmax_last_axis_f32(x);
+fn softmax(input: &[f32], output: &mut [f32]) {
+    oxidize_core::tensor::softmax_f32(input, output).unwrap();
 }
 
 fn swiglu(gate: &mut [f32], up: &[f32]) {
@@ -47,9 +47,10 @@ fn layer_forward(
     for i in 0..h {
         qk[0] += q[i] * k[i] * scale;
     }
-    softmax(&mut qk);
+    let mut qk_out = vec![0.0_f32; 1];
+    softmax(&qk, &mut qk_out);
     for i in 0..h {
-        attn_out[i] = v[i] * qk[0];
+        attn_out[i] = v[i] * qk_out[0];
     }
 
     gemv(h, h, attn_o_w, &attn_out, scratch);
@@ -105,9 +106,13 @@ fn bench_model(
     let mut x = vec![0.0_f32; h];
     let mut scratch = vec![0.0_f32; h];
 
+    let mut x_normed = vec![0.0_f32; h];
+    let mut logits = vec![0.0_f32; vocab];
+
     // Warmup
     x.copy_from_slice(&tok_emb[token_id * h..(token_id + 1) * h]);
-    rms_norm(&mut x, &norm_w, 1e-5);
+    rms_norm(&x, &norm_w, 1e-5, &mut x_normed);
+    x.copy_from_slice(&x_normed);
     for l in 0..layers {
         layer_forward(
             &mut x, h, inter,
@@ -121,16 +126,16 @@ fn bench_model(
             &mut scratch,
         );
     }
-    rms_norm(&mut x, &norm_w, 1e-5);
-    let mut logits = vec![0.0_f32; vocab];
-    gemv(vocab, h, &lm_head, &x, &mut logits);
-    softmax(&mut logits);
+    rms_norm(&x, &norm_w, 1e-5, &mut x_normed);
+    gemv(vocab, h, &lm_head, &x_normed, &mut logits);
+    softmax(&logits, &mut logits);
 
     // Benchmark
     let start = Instant::now();
     for _ in 0..iters {
         x.copy_from_slice(&tok_emb[token_id * h..(token_id + 1) * h]);
-        rms_norm(&mut x, &norm_w, 1e-5);
+        rms_norm(&x, &norm_w, 1e-5, &mut x_normed);
+        x.copy_from_slice(&x_normed);
         for l in 0..layers {
             layer_forward(
                 &mut x, h, inter,
@@ -144,8 +149,8 @@ fn bench_model(
                 &mut scratch,
             );
         }
-        rms_norm(&mut x, &norm_w, 1e-5);
-        gemv(vocab, h, &lm_head, &x, &mut logits);
+        rms_norm(&x, &norm_w, 1e-5, &mut x_normed);
+        gemv(vocab, h, &lm_head, &x_normed, &mut logits);
     }
     start.elapsed()
 }
