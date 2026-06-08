@@ -218,6 +218,41 @@ const GEMV_F32_PTX: &str = include_str!(concat!(env!("OUT_DIR"), "/gemv_f32.ptx"
 // resident in VRAM so they are uploaded a single time instead of per token.
 // ---------------------------------------------------------------------------
 
+/// Opaque handle used to tag a group of weight matrices as belonging to the
+/// same model layer.  The inference engine calls [`preload_layer`] before a
+/// forward pass and [`evict_layer`] when the layer is no longer needed.
+pub type LayerId = usize;
+
+/// Configuration for layer-by-layer VRAM management (AirLLM-style).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CudaLayerConfig {
+    /// Maximum number of layers to keep resident in VRAM at once.
+    /// 0 = unlimited (default, loads all layers).
+    pub max_resident_layers: usize,
+    /// Maximum VRAM bytes to use for weight caching.
+    /// 0 = unlimited (default).
+    pub max_vram_bytes: usize,
+}
+
+impl Default for CudaLayerConfig {
+    fn default() -> Self {
+        Self {
+            max_resident_layers: 0,
+            max_vram_bytes: 0,
+        }
+    }
+}
+
+#[cfg(feature = "cuda")]
+struct LayerEntry {
+    /// Pointer keys of f32 weights owned by this layer.
+    f32_keys: Vec<(usize, usize)>,
+    /// Pointer keys of f16 weights owned by this layer.
+    f16_keys: Vec<(usize, usize)>,
+    /// Approximate bytes consumed by this layer's device buffers.
+    bytes: usize,
+}
+
 #[cfg(feature = "cuda")]
 struct GpuState {
     // Held to keep the CUDA context current for this thread; never read.
@@ -234,7 +269,14 @@ struct GpuState {
     resident_f32: std::collections::HashMap<(usize, usize), cust::memory::DeviceBuffer<f32>>,
     /// Pool of reusable f32 device buffers keyed by length.
     f32_pool: std::collections::HashMap<usize, Vec<cust::memory::DeviceBuffer<f32>>>,
-
+    /// Layer-by-layer VRAM management.
+    layer_config: CudaLayerConfig,
+    /// Which layers are currently resident and in what order (front = MRU).
+    layer_lru: std::collections::VecDeque<LayerId>,
+    /// Mapping from layer id to the weight keys it owns.
+    layer_map: std::collections::HashMap<LayerId, LayerEntry>,
+    /// Current bytes used by resident weights (excludes pools / scratch).
+    resident_bytes: usize,
 }
 
 #[cfg(feature = "cuda")]
@@ -256,6 +298,55 @@ impl GpuState {
     ) {
         let len = buf.len();
         self.f32_pool.entry(len).or_default().push(buf);
+    }
+
+    /// Ensure the given layer is marked as most-recently-used, evicting LRU
+    /// layers if we are over the configured budget.
+    fn touch_layer(&mut self, layer: LayerId) {
+        if self.layer_config.max_resident_layers == 0 && self.layer_config.max_vram_bytes == 0 {
+            return; // unlimited
+        }
+        // Remove from current position if present.
+        if let Some(pos) = self.layer_lru.iter().position(|&id| id == layer) {
+            self.layer_lru.remove(pos);
+        }
+        self.layer_lru.push_back(layer);
+        self.enforce_budget();
+    }
+
+    fn enforce_budget(&mut self) {
+        let max_layers = self.layer_config.max_resident_layers;
+        let max_bytes = self.layer_config.max_vram_bytes;
+
+        loop {
+            let over_layer_limit = max_layers > 0 && self.layer_lru.len() > max_layers;
+            let over_byte_limit = max_bytes > 0 && self.resident_bytes > max_bytes;
+            if !over_layer_limit && !over_byte_limit {
+                break;
+            }
+            if let Some(evict_id) = self.layer_lru.pop_front() {
+                self.evict_layer_internal(evict_id);
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn evict_layer_internal(&mut self, layer: LayerId) {
+        if let Some(entry) = self.layer_map.remove(&layer) {
+            for key in &entry.f32_keys {
+                if let Some(buf) = self.resident_f32.remove(key) {
+                    self.resident_bytes -= buf.len() * std::mem::size_of::<f32>();
+                    drop(buf);
+                }
+            }
+            for key in &entry.f16_keys {
+                if let Some(buf) = self.resident_f16.remove(key) {
+                    self.resident_bytes -= buf.len() * std::mem::size_of::<u16>();
+                    drop(buf);
+                }
+            }
+        }
     }
 }
 
@@ -285,6 +376,10 @@ fn gpu_init() -> Result<GpuState, String> {
         resident_f16: std::collections::HashMap::new(),
         resident_f32: std::collections::HashMap::new(),
         f32_pool: std::collections::HashMap::new(),
+        layer_config: CudaLayerConfig::default(),
+        layer_lru: std::collections::VecDeque::new(),
+        layer_map: std::collections::HashMap::new(),
+        resident_bytes: 0,
     })
 }
 
@@ -305,6 +400,84 @@ fn with_gpu<R>(f: impl FnOnce(&mut GpuState) -> Result<R, String>) -> Result<R, 
 #[cfg(feature = "cuda")]
 fn stringify<E: std::fmt::Display>(error: E) -> String {
     error.to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Layer-by-layer VRAM management public API
+// ---------------------------------------------------------------------------
+
+/// Configure the layer cache budget.  Must be called before any kernels run.
+#[cfg(feature = "cuda")]
+pub fn set_layer_config(config: CudaLayerConfig) -> Result<(), String> {
+    with_gpu(|gpu| {
+        gpu.layer_config = config;
+        gpu.enforce_budget();
+        Ok(())
+    })
+}
+
+/// Mark a layer as needed and upload its weights if they are not already
+/// resident.  Evicts LRU layers when over budget.
+#[cfg(feature = "cuda")]
+pub fn preload_layer(
+    layer: LayerId,
+    f32_weights: &[(&[f32], usize, usize)],
+    f16_weights: &[(&[u8], usize, usize)],
+) -> Result<(), String> {
+    with_gpu(|gpu| {
+        if gpu.layer_map.contains_key(&layer) {
+            // Already resident — just bump to MRU.
+            gpu.touch_layer(layer);
+            return Ok(());
+        }
+
+        let mut entry = LayerEntry {
+            f32_keys: Vec::new(),
+            f16_keys: Vec::new(),
+            bytes: 0,
+        };
+
+        for (matrix, rows, cols) in f32_weights {
+            let key = (matrix.as_ptr() as usize, matrix.len());
+            if !gpu.resident_f32.contains_key(&key) {
+                let buf = cust::memory::DeviceBuffer::from_slice(*matrix).map_err(stringify)?;
+                entry.bytes += buf.len() * std::mem::size_of::<f32>();
+                gpu.resident_f32.insert(key, buf);
+            }
+            entry.f32_keys.push(key);
+        }
+
+        for (matrix, rows, cols) in f16_weights {
+            let key = (matrix.as_ptr() as usize, matrix.len());
+            if !gpu.resident_f16.contains_key(&key) {
+                let buf = cust::memory::DeviceBuffer::from_slice(*matrix).map_err(stringify)?;
+                entry.bytes += buf.len() * std::mem::size_of::<u16>();
+                gpu.resident_f16.insert(key, buf);
+            }
+            entry.f16_keys.push(key);
+        }
+
+        gpu.resident_bytes += entry.bytes;
+        gpu.layer_map.insert(layer, entry);
+        gpu.touch_layer(layer);
+        Ok(())
+    })
+}
+
+/// Explicitly evict a layer from VRAM, freeing its device buffers.
+#[cfg(feature = "cuda")]
+pub fn evict_layer(layer: LayerId) -> Result<(), String> {
+    with_gpu(|gpu| {
+        gpu.layer_lru.retain(|&id| id != layer);
+        gpu.evict_layer_internal(layer);
+        Ok(())
+    })
+}
+
+/// Return how many bytes of weight data are currently resident on the GPU.
+#[cfg(feature = "cuda")]
+pub fn resident_vram_bytes() -> usize {
+    with_gpu(|gpu| Ok(gpu.resident_bytes)).unwrap_or(0)
 }
 
 #[cfg(feature = "cuda")]
