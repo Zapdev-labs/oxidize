@@ -568,6 +568,8 @@ pub fn gemv_quantized_cuda(
         // accumulates dot-products in f32 precision before writing f32 output.
         // cuBLAS Hgemm accumulates in f16, which causes unacceptable numerical
         // drift for LLM inference.
+        let rows_u32 = rows_i32 as u32;
+        let cols_u32 = cols_i32 as u32;
         let block_size = 256_u32;
         let grid_size = rows_u32.saturating_mul(32).div_ceil(block_size);
         let function = gpu
