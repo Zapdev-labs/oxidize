@@ -30,6 +30,8 @@ func Run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 		return listCommand(args[1:], stdout)
 	case "serve":
 		return serveCommand(ctx, args[1:])
+	case "gpu-cluster":
+		return gpuClusterCommand(args[1:], stdout, stderr)
 	case "-h", "--help", "help":
 		printOllamaHelp(stdout)
 		return nil

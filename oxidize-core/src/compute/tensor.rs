@@ -1269,7 +1269,9 @@ pub fn gemv_quantized_f32(
     output: &mut [f32],
 ) -> Result<(), GemvError> {
     #[cfg(feature = "cuda")]
-    if crate::cuda::cuda_build_info().detected_at_build {
+    if crate::cuda::cuda_build_info().detected_at_build
+        && crate::cuda::supports_quantized_gpu(quantization)
+    {
         return crate::cuda::gemv_quantized_cuda(
             quantization,
             quantized_matrix,
