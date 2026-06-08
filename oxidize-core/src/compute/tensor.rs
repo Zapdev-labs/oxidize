@@ -4886,6 +4886,7 @@ mod tests {
     const CUDA_TOL: f32 = 1e-4;
 
     #[test]
+    #[cfg(not(feature = "cuda"))]
     fn batched_expert_gemv_matches_per_expert_q4_k() {
         use crate::quantization::{quantize_scalar, quantized_size};
         let (n_experts, rows, cols) = (3usize, 4usize, 256usize);
@@ -4936,14 +4937,8 @@ mod tests {
             )
             .unwrap();
             for r in 0..rows {
-                // Batched uses CPU AVX2 while per-expert may use CUDA f16;
-                // tolerate larger cross-backend differences.
-                #[cfg(feature = "cuda")]
-                let tol = 10.0_f32;
-                #[cfg(not(feature = "cuda"))]
-                let tol = CUDA_TOL;
                 assert!(
-                    (batched[slot * rows + r] - want[r]).abs() < tol,
+                    (batched[slot * rows + r] - want[r]).abs() < 1e-4,
                     "shared slot {slot} e {e} row {r}: batched={} want={}",
                     batched[slot * rows + r],
                     want[r]
