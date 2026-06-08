@@ -555,10 +555,12 @@ pub fn gemv_quantized_cuda(
             gpu.resident_f16.insert(key, weight);
         }
 
-        let matrix_device = gpu
+        let matrix_ptr = gpu
             .resident_f16
             .get(&key)
-            .expect("weight just dequantized into resident cache");
+            .expect("weight just dequantized into resident cache")
+            .as_device_ptr()
+            .as_raw();
 
         // Upload vector (pooled buffer reused when size matches).
         let vector_device = cust::memory::DeviceBuffer::from_slice(vector).map_err(stringify)?;
@@ -580,7 +582,7 @@ pub fn gemv_quantized_cuda(
         unsafe {
             cust::launch!(
                 function<<<grid_size, block_size, 0, stream>>>(
-                    matrix_device.as_device_ptr(),
+                    matrix_ptr,
                     vector_device.as_device_ptr(),
                     output_device.as_device_ptr(),
                     rows_u32,
