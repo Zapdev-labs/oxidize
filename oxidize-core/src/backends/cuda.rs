@@ -356,12 +356,12 @@ pub fn gemv_f32_cuda(
             let buffer = cust::memory::DeviceBuffer::from_slice(matrix).map_err(stringify)?;
             gpu.resident_f32.insert(key, buffer);
         }
-        let matrix_device = gpu.resident_f32.get(&key).unwrap();
+        let matrix_ptr = gpu.resident_f32.get(&key).unwrap().as_device_ptr().as_raw();
 
         // Upload vector (pooled buffer reused when size matches).
         let mut vector_device = gpu.get_f32_buffer(cols).map_err(stringify)?;
         vector_device.copy_from(vector).map_err(stringify)?;
-        let mut output_device = gpu.get_f32_buffer(rows).map_err(stringify)?;
+        let output_device = gpu.get_f32_buffer(rows).map_err(stringify)?;
 
         let alpha = 1.0_f32;
         let beta = 0.0_f32;
@@ -377,7 +377,7 @@ pub fn gemv_f32_cuda(
                 cols_i32,
                 rows_i32,
                 &alpha,
-                matrix_device.as_device_ptr().as_raw() as *const f32,
+                matrix_ptr as *const f32,
                 cols_i32,
                 vector_device.as_device_ptr().as_raw() as *const f32,
                 1,
@@ -565,7 +565,7 @@ pub fn gemv_quantized_cuda(
         // Upload input vector to GPU (pooled buffer) then convert f32 -> f16.
         let mut vector_device = gpu.get_f32_buffer(cols).map_err(stringify)?;
         vector_device.copy_from(vector).map_err(stringify)?;
-        let mut vector_f16 = gpu.get_u16_buffer(cols).map_err(stringify)?;
+        let vector_f16 = gpu.get_u16_buffer(cols).map_err(stringify)?;
         {
             let block_size = 256_u32;
             let grid_size = (cols as u32).div_ceil(block_size);
@@ -584,7 +584,7 @@ pub fn gemv_quantized_cuda(
         }
 
         // Allocate f16 output buffer (pooled).
-        let mut output_f16 = gpu.get_u16_buffer(rows).map_err(stringify)?;
+        let output_f16 = gpu.get_u16_buffer(rows).map_err(stringify)?;
 
         // cuBLAS Hgemm: treat vector as a cols×1 matrix, result is rows×1.
         let alpha_half = cublas_sys::__half { x: 0x3C00 }; // 1.0 in f16
@@ -613,7 +613,7 @@ pub fn gemv_quantized_cuda(
         }
 
         // Convert output f16 -> f32 on GPU into a temp device buffer, then copy to host.
-        let mut output_device = gpu.get_f32_buffer(rows).map_err(stringify)?;
+        let output_device = gpu.get_f32_buffer(rows).map_err(stringify)?;
         {
             let block_size = 256_u32;
             let grid_size = (rows as u32).div_ceil(block_size);
@@ -718,7 +718,7 @@ pub fn gemm_f32_cuda(
         }
         let right_ptr = gpu.resident_f32.get(&right_key).unwrap().as_device_ptr().as_raw();
 
-        let mut output_device =
+        let output_device =
             cust::memory::DeviceBuffer::<f32>::zeroed(output.len()).map_err(stringify)?;
 
         let alpha = 1.0_f32;
