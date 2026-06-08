@@ -3295,6 +3295,11 @@ pub fn gemv_f32_transposed(
             actual: output.len(),
         });
     }
+    #[cfg(feature = "cuda")]
+    if crate::cuda::cuda_build_info().detected_at_build {
+        return crate::cuda::gemv_f32_transposed_cuda(matrix, rows, cols, vector, output)
+            .map_err(|err| GemvError::Cuda(format!("{err:?}")));
+    }
     gemv_f32_transposed_cpu(matrix, rows, cols, vector, output);
     Ok(())
 }
