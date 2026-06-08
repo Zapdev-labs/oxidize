@@ -1,0 +1,21 @@
+oxidize-core/benches/gemv_bench.rs
+  s_1330dccb364bc7::t_119d4a2d3eae78 1-78
+oxidize-core/Cargo.toml
+  s_1330dccb364bc7::t_fac2f707afa2d2 62-65
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.3",
+  "base_commit_sha": "dfe8ff48c4ea6dae79e85ca84aef37df4ddb8972",
+  "prompts": {},
+  "sessions": {
+    "s_1330dccb364bc7": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_1591f6c3cffeJjEJP6ngXiqODO",
+        "model": "k2p6"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
