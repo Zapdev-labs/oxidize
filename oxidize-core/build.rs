@@ -30,12 +30,7 @@ fn main() {
             let cu_path = Path::new("kernels/gemv_f32.cu");
             println!("cargo:rerun-if-changed={}", cu_path.display());
             let status = std::process::Command::new(&nvcc)
-                .args(&[
-                    "-ptx",
-                    "-O3",
-                    "--use_fast_math",
-                    "-arch=sm_52",
-                ])
+                .args(["-ptx", "-O3", "--use_fast_math", "-arch=sm_52"])
                 .arg(cu_path)
                 .arg("-o")
                 .arg(&ptx_path)

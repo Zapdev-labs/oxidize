@@ -1210,18 +1210,74 @@ pub fn gemv_quantized_experts_f32(
                 &mut q8k[s * q8_stride..(s + 1) * q8_stride],
             );
         }
-        output.par_iter_mut().enumerate().for_each(|(i, out)| {
-            let slot = i / rows;
-            let row = i % rows;
-            let expert = selected[slot];
-            let row_start = expert * expert_bytes + row * row_bytes;
-            let rowb = &matrix[row_start..row_start + row_bytes];
-            let qs = if shared { 0 } else { slot };
-            let q8 = &q8k[qs * q8_stride..(qs + 1) * q8_stride];
-            // Safety: q4_k_q8_k_avx2_available() checked above; dispatcher picks
-            // the VNNI kernel when the runtime supports it.
-            *out = unsafe { q4_k_q8_k_row_dot(rowb, blocks_per_row, q8) };
-        });
+        // 4-row custom kernel: shares the Q8_K input across rows and runs 4
+        // independent accumulator chains to overlap DRAM latency. Chunks of 32
+        // never span an expert slot when 32 divides `rows`. VNNI machines keep
+        // their per-row VNNI kernel instead.
+        let use_x4 = cfg!(any(target_arch = "x86", target_arch = "x86_64"))
+            && !q4_k_q8_k_vnni_available()
+            && rows.is_multiple_of(32);
+        if use_x4 {
+            output
+                .par_chunks_mut(32)
+                .enumerate()
+                .for_each(|(chunk_idx, out_chunk)| {
+                    let i0 = chunk_idx * 32;
+                    let slot = i0 / rows;
+                    let row0 = i0 % rows;
+                    let expert = selected[slot];
+                    let qs = if shared { 0 } else { slot };
+                    let q8 = &q8k[qs * q8_stride..(qs + 1) * q8_stride];
+                    let mut r = 0;
+                    while r < out_chunk.len() {
+                        if r + 4 <= out_chunk.len() {
+                            let base = unsafe {
+                                matrix
+                                    .as_ptr()
+                                    .add(expert * expert_bytes + (row0 + r) * row_bytes)
+                            };
+                            let mut quad = [0.0_f32; 4];
+                            // Safety: avx2 verified by q4_k_q8_k_avx2_available();
+                            // rows stay inside this expert because 32 | rows.
+                            unsafe {
+                                q4_k_q8_k_row_dot_x4_avx2(
+                                    base,
+                                    row_bytes,
+                                    blocks_per_row,
+                                    q8,
+                                    &mut quad,
+                                )
+                            };
+                            out_chunk[r..r + 4].copy_from_slice(&quad);
+                            r += 4;
+                        } else {
+                            let row_start = expert * expert_bytes + (row0 + r) * row_bytes;
+                            let rowb = &matrix[row_start..row_start + row_bytes];
+                            out_chunk[r] = unsafe { q4_k_q8_k_row_dot(rowb, blocks_per_row, q8) };
+                            r += 1;
+                        }
+                    }
+                });
+            return Ok(());
+        }
+        // with_min_len keeps rayon from splitting into per-row tasks; each row
+        // dot is only ~1-3us, so fine splits drown in steal/join overhead.
+        output
+            .par_iter_mut()
+            .with_min_len(32)
+            .enumerate()
+            .for_each(|(i, out)| {
+                let slot = i / rows;
+                let row = i % rows;
+                let expert = selected[slot];
+                let row_start = expert * expert_bytes + row * row_bytes;
+                let rowb = &matrix[row_start..row_start + row_bytes];
+                let qs = if shared { 0 } else { slot };
+                let q8 = &q8k[qs * q8_stride..(qs + 1) * q8_stride];
+                // Safety: q4_k_q8_k_avx2_available() checked above; dispatcher picks
+                // the VNNI kernel when the runtime supports it.
+                *out = unsafe { q4_k_q8_k_row_dot(rowb, blocks_per_row, q8) };
+            });
         return Ok(());
     }
 
@@ -1233,15 +1289,19 @@ pub fn gemv_quantized_experts_f32(
         && is_x86_feature_detected!("fma")
     {
         let blocks_per_row = cols / QK_K;
-        output.par_iter_mut().enumerate().for_each(|(i, out)| {
-            let slot = i / rows;
-            let row = i % rows;
-            let expert = selected[slot];
-            let row_start = expert * expert_bytes + row * row_bytes;
-            let rowb = &matrix[row_start..row_start + row_bytes];
-            // Safety: avx2+fma checked above.
-            *out = unsafe { q6_k_row_dot_avx2(rowb, blocks_per_row, input_for(slot)) };
-        });
+        output
+            .par_iter_mut()
+            .with_min_len(32)
+            .enumerate()
+            .for_each(|(i, out)| {
+                let slot = i / rows;
+                let row = i % rows;
+                let expert = selected[slot];
+                let row_start = expert * expert_bytes + row * row_bytes;
+                let rowb = &matrix[row_start..row_start + row_bytes];
+                // Safety: avx2+fma checked above.
+                *out = unsafe { q6_k_row_dot_avx2(rowb, blocks_per_row, input_for(slot)) };
+            });
         return Ok(());
     }
 
@@ -1432,15 +1492,37 @@ fn gemv_q4_k_q8_k_fused(
         unsafe { q4_k_q8_k_row_dot(row, blocks_per_row, &q8k) }
     };
 
+    // 4-row custom kernel (AVX2 machines without VNNI): shares the Q8_K input
+    // across 4 weight rows and keeps 4 independent accumulator chains in
+    // flight so DRAM latency overlaps across row streams.
+    let use_x4 =
+        cfg!(any(target_arch = "x86", target_arch = "x86_64")) && !q4_k_q8_k_vnni_available();
+    let run_range = |out_range: &mut [f32], row0: usize| {
+        let mut r = 0;
+        while r < out_range.len() {
+            if use_x4 && r + 4 <= out_range.len() && row0 + r + 4 <= rows {
+                let base = unsafe { weights.as_ptr().add((row0 + r) * row_bytes) };
+                let mut quad = [0.0_f32; 4];
+                // Safety: avx2+fma verified before dispatch; rows are in range.
+                unsafe {
+                    q4_k_q8_k_row_dot_x4_avx2(base, row_bytes, blocks_per_row, &q8k, &mut quad)
+                };
+                out_range[r..r + 4].copy_from_slice(&quad);
+                r += 4;
+            } else {
+                out_range[r] = compute_row(row0 + r);
+                r += 1;
+            }
+        }
+    };
+
     if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
         output
-            .par_iter_mut()
+            .par_chunks_mut(32)
             .enumerate()
-            .for_each(|(row_idx, out)| *out = compute_row(row_idx));
+            .for_each(|(chunk_idx, out_chunk)| run_range(out_chunk, chunk_idx * 32));
     } else {
-        for (row_idx, out) in output.iter_mut().enumerate() {
-            *out = compute_row(row_idx);
-        }
+        run_range(output, 0);
     }
     Ok(())
 }
@@ -1642,11 +1724,21 @@ fn quantize_block_q8_k_scalar(block_in: &[f32], block_out: &mut [u8]) {
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn q4_k_q8_k_row_dot_avx2(row: &[u8], blocks_per_row: usize, q8k: &[u8]) -> f32 {
     let mask = _mm256_set1_epi8(0x0f);
-    let ones = _mm256_set1_epi16(1);
     let mut acc = 0.0_f32;
     for block_idx in 0..blocks_per_row {
         let w_ptr = row.as_ptr().wrapping_add(block_idx * BLOCK_Q4_K_SIZE);
         let q8_ptr = q8k.as_ptr().wrapping_add(block_idx * BLOCK_Q8_K_BYTES);
+
+        // Prefetch the weight stream ~4 blocks (576B) ahead: rows stream from
+        // DRAM (often the remote NUMA node here) and the OOO window alone does
+        // not hide that latency. 3 lines cover the 144B consumed per iteration.
+        // Prefetch hints never fault, so running past the row end is safe.
+        unsafe {
+            let ahead = w_ptr.wrapping_add(4 * BLOCK_Q4_K_SIZE).cast::<i8>();
+            _mm_prefetch::<{ _MM_HINT_T0 }>(ahead);
+            _mm_prefetch::<{ _MM_HINT_T0 }>(ahead.wrapping_add(64));
+            _mm_prefetch::<{ _MM_HINT_T0 }>(ahead.wrapping_add(128));
+        }
 
         let d_w = f16_le_to_f32([unsafe { *w_ptr }, unsafe { *w_ptr.add(1) }]);
         let dmin_w = f16_le_to_f32([unsafe { *w_ptr.add(2) }, unsafe { *w_ptr.add(3) }]);
@@ -1676,12 +1768,12 @@ unsafe fn q4_k_q8_k_row_dot_avx2(row: &[u8], blocks_per_row: usize, q8k: &[u8]) 
             let q8_high = unsafe { _mm256_loadu_si256(q8.add(g2 * 32) as *const __m256i) };
             let p16_low = _mm256_maddubs_epi16(q4_low, q8_low);
             let p16_high = _mm256_maddubs_epi16(q4_high, q8_high);
-            let p32_low = _mm256_madd_epi16(p16_low, ones);
-            let p32_high = _mm256_madd_epi16(p16_high, ones);
-            let s1_v = _mm256_set1_epi32(s1 as i32);
-            let s2_v = _mm256_set1_epi32(s2 as i32);
-            vec_pos = _mm256_add_epi32(vec_pos, _mm256_mullo_epi32(p32_low, s1_v));
-            vec_pos = _mm256_add_epi32(vec_pos, _mm256_mullo_epi32(p32_high, s2_v));
+            // madd(p16, set1_epi16(s)) == s * (p0 + p1) per i32 lane — identical
+            // to madd(p16, ones) * s, but avoids the slow mullo_epi32 (10c lat).
+            // No overflow: |p16| <= 2*15*127 = 3810, s <= 63 -> 240_030 << i32::MAX.
+            let p32_low = _mm256_madd_epi16(p16_low, _mm256_set1_epi16(s1 as i16));
+            let p32_high = _mm256_madd_epi16(p16_high, _mm256_set1_epi16(s2 as i16));
+            vec_pos = _mm256_add_epi32(vec_pos, _mm256_add_epi32(p32_low, p32_high));
 
             let bs1 = unsafe { read_q8_k_bsum(bsums, g1 * 2) } as i32
                 + unsafe { read_q8_k_bsum(bsums, g1 * 2 + 1) } as i32;
@@ -1694,6 +1786,104 @@ unsafe fn q4_k_q8_k_row_dot_avx2(row: &[u8], blocks_per_row: usize, q8k: &[u8]) 
         acc += d_w * d_q8 * pos_acc as f32 - dmin_w * d_q8 * min_acc as f32;
     }
     acc
+}
+
+/// Dot 4 consecutive weight rows against one shared Q8_K vector.
+///
+/// Per-row math is bit-identical to [`q4_k_q8_k_row_dot_avx2`] (same op
+/// sequence and accumulation order); the win is structural: the Q8_K input
+/// vectors and bsum pair-sums are loaded/computed once per block and reused by
+/// all 4 rows, and the 4 scalar accumulators form independent dependency
+/// chains so the out-of-order core can overlap DRAM (often remote-NUMA)
+/// latency across rows instead of stalling on one row's stream.
+///
+/// # Safety
+/// `rows_base` must point to 4 rows of `blocks_per_row` Q4_K blocks spaced
+/// `row_bytes` apart; `q8k` must hold `blocks_per_row` Q8_K blocks. Caller
+/// must have verified AVX2+FMA support.
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,fma")]
+#[allow(unsafe_op_in_unsafe_fn)]
+unsafe fn q4_k_q8_k_row_dot_x4_avx2(
+    rows_base: *const u8,
+    row_bytes: usize,
+    blocks_per_row: usize,
+    q8k: &[u8],
+    out: &mut [f32; 4],
+) {
+    let mask = _mm256_set1_epi8(0x0f);
+    let mut acc = [0.0_f32; 4];
+    for block_idx in 0..blocks_per_row {
+        let q8_ptr = q8k.as_ptr().add(block_idx * BLOCK_Q8_K_BYTES);
+        let d_q8 =
+            f32::from_le_bytes([*q8_ptr, *q8_ptr.add(1), *q8_ptr.add(2), *q8_ptr.add(3)]);
+        let q8 = q8_ptr.add(4);
+        let bsums = q8_ptr.add(4 + QK_K);
+
+        // Shared across all 4 rows: the 8 q8 sub-group vectors and the
+        // per-group-pair bsum sums (these depend only on the input vector).
+        let q8v = [
+            _mm256_loadu_si256(q8 as *const __m256i),
+            _mm256_loadu_si256(q8.add(32) as *const __m256i),
+            _mm256_loadu_si256(q8.add(64) as *const __m256i),
+            _mm256_loadu_si256(q8.add(96) as *const __m256i),
+            _mm256_loadu_si256(q8.add(128) as *const __m256i),
+            _mm256_loadu_si256(q8.add(160) as *const __m256i),
+            _mm256_loadu_si256(q8.add(192) as *const __m256i),
+            _mm256_loadu_si256(q8.add(224) as *const __m256i),
+        ];
+        let mut bs = [0_i32; 8];
+        for (g, b) in bs.iter_mut().enumerate() {
+            *b = read_q8_k_bsum(bsums, g * 2) as i32 + read_q8_k_bsum(bsums, g * 2 + 1) as i32;
+        }
+
+        for (r, acc_r) in acc.iter_mut().enumerate() {
+            let w_ptr = rows_base.add(r * row_bytes + block_idx * BLOCK_Q4_K_SIZE);
+            // Same prefetch policy as the single-row kernel, per stream.
+            let ahead = w_ptr.add(4 * BLOCK_Q4_K_SIZE).cast::<i8>();
+            _mm_prefetch::<{ _MM_HINT_T0 }>(ahead);
+            _mm_prefetch::<{ _MM_HINT_T0 }>(ahead.add(64));
+            _mm_prefetch::<{ _MM_HINT_T0 }>(ahead.add(128));
+
+            let d_w = f16_le_to_f32([*w_ptr, *w_ptr.add(1)]);
+            let dmin_w = f16_le_to_f32([*w_ptr.add(2), *w_ptr.add(3)]);
+            let scales = std::slice::from_raw_parts(w_ptr.add(4), 12);
+            let qs = w_ptr.add(16);
+
+            let mut vec_pos = _mm256_setzero_si256();
+            let mut min_acc: i32 = 0;
+            for gp in 0..4 {
+                let g1 = gp * 2;
+                let g2 = g1 + 1;
+                let (s1, ms1) = get_scale_min_k4(g1, scales);
+                let (s2, ms2) = get_scale_min_k4(g2, scales);
+                let packed = _mm256_loadu_si256(qs.add(gp * 32) as *const __m256i);
+                let q4_low = _mm256_and_si256(packed, mask);
+                let q4_high = _mm256_and_si256(_mm256_srli_epi16(packed, 4), mask);
+                let p16_low = _mm256_maddubs_epi16(q4_low, q8v[g1]);
+                let p16_high = _mm256_maddubs_epi16(q4_high, q8v[g2]);
+                let p32_low = _mm256_madd_epi16(p16_low, _mm256_set1_epi16(s1 as i16));
+                let p32_high = _mm256_madd_epi16(p16_high, _mm256_set1_epi16(s2 as i16));
+                vec_pos = _mm256_add_epi32(vec_pos, _mm256_add_epi32(p32_low, p32_high));
+                min_acc += ms1 as i32 * bs[g1];
+                min_acc += ms2 as i32 * bs[g2];
+            }
+            let pos_acc = hsum_i32_avx2(vec_pos);
+            *acc_r += d_w * d_q8 * pos_acc as f32 - dmin_w * d_q8 * min_acc as f32;
+        }
+    }
+    *out = acc;
+}
+
+#[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+unsafe fn q4_k_q8_k_row_dot_x4_avx2(
+    _rows_base: *const u8,
+    _row_bytes: usize,
+    _blocks_per_row: usize,
+    _q8k: &[u8],
+    _out: &mut [f32; 4],
+) {
+    unreachable!("x4 kernel is gated on x86 availability at call sites")
 }
 
 /// AVX-512 VNNI variant of [`q4_k_q8_k_row_dot_avx2`]. Uses `_mm512_dpbusd_epi32`
@@ -1772,7 +1962,6 @@ unsafe fn q4_k_q8_k_row_dot_chunk_avx2(
     out: &mut [f32],
 ) {
     debug_assert_eq!(out.len(), token_count);
-    let ones = _mm256_set1_epi16(1);
     let mask = _mm256_set1_epi8(0x0f);
 
     for block_idx in 0..blocks_per_row {
@@ -1800,16 +1989,18 @@ unsafe fn q4_k_q8_k_row_dot_chunk_avx2(
             q4_hi[gp] = _mm256_and_si256(_mm256_srli_epi16(packed, 4), mask);
         }
 
-        // Broadcast scales for vector mullo.
+        // Broadcast scales as i16 for madd_epi16: madd(p16, set1_epi16(s)) ==
+        // s * (p0 + p1) per i32 lane — identical to madd(p16, ones) * s but
+        // avoids the slow mullo_epi32. No overflow: |p16| <= 3810, s <= 63.
         let s_v = [
-            _mm256_set1_epi32(g_scales[0]),
-            _mm256_set1_epi32(g_scales[1]),
-            _mm256_set1_epi32(g_scales[2]),
-            _mm256_set1_epi32(g_scales[3]),
-            _mm256_set1_epi32(g_scales[4]),
-            _mm256_set1_epi32(g_scales[5]),
-            _mm256_set1_epi32(g_scales[6]),
-            _mm256_set1_epi32(g_scales[7]),
+            _mm256_set1_epi16(g_scales[0] as i16),
+            _mm256_set1_epi16(g_scales[1] as i16),
+            _mm256_set1_epi16(g_scales[2] as i16),
+            _mm256_set1_epi16(g_scales[3] as i16),
+            _mm256_set1_epi16(g_scales[4] as i16),
+            _mm256_set1_epi16(g_scales[5] as i16),
+            _mm256_set1_epi16(g_scales[6] as i16),
+            _mm256_set1_epi16(g_scales[7] as i16),
         ];
 
         for (token, out_value) in out.iter_mut().enumerate().take(token_count) {
@@ -1834,12 +2025,9 @@ unsafe fn q4_k_q8_k_row_dot_chunk_avx2(
                 let q8_high = unsafe { _mm256_loadu_si256(q8.add(g2 * 32) as *const __m256i) };
                 let p16_low = _mm256_maddubs_epi16(q4_lo[gp], q8_low);
                 let p16_high = _mm256_maddubs_epi16(q4_hi[gp], q8_high);
-                let p32_low = _mm256_madd_epi16(p16_low, ones);
-                let p32_high = _mm256_madd_epi16(p16_high, ones);
-                let scaled_low = _mm256_mullo_epi32(p32_low, s_v[g1]);
-                let scaled_high = _mm256_mullo_epi32(p32_high, s_v[g2]);
-                vec_pos = _mm256_add_epi32(vec_pos, scaled_low);
-                vec_pos = _mm256_add_epi32(vec_pos, scaled_high);
+                let scaled_low = _mm256_madd_epi16(p16_low, s_v[g1]);
+                let scaled_high = _mm256_madd_epi16(p16_high, s_v[g2]);
+                vec_pos = _mm256_add_epi32(vec_pos, _mm256_add_epi32(scaled_low, scaled_high));
             }
             let pos = unsafe { hsum_i32_avx2(vec_pos) };
 
@@ -2123,6 +2311,7 @@ fn gemv_q4_k_f32_fused(
     if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
         output
             .par_iter_mut()
+            .with_min_len(32)
             .enumerate()
             .for_each(|(row_idx, out)| *out = compute_row(row_idx));
     } else {
@@ -2405,6 +2594,7 @@ fn gemv_q2_k_f32_fused(
     if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
         output
             .par_iter_mut()
+            .with_min_len(32)
             .enumerate()
             .for_each(|(row_idx, out)| *out = compute_row(row_idx));
     } else {
@@ -2968,6 +3158,7 @@ fn gemv_q6_k_f32_fused(
     if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
         output
             .par_iter_mut()
+            .with_min_len(32)
             .enumerate()
             .for_each(|(row_idx, out)| *out = compute_row(row_idx));
     } else {
@@ -3100,6 +3291,7 @@ fn gemv_qk_f32_fused(
     if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
         output
             .par_iter_mut()
+            .with_min_len(32)
             .enumerate()
             .for_each(|(row_idx, out)| *out = compute_row(row_idx));
     } else {
@@ -3148,6 +3340,7 @@ fn gemv_q8_0_f32_fused(
     if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
         output
             .par_iter_mut()
+            .with_min_len(32)
             .enumerate()
             .for_each(|(row_idx, out)| *out = compute_row(row_idx));
     } else {
@@ -4912,6 +5105,95 @@ mod tests {
 
     #[test]
     #[cfg(not(feature = "cuda"))]
+    fn q4_k_x4_kernel_matches_single_row_paths() {
+        use crate::quantization::{quantize_scalar, quantized_size};
+        // rows multiple of 32 exercises the 4-row expert kernel; rows*cols
+        // above PARALLEL_GEMV_MIN_OPS exercises the parallel x4 gemv path.
+        let (n_experts, rows, cols) = (2usize, 64usize, 256usize);
+        let total = n_experts * rows * cols;
+        let mut bytes = vec![0u8; total * 4];
+        for i in 0..total {
+            let v = (((i * 13 + 11) % 103) as f32) / 51.0 - 1.0;
+            bytes[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
+        }
+        let q_size = quantized_size(GgufQuantizationType::Q4_K_M, total).unwrap();
+        let mut q = vec![0u8; q_size];
+        quantize_scalar(
+            GgufQuantizationType::F32,
+            GgufQuantizationType::Q4_K_M,
+            &bytes,
+            &mut q,
+        )
+        .unwrap();
+        let input: Vec<f32> = (0..cols)
+            .map(|i| (((i * 7 + 5) % 91) as f32) / 45.0 - 1.0)
+            .collect();
+
+        // Reference: per-row single dot via 1-row gemv calls.
+        let expert_bytes = q.len() / n_experts;
+        let row_bytes = expert_bytes / rows;
+        let mut want = vec![0.0f32; n_experts * rows];
+        for e in 0..n_experts {
+            for r in 0..rows {
+                let start = e * expert_bytes + r * row_bytes;
+                let mut out = [0.0f32];
+                gemv_quantized_f32(
+                    GgufQuantizationType::Q4_K_M,
+                    &q[start..start + row_bytes],
+                    1,
+                    cols,
+                    &input,
+                    &mut out,
+                )
+                .unwrap();
+                want[e * rows + r] = out[0];
+            }
+        }
+
+        // Expert path (x4 kernel when rows % 32 == 0). Exact equality: the x4
+        // kernel performs the identical op sequence per row.
+        let selected = [1usize, 0usize];
+        let mut batched = vec![0.0f32; selected.len() * rows];
+        gemv_quantized_experts_f32(
+            GgufQuantizationType::Q4_K_M,
+            &q,
+            n_experts,
+            &selected,
+            rows,
+            cols,
+            &input,
+            0,
+            &mut batched,
+        )
+        .unwrap();
+        for (slot, &e) in selected.iter().enumerate() {
+            for r in 0..rows {
+                assert_eq!(
+                    batched[slot * rows + r],
+                    want[e * rows + r],
+                    "expert x4: slot {slot} expert {e} row {r}"
+                );
+            }
+        }
+
+        // Single-vector gemv path on one expert's matrix (serial branch also
+        // routes through the x4 run_range helper).
+        let mut gemv_out = vec![0.0f32; rows];
+        gemv_quantized_f32(
+            GgufQuantizationType::Q4_K_M,
+            &q[..expert_bytes],
+            rows,
+            cols,
+            &input,
+            &mut gemv_out,
+        )
+        .unwrap();
+        for r in 0..rows {
+            assert_eq!(gemv_out[r], want[r], "gemv x4: row {r}");
+        }
+    }
+
+    #[test]
     fn batched_expert_gemv_matches_per_expert_q4_k() {
         use crate::quantization::{quantize_scalar, quantized_size};
         let (n_experts, rows, cols) = (3usize, 4usize, 256usize);
