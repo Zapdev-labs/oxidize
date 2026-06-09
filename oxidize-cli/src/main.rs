@@ -768,7 +768,8 @@ fn rewrite_serve_args(raw: Vec<OsString>) -> io::Result<Vec<OsString>> {
             }
             Some(
                 "--model" | "--backend" | "--max-tokens" | "--temperature" | "--top-p" | "--top-k"
-                | "--ctx-size" | "--threads" | "--kv-cache-dtype" | "--tokenizer-model",
+                | "--ctx-size" | "--threads" | "--kv-cache-dtype" | "--tokenizer-model"
+                | "--draft-model" | "--draft-tokens" | "--layer-cache" | "--ram-offload-threads",
             ) => {
                 rewritten.push(arg);
                 let Some(value) = args.next() else {
@@ -1263,7 +1264,7 @@ fn dflash_byte_smoke_tokenizer() -> LoadedTokenizer {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn generate_with_model<W: Write, M: Model>(
+fn generate_with_model<W: Write, M: Model + ?Sized>(
     prompt: &str,
     model: &mut M,
     tokenizer: &LoadedTokenizer,
@@ -1353,9 +1354,9 @@ fn generate_with_model<W: Write, M: Model>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn generate_with_dflash_draft<W: Write>(
+fn generate_with_dflash_draft<W: Write, M: Model + ?Sized>(
     prompt: &str,
-    target_model: &mut InferenceModel,
+    target_model: &mut M,
     draft_model: &mut oxidize_core::dflash::DFlashDraftModel,
     tokenizer: &LoadedTokenizer,
     max_tokens: usize,
@@ -1636,6 +1637,19 @@ fn server_args_from_cli(args: &Args) -> io::Result<oxidize_server::Args> {
         mesh: args.mesh,
         mesh_port: args.mesh_port,
         tokenizer_model: args.tokenizer_model.clone(),
+        draft_model: args.draft_model.clone(),
+        draft_tokens: args.draft_tokens,
+        kv_cache_dtype: match args.kv_cache_dtype {
+            KvCacheDType::F32 => oxidize_server::KvCacheDType::F32,
+            KvCacheDType::F16 => oxidize_server::KvCacheDType::F16,
+            KvCacheDType::Q8 => oxidize_server::KvCacheDType::Q8,
+            KvCacheDType::Q4 => oxidize_server::KvCacheDType::Q4,
+        },
+        threads: args
+            .threads
+            .filter(|threads| *threads > 0)
+            .unwrap_or(0),
+        ram_offload_threads: args.ram_offload_threads,
     })
 }
 
@@ -1724,10 +1738,27 @@ fn main() {
             .map(usize::from)
             .unwrap_or(8)
     };
-    if let Err(error) = rayon::ThreadPoolBuilder::new()
-        .num_threads(threads)
-        .build_global()
+    #[allow(unused_mut)]
+    let mut pool_builder = rayon::ThreadPoolBuilder::new().num_threads(threads);
+    #[cfg(target_os = "linux")]
     {
+        // Pin each rayon worker to one CPU (identity mapping over online
+        // CPUs). Without this the scheduler migrates workers between NUMA
+        // nodes mid-token, turning local DRAM streams into remote ones and
+        // defeating the hardware prefetcher. Disable with OXIDIZE_NO_PIN=1.
+        if std::env::var_os("OXIDIZE_NO_PIN").is_none() {
+            pool_builder = pool_builder.start_handler(|idx| unsafe {
+                let ncpu = libc::sysconf(libc::_SC_NPROCESSORS_ONLN);
+                if ncpu > 0 {
+                    let mut set: libc::cpu_set_t = std::mem::zeroed();
+                    libc::CPU_ZERO(&mut set);
+                    libc::CPU_SET(idx % ncpu as usize, &mut set);
+                    libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set);
+                }
+            });
+        }
+    }
+    if let Err(error) = pool_builder.build_global() {
         eprintln!("failed to set rayon thread pool: {error}");
         return;
     }
@@ -2021,15 +2052,35 @@ fn main() {
                         return;
                     }
 
-                    let use_mmap = true;
-                    let mut target_model =
-                        match InferenceModel::load_from_gguf(&mapped, config, use_mmap) {
-                            Ok(model) => model,
+                    let mut target_model: Box<dyn Model> = if args.layer_wise {
+                        match oxidize_core::layer_wise::LayerWiseModel::load_from_gguf(
+                            &mapped,
+                            config.clone(),
+                            args.layer_cache,
+                        ) {
+                            Ok(mut model) => {
+                                if let Err(error) = model.warm_layer_cache() {
+                                    eprintln!("failed to warm layer cache: {error}");
+                                    return;
+                                }
+                                Box::new(model)
+                            }
+                            Err(error) => {
+                                eprintln!("failed to load layer-wise target model: {error}");
+                                return;
+                            }
+                        }
+                    } else {
+                        match InferenceModel::load_from_gguf(&mapped, config.clone(), true) {
+                            Ok(model) => Box::new(model),
                             Err(error) => {
                                 eprintln!("failed to load target model weights: {error}");
                                 return;
                             }
-                        };
+                        }
+                    };
+                    let target_hidden_size = config.hidden_size;
+                    let target_layer_count = target_model.layer_count();
 
                     let draft_mapped = match loader.load(draft_model_path) {
                         Ok(mapped) => mapped,
@@ -2067,24 +2118,23 @@ fn main() {
                         );
                         return;
                     }
-                    let target_hidden_size = target_model.config_hidden_size();
                     let incompatible_hidden = draft_model.config.hidden_size != target_hidden_size;
                     let incompatible_layers = draft_model
                         .config
                         .target_layer_ids
                         .iter()
-                        .any(|&layer| layer >= target_model.layer_count());
+                        .any(|&layer| layer >= target_layer_count);
                     if incompatible_hidden || incompatible_layers {
                         eprintln!(
                             "DFlash draft is incompatible with target (draft_hidden={}, target_hidden={}, draft_target_layers={:?}, target_layers={}); falling back to target-only generation",
                             draft_model.config.hidden_size,
                             target_hidden_size,
                             draft_model.config.target_layer_ids,
-                            target_model.layer_count()
+                            target_layer_count
                         );
                         if let Err(error) = generate_with_model(
                             &args.prompt,
-                            &mut target_model,
+                            target_model.as_mut(),
                             &tokenizer,
                             args.max_tokens,
                             args.temperature,
@@ -2112,7 +2162,7 @@ fn main() {
                     );
                     if let Err(error) = generate_with_dflash_draft(
                         &args.prompt,
-                        &mut target_model,
+                        target_model.as_mut(),
                         &mut draft_model,
                         &tokenizer,
                         args.max_tokens,
@@ -2184,7 +2234,13 @@ fn main() {
                         config,
                         args.layer_cache,
                     ) {
-                        Ok(m) => Box::new(m),
+                        Ok(mut m) => {
+                            if let Err(error) = m.warm_layer_cache() {
+                                eprintln!("failed to warm layer cache: {error}");
+                                return;
+                            }
+                            Box::new(m)
+                        }
                         Err(error) => {
                             eprintln!("failed to load layer-wise model: {error}");
                             return;

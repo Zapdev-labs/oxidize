@@ -1320,6 +1320,118 @@ pub fn gemv_quantized_experts_f32(
     Ok(())
 }
 
+/// Fused gate+up expert GEMV: computes both MoE projections in ONE parallel
+/// region (instead of two), halving the fork/join + steal overhead of the two
+/// biggest per-layer dispatches during decode. `output` is `[2 * n_sel * rows]`
+/// with the gate results in the first half and up results in the second.
+///
+/// Falls back to two [`gemv_quantized_experts_f32`] calls whenever the fused
+/// fast-path conditions don't hold (non-Q4_K, rows not a multiple of 32, VNNI
+/// machines, mismatched matrix sizes).
+#[allow(clippy::too_many_arguments)]
+pub fn gemv_quantized_experts_gate_up_f32(
+    quantization: GgufQuantizationType,
+    gate_matrix: &[u8],
+    up_matrix: &[u8],
+    n_experts: usize,
+    selected: &[usize],
+    rows: usize,
+    cols: usize,
+    input: &[f32],
+    output: &mut [f32],
+) -> Result<(), GemvError> {
+    let n_sel = selected.len();
+    let half = n_sel * rows;
+    if output.len() != 2 * half {
+        return Err(GemvError::InvalidOutputLength {
+            expected: 2 * half,
+            actual: output.len(),
+        });
+    }
+    let fused_ok = matches!(
+        quantization,
+        GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M
+    ) && cols.is_multiple_of(QK_K)
+        && q4_k_q8_k_avx2_available()
+        && !q4_k_q8_k_vnni_available()
+        && rows.is_multiple_of(32)
+        && gate_matrix.len() == up_matrix.len()
+        && n_experts > 0
+        && !gate_matrix.is_empty();
+    if !fused_ok {
+        let (gate_out, up_out) = output.split_at_mut(half);
+        gemv_quantized_experts_f32(
+            quantization,
+            gate_matrix,
+            n_experts,
+            selected,
+            rows,
+            cols,
+            input,
+            0,
+            gate_out,
+        )?;
+        gemv_quantized_experts_f32(
+            quantization,
+            up_matrix,
+            n_experts,
+            selected,
+            rows,
+            cols,
+            input,
+            0,
+            up_out,
+        )?;
+        return Ok(());
+    }
+
+    let expert_bytes = gate_matrix.len() / n_experts;
+    let row_bytes = expert_bytes / rows.max(1);
+    let blocks_per_row = cols / QK_K;
+    let q8_stride = blocks_per_row * BLOCK_Q8_K_BYTES;
+    let mut q8k = vec![0_u8; q8_stride];
+    quantize_vector_q8_k_into(input, blocks_per_row, &mut q8k);
+    let q8k = &q8k[..];
+
+    // One region over both projections; 32 | rows guarantees a chunk never
+    // spans a projection or expert-slot boundary.
+    output
+        .par_chunks_mut(32)
+        .enumerate()
+        .for_each(|(chunk_idx, out_chunk)| {
+            let i0 = chunk_idx * 32;
+            let matrix = if i0 < half { gate_matrix } else { up_matrix };
+            let rem = i0 % half;
+            let slot = rem / rows;
+            let row0 = rem % rows;
+            let expert = selected[slot];
+            let mut r = 0;
+            while r < out_chunk.len() {
+                if r + 4 <= out_chunk.len() {
+                    let base = unsafe {
+                        matrix
+                            .as_ptr()
+                            .add(expert * expert_bytes + (row0 + r) * row_bytes)
+                    };
+                    let mut quad = [0.0_f32; 4];
+                    // Safety: avx2 verified above; 32 | rows keeps the quad
+                    // inside this expert's rows.
+                    unsafe {
+                        q4_k_q8_k_row_dot_x4_avx2(base, row_bytes, blocks_per_row, q8k, &mut quad)
+                    };
+                    out_chunk[r..r + 4].copy_from_slice(&quad);
+                    r += 4;
+                } else {
+                    let row_start = expert * expert_bytes + (row0 + r) * row_bytes;
+                    let rowb = &matrix[row_start..row_start + row_bytes];
+                    out_chunk[r] = unsafe { q4_k_q8_k_row_dot(rowb, blocks_per_row, q8k) };
+                    r += 1;
+                }
+            }
+        });
+    Ok(())
+}
+
 pub fn gemv_quantized_f32(
     quantization: GgufQuantizationType,
     quantized_matrix: &[u8],
@@ -5174,6 +5286,27 @@ mod tests {
                     "expert x4: slot {slot} expert {e} row {r}"
                 );
             }
+        }
+
+        // Fused gate+up region must match two separate expert GEMV calls
+        // exactly (same kernel per row). Reuse the matrix for both halves.
+        let mut fused = vec![0.0f32; 2 * selected.len() * rows];
+        gemv_quantized_experts_gate_up_f32(
+            GgufQuantizationType::Q4_K_M,
+            &q,
+            &q,
+            n_experts,
+            &selected,
+            rows,
+            cols,
+            &input,
+            &mut fused,
+        )
+        .unwrap();
+        let half = selected.len() * rows;
+        for j in 0..half {
+            assert_eq!(fused[j], batched[j], "fused gate j {j}");
+            assert_eq!(fused[half + j], batched[j], "fused up j {j}");
         }
 
         // Single-vector gemv path on one expert's matrix (serial branch also
