@@ -28,6 +28,14 @@ pub struct LayerWiseModel {
     kv_cache: KvCache,
     ssm_states: Vec<Vec<f32>>,
     ssm_conv_buffers: Vec<ConvHistoryRing>,
+    /// Number of tokens applied to the recurrent (GDN) state so far.
+    ssm_pos: usize,
+    /// Snapshots of (position, ssm_states, conv rings) for speculative
+    /// rollback: unlike the KV cache, recurrent state is not
+    /// position-addressable, so rewinding requires restoring a checkpoint.
+    /// Two entries are live per speculative round (the rollback target set at
+    /// the pre-verify rewind, plus the forward_many entry position).
+    ssm_checkpoints: Vec<(usize, Vec<Vec<f32>>, Vec<ConvHistoryRing>)>,
     cache: LayerCache,
 }
 
@@ -415,6 +423,21 @@ impl LayerWiseModel {
     /// linearly; 16 keeps scratch in the tens of MB for typical models.
     const FORWARD_WINDOW: usize = 16;
 
+    /// Record a recurrent-state checkpoint at `pos`, keeping at most the two
+    /// most recent distinct positions (one speculative round needs two: the
+    /// rollback target and the verify-window entry).
+    fn push_ssm_checkpoint(&mut self, pos: usize) {
+        self.ssm_checkpoints.retain(|(p, _, _)| *p != pos);
+        self.ssm_checkpoints.push((
+            pos,
+            self.ssm_states.clone(),
+            self.ssm_conv_buffers.clone(),
+        ));
+        if self.ssm_checkpoints.len() > 2 {
+            self.ssm_checkpoints.remove(0);
+        }
+    }
+
     /// Window size for batched forward; `OXIDIZE_WINDOW_BISECT=off` forces the
     /// per-token path (debugging / A-B reference).
     fn forward_window_size() -> usize {
@@ -581,6 +604,8 @@ impl LayerWiseModel {
             kv_cache,
             ssm_states,
             ssm_conv_buffers,
+            ssm_pos: 0,
+            ssm_checkpoints: Vec::new(),
             cache: LayerCache::new(effective_cache, layer_count),
         })
     }
@@ -983,6 +1008,7 @@ impl LayerWiseModel {
             );
         }
 
+        self.ssm_pos = pos + 1;
         Ok(logits)
     }
 
@@ -1254,6 +1280,7 @@ impl LayerWiseModel {
             nb,
         )
         .map_err(|e| ModelError::InferenceFailed(format!("output: {:?}", e)))?;
+        self.ssm_pos = start_pos + kk;
         Ok(needed
             .iter()
             .enumerate()
@@ -2043,10 +2070,34 @@ impl Model for LayerWiseModel {
                     *buffer = ConvHistoryRing::new(4, dim);
                 }
             }
+            self.ssm_pos = 0;
+            self.ssm_checkpoints.clear();
+        } else if consumed_tokens == self.ssm_pos {
+            // State already sits at the target position. Capture a checkpoint:
+            // the speculative loop rewinds here, forwards the pending token,
+            // verifies a draft window, then rolls back to this position.
+            self.push_ssm_checkpoint(consumed_tokens);
+        } else if let Some(idx) = self
+            .ssm_checkpoints
+            .iter()
+            .position(|(p, _, _)| *p == consumed_tokens)
+        {
+            // Speculative rollback: restore the recurrent state snapshot taken
+            // before the rejected draft window was processed.
+            let (_, states, bufs) = &self.ssm_checkpoints[idx];
+            self.ssm_states = states.clone();
+            self.ssm_conv_buffers = bufs.clone();
+            self.ssm_pos = consumed_tokens;
+        } else if self.ssm_states.iter().any(|s| s.len() > 1) {
+            // GDN model rewinding to a position we have no snapshot for: the
+            // recurrent state cannot be reconstructed. Warn instead of failing
+            // so non-speculative callers keep the (previous) best-effort
+            // behavior, but generation quality may degrade past this point.
+            eprintln!(
+                "layer-wise: rewind_to({consumed_tokens}) without a GDN checkpoint (state at {}); recurrent state may be stale",
+                self.ssm_pos
+            );
         }
-        // NOTE: mid-sequence rewinds (speculative rollback) cannot restore GDN
-        // state without checkpointing; that remains an open correctness gap for
-        // draft-model decoding on GDN architectures.
         self.kv_cache
             .rewind_to(position)
             .map_err(|e| ModelError::InferenceFailed(format!("{e:?}")))
@@ -2095,6 +2146,9 @@ impl Model for LayerWiseModel {
             });
         }
         let start_pos = session.consumed_tokens();
+        // forward_many is the speculative-verification entry point: checkpoint
+        // the recurrent state here so a rejected draft can rewind to start_pos.
+        self.push_ssm_checkpoint(start_pos);
         let window = Self::forward_window_size();
         let mut all_logits = Vec::with_capacity(tokens.len());
         let mut offset = 0;
