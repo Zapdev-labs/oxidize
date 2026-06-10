@@ -155,6 +155,10 @@ struct ConvHistoryRing {
 }
 
 impl ConvHistoryRing {
+    fn checksum(&self) -> f64 {
+        self.slots.iter().map(|v| *v as f64).sum::<f64>() + self.head as f64 * 1e-3 + self.len as f64 * 1e-6
+    }
+
     fn new(capacity: usize, dim: usize) -> Self {
         Self {
             slots: vec![0.0_f32; capacity.saturating_mul(dim)],
@@ -411,9 +415,34 @@ fn debug_vec(label: &str, x: &[f32]) {
     eprintln!("{label} nan={nan_count} inf={inf_count} max_abs={max_abs} gt1k={large}");
 }
 
+
+/// Per-layer hidden-state checksum tracing (OXIDIZE_TRACE_FWD=1) for
+/// diffing the batched window path against the per-token path.
+fn trace_fwd(path: &str, pos: usize, layer: usize, x: &[f32]) {
+    if std::env::var_os("OXIDIZE_TRACE_FWD").is_some() {
+        let sum: f64 = x.iter().map(|v| *v as f64).sum();
+        eprintln!("TRACE {path} pos={pos} layer={layer} sum={sum:.9e}");
+    }
+}
+
 fn debug_hidden(label: &str, pos: usize, x: &[f32]) {
     if pos == 0 {
         debug_vec(label, x);
+    }
+}
+
+
+impl LayerWiseModel {
+    fn trace_state(&self, label: &str, pos: usize) {
+        if std::env::var_os("OXIDIZE_TRACE_FWD").is_some() {
+            let s0: f64 = self.ssm_states.first().map(|s| s.iter().map(|v| *v as f64).sum()).unwrap_or(0.0);
+            let r0: f64 = self
+                .ssm_conv_buffers
+                .first()
+                .map(|b| b.checksum())
+                .unwrap_or(0.0);
+            eprintln!("STATE {label} pos={pos} ssm_pos={} s0={s0:.9e} r0={r0:.9e}", self.ssm_pos);
+        }
     }
 }
 
@@ -427,6 +456,7 @@ impl LayerWiseModel {
     /// most recent distinct positions (one speculative round needs two: the
     /// rollback target and the verify-window entry).
     fn push_ssm_checkpoint(&mut self, pos: usize) {
+        self.trace_state("push", pos);
         self.ssm_checkpoints.retain(|(p, _, _)| *p != pos);
         self.ssm_checkpoints.push((
             pos,
@@ -439,12 +469,11 @@ impl LayerWiseModel {
     }
 
     /// Window size for batched forward; `OXIDIZE_WINDOW_BISECT=off` forces the
-    /// per-token path (debugging / A-B reference).
-    fn forward_window_size() -> usize {
-        if std::env::var("OXIDIZE_WINDOW_BISECT")
-            .map(|v| v.contains("off"))
-            .unwrap_or(false)
-        {
+    /// per-token path everywhere, `=fwd` only in `forward`, `=many` only in
+    /// `forward_many` (debugging / A-B reference).
+    fn forward_window_size_for(caller: &str) -> usize {
+        let v = std::env::var("OXIDIZE_WINDOW_BISECT").unwrap_or_default();
+        if v.contains("off") || v.contains(caller) {
             1
         } else {
             Self::FORWARD_WINDOW
@@ -797,6 +826,7 @@ impl LayerWiseModel {
     }
 
     fn forward_single(&mut self, token: Token, pos: usize) -> Result<Logits, ModelError> {
+        self.trace_state("fwd1-entry", pos);
         let cfg = self.config.clone();
         let h = cfg.hidden_size;
 
@@ -987,6 +1017,7 @@ impl LayerWiseModel {
             }
 
             debug_hidden(&format!("layer {layer_idx}"), pos, &x);
+            trace_fwd("single", pos, layer_idx, &x);
         }
 
         let mut normed = vec![0.0_f32; h];
@@ -1248,6 +1279,9 @@ impl LayerWiseModel {
 
             for (xi, out) in xs.iter_mut().zip(ffn_all.iter()) {
                 *xi += out;
+            }
+            for t in 0..kk {
+                trace_fwd("window", start_pos + t, layer_idx, &xs[t * h..(t + 1) * h]);
             }
         }
 
@@ -2088,6 +2122,7 @@ impl Model for LayerWiseModel {
             self.ssm_states = states.clone();
             self.ssm_conv_buffers = bufs.clone();
             self.ssm_pos = consumed_tokens;
+            self.trace_state("restore", consumed_tokens);
         } else if self.ssm_states.iter().any(|s| s.len() > 1) {
             // GDN model rewinding to a position we have no snapshot for: the
             // recurrent state cannot be reconstructed. Warn instead of failing
@@ -2115,7 +2150,7 @@ impl Model for LayerWiseModel {
             });
         }
         let start_pos = session.consumed_tokens();
-        let window = Self::forward_window_size();
+        let window = Self::forward_window_size_for("fwd");
         let mut logits = Vec::new();
         let mut offset = 0;
         while offset < tokens.len() {
@@ -2149,7 +2184,7 @@ impl Model for LayerWiseModel {
         // forward_many is the speculative-verification entry point: checkpoint
         // the recurrent state here so a rejected draft can rewind to start_pos.
         self.push_ssm_checkpoint(start_pos);
-        let window = Self::forward_window_size();
+        let window = Self::forward_window_size_for("many");
         let mut all_logits = Vec::with_capacity(tokens.len());
         let mut offset = 0;
         while offset < tokens.len() {
