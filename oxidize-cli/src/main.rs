@@ -623,11 +623,35 @@ fn run_gpu_cluster(args: &[String]) -> i32 {
                     }
                     "--nodes" => {
                         i += 1;
-                        nodes = args.get(i).and_then(|v| v.parse().ok()).unwrap_or(0);
+                        match args.get(i) {
+                            Some(v) => match v.parse() {
+                                Ok(n) => nodes = n,
+                                Err(_) => {
+                                    eprintln!("error: --nodes expects a positive integer, got '{v}'");
+                                    return 2;
+                                }
+                            },
+                            None => {
+                                eprintln!("error: --nodes requires a value");
+                                return 2;
+                            }
+                        }
                     }
                     "--gpus-per-node" => {
                         i += 1;
-                        gpus_per_node = args.get(i).and_then(|v| v.parse().ok()).unwrap_or(0);
+                        match args.get(i) {
+                            Some(v) => match v.parse() {
+                                Ok(n) => gpus_per_node = n,
+                                Err(_) => {
+                                    eprintln!("error: --gpus-per-node expects a positive integer, got '{v}'");
+                                    return 2;
+                                }
+                            },
+                            None => {
+                                eprintln!("error: --gpus-per-node requires a value");
+                                return 2;
+                            }
+                        }
                     }
                     other => {
                         eprintln!("error: unknown flag {other}");
@@ -641,7 +665,6 @@ fn run_gpu_cluster(args: &[String]) -> i32 {
             // single family is selected.
             let specs = match family {
                 Some(f) => {
-                    let p = gc::profile(f);
                     let count = if nodes > 0 {
                         nodes
                     } else {
@@ -652,7 +675,6 @@ fn run_gpu_cluster(args: &[String]) -> i32 {
                     } else {
                         default_gpus_per_node(f)
                     };
-                    let _ = p;
                     vec![gc::NodePoolSpec::new(f, count, gpn)]
                 }
                 None => vec![
@@ -681,14 +703,14 @@ fn run_gpu_cluster(args: &[String]) -> i32 {
             0
         }
         _ => {
-            println!(
+            eprintln!(
                 "usage: oxidize gpu-cluster <generate|detect|profiles>\n\
                  \n\
                  generate [--family b200|a100|rtx-pro-6000] [--nodes N] [--gpus-per-node N]\n\
                  detect   probe local NVIDIA GPUs via nvidia-smi\n\
                  profiles list known GPU tier profiles"
             );
-            0
+            1
         }
     }
 }

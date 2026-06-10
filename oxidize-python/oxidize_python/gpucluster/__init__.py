@@ -329,7 +329,7 @@ def classify_product(name: str) -> GpuFamily | None:
         return GpuFamily.B200
     if "a100" in n:
         return GpuFamily.A100
-    if ("rtx" in n or "pro" in n) and "6000" in n:
+    if "rtx" in n and "pro" in n and "6000" in n:
         return GpuFamily.RTX_PRO_6000
     return None
 
@@ -382,8 +382,9 @@ def detect_gpus() -> list[DetectedGpu]:
             capture_output=True,
             text=True,
             check=False,
+            timeout=30,
         )
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
         return []
     if out.returncode != 0:
         return []

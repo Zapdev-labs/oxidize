@@ -8,7 +8,6 @@ package gpucluster
 
 import (
 	"os/exec"
-	"sort"
 	"strconv"
 	"strings"
 )
@@ -399,7 +398,7 @@ func DetectGPUs() []DetectedGPU {
 		"--query-gpu=index,name,memory.total,mig.mode.current",
 		"--format=csv,noheader,nounits").Output()
 	if err != nil {
-		return nil
+		return []DetectedGPU{}
 	}
 	return ParseNvidiaSMICSV(string(out))
 }
@@ -424,7 +423,6 @@ func Summarize(gpus []DetectedGPU) []FamilyCount {
 			out = append(out, FamilyCount{f, n})
 		}
 	}
-	// AllFamilies is already in spec order; keep it stable.
-	sort.SliceStable(out, func(i, j int) bool { return out[i].Family < out[j].Family })
+	// out is already in AllFamilies spec order; no extra sort needed.
 	return out
 }

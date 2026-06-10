@@ -1,0 +1,2 @@
+FAIL	github.com/Zapdev-labs/oxidize/golang/core/mesh [build failed]
+FAIL

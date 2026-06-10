@@ -219,6 +219,35 @@ const GEMV_F32_PTX: &str = include_str!(concat!(env!("OUT_DIR"), "/gemv_f32.ptx"
 // resident in VRAM so they are uploaded a single time instead of per token.
 // ---------------------------------------------------------------------------
 
+/// Fast, non-cryptographic FNV-1a 64-bit hash used for content-aware cache
+/// invalidation of resident GPU buffers. Callers may reuse a host allocation
+/// (e.g. a `Vec<f32>` whose contents change), so pointer identity alone is
+/// not sufficient.
+#[allow(dead_code)]
+fn hash_bytes(data: &[u8]) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x0100_0000_01b3;
+    let mut hash = FNV_OFFSET;
+    for &byte in data {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
+}
+
+#[allow(dead_code)]
+fn hash_f32_slice(slice: &[f32]) -> u64 {
+    // SAFETY: `f32` has a fixed-size, padding-free representation, so a
+    // contiguous `&[f32]` can be soundly reinterpreted as `&[u8]`.
+    let bytes = unsafe {
+        std::slice::from_raw_parts(
+            slice.as_ptr() as *const u8,
+            slice.len() * std::mem::size_of::<f32>(),
+        )
+    };
+    hash_bytes(bytes)
+}
+
 #[cfg(feature = "cuda")]
 struct GpuState {
     // Held to keep the CUDA context current for this thread; never read.
@@ -227,12 +256,11 @@ struct GpuState {
     stream: cust::stream::Stream,
     cublas: cublas_sys::cublasHandle_t,
     /// Quantized weights dequantized once on the GPU to resident f16 (stored as
-    /// raw u16 bits), keyed by the host slice's `(pointer, len)`. Quantized
-    /// matrices are always static model weights with a stable backing
-    /// allocation for the run, so pointer identity is a safe cache key.
-    resident_f16: std::collections::HashMap<(usize, usize), cust::memory::DeviceBuffer<u16>>,
+    /// raw u16 bits), keyed by `(pointer, len, content_hash)`. The content hash
+    /// defends against callers that mutate a reused host allocation.
+    resident_f16: std::collections::HashMap<(usize, usize, u64), cust::memory::DeviceBuffer<u16>>,
     /// Resident f32 weight matrices for the dense gemv path, same keying.
-    resident_f32: std::collections::HashMap<(usize, usize), cust::memory::DeviceBuffer<f32>>,
+    resident_f32: std::collections::HashMap<(usize, usize, u64), cust::memory::DeviceBuffer<f32>>,
 }
 
 #[cfg(feature = "cuda")]
@@ -297,8 +325,14 @@ pub fn gemv_f32_cuda(
     with_gpu(|gpu| {
         // The matrix argument to a gemv is a model weight (output = W · x), so
         // it is kept resident in VRAM and uploaded only once; activations flow
-        // through the small `vector`/`output` buffers.
-        let key = (matrix.as_ptr() as usize, matrix.len());
+        // through the small `vector`/`output` buffers. The cache key includes a
+        // content hash so callers that reuse a host allocation with new data do
+        // not receive stale GPU-resident weights.
+        let key = (
+            matrix.as_ptr() as usize,
+            matrix.len(),
+            hash_f32_slice(matrix),
+        );
         if !gpu.resident_f32.contains_key(&key) {
             let buffer = cust::memory::DeviceBuffer::from_slice(matrix).map_err(stringify)?;
             gpu.resident_f32.insert(key, buffer);
@@ -475,7 +509,13 @@ pub fn gemv_quantized_cuda(
         // First use: upload the raw quantized weight, dequantize it on the GPU
         // to resident f16 (stored as u16 bits), and cache it. Every later token
         // reuses the resident half-precision weight — no re-upload, no CPU work.
-        let key = (quantized_matrix.as_ptr() as usize, quantized_matrix.len());
+        // The cache key includes a content hash so a reused host allocation with
+        // mutated quantized bytes is re-uploaded rather than returning stale f16.
+        let key = (
+            quantized_matrix.as_ptr() as usize,
+            quantized_matrix.len(),
+            hash_bytes(quantized_matrix),
+        );
         if !gpu.resident_f16.contains_key(&key) {
             let raw =
                 cust::memory::DeviceBuffer::from_slice(quantized_matrix).map_err(stringify)?;
@@ -751,6 +791,39 @@ mod tests {
         )
         .expect_err("left matrix size mismatch should fail");
         assert!(matches!(err, GemmCudaError::InvalidLeftMatrixLength { .. }));
+    }
+
+    #[test]
+    fn hash_detects_f32_slice_mutation() {
+        let mut data = vec![1.0_f32, 2.0, 3.0, 4.0];
+        let original = hash_f32_slice(&data);
+
+        data[2] = 99.0;
+        let mutated = hash_f32_slice(&data);
+        assert_ne!(
+            original, mutated,
+            "content hash must change when slice contents change"
+        );
+
+        data[2] = 3.0;
+        let restored = hash_f32_slice(&data);
+        assert_eq!(
+            original, restored,
+            "content hash must be deterministic for identical contents"
+        );
+    }
+
+    #[test]
+    fn hash_detects_byte_slice_mutation() {
+        let bytes = b"oxidize";
+        let original = hash_bytes(bytes);
+        let mut modified = bytes.to_vec();
+        modified[0] = b'O';
+        assert_ne!(
+            original,
+            hash_bytes(&modified),
+            "content hash must change when byte contents change"
+        );
     }
 
     #[test]

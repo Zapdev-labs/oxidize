@@ -289,6 +289,19 @@ data:
             resources:
               - name: nvidia.com/gpu
                 replicas: 2
+      - match:
+          - key: nvidia.com/gpu.product
+            operator: In
+            values:
+              - NVIDIA-B200
+              - NVIDIA-B200-SXM5
+        sharing:
+          timeSlicing:
+            renameByDefault: false
+            failRequestsGreaterThanOne: true
+            resources:
+              - name: nvidia.com/gpu
+                replicas: 1
 ```
 
 **Behavior:**
@@ -318,8 +331,8 @@ data:
             operator: In
             values:
               - NVIDIA-A100-SXM4-80GB
-        mig:
-          strategy: mixed
+        flags:
+          migStrategy: mixed
           # Example MIG geometries
           # 1g.10gb x 7 + 2g.20gb x 1 + 3g.40gb x 1 (varies by SKU)
 ```
@@ -563,9 +576,7 @@ apiVersion: v1
 kind: Pod
 metadata:
   name: oxidize-multi-gpu
-  annotations:
-    nvidia.com/requirements: "nvidia.com/gpu.present=true, topology-aware"
-spec:
+  spec:
   schedulerName: default-scheduler  # or volcano/yunikorn for gang scheduling
   containers:
     - name: workload

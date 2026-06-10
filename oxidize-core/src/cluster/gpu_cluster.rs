@@ -451,7 +451,7 @@ pub fn classify_product(name: &str) -> Option<GpuFamily> {
         Some(GpuFamily::B200)
     } else if n.contains("a100") {
         Some(GpuFamily::A100)
-    } else if (n.contains("rtx") || n.contains("pro")) && n.contains("6000") {
+    } else if n.contains("rtx") && n.contains("pro") && n.contains("6000") {
         Some(GpuFamily::RtxPro6000)
     } else {
         None
@@ -669,6 +669,8 @@ mod tests {
             classify_product("NVIDIA RTX PRO 6000"),
             Some(GpuFamily::RtxPro6000)
         );
+        // Regression: plain RTX 6000 (non-Pro) must NOT match.
+        assert_eq!(classify_product("NVIDIA RTX 6000"), None);
         assert_eq!(classify_product("Tesla V100"), None);
     }
 

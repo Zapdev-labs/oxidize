@@ -205,6 +205,7 @@ Commands:
   bench <model>            Decode throughput benchmark
   inspect <model.gguf>     Print GGUF metadata and tensors
   serve [options]          Start the OpenAI-compatible server
+  gpu-cluster <subcmd>     Generate or detect GPU cluster configs
   list                     List local GGUF models in ./models
 
 Examples:

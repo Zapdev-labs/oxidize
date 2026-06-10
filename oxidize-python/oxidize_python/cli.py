@@ -390,11 +390,24 @@ def _gpu_cluster_command(args: list[str]) -> int:
             print(f"{fam.slug}: {n}")
         return 0
     if sub == "generate":
+        if args[1:] and args[1] in ("-h", "--help"):
+            print(
+                "Usage: oxidize gpu-cluster generate [options]\n\n"
+                "Options:\n"
+                "  --family b200|a100|rtx-pro-6000   GPU family (default: all)\n"
+                "  --nodes N                         Number of nodes (default: per-family preset)\n"
+                "  --gpus-per-node N                 GPUs per node (default: per-family preset)"
+            )
+            return 0
         p = argparse.ArgumentParser(prog="oxidize gpu-cluster generate", add_help=False)
         p.add_argument("--family", default="")
         p.add_argument("--nodes", type=int, default=0)
         p.add_argument("--gpus-per-node", type=int, default=0)
         ns = p.parse_args(args[1:])
+
+        if ns.nodes < 0 or ns.gpus_per_node < 0:
+            print("error: --nodes and --gpus-per-node must be positive integers", file=sys.stderr)
+            return 2
 
         if ns.family:
             fam = gc.GpuFamily.from_slug(ns.family)
@@ -454,6 +467,7 @@ Commands:
   bench <model>            Decode throughput benchmark
   inspect <model.gguf>     Print GGUF metadata and tensors
   serve [options]          Start the OpenAI-compatible server
+  gpu-cluster <sub>        GPU cluster helpers (generate, detect, profiles)
   list                     List local GGUF models in ./models""",
         file=out,
     )
