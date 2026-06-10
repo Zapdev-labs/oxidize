@@ -1823,12 +1823,51 @@ impl LayerWiseModel {
             0
         };
 
+        // Run Q, K, V projections concurrently (one fork instead of three
+        // sequential parallel regions) — same pattern as InferenceModel.
         let mut q_full = vec![0.0_f32; q_len];
-        gemv_weight(&layer.attn_q, q_len, h, &normed, &mut q_full)
-            .map_err(|e| ModelError::InferenceFailed(format!("attn_q: {:?}", e)))?;
+        let mut k_vec = vec![0.0_f32; kv_len];
+        let mut v_vec = vec![0.0_f32; kv_len];
+        {
+            let normed_ref = &normed;
+            let ((qr, kr), vr) = rayon::join(
+                || {
+                    rayon::join(
+                        || gemv_weight(&layer.attn_q, q_len, h, normed_ref, &mut q_full),
+                        || {
+                            if weight_is_empty(&layer.attn_k) {
+                                Ok(())
+                            } else {
+                                gemv_weight(&layer.attn_k, kv_len, h, normed_ref, &mut k_vec)
+                            }
+                        },
+                    )
+                },
+                || {
+                    if weight_is_empty(&layer.attn_v) {
+                        Ok(())
+                    } else {
+                        gemv_weight(&layer.attn_v, kv_len, h, normed_ref, &mut v_vec)
+                    }
+                },
+            );
+            qr.map_err(|e| ModelError::InferenceFailed(format!("attn_q: {:?}", e)))?;
+            kr.map_err(|e| ModelError::InferenceFailed(format!("attn_k: {:?}", e)))?;
+            vr.map_err(|e| ModelError::InferenceFailed(format!("attn_v: {:?}", e)))?;
+        }
         if !layer.attn_q_bias.is_empty() {
             for (i, q) in q_full.iter_mut().enumerate() {
                 *q += layer.attn_q_bias[i % layer.attn_q_bias.len()];
+            }
+        }
+        if !layer.attn_k_bias.is_empty() {
+            for (i, k) in k_vec.iter_mut().enumerate() {
+                *k += layer.attn_k_bias[i % layer.attn_k_bias.len()];
+            }
+        }
+        if !layer.attn_v_bias.is_empty() {
+            for (i, v) in v_vec.iter_mut().enumerate() {
+                *v += layer.attn_v_bias[i % layer.attn_v_bias.len()];
             }
         }
 
@@ -1869,26 +1908,7 @@ impl LayerWiseModel {
             (q_full[..q_len_used_guess].to_vec(), None)
         };
 
-        let mut k_vec = vec![0.0_f32; kv_len];
-        let mut v_vec = vec![0.0_f32; kv_len];
-        if !weight_is_empty(&layer.attn_k) {
-            gemv_weight(&layer.attn_k, kv_len, h, &normed, &mut k_vec)
-                .map_err(|e| ModelError::InferenceFailed(format!("attn_k: {:?}", e)))?;
-            if !layer.attn_k_bias.is_empty() {
-                for (i, k) in k_vec.iter_mut().enumerate() {
-                    *k += layer.attn_k_bias[i % layer.attn_k_bias.len()];
-                }
-            }
-        }
-        if !weight_is_empty(&layer.attn_v) {
-            gemv_weight(&layer.attn_v, kv_len, h, &normed, &mut v_vec)
-                .map_err(|e| ModelError::InferenceFailed(format!("attn_v: {:?}", e)))?;
-            if !layer.attn_v_bias.is_empty() {
-                for (i, v) in v_vec.iter_mut().enumerate() {
-                    *v += layer.attn_v_bias[i % layer.attn_v_bias.len()];
-                }
-            }
-        }
+
 
         if std::env::var_os("OXIDIZE_TRACE_FWD").is_some() {
             let s = |v: &[f32]| v.iter().map(|x| *x as f64).sum::<f64>();
