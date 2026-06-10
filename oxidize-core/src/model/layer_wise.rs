@@ -622,6 +622,18 @@ impl LayerWiseModel {
             );
         }
 
+        if std::env::var("OXIDIZE_NUMA_REPLICATE").is_ok_and(|v| v == "1") {
+            let t0 = std::time::Instant::now();
+            if crate::numa::replicate(mapped.bytes()) {
+                eprintln!(
+                    "layer-wise: NUMA-replicated {:.1} GiB of weights per node in {:.1}s",
+                    mapped.bytes().len() as f64 / (1u64 << 30) as f64,
+                    t0.elapsed().as_secs_f32()
+                );
+            } else {
+                eprintln!("layer-wise: NUMA replication unavailable; using shared mapping");
+            }
+        }
         Ok(Self {
             config,
             mmap: Arc::new(mapped.clone()),

@@ -90,6 +90,8 @@ pub mod simd;
 pub mod speculative;
 #[path = "backends/strix.rs"]
 pub mod strix;
+#[path = "compute/numa.rs"]
+pub mod numa;
 #[path = "compute/spinpool.rs"]
 pub mod spinpool;
 #[path = "compute/tensor.rs"]

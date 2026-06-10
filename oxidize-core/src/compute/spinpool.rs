@@ -184,10 +184,18 @@ fn worker_loop(s: &'static Shared, worker_idx: usize, participants: usize) {
                 // before taking this lock to notify, so we cannot sleep
                 // through a publish.
                 if s.serial.load(Ordering::Acquire) == last_serial {
-                    let _guard = s
+                    let (_guard, timeout) = s
                         .idle_cv
                         .wait_timeout(guard, std::time::Duration::from_millis(50))
                         .unwrap();
+                    // Only a notify means a region is imminent; a timeout on
+                    // an idle pool must NOT re-enter the spin phase, or every
+                    // idle worker burns a few ms of CPU per 50ms — poisonous
+                    // when other processes share these cores.
+                    if timeout.timed_out() {
+                        spins = SPIN_BUDGET;
+                        continue;
+                    }
                 }
                 spins = 0;
             }
