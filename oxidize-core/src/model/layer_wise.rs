@@ -1433,11 +1433,24 @@ impl LayerWiseModel {
         // identical to the previous sequential loop.
         let head_state = head_k_dim * head_v_dim;
         let conv_out_ref = &conv_out;
-        state
-            .par_chunks_mut(head_state)
-            .zip(core_out.par_chunks_mut(head_v_dim))
-            .enumerate()
-            .for_each(|(v_head, (state_h, out_h))| {
+        let state_base = state.as_mut_ptr() as usize;
+        let out_base = core_out.as_mut_ptr() as usize;
+        crate::spinpool::run_chunks(num_v_heads, |v_head| {
+            // Safety: per-head state/output chunks are disjoint and both
+            // buffers outlive the blocking dispatch below.
+            let state_h = unsafe {
+                std::slice::from_raw_parts_mut(
+                    (state_base as *mut f32).add(v_head * head_state),
+                    head_state,
+                )
+            };
+            let out_h = unsafe {
+                std::slice::from_raw_parts_mut(
+                    (out_base as *mut f32).add(v_head * head_v_dim),
+                    head_v_dim,
+                )
+            };
+            {
                 let k_head = v_head / head_repeat;
                 let q_off = k_head * head_k_dim;
                 let k_off = key_dim + k_head * head_k_dim;
@@ -1498,7 +1511,8 @@ impl LayerWiseModel {
                     }
                     out_h[j] = sum;
                 }
-            });
+            }
+        });
 
         debug_vec(&format!("layer {layer_idx} gdn core"), &core_out);
 
@@ -1823,37 +1837,21 @@ impl LayerWiseModel {
             0
         };
 
-        // Run Q, K, V projections concurrently (one fork instead of three
-        // sequential parallel regions) — same pattern as InferenceModel.
+        // Q/K/V projections run sequentially; each GEMV is internally
+        // parallel (spin pool), and a rayon::join here would wake the rayon
+        // workers mid-decode, contending with the pinned spin workers.
         let mut q_full = vec![0.0_f32; q_len];
         let mut k_vec = vec![0.0_f32; kv_len];
         let mut v_vec = vec![0.0_f32; kv_len];
-        {
-            let normed_ref = &normed;
-            let ((qr, kr), vr) = rayon::join(
-                || {
-                    rayon::join(
-                        || gemv_weight(&layer.attn_q, q_len, h, normed_ref, &mut q_full),
-                        || {
-                            if weight_is_empty(&layer.attn_k) {
-                                Ok(())
-                            } else {
-                                gemv_weight(&layer.attn_k, kv_len, h, normed_ref, &mut k_vec)
-                            }
-                        },
-                    )
-                },
-                || {
-                    if weight_is_empty(&layer.attn_v) {
-                        Ok(())
-                    } else {
-                        gemv_weight(&layer.attn_v, kv_len, h, normed_ref, &mut v_vec)
-                    }
-                },
-            );
-            qr.map_err(|e| ModelError::InferenceFailed(format!("attn_q: {:?}", e)))?;
-            kr.map_err(|e| ModelError::InferenceFailed(format!("attn_k: {:?}", e)))?;
-            vr.map_err(|e| ModelError::InferenceFailed(format!("attn_v: {:?}", e)))?;
+        gemv_weight(&layer.attn_q, q_len, h, &normed, &mut q_full)
+            .map_err(|e| ModelError::InferenceFailed(format!("attn_q: {:?}", e)))?;
+        if !weight_is_empty(&layer.attn_k) {
+            gemv_weight(&layer.attn_k, kv_len, h, &normed, &mut k_vec)
+                .map_err(|e| ModelError::InferenceFailed(format!("attn_k: {:?}", e)))?;
+        }
+        if !weight_is_empty(&layer.attn_v) {
+            gemv_weight(&layer.attn_v, kv_len, h, &normed, &mut v_vec)
+                .map_err(|e| ModelError::InferenceFailed(format!("attn_v: {:?}", e)))?;
         }
         if !layer.attn_q_bias.is_empty() {
             for (i, q) in q_full.iter_mut().enumerate() {

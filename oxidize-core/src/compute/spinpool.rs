@@ -3,30 +3,42 @@
 //! Token decode issues hundreds of small parallel regions per token; rayon's
 //! sleep/wake worker handoff costs tens of microseconds per region, which
 //! dominates wall time once the kernels themselves are fast. This pool keeps
-//! workers resident: a region is published by bumping a serial counter,
-//! workers claim chunk indices via CAS on a (serial, next) word, and the
-//! submitter participates too. Workers spin briefly between regions (covering
-//! the intra-token gaps) and park on a condvar when idle longer, so an idle
-//! server does not burn CPU.
+//! workers resident and uses STATIC chunk partitioning: participant `p` of
+//! `P` processes chunks `p, p+P, p+2P, ...`, so there is no shared claim
+//! counter to contend on (a shared-CAS ticket measurably collapsed under
+//! cross-socket contention). Chunks are uniform (fixed row count), so static
+//! assignment balances within one chunk of ideal.
 //!
-//! Experimental: enable with `OXIDIZE_SPINPOOL=1` (default: rayon).
+//! Region lifecycle: the submitter stores the closure fat pointer + chunk
+//! count, bumps `serial` (release), and processes its own share. Each worker
+//! acks completion by writing the serial into its own cache-line-padded slot;
+//! the submitter waits for every ack before returning, which both keeps the
+//! closure borrow alive for stragglers and prevents the next region's payload
+//! from overwriting one still being read.
+//!
+//! Workers spin briefly between regions (covering per-layer glue during
+//! decode) and park on a condvar when idle, so an idle server costs nothing.
+//!
+//! Disable with `OXIDIZE_SPINPOOL=0` (falls back to rayon).
 
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex, OnceLock};
 
+#[repr(align(64))]
+struct AckSlot {
+    done_serial: AtomicU64,
+}
+
 struct Shared {
-    /// High 32 bits: region serial. Low 32 bits: next chunk index. Workers
-    /// CAS-increment the low half only while the high half matches the region
-    /// they validated, so a stale worker can never claim a chunk of a region
-    /// whose closure it has not loaded.
-    ticket: AtomicU64,
-    /// Erased fat pointer to the submitter's `&(dyn Fn(usize) + Sync)`; valid
-    /// from the matching `ticket` publish until the submitter observes all
-    /// chunks done (it blocks in `run`, keeping the borrow alive).
+    /// Region serial; bumped (release) after the payload below is stored.
+    serial: AtomicU64,
+    /// Erased fat pointer to the submitter's `&(dyn Fn(usize) + Sync)`.
+    /// Valid from the serial bump until every worker acks that serial.
     task_data: AtomicU64,
     task_vtable: AtomicU64,
     n_chunks: AtomicUsize,
-    done: AtomicUsize,
+    /// One ack slot per worker, cache-line padded: written only by its owner.
+    acks: Box<[AckSlot]>,
     busy: AtomicBool,
     shutdown: AtomicBool,
     idle_lock: Mutex<()>,
@@ -35,26 +47,28 @@ struct Shared {
 
 pub struct SpinPool {
     shared: &'static Shared,
+    /// Workers + the submitting thread.
+    participants: usize,
 }
 
-/// Iterations of `spin_loop` before a worker parks on the condvar. This
-/// covers the per-layer glue between GEMVs during decode; truly idle workers
-/// park and cost nothing.
+/// `spin_loop` iterations before a worker parks. On Skylake a pause is
+/// ~100+ cycles, so this covers multi-millisecond gaps — far more than the
+/// per-layer glue between decode GEMVs; truly idle workers park.
 const SPIN_BUDGET: u32 = 60_000;
-
-#[inline]
-fn serial_of(ticket: u64) -> u64 {
-    ticket >> 32
-}
 
 impl SpinPool {
     fn new(workers: usize) -> Self {
+        let acks: Box<[AckSlot]> = (0..workers)
+            .map(|_| AckSlot {
+                done_serial: AtomicU64::new(0),
+            })
+            .collect();
         let shared: &'static Shared = Box::leak(Box::new(Shared {
-            ticket: AtomicU64::new(0),
+            serial: AtomicU64::new(0),
             task_data: AtomicU64::new(0),
             task_vtable: AtomicU64::new(0),
             n_chunks: AtomicUsize::new(0),
-            done: AtomicUsize::new(0),
+            acks,
             busy: AtomicBool::new(false),
             shutdown: AtomicBool::new(false),
             idle_lock: Mutex::new(()),
@@ -63,10 +77,13 @@ impl SpinPool {
         for worker_idx in 0..workers {
             std::thread::Builder::new()
                 .name(format!("oxidize-spin-{worker_idx}"))
-                .spawn(move || worker_loop(shared, worker_idx))
+                .spawn(move || worker_loop(shared, worker_idx, workers + 1))
                 .expect("spawn spin worker");
         }
-        Self { shared }
+        Self {
+            shared,
+            participants: workers + 1,
+        }
     }
 
     /// Run `f(chunk_idx)` for every chunk in `0..n_chunks` across the pool.
@@ -92,60 +109,42 @@ impl SpinPool {
             return;
         }
 
-        // Publish payload, then the new ticket (release): workers load the
-        // payload only after acquiring a ticket with the new serial.
+        // Publish payload, then the new serial (release): workers read the
+        // payload only after observing the bumped serial.
         let fat: [u64; 2] = unsafe { std::mem::transmute(f) };
         s.task_data.store(fat[0], Ordering::Relaxed);
         s.task_vtable.store(fat[1], Ordering::Relaxed);
         s.n_chunks.store(n_chunks, Ordering::Relaxed);
-        s.done.store(0, Ordering::Relaxed);
-        let serial = serial_of(s.ticket.load(Ordering::Relaxed)) + 1;
-        s.ticket.store(serial << 32, Ordering::Release);
+        let serial = s.serial.load(Ordering::Relaxed) + 1;
+        s.serial.store(serial, Ordering::Release);
+        // Pair with the worker's serial re-check under the lock so a worker
+        // deciding to park right now cannot miss the wakeup.
+        drop(s.idle_lock.lock().unwrap());
         s.idle_cv.notify_all();
 
-        // Submitter claims chunks alongside the workers.
-        take_chunks(s, serial, n_chunks, f);
+        // Submitter is participant 0.
+        let participants = self.participants;
+        let mut i = 0;
+        while i < n_chunks {
+            f(i);
+            i += participants;
+        }
 
-        // Wait for stragglers still running their last chunk.
-        while s.done.load(Ordering::Acquire) < n_chunks {
-            std::hint::spin_loop();
+        // Wait until every worker acks this serial; the payload and `f`'s
+        // borrow must outlive any straggler still reading them.
+        for slot in s.acks.iter() {
+            while slot.done_serial.load(Ordering::Acquire) != serial {
+                std::hint::spin_loop();
+            }
         }
         s.busy.store(false, Ordering::Release);
     }
 }
 
-/// CAS-claim chunk indices for `serial` until the region is exhausted.
-#[inline]
-fn take_chunks(s: &Shared, serial: u64, n_chunks: usize, f: &dyn Fn(usize)) {
-    let mut cur = s.ticket.load(Ordering::Relaxed);
-    loop {
-        if serial_of(cur) != serial {
-            return; // region superseded
-        }
-        let idx = (cur & 0xffff_ffff) as usize;
-        if idx >= n_chunks {
-            return; // region exhausted
-        }
-        match s.ticket.compare_exchange_weak(
-            cur,
-            cur + 1,
-            Ordering::AcqRel,
-            Ordering::Relaxed,
-        ) {
-            Ok(_) => {
-                f(idx);
-                s.done.fetch_add(1, Ordering::Release);
-                cur = s.ticket.load(Ordering::Relaxed);
-            }
-            Err(actual) => cur = actual,
-        }
-    }
-}
-
-fn worker_loop(s: &'static Shared, worker_idx: usize) {
-    // Pin like the rayon workers (identity map). The spin workers are never
-    // active at the same time as a rayon GEMV region, so sharing cores is
-    // fine; OXIDIZE_NO_PIN=1 disables.
+fn worker_loop(s: &'static Shared, worker_idx: usize, participants: usize) {
+    // Pin like the rayon workers (identity map, submitter-adjacent CPUs).
+    // The spin workers are never active at the same time as a rayon GEMV
+    // region, so sharing cores is fine; OXIDIZE_NO_PIN=1 disables.
     #[cfg(target_os = "linux")]
     unsafe {
         let ncpu = libc::sysconf(libc::_SC_NPROCESSORS_ONLN);
@@ -156,21 +155,18 @@ fn worker_loop(s: &'static Shared, worker_idx: usize) {
             libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set);
         }
     }
-    #[cfg(not(target_os = "linux"))]
-    let _ = worker_idx;
 
+    let my_participant = worker_idx + 1;
     let mut last_serial: u64 = 0;
     loop {
         if s.shutdown.load(Ordering::Relaxed) {
             return;
         }
-        // Wait for a region with a serial we have not processed.
+        // Wait for a region we have not processed.
         let mut spins = 0_u32;
         let serial = loop {
-            let t = s.ticket.load(Ordering::Acquire);
-            let serial = serial_of(t);
-            if serial != last_serial && (t & 0xffff_ffff) < s.n_chunks.load(Ordering::Relaxed) as u64
-            {
+            let serial = s.serial.load(Ordering::Acquire);
+            if serial != last_serial {
                 break serial;
             }
             if s.shutdown.load(Ordering::Relaxed) {
@@ -181,22 +177,35 @@ fn worker_loop(s: &'static Shared, worker_idx: usize) {
                 std::hint::spin_loop();
             } else {
                 let guard = s.idle_lock.lock().unwrap();
-                let _guard = s
-                    .idle_cv
-                    .wait_timeout(guard, std::time::Duration::from_millis(50))
-                    .unwrap();
+                // Re-check under the lock: the submitter bumps the serial
+                // before taking this lock to notify, so we cannot sleep
+                // through a publish.
+                if s.serial.load(Ordering::Acquire) == last_serial {
+                    let _guard = s
+                        .idle_cv
+                        .wait_timeout(guard, std::time::Duration::from_millis(50))
+                        .unwrap();
+                }
                 spins = 0;
             }
         };
         last_serial = serial;
-        // Payload was stored before the ticket release for this serial.
+        // Payload was stored before the serial release for this region, and
+        // stays valid until we ack below.
         let fat = [
             s.task_data.load(Ordering::Relaxed),
             s.task_vtable.load(Ordering::Relaxed),
         ];
         let f: &(dyn Fn(usize) + Sync) = unsafe { std::mem::transmute(fat) };
         let n = s.n_chunks.load(Ordering::Relaxed);
-        take_chunks(s, serial, n, f);
+        let mut i = my_participant;
+        while i < n {
+            f(i);
+            i += participants;
+        }
+        s.acks[worker_idx]
+            .done_serial
+            .store(serial, Ordering::Release);
     }
 }
 
@@ -204,10 +213,7 @@ static POOL: OnceLock<Option<SpinPool>> = OnceLock::new();
 
 fn pool() -> Option<&'static SpinPool> {
     POOL.get_or_init(|| {
-        // Experimental: opt-in only. The shared-ticket design measured SLOWER
-        // under 16-thread contention (CAS line ping-pong across sockets) and
-        // needs static chunk partitioning before it can be the default.
-        if !std::env::var("OXIDIZE_SPINPOOL").is_ok_and(|v| v == "1") {
+        if std::env::var("OXIDIZE_SPINPOOL").is_ok_and(|v| v == "0") {
             return None;
         }
         let workers = rayon::current_num_threads().saturating_sub(1);
@@ -239,7 +245,7 @@ mod tests {
     #[test]
     fn run_chunks_executes_every_chunk_exactly_once() {
         let counts: Vec<AtomicU32> = (0..1000).map(|_| AtomicU32::new(0)).collect();
-        for round in 0..50 {
+        for round in 0..200 {
             run_chunks(counts.len(), |i| {
                 counts[i].fetch_add(1, Ordering::Relaxed);
             });
@@ -261,13 +267,36 @@ mod tests {
     }
 
     #[test]
-    fn run_chunks_back_to_back_regions_with_different_sizes() {
-        for n in [2usize, 7, 31, 128, 1] {
+    fn run_chunks_back_to_back_regions_with_varied_sizes() {
+        for n in [2usize, 7, 31, 128, 1, 333, 4096] {
             let counts: Vec<AtomicU32> = (0..n).map(|_| AtomicU32::new(0)).collect();
             run_chunks(n, |i| {
                 counts[i].fetch_add(1, Ordering::Relaxed);
             });
             assert!(counts.iter().all(|c| c.load(Ordering::Relaxed) == 1));
+        }
+    }
+
+    #[test]
+    fn run_chunks_results_match_serial_reference() {
+        // GEMV-shaped check: each chunk writes a deterministic function of its
+        // index into a disjoint slice; compare against serial execution.
+        let n_chunks = 517usize;
+        let chunk = 32usize;
+        let mut parallel = vec![0.0f32; n_chunks * chunk];
+        let base = parallel.as_mut_ptr() as usize;
+        run_chunks(n_chunks, |ci| {
+            let out = unsafe {
+                std::slice::from_raw_parts_mut((base as *mut f32).add(ci * chunk), chunk)
+            };
+            for (j, v) in out.iter_mut().enumerate() {
+                *v = (ci * 31 + j * 7) as f32 * 0.5;
+            }
+        });
+        for ci in 0..n_chunks {
+            for j in 0..chunk {
+                assert_eq!(parallel[ci * chunk + j], (ci * 31 + j * 7) as f32 * 0.5);
+            }
         }
     }
 }
