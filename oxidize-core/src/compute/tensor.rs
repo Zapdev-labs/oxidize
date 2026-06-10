@@ -20,6 +20,12 @@ const E2M1_DOUBLED_VALUES: [f32; 16] = [
 ];
 const FLASH_ATTENTION_BLOCK_TOKENS: usize = 64;
 const PARALLEL_GEMV_MIN_OPS: usize = 1 << 20;
+
+/// Rows per spin-pool dispatch chunk. Small chunks cost nothing under static
+/// partitioning (no claim contention) and cut straggler imbalance on
+/// mid-sized regions; 8 still holds two 4-row kernel quads.
+const GEMV_CHUNK_ROWS: usize = 32;
+
 const TRANSPOSED_GEMV_COL_CHUNK: usize = QK_K;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -1218,8 +1224,8 @@ pub fn gemv_quantized_experts_f32(
             && !q4_k_q8_k_vnni_available()
             && rows.is_multiple_of(32);
         if use_x4 {
-            run_output_chunks(output, 32, |chunk_idx, out_chunk| {
-                    let i0 = chunk_idx * 32;
+            run_output_chunks(output, GEMV_CHUNK_ROWS, |chunk_idx, out_chunk| {
+                    let i0 = chunk_idx * GEMV_CHUNK_ROWS;
                     let slot = i0 / rows;
                     let row0 = i0 % rows;
                     let expert = selected[slot];
@@ -1299,8 +1305,8 @@ pub fn gemv_quantized_experts_f32(
             );
         }
         if rows.is_multiple_of(32) {
-            run_output_chunks(output, 32, |chunk_idx, out_chunk| {
-                    let i0 = chunk_idx * 32;
+            run_output_chunks(output, GEMV_CHUNK_ROWS, |chunk_idx, out_chunk| {
+                    let i0 = chunk_idx * GEMV_CHUNK_ROWS;
                     let slot = i0 / rows;
                     let row0 = i0 % rows;
                     let expert = selected[slot];
@@ -1447,8 +1453,8 @@ pub fn gemv_quantized_experts_gate_up_f32(
 
     // One region over both projections; 32 | rows guarantees a chunk never
     // spans a projection or expert-slot boundary.
-    run_output_chunks(output, 32, |chunk_idx, out_chunk| {
-            let i0 = chunk_idx * 32;
+    run_output_chunks(output, GEMV_CHUNK_ROWS, |chunk_idx, out_chunk| {
+            let i0 = chunk_idx * GEMV_CHUNK_ROWS;
             let matrix = if i0 < half { gate_matrix } else { up_matrix };
             let rem = i0 % half;
             let slot = rem / rows;
@@ -1678,8 +1684,8 @@ fn gemv_q6_k_q8_k_fused(
         }
     };
     if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
-        run_output_chunks(output, 32, |chunk_idx, out_chunk| {
-            run_range(out_chunk, chunk_idx * 32)
+        run_output_chunks(output, GEMV_CHUNK_ROWS, |chunk_idx, out_chunk| {
+            run_range(out_chunk, chunk_idx * GEMV_CHUNK_ROWS)
         });
     } else {
         run_range(output, 0);
@@ -1774,8 +1780,8 @@ fn gemv_q4_k_q8_k_fused(
     };
 
     if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
-        run_output_chunks(output, 32, |chunk_idx, out_chunk| {
-            run_range(out_chunk, chunk_idx * 32)
+        run_output_chunks(output, GEMV_CHUNK_ROWS, |chunk_idx, out_chunk| {
+            run_range(out_chunk, chunk_idx * GEMV_CHUNK_ROWS)
         });
     } else {
         run_range(output, 0);

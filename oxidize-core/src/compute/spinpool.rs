@@ -3,11 +3,12 @@
 //! Token decode issues hundreds of small parallel regions per token; rayon's
 //! sleep/wake worker handoff costs tens of microseconds per region, which
 //! dominates wall time once the kernels themselves are fast. This pool keeps
-//! workers resident and uses STATIC chunk partitioning: participant `p` of
-//! `P` processes chunks `p, p+P, p+2P, ...`, so there is no shared claim
-//! counter to contend on (a shared-CAS ticket measurably collapsed under
-//! cross-socket contention). Chunks are uniform (fixed row count), so static
-//! assignment balances within one chunk of ideal.
+//! workers resident and uses STATIC block partitioning: participant `p` of
+//! `P` owns the contiguous chunk range `[p*n/P, (p+1)*n/P)`, so there is no
+//! shared claim counter to contend on (a shared-CAS ticket measurably
+//! collapsed under cross-socket contention) and each worker streams
+//! sequential weight rows. Chunks are uniform, so blocks balance within one
+//! chunk of ideal.
 //!
 //! Region lifecycle: the submitter stores the closure fat pointer + chunk
 //! count, bumps `serial` (release), and processes its own share. Each worker
@@ -122,13 +123,15 @@ impl SpinPool {
         drop(s.idle_lock.lock().unwrap());
         s.idle_cv.notify_all();
 
-        // Submitter is participant 0.
+        // Submitter is participant 0. Participants own CONTIGUOUS chunk
+        // ranges so each worker streams sequential weight rows (strided
+        // ownership defeats the hardware prefetcher).
         let participants = self.participants;
-        let mut i = 0;
-        while i < n_chunks {
+        for i in 0..n_chunks / participants {
             f(i);
-            i += participants;
         }
+        // Tail chunks (n % P) belong to the last participants by the block
+        // formula; participant 0's range is exactly [0, n/P).
 
         // Wait until every worker acks this serial; the payload and `f`'s
         // borrow must outlive any straggler still reading them.
@@ -198,10 +201,10 @@ fn worker_loop(s: &'static Shared, worker_idx: usize, participants: usize) {
         ];
         let f: &(dyn Fn(usize) + Sync) = unsafe { std::mem::transmute(fat) };
         let n = s.n_chunks.load(Ordering::Relaxed);
-        let mut i = my_participant;
-        while i < n {
+        let start = (my_participant * n) / participants;
+        let end = ((my_participant + 1) * n) / participants;
+        for i in start..end {
             f(i);
-            i += participants;
         }
         s.acks[worker_idx]
             .done_serial
