@@ -510,7 +510,14 @@ impl InferenceConfig {
         };
         let gelu_ffn = is_gemma;
         let sandwich_norm = is_gemma;
-        let rms_norm_weight_plus_one = architecture == ModelArchitecture::Qwen;
+        // Only the Qwen3.5/GDN lineage uses the Gemma-style (1 + w) RMSNorm
+        // convention. Standard Qwen2/Qwen3/qwen3moe use plain w * x_hat —
+        // keying this on the whole Qwen family garbled every official Qwen
+        // GGUF in code paths that honor the flag (layer-wise).
+        let rms_norm_weight_plus_one = matches!(
+            arch.as_str(),
+            "qwen35" | "qwen35moe" | "qwen3_5_moe" | "qwen3_5_moe_text"
+        );
 
         Self {
             vocab_size,
@@ -1773,6 +1780,19 @@ impl InferenceModel {
                 }
             }
 
+            if std::env::var_os("OXIDIZE_TRACE_FWD").is_some() {
+                let s = |v: &[f32]| v.iter().map(|x| *x as f64).sum::<f64>();
+                for t in 0..batch {
+                    eprintln!(
+                        "STAGE inf pos={} layer={layer_idx} normed={:.6e} q={:.6e} k={:.6e} v={:.6e}",
+                        start_pos + t,
+                        s(&normed_batch[t * h..(t + 1) * h]),
+                        s(&q_batch[t * q_len..(t + 1) * q_len]),
+                        s(&k_batch[t * kv_len..(t + 1) * kv_len]),
+                        s(&v_batch[t * kv_len..(t + 1) * kv_len])
+                    );
+                }
+            }
             let q_heads = q_len_used0 / q_head_dim.max(1);
             let kv_heads = kv_len.checked_div(kv_head_dim).unwrap_or(0);
 
@@ -2072,6 +2092,12 @@ impl InferenceModel {
 
                 for i in 0..batch * h {
                     x_batch[i] += ffn_out_batch[i];
+                }
+            }
+            if std::env::var_os("OXIDIZE_TRACE_FWD").is_some() {
+                for t in 0..batch {
+                    let sum: f64 = x_batch[t * h..(t + 1) * h].iter().map(|v| *v as f64).sum();
+                    eprintln!("TRACE inf pos={} layer={layer_idx} sum={sum:.9e}", start_pos + t);
                 }
             }
         }
@@ -3022,6 +3048,10 @@ impl InferenceModel {
                 for i in 0..h {
                     ws.x[i] += ffn_out[i];
                 }
+            }
+            if std::env::var_os("OXIDIZE_TRACE_FWD").is_some() {
+                let sum: f64 = ws.x[..h].iter().map(|v| *v as f64).sum();
+                eprintln!("TRACE inf pos={pos} layer={layer_idx} sum={sum:.9e}");
             }
         }
         Ok(())

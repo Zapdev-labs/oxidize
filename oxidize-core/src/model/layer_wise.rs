@@ -1890,6 +1890,13 @@ impl LayerWiseModel {
             }
         }
 
+        if std::env::var_os("OXIDIZE_TRACE_FWD").is_some() {
+            let s = |v: &[f32]| v.iter().map(|x| *x as f64).sum::<f64>();
+            eprintln!(
+                "STAGE lw pos={pos} layer={layer_idx} normed={:.6e} q={:.6e} k={:.6e} v={:.6e} x={:.6e} nw_len={} nw={:.6e}",
+                s(&normed), s(&q), s(&k_vec), s(&v_vec), s(x), layer.attn_norm.len(), s(&layer.attn_norm)
+            );
+        }
         let q_len_used = q.len();
         let q_head_dim = if n > 0 && q_len_used.is_multiple_of(n) {
             q_len_used / n
