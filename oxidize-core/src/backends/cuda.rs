@@ -1,5 +1,8 @@
 use crate::gguf::GgufQuantizationType;
 
+#[cfg(feature = "cuda")]
+use cust::memory::CopyDestination;
+
 const QK8_0: usize = 32;
 const BLOCK_Q8_0_SIZE: usize = 2 + QK8_0;
 
@@ -174,9 +177,129 @@ impl From<cust::error::CudaError> for GemmCudaError {
 
 pub const GEMV_KERNEL_NAME: &str = "gemv_f32_kernel";
 pub const GEMV_Q8_0_KERNEL_NAME: &str = "gemv_q8_0_f32_kernel";
+/// f16-weight matrix-vector kernel (weights stored as resident half precision).
+pub const GEMV_F16_KERNEL_NAME: &str = "gemv_f16_kernel";
+
+/// Whether [`gemv_quantized_cuda`] has a GPU dequant kernel for this type.
+/// Callers should fall back to the CPU quantized path when this is `false`.
+#[cfg(feature = "cuda")]
+pub fn supports_quantized_gpu(quantization: GgufQuantizationType) -> bool {
+    dequant_kernel_for(quantization).is_some()
+}
+
+/// GPU dequantization kernel name + raw block size in bytes + decoded values
+/// per block, for a quantization type. Returns `None` for types without a GPU
+/// dequant kernel (callers fall back to the CPU quantized path).
+#[cfg(feature = "cuda")]
+fn dequant_kernel_for(quantization: GgufQuantizationType) -> Option<(&'static str, usize, usize)> {
+    match quantization {
+        GgufQuantizationType::Q8_0 => Some(("dequant_q8_0_kernel", 34, 32)),
+        GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M => {
+            Some(("dequant_q4_k_kernel", 144, 256))
+        }
+        GgufQuantizationType::Q6_K => Some(("dequant_q6_k_kernel", 210, 256)),
+        _ => None,
+    }
+}
+
+// PTX is generated from `kernels/gemv_f32.cu` by `build.rs` (nvcc) into OUT_DIR.
+#[cfg(feature = "cuda")]
+const GEMV_F32_PTX: &str = include_str!(concat!(env!("OUT_DIR"), "/gemv_f32.ptx"));
+
+// ---------------------------------------------------------------------------
+// Persistent per-thread GPU state
+//
+// The previous implementation created a fresh CUDA context, JIT-compiled the
+// PTX module, and created a new cuBLAS handle on *every* matmul. Across a
+// transformer forward pass that is thousands of PTX JIT compilations per token
+// — the dominant cost, far larger than the actual math. We now build all of
+// these once and reuse them, and keep static (quantized) weight matrices
+// resident in VRAM so they are uploaded a single time instead of per token.
+// ---------------------------------------------------------------------------
+
+/// Fast, non-cryptographic FNV-1a 64-bit hash used for content-aware cache
+/// invalidation of resident GPU buffers. Callers may reuse a host allocation
+/// (e.g. a `Vec<f32>` whose contents change), so pointer identity alone is
+/// not sufficient.
+#[allow(dead_code)]
+fn hash_bytes(data: &[u8]) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x0100_0000_01b3;
+    let mut hash = FNV_OFFSET;
+    for &byte in data {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
+}
+
+#[allow(dead_code)]
+fn hash_f32_slice(slice: &[f32]) -> u64 {
+    // SAFETY: `f32` has a fixed-size, padding-free representation, so a
+    // contiguous `&[f32]` can be soundly reinterpreted as `&[u8]`.
+    let bytes = unsafe {
+        std::slice::from_raw_parts(
+            slice.as_ptr() as *const u8,
+            slice.len() * std::mem::size_of::<f32>(),
+        )
+    };
+    hash_bytes(bytes)
+}
 
 #[cfg(feature = "cuda")]
-const GEMV_F32_PTX: &str = include_str!("../../kernels/gemv_f32.ptx");
+struct GpuState {
+    // Held to keep the CUDA context current for this thread; never read.
+    _ctx: cust::context::Context,
+    module: cust::module::Module,
+    stream: cust::stream::Stream,
+    cublas: cublas_sys::cublasHandle_t,
+    /// Quantized weights dequantized once on the GPU to resident f16 (stored as
+    /// raw u16 bits), keyed by `(pointer, len, content_hash)`. The content hash
+    /// defends against callers that mutate a reused host allocation.
+    resident_f16: std::collections::HashMap<(usize, usize, u64), cust::memory::DeviceBuffer<u16>>,
+    /// Resident f32 weight matrices for the dense gemv path, same keying.
+    resident_f32: std::collections::HashMap<(usize, usize, u64), cust::memory::DeviceBuffer<f32>>,
+}
+
+#[cfg(feature = "cuda")]
+thread_local! {
+    static GPU_STATE: std::cell::RefCell<Option<GpuState>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(feature = "cuda")]
+fn gpu_init() -> Result<GpuState, String> {
+    let _ctx = cust::quick_init().map_err(|e| e.to_string())?;
+    let module = cust::module::Module::from_ptx(GEMV_F32_PTX, &[]).map_err(|e| e.to_string())?;
+    let stream = cust::stream::Stream::new(cust::stream::StreamFlags::DEFAULT, None)
+        .map_err(|e| e.to_string())?;
+    let mut cublas: cublas_sys::cublasHandle_t = std::ptr::null_mut();
+    // SAFETY: cuBLAS expects a valid out-pointer for handle creation.
+    let status = unsafe { cublas_sys::cublasCreate_v2(&mut cublas) };
+    if status != cublas_sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS {
+        return Err(format!("cublasCreate_v2 failed with status {status:?}"));
+    }
+    Ok(GpuState {
+        _ctx,
+        module,
+        stream,
+        cublas,
+        resident_f16: std::collections::HashMap::new(),
+        resident_f32: std::collections::HashMap::new(),
+    })
+}
+
+/// Run `f` with the thread-local GPU state, initializing it on first use.
+#[cfg(feature = "cuda")]
+fn with_gpu<R>(f: impl FnOnce(&mut GpuState) -> Result<R, String>) -> Result<R, String> {
+    GPU_STATE.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        if guard.is_none() {
+            *guard = Some(gpu_init()?);
+        }
+        f(guard.as_mut().expect("gpu state initialized"))
+    })
+}
 
 #[cfg(feature = "cuda")]
 pub fn gemv_f32_cuda(
@@ -188,16 +311,6 @@ pub fn gemv_f32_cuda(
 ) -> Result<(), GemvCudaError> {
     validate_gemv_dims(matrix, rows, cols, vector, output)?;
 
-    let _context = initialize_cuda()?;
-    let module = cust::module::Module::from_ptx(GEMV_F32_PTX, &[])?;
-    let stream = cust::stream::Stream::new(cust::stream::StreamFlags::DEFAULT, None)?;
-
-    let mut matrix_device = cust::memory::DeviceBuffer::from_slice(matrix)?;
-    let mut vector_device = cust::memory::DeviceBuffer::from_slice(vector)?;
-    let mut output_device = cust::memory::DeviceBuffer::zeroed(rows)?;
-
-    let block_size = 128_u32;
-    let grid_size = (rows as u32).div_ceil(block_size);
     let rows_u32 = u32::try_from(rows).map_err(|_| GemvCudaError::InvalidOutputLength {
         expected: u32::MAX as usize,
         actual: rows,
@@ -207,22 +320,62 @@ pub fn gemv_f32_cuda(
         actual: cols,
     })?;
 
-    let function = module.get_function(GEMV_KERNEL_NAME)?;
-    // SAFETY: Kernel parameters are valid device buffers and scalar dimensions.
-    unsafe {
-        cust::launch!(
-            function<<<grid_size, block_size, 0, stream>>>(
-                matrix_device.as_device_ptr(),
-                vector_device.as_device_ptr(),
-                output_device.as_device_ptr(),
-                rows_u32,
-                cols_u32
+    with_gpu(|gpu| {
+        // The matrix argument to a gemv is a model weight (output = W · x), so
+        // it is kept resident in VRAM and uploaded only once; activations flow
+        // through the small `vector`/`output` buffers. The cache key includes a
+        // content hash so callers that reuse a host allocation with new data do
+        // not receive stale GPU-resident weights.
+        let key = (
+            matrix.as_ptr() as usize,
+            matrix.len(),
+            hash_f32_slice(matrix),
+        );
+        if !gpu.resident_f32.contains_key(&key) {
+            let buffer = cust::memory::DeviceBuffer::from_slice(matrix).map_err(stringify)?;
+            gpu.resident_f32.insert(key, buffer);
+        }
+
+        let vector_device = cust::memory::DeviceBuffer::from_slice(vector).map_err(stringify)?;
+        let output_device = cust::memory::DeviceBuffer::<f32>::zeroed(rows).map_err(stringify)?;
+        let matrix_device = gpu
+            .resident_f32
+            .get(&key)
+            .expect("weight just inserted into resident cache");
+
+        // One warp (32 lanes) per row: launch rows*32 threads, 256/block.
+        let block_size = 256_u32;
+        let grid_size = rows_u32.saturating_mul(32).div_ceil(block_size);
+        let function = gpu
+            .module
+            .get_function(GEMV_KERNEL_NAME)
+            .map_err(stringify)?;
+        let stream = &gpu.stream;
+        // SAFETY: Kernel parameters are valid device buffers and scalar dimensions.
+        unsafe {
+            cust::launch!(
+                function<<<grid_size, block_size, 0, stream>>>(
+                    matrix_device.as_device_ptr(),
+                    vector_device.as_device_ptr(),
+                    output_device.as_device_ptr(),
+                    rows_u32,
+                    cols_u32
+                )
             )
-        )?;
-    }
-    stream.synchronize()?;
-    output_device.copy_to(output)?;
-    Ok(())
+            .map_err(stringify)?;
+        }
+        stream.synchronize().map_err(stringify)?;
+        output_device.copy_to(output).map_err(stringify)?;
+        Ok(())
+    })
+    .map_err(GemvCudaError::Cuda)
+}
+
+/// Map any `Display` error (e.g. `cust::error::CudaError`) into a `String`,
+/// the common error currency used inside [`with_gpu`] closures.
+#[cfg(feature = "cuda")]
+fn stringify<E: std::fmt::Display>(error: E) -> String {
+    error.to_string()
 }
 
 pub fn validate_gemv_dims(
@@ -304,21 +457,40 @@ pub fn gemv_quantized_cuda(
     vector: &[f32],
     output: &mut [f32],
 ) -> Result<(), GemvCudaError> {
-    if quantization != GgufQuantizationType::Q8_0 {
-        return Err(GemvCudaError::UnsupportedQuantizationType { quantization });
+    // Map the quantization type to its GPU dequant kernel + block geometry.
+    // Types without a GPU kernel are reported so the caller can fall back to the
+    // CPU quantized path.
+    let (dequant_kernel, block_bytes, vals_per_block) = dequant_kernel_for(quantization)
+        .ok_or(GemvCudaError::UnsupportedQuantizationType { quantization })?;
+
+    // Validate the quantized matrix / vector / output geometry.
+    if quantized_matrix.len() % block_bytes != 0 {
+        return Err(GemvCudaError::InvalidMatrixLength {
+            expected: quantized_matrix.len().next_multiple_of(block_bytes),
+            actual: quantized_matrix.len(),
+        });
     }
-    validate_q8_0_gemv_dims(quantized_matrix, rows, cols, vector, output)?;
+    let n_blocks = quantized_matrix.len() / block_bytes;
+    let expected_elems = rows.saturating_mul(cols);
+    if n_blocks.saturating_mul(vals_per_block) != expected_elems {
+        return Err(GemvCudaError::InvalidMatrixLength {
+            expected: expected_elems,
+            actual: n_blocks * vals_per_block,
+        });
+    }
+    if vector.len() != cols {
+        return Err(GemvCudaError::InvalidVectorLength {
+            expected: cols,
+            actual: vector.len(),
+        });
+    }
+    if output.len() != rows {
+        return Err(GemvCudaError::InvalidOutputLength {
+            expected: rows,
+            actual: output.len(),
+        });
+    }
 
-    let _context = initialize_cuda()?;
-    let module = cust::module::Module::from_ptx(GEMV_F32_PTX, &[])?;
-    let stream = cust::stream::Stream::new(cust::stream::StreamFlags::DEFAULT, None)?;
-
-    let matrix_device = cust::memory::DeviceBuffer::from_slice(quantized_matrix)?;
-    let vector_device = cust::memory::DeviceBuffer::from_slice(vector)?;
-    let output_device = cust::memory::DeviceBuffer::zeroed(rows)?;
-
-    let block_size = 128_u32;
-    let grid_size = (rows as u32).div_ceil(block_size);
     let rows_u32 = u32::try_from(rows).map_err(|_| GemvCudaError::InvalidOutputLength {
         expected: u32::MAX as usize,
         actual: rows,
@@ -327,23 +499,80 @@ pub fn gemv_quantized_cuda(
         expected: u32::MAX as usize,
         actual: cols,
     })?;
+    let n_blocks_u32 = u32::try_from(n_blocks).map_err(|_| GemvCudaError::InvalidMatrixLength {
+        expected: u32::MAX as usize,
+        actual: n_blocks,
+    })?;
 
-    let function = module.get_function(GEMV_Q8_0_KERNEL_NAME)?;
-    // SAFETY: Kernel parameters are valid device buffers and scalar dimensions.
-    unsafe {
-        cust::launch!(
-            function<<<grid_size, block_size, 0, stream>>>(
-                matrix_device.as_device_ptr(),
-                vector_device.as_device_ptr(),
-                output_device.as_device_ptr(),
-                rows_u32,
-                cols_u32
+    with_gpu(|gpu| {
+        // First use: upload the raw quantized weight, dequantize it on the GPU
+        // to resident f16 (stored as u16 bits), and cache it. Every later token
+        // reuses the resident half-precision weight — no re-upload, no CPU work.
+        // The cache key includes a content hash so a reused host allocation with
+        // mutated quantized bytes is re-uploaded rather than returning stale f16.
+        let key = (
+            quantized_matrix.as_ptr() as usize,
+            quantized_matrix.len(),
+            hash_bytes(quantized_matrix),
+        );
+        if !gpu.resident_f16.contains_key(&key) {
+            let raw =
+                cust::memory::DeviceBuffer::from_slice(quantized_matrix).map_err(stringify)?;
+            let weight =
+                cust::memory::DeviceBuffer::<u16>::zeroed(expected_elems).map_err(stringify)?;
+
+            let block_size = 256_u32;
+            let grid_size = n_blocks_u32.div_ceil(block_size);
+            let function = gpu.module.get_function(dequant_kernel).map_err(stringify)?;
+            let stream = &gpu.stream;
+            // SAFETY: device buffers are valid; nblocks bounds the kernel.
+            unsafe {
+                cust::launch!(
+                    function<<<grid_size, block_size, 0, stream>>>(
+                        raw.as_device_ptr(),
+                        weight.as_device_ptr(),
+                        n_blocks_u32
+                    )
+                )
+                .map_err(stringify)?;
+            }
+            stream.synchronize().map_err(stringify)?;
+            gpu.resident_f16.insert(key, weight);
+        }
+
+        let vector_device = cust::memory::DeviceBuffer::from_slice(vector).map_err(stringify)?;
+        let output_device = cust::memory::DeviceBuffer::<f32>::zeroed(rows).map_err(stringify)?;
+        let matrix_device = gpu
+            .resident_f16
+            .get(&key)
+            .expect("weight just dequantized into resident cache");
+
+        // One warp (32 lanes) per row: launch rows*32 threads, 256/block.
+        let block_size = 256_u32;
+        let grid_size = rows_u32.saturating_mul(32).div_ceil(block_size);
+        let function = gpu
+            .module
+            .get_function(GEMV_F16_KERNEL_NAME)
+            .map_err(stringify)?;
+        let stream = &gpu.stream;
+        // SAFETY: Kernel parameters are valid device buffers and scalar dimensions.
+        unsafe {
+            cust::launch!(
+                function<<<grid_size, block_size, 0, stream>>>(
+                    matrix_device.as_device_ptr(),
+                    vector_device.as_device_ptr(),
+                    output_device.as_device_ptr(),
+                    rows_u32,
+                    cols_u32
+                )
             )
-        )?;
-    }
-    stream.synchronize()?;
-    output_device.copy_to(output)?;
-    Ok(())
+            .map_err(stringify)?;
+        }
+        stream.synchronize().map_err(stringify)?;
+        output_device.copy_to(output).map_err(stringify)?;
+        Ok(())
+    })
+    .map_err(GemvCudaError::Cuda)
 }
 
 pub fn validate_gemm_dims(
@@ -382,20 +611,6 @@ pub fn validate_gemm_dims(
 }
 
 #[cfg(feature = "cuda")]
-fn cublas_status_to_error(
-    status: cublas_sys::cublasStatus_t,
-    op: &str,
-) -> Result<(), GemmCudaError> {
-    if status == cublas_sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS {
-        Ok(())
-    } else {
-        Err(GemmCudaError::Cuda(format!(
-            "{op} failed with status {status:?}"
-        )))
-    }
-}
-
-#[cfg(feature = "cuda")]
 pub fn gemm_f32_cuda(
     left_matrix: &[f32],
     rows: usize,
@@ -406,17 +621,6 @@ pub fn gemm_f32_cuda(
 ) -> Result<(), GemmCudaError> {
     validate_gemm_dims(left_matrix, rows, shared_dim, right_matrix, cols, output)?;
 
-    let _context = initialize_cuda()?;
-    let left_device = cust::memory::DeviceBuffer::from_slice(left_matrix)?;
-    let right_device = cust::memory::DeviceBuffer::from_slice(right_matrix)?;
-    let output_device = cust::memory::DeviceBuffer::<f32>::zeroed(output.len())?;
-
-    let mut handle: cublas_sys::cublasHandle_t = std::ptr::null_mut();
-    // SAFETY: cuBLAS expects a valid out-pointer for handle creation.
-    unsafe { cublas_status_to_error(cublas_sys::cublasCreate_v2(&mut handle), "cublasCreate_v2")? };
-
-    let alpha = 1.0_f32;
-    let beta = 0.0_f32;
     let m = i32::try_from(cols).map_err(|_| GemmCudaError::InvalidOutputLength {
         expected: i32::MAX as usize,
         actual: cols,
@@ -430,15 +634,25 @@ pub fn gemm_f32_cuda(
         actual: shared_dim,
     })?;
 
-    let lda = m;
-    let ldb = k;
-    let ldc = m;
+    with_gpu(|gpu| {
+        let left_device = cust::memory::DeviceBuffer::from_slice(left_matrix).map_err(stringify)?;
+        let right_device =
+            cust::memory::DeviceBuffer::from_slice(right_matrix).map_err(stringify)?;
+        let output_device =
+            cust::memory::DeviceBuffer::<f32>::zeroed(output.len()).map_err(stringify)?;
 
-    // SAFETY: device buffers are allocated and valid, dimensions and leading dimensions are consistent.
-    let gemm_result = unsafe {
-        cublas_status_to_error(
+        let alpha = 1.0_f32;
+        let beta = 0.0_f32;
+        let lda = m;
+        let ldb = k;
+        let ldc = m;
+
+        // SAFETY: device buffers are allocated and valid; dimensions and
+        // leading dimensions are consistent; the cuBLAS handle is cached and
+        // valid for the lifetime of this thread's GPU state.
+        let status = unsafe {
             cublas_sys::cublasSgemm_v2(
-                handle,
+                gpu.cublas,
                 cublas_sys::cublasOperation_t::CUBLAS_OP_N,
                 cublas_sys::cublasOperation_t::CUBLAS_OP_N,
                 m,
@@ -450,20 +664,17 @@ pub fn gemm_f32_cuda(
                 left_device.as_device_ptr().as_raw() as *const f32,
                 ldb,
                 &beta,
-                output_device.as_device_ptr().as_raw_mut() as *mut f32,
+                output_device.as_device_ptr().as_raw() as *mut f32,
                 ldc,
-            ),
-            "cublasSgemm_v2",
-        )
-    };
-
-    // SAFETY: handle is either null or created by cublasCreate_v2.
-    let destroy_result =
-        unsafe { cublas_status_to_error(cublas_sys::cublasDestroy_v2(handle), "cublasDestroy_v2") };
-    gemm_result?;
-    destroy_result?;
-    output_device.copy_to(output)?;
-    Ok(())
+            )
+        };
+        if status != cublas_sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS {
+            return Err(format!("cublasSgemm_v2 failed with status {status:?}"));
+        }
+        output_device.copy_to(output).map_err(stringify)?;
+        Ok(())
+    })
+    .map_err(GemmCudaError::Cuda)
 }
 
 #[cfg(test)]
@@ -578,6 +789,39 @@ mod tests {
         )
         .expect_err("left matrix size mismatch should fail");
         assert!(matches!(err, GemmCudaError::InvalidLeftMatrixLength { .. }));
+    }
+
+    #[test]
+    fn hash_detects_f32_slice_mutation() {
+        let mut data = vec![1.0_f32, 2.0, 3.0, 4.0];
+        let original = hash_f32_slice(&data);
+
+        data[2] = 99.0;
+        let mutated = hash_f32_slice(&data);
+        assert_ne!(
+            original, mutated,
+            "content hash must change when slice contents change"
+        );
+
+        data[2] = 3.0;
+        let restored = hash_f32_slice(&data);
+        assert_eq!(
+            original, restored,
+            "content hash must be deterministic for identical contents"
+        );
+    }
+
+    #[test]
+    fn hash_detects_byte_slice_mutation() {
+        let bytes = b"oxidize";
+        let original = hash_bytes(bytes);
+        let mut modified = bytes.to_vec();
+        modified[0] = b'O';
+        assert_ne!(
+            original,
+            hash_bytes(&modified),
+            "content hash must change when byte contents change"
+        );
     }
 
     #[test]

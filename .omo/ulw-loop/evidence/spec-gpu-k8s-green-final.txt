@@ -1,0 +1,21 @@
+GREEN CHECK happy_path: generated marker absent and current-state section present
+20:## 2. Current Oxidize State
+83:## 5. Target Architecture
+GREEN CHECK edge_completeness: required sections present
+148:## 6. Kubernetes API
+327:## 11. Failure Handling
+339:## 12. Security
+352:## 13. Observability
+371:## 14. Rollout Plan
+412:## 15. Acceptance Criteria
+GREEN CHECK regression_alignment: speculative implementation claims absent, future language present
+7:build specification, not a claim that all described GPU data-plane features
+43:The following are not complete production capabilities today and must be
+53:  future work.
+24:Oxidize already has a distributed mesh module in `oxidize-core/src/mesh/` with
+38:The mesh API is intentionally centralized through `oxidize-core/src/mesh/mod.rs`.
+442:- `oxidize-core/src/mesh/AGENTS.md` for mesh ownership and conventions.
+443:- `oxidize-core/src/mesh/mod.rs` for the public mesh API boundary.
+444:- `docs/research_exo_mesh_protocol.md` for prior art in libp2p-based
+446:- `docs/pagedattention_research_report.md` for paged KV and scheduler
+448:- `docs/perf_analysis_report.md` and `docs/perf_research_report.md` for current

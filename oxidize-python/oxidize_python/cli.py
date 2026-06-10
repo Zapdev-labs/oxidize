@@ -25,6 +25,7 @@ def main(argv: list[str] | None = None) -> int:
         "list": _list_command,
         "ls": _list_command,
         "serve": _serve_command,
+        "gpu-cluster": _gpu_cluster_command,
         "help": _help_command,
         "-h": _help_command,
         "--help": _help_command,
@@ -361,6 +362,99 @@ def _resolve_models_dir(raw: str) -> str:
     return str(candidate) if candidate.is_dir() else ""
 
 
+def _gpu_cluster_command(args: list[str]) -> int:
+    from oxidize_python import gpucluster as gc
+
+    sub = args[0] if args else "help"
+    if sub == "profiles":
+        for p in gc.all_profiles():
+            print(
+                f"{p.family.slug:<14} product={p.product:<26} arch={p.generation:<9} "
+                f"mem={p.memory_mib}MiB tdp={p.tdp_watts}W nvlink={p.nvlink} "
+                f"mig={p.mig_capable} timeslice={p.time_slice_replicas} net={p.network_class}"
+            )
+        return 0
+    if sub == "detect":
+        gpus = gc.detect_gpus()
+        if not gpus:
+            print("no NVIDIA GPUs detected (nvidia-smi unavailable or no devices)")
+            return 0
+        for g in gpus:
+            fam = g.family.slug if g.family else "unknown"
+            print(
+                f"GPU {g.index}: {g.name} ({g.memory_total_mib}MiB) "
+                f"family={fam} mig={g.mig_enabled}"
+            )
+        print("--- summary ---")
+        for fam, n in gc.summarize(gpus):
+            print(f"{fam.slug}: {n}")
+        return 0
+    if sub == "generate":
+        if args[1:] and args[1] in ("-h", "--help"):
+            print(
+                "Usage: oxidize gpu-cluster generate [options]\n\n"
+                "Options:\n"
+                "  --family b200|a100|rtx-pro-6000   GPU family (default: all)\n"
+                "  --nodes N                         Number of nodes (default: per-family preset)\n"
+                "  --gpus-per-node N                 GPUs per node (default: per-family preset)"
+            )
+            return 0
+        p = argparse.ArgumentParser(prog="oxidize gpu-cluster generate", add_help=False)
+        p.add_argument("--family", default="")
+        p.add_argument("--nodes", type=int, default=0)
+        p.add_argument("--gpus-per-node", type=int, default=0)
+        ns = p.parse_args(args[1:])
+
+        if ns.nodes < 0 or ns.gpus_per_node < 0:
+            print("error: --nodes and --gpus-per-node must be positive integers", file=sys.stderr)
+            return 2
+
+        if ns.family:
+            fam = gc.GpuFamily.from_slug(ns.family)
+            if fam is None:
+                print("error: --family expects b200|a100|rtx-pro-6000", file=sys.stderr)
+                return 2
+            defaults_nodes = {
+                gc.GpuFamily.B200: 8, gc.GpuFamily.A100: 16, gc.GpuFamily.RTX_PRO_6000: 4
+            }
+            defaults_gpn = {
+                gc.GpuFamily.B200: 8, gc.GpuFamily.A100: 8, gc.GpuFamily.RTX_PRO_6000: 2
+            }
+            count = ns.nodes or defaults_nodes[fam]
+            gpn = ns.gpus_per_node or defaults_gpn[fam]
+            specs = [gc.NodePoolSpec(fam, count, gpn)]
+        else:
+            specs = [
+                gc.NodePoolSpec(gc.GpuFamily.B200, 8, 8),
+                gc.NodePoolSpec(gc.GpuFamily.A100, 16, 8),
+                gc.NodePoolSpec(gc.GpuFamily.RTX_PRO_6000, 4, 2),
+            ]
+        families = [s.family for s in specs]
+
+        print(gc.node_pools_yaml(specs), end="")
+        print("---")
+        print(gc.device_plugin_config_yaml(families), end="")
+        for f in families:
+            mig = gc.mig_config_yaml(f)
+            if mig is not None:
+                print("---")
+                print(mig, end="")
+        print("---")
+        print(gc.prometheus_rules_yaml(), end="")
+        for f in families:
+            print("---")
+            print(gc.helm_values_yaml(f), end="")
+        return 0
+
+    print(
+        "usage: oxidize gpu-cluster <generate|detect|profiles>\n\n"
+        "generate [--family b200|a100|rtx-pro-6000] [--nodes N] [--gpus-per-node N]\n"
+        "detect   probe local NVIDIA GPUs via nvidia-smi\n"
+        "profiles list known GPU tier profiles"
+    )
+    return 0
+
+
 def _help_command(_args: list[str]) -> int:
     _print_help()
     return 0
@@ -377,6 +471,7 @@ Commands:
   bench <model>            Decode throughput benchmark
   inspect <model.gguf>     Print GGUF metadata and tensors
   serve [options]          Start the OpenAI-compatible server
+  gpu-cluster <sub>        GPU cluster helpers (generate, detect, profiles)
   list                     List local GGUF models in ./models""",
         file=out,
     )

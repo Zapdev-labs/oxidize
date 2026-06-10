@@ -20,6 +20,14 @@ fn main() {
             println!("cargo:rustc-link-search=native={}", lib64.display());
             println!("cargo:rustc-link-lib=dylib=cudart");
         }
+
+        // When the `cuda` feature is on, compile the GEMV kernels from CUDA C
+        // source to PTX with nvcc. Generating PTX at build time (rather than
+        // committing hand-written PTX) guarantees it is valid for the installed
+        // toolkit and forward-JIT-compatible with newer GPUs (e.g. sm_120).
+        if env::var_os("CARGO_FEATURE_CUDA").is_some() {
+            compile_cuda_kernels(&cuda_root);
+        }
     }
 
     if detect_metal_available() {
@@ -36,6 +44,42 @@ fn main() {
 
     if detect_mlx_available() {
         println!("cargo:rustc-cfg=mlx_available");
+    }
+}
+
+/// Compile `kernels/gemv_f32.cu` to PTX in `OUT_DIR` using nvcc.
+///
+/// `-arch=compute_75` emits a virtual-architecture PTX that the driver JITs to
+/// the physical GPU at load time; it forward-compiles to any newer GPU while
+/// staying broadly compatible. The crate embeds the result via
+/// `include_str!(concat!(env!("OUT_DIR"), "/gemv_f32.ptx"))`.
+fn compile_cuda_kernels(cuda_root: &Path) {
+    let out_dir = env::var("OUT_DIR").expect("OUT_DIR is set by cargo");
+    let ptx_out = Path::new(&out_dir).join("gemv_f32.ptx");
+    let src = Path::new("kernels/gemv_f32.cu");
+    println!("cargo:rerun-if-changed=kernels/gemv_f32.cu");
+
+    let nvcc = {
+        let candidate = cuda_root.join("bin").join("nvcc");
+        if candidate.is_file() {
+            candidate
+        } else {
+            PathBuf::from("nvcc")
+        }
+    };
+
+    let status = std::process::Command::new(&nvcc)
+        .arg("-ptx")
+        .arg("-arch=compute_75")
+        .arg("-o")
+        .arg(&ptx_out)
+        .arg(src)
+        .status();
+
+    match status {
+        Ok(s) if s.success() => {}
+        Ok(s) => panic!("nvcc failed to compile {}: exit {s}", src.display()),
+        Err(e) => panic!("failed to invoke nvcc ({}): {e}", nvcc.display()),
     }
 }
 
