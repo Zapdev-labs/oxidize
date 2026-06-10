@@ -1218,10 +1218,7 @@ pub fn gemv_quantized_experts_f32(
             && !q4_k_q8_k_vnni_available()
             && rows.is_multiple_of(32);
         if use_x4 {
-            output
-                .par_chunks_mut(32)
-                .enumerate()
-                .for_each(|(chunk_idx, out_chunk)| {
+            run_output_chunks(output, 32, |chunk_idx, out_chunk| {
                     let i0 = chunk_idx * 32;
                     let slot = i0 / rows;
                     let row0 = i0 % rows;
@@ -1302,10 +1299,7 @@ pub fn gemv_quantized_experts_f32(
             );
         }
         if rows.is_multiple_of(32) {
-            output
-                .par_chunks_mut(32)
-                .enumerate()
-                .for_each(|(chunk_idx, out_chunk)| {
+            run_output_chunks(output, 32, |chunk_idx, out_chunk| {
                     let i0 = chunk_idx * 32;
                     let slot = i0 / rows;
                     let row0 = i0 % rows;
@@ -1453,10 +1447,7 @@ pub fn gemv_quantized_experts_gate_up_f32(
 
     // One region over both projections; 32 | rows guarantees a chunk never
     // spans a projection or expert-slot boundary.
-    output
-        .par_chunks_mut(32)
-        .enumerate()
-        .for_each(|(chunk_idx, out_chunk)| {
+    run_output_chunks(output, 32, |chunk_idx, out_chunk| {
             let i0 = chunk_idx * 32;
             let matrix = if i0 < half { gate_matrix } else { up_matrix };
             let rem = i0 % half;
@@ -1488,6 +1479,28 @@ pub fn gemv_quantized_experts_gate_up_f32(
             }
         });
     Ok(())
+}
+
+
+/// Run `body(chunk_idx, out_chunk)` over `output` split into `chunk`-sized
+/// pieces, dispatched through the persistent spin pool (decode-latency path).
+fn run_output_chunks(
+    output: &mut [f32],
+    chunk: usize,
+    body: impl Fn(usize, &mut [f32]) + Sync,
+) {
+    let len = output.len();
+    let base = output.as_mut_ptr() as usize;
+    let n_chunks = len.div_ceil(chunk);
+    crate::spinpool::run_chunks(n_chunks, |ci| {
+        let start = ci * chunk;
+        let end = (start + chunk).min(len);
+        // Safety: chunks are disjoint by construction and `output` outlives
+        // the blocking run_chunks call.
+        let slice =
+            unsafe { std::slice::from_raw_parts_mut((base as *mut f32).add(start), end - start) };
+        body(ci, slice);
+    });
 }
 
 pub fn gemv_quantized_f32(
@@ -1665,10 +1678,9 @@ fn gemv_q6_k_q8_k_fused(
         }
     };
     if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
-        output
-            .par_chunks_mut(32)
-            .enumerate()
-            .for_each(|(chunk_idx, out_chunk)| run_range(out_chunk, chunk_idx * 32));
+        run_output_chunks(output, 32, |chunk_idx, out_chunk| {
+            run_range(out_chunk, chunk_idx * 32)
+        });
     } else {
         run_range(output, 0);
     }
@@ -1762,10 +1774,9 @@ fn gemv_q4_k_q8_k_fused(
     };
 
     if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
-        output
-            .par_chunks_mut(32)
-            .enumerate()
-            .for_each(|(chunk_idx, out_chunk)| run_range(out_chunk, chunk_idx * 32));
+        run_output_chunks(output, 32, |chunk_idx, out_chunk| {
+            run_range(out_chunk, chunk_idx * 32)
+        });
     } else {
         run_range(output, 0);
     }
