@@ -49,6 +49,7 @@ impl ModelArchitecture {
                 | "qwen2"
                 | "qwen2moe"
                 | "qwen3"
+                | "qwen3moe"
                 | "qwen35"
                 | "qwen3_5_moe"
                 | "qwen3_5_moe_text"
@@ -317,7 +318,10 @@ impl InferenceConfig {
             .or_else(|| {
                 token_embd_dims.as_ref().and_then(|d| match d.len() {
                     0 | 1 => None,
-                    _ => d.first().copied().map(|v| v as u32),
+                    // GGUF dim order differs between writers (llama.cpp files
+                    // store hidden-first, oxidize-converted files vocab-first);
+                    // the vocab axis is always the larger of the two.
+                    _ => d.iter().copied().max().map(|v| v as u32),
                 })
             })
             .map(|v| v as usize)
