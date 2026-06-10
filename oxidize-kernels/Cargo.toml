@@ -1,0 +1,12 @@
+[package]
+name = "oxidize-kernels"
+description = "OXK: hand-tuned CPU kernels for quantized GEMV (Q4_K first)"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+
+[[bench]]
+name = "oxk_q4k_bench"
+harness = false

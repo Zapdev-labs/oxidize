@@ -20,6 +20,9 @@ path = "src/bin/bench.rs"
 name = "inspect_gguf"
 path = "src/bin/inspect_gguf.rs"
 
+[features]
+oxk = ["oxidize-core/oxk", "oxidize-server/oxk"]
+
 [dependencies]
 clap.workspace = true
 oxidize-core = { path = "../oxidize-core" }

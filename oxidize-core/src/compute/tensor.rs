@@ -1232,6 +1232,19 @@ pub fn gemv_quantized_experts_f32(
                     let expert = selected[slot];
                     let qs = if shared { 0 } else { slot };
                     let q8 = &q8k[qs * q8_stride..(qs + 1) * q8_stride];
+                    // OXK opt-in (OXIDIZE_GEMV=oxk): same chunk, ×8 kernels.
+                    #[cfg(feature = "oxk")]
+                    if gemv_mode() == GemvMode::Oxk {
+                        let start = expert * expert_bytes + row0 * row_bytes;
+                        let end = start + out_chunk.len() * row_bytes;
+                        oxidize_kernels::gemv_q4k_range(
+                            &matrix[start..end],
+                            blocks_per_row,
+                            q8,
+                            out_chunk,
+                        );
+                        return;
+                    }
                     let mut r = 0;
                     while r < out_chunk.len() {
                         if r + 4 <= out_chunk.len() {
@@ -1463,6 +1476,14 @@ pub fn gemv_quantized_experts_gate_up_f32(
             let slot = rem / rows;
             let row0 = rem % rows;
             let expert = selected[slot];
+            // OXK opt-in (OXIDIZE_GEMV=oxk): same chunk, ×8 kernels.
+            #[cfg(feature = "oxk")]
+            if gemv_mode() == GemvMode::Oxk {
+                let start = expert * expert_bytes + row0 * row_bytes;
+                let end = start + out_chunk.len() * row_bytes;
+                oxidize_kernels::gemv_q4k_range(&matrix[start..end], blocks_per_row, q8k, out_chunk);
+                return;
+            }
             let mut r = 0;
             while r < out_chunk.len() {
                 if r + 4 <= out_chunk.len() {
@@ -1610,6 +1631,87 @@ fn q4_k_q8_k_vnni_available() -> bool {
     #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
     {
         false
+    }
+}
+
+/// Which Q4_K GEMV implementation services the AVX2 decode hot path.
+/// Selected once from `OXIDIZE_GEMV` (see the OXK migration plan): `legacy`
+/// (default) keeps the tensor.rs intrinsics untouched, `oxk` routes contiguous
+/// row ranges to the `oxidize-kernels` crate, and `shadow` runs both and
+/// compares (dev/bench only). Without the `oxk` cargo feature every value
+/// resolves to `Legacy`.
+#[cfg_attr(not(feature = "oxk"), allow(dead_code))]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum GemvMode {
+    Legacy,
+    #[cfg(feature = "oxk")]
+    Oxk,
+    #[cfg(feature = "oxk")]
+    Shadow,
+}
+
+#[cfg_attr(not(feature = "oxk"), allow(dead_code))]
+fn gemv_mode() -> GemvMode {
+    static MODE: std::sync::OnceLock<GemvMode> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| match std::env::var("OXIDIZE_GEMV").as_deref() {
+        #[cfg(feature = "oxk")]
+        Ok("oxk") => GemvMode::Oxk,
+        #[cfg(feature = "oxk")]
+        Ok("shadow") => GemvMode::Shadow,
+        Ok("legacy") | Ok("") | Err(_) => GemvMode::Legacy,
+        Ok(other) => {
+            eprintln!(
+                "OXIDIZE_GEMV={other} not available in this build (unknown value or \
+                 'oxk' feature not compiled); falling back to legacy"
+            );
+            GemvMode::Legacy
+        }
+    })
+}
+
+/// Shadow mode: run the legacy range into `out`, the OXK range into a scratch
+/// buffer, compare, and accumulate per-implementation wall time. Mismatches
+/// beyond 1e-4 relative error and periodic timing summaries go to stderr.
+#[cfg(feature = "oxk")]
+fn shadow_q4k_range(
+    rows: &[u8],
+    blocks_per_row: usize,
+    q8k: &[u8],
+    out: &mut [f32],
+    legacy: impl FnOnce(&mut [f32]),
+) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static LEGACY_NS: AtomicU64 = AtomicU64::new(0);
+    static OXK_NS: AtomicU64 = AtomicU64::new(0);
+    static CALLS: AtomicU64 = AtomicU64::new(0);
+    static MISMATCHES: AtomicU64 = AtomicU64::new(0);
+
+    let t0 = std::time::Instant::now();
+    legacy(out);
+    let t1 = std::time::Instant::now();
+    let mut scratch = vec![0.0_f32; out.len()];
+    oxidize_kernels::gemv_q4k_range(rows, blocks_per_row, q8k, &mut scratch);
+    let t2 = std::time::Instant::now();
+
+    for (i, (l, o)) in out.iter().zip(scratch.iter()).enumerate() {
+        let rel = (l - o).abs() / l.abs().max(1e-6);
+        if rel > 1e-4 && MISMATCHES.fetch_add(1, Ordering::Relaxed) < 16 {
+            eprintln!("[oxk-shadow] mismatch row {i}: legacy={l} oxk={o} rel={rel:.3e}");
+        }
+    }
+    let legacy_ns =
+        LEGACY_NS.fetch_add(t1.duration_since(t0).as_nanos() as u64, Ordering::Relaxed);
+    let oxk_ns = OXK_NS.fetch_add(t2.duration_since(t1).as_nanos() as u64, Ordering::Relaxed);
+    let calls = CALLS.fetch_add(1, Ordering::Relaxed) + 1;
+    if calls.is_multiple_of(65_536) {
+        eprintln!(
+            "[oxk-shadow] {} ranges: legacy {:.3}s oxk {:.3}s (oxk = {:.1}% of legacy), mismatched rows {}",
+            calls,
+            legacy_ns as f64 / 1e9,
+            oxk_ns as f64 / 1e9,
+            oxk_ns as f64 / legacy_ns.max(1) as f64 * 100.0,
+            MISMATCHES.load(Ordering::Relaxed),
+        );
     }
 }
 
@@ -1766,22 +1868,54 @@ fn gemv_q4_k_q8_k_fused(
         cfg!(any(target_arch = "x86", target_arch = "x86_64")) && !q4_k_q8_k_vnni_available();
     let run_range = |out_range: &mut [f32], row0: usize| {
         let weights = crate::numa::local_slice(weights);
-        let mut r = 0;
-        while r < out_range.len() {
-            if use_x4 && r + 4 <= out_range.len() && row0 + r + 4 <= rows {
-                let base = unsafe { weights.as_ptr().add((row0 + r) * row_bytes) };
-                let mut quad = [0.0_f32; 4];
-                // Safety: avx2+fma verified before dispatch; rows are in range.
-                unsafe {
-                    q4_k_q8_k_row_dot_x4_avx2(base, row_bytes, blocks_per_row, &q8k, &mut quad)
-                };
-                out_range[r..r + 4].copy_from_slice(&quad);
-                r += 4;
-            } else {
-                out_range[r] = compute_row(row0 + r);
-                r += 1;
+        let legacy_range = |out_range: &mut [f32]| {
+            let mut r = 0;
+            while r < out_range.len() {
+                if use_x4 && r + 4 <= out_range.len() && row0 + r + 4 <= rows {
+                    let base = unsafe { weights.as_ptr().add((row0 + r) * row_bytes) };
+                    let mut quad = [0.0_f32; 4];
+                    // Safety: avx2+fma verified before dispatch; rows are in range.
+                    unsafe {
+                        q4_k_q8_k_row_dot_x4_avx2(base, row_bytes, blocks_per_row, &q8k, &mut quad)
+                    };
+                    out_range[r..r + 4].copy_from_slice(&quad);
+                    r += 4;
+                } else {
+                    out_range[r] = compute_row(row0 + r);
+                    r += 1;
+                }
+            }
+        };
+        // OXK dispatch choke point (single switch, OXIDIZE_GEMV): threading,
+        // NUMA translation and Q8_K quantization above are shared by all modes.
+        #[cfg(feature = "oxk")]
+        {
+            let start = row0 * row_bytes;
+            let end = start + out_range.len() * row_bytes;
+            match gemv_mode() {
+                GemvMode::Oxk => {
+                    oxidize_kernels::gemv_q4k_range(
+                        &weights[start..end],
+                        blocks_per_row,
+                        &q8k,
+                        out_range,
+                    );
+                    return;
+                }
+                GemvMode::Shadow => {
+                    shadow_q4k_range(
+                        &weights[start..end],
+                        blocks_per_row,
+                        &q8k,
+                        out_range,
+                        legacy_range,
+                    );
+                    return;
+                }
+                GemvMode::Legacy => {}
             }
         }
+        legacy_range(out_range);
     };
 
     if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
@@ -5544,6 +5678,113 @@ mod tests {
     const CUDA_TOL: f32 = 0.5;
     #[cfg(not(feature = "cuda"))]
     const CUDA_TOL: f32 = 1e-4;
+
+    /// Gate A (OXK plan): the oxidize-kernels Q4_K row dots must match the
+    /// legacy tensor.rs kernels bit-for-bit (same integer op sequence and f32
+    /// combine order), and its Q8_K activation quantizer must be byte-equal.
+    #[test]
+    #[cfg(all(feature = "oxk", any(target_arch = "x86", target_arch = "x86_64")))]
+    fn oxk_q4_k_kernels_match_legacy_exactly() {
+        use crate::quantization::{quantize_scalar, quantized_size};
+        if !q4_k_q8_k_avx2_available() {
+            return;
+        }
+        let (rows, cols) = (24usize, 512usize);
+        let blocks_per_row = cols / QK_K;
+        let total = rows * cols;
+        let mut bytes = vec![0u8; total * 4];
+        for i in 0..total {
+            let v = (((i * 31 + 7) % 211) as f32) / 53.0 - 2.0;
+            bytes[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
+        }
+        let q_size = quantized_size(GgufQuantizationType::Q4_K_M, total).unwrap();
+        let mut q = vec![0u8; q_size];
+        quantize_scalar(
+            GgufQuantizationType::F32,
+            GgufQuantizationType::Q4_K_M,
+            &bytes,
+            &mut q,
+        )
+        .unwrap();
+        let input: Vec<f32> = (0..cols)
+            .map(|i| (((i * 17 + 3) % 113) as f32) / 29.0 - 1.5)
+            .collect();
+
+        // Q8_K quantizer parity (byte-exact).
+        let mut q8k_legacy = vec![0u8; blocks_per_row * BLOCK_Q8_K_BYTES];
+        quantize_vector_q8_k_into(&input, blocks_per_row, &mut q8k_legacy);
+        let mut q8k_oxk = vec![0u8; blocks_per_row * BLOCK_Q8_K_BYTES];
+        oxidize_kernels::quantize_q8_k_into(&input, blocks_per_row, &mut q8k_oxk);
+        assert_eq!(q8k_legacy, q8k_oxk, "Q8_K quantizer bytes differ");
+
+        let row_bytes = blocks_per_row * BLOCK_Q4_K_SIZE;
+        // Legacy single-row reference (AVX2 kernel, not VNNI, to pin the exact
+        // instruction family OXK replicates; the two are bit-equal anyway).
+        let legacy: Vec<f32> = (0..rows)
+            .map(|r| unsafe {
+                q4_k_q8_k_row_dot_avx2(
+                    &q[r * row_bytes..(r + 1) * row_bytes],
+                    blocks_per_row,
+                    &q8k_legacy,
+                )
+            })
+            .collect();
+
+        // OXK scalar reference vs legacy AVX2: exact.
+        for (r, &want) in legacy.iter().enumerate() {
+            let got = oxidize_kernels::q4k_q8k_row_dot_scalar(
+                &q[r * row_bytes..(r + 1) * row_bytes],
+                blocks_per_row,
+                &q8k_oxk,
+            );
+            assert_eq!(got.to_bits(), want.to_bits(), "oxk scalar row {r}");
+        }
+
+        // OXK x1 / x4 / x8 vs legacy: exact.
+        for (r, &want) in legacy.iter().enumerate() {
+            let got = unsafe {
+                oxidize_kernels::q4k_q8k_row_dot_avx2(
+                    &q[r * row_bytes..(r + 1) * row_bytes],
+                    blocks_per_row,
+                    &q8k_oxk,
+                )
+            };
+            assert_eq!(got.to_bits(), want.to_bits(), "oxk x1 row {r}");
+        }
+        let mut quad = [0.0f32; 4];
+        unsafe {
+            oxidize_kernels::q4k_q8k_row_dot_x4_avx2(
+                q.as_ptr(),
+                row_bytes,
+                blocks_per_row,
+                &q8k_oxk,
+                &mut quad,
+            )
+        };
+        for (r, &got) in quad.iter().enumerate() {
+            assert_eq!(got.to_bits(), legacy[r].to_bits(), "oxk x4 row {r}");
+        }
+        let mut octet = [0.0f32; 8];
+        unsafe {
+            oxidize_kernels::q4k_q8k_row_dot_x8_avx2(
+                q.as_ptr(),
+                row_bytes,
+                blocks_per_row,
+                &q8k_oxk,
+                &mut octet,
+            )
+        };
+        for (r, &got) in octet.iter().enumerate() {
+            assert_eq!(got.to_bits(), legacy[r].to_bits(), "oxk x8 row {r}");
+        }
+
+        // Range helper over an x8+x4+x1 tail split (24 = 8+8+4+4 tails inside).
+        let mut out = vec![0.0f32; rows];
+        oxidize_kernels::gemv_q4k_range(&q, blocks_per_row, &q8k_oxk, &mut out);
+        for (r, &got) in out.iter().enumerate() {
+            assert_eq!(got.to_bits(), legacy[r].to_bits(), "oxk range row {r}");
+        }
+    }
 
     #[test]
     #[cfg(not(feature = "cuda"))]

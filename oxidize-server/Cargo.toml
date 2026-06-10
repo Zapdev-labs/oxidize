@@ -12,6 +12,9 @@ path = "src/lib.rs"
 name = "oxidize-server"
 path = "src/main.rs"
 
+[features]
+oxk = ["oxidize-core/oxk"]
+
 [dependencies]
 axum = { workspace = true, features = ["ws"] }
 clap.workspace = true
