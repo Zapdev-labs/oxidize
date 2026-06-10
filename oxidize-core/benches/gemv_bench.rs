@@ -54,6 +54,24 @@ fn bench_gemv_q8_0(rows: usize, cols: usize, iters: usize) -> Duration {
 }
 
 fn main() {
+    #[cfg(not(feature = "cuda"))]
+    {
+        eprintln!("ERROR: This benchmark requires the 'cuda' feature to be enabled.");
+        eprintln!("       Run with: cargo run --bench gemv_bench --features cuda");
+        std::process::exit(1);
+    }
+
+    #[cfg(feature = "cuda")]
+    {
+        use oxidize_core::cuda::cuda_build_info;
+        let info = cuda_build_info();
+        if !info.detected_at_build {
+            eprintln!("ERROR: CUDA was not detected at build time.");
+            eprintln!("       Re-build with CUDA toolkit installed and the 'cuda' feature enabled.");
+            std::process::exit(1);
+        }
+    }
+
     println!("=== Oxidize CUDA GEMV Benchmark ===\n");
 
     let configs = vec![

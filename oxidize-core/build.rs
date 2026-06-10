@@ -40,12 +40,19 @@ fn main() {
                     println!("cargo:rustc-env=OXIDIZE_CUDA_PTX={}", ptx_path.display());
                 }
                 Ok(s) => {
-                    eprintln!("warning: nvcc PTX compilation failed with status {}", s);
+                    panic!("nvcc PTX compilation failed with status {}", s);
                 }
                 Err(e) => {
-                    eprintln!("warning: failed to run nvcc: {}", e);
+                    panic!("failed to run nvcc: {}", e);
                 }
             }
+        } else {
+            panic!(
+                "CUDA root detected at {} but nvcc not found at {}. \
+                 The cuda feature requires nvcc to compile kernels.",
+                cuda_root.display(),
+                nvcc.display()
+            );
         }
     }
 

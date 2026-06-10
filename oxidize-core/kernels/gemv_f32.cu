@@ -35,6 +35,9 @@ __device__ __forceinline__ float warp_reduce_sum(float v) {
     return v;
 }
 
+// NOTE: This kernel is currently unused by the CUDA backend; cuBLAS sgemv is
+// preferred for f32 GEMV.  It is kept in the PTX so that existing tests and
+// the GEMV_KERNEL_NAME constant remain valid.
 extern "C" __global__ void gemv_f32_kernel(
     const float* matrix, const float* vector, float* output,
     unsigned int rows, unsigned int cols)
@@ -228,8 +231,8 @@ extern "C" __global__ void gemv_q4_0_kernel(
 #pragma unroll
         for (int i = 0; i < 16; i++) {
             unsigned char qb = q[i];
-            float v0 = d * (float)(qb & 0xF);
-            float v1 = d * (float)(qb >> 4);
+            float v0 = d * ((float)(qb & 0xF) - 8.0f);
+            float v1 = d * ((float)(qb >> 4) - 8.0f);
             sum += v0 * vector[vec_base + i * 2];
             sum += v1 * vector[vec_base + i * 2 + 1];
         }

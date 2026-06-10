@@ -1225,6 +1225,7 @@ pub fn gemv_quantized_experts_f32(
             && rows.is_multiple_of(32);
         if use_x4 {
             run_output_chunks(output, GEMV_CHUNK_ROWS, |chunk_idx, out_chunk| {
+                    let matrix = crate::numa::local_slice(matrix);
                     let i0 = chunk_idx * GEMV_CHUNK_ROWS;
                     let slot = i0 / rows;
                     let row0 = i0 % rows;
@@ -1306,6 +1307,7 @@ pub fn gemv_quantized_experts_f32(
         }
         if rows.is_multiple_of(32) {
             run_output_chunks(output, GEMV_CHUNK_ROWS, |chunk_idx, out_chunk| {
+                    let matrix = crate::numa::local_slice(matrix);
                     let i0 = chunk_idx * GEMV_CHUNK_ROWS;
                     let slot = i0 / rows;
                     let row0 = i0 % rows;
@@ -1455,7 +1457,8 @@ pub fn gemv_quantized_experts_gate_up_f32(
     // spans a projection or expert-slot boundary.
     run_output_chunks(output, GEMV_CHUNK_ROWS, |chunk_idx, out_chunk| {
             let i0 = chunk_idx * GEMV_CHUNK_ROWS;
-            let matrix = if i0 < half { gate_matrix } else { up_matrix };
+            let matrix =
+                crate::numa::local_slice(if i0 < half { gate_matrix } else { up_matrix });
             let rem = i0 % half;
             let slot = rem / rows;
             let row0 = rem % rows;
@@ -1663,6 +1666,7 @@ fn gemv_q6_k_q8_k_fused(
     let row_bytes = blocks_per_row * BLOCK_Q6_K_SIZE;
 
     let run_range = |out_range: &mut [f32], row0: usize| {
+        let weights = crate::numa::local_slice(weights);
         let mut r = 0;
         while r < out_range.len() {
             if r + 4 <= out_range.len() && row0 + r + 4 <= rows {
@@ -1761,6 +1765,7 @@ fn gemv_q4_k_q8_k_fused(
     let use_x4 =
         cfg!(any(target_arch = "x86", target_arch = "x86_64")) && !q4_k_q8_k_vnni_available();
     let run_range = |out_range: &mut [f32], row0: usize| {
+        let weights = crate::numa::local_slice(weights);
         let mut r = 0;
         while r < out_range.len() {
             if use_x4 && r + 4 <= out_range.len() && row0 + r + 4 <= rows {
@@ -5536,7 +5541,7 @@ mod tests {
     /// CPU references.  The GPU dequantizes to f16 before GEMV, so a small
     /// round-trip error (~0.01-0.5) is expected and acceptable.
     #[cfg(feature = "cuda")]
-    const CUDA_TOL: f32 = 1.0;
+    const CUDA_TOL: f32 = 0.5;
     #[cfg(not(feature = "cuda"))]
     const CUDA_TOL: f32 = 1e-4;
 

@@ -281,6 +281,10 @@ struct GpuState {
     layer_map: std::collections::HashMap<LayerId, LayerEntry>,
     /// Current bytes used by resident weights (excludes pools / scratch).
     resident_bytes: usize,
+    /// Keys resident in `resident_f16` that are NOT owned by any layer.
+    /// These are lazily cached by `gemv_quantized_cuda` and must be
+    /// subject to the same budget enforcement as layer-managed weights.
+    orphan_f16_keys: Vec<(usize, usize)>,
 }
 
 #[cfg(feature = "cuda")]
@@ -322,6 +326,7 @@ impl GpuState {
         let max_layers = self.layer_config.max_resident_layers;
         let max_bytes = self.layer_config.max_vram_bytes;
 
+        // First evict LRU layers.
         loop {
             let over_layer_limit = max_layers > 0 && self.layer_lru.len() > max_layers;
             let over_byte_limit = max_bytes > 0 && self.resident_bytes > max_bytes;
@@ -334,26 +339,49 @@ impl GpuState {
                 break;
             }
         }
+
+        // If still over byte budget, evict orphan (non-layer) f16 entries LRU-style.
+        while max_bytes > 0 && self.resident_bytes > max_bytes && !self.orphan_f16_keys.is_empty() {
+            let key = self.orphan_f16_keys.remove(0);
+            if let Some(buf) = self.resident_f16.remove(&key) {
+                self.resident_bytes -= buf.len() * std::mem::size_of::<u16>();
+                drop(buf);
+            }
+        }
     }
 
     fn evict_layer_internal(&mut self, layer: LayerId) {
         if let Some(entry) = self.layer_map.remove(&layer) {
             for key in &entry.f32_keys {
-                if let Some(buf) = self.resident_f32.remove(key) {
-                    self.resident_bytes -= buf.len() * std::mem::size_of::<f32>();
-                    drop(buf);
+                // Only remove if no other resident layer still references this key.
+                let other_refs = self.layer_map.values().any(|e| e.f32_keys.contains(key));
+                if !other_refs {
+                    if let Some(buf) = self.resident_f32.remove(key) {
+                        self.resident_bytes -= buf.len() * std::mem::size_of::<f32>();
+                        drop(buf);
+                    }
                 }
             }
             for key in &entry.f16_keys {
-                if let Some(buf) = self.resident_f16.remove(key) {
-                    self.resident_bytes -= buf.len() * std::mem::size_of::<u16>();
-                    drop(buf);
+                let other_refs = self.layer_map.values().any(|e| e.f16_keys.contains(key));
+                if !other_refs {
+                    if let Some(buf) = self.resident_f16.remove(key) {
+                        self.resident_bytes -= buf.len() * std::mem::size_of::<u16>();
+                        drop(buf);
+                    }
                 }
             }
         }
     }
 }
 
+/// Thread-local GPU state.
+///
+/// **Limitation:** Each thread that calls a CUDA kernel gets its own
+/// `GpuState` (CUDA context, module, caches, etc.). In a multi-threaded
+/// program this means weight caches are duplicated per thread, which can
+/// multiply VRAM usage. For best efficiency run GPU work from a single
+/// thread (e.g. one dedicated inference thread).
 #[cfg(feature = "cuda")]
 thread_local! {
     static GPU_STATE: std::cell::RefCell<Option<GpuState>> =
@@ -384,6 +412,7 @@ fn gpu_init() -> Result<GpuState, String> {
         layer_lru: std::collections::VecDeque::new(),
         layer_map: std::collections::HashMap::new(),
         resident_bytes: 0,
+        orphan_f16_keys: Vec::new(),
     })
 }
 
@@ -474,6 +503,23 @@ pub fn evict_layer(layer: LayerId) -> Result<(), String> {
 #[cfg(feature = "cuda")]
 pub fn resident_vram_bytes() -> usize {
     with_gpu(|gpu| Ok(gpu.resident_bytes)).unwrap_or(0)
+}
+
+/// Clear all resident weight caches (f16, f32, and layer entries).
+///
+/// Call this when loading a new model or when host weight buffers have been
+/// mutated, to ensure stale GPU copies are not reused.
+#[cfg(feature = "cuda")]
+pub fn clear_resident_cache() -> Result<(), String> {
+    with_gpu(|gpu| {
+        gpu.resident_f16.clear();
+        gpu.resident_f32.clear();
+        gpu.layer_map.clear();
+        gpu.layer_lru.clear();
+        gpu.orphan_f16_keys.clear();
+        gpu.resident_bytes = 0;
+        Ok(())
+    })
 }
 
 #[cfg(feature = "cuda")]
@@ -592,6 +638,18 @@ pub fn gemv_f32_transposed_cuda(
         return Err(GemvCudaError::InvalidMatrixLength {
             expected: expected_matrix_len,
             actual: matrix.len(),
+        });
+    }
+    if vector.len() != rows {
+        return Err(GemvCudaError::InvalidVectorLength {
+            expected: rows,
+            actual: vector.len(),
+        });
+    }
+    if output.len() != cols {
+        return Err(GemvCudaError::InvalidOutputLength {
+            expected: cols,
+            actual: output.len(),
         });
     }
 
@@ -920,7 +978,10 @@ pub fn gemv_quantized_cuda(
                 .map_err(stringify)?;
             }
             stream.synchronize().map_err(stringify)?;
+            gpu.resident_bytes += weight.len() * std::mem::size_of::<u16>();
+            gpu.orphan_f16_keys.push(key);
             gpu.resident_f16.insert(key, weight);
+            gpu.enforce_budget();
         }
 
         let matrix_ptr = gpu
@@ -1035,13 +1096,11 @@ pub fn gemm_f32_cuda(
         }
         let left_ptr = gpu.resident_f32.get(&left_key).unwrap().as_device_ptr().as_raw();
 
-        // Cache right matrix (also often static / reused).
-        let right_key = (right_matrix.as_ptr() as usize, right_matrix.len());
-        if !gpu.resident_f32.contains_key(&right_key) {
-            let buffer = cust::memory::DeviceBuffer::from_slice(right_matrix).map_err(stringify)?;
-            gpu.resident_f32.insert(right_key, buffer);
-        }
-        let right_ptr = gpu.resident_f32.get(&right_key).unwrap().as_device_ptr().as_raw();
+        // Right matrix is an activation (not a static weight), so we always
+        // upload a fresh copy to avoid stale-cache bugs when the host buffer
+        // is reused or mutated between calls.
+        let right_device = cust::memory::DeviceBuffer::from_slice(right_matrix).map_err(stringify)?;
+        let right_ptr = right_device.as_device_ptr().as_raw();
 
         let output_device =
             cust::memory::DeviceBuffer::<f32>::zeroed(output.len()).map_err(stringify)?;

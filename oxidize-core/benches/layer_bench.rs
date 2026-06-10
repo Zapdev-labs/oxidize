@@ -1,7 +1,8 @@
 use std::time::{Duration, Instant};
 
 fn gemv(rows: usize, cols: usize, matrix: &[f32], vector: &[f32], output: &mut [f32]) {
-    oxidize_core::tensor::gemv_f32(matrix, rows, cols, vector, output).unwrap();
+    oxidize_core::tensor::gemv_f32(matrix, rows, cols, vector, output)
+        .expect("gemv_f32 should not fail with valid dimensions");
 }
 
 fn bench_layer_by_layer(
@@ -47,14 +48,15 @@ fn bench_layer_by_layer(
 
     let mut x = vec![0.0_f32; h];
     let mut scratch = vec![0.0_f32; h];
+    let mut bufs = LayerGemvBuffers::new(h, inter);
 
     #[cfg(feature = "cuda")]
     {
-        use oxidize_core::cuda::{set_layer_config, preload_layer, evict_layer, CudaLayerConfig};
+        use oxidize_core::cuda::{set_layer_config, preload_layer, CudaLayerConfig};
         set_layer_config(CudaLayerConfig {
             max_resident_layers: max_resident,
             max_vram_bytes: 0,
-        }).unwrap();
+        }).expect("set_layer_config should succeed");
 
         // Preload initial layers
         for l in 0..layers.min(max_resident) {
@@ -66,7 +68,7 @@ fn bench_layer_by_layer(
                 (&ffn_gate[l], inter, h),
                 (&ffn_up[l], inter, h),
                 (&ffn_down[l], h, inter),
-            ]).unwrap();
+            ]).expect("preload_layer should succeed");
         }
     }
 
@@ -83,10 +85,10 @@ fn bench_layer_by_layer(
                 (&ffn_gate[l], inter, h),
                 (&ffn_up[l], inter, h),
                 (&ffn_down[l], h, inter),
-            ]).unwrap();
+            ]).expect("preload_layer should succeed");
         }
         layer_gemvs(l, h, inter, &attn_q, &attn_k, &attn_v, &attn_o,
-                    &ffn_gate, &ffn_up, &ffn_down, &mut x, &mut scratch);
+                    &ffn_gate, &ffn_up, &ffn_down, &mut x, &mut scratch, &mut bufs);
     }
 
     // Benchmark
@@ -105,10 +107,10 @@ fn bench_layer_by_layer(
                     (&ffn_gate[l], inter, h),
                     (&ffn_up[l], inter, h),
                     (&ffn_down[l], h, inter),
-                ]).unwrap();
+                ]).expect("preload_layer should succeed");
             }
             layer_gemvs(l, h, inter, &attn_q, &attn_k, &attn_v, &attn_o,
-                        &ffn_gate, &ffn_up, &ffn_down, &mut x, &mut scratch);
+                        &ffn_gate, &ffn_up, &ffn_down, &mut x, &mut scratch, &mut bufs);
         }
     }
     let elapsed = start.elapsed();
@@ -125,6 +127,30 @@ fn bench_layer_by_layer(
     }
 }
 
+struct LayerGemvBuffers {
+    q: Vec<f32>,
+    k: Vec<f32>,
+    v: Vec<f32>,
+    attn_out: Vec<f32>,
+    gate: Vec<f32>,
+    up: Vec<f32>,
+    ffn_out: Vec<f32>,
+}
+
+impl LayerGemvBuffers {
+    fn new(h: usize, inter: usize) -> Self {
+        Self {
+            q: vec![0.0_f32; h],
+            k: vec![0.0_f32; h],
+            v: vec![0.0_f32; h],
+            attn_out: vec![0.0_f32; h],
+            gate: vec![0.0_f32; inter],
+            up: vec![0.0_f32; inter],
+            ffn_out: vec![0.0_f32; h],
+        }
+    }
+}
+
 fn layer_gemvs(
     l: usize,
     h: usize,
@@ -138,15 +164,21 @@ fn layer_gemvs(
     ffn_down: &[Vec<f32>],
     x: &mut [f32],
     scratch: &mut [f32],
+    bufs: &mut LayerGemvBuffers,
 ) {
-    let mut q = vec![0.0_f32; h];
-    let mut k = vec![0.0_f32; h];
-    let mut v = vec![0.0_f32; h];
-    let mut attn_out = vec![0.0_f32; h];
+    let LayerGemvBuffers { q, k, v, attn_out, gate, up, ffn_out } = bufs;
 
-    gemv(h, h, &attn_q[l], x, &mut q);
-    gemv(h, h, &attn_k[l], x, &mut k);
-    gemv(h, h, &attn_v[l], x, &mut v);
+    q.fill(0.0);
+    k.fill(0.0);
+    v.fill(0.0);
+    attn_out.fill(0.0);
+    gate.fill(0.0);
+    up.fill(0.0);
+    ffn_out.fill(0.0);
+
+    gemv(h, h, &attn_q[l], x, q);
+    gemv(h, h, &attn_k[l], x, k);
+    gemv(h, h, &attn_v[l], x, v);
 
     let head_dim = h;
     let mut qk = 0.0_f32;
@@ -159,21 +191,17 @@ fn layer_gemvs(
         attn_out[i] = v[i] * qk_softmax;
     }
 
-    gemv(h, h, &attn_o[l], &attn_out, scratch);
+    gemv(h, h, &attn_o[l], attn_out, scratch);
     for i in 0..h {
         x[i] += scratch[i];
     }
 
-    let mut gate = vec![0.0_f32; inter];
-    let mut up = vec![0.0_f32; inter];
-    let mut ffn_out = vec![0.0_f32; h];
-
-    gemv(inter, h, &ffn_gate[l], x, &mut gate);
-    gemv(inter, h, &ffn_up[l], x, &mut up);
+    gemv(inter, h, &ffn_gate[l], x, gate);
+    gemv(inter, h, &ffn_up[l], x, up);
     for i in 0..inter {
         gate[i] = gate[i] * (1.0 / (1.0 + (-gate[i]).exp())) * up[i];
     }
-    gemv(h, inter, &ffn_down[l], &gate, &mut ffn_out);
+    gemv(h, inter, &ffn_down[l], gate, ffn_out);
 
     for i in 0..h {
         x[i] += ffn_out[i];
