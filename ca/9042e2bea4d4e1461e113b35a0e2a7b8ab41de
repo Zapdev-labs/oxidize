@@ -1,0 +1,19 @@
+oxidize-core/src/model/layer_wise.rs
+  s_d8b5af6870ab84::t_0b11c245d48483 2040-2091
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "ca9042e2bea4d4e1461e113b35a0e2a7b8ab41de",
+  "prompts": {},
+  "sessions": {
+    "s_d8b5af6870ab84": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "747c40af-74b1-4c68-a8f8-83589cf844b7",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
