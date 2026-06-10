@@ -414,8 +414,12 @@ def _gpu_cluster_command(args: list[str]) -> int:
             if fam is None:
                 print("error: --family expects b200|a100|rtx-pro-6000", file=sys.stderr)
                 return 2
-            defaults_nodes = {gc.GpuFamily.B200: 8, gc.GpuFamily.A100: 16, gc.GpuFamily.RTX_PRO_6000: 4}
-            defaults_gpn = {gc.GpuFamily.B200: 8, gc.GpuFamily.A100: 8, gc.GpuFamily.RTX_PRO_6000: 2}
+            defaults_nodes = {
+                gc.GpuFamily.B200: 8, gc.GpuFamily.A100: 16, gc.GpuFamily.RTX_PRO_6000: 4
+            }
+            defaults_gpn = {
+                gc.GpuFamily.B200: 8, gc.GpuFamily.A100: 8, gc.GpuFamily.RTX_PRO_6000: 2
+            }
             count = ns.nodes or defaults_nodes[fam]
             gpn = ns.gpus_per_node or defaults_gpn[fam]
             specs = [gc.NodePoolSpec(fam, count, gpn)]

@@ -191,9 +191,7 @@ pub fn supports_quantized_gpu(quantization: GgufQuantizationType) -> bool {
 /// per block, for a quantization type. Returns `None` for types without a GPU
 /// dequant kernel (callers fall back to the CPU quantized path).
 #[cfg(feature = "cuda")]
-fn dequant_kernel_for(
-    quantization: GgufQuantizationType,
-) -> Option<(&'static str, usize, usize)> {
+fn dequant_kernel_for(quantization: GgufQuantizationType) -> Option<(&'static str, usize, usize)> {
     match quantization {
         GgufQuantizationType::Q8_0 => Some(("dequant_q8_0_kernel", 34, 32)),
         GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M => {
@@ -339,8 +337,7 @@ pub fn gemv_f32_cuda(
         }
 
         let vector_device = cust::memory::DeviceBuffer::from_slice(vector).map_err(stringify)?;
-        let output_device =
-            cust::memory::DeviceBuffer::<f32>::zeroed(rows).map_err(stringify)?;
+        let output_device = cust::memory::DeviceBuffer::<f32>::zeroed(rows).map_err(stringify)?;
         let matrix_device = gpu
             .resident_f32
             .get(&key)
@@ -349,7 +346,10 @@ pub fn gemv_f32_cuda(
         // One warp (32 lanes) per row: launch rows*32 threads, 256/block.
         let block_size = 256_u32;
         let grid_size = rows_u32.saturating_mul(32).div_ceil(block_size);
-        let function = gpu.module.get_function(GEMV_KERNEL_NAME).map_err(stringify)?;
+        let function = gpu
+            .module
+            .get_function(GEMV_KERNEL_NAME)
+            .map_err(stringify)?;
         let stream = &gpu.stream;
         // SAFETY: Kernel parameters are valid device buffers and scalar dimensions.
         unsafe {
@@ -460,9 +460,8 @@ pub fn gemv_quantized_cuda(
     // Map the quantization type to its GPU dequant kernel + block geometry.
     // Types without a GPU kernel are reported so the caller can fall back to the
     // CPU quantized path.
-    let (dequant_kernel, block_bytes, vals_per_block) =
-        dequant_kernel_for(quantization)
-            .ok_or(GemvCudaError::UnsupportedQuantizationType { quantization })?;
+    let (dequant_kernel, block_bytes, vals_per_block) = dequant_kernel_for(quantization)
+        .ok_or(GemvCudaError::UnsupportedQuantizationType { quantization })?;
 
     // Validate the quantized matrix / vector / output geometry.
     if quantized_matrix.len() % block_bytes != 0 {
@@ -542,8 +541,7 @@ pub fn gemv_quantized_cuda(
         }
 
         let vector_device = cust::memory::DeviceBuffer::from_slice(vector).map_err(stringify)?;
-        let output_device =
-            cust::memory::DeviceBuffer::<f32>::zeroed(rows).map_err(stringify)?;
+        let output_device = cust::memory::DeviceBuffer::<f32>::zeroed(rows).map_err(stringify)?;
         let matrix_device = gpu
             .resident_f16
             .get(&key)

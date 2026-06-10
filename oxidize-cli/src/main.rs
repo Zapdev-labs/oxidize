@@ -627,7 +627,9 @@ fn run_gpu_cluster(args: &[String]) -> i32 {
                             Some(v) => match v.parse() {
                                 Ok(n) => nodes = n,
                                 Err(_) => {
-                                    eprintln!("error: --nodes expects a positive integer, got '{v}'");
+                                    eprintln!(
+                                        "error: --nodes expects a positive integer, got '{v}'"
+                                    );
                                     return 2;
                                 }
                             },
@@ -643,7 +645,9 @@ fn run_gpu_cluster(args: &[String]) -> i32 {
                             Some(v) => match v.parse() {
                                 Ok(n) => gpus_per_node = n,
                                 Err(_) => {
-                                    eprintln!("error: --gpus-per-node expects a positive integer, got '{v}'");
+                                    eprintln!(
+                                        "error: --gpus-per-node expects a positive integer, got '{v}'"
+                                    );
                                     return 2;
                                 }
                             },
