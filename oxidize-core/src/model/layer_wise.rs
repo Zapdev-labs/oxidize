@@ -496,6 +496,11 @@ impl LayerWiseModel {
         let mut output_weight: Option<WeightStorage> = None;
         let mut layer_tensors: Vec<HashMap<String, GgufTensorRef>> =
             vec![HashMap::new(); config.layer_count];
+        // Byte ranges of dense (non-routed-expert) mmap-resident weights: the
+        // candidate set for partial NUMA replication. Routed expert tensors
+        // (`*_exps`) are excluded — they are the bulk of MoE models and only
+        // ~2% of them is read per token; shared experts (`*_shexp`) are dense.
+        let mut dense_ranges: Vec<(usize, usize)> = Vec::new();
 
         let is_supported_quant_gemv = |qtype: GgufQuantizationType| {
             matches!(
@@ -526,6 +531,7 @@ impl LayerWiseModel {
                         .unwrap_or(config.hidden_size as u64)
                         as usize;
                     if is_supported_quant_gemv(qtype) {
+                        dense_ranges.push((offset, qsize));
                         tok_embeddings = Some(WeightStorage::MmapQuantized(
                             qtype,
                             mapped.mmap(),
@@ -549,6 +555,7 @@ impl LayerWiseModel {
                 }
                 "output.weight" => {
                     if is_supported_quant_gemv(qtype) {
+                        dense_ranges.push((offset, qsize));
                         output_weight = Some(WeightStorage::MmapQuantized(
                             qtype,
                             mapped.mmap(),
@@ -575,6 +582,9 @@ impl LayerWiseModel {
                         continue;
                     }
                     let key = parts[2..].join(".");
+                    if !key.contains("_exps") {
+                        dense_ranges.push((offset, qsize));
+                    }
                     layer_tensors[layer_idx].insert(
                         key,
                         GgufTensorRef {
@@ -622,12 +632,30 @@ impl LayerWiseModel {
             );
         }
 
-        if std::env::var("OXIDIZE_NUMA_REPLICATE").is_ok_and(|v| v == "1") {
+        let numa_mode = std::env::var("OXIDIZE_NUMA_REPLICATE").unwrap_or_default();
+        if numa_mode == "1" || numa_mode == "dense" {
             let t0 = std::time::Instant::now();
-            if crate::numa::replicate(mapped.bytes()) {
+            // Whole-model replication needs one full copy per node; cap it at
+            // a fraction of the smallest node so the copy cannot OOM the box.
+            // Past the cap (e.g. a 208 GB MoE GGUF on 92/224 GB nodes), fall
+            // back to replicating only the dense tensors — a few GB that
+            // carry roughly half the per-token weight reads.
+            let full_budget = crate::numa::min_node_total_bytes() / 2;
+            let full_fits = (mapped.bytes().len() as u64) <= full_budget;
+            let replicated = if numa_mode == "1" && full_fits {
+                if crate::numa::replicate(mapped.bytes()) {
+                    mapped.bytes().len()
+                } else {
+                    0
+                }
+            } else {
+                crate::numa::replicate_ranges(mapped.bytes(), &dense_ranges)
+            };
+            if replicated > 0 {
                 eprintln!(
-                    "layer-wise: NUMA-replicated {:.1} GiB of weights per node in {:.1}s",
-                    mapped.bytes().len() as f64 / (1u64 << 30) as f64,
+                    "layer-wise: NUMA-replicated {:.1} GiB of {} weights per node in {:.1}s",
+                    replicated as f64 / (1u64 << 30) as f64,
+                    if numa_mode == "1" && full_fits { "all" } else { "dense" },
                     t0.elapsed().as_secs_f32()
                 );
             } else {
