@@ -1,0 +1,46 @@
+oxidize-kernels/src/q8k.rs
+  s_0870efbee888ff::t_2a0f0e279a861b 1-54
+oxidize-kernels/Cargo.toml
+  s_0870efbee888ff::t_59d3eec2eaf92d 1-12
+oxidize-core/Cargo.toml
+  s_0870efbee888ff::t_ff5ec4a18fdb9f 19,36
+oxidize-cli/Cargo.toml
+  s_0870efbee888ff::t_ff5ec4a18fdb9f 23-25
+oxidize-kernels/src/lib.rs
+  s_0870efbee888ff::t_fd7197bfd9a24a 1-236
+oxidize-kernels/src/q4k_scalar.rs
+  s_0870efbee888ff::t_f904094b73bcf9 1-52
+oxidize-kernels/benches/oxk_q4k_bench.rs
+  s_0870efbee888ff::t_e3f820d9a3aaa6 1-153
+Cargo.toml
+  s_0870efbee888ff::t_84236d68c74aff 12
+oxidize-core/src/compute/tensor.rs
+  s_0870efbee888ff::t_60082db8802138 1235-1247
+  s_0870efbee888ff::t_b8a1fcf7c72ddb 1643
+  s_0870efbee888ff::t_0be771d3a5cb4b 1653
+  s_0870efbee888ff::t_a0ff6a0da9a777 1871-1915,1918
+  s_0870efbee888ff::t_e1905868712f66 5682-5788
+  s_0870efbee888ff::t_8678e4c635eb22 1479-1486
+  s_0870efbee888ff::t_05ebfb2221eeab 1637-1642,1644-1652,1654-1717
+oxidize-server/Cargo.toml
+  s_0870efbee888ff::t_ff5ec4a18fdb9f 15-17
+oxidize-kernels/src/q4k_avx2.rs
+  s_0870efbee888ff::t_1174ad033c013f 1-24,26-34,36-49,51-89,91-179
+  s_0870efbee888ff::t_755d099073d8ac 25,35,50,90
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "d02efe4d10c608fa74dc7653b875fa9c25147bbd",
+  "prompts": {},
+  "sessions": {
+    "s_0870efbee888ff": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "715178d8-6185-4fe3-b3c6-725394862bd7",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
