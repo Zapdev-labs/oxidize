@@ -2037,36 +2037,58 @@ impl LayerWiseModel {
             .checked_div(kv_heads)
             .filter(|g| *g > 0)
             .unwrap_or(1);
-        for head in 0..q_heads {
-            let kv_head = head / actual_kv_group_size;
-            let q_head_start = head * q_head_dim;
-            let q_head_end = q_head_start + q_head_dim;
-            if q_head_end > q.len() {
-                break;
-            }
-            let q_head = &q[q_head_start..q_head_end];
-
-            let q_head_for_attn = if q_head_dim > kv_head_dim {
-                &q_head[..kv_head_dim]
-            } else {
-                q_head
-            };
-            let mut out_head = vec![0.0_f32; kv_head_dim];
-            flash_attention_decode_f32(
-                q_head_for_attn,
-                key_cache,
-                value_cache,
-                seq_len,
-                kv_head_dim,
-                kv_len,
-                kv_head,
-                &mut out_head,
-            )
-            .map_err(|e| ModelError::InferenceFailed(format!("flash attention: {:?}", e)))?;
-
-            let write_start = head * kv_head_dim;
-            if write_start + out_head.len() <= attn_result.len() {
-                attn_result[write_start..write_start + out_head.len()].copy_from_slice(&out_head);
+        // Heads are independent; this loop grows linearly with context and
+        // serializes ~tens of ms/token at long sequences, so dispatch it
+        // through the spin pool. Per-head output slices are disjoint.
+        {
+            let attn_failed = std::sync::atomic::AtomicBool::new(false);
+            let out_base = attn_result.as_mut_ptr() as usize;
+            let attn_len = attn_result.len();
+            let q_ref = &q;
+            crate::spinpool::run_chunks(q_heads, |head| {
+                let kv_head = head / actual_kv_group_size;
+                let q_head_start = head * q_head_dim;
+                let q_head_end = q_head_start + q_head_dim;
+                if q_head_end > q_ref.len() {
+                    return;
+                }
+                let q_head = &q_ref[q_head_start..q_head_end];
+                let q_head_for_attn = if q_head_dim > kv_head_dim {
+                    &q_head[..kv_head_dim]
+                } else {
+                    q_head
+                };
+                let write_start = head * kv_head_dim;
+                if write_start + kv_head_dim > attn_len {
+                    return;
+                }
+                // Safety: per-head ranges are disjoint and attn_result
+                // outlives the blocking dispatch.
+                let out_head = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        (out_base as *mut f32).add(write_start),
+                        kv_head_dim,
+                    )
+                };
+                if flash_attention_decode_f32(
+                    q_head_for_attn,
+                    key_cache,
+                    value_cache,
+                    seq_len,
+                    kv_head_dim,
+                    kv_len,
+                    kv_head,
+                    out_head,
+                )
+                .is_err()
+                {
+                    attn_failed.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            });
+            if attn_failed.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(ModelError::InferenceFailed(
+                    "flash attention failed".to_owned(),
+                ));
             }
         }
 
