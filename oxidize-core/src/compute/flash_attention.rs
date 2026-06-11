@@ -147,6 +147,109 @@ unsafe fn dot_product_f32_neon_arm(a: &[f32], b: &[f32]) -> f32 {
     total
 }
 
+/// KV element type for the decode kernel: f32 rows pass through (bit-identical
+/// to the historical f32-only kernel), u16 rows are IEEE half bits converted
+/// on the fly (F16C on x86). Borrowing the cache in its storage dtype halves
+/// attention DRAM traffic vs materializing an f32 prefix copy per layer.
+pub trait KvElem: Copy + Sync {
+    fn dot(query: &[f32], row: &[Self]) -> f32;
+    fn axpy(out: &mut [f32], scale: f32, row: &[Self]);
+}
+
+impl KvElem for f32 {
+    #[inline]
+    fn dot(query: &[f32], row: &[f32]) -> f32 {
+        dot_product_f32(query, row)
+    }
+
+    #[inline]
+    fn axpy(out: &mut [f32], scale: f32, row: &[f32]) {
+        for (o, v) in out.iter_mut().zip(row.iter()) {
+            *o += scale * v;
+        }
+    }
+}
+
+impl KvElem for u16 {
+    #[inline]
+    fn dot(query: &[f32], row: &[u16]) -> f32 {
+        #[cfg(target_arch = "x86_64")]
+        if f16c_available() {
+            // Safety: feature checked above.
+            return unsafe { dot_product_f32_f16_avx2(query, row) };
+        }
+        let mut sum = 0.0_f32;
+        for (q, &bits) in query.iter().zip(row.iter()) {
+            sum += q * crate::tensor::f16_le_to_f32(bits.to_le_bytes());
+        }
+        sum
+    }
+
+    #[inline]
+    fn axpy(out: &mut [f32], scale: f32, row: &[u16]) {
+        #[cfg(target_arch = "x86_64")]
+        if f16c_available() {
+            // Safety: feature checked above.
+            unsafe { axpy_f32_f16_avx2(out, scale, row) };
+            return;
+        }
+        for (o, &bits) in out.iter_mut().zip(row.iter()) {
+            *o += scale * crate::tensor::f16_le_to_f32(bits.to_le_bytes());
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn f16c_available() -> bool {
+    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        is_x86_feature_detected!("f16c")
+            && is_x86_feature_detected!("fma")
+            && is_x86_feature_detected!("avx2")
+    })
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma,f16c")]
+unsafe fn dot_product_f32_f16_avx2(a: &[f32], b: &[u16]) -> f32 {
+    use std::arch::x86_64::*;
+    let len = a.len().min(b.len());
+    let mut sum = _mm256_setzero_ps();
+    let chunks = len / 8;
+    for i in 0..chunks {
+        let va = unsafe { _mm256_loadu_ps(a.as_ptr().add(i * 8)) };
+        let vh = unsafe { _mm_loadu_si128(b.as_ptr().add(i * 8) as *const __m128i) };
+        let vb = _mm256_cvtph_ps(vh);
+        sum = _mm256_fmadd_ps(va, vb, sum);
+    }
+    let mut result = [0.0_f32; 8];
+    unsafe { _mm256_storeu_ps(result.as_mut_ptr(), sum) };
+    let mut total = result.iter().sum::<f32>();
+    for i in (chunks * 8)..len {
+        total += a[i] * crate::tensor::f16_le_to_f32(b[i].to_le_bytes());
+    }
+    total
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma,f16c")]
+unsafe fn axpy_f32_f16_avx2(out: &mut [f32], scale: f32, row: &[u16]) {
+    use std::arch::x86_64::*;
+    let len = out.len().min(row.len());
+    let vs = _mm256_set1_ps(scale);
+    let chunks = len / 8;
+    for i in 0..chunks {
+        let vh = unsafe { _mm_loadu_si128(row.as_ptr().add(i * 8) as *const __m128i) };
+        let vv = _mm256_cvtph_ps(vh);
+        let vo = unsafe { _mm256_loadu_ps(out.as_ptr().add(i * 8)) };
+        unsafe { _mm256_storeu_ps(out.as_mut_ptr().add(i * 8), _mm256_fmadd_ps(vs, vv, vo)) };
+    }
+    for i in (chunks * 8)..len {
+        out[i] += scale * crate::tensor::f16_le_to_f32(row[i].to_le_bytes());
+    }
+}
+
 /// Decode-phase flash attention: single query attends to a full key/value sequence.
 ///
 /// This is optimized for the decode phase (one query vector, many key/value vectors)
@@ -164,6 +267,54 @@ pub fn flash_attention_decode_f32(
     query: &[f32],
     key_layer: &[f32],
     value_layer: &[f32],
+    seq_len: usize,
+    head_dim: usize,
+    kv_len: usize,
+    kv_head: usize,
+    output: &mut [f32],
+) -> Result<(), AttentionError> {
+    flash_attention_decode_impl(
+        query,
+        key_layer,
+        value_layer,
+        seq_len,
+        head_dim,
+        kv_len,
+        kv_head,
+        output,
+    )
+}
+
+/// [`flash_attention_decode_f32`] over f16-bit K/V rows (the KV cache's F16
+/// storage borrowed directly, no f32 prefix materialization).
+#[allow(clippy::too_many_arguments)]
+pub fn flash_attention_decode_f16(
+    query: &[f32],
+    key_layer: &[u16],
+    value_layer: &[u16],
+    seq_len: usize,
+    head_dim: usize,
+    kv_len: usize,
+    kv_head: usize,
+    output: &mut [f32],
+) -> Result<(), AttentionError> {
+    flash_attention_decode_impl(
+        query,
+        key_layer,
+        value_layer,
+        seq_len,
+        head_dim,
+        kv_len,
+        kv_head,
+        output,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn flash_attention_decode_impl<E: KvElem>(
+    query: &[f32],
+    key_layer: &[E],
+    value_layer: &[E],
     seq_len: usize,
     head_dim: usize,
     kv_len: usize,
@@ -231,7 +382,7 @@ pub fn flash_attention_decode_f32(
             let row_off = t * kv_len + kv_offset;
             let key_row = &key_layer[row_off..row_off + head_dim];
 
-            let mut score = dot_product_f32(query, key_row);
+            let mut score = E::dot(query, key_row);
             score *= scale;
 
             let new_max = running_max.max(score);
@@ -248,9 +399,7 @@ pub fn flash_attention_decode_f32(
             // Add weighted value
             let val_row_off = t * kv_len + kv_offset;
             let value_row = &value_layer[val_row_off..val_row_off + head_dim];
-            for (out, v) in output.iter_mut().zip(value_row.iter()) {
-                *out += exp_score * v;
-            }
+            E::axpy(output, exp_score, value_row);
 
             running_sum = running_sum * exp_factor + exp_score;
             running_max = new_max;
@@ -278,6 +427,57 @@ pub fn flash_attention_decode_heads_f32(
     query_heads: &[f32],
     key_layer: &[f32],
     value_layer: &[f32],
+    seq_len: usize,
+    head_dim: usize,
+    kv_len: usize,
+    num_heads: usize,
+    kv_heads: usize,
+    output_heads: &mut [f32],
+) -> Result<(), AttentionError> {
+    flash_attention_decode_heads_impl(
+        query_heads,
+        key_layer,
+        value_layer,
+        seq_len,
+        head_dim,
+        kv_len,
+        num_heads,
+        kv_heads,
+        output_heads,
+    )
+}
+
+/// [`flash_attention_decode_heads_f32`] over f16-bit K/V (borrowed F16 cache).
+#[allow(clippy::too_many_arguments)]
+pub fn flash_attention_decode_heads_f16(
+    query_heads: &[f32],
+    key_layer: &[u16],
+    value_layer: &[u16],
+    seq_len: usize,
+    head_dim: usize,
+    kv_len: usize,
+    num_heads: usize,
+    kv_heads: usize,
+    output_heads: &mut [f32],
+) -> Result<(), AttentionError> {
+    flash_attention_decode_heads_impl(
+        query_heads,
+        key_layer,
+        value_layer,
+        seq_len,
+        head_dim,
+        kv_len,
+        num_heads,
+        kv_heads,
+        output_heads,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn flash_attention_decode_heads_impl<E: KvElem>(
+    query_heads: &[f32],
+    key_layer: &[E],
+    value_layer: &[E],
     seq_len: usize,
     head_dim: usize,
     kv_len: usize,
@@ -344,7 +544,7 @@ pub fn flash_attention_decode_heads_f32(
             };
             let kv_head = head / group_size;
             let q_head = &query_heads[head * head_dim..(head + 1) * head_dim];
-            if let Err(e) = flash_attention_decode_f32(
+            if let Err(e) = flash_attention_decode_impl(
                 q_head,
                 key_layer,
                 value_layer,
@@ -366,7 +566,7 @@ pub fn flash_attention_decode_heads_f32(
             let kv_head = head / group_size;
             let q_head = &query_heads[head * head_dim..(head + 1) * head_dim];
             let out_head = &mut output_heads[head * head_dim..(head + 1) * head_dim];
-            flash_attention_decode_f32(
+            flash_attention_decode_impl(
                 q_head,
                 key_layer,
                 value_layer,
@@ -480,6 +680,73 @@ pub fn flash_attention_prefill_f32(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The f16 K/V decode path must match the f32 path within half-precision
+    /// rounding (the only difference is each K/V element passing through f16).
+    #[test]
+    fn decode_heads_f16_matches_f32() {
+        let (seq_len, head_dim, num_heads, kv_heads) = (37_usize, 64_usize, 4_usize, 2_usize);
+        let kv_len = kv_heads * head_dim;
+        let kv: Vec<f32> = (0..seq_len * kv_len)
+            .map(|i| ((i as f32) * 0.013).sin() * 0.5)
+            .collect();
+        let vv: Vec<f32> = (0..seq_len * kv_len)
+            .map(|i| ((i as f32) * 0.007).cos() * 0.5)
+            .collect();
+        let query: Vec<f32> = (0..num_heads * head_dim)
+            .map(|i| ((i as f32) * 0.011).sin())
+            .collect();
+        let k16: Vec<u16> = kv
+            .iter()
+            .map(|&v| crate::kv_cache::f32_to_f16_bits(v))
+            .collect();
+        let v16: Vec<u16> = vv
+            .iter()
+            .map(|&v| crate::kv_cache::f32_to_f16_bits(v))
+            .collect();
+        // Reference over the f16-rounded values so only kernel differences count.
+        let k_r: Vec<f32> = k16
+            .iter()
+            .map(|&b| crate::tensor::f16_bits_to_f32(b))
+            .collect();
+        let v_r: Vec<f32> = v16
+            .iter()
+            .map(|&b| crate::tensor::f16_bits_to_f32(b))
+            .collect();
+
+        let mut out_f32 = vec![0.0_f32; num_heads * head_dim];
+        flash_attention_decode_heads_f32(
+            &query,
+            &k_r,
+            &v_r,
+            seq_len,
+            head_dim,
+            kv_len,
+            num_heads,
+            kv_heads,
+            &mut out_f32,
+        )
+        .unwrap();
+        let mut out_f16 = vec![0.0_f32; num_heads * head_dim];
+        flash_attention_decode_heads_f16(
+            &query,
+            &k16,
+            &v16,
+            seq_len,
+            head_dim,
+            kv_len,
+            num_heads,
+            kv_heads,
+            &mut out_f16,
+        )
+        .unwrap();
+        for (i, (a, b)) in out_f32.iter().zip(&out_f16).enumerate() {
+            assert!(
+                (a - b).abs() <= 1e-5 + a.abs() * 1e-4,
+                "lane {i}: f32 {a} vs f16 {b}"
+            );
+        }
+    }
 
     fn reference_attention_decode(
         query: &[f32],

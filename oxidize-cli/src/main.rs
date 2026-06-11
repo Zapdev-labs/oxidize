@@ -698,13 +698,13 @@ where
         }
     }
     if !has_flag(&rewritten, "--kv-cache-dtype") {
-        // f32 is the only KV dtype the decode attention path can borrow
-        // zero-copy; q8/f16 dequantize the WHOLE K/V prefix into workspace
-        // buffers every layer, every token. cpu-optimized clamps the context
-        // to 2048, bounding the f32 cache (~600 MB for a 4B model). Pass
+        // f16/f32 are the KV dtypes decode attention can borrow zero-copy
+        // (f16 converts in-kernel via F16C); q8 dequantizes the WHOLE K/V
+        // prefix into workspace buffers every layer, every token. f16 also
+        // halves attention DRAM reads vs f32 as the context grows. Pass
         // --kv-cache-dtype q8 to trade decode speed for memory.
         rewritten.push("--kv-cache-dtype".into());
-        rewritten.push("f32".into());
+        rewritten.push("f16".into());
     }
     // One-shot prompt runs exit right after generation, so a background API
     // server would just load the model a second time (concurrently, stealing
@@ -808,11 +808,10 @@ fn rewrite_serve_args(raw: Vec<OsString>) -> io::Result<Vec<OsString>> {
         rewritten.push(model_path.into_os_string());
     }
     if !has_flag(&rewritten, "--kv-cache-dtype") {
-        // Match the `run` rewrite: f32 KV is the zero-copy decode path (see
-        // the comment there); the server's ctx auto-cap accounts for the
-        // larger per-token KV footprint.
+        // Match the `run` rewrite: f16 KV is the zero-copy decode path with
+        // half the attention reads of f32 (see the comment there).
         rewritten.push("--kv-cache-dtype".into());
-        rewritten.push("f32".into());
+        rewritten.push("f16".into());
     }
     if !has_flag(&rewritten, "--cpu-optimized") {
         rewritten.push("--cpu-optimized".into());
@@ -2879,7 +2878,7 @@ mod tests {
         assert!(args.contains(&OsString::from("--mmap-prefetch")));
         assert!(args.contains(&OsString::from("--mmap-hugepages")));
         assert!(args.contains(&OsString::from("--kv-cache-dtype")));
-        assert!(args.contains(&OsString::from("f32")));
+        assert!(args.contains(&OsString::from("f16")));
     }
 
     #[test]

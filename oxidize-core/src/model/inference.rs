@@ -1,4 +1,4 @@
-use crate::flash_attention::flash_attention_decode_heads_f32;
+use crate::flash_attention::{flash_attention_decode_heads_f16, flash_attention_decode_heads_f32};
 use crate::gguf::{GgufQuantizationType, MappedGgufFile};
 use crate::kv_cache::{KvCache, KvCacheConfig};
 use crate::model::{Logits, Model, ModelError, Session, Token};
@@ -2825,45 +2825,7 @@ impl InferenceModel {
                         .set(kv_layer_idx, pos, k_vec, v_vec)
                         .map_err(|e| ModelError::InferenceFailed(format!("kv set: {:?}", e)))?;
 
-                    // Borrow the F32 KV prefix when the logical prefix is still
-                    // contiguous in storage; otherwise copy into workspace buffers.
                     let seq_len = pos + 1;
-                    let borrowed_key_cache = self
-                        .kv_cache
-                        .f32_layer_key_prefix(kv_layer_idx, seq_len)
-                        .map_err(|e| {
-                            ModelError::InferenceFailed(format!("kv borrow keys: {:?}", e))
-                        })?;
-                    let borrowed_value_cache = self
-                        .kv_cache
-                        .f32_layer_value_prefix(kv_layer_idx, seq_len)
-                        .map_err(|e| {
-                            ModelError::InferenceFailed(format!("kv borrow values: {:?}", e))
-                        })?;
-
-                    let key_cache: &[f32];
-                    let value_cache: &[f32];
-                    if let (Some(keys), Some(values)) = (borrowed_key_cache, borrowed_value_cache) {
-                        key_cache = keys;
-                        value_cache = values;
-                    } else {
-                        let key_copy = &mut ws.kv_keys_copy[..seq_len * kv_len];
-                        key_copy.fill(0.0_f32);
-                        let value_copy = &mut ws.kv_values_copy[..seq_len * kv_len];
-                        value_copy.fill(0.0_f32);
-                        self.kv_cache
-                            .copy_layer_keys(kv_layer_idx, seq_len, key_copy)
-                            .map_err(|e| {
-                                ModelError::InferenceFailed(format!("kv copy keys: {:?}", e))
-                            })?;
-                        self.kv_cache
-                            .copy_layer_values(kv_layer_idx, seq_len, value_copy)
-                            .map_err(|e| {
-                                ModelError::InferenceFailed(format!("kv copy values: {:?}", e))
-                            })?;
-                        key_cache = key_copy;
-                        value_cache = value_copy;
-                    }
 
                     // compute attention using parallel flash attention decode over heads
                     let attn_result = &mut ws.attn_result[..q_len_used];
@@ -2883,44 +2845,144 @@ impl InferenceModel {
                     } else {
                         q
                     };
-                    // Sliding-window attention: a local layer attends only to the
-                    // most recent `layer_window` positions. RoPE encodes absolute
-                    // positions, so slicing off the oldest rows yields the
-                    // windowed-causal mask with relative positions preserved.
-                    let (eff_seq_len, key_cache, value_cache) =
-                        if layer_window > 0 && seq_len > layer_window {
-                            let skip = (seq_len - layer_window) * kv_len;
-                            (layer_window, &key_cache[skip..], &value_cache[skip..])
+
+                    // Borrow the KV prefix in its storage dtype when the logical
+                    // prefix is still contiguous in storage (F32 directly, F16 as
+                    // half bits converted in-kernel); otherwise dequantize-copy
+                    // into workspace buffers. Borrowing avoids materializing an
+                    // f32 prefix copy per layer per token, and F16 also halves
+                    // the attention DRAM reads vs an F32 cache.
+                    let f16_keys = self
+                        .kv_cache
+                        .f16_layer_key_prefix(kv_layer_idx, seq_len)
+                        .map_err(|e| {
+                            ModelError::InferenceFailed(format!("kv borrow f16 keys: {:?}", e))
+                        })?;
+                    let f16_values = self
+                        .kv_cache
+                        .f16_layer_value_prefix(kv_layer_idx, seq_len)
+                        .map_err(|e| {
+                            ModelError::InferenceFailed(format!("kv borrow f16 values: {:?}", e))
+                        })?;
+                    if let (Some(key16), Some(value16)) = (f16_keys, f16_values) {
+                        // Sliding-window attention: a local layer attends only to
+                        // the most recent `layer_window` positions (see the F32
+                        // branch below for why slicing preserves the mask).
+                        let (eff_seq_len, key16, value16) =
+                            if layer_window > 0 && seq_len > layer_window {
+                                let skip = (seq_len - layer_window) * kv_len;
+                                (layer_window, &key16[skip..], &value16[skip..])
+                            } else {
+                                (seq_len, key16, value16)
+                            };
+                        if let Some(t0) = glue_t0 {
+                            crate::tensor::decode_profile_record(
+                                "pre_attn_glue",
+                                t0.elapsed().as_nanos() as u64,
+                            );
+                        }
+                        let attn_t0 =
+                            crate::tensor::decode_profile_enabled().then(std::time::Instant::now);
+                        flash_attention_decode_heads_f16(
+                            q_for_flash,
+                            key16,
+                            value16,
+                            eff_seq_len,
+                            kv_head_dim,
+                            kv_len,
+                            q_heads,
+                            kv_heads,
+                            attn_result,
+                        )
+                        .map_err(|e| {
+                            ModelError::InferenceFailed(format!(
+                                "flash attention heads (f16): {:?}",
+                                e
+                            ))
+                        })?;
+                        if let Some(t0) = attn_t0 {
+                            crate::tensor::decode_profile_record(
+                                "attention",
+                                t0.elapsed().as_nanos() as u64,
+                            );
+                        }
+                    } else {
+                        let borrowed_key_cache = self
+                            .kv_cache
+                            .f32_layer_key_prefix(kv_layer_idx, seq_len)
+                            .map_err(|e| {
+                                ModelError::InferenceFailed(format!("kv borrow keys: {:?}", e))
+                            })?;
+                        let borrowed_value_cache = self
+                            .kv_cache
+                            .f32_layer_value_prefix(kv_layer_idx, seq_len)
+                            .map_err(|e| {
+                                ModelError::InferenceFailed(format!("kv borrow values: {:?}", e))
+                            })?;
+
+                        let key_cache: &[f32];
+                        let value_cache: &[f32];
+                        if let (Some(keys), Some(values)) =
+                            (borrowed_key_cache, borrowed_value_cache)
+                        {
+                            key_cache = keys;
+                            value_cache = values;
                         } else {
-                            (seq_len, key_cache, value_cache)
-                        };
-                    if let Some(t0) = glue_t0 {
-                        crate::tensor::decode_profile_record(
-                            "pre_attn_glue",
-                            t0.elapsed().as_nanos() as u64,
-                        );
-                    }
-                    let attn_t0 =
-                        crate::tensor::decode_profile_enabled().then(std::time::Instant::now);
-                    flash_attention_decode_heads_f32(
-                        q_for_flash,
-                        key_cache,
-                        value_cache,
-                        eff_seq_len,
-                        kv_head_dim,
-                        kv_len,
-                        q_heads,
-                        kv_heads,
-                        attn_result,
-                    )
-                    .map_err(|e| {
-                        ModelError::InferenceFailed(format!("flash attention heads: {:?}", e))
-                    })?;
-                    if let Some(t0) = attn_t0 {
-                        crate::tensor::decode_profile_record(
-                            "attention",
-                            t0.elapsed().as_nanos() as u64,
-                        );
+                            let key_copy = &mut ws.kv_keys_copy[..seq_len * kv_len];
+                            let value_copy = &mut ws.kv_values_copy[..seq_len * kv_len];
+                            self.kv_cache
+                                .copy_layer_keys(kv_layer_idx, seq_len, key_copy)
+                                .map_err(|e| {
+                                    ModelError::InferenceFailed(format!("kv copy keys: {:?}", e))
+                                })?;
+                            self.kv_cache
+                                .copy_layer_values(kv_layer_idx, seq_len, value_copy)
+                                .map_err(|e| {
+                                    ModelError::InferenceFailed(format!("kv copy values: {:?}", e))
+                                })?;
+                            key_cache = key_copy;
+                            value_cache = value_copy;
+                        }
+
+                        // Sliding-window attention: a local layer attends only to the
+                        // most recent `layer_window` positions. RoPE encodes absolute
+                        // positions, so slicing off the oldest rows yields the
+                        // windowed-causal mask with relative positions preserved.
+                        let (eff_seq_len, key_cache, value_cache) =
+                            if layer_window > 0 && seq_len > layer_window {
+                                let skip = (seq_len - layer_window) * kv_len;
+                                (layer_window, &key_cache[skip..], &value_cache[skip..])
+                            } else {
+                                (seq_len, key_cache, value_cache)
+                            };
+                        if let Some(t0) = glue_t0 {
+                            crate::tensor::decode_profile_record(
+                                "pre_attn_glue",
+                                t0.elapsed().as_nanos() as u64,
+                            );
+                        }
+                        let attn_t0 =
+                            crate::tensor::decode_profile_enabled().then(std::time::Instant::now);
+                        flash_attention_decode_heads_f32(
+                            q_for_flash,
+                            key_cache,
+                            value_cache,
+                            eff_seq_len,
+                            kv_head_dim,
+                            kv_len,
+                            q_heads,
+                            kv_heads,
+                            attn_result,
+                        )
+                        .map_err(|e| {
+                            ModelError::InferenceFailed(format!("flash attention heads: {:?}", e))
+                        })?;
+                        if let Some(t0) = attn_t0 {
+                            crate::tensor::decode_profile_record(
+                                "attention",
+                                t0.elapsed().as_nanos() as u64,
+                            );
+                        }
                     }
 
                     // Reconcile attention result size with attn_output expected input

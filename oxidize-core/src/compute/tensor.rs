@@ -258,6 +258,38 @@ pub fn gemm_quantized_f32(
         });
     }
 
+    let profile_start = gemv_profile::enabled().then(std::time::Instant::now);
+    let result = gemm_quantized_f32_inner(
+        quantization,
+        quantized_matrix,
+        rows,
+        cols,
+        inputs,
+        outputs,
+        batch,
+    );
+    if let Some(start) = profile_start {
+        gemv_profile::record(
+            format!("gemm{batch} {quantization:?}"),
+            rows,
+            cols,
+            quantized_matrix.len(),
+            start.elapsed().as_nanos() as u64,
+        );
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn gemm_quantized_f32_inner(
+    quantization: GgufQuantizationType,
+    quantized_matrix: &[u8],
+    rows: usize,
+    cols: usize,
+    inputs: &[f32],
+    outputs: &mut [f32],
+    batch: usize,
+) -> Result<(), GemvError> {
     // Fast path: decode each block once into a scratch f32 buffer, then do
     // `batch` AVX2 FMA dot products against it. Saves repeating the per-block
     // dequant for every batch token.
@@ -2556,6 +2588,27 @@ unsafe fn q4_k_q8_k_row_dot_x4_avx2(
             _mm_prefetch::<{ _MM_HINT_T0 }>(ahead);
             _mm_prefetch::<{ _MM_HINT_T0 }>(ahead.add(64));
             _mm_prefetch::<{ _MM_HINT_T0 }>(ahead.add(128));
+            // For SHORT rows also sweep the NEXT quad's row r into L2, one
+            // quad-time ahead: 10-block rows (1.4KB) restart the hardware
+            // prefetcher every 22 cache lines, costing ~10% of DRAM bandwidth
+            // on 2560-column matrices. Advancing one block per iteration, the
+            // pointer covers the whole next row by quad end. Long rows keep
+            // the prefetcher locked on their own — the extra reach only
+            // pollutes L2 there.
+            if blocks_per_row <= 16 {
+                let next_quad = w_ptr.add(4 * row_bytes).cast::<i8>();
+                _mm_prefetch::<{ _MM_HINT_T1 }>(next_quad);
+                _mm_prefetch::<{ _MM_HINT_T1 }>(next_quad.add(64));
+                _mm_prefetch::<{ _MM_HINT_T1 }>(next_quad.add(128));
+            } else {
+                // Long rows: a second, deeper in-row sweep (T1, 16 blocks =
+                // 2.3KB ahead) — the 576B T0 distance alone leaves the stream
+                // ~8% under the short-row shapes once those got their sweep.
+                let far = w_ptr.add(16 * BLOCK_Q4_K_SIZE).cast::<i8>();
+                _mm_prefetch::<{ _MM_HINT_T1 }>(far);
+                _mm_prefetch::<{ _MM_HINT_T1 }>(far.add(64));
+                _mm_prefetch::<{ _MM_HINT_T1 }>(far.add(128));
+            }
 
             let d_w = f16_le_to_f32([*w_ptr, *w_ptr.add(1)]);
             let dmin_w = f16_le_to_f32([*w_ptr.add(2), *w_ptr.add(3)]);
@@ -2718,6 +2771,19 @@ unsafe fn q6_k_q8_k_row_dot_x4_avx2(
             _mm_prefetch::<{ _MM_HINT_T0 }>(ahead);
             _mm_prefetch::<{ _MM_HINT_T0 }>(ahead.add(64));
             _mm_prefetch::<{ _MM_HINT_T0 }>(ahead.add(128));
+            // Next-quad sweep for short rows, deeper in-row sweep for long
+            // rows; see the Q4_K x4 kernel.
+            if blocks_per_row <= 16 {
+                let next_quad = w_ptr.add(4 * row_bytes).cast::<i8>();
+                _mm_prefetch::<{ _MM_HINT_T1 }>(next_quad);
+                _mm_prefetch::<{ _MM_HINT_T1 }>(next_quad.add(64));
+                _mm_prefetch::<{ _MM_HINT_T1 }>(next_quad.add(128));
+            } else {
+                let far = w_ptr.add(16 * BLOCK_Q6_K_SIZE).cast::<i8>();
+                _mm_prefetch::<{ _MM_HINT_T1 }>(far);
+                _mm_prefetch::<{ _MM_HINT_T1 }>(far.add(64));
+                _mm_prefetch::<{ _MM_HINT_T1 }>(far.add(128));
+            }
 
             let d = f16_le_to_f32([*w_ptr.add(208), *w_ptr.add(209)]);
             let ql = w_ptr;
