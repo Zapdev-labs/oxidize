@@ -20,9 +20,8 @@
 //! Workers spin briefly between regions (covering per-layer glue during
 //! decode) and park on a condvar when idle, so an idle server costs nothing.
 //!
-//! Enabled by default only on multi-socket (NUMA) hosts; force with
-//! `OXIDIZE_SPINPOOL=1`, disable with `OXIDIZE_SPINPOOL=0` (falls back to
-//! rayon).
+//! Enabled by default (all decode hot loops dispatch through [`run_chunks`]);
+//! disable with `OXIDIZE_SPINPOOL=0` (falls back to rayon).
 
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex, OnceLock};
@@ -195,10 +194,22 @@ impl SpinPool {
         if n_chunks == 0 {
             return;
         }
+        // Pin the submitting thread to slot 0 (workers own slots 1..P). An
+        // unpinned submitter floats onto cores where workers are spinning and
+        // timeshares against them — all the serial glue between regions (and
+        // the submitter's own chunk range) then runs at half speed.
+        thread_local! {
+            static PINNED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        }
+        PINNED.with(|pinned| {
+            if !pinned.get() {
+                pin_to_slot(0);
+                pinned.set(true);
+            }
+        });
         let s = self.shared;
         if n_chunks == 1
-            || s
-                .busy
+            || s.busy
                 .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
                 .is_err()
         {
@@ -313,16 +324,13 @@ static POOL: OnceLock<Option<SpinPool>> = OnceLock::new();
 
 fn pool() -> Option<&'static SpinPool> {
     POOL.get_or_init(|| {
-        // Default on only for multi-socket hosts, where region dispatch
-        // latency dominates and the resident spin workers were a measured
-        // win. On single-socket parts the extra always-spinning threads
-        // compete with rayon's pool for cores and SMT issue slots and cost
-        // up to 3x decode throughput. OXIDIZE_SPINPOOL=1/0 overrides.
-        let enabled = match std::env::var("OXIDIZE_SPINPOOL") {
-            Ok(v) => v != "0",
-            Err(_) => crate::numa::node_count() > 1,
-        };
-        if !enabled {
+        // Default on: with every decode hot loop dispatched through
+        // run_chunks (GEMV fused regions + attention heads), the resident
+        // workers beat rayon's sleep/wake handoff on single-socket parts too
+        // (11.8 vs 10.9 tok/s, Ryzen 6850H) — but only with the submitter
+        // pinned to slot 0 and no nested/concurrent regions, which would run
+        // inline-serial. OXIDIZE_SPINPOOL=0 falls back to rayon.
+        if std::env::var("OXIDIZE_SPINPOOL").is_ok_and(|v| v == "0") {
             return None;
         }
         let workers = rayon::current_num_threads().saturating_sub(1);
@@ -341,7 +349,27 @@ pub fn run_chunks(n_chunks: usize, f: impl Fn(usize) + Sync + Send) {
         Some(p) => p.run(n_chunks, &f),
         None => {
             use rayon::prelude::*;
-            (0..n_chunks).into_par_iter().for_each(f);
+            // Static block partitioning, like the spin pool: one contiguous
+            // chunk range per worker. Decode GEMV chunks are ~1-10us each;
+            // letting rayon schedule hundreds of them individually buries
+            // the kernels in steal/join overhead (a 9728x2560 Q4_K GEMV
+            // measured 21 GB/s with per-chunk tasks vs ~36 GB/s for shapes
+            // with coarser chunks). Chunks are uniform, so blocks balance
+            // within one chunk of ideal.
+            let tasks = rayon::current_num_threads().min(n_chunks);
+            if tasks <= 1 {
+                for i in 0..n_chunks {
+                    f(i);
+                }
+                return;
+            }
+            (0..tasks).into_par_iter().for_each(|t| {
+                let start = t * n_chunks / tasks;
+                let end = (t + 1) * n_chunks / tasks;
+                for i in start..end {
+                    f(i);
+                }
+            });
         }
     }
 }
@@ -359,7 +387,11 @@ mod tests {
                 counts[i].fetch_add(1, Ordering::Relaxed);
             });
             for (i, c) in counts.iter().enumerate() {
-                assert_eq!(c.load(Ordering::Relaxed), round + 1, "chunk {i} round {round}");
+                assert_eq!(
+                    c.load(Ordering::Relaxed),
+                    round + 1,
+                    "chunk {i} round {round}"
+                );
             }
         }
     }

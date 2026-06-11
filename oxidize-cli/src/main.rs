@@ -698,8 +698,13 @@ where
         }
     }
     if !has_flag(&rewritten, "--kv-cache-dtype") {
+        // f32 is the only KV dtype the decode attention path can borrow
+        // zero-copy; q8/f16 dequantize the WHOLE K/V prefix into workspace
+        // buffers every layer, every token. cpu-optimized clamps the context
+        // to 2048, bounding the f32 cache (~600 MB for a 4B model). Pass
+        // --kv-cache-dtype q8 to trade decode speed for memory.
         rewritten.push("--kv-cache-dtype".into());
-        rewritten.push("q8".into());
+        rewritten.push("f32".into());
     }
     // One-shot prompt runs exit right after generation, so a background API
     // server would just load the model a second time (concurrently, stealing
@@ -772,9 +777,20 @@ fn rewrite_serve_args(raw: Vec<OsString>) -> io::Result<Vec<OsString>> {
                 model = Some(value.to_owned());
             }
             Some(
-                "--model" | "--backend" | "--max-tokens" | "--temperature" | "--top-p" | "--top-k"
-                | "--ctx-size" | "--threads" | "--kv-cache-dtype" | "--tokenizer-model"
-                | "--draft-model" | "--draft-tokens" | "--layer-cache" | "--ram-offload-threads",
+                "--model"
+                | "--backend"
+                | "--max-tokens"
+                | "--temperature"
+                | "--top-p"
+                | "--top-k"
+                | "--ctx-size"
+                | "--threads"
+                | "--kv-cache-dtype"
+                | "--tokenizer-model"
+                | "--draft-model"
+                | "--draft-tokens"
+                | "--layer-cache"
+                | "--ram-offload-threads",
             ) => {
                 rewritten.push(arg);
                 let Some(value) = args.next() else {
@@ -792,8 +808,11 @@ fn rewrite_serve_args(raw: Vec<OsString>) -> io::Result<Vec<OsString>> {
         rewritten.push(model_path.into_os_string());
     }
     if !has_flag(&rewritten, "--kv-cache-dtype") {
+        // Match the `run` rewrite: f32 KV is the zero-copy decode path (see
+        // the comment there); the server's ctx auto-cap accounts for the
+        // larger per-token KV footprint.
         rewritten.push("--kv-cache-dtype".into());
-        rewritten.push("q8".into());
+        rewritten.push("f32".into());
     }
     if !has_flag(&rewritten, "--cpu-optimized") {
         rewritten.push("--cpu-optimized".into());
@@ -1650,10 +1669,7 @@ fn server_args_from_cli(args: &Args) -> io::Result<oxidize_server::Args> {
             KvCacheDType::Q8 => oxidize_server::KvCacheDType::Q8,
             KvCacheDType::Q4 => oxidize_server::KvCacheDType::Q4,
         },
-        threads: args
-            .threads
-            .filter(|threads| *threads > 0)
-            .unwrap_or(0),
+        threads: args.threads.filter(|threads| *threads > 0).unwrap_or(0),
         ram_offload_threads: args.ram_offload_threads,
     })
 }
@@ -2863,7 +2879,7 @@ mod tests {
         assert!(args.contains(&OsString::from("--mmap-prefetch")));
         assert!(args.contains(&OsString::from("--mmap-hugepages")));
         assert!(args.contains(&OsString::from("--kv-cache-dtype")));
-        assert!(args.contains(&OsString::from("q8")));
+        assert!(args.contains(&OsString::from("f32")));
     }
 
     #[test]

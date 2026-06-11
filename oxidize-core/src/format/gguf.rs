@@ -94,7 +94,24 @@ impl MappedGgufFile {
         let available = linux_mem_available_bytes().unwrap_or(0);
         // Only enable THP when model is <50% of available RAM (2× headroom).
         if model_bytes > 0 && available > 0 && model_bytes * 2 <= available {
-            self.mmap.advise(Advice::HugePage)
+            self.mmap.advise(Advice::HugePage)?;
+            // MADV_HUGEPAGE only hints khugepaged, which in practice never
+            // collapses read-only file pages while decode is running — the
+            // model stays in 4 KB pages and every token's full weight sweep
+            // pays a TLB walk per 64 cache lines (~600K walks/token for a
+            // 2.5 GB model). MADV_COLLAPSE (kernel >= 6.1) collapses the
+            // page-cache folios synchronously at load. Best effort: older
+            // kernels return EINVAL and we keep the khugepaged hint.
+            const MADV_COLLAPSE: libc::c_int = 25;
+            let bytes = self.bytes();
+            unsafe {
+                libc::madvise(
+                    bytes.as_ptr() as *mut libc::c_void,
+                    bytes.len(),
+                    MADV_COLLAPSE,
+                );
+            }
+            Ok(())
         } else {
             Ok(())
         }

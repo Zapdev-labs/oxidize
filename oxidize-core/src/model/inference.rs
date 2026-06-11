@@ -4,9 +4,9 @@ use crate::kv_cache::{KvCache, KvCacheConfig};
 use crate::model::{Logits, Model, ModelError, Session, Token};
 use crate::quantization::{dequantize_scalar, quantized_size};
 use crate::tensor::{
-    DType, apply_geglu_inplace_f32, apply_rope_f32, apply_swiglu_inplace_f32, f16_le_to_f32,
-    gemm_quantized_f32, gemv_f32, gemv_quantized_experts_f32, gemv_quantized_experts_gate_up_f32,
-    gemv_quantized_f32, rms_norm_f32,
+    DType, GemvJob, apply_geglu_inplace_f32, apply_rope_f32, apply_swiglu_inplace_f32,
+    f16_le_to_f32, gemm_quantized_f32, gemv_f32, gemv_quantized_experts_f32,
+    gemv_quantized_experts_gate_up_f32, gemv_quantized_f32, gemv_quantized_multi_f32, rms_norm_f32,
 };
 use memmap2::Mmap;
 use std::sync::Arc;
@@ -45,15 +45,8 @@ impl ModelArchitecture {
                 "deepseek" | "deepseek2" | "deepseek_v2" | "deepseek_v3" | "deepseek_moe" => {
                     Self::DeepSeek
                 }
-                "qwen"
-                | "qwen2"
-                | "qwen2moe"
-                | "qwen3"
-                | "qwen3moe"
-                | "qwen35"
-                | "qwen3_5_moe"
-                | "qwen3_5_moe_text"
-                | "qwen35moe" => Self::Qwen,
+                "qwen" | "qwen2" | "qwen2moe" | "qwen3" | "qwen3moe" | "qwen35" | "qwen3_5_moe"
+                | "qwen3_5_moe_text" | "qwen35moe" => Self::Qwen,
                 "gemma" | "gemma2" | "gemma3" | "gemma4" => Self::Gemma,
                 "phi" | "phi3" => Self::Phi,
                 "falcon" => Self::Falcon,
@@ -939,6 +932,44 @@ fn gemv_weight(
                 .map_err(|e| format!("{:?}", e))
         }
     }
+}
+
+/// Run several same-input projections (q/k/v, gate/up) as ONE fused parallel
+/// region via [`gemv_quantized_multi_f32`]. Entries with `rows == 0` are
+/// skipped; F32-stored weights run as sequential [`gemv_weight`] calls after
+/// the fused region (rare: quantized models keep only norms in f32).
+fn gemv_weight_fused(
+    parts: Vec<(&WeightStorage, usize, &mut [f32])>,
+    cols: usize,
+    input: &[f32],
+) -> Result<(), String> {
+    let mut jobs: Vec<GemvJob<'_>> = Vec::with_capacity(parts.len());
+    let mut serial: Vec<(&WeightStorage, usize, &mut [f32])> = Vec::new();
+    for (storage, rows, output) in parts {
+        if rows == 0 {
+            continue;
+        }
+        match storage {
+            WeightStorage::Quantized(qtype, data) => jobs.push(GemvJob {
+                quantization: *qtype,
+                matrix: data,
+                rows,
+                output,
+            }),
+            WeightStorage::MmapQuantized(qtype, mmap, offset, size) => jobs.push(GemvJob {
+                quantization: *qtype,
+                matrix: &mmap[*offset..*offset + *size],
+                rows,
+                output,
+            }),
+            WeightStorage::F32(_) => serial.push((storage, rows, output)),
+        }
+    }
+    gemv_quantized_multi_f32(&mut jobs, cols, input).map_err(|e| format!("{:?}", e))?;
+    for (storage, rows, output) in serial {
+        gemv_weight(storage, rows, cols, input, output)?;
+    }
+    Ok(())
 }
 
 /// Add a per-row bias (repeating modulo `bias.len()` when shorter than a row)
@@ -2097,7 +2128,10 @@ impl InferenceModel {
             if std::env::var_os("OXIDIZE_TRACE_FWD").is_some() {
                 for t in 0..batch {
                     let sum: f64 = x_batch[t * h..(t + 1) * h].iter().map(|v| *v as f64).sum();
-                    eprintln!("TRACE inf pos={} layer={layer_idx} sum={sum:.9e}", start_pos + t);
+                    eprintln!(
+                        "TRACE inf pos={} layer={layer_idx} sum={sum:.9e}",
+                        start_pos + t
+                    );
                 }
             }
         }
@@ -2129,13 +2163,18 @@ impl InferenceModel {
         pos: usize,
         need_logits: bool,
     ) -> Result<Option<Logits>, ModelError> {
+        let token_t0 = crate::tensor::decode_profile_enabled().then(std::time::Instant::now);
         self.embed_token_into_workspace(token);
         let layer_count = self.config.layer_count;
         self.run_layer_range_in_workspace(pos, 0..layer_count)?;
         if !need_logits {
             return Ok(None);
         }
-        self.final_head_from_workspace().map(Some)
+        let logits = self.final_head_from_workspace().map(Some);
+        if let Some(t0) = token_t0 {
+            crate::tensor::decode_profile_record("token_forward", t0.elapsed().as_nanos() as u64);
+        }
+        logits
     }
 
     /// Write `token`'s embedding into `workspace.x[..hidden_size]`. First stage
@@ -2405,8 +2444,8 @@ impl InferenceModel {
                         for c in 0..qkv_out_len {
                             let mut sum = 0.0_f32;
                             // Tap-major [kernel, channels]; newest input uses the last tap.
-                            sum += layer.ssm_conv1d[(conv_kernel - 1) * qkv_out_len + c]
-                                * x_proj[c];
+                            sum +=
+                                layer.ssm_conv1d[(conv_kernel - 1) * qkv_out_len + c] * x_proj[c];
                             for b in 1..conv_kernel {
                                 if let Some(prev) = buffer.past_frame(b) {
                                     let weight_idx = (conv_kernel - 1 - b) * qkv_out_len + c;
@@ -2620,34 +2659,29 @@ impl InferenceModel {
                     let v_vec = &mut ws.v_vec[..kv_len];
                     v_vec.fill(0.0_f32);
 
-                    // Run Q, K, V projections in parallel — they write to non-overlapping
-                    // buffers (q_full, k_vec, v_vec) and share only an immutable normed view.
-                    // Same pattern as the gate||up join below; reborrow semantics preserve
-                    // all three slice bindings after the join returns.
-                    let ((qr, kr), vr) = rayon::join(
-                        || {
-                            rayon::join(
-                                || gemv_weight(&layer.attn_q, q_len, h, normed, q_full),
-                                || {
-                                    if layer.attn_k.is_empty() {
-                                        Ok(())
-                                    } else {
-                                        gemv_weight(&layer.attn_k, kv_len, h, normed, k_vec)
-                                    }
-                                },
-                            )
-                        },
-                        || {
-                            if layer.attn_v.is_empty() {
-                                Ok(())
-                            } else {
-                                gemv_weight(&layer.attn_v, kv_len, h, normed, v_vec)
-                            }
-                        },
-                    );
-                    qr.map_err(|e| ModelError::InferenceFailed(format!("attn_q: {:?}", e)))?;
-                    kr.map_err(|e| ModelError::InferenceFailed(format!("attn_k: {:?}", e)))?;
-                    vr.map_err(|e| ModelError::InferenceFailed(format!("attn_v: {:?}", e)))?;
+                    // Run Q, K, V projections as ONE fused parallel region —
+                    // they share the same normed input and write to
+                    // non-overlapping buffers (q_full, k_vec, v_vec).
+                    gemv_weight_fused(
+                        vec![
+                            (&layer.attn_q, q_len, &mut *q_full),
+                            (
+                                &layer.attn_k,
+                                if layer.attn_k.is_empty() { 0 } else { kv_len },
+                                &mut *k_vec,
+                            ),
+                            (
+                                &layer.attn_v,
+                                if layer.attn_v.is_empty() { 0 } else { kv_len },
+                                &mut *v_vec,
+                            ),
+                        ],
+                        h,
+                        normed,
+                    )
+                    .map_err(|e| ModelError::InferenceFailed(format!("attn_qkv: {:?}", e)))?;
+                    let glue_t0 =
+                        crate::tensor::decode_profile_enabled().then(std::time::Instant::now);
 
                     if !layer.attn_q_bias.is_empty() {
                         for (i, q) in q_full.iter_mut().enumerate() {
@@ -2860,6 +2894,14 @@ impl InferenceModel {
                         } else {
                             (seq_len, key_cache, value_cache)
                         };
+                    if let Some(t0) = glue_t0 {
+                        crate::tensor::decode_profile_record(
+                            "pre_attn_glue",
+                            t0.elapsed().as_nanos() as u64,
+                        );
+                    }
+                    let attn_t0 =
+                        crate::tensor::decode_profile_enabled().then(std::time::Instant::now);
                     flash_attention_decode_heads_f32(
                         q_for_flash,
                         key_cache,
@@ -2874,6 +2916,12 @@ impl InferenceModel {
                     .map_err(|e| {
                         ModelError::InferenceFailed(format!("flash attention heads: {:?}", e))
                     })?;
+                    if let Some(t0) = attn_t0 {
+                        crate::tensor::decode_profile_record(
+                            "attention",
+                            t0.elapsed().as_nanos() as u64,
+                        );
+                    }
 
                     // Reconcile attention result size with attn_output expected input
                     let attn_input = if attn_output_input_len > 0
@@ -3006,15 +3054,20 @@ impl InferenceModel {
                         gate.fill(0.0_f32);
                         let up = &mut ws.intermediate_b[..cfg.intermediate_size];
                         up.fill(0.0_f32);
-                        let (gate_result, up_result) = rayon::join(
-                            || gemv_weight(&layer.ffn_gate, cfg.intermediate_size, h, normed, gate),
-                            || gemv_weight(&layer.ffn_up, cfg.intermediate_size, h, normed, up),
-                        );
-                        gate_result.map_err(|e| {
-                            ModelError::InferenceFailed(format!("ffn_gate: {:?}", e))
+                        // Gate and up share the normed input; run both as ONE
+                        // fused parallel region (two nested regions stole work
+                        // from each other and halved streaming throughput).
+                        gemv_weight_fused(
+                            vec![
+                                (&layer.ffn_gate, cfg.intermediate_size, &mut *gate),
+                                (&layer.ffn_up, cfg.intermediate_size, &mut *up),
+                            ],
+                            h,
+                            normed,
+                        )
+                        .map_err(|e| {
+                            ModelError::InferenceFailed(format!("ffn_gate_up: {:?}", e))
                         })?;
-                        up_result
-                            .map_err(|e| ModelError::InferenceFailed(format!("ffn_up: {:?}", e)))?;
 
                         // GeGLU for Gemma, otherwise SwiGLU (AVX2 fast path).
                         if cfg.gelu_ffn {
@@ -3419,185 +3472,191 @@ pub(crate) fn moe_ffn_forward_weights(
     router_logits: &mut [f32],
     expert_scores: &mut [(usize, f32)],
 ) -> Result<(), ModelError> {
-        let h = cfg.hidden_size;
-        // Experts may use a narrower intermediate width than the dense FFN
-        // (LFM2MoE: 1792 vs 7168). Fall back to intermediate_size otherwise.
-        let i_size = if cfg.expert_intermediate_size > 0 {
-            cfg.expert_intermediate_size
-        } else {
-            cfg.intermediate_size
-        };
-        let n_experts = cfg.num_experts;
-        let n_experts_per_tok = cfg.num_experts_per_tok.max(1).min(n_experts);
-        let sigmoid_gating = cfg.expert_gating_sigmoid;
+    let h = cfg.hidden_size;
+    // Experts may use a narrower intermediate width than the dense FFN
+    // (LFM2MoE: 1792 vs 7168). Fall back to intermediate_size otherwise.
+    let i_size = if cfg.expert_intermediate_size > 0 {
+        cfg.expert_intermediate_size
+    } else {
+        cfg.intermediate_size
+    };
+    let n_experts = cfg.num_experts;
+    let n_experts_per_tok = cfg.num_experts_per_tok.max(1).min(n_experts);
+    let sigmoid_gating = cfg.expert_gating_sigmoid;
 
-        // 1. Router logits: [n_experts]
-        router_logits.fill(0.0_f32);
-        gemv_weight(layer.gate_inp, n_experts, h, normed, router_logits)
-            .map_err(|e| ModelError::InferenceFailed(format!("moe router: {:?}", e)))?;
+    // 1. Router logits: [n_experts]
+    router_logits.fill(0.0_f32);
+    gemv_weight(layer.gate_inp, n_experts, h, normed, router_logits)
+        .map_err(|e| ModelError::InferenceFailed(format!("moe router: {:?}", e)))?;
 
-        // 2. Gating. Softmax (Mixtral) or sigmoid + per-layer expert bias (LFM2MoE).
-        // For sigmoid gating the bias is added for top-k *selection* only; the
-        // routing weights are the raw sigmoid scores, renormalized over the
-        // selected experts. `router_logits` holds the weight, `expert_scores.1`
-        // the selection score.
-        if sigmoid_gating {
+    // 2. Gating. Softmax (Mixtral) or sigmoid + per-layer expert bias (LFM2MoE).
+    // For sigmoid gating the bias is added for top-k *selection* only; the
+    // routing weights are the raw sigmoid scores, renormalized over the
+    // selected experts. `router_logits` holds the weight, `expert_scores.1`
+    // the selection score.
+    if sigmoid_gating {
+        for logit in router_logits.iter_mut() {
+            *logit = 1.0_f32 / (1.0 + (-*logit).exp());
+        }
+        for (i, &w) in router_logits.iter().enumerate() {
+            let bias = layer.exp_probs_b.get(i).copied().unwrap_or(0.0);
+            expert_scores[i] = (i, w + bias);
+        }
+    } else {
+        let max_logit = router_logits
+            .iter()
+            .fold(f32::NEG_INFINITY, |a, &b| a.max(b));
+        let mut sum_exp = 0.0_f32;
+        for logit in router_logits.iter_mut() {
+            *logit = (*logit - max_logit).exp();
+            sum_exp += *logit;
+        }
+        if sum_exp > 0.0 {
             for logit in router_logits.iter_mut() {
-                *logit = 1.0_f32 / (1.0 + (-*logit).exp());
-            }
-            for (i, &w) in router_logits.iter().enumerate() {
-                let bias = layer.exp_probs_b.get(i).copied().unwrap_or(0.0);
-                expert_scores[i] = (i, w + bias);
-            }
-        } else {
-            let max_logit = router_logits
-                .iter()
-                .fold(f32::NEG_INFINITY, |a, &b| a.max(b));
-            let mut sum_exp = 0.0_f32;
-            for logit in router_logits.iter_mut() {
-                *logit = (*logit - max_logit).exp();
-                sum_exp += *logit;
-            }
-            if sum_exp > 0.0 {
-                for logit in router_logits.iter_mut() {
-                    *logit /= sum_exp;
-                }
-            }
-            for (i, &w) in router_logits.iter().enumerate() {
-                expert_scores[i] = (i, w);
+                *logit /= sum_exp;
             }
         }
-
-        // 3. Top-k expert selection by selection score.
-        let compare_score = |a: &(usize, f32), b: &(usize, f32)| {
-            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-        };
-        if n_experts_per_tok < expert_scores.len() {
-            let (selected, _, _) =
-                expert_scores.select_nth_unstable_by(n_experts_per_tok, compare_score);
-            selected.sort_by(compare_score);
-        } else {
-            expert_scores.sort_by(compare_score);
+        for (i, &w) in router_logits.iter().enumerate() {
+            expert_scores[i] = (i, w);
         }
+    }
 
-        // Renormalize routing weights over the selected experts (Qwen/Mixtral norm_topk_prob).
-        let weight_norm = {
-            let s: f32 = expert_scores
-                .iter()
-                .take(n_experts_per_tok)
-                .map(|&(idx, _)| router_logits[idx])
-                .sum();
-            if s > 0.0 { s } else { 1.0 }
-        };
+    // 3. Top-k expert selection by selection score.
+    let compare_score = |a: &(usize, f32), b: &(usize, f32)| {
+        b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+    };
+    if n_experts_per_tok < expert_scores.len() {
+        let (selected, _, _) =
+            expert_scores.select_nth_unstable_by(n_experts_per_tok, compare_score);
+        selected.sort_by(compare_score);
+    } else {
+        expert_scores.sort_by(compare_score);
+    }
 
-        // 4. Gather the selected experts and their routing weights.
-        let n_sel = n_experts_per_tok;
-        let mut selected: Vec<usize> = Vec::with_capacity(n_sel);
-        let mut weights: Vec<f32> = Vec::with_capacity(n_sel);
-        for &(expert_idx, sel_score) in expert_scores.iter().take(n_sel) {
-            selected.push(expert_idx);
-            weights.push(router_logits[expert_idx] / weight_norm);
-        }
+    // Renormalize routing weights over the selected experts (Qwen/Mixtral norm_topk_prob).
+    let weight_norm = {
+        let s: f32 = expert_scores
+            .iter()
+            .take(n_experts_per_tok)
+            .map(|&(idx, _)| router_logits[idx])
+            .sum();
+        if s > 0.0 { s } else { 1.0 }
+    };
 
-        // 5. Expert FFN. Prefer the batched path (one parallel region per
-        // projection across all selected experts) for quantized experts; this
-        // avoids 12 separate rayon dispatches per MoE layer. Fall back to the
-        // per-expert path for f32 experts.
-        if let (Some((gq, gm)), Some((uq, um)), Some((dq, dm))) = (
-            expert_matrix(layer.gate_exps),
-            expert_matrix(layer.up_exps),
-            expert_matrix(layer.down_exps),
-        ) {
-            let gate_all = &mut gate_scratch[..n_sel * i_size];
-            let up_all = &mut up_scratch[..n_sel * i_size];
-            gate_all.fill(0.0_f32);
-            up_all.fill(0.0_f32);
-            if gq == uq {
-                // Fused: gate + up in ONE parallel region (halves the
-                // fork/join + steal overhead of the two largest dispatches).
-                let mut gate_up = vec![0.0_f32; 2 * n_sel * i_size];
-                gemv_quantized_experts_gate_up_f32(
-                    gq,
-                    gm,
-                    um,
-                    n_experts,
-                    &selected,
-                    i_size,
-                    h,
-                    normed,
-                    &mut gate_up,
-                )
-                .map_err(|e| ModelError::InferenceFailed(format!("moe gate+up: {:?}", e)))?;
-                let (gate_half, up_half) = gate_up.split_at(n_sel * i_size);
-                gate_all.copy_from_slice(gate_half);
-                up_all.copy_from_slice(up_half);
-            } else {
-                gemv_quantized_experts_f32(
-                    gq, gm, n_experts, &selected, i_size, h, normed, 0, gate_all,
-                )
-                .map_err(|e| ModelError::InferenceFailed(format!("moe gate: {:?}", e)))?;
-                gemv_quantized_experts_f32(
-                    uq, um, n_experts, &selected, i_size, h, normed, 0, up_all,
-                )
-                .map_err(|e| ModelError::InferenceFailed(format!("moe up: {:?}", e)))?;
-            }
-            // SwiGLU into gate_all; it then becomes the down-projection input
-            // (one contiguous [n_sel, i_size] buffer, stride i_size per expert).
-            for (g, u) in gate_all.iter_mut().zip(up_all.iter()) {
-                let sigmoid = 1.0_f32 / (1.0 + (-*g).exp());
-                *g = *g * sigmoid * *u;
-            }
-            let down_all = &mut expert_out[..n_sel * h];
-            down_all.fill(0.0_f32);
-            gemv_quantized_experts_f32(
-                dq, dm, n_experts, &selected, h, i_size, gate_all, i_size, down_all,
-            )
-            .map_err(|e| ModelError::InferenceFailed(format!("moe down: {:?}", e)))?;
-            for (slot, &weight) in weights.iter().enumerate() {
-                let d = &down_all[slot * h..(slot + 1) * h];
-                for (out, val) in ffn_out.iter_mut().zip(d.iter()) {
-                    *out += weight * val;
-                }
-            }
-            return Ok(());
-        }
+    // 4. Gather the selected experts and their routing weights.
+    let n_sel = n_experts_per_tok;
+    let mut selected: Vec<usize> = Vec::with_capacity(n_sel);
+    let mut weights: Vec<f32> = Vec::with_capacity(n_sel);
+    for &(expert_idx, sel_score) in expert_scores.iter().take(n_sel) {
+        selected.push(expert_idx);
+        weights.push(router_logits[expert_idx] / weight_norm);
+    }
 
-        // Fallback: per-expert FFN for f32 expert weights.
-        for (slot, &expert_idx) in selected.iter().enumerate() {
-            let weight = weights[slot];
-            let gate = &mut gate_scratch[..i_size];
-            let up = &mut up_scratch[..i_size];
-            gate.fill(0.0_f32);
-            up.fill(0.0_f32);
-            expert_out.fill(0.0_f32);
-
-            gemv_expert_weight(layer.gate_exps, expert_idx, n_experts, i_size, h, normed, gate)
-                .map_err(|e| ModelError::InferenceFailed(format!("moe gate: {:?}", e)))?;
-            gemv_expert_weight(layer.up_exps, expert_idx, n_experts, i_size, h, normed, up)
-                .map_err(|e| ModelError::InferenceFailed(format!("moe up: {:?}", e)))?;
-
-            for (g, u) in gate.iter_mut().zip(up.iter()) {
-                let sigmoid = 1.0_f32 / (1.0 + (-*g).exp());
-                *g = *g * sigmoid * *u;
-            }
-
-            gemv_expert_weight(
-                layer.down_exps,
-                expert_idx,
+    // 5. Expert FFN. Prefer the batched path (one parallel region per
+    // projection across all selected experts) for quantized experts; this
+    // avoids 12 separate rayon dispatches per MoE layer. Fall back to the
+    // per-expert path for f32 experts.
+    if let (Some((gq, gm)), Some((uq, um)), Some((dq, dm))) = (
+        expert_matrix(layer.gate_exps),
+        expert_matrix(layer.up_exps),
+        expert_matrix(layer.down_exps),
+    ) {
+        let gate_all = &mut gate_scratch[..n_sel * i_size];
+        let up_all = &mut up_scratch[..n_sel * i_size];
+        gate_all.fill(0.0_f32);
+        up_all.fill(0.0_f32);
+        if gq == uq {
+            // Fused: gate + up in ONE parallel region (halves the
+            // fork/join + steal overhead of the two largest dispatches).
+            let mut gate_up = vec![0.0_f32; 2 * n_sel * i_size];
+            gemv_quantized_experts_gate_up_f32(
+                gq,
+                gm,
+                um,
                 n_experts,
-                h,
+                &selected,
                 i_size,
-                gate,
-                expert_out,
+                h,
+                normed,
+                &mut gate_up,
             )
-            .map_err(|e| ModelError::InferenceFailed(format!("moe down: {:?}", e)))?;
-
-            for (out, val) in ffn_out.iter_mut().zip(expert_out.iter()) {
+            .map_err(|e| ModelError::InferenceFailed(format!("moe gate+up: {:?}", e)))?;
+            let (gate_half, up_half) = gate_up.split_at(n_sel * i_size);
+            gate_all.copy_from_slice(gate_half);
+            up_all.copy_from_slice(up_half);
+        } else {
+            gemv_quantized_experts_f32(
+                gq, gm, n_experts, &selected, i_size, h, normed, 0, gate_all,
+            )
+            .map_err(|e| ModelError::InferenceFailed(format!("moe gate: {:?}", e)))?;
+            gemv_quantized_experts_f32(uq, um, n_experts, &selected, i_size, h, normed, 0, up_all)
+                .map_err(|e| ModelError::InferenceFailed(format!("moe up: {:?}", e)))?;
+        }
+        // SwiGLU into gate_all; it then becomes the down-projection input
+        // (one contiguous [n_sel, i_size] buffer, stride i_size per expert).
+        for (g, u) in gate_all.iter_mut().zip(up_all.iter()) {
+            let sigmoid = 1.0_f32 / (1.0 + (-*g).exp());
+            *g = *g * sigmoid * *u;
+        }
+        let down_all = &mut expert_out[..n_sel * h];
+        down_all.fill(0.0_f32);
+        gemv_quantized_experts_f32(
+            dq, dm, n_experts, &selected, h, i_size, gate_all, i_size, down_all,
+        )
+        .map_err(|e| ModelError::InferenceFailed(format!("moe down: {:?}", e)))?;
+        for (slot, &weight) in weights.iter().enumerate() {
+            let d = &down_all[slot * h..(slot + 1) * h];
+            for (out, val) in ffn_out.iter_mut().zip(d.iter()) {
                 *out += weight * val;
             }
         }
+        return Ok(());
+    }
 
-        Ok(())
+    // Fallback: per-expert FFN for f32 expert weights.
+    for (slot, &expert_idx) in selected.iter().enumerate() {
+        let weight = weights[slot];
+        let gate = &mut gate_scratch[..i_size];
+        let up = &mut up_scratch[..i_size];
+        gate.fill(0.0_f32);
+        up.fill(0.0_f32);
+        expert_out.fill(0.0_f32);
+
+        gemv_expert_weight(
+            layer.gate_exps,
+            expert_idx,
+            n_experts,
+            i_size,
+            h,
+            normed,
+            gate,
+        )
+        .map_err(|e| ModelError::InferenceFailed(format!("moe gate: {:?}", e)))?;
+        gemv_expert_weight(layer.up_exps, expert_idx, n_experts, i_size, h, normed, up)
+            .map_err(|e| ModelError::InferenceFailed(format!("moe up: {:?}", e)))?;
+
+        for (g, u) in gate.iter_mut().zip(up.iter()) {
+            let sigmoid = 1.0_f32 / (1.0 + (-*g).exp());
+            *g = *g * sigmoid * *u;
+        }
+
+        gemv_expert_weight(
+            layer.down_exps,
+            expert_idx,
+            n_experts,
+            h,
+            i_size,
+            gate,
+            expert_out,
+        )
+        .map_err(|e| ModelError::InferenceFailed(format!("moe down: {:?}", e)))?;
+
+        for (out, val) in ffn_out.iter_mut().zip(expert_out.iter()) {
+            *out += weight * val;
+        }
+    }
+
+    Ok(())
 }
 
 impl Model for InferenceModel {

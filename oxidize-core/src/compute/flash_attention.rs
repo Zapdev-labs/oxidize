@@ -1,8 +1,12 @@
 use crate::tensor::AttentionError;
-use rayon::prelude::*;
 
 const FLASH_BLOCK_SIZE: usize = 64;
-const PARALLEL_FLASH_ATTN_MIN_SEQ_LEN: usize = 128;
+// Above this sequence length decode attention fans heads out through
+// run_chunks. The spin pool keeps region dispatch in the low microseconds,
+// so parallel attention pays off almost immediately (the old threshold of
+// 128 left attention single-threaded for the entire early context — ~135us
+// of the ~95us-per-layer decode glue at seq 100).
+const PARALLEL_FLASH_ATTN_MIN_SEQ_LEN: usize = 16;
 
 /// Compute dot product of two equal-length f32 slices.
 /// Uses AVX-512 > AVX2 > NEON > scalar based on target features.
@@ -323,26 +327,39 @@ pub fn flash_attention_decode_heads_f32(
     let use_parallel = seq_len >= PARALLEL_FLASH_ATTN_MIN_SEQ_LEN && num_heads > 1;
 
     if use_parallel {
-        let results: Vec<Result<(), AttentionError>> = output_heads
-            .par_chunks_exact_mut(head_dim)
-            .enumerate()
-            .map(|(head, out_head)| {
-                let kv_head = head / group_size;
-                let q_head = &query_heads[head * head_dim..(head + 1) * head_dim];
-                flash_attention_decode_f32(
-                    q_head,
-                    key_layer,
-                    value_layer,
-                    seq_len,
+        // Dispatch heads through run_chunks (spin pool when enabled) rather
+        // than a raw rayon region: decode interleaves these head regions with
+        // the GEMV regions, and mixing two dispatch mechanisms leaves one
+        // pool's workers waking (or spinning) against the other's.
+        let error: std::sync::Mutex<Option<AttentionError>> = std::sync::Mutex::new(None);
+        let out_base = output_heads.as_mut_ptr() as usize;
+        crate::spinpool::run_chunks(num_heads, |head| {
+            // Safety: each head owns a disjoint output slice; the buffer
+            // outlives the region.
+            let out_head = unsafe {
+                std::slice::from_raw_parts_mut(
+                    (out_base as *mut f32).add(head * head_dim),
                     head_dim,
-                    kv_len,
-                    kv_head,
-                    out_head,
                 )
-            })
-            .collect();
-        for result in results {
-            result?;
+            };
+            let kv_head = head / group_size;
+            let q_head = &query_heads[head * head_dim..(head + 1) * head_dim];
+            if let Err(e) = flash_attention_decode_f32(
+                q_head,
+                key_layer,
+                value_layer,
+                seq_len,
+                head_dim,
+                kv_len,
+                kv_head,
+                out_head,
+            ) && let Ok(mut slot) = error.lock()
+            {
+                slot.get_or_insert(e);
+            }
+        });
+        if let Some(e) = error.into_inner().unwrap_or(None) {
+            return Err(e);
         }
     } else {
         for head in 0..num_heads {
