@@ -684,6 +684,7 @@ where
     let model_path = resolve_model_spec(&model, hf_file.as_deref())?;
     rewritten.push("--model".into());
     rewritten.push(model_path.into_os_string());
+    let one_shot = prompt.is_some();
     if let Some(prompt) = prompt {
         rewritten.push("--prompt".into());
         rewritten.push(prompt);
@@ -700,7 +701,11 @@ where
         rewritten.push("--kv-cache-dtype".into());
         rewritten.push("q8".into());
     }
-    let skip_api = has_flag(&rewritten, "--no-api")
+    // One-shot prompt runs exit right after generation, so a background API
+    // server would just load the model a second time (concurrently, stealing
+    // memory bandwidth from prefill) and die with the process.
+    let skip_api = one_shot
+        || has_flag(&rewritten, "--no-api")
         || has_flag(&rewritten, "--mesh")
         || has_flag(&rewritten, "--pipe-head")
         || has_flag(&rewritten, "--pipe-tail");
@@ -1734,30 +1739,18 @@ fn main() {
     let threads = if let Some(t) = args.threads.filter(|t| *t > 0) {
         t
     } else {
-        std::thread::available_parallelism()
-            .map(usize::from)
-            .unwrap_or(8)
+        // One worker per physical core: decode GEMV is DRAM-bound, so SMT
+        // siblings add contention, not throughput (16 logical threads on an
+        // 8-core part measures slower than 8).
+        oxidize_core::spinpool::physical_core_count()
     };
-    #[allow(unused_mut)]
-    let mut pool_builder = rayon::ThreadPoolBuilder::new().num_threads(threads);
-    #[cfg(target_os = "linux")]
-    {
-        // Pin each rayon worker to one CPU (identity mapping over online
-        // CPUs). Without this the scheduler migrates workers between NUMA
-        // nodes mid-token, turning local DRAM streams into remote ones and
-        // defeating the hardware prefetcher. Disable with OXIDIZE_NO_PIN=1.
-        if std::env::var_os("OXIDIZE_NO_PIN").is_none() {
-            pool_builder = pool_builder.start_handler(|idx| unsafe {
-                let ncpu = libc::sysconf(libc::_SC_NPROCESSORS_ONLN);
-                if ncpu > 0 {
-                    let mut set: libc::cpu_set_t = std::mem::zeroed();
-                    libc::CPU_ZERO(&mut set);
-                    libc::CPU_SET(idx % ncpu as usize, &mut set);
-                    libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set);
-                }
-            });
-        }
-    }
+    // Pin each rayon worker to one CPU in core-first order. Without this the
+    // scheduler migrates workers between cores (and NUMA nodes) mid-token,
+    // turning local DRAM streams into remote ones and defeating the hardware
+    // prefetcher. Disable with OXIDIZE_NO_PIN=1.
+    let pool_builder = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .start_handler(oxidize_core::spinpool::pin_to_slot);
     if let Err(error) = pool_builder.build_global() {
         eprintln!("failed to set rayon thread pool: {error}");
         return;
@@ -2861,7 +2854,7 @@ mod tests {
         .expect("run args should rewrite");
         assert!(args.contains(&OsString::from("--model")));
         assert!(args.contains(&OsString::from("local.gguf")));
-        assert!(args.contains(&OsString::from("--serve-api")));
+        assert!(!args.contains(&OsString::from("--serve-api")));
         assert!(args.contains(&OsString::from("--prompt")));
         assert!(args.contains(&OsString::from("hello")));
         assert!(args.contains(&OsString::from("--max-tokens")));
@@ -2915,7 +2908,7 @@ mod tests {
     }
 
     #[test]
-    fn run_rewrite_with_prompt_is_not_api_only() {
+    fn run_rewrite_with_prompt_skips_background_server() {
         let args = rewrite_run_args(
             ["oxidize", "run", "local.gguf", "hello"]
                 .into_iter()
@@ -2924,7 +2917,7 @@ mod tests {
         .expect("run args should rewrite");
         assert!(args.contains(&OsString::from("--prompt")));
         assert!(!args.contains(&OsString::from("--api-only")));
-        assert!(args.contains(&OsString::from("--serve-api")));
+        assert!(!args.contains(&OsString::from("--serve-api")));
     }
 
     #[test]

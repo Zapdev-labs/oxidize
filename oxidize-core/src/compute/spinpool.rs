@@ -20,7 +20,9 @@
 //! Workers spin briefly between regions (covering per-layer glue during
 //! decode) and park on a condvar when idle, so an idle server costs nothing.
 //!
-//! Disable with `OXIDIZE_SPINPOOL=0` (falls back to rayon).
+//! Enabled by default only on multi-socket (NUMA) hosts; force with
+//! `OXIDIZE_SPINPOOL=1`, disable with `OXIDIZE_SPINPOOL=0` (falls back to
+//! rayon).
 
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex, OnceLock};
@@ -56,6 +58,102 @@ pub struct SpinPool {
 /// ~100+ cycles, so this covers multi-millisecond gaps — far more than the
 /// per-layer glue between decode GEMVs; truly idle workers park.
 const SPIN_BUDGET: u32 = 60_000;
+
+struct Topology {
+    /// All online logical CPUs, core-first: the first `cores` entries are the
+    /// first SMT sibling of each physical core, the rest are the remaining
+    /// siblings. Pinning worker `i` to `order[i]` spreads the first `cores`
+    /// workers across whole cores; an identity map does not (Linux enumerates
+    /// sibling pairs adjacently on AMD, so identity stacks pairs of workers
+    /// onto half the cores).
+    order: Vec<usize>,
+    cores: usize,
+}
+
+#[cfg(target_os = "linux")]
+fn parse_cpu_list(s: &str) -> Vec<usize> {
+    let mut cpus = Vec::new();
+    for part in s.trim().split(',') {
+        if let Some((a, b)) = part.split_once('-') {
+            if let (Ok(a), Ok(b)) = (a.parse::<usize>(), b.parse::<usize>()) {
+                cpus.extend(a..=b);
+            }
+        } else if let Ok(v) = part.parse::<usize>() {
+            cpus.push(v);
+        }
+    }
+    cpus
+}
+
+#[cfg(target_os = "linux")]
+fn read_topology() -> Option<Topology> {
+    let online = std::fs::read_to_string("/sys/devices/system/cpu/online").ok()?;
+    let cpus = parse_cpu_list(&online);
+    let mut order = Vec::with_capacity(cpus.len());
+    let mut rest = Vec::new();
+    for &cpu in &cpus {
+        let path = format!("/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list");
+        let siblings = std::fs::read_to_string(&path).ok()?;
+        let first = parse_cpu_list(&siblings).into_iter().min()?;
+        if first == cpu {
+            order.push(cpu);
+        } else {
+            rest.push(cpu);
+        }
+    }
+    if order.is_empty() {
+        return None;
+    }
+    let cores = order.len();
+    order.extend(rest);
+    Some(Topology { order, cores })
+}
+
+fn topology() -> &'static Topology {
+    static TOPOLOGY: OnceLock<Topology> = OnceLock::new();
+    TOPOLOGY.get_or_init(|| {
+        #[cfg(target_os = "linux")]
+        if let Some(t) = read_topology() {
+            return t;
+        }
+        let n = std::thread::available_parallelism().map_or(1, usize::from);
+        Topology {
+            order: (0..n).collect(),
+            cores: n,
+        }
+    })
+}
+
+/// Number of physical cores (logical CPUs when the SMT topology is
+/// unreadable). Decode GEMV is DRAM-bound and saturates with one worker per
+/// core — SMT siblings only split issue slots — so thread-count defaults use
+/// this rather than `available_parallelism`.
+pub fn physical_core_count() -> usize {
+    topology().cores
+}
+
+/// Pin the calling thread to the `slot`-th CPU in core-first order (one
+/// physical core per slot until cores run out, then the remaining SMT
+/// siblings). Stable placement keeps each worker's weight stream on one
+/// core's prefetcher and, on NUMA hosts, on one node. No-op with
+/// `OXIDIZE_NO_PIN=1` or off Linux.
+#[cfg(target_os = "linux")]
+pub fn pin_to_slot(slot: usize) {
+    if std::env::var_os("OXIDIZE_NO_PIN").is_some() {
+        return;
+    }
+    let order = &topology().order;
+    let cpu = order[slot % order.len()];
+    unsafe {
+        let mut set: libc::cpu_set_t = std::mem::zeroed();
+        libc::CPU_ZERO(&mut set);
+        libc::CPU_SET(cpu, &mut set);
+        libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set);
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn pin_to_slot(_slot: usize) {}
 
 impl SpinPool {
     fn new(workers: usize) -> Self {
@@ -145,19 +243,10 @@ impl SpinPool {
 }
 
 fn worker_loop(s: &'static Shared, worker_idx: usize, participants: usize) {
-    // Pin like the rayon workers (identity map, submitter-adjacent CPUs).
-    // The spin workers are never active at the same time as a rayon GEMV
-    // region, so sharing cores is fine; OXIDIZE_NO_PIN=1 disables.
-    #[cfg(target_os = "linux")]
-    unsafe {
-        let ncpu = libc::sysconf(libc::_SC_NPROCESSORS_ONLN);
-        if ncpu > 0 && std::env::var_os("OXIDIZE_NO_PIN").is_none() {
-            let mut set: libc::cpu_set_t = std::mem::zeroed();
-            libc::CPU_ZERO(&mut set);
-            libc::CPU_SET((worker_idx + 1) % ncpu as usize, &mut set);
-            libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set);
-        }
-    }
+    // Pin like the rayon workers (core-first order, submitter-adjacent
+    // slots). The spin workers are never active at the same time as a rayon
+    // GEMV region, so sharing cores is fine; OXIDIZE_NO_PIN=1 disables.
+    pin_to_slot(worker_idx + 1);
 
     let my_participant = worker_idx + 1;
     let mut last_serial: u64 = 0;
@@ -224,7 +313,16 @@ static POOL: OnceLock<Option<SpinPool>> = OnceLock::new();
 
 fn pool() -> Option<&'static SpinPool> {
     POOL.get_or_init(|| {
-        if std::env::var("OXIDIZE_SPINPOOL").is_ok_and(|v| v == "0") {
+        // Default on only for multi-socket hosts, where region dispatch
+        // latency dominates and the resident spin workers were a measured
+        // win. On single-socket parts the extra always-spinning threads
+        // compete with rayon's pool for cores and SMT issue slots and cost
+        // up to 3x decode throughput. OXIDIZE_SPINPOOL=1/0 overrides.
+        let enabled = match std::env::var("OXIDIZE_SPINPOOL") {
+            Ok(v) => v != "0",
+            Err(_) => crate::numa::node_count() > 1,
+        };
+        if !enabled {
             return None;
         }
         let workers = rayon::current_num_threads().saturating_sub(1);
@@ -309,5 +407,18 @@ mod tests {
                 assert_eq!(parallel[ci * chunk + j], (ci * 31 + j * 7) as f32 * 0.5);
             }
         }
+    }
+
+    #[test]
+    fn topology_pin_order_covers_each_cpu_once() {
+        let t = topology();
+        assert!(t.cores >= 1);
+        assert!(t.cores <= t.order.len());
+        let mut seen = t.order.clone();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), t.order.len(), "pin order must not repeat CPUs");
+        let logical = std::thread::available_parallelism().map_or(1, usize::from);
+        assert_eq!(t.order.len(), logical);
     }
 }

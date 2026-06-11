@@ -41,6 +41,11 @@ mod imp {
             .unwrap_or(1)
     }
 
+    /// Number of online NUMA nodes (1 when unreadable).
+    pub fn node_count() -> usize {
+        num_nodes()
+    }
+
     /// Smallest `MemTotal` across online nodes, in bytes (0 if unreadable).
     pub fn min_node_total_bytes() -> u64 {
         let nodes = num_nodes();
@@ -246,6 +251,10 @@ mod imp {
 
 #[cfg(not(target_os = "linux"))]
 mod imp {
+    pub fn node_count() -> usize {
+        1
+    }
+
     pub fn replicate(_src: &[u8]) -> bool {
         false
     }
@@ -264,7 +273,7 @@ mod imp {
     }
 }
 
-pub use imp::{local_slice, min_node_total_bytes, replicate, replicate_ranges};
+pub use imp::{local_slice, min_node_total_bytes, node_count, replicate, replicate_ranges};
 
 #[cfg(test)]
 mod tests {
