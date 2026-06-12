@@ -1981,11 +1981,12 @@ fn q4_k_q8_k_vnni_available() -> bool {
 }
 
 /// Which Q4_K GEMV implementation services the AVX2 decode hot path.
-/// Selected once from `OXIDIZE_GEMV` (see the OXK migration plan): `legacy`
-/// (default) keeps the tensor.rs intrinsics untouched, `oxk` routes contiguous
-/// row ranges to the `oxidize-kernels` crate, and `shadow` runs both and
-/// compares (dev/bench only). Without the `oxk` cargo feature every value
-/// resolves to `Legacy`.
+/// Selected once from `OXIDIZE_GEMV` (see the OXK migration plan): `auto`
+/// (default) uses OXK when the `oxk` feature is compiled and this CPU supports
+/// the kernel ISA, `legacy` keeps the tensor.rs intrinsics untouched, `oxk`
+/// routes contiguous row ranges to the `oxidize-kernels` crate, and `shadow`
+/// runs both and compares (dev/bench only). Without the `oxk` cargo feature
+/// every value resolves to `Legacy`.
 #[cfg_attr(not(feature = "oxk"), allow(dead_code))]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum GemvMode {
@@ -2004,7 +2005,21 @@ fn gemv_mode() -> GemvMode {
         Ok("oxk") => GemvMode::Oxk,
         #[cfg(feature = "oxk")]
         Ok("shadow") => GemvMode::Shadow,
-        Ok("legacy") | Ok("") | Err(_) => GemvMode::Legacy,
+        Ok("auto") | Ok("") | Err(_) => {
+            #[cfg(feature = "oxk")]
+            {
+                if oxidize_kernels::oxk_avx2_available() {
+                    GemvMode::Oxk
+                } else {
+                    GemvMode::Legacy
+                }
+            }
+            #[cfg(not(feature = "oxk"))]
+            {
+                GemvMode::Legacy
+            }
+        }
+        Ok("legacy") => GemvMode::Legacy,
         Ok(other) => {
             eprintln!(
                 "OXIDIZE_GEMV={other} not available in this build (unknown value or \
