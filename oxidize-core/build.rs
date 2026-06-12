@@ -25,7 +25,9 @@ fn main() {
         // fresh, forward-compatible PTX instead of a stale checked-in file.
         let nvcc = cuda_root.join("bin").join("nvcc");
         if nvcc.is_file() {
-            let out_dir = env::var_os("OUT_DIR").map(PathBuf::from).unwrap_or_default();
+            let out_dir = env::var_os("OUT_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_default();
             let ptx_path = out_dir.join("gemv_f32.ptx");
             let cu_path = Path::new("kernels/gemv_f32.cu");
             println!("cargo:rerun-if-changed={}", cu_path.display());

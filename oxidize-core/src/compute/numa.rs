@@ -192,7 +192,11 @@ mod imp {
             });
         }
         // `merged` is sorted, so `regions` is sorted by src_start.
-        if REGIONS.set(regions).is_ok() { total } else { 0 }
+        if REGIONS.set(regions).is_ok() {
+            total
+        } else {
+            0
+        }
     }
 
     /// Replicate all of `src` (single region). See [`replicate_ranges`].
@@ -243,9 +247,7 @@ mod imp {
         // Safety: the replica buffer mirrors the source region byte-for-byte,
         // is never written after replication, and lives for the process
         // lifetime (registered in a static).
-        unsafe {
-            std::slice::from_raw_parts((base + (p - region.src_start)) as *const u8, s.len())
-        }
+        unsafe { std::slice::from_raw_parts((base + (p - region.src_start)) as *const u8, s.len()) }
     }
 }
 

@@ -6,14 +6,11 @@ fn bench_gemv_f32(rows: usize, cols: usize, iters: usize) -> Duration {
     let mut output = vec![0.0_f32; rows];
 
     // Warmup
-    oxidize_core::tensor::gemv_f32(&matrix, rows, cols, &vector, &mut output,
-    ).unwrap();
+    oxidize_core::tensor::gemv_f32(&matrix, rows, cols, &vector, &mut output).unwrap();
 
     let start = Instant::now();
     for _ in 0..iters {
-        oxidize_core::tensor::gemv_f32(
-            &matrix, rows, cols, &vector, &mut output,
-        ).unwrap();
+        oxidize_core::tensor::gemv_f32(&matrix, rows, cols, &vector, &mut output).unwrap();
     }
     start.elapsed()
 }
@@ -37,18 +34,31 @@ fn bench_gemv_q8_0(rows: usize, cols: usize, iters: usize) -> Duration {
         GgufQuantizationType::Q8_0,
         &matrix_bytes,
         &mut quantized,
-    ).unwrap();
+    )
+    .unwrap();
 
     // Warmup
     oxidize_core::tensor::gemv_quantized_f32(
-        GgufQuantizationType::Q8_0, &quantized, rows, cols, &vector, &mut output,
-    ).unwrap();
+        GgufQuantizationType::Q8_0,
+        &quantized,
+        rows,
+        cols,
+        &vector,
+        &mut output,
+    )
+    .unwrap();
 
     let start = Instant::now();
     for _ in 0..iters {
         oxidize_core::tensor::gemv_quantized_f32(
-            GgufQuantizationType::Q8_0, &quantized, rows, cols, &vector, &mut output,
-        ).unwrap();
+            GgufQuantizationType::Q8_0,
+            &quantized,
+            rows,
+            cols,
+            &vector,
+            &mut output,
+        )
+        .unwrap();
     }
     start.elapsed()
 }
@@ -67,7 +77,9 @@ fn main() {
         let info = cuda_build_info();
         if !info.detected_at_build {
             eprintln!("ERROR: CUDA was not detected at build time.");
-            eprintln!("       Re-build with CUDA toolkit installed and the 'cuda' feature enabled.");
+            eprintln!(
+                "       Re-build with CUDA toolkit installed and the 'cuda' feature enabled."
+            );
             std::process::exit(1);
         }
     }
@@ -85,7 +97,10 @@ fn main() {
         let dur_f32 = bench_gemv_f32(rows, cols, iters);
         let tps_f32 = iters as f64 / dur_f32.as_secs_f64();
         let us_per_f32 = dur_f32.as_secs_f64() * 1e6 / iters as f64;
-        println!("  f32 GEMV:  {:.2} ops/s  ({:.3} µs/op)", tps_f32, us_per_f32);
+        println!(
+            "  f32 GEMV:  {:.2} ops/s  ({:.3} µs/op)",
+            tps_f32, us_per_f32
+        );
 
         let dur_q8 = bench_gemv_q8_0(rows, cols, iters);
         let tps_q8 = iters as f64 / dur_q8.as_secs_f64();
