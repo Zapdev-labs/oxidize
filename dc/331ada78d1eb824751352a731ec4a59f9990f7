@@ -1,0 +1,19 @@
+oxidize-core/src/compute/tensor.rs
+  s_17c54972077cf6::t_521968c28447c2 1984-1989,2008-2022
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "dc331ada78d1eb824751352a731ec4a59f9990f7",
+  "prompts": {},
+  "sessions": {
+    "s_17c54972077cf6": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_147dd58ceffeAz5ju46hiNAXVq",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
