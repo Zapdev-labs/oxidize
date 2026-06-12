@@ -63,6 +63,20 @@ impl LoadedTokenizer {
         }
     }
 
+    /// Whether a BOS token should be prepended by default for this model.
+    ///
+    /// Honors the GGUF `tokenizer.ggml.add_bos_token` metadata when present.
+    /// When absent, defaults match llama.cpp: SentencePiece/llama add BOS,
+    /// byte-level BPE (gpt2/Qwen), WordPiece, and tiktoken do not. Prepending a
+    /// spurious BOS on a model not trained with one (e.g. Qwen3.5/Qwopus)
+    /// shifts every position and corrupts the forward pass.
+    pub fn add_bos_default(&self) -> bool {
+        if let Some(flag) = self.special_tokens().add_bos_token {
+            return flag;
+        }
+        matches!(self, Self::SentencePiece(_))
+    }
+
     pub fn encode_with_special_tokens(&self, text: &str, options: EncodeOptions) -> Vec<u32> {
         let mut encoded = self.encode(text);
         self.special_tokens()
@@ -213,6 +227,9 @@ pub struct SpecialTokens {
     pub separator: Option<u32>,
     pub cls: Option<u32>,
     pub mask: Option<u32>,
+    /// `tokenizer.ggml.add_bos_token` from GGUF metadata (None when absent).
+    /// Qwen/gpt2-BPE models set this false; llama/SPM models set it true.
+    pub add_bos_token: Option<bool>,
 }
 
 impl SpecialTokens {
@@ -227,6 +244,7 @@ impl SpecialTokens {
                 .or_else(|| metadata_u32(metadata, "tokenizer.ggml.sep_token_id")),
             cls: metadata_u32(metadata, "tokenizer.ggml.cls_token_id"),
             mask: metadata_u32(metadata, "tokenizer.ggml.mask_token_id"),
+            add_bos_token: metadata_bool(metadata, "tokenizer.ggml.add_bos_token"),
         }
     }
 
@@ -637,6 +655,19 @@ fn metadata_f32_array(
             .collect(),
         Some(_) => Err(TokenizerLoadError::InvalidMetadataType(key)),
         None => Err(TokenizerLoadError::MissingMetadata(key)),
+    }
+}
+
+fn metadata_bool(
+    metadata: &BTreeMap<String, GgufMetadataValue>,
+    key: &'static str,
+) -> Option<bool> {
+    match metadata.get(key) {
+        Some(GgufMetadataValue::Bool(value)) => Some(*value),
+        Some(GgufMetadataValue::Uint8(value)) => Some(*value != 0),
+        Some(GgufMetadataValue::Int8(value)) => Some(*value != 0),
+        Some(GgufMetadataValue::Int32(value)) => Some(*value != 0),
+        _ => None,
     }
 }
 
