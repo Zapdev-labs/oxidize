@@ -16,18 +16,34 @@ use std::arch::x86::*;
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 
-use crate::{f16_le_to_f32, get_scale_min_k4, read_q8_k_bsum, BLOCK_Q4_K_SIZE, BLOCK_Q8_K_BYTES, QK_K};
+use crate::cpu::OxkTune;
+use crate::{
+    BLOCK_Q4_K_SIZE, BLOCK_Q8_K_BYTES, QK_K, f16_le_to_f32, get_scale_min_k4, read_q8_k_bsum,
+};
 
-/// Software-prefetch distance in Q4_K blocks (576 B ≈ 9 cache lines ahead).
-const PF_BLOCKS: usize = 4;
-
+/// Prefetch the weight block `tune.pf_bytes` ahead of `w_ptr` (one Q4_K block
+/// spans 144 B ≈ 3 cache lines). Distance and hint come from
+/// [`crate::cpu::tune`] (per-vendor default + `OXIDIZE_OXK_PF` /
+/// `OXIDIZE_OXK_PF_HINT` overrides); NTA keeps once-per-token weight streams
+/// from evicting KV/activations out of L3. The hint branch is perfectly
+/// predicted (same arm every call), so the runtime tune costs nothing
+/// measurable.
 #[inline]
 #[target_feature(enable = "avx2,fma")]
-unsafe fn prefetch_row_ahead(w_ptr: *const u8) {
-    let ahead = w_ptr.wrapping_add(PF_BLOCKS * BLOCK_Q4_K_SIZE).cast::<i8>();
-    _mm_prefetch::<{ _MM_HINT_T0 }>(ahead);
-    _mm_prefetch::<{ _MM_HINT_T0 }>(ahead.wrapping_add(64));
-    _mm_prefetch::<{ _MM_HINT_T0 }>(ahead.wrapping_add(128));
+unsafe fn prefetch_row_ahead(w_ptr: *const u8, tune: OxkTune) {
+    if tune.pf_bytes == 0 {
+        return;
+    }
+    let ahead = w_ptr.wrapping_add(tune.pf_bytes).cast::<i8>();
+    if tune.pf_nta {
+        _mm_prefetch::<{ _MM_HINT_NTA }>(ahead);
+        _mm_prefetch::<{ _MM_HINT_NTA }>(ahead.wrapping_add(64));
+        _mm_prefetch::<{ _MM_HINT_NTA }>(ahead.wrapping_add(128));
+    } else {
+        _mm_prefetch::<{ _MM_HINT_T0 }>(ahead);
+        _mm_prefetch::<{ _MM_HINT_T0 }>(ahead.wrapping_add(64));
+        _mm_prefetch::<{ _MM_HINT_T0 }>(ahead.wrapping_add(128));
+    }
 }
 
 /// Horizontal sum of 8 packed i32.
@@ -48,12 +64,7 @@ unsafe fn hsum_i32(v: __m256i) -> i32 {
 /// Returns this block's f32 contribution.
 #[inline]
 #[target_feature(enable = "avx2,fma")]
-unsafe fn block_dot_one_row(
-    w_ptr: *const u8,
-    d_q8: f32,
-    q8v: &[__m256i; 8],
-    bs: &[i32; 8],
-) -> f32 {
+unsafe fn block_dot_one_row(w_ptr: *const u8, d_q8: f32, q8v: &[__m256i; 8], bs: &[i32; 8]) -> f32 {
     let mask = _mm256_set1_epi8(0x0f);
     let d_w = f16_le_to_f32([*w_ptr, *w_ptr.add(1)]);
     let dmin_w = f16_le_to_f32([*w_ptr.add(2), *w_ptr.add(3)]);
@@ -116,10 +127,11 @@ unsafe fn load_q8_block(q8_ptr: *const u8) -> (f32, [__m256i; 8], [i32; 8]) {
 /// `q8k` the matching Q8_K blocks.
 #[target_feature(enable = "avx2,fma")]
 pub unsafe fn q4k_q8k_row_dot_avx2(row: &[u8], blocks_per_row: usize, q8k: &[u8]) -> f32 {
+    let tune = crate::cpu::tune();
     let mut acc = 0.0_f32;
     for block_idx in 0..blocks_per_row {
         let w_ptr = row.as_ptr().add(block_idx * BLOCK_Q4_K_SIZE);
-        prefetch_row_ahead(w_ptr);
+        prefetch_row_ahead(w_ptr, tune);
         let (d_q8, q8v, bs) = load_q8_block(q8k.as_ptr().add(block_idx * BLOCK_Q8_K_BYTES));
         acc += block_dot_one_row(w_ptr, d_q8, &q8v, &bs);
     }
@@ -138,12 +150,13 @@ pub unsafe fn q4k_q8k_row_dot_x4_avx2(
     q8k: &[u8],
     out: &mut [f32; 4],
 ) {
+    let tune = crate::cpu::tune();
     let mut acc = [0.0_f32; 4];
     for block_idx in 0..blocks_per_row {
         let (d_q8, q8v, bs) = load_q8_block(q8k.as_ptr().add(block_idx * BLOCK_Q8_K_BYTES));
         for (r, acc_r) in acc.iter_mut().enumerate() {
             let w_ptr = rows_base.add(r * row_bytes + block_idx * BLOCK_Q4_K_SIZE);
-            prefetch_row_ahead(w_ptr);
+            prefetch_row_ahead(w_ptr, tune);
             *acc_r += block_dot_one_row(w_ptr, d_q8, &q8v, &bs);
         }
     }
@@ -166,12 +179,13 @@ pub unsafe fn q4k_q8k_row_dot_x8_avx2(
     q8k: &[u8],
     out: &mut [f32; 8],
 ) {
+    let tune = crate::cpu::tune();
     let mut acc = [0.0_f32; 8];
     for block_idx in 0..blocks_per_row {
         let (d_q8, q8v, bs) = load_q8_block(q8k.as_ptr().add(block_idx * BLOCK_Q8_K_BYTES));
         for (r, acc_r) in acc.iter_mut().enumerate() {
             let w_ptr = rows_base.add(r * row_bytes + block_idx * BLOCK_Q4_K_SIZE);
-            prefetch_row_ahead(w_ptr);
+            prefetch_row_ahead(w_ptr, tune);
             *acc_r += block_dot_one_row(w_ptr, d_q8, &q8v, &bs);
         }
     }

@@ -11,8 +11,8 @@ use std::hint::black_box;
 use std::time::{Duration, Instant};
 
 use oxidize_kernels::{
-    gemv_q4k_range, oxk_avx2_available, q4k_q8k_row_dot_scalar, quantize_q8_k_into,
-    BLOCK_Q4_K_SIZE, BLOCK_Q8_K_BYTES, QK_K,
+    BLOCK_Q4_K_SIZE, BLOCK_Q8_K_BYTES, QK_K, gemv_q4k_range, oxk_avx2_available,
+    q4k_q8k_row_dot_scalar, quantize_q8_k_into,
 };
 
 fn fill_pseudo(bytes: &mut [u8], mut state: u64) {
@@ -44,10 +44,17 @@ fn fixture(rows: usize, cols: usize) -> Fixture {
             block[half * 2..half * 2 + 2].copy_from_slice(&tamed.to_le_bytes());
         }
     }
-    let vector: Vec<f32> = (0..cols).map(|i| ((i * 37 % 255) as f32 - 127.0) / 64.0).collect();
+    let vector: Vec<f32> = (0..cols)
+        .map(|i| ((i * 37 % 255) as f32 - 127.0) / 64.0)
+        .collect();
     let mut q8k = vec![0_u8; blocks_per_row * BLOCK_Q8_K_BYTES];
     quantize_q8_k_into(&vector, blocks_per_row, &mut q8k);
-    Fixture { weights, q8k, rows, blocks_per_row }
+    Fixture {
+        weights,
+        q8k,
+        rows,
+        blocks_per_row,
+    }
 }
 
 /// Run `body` (one full pass over the matrix) repeatedly for `secs`; return GB/s.
@@ -66,16 +73,27 @@ fn time_gbps(fix: &Fixture, secs: f64, mut body: impl FnMut(&Fixture) -> f32) ->
 }
 
 fn main() {
-    let secs: f64 = std::env::var("OXK_BENCH_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(5.0);
-    let dims = std::env::var("OXK_BENCH_DIMS").unwrap_or_else(|_| "4096x4096,6144x2048,768x2048".into());
-    println!("oxk_q4k_bench: secs/variant={secs} avx2={}", oxk_avx2_available());
+    let secs: f64 = std::env::var("OXK_BENCH_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(5.0);
+    let dims =
+        std::env::var("OXK_BENCH_DIMS").unwrap_or_else(|_| "4096x4096,6144x2048,768x2048".into());
+    println!(
+        "oxk_q4k_bench: secs/variant={secs} avx2={}",
+        oxk_avx2_available()
+    );
+    println!("cpu: {}", oxidize_kernels::oxk_cpu_summary());
 
     for dim in dims.split(',') {
         let (r, c) = dim.trim().split_once('x').expect("dims as RxC");
         let (rows, cols): (usize, usize) = (r.parse().unwrap(), c.parse().unwrap());
         let fix = fixture(rows, cols);
         let row_bytes = fix.blocks_per_row * BLOCK_Q4_K_SIZE;
-        println!("== {rows} rows x {cols} cols ({:.1} MB) ==", fix.weights.len() as f64 / 1e6);
+        println!(
+            "== {rows} rows x {cols} cols ({:.1} MB) ==",
+            fix.weights.len() as f64 / 1e6
+        );
 
         let scalar = time_gbps(&fix, (secs / 10.0).max(0.5), |f| {
             let mut acc = 0.0;
@@ -149,5 +167,34 @@ fn main() {
             out[0]
         });
         println!("  oxk gemv range  {range:7.3} GB/s");
+
+        // Contended mode: split the rows across OXK_BENCH_THREADS workers all
+        // streaming weights at once — the shape of real multi-core decode,
+        // where prefetch tuning actually matters (single-threaded streaming
+        // rarely separates configs on modern prefetchers).
+        let threads: usize = std::env::var("OXK_BENCH_THREADS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1);
+        if threads > 1 {
+            let chunk_rows = fix.rows.div_ceil(threads);
+            let mt = time_gbps(&fix, secs, |f| {
+                std::thread::scope(|scope| {
+                    for (t, w_chunk) in f.weights.chunks(chunk_rows * row_bytes).enumerate() {
+                        let q8k = &f.q8k;
+                        let bpr = f.blocks_per_row;
+                        let rows_here = w_chunk.len() / row_bytes;
+                        let _ = t;
+                        scope.spawn(move || {
+                            let mut out = vec![0.0_f32; rows_here];
+                            gemv_q4k_range(w_chunk, bpr, q8k, &mut out);
+                            black_box(out[0]);
+                        });
+                    }
+                });
+                0.0
+            });
+            println!("  oxk gemv {threads}T     {mt:7.3} GB/s");
+        }
     }
 }

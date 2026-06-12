@@ -13,11 +13,13 @@
 //! benchmarked and tested in isolation; `oxidize-core` consumes it behind the
 //! optional `oxk` cargo feature with runtime selection via `OXIDIZE_GEMV`.
 
+pub mod cpu;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 mod q4k_avx2;
 mod q4k_scalar;
 mod q8k;
 
+pub use cpu::{CpuVendor, OxkTune, cpu_vendor, oxk_cpu_summary};
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 pub use q4k_avx2::{q4k_q8k_row_dot_avx2, q4k_q8k_row_dot_x4_avx2, q4k_q8k_row_dot_x8_avx2};
 pub use q4k_scalar::q4k_q8k_row_dot_scalar;
@@ -61,9 +63,7 @@ pub fn gemv_q4k_range(rows: &[u8], blocks_per_row: usize, q8k: &[u8], out: &mut 
             let base = unsafe { rows.as_ptr().add(r * row_bytes) };
             let mut octet = [0.0_f32; 8];
             // Safety: avx2+fma checked above; r+8 <= n keeps all rows in range.
-            unsafe {
-                q4k_q8k_row_dot_x8_avx2(base, row_bytes, blocks_per_row, q8k, &mut octet)
-            };
+            unsafe { q4k_q8k_row_dot_x8_avx2(base, row_bytes, blocks_per_row, q8k, &mut octet) };
             out[r..r + 8].copy_from_slice(&octet);
             r += 8;
         }
@@ -196,7 +196,11 @@ mod tests {
             {
                 for r in 0..rows {
                     let single = unsafe {
-                        q4k_q8k_row_dot_avx2(&weights[r * row_bytes..(r + 1) * row_bytes], bpr, &q8k)
+                        q4k_q8k_row_dot_avx2(
+                            &weights[r * row_bytes..(r + 1) * row_bytes],
+                            bpr,
+                            &q8k,
+                        )
                     };
                     assert_eq!(single.to_bits(), scalar[r].to_bits(), "x1 row {r}");
                 }

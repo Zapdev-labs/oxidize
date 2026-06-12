@@ -48,7 +48,6 @@ fn quantize_block(block_in: &[f32], block_out: &mut [u8]) {
             sum += (block_out[qs_off + g * 16 + i] as i8) as i32;
         }
         let sum16 = sum.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
-        block_out[bsums_off + g * 2..bsums_off + g * 2 + 2]
-            .copy_from_slice(&sum16.to_le_bytes());
+        block_out[bsums_off + g * 2..bsums_off + g * 2 + 2].copy_from_slice(&sum16.to_le_bytes());
     }
 }

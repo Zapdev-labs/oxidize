@@ -5,7 +5,7 @@
 //! same per-block f32 combine order, so SIMD variants must match bit-for-bit.
 
 use crate::{
-    f16_le_to_f32, get_scale_min_k4, read_q8_k_bsum, BLOCK_Q4_K_SIZE, BLOCK_Q8_K_BYTES, QK_K,
+    BLOCK_Q4_K_SIZE, BLOCK_Q8_K_BYTES, QK_K, f16_le_to_f32, get_scale_min_k4, read_q8_k_bsum,
 };
 
 /// Dot one Q4_K row (`blocks_per_row` blocks) against a Q8_K vector.
