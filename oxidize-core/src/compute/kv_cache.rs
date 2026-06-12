@@ -13,8 +13,8 @@ use std::path::Path;
 /// scale, at the cost of `blocks_per_token` extra f32 scales per token.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum KvQuantization {
-    #[default]
     Asymmetric,
+    #[default]
     TurboQuant,
 }
 
@@ -2484,7 +2484,7 @@ mod tests {
     }
 
     #[test]
-    fn turboquant_default_is_asymmetric() {
+    fn turboquant_is_default_kv_quantization() {
         let cfg = KvCacheConfig {
             layer_count: 1,
             context_size: 1,
@@ -2493,6 +2493,6 @@ mod tests {
             dtype: DType::I8,
             quantization: Default::default(),
         };
-        assert_eq!(cfg.quantization, KvQuantization::Asymmetric);
+        assert_eq!(cfg.quantization, KvQuantization::TurboQuant);
     }
 }

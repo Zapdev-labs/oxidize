@@ -58,6 +58,8 @@ pub struct ModelRuntime {
     pub tokenizer: LoadedTokenizer,
     pub chat_template: Option<String>,
     pub model: StdMutex<LoadedModel>,
+    pub draft: Option<StdMutex<DFlashDraftModel>>,
+    pub draft_tokens: usize,
     pub defaults: GenerationDefaults,
 }
 
@@ -141,6 +143,22 @@ impl Model for LoadedModel {
             Self::Mlx(model) => model.rewind_to(consumed_tokens),
         }
     }
+
+    fn forward_many(
+        &mut self,
+        tokens: &[Token],
+        session: &mut Session,
+    ) -> Result<Vec<Vec<f32>>, ModelError> {
+        match self {
+            Self::Inference(model) => model.forward_many(tokens, session),
+            Self::LayerWise(model) => model.forward_many(tokens, session),
+            Self::DFlash(model) => model.forward_many(tokens, session),
+            #[cfg(target_os = "macos")]
+            Self::Mlx(model) => model.forward_many(tokens, session),
+            #[cfg(not(target_os = "macos"))]
+            Self::Mlx(model) => model.forward_many(tokens, session),
+        }
+    }
 }
 
 pub fn load_model_runtime(args: &Args) -> Result<Option<Arc<ModelRuntime>>, String> {
@@ -205,6 +223,13 @@ pub fn load_model_runtime(args: &Args) -> Result<Option<Arc<ModelRuntime>>, Stri
         .and_then(|value| match value {
             GgufMetadataValue::String(template) => Some(template.clone()),
             _ => None,
+        })
+        .or_else(|| {
+            matches!(
+                mapped.parsed().architecture(),
+                Some("qwen" | "qwen2" | "qwen2moe" | "qwen35" | "qwen3" | "qwen3_5_moe")
+            )
+            .then(|| "<|im_start|>".to_owned())
         });
 
     let model = if is_dflash {
@@ -233,10 +258,12 @@ pub fn load_model_runtime(args: &Args) -> Result<Option<Arc<ModelRuntime>>, Stri
         if args.turboquant_kv {
             config.kv_quantization = oxidize_core::kv_cache::KvQuantization::TurboQuant;
         }
-        LoadedModel::LayerWise(Box::new(
-            LayerWiseModel::load_from_gguf(&mapped, config, args.layer_cache)
-                .map_err(|error| format!("failed to load layer-wise model: {error}"))?,
-        ))
+        let mut layer_wise = LayerWiseModel::load_from_gguf(&mapped, config, args.layer_cache)
+            .map_err(|error| format!("failed to load layer-wise model: {error}"))?;
+        layer_wise
+            .warm_layer_cache()
+            .map_err(|error| format!("failed to warm layer cache: {error}"))?;
+        LoadedModel::LayerWise(Box::new(layer_wise))
     } else if effective_backend == oxidize_core::backend::Backend::Mlx {
         let mut config = inference_config_from_gguf(&mapped, args);
         if args.turboquant_kv {
@@ -277,11 +304,31 @@ pub fn load_model_runtime(args: &Args) -> Result<Option<Arc<ModelRuntime>>, Stri
         ))
     };
 
+    let target_hidden_size = inference_config_from_gguf(&mapped, args).hidden_size;
+    let target_layer_count = match &model {
+        LoadedModel::Inference(m) => m.layer_count(),
+        LoadedModel::LayerWise(m) => m.layer_count(),
+        LoadedModel::DFlash(m) => m.layer_count(),
+        #[cfg(target_os = "macos")]
+        LoadedModel::Mlx(m) => m.layer_count(),
+        #[cfg(not(target_os = "macos"))]
+        LoadedModel::Mlx(m) => m.layer_count(),
+    };
+    let (draft, draft_tokens) = load_speculative_draft(
+        args,
+        &loader,
+        &mapped,
+        target_hidden_size,
+        target_layer_count,
+    )?;
+
     Ok(Some(Arc::new(ModelRuntime {
         id: args.model_id.clone(),
         tokenizer,
         chat_template,
         model: StdMutex::new(model),
+        draft,
+        draft_tokens,
         defaults: GenerationDefaults {
             max_tokens: args.max_tokens,
             temperature: args.temperature,
@@ -313,9 +360,13 @@ fn optimize_mapped_model_memory(mapped: &MappedGgufFile, args: &Args) {
         tracing::warn!(%error, "mmap hugepage hint failed");
     }
     if args.ram_offload {
-        let threads = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(8);
+        let threads = if args.ram_offload_threads > 0 {
+            args.ram_offload_threads
+        } else {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(8)
+        };
         let (mlocked, checksum, elapsed_ms) = mapped.prefault_pages_locked(threads);
         tracing::info!(
             gib = mapped.bytes().len() as f64 / 1024.0 / 1024.0 / 1024.0,
@@ -330,13 +381,100 @@ fn optimize_mapped_model_memory(mapped: &MappedGgufFile, args: &Args) {
 
 fn inference_config_from_gguf(mapped: &MappedGgufFile, args: &Args) -> InferenceConfig {
     let mut config = InferenceConfig::from_gguf(mapped);
+    config.kv_cache_dtype = args.kv_cache_dtype.dtype();
+    if args.no_turboquant_kv {
+        config.kv_quantization = oxidize_core::kv_cache::KvQuantization::Asymmetric;
+    } else if args.turboquant_kv {
+        config.kv_quantization = oxidize_core::kv_cache::KvQuantization::TurboQuant;
+    }
     if let Some(ctx) = args.ctx_size {
         config.context_size = ctx;
     }
     if args.cpu_optimized {
         config.context_size = config.context_size.min(2048);
     }
+    if args.ctx_size.is_none() && !args.cpu_optimized {
+        let kv_bytes_per_token = config.layer_count
+            * config.num_key_value_heads
+            * config.kv_head_dim()
+            * 2
+            * config.kv_cache_dtype.size_in_bytes();
+        let kv_full = (config.context_size as u64).saturating_mul(kv_bytes_per_token as u64);
+        #[cfg(target_os = "linux")]
+        let available = oxidize_core::gguf::linux_mem_available_bytes().unwrap_or(u64::MAX);
+        #[cfg(not(target_os = "linux"))]
+        let available = u64::MAX;
+        let model_bytes = mapped.bytes().len() as u64;
+        let overhead = 8u64 << 30;
+        let kv_budget = available
+            .saturating_sub(model_bytes)
+            .saturating_sub(overhead);
+        if kv_full > kv_budget && kv_bytes_per_token > 0 {
+            let capped = ((kv_budget / kv_bytes_per_token as u64) as usize / 512).max(1) * 512;
+            tracing::info!(
+                from = config.context_size,
+                to = capped,
+                "context capped to fit KV cache in available RAM"
+            );
+            config.context_size = capped;
+        }
+    }
     config
+}
+
+fn load_speculative_draft(
+    args: &Args,
+    loader: &GgufModelLoader,
+    target_mapped: &MappedGgufFile,
+    target_hidden_size: usize,
+    target_layer_count: usize,
+) -> Result<(Option<StdMutex<DFlashDraftModel>>, usize), String> {
+    let Some(draft_path) = args.draft_model.as_deref() else {
+        return Ok((None, args.draft_tokens.max(1)));
+    };
+
+    let draft_mapped = loader.load(draft_path).map_err(|error| {
+        format!(
+            "failed to load DFlash draft model {}: {error:?}",
+            draft_path.display()
+        )
+    })?;
+    let draft_arch = draft_mapped.parsed().architecture();
+    if !matches!(draft_arch, Some("dflash" | "dflash-draft")) {
+        return Err(format!(
+            "--draft-model must point to a DFlash GGUF, got architecture {draft_arch:?}"
+        ));
+    }
+
+    let draft_config = DFlashConfig::from_gguf(&draft_mapped);
+    let mut draft_model = DFlashDraftModel::load_from_gguf(&draft_mapped, draft_config)
+        .map_err(|error| format!("failed to load DFlash draft model: {error}"))?;
+    draft_model
+        .load_external_io_from_gguf(target_mapped)
+        .map_err(|error| format!("failed to borrow draft IO from target GGUF: {error}"))?;
+
+    let incompatible_hidden = draft_model.config.hidden_size != target_hidden_size;
+    let incompatible_layers = draft_model
+        .config
+        .target_layer_ids
+        .iter()
+        .any(|&layer| layer >= target_layer_count);
+    if incompatible_hidden || incompatible_layers {
+        return Err(format!(
+            "DFlash draft is incompatible with target (draft_hidden={}, target_hidden={}, draft_target_layers={:?}, target_layers={})",
+            draft_model.config.hidden_size,
+            target_hidden_size,
+            draft_model.config.target_layer_ids,
+            target_layer_count
+        ));
+    }
+
+    tracing::info!(
+        draft = %draft_path.display(),
+        draft_tokens = args.draft_tokens,
+        "enabled DFlash speculative decoding for API server"
+    );
+    Ok((Some(StdMutex::new(draft_model)), args.draft_tokens.max(1)))
 }
 
 #[allow(dead_code)]

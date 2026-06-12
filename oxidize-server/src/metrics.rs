@@ -9,8 +9,8 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use prometheus::{
-    CounterVec, Encoder, Gauge, Histogram, HistogramOpts, HistogramVec, IntCounter,
-    IntGauge, Opts, Registry, TextEncoder,
+    CounterVec, Encoder, Gauge, Histogram, HistogramOpts, HistogramVec, IntCounter, IntGauge, Opts,
+    Registry, TextEncoder,
 };
 
 use crate::app::AppState;
