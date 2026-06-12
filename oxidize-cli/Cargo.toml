@@ -20,6 +20,10 @@ path = "src/bin/bench.rs"
 name = "inspect_gguf"
 path = "src/bin/inspect_gguf.rs"
 
+[[bin]]
+name = "gguf_layer_keys"
+path = "src/bin/gguf_layer_keys.rs"
+
 [features]
 oxk = ["oxidize-core/oxk", "oxidize-server/oxk"]
 

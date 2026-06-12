@@ -526,7 +526,7 @@ fn quantize_from_f32_scalar(
             quantize_k_packed_scalar(target, input, output, BLOCK_Q3_K_SIZE, 3, 3.5)
         }
         GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M => {
-            quantize_k_packed_scalar(target, input, output, BLOCK_Q4_K_SIZE, 4, 8.0)
+            quantize_q4_k_scalar(input, output)
         }
         GgufQuantizationType::Q5_K_S | GgufQuantizationType::Q5_K_M => {
             quantize_k_packed_scalar(target, input, output, BLOCK_Q5_K_SIZE, 5, 16.0)
@@ -815,6 +815,162 @@ fn quantize_linear_4bit(
             out_block[payload_offset + i] = q_low | (q_high << 4);
         }
     }
+    Ok(())
+}
+
+/// llama.cpp `nearest_int` — fast round-to-nearest for quant heuristics.
+fn nearest_int(fval: f32) -> i32 {
+    let val = fval + 12_582_912.0;
+    (val.to_bits() & 0x007f_ffff) as i32 - 0x0040_0000
+}
+
+/// Port of llama.cpp `make_qkx1_quants` (ggml-quants.c).
+fn make_qkx1_quants(x: &[f32], l: &mut [u8], the_min: &mut f32, ntry: i32, alpha: f32) -> f32 {
+    debug_assert_eq!(x.len(), l.len());
+    let n = x.len();
+    let nmax = 15;
+
+    let mut min = x[0];
+    let mut max = x[0];
+    for &v in &x[1..] {
+        if v < min {
+            min = v;
+        }
+        if v > max {
+            max = v;
+        }
+    }
+    if max == min {
+        l.fill(0);
+        *the_min = 0.0;
+        return 0.0;
+    }
+    if min > 0.0 {
+        min = 0.0;
+    }
+
+    let mut iscale = nmax as f32 / (max - min);
+    let mut scale = 1.0 / iscale;
+
+    for _ in 0..ntry {
+        let mut sumlx = 0.0_f32;
+        let mut suml2 = 0_i32;
+        let mut did_change = false;
+        for (i, &xv) in x.iter().enumerate() {
+            let mut ql = nearest_int(iscale * (xv - min));
+            ql = ql.clamp(0, nmax);
+            if l[i] != ql as u8 {
+                l[i] = ql as u8;
+                did_change = true;
+            }
+            sumlx += (xv - min) * ql as f32;
+            suml2 += ql * ql;
+        }
+        if suml2 > 0 {
+            scale = sumlx / suml2 as f32;
+        }
+        let mut sum = 0.0_f32;
+        for (i, &xv) in x.iter().enumerate() {
+            sum += xv - scale * l[i] as f32;
+        }
+        min = alpha * min + (1.0 - alpha) * sum / n as f32;
+        if min > 0.0 {
+            min = 0.0;
+        }
+        iscale = 1.0 / scale;
+        if !did_change {
+            break;
+        }
+    }
+
+    *the_min = -min;
+    scale
+}
+
+/// llama.cpp-compatible Q4_K block quantizer (`quantize_row_q4_K_ref` with make_qkx1).
+pub fn quantize_q4_k_scalar(input: &[f32], output: &mut [u8]) -> Result<(), QuantizationError> {
+    if !input.len().is_multiple_of(QK_K) {
+        return Err(QuantizationError::InvalidInputLength {
+            quantization: GgufQuantizationType::Q4_K_M,
+            expected_multiple: QK_K,
+            actual: input.len(),
+        });
+    }
+    if output.len() != (input.len() / QK_K) * BLOCK_Q4_K_SIZE {
+        return Err(QuantizationError::InvalidOutputLength {
+            quantization: GgufQuantizationType::Q4_K_M,
+            expected: (input.len() / QK_K) * BLOCK_Q4_K_SIZE,
+            actual: output.len(),
+        });
+    }
+
+    let mut l = [0_u8; QK_K];
+    let mut mins = [0.0_f32; QK_K / 32];
+    let mut scales = [0.0_f32; QK_K / 32];
+
+    for (in_block, out_block) in input
+        .chunks_exact(QK_K)
+        .zip(output.chunks_exact_mut(BLOCK_Q4_K_SIZE))
+    {
+        let mut max_scale = 0.0_f32;
+        let mut max_min = 0.0_f32;
+        for j in 0..QK_K / 32 {
+            let chunk = &in_block[32 * j..32 * j + 32];
+            let l_chunk = &mut l[32 * j..32 * j + 32];
+            scales[j] = make_qkx1_quants(chunk, l_chunk, &mut mins[j], 5, 0.5);
+            if scales[j] > max_scale {
+                max_scale = scales[j];
+            }
+            if mins[j] > max_min {
+                max_min = mins[j];
+            }
+        }
+
+        let inv_scale = if max_scale > 0.0 {
+            63.0 / max_scale
+        } else {
+            0.0
+        };
+        let inv_min = if max_min > 0.0 { 63.0 / max_min } else { 0.0 };
+
+        out_block[4..16].fill(0);
+        for j in 0..QK_K / 32 {
+            let ls = nearest_int(inv_scale * scales[j]).clamp(0, 63) as u8;
+            let lm = nearest_int(inv_min * mins[j]).clamp(0, 63) as u8;
+            if j < 4 {
+                out_block[4 + j] = ls;
+                out_block[4 + j + 4] = lm;
+            } else {
+                out_block[4 + j + 4] = (ls & 0x0F) | ((lm & 0x0F) << 4);
+                out_block[4 + j - 4] |= (ls >> 4) << 6;
+                out_block[4 + j] |= (lm >> 4) << 6;
+            }
+        }
+
+        out_block[0..2].copy_from_slice(&f32_to_f16_bits(max_scale / 63.0).to_le_bytes());
+        out_block[2..4].copy_from_slice(&f32_to_f16_bits(max_min / 63.0).to_le_bytes());
+
+        for j in 0..QK_K / 32 {
+            let (sc, m) = get_scale_min_k4(j, &out_block[4..16]);
+            let d = f16_le_to_f32(&out_block[0..2]) * sc as f32;
+            if d == 0.0 {
+                continue;
+            }
+            let dm = f16_le_to_f32(&out_block[2..4]) * m as f32;
+            for ii in 0..32 {
+                let ql = nearest_int((in_block[32 * j + ii] + dm) / d).clamp(0, 15) as u8;
+                l[32 * j + ii] = ql;
+            }
+        }
+
+        out_block[16..144].fill(0);
+        for j in (0..QK_K).step_by(64) {
+            for l_idx in 0..32 {
+                out_block[16 + (j / 64) * 32 + l_idx] = l[j + l_idx] | (l[j + l_idx + 32] << 4);
+            }
+        }
+    }
+
     Ok(())
 }
 

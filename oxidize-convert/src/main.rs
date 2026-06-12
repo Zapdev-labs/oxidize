@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::Parser;
+use oxidize_core::gguf::GgufQuantizationType;
 use oxidize_core::safetensors_to_gguf::{SafetensorsToGgufConfig, convert_safetensors_to_gguf};
 
 #[derive(Debug, Parser)]
@@ -25,6 +26,22 @@ struct Args {
     /// Keep original HuggingFace tensor names instead of mapping to GGUF names
     #[arg(long)]
     no_hf_names: bool,
+    /// Quantize tensors while converting (e.g. Q4_K_M, Q8_0)
+    #[arg(long)]
+    target: Option<String>,
+}
+
+fn parse_target(s: &str) -> anyhow::Result<GgufQuantizationType> {
+    match s.to_ascii_uppercase().as_str() {
+        "Q4_K_M" => Ok(GgufQuantizationType::Q4_K_M),
+        "Q4_K_S" => Ok(GgufQuantizationType::Q4_K_S),
+        "Q4_0" => Ok(GgufQuantizationType::Q4_0),
+        "Q8_0" => Ok(GgufQuantizationType::Q8_0),
+        "Q6_K" => Ok(GgufQuantizationType::Q6_K),
+        "F16" => Ok(GgufQuantizationType::F16),
+        "F32" => Ok(GgufQuantizationType::F32),
+        other => anyhow::bail!("unsupported --target quantization: {other}"),
+    }
 }
 
 fn run(args: Args) -> Result<()> {
@@ -35,6 +52,11 @@ fn run(args: Args) -> Result<()> {
             arch_override: args.arch,
             map_hf_tensor_names: !args.no_hf_names,
             config_path: args.config,
+            target_quantization: args
+                .target
+                .as_deref()
+                .map(parse_target)
+                .transpose()?,
         },
     )?;
     println!("Converted {} tensors → {}", count, args.output.display());
