@@ -7,10 +7,14 @@ pub struct FinetuneConfig {
     pub learning_rate: f32,
     pub weight_decay: f32,
     pub epochs: usize,
-    pub batch_size: usize,
+    /// Sequence length each packed training chunk is built to.
     pub max_seq_len: usize,
-    pub gradient_accumulation_steps: usize,
-    pub gradient_checkpointing: bool,
+    /// Positions forwarded per batched window (GEMM batch dimension).
+    pub window: usize,
+    /// Optimizer step cadence, measured in supervised tokens.
+    pub tokens_per_step: usize,
+    /// Pack multiple short examples into each max_seq_len chunk (EOS-separated).
+    pub pack: bool,
     pub warmup_steps: usize,
     pub seed: u64,
     pub output_lora_scale: bool,
@@ -24,10 +28,10 @@ impl Default for FinetuneConfig {
             learning_rate: 2e-4,
             weight_decay: 0.0,
             epochs: 1,
-            batch_size: 1,
-            max_seq_len: 2048,
-            gradient_accumulation_steps: 4,
-            gradient_checkpointing: true,
+            max_seq_len: 512,
+            window: 64,
+            tokens_per_step: 256,
+            pack: true,
             warmup_steps: 10,
             seed: 42,
             output_lora_scale: true,

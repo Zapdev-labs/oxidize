@@ -58,6 +58,55 @@ pub fn load_jsonl_sft(path: impl AsRef<Path>) -> Result<Vec<SftExample>> {
     Ok(out)
 }
 
+/// Pack tokenized examples into training chunks.
+///
+/// With `pack = true`, examples are concatenated (separated by `eos`) into
+/// chunks of exactly `max_seq_len` tokens so every batched forward window is
+/// full — the same throughput trick unsloth/llama.cpp use. With
+/// `pack = false`, each example becomes its own chunk (truncated to
+/// `max_seq_len`).
+pub fn pack_chunks(examples: &[SftExample], max_seq_len: usize, eos: u32, pack: bool) -> Vec<Vec<u32>> {
+    let max_seq_len = max_seq_len.max(2);
+    let mut chunks = Vec::new();
+    if !pack {
+        for ex in examples {
+            if ex.token_ids.len() >= 2 {
+                let mut ids = ex.token_ids.clone();
+                ids.truncate(max_seq_len);
+                chunks.push(ids);
+            }
+        }
+        return chunks;
+    }
+    let mut current: Vec<u32> = Vec::with_capacity(max_seq_len);
+    for ex in examples {
+        if ex.token_ids.is_empty() {
+            continue;
+        }
+        let mut remaining = &ex.token_ids[..];
+        while !remaining.is_empty() {
+            if !current.is_empty() {
+                current.push(eos);
+                if current.len() >= max_seq_len {
+                    chunks.push(std::mem::take(&mut current));
+                    continue;
+                }
+            }
+            let room = max_seq_len - current.len();
+            let take = room.min(remaining.len());
+            current.extend_from_slice(&remaining[..take]);
+            remaining = &remaining[take..];
+            if current.len() >= max_seq_len {
+                chunks.push(std::mem::take(&mut current));
+            }
+        }
+    }
+    if current.len() >= 2 {
+        chunks.push(current);
+    }
+    chunks
+}
+
 fn row_to_text(row: &JsonlRow) -> String {
     if !row.text.is_empty() {
         return row.text.clone();
@@ -85,5 +134,47 @@ fn row_to_text(row: &JsonlRow) -> String {
             "<|im_start|>user\n{}\n{}\n<|im_start|>assistant\n{}\n",
             row.instruction, row.input, row.output
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ex(ids: &[u32]) -> SftExample {
+        SftExample {
+            text: String::new(),
+            token_ids: ids.to_vec(),
+        }
+    }
+
+    #[test]
+    fn packing_fills_chunks_and_separates_with_eos() {
+        let examples = vec![ex(&[1, 2, 3]), ex(&[4, 5]), ex(&[6, 7, 8, 9])];
+        let chunks = pack_chunks(&examples, 6, 0, true);
+        // Examples within a chunk are EOS-separated; a chunk boundary is
+        // already a separator, so no EOS opens the next chunk.
+        assert_eq!(chunks, vec![vec![1, 2, 3, 0, 4, 5], vec![6, 7, 8, 9]]);
+        assert_eq!(chunks[0].len(), 6);
+        for c in &chunks {
+            assert!(c.len() >= 2 && c.len() <= 6);
+        }
+    }
+
+    #[test]
+    fn packing_terminates_when_eos_fills_chunk_exactly() {
+        // 5-token example into len-6 chunks: eos after it lands at index 5,
+        // exactly filling the chunk — must not loop forever.
+        let examples = vec![ex(&[1, 2, 3, 4, 5]), ex(&[6, 7, 8])];
+        let chunks = pack_chunks(&examples, 6, 0, true);
+        let flat: Vec<u32> = chunks.iter().flatten().copied().collect();
+        assert_eq!(flat, vec![1, 2, 3, 4, 5, 0, 6, 7, 8]);
+    }
+
+    #[test]
+    fn no_pack_truncates_per_example() {
+        let examples = vec![ex(&[1, 2, 3, 4, 5]), ex(&[9])];
+        let chunks = pack_chunks(&examples, 4, 0, false);
+        assert_eq!(chunks, vec![vec![1, 2, 3, 4]]);
     }
 }
