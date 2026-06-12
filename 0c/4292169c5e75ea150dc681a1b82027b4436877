@@ -1,0 +1,39 @@
+oxidize-kernels/src/q4k_scalar.rs
+  s_724bd44ab82b59::t_fee80089098866 8
+oxidize-kernels/src/q8k.rs
+  s_724bd44ab82b59::t_fee80089098866 51
+oxidize-kernels/src/q4k_avx2.rs
+  s_724bd44ab82b59::t_9bc072936dd4fb 130,134
+  s_724bd44ab82b59::t_27881934f41c10 25-30
+  s_724bd44ab82b59::t_eef97a80b271fd 153,159
+  s_724bd44ab82b59::t_7a3c5f31efc69e 19,24,33-46
+  s_724bd44ab82b59::t_fee80089098866 20-22,67
+  s_724bd44ab82b59::t_095201ba4a9a21 182,188
+oxidize-kernels/benches/oxk_q4k_bench.rs
+  s_724bd44ab82b59::t_fee80089098866 14-15,47-49,52-57,76-85,93-96
+  s_724bd44ab82b59::t_bdcd6eb728a437 170-198
+  s_724bd44ab82b59::t_074105610ccfd9 86
+oxidize-kernels/src/cpu.rs
+  s_724bd44ab82b59::t_631ddf856635a5 45-46
+  s_724bd44ab82b59::t_c4d9a5abb7eb01 67-73,75
+  s_724bd44ab82b59::t_6b0e3fd7c652e2 1-44,47-66,74,76-141
+oxidize-kernels/src/lib.rs
+  s_724bd44ab82b59::t_fee80089098866 66,199-203
+  s_724bd44ab82b59::t_422fda2d71fbee 16,22
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "0c4292169c5e75ea150dc681a1b82027b4436877",
+  "prompts": {},
+  "sessions": {
+    "s_724bd44ab82b59": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "7d9f0cc2-a398-4765-9e80-cdfdc4957c55",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
