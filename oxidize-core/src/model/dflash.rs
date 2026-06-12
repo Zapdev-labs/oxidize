@@ -420,6 +420,23 @@ impl F32Weight {
     }
 }
 
+fn gguf_row_col_dims(dims: &[u64], hidden_size: usize) -> Option<(usize, usize)> {
+    if dims.len() != 2 {
+        return None;
+    }
+    let d0 = dims[0] as usize;
+    let d1 = dims[1] as usize;
+    if d1 == hidden_size {
+        Some((d0, d1))
+    } else if d0 == hidden_size {
+        Some((d1, d0))
+    } else if d0 > d1 {
+        Some((d0, d1))
+    } else {
+        Some((d1, d0))
+    }
+}
+
 fn transpose_f32(data: &[f32], gguf_rows: usize, gguf_cols: usize) -> Vec<f32> {
     let mut result = vec![0.0f32; data.len()];
     for r in 0..gguf_rows {
@@ -1052,17 +1069,18 @@ impl DFlashDraftModel {
             Ok(Some((f32_data, info.dimensions.clone())))
         };
 
+        let hidden_size = self.config.hidden_size;
         let load_proj = |name: &str| -> Result<F32Weight, String> {
             let info = match tensor_infos.iter().find(|t| t.name == name) {
                 Some(i) => i,
                 None => return Ok(F32Weight::from_slice(Vec::new(), 0, 0)),
             };
-            if info.dimensions.len() != 2 {
+            let Some((rows, cols)) = gguf_row_col_dims(&info.dimensions, hidden_size) else {
                 return Ok(F32Weight::from_slice(Vec::new(), 0, 0));
-            }
+            };
             let qtype = GgufQuantizationType::from_ggml_type(info.ggml_type);
-            let in_dim = info.dimensions[0] as usize;
-            let out_dim = info.dimensions[1] as usize;
+            let in_dim = cols;
+            let out_dim = rows;
             if quantized_gemv_supported(qtype, in_dim) {
                 let value_count = out_dim * in_dim;
                 let qsize = quantized_size(qtype, value_count)
@@ -1085,11 +1103,15 @@ impl DFlashDraftModel {
                 ));
             }
             match load_f32_with_dims(name)? {
-                Some((data, _)) => Ok(F32Weight::from_slice(
-                    transpose_f32(&data, in_dim, out_dim),
-                    out_dim,
-                    in_dim,
-                )),
+                Some((data, dims)) => {
+                    let (rows, cols) =
+                        gguf_row_col_dims(&dims, hidden_size).unwrap_or((out_dim, in_dim));
+                    Ok(F32Weight::from_slice(
+                        transpose_f32(&data, rows, cols),
+                        rows,
+                        cols,
+                    ))
+                }
                 None => Ok(F32Weight::from_slice(Vec::new(), 0, 0)),
             }
         };
@@ -1099,12 +1121,12 @@ impl DFlashDraftModel {
                 Some(i) => i,
                 None => return Ok(F32Weight::from_slice(Vec::new(), 0, 0)),
             };
-            if info.dimensions.len() != 2 {
+            let Some((rows, cols)) = gguf_row_col_dims(&info.dimensions, hidden_size) else {
                 return Ok(F32Weight::from_slice(Vec::new(), 0, 0));
-            }
+            };
             let qtype = GgufQuantizationType::from_ggml_type(info.ggml_type);
-            let in_dim = info.dimensions[0] as usize;
-            let out_dim = info.dimensions[1] as usize;
+            let in_dim = cols;
+            let out_dim = rows;
             let value_count = out_dim * in_dim;
             let qsize = quantized_size(qtype, value_count)
                 .map_err(|e| format!("quantized_size for {}: {:?}", name, e))?;
@@ -1130,7 +1152,6 @@ impl DFlashDraftModel {
             let weight = load_proj(name)?;
             if weight.is_loaded() {
                 self.output = weight;
-                self.config.vocab_size = self.output.output_dim();
                 break;
             }
         }
@@ -1143,11 +1164,14 @@ impl DFlashDraftModel {
             let weight = load_row_weight(name)?;
             if weight.is_loaded() {
                 self.tok_embeddings = weight;
-                if !self.output.is_loaded() {
-                    self.config.vocab_size = self.tok_embeddings.output_dim();
-                }
                 break;
             }
+        }
+
+        if self.output.is_loaded() {
+            self.config.vocab_size = self.output.output_dim();
+        } else if self.tok_embeddings.is_loaded() {
+            self.config.vocab_size = self.tok_embeddings.output_dim();
         }
 
         Ok(())

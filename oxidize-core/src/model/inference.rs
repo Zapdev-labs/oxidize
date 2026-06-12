@@ -45,8 +45,9 @@ impl ModelArchitecture {
                 "deepseek" | "deepseek2" | "deepseek_v2" | "deepseek_v3" | "deepseek_moe" => {
                     Self::DeepSeek
                 }
-                "qwen" | "qwen2" | "qwen2moe" | "qwen3" | "qwen3moe" | "qwen35" | "qwen3_5_moe"
-                | "qwen3_5_moe_text" | "qwen35moe" => Self::Qwen,
+                "qwen" | "qwen2" | "qwen2moe" | "qwen3" | "qwen3moe" | "qwen35" | "qwen3_5"
+                | "qwen3_5_text" | "qwen35_text" | "qwen3_5_moe" | "qwen3_5_moe_text"
+                | "qwen35moe" => Self::Qwen,
                 "gemma" | "gemma2" | "gemma3" | "gemma4" => Self::Gemma,
                 "phi" | "phi3" => Self::Phi,
                 "falcon" => Self::Falcon,
@@ -152,6 +153,10 @@ pub struct InferenceConfig {
     pub sandwich_norm: bool,
     /// Qwen-style RMSNorm scales by `(1 + weight)` instead of `weight` alone.
     pub rms_norm_weight_plus_one: bool,
+    /// Number of appended multi-token-prediction (MTP / nextn) draft layers.
+    /// These layers live after the causal backbone in GGUF (`blk.N.nextn.*`) and
+    /// are not counted in `layer_count`.
+    pub nextn_predict_layers: usize,
 }
 
 impl Default for InferenceConfig {
@@ -185,6 +190,7 @@ impl Default for InferenceConfig {
             gelu_ffn: false,
             sandwich_norm: false,
             rms_norm_weight_plus_one: false,
+            nextn_predict_layers: 0,
         }
     }
 }
@@ -253,7 +259,8 @@ impl InferenceConfig {
     /// Map `general.architecture` values to the GGUF metadata key prefix.
     fn gguf_metadata_prefix(arch: &str) -> &str {
         match arch {
-            "qwen3_5_moe_text" | "qwen3_5_moe" | "qwen35moe" | "qwen3_5" => "qwen35",
+            "qwen3_5_moe_text" | "qwen3_5_moe" | "qwen35moe" | "qwen3_5" | "qwen3_5_text"
+            | "qwen35_text" => "qwen35",
             other => other,
         }
     }
@@ -263,14 +270,17 @@ impl InferenceConfig {
     /// Falls back to weight tensor dimensions when metadata is missing.
     pub fn from_gguf(mapped: &MappedGgufFile) -> Self {
         let metadata = &mapped.parsed().metadata;
-        let arch = mapped
+        let raw_arch = mapped
             .parsed()
             .architecture()
             .unwrap_or("llama")
             .to_string();
         let architecture = ModelArchitecture::from_gguf(mapped);
 
-        let metadata_prefix = Self::gguf_metadata_prefix(&arch);
+        let metadata_prefix = Self::gguf_metadata_prefix(&raw_arch);
+        // Canonicalize the arch string so downstream behavior matches (RMSNorm
+        // (1+w), GDN detection, etc.) see `qwen35` even for `qwen3_5_text`.
+        let arch = metadata_prefix.to_string();
         let key = |suffix: &str| format!("{metadata_prefix}.{suffix}");
         let arch_u32 = |suffix: &str| {
             metadata_u32_lookup(metadata, &key(suffix)).or_else(|| {
@@ -324,7 +334,12 @@ impl InferenceConfig {
             .map(|v| v as usize)
             .unwrap_or(4096);
 
-        let layer_count = arch_u32("block_count").unwrap_or(32) as usize;
+        // Multi-token-prediction (MTP/nextn) layers are appended after the main
+        // stack (e.g. qwen35 blk.64 with nextn.* tensors); they are draft heads,
+        // not part of the causal backbone, so exclude them from layer_count.
+        let nextn_layers = arch_u32("nextn_predict_layers").unwrap_or(0) as usize;
+        let layer_count =
+            (arch_u32("block_count").unwrap_or(32) as usize).saturating_sub(nextn_layers);
 
         let intermediate_size = arch_u32("feed_forward_length")
             .map(|v| v as usize)
@@ -507,10 +522,14 @@ impl InferenceConfig {
         // convention. Standard Qwen2/Qwen3/qwen3moe use plain w * x_hat —
         // keying this on the whole Qwen family garbled every official Qwen
         // GGUF in code paths that honor the flag (layer-wise).
-        let rms_norm_weight_plus_one = matches!(
+        let mut rms_norm_weight_plus_one = matches!(
             arch.as_str(),
             "qwen35" | "qwen35moe" | "qwen3_5_moe" | "qwen3_5_moe_text"
         );
+        // Temp override to verify the baked-vs-raw (1+w) hypothesis.
+        if let Ok(v) = std::env::var("OXIDIZE_RMS_PLUS_ONE") {
+            rms_norm_weight_plus_one = v != "0";
+        }
 
         Self {
             vocab_size,
@@ -541,6 +560,7 @@ impl InferenceConfig {
             gelu_ffn,
             sandwich_norm,
             rms_norm_weight_plus_one,
+            nextn_predict_layers: nextn_layers,
         }
     }
 }
@@ -1092,6 +1112,42 @@ struct LayerWeights {
     ffn_down_shexp: WeightStorage,
 }
 
+/// Qwen3.5/Qwen3.6-style in-model MTP (`nextn`) draft block.
+///
+/// GGUF stores one extra decoder block after the target stack (`blk.N.*`) plus
+/// the `blk.N.nextn.*` fusion/head tensors. The regular block weights are kept
+/// in `layer`; the extra tensors combine a token embedding and the target hidden
+/// state, then project the MTP hidden state back through a shared or dedicated
+/// output head.
+#[derive(Debug, Clone, PartialEq, Default)]
+struct MtpWeights {
+    layer: LayerWeights,
+    eh_proj: WeightStorage,
+    enorm: Vec<f32>,
+    hnorm: Vec<f32>,
+    embed_tokens: WeightStorage,
+    shared_head_norm: Vec<f32>,
+    shared_head_head: WeightStorage,
+}
+
+impl MtpWeights {
+    fn is_usable(&self, config: &InferenceConfig) -> bool {
+        let h = config.hidden_size;
+        !self.eh_proj.is_empty()
+            && self.eh_proj.output_dim(h.saturating_mul(2)) == h
+            && self.enorm.len() == h
+            && self.hnorm.len() == h
+            && !self.layer.attn_norm.is_empty()
+            && !self.layer.attn_q.is_empty()
+            && !self.layer.attn_k.is_empty()
+            && !self.layer.attn_v.is_empty()
+            && !self.layer.attn_output.is_empty()
+            && !self.layer.ffn_gate.is_empty()
+            && !self.layer.ffn_up.is_empty()
+            && !self.layer.ffn_down.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct InferenceModel {
     config: InferenceConfig,
@@ -1100,6 +1156,7 @@ pub struct InferenceModel {
     norm_weight: Vec<f32>,
     output_weight: WeightStorage,
     layers: Vec<LayerWeights>,
+    mtp: Option<MtpWeights>,
     kv_cache: KvCache,
     /// Maps absolute layer index → KV cache layer index for attention layers.
     /// Non-attention (shortconv, Mamba) layers have `None` and never write the KV cache.
@@ -1110,6 +1167,9 @@ pub struct InferenceModel {
     ssm_states: Vec<Vec<f32>>, // [layer][state_dim]
     ssm_conv_buffers: Vec<ConvHistoryRing>,
     workspace: Workspace,
+    /// Final output-normalized hidden row for the most recent target token.
+    /// Native MTP consumes this row as its target-hidden input.
+    last_output_hidden: Vec<f32>,
 }
 
 impl InferenceModel {
@@ -1181,6 +1241,36 @@ pub(crate) fn lookup_quantized_embedding(
     }
 }
 
+fn lookup_embedding_from_storage(
+    storage: &WeightStorage,
+    hidden_size: usize,
+    vocab_size: usize,
+    token: Token,
+    out: &mut [f32],
+) {
+    out.fill(0.0_f32);
+    if out.len() != hidden_size || hidden_size == 0 || vocab_size == 0 {
+        return;
+    }
+    let token_idx = (token as usize).min(vocab_size.saturating_sub(1));
+    match storage {
+        WeightStorage::F32(data) => {
+            let start = token_idx.saturating_mul(hidden_size);
+            let end = start.saturating_add(hidden_size);
+            if end <= data.len() {
+                out.copy_from_slice(&data[start..end]);
+            }
+        }
+        WeightStorage::Quantized(qtype, data) => {
+            lookup_quantized_embedding(hidden_size, *qtype, data, token_idx, out);
+        }
+        WeightStorage::MmapQuantized(qtype, mmap, offset, size) => {
+            let data = &mmap[*offset..*offset + *size];
+            lookup_quantized_embedding(hidden_size, *qtype, data, token_idx, out);
+        }
+    }
+}
+
 impl InferenceModel {
     pub fn load_from_gguf(
         mapped: &MappedGgufFile,
@@ -1197,6 +1287,8 @@ impl InferenceModel {
         let mut norm_weight: Option<Vec<f32>> = None;
         let mut output_weight: Option<WeightStorage> = None;
         let mut layers: Vec<LayerWeights> = vec![LayerWeights::default(); config.layer_count];
+        let mut mtp: Option<MtpWeights> =
+            (config.nextn_predict_layers > 0).then(MtpWeights::default);
         let mmap_arc = if use_mmap { Some(mapped.mmap()) } else { None };
 
         let tensor_list = mapped.mapped_tensor_infos();
@@ -1288,6 +1380,109 @@ impl InferenceModel {
                         .parse()
                         .map_err(|_| format!("bad layer index in tensor name: {}", name))?;
                     if layer_idx >= config.layer_count {
+                        if let Some(mtp) = mtp.as_mut()
+                            && layer_idx == config.layer_count
+                        {
+                            if parts.get(2) == Some(&"nextn") {
+                                let nextn_name = parts.get(3).copied().unwrap_or("");
+                                let nextn_suffix = parts.get(4).copied();
+                                match (nextn_name, nextn_suffix) {
+                                    ("eh_proj", Some("weight")) => {
+                                        mtp.eh_proj = load_tensor(name, qtype, qdata, value_count)?;
+                                    }
+                                    ("enorm", Some("weight")) | ("enorm", None) => {
+                                        mtp.enorm = load_bias(qtype, qdata, value_count)?;
+                                    }
+                                    ("hnorm", Some("weight")) | ("hnorm", None) => {
+                                        mtp.hnorm = load_bias(qtype, qdata, value_count)?;
+                                    }
+                                    ("embed_tokens", Some("weight")) => {
+                                        mtp.embed_tokens =
+                                            load_tensor(name, qtype, qdata, value_count)?;
+                                    }
+                                    ("shared_head_norm", Some("weight"))
+                                    | ("shared_head_norm", None) => {
+                                        mtp.shared_head_norm =
+                                            load_bias(qtype, qdata, value_count)?;
+                                    }
+                                    ("shared_head_head", Some("weight"))
+                                    | ("shared_head", Some("weight")) => {
+                                        mtp.shared_head_head =
+                                            load_tensor(name, qtype, qdata, value_count)?;
+                                    }
+                                    _ => {}
+                                }
+                            } else {
+                                let weight_name = parts[2];
+                                let suffix = parts.get(3).copied();
+                                match (weight_name, suffix) {
+                                    ("attn_norm", _) => {
+                                        mtp.layer.attn_norm = load_bias(qtype, qdata, value_count)?;
+                                    }
+                                    ("attn_q", Some("weight")) => {
+                                        mtp.layer.attn_q =
+                                            load_tensor(name, qtype, qdata, value_count)?;
+                                    }
+                                    ("attn_q", Some("bias")) => {
+                                        mtp.layer.attn_q_bias =
+                                            load_bias(qtype, qdata, value_count)?;
+                                    }
+                                    ("attn_k", Some("weight")) => {
+                                        mtp.layer.attn_k =
+                                            load_tensor(name, qtype, qdata, value_count)?;
+                                    }
+                                    ("attn_k", Some("bias")) => {
+                                        mtp.layer.attn_k_bias =
+                                            load_bias(qtype, qdata, value_count)?;
+                                    }
+                                    ("attn_v", Some("weight")) => {
+                                        mtp.layer.attn_v =
+                                            load_tensor(name, qtype, qdata, value_count)?;
+                                    }
+                                    ("attn_v", Some("bias")) => {
+                                        mtp.layer.attn_v_bias =
+                                            load_bias(qtype, qdata, value_count)?;
+                                    }
+                                    ("attn_output", Some("weight")) => {
+                                        mtp.layer.attn_output =
+                                            load_tensor(name, qtype, qdata, value_count)?;
+                                    }
+                                    ("attn_output", Some("bias")) => {
+                                        mtp.layer.attn_output_bias =
+                                            load_bias(qtype, qdata, value_count)?;
+                                    }
+                                    ("attn_q_norm", _) => {
+                                        mtp.layer.attn_q_norm =
+                                            load_bias(qtype, qdata, value_count)?;
+                                    }
+                                    ("attn_k_norm", _) => {
+                                        mtp.layer.attn_k_norm =
+                                            load_bias(qtype, qdata, value_count)?;
+                                    }
+                                    ("ffn_norm", _) | ("post_attention_norm", _) => {
+                                        mtp.layer.post_attention_norm =
+                                            load_bias(qtype, qdata, value_count)?;
+                                    }
+                                    ("ffn_gate", _) => {
+                                        mtp.layer.ffn_gate =
+                                            load_tensor(name, qtype, qdata, value_count)?;
+                                    }
+                                    ("ffn_up", _) => {
+                                        mtp.layer.ffn_up =
+                                            load_tensor(name, qtype, qdata, value_count)?;
+                                    }
+                                    ("ffn_down", Some("weight")) => {
+                                        mtp.layer.ffn_down =
+                                            load_tensor(name, qtype, qdata, value_count)?;
+                                    }
+                                    ("ffn_down", Some("bias")) => {
+                                        mtp.layer.ffn_down_bias =
+                                            load_bias(qtype, qdata, value_count)?;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
                         continue;
                     }
                     let weight_name = parts[2];
@@ -1508,12 +1703,24 @@ impl InferenceModel {
         let tok_embeddings = tok_embeddings.ok_or("missing tok_embeddings.weight")?;
         let norm_weight = norm_weight.ok_or("missing norm.weight")?;
         let output_weight = output_weight.unwrap_or_else(|| tok_embeddings.clone());
+        let mtp = mtp.and_then(|weights| {
+            if weights.is_usable(&config) {
+                Some(weights)
+            } else {
+                eprintln!(
+                    "MTP metadata advertises {} nextn layer(s), but required blk.{}.nextn/decoder tensors were incomplete; disabling native MTP",
+                    config.nextn_predict_layers, config.layer_count
+                );
+                None
+            }
+        });
 
         eprintln!(
-            "InferenceConfig: vocab={}, context={}, layers={}, hidden={}, intermediate={}, heads={}, kv_heads={}, kv_head_dim={}, eps={}, theta={}",
+            "InferenceConfig: vocab={}, context={}, layers={}, mtp_nextn={}, hidden={}, intermediate={}, heads={}, kv_heads={}, kv_head_dim={}, eps={}, theta={}",
             config.vocab_size,
             config.context_size,
             config.layer_count,
+            config.nextn_predict_layers,
             config.hidden_size,
             config.intermediate_size,
             config.num_attention_heads,
@@ -1577,6 +1784,7 @@ impl InferenceModel {
         }
 
         let workspace = Workspace::for_config(&config);
+        let last_output_hidden = vec![0.0_f32; config.hidden_size];
 
         Ok(Self {
             config,
@@ -1585,11 +1793,13 @@ impl InferenceModel {
             norm_weight,
             output_weight,
             layers,
+            mtp,
             kv_cache,
             kv_layer_map,
             ssm_states,
             ssm_conv_buffers,
             workspace,
+            last_output_hidden,
         })
     }
 
@@ -2145,6 +2355,7 @@ impl InferenceModel {
         let mut final_normed = vec![0.0_f32; h];
         rms_norm_f32(last, &self.norm_weight, cfg.rms_norm_eps, &mut final_normed)
             .map_err(|e| ModelError::InferenceFailed(format!("final_norm: {:?}", e)))?;
+        self.last_output_hidden = final_normed.clone();
         let mut logits = vec![0.0_f32; cfg.vocab_size];
         gemv_weight(
             &self.output_weight,
@@ -2250,6 +2461,21 @@ impl InferenceModel {
         &self.norm_weight
     }
 
+    /// Whether this GGUF contains a usable native MTP/nextn draft block.
+    pub fn has_mtp(&self) -> bool {
+        self.mtp.is_some()
+    }
+
+    /// Number of nextn layers advertised by GGUF metadata.
+    pub fn nextn_predict_layers(&self) -> usize {
+        self.config.nextn_predict_layers
+    }
+
+    /// Final output-normalized hidden row for the latest committed target token.
+    pub fn last_output_hidden(&self) -> &[f32] {
+        &self.last_output_hidden
+    }
+
     /// Project already-normalized hidden states through the output (lm_head) matrix.
     pub fn lm_head_logits_from_normed(
         &self,
@@ -2284,19 +2510,440 @@ impl InferenceModel {
     /// Apply final RMSNorm + lm_head to the current hidden state in
     /// `workspace.x` and return the logits. Last stage of pipeline-parallel.
     pub fn final_head_from_workspace(&mut self) -> Result<Logits, ModelError> {
+        let h = self.config.hidden_size;
+        let vocab_size = self.config.vocab_size;
+        let rms_norm_eps = self.config.rms_norm_eps;
+        let (logits_out, last_hidden) = {
+            let ws = &mut self.workspace;
+            let x = &ws.x[..h];
+            let normed = &mut ws.hidden_a[..h];
+            normed.fill(0.0_f32);
+            rms_norm_f32(x, &self.norm_weight, rms_norm_eps, normed)
+                .map_err(|e| ModelError::InferenceFailed(format!("final_norm: {:?}", e)))?;
+            let last_hidden = normed.to_vec();
+            let logits = &mut ws.logits[..vocab_size];
+            logits.fill(0.0_f32);
+            gemv_weight(&self.output_weight, vocab_size, h, normed, logits)
+                .map_err(|e| ModelError::InferenceFailed(format!("output: {:?}", e)))?;
+            (logits.to_vec(), last_hidden)
+        };
+        self.last_output_hidden = last_hidden;
+        Ok(logits_out)
+    }
+
+    /// Generate draft tokens with the native in-GGUF MTP/nextn block.
+    ///
+    /// `start_token` and `start_hidden` must describe the same committed target
+    /// position. The first MTP step predicts the token after `start_token`; each
+    /// accepted MTP row then feeds its sampled token and post-head-norm hidden row
+    /// back into the next MTP step.
+    pub fn draft_mtp_tokens(
+        &mut self,
+        start_token: Token,
+        start_hidden: &[f32],
+        max_tokens: usize,
+        sampling: crate::sampling::SamplingConfig,
+        random: &mut dyn FnMut() -> f32,
+    ) -> Result<(Vec<Token>, Vec<Logits>), ModelError> {
+        if max_tokens == 0 {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        if self.mtp.is_none() {
+            return Err(ModelError::InferenceFailed(
+                "model does not contain a usable MTP/nextn block".to_string(),
+            ));
+        }
+        let h = self.config.hidden_size;
+        if start_hidden.len() != h {
+            return Err(ModelError::InferenceFailed(format!(
+                "MTP hidden width mismatch: expected {h}, got {}",
+                start_hidden.len()
+            )));
+        }
+
+        let mtp_kv_config = KvCacheConfig {
+            layer_count: 1,
+            context_size: max_tokens.max(1),
+            head_count: self.config.num_key_value_heads,
+            head_dim: self.config.kv_head_dim(),
+            dtype: DType::F32,
+            quantization: crate::kv_cache::KvQuantization::default(),
+        };
+        let mut mtp_kv = KvCache::new(mtp_kv_config)
+            .map_err(|e| ModelError::InferenceFailed(format!("mtp kv_cache: {e:?}")))?;
+
+        let mut draft_tokens = Vec::with_capacity(max_tokens);
+        let mut draft_logits = Vec::with_capacity(max_tokens);
+        let mut current_token = start_token;
+        let mut current_hidden = start_hidden.to_vec();
+        for pos in 0..max_tokens {
+            let (logits, next_hidden) =
+                self.mtp_forward_one(current_token, &current_hidden, pos, &mut mtp_kv)?;
+            let token = crate::sampling::sample(&logits, sampling, random())
+                .map_err(|e| ModelError::InferenceFailed(format!("MTP sample: {e:?}")))?;
+            draft_tokens.push(token);
+            draft_logits.push(logits);
+            current_token = token;
+            current_hidden = next_hidden;
+        }
+
+        Ok((draft_tokens, draft_logits))
+    }
+
+    fn mtp_forward_one(
+        &mut self,
+        token: Token,
+        previous_hidden: &[f32],
+        pos: usize,
+        mtp_kv: &mut KvCache,
+    ) -> Result<(Logits, Vec<f32>), ModelError> {
+        let mtp = self
+            .mtp
+            .as_ref()
+            .ok_or_else(|| ModelError::InferenceFailed("missing MTP/nextn weights".to_string()))?;
+        let h = self.config.hidden_size;
+        let vocab_size = self.config.vocab_size;
+        let rms_norm_eps = self.config.rms_norm_eps;
+
+        let embed_storage = if mtp.embed_tokens.is_empty() {
+            &self.tok_embeddings
+        } else {
+            &mtp.embed_tokens
+        };
+        let mut token_embedding = vec![0.0_f32; h];
+        lookup_embedding_from_storage(embed_storage, h, vocab_size, token, &mut token_embedding);
+
+        let mut embed_normed = vec![0.0_f32; h];
+        rms_norm_f32(
+            &token_embedding,
+            &mtp.enorm,
+            rms_norm_eps,
+            &mut embed_normed,
+        )
+        .map_err(|e| ModelError::InferenceFailed(format!("mtp enorm: {e:?}")))?;
+        let mut hidden_normed = vec![0.0_f32; h];
+        rms_norm_f32(
+            previous_hidden,
+            &mtp.hnorm,
+            rms_norm_eps,
+            &mut hidden_normed,
+        )
+        .map_err(|e| ModelError::InferenceFailed(format!("mtp hnorm: {e:?}")))?;
+
+        let mut concat = vec![0.0_f32; h * 2];
+        concat[..h].copy_from_slice(&embed_normed);
+        concat[h..].copy_from_slice(&hidden_normed);
+
+        let mut fused = vec![0.0_f32; h];
+        gemv_weight(&mtp.eh_proj, h, h * 2, &concat, &mut fused)
+            .map_err(|e| ModelError::InferenceFailed(format!("mtp eh_proj: {e}")))?;
+        self.workspace.x[..h].copy_from_slice(&fused);
+
+        self.run_mtp_layer_in_workspace(pos, mtp_kv)?;
+
+        let mtp = self
+            .mtp
+            .as_ref()
+            .ok_or_else(|| ModelError::InferenceFailed("missing MTP/nextn weights".to_string()))?;
+        let norm_weight = if mtp.shared_head_norm.is_empty() {
+            &self.norm_weight
+        } else {
+            &mtp.shared_head_norm
+        };
+        let head_weight = if mtp.shared_head_head.is_empty() {
+            &self.output_weight
+        } else {
+            &mtp.shared_head_head
+        };
+
+        let x = self.workspace.x[..h].to_vec();
+        let mut mtp_hidden = vec![0.0_f32; h];
+        rms_norm_f32(&x, norm_weight, rms_norm_eps, &mut mtp_hidden)
+            .map_err(|e| ModelError::InferenceFailed(format!("mtp shared_head_norm: {e:?}")))?;
+        let mut logits = vec![0.0_f32; vocab_size];
+        gemv_weight(head_weight, vocab_size, h, &mtp_hidden, &mut logits)
+            .map_err(|e| ModelError::InferenceFailed(format!("mtp shared_head: {e}")))?;
+        Ok((logits, mtp_hidden))
+    }
+
+    fn run_mtp_layer_in_workspace(
+        &mut self,
+        pos: usize,
+        mtp_kv: &mut KvCache,
+    ) -> Result<(), ModelError> {
+        let mtp = self
+            .mtp
+            .as_ref()
+            .ok_or_else(|| ModelError::InferenceFailed("missing MTP/nextn weights".to_string()))?;
+        let layer = &mtp.layer;
         let cfg = &self.config;
         let h = cfg.hidden_size;
-        let ws = &mut self.workspace;
-        let x = &ws.x[..h];
-        let normed = &mut ws.hidden_a[..h];
-        normed.fill(0.0_f32);
-        rms_norm_f32(x, &self.norm_weight, cfg.rms_norm_eps, normed)
-            .map_err(|e| ModelError::InferenceFailed(format!("final_norm: {:?}", e)))?;
-        let logits = &mut ws.logits[..cfg.vocab_size];
-        logits.fill(0.0_f32);
-        gemv_weight(&self.output_weight, cfg.vocab_size, h, normed, logits)
-            .map_err(|e| ModelError::InferenceFailed(format!("output: {:?}", e)))?;
-        Ok(logits.to_vec())
+        let n = cfg.num_attention_heads;
+        let k = cfg.num_key_value_heads;
+        let mut x = self.workspace.x[..h].to_vec();
+
+        let mut normed = vec![0.0_f32; h];
+        rms_norm_f32(&x, &layer.attn_norm, cfg.rms_norm_eps, &mut normed)
+            .map_err(|e| ModelError::InferenceFailed(format!("mtp attn_norm: {e:?}")))?;
+
+        let qg_len = layer.attn_q.output_dim(h);
+        let kv_len = layer.attn_k.output_dim(h);
+        let attn_output_input_len = layer.attn_output.output_dim(h);
+        if qg_len == 0 || kv_len == 0 || attn_output_input_len == 0 {
+            return Err(ModelError::InferenceFailed(format!(
+                "invalid MTP attention dims qg={qg_len} kv={kv_len} out_in={attn_output_input_len}"
+            )));
+        }
+
+        let mut qg = vec![0.0_f32; qg_len];
+        let mut k_vec = vec![0.0_f32; kv_len];
+        let mut v_vec = vec![0.0_f32; kv_len];
+        gemv_weight_fused(
+            vec![
+                (&layer.attn_q, qg_len, &mut qg[..]),
+                (&layer.attn_k, kv_len, &mut k_vec[..]),
+                (&layer.attn_v, kv_len, &mut v_vec[..]),
+            ],
+            h,
+            &normed,
+        )
+        .map_err(|e| ModelError::InferenceFailed(format!("mtp qkv: {e}")))?;
+        if !layer.attn_q_bias.is_empty() {
+            for (i, q) in qg.iter_mut().enumerate() {
+                *q += layer.attn_q_bias[i % layer.attn_q_bias.len()];
+            }
+        }
+        if !layer.attn_k_bias.is_empty() {
+            for (i, value) in k_vec.iter_mut().enumerate() {
+                *value += layer.attn_k_bias[i % layer.attn_k_bias.len()];
+            }
+        }
+        if !layer.attn_v_bias.is_empty() {
+            for (i, value) in v_vec.iter_mut().enumerate() {
+                *value += layer.attn_v_bias[i % layer.attn_v_bias.len()];
+            }
+        }
+
+        let q_len = qg_len.min(attn_output_input_len);
+        let gate = (qg_len >= q_len.saturating_mul(2)).then(|| qg[q_len..q_len + q_len].to_vec());
+        let mut q = qg[..q_len].to_vec();
+        let q_head_dim = if n > 0 && q_len.is_multiple_of(n) {
+            q_len / n
+        } else {
+            q_len
+        };
+        let q_heads = q_len.checked_div(q_head_dim.max(1)).unwrap_or(1);
+        let kv_head_dim = if k > 0 && kv_len.is_multiple_of(k) {
+            kv_len / k
+        } else {
+            kv_len
+        };
+        let kv_heads = kv_len.checked_div(kv_head_dim.max(1)).unwrap_or(1);
+
+        if !layer.attn_q_norm.is_empty() && q.len() == layer.attn_q_norm.len() {
+            let mut normed_q = vec![0.0_f32; q.len()];
+            rms_norm_f32(&q, &layer.attn_q_norm, cfg.rms_norm_eps, &mut normed_q)
+                .map_err(|e| ModelError::InferenceFailed(format!("mtp q_norm: {e:?}")))?;
+            q.copy_from_slice(&normed_q);
+        } else if !layer.attn_q_norm.is_empty() && q_head_dim == layer.attn_q_norm.len() {
+            let mut normed_head = vec![0.0_f32; q_head_dim];
+            for head in 0..q_heads {
+                let start = head * q_head_dim;
+                let end = start + q_head_dim;
+                if end > q.len() {
+                    break;
+                }
+                rms_norm_f32(
+                    &q[start..end],
+                    &layer.attn_q_norm,
+                    cfg.rms_norm_eps,
+                    &mut normed_head,
+                )
+                .map_err(|e| ModelError::InferenceFailed(format!("mtp q_norm: {e:?}")))?;
+                q[start..end].copy_from_slice(&normed_head);
+            }
+        }
+        if !layer.attn_k_norm.is_empty() && k_vec.len() == layer.attn_k_norm.len() {
+            let mut normed_k = vec![0.0_f32; k_vec.len()];
+            rms_norm_f32(&k_vec, &layer.attn_k_norm, cfg.rms_norm_eps, &mut normed_k)
+                .map_err(|e| ModelError::InferenceFailed(format!("mtp k_norm: {e:?}")))?;
+            k_vec.copy_from_slice(&normed_k);
+        } else if !layer.attn_k_norm.is_empty() && kv_head_dim == layer.attn_k_norm.len() {
+            let mut normed_head = vec![0.0_f32; kv_head_dim];
+            for head in 0..kv_heads {
+                let start = head * kv_head_dim;
+                let end = start + kv_head_dim;
+                if end > k_vec.len() {
+                    break;
+                }
+                rms_norm_f32(
+                    &k_vec[start..end],
+                    &layer.attn_k_norm,
+                    cfg.rms_norm_eps,
+                    &mut normed_head,
+                )
+                .map_err(|e| ModelError::InferenceFailed(format!("mtp k_norm: {e:?}")))?;
+                k_vec[start..end].copy_from_slice(&normed_head);
+            }
+        }
+
+        let q_rope_len = cfg.effective_rope_dim().min(q_head_dim);
+        let mut rope_scratch = vec![0.0_f32; q_rope_len.max(kv_head_dim)];
+        for head in 0..q_heads {
+            let off = head * q_head_dim;
+            if off + q_head_dim > q.len() {
+                break;
+            }
+            let rotated = &mut rope_scratch[..q_rope_len];
+            apply_rope_f32(
+                &q[off..off + q_rope_len],
+                pos,
+                q_rope_len,
+                cfg.rope_theta,
+                rotated,
+            )
+            .map_err(|e| ModelError::InferenceFailed(format!("mtp rope q: {e:?}")))?;
+            q[off..off + q_rope_len].copy_from_slice(rotated);
+        }
+        let k_rope_len = cfg.effective_rope_dim().min(kv_head_dim);
+        for head in 0..kv_heads {
+            let off = head * kv_head_dim;
+            if off + kv_head_dim > k_vec.len() {
+                break;
+            }
+            let rotated = &mut rope_scratch[..k_rope_len];
+            apply_rope_f32(
+                &k_vec[off..off + k_rope_len],
+                pos,
+                k_rope_len,
+                cfg.rope_theta,
+                rotated,
+            )
+            .map_err(|e| ModelError::InferenceFailed(format!("mtp rope k: {e:?}")))?;
+            k_vec[off..off + k_rope_len].copy_from_slice(rotated);
+        }
+
+        mtp_kv
+            .set(0, pos, &k_vec, &v_vec)
+            .map_err(|e| ModelError::InferenceFailed(format!("mtp kv set: {e:?}")))?;
+        let seq_len = pos + 1;
+        let key_cache = mtp_kv
+            .f32_layer_key_prefix(0, seq_len)
+            .map_err(|e| ModelError::InferenceFailed(format!("mtp kv keys: {e:?}")))?
+            .ok_or_else(|| ModelError::InferenceFailed("MTP KV cache is not f32".to_string()))?;
+        let value_cache = mtp_kv
+            .f32_layer_value_prefix(0, seq_len)
+            .map_err(|e| ModelError::InferenceFailed(format!("mtp kv values: {e:?}")))?
+            .ok_or_else(|| ModelError::InferenceFailed("MTP KV cache is not f32".to_string()))?;
+
+        let q_for_flash = if q_head_dim > kv_head_dim {
+            let mut truncated = vec![0.0_f32; q_heads * kv_head_dim];
+            for head in 0..q_heads {
+                let src = head * q_head_dim;
+                let dst = head * kv_head_dim;
+                truncated[dst..dst + kv_head_dim].copy_from_slice(&q[src..src + kv_head_dim]);
+            }
+            truncated
+        } else {
+            q.clone()
+        };
+        let mut attn_result = vec![0.0_f32; q_for_flash.len()];
+        flash_attention_decode_heads_f32(
+            &q_for_flash,
+            key_cache,
+            value_cache,
+            seq_len,
+            kv_head_dim,
+            kv_len,
+            q_heads,
+            kv_heads,
+            &mut attn_result,
+        )
+        .map_err(|e| ModelError::InferenceFailed(format!("mtp attention: {e:?}")))?;
+        if let Some(gate) = gate.as_ref()
+            && gate.len() == attn_result.len()
+        {
+            for (out, gate_value) in attn_result.iter_mut().zip(gate.iter()) {
+                let sigmoid = 1.0_f32 / (1.0 + (-*gate_value).exp());
+                *out *= sigmoid;
+            }
+        }
+
+        let attn_input = if attn_result.len() == attn_output_input_len {
+            attn_result
+        } else {
+            let mut padded = vec![0.0_f32; attn_output_input_len];
+            let copy = padded.len().min(attn_result.len());
+            padded[..copy].copy_from_slice(&attn_result[..copy]);
+            padded
+        };
+        let mut attn_out = vec![0.0_f32; h];
+        gemv_weight(
+            &layer.attn_output,
+            h,
+            attn_output_input_len,
+            &attn_input,
+            &mut attn_out,
+        )
+        .map_err(|e| ModelError::InferenceFailed(format!("mtp attn_output: {e}")))?;
+        if !layer.attn_output_bias.is_empty() {
+            for (i, out) in attn_out.iter_mut().enumerate() {
+                *out += layer.attn_output_bias[i % layer.attn_output_bias.len()];
+            }
+        }
+        for i in 0..h {
+            x[i] += attn_out[i];
+        }
+
+        let ffn_norm_weight = if !layer.post_attention_norm.is_empty() {
+            &layer.post_attention_norm
+        } else {
+            &layer.ffn_norm
+        };
+        if ffn_norm_weight.is_empty() {
+            return Err(ModelError::InferenceFailed(
+                "MTP block is missing post_attention_norm/ffn_norm".to_string(),
+            ));
+        }
+        let mut ffn_normed = vec![0.0_f32; h];
+        rms_norm_f32(&x, ffn_norm_weight, cfg.rms_norm_eps, &mut ffn_normed)
+            .map_err(|e| ModelError::InferenceFailed(format!("mtp ffn_norm: {e:?}")))?;
+        let mut gate = vec![0.0_f32; cfg.intermediate_size];
+        let mut up = vec![0.0_f32; cfg.intermediate_size];
+        gemv_weight_fused(
+            vec![
+                (&layer.ffn_gate, cfg.intermediate_size, &mut gate[..]),
+                (&layer.ffn_up, cfg.intermediate_size, &mut up[..]),
+            ],
+            h,
+            &ffn_normed,
+        )
+        .map_err(|e| ModelError::InferenceFailed(format!("mtp ffn gate/up: {e}")))?;
+        if cfg.gelu_ffn {
+            apply_geglu_inplace_f32(&mut gate, &up);
+        } else {
+            apply_swiglu_inplace_f32(&mut gate, &up);
+        }
+        let mut ffn_out = vec![0.0_f32; h];
+        gemv_weight(
+            &layer.ffn_down,
+            h,
+            cfg.intermediate_size,
+            &gate,
+            &mut ffn_out,
+        )
+        .map_err(|e| ModelError::InferenceFailed(format!("mtp ffn_down: {e}")))?;
+        if !layer.ffn_down_bias.is_empty() {
+            for (i, out) in ffn_out.iter_mut().enumerate() {
+                *out += layer.ffn_down_bias[i % layer.ffn_down_bias.len()];
+            }
+        }
+        for i in 0..h {
+            x[i] += ffn_out[i];
+        }
+
+        self.workspace.x[..h].copy_from_slice(&x);
+        Ok(())
     }
 
     /// Run layers `range` against the hidden state currently in
@@ -3816,6 +4463,68 @@ impl Model for InferenceModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gguf::{GgufFile, GgufMetadataValue, GgufTensorInfo, MappedGgufFile};
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn qwen35_mtp_metadata_subtracts_nextn_layers() {
+        let mapped = MappedGgufFile::from_parsed_for_test(GgufFile {
+            version: 3,
+            tensor_count: 1,
+            metadata: BTreeMap::from([
+                (
+                    "general.architecture".to_owned(),
+                    GgufMetadataValue::String("qwen35".to_owned()),
+                ),
+                (
+                    "qwen35.block_count".to_owned(),
+                    GgufMetadataValue::Uint32(65),
+                ),
+                (
+                    "qwen35.nextn_predict_layers".to_owned(),
+                    GgufMetadataValue::Uint32(1),
+                ),
+                (
+                    "qwen35.embedding_length".to_owned(),
+                    GgufMetadataValue::Uint32(5120),
+                ),
+                (
+                    "qwen35.feed_forward_length".to_owned(),
+                    GgufMetadataValue::Uint32(17408),
+                ),
+                (
+                    "qwen35.attention.head_count".to_owned(),
+                    GgufMetadataValue::Uint32(24),
+                ),
+                (
+                    "qwen35.attention.head_count_kv".to_owned(),
+                    GgufMetadataValue::Uint32(4),
+                ),
+                (
+                    "qwen35.attention.key_length".to_owned(),
+                    GgufMetadataValue::Uint32(256),
+                ),
+            ]),
+            tensor_infos: vec![GgufTensorInfo {
+                name: "tok_embeddings.weight".to_owned(),
+                dimensions: vec![5120, 248320],
+                ggml_type: 0,
+                relative_offset: 0,
+                absolute_offset: 0,
+            }],
+            alignment: 32,
+            data_section_start: 0,
+        });
+
+        let cfg = InferenceConfig::from_gguf(&mapped);
+
+        assert_eq!(cfg.architecture, ModelArchitecture::Qwen);
+        assert_eq!(cfg.layer_count, 64);
+        assert_eq!(cfg.nextn_predict_layers, 1);
+        assert_eq!(cfg.hidden_size, 5120);
+        assert_eq!(cfg.kv_head_dim(), 256);
+        assert_eq!(cfg.rope_dim, 64);
+    }
 
     #[test]
     fn gemma_sliding_window_pattern_selects_global_layers() {
@@ -3900,11 +4609,13 @@ mod tests {
             norm_weight: vec![1.0, 1.0],
             output_weight: WeightStorage::F32(vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6]),
             layers: Vec::new(),
+            mtp: None,
             kv_cache: KvCache::new(kv_cache_config).expect("tiny kv cache should be valid"),
             kv_layer_map: Vec::new(),
             ssm_states: Vec::new(),
             ssm_conv_buffers: Vec::new(),
             workspace: Workspace::for_config(&config),
+            last_output_hidden: vec![0.0_f32; config.hidden_size],
         }
     }
 
@@ -3996,6 +4707,54 @@ mod tests {
         assert_eq!(prefill_logits, single_logits);
         assert_eq!(prefill_session.consumed_tokens(), 2);
         assert_eq!(single_session.consumed_tokens(), 1);
+    }
+
+    #[test]
+    fn native_mtp_draft_runs_on_tiny_weights() {
+        let mut model = tiny_inference_model();
+        model.config.nextn_predict_layers = 1;
+        model.config.intermediate_size = 2;
+        let mut layer = LayerWeights {
+            attn_norm: vec![1.0, 1.0],
+            attn_q: WeightStorage::F32(vec![0.0; 4 * 2]),
+            attn_k: WeightStorage::F32(vec![0.0; 2 * 2]),
+            attn_v: WeightStorage::F32(vec![0.0; 2 * 2]),
+            attn_output: WeightStorage::F32(vec![0.0; 2 * 2]),
+            post_attention_norm: vec![1.0, 1.0],
+            ffn_gate: WeightStorage::F32(vec![0.0; 2 * 2]),
+            ffn_up: WeightStorage::F32(vec![0.0; 2 * 2]),
+            ffn_down: WeightStorage::F32(vec![0.0; 2 * 2]),
+            ..LayerWeights::default()
+        };
+        // Keep the MTP layer full-attention and dense; q output is [q; gate].
+        layer.attn_q_bias = vec![0.0; 4];
+        model.mtp = Some(MtpWeights {
+            layer,
+            eh_proj: WeightStorage::F32(vec![0.0; 2 * 4]),
+            enorm: vec![1.0, 1.0],
+            hnorm: vec![1.0, 1.0],
+            shared_head_norm: vec![1.0, 1.0],
+            ..MtpWeights::default()
+        });
+
+        let mut random = || 0.0_f32;
+        let (tokens, logits) = model
+            .draft_mtp_tokens(
+                0,
+                &[0.0, 0.0],
+                2,
+                crate::sampling::SamplingConfig {
+                    temperature: 0.0,
+                    top_k: Some(1),
+                    ..Default::default()
+                },
+                &mut random,
+            )
+            .expect("tiny MTP draft should run");
+
+        assert_eq!(tokens, vec![2, 2]);
+        assert_eq!(logits.len(), 2);
+        assert!(logits.iter().all(|step| step.len() == model.vocab_size()));
     }
 
     /// Whole-model forward(0..L) must equal split forward(0..K) + forward(K..L)

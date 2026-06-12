@@ -2,7 +2,8 @@ mod pipeline;
 
 use clap::{Parser, ValueEnum};
 use oxidize_core::generation::{
-    GenerationConfig, GenerationStream, SpeculativeGenerationConfig, SpeculativeGenerationStream,
+    GenerationConfig, GenerationStream, MtpGenerationStream, SpeculativeGenerationConfig,
+    SpeculativeGenerationStream,
 };
 use oxidize_core::gguf::MappedGgufFile;
 use oxidize_core::inference::{InferenceConfig, InferenceModel};
@@ -88,8 +89,12 @@ struct Args {
     layer_wise: bool,
     #[arg(long, default_value_t = 1)]
     layer_cache: usize,
+    /// Use TurboQuant block quantization for q4/q8 KV cache (default).
     #[arg(long, default_value_t = false)]
     turboquant: bool,
+    /// Use the legacy asymmetric q4/q8 KV cache quantizer instead of TurboQuant.
+    #[arg(long, default_value_t = false)]
+    no_turboquant: bool,
     #[arg(long, default_value_t = false)]
     cpu_optimized: bool,
     #[arg(long, default_value_t = false)]
@@ -157,6 +162,9 @@ struct Args {
     /// Number of draft tokens per speculative step.
     #[arg(long, default_value_t = 4)]
     draft_tokens: usize,
+    /// Disable native in-GGUF MTP/nextn speculative decoding when present.
+    #[arg(long, default_value_t = false)]
+    no_mtp: bool,
 }
 
 fn print_run_help() {
@@ -1309,7 +1317,7 @@ fn generate_with_model<W: Write, M: Model + ?Sized>(
     let prompt_tokens = tokenizer.encode_with_special_tokens(
         prompt,
         EncodeOptions {
-            add_bos: true,
+            add_bos: tokenizer.add_bos_default(),
             add_eos: false,
             pad_to: None,
         },
@@ -1399,7 +1407,7 @@ fn generate_with_dflash_draft<W: Write, M: Model + ?Sized>(
     let prompt_tokens = tokenizer.encode_with_special_tokens(
         prompt,
         EncodeOptions {
-            add_bos: true,
+            add_bos: tokenizer.add_bos_default(),
             add_eos: false,
             pad_to: None,
         },
@@ -1455,6 +1463,92 @@ fn generate_with_dflash_draft<W: Write, M: Model + ?Sized>(
         write!(writer, "{response}")?;
         writer.flush()?;
     }
+    let elapsed = started_at.elapsed();
+    writeln!(writer)?;
+    writeln!(
+        writer,
+        "{}",
+        format_generation_stats(generated_tokens.len(), elapsed)
+    )?;
+    Ok(response)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn generate_with_mtp_model<W: Write>(
+    prompt: &str,
+    target_model: &mut InferenceModel,
+    tokenizer: &LoadedTokenizer,
+    max_tokens: usize,
+    temperature: f32,
+    top_p: Option<f32>,
+    top_k: Option<usize>,
+    draft_tokens: usize,
+    writer: &mut W,
+) -> io::Result<String> {
+    use futures_core::Stream;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Waker};
+
+    let started_at = Instant::now();
+    let mut session = Session::new();
+    let prompt_tokens = tokenizer.encode_with_special_tokens(
+        prompt,
+        EncodeOptions {
+            add_bos: tokenizer.add_bos_default(),
+            add_eos: false,
+            pad_to: None,
+        },
+    );
+    let eos_token = tokenizer.special_tokens().eos;
+    let suppressed_tokens = suppressed_generation_tokens(tokenizer, target_model.vocab_size());
+    let generation = GenerationConfig {
+        max_new_tokens: max_tokens,
+        stop_token: eos_token,
+        suppressed_tokens,
+        sampling: SamplingConfig {
+            temperature,
+            top_p,
+            top_k,
+            ..SamplingConfig::default()
+        },
+        ..GenerationConfig::default()
+    };
+    let config = SpeculativeGenerationConfig {
+        generation,
+        draft_tokens_per_step: draft_tokens.max(1),
+    };
+
+    let mut rng = rand::thread_rng();
+    let mut stream =
+        MtpGenerationStream::new(target_model, &mut session, &prompt_tokens, config, || {
+            rand::Rng::r#gen::<f32>(&mut rng)
+        });
+    let waker = Waker::from(Arc::new(NoopWaker));
+    let mut cx = Context::from_waker(&waker);
+    let mut pinned = Pin::new(&mut stream);
+    let mut generated_tokens: Vec<u32> = Vec::new();
+
+    loop {
+        match Stream::poll_next(pinned.as_mut(), &mut cx) {
+            Poll::Ready(Some(Ok(token))) => generated_tokens.push(token),
+            Poll::Ready(Some(Err(e))) => {
+                return Err(io::Error::other(format!("generation error: {:?}", e)));
+            }
+            Poll::Ready(None) => break,
+            Poll::Pending => break,
+        }
+    }
+
+    let response = tokenizer
+        .decode_without_special_tokens(&generated_tokens)
+        .unwrap_or_default();
+    if !response.is_empty() {
+        write!(writer, "{response}")?;
+    } else if !generated_tokens.is_empty() {
+        write!(writer, "[generated token ids: {generated_tokens:?}]")?;
+    }
+    writer.flush()?;
     let elapsed = started_at.elapsed();
     writeln!(writer)?;
     writeln!(
@@ -1657,6 +1751,7 @@ fn server_args_from_cli(args: &Args) -> io::Result<oxidize_server::Args> {
         layer_wise: args.layer_wise,
         layer_cache: args.layer_cache,
         turboquant_kv: args.turboquant,
+        no_turboquant_kv: args.no_turboquant,
         mesh: args.mesh,
         mesh_port: args.mesh_port,
         tokenizer_model: args.tokenizer_model.clone(),
@@ -1956,7 +2051,9 @@ fn main() {
                 }
                 let mut config = InferenceConfig::from_gguf(&mapped);
                 config.kv_cache_dtype = args.kv_cache_dtype.dtype();
-                if args.turboquant {
+                if args.no_turboquant {
+                    config.kv_quantization = oxidize_core::kv_cache::KvQuantization::Asymmetric;
+                } else if args.turboquant {
                     config.kv_quantization = oxidize_core::kv_cache::KvQuantization::TurboQuant;
                 }
                 if let Some(ctx) = args.ctx_size {
@@ -2178,6 +2275,80 @@ fn main() {
                         args.top_p,
                         args.top_k,
                         args.draft_tokens,
+                        &mut writer,
+                    ) {
+                        eprintln!("generation failed: {error}");
+                    }
+                    return;
+                }
+
+                if !is_dflash
+                    && !args.layer_wise
+                    && effective_backend != oxidize_core::backend::Backend::Mlx
+                {
+                    let use_mmap = true;
+                    let mut concrete_model =
+                        match InferenceModel::load_from_gguf(&mapped, config.clone(), use_mmap) {
+                            Ok(model) => model,
+                            Err(error) => {
+                                eprintln!("failed to load model weights: {error}");
+                                return;
+                            }
+                        };
+                    if concrete_model.has_mtp() && !args.no_mtp && !args.chat {
+                        eprintln!(
+                            "using native MTP/nextn speculative decoding: target={} nextn_layers={} draft_tokens={}",
+                            model_path.display(),
+                            concrete_model.nextn_predict_layers(),
+                            args.draft_tokens
+                        );
+                        if let Err(error) = generate_with_mtp_model(
+                            &args.prompt,
+                            &mut concrete_model,
+                            &tokenizer,
+                            args.max_tokens,
+                            args.temperature,
+                            args.top_p,
+                            args.top_k,
+                            args.draft_tokens,
+                            &mut writer,
+                        ) {
+                            eprintln!("generation failed: {error}");
+                        }
+                        return;
+                    }
+                    if concrete_model.has_mtp() && args.chat && !args.no_mtp {
+                        eprintln!(
+                            "native MTP/nextn is available but chat mode currently uses target-only generation"
+                        );
+                    }
+                    let mut model: Box<dyn Model> = Box::new(concrete_model);
+                    if args.chat {
+                        let stdin = io::stdin();
+                        let mut reader = stdin.lock();
+                        if let Err(error) = run_model_chat_mode(
+                            &mut reader,
+                            &mut writer,
+                            &mut model,
+                            &tokenizer,
+                            args.max_tokens,
+                            args.temperature,
+                            args.top_p,
+                            args.top_k,
+                        ) {
+                            eprintln!("chat mode failed: {error}");
+                        }
+                        return;
+                    }
+
+                    if let Err(error) = generate_with_model(
+                        &args.prompt,
+                        &mut model,
+                        &tokenizer,
+                        args.max_tokens,
+                        args.temperature,
+                        args.top_p,
+                        args.top_k,
                         &mut writer,
                     ) {
                         eprintln!("generation failed: {error}");
