@@ -118,6 +118,32 @@ fn select_isa() -> &'static str {
     "scalar"
 }
 
+/// Lead multi-row tile width for the AVX2 range GEMV, resolved once per
+/// process. Default 16 (the widest) on every vendor, with
+/// `OXIDIZE_OXK_TILE={1,4,8,16}` for per-part retuning; the result is
+/// bit-identical regardless of width.
+///
+/// Counterintuitively the WIDEST tile wins in real decode even though a
+/// single-threaded microbench prefers x1 (Xeon Silver 4110: x1 = 4.23 GB/s vs
+/// x8 = 3.76). The microbench is L3-resident, so it only sees the wide tile's
+/// register pressure; real decode streams each expert matrix cold from DRAM,
+/// where the wide tile's 16 independent outstanding loads hide memory latency.
+/// Interleaved e2e A/B on Qwen3-30B-A3B (28T) was decisive and monotone:
+/// tile16 11.7/10.0 > tile8 7.5/7.0 > tile1 4.8/4.3 tok/s — so narrowing the
+/// tile on Intel (the microbench's suggestion) would roughly halve decode.
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+fn max_tile() -> usize {
+    static TILE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *TILE.get_or_init(|| {
+        if let Ok(Ok(t)) = std::env::var("OXIDIZE_OXK_TILE").map(|v| v.parse::<usize>())
+            && matches!(t, 1 | 4 | 8 | 16)
+        {
+            return t;
+        }
+        16
+    })
+}
+
 /// Dot a contiguous range of Q4_K rows against one pre-quantized Q8_K vector.
 ///
 /// `rows` must point at `out.len()` rows of `blocks_per_row` Q4_K blocks laid
@@ -216,18 +242,24 @@ pub fn gemv_q4k_range(rows: &[u8], blocks_per_row: usize, q8k: &[u8], out: &mut 
             return;
         }
 
-        // AVX2 baseline (Haswell+ and Zen)
+        // AVX2 baseline (Haswell+ and Zen). The lead tile width is
+        // vendor-tuned (see `max_tile`): wide multi-row tiles amortize the
+        // shared Q8_K load but hold 8 Q8 ymm vectors live across 8-16 row
+        // dots, so on register-tight cores (Skylake-SP) x1 is fastest while
+        // Zen prefers x16. Each width computes a row bit-identically, so the
+        // tile choice never changes the result.
         if isa == "avx2" || (isa == "auto" && oxk_avx2_available()) {
             let n = out.len();
+            let tile = max_tile();
             let mut r = 0;
-            while r + 16 <= n {
+            while tile >= 16 && r + 16 <= n {
                 let base = unsafe { rows.as_ptr().add(r * row_bytes) };
                 let mut hex = [0.0_f32; 16];
                 unsafe { q4k_q8k_row_dot_x16_avx2(base, row_bytes, blocks_per_row, q8k, &mut hex) };
                 out[r..r + 16].copy_from_slice(&hex);
                 r += 16;
             }
-            if r + 8 <= n {
+            while tile >= 8 && r + 8 <= n {
                 let base = unsafe { rows.as_ptr().add(r * row_bytes) };
                 let mut octet = [0.0_f32; 8];
                 unsafe {
@@ -236,7 +268,7 @@ pub fn gemv_q4k_range(rows: &[u8], blocks_per_row: usize, q8k: &[u8], out: &mut 
                 out[r..r + 8].copy_from_slice(&octet);
                 r += 8;
             }
-            if r + 4 <= n {
+            while tile >= 4 && r + 4 <= n {
                 let base = unsafe { rows.as_ptr().add(r * row_bytes) };
                 let mut quad = [0.0_f32; 4];
                 unsafe { q4k_q8k_row_dot_x4_avx2(base, row_bytes, blocks_per_row, q8k, &mut quad) };
