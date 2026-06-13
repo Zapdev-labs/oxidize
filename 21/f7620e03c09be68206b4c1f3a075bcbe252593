@@ -1,0 +1,21 @@
+oxidize-kernels/src/lib.rs
+  s_2a26fed6f18227::t_5525f8629fabfe 121,134-137,139-142,144-146
+  s_2a26fed6f18227::t_b3942f404a481a 122-133,138,143
+  s_2a26fed6f18227::t_c9f6e3434a4e0d 245-250,253,255,262,271
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "21f7620e03c09be68206b4c1f3a075bcbe252593",
+  "prompts": {},
+  "sessions": {
+    "s_2a26fed6f18227": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0dc85995-f661-46c7-be1a-d5050b90ad4f",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
