@@ -1,0 +1,35 @@
+oxidize-kernels/benches/oxk_q4k_bench.rs
+  s_2a26fed6f18227::t_21aca295e212b7 98-105
+  s_2a26fed6f18227::t_a07173e7c15943 222,227,233
+  s_2a26fed6f18227::t_a5ba271c869bd0 220-221
+  s_2a26fed6f18227::t_cde30152661bd8 179-219,223-226,228-229,231-232,234,237-242
+oxidize-kernels/src/q4k_avx2.rs
+  s_2a26fed6f18227::t_ca7bd0c3010012 55,73-82,84-86,203
+  s_2a26fed6f18227::t_a5ba271c869bd0 147
+oxidize-kernels/src/q4k_avx512.rs
+  s_2a26fed6f18227::t_ca7bd0c3010012 130-179,283,408
+  s_2a26fed6f18227::t_a5ba271c869bd0 123,276,382-401,411-434
+oxidize-kernels/src/lib.rs
+  s_2a26fed6f18227::t_69e38e41173a79 94-113
+  s_2a26fed6f18227::t_a5ba271c869bd0 158-162,164-251,254,392-400,418-538
+oxidize-kernels/src/cpu.rs
+  s_2a26fed6f18227::t_059717d146f64d 171-178
+  s_2a26fed6f18227::t_54a9490058b0f3 87-99
+  s_2a26fed6f18227::t_a5ba271c869bd0 115-118
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "2291fd3a9d260f3c17f6961ab7537c64e7383aaf",
+  "prompts": {},
+  "sessions": {
+    "s_2a26fed6f18227": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0dc85995-f661-46c7-be1a-d5050b90ad4f",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
