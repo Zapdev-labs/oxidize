@@ -1,0 +1,27 @@
+oxidize-core/src/format/tokenizer.rs
+  s_2a26fed6f18227::t_0c1296db787d13 1787,1803
+oxidize-core/src/compute/tensor.rs
+  s_2a26fed6f18227::t_3fad975d9790cd 5276-5280,5287,5291
+oxidize-core/src/model/inference.rs
+  s_2a26fed6f18227::t_cb2c5280db3ee0 4294-4333,4335-4338
+  s_2a26fed6f18227::t_f27fed3b153401 19
+  s_2a26fed6f18227::t_35e145a39f1f3c 14-18,20-27,2038,2352,3828
+oxidize-core/src/model/layer_wise.rs
+  s_2a26fed6f18227::t_0a51512999d965 452,457,477,1948,2054,2094,2202,2261,2285
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "10f5d7d9aa4e4301e3231b8b7d47f4726dc91b44",
+  "prompts": {},
+  "sessions": {
+    "s_2a26fed6f18227": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0dc85995-f661-46c7-be1a-d5050b90ad4f",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
