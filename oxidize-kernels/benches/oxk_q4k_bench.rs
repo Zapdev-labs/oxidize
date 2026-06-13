@@ -95,6 +95,14 @@ fn main() {
             fix.weights.len() as f64 / 1e6
         );
 
+        // OXK_BENCH_MT_ONLY=1 skips the single-threaded variants — for
+        // prefetch/thread sweeps where only the contended number matters.
+        let mt_only = std::env::var("OXK_BENCH_MT_ONLY").as_deref() == Ok("1");
+        if mt_only {
+            run_mt(&fix, row_bytes, secs);
+            continue;
+        }
+
         let scalar = time_gbps(&fix, (secs / 10.0).max(0.5), |f| {
             let mut acc = 0.0;
             for row in f.weights.chunks_exact(row_bytes) {
@@ -168,33 +176,68 @@ fn main() {
         });
         println!("  oxk gemv range  {range:7.3} GB/s");
 
-        // Contended mode: split the rows across OXK_BENCH_THREADS workers all
-        // streaming weights at once — the shape of real multi-core decode,
-        // where prefetch tuning actually matters (single-threaded streaming
-        // rarely separates configs on modern prefetchers).
-        let threads: usize = std::env::var("OXK_BENCH_THREADS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(1);
-        if threads > 1 {
-            let chunk_rows = fix.rows.div_ceil(threads);
-            let mt = time_gbps(&fix, secs, |f| {
-                std::thread::scope(|scope| {
-                    for (t, w_chunk) in f.weights.chunks(chunk_rows * row_bytes).enumerate() {
-                        let q8k = &f.q8k;
-                        let bpr = f.blocks_per_row;
-                        let rows_here = w_chunk.len() / row_bytes;
-                        let _ = t;
-                        scope.spawn(move || {
-                            let mut out = vec![0.0_f32; rows_here];
-                            gemv_q4k_range(w_chunk, bpr, q8k, &mut out);
-                            black_box(out[0]);
-                        });
-                    }
-                });
-                0.0
-            });
-            println!("  oxk gemv {threads}T     {mt:7.3} GB/s");
-        }
+        run_mt(&fix, row_bytes, secs);
     }
+}
+
+/// Contended mode: split the rows across OXK_BENCH_THREADS persistent
+/// workers all streaming weights at once — the shape of real multi-core
+/// decode, where prefetch tuning actually matters (single-threaded streaming
+/// rarely separates configs on modern prefetchers). Workers loop until the
+/// deadline so thread-spawn cost stays out of the measurement.
+/// OXK_BENCH_MT_KERNEL=x1 swaps the x8-based range GEMV for a
+/// one-row-at-a-time loop (one sequential stream per worker instead of eight
+/// interleaved ones).
+fn run_mt(fix: &Fixture, row_bytes: usize, secs: f64) {
+    let threads: usize = std::env::var("OXK_BENCH_THREADS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1);
+    if threads <= 1 {
+        return;
+    }
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    let mt_x1 = std::env::var("OXK_BENCH_MT_KERNEL").as_deref() == Ok("x1");
+    let chunk_rows = fix.rows.div_ceil(threads);
+    let stop = AtomicBool::new(false);
+    let bytes_done = AtomicU64::new(0);
+    let start = Instant::now();
+    std::thread::scope(|scope| {
+        for w_chunk in fix.weights.chunks(chunk_rows * row_bytes) {
+            let (q8k, bpr) = (&fix.q8k, fix.blocks_per_row);
+            let rows_here = w_chunk.len() / row_bytes;
+            let (stop, bytes_done) = (&stop, &bytes_done);
+            scope.spawn(move || {
+                let mut out = vec![0.0_f32; rows_here];
+                let mut local = 0_u64;
+                while !stop.load(Ordering::Relaxed) {
+                    if mt_x1 {
+                        for (row, out_r) in w_chunk.chunks_exact(row_bytes).zip(out.iter_mut()) {
+                            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+                            {
+                                // Safety: avx2 availability printed at startup;
+                                // x1 mode is only meaningful with avx2.
+                                *out_r =
+                                    unsafe { oxidize_kernels::q4k_q8k_row_dot_avx2(row, bpr, q8k) };
+                            }
+                            #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+                            {
+                                *out_r = q4k_q8k_row_dot_scalar(row, bpr, q8k);
+                            }
+                        }
+                    } else {
+                        gemv_q4k_range(w_chunk, bpr, q8k, &mut out);
+                    }
+                    black_box(out[0]);
+                    local += w_chunk.len() as u64;
+                }
+                bytes_done.fetch_add(local, Ordering::Relaxed);
+            });
+        }
+        std::thread::sleep(Duration::from_secs_f64(secs));
+        stop.store(true, Ordering::Relaxed);
+    });
+    let mt = bytes_done.load(Ordering::Relaxed) as f64 / start.elapsed().as_secs_f64() / 1e9;
+    let label = if mt_x1 { "x1" } else { "rg" };
+    println!("  oxk gemv {threads}T/{label}  {mt:7.3} GB/s");
 }

@@ -16,12 +16,17 @@
 pub mod cpu;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 mod q4k_avx2;
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+mod q4k_avx512;
 mod q4k_scalar;
 mod q8k;
 
-pub use cpu::{CpuVendor, OxkTune, cpu_vendor, oxk_cpu_summary};
+pub use cpu::{CpuInfo, CpuVendor, OxkTune, cpu_vendor, cpuinfo, oxk_cpu_summary};
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-pub use q4k_avx2::{q4k_q8k_row_dot_avx2, q4k_q8k_row_dot_x4_avx2, q4k_q8k_row_dot_x8_avx2};
+pub use q4k_avx2::{
+    q4k_q8k_row_dot_avx2, q4k_q8k_row_dot_x4_avx2, q4k_q8k_row_dot_x8_avx2,
+    q4k_q8k_row_dot_x16_avx2,
+};
 pub use q4k_scalar::q4k_q8k_row_dot_scalar;
 pub use q8k::quantize_q8_k_into;
 
@@ -45,44 +50,208 @@ pub fn oxk_avx2_available() -> bool {
     }
 }
 
+/// Whether AVX-512F+BW (non-VNNI) kernels can run.
+#[inline]
+pub fn oxk_avx512_available() -> bool {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        std::arch::is_x86_feature_detected!("avx512f")
+            && std::arch::is_x86_feature_detected!("avx512bw")
+    }
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+    {
+        false
+    }
+}
+
+/// Whether AVX-512 VNNI kernels can run.
+#[inline]
+pub fn oxk_avx512vnni_available() -> bool {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        oxk_avx512_available() && std::arch::is_x86_feature_detected!("avx512vnni")
+    }
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+    {
+        false
+    }
+}
+
+/// Whether AVX-VNNI (256-bit) kernels can run.
+#[inline]
+pub fn oxk_avxvnni_available() -> bool {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        oxk_avx2_available() && std::arch::is_x86_feature_detected!("avxvnni")
+    }
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+    {
+        false
+    }
+}
+
+/// Select the best ISA tile size for the detected CPU + env overrides.
+/// Resolved ONCE per process: this runs inside `gemv_q4k_range`, which the
+/// pool workers call once per chunk — a per-call `env::var` here showed up
+/// at >1% of total decode samples (libc getenv scans the environment).
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+fn select_isa() -> &'static str {
+    static ISA: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+    ISA.get_or_init(|| match std::env::var("OXIDIZE_OXK_ISA").as_deref() {
+        Ok("scalar") => "scalar",
+        Ok("avx2") => "avx2",
+        Ok("avx512") => "avx512",
+        Ok("avx512vnni") => "avx512vnni",
+        Ok("avxvnni") => "avxvnni",
+        Ok(other) => {
+            eprintln!(
+                "OXIDIZE_OXK_ISA={other} unknown (use scalar|avx2|avx512|avx512vnni|avxvnni); using auto"
+            );
+            "auto"
+        }
+        Err(_) => "auto",
+    })
+}
+
+#[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+fn select_isa() -> &'static str {
+    "scalar"
+}
+
 /// Dot a contiguous range of Q4_K rows against one pre-quantized Q8_K vector.
 ///
 /// `rows` must point at `out.len()` rows of `blocks_per_row` Q4_K blocks laid
 /// out back-to-back (`row_bytes = blocks_per_row * BLOCK_Q4_K_SIZE` apart);
-/// `q8k` holds `blocks_per_row` Q8_K blocks. Uses ×8 / ×4 / ×1 AVX2 kernels
-/// for the bulk and scalar as the portable fallback.
+/// `q8k` holds `blocks_per_row` Q8_K blocks. Uses the widest available ISA
+/// (AVX-512 VNNI → AVX-VNNI → AVX-512 → AVX2 → scalar) with ×8 / ×4 / ×1
+/// tiling.
 pub fn gemv_q4k_range(rows: &[u8], blocks_per_row: usize, q8k: &[u8], out: &mut [f32]) {
     let row_bytes = blocks_per_row * BLOCK_Q4_K_SIZE;
     debug_assert!(rows.len() >= out.len() * row_bytes);
     debug_assert!(q8k.len() >= blocks_per_row * BLOCK_Q8_K_BYTES);
+
+    let isa = select_isa();
+
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    if oxk_avx2_available() {
-        let n = out.len();
-        let mut r = 0;
-        while r + 8 <= n {
-            let base = unsafe { rows.as_ptr().add(r * row_bytes) };
-            let mut octet = [0.0_f32; 8];
-            // Safety: avx2+fma checked above; r+8 <= n keeps all rows in range.
-            unsafe { q4k_q8k_row_dot_x8_avx2(base, row_bytes, blocks_per_row, q8k, &mut octet) };
-            out[r..r + 8].copy_from_slice(&octet);
-            r += 8;
+    {
+        // AVX-512 VNNI (Ice Lake / Sapphire Rapids / Granite Rapids)
+        if isa == "avx512vnni" || (isa == "auto" && oxk_avx512vnni_available()) {
+            let n = out.len();
+            let mut r = 0;
+            while r + 4 <= n {
+                let base = unsafe { rows.as_ptr().add(r * row_bytes) };
+                let mut quad = [0.0_f32; 4];
+                unsafe {
+                    q4k_avx512::q4k_q8k_row_dot_x4_avx512vnni(
+                        base,
+                        row_bytes,
+                        blocks_per_row,
+                        q8k,
+                        &mut quad,
+                    )
+                };
+                out[r..r + 4].copy_from_slice(&quad);
+                r += 4;
+            }
+            while r < n {
+                let row = &rows[r * row_bytes..(r + 1) * row_bytes];
+                out[r] =
+                    unsafe { q4k_avx512::q4k_q8k_row_dot_avx512vnni(row, blocks_per_row, q8k) };
+                r += 1;
+            }
+            return;
         }
-        if r + 4 <= n {
-            let base = unsafe { rows.as_ptr().add(r * row_bytes) };
-            let mut quad = [0.0_f32; 4];
-            // Safety: as above.
-            unsafe { q4k_q8k_row_dot_x4_avx2(base, row_bytes, blocks_per_row, q8k, &mut quad) };
-            out[r..r + 4].copy_from_slice(&quad);
-            r += 4;
+
+        // AVX-VNNI (Alder Lake+ / Zen 4+)
+        if isa == "avxvnni" || (isa == "auto" && oxk_avxvnni_available()) {
+            let n = out.len();
+            let mut r = 0;
+            while r + 4 <= n {
+                let base = unsafe { rows.as_ptr().add(r * row_bytes) };
+                let mut quad = [0.0_f32; 4];
+                unsafe {
+                    q4k_avx512::q4k_q8k_row_dot_x4_avxvnni(
+                        base,
+                        row_bytes,
+                        blocks_per_row,
+                        q8k,
+                        &mut quad,
+                    )
+                };
+                out[r..r + 4].copy_from_slice(&quad);
+                r += 4;
+            }
+            while r < n {
+                let row = &rows[r * row_bytes..(r + 1) * row_bytes];
+                out[r] = unsafe { q4k_avx512::q4k_q8k_row_dot_avxvnni(row, blocks_per_row, q8k) };
+                r += 1;
+            }
+            return;
         }
-        while r < n {
-            let row = &rows[r * row_bytes..(r + 1) * row_bytes];
-            // Safety: as above.
-            out[r] = unsafe { q4k_q8k_row_dot_avx2(row, blocks_per_row, q8k) };
-            r += 1;
+
+        // AVX-512F/BW (Skylake-SP / Xeon Silver, etc.)
+        if isa == "avx512" || (isa == "auto" && oxk_avx512_available() && cpuinfo().use_avx512) {
+            let n = out.len();
+            let mut r = 0;
+            while r + 4 <= n {
+                let base = unsafe { rows.as_ptr().add(r * row_bytes) };
+                let mut quad = [0.0_f32; 4];
+                unsafe {
+                    q4k_avx512::q4k_q8k_row_dot_x4_avx512(
+                        base,
+                        row_bytes,
+                        blocks_per_row,
+                        q8k,
+                        &mut quad,
+                    )
+                };
+                out[r..r + 4].copy_from_slice(&quad);
+                r += 4;
+            }
+            while r < n {
+                let row = &rows[r * row_bytes..(r + 1) * row_bytes];
+                out[r] = unsafe { q4k_avx512::q4k_q8k_row_dot_avx512(row, blocks_per_row, q8k) };
+                r += 1;
+            }
+            return;
         }
-        return;
+
+        // AVX2 baseline (Haswell+ and Zen)
+        if isa == "avx2" || (isa == "auto" && oxk_avx2_available()) {
+            let n = out.len();
+            let mut r = 0;
+            while r + 16 <= n {
+                let base = unsafe { rows.as_ptr().add(r * row_bytes) };
+                let mut hex = [0.0_f32; 16];
+                unsafe { q4k_q8k_row_dot_x16_avx2(base, row_bytes, blocks_per_row, q8k, &mut hex) };
+                out[r..r + 16].copy_from_slice(&hex);
+                r += 16;
+            }
+            if r + 8 <= n {
+                let base = unsafe { rows.as_ptr().add(r * row_bytes) };
+                let mut octet = [0.0_f32; 8];
+                unsafe {
+                    q4k_q8k_row_dot_x8_avx2(base, row_bytes, blocks_per_row, q8k, &mut octet)
+                };
+                out[r..r + 8].copy_from_slice(&octet);
+                r += 8;
+            }
+            if r + 4 <= n {
+                let base = unsafe { rows.as_ptr().add(r * row_bytes) };
+                let mut quad = [0.0_f32; 4];
+                unsafe { q4k_q8k_row_dot_x4_avx2(base, row_bytes, blocks_per_row, q8k, &mut quad) };
+                out[r..r + 4].copy_from_slice(&quad);
+                r += 4;
+            }
+            while r < n {
+                let row = &rows[r * row_bytes..(r + 1) * row_bytes];
+                out[r] = unsafe { q4k_q8k_row_dot_avx2(row, blocks_per_row, q8k) };
+                r += 1;
+            }
+            return;
+        }
     }
+
     for (r, out_r) in out.iter_mut().enumerate() {
         let row = &rows[r * row_bytes..(r + 1) * row_bytes];
         *out_r = q4k_q8k_row_dot_scalar(row, blocks_per_row, q8k);
@@ -220,6 +389,15 @@ mod tests {
                         assert_eq!(octet[r].to_bits(), scalar[r].to_bits(), "x8 row {r}");
                     }
                 }
+                if rows >= 16 {
+                    let mut hex = [0.0_f32; 16];
+                    unsafe {
+                        q4k_q8k_row_dot_x16_avx2(weights.as_ptr(), row_bytes, bpr, &q8k, &mut hex)
+                    };
+                    for r in 0..16 {
+                        assert_eq!(hex[r].to_bits(), scalar[r].to_bits(), "x16 row {r}");
+                    }
+                }
             }
         }
     }
@@ -235,6 +413,130 @@ mod tests {
             let want =
                 q4k_q8k_row_dot_scalar(&weights[r * row_bytes..(r + 1) * row_bytes], 8, &q8k);
             assert_eq!(out[r].to_bits(), want.to_bits(), "row {r}");
+        }
+    }
+
+    #[test]
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    fn avxvnni_matches_scalar_exactly() {
+        if !oxk_avxvnni_available() {
+            return;
+        }
+        for &(rows, bpr, seed) in &[(8usize, 16usize, 1u64), (12, 4, 2), (32, 8, 3)] {
+            let (weights, q8k) = random_fixture(rows, bpr, seed);
+            let row_bytes = bpr * BLOCK_Q4_K_SIZE;
+            let scalar: Vec<f32> = (0..rows)
+                .map(|r| {
+                    q4k_q8k_row_dot_scalar(&weights[r * row_bytes..(r + 1) * row_bytes], bpr, &q8k)
+                })
+                .collect();
+            for r in 0..rows {
+                let got = unsafe {
+                    q4k_avx512::q4k_q8k_row_dot_avxvnni(
+                        &weights[r * row_bytes..(r + 1) * row_bytes],
+                        bpr,
+                        &q8k,
+                    )
+                };
+                assert_eq!(got.to_bits(), scalar[r].to_bits(), "avxvnni row {r}");
+            }
+            let mut quad = [0.0_f32; 4];
+            unsafe {
+                q4k_avx512::q4k_q8k_row_dot_x4_avxvnni(
+                    weights.as_ptr(),
+                    row_bytes,
+                    bpr,
+                    &q8k,
+                    &mut quad,
+                )
+            };
+            for r in 0..4 {
+                assert_eq!(quad[r].to_bits(), scalar[r].to_bits(), "avxvnni x4 row {r}");
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    fn avx512_matches_scalar_exactly() {
+        if !oxk_avx512_available() {
+            return;
+        }
+        for &(rows, bpr, seed) in &[(8usize, 16usize, 1u64), (12, 4, 2), (32, 8, 3)] {
+            let (weights, q8k) = random_fixture(rows, bpr, seed);
+            let row_bytes = bpr * BLOCK_Q4_K_SIZE;
+            let scalar: Vec<f32> = (0..rows)
+                .map(|r| {
+                    q4k_q8k_row_dot_scalar(&weights[r * row_bytes..(r + 1) * row_bytes], bpr, &q8k)
+                })
+                .collect();
+            for r in 0..rows {
+                let got = unsafe {
+                    q4k_avx512::q4k_q8k_row_dot_avx512(
+                        &weights[r * row_bytes..(r + 1) * row_bytes],
+                        bpr,
+                        &q8k,
+                    )
+                };
+                assert_eq!(got.to_bits(), scalar[r].to_bits(), "avx512 row {r}");
+            }
+            let mut quad = [0.0_f32; 4];
+            unsafe {
+                q4k_avx512::q4k_q8k_row_dot_x4_avx512(
+                    weights.as_ptr(),
+                    row_bytes,
+                    bpr,
+                    &q8k,
+                    &mut quad,
+                )
+            };
+            for r in 0..4 {
+                assert_eq!(quad[r].to_bits(), scalar[r].to_bits(), "avx512 x4 row {r}");
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    fn avx512vnni_matches_scalar_exactly() {
+        if !oxk_avx512vnni_available() {
+            return;
+        }
+        for &(rows, bpr, seed) in &[(8usize, 16usize, 1u64), (12, 4, 2), (32, 8, 3)] {
+            let (weights, q8k) = random_fixture(rows, bpr, seed);
+            let row_bytes = bpr * BLOCK_Q4_K_SIZE;
+            let scalar: Vec<f32> = (0..rows)
+                .map(|r| {
+                    q4k_q8k_row_dot_scalar(&weights[r * row_bytes..(r + 1) * row_bytes], bpr, &q8k)
+                })
+                .collect();
+            for r in 0..rows {
+                let got = unsafe {
+                    q4k_avx512::q4k_q8k_row_dot_avx512vnni(
+                        &weights[r * row_bytes..(r + 1) * row_bytes],
+                        bpr,
+                        &q8k,
+                    )
+                };
+                assert_eq!(got.to_bits(), scalar[r].to_bits(), "avx512vnni row {r}");
+            }
+            let mut quad = [0.0_f32; 4];
+            unsafe {
+                q4k_avx512::q4k_q8k_row_dot_x4_avx512vnni(
+                    weights.as_ptr(),
+                    row_bytes,
+                    bpr,
+                    &q8k,
+                    &mut quad,
+                )
+            };
+            for r in 0..4 {
+                assert_eq!(
+                    quad[r].to_bits(),
+                    scalar[r].to_bits(),
+                    "avx512vnni x4 row {r}"
+                );
+            }
         }
     }
 }
