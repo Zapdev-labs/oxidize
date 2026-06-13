@@ -5273,25 +5273,22 @@ pub fn gemm_i4(
 }
 
 fn gemv_f32_cpu(matrix: &[f32], cols: usize, vector: &[f32], output: &mut [f32]) {
+    // dot_f32_fast (AVX2 FMA, independent accumulators) rather than a scalar
+    // iterator sum: LLVM cannot vectorize the f32 reduction (non-associative),
+    // leaving a 4-cycle-latency serial FMA chain. The MoE router GEMV runs
+    // through here every layer of every token — measured ~24 ms/token of
+    // main-thread stall on Qwen3-30B before this change.
     let rows = output.len();
     if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
         matrix
             .par_chunks_exact(cols)
             .zip(output.par_iter_mut())
             .for_each(|(row_values, out)| {
-                *out = row_values
-                    .iter()
-                    .zip(vector.iter())
-                    .map(|(weight, value)| weight * value)
-                    .sum();
+                *out = dot_f32_fast(row_values, &vector[..cols]);
             });
     } else {
         for (row_values, out) in matrix.chunks_exact(cols).zip(output.iter_mut()) {
-            *out = row_values
-                .iter()
-                .zip(vector.iter())
-                .map(|(weight, value)| weight * value)
-                .sum();
+            *out = dot_f32_fast(row_values, &vector[..cols]);
         }
     }
 }

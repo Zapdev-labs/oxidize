@@ -1784,6 +1784,7 @@ mod tests {
                 separator: None,
                 cls: None,
                 mask: None,
+                add_bos_token: None,
             }
         );
     }
@@ -1799,6 +1800,7 @@ mod tests {
             separator: None,
             cls: None,
             mask: None,
+            add_bos_token: None,
         };
 
         let tokenizer = LoadedTokenizer::WordPiece(tokenizer);

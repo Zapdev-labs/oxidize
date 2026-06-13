@@ -11,6 +11,20 @@ use crate::tensor::{
 use memmap2::Mmap;
 use std::sync::Arc;
 
+/// Cached `OXIDIZE_TRACE_FWD` gate. The trace checks sit inside per-layer
+/// per-token forward loops; an uncached `env::var_os` there is a libc
+/// environment scan on every layer of every token.
+pub(crate) fn trace_fwd_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("OXIDIZE_TRACE_FWD").is_some())
+}
+
+/// Cached `OXIDIZE_TRACE_VALS` gate (see [`trace_fwd_enabled`]).
+pub(crate) fn trace_vals_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("OXIDIZE_TRACE_VALS").is_some())
+}
+
 /// Detected model architecture from GGUF metadata.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ModelArchitecture {
@@ -2021,7 +2035,7 @@ impl InferenceModel {
                 }
             }
 
-            if std::env::var_os("OXIDIZE_TRACE_FWD").is_some() {
+            if trace_fwd_enabled() {
                 let s = |v: &[f32]| v.iter().map(|x| *x as f64).sum::<f64>();
                 for t in 0..batch {
                     eprintln!(
@@ -2335,7 +2349,7 @@ impl InferenceModel {
                     x_batch[i] += ffn_out_batch[i];
                 }
             }
-            if std::env::var_os("OXIDIZE_TRACE_FWD").is_some() {
+            if trace_fwd_enabled() {
                 for t in 0..batch {
                     let sum: f64 = x_batch[t * h..(t + 1) * h].iter().map(|v| *v as f64).sum();
                     eprintln!(
@@ -3811,7 +3825,7 @@ impl InferenceModel {
                     ws.x[i] += ffn_out[i];
                 }
             }
-            if std::env::var_os("OXIDIZE_TRACE_FWD").is_some() {
+            if trace_fwd_enabled() {
                 let sum: f64 = ws.x[..h].iter().map(|v| *v as f64).sum();
                 eprintln!("TRACE inf pos={pos} layer={layer_idx} sum={sum:.9e}");
             }
@@ -4277,30 +4291,51 @@ pub(crate) fn moe_ffn_forward_weights(
         if gq == uq {
             // Fused: gate + up in ONE parallel region (halves the
             // fork/join + steal overhead of the two largest dispatches).
-            let mut gate_up = vec![0.0_f32; 2 * n_sel * i_size];
-            gemv_quantized_experts_gate_up_f32(
-                gq,
-                gm,
-                um,
-                n_experts,
-                &selected,
-                i_size,
-                h,
-                normed,
-                &mut gate_up,
-            )
-            .map_err(|e| ModelError::InferenceFailed(format!("moe gate+up: {:?}", e)))?;
-            let (gate_half, up_half) = gate_up.split_at(n_sel * i_size);
-            gate_all.copy_from_slice(gate_half);
-            up_all.copy_from_slice(up_half);
-        } else {
-            gemv_quantized_experts_f32(
-                gq, gm, n_experts, &selected, i_size, h, normed, 0, gate_all,
-            )
-            .map_err(|e| ModelError::InferenceFailed(format!("moe gate: {:?}", e)))?;
-            gemv_quantized_experts_f32(uq, um, n_experts, &selected, i_size, h, normed, 0, up_all)
-                .map_err(|e| ModelError::InferenceFailed(format!("moe up: {:?}", e)))?;
+            // The kernel needs gate|up laid out contiguously to dispatch both
+            // projections as a single pool region, so we cannot write directly
+            // into the two separate scratch buffers. Use a thread-local buffer
+            // (decode forward runs on the single submitter thread) rather than
+            // a per-layer-per-token heap alloc + two memcpys back into
+            // gate_all/up_all — that copy was ~14% of main-thread decode time.
+            // The kernel writes every output element, so no zero-fill is
+            // needed; the SwiGLU and down-projection read the two halves in
+            // place, leaving gate_all/up_all unused on this path.
+            thread_local! {
+                static GATE_UP: std::cell::RefCell<Vec<f32>> =
+                    const { std::cell::RefCell::new(Vec::new()) };
+            }
+            let _ = (&gate_all, &up_all);
+            return GATE_UP.with_borrow_mut(|gate_up| {
+                gate_up.resize(2 * n_sel * i_size, 0.0_f32);
+                gemv_quantized_experts_gate_up_f32(
+                    gq, gm, um, n_experts, &selected, i_size, h, normed, gate_up,
+                )
+                .map_err(|e| ModelError::InferenceFailed(format!("moe gate+up: {:?}", e)))?;
+                let (gate_half, up_half) = gate_up.split_at_mut(n_sel * i_size);
+                // SwiGLU into gate_half; it becomes the down-projection input
+                // (contiguous [n_sel, i_size], stride i_size per expert).
+                for (g, u) in gate_half.iter_mut().zip(up_half.iter()) {
+                    let sigmoid = 1.0_f32 / (1.0 + (-*g).exp());
+                    *g = *g * sigmoid * *u;
+                }
+                let down_all = &mut expert_out[..n_sel * h];
+                gemv_quantized_experts_f32(
+                    dq, dm, n_experts, &selected, h, i_size, gate_half, i_size, down_all,
+                )
+                .map_err(|e| ModelError::InferenceFailed(format!("moe down: {:?}", e)))?;
+                for (slot, &weight) in weights.iter().enumerate() {
+                    let d = &down_all[slot * h..(slot + 1) * h];
+                    for (out, val) in ffn_out.iter_mut().zip(d.iter()) {
+                        *out += weight * val;
+                    }
+                }
+                Ok(())
+            });
         }
+        gemv_quantized_experts_f32(gq, gm, n_experts, &selected, i_size, h, normed, 0, gate_all)
+            .map_err(|e| ModelError::InferenceFailed(format!("moe gate: {:?}", e)))?;
+        gemv_quantized_experts_f32(uq, um, n_experts, &selected, i_size, h, normed, 0, up_all)
+            .map_err(|e| ModelError::InferenceFailed(format!("moe up: {:?}", e)))?;
         // SwiGLU into gate_all; it then becomes the down-projection input
         // (one contiguous [n_sel, i_size] buffer, stride i_size per expert).
         for (g, u) in gate_all.iter_mut().zip(up_all.iter()) {

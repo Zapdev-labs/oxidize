@@ -449,12 +449,12 @@ fn debug_vec(label: &str, x: &[f32]) {
 /// Per-layer hidden-state checksum tracing (OXIDIZE_TRACE_FWD=1) for
 /// diffing the batched window path against the per-token path.
 fn trace_fwd(path: &str, pos: usize, layer: usize, x: &[f32]) {
-    if std::env::var_os("OXIDIZE_TRACE_FWD").is_some() {
+    if crate::inference::trace_fwd_enabled() {
         let sum: f64 = x.iter().map(|v| *v as f64).sum();
         // OXIDIZE_TRACE_VALS=1 also prints the first 8 residual values so the
         // stream can be diffed value-for-value against a reference (llama.cpp
         // eval-callback) — sums alone can match by luck.
-        if std::env::var_os("OXIDIZE_TRACE_VALS").is_some() {
+        if crate::inference::trace_vals_enabled() {
             let head: Vec<String> = x.iter().take(8).map(|v| format!("{v:.5}")).collect();
             eprintln!(
                 "TRACE {path} pos={pos} layer={layer} sum={sum:.9e} vals=[{}]",
@@ -474,7 +474,7 @@ fn debug_hidden(label: &str, pos: usize, x: &[f32]) {
 
 impl LayerWiseModel {
     fn trace_state(&self, label: &str, pos: usize) {
-        if std::env::var_os("OXIDIZE_TRACE_FWD").is_some() {
+        if crate::inference::trace_fwd_enabled() {
             let s0: f64 = self
                 .ssm_states
                 .first()
@@ -1945,7 +1945,7 @@ impl LayerWiseModel {
             }
         }
 
-        if layer_idx == 0 && std::env::var_os("OXIDIZE_TRACE_VALS").is_some() {
+        if layer_idx == 0 && crate::inference::trace_vals_enabled() {
             let mabs = |v: &[f32]| v.iter().fold(0.0_f32, |m, x| m.max(x.abs()));
             // Locate the outlier element of token-0 core and dump its factors.
             let (mut bi, mut bv) = (0usize, 0.0_f32);
@@ -2051,7 +2051,7 @@ impl LayerWiseModel {
                 }
             }
         }
-        if layer_idx == 0 && std::env::var_os("OXIDIZE_TRACE_VALS").is_some() {
+        if layer_idx == 0 && crate::inference::trace_vals_enabled() {
             let mabs = |v: &[f32]| v.iter().fold(0.0_f32, |m, x| m.max(x.abs()));
             let ssum = |v: &[f32]| v.iter().map(|x| *x as f64).sum::<f64>();
             let hd = head_v_dim;
@@ -2091,7 +2091,7 @@ impl LayerWiseModel {
                     .copy_from_slice(&core_all[t * value_dim..t * value_dim + copy_len]);
             }
         }
-        if layer_idx == 0 && std::env::var_os("OXIDIZE_TRACE_VALS").is_some() {
+        if layer_idx == 0 && crate::inference::trace_vals_enabled() {
             eprintln!(
                 "GDN L0 residual(=linear_attn_out) t0[0..6]={:?} (llama [-0.0381,-0.0049,-0.0200,..])",
                 &residual_all[..6.min(residual_all.len())],
@@ -2199,7 +2199,7 @@ impl LayerWiseModel {
             (q_full[..q_len_used_guess].to_vec(), None)
         };
 
-        if std::env::var_os("OXIDIZE_TRACE_FWD").is_some() {
+        if crate::inference::trace_fwd_enabled() {
             let s = |v: &[f32]| v.iter().map(|x| *x as f64).sum::<f64>();
             eprintln!(
                 "STAGE lw pos={pos} layer={layer_idx} normed={:.6e} q={:.6e} k={:.6e} v={:.6e} x={:.6e} nw_len={} nw={:.6e}",
@@ -2258,7 +2258,7 @@ impl LayerWiseModel {
             }
         }
 
-        if layer_idx == 3 && pos == 0 && std::env::var_os("OXIDIZE_TRACE_VALS").is_some() {
+        if layer_idx == 3 && pos == 0 && crate::inference::trace_vals_enabled() {
             eprintln!(
                 "ATTN L3 h0 pos0: q_prerope[0..6]={:?} q_head_dim={q_head_dim} rope_len={}",
                 &q[..6.min(q.len())],
@@ -2282,8 +2282,11 @@ impl LayerWiseModel {
             .map_err(|e| ModelError::InferenceFailed(format!("rope q: {:?}", e)))?;
             q[off..off + q_rope_len].copy_from_slice(&rotated);
         }
-        if layer_idx == 3 && pos == 0 && std::env::var_os("OXIDIZE_TRACE_VALS").is_some() {
-            eprintln!("ATTN L3 h0 pos0: q_postrope[0..6]={:?}", &q[..6.min(q.len())]);
+        if layer_idx == 3 && pos == 0 && crate::inference::trace_vals_enabled() {
+            eprintln!(
+                "ATTN L3 h0 pos0: q_postrope[0..6]={:?}",
+                &q[..6.min(q.len())]
+            );
         }
         for head in 0..kv_heads {
             let off = head * kv_head_dim;
