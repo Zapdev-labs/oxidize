@@ -37,7 +37,98 @@ pub fn detect_architecture(metadata: &BTreeMap<String, String>) -> ModelArchitec
     }
 }
 
-/// Map a GGUF tensor name to oxidize's canonical `blk.N.*` / global names.
+/// Map Qwen3.5/3.6 MTP (multi-token prediction) HF tensor names to oxidize's
+/// `nextn` GGUF naming. Returns `None` if the name is not an MTP tensor.
+///
+/// This handles the nested form `model.layers.{L}.mtp.*` where the MTP module is
+/// stored as a sub-module of layer `L`. The flat form `mtp.*` (stored as a top-
+/// level module) is handled separately by `rewrite_flat_mtp_names` once the
+/// causal backbone layer count is known.
+///
+/// Mapping for nested form:
+/// * `model.layers.{L}.mtp.fc.weight` -> `blk.{L}.nextn.eh_proj.weight`
+/// * `model.layers.{L}.mtp.pre_fc_norm_embedding.weight` -> `blk.{L}.nextn.enorm.weight`
+/// * `model.layers.{L}.mtp.pre_fc_norm_hidden.weight` -> `blk.{L}.nextn.hnorm.weight`
+/// * `model.layers.{L}.mtp.norm.weight` -> `blk.{L}.nextn.shared_head_norm.weight`
+/// * `model.layers.{L}.mtp.embed_tokens.weight` -> `blk.{L}.nextn.embed_tokens.weight`
+/// * `model.layers.{L}.mtp.lm_head.weight` -> `blk.{L}.nextn.shared_head_head.weight`
+/// * `model.layers.{L}.mtp.layers.{N}.*` -> `blk.{L+N}.*`
+pub fn map_qwen_mtp_tensor_name(name: &str) -> Option<String> {
+    let stripped = name
+        .strip_prefix("model.language_model.")
+        .or_else(|| name.strip_prefix("model."))
+        .unwrap_or(name);
+
+    let rest = stripped.strip_prefix("layers.")?;
+    let (layer_str, rest) = rest.split_once('.')?;
+    let layer: usize = layer_str.parse().ok()?;
+    let rest = rest.strip_prefix("mtp.")?;
+
+    map_qwen_mtp_inner(rest, layer)
+}
+
+fn map_qwen_mtp_inner(rest: &str, layer: usize) -> Option<String> {
+    // Fusion head tensors live directly under `mtp.*`.
+    if let Some((head_name, suffix)) = rest.rsplit_once('.') {
+        if suffix == "weight" || suffix == "bias" {
+            let mapped_head = match head_name {
+                "fc" => "nextn.eh_proj",
+                "pre_fc_norm_embedding" => "nextn.enorm",
+                "pre_fc_norm_hidden" => "nextn.hnorm",
+                "norm" => "nextn.shared_head_norm",
+                "embed_tokens" => "nextn.embed_tokens",
+                "lm_head" => "nextn.shared_head_head",
+                _ => "",
+            };
+            if !mapped_head.is_empty() {
+                let mapped_suffix = if suffix == "bias" { ".bias" } else { ".weight" };
+                return Some(format!("blk.{layer}.{mapped_head}{mapped_suffix}"));
+            }
+        }
+    }
+
+    // Nested MTP transformer block: `mtp.layers.{N}.(...)` -> `blk.{layer+N}.(...)`.
+    let rest = rest.strip_prefix("layers.")?;
+    let (mtp_layer_str, rest) = rest.split_once('.')?;
+    let mtp_layer: usize = mtp_layer_str.parse().ok()?;
+    let mapped_layer = layer + mtp_layer;
+
+    let mapped_suffix = match rest {
+        "input_layernorm.weight" => "attn_norm.weight",
+        "post_attention_layernorm.weight" => "ffn_norm.weight",
+        "self_attn.q_proj.weight" => "attn_q.weight",
+        "self_attn.k_proj.weight" => "attn_k.weight",
+        "self_attn.v_proj.weight" => "attn_v.weight",
+        "self_attn.o_proj.weight" => "attn_output.weight",
+        "self_attn.q_proj.bias" => "attn_q.bias",
+        "self_attn.k_proj.bias" => "attn_k.bias",
+        "self_attn.v_proj.bias" => "attn_v.bias",
+        "self_attn.o_proj.bias" => "attn_output.bias",
+        "self_attn.q_norm.weight" => "attn_q_norm.weight",
+        "self_attn.k_norm.weight" => "attn_k_norm.weight",
+        "mlp.gate_proj.weight" => "ffn_gate.weight",
+        "mlp.up_proj.weight" => "ffn_up.weight",
+        "mlp.down_proj.weight" => "ffn_down.weight",
+        "mlp.gate_proj.bias" => "ffn_gate.bias",
+        "mlp.up_proj.bias" => "ffn_up.bias",
+        "mlp.down_proj.bias" => "ffn_down.bias",
+        _ => return None,
+    };
+    Some(format!("blk.{mapped_layer}.{mapped_suffix}"))
+}
+
+/// Map flat Qwen3.5/3.6 MTP tensor names (`mtp.fc.weight`, `mtp.layers.0.*`)
+/// to oxidize's `nextn` GGUF naming using a caller-supplied causal backbone
+/// layer count as the MTP base layer.
+pub fn map_flat_qwen_mtp_tensor_name(name: &str, base_layer: usize) -> Option<String> {
+    let stripped = name
+        .strip_prefix("model.language_model.")
+        .or_else(|| name.strip_prefix("model."))
+        .unwrap_or(name);
+
+    let rest = stripped.strip_prefix("mtp.")?;
+    map_qwen_mtp_inner(rest, base_layer)
+}
 /// HF-prefixed tensors (e.g. `model.language_model.layers.0.linear_attn.in_proj_a.weight`)
 /// are converted via [`map_hf_tensor_name`]; already-canonical names pass through.
 pub fn normalize_gguf_tensor_name(name: &str) -> Option<String> {
@@ -78,6 +169,13 @@ pub fn gguf_layer_tensor_keys(
 pub fn map_hf_tensor_name(name: &str) -> String {
     if name.starts_with("model.visual.") {
         return String::new();
+    }
+
+    // Qwen3.5/3.6 in-model multi-token-prediction (MTP / nextn) tensors.
+    // These live under `model.layers.{L}.mtp.*` and map to oxidize's
+    // `blk.{L}.nextn.*` fusion head plus an appended transformer block.
+    if let Some(mapped) = map_qwen_mtp_tensor_name(name) {
+        return mapped;
     }
 
     let stripped = name
@@ -353,6 +451,53 @@ mod tests {
 
         metadata.insert("model_type".into(), "qwen2moe".into());
         assert_eq!(detect_architecture(&metadata), ModelArchitecture::Qwen);
+    }
+
+    #[test]
+    fn maps_qwen35_mtp_tensors() {
+        // Nested form: MTP stored as a sub-module of the last backbone layer.
+        assert_eq!(
+            map_hf_tensor_name("model.layers.32.mtp.fc.weight"),
+            "blk.32.nextn.eh_proj.weight"
+        );
+        assert_eq!(
+            map_hf_tensor_name("model.layers.32.mtp.pre_fc_norm_embedding.weight"),
+            "blk.32.nextn.enorm.weight"
+        );
+        assert_eq!(
+            map_hf_tensor_name("model.layers.32.mtp.pre_fc_norm_hidden.weight"),
+            "blk.32.nextn.hnorm.weight"
+        );
+        assert_eq!(
+            map_hf_tensor_name("model.layers.32.mtp.norm.weight"),
+            "blk.32.nextn.shared_head_norm.weight"
+        );
+        assert_eq!(
+            map_hf_tensor_name("model.layers.32.mtp.layers.0.self_attn.q_proj.weight"),
+            "blk.32.attn_q.weight"
+        );
+        assert_eq!(
+            map_hf_tensor_name("model.layers.32.mtp.layers.0.mlp.down_proj.weight"),
+            "blk.32.ffn_down.weight"
+        );
+
+        // Flat form: MTP saved as a top-level module; needs base layer supplied.
+        assert_eq!(
+            map_flat_qwen_mtp_tensor_name("mtp.fc.weight", 32),
+            Some("blk.32.nextn.eh_proj.weight".to_owned())
+        );
+        assert_eq!(
+            map_flat_qwen_mtp_tensor_name("mtp.pre_fc_norm_embedding.weight", 32),
+            Some("blk.32.nextn.enorm.weight".to_owned())
+        );
+        assert_eq!(
+            map_flat_qwen_mtp_tensor_name("mtp.layers.0.self_attn.q_proj.weight", 32),
+            Some("blk.32.attn_q.weight".to_owned())
+        );
+        assert_eq!(
+            map_flat_qwen_mtp_tensor_name("mtp.layers.0.mlp.down_proj.weight", 32),
+            Some("blk.32.ffn_down.weight".to_owned())
+        );
     }
 
     #[test]

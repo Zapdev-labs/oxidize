@@ -1,6 +1,7 @@
 use crate::conversion::{
-    extract_layer_index, flatten_linear_attn_conv1d, map_hf_tensor_name,
-    preprocess_hf_tensors_for_gguf, split_fused_gate_up_proj,
+    extract_layer_index, flatten_linear_attn_conv1d, map_flat_qwen_mtp_tensor_name,
+    map_hf_tensor_name, map_qwen_mtp_tensor_name, preprocess_hf_tensors_for_gguf,
+    split_fused_gate_up_proj,
 };
 use crate::gguf::{GgufMetadataArray, GgufMetadataType, GgufMetadataValue, GgufQuantizationType};
 use crate::quantization::{quantize_scalar, quantized_size};
@@ -37,6 +38,34 @@ struct OutputTensor {
     dimensions: Vec<u64>,
     ggml_type: u32,
     data: Vec<u8>,
+}
+
+/// Read the causal backbone layer count from a HF config.json, looking in both
+/// the root and `text_config` for `num_hidden_layers`.
+fn mtp_base_layer_from_config(cfg_path: Option<&Path>) -> Option<usize> {
+    let cfg_path = cfg_path?;
+    let raw = std::fs::read_to_string(cfg_path).ok()?;
+    let json: Value = serde_json::from_str(&raw).ok()?;
+    let cfg = json
+        .get("text_config")
+        .filter(|v| v.is_object())
+        .unwrap_or(&json);
+    cfg.get("num_hidden_layers")?.as_u64().map(|n| n as usize)
+}
+
+/// Rewrite flat Qwen3.5/3.6 MTP tensor names (`mtp.fc.weight`, `mtp.layers.0.*`)
+/// to oxidize's `blk.{base}.nextn.*` naming. The base layer is the number of
+/// causal backbone layers (e.g. 32 for a 32-layer model), so the MTP block is
+/// appended immediately after the main stack.
+fn rewrite_flat_mtp_tensor_names(
+    tensors: &mut [(String, Dtype, Vec<usize>, Vec<u8>)],
+    base_layer: usize,
+) {
+    for (name, _, _, _) in tensors.iter_mut() {
+        if let Some(mapped) = map_flat_qwen_mtp_tensor_name(name, base_layer) {
+            *name = mapped;
+        }
+    }
 }
 
 /// Requantize every quantizable tensor in an existing GGUF to `target`.
@@ -135,7 +164,7 @@ pub fn convert_safetensors_to_gguf(
     }
 
     let (tensors, st_meta, config_dir) = load_all_tensors(input)?;
-    let tensors = preprocess_hf_tensors_for_gguf(tensors);
+    let mut tensors = preprocess_hf_tensors_for_gguf(tensors);
     let arch = resolve_architecture(config, &st_meta, config_dir.as_deref(), input)?;
 
     let mut metadata = build_base_metadata(&st_meta, &arch, input);
@@ -143,6 +172,14 @@ pub fn convert_safetensors_to_gguf(
     let cfg_path = config.config_path.as_ref().or(auto_config.as_ref());
     if let Some(cfg_path) = cfg_path.filter(|p| p.is_file()) {
         merge_hf_config_metadata(&mut metadata, &arch, cfg_path)?;
+    }
+
+    // Qwen3.5/3.6 MTP modules may be saved either as `model.layers.{L}.mtp.*`
+    // (handled by `map_hf_tensor_name`) or as flat top-level `mtp.*` tensors.
+    // For the flat form we need the backbone layer count to know where to place
+    // the appended nextn block, so rewrite the names once the config is loaded.
+    if let Some(base_layer) = mtp_base_layer_from_config(cfg_path.map(|p| p.as_path())) {
+        rewrite_flat_mtp_tensor_names(&mut tensors, base_layer);
     }
 
     // Embed tokenizer metadata so the converted GGUF is self-contained. HF
@@ -459,7 +496,30 @@ fn merge_hf_config_metadata(
     };
 
     insert_u32(meta, &prefix("embedding_length"), "hidden_size");
-    insert_u32(meta, &prefix("block_count"), "num_hidden_layers");
+    let block_count = cfg.get("num_hidden_layers").and_then(json_u32);
+    let nextn_layers = cfg.get("mtp_num_hidden_layers").and_then(json_u32);
+    // Qwen3.5/3.6-style in-model multi-token prediction (MTP/nextn) layers are
+    // appended after the main transformer stack. Oxidize's loader treats
+    // `block_count` as the total number of `blk.*` layers (causal backbone +
+    // nextn) and subtracts `nextn_predict_layers` to obtain the backbone count.
+    // HF configs store these counts separately, so add them together.
+    if let Some(block_count) = block_count {
+        let total = if let Some(nextn) = nextn_layers {
+            block_count + nextn
+        } else {
+            block_count
+        };
+        meta.insert(
+            prefix("block_count"),
+            GgufMetadataValue::Uint32(total),
+        );
+    }
+    if let Some(nextn) = nextn_layers {
+        meta.insert(
+            prefix("nextn_predict_layers"),
+            GgufMetadataValue::Uint32(nextn),
+        );
+    }
     insert_u32(meta, &prefix("feed_forward_length"), "intermediate_size");
     insert_u32(meta, &prefix("attention.head_count"), "num_attention_heads");
     insert_u32(
@@ -849,6 +909,7 @@ fn plan_stream_outputs(
     shape: &[usize],
     shard_path: &Path,
     map_hf_names: bool,
+    mtp_base_layer: Option<usize>,
 ) -> Result<Vec<PlannedTensor>> {
     if name.starts_with("model.visual.") {
         return Ok(Vec::new());
@@ -913,6 +974,13 @@ fn plan_stream_outputs(
         || name == "norm.weight"
     {
         name.to_owned()
+    } else if let Some(base) = mtp_base_layer {
+        // Flat Qwen3.5/3.6 MTP tensors (`mtp.fc.weight`, `mtp.layers.0.*`) need
+        // the backbone layer count to be placed correctly.
+        map_flat_qwen_mtp_tensor_name(name, base)
+            .or_else(|| if map_hf_names { Some(map_hf_tensor_name(name)) } else { None })
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| name.to_owned())
     } else if map_hf_names {
         map_hf_tensor_name(name)
     } else {
@@ -1005,6 +1073,9 @@ fn convert_safetensors_dir_streaming(
 
     let mut shard_meta_cache: BTreeMap<String, Vec<(String, Dtype, Vec<usize>)>> = BTreeMap::new();
     let mut planned: Vec<PlannedTensor> = Vec::new();
+    let auto_config = input.join("config.json");
+    let cfg_path = config.config_path.as_ref().unwrap_or(&auto_config);
+    let mtp_base_layer = mtp_base_layer_from_config(Some(cfg_path));
 
     for (tensor_name, shard_name_val) in weight_map {
         let shard_name = shard_name_val
@@ -1033,6 +1104,7 @@ fn convert_safetensors_dir_streaming(
             &shape,
             &shard_path,
             config.map_hf_tensor_names,
+            mtp_base_layer,
         )?);
     }
 
@@ -1045,8 +1117,6 @@ fn convert_safetensors_dir_streaming(
 
     let arch = resolve_architecture(config, &st_meta, Some(input), input)?;
     let mut metadata = build_base_metadata(&st_meta, &arch, input);
-    let auto_config = input.join("config.json");
-    let cfg_path = config.config_path.as_ref().unwrap_or(&auto_config);
     if cfg_path.is_file() {
         merge_hf_config_metadata(&mut metadata, &arch, cfg_path)?;
     }
