@@ -51,6 +51,8 @@ pub mod gguf;
 pub mod gpu_cluster;
 #[path = "model/inference.rs"]
 pub mod inference;
+#[path = "model/diffusion_gemma.rs"]
+pub mod diffusion_gemma;
 #[path = "compute/kv_cache.rs"]
 pub mod kv_cache;
 #[path = "model/layer_wise.rs"]
