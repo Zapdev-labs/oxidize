@@ -344,21 +344,34 @@ fn dtype_element_size(dtype: Dtype) -> Option<usize> {
 }
 
 /// Expand HF tensors into GGUF-ready tensors (split fused MoE, skip vision).
+///
+/// A fused `gate_up_proj` that cannot be split is a hard error: emitting the
+/// unsplit tensor would produce a GGUF missing `ffn_gate_exps`/`ffn_up_exps`
+/// and break MoE inference (the streaming path already errors here).
 pub fn preprocess_hf_tensors_for_gguf(
     tensors: Vec<(String, Dtype, Vec<usize>, Vec<u8>)>,
-) -> Vec<(String, Dtype, Vec<usize>, Vec<u8>)> {
+) -> Result<Vec<(String, Dtype, Vec<usize>, Vec<u8>)>, String> {
     let mut out = Vec::with_capacity(tensors.len() + 64);
     for (name, dtype, shape, raw) in tensors {
         if name.starts_with("model.visual.") {
             continue;
         }
         if name.ends_with(".mlp.experts.gate_up_proj") {
-            if let Some(layer) = extract_layer_index(&name) {
-                if let Some(split) = split_fused_gate_up_proj(layer, dtype, &shape, &raw) {
-                    out.extend(split);
-                    continue;
-                }
-            }
+            let layer = extract_layer_index(&name).ok_or_else(|| {
+                format!(
+                    "fused gate_up_proj tensor {name:?} has no parseable layer index; \
+                     cannot split into ffn_gate_exps/ffn_up_exps"
+                )
+            })?;
+            let split = split_fused_gate_up_proj(layer, dtype, &shape, &raw).ok_or_else(|| {
+                format!(
+                    "failed to split fused gate_up_proj tensor {name:?} (shape {shape:?}); \
+                     the GGUF would be missing ffn_gate_exps/ffn_up_exps and MoE \
+                     inference would break"
+                )
+            })?;
+            out.extend(split);
+            continue;
         }
         if name.ends_with(".linear_attn.conv1d.weight") {
             if let Some(layer) = extract_layer_index(&name) {
@@ -370,7 +383,7 @@ pub fn preprocess_hf_tensors_for_gguf(
         }
         out.push((name, dtype, shape, raw));
     }
-    out
+    Ok(out)
 }
 
 pub fn extract_layer_index(name: &str) -> Option<usize> {

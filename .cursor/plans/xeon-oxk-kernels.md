@@ -43,13 +43,14 @@ Nothing is deleted until OXK is **faster or equal** on Silver for that specific 
 flowchart LR
   P0[Phase0 Baseline TPS]
   P1[Phase1 OXK crate plus parity]
-  P2[Phase2 Microbench]
-  P3[Phase3 Opt-in shadow]
-  P4[Phase4 Flip default]
-  P5[Phase5 Remove legacy]
-  P0 --> P1 --> P2 --> P3 --> P4 --> P5
+  P2[Phase2 Microbench plus shadow]
+  P3[Phase3 Opt-in runtime]
+  P4[Phase4 MoE plus FFN]
+  P5[Phase5 Flip default]
+  P6[Phase6 Remove legacy]
+  P0 --> P1 --> P2 --> P3 --> P4 --> P5 --> P6
   P2 -.->|slower| P1
-  P4 -.->|regression| P3
+  P5 -.->|regression| P3
 ```
 
 Every phase must keep `make test` / `make ci` green. Default user path = legacy until Phase 5.

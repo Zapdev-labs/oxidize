@@ -58,7 +58,18 @@ pub fn cross_entropy_grad_batch(
                 row.fill(0.0);
                 return (0.0_f32, 0usize);
             }
-            let target = (target as usize).min(vocab - 1);
+            let target = target as usize;
+            if target >= vocab {
+                // Out-of-range label = a tokenizer/data bug. Skip it (like an
+                // ignored target) instead of silently clamping to the last class
+                // and training on the wrong target; assert in dev/test builds.
+                debug_assert!(
+                    target < vocab,
+                    "target {target} out of range for vocab {vocab}"
+                );
+                row.fill(0.0);
+                return (0.0_f32, 0usize);
+            }
             let max_logit = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
             let exp_sum: f32 = row.iter().map(|l| (l - max_logit).exp()).sum();
             let log_sum_exp = max_logit + exp_sum.ln();
@@ -102,7 +113,9 @@ mod tests {
     fn ce_grad_batch_matches_loss_only_and_sums_to_zero_ish() {
         let vocab = 7;
         let count = 4;
-        let mut logits: Vec<f32> = (0..count * vocab).map(|i| (i as f32 * 0.31).sin()).collect();
+        let mut logits: Vec<f32> = (0..count * vocab)
+            .map(|i| (i as f32 * 0.31).sin())
+            .collect();
         let targets: Vec<u32> = vec![0, 3, 6, 2];
         let expect_loss = softmax_cross_entropy_batch(&logits, &targets, vocab);
         let (loss, n) = cross_entropy_grad_batch(&mut logits, &targets, vocab, 1.0);

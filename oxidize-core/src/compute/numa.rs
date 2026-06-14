@@ -30,13 +30,26 @@ mod imp {
     /// Sorted by `src_start`; set once at model load.
     static REGIONS: OnceLock<Vec<Region>> = OnceLock::new();
 
+    /// Highest node id in a kernel cpulist-style string (e.g. `"0-1"`,
+    /// `"0,2-3"`, `"0,1"`). Returns `None` if nothing parses.
+    fn parse_max_node(list: &str) -> Option<usize> {
+        let mut max: Option<usize> = None;
+        for part in list.split(',') {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+            // Each part is "N" or a range "N-M"; the high end is the last field.
+            let high = part.rsplit('-').next()?.trim().parse::<usize>().ok()?;
+            max = Some(max.map_or(high, |m| m.max(high)));
+        }
+        max
+    }
+
     fn num_nodes() -> usize {
         std::fs::read_to_string("/sys/devices/system/node/online")
             .ok()
-            .and_then(|s| {
-                let s = s.trim();
-                s.rsplit('-').next().and_then(|n| n.parse::<usize>().ok())
-            })
+            .and_then(|s| parse_max_node(s.trim()))
             .map(|max| max + 1)
             .unwrap_or(1)
     }
@@ -85,15 +98,20 @@ mod imp {
             // for a 17GB model, while the page-cache mapping they replace gets
             // large folios. Sequential fault-in below populates huge pages.
             libc::madvise(p, len, libc::MADV_HUGEPAGE);
-            let mask: u64 = 1 << node;
+            // Node bitmask sized to cover `node` — a single u64 overflows for
+            // node ids >= 64 (`1 << node` is UB). `maxnode` is the number of
+            // bits in the mask buffer.
+            let words = node / 64 + 1;
+            let mut mask = vec![0u64; words];
+            mask[node / 64] = 1u64 << (node % 64);
             // MPOL_BIND = 2: fault pages only on `node`.
             let r = libc::syscall(
                 libc::SYS_mbind,
                 p as usize,
                 len,
                 2usize,
-                &mask as *const u64 as usize,
-                64usize,
+                mask.as_ptr() as usize,
+                (words * 64) as usize,
                 0u32,
             );
             if r != 0 {
@@ -192,10 +210,19 @@ mod imp {
             });
         }
         // `merged` is sorted, so `regions` is sorted by src_start.
-        if REGIONS.set(regions).is_ok() {
-            total
-        } else {
-            0
+        match REGIONS.set(regions) {
+            Ok(()) => total,
+            Err(regions) => {
+                // Lost the init race: another thread registered first. Free the
+                // replicas we just allocated instead of leaking them — these are
+                // node-bound mappings of the full weight set (GBs).
+                for region in &regions {
+                    for &b in &region.bases {
+                        unsafe { libc::munmap(b as *mut libc::c_void, region.len) };
+                    }
+                }
+                0
+            }
         }
     }
 

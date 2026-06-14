@@ -215,10 +215,12 @@ fn run_mt(fix: &Fixture, row_bytes: usize, secs: f64) {
                         for (row, out_r) in w_chunk.chunks_exact(row_bytes).zip(out.iter_mut()) {
                             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
                             {
-                                // Safety: avx2 availability printed at startup;
-                                // x1 mode is only meaningful with avx2.
-                                *out_r =
-                                    unsafe { oxidize_kernels::q4k_q8k_row_dot_avx2(row, bpr, q8k) };
+                                *out_r = if oxidize_kernels::oxk_avx2_available() {
+                                    // Safety: guarded by the runtime AVX2 check.
+                                    unsafe { oxidize_kernels::q4k_q8k_row_dot_avx2(row, bpr, q8k) }
+                                } else {
+                                    q4k_q8k_row_dot_scalar(row, bpr, q8k)
+                                };
                             }
                             #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
                             {

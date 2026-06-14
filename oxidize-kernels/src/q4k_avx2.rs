@@ -57,7 +57,13 @@ pub(crate) unsafe fn prefetch_row_stream(
     // Short rows: the hardware prefetcher loses lock when the row ends.  Kick
     // the next tile's stream so it is already moving by the time we get there.
     if blocks_per_row <= 16 {
-        let next_tile = w_block.add(r * row_bytes + rows_in_tile * row_bytes);
+        // `w_block` already points into row `r`; the corresponding block one
+        // tile ahead is exactly `rows_in_tile * row_bytes` further (re-adding
+        // `r * row_bytes` would overshoot by `r` rows). `wrapping_add` keeps
+        // this a pure address computation — prefetching past the allocation is
+        // harmless, but `.add()` past it would be UB.
+        let _ = r;
+        let next_tile = w_block.wrapping_add(rows_in_tile * row_bytes);
         let next = next_tile.wrapping_add(tune.pf_bytes).cast::<i8>();
         _mm_prefetch::<{ _MM_HINT_T1 }>(next);
         _mm_prefetch::<{ _MM_HINT_T1 }>(next.wrapping_add(64));

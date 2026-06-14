@@ -526,7 +526,7 @@ fn quantize_from_f32_scalar(
             quantize_k_packed_scalar(target, input, output, BLOCK_Q3_K_SIZE, 3, 3.5)
         }
         GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M => {
-            quantize_q4_k_scalar(input, output)
+            quantize_q4_k_scalar(target, input, output)
         }
         GgufQuantizationType::Q5_K_S | GgufQuantizationType::Q5_K_M => {
             quantize_k_packed_scalar(target, input, output, BLOCK_Q5_K_SIZE, 5, 16.0)
@@ -888,17 +888,21 @@ fn make_qkx1_quants(x: &[f32], l: &mut [u8], the_min: &mut f32, ntry: i32, alpha
 }
 
 /// llama.cpp-compatible Q4_K block quantizer (`quantize_row_q4_K_ref` with make_qkx1).
-pub fn quantize_q4_k_scalar(input: &[f32], output: &mut [u8]) -> Result<(), QuantizationError> {
+pub fn quantize_q4_k_scalar(
+    target: GgufQuantizationType,
+    input: &[f32],
+    output: &mut [u8],
+) -> Result<(), QuantizationError> {
     if !input.len().is_multiple_of(QK_K) {
         return Err(QuantizationError::InvalidInputLength {
-            quantization: GgufQuantizationType::Q4_K_M,
+            quantization: target,
             expected_multiple: QK_K,
             actual: input.len(),
         });
     }
     if output.len() != (input.len() / QK_K) * BLOCK_Q4_K_SIZE {
         return Err(QuantizationError::InvalidOutputLength {
-            quantization: GgufQuantizationType::Q4_K_M,
+            quantization: target,
             expected: (input.len() / QK_K) * BLOCK_Q4_K_SIZE,
             actual: output.len(),
         });

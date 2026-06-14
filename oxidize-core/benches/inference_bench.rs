@@ -115,17 +115,20 @@ fn layer_forward(
 }
 
 fn bench_model(vocab: usize, h: usize, inter: usize, layers: usize, iters: usize) -> Duration {
-    // Random weights
+    // Random weights. One layer's weights are allocated and reused for every
+    // layer: materializing all `layers` copies at 7B-ish dims needs ~22 GB and
+    // OOMs typical machines. Each matrix (67–180 MB here) still far exceeds L3,
+    // so the per-layer cold-DRAM streaming the bench measures is preserved.
     let mut tok_emb = vec![0.0_f32; vocab * h];
     let norm_w = vec![1.0_f32; h];
     let mut lm_head = vec![0.0_f32; vocab * h];
-    let mut attn_q = vec![0.0_f32; layers * h * h];
-    let mut attn_k = vec![0.0_f32; layers * h * h];
-    let mut attn_v = vec![0.0_f32; layers * h * h];
-    let mut attn_o = vec![0.0_f32; layers * h * h];
-    let mut ffn_gate = vec![0.0_f32; layers * inter * h];
-    let mut ffn_up = vec![0.0_f32; layers * inter * h];
-    let mut ffn_down = vec![0.0_f32; layers * h * inter];
+    let mut attn_q = vec![0.0_f32; h * h];
+    let mut attn_k = vec![0.0_f32; h * h];
+    let mut attn_v = vec![0.0_f32; h * h];
+    let mut attn_o = vec![0.0_f32; h * h];
+    let mut ffn_gate = vec![0.0_f32; inter * h];
+    let mut ffn_up = vec![0.0_f32; inter * h];
+    let mut ffn_down = vec![0.0_f32; h * inter];
 
     for v in tok_emb.iter_mut() {
         *v = fastrand::f32() * 0.02;
@@ -194,18 +197,18 @@ fn bench_model(vocab: usize, h: usize, inter: usize, layers: usize, iters: usize
         x.copy_from_slice(&tok_emb[token_id * h..(token_id + 1) * h]);
         rms_norm(&x, &norm_w, 1e-5, &mut x_normed);
         x.copy_from_slice(&x_normed);
-        for l in 0..layers {
+        for _ in 0..layers {
             layer_forward(
                 &mut x,
                 h,
                 inter,
-                &attn_q[l * h * h..(l + 1) * h * h],
-                &attn_k[l * h * h..(l + 1) * h * h],
-                &attn_v[l * h * h..(l + 1) * h * h],
-                &attn_o[l * h * h..(l + 1) * h * h],
-                &ffn_gate[l * inter * h..(l + 1) * inter * h],
-                &ffn_up[l * inter * h..(l + 1) * inter * h],
-                &ffn_down[l * h * inter..(l + 1) * h * inter],
+                &attn_q,
+                &attn_k,
+                &attn_v,
+                &attn_o,
+                &ffn_gate,
+                &ffn_up,
+                &ffn_down,
                 &mut scratch,
                 &mut bufs,
             );

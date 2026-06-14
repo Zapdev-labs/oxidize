@@ -649,15 +649,23 @@ impl Stream for MtpGenerationStream<'_> {
     type Item = Result<Token, GenerationError>;
 
     fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        if let Some(token) = self.emit_buffer.pop_front() {
-            return Poll::Ready(self.emit_token(token));
-        }
-
+        // Terminate before draining buffered tokens. One MTP step can enqueue
+        // several tokens at once (accepted drafts + the bonus token), so the
+        // budget/stop checks must gate every emitted token — not just run
+        // between steps. Otherwise a request with max_new_tokens=1 and
+        // draft_tokens=4 would emit up to 5 tokens, and a stop/EOS token popped
+        // from the buffer (which sets Done in `emit_token`) would not prevent
+        // the trailing buffered tokens from being returned.
         if self.generated >= self.config.generation.max_new_tokens
             || matches!(self.state, GenerationState::Done)
         {
             self.state = GenerationState::Done;
+            self.emit_buffer.clear();
             return Poll::Ready(None);
+        }
+
+        if let Some(token) = self.emit_buffer.pop_front() {
+            return Poll::Ready(self.emit_token(token));
         }
 
         if matches!(self.state, GenerationState::Prefill)

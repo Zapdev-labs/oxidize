@@ -164,7 +164,7 @@ pub fn convert_safetensors_to_gguf(
     }
 
     let (tensors, st_meta, config_dir) = load_all_tensors(input)?;
-    let mut tensors = preprocess_hf_tensors_for_gguf(tensors);
+    let mut tensors = preprocess_hf_tensors_for_gguf(tensors).map_err(|e| anyhow!(e))?;
     let arch = resolve_architecture(config, &st_meta, config_dir.as_deref(), input)?;
 
     let mut metadata = build_base_metadata(&st_meta, &arch, input);
@@ -200,6 +200,13 @@ pub fn convert_safetensors_to_gguf(
 
     let output_tensors = build_output_tensors(&tensors, config.map_hf_tensor_names)?;
     let gguf_bytes = write_gguf(3, &metadata, &output_tensors, 32)?;
+    // Apply target quantization on the single-file / non-index path too — only
+    // the streaming directory path quantized before, so plain file conversions
+    // silently emitted an unquantized GGUF.
+    let gguf_bytes = match config.target_quantization {
+        Some(target) => quantize_gguf_to_target(&gguf_bytes, target)?,
+        None => gguf_bytes,
+    };
     std::fs::write(output, &gguf_bytes)
         .with_context(|| format!("failed to write {}", output.display()))?;
     Ok(output_tensors.len())
@@ -509,10 +516,7 @@ fn merge_hf_config_metadata(
         } else {
             block_count
         };
-        meta.insert(
-            prefix("block_count"),
-            GgufMetadataValue::Uint32(total),
-        );
+        meta.insert(prefix("block_count"), GgufMetadataValue::Uint32(total));
     }
     if let Some(nextn) = nextn_layers {
         meta.insert(
@@ -893,7 +897,8 @@ fn tensor_byte_len(ggml_type: u32, dimensions: &[u64]) -> Result<usize> {
     let elem = match ggml_type {
         0 => 4,
         1 | 30 => 2,
-        24 | 25 => 1,
+        24 => 1, // I8 / U8
+        25 => 2, // I16
         26 => 4,
         27 => 8,
         other => bail!("unsupported ggml tensor type {other}"),
@@ -978,7 +983,13 @@ fn plan_stream_outputs(
         // Flat Qwen3.5/3.6 MTP tensors (`mtp.fc.weight`, `mtp.layers.0.*`) need
         // the backbone layer count to be placed correctly.
         map_flat_qwen_mtp_tensor_name(name, base)
-            .or_else(|| if map_hf_names { Some(map_hf_tensor_name(name)) } else { None })
+            .or_else(|| {
+                if map_hf_names {
+                    Some(map_hf_tensor_name(name))
+                } else {
+                    None
+                }
+            })
             .filter(|n| !n.is_empty())
             .unwrap_or_else(|| name.to_owned())
     } else if map_hf_names {

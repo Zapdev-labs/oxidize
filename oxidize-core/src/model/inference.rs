@@ -4286,8 +4286,6 @@ pub(crate) fn moe_ffn_forward_weights(
     ) {
         let gate_all = &mut gate_scratch[..n_sel * i_size];
         let up_all = &mut up_scratch[..n_sel * i_size];
-        gate_all.fill(0.0_f32);
-        up_all.fill(0.0_f32);
         if gq == uq {
             // Fused: gate + up in ONE parallel region (halves the
             // fork/join + steal overhead of the two largest dispatches).
@@ -4332,6 +4330,11 @@ pub(crate) fn moe_ffn_forward_weights(
                 Ok(())
             });
         }
+        // Non-fused path actually consumes gate_all/up_all — zero them here
+        // (the fused branch above returns early without touching them, so the
+        // previous unconditional fill was wasted decode-hot-path traffic).
+        gate_all.fill(0.0_f32);
+        up_all.fill(0.0_f32);
         gemv_quantized_experts_f32(gq, gm, n_experts, &selected, i_size, h, normed, 0, gate_all)
             .map_err(|e| ModelError::InferenceFailed(format!("moe gate: {:?}", e)))?;
         gemv_quantized_experts_f32(uq, um, n_experts, &selected, i_size, h, normed, 0, up_all)

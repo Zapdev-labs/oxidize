@@ -98,13 +98,17 @@ fn detect_cpuinfo() -> CpuInfo {
     };
     let stepping = eax1 & 0xf;
 
-    let (_, ebx7, ecx7, edx7) = cpuid_leaf_sub(7, 0);
+    let (_, ebx7, ecx7, _) = cpuid_leaf_sub(7, 0);
     let has_avx2 = std::arch::is_x86_feature_detected!("avx2");
     let has_fma = std::arch::is_x86_feature_detected!("fma");
     let has_avx512f = (ebx7 >> 16) & 1 != 0;
     let has_avx512bw = (ebx7 >> 30) & 1 != 0;
     let has_avx512vnni = (ecx7 >> 11) & 1 != 0;
-    let has_avxvnni = (edx7 >> 4) & 1 != 0;
+    // VEX-encoded AVX-VNNI (Alder Lake+, Zen 4+) is reported in leaf 7
+    // subleaf 1, EAX bit 4 — NOT leaf 7 subleaf 0 EDX bit 4 (which is
+    // FSRM/other).
+    let (eax7_1, _, _, _) = cpuid_leaf_sub(7, 1);
+    let has_avxvnni = (eax7_1 >> 4) & 1 != 0;
 
     // Default AVX-512 enablement: only when it has VNNI (where the ISA is a
     // clear win) or on parts where the wider register alone has proven useful.

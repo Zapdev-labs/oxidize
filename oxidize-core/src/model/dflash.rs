@@ -1102,16 +1102,17 @@ impl DFlashDraftModel {
                     in_dim,
                 ));
             }
+            // Dequant fallback: mirror the primary loader — transpose the raw
+            // [in_dim, out_dim] f32 into [out_dim, in_dim] and store rows =
+            // out_dim. The previous code transposed with (out_dim, in_dim)
+            // (swapped) and so corrupted the weight whenever the quantized GEMV
+            // path was skipped.
             match load_f32_with_dims(name)? {
-                Some((data, dims)) => {
-                    let (rows, cols) =
-                        gguf_row_col_dims(&dims, hidden_size).unwrap_or((out_dim, in_dim));
-                    Ok(F32Weight::from_slice(
-                        transpose_f32(&data, rows, cols),
-                        rows,
-                        cols,
-                    ))
-                }
+                Some((data, _)) => Ok(F32Weight::from_slice(
+                    transpose_f32(&data, in_dim, out_dim),
+                    out_dim,
+                    in_dim,
+                )),
                 None => Ok(F32Weight::from_slice(Vec::new(), 0, 0)),
             }
         };

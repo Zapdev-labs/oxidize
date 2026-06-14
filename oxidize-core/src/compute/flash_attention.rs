@@ -485,7 +485,16 @@ fn flash_attention_decode_heads_impl<E: KvElem>(
     kv_heads: usize,
     output_heads: &mut [f32],
 ) -> Result<(), AttentionError> {
-    let q_len = num_heads * head_dim;
+    // `checked_mul` so a pathological `num_heads * head_dim` cannot wrap to a
+    // small `q_len` that then passes the length checks below while the per-head
+    // unsafe output slices (indexed up to `num_heads * head_dim`) run past the
+    // buffer.
+    let Some(q_len) = num_heads.checked_mul(head_dim) else {
+        return Err(AttentionError::InvalidQueryLength {
+            expected: usize::MAX,
+            actual: query_heads.len(),
+        });
+    };
     if query_heads.len() != q_len {
         return Err(AttentionError::InvalidQueryLength {
             expected: q_len,
@@ -534,8 +543,11 @@ fn flash_attention_decode_heads_impl<E: KvElem>(
         let error: std::sync::Mutex<Option<AttentionError>> = std::sync::Mutex::new(None);
         let out_base = output_heads.as_mut_ptr() as usize;
         crate::spinpool::run_chunks(num_heads, |head| {
-            // Safety: each head owns a disjoint output slice; the buffer
-            // outlives the region.
+            // Safety: each head owns a disjoint `head_dim`-length output slice.
+            // `output_heads.len() == q_len == num_heads * head_dim` is validated
+            // above (with overflow-checked `q_len`), so for `head < num_heads`
+            // the range `[head*head_dim, head*head_dim+head_dim)` is in-bounds;
+            // the buffer outlives the region.
             let out_head = unsafe {
                 std::slice::from_raw_parts_mut(
                     (out_base as *mut f32).add(head * head_dim),

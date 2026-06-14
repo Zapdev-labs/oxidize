@@ -236,20 +236,34 @@ impl SpinPool {
         // ranges so each worker streams sequential weight rows (strided
         // ownership defeats the hardware prefetcher).
         let participants = self.participants;
-        for i in 0..n_chunks / participants {
-            f(i);
-        }
+        // Run the submitter's own contiguous chunk range. If `f` panics here we
+        // must NOT unwind out of `run` before every worker has acked: workers
+        // still hold a fat pointer to `f` (borrowed from the caller's stack) and
+        // may call it until they ack, so an early return would invalidate that
+        // borrow => use-after-free. Catch the panic, drain the acks below, then
+        // resume the unwind so the caller still observes it.
+        let submitter_panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            for i in 0..n_chunks / participants {
+                f(i);
+            }
+        }))
+        .err();
         // Tail chunks (n % P) belong to the last participants by the block
         // formula; participant 0's range is exactly [0, n/P).
 
         // Wait until every worker acks this serial; the payload and `f`'s
-        // borrow must outlive any straggler still reading them.
+        // borrow must outlive any straggler still reading them. Workers always
+        // ack (even on a panicking chunk), so this cannot deadlock.
         for slot in s.acks.iter() {
             while slot.done_serial.load(Ordering::Acquire) != serial {
                 std::hint::spin_loop();
             }
         }
         s.busy.store(false, Ordering::Release);
+
+        if let Some(payload) = submitter_panic {
+            std::panic::resume_unwind(payload);
+        }
     }
 }
 
@@ -311,12 +325,22 @@ fn worker_loop(s: &'static Shared, worker_idx: usize, participants: usize) {
         let n = s.n_chunks.load(Ordering::Relaxed);
         let start = (my_participant * n) / participants;
         let end = ((my_participant + 1) * n) / participants;
-        for i in start..end {
-            f(i);
-        }
+        // Catch a panicking chunk so we still ack below: the submitter spins on
+        // this worker's ack and would deadlock the whole pool (and every future
+        // region) if a panic skipped it. The worker stays alive to serve the
+        // next region; the partial region's output is simply incomplete.
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            for i in start..end {
+                f(i);
+            }
+        }))
+        .is_err();
         s.acks[worker_idx]
             .done_serial
             .store(serial, Ordering::Release);
+        if panicked {
+            eprintln!("[spinpool] worker {worker_idx} chunk panicked; region output is incomplete");
+        }
     }
 }
 

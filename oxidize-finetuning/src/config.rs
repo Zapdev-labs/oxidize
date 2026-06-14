@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+// Fill any field missing from older/partial configs from `Default` rather than
+// failing to deserialize when new fields are added.
+#[serde(default)]
 pub struct FinetuneConfig {
     pub rank: usize,
     pub alpha: f32,

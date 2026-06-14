@@ -161,7 +161,7 @@ pub fn gemv_q4k_range(rows: &[u8], blocks_per_row: usize, q8k: &[u8], out: &mut 
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
         // AVX-512 VNNI (Ice Lake / Sapphire Rapids / Granite Rapids)
-        if isa == "avx512vnni" || (isa == "auto" && oxk_avx512vnni_available()) {
+        if (isa == "avx512vnni" || isa == "auto") && oxk_avx512vnni_available() {
             let n = out.len();
             let mut r = 0;
             while r + 4 <= n {
@@ -189,7 +189,7 @@ pub fn gemv_q4k_range(rows: &[u8], blocks_per_row: usize, q8k: &[u8], out: &mut 
         }
 
         // AVX-VNNI (Alder Lake+ / Zen 4+)
-        if isa == "avxvnni" || (isa == "auto" && oxk_avxvnni_available()) {
+        if (isa == "avxvnni" || isa == "auto") && oxk_avxvnni_available() {
             let n = out.len();
             let mut r = 0;
             while r + 4 <= n {
@@ -216,7 +216,7 @@ pub fn gemv_q4k_range(rows: &[u8], blocks_per_row: usize, q8k: &[u8], out: &mut 
         }
 
         // AVX-512F/BW (Skylake-SP / Xeon Silver, etc.)
-        if isa == "avx512" || (isa == "auto" && oxk_avx512_available() && cpuinfo().use_avx512) {
+        if oxk_avx512_available() && (isa == "avx512" || (isa == "auto" && cpuinfo().use_avx512)) {
             let n = out.len();
             let mut r = 0;
             while r + 4 <= n {
@@ -248,7 +248,7 @@ pub fn gemv_q4k_range(rows: &[u8], blocks_per_row: usize, q8k: &[u8], out: &mut 
         // dots, so on register-tight cores (Skylake-SP) x1 is fastest while
         // Zen prefers x16. Each width computes a row bit-identically, so the
         // tile choice never changes the result.
-        if isa == "avx2" || (isa == "auto" && oxk_avx2_available()) {
+        if (isa == "avx2" || isa == "auto") && oxk_avx2_available() {
             let n = out.len();
             let tile = max_tile();
             let mut r = 0;

@@ -286,6 +286,20 @@ struct GpuState {
 }
 
 #[cfg(feature = "cuda")]
+impl Drop for GpuState {
+    fn drop(&mut self) {
+        // The cuBLAS handle (from `cublasCreate_v2`) is a raw resource the other
+        // RAII fields don't release. `Drop::drop` runs before the struct's
+        // fields are dropped, so the CUDA context (`_ctx`) is still current.
+        if !self.cublas.is_null() {
+            unsafe {
+                cublas_sys::cublasDestroy_v2(self.cublas);
+            }
+        }
+    }
+}
+
+#[cfg(feature = "cuda")]
 impl GpuState {
     fn get_f32_buffer(&mut self, len: usize) -> Result<cust::memory::DeviceBuffer<f32>, String> {
         if let Some(pool) = self.f32_pool.get_mut(&len) {

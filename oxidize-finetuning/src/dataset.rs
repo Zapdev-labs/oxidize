@@ -61,19 +61,26 @@ pub fn load_jsonl_sft(path: impl AsRef<Path>) -> Result<Vec<SftExample>> {
 /// Pack tokenized examples into training chunks.
 ///
 /// With `pack = true`, examples are concatenated (separated by `eos`) into
-/// chunks of exactly `max_seq_len` tokens so every batched forward window is
-/// full — the same throughput trick unsloth/llama.cpp use. With
-/// `pack = false`, each example becomes its own chunk (truncated to
+/// chunks of `max_seq_len` tokens so batched forward windows are full — the
+/// same throughput trick unsloth/llama.cpp use. The trailing chunk may be
+/// shorter than `max_seq_len` (it is kept when it holds at least 2 tokens).
+/// With `pack = false`, each example becomes its own chunk (truncated to
 /// `max_seq_len`).
-pub fn pack_chunks(examples: &[SftExample], max_seq_len: usize, eos: u32, pack: bool) -> Vec<Vec<u32>> {
+pub fn pack_chunks(
+    examples: &[SftExample],
+    max_seq_len: usize,
+    eos: u32,
+    pack: bool,
+) -> Vec<Vec<u32>> {
     let max_seq_len = max_seq_len.max(2);
     let mut chunks = Vec::new();
     if !pack {
         for ex in examples {
             if ex.token_ids.len() >= 2 {
-                let mut ids = ex.token_ids.clone();
-                ids.truncate(max_seq_len);
-                chunks.push(ids);
+                // Copy only the kept prefix rather than cloning the full vector
+                // and truncating (avoids O(n) work on long, truncated examples).
+                let take = max_seq_len.min(ex.token_ids.len());
+                chunks.push(ex.token_ids[..take].to_vec());
             }
         }
         return chunks;
@@ -88,7 +95,10 @@ pub fn pack_chunks(examples: &[SftExample], max_seq_len: usize, eos: u32, pack: 
             if !current.is_empty() {
                 current.push(eos);
                 if current.len() >= max_seq_len {
-                    chunks.push(std::mem::take(&mut current));
+                    chunks.push(std::mem::replace(
+                        &mut current,
+                        Vec::with_capacity(max_seq_len),
+                    ));
                     continue;
                 }
             }
@@ -97,7 +107,10 @@ pub fn pack_chunks(examples: &[SftExample], max_seq_len: usize, eos: u32, pack: 
             current.extend_from_slice(&remaining[..take]);
             remaining = &remaining[take..];
             if current.len() >= max_seq_len {
-                chunks.push(std::mem::take(&mut current));
+                chunks.push(std::mem::replace(
+                    &mut current,
+                    Vec::with_capacity(max_seq_len),
+                ));
             }
         }
     }
