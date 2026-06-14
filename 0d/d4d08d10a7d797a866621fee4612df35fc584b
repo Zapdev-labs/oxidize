@@ -1,0 +1,69 @@
+oxidize-kernels/src/cpu.rs
+  s_5aa7fe9b782d05::t_3ee799bd017ea0 101,107-111
+oxidize-core/src/format/conversion.rs
+  s_5aa7fe9b782d05::t_b97527854da38d 347-350,353,360-374,386
+oxidize-finetuning/src/dataset.rs
+  s_5aa7fe9b782d05::t_f680188328b547 64-67
+  s_5aa7fe9b782d05::t_1b88f5291d8705 80-83
+  s_5aa7fe9b782d05::t_f6d3d80fdfe360 98-99,101,110-111,113
+oxidize-core/src/model/dflash.rs
+  s_5aa7fe9b782d05::t_af0fbab2b98751 1105-1109,1111-1115
+oxidize-core/src/compute/flash_attention.rs
+  s_5aa7fe9b782d05::t_e6db032710c1c3 488-497
+  s_5aa7fe9b782d05::t_3c50c8f66e7fa8 546-550
+oxidize-kernels/src/lib.rs
+  s_5aa7fe9b782d05::t_843a28626a5ac2 251
+  s_5aa7fe9b782d05::t_068d7972710f71 164
+  s_5aa7fe9b782d05::t_e13971e9534fa8 192
+  s_5aa7fe9b782d05::t_b1fda9f811bcb6 219
+oxidize-core/src/compute/quantization.rs
+  s_5aa7fe9b782d05::t_f21f1731d376c1 529
+  s_5aa7fe9b782d05::t_a7a896450a3664 891-895,898,905
+oxidize-kernels/src/q4k_avx2.rs
+  s_5aa7fe9b782d05::t_8eb1791feef74d 60-66
+oxidize-core/src/backends/cuda.rs
+  s_5aa7fe9b782d05::t_2060900c6a8dbe 289-301
+oxidize-finetuning/src/config.rs
+  s_5aa7fe9b782d05::t_556461f874e99a 4-6
+oxidize-finetuning/src/fused.rs
+  s_5aa7fe9b782d05::t_1fd7f4351d9eb9 61-72
+.cursor/plans/xeon-oxk-kernels.md
+  s_5aa7fe9b782d05::t_c525d34c4088e8 46-51,53
+oxidize-kernels/benches/oxk_q4k_bench.rs
+  s_5aa7fe9b782d05::t_6df0420dabf143 218-223
+oxidize-core/src/format/safetensors_to_gguf.rs
+  s_5aa7fe9b782d05::t_90af37849e8423 900-901
+  s_5aa7fe9b782d05::t_8474a257784c88 167
+  s_5aa7fe9b782d05::t_9adb3dc5feb9e1 203-209
+oxidize-core/benches/inference_bench.rs
+  s_5aa7fe9b782d05::t_c26c48d3552787 118-121,125-131
+  s_5aa7fe9b782d05::t_2edc11690f3e06 200
+  s_5aa7fe9b782d05::t_dc95e7872dfd79 205-211
+oxidize-core/src/compute/spinpool.rs
+  s_5aa7fe9b782d05::t_d3cd7cc6a6b3b2 239-250,255-256,263-266
+  s_5aa7fe9b782d05::t_7b555d6e928a48 328-337,341-343
+oxidize-core/src/compute/numa.rs
+  s_5aa7fe9b782d05::t_d3952e18a60aa3 213-225
+  s_5aa7fe9b782d05::t_b38f398ba2081b 33-48,52
+  s_5aa7fe9b782d05::t_67e9d8cd8d8b93 101-106,113-114
+oxidize-core/src/model/inference.rs
+  s_5aa7fe9b782d05::t_6758c4629dc48b 4333-4337
+oxidize-core/src/model/generation.rs
+  s_5aa7fe9b782d05::t_ab0a791cb964b5 652-658,663,667-668
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "0dd4d08d10a7d797a866621fee4612df35fc584b",
+  "prompts": {},
+  "sessions": {
+    "s_5aa7fe9b782d05": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5935401e-776f-469a-9734-ca883d439232",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
