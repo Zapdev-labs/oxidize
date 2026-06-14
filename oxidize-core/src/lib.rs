@@ -47,6 +47,8 @@ pub mod flash_attention;
 pub mod generation;
 #[path = "format/gguf.rs"]
 pub mod gguf;
+#[path = "cluster/gpu_cluster.rs"]
+pub mod gpu_cluster;
 #[path = "model/inference.rs"]
 pub mod inference;
 #[path = "compute/kv_cache.rs"]

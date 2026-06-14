@@ -1,0 +1,44 @@
+FAIL	github.com/Zapdev-labs/oxidize/golang/cmd/oxidize [build failed]
+FAIL	github.com/Zapdev-labs/oxidize/golang/core [build failed]
+ok  	github.com/Zapdev-labs/oxidize/golang/core/backend	0.002s
+ok  	github.com/Zapdev-labs/oxidize/golang/core/backends	0.002s
+ok  	github.com/Zapdev-labs/oxidize/golang/core/backends/cpu	(cached)
+ok  	github.com/Zapdev-labs/oxidize/golang/core/backends/cuda	(cached)
+ok  	github.com/Zapdev-labs/oxidize/golang/core/backends/metal	(cached)
+ok  	github.com/Zapdev-labs/oxidize/golang/core/backends/mlx	(cached)
+ok  	github.com/Zapdev-labs/oxidize/golang/core/backends/strix	(cached)
+ok  	github.com/Zapdev-labs/oxidize/golang/core/backends/vulkan	(cached)
+ok  	github.com/Zapdev-labs/oxidize/golang/core/backends/webgpu	(cached)
+FAIL	github.com/Zapdev-labs/oxidize/golang/core/conversion [build failed]
+ok  	github.com/Zapdev-labs/oxidize/golang/core/cpu_kernels	0.002s
+ok  	github.com/Zapdev-labs/oxidize/golang/core/flash_attention	(cached)
+FAIL	github.com/Zapdev-labs/oxidize/golang/core/ggufcore [build failed]
+ok  	github.com/Zapdev-labs/oxidize/golang/core/kv_cache	(cached)
+ok  	github.com/Zapdev-labs/oxidize/golang/core/mesh	0.002s
+FAIL	github.com/Zapdev-labs/oxidize/golang/core/model [build failed]
+ok  	github.com/Zapdev-labs/oxidize/golang/core/paged	(cached)
+FAIL	github.com/Zapdev-labs/oxidize/golang/core/quantization [build failed]
+ok  	github.com/Zapdev-labs/oxidize/golang/core/safetensors	(cached)
+ok  	github.com/Zapdev-labs/oxidize/golang/core/simd	(cached)
+ok  	github.com/Zapdev-labs/oxidize/golang/core/tensor	0.002s
+FAIL	github.com/Zapdev-labs/oxidize/golang/core/tokenizer [build failed]
+ok  	github.com/Zapdev-labs/oxidize/golang/core/turboquant	(cached)
+ok  	github.com/Zapdev-labs/oxidize/golang/core/util	(cached)
+ok  	github.com/Zapdev-labs/oxidize/golang/core/validation	(cached)
+ok  	github.com/Zapdev-labs/oxidize/golang/core/vision	(cached)
+ok  	github.com/Zapdev-labs/oxidize/golang/core/workspace	(cached)
+ok  	github.com/Zapdev-labs/oxidize/golang/hf	(cached)
+ok  	github.com/Zapdev-labs/oxidize/golang/internal/api	(cached)
+ok  	github.com/Zapdev-labs/oxidize/golang/internal/auth	0.003s
+ok  	github.com/Zapdev-labs/oxidize/golang/internal/buildinfo	(cached)
+FAIL	github.com/Zapdev-labs/oxidize/golang/internal/cli [build failed]
+FAIL	github.com/Zapdev-labs/oxidize/golang/internal/generate [build failed]
+ok  	github.com/Zapdev-labs/oxidize/golang/internal/gguf	0.002s
+FAIL	github.com/Zapdev-labs/oxidize/golang/internal/server [build failed]
+ok  	github.com/Zapdev-labs/oxidize/golang/internal/serviceinfo	0.002s
+?   	github.com/Zapdev-labs/oxidize/golang/internal/testutil	[no test files]
+--- FAIL: TestManualQAScriptShape (0.00s)
+    manual_qa_test.go:30: script missing "--prompt"
+FAIL
+FAIL	github.com/Zapdev-labs/oxidize/golang/scripts	0.002s
+FAIL

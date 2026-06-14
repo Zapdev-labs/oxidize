@@ -1,0 +1,138 @@
+printf 'Manual QA final clean: headings and grounded language\n'; sed -n '1,90p'
+ docs/spec-gpu-k8s-mesh.md; printf '\nManual QA final clean: required sections\n
+'; rg -n '^## (2|5|6|11|12|13|14|15)\.' docs/spec-gpu-k8s-mesh.md; printf '\nMan
+ual QA final clean: validator wording\n'; rg -n 'coverage rejects empty plans|ca
+pability-aware' docs/spec-gpu-k8s-mesh.md; printf '\nManual QA final clean: forb
+idden speculative claims should be empty\n'; rg -n 'Vibe Code Warning|PlanarQuan
+t|IsoQuant|Custom PTX|Go Coordination Layer|Deep integration with NVIDIA NCCL' d
+ocs/spec-gpu-k8s-mesh.md || true; printf '\nQA_DONE\n'
+
+oxidize feat/gpu-k8s-mesh  ? ❯ printf 'Manual QA final clean: headings and grou
+nded language\n'; sed -n '1,90p' docs/spec-gpu-k8s-mesh.md; printf '\nManual QA
+final clean: required sections\n'; rg -n '^## (2|5|6|11|12|13|14|15)\.' docs/spe
+c-gpu-k8s-mesh.md; printf '\nManual QA final clean: validator wording\n'; rg -n
+'coverage rejects empty plans|capability-aware' docs/spec-gpu-k8s-mesh.md; print
+f '\nManual QA final clean: forbidden speculative claims should be empty\n'; rg
+-n 'Vibe Code Warning|PlanarQuant|IsoQuant|Custom PTX|Go Coordination Layer|Deep
+ integration with NVIDIA NCCL' docs/spec-gpu-k8s-mesh.md || true; printf '\nQA_D
+ONE\n'
+Manual QA final clean: headings and grounded language
+# Specification: GPU Kubernetes Mesh Orchestration
+
+## 1. Purpose
+
+This document defines the target design for running Oxidize as an elastic,
+multi-node inference mesh on Kubernetes with GPU-aware placement. It is a
+build specification, not a claim that all described GPU data-plane features
+already exist.
+
+The immediate goal is to connect the existing Oxidize mesh primitives to a
+Kubernetes operator and define the missing work needed for production GPU
+clusters:
+
+- Kubernetes lifecycle management for mesh workers.
+- GPU, memory, topology, and model-shard placement.
+- OpenAI-compatible serving through the existing server surface.
+- A path from today's CPU-oriented mesh collectives to GPU collectives such as
+  NCCL, RCCL, Metal/MLX distributed backends, or RDMA-capable transports.
+
+## 2. Current Oxidize State
+
+### 2.1 Implemented Building Blocks
+
+Oxidize already has a distributed mesh module in `oxidize-core/src/mesh/` with
+the following reusable pieces:
+
+| Area | Current primitive | Source |
+| --- | --- | --- |
+| Peer discovery | libp2p swarm, TCP, Noise, Yamux, mDNS discovery, namespace is
+olation | `discovery.rs`, `node.rs` |
+| Control plane | Six namespaced GossipSub topics and `MeshEnvelope` session clo
+cks | `gossip.rs` |
+| Leader election | Deterministic bully-style election with election-clock inval
+idation | `election.rs` |
+| Topology | Peer capability graph, stale-node eviction, aggregate capabilities
+| `topology.rs` |
+| Sharding | Pipeline and tensor `ShardPlan` assignment over eligible workers |
+`sharding.rs` |
+| Data movement | Ring transport abstraction with mock and TCP transports | `rin
+g.rs` |
+| Fault handling | Collective timeout helpers, runner status, shutdown task mess
+ages | `fault_tolerance.rs` |
+| Validation | Mesh command, prompt, node, and shard-plan scrutiny | `scrutiny.r
+s` |
+
+The mesh API is intentionally centralized through `oxidize-core/src/mesh/mod.rs`
+.
+Any Kubernetes integration should treat that module as the public boundary.
+
+### 2.2 Important Gaps
+
+The following are not complete production capabilities today and must be
+planned as implementation work:
+
+- GPU backends are still maturing; existing perf documents describe CUDA,
+  Metal, Vulkan, and WebGPU support as incomplete compared with llama.cpp,
+  vLLM, and TensorRT-LLM.
+- Current mesh collectives use the `RingTransport` abstraction; there is no
+  production NCCL/RCCL data-plane backend wired through the mesh.
+- PagedAttention scheduling exists as a subsystem, but production-grade
+  distributed paged KV ownership, prefix sharing, and remote KV migration are
+  future work.
+- The Go and Python ports exist, but this spec keeps Kubernetes orchestration
+  out of those ports until the Rust mesh contract is stable.
+- Multi-tenant admission control, GPU quota enforcement, and model-cache
+  eviction need operator-level implementation.
+
+## 3. Design Goals
+
+1. Run one logical `OxidizeCluster` as a namespace-scoped Kubernetes resource.
+2. Keep the Rust mesh as the source of truth for peer membership, election,
+   sharding, and inference data-plane contracts.
+3. Keep Kubernetes responsible for desired state, placement, rolling updates,
+   identity, storage, and service exposure.
+4. Prefer capability-driven scheduling over static replica counts. GPU type,
+   VRAM, topology, fabric, model size, quantization, and available cache all
+   affect placement.
+5. Support CPU-only and mixed CPU/GPU clusters as degraded but valid
+   configurations.
+6. Make failures explicit: a failed shard, hung collective, evicted node, or
+   stale election must move cluster status into a visible condition.
+
+## 4. Non-Goals
+
+- Do not replace the existing Rust workspace or move mesh control into Go.
+- Do not require Kubernetes for local peer-to-peer development.
+- Do not promise RDMA, NCCL/RCCL, GPUDirect, or custom GPU kernels until the
+  backend contracts are implemented and benchmarked.
+- Do not expose cluster-internal GossipSub topics directly to public clients.
+- Do not make the Python package the control-plane owner for Kubernetes.
+
+## 5. Target Architecture
+
+```mermaid
+flowchart TD
+    Client[Client / SDK] --> Ingress[Ingress or LoadBalancer]
+    Ingress --> ServerSvc[oxidize-server Service]
+
+    subgraph K8s[Kubernetes namespace]
+
+Manual QA final clean: required sections
+20:## 2. Current Oxidize State
+83:## 5. Target Architecture
+148:## 6. Kubernetes API
+327:## 11. Failure Handling
+339:## 12. Security
+352:## 13. Observability
+371:## 14. Rollout Plan
+412:## 15. Acceptance Criteria
+
+Manual QA final clean: validator wording
+280:4. Current `validate_shard_plan` coverage rejects empty plans; capability-aw
+are
+
+Manual QA final clean: forbidden speculative claims should be empty
+
+QA_DONE
+
+oxidize feat/gpu-k8s-mesh  ? ❯

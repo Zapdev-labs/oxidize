@@ -1,0 +1,32 @@
+sfw uv run pytest oxidize_python/core/mesh/test_k8s.py -q; sfw uv run python -c
+"from oxidize_python.core.mesh.test_k8s import llama_cluster_spec; from oxidize_
+python.core.mesh.k8s import plan_k8s_mesh; p=plan_k8s_mesh(llama_cluster_spec(),
+ ready_peers=4, leader_peer_id='12D3KooW'); print(p.pod_env['OXIDIZE_MESH_NAMESP
+ACE'], p.status.phase.value, p.capabilities.tags['gpu.vendor'])"; printf '\nPYTH
+ON_QA_DONE\n'
+
+oxidize/oxidize-python feat/gpu-k8s-mesh  ? ❯ sfw uv run pytest oxidize_python/
+core/mesh/test_k8s.py -q; sfw uv run python -c "from oxidize_python.core.mesh.te
+st_k8s import llama_cluster_spec; from oxidize_python.core.mesh.k8s import plan_
+k8s_mesh; p=plan_k8s_mesh(llama_cluster_spec(), ready_peers=4, leader_peer_id='1
+2D3KooW'); print(p.pod_env['OXIDIZE_MESH_NAMESPACE'], p.status.phase.value, p.ca
+pabilities.tags['gpu.vendor'])"; printf '\nPYTHON_QA_DONE\n'
+Protected by Socket Firewall
+.........                                                                [100%]
+9 passed in 0.10s
+
+=== Socket Firewall ===
+
+Warning: Socket Firewall did not detect any package fetch attempts
+
+Protected by Socket Firewall
+llama-70b-uid-123 Ready nvidia
+
+=== Socket Firewall ===
+
+Warning: Socket Firewall did not detect any package fetch attempts
+
+
+PYTHON_QA_DONE
+
+oxidize/oxidize-python feat/gpu-k8s-mesh  ? ❯
