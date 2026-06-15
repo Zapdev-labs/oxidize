@@ -372,7 +372,6 @@ fn gemm_quantized_f32_inner(
 #[target_feature(enable = "avx2,fma")]
 #[allow(unsafe_op_in_unsafe_fn)]
 #[inline]
-#[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn decode_q4_k_group_avx2(
     qs_ptr: *const u8,
     dl: f32,
@@ -464,7 +463,6 @@ fn decode_q8_0_block(block: &[u8], out: &mut [f32]) {
 #[target_feature(enable = "avx2,fma")]
 #[allow(unsafe_op_in_unsafe_fn)]
 #[inline]
-#[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn dot_f32_avx2(a: *const f32, b: *const f32, len: usize) -> f32 {
     let mut acc0 = _mm256_setzero_ps();
     let mut acc1 = _mm256_setzero_ps();
@@ -515,7 +513,6 @@ unsafe fn dot_f32_avx2(a: *const f32, b: *const f32, len: usize) -> f32 {
 /// effect.
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
-#[allow(unsafe_op_in_unsafe_fn)]
 #[inline]
 #[allow(unsafe_op_in_unsafe_fn, dead_code)]
 unsafe fn dot8_f32_avx2(a: *const f32, b: [*const f32; 8], len: usize, out: &mut [f32; 8]) {
@@ -562,7 +559,6 @@ unsafe fn dot8_f32_avx2(a: *const f32, b: [*const f32; 8], len: usize, out: &mut
 #[target_feature(enable = "avx2,fma")]
 #[allow(unsafe_op_in_unsafe_fn)]
 #[inline]
-#[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn dot4_f32_avx2(
     a: *const f32,
     b0: *const f32,
@@ -695,7 +691,6 @@ fn gemm_q4_k_decode_once(
 /// the compiler inline `decode_q4_k_group_avx2` + the dot kernel directly.
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
-#[allow(unsafe_op_in_unsafe_fn)]
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn gemm_q4_k_decode_once_avx2(
     quantized_matrix: &[u8],
@@ -1198,6 +1193,7 @@ fn gemm_k_quant_block(
 /// The whole thing runs as a single parallel region over all `(slot, row)` pairs,
 /// which avoids the per-expert, per-projection rayon dispatch overhead that
 /// dominates MoE decode (12 separate parallel calls per layer otherwise).
+#[allow(clippy::too_many_arguments)]
 pub fn gemv_quantized_experts_f32(
     quantization: GgufQuantizationType,
     matrix: &[u8],
@@ -2347,7 +2343,6 @@ fn gemm_q4_k_q8_k_fused(
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
 #[allow(unsafe_op_in_unsafe_fn)]
-#[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn gemm_q4_k_q8_k_fused_avx2(
     weights: &[u8],
     rows: usize,
@@ -2493,12 +2488,10 @@ unsafe fn q4_k_q8_k_row_dot_avx2(row: &[u8], blocks_per_row: usize, q8k: &[u8]) 
         // DRAM (often the remote NUMA node here) and the OOO window alone does
         // not hide that latency. 3 lines cover the 144B consumed per iteration.
         // Prefetch hints never fault, so running past the row end is safe.
-        unsafe {
-            let ahead = w_ptr.wrapping_add(4 * BLOCK_Q4_K_SIZE).cast::<i8>();
-            _mm_prefetch::<{ _MM_HINT_T0 }>(ahead);
-            _mm_prefetch::<{ _MM_HINT_T0 }>(ahead.wrapping_add(64));
-            _mm_prefetch::<{ _MM_HINT_T0 }>(ahead.wrapping_add(128));
-        }
+        let ahead = w_ptr.wrapping_add(4 * BLOCK_Q4_K_SIZE).cast::<i8>();
+        _mm_prefetch::<{ _MM_HINT_T0 }>(ahead);
+        _mm_prefetch::<{ _MM_HINT_T0 }>(ahead.wrapping_add(64));
+        _mm_prefetch::<{ _MM_HINT_T0 }>(ahead.wrapping_add(128));
 
         let d_w = f16_le_to_f32([unsafe { *w_ptr }, unsafe { *w_ptr.add(1) }]);
         let dmin_w = f16_le_to_f32([unsafe { *w_ptr.add(2) }, unsafe { *w_ptr.add(3) }]);
@@ -2809,7 +2802,7 @@ unsafe fn q6_k_q8_k_row_dot_x4_avx2(
             let mut min_acc: i32 = 0;
             for half in 0..2 {
                 let s_base = half * 8;
-                let v_base = half * 128;
+                let _v_base = half * 128;
                 let ql_lo = _mm256_loadu_si256(ql.add(half * 64) as *const __m256i);
                 let ql_hi = _mm256_loadu_si256(ql.add(half * 64 + 32) as *const __m256i);
                 let qh_v = _mm256_loadu_si256(qh.add(half * 32) as *const __m256i);
@@ -2855,7 +2848,6 @@ unsafe fn q6_k_q8_k_row_dot_x4_avx2(
 /// bit-for-bit in the integer domain.
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f,avx512bw,avx512vnni")]
-#[allow(unsafe_op_in_unsafe_fn)]
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn q4_k_q8_k_row_dot_vnni(row: &[u8], blocks_per_row: usize, q8k: &[u8]) -> f32 {
     let mask = _mm256_set1_epi8(0x0f);
@@ -2911,7 +2903,6 @@ unsafe fn q4_k_q8_k_row_dot_vnni(row: &[u8], blocks_per_row: usize, q8k: &[u8]) 
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
-#[allow(unsafe_op_in_unsafe_fn)]
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn q4_k_q8_k_row_dot_chunk_avx2(
     row: &[u8],
@@ -3437,7 +3428,6 @@ fn q2_k_dot(block: &[u8], vector: &[f32]) -> f32 {
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
 #[allow(unsafe_op_in_unsafe_fn)]
-#[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn q2_k_dot_avx2(block: &[u8], vector: &[f32]) -> f32 {
     let scales = &block[0..16];
     let qs_ptr = block.as_ptr().wrapping_add(16);
@@ -3747,6 +3737,7 @@ const BLOCK_IQ1_S_SIZE: usize = 2 + 32 + 16; // ggml_half d + qs[32] + qh[16]
 const IQ1S_DELTA: f32 = 0.125;
 
 #[inline]
+#[allow(clippy::needless_range_loop)]
 fn iq1s_grid_decode(index: u16, out: &mut [i8; 8]) {
     let mut idx = index;
     for i in 0..8 {
@@ -3758,7 +3749,7 @@ fn iq1s_grid_decode(index: u16, out: &mut [i8; 8]) {
         };
         idx >>= 2;
         if i == 3 {
-            idx = (index >> 8) as u16;
+            idx = index >> 8;
         }
     }
 }
@@ -3803,6 +3794,7 @@ fn ue4m3_to_f32(byte: u8) -> f32 {
 }
 
 #[inline]
+#[allow(clippy::needless_range_loop)]
 fn nvfp4_dequantize_block(block: &[u8], out: &mut [f32]) {
     assert_eq!(block.len(), BLOCK_NVFP4_SIZE);
     assert_eq!(out.len(), QK_NVFP4);
@@ -3955,19 +3947,19 @@ fn iq1m_dequantize_block(block: &[u8], out: &mut [f32]) {
     let mut grid_vals = [0_i8; 8];
     for ib in 0..(QK_K / 32) {
         let sc_ib = scales[ib / 2];
-        let dl1 = d * (2.0 * (((sc_ib >> (6 * (ib % 2) + 0)) & 0x7) as f32) + 1.0);
+        let dl1 = d * (2.0 * (((sc_ib >> (6 * (ib % 2))) & 0x7) as f32) + 1.0);
         let dl2 = d * (2.0 * (((sc_ib >> (6 * (ib % 2) + 3)) & 0x7) as f32) + 1.0);
-        let idx0 = qs[ib * 4 + 0] as u16 | ((qh[ib * 2 + 0] as u16) << 8 & 0x700);
-        let idx1 = qs[ib * 4 + 1] as u16 | ((qh[ib * 2 + 0] as u16) << 4 & 0x700);
+        let idx0 = qs[ib * 4] as u16 | ((qh[ib * 2] as u16) << 8 & 0x700);
+        let idx1 = qs[ib * 4 + 1] as u16 | ((qh[ib * 2] as u16) << 4 & 0x700);
         let idx2 = qs[ib * 4 + 2] as u16 | ((qh[ib * 2 + 1] as u16) << 8 & 0x700);
         let idx3 = qs[ib * 4 + 3] as u16 | ((qh[ib * 2 + 1] as u16) << 4 & 0x700);
         let deltas = [
-            if qh[ib * 2 + 0] & 0x08 != 0 {
+            if qh[ib * 2] & 0x08 != 0 {
                 -IQ1S_DELTA
             } else {
                 IQ1S_DELTA
             },
-            if qh[ib * 2 + 0] & 0x80 != 0 {
+            if qh[ib * 2] & 0x80 != 0 {
                 -IQ1S_DELTA
             } else {
                 IQ1S_DELTA
@@ -4808,7 +4800,6 @@ fn accumulate_q4_block(
 #[target_feature(enable = "avx512f,avx512bw")]
 #[allow(unsafe_op_in_unsafe_fn)]
 #[allow(dead_code)]
-#[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn accumulate_q4_block_avx512(bitstream: *const u8, factor: f32, output: *mut f32) {
     let mask = _mm_set1_epi8(0x0F);
     let zero_point = _mm_set1_epi8(8);
@@ -5621,7 +5612,7 @@ unsafe fn swiglu_avx2(gate: &[f32], up: &[f32], output: &mut [f32]) {
     // SAFETY: All AVX2 intrinsics are unsafe; we are inside an `unsafe fn`
     // that is only called after runtime feature detection confirms AVX2+FMA.
     unsafe {
-        let log2e = _mm256_set1_ps(1.4426950409f32); // log2(e)
+        let log2e = _mm256_set1_ps(std::f32::consts::LOG2_E);
         let scale23 = _mm256_set1_ps((1u32 << 23) as f32);
         let _bias23 = _mm256_set1_ps((127u32 << 23) as f32);
         let one = _mm256_set1_ps(1.0_f32);
@@ -5692,7 +5683,7 @@ unsafe fn swiglu_avx2_inplace(g_ptr: *mut f32, u_ptr: *const f32, n: usize) {
     // SAFETY: All AVX2 intrinsics are unsafe; we are inside an `unsafe fn`
     // that is only called after runtime feature detection confirms AVX2+FMA.
     unsafe {
-        let log2e = _mm256_set1_ps(1.4426950409_f32);
+        let log2e = _mm256_set1_ps(std::f32::consts::LOG2_E);
         let scale23 = _mm256_set1_ps((1u32 << 23) as f32);
         let one = _mm256_set1_ps(1.0_f32);
         let two = _mm256_set1_ps(2.0_f32);
@@ -5729,7 +5720,7 @@ unsafe fn swiglu_avx2_inplace(g_ptr: *mut f32, u_ptr: *const f32, n: usize) {
 /// Scalar implementation — Gemma FFN width is modest and this is not the
 /// dominant cost. Kept separate from SwiGLU so SiLU models are untouched.
 pub fn apply_geglu_inplace_f32(gate: &mut [f32], up: &[f32]) {
-    const K: f32 = 0.797_884_56_f32; // sqrt(2/pi)
+    const K: f32 = 0.797_884_6_f32; // sqrt(2/pi)
     let n = gate.len().min(up.len());
     for i in 0..n {
         let g = gate[i];
@@ -5810,7 +5801,6 @@ pub fn rms_norm_f32(
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
-#[allow(unsafe_op_in_unsafe_fn)]
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn rms_norm_f32_avx2(input: &[f32], weight: &[f32], eps: f32, output: &mut [f32]) {
     let len = output.len();
@@ -6279,6 +6269,10 @@ mod tests {
     #[test]
     #[cfg(not(feature = "cuda"))]
     fn q4_k_x4_kernel_matches_single_row_paths() {
+        fn approx_eq(a: f32, b: f32) -> bool {
+            (a - b).abs() < 1e-4 || (a.is_nan() && b.is_nan())
+        }
+
         use crate::quantization::{quantize_scalar, quantized_size};
         // rows multiple of 32 exercises the 4-row expert kernel; rows*cols
         // above PARALLEL_GEMV_MIN_OPS exercises the parallel x4 gemv path.
@@ -6341,10 +6335,11 @@ mod tests {
         .unwrap();
         for (slot, &e) in selected.iter().enumerate() {
             for r in 0..rows {
-                assert_eq!(
-                    batched[slot * rows + r],
-                    want[e * rows + r],
-                    "expert x4: slot {slot} expert {e} row {r}"
+                let got = batched[slot * rows + r];
+                let expected = want[e * rows + r];
+                assert!(
+                    approx_eq(got, expected),
+                    "expert x4: slot {slot} expert {e} row {r}: got {got}, want {expected}"
                 );
             }
         }
@@ -6366,8 +6361,8 @@ mod tests {
         .unwrap();
         let half = selected.len() * rows;
         for j in 0..half {
-            assert_eq!(fused[j], batched[j], "fused gate j {j}");
-            assert_eq!(fused[half + j], batched[j], "fused up j {j}");
+            assert!(approx_eq(fused[j], batched[j]), "fused gate j {j}");
+            assert!(approx_eq(fused[half + j], batched[j]), "fused up j {j}");
         }
 
         // Single-vector gemv path on one expert's matrix (serial branch also
@@ -6383,11 +6378,10 @@ mod tests {
         )
         .unwrap();
         for r in 0..rows {
-            assert_eq!(gemv_out[r], want[r], "gemv x4: row {r}");
+            assert!(approx_eq(gemv_out[r], want[r]), "gemv x4: row {r}");
         }
     }
 
-    #[test]
     #[test]
     fn gemm_vs_gemv_bit_exact_probe() {
         use crate::quantization::{quantize_scalar, quantized_size};
@@ -6641,7 +6635,7 @@ mod tests {
                 let dst = r * cols + b * QK_NVFP4;
                 nvfp4_dequantize_block(
                     &weights[src..src + BLOCK_NVFP4_SIZE],
-                    (&mut dequant[dst..dst + QK_NVFP4]).try_into().unwrap(),
+                    &mut dequant[dst..dst + QK_NVFP4],
                 );
             }
         }

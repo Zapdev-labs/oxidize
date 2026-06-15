@@ -312,11 +312,11 @@ impl<'a, T: Model> SpeculativeDecoder<'a, T> {
             let hidden = self
                 .draft_model
                 .forward_token(current_token, None)
-                .map_err(|e| SpeculativeError::DraftModel(e))?;
+                .map_err(SpeculativeError::DraftModel)?;
             let logits = self
                 .draft_model
                 .logits(&hidden)
-                .map_err(|e| SpeculativeError::DraftModel(e))?;
+                .map_err(SpeculativeError::DraftModel)?;
 
             let token = sample(&logits, self.config.sampling, fastrand::f32())
                 .map_err(SpeculativeError::Sampling)?;
@@ -432,14 +432,7 @@ impl<'a, T: Model> SpeculativeDecoder<'a, T> {
 
         let logits = self
             .target_model
-            .forward(
-                &[if self.last_token_pending_kv {
-                    last_token
-                } else {
-                    last_token
-                }],
-                &mut self.target_session,
-            )
+            .forward(&[last_token], &mut self.target_session)
             .map_err(SpeculativeError::Model)?;
 
         let token = sample(&logits, self.config.sampling, fastrand::f32())
@@ -564,7 +557,6 @@ pub fn load_draft_model_for_speculative(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llama::{LlamaConfig, LlamaModel};
 
     #[test]
     fn speculative_config_default() {

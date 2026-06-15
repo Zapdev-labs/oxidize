@@ -551,7 +551,7 @@ fn load_bpe(
             }
         }
         // Longest pieces first so overlapping markers match greedily.
-        special_pieces.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        special_pieces.sort_by_key(|a| std::cmp::Reverse(a.0.len()));
     }
 
     Ok(BpeTokenizer {

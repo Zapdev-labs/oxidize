@@ -18,3 +18,6 @@ __pycache__/
 
 # btca local data
 .btca/
+
+# Local k8s deployment scripts (not part of upstream)
+deploy/

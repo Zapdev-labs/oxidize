@@ -1073,7 +1073,7 @@ mod tests {
             sample(
                 &[1.0],
                 SamplingConfig {
-                    temperature: 0.0,
+                    temperature: f32::NAN,
                     ..SamplingConfig::default()
                 },
                 0.3

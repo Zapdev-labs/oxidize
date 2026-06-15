@@ -38,7 +38,7 @@ fn init_thread_pool() {
                 .unwrap_or(8);
             // Heuristic: halve on HT machines (logical divisible by 2 and > 4),
             // clamp to [4, 12] for memory-bandwidth efficiency.
-            if logical > 4 && logical % 2 == 0 {
+            if logical > 4 && logical.is_multiple_of(2) {
                 (logical / 2).clamp(4, 12)
             } else {
                 logical.clamp(4, 12)

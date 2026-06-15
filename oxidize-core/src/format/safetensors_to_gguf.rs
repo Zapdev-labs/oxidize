@@ -1,3 +1,5 @@
+#![allow(clippy::type_complexity)]
+
 use crate::conversion::{
     extract_layer_index, flatten_linear_attn_conv1d, map_flat_qwen_mtp_tensor_name,
     map_hf_tensor_name, map_qwen_mtp_tensor_name, preprocess_hf_tensors_for_gguf,
@@ -189,13 +191,13 @@ pub fn convert_safetensors_to_gguf(
     let tokenizer_dir = config_dir
         .clone()
         .or_else(|| cfg_path.and_then(|p| p.parent().map(Path::to_path_buf)));
-    if let Some(dir) = tokenizer_dir {
-        if let Err(error) = merge_hf_tokenizer_metadata(&mut metadata, &dir) {
-            eprintln!(
-                "warning: failed to embed tokenizer metadata from {}: {error:#}",
-                dir.display()
-            );
-        }
+    if let Some(dir) = tokenizer_dir
+        && let Err(error) = merge_hf_tokenizer_metadata(&mut metadata, &dir)
+    {
+        eprintln!(
+            "warning: failed to embed tokenizer metadata from {}: {error:#}",
+            dir.display()
+        );
     }
 
     let output_tensors = build_output_tensors(&tensors, config.map_hf_tensor_names)?;
@@ -223,10 +225,10 @@ fn resolve_architecture(
     }
     if let Some(dir) = config_dir {
         let cfg_path = dir.join("config.json");
-        if cfg_path.is_file() {
-            if let Ok(arch) = read_arch_from_hf_config(&cfg_path) {
-                return Ok(arch);
-            }
+        if cfg_path.is_file()
+            && let Ok(arch) = read_arch_from_hf_config(&cfg_path)
+        {
+            return Ok(arch);
         }
     }
     Ok(st_meta
@@ -657,19 +659,19 @@ fn merge_hf_tokenizer_metadata(
         }
     }
     // Unigram stores [token, score] pairs instead of a flat map.
-    if model_type.eq_ignore_ascii_case("unigram") {
-        if let Some(arr) = model.get("vocab").and_then(|v| v.as_array()) {
-            for (id, pair) in arr.iter().enumerate() {
-                if id >= len {
-                    break;
+    if model_type.eq_ignore_ascii_case("unigram")
+        && let Some(arr) = model.get("vocab").and_then(|v| v.as_array())
+    {
+        for (id, pair) in arr.iter().enumerate() {
+            if id >= len {
+                break;
+            }
+            if let Some(p) = pair.as_array() {
+                if let Some(t) = p.first().and_then(|v| v.as_str()) {
+                    tokens[id] = t.to_owned();
                 }
-                if let Some(p) = pair.as_array() {
-                    if let Some(t) = p.first().and_then(|v| v.as_str()) {
-                        tokens[id] = t.to_owned();
-                    }
-                    if let Some(s) = p.get(1).and_then(|v| v.as_f64()) {
-                        scores[id] = s as f32;
-                    }
+                if let Some(s) = p.get(1).and_then(|v| v.as_f64()) {
+                    scores[id] = s as f32;
                 }
             }
         }

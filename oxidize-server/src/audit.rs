@@ -179,11 +179,12 @@ pub struct AuditLogger {
 
 impl AuditLogger {
     pub fn new() -> Self {
-        let (sender, mut receiver) = mpsc::unbounded_channel::<AuditEvent>();
+        let (sender, receiver) = mpsc::unbounded_channel::<AuditEvent>();
 
         #[cfg(not(test))]
         {
             tokio::spawn(async move {
+                let mut receiver = receiver;
                 while let Some(event) = receiver.recv().await {
                     let json = event.to_json();
                     match event.severity {
@@ -289,6 +290,7 @@ pub async fn audit_middleware(
 }
 
 /// Log a generation completion event.
+#[allow(clippy::too_many_arguments)]
 pub fn log_generation_event(
     logger: &AuditLogger,
     request_id: RequestId,

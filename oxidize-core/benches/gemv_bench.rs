@@ -84,28 +84,31 @@ fn main() {
         }
     }
 
-    println!("=== Oxidize CUDA GEMV Benchmark ===\n");
+    #[cfg(feature = "cuda")]
+    {
+        println!("=== Oxidize CUDA GEMV Benchmark ===\n");
 
-    let configs = vec![
-        ("small  (512×512)", 512, 512, 10000),
-        ("medium (4096×4096)", 4096, 4096, 2000),
-        ("large  (11008×4096)", 11008, 4096, 1000),
-    ];
+        let configs = vec![
+            ("small  (512×512)", 512, 512, 10000),
+            ("medium (4096×4096)", 4096, 4096, 2000),
+            ("large  (11008×4096)", 11008, 4096, 1000),
+        ];
 
-    for (name, rows, cols, iters) in configs {
-        println!("{}  –  {} iterations", name, iters);
-        let dur_f32 = bench_gemv_f32(rows, cols, iters);
-        let tps_f32 = iters as f64 / dur_f32.as_secs_f64();
-        let us_per_f32 = dur_f32.as_secs_f64() * 1e6 / iters as f64;
-        println!(
-            "  f32 GEMV:  {:.2} ops/s  ({:.3} µs/op)",
-            tps_f32, us_per_f32
-        );
+        for (name, rows, cols, iters) in configs {
+            println!("{}  –  {} iterations", name, iters);
+            let dur_f32 = bench_gemv_f32(rows, cols, iters);
+            let tps_f32 = iters as f64 / dur_f32.as_secs_f64();
+            let us_per_f32 = dur_f32.as_secs_f64() * 1e6 / iters as f64;
+            println!(
+                "  f32 GEMV:  {:.2} ops/s  ({:.3} µs/op)",
+                tps_f32, us_per_f32
+            );
 
-        let dur_q8 = bench_gemv_q8_0(rows, cols, iters);
-        let tps_q8 = iters as f64 / dur_q8.as_secs_f64();
-        let us_per_q8 = dur_q8.as_secs_f64() * 1e6 / iters as f64;
-        println!("  q8_0 GEMV: {:.2} ops/s  ({:.3} µs/op)", tps_q8, us_per_q8);
-        println!();
+            let dur_q8 = bench_gemv_q8_0(rows, cols, iters);
+            let tps_q8 = iters as f64 / dur_q8.as_secs_f64();
+            let us_per_q8 = dur_q8.as_secs_f64() * 1e6 / iters as f64;
+            println!("  q8_0 GEMV: {:.2} ops/s  ({:.3} µs/op)", tps_q8, us_per_q8);
+            println!();
+        }
     }
 }

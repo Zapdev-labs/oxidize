@@ -1,4 +1,5 @@
 //! Temporal encoder for video understanding.
+#![allow(clippy::needless_range_loop)]
 //!
 //! Applies a stack of causal self-attention layers over the time axis. The
 //! input to the temporal encoder is a `[num_frames, hidden_size]` matrix of
@@ -365,6 +366,7 @@ fn forward_temporal_layer(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compute_causal_attention(
     q: &[f32],          // [seq, hidden]
     k: &[f32],          // [seq, hidden]

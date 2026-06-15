@@ -217,9 +217,9 @@ mod tests {
         let mut cache = PrefixCache::new(config, 2, 2);
         let kv = KvCache::new(config).unwrap();
 
-        cache.store(&vec![1, 2], kv.clone()).unwrap();
-        cache.store(&vec![3, 4], kv.clone()).unwrap();
-        cache.store(&vec![5, 6], kv.clone()).unwrap();
+        cache.store(&[1, 2], kv.clone()).unwrap();
+        cache.store(&[3, 4], kv.clone()).unwrap();
+        cache.store(&[5, 6], kv.clone()).unwrap();
 
         assert_eq!(cache.cache.len(), 2);
     }

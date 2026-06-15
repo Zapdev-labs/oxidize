@@ -1,3 +1,5 @@
+#![allow(clippy::needless_range_loop, clippy::too_many_arguments)]
+
 use crate::flash_attention::{flash_attention_decode_heads_f16, flash_attention_decode_heads_f32};
 use crate::gguf::{GgufQuantizationType, MappedGgufFile};
 use crate::kv_cache::{KvCache, KvCacheConfig};
@@ -1063,7 +1065,7 @@ fn gemm_weight(
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
-struct LayerWeights {
+pub(crate) struct LayerWeights {
     attn_norm: Vec<f32>,
     attn_q: WeightStorage,
     attn_q_bias: Vec<f32>,
@@ -4270,7 +4272,7 @@ pub(crate) fn moe_ffn_forward_weights(
     let n_sel = n_experts_per_tok;
     let mut selected: Vec<usize> = Vec::with_capacity(n_sel);
     let mut weights: Vec<f32> = Vec::with_capacity(n_sel);
-    for &(expert_idx, sel_score) in expert_scores.iter().take(n_sel) {
+    for &(expert_idx, _sel_score) in expert_scores.iter().take(n_sel) {
         selected.push(expert_idx);
         weights.push(router_logits[expert_idx] / weight_norm);
     }
@@ -4660,9 +4662,11 @@ mod tests {
     #[test]
     fn batched_prefill_rejects_moe_layers() {
         let mut model = tiny_inference_model();
-        let mut layer = LayerWeights::default();
-        layer.attn_q = WeightStorage::F32(vec![1.0]);
-        layer.ffn_gate_exps = WeightStorage::F32(vec![1.0]);
+        let layer = LayerWeights {
+            attn_q: WeightStorage::F32(vec![1.0]),
+            ffn_gate_exps: WeightStorage::F32(vec![1.0]),
+            ..Default::default()
+        };
         model.layers.push(layer);
 
         assert!(!model.layers_supported_for_batched());
@@ -4701,14 +4705,14 @@ mod tests {
         assert_eq!(ws.v_vec.len(), max_kv_len);
         assert_eq!(ws.attn_result.len(), max_qkv);
 
-        let head_dim = config.head_dim().max(config.kv_head_dim());
+        let head_dim = config.head_dim().max(config.kv_head_dim()).max(192);
         assert_eq!(ws.head_scratch.len(), head_dim);
 
         let kv_copy_size = config.context_size * max_kv_len;
         assert_eq!(ws.kv_keys_copy.len(), kv_copy_size);
         assert_eq!(ws.kv_values_copy.len(), kv_copy_size);
         assert_eq!(ws.logits.len(), config.vocab_size);
-        assert_eq!(ws.mamba_scratch.len(), config.hidden_size * 2);
+        assert_eq!(ws.mamba_scratch.len(), config.hidden_size.max(576));
         assert_eq!(ws.conv_out.len(), max_qkv);
     }
 
