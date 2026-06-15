@@ -84,6 +84,8 @@ fn main() {
         }
     }
 
+    #[cfg(feature = "cuda")]
+    {
     println!("=== Oxidize CUDA GEMV Benchmark ===\n");
 
     let configs = vec![
@@ -107,5 +109,6 @@ fn main() {
         let us_per_q8 = dur_q8.as_secs_f64() * 1e6 / iters as f64;
         println!("  q8_0 GEMV: {:.2} ops/s  ({:.3} µs/op)", tps_q8, us_per_q8);
         println!();
+    }
     }
 }

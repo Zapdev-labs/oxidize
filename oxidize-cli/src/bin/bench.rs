@@ -426,6 +426,7 @@ fn inference_config_from_dflash(
         embedding_scale: 1.0,
         gelu_ffn: false,
         sandwich_norm: false,
+        rms_norm_weight_plus_one: false,
     }
 }
 

@@ -265,6 +265,7 @@ pub type LayerId = usize;
 
 /// Configuration for layer-by-layer VRAM management (AirLLM-style).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub struct CudaLayerConfig {
     /// Maximum number of layers to keep resident in VRAM at once.
     /// 0 = unlimited (default, loads all layers).
@@ -274,14 +275,6 @@ pub struct CudaLayerConfig {
     pub max_vram_bytes: usize,
 }
 
-impl Default for CudaLayerConfig {
-    fn default() -> Self {
-        Self {
-            max_resident_layers: 0,
-            max_vram_bytes: 0,
-        }
-    }
-}
 
 #[cfg(feature = "cuda")]
 struct LayerEntry {

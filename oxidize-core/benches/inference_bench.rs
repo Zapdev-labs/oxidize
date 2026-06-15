@@ -46,6 +46,7 @@ impl LayerBuffers {
 
 /// Simulates one transformer layer forward pass.
 /// `bufs` is pre-allocated outside the hot path to avoid allocator overhead.
+#[allow(clippy::too_many_arguments)]
 fn layer_forward(
     x: &mut [f32],
     h: usize,

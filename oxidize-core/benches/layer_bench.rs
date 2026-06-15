@@ -6,11 +6,11 @@ fn gemv(rows: usize, cols: usize, matrix: &[f32], vector: &[f32], output: &mut [
 }
 
 fn bench_layer_by_layer(
-    vocab: usize,
+    _vocab: usize,
     h: usize,
     inter: usize,
     layers: usize,
-    max_resident: usize,
+    _max_resident: usize,
     iters: usize,
 ) -> (Duration, usize) {
     // Random weights per layer
@@ -204,6 +204,7 @@ impl LayerGemvBuffers {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn layer_gemvs(
     l: usize,
     h: usize,
@@ -234,12 +235,12 @@ fn layer_gemvs(
     gemv(h, h, &attn_v[l], x, v);
 
     let head_dim = h;
-    let mut qk = 0.0_f32;
     let scale = 1.0 / (head_dim as f32).sqrt();
+    let mut qk_sum = 0.0_f32;
     for i in 0..h {
-        qk += q[i] * k[i] * scale;
+        qk_sum += q[i] * k[i] * scale;
     }
-    let qk_softmax = 1.0_f32; // single element softmax is identity
+    let qk_softmax = qk_sum.exp(); // bench softmax stub uses computed dot
     for i in 0..h {
         attn_out[i] = v[i] * qk_softmax;
     }
@@ -276,7 +277,7 @@ fn main() {
     let bytes_per_layer = (
         4 * h * h +   // 4 attention projections
         2 * inter * h + // gate + up
-        1 * h * inter
+        h * inter
         // down
     ) * std::mem::size_of::<f32>();
     println!(

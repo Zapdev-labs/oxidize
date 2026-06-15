@@ -1,4 +1,5 @@
 //! Video encoder.
+#![allow(clippy::needless_range_loop, clippy::too_many_arguments)]
 //!
 //! Runs the per-frame vision encoder over a [`VideoFrames`] tensor, pools
 //! each frame to a single vector, then runs the temporal encoder across the
@@ -328,13 +329,15 @@ mod tests {
             image_std: [1.0; 3],
             num_image_tokens: 4,
         };
-        let mut temporal = TemporalConfig::default();
-        temporal.hidden_size = vision.projection_dim;
-        temporal.num_layers = 1;
-        temporal.num_heads = 2;
-        temporal.intermediate_size = 8;
-        temporal.max_frames = 4;
-        temporal.use_cls_token = false;
+        let temporal = TemporalConfig {
+            hidden_size: vision.projection_dim,
+            num_layers: 1,
+            num_heads: 2,
+            intermediate_size: 8,
+            max_frames: 4,
+            use_cls_token: false,
+            ..Default::default()
+        };
         VideoConfig {
             vision,
             temporal,

@@ -1,3 +1,5 @@
+#![allow(clippy::needless_range_loop, clippy::manual_checked_ops, dead_code)]
+
 use crate::conversion::normalize_gguf_tensor_name;
 use crate::flash_attention::flash_attention_decode_f32;
 use crate::gguf::{GgufQuantizationType, MappedGgufFile};
@@ -403,7 +405,7 @@ fn split_gated_query_proj(q_full: &[f32], head_dim: usize) -> Option<(Vec<f32>, 
 }
 
 fn debug_vec(label: &str, x: &[f32]) {
-    if !std::env::var("OXIDIZE_DEBUG_LAYERS").is_ok() {
+    if std::env::var("OXIDIZE_DEBUG_LAYERS").is_err() {
         return;
     }
     let nan_count = x.iter().filter(|v| v.is_nan()).count();

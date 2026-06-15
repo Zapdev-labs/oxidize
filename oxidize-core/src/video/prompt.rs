@@ -91,7 +91,7 @@ impl VideoPrompt {
                             // Pad/truncate to llm_hidden.
                             let take = hidden_size.min(llm_hidden);
                             out.extend_from_slice(&text_embedding_table[start..start + take]);
-                            out.extend(std::iter::repeat(0.0_f32).take(llm_hidden - take));
+                            out.extend(std::iter::repeat_n(0.0_f32, llm_hidden - take));
                         }
                     }
                 }
@@ -157,8 +157,8 @@ impl VideoPrompt {
                             "video llm_hidden_size {llm_hidden_size} != prompt llm_hidden {llm_hidden}"
                         )));
                     }
-                    let extra = (self.video_start_embedding.len() > 0) as usize
-                        + (self.video_end_embedding.len() > 0) as usize;
+                    let extra = (!self.video_start_embedding.is_empty()) as usize
+                        + (!self.video_end_embedding.is_empty()) as usize;
                     total = total
                         .checked_add(num_frames + extra)
                         .ok_or_else(|| VideoError::InvalidConfig("row count overflow".into()))?;
@@ -222,7 +222,7 @@ mod tests {
     fn rejects_token_out_of_range() {
         let mut prompt = VideoPrompt::new();
         prompt.add_text(vec![10]);
-        let err = prompt.build_sequence(&vec![0.0; 6], 3, 2).unwrap_err();
+        let err = prompt.build_sequence(&[0.0; 6], 3, 2).unwrap_err();
         assert!(matches!(err, VideoError::InvalidConfig(_)));
     }
 }

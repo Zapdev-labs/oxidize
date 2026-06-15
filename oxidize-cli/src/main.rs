@@ -1837,16 +1837,6 @@ fn server_args_from_cli(args: &Args) -> io::Result<oxidize_server::Args> {
         mesh: args.mesh,
         mesh_port: args.mesh_port,
         tokenizer_model: args.tokenizer_model.clone(),
-        draft_model: args.draft_model.clone(),
-        draft_tokens: args.draft_tokens,
-        kv_cache_dtype: match args.kv_cache_dtype {
-            KvCacheDType::F32 => oxidize_server::KvCacheDType::F32,
-            KvCacheDType::F16 => oxidize_server::KvCacheDType::F16,
-            KvCacheDType::Q8 => oxidize_server::KvCacheDType::Q8,
-            KvCacheDType::Q4 => oxidize_server::KvCacheDType::Q4,
-        },
-        threads: args.threads.filter(|threads| *threads > 0).unwrap_or(0),
-        ram_offload_threads: args.ram_offload_threads,
     })
 }
 

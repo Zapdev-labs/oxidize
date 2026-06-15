@@ -151,12 +151,11 @@ fn dense(total: usize, n: usize, stride: usize) -> Vec<usize> {
     }
     let mut out: Vec<usize> = (0..total).step_by(stride).take(n).collect();
     // Always include the last frame so we don't lose the tail.
-    if let Some(last) = out.last().copied() {
-        if last != total - 1 {
+    if let Some(last) = out.last().copied()
+        && last != total - 1 {
             out.pop();
             out.push(total - 1);
         }
-    }
     out
 }
 
