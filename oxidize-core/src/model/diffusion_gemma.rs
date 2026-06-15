@@ -543,18 +543,24 @@ impl DiffusionGemma {
         }
     }
 
-    fn moe_ffn(&self, l: &Layer, src: &[f32], out: &mut [f32], _nt: usize) {
+    /// Routed MoE for the whole token batch, batched mul_mat_id-style: all `nt*N_USED`
+    /// (token, expert) pairs flow through ONE gate_up experts GEMV and ONE down experts GEMV,
+    /// giving a single level of rayon parallelism over the full output (no per-token nesting).
+    fn moe_ffn(&self, l: &Layer, src: &[f32], out: &mut [f32], nt: usize) {
         let ones = vec![1.0_f32; N_EMBD];
-        // Sequential over tokens: the inner experts GEMV is already rayon-parallel over its
-        // rows; an outer par here nests and thrashes (measured 4x slower). Keeping the single
-        // (inner) level of parallelism is fastest until a batched mul_mat_id-style experts
-        // kernel lands.
-        out.chunks_mut(N_EMBD).enumerate().for_each(|(i, or)| {
+        let inv = 1.0 / (N_EMBD as f32).sqrt();
+        let ns = nt * N_USED;
+        let gu_rows = 2 * EXPERT_FF;
+
+        // Per-token (cheap, scalar): router selection, combine weights, and the per-(token,expert)
+        // expert input (pre_ffw_norm_2(attn_out), repeated across the token's N_USED slots).
+        let mut sel_flat = vec![0usize; ns];
+        let mut wts = vec![0.0_f32; ns];
+        let mut ein_rep = vec![0.0_f32; ns * N_EMBD];
+        for i in 0..nt {
             let sr = &src[i * N_EMBD..(i + 1) * N_EMBD];
-            // router input: scaleless_rms(attn_out) * 1/sqrt(N_EMBD) * gate_inp_s
             let mut rin = vec![0.0_f32; N_EMBD];
             rms_norm_f32(sr, &ones, EPS, &mut rin).unwrap();
-            let inv = 1.0 / (N_EMBD as f32).sqrt();
             for t in 0..N_EMBD {
                 rin[t] = rin[t] * inv * l.ffn_gate_inp_s[t];
             }
@@ -562,39 +568,43 @@ impl DiffusionGemma {
             gemv_f32(&l.ffn_gate_inp, N_EXPERT, N_EMBD, &rin, &mut logits).unwrap();
             let mut probs = vec![0.0_f32; N_EXPERT];
             softmax_f32(&logits, &mut probs).unwrap();
-            // top-8 by prob
             let mut idx: Vec<usize> = (0..N_EXPERT).collect();
             idx.sort_by(|&a, &b| probs[b].partial_cmp(&probs[a]).unwrap());
-            let sel: Vec<usize> = idx[..N_USED].to_vec();
-            let wsum: f32 = sel.iter().map(|&e| probs[e]).sum();
-
-            // pre_ffw_norm_2(attn_out) as the expert input
+            let wsum: f32 = idx[..N_USED].iter().map(|&e| probs[e]).sum();
             let mut ein = vec![0.0_f32; N_EMBD];
             rms_norm_f32(sr, &l.pre_ffw_norm_2, EPS, &mut ein).unwrap();
-
-            // fused gate_up: per selected expert -> [2*EXPERT_FF]
-            let gu_rows = 2 * EXPERT_FF;
-            let mut gu = vec![0.0_f32; N_USED * gu_rows];
-            self.experts_ew(&l.ffn_gate_up_exps, &sel, gu_rows, N_EMBD, &ein, 0, &mut gu);
-            // swiglu per expert: gate = gu[..EXPERT_FF], up = gu[EXPERT_FF..]
-            let mut h = vec![0.0_f32; N_USED * EXPERT_FF];
             for s in 0..N_USED {
-                let g = &mut gu[s * gu_rows..s * gu_rows + EXPERT_FF].to_vec();
-                let u = &gu[s * gu_rows + EXPERT_FF..s * gu_rows + 2 * EXPERT_FF];
-                apply_geglu_inplace_f32(g, u);
-                h[s * EXPERT_FF..(s + 1) * EXPERT_FF].copy_from_slice(g);
+                let e = idx[s];
+                sel_flat[i * N_USED + s] = e;
+                wts[i * N_USED + s] = (probs[e] / wsum) * l.ffn_down_exps_s[e];
+                ein_rep[(i * N_USED + s) * N_EMBD..(i * N_USED + s + 1) * N_EMBD].copy_from_slice(&ein);
             }
-            // down per expert: [N_EMBD] each
-            let mut dn = vec![0.0_f32; N_USED * N_EMBD];
-            self.experts_ew(&l.ffn_down_exps, &sel, N_EMBD, EXPERT_FF, &h, EXPERT_FF, &mut dn);
-            // weighted sum (router prob / wsum) * per-expert down scale
-            for (s, &e) in sel.iter().enumerate() {
-                let w = (probs[e] / wsum) * l.ffn_down_exps_s[e];
+        }
+
+        // ONE batched gate_up over all slots -> [ns, gu_rows]; swiglu -> h [ns, EXPERT_FF].
+        let mut gu = vec![0.0_f32; ns * gu_rows];
+        self.experts_ew(&l.ffn_gate_up_exps, &sel_flat, gu_rows, N_EMBD, &ein_rep, N_EMBD, &mut gu);
+        let mut h = vec![0.0_f32; ns * EXPERT_FF];
+        h.par_chunks_mut(EXPERT_FF).enumerate().for_each(|(s, hs)| {
+            let base = s * gu_rows;
+            let mut g = gu[base..base + EXPERT_FF].to_vec();
+            apply_geglu_inplace_f32(&mut g, &gu[base + EXPERT_FF..base + gu_rows]);
+            hs.copy_from_slice(&g);
+        });
+
+        // ONE batched down over all slots -> [ns, N_EMBD].
+        let mut dn = vec![0.0_f32; ns * N_EMBD];
+        self.experts_ew(&l.ffn_down_exps, &sel_flat, N_EMBD, EXPERT_FF, &h, EXPERT_FF, &mut dn);
+
+        // Per-token combine: weighted expert sum, then post_ffw_norm_2.
+        out.par_chunks_mut(N_EMBD).enumerate().for_each(|(i, or)| {
+            for s in 0..N_USED {
+                let slot = i * N_USED + s;
+                let w = wts[slot];
                 for t in 0..N_EMBD {
-                    or[t] += w * dn[s * N_EMBD + t];
+                    or[t] += w * dn[slot * N_EMBD + t];
                 }
             }
-            // post_ffw_norm_2
             let mut nrm = vec![0.0_f32; N_EMBD];
             rms_norm_f32(or, &l.post_ffw_norm_2, EPS, &mut nrm).unwrap();
             or.copy_from_slice(&nrm);

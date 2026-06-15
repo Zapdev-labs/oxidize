@@ -19,13 +19,14 @@ fn main() {
     eprintln!("loaded in {:.1}s", t_load.elapsed().as_secs_f64());
 
     // tokenize the prompt (fall back to a bare BOS prefix if no tokenizer)
-    let prompt: Vec<u32> = match oxidize_core::tokenizer::load_tokenizer_from_gguf_file(Some(Path::new(path))) {
-        Ok(Some(tok)) => {
+    let tokenizer = oxidize_core::tokenizer::load_tokenizer_from_gguf_file(Some(Path::new(path))).ok().flatten();
+    let prompt: Vec<u32> = match &tokenizer {
+        Some(tok) => {
             let mut ids = vec![2u32]; // BOS
             ids.extend(tok.encode(&prompt_text));
             ids
         }
-        _ => vec![2u32],
+        None => vec![2u32],
     };
     eprintln!("prompt tokens: {}", prompt.len());
 
@@ -34,6 +35,11 @@ fn main() {
     println!("=== diffusion-gemma (OXK) ===");
     for (step, ent, acc) in &stats.entropy_trace {
         println!("step {step:3}  mean_entropy={ent:.4}  accepted={acc}/{}", stats.canvas_tokens);
+    }
+    if let Some(tok) = &tokenizer {
+        if let Ok(text) = tok.decode(&stats.tokens) {
+            println!("=== canvas (decoded) ===\n{text}");
+        }
     }
     println!("=== perf ===");
     println!(
