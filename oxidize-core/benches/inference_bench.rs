@@ -60,7 +60,17 @@ fn layer_forward(
     scratch: &mut [f32],
     bufs: &mut LayerBuffers,
 ) {
-    let LayerBuffers { q, k, v, attn_out, qk, qk_out, gate, up, ffn_out } = bufs;
+    let LayerBuffers {
+        q,
+        k,
+        v,
+        attn_out,
+        qk,
+        qk_out,
+        gate,
+        up,
+        ffn_out,
+    } = bufs;
 
     q.fill(0.0);
     k.fill(0.0);
@@ -104,13 +114,7 @@ fn layer_forward(
     }
 }
 
-fn bench_model(
-    vocab: usize,
-    h: usize,
-    inter: usize,
-    layers: usize,
-    iters: usize,
-) -> Duration {
+fn bench_model(vocab: usize, h: usize, inter: usize, layers: usize, iters: usize) -> Duration {
     // Random weights
     let mut tok_emb = vec![0.0_f32; vocab * h];
     let norm_w = vec![1.0_f32; h];
@@ -123,15 +127,33 @@ fn bench_model(
     let mut ffn_up = vec![0.0_f32; layers * inter * h];
     let mut ffn_down = vec![0.0_f32; layers * h * inter];
 
-    for v in tok_emb.iter_mut() { *v = fastrand::f32() * 0.02; }
-    for v in lm_head.iter_mut() { *v = fastrand::f32() * 0.02; }
-    for v in attn_q.iter_mut() { *v = fastrand::f32() * 0.02; }
-    for v in attn_k.iter_mut() { *v = fastrand::f32() * 0.02; }
-    for v in attn_v.iter_mut() { *v = fastrand::f32() * 0.02; }
-    for v in attn_o.iter_mut() { *v = fastrand::f32() * 0.02; }
-    for v in ffn_gate.iter_mut() { *v = fastrand::f32() * 0.02; }
-    for v in ffn_up.iter_mut() { *v = fastrand::f32() * 0.02; }
-    for v in ffn_down.iter_mut() { *v = fastrand::f32() * 0.02; }
+    for v in tok_emb.iter_mut() {
+        *v = fastrand::f32() * 0.02;
+    }
+    for v in lm_head.iter_mut() {
+        *v = fastrand::f32() * 0.02;
+    }
+    for v in attn_q.iter_mut() {
+        *v = fastrand::f32() * 0.02;
+    }
+    for v in attn_k.iter_mut() {
+        *v = fastrand::f32() * 0.02;
+    }
+    for v in attn_v.iter_mut() {
+        *v = fastrand::f32() * 0.02;
+    }
+    for v in attn_o.iter_mut() {
+        *v = fastrand::f32() * 0.02;
+    }
+    for v in ffn_gate.iter_mut() {
+        *v = fastrand::f32() * 0.02;
+    }
+    for v in ffn_up.iter_mut() {
+        *v = fastrand::f32() * 0.02;
+    }
+    for v in ffn_down.iter_mut() {
+        *v = fastrand::f32() * 0.02;
+    }
 
     let token_id = 0_usize;
     let mut x = vec![0.0_f32; h];
@@ -148,7 +170,9 @@ fn bench_model(
     x.copy_from_slice(&x_normed);
     for l in 0..layers {
         layer_forward(
-            &mut x, h, inter,
+            &mut x,
+            h,
+            inter,
             &attn_q[l * h * h..(l + 1) * h * h],
             &attn_k[l * h * h..(l + 1) * h * h],
             &attn_v[l * h * h..(l + 1) * h * h],
@@ -172,7 +196,9 @@ fn bench_model(
         x.copy_from_slice(&x_normed);
         for l in 0..layers {
             layer_forward(
-                &mut x, h, inter,
+                &mut x,
+                h,
+                inter,
                 &attn_q[l * h * h..(l + 1) * h * h],
                 &attn_k[l * h * h..(l + 1) * h * h],
                 &attn_v[l * h * h..(l + 1) * h * h],
@@ -195,9 +221,30 @@ fn main() {
 
     // Use smaller configs that fit comfortably on typical consumer machines.
     let models = vec![
-        ("TinyLlama-1.1B-ish  (n=22, h=2048, inter=5632)", 32000, 2048, 5632, 22, 20),
-        ("Llama-3B-ish        (n=26, h=3200, inter=8640)", 32000, 3200, 8640, 26, 10),
-        ("Llama-7B-ish        (n=32, h=4096, inter=11008)", 32000, 4096, 11008, 32, 5),
+        (
+            "TinyLlama-1.1B-ish  (n=22, h=2048, inter=5632)",
+            32000,
+            2048,
+            5632,
+            22,
+            20,
+        ),
+        (
+            "Llama-3B-ish        (n=26, h=3200, inter=8640)",
+            32000,
+            3200,
+            8640,
+            26,
+            10,
+        ),
+        (
+            "Llama-7B-ish        (n=32, h=4096, inter=11008)",
+            32000,
+            4096,
+            11008,
+            32,
+            5,
+        ),
     ];
 
     for (name, vocab, h, inter, layers, iters) in models {

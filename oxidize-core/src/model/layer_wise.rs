@@ -156,7 +156,9 @@ struct ConvHistoryRing {
 
 impl ConvHistoryRing {
     fn checksum(&self) -> f64 {
-        self.slots.iter().map(|v| *v as f64).sum::<f64>() + self.head as f64 * 1e-3 + self.len as f64 * 1e-6
+        self.slots.iter().map(|v| *v as f64).sum::<f64>()
+            + self.head as f64 * 1e-3
+            + self.len as f64 * 1e-6
     }
 
     fn new(capacity: usize, dim: usize) -> Self {
@@ -411,10 +413,12 @@ fn debug_vec(label: &str, x: &[f32]) {
         .filter(|v| v.is_finite())
         .map(|v| v.abs())
         .fold(0.0_f32, f32::max);
-    let large = x.iter().filter(|v| v.is_finite() && v.abs() > 1000.0).count();
+    let large = x
+        .iter()
+        .filter(|v| v.is_finite() && v.abs() > 1000.0)
+        .count();
     eprintln!("{label} nan={nan_count} inf={inf_count} max_abs={max_abs} gt1k={large}");
 }
-
 
 /// Per-layer hidden-state checksum tracing (OXIDIZE_TRACE_FWD=1) for
 /// diffing the batched window path against the per-token path.
@@ -431,17 +435,23 @@ fn debug_hidden(label: &str, pos: usize, x: &[f32]) {
     }
 }
 
-
 impl LayerWiseModel {
     fn trace_state(&self, label: &str, pos: usize) {
         if std::env::var_os("OXIDIZE_TRACE_FWD").is_some() {
-            let s0: f64 = self.ssm_states.first().map(|s| s.iter().map(|v| *v as f64).sum()).unwrap_or(0.0);
+            let s0: f64 = self
+                .ssm_states
+                .first()
+                .map(|s| s.iter().map(|v| *v as f64).sum())
+                .unwrap_or(0.0);
             let r0: f64 = self
                 .ssm_conv_buffers
                 .first()
                 .map(|b| b.checksum())
                 .unwrap_or(0.0);
-            eprintln!("STATE {label} pos={pos} ssm_pos={} s0={s0:.9e} r0={r0:.9e}", self.ssm_pos);
+            eprintln!(
+                "STATE {label} pos={pos} ssm_pos={} s0={s0:.9e} r0={r0:.9e}",
+                self.ssm_pos
+            );
         }
     }
 }
@@ -458,11 +468,8 @@ impl LayerWiseModel {
     fn push_ssm_checkpoint(&mut self, pos: usize) {
         self.trace_state("push", pos);
         self.ssm_checkpoints.retain(|(p, _, _)| *p != pos);
-        self.ssm_checkpoints.push((
-            pos,
-            self.ssm_states.clone(),
-            self.ssm_conv_buffers.clone(),
-        ));
+        self.ssm_checkpoints
+            .push((pos, self.ssm_states.clone(), self.ssm_conv_buffers.clone()));
         if self.ssm_checkpoints.len() > 2 {
             self.ssm_checkpoints.remove(0);
         }
@@ -671,12 +678,7 @@ impl LayerWiseModel {
         prefer_mmap: bool,
     ) -> WeightStorage {
         if prefer_mmap {
-            WeightStorage::MmapQuantized(
-                qtype,
-                self.mmap.mmap(),
-                offset,
-                size,
-            )
+            WeightStorage::MmapQuantized(qtype, self.mmap.mmap(), offset, size)
         } else {
             WeightStorage::Quantized(qtype, qdata.to_vec())
         }
@@ -946,16 +948,10 @@ impl LayerWiseModel {
                             apply_swiglu_f32(&gate, &up, &mut swiglu).map_err(|e| {
                                 ModelError::InferenceFailed(format!("shexp swiglu: {:?}", e))
                             })?;
-                            gemv_weight(
-                                &layer.ffn_down_shexp,
-                                h,
-                                shexp_i,
-                                &swiglu,
-                                &mut shexp_out,
-                            )
-                            .map_err(|e| {
-                                ModelError::InferenceFailed(format!("shexp down: {:?}", e))
-                            })?;
+                            gemv_weight(&layer.ffn_down_shexp, h, shexp_i, &swiglu, &mut shexp_out)
+                                .map_err(|e| {
+                                    ModelError::InferenceFailed(format!("shexp down: {:?}", e))
+                                })?;
                             if !weight_is_empty(&layer.ffn_gate_inp_shexp) {
                                 let mut gate_logit = vec![0.0_f32; 1];
                                 gemv_weight(
@@ -1198,8 +1194,15 @@ impl LayerWiseModel {
                         kk,
                     )
                     .map_err(|e| ModelError::InferenceFailed(format!("shexp gate: {:?}", e)))?;
-                    gemm_weight(&layer.ffn_up_shexp, shexp_i, h, &normed_all, &mut up_all, kk)
-                        .map_err(|e| ModelError::InferenceFailed(format!("shexp up: {:?}", e)))?;
+                    gemm_weight(
+                        &layer.ffn_up_shexp,
+                        shexp_i,
+                        h,
+                        &normed_all,
+                        &mut up_all,
+                        kk,
+                    )
+                    .map_err(|e| ModelError::InferenceFailed(format!("shexp up: {:?}", e)))?;
                     let mut swiglu_all = vec![0.0_f32; kk * shexp_i];
                     for t in 0..kk {
                         let mut swiglu = vec![0.0_f32; shexp_i];
@@ -1367,14 +1370,8 @@ impl LayerWiseModel {
         let head_repeat = num_v_heads / num_k_heads.max(1);
 
         let mut mixed_qkv = vec![0.0_f32; qkv_out_len];
-        gemv_weight(
-            &layer.attn_qkv,
-            qkv_out_len,
-            h,
-            &normed,
-            &mut mixed_qkv,
-        )
-        .map_err(|e| ModelError::InferenceFailed(format!("attn_qkv: {:?}", e)))?;
+        gemv_weight(&layer.attn_qkv, qkv_out_len, h, &normed, &mut mixed_qkv)
+            .map_err(|e| ModelError::InferenceFailed(format!("attn_qkv: {:?}", e)))?;
 
         let conv_kernel = 4_usize;
         let mut conv_out = vec![0.0_f32; qkv_out_len];
@@ -1628,8 +1625,15 @@ impl LayerWiseModel {
                 .map_err(|e| ModelError::InferenceFailed(format!("ssm_beta: {:?}", e)))?;
         }
         let mut a_all = vec![0.0_f32; kk * num_v_heads];
-        gemm_weight(&layer.ssm_alpha, num_v_heads, h, &normed_all, &mut a_all, kk)
-            .map_err(|e| ModelError::InferenceFailed(format!("ssm_alpha: {:?}", e)))?;
+        gemm_weight(
+            &layer.ssm_alpha,
+            num_v_heads,
+            h,
+            &normed_all,
+            &mut a_all,
+            kk,
+        )
+        .map_err(|e| ModelError::InferenceFailed(format!("ssm_alpha: {:?}", e)))?;
         let mut z_all = vec![0.0_f32; kk * value_dim];
         gemm_weight(&layer.attn_gate, value_dim, h, &normed_all, &mut z_all, kk)
             .map_err(|e| ModelError::InferenceFailed(format!("attn_gate: {:?}", e)))?;
@@ -1640,16 +1644,14 @@ impl LayerWiseModel {
         for t in 0..kk {
             let mixed = &mixed_all[t * qkv_out_len..(t + 1) * qkv_out_len];
             let conv_out = &mut conv_all[t * qkv_out_len..(t + 1) * qkv_out_len];
-            if !layer.ssm_conv1d.is_empty() && layer.ssm_conv1d.len() == conv_kernel * qkv_out_len
-            {
+            if !layer.ssm_conv1d.is_empty() && layer.ssm_conv1d.len() == conv_kernel * qkv_out_len {
                 if self.ssm_conv_buffers[layer_idx].dim != qkv_out_len {
                     self.ssm_conv_buffers[layer_idx] =
                         ConvHistoryRing::new(conv_kernel, qkv_out_len);
                 }
                 let buffer = &self.ssm_conv_buffers[layer_idx];
                 for c in 0..qkv_out_len {
-                    let mut sum =
-                        layer.ssm_conv1d[(conv_kernel - 1) * qkv_out_len + c] * mixed[c];
+                    let mut sum = layer.ssm_conv1d[(conv_kernel - 1) * qkv_out_len + c] * mixed[c];
                     for b in 1..conv_kernel {
                         if let Some(prev) = buffer.past_frame(b) {
                             let weight_idx = (conv_kernel - 1 - b) * qkv_out_len + c;
@@ -1897,22 +1899,28 @@ impl LayerWiseModel {
             q_len_used_guess
         };
 
-        let (mut q, attn_gate) = if attn_output_input_len > 0 && q_len == 2 * attn_output_input_len {
-            let (query, gate) = split_gated_query_proj(&q_full, q_head_dim_guess).ok_or_else(|| {
-                ModelError::InferenceFailed("gated q_proj split failed".to_owned())
-            })?;
+        let (mut q, attn_gate) = if attn_output_input_len > 0 && q_len == 2 * attn_output_input_len
+        {
+            let (query, gate) =
+                split_gated_query_proj(&q_full, q_head_dim_guess).ok_or_else(|| {
+                    ModelError::InferenceFailed("gated q_proj split failed".to_owned())
+                })?;
             (query, Some(gate))
         } else {
             (q_full[..q_len_used_guess].to_vec(), None)
         };
 
-
-
         if std::env::var_os("OXIDIZE_TRACE_FWD").is_some() {
             let s = |v: &[f32]| v.iter().map(|x| *x as f64).sum::<f64>();
             eprintln!(
                 "STAGE lw pos={pos} layer={layer_idx} normed={:.6e} q={:.6e} k={:.6e} v={:.6e} x={:.6e} nw_len={} nw={:.6e}",
-                s(&normed), s(&q), s(&k_vec), s(&v_vec), s(x), layer.attn_norm.len(), s(&layer.attn_norm)
+                s(&normed),
+                s(&q),
+                s(&k_vec),
+                s(&v_vec),
+                s(x),
+                layer.attn_norm.len(),
+                s(&layer.attn_norm)
             );
         }
         let q_len_used = q.len();
@@ -2092,18 +2100,18 @@ impl LayerWiseModel {
             }
         }
 
-        let mut attn_input = if attn_output_input_len > 0 && attn_result.len() != attn_output_input_len
-        {
-            if attn_result.len() >= attn_output_input_len {
-                attn_result[..attn_output_input_len].to_vec()
+        let mut attn_input =
+            if attn_output_input_len > 0 && attn_result.len() != attn_output_input_len {
+                if attn_result.len() >= attn_output_input_len {
+                    attn_result[..attn_output_input_len].to_vec()
+                } else {
+                    let mut padded = vec![0.0_f32; attn_output_input_len];
+                    padded[..attn_result.len()].copy_from_slice(&attn_result);
+                    padded
+                }
             } else {
-                let mut padded = vec![0.0_f32; attn_output_input_len];
-                padded[..attn_result.len()].copy_from_slice(&attn_result);
-                padded
-            }
-        } else {
-            attn_result
-        };
+                attn_result
+            };
 
         if let Some(gate) = attn_gate {
             for (out, g) in attn_input.iter_mut().zip(gate.iter()) {
@@ -2236,8 +2244,11 @@ impl Model for LayerWiseModel {
         let mut offset = 0;
         while offset < tokens.len() {
             let end = (offset + window).min(tokens.len());
-            all_logits
-                .extend(self.forward_window(&tokens[offset..end], start_pos + offset, true)?);
+            all_logits.extend(self.forward_window(
+                &tokens[offset..end],
+                start_pos + offset,
+                true,
+            )?);
             offset = end;
         }
         session.record_tokens(tokens.len());

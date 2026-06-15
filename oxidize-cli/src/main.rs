@@ -956,9 +956,20 @@ fn rewrite_serve_args(raw: Vec<OsString>) -> io::Result<Vec<OsString>> {
                 model = Some(value.to_owned());
             }
             Some(
-                "--model" | "--backend" | "--max-tokens" | "--temperature" | "--top-p" | "--top-k"
-                | "--ctx-size" | "--threads" | "--kv-cache-dtype" | "--tokenizer-model"
-                | "--draft-model" | "--draft-tokens" | "--layer-cache" | "--ram-offload-threads",
+                "--model"
+                | "--backend"
+                | "--max-tokens"
+                | "--temperature"
+                | "--top-p"
+                | "--top-k"
+                | "--ctx-size"
+                | "--threads"
+                | "--kv-cache-dtype"
+                | "--tokenizer-model"
+                | "--draft-model"
+                | "--draft-tokens"
+                | "--layer-cache"
+                | "--ram-offload-threads",
             ) => {
                 rewritten.push(arg);
                 let Some(value) = args.next() else {
@@ -1834,10 +1845,7 @@ fn server_args_from_cli(args: &Args) -> io::Result<oxidize_server::Args> {
             KvCacheDType::Q8 => oxidize_server::KvCacheDType::Q8,
             KvCacheDType::Q4 => oxidize_server::KvCacheDType::Q4,
         },
-        threads: args
-            .threads
-            .filter(|threads| *threads > 0)
-            .unwrap_or(0),
+        threads: args.threads.filter(|threads| *threads > 0).unwrap_or(0),
         ram_offload_threads: args.ram_offload_threads,
     })
 }

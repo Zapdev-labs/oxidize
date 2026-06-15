@@ -99,8 +99,7 @@ impl SpinPool {
         }
         let s = self.shared;
         if n_chunks == 1
-            || s
-                .busy
+            || s.busy
                 .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
                 .is_err()
         {
@@ -253,7 +252,11 @@ mod tests {
                 counts[i].fetch_add(1, Ordering::Relaxed);
             });
             for (i, c) in counts.iter().enumerate() {
-                assert_eq!(c.load(Ordering::Relaxed), round + 1, "chunk {i} round {round}");
+                assert_eq!(
+                    c.load(Ordering::Relaxed),
+                    round + 1,
+                    "chunk {i} round {round}"
+                );
             }
         }
     }

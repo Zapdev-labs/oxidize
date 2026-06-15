@@ -194,9 +194,7 @@ pub fn supports_quantized_gpu(quantization: GgufQuantizationType) -> bool {
 /// per block, for a quantization type. Returns `None` for types without a GPU
 /// dequant kernel (callers fall back to the CPU quantized path).
 #[cfg(feature = "cuda")]
-fn dequant_kernel_for(
-    quantization: GgufQuantizationType,
-) -> Option<(&'static str, usize, usize)> {
+fn dequant_kernel_for(quantization: GgufQuantizationType) -> Option<(&'static str, usize, usize)> {
     match quantization {
         GgufQuantizationType::Q8_0 => Some(("dequant_q8_0_kernel", 34, 32)),
         GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M => {
@@ -241,20 +239,12 @@ fn hash_f32_slice(slice: &[f32]) -> u64 {
 
 #[cfg(feature = "cuda")]
 fn f32_cache_key(slice: &[f32]) -> WeightCacheKey {
-    (
-        slice.as_ptr() as usize,
-        slice.len(),
-        hash_f32_slice(slice),
-    )
+    (slice.as_ptr() as usize, slice.len(), hash_f32_slice(slice))
 }
 
 #[cfg(feature = "cuda")]
 fn bytes_cache_key(slice: &[u8]) -> WeightCacheKey {
-    (
-        slice.as_ptr() as usize,
-        slice.len(),
-        hash_bytes(slice),
-    )
+    (slice.as_ptr() as usize, slice.len(), hash_bytes(slice))
 }
 
 // ---------------------------------------------------------------------------
@@ -333,10 +323,7 @@ struct GpuState {
 
 #[cfg(feature = "cuda")]
 impl GpuState {
-    fn get_f32_buffer(
-        &mut self,
-        len: usize,
-    ) -> Result<cust::memory::DeviceBuffer<f32>, String> {
+    fn get_f32_buffer(&mut self, len: usize) -> Result<cust::memory::DeviceBuffer<f32>, String> {
         if let Some(pool) = self.f32_pool.get_mut(&len) {
             if let Some(buf) = pool.pop() {
                 return Ok(buf);
@@ -345,9 +332,7 @@ impl GpuState {
         cust::memory::DeviceBuffer::<f32>::zeroed(len).map_err(stringify)
     }
 
-    fn return_f32_buffer(&mut self,
-        buf: cust::memory::DeviceBuffer<f32>,
-    ) {
+    fn return_f32_buffer(&mut self, buf: cust::memory::DeviceBuffer<f32>) {
         let len = buf.len();
         self.f32_pool.entry(len).or_default().push(buf);
     }
@@ -531,10 +516,7 @@ pub fn set_layer_config(config: CudaLayerConfig) -> Result<(), String> {
 /// * `f32_weights` – slice of `(matrix_data, rows, cols)` for each f32 weight
 ///   matrix belonging to this layer.
 #[cfg(feature = "cuda")]
-pub fn preload_layer(
-    layer: LayerId,
-    f32_weights: &[(&[f32], usize, usize)],
-) -> Result<(), String> {
+pub fn preload_layer(layer: LayerId, f32_weights: &[(&[f32], usize, usize)]) -> Result<(), String> {
     with_gpu(|gpu| {
         if gpu.layer_map.contains_key(&layer) {
             // Already resident — just bump to MRU.
@@ -769,7 +751,9 @@ pub fn gemv_f32_transposed_cuda(
             )
         };
         if status != cublas_sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS {
-            return Err(format!("cublasSgemv_v2 (transposed) failed with status {status:?}"));
+            return Err(format!(
+                "cublasSgemv_v2 (transposed) failed with status {status:?}"
+            ));
         }
 
         output_device.copy_to(output).map_err(stringify)?;
@@ -816,10 +800,8 @@ pub fn gemv_q8_0_direct_cuda(
         // Upload quantized weights (compressed, small transfer).
         let matrix_device =
             cust::memory::DeviceBuffer::from_slice(quantized_matrix).map_err(stringify)?;
-        let vector_device =
-            cust::memory::DeviceBuffer::from_slice(vector).map_err(stringify)?;
-        let output_device =
-            cust::memory::DeviceBuffer::<f32>::zeroed(rows).map_err(stringify)?;
+        let vector_device = cust::memory::DeviceBuffer::from_slice(vector).map_err(stringify)?;
+        let output_device = cust::memory::DeviceBuffer::<f32>::zeroed(rows).map_err(stringify)?;
 
         let block_size = 256_u32;
         let grid_size = rows_u32.saturating_mul(32).div_ceil(block_size);
@@ -900,10 +882,8 @@ pub fn gemv_q4_0_direct_cuda(
     with_gpu(|gpu| {
         let matrix_device =
             cust::memory::DeviceBuffer::from_slice(quantized_matrix).map_err(stringify)?;
-        let vector_device =
-            cust::memory::DeviceBuffer::from_slice(vector).map_err(stringify)?;
-        let output_device =
-            cust::memory::DeviceBuffer::<f32>::zeroed(rows).map_err(stringify)?;
+        let vector_device = cust::memory::DeviceBuffer::from_slice(vector).map_err(stringify)?;
+        let output_device = cust::memory::DeviceBuffer::<f32>::zeroed(rows).map_err(stringify)?;
 
         let block_size = 256_u32;
         let grid_size = rows_u32.saturating_mul(32).div_ceil(block_size);
@@ -982,9 +962,8 @@ pub fn gemv_quantized_cuda(
     // Map the quantization type to its GPU dequant kernel + block geometry.
     // Types without a GPU kernel are reported so the caller can fall back to the
     // CPU quantized path.
-    let (dequant_kernel, block_bytes, vals_per_block) =
-        dequant_kernel_for(quantization)
-            .ok_or(GemvCudaError::UnsupportedQuantizationType { quantization })?;
+    let (dequant_kernel, block_bytes, vals_per_block) = dequant_kernel_for(quantization)
+        .ok_or(GemvCudaError::UnsupportedQuantizationType { quantization })?;
 
     // Validate the quantized matrix / vector / output geometry.
     if quantized_matrix.len() % block_bytes != 0 {
@@ -1174,12 +1153,18 @@ pub fn gemm_f32_cuda(
             let buffer = cust::memory::DeviceBuffer::from_slice(left_matrix).map_err(stringify)?;
             gpu.resident_f32.insert(left_key, buffer);
         }
-        let left_ptr = gpu.resident_f32.get(&left_key).unwrap().as_device_ptr().as_raw();
+        let left_ptr = gpu
+            .resident_f32
+            .get(&left_key)
+            .unwrap()
+            .as_device_ptr()
+            .as_raw();
 
         // Right matrix is an activation (not a static weight), so we always
         // upload a fresh copy to avoid stale-cache bugs when the host buffer
         // is reused or mutated between calls.
-        let right_device = cust::memory::DeviceBuffer::from_slice(right_matrix).map_err(stringify)?;
+        let right_device =
+            cust::memory::DeviceBuffer::from_slice(right_matrix).map_err(stringify)?;
         let right_ptr = right_device.as_device_ptr().as_raw();
 
         let output_device =
@@ -1285,9 +1270,8 @@ mod tests {
 
     #[test]
     fn rejects_gemv_cuda_dimension_mismatch() {
-        let err = validate_gemv_dims(&[1.0_f32, 2.0, 3.0], 2, 2, &[1.0_f32, 1.0], &[0.0_f32; 2],
-        )
-        .expect_err("matrix size mismatch should fail");
+        let err = validate_gemv_dims(&[1.0_f32, 2.0, 3.0], 2, 2, &[1.0_f32, 1.0], &[0.0_f32; 2])
+            .expect_err("matrix size mismatch should fail");
         assert!(matches!(err, GemvCudaError::InvalidMatrixLength { .. }));
     }
 
@@ -1309,9 +1293,8 @@ mod tests {
         let matrix = vec![0_u8; BLOCK_Q8_0_SIZE];
         let vector = vec![1.0_f32; cols];
         let output = vec![0.0_f32; rows];
-        let err = validate_q8_0_gemv_dims(&matrix, rows, cols, &vector, &output
-        )
-        .expect_err("non-aligned columns should fail");
+        let err = validate_q8_0_gemv_dims(&matrix, rows, cols, &vector, &output)
+            .expect_err("non-aligned columns should fail");
         assert!(matches!(err, GemvCudaError::InvalidVectorLength { .. }));
     }
 

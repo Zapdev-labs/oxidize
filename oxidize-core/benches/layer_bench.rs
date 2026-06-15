@@ -24,25 +24,39 @@ fn bench_layer_by_layer(
 
     for _ in 0..layers {
         let mut w = vec![0.0_f32; h * h];
-        for v in w.iter_mut() { *v = fastrand::f32() * 0.02; }
+        for v in w.iter_mut() {
+            *v = fastrand::f32() * 0.02;
+        }
         attn_q.push(w);
         let mut w = vec![0.0_f32; h * h];
-        for v in w.iter_mut() { *v = fastrand::f32() * 0.02; }
+        for v in w.iter_mut() {
+            *v = fastrand::f32() * 0.02;
+        }
         attn_k.push(w);
         let mut w = vec![0.0_f32; h * h];
-        for v in w.iter_mut() { *v = fastrand::f32() * 0.02; }
+        for v in w.iter_mut() {
+            *v = fastrand::f32() * 0.02;
+        }
         attn_v.push(w);
         let mut w = vec![0.0_f32; h * h];
-        for v in w.iter_mut() { *v = fastrand::f32() * 0.02; }
+        for v in w.iter_mut() {
+            *v = fastrand::f32() * 0.02;
+        }
         attn_o.push(w);
         let mut w = vec![0.0_f32; inter * h];
-        for v in w.iter_mut() { *v = fastrand::f32() * 0.02; }
+        for v in w.iter_mut() {
+            *v = fastrand::f32() * 0.02;
+        }
         ffn_gate.push(w);
         let mut w = vec![0.0_f32; inter * h];
-        for v in w.iter_mut() { *v = fastrand::f32() * 0.02; }
+        for v in w.iter_mut() {
+            *v = fastrand::f32() * 0.02;
+        }
         ffn_up.push(w);
         let mut w = vec![0.0_f32; h * inter];
-        for v in w.iter_mut() { *v = fastrand::f32() * 0.02; }
+        for v in w.iter_mut() {
+            *v = fastrand::f32() * 0.02;
+        }
         ffn_down.push(w);
     }
 
@@ -52,23 +66,28 @@ fn bench_layer_by_layer(
 
     #[cfg(feature = "cuda")]
     {
-        use oxidize_core::cuda::{set_layer_config, preload_layer, CudaLayerConfig};
+        use oxidize_core::cuda::{CudaLayerConfig, preload_layer, set_layer_config};
         set_layer_config(CudaLayerConfig {
             max_resident_layers: max_resident,
             max_vram_bytes: 0,
-        }).expect("set_layer_config should succeed");
+        })
+        .expect("set_layer_config should succeed");
 
         // Preload initial layers
         for l in 0..layers.min(max_resident) {
-            preload_layer(l, &[
-                (&attn_q[l], h, h),
-                (&attn_k[l], h, h),
-                (&attn_v[l], h, h),
-                (&attn_o[l], h, h),
-                (&ffn_gate[l], inter, h),
-                (&ffn_up[l], inter, h),
-                (&ffn_down[l], h, inter),
-            ]).expect("preload_layer should succeed");
+            preload_layer(
+                l,
+                &[
+                    (&attn_q[l], h, h),
+                    (&attn_k[l], h, h),
+                    (&attn_v[l], h, h),
+                    (&attn_o[l], h, h),
+                    (&ffn_gate[l], inter, h),
+                    (&ffn_up[l], inter, h),
+                    (&ffn_down[l], h, inter),
+                ],
+            )
+            .expect("preload_layer should succeed");
         }
     }
 
@@ -77,18 +96,35 @@ fn bench_layer_by_layer(
         #[cfg(feature = "cuda")]
         {
             use oxidize_core::cuda::preload_layer;
-            preload_layer(l, &[
-                (&attn_q[l], h, h),
-                (&attn_k[l], h, h),
-                (&attn_v[l], h, h),
-                (&attn_o[l], h, h),
-                (&ffn_gate[l], inter, h),
-                (&ffn_up[l], inter, h),
-                (&ffn_down[l], h, inter),
-            ]).expect("preload_layer should succeed");
+            preload_layer(
+                l,
+                &[
+                    (&attn_q[l], h, h),
+                    (&attn_k[l], h, h),
+                    (&attn_v[l], h, h),
+                    (&attn_o[l], h, h),
+                    (&ffn_gate[l], inter, h),
+                    (&ffn_up[l], inter, h),
+                    (&ffn_down[l], h, inter),
+                ],
+            )
+            .expect("preload_layer should succeed");
         }
-        layer_gemvs(l, h, inter, &attn_q, &attn_k, &attn_v, &attn_o,
-                    &ffn_gate, &ffn_up, &ffn_down, &mut x, &mut scratch, &mut bufs);
+        layer_gemvs(
+            l,
+            h,
+            inter,
+            &attn_q,
+            &attn_k,
+            &attn_v,
+            &attn_o,
+            &ffn_gate,
+            &ffn_up,
+            &ffn_down,
+            &mut x,
+            &mut scratch,
+            &mut bufs,
+        );
     }
 
     // Benchmark
@@ -99,18 +135,35 @@ fn bench_layer_by_layer(
             #[cfg(feature = "cuda")]
             {
                 use oxidize_core::cuda::preload_layer;
-                preload_layer(l, &[
-                    (&attn_q[l], h, h),
-                    (&attn_k[l], h, h),
-                    (&attn_v[l], h, h),
-                    (&attn_o[l], h, h),
-                    (&ffn_gate[l], inter, h),
-                    (&ffn_up[l], inter, h),
-                    (&ffn_down[l], h, inter),
-                ]).expect("preload_layer should succeed");
+                preload_layer(
+                    l,
+                    &[
+                        (&attn_q[l], h, h),
+                        (&attn_k[l], h, h),
+                        (&attn_v[l], h, h),
+                        (&attn_o[l], h, h),
+                        (&ffn_gate[l], inter, h),
+                        (&ffn_up[l], inter, h),
+                        (&ffn_down[l], h, inter),
+                    ],
+                )
+                .expect("preload_layer should succeed");
             }
-            layer_gemvs(l, h, inter, &attn_q, &attn_k, &attn_v, &attn_o,
-                        &ffn_gate, &ffn_up, &ffn_down, &mut x, &mut scratch, &mut bufs);
+            layer_gemvs(
+                l,
+                h,
+                inter,
+                &attn_q,
+                &attn_k,
+                &attn_v,
+                &attn_o,
+                &ffn_gate,
+                &ffn_up,
+                &ffn_down,
+                &mut x,
+                &mut scratch,
+                &mut bufs,
+            );
         }
     }
     let elapsed = start.elapsed();
@@ -166,7 +219,15 @@ fn layer_gemvs(
     scratch: &mut [f32],
     bufs: &mut LayerGemvBuffers,
 ) {
-    let LayerGemvBuffers { q, k, v, attn_out, gate, up, ffn_out } = bufs;
+    let LayerGemvBuffers {
+        q,
+        k,
+        v,
+        attn_out,
+        gate,
+        up,
+        ffn_out,
+    } = bufs;
 
     gemv(h, h, &attn_q[l], x, q);
     gemv(h, h, &attn_k[l], x, k);
@@ -215,10 +276,17 @@ fn main() {
     let bytes_per_layer = (
         4 * h * h +   // 4 attention projections
         2 * inter * h + // gate + up
-        1 * h * inter   // down
+        1 * h * inter
+        // down
     ) * std::mem::size_of::<f32>();
-    println!("Approx weight bytes per layer: {:.1} MB", bytes_per_layer as f64 / 1e6);
-    println!("Total model weights: {:.1} MB\n", (bytes_per_layer * layers) as f64 / 1e6);
+    println!(
+        "Approx weight bytes per layer: {:.1} MB",
+        bytes_per_layer as f64 / 1e6
+    );
+    println!(
+        "Total model weights: {:.1} MB\n",
+        (bytes_per_layer * layers) as f64 / 1e6
+    );
 
     // Benchmark 1: All layers resident (unlimited)
     println!("[Config 1] All {} layers resident", layers);
@@ -242,9 +310,21 @@ fn main() {
     println!("  VRAM used:  {:.1} MB\n", vram_1 as f64 / 1e6);
 
     println!("=== Summary ===");
-    println!("All layers:     {:.2} layers/s,  {:.1} MB VRAM", tps_all, vram_all as f64 / 1e6);
-    println!("2-layer cache:  {:.2} layers/s,  {:.1} MB VRAM  ({:.1}% of full speed)",
-             tps_2, vram_2 as f64 / 1e6, tps_2 / tps_all * 100.0);
-    println!("1-layer cache:  {:.2} layers/s,  {:.1} MB VRAM  ({:.1}% of full speed)",
-             tps_1, vram_1 as f64 / 1e6, tps_1 / tps_all * 100.0);
+    println!(
+        "All layers:     {:.2} layers/s,  {:.1} MB VRAM",
+        tps_all,
+        vram_all as f64 / 1e6
+    );
+    println!(
+        "2-layer cache:  {:.2} layers/s,  {:.1} MB VRAM  ({:.1}% of full speed)",
+        tps_2,
+        vram_2 as f64 / 1e6,
+        tps_2 / tps_all * 100.0
+    );
+    println!(
+        "1-layer cache:  {:.2} layers/s,  {:.1} MB VRAM  ({:.1}% of full speed)",
+        tps_1,
+        vram_1 as f64 / 1e6,
+        tps_1 / tps_all * 100.0
+    );
 }

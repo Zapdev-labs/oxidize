@@ -1225,43 +1225,43 @@ pub fn gemv_quantized_experts_f32(
             && rows.is_multiple_of(32);
         if use_x4 {
             run_output_chunks(output, GEMV_CHUNK_ROWS, |chunk_idx, out_chunk| {
-                    let matrix = crate::numa::local_slice(matrix);
-                    let i0 = chunk_idx * GEMV_CHUNK_ROWS;
-                    let slot = i0 / rows;
-                    let row0 = i0 % rows;
-                    let expert = selected[slot];
-                    let qs = if shared { 0 } else { slot };
-                    let q8 = &q8k[qs * q8_stride..(qs + 1) * q8_stride];
-                    let mut r = 0;
-                    while r < out_chunk.len() {
-                        if r + 4 <= out_chunk.len() {
-                            let base = unsafe {
-                                matrix
-                                    .as_ptr()
-                                    .add(expert * expert_bytes + (row0 + r) * row_bytes)
-                            };
-                            let mut quad = [0.0_f32; 4];
-                            // Safety: avx2 verified by q4_k_q8_k_avx2_available();
-                            // rows stay inside this expert because 32 | rows.
-                            unsafe {
-                                q4_k_q8_k_row_dot_x4_avx2(
-                                    base,
-                                    row_bytes,
-                                    blocks_per_row,
-                                    q8,
-                                    &mut quad,
-                                )
-                            };
-                            out_chunk[r..r + 4].copy_from_slice(&quad);
-                            r += 4;
-                        } else {
-                            let row_start = expert * expert_bytes + (row0 + r) * row_bytes;
-                            let rowb = &matrix[row_start..row_start + row_bytes];
-                            out_chunk[r] = unsafe { q4_k_q8_k_row_dot(rowb, blocks_per_row, q8) };
-                            r += 1;
-                        }
+                let matrix = crate::numa::local_slice(matrix);
+                let i0 = chunk_idx * GEMV_CHUNK_ROWS;
+                let slot = i0 / rows;
+                let row0 = i0 % rows;
+                let expert = selected[slot];
+                let qs = if shared { 0 } else { slot };
+                let q8 = &q8k[qs * q8_stride..(qs + 1) * q8_stride];
+                let mut r = 0;
+                while r < out_chunk.len() {
+                    if r + 4 <= out_chunk.len() {
+                        let base = unsafe {
+                            matrix
+                                .as_ptr()
+                                .add(expert * expert_bytes + (row0 + r) * row_bytes)
+                        };
+                        let mut quad = [0.0_f32; 4];
+                        // Safety: avx2 verified by q4_k_q8_k_avx2_available();
+                        // rows stay inside this expert because 32 | rows.
+                        unsafe {
+                            q4_k_q8_k_row_dot_x4_avx2(
+                                base,
+                                row_bytes,
+                                blocks_per_row,
+                                q8,
+                                &mut quad,
+                            )
+                        };
+                        out_chunk[r..r + 4].copy_from_slice(&quad);
+                        r += 4;
+                    } else {
+                        let row_start = expert * expert_bytes + (row0 + r) * row_bytes;
+                        let rowb = &matrix[row_start..row_start + row_bytes];
+                        out_chunk[r] = unsafe { q4_k_q8_k_row_dot(rowb, blocks_per_row, q8) };
+                        r += 1;
                     }
-                });
+                }
+            });
             return Ok(());
         }
         // with_min_len keeps rayon from splitting into per-row tasks; each row
@@ -1307,44 +1307,43 @@ pub fn gemv_quantized_experts_f32(
         }
         if rows.is_multiple_of(32) {
             run_output_chunks(output, GEMV_CHUNK_ROWS, |chunk_idx, out_chunk| {
-                    let matrix = crate::numa::local_slice(matrix);
-                    let i0 = chunk_idx * GEMV_CHUNK_ROWS;
-                    let slot = i0 / rows;
-                    let row0 = i0 % rows;
-                    let expert = selected[slot];
-                    let qs = if shared { 0 } else { slot };
-                    let q8 = &q8k[qs * q8_stride..(qs + 1) * q8_stride];
-                    let mut r = 0;
-                    while r < out_chunk.len() {
-                        if r + 4 <= out_chunk.len() {
-                            let base = unsafe {
-                                matrix
-                                    .as_ptr()
-                                    .add(expert * expert_bytes + (row0 + r) * row_bytes)
-                            };
-                            let mut quad = [0.0_f32; 4];
-                            // Safety: avx2+fma checked above; 32 | rows keeps
-                            // the quad inside this expert's rows.
-                            unsafe {
-                                q6_k_q8_k_row_dot_x4_avx2(
-                                    base,
-                                    row_bytes,
-                                    blocks_per_row,
-                                    q8,
-                                    &mut quad,
-                                )
-                            };
-                            out_chunk[r..r + 4].copy_from_slice(&quad);
-                            r += 4;
-                        } else {
-                            let row_start = expert * expert_bytes + (row0 + r) * row_bytes;
-                            let rowb = &matrix[row_start..row_start + row_bytes];
-                            out_chunk[r] =
-                                unsafe { q6_k_q8_k_row_dot_avx2(rowb, blocks_per_row, q8) };
-                            r += 1;
-                        }
+                let matrix = crate::numa::local_slice(matrix);
+                let i0 = chunk_idx * GEMV_CHUNK_ROWS;
+                let slot = i0 / rows;
+                let row0 = i0 % rows;
+                let expert = selected[slot];
+                let qs = if shared { 0 } else { slot };
+                let q8 = &q8k[qs * q8_stride..(qs + 1) * q8_stride];
+                let mut r = 0;
+                while r < out_chunk.len() {
+                    if r + 4 <= out_chunk.len() {
+                        let base = unsafe {
+                            matrix
+                                .as_ptr()
+                                .add(expert * expert_bytes + (row0 + r) * row_bytes)
+                        };
+                        let mut quad = [0.0_f32; 4];
+                        // Safety: avx2+fma checked above; 32 | rows keeps
+                        // the quad inside this expert's rows.
+                        unsafe {
+                            q6_k_q8_k_row_dot_x4_avx2(
+                                base,
+                                row_bytes,
+                                blocks_per_row,
+                                q8,
+                                &mut quad,
+                            )
+                        };
+                        out_chunk[r..r + 4].copy_from_slice(&quad);
+                        r += 4;
+                    } else {
+                        let row_start = expert * expert_bytes + (row0 + r) * row_bytes;
+                        let rowb = &matrix[row_start..row_start + row_bytes];
+                        out_chunk[r] = unsafe { q6_k_q8_k_row_dot_avx2(rowb, blocks_per_row, q8) };
+                        r += 1;
                     }
-                });
+                }
+            });
         } else {
             output
                 .par_iter_mut()
@@ -1456,48 +1455,42 @@ pub fn gemv_quantized_experts_gate_up_f32(
     // One region over both projections; 32 | rows guarantees a chunk never
     // spans a projection or expert-slot boundary.
     run_output_chunks(output, GEMV_CHUNK_ROWS, |chunk_idx, out_chunk| {
-            let i0 = chunk_idx * GEMV_CHUNK_ROWS;
-            let matrix =
-                crate::numa::local_slice(if i0 < half { gate_matrix } else { up_matrix });
-            let rem = i0 % half;
-            let slot = rem / rows;
-            let row0 = rem % rows;
-            let expert = selected[slot];
-            let mut r = 0;
-            while r < out_chunk.len() {
-                if r + 4 <= out_chunk.len() {
-                    let base = unsafe {
-                        matrix
-                            .as_ptr()
-                            .add(expert * expert_bytes + (row0 + r) * row_bytes)
-                    };
-                    let mut quad = [0.0_f32; 4];
-                    // Safety: avx2 verified above; 32 | rows keeps the quad
-                    // inside this expert's rows.
-                    unsafe {
-                        q4_k_q8_k_row_dot_x4_avx2(base, row_bytes, blocks_per_row, q8k, &mut quad)
-                    };
-                    out_chunk[r..r + 4].copy_from_slice(&quad);
-                    r += 4;
-                } else {
-                    let row_start = expert * expert_bytes + (row0 + r) * row_bytes;
-                    let rowb = &matrix[row_start..row_start + row_bytes];
-                    out_chunk[r] = unsafe { q4_k_q8_k_row_dot(rowb, blocks_per_row, q8k) };
-                    r += 1;
-                }
+        let i0 = chunk_idx * GEMV_CHUNK_ROWS;
+        let matrix = crate::numa::local_slice(if i0 < half { gate_matrix } else { up_matrix });
+        let rem = i0 % half;
+        let slot = rem / rows;
+        let row0 = rem % rows;
+        let expert = selected[slot];
+        let mut r = 0;
+        while r < out_chunk.len() {
+            if r + 4 <= out_chunk.len() {
+                let base = unsafe {
+                    matrix
+                        .as_ptr()
+                        .add(expert * expert_bytes + (row0 + r) * row_bytes)
+                };
+                let mut quad = [0.0_f32; 4];
+                // Safety: avx2 verified above; 32 | rows keeps the quad
+                // inside this expert's rows.
+                unsafe {
+                    q4_k_q8_k_row_dot_x4_avx2(base, row_bytes, blocks_per_row, q8k, &mut quad)
+                };
+                out_chunk[r..r + 4].copy_from_slice(&quad);
+                r += 4;
+            } else {
+                let row_start = expert * expert_bytes + (row0 + r) * row_bytes;
+                let rowb = &matrix[row_start..row_start + row_bytes];
+                out_chunk[r] = unsafe { q4_k_q8_k_row_dot(rowb, blocks_per_row, q8k) };
+                r += 1;
             }
-        });
+        }
+    });
     Ok(())
 }
 
-
 /// Run `body(chunk_idx, out_chunk)` over `output` split into `chunk`-sized
 /// pieces, dispatched through the persistent spin pool (decode-latency path).
-fn run_output_chunks(
-    output: &mut [f32],
-    chunk: usize,
-    body: impl Fn(usize, &mut [f32]) + Sync,
-) {
+fn run_output_chunks(output: &mut [f32], chunk: usize, body: impl Fn(usize, &mut [f32]) + Sync) {
     let len = output.len();
     let base = output.as_mut_ptr() as usize;
     let n_chunks = len.div_ceil(chunk);
@@ -1528,13 +1521,21 @@ pub fn gemv_quantized_f32(
         match quantization {
             GgufQuantizationType::Q8_0 => {
                 return crate::cuda::gemv_q8_0_direct_cuda(
-                    quantized_matrix, rows, cols, vector, output,
+                    quantized_matrix,
+                    rows,
+                    cols,
+                    vector,
+                    output,
                 )
                 .map_err(|err| GemvError::Cuda(format!("{err:?}")));
             }
             GgufQuantizationType::Q4_0 => {
                 return crate::cuda::gemv_q4_0_direct_cuda(
-                    quantized_matrix, rows, cols, vector, output,
+                    quantized_matrix,
+                    rows,
+                    cols,
+                    vector,
+                    output,
                 )
                 .map_err(|err| GemvError::Cuda(format!("{err:?}")));
             }
@@ -1566,9 +1567,7 @@ pub fn gemv_quantized_f32(
         GgufQuantizationType::Q2_K => {
             gemv_q2_k_f32_fused(quantized_matrix, rows, cols, vector, output)
         }
-        GgufQuantizationType::Q6_K
-            if cols.is_multiple_of(QK_K) && q4_k_q8_k_avx2_available() =>
-        {
+        GgufQuantizationType::Q6_K if cols.is_multiple_of(QK_K) && q4_k_q8_k_avx2_available() => {
             gemv_q6_k_q8_k_fused(quantized_matrix, rows, cols, vector, output)
         }
         GgufQuantizationType::Q6_K => {
@@ -1626,7 +1625,6 @@ unsafe fn q4_k_q8_k_row_dot(row: &[u8], blocks_per_row: usize, q8k: &[u8]) -> f3
     }
     unsafe { q4_k_q8_k_row_dot_avx2(row, blocks_per_row, q8k) }
 }
-
 
 /// Q6_K x Q8_K fused GEMV: quantizes the input once to Q8_K, then runs the
 /// integer Q6_K kernel per row (4-row chunks share the input loads). Same
@@ -2082,8 +2080,7 @@ unsafe fn q4_k_q8_k_row_dot_x4_avx2(
     let mut acc = [0.0_f32; 4];
     for block_idx in 0..blocks_per_row {
         let q8_ptr = q8k.as_ptr().add(block_idx * BLOCK_Q8_K_BYTES);
-        let d_q8 =
-            f32::from_le_bytes([*q8_ptr, *q8_ptr.add(1), *q8_ptr.add(2), *q8_ptr.add(3)]);
+        let d_q8 = f32::from_le_bytes([*q8_ptr, *q8_ptr.add(1), *q8_ptr.add(2), *q8_ptr.add(3)]);
         let q8 = q8_ptr.add(4);
         let bsums = q8_ptr.add(4 + QK_K);
 
@@ -2154,7 +2151,6 @@ unsafe fn q4_k_q8_k_row_dot_x4_avx2(
     unreachable!("x4 kernel is gated on x86 availability at call sites")
 }
 
-
 /// Integer Q6_K x Q8_K row dot (llama.cpp-style). Decodes 6-bit weights to
 /// unsigned 0..63, runs `maddubs`/`madd` integer dot products against the
 /// pre-quantized Q8_K input, and removes the implicit -32 offset analytically
@@ -2176,8 +2172,7 @@ unsafe fn q6_k_q8_k_row_dot_avx2(row: &[u8], blocks_per_row: usize, q8k: &[u8]) 
     for block_idx in 0..blocks_per_row {
         let w_ptr = row.as_ptr().add(block_idx * BLOCK_Q6_K_SIZE);
         let q8_ptr = q8k.as_ptr().add(block_idx * BLOCK_Q8_K_BYTES);
-        let d_q8 =
-            f32::from_le_bytes([*q8_ptr, *q8_ptr.add(1), *q8_ptr.add(2), *q8_ptr.add(3)]);
+        let d_q8 = f32::from_le_bytes([*q8_ptr, *q8_ptr.add(1), *q8_ptr.add(2), *q8_ptr.add(3)]);
         let q8 = q8_ptr.add(4);
         let bsums = q8_ptr.add(4 + QK_K);
         let d = f16_le_to_f32([*w_ptr.add(208), *w_ptr.add(209)]);
@@ -2215,11 +2210,9 @@ unsafe fn q6_k_q8_k_row_dot_avx2(row: &[u8], blocks_per_row: usize, q8k: &[u8]) 
             for (g, qv) in [q1, q2, q3, q4].into_iter().enumerate() {
                 let sa = sc[s_base + g * 2] as i16;
                 let sb = sc[s_base + g * 2 + 1] as i16;
-                let q8v =
-                    _mm256_loadu_si256(q8.add(v_base + g * 32) as *const __m256i);
+                let q8v = _mm256_loadu_si256(q8.add(v_base + g * 32) as *const __m256i);
                 let p16 = _mm256_maddubs_epi16(qv, q8v);
-                let scale_pair =
-                    _mm256_set_m128i(_mm_set1_epi16(sb), _mm_set1_epi16(sa));
+                let scale_pair = _mm256_set_m128i(_mm_set1_epi16(sb), _mm_set1_epi16(sa));
                 vec_pos = _mm256_add_epi32(vec_pos, _mm256_madd_epi16(p16, scale_pair));
                 let g0 = half * 8 + g * 2;
                 min_acc += sa as i32 * read_q8_k_bsum(bsums, g0) as i32;
@@ -2254,8 +2247,7 @@ unsafe fn q6_k_q8_k_row_dot_x4_avx2(
     let mut acc = [0.0_f32; 4];
     for block_idx in 0..blocks_per_row {
         let q8_ptr = q8k.as_ptr().add(block_idx * BLOCK_Q8_K_BYTES);
-        let d_q8 =
-            f32::from_le_bytes([*q8_ptr, *q8_ptr.add(1), *q8_ptr.add(2), *q8_ptr.add(3)]);
+        let d_q8 = f32::from_le_bytes([*q8_ptr, *q8_ptr.add(1), *q8_ptr.add(2), *q8_ptr.add(3)]);
         let q8 = q8_ptr.add(4);
         let bsums = q8_ptr.add(4 + QK_K);
         let mut bs = [0_i32; 16];
@@ -2315,10 +2307,8 @@ unsafe fn q6_k_q8_k_row_dot_x4_avx2(
                     let sa = sc[s_base + g * 2] as i16;
                     let sb = sc[s_base + g * 2 + 1] as i16;
                     let p16 = _mm256_maddubs_epi16(qv, q8v[half * 4 + g]);
-                    let scale_pair =
-                        _mm256_set_m128i(_mm_set1_epi16(sb), _mm_set1_epi16(sa));
-                    vec_pos =
-                        _mm256_add_epi32(vec_pos, _mm256_madd_epi16(p16, scale_pair));
+                    let scale_pair = _mm256_set_m128i(_mm_set1_epi16(sb), _mm_set1_epi16(sa));
+                    vec_pos = _mm256_add_epi32(vec_pos, _mm256_madd_epi16(p16, scale_pair));
                     let g0 = half * 8 + g * 2;
                     min_acc += sa as i32 * bs[g0];
                     min_acc += sb as i32 * bs[g0 + 1];
@@ -5676,27 +5666,60 @@ mod tests {
         }
         let q_size = quantized_size(GgufQuantizationType::Q4_K_M, total).unwrap();
         let mut q = vec![0u8; q_size];
-        quantize_scalar(GgufQuantizationType::F32, GgufQuantizationType::Q4_K_M, &bytes, &mut q).unwrap();
+        quantize_scalar(
+            GgufQuantizationType::F32,
+            GgufQuantizationType::Q4_K_M,
+            &bytes,
+            &mut q,
+        )
+        .unwrap();
         let mut inputs = vec![0.0f32; batch * cols];
         for (i, x) in inputs.iter_mut().enumerate() {
             *x = (((i * 19 + 7) % 113) as f32) / 56.0 - 1.0;
         }
         let mut gemm_out = vec![0.0f32; batch * rows];
-        gemm_quantized_f32(GgufQuantizationType::Q4_K_M, &q, rows, cols, &inputs, &mut gemm_out, batch).unwrap();
+        gemm_quantized_f32(
+            GgufQuantizationType::Q4_K_M,
+            &q,
+            rows,
+            cols,
+            &inputs,
+            &mut gemm_out,
+            batch,
+        )
+        .unwrap();
         let mut mismatches = 0;
         for t in 0..batch {
             let mut gemv_out = vec![0.0f32; rows];
-            gemv_quantized_f32(GgufQuantizationType::Q4_K_M, &q, rows, cols, &inputs[t * cols..(t + 1) * cols], &mut gemv_out).unwrap();
+            gemv_quantized_f32(
+                GgufQuantizationType::Q4_K_M,
+                &q,
+                rows,
+                cols,
+                &inputs[t * cols..(t + 1) * cols],
+                &mut gemv_out,
+            )
+            .unwrap();
             for r in 0..rows {
                 if gemm_out[t * rows + r].to_bits() != gemv_out[r].to_bits() {
                     if mismatches < 5 {
-                        eprintln!("t={t} r={r}: gemm={} gemv={} diff={}", gemm_out[t * rows + r], gemv_out[r], gemm_out[t * rows + r] - gemv_out[r]);
+                        eprintln!(
+                            "t={t} r={r}: gemm={} gemv={} diff={}",
+                            gemm_out[t * rows + r],
+                            gemv_out[r],
+                            gemm_out[t * rows + r] - gemv_out[r]
+                        );
                     }
                     mismatches += 1;
                 }
             }
         }
-        assert_eq!(mismatches, 0, "{mismatches} bit mismatches of {}", batch * rows);
+        assert_eq!(
+            mismatches,
+            0,
+            "{mismatches} bit mismatches of {}",
+            batch * rows
+        );
     }
 
     #[test]
