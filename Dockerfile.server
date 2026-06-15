@@ -25,6 +25,7 @@ COPY oxidize-finetuning/src oxidize-finetuning/src
 COPY oxidize-convert/src oxidize-convert/src
 COPY oxidize-ffi/src oxidize-ffi/src
 COPY oxidize-kernels/src oxidize-kernels/src
+COPY oxidize-kernels/benches oxidize-kernels/benches
 
 RUN cargo build --release --package oxidize-server
 
