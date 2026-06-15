@@ -3223,7 +3223,7 @@ fn iq1s_grid_decode(index: u16, out: &mut [i8; 8]) {
         };
         idx >>= 2;
         if i == 3 {
-            idx = index >> 8 ;
+            idx = index >> 8;
         }
     }
 }
@@ -3423,17 +3423,17 @@ fn iq1m_dequantize_block(block: &[u8], out: &mut [f32]) {
         let sc_ib = scales[ib / 2];
         let dl1 = d * (2.0 * (((sc_ib >> (6 * (ib % 2))) & 0x7) as f32) + 1.0);
         let dl2 = d * (2.0 * (((sc_ib >> (6 * (ib % 2) + 3)) & 0x7) as f32) + 1.0);
-        let idx0 = qs[ib * 4 ] as u16 | ((qh[ib * 2 ] as u16) << 8 & 0x700);
-        let idx1 = qs[ib * 4 + 1] as u16 | ((qh[ib * 2 ] as u16) << 4 & 0x700);
+        let idx0 = qs[ib * 4] as u16 | ((qh[ib * 2] as u16) << 8 & 0x700);
+        let idx1 = qs[ib * 4 + 1] as u16 | ((qh[ib * 2] as u16) << 4 & 0x700);
         let idx2 = qs[ib * 4 + 2] as u16 | ((qh[ib * 2 + 1] as u16) << 8 & 0x700);
         let idx3 = qs[ib * 4 + 3] as u16 | ((qh[ib * 2 + 1] as u16) << 4 & 0x700);
         let deltas = [
-            if qh[ib * 2 ] & 0x08 != 0 {
+            if qh[ib * 2] & 0x08 != 0 {
                 -IQ1S_DELTA
             } else {
                 IQ1S_DELTA
             },
-            if qh[ib * 2 ] & 0x80 != 0 {
+            if qh[ib * 2] & 0x80 != 0 {
                 -IQ1S_DELTA
             } else {
                 IQ1S_DELTA

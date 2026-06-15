@@ -264,8 +264,7 @@ fn bytes_cache_key(slice: &[u8]) -> WeightCacheKey {
 pub type LayerId = usize;
 
 /// Configuration for layer-by-layer VRAM management (AirLLM-style).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CudaLayerConfig {
     /// Maximum number of layers to keep resident in VRAM at once.
     /// 0 = unlimited (default, loads all layers).
@@ -274,7 +273,6 @@ pub struct CudaLayerConfig {
     /// 0 = unlimited (default).
     pub max_vram_bytes: usize,
 }
-
 
 #[cfg(feature = "cuda")]
 struct LayerEntry {

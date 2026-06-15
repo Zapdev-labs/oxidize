@@ -557,7 +557,6 @@ pub fn load_draft_model_for_speculative(
 #[cfg(test)]
 mod tests {
     use super::*;
-    
 
     #[test]
     fn speculative_config_default() {

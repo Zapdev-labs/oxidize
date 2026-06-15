@@ -144,12 +144,13 @@ pub fn convert_safetensors_to_gguf(
         .clone()
         .or_else(|| cfg_path.and_then(|p| p.parent().map(Path::to_path_buf)));
     if let Some(dir) = tokenizer_dir
-        && let Err(error) = merge_hf_tokenizer_metadata(&mut metadata, &dir) {
-            eprintln!(
-                "warning: failed to embed tokenizer metadata from {}: {error:#}",
-                dir.display()
-            );
-        }
+        && let Err(error) = merge_hf_tokenizer_metadata(&mut metadata, &dir)
+    {
+        eprintln!(
+            "warning: failed to embed tokenizer metadata from {}: {error:#}",
+            dir.display()
+        );
+    }
 
     let output_tensors = build_output_tensors(&tensors, config.map_hf_tensor_names)?;
     let gguf_bytes = write_gguf(3, &metadata, &output_tensors, 32)?;
@@ -170,9 +171,10 @@ fn resolve_architecture(
     if let Some(dir) = config_dir {
         let cfg_path = dir.join("config.json");
         if cfg_path.is_file()
-            && let Ok(arch) = read_arch_from_hf_config(&cfg_path) {
-                return Ok(arch);
-            }
+            && let Ok(arch) = read_arch_from_hf_config(&cfg_path)
+        {
+            return Ok(arch);
+        }
     }
     Ok(st_meta
         .get("model_type")
@@ -545,21 +547,22 @@ fn merge_hf_tokenizer_metadata(
     }
     // Unigram stores [token, score] pairs instead of a flat map.
     if model_type.eq_ignore_ascii_case("unigram")
-        && let Some(arr) = model.get("vocab").and_then(|v| v.as_array()) {
-            for (id, pair) in arr.iter().enumerate() {
-                if id >= len {
-                    break;
+        && let Some(arr) = model.get("vocab").and_then(|v| v.as_array())
+    {
+        for (id, pair) in arr.iter().enumerate() {
+            if id >= len {
+                break;
+            }
+            if let Some(p) = pair.as_array() {
+                if let Some(t) = p.first().and_then(|v| v.as_str()) {
+                    tokens[id] = t.to_owned();
                 }
-                if let Some(p) = pair.as_array() {
-                    if let Some(t) = p.first().and_then(|v| v.as_str()) {
-                        tokens[id] = t.to_owned();
-                    }
-                    if let Some(s) = p.get(1).and_then(|v| v.as_f64()) {
-                        scores[id] = s as f32;
-                    }
+                if let Some(s) = p.get(1).and_then(|v| v.as_f64()) {
+                    scores[id] = s as f32;
                 }
             }
         }
+    }
     if let Some(added) = added {
         for entry in added {
             let Some(id) = entry.get("id").and_then(|v| v.as_u64()) else {

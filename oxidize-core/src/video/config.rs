@@ -2,8 +2,7 @@ use super::error::VideoError;
 use crate::vision::VisionConfig;
 
 /// Strategy for selecting which frames of an input video to keep.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FrameSamplingStrategy {
     /// Pick `target_frames` indices evenly spaced across `[0, total_frames)`.
     #[default]
@@ -16,7 +15,6 @@ pub enum FrameSamplingStrategy {
     /// target number of candidate frames are available.
     Adaptive,
 }
-
 
 /// Configuration for the temporal encoder that runs on top of the
 /// per-frame vision encoder.
@@ -104,8 +102,7 @@ impl TemporalConfig {
 
 /// How pooled per-frame video tokens should be aggregated into a single
 /// representation per frame.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TemporalPool {
     /// Mean of all patch embeddings per frame.
     #[default]
@@ -115,7 +112,6 @@ pub enum TemporalPool {
     /// Last token of each frame's patch sequence.
     LastToken,
 }
-
 
 /// Top-level video model configuration. Holds both the per-frame vision
 /// configuration and the temporal stack configuration.
