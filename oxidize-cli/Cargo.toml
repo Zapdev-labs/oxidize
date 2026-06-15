@@ -3,6 +3,7 @@ name = "oxidize-cli"
 edition.workspace = true
 license.workspace = true
 version.workspace = true
+autobins = false
 
 [[bin]]
 name = "oxidize-cli"
@@ -23,6 +24,11 @@ path = "src/bin/inspect_gguf.rs"
 [[bin]]
 name = "gguf_layer_keys"
 path = "src/bin/gguf_layer_keys.rs"
+
+[[bin]]
+name = "diffusion_gemma_bench"
+path = "src/bin/diffusion_gemma_bench.rs"
+required-features = ["oxk"]
 
 [features]
 oxk = ["oxidize-core/oxk", "oxidize-server/oxk"]
