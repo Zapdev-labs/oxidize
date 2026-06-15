@@ -167,7 +167,7 @@ impl SftTrainer {
 
                         if let Some((_, every)) = self.checkpoint
                             && every > 0
-                            && opt_step % every == 0
+                            && opt_step.is_multiple_of(every)
                         {
                             self.save_checkpoint(&format!("step {opt_step}"));
                         }

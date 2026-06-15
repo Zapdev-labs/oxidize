@@ -20,6 +20,13 @@
 //! The denoise loop reproduces the reference sampler (linear temperature schedule,
 //! EntropyBoundSampler accept, StableAndConfident stop).
 
+#![allow(
+    clippy::too_many_arguments,
+    clippy::needless_range_loop,
+    clippy::type_complexity,
+    dead_code
+)]
+
 use crate::gguf::{GgufQuantizationType, GgufTensorInfo, load_mapped_gguf};
 use crate::tensor::{
     apply_geglu_inplace_f32, gemm_quantized_f32, gemv_f32, gemv_quantized_experts_f32,

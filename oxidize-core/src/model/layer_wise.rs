@@ -2054,8 +2054,8 @@ impl LayerWiseModel {
             }
         }
         if layer_idx == 0 && crate::inference::trace_vals_enabled() {
-            let mabs = |v: &[f32]| v.iter().fold(0.0_f32, |m, x| m.max(x.abs()));
-            let ssum = |v: &[f32]| v.iter().map(|x| *x as f64).sum::<f64>();
+            let _mabs = |v: &[f32]| v.iter().fold(0.0_f32, |m, x| m.max(x.abs()));
+            let _ssum = |v: &[f32]| v.iter().map(|x| *x as f64).sum::<f64>();
             let hd = head_v_dim;
             eprintln!(
                 "GDN L0 core_post head0={:?} head46={:?} head47={:?} (llama h46[-0.0044,-0.0048,0.0012] h47[-0.0035,-0.0000,-0.0012])",

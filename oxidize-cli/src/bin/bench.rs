@@ -384,10 +384,9 @@ fn infer_dflash_config_from_tensors(
     if let Some(t) = tensors
         .iter()
         .find(|t| t.name == "blk.0.attn_q_norm.weight")
+        && let Some(&dim) = t.dimensions.first()
     {
-        if let Some(&dim) = t.dimensions.first() {
-            out.head_dim = Some(dim as usize);
-        }
+        out.head_dim = Some(dim as usize);
     }
     out
 }

@@ -513,7 +513,7 @@ fn gguf_repo_candidates(spec: &str) -> Vec<String> {
 
 fn resolve_hf_model_spec(api: &HfApi, spec: &str, hf_file: Option<&str>) -> io::Result<PathBuf> {
     let mut attempted = Vec::new();
-    for candidate in std::iter::once(spec.to_owned()).chain(gguf_repo_candidates(spec).into_iter())
+    for candidate in std::iter::once(spec.to_owned()).chain(gguf_repo_candidates(spec))
     {
         if attempted.contains(&candidate) {
             continue;
@@ -2072,10 +2072,11 @@ fn main() {
         }
         return;
     }
-    if args.serve_api && !args.no_api {
-        if let Err(error) = spawn_api_server_background(&args) {
-            eprintln!("failed to start API server: {error}");
-        }
+    if args.serve_api
+        && !args.no_api
+        && let Err(error) = spawn_api_server_background(&args)
+    {
+        eprintln!("failed to start API server: {error}");
     }
     if args.pipe_head {
         let model = match args.model.as_ref() {

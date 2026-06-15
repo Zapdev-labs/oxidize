@@ -110,6 +110,7 @@ fn open_generation_stream<'a>(
     } else {
         let use_native_mtp =
             matches!(model, LoadedModel::Inference(inference) if inference.has_mtp());
+        #[allow(clippy::collapsible_if)]
         if use_native_mtp {
             if let LoadedModel::Inference(inference_model) = model {
                 return ActiveGenerationStream::Mtp(MtpGenerationStream::new(
@@ -243,7 +244,7 @@ fn generate_text_blocking(
         .transpose()?;
     let mut stream = open_generation_stream(
         runtime,
-        &mut *model,
+        &mut model,
         draft_guard.as_deref_mut(),
         &mut session,
         &prompt_tokens,
@@ -374,7 +375,7 @@ fn generate_text_streaming_inner(
         .transpose()?;
     let mut stream = open_generation_stream(
         runtime,
-        &mut *model,
+        &mut model,
         draft_guard.as_deref_mut(),
         &mut session,
         &prompt_tokens,

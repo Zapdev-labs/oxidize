@@ -111,7 +111,7 @@ mod imp {
                 len,
                 2usize,
                 mask.as_ptr() as usize,
-                (words * 64) as usize,
+                words * 64,
                 0u32,
             );
             if r != 0 {

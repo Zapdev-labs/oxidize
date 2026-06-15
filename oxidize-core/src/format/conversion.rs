@@ -1,3 +1,5 @@
+#![allow(clippy::type_complexity)]
+
 use crate::gguf::GgufQuantizationType;
 use safetensors::tensor::Dtype;
 use std::collections::BTreeMap;
@@ -69,8 +71,8 @@ pub fn map_qwen_mtp_tensor_name(name: &str) -> Option<String> {
 
 fn map_qwen_mtp_inner(rest: &str, layer: usize) -> Option<String> {
     // Fusion head tensors live directly under `mtp.*`.
-    if let Some((head_name, suffix)) = rest.rsplit_once('.') {
-        if suffix == "weight" || suffix == "bias" {
+    if let Some((head_name, suffix)) = rest.rsplit_once('.')
+        && (suffix == "weight" || suffix == "bias") {
             let mapped_head = match head_name {
                 "fc" => "nextn.eh_proj",
                 "pre_fc_norm_embedding" => "nextn.enorm",
@@ -85,7 +87,6 @@ fn map_qwen_mtp_inner(rest: &str, layer: usize) -> Option<String> {
                 return Some(format!("blk.{layer}.{mapped_head}{mapped_suffix}"));
             }
         }
-    }
 
     // Nested MTP transformer block: `mtp.layers.{N}.(...)` -> `blk.{layer+N}.(...)`.
     let rest = rest.strip_prefix("layers.")?;
@@ -211,8 +212,8 @@ pub fn map_hf_tensor_name(name: &str) -> String {
                 return format!("blk.{layer}.{mapped_expert_weight}.{expert}.weight");
             }
 
-            if let Some(rest) = suffix.strip_prefix("mlp.experts.") {
-                if let Some((expert, expert_weight)) = rest.split_once('.') {
+            if let Some(rest) = suffix.strip_prefix("mlp.experts.")
+                && let Some((expert, expert_weight)) = rest.split_once('.') {
                     let mapped_expert_weight = match expert_weight {
                         "gate_proj.weight" => "ffn_gate",
                         "up_proj.weight" => "ffn_up",
@@ -221,7 +222,6 @@ pub fn map_hf_tensor_name(name: &str) -> String {
                     };
                     return format!("blk.{layer}.{mapped_expert_weight}.{expert}.weight");
                 }
-            }
 
             let mapped_suffix = match suffix {
                 "input_layernorm.weight" => "attn_norm.weight",
@@ -272,7 +272,7 @@ pub fn split_fused_gate_up_proj(
     shape: &[usize],
     raw: &[u8],
 ) -> Option<Vec<(String, Dtype, Vec<usize>, Vec<u8>)>> {
-    if shape.len() != 3 || shape[1] % 2 != 0 {
+    if shape.len() != 3 || !shape[1].is_multiple_of(2) {
         return None;
     }
     let experts = shape[0];
@@ -374,14 +374,12 @@ pub fn preprocess_hf_tensors_for_gguf(
             out.extend(split);
             continue;
         }
-        if name.ends_with(".linear_attn.conv1d.weight") {
-            if let Some(layer) = extract_layer_index(&name) {
-                if let Some(flat) = flatten_linear_attn_conv1d(layer, dtype, &shape, &raw) {
+        if name.ends_with(".linear_attn.conv1d.weight")
+            && let Some(layer) = extract_layer_index(&name)
+                && let Some(flat) = flatten_linear_attn_conv1d(layer, dtype, &shape, &raw) {
                     out.push(flat);
                     continue;
                 }
-            }
-        }
         out.push((name, dtype, shape, raw));
     }
     Ok(out)

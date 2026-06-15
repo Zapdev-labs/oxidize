@@ -2,7 +2,7 @@
 
 use crate::conversion::{
     extract_layer_index, flatten_linear_attn_conv1d, map_flat_qwen_mtp_tensor_name,
-    map_hf_tensor_name, map_qwen_mtp_tensor_name, preprocess_hf_tensors_for_gguf,
+    map_hf_tensor_name, preprocess_hf_tensors_for_gguf,
     split_fused_gate_up_proj,
 };
 use crate::gguf::{GgufMetadataArray, GgufMetadataType, GgufMetadataValue, GgufQuantizationType};
@@ -560,16 +560,14 @@ fn merge_hf_config_metadata(
         &prefix("attention.layer_norm_rms_epsilon"),
         "rms_norm_eps",
     );
-    if !insert_f32(meta, &prefix("rope.freq_base"), "rope_theta") {
-        if let Some(rp) = cfg.get("rope_parameters").and_then(|v| v.as_object()) {
-            if let Some(theta) = rp.get("rope_theta").and_then(json_f32) {
+    if !insert_f32(meta, &prefix("rope.freq_base"), "rope_theta")
+        && let Some(rp) = cfg.get("rope_parameters").and_then(|v| v.as_object())
+            && let Some(theta) = rp.get("rope_theta").and_then(json_f32) {
                 meta.insert(
                     prefix("rope.freq_base").to_owned(),
                     GgufMetadataValue::Float32(theta),
                 );
             }
-        }
-    }
     insert_u32(meta, &prefix("attention.sliding_window"), "sliding_window");
     insert_u32(meta, &prefix("expert_count"), "num_experts");
     insert_u32(meta, &prefix("expert_used_count"), "num_experts_per_tok");
@@ -930,7 +928,7 @@ fn plan_stream_outputs(
         let Some(layer) = extract_layer_index(name) else {
             return Ok(Vec::new());
         };
-        if shape.len() != 3 || shape[1] % 2 != 0 {
+        if shape.len() != 3 || !shape[1].is_multiple_of(2) {
             bail!("invalid gate_up_proj shape for {name}: {shape:?}");
         }
         let experts = shape[0];
@@ -1140,14 +1138,13 @@ fn convert_safetensors_dir_streaming(
         );
     }
 
-    if let Some(target) = config.target_quantization {
-        if let Some(file_type) = gguf_file_type_id(target) {
+    if let Some(target) = config.target_quantization
+        && let Some(file_type) = gguf_file_type_id(target) {
             metadata.insert(
                 "general.file_type".to_owned(),
                 GgufMetadataValue::Uint32(file_type),
             );
         }
-    }
 
     write_gguf_streaming(
         output,
@@ -1256,11 +1253,11 @@ fn write_gguf_streaming(
     for plan in planned {
         data_lens.push(planned_data_len(plan, target)?);
         output_types.push(
-            if target.is_some()
+            if let Some(t) = target
                 && plan.dimensions.len() >= 2
                 && matches!(plan.ggml_type, 0 | 1 | 30)
             {
-                ggml_type_id(target.unwrap())?
+                ggml_type_id(t)?
             } else {
                 plan.ggml_type
             },

@@ -1,5 +1,7 @@
+#[cfg(feature = "cuda")]
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "cuda")]
 fn bench_gemv_f32(rows: usize, cols: usize, iters: usize) -> Duration {
     let matrix = vec![1.0_f32; rows * cols];
     let vector = vec![1.0_f32; cols];
@@ -15,6 +17,7 @@ fn bench_gemv_f32(rows: usize, cols: usize, iters: usize) -> Duration {
     start.elapsed()
 }
 
+#[cfg(feature = "cuda")]
 fn bench_gemv_q8_0(rows: usize, cols: usize, iters: usize) -> Duration {
     use oxidize_core::gguf::GgufQuantizationType;
     use oxidize_core::quantization::{quantize_scalar, quantized_size};
