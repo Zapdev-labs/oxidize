@@ -168,14 +168,6 @@ fn layer_gemvs(
 ) {
     let LayerGemvBuffers { q, k, v, attn_out, gate, up, ffn_out } = bufs;
 
-    q.fill(0.0);
-    k.fill(0.0);
-    v.fill(0.0);
-    attn_out.fill(0.0);
-    gate.fill(0.0);
-    up.fill(0.0);
-    ffn_out.fill(0.0);
-
     gemv(h, h, &attn_q[l], x, q);
     gemv(h, h, &attn_k[l], x, k);
     gemv(h, h, &attn_v[l], x, v);

@@ -47,6 +47,8 @@ pub mod flash_attention;
 pub mod generation;
 #[path = "format/gguf.rs"]
 pub mod gguf;
+#[path = "cluster/gpu_cluster.rs"]
+pub mod gpu_cluster;
 #[path = "model/inference.rs"]
 pub mod inference;
 #[path = "compute/kv_cache.rs"]
@@ -92,6 +94,8 @@ pub mod speculative;
 pub mod strix;
 #[path = "compute/spinpool.rs"]
 pub mod spinpool;
+#[path = "compute/numa.rs"]
+pub mod numa;
 #[path = "compute/tensor.rs"]
 pub mod tensor;
 #[path = "format/tokenizer.rs"]

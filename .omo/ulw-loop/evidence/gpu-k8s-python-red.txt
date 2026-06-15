@@ -1,0 +1,22 @@
+Protected by Socket Firewall
+
+==================================== ERRORS ====================================
+____________ ERROR collecting oxidize_python/core/mesh/test_k8s.py _____________
+ImportError while importing test module '/home/dih/oxidize-3/oxidize/oxidize-python/oxidize_python/core/mesh/test_k8s.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+../../../.local/share/uv/python/cpython-3.13.13-linux-x86_64-gnu/lib/python3.13/importlib/__init__.py:88: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+oxidize_python/core/mesh/test_k8s.py:5: in <module>
+    from oxidize_python.core.mesh.k8s import (
+E   ModuleNotFoundError: No module named 'oxidize_python.core.mesh.k8s'
+=========================== short test summary info ============================
+ERROR oxidize_python/core/mesh/test_k8s.py
+!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+1 error in 0.38s
+
+=== Socket Firewall ===
+
+ - 18 packages fetched successfully
+

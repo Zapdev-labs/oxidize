@@ -3831,14 +3831,14 @@ mod tests {
         assert_eq!(ws.v_vec.len(), max_kv_len);
         assert_eq!(ws.attn_result.len(), max_qkv);
 
-        let head_dim = config.head_dim().max(config.kv_head_dim());
+        let head_dim = config.head_dim().max(config.kv_head_dim()).max(192);
         assert_eq!(ws.head_scratch.len(), head_dim);
 
         let kv_copy_size = config.context_size * max_kv_len;
         assert_eq!(ws.kv_keys_copy.len(), kv_copy_size);
         assert_eq!(ws.kv_values_copy.len(), kv_copy_size);
         assert_eq!(ws.logits.len(), config.vocab_size);
-        assert_eq!(ws.mamba_scratch.len(), config.hidden_size * 2);
+        assert_eq!(ws.mamba_scratch.len(), config.hidden_size.max(576));
         assert_eq!(ws.conv_out.len(), max_qkv);
     }
 

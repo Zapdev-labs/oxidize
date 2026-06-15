@@ -21,38 +21,12 @@ fn main() {
             println!("cargo:rustc-link-lib=dylib=cudart");
         }
 
-        // Compile CUDA kernels to PTX at build time so the Rust backend loads
-        // fresh, forward-compatible PTX instead of a stale checked-in file.
-        let nvcc = cuda_root.join("bin").join("nvcc");
-        if nvcc.is_file() {
-            let out_dir = env::var_os("OUT_DIR").map(PathBuf::from).unwrap_or_default();
-            let ptx_path = out_dir.join("gemv_f32.ptx");
-            let cu_path = Path::new("kernels/gemv_f32.cu");
-            println!("cargo:rerun-if-changed={}", cu_path.display());
-            let status = std::process::Command::new(&nvcc)
-                .args(["-ptx", "-O3", "--use_fast_math", "-arch=sm_52"])
-                .arg(cu_path)
-                .arg("-o")
-                .arg(&ptx_path)
-                .status();
-            match status {
-                Ok(s) if s.success() => {
-                    println!("cargo:rustc-env=OXIDIZE_CUDA_PTX={}", ptx_path.display());
-                }
-                Ok(s) => {
-                    panic!("nvcc PTX compilation failed with status {}", s);
-                }
-                Err(e) => {
-                    panic!("failed to run nvcc: {}", e);
-                }
-            }
-        } else {
-            panic!(
-                "CUDA root detected at {} but nvcc not found at {}. \
-                 The cuda feature requires nvcc to compile kernels.",
-                cuda_root.display(),
-                nvcc.display()
-            );
+        // When the `cuda` feature is on, compile the GEMV kernels from CUDA C
+        // source to PTX with nvcc. Generating PTX at build time (rather than
+        // committing hand-written PTX) guarantees it is valid for the installed
+        // toolkit and forward-JIT-compatible with newer GPUs (e.g. sm_120).
+        if env::var_os("CARGO_FEATURE_CUDA").is_some() {
+            compile_cuda_kernels(&cuda_root);
         }
     }
 
@@ -70,6 +44,44 @@ fn main() {
 
     if detect_mlx_available() {
         println!("cargo:rustc-cfg=mlx_available");
+    }
+}
+
+/// Compile `kernels/gemv_f32.cu` to PTX in `OUT_DIR` using nvcc.
+///
+/// `-arch=compute_75` emits a virtual-architecture PTX that the driver JITs to
+/// the physical GPU at load time; it forward-compiles to any newer GPU while
+/// staying broadly compatible. The crate embeds the result via
+/// `include_str!(concat!(env!("OUT_DIR"), "/gemv_f32.ptx"))`.
+fn compile_cuda_kernels(cuda_root: &Path) {
+    let out_dir = env::var("OUT_DIR").expect("OUT_DIR is set by cargo");
+    let ptx_out = Path::new(&out_dir).join("gemv_f32.ptx");
+    let src = Path::new("kernels/gemv_f32.cu");
+    println!("cargo:rerun-if-changed=kernels/gemv_f32.cu");
+
+    let nvcc = {
+        let candidate = cuda_root.join("bin").join("nvcc");
+        if candidate.is_file() {
+            candidate
+        } else {
+            PathBuf::from("nvcc")
+        }
+    };
+
+    let status = std::process::Command::new(&nvcc)
+        .arg("-ptx")
+        .arg("-O3")
+        .arg("--use_fast_math")
+        .arg("-arch=compute_75")
+        .arg("-o")
+        .arg(&ptx_out)
+        .arg(src)
+        .status();
+
+    match status {
+        Ok(s) if s.success() => {}
+        Ok(s) => panic!("nvcc failed to compile {}: exit {s}", src.display()),
+        Err(e) => panic!("failed to invoke nvcc ({}): {e}", nvcc.display()),
     }
 }
 

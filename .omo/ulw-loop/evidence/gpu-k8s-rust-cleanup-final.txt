@@ -1,0 +1,1 @@
+cleanup: tmux kill-session -t ulw-qa-gpu-k8s-rust; verified session absent

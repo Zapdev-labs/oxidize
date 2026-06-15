@@ -211,6 +211,52 @@ fn dequant_kernel_for(
 #[cfg(feature = "cuda")]
 const GEMV_F32_PTX: &str = include_str!(concat!(env!("OUT_DIR"), "/gemv_f32.ptx"));
 
+#[cfg(feature = "cuda")]
+type WeightCacheKey = (usize, usize, u64);
+
+/// Fast, non-cryptographic FNV-1a 64-bit hash for content-aware cache keys.
+#[cfg(feature = "cuda")]
+fn hash_bytes(data: &[u8]) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x0100_0000_01b3;
+    let mut hash = FNV_OFFSET;
+    for &byte in data {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
+}
+
+#[cfg(feature = "cuda")]
+fn hash_f32_slice(slice: &[f32]) -> u64 {
+    // SAFETY: `f32` has a fixed-size, padding-free representation.
+    let bytes = unsafe {
+        std::slice::from_raw_parts(
+            slice.as_ptr() as *const u8,
+            slice.len() * std::mem::size_of::<f32>(),
+        )
+    };
+    hash_bytes(bytes)
+}
+
+#[cfg(feature = "cuda")]
+fn f32_cache_key(slice: &[f32]) -> WeightCacheKey {
+    (
+        slice.as_ptr() as usize,
+        slice.len(),
+        hash_f32_slice(slice),
+    )
+}
+
+#[cfg(feature = "cuda")]
+fn bytes_cache_key(slice: &[u8]) -> WeightCacheKey {
+    (
+        slice.as_ptr() as usize,
+        slice.len(),
+        hash_bytes(slice),
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Persistent per-thread GPU state
 //
@@ -250,9 +296,9 @@ impl Default for CudaLayerConfig {
 #[cfg(feature = "cuda")]
 struct LayerEntry {
     /// Pointer keys of f32 weights owned by this layer.
-    f32_keys: Vec<(usize, usize)>,
+    f32_keys: Vec<WeightCacheKey>,
     /// Pointer keys of f16 weights owned by this layer.
-    f16_keys: Vec<(usize, usize)>,
+    f16_keys: Vec<WeightCacheKey>,
     /// Approximate bytes consumed by this layer's device buffers.
     bytes: usize,
 }
@@ -265,12 +311,10 @@ struct GpuState {
     stream: cust::stream::Stream,
     cublas: cublas_sys::cublasHandle_t,
     /// Quantized weights dequantized once on the GPU to resident f16 (stored as
-    /// raw u16 bits), keyed by the host slice's `(pointer, len)`. Quantized
-    /// matrices are always static model weights with a stable backing
-    /// allocation for the run, so pointer identity is a safe cache key.
-    resident_f16: std::collections::HashMap<(usize, usize), cust::memory::DeviceBuffer<u16>>,
+    /// raw u16 bits), keyed by `(pointer, len, content_hash)`.
+    resident_f16: std::collections::HashMap<WeightCacheKey, cust::memory::DeviceBuffer<u16>>,
     /// Resident f32 weight matrices for the dense gemv path, same keying.
-    resident_f32: std::collections::HashMap<(usize, usize), cust::memory::DeviceBuffer<f32>>,
+    resident_f32: std::collections::HashMap<WeightCacheKey, cust::memory::DeviceBuffer<f32>>,
     /// Pool of reusable f32 device buffers keyed by length.
     f32_pool: std::collections::HashMap<usize, Vec<cust::memory::DeviceBuffer<f32>>>,
     /// Layer-by-layer VRAM management.
@@ -284,7 +328,7 @@ struct GpuState {
     /// Keys resident in `resident_f16` that are NOT owned by any layer.
     /// These are lazily cached by `gemv_quantized_cuda` and must be
     /// subject to the same budget enforcement as layer-managed weights.
-    orphan_f16_keys: Vec<(usize, usize)>,
+    orphan_f16_keys: std::collections::VecDeque<WeightCacheKey>,
 }
 
 #[cfg(feature = "cuda")]
@@ -341,13 +385,45 @@ impl GpuState {
         }
 
         // If still over byte budget, evict orphan (non-layer) f16 entries LRU-style.
-        while max_bytes > 0 && self.resident_bytes > max_bytes && !self.orphan_f16_keys.is_empty() {
-            let key = self.orphan_f16_keys.remove(0);
+        while max_bytes > 0 && self.resident_bytes > max_bytes {
+            let Some(key) = self.orphan_f16_keys.pop_front() else {
+                break;
+            };
             if let Some(buf) = self.resident_f16.remove(&key) {
                 self.resident_bytes -= buf.len() * std::mem::size_of::<u16>();
                 drop(buf);
             }
         }
+    }
+
+    /// Evict LRU layers/orphans until `resident_bytes + additional_bytes` fits
+    /// within the configured VRAM budget. Call before inserting new weights so
+    /// the freshly inserted entry is not evicted in the same operation.
+    fn ensure_vram_headroom(&mut self, additional_bytes: usize) {
+        let max_bytes = self.layer_config.max_vram_bytes;
+        if max_bytes == 0 {
+            return;
+        }
+        while self.resident_bytes.saturating_add(additional_bytes) > max_bytes {
+            if let Some(evict_id) = self.layer_lru.pop_front() {
+                self.evict_layer_internal(evict_id);
+                continue;
+            }
+            let Some(key) = self.orphan_f16_keys.pop_front() else {
+                break;
+            };
+            if let Some(buf) = self.resident_f16.remove(&key) {
+                self.resident_bytes -= buf.len() * std::mem::size_of::<u16>();
+                drop(buf);
+            }
+        }
+    }
+
+    fn touch_orphan_f16(&mut self, key: WeightCacheKey) {
+        if let Some(pos) = self.orphan_f16_keys.iter().position(|&k| k == key) {
+            self.orphan_f16_keys.remove(pos);
+        }
+        self.orphan_f16_keys.push_back(key);
     }
 
     fn evict_layer_internal(&mut self, layer: LayerId) {
@@ -412,7 +488,7 @@ fn gpu_init() -> Result<GpuState, String> {
         layer_lru: std::collections::VecDeque::new(),
         layer_map: std::collections::HashMap::new(),
         resident_bytes: 0,
-        orphan_f16_keys: Vec::new(),
+        orphan_f16_keys: std::collections::VecDeque::new(),
     })
 }
 
@@ -473,7 +549,7 @@ pub fn preload_layer(
         };
 
         for (matrix, _rows, _cols) in f32_weights {
-            let key = (matrix.as_ptr() as usize, matrix.len());
+            let key = f32_cache_key(matrix);
             if !gpu.resident_f32.contains_key(&key) {
                 let buf = cust::memory::DeviceBuffer::from_slice(*matrix).map_err(stringify)?;
                 entry.bytes += buf.len() * std::mem::size_of::<f32>();
@@ -545,7 +621,7 @@ pub fn gemv_f32_cuda(
         // The matrix argument to a gemv is a model weight (output = W · x), so
         // it is kept resident in VRAM and uploaded only once; activations flow
         // through the small `vector`/`output` buffers.
-        let key = (matrix.as_ptr() as usize, matrix.len());
+        let key = f32_cache_key(matrix);
         if !gpu.resident_f32.contains_key(&key) {
             let buffer = cust::memory::DeviceBuffer::from_slice(matrix).map_err(stringify)?;
             gpu.resident_f32.insert(key, buffer);
@@ -663,7 +739,7 @@ pub fn gemv_f32_transposed_cuda(
     })?;
 
     with_gpu(|gpu| {
-        let key = (matrix.as_ptr() as usize, matrix.len());
+        let key = f32_cache_key(matrix);
         if !gpu.resident_f32.contains_key(&key) {
             let buffer = cust::memory::DeviceBuffer::from_slice(matrix).map_err(stringify)?;
             gpu.resident_f32.insert(key, buffer);
@@ -955,8 +1031,11 @@ pub fn gemv_quantized_cuda(
         // First use: upload the raw quantized weight, dequantize it on the GPU
         // to resident f16 (stored as u16 bits), and cache it. Every later token
         // reuses the resident half-precision weight — no re-upload, no CPU work.
-        let key = (quantized_matrix.as_ptr() as usize, quantized_matrix.len());
+        let key = bytes_cache_key(quantized_matrix);
         if !gpu.resident_f16.contains_key(&key) {
+            let weight_bytes = expected_elems * std::mem::size_of::<u16>();
+            gpu.ensure_vram_headroom(weight_bytes);
+
             let raw =
                 cust::memory::DeviceBuffer::from_slice(quantized_matrix).map_err(stringify)?;
             let weight =
@@ -978,16 +1057,17 @@ pub fn gemv_quantized_cuda(
                 .map_err(stringify)?;
             }
             stream.synchronize().map_err(stringify)?;
-            gpu.resident_bytes += weight.len() * std::mem::size_of::<u16>();
-            gpu.orphan_f16_keys.push(key);
+            gpu.resident_bytes += weight_bytes;
+            gpu.orphan_f16_keys.push_back(key);
             gpu.resident_f16.insert(key, weight);
-            gpu.enforce_budget();
+        } else {
+            gpu.touch_orphan_f16(key);
         }
 
         let matrix_ptr = gpu
             .resident_f16
             .get(&key)
-            .expect("weight just dequantized into resident cache")
+            .ok_or_else(|| "quantized weight missing from resident cache after insert".to_string())?
             .as_device_ptr()
             .as_raw();
 
@@ -1089,7 +1169,7 @@ pub fn gemm_f32_cuda(
 
     with_gpu(|gpu| {
         // Cache left matrix (model weights) in VRAM.
-        let left_key = (left_matrix.as_ptr() as usize, left_matrix.len());
+        let left_key = f32_cache_key(left_matrix);
         if !gpu.resident_f32.contains_key(&left_key) {
             let buffer = cust::memory::DeviceBuffer::from_slice(left_matrix).map_err(stringify)?;
             gpu.resident_f32.insert(left_key, buffer);

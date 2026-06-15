@@ -1,0 +1,138 @@
+Protected by Socket Firewall
+...F..F.F                                                                [100%]
+=================================== FAILURES ===================================
+_ test_plan_k8s_mesh_rejects_negative_boundary_values[min_replicas--1-replicas] _
+
+field = 'min_replicas', value = -1, message = 'replicas'
+
+    @pytest.mark.parametrize(
+        ("field", "value", "message"),
+        [
+            ("min_replicas", -1, "replicas"),
+            ("max_replicas", -1, "replicas"),
+            ("collective_timeout_seconds", -1, "collective timeout"),
+            ("listen_port", -1, "listen port"),
+            ("count_per_pod", -1, "gpu count"),
+            ("min_memory_gib", -1, "gpu memory"),
+        ],
+    )
+    def test_plan_k8s_mesh_rejects_negative_boundary_values(
+        field: str,
+        value: int,
+        message: str,
+    ) -> None:
+        spec = llama_cluster_spec()
+        match field:
+            case "min_replicas":
+                spec.serving.min_replicas = value
+            case "max_replicas":
+                spec.serving.max_replicas = value
+            case "collective_timeout_seconds":
+                spec.mesh.collective_timeout_seconds = value
+            case "listen_port":
+                spec.mesh.listen_port = value
+            case "count_per_pod":
+                spec.gpu.count_per_pod = value
+            case "min_memory_gib":
+                spec.gpu.min_memory_gib = value
+            case unreachable:
+                raise AssertionError(unreachable)
+    
+>       with pytest.raises(K8sPlanError, match=message):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE <class 'oxidize_python.core.mesh.k8s.K8sPlanError'>
+
+oxidize_python/core/mesh/test_k8s.py:111: Failed
+_ test_plan_k8s_mesh_rejects_negative_boundary_values[listen_port--1-listen port] _
+
+field = 'listen_port', value = -1, message = 'listen port'
+
+    @pytest.mark.parametrize(
+        ("field", "value", "message"),
+        [
+            ("min_replicas", -1, "replicas"),
+            ("max_replicas", -1, "replicas"),
+            ("collective_timeout_seconds", -1, "collective timeout"),
+            ("listen_port", -1, "listen port"),
+            ("count_per_pod", -1, "gpu count"),
+            ("min_memory_gib", -1, "gpu memory"),
+        ],
+    )
+    def test_plan_k8s_mesh_rejects_negative_boundary_values(
+        field: str,
+        value: int,
+        message: str,
+    ) -> None:
+        spec = llama_cluster_spec()
+        match field:
+            case "min_replicas":
+                spec.serving.min_replicas = value
+            case "max_replicas":
+                spec.serving.max_replicas = value
+            case "collective_timeout_seconds":
+                spec.mesh.collective_timeout_seconds = value
+            case "listen_port":
+                spec.mesh.listen_port = value
+            case "count_per_pod":
+                spec.gpu.count_per_pod = value
+            case "min_memory_gib":
+                spec.gpu.min_memory_gib = value
+            case unreachable:
+                raise AssertionError(unreachable)
+    
+>       with pytest.raises(K8sPlanError, match=message):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE <class 'oxidize_python.core.mesh.k8s.K8sPlanError'>
+
+oxidize_python/core/mesh/test_k8s.py:111: Failed
+_ test_plan_k8s_mesh_rejects_negative_boundary_values[min_memory_gib--1-gpu memory] _
+
+field = 'min_memory_gib', value = -1, message = 'gpu memory'
+
+    @pytest.mark.parametrize(
+        ("field", "value", "message"),
+        [
+            ("min_replicas", -1, "replicas"),
+            ("max_replicas", -1, "replicas"),
+            ("collective_timeout_seconds", -1, "collective timeout"),
+            ("listen_port", -1, "listen port"),
+            ("count_per_pod", -1, "gpu count"),
+            ("min_memory_gib", -1, "gpu memory"),
+        ],
+    )
+    def test_plan_k8s_mesh_rejects_negative_boundary_values(
+        field: str,
+        value: int,
+        message: str,
+    ) -> None:
+        spec = llama_cluster_spec()
+        match field:
+            case "min_replicas":
+                spec.serving.min_replicas = value
+            case "max_replicas":
+                spec.serving.max_replicas = value
+            case "collective_timeout_seconds":
+                spec.mesh.collective_timeout_seconds = value
+            case "listen_port":
+                spec.mesh.listen_port = value
+            case "count_per_pod":
+                spec.gpu.count_per_pod = value
+            case "min_memory_gib":
+                spec.gpu.min_memory_gib = value
+            case unreachable:
+                raise AssertionError(unreachable)
+    
+>       with pytest.raises(K8sPlanError, match=message):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE <class 'oxidize_python.core.mesh.k8s.K8sPlanError'>
+
+oxidize_python/core/mesh/test_k8s.py:111: Failed
+=========================== short test summary info ============================
+FAILED oxidize_python/core/mesh/test_k8s.py::test_plan_k8s_mesh_rejects_negative_boundary_values[min_replicas--1-replicas]
+FAILED oxidize_python/core/mesh/test_k8s.py::test_plan_k8s_mesh_rejects_negative_boundary_values[listen_port--1-listen port]
+FAILED oxidize_python/core/mesh/test_k8s.py::test_plan_k8s_mesh_rejects_negative_boundary_values[min_memory_gib--1-gpu memory]
+3 failed, 6 passed in 0.13s
+
+=== Socket Firewall ===
+
+

@@ -91,6 +91,36 @@ pub fn map_hf_tensor_name(name: &str) -> String {
     }
 }
 
+/// Normalize a tensor name from GGUF or HF conventions into oxidize's canonical
+/// GGUF naming. Returns `None` for tensors that should be skipped (e.g. vision).
+pub fn normalize_gguf_tensor_name(name: &str) -> Option<String> {
+    match name {
+        "tok_embeddings.weight"
+        | "token_embd.weight"
+        | "output.weight"
+        | "norm.weight"
+        | "output_norm.weight" => Some(name.to_owned()),
+        n if n.starts_with("blk.") => Some(n.to_owned()),
+        _ => {
+            let mapped = map_hf_tensor_name(name);
+            if mapped.starts_with("blk.")
+                || matches!(
+                    mapped.as_str(),
+                    "tok_embeddings.weight"
+                        | "token_embd.weight"
+                        | "output.weight"
+                        | "norm.weight"
+                        | "output_norm.weight"
+                )
+            {
+                Some(mapped)
+            } else {
+                None
+            }
+        }
+    }
+}
+
 pub fn build_conversion_plan(
     metadata: &BTreeMap<String, String>,
     tensors: impl IntoIterator<Item = String>,

@@ -23,9 +23,8 @@ use crate::routes::responses::{
     validate_candidate_count,
 };
 use crate::runtime::generate::{
-    GenerationError, GenerationRequest, generate_text,
-    generate_with_scheduler_blocking, generate_with_scheduler_streaming_blocking,
-    render_chat_prompt,
+    GenerationError, GenerationRequest, generate_text, generate_with_scheduler_blocking,
+    generate_with_scheduler_streaming_blocking, render_chat_prompt,
 };
 use crate::schema::{ChatCompletionRequest, ResponseFormat, StopSequences};
 
