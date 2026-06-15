@@ -26,6 +26,7 @@ use crate::tensor::{
     gemv_quantized_f32, rms_norm_f32, softmax_f32,
 };
 use memmap2::Mmap;
+use rayon::prelude::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -72,8 +73,10 @@ fn quant_supported(q: GgufQuantizationType) -> bool {
     )
 }
 
-/// A quantized weight matrix held as an mmap slice. `rows` outputs of `cols` inputs each.
-/// `deq` holds a dequantized f32 copy for types OXK's kernels don't support (e.g. Q5_0).
+/// A quantized weight matrix. `rows` outputs of `cols` inputs each. Normally an mmap slice; for
+/// types OXK's kernels don't support (e.g. Q5_0) it is requantized to Q8_0 and held in `owned`
+/// (Q8_0 is higher precision than Q5_0, so the requant is near-lossless and stays on the fast
+/// SIMD path — ~4x less RAM and ~10x faster than a scalar f32 fallback).
 #[derive(Clone)]
 struct QW {
     q: GgufQuantizationType,
@@ -81,7 +84,7 @@ struct QW {
     len: usize,
     rows: usize,
     cols: usize,
-    deq: Option<Vec<f32>>,
+    owned: Option<Vec<u8>>,
 }
 
 /// A routed-experts tensor: `n_expert` matrices of `rows x cols` each, contiguous.
@@ -92,7 +95,15 @@ struct EW {
     len: usize,
     rows: usize,
     cols: usize,
-    deq: Option<Vec<f32>>,
+    owned: Option<Vec<u8>>,
+}
+
+/// Requantize an OXK-unsupported buffer to Q8_0 bytes (via f32). `n` = element count.
+fn requant_to_q8_0(q: GgufQuantizationType, bytes: &[u8], n: usize) -> Vec<u8> {
+    let f = dequant_any(q, bytes, n);
+    let mut out = vec![0u8; (n / 32) * 34];
+    crate::quantization::quantize_q8_0_scalar(&f, &mut out).expect("q8_0 requant");
+    out
 }
 
 struct Layer {
@@ -211,47 +222,33 @@ fn f16_to_f32(h: u16) -> f32 {
 }
 
 impl DiffusionGemma {
-    fn bytes(&self, w: &QW) -> &[u8] {
-        &self.mmap[w.off..w.off + w.len]
+    fn bytes<'a>(&'a self, w: &'a QW) -> &'a [u8] {
+        match &w.owned {
+            Some(b) => b,
+            None => &self.mmap[w.off..w.off + w.len],
+        }
     }
-    fn ebytes(&self, w: &EW) -> &[u8] {
-        &self.mmap[w.off..w.off + w.len]
+    fn ebytes<'a>(&'a self, w: &'a EW) -> &'a [u8] {
+        match &w.owned {
+            Some(b) => b,
+            None => &self.mmap[w.off..w.off + w.len],
+        }
     }
 
-    /// Batched matmul `outputs[batch, rows] = W[rows, cols] @ inputs[batch, cols]`, using the OXK
-    /// quantized GEMM when supported, else a dequantized-f32 GEMV loop.
+    /// Batched matmul `outputs[batch, rows] = W[rows, cols] @ inputs[batch, cols]` on OXK GEMM.
     fn gemm_qw(&self, w: &QW, rows: usize, cols: usize, inputs: &[f32], outputs: &mut [f32], batch: usize) {
-        if let Some(d) = &w.deq {
-            for b in 0..batch {
-                gemv_f32(d, rows, cols, &inputs[b * cols..b * cols + cols], &mut outputs[b * rows..b * rows + rows]).unwrap();
-            }
-        } else {
-            gemm_quantized_f32(w.q, self.bytes(w), rows, cols, inputs, outputs, batch).unwrap();
-        }
+        gemm_quantized_f32(w.q, self.bytes(w), rows, cols, inputs, outputs, batch).unwrap();
     }
 
     /// Single-vector matmul `output[rows] = W[rows, cols] @ input[cols]`.
     fn gemv_qw(&self, w: &QW, rows: usize, cols: usize, input: &[f32], output: &mut [f32]) {
-        if let Some(d) = &w.deq {
-            gemv_f32(d, rows, cols, input, output).unwrap();
-        } else {
-            gemv_quantized_f32(w.q, self.bytes(w), rows, cols, input, output).unwrap();
-        }
+        gemv_quantized_f32(w.q, self.bytes(w), rows, cols, input, output).unwrap();
     }
 
     /// Selected-experts matmul. `output[n_sel, rows]`; each expert reads `inputs[slot*stride..]`
     /// (or shared `inputs` when `stride == 0`).
     fn experts_ew(&self, w: &EW, sel: &[usize], rows: usize, cols: usize, inputs: &[f32], stride: usize, output: &mut [f32]) {
-        if let Some(d) = &w.deq {
-            let per = rows * cols;
-            for (s, &e) in sel.iter().enumerate() {
-                let mat = &d[e * per..e * per + per];
-                let inp = if stride == 0 { &inputs[..cols] } else { &inputs[s * stride..s * stride + cols] };
-                gemv_f32(mat, rows, cols, inp, &mut output[s * rows..s * rows + rows]).unwrap();
-            }
-        } else {
-            gemv_quantized_experts_f32(w.q, self.ebytes(w), N_EXPERT, sel, rows, cols, inputs, stride, output).unwrap();
-        }
+        gemv_quantized_experts_f32(w.q, self.ebytes(w), N_EXPERT, sel, rows, cols, inputs, stride, output).unwrap();
     }
 
     pub fn load(path: &str) -> Result<DiffusionGemma, String> {
@@ -271,12 +268,12 @@ impl DiffusionGemma {
             let rows = t.dimensions[1] as usize;
             let len = bytes_for(q, rows, cols);
             let off = t.absolute_offset as usize;
-            let deq = if quant_supported(q) {
-                None
+            if quant_supported(q) {
+                Ok(QW { q, off, len, rows, cols, owned: None })
             } else {
-                Some(dequant_any(q, &mmap[off..off + len], rows * cols))
-            };
-            Ok(QW { q, off, len, rows, cols, deq })
+                let owned = requant_to_q8_0(q, &mmap[off..off + len], rows * cols);
+                Ok(QW { q: GgufQuantizationType::Q8_0, off, len: owned.len(), rows, cols, owned: Some(owned) })
+            }
         };
         let ew = |name: &str| -> Result<EW, String> {
             let t = by_name.get(name).ok_or_else(|| format!("missing tensor {name}"))?;
@@ -286,12 +283,12 @@ impl DiffusionGemma {
             let rows = t.dimensions[1] as usize;
             let len = bytes_for(q, rows, cols) * N_EXPERT;
             let off = t.absolute_offset as usize;
-            let deq = if quant_supported(q) {
-                None
+            if quant_supported(q) {
+                Ok(EW { q, off, len, rows, cols, owned: None })
             } else {
-                Some(dequant_any(q, &mmap[off..off + len], N_EXPERT * rows * cols))
-            };
-            Ok(EW { q, off, len, rows, cols, deq })
+                let owned = requant_to_q8_0(q, &mmap[off..off + len], N_EXPERT * rows * cols);
+                Ok(EW { q: GgufQuantizationType::Q8_0, off, len: owned.len(), rows, cols, owned: Some(owned) })
+            }
         };
         let f32v = |name: &str| -> Result<Vec<f32>, String> {
             let t = by_name.get(name).ok_or_else(|| format!("missing tensor {name}"))?;
@@ -454,23 +451,19 @@ impl DiffusionGemma {
                 }
             }
 
-            // bidirectional attention (scale = 1.0)
+            // bidirectional attention (scale = 1.0), parallelized over query tokens.
+            // prompt-prefix queries (i < prefix) are causal among the prefix; canvas queries
+            // (i >= prefix) attend everything (bidirectional + full cross).
             let mut attn = vec![0.0_f32; nt * qdim];
-            let mut scores = vec![0.0_f32; nt];
-            let mut probs = vec![0.0_f32; nt];
-            for i in 0..nt {
+            attn.par_chunks_mut(qdim).enumerate().for_each(|(i, arow)| {
+                let causal = i < prefix;
+                let lim = if causal { i + 1 } else { nt };
+                let mut scores = vec![0.0_f32; lim];
+                let mut probs = vec![0.0_f32; lim];
                 for h in 0..N_HEAD {
                     let kvhh = h / group;
                     let qv = &q[i * qdim + h * hd..i * qdim + h * hd + hd];
-                    // prompt-prefix queries (i < prefix) are causal among the prefix; canvas
-                    // queries (i >= prefix) attend everything (bidirectional + full cross).
-                    let causal = i < prefix;
-                    let mut lim = nt;
-                    for j in 0..nt {
-                        if causal && j > i {
-                            lim = j;
-                            break;
-                        }
+                    for j in 0..lim {
                         let kv = &k[j * kvdim + kvhh * hd..j * kvdim + kvhh * hd + hd];
                         let mut d = 0.0_f32;
                         for t in 0..hd {
@@ -478,8 +471,8 @@ impl DiffusionGemma {
                         }
                         scores[j] = d;
                     }
-                    softmax_f32(&scores[..lim], &mut probs[..lim]).unwrap();
-                    let out = &mut attn[i * qdim + h * hd..i * qdim + h * hd + hd];
+                    softmax_f32(&scores, &mut probs).unwrap();
+                    let out = &mut arow[h * hd..h * hd + hd];
                     for j in 0..lim {
                         let vv = &v[j * kvdim + kvhh * hd..j * kvdim + kvhh * hd + hd];
                         let p = probs[j];
@@ -488,7 +481,7 @@ impl DiffusionGemma {
                         }
                     }
                 }
-            }
+            });
 
             // output projection
             let mut attn_proj = vec![0.0_f32; nt * N_EMBD];
@@ -550,9 +543,13 @@ impl DiffusionGemma {
         }
     }
 
-    fn moe_ffn(&self, l: &Layer, src: &[f32], out: &mut [f32], nt: usize) {
+    fn moe_ffn(&self, l: &Layer, src: &[f32], out: &mut [f32], _nt: usize) {
         let ones = vec![1.0_f32; N_EMBD];
-        for i in 0..nt {
+        // Sequential over tokens: the inner experts GEMV is already rayon-parallel over its
+        // rows; an outer par here nests and thrashes (measured 4x slower). Keeping the single
+        // (inner) level of parallelism is fastest until a batched mul_mat_id-style experts
+        // kernel lands.
+        out.chunks_mut(N_EMBD).enumerate().for_each(|(i, or)| {
             let sr = &src[i * N_EMBD..(i + 1) * N_EMBD];
             // router input: scaleless_rms(attn_out) * 1/sqrt(N_EMBD) * gate_inp_s
             let mut rin = vec![0.0_f32; N_EMBD];
@@ -591,7 +588,6 @@ impl DiffusionGemma {
             let mut dn = vec![0.0_f32; N_USED * N_EMBD];
             self.experts_ew(&l.ffn_down_exps, &sel, N_EMBD, EXPERT_FF, &h, EXPERT_FF, &mut dn);
             // weighted sum (router prob / wsum) * per-expert down scale
-            let or = &mut out[i * N_EMBD..(i + 1) * N_EMBD];
             for (s, &e) in sel.iter().enumerate() {
                 let w = (probs[e] / wsum) * l.ffn_down_exps_s[e];
                 for t in 0..N_EMBD {
@@ -602,7 +598,7 @@ impl DiffusionGemma {
             let mut nrm = vec![0.0_f32; N_EMBD];
             rms_norm_f32(or, &l.post_ffw_norm_2, EPS, &mut nrm).unwrap();
             or.copy_from_slice(&nrm);
-        }
+        });
     }
 
     /// Project output-normed hidden -> vocab logits via the tied token_embd head, with softcap.
@@ -702,57 +698,71 @@ impl DiffusionGemma {
 
             let outv = self.forward_masked(&inpl, &positions, prefix);
 
-            // sample each canvas position
+            // sample each canvas position (parallel over the canvas; lm_head + full-vocab
+            // softmax/sort dominate the per-step cost). Randomness is a deterministic per
+            // (seed, step, position) draw so the parallel map stays reproducible.
             let temp = 0.4 + 0.4 * (step as f32 / steps as f32);
             let mut entropy = vec![0.0_f32; CANVAS];
             let mut sampled = vec![0u32; CANVAS];
-            let mut logits = vec![0.0_f32; N_VOCAB];
-            for c in 0..CANVAS {
-                self.lm_head(&outv[(prefix + c) * N_EMBD..(prefix + c + 1) * N_EMBD], &mut logits);
-                // softmax over logits/temp with running max
-                let mut maxl = f32::NEG_INFINITY;
-                let mut amax = 0usize;
-                for v in 0..N_VOCAB {
-                    let x = logits[v] / temp;
-                    if x > maxl {
-                        maxl = x;
-                        amax = v;
+            // Batched output head: all canvas logits in one big parallel GEMM (the dominant
+            // matmul), then a nest-free parallel sample over the canvas.
+            let canvas_hidden = &outv[prefix * N_EMBD..(prefix + CANVAS) * N_EMBD];
+            let mut all_logits = vec![0.0_f32; CANVAS * N_VOCAB];
+            self.gemm_qw(&self.token_embd, N_VOCAB, N_EMBD, canvas_hidden, &mut all_logits, CANVAS);
+            all_logits.par_chunks_mut(N_VOCAB).for_each(|lg| {
+                for v in lg.iter_mut() {
+                    *v = SOFTCAP * (*v / SOFTCAP).tanh();
+                }
+            });
+            let results: Vec<(f32, u32, u32, Vec<(u32, f32)>)> = (0..CANVAS)
+                .into_par_iter()
+                .map(|c| {
+                    let mut logits = all_logits[c * N_VOCAB..(c + 1) * N_VOCAB].to_vec();
+                    let mut maxl = f32::NEG_INFINITY;
+                    let mut amax = 0usize;
+                    for v in 0..N_VOCAB {
+                        let x = logits[v] / temp;
+                        if x > maxl {
+                            maxl = x;
+                            amax = v;
+                        }
                     }
-                }
-                let mut sum = 0.0f32;
-                for v in 0..N_VOCAB {
-                    let p = (logits[v] / temp - maxl).exp();
-                    logits[v] = p;
-                    sum += p;
-                }
-                // entropy + multinomial sample
-                let mut ent = 0.0f32;
-                let r = (rng.next_f32()) * sum;
-                let mut cum = 0.0f32;
-                let mut tok = amax as u32;
-                let mut picked = false;
-                for v in 0..N_VOCAB {
-                    let p = logits[v] / sum;
-                    if p > 0.0 {
-                        ent -= p * p.ln();
+                    let mut sum = 0.0f32;
+                    for v in 0..N_VOCAB {
+                        let p = (logits[v] / temp - maxl).exp();
+                        logits[v] = p;
+                        sum += p;
                     }
-                    cum += logits[v];
-                    if !picked && cum >= r {
-                        tok = v as u32;
-                        picked = true;
+                    let mut ent = 0.0f32;
+                    let r = det_unif(seed ^ (step as u64).wrapping_mul(0x9E3779B97F4A7C15) ^ (c as u64)) * sum;
+                    let mut cum = 0.0f32;
+                    let mut tok = amax as u32;
+                    let mut picked = false;
+                    for v in 0..N_VOCAB {
+                        let p = logits[v] / sum;
+                        if p > 0.0 {
+                            ent -= p * p.ln();
+                        }
+                        cum += logits[v];
+                        if !picked && cum >= r {
+                            tok = v as u32;
+                            picked = true;
+                        }
                     }
-                }
-                // top-SC_K self-cond via partial selection (renormalized over full softmax)
-                let mut order: Vec<usize> = (0..N_VOCAB).collect();
-                order.select_nth_unstable_by(SC_K, |&a, &b| logits[b].partial_cmp(&logits[a]).unwrap());
-                for k in 0..SC_K {
-                    let id = order[k];
-                    sc_ids[c * SC_K + k] = id as u32;
-                    sc_probs[c * SC_K + k] = logits[id] / sum;
-                }
+                    let mut order: Vec<usize> = (0..N_VOCAB).collect();
+                    order.select_nth_unstable_by(SC_K, |&a, &b| logits[b].partial_cmp(&logits[a]).unwrap());
+                    let sc: Vec<(u32, f32)> = order[..SC_K].iter().map(|&id| (id as u32, logits[id] / sum)).collect();
+                    (ent, tok, amax as u32, sc)
+                })
+                .collect();
+            for (c, (ent, tok, amax, sc)) in results.into_iter().enumerate() {
                 entropy[c] = ent;
                 sampled[c] = tok;
-                argmax_canvas[c] = amax as u32;
+                argmax_canvas[c] = amax;
+                for (k, (id, p)) in sc.into_iter().enumerate() {
+                    sc_ids[c * SC_K + k] = id;
+                    sc_probs[c * SC_K + k] = p;
+                }
             }
             have_sc = true;
 
@@ -803,6 +813,15 @@ impl DiffusionGemma {
         let mut buf = inpl.to_vec();
         self.forward_inner(&mut buf, positions, prefix)
     }
+}
+
+/// Deterministic uniform in [0,1) from a 64-bit key (splitmix64 finalizer).
+fn det_unif(mut z: u64) -> f32 {
+    z = z.wrapping_add(0x9E3779B97F4A7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+    z ^= z >> 31;
+    (z >> 40) as f32 / (1u64 << 24) as f32
 }
 
 /// Cheap deterministic RNG (xorshift-ish LCG) to avoid an external dependency.
