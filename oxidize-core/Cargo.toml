@@ -59,3 +59,15 @@ metal = "0.31"
 [[bench]]
 name = "criterion"
 harness = false
+
+[[bench]]
+name = "gemv_bench"
+harness = false
+
+[[bench]]
+name = "inference_bench"
+harness = false
+
+[[bench]]
+name = "layer_bench"
+harness = false

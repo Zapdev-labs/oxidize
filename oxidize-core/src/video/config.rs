@@ -3,8 +3,10 @@ use crate::vision::VisionConfig;
 
 /// Strategy for selecting which frames of an input video to keep.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum FrameSamplingStrategy {
     /// Pick `target_frames` indices evenly spaced across `[0, total_frames)`.
+    #[default]
     Uniform,
     /// Keep every `stride`-th frame (clipped to `target_frames` if available).
     /// Stride 0 is treated as 1 (i.e. dense sampling).
@@ -15,11 +17,6 @@ pub enum FrameSamplingStrategy {
     Adaptive,
 }
 
-impl Default for FrameSamplingStrategy {
-    fn default() -> Self {
-        Self::Uniform
-    }
-}
 
 /// Configuration for the temporal encoder that runs on top of the
 /// per-frame vision encoder.
@@ -83,7 +80,7 @@ impl TemporalConfig {
         if self.num_heads == 0 {
             return invalid_config("num_heads must be non-zero");
         }
-        if self.hidden_size % self.num_heads != 0 {
+        if !self.hidden_size.is_multiple_of(self.num_heads) {
             return invalid_config("hidden_size must be divisible by num_heads");
         }
         if self.num_layers == 0 {
@@ -95,7 +92,7 @@ impl TemporalConfig {
         if self.max_frames == 0 {
             return invalid_config("max_frames must be non-zero");
         }
-        if !(self.rms_norm_eps > 0.0) {
+        if self.rms_norm_eps <= 0.0 {
             return invalid_config("rms_norm_eps must be positive");
         }
         if self.rope_theta <= 0.0 {
@@ -108,8 +105,10 @@ impl TemporalConfig {
 /// How pooled per-frame video tokens should be aggregated into a single
 /// representation per frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum TemporalPool {
     /// Mean of all patch embeddings per frame.
+    #[default]
     Mean,
     /// First token (the vision encoder's class token) per frame.
     ClsToken,
@@ -117,11 +116,6 @@ pub enum TemporalPool {
     LastToken,
 }
 
-impl Default for TemporalPool {
-    fn default() -> Self {
-        Self::Mean
-    }
-}
 
 /// Top-level video model configuration. Holds both the per-frame vision
 /// configuration and the temporal stack configuration.
@@ -149,8 +143,10 @@ pub struct VideoConfig {
 
 impl Default for VideoConfig {
     fn default() -> Self {
-        let mut temporal = TemporalConfig::default();
-        temporal.hidden_size = VisionConfig::clip_large().projection_dim;
+        let temporal = TemporalConfig {
+            hidden_size: VisionConfig::clip_large().projection_dim,
+            ..Default::default()
+        };
         Self {
             vision: VisionConfig::clip_large(),
             temporal,
@@ -168,12 +164,14 @@ impl VideoConfig {
     /// Reasonable defaults for a small / fast CPU video model.
     pub fn cpu_small() -> Self {
         let vision = VisionConfig::clip_base();
-        let mut temporal = TemporalConfig::default();
-        temporal.hidden_size = vision.projection_dim;
-        temporal.num_layers = 2;
-        temporal.num_heads = 4;
-        temporal.intermediate_size = 2048;
-        temporal.max_frames = 16;
+        let temporal = TemporalConfig {
+            hidden_size: vision.projection_dim,
+            num_layers: 2,
+            num_heads: 4,
+            intermediate_size: 2048,
+            max_frames: 16,
+            ..Default::default()
+        };
         Self {
             vision,
             temporal,

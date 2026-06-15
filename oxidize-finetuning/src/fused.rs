@@ -1,5 +1,6 @@
 use rayon::prelude::*;
 
+#[allow(clippy::too_many_arguments)]
 pub fn adamw_step(
     params: &mut [f32],
     grads: &[f32],

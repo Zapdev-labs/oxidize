@@ -1,3 +1,5 @@
+#![allow(clippy::needless_range_loop, clippy::too_many_arguments)]
+
 use crate::flash_attention::flash_attention_decode_heads_f32;
 use crate::gguf::{GgufQuantizationType, MappedGgufFile};
 use crate::kv_cache::{KvCache, KvCacheConfig};
@@ -5,7 +7,8 @@ use crate::model::{Logits, Model, ModelError, Session, Token};
 use crate::quantization::{dequantize_scalar, quantized_size};
 use crate::tensor::{
     DType, apply_geglu_inplace_f32, apply_rope_f32, apply_swiglu_inplace_f32, f16_le_to_f32,
-    gemm_quantized_f32, gemv_f32, gemv_quantized_experts_f32, gemv_quantized_f32, rms_norm_f32,
+    gemm_quantized_f32, gemv_f32, gemv_quantized_experts_f32, gemv_quantized_experts_gate_up_f32,
+    gemv_quantized_f32, rms_norm_f32,
 };
 use memmap2::Mmap;
 use std::sync::Arc;
@@ -44,7 +47,8 @@ impl ModelArchitecture {
                 "deepseek" | "deepseek2" | "deepseek_v2" | "deepseek_v3" | "deepseek_moe" => {
                     Self::DeepSeek
                 }
-                "qwen" | "qwen2" | "qwen2moe" | "qwen3" | "qwen35" => Self::Qwen,
+                "qwen" | "qwen2" | "qwen2moe" | "qwen3" | "qwen3moe" | "qwen35" | "qwen3_5_moe"
+                | "qwen3_5_moe_text" | "qwen35moe" => Self::Qwen,
                 "gemma" | "gemma2" | "gemma3" | "gemma4" => Self::Gemma,
                 "phi" | "phi3" => Self::Phi,
                 "falcon" => Self::Falcon,
@@ -148,6 +152,8 @@ pub struct InferenceConfig {
     /// attention output and a post-FFN norm to the FFN output, each *before* the
     /// residual add (in addition to the standard pre-attention / pre-FFN norms).
     pub sandwich_norm: bool,
+    /// Qwen-style RMSNorm scales by `(1 + weight)` instead of `weight` alone.
+    pub rms_norm_weight_plus_one: bool,
 }
 
 impl Default for InferenceConfig {
@@ -180,6 +186,7 @@ impl Default for InferenceConfig {
             embedding_scale: 1.0,
             gelu_ffn: false,
             sandwich_norm: false,
+            rms_norm_weight_plus_one: false,
         }
     }
 }
@@ -245,6 +252,14 @@ impl InferenceConfig {
         }
     }
 
+    /// Map `general.architecture` values to the GGUF metadata key prefix.
+    fn gguf_metadata_prefix(arch: &str) -> &str {
+        match arch {
+            "qwen3_5_moe_text" | "qwen3_5_moe" | "qwen35moe" | "qwen3_5" => "qwen35",
+            other => other,
+        }
+    }
+
     /// Build an InferenceConfig from a mapped GGUF file by reading metadata under
     /// the actual architecture prefix (e.g. `qwen3.*`, `llama.*`, `gemma3.*`).
     /// Falls back to weight tensor dimensions when metadata is missing.
@@ -257,32 +272,55 @@ impl InferenceConfig {
             .to_string();
         let architecture = ModelArchitecture::from_gguf(mapped);
 
-        let key = |suffix: &str| format!("{arch}.{suffix}");
-        let arch_u32 = |suffix: &str| metadata_u32_lookup(metadata, &key(suffix));
-        let arch_f32 = |suffix: &str| metadata_f32_lookup(metadata, &key(suffix));
+        let metadata_prefix = Self::gguf_metadata_prefix(&arch);
+        let key = |suffix: &str| format!("{metadata_prefix}.{suffix}");
+        let arch_u32 = |suffix: &str| {
+            metadata_u32_lookup(metadata, &key(suffix)).or_else(|| {
+                if metadata_prefix == arch {
+                    None
+                } else {
+                    metadata_u32_lookup(metadata, &format!("{arch}.{suffix}"))
+                }
+            })
+        };
+        let arch_f32 = |suffix: &str| {
+            metadata_f32_lookup(metadata, &key(suffix)).or_else(|| {
+                if metadata_prefix == arch {
+                    None
+                } else {
+                    metadata_f32_lookup(metadata, &format!("{arch}.{suffix}"))
+                }
+            })
+        };
 
         let token_embd_dims = first_tensor_dims(mapped, "tok_embeddings.weight")
             .or_else(|| first_tensor_dims(mapped, "token_embd.weight"));
 
         let hidden_size = arch_u32("embedding_length")
             .or_else(|| {
-                token_embd_dims
-                    .as_ref()
-                    .and_then(|d| d.first().copied())
-                    .map(|v| v as u32)
+                token_embd_dims.as_ref().and_then(|d| match d.len() {
+                    0 => None,
+                    1 => d.first().copied().map(|v| v as u32),
+                    _ => d.get(1).copied().map(|v| v as u32),
+                })
             })
-            .unwrap_or(4096) as usize;
+            .map(|v| v as usize)
+            .unwrap_or(4096);
 
         let vocab_size = arch_u32("vocab_size")
             .or_else(|| metadata_u32_lookup(metadata, "general.vocab_size"))
             .or_else(|| metadata_u32_lookup(metadata, "tokenizer.ggml.tokens.count"))
             .or_else(|| {
-                token_embd_dims
-                    .as_ref()
-                    .and_then(|d| d.get(1).copied())
-                    .map(|v| v as u32)
+                token_embd_dims.as_ref().and_then(|d| match d.len() {
+                    0 | 1 => None,
+                    // GGUF dim order differs between writers (llama.cpp files
+                    // store hidden-first, oxidize-converted files vocab-first);
+                    // the vocab axis is always the larger of the two.
+                    _ => d.iter().copied().max().map(|v| v as u32),
+                })
             })
-            .unwrap_or(32000) as usize;
+            .map(|v| v as usize)
+            .unwrap_or(32000);
 
         let context_size = arch_u32("context_length")
             .map(|v| v as usize)
@@ -355,7 +393,15 @@ impl InferenceConfig {
         }
 
         let rms_norm_eps = arch_f32("attention.layer_norm_rms_epsilon").unwrap_or(1e-5);
-        let rope_theta = arch_f32("rope.freq_base").unwrap_or(10000.0);
+        let mut rope_theta = arch_f32("rope.freq_base").unwrap_or(10000.0);
+        if matches!(
+            arch.as_str(),
+            "qwen3_5_moe_text" | "qwen3_5_moe" | "qwen35moe" | "qwen3_5" | "qwen35"
+        ) && rope_theta <= 10000.0
+        {
+            // HF stores theta under rope_parameters; older GGUF converts may omit rope.freq_base.
+            rope_theta = 10_000_000.0;
+        }
         let sliding_window = arch_u32("attention.sliding_window")
             .map(|v| v as usize)
             .unwrap_or(0);
@@ -412,9 +458,19 @@ impl InferenceConfig {
 
         // Partial RoPE: number of head dimensions that receive rotation.
         // 0 means "use full kv_head_dim" (standard). MiniMax-M2 uses 64 of 128.
-        let rope_dim = arch_u32("rope.dimension_count")
+        let mut rope_dim = arch_u32("rope.dimension_count")
             .map(|v| v as usize)
             .unwrap_or(0);
+        if rope_dim == 0
+            && matches!(
+                arch.as_str(),
+                "qwen3_5_moe_text" | "qwen3_5_moe" | "qwen35moe" | "qwen3_5" | "qwen35"
+            )
+            && key_value_head_dim > 0
+        {
+            // Qwen3.5 partial_rotary_factor=0.25 on 256-dim heads.
+            rope_dim = key_value_head_dim / 4;
+        }
 
         // ---- Gemma-family specifics ----
         // Gemma 2/3/4 interleave local sliding-window and global attention layers,
@@ -449,6 +505,14 @@ impl InferenceConfig {
         };
         let gelu_ffn = is_gemma;
         let sandwich_norm = is_gemma;
+        // Only the Qwen3.5/GDN lineage uses the Gemma-style (1 + w) RMSNorm
+        // convention. Standard Qwen2/Qwen3/qwen3moe use plain w * x_hat —
+        // keying this on the whole Qwen family garbled every official Qwen
+        // GGUF in code paths that honor the flag (layer-wise).
+        let rms_norm_weight_plus_one = matches!(
+            arch.as_str(),
+            "qwen35" | "qwen35moe" | "qwen3_5_moe" | "qwen3_5_moe_text"
+        );
 
         Self {
             vocab_size,
@@ -478,6 +542,7 @@ impl InferenceConfig {
             embedding_scale,
             gelu_ffn,
             sandwich_norm,
+            rms_norm_weight_plus_one,
         }
     }
 }
@@ -928,7 +993,7 @@ fn gemm_weight(
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
-struct LayerWeights {
+pub(crate) struct LayerWeights {
     attn_norm: Vec<f32>,
     attn_q: WeightStorage,
     attn_q_bias: Vec<f32>,
@@ -1710,6 +1775,19 @@ impl InferenceModel {
                 }
             }
 
+            if std::env::var_os("OXIDIZE_TRACE_FWD").is_some() {
+                let s = |v: &[f32]| v.iter().map(|x| *x as f64).sum::<f64>();
+                for t in 0..batch {
+                    eprintln!(
+                        "STAGE inf pos={} layer={layer_idx} normed={:.6e} q={:.6e} k={:.6e} v={:.6e}",
+                        start_pos + t,
+                        s(&normed_batch[t * h..(t + 1) * h]),
+                        s(&q_batch[t * q_len..(t + 1) * q_len]),
+                        s(&k_batch[t * kv_len..(t + 1) * kv_len]),
+                        s(&v_batch[t * kv_len..(t + 1) * kv_len])
+                    );
+                }
+            }
             let q_heads = q_len_used0 / q_head_dim.max(1);
             let kv_heads = kv_len.checked_div(kv_head_dim).unwrap_or(0);
 
@@ -2009,6 +2087,15 @@ impl InferenceModel {
 
                 for i in 0..batch * h {
                     x_batch[i] += ffn_out_batch[i];
+                }
+            }
+            if std::env::var_os("OXIDIZE_TRACE_FWD").is_some() {
+                for t in 0..batch {
+                    let sum: f64 = x_batch[t * h..(t + 1) * h].iter().map(|v| *v as f64).sum();
+                    eprintln!(
+                        "TRACE inf pos={} layer={layer_idx} sum={sum:.9e}",
+                        start_pos + t
+                    );
                 }
             }
         }
@@ -2315,12 +2402,12 @@ impl InferenceModel {
                         let buffer = &self.ssm_conv_buffers[layer_idx];
                         for c in 0..qkv_out_len {
                             let mut sum = 0.0_f32;
-                            // Current token (weight[0])
-                            sum += layer.ssm_conv1d[c] * x_proj[c];
-                            // Previous tokens (weights[1..3])
+                            // Tap-major [kernel, channels]; newest input uses the last tap.
+                            sum +=
+                                layer.ssm_conv1d[(conv_kernel - 1) * qkv_out_len + c] * x_proj[c];
                             for b in 1..conv_kernel {
                                 if let Some(prev) = buffer.past_frame(b) {
-                                    let weight_idx = b * qkv_out_len + c;
+                                    let weight_idx = (conv_kernel - 1 - b) * qkv_out_len + c;
                                     sum += layer.ssm_conv1d[weight_idx] * prev[c];
                                 }
                             }
@@ -2960,6 +3047,10 @@ impl InferenceModel {
                     ws.x[i] += ffn_out[i];
                 }
             }
+            if std::env::var_os("OXIDIZE_TRACE_FWD").is_some() {
+                let sum: f64 = ws.x[..h].iter().map(|v| *v as f64).sum();
+                eprintln!("TRACE inf pos={pos} layer={layer_idx} sum={sum:.9e}");
+            }
         }
         Ok(())
     }
@@ -3280,185 +3371,237 @@ impl InferenceModel {
         router_logits: &mut [f32],
         expert_scores: &mut [(usize, f32)],
     ) -> Result<(), ModelError> {
-        let h = cfg.hidden_size;
-        // Experts may use a narrower intermediate width than the dense FFN
-        // (LFM2MoE: 1792 vs 7168). Fall back to intermediate_size otherwise.
-        let i_size = if cfg.expert_intermediate_size > 0 {
-            cfg.expert_intermediate_size
-        } else {
-            cfg.intermediate_size
-        };
-        let n_experts = cfg.num_experts;
-        let n_experts_per_tok = cfg.num_experts_per_tok.max(1).min(n_experts);
-        let sigmoid_gating = cfg.expert_gating_sigmoid;
+        moe_ffn_forward_weights(
+            &MoeFfnWeights::from_layer(layer),
+            cfg,
+            normed,
+            ffn_out,
+            gate_scratch,
+            up_scratch,
+            expert_out,
+            router_logits,
+            expert_scores,
+        )
+    }
+}
 
-        // 1. Router logits: [n_experts]
-        router_logits.fill(0.0_f32);
-        gemv_weight(&layer.ffn_gate_inp, n_experts, h, normed, router_logits)
-            .map_err(|e| ModelError::InferenceFailed(format!("moe router: {:?}", e)))?;
+/// MoE FFN weight bundle shared by inference and layer-wise runtimes.
+pub(crate) struct MoeFfnWeights<'a> {
+    pub gate_inp: &'a WeightStorage,
+    pub gate_exps: &'a WeightStorage,
+    pub up_exps: &'a WeightStorage,
+    pub down_exps: &'a WeightStorage,
+    pub exp_probs_b: &'a [f32],
+}
 
-        // 2. Gating. Softmax (Mixtral) or sigmoid + per-layer expert bias (LFM2MoE).
-        // For sigmoid gating the bias is added for top-k *selection* only; the
-        // routing weights are the raw sigmoid scores, renormalized over the
-        // selected experts. `router_logits` holds the weight, `expert_scores.1`
-        // the selection score.
-        if sigmoid_gating {
+impl<'a> MoeFfnWeights<'a> {
+    pub(crate) fn from_layer(layer: &'a LayerWeights) -> Self {
+        Self {
+            gate_inp: &layer.ffn_gate_inp,
+            gate_exps: &layer.ffn_gate_exps,
+            up_exps: &layer.ffn_up_exps,
+            down_exps: &layer.ffn_down_exps,
+            exp_probs_b: &layer.ffn_exp_probs_b,
+        }
+    }
+}
+
+pub(crate) fn moe_ffn_forward_weights(
+    layer: &MoeFfnWeights<'_>,
+    cfg: &InferenceConfig,
+    normed: &[f32],
+    ffn_out: &mut [f32],
+    gate_scratch: &mut [f32],
+    up_scratch: &mut [f32],
+    expert_out: &mut [f32],
+    router_logits: &mut [f32],
+    expert_scores: &mut [(usize, f32)],
+) -> Result<(), ModelError> {
+    let h = cfg.hidden_size;
+    // Experts may use a narrower intermediate width than the dense FFN
+    // (LFM2MoE: 1792 vs 7168). Fall back to intermediate_size otherwise.
+    let i_size = if cfg.expert_intermediate_size > 0 {
+        cfg.expert_intermediate_size
+    } else {
+        cfg.intermediate_size
+    };
+    let n_experts = cfg.num_experts;
+    let n_experts_per_tok = cfg.num_experts_per_tok.max(1).min(n_experts);
+    let sigmoid_gating = cfg.expert_gating_sigmoid;
+
+    // 1. Router logits: [n_experts]
+    router_logits.fill(0.0_f32);
+    gemv_weight(layer.gate_inp, n_experts, h, normed, router_logits)
+        .map_err(|e| ModelError::InferenceFailed(format!("moe router: {:?}", e)))?;
+
+    // 2. Gating. Softmax (Mixtral) or sigmoid + per-layer expert bias (LFM2MoE).
+    // For sigmoid gating the bias is added for top-k *selection* only; the
+    // routing weights are the raw sigmoid scores, renormalized over the
+    // selected experts. `router_logits` holds the weight, `expert_scores.1`
+    // the selection score.
+    if sigmoid_gating {
+        for logit in router_logits.iter_mut() {
+            *logit = 1.0_f32 / (1.0 + (-*logit).exp());
+        }
+        for (i, &w) in router_logits.iter().enumerate() {
+            let bias = layer.exp_probs_b.get(i).copied().unwrap_or(0.0);
+            expert_scores[i] = (i, w + bias);
+        }
+    } else {
+        let max_logit = router_logits
+            .iter()
+            .fold(f32::NEG_INFINITY, |a, &b| a.max(b));
+        let mut sum_exp = 0.0_f32;
+        for logit in router_logits.iter_mut() {
+            *logit = (*logit - max_logit).exp();
+            sum_exp += *logit;
+        }
+        if sum_exp > 0.0 {
             for logit in router_logits.iter_mut() {
-                *logit = 1.0_f32 / (1.0 + (-*logit).exp());
-            }
-            for (i, &w) in router_logits.iter().enumerate() {
-                let bias = layer.ffn_exp_probs_b.get(i).copied().unwrap_or(0.0);
-                expert_scores[i] = (i, w + bias);
-            }
-        } else {
-            let max_logit = router_logits
-                .iter()
-                .fold(f32::NEG_INFINITY, |a, &b| a.max(b));
-            let mut sum_exp = 0.0_f32;
-            for logit in router_logits.iter_mut() {
-                *logit = (*logit - max_logit).exp();
-                sum_exp += *logit;
-            }
-            if sum_exp > 0.0 {
-                for logit in router_logits.iter_mut() {
-                    *logit /= sum_exp;
-                }
-            }
-            for (i, &w) in router_logits.iter().enumerate() {
-                expert_scores[i] = (i, w);
+                *logit /= sum_exp;
             }
         }
-
-        // 3. Top-k expert selection by selection score.
-        let compare_score = |a: &(usize, f32), b: &(usize, f32)| {
-            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-        };
-        if n_experts_per_tok < expert_scores.len() {
-            let (selected, _, _) =
-                expert_scores.select_nth_unstable_by(n_experts_per_tok, compare_score);
-            selected.sort_by(compare_score);
-        } else {
-            expert_scores.sort_by(compare_score);
+        for (i, &w) in router_logits.iter().enumerate() {
+            expert_scores[i] = (i, w);
         }
+    }
 
-        // Renormalization denominator for sigmoid weights over selected experts.
-        let weight_norm = if sigmoid_gating {
-            let s: f32 = expert_scores
-                .iter()
-                .take(n_experts_per_tok)
-                .map(|&(idx, _)| router_logits[idx])
-                .sum();
-            if s > 0.0 { s } else { 1.0 }
+    // 3. Top-k expert selection by selection score.
+    let compare_score = |a: &(usize, f32), b: &(usize, f32)| {
+        b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+    };
+    if n_experts_per_tok < expert_scores.len() {
+        let (selected, _, _) =
+            expert_scores.select_nth_unstable_by(n_experts_per_tok, compare_score);
+        selected.sort_by(compare_score);
+    } else {
+        expert_scores.sort_by(compare_score);
+    }
+
+    // Renormalize routing weights over the selected experts (Qwen/Mixtral norm_topk_prob).
+    let weight_norm = {
+        let s: f32 = expert_scores
+            .iter()
+            .take(n_experts_per_tok)
+            .map(|&(idx, _)| router_logits[idx])
+            .sum();
+        if s > 0.0 { s } else { 1.0 }
+    };
+
+    // 4. Gather the selected experts and their routing weights.
+    let n_sel = n_experts_per_tok;
+    let mut selected: Vec<usize> = Vec::with_capacity(n_sel);
+    let mut weights: Vec<f32> = Vec::with_capacity(n_sel);
+    for &(expert_idx, _sel_score) in expert_scores.iter().take(n_sel) {
+        selected.push(expert_idx);
+        weights.push(router_logits[expert_idx] / weight_norm);
+    }
+
+    // 5. Expert FFN. Prefer the batched path (one parallel region per
+    // projection across all selected experts) for quantized experts; this
+    // avoids 12 separate rayon dispatches per MoE layer. Fall back to the
+    // per-expert path for f32 experts.
+    if let (Some((gq, gm)), Some((uq, um)), Some((dq, dm))) = (
+        expert_matrix(layer.gate_exps),
+        expert_matrix(layer.up_exps),
+        expert_matrix(layer.down_exps),
+    ) {
+        let gate_all = &mut gate_scratch[..n_sel * i_size];
+        let up_all = &mut up_scratch[..n_sel * i_size];
+        gate_all.fill(0.0_f32);
+        up_all.fill(0.0_f32);
+        if gq == uq {
+            // Fused: gate + up in ONE parallel region (halves the
+            // fork/join + steal overhead of the two largest dispatches).
+            let mut gate_up = vec![0.0_f32; 2 * n_sel * i_size];
+            gemv_quantized_experts_gate_up_f32(
+                gq,
+                gm,
+                um,
+                n_experts,
+                &selected,
+                i_size,
+                h,
+                normed,
+                &mut gate_up,
+            )
+            .map_err(|e| ModelError::InferenceFailed(format!("moe gate+up: {:?}", e)))?;
+            let (gate_half, up_half) = gate_up.split_at(n_sel * i_size);
+            gate_all.copy_from_slice(gate_half);
+            up_all.copy_from_slice(up_half);
         } else {
-            1.0
-        };
-
-        // 4. Gather the selected experts and their routing weights.
-        let n_sel = n_experts_per_tok;
-        let mut selected: Vec<usize> = Vec::with_capacity(n_sel);
-        let mut weights: Vec<f32> = Vec::with_capacity(n_sel);
-        for &(expert_idx, sel_score) in expert_scores.iter().take(n_sel) {
-            selected.push(expert_idx);
-            weights.push(if sigmoid_gating {
-                router_logits[expert_idx] / weight_norm
-            } else {
-                sel_score
-            });
-        }
-
-        // 5. Expert FFN. Prefer the batched path (one parallel region per
-        // projection across all selected experts) for quantized experts; this
-        // avoids 12 separate rayon dispatches per MoE layer. Fall back to the
-        // per-expert path for f32 experts.
-        if let (Some((gq, gm)), Some((uq, um)), Some((dq, dm))) = (
-            expert_matrix(&layer.ffn_gate_exps),
-            expert_matrix(&layer.ffn_up_exps),
-            expert_matrix(&layer.ffn_down_exps),
-        ) {
-            let gate_all = &mut gate_scratch[..n_sel * i_size];
-            let up_all = &mut up_scratch[..n_sel * i_size];
-            gate_all.fill(0.0_f32);
-            up_all.fill(0.0_f32);
             gemv_quantized_experts_f32(
                 gq, gm, n_experts, &selected, i_size, h, normed, 0, gate_all,
             )
             .map_err(|e| ModelError::InferenceFailed(format!("moe gate: {:?}", e)))?;
             gemv_quantized_experts_f32(uq, um, n_experts, &selected, i_size, h, normed, 0, up_all)
                 .map_err(|e| ModelError::InferenceFailed(format!("moe up: {:?}", e)))?;
-            // SwiGLU into gate_all; it then becomes the down-projection input
-            // (one contiguous [n_sel, i_size] buffer, stride i_size per expert).
-            for (g, u) in gate_all.iter_mut().zip(up_all.iter()) {
-                let sigmoid = 1.0_f32 / (1.0 + (-*g).exp());
-                *g = *g * sigmoid * *u;
-            }
-            let down_all = &mut expert_out[..n_sel * h];
-            down_all.fill(0.0_f32);
-            gemv_quantized_experts_f32(
-                dq, dm, n_experts, &selected, h, i_size, gate_all, i_size, down_all,
-            )
-            .map_err(|e| ModelError::InferenceFailed(format!("moe down: {:?}", e)))?;
-            for (slot, &weight) in weights.iter().enumerate() {
-                let d = &down_all[slot * h..(slot + 1) * h];
-                for (out, val) in ffn_out.iter_mut().zip(d.iter()) {
-                    *out += weight * val;
-                }
-            }
-            return Ok(());
         }
-
-        // Fallback: per-expert FFN for f32 expert weights.
-        for (slot, &expert_idx) in selected.iter().enumerate() {
-            let weight = weights[slot];
-            let gate = &mut gate_scratch[..i_size];
-            let up = &mut up_scratch[..i_size];
-            gate.fill(0.0_f32);
-            up.fill(0.0_f32);
-            expert_out.fill(0.0_f32);
-
-            gemv_expert_weight(
-                &layer.ffn_gate_exps,
-                expert_idx,
-                n_experts,
-                i_size,
-                h,
-                normed,
-                gate,
-            )
-            .map_err(|e| ModelError::InferenceFailed(format!("moe gate: {:?}", e)))?;
-            gemv_expert_weight(
-                &layer.ffn_up_exps,
-                expert_idx,
-                n_experts,
-                i_size,
-                h,
-                normed,
-                up,
-            )
-            .map_err(|e| ModelError::InferenceFailed(format!("moe up: {:?}", e)))?;
-
-            for (g, u) in gate.iter_mut().zip(up.iter()) {
-                let sigmoid = 1.0_f32 / (1.0 + (-*g).exp());
-                *g = *g * sigmoid * *u;
-            }
-
-            gemv_expert_weight(
-                &layer.ffn_down_exps,
-                expert_idx,
-                n_experts,
-                h,
-                i_size,
-                gate,
-                expert_out,
-            )
-            .map_err(|e| ModelError::InferenceFailed(format!("moe down: {:?}", e)))?;
-
-            for (out, val) in ffn_out.iter_mut().zip(expert_out.iter()) {
+        // SwiGLU into gate_all; it then becomes the down-projection input
+        // (one contiguous [n_sel, i_size] buffer, stride i_size per expert).
+        for (g, u) in gate_all.iter_mut().zip(up_all.iter()) {
+            let sigmoid = 1.0_f32 / (1.0 + (-*g).exp());
+            *g = *g * sigmoid * *u;
+        }
+        let down_all = &mut expert_out[..n_sel * h];
+        down_all.fill(0.0_f32);
+        gemv_quantized_experts_f32(
+            dq, dm, n_experts, &selected, h, i_size, gate_all, i_size, down_all,
+        )
+        .map_err(|e| ModelError::InferenceFailed(format!("moe down: {:?}", e)))?;
+        for (slot, &weight) in weights.iter().enumerate() {
+            let d = &down_all[slot * h..(slot + 1) * h];
+            for (out, val) in ffn_out.iter_mut().zip(d.iter()) {
                 *out += weight * val;
             }
         }
-
-        Ok(())
+        return Ok(());
     }
+
+    // Fallback: per-expert FFN for f32 expert weights.
+    for (slot, &expert_idx) in selected.iter().enumerate() {
+        let weight = weights[slot];
+        let gate = &mut gate_scratch[..i_size];
+        let up = &mut up_scratch[..i_size];
+        gate.fill(0.0_f32);
+        up.fill(0.0_f32);
+        expert_out.fill(0.0_f32);
+
+        gemv_expert_weight(
+            layer.gate_exps,
+            expert_idx,
+            n_experts,
+            i_size,
+            h,
+            normed,
+            gate,
+        )
+        .map_err(|e| ModelError::InferenceFailed(format!("moe gate: {:?}", e)))?;
+        gemv_expert_weight(layer.up_exps, expert_idx, n_experts, i_size, h, normed, up)
+            .map_err(|e| ModelError::InferenceFailed(format!("moe up: {:?}", e)))?;
+
+        for (g, u) in gate.iter_mut().zip(up.iter()) {
+            let sigmoid = 1.0_f32 / (1.0 + (-*g).exp());
+            *g = *g * sigmoid * *u;
+        }
+
+        gemv_expert_weight(
+            layer.down_exps,
+            expert_idx,
+            n_experts,
+            h,
+            i_size,
+            gate,
+            expert_out,
+        )
+        .map_err(|e| ModelError::InferenceFailed(format!("moe down: {:?}", e)))?;
+
+        for (out, val) in ffn_out.iter_mut().zip(expert_out.iter()) {
+            *out += weight * val;
+        }
+    }
+
+    Ok(())
 }
 
 impl Model for InferenceModel {
@@ -3651,9 +3794,11 @@ mod tests {
     #[test]
     fn batched_prefill_rejects_moe_layers() {
         let mut model = tiny_inference_model();
-        let mut layer = LayerWeights::default();
-        layer.attn_q = WeightStorage::F32(vec![1.0]);
-        layer.ffn_gate_exps = WeightStorage::F32(vec![1.0]);
+        let layer = LayerWeights {
+            attn_q: WeightStorage::F32(vec![1.0]),
+            ffn_gate_exps: WeightStorage::F32(vec![1.0]),
+            ..Default::default()
+        };
         model.layers.push(layer);
 
         assert!(!model.layers_supported_for_batched());
@@ -3692,14 +3837,14 @@ mod tests {
         assert_eq!(ws.v_vec.len(), max_kv_len);
         assert_eq!(ws.attn_result.len(), max_qkv);
 
-        let head_dim = config.head_dim().max(config.kv_head_dim());
+        let head_dim = config.head_dim().max(config.kv_head_dim()).max(192);
         assert_eq!(ws.head_scratch.len(), head_dim);
 
         let kv_copy_size = config.context_size * max_kv_len;
         assert_eq!(ws.kv_keys_copy.len(), kv_copy_size);
         assert_eq!(ws.kv_values_copy.len(), kv_copy_size);
         assert_eq!(ws.logits.len(), config.vocab_size);
-        assert_eq!(ws.mamba_scratch.len(), config.hidden_size * 2);
+        assert_eq!(ws.mamba_scratch.len(), config.hidden_size.max(576));
         assert_eq!(ws.conv_out.len(), max_qkv);
     }
 

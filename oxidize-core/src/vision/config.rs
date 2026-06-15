@@ -4,7 +4,7 @@ pub(crate) const RGB_CHANNELS: usize = 3;
 pub(crate) const RGBA_CHANNELS: usize = 4;
 
 const CLIP_IMAGE_MEAN: [f32; RGB_CHANNELS] = [0.48145466, 0.4578275, 0.40821073];
-const CLIP_IMAGE_STD: [f32; RGB_CHANNELS] = [0.26862954, 0.26130258, 0.27577711];
+const CLIP_IMAGE_STD: [f32; RGB_CHANNELS] = [0.26862954, 0.261_302_6, 0.275_777_1];
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct VisionConfig {
@@ -90,7 +90,7 @@ impl VisionConfig {
         if self.patch_size == 0 {
             return invalid_config("patch_size must be non-zero");
         }
-        if self.image_size % self.patch_size != 0 {
+        if !self.image_size.is_multiple_of(self.patch_size) {
             return invalid_config("image_size must be divisible by patch_size");
         }
         if self.hidden_size == 0 || self.projection_dim == 0 {
@@ -103,7 +103,7 @@ impl VisionConfig {
                 self.num_image_tokens
             )));
         }
-        if self.image_std.iter().any(|std| *std == 0.0) {
+        if self.image_std.contains(&0.0) {
             return invalid_config("image_std entries must be non-zero");
         }
         Ok(())

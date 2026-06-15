@@ -35,6 +35,9 @@ __device__ __forceinline__ float warp_reduce_sum(float v) {
     return v;
 }
 
+// NOTE: This kernel is currently unused by the CUDA backend; cuBLAS sgemv is
+// preferred for f32 GEMV.  It is kept in the PTX so that existing tests and
+// the GEMV_KERNEL_NAME constant remain valid.
 extern "C" __global__ void gemv_f32_kernel(
     const float* matrix, const float* vector, float* output,
     unsigned int rows, unsigned int cols)
@@ -164,4 +167,77 @@ extern "C" __global__ void dequant_q6_k_kernel(
         }
         q_ptr += 128;
     }
+}
+
+// --------------------------------------------------------------------------
+// On-the-fly quantized GEMV kernels (no f16 materialization)
+//
+// These kernels read quantized weights directly and dequantize inside the
+// dot-product loop.  This keeps VRAM usage at the compressed size (~1 byte
+// per param for Q8_0, ~0.56 for Q4_0) instead of expanding to 2-byte f16.
+// Essential for running 70B models on 4GB GPUs.
+// --------------------------------------------------------------------------
+
+// Q8_0 GEMV: each lane reads Q8_0 blocks [scale_f16 + 32 int8] and accumulates
+// directly.  No intermediate f16 buffer.
+extern "C" __global__ void gemv_q8_0_kernel(
+    const unsigned char* matrix, const float* vector, float* output,
+    unsigned int rows, unsigned int cols)
+{
+    unsigned int global_thread = blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned int row = global_thread >> 5;     // one warp per row
+    unsigned int lane = threadIdx.x & 31u;
+    if (row >= rows) return;
+
+    unsigned int blocks_per_row = cols >> 5;   // cols / 32
+    const unsigned char* row_blocks = matrix + (size_t)row * blocks_per_row * 34;
+
+    float sum = 0.0f;
+    for (unsigned int b = lane; b < blocks_per_row; b += 32u) {
+        const unsigned char* blk = row_blocks + (size_t)b * 34;
+        float d = __half2float(*reinterpret_cast<const __half*>(blk));
+        const signed char* q = reinterpret_cast<const signed char*>(blk + 2);
+        unsigned int vec_base = b << 5;  // b * 32
+#pragma unroll
+        for (int i = 0; i < 32; i++) {
+            sum += d * (float)q[i] * vector[vec_base + i];
+        }
+    }
+
+    sum = warp_reduce_sum(sum);
+    if (lane == 0u) output[row] = sum;
+}
+
+// Q4_0 GEMV: 18-byte block = f16 scale + 32 nibbles (4 bits each).
+// Memory: 18 bytes / 32 values = 0.5625 bytes/param.
+extern "C" __global__ void gemv_q4_0_kernel(
+    const unsigned char* matrix, const float* vector, float* output,
+    unsigned int rows, unsigned int cols)
+{
+    unsigned int global_thread = blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned int row = global_thread >> 5;
+    unsigned int lane = threadIdx.x & 31u;
+    if (row >= rows) return;
+
+    unsigned int blocks_per_row = cols >> 5;   // cols / 32
+    const unsigned char* row_blocks = matrix + (size_t)row * blocks_per_row * 18;
+
+    float sum = 0.0f;
+    for (unsigned int b = lane; b < blocks_per_row; b += 32u) {
+        const unsigned char* blk = row_blocks + (size_t)b * 18;
+        float d = __half2float(*reinterpret_cast<const __half*>(blk));
+        const unsigned char* q = blk + 2;
+        unsigned int vec_base = b << 5;
+#pragma unroll
+        for (int i = 0; i < 16; i++) {
+            unsigned char qb = q[i];
+            float v0 = d * ((float)(qb & 0xF) - 8.0f);
+            float v1 = d * ((float)(qb >> 4) - 8.0f);
+            sum += v0 * vector[vec_base + i * 2];
+            sum += v1 * vector[vec_base + i * 2 + 1];
+        }
+    }
+
+    sum = warp_reduce_sum(sum);
+    if (lane == 0u) output[row] = sum;
 }

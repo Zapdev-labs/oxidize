@@ -70,6 +70,8 @@ fn compile_cuda_kernels(cuda_root: &Path) {
 
     let status = std::process::Command::new(&nvcc)
         .arg("-ptx")
+        .arg("-O3")
+        .arg("--use_fast_math")
         .arg("-arch=compute_75")
         .arg("-o")
         .arg(&ptx_out)

@@ -160,6 +160,7 @@ fn lora_up_add(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn lora_up_backward(
     b: &[f32],
     grad_out: &[f32],

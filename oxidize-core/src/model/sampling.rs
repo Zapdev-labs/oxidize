@@ -476,10 +476,44 @@ pub fn speculative_decode(
         return Err(SamplingError::InvalidSpeculativeInputs);
     }
 
+    // Greedy configs (temperature 0 / top-k 1) make the target distribution a
+    // point mass: verification reduces to exact argmax matching and must not
+    // consume randomness, otherwise generation is RNG-dependent and stops
+    // matching plain target decoding.
+    let greedy = sampling_config.temperature <= 0.0 || sampling_config.top_k == Some(1);
+    // For stochastic configs the acceptance ratio must be computed under the
+    // temperature the target actually samples with, not a hardcoded 1.0.
+    // (top-k/top-p modifications of the verification distributions are still
+    // approximated by the raw softmax here.)
+    let verify_temperature = if greedy {
+        1.0
+    } else {
+        sampling_config.temperature
+    };
+
     let mut emitted = Vec::with_capacity(draft_tokens.len() + 1);
     for (step, draft_token) in draft_tokens.iter().copied().enumerate() {
-        let draft_probs = softmax_probs(&draft_logits[step], 1.0)?;
-        let target_probs = softmax_probs(&target_logits[step], 1.0)?;
+        if greedy {
+            let target_argmax = target_logits[step]
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.total_cmp(b.1))
+                .map(|(i, _)| i as u32)
+                .ok_or(SamplingError::InvalidSpeculativeInputs)?;
+            if draft_token == target_argmax {
+                emitted.push(draft_token);
+                continue;
+            }
+            emitted.push(target_argmax);
+            return Ok(SpeculativeDecodeResult {
+                tokens: emitted,
+                accepted_draft_tokens: step,
+                used_residual_fallback: true,
+            });
+        }
+
+        let draft_probs = softmax_probs(&draft_logits[step], verify_temperature)?;
+        let target_probs = softmax_probs(&target_logits[step], verify_temperature)?;
         if draft_probs.len() != target_probs.len() {
             return Err(SamplingError::InvalidSpeculativeInputs);
         }
@@ -1039,7 +1073,7 @@ mod tests {
             sample(
                 &[1.0],
                 SamplingConfig {
-                    temperature: 0.0,
+                    temperature: f32::NAN,
                     ..SamplingConfig::default()
                 },
                 0.3

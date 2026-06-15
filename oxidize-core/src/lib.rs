@@ -72,6 +72,8 @@ pub mod mlx_inference;
 pub mod model;
 #[path = "model/loader.rs"]
 pub mod model_loader;
+#[path = "compute/numa.rs"]
+pub mod numa;
 #[path = "model/offload.rs"]
 pub mod offload;
 #[path = "paged_attention/mod.rs"]
@@ -90,6 +92,8 @@ pub mod sampling;
 pub mod simd;
 #[path = "model/speculative.rs"]
 pub mod speculative;
+#[path = "compute/spinpool.rs"]
+pub mod spinpool;
 #[path = "backends/strix.rs"]
 pub mod strix;
 #[path = "compute/tensor.rs"]
