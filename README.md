@@ -253,4 +253,4 @@ Design goals:
 
 ## License
 
-MIT
+Zapdev labs Fair Use License
