@@ -31,6 +31,8 @@ pub use backend::ComputeBackend;
 pub mod advanced_features;
 #[path = "compute/activation_stats.rs"]
 pub mod activation_stats;
+#[path = "autotune/mod.rs"]
+pub mod autotune;
 #[path = "util/benchmark_suite.rs"]
 pub mod benchmark_suite;
 #[path = "format/conversion.rs"]

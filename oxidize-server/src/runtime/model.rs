@@ -179,6 +179,80 @@ pub fn load_model_runtime(args: &Args) -> Result<Option<Arc<ModelRuntime>>, Stri
             );
         })
         .map_err(|error| format!("failed to load model: {error:?}"))?;
+    if args.auto && !args.no_auto {
+        let inv = oxidize_core::autotune::detect();
+        let model = oxidize_core::autotune::fingerprint(&mapped);
+        let plan = oxidize_core::autotune::plan(&inv, &model);
+        match args.print_plan.as_str() {
+            "json" => {
+                use oxidize_core::autotune::PipelineMode;
+                use oxidize_core::autotune::OxkIsa;
+                use oxidize_core::autotune::OxkTile;
+                use oxidize_core::autotune::SpeculativeSpec;
+                let pipe = match plan.pipeline {
+                    PipelineMode::Sequential => "sequential",
+                    PipelineMode::Continuous => "continuous",
+                    PipelineMode::Paged => "paged",
+                    PipelineMode::Asymmetric => "asymmetric",
+                };
+                let isa = match plan.oxk_isa {
+                    OxkIsa::Scalar => "scalar",
+                    OxkIsa::Avx2 => "avx2",
+                    OxkIsa::Avx512 => "avx512",
+                };
+                let tile = match plan.oxk_tile {
+                    OxkTile::T1 => 1,
+                    OxkTile::T4 => 4,
+                    OxkTile::T8 => 8,
+                    OxkTile::T16 => 16,
+                };
+                let spec = match plan.speculative {
+                    SpeculativeSpec::None => "none",
+                    SpeculativeSpec::DFlash => "dflash",
+                    SpeculativeSpec::Mtp => "mtp",
+                };
+                let value = serde_json::json!({
+                    "threads": plan.threads,
+                    "ctx_size": plan.ctx_size,
+                    "kv_cache_dtype": format!("{:?}", plan.kv_cache_dtype),
+                    "n_gpu_layers": plan.n_gpu_layers,
+                    "mmap": plan.mmap,
+                    "mlock": plan.mlock,
+                    "mmap_hugepages": plan.mmap_hugepages,
+                    "mmap_prefetch": plan.mmap_prefetch,
+                    "numa_replicate_dense": plan.numa_replicate_dense,
+                    "layer_wise": plan.layer_wise,
+                    "layer_cache": plan.layer_cache,
+                    "pipeline": pipe,
+                    "speculative": spec,
+                    "decode_tile_tokens": plan.decode_tile_tokens,
+                    "oxk_isa": isa,
+                    "oxk_tile": tile,
+                    "expected_prompt_tps": plan.expected_prompt_tps,
+                    "expected_decode_tps": plan.expected_decode_tps,
+                    "rationale": plan.rationale,
+                });
+                if let Ok(s) = serde_json::to_string_pretty(&value) {
+                    tracing::info!(plan = %s, "autotune plan (json)");
+                }
+            }
+            "no" | "false" | "0" => {}
+            _ => {
+                tracing::info!("\n{}", plan.summary());
+            }
+        }
+        tracing::info!(
+            threads = plan.threads,
+            ctx_size = plan.ctx_size,
+            n_gpu_layers = plan.n_gpu_layers,
+            layer_wise = plan.layer_wise,
+            layer_cache = plan.layer_cache,
+            pipeline = ?plan.pipeline,
+            oxk_isa = ?plan.oxk_isa,
+            expected_decode_tps = plan.expected_decode_tps,
+            "autotune plan summary"
+        );
+    }
     optimize_mapped_model_memory(&mapped, args);
     let metadata = &mapped.parsed().metadata;
     let is_dflash = matches!(

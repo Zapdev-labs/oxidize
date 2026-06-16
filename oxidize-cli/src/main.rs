@@ -24,7 +24,7 @@ use serde::Deserialize;
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
@@ -165,6 +165,32 @@ struct Args {
     /// Disable native in-GGUF MTP/nextn speculative decoding when present.
     #[arg(long, default_value_t = false)]
     no_mtp: bool,
+    /// Auto-detect hardware and pick inference knobs (threads, ctx,
+    /// KV dtype, n_gpu_layers, layer_wise, mmap, mlock, ISA, pipeline).
+    /// On by default for `run`; explicit flags always win.
+    #[arg(long, default_value_t = true)]
+    auto: bool,
+    /// Opt out of auto-tuning (revert to explicit-flag-only behavior).
+    #[arg(long, default_value_t = false)]
+    no_auto: bool,
+    /// Print the resolved autotune plan to stderr before generation
+    /// starts. "json" emits machine-readable JSON instead of text.
+    #[arg(long, default_value = "auto")]
+    print_plan: String,
+    /// Internal: set if the user passed `--n-gpu-layers`. Used by
+    /// the autotuner to avoid overriding an explicit value.
+    #[arg(skip)]
+    n_gpu_layers_set: bool,
+    /// Internal: set if the user passed `--kv-cache-dtype`.
+    #[arg(skip)]
+    kv_cache_dtype_set: bool,
+}
+
+/// True if `argv` contains `--flag` (exact match) or
+/// `--flag=value` (prefix match). Used by the autotuner to detect
+/// which non-Option flags the user set on the command line.
+fn user_passed_flag(argv: &[String], flag: &str) -> bool {
+    argv.iter().any(|a| a == flag || a.starts_with(&format!("{flag}=")))
 }
 
 fn print_run_help() {
@@ -513,8 +539,7 @@ fn gguf_repo_candidates(spec: &str) -> Vec<String> {
 
 fn resolve_hf_model_spec(api: &HfApi, spec: &str, hf_file: Option<&str>) -> io::Result<PathBuf> {
     let mut attempted = Vec::new();
-    for candidate in std::iter::once(spec.to_owned()).chain(gguf_repo_candidates(spec))
-    {
+    for candidate in std::iter::once(spec.to_owned()).chain(gguf_repo_candidates(spec)) {
         if attempted.contains(&candidate) {
             continue;
         }
@@ -1954,6 +1979,9 @@ fn server_args_from_cli(args: &Args) -> io::Result<oxidize_server::Args> {
         },
         threads: args.threads.filter(|threads| *threads > 0).unwrap_or(0),
         ram_offload_threads: args.ram_offload_threads,
+        auto: args.auto,
+        no_auto: args.no_auto,
+        print_plan: args.print_plan.clone(),
     })
 }
 
@@ -2017,6 +2045,16 @@ fn main() {
     let args = match Args::try_parse_from(rewritten_args) {
         Ok(args) => args,
         Err(error) => error.exit(),
+    };
+
+    // Detect which non-Option flags the user explicitly set, so the
+    // autotuner can avoid overriding them.
+    let n_gpu_layers_set = user_passed_flag(&std::env::args().collect::<Vec<_>>(), "--n-gpu-layers");
+    let kv_cache_dtype_set = user_passed_flag(&std::env::args().collect::<Vec<_>>(), "--kv-cache-dtype");
+    let mut args = Args {
+        n_gpu_layers_set,
+        kv_cache_dtype_set,
+        ..args
     };
     let (effective_backend, warning) = args.backend.to_core_backend().effective();
     if let Some(msg) = warning {
@@ -2142,13 +2180,53 @@ fn main() {
         }
         return;
     }
-    if let Some(model_path) = args.model.as_ref() {
+    if let Some(model_path) = args.model.clone() {
         let loader = GgufModelLoader;
-        match loader.load_with_progress(model_path, |progress| {
+        let mapped = match loader.load_with_progress(&model_path, |progress| {
             println!("{}", render_load_progress(progress))
         }) {
-            Ok(mapped) => {
-                optimize_mapped_model_memory(&mapped, &args);
+            Ok(mapped) => mapped,
+            Err(error) => {
+                eprintln!("failed to load model: {error}");
+                return;
+            }
+        };
+        // Run autotune after the model is mapped (so we can
+        // fingerprint it) but before the rest of the pipeline —
+        // `apply_plan` mutates `args` to fill in any field the user
+        // didn't set explicitly.
+        if args.auto && !args.no_auto {
+            let inv = oxidize_core::autotune::detect();
+            let model = oxidize_core::autotune::fingerprint(&mapped);
+            let plan = oxidize_core::autotune::plan(&inv, &model);
+            let print = match args.print_plan.as_str() {
+                "json" => true,
+                "auto" => atty_stdout(),
+                "yes" | "true" | "1" => true,
+                "no" | "false" | "0" => false,
+                other => {
+                    eprintln!(
+                        "warning: unknown --print-plan value '{}', defaulting to text",
+                        other
+                    );
+                    true
+                }
+            };
+            if print {
+                if args.print_plan == "json" {
+                    eprintln!(
+                        "{}",
+                        serde_json::to_string_pretty(&plan_to_json(&plan))
+                            .unwrap_or_else(|_| "{}".to_string())
+                    );
+                } else {
+                    eprintln!("\n[oxidize auto-tune plan]\n{}", plan.summary());
+                }
+            }
+            apply_plan_to_args(&mut args, &plan, &inv);
+        }
+        optimize_mapped_model_memory(&mapped, &args);
+        {
                 for lora_path in &args.lora_paths {
                     match loader.load(lora_path) {
                         Ok(adapter) => match plan_lora_application(
@@ -2695,8 +2773,6 @@ fn main() {
                 ) {
                     eprintln!("generation failed: {error}");
                 }
-            }
-            Err(error) => eprintln!("failed to load model: {error}"),
         }
         return;
     }
@@ -2705,6 +2781,160 @@ fn main() {
     if let Err(error) = run_single_shot_mode(&args.prompt, &mut writer) {
         eprintln!("single-shot mode failed: {error}");
     }
+}
+
+/// Apply the autotune plan to `args`. Only fills in fields the user
+/// didn't explicitly set. Designed to be safe to call even when
+/// the user has set most flags (those are left untouched).
+fn apply_plan_to_args(
+    args: &mut Args,
+    plan: &oxidize_core::autotune::TuningPlan,
+    inv: &oxidize_core::autotune::HardwareInventory,
+) {
+    let overrides = oxidize_core::autotune::overrides_from_plan(plan);
+    // Threads: always fill in if user didn't pass --threads.
+    if args.threads.is_none() {
+        if let Some(t) = overrides.threads {
+            if t > 0 {
+                args.threads = Some(t);
+            }
+        }
+    }
+    // Ctx size: only if user didn't pass --ctx-size.
+    if args.ctx_size.is_none() {
+        if let Some(c) = overrides.ctx_size {
+            if c > 0 {
+                args.ctx_size = Some(c);
+            }
+        }
+    }
+    // n_gpu_layers: only if user didn't pass --n-gpu-layers.
+    if !args.n_gpu_layers_set {
+        if let Some(n) = overrides.n_gpu_layers {
+            args.n_gpu_layers = n;
+        }
+    }
+    // kv_cache_dtype: only if user didn't pass --kv-cache-dtype.
+    if !args.kv_cache_dtype_set {
+        use oxidize_core::tensor::DType;
+        let desired = match plan.kv_cache_dtype {
+            DType::F16 => KvCacheDType::F16,
+            DType::F32 => KvCacheDType::F32,
+            DType::I8 => KvCacheDType::Q8,
+            DType::I16 => KvCacheDType::Q4,
+            _ => KvCacheDType::F16,
+        };
+        args.kv_cache_dtype = desired;
+    }
+    // TurboQuant: only if user didn't pass either turboquant flag.
+    if !args.turboquant && !args.no_turboquant {
+        if let Some(true) = overrides.turboquant {
+            args.turboquant = true;
+        }
+    }
+    // layer_cache: only if user kept the default of 1.
+    if args.layer_cache == 1 {
+        if let Some(c) = overrides.layer_cache {
+            if c > 0 && c != 1 {
+                args.layer_cache = c;
+            }
+        }
+    }
+    // layer_wise: only if user kept the default of false AND the plan
+    // recommends it. Documented as best-effort: we can't distinguish
+    // `--no-layer-wise` from "user didn't set", so a user who
+    // explicitly wants to disable layer_wise should use --no-auto.
+    if !args.layer_wise {
+        if let Some(true) = overrides.layer_wise {
+            args.layer_wise = true;
+        }
+    }
+    // cpu_optimized: never auto-enable (it caps ctx to 2048 and
+    // disables the existing auto-cap; it would silently override
+    // a lot of user intent). The plan still hints via rationale.
+    // ram_offload + mmap hints: best-effort, same caveat.
+    if !args.ram_offload {
+        if let Some(true) = overrides.ram_offload {
+            args.ram_offload = true;
+        }
+    }
+    if !args.mmap_hugepages {
+        if let Some(true) = overrides.mmap_hugepages {
+            args.mmap_hugepages = true;
+        }
+    }
+    if !args.mmap_prefetch {
+        if let Some(true) = overrides.mmap_prefetch {
+            args.mmap_prefetch = true;
+        }
+    }
+    eprintln!(
+        "[oxidize auto-tune] applied: threads={:?} ctx={:?} n_gpu_layers={} kv={:?} layer_wise={} layer_cache={} turboquant={} (cores={} ram={} GiB gpu={} MiB)",
+        args.threads,
+        args.ctx_size,
+        args.n_gpu_layers,
+        args.kv_cache_dtype,
+        args.layer_wise,
+        args.layer_cache,
+        args.turboquant,
+        inv.physical_cores,
+        inv.total_ram_bytes / (1u64 << 30),
+        inv.gpu_vram_bytes / (1024 * 1024),
+    );
+}
+
+/// JSON-friendly snapshot of a `TuningPlan` for tooling.
+fn plan_to_json(plan: &oxidize_core::autotune::TuningPlan) -> serde_json::Value {
+    use oxidize_core::autotune::{OxkIsa, OxkTile, PipelineMode, SpeculativeSpec};
+    let isa = match plan.oxk_isa {
+        OxkIsa::Scalar => "scalar",
+        OxkIsa::Avx2 => "avx2",
+        OxkIsa::Avx512 => "avx512",
+    };
+    let tile = match plan.oxk_tile {
+        OxkTile::T1 => 1,
+        OxkTile::T4 => 4,
+        OxkTile::T8 => 8,
+        OxkTile::T16 => 16,
+    };
+    let pipe = match plan.pipeline {
+        PipelineMode::Sequential => "sequential",
+        PipelineMode::Continuous => "continuous",
+        PipelineMode::Paged => "paged",
+        PipelineMode::Asymmetric => "asymmetric",
+    };
+    let spec = match plan.speculative {
+        SpeculativeSpec::None => "none",
+        SpeculativeSpec::DFlash => "dflash",
+        SpeculativeSpec::Mtp => "mtp",
+    };
+    serde_json::json!({
+        "threads": plan.threads,
+        "ctx_size": plan.ctx_size,
+        "kv_cache_dtype": format!("{:?}", plan.kv_cache_dtype),
+        "n_gpu_layers": plan.n_gpu_layers,
+        "mmap": plan.mmap,
+        "mlock": plan.mlock,
+        "mmap_hugepages": plan.mmap_hugepages,
+        "mmap_prefetch": plan.mmap_prefetch,
+        "numa_replicate_dense": plan.numa_replicate_dense,
+        "layer_wise": plan.layer_wise,
+        "layer_cache": plan.layer_cache,
+        "pipeline": pipe,
+        "speculative": spec,
+        "decode_tile_tokens": plan.decode_tile_tokens,
+        "oxk_isa": isa,
+        "oxk_tile": tile,
+        "expected_prompt_tps": plan.expected_prompt_tps,
+        "expected_decode_tps": plan.expected_decode_tps,
+        "rationale": plan.rationale,
+    })
+}
+
+/// True if stdout is attached to a terminal (best-effort: uses
+/// `std::io::IsTerminal` from stdlib).
+fn atty_stdout() -> bool {
+    std::io::stdout().is_terminal()
 }
 
 /// Run the CLI in distributed mesh node mode.

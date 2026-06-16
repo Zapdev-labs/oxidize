@@ -135,6 +135,18 @@ pub struct Args {
     /// Parallel RAM prefault threads for --ram-offload (0 = logical CPU count).
     #[arg(long, default_value_t = 0)]
     pub ram_offload_threads: usize,
+    /// Auto-detect hardware and pick inference knobs (threads, ctx,
+    /// KV dtype, n_gpu_layers, layer_wise, mmap, mlock, ISA, pipeline).
+    /// On by default; explicit flags always win.
+    #[arg(long, default_value_t = true)]
+    pub auto: bool,
+    /// Opt out of auto-tuning.
+    #[arg(long, default_value_t = false)]
+    pub no_auto: bool,
+    /// Print the resolved autotune plan to stderr on startup.
+    /// "json" emits machine-readable JSON instead of text.
+    #[arg(long, default_value = "auto")]
+    pub print_plan: String,
 }
 
 #[cfg(test)]

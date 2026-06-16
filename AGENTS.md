@@ -70,6 +70,8 @@ This workspace contains the core Rust LLM inference engine (`oxidize-core`) and 
 | Wanda pruning | `oxidize-prune/src/wanda.rs` | Per-output-row `|W| · ‖X‖_2`; see `oxidize-prune/AGENTS.md` |
 | Magnitude pruning | `oxidize-prune/src/mask.rs` + `wanda.rs` | Per-output-row `|W|`; per Wanda paper, the right default for LLMs |
 | Activation L2 norms (Wanda calibration) | `oxidize-core/src/compute/activation_stats.rs` | `ActivationStats` + `CalibrationRunner`; consumed by `oxidize-prune` |
+| Auto-detect + auto-tune | `oxidize-core/src/autotune/` | `detect()` (CPU/RAM/NUMA/GPU/ISA) + `fingerprint()` + `plan()` rule table; CLI flags `--auto --no-auto --print-plan` |
+| Skylake-SP detection (AVX-512 regression gate) | `oxidize-kernels/src/cpu.rs` | `pub fn is_skylake_sp() -> bool` |
 
 ## CONVENTIONS
 - **Flat module system**: `lib.rs` uses `#[path = "..."]` to flatten all modules into crate root. Only `mesh/`, `paged_attention/`, `vision/` have real `mod.rs` files.

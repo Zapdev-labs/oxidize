@@ -166,6 +166,18 @@ pub fn cpuinfo() -> &'static CpuInfo {
     INFO.get_or_init(detect_cpuinfo)
 }
 
+/// True if the host CPU is Intel Skylake-SP / Skylake-X (family 6,
+/// model 85 or 86). On these parts AVX-512 under sustained decode
+/// causes frequency drop and regresses below AVX2. The autotuner
+/// and any AVX-512 dispatcher in this crate use this to keep AVX2
+/// as the default path.
+///
+/// On non-x86 hosts this is always `false`.
+pub fn is_skylake_sp() -> bool {
+    let info = cpuinfo();
+    info.vendor == CpuVendor::Intel && info.family == 6 && matches!(info.model, 85 | 86)
+}
+
 /// Tuning profile for this process, resolved once from CPU vendor + env.
 pub fn tune() -> OxkTune {
     static TUNE: OnceLock<OxkTune> = OnceLock::new();
