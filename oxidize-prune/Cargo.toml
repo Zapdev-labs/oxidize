@@ -1,15 +1,18 @@
 [package]
-name = "oxidize-convert"
+name = "oxidize-prune"
 edition.workspace = true
 license.workspace = true
 version.workspace = true
 
+[lib]
+name = "oxidize_prune"
+path = "src/lib.rs"
+
 [[bin]]
-name = "oxidize-convert"
+name = "oxidize-prune"
 path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
 oxidize-core = { path = "../oxidize-core" }
-oxidize-prune = { path = "../oxidize-prune" }

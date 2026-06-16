@@ -29,6 +29,8 @@ pub mod backend;
 pub use backend::ComputeBackend;
 #[path = "model/advanced_features.rs"]
 pub mod advanced_features;
+#[path = "compute/activation_stats.rs"]
+pub mod activation_stats;
 #[path = "util/benchmark_suite.rs"]
 pub mod benchmark_suite;
 #[path = "format/conversion.rs"]
@@ -41,6 +43,8 @@ pub mod cross_validation;
 pub mod cuda;
 #[path = "model/dflash.rs"]
 pub mod dflash;
+#[path = "model/diffusion_gemma.rs"]
+pub mod diffusion_gemma;
 #[path = "compute/flash_attention.rs"]
 pub mod flash_attention;
 #[path = "model/generation.rs"]
@@ -51,8 +55,6 @@ pub mod gguf;
 pub mod gpu_cluster;
 #[path = "model/inference.rs"]
 pub mod inference;
-#[path = "model/diffusion_gemma.rs"]
-pub mod diffusion_gemma;
 #[path = "compute/kv_cache.rs"]
 pub mod kv_cache;
 #[path = "model/layer_wise.rs"]
