@@ -43,7 +43,7 @@ func TestModelsAndPlaceholderRoutes(t *testing.T) {
 	assertStatus(t, handler, http.MethodGet, "/v1/models", nil, "", http.StatusOK)
 	assertStatus(t, handler, http.MethodPost, "/v1/chat/completions", []byte(`{"model":"`+modelID+`","messages":[{"role":"user","content":"hi"}]}`), "application/json", http.StatusOK)
 	assertStatus(t, handler, http.MethodPost, "/v1/completions", []byte(`{"model":"`+modelID+`","prompt":"hi"}`), "application/json", http.StatusOK)
-	assertStatus(t, handler, http.MethodPost, "/v1/embeddings", []byte(`{"model":"`+modelID+`","input":"hi"}`), "application/json", http.StatusOK)
+	assertStatus(t, handler, http.MethodPost, "/v1/embeddings", []byte(`{"model":"`+modelID+`","input":"hi"}`), "application/json", http.StatusNotImplemented)
 }
 
 func TestAuthAndErrors(t *testing.T) {

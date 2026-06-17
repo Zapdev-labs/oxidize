@@ -72,7 +72,8 @@ func LoadModelFromPath(path string, cfg LoaderConfig) (LoaderResult, error) {
 }
 
 // LoadDraftFromPath loads a draft model (DFlash GGUF or smaller inference checkpoint).
-func LoadDraftFromPath(path string, cfg LoaderConfig) (model.Model, error) {
+// When the draft hidden size mismatches the target, callers should fall back to target-only.
+func LoadDraftFromPath(path string, cfg LoaderConfig, targetHidden int) (model.Model, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return nil, fmt.Errorf("generate: empty draft model path")
@@ -84,11 +85,17 @@ func LoadDraftFromPath(path string, cfg LoaderConfig) (model.Model, error) {
 	arch := strings.ToLower(ggufcore.Architecture(mapped.Parsed))
 	if strings.Contains(arch, "dflash") {
 		dcfg := model.DFlashConfigFromGGUF(mapped.Parsed)
+		if targetHidden > 0 && dcfg.HiddenSize > 0 && dcfg.HiddenSize != targetHidden {
+			return nil, fmt.Errorf("generate: draft hidden_size %d != target %d", dcfg.HiddenSize, targetHidden)
+		}
 		return model.LoadDFlashFromGGUF(mapped, dcfg)
 	}
-	loaderCfg := model.NewLoaderConfig()
-	loaderCfg.Backend = cfg.Backend
-	loaderCfg.ContextSize = cfg.ContextSize
-	loaderCfg.AllowFallback = true
-	return model.LoadInferenceFromGGUF(mapped)
+	inf, err := model.LoadInferenceFromGGUF(mapped)
+	if err != nil {
+		return nil, err
+	}
+	if targetHidden > 0 && inf.Config.HiddenSize > 0 && inf.Config.HiddenSize != targetHidden {
+		return nil, fmt.Errorf("generate: draft hidden_size %d != target %d", inf.Config.HiddenSize, targetHidden)
+	}
+	return inf, nil
 }

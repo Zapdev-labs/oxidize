@@ -1,7 +1,3 @@
-// Package cudabackend mirrors oxidize_core::backends::cuda. The CUDA backend
-// is a stub in this build (no CUDA runtime is linked in Go); the package
-// still exposes the BuildInfo, MemoryDevice, and validation helpers so that
-// callers can probe for CUDA support at runtime.
 package cudabackend
 
 import "fmt"
@@ -11,9 +7,6 @@ type BuildInfo struct {
 	DetectedAtBuild bool
 	CudaPath        string
 }
-
-// Info returns the build-time detection result for the CUDA backend.
-func Info() BuildInfo { return BuildInfo{DetectedAtBuild: false, CudaPath: ""} }
 
 // MemoryDevice mirrors MemoryDevice.
 type MemoryDevice uint8
@@ -40,9 +33,6 @@ type MemoryError struct{ Message string }
 
 func (e *MemoryError) Error() string { return "cuda memory: " + e.Message }
 
-// Initialize is a stub. A real implementation would load the CUDA runtime.
-func Initialize() error { return &MemoryError{Message: "cuda backend not linked in this build"} }
-
 // GemvCudaError mirrors GemvCudaError.
 type GemvCudaError struct{ Message string }
 
@@ -53,19 +43,14 @@ type GemmCudaError struct{ Message string }
 
 func (e *GemmCudaError) Error() string { return "cuda gemm: " + e.Message }
 
-// GemvF32Cuda is a stub.
-func GemvF32Cuda(_, _ []float32, _, _ int, _, _ []float32) error {
-	return &GemvCudaError{Message: "cuda backend not linked"}
-}
-
 // GemmF32Cuda is a stub.
 func GemmF32Cuda(_, _ []float32, _, _, _ int, _ []float32) error {
-	return &GemmCudaError{Message: "cuda backend not linked"}
+	return &GemmCudaError{Message: "cuda gemm not implemented"}
 }
 
 // GemvQuantizedCuda is a stub.
 func GemvQuantizedCuda(_ []byte, _ int, _ []float32, _, _ int, _, _ []float32) error {
-	return &GemvCudaError{Message: "cuda backend not linked"}
+	return &GemvCudaError{Message: "cuda quantized gemv not implemented"}
 }
 
 // ValidateGemvDims mirrors validate_gemv_dims.

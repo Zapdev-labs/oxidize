@@ -36,6 +36,9 @@ type RunConfig struct {
 	UseDFlashFusion bool
 	Vision          bool
 	ImagePath       string
+	LayerWise       bool
+	LayerCache      int
+	RAMOffload      bool
 }
 
 // DefaultRunConfig returns sensible generation defaults.
@@ -103,9 +106,11 @@ func RunFromGGUF(ctx context.Context, cfg RunConfig, stdout io.Writer) error {
 	}
 	if cfg.Vision && strings.TrimSpace(cfg.ImagePath) != "" {
 		if raw, err := os.ReadFile(cfg.ImagePath); err == nil {
-			pre := vision.NewStubPreprocessor(vision.DefaultConfig())
-			if enc, err := pre.Process(raw, vision.ModalityImage); err == nil {
-				_, _ = fmt.Fprintf(stdout, "# vision: preprocessed image (%v)\n", enc)
+			cfgVision := vision.DefaultConfig()
+			enc := vision.NewPatchEncoder(cfgVision)
+			if vecs, err := enc.Encode(raw); err == nil {
+				dims := enc.Dims()
+				_, _ = fmt.Fprintf(stdout, "# vision: patch encoder dims=%v len=%d\n", dims, len(vecs))
 			}
 		}
 	}
@@ -140,22 +145,30 @@ func RunFromGGUF(ctx context.Context, cfg RunConfig, stdout io.Writer) error {
 
 	session := model.NewSession()
 	genCfg := cfg.generationConfig()
-
 	start := time.Now()
+
+	streamModel := model.Model(inference)
+	if cfg.LayerWise {
+		if cfg.LayerCache <= 0 {
+			cfg.LayerCache = 4
+		}
+		streamModel = model.NewLayerWiseFromInference(inference, cfg.LayerCache)
+	}
+
 	if strings.TrimSpace(cfg.DraftModel) != "" || cfg.UseDFlashFusion {
 		draftPath := strings.TrimSpace(cfg.DraftModel)
 		var draft model.Model
 		var err error
 		if draftPath != "" {
-			draft, err = LoadDraftFromPath(draftPath, cfg.loaderConfig())
+			draft, err = LoadDraftFromPath(draftPath, cfg.loaderConfig(), inference.Config.HiddenSize)
 		} else {
-			draft = model.NewHeuristicDFlashDraft(inference, model.DefaultDFlashConfig())
+			draft = model.NewHeuristicDFlashDraft(streamModel, model.DefaultDFlashConfig())
 		}
 		if err != nil {
 			return fmt.Errorf("generate: draft model: %w", err)
 		}
 		if cfg.UseDFlashFusion {
-			dec := model.NewSpeculativeDecoder(draft, inference, session, model.SpeculativeConfig{
+			dec := model.NewSpeculativeDecoder(draft, streamModel, session, model.SpeculativeConfig{
 				DraftTokensPerStep: cfg.DraftTokens,
 				MaxNewTokens:       genCfg.MaxNewTokens,
 				Sampling:           genCfg.Sampling,
@@ -164,7 +177,7 @@ func RunFromGGUF(ctx context.Context, cfg RunConfig, stdout io.Writer) error {
 			if cfg.DraftTokens > 0 {
 				dec.Config.DraftTokensPerStep = cfg.DraftTokens
 			}
-			_, _ = inference.Forward(promptTokens, session)
+			_, _ = streamModel.Forward(promptTokens, session)
 			for i := 0; i < genCfg.MaxNewTokens; i++ {
 				if err := ctx.Err(); err != nil {
 					return err
@@ -201,7 +214,7 @@ func RunFromGGUF(ctx context.Context, cfg RunConfig, stdout io.Writer) error {
 		if cfg.DraftTokens > 0 {
 			specCfg.DraftTokensPerStep = cfg.DraftTokens
 		}
-		stream := model.NewSpeculativeGenerationStream(draft, inference, session, specCfg)
+		stream := model.NewSpeculativeGenerationStream(draft, streamModel, session, specCfg)
 		stream.Seed(promptTokens)
 		for i := 0; i < genCfg.MaxNewTokens; i++ {
 			if err := ctx.Err(); err != nil {
@@ -222,8 +235,30 @@ func RunFromGGUF(ctx context.Context, cfg RunConfig, stdout io.Writer) error {
 				return err
 			}
 		}
+	} else if model.HasMTPWeights(cfg.ModelPath) {
+		mtpStream := model.NewMtpGenerationStream(streamModel, session, genCfg)
+		mtpStream.Seed(promptTokens)
+		for i := 0; i < genCfg.MaxNewTokens; i++ {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			token, done, err := mtpStream.Next(ctx)
+			if err != nil {
+				return err
+			}
+			if done {
+				break
+			}
+			piece, err := tok.Decode([]model.Token{token})
+			if err != nil {
+				piece = fmt.Sprintf("<%d>", token)
+			}
+			if _, err := io.WriteString(stdout, piece); err != nil {
+				return err
+			}
+		}
 	} else {
-		stream := model.NewGenerationStream(inference, session, genCfg)
+		stream := model.NewGenerationStream(streamModel, session, genCfg)
 		stream.Seed(promptTokens)
 		for i := 0; i < genCfg.MaxNewTokens; i++ {
 			if err := ctx.Err(); err != nil {

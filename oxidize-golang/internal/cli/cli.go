@@ -30,6 +30,8 @@ func Run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 		return listCommand(args[1:], stdout)
 	case "serve":
 		return serveCommand(ctx, args[1:])
+	case "convert":
+		return convertCommand(args[1:], stdout)
 	case "gpu-cluster":
 		return gpuClusterCommand(args[1:], stdout, stderr)
 	case "-h", "--help", "help":
@@ -89,7 +91,7 @@ func runOrChat(ctx context.Context, args []string, stdout io.Writer, stderr io.W
 	if chat {
 		cmd = "chat"
 	}
-	_, opts, rest, err := parseRunFlags(cmd, args)
+	_, opts, visits, rest, err := parseRunFlags(cmd, args)
 	if err != nil {
 		return err
 	}
@@ -103,6 +105,9 @@ func runOrChat(ctx context.Context, args []string, stdout io.Writer, stderr io.W
 	modelPath, err := resolveModelPathWithHF(modelArg, opts.HFFile)
 	if err != nil {
 		return err
+	}
+	if err := applyAutotune(modelPath, &opts, visits, stderr); err != nil {
+		_, _ = fmt.Fprintf(stderr, "autotune warning: %v\n", err)
 	}
 	if done, err := maybeRunPipeline(ctx, opts, modelPath, stdout); done {
 		return err

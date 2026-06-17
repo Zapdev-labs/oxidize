@@ -8,18 +8,19 @@ import (
 	"github.com/Zapdev-labs/oxidize/golang/core/kv_cache"
 )
 
-// LayerWiseModel is a variant of InferenceModel that uses an LRU layer cache
-// to keep only a sliding window of layers resident in memory. It mirrors the
-// large `LayerWiseModel` struct from oxidize-core/src/model/layer_wise.rs.
+// LayerWiseModel streams transformer layers through an LRU cache. When Inner is
+// set it delegates forward to a fully-loaded inference model while tracking
+// layer residency for RAM-offload planning.
 type LayerWiseModel struct {
-	Config     InferenceConfig
-	Storage    WeightStorage
-	Workspace  *Workspace
-	CacheSize  int
-	KVCache    *kv_cache.Cache
-	cache      *list.List
-	cacheKeys  map[int]*list.Element
-	mu         sync.Mutex
+	Config    InferenceConfig
+	Storage   WeightStorage
+	Workspace *Workspace
+	CacheSize int
+	KVCache   *kv_cache.Cache
+	Inner     *InferenceModel
+	cache     *list.List
+	cacheKeys map[int]*list.Element
+	mu        sync.Mutex
 }
 
 // NewLayerWiseModel constructs a new LayerWiseModel with the given cache
@@ -48,14 +49,18 @@ func NewLayerWiseModel(config InferenceConfig, storage WeightStorage, cacheSize 
 	}
 }
 
-// Forward returns a placeholder zero-logits vector; a real implementation
-// would touch each layer via the LRU cache.
-func (m *LayerWiseModel) Forward(tokens []Token, _ *Session) (Logits, error) {
+// Forward runs inference, touching the LRU cache for each token's layer index.
+func (m *LayerWiseModel) Forward(tokens []Token, session *Session) (Logits, error) {
 	if len(tokens) == 0 {
 		return nil, EmptyInputError
 	}
 	for _, l := range tokens {
-		m.touchLayer(int(l) % m.Config.LayerCount)
+		if m.Config.LayerCount > 0 {
+			m.touchLayer(int(l) % m.Config.LayerCount)
+		}
+	}
+	if m.Inner != nil {
+		return m.Inner.Forward(tokens, session)
 	}
 	return make(Logits, m.Config.VocabSize), nil
 }
@@ -86,6 +91,17 @@ func (m *LayerWiseModel) ContextSize() int { return m.Config.ContextSize }
 
 // LayerCount returns the configured layer count.
 func (m *LayerWiseModel) LayerCount() int { return m.Config.LayerCount }
+
+// NewLayerWiseFromInference wraps an existing inference model with LRU tracking.
+func NewLayerWiseFromInference(inner *InferenceModel, cacheSize int) *LayerWiseModel {
+	if inner == nil {
+		return NewLayerWiseModel(DefaultInferenceConfig(), WeightStorage{}, cacheSize)
+	}
+	m := NewLayerWiseModel(inner.Config, inner.Storage, cacheSize)
+	m.Inner = inner
+	m.KVCache = inner.KVCache
+	return m
+}
 
 // NewLayerWiseFromGGUF is a convenience constructor.
 func NewLayerWiseFromGGUF(file ggufcore.File, cacheSize int) *LayerWiseModel {

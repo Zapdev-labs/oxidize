@@ -15,6 +15,8 @@ from oxidize_python.core.model.generation import (
     default_generation_config,
     default_speculative_generation_config,
 )
+from oxidize_python.core.model.layer_wise import new_layer_wise_from_inference
+from oxidize_python.core.model.mtp import MtpGenerationStream, has_mtp_weights
 from oxidize_python.core.model.inference import InferenceModel
 from oxidize_python.core.model.loader import LoaderConfig, load_gguf_model_from_path
 from oxidize_python.core.model.model import Model, Session, Token
@@ -26,8 +28,9 @@ from oxidize_python.core.model.speculative import (
 from oxidize_python.core.tokenizer import from_gguf_metadata
 from oxidize_python.core.tokenizer.bpe import BpeTokenizer
 from oxidize_python.core.tokenizer.tokenizer import EncodeOptions, SpecialTokens
-from oxidize_python.core.vision.vision import Modality, StubPreprocessor, default_config
+from oxidize_python.core.vision.vision import PatchEncoder, default_config
 from oxidize_python.internal.generate.cache import inference_from_cache
+from oxidize_python.internal.generate.draft import load_draft_from_path
 from oxidize_python.internal.generate.paged_run import run_paged_from_gguf
 from oxidize_python.internal.gguf.parse import load_file
 
@@ -46,6 +49,8 @@ class RunConfig:
     loader: LoaderConfig = field(default_factory=LoaderConfig)
     use_paged: bool = False
     use_dflash_fusion: bool = False
+    layer_wise: bool = False
+    layer_cache: int = 4
     vision: bool = False
     image_path: str = ""
     stop_token: Token = 2
@@ -136,9 +141,10 @@ def run_from_gguf(cfg: RunConfig, stdout: object) -> None:
     if cfg.vision and cfg.image_path.strip():
         try:
             raw = _read_image_bytes(cfg.image_path.strip())
-            pre = StubPreprocessor(default_config())
-            enc = pre.process(raw, Modality.IMAGE)
-            stdout.write(f"# vision: preprocessed image ({enc!r})\n")
+            enc = PatchEncoder(default_config())
+            vecs = enc.encode(raw)
+            dims = enc.dims()
+            stdout.write(f"# vision: patch encoder dims={dims} len={len(vecs)}\n")
         except OSError:
             pass
 
@@ -156,23 +162,30 @@ def run_from_gguf(cfg: RunConfig, stdout: object) -> None:
     start = time.monotonic()
     draft_path = cfg.draft_model_path.strip() or cfg.loader.draft_model.strip()
 
+    stream_model: Model = inference
+    if cfg.layer_wise:
+        cache_size = cfg.layer_cache if cfg.layer_cache > 0 else 4
+        stream_model = new_layer_wise_from_inference(inference, cache_size)
+
     if draft_path or cfg.use_dflash_fusion:
         draft: Model
         if draft_path:
-            draft = load_gguf_model_from_path(draft_path, cfg.loader)
+            draft = load_draft_from_path(
+                draft_path, cfg.loader, inference.config.hidden_size
+            )
         else:
-            draft = HeuristicDFlashDraft(inference, DFlashConfig())
+            draft = HeuristicDFlashDraft(stream_model, DFlashConfig())
         if cfg.use_dflash_fusion:
             dec = SpeculativeDecoder(
                 draft,
-                inference,
+                stream_model,
                 session,
                 SpeculativeConfig(
                     draft_tokens_per_step=max(1, cfg.draft_tokens_per_step),
                     max_new_tokens=cfg.max_new_tokens,
                 ),
             )
-            inference.forward(prompt_tokens, session)
+            stream_model.forward(prompt_tokens, session)
             for _ in range(cfg.max_new_tokens):
                 accepted = dec.step()
                 if not accepted:
@@ -185,7 +198,7 @@ def run_from_gguf(cfg: RunConfig, stdout: object) -> None:
             stdout.write(f"\ngeneration stats: tokens={tokens} speed={speed:.2f} tok/s (dflash)\n")
             return
 
-        stream = _generation_stream(inference, cfg, session)
+        stream = _generation_stream(stream_model, cfg, session)
         stream.seed(prompt_tokens)
         for _ in range(cfg.max_new_tokens):
             token, done, err = stream.next()
@@ -194,8 +207,26 @@ def run_from_gguf(cfg: RunConfig, stdout: object) -> None:
             if done:
                 break
             _emit_token(tok, token, stdout)
+    elif has_mtp_weights(path):
+        gen_cfg = default_generation_config()
+        if cfg.max_new_tokens > 0:
+            gen_cfg.max_new_tokens = cfg.max_new_tokens
+        gen_cfg.stop_token = cfg.stop_token
+        gen_cfg.sampling.temperature = cfg.temperature
+        gen_cfg.sampling.top_p = cfg.top_p
+        if cfg.top_k > 0:
+            gen_cfg.sampling.top_k = cfg.top_k
+        mtp_stream = MtpGenerationStream(stream_model, session, gen_cfg)
+        mtp_stream.seed(prompt_tokens)
+        for _ in range(cfg.max_new_tokens):
+            token, done, err = mtp_stream.next()
+            if err is not None:
+                raise err
+            if done:
+                break
+            _emit_token(tok, token, stdout)
     else:
-        stream = _generation_stream(inference, cfg, session)
+        stream = _generation_stream(stream_model, cfg, session)
         stream.seed(prompt_tokens)
         for _ in range(cfg.max_new_tokens):
             token, done, err = stream.next()

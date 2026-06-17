@@ -16,12 +16,23 @@ func maybeRunMeshChat(ctx context.Context, opts genOptions, modelPath string, st
 		return false, nil
 	}
 	_ = ctx
-	local := mesh.MeshNode{ID: "local", Addr: fmt.Sprintf("127.0.0.1:%d", opts.MeshPort), Role: "worker", Healthy: true}
-	engine := mesh.NewMeshChatEngine(local)
-	engine.Router.Update(local)
-	transport := mesh.NewTcpTransport(local.Addr)
-	_ = transport
-	_, _ = fmt.Fprintf(stdout, "oxidize mesh chat (gossip engine). peers=%d. type exit to quit.\n", len(engine.Router.Peers()))
+	addr := fmt.Sprintf("127.0.0.1:%d", opts.MeshPort)
+	local := mesh.MeshNode{ID: "local", Addr: addr, Role: "worker", Healthy: true}
+	rt := mesh.NewRuntime(local)
+	if err := rt.StartListen(); err != nil {
+		return true, fmt.Errorf("mesh listen: %w", err)
+	}
+	for _, peer := range strings.Split(opts.MeshPeers, ",") {
+		peer = strings.TrimSpace(peer)
+		if peer == "" || peer == addr {
+			continue
+		}
+		rt.Engine.Router.Update(mesh.MeshNode{ID: peer, Addr: peer, Role: "worker", Healthy: true})
+		if err := rt.Transport.Dial(peer); err != nil {
+			_, _ = fmt.Fprintf(stderr, "mesh: dial %s: %v\n", peer, err)
+		}
+	}
+	_, _ = fmt.Fprintf(stdout, "oxidize mesh chat on %s (peers=%d). type exit to quit.\n", addr, len(rt.Engine.Router.Peers()))
 	cfgRun := opts.runConfig(modelPath)
 	scanner := bufio.NewScanner(os.Stdin)
 	for {
@@ -38,14 +49,19 @@ func maybeRunMeshChat(ctx context.Context, opts genOptions, modelPath string, st
 		if strings.EqualFold(line, "exit") || strings.EqualFold(line, "quit") {
 			return true, nil
 		}
-		for _, peer := range engine.Router.Peers() {
-			if peer.ID != local.ID {
-				engine.Router.Update(peer)
-			}
-		}
 		cfgRun.Prompt = line
-		if err := generateRun(ctx, cfgRun, stdout, stderr); err != nil {
-			_, _ = fmt.Fprintf(stderr, "generation failed: %v\n", err)
+		text, err := rt.RouteCompletion(cfgRun.ModelPath, line, func(_, prompt string) (string, error) {
+			if err := generateRun(ctx, cfgRun, stdout, stderr); err != nil {
+				return "", err
+			}
+			return prompt, nil
+		})
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "mesh generation failed: %v\n", err)
+			continue
+		}
+		if text != "" && text != line {
+			_, _ = fmt.Fprintf(stdout, "%s\n", text)
 		}
 		_, _ = io.WriteString(stdout, "\n")
 	}

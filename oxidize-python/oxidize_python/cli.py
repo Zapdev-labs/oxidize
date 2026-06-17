@@ -128,6 +128,10 @@ def _run_command(args: list[str]) -> int:
         return 0
     if maybe_run_mesh_chat(opts, path, sys.stdout, sys.stderr):
         return 0
+    from oxidize_python.cli_autotune import apply_autotune
+    from oxidize_python.cli_flag_visits import flag_visits
+
+    apply_autotune(path, opts, flag_visits(args))
     if path.lower().endswith(".gguf") and Path(path).is_file():
         return _run_gguf(opts.run_config(path), profile=opts.profile)
     sys.stdout.write(cli_transcript(opts.prompt))
@@ -158,6 +162,10 @@ def _chat_command(args: list[str]) -> int:
 
     if maybe_run_mesh_chat(opts, path, sys.stdout, sys.stderr):
         return 0
+    from oxidize_python.cli_autotune import apply_autotune
+    from oxidize_python.cli_flag_visits import flag_visits
+
+    apply_autotune(path, opts, flag_visits(args))
     cfg = opts.run_config(path)
     print("oxidize chat mode. type 'exit' or 'quit' to leave.")
     while True:

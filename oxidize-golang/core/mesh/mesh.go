@@ -132,15 +132,6 @@ func (c *ChannelTransport) Recv() []byte {
 	}
 }
 
-// TcpTransport mirrors TcpTransport. It is a thin shell that records
-// configuration but does not actually open TCP connections.
-type TcpTransport struct {
-	Addr string
-}
-
-// NewTcpTransport constructs a transport that will bind to `addr`.
-func NewTcpTransport(addr string) *TcpTransport { return &TcpTransport{Addr: addr} }
-
 // ShardPlan mirrors ShardPlan.
 type ShardPlan struct {
 	Shards       []MeshShard

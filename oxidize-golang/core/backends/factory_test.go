@@ -3,6 +3,8 @@ package backends
 import (
 	"testing"
 
+	cudabackend "github.com/Zapdev-labs/oxidize/golang/core/backends/cuda"
+
 	"github.com/Zapdev-labs/oxidize/golang/core/backend"
 )
 
@@ -19,22 +21,37 @@ func TestNewComputeBackendCPU(t *testing.T) {
 	}
 }
 
-func TestNewComputeBackendCudaFallback(t *testing.T) {
+func TestNewComputeBackendCuda(t *testing.T) {
 	res, err := NewComputeBackend("cuda", true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !res.FellBack || res.Effective != backend.BackendCpu {
-		t.Fatalf("expected cuda->cpu fallback, got %+v", res)
+	if res.Requested != backend.BackendCuda {
+		t.Fatalf("requested = %v", res.Requested)
 	}
-	if res.Warning == "" {
-		t.Fatal("expected warning")
+	if res.FellBack {
+		if res.Effective != backend.BackendCpu {
+			t.Fatalf("expected cpu fallback, got %+v", res)
+		}
+		if res.Warning == "" {
+			t.Fatal("expected warning on fallback")
+		}
+		return
+	}
+	if res.Backend == nil || res.Backend.Name() != "cuda" {
+		t.Fatalf("backend = %v", res.Backend)
 	}
 }
 
 func TestNewComputeBackendCudaNoFallback(t *testing.T) {
-	_, err := NewComputeBackend("cuda", false)
-	if err == nil {
-		t.Fatal("expected error without fallback")
+	if err := cudabackend.Initialize(); err != nil {
+		t.Skip("cuda unavailable in this environment")
+	}
+	res, err := NewComputeBackend("cuda", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Backend.Name() != "cuda" {
+		t.Fatalf("backend = %s", res.Backend.Name())
 	}
 }
