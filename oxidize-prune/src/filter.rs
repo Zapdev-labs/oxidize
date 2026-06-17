@@ -12,6 +12,11 @@ impl PruneFilter {
         }
     }
 
+    /// Returns whether `tensor_name` should be kept (pruned otherwise).
+    ///
+    /// A tensor is kept only if it matches the keep filter **and** is not
+    /// matched by the drop filter. `drop_contains` therefore takes precedence:
+    /// if a name matches both a keep pattern and a drop pattern, it is dropped.
     pub fn keeps(&self, tensor_name: &str) -> bool {
         let passes_keep = self.keep_contains.is_empty()
             || self

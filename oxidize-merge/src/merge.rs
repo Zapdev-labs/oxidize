@@ -70,20 +70,14 @@ pub fn merge_models(opts: MergeOptions) -> Result<MergeReport> {
                         copied_a += 1;
                     }
                 }
-                (Some(_), None) => match opts.missing {
-                    MissingTensorPolicy::Error => {
-                        bail!("tensor {name} exists only in model A");
-                    }
-                    MissingTensorPolicy::A => copied_a += 1,
-                    MissingTensorPolicy::B => bail!("tensor {name} missing from model B"),
-                },
-                (None, Some(_)) => match opts.missing {
-                    MissingTensorPolicy::Error => {
-                        bail!("tensor {name} exists only in model B");
-                    }
-                    MissingTensorPolicy::A => bail!("tensor {name} missing from model A"),
-                    MissingTensorPolicy::B => copied_b += 1,
-                },
+                (Some(_), None) => {
+                    resolve_single_side(&opts.missing, true, name)?;
+                    copied_a += 1;
+                }
+                (None, Some(_)) => {
+                    resolve_single_side(&opts.missing, false, name)?;
+                    copied_b += 1;
+                }
                 (None, None) => unreachable!("name came from union"),
             }
         }

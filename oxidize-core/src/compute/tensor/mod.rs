@@ -5,6 +5,8 @@
 
 mod errors;
 mod kernels;
+mod types;
 
 pub use errors::*;
 pub use kernels::*;
+pub use types::*;

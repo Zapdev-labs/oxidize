@@ -41,6 +41,11 @@ struct Shared {
     n_chunks: AtomicUsize,
     /// One ack slot per worker, cache-line padded: written only by its owner.
     acks: Box<[AckSlot]>,
+    /// Set by any worker whose chunk panicked in the current region. Reset by
+    /// the submitter before each region is published; checked after the
+    /// ack-drain so a swallowed worker panic is propagated to the caller
+    /// instead of silently producing incomplete output.
+    region_failed: AtomicBool,
     busy: AtomicBool,
     shutdown: AtomicBool,
     idle_lock: Mutex<()>,
@@ -167,6 +172,7 @@ impl SpinPool {
             task_vtable: AtomicU64::new(0),
             n_chunks: AtomicUsize::new(0),
             acks,
+            region_failed: AtomicBool::new(false),
             busy: AtomicBool::new(false),
             shutdown: AtomicBool::new(false),
             idle_lock: Mutex::new(()),
@@ -222,6 +228,9 @@ impl SpinPool {
         // Publish payload, then the new serial (release): workers read the
         // payload only after observing the bumped serial.
         let fat: [u64; 2] = unsafe { std::mem::transmute(f) };
+        // Clear the previous region's failure flag before workers can observe
+        // the new serial.
+        s.region_failed.store(false, Ordering::Relaxed);
         s.task_data.store(fat[0], Ordering::Relaxed);
         s.task_vtable.store(fat[1], Ordering::Relaxed);
         s.n_chunks.store(n_chunks, Ordering::Relaxed);
@@ -261,8 +270,15 @@ impl SpinPool {
         }
         s.busy.store(false, Ordering::Release);
 
+        // Propagate failures only after every worker has acked (and thus
+        // dropped its borrow of `f`). The submitter's own panic takes priority;
+        // otherwise surface a worker-chunk panic so `run` never reports success
+        // with partially computed output.
         if let Some(payload) = submitter_panic {
             std::panic::resume_unwind(payload);
+        }
+        if s.region_failed.load(Ordering::Acquire) {
+            panic!("[spinpool] a worker chunk panicked; region output is incomplete");
         }
     }
 }
@@ -335,6 +351,11 @@ fn worker_loop(s: &'static Shared, worker_idx: usize, participants: usize) {
             }
         }))
         .is_err();
+        // Record the failure before acking so the submitter, which only reads
+        // `region_failed` after observing this ack, is guaranteed to see it.
+        if panicked {
+            s.region_failed.store(true, Ordering::Release);
+        }
         s.acks[worker_idx]
             .done_serial
             .store(serial, Ordering::Release);

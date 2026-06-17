@@ -64,15 +64,20 @@ impl AuthConfig {
     }
 
     pub fn is_enabled(&self) -> bool {
-        !self.keys().is_empty()
+        self.keys().next().is_some()
     }
 
-    fn keys(&self) -> Vec<&str> {
-        if self.api_keys.is_empty() {
-            self.api_key.as_deref().into_iter().collect()
+    /// Iterate configured API keys without allocating per call.
+    fn keys(&self) -> impl Iterator<Item = &str> {
+        // `api_keys` is the source of truth when present; otherwise fall back
+        // to the single `api_key`. Exactly one branch yields items.
+        let from_list = self.api_keys.iter().map(AsRef::as_ref);
+        let from_single = if self.api_keys.is_empty() {
+            self.api_key.as_deref()
         } else {
-            self.api_keys.iter().map(AsRef::as_ref).collect()
-        }
+            None
+        };
+        from_list.chain(from_single)
     }
 }
 
@@ -203,13 +208,13 @@ mod tests {
     fn auth_config_accepts_multiple_keys() {
         let auth = AuthConfig::from_keys(["alpha".to_string(), "bravo".to_string()]);
         assert!(auth.is_enabled());
-        assert_eq!(auth.keys(), vec!["alpha", "bravo"]);
+        assert_eq!(auth.keys().collect::<Vec<_>>(), vec!["alpha", "bravo"]);
         assert_eq!(auth.api_key.as_deref(), Some("alpha"));
     }
 
     #[test]
     fn auth_config_ignores_empty_keys() {
         let auth = AuthConfig::from_keys([" alpha ".to_string(), "".to_string(), " ".to_string()]);
-        assert_eq!(auth.keys(), vec!["alpha"]);
+        assert_eq!(auth.keys().collect::<Vec<_>>(), vec!["alpha"]);
     }
 }

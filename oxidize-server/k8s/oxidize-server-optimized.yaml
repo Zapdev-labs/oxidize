@@ -129,7 +129,9 @@ spec:
               topologyKey: kubernetes.io/hostname
       containers:
         - name: oxidize-server
-          image: oxidize-server:latest
+          # Pin an immutable tag (or digest) for reproducible rollouts across
+          # replicas; `latest` drifts and can leave pods on different builds.
+          image: oxidize-server:0.1.0
           imagePullPolicy: IfNotPresent
           args:
             - --host=0.0.0.0

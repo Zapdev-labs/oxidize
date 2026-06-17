@@ -130,8 +130,18 @@ impl ShardWriter {
             if updated != shard_name {
                 let old = self.output_dir.join(&shard_name);
                 let new = self.output_dir.join(&updated);
+                // The index is about to reference `updated`. If neither the
+                // source nor the already-renamed destination exists, the index
+                // would point at a missing shard — fail loudly instead.
                 if old.exists() {
                     fs::rename(&old, &new)?;
+                } else if !new.exists() {
+                    bail!(
+                        "shard {} missing while finalizing index (expected {} or {})",
+                        shard_name,
+                        old.display(),
+                        new.display()
+                    );
                 }
             }
             final_weight_map.insert(tensor_name, updated);

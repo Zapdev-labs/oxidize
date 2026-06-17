@@ -52,9 +52,13 @@ impl HardwareInventory {
         let cpu = format!("{:?}", self.cpu_vendor);
         let simd = format!("{:?}", self.simd);
         let gpu = if self.has_gpu {
+            let family = self
+                .gpu_family
+                .map(|f| f.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
             format!(
-                "gpu={:?} vram={} MiB",
-                self.gpu_family,
+                "gpu={} vram={} MiB",
+                family,
                 self.gpu_vram_bytes / (1024 * 1024)
             )
         } else {
@@ -99,8 +103,12 @@ pub fn detect() -> HardwareInventory {
         .sum();
     // Pick the highest-end family if we have multiple GPUs of
     // different kinds (rare but possible — DGX has A100 + BlueField
-    // NICs that nvidia-smi may report).
-    let gpu_family = gpus.iter().find_map(|g| g.family);
+    // NICs that nvidia-smi may report). Rank by capability rather than
+    // nvidia-smi enumeration order so selection is deterministic.
+    let gpu_family = gpus
+        .iter()
+        .filter_map(|g| g.family)
+        .max_by_key(|f| f.rank());
 
     let has_metal = detect_metal();
     let has_cuda = detect_cuda();

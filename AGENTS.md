@@ -124,7 +124,7 @@ make wasm     # outputs to dist/wasm
 - Parallel language ports should reach feature parity with `oxidize-core` (user asked for every Rust feature in Python/Go, with Python targeting similar CLOC to Rust).
 - Keep `oxidize-py` (PyO3/maturin bindings) alongside the pure-Python `oxidize-python` package.
 - When extending Go/Python ports, implement in `oxidize-golang` first, mirror to `oxidize-python`, and sync new `master` Rust features rather than leaving ports stale.
-- For Go/Python GPU backends, use pure native implementations (no Rust FFI/CGO at runtime); CUDA first, then Vulkan/Metal/WebGPU.
+- For Go/Python GPU backends, use pure native implementations (no Rust FFI at runtime; CGO permitted for native GPU bindings); CUDA first, then Vulkan/Metal/WebGPU.
 - Avoid creating extra markdown documentation files unless asked; update README when needed.
 - On feature branches, stage and commit only files related to the task; exclude unrelated workspace changes.
 - `oxidize run <model>` should start the OpenAI-compatible HTTP/WebSocket server by default; use `--no-api` for local inference only.

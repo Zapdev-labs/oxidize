@@ -1963,24 +1963,44 @@ fn main() {
         effective_backend.as_str(),
         backend_label
     );
-    let threads = if let Some(t) = args.threads.filter(|t| *t > 0) {
-        t
-    } else {
-        // One worker per physical core: decode GEMV is DRAM-bound, so SMT
-        // siblings add contention, not throughput (16 logical threads on an
-        // 8-core part measures slower than 8).
-        oxidize_core::spinpool::physical_core_count()
-    };
-    // Pin each rayon worker to one CPU in core-first order. Without this the
-    // scheduler migrates workers between cores (and NUMA nodes) mid-token,
-    // turning local DRAM streams into remote ones and defeating the hardware
-    // prefetcher. Disable with OXIDIZE_NO_PIN=1.
-    let pool_builder = rayon::ThreadPoolBuilder::new()
-        .num_threads(threads)
-        .start_handler(oxidize_core::spinpool::pin_to_slot);
-    if let Err(error) = pool_builder.build_global() {
-        eprintln!("failed to set rayon thread pool: {error}");
-        return;
+    // Build the global rayon pool with one worker per physical core. Decode
+    // GEMV is DRAM-bound, so SMT siblings add contention, not throughput (16
+    // logical threads on an 8-core part measures slower than 8). Pin each
+    // worker to one CPU in core-first order; otherwise the scheduler migrates
+    // workers between cores (and NUMA nodes) mid-token, turning local DRAM
+    // streams into remote ones and defeating the prefetcher. Disable pinning
+    // with OXIDIZE_NO_PIN=1.
+    //
+    // The pool can only be built once and must be built before any rayon use.
+    // When `--auto` will tune an actual model it can lower the thread count
+    // (e.g. for GPU offload), so for that path we defer the build until after
+    // the plan is applied — building it here would pin the wrong thread count
+    // permanently. Model loading itself does not touch the global pool.
+    fn build_rayon_pool(threads: usize) -> Result<(), rayon::ThreadPoolBuildError> {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .start_handler(oxidize_core::spinpool::pin_to_slot)
+            .build_global()
+    }
+    fn resolve_threads(args: &Args) -> usize {
+        args.threads
+            .filter(|t| *t > 0)
+            .unwrap_or_else(oxidize_core::spinpool::physical_core_count)
+    }
+    let defer_pool_for_autotune = args.auto
+        && !args.no_auto
+        && args.model.is_some()
+        && args.threads.filter(|t| *t > 0).is_none()
+        && args.profile.is_none()
+        && !args.api_only
+        && !args.pipe_head
+        && !args.pipe_tail
+        && !args.mesh;
+    if !defer_pool_for_autotune {
+        if let Err(error) = build_rayon_pool(resolve_threads(&args)) {
+            eprintln!("failed to set rayon thread pool: {error}");
+            return;
+        }
     }
     if let Some(profiler) = args.profile
         && !is_profiling_child()
@@ -2114,6 +2134,14 @@ fn main() {
                 }
             }
             apply_plan_to_args(&mut args, &plan, &inv);
+        }
+        // Now that autotune has finalized `args.threads`, build the rayon pool
+        // if we deferred it above. This is the first point rayon is used.
+        if defer_pool_for_autotune
+            && let Err(error) = build_rayon_pool(resolve_threads(&args))
+        {
+            eprintln!("failed to set rayon thread pool: {error}");
+            return;
         }
         optimize_mapped_model_memory(&mapped, &args);
         {

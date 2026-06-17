@@ -48,6 +48,13 @@ pub fn slerp_f32(a: &[f32], b: &[f32], t: f32, out: &mut [f32]) {
     }
 
     let sin_theta = theta.sin();
+    // Near-antipodal inputs: theta → π, sin_theta → 0, so the slerp weight
+    // division blows up to NaN/Inf. The great-circle direction is undefined
+    // there, so fall back to a stable linear blend.
+    if sin_theta < 1e-8 {
+        linear_f32(a, b, t, out);
+        return;
+    }
     let w0 = ((1.0 - f64::from(t)) * theta).sin() / sin_theta;
     let w1 = (f64::from(t) * theta).sin() / sin_theta;
     for ((o, &left), &right) in out.iter_mut().zip(a.iter()).zip(b.iter()) {
@@ -296,6 +303,11 @@ mod tests {
         slerp_f32(&a, &b, 0.5, &mut out);
         let norm = (out[0] * out[0] + out[1] * out[1]).sqrt();
         assert!((norm - 1.0).abs() < 1e-4);
-        assert!(out[0] > 0.0 && out[1] > 0.0);
+        // Midpoint between two orthogonal unit vectors sits at exactly 45°,
+        // so both components must equal cos(45°) = 1/sqrt(2). Checking the
+        // angle (not just norm + sign) pins down the actual interpolation.
+        let half = std::f32::consts::FRAC_1_SQRT_2;
+        assert!((out[0] - half).abs() < 1e-4, "out[0]={}", out[0]);
+        assert!((out[1] - half).abs() < 1e-4, "out[1]={}", out[1]);
     }
 }

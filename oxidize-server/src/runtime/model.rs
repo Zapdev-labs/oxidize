@@ -151,7 +151,20 @@ pub fn load_model_runtime(args: &Args) -> Result<Option<Arc<ModelRuntime>>, Stri
     if args.auto && !args.no_auto {
         let inv = oxidize_core::autotune::detect();
         let model = oxidize_core::autotune::fingerprint(&mapped);
-        let plan = oxidize_core::autotune::plan(&inv, &model);
+        let mut plan = oxidize_core::autotune::plan(&inv, &model);
+        // The DFlash branch does not honor the layer-wise execution path, so a
+        // `layer_wise` recommendation here would be logged but never applied.
+        // Drop it before logging so the reported plan matches what the server
+        // actually runs for this model.
+        if matches!(
+            mapped.parsed().architecture(),
+            Some("dflash" | "dflash-draft")
+        ) && plan.layer_wise
+        {
+            plan.layer_wise = false;
+            plan.rationale
+                .push("layer_wise disabled: not supported by the DFlash model path".to_string());
+        }
         match args.print_plan.as_str() {
             "json" => {
                 use oxidize_core::autotune::OxkIsa;

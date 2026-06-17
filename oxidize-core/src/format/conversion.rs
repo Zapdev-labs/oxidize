@@ -1,8 +1,9 @@
-#![allow(clippy::type_complexity)]
-
 use crate::gguf::GgufQuantizationType;
 use safetensors::tensor::Dtype;
 use std::collections::BTreeMap;
+
+/// A decoded tensor staged for GGUF output: `(name, dtype, shape, raw bytes)`.
+pub(crate) type StagedTensor = (String, Dtype, Vec<usize>, Vec<u8>);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModelArchitecture {
@@ -275,7 +276,7 @@ pub fn split_fused_gate_up_proj(
     dtype: Dtype,
     shape: &[usize],
     raw: &[u8],
-) -> Option<Vec<(String, Dtype, Vec<usize>, Vec<u8>)>> {
+) -> Option<Vec<StagedTensor>> {
     if shape.len() != 3 || !shape[1].is_multiple_of(2) {
         return None;
     }
@@ -316,7 +317,7 @@ pub fn flatten_linear_attn_conv1d(
     dtype: Dtype,
     shape: &[usize],
     raw: &[u8],
-) -> Option<(String, Dtype, Vec<usize>, Vec<u8>)> {
+) -> Option<StagedTensor> {
     if shape.len() != 3 || shape[1] != 1 {
         return None;
     }
@@ -354,8 +355,8 @@ fn dtype_element_size(dtype: Dtype) -> Option<usize> {
 /// unsplit tensor would produce a GGUF missing `ffn_gate_exps`/`ffn_up_exps`
 /// and break MoE inference (the streaming path already errors here).
 pub fn preprocess_hf_tensors_for_gguf(
-    tensors: Vec<(String, Dtype, Vec<usize>, Vec<u8>)>,
-) -> Result<Vec<(String, Dtype, Vec<usize>, Vec<u8>)>, String> {
+    tensors: Vec<StagedTensor>,
+) -> Result<Vec<StagedTensor>, String> {
     let mut out = Vec::with_capacity(tensors.len() + 64);
     for (name, dtype, shape, raw) in tensors {
         if name.starts_with("model.visual.") {

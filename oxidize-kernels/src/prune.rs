@@ -5,8 +5,6 @@
 
 #![allow(unsafe_op_in_unsafe_fn)]
 
-use std::cmp::Ordering;
-
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use std::arch::is_x86_feature_detected;
 
@@ -57,7 +55,9 @@ pub fn wanda_mask(
 
 /// Zero pruned entries in a row-major weight matrix (`mask[i] == false` → 0).
 pub fn apply_mask_inplace(weights_f32: &mut [f32], mask: &[bool]) {
-    debug_assert_eq!(weights_f32.len(), mask.len());
+    // `assert_eq!` (not `debug_assert_eq!`): on a length mismatch `zip` would
+    // silently truncate in release builds, leaving weights unzeroed.
+    assert_eq!(weights_f32.len(), mask.len());
     for (w, &keep) in weights_f32.iter_mut().zip(mask.iter()) {
         if !keep {
             *w = 0.0;
@@ -103,11 +103,10 @@ fn mask_row_by_scores(scores: &[f32], indices: &mut [usize], drop: usize, row_ma
     for (i, slot) in indices.iter_mut().enumerate() {
         *slot = i;
     }
-    indices.select_nth_unstable_by(drop - 1, |&a, &b| {
-        scores[a]
-            .partial_cmp(&scores[b])
-            .unwrap_or(Ordering::Equal)
-    });
+    // `total_cmp` gives a strict weak ordering even when scores contain NaN;
+    // `partial_cmp(...).unwrap_or(Equal)` does not, which can corrupt the
+    // partition produced by `select_nth_unstable_by`.
+    indices.select_nth_unstable_by(drop - 1, |&a, &b| scores[a].total_cmp(&scores[b]));
     for &j in indices.iter().take(drop) {
         row_mask[j] = false;
     }

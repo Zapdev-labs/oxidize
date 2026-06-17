@@ -10,9 +10,10 @@ use std::arch::x86::*;
 use std::arch::x86_64::*;
 
 use super::errors::{
-    ActivationFn, AttentionError, DType, GemmError, GemvError, LayerNormError,
-    LinearActivationError, RmsNormError, RopeError, SoftmaxError, SwiGluError,
+    AttentionError, GemmError, GemvError, LayerNormError, LinearActivationError, RmsNormError,
+    RopeError, SoftmaxError, SwiGluError,
 };
+use super::types::{ActivationFn, DType};
 
 const E2M1_DOUBLED_VALUES: [f32; 16] = [
     0.0, 1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0, 0.0, -1.0, -2.0, -3.0, -4.0, -6.0, -8.0, -12.0,

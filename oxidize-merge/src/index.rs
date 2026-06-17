@@ -8,6 +8,34 @@ use safetensors::SafeTensors;
 use safetensors::tensor::Dtype;
 use serde_json::Value;
 
+/// Merge per-shard metadata, erroring on conflicting values for the same key
+/// rather than silently letting a later shard overwrite an earlier one.
+fn merge_metadata(into: &mut BTreeMap<String, String>, from: BTreeMap<String, String>) -> Result<()> {
+    for (k, v) in from {
+        match into.get(&k) {
+            Some(existing) if *existing != v => {
+                bail!("conflicting metadata for key {k:?}: {existing:?} vs {v:?}");
+            }
+            _ => {
+                into.insert(k, v);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Reject shard names that are not a plain file name within the model
+/// directory (absolute paths, parent escapes, or nested directories), so a
+/// malicious index JSON cannot read arbitrary files via `dir.join(name)`.
+fn validate_shard_name(name: &str) -> Result<()> {
+    let p = Path::new(name);
+    let mut components = p.components();
+    match (components.next(), components.next()) {
+        (Some(std::path::Component::Normal(_)), None) => Ok(()),
+        _ => bail!("invalid shard name {name:?} in weight index (must be a plain file name)"),
+    }
+}
+
 #[derive(Debug)]
 pub struct MappedShard {
     mmap: Mmap,
@@ -113,7 +141,7 @@ impl ModelIndex {
                 }
                 tensors.insert(name, info);
             }
-            metadata.extend(read_file_metadata(&shard_path)?);
+            merge_metadata(&mut metadata, read_file_metadata(&shard_path)?)?;
         }
         Ok(Self {
             root: dir.to_path_buf(),
@@ -147,9 +175,10 @@ impl ModelIndex {
                 .as_str()
                 .ok_or_else(|| anyhow!("weight_map entry for {tensor_name} is not a string"))?;
             if !shard_cache.contains_key(shard_name) {
+                validate_shard_name(shard_name)?;
                 let shard_path = dir.join(shard_name);
                 shard_cache.insert(shard_name.to_owned(), MappedShard::open(&shard_path)?);
-                metadata.extend(read_file_metadata(&shard_path)?);
+                merge_metadata(&mut metadata, read_file_metadata(&shard_path)?)?;
             }
             let shard = shard_cache.get(shard_name).unwrap();
             let info = shard

@@ -191,8 +191,13 @@ fn run(args: Args) -> Result<()> {
             };
             if let (Some(calib), false) = (args.calibration.as_ref(), args.dry_run) {
                 let cache = wanda::load_l2_norms_cache(calib)?;
-                let input_bytes = std::fs::read(&args.input)?;
-                wanda::validate_calibration(&cache, &input_bytes)?;
+                // `validate_calibration` only inspects the GGUF header (tensor
+                // names + dims). Memory-map the model so only the header pages
+                // fault in — `std::fs::read` here would pull the entire 50–100+
+                // GB file into RAM and OOM on large models.
+                let mapped = oxidize_core::gguf::load_mapped_gguf(&args.input)
+                    .map_err(|e| anyhow::anyhow!(e))?;
+                wanda::validate_calibration(&cache, mapped.bytes())?;
             }
             let report = wanda_prune(WandaOptions {
                 input: args.input,

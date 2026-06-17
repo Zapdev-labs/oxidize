@@ -315,7 +315,7 @@ fn tier3_kv_and_ctx(inv: &HardwareInventory, model: &ModelFingerprint, plan: &mu
         plan.kv_quantization = KvQuantization::Asymmetric;
         plan
             .rationale
-            .push(">= 16 GiB VRAM → kv=F16 (lossless at this precision)".to_string());
+            .push(">= 16 GiB VRAM → kv=F16 (no additional quantization)".to_string());
     } else if (inv.has_gpu && vram_gib >= 8) || model.layer_count >= 80 {
         plan.kv_cache_dtype = DType::F16;
         plan.kv_quantization = KvQuantization::Asymmetric;
@@ -337,7 +337,17 @@ fn tier3_kv_and_ctx(inv: &HardwareInventory, model: &ModelFingerprint, plan: &mu
     // We cap by KV memory budget: leave 60% of effective RAM for
     // the model + 8 GiB for OS/workspace; KV gets the rest.
     let ram_budget = effective_ram_bytes(inv);
-    let model_bytes = model.file_size_bytes;
+    // Only layers that stay resident in RAM count against the KV budget. With
+    // GPU offload, the offloaded fraction of the weights lives in VRAM, so
+    // charging the full file size here would needlessly clamp ctx_size (e.g.
+    // down to 512 tokens) on systems where the model mostly lives on the GPU.
+    let model_bytes = if plan.n_gpu_layers > 0 && model.layer_count > 0 {
+        let resident_layers = model.layer_count.saturating_sub(plan.n_gpu_layers);
+        ((model.file_size_bytes as u128 * resident_layers as u128)
+            / model.layer_count as u128) as u64
+    } else {
+        model.file_size_bytes
+    };
     let overhead = 8u64 << 30;
     let kv_budget = ram_budget.saturating_sub(model_bytes).saturating_sub(overhead);
     let kv_bytes = kv_bytes_per_token(model, plan.kv_cache_dtype.size_in_bytes());
@@ -415,8 +425,10 @@ fn is_dflash_compatible(arch: &str) -> bool {
 // ---------- tier 6: thread count ----------
 
 fn tier6_threads(inv: &HardwareInventory, plan: &mut TuningPlan) {
-    if inv.has_gpu && plan.n_gpu_layers > 0 && plan.oxk_isa != OxkIsa::Scalar {
-        // GPU doing the heavy lifting; CPU only schedules + samples.
+    if inv.has_gpu && plan.n_gpu_layers > 0 {
+        // GPU doing the heavy lifting; CPU only schedules + samples. GPU
+        // offload alone justifies a low thread count regardless of CPU ISA
+        // (e.g. ARM reports `oxk_isa = Scalar` despite having Neon SIMD).
         plan.threads = 4.max(inv.physical_cores / 8);
         plan
             .rationale

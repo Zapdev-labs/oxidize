@@ -332,10 +332,8 @@ impl BlockPool {
     ///
     /// The block's reference count must be zero (or will be set to zero).
     pub fn free_block(&mut self, id: BlockId) -> Result<(), BlockPoolError> {
-        // Validate id first.
-        if self.blocks.get(id).is_none() {
-            return Err(BlockPoolError::InvalidBlockId { id });
-        }
+        // `is_free` only inspects the free list, so it is safe for any id; the
+        // `get_mut(...).ok_or(...)` below is the single validation point.
         let already_free = self.is_free(id);
         let block = self
             .blocks

@@ -111,20 +111,19 @@ fn open_generation_stream<'a>(
     } else {
         let use_native_mtp =
             matches!(model, LoadedModel::Inference(inference) if inference.has_mtp());
-        #[allow(clippy::collapsible_if)]
-        if use_native_mtp {
-            if let LoadedModel::Inference(inference_model) = model {
-                return ActiveGenerationStream::Mtp(MtpGenerationStream::new(
-                    inference_model.as_mut(),
-                    session,
-                    prompt_tokens,
-                    SpeculativeGenerationConfig {
-                        generation: config,
-                        draft_tokens_per_step: runtime.draft_tokens.max(1),
-                    },
-                    random,
-                ));
-            }
+        if use_native_mtp
+            && let LoadedModel::Inference(inference_model) = model
+        {
+            return ActiveGenerationStream::Mtp(MtpGenerationStream::new(
+                inference_model.as_mut(),
+                session,
+                prompt_tokens,
+                SpeculativeGenerationConfig {
+                    generation: config,
+                    draft_tokens_per_step: runtime.draft_tokens.max(1),
+                },
+                random,
+            ));
         }
         ActiveGenerationStream::Standard(GenerationStream::new(
             model,

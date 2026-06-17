@@ -56,9 +56,13 @@ pub fn classify_tensor(name: &str) -> TensorCategory {
         || lower.contains("v_proj")
         || lower.contains("o_proj")
         || lower.contains("qkv")
-        || lower.contains("query")
-        || lower.contains("key")
-        || lower.contains("value")
+        // Use the projection-suffixed forms rather than bare "query"/"key"/
+        // "value": the latter match unrelated tensors (e.g. routing tables or
+        // KV-cache buffers named "...key_cache") and misclassify them as
+        // attention weights.
+        || lower.contains("query_proj")
+        || lower.contains("key_proj")
+        || lower.contains("value_proj")
     {
         return TensorCategory::Attention;
     }
@@ -87,6 +91,9 @@ pub fn recipe_metadata(recipe: &MergeRecipe, method: &str) -> BTreeMap<String, S
     );
     meta.insert("oxidize-merge.mlp_t".to_owned(), recipe.mlp_t.to_string());
     meta.insert("oxidize-merge.other_t".to_owned(), recipe.other_t.to_string());
+    if let Some(default_t) = recipe.default_t {
+        meta.insert("oxidize-merge.default_t".to_owned(), default_t.to_string());
+    }
     meta
 }
 

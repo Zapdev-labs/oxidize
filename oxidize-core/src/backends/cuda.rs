@@ -372,6 +372,12 @@ impl GpuState {
     }
 
     fn enforce_budget(&mut self) {
+        self.enforce_budget_protecting(None);
+    }
+
+    /// Like [`Self::enforce_budget`], but never evicts `protect` (the orphan
+    /// quant entry a caller is about to use this turn).
+    fn enforce_budget_protecting(&mut self, protect: Option<WeightCacheKey>) {
         let max_layers = self.layer_config.max_resident_layers;
         let max_bytes = self.layer_config.max_vram_bytes;
 
@@ -398,12 +404,18 @@ impl GpuState {
                 drop(buf);
                 continue;
             }
-            if let Some(key) = self.orphan_quant_keys.pop_front()
-                && let Some(buf) = self.resident_quant.remove(&key)
-            {
-                self.resident_bytes -= buf.len();
-                drop(buf);
-                continue;
+            if let Some(key) = self.orphan_quant_keys.pop_front() {
+                if Some(key) == protect {
+                    // Don't evict the entry the caller still needs; re-queue it
+                    // at the front and stop (everything else is already gone).
+                    self.orphan_quant_keys.push_front(key);
+                    break;
+                }
+                if let Some(buf) = self.resident_quant.remove(&key) {
+                    self.resident_bytes -= buf.len();
+                    drop(buf);
+                    continue;
+                }
             }
             break;
         }
@@ -476,7 +488,10 @@ impl GpuState {
             self.resident_bytes += buf.len();
             self.resident_quant.insert(key, buf);
             self.orphan_quant_keys.push_back(key);
-            self.enforce_budget();
+            // Protect the entry we just made resident: the caller is about to
+            // `get(&key)` it, so it must not be evicted in this same budget
+            // pass even if `ensure_vram_headroom` could not free enough room.
+            self.enforce_budget_protecting(Some(key));
         } else {
             self.touch_orphan_quant(key);
         }

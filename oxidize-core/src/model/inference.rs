@@ -4317,8 +4317,16 @@ pub(crate) fn moe_ffn_forward_weights(
     {
         let n_group = cfg.expert_group_count;
         let group_size = n_experts / n_group;
-        let mut group_scores: Vec<(usize, f32)> = (0..n_group)
-            .map(|g| {
+        // Reuse a thread-local scratch buffer for the per-group scores instead
+        // of allocating a fresh `Vec` every decode step (this routing block
+        // runs once per token).
+        thread_local! {
+            static GROUP_SCORES: std::cell::RefCell<Vec<(usize, f32)>> =
+                const { std::cell::RefCell::new(Vec::new()) };
+        }
+        GROUP_SCORES.with_borrow_mut(|group_scores| {
+            group_scores.clear();
+            group_scores.extend((0..n_group).map(|g| {
                 let grp = &expert_scores[g * group_size..g * group_size + group_size];
                 let (mut top1, mut top2) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
                 for &(_, s) in grp {
@@ -4330,14 +4338,15 @@ pub(crate) fn moe_ffn_forward_weights(
                     }
                 }
                 (g, if top2.is_finite() { top1 + top2 } else { top1 })
-            })
-            .collect();
-        group_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        for &(g, _) in group_scores.iter().skip(cfg.expert_group_used_count) {
-            for e in &mut expert_scores[g * group_size..g * group_size + group_size] {
-                e.1 = f32::NEG_INFINITY;
+            }));
+            group_scores
+                .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            for &(g, _) in group_scores.iter().skip(cfg.expert_group_used_count) {
+                for e in &mut expert_scores[g * group_size..g * group_size + group_size] {
+                    e.1 = f32::NEG_INFINITY;
+                }
             }
-        }
+        });
     }
 
     // 3. Top-k expert selection by selection score.

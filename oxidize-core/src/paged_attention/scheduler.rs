@@ -766,33 +766,29 @@ impl Scheduler {
             let block_end = ((block_idx + 1) * block_size).min(prompt.len());
             let hash = compute_block_hash(&prompt[..block_end]);
 
-            if block_end <= cached_tokens_total {
-                // Fully cached block — share it.
+            // Resolve the physical block first (this borrows `self.block_pool`),
+            // then do a single `sequences` lookup to append it. Keeping the two
+            // borrows disjoint lets us fetch the sequence once per iteration
+            // instead of once per branch.
+            let block_id = if block_end <= cached_tokens_total {
+                // Fully cached block — share it if the cache entry still exists,
+                // otherwise allocate fresh (it was evicted since we computed
+                // `cached_tokens_total`).
                 if let Some(block_id) = self.block_pool.lookup_prefix_cache(hash) {
                     self.block_pool.inc_ref(block_id)?;
-                    let seq = self
-                        .sequences
-                        .get_mut(&seq_id)
-                        .ok_or(SchedulerError::SequenceNotFound { seq_id })?;
-                    seq.block_table.append_block(block_id);
+                    block_id
                 } else {
-                    // Cache entry was evicted since we computed cached_tokens_total.
-                    let seq = self
-                        .sequences
-                        .get_mut(&seq_id)
-                        .ok_or(SchedulerError::SequenceNotFound { seq_id })?;
-                    let block_id = self.block_pool.allocate_block()?;
-                    seq.block_table.append_block(block_id);
+                    self.block_pool.allocate_block()?
                 }
             } else {
                 // New or partially-cached block — allocate fresh.
-                let seq = self
-                    .sequences
-                    .get_mut(&seq_id)
-                    .ok_or(SchedulerError::SequenceNotFound { seq_id })?;
-                let block_id = self.block_pool.allocate_block()?;
-                seq.block_table.append_block(block_id);
-            }
+                self.block_pool.allocate_block()?
+            };
+            let seq = self
+                .sequences
+                .get_mut(&seq_id)
+                .ok_or(SchedulerError::SequenceNotFound { seq_id })?;
+            seq.block_table.append_block(block_id);
         }
 
         // --- Advance token counters. ---

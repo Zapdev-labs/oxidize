@@ -60,17 +60,14 @@ pub fn cross_entropy_grad_batch(
                 return (0.0_f32, 0usize);
             }
             let target = target as usize;
-            if target >= vocab {
-                // Out-of-range label = a tokenizer/data bug. Skip it (like an
-                // ignored target) instead of silently clamping to the last class
-                // and training on the wrong target; assert in dev/test builds.
-                debug_assert!(
-                    target < vocab,
-                    "target {target} out of range for vocab {vocab}"
-                );
-                row.fill(0.0);
-                return (0.0_f32, 0usize);
-            }
+            // Out-of-range label = a tokenizer/data bug. Fail fast (in every
+            // build) rather than silently skipping here while the loss-only
+            // path clamps — that divergence desyncs gradient vs loss
+            // accounting and hides the underlying data corruption.
+            assert!(
+                target < vocab,
+                "target {target} out of range for vocab {vocab}"
+            );
             let max_logit = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
             let exp_sum: f32 = row.iter().map(|l| (l - max_logit).exp()).sum();
             let log_sum_exp = max_logit + exp_sum.ln();
@@ -94,7 +91,12 @@ pub fn softmax_cross_entropy_batch(logits: &[f32], targets: &[u32], vocab: usize
             if target == IGNORE_TARGET {
                 return (0.0_f32, 0usize);
             }
-            (softmax_cross_entropy(row, target as usize), 1usize)
+            let target = target as usize;
+            assert!(
+                target < vocab,
+                "target {target} out of range for vocab {vocab}"
+            );
+            (softmax_cross_entropy(row, target), 1usize)
         })
         .reduce(|| (0.0, 0), |a, b| (a.0 + b.0, a.1 + b.1))
 }
