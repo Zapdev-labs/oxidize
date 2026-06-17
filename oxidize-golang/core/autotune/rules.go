@@ -290,7 +290,7 @@ func tier3KVAndCtx(inv *HardwareInventory, model *ModelFingerprint, plan *Tuning
 
 	ramBudget := effectiveRAMBytes(inv)
 	overhead := uint64(8 << 30)
-	kvBudget := ramBudget
+	var kvBudget uint64
 	if ramBudget > model.FileSizeBytes+overhead {
 		kvBudget = ramBudget - model.FileSizeBytes - overhead
 	} else {
