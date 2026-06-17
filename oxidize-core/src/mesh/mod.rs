@@ -12,6 +12,7 @@ mod gossip;
 mod node;
 mod progress;
 mod ring;
+mod rdma;
 mod scrutiny;
 mod sharding;
 mod topology;
@@ -39,6 +40,10 @@ pub use progress::{
 pub use ring::{
     ChannelTransport, DualTcpTransport, RingBackend, RingError, RingTransport, TcpTransport,
     create_mock_ring, create_tcp_ring,
+};
+pub use rdma::{
+    RdmaConfig, RdmaMockTransport, RdmaRingTransport, create_mock_rdma_ring, rdma_build_available,
+    rdma_runtime_available,
 };
 pub use scrutiny::{
     MeshValidationReport, validate_mesh_command, validate_mesh_prompt, validate_node_capabilities,

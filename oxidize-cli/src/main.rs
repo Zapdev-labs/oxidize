@@ -1814,6 +1814,7 @@ fn server_backend_from_cli(backend: Backend) -> oxidize_server::Backend {
         Backend::Metal => oxidize_server::Backend::Metal,
         Backend::Mlx => oxidize_server::Backend::Mlx,
         Backend::Cuda => oxidize_server::Backend::Cuda,
+        Backend::Rocm => oxidize_server::Backend::Rocm,
         Backend::Vulkan => oxidize_server::Backend::Vulkan,
         Backend::IntelArc => oxidize_server::Backend::IntelArc,
     }
@@ -1952,6 +1953,7 @@ fn main() {
         oxidize_core::backend::Backend::Mlx => "Apple Silicon",
         oxidize_core::backend::Backend::Metal => "Metal GPU",
         oxidize_core::backend::Backend::Cuda => "CUDA GPU",
+        oxidize_core::backend::Backend::Rocm => "ROCm GPU",
         oxidize_core::backend::Backend::Cpu => "CPU",
         oxidize_core::backend::Backend::Vulkan => "Vulkan GPU",
         oxidize_core::backend::Backend::IntelArc => "Intel Arc GPU (Vulkan)",

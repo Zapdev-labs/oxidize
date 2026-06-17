@@ -184,10 +184,10 @@ pub fn gemv_f32(
         });
     }
 
-    #[cfg(feature = "cuda")]
-    if crate::cuda::cuda_build_info().detected_at_build {
-        return crate::cuda::gemv_f32_cuda(matrix, rows, cols, vector, output)
-            .map_err(|err| GemvError::Cuda(format!("{err:?}")));
+    #[cfg(any(feature = "cuda", feature = "rocm"))]
+    if crate::gpu_dispatch::active_gpu().is_some() {
+        return crate::gpu_dispatch::gemv_f32(matrix, rows, cols, vector, output)
+            .map_err(GemvError::Cuda);
     }
 
     #[cfg(feature = "webgpu")]
@@ -1633,60 +1633,17 @@ pub fn gemv_quantized_f32(
     vector: &[f32],
     output: &mut [f32],
 ) -> Result<(), GemvError> {
-    #[cfg(feature = "cuda")]
-    if crate::cuda::cuda_build_info().detected_at_build {
-        // Fast path: on-the-fly kernels that never materialize f16.
-        // These stream quantized weights directly and are essential for
-        // layer-by-layer inference on 4GB GPUs.
-        match quantization {
-            GgufQuantizationType::Q8_0 => {
-                return crate::cuda::gemv_q8_0_direct_cuda(
-                    quantized_matrix,
-                    rows,
-                    cols,
-                    vector,
-                    output,
-                )
-                .map_err(|err| GemvError::Cuda(format!("{err:?}")));
-            }
-            GgufQuantizationType::Q4_0 => {
-                return crate::cuda::gemv_q4_0_direct_cuda(
-                    quantized_matrix,
-                    rows,
-                    cols,
-                    vector,
-                    output,
-                )
-                .map_err(|err| GemvError::Cuda(format!("{err:?}")));
-            }
-            GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M
-                if cols.is_multiple_of(QK_K) =>
-            {
-                let blocks_per_row = cols / QK_K;
-                let mut q8k = vec![0_u8; blocks_per_row * BLOCK_Q8_K_BYTES];
-                quantize_vector_q8_k_into(vector, blocks_per_row, &mut q8k);
-                return crate::cuda::gemv_q4_k_direct_cuda(
-                    quantized_matrix,
-                    rows,
-                    cols,
-                    &q8k,
-                    output,
-                )
-                .map_err(|err| GemvError::Cuda(format!("{err:?}")));
-            }
-            _ => {
-                // Fall back to dequant-to-f16 path for other types.
-                return crate::cuda::gemv_quantized_cuda(
-                    quantization,
-                    quantized_matrix,
-                    rows,
-                    cols,
-                    vector,
-                    output,
-                )
-                .map_err(|err| GemvError::Cuda(format!("{err:?}")));
-            }
-        }
+    #[cfg(any(feature = "cuda", feature = "rocm"))]
+    if crate::gpu_dispatch::active_gpu().is_some() {
+        return crate::gpu_dispatch::gemv_quantized(
+            quantization,
+            quantized_matrix,
+            rows,
+            cols,
+            vector,
+            output,
+        )
+        .map_err(|err| GemvError::Cuda(err));
     }
 
     let profile_start = gemv_profile::enabled().then(std::time::Instant::now);

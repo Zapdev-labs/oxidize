@@ -124,6 +124,8 @@ mod tests {
             gpu_vram_bytes: 0,
             has_metal: false,
             has_cuda: false,
+            has_rocm: false,
+            has_rdma: false,
             is_wsl: false,
             container_mem_limit: None,
             hugepages_2mib_avail: false,

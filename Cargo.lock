@@ -3042,6 +3042,7 @@ dependencies = [
  "futures-util",
  "gpu-allocator",
  "libc",
+ "libloading",
  "libp2p",
  "memmap2",
  "metal",

@@ -3,12 +3,17 @@ use std::path::{Path, PathBuf};
 
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(cuda_available)");
+    println!("cargo:rustc-check-cfg=cfg(rocm_available)");
+    println!("cargo:rustc-check-cfg=cfg(rdma_available)");
     println!("cargo:rustc-check-cfg=cfg(metal_available)");
     println!("cargo:rustc-check-cfg=cfg(webgpu_available)");
     println!("cargo:rustc-check-cfg=cfg(vulkan_available)");
     println!("cargo:rustc-check-cfg=cfg(mlx_available)");
     println!("cargo:rerun-if-env-changed=CUDA_HOME");
     println!("cargo:rerun-if-env-changed=CUDA_PATH");
+    println!("cargo:rerun-if-env-changed=ROCM_PATH");
+    println!("cargo:rerun-if-env-changed=ROCM_ARCH");
+    println!("cargo:rerun-if-env-changed=GPU_TARGETS");
     println!("cargo:rerun-if-env-changed=VULKAN_SDK");
 
     if let Some(cuda_root) = detect_cuda_root() {
@@ -28,6 +33,25 @@ fn main() {
         if env::var_os("CARGO_FEATURE_CUDA").is_some() {
             compile_cuda_kernels(&cuda_root);
         }
+    }
+
+    if let Some(rocm_root) = detect_rocm_root() {
+        println!("cargo:rustc-cfg=rocm_available");
+        println!("cargo:rustc-env=OXIDIZE_ROCM_PATH={}", rocm_root.display());
+
+        let lib = rocm_root.join("lib");
+        if lib.is_dir() {
+            println!("cargo:rustc-link-search=native={}", lib.display());
+            println!("cargo:rustc-link-lib=dylib=amdhip64");
+        }
+
+        if env::var_os("CARGO_FEATURE_ROCM").is_some() {
+            compile_rocm_kernels(&rocm_root);
+        }
+    }
+
+    if detect_rdma_available() {
+        println!("cargo:rustc-cfg=rdma_available");
     }
 
     if detect_metal_available() {
@@ -90,6 +114,86 @@ fn compile_cuda_kernels(cuda_root: &Path) {
         Ok(s) => panic!("nvcc failed to compile {}: exit {s}", src.display()),
         Err(e) => panic!("failed to invoke nvcc ({}): {e}", nvcc.display()),
     }
+}
+
+/// Compile `kernels/gemv_f32.cu` to a HIP code object with hipcc.
+fn compile_rocm_kernels(rocm_root: &Path) {
+    let out_dir = env::var("OUT_DIR").expect("OUT_DIR is set by cargo");
+    let co_out = Path::new(&out_dir).join("gemv_f32.co");
+    let src = Path::new("kernels/gemv_f32.cu");
+    println!("cargo:rerun-if-changed=kernels/gemv_f32.cu");
+
+    let hipcc = {
+        let exe = if cfg!(target_os = "windows") {
+            "hipcc.exe"
+        } else {
+            "hipcc"
+        };
+        let candidate = rocm_root.join("bin").join(exe);
+        if candidate.is_file() {
+            candidate
+        } else {
+            PathBuf::from(exe)
+        }
+    };
+
+    let arch = env::var("ROCM_ARCH")
+        .or_else(|_| env::var("GPU_TARGETS"))
+        .unwrap_or_else(|_| "native".to_string());
+
+    let status = std::process::Command::new(&hipcc)
+        .arg("--genco")
+        .arg("-O3")
+        .arg("-ffast-math")
+        .arg(format!("--offload-arch={arch}"))
+        .arg("-o")
+        .arg(&co_out)
+        .arg(src)
+        .status();
+
+    match status {
+        Ok(s) if s.success() => {}
+        Ok(s) => panic!("hipcc failed to compile {}: exit {s}", src.display()),
+        Err(e) => panic!("failed to invoke hipcc ({}): {e}", hipcc.display()),
+    }
+}
+
+fn detect_rocm_root() -> Option<PathBuf> {
+    for key in ["ROCM_PATH", "HIP_PATH"] {
+        match env::var_os(key).map(PathBuf::from) {
+            Some(path) if path.is_dir() => return Some(path),
+            _ => {}
+        }
+    }
+
+    let default = Path::new("/opt/rocm");
+    if default.is_dir() {
+        Some(default.to_path_buf())
+    } else {
+        None
+    }
+}
+
+fn detect_rdma_available() -> bool {
+    if env::var_os("CARGO_FEATURE_RDMA").is_none() {
+        return false;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        for path in [
+            "/usr/lib/x86_64-linux-gnu/libibverbs.so.1",
+            "/usr/lib64/libibverbs.so.1",
+            "/usr/lib/libibverbs.so.1",
+            "/lib/x86_64-linux-gnu/libibverbs.so.1",
+        ] {
+            if Path::new(path).exists() {
+                return true;
+            }
+        }
+    }
+
+    false
 }
 
 fn detect_cuda_root() -> Option<PathBuf> {

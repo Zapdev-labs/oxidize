@@ -8,6 +8,7 @@ pub enum Backend {
     Cpu,
     Metal,
     Cuda,
+    Rocm,
     Mlx,
     Vulkan,
     /// Intel Arc GPUs via the Vulkan compute path.
@@ -22,6 +23,7 @@ impl std::str::FromStr for Backend {
             "cpu" => Ok(Backend::Cpu),
             "metal" => Ok(Backend::Metal),
             "cuda" => Ok(Backend::Cuda),
+            "rocm" | "hip" => Ok(Backend::Rocm),
             "mlx" => Ok(Backend::Mlx),
             "vulkan" => Ok(Backend::Vulkan),
             "intel-arc" | "arc" => Ok(Backend::IntelArc),
@@ -37,6 +39,7 @@ impl Backend {
             Backend::Cpu => "cpu",
             Backend::Metal => "metal",
             Backend::Cuda => "cuda",
+            Backend::Rocm => "rocm",
             Backend::Mlx => "mlx",
             Backend::Vulkan => "vulkan",
             Backend::IntelArc => "intel-arc",
@@ -54,6 +57,13 @@ impl Backend {
                 Some("MLX backend requested but unavailable on Linux; falling back to CPU"),
             ),
             Backend::Vulkan => (Backend::Vulkan, None),
+            Backend::Rocm if cfg!(rocm_available) => (Backend::Rocm, None),
+            Backend::Rocm => (
+                Backend::Cpu,
+                Some(
+                    "ROCm backend requested but HIP was not detected at build time; falling back to CPU",
+                ),
+            ),
             Backend::IntelArc if cfg!(vulkan_available) => (Backend::IntelArc, None),
             Backend::IntelArc => (
                 Backend::Vulkan,
@@ -171,6 +181,8 @@ mod tests {
         assert_eq!(Backend::from_str("cpu"), Ok(Backend::Cpu));
         assert_eq!(Backend::from_str("metal"), Ok(Backend::Metal));
         assert_eq!(Backend::from_str("cuda"), Ok(Backend::Cuda));
+        assert_eq!(Backend::from_str("rocm"), Ok(Backend::Rocm));
+        assert_eq!(Backend::from_str("hip"), Ok(Backend::Rocm));
         assert_eq!(Backend::from_str("mlx"), Ok(Backend::Mlx));
         assert_eq!(Backend::from_str("vulkan"), Ok(Backend::Vulkan));
         assert_eq!(Backend::from_str("intel-arc"), Ok(Backend::IntelArc));
@@ -184,6 +196,7 @@ mod tests {
             Backend::Cpu,
             Backend::Metal,
             Backend::Cuda,
+            Backend::Rocm,
             Backend::Mlx,
             Backend::Vulkan,
             Backend::IntelArc,

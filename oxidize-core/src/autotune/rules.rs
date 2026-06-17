@@ -253,8 +253,18 @@ fn tier1_isa(inv: &HardwareInventory, plan: &mut TuningPlan) {
 // ---------- tier 2: GPU offload ----------
 
 fn tier2_gpu_offload(inv: &HardwareInventory, model: &ModelFingerprint, plan: &mut TuningPlan) {
+    if !inv.has_gpu && !inv.has_rocm && !inv.has_cuda {
+        plan.n_gpu_layers = 0;
+        return;
+    }
     if !inv.has_gpu {
         plan.n_gpu_layers = 0;
+        if inv.has_rocm {
+            plan.rationale.push(
+                "ROCm build detected but no GPU inventory — set --backend rocm and pass --n-gpu-layers manually"
+                    .to_string(),
+            );
+        }
         return;
     }
     let per_layer = per_layer_weight_bytes(model);
@@ -562,6 +572,8 @@ mod tests {
             gpu_vram_bytes: 0,
             has_metal: false,
             has_cuda: false,
+            has_rocm: false,
+            has_rdma: false,
             is_wsl: false,
             container_mem_limit: None,
             hugepages_2mib_avail: false,
@@ -595,6 +607,8 @@ mod tests {
             gpu_vram_bytes: 0,
             has_metal: true,
             has_cuda: false,
+            has_rocm: false,
+            has_rdma: false,
             is_wsl: false,
             container_mem_limit: None,
             hugepages_2mib_avail: false,

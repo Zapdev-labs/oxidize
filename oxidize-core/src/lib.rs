@@ -43,6 +43,10 @@ pub mod cpu_kernels;
 pub mod cross_validation;
 #[path = "backends/cuda.rs"]
 pub mod cuda;
+#[path = "backends/rocm.rs"]
+pub mod rocm;
+#[path = "compute/gpu_dispatch.rs"]
+pub mod gpu_dispatch;
 #[path = "model/dflash.rs"]
 pub mod dflash;
 #[path = "model/diffusion_gemma.rs"]

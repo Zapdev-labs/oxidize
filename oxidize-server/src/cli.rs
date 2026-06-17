@@ -32,6 +32,8 @@ pub enum Backend {
     /// macOS only
     Mlx,
     Cuda,
+    /// AMD ROCm / HIP
+    Rocm,
     Vulkan,
     /// Intel Arc GPUs via Vulkan compute
     IntelArc,
@@ -44,6 +46,7 @@ impl Backend {
             Backend::Metal => oxidize_core::backend::Backend::Metal,
             Backend::Mlx => oxidize_core::backend::Backend::Mlx,
             Backend::Cuda => oxidize_core::backend::Backend::Cuda,
+            Backend::Rocm => oxidize_core::backend::Backend::Rocm,
             Backend::Vulkan => oxidize_core::backend::Backend::Vulkan,
             Backend::IntelArc => oxidize_core::backend::Backend::IntelArc,
         }

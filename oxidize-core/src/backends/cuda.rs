@@ -187,6 +187,9 @@ pub const GEMV_Q8_0_DIRECT_KERNEL_NAME: &str = "gemv_q8_0_kernel";
 pub const GEMV_Q4_0_DIRECT_KERNEL_NAME: &str = "gemv_q4_0_kernel";
 /// On-the-fly Q4_K × Q8_K GEMV (no f16 materialization; OXK GPU path).
 pub const GEMV_Q4_K_DIRECT_KERNEL_NAME: &str = "gemv_q4_k_kernel";
+pub const GEMV_IQ1_S_KERNEL_NAME: &str = "gemv_iq1_s_kernel";
+pub const GEMV_IQ1_M_KERNEL_NAME: &str = "gemv_iq1_m_kernel";
+pub const GEMV_NVFP4_KERNEL_NAME: &str = "gemv_nvfp4_kernel";
 
 /// Whether [`gemv_quantized_cuda`] has a GPU dequant kernel for this type.
 /// Callers should fall back to the CPU quantized path when this is `false`.
@@ -206,6 +209,8 @@ fn dequant_kernel_for(quantization: GgufQuantizationType) -> Option<(&'static st
             Some(("dequant_q4_k_kernel", 144, 256))
         }
         GgufQuantizationType::Q6_K => Some(("dequant_q6_k_kernel", 210, 256)),
+        GgufQuantizationType::Q2_K => Some(("dequant_q2_k_kernel", 84, 256)),
+        GgufQuantizationType::NVFP4 => Some(("dequant_nvfp4_kernel", 36, 64)),
         _ => None,
     }
 }
@@ -1092,6 +1097,150 @@ pub fn gemv_q4_k_direct_cuda(
         Ok(())
     })
     .map_err(GemvCudaError::Cuda)
+}
+
+#[cfg(feature = "cuda")]
+fn gemv_superblock_direct_cuda(
+    kernel_name: &str,
+    block_bytes: usize,
+    vals_per_block: usize,
+    quantized_matrix: &[u8],
+    rows: usize,
+    cols: usize,
+    vector: &[f32],
+    output: &mut [f32],
+) -> Result<(), GemvCudaError> {
+    if !cols.is_multiple_of(vals_per_block) {
+        return Err(GemvCudaError::InvalidVectorLength {
+            expected: cols.div_ceil(vals_per_block) * vals_per_block,
+            actual: cols,
+        });
+    }
+    let blocks_per_row = cols / vals_per_block;
+    let expected_matrix_len = rows
+        .saturating_mul(blocks_per_row)
+        .saturating_mul(block_bytes);
+    if quantized_matrix.len() != expected_matrix_len {
+        return Err(GemvCudaError::InvalidMatrixLength {
+            expected: expected_matrix_len,
+            actual: quantized_matrix.len(),
+        });
+    }
+    if vector.len() != cols {
+        return Err(GemvCudaError::InvalidVectorLength {
+            expected: cols,
+            actual: vector.len(),
+        });
+    }
+    if output.len() != rows {
+        return Err(GemvCudaError::InvalidOutputLength {
+            expected: rows,
+            actual: output.len(),
+        });
+    }
+
+    let rows_u32 = u32::try_from(rows).map_err(|_| GemvCudaError::InvalidOutputLength {
+        expected: u32::MAX as usize,
+        actual: rows,
+    })?;
+    let blocks_u32 = u32::try_from(blocks_per_row).map_err(|_| GemvCudaError::InvalidVectorLength {
+        expected: u32::MAX as usize,
+        actual: blocks_per_row,
+    })?;
+
+    with_gpu(|gpu| {
+        let key = bytes_cache_key(quantized_matrix);
+        gpu.ensure_resident_quant(key, quantized_matrix)?;
+        let matrix_ptr = gpu
+            .resident_quant
+            .get(&key)
+            .ok_or_else(|| "quant weight missing from resident cache".to_string())?
+            .as_device_ptr();
+
+        let vector_device = cust::memory::DeviceBuffer::from_slice(vector).map_err(stringify)?;
+        let output_device = gpu.get_f32_buffer(rows).map_err(stringify)?;
+
+        let block_size = 256_u32;
+        let grid_size = rows_u32.saturating_mul(32).div_ceil(block_size);
+        let function = gpu.module.get_function(kernel_name).map_err(stringify)?;
+        let stream = &gpu.stream;
+        unsafe {
+            cust::launch!(
+                function<<<grid_size, block_size, 0, stream>>>(
+                    matrix_ptr,
+                    vector_device.as_device_ptr(),
+                    output_device.as_device_ptr(),
+                    rows_u32,
+                    blocks_u32
+                )
+            )
+            .map_err(stringify)?;
+        }
+        output_device.copy_to(output).map_err(stringify)?;
+        gpu.return_f32_buffer(output_device);
+        Ok(())
+    })
+    .map_err(GemvCudaError::Cuda)
+}
+
+#[cfg(feature = "cuda")]
+pub fn gemv_iq1_s_direct_cuda(
+    quantized_matrix: &[u8],
+    rows: usize,
+    cols: usize,
+    vector: &[f32],
+    output: &mut [f32],
+) -> Result<(), GemvCudaError> {
+    gemv_superblock_direct_cuda(
+        GEMV_IQ1_S_KERNEL_NAME,
+        50,
+        256,
+        quantized_matrix,
+        rows,
+        cols,
+        vector,
+        output,
+    )
+}
+
+#[cfg(feature = "cuda")]
+pub fn gemv_iq1_m_direct_cuda(
+    quantized_matrix: &[u8],
+    rows: usize,
+    cols: usize,
+    vector: &[f32],
+    output: &mut [f32],
+) -> Result<(), GemvCudaError> {
+    gemv_superblock_direct_cuda(
+        GEMV_IQ1_M_KERNEL_NAME,
+        56,
+        256,
+        quantized_matrix,
+        rows,
+        cols,
+        vector,
+        output,
+    )
+}
+
+#[cfg(feature = "cuda")]
+pub fn gemv_nvfp4_direct_cuda(
+    quantized_matrix: &[u8],
+    rows: usize,
+    cols: usize,
+    vector: &[f32],
+    output: &mut [f32],
+) -> Result<(), GemvCudaError> {
+    gemv_superblock_direct_cuda(
+        GEMV_NVFP4_KERNEL_NAME,
+        36,
+        64,
+        quantized_matrix,
+        rows,
+        cols,
+        vector,
+        output,
+    )
 }
 
 pub fn validate_q8_0_gemv_dims(

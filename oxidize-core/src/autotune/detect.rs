@@ -39,6 +39,8 @@ pub struct HardwareInventory {
     pub gpu_vram_bytes: u64,
     pub has_metal: bool,
     pub has_cuda: bool,
+    pub has_rocm: bool,
+    pub has_rdma: bool,
     pub is_wsl: bool,
     pub container_mem_limit: Option<u64>,
     pub hugepages_2mib_avail: bool,
@@ -102,6 +104,8 @@ pub fn detect() -> HardwareInventory {
 
     let has_metal = detect_metal();
     let has_cuda = detect_cuda();
+    let has_rocm = detect_rocm();
+    let has_rdma = detect_rdma();
     let is_wsl = detect_wsl();
     let container_mem_limit = detect_cgroup_mem_limit();
     let hugepages_2mib_avail = detect_hugepages_2mib();
@@ -120,6 +124,8 @@ pub fn detect() -> HardwareInventory {
         gpu_vram_bytes,
         has_metal,
         has_cuda,
+        has_rocm,
+        has_rdma,
         is_wsl,
         container_mem_limit,
         hugepages_2mib_avail,
@@ -179,6 +185,14 @@ fn detect_metal() -> bool {
 
 fn detect_cuda() -> bool {
     crate::cuda::cuda_build_info().detected_at_build
+}
+
+fn detect_rocm() -> bool {
+    crate::rocm::rocm_build_info().detected_at_build
+}
+
+fn detect_rdma() -> bool {
+    crate::mesh::rdma_build_available()
 }
 
 fn detect_wsl() -> bool {
