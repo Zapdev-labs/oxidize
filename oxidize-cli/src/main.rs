@@ -1,6 +1,10 @@
+mod backend;
+mod help;
 mod pipeline;
 
+use backend::Backend;
 use clap::{Parser, ValueEnum};
+use help::{print_model_list, print_ollama_help, print_run_help, print_serve_help};
 use oxidize_core::generation::{
     GenerationConfig, GenerationStream, MtpGenerationStream, SpeculativeGenerationConfig,
     SpeculativeGenerationStream,
@@ -33,26 +37,6 @@ use std::task::Wake;
 use std::time::{Duration, Instant};
 
 const PROFILE_CHILD_ENV: &str = "OXIDIZE_PROFILE_CHILD";
-
-// #region agent log
-fn agent_debug_log_cli(hypothesis_id: &str, location: &str, message: &str, data: &str) {
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or(0);
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/home/dih/oxidize/.cursor/debug-49b0b9.log")
-    {
-        let _ = writeln!(
-            file,
-            "{{\"sessionId\":\"49b0b9\",\"runId\":\"initial\",\"hypothesisId\":\"{}\",\"location\":\"{}\",\"message\":\"{}\",\"data\":{},\"timestamp\":{}}}",
-            hypothesis_id, location, message, data, timestamp
-        );
-    }
-}
-// #endregion
 
 #[derive(Debug, Parser)]
 #[command(name = "oxidize")]
@@ -198,73 +182,6 @@ fn user_passed_flag(argv: &[String], flag: &str) -> bool {
         .any(|a| a == flag || a.starts_with(&format!("{flag}=")))
 }
 
-fn print_run_help() {
-    println!(
-        "Usage: oxidize run <model> [prompt] [options]\n\n\
-         Models can be local .gguf files or Hugging Face GGUF repos.\n\n\
-         Examples:\n\
-           oxidize run ./models/model.gguf \"hello\"\n\
-           oxidize run Qwen/Qwen2.5-0.5B-Instruct-GGUF --file qwen2.5-0.5b-instruct-q4_k_m.gguf --chat\n\
-           oxidize run TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF \"write a haiku\" --max-tokens 128\n\n\
-         Common options: --chat, --prompt, --max-tokens, --temperature, --backend, --threads, --no-api"
-    );
-}
-
-fn print_serve_help() {
-    println!(
-        "Usage: oxidize serve [model] [options]\n\n\
-         Starts the OpenAI-compatible API server.\n\n\
-         Examples:\n\
-           oxidize serve ./models/Qwen3-4B-Q4_K_M.gguf\n\
-           oxidize serve --host 0.0.0.0 --port 11434\n\
-           oxidize serve ./models/model.gguf --temperature 0 --top-k 1\n\n\
-         Common options: --host, --port, --model, --max-tokens, --temperature, --top-p, --top-k, --threads"
-    );
-}
-
-fn print_ollama_help() {
-    println!(
-        "Usage: oxidize <command> [args]\n\n\
-         Commands:\n\
-           run <model> [prompt]     Run a model locally\n\
-           serve [model]            Start the OpenAI-compatible server\n\
-           list                     List local GGUF models in ./models\n\n\
-         Examples:\n\
-           oxidize run ./models/Qwen3-4B-Q4_K_M.gguf \"hello\"\n\
-           oxidize serve ./models/Qwen3-4B-Q4_K_M.gguf\n\
-           oxidize list"
-    );
-}
-
-fn print_model_list() -> io::Result<()> {
-    let models_dir = std::env::current_dir()?.join("models");
-    let mut rows = Vec::new();
-    if models_dir.is_dir() {
-        for entry in std::fs::read_dir(&models_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if path
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"))
-            {
-                let metadata = entry.metadata()?;
-                let size_gib = metadata.len() as f64 / 1024.0 / 1024.0 / 1024.0;
-                rows.push((path, size_gib));
-            }
-        }
-    }
-    rows.sort_by(|a, b| a.0.cmp(&b.0));
-    println!("{:<48} {:>9} PATH", "NAME", "SIZE");
-    for (path, size_gib) in rows {
-        let name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("<invalid>");
-        println!("{name:<48} {size_gib:>8.2}G {}", path.display());
-    }
-    Ok(())
-}
 
 fn resolve_model_spec(spec: &str, hf_file: Option<&str>) -> io::Result<PathBuf> {
     let path = PathBuf::from(spec);
@@ -1075,42 +992,6 @@ impl KvCacheDType {
     }
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
-enum Backend {
-    Cpu,
-    Metal,
-    /// macOS only
-    Mlx,
-    Cuda,
-    Vulkan,
-    /// Intel Arc GPUs via Vulkan compute
-    IntelArc,
-}
-
-impl Backend {
-    fn to_core_backend(self) -> oxidize_core::backend::Backend {
-        match self {
-            Backend::Cpu => oxidize_core::backend::Backend::Cpu,
-            Backend::Metal => oxidize_core::backend::Backend::Metal,
-            Backend::Mlx => oxidize_core::backend::Backend::Mlx,
-            Backend::Cuda => oxidize_core::backend::Backend::Cuda,
-            Backend::Vulkan => oxidize_core::backend::Backend::Vulkan,
-            Backend::IntelArc => oxidize_core::backend::Backend::IntelArc,
-        }
-    }
-
-    #[allow(dead_code)]
-    fn as_arg(self) -> &'static str {
-        match self {
-            Backend::Cpu => "cpu",
-            Backend::Metal => "metal",
-            Backend::Mlx => "mlx",
-            Backend::Cuda => "cuda",
-            Backend::Vulkan => "vulkan",
-            Backend::IntelArc => "intel-arc",
-        }
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ConversationTurn {
@@ -1878,9 +1759,9 @@ fn run_api_server_blocking(server_args: oxidize_server::Args) -> io::Result<()> 
                 oxidize_server::RequestLimitConfig::default(),
             )),
             batcher: Arc::new(oxidize_server::ContinuousBatcher::default()),
-            auth: oxidize_server::AuthConfig {
-                api_key: api_key.map(Arc::<str>::from),
-            },
+            auth: api_key
+                .map(|key| oxidize_server::AuthConfig::from_keys([key]))
+                .unwrap_or_else(oxidize_server::AuthConfig::disabled),
             model,
             paged: None,
             mesh: None,
@@ -2277,48 +2158,11 @@ fn main() {
                 mapped.parsed().architecture(),
                 Some("dflash" | "dflash-draft")
             );
-            // #region agent log
-            let mapped_infos = mapped.mapped_tensor_infos();
-            let architecture = mapped.parsed().architecture().unwrap_or("<none>");
-            let has_lm_head = mapped_infos
-                .iter()
-                .any(|tensor| tensor.name == "lm_head.weight");
-            let has_output = mapped_infos
-                .iter()
-                .any(|tensor| tensor.name == "output.weight");
-            let has_embed_tokens = mapped_infos
-                .iter()
-                .any(|tensor| tensor.name == "model.embed_tokens.weight");
-            let has_tok_embeddings = mapped_infos
-                .iter()
-                .any(|tensor| tensor.name == "tok_embeddings.weight");
-            agent_debug_log_cli(
-                "H0_REPRO_PATH,H2_TENSOR_NAMES,H5_OUTPUT_PROJECTION",
-                "oxidize-cli/src/main.rs:run_model_mode",
-                "classified GGUF before CLI model construction",
-                &format!(
-                    "{{\"architecture\":\"{}\",\"is_dflash\":{},\"tensor_count\":{},\"has_lm_head\":{},\"has_output\":{},\"has_embed_tokens\":{},\"has_tok_embeddings\":{}}}",
-                    architecture,
-                    is_dflash,
-                    mapped_infos.len(),
-                    has_lm_head,
-                    has_output,
-                    has_embed_tokens,
-                    has_tok_embeddings
-                ),
-            );
-            // #endregion
             if args.ctx_size == Some(0) {
                 eprintln!("invalid --ctx-size: must be greater than 0");
                 return;
             }
             if is_dflash && args.draft_model.is_none() && !dflash_gguf_has_io_tensors(&mapped) {
-                agent_debug_log_cli(
-                    "H5_OUTPUT_PROJECTION",
-                    "oxidize-cli/src/main.rs:run_model_mode",
-                    "rejecting standalone dflash draft as generation target",
-                    "{\"reason\":\"dflash_requires_target_model_context\"}",
-                );
                 eprintln!(
                     "DFlash draft GGUF cannot be used as --model for normal generation. Use the full target GGUF with --model and pass this DFlash file via --draft-model, or use a DFlash GGUF that includes lm_head.weight and model.embed_tokens.weight (e.g. *-fullhead.gguf)."
                 );

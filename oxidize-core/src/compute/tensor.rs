@@ -1,4 +1,8 @@
 use crate::gguf::GgufQuantizationType;
+use crate::quantization::{
+    BLOCK_NVFP4_SIZE, BLOCK_Q2_K_SIZE, BLOCK_Q4_K_SIZE, BLOCK_Q6_K_SIZE, BLOCK_Q8_0_SIZE, QK8_0,
+    QK_K, QK_NVFP4, QK_NVFP4_SUB,
+};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 #[cfg(target_arch = "x86")]
@@ -6,15 +10,6 @@ use std::arch::x86::*;
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 
-const QK8_0: usize = 32;
-const BLOCK_Q8_0_SIZE: usize = 2 + QK8_0;
-const QK_K: usize = 256;
-const QK_NVFP4: usize = 64;
-const QK_NVFP4_SUB: usize = 16;
-const BLOCK_Q4_K_SIZE: usize = 2 * std::mem::size_of::<u16>() + 12 + QK_K / 2;
-const BLOCK_Q2_K_SIZE: usize = 2 * std::mem::size_of::<u16>() + QK_K / 16 + QK_K / 4;
-const BLOCK_Q6_K_SIZE: usize = std::mem::size_of::<u16>() + QK_K / 16 + 3 * QK_K / 4;
-const BLOCK_NVFP4_SIZE: usize = QK_NVFP4 / QK_NVFP4_SUB + QK_NVFP4 / 2;
 const E2M1_DOUBLED_VALUES: [f32; 16] = [
     0.0, 1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0, 0.0, -1.0, -2.0, -3.0, -4.0, -6.0, -8.0, -12.0,
 ];
@@ -1664,6 +1659,21 @@ pub fn gemv_quantized_f32(
                 )
                 .map_err(|err| GemvError::Cuda(format!("{err:?}")));
             }
+            GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M
+                if cols.is_multiple_of(QK_K) =>
+            {
+                let blocks_per_row = cols / QK_K;
+                let mut q8k = vec![0_u8; blocks_per_row * BLOCK_Q8_K_BYTES];
+                quantize_vector_q8_k_into(vector, blocks_per_row, &mut q8k);
+                return crate::cuda::gemv_q4_k_direct_cuda(
+                    quantized_matrix,
+                    rows,
+                    cols,
+                    &q8k,
+                    output,
+                )
+                .map_err(|err| GemvError::Cuda(format!("{err:?}")));
+            }
             _ => {
                 // Fall back to dequant-to-f16 path for other types.
                 return crate::cuda::gemv_quantized_cuda(
@@ -2417,7 +2427,7 @@ unsafe fn gemm_q4_k_q8_k_fused_avx2(
 const BLOCK_Q8_K_BYTES: usize = 4 + 256 + 32;
 
 /// Quantize `vector` (length `n_blocks * 256`) into `n_blocks` Q8_K blocks.
-fn quantize_vector_q8_k_into(vector: &[f32], n_blocks: usize, out: &mut [u8]) {
+pub(crate) fn quantize_vector_q8_k_into(vector: &[f32], n_blocks: usize, out: &mut [u8]) {
     debug_assert_eq!(vector.len(), n_blocks * QK_K);
     debug_assert_eq!(out.len(), n_blocks * BLOCK_Q8_K_BYTES);
     for (b, block_in) in vector.chunks_exact(QK_K).enumerate().take(n_blocks) {

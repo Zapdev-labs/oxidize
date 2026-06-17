@@ -3,20 +3,20 @@
 use crate::gguf::GgufQuantizationType;
 use rayon::prelude::*;
 
-const QK4_0: usize = 32;
-const QK4_1: usize = 32;
-const QK5_0: usize = 32;
-const QK5_1: usize = 32;
-const QK8_0: usize = 32;
-const QK_K: usize = 256;
-const QK_NVFP4: usize = 64;
-const QK_NVFP4_SUB: usize = 16;
+pub const QK4_0: usize = 32;
+pub const QK4_1: usize = 32;
+pub const QK5_0: usize = 32;
+pub const QK5_1: usize = 32;
+pub const QK8_0: usize = 32;
+pub const QK_K: usize = 256;
+pub const QK_NVFP4: usize = 64;
+pub const QK_NVFP4_SUB: usize = 16;
 
-const BLOCK_Q4_0_SIZE: usize = 2 + 16;
-const BLOCK_Q4_1_SIZE: usize = 2 + 2 + 16;
-const BLOCK_Q5_0_SIZE: usize = 2 + 4 + 16;
-const BLOCK_Q5_1_SIZE: usize = 2 + 2 + 4 + 16;
-const BLOCK_Q8_0_SIZE: usize = 2 + 32;
+pub const BLOCK_Q4_0_SIZE: usize = 2 + 16;
+pub const BLOCK_Q4_1_SIZE: usize = 2 + 2 + 16;
+pub const BLOCK_Q5_0_SIZE: usize = 2 + 4 + 16;
+pub const BLOCK_Q5_1_SIZE: usize = 2 + 2 + 4 + 16;
+pub const BLOCK_Q8_0_SIZE: usize = 2 + 32;
 
 const fn sizeof_of_f16() -> usize {
     2
@@ -28,12 +28,12 @@ const fn sizeof_of_i16() -> usize {
     2
 }
 
-const BLOCK_Q2_K_SIZE: usize = 2 * sizeof_of_f16() + QK_K / 16 + QK_K / 4;
-const BLOCK_Q3_K_SIZE: usize = sizeof_of_f16() + QK_K / 4 + QK_K / 8 + 12;
-const BLOCK_Q4_K_SIZE: usize = 2 * sizeof_of_f16() + 12 + QK_K / 2;
-const BLOCK_Q5_K_SIZE: usize = 2 * sizeof_of_f16() + 12 + QK_K / 2 + QK_K / 8;
-const BLOCK_Q6_K_SIZE: usize = sizeof_of_f16() + QK_K / 16 + 3 * QK_K / 4;
-const BLOCK_Q8_K_SIZE: usize = sizeof_of_f32() + QK_K + QK_K / 16 * sizeof_of_i16();
+pub const BLOCK_Q2_K_SIZE: usize = 2 * sizeof_of_f16() + QK_K / 16 + QK_K / 4;
+pub const BLOCK_Q3_K_SIZE: usize = sizeof_of_f16() + QK_K / 4 + QK_K / 8 + 12;
+pub const BLOCK_Q4_K_SIZE: usize = 2 * sizeof_of_f16() + 12 + QK_K / 2;
+pub const BLOCK_Q5_K_SIZE: usize = 2 * sizeof_of_f16() + 12 + QK_K / 2 + QK_K / 8;
+pub const BLOCK_Q6_K_SIZE: usize = sizeof_of_f16() + QK_K / 16 + 3 * QK_K / 4;
+pub const BLOCK_Q8_K_SIZE: usize = sizeof_of_f32() + QK_K + QK_K / 16 * sizeof_of_i16();
 
 // IQ (importance matrix) quantization block sizes
 // block_iq1_s: ggml_half d + uint8_t qs[QK_K/8] + uint16_t qh[QK_K/32]
@@ -41,7 +41,7 @@ const BLOCK_IQ1_S_SIZE: usize = sizeof_of_f16() + QK_K / 8 + QK_K / 16;
 // block_iq1_m: uint8_t qs[QK_K/8] + uint8_t qh[QK_K/16] + uint8_t scales[QK_K/32]
 const BLOCK_IQ1_M_SIZE: usize = QK_K / 8 + QK_K / 16 + QK_K / 32;
 // block_nvfp4: uint8_t d[4] (UE4M3 scales) + uint8_t qs[32] (packed E2M1)
-const BLOCK_NVFP4_SIZE: usize = QK_NVFP4 / QK_NVFP4_SUB + QK_NVFP4 / 2;
+pub const BLOCK_NVFP4_SIZE: usize = QK_NVFP4 / QK_NVFP4_SUB + QK_NVFP4 / 2;
 // block_iq4_xs: ggml_half d + uint16_t scales_h + uint8_t scales_l[QK_K/64] + uint8_t qs[QK_K/2]
 const BLOCK_IQ4_XS_SIZE: usize = sizeof_of_f16() + 2 + QK_K / 64 + QK_K / 2;
 // block_iq3_s: ggml_half d + uint8_t qs[QK_K/4] + uint8_t qh[QK_K/32] + uint8_t signs[QK_K/8] + uint8_t scales[QK_K/64]

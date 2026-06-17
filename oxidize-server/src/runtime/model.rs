@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::Mutex as StdMutex;
+use tokio::sync::Mutex;
 
 use oxidize_core::{
     dflash::{DFlashConfig, DFlashDraftModel},
@@ -22,43 +22,12 @@ use oxidize_core::{
 
 use crate::cli::Args;
 
-// #region agent log
-fn agent_debug_log_runtime(
-    hypothesis_id: &str,
-    location: &str,
-    message: &str,
-    data: serde_json::Value,
-) {
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or(0);
-    let payload = serde_json::json!({
-        "sessionId": "49b0b9",
-        "runId": "initial",
-        "hypothesisId": hypothesis_id,
-        "location": location,
-        "message": message,
-        "data": data,
-        "timestamp": timestamp
-    });
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/home/dih/oxidize/.cursor/debug-49b0b9.log")
-    {
-        use std::io::Write;
-        let _ = writeln!(file, "{payload}");
-    }
-}
-// #endregion
-
 pub struct ModelRuntime {
     pub id: String,
     pub tokenizer: LoadedTokenizer,
     pub chat_template: Option<String>,
-    pub model: StdMutex<LoadedModel>,
-    pub draft: Option<StdMutex<DFlashDraftModel>>,
+    pub model: Mutex<LoadedModel>,
+    pub draft: Option<Mutex<DFlashDraftModel>>,
     pub draft_tokens: usize,
     pub defaults: GenerationDefaults,
 }
@@ -259,23 +228,6 @@ pub fn load_model_runtime(args: &Args) -> Result<Option<Arc<ModelRuntime>>, Stri
         mapped.parsed().architecture(),
         Some("dflash" | "dflash-draft")
     );
-    // #region agent log
-    let mapped_infos = mapped.mapped_tensor_infos();
-    agent_debug_log_runtime(
-        "H0_REPRO_PATH,H2_TENSOR_NAMES,H5_OUTPUT_PROJECTION",
-        "oxidize-server/src/runtime/model.rs:load_model_runtime",
-        "classified GGUF before server model construction",
-        serde_json::json!({
-            "architecture": mapped.parsed().architecture(),
-            "is_dflash": is_dflash,
-            "tensor_count": mapped_infos.len(),
-            "has_lm_head": mapped_infos.iter().any(|tensor| tensor.name == "lm_head.weight"),
-            "has_output": mapped_infos.iter().any(|tensor| tensor.name == "output.weight"),
-            "has_embed_tokens": mapped_infos.iter().any(|tensor| tensor.name == "model.embed_tokens.weight"),
-            "has_tok_embeddings": mapped_infos.iter().any(|tensor| tensor.name == "tok_embeddings.weight")
-        }),
-    );
-    // #endregion
     if args.ctx_size == Some(0) {
         return Err("invalid --ctx-size: must be greater than 0".into());
     }
@@ -400,7 +352,7 @@ pub fn load_model_runtime(args: &Args) -> Result<Option<Arc<ModelRuntime>>, Stri
         id: args.model_id.clone(),
         tokenizer,
         chat_template,
-        model: StdMutex::new(model),
+        model: Mutex::new(model),
         draft,
         draft_tokens,
         defaults: GenerationDefaults {
@@ -502,7 +454,7 @@ fn load_speculative_draft(
     target_mapped: &MappedGgufFile,
     target_hidden_size: usize,
     target_layer_count: usize,
-) -> Result<(Option<StdMutex<DFlashDraftModel>>, usize), String> {
+) -> Result<(Option<Mutex<DFlashDraftModel>>, usize), String> {
     let Some(draft_path) = args.draft_model.as_deref() else {
         return Ok((None, args.draft_tokens.max(1)));
     };
@@ -548,7 +500,7 @@ fn load_speculative_draft(
         draft_tokens = args.draft_tokens,
         "enabled DFlash speculative decoding for API server"
     );
-    Ok((Some(StdMutex::new(draft_model)), args.draft_tokens.max(1)))
+    Ok((Some(Mutex::new(draft_model)), args.draft_tokens.max(1)))
 }
 
 #[allow(dead_code)]

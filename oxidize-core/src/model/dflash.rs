@@ -8,38 +8,6 @@ use crate::tensor::{
     gemv_quantized_f32, rms_norm_f32,
 };
 
-// #region agent log
-fn agent_debug_log(
-    run_id: &str,
-    hypothesis_id: &str,
-    location: &str,
-    message: &str,
-    data: serde_json::Value,
-) {
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or(0);
-    let payload = serde_json::json!({
-        "sessionId": "49b0b9",
-        "runId": run_id,
-        "hypothesisId": hypothesis_id,
-        "location": location,
-        "message": message,
-        "data": data,
-        "timestamp": timestamp
-    });
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/home/dih/oxidize/.cursor/debug-49b0b9.log")
-    {
-        use std::io::Write;
-        let _ = writeln!(file, "{payload}");
-    }
-}
-// #endregion
-
 /// DFlash configuration matching the HuggingFace config.json.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DFlashConfig {
@@ -214,30 +182,6 @@ impl DFlashConfig {
             .unwrap_or(num_hidden_layers);
         let target_layer_ids =
             target_layer_ids_from_metadata.unwrap_or_else(|| (0..num_target_layers).collect());
-
-        // #region agent log
-        agent_debug_log(
-            "initial",
-            "H1_CONFIG_METADATA",
-            "oxidize-core/src/model/dflash.rs:DFlashConfig::from_gguf",
-            "derived dflash config from GGUF metadata",
-            serde_json::json!({
-                "architecture": arch,
-                "hidden_size": hidden_size,
-                "num_hidden_layers": num_hidden_layers,
-                "num_target_layers": num_target_layers,
-                "block_size": block_size,
-                "mask_token_id": mask_token_id,
-                "vocab_size": vocab_size,
-                "num_attention_heads": num_attention_heads,
-                "num_key_value_heads": num_key_value_heads,
-                "intermediate_size": intermediate_size,
-                "target_layer_ids_len": target_layer_ids.len(),
-                "target_layer_ids_first": target_layer_ids.iter().take(8).copied().collect::<Vec<_>>(),
-                "has_target_layer_ids_metadata": metadata.contains_key(&arch_key("target_layer_ids"))
-            }),
-        );
-        // #endregion
 
         Self {
             hidden_size,
@@ -930,35 +874,6 @@ impl DFlashDraftModel {
             model.tok_embeddings = tok_embeddings;
         }
 
-        // #region agent log
-        agent_debug_log(
-            "initial",
-            "H2_TENSOR_NAMES,H3_QUANT_WEIGHT_LAYOUT,H5_OUTPUT_PROJECTION",
-            "oxidize-core/src/model/dflash.rs:DFlashDraftModel::load_from_gguf",
-            "loaded top-level dflash tensors",
-            serde_json::json!({
-                "tensor_count": tensor_infos.len(),
-                "fc_loaded": model.fc.is_loaded(),
-                "fc_quant": model.fc.quant.is_some(),
-                "fc_rows": model.fc.rows,
-                "fc_cols": model.fc.cols,
-                "hidden_norm_len": model.hidden_norm.len(),
-                "norm_len": model.norm.len(),
-                "output_loaded": model.output.is_loaded(),
-                "output_quant": model.output.quant.is_some(),
-                "output_rows": model.output.rows,
-                "output_cols": model.output.cols,
-                "tok_embeddings_loaded": model.tok_embeddings.is_loaded(),
-                "tok_embeddings_quant": model.tok_embeddings.quant.is_some(),
-                "tok_embeddings_rows": model.tok_embeddings.rows,
-                "tok_embeddings_cols": model.tok_embeddings.cols,
-                "has_lm_head_tensor": tensor_infos.iter().any(|tensor| tensor.name == "lm_head.weight"),
-                "has_output_tensor": tensor_infos.iter().any(|tensor| tensor.name == "output.weight"),
-                "has_embed_tokens_tensor": tensor_infos.iter().any(|tensor| tensor.name == "model.embed_tokens.weight")
-            }),
-        );
-        // #endregion
-
         // Load layers using llama.cpp blk.N naming.
         for layer_idx in 0..config.num_hidden_layers {
             let prefix = format!("blk.{}", layer_idx);
@@ -1010,26 +925,6 @@ impl DFlashDraftModel {
             };
             model.layers.push(layer);
         }
-
-        // #region agent log
-        agent_debug_log(
-            "initial",
-            "H2_TENSOR_NAMES,H3_QUANT_WEIGHT_LAYOUT",
-            "oxidize-core/src/model/dflash.rs:DFlashDraftModel::load_from_gguf",
-            "loaded dflash decoder layers",
-            serde_json::json!({
-                "layers_loaded": model.layers.len(),
-                "expected_layers": config.num_hidden_layers,
-                "first_layer_q_loaded": model.layers.first().is_some_and(|layer| layer.attention.q_proj.is_loaded()),
-                "first_layer_k_loaded": model.layers.first().is_some_and(|layer| layer.attention.k_proj.is_loaded()),
-                "first_layer_v_loaded": model.layers.first().is_some_and(|layer| layer.attention.v_proj.is_loaded()),
-                "first_layer_o_loaded": model.layers.first().is_some_and(|layer| layer.attention.o_proj.is_loaded()),
-                "first_layer_mlp_gate_loaded": model.layers.first().is_some_and(|layer| layer.mlp_gate.is_loaded()),
-                "first_layer_mlp_up_loaded": model.layers.first().is_some_and(|layer| layer.mlp_up.is_loaded()),
-                "first_layer_mlp_down_loaded": model.layers.first().is_some_and(|layer| layer.mlp_down.is_loaded())
-            }),
-        );
-        // #endregion
 
         Ok(model)
     }
@@ -1510,26 +1405,6 @@ impl DFlashDraftModel {
 
         // Embedding lookup: hidden[b * h] row-major.
         let mut hidden = vec![0.0_f32; b * h];
-        // #region agent log
-        agent_debug_log(
-            "initial",
-            "H3_QUANT_EMBED_PREFILL,H4_RUNTIME_BATCH",
-            "oxidize-core/src/model/dflash.rs:DFlashDraftModel::forward_batch",
-            "entering dflash batched forward embedding path",
-            serde_json::json!({
-                "batch": b,
-                "hidden_size": h,
-                "first_token": tokens.first().copied(),
-                "position_offset_before": self.position_offset,
-                "tok_embeddings_loaded": self.tok_embeddings.is_loaded(),
-                "tok_embeddings_data_len": self.tok_embeddings.data.len(),
-                "tok_embeddings_quant": self.tok_embeddings.quant.is_some(),
-                "tok_embeddings_rows": self.tok_embeddings.rows,
-                "tok_embeddings_cols": self.tok_embeddings.cols,
-                "will_use_f32_embedding_slice": !self.tok_embeddings.data.is_empty()
-            }),
-        );
-        // #endregion
         if self.tok_embeddings.is_loaded() {
             for (t, &token) in tokens.iter().enumerate() {
                 self.fill_token_embedding(token, &mut hidden[t * h..(t + 1) * h])?;
@@ -1806,24 +1681,6 @@ impl Model for DFlashDraftModel {
         if tokens.is_empty() {
             return Err(ModelError::EmptyInput);
         }
-
-        // #region agent log
-        agent_debug_log(
-            "initial",
-            "H4_RUNTIME_BATCH,H5_OUTPUT_PROJECTION",
-            "oxidize-core/src/model/dflash.rs:Model::forward",
-            "dflash model forward entry",
-            serde_json::json!({
-                "tokens_len": tokens.len(),
-                "session_consumed_tokens": session.consumed_tokens(),
-                "position_offset_before": self.position_offset,
-                "output_loaded": self.output.is_loaded(),
-                "output_quant": self.output.quant.is_some(),
-                "norm_len": self.norm.len(),
-                "layers_loaded": self.layers.len()
-            }),
-        );
-        // #endregion
 
         // Prefer batched prefill: every linear is computed with a single
         // weight scan amortized over all tokens. Falls back to forward_token

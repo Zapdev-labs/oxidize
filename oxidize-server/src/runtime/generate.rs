@@ -180,10 +180,7 @@ fn generate_text_blocking(
     runtime: &ModelRuntime,
     request: GenerationRequest,
 ) -> Result<GenerationResult, GenerationError> {
-    let mut model = runtime
-        .model
-        .lock()
-        .map_err(|_| GenerationError::Other("model lock poisoned".to_owned()))?;
+    let mut model = runtime.model.blocking_lock();
     model
         .rewind_to(0)
         .map_err(|e| GenerationError::Other(format!("failed to reset model KV cache: {e:?}")))?;
@@ -236,11 +233,7 @@ fn generate_text_blocking(
     let mut draft_guard = runtime
         .draft
         .as_ref()
-        .map(|draft| {
-            draft
-                .lock()
-                .map_err(|_| GenerationError::Other("draft model lock poisoned".to_owned()))
-        })
+        .map(|draft| Ok(draft.blocking_lock()))
         .transpose()?;
     let mut stream = open_generation_stream(
         runtime,
@@ -310,10 +303,7 @@ fn generate_text_streaming_inner(
     tx: &tokio::sync::mpsc::Sender<Result<String, GenerationError>>,
     cancel: &Arc<AtomicBool>,
 ) -> Result<(), GenerationError> {
-    let mut model = runtime
-        .model
-        .lock()
-        .map_err(|_| GenerationError::Other("model lock poisoned".to_owned()))?;
+    let mut model = runtime.model.blocking_lock();
     model
         .rewind_to(0)
         .map_err(|e| GenerationError::Other(format!("failed to reset model KV cache: {e:?}")))?;
@@ -367,11 +357,7 @@ fn generate_text_streaming_inner(
     let mut draft_guard = runtime
         .draft
         .as_ref()
-        .map(|draft| {
-            draft
-                .lock()
-                .map_err(|_| GenerationError::Other("draft model lock poisoned".to_owned()))
-        })
+        .map(|draft| Ok(draft.blocking_lock()))
         .transpose()?;
     let mut stream = open_generation_stream(
         runtime,
@@ -418,11 +404,7 @@ pub fn generate_with_scheduler_blocking(
     paged: &PagedModelRuntime,
     request: GenerationRequest,
 ) -> Result<GenerationResult, GenerationError> {
-    let mut model = paged
-        .runtime
-        .model
-        .lock()
-        .map_err(|_| GenerationError::Other("model lock poisoned".to_owned()))?;
+    let mut model = paged.runtime.model.blocking_lock();
     model
         .rewind_to(0)
         .map_err(|e| GenerationError::Other(format!("failed to reset model KV cache: {e:?}")))?;
@@ -457,10 +439,7 @@ pub fn generate_with_scheduler_blocking(
     };
 
     let seq_id = paged.next_seq_id.fetch_add(1, Ordering::SeqCst);
-    let mut scheduler = paged
-        .scheduler
-        .lock()
-        .map_err(|_| GenerationError::Other("scheduler lock poisoned".to_owned()))?;
+    let mut scheduler = paged.scheduler.blocking_lock();
 
     let seq = Sequence::new(
         seq_id,
@@ -579,11 +558,7 @@ fn generate_with_scheduler_streaming_inner(
     tx: &tokio::sync::mpsc::Sender<Result<String, GenerationError>>,
     cancel: Arc<AtomicBool>,
 ) -> Result<(), GenerationError> {
-    let mut model = paged
-        .runtime
-        .model
-        .lock()
-        .map_err(|_| GenerationError::Other("model lock poisoned".to_owned()))?;
+    let mut model = paged.runtime.model.blocking_lock();
     model
         .rewind_to(0)
         .map_err(|e| GenerationError::Other(format!("failed to reset model KV cache: {e:?}")))?;
@@ -618,10 +593,7 @@ fn generate_with_scheduler_streaming_inner(
     };
 
     let seq_id = paged.next_seq_id.fetch_add(1, Ordering::SeqCst);
-    let mut scheduler = paged
-        .scheduler
-        .lock()
-        .map_err(|_| GenerationError::Other("scheduler lock poisoned".to_owned()))?;
+    let mut scheduler = paged.scheduler.blocking_lock();
 
     let seq = Sequence::new(
         seq_id,

@@ -3107,6 +3107,8 @@ dependencies = [
  "anyhow",
  "clap",
  "oxidize-core",
+ "oxidize-kernels",
+ "rayon",
 ]
 
 [[package]]

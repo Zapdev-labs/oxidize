@@ -139,3 +139,4 @@ make wasm     # outputs to dist/wasm
 - Rust `oxidize run` rewrites to `--serve-api` by default (background in-process server on `--api-host`/`--api-port`); realtime WebSocket at `ws://HOST:PORT/v1/realtime` (`oxidize-server/tests/realtime_ws.rs`).
 - `oxidize-convert` converts HuggingFace SafeTensors (file or model directory with `config.json`) to GGUF; core logic in `oxidize-core/src/format/safetensors_to_gguf.rs`.
 - Git installs must name `oxidize-cli` explicitly (`cargo install --git … oxidize-cli --bin oxidize`) because the workspace ships multiple binary crates.
+- `oxidize-prune` depends on `oxidize-kernels` for SIMD magnitude/Wanda masks (`prune.rs`), Q4_K dequant (`q4k_dequant.rs`), and rayon-parallel tensor processing in `wanda.rs`.
