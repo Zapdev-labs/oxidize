@@ -284,7 +284,8 @@ fn main() {
     let bytes_per_layer = (
         4 * h * h +   // 4 attention projections
         2 * inter * h + // gate + up
-        h * inter // down
+        h * inter
+        // down
     ) * std::mem::size_of::<f32>();
     println!(
         "Approx weight bytes per layer: {:.1} MB",

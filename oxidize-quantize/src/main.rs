@@ -1,14 +1,18 @@
 use std::collections::BTreeMap;
-use std::fs;
+use std::fs::{self, File};
+use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use oxidize_core::gguf::{
     GgufFile, GgufMetadataArray, GgufMetadataType, GgufMetadataValue, GgufQuantizationType,
-    GgufTensorInfo, parse_gguf,
+    GgufTensorInfo, load_mapped_gguf, parse_gguf,
 };
 use oxidize_core::quantization::{quantize_scalar, quantized_size};
+use rayon::prelude::*;
+
+const STREAM_VALUES_PER_CHUNK: usize = 256 * 4096;
 
 #[derive(Debug, Parser)]
 #[command(name = "oxidize-quantize")]
@@ -25,6 +29,9 @@ struct Args {
     /// existing tensors. Format: name:path:dim0,dim1:type
     #[arg(long)]
     append_tensor: Vec<String>,
+    /// Worker threads for GGUF tensor quantization. Defaults to Rayon default.
+    #[arg(long)]
+    threads: Option<usize>,
 }
 
 fn parse_quantization_type(value: &str) -> Result<GgufQuantizationType, String> {
@@ -65,6 +72,16 @@ fn source_value_count(source: GgufQuantizationType, byte_len: usize) -> Result<u
 }
 
 fn run(args: Args) -> Result<()> {
+    if let Some(threads) = args.threads {
+        if threads == 0 {
+            bail!("--threads must be greater than zero");
+        }
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build_global()
+            .map_err(|err| anyhow!(err))
+            .context("failed to initialize quantization thread pool")?;
+    }
     quantize_file(
         &args.input,
         &args.output,
@@ -81,21 +98,24 @@ fn quantize_file(
     target: Option<GgufQuantizationType>,
     append_specs: &[String],
 ) -> Result<()> {
-    let input = fs::read(input_path)
-        .with_context(|| format!("failed to read input file: {}", input_path.display()))?;
-    if input.starts_with(b"GGUF") {
-        let output = if append_specs.is_empty() {
+    if input_is_gguf(input_path)? {
+        if append_specs.is_empty() {
             let target =
                 target.ok_or_else(|| anyhow!("--target is required for GGUF quantization"))?;
-            quantize_gguf_bytes(&input, target)?
+            quantize_gguf_stream(input_path, output_path, target)?;
         } else {
-            append_gguf_tensors(&input, append_specs)?
-        };
-        fs::write(output_path, &output)
-            .with_context(|| format!("failed to write output file: {}", output_path.display()))?;
+            let input = fs::read(input_path)
+                .with_context(|| format!("failed to read input file: {}", input_path.display()))?;
+            let output = append_gguf_tensors(&input, append_specs)?;
+            fs::write(output_path, &output).with_context(|| {
+                format!("failed to write output file: {}", output_path.display())
+            })?;
+        }
         return Ok(());
     }
 
+    let input = fs::read(input_path)
+        .with_context(|| format!("failed to read input file: {}", input_path.display()))?;
     let target = target.ok_or_else(|| anyhow!("--target is required for raw tensor inputs"))?;
     let source = source.ok_or_else(|| anyhow!("--source is required for raw tensor inputs"))?;
     let value_count = source_value_count(source, input.len())?;
@@ -111,6 +131,16 @@ fn quantize_file(
     Ok(())
 }
 
+fn input_is_gguf(input_path: &Path) -> Result<bool> {
+    let mut file = File::open(input_path)
+        .with_context(|| format!("failed to open input file: {}", input_path.display()))?;
+    let mut magic = [0_u8; 4];
+    let read = file
+        .read(&mut magic)
+        .with_context(|| format!("failed to read input file: {}", input_path.display()))?;
+    Ok(read == magic.len() && magic == *b"GGUF")
+}
+
 #[derive(Debug, Clone)]
 struct OutputTensor {
     name: String,
@@ -119,16 +149,191 @@ struct OutputTensor {
     data: Vec<u8>,
 }
 
-fn quantize_gguf_bytes(input: &[u8], target: GgufQuantizationType) -> Result<Vec<u8>> {
+#[derive(Debug, Clone)]
+struct TensorPlan {
+    name: String,
+    dimensions: Vec<u64>,
+    output_ggml_type: u32,
+    absolute_offset: usize,
+    input_size: usize,
+    output_size: usize,
+    source_quantization: GgufQuantizationType,
+    output_quantization: GgufQuantizationType,
+    quantize: bool,
+}
+
+fn quantize_gguf_stream(
+    input_path: &Path,
+    output_path: &Path,
+    target: GgufQuantizationType,
+) -> Result<()> {
     ensure_gguf_target_supported(target)?;
-    let parsed = parse_gguf(input).map_err(|err| anyhow!(err))?;
+    let mapped = load_mapped_gguf(input_path)
+        .map_err(|err| anyhow!(err))
+        .with_context(|| format!("failed to mmap GGUF input: {}", input_path.display()))?;
+    let parsed = mapped.parsed();
+    let input = mapped.bytes();
+
     let mut metadata = parsed.metadata.clone();
     metadata.insert(
         "general.file_type".to_owned(),
         GgufMetadataValue::Uint32(gguf_type_id(target)?),
     );
-    let tensors = build_output_tensors(&parsed, input, target)?;
-    write_gguf(parsed.version, &metadata, &tensors, parsed.alignment)
+    let plans = build_tensor_plans(parsed, input.len(), target)?;
+
+    let mut output = File::create(output_path)
+        .with_context(|| format!("failed to create output file: {}", output_path.display()))?;
+    write_gguf_stream(
+        parsed.version,
+        &metadata,
+        &plans,
+        parsed.alignment,
+        input,
+        &mut output,
+    )
+}
+
+fn build_tensor_plans(
+    parsed: &GgufFile,
+    input_len: usize,
+    target: GgufQuantizationType,
+) -> Result<Vec<TensorPlan>> {
+    parsed
+        .tensor_infos
+        .iter()
+        .map(|tensor| build_tensor_plan(tensor, input_len, target))
+        .collect()
+}
+
+fn build_tensor_plan(
+    tensor: &GgufTensorInfo,
+    input_len: usize,
+    target: GgufQuantizationType,
+) -> Result<TensorPlan> {
+    let source = GgufQuantizationType::from_ggml_type(tensor.ggml_type);
+    let value_count = tensor_value_count(tensor)?;
+    let input_size = quantized_size(source, value_count)
+        .map_err(|err| anyhow!(err))
+        .with_context(|| format!("unsupported input tensor type for {}", tensor.name))?;
+    let absolute_offset = usize::try_from(tensor.absolute_offset)
+        .with_context(|| format!("tensor {} offset overflows usize", tensor.name))?;
+    let end = absolute_offset
+        .checked_add(input_size)
+        .ok_or_else(|| anyhow!("tensor {} byte range overflows", tensor.name))?;
+    if end > input_len {
+        bail!("tensor {} extends past end of input GGUF", tensor.name);
+    }
+
+    let output_quantization = select_output_quantization(tensor, source, target)?;
+    let quantize = output_quantization != source;
+    let output_size = if quantize {
+        quantized_size(output_quantization, value_count).map_err(|err| anyhow!(err))?
+    } else {
+        input_size
+    };
+    let output_ggml_type = if quantize {
+        ggml_type_id(output_quantization)?
+    } else {
+        tensor.ggml_type
+    };
+
+    Ok(TensorPlan {
+        name: tensor.name.clone(),
+        dimensions: tensor.dimensions.clone(),
+        output_ggml_type,
+        absolute_offset,
+        input_size,
+        output_size,
+        source_quantization: source,
+        output_quantization,
+        quantize,
+    })
+}
+
+fn select_output_quantization(
+    tensor: &GgufTensorInfo,
+    source: GgufQuantizationType,
+    requested: GgufQuantizationType,
+) -> Result<GgufQuantizationType> {
+    if tensor.dimensions.len() < 2
+        || !matches!(
+            source,
+            GgufQuantizationType::F32 | GgufQuantizationType::F16 | GgufQuantizationType::BF16
+        )
+    {
+        return Ok(source);
+    }
+
+    let value_count = tensor_value_count(tensor)?;
+    if requested == GgufQuantizationType::Q4_K_M
+        && name_should_stay_unquantized_for_q4_k_m(&tensor.name)
+    {
+        return Ok(source);
+    }
+    let mut selected = if requested == GgufQuantizationType::Q4_K_M {
+        q4_k_m_mixed_type(&tensor.name)
+    } else {
+        requested
+    };
+
+    if uses_k_quant_blocks(selected) {
+        let row_width = tensor
+            .dimensions
+            .first()
+            .copied()
+            .and_then(|dim| usize::try_from(dim).ok())
+            .ok_or_else(|| anyhow!("tensor {} first dimension overflows usize", tensor.name))?;
+        if !row_width.is_multiple_of(k_quant_values_per_block(selected)) {
+            selected = if row_width.is_multiple_of(32) {
+                GgufQuantizationType::Q5_0
+            } else {
+                source
+            };
+        }
+    }
+
+    if quantized_size(selected, value_count).is_err() {
+        return Ok(source);
+    }
+
+    Ok(selected)
+}
+
+fn q4_k_m_mixed_type(name: &str) -> GgufQuantizationType {
+    // llama.cpp's Q4_K_M is a mixed preset rather than a literal "all Q4_K"
+    // conversion.  For Kimi/DeepSeek, llama.cpp keeps output.weight at Q6_K
+    // and uses Q4_K for the bulk of the model.  Row-width validation below
+    // handles MLA tensors that need Q5_0 fallbacks.
+    if name == "output.weight" {
+        GgufQuantizationType::Q6_K
+    } else {
+        GgufQuantizationType::Q4_K_M
+    }
+}
+
+fn name_should_stay_unquantized_for_q4_k_m(name: &str) -> bool {
+    // DeepSeek/Kimi router weights are tiny relative to the model and strongly
+    // affect expert choice. llama.cpp keeps these as F32 in its Q4_K_M output.
+    name.contains("ffn_gate_inp.weight")
+}
+
+fn uses_k_quant_blocks(quantization: GgufQuantizationType) -> bool {
+    matches!(
+        quantization,
+        GgufQuantizationType::Q2_K
+            | GgufQuantizationType::Q3_K_S
+            | GgufQuantizationType::Q3_K_M
+            | GgufQuantizationType::Q3_K_L
+            | GgufQuantizationType::Q4_K_S
+            | GgufQuantizationType::Q4_K_M
+            | GgufQuantizationType::Q5_K_S
+            | GgufQuantizationType::Q5_K_M
+            | GgufQuantizationType::Q6_K
+    )
+}
+
+fn k_quant_values_per_block(_quantization: GgufQuantizationType) -> usize {
+    256
 }
 
 fn append_gguf_tensors(input: &[u8], append_specs: &[String]) -> Result<Vec<u8>> {
@@ -201,57 +406,9 @@ fn parse_append_tensor_spec(spec: &str) -> Result<OutputTensor> {
     Ok(OutputTensor {
         name: parts[0].to_owned(),
         dimensions,
-        ggml_type: gguf_type_id(qtype)?,
+        ggml_type: ggml_type_id(qtype)?,
         data,
     })
-}
-
-fn build_output_tensors(
-    parsed: &GgufFile,
-    input: &[u8],
-    target: GgufQuantizationType,
-) -> Result<Vec<OutputTensor>> {
-    let mut tensors = Vec::with_capacity(parsed.tensor_infos.len());
-    for tensor in &parsed.tensor_infos {
-        let source = GgufQuantizationType::from_ggml_type(tensor.ggml_type);
-        let value_count = tensor_value_count(tensor)?;
-        let input_size = quantized_size(source, value_count)
-            .map_err(|err| anyhow!(err))
-            .with_context(|| format!("unsupported input tensor type for {}", tensor.name))?;
-        let start = tensor.absolute_offset as usize;
-        let end = start
-            .checked_add(input_size)
-            .ok_or_else(|| anyhow!("tensor {} byte range overflows", tensor.name))?;
-        if end > input.len() {
-            bail!("tensor {} extends past end of input GGUF", tensor.name);
-        }
-        let tensor_bytes = &input[start..end];
-
-        let should_quantize = tensor.dimensions.len() >= 2
-            && matches!(
-                source,
-                GgufQuantizationType::F32 | GgufQuantizationType::F16 | GgufQuantizationType::BF16
-            )
-            && quantized_size(target, value_count).is_ok();
-        let (ggml_type, data) = if should_quantize {
-            let output_size = quantized_size(target, value_count).map_err(|err| anyhow!(err))?;
-            let mut output = vec![0_u8; output_size];
-            quantize_scalar(source, target, tensor_bytes, &mut output)
-                .map_err(|err| anyhow!(err))
-                .with_context(|| format!("failed to quantize tensor {}", tensor.name))?;
-            (gguf_type_id(target)?, output)
-        } else {
-            (tensor.ggml_type, tensor_bytes.to_vec())
-        };
-
-        tensors.push(OutputTensor {
-            name: tensor.name.clone(),
-            dimensions: tensor.dimensions.clone(),
-            ggml_type,
-            data,
-        });
-    }
-    Ok(tensors)
 }
 
 fn ensure_gguf_target_supported(target: GgufQuantizationType) -> Result<()> {
@@ -308,6 +465,27 @@ fn gguf_type_id(quantization: GgufQuantizationType) -> Result<u32> {
     }
 }
 
+fn ggml_type_id(quantization: GgufQuantizationType) -> Result<u32> {
+    match quantization {
+        GgufQuantizationType::F32 => Ok(0),
+        GgufQuantizationType::F16 => Ok(1),
+        GgufQuantizationType::Q4_0 => Ok(2),
+        GgufQuantizationType::Q4_1 => Ok(3),
+        GgufQuantizationType::Q5_0 => Ok(6),
+        GgufQuantizationType::Q5_1 => Ok(7),
+        GgufQuantizationType::Q8_0 => Ok(8),
+        GgufQuantizationType::Q2_K => Ok(10),
+        GgufQuantizationType::Q3_K_S
+        | GgufQuantizationType::Q3_K_M
+        | GgufQuantizationType::Q3_K_L => Ok(11),
+        GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M => Ok(12),
+        GgufQuantizationType::Q5_K_S | GgufQuantizationType::Q5_K_M => Ok(13),
+        GgufQuantizationType::Q6_K => Ok(14),
+        GgufQuantizationType::BF16 => Ok(30),
+        other => bail!("unsupported GGML tensor type: {other:?}"),
+    }
+}
+
 fn write_gguf(
     version: u32,
     metadata: &BTreeMap<String, GgufMetadataValue>,
@@ -361,6 +539,200 @@ fn write_gguf(
         pad_to_alignment(&mut out, alignment)?;
     }
     Ok(out)
+}
+
+fn write_gguf_stream(
+    version: u32,
+    metadata: &BTreeMap<String, GgufMetadataValue>,
+    tensors: &[TensorPlan],
+    alignment: u64,
+    input: &[u8],
+    output: &mut File,
+) -> Result<()> {
+    if alignment == 0 || !alignment.is_power_of_two() {
+        bail!("invalid GGUF alignment: {alignment}");
+    }
+
+    let relative_offsets = tensor_relative_offsets(tensors, alignment)?;
+    let mut header = Vec::new();
+    header.extend_from_slice(b"GGUF");
+    header.extend_from_slice(&version.to_le_bytes());
+    header.extend_from_slice(&(tensors.len() as u64).to_le_bytes());
+    header.extend_from_slice(&(metadata.len() as u64).to_le_bytes());
+    for (key, value) in metadata {
+        write_string(&mut header, key);
+        write_metadata_value(&mut header, value)?;
+    }
+    for (tensor, relative_offset) in tensors.iter().zip(relative_offsets.iter().copied()) {
+        write_string(&mut header, &tensor.name);
+        header.extend_from_slice(&(tensor.dimensions.len() as u32).to_le_bytes());
+        for dimension in &tensor.dimensions {
+            header.extend_from_slice(&dimension.to_le_bytes());
+        }
+        header.extend_from_slice(&tensor.output_ggml_type.to_le_bytes());
+        header.extend_from_slice(&relative_offset.to_le_bytes());
+    }
+    pad_to_alignment(&mut header, alignment)?;
+    output.write_all(&header)?;
+
+    let data_section_start = header.len() as u64;
+    for (idx, (tensor, relative_offset)) in tensors.iter().zip(relative_offsets.iter()).enumerate()
+    {
+        let expected_pos = data_section_start
+            .checked_add(*relative_offset)
+            .ok_or_else(|| anyhow!("GGUF output offset overflow"))?;
+        pad_file_to(output, expected_pos)?;
+        eprintln!(
+            "[{}/{}] {} - {:?} -> {:?} ({} bytes -> {} bytes)",
+            idx + 1,
+            tensors.len(),
+            tensor.name,
+            tensor.source_quantization,
+            tensor.output_quantization,
+            tensor.input_size,
+            tensor.output_size
+        );
+        write_tensor_data_stream(tensor, input, output)?;
+        let aligned = align_up_u64(
+            expected_pos
+                .checked_add(tensor.output_size as u64)
+                .ok_or_else(|| anyhow!("GGUF output tensor end overflow"))?,
+            alignment,
+        )?;
+        pad_file_to(output, aligned)?;
+    }
+    Ok(())
+}
+
+fn tensor_relative_offsets(tensors: &[TensorPlan], alignment: u64) -> Result<Vec<u64>> {
+    let mut offsets = Vec::with_capacity(tensors.len());
+    let mut relative_offset = 0_u64;
+    for tensor in tensors {
+        relative_offset = align_up_u64(relative_offset, alignment)?;
+        offsets.push(relative_offset);
+        relative_offset = relative_offset
+            .checked_add(tensor.output_size as u64)
+            .ok_or_else(|| anyhow!("GGUF tensor data offset overflow"))?;
+    }
+    Ok(offsets)
+}
+
+fn pad_file_to(output: &mut File, target_len: u64) -> Result<()> {
+    let current = output.stream_position()?;
+    if current > target_len {
+        bail!("output position {current} passed expected offset {target_len}");
+    }
+    let mut remaining = target_len - current;
+    const ZEROES: [u8; 4096] = [0; 4096];
+    while remaining > 0 {
+        let len = usize::try_from(remaining.min(ZEROES.len() as u64))?;
+        output.write_all(&ZEROES[..len])?;
+        remaining -= len as u64;
+    }
+    Ok(())
+}
+
+fn write_tensor_data_stream(tensor: &TensorPlan, input: &[u8], output: &mut File) -> Result<()> {
+    let start = tensor.absolute_offset;
+    let end = start
+        .checked_add(tensor.input_size)
+        .ok_or_else(|| anyhow!("tensor {} byte range overflows", tensor.name))?;
+    let input_bytes = &input[start..end];
+
+    if !tensor.quantize {
+        output.write_all(input_bytes)?;
+        return Ok(());
+    }
+
+    let source_width = scalar_source_width(tensor.source_quantization)?;
+    let value_count = tensor_value_count_from_dimensions(&tensor.name, &tensor.dimensions)?;
+    let chunk_values = stream_chunk_values(tensor.output_quantization);
+    let batch_chunks = rayon::current_num_threads().max(1) * 2;
+    let mut processed = 0_usize;
+    while processed < value_count {
+        let mut batch = Vec::with_capacity(batch_chunks);
+        for _ in 0..batch_chunks {
+            if processed >= value_count {
+                break;
+            }
+            let values = (value_count - processed).min(chunk_values);
+            batch.push((processed, values));
+            processed += values;
+        }
+        let chunks = batch
+            .par_iter()
+            .map(|(start_value, values)| {
+                quantize_tensor_chunk(tensor, input_bytes, source_width, *start_value, *values)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        for chunk in chunks {
+            output.write_all(&chunk)?;
+        }
+    }
+    Ok(())
+}
+
+fn quantize_tensor_chunk(
+    tensor: &TensorPlan,
+    input_bytes: &[u8],
+    source_width: usize,
+    start_value: usize,
+    values: usize,
+) -> Result<Vec<u8>> {
+    let input_start = start_value
+        .checked_mul(source_width)
+        .ok_or_else(|| anyhow!("tensor {} input chunk offset overflows", tensor.name))?;
+    let input_len = values
+        .checked_mul(source_width)
+        .ok_or_else(|| anyhow!("tensor {} input chunk length overflows", tensor.name))?;
+    let input_chunk = &input_bytes[input_start..input_start + input_len];
+    let output_len =
+        quantized_size(tensor.output_quantization, values).map_err(|err| anyhow!(err))?;
+    let mut output_chunk = vec![0_u8; output_len];
+    quantize_scalar(
+        tensor.source_quantization,
+        tensor.output_quantization,
+        input_chunk,
+        &mut output_chunk,
+    )
+    .map_err(|err| anyhow!(err))
+    .with_context(|| format!("failed to quantize tensor {}", tensor.name))?;
+    Ok(output_chunk)
+}
+
+fn scalar_source_width(source: GgufQuantizationType) -> Result<usize> {
+    match source {
+        GgufQuantizationType::F32 => Ok(4),
+        GgufQuantizationType::F16 | GgufQuantizationType::BF16 => Ok(2),
+        other => bail!("cannot stream-quantize from source type {other:?}"),
+    }
+}
+
+fn stream_chunk_values(target: GgufQuantizationType) -> usize {
+    let block = if uses_k_quant_blocks(target) {
+        256
+    } else if matches!(
+        target,
+        GgufQuantizationType::Q4_0
+            | GgufQuantizationType::Q4_1
+            | GgufQuantizationType::Q5_0
+            | GgufQuantizationType::Q5_1
+            | GgufQuantizationType::Q8_0
+    ) {
+        32
+    } else {
+        1
+    };
+    STREAM_VALUES_PER_CHUNK / block * block
+}
+
+fn tensor_value_count_from_dimensions(name: &str, dimensions: &[u64]) -> Result<usize> {
+    dimensions.iter().try_fold(1_usize, |acc, dim| {
+        let dim = usize::try_from(*dim)
+            .with_context(|| format!("tensor {name} dimension overflows usize"))?;
+        acc.checked_mul(dim)
+            .ok_or_else(|| anyhow!("tensor {name} value count overflows"))
+    })
 }
 
 fn write_metadata_value(out: &mut Vec<u8>, value: &GgufMetadataValue) -> Result<()> {
@@ -600,6 +972,96 @@ mod tests {
     }
 
     #[test]
+    fn q4_k_m_policy_uses_mixed_types_and_deepseek_fallbacks() {
+        let output = tensor_info("output.weight", vec![256, 256], 1);
+        let output_plan = build_tensor_plan(&output, 256 * 256 * 2, GgufQuantizationType::Q4_K_M)
+            .expect("output plan should build");
+        assert_eq!(output_plan.output_quantization, GgufQuantizationType::Q6_K);
+        assert_eq!(output_plan.output_ggml_type, 14);
+
+        let mla = tensor_info("blk.0.attn_k_b.weight", vec![128, 512, 64, 1], 30);
+        let mla_plan = build_tensor_plan(&mla, 128 * 512 * 64 * 2, GgufQuantizationType::Q4_K_M)
+            .expect("MLA plan should build");
+        assert_eq!(mla_plan.output_quantization, GgufQuantizationType::Q5_0);
+        assert_eq!(mla_plan.output_ggml_type, 6);
+
+        let norm = tensor_info("blk.0.attn_norm.weight", vec![256], 0);
+        let norm_plan = build_tensor_plan(&norm, 256 * 4, GgufQuantizationType::Q4_K_M)
+            .expect("norm plan should build");
+        assert_eq!(norm_plan.output_quantization, GgufQuantizationType::F32);
+        assert!(!norm_plan.quantize);
+
+        let router = tensor_info("blk.0.ffn_gate_inp.weight", vec![7168, 268], 0);
+        let router_plan = build_tensor_plan(&router, 7168 * 268 * 4, GgufQuantizationType::Q4_K_M)
+            .expect("router plan should build");
+        assert_eq!(router_plan.output_quantization, GgufQuantizationType::F32);
+        assert!(!router_plan.quantize);
+    }
+
+    #[test]
+    fn quantize_file_streams_q4_k_m_with_ggml_tensor_type() {
+        let temp_dir = unique_temp_dir();
+        let input_path = temp_dir.join("tiny-f32.gguf");
+        let output_path = temp_dir.join("tiny-q4-k-m.gguf");
+
+        let matrix_values = (0..256).map(|idx| idx as f32 / 16.0).collect::<Vec<_>>();
+        let mut matrix_data = Vec::with_capacity(matrix_values.len() * 4);
+        for value in &matrix_values {
+            matrix_data.extend_from_slice(&value.to_le_bytes());
+        }
+
+        let metadata = BTreeMap::from([
+            (
+                "general.architecture".to_owned(),
+                GgufMetadataValue::String("llama".to_owned()),
+            ),
+            (
+                "general.alignment".to_owned(),
+                GgufMetadataValue::Uint32(32),
+            ),
+            ("general.file_type".to_owned(), GgufMetadataValue::Uint32(0)),
+        ]);
+        let input = write_gguf(
+            3,
+            &metadata,
+            &[OutputTensor {
+                name: "blk.0.ffn_gate.weight".to_owned(),
+                dimensions: vec![256, 1],
+                ggml_type: 0,
+                data: matrix_data,
+            }],
+            32,
+        )
+        .expect("tiny GGUF should be written");
+        fs::write(&input_path, input).expect("tiny GGUF input should be written");
+
+        quantize_file(
+            &input_path,
+            &output_path,
+            None,
+            Some(GgufQuantizationType::Q4_K_M),
+            &[],
+        )
+        .expect("GGUF Q4_K_M quantization should succeed");
+
+        let output = fs::read(&output_path).expect("output GGUF should exist");
+        let parsed = parse_gguf(&output).expect("output GGUF should parse");
+        assert_eq!(
+            parsed.metadata.get("general.file_type"),
+            Some(&GgufMetadataValue::Uint32(15))
+        );
+        assert_eq!(parsed.tensor_infos[0].ggml_type, 12);
+        assert_eq!(
+            output.len() - parsed.tensor_infos[0].absolute_offset as usize,
+            align_up_u64(
+                quantized_size(GgufQuantizationType::Q4_K_M, 256).expect("q4 size") as u64,
+                32,
+            )
+            .expect("aligned size") as usize
+        );
+    }
+
+    #[test]
     fn raw_quantization_requires_source_type() {
         let temp_dir = unique_temp_dir();
         let input_path = temp_dir.join("input.bin");
@@ -622,6 +1084,16 @@ mod tests {
         let err =
             source_value_count(GgufQuantizationType::F32, 3).expect_err("must reject invalid len");
         assert!(err.to_string().contains("not a multiple"));
+    }
+
+    fn tensor_info(name: &str, dimensions: Vec<u64>, ggml_type: u32) -> GgufTensorInfo {
+        GgufTensorInfo {
+            name: name.to_owned(),
+            dimensions,
+            ggml_type,
+            relative_offset: 0,
+            absolute_offset: 0,
+        }
     }
 
     fn unique_temp_dir() -> PathBuf {

@@ -130,10 +130,10 @@ struct Layer {
     post_ffw_norm_1: Vec<f32>,
     // routed MoE
     pre_ffw_norm_2: Vec<f32>,
-    ffn_gate_inp: Vec<f32>,   // [N_EXPERT, N_EMBD] f32 router
-    ffn_gate_inp_s: Vec<f32>, // [N_EMBD] per-channel router-input scale
-    ffn_gate_up_exps: EW,     // fused [2*EXPERT_FF, N_EMBD] per expert
-    ffn_down_exps: EW,        // [N_EMBD, EXPERT_FF] per expert
+    ffn_gate_inp: Vec<f32>,    // [N_EXPERT, N_EMBD] f32 router
+    ffn_gate_inp_s: Vec<f32>,  // [N_EMBD] per-channel router-input scale
+    ffn_gate_up_exps: EW,      // fused [2*EXPERT_FF, N_EMBD] per expert
+    ffn_down_exps: EW,         // [N_EMBD, EXPERT_FF] per expert
     ffn_down_exps_s: Vec<f32>, // [N_EXPERT] per-expert output scale
     post_ffw_norm_2: Vec<f32>,
     post_ffw_norm: Vec<f32>,
@@ -148,8 +148,8 @@ pub struct DiffusionGemma {
     self_cond_norm: Vec<f32>,
     self_cond_gate: QW,
     self_cond_up: QW,
-    self_cond_down: QW, // Q5_0 -> auto-dequantized in QW.deq
-    rope_freqs: Vec<f32>,         // [256] proportional-rope factors for full layers
+    self_cond_down: QW,   // Q5_0 -> auto-dequantized in QW.deq
+    rope_freqs: Vec<f32>, // [256] proportional-rope factors for full layers
 }
 
 fn bytes_for(q: GgufQuantizationType, rows: usize, cols: usize) -> usize {
@@ -178,7 +178,12 @@ fn dequant_q5_0(data: &[u8], n: usize) -> Vec<f32> {
     for b in 0..nblocks {
         let base = b * 22;
         let d = f16_to_f32(u16::from_le_bytes([data[base], data[base + 1]]));
-        let qh = u32::from_le_bytes([data[base + 2], data[base + 3], data[base + 4], data[base + 5]]);
+        let qh = u32::from_le_bytes([
+            data[base + 2],
+            data[base + 3],
+            data[base + 4],
+            data[base + 5],
+        ]);
         let qs = &data[base + 6..base + 22];
         for i in 0..16 {
             let h0 = ((qh >> i) & 1) as u8;
@@ -199,13 +204,18 @@ fn dequant_any(q: GgufQuantizationType, bytes: &[u8], n: usize) -> Vec<f32> {
         GgufQuantizationType::F32 => {
             let mut v = vec![0.0_f32; n];
             for i in 0..n {
-                v[i] = f32::from_le_bytes([bytes[i * 4], bytes[i * 4 + 1], bytes[i * 4 + 2], bytes[i * 4 + 3]]);
+                v[i] = f32::from_le_bytes([
+                    bytes[i * 4],
+                    bytes[i * 4 + 1],
+                    bytes[i * 4 + 2],
+                    bytes[i * 4 + 3],
+                ]);
             }
             v
         }
-        GgufQuantizationType::F16 => {
-            (0..n).map(|i| f16_to_f32(u16::from_le_bytes([bytes[i * 2], bytes[i * 2 + 1]]))).collect()
-        }
+        GgufQuantizationType::F16 => (0..n)
+            .map(|i| f16_to_f32(u16::from_le_bytes([bytes[i * 2], bytes[i * 2 + 1]])))
+            .collect(),
         other => panic!("dequant_any: unsupported quant {other:?}"),
     }
 }
@@ -243,7 +253,15 @@ impl DiffusionGemma {
     }
 
     /// Batched matmul `outputs[batch, rows] = W[rows, cols] @ inputs[batch, cols]` on OXK GEMM.
-    fn gemm_qw(&self, w: &QW, rows: usize, cols: usize, inputs: &[f32], outputs: &mut [f32], batch: usize) {
+    fn gemm_qw(
+        &self,
+        w: &QW,
+        rows: usize,
+        cols: usize,
+        inputs: &[f32],
+        outputs: &mut [f32],
+        batch: usize,
+    ) {
         gemm_quantized_f32(w.q, self.bytes(w), rows, cols, inputs, outputs, batch).unwrap();
     }
 
@@ -254,8 +272,28 @@ impl DiffusionGemma {
 
     /// Selected-experts matmul. `output[n_sel, rows]`; each expert reads `inputs[slot*stride..]`
     /// (or shared `inputs` when `stride == 0`).
-    fn experts_ew(&self, w: &EW, sel: &[usize], rows: usize, cols: usize, inputs: &[f32], stride: usize, output: &mut [f32]) {
-        gemv_quantized_experts_f32(w.q, self.ebytes(w), N_EXPERT, sel, rows, cols, inputs, stride, output).unwrap();
+    fn experts_ew(
+        &self,
+        w: &EW,
+        sel: &[usize],
+        rows: usize,
+        cols: usize,
+        inputs: &[f32],
+        stride: usize,
+        output: &mut [f32],
+    ) {
+        gemv_quantized_experts_f32(
+            w.q,
+            self.ebytes(w),
+            N_EXPERT,
+            sel,
+            rows,
+            cols,
+            inputs,
+            stride,
+            output,
+        )
+        .unwrap();
     }
 
     pub fn load(path: &str) -> Result<DiffusionGemma, String> {
@@ -268,7 +306,9 @@ impl DiffusionGemma {
         }
 
         let qw = |name: &str| -> Result<QW, String> {
-            let t = by_name.get(name).ok_or_else(|| format!("missing tensor {name}"))?;
+            let t = by_name
+                .get(name)
+                .ok_or_else(|| format!("missing tensor {name}"))?;
             let q = GgufQuantizationType::from_ggml_type(t.ggml_type);
             // 2D linear weight: dims = [cols(in), rows(out)]
             let cols = t.dimensions[0] as usize;
@@ -276,14 +316,30 @@ impl DiffusionGemma {
             let len = bytes_for(q, rows, cols);
             let off = t.absolute_offset as usize;
             if quant_supported(q) {
-                Ok(QW { q, off, len, rows, cols, owned: None })
+                Ok(QW {
+                    q,
+                    off,
+                    len,
+                    rows,
+                    cols,
+                    owned: None,
+                })
             } else {
                 let owned = requant_to_q8_0(q, &mmap[off..off + len], rows * cols);
-                Ok(QW { q: GgufQuantizationType::Q8_0, off, len: owned.len(), rows, cols, owned: Some(owned) })
+                Ok(QW {
+                    q: GgufQuantizationType::Q8_0,
+                    off,
+                    len: owned.len(),
+                    rows,
+                    cols,
+                    owned: Some(owned),
+                })
             }
         };
         let ew = |name: &str| -> Result<EW, String> {
-            let t = by_name.get(name).ok_or_else(|| format!("missing tensor {name}"))?;
+            let t = by_name
+                .get(name)
+                .ok_or_else(|| format!("missing tensor {name}"))?;
             let q = GgufQuantizationType::from_ggml_type(t.ggml_type);
             // experts dims = [cols(in), rows(out), n_expert]
             let cols = t.dimensions[0] as usize;
@@ -291,14 +347,30 @@ impl DiffusionGemma {
             let len = bytes_for(q, rows, cols) * N_EXPERT;
             let off = t.absolute_offset as usize;
             if quant_supported(q) {
-                Ok(EW { q, off, len, rows, cols, owned: None })
+                Ok(EW {
+                    q,
+                    off,
+                    len,
+                    rows,
+                    cols,
+                    owned: None,
+                })
             } else {
                 let owned = requant_to_q8_0(q, &mmap[off..off + len], N_EXPERT * rows * cols);
-                Ok(EW { q: GgufQuantizationType::Q8_0, off, len: owned.len(), rows, cols, owned: Some(owned) })
+                Ok(EW {
+                    q: GgufQuantizationType::Q8_0,
+                    off,
+                    len: owned.len(),
+                    rows,
+                    cols,
+                    owned: Some(owned),
+                })
             }
         };
         let f32v = |name: &str| -> Result<Vec<f32>, String> {
-            let t = by_name.get(name).ok_or_else(|| format!("missing tensor {name}"))?;
+            let t = by_name
+                .get(name)
+                .ok_or_else(|| format!("missing tensor {name}"))?;
             let n: usize = t.dimensions.iter().map(|&d| d as usize).product();
             let off = t.absolute_offset as usize;
             let q = GgufQuantizationType::from_ggml_type(t.ggml_type);
@@ -308,7 +380,10 @@ impl DiffusionGemma {
                     let raw = &mmap[off..off + n * 4];
                     for i in 0..n {
                         v[i] = f32::from_le_bytes([
-                            raw[i * 4], raw[i * 4 + 1], raw[i * 4 + 2], raw[i * 4 + 3],
+                            raw[i * 4],
+                            raw[i * 4 + 1],
+                            raw[i * 4 + 2],
+                            raw[i * 4 + 3],
                         ]);
                     }
                     Ok(v)
@@ -328,7 +403,11 @@ impl DiffusionGemma {
         let mut layers = Vec::with_capacity(N_LAYER);
         for il in 0..N_LAYER {
             let p = |s: &str| format!("blk.{il}.{s}");
-            let attn_v = if is_swa(il) { Some(qw(&p("attn_v.weight"))?) } else { None };
+            let attn_v = if is_swa(il) {
+                Some(qw(&p("attn_v.weight"))?)
+            } else {
+                None
+            };
             // per-expert output scale ffn_down_exps.scale [N_EXPERT]; router scale ffn_gate_inp.scale
             let ds = f32v(&p("ffn_down_exps.scale")).unwrap_or_else(|_| vec![1.0; N_EXPERT]);
             let gis = f32v(&p("ffn_gate_inp.scale")).unwrap_or_else(|_| vec![1.0; N_EMBD]);
@@ -419,11 +498,21 @@ impl DiffusionGemma {
             let kvdim = kvh * hd;
             let group = N_HEAD / kvh;
             let rot = hd; // full rope over head_dim
-            let freqs = if is_swa(il) { None } else { Some(&self.rope_freqs[..hd / 2]) };
+            let freqs = if is_swa(il) {
+                None
+            } else {
+                Some(&self.rope_freqs[..hd / 2])
+            };
 
             // attn norm
             for i in 0..nt {
-                rms_norm_f32(&x[i * N_EMBD..(i + 1) * N_EMBD], &l.attn_norm, EPS, &mut normed[i * N_EMBD..(i + 1) * N_EMBD]).unwrap();
+                rms_norm_f32(
+                    &x[i * N_EMBD..(i + 1) * N_EMBD],
+                    &l.attn_norm,
+                    EPS,
+                    &mut normed[i * N_EMBD..(i + 1) * N_EMBD],
+                )
+                .unwrap();
             }
             // Q/K(/V) projections (batched)
             let mut q = vec![0.0_f32; nt * qdim];
@@ -498,7 +587,13 @@ impl DiffusionGemma {
             let mut attn_out = vec![0.0_f32; nt * N_EMBD];
             for i in 0..nt {
                 let r = i * N_EMBD..(i + 1) * N_EMBD;
-                rms_norm_f32(&attn_proj[r.clone()], &l.post_attention_norm, EPS, &mut attn_out[r.clone()]).unwrap();
+                rms_norm_f32(
+                    &attn_proj[r.clone()],
+                    &l.post_attention_norm,
+                    EPS,
+                    &mut attn_out[r.clone()],
+                )
+                .unwrap();
                 for t in 0..N_EMBD {
                     attn_out[i * N_EMBD + t] += x[i * N_EMBD + t];
                 }
@@ -527,7 +622,13 @@ impl DiffusionGemma {
         // final norm
         let mut outv = vec![0.0_f32; nt * N_EMBD];
         for i in 0..nt {
-            rms_norm_f32(&x[i * N_EMBD..(i + 1) * N_EMBD], &self.output_norm, EPS, &mut outv[i * N_EMBD..(i + 1) * N_EMBD]).unwrap();
+            rms_norm_f32(
+                &x[i * N_EMBD..(i + 1) * N_EMBD],
+                &self.output_norm,
+                EPS,
+                &mut outv[i * N_EMBD..(i + 1) * N_EMBD],
+            )
+            .unwrap();
         }
         outv
     }
@@ -535,7 +636,13 @@ impl DiffusionGemma {
     fn dense_ffn(&self, l: &Layer, src: &[f32], out: &mut [f32], nt: usize) {
         let mut nrm = vec![0.0_f32; nt * N_EMBD];
         for i in 0..nt {
-            rms_norm_f32(&src[i * N_EMBD..(i + 1) * N_EMBD], &l.ffn_norm, EPS, &mut nrm[i * N_EMBD..(i + 1) * N_EMBD]).unwrap();
+            rms_norm_f32(
+                &src[i * N_EMBD..(i + 1) * N_EMBD],
+                &l.ffn_norm,
+                EPS,
+                &mut nrm[i * N_EMBD..(i + 1) * N_EMBD],
+            )
+            .unwrap();
         }
         let mut gate = vec![0.0_f32; nt * DENSE_FF];
         let mut up = vec![0.0_f32; nt * DENSE_FF];
@@ -546,7 +653,13 @@ impl DiffusionGemma {
         self.gemm_qw(&l.ffn_down, N_EMBD, DENSE_FF, &gate, &mut down, nt);
         // post_ffw_norm_1
         for i in 0..nt {
-            rms_norm_f32(&down[i * N_EMBD..(i + 1) * N_EMBD], &l.post_ffw_norm_1, EPS, &mut out[i * N_EMBD..(i + 1) * N_EMBD]).unwrap();
+            rms_norm_f32(
+                &down[i * N_EMBD..(i + 1) * N_EMBD],
+                &l.post_ffw_norm_1,
+                EPS,
+                &mut out[i * N_EMBD..(i + 1) * N_EMBD],
+            )
+            .unwrap();
         }
     }
 
@@ -584,13 +697,22 @@ impl DiffusionGemma {
                 let e = idx[s];
                 sel_flat[i * N_USED + s] = e;
                 wts[i * N_USED + s] = (probs[e] / wsum) * l.ffn_down_exps_s[e];
-                ein_rep[(i * N_USED + s) * N_EMBD..(i * N_USED + s + 1) * N_EMBD].copy_from_slice(&ein);
+                ein_rep[(i * N_USED + s) * N_EMBD..(i * N_USED + s + 1) * N_EMBD]
+                    .copy_from_slice(&ein);
             }
         }
 
         // ONE batched gate_up over all slots -> [ns, gu_rows]; swiglu -> h [ns, EXPERT_FF].
         let mut gu = vec![0.0_f32; ns * gu_rows];
-        self.experts_ew(&l.ffn_gate_up_exps, &sel_flat, gu_rows, N_EMBD, &ein_rep, N_EMBD, &mut gu);
+        self.experts_ew(
+            &l.ffn_gate_up_exps,
+            &sel_flat,
+            gu_rows,
+            N_EMBD,
+            &ein_rep,
+            N_EMBD,
+            &mut gu,
+        );
         let mut h = vec![0.0_f32; ns * EXPERT_FF];
         h.par_chunks_mut(EXPERT_FF).enumerate().for_each(|(s, hs)| {
             let base = s * gu_rows;
@@ -601,7 +723,15 @@ impl DiffusionGemma {
 
         // ONE batched down over all slots -> [ns, N_EMBD].
         let mut dn = vec![0.0_f32; ns * N_EMBD];
-        self.experts_ew(&l.ffn_down_exps, &sel_flat, N_EMBD, EXPERT_FF, &h, EXPERT_FF, &mut dn);
+        self.experts_ew(
+            &l.ffn_down_exps,
+            &sel_flat,
+            N_EMBD,
+            EXPERT_FF,
+            &h,
+            EXPERT_FF,
+            &mut dn,
+        );
 
         // Per-token combine: weighted expert sum, then post_ffw_norm_2.
         out.par_chunks_mut(N_EMBD).enumerate().for_each(|(i, or)| {
@@ -660,7 +790,9 @@ impl DiffusionGemma {
         }
 
         // canvas init: random tokens
-        let mut canvas: Vec<u32> = (0..CANVAS).map(|_| (rng.next() % N_VOCAB as u64) as u32).collect();
+        let mut canvas: Vec<u32> = (0..CANVAS)
+            .map(|_| (rng.next() % N_VOCAB as u64) as u32)
+            .collect();
         let mut argmax_canvas = vec![u32::MAX; CANVAS];
         let mut prev_argmax = vec![u32::MAX; CANVAS];
         // self-cond top-k (id,prob) per canvas position; empty (prob 0) on step 1
@@ -725,7 +857,14 @@ impl DiffusionGemma {
             // matmul), then a nest-free parallel sample over the canvas.
             let canvas_hidden = &outv[prefix * N_EMBD..(prefix + CANVAS) * N_EMBD];
             let mut all_logits = vec![0.0_f32; CANVAS * N_VOCAB];
-            self.gemm_qw(&self.token_embd, N_VOCAB, N_EMBD, canvas_hidden, &mut all_logits, CANVAS);
+            self.gemm_qw(
+                &self.token_embd,
+                N_VOCAB,
+                N_EMBD,
+                canvas_hidden,
+                &mut all_logits,
+                CANVAS,
+            );
             all_logits.par_chunks_mut(N_VOCAB).for_each(|lg| {
                 for v in lg.iter_mut() {
                     *v = SOFTCAP * (*v / SOFTCAP).tanh();
@@ -751,7 +890,9 @@ impl DiffusionGemma {
                         sum += p;
                     }
                     let mut ent = 0.0f32;
-                    let r = det_unif(seed ^ (step as u64).wrapping_mul(0x9E3779B97F4A7C15) ^ (c as u64)) * sum;
+                    let r = det_unif(
+                        seed ^ (step as u64).wrapping_mul(0x9E3779B97F4A7C15) ^ (c as u64),
+                    ) * sum;
                     let mut cum = 0.0f32;
                     let mut tok = amax as u32;
                     let mut picked = false;
@@ -767,8 +908,13 @@ impl DiffusionGemma {
                         }
                     }
                     let mut order: Vec<usize> = (0..N_VOCAB).collect();
-                    order.select_nth_unstable_by(SC_K, |&a, &b| logits[b].partial_cmp(&logits[a]).unwrap());
-                    let sc: Vec<(u32, f32)> = order[..SC_K].iter().map(|&id| (id as u32, logits[id] / sum)).collect();
+                    order.select_nth_unstable_by(SC_K, |&a, &b| {
+                        logits[b].partial_cmp(&logits[a]).unwrap()
+                    });
+                    let sc: Vec<(u32, f32)> = order[..SC_K]
+                        .iter()
+                        .map(|&id| (id as u32, logits[id] / sum))
+                        .collect();
                     (ent, tok, amax as u32, sc)
                 })
                 .collect();
@@ -809,7 +955,11 @@ impl DiffusionGemma {
             prev_argmax.copy_from_slice(&argmax_canvas);
             // renoise non-accepted
             for c in 0..CANVAS {
-                canvas[c] = if accept[c] { sampled[c] } else { (rng.next() % N_VOCAB as u64) as u32 };
+                canvas[c] = if accept[c] {
+                    sampled[c]
+                } else {
+                    (rng.next() % N_VOCAB as u64) as u32
+                };
             }
         }
 
@@ -845,7 +995,9 @@ fn det_unif(mut z: u64) -> f32 {
 struct Lcg(u64);
 impl Lcg {
     fn new(seed: u64) -> Self {
-        Lcg(seed.wrapping_mul(2862933555777941757).wrapping_add(3037000493))
+        Lcg(seed
+            .wrapping_mul(2862933555777941757)
+            .wrapping_add(3037000493))
     }
     fn next(&mut self) -> u64 {
         let mut x = self.0;

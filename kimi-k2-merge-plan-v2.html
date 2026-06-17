@@ -1,0 +1,650 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kimi-K2 Merge Plan v2 — oxidize / OXK</title>
+<style>
+  :root {
+    --bg:     #090c11;
+    --bg2:    #0d1018;
+    --card:   #121620;
+    --card2:  #161b24;
+    --ink:    #e8edf5;
+    --mut:    #7d8fa3;
+    --dim:    #4e5f72;
+    --acc:    #6b9fff;
+    --acc2:   #9b78f5;
+    --ok:     #34d68a;
+    --warn:   #f0a93a;
+    --bad:    #f56060;
+    --new:    #38c9d4;
+    --line:   #1e2636;
+    --line2:  #252f40;
+    --mono:   ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font: 14.5px/1.7 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Layout */
+  .wrap { max-width: 1020px; margin: 0 auto; padding: 0 24px 120px; }
+
+  /* Hero */
+  .hero {
+    padding: 60px 0 36px;
+    border-bottom: 1px solid var(--line2);
+    position: relative;
+    overflow: hidden;
+  }
+  .hero::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background:
+      radial-gradient(ellipse 800px 400px at 90% -10%, rgba(107,159,255,.09), transparent 60%),
+      radial-gradient(ellipse 600px 350px at -5% 20%, rgba(155,120,245,.07), transparent 55%);
+    pointer-events: none;
+  }
+  .badge {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-family: var(--mono); font-size: 11px; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--acc); background: rgba(107,159,255,.08);
+    border: 1px solid rgba(107,159,255,.2); padding: 4px 12px; border-radius: 999px;
+    margin-bottom: 20px;
+  }
+  .badge .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--acc); opacity: .8; }
+
+  h1 {
+    font-size: clamp(26px, 4.5vw, 40px);
+    font-weight: 760;
+    line-height: 1.08;
+    letter-spacing: -.025em;
+    margin-bottom: 14px;
+  }
+  h1 .grad {
+    background: linear-gradient(100deg, var(--acc) 0%, var(--acc2) 100%);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .lede { font-size: 15.5px; color: var(--mut); max-width: 68ch; line-height: 1.6; }
+
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 22px; }
+  .chip {
+    font-family: var(--mono); font-size: 11.5px;
+    background: var(--card); border: 1px solid var(--line2);
+    border-radius: 7px; padding: 5px 10px; color: var(--ink);
+  }
+  .chip b { color: var(--acc); }
+
+  /* Version notice */
+  .v2-notice {
+    margin-top: 28px;
+    background: rgba(56,201,212,.07);
+    border: 1px solid rgba(56,201,212,.18);
+    border-radius: 10px;
+    padding: 11px 16px;
+    font-size: 13px;
+    color: var(--new);
+    display: flex; align-items: flex-start; gap: 10px;
+  }
+  .v2-notice .label { font-family: var(--mono); font-weight: 700; font-size: 10px;
+    letter-spacing: .08em; text-transform: uppercase; flex-shrink: 0; padding-top: 2px; }
+
+  /* Sections */
+  section { margin-top: 52px; }
+  .sec-head { display: flex; align-items: center; gap: 14px; margin-bottom: 20px; }
+  .sec-num {
+    font-family: var(--mono); font-size: 11px; color: var(--dim);
+    letter-spacing: .06em; flex-shrink: 0;
+  }
+  h2 { font-size: 19px; font-weight: 680; letter-spacing: -.01em; }
+
+  /* Cards */
+  .card {
+    background: linear-gradient(160deg, var(--card), var(--bg2));
+    border: 1px solid var(--line);
+    border-radius: 13px;
+    padding: 18px 20px;
+    margin: 12px 0;
+  }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 640px) { .grid2 { grid-template-columns: 1fr; } }
+
+  h3 {
+    font-size: 14px; font-weight: 650; color: var(--ink);
+    margin-bottom: 10px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  }
+
+  /* Tables */
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 9px 11px; border-bottom: 1px solid var(--line); font-size: 13.5px; vertical-align: top; }
+  thead th { color: var(--dim); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .07em; }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr:hover { background: rgba(107,159,255,.03); }
+  td.mono { font-family: var(--mono); color: var(--acc); white-space: nowrap; font-size: 13px; }
+  td.mut { color: var(--mut); }
+
+  /* Pills */
+  .pill {
+    display: inline-block; font-family: var(--mono); font-size: 10px; font-weight: 700;
+    letter-spacing: .07em; text-transform: uppercase; padding: 2px 8px;
+    border-radius: 999px; vertical-align: middle; flex-shrink: 0;
+  }
+  .p-ok   { background: rgba(52,214,138,.12); color: var(--ok);  border: 1px solid rgba(52,214,138,.22); }
+  .p-warn { background: rgba(240,169,58,.12);  color: var(--warn); border: 1px solid rgba(240,169,58,.22); }
+  .p-bad  { background: rgba(245,96,96,.12);   color: var(--bad);  border: 1px solid rgba(245,96,96,.22); }
+  .p-acc  { background: rgba(107,159,255,.12); color: var(--acc);  border: 1px solid rgba(107,159,255,.22); }
+  .p-new  { background: rgba(56,201,212,.12);  color: var(--new);  border: 1px solid rgba(56,201,212,.22); }
+
+  /* Callouts */
+  .callout {
+    border-radius: 12px; padding: 14px 16px 14px 20px;
+    margin: 12px 0; border: 1px solid var(--line);
+    background: var(--card); position: relative; overflow: hidden;
+  }
+  .callout::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; border-radius: 3px 0 0 3px; }
+  .callout.bad::before  { background: var(--bad); }
+  .callout.warn::before { background: var(--warn); }
+  .callout.ok::before   { background: var(--ok); }
+  .callout.new::before  { background: var(--new); }
+  .callout p { margin-top: 6px; color: var(--mut); font-size: 13.5px; line-height: 1.6; }
+  .callout ul { margin-top: 6px; padding-left: 18px; color: var(--mut); font-size: 13.5px; }
+  .callout li { margin: 4px 0; }
+
+  /* Code */
+  code {
+    font-family: var(--mono); font-size: 12px;
+    background: rgba(0,0,0,.35); padding: 1px 6px;
+    border-radius: 4px; color: #9ec8ff; border: 1px solid var(--line);
+  }
+  pre {
+    background: #060911; border: 1px solid var(--line2);
+    border-radius: 10px; padding: 14px 16px; overflow-x: auto;
+    margin: 10px 0;
+  }
+  pre code {
+    background: none; border: none; padding: 0;
+    color: #c8d8f0; font-size: 12px; line-height: 1.75;
+  }
+  .cm { color: #475e78; } .kw { color: #6b9fff; } .st { color: #6fd4a0; } .num { color: #e0a05a; }
+
+  /* Timeline */
+  .tl { margin-top: 8px; }
+  .step { display: grid; grid-template-columns: 44px 1fr; gap: 0 16px; margin-bottom: 16px; position: relative; }
+  .step::after {
+    content: ""; position: absolute;
+    left: 21px; top: 44px; bottom: -16px; width: 2px;
+    background: linear-gradient(to bottom, var(--line2), transparent);
+  }
+  .step:last-child::after { display: none; }
+  .dot {
+    width: 44px; height: 44px; border-radius: 11px; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 800; font-size: 15px; letter-spacing: -.02em;
+    background: linear-gradient(145deg, var(--acc), var(--acc2));
+    color: #060b14;
+    box-shadow: 0 4px 16px rgba(107,159,255,.2);
+    position: relative; z-index: 1;
+  }
+  .dot.eval {
+    background: linear-gradient(145deg, var(--ok), #1fa86a);
+    box-shadow: 0 4px 16px rgba(52,214,138,.2);
+  }
+  .dot.new-step {
+    background: linear-gradient(145deg, var(--new), #1898a5);
+    box-shadow: 0 4px 16px rgba(56,201,212,.2);
+  }
+  .body {
+    background: linear-gradient(160deg, var(--card), var(--bg2));
+    border: 1px solid var(--line); border-radius: 12px;
+    padding: 14px 17px; min-width: 0;
+  }
+  .body ul { padding-left: 18px; margin: 8px 0; }
+  .body li { margin: 4px 0; color: var(--mut); font-size: 13.5px; }
+  .body p { color: var(--mut); font-size: 13.5px; margin-top: 8px; line-height: 1.6; }
+  .body ol { padding-left: 18px; }
+  .body ol li { margin: 5px 0; color: var(--mut); font-size: 13.5px; }
+
+  /* Capacity bar viz */
+  .disk-stages { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
+  .disk-row { display: grid; grid-template-columns: 180px 1fr 72px; gap: 10px; align-items: center; font-size: 13px; }
+  @media (max-width: 560px) { .disk-row { grid-template-columns: 1fr; } }
+  .disk-label { color: var(--mut); }
+  .bar-track { background: var(--line); border-radius: 4px; height: 8px; overflow: hidden; }
+  .bar-fill { height: 100%; border-radius: 4px; }
+  .disk-val { font-family: var(--mono); color: var(--acc); text-align: right; font-size: 12px; }
+
+  /* Misc */
+  ul { padding-left: 20px; } li { margin: 4px 0; }
+  a { color: var(--acc); text-decoration: none; } a:hover { text-decoration: underline; }
+  .mut { color: var(--mut); }
+  .foot { margin-top: 52px; padding-top: 20px; border-top: 1px solid var(--line); color: var(--dim); font-size: 13px; }
+  .divider { border: none; border-top: 1px solid var(--line); margin: 10px 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<!-- HERO -->
+<header class="hero">
+  <div class="badge"><span class="dot"></span>runbook · v2 · 2026-06-15</div>
+  <h1>Kimi-K2 <span class="grad">Merge → Prune → GGUF</span><br>on oxidize / OXK</h1>
+  <p class="lede">SLERP weight-merge of <code>Kimi-K2.6</code> + <code>Kimi-K2.7-Code</code>, deep-prune with snapprune,
+    GGUF via llama.cpp fallback, run on oxidize with DeepSeek-V3 MoE support added incrementally.
+    Eval gates between every major stage.</p>
+  <div class="chips">
+    <span class="chip">host <b>ai-2 · 192.168.1.152</b></span>
+    <span class="chip">disk <b>12 TB free</b></span>
+    <span class="chip">merge <b>SLERP</b></span>
+    <span class="chip">target <b>Q4_K_M GGUF + oxidize</b></span>
+    <span class="chip">date <b>2026-06-15</b></span>
+  </div>
+  <div class="v2-notice">
+    <span class="label">v2 changes</span>
+    <span>Corrected capacity math (K2.7-Code = 2.5 TB bf16, not 2.0 TB). Added perplexity eval gates after merge and after prune.
+      Added llama.cpp as primary GGUF conversion path to decouple from oxidize MoE work. Updated peak transient: <b>~7.5 TB</b> (down from 8–9 TB).</span>
+  </div>
+</header>
+
+<!-- 01 DECISIONS -->
+<section>
+  <div class="sec-head"><span class="sec-num">01</span><h2>Confirmed decisions</h2></div>
+  <div class="card" style="padding: 4px 8px">
+    <table>
+      <thead><tr><th>Question</th><th>Decision</th></tr></thead>
+      <tbody>
+        <tr><td>Merge type</td><td>SLERP — mergekit, no training. K2.7-Code as primary (coding bias).</td></tr>
+        <tr><td>GGUF conversion</td><td><b>llama.cpp</b> <code>convert_hf_to_gguf.py</code> — already has DeepSeek-V3 expert support. Decouples Stage 4 from oxidize MoE work.</td></tr>
+        <tr><td>Prune calibration corpus</td><td>Zapdev-labs/oxidize <b>+ mixed general/instruction data</b> — prevents expert dropout bias toward code-only tokens.</td></tr>
+        <tr><td>Eval gates</td><td>Perplexity on held-out set after merge and after prune. Regression check vs both source models.</td></tr>
+        <tr><td>oxidize DeepSeek-MoE</td><td>Build incrementally (Stage 6). Blocked only on GGUF inference, not conversion.</td></tr>
+        <tr><td>ai-2 RAM</td><td class="mono">TBD <span style="font-family:inherit;color:var(--mut)">— confirm before starting; sets streaming limits</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- 02 ARCHITECTURE -->
+<section>
+  <div class="sec-head"><span class="sec-num">02</span><h2>Architecture <span class="pill p-ok" style="margin-left:4px">merge-compatible</span></h2></div>
+  <div class="grid2">
+    <div class="card">
+      <h3>Kimi-K2.6 / K2.7-Code — identical arch</h3>
+      <table>
+        <tbody>
+          <tr><td>Family</td><td class="mono">DeepSeek-V3 MoE + MLA</td></tr>
+          <tr><td>Total params</td><td class="mono">~1T · 32B active</td></tr>
+          <tr><td>Experts</td><td class="mono">384 total · 8 active · 1 shared</td></tr>
+          <tr><td>Layers</td><td class="mono">61 (layer 0 dense, 1–60 MoE)</td></tr>
+          <tr><td>Attention hidden</td><td class="mono">7168</td></tr>
+          <tr><td>Expert hidden</td><td class="mono">2048</td></tr>
+          <tr><td>Heads / vocab</td><td class="mono">64 · 160K</td></tr>
+          <tr><td>Context</td><td class="mono">256K</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="card">
+      <h3>Key merge notes</h3>
+      <ul style="color:var(--mut);padding-left:18px;font-size:13.5px">
+        <li>Identical tensor names and shapes → SLERP blends cleanly.</li>
+        <li>K2.7-Code differs from K2.6 in training data only, not structure.</li>
+        <li><b>Shared expert</b> runs unconditionally on every token alongside top-8 routed. Must be a separate code path in oxidize gating — not a 9th routed index.</li>
+        <li>Layer 0 is dense (no MoE) — gating logic must skip it.</li>
+        <li>Verify both <code>config.json</code> agree on 384/8/1 before merge.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- 03 BLOCKERS -->
+<section>
+  <div class="sec-head"><span class="sec-num">03</span><h2>Blockers</h2></div>
+
+  <div class="callout bad">
+    <h3><span class="pill p-bad">blocker</span> oxidize runs DeepSeek as dense FFN</h3>
+    <p><code>uses_moe()</code> in <code>inference.rs:94</code> lists Mixtral, MiniMax, Lfm2Moe — not DeepSeek.
+      So all 384 experts are ignored and the forward pass is wrong for Kimi. Stage 6 fixes this.
+      <b>GGUF conversion now goes through llama.cpp so Stage 4 can proceed independently.</b></p>
+  </div>
+
+  <div class="callout warn">
+    <h3><span class="pill p-warn">access</span> snapprune interface unconfirmed</h3>
+    <p><code>github.com/Zapdev-labs/snapprune</code> is private. Stage 3 commands are written against a
+      generic structured/expert-prune interface. Make exact once you confirm access on ai-2 or paste the README.</p>
+  </div>
+
+  <div class="callout warn">
+    <h3><span class="pill p-warn">unknown</span> K2.6 exact bf16 size</h3>
+    <p>K2.7-Code is confirmed at 2.5 TB bf16. K2.6 should be ~2.4–2.5 TB (identical arch).
+      Run <code>du -sh /data/k2.6</code> after download to confirm before deleting sources.</p>
+  </div>
+
+  <div class="callout warn">
+    <h3><span class="pill p-warn">risk</span> expert pruning calibration bias</h3>
+    <p>Calibrating on code-only tokens will undercount experts used for reasoning, instruction-following,
+      and general language — those experts are more likely to be dropped. Mix in general + instruction data
+      alongside the oxidize corpus for the prune calibration run.</p>
+  </div>
+</section>
+
+<!-- 04 CAPACITY -->
+<section>
+  <div class="sec-head"><span class="sec-num">04</span><h2>Capacity math <span class="pill p-ok" style="margin-left:4px">fits 12 TB · peak ~7.5 TB</span></h2></div>
+  <div class="card">
+    <div class="disk-stages">
+      <div class="disk-row">
+        <span class="disk-label">After both downloads</span>
+        <div class="bar-track"><div class="bar-fill" style="width:42%;background:linear-gradient(90deg,var(--acc),var(--acc2))"></div></div>
+        <span class="disk-val">~5.0 TB</span>
+      </div>
+      <div class="disk-row">
+        <span class="disk-label">During merge <b style="color:var(--bad)">← peak</b></span>
+        <div class="bar-track"><div class="bar-fill" style="width:63%;background:linear-gradient(90deg,var(--bad),#c43030)"></div></div>
+        <span class="disk-val">~7.5 TB</span>
+      </div>
+      <div class="disk-row">
+        <span class="disk-label">Delete sources after merge</span>
+        <div class="bar-track"><div class="bar-fill" style="width:21%;background:var(--acc)"></div></div>
+        <span class="disk-val">~2.5 TB</span>
+      </div>
+      <div class="disk-row">
+        <span class="disk-label">During snapprune</span>
+        <div class="bar-track"><div class="bar-fill" style="width:33%;background:var(--warn)"></div></div>
+        <span class="disk-val">~3.5–4 TB</span>
+      </div>
+      <div class="disk-row">
+        <span class="disk-label">Delete merged after prune</span>
+        <div class="bar-track"><div class="bar-fill" style="width:12%;background:var(--ok)"></div></div>
+        <span class="disk-val">~1.2–1.5 TB</span>
+      </div>
+      <div class="disk-row">
+        <span class="disk-label">Q8_0 intermediate</span>
+        <div class="bar-track"><div class="bar-fill" style="width:17%;background:var(--acc2)"></div></div>
+        <span class="disk-val">~1.8–2 TB</span>
+      </div>
+      <div class="disk-row">
+        <span class="disk-label">Final Q4_K_M GGUF</span>
+        <div class="bar-track"><div class="bar-fill" style="width:5%;background:var(--ok)"></div></div>
+        <span class="disk-val">~0.5–0.6 TB</span>
+      </div>
+    </div>
+    <hr class="divider" style="margin-top:14px">
+    <p style="font-size:13px;color:var(--mut);margin-top:10px">
+      <b style="color:var(--ink)">Delete sequencing matters:</b> remove both source checkpoints right after merge completes to clear ~5 TB before snapprune starts.
+      Then delete the merged bf16 before creating Q8_0. Peak transient is the merge stage only.
+      RAM is the remaining unknown — mergekit and snapprune stream tensor-by-tensor so peak RAM is a few × largest shard, not whole-model.
+      Confirm <code>free -h</code> on ai-2 to set <code>--lazy-unpickle</code> / shard-size limits.
+    </p>
+  </div>
+</section>
+
+<!-- 05 PIPELINE -->
+<section>
+  <div class="sec-head"><span class="sec-num">05</span><h2>Pipeline</h2></div>
+  <div class="tl">
+
+    <!-- Step 0 -->
+    <div class="step">
+      <div class="dot">0</div>
+      <div class="body">
+        <h3>Prep ai-2</h3>
+        <ul>
+          <li>Confirm RAM, 12 TB free, Python 3.11+, torch, cargo.</li>
+          <li>Install mergekit, huggingface_hub, safetensors, snapprune; clone llama.cpp; build oxidize + OXK.</li>
+        </ul>
+<pre><code><span class="cm"># On ai-2</span>
+python -m pip install -U <span class="st">"mergekit[lazy]"</span> huggingface_hub safetensors
+hf auth login                      <span class="cm"># Moonshot models may be gated</span>
+df -h /data && free -h             <span class="cm"># capture disk + RAM before starting</span>
+
+git clone https://github.com/Zapdev-labs/snapprune && pip install -e snapprune
+git clone https://github.com/ggml-org/llama.cpp && cd llama.cpp
+cmake -B build -DGGML_NATIVE=ON && cmake --build build --config Release -j$(nproc)
+cd ..
+
+<span class="cm"># Build oxidize + OXK</span>
+git clone https://github.com/Zapdev-labs/oxidize && cd oxidize
+cargo build --release -p oxidize-core -p oxidize-quantize
+</code></pre>
+      </div>
+    </div>
+
+    <!-- Step 1 -->
+    <div class="step">
+      <div class="dot">1</div>
+      <div class="body">
+        <h3>Download checkpoints + verify arch</h3>
+<pre><code>hf download moonshotai/Kimi-K2.7-Code --local-dir /data/k2.7-code
+hf download moonshotai/Kimi-K2.6      --local-dir /data/k2.6
+
+<span class="cm"># Verify arch parity</span>
+python3 - &lt;&lt;'EOF'
+import json, sys
+a = json.load(open("/data/k2.7-code/config.json"))
+b = json.load(open("/data/k2.6/config.json"))
+keys = ["num_hidden_layers","num_experts","num_experts_per_tok","n_shared_experts","hidden_size"]
+for k in keys:
+    match = "✓" if a.get(k) == b.get(k) else "✗ MISMATCH"
+    print(f"{match}  {k}: {a.get(k)} vs {b.get(k)}")
+EOF
+
+du -sh /data/k2.6 /data/k2.7-code   <span class="cm"># record actual sizes</span></code></pre>
+        <p>K2.7-Code confirmed 2.5 TB bf16. K2.6 expected ~2.4–2.5 TB. Record actual before proceeding.</p>
+      </div>
+    </div>
+
+    <!-- Step 2 -->
+    <div class="step">
+      <div class="dot">2</div>
+      <div class="body">
+        <h3>SLERP weight merge <span class="pill p-acc">streaming · K2.7-Code primary</span></h3>
+        <p>K2.7-Code is base model for coding bias. MLA layers weighted 0.3 toward code model, expert MLP layers blended evenly at 0.5.</p>
+<pre><code><span class="cm"># merge-config.yaml</span>
+<span class="kw">slices</span>:
+  - sources:
+      - { model: /data/k2.7-code, layer_range: [0, 61] }
+      - { model: /data/k2.6,      layer_range: [0, 61] }
+<span class="kw">merge_method</span>: slerp
+<span class="kw">base_model</span>: /data/k2.7-code
+<span class="kw">parameters</span>:
+  t:
+    - { filter: self_attn, value: <span class="num">0.3</span> }   <span class="cm"># MLA — favor code model</span>
+    - { filter: mlp,       value: <span class="num">0.5</span> }   <span class="cm"># experts — even blend</span>
+    - { value: <span class="num">0.4</span> }                       <span class="cm"># everything else</span>
+<span class="kw">dtype</span>: bfloat16</code></pre>
+<pre><code>mergekit-yaml merge-config.yaml /data/k2-merged \
+  --lazy-unpickle --allow-crimes \
+  --out-shard-size 5B --low-cpu-memory</code></pre>
+        <p><code>--allow-crimes</code> disables arch compatibility checks — safe here because both models are verified identical arch (Step 1). After merge completes and output is confirmed present: <b>delete both sources</b> to reclaim ~5 TB.</p>
+<pre><code><span class="cm"># Only after merge is confirmed complete</span>
+rm -rf /data/k2.6 /data/k2.7-code
+df -h /data</code></pre>
+      </div>
+    </div>
+
+    <!-- Eval gate A -->
+    <div class="step">
+      <div class="dot eval">✓</div>
+      <div class="body" style="border-color:rgba(52,214,138,.2)">
+        <h3><span class="pill p-ok">eval gate A</span> Perplexity check — post-merge</h3>
+        <p>Before pruning, verify the merge didn't degrade either model's capability. Establish baseline perplexity on a fixed held-out set (~500 samples, mix of code + general).</p>
+<pre><code><span class="cm"># Using llama.cpp perplexity tool on the merged safetensors-converted GGUF</span>
+<span class="cm"># Or use a quick HF eval if you have a GPU available</span>
+python3 -m lm_eval \
+  --model hf --model_args pretrained=/data/k2-merged \
+  --tasks wikitext,humaneval \
+  --output_path /data/eval-post-merge.json</code></pre>
+        <p><b>Gate:</b> perplexity should be at or between the two source models. If it's worse than both, the merge t-values need tuning before pruning compounds the damage.</p>
+      </div>
+    </div>
+
+    <!-- Step 3 -->
+    <div class="step">
+      <div class="dot">3</div>
+      <div class="body">
+        <h3>Deep-prune with snapprune <span class="pill p-warn">CLI TBC — confirm README on ai-2</span></h3>
+        <p>Two prune axes. Run routing stats first before committing to a target expert count.</p>
+        <ul>
+          <li><b>Expert pruning</b> — drop low-utilization experts based on routing frequency. Biggest size win. Start conservative: 384 → 256 first pass.</li>
+          <li><b>Structured prune</b> — width/depth trim guided by activation importance. Secondary pass.</li>
+        </ul>
+        <p><b>Calibration corpus:</b> mix oxidize code corpus with a general instruction set (e.g. OpenHermes or similar) to avoid dropping experts that handle non-code tokens.</p>
+<pre><code><span class="cm"># Step 3a: collect routing stats first</span>
+snapprune stats \
+  --model /data/k2-merged \
+  --calib calib-corpus-mixed \
+  --out /data/routing-stats.json
+
+<span class="cm"># Inspect tail — see where utilization drops off</span>
+python3 -c "
+import json; s = json.load(open('/data/routing-stats.json'))
+utils = sorted(s['expert_utilization'].values())
+print(f'p50: {utils[len(utils)//2]:.4f}')
+print(f'p10: {utils[len(utils)//10]:.4f}')
+print(f'dead (&lt;0.001): {sum(1 for u in utils if u &lt; 0.001)}')
+"
+
+<span class="cm"># Step 3b: prune based on actual stats</span>
+snapprune deep \
+  --model /data/k2-merged \
+  --calib calib-corpus-mixed \
+  --expert-keep 256 --sparsity 0.3 \
+  --out /data/k2-merged-pruned</code></pre>
+      </div>
+    </div>
+
+    <!-- Eval gate B -->
+    <div class="step">
+      <div class="dot eval">✓</div>
+      <div class="body" style="border-color:rgba(52,214,138,.2)">
+        <h3><span class="pill p-ok">eval gate B</span> Perplexity check — post-prune</h3>
+        <p>Compare against eval gate A numbers. Accept the pruned model only if perplexity delta is within tolerance.</p>
+<pre><code>python3 -m lm_eval \
+  --model hf --model_args pretrained=/data/k2-merged-pruned \
+  --tasks wikitext,humaneval \
+  --output_path /data/eval-post-prune.json
+
+<span class="cm"># Quick diff</span>
+python3 -c "
+import json
+a = json.load(open('/data/eval-post-merge.json'))
+b = json.load(open('/data/eval-post-prune.json'))
+for k in a.get('results', {}):
+    print(k, a['results'][k], '->', b['results'][k])
+"</code></pre>
+        <p><b>Gate:</b> if perplexity rises &gt;5% relative vs post-merge, consider a less aggressive expert-keep target before proceeding. Delete merged bf16 only after passing this gate.</p>
+<pre><code><span class="cm"># After passing eval gate B</span>
+rm -rf /data/k2-merged
+df -h /data</code></pre>
+      </div>
+    </div>
+
+    <!-- Step 4 -->
+    <div class="step">
+      <div class="dot new-step">4</div>
+      <div class="body" style="border-color:rgba(56,201,212,.18)">
+        <h3>Convert to GGUF via llama.cpp <span class="pill p-new">new path · decoupled from oxidize</span></h3>
+        <p>llama.cpp already handles DeepSeek-V3 expert tensor layout. This means Stage 4 is independent of the oxidize MoE work in Stage 6 — you can have a working GGUF to test against while Stage 6 is in progress.</p>
+<pre><code><span class="cm"># Convert pruned safetensors → GGUF (bf16 first)</span>
+python3 llama.cpp/convert_hf_to_gguf.py \
+  /data/k2-merged-pruned \
+  --outfile /data/k2-merged-pruned-bf16.gguf \
+  --outtype bf16
+
+<span class="cm"># Quantize to Q8_0 then Q4_K_M</span>
+./llama.cpp/build/bin/llama-quantize \
+  /data/k2-merged-pruned-bf16.gguf \
+  /data/k2-merged-Q8_0.gguf Q8_0
+
+./llama.cpp/build/bin/llama-quantize \
+  /data/k2-merged-Q8_0.gguf \
+  /data/k2-merged-Q4_K_M.gguf Q4_K_M
+
+<span class="cm"># Smoke test with llama.cpp before moving to oxidize</span>
+./llama.cpp/build/bin/llama-cli \
+  -m /data/k2-merged-Q4_K_M.gguf \
+  -p "write quicksort in rust" -n 200</code></pre>
+        <p>Delete bf16 GGUF and Q8_0 after Q4_K_M is confirmed good to reclaim ~1.5–2 TB.</p>
+      </div>
+    </div>
+
+    <!-- Step 5 -->
+    <div class="step">
+      <div class="dot">5</div>
+      <div class="body">
+        <h3>Add DeepSeek-V3 MoE to oxidize <span class="pill p-bad">core eng work</span></h3>
+        <p class="mut">Incremental, test-driven. Reuse existing MoE machinery + OXK expert-GEMV kernels
+          (<code>gemv_quantized_experts_f32</code>, <code>gemv_quantized_experts_gate_up_f32</code> already imported in <code>inference.rs</code>).</p>
+        <ol>
+          <li>Add <code>DeepSeek</code> to <code>uses_moe()</code> at <code>inference.rs:94</code>.</li>
+          <li>Parse DeepSeek-V3 MoE metadata from GGUF: <code>expert_count=384</code> (or post-prune count), <code>expert_used_count=8</code>, <code>n_shared_experts=1</code>, <code>n_dense_layers=1</code>.</li>
+          <li>Implement top-8-of-N gating. <b>Shared expert is a separate unconditional path</b> — add its output after the 8 routed experts, not as a 9th routed index.</li>
+          <li>Keep MLA intact. MoE FFN only on layers ≥ 1 (layer 0 is dense, no gating).</li>
+          <li>Unit-test gating on a tiny synthetic GGUF with known routing. Forward-parity vs llama.cpp on the same prompt before moving to full inference.</li>
+        </ol>
+<pre><code><span class="cm">// inference.rs — uses_moe() patch sketch</span>
+<span class="kw">fn</span> uses_moe(arch: &Architecture) -> <span class="kw">bool</span> {
+    matches!(arch,
+        Architecture::Mixtral
+      | Architecture::MiniMax
+      | Architecture::Lfm2Moe
+      | Architecture::DeepSeek   <span class="cm">// ← add this</span>
+    )
+}</code></pre>
+      </div>
+    </div>
+
+    <!-- Step 6 -->
+    <div class="step">
+      <div class="dot">6</div>
+      <div class="body">
+        <h3>Run on oxidize, benchmark, optimize (OXK)</h3>
+<pre><code>oxrun /data/k2-merged-Q4_K_M.gguf --prompt <span class="st">"write quicksort in rust"</span>
+
+<span class="cm"># NUMA single-socket pin — prior ai-2 finding: ~+32%</span>
+numactl --cpunodebind=0 --membind=0 \
+  oxrun /data/k2-merged-Q4_K_M.gguf --bench</code></pre>
+        <p>Speed levers, by expected payoff on this CPU box:</p>
+        <ul>
+          <li>Confirm OXK fused expert-GEMV kernels engage — not scalar fallback. Check logs for kernel dispatch.</li>
+          <li>NUMA single-socket + core-first pinning (+32% prior finding).</li>
+          <li>Expert prune level from Stage 3 is the biggest decode lever — fewer active-param GEMVs per token.</li>
+          <li>Quant comparison: Q4_K_M vs Q5_0 vs IQ4_XS — tok/s vs quality tradeoff.</li>
+          <li>Verify MLA KV cache + flash-attention decode path is active.</li>
+          <li>Cross-check tok/s vs llama.cpp on same GGUF to isolate oxidize-specific gains or regressions.</li>
+        </ul>
+        <p class="mut" style="margin-top:10px">Deliverable: merged+pruned GGUF on oxidize with recorded tok/s benchmark, packaged like the MiniMax-M2.75-460B-GGUF release.</p>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<!-- 06 OPEN ITEMS -->
+<section>
+  <div class="sec-head"><span class="sec-num">06</span><h2>Open items — need your input</h2></div>
+  <div class="callout ok">
+    <ul>
+      <li><b>ai-2 RAM</b> — sets mergekit / snapprune streaming limits (<code>free -h</code>).</li>
+      <li><b>snapprune README / access</b> — to finalize Stage 3 exact flags and calibration format.</li>
+      <li><b>Prune aggression</b> — 384 → 256 conservative first pass, or go straight to 128? Run routing stats (Step 3a) to decide based on actual utilization tail.</li>
+      <li><b>Mixed calibration corpus</b> — which general/instruction dataset to mix with oxidize corpus for prune calibration? Suggests OpenHermes, SlimOrca, or similar.</li>
+      <li><b>Coding bias tuning</b> — current t=0.3 for MLA (K2.7-Code favored), t=0.5 for experts (even blend). Adjust if you want stronger coding skew.</li>
+      <li><b>Final quant targets</b> — Q4_K_M as primary. Want a Q5_K_M or Q8_0 master artifact kept alongside?</li>
+      <li><b>K2.6 actual bf16 size</b> — run <code>du -sh /data/k2.6</code> after download; update capacity math.</li>
+    </ul>
+  </div>
+</section>
+
+<p class="foot">v2 · 2026-06-15 · Updated capacity math, eval gates, llama.cpp GGUF path, shared-expert arch note, calibration corpus guidance.</p>
+
+</div>
+</body>
+</html>

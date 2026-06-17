@@ -9,6 +9,7 @@ pub enum ModelArchitecture {
     Llama,
     Mistral,
     Qwen,
+    DeepSeek,
     Gemma,
     Phi,
     Unknown(String),
@@ -32,6 +33,8 @@ pub fn detect_architecture(metadata: &BTreeMap<String, String>) -> ModelArchitec
         Some("mistral") => ModelArchitecture::Mistral,
         Some("qwen") | Some("qwen2") | Some("qwen2moe") | Some("qwen3") | Some("qwen35")
         | Some("qwen35moe") => ModelArchitecture::Qwen,
+        Some("deepseek") | Some("deepseek2") | Some("deepseek_v2") | Some("deepseek_v3")
+        | Some("deepseek_moe") => ModelArchitecture::DeepSeek,
         Some("gemma") => ModelArchitecture::Gemma,
         Some("phi") => ModelArchitecture::Phi,
         Some(other) => ModelArchitecture::Unknown(other.to_string()),
@@ -72,21 +75,22 @@ pub fn map_qwen_mtp_tensor_name(name: &str) -> Option<String> {
 fn map_qwen_mtp_inner(rest: &str, layer: usize) -> Option<String> {
     // Fusion head tensors live directly under `mtp.*`.
     if let Some((head_name, suffix)) = rest.rsplit_once('.')
-        && (suffix == "weight" || suffix == "bias") {
-            let mapped_head = match head_name {
-                "fc" => "nextn.eh_proj",
-                "pre_fc_norm_embedding" => "nextn.enorm",
-                "pre_fc_norm_hidden" => "nextn.hnorm",
-                "norm" => "nextn.shared_head_norm",
-                "embed_tokens" => "nextn.embed_tokens",
-                "lm_head" => "nextn.shared_head_head",
-                _ => "",
-            };
-            if !mapped_head.is_empty() {
-                let mapped_suffix = if suffix == "bias" { ".bias" } else { ".weight" };
-                return Some(format!("blk.{layer}.{mapped_head}{mapped_suffix}"));
-            }
+        && (suffix == "weight" || suffix == "bias")
+    {
+        let mapped_head = match head_name {
+            "fc" => "nextn.eh_proj",
+            "pre_fc_norm_embedding" => "nextn.enorm",
+            "pre_fc_norm_hidden" => "nextn.hnorm",
+            "norm" => "nextn.shared_head_norm",
+            "embed_tokens" => "nextn.embed_tokens",
+            "lm_head" => "nextn.shared_head_head",
+            _ => "",
+        };
+        if !mapped_head.is_empty() {
+            let mapped_suffix = if suffix == "bias" { ".bias" } else { ".weight" };
+            return Some(format!("blk.{layer}.{mapped_head}{mapped_suffix}"));
         }
+    }
 
     // Nested MTP transformer block: `mtp.layers.{N}.(...)` -> `blk.{layer+N}.(...)`.
     let rest = rest.strip_prefix("layers.")?;
@@ -213,15 +217,16 @@ pub fn map_hf_tensor_name(name: &str) -> String {
             }
 
             if let Some(rest) = suffix.strip_prefix("mlp.experts.")
-                && let Some((expert, expert_weight)) = rest.split_once('.') {
-                    let mapped_expert_weight = match expert_weight {
-                        "gate_proj.weight" => "ffn_gate",
-                        "up_proj.weight" => "ffn_up",
-                        "down_proj.weight" => "ffn_down",
-                        _ => return name.to_owned(),
-                    };
-                    return format!("blk.{layer}.{mapped_expert_weight}.{expert}.weight");
-                }
+                && let Some((expert, expert_weight)) = rest.split_once('.')
+            {
+                let mapped_expert_weight = match expert_weight {
+                    "gate_proj.weight" => "ffn_gate",
+                    "up_proj.weight" => "ffn_up",
+                    "down_proj.weight" => "ffn_down",
+                    _ => return name.to_owned(),
+                };
+                return format!("blk.{layer}.{mapped_expert_weight}.{expert}.weight");
+            }
 
             let mapped_suffix = match suffix {
                 "input_layernorm.weight" => "attn_norm.weight",
@@ -263,7 +268,6 @@ pub fn map_hf_tensor_name(name: &str) -> String {
         }
     }
 }
-
 
 /// Split Qwen3.5-MoE fused `gate_up_proj` [E, 2*I, H] into separate gate/up expert tensors.
 pub fn split_fused_gate_up_proj(
@@ -376,10 +380,11 @@ pub fn preprocess_hf_tensors_for_gguf(
         }
         if name.ends_with(".linear_attn.conv1d.weight")
             && let Some(layer) = extract_layer_index(&name)
-                && let Some(flat) = flatten_linear_attn_conv1d(layer, dtype, &shape, &raw) {
-                    out.push(flat);
-                    continue;
-                }
+            && let Some(flat) = flatten_linear_attn_conv1d(layer, dtype, &shape, &raw)
+        {
+            out.push(flat);
+            continue;
+        }
         out.push((name, dtype, shape, raw));
     }
     Ok(out)
@@ -463,6 +468,16 @@ mod tests {
 
         metadata.insert("model_type".into(), "qwen2moe".into());
         assert_eq!(detect_architecture(&metadata), ModelArchitecture::Qwen);
+    }
+
+    #[test]
+    fn conversion_detects_deepseek_metadata_variants() {
+        let mut metadata = BTreeMap::new();
+        metadata.insert("model_type".into(), "deepseek_v3".into());
+        assert_eq!(detect_architecture(&metadata), ModelArchitecture::DeepSeek);
+
+        metadata.insert("model_type".into(), "deepseek2".into());
+        assert_eq!(detect_architecture(&metadata), ModelArchitecture::DeepSeek);
     }
 
     #[test]

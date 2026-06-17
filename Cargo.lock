@@ -3025,6 +3025,7 @@ dependencies = [
  "anyhow",
  "clap",
  "oxidize-core",
+ "oxidize-prune",
 ]
 
 [[package]]
@@ -3087,6 +3088,15 @@ name = "oxidize-kernels"
 version = "0.1.0"
 
 [[package]]
+name = "oxidize-prune"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "oxidize-core",
+]
+
+[[package]]
 name = "oxidize-py"
 version = "0.1.0"
 dependencies = [
@@ -3101,6 +3111,7 @@ dependencies = [
  "anyhow",
  "clap",
  "oxidize-core",
+ "rayon",
 ]
 
 [[package]]

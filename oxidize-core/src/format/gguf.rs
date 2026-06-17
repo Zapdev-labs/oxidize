@@ -585,6 +585,7 @@ fn detect_architecture_from_metadata_keys(
         };
         let architecture = match namespace {
             "llama" | "mistral" | "mixtral" | "qwen" | "qwen2" | "qwen2moe" | "qwen35"
+            | "deepseek" | "deepseek2" | "deepseek_v2" | "deepseek_v3" | "deepseek_moe"
             | "gemma" | "phi" | "falcon" | "gpt2" | "gptj" | "gptneox" | "dflash"
             | "dflash-draft" => Some(namespace),
             _ => None,
@@ -607,8 +608,10 @@ fn align_up(value: u64, alignment: u64) -> Result<u64, GgufParseError> {
 fn map_tensor_name(architecture: &str, name: &str) -> String {
     let architecture = architecture.to_ascii_lowercase();
     let mapped = match architecture.as_str() {
-        "llama" | "mistral" | "mixtral" | "qwen" | "qwen2" | "qwen2moe" | "qwen35" | "gemma"
-        | "phi" => map_hf_decoder_name(name),
+        "llama" | "mistral" | "mixtral" | "qwen" | "qwen2" | "qwen2moe" | "qwen35" | "deepseek"
+        | "deepseek2" | "deepseek_v2" | "deepseek_v3" | "deepseek_moe" | "gemma" | "phi" => {
+            map_hf_decoder_name(name)
+        }
         "falcon" => map_falcon_name(name),
         "gpt2" => map_gpt2_name(name),
         "gptj" => map_gptj_name(name),
@@ -637,6 +640,18 @@ fn map_hf_decoder_name(name: &str) -> Option<String> {
                     "blk.{layer}.{mapped_expert_weight}.{expert}.weight"
                 ));
             }
+            if let Some(rest) = suffix.strip_prefix("mlp.experts.") {
+                let (expert, expert_weight) = rest.split_once('.')?;
+                let mapped_expert_weight = match expert_weight {
+                    "gate_proj.weight" => "ffn_gate",
+                    "up_proj.weight" => "ffn_up",
+                    "down_proj.weight" => "ffn_down",
+                    _ => return None,
+                };
+                return Some(format!(
+                    "blk.{layer}.{mapped_expert_weight}.{expert}.weight"
+                ));
+            }
             let mapped_suffix = match suffix {
                 "input_layernorm.weight" => "attn_norm.weight",
                 "post_attention_layernorm.weight" => "ffn_norm.weight",
@@ -644,9 +659,19 @@ fn map_hf_decoder_name(name: &str) -> Option<String> {
                 "self_attn.k_proj.weight" => "attn_k.weight",
                 "self_attn.v_proj.weight" => "attn_v.weight",
                 "self_attn.o_proj.weight" => "attn_output.weight",
+                "self_attn.q_a_proj.weight" => "attn_q_a.weight",
+                "self_attn.q_a_layernorm.weight" => "attn_q_a_norm.weight",
+                "self_attn.q_b_proj.weight" => "attn_q_b.weight",
+                "self_attn.kv_a_proj_with_mqa.weight" => "attn_kv_a_mqa.weight",
+                "self_attn.kv_a_layernorm.weight" => "attn_kv_a_norm.weight",
                 "mlp.up_proj.weight" => "ffn_up.weight",
                 "mlp.gate_proj.weight" => "ffn_gate.weight",
                 "mlp.down_proj.weight" => "ffn_down.weight",
+                "mlp.gate.weight" => "ffn_gate_inp.weight",
+                "mlp.shared_expert.gate_proj.weight" => "ffn_gate_shexp.weight",
+                "mlp.shared_expert.up_proj.weight" => "ffn_up_shexp.weight",
+                "mlp.shared_expert.down_proj.weight" => "ffn_down_shexp.weight",
+                "mlp.shared_expert_gate.weight" => "ffn_gate_inp_shexp.weight",
                 "block_sparse_moe.gate.weight" => "ffn_gate_inp.weight",
                 _ => return None,
             };
@@ -1183,6 +1208,23 @@ mod tests {
     }
 
     #[test]
+    fn architecture_detects_deepseek_namespace_when_general_architecture_is_missing() {
+        let file = GgufFile {
+            version: 3,
+            tensor_count: 0,
+            metadata: BTreeMap::from([(
+                "deepseek2.expert_count".to_owned(),
+                GgufMetadataValue::Uint32(384),
+            )]),
+            tensor_infos: Vec::new(),
+            alignment: 32,
+            data_section_start: 0,
+        };
+
+        assert_eq!(file.architecture(), Some("deepseek2"));
+    }
+
+    #[test]
     fn architecture_returns_none_for_unknown_namespaces() {
         let file = GgufFile {
             version: 3,
@@ -1223,6 +1265,38 @@ mod tests {
         assert_eq!(mapped[1].name, "blk.2.ffn_gate.3.weight");
         assert_eq!(mapped[2].name, "blk.2.ffn_down.3.weight");
         assert_eq!(mapped[3].name, "blk.2.ffn_up.3.weight");
+    }
+
+    #[test]
+    fn maps_deepseek_moe_and_shared_expert_tensor_names_to_internal_format() {
+        let file = GgufFile {
+            version: 3,
+            tensor_count: 7,
+            metadata: BTreeMap::from([(
+                "general.architecture".to_owned(),
+                GgufMetadataValue::String("deepseek2".to_owned()),
+            )]),
+            tensor_infos: vec![
+                tensor_info("model.layers.1.self_attn.q_a_proj.weight"),
+                tensor_info("model.layers.1.self_attn.kv_a_proj_with_mqa.weight"),
+                tensor_info("model.layers.1.mlp.gate.weight"),
+                tensor_info("model.layers.1.mlp.experts.42.gate_proj.weight"),
+                tensor_info("model.layers.1.mlp.shared_expert.gate_proj.weight"),
+                tensor_info("model.layers.1.mlp.shared_expert.up_proj.weight"),
+                tensor_info("model.layers.1.mlp.shared_expert_gate.weight"),
+            ],
+            alignment: 32,
+            data_section_start: 0,
+        };
+
+        let mapped = file.mapped_tensor_infos();
+        assert_eq!(mapped[0].name, "blk.1.attn_q_a.weight");
+        assert_eq!(mapped[1].name, "blk.1.attn_kv_a_mqa.weight");
+        assert_eq!(mapped[2].name, "blk.1.ffn_gate_inp.weight");
+        assert_eq!(mapped[3].name, "blk.1.ffn_gate.42.weight");
+        assert_eq!(mapped[4].name, "blk.1.ffn_gate_shexp.weight");
+        assert_eq!(mapped[5].name, "blk.1.ffn_up_shexp.weight");
+        assert_eq!(mapped[6].name, "blk.1.ffn_gate_inp_shexp.weight");
     }
 
     #[test]

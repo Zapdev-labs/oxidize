@@ -427,6 +427,9 @@ fn inference_config_from_dflash(
         sandwich_norm: false,
         rms_norm_weight_plus_one: false,
         nextn_predict_layers: 0,
+        expert_weights_scale: 1.0,
+        expert_group_count: 0,
+        expert_group_used_count: 0,
     }
 }
 

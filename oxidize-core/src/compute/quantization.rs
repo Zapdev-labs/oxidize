@@ -267,7 +267,7 @@ pub fn quantized_size(
         GgufQuantizationType::IQ3_S => (QK_K, BLOCK_IQ3_S_SIZE),
         GgufQuantizationType::IQ4_XS => (QK_K, BLOCK_IQ4_XS_SIZE),
         GgufQuantizationType::IQ3_XXS => (QK_K, BLOCK_Q3_K_SIZE), // approximate (unsupported dequant)
-        GgufQuantizationType::IQ4_NL => (QK_K, BLOCK_Q4_K_SIZE),  // approximate (unsupported dequant)
+        GgufQuantizationType::IQ4_NL => (QK_K, BLOCK_Q4_K_SIZE), // approximate (unsupported dequant)
         other => return Err(QuantizationError::UnsupportedQuantizationType(other)),
     };
 
@@ -661,7 +661,10 @@ fn quantize_f16_scalar(input: &[f32], output: &mut [u8]) -> Result<(), Quantizat
     Ok(())
 }
 
-pub(crate) fn quantize_q8_0_scalar(input: &[f32], output: &mut [u8]) -> Result<(), QuantizationError> {
+pub(crate) fn quantize_q8_0_scalar(
+    input: &[f32],
+    output: &mut [u8],
+) -> Result<(), QuantizationError> {
     if !input.len().is_multiple_of(QK8_0) {
         return Err(QuantizationError::InvalidInputLength {
             quantization: GgufQuantizationType::Q8_0,
@@ -1584,9 +1587,7 @@ pub fn dequantize_iq3_s_scalar(input: &[u8], output: &mut [f32]) -> Result<(), Q
         BLOCK_IQ3_S_SIZE,
         QK_K,
     )?;
-    let grid = |idx: usize, j: usize| -> f32 {
-        ((IQ3S_GRID[idx] >> (8 * j)) & 0xff) as f32
-    };
+    let grid = |idx: usize, j: usize| -> f32 { ((IQ3S_GRID[idx] >> (8 * j)) & 0xff) as f32 };
     for (block, out) in input
         .chunks_exact(BLOCK_IQ3_S_SIZE)
         .zip(output.chunks_exact_mut(QK_K))
@@ -1612,7 +1613,11 @@ pub fn dequantize_iq3_s_scalar(input: &[u8], output: &mut [f32]) -> Result<(), Q
                 let s = signs[sg_o + l];
                 for j in 0..4 {
                     let f1 = if s & KMASK_IQ2XS[j] != 0 { -1.0 } else { 1.0 };
-                    let f2 = if s & KMASK_IQ2XS[j + 4] != 0 { -1.0 } else { 1.0 };
+                    let f2 = if s & KMASK_IQ2XS[j + 4] != 0 {
+                        -1.0
+                    } else {
+                        1.0
+                    };
                     out[y + j] = db1 * grid(i1, j) * f1;
                     out[y + j + 4] = db1 * grid(i2, j) * f2;
                 }
@@ -1628,7 +1633,11 @@ pub fn dequantize_iq3_s_scalar(input: &[u8], output: &mut [f32]) -> Result<(), Q
                 let s = signs[sg_o + l];
                 for j in 0..4 {
                     let f1 = if s & KMASK_IQ2XS[j] != 0 { -1.0 } else { 1.0 };
-                    let f2 = if s & KMASK_IQ2XS[j + 4] != 0 { -1.0 } else { 1.0 };
+                    let f2 = if s & KMASK_IQ2XS[j + 4] != 0 {
+                        -1.0
+                    } else {
+                        1.0
+                    };
                     out[y + j] = db2 * grid(i1, j) * f1;
                     out[y + j + 4] = db2 * grid(i2, j) * f2;
                 }
@@ -2011,7 +2020,10 @@ mod tests {
             quantized_size(GgufQuantizationType::IQ4_XS, 256).unwrap(),
             136
         );
-        assert_eq!(quantized_size(GgufQuantizationType::IQ3_S, 256).unwrap(), 110);
+        assert_eq!(
+            quantized_size(GgufQuantizationType::IQ3_S, 256).unwrap(),
+            110
+        );
     }
 
     #[test]

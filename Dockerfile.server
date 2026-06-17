@@ -30,9 +30,11 @@ COPY oxidize-kernels/benches oxidize-kernels/benches
 RUN cargo build --release --package oxidize-server
 
 FROM debian:bookworm-slim
-RUN useradd --create-home --shell /usr/sbin/nologin oxidize
+RUN useradd --create-home --shell /usr/sbin/nologin oxidize \
+    && mkdir -p /var/lib/oxidize/model-cache \
+    && chown -R oxidize:oxidize /var/lib/oxidize
 WORKDIR /app
 COPY --from=builder /workspace/target/release/oxidize-server /usr/local/bin/oxidize-server
 USER oxidize
-EXPOSE 3000
+EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/oxidize-server"]

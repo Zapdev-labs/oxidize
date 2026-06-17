@@ -19,6 +19,61 @@ use crate::app::AppState;
 #[derive(Clone, Default)]
 pub struct AuthConfig {
     pub api_key: Option<Arc<str>>,
+    pub api_keys: Arc<[Arc<str>]>,
+}
+
+impl AuthConfig {
+    pub fn disabled() -> Self {
+        Self::default()
+    }
+
+    pub fn from_keys(keys: impl IntoIterator<Item = String>) -> Self {
+        let api_keys: Vec<Arc<str>> = keys
+            .into_iter()
+            .map(|key| key.trim().to_owned())
+            .filter(|key| !key.is_empty())
+            .map(Arc::<str>::from)
+            .collect();
+
+        Self {
+            api_key: api_keys.first().cloned(),
+            api_keys: Arc::from(api_keys),
+        }
+    }
+
+    pub fn from_env() -> Self {
+        let keys = std::env::var("OXIDIZE_API_KEYS")
+            .ok()
+            .map(|value| {
+                value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|key| !key.is_empty())
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .filter(|keys| !keys.is_empty())
+            .or_else(|| {
+                std::env::var("OXIDIZE_API_KEY")
+                    .ok()
+                    .map(|value| vec![value])
+            })
+            .unwrap_or_default();
+
+        Self::from_keys(keys)
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        !self.keys().is_empty()
+    }
+
+    fn keys(&self) -> Vec<&str> {
+        if self.api_keys.is_empty() {
+            self.api_key.as_deref().into_iter().collect()
+        } else {
+            self.api_keys.iter().map(AsRef::as_ref).collect()
+        }
+    }
 }
 
 pub async fn enforce_api_key(
@@ -30,13 +85,14 @@ pub async fn enforce_api_key(
     if !path.starts_with("/v1/") {
         return next.run(request).await;
     }
-    let Some(expected_key) = state.auth.api_key.as_deref() else {
+    if !state.auth.is_enabled() {
         return next.run(request).await;
     };
     let query = request.uri().query().map(str::to_owned);
-    if request_has_api_key(request.headers(), expected_key)
-        || query_has_api_key(query.as_deref(), expected_key)
-    {
+    if state.auth.keys().into_iter().any(|expected_key| {
+        request_has_api_key(request.headers(), expected_key)
+            || query_has_api_key(query.as_deref(), expected_key)
+    }) {
         return next.run(request).await;
     }
     (
@@ -141,5 +197,19 @@ mod tests {
         ));
         assert!(!query_has_api_key(Some("api_key=wrong"), "secret"));
         assert!(!query_has_api_key(None, "secret"));
+    }
+
+    #[test]
+    fn auth_config_accepts_multiple_keys() {
+        let auth = AuthConfig::from_keys(["alpha".to_string(), "bravo".to_string()]);
+        assert!(auth.is_enabled());
+        assert_eq!(auth.keys(), vec!["alpha", "bravo"]);
+        assert_eq!(auth.api_key.as_deref(), Some("alpha"));
+    }
+
+    #[test]
+    fn auth_config_ignores_empty_keys() {
+        let auth = AuthConfig::from_keys([" alpha ".to_string(), "".to_string(), " ".to_string()]);
+        assert_eq!(auth.keys(), vec!["alpha"]);
     }
 }

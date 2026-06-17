@@ -1,0 +1,195 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: llama-qwen7b
+  namespace: model-llama
+  labels:
+    app: llama-qwen7b
+spec:
+  type: LoadBalancer
+  selector:
+    app: llama-qwen7b
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llama-qwen7b-ai
+  namespace: model-llama
+  labels:
+    app: llama-qwen7b
+    node: ai
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: llama-qwen7b
+      node: ai
+  template:
+    metadata:
+      labels:
+        app: llama-qwen7b
+        node: ai
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      nodeName: ai
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: llama-server
+          image: ghcr.io/ggml-org/llama.cpp:server
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-ec"]
+          args:
+            - |
+              mkdir -p /models
+              if [ ! -s /models/Qwen2.5-7B-Instruct-Q4_K_M.gguf ]; then
+                curl -L --fail --retry 5 --retry-delay 2 --continue-at - \
+                  -o /models/Qwen2.5-7B-Instruct-Q4_K_M.gguf \
+                  https://huggingface.co/bartowski/Qwen2.5-7B-Instruct-GGUF/resolve/main/Qwen2.5-7B-Instruct-Q4_K_M.gguf
+              fi
+              ls -lh /models
+              test -f /models/Qwen2.5-7B-Instruct-Q4_K_M.gguf
+              exec /app/llama-server \
+                --model /models/Qwen2.5-7B-Instruct-Q4_K_M.gguf \
+                --alias qwen25-7b \
+                --host 0.0.0.0 \
+                --port 8080 \
+                --threads 32 \
+                --threads-batch 32 \
+                --ctx-size 4096 \
+                --batch-size 2048 \
+                --ubatch-size 512 \
+                --parallel 2 \
+                --flash-attn on \
+                --metrics --no-ui
+          ports:
+            - name: http
+              containerPort: 8080
+          resources:
+            requests:
+              cpu: "16"
+              memory: 12Gi
+            limits:
+              cpu: "32"
+              memory: 24Gi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 60
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          volumeMounts:
+            - name: models
+              mountPath: /models
+      volumes:
+        - name: models
+          emptyDir:
+            sizeLimit: 8Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llama-qwen7b-ai-2
+  namespace: model-llama
+  labels:
+    app: llama-qwen7b
+    node: ai-2
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: llama-qwen7b
+      node: ai-2
+  template:
+    metadata:
+      labels:
+        app: llama-qwen7b
+        node: ai-2
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      nodeName: ai-2
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: llama-server
+          image: ghcr.io/ggml-org/llama.cpp:server
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-ec"]
+          args:
+            - |
+              mkdir -p /models
+              if [ ! -s /models/Qwen2.5-7B-Instruct-Q4_K_M.gguf ]; then
+                curl -L --fail --retry 5 --retry-delay 2 --continue-at - \
+                  -o /models/Qwen2.5-7B-Instruct-Q4_K_M.gguf \
+                  https://huggingface.co/bartowski/Qwen2.5-7B-Instruct-GGUF/resolve/main/Qwen2.5-7B-Instruct-Q4_K_M.gguf
+              fi
+              ls -lh /models
+              test -f /models/Qwen2.5-7B-Instruct-Q4_K_M.gguf
+              exec /app/llama-server \
+                --model /models/Qwen2.5-7B-Instruct-Q4_K_M.gguf \
+                --alias qwen25-7b \
+                --host 0.0.0.0 \
+                --port 8080 \
+                --threads 32 \
+                --threads-batch 32 \
+                --ctx-size 4096 \
+                --batch-size 2048 \
+                --ubatch-size 512 \
+                --parallel 2 \
+                --flash-attn on \
+                --metrics --no-ui
+          ports:
+            - name: http
+              containerPort: 8080
+          resources:
+            requests:
+              cpu: "16"
+              memory: 12Gi
+            limits:
+              cpu: "32"
+              memory: 24Gi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 60
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          volumeMounts:
+            - name: models
+              mountPath: /models
+      volumes:
+        - name: models
+          emptyDir:
+            sizeLimit: 8Gi

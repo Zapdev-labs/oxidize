@@ -9,9 +9,17 @@ use std::path::Path;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let path = args.get(1).expect("Usage: diffusion_gemma_bench <model.gguf> [prompt] [steps]");
-    let prompt_text = args.get(2).cloned().unwrap_or_else(|| "What is the capital of France?".to_string());
-    let steps: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(oxidize_core::diffusion_gemma::STEPS);
+    let path = args
+        .get(1)
+        .expect("Usage: diffusion_gemma_bench <model.gguf> [prompt] [steps]");
+    let prompt_text = args
+        .get(2)
+        .cloned()
+        .unwrap_or_else(|| "What is the capital of France?".to_string());
+    let steps: usize = args
+        .get(3)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(oxidize_core::diffusion_gemma::STEPS);
 
     eprintln!("loading {path} ...");
     let t_load = std::time::Instant::now();
@@ -19,7 +27,9 @@ fn main() {
     eprintln!("loaded in {:.1}s", t_load.elapsed().as_secs_f64());
 
     // tokenize the prompt (fall back to a bare BOS prefix if no tokenizer)
-    let tokenizer = oxidize_core::tokenizer::load_tokenizer_from_gguf_file(Some(Path::new(path))).ok().flatten();
+    let tokenizer = oxidize_core::tokenizer::load_tokenizer_from_gguf_file(Some(Path::new(path)))
+        .ok()
+        .flatten();
     let prompt: Vec<u32> = match &tokenizer {
         Some(tok) => {
             let mut ids = vec![2u32]; // BOS
@@ -34,7 +44,10 @@ fn main() {
 
     println!("=== diffusion-gemma (OXK) ===");
     for (step, ent, acc) in &stats.entropy_trace {
-        println!("step {step:3}  mean_entropy={ent:.4}  accepted={acc}/{}", stats.canvas_tokens);
+        println!(
+            "step {step:3}  mean_entropy={ent:.4}  accepted={acc}/{}",
+            stats.canvas_tokens
+        );
     }
     if let Some(tok) = &tokenizer {
         if let Ok(text) = tok.decode(&stats.tokens) {

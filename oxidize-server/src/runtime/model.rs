@@ -185,9 +185,9 @@ pub fn load_model_runtime(args: &Args) -> Result<Option<Arc<ModelRuntime>>, Stri
         let plan = oxidize_core::autotune::plan(&inv, &model);
         match args.print_plan.as_str() {
             "json" => {
-                use oxidize_core::autotune::PipelineMode;
                 use oxidize_core::autotune::OxkIsa;
                 use oxidize_core::autotune::OxkTile;
+                use oxidize_core::autotune::PipelineMode;
                 use oxidize_core::autotune::SpeculativeSpec;
                 let pipe = match plan.pipeline {
                     PipelineMode::Sequential => "sequential",

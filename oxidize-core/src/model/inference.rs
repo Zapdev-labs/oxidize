@@ -92,7 +92,10 @@ impl ModelArchitecture {
 
     /// Whether this architecture uses MoE FFN.
     pub fn uses_moe(&self) -> bool {
-        matches!(self, Self::Mixtral | Self::MiniMax | Self::Lfm2Moe)
+        matches!(
+            self,
+            Self::Mixtral | Self::MiniMax | Self::Lfm2Moe | Self::DeepSeek
+        )
     }
 
     /// Whether this architecture uses LFM2 short-convolution token mixing on
@@ -173,6 +176,17 @@ pub struct InferenceConfig {
     /// These layers live after the causal backbone in GGUF (`blk.N.nextn.*`) and
     /// are not counted in `layer_count`.
     pub nextn_predict_layers: usize,
+    /// DeepSeek-V3/Kimi routed-expert output scale (HF `routed_scaling_factor`,
+    /// llama.cpp `expert_weights_scale`). The routed experts' weighted sum is
+    /// multiplied by this before the shared-expert/residual add. 1.0 = none.
+    /// Kimi-K2 uses ~2.827; without it the routed branch is far too weak.
+    pub expert_weights_scale: f32,
+    /// DeepSeek-V3 group-limited routing: number of expert groups (`n_group`).
+    /// 0 or 1 = no group routing (plain global top-k). Kimi-K2 = 1.
+    pub expert_group_count: usize,
+    /// DeepSeek-V3 group-limited routing: groups kept per token (`topk_group`).
+    /// Only consulted when `expert_group_count > 1`.
+    pub expert_group_used_count: usize,
 }
 
 impl Default for InferenceConfig {
@@ -207,6 +221,9 @@ impl Default for InferenceConfig {
             sandwich_norm: false,
             rms_norm_weight_plus_one: false,
             nextn_predict_layers: 0,
+            expert_weights_scale: 1.0,
+            expert_group_count: 0,
+            expert_group_used_count: 0,
         }
     }
 }
@@ -479,11 +496,26 @@ impl InferenceConfig {
         let leading_dense_layers = arch_u32("leading_dense_block_count")
             .map(|v| v as usize)
             .unwrap_or(0);
-        // expert_gating_func: 1 = softmax, 2 = sigmoid (lfm2moe uses sigmoid).
+        // expert_gating_func: 1 = softmax, 2 = sigmoid (lfm2moe/deepseek2 use sigmoid).
         let expert_gating_sigmoid = arch_u32("expert_gating_func")
             .or_else(|| metadata_u32_lookup(metadata, "expert_gating_func"))
             .map(|v| v == 2)
             .unwrap_or(false);
+        // DeepSeek-V3/Kimi routed-expert scaling (`routed_scaling_factor`) and
+        // group-limited routing (`n_group` / `topk_group`). Absent for other
+        // MoE archs, so they default to 1.0 / no-group and behave unchanged.
+        let expert_weights_scale = arch_f32("expert_weights_scale")
+            .or_else(|| metadata_f32_lookup(metadata, "expert_weights_scale"))
+            .filter(|&v| v > 0.0)
+            .unwrap_or(1.0);
+        let expert_group_count = arch_u32("expert_group_count")
+            .or_else(|| metadata_u32_lookup(metadata, "expert_group_count"))
+            .map(|v| v as usize)
+            .unwrap_or(0);
+        let expert_group_used_count = arch_u32("expert_group_used_count")
+            .or_else(|| metadata_u32_lookup(metadata, "expert_group_used_count"))
+            .map(|v| v as usize)
+            .unwrap_or(0);
 
         // Partial RoPE: number of head dimensions that receive rotation.
         // 0 means "use full kv_head_dim" (standard). MiniMax-M2 uses 64 of 128.
@@ -577,6 +609,9 @@ impl InferenceConfig {
             sandwich_norm,
             rms_norm_weight_plus_one,
             nextn_predict_layers: nextn_layers,
+            expert_weights_scale,
+            expert_group_count,
+            expert_group_used_count,
         }
     }
 }
@@ -1124,6 +1159,10 @@ pub(crate) struct LayerWeights {
     mla_v_b: WeightStorage,
     // DeepSeek MoE shared expert (shexp) branch.
     ffn_gate_shexp: WeightStorage,
+    // Optional DeepSeek shared-expert gate. Some DeepSeek-family checkpoints
+    // store `mlp.shared_expert_gate.weight`; when present it sigmoid-scales the
+    // unconditional shared expert output, but it is not part of routed top-k.
+    ffn_gate_inp_shexp: WeightStorage,
     ffn_up_shexp: WeightStorage,
     ffn_down_shexp: WeightStorage,
 }
@@ -1699,6 +1738,10 @@ impl InferenceModel {
                         }
                         ("ffn_gate_shexp", _) => {
                             layers[layer_idx].ffn_gate_shexp =
+                                load_tensor(name, qtype, qdata, value_count)?
+                        }
+                        ("ffn_gate_inp_shexp", _) => {
+                            layers[layer_idx].ffn_gate_inp_shexp =
                                 load_tensor(name, qtype, qdata, value_count)?
                         }
                         ("ffn_up_shexp", _) => {
@@ -3770,6 +3813,21 @@ impl InferenceModel {
                                 .map_err(|e| {
                                     ModelError::InferenceFailed(format!("shexp down: {:?}", e))
                                 })?;
+                            if !layer.ffn_gate_inp_shexp.is_empty() {
+                                let gate_logit = &mut ws.moe_router_logits[..1];
+                                gate_logit[0] = 0.0_f32;
+                                gemv_weight(&layer.ffn_gate_inp_shexp, 1, h, normed, gate_logit)
+                                    .map_err(|e| {
+                                        ModelError::InferenceFailed(format!(
+                                            "shexp router gate: {:?}",
+                                            e
+                                        ))
+                                    })?;
+                                let scale = 1.0_f32 / (1.0 + (-gate_logit[0]).exp());
+                                for val in shexp_out.iter_mut() {
+                                    *val *= scale;
+                                }
+                            }
                             for i in 0..h {
                                 ffn_out[i] += shexp_out[i];
                             }
@@ -4246,6 +4304,42 @@ pub(crate) fn moe_ffn_forward_weights(
         }
     }
 
+    // 2b. DeepSeek-V3 group-limited routing. Experts are partitioned into
+    // `expert_group_count` contiguous groups; each group is ranked by the sum
+    // of its top-2 selection scores, the top `expert_group_used_count` groups
+    // are kept, and all experts outside them are masked (-inf) before the
+    // global top-k below. `expert_group_count <= 1` (e.g. Kimi-K2) is a no-op,
+    // leaving the existing global top-k path byte-for-byte unchanged.
+    if cfg.expert_group_count > 1
+        && cfg.expert_group_used_count > 0
+        && cfg.expert_group_used_count < cfg.expert_group_count
+        && n_experts % cfg.expert_group_count == 0
+    {
+        let n_group = cfg.expert_group_count;
+        let group_size = n_experts / n_group;
+        let mut group_scores: Vec<(usize, f32)> = (0..n_group)
+            .map(|g| {
+                let grp = &expert_scores[g * group_size..g * group_size + group_size];
+                let (mut top1, mut top2) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+                for &(_, s) in grp {
+                    if s > top1 {
+                        top2 = top1;
+                        top1 = s;
+                    } else if s > top2 {
+                        top2 = s;
+                    }
+                }
+                (g, if top2.is_finite() { top1 + top2 } else { top1 })
+            })
+            .collect();
+        group_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        for &(g, _) in group_scores.iter().skip(cfg.expert_group_used_count) {
+            for e in &mut expert_scores[g * group_size..g * group_size + group_size] {
+                e.1 = f32::NEG_INFINITY;
+            }
+        }
+    }
+
     // 3. Top-k expert selection by selection score.
     let compare_score = |a: &(usize, f32), b: &(usize, f32)| {
         b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
@@ -4268,13 +4362,22 @@ pub(crate) fn moe_ffn_forward_weights(
         if s > 0.0 { s } else { 1.0 }
     };
 
-    // 4. Gather the selected experts and their routing weights.
+    // 4. Gather the selected experts and their routing weights. The routed
+    // contribution is scaled by `expert_weights_scale` (DeepSeek-V3/Kimi
+    // `routed_scaling_factor`); folding it into the per-expert weight here
+    // applies it uniformly across the fused, non-fused, and f32 expert paths
+    // below. Defaults to 1.0 for every non-DeepSeek MoE arch.
+    let routed_scale = if cfg.expert_weights_scale > 0.0 {
+        cfg.expert_weights_scale
+    } else {
+        1.0
+    };
     let n_sel = n_experts_per_tok;
     let mut selected: Vec<usize> = Vec::with_capacity(n_sel);
     let mut weights: Vec<f32> = Vec::with_capacity(n_sel);
     for &(expert_idx, _sel_score) in expert_scores.iter().take(n_sel) {
         selected.push(expert_idx);
-        weights.push(router_logits[expert_idx] / weight_norm);
+        weights.push(routed_scale * router_logits[expert_idx] / weight_norm);
     }
 
     // 5. Expert FFN. Prefer the batched path (one parallel region per
@@ -4564,6 +4667,113 @@ mod tests {
         assert_eq!(cfg.hidden_size, 5120);
         assert_eq!(cfg.kv_head_dim(), 256);
         assert_eq!(cfg.rope_dim, 64);
+    }
+
+    #[test]
+    fn deepseek_v3_moe_metadata_is_parsed_for_kimi_style_routing() {
+        let mapped = MappedGgufFile::from_parsed_for_test(GgufFile {
+            version: 3,
+            tensor_count: 3,
+            metadata: BTreeMap::from([
+                (
+                    "general.architecture".to_owned(),
+                    GgufMetadataValue::String("deepseek2".to_owned()),
+                ),
+                (
+                    "deepseek2.block_count".to_owned(),
+                    GgufMetadataValue::Uint32(61),
+                ),
+                (
+                    "deepseek2.embedding_length".to_owned(),
+                    GgufMetadataValue::Uint32(7168),
+                ),
+                (
+                    "deepseek2.feed_forward_length".to_owned(),
+                    GgufMetadataValue::Uint32(18432),
+                ),
+                (
+                    "deepseek2.attention.head_count".to_owned(),
+                    GgufMetadataValue::Uint32(64),
+                ),
+                (
+                    "deepseek2.attention.head_count_kv".to_owned(),
+                    GgufMetadataValue::Uint32(64),
+                ),
+                (
+                    "deepseek2.attention.key_length_mla".to_owned(),
+                    GgufMetadataValue::Uint32(128),
+                ),
+                (
+                    "deepseek2.expert_count".to_owned(),
+                    GgufMetadataValue::Uint32(384),
+                ),
+                (
+                    "deepseek2.expert_used_count".to_owned(),
+                    GgufMetadataValue::Uint32(8),
+                ),
+                (
+                    "deepseek2.expert_feed_forward_length".to_owned(),
+                    GgufMetadataValue::Uint32(2048),
+                ),
+                (
+                    "deepseek2.leading_dense_block_count".to_owned(),
+                    GgufMetadataValue::Uint32(1),
+                ),
+                (
+                    "deepseek2.expert_gating_func".to_owned(),
+                    GgufMetadataValue::Uint32(2),
+                ),
+                (
+                    "deepseek2.expert_weights_scale".to_owned(),
+                    GgufMetadataValue::Float32(2.827),
+                ),
+                (
+                    "deepseek2.expert_group_count".to_owned(),
+                    GgufMetadataValue::Uint32(1),
+                ),
+            ]),
+            tensor_infos: vec![
+                GgufTensorInfo {
+                    name: "tok_embeddings.weight".to_owned(),
+                    dimensions: vec![7168, 160000],
+                    ggml_type: 0,
+                    relative_offset: 0,
+                    absolute_offset: 0,
+                },
+                GgufTensorInfo {
+                    name: "blk.1.ffn_gate_inp.weight".to_owned(),
+                    dimensions: vec![7168, 384],
+                    ggml_type: 0,
+                    relative_offset: 0,
+                    absolute_offset: 0,
+                },
+                GgufTensorInfo {
+                    name: "blk.1.ffn_gate_shexp.weight".to_owned(),
+                    dimensions: vec![7168, 2048],
+                    ggml_type: 0,
+                    relative_offset: 0,
+                    absolute_offset: 0,
+                },
+            ],
+            alignment: 32,
+            data_section_start: 0,
+        });
+
+        let cfg = InferenceConfig::from_gguf(&mapped);
+
+        assert_eq!(cfg.architecture, ModelArchitecture::DeepSeek);
+        assert!(cfg.architecture.uses_moe());
+        assert!(cfg.architecture.uses_mla());
+        assert_eq!(cfg.layer_count, 61);
+        assert_eq!(cfg.hidden_size, 7168);
+        assert_eq!(cfg.num_experts, 384);
+        assert_eq!(cfg.num_experts_per_tok, 8);
+        assert_eq!(cfg.expert_intermediate_size, 2048);
+        assert_eq!(cfg.leading_dense_layers, 1);
+        assert!(cfg.expert_gating_sigmoid);
+        assert!((cfg.expert_weights_scale - 2.827).abs() < 1e-6);
+        assert_eq!(cfg.expert_group_count, 1);
+        assert_eq!(cfg.kv_head_dim(), 128);
     }
 
     #[test]
