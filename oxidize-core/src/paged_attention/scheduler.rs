@@ -758,7 +758,7 @@ impl Scheduler {
         let current_blocks = self
             .sequences
             .get(&seq_id)
-            .unwrap()
+            .ok_or(SchedulerError::SequenceNotFound { seq_id })?
             .block_table
             .num_blocks();
 
@@ -770,31 +770,46 @@ impl Scheduler {
                 // Fully cached block — share it.
                 if let Some(block_id) = self.block_pool.lookup_prefix_cache(hash) {
                     self.block_pool.inc_ref(block_id)?;
-                    let seq = self.sequences.get_mut(&seq_id).unwrap();
+                    let seq = self
+                        .sequences
+                        .get_mut(&seq_id)
+                        .ok_or(SchedulerError::SequenceNotFound { seq_id })?;
                     seq.block_table.append_block(block_id);
                 } else {
                     // Cache entry was evicted since we computed cached_tokens_total.
-                    let seq = self.sequences.get_mut(&seq_id).unwrap();
+                    let seq = self
+                        .sequences
+                        .get_mut(&seq_id)
+                        .ok_or(SchedulerError::SequenceNotFound { seq_id })?;
                     let block_id = self.block_pool.allocate_block()?;
                     seq.block_table.append_block(block_id);
                 }
             } else {
                 // New or partially-cached block — allocate fresh.
-                let seq = self.sequences.get_mut(&seq_id).unwrap();
+                let seq = self
+                    .sequences
+                    .get_mut(&seq_id)
+                    .ok_or(SchedulerError::SequenceNotFound { seq_id })?;
                 let block_id = self.block_pool.allocate_block()?;
                 seq.block_table.append_block(block_id);
             }
         }
 
         // --- Advance token counters. ---
-        let seq = self.sequences.get_mut(&seq_id).unwrap();
+        let seq = self
+            .sequences
+            .get_mut(&seq_id)
+            .ok_or(SchedulerError::SequenceNotFound { seq_id })?;
         for _ in 0..this_chunk {
             let _ = seq.block_table.append_token();
         }
         seq.record_prefilled_tokens(this_chunk);
 
         // --- Insert newly-computed blocks into the prefix cache. ---
-        let seq = self.sequences.get(&seq_id).unwrap();
+        let seq = self
+            .sequences
+            .get(&seq_id)
+            .ok_or(SchedulerError::SequenceNotFound { seq_id })?;
         for block_idx in 0..target_blocks {
             let block_end = ((block_idx + 1) * block_size).min(prompt.len());
             // Only cache blocks that were not fully cached before this call.
@@ -897,6 +912,7 @@ impl Scheduler {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::paged_attention::BlockPoolConfig;

@@ -4,11 +4,15 @@ use crate::quantization::{
     QK_K, QK_NVFP4, QK_NVFP4_SUB,
 };
 use rayon::prelude::*;
-use serde::{Deserialize, Serialize};
 #[cfg(target_arch = "x86")]
 use std::arch::x86::*;
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
+
+use super::errors::{
+    ActivationFn, AttentionError, DType, GemmError, GemvError, LayerNormError,
+    LinearActivationError, RmsNormError, RopeError, SoftmaxError, SwiGluError,
+};
 
 const E2M1_DOUBLED_VALUES: [f32; 16] = [
     0.0, 1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0, 0.0, -1.0, -2.0, -3.0, -4.0, -6.0, -8.0, -12.0,
@@ -23,139 +27,6 @@ const GEMV_CHUNK_ROWS: usize = 32;
 
 const TRANSPOSED_GEMV_COL_CHUNK: usize = QK_K;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-pub enum DType {
-    F32,
-    F16,
-    I8,
-    I16,
-    I32,
-    I64,
-}
-
-impl DType {
-    /// Return the size of a single element in bytes.
-    pub fn size_in_bytes(&self) -> usize {
-        match self {
-            DType::F32 => 4,
-            DType::F16 => 2,
-            DType::I8 => 1,
-            DType::I16 => 2,
-            DType::I32 => 4,
-            DType::I64 => 8,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GemvError {
-    InvalidMatrixLength {
-        expected: usize,
-        actual: usize,
-    },
-    InvalidVectorLength {
-        expected: usize,
-        actual: usize,
-    },
-    InvalidOutputLength {
-        expected: usize,
-        actual: usize,
-    },
-    UnsupportedQuantizationType {
-        quantization: GgufQuantizationType,
-    },
-    #[cfg(feature = "cuda")]
-    Cuda(String),
-    #[cfg(feature = "metal")]
-    Metal(String),
-    #[cfg(feature = "webgpu")]
-    WebGpu(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GemmError {
-    InvalidLeftMatrixLength {
-        expected: usize,
-        actual: usize,
-    },
-    InvalidRightMatrixLength {
-        expected: usize,
-        actual: usize,
-    },
-    InvalidOutputLength {
-        expected: usize,
-        actual: usize,
-    },
-    #[cfg(feature = "cuda")]
-    Cuda(String),
-    #[cfg(feature = "metal")]
-    Metal(String),
-    #[cfg(feature = "webgpu")]
-    WebGpu(String),
-    InvalidTensorParallelShardCount {
-        shared_dim: usize,
-        shard_count: usize,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AttentionError {
-    ZeroHeadDim,
-    InvalidQueryLength { expected: usize, actual: usize },
-    InvalidKeyLength { expected: usize, actual: usize },
-    InvalidValueLength { expected: usize, actual: usize },
-    InvalidOutputLength { expected: usize, actual: usize },
-    InvalidKvHead { kv_head: usize, kv_heads: usize },
-    InvalidHeadGrouping { num_heads: usize, kv_heads: usize },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RopeError {
-    InvalidInputLength { expected: usize, actual: usize },
-    InvalidOutputLength { expected: usize, actual: usize },
-    OddHeadDim { head_dim: usize },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SwiGluError {
-    InvalidGateLength { expected: usize, actual: usize },
-    InvalidUpLength { expected: usize, actual: usize },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ActivationFn {
-    Relu,
-    Gelu,
-    Silu,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LinearActivationError {
-    InvalidMatrixLength { expected: usize, actual: usize },
-    InvalidVectorLength { expected: usize, actual: usize },
-    InvalidOutputLength { expected: usize, actual: usize },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RmsNormError {
-    ZeroDimension,
-    InvalidInputLength { expected: usize, actual: usize },
-    InvalidWeightLength { expected: usize, actual: usize },
-    InvalidOutputLength { expected: usize, actual: usize },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LayerNormError {
-    InvalidInputLength { expected: usize, actual: usize },
-    InvalidWeightLength { expected: usize, actual: usize },
-    InvalidBiasLength { expected: usize, actual: usize },
-    InvalidOutputLength { expected: usize, actual: usize },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SoftmaxError {
-    InvalidInputLength { expected: usize, actual: usize },
-}
 
 pub fn gemv_f32(
     matrix: &[f32],
@@ -363,6 +234,9 @@ fn gemm_quantized_f32_inner(
 /// AVX2 unpack of a 32-byte qs slice into 32 f32 values via
 /// `dl * nibble - ml`. `high_nibble = true` selects the upper 4 bits, else
 /// the lower 4 bits.
+///
+/// # Safety
+/// `qs_ptr` addresses ≥32 bytes; `out_ptr` addresses ≥32 writable f32s. AVX2+FMA required.
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
 #[allow(unsafe_op_in_unsafe_fn)]
@@ -454,6 +328,10 @@ fn decode_q8_0_block(block: &[u8], out: &mut [f32]) {
 
 /// AVX2 + FMA dot product over `len` f32 elements. `len` is expected to be a
 /// multiple of 8; a tail loop handles any remainder.
+///
+/// # Safety
+/// `a` and `b` must each address at least `len` initialized f32 elements; `len` may be
+/// zero. Caller must ensure AVX2+FMA is available.
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
 #[allow(unsafe_op_in_unsafe_fn)]
@@ -710,6 +588,8 @@ unsafe fn gemm_q4_k_decode_once_avx2(
         partial.fill(0.0);
         let row_base = unsafe { qm_ptr.add(row_idx * row_stride_bytes) };
         for block_idx in 0..blocks_per_row {
+            // SAFETY: `row_base` points into the packed matrix row; each block is `BLOCK_Q4_K_SIZE`
+            // bytes and `block_idx` is bounded by `blocks_per_row`.
             let block_ptr = unsafe { row_base.add(block_idx * BLOCK_Q4_K_SIZE) };
             let block = unsafe { std::slice::from_raw_parts(block_ptr, BLOCK_Q4_K_SIZE) };
             let d = f16_le_to_f32([block[0], block[1]]);

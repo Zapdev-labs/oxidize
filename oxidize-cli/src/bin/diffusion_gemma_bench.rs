@@ -40,7 +40,9 @@ fn main() {
     };
     eprintln!("prompt tokens: {}", prompt.len());
 
-    let stats = model.generate(&prompt, steps, 1234);
+    let stats = model
+        .generate(&prompt, steps, 1234)
+        .expect("generation failed");
 
     println!("=== diffusion-gemma (OXK) ===");
     for (step, ent, acc) in &stats.entropy_trace {

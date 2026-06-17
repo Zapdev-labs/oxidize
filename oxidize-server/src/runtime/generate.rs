@@ -1,4 +1,5 @@
 //! Generation engine: sequential path and PagedAttention path (blocking + streaming).
+#![deny(clippy::unwrap_used, clippy::expect_used)]
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -481,7 +482,7 @@ pub fn generate_with_scheduler_blocking(
 
     loop {
         let seq = scheduler.get_sequence(seq_id);
-        if seq.is_none() || seq.unwrap().is_finished() {
+        if seq.as_ref().is_none_or(|s| s.is_finished()) {
             break;
         }
 
@@ -673,7 +674,7 @@ fn generate_with_scheduler_streaming_inner(
         }
 
         let seq = scheduler.get_sequence(seq_id);
-        if seq.is_none() || seq.unwrap().is_finished() {
+        if seq.as_ref().is_none_or(|s| s.is_finished()) {
             break;
         }
 

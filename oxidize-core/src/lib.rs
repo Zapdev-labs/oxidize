@@ -2,6 +2,7 @@
 //!
 //! This crate exposes model/runtime primitives and a small public health surface
 //! used by CLI, server, and WASM integrations.
+#![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
 //!
 //! # API quick check
 //!
@@ -106,7 +107,7 @@ pub mod speculative;
 pub mod spinpool;
 #[path = "backends/strix.rs"]
 pub mod strix;
-#[path = "compute/tensor.rs"]
+#[path = "compute/tensor/mod.rs"]
 pub mod tensor;
 #[path = "format/tokenizer.rs"]
 pub mod tokenizer;

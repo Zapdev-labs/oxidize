@@ -2,6 +2,7 @@
 //!
 //! The binary in `main.rs` is a thin wrapper that parses CLI args, loads the
 //! model, and binds the Axum router built here.
+#![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod app;
 pub mod audit;

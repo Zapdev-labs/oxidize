@@ -2,6 +2,7 @@
 //!
 //! Provides block-based KV cache management with on-demand allocation,
 //! reference counting for shared blocks, and copy-on-write semantics.
+#![deny(clippy::unwrap_used, clippy::expect_used)]
 
 pub mod block_pool;
 pub mod scheduler;

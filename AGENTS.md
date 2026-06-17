@@ -123,7 +123,9 @@ make wasm     # outputs to dist/wasm
 - When adding `oxidize-python` or expanding `oxidize-golang`, keep all Rust crates and features; do not delete or replace the Rust workspace.
 - Parallel language ports should reach feature parity with `oxidize-core` (user asked for every Rust feature in Python/Go, with Python targeting similar CLOC to Rust).
 - Keep `oxidize-py` (PyO3/maturin bindings) alongside the pure-Python `oxidize-python` package.
-- When syncing ports, bring new `master` Rust features into `oxidize-golang` (and follow-on Python work) rather than leaving ports stale.
+- When extending Go/Python ports, implement in `oxidize-golang` first, mirror to `oxidize-python`, and sync new `master` Rust features rather than leaving ports stale.
+- For Go/Python GPU backends, use pure native implementations (no Rust FFI/CGO at runtime); CUDA first, then Vulkan/Metal/WebGPU.
+- Avoid creating extra markdown documentation files unless asked; update README when needed.
 - On feature branches, stage and commit only files related to the task; exclude unrelated workspace changes.
 - `oxidize run <model>` should start the OpenAI-compatible HTTP/WebSocket server by default; use `--no-api` for local inference only.
 - Contributions should keep tests passing and use clear, ethical PR/markdown descriptions; include benchmarks when claiming performance changes.
@@ -140,3 +142,5 @@ make wasm     # outputs to dist/wasm
 - `oxidize-convert` converts HuggingFace SafeTensors (file or model directory with `config.json`) to GGUF; core logic in `oxidize-core/src/format/safetensors_to_gguf.rs`.
 - Git installs must name `oxidize-cli` explicitly (`cargo install --git … oxidize-cli --bin oxidize`) because the workspace ships multiple binary crates.
 - `oxidize-prune` depends on `oxidize-kernels` for SIMD magnitude/Wanda masks (`prune.rs`), Q4_K dequant (`q4k_dequant.rs`), and rayon-parallel tensor processing in `wanda.rs`.
+- Both Go and Python ports include `core/autotune/` with `--auto`, `--no-auto`, and `--print-plan` CLI flags.
+- Run Go port tests with `CGO_ENABLED=0` (exclude `scripts` package); Python tests via `uv run pytest` (`OXIDIZE_SLOW_TESTS=1` for slow GGUF integrations).

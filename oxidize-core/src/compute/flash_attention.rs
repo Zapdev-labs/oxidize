@@ -1,3 +1,9 @@
+//! Hand-rolled flash-attention kernels (prefill + decode).
+//!
+//! `unsafe` here constructs disjoint head slices from a contiguous output buffer; each site
+//! documents length/alias preconditions. Mutex error capture in the parallel decode path is
+//! synchronous (spin pool / rayon), not async.
+
 use crate::tensor::AttentionError;
 
 const FLASH_BLOCK_SIZE: usize = 64;

@@ -316,7 +316,7 @@ impl BlockPool {
         }
         let mut ids = Vec::with_capacity(n);
         for _ in 0..n {
-            let id = self.free_list.pop().expect("checked above");
+            let id = self.free_list.pop().ok_or(BlockPoolError::OutOfBlocks)?;
             let block = self
                 .blocks
                 .get_mut(id)
@@ -337,7 +337,10 @@ impl BlockPool {
             return Err(BlockPoolError::InvalidBlockId { id });
         }
         let already_free = self.is_free(id);
-        let block = self.blocks.get_mut(id).unwrap();
+        let block = self
+            .blocks
+            .get_mut(id)
+            .ok_or(BlockPoolError::InvalidBlockId { id })?;
         block.ref_count = 0;
         if !already_free {
             self.free_list.push(id);
@@ -535,6 +538,7 @@ impl BlockTable {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

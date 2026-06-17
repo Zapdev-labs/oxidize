@@ -84,9 +84,7 @@ async fn realtime_lifecycle_emits_session_created_and_response_events() {
 #[tokio::test]
 async fn realtime_rejects_missing_api_key_when_auth_enabled() {
     let mut state = test_state();
-    state.auth = AuthConfig {
-        api_key: Some(Arc::from("secret-key")),
-    };
+    state.auth = AuthConfig::from_keys(["secret-key".to_string()]);
     let app = build_app_with_state(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
