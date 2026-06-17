@@ -3088,6 +3088,19 @@ name = "oxidize-kernels"
 version = "0.1.0"
 
 [[package]]
+name = "oxidize-merge"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "memmap2",
+ "safetensors",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "oxidize-prune"
 version = "0.1.0"
 dependencies = [
