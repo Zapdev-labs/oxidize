@@ -1,0 +1,21 @@
+oxidize-finetuning/src/dpo.rs
+  s_9977901d17a81e::t_f6c49a349df5da 1-708
+oxidize-finetuning/src/qlora.rs
+  s_9977901d17a81e::t_f6c49a349df5da 1-486
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.8",
+  "base_commit_sha": "f42ca159366edece3ab47d22f7a5a27cecc372d4",
+  "prompts": {},
+  "sessions": {
+    "s_9977901d17a81e": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "3cd73ec3-5368-4b64-bd49-5601fc62d824",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
