@@ -79,10 +79,11 @@ pub fn build_app_with_state(state: AppState) -> Router {
 
 #[cfg(test)]
 pub fn build_app() -> Router {
-    let api_key = std::env::var("OXIDIZE_API_KEY")
-        .ok()
-        .filter(|value| !value.is_empty());
-    build_app_with_config(RequestLimitConfig::default(), api_key, None)
+    build_app_with_config(
+        RequestLimitConfig::default(),
+        AuthConfig::from_env().api_key.map(|key| key.to_string()),
+        None,
+    )
 }
 
 #[cfg(test)]
@@ -106,12 +107,23 @@ pub fn build_app_with_full_config(
     model: Option<Arc<ModelRuntime>>,
     mesh: Option<MeshClusterState>,
 ) -> Router {
+    let auth = api_key
+        .map(|key| AuthConfig::from_keys([key]))
+        .unwrap_or_else(AuthConfig::disabled);
+    build_app_with_auth_config(config, auth, model, mesh)
+}
+
+#[cfg(test)]
+pub fn build_app_with_auth_config(
+    config: RequestLimitConfig,
+    auth: AuthConfig,
+    model: Option<Arc<ModelRuntime>>,
+    mesh: Option<MeshClusterState>,
+) -> Router {
     let state = AppState {
         limiter: Arc::new(RequestLimiter::new(config)),
         batcher: Arc::new(ContinuousBatcher::default()),
-        auth: AuthConfig {
-            api_key: api_key.map(Arc::<str>::from),
-        },
+        auth,
         model: model.clone(),
         paged: None,
         mesh,
@@ -165,7 +177,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn readyz_returns_200() {
+    async fn readyz_returns_503_when_no_model_is_loaded() {
         let response = build_app()
             .oneshot(
                 Request::builder()
@@ -175,7 +187,7 @@ mod tests {
             )
             .await
             .expect("request should be handled");
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]
@@ -607,6 +619,29 @@ mod tests {
                 )
                 .await
                 .expect("request should be handled");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn api_key_auth_allows_rotated_secondary_key() {
+        let app = build_app_with_auth_config(
+            RequestLimitConfig::default(),
+            AuthConfig::from_keys(["primary".to_string(), "secondary".to_string()]),
+            None,
+            None,
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/models")
+                    .header("x-api-key", "secondary")
+                    .body(Body::empty())
+                    .expect("valid request"),
+            )
+            .await
+            .expect("request should be handled");
+
         assert_eq!(response.status(), StatusCode::OK);
     }
 

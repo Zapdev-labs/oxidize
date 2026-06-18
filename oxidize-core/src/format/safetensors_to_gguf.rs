@@ -1,6 +1,9 @@
 #![allow(clippy::type_complexity)]
 
-use crate::conversion::map_hf_tensor_name;
+use crate::conversion::{
+    extract_layer_index, flatten_linear_attn_conv1d, map_flat_qwen_mtp_tensor_name,
+    map_hf_tensor_name, preprocess_hf_tensors_for_gguf, split_fused_gate_up_proj,
+};
 use crate::gguf::{GgufMetadataArray, GgufMetadataType, GgufMetadataValue, GgufQuantizationType};
 use crate::quantization::{quantize_scalar, quantized_size};
 use anyhow::{Context, Result, anyhow, bail};
@@ -8,6 +11,7 @@ use safetensors::tensor::{Dtype, SafeTensors};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs::File;
+use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
@@ -15,6 +19,7 @@ pub struct SafetensorsToGgufConfig {
     pub arch_override: Option<String>,
     pub map_hf_tensor_names: bool,
     pub config_path: Option<PathBuf>,
+    pub target_quantization: Option<GgufQuantizationType>,
 }
 
 impl Default for SafetensorsToGgufConfig {
@@ -23,6 +28,7 @@ impl Default for SafetensorsToGgufConfig {
             arch_override: None,
             map_hf_tensor_names: true,
             config_path: None,
+            target_quantization: None,
         }
     }
 }
@@ -33,6 +39,34 @@ struct OutputTensor {
     dimensions: Vec<u64>,
     ggml_type: u32,
     data: Vec<u8>,
+}
+
+/// Read the causal backbone layer count from a HF config.json, looking in both
+/// the root and `text_config` for `num_hidden_layers`.
+fn mtp_base_layer_from_config(cfg_path: Option<&Path>) -> Option<usize> {
+    let cfg_path = cfg_path?;
+    let raw = std::fs::read_to_string(cfg_path).ok()?;
+    let json: Value = serde_json::from_str(&raw).ok()?;
+    let cfg = json
+        .get("text_config")
+        .filter(|v| v.is_object())
+        .unwrap_or(&json);
+    cfg.get("num_hidden_layers")?.as_u64().map(|n| n as usize)
+}
+
+/// Rewrite flat Qwen3.5/3.6 MTP tensor names (`mtp.fc.weight`, `mtp.layers.0.*`)
+/// to oxidize's `blk.{base}.nextn.*` naming. The base layer is the number of
+/// causal backbone layers (e.g. 32 for a 32-layer model), so the MTP block is
+/// appended immediately after the main stack.
+fn rewrite_flat_mtp_tensor_names(
+    tensors: &mut [(String, Dtype, Vec<usize>, Vec<u8>)],
+    base_layer: usize,
+) {
+    for (name, _, _, _) in tensors.iter_mut() {
+        if let Some(mapped) = map_flat_qwen_mtp_tensor_name(name, base_layer) {
+            *name = mapped;
+        }
+    }
 }
 
 /// Requantize every quantizable tensor in an existing GGUF to `target`.
@@ -126,7 +160,12 @@ pub fn convert_safetensors_to_gguf(
     output: &Path,
     config: &SafetensorsToGgufConfig,
 ) -> Result<usize> {
+    if input.is_dir() && find_weight_index(input)?.is_some() {
+        return convert_safetensors_dir_streaming(input, output, config);
+    }
+
     let (tensors, st_meta, config_dir) = load_all_tensors(input)?;
+    let mut tensors = preprocess_hf_tensors_for_gguf(tensors).map_err(|e| anyhow!(e))?;
     let arch = resolve_architecture(config, &st_meta, config_dir.as_deref(), input)?;
 
     let mut metadata = build_base_metadata(&st_meta, &arch, input);
@@ -134,6 +173,14 @@ pub fn convert_safetensors_to_gguf(
     let cfg_path = config.config_path.as_ref().or(auto_config.as_ref());
     if let Some(cfg_path) = cfg_path.filter(|p| p.is_file()) {
         merge_hf_config_metadata(&mut metadata, &arch, cfg_path)?;
+    }
+
+    // Qwen3.5/3.6 MTP modules may be saved either as `model.layers.{L}.mtp.*`
+    // (handled by `map_hf_tensor_name`) or as flat top-level `mtp.*` tensors.
+    // For the flat form we need the backbone layer count to know where to place
+    // the appended nextn block, so rewrite the names once the config is loaded.
+    if let Some(base_layer) = mtp_base_layer_from_config(cfg_path.map(|p| p.as_path())) {
+        rewrite_flat_mtp_tensor_names(&mut tensors, base_layer);
     }
 
     // Embed tokenizer metadata so the converted GGUF is self-contained. HF
@@ -154,6 +201,13 @@ pub fn convert_safetensors_to_gguf(
 
     let output_tensors = build_output_tensors(&tensors, config.map_hf_tensor_names)?;
     let gguf_bytes = write_gguf(3, &metadata, &output_tensors, 32)?;
+    // Apply target quantization on the single-file / non-index path too — only
+    // the streaming directory path quantized before, so plain file conversions
+    // silently emitted an unquantized GGUF.
+    let gguf_bytes = match config.target_quantization {
+        Some(target) => quantize_gguf_to_target(&gguf_bytes, target)?,
+        None => gguf_bytes,
+    };
     std::fs::write(output, &gguf_bytes)
         .with_context(|| format!("failed to write {}", output.display()))?;
     Ok(output_tensors.len())
@@ -207,7 +261,9 @@ fn normalize_hf_arch(model_type: &str) -> String {
     match model_type.to_ascii_lowercase().as_str() {
         "qwen2" | "qwen2_moe" | "qwen2moe" => "qwen2".to_owned(),
         "qwen3" | "qwen3_moe" => "qwen3".to_owned(),
-        "qwen3_5" | "qwen35" => "qwen35".to_owned(),
+        "qwen3_5" | "qwen35" | "qwen3_5_moe" | "qwen3_5_moe_text" | "qwen35moe" => {
+            "qwen35".to_owned()
+        }
         "llama" | "mistral" | "gemma" | "phi" | "phi3" | "mixtral" => model_type.to_owned(),
         other => other.to_owned(),
     }
@@ -319,6 +375,22 @@ fn find_weight_index(dir: &Path) -> Result<Option<PathBuf>> {
     Ok(candidates.into_iter().next())
 }
 
+fn load_safetensors_tensor_index(
+    path: &Path,
+) -> Result<(Vec<(String, Dtype, Vec<usize>)>, BTreeMap<String, String>)> {
+    let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let mmap = unsafe { memmap2::Mmap::map(&file) }
+        .with_context(|| format!("failed to mmap {}", path.display()))?;
+    let st = SafeTensors::deserialize(&mmap)
+        .map_err(|e| anyhow!("failed to parse SafeTensors: {e:?}"))?;
+    let meta = read_safetensors_metadata(&mmap)?;
+    let mut tensors = Vec::with_capacity(st.len());
+    for (name, view) in st.tensors() {
+        tensors.push((name.to_owned(), view.dtype(), view.shape().to_vec()));
+    }
+    Ok((tensors, meta))
+}
+
 fn load_safetensors_file(
     path: &Path,
 ) -> Result<(
@@ -422,14 +494,37 @@ fn merge_hf_config_metadata(
             meta.insert(key.to_owned(), GgufMetadataValue::Uint32(v));
         }
     };
-    let insert_f32 = |meta: &mut BTreeMap<_, _>, key: &str, field: &str| {
+    let insert_f32 = |meta: &mut BTreeMap<_, _>, key: &str, field: &str| -> bool {
         if let Some(v) = cfg.get(field).and_then(json_f32) {
             meta.insert(key.to_owned(), GgufMetadataValue::Float32(v));
+            true
+        } else {
+            false
         }
     };
 
     insert_u32(meta, &prefix("embedding_length"), "hidden_size");
-    insert_u32(meta, &prefix("block_count"), "num_hidden_layers");
+    let block_count = cfg.get("num_hidden_layers").and_then(json_u32);
+    let nextn_layers = cfg.get("mtp_num_hidden_layers").and_then(json_u32);
+    // Qwen3.5/3.6-style in-model multi-token prediction (MTP/nextn) layers are
+    // appended after the main transformer stack. Oxidize's loader treats
+    // `block_count` as the total number of `blk.*` layers (causal backbone +
+    // nextn) and subtracts `nextn_predict_layers` to obtain the backbone count.
+    // HF configs store these counts separately, so add them together.
+    if let Some(block_count) = block_count {
+        let total = if let Some(nextn) = nextn_layers {
+            block_count + nextn
+        } else {
+            block_count
+        };
+        meta.insert(prefix("block_count"), GgufMetadataValue::Uint32(total));
+    }
+    if let Some(nextn) = nextn_layers {
+        meta.insert(
+            prefix("nextn_predict_layers"),
+            GgufMetadataValue::Uint32(nextn),
+        );
+    }
     insert_u32(meta, &prefix("feed_forward_length"), "intermediate_size");
     insert_u32(meta, &prefix("attention.head_count"), "num_attention_heads");
     insert_u32(
@@ -464,17 +559,33 @@ fn merge_hf_config_metadata(
         &prefix("attention.layer_norm_rms_epsilon"),
         "rms_norm_eps",
     );
-    insert_f32(meta, &prefix("rope.freq_base"), "rope_theta");
+    if !insert_f32(meta, &prefix("rope.freq_base"), "rope_theta")
+        && let Some(rp) = cfg.get("rope_parameters").and_then(|v| v.as_object())
+        && let Some(theta) = rp.get("rope_theta").and_then(json_f32)
+    {
+        meta.insert(
+            prefix("rope.freq_base").to_owned(),
+            GgufMetadataValue::Float32(theta),
+        );
+    }
     insert_u32(meta, &prefix("attention.sliding_window"), "sliding_window");
     insert_u32(meta, &prefix("expert_count"), "num_experts");
     insert_u32(meta, &prefix("expert_used_count"), "num_experts_per_tok");
+    insert_u32(
+        meta,
+        &prefix("expert_feed_forward_length"),
+        "moe_intermediate_size",
+    );
 
-    if let Some(model_type) = cfg.get("model_type").and_then(|v| v.as_str()) {
-        meta.insert(
-            "general.architecture".to_owned(),
-            GgufMetadataValue::String(normalize_hf_arch(model_type)),
-        );
-    }
+    // general.architecture MUST match the metadata key prefix (`arch`),
+    // otherwise the loader builds keys like `qwen3_5_text.attention.head_count`
+    // that don't exist and silently falls back to defaults. Use the already
+    // resolved `arch` rather than re-deriving from a (possibly `_text`-suffixed
+    // multimodal) model_type.
+    meta.insert(
+        "general.architecture".to_owned(),
+        GgufMetadataValue::String(arch.to_owned()),
+    );
     Ok(())
 }
 
@@ -704,11 +815,20 @@ fn build_output_tensors(
 ) -> Result<Vec<OutputTensor>> {
     let mut out: Vec<OutputTensor> = Vec::with_capacity(tensors.len());
     for (name, dtype, shape, raw_data) in tensors {
-        let output_name = if map_hf_names {
+        let output_name = if name.starts_with("blk.")
+            || name == "tok_embeddings.weight"
+            || name == "output.weight"
+            || name == "norm.weight"
+        {
+            name.clone()
+        } else if map_hf_names {
             map_hf_tensor_name(name)
         } else {
             name.clone()
         };
+        if output_name.is_empty() {
+            continue;
+        }
         let dimensions: Vec<u64> = shape.iter().map(|&d| d as u64).collect();
         let (ggml_type, data) = match dtype {
             Dtype::F32 => (0_u32, raw_data.clone()),
@@ -738,6 +858,486 @@ fn build_output_tensors(
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(out)
+}
+
+#[derive(Debug, Clone, Copy)]
+enum StreamTransform {
+    Passthrough,
+    SplitGateUpGate,
+    SplitGateUpUp,
+    FlattenConv1d,
+}
+
+#[derive(Debug, Clone)]
+struct PlannedTensor {
+    name: String,
+    dimensions: Vec<u64>,
+    ggml_type: u32,
+    source_name: String,
+    source_shard: PathBuf,
+    transform: StreamTransform,
+}
+
+fn dtype_to_ggml_type(dtype: Dtype) -> Result<u32> {
+    Ok(match dtype {
+        Dtype::F32 => 0,
+        Dtype::F16 => 1,
+        Dtype::U8 | Dtype::I8 => 24,
+        Dtype::I16 => 25,
+        Dtype::I32 => 26,
+        Dtype::I64 => 27,
+        Dtype::BF16 => 30,
+        other => bail!("unsupported SafeTensors dtype {other:?}"),
+    })
+}
+
+fn tensor_byte_len(ggml_type: u32, dimensions: &[u64]) -> Result<usize> {
+    let count: u64 = dimensions.iter().product();
+    let count = usize::try_from(count).map_err(|_| anyhow!("tensor element count overflow"))?;
+    let elem = match ggml_type {
+        0 => 4,
+        1 | 30 => 2,
+        24 => 1, // I8 / U8
+        25 => 2, // I16
+        26 => 4,
+        27 => 8,
+        other => bail!("unsupported ggml tensor type {other}"),
+    };
+    count
+        .checked_mul(elem)
+        .ok_or_else(|| anyhow!("tensor byte length overflow"))
+}
+
+fn plan_stream_outputs(
+    name: &str,
+    dtype: Dtype,
+    shape: &[usize],
+    shard_path: &Path,
+    map_hf_names: bool,
+    mtp_base_layer: Option<usize>,
+) -> Result<Vec<PlannedTensor>> {
+    if name.starts_with("model.visual.") {
+        return Ok(Vec::new());
+    }
+
+    let ggml_type = dtype_to_ggml_type(dtype)?;
+    let shard = shard_path.to_path_buf();
+    let source_name = name.to_owned();
+
+    if name.ends_with(".mlp.experts.gate_up_proj") {
+        let Some(layer) = extract_layer_index(name) else {
+            return Ok(Vec::new());
+        };
+        if shape.len() != 3 || !shape[1].is_multiple_of(2) {
+            bail!("invalid gate_up_proj shape for {name}: {shape:?}");
+        }
+        let experts = shape[0];
+        let half = shape[1] / 2;
+        let hidden = shape[2];
+        return Ok(vec![
+            PlannedTensor {
+                name: format!("blk.{layer}.ffn_gate_exps.weight"),
+                dimensions: vec![experts as u64, half as u64, hidden as u64],
+                ggml_type,
+                source_name: source_name.clone(),
+                source_shard: shard.clone(),
+                transform: StreamTransform::SplitGateUpGate,
+            },
+            PlannedTensor {
+                name: format!("blk.{layer}.ffn_up_exps.weight"),
+                dimensions: vec![experts as u64, half as u64, hidden as u64],
+                ggml_type,
+                source_name,
+                source_shard: shard,
+                transform: StreamTransform::SplitGateUpUp,
+            },
+        ]);
+    }
+
+    if name.ends_with(".linear_attn.conv1d.weight") {
+        let Some(layer) = extract_layer_index(name) else {
+            return Ok(Vec::new());
+        };
+        if shape.len() != 3 || shape[1] != 1 {
+            bail!("invalid conv1d shape for {name}: {shape:?}");
+        }
+        let channels = shape[0];
+        let kernel = shape[2];
+        return Ok(vec![PlannedTensor {
+            name: format!("blk.{layer}.ssm_conv1d.weight"),
+            dimensions: vec![(kernel * channels) as u64],
+            ggml_type,
+            source_name,
+            source_shard: shard,
+            transform: StreamTransform::FlattenConv1d,
+        }]);
+    }
+
+    let output_name = if name.starts_with("blk.")
+        || name == "tok_embeddings.weight"
+        || name == "output.weight"
+        || name == "norm.weight"
+    {
+        name.to_owned()
+    } else if let Some(base) = mtp_base_layer {
+        // Flat Qwen3.5/3.6 MTP tensors (`mtp.fc.weight`, `mtp.layers.0.*`) need
+        // the backbone layer count to be placed correctly.
+        map_flat_qwen_mtp_tensor_name(name, base)
+            .or_else(|| {
+                if map_hf_names {
+                    Some(map_hf_tensor_name(name))
+                } else {
+                    None
+                }
+            })
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| name.to_owned())
+    } else if map_hf_names {
+        map_hf_tensor_name(name)
+    } else {
+        name.to_owned()
+    };
+    if output_name.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    Ok(vec![PlannedTensor {
+        name: output_name,
+        dimensions: shape.iter().map(|&d| d as u64).collect(),
+        ggml_type,
+        source_name,
+        source_shard: shard,
+        transform: StreamTransform::Passthrough,
+    }])
+}
+
+fn read_tensor_from_shard(
+    shard_path: &Path,
+    tensor_name: &str,
+) -> Result<(Dtype, Vec<usize>, Vec<u8>)> {
+    let file = File::open(shard_path)
+        .with_context(|| format!("failed to open {}", shard_path.display()))?;
+    let mmap = unsafe { memmap2::Mmap::map(&file) }
+        .with_context(|| format!("failed to mmap {}", shard_path.display()))?;
+    let st = SafeTensors::deserialize(&mmap)
+        .map_err(|e| anyhow!("failed to parse SafeTensors: {e:?}"))?;
+    let view = st.tensor(tensor_name).map_err(|e| {
+        anyhow!(
+            "tensor {tensor_name} missing in {}: {e:?}",
+            shard_path.display()
+        )
+    })?;
+    Ok((view.dtype(), view.shape().to_vec(), view.data().to_vec()))
+}
+
+fn materialize_planned_tensor(plan: &PlannedTensor) -> Result<Vec<u8>> {
+    let (dtype, shape, raw) = read_tensor_from_shard(&plan.source_shard, &plan.source_name)?;
+    match plan.transform {
+        StreamTransform::Passthrough => Ok(raw),
+        StreamTransform::SplitGateUpGate | StreamTransform::SplitGateUpUp => {
+            let Some(layer) = extract_layer_index(&plan.source_name) else {
+                bail!("missing layer index for {}", plan.source_name);
+            };
+            let split = split_fused_gate_up_proj(layer, dtype, &shape, &raw)
+                .ok_or_else(|| anyhow!("failed to split gate_up_proj {}", plan.source_name))?;
+            let idx = match plan.transform {
+                StreamTransform::SplitGateUpGate => 0,
+                StreamTransform::SplitGateUpUp => 1,
+                _ => unreachable!(),
+            };
+            Ok(split[idx].3.clone())
+        }
+        StreamTransform::FlattenConv1d => {
+            let Some(layer) = extract_layer_index(&plan.source_name) else {
+                bail!("missing layer index for {}", plan.source_name);
+            };
+            let (_, _, _, flat) = flatten_linear_attn_conv1d(layer, dtype, &shape, &raw)
+                .ok_or_else(|| anyhow!("failed to flatten conv1d {}", plan.source_name))?;
+            Ok(flat)
+        }
+    }
+}
+
+fn convert_safetensors_dir_streaming(
+    input: &Path,
+    output: &Path,
+    config: &SafetensorsToGgufConfig,
+) -> Result<usize> {
+    let index_path = find_weight_index(input)?
+        .ok_or_else(|| anyhow!("missing safetensors index in {}", input.display()))?;
+    let index_raw = std::fs::read_to_string(&index_path)?;
+    let index: Value = serde_json::from_str(&index_raw).context("invalid weight index JSON")?;
+
+    let mut st_meta = BTreeMap::new();
+    if let Some(meta) = index.get("metadata").and_then(|v| v.as_object()) {
+        for (k, v) in meta {
+            if let Some(s) = v.as_str() {
+                st_meta.insert(k.clone(), s.to_owned());
+            }
+        }
+    }
+
+    let weight_map = index
+        .get("weight_map")
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| anyhow!("weight index missing weight_map"))?;
+
+    let mut shard_meta_cache: BTreeMap<String, Vec<(String, Dtype, Vec<usize>)>> = BTreeMap::new();
+    let mut planned: Vec<PlannedTensor> = Vec::new();
+    let auto_config = input.join("config.json");
+    let cfg_path = config.config_path.as_ref().unwrap_or(&auto_config);
+    let mtp_base_layer = mtp_base_layer_from_config(Some(cfg_path));
+
+    for (tensor_name, shard_name_val) in weight_map {
+        let shard_name = shard_name_val
+            .as_str()
+            .ok_or_else(|| anyhow!("weight_map entry for {tensor_name} is not a string"))?;
+        let shard_path = input.join(shard_name);
+        if !shard_meta_cache.contains_key(shard_name) {
+            let (tensor_index, meta) = load_safetensors_tensor_index(&shard_path)?;
+            st_meta.extend(meta);
+            shard_meta_cache.insert(shard_name.to_owned(), tensor_index);
+        }
+        let shard_tensors = shard_meta_cache.get(shard_name).unwrap();
+        let Some((dtype, shape)) = shard_tensors
+            .iter()
+            .find(|(n, ..)| n == tensor_name)
+            .map(|(_, d, s)| (*d, s.clone()))
+        else {
+            bail!(
+                "tensor {tensor_name} not found in shard {}",
+                shard_path.display()
+            );
+        };
+        planned.extend(plan_stream_outputs(
+            tensor_name,
+            dtype,
+            &shape,
+            &shard_path,
+            config.map_hf_tensor_names,
+            mtp_base_layer,
+        )?);
+    }
+
+    planned.sort_by(|a, b| a.name.cmp(&b.name));
+    eprintln!(
+        "streaming convert: {} HF tensors -> {} GGUF tensors",
+        weight_map.len(),
+        planned.len()
+    );
+
+    let arch = resolve_architecture(config, &st_meta, Some(input), input)?;
+    let mut metadata = build_base_metadata(&st_meta, &arch, input);
+    if cfg_path.is_file() {
+        merge_hf_config_metadata(&mut metadata, &arch, cfg_path)?;
+    }
+    if let Err(error) = merge_hf_tokenizer_metadata(&mut metadata, input) {
+        eprintln!(
+            "warning: failed to embed tokenizer metadata from {}: {error:#}",
+            input.display()
+        );
+    }
+
+    if let Some(target) = config.target_quantization
+        && let Some(file_type) = gguf_file_type_id(target)
+    {
+        metadata.insert(
+            "general.file_type".to_owned(),
+            GgufMetadataValue::Uint32(file_type),
+        );
+    }
+
+    write_gguf_streaming(
+        output,
+        3,
+        &metadata,
+        &planned,
+        32,
+        config.target_quantization,
+    )?;
+    Ok(planned.len())
+}
+
+fn gguf_file_type_id(target: GgufQuantizationType) -> Option<u32> {
+    match target {
+        GgufQuantizationType::Q8_0 => Some(7),
+        GgufQuantizationType::Q4_0 => Some(2),
+        GgufQuantizationType::Q4_1 => Some(3),
+        GgufQuantizationType::Q4_K_M => Some(15),
+        GgufQuantizationType::Q4_K_S => Some(14),
+        GgufQuantizationType::Q6_K => Some(18),
+        _ => None,
+    }
+}
+
+fn ggml_type_id(target: GgufQuantizationType) -> Result<u32> {
+    Ok(match target {
+        GgufQuantizationType::F32 => 0,
+        GgufQuantizationType::F16 => 1,
+        GgufQuantizationType::Q4_0 => 2,
+        GgufQuantizationType::Q4_1 => 3,
+        GgufQuantizationType::Q5_0 => 6,
+        GgufQuantizationType::Q5_1 => 7,
+        GgufQuantizationType::Q8_0 => 8,
+        GgufQuantizationType::Q2_K => 10,
+        GgufQuantizationType::Q3_K_S => 11,
+        GgufQuantizationType::Q3_K_M => 12,
+        GgufQuantizationType::Q3_K_L => 13,
+        GgufQuantizationType::Q4_K_S => 14,
+        GgufQuantizationType::Q4_K_M => 15,
+        GgufQuantizationType::Q5_K_S => 16,
+        GgufQuantizationType::Q5_K_M => 17,
+        GgufQuantizationType::Q6_K => 18,
+        other => bail!("unsupported GGUF target type {other:?}"),
+    })
+}
+
+fn planned_data_len(plan: &PlannedTensor, target: Option<GgufQuantizationType>) -> Result<usize> {
+    let raw = tensor_byte_len(plan.ggml_type, &plan.dimensions)?;
+    if plan.dimensions.len() < 2 {
+        return Ok(raw);
+    }
+    let Some(target) = target else {
+        return Ok(raw);
+    };
+    if !matches!(plan.ggml_type, 0 | 1 | 30) {
+        return Ok(raw);
+    }
+    let count: usize = plan
+        .dimensions
+        .iter()
+        .map(|d| usize::try_from(*d).unwrap_or(0))
+        .product();
+    quantized_size(target, count).map_err(|e| anyhow!("{e:?}"))
+}
+
+fn maybe_quantize_tensor_data(
+    target: Option<GgufQuantizationType>,
+    ggml_type: u32,
+    dimensions: &[u64],
+    data: Vec<u8>,
+) -> Result<(u32, Vec<u8>)> {
+    if dimensions.len() < 2 {
+        return Ok((ggml_type, data));
+    }
+    let Some(target) = target else {
+        return Ok((ggml_type, data));
+    };
+    if !matches!(ggml_type, 0 | 1 | 30) {
+        return Ok((ggml_type, data));
+    }
+    let source = GgufQuantizationType::from_ggml_type(ggml_type);
+    let count: usize = dimensions
+        .iter()
+        .map(|d| usize::try_from(*d).unwrap_or(0))
+        .product();
+    let out_size = quantized_size(target, count).map_err(|e| anyhow!("{e:?}"))?;
+    let mut out = vec![0_u8; out_size];
+    quantize_scalar(source, target, &data, &mut out).map_err(|e| anyhow!("{e:?}"))?;
+    Ok((ggml_type_id(target)?, out))
+}
+
+fn write_gguf_streaming(
+    path: &Path,
+    version: u32,
+    metadata: &BTreeMap<String, GgufMetadataValue>,
+    planned: &[PlannedTensor],
+    alignment: u64,
+    target: Option<GgufQuantizationType>,
+) -> Result<()> {
+    if alignment == 0 || !alignment.is_power_of_two() {
+        bail!("invalid GGUF alignment: {alignment}");
+    }
+
+    let mut data_lens = Vec::with_capacity(planned.len());
+    let mut output_types = Vec::with_capacity(planned.len());
+    for plan in planned {
+        data_lens.push(planned_data_len(plan, target)?);
+        output_types.push(
+            if let Some(t) = target
+                && plan.dimensions.len() >= 2
+                && matches!(plan.ggml_type, 0 | 1 | 30)
+            {
+                ggml_type_id(t)?
+            } else {
+                plan.ggml_type
+            },
+        );
+    }
+
+    let mut relative_offsets = Vec::with_capacity(planned.len());
+    let mut cursor: u64 = 0;
+    for &len in &data_lens {
+        cursor = align_up(cursor, alignment)?;
+        relative_offsets.push(cursor);
+        cursor = cursor
+            .checked_add(len as u64)
+            .ok_or_else(|| anyhow!("tensor data offset overflow"))?;
+    }
+
+    let mut header = Vec::new();
+    header.extend_from_slice(b"GGUF");
+    header.extend_from_slice(&version.to_le_bytes());
+    header.extend_from_slice(&(planned.len() as u64).to_le_bytes());
+    header.extend_from_slice(&(metadata.len() as u64).to_le_bytes());
+    for (key, value) in metadata {
+        write_string(&mut header, key);
+        write_metadata_value(&mut header, value)?;
+    }
+    for (plan, (&rel_offset, &out_type)) in planned
+        .iter()
+        .zip(relative_offsets.iter().zip(output_types.iter()))
+    {
+        write_string(&mut header, &plan.name);
+        header.extend_from_slice(&(plan.dimensions.len() as u32).to_le_bytes());
+        for dim in &plan.dimensions {
+            header.extend_from_slice(&dim.to_le_bytes());
+        }
+        header.extend_from_slice(&out_type.to_le_bytes());
+        header.extend_from_slice(&rel_offset.to_le_bytes());
+    }
+    pad_to(&mut header, alignment)?;
+    let data_start = header.len() as u64;
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file =
+        File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
+    let mut out = BufWriter::new(file);
+    out.write_all(&header)?;
+
+    for (idx, plan) in planned.iter().enumerate() {
+        if idx % 25 == 0 {
+            eprintln!(
+                "writing tensor {}/{}: {}",
+                idx + 1,
+                planned.len(),
+                plan.name
+            );
+        }
+        let file_offset = data_start + relative_offsets[idx];
+        out.seek(SeekFrom::Start(file_offset))?;
+        let raw = materialize_planned_tensor(plan)?;
+        let (_ggml_type, data) =
+            maybe_quantize_tensor_data(target, plan.ggml_type, &plan.dimensions, raw)?;
+        if data.len() != data_lens[idx] {
+            bail!(
+                "tensor {} byte length mismatch: expected {}, got {}",
+                plan.name,
+                data_lens[idx],
+                data.len()
+            );
+        }
+        out.write_all(&data)?;
+        let aligned_end = align_up(file_offset + data.len() as u64, alignment)? as u64;
+        let pad_len = aligned_end.saturating_sub(file_offset + data.len() as u64);
+        if pad_len > 0 {
+            out.write_all(&vec![0_u8; pad_len as usize])?;
+        }
+    }
+    out.flush()?;
+    Ok(())
 }
 
 fn write_gguf(

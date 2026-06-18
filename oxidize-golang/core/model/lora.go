@@ -5,17 +5,58 @@ import (
 	"math"
 )
 
-// LoraLayer mirrors LoraLayer.
+// LoraLayer mirrors LoraLayer with optional low-rank weight matrices.
 type LoraLayer struct {
-	Name      string
-	Rank      int
-	Alpha     float32
-	Scale     float32
-	BaseShape []int
-	UpLoaded  bool
+	Name       string
+	Rank       int
+	Alpha      float32
+	Scale      float32
+	BaseShape  []int
+	UpLoaded   bool
 	DownLoaded bool
+	Up         []float32 // [rank * inDim]
+	Down       []float32 // [outDim * rank]
+	InDim      int
+	OutDim     int
 }
 
+// SetLowRankWeights attaches A/B matrices for low-rank adaptation.
+func (l *LoraLayer) SetLowRankWeights(up, down []float32, inDim, outDim int) {
+	l.Up, l.Down = up, down
+	l.InDim, l.OutDim = inDim, outDim
+	l.UpLoaded = len(up) > 0
+	l.DownLoaded = len(down) > 0
+}
+
+// ApplyLowRankDelta adds scale * (x @ A @ B) to out when matrices are loaded.
+func (l LoraLayer) ApplyLowRankDelta(x, out []float32) {
+	if !l.UpLoaded || !l.DownLoaded || l.Rank <= 0 || l.InDim <= 0 || l.OutDim <= 0 {
+		return
+	}
+	if len(x) < l.InDim || len(out) < l.OutDim {
+		return
+	}
+	hidden := make([]float32, l.Rank)
+	for r := 0; r < l.Rank; r++ {
+		var sum float32
+		base := r * l.InDim
+		for i := 0; i < l.InDim; i++ {
+			sum += l.Up[base+i] * x[i]
+		}
+		hidden[r] = sum
+	}
+	scale := l.Scale
+	if scale == 0 && l.Alpha > 0 && l.Rank > 0 {
+		scale = l.Alpha / float32(l.Rank)
+	}
+	for o := 0; o < l.OutDim; o++ {
+		var sum float32
+		for r := 0; r < l.Rank; r++ {
+			sum += l.Down[o*l.Rank+r] * hidden[r]
+		}
+		out[o] += scale * sum
+	}
+}
 // NewLoraLayer constructs a layer placeholder.
 func NewLoraLayer(name string, rank int, alpha float32, baseShape []int) LoraLayer {
 	scale := float32(1.0)

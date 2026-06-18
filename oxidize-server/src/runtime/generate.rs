@@ -1,4 +1,5 @@
 //! Generation engine: sequential path and PagedAttention path (blocking + streaming).
+#![deny(clippy::unwrap_used, clippy::expect_used)]
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -7,7 +8,10 @@ use std::task::{Context, Poll, Wake, Waker};
 
 use futures_util::Stream;
 use oxidize_core::{
-    generation::{GenerationConfig, GenerationStream},
+    generation::{
+        GenerationConfig, GenerationError as CoreGenerationError, GenerationStream,
+        MtpGenerationStream, SpeculativeGenerationConfig, SpeculativeGenerationStream,
+    },
     model::{Model, Session, Token},
     paged_attention::{Scheduler, Sequence},
     sampling::{SamplingConfig, sample},
@@ -15,7 +19,7 @@ use oxidize_core::{
 };
 use rand::{SeedableRng, rngs::StdRng};
 
-use crate::runtime::model::ModelRuntime;
+use crate::runtime::model::{LoadedModel, ModelRuntime};
 use crate::runtime::paged::PagedModelRuntime;
 use crate::schema::ChatMessageInput;
 
@@ -64,6 +68,73 @@ impl Wake for NoopWaker {
     fn wake(self: Arc<Self>) {}
 }
 
+enum ActiveGenerationStream<'a> {
+    Standard(GenerationStream<'a, LoadedModel>),
+    Speculative(SpeculativeGenerationStream<'a, LoadedModel>),
+    Mtp(MtpGenerationStream<'a>),
+}
+
+impl ActiveGenerationStream<'_> {
+    fn poll_next(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Token, CoreGenerationError>>> {
+        match self.get_mut() {
+            Self::Standard(stream) => Pin::new(stream).poll_next(cx),
+            Self::Speculative(stream) => Pin::new(stream).poll_next(cx),
+            Self::Mtp(stream) => Pin::new(stream).poll_next(cx),
+        }
+    }
+}
+
+fn open_generation_stream<'a>(
+    runtime: &'a ModelRuntime,
+    model: &'a mut LoadedModel,
+    draft: Option<&'a mut oxidize_core::dflash::DFlashDraftModel>,
+    session: &'a mut Session,
+    prompt_tokens: &'a [Token],
+    config: GenerationConfig,
+    random: impl FnMut() -> f32 + 'a,
+) -> ActiveGenerationStream<'a> {
+    if let Some(draft_model) = draft {
+        ActiveGenerationStream::Speculative(SpeculativeGenerationStream::new(
+            model,
+            draft_model,
+            session,
+            prompt_tokens,
+            SpeculativeGenerationConfig {
+                generation: config,
+                draft_tokens_per_step: runtime.draft_tokens.max(1),
+            },
+            random,
+        ))
+    } else {
+        let use_native_mtp =
+            matches!(model, LoadedModel::Inference(inference) if inference.has_mtp());
+        if use_native_mtp
+            && let LoadedModel::Inference(inference_model) = model
+        {
+            return ActiveGenerationStream::Mtp(MtpGenerationStream::new(
+                inference_model.as_mut(),
+                session,
+                prompt_tokens,
+                SpeculativeGenerationConfig {
+                    generation: config,
+                    draft_tokens_per_step: runtime.draft_tokens.max(1),
+                },
+                random,
+            ));
+        }
+        ActiveGenerationStream::Standard(GenerationStream::new(
+            model,
+            session,
+            prompt_tokens,
+            config,
+            random,
+        ))
+    }
+}
+
 pub fn render_chat_prompt(runtime: &ModelRuntime, messages: &[ChatMessageInput]) -> String {
     let chat_messages = messages
         .iter()
@@ -109,10 +180,7 @@ fn generate_text_blocking(
     runtime: &ModelRuntime,
     request: GenerationRequest,
 ) -> Result<GenerationResult, GenerationError> {
-    let mut model = runtime
-        .model
-        .lock()
-        .map_err(|_| GenerationError::Other("model lock poisoned".to_owned()))?;
+    let mut model = runtime.model.blocking_lock();
     model
         .rewind_to(0)
         .map_err(|e| GenerationError::Other(format!("failed to reset model KV cache: {e:?}")))?;
@@ -120,7 +188,7 @@ fn generate_text_blocking(
     let prompt_tokens = runtime.tokenizer.encode_with_special_tokens(
         &request.prompt,
         EncodeOptions {
-            add_bos: true,
+            add_bos: runtime.tokenizer.add_bos_default(),
             add_eos: false,
             pad_to: None,
         },
@@ -162,20 +230,32 @@ fn generate_text_blocking(
     };
     let mut seeded_rng = request.seed.map(StdRng::seed_from_u64);
     let mut thread_rng = rand::thread_rng();
-    let mut stream =
-        GenerationStream::new(&mut *model, &mut session, &prompt_tokens, config, || {
+    let mut draft_guard = runtime
+        .draft
+        .as_ref()
+        .map(|draft| Ok(draft.blocking_lock()))
+        .transpose()?;
+    let mut stream = open_generation_stream(
+        runtime,
+        &mut model,
+        draft_guard.as_deref_mut(),
+        &mut session,
+        &prompt_tokens,
+        config,
+        || {
             seeded_rng.as_mut().map_or_else(
                 || rand::Rng::r#gen::<f32>(&mut thread_rng),
                 rand::Rng::r#gen::<f32>,
             )
-        });
+        },
+    );
     let waker = Waker::from(Arc::new(NoopWaker));
     let mut cx = Context::from_waker(&waker);
     let mut pinned = Pin::new(&mut stream);
     let mut generated_tokens = Vec::new();
 
     loop {
-        match Stream::poll_next(pinned.as_mut(), &mut cx) {
+        match ActiveGenerationStream::poll_next(pinned.as_mut(), &mut cx) {
             Poll::Ready(Some(Ok(token))) => generated_tokens.push(token),
             Poll::Ready(Some(Err(error))) => {
                 return Err(GenerationError::Other(format!(
@@ -223,10 +303,7 @@ fn generate_text_streaming_inner(
     tx: &tokio::sync::mpsc::Sender<Result<String, GenerationError>>,
     cancel: &Arc<AtomicBool>,
 ) -> Result<(), GenerationError> {
-    let mut model = runtime
-        .model
-        .lock()
-        .map_err(|_| GenerationError::Other("model lock poisoned".to_owned()))?;
+    let mut model = runtime.model.blocking_lock();
     model
         .rewind_to(0)
         .map_err(|e| GenerationError::Other(format!("failed to reset model KV cache: {e:?}")))?;
@@ -235,7 +312,7 @@ fn generate_text_streaming_inner(
     let prompt_tokens = runtime.tokenizer.encode_with_special_tokens(
         &request.prompt,
         EncodeOptions {
-            add_bos: true,
+            add_bos: runtime.tokenizer.add_bos_default(),
             add_eos: false,
             pad_to: None,
         },
@@ -277,13 +354,25 @@ fn generate_text_streaming_inner(
     };
     let mut seeded_rng = request.seed.map(StdRng::seed_from_u64);
     let mut thread_rng = rand::thread_rng();
-    let mut stream =
-        GenerationStream::new(&mut *model, &mut session, &prompt_tokens, config, || {
+    let mut draft_guard = runtime
+        .draft
+        .as_ref()
+        .map(|draft| Ok(draft.blocking_lock()))
+        .transpose()?;
+    let mut stream = open_generation_stream(
+        runtime,
+        &mut model,
+        draft_guard.as_deref_mut(),
+        &mut session,
+        &prompt_tokens,
+        config,
+        || {
             seeded_rng.as_mut().map_or_else(
                 || rand::Rng::r#gen::<f32>(&mut thread_rng),
                 rand::Rng::r#gen::<f32>,
             )
-        });
+        },
+    );
     let waker = Waker::from(Arc::new(NoopWaker));
     let mut cx = Context::from_waker(&waker);
     let mut pinned = Pin::new(&mut stream);
@@ -292,7 +381,7 @@ fn generate_text_streaming_inner(
         if cancel.load(Ordering::Relaxed) {
             return Ok(());
         }
-        match Stream::poll_next(pinned.as_mut(), &mut cx) {
+        match ActiveGenerationStream::poll_next(pinned.as_mut(), &mut cx) {
             Poll::Ready(Some(Ok(token))) => {
                 let piece = runtime.tokenizer.decode(&[token]).unwrap_or_default();
                 if tx.blocking_send(Ok(piece)).is_err() {
@@ -315,11 +404,7 @@ pub fn generate_with_scheduler_blocking(
     paged: &PagedModelRuntime,
     request: GenerationRequest,
 ) -> Result<GenerationResult, GenerationError> {
-    let mut model = paged
-        .runtime
-        .model
-        .lock()
-        .map_err(|_| GenerationError::Other("model lock poisoned".to_owned()))?;
+    let mut model = paged.runtime.model.blocking_lock();
     model
         .rewind_to(0)
         .map_err(|e| GenerationError::Other(format!("failed to reset model KV cache: {e:?}")))?;
@@ -328,7 +413,7 @@ pub fn generate_with_scheduler_blocking(
     let prompt_tokens = paged.runtime.tokenizer.encode_with_special_tokens(
         &request.prompt,
         EncodeOptions {
-            add_bos: true,
+            add_bos: paged.runtime.tokenizer.add_bos_default(),
             add_eos: false,
             pad_to: None,
         },
@@ -354,10 +439,7 @@ pub fn generate_with_scheduler_blocking(
     };
 
     let seq_id = paged.next_seq_id.fetch_add(1, Ordering::SeqCst);
-    let mut scheduler = paged
-        .scheduler
-        .lock()
-        .map_err(|_| GenerationError::Other("scheduler lock poisoned".to_owned()))?;
+    let mut scheduler = paged.scheduler.blocking_lock();
 
     let seq = Sequence::new(
         seq_id,
@@ -399,7 +481,7 @@ pub fn generate_with_scheduler_blocking(
 
     loop {
         let seq = scheduler.get_sequence(seq_id);
-        if seq.is_none() || seq.unwrap().is_finished() {
+        if seq.as_ref().is_none_or(|s| s.is_finished()) {
             break;
         }
 
@@ -476,11 +558,7 @@ fn generate_with_scheduler_streaming_inner(
     tx: &tokio::sync::mpsc::Sender<Result<String, GenerationError>>,
     cancel: Arc<AtomicBool>,
 ) -> Result<(), GenerationError> {
-    let mut model = paged
-        .runtime
-        .model
-        .lock()
-        .map_err(|_| GenerationError::Other("model lock poisoned".to_owned()))?;
+    let mut model = paged.runtime.model.blocking_lock();
     model
         .rewind_to(0)
         .map_err(|e| GenerationError::Other(format!("failed to reset model KV cache: {e:?}")))?;
@@ -489,7 +567,7 @@ fn generate_with_scheduler_streaming_inner(
     let prompt_tokens = paged.runtime.tokenizer.encode_with_special_tokens(
         &request.prompt,
         EncodeOptions {
-            add_bos: true,
+            add_bos: paged.runtime.tokenizer.add_bos_default(),
             add_eos: false,
             pad_to: None,
         },
@@ -515,10 +593,7 @@ fn generate_with_scheduler_streaming_inner(
     };
 
     let seq_id = paged.next_seq_id.fetch_add(1, Ordering::SeqCst);
-    let mut scheduler = paged
-        .scheduler
-        .lock()
-        .map_err(|_| GenerationError::Other("scheduler lock poisoned".to_owned()))?;
+    let mut scheduler = paged.scheduler.blocking_lock();
 
     let seq = Sequence::new(
         seq_id,
@@ -598,7 +673,7 @@ fn generate_with_scheduler_streaming_inner(
         }
 
         let seq = scheduler.get_sequence(seq_id);
-        if seq.is_none() || seq.unwrap().is_finished() {
+        if seq.as_ref().is_none_or(|s| s.is_finished()) {
             break;
         }
 

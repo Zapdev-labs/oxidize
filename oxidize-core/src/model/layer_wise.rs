@@ -347,6 +347,32 @@ fn gated_rms_norm(x: &mut [f32], weight: &[f32], gate: &[f32], eps: f32) {
     if n == 0 {
         return;
     }
+    // llama.cpp's GDN gated RMSNorm uses a near-zero eps; oxidize's model eps
+    // (1e-6) over-floors near-orthogonal-qk heads whose delta output is tiny.
+    let eps = std::env::var("OXIDIZE_GDN_EPS")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(eps);
+    if std::env::var_os("OXIDIZE_GDN_GATE_FIRST").is_some() {
+        // HF Qwen3NextRMSNormGated order (gate before norm).
+        for i in 0..n {
+            let g = gate.get(i).copied().unwrap_or(0.0_f32);
+            let silu = g * (1.0_f32 / (1.0_f32 + (-g).exp()));
+            x[i] *= silu;
+        }
+        let mut var = 0.0_f32;
+        for val in x.iter() {
+            var += val * val;
+        }
+        var /= n as f32;
+        let inv = 1.0_f32 / (var + eps).sqrt();
+        for i in 0..n {
+            let w = weight.get(i).copied().unwrap_or(1.0_f32);
+            x[i] = x[i] * inv * w;
+        }
+        return;
+    }
+    // Gate-after order (matches llama.cpp's qwen3next graph): rmsnorm * weight * silu(gate).
     let mut var = 0.0_f32;
     for val in x.iter() {
         var += val * val;
@@ -425,9 +451,20 @@ fn debug_vec(label: &str, x: &[f32]) {
 /// Per-layer hidden-state checksum tracing (OXIDIZE_TRACE_FWD=1) for
 /// diffing the batched window path against the per-token path.
 fn trace_fwd(path: &str, pos: usize, layer: usize, x: &[f32]) {
-    if std::env::var_os("OXIDIZE_TRACE_FWD").is_some() {
+    if crate::inference::trace_fwd_enabled() {
         let sum: f64 = x.iter().map(|v| *v as f64).sum();
-        eprintln!("TRACE {path} pos={pos} layer={layer} sum={sum:.9e}");
+        // OXIDIZE_TRACE_VALS=1 also prints the first 8 residual values so the
+        // stream can be diffed value-for-value against a reference (llama.cpp
+        // eval-callback) — sums alone can match by luck.
+        if crate::inference::trace_vals_enabled() {
+            let head: Vec<String> = x.iter().take(8).map(|v| format!("{v:.5}")).collect();
+            eprintln!(
+                "TRACE {path} pos={pos} layer={layer} sum={sum:.9e} vals=[{}]",
+                head.join(",")
+            );
+        } else {
+            eprintln!("TRACE {path} pos={pos} layer={layer} sum={sum:.9e}");
+        }
     }
 }
 
@@ -439,7 +476,7 @@ fn debug_hidden(label: &str, pos: usize, x: &[f32]) {
 
 impl LayerWiseModel {
     fn trace_state(&self, label: &str, pos: usize) {
-        if std::env::var_os("OXIDIZE_TRACE_FWD").is_some() {
+        if crate::inference::trace_fwd_enabled() {
             let s0: f64 = self
                 .ssm_states
                 .first()
@@ -505,6 +542,11 @@ impl LayerWiseModel {
         let mut output_weight: Option<WeightStorage> = None;
         let mut layer_tensors: Vec<HashMap<String, GgufTensorRef>> =
             vec![HashMap::new(); config.layer_count];
+        // Byte ranges of dense (non-routed-expert) mmap-resident weights: the
+        // candidate set for partial NUMA replication. Routed expert tensors
+        // (`*_exps`) are excluded — they are the bulk of MoE models and only
+        // ~2% of them is read per token; shared experts (`*_shexp`) are dense.
+        let mut dense_ranges: Vec<(usize, usize)> = Vec::new();
 
         let is_supported_quant_gemv = |qtype: GgufQuantizationType| {
             matches!(
@@ -535,6 +577,7 @@ impl LayerWiseModel {
                         .unwrap_or(config.hidden_size as u64)
                         as usize;
                     if is_supported_quant_gemv(qtype) {
+                        dense_ranges.push((offset, qsize));
                         tok_embeddings = Some(WeightStorage::MmapQuantized(
                             qtype,
                             mapped.mmap(),
@@ -558,6 +601,7 @@ impl LayerWiseModel {
                 }
                 "output.weight" => {
                     if is_supported_quant_gemv(qtype) {
+                        dense_ranges.push((offset, qsize));
                         output_weight = Some(WeightStorage::MmapQuantized(
                             qtype,
                             mapped.mmap(),
@@ -574,7 +618,8 @@ impl LayerWiseModel {
                 }
                 name if name.starts_with("blk.") => {
                     let parts: Vec<&str> = name.split('.').collect();
-                    if parts.len() < 4 {
+                    // Suffix-less vectors like `blk.N.ssm_a` are 3 parts.
+                    if parts.len() < 3 {
                         continue;
                     }
                     let layer_idx: usize = parts[1]
@@ -583,7 +628,16 @@ impl LayerWiseModel {
                     if layer_idx >= config.layer_count {
                         continue;
                     }
-                    let key = parts[2..].join(".");
+                    let mut key = parts[2..].join(".");
+                    // llama.cpp-style qwen35 GGUFs emit the GDN decay vector as
+                    // a bare `ssm_a` (no `.weight` suffix); canonicalize so the
+                    // slot loader's `ssm_a.weight` match finds it.
+                    if key == "ssm_a" {
+                        key = "ssm_a.weight".to_owned();
+                    }
+                    if !key.contains("_exps") {
+                        dense_ranges.push((offset, qsize));
+                    }
                     layer_tensors[layer_idx].insert(
                         key,
                         GgufTensorRef {
@@ -631,6 +685,40 @@ impl LayerWiseModel {
             );
         }
 
+        let numa_mode = std::env::var("OXIDIZE_NUMA_REPLICATE").unwrap_or_default();
+        if numa_mode == "1" || numa_mode == "dense" {
+            let t0 = std::time::Instant::now();
+            // Whole-model replication needs one full copy per node; cap it at
+            // a fraction of the smallest node so the copy cannot OOM the box.
+            // Past the cap (e.g. a 208 GB MoE GGUF on 92/224 GB nodes), fall
+            // back to replicating only the dense tensors — a few GB that
+            // carry roughly half the per-token weight reads.
+            let full_budget = crate::numa::min_node_total_bytes() / 2;
+            let full_fits = (mapped.bytes().len() as u64) <= full_budget;
+            let replicated = if numa_mode == "1" && full_fits {
+                if crate::numa::replicate(mapped.bytes()) {
+                    mapped.bytes().len()
+                } else {
+                    0
+                }
+            } else {
+                crate::numa::replicate_ranges(mapped.bytes(), &dense_ranges)
+            };
+            if replicated > 0 {
+                eprintln!(
+                    "layer-wise: NUMA-replicated {:.1} GiB of {} weights per node in {:.1}s",
+                    replicated as f64 / (1u64 << 30) as f64,
+                    if numa_mode == "1" && full_fits {
+                        "all"
+                    } else {
+                        "dense"
+                    },
+                    t0.elapsed().as_secs_f32()
+                );
+            } else {
+                eprintln!("layer-wise: NUMA replication unavailable; using shared mapping");
+            }
+        }
         Ok(Self {
             config,
             mmap: Arc::new(mapped.clone()),
@@ -1064,6 +1152,104 @@ impl LayerWiseModel {
             let logits = self.forward_single(tokens[0], start_pos)?;
             return Ok(vec![logits]);
         }
+        let xs = self.forward_window_states(tokens, start_pos)?;
+        let cfg = self.config.clone();
+        let h = cfg.hidden_size;
+
+        // Final norm + LM head, batched over the tokens that need logits.
+        let needed: Vec<usize> = if want_all_logits {
+            (0..kk).collect()
+        } else {
+            vec![kk - 1]
+        };
+        let nb = needed.len();
+        let mut normed_all = vec![0.0_f32; nb * h];
+        for (j, &t) in needed.iter().enumerate() {
+            let mut normed = vec![0.0_f32; h];
+            rms_norm_model(
+                &xs[t * h..(t + 1) * h],
+                &self.norm_weight,
+                cfg.rms_norm_eps,
+                &mut normed,
+                &cfg,
+            )?;
+            normed_all[j * h..(j + 1) * h].copy_from_slice(&normed);
+        }
+        let mut logits_all = vec![0.0_f32; nb * cfg.vocab_size];
+        self.lm_head_logits_batch(&normed_all, nb, &mut logits_all)?;
+        Ok(needed
+            .iter()
+            .enumerate()
+            .map(|(j, _)| logits_all[j * cfg.vocab_size..(j + 1) * cfg.vocab_size].to_vec())
+            .collect())
+    }
+
+    /// Batched final-normed hidden states for a window of tokens. This is the
+    /// training entry point: it advances KV/SSM state exactly like
+    /// `forward_window` but returns the post-final-norm hidden state for every
+    /// position (`tokens.len() * hidden_size`, row-major by position) instead
+    /// of computing LM-head logits.
+    pub fn forward_normed_hidden(
+        &mut self,
+        tokens: &[Token],
+        start_pos: usize,
+    ) -> Result<Vec<f32>, ModelError> {
+        let kk = tokens.len();
+        if kk == 0 {
+            return Err(ModelError::EmptyInput);
+        }
+        let xs = self.forward_window_states(tokens, start_pos)?;
+        let cfg = self.config.clone();
+        let h = cfg.hidden_size;
+        let mut normed_all = vec![0.0_f32; kk * h];
+        for t in 0..kk {
+            rms_norm_model(
+                &xs[t * h..(t + 1) * h],
+                &self.norm_weight,
+                cfg.rms_norm_eps,
+                &mut normed_all[t * h..(t + 1) * h],
+                &cfg,
+            )?;
+        }
+        Ok(normed_all)
+    }
+
+    /// LM-head logits for `count` rows of final-normed hidden states
+    /// (`normed_all` is `count * hidden_size`, `logits_out` is
+    /// `count * vocab_size`). Uses the batched GEMM weight path.
+    pub fn lm_head_logits_batch(
+        &self,
+        normed_all: &[f32],
+        count: usize,
+        logits_out: &mut [f32],
+    ) -> Result<(), ModelError> {
+        let h = self.config.hidden_size;
+        let vocab = self.config.vocab_size;
+        if normed_all.len() != count * h || logits_out.len() != count * vocab {
+            return Err(ModelError::InferenceFailed(format!(
+                "lm_head_logits_batch: normed={} logits={} expected {}x{h} and {}x{vocab}",
+                normed_all.len(),
+                logits_out.len(),
+                count,
+                count
+            )));
+        }
+        gemm_weight(&self.output_weight, vocab, h, normed_all, logits_out, count)
+            .map_err(|e| ModelError::InferenceFailed(format!("output: {:?}", e)))
+    }
+
+    /// Run the transformer stack over a window of tokens, returning the
+    /// pre-final-norm hidden state for every position (kk * hidden_size).
+    /// Advances KV cache and SSM state to `start_pos + tokens.len()`.
+    fn forward_window_states(
+        &mut self,
+        tokens: &[Token],
+        start_pos: usize,
+    ) -> Result<Vec<f32>, ModelError> {
+        let kk = tokens.len();
+        if kk == 0 {
+            return Err(ModelError::EmptyInput);
+        }
         let cfg = self.config.clone();
         let h = cfg.hidden_size;
 
@@ -1085,6 +1271,9 @@ impl LayerWiseModel {
             }
         }
 
+        for t in 0..kk {
+            trace_fwd("embd", start_pos + t, usize::MAX, &xs[t * h..(t + 1) * h]);
+        }
         for layer_idx in 0..cfg.layer_count {
             self.ensure_layer_loaded(layer_idx)
                 .map_err(|e| ModelError::InferenceFailed(format!("layer load: {}", e)))?;
@@ -1290,41 +1479,8 @@ impl LayerWiseModel {
             }
         }
 
-        // Final norm + LM head, batched over the tokens that need logits.
-        let needed: Vec<usize> = if want_all_logits {
-            (0..kk).collect()
-        } else {
-            vec![kk - 1]
-        };
-        let nb = needed.len();
-        let mut normed_all = vec![0.0_f32; nb * h];
-        for (j, &t) in needed.iter().enumerate() {
-            let mut normed = vec![0.0_f32; h];
-            rms_norm_model(
-                &xs[t * h..(t + 1) * h],
-                &self.norm_weight,
-                cfg.rms_norm_eps,
-                &mut normed,
-                &cfg,
-            )?;
-            normed_all[j * h..(j + 1) * h].copy_from_slice(&normed);
-        }
-        let mut logits_all = vec![0.0_f32; nb * cfg.vocab_size];
-        gemm_weight(
-            &self.output_weight,
-            cfg.vocab_size,
-            h,
-            &normed_all,
-            &mut logits_all,
-            nb,
-        )
-        .map_err(|e| ModelError::InferenceFailed(format!("output: {:?}", e)))?;
         self.ssm_pos = start_pos + kk;
-        Ok(needed
-            .iter()
-            .enumerate()
-            .map(|(j, _)| logits_all[j * cfg.vocab_size..(j + 1) * cfg.vocab_size].to_vec())
-            .collect())
+        Ok(xs)
     }
 
     fn run_mamba_layer(
@@ -1652,12 +1808,22 @@ impl LayerWiseModel {
                         ConvHistoryRing::new(conv_kernel, qkv_out_len);
                 }
                 let buffer = &self.ssm_conv_buffers[layer_idx];
+                // llama.cpp-converted GGUFs store ssm_conv1d as {kernel, channels}
+                // (kernel contiguous → offset c*kernel + tap); oxidize's own
+                // converter stores {channels, kernel} (tap-major → tap*ch + c).
+                let chan_major = std::env::var_os("OXIDIZE_CONV_CHAN_MAJOR").is_some();
+                let widx = |tap: usize, c: usize| {
+                    if chan_major {
+                        c * conv_kernel + tap
+                    } else {
+                        tap * qkv_out_len + c
+                    }
+                };
                 for c in 0..qkv_out_len {
-                    let mut sum = layer.ssm_conv1d[(conv_kernel - 1) * qkv_out_len + c] * mixed[c];
+                    let mut sum = layer.ssm_conv1d[widx(conv_kernel - 1, c)] * mixed[c];
                     for b in 1..conv_kernel {
                         if let Some(prev) = buffer.past_frame(b) {
-                            let weight_idx = (conv_kernel - 1 - b) * qkv_out_len + c;
-                            sum += layer.ssm_conv1d[weight_idx] * prev[c];
+                            sum += layer.ssm_conv1d[widx(conv_kernel - 1 - b, c)] * prev[c];
                         }
                     }
                     conv_out[c] = sum;
@@ -1707,8 +1873,14 @@ impl LayerWiseModel {
                     let mut k = conv_out[k_off..k_off + head_k_dim].to_vec();
                     l2_normalize(&mut q);
                     l2_normalize(&mut k);
-                    for x in q.iter_mut() {
-                        *x *= q_scale;
+                    // llama.cpp's GATED_DELTA_NET L2-norms q,k with NO 1/sqrt(d)
+                    // scale. Applying q_scale shrinks the core into the
+                    // eps-dominated regime of the per-head gated RMS norm,
+                    // breaking normalization. OXIDIZE_NO_QSCALE=1 disables it.
+                    if std::env::var_os("OXIDIZE_NO_QSCALE").is_none() {
+                        for x in q.iter_mut() {
+                            *x *= q_scale;
+                        }
                     }
 
                     let v = &conv_out[v_off..v_off + head_v_dim];
@@ -1719,7 +1891,14 @@ impl LayerWiseModel {
                     } else {
                         softplus(a_val)
                     };
-                    let g = -(a_log.exp()) * dt;
+                    // Raw A_log (oxidize converter): A = -exp(A_log). Baked A
+                    // (llama.cpp converter): ssm_a already stores A (negative),
+                    // use directly. OXIDIZE_SSM_A_DIRECT=1 selects baked mode.
+                    let g = if std::env::var_os("OXIDIZE_SSM_A_DIRECT").is_some() {
+                        a_log * dt
+                    } else {
+                        -(a_log.exp()) * dt
+                    };
                     let decay = g.exp();
 
                     for s in state_h.iter_mut() {
@@ -1768,6 +1947,98 @@ impl LayerWiseModel {
             }
         }
 
+        if layer_idx == 0 && crate::inference::trace_vals_enabled() {
+            let mabs = |v: &[f32]| v.iter().fold(0.0_f32, |m, x| m.max(x.abs()));
+            // Locate the outlier element of token-0 core and dump its factors.
+            let (mut bi, mut bv) = (0usize, 0.0_f32);
+            for (i, &x) in core_all[..value_dim.min(core_all.len())].iter().enumerate() {
+                if x.abs() > bv {
+                    bv = x.abs();
+                    bi = i;
+                }
+            }
+            let v_head = bi / head_v_dim;
+            let j = bi % head_v_dim;
+            let k_head = v_head / head_repeat.max(1);
+            // Recompute q,k (post conv+silu, l2norm, q_scale) for this head, t=0.
+            let conv0 = &conv_all[..qkv_out_len];
+            let q_off = k_head * head_k_dim;
+            let k_off = key_dim + k_head * head_k_dim;
+            let v_off = key_dim * 2 + v_head * head_v_dim;
+            let mut q = conv0[q_off..q_off + head_k_dim].to_vec();
+            let mut k = conv0[k_off..k_off + head_k_dim].to_vec();
+            l2_normalize(&mut q);
+            l2_normalize(&mut k);
+            for x in q.iter_mut() {
+                *x *= 1.0_f32 / (head_k_dim as f32).sqrt();
+            }
+            let kq: f32 = k.iter().zip(q.iter()).map(|(a, b)| a * b).sum();
+            let vval = conv0[v_off + j];
+            let beta = sigmoid(b_all[v_head]);
+            let ssum = |v: &[f32]| v.iter().map(|x| *x as f64).sum::<f64>();
+            // head0 t0 raw conv slices for direct comparison to llama:
+            //   llama v head0=[-0.0004,0.0526,0.0150]  q(l2)=[-0.0139,0.0896,-0.0231]
+            let mut q0 = conv0[..head_k_dim].to_vec();
+            let mut k0 = conv0[key_dim..key_dim + head_k_dim].to_vec();
+            l2_normalize(&mut q0);
+            l2_normalize(&mut k0);
+            eprintln!(
+                "GDN L0 head0 t0: v_raw={:?} q_l2={:?} k_l2={:?}",
+                &conv0[key_dim * 2..key_dim * 2 + 4],
+                &q0[..4],
+                &k0[..4],
+            );
+            eprintln!(
+                "GDN L0 head0 t0: core_pre(=attn_output)[0..6]={:?} (llama [-0.0000,0.0001,0.0000,..])",
+                &core_all[..6.min(core_all.len())],
+            );
+            // head46 factors: v, k·q, beta — diagnose higher-head collapse
+            for &vh in &[1usize, 46usize] {
+                let kh = vh / head_repeat.max(1);
+                let qo = kh * head_k_dim;
+                let ko = key_dim + kh * head_k_dim;
+                let vo = key_dim * 2 + vh * head_v_dim;
+                let mut qh = conv0[qo..qo + head_k_dim].to_vec();
+                let mut kh2 = conv0[ko..ko + head_k_dim].to_vec();
+                l2_normalize(&mut qh);
+                l2_normalize(&mut kh2);
+                for x in qh.iter_mut() {
+                    *x *= 1.0_f32 / (head_k_dim as f32).sqrt();
+                }
+                let kqv: f32 = kh2.iter().zip(qh.iter()).map(|(a, b)| a * b).sum();
+                // q,k post-l2norm (pre q_scale) for comparison to llama
+                let mut qn = conv0[qo..qo + head_k_dim].to_vec();
+                let mut kn = conv0[ko..ko + head_k_dim].to_vec();
+                l2_normalize(&mut qn);
+                l2_normalize(&mut kn);
+                let zh = vh * head_v_dim;
+                let zslice = &z_all[zh..zh + 3];
+                let silu0 = zslice[0] * (1.0 / (1.0 + (-zslice[0]).exp()));
+                eprintln!(
+                    "GDN L0 v_head={vh} k_head={kh}: k·q={:.6} beta={:.5} z[0..3]={:?} silu(z0)={:.4} qn[0..3]={:?} kn[0..3]={:?}",
+                    kqv,
+                    sigmoid(b_all[vh]),
+                    zslice,
+                    silu0,
+                    &qn[..3],
+                    &kn[..3],
+                );
+                let _ = (qh, kh2, &conv0[vo..vo + 3]);
+            }
+            eprintln!(
+                "GDN L0 t0 OUTLIER: idx={bi} v_head={v_head} j={j} core={bv:.5} | v={vval:.5} beta={beta:.5} k·q={kq:.6} | conv_v_max={:.4} conv_q_max={:.4} z_max={:.4} ssm_norm[0]={:.4}",
+                mabs(&conv0[key_dim * 2..qkv_out_len]),
+                mabs(&conv0[..key_dim]),
+                mabs(&z_all[..value_dim.min(z_all.len())]),
+                layer.ssm_norm.first().copied().unwrap_or(0.0),
+            );
+            eprintln!(
+                "GDN L0 SUMS (vs llama conv=4714 gdn_out=97 z=-35772 node55=-29.6): conv={:.1} core_pre={:.2} z={:.1}",
+                ssum(&conv_all),
+                ssum(&core_all),
+                ssum(&z_all),
+            );
+        }
         if !layer.ssm_norm.is_empty() && layer.ssm_norm.len() == head_v_dim {
             for t in 0..kk {
                 for head in 0..num_v_heads {
@@ -1781,6 +2052,18 @@ impl LayerWiseModel {
                     );
                 }
             }
+        }
+        if layer_idx == 0 && crate::inference::trace_vals_enabled() {
+            let _mabs = |v: &[f32]| v.iter().fold(0.0_f32, |m, x| m.max(x.abs()));
+            let _ssum = |v: &[f32]| v.iter().map(|x| *x as f64).sum::<f64>();
+            let hd = head_v_dim;
+            eprintln!(
+                "GDN L0 core_post head0={:?} head46={:?} head47={:?} (llama h46[-0.0044,-0.0048,0.0012] h47[-0.0035,-0.0000,-0.0012])",
+                &core_all[..3.min(core_all.len())],
+                &core_all[46 * hd..46 * hd + 3],
+                &core_all[47 * hd..47 * hd + 3],
+            );
+            // llama node_55 rows: head0 [0.0001,-0.0030,-0.0008] head1 [-0.0003,-0.0091,-0.0027]
         }
 
         let mut residual_all = vec![0.0_f32; kk * h];
@@ -1809,6 +2092,12 @@ impl LayerWiseModel {
                 residual_all[t * h..t * h + copy_len]
                     .copy_from_slice(&core_all[t * value_dim..t * value_dim + copy_len]);
             }
+        }
+        if layer_idx == 0 && crate::inference::trace_vals_enabled() {
+            eprintln!(
+                "GDN L0 residual(=linear_attn_out) t0[0..6]={:?} (llama [-0.0381,-0.0049,-0.0200,..])",
+                &residual_all[..6.min(residual_all.len())],
+            );
         }
         Ok(residual_all)
     }
@@ -1912,7 +2201,7 @@ impl LayerWiseModel {
             (q_full[..q_len_used_guess].to_vec(), None)
         };
 
-        if std::env::var_os("OXIDIZE_TRACE_FWD").is_some() {
+        if crate::inference::trace_fwd_enabled() {
             let s = |v: &[f32]| v.iter().map(|x| *x as f64).sum::<f64>();
             eprintln!(
                 "STAGE lw pos={pos} layer={layer_idx} normed={:.6e} q={:.6e} k={:.6e} v={:.6e} x={:.6e} nw_len={} nw={:.6e}",
@@ -1971,6 +2260,13 @@ impl LayerWiseModel {
             }
         }
 
+        if layer_idx == 3 && pos == 0 && crate::inference::trace_vals_enabled() {
+            eprintln!(
+                "ATTN L3 h0 pos0: q_prerope[0..6]={:?} q_head_dim={q_head_dim} rope_len={}",
+                &q[..6.min(q.len())],
+                cfg.effective_rope_dim().min(q_head_dim),
+            );
+        }
         for head in 0..q_heads {
             let off = head * q_head_dim;
             if off + q_head_dim > q.len() {
@@ -1987,6 +2283,12 @@ impl LayerWiseModel {
             )
             .map_err(|e| ModelError::InferenceFailed(format!("rope q: {:?}", e)))?;
             q[off..off + q_rope_len].copy_from_slice(&rotated);
+        }
+        if layer_idx == 3 && pos == 0 && crate::inference::trace_vals_enabled() {
+            eprintln!(
+                "ATTN L3 h0 pos0: q_postrope[0..6]={:?}",
+                &q[..6.min(q.len())]
+            );
         }
         for head in 0..kv_heads {
             let off = head * kv_head_dim;

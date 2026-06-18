@@ -3,6 +3,7 @@ package validation
 
 import (
 	"errors"
+	"sort"
 	"sync"
 	"time"
 )
@@ -58,9 +59,7 @@ func (r *Runner) Enable(s Suite) { r.mu.Lock(); r.suites[s] = true; r.mu.Unlock(
 // Disable disables a suite.
 func (r *Runner) Disable(s Suite) { r.mu.Lock(); r.suites[s] = false; r.mu.Unlock() }
 
-// Run executes enabled suites using a placeholder implementation. Each suite
-// always reports passed; downstream callers can override behaviour by
-// registering custom probes.
+// Run executes enabled suites using registered probes. Suites without probes fail.
 func (r *Runner) Run() ParityReport {
 	r.mu.Lock()
 	enabled := make([]Suite, 0, len(r.suites))
@@ -70,18 +69,30 @@ func (r *Runner) Run() ParityReport {
 		}
 	}
 	r.mu.Unlock()
+	sort.Slice(enabled, func(i, j int) bool { return enabled[i] < enabled[j] })
 	now := time.Now()
 	var results []Result
+	var failures []string
 	for _, s := range enabled {
-		results = append(results, Result{Suite: s, Passed: true, Elapsed: time.Microsecond, Output: "ok"})
+		start := time.Now()
+		if err := RunProbe(s); err != nil {
+			msg := string(s) + ": " + err.Error()
+			failures = append(failures, msg)
+			results = append(results, Result{Suite: s, Passed: false, Elapsed: time.Since(start), Output: msg})
+			continue
+		}
+		results = append(results, Result{Suite: s, Passed: true, Elapsed: time.Since(start), Output: "ok"})
 	}
 	r.mu.Lock()
 	r.results = results
 	r.mu.Unlock()
-	rep := ParityReport{RunAt: now, Total: len(results), Passed: len(results)}
-	if rep.Total != rep.Passed {
-		rep.Failed = rep.Total - rep.Passed
+	rep := ParityReport{RunAt: now, Total: len(results), Passed: 0, Failures: failures}
+	for _, res := range results {
+		if res.Passed {
+			rep.Passed++
+		}
 	}
+	rep.Failed = rep.Total - rep.Passed
 	return rep
 }
 

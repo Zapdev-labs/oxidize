@@ -1,20 +1,20 @@
 use crate::gguf::GgufQuantizationType;
+use crate::quantization::{
+    BLOCK_NVFP4_SIZE, BLOCK_Q2_K_SIZE, BLOCK_Q4_K_SIZE, BLOCK_Q6_K_SIZE, BLOCK_Q8_0_SIZE, QK8_0,
+    QK_K, QK_NVFP4, QK_NVFP4_SUB,
+};
 use rayon::prelude::*;
-use serde::{Deserialize, Serialize};
 #[cfg(target_arch = "x86")]
 use std::arch::x86::*;
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 
-const QK8_0: usize = 32;
-const BLOCK_Q8_0_SIZE: usize = 2 + QK8_0;
-const QK_K: usize = 256;
-const QK_NVFP4: usize = 64;
-const QK_NVFP4_SUB: usize = 16;
-const BLOCK_Q4_K_SIZE: usize = 2 * std::mem::size_of::<u16>() + 12 + QK_K / 2;
-const BLOCK_Q2_K_SIZE: usize = 2 * std::mem::size_of::<u16>() + QK_K / 16 + QK_K / 4;
-const BLOCK_Q6_K_SIZE: usize = std::mem::size_of::<u16>() + QK_K / 16 + 3 * QK_K / 4;
-const BLOCK_NVFP4_SIZE: usize = QK_NVFP4 / QK_NVFP4_SUB + QK_NVFP4 / 2;
+use super::errors::{
+    AttentionError, GemmError, GemvError, LayerNormError, LinearActivationError, RmsNormError,
+    RopeError, SoftmaxError, SwiGluError,
+};
+use super::types::{ActivationFn, DType};
+
 const E2M1_DOUBLED_VALUES: [f32; 16] = [
     0.0, 1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0, 0.0, -1.0, -2.0, -3.0, -4.0, -6.0, -8.0, -12.0,
 ];
@@ -28,139 +28,6 @@ const GEMV_CHUNK_ROWS: usize = 32;
 
 const TRANSPOSED_GEMV_COL_CHUNK: usize = QK_K;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-pub enum DType {
-    F32,
-    F16,
-    I8,
-    I16,
-    I32,
-    I64,
-}
-
-impl DType {
-    /// Return the size of a single element in bytes.
-    pub fn size_in_bytes(&self) -> usize {
-        match self {
-            DType::F32 => 4,
-            DType::F16 => 2,
-            DType::I8 => 1,
-            DType::I16 => 2,
-            DType::I32 => 4,
-            DType::I64 => 8,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GemvError {
-    InvalidMatrixLength {
-        expected: usize,
-        actual: usize,
-    },
-    InvalidVectorLength {
-        expected: usize,
-        actual: usize,
-    },
-    InvalidOutputLength {
-        expected: usize,
-        actual: usize,
-    },
-    UnsupportedQuantizationType {
-        quantization: GgufQuantizationType,
-    },
-    #[cfg(feature = "cuda")]
-    Cuda(String),
-    #[cfg(feature = "metal")]
-    Metal(String),
-    #[cfg(feature = "webgpu")]
-    WebGpu(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GemmError {
-    InvalidLeftMatrixLength {
-        expected: usize,
-        actual: usize,
-    },
-    InvalidRightMatrixLength {
-        expected: usize,
-        actual: usize,
-    },
-    InvalidOutputLength {
-        expected: usize,
-        actual: usize,
-    },
-    #[cfg(feature = "cuda")]
-    Cuda(String),
-    #[cfg(feature = "metal")]
-    Metal(String),
-    #[cfg(feature = "webgpu")]
-    WebGpu(String),
-    InvalidTensorParallelShardCount {
-        shared_dim: usize,
-        shard_count: usize,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AttentionError {
-    ZeroHeadDim,
-    InvalidQueryLength { expected: usize, actual: usize },
-    InvalidKeyLength { expected: usize, actual: usize },
-    InvalidValueLength { expected: usize, actual: usize },
-    InvalidOutputLength { expected: usize, actual: usize },
-    InvalidKvHead { kv_head: usize, kv_heads: usize },
-    InvalidHeadGrouping { num_heads: usize, kv_heads: usize },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RopeError {
-    InvalidInputLength { expected: usize, actual: usize },
-    InvalidOutputLength { expected: usize, actual: usize },
-    OddHeadDim { head_dim: usize },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SwiGluError {
-    InvalidGateLength { expected: usize, actual: usize },
-    InvalidUpLength { expected: usize, actual: usize },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ActivationFn {
-    Relu,
-    Gelu,
-    Silu,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LinearActivationError {
-    InvalidMatrixLength { expected: usize, actual: usize },
-    InvalidVectorLength { expected: usize, actual: usize },
-    InvalidOutputLength { expected: usize, actual: usize },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RmsNormError {
-    ZeroDimension,
-    InvalidInputLength { expected: usize, actual: usize },
-    InvalidWeightLength { expected: usize, actual: usize },
-    InvalidOutputLength { expected: usize, actual: usize },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LayerNormError {
-    InvalidInputLength { expected: usize, actual: usize },
-    InvalidWeightLength { expected: usize, actual: usize },
-    InvalidBiasLength { expected: usize, actual: usize },
-    InvalidOutputLength { expected: usize, actual: usize },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SoftmaxError {
-    InvalidInputLength { expected: usize, actual: usize },
-}
 
 pub fn gemv_f32(
     matrix: &[f32],
@@ -189,10 +56,10 @@ pub fn gemv_f32(
         });
     }
 
-    #[cfg(feature = "cuda")]
-    if crate::cuda::cuda_build_info().detected_at_build {
-        return crate::cuda::gemv_f32_cuda(matrix, rows, cols, vector, output)
-            .map_err(|err| GemvError::Cuda(format!("{err:?}")));
+    #[cfg(any(feature = "cuda", feature = "rocm"))]
+    if crate::gpu_dispatch::active_gpu().is_some() {
+        return crate::gpu_dispatch::gemv_f32(matrix, rows, cols, vector, output)
+            .map_err(GemvError::Cuda);
     }
 
     #[cfg(feature = "webgpu")]
@@ -258,6 +125,38 @@ pub fn gemm_quantized_f32(
         });
     }
 
+    let profile_start = gemv_profile::enabled().then(std::time::Instant::now);
+    let result = gemm_quantized_f32_inner(
+        quantization,
+        quantized_matrix,
+        rows,
+        cols,
+        inputs,
+        outputs,
+        batch,
+    );
+    if let Some(start) = profile_start {
+        gemv_profile::record(
+            format!("gemm{batch} {quantization:?}"),
+            rows,
+            cols,
+            quantized_matrix.len(),
+            start.elapsed().as_nanos() as u64,
+        );
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn gemm_quantized_f32_inner(
+    quantization: GgufQuantizationType,
+    quantized_matrix: &[u8],
+    rows: usize,
+    cols: usize,
+    inputs: &[f32],
+    outputs: &mut [f32],
+    batch: usize,
+) -> Result<(), GemvError> {
     // Fast path: decode each block once into a scratch f32 buffer, then do
     // `batch` AVX2 FMA dot products against it. Saves repeating the per-block
     // dequant for every batch token.
@@ -336,6 +235,9 @@ pub fn gemm_quantized_f32(
 /// AVX2 unpack of a 32-byte qs slice into 32 f32 values via
 /// `dl * nibble - ml`. `high_nibble = true` selects the upper 4 bits, else
 /// the lower 4 bits.
+///
+/// # Safety
+/// `qs_ptr` addresses ≥32 bytes; `out_ptr` addresses ≥32 writable f32s. AVX2+FMA required.
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
 #[allow(unsafe_op_in_unsafe_fn)]
@@ -427,6 +329,10 @@ fn decode_q8_0_block(block: &[u8], out: &mut [f32]) {
 
 /// AVX2 + FMA dot product over `len` f32 elements. `len` is expected to be a
 /// multiple of 8; a tail loop handles any remainder.
+///
+/// # Safety
+/// `a` and `b` must each address at least `len` initialized f32 elements; `len` may be
+/// zero. Caller must ensure AVX2+FMA is available.
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
 #[allow(unsafe_op_in_unsafe_fn)]
@@ -683,6 +589,8 @@ unsafe fn gemm_q4_k_decode_once_avx2(
         partial.fill(0.0);
         let row_base = unsafe { qm_ptr.add(row_idx * row_stride_bytes) };
         for block_idx in 0..blocks_per_row {
+            // SAFETY: `row_base` points into the packed matrix row; each block is `BLOCK_Q4_K_SIZE`
+            // bytes and `block_idx` is bounded by `blocks_per_row`.
             let block_ptr = unsafe { row_base.add(block_idx * BLOCK_Q4_K_SIZE) };
             let block = unsafe { std::slice::from_raw_parts(block_ptr, BLOCK_Q4_K_SIZE) };
             let d = f16_le_to_f32([block[0], block[1]]);
@@ -1228,6 +1136,19 @@ pub fn gemv_quantized_experts_f32(
                 let expert = selected[slot];
                 let qs = if shared { 0 } else { slot };
                 let q8 = &q8k[qs * q8_stride..(qs + 1) * q8_stride];
+                // OXK opt-in (OXIDIZE_GEMV=oxk): same chunk, ×8 kernels.
+                #[cfg(feature = "oxk")]
+                if gemv_mode() == GemvMode::Oxk {
+                    let start = expert * expert_bytes + row0 * row_bytes;
+                    let end = start + out_chunk.len() * row_bytes;
+                    oxidize_kernels::gemv_q4k_range(
+                        &matrix[start..end],
+                        blocks_per_row,
+                        q8,
+                        out_chunk,
+                    );
+                    return;
+                }
                 let mut r = 0;
                 while r < out_chunk.len() {
                     if r + 4 <= out_chunk.len() {
@@ -1457,6 +1378,14 @@ pub fn gemv_quantized_experts_gate_up_f32(
         let slot = rem / rows;
         let row0 = rem % rows;
         let expert = selected[slot];
+        // OXK opt-in (OXIDIZE_GEMV=oxk): same chunk, ×8 kernels.
+        #[cfg(feature = "oxk")]
+        if gemv_mode() == GemvMode::Oxk {
+            let start = expert * expert_bytes + row0 * row_bytes;
+            let end = start + out_chunk.len() * row_bytes;
+            oxidize_kernels::gemv_q4k_range(&matrix[start..end], blocks_per_row, q8k, out_chunk);
+            return;
+        }
         let mut r = 0;
         while r < out_chunk.len() {
             if r + 4 <= out_chunk.len() {
@@ -1501,6 +1430,82 @@ fn run_output_chunks(output: &mut [f32], chunk: usize, body: impl Fn(usize, &mut
     });
 }
 
+/// Per-shape GEMV profiling (`OXIDIZE_DECODE_PROFILE=1`): accumulates call
+/// count, wall time, and bytes streamed per (quant, rows, cols) and prints a
+/// summary at process exit. Attribution tool for decode wall time — the
+/// achieved GB/s column shows which kernel/shape sits below the DRAM roof.
+mod gemv_profile {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    type Table = Mutex<HashMap<(String, usize, usize), (u64, u64, u64)>>;
+    static TABLE: OnceLock<Option<Table>> = OnceLock::new();
+
+    fn table() -> Option<&'static Table> {
+        TABLE
+            .get_or_init(|| {
+                if std::env::var("OXIDIZE_DECODE_PROFILE").is_ok_and(|v| v != "0") {
+                    #[cfg(unix)]
+                    unsafe {
+                        libc::atexit(dump_at_exit);
+                    }
+                    Some(Mutex::new(HashMap::new()))
+                } else {
+                    None
+                }
+            })
+            .as_ref()
+    }
+
+    #[cfg(unix)]
+    extern "C" fn dump_at_exit() {
+        dump();
+    }
+
+    pub fn enabled() -> bool {
+        table().is_some()
+    }
+
+    pub fn record(label: String, rows: usize, cols: usize, bytes: usize, ns: u64) {
+        if let Some(t) = table()
+            && let Ok(mut map) = t.lock()
+        {
+            let e = map.entry((label, rows, cols)).or_insert((0, 0, 0));
+            e.0 += 1;
+            e.1 += ns;
+            e.2 += bytes as u64;
+        }
+    }
+
+    pub fn dump() {
+        let Some(t) = table() else { return };
+        let Ok(map) = t.lock() else { return };
+        let mut entries: Vec<_> = map.iter().collect();
+        entries.sort_by_key(|(_, (_, ns, _))| std::cmp::Reverse(*ns));
+        let total_ns: u64 = entries.iter().map(|(_, (_, ns, _))| ns).sum();
+        eprintln!("gemv profile (total {:.1} ms):", total_ns as f64 / 1e6);
+        for ((label, rows, cols), (count, ns, bytes)) in entries {
+            eprintln!(
+                "  {label:>8} {rows:>7}x{cols:<6} calls={count:<6} total={:>8.1}ms avg={:>7.1}us {:>6.1} GB/s",
+                *ns as f64 / 1e6,
+                *ns as f64 / 1e3 / *count as f64,
+                *bytes as f64 / *ns as f64,
+            );
+        }
+    }
+}
+
+/// Record a non-GEMV decode phase into the `OXIDIZE_DECODE_PROFILE` summary
+/// (no-op when profiling is off). Returns whether profiling is enabled so
+/// call sites can skip `Instant::now()` otherwise.
+pub fn decode_profile_enabled() -> bool {
+    gemv_profile::enabled()
+}
+
+pub fn decode_profile_record(label: &str, ns: u64) {
+    gemv_profile::record(label.to_string(), 0, 0, 0, ns);
+}
+
 pub fn gemv_quantized_f32(
     quantization: GgufQuantizationType,
     quantized_matrix: &[u8],
@@ -1509,48 +1514,21 @@ pub fn gemv_quantized_f32(
     vector: &[f32],
     output: &mut [f32],
 ) -> Result<(), GemvError> {
-    #[cfg(feature = "cuda")]
-    if crate::cuda::cuda_build_info().detected_at_build {
-        // Fast path: on-the-fly kernels that never materialize f16.
-        // These stream quantized weights directly and are essential for
-        // layer-by-layer inference on 4GB GPUs.
-        match quantization {
-            GgufQuantizationType::Q8_0 => {
-                return crate::cuda::gemv_q8_0_direct_cuda(
-                    quantized_matrix,
-                    rows,
-                    cols,
-                    vector,
-                    output,
-                )
-                .map_err(|err| GemvError::Cuda(format!("{err:?}")));
-            }
-            GgufQuantizationType::Q4_0 => {
-                return crate::cuda::gemv_q4_0_direct_cuda(
-                    quantized_matrix,
-                    rows,
-                    cols,
-                    vector,
-                    output,
-                )
-                .map_err(|err| GemvError::Cuda(format!("{err:?}")));
-            }
-            _ => {
-                // Fall back to dequant-to-f16 path for other types.
-                return crate::cuda::gemv_quantized_cuda(
-                    quantization,
-                    quantized_matrix,
-                    rows,
-                    cols,
-                    vector,
-                    output,
-                )
-                .map_err(|err| GemvError::Cuda(format!("{err:?}")));
-            }
-        }
+    #[cfg(any(feature = "cuda", feature = "rocm"))]
+    if crate::gpu_dispatch::active_gpu().is_some() {
+        return crate::gpu_dispatch::gemv_quantized(
+            quantization,
+            quantized_matrix,
+            rows,
+            cols,
+            vector,
+            output,
+        )
+        .map_err(|err| GemvError::Cuda(err));
     }
 
-    match quantization {
+    let profile_start = gemv_profile::enabled().then(std::time::Instant::now);
+    let result = match quantization {
         GgufQuantizationType::Q8_0 => gemv_q8_0_f32_fused(quantized_matrix, cols, vector, output),
         GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M
             if cols.is_multiple_of(QK_K) && q4_k_q8_k_avx2_available() =>
@@ -1579,6 +1557,244 @@ pub fn gemv_quantized_f32(
             gemv_nvfp4_f32_fused(quantized_matrix, rows, cols, vector, output)
         }
         _ => Err(GemvError::UnsupportedQuantizationType { quantization }),
+    };
+    if let Some(start) = profile_start {
+        gemv_profile::record(
+            format!("{quantization:?}"),
+            rows,
+            cols,
+            quantized_matrix.len(),
+            start.elapsed().as_nanos() as u64,
+        );
+    }
+    result
+}
+
+/// One matrix of a fused multi-GEMV region (see [`gemv_quantized_multi_f32`]).
+pub struct GemvJob<'a> {
+    pub quantization: GgufQuantizationType,
+    pub matrix: &'a [u8],
+    pub rows: usize,
+    pub output: &'a mut [f32],
+}
+
+/// Run several quantized GEMVs that share one input vector as a SINGLE flat
+/// parallel region. Token decode previously overlapped q/k/v and gate/up with
+/// `rayon::join`, but nested parallel regions steal work from each other and
+/// interleave the weight streams of different matrices on the same cores
+/// (measured 19-21 GB/s vs 32+ GB/s for the same shape dispatched alone); with
+/// the spin pool the losing join arm ran entirely serial. One flat region
+/// keeps every worker on one contiguous weight range and quantizes the shared
+/// input to Q8_K once.
+///
+/// Row results are bit-identical to [`gemv_quantized_f32`]: the same row-dot
+/// kernels run in the same per-row order. Jobs whose quantization lacks the
+/// integer Q8_K fast path on this CPU fall back to sequential
+/// [`gemv_quantized_f32`] calls.
+pub fn gemv_quantized_multi_f32(
+    jobs: &mut [GemvJob<'_>],
+    cols: usize,
+    vector: &[f32],
+) -> Result<(), GemvError> {
+    if vector.len() != cols {
+        return Err(GemvError::InvalidVectorLength {
+            expected: cols,
+            actual: vector.len(),
+        });
+    }
+    let fast = cols.is_multiple_of(QK_K)
+        && q4_k_q8_k_avx2_available()
+        && jobs.iter().all(|job| {
+            matches!(
+                job.quantization,
+                GgufQuantizationType::Q4_K_S
+                    | GgufQuantizationType::Q4_K_M
+                    | GgufQuantizationType::Q6_K
+            )
+        });
+    if !fast {
+        for job in jobs.iter_mut() {
+            gemv_quantized_f32(
+                job.quantization,
+                job.matrix,
+                job.rows,
+                cols,
+                vector,
+                job.output,
+            )?;
+        }
+        return Ok(());
+    }
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+    unreachable!("fast multi-GEMV requires the x86 Q8_K kernels");
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        let blocks_per_row = cols / QK_K;
+        for job in jobs.iter() {
+            let block_size = match job.quantization {
+                GgufQuantizationType::Q6_K => BLOCK_Q6_K_SIZE,
+                _ => BLOCK_Q4_K_SIZE,
+            };
+            let expected = job.rows * blocks_per_row * block_size;
+            if job.matrix.len() != expected {
+                return Err(GemvError::InvalidMatrixLength {
+                    expected,
+                    actual: job.matrix.len(),
+                });
+            }
+            if job.output.len() != job.rows {
+                return Err(GemvError::InvalidOutputLength {
+                    expected: job.rows,
+                    actual: job.output.len(),
+                });
+            }
+        }
+
+        let profile_start = gemv_profile::enabled().then(std::time::Instant::now);
+        let mut q8k = vec![0_u8; blocks_per_row * BLOCK_Q8_K_BYTES];
+        quantize_vector_q8_k_into(vector, blocks_per_row, &mut q8k);
+
+        // Flatten jobs into row chunks; chunk_starts[i] is the first global
+        // chunk index of job i. Chunk sizes are byte-weighted per job (Q6_K
+        // rows are 1.46x heavier than Q4_K) so the static block partition
+        // over chunk indices stays balanced in BYTES when quantizations mix
+        // within one region (q in Q4_K with k/v in Q6_K measurably skewed the
+        // tail participants otherwise).
+        let chunk_bytes_target = GEMV_CHUNK_ROWS * blocks_per_row * BLOCK_Q4_K_SIZE;
+        let mut chunk_rows = Vec::with_capacity(jobs.len());
+        let mut chunk_starts = Vec::with_capacity(jobs.len() + 1);
+        let mut total_chunks = 0_usize;
+        for job in jobs.iter() {
+            let row_bytes = job.matrix.len() / job.rows.max(1);
+            let rows_per_chunk = (chunk_bytes_target / row_bytes.max(1))
+                .next_multiple_of(4)
+                .clamp(4, GEMV_CHUNK_ROWS);
+            chunk_starts.push(total_chunks);
+            chunk_rows.push(rows_per_chunk);
+            total_chunks += job.rows.div_ceil(rows_per_chunk);
+        }
+        chunk_starts.push(total_chunks);
+
+        struct JobRef {
+            quantization: GgufQuantizationType,
+            matrix_ptr: usize,
+            matrix_len: usize,
+            rows: usize,
+            out_ptr: usize,
+        }
+        let refs: Vec<JobRef> = jobs
+            .iter_mut()
+            .map(|job| JobRef {
+                quantization: job.quantization,
+                matrix_ptr: job.matrix.as_ptr() as usize,
+                matrix_len: job.matrix.len(),
+                rows: job.rows,
+                out_ptr: job.output.as_mut_ptr() as usize,
+            })
+            .collect();
+        let use_x4 = !q4_k_q8_k_vnni_available();
+        let q8k = &q8k[..];
+        let total_bytes: usize = refs.iter().map(|r| r.matrix_len).sum();
+        let total_rows: usize = refs.iter().map(|r| r.rows).sum();
+
+        crate::spinpool::run_chunks(total_chunks, |ci| {
+            let job_idx = chunk_starts.partition_point(|&s| s <= ci) - 1;
+            let job = &refs[job_idx];
+            let job_chunk_rows = chunk_rows[job_idx];
+            let row0 = (ci - chunk_starts[job_idx]) * job_chunk_rows;
+            let nrows = job_chunk_rows.min(job.rows - row0);
+            // Safety: chunks partition each job's rows disjointly, and the
+            // matrices/outputs are caller borrows that outlive this region.
+            let matrix =
+                unsafe { std::slice::from_raw_parts(job.matrix_ptr as *const u8, job.matrix_len) };
+            let matrix = crate::numa::local_slice(matrix);
+            let out = unsafe {
+                std::slice::from_raw_parts_mut((job.out_ptr as *mut f32).add(row0), nrows)
+            };
+            match job.quantization {
+                GgufQuantizationType::Q6_K => {
+                    let row_bytes = blocks_per_row * BLOCK_Q6_K_SIZE;
+                    let mut r = 0;
+                    while r < out.len() {
+                        if use_x4 && r + 4 <= out.len() {
+                            let base = unsafe { matrix.as_ptr().add((row0 + r) * row_bytes) };
+                            let mut quad = [0.0_f32; 4];
+                            // Safety: avx2+fma verified by the `fast` gate.
+                            unsafe {
+                                q6_k_q8_k_row_dot_x4_avx2(
+                                    base,
+                                    row_bytes,
+                                    blocks_per_row,
+                                    q8k,
+                                    &mut quad,
+                                )
+                            };
+                            out[r..r + 4].copy_from_slice(&quad);
+                            r += 4;
+                        } else {
+                            let start = (row0 + r) * row_bytes;
+                            let row = &matrix[start..start + row_bytes];
+                            out[r] = unsafe { q6_k_q8_k_row_dot_avx2(row, blocks_per_row, q8k) };
+                            r += 1;
+                        }
+                    }
+                }
+                _ => {
+                    let row_bytes = blocks_per_row * BLOCK_Q4_K_SIZE;
+                    #[cfg(feature = "oxk")]
+                    let use_oxk = gemv_mode() == GemvMode::Oxk;
+                    #[cfg(not(feature = "oxk"))]
+                    let use_oxk = false;
+                    if use_oxk {
+                        #[cfg(feature = "oxk")]
+                        {
+                            let start = row0 * row_bytes;
+                            oxidize_kernels::gemv_q4k_range(
+                                &matrix[start..start + out.len() * row_bytes],
+                                blocks_per_row,
+                                q8k,
+                                out,
+                            );
+                        }
+                    } else {
+                        let mut r = 0;
+                        while r < out.len() {
+                            if use_x4 && r + 4 <= out.len() {
+                                let base = unsafe { matrix.as_ptr().add((row0 + r) * row_bytes) };
+                                let mut quad = [0.0_f32; 4];
+                                // Safety: avx2+fma verified by the `fast` gate.
+                                unsafe {
+                                    q4_k_q8_k_row_dot_x4_avx2(
+                                        base,
+                                        row_bytes,
+                                        blocks_per_row,
+                                        q8k,
+                                        &mut quad,
+                                    )
+                                };
+                                out[r..r + 4].copy_from_slice(&quad);
+                                r += 4;
+                            } else {
+                                let start = (row0 + r) * row_bytes;
+                                let row = &matrix[start..start + row_bytes];
+                                out[r] = unsafe { q4_k_q8_k_row_dot(row, blocks_per_row, q8k) };
+                                r += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        if let Some(start) = profile_start {
+            gemv_profile::record(
+                format!("fused{}", refs.len()),
+                total_rows,
+                cols,
+                total_bytes,
+                start.elapsed().as_nanos() as u64,
+            );
+        }
+        Ok(())
     }
 }
 
@@ -1605,6 +1821,101 @@ fn q4_k_q8_k_vnni_available() -> bool {
     #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
     {
         false
+    }
+}
+
+/// Which Q4_K GEMV implementation services the AVX2 decode hot path.
+/// Selected once from `OXIDIZE_GEMV` (see the OXK migration plan): `auto`
+/// (default) uses OXK when the `oxk` feature is compiled and this CPU supports
+/// the kernel ISA, `legacy` keeps the tensor.rs intrinsics untouched, `oxk`
+/// routes contiguous row ranges to the `oxidize-kernels` crate, and `shadow`
+/// runs both and compares (dev/bench only). Without the `oxk` cargo feature
+/// every value resolves to `Legacy`.
+#[cfg_attr(not(feature = "oxk"), allow(dead_code))]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum GemvMode {
+    Legacy,
+    #[cfg(feature = "oxk")]
+    Oxk,
+    #[cfg(feature = "oxk")]
+    Shadow,
+}
+
+#[cfg_attr(not(feature = "oxk"), allow(dead_code))]
+fn gemv_mode() -> GemvMode {
+    static MODE: std::sync::OnceLock<GemvMode> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| match std::env::var("OXIDIZE_GEMV").as_deref() {
+        #[cfg(feature = "oxk")]
+        Ok("oxk") => GemvMode::Oxk,
+        #[cfg(feature = "oxk")]
+        Ok("shadow") => GemvMode::Shadow,
+        Ok("auto") | Ok("") | Err(_) => {
+            #[cfg(feature = "oxk")]
+            {
+                if oxidize_kernels::oxk_avx2_available() {
+                    GemvMode::Oxk
+                } else {
+                    GemvMode::Legacy
+                }
+            }
+            #[cfg(not(feature = "oxk"))]
+            {
+                GemvMode::Legacy
+            }
+        }
+        Ok("legacy") => GemvMode::Legacy,
+        Ok(other) => {
+            eprintln!(
+                "OXIDIZE_GEMV={other} not available in this build (unknown value or \
+                 'oxk' feature not compiled); falling back to legacy"
+            );
+            GemvMode::Legacy
+        }
+    })
+}
+
+/// Shadow mode: run the legacy range into `out`, the OXK range into a scratch
+/// buffer, compare, and accumulate per-implementation wall time. Mismatches
+/// beyond 1e-4 relative error and periodic timing summaries go to stderr.
+#[cfg(feature = "oxk")]
+fn shadow_q4k_range(
+    rows: &[u8],
+    blocks_per_row: usize,
+    q8k: &[u8],
+    out: &mut [f32],
+    legacy: impl FnOnce(&mut [f32]),
+) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static LEGACY_NS: AtomicU64 = AtomicU64::new(0);
+    static OXK_NS: AtomicU64 = AtomicU64::new(0);
+    static CALLS: AtomicU64 = AtomicU64::new(0);
+    static MISMATCHES: AtomicU64 = AtomicU64::new(0);
+
+    let t0 = std::time::Instant::now();
+    legacy(out);
+    let t1 = std::time::Instant::now();
+    let mut scratch = vec![0.0_f32; out.len()];
+    oxidize_kernels::gemv_q4k_range(rows, blocks_per_row, q8k, &mut scratch);
+    let t2 = std::time::Instant::now();
+
+    for (i, (l, o)) in out.iter().zip(scratch.iter()).enumerate() {
+        let rel = (l - o).abs() / l.abs().max(1e-6);
+        if rel > 1e-4 && MISMATCHES.fetch_add(1, Ordering::Relaxed) < 16 {
+            eprintln!("[oxk-shadow] mismatch row {i}: legacy={l} oxk={o} rel={rel:.3e}");
+        }
+    }
+    let legacy_ns = LEGACY_NS.fetch_add(t1.duration_since(t0).as_nanos() as u64, Ordering::Relaxed);
+    let oxk_ns = OXK_NS.fetch_add(t2.duration_since(t1).as_nanos() as u64, Ordering::Relaxed);
+    let calls = CALLS.fetch_add(1, Ordering::Relaxed) + 1;
+    if calls.is_multiple_of(65_536) {
+        eprintln!(
+            "[oxk-shadow] {} ranges: legacy {:.3}s oxk {:.3}s (oxk = {:.1}% of legacy), mismatched rows {}",
+            calls,
+            legacy_ns as f64 / 1e9,
+            oxk_ns as f64 / 1e9,
+            oxk_ns as f64 / legacy_ns.max(1) as f64 * 100.0,
+            MISMATCHES.load(Ordering::Relaxed),
+        );
     }
 }
 
@@ -1760,22 +2071,54 @@ fn gemv_q4_k_q8_k_fused(
         cfg!(any(target_arch = "x86", target_arch = "x86_64")) && !q4_k_q8_k_vnni_available();
     let run_range = |out_range: &mut [f32], row0: usize| {
         let weights = crate::numa::local_slice(weights);
-        let mut r = 0;
-        while r < out_range.len() {
-            if use_x4 && r + 4 <= out_range.len() && row0 + r + 4 <= rows {
-                let base = unsafe { weights.as_ptr().add((row0 + r) * row_bytes) };
-                let mut quad = [0.0_f32; 4];
-                // Safety: avx2+fma verified before dispatch; rows are in range.
-                unsafe {
-                    q4_k_q8_k_row_dot_x4_avx2(base, row_bytes, blocks_per_row, &q8k, &mut quad)
-                };
-                out_range[r..r + 4].copy_from_slice(&quad);
-                r += 4;
-            } else {
-                out_range[r] = compute_row(row0 + r);
-                r += 1;
+        let legacy_range = |out_range: &mut [f32]| {
+            let mut r = 0;
+            while r < out_range.len() {
+                if use_x4 && r + 4 <= out_range.len() && row0 + r + 4 <= rows {
+                    let base = unsafe { weights.as_ptr().add((row0 + r) * row_bytes) };
+                    let mut quad = [0.0_f32; 4];
+                    // Safety: avx2+fma verified before dispatch; rows are in range.
+                    unsafe {
+                        q4_k_q8_k_row_dot_x4_avx2(base, row_bytes, blocks_per_row, &q8k, &mut quad)
+                    };
+                    out_range[r..r + 4].copy_from_slice(&quad);
+                    r += 4;
+                } else {
+                    out_range[r] = compute_row(row0 + r);
+                    r += 1;
+                }
+            }
+        };
+        // OXK dispatch choke point (single switch, OXIDIZE_GEMV): threading,
+        // NUMA translation and Q8_K quantization above are shared by all modes.
+        #[cfg(feature = "oxk")]
+        {
+            let start = row0 * row_bytes;
+            let end = start + out_range.len() * row_bytes;
+            match gemv_mode() {
+                GemvMode::Oxk => {
+                    oxidize_kernels::gemv_q4k_range(
+                        &weights[start..end],
+                        blocks_per_row,
+                        &q8k,
+                        out_range,
+                    );
+                    return;
+                }
+                GemvMode::Shadow => {
+                    shadow_q4k_range(
+                        &weights[start..end],
+                        blocks_per_row,
+                        &q8k,
+                        out_range,
+                        legacy_range,
+                    );
+                    return;
+                }
+                GemvMode::Legacy => {}
             }
         }
+        legacy_range(out_range);
     };
 
     if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
@@ -1922,7 +2265,7 @@ unsafe fn gemm_q4_k_q8_k_fused_avx2(
 const BLOCK_Q8_K_BYTES: usize = 4 + 256 + 32;
 
 /// Quantize `vector` (length `n_blocks * 256`) into `n_blocks` Q8_K blocks.
-fn quantize_vector_q8_k_into(vector: &[f32], n_blocks: usize, out: &mut [u8]) {
+pub(crate) fn quantize_vector_q8_k_into(vector: &[f32], n_blocks: usize, out: &mut [u8]) {
     debug_assert_eq!(vector.len(), n_blocks * QK_K);
     debug_assert_eq!(out.len(), n_blocks * BLOCK_Q8_K_BYTES);
     for (b, block_in) in vector.chunks_exact(QK_K).enumerate().take(n_blocks) {
@@ -2096,11 +2439,31 @@ unsafe fn q4_k_q8_k_row_dot_x4_avx2(
 
         for (r, acc_r) in acc.iter_mut().enumerate() {
             let w_ptr = rows_base.add(r * row_bytes + block_idx * BLOCK_Q4_K_SIZE);
-            if block_idx + 4 < blocks_per_row {
-                let ahead = w_ptr.wrapping_add(4 * BLOCK_Q4_K_SIZE).cast::<i8>();
-                _mm_prefetch::<{ _MM_HINT_T0 }>(ahead);
-                _mm_prefetch::<{ _MM_HINT_T0 }>(ahead.wrapping_add(64));
-                _mm_prefetch::<{ _MM_HINT_T0 }>(ahead.wrapping_add(128));
+            // Same prefetch policy as the single-row kernel, per stream.
+            let ahead = w_ptr.add(4 * BLOCK_Q4_K_SIZE).cast::<i8>();
+            _mm_prefetch::<{ _MM_HINT_T0 }>(ahead);
+            _mm_prefetch::<{ _MM_HINT_T0 }>(ahead.add(64));
+            _mm_prefetch::<{ _MM_HINT_T0 }>(ahead.add(128));
+            // For SHORT rows also sweep the NEXT quad's row r into L2, one
+            // quad-time ahead: 10-block rows (1.4KB) restart the hardware
+            // prefetcher every 22 cache lines, costing ~10% of DRAM bandwidth
+            // on 2560-column matrices. Advancing one block per iteration, the
+            // pointer covers the whole next row by quad end. Long rows keep
+            // the prefetcher locked on their own — the extra reach only
+            // pollutes L2 there.
+            if blocks_per_row <= 16 {
+                let next_quad = w_ptr.add(4 * row_bytes).cast::<i8>();
+                _mm_prefetch::<{ _MM_HINT_T1 }>(next_quad);
+                _mm_prefetch::<{ _MM_HINT_T1 }>(next_quad.add(64));
+                _mm_prefetch::<{ _MM_HINT_T1 }>(next_quad.add(128));
+            } else {
+                // Long rows: a second, deeper in-row sweep (T1, 16 blocks =
+                // 2.3KB ahead) — the 576B T0 distance alone leaves the stream
+                // ~8% under the short-row shapes once those got their sweep.
+                let far = w_ptr.add(16 * BLOCK_Q4_K_SIZE).cast::<i8>();
+                _mm_prefetch::<{ _MM_HINT_T1 }>(far);
+                _mm_prefetch::<{ _MM_HINT_T1 }>(far.add(64));
+                _mm_prefetch::<{ _MM_HINT_T1 }>(far.add(128));
             }
 
             let d_w = f16_le_to_f32([*w_ptr, *w_ptr.add(1)]);
@@ -2260,11 +2623,22 @@ unsafe fn q6_k_q8_k_row_dot_x4_avx2(
 
         for (r, acc_r) in acc.iter_mut().enumerate() {
             let w_ptr = rows_base.add(r * row_bytes + block_idx * BLOCK_Q6_K_SIZE);
-            if block_idx + 3 < blocks_per_row {
-                let ahead = w_ptr.wrapping_add(3 * BLOCK_Q6_K_SIZE).cast::<i8>();
-                _mm_prefetch::<{ _MM_HINT_T0 }>(ahead);
-                _mm_prefetch::<{ _MM_HINT_T0 }>(ahead.wrapping_add(64));
-                _mm_prefetch::<{ _MM_HINT_T0 }>(ahead.wrapping_add(128));
+            let ahead = w_ptr.add(3 * BLOCK_Q6_K_SIZE).cast::<i8>();
+            _mm_prefetch::<{ _MM_HINT_T0 }>(ahead);
+            _mm_prefetch::<{ _MM_HINT_T0 }>(ahead.add(64));
+            _mm_prefetch::<{ _MM_HINT_T0 }>(ahead.add(128));
+            // Next-quad sweep for short rows, deeper in-row sweep for long
+            // rows; see the Q4_K x4 kernel.
+            if blocks_per_row <= 16 {
+                let next_quad = w_ptr.add(4 * row_bytes).cast::<i8>();
+                _mm_prefetch::<{ _MM_HINT_T1 }>(next_quad);
+                _mm_prefetch::<{ _MM_HINT_T1 }>(next_quad.add(64));
+                _mm_prefetch::<{ _MM_HINT_T1 }>(next_quad.add(128));
+            } else {
+                let far = w_ptr.add(16 * BLOCK_Q6_K_SIZE).cast::<i8>();
+                _mm_prefetch::<{ _MM_HINT_T1 }>(far);
+                _mm_prefetch::<{ _MM_HINT_T1 }>(far.add(64));
+                _mm_prefetch::<{ _MM_HINT_T1 }>(far.add(128));
             }
 
             let d = f16_le_to_f32([*w_ptr.add(208), *w_ptr.add(209)]);
@@ -4738,25 +5112,22 @@ pub fn gemm_i4(
 }
 
 fn gemv_f32_cpu(matrix: &[f32], cols: usize, vector: &[f32], output: &mut [f32]) {
+    // dot_f32_fast (AVX2 FMA, independent accumulators) rather than a scalar
+    // iterator sum: LLVM cannot vectorize the f32 reduction (non-associative),
+    // leaving a 4-cycle-latency serial FMA chain. The MoE router GEMV runs
+    // through here every layer of every token — measured ~24 ms/token of
+    // main-thread stall on Qwen3-30B before this change.
     let rows = output.len();
     if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
         matrix
             .par_chunks_exact(cols)
             .zip(output.par_iter_mut())
             .for_each(|(row_values, out)| {
-                *out = row_values
-                    .iter()
-                    .zip(vector.iter())
-                    .map(|(weight, value)| weight * value)
-                    .sum();
+                *out = dot_f32_fast(row_values, &vector[..cols]);
             });
     } else {
         for (row_values, out) in matrix.chunks_exact(cols).zip(output.iter_mut()) {
-            *out = row_values
-                .iter()
-                .zip(vector.iter())
-                .map(|(weight, value)| weight * value)
-                .sum();
+            *out = dot_f32_fast(row_values, &vector[..cols]);
         }
     }
 }
@@ -5520,6 +5891,114 @@ impl Tensor {
 mod tests {
     use super::*;
 
+    /// Shape/thread/working-set microbenchmark for the Q4_K decode GEMV.
+    /// Run with:
+    ///   cargo test --release -p oxidize-core --lib -- --ignored --nocapture bench_q4k
+    #[test]
+    #[ignore]
+    fn bench_q4k_gemv_shapes() {
+        let shapes: [(usize, usize); 4] = [(9728, 2560), (2560, 9728), (4096, 2560), (1024, 2560)];
+        for threads in [1usize, 8] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            for &(rows, cols) in &shapes {
+                let bpr = cols / QK_K;
+                let bytes = rows * bpr * BLOCK_Q4_K_SIZE;
+                // 8 copies so the DRAM pass cannot sit in the 16MB L3.
+                let copies = 8;
+                let weights: Vec<u8> = (0..bytes * copies).map(|i| (i * 37 + 11) as u8).collect();
+                let vector: Vec<f32> = (0..cols).map(|i| ((i as f32) * 0.001).sin()).collect();
+                let mut output = vec![0.0_f32; rows];
+                for (label, stride) in [("L3", 0usize), ("DRAM", bytes)] {
+                    pool.install(|| {
+                        for i in 0..copies {
+                            let w = &weights[i * stride..i * stride + bytes];
+                            gemv_q4_k_q8_k_fused(w, rows, cols, &vector, &mut output).unwrap();
+                        }
+                        let iters = 24;
+                        let t0 = std::time::Instant::now();
+                        for i in 0..iters {
+                            let w = &weights[(i % copies) * stride..(i % copies) * stride + bytes];
+                            gemv_q4_k_q8_k_fused(w, rows, cols, &vector, &mut output).unwrap();
+                        }
+                        let ns = t0.elapsed().as_nanos() as f64 / iters as f64;
+                        eprintln!(
+                            "q4k {rows:>5}x{cols:<5} threads={threads} {label:>4}: {:>7.1}us {:>6.1} GB/s",
+                            ns / 1e3,
+                            bytes as f64 / ns
+                        );
+                    });
+                }
+            }
+        }
+    }
+
+    /// The fused multi-matrix region must produce bit-identical rows to the
+    /// sequential per-matrix GEMVs (same row kernels, same per-row order),
+    /// including mixed Q4_K/Q6_K jobs and non-multiple-of-chunk tails.
+    #[test]
+    fn multi_gemv_matches_sequential_bitwise() {
+        let cols = 2560;
+        let bpr = cols / QK_K;
+        let q4_rows = 96_usize;
+        let q6_rows = 61_usize;
+        let q4: Vec<u8> = (0..q4_rows * bpr * BLOCK_Q4_K_SIZE)
+            .map(|i| (i * 31 + 7) as u8)
+            .collect();
+        let q6: Vec<u8> = (0..q6_rows * bpr * BLOCK_Q6_K_SIZE)
+            .map(|i| (i * 17 + 3) as u8)
+            .collect();
+        let vector: Vec<f32> = (0..cols).map(|i| ((i as f32) * 0.01).sin()).collect();
+
+        let mut seq_q4 = vec![0.0_f32; q4_rows];
+        let mut seq_q6 = vec![0.0_f32; q6_rows];
+        gemv_quantized_f32(
+            GgufQuantizationType::Q4_K_M,
+            &q4,
+            q4_rows,
+            cols,
+            &vector,
+            &mut seq_q4,
+        )
+        .unwrap();
+        gemv_quantized_f32(
+            GgufQuantizationType::Q6_K,
+            &q6,
+            q6_rows,
+            cols,
+            &vector,
+            &mut seq_q6,
+        )
+        .unwrap();
+
+        let mut multi_q4 = vec![0.0_f32; q4_rows];
+        let mut multi_q6 = vec![0.0_f32; q6_rows];
+        let mut jobs = [
+            GemvJob {
+                quantization: GgufQuantizationType::Q4_K_M,
+                matrix: &q4,
+                rows: q4_rows,
+                output: &mut multi_q4,
+            },
+            GemvJob {
+                quantization: GgufQuantizationType::Q6_K,
+                matrix: &q6,
+                rows: q6_rows,
+                output: &mut multi_q6,
+            },
+        ];
+        gemv_quantized_multi_f32(&mut jobs, cols, &vector).unwrap();
+
+        for (i, (a, b)) in seq_q4.iter().zip(&multi_q4).enumerate() {
+            assert_eq!(a.to_bits(), b.to_bits(), "q4 row {i}");
+        }
+        for (i, (a, b)) in seq_q6.iter().zip(&multi_q6).enumerate() {
+            assert_eq!(a.to_bits(), b.to_bits(), "q6 row {i}");
+        }
+    }
+
     /// Tolerance for tests that compare CUDA (f16-intermediate) results against
     /// CPU references.  The GPU dequantizes to f16 before GEMV, so a small
     /// round-trip error (~0.01-0.5) is expected and acceptable.
@@ -5527,6 +6006,113 @@ mod tests {
     const CUDA_TOL: f32 = 0.5;
     #[cfg(not(feature = "cuda"))]
     const CUDA_TOL: f32 = 1e-4;
+
+    /// Gate A (OXK plan): the oxidize-kernels Q4_K row dots must match the
+    /// legacy tensor.rs kernels bit-for-bit (same integer op sequence and f32
+    /// combine order), and its Q8_K activation quantizer must be byte-equal.
+    #[test]
+    #[cfg(all(feature = "oxk", any(target_arch = "x86", target_arch = "x86_64")))]
+    fn oxk_q4_k_kernels_match_legacy_exactly() {
+        use crate::quantization::{quantize_scalar, quantized_size};
+        if !q4_k_q8_k_avx2_available() {
+            return;
+        }
+        let (rows, cols) = (24usize, 512usize);
+        let blocks_per_row = cols / QK_K;
+        let total = rows * cols;
+        let mut bytes = vec![0u8; total * 4];
+        for i in 0..total {
+            let v = (((i * 31 + 7) % 211) as f32) / 53.0 - 2.0;
+            bytes[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
+        }
+        let q_size = quantized_size(GgufQuantizationType::Q4_K_M, total).unwrap();
+        let mut q = vec![0u8; q_size];
+        quantize_scalar(
+            GgufQuantizationType::F32,
+            GgufQuantizationType::Q4_K_M,
+            &bytes,
+            &mut q,
+        )
+        .unwrap();
+        let input: Vec<f32> = (0..cols)
+            .map(|i| (((i * 17 + 3) % 113) as f32) / 29.0 - 1.5)
+            .collect();
+
+        // Q8_K quantizer parity (byte-exact).
+        let mut q8k_legacy = vec![0u8; blocks_per_row * BLOCK_Q8_K_BYTES];
+        quantize_vector_q8_k_into(&input, blocks_per_row, &mut q8k_legacy);
+        let mut q8k_oxk = vec![0u8; blocks_per_row * BLOCK_Q8_K_BYTES];
+        oxidize_kernels::quantize_q8_k_into(&input, blocks_per_row, &mut q8k_oxk);
+        assert_eq!(q8k_legacy, q8k_oxk, "Q8_K quantizer bytes differ");
+
+        let row_bytes = blocks_per_row * BLOCK_Q4_K_SIZE;
+        // Legacy single-row reference (AVX2 kernel, not VNNI, to pin the exact
+        // instruction family OXK replicates; the two are bit-equal anyway).
+        let legacy: Vec<f32> = (0..rows)
+            .map(|r| unsafe {
+                q4_k_q8_k_row_dot_avx2(
+                    &q[r * row_bytes..(r + 1) * row_bytes],
+                    blocks_per_row,
+                    &q8k_legacy,
+                )
+            })
+            .collect();
+
+        // OXK scalar reference vs legacy AVX2: exact.
+        for (r, &want) in legacy.iter().enumerate() {
+            let got = oxidize_kernels::q4k_q8k_row_dot_scalar(
+                &q[r * row_bytes..(r + 1) * row_bytes],
+                blocks_per_row,
+                &q8k_oxk,
+            );
+            assert_eq!(got.to_bits(), want.to_bits(), "oxk scalar row {r}");
+        }
+
+        // OXK x1 / x4 / x8 vs legacy: exact.
+        for (r, &want) in legacy.iter().enumerate() {
+            let got = unsafe {
+                oxidize_kernels::q4k_q8k_row_dot_avx2(
+                    &q[r * row_bytes..(r + 1) * row_bytes],
+                    blocks_per_row,
+                    &q8k_oxk,
+                )
+            };
+            assert_eq!(got.to_bits(), want.to_bits(), "oxk x1 row {r}");
+        }
+        let mut quad = [0.0f32; 4];
+        unsafe {
+            oxidize_kernels::q4k_q8k_row_dot_x4_avx2(
+                q.as_ptr(),
+                row_bytes,
+                blocks_per_row,
+                &q8k_oxk,
+                &mut quad,
+            )
+        };
+        for (r, &got) in quad.iter().enumerate() {
+            assert_eq!(got.to_bits(), legacy[r].to_bits(), "oxk x4 row {r}");
+        }
+        let mut octet = [0.0f32; 8];
+        unsafe {
+            oxidize_kernels::q4k_q8k_row_dot_x8_avx2(
+                q.as_ptr(),
+                row_bytes,
+                blocks_per_row,
+                &q8k_oxk,
+                &mut octet,
+            )
+        };
+        for (r, &got) in octet.iter().enumerate() {
+            assert_eq!(got.to_bits(), legacy[r].to_bits(), "oxk x8 row {r}");
+        }
+
+        // Range helper over an x8+x4+x1 tail split (24 = 8+8+4+4 tails inside).
+        let mut out = vec![0.0f32; rows];
+        oxidize_kernels::gemv_q4k_range(&q, blocks_per_row, &q8k_oxk, &mut out);
+        for (r, &got) in out.iter().enumerate() {
+            assert_eq!(got.to_bits(), legacy[r].to_bits(), "oxk range row {r}");
+        }
+    }
 
     #[test]
     #[cfg(not(feature = "cuda"))]

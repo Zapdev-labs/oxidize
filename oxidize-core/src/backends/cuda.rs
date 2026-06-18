@@ -5,6 +5,9 @@ use cust::memory::CopyDestination;
 
 const QK8_0: usize = 32;
 const BLOCK_Q8_0_SIZE: usize = 2 + QK8_0;
+const QK_K: usize = 256;
+const BLOCK_Q4_K_SIZE: usize = 144;
+const BLOCK_Q8_K_BYTES: usize = 4 + QK_K + 32;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CudaBuildInfo {
@@ -182,6 +185,11 @@ pub const GEMV_F16_KERNEL_NAME: &str = "gemv_f16_kernel";
 pub const GEMV_Q8_0_DIRECT_KERNEL_NAME: &str = "gemv_q8_0_kernel";
 /// On-the-fly Q4_0 GEMV (no f16 materialization).
 pub const GEMV_Q4_0_DIRECT_KERNEL_NAME: &str = "gemv_q4_0_kernel";
+/// On-the-fly Q4_K × Q8_K GEMV (no f16 materialization; OXK GPU path).
+pub const GEMV_Q4_K_DIRECT_KERNEL_NAME: &str = "gemv_q4_k_kernel";
+pub const GEMV_IQ1_S_KERNEL_NAME: &str = "gemv_iq1_s_kernel";
+pub const GEMV_IQ1_M_KERNEL_NAME: &str = "gemv_iq1_m_kernel";
+pub const GEMV_NVFP4_KERNEL_NAME: &str = "gemv_nvfp4_kernel";
 
 /// Whether [`gemv_quantized_cuda`] has a GPU dequant kernel for this type.
 /// Callers should fall back to the CPU quantized path when this is `false`.
@@ -201,6 +209,8 @@ fn dequant_kernel_for(quantization: GgufQuantizationType) -> Option<(&'static st
             Some(("dequant_q4_k_kernel", 144, 256))
         }
         GgufQuantizationType::Q6_K => Some(("dequant_q6_k_kernel", 210, 256)),
+        GgufQuantizationType::Q2_K => Some(("dequant_q2_k_kernel", 84, 256)),
+        GgufQuantizationType::NVFP4 => Some(("dequant_nvfp4_kernel", 36, 64)),
         _ => None,
     }
 }
@@ -310,6 +320,25 @@ struct GpuState {
     /// These are lazily cached by `gemv_quantized_cuda` and must be
     /// subject to the same budget enforcement as layer-managed weights.
     orphan_f16_keys: std::collections::VecDeque<WeightCacheKey>,
+    /// Raw quantized weights for on-the-fly GEMV (Q8_0, Q4_0, Q4_K).
+    resident_quant: std::collections::HashMap<WeightCacheKey, cust::memory::DeviceBuffer<u8>>,
+    orphan_quant_keys: std::collections::VecDeque<WeightCacheKey>,
+    /// Reusable Q8_K activation buffers keyed by byte length.
+    q8k_pool: std::collections::HashMap<usize, Vec<cust::memory::DeviceBuffer<u8>>>,
+}
+
+#[cfg(feature = "cuda")]
+impl Drop for GpuState {
+    fn drop(&mut self) {
+        // The cuBLAS handle (from `cublasCreate_v2`) is a raw resource the other
+        // RAII fields don't release. `Drop::drop` runs before the struct's
+        // fields are dropped, so the CUDA context (`_ctx`) is still current.
+        if !self.cublas.is_null() {
+            unsafe {
+                cublas_sys::cublasDestroy_v2(self.cublas);
+            }
+        }
+    }
 }
 
 #[cfg(feature = "cuda")]
@@ -343,6 +372,12 @@ impl GpuState {
     }
 
     fn enforce_budget(&mut self) {
+        self.enforce_budget_protecting(None);
+    }
+
+    /// Like [`Self::enforce_budget`], but never evicts `protect` (the orphan
+    /// quant entry a caller is about to use this turn).
+    fn enforce_budget_protecting(&mut self, protect: Option<WeightCacheKey>) {
         let max_layers = self.layer_config.max_resident_layers;
         let max_bytes = self.layer_config.max_vram_bytes;
 
@@ -362,13 +397,27 @@ impl GpuState {
 
         // If still over byte budget, evict orphan (non-layer) f16 entries LRU-style.
         while max_bytes > 0 && self.resident_bytes > max_bytes {
-            let Some(key) = self.orphan_f16_keys.pop_front() else {
-                break;
-            };
-            if let Some(buf) = self.resident_f16.remove(&key) {
+            if let Some(key) = self.orphan_f16_keys.pop_front()
+                && let Some(buf) = self.resident_f16.remove(&key)
+            {
                 self.resident_bytes -= buf.len() * std::mem::size_of::<u16>();
                 drop(buf);
+                continue;
             }
+            if let Some(key) = self.orphan_quant_keys.pop_front() {
+                if Some(key) == protect {
+                    // Don't evict the entry the caller still needs; re-queue it
+                    // at the front and stop (everything else is already gone).
+                    self.orphan_quant_keys.push_front(key);
+                    break;
+                }
+                if let Some(buf) = self.resident_quant.remove(&key) {
+                    self.resident_bytes -= buf.len();
+                    drop(buf);
+                    continue;
+                }
+            }
+            break;
         }
     }
 
@@ -385,13 +434,21 @@ impl GpuState {
                 self.evict_layer_internal(evict_id);
                 continue;
             }
-            let Some(key) = self.orphan_f16_keys.pop_front() else {
-                break;
-            };
-            if let Some(buf) = self.resident_f16.remove(&key) {
+            if let Some(key) = self.orphan_f16_keys.pop_front()
+                && let Some(buf) = self.resident_f16.remove(&key)
+            {
                 self.resident_bytes -= buf.len() * std::mem::size_of::<u16>();
                 drop(buf);
+                continue;
             }
+            if let Some(key) = self.orphan_quant_keys.pop_front()
+                && let Some(buf) = self.resident_quant.remove(&key)
+            {
+                self.resident_bytes -= buf.len();
+                drop(buf);
+                continue;
+            }
+            break;
         }
     }
 
@@ -400,6 +457,45 @@ impl GpuState {
             self.orphan_f16_keys.remove(pos);
         }
         self.orphan_f16_keys.push_back(key);
+    }
+
+    fn touch_orphan_quant(&mut self, key: WeightCacheKey) {
+        if let Some(pos) = self.orphan_quant_keys.iter().position(|&k| k == key) {
+            self.orphan_quant_keys.remove(pos);
+        }
+        self.orphan_quant_keys.push_back(key);
+    }
+
+    fn get_q8k_buffer(&mut self, len: usize) -> Result<cust::memory::DeviceBuffer<u8>, String> {
+        if let Some(pool) = self.q8k_pool.get_mut(&len) {
+            if let Some(buf) = pool.pop() {
+                return Ok(buf);
+            }
+        }
+        cust::memory::DeviceBuffer::<u8>::zeroed(len).map_err(stringify)
+    }
+
+    fn return_q8k_buffer(&mut self, buf: cust::memory::DeviceBuffer<u8>) {
+        let len = buf.len();
+        self.q8k_pool.entry(len).or_default().push(buf);
+    }
+
+    /// Upload quantized weights once; reuse the device buffer on later tokens.
+    fn ensure_resident_quant(&mut self, key: WeightCacheKey, host: &[u8]) -> Result<(), String> {
+        if !self.resident_quant.contains_key(&key) {
+            self.ensure_vram_headroom(host.len());
+            let buf = cust::memory::DeviceBuffer::from_slice(host).map_err(stringify)?;
+            self.resident_bytes += buf.len();
+            self.resident_quant.insert(key, buf);
+            self.orphan_quant_keys.push_back(key);
+            // Protect the entry we just made resident: the caller is about to
+            // `get(&key)` it, so it must not be evicted in this same budget
+            // pass even if `ensure_vram_headroom` could not free enough room.
+            self.enforce_budget_protecting(Some(key));
+        } else {
+            self.touch_orphan_quant(key);
+        }
+        Ok(())
     }
 
     fn evict_layer_internal(&mut self, layer: LayerId) {
@@ -465,6 +561,9 @@ fn gpu_init() -> Result<GpuState, String> {
         layer_map: std::collections::HashMap::new(),
         resident_bytes: 0,
         orphan_f16_keys: std::collections::VecDeque::new(),
+        resident_quant: std::collections::HashMap::new(),
+        orphan_quant_keys: std::collections::VecDeque::new(),
+        q8k_pool: std::collections::HashMap::new(),
     })
 }
 
@@ -788,11 +887,16 @@ pub fn gemv_q8_0_direct_cuda(
     })?;
 
     with_gpu(|gpu| {
-        // Upload quantized weights (compressed, small transfer).
-        let matrix_device =
-            cust::memory::DeviceBuffer::from_slice(quantized_matrix).map_err(stringify)?;
+        let key = bytes_cache_key(quantized_matrix);
+        gpu.ensure_resident_quant(key, quantized_matrix)?;
+        let matrix_ptr = gpu
+            .resident_quant
+            .get(&key)
+            .ok_or_else(|| "Q8_0 weight missing from resident cache".to_string())?
+            .as_device_ptr();
+
         let vector_device = cust::memory::DeviceBuffer::from_slice(vector).map_err(stringify)?;
-        let output_device = cust::memory::DeviceBuffer::<f32>::zeroed(rows).map_err(stringify)?;
+        let output_device = gpu.get_f32_buffer(rows).map_err(stringify)?;
 
         let block_size = 256_u32;
         let grid_size = rows_u32.saturating_mul(32).div_ceil(block_size);
@@ -804,7 +908,7 @@ pub fn gemv_q8_0_direct_cuda(
         unsafe {
             cust::launch!(
                 function<<<grid_size, block_size, 0, stream>>>(
-                    matrix_device.as_device_ptr(),
+                    matrix_ptr,
                     vector_device.as_device_ptr(),
                     output_device.as_device_ptr(),
                     rows_u32,
@@ -814,6 +918,7 @@ pub fn gemv_q8_0_direct_cuda(
             .map_err(stringify)?;
         }
         output_device.copy_to(output).map_err(stringify)?;
+        gpu.return_f32_buffer(output_device);
         Ok(())
     })
     .map_err(GemvCudaError::Cuda)
@@ -829,8 +934,7 @@ pub fn gemv_q4_0_direct_cuda(
     vector: &[f32],
     output: &mut [f32],
 ) -> Result<(), GemvCudaError> {
-    const QK4_0: usize = 32;
-    const BLOCK_Q4_0_SIZE: usize = 2 + 16; // f16 scale + 16 nibbles
+    use crate::quantization::{BLOCK_Q4_0_SIZE, QK4_0};
 
     if !cols.is_multiple_of(QK4_0) {
         return Err(GemvCudaError::InvalidVectorLength {
@@ -871,10 +975,16 @@ pub fn gemv_q4_0_direct_cuda(
     })?;
 
     with_gpu(|gpu| {
-        let matrix_device =
-            cust::memory::DeviceBuffer::from_slice(quantized_matrix).map_err(stringify)?;
+        let key = bytes_cache_key(quantized_matrix);
+        gpu.ensure_resident_quant(key, quantized_matrix)?;
+        let matrix_ptr = gpu
+            .resident_quant
+            .get(&key)
+            .ok_or_else(|| "Q4_0 weight missing from resident cache".to_string())?
+            .as_device_ptr();
+
         let vector_device = cust::memory::DeviceBuffer::from_slice(vector).map_err(stringify)?;
-        let output_device = cust::memory::DeviceBuffer::<f32>::zeroed(rows).map_err(stringify)?;
+        let output_device = gpu.get_f32_buffer(rows).map_err(stringify)?;
 
         let block_size = 256_u32;
         let grid_size = rows_u32.saturating_mul(32).div_ceil(block_size);
@@ -886,7 +996,7 @@ pub fn gemv_q4_0_direct_cuda(
         unsafe {
             cust::launch!(
                 function<<<grid_size, block_size, 0, stream>>>(
-                    matrix_device.as_device_ptr(),
+                    matrix_ptr,
                     vector_device.as_device_ptr(),
                     output_device.as_device_ptr(),
                     rows_u32,
@@ -896,9 +1006,256 @@ pub fn gemv_q4_0_direct_cuda(
             .map_err(stringify)?;
         }
         output_device.copy_to(output).map_err(stringify)?;
+        gpu.return_f32_buffer(output_device);
         Ok(())
     })
     .map_err(GemvCudaError::Cuda)
+}
+
+pub fn validate_q4_k_gemv_dims(
+    quantized_matrix: &[u8],
+    rows: usize,
+    cols: usize,
+    q8k: &[u8],
+    output: &[f32],
+) -> Result<(), GemvCudaError> {
+    if !cols.is_multiple_of(QK_K) {
+        return Err(GemvCudaError::InvalidVectorLength {
+            expected: cols.div_ceil(QK_K) * QK_K,
+            actual: cols,
+        });
+    }
+    let blocks_per_row = cols / QK_K;
+    let expected_matrix_len = rows
+        .saturating_mul(blocks_per_row)
+        .saturating_mul(BLOCK_Q4_K_SIZE);
+    if quantized_matrix.len() != expected_matrix_len {
+        return Err(GemvCudaError::InvalidMatrixLength {
+            expected: expected_matrix_len,
+            actual: quantized_matrix.len(),
+        });
+    }
+    let expected_q8k_len = blocks_per_row * BLOCK_Q8_K_BYTES;
+    if q8k.len() != expected_q8k_len {
+        return Err(GemvCudaError::InvalidVectorLength {
+            expected: expected_q8k_len,
+            actual: q8k.len(),
+        });
+    }
+    if output.len() != rows {
+        return Err(GemvCudaError::InvalidOutputLength {
+            expected: rows,
+            actual: output.len(),
+        });
+    }
+    Ok(())
+}
+
+/// Q4_K on-the-fly GEMV via Q4_K × Q8_K dot products (OXK GPU path).
+/// Weights stay compressed in VRAM; the input vector is quantized to Q8_K
+/// once per token on the CPU (same layout as the OXK CPU kernels).
+#[cfg(feature = "cuda")]
+pub fn gemv_q4_k_direct_cuda(
+    quantized_matrix: &[u8],
+    rows: usize,
+    cols: usize,
+    q8k: &[u8],
+    output: &mut [f32],
+) -> Result<(), GemvCudaError> {
+    validate_q4_k_gemv_dims(quantized_matrix, rows, cols, q8k, output)?;
+
+    let blocks_per_row = cols / QK_K;
+    let rows_u32 = u32::try_from(rows).map_err(|_| GemvCudaError::InvalidOutputLength {
+        expected: u32::MAX as usize,
+        actual: rows,
+    })?;
+    let blocks_u32 = u32::try_from(blocks_per_row).map_err(|_| GemvCudaError::InvalidVectorLength {
+        expected: u32::MAX as usize,
+        actual: blocks_per_row,
+    })?;
+
+    with_gpu(|gpu| {
+        let key = bytes_cache_key(quantized_matrix);
+        gpu.ensure_resident_quant(key, quantized_matrix)?;
+        let matrix_ptr = gpu
+            .resident_quant
+            .get(&key)
+            .ok_or_else(|| "Q4_K weight missing from resident cache".to_string())?
+            .as_device_ptr();
+
+        let mut q8k_device = gpu.get_q8k_buffer(q8k.len()).map_err(stringify)?;
+        q8k_device.copy_from(q8k).map_err(stringify)?;
+        let output_device = gpu.get_f32_buffer(rows).map_err(stringify)?;
+
+        let block_size = 256_u32;
+        let grid_size = rows_u32.saturating_mul(32).div_ceil(block_size);
+        let function = gpu
+            .module
+            .get_function(GEMV_Q4_K_DIRECT_KERNEL_NAME)
+            .map_err(stringify)?;
+        let stream = &gpu.stream;
+        unsafe {
+            cust::launch!(
+                function<<<grid_size, block_size, 0, stream>>>(
+                    matrix_ptr,
+                    q8k_device.as_device_ptr(),
+                    output_device.as_device_ptr(),
+                    rows_u32,
+                    blocks_u32
+                )
+            )
+            .map_err(stringify)?;
+        }
+        output_device.copy_to(output).map_err(stringify)?;
+        gpu.return_f32_buffer(output_device);
+        gpu.return_q8k_buffer(q8k_device);
+        Ok(())
+    })
+    .map_err(GemvCudaError::Cuda)
+}
+
+#[cfg(feature = "cuda")]
+fn gemv_superblock_direct_cuda(
+    kernel_name: &str,
+    block_bytes: usize,
+    vals_per_block: usize,
+    quantized_matrix: &[u8],
+    rows: usize,
+    cols: usize,
+    vector: &[f32],
+    output: &mut [f32],
+) -> Result<(), GemvCudaError> {
+    if !cols.is_multiple_of(vals_per_block) {
+        return Err(GemvCudaError::InvalidVectorLength {
+            expected: cols.div_ceil(vals_per_block) * vals_per_block,
+            actual: cols,
+        });
+    }
+    let blocks_per_row = cols / vals_per_block;
+    let expected_matrix_len = rows
+        .saturating_mul(blocks_per_row)
+        .saturating_mul(block_bytes);
+    if quantized_matrix.len() != expected_matrix_len {
+        return Err(GemvCudaError::InvalidMatrixLength {
+            expected: expected_matrix_len,
+            actual: quantized_matrix.len(),
+        });
+    }
+    if vector.len() != cols {
+        return Err(GemvCudaError::InvalidVectorLength {
+            expected: cols,
+            actual: vector.len(),
+        });
+    }
+    if output.len() != rows {
+        return Err(GemvCudaError::InvalidOutputLength {
+            expected: rows,
+            actual: output.len(),
+        });
+    }
+
+    let rows_u32 = u32::try_from(rows).map_err(|_| GemvCudaError::InvalidOutputLength {
+        expected: u32::MAX as usize,
+        actual: rows,
+    })?;
+    let blocks_u32 = u32::try_from(blocks_per_row).map_err(|_| GemvCudaError::InvalidVectorLength {
+        expected: u32::MAX as usize,
+        actual: blocks_per_row,
+    })?;
+
+    with_gpu(|gpu| {
+        let key = bytes_cache_key(quantized_matrix);
+        gpu.ensure_resident_quant(key, quantized_matrix)?;
+        let matrix_ptr = gpu
+            .resident_quant
+            .get(&key)
+            .ok_or_else(|| "quant weight missing from resident cache".to_string())?
+            .as_device_ptr();
+
+        let vector_device = cust::memory::DeviceBuffer::from_slice(vector).map_err(stringify)?;
+        let output_device = gpu.get_f32_buffer(rows).map_err(stringify)?;
+
+        let block_size = 256_u32;
+        let grid_size = rows_u32.saturating_mul(32).div_ceil(block_size);
+        let function = gpu.module.get_function(kernel_name).map_err(stringify)?;
+        let stream = &gpu.stream;
+        unsafe {
+            cust::launch!(
+                function<<<grid_size, block_size, 0, stream>>>(
+                    matrix_ptr,
+                    vector_device.as_device_ptr(),
+                    output_device.as_device_ptr(),
+                    rows_u32,
+                    blocks_u32
+                )
+            )
+            .map_err(stringify)?;
+        }
+        output_device.copy_to(output).map_err(stringify)?;
+        gpu.return_f32_buffer(output_device);
+        Ok(())
+    })
+    .map_err(GemvCudaError::Cuda)
+}
+
+#[cfg(feature = "cuda")]
+pub fn gemv_iq1_s_direct_cuda(
+    quantized_matrix: &[u8],
+    rows: usize,
+    cols: usize,
+    vector: &[f32],
+    output: &mut [f32],
+) -> Result<(), GemvCudaError> {
+    gemv_superblock_direct_cuda(
+        GEMV_IQ1_S_KERNEL_NAME,
+        50,
+        256,
+        quantized_matrix,
+        rows,
+        cols,
+        vector,
+        output,
+    )
+}
+
+#[cfg(feature = "cuda")]
+pub fn gemv_iq1_m_direct_cuda(
+    quantized_matrix: &[u8],
+    rows: usize,
+    cols: usize,
+    vector: &[f32],
+    output: &mut [f32],
+) -> Result<(), GemvCudaError> {
+    gemv_superblock_direct_cuda(
+        GEMV_IQ1_M_KERNEL_NAME,
+        56,
+        256,
+        quantized_matrix,
+        rows,
+        cols,
+        vector,
+        output,
+    )
+}
+
+#[cfg(feature = "cuda")]
+pub fn gemv_nvfp4_direct_cuda(
+    quantized_matrix: &[u8],
+    rows: usize,
+    cols: usize,
+    vector: &[f32],
+    output: &mut [f32],
+) -> Result<(), GemvCudaError> {
+    gemv_superblock_direct_cuda(
+        GEMV_NVFP4_KERNEL_NAME,
+        36,
+        64,
+        quantized_matrix,
+        rows,
+        cols,
+        vector,
+        output,
+    )
 }
 
 pub fn validate_q8_0_gemv_dims(
@@ -1030,6 +1387,7 @@ pub fn gemv_quantized_cuda(
             gpu.resident_bytes += weight_bytes;
             gpu.orphan_f16_keys.push_back(key);
             gpu.resident_f16.insert(key, weight);
+            gpu.enforce_budget();
         } else {
             gpu.touch_orphan_f16(key);
         }
@@ -1315,6 +1673,8 @@ mod tests {
     #[cfg(feature = "cuda")]
     fn gemv_cuda_kernel_name_matches_ptx_entry() {
         assert!(GEMV_F32_PTX.contains(".entry gemv_f32_kernel"));
+        assert!(GEMV_F32_PTX.contains(".entry gemv_q4_k_kernel"));
         assert_eq!(GEMV_KERNEL_NAME, "gemv_f32_kernel");
+        assert_eq!(GEMV_Q4_K_DIRECT_KERNEL_NAME, "gemv_q4_k_kernel");
     }
 }

@@ -40,9 +40,7 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    let api_key = std::env::var("OXIDIZE_API_KEY")
-        .ok()
-        .filter(|value| !value.is_empty());
+    let auth = AuthConfig::from_env();
 
     let (model_opt, paged_opt) = if args.batch_mode == BatchMode::Paged {
         if let Some(runtime) = model {
@@ -76,9 +74,7 @@ async fn main() {
     let state = AppState {
         limiter: Arc::new(RequestLimiter::new(RequestLimitConfig::default())),
         batcher: Arc::new(ContinuousBatcher::default()),
-        auth: AuthConfig {
-            api_key: api_key.map(Arc::<str>::from),
-        },
+        auth,
         model: model_opt,
         paged: paged_opt,
         mesh,

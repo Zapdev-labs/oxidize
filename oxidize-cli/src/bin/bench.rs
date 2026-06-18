@@ -384,10 +384,9 @@ fn infer_dflash_config_from_tensors(
     if let Some(t) = tensors
         .iter()
         .find(|t| t.name == "blk.0.attn_q_norm.weight")
+        && let Some(&dim) = t.dimensions.first()
     {
-        if let Some(&dim) = t.dimensions.first() {
-            out.head_dim = Some(dim as usize);
-        }
+        out.head_dim = Some(dim as usize);
     }
     out
 }
@@ -427,6 +426,10 @@ fn inference_config_from_dflash(
         gelu_ffn: false,
         sandwich_norm: false,
         rms_norm_weight_plus_one: false,
+        nextn_predict_layers: 0,
+        expert_weights_scale: 1.0,
+        expert_group_count: 0,
+        expert_group_used_count: 0,
     }
 }
 

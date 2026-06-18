@@ -1,10 +1,12 @@
-use oxidize_core::inference::InferenceModel;
-use oxidize_core::model::{Model, Session};
+use std::time::Instant;
+
+use oxidize_core::layer_wise::LayerWiseModel;
+use oxidize_core::model::Model;
 
 use crate::config::FinetuneConfig;
 use crate::dataset::SftExample;
 use crate::error::{FinetuneError, Result};
-use crate::fused::{cross_entropy_grad, softmax_cross_entropy};
+use crate::fused::{cross_entropy_grad_batch, softmax_cross_entropy_batch};
 use crate::lora::{LoRAAdapter, LoRATarget};
 
 #[derive(Debug, Clone)]
@@ -13,38 +15,69 @@ pub struct FinetuneReport {
     pub tokens: usize,
     pub mean_loss: f32,
     pub epoch_losses: Vec<f32>,
+    pub tokens_per_second: f32,
+    pub elapsed_seconds: f32,
 }
 
+/// SFT trainer: frozen quantized base (batched layer-major windows through
+/// `LayerWiseModel`) + trainable LoRA on the LM head.
+///
+/// Throughput design (the "faster than per-token" plan):
+/// - windows of `config.window` positions run as GEMMs, amortizing one pass
+///   over the quantized weights across the whole window instead of re-reading
+///   ~all of the model per token;
+/// - logits/grad buffers are allocated once and reused across windows;
+/// - cross-entropy converts logits to gradients in place (no second
+///   window×vocab buffer);
+/// - all LoRA forward/backward/optimizer math is rayon-parallel and batched.
 pub struct SftTrainer {
     pub config: FinetuneConfig,
     pub output_lora: LoRAAdapter,
+    /// (directory, every_n_optimizer_steps) for periodic adapter checkpoints.
+    pub checkpoint: Option<(std::path::PathBuf, usize)>,
 }
 
 impl SftTrainer {
-    pub fn for_model(model: &InferenceModel, config: FinetuneConfig) -> Self {
-        let h = model.config_hidden_size();
+    pub fn for_model(model: &LayerWiseModel, config: FinetuneConfig) -> Self {
+        let h = model.config().hidden_size;
         let vocab = model.config().vocab_size;
         Self {
             config: config.clone(),
             output_lora: LoRAAdapter::new(LoRATarget::OutputHead, h, vocab, &config),
+            checkpoint: None,
+        }
+    }
+
+    fn save_checkpoint(&self, label: &str) {
+        if let Some((dir, _)) = &self.checkpoint {
+            match crate::export::export_lora_gguf(
+                dir,
+                std::slice::from_ref(&self.output_lora),
+                self.config.rank,
+                self.config.lora_scale(),
+            ) {
+                Ok(()) => println!("  checkpoint ({label}) -> {}", dir.display()),
+                Err(e) => eprintln!("  checkpoint save failed: {e}"),
+            }
         }
     }
 
     pub fn tokenize_examples(
         examples: &mut Vec<SftExample>,
-        encode: impl Fn(&str) -> Vec<u32>,
+        encode: impl Fn(&str) -> Vec<u32> + Sync,
         max_seq_len: usize,
     ) -> Result<()> {
-        for ex in examples.iter_mut() {
+        use rayon::prelude::*;
+        // BPE encoding of a large-vocab tokenizer is the slowest part of setup
+        // and is independent per example — run it across all cores.
+        let cap = max_seq_len.saturating_mul(4).max(2);
+        examples.par_iter_mut().for_each(|ex| {
             let mut ids = encode(&ex.text);
-            if ids.len() > max_seq_len {
-                ids.truncate(max_seq_len);
-            }
-            if ids.len() < 2 {
-                continue;
-            }
+            // Packing splits overlong examples across chunks; still cap single
+            // rows to bound pathological inputs.
+            ids.truncate(cap);
             ex.token_ids = ids;
-        }
+        });
         examples.retain(|e| e.token_ids.len() >= 2);
         if examples.is_empty() {
             return Err(FinetuneError::EmptyDataset);
@@ -52,149 +85,187 @@ impl SftTrainer {
         Ok(())
     }
 
+    /// Train over pre-packed chunks (see `dataset::pack_chunks`).
     pub fn train(
         &mut self,
-        model: &mut InferenceModel,
-        examples: &[SftExample],
+        model: &mut LayerWiseModel,
+        chunks: &[Vec<u32>],
     ) -> Result<FinetuneReport> {
-        if examples.is_empty() {
+        if chunks.is_empty() {
             return Err(FinetuneError::EmptyDataset);
         }
-        let h = model.config_hidden_size();
         let vocab = model.config().vocab_size;
-        #[allow(unused_assignments)]
-        let mut session = Session::new();
+        let window = self.config.window.max(2);
+        let tokens_per_step = self.config.tokens_per_step.max(1);
+        let grad_scale = 1.0 / tokens_per_step as f32;
+
+        // Reused buffers: window × vocab is the big one (e.g. 64 × 248320 × 4B ≈ 64MB).
+        let mut logits = vec![0.0_f32; window * vocab];
+
         let mut epoch_losses = Vec::with_capacity(self.config.epochs);
         let mut total_loss = 0.0_f32;
-        let mut total_steps = 0usize;
         let mut total_tokens = 0usize;
         let mut opt_step = 0usize;
-        let mut accum = 0usize;
+        let mut accum_tokens = 0usize;
+        let started = Instant::now();
+        let mut last_report = Instant::now();
+        let mut tokens_since_report = 0usize;
 
-        let mut normed = vec![0.0_f32; h];
-        let mut logits = vec![0.0_f32; vocab];
-        let mut grad_logits = vec![0.0_f32; vocab];
-
-        for _epoch in 0..self.config.epochs {
+        for epoch in 0..self.config.epochs {
             let mut epoch_loss = 0.0_f32;
-            let mut epoch_steps = 0usize;
+            let mut epoch_tokens = 0usize;
 
-            for example in examples {
-                let ids = &example.token_ids;
-                if ids.len() < 2 {
+            for chunk in chunks {
+                if chunk.len() < 2 {
                     continue;
                 }
                 model
                     .rewind_to(0)
                     .map_err(|e| FinetuneError::Model(format!("{e:?}")))?;
-                session = Session::new();
+                let inputs = &chunk[..chunk.len() - 1];
+                let targets = &chunk[1..];
 
-                for pos in 0..ids.len() - 1 {
-                    let token = ids[pos];
-                    let target = ids[pos + 1] as usize;
+                let mut pos = 0usize;
+                while pos < inputs.len() {
+                    let end = (pos + window).min(inputs.len());
+                    let kk = end - pos;
+                    let win_tokens = &inputs[pos..end];
+                    let win_targets = &targets[pos..end];
 
-                    model.embed_token_into_workspace(token);
-                    model
-                        .run_layer_range_in_workspace(pos, 0..model.config().layer_count)
+                    let normed = model
+                        .forward_normed_hidden(win_tokens, pos)
                         .map_err(|e| FinetuneError::Model(format!("{e:?}")))?;
-
-                    let hidden = model.hidden_state();
+                    let logits_w = &mut logits[..kk * vocab];
                     model
-                        .apply_final_norm(hidden, &mut normed)
+                        .lm_head_logits_batch(&normed, kk, logits_w)
                         .map_err(|e| FinetuneError::Model(format!("{e:?}")))?;
+                    self.output_lora.forward_batch(&normed, logits_w, kk)?;
 
-                    logits.fill(0.0_f32);
-                    model
-                        .lm_head_logits_from_normed(&normed, &mut logits)
-                        .map_err(|e| FinetuneError::Model(format!("{e:?}")))?;
+                    // In place: logits -> grad_scale * (softmax - onehot).
+                    let (loss_sum, n) =
+                        cross_entropy_grad_batch(logits_w, win_targets, vocab, grad_scale);
+                    self.output_lora.backward_batch(&normed, logits_w, kk)?;
 
-                    self.output_lora.forward(&normed, &mut logits)?;
+                    epoch_loss += loss_sum;
+                    epoch_tokens += n;
+                    total_loss += loss_sum;
+                    total_tokens += n;
+                    accum_tokens += n;
+                    tokens_since_report += n;
 
-                    grad_logits.fill(0.0_f32);
-                    let loss = cross_entropy_grad(&logits, target.min(vocab - 1), &mut grad_logits);
-                    epoch_loss += loss;
-                    total_loss += loss;
-                    epoch_steps += 1;
-                    total_steps += 1;
-                    total_tokens += 1;
-                    accum += 1;
-
-                    if accum >= self.config.gradient_accumulation_steps {
+                    if accum_tokens >= tokens_per_step {
                         opt_step += 1;
                         let lr = warmup_lr(
                             self.config.learning_rate,
                             opt_step,
                             self.config.warmup_steps,
                         );
+                        self.output_lora
+                            .step(lr, self.config.weight_decay, opt_step);
                         self.output_lora.zero_grad();
-                        self.output_lora.backward_and_step(
-                            &normed,
-                            &grad_logits,
-                            lr,
-                            self.config.weight_decay,
-                            opt_step,
-                        )?;
-                        accum = 0;
+                        accum_tokens = 0;
+
+                        if let Some((_, every)) = self.checkpoint
+                            && every > 0
+                            && opt_step.is_multiple_of(every)
+                        {
+                            self.save_checkpoint(&format!("step {opt_step}"));
+                        }
                     }
 
-                    session.record_tokens(1);
+                    if last_report.elapsed().as_secs_f32() >= 10.0 {
+                        let tps = tokens_since_report as f32 / last_report.elapsed().as_secs_f32();
+                        println!(
+                            "  epoch {} step {} tokens {} loss {:.4} | {:.2} tok/s",
+                            epoch + 1,
+                            opt_step,
+                            total_tokens,
+                            if epoch_tokens > 0 {
+                                epoch_loss / epoch_tokens as f32
+                            } else {
+                                0.0
+                            },
+                            tps
+                        );
+                        last_report = Instant::now();
+                        tokens_since_report = 0;
+                    }
+
+                    pos = end;
                 }
             }
 
-            if epoch_steps > 0 {
-                epoch_losses.push(epoch_loss / epoch_steps as f32);
+            if epoch_tokens > 0 {
+                epoch_losses.push(epoch_loss / epoch_tokens as f32);
             }
         }
 
+        // Flush a trailing partial accumulation so its gradients aren't lost.
+        if accum_tokens > 0 {
+            opt_step += 1;
+            let lr = warmup_lr(
+                self.config.learning_rate,
+                opt_step,
+                self.config.warmup_steps,
+            );
+            self.output_lora
+                .step(lr, self.config.weight_decay, opt_step);
+            self.output_lora.zero_grad();
+        }
+
+        let elapsed = started.elapsed().as_secs_f32();
         Ok(FinetuneReport {
-            steps: total_steps,
+            steps: opt_step,
             tokens: total_tokens,
-            mean_loss: if total_steps > 0 {
-                total_loss / total_steps as f32
+            mean_loss: if total_tokens > 0 {
+                total_loss / total_tokens as f32
             } else {
                 0.0
             },
             epoch_losses,
+            tokens_per_second: if elapsed > 0.0 {
+                total_tokens as f32 / elapsed
+            } else {
+                0.0
+            },
+            elapsed_seconds: elapsed,
         })
     }
 
-    pub fn eval_loss(&self, model: &mut InferenceModel, examples: &[SftExample]) -> Result<f32> {
-        let h = model.config_hidden_size();
+    /// Mean loss over pre-packed chunks, no gradient work.
+    pub fn eval_loss(&self, model: &mut LayerWiseModel, chunks: &[Vec<u32>]) -> Result<f32> {
         let vocab = model.config().vocab_size;
-        #[allow(unused_assignments)]
-        let mut session = Session::new();
-        let mut normed = vec![0.0_f32; h];
-        let mut logits = vec![0.0_f32; vocab];
+        let window = self.config.window.max(2);
+        let mut logits = vec![0.0_f32; window * vocab];
         let mut sum = 0.0_f32;
         let mut n = 0usize;
 
-        for example in examples {
-            let ids = &example.token_ids;
-            if ids.len() < 2 {
+        for chunk in chunks {
+            if chunk.len() < 2 {
                 continue;
             }
             model
                 .rewind_to(0)
                 .map_err(|e| FinetuneError::Model(format!("{e:?}")))?;
-            session = Session::new();
-            for pos in 0..ids.len() - 1 {
-                let token = ids[pos];
-                let target = ids[pos + 1] as usize;
-                model.embed_token_into_workspace(token);
-                model
-                    .run_layer_range_in_workspace(pos, 0..model.config().layer_count)
+            let inputs = &chunk[..chunk.len() - 1];
+            let targets = &chunk[1..];
+            let mut pos = 0usize;
+            while pos < inputs.len() {
+                let end = (pos + window).min(inputs.len());
+                let kk = end - pos;
+                let normed = model
+                    .forward_normed_hidden(&inputs[pos..end], pos)
                     .map_err(|e| FinetuneError::Model(format!("{e:?}")))?;
+                let logits_w = &mut logits[..kk * vocab];
                 model
-                    .apply_final_norm(model.hidden_state(), &mut normed)
+                    .lm_head_logits_batch(&normed, kk, logits_w)
                     .map_err(|e| FinetuneError::Model(format!("{e:?}")))?;
-                logits.fill(0.0_f32);
-                model
-                    .lm_head_logits_from_normed(&normed, &mut logits)
-                    .map_err(|e| FinetuneError::Model(format!("{e:?}")))?;
-                self.output_lora.forward(&normed, &mut logits)?;
-                sum += softmax_cross_entropy(&logits, target.min(vocab - 1));
-                n += 1;
-                session.record_tokens(1);
+                self.output_lora.forward_batch(&normed, logits_w, kk)?;
+                let (loss_sum, count) =
+                    softmax_cross_entropy_batch(logits_w, &targets[pos..end], vocab);
+                sum += loss_sum;
+                n += count;
+                pos = end;
             }
         }
         Ok(if n > 0 { sum / n as f32 } else { 0.0 })

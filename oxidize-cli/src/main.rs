@@ -1,8 +1,13 @@
+mod backend;
+mod help;
 mod pipeline;
 
+use backend::Backend;
 use clap::{Parser, ValueEnum};
+use help::{print_model_list, print_ollama_help, print_run_help, print_serve_help};
 use oxidize_core::generation::{
-    GenerationConfig, GenerationStream, SpeculativeGenerationConfig, SpeculativeGenerationStream,
+    GenerationConfig, GenerationStream, MtpGenerationStream, SpeculativeGenerationConfig,
+    SpeculativeGenerationStream,
 };
 use oxidize_core::gguf::MappedGgufFile;
 use oxidize_core::inference::{InferenceConfig, InferenceModel};
@@ -23,7 +28,7 @@ use serde::Deserialize;
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
@@ -32,26 +37,6 @@ use std::task::Wake;
 use std::time::{Duration, Instant};
 
 const PROFILE_CHILD_ENV: &str = "OXIDIZE_PROFILE_CHILD";
-
-// #region agent log
-fn agent_debug_log_cli(hypothesis_id: &str, location: &str, message: &str, data: &str) {
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or(0);
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/home/dih/oxidize/.cursor/debug-49b0b9.log")
-    {
-        let _ = writeln!(
-            file,
-            "{{\"sessionId\":\"49b0b9\",\"runId\":\"initial\",\"hypothesisId\":\"{}\",\"location\":\"{}\",\"message\":\"{}\",\"data\":{},\"timestamp\":{}}}",
-            hypothesis_id, location, message, data, timestamp
-        );
-    }
-}
-// #endregion
 
 #[derive(Debug, Parser)]
 #[command(name = "oxidize")]
@@ -88,8 +73,12 @@ struct Args {
     layer_wise: bool,
     #[arg(long, default_value_t = 1)]
     layer_cache: usize,
+    /// Use TurboQuant block quantization for q4/q8 KV cache (default).
     #[arg(long, default_value_t = false)]
     turboquant: bool,
+    /// Use the legacy asymmetric q4/q8 KV cache quantizer instead of TurboQuant.
+    #[arg(long, default_value_t = false)]
+    no_turboquant: bool,
     #[arg(long, default_value_t = false)]
     cpu_optimized: bool,
     #[arg(long, default_value_t = false)]
@@ -157,75 +146,42 @@ struct Args {
     /// Number of draft tokens per speculative step.
     #[arg(long, default_value_t = 4)]
     draft_tokens: usize,
+    /// Force DFlash speculative decoding even when the draft was trained for a different target.
+    /// Output remains target-verified, but draft acceptance may be poor.
+    #[arg(long, default_value_t = false)]
+    force_dflash: bool,
+    /// Disable native in-GGUF MTP/nextn speculative decoding when present.
+    #[arg(long, default_value_t = false)]
+    no_mtp: bool,
+    /// Auto-detect hardware and pick inference knobs (threads, ctx,
+    /// KV dtype, n_gpu_layers, layer_wise, mmap, mlock, ISA, pipeline).
+    /// On by default for `run`; explicit flags always win.
+    #[arg(long, default_value_t = true)]
+    auto: bool,
+    /// Opt out of auto-tuning (revert to explicit-flag-only behavior).
+    #[arg(long, default_value_t = false)]
+    no_auto: bool,
+    /// Print the resolved autotune plan to stderr before generation
+    /// starts. "json" emits machine-readable JSON instead of text.
+    #[arg(long, default_value = "auto")]
+    print_plan: String,
+    /// Internal: set if the user passed `--n-gpu-layers`. Used by
+    /// the autotuner to avoid overriding an explicit value.
+    #[arg(skip)]
+    n_gpu_layers_set: bool,
+    /// Internal: set if the user passed `--kv-cache-dtype`.
+    #[arg(skip)]
+    kv_cache_dtype_set: bool,
 }
 
-fn print_run_help() {
-    println!(
-        "Usage: oxidize run <model> [prompt] [options]\n\n\
-         Models can be local .gguf files or Hugging Face GGUF repos.\n\n\
-         Examples:\n\
-           oxidize run ./models/model.gguf \"hello\"\n\
-           oxidize run Qwen/Qwen2.5-0.5B-Instruct-GGUF --file qwen2.5-0.5b-instruct-q4_k_m.gguf --chat\n\
-           oxidize run TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF \"write a haiku\" --max-tokens 128\n\n\
-         Common options: --chat, --prompt, --max-tokens, --temperature, --backend, --threads, --no-api"
-    );
+/// True if `argv` contains `--flag` (exact match) or
+/// `--flag=value` (prefix match). Used by the autotuner to detect
+/// which non-Option flags the user set on the command line.
+fn user_passed_flag(argv: &[String], flag: &str) -> bool {
+    argv.iter()
+        .any(|a| a == flag || a.starts_with(&format!("{flag}=")))
 }
 
-fn print_serve_help() {
-    println!(
-        "Usage: oxidize serve [model] [options]\n\n\
-         Starts the OpenAI-compatible API server.\n\n\
-         Examples:\n\
-           oxidize serve ./models/Qwen3-4B-Q4_K_M.gguf\n\
-           oxidize serve --host 0.0.0.0 --port 11434\n\
-           oxidize serve ./models/model.gguf --temperature 0 --top-k 1\n\n\
-         Common options: --host, --port, --model, --max-tokens, --temperature, --top-p, --top-k, --threads"
-    );
-}
-
-fn print_ollama_help() {
-    println!(
-        "Usage: oxidize <command> [args]\n\n\
-         Commands:\n\
-           run <model> [prompt]     Run a model locally\n\
-           serve [model]            Start the OpenAI-compatible server\n\
-           list                     List local GGUF models in ./models\n\n\
-         Examples:\n\
-           oxidize run ./models/Qwen3-4B-Q4_K_M.gguf \"hello\"\n\
-           oxidize serve ./models/Qwen3-4B-Q4_K_M.gguf\n\
-           oxidize list"
-    );
-}
-
-fn print_model_list() -> io::Result<()> {
-    let models_dir = std::env::current_dir()?.join("models");
-    let mut rows = Vec::new();
-    if models_dir.is_dir() {
-        for entry in std::fs::read_dir(&models_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if path
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"))
-            {
-                let metadata = entry.metadata()?;
-                let size_gib = metadata.len() as f64 / 1024.0 / 1024.0 / 1024.0;
-                rows.push((path, size_gib));
-            }
-        }
-    }
-    rows.sort_by(|a, b| a.0.cmp(&b.0));
-    println!("{:<48} {:>9} PATH", "NAME", "SIZE");
-    for (path, size_gib) in rows {
-        let name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("<invalid>");
-        println!("{name:<48} {size_gib:>8.2}G {}", path.display());
-    }
-    Ok(())
-}
 
 fn resolve_model_spec(spec: &str, hf_file: Option<&str>) -> io::Result<PathBuf> {
     let path = PathBuf::from(spec);
@@ -505,8 +461,7 @@ fn gguf_repo_candidates(spec: &str) -> Vec<String> {
 
 fn resolve_hf_model_spec(api: &HfApi, spec: &str, hf_file: Option<&str>) -> io::Result<PathBuf> {
     let mut attempted = Vec::new();
-    for candidate in std::iter::once(spec.to_owned()).chain(gguf_repo_candidates(spec).into_iter())
-    {
+    for candidate in std::iter::once(spec.to_owned()).chain(gguf_repo_candidates(spec)) {
         if attempted.contains(&candidate) {
             continue;
         }
@@ -873,6 +828,7 @@ where
     let model_path = resolve_model_spec(&model, hf_file.as_deref())?;
     rewritten.push("--model".into());
     rewritten.push(model_path.into_os_string());
+    let one_shot = prompt.is_some();
     if let Some(prompt) = prompt {
         rewritten.push("--prompt".into());
         rewritten.push(prompt);
@@ -886,10 +842,19 @@ where
         }
     }
     if !has_flag(&rewritten, "--kv-cache-dtype") {
+        // f16/f32 are the KV dtypes decode attention can borrow zero-copy
+        // (f16 converts in-kernel via F16C); q8 dequantizes the WHOLE K/V
+        // prefix into workspace buffers every layer, every token. f16 also
+        // halves attention DRAM reads vs f32 as the context grows. Pass
+        // --kv-cache-dtype q8 to trade decode speed for memory.
         rewritten.push("--kv-cache-dtype".into());
-        rewritten.push("q8".into());
+        rewritten.push("f16".into());
     }
-    let skip_api = has_flag(&rewritten, "--no-api")
+    // One-shot prompt runs exit right after generation, so a background API
+    // server would just load the model a second time (concurrently, stealing
+    // memory bandwidth from prefill) and die with the process.
+    let skip_api = one_shot
+        || has_flag(&rewritten, "--no-api")
         || has_flag(&rewritten, "--mesh")
         || has_flag(&rewritten, "--pipe-head")
         || has_flag(&rewritten, "--pipe-tail");
@@ -987,8 +952,10 @@ fn rewrite_serve_args(raw: Vec<OsString>) -> io::Result<Vec<OsString>> {
         rewritten.push(model_path.into_os_string());
     }
     if !has_flag(&rewritten, "--kv-cache-dtype") {
+        // Match the `run` rewrite: f16 KV is the zero-copy decode path with
+        // half the attention reads of f32 (see the comment there).
         rewritten.push("--kv-cache-dtype".into());
-        rewritten.push("q8".into());
+        rewritten.push("f16".into());
     }
     if !has_flag(&rewritten, "--cpu-optimized") {
         rewritten.push("--cpu-optimized".into());
@@ -1025,42 +992,6 @@ impl KvCacheDType {
     }
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
-enum Backend {
-    Cpu,
-    Metal,
-    /// macOS only
-    Mlx,
-    Cuda,
-    Vulkan,
-    /// Intel Arc GPUs via Vulkan compute
-    IntelArc,
-}
-
-impl Backend {
-    fn to_core_backend(self) -> oxidize_core::backend::Backend {
-        match self {
-            Backend::Cpu => oxidize_core::backend::Backend::Cpu,
-            Backend::Metal => oxidize_core::backend::Backend::Metal,
-            Backend::Mlx => oxidize_core::backend::Backend::Mlx,
-            Backend::Cuda => oxidize_core::backend::Backend::Cuda,
-            Backend::Vulkan => oxidize_core::backend::Backend::Vulkan,
-            Backend::IntelArc => oxidize_core::backend::Backend::IntelArc,
-        }
-    }
-
-    #[allow(dead_code)]
-    fn as_arg(self) -> &'static str {
-        match self {
-            Backend::Cpu => "cpu",
-            Backend::Metal => "metal",
-            Backend::Mlx => "mlx",
-            Backend::Cuda => "cuda",
-            Backend::Vulkan => "vulkan",
-            Backend::IntelArc => "intel-arc",
-        }
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ConversationTurn {
@@ -1486,7 +1417,7 @@ fn generate_with_model<W: Write, M: Model + ?Sized>(
     let prompt_tokens = tokenizer.encode_with_special_tokens(
         prompt,
         EncodeOptions {
-            add_bos: true,
+            add_bos: tokenizer.add_bos_default(),
             add_eos: false,
             pad_to: None,
         },
@@ -1576,7 +1507,7 @@ fn generate_with_dflash_draft<W: Write, M: Model + ?Sized>(
     let prompt_tokens = tokenizer.encode_with_special_tokens(
         prompt,
         EncodeOptions {
-            add_bos: true,
+            add_bos: tokenizer.add_bos_default(),
             add_eos: false,
             pad_to: None,
         },
@@ -1632,6 +1563,92 @@ fn generate_with_dflash_draft<W: Write, M: Model + ?Sized>(
         write!(writer, "{response}")?;
         writer.flush()?;
     }
+    let elapsed = started_at.elapsed();
+    writeln!(writer)?;
+    writeln!(
+        writer,
+        "{}",
+        format_generation_stats(generated_tokens.len(), elapsed)
+    )?;
+    Ok(response)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn generate_with_mtp_model<W: Write>(
+    prompt: &str,
+    target_model: &mut InferenceModel,
+    tokenizer: &LoadedTokenizer,
+    max_tokens: usize,
+    temperature: f32,
+    top_p: Option<f32>,
+    top_k: Option<usize>,
+    draft_tokens: usize,
+    writer: &mut W,
+) -> io::Result<String> {
+    use futures_core::Stream;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Waker};
+
+    let started_at = Instant::now();
+    let mut session = Session::new();
+    let prompt_tokens = tokenizer.encode_with_special_tokens(
+        prompt,
+        EncodeOptions {
+            add_bos: tokenizer.add_bos_default(),
+            add_eos: false,
+            pad_to: None,
+        },
+    );
+    let eos_token = tokenizer.special_tokens().eos;
+    let suppressed_tokens = suppressed_generation_tokens(tokenizer, target_model.vocab_size());
+    let generation = GenerationConfig {
+        max_new_tokens: max_tokens,
+        stop_token: eos_token,
+        suppressed_tokens,
+        sampling: SamplingConfig {
+            temperature,
+            top_p,
+            top_k,
+            ..SamplingConfig::default()
+        },
+        ..GenerationConfig::default()
+    };
+    let config = SpeculativeGenerationConfig {
+        generation,
+        draft_tokens_per_step: draft_tokens.max(1),
+    };
+
+    let mut rng = rand::thread_rng();
+    let mut stream =
+        MtpGenerationStream::new(target_model, &mut session, &prompt_tokens, config, || {
+            rand::Rng::r#gen::<f32>(&mut rng)
+        });
+    let waker = Waker::from(Arc::new(NoopWaker));
+    let mut cx = Context::from_waker(&waker);
+    let mut pinned = Pin::new(&mut stream);
+    let mut generated_tokens: Vec<u32> = Vec::new();
+
+    loop {
+        match Stream::poll_next(pinned.as_mut(), &mut cx) {
+            Poll::Ready(Some(Ok(token))) => generated_tokens.push(token),
+            Poll::Ready(Some(Err(e))) => {
+                return Err(io::Error::other(format!("generation error: {:?}", e)));
+            }
+            Poll::Ready(None) => break,
+            Poll::Pending => break,
+        }
+    }
+
+    let response = tokenizer
+        .decode_without_special_tokens(&generated_tokens)
+        .unwrap_or_default();
+    if !response.is_empty() {
+        write!(writer, "{response}")?;
+    } else if !generated_tokens.is_empty() {
+        write!(writer, "[generated token ids: {generated_tokens:?}]")?;
+    }
+    writer.flush()?;
     let elapsed = started_at.elapsed();
     writeln!(writer)?;
     writeln!(
@@ -1742,9 +1759,9 @@ fn run_api_server_blocking(server_args: oxidize_server::Args) -> io::Result<()> 
                 oxidize_server::RequestLimitConfig::default(),
             )),
             batcher: Arc::new(oxidize_server::ContinuousBatcher::default()),
-            auth: oxidize_server::AuthConfig {
-                api_key: api_key.map(Arc::<str>::from),
-            },
+            auth: api_key
+                .map(|key| oxidize_server::AuthConfig::from_keys([key]))
+                .unwrap_or_else(oxidize_server::AuthConfig::disabled),
             model,
             paged: None,
             mesh: None,
@@ -1797,6 +1814,7 @@ fn server_backend_from_cli(backend: Backend) -> oxidize_server::Backend {
         Backend::Metal => oxidize_server::Backend::Metal,
         Backend::Mlx => oxidize_server::Backend::Mlx,
         Backend::Cuda => oxidize_server::Backend::Cuda,
+        Backend::Rocm => oxidize_server::Backend::Rocm,
         Backend::Vulkan => oxidize_server::Backend::Vulkan,
         Backend::IntelArc => oxidize_server::Backend::IntelArc,
     }
@@ -1834,9 +1852,23 @@ fn server_args_from_cli(args: &Args) -> io::Result<oxidize_server::Args> {
         layer_wise: args.layer_wise,
         layer_cache: args.layer_cache,
         turboquant_kv: args.turboquant,
+        no_turboquant_kv: args.no_turboquant,
         mesh: args.mesh,
         mesh_port: args.mesh_port,
         tokenizer_model: args.tokenizer_model.clone(),
+        draft_model: args.draft_model.clone(),
+        draft_tokens: args.draft_tokens,
+        kv_cache_dtype: match args.kv_cache_dtype {
+            KvCacheDType::F32 => oxidize_server::KvCacheDType::F32,
+            KvCacheDType::F16 => oxidize_server::KvCacheDType::F16,
+            KvCacheDType::Q8 => oxidize_server::KvCacheDType::Q8,
+            KvCacheDType::Q4 => oxidize_server::KvCacheDType::Q4,
+        },
+        threads: args.threads.filter(|threads| *threads > 0).unwrap_or(0),
+        ram_offload_threads: args.ram_offload_threads,
+        auto: args.auto,
+        no_auto: args.no_auto,
+        print_plan: args.print_plan.clone(),
     })
 }
 
@@ -1901,6 +1933,18 @@ fn main() {
         Ok(args) => args,
         Err(error) => error.exit(),
     };
+
+    // Detect which non-Option flags the user explicitly set, so the
+    // autotuner can avoid overriding them.
+    let n_gpu_layers_set =
+        user_passed_flag(&std::env::args().collect::<Vec<_>>(), "--n-gpu-layers");
+    let kv_cache_dtype_set =
+        user_passed_flag(&std::env::args().collect::<Vec<_>>(), "--kv-cache-dtype");
+    let mut args = Args {
+        n_gpu_layers_set,
+        kv_cache_dtype_set,
+        ..args
+    };
     let (effective_backend, warning) = args.backend.to_core_backend().effective();
     if let Some(msg) = warning {
         eprintln!("warning: {msg}");
@@ -1909,6 +1953,7 @@ fn main() {
         oxidize_core::backend::Backend::Mlx => "Apple Silicon",
         oxidize_core::backend::Backend::Metal => "Metal GPU",
         oxidize_core::backend::Backend::Cuda => "CUDA GPU",
+        oxidize_core::backend::Backend::Rocm => "ROCm GPU",
         oxidize_core::backend::Backend::Cpu => "CPU",
         oxidize_core::backend::Backend::Vulkan => "Vulkan GPU",
         oxidize_core::backend::Backend::IntelArc => "Intel Arc GPU (Vulkan)",
@@ -1918,36 +1963,44 @@ fn main() {
         effective_backend.as_str(),
         backend_label
     );
-    let threads = if let Some(t) = args.threads.filter(|t| *t > 0) {
-        t
-    } else {
-        std::thread::available_parallelism()
-            .map(usize::from)
-            .unwrap_or(8)
-    };
-    #[allow(unused_mut)]
-    let mut pool_builder = rayon::ThreadPoolBuilder::new().num_threads(threads);
-    #[cfg(target_os = "linux")]
-    {
-        // Pin each rayon worker to one CPU (identity mapping over online
-        // CPUs). Without this the scheduler migrates workers between NUMA
-        // nodes mid-token, turning local DRAM streams into remote ones and
-        // defeating the hardware prefetcher. Disable with OXIDIZE_NO_PIN=1.
-        if std::env::var_os("OXIDIZE_NO_PIN").is_none() {
-            pool_builder = pool_builder.start_handler(|idx| unsafe {
-                let ncpu = libc::sysconf(libc::_SC_NPROCESSORS_ONLN);
-                if ncpu > 0 {
-                    let mut set: libc::cpu_set_t = std::mem::zeroed();
-                    libc::CPU_ZERO(&mut set);
-                    libc::CPU_SET(idx % ncpu as usize, &mut set);
-                    libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set);
-                }
-            });
-        }
+    // Build the global rayon pool with one worker per physical core. Decode
+    // GEMV is DRAM-bound, so SMT siblings add contention, not throughput (16
+    // logical threads on an 8-core part measures slower than 8). Pin each
+    // worker to one CPU in core-first order; otherwise the scheduler migrates
+    // workers between cores (and NUMA nodes) mid-token, turning local DRAM
+    // streams into remote ones and defeating the prefetcher. Disable pinning
+    // with OXIDIZE_NO_PIN=1.
+    //
+    // The pool can only be built once and must be built before any rayon use.
+    // When `--auto` will tune an actual model it can lower the thread count
+    // (e.g. for GPU offload), so for that path we defer the build until after
+    // the plan is applied — building it here would pin the wrong thread count
+    // permanently. Model loading itself does not touch the global pool.
+    fn build_rayon_pool(threads: usize) -> Result<(), rayon::ThreadPoolBuildError> {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .start_handler(oxidize_core::spinpool::pin_to_slot)
+            .build_global()
     }
-    if let Err(error) = pool_builder.build_global() {
-        eprintln!("failed to set rayon thread pool: {error}");
-        return;
+    fn resolve_threads(args: &Args) -> usize {
+        args.threads
+            .filter(|t| *t > 0)
+            .unwrap_or_else(oxidize_core::spinpool::physical_core_count)
+    }
+    let defer_pool_for_autotune = args.auto
+        && !args.no_auto
+        && args.model.is_some()
+        && args.threads.filter(|t| *t > 0).is_none()
+        && args.profile.is_none()
+        && !args.api_only
+        && !args.pipe_head
+        && !args.pipe_tail
+        && !args.mesh;
+    if !defer_pool_for_autotune {
+        if let Err(error) = build_rayon_pool(resolve_threads(&args)) {
+            eprintln!("failed to set rayon thread pool: {error}");
+            return;
+        }
     }
     if let Some(profiler) = args.profile
         && !is_profiling_child()
@@ -1967,10 +2020,11 @@ fn main() {
         }
         return;
     }
-    if args.serve_api && !args.no_api {
-        if let Err(error) = spawn_api_server_background(&args) {
-            eprintln!("failed to start API server: {error}");
-        }
+    if args.serve_api
+        && !args.no_api
+        && let Err(error) = spawn_api_server_background(&args)
+    {
+        eprintln!("failed to start API server: {error}");
     }
     if args.pipe_head {
         let model = match args.model.as_ref() {
@@ -2036,284 +2090,303 @@ fn main() {
         }
         return;
     }
-    if let Some(model_path) = args.model.as_ref() {
+    if let Some(model_path) = args.model.clone() {
         let loader = GgufModelLoader;
-        match loader.load_with_progress(model_path, |progress| {
+        let mapped = match loader.load_with_progress(&model_path, |progress| {
             println!("{}", render_load_progress(progress))
         }) {
-            Ok(mapped) => {
-                optimize_mapped_model_memory(&mapped, &args);
-                for lora_path in &args.lora_paths {
-                    match loader.load(lora_path) {
-                        Ok(adapter) => match plan_lora_application(
-                            &mapped.parsed().tensor_infos,
-                            &adapter.parsed().tensor_infos,
-                            mapped.parsed().quantization_type(),
-                        ) {
-                            Ok(plan) => println!("{}", render_lora_plan(&plan)),
-                            Err(error) => eprintln!("failed to plan adapter: {error:?}"),
-                        },
-                        Err(error) => eprintln!("failed to load adapter: {error}"),
-                    }
-                }
-                if args.gpus > 1 {
-                    let Some(strategy) = parse_parallelism(&args.parallelism) else {
-                        eprintln!(
-                            "invalid --parallelism value: {} (expected: tensor|pipeline)",
-                            args.parallelism
-                        );
-                        return;
-                    };
-                    let config = MultiGpuConfig {
-                        gpu_count: args.gpus,
-                        n_gpu_layers: args.n_gpu_layers,
-                        strategy,
-                    };
-                    match plan_multi_gpu_offload(&mapped.parsed().tensor_infos, &config) {
-                        Ok(plan) => println!("{}", render_multi_gpu_offload_plan(&plan)),
-                        Err(error) => {
-                            eprintln!("failed to build multi-gpu offload plan: {error:?}")
-                        }
-                    }
-                } else {
-                    let plan = plan_layer_offload(&mapped.parsed().tensor_infos, args.n_gpu_layers);
-                    println!("{}", render_offload_plan(&plan));
-                }
-
-                // Extract model config from GGUF metadata and run generation
-                let metadata = &mapped.parsed().metadata;
-                let is_dflash = matches!(
-                    mapped.parsed().architecture(),
-                    Some("dflash" | "dflash-draft")
-                );
-                // #region agent log
-                let mapped_infos = mapped.mapped_tensor_infos();
-                let architecture = mapped.parsed().architecture().unwrap_or("<none>");
-                let has_lm_head = mapped_infos
-                    .iter()
-                    .any(|tensor| tensor.name == "lm_head.weight");
-                let has_output = mapped_infos
-                    .iter()
-                    .any(|tensor| tensor.name == "output.weight");
-                let has_embed_tokens = mapped_infos
-                    .iter()
-                    .any(|tensor| tensor.name == "model.embed_tokens.weight");
-                let has_tok_embeddings = mapped_infos
-                    .iter()
-                    .any(|tensor| tensor.name == "tok_embeddings.weight");
-                agent_debug_log_cli(
-                    "H0_REPRO_PATH,H2_TENSOR_NAMES,H5_OUTPUT_PROJECTION",
-                    "oxidize-cli/src/main.rs:run_model_mode",
-                    "classified GGUF before CLI model construction",
-                    &format!(
-                        "{{\"architecture\":\"{}\",\"is_dflash\":{},\"tensor_count\":{},\"has_lm_head\":{},\"has_output\":{},\"has_embed_tokens\":{},\"has_tok_embeddings\":{}}}",
-                        architecture,
-                        is_dflash,
-                        mapped_infos.len(),
-                        has_lm_head,
-                        has_output,
-                        has_embed_tokens,
-                        has_tok_embeddings
-                    ),
-                );
-                // #endregion
-                if args.ctx_size == Some(0) {
-                    eprintln!("invalid --ctx-size: must be greater than 0");
-                    return;
-                }
-                if is_dflash && args.draft_model.is_none() && !dflash_gguf_has_io_tensors(&mapped) {
-                    agent_debug_log_cli(
-                        "H5_OUTPUT_PROJECTION",
-                        "oxidize-cli/src/main.rs:run_model_mode",
-                        "rejecting standalone dflash draft as generation target",
-                        "{\"reason\":\"dflash_requires_target_model_context\"}",
-                    );
+            Ok(mapped) => mapped,
+            Err(error) => {
+                eprintln!("failed to load model: {error}");
+                return;
+            }
+        };
+        // Run autotune after the model is mapped (so we can
+        // fingerprint it) but before the rest of the pipeline —
+        // `apply_plan` mutates `args` to fill in any field the user
+        // didn't set explicitly.
+        if args.auto && !args.no_auto {
+            let inv = oxidize_core::autotune::detect();
+            let model = oxidize_core::autotune::fingerprint(&mapped);
+            let plan = oxidize_core::autotune::plan(&inv, &model);
+            let print = match args.print_plan.as_str() {
+                "json" => true,
+                "auto" => atty_stdout(),
+                "yes" | "true" | "1" => true,
+                "no" | "false" | "0" => false,
+                other => {
                     eprintln!(
-                        "DFlash draft GGUF cannot be used as --model for normal generation. Use the full target GGUF with --model and pass this DFlash file via --draft-model, or use a DFlash GGUF that includes lm_head.weight and model.embed_tokens.weight (e.g. *-fullhead.gguf)."
+                        "warning: unknown --print-plan value '{}', defaulting to text",
+                        other
+                    );
+                    true
+                }
+            };
+            if print {
+                if args.print_plan == "json" {
+                    eprintln!(
+                        "{}",
+                        serde_json::to_string_pretty(&plan_to_json(&plan))
+                            .unwrap_or_else(|_| "{}".to_string())
+                    );
+                } else {
+                    eprintln!("\n[oxidize auto-tune plan]\n{}", plan.summary());
+                }
+            }
+            apply_plan_to_args(&mut args, &plan, &inv);
+        }
+        // Now that autotune has finalized `args.threads`, build the rayon pool
+        // if we deferred it above. This is the first point rayon is used.
+        if defer_pool_for_autotune
+            && let Err(error) = build_rayon_pool(resolve_threads(&args))
+        {
+            eprintln!("failed to set rayon thread pool: {error}");
+            return;
+        }
+        optimize_mapped_model_memory(&mapped, &args);
+        {
+            for lora_path in &args.lora_paths {
+                match loader.load(lora_path) {
+                    Ok(adapter) => match plan_lora_application(
+                        &mapped.parsed().tensor_infos,
+                        &adapter.parsed().tensor_infos,
+                        mapped.parsed().quantization_type(),
+                    ) {
+                        Ok(plan) => println!("{}", render_lora_plan(&plan)),
+                        Err(error) => eprintln!("failed to plan adapter: {error:?}"),
+                    },
+                    Err(error) => eprintln!("failed to load adapter: {error}"),
+                }
+            }
+            if args.gpus > 1 {
+                let Some(strategy) = parse_parallelism(&args.parallelism) else {
+                    eprintln!(
+                        "invalid --parallelism value: {} (expected: tensor|pipeline)",
+                        args.parallelism
                     );
                     return;
+                };
+                let config = MultiGpuConfig {
+                    gpu_count: args.gpus,
+                    n_gpu_layers: args.n_gpu_layers,
+                    strategy,
+                };
+                match plan_multi_gpu_offload(&mapped.parsed().tensor_infos, &config) {
+                    Ok(plan) => println!("{}", render_multi_gpu_offload_plan(&plan)),
+                    Err(error) => {
+                        eprintln!("failed to build multi-gpu offload plan: {error:?}")
+                    }
                 }
-                let mut config = InferenceConfig::from_gguf(&mapped);
-                config.kv_cache_dtype = args.kv_cache_dtype.dtype();
-                if args.turboquant {
-                    config.kv_quantization = oxidize_core::kv_cache::KvQuantization::TurboQuant;
-                }
-                if let Some(ctx) = args.ctx_size {
-                    config.context_size = ctx;
-                }
-                if args.cpu_optimized {
-                    config.context_size = config.context_size.min(2048);
-                }
-                // Auto-cap context to what fits in available RAM.
-                // KV cache = layers × ctx × kv_heads × head_dim × 2 (K+V) × dtype_bytes.
-                // If the full context would need more than available RAM headroom, shrink it.
-                if args.ctx_size.is_none() && !args.cpu_optimized {
-                    let kv_bytes_per_token = config.layer_count
+            } else {
+                let plan = plan_layer_offload(&mapped.parsed().tensor_infos, args.n_gpu_layers);
+                println!("{}", render_offload_plan(&plan));
+            }
+
+            // Extract model config from GGUF metadata and run generation
+            let metadata = &mapped.parsed().metadata;
+            let is_dflash = matches!(
+                mapped.parsed().architecture(),
+                Some("dflash" | "dflash-draft")
+            );
+            if args.ctx_size == Some(0) {
+                eprintln!("invalid --ctx-size: must be greater than 0");
+                return;
+            }
+            if is_dflash && args.draft_model.is_none() && !dflash_gguf_has_io_tensors(&mapped) {
+                eprintln!(
+                    "DFlash draft GGUF cannot be used as --model for normal generation. Use the full target GGUF with --model and pass this DFlash file via --draft-model, or use a DFlash GGUF that includes lm_head.weight and model.embed_tokens.weight (e.g. *-fullhead.gguf)."
+                );
+                return;
+            }
+            let mut config = InferenceConfig::from_gguf(&mapped);
+            config.kv_cache_dtype = args.kv_cache_dtype.dtype();
+            if args.no_turboquant {
+                config.kv_quantization = oxidize_core::kv_cache::KvQuantization::Asymmetric;
+            } else if args.turboquant {
+                config.kv_quantization = oxidize_core::kv_cache::KvQuantization::TurboQuant;
+            }
+            if let Some(ctx) = args.ctx_size {
+                config.context_size = ctx;
+            }
+            if args.cpu_optimized {
+                config.context_size = config.context_size.min(2048);
+            }
+            // Auto-cap context to what fits in available RAM.
+            // KV cache = layers × ctx × kv_heads × head_dim × 2 (K+V) × dtype_bytes.
+            // If the full context would need more than available RAM headroom, shrink it.
+            if args.ctx_size.is_none() && !args.cpu_optimized {
+                let kv_bytes_per_token = config.layer_count
                         * config.num_key_value_heads
                         * config.kv_head_dim()
                         * 2  // K + V
                         * config.kv_cache_dtype.size_in_bytes();
-                    let kv_full: u64 =
-                        (config.context_size as u64).saturating_mul(kv_bytes_per_token as u64);
-                    #[cfg(target_os = "linux")]
-                    let available =
-                        oxidize_core::gguf::linux_mem_available_bytes().unwrap_or(u64::MAX);
-                    #[cfg(not(target_os = "linux"))]
-                    let available = u64::MAX;
-                    // Reserve headroom for the model weights (file-backed but needed during
-                    // inference) plus 8 GiB for OS/workspace/overhead.
-                    let model_bytes = mapped.bytes().len() as u64;
-                    let overhead = 8u64 << 30; // 8 GiB
-                    let kv_budget = available
-                        .saturating_sub(model_bytes)
-                        .saturating_sub(overhead);
-                    if kv_full > kv_budget && kv_bytes_per_token > 0 {
-                        let capped = (kv_budget / kv_bytes_per_token as u64) as usize;
-                        // Round down to nearest power-of-2 multiple of 512.
-                        let capped = (capped / 512).max(1) * 512;
-                        eprintln!(
-                            "context: capped {} → {} tokens (KV cache would need {:.1} GiB, budget {:.1} GiB)",
-                            config.context_size,
-                            capped,
-                            kv_full as f64 / (1 << 30) as f64,
-                            kv_budget as f64 / (1 << 30) as f64,
-                        );
-                        config.context_size = capped;
-                    }
+                let kv_full: u64 =
+                    (config.context_size as u64).saturating_mul(kv_bytes_per_token as u64);
+                #[cfg(target_os = "linux")]
+                let available = oxidize_core::gguf::linux_mem_available_bytes().unwrap_or(u64::MAX);
+                #[cfg(not(target_os = "linux"))]
+                let available = u64::MAX;
+                // Reserve headroom for the model weights (file-backed but needed during
+                // inference) plus 8 GiB for OS/workspace/overhead.
+                let model_bytes = mapped.bytes().len() as u64;
+                let overhead = 8u64 << 30; // 8 GiB
+                let kv_budget = available
+                    .saturating_sub(model_bytes)
+                    .saturating_sub(overhead);
+                if kv_full > kv_budget && kv_bytes_per_token > 0 {
+                    let capped = (kv_budget / kv_bytes_per_token as u64) as usize;
+                    // Round down to nearest power-of-2 multiple of 512.
+                    let capped = (capped / 512).max(1) * 512;
+                    eprintln!(
+                        "context: capped {} → {} tokens (KV cache would need {:.1} GiB, budget {:.1} GiB)",
+                        config.context_size,
+                        capped,
+                        kv_full as f64 / (1 << 30) as f64,
+                        kv_budget as f64 / (1 << 30) as f64,
+                    );
+                    config.context_size = capped;
                 }
-                // Load tokenizer from GGUF metadata, falling back to an external model.
-                // For DFlash smoke runs with borrowed IO, prefer the external
-                // tokenizer so sampled ids match the borrowed output head.
-                let tokenizer_result = if is_dflash && args.tokenizer_model.is_some() {
-                    oxidize_core::tokenizer::load_tokenizer_from_gguf_file(
-                        args.tokenizer_model.as_deref(),
+            }
+            // Load tokenizer from GGUF metadata, falling back to an external model.
+            // For DFlash smoke runs with borrowed IO, prefer the external
+            // tokenizer so sampled ids match the borrowed output head.
+            let tokenizer_result = if is_dflash && args.tokenizer_model.is_some() {
+                oxidize_core::tokenizer::load_tokenizer_from_gguf_file(
+                    args.tokenizer_model.as_deref(),
+                )
+                .and_then(|opt| {
+                    opt.ok_or_else(|| {
+                        "external tokenizer model did not contain tokenizer metadata".to_string()
+                    })
+                })
+                .map_err(|_e| {
+                    oxidize_core::tokenizer::TokenizerLoadError::MissingMetadata(
+                        "tokenizer.ggml.model",
                     )
-                    .and_then(|opt| {
-                        opt.ok_or_else(|| {
-                            "external tokenizer model did not contain tokenizer metadata"
-                                .to_string()
-                        })
-                    })
-                    .map_err(|_e| {
-                        oxidize_core::tokenizer::TokenizerLoadError::MissingMetadata(
-                            "tokenizer.ggml.model",
-                        )
-                    })
-                    .or_else(|_| load_tokenizer_from_gguf_metadata(metadata))
-                } else {
-                    load_tokenizer_from_gguf_metadata(metadata).or_else(|_| {
-                        if is_dflash && dflash_gguf_has_io_tensors(&mapped) {
-                            Ok(dflash_byte_smoke_tokenizer())
-                        } else {
-                            oxidize_core::tokenizer::load_tokenizer_from_gguf_file(
-                                args.tokenizer_model.as_deref(),
-                            )
-                            .and_then(|opt| {
-                                opt.ok_or_else(|| {
-                                    "external tokenizer model did not contain tokenizer metadata"
-                                        .to_string()
-                                })
-                            })
-                            .map_err(|_e| {
-                                oxidize_core::tokenizer::TokenizerLoadError::MissingMetadata(
-                                    "tokenizer.ggml.model",
-                                )
-                            })
-                        }
-                    })
-                };
-                let tokenizer = match tokenizer_result {
-                    Ok(t) => t,
-                    Err(error) => {
-                        eprintln!("failed to load tokenizer: {error:?}");
-                        return;
-                    }
-                };
-                let stdout = io::stdout();
-                let mut writer = stdout.lock();
-                if let Some(draft_model_path) = args.draft_model.as_deref() {
-                    if is_dflash {
-                        eprintln!(
-                            "DFlash GGUFs are draft models, not target models. Use --model with the full target GGUF and --draft-model with the DFlash GGUF."
-                        );
-                        return;
-                    }
-
-                    let mut target_model: Box<dyn Model> = if args.layer_wise {
-                        match oxidize_core::layer_wise::LayerWiseModel::load_from_gguf(
-                            &mapped,
-                            config.clone(),
-                            args.layer_cache,
-                        ) {
-                            Ok(mut model) => {
-                                if let Err(error) = model.warm_layer_cache() {
-                                    eprintln!("failed to warm layer cache: {error}");
-                                    return;
-                                }
-                                Box::new(model)
-                            }
-                            Err(error) => {
-                                eprintln!("failed to load layer-wise target model: {error}");
-                                return;
-                            }
-                        }
+                })
+                .or_else(|_| load_tokenizer_from_gguf_metadata(metadata))
+            } else {
+                load_tokenizer_from_gguf_metadata(metadata).or_else(|_| {
+                    if is_dflash && dflash_gguf_has_io_tensors(&mapped) {
+                        Ok(dflash_byte_smoke_tokenizer())
                     } else {
-                        match InferenceModel::load_from_gguf(&mapped, config.clone(), true) {
-                            Ok(model) => Box::new(model),
-                            Err(error) => {
-                                eprintln!("failed to load target model weights: {error}");
+                        oxidize_core::tokenizer::load_tokenizer_from_gguf_file(
+                            args.tokenizer_model.as_deref(),
+                        )
+                        .and_then(|opt| {
+                            opt.ok_or_else(|| {
+                                "external tokenizer model did not contain tokenizer metadata"
+                                    .to_string()
+                            })
+                        })
+                        .map_err(|_e| {
+                            oxidize_core::tokenizer::TokenizerLoadError::MissingMetadata(
+                                "tokenizer.ggml.model",
+                            )
+                        })
+                    }
+                })
+            };
+            let tokenizer = match tokenizer_result {
+                Ok(t) => t,
+                Err(error) => {
+                    eprintln!("failed to load tokenizer: {error:?}");
+                    return;
+                }
+            };
+            let stdout = io::stdout();
+            let mut writer = stdout.lock();
+            if let Some(draft_model_path) = args.draft_model.as_deref() {
+                if is_dflash {
+                    eprintln!(
+                        "DFlash GGUFs are draft models, not target models. Use --model with the full target GGUF and --draft-model with the DFlash GGUF."
+                    );
+                    return;
+                }
+
+                let mut target_model: Box<dyn Model> = if args.layer_wise {
+                    match oxidize_core::layer_wise::LayerWiseModel::load_from_gguf(
+                        &mapped,
+                        config.clone(),
+                        args.layer_cache,
+                    ) {
+                        Ok(mut model) => {
+                            if let Err(error) = model.warm_layer_cache() {
+                                eprintln!("failed to warm layer cache: {error}");
                                 return;
                             }
+                            Box::new(model)
                         }
-                    };
-                    let target_hidden_size = config.hidden_size;
-                    let target_layer_count = target_model.layer_count();
-
-                    let draft_mapped = match loader.load(draft_model_path) {
-                        Ok(mapped) => mapped,
                         Err(error) => {
-                            eprintln!(
-                                "failed to load DFlash draft model {}: {error}",
-                                draft_model_path.display()
-                            );
+                            eprintln!("failed to load layer-wise target model: {error}");
                             return;
                         }
-                    };
-                    let draft_arch = draft_mapped.parsed().architecture();
-                    if !matches!(draft_arch, Some("dflash" | "dflash-draft")) {
+                    }
+                } else {
+                    match InferenceModel::load_from_gguf(&mapped, config.clone(), true) {
+                        Ok(model) => Box::new(model),
+                        Err(error) => {
+                            eprintln!("failed to load target model weights: {error}");
+                            return;
+                        }
+                    }
+                };
+                let target_hidden_size = config.hidden_size;
+                let target_layer_count = target_model.layer_count();
+
+                let draft_mapped = match loader.load(draft_model_path) {
+                    Ok(mapped) => mapped,
+                    Err(error) => {
                         eprintln!(
-                            "--draft-model must point to a DFlash GGUF, got architecture {:?}",
-                            draft_arch
+                            "failed to load DFlash draft model {}: {error}",
+                            draft_model_path.display()
                         );
                         return;
                     }
-                    let draft_config = oxidize_core::dflash::DFlashConfig::from_gguf(&draft_mapped);
-                    let mut draft_model =
-                        match oxidize_core::dflash::DFlashDraftModel::load_from_gguf(
-                            &draft_mapped,
-                            draft_config,
-                        ) {
-                            Ok(model) => model,
-                            Err(error) => {
-                                eprintln!("failed to load DFlash draft model: {error}");
-                                return;
-                            }
-                        };
-                    if let Err(error) = draft_model.load_external_io_from_gguf(&mapped) {
-                        eprintln!(
-                            "failed to borrow draft token embeddings/output from target GGUF: {error}"
-                        );
+                };
+                let draft_arch = draft_mapped.parsed().architecture();
+                if !matches!(draft_arch, Some("dflash" | "dflash-draft")) {
+                    eprintln!(
+                        "--draft-model must point to a DFlash GGUF, got architecture {:?}",
+                        draft_arch
+                    );
+                    return;
+                }
+                let draft_config = oxidize_core::dflash::DFlashConfig::from_gguf(&draft_mapped);
+                let mut draft_model = match oxidize_core::dflash::DFlashDraftModel::load_from_gguf(
+                    &draft_mapped,
+                    draft_config,
+                ) {
+                    Ok(model) => model,
+                    Err(error) => {
+                        eprintln!("failed to load DFlash draft model: {error}");
                         return;
                     }
-                    let incompatible_hidden = draft_model.config.hidden_size != target_hidden_size;
-                    let incompatible_layers = draft_model
-                        .config
-                        .target_layer_ids
-                        .iter()
-                        .any(|&layer| layer >= target_layer_count);
-                    if incompatible_hidden || incompatible_layers {
+                };
+                if let Err(error) = draft_model.load_external_io_from_gguf(&mapped) {
+                    eprintln!(
+                        "failed to borrow draft token embeddings/output from target GGUF: {error}"
+                    );
+                    return;
+                }
+                let incompatible_hidden = draft_model.config.hidden_size != target_hidden_size;
+                let incompatible_layers = draft_model
+                    .config
+                    .target_layer_ids
+                    .iter()
+                    .any(|&layer| layer >= target_layer_count);
+                if incompatible_hidden || incompatible_layers {
+                    if args.force_dflash {
                         eprintln!(
-                            "DFlash draft is incompatible with target (draft_hidden={}, target_hidden={}, draft_target_layers={:?}, target_layers={}); falling back to target-only generation",
+                            "forcing DFlash with incompatible target (draft_hidden={}, target_hidden={}, draft_target_layers={:?}, target_layers={}); target verification still controls output, but acceptance may be poor",
+                            draft_model.config.hidden_size,
+                            target_hidden_size,
+                            draft_model.config.target_layer_ids,
+                            target_layer_count
+                        );
+                    } else {
+                        eprintln!(
+                            "DFlash draft is incompatible with target (draft_hidden={}, target_hidden={}, draft_target_layers={:?}, target_layers={}); falling back to target-only generation (pass --force-dflash to test anyway)",
                             draft_model.config.hidden_size,
                             target_hidden_size,
                             draft_model.config.target_layer_ids,
@@ -2333,24 +2406,61 @@ fn main() {
                         }
                         return;
                     }
-                    if draft_model.vocab_size() != target_model.vocab_size() {
-                        eprintln!(
-                            "DFlash draft vocab ({}) does not match target vocab ({}) after borrowing target IO",
-                            draft_model.vocab_size(),
-                            target_model.vocab_size()
-                        );
-                        return;
-                    }
+                }
+                if draft_model.vocab_size() != target_model.vocab_size() {
                     eprintln!(
-                        "using DFlash speculative decoding: target={} draft={} draft_tokens={}",
+                        "DFlash draft vocab ({}) does not match target vocab ({}) after borrowing target IO",
+                        draft_model.vocab_size(),
+                        target_model.vocab_size()
+                    );
+                    return;
+                }
+                eprintln!(
+                    "using DFlash speculative decoding: target={} draft={} draft_tokens={}",
+                    model_path.display(),
+                    draft_model_path.display(),
+                    args.draft_tokens
+                );
+                if let Err(error) = generate_with_dflash_draft(
+                    &args.prompt,
+                    target_model.as_mut(),
+                    &mut draft_model,
+                    &tokenizer,
+                    args.max_tokens,
+                    args.temperature,
+                    args.top_p,
+                    args.top_k,
+                    args.draft_tokens,
+                    &mut writer,
+                ) {
+                    eprintln!("generation failed: {error}");
+                }
+                return;
+            }
+
+            if !is_dflash
+                && !args.layer_wise
+                && effective_backend != oxidize_core::backend::Backend::Mlx
+            {
+                let use_mmap = true;
+                let mut concrete_model =
+                    match InferenceModel::load_from_gguf(&mapped, config.clone(), use_mmap) {
+                        Ok(model) => model,
+                        Err(error) => {
+                            eprintln!("failed to load model weights: {error}");
+                            return;
+                        }
+                    };
+                if concrete_model.has_mtp() && !args.no_mtp && !args.chat {
+                    eprintln!(
+                        "using native MTP/nextn speculative decoding: target={} nextn_layers={} draft_tokens={}",
                         model_path.display(),
-                        draft_model_path.display(),
+                        concrete_model.nextn_predict_layers(),
                         args.draft_tokens
                     );
-                    if let Err(error) = generate_with_dflash_draft(
+                    if let Err(error) = generate_with_mtp_model(
                         &args.prompt,
-                        target_model.as_mut(),
-                        &mut draft_model,
+                        &mut concrete_model,
                         &tokenizer,
                         args.max_tokens,
                         args.temperature,
@@ -2363,126 +2473,12 @@ fn main() {
                     }
                     return;
                 }
-
-                let mut model: Box<dyn Model> = if is_dflash {
-                    let dflash_config = oxidize_core::dflash::DFlashConfig::from_gguf(&mapped);
-                    match oxidize_core::dflash::DFlashDraftModel::load_from_gguf(
-                        &mapped,
-                        dflash_config,
-                    ) {
-                        Ok(mut m) => {
-                            if (!m.output.is_loaded() || !m.tok_embeddings.is_loaded())
-                                && let Some(io_model_path) = args.tokenizer_model.as_deref()
-                            {
-                                match loader.load(io_model_path) {
-                                    Ok(io_mapped) => {
-                                        if let Err(error) = m.load_external_io_from_gguf(&io_mapped)
-                                        {
-                                            eprintln!(
-                                                "failed to borrow DFlash IO tensors from {}: {error}",
-                                                io_model_path.display()
-                                            );
-                                            return;
-                                        }
-                                        eprintln!(
-                                            "borrowed DFlash token embeddings/output from {} for smoke-test generation",
-                                            io_model_path.display()
-                                        );
-                                    }
-                                    Err(error) => {
-                                        eprintln!(
-                                            "failed to load DFlash IO model {}: {error}",
-                                            io_model_path.display()
-                                        );
-                                        return;
-                                    }
-                                }
-                            }
-                            if !m.output.is_loaded() || !m.tok_embeddings.is_loaded() {
-                                eprintln!(
-                                    "DFlash draft GGUF is still missing token embeddings or lm_head; use *-fullhead.gguf or pass --tokenizer-model with a GGUF that has output.weight and embed_tokens."
-                                );
-                                return;
-                            }
-                            eprintln!(
-                                "DFlash standalone generation using builtin lm_head/embeddings in {}",
-                                model_path.display()
-                            );
-                            Box::new(m)
-                        }
-                        Err(error) => {
-                            eprintln!("failed to load DFlash model: {error}");
-                            return;
-                        }
-                    }
-                } else if args.layer_wise {
-                    match oxidize_core::layer_wise::LayerWiseModel::load_from_gguf(
-                        &mapped,
-                        config,
-                        args.layer_cache,
-                    ) {
-                        Ok(mut m) => {
-                            if let Err(error) = m.warm_layer_cache() {
-                                eprintln!("failed to warm layer cache: {error}");
-                                return;
-                            }
-                            Box::new(m)
-                        }
-                        Err(error) => {
-                            eprintln!("failed to load layer-wise model: {error}");
-                            return;
-                        }
-                    }
-                } else if effective_backend == oxidize_core::backend::Backend::Mlx {
-                    #[cfg(target_os = "macos")]
-                    {
-                        match oxidize_core::mlx_inference::MlxInferenceModel::load_from_gguf(
-                            &mapped, config,
-                        ) {
-                            Ok(m) => {
-                                println!("MLX backend: loaded model into unified memory");
-                                Box::new(m)
-                            }
-                            Err(error) => {
-                                eprintln!(
-                                    "MLX initialization failed: {error}; falling back to CPU"
-                                );
-                                let use_mmap = true;
-                                match InferenceModel::load_from_gguf(&mapped, config, use_mmap) {
-                                    Ok(m) => Box::new(m),
-                                    Err(error) => {
-                                        eprintln!("failed to load model weights: {error}");
-                                        return;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    #[cfg(not(target_os = "macos"))]
-                    {
-                        eprintln!(
-                            "MLX backend requested but unavailable on Linux; falling back to CPU"
-                        );
-                        let use_mmap = true;
-                        match InferenceModel::load_from_gguf(&mapped, config, use_mmap) {
-                            Ok(m) => Box::new(m),
-                            Err(error) => {
-                                eprintln!("failed to load model weights: {error}");
-                                return;
-                            }
-                        }
-                    }
-                } else {
-                    let use_mmap = true;
-                    match InferenceModel::load_from_gguf(&mapped, config, use_mmap) {
-                        Ok(m) => Box::new(m),
-                        Err(error) => {
-                            eprintln!("failed to load model weights: {error}");
-                            return;
-                        }
-                    }
-                };
-
+                if concrete_model.has_mtp() && args.chat && !args.no_mtp {
+                    eprintln!(
+                        "native MTP/nextn is available but chat mode currently uses target-only generation"
+                    );
+                }
+                let mut model: Box<dyn Model> = Box::new(concrete_model);
                 if args.chat {
                     let stdin = io::stdin();
                     let mut reader = stdin.lock();
@@ -2513,8 +2509,153 @@ fn main() {
                 ) {
                     eprintln!("generation failed: {error}");
                 }
+                return;
             }
-            Err(error) => eprintln!("failed to load model: {error}"),
+
+            let mut model: Box<dyn Model> = if is_dflash {
+                let dflash_config = oxidize_core::dflash::DFlashConfig::from_gguf(&mapped);
+                match oxidize_core::dflash::DFlashDraftModel::load_from_gguf(&mapped, dflash_config)
+                {
+                    Ok(mut m) => {
+                        if (!m.output.is_loaded() || !m.tok_embeddings.is_loaded())
+                            && let Some(io_model_path) = args.tokenizer_model.as_deref()
+                        {
+                            match loader.load(io_model_path) {
+                                Ok(io_mapped) => {
+                                    if let Err(error) = m.load_external_io_from_gguf(&io_mapped) {
+                                        eprintln!(
+                                            "failed to borrow DFlash IO tensors from {}: {error}",
+                                            io_model_path.display()
+                                        );
+                                        return;
+                                    }
+                                    eprintln!(
+                                        "borrowed DFlash token embeddings/output from {} for smoke-test generation",
+                                        io_model_path.display()
+                                    );
+                                }
+                                Err(error) => {
+                                    eprintln!(
+                                        "failed to load DFlash IO model {}: {error}",
+                                        io_model_path.display()
+                                    );
+                                    return;
+                                }
+                            }
+                        }
+                        if !m.output.is_loaded() || !m.tok_embeddings.is_loaded() {
+                            eprintln!(
+                                "DFlash draft GGUF is still missing token embeddings or lm_head; use *-fullhead.gguf or pass --tokenizer-model with a GGUF that has output.weight and embed_tokens."
+                            );
+                            return;
+                        }
+                        eprintln!(
+                            "DFlash standalone generation using builtin lm_head/embeddings in {}",
+                            model_path.display()
+                        );
+                        Box::new(m)
+                    }
+                    Err(error) => {
+                        eprintln!("failed to load DFlash model: {error}");
+                        return;
+                    }
+                }
+            } else if args.layer_wise {
+                match oxidize_core::layer_wise::LayerWiseModel::load_from_gguf(
+                    &mapped,
+                    config,
+                    args.layer_cache,
+                ) {
+                    Ok(mut m) => {
+                        if let Err(error) = m.warm_layer_cache() {
+                            eprintln!("failed to warm layer cache: {error}");
+                            return;
+                        }
+                        Box::new(m)
+                    }
+                    Err(error) => {
+                        eprintln!("failed to load layer-wise model: {error}");
+                        return;
+                    }
+                }
+            } else if effective_backend == oxidize_core::backend::Backend::Mlx {
+                #[cfg(target_os = "macos")]
+                {
+                    match oxidize_core::mlx_inference::MlxInferenceModel::load_from_gguf(
+                        &mapped, config,
+                    ) {
+                        Ok(m) => {
+                            println!("MLX backend: loaded model into unified memory");
+                            Box::new(m)
+                        }
+                        Err(error) => {
+                            eprintln!("MLX initialization failed: {error}; falling back to CPU");
+                            let use_mmap = true;
+                            match InferenceModel::load_from_gguf(&mapped, config, use_mmap) {
+                                Ok(m) => Box::new(m),
+                                Err(error) => {
+                                    eprintln!("failed to load model weights: {error}");
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    eprintln!(
+                        "MLX backend requested but unavailable on Linux; falling back to CPU"
+                    );
+                    let use_mmap = true;
+                    match InferenceModel::load_from_gguf(&mapped, config, use_mmap) {
+                        Ok(m) => Box::new(m),
+                        Err(error) => {
+                            eprintln!("failed to load model weights: {error}");
+                            return;
+                        }
+                    }
+                }
+            } else {
+                let use_mmap = true;
+                match InferenceModel::load_from_gguf(&mapped, config, use_mmap) {
+                    Ok(m) => Box::new(m),
+                    Err(error) => {
+                        eprintln!("failed to load model weights: {error}");
+                        return;
+                    }
+                }
+            };
+
+            if args.chat {
+                let stdin = io::stdin();
+                let mut reader = stdin.lock();
+                if let Err(error) = run_model_chat_mode(
+                    &mut reader,
+                    &mut writer,
+                    &mut model,
+                    &tokenizer,
+                    args.max_tokens,
+                    args.temperature,
+                    args.top_p,
+                    args.top_k,
+                ) {
+                    eprintln!("chat mode failed: {error}");
+                }
+                return;
+            }
+
+            if let Err(error) = generate_with_model(
+                &args.prompt,
+                &mut model,
+                &tokenizer,
+                args.max_tokens,
+                args.temperature,
+                args.top_p,
+                args.top_k,
+                &mut writer,
+            ) {
+                eprintln!("generation failed: {error}");
+            }
         }
         return;
     }
@@ -2523,6 +2664,160 @@ fn main() {
     if let Err(error) = run_single_shot_mode(&args.prompt, &mut writer) {
         eprintln!("single-shot mode failed: {error}");
     }
+}
+
+/// Apply the autotune plan to `args`. Only fills in fields the user
+/// didn't explicitly set. Designed to be safe to call even when
+/// the user has set most flags (those are left untouched).
+fn apply_plan_to_args(
+    args: &mut Args,
+    plan: &oxidize_core::autotune::TuningPlan,
+    inv: &oxidize_core::autotune::HardwareInventory,
+) {
+    let overrides = oxidize_core::autotune::overrides_from_plan(plan);
+    // Threads: always fill in if user didn't pass --threads.
+    if args.threads.is_none() {
+        if let Some(t) = overrides.threads {
+            if t > 0 {
+                args.threads = Some(t);
+            }
+        }
+    }
+    // Ctx size: only if user didn't pass --ctx-size.
+    if args.ctx_size.is_none() {
+        if let Some(c) = overrides.ctx_size {
+            if c > 0 {
+                args.ctx_size = Some(c);
+            }
+        }
+    }
+    // n_gpu_layers: only if user didn't pass --n-gpu-layers.
+    if !args.n_gpu_layers_set {
+        if let Some(n) = overrides.n_gpu_layers {
+            args.n_gpu_layers = n;
+        }
+    }
+    // kv_cache_dtype: only if user didn't pass --kv-cache-dtype.
+    if !args.kv_cache_dtype_set {
+        use oxidize_core::tensor::DType;
+        let desired = match plan.kv_cache_dtype {
+            DType::F16 => KvCacheDType::F16,
+            DType::F32 => KvCacheDType::F32,
+            DType::I8 => KvCacheDType::Q8,
+            DType::I16 => KvCacheDType::Q4,
+            _ => KvCacheDType::F16,
+        };
+        args.kv_cache_dtype = desired;
+    }
+    // TurboQuant: only if user didn't pass either turboquant flag.
+    if !args.turboquant && !args.no_turboquant {
+        if let Some(true) = overrides.turboquant {
+            args.turboquant = true;
+        }
+    }
+    // layer_cache: only if user kept the default of 1.
+    if args.layer_cache == 1 {
+        if let Some(c) = overrides.layer_cache {
+            if c > 0 && c != 1 {
+                args.layer_cache = c;
+            }
+        }
+    }
+    // layer_wise: only if user kept the default of false AND the plan
+    // recommends it. Documented as best-effort: we can't distinguish
+    // `--no-layer-wise` from "user didn't set", so a user who
+    // explicitly wants to disable layer_wise should use --no-auto.
+    if !args.layer_wise {
+        if let Some(true) = overrides.layer_wise {
+            args.layer_wise = true;
+        }
+    }
+    // cpu_optimized: never auto-enable (it caps ctx to 2048 and
+    // disables the existing auto-cap; it would silently override
+    // a lot of user intent). The plan still hints via rationale.
+    // ram_offload + mmap hints: best-effort, same caveat.
+    if !args.ram_offload {
+        if let Some(true) = overrides.ram_offload {
+            args.ram_offload = true;
+        }
+    }
+    if !args.mmap_hugepages {
+        if let Some(true) = overrides.mmap_hugepages {
+            args.mmap_hugepages = true;
+        }
+    }
+    if !args.mmap_prefetch {
+        if let Some(true) = overrides.mmap_prefetch {
+            args.mmap_prefetch = true;
+        }
+    }
+    eprintln!(
+        "[oxidize auto-tune] applied: threads={:?} ctx={:?} n_gpu_layers={} kv={:?} layer_wise={} layer_cache={} turboquant={} (cores={} ram={} GiB gpu={} MiB)",
+        args.threads,
+        args.ctx_size,
+        args.n_gpu_layers,
+        args.kv_cache_dtype,
+        args.layer_wise,
+        args.layer_cache,
+        args.turboquant,
+        inv.physical_cores,
+        inv.total_ram_bytes / (1u64 << 30),
+        inv.gpu_vram_bytes / (1024 * 1024),
+    );
+}
+
+/// JSON-friendly snapshot of a `TuningPlan` for tooling.
+fn plan_to_json(plan: &oxidize_core::autotune::TuningPlan) -> serde_json::Value {
+    use oxidize_core::autotune::{OxkIsa, OxkTile, PipelineMode, SpeculativeSpec};
+    let isa = match plan.oxk_isa {
+        OxkIsa::Scalar => "scalar",
+        OxkIsa::Avx2 => "avx2",
+        OxkIsa::Avx512 => "avx512",
+    };
+    let tile = match plan.oxk_tile {
+        OxkTile::T1 => 1,
+        OxkTile::T4 => 4,
+        OxkTile::T8 => 8,
+        OxkTile::T16 => 16,
+    };
+    let pipe = match plan.pipeline {
+        PipelineMode::Sequential => "sequential",
+        PipelineMode::Continuous => "continuous",
+        PipelineMode::Paged => "paged",
+        PipelineMode::Asymmetric => "asymmetric",
+    };
+    let spec = match plan.speculative {
+        SpeculativeSpec::None => "none",
+        SpeculativeSpec::DFlash => "dflash",
+        SpeculativeSpec::Mtp => "mtp",
+    };
+    serde_json::json!({
+        "threads": plan.threads,
+        "ctx_size": plan.ctx_size,
+        "kv_cache_dtype": format!("{:?}", plan.kv_cache_dtype),
+        "n_gpu_layers": plan.n_gpu_layers,
+        "mmap": plan.mmap,
+        "mlock": plan.mlock,
+        "mmap_hugepages": plan.mmap_hugepages,
+        "mmap_prefetch": plan.mmap_prefetch,
+        "numa_replicate_dense": plan.numa_replicate_dense,
+        "layer_wise": plan.layer_wise,
+        "layer_cache": plan.layer_cache,
+        "pipeline": pipe,
+        "speculative": spec,
+        "decode_tile_tokens": plan.decode_tile_tokens,
+        "oxk_isa": isa,
+        "oxk_tile": tile,
+        "expected_prompt_tps": plan.expected_prompt_tps,
+        "expected_decode_tps": plan.expected_decode_tps,
+        "rationale": plan.rationale,
+    })
+}
+
+/// True if stdout is attached to a terminal (best-effort: uses
+/// `std::io::IsTerminal` from stdlib).
+fn atty_stdout() -> bool {
+    std::io::stdout().is_terminal()
 }
 
 /// Run the CLI in distributed mesh node mode.
@@ -3048,7 +3343,7 @@ mod tests {
         .expect("run args should rewrite");
         assert!(args.contains(&OsString::from("--model")));
         assert!(args.contains(&OsString::from("local.gguf")));
-        assert!(args.contains(&OsString::from("--serve-api")));
+        assert!(!args.contains(&OsString::from("--serve-api")));
         assert!(args.contains(&OsString::from("--prompt")));
         assert!(args.contains(&OsString::from("hello")));
         assert!(args.contains(&OsString::from("--max-tokens")));
@@ -3057,7 +3352,7 @@ mod tests {
         assert!(args.contains(&OsString::from("--mmap-prefetch")));
         assert!(args.contains(&OsString::from("--mmap-hugepages")));
         assert!(args.contains(&OsString::from("--kv-cache-dtype")));
-        assert!(args.contains(&OsString::from("q8")));
+        assert!(args.contains(&OsString::from("f16")));
     }
 
     #[test]
@@ -3102,7 +3397,7 @@ mod tests {
     }
 
     #[test]
-    fn run_rewrite_with_prompt_is_not_api_only() {
+    fn run_rewrite_with_prompt_skips_background_server() {
         let args = rewrite_run_args(
             ["oxidize", "run", "local.gguf", "hello"]
                 .into_iter()
@@ -3111,7 +3406,7 @@ mod tests {
         .expect("run args should rewrite");
         assert!(args.contains(&OsString::from("--prompt")));
         assert!(!args.contains(&OsString::from("--api-only")));
-        assert!(args.contains(&OsString::from("--serve-api")));
+        assert!(!args.contains(&OsString::from("--serve-api")));
     }
 
     #[test]

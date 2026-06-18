@@ -37,6 +37,16 @@ impl GpuFamily {
         [GpuFamily::B200, GpuFamily::A100, GpuFamily::RtxPro6000]
     }
 
+    /// Relative capability rank (higher = higher-end). Used to pick the
+    /// best GPU on mixed-family hosts independent of enumeration order.
+    pub fn rank(self) -> u8 {
+        match self {
+            GpuFamily::B200 => 3,
+            GpuFamily::A100 => 2,
+            GpuFamily::RtxPro6000 => 1,
+        }
+    }
+
     /// The `oxidize.io/gpu-family` label value.
     pub fn slug(self) -> &'static str {
         match self {

@@ -1,8 +1,9 @@
 //! PagedAttention runtime: scheduler + block pool wrapping a [`ModelRuntime`].
 
 use std::sync::Arc;
-use std::sync::Mutex as StdMutex;
 use std::sync::atomic::AtomicU64;
+
+use tokio::sync::Mutex;
 
 use oxidize_core::{
     model::Model,
@@ -21,13 +22,13 @@ use crate::runtime::model::{LoadedModel, ModelRuntime};
 /// and provides accurate usage counts.
 pub struct PagedModelRuntime {
     pub runtime: Arc<ModelRuntime>,
-    pub scheduler: StdMutex<Scheduler>,
+    pub scheduler: Mutex<Scheduler>,
     pub next_seq_id: AtomicU64,
     pub block_size: usize,
 }
 
 pub fn build_paged_runtime(args: &Args, runtime: Arc<ModelRuntime>) -> Arc<PagedModelRuntime> {
-    let inference_model = runtime.model.lock().expect("model lock poisoned");
+    let inference_model = runtime.model.blocking_lock();
     let config = match inference_model.context_size().checked_div(16).unwrap_or(0) {
         0 => BlockPoolConfig::default(),
         blocks => BlockPoolConfig {
@@ -42,7 +43,7 @@ pub fn build_paged_runtime(args: &Args, runtime: Arc<ModelRuntime>) -> Arc<Paged
     drop(inference_model);
 
     let (num_kv_heads, head_dim) = {
-        let model_guard = runtime.model.lock().expect("model lock poisoned");
+        let model_guard = runtime.model.blocking_lock();
         match &*model_guard {
             LoadedModel::Inference(m) => {
                 let cfg = m.config();
@@ -85,7 +86,7 @@ pub fn build_paged_runtime(args: &Args, runtime: Arc<ModelRuntime>) -> Arc<Paged
 
     Arc::new(PagedModelRuntime {
         runtime,
-        scheduler: StdMutex::new(scheduler),
+        scheduler: Mutex::new(scheduler),
         next_seq_id: AtomicU64::new(1),
         block_size: config.block_size,
     })

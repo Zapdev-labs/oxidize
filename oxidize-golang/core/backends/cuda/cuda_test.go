@@ -4,8 +4,8 @@ import "testing"
 
 func TestBuildInfo(t *testing.T) {
 	info := Info()
-	if info.DetectedAtBuild {
-		t.Fatal("this build is a stub; cuda should not be detected")
+	if info.DetectedAtBuild && info.CudaPath == "" {
+		t.Fatal("native cuda build should set CudaPath")
 	}
 }
 

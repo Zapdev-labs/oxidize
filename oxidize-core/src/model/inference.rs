@@ -1,17 +1,31 @@
 #![allow(clippy::needless_range_loop, clippy::too_many_arguments)]
 
-use crate::flash_attention::flash_attention_decode_heads_f32;
+use crate::flash_attention::{flash_attention_decode_heads_f16, flash_attention_decode_heads_f32};
 use crate::gguf::{GgufQuantizationType, MappedGgufFile};
 use crate::kv_cache::{KvCache, KvCacheConfig};
 use crate::model::{Logits, Model, ModelError, Session, Token};
 use crate::quantization::{dequantize_scalar, quantized_size};
 use crate::tensor::{
-    DType, apply_geglu_inplace_f32, apply_rope_f32, apply_swiglu_inplace_f32, f16_le_to_f32,
-    gemm_quantized_f32, gemv_f32, gemv_quantized_experts_f32, gemv_quantized_experts_gate_up_f32,
-    gemv_quantized_f32, rms_norm_f32,
+    DType, GemvJob, apply_geglu_inplace_f32, apply_rope_f32, apply_swiglu_inplace_f32,
+    f16_le_to_f32, gemm_quantized_f32, gemv_f32, gemv_quantized_experts_f32,
+    gemv_quantized_experts_gate_up_f32, gemv_quantized_f32, gemv_quantized_multi_f32, rms_norm_f32,
 };
 use memmap2::Mmap;
 use std::sync::Arc;
+
+/// Cached `OXIDIZE_TRACE_FWD` gate. The trace checks sit inside per-layer
+/// per-token forward loops; an uncached `env::var_os` there is a libc
+/// environment scan on every layer of every token.
+pub(crate) fn trace_fwd_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("OXIDIZE_TRACE_FWD").is_some())
+}
+
+/// Cached `OXIDIZE_TRACE_VALS` gate (see [`trace_fwd_enabled`]).
+pub(crate) fn trace_vals_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("OXIDIZE_TRACE_VALS").is_some())
+}
 
 /// Detected model architecture from GGUF metadata.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -47,8 +61,9 @@ impl ModelArchitecture {
                 "deepseek" | "deepseek2" | "deepseek_v2" | "deepseek_v3" | "deepseek_moe" => {
                     Self::DeepSeek
                 }
-                "qwen" | "qwen2" | "qwen2moe" | "qwen3" | "qwen3moe" | "qwen35" | "qwen3_5_moe"
-                | "qwen3_5_moe_text" | "qwen35moe" => Self::Qwen,
+                "qwen" | "qwen2" | "qwen2moe" | "qwen3" | "qwen3moe" | "qwen35" | "qwen3_5"
+                | "qwen3_5_text" | "qwen35_text" | "qwen3_5_moe" | "qwen3_5_moe_text"
+                | "qwen35moe" => Self::Qwen,
                 "gemma" | "gemma2" | "gemma3" | "gemma4" => Self::Gemma,
                 "phi" | "phi3" => Self::Phi,
                 "falcon" => Self::Falcon,
@@ -77,7 +92,10 @@ impl ModelArchitecture {
 
     /// Whether this architecture uses MoE FFN.
     pub fn uses_moe(&self) -> bool {
-        matches!(self, Self::Mixtral | Self::MiniMax | Self::Lfm2Moe)
+        matches!(
+            self,
+            Self::Mixtral | Self::MiniMax | Self::Lfm2Moe | Self::DeepSeek
+        )
     }
 
     /// Whether this architecture uses LFM2 short-convolution token mixing on
@@ -154,6 +172,21 @@ pub struct InferenceConfig {
     pub sandwich_norm: bool,
     /// Qwen-style RMSNorm scales by `(1 + weight)` instead of `weight` alone.
     pub rms_norm_weight_plus_one: bool,
+    /// Number of appended multi-token-prediction (MTP / nextn) draft layers.
+    /// These layers live after the causal backbone in GGUF (`blk.N.nextn.*`) and
+    /// are not counted in `layer_count`.
+    pub nextn_predict_layers: usize,
+    /// DeepSeek-V3/Kimi routed-expert output scale (HF `routed_scaling_factor`,
+    /// llama.cpp `expert_weights_scale`). The routed experts' weighted sum is
+    /// multiplied by this before the shared-expert/residual add. 1.0 = none.
+    /// Kimi-K2 uses ~2.827; without it the routed branch is far too weak.
+    pub expert_weights_scale: f32,
+    /// DeepSeek-V3 group-limited routing: number of expert groups (`n_group`).
+    /// 0 or 1 = no group routing (plain global top-k). Kimi-K2 = 1.
+    pub expert_group_count: usize,
+    /// DeepSeek-V3 group-limited routing: groups kept per token (`topk_group`).
+    /// Only consulted when `expert_group_count > 1`.
+    pub expert_group_used_count: usize,
 }
 
 impl Default for InferenceConfig {
@@ -187,6 +220,10 @@ impl Default for InferenceConfig {
             gelu_ffn: false,
             sandwich_norm: false,
             rms_norm_weight_plus_one: false,
+            nextn_predict_layers: 0,
+            expert_weights_scale: 1.0,
+            expert_group_count: 0,
+            expert_group_used_count: 0,
         }
     }
 }
@@ -255,7 +292,8 @@ impl InferenceConfig {
     /// Map `general.architecture` values to the GGUF metadata key prefix.
     fn gguf_metadata_prefix(arch: &str) -> &str {
         match arch {
-            "qwen3_5_moe_text" | "qwen3_5_moe" | "qwen35moe" | "qwen3_5" => "qwen35",
+            "qwen3_5_moe_text" | "qwen3_5_moe" | "qwen35moe" | "qwen3_5" | "qwen3_5_text"
+            | "qwen35_text" => "qwen35",
             other => other,
         }
     }
@@ -265,14 +303,17 @@ impl InferenceConfig {
     /// Falls back to weight tensor dimensions when metadata is missing.
     pub fn from_gguf(mapped: &MappedGgufFile) -> Self {
         let metadata = &mapped.parsed().metadata;
-        let arch = mapped
+        let raw_arch = mapped
             .parsed()
             .architecture()
             .unwrap_or("llama")
             .to_string();
         let architecture = ModelArchitecture::from_gguf(mapped);
 
-        let metadata_prefix = Self::gguf_metadata_prefix(&arch);
+        let metadata_prefix = Self::gguf_metadata_prefix(&raw_arch);
+        // Canonicalize the arch string so downstream behavior matches (RMSNorm
+        // (1+w), GDN detection, etc.) see `qwen35` even for `qwen3_5_text`.
+        let arch = metadata_prefix.to_string();
         let key = |suffix: &str| format!("{metadata_prefix}.{suffix}");
         let arch_u32 = |suffix: &str| {
             metadata_u32_lookup(metadata, &key(suffix)).or_else(|| {
@@ -326,7 +367,12 @@ impl InferenceConfig {
             .map(|v| v as usize)
             .unwrap_or(4096);
 
-        let layer_count = arch_u32("block_count").unwrap_or(32) as usize;
+        // Multi-token-prediction (MTP/nextn) layers are appended after the main
+        // stack (e.g. qwen35 blk.64 with nextn.* tensors); they are draft heads,
+        // not part of the causal backbone, so exclude them from layer_count.
+        let nextn_layers = arch_u32("nextn_predict_layers").unwrap_or(0) as usize;
+        let layer_count =
+            (arch_u32("block_count").unwrap_or(32) as usize).saturating_sub(nextn_layers);
 
         let intermediate_size = arch_u32("feed_forward_length")
             .map(|v| v as usize)
@@ -450,11 +496,26 @@ impl InferenceConfig {
         let leading_dense_layers = arch_u32("leading_dense_block_count")
             .map(|v| v as usize)
             .unwrap_or(0);
-        // expert_gating_func: 1 = softmax, 2 = sigmoid (lfm2moe uses sigmoid).
+        // expert_gating_func: 1 = softmax, 2 = sigmoid (lfm2moe/deepseek2 use sigmoid).
         let expert_gating_sigmoid = arch_u32("expert_gating_func")
             .or_else(|| metadata_u32_lookup(metadata, "expert_gating_func"))
             .map(|v| v == 2)
             .unwrap_or(false);
+        // DeepSeek-V3/Kimi routed-expert scaling (`routed_scaling_factor`) and
+        // group-limited routing (`n_group` / `topk_group`). Absent for other
+        // MoE archs, so they default to 1.0 / no-group and behave unchanged.
+        let expert_weights_scale = arch_f32("expert_weights_scale")
+            .or_else(|| metadata_f32_lookup(metadata, "expert_weights_scale"))
+            .filter(|&v| v > 0.0)
+            .unwrap_or(1.0);
+        let expert_group_count = arch_u32("expert_group_count")
+            .or_else(|| metadata_u32_lookup(metadata, "expert_group_count"))
+            .map(|v| v as usize)
+            .unwrap_or(0);
+        let expert_group_used_count = arch_u32("expert_group_used_count")
+            .or_else(|| metadata_u32_lookup(metadata, "expert_group_used_count"))
+            .map(|v| v as usize)
+            .unwrap_or(0);
 
         // Partial RoPE: number of head dimensions that receive rotation.
         // 0 means "use full kv_head_dim" (standard). MiniMax-M2 uses 64 of 128.
@@ -509,10 +570,14 @@ impl InferenceConfig {
         // convention. Standard Qwen2/Qwen3/qwen3moe use plain w * x_hat —
         // keying this on the whole Qwen family garbled every official Qwen
         // GGUF in code paths that honor the flag (layer-wise).
-        let rms_norm_weight_plus_one = matches!(
+        let mut rms_norm_weight_plus_one = matches!(
             arch.as_str(),
             "qwen35" | "qwen35moe" | "qwen3_5_moe" | "qwen3_5_moe_text"
         );
+        // Temp override to verify the baked-vs-raw (1+w) hypothesis.
+        if let Ok(v) = std::env::var("OXIDIZE_RMS_PLUS_ONE") {
+            rms_norm_weight_plus_one = v != "0";
+        }
 
         Self {
             vocab_size,
@@ -543,6 +608,10 @@ impl InferenceConfig {
             gelu_ffn,
             sandwich_norm,
             rms_norm_weight_plus_one,
+            nextn_predict_layers: nextn_layers,
+            expert_weights_scale,
+            expert_group_count,
+            expert_group_used_count,
         }
     }
 }
@@ -936,6 +1005,44 @@ fn gemv_weight(
     }
 }
 
+/// Run several same-input projections (q/k/v, gate/up) as ONE fused parallel
+/// region via [`gemv_quantized_multi_f32`]. Entries with `rows == 0` are
+/// skipped; F32-stored weights run as sequential [`gemv_weight`] calls after
+/// the fused region (rare: quantized models keep only norms in f32).
+fn gemv_weight_fused(
+    parts: Vec<(&WeightStorage, usize, &mut [f32])>,
+    cols: usize,
+    input: &[f32],
+) -> Result<(), String> {
+    let mut jobs: Vec<GemvJob<'_>> = Vec::with_capacity(parts.len());
+    let mut serial: Vec<(&WeightStorage, usize, &mut [f32])> = Vec::new();
+    for (storage, rows, output) in parts {
+        if rows == 0 {
+            continue;
+        }
+        match storage {
+            WeightStorage::Quantized(qtype, data) => jobs.push(GemvJob {
+                quantization: *qtype,
+                matrix: data,
+                rows,
+                output,
+            }),
+            WeightStorage::MmapQuantized(qtype, mmap, offset, size) => jobs.push(GemvJob {
+                quantization: *qtype,
+                matrix: &mmap[*offset..*offset + *size],
+                rows,
+                output,
+            }),
+            WeightStorage::F32(_) => serial.push((storage, rows, output)),
+        }
+    }
+    gemv_quantized_multi_f32(&mut jobs, cols, input).map_err(|e| format!("{:?}", e))?;
+    for (storage, rows, output) in serial {
+        gemv_weight(storage, rows, cols, input, output)?;
+    }
+    Ok(())
+}
+
 /// Add a per-row bias (repeating modulo `bias.len()` when shorter than a row)
 /// to every position of a `[batch, row]`-style buffer. Used to apply attention
 /// biases across all batch tokens after a batched GEMM.
@@ -1052,8 +1159,48 @@ pub(crate) struct LayerWeights {
     mla_v_b: WeightStorage,
     // DeepSeek MoE shared expert (shexp) branch.
     ffn_gate_shexp: WeightStorage,
+    // Optional DeepSeek shared-expert gate. Some DeepSeek-family checkpoints
+    // store `mlp.shared_expert_gate.weight`; when present it sigmoid-scales the
+    // unconditional shared expert output, but it is not part of routed top-k.
+    ffn_gate_inp_shexp: WeightStorage,
     ffn_up_shexp: WeightStorage,
     ffn_down_shexp: WeightStorage,
+}
+
+/// Qwen3.5/Qwen3.6-style in-model MTP (`nextn`) draft block.
+///
+/// GGUF stores one extra decoder block after the target stack (`blk.N.*`) plus
+/// the `blk.N.nextn.*` fusion/head tensors. The regular block weights are kept
+/// in `layer`; the extra tensors combine a token embedding and the target hidden
+/// state, then project the MTP hidden state back through a shared or dedicated
+/// output head.
+#[derive(Debug, Clone, PartialEq, Default)]
+struct MtpWeights {
+    layer: LayerWeights,
+    eh_proj: WeightStorage,
+    enorm: Vec<f32>,
+    hnorm: Vec<f32>,
+    embed_tokens: WeightStorage,
+    shared_head_norm: Vec<f32>,
+    shared_head_head: WeightStorage,
+}
+
+impl MtpWeights {
+    fn is_usable(&self, config: &InferenceConfig) -> bool {
+        let h = config.hidden_size;
+        !self.eh_proj.is_empty()
+            && self.eh_proj.output_dim(h.saturating_mul(2)) == h
+            && self.enorm.len() == h
+            && self.hnorm.len() == h
+            && !self.layer.attn_norm.is_empty()
+            && !self.layer.attn_q.is_empty()
+            && !self.layer.attn_k.is_empty()
+            && !self.layer.attn_v.is_empty()
+            && !self.layer.attn_output.is_empty()
+            && !self.layer.ffn_gate.is_empty()
+            && !self.layer.ffn_up.is_empty()
+            && !self.layer.ffn_down.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1064,6 +1211,7 @@ pub struct InferenceModel {
     norm_weight: Vec<f32>,
     output_weight: WeightStorage,
     layers: Vec<LayerWeights>,
+    mtp: Option<MtpWeights>,
     kv_cache: KvCache,
     /// Maps absolute layer index → KV cache layer index for attention layers.
     /// Non-attention (shortconv, Mamba) layers have `None` and never write the KV cache.
@@ -1074,6 +1222,9 @@ pub struct InferenceModel {
     ssm_states: Vec<Vec<f32>>, // [layer][state_dim]
     ssm_conv_buffers: Vec<ConvHistoryRing>,
     workspace: Workspace,
+    /// Final output-normalized hidden row for the most recent target token.
+    /// Native MTP consumes this row as its target-hidden input.
+    last_output_hidden: Vec<f32>,
 }
 
 impl InferenceModel {
@@ -1145,6 +1296,36 @@ pub(crate) fn lookup_quantized_embedding(
     }
 }
 
+fn lookup_embedding_from_storage(
+    storage: &WeightStorage,
+    hidden_size: usize,
+    vocab_size: usize,
+    token: Token,
+    out: &mut [f32],
+) {
+    out.fill(0.0_f32);
+    if out.len() != hidden_size || hidden_size == 0 || vocab_size == 0 {
+        return;
+    }
+    let token_idx = (token as usize).min(vocab_size.saturating_sub(1));
+    match storage {
+        WeightStorage::F32(data) => {
+            let start = token_idx.saturating_mul(hidden_size);
+            let end = start.saturating_add(hidden_size);
+            if end <= data.len() {
+                out.copy_from_slice(&data[start..end]);
+            }
+        }
+        WeightStorage::Quantized(qtype, data) => {
+            lookup_quantized_embedding(hidden_size, *qtype, data, token_idx, out);
+        }
+        WeightStorage::MmapQuantized(qtype, mmap, offset, size) => {
+            let data = &mmap[*offset..*offset + *size];
+            lookup_quantized_embedding(hidden_size, *qtype, data, token_idx, out);
+        }
+    }
+}
+
 impl InferenceModel {
     pub fn load_from_gguf(
         mapped: &MappedGgufFile,
@@ -1161,6 +1342,8 @@ impl InferenceModel {
         let mut norm_weight: Option<Vec<f32>> = None;
         let mut output_weight: Option<WeightStorage> = None;
         let mut layers: Vec<LayerWeights> = vec![LayerWeights::default(); config.layer_count];
+        let mut mtp: Option<MtpWeights> =
+            (config.nextn_predict_layers > 0).then(MtpWeights::default);
         let mmap_arc = if use_mmap { Some(mapped.mmap()) } else { None };
 
         let tensor_list = mapped.mapped_tensor_infos();
@@ -1252,6 +1435,109 @@ impl InferenceModel {
                         .parse()
                         .map_err(|_| format!("bad layer index in tensor name: {}", name))?;
                     if layer_idx >= config.layer_count {
+                        if let Some(mtp) = mtp.as_mut()
+                            && layer_idx == config.layer_count
+                        {
+                            if parts.get(2) == Some(&"nextn") {
+                                let nextn_name = parts.get(3).copied().unwrap_or("");
+                                let nextn_suffix = parts.get(4).copied();
+                                match (nextn_name, nextn_suffix) {
+                                    ("eh_proj", Some("weight")) => {
+                                        mtp.eh_proj = load_tensor(name, qtype, qdata, value_count)?;
+                                    }
+                                    ("enorm", Some("weight")) | ("enorm", None) => {
+                                        mtp.enorm = load_bias(qtype, qdata, value_count)?;
+                                    }
+                                    ("hnorm", Some("weight")) | ("hnorm", None) => {
+                                        mtp.hnorm = load_bias(qtype, qdata, value_count)?;
+                                    }
+                                    ("embed_tokens", Some("weight")) => {
+                                        mtp.embed_tokens =
+                                            load_tensor(name, qtype, qdata, value_count)?;
+                                    }
+                                    ("shared_head_norm", Some("weight"))
+                                    | ("shared_head_norm", None) => {
+                                        mtp.shared_head_norm =
+                                            load_bias(qtype, qdata, value_count)?;
+                                    }
+                                    ("shared_head_head", Some("weight"))
+                                    | ("shared_head", Some("weight")) => {
+                                        mtp.shared_head_head =
+                                            load_tensor(name, qtype, qdata, value_count)?;
+                                    }
+                                    _ => {}
+                                }
+                            } else {
+                                let weight_name = parts[2];
+                                let suffix = parts.get(3).copied();
+                                match (weight_name, suffix) {
+                                    ("attn_norm", _) => {
+                                        mtp.layer.attn_norm = load_bias(qtype, qdata, value_count)?;
+                                    }
+                                    ("attn_q", Some("weight")) => {
+                                        mtp.layer.attn_q =
+                                            load_tensor(name, qtype, qdata, value_count)?;
+                                    }
+                                    ("attn_q", Some("bias")) => {
+                                        mtp.layer.attn_q_bias =
+                                            load_bias(qtype, qdata, value_count)?;
+                                    }
+                                    ("attn_k", Some("weight")) => {
+                                        mtp.layer.attn_k =
+                                            load_tensor(name, qtype, qdata, value_count)?;
+                                    }
+                                    ("attn_k", Some("bias")) => {
+                                        mtp.layer.attn_k_bias =
+                                            load_bias(qtype, qdata, value_count)?;
+                                    }
+                                    ("attn_v", Some("weight")) => {
+                                        mtp.layer.attn_v =
+                                            load_tensor(name, qtype, qdata, value_count)?;
+                                    }
+                                    ("attn_v", Some("bias")) => {
+                                        mtp.layer.attn_v_bias =
+                                            load_bias(qtype, qdata, value_count)?;
+                                    }
+                                    ("attn_output", Some("weight")) => {
+                                        mtp.layer.attn_output =
+                                            load_tensor(name, qtype, qdata, value_count)?;
+                                    }
+                                    ("attn_output", Some("bias")) => {
+                                        mtp.layer.attn_output_bias =
+                                            load_bias(qtype, qdata, value_count)?;
+                                    }
+                                    ("attn_q_norm", _) => {
+                                        mtp.layer.attn_q_norm =
+                                            load_bias(qtype, qdata, value_count)?;
+                                    }
+                                    ("attn_k_norm", _) => {
+                                        mtp.layer.attn_k_norm =
+                                            load_bias(qtype, qdata, value_count)?;
+                                    }
+                                    ("ffn_norm", _) | ("post_attention_norm", _) => {
+                                        mtp.layer.post_attention_norm =
+                                            load_bias(qtype, qdata, value_count)?;
+                                    }
+                                    ("ffn_gate", _) => {
+                                        mtp.layer.ffn_gate =
+                                            load_tensor(name, qtype, qdata, value_count)?;
+                                    }
+                                    ("ffn_up", _) => {
+                                        mtp.layer.ffn_up =
+                                            load_tensor(name, qtype, qdata, value_count)?;
+                                    }
+                                    ("ffn_down", Some("weight")) => {
+                                        mtp.layer.ffn_down =
+                                            load_tensor(name, qtype, qdata, value_count)?;
+                                    }
+                                    ("ffn_down", Some("bias")) => {
+                                        mtp.layer.ffn_down_bias =
+                                            load_bias(qtype, qdata, value_count)?;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
                         continue;
                     }
                     let weight_name = parts[2];
@@ -1454,6 +1740,10 @@ impl InferenceModel {
                             layers[layer_idx].ffn_gate_shexp =
                                 load_tensor(name, qtype, qdata, value_count)?
                         }
+                        ("ffn_gate_inp_shexp", _) => {
+                            layers[layer_idx].ffn_gate_inp_shexp =
+                                load_tensor(name, qtype, qdata, value_count)?
+                        }
                         ("ffn_up_shexp", _) => {
                             layers[layer_idx].ffn_up_shexp =
                                 load_tensor(name, qtype, qdata, value_count)?
@@ -1472,12 +1762,24 @@ impl InferenceModel {
         let tok_embeddings = tok_embeddings.ok_or("missing tok_embeddings.weight")?;
         let norm_weight = norm_weight.ok_or("missing norm.weight")?;
         let output_weight = output_weight.unwrap_or_else(|| tok_embeddings.clone());
+        let mtp = mtp.and_then(|weights| {
+            if weights.is_usable(&config) {
+                Some(weights)
+            } else {
+                eprintln!(
+                    "MTP metadata advertises {} nextn layer(s), but required blk.{}.nextn/decoder tensors were incomplete; disabling native MTP",
+                    config.nextn_predict_layers, config.layer_count
+                );
+                None
+            }
+        });
 
         eprintln!(
-            "InferenceConfig: vocab={}, context={}, layers={}, hidden={}, intermediate={}, heads={}, kv_heads={}, kv_head_dim={}, eps={}, theta={}",
+            "InferenceConfig: vocab={}, context={}, layers={}, mtp_nextn={}, hidden={}, intermediate={}, heads={}, kv_heads={}, kv_head_dim={}, eps={}, theta={}",
             config.vocab_size,
             config.context_size,
             config.layer_count,
+            config.nextn_predict_layers,
             config.hidden_size,
             config.intermediate_size,
             config.num_attention_heads,
@@ -1541,6 +1843,7 @@ impl InferenceModel {
         }
 
         let workspace = Workspace::for_config(&config);
+        let last_output_hidden = vec![0.0_f32; config.hidden_size];
 
         Ok(Self {
             config,
@@ -1549,11 +1852,13 @@ impl InferenceModel {
             norm_weight,
             output_weight,
             layers,
+            mtp,
             kv_cache,
             kv_layer_map,
             ssm_states,
             ssm_conv_buffers,
             workspace,
+            last_output_hidden,
         })
     }
 
@@ -1775,7 +2080,7 @@ impl InferenceModel {
                 }
             }
 
-            if std::env::var_os("OXIDIZE_TRACE_FWD").is_some() {
+            if trace_fwd_enabled() {
                 let s = |v: &[f32]| v.iter().map(|x| *x as f64).sum::<f64>();
                 for t in 0..batch {
                     eprintln!(
@@ -2089,7 +2394,7 @@ impl InferenceModel {
                     x_batch[i] += ffn_out_batch[i];
                 }
             }
-            if std::env::var_os("OXIDIZE_TRACE_FWD").is_some() {
+            if trace_fwd_enabled() {
                 for t in 0..batch {
                     let sum: f64 = x_batch[t * h..(t + 1) * h].iter().map(|v| *v as f64).sum();
                     eprintln!(
@@ -2109,6 +2414,7 @@ impl InferenceModel {
         let mut final_normed = vec![0.0_f32; h];
         rms_norm_f32(last, &self.norm_weight, cfg.rms_norm_eps, &mut final_normed)
             .map_err(|e| ModelError::InferenceFailed(format!("final_norm: {:?}", e)))?;
+        self.last_output_hidden = final_normed.clone();
         let mut logits = vec![0.0_f32; cfg.vocab_size];
         gemv_weight(
             &self.output_weight,
@@ -2127,13 +2433,18 @@ impl InferenceModel {
         pos: usize,
         need_logits: bool,
     ) -> Result<Option<Logits>, ModelError> {
+        let token_t0 = crate::tensor::decode_profile_enabled().then(std::time::Instant::now);
         self.embed_token_into_workspace(token);
         let layer_count = self.config.layer_count;
         self.run_layer_range_in_workspace(pos, 0..layer_count)?;
         if !need_logits {
             return Ok(None);
         }
-        self.final_head_from_workspace().map(Some)
+        let logits = self.final_head_from_workspace().map(Some);
+        if let Some(t0) = token_t0 {
+            crate::tensor::decode_profile_record("token_forward", t0.elapsed().as_nanos() as u64);
+        }
+        logits
     }
 
     /// Write `token`'s embedding into `workspace.x[..hidden_size]`. First stage
@@ -2209,6 +2520,21 @@ impl InferenceModel {
         &self.norm_weight
     }
 
+    /// Whether this GGUF contains a usable native MTP/nextn draft block.
+    pub fn has_mtp(&self) -> bool {
+        self.mtp.is_some()
+    }
+
+    /// Number of nextn layers advertised by GGUF metadata.
+    pub fn nextn_predict_layers(&self) -> usize {
+        self.config.nextn_predict_layers
+    }
+
+    /// Final output-normalized hidden row for the latest committed target token.
+    pub fn last_output_hidden(&self) -> &[f32] {
+        &self.last_output_hidden
+    }
+
     /// Project already-normalized hidden states through the output (lm_head) matrix.
     pub fn lm_head_logits_from_normed(
         &self,
@@ -2243,19 +2569,440 @@ impl InferenceModel {
     /// Apply final RMSNorm + lm_head to the current hidden state in
     /// `workspace.x` and return the logits. Last stage of pipeline-parallel.
     pub fn final_head_from_workspace(&mut self) -> Result<Logits, ModelError> {
+        let h = self.config.hidden_size;
+        let vocab_size = self.config.vocab_size;
+        let rms_norm_eps = self.config.rms_norm_eps;
+        let (logits_out, last_hidden) = {
+            let ws = &mut self.workspace;
+            let x = &ws.x[..h];
+            let normed = &mut ws.hidden_a[..h];
+            normed.fill(0.0_f32);
+            rms_norm_f32(x, &self.norm_weight, rms_norm_eps, normed)
+                .map_err(|e| ModelError::InferenceFailed(format!("final_norm: {:?}", e)))?;
+            let last_hidden = normed.to_vec();
+            let logits = &mut ws.logits[..vocab_size];
+            logits.fill(0.0_f32);
+            gemv_weight(&self.output_weight, vocab_size, h, normed, logits)
+                .map_err(|e| ModelError::InferenceFailed(format!("output: {:?}", e)))?;
+            (logits.to_vec(), last_hidden)
+        };
+        self.last_output_hidden = last_hidden;
+        Ok(logits_out)
+    }
+
+    /// Generate draft tokens with the native in-GGUF MTP/nextn block.
+    ///
+    /// `start_token` and `start_hidden` must describe the same committed target
+    /// position. The first MTP step predicts the token after `start_token`; each
+    /// accepted MTP row then feeds its sampled token and post-head-norm hidden row
+    /// back into the next MTP step.
+    pub fn draft_mtp_tokens(
+        &mut self,
+        start_token: Token,
+        start_hidden: &[f32],
+        max_tokens: usize,
+        sampling: crate::sampling::SamplingConfig,
+        random: &mut dyn FnMut() -> f32,
+    ) -> Result<(Vec<Token>, Vec<Logits>), ModelError> {
+        if max_tokens == 0 {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        if self.mtp.is_none() {
+            return Err(ModelError::InferenceFailed(
+                "model does not contain a usable MTP/nextn block".to_string(),
+            ));
+        }
+        let h = self.config.hidden_size;
+        if start_hidden.len() != h {
+            return Err(ModelError::InferenceFailed(format!(
+                "MTP hidden width mismatch: expected {h}, got {}",
+                start_hidden.len()
+            )));
+        }
+
+        let mtp_kv_config = KvCacheConfig {
+            layer_count: 1,
+            context_size: max_tokens.max(1),
+            head_count: self.config.num_key_value_heads,
+            head_dim: self.config.kv_head_dim(),
+            dtype: DType::F32,
+            quantization: crate::kv_cache::KvQuantization::default(),
+        };
+        let mut mtp_kv = KvCache::new(mtp_kv_config)
+            .map_err(|e| ModelError::InferenceFailed(format!("mtp kv_cache: {e:?}")))?;
+
+        let mut draft_tokens = Vec::with_capacity(max_tokens);
+        let mut draft_logits = Vec::with_capacity(max_tokens);
+        let mut current_token = start_token;
+        let mut current_hidden = start_hidden.to_vec();
+        for pos in 0..max_tokens {
+            let (logits, next_hidden) =
+                self.mtp_forward_one(current_token, &current_hidden, pos, &mut mtp_kv)?;
+            let token = crate::sampling::sample(&logits, sampling, random())
+                .map_err(|e| ModelError::InferenceFailed(format!("MTP sample: {e:?}")))?;
+            draft_tokens.push(token);
+            draft_logits.push(logits);
+            current_token = token;
+            current_hidden = next_hidden;
+        }
+
+        Ok((draft_tokens, draft_logits))
+    }
+
+    fn mtp_forward_one(
+        &mut self,
+        token: Token,
+        previous_hidden: &[f32],
+        pos: usize,
+        mtp_kv: &mut KvCache,
+    ) -> Result<(Logits, Vec<f32>), ModelError> {
+        let mtp = self
+            .mtp
+            .as_ref()
+            .ok_or_else(|| ModelError::InferenceFailed("missing MTP/nextn weights".to_string()))?;
+        let h = self.config.hidden_size;
+        let vocab_size = self.config.vocab_size;
+        let rms_norm_eps = self.config.rms_norm_eps;
+
+        let embed_storage = if mtp.embed_tokens.is_empty() {
+            &self.tok_embeddings
+        } else {
+            &mtp.embed_tokens
+        };
+        let mut token_embedding = vec![0.0_f32; h];
+        lookup_embedding_from_storage(embed_storage, h, vocab_size, token, &mut token_embedding);
+
+        let mut embed_normed = vec![0.0_f32; h];
+        rms_norm_f32(
+            &token_embedding,
+            &mtp.enorm,
+            rms_norm_eps,
+            &mut embed_normed,
+        )
+        .map_err(|e| ModelError::InferenceFailed(format!("mtp enorm: {e:?}")))?;
+        let mut hidden_normed = vec![0.0_f32; h];
+        rms_norm_f32(
+            previous_hidden,
+            &mtp.hnorm,
+            rms_norm_eps,
+            &mut hidden_normed,
+        )
+        .map_err(|e| ModelError::InferenceFailed(format!("mtp hnorm: {e:?}")))?;
+
+        let mut concat = vec![0.0_f32; h * 2];
+        concat[..h].copy_from_slice(&embed_normed);
+        concat[h..].copy_from_slice(&hidden_normed);
+
+        let mut fused = vec![0.0_f32; h];
+        gemv_weight(&mtp.eh_proj, h, h * 2, &concat, &mut fused)
+            .map_err(|e| ModelError::InferenceFailed(format!("mtp eh_proj: {e}")))?;
+        self.workspace.x[..h].copy_from_slice(&fused);
+
+        self.run_mtp_layer_in_workspace(pos, mtp_kv)?;
+
+        let mtp = self
+            .mtp
+            .as_ref()
+            .ok_or_else(|| ModelError::InferenceFailed("missing MTP/nextn weights".to_string()))?;
+        let norm_weight = if mtp.shared_head_norm.is_empty() {
+            &self.norm_weight
+        } else {
+            &mtp.shared_head_norm
+        };
+        let head_weight = if mtp.shared_head_head.is_empty() {
+            &self.output_weight
+        } else {
+            &mtp.shared_head_head
+        };
+
+        let x = self.workspace.x[..h].to_vec();
+        let mut mtp_hidden = vec![0.0_f32; h];
+        rms_norm_f32(&x, norm_weight, rms_norm_eps, &mut mtp_hidden)
+            .map_err(|e| ModelError::InferenceFailed(format!("mtp shared_head_norm: {e:?}")))?;
+        let mut logits = vec![0.0_f32; vocab_size];
+        gemv_weight(head_weight, vocab_size, h, &mtp_hidden, &mut logits)
+            .map_err(|e| ModelError::InferenceFailed(format!("mtp shared_head: {e}")))?;
+        Ok((logits, mtp_hidden))
+    }
+
+    fn run_mtp_layer_in_workspace(
+        &mut self,
+        pos: usize,
+        mtp_kv: &mut KvCache,
+    ) -> Result<(), ModelError> {
+        let mtp = self
+            .mtp
+            .as_ref()
+            .ok_or_else(|| ModelError::InferenceFailed("missing MTP/nextn weights".to_string()))?;
+        let layer = &mtp.layer;
         let cfg = &self.config;
         let h = cfg.hidden_size;
-        let ws = &mut self.workspace;
-        let x = &ws.x[..h];
-        let normed = &mut ws.hidden_a[..h];
-        normed.fill(0.0_f32);
-        rms_norm_f32(x, &self.norm_weight, cfg.rms_norm_eps, normed)
-            .map_err(|e| ModelError::InferenceFailed(format!("final_norm: {:?}", e)))?;
-        let logits = &mut ws.logits[..cfg.vocab_size];
-        logits.fill(0.0_f32);
-        gemv_weight(&self.output_weight, cfg.vocab_size, h, normed, logits)
-            .map_err(|e| ModelError::InferenceFailed(format!("output: {:?}", e)))?;
-        Ok(logits.to_vec())
+        let n = cfg.num_attention_heads;
+        let k = cfg.num_key_value_heads;
+        let mut x = self.workspace.x[..h].to_vec();
+
+        let mut normed = vec![0.0_f32; h];
+        rms_norm_f32(&x, &layer.attn_norm, cfg.rms_norm_eps, &mut normed)
+            .map_err(|e| ModelError::InferenceFailed(format!("mtp attn_norm: {e:?}")))?;
+
+        let qg_len = layer.attn_q.output_dim(h);
+        let kv_len = layer.attn_k.output_dim(h);
+        let attn_output_input_len = layer.attn_output.output_dim(h);
+        if qg_len == 0 || kv_len == 0 || attn_output_input_len == 0 {
+            return Err(ModelError::InferenceFailed(format!(
+                "invalid MTP attention dims qg={qg_len} kv={kv_len} out_in={attn_output_input_len}"
+            )));
+        }
+
+        let mut qg = vec![0.0_f32; qg_len];
+        let mut k_vec = vec![0.0_f32; kv_len];
+        let mut v_vec = vec![0.0_f32; kv_len];
+        gemv_weight_fused(
+            vec![
+                (&layer.attn_q, qg_len, &mut qg[..]),
+                (&layer.attn_k, kv_len, &mut k_vec[..]),
+                (&layer.attn_v, kv_len, &mut v_vec[..]),
+            ],
+            h,
+            &normed,
+        )
+        .map_err(|e| ModelError::InferenceFailed(format!("mtp qkv: {e}")))?;
+        if !layer.attn_q_bias.is_empty() {
+            for (i, q) in qg.iter_mut().enumerate() {
+                *q += layer.attn_q_bias[i % layer.attn_q_bias.len()];
+            }
+        }
+        if !layer.attn_k_bias.is_empty() {
+            for (i, value) in k_vec.iter_mut().enumerate() {
+                *value += layer.attn_k_bias[i % layer.attn_k_bias.len()];
+            }
+        }
+        if !layer.attn_v_bias.is_empty() {
+            for (i, value) in v_vec.iter_mut().enumerate() {
+                *value += layer.attn_v_bias[i % layer.attn_v_bias.len()];
+            }
+        }
+
+        let q_len = qg_len.min(attn_output_input_len);
+        let gate = (qg_len >= q_len.saturating_mul(2)).then(|| qg[q_len..q_len + q_len].to_vec());
+        let mut q = qg[..q_len].to_vec();
+        let q_head_dim = if n > 0 && q_len.is_multiple_of(n) {
+            q_len / n
+        } else {
+            q_len
+        };
+        let q_heads = q_len.checked_div(q_head_dim.max(1)).unwrap_or(1);
+        let kv_head_dim = if k > 0 && kv_len.is_multiple_of(k) {
+            kv_len / k
+        } else {
+            kv_len
+        };
+        let kv_heads = kv_len.checked_div(kv_head_dim.max(1)).unwrap_or(1);
+
+        if !layer.attn_q_norm.is_empty() && q.len() == layer.attn_q_norm.len() {
+            let mut normed_q = vec![0.0_f32; q.len()];
+            rms_norm_f32(&q, &layer.attn_q_norm, cfg.rms_norm_eps, &mut normed_q)
+                .map_err(|e| ModelError::InferenceFailed(format!("mtp q_norm: {e:?}")))?;
+            q.copy_from_slice(&normed_q);
+        } else if !layer.attn_q_norm.is_empty() && q_head_dim == layer.attn_q_norm.len() {
+            let mut normed_head = vec![0.0_f32; q_head_dim];
+            for head in 0..q_heads {
+                let start = head * q_head_dim;
+                let end = start + q_head_dim;
+                if end > q.len() {
+                    break;
+                }
+                rms_norm_f32(
+                    &q[start..end],
+                    &layer.attn_q_norm,
+                    cfg.rms_norm_eps,
+                    &mut normed_head,
+                )
+                .map_err(|e| ModelError::InferenceFailed(format!("mtp q_norm: {e:?}")))?;
+                q[start..end].copy_from_slice(&normed_head);
+            }
+        }
+        if !layer.attn_k_norm.is_empty() && k_vec.len() == layer.attn_k_norm.len() {
+            let mut normed_k = vec![0.0_f32; k_vec.len()];
+            rms_norm_f32(&k_vec, &layer.attn_k_norm, cfg.rms_norm_eps, &mut normed_k)
+                .map_err(|e| ModelError::InferenceFailed(format!("mtp k_norm: {e:?}")))?;
+            k_vec.copy_from_slice(&normed_k);
+        } else if !layer.attn_k_norm.is_empty() && kv_head_dim == layer.attn_k_norm.len() {
+            let mut normed_head = vec![0.0_f32; kv_head_dim];
+            for head in 0..kv_heads {
+                let start = head * kv_head_dim;
+                let end = start + kv_head_dim;
+                if end > k_vec.len() {
+                    break;
+                }
+                rms_norm_f32(
+                    &k_vec[start..end],
+                    &layer.attn_k_norm,
+                    cfg.rms_norm_eps,
+                    &mut normed_head,
+                )
+                .map_err(|e| ModelError::InferenceFailed(format!("mtp k_norm: {e:?}")))?;
+                k_vec[start..end].copy_from_slice(&normed_head);
+            }
+        }
+
+        let q_rope_len = cfg.effective_rope_dim().min(q_head_dim);
+        let mut rope_scratch = vec![0.0_f32; q_rope_len.max(kv_head_dim)];
+        for head in 0..q_heads {
+            let off = head * q_head_dim;
+            if off + q_head_dim > q.len() {
+                break;
+            }
+            let rotated = &mut rope_scratch[..q_rope_len];
+            apply_rope_f32(
+                &q[off..off + q_rope_len],
+                pos,
+                q_rope_len,
+                cfg.rope_theta,
+                rotated,
+            )
+            .map_err(|e| ModelError::InferenceFailed(format!("mtp rope q: {e:?}")))?;
+            q[off..off + q_rope_len].copy_from_slice(rotated);
+        }
+        let k_rope_len = cfg.effective_rope_dim().min(kv_head_dim);
+        for head in 0..kv_heads {
+            let off = head * kv_head_dim;
+            if off + kv_head_dim > k_vec.len() {
+                break;
+            }
+            let rotated = &mut rope_scratch[..k_rope_len];
+            apply_rope_f32(
+                &k_vec[off..off + k_rope_len],
+                pos,
+                k_rope_len,
+                cfg.rope_theta,
+                rotated,
+            )
+            .map_err(|e| ModelError::InferenceFailed(format!("mtp rope k: {e:?}")))?;
+            k_vec[off..off + k_rope_len].copy_from_slice(rotated);
+        }
+
+        mtp_kv
+            .set(0, pos, &k_vec, &v_vec)
+            .map_err(|e| ModelError::InferenceFailed(format!("mtp kv set: {e:?}")))?;
+        let seq_len = pos + 1;
+        let key_cache = mtp_kv
+            .f32_layer_key_prefix(0, seq_len)
+            .map_err(|e| ModelError::InferenceFailed(format!("mtp kv keys: {e:?}")))?
+            .ok_or_else(|| ModelError::InferenceFailed("MTP KV cache is not f32".to_string()))?;
+        let value_cache = mtp_kv
+            .f32_layer_value_prefix(0, seq_len)
+            .map_err(|e| ModelError::InferenceFailed(format!("mtp kv values: {e:?}")))?
+            .ok_or_else(|| ModelError::InferenceFailed("MTP KV cache is not f32".to_string()))?;
+
+        let q_for_flash = if q_head_dim > kv_head_dim {
+            let mut truncated = vec![0.0_f32; q_heads * kv_head_dim];
+            for head in 0..q_heads {
+                let src = head * q_head_dim;
+                let dst = head * kv_head_dim;
+                truncated[dst..dst + kv_head_dim].copy_from_slice(&q[src..src + kv_head_dim]);
+            }
+            truncated
+        } else {
+            q.clone()
+        };
+        let mut attn_result = vec![0.0_f32; q_for_flash.len()];
+        flash_attention_decode_heads_f32(
+            &q_for_flash,
+            key_cache,
+            value_cache,
+            seq_len,
+            kv_head_dim,
+            kv_len,
+            q_heads,
+            kv_heads,
+            &mut attn_result,
+        )
+        .map_err(|e| ModelError::InferenceFailed(format!("mtp attention: {e:?}")))?;
+        if let Some(gate) = gate.as_ref()
+            && gate.len() == attn_result.len()
+        {
+            for (out, gate_value) in attn_result.iter_mut().zip(gate.iter()) {
+                let sigmoid = 1.0_f32 / (1.0 + (-*gate_value).exp());
+                *out *= sigmoid;
+            }
+        }
+
+        let attn_input = if attn_result.len() == attn_output_input_len {
+            attn_result
+        } else {
+            let mut padded = vec![0.0_f32; attn_output_input_len];
+            let copy = padded.len().min(attn_result.len());
+            padded[..copy].copy_from_slice(&attn_result[..copy]);
+            padded
+        };
+        let mut attn_out = vec![0.0_f32; h];
+        gemv_weight(
+            &layer.attn_output,
+            h,
+            attn_output_input_len,
+            &attn_input,
+            &mut attn_out,
+        )
+        .map_err(|e| ModelError::InferenceFailed(format!("mtp attn_output: {e}")))?;
+        if !layer.attn_output_bias.is_empty() {
+            for (i, out) in attn_out.iter_mut().enumerate() {
+                *out += layer.attn_output_bias[i % layer.attn_output_bias.len()];
+            }
+        }
+        for i in 0..h {
+            x[i] += attn_out[i];
+        }
+
+        let ffn_norm_weight = if !layer.post_attention_norm.is_empty() {
+            &layer.post_attention_norm
+        } else {
+            &layer.ffn_norm
+        };
+        if ffn_norm_weight.is_empty() {
+            return Err(ModelError::InferenceFailed(
+                "MTP block is missing post_attention_norm/ffn_norm".to_string(),
+            ));
+        }
+        let mut ffn_normed = vec![0.0_f32; h];
+        rms_norm_f32(&x, ffn_norm_weight, cfg.rms_norm_eps, &mut ffn_normed)
+            .map_err(|e| ModelError::InferenceFailed(format!("mtp ffn_norm: {e:?}")))?;
+        let mut gate = vec![0.0_f32; cfg.intermediate_size];
+        let mut up = vec![0.0_f32; cfg.intermediate_size];
+        gemv_weight_fused(
+            vec![
+                (&layer.ffn_gate, cfg.intermediate_size, &mut gate[..]),
+                (&layer.ffn_up, cfg.intermediate_size, &mut up[..]),
+            ],
+            h,
+            &ffn_normed,
+        )
+        .map_err(|e| ModelError::InferenceFailed(format!("mtp ffn gate/up: {e}")))?;
+        if cfg.gelu_ffn {
+            apply_geglu_inplace_f32(&mut gate, &up);
+        } else {
+            apply_swiglu_inplace_f32(&mut gate, &up);
+        }
+        let mut ffn_out = vec![0.0_f32; h];
+        gemv_weight(
+            &layer.ffn_down,
+            h,
+            cfg.intermediate_size,
+            &gate,
+            &mut ffn_out,
+        )
+        .map_err(|e| ModelError::InferenceFailed(format!("mtp ffn_down: {e}")))?;
+        if !layer.ffn_down_bias.is_empty() {
+            for (i, out) in ffn_out.iter_mut().enumerate() {
+                *out += layer.ffn_down_bias[i % layer.ffn_down_bias.len()];
+            }
+        }
+        for i in 0..h {
+            x[i] += ffn_out[i];
+        }
+
+        self.workspace.x[..h].copy_from_slice(&x);
+        Ok(())
     }
 
     /// Run layers `range` against the hidden state currently in
@@ -2618,34 +3365,29 @@ impl InferenceModel {
                     let v_vec = &mut ws.v_vec[..kv_len];
                     v_vec.fill(0.0_f32);
 
-                    // Run Q, K, V projections in parallel — they write to non-overlapping
-                    // buffers (q_full, k_vec, v_vec) and share only an immutable normed view.
-                    // Same pattern as the gate||up join below; reborrow semantics preserve
-                    // all three slice bindings after the join returns.
-                    let ((qr, kr), vr) = rayon::join(
-                        || {
-                            rayon::join(
-                                || gemv_weight(&layer.attn_q, q_len, h, normed, q_full),
-                                || {
-                                    if layer.attn_k.is_empty() {
-                                        Ok(())
-                                    } else {
-                                        gemv_weight(&layer.attn_k, kv_len, h, normed, k_vec)
-                                    }
-                                },
-                            )
-                        },
-                        || {
-                            if layer.attn_v.is_empty() {
-                                Ok(())
-                            } else {
-                                gemv_weight(&layer.attn_v, kv_len, h, normed, v_vec)
-                            }
-                        },
-                    );
-                    qr.map_err(|e| ModelError::InferenceFailed(format!("attn_q: {:?}", e)))?;
-                    kr.map_err(|e| ModelError::InferenceFailed(format!("attn_k: {:?}", e)))?;
-                    vr.map_err(|e| ModelError::InferenceFailed(format!("attn_v: {:?}", e)))?;
+                    // Run Q, K, V projections as ONE fused parallel region —
+                    // they share the same normed input and write to
+                    // non-overlapping buffers (q_full, k_vec, v_vec).
+                    gemv_weight_fused(
+                        vec![
+                            (&layer.attn_q, q_len, &mut *q_full),
+                            (
+                                &layer.attn_k,
+                                if layer.attn_k.is_empty() { 0 } else { kv_len },
+                                &mut *k_vec,
+                            ),
+                            (
+                                &layer.attn_v,
+                                if layer.attn_v.is_empty() { 0 } else { kv_len },
+                                &mut *v_vec,
+                            ),
+                        ],
+                        h,
+                        normed,
+                    )
+                    .map_err(|e| ModelError::InferenceFailed(format!("attn_qkv: {:?}", e)))?;
+                    let glue_t0 =
+                        crate::tensor::decode_profile_enabled().then(std::time::Instant::now);
 
                     if !layer.attn_q_bias.is_empty() {
                         for (i, q) in q_full.iter_mut().enumerate() {
@@ -2789,45 +3531,7 @@ impl InferenceModel {
                         .set(kv_layer_idx, pos, k_vec, v_vec)
                         .map_err(|e| ModelError::InferenceFailed(format!("kv set: {:?}", e)))?;
 
-                    // Borrow the F32 KV prefix when the logical prefix is still
-                    // contiguous in storage; otherwise copy into workspace buffers.
                     let seq_len = pos + 1;
-                    let borrowed_key_cache = self
-                        .kv_cache
-                        .f32_layer_key_prefix(kv_layer_idx, seq_len)
-                        .map_err(|e| {
-                            ModelError::InferenceFailed(format!("kv borrow keys: {:?}", e))
-                        })?;
-                    let borrowed_value_cache = self
-                        .kv_cache
-                        .f32_layer_value_prefix(kv_layer_idx, seq_len)
-                        .map_err(|e| {
-                            ModelError::InferenceFailed(format!("kv borrow values: {:?}", e))
-                        })?;
-
-                    let key_cache: &[f32];
-                    let value_cache: &[f32];
-                    if let (Some(keys), Some(values)) = (borrowed_key_cache, borrowed_value_cache) {
-                        key_cache = keys;
-                        value_cache = values;
-                    } else {
-                        let key_copy = &mut ws.kv_keys_copy[..seq_len * kv_len];
-                        key_copy.fill(0.0_f32);
-                        let value_copy = &mut ws.kv_values_copy[..seq_len * kv_len];
-                        value_copy.fill(0.0_f32);
-                        self.kv_cache
-                            .copy_layer_keys(kv_layer_idx, seq_len, key_copy)
-                            .map_err(|e| {
-                                ModelError::InferenceFailed(format!("kv copy keys: {:?}", e))
-                            })?;
-                        self.kv_cache
-                            .copy_layer_values(kv_layer_idx, seq_len, value_copy)
-                            .map_err(|e| {
-                                ModelError::InferenceFailed(format!("kv copy values: {:?}", e))
-                            })?;
-                        key_cache = key_copy;
-                        value_cache = value_copy;
-                    }
 
                     // compute attention using parallel flash attention decode over heads
                     let attn_result = &mut ws.attn_result[..q_len_used];
@@ -2847,31 +3551,145 @@ impl InferenceModel {
                     } else {
                         q
                     };
-                    // Sliding-window attention: a local layer attends only to the
-                    // most recent `layer_window` positions. RoPE encodes absolute
-                    // positions, so slicing off the oldest rows yields the
-                    // windowed-causal mask with relative positions preserved.
-                    let (eff_seq_len, key_cache, value_cache) =
-                        if layer_window > 0 && seq_len > layer_window {
-                            let skip = (seq_len - layer_window) * kv_len;
-                            (layer_window, &key_cache[skip..], &value_cache[skip..])
+
+                    // Borrow the KV prefix in its storage dtype when the logical
+                    // prefix is still contiguous in storage (F32 directly, F16 as
+                    // half bits converted in-kernel); otherwise dequantize-copy
+                    // into workspace buffers. Borrowing avoids materializing an
+                    // f32 prefix copy per layer per token, and F16 also halves
+                    // the attention DRAM reads vs an F32 cache.
+                    let f16_keys = self
+                        .kv_cache
+                        .f16_layer_key_prefix(kv_layer_idx, seq_len)
+                        .map_err(|e| {
+                            ModelError::InferenceFailed(format!("kv borrow f16 keys: {:?}", e))
+                        })?;
+                    let f16_values = self
+                        .kv_cache
+                        .f16_layer_value_prefix(kv_layer_idx, seq_len)
+                        .map_err(|e| {
+                            ModelError::InferenceFailed(format!("kv borrow f16 values: {:?}", e))
+                        })?;
+                    if let (Some(key16), Some(value16)) = (f16_keys, f16_values) {
+                        // Sliding-window attention: a local layer attends only to
+                        // the most recent `layer_window` positions (see the F32
+                        // branch below for why slicing preserves the mask).
+                        let (eff_seq_len, key16, value16) =
+                            if layer_window > 0 && seq_len > layer_window {
+                                let skip = (seq_len - layer_window) * kv_len;
+                                (layer_window, &key16[skip..], &value16[skip..])
+                            } else {
+                                (seq_len, key16, value16)
+                            };
+                        if let Some(t0) = glue_t0 {
+                            crate::tensor::decode_profile_record(
+                                "pre_attn_glue",
+                                t0.elapsed().as_nanos() as u64,
+                            );
+                        }
+                        let attn_t0 =
+                            crate::tensor::decode_profile_enabled().then(std::time::Instant::now);
+                        flash_attention_decode_heads_f16(
+                            q_for_flash,
+                            key16,
+                            value16,
+                            eff_seq_len,
+                            kv_head_dim,
+                            kv_len,
+                            q_heads,
+                            kv_heads,
+                            attn_result,
+                        )
+                        .map_err(|e| {
+                            ModelError::InferenceFailed(format!(
+                                "flash attention heads (f16): {:?}",
+                                e
+                            ))
+                        })?;
+                        if let Some(t0) = attn_t0 {
+                            crate::tensor::decode_profile_record(
+                                "attention",
+                                t0.elapsed().as_nanos() as u64,
+                            );
+                        }
+                    } else {
+                        let borrowed_key_cache = self
+                            .kv_cache
+                            .f32_layer_key_prefix(kv_layer_idx, seq_len)
+                            .map_err(|e| {
+                                ModelError::InferenceFailed(format!("kv borrow keys: {:?}", e))
+                            })?;
+                        let borrowed_value_cache = self
+                            .kv_cache
+                            .f32_layer_value_prefix(kv_layer_idx, seq_len)
+                            .map_err(|e| {
+                                ModelError::InferenceFailed(format!("kv borrow values: {:?}", e))
+                            })?;
+
+                        let key_cache: &[f32];
+                        let value_cache: &[f32];
+                        if let (Some(keys), Some(values)) =
+                            (borrowed_key_cache, borrowed_value_cache)
+                        {
+                            key_cache = keys;
+                            value_cache = values;
                         } else {
-                            (seq_len, key_cache, value_cache)
-                        };
-                    flash_attention_decode_heads_f32(
-                        q_for_flash,
-                        key_cache,
-                        value_cache,
-                        eff_seq_len,
-                        kv_head_dim,
-                        kv_len,
-                        q_heads,
-                        kv_heads,
-                        attn_result,
-                    )
-                    .map_err(|e| {
-                        ModelError::InferenceFailed(format!("flash attention heads: {:?}", e))
-                    })?;
+                            let key_copy = &mut ws.kv_keys_copy[..seq_len * kv_len];
+                            let value_copy = &mut ws.kv_values_copy[..seq_len * kv_len];
+                            self.kv_cache
+                                .copy_layer_keys(kv_layer_idx, seq_len, key_copy)
+                                .map_err(|e| {
+                                    ModelError::InferenceFailed(format!("kv copy keys: {:?}", e))
+                                })?;
+                            self.kv_cache
+                                .copy_layer_values(kv_layer_idx, seq_len, value_copy)
+                                .map_err(|e| {
+                                    ModelError::InferenceFailed(format!("kv copy values: {:?}", e))
+                                })?;
+                            key_cache = key_copy;
+                            value_cache = value_copy;
+                        }
+
+                        // Sliding-window attention: a local layer attends only to the
+                        // most recent `layer_window` positions. RoPE encodes absolute
+                        // positions, so slicing off the oldest rows yields the
+                        // windowed-causal mask with relative positions preserved.
+                        let (eff_seq_len, key_cache, value_cache) =
+                            if layer_window > 0 && seq_len > layer_window {
+                                let skip = (seq_len - layer_window) * kv_len;
+                                (layer_window, &key_cache[skip..], &value_cache[skip..])
+                            } else {
+                                (seq_len, key_cache, value_cache)
+                            };
+                        if let Some(t0) = glue_t0 {
+                            crate::tensor::decode_profile_record(
+                                "pre_attn_glue",
+                                t0.elapsed().as_nanos() as u64,
+                            );
+                        }
+                        let attn_t0 =
+                            crate::tensor::decode_profile_enabled().then(std::time::Instant::now);
+                        flash_attention_decode_heads_f32(
+                            q_for_flash,
+                            key_cache,
+                            value_cache,
+                            eff_seq_len,
+                            kv_head_dim,
+                            kv_len,
+                            q_heads,
+                            kv_heads,
+                            attn_result,
+                        )
+                        .map_err(|e| {
+                            ModelError::InferenceFailed(format!("flash attention heads: {:?}", e))
+                        })?;
+                        if let Some(t0) = attn_t0 {
+                            crate::tensor::decode_profile_record(
+                                "attention",
+                                t0.elapsed().as_nanos() as u64,
+                            );
+                        }
+                    }
 
                     // Reconcile attention result size with attn_output expected input
                     let attn_input = if attn_output_input_len > 0
@@ -2995,6 +3813,21 @@ impl InferenceModel {
                                 .map_err(|e| {
                                     ModelError::InferenceFailed(format!("shexp down: {:?}", e))
                                 })?;
+                            if !layer.ffn_gate_inp_shexp.is_empty() {
+                                let gate_logit = &mut ws.moe_router_logits[..1];
+                                gate_logit[0] = 0.0_f32;
+                                gemv_weight(&layer.ffn_gate_inp_shexp, 1, h, normed, gate_logit)
+                                    .map_err(|e| {
+                                        ModelError::InferenceFailed(format!(
+                                            "shexp router gate: {:?}",
+                                            e
+                                        ))
+                                    })?;
+                                let scale = 1.0_f32 / (1.0 + (-gate_logit[0]).exp());
+                                for val in shexp_out.iter_mut() {
+                                    *val *= scale;
+                                }
+                            }
                             for i in 0..h {
                                 ffn_out[i] += shexp_out[i];
                             }
@@ -3004,15 +3837,20 @@ impl InferenceModel {
                         gate.fill(0.0_f32);
                         let up = &mut ws.intermediate_b[..cfg.intermediate_size];
                         up.fill(0.0_f32);
-                        let (gate_result, up_result) = rayon::join(
-                            || gemv_weight(&layer.ffn_gate, cfg.intermediate_size, h, normed, gate),
-                            || gemv_weight(&layer.ffn_up, cfg.intermediate_size, h, normed, up),
-                        );
-                        gate_result.map_err(|e| {
-                            ModelError::InferenceFailed(format!("ffn_gate: {:?}", e))
+                        // Gate and up share the normed input; run both as ONE
+                        // fused parallel region (two nested regions stole work
+                        // from each other and halved streaming throughput).
+                        gemv_weight_fused(
+                            vec![
+                                (&layer.ffn_gate, cfg.intermediate_size, &mut *gate),
+                                (&layer.ffn_up, cfg.intermediate_size, &mut *up),
+                            ],
+                            h,
+                            normed,
+                        )
+                        .map_err(|e| {
+                            ModelError::InferenceFailed(format!("ffn_gate_up: {:?}", e))
                         })?;
-                        up_result
-                            .map_err(|e| ModelError::InferenceFailed(format!("ffn_up: {:?}", e)))?;
 
                         // GeGLU for Gemma, otherwise SwiGLU (AVX2 fast path).
                         if cfg.gelu_ffn {
@@ -3047,7 +3885,7 @@ impl InferenceModel {
                     ws.x[i] += ffn_out[i];
                 }
             }
-            if std::env::var_os("OXIDIZE_TRACE_FWD").is_some() {
+            if trace_fwd_enabled() {
                 let sum: f64 = ws.x[..h].iter().map(|v| *v as f64).sum();
                 eprintln!("TRACE inf pos={pos} layer={layer_idx} sum={sum:.9e}");
             }
@@ -3466,6 +4304,51 @@ pub(crate) fn moe_ffn_forward_weights(
         }
     }
 
+    // 2b. DeepSeek-V3 group-limited routing. Experts are partitioned into
+    // `expert_group_count` contiguous groups; each group is ranked by the sum
+    // of its top-2 selection scores, the top `expert_group_used_count` groups
+    // are kept, and all experts outside them are masked (-inf) before the
+    // global top-k below. `expert_group_count <= 1` (e.g. Kimi-K2) is a no-op,
+    // leaving the existing global top-k path byte-for-byte unchanged.
+    if cfg.expert_group_count > 1
+        && cfg.expert_group_used_count > 0
+        && cfg.expert_group_used_count < cfg.expert_group_count
+        && n_experts % cfg.expert_group_count == 0
+    {
+        let n_group = cfg.expert_group_count;
+        let group_size = n_experts / n_group;
+        // Reuse a thread-local scratch buffer for the per-group scores instead
+        // of allocating a fresh `Vec` every decode step (this routing block
+        // runs once per token).
+        thread_local! {
+            static GROUP_SCORES: std::cell::RefCell<Vec<(usize, f32)>> =
+                const { std::cell::RefCell::new(Vec::new()) };
+        }
+        GROUP_SCORES.with_borrow_mut(|group_scores| {
+            group_scores.clear();
+            group_scores.extend((0..n_group).map(|g| {
+                let grp = &expert_scores[g * group_size..g * group_size + group_size];
+                let (mut top1, mut top2) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+                for &(_, s) in grp {
+                    if s > top1 {
+                        top2 = top1;
+                        top1 = s;
+                    } else if s > top2 {
+                        top2 = s;
+                    }
+                }
+                (g, if top2.is_finite() { top1 + top2 } else { top1 })
+            }));
+            group_scores
+                .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            for &(g, _) in group_scores.iter().skip(cfg.expert_group_used_count) {
+                for e in &mut expert_scores[g * group_size..g * group_size + group_size] {
+                    e.1 = f32::NEG_INFINITY;
+                }
+            }
+        });
+    }
+
     // 3. Top-k expert selection by selection score.
     let compare_score = |a: &(usize, f32), b: &(usize, f32)| {
         b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
@@ -3488,13 +4371,22 @@ pub(crate) fn moe_ffn_forward_weights(
         if s > 0.0 { s } else { 1.0 }
     };
 
-    // 4. Gather the selected experts and their routing weights.
+    // 4. Gather the selected experts and their routing weights. The routed
+    // contribution is scaled by `expert_weights_scale` (DeepSeek-V3/Kimi
+    // `routed_scaling_factor`); folding it into the per-expert weight here
+    // applies it uniformly across the fused, non-fused, and f32 expert paths
+    // below. Defaults to 1.0 for every non-DeepSeek MoE arch.
+    let routed_scale = if cfg.expert_weights_scale > 0.0 {
+        cfg.expert_weights_scale
+    } else {
+        1.0
+    };
     let n_sel = n_experts_per_tok;
     let mut selected: Vec<usize> = Vec::with_capacity(n_sel);
     let mut weights: Vec<f32> = Vec::with_capacity(n_sel);
     for &(expert_idx, _sel_score) in expert_scores.iter().take(n_sel) {
         selected.push(expert_idx);
-        weights.push(router_logits[expert_idx] / weight_norm);
+        weights.push(routed_scale * router_logits[expert_idx] / weight_norm);
     }
 
     // 5. Expert FFN. Prefer the batched path (one parallel region per
@@ -3508,35 +4400,59 @@ pub(crate) fn moe_ffn_forward_weights(
     ) {
         let gate_all = &mut gate_scratch[..n_sel * i_size];
         let up_all = &mut up_scratch[..n_sel * i_size];
-        gate_all.fill(0.0_f32);
-        up_all.fill(0.0_f32);
         if gq == uq {
             // Fused: gate + up in ONE parallel region (halves the
             // fork/join + steal overhead of the two largest dispatches).
-            let mut gate_up = vec![0.0_f32; 2 * n_sel * i_size];
-            gemv_quantized_experts_gate_up_f32(
-                gq,
-                gm,
-                um,
-                n_experts,
-                &selected,
-                i_size,
-                h,
-                normed,
-                &mut gate_up,
-            )
-            .map_err(|e| ModelError::InferenceFailed(format!("moe gate+up: {:?}", e)))?;
-            let (gate_half, up_half) = gate_up.split_at(n_sel * i_size);
-            gate_all.copy_from_slice(gate_half);
-            up_all.copy_from_slice(up_half);
-        } else {
-            gemv_quantized_experts_f32(
-                gq, gm, n_experts, &selected, i_size, h, normed, 0, gate_all,
-            )
-            .map_err(|e| ModelError::InferenceFailed(format!("moe gate: {:?}", e)))?;
-            gemv_quantized_experts_f32(uq, um, n_experts, &selected, i_size, h, normed, 0, up_all)
-                .map_err(|e| ModelError::InferenceFailed(format!("moe up: {:?}", e)))?;
+            // The kernel needs gate|up laid out contiguously to dispatch both
+            // projections as a single pool region, so we cannot write directly
+            // into the two separate scratch buffers. Use a thread-local buffer
+            // (decode forward runs on the single submitter thread) rather than
+            // a per-layer-per-token heap alloc + two memcpys back into
+            // gate_all/up_all — that copy was ~14% of main-thread decode time.
+            // The kernel writes every output element, so no zero-fill is
+            // needed; the SwiGLU and down-projection read the two halves in
+            // place, leaving gate_all/up_all unused on this path.
+            thread_local! {
+                static GATE_UP: std::cell::RefCell<Vec<f32>> =
+                    const { std::cell::RefCell::new(Vec::new()) };
+            }
+            let _ = (&gate_all, &up_all);
+            return GATE_UP.with_borrow_mut(|gate_up| {
+                gate_up.resize(2 * n_sel * i_size, 0.0_f32);
+                gemv_quantized_experts_gate_up_f32(
+                    gq, gm, um, n_experts, &selected, i_size, h, normed, gate_up,
+                )
+                .map_err(|e| ModelError::InferenceFailed(format!("moe gate+up: {:?}", e)))?;
+                let (gate_half, up_half) = gate_up.split_at_mut(n_sel * i_size);
+                // SwiGLU into gate_half; it becomes the down-projection input
+                // (contiguous [n_sel, i_size], stride i_size per expert).
+                for (g, u) in gate_half.iter_mut().zip(up_half.iter()) {
+                    let sigmoid = 1.0_f32 / (1.0 + (-*g).exp());
+                    *g = *g * sigmoid * *u;
+                }
+                let down_all = &mut expert_out[..n_sel * h];
+                gemv_quantized_experts_f32(
+                    dq, dm, n_experts, &selected, h, i_size, gate_half, i_size, down_all,
+                )
+                .map_err(|e| ModelError::InferenceFailed(format!("moe down: {:?}", e)))?;
+                for (slot, &weight) in weights.iter().enumerate() {
+                    let d = &down_all[slot * h..(slot + 1) * h];
+                    for (out, val) in ffn_out.iter_mut().zip(d.iter()) {
+                        *out += weight * val;
+                    }
+                }
+                Ok(())
+            });
         }
+        // Non-fused path actually consumes gate_all/up_all — zero them here
+        // (the fused branch above returns early without touching them, so the
+        // previous unconditional fill was wasted decode-hot-path traffic).
+        gate_all.fill(0.0_f32);
+        up_all.fill(0.0_f32);
+        gemv_quantized_experts_f32(gq, gm, n_experts, &selected, i_size, h, normed, 0, gate_all)
+            .map_err(|e| ModelError::InferenceFailed(format!("moe gate: {:?}", e)))?;
+        gemv_quantized_experts_f32(uq, um, n_experts, &selected, i_size, h, normed, 0, up_all)
+            .map_err(|e| ModelError::InferenceFailed(format!("moe up: {:?}", e)))?;
         // SwiGLU into gate_all; it then becomes the down-projection input
         // (one contiguous [n_sel, i_size] buffer, stride i_size per expert).
         for (g, u) in gate_all.iter_mut().zip(up_all.iter()) {
@@ -3699,6 +4615,175 @@ impl Model for InferenceModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gguf::{GgufFile, GgufMetadataValue, GgufTensorInfo, MappedGgufFile};
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn qwen35_mtp_metadata_subtracts_nextn_layers() {
+        let mapped = MappedGgufFile::from_parsed_for_test(GgufFile {
+            version: 3,
+            tensor_count: 1,
+            metadata: BTreeMap::from([
+                (
+                    "general.architecture".to_owned(),
+                    GgufMetadataValue::String("qwen35".to_owned()),
+                ),
+                (
+                    "qwen35.block_count".to_owned(),
+                    GgufMetadataValue::Uint32(65),
+                ),
+                (
+                    "qwen35.nextn_predict_layers".to_owned(),
+                    GgufMetadataValue::Uint32(1),
+                ),
+                (
+                    "qwen35.embedding_length".to_owned(),
+                    GgufMetadataValue::Uint32(5120),
+                ),
+                (
+                    "qwen35.feed_forward_length".to_owned(),
+                    GgufMetadataValue::Uint32(17408),
+                ),
+                (
+                    "qwen35.attention.head_count".to_owned(),
+                    GgufMetadataValue::Uint32(24),
+                ),
+                (
+                    "qwen35.attention.head_count_kv".to_owned(),
+                    GgufMetadataValue::Uint32(4),
+                ),
+                (
+                    "qwen35.attention.key_length".to_owned(),
+                    GgufMetadataValue::Uint32(256),
+                ),
+            ]),
+            tensor_infos: vec![GgufTensorInfo {
+                name: "tok_embeddings.weight".to_owned(),
+                dimensions: vec![5120, 248320],
+                ggml_type: 0,
+                relative_offset: 0,
+                absolute_offset: 0,
+            }],
+            alignment: 32,
+            data_section_start: 0,
+        });
+
+        let cfg = InferenceConfig::from_gguf(&mapped);
+
+        assert_eq!(cfg.architecture, ModelArchitecture::Qwen);
+        assert_eq!(cfg.layer_count, 64);
+        assert_eq!(cfg.nextn_predict_layers, 1);
+        assert_eq!(cfg.hidden_size, 5120);
+        assert_eq!(cfg.kv_head_dim(), 256);
+        assert_eq!(cfg.rope_dim, 64);
+    }
+
+    #[test]
+    fn deepseek_v3_moe_metadata_is_parsed_for_kimi_style_routing() {
+        let mapped = MappedGgufFile::from_parsed_for_test(GgufFile {
+            version: 3,
+            tensor_count: 3,
+            metadata: BTreeMap::from([
+                (
+                    "general.architecture".to_owned(),
+                    GgufMetadataValue::String("deepseek2".to_owned()),
+                ),
+                (
+                    "deepseek2.block_count".to_owned(),
+                    GgufMetadataValue::Uint32(61),
+                ),
+                (
+                    "deepseek2.embedding_length".to_owned(),
+                    GgufMetadataValue::Uint32(7168),
+                ),
+                (
+                    "deepseek2.feed_forward_length".to_owned(),
+                    GgufMetadataValue::Uint32(18432),
+                ),
+                (
+                    "deepseek2.attention.head_count".to_owned(),
+                    GgufMetadataValue::Uint32(64),
+                ),
+                (
+                    "deepseek2.attention.head_count_kv".to_owned(),
+                    GgufMetadataValue::Uint32(64),
+                ),
+                (
+                    "deepseek2.attention.key_length_mla".to_owned(),
+                    GgufMetadataValue::Uint32(128),
+                ),
+                (
+                    "deepseek2.expert_count".to_owned(),
+                    GgufMetadataValue::Uint32(384),
+                ),
+                (
+                    "deepseek2.expert_used_count".to_owned(),
+                    GgufMetadataValue::Uint32(8),
+                ),
+                (
+                    "deepseek2.expert_feed_forward_length".to_owned(),
+                    GgufMetadataValue::Uint32(2048),
+                ),
+                (
+                    "deepseek2.leading_dense_block_count".to_owned(),
+                    GgufMetadataValue::Uint32(1),
+                ),
+                (
+                    "deepseek2.expert_gating_func".to_owned(),
+                    GgufMetadataValue::Uint32(2),
+                ),
+                (
+                    "deepseek2.expert_weights_scale".to_owned(),
+                    GgufMetadataValue::Float32(2.827),
+                ),
+                (
+                    "deepseek2.expert_group_count".to_owned(),
+                    GgufMetadataValue::Uint32(1),
+                ),
+            ]),
+            tensor_infos: vec![
+                GgufTensorInfo {
+                    name: "tok_embeddings.weight".to_owned(),
+                    dimensions: vec![7168, 160000],
+                    ggml_type: 0,
+                    relative_offset: 0,
+                    absolute_offset: 0,
+                },
+                GgufTensorInfo {
+                    name: "blk.1.ffn_gate_inp.weight".to_owned(),
+                    dimensions: vec![7168, 384],
+                    ggml_type: 0,
+                    relative_offset: 0,
+                    absolute_offset: 0,
+                },
+                GgufTensorInfo {
+                    name: "blk.1.ffn_gate_shexp.weight".to_owned(),
+                    dimensions: vec![7168, 2048],
+                    ggml_type: 0,
+                    relative_offset: 0,
+                    absolute_offset: 0,
+                },
+            ],
+            alignment: 32,
+            data_section_start: 0,
+        });
+
+        let cfg = InferenceConfig::from_gguf(&mapped);
+
+        assert_eq!(cfg.architecture, ModelArchitecture::DeepSeek);
+        assert!(cfg.architecture.uses_moe());
+        assert!(cfg.architecture.uses_mla());
+        assert_eq!(cfg.layer_count, 61);
+        assert_eq!(cfg.hidden_size, 7168);
+        assert_eq!(cfg.num_experts, 384);
+        assert_eq!(cfg.num_experts_per_tok, 8);
+        assert_eq!(cfg.expert_intermediate_size, 2048);
+        assert_eq!(cfg.leading_dense_layers, 1);
+        assert!(cfg.expert_gating_sigmoid);
+        assert!((cfg.expert_weights_scale - 2.827).abs() < 1e-6);
+        assert_eq!(cfg.expert_group_count, 1);
+        assert_eq!(cfg.kv_head_dim(), 128);
+    }
 
     #[test]
     fn gemma_sliding_window_pattern_selects_global_layers() {
@@ -3783,11 +4868,13 @@ mod tests {
             norm_weight: vec![1.0, 1.0],
             output_weight: WeightStorage::F32(vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6]),
             layers: Vec::new(),
+            mtp: None,
             kv_cache: KvCache::new(kv_cache_config).expect("tiny kv cache should be valid"),
             kv_layer_map: Vec::new(),
             ssm_states: Vec::new(),
             ssm_conv_buffers: Vec::new(),
             workspace: Workspace::for_config(&config),
+            last_output_hidden: vec![0.0_f32; config.hidden_size],
         }
     }
 
@@ -3881,6 +4968,54 @@ mod tests {
         assert_eq!(prefill_logits, single_logits);
         assert_eq!(prefill_session.consumed_tokens(), 2);
         assert_eq!(single_session.consumed_tokens(), 1);
+    }
+
+    #[test]
+    fn native_mtp_draft_runs_on_tiny_weights() {
+        let mut model = tiny_inference_model();
+        model.config.nextn_predict_layers = 1;
+        model.config.intermediate_size = 2;
+        let mut layer = LayerWeights {
+            attn_norm: vec![1.0, 1.0],
+            attn_q: WeightStorage::F32(vec![0.0; 4 * 2]),
+            attn_k: WeightStorage::F32(vec![0.0; 2 * 2]),
+            attn_v: WeightStorage::F32(vec![0.0; 2 * 2]),
+            attn_output: WeightStorage::F32(vec![0.0; 2 * 2]),
+            post_attention_norm: vec![1.0, 1.0],
+            ffn_gate: WeightStorage::F32(vec![0.0; 2 * 2]),
+            ffn_up: WeightStorage::F32(vec![0.0; 2 * 2]),
+            ffn_down: WeightStorage::F32(vec![0.0; 2 * 2]),
+            ..LayerWeights::default()
+        };
+        // Keep the MTP layer full-attention and dense; q output is [q; gate].
+        layer.attn_q_bias = vec![0.0; 4];
+        model.mtp = Some(MtpWeights {
+            layer,
+            eh_proj: WeightStorage::F32(vec![0.0; 2 * 4]),
+            enorm: vec![1.0, 1.0],
+            hnorm: vec![1.0, 1.0],
+            shared_head_norm: vec![1.0, 1.0],
+            ..MtpWeights::default()
+        });
+
+        let mut random = || 0.0_f32;
+        let (tokens, logits) = model
+            .draft_mtp_tokens(
+                0,
+                &[0.0, 0.0],
+                2,
+                crate::sampling::SamplingConfig {
+                    temperature: 0.0,
+                    top_k: Some(1),
+                    ..Default::default()
+                },
+                &mut random,
+            )
+            .expect("tiny MTP draft should run");
+
+        assert_eq!(tokens, vec![2, 2]);
+        assert_eq!(logits.len(), 2);
+        assert!(logits.iter().all(|step| step.len() == model.vocab_size()));
     }
 
     /// Whole-model forward(0..L) must equal split forward(0..K) + forward(K..L)

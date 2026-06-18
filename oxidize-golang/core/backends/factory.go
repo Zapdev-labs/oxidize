@@ -40,7 +40,7 @@ func NewComputeBackend(name string, allowFallback bool) (FactoryResult, error) {
 	avail, reason := backendAvailable(effective)
 	if avail {
 		return FactoryResult{
-			Backend:   cpubackend.New(),
+			Backend:   instantiateBackend(effective),
 			Requested: requested,
 			Effective: effective,
 			Warning:   warn,
@@ -62,6 +62,15 @@ func NewComputeBackend(name string, allowFallback bool) (FactoryResult, error) {
 	}, nil
 }
 
+func instantiateBackend(b backend.Backend) backend.ComputeBackend {
+	switch b {
+	case backend.BackendCuda:
+		return cudabackend.New()
+	default:
+		return cpubackend.New()
+	}
+}
+
 func backendAvailable(b backend.Backend) (bool, string) {
 	switch b {
 	case backend.BackendCpu:
@@ -75,9 +84,6 @@ func backendAvailable(b backend.Backend) (bool, string) {
 		}
 		return true, ""
 	case backend.BackendCuda:
-		if !cudabackend.Info().DetectedAtBuild {
-			return false, "cuda backend not linked in this build"
-		}
 		if err := cudabackend.Initialize(); err != nil {
 			return false, err.Error()
 		}

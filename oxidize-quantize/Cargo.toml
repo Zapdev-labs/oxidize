@@ -8,3 +8,4 @@ version.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 oxidize-core = { path = "../oxidize-core" }
+rayon = "1"

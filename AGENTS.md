@@ -67,6 +67,11 @@ This workspace contains the core Rust LLM inference engine (`oxidize-core`) and 
 | Distributed logic | `oxidize-core/src/mesh/` | Only dir with real `mod.rs` + privacy boundaries |
 | Port to Go | `oxidize-golang/` | Mirror Rust structure; see `oxidize-golang/AGENTS.md` |
 | Port to Python | `oxidize-python/` | Mirror Go structure; see `oxidize-python/AGENTS.md` |
+| Wanda pruning | `oxidize-prune/src/wanda.rs` | Per-output-row `|W| · ‖X‖_2`; see `oxidize-prune/AGENTS.md` |
+| Magnitude pruning | `oxidize-prune/src/mask.rs` + `wanda.rs` | Per-output-row `|W|`; per Wanda paper, the right default for LLMs |
+| Activation L2 norms (Wanda calibration) | `oxidize-core/src/compute/activation_stats.rs` | `ActivationStats` + `CalibrationRunner`; consumed by `oxidize-prune` |
+| Auto-detect + auto-tune | `oxidize-core/src/autotune/` | `detect()` (CPU/RAM/NUMA/GPU/ISA) + `fingerprint()` + `plan()` rule table; CLI flags `--auto --no-auto --print-plan` |
+| Skylake-SP detection (AVX-512 regression gate) | `oxidize-kernels/src/cpu.rs` | `pub fn is_skylake_sp() -> bool` |
 
 ## CONVENTIONS
 - **Flat module system**: `lib.rs` uses `#[path = "..."]` to flatten all modules into crate root. Only `mesh/`, `paged_attention/`, `vision/` have real `mod.rs` files.
@@ -118,7 +123,9 @@ make wasm     # outputs to dist/wasm
 - When adding `oxidize-python` or expanding `oxidize-golang`, keep all Rust crates and features; do not delete or replace the Rust workspace.
 - Parallel language ports should reach feature parity with `oxidize-core` (user asked for every Rust feature in Python/Go, with Python targeting similar CLOC to Rust).
 - Keep `oxidize-py` (PyO3/maturin bindings) alongside the pure-Python `oxidize-python` package.
-- When syncing ports, bring new `master` Rust features into `oxidize-golang` (and follow-on Python work) rather than leaving ports stale.
+- When extending Go/Python ports, implement in `oxidize-golang` first, mirror to `oxidize-python`, and sync new `master` Rust features rather than leaving ports stale.
+- For Go/Python GPU backends, use pure native implementations (no Rust FFI at runtime; CGO permitted for native GPU bindings); CUDA first, then Vulkan/Metal/WebGPU.
+- Avoid creating extra markdown documentation files unless asked; update README when needed.
 - On feature branches, stage and commit only files related to the task; exclude unrelated workspace changes.
 - `oxidize run <model>` should start the OpenAI-compatible HTTP/WebSocket server by default; use `--no-api` for local inference only.
 - Contributions should keep tests passing and use clear, ethical PR/markdown descriptions; include benchmarks when claiming performance changes.
@@ -134,3 +141,6 @@ make wasm     # outputs to dist/wasm
 - Rust `oxidize run` rewrites to `--serve-api` by default (background in-process server on `--api-host`/`--api-port`); realtime WebSocket at `ws://HOST:PORT/v1/realtime` (`oxidize-server/tests/realtime_ws.rs`).
 - `oxidize-convert` converts HuggingFace SafeTensors (file or model directory with `config.json`) to GGUF; core logic in `oxidize-core/src/format/safetensors_to_gguf.rs`.
 - Git installs must name `oxidize-cli` explicitly (`cargo install --git … oxidize-cli --bin oxidize`) because the workspace ships multiple binary crates.
+- `oxidize-prune` depends on `oxidize-kernels` for SIMD magnitude/Wanda masks (`prune.rs`), Q4_K dequant (`q4k_dequant.rs`), and rayon-parallel tensor processing in `wanda.rs`.
+- Both Go and Python ports include `core/autotune/` with `--auto`, `--no-auto`, and `--print-plan` CLI flags.
+- Run Go port tests with `CGO_ENABLED=0` (exclude `scripts` package); Python tests via `uv run pytest` (`OXIDIZE_SLOW_TESTS=1` for slow GGUF integrations).

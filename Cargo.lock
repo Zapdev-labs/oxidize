@@ -3025,6 +3025,7 @@ dependencies = [
  "anyhow",
  "clap",
  "oxidize-core",
+ "oxidize-prune",
 ]
 
 [[package]]
@@ -3041,11 +3042,13 @@ dependencies = [
  "futures-util",
  "gpu-allocator",
  "libc",
+ "libloading",
  "libp2p",
  "memmap2",
  "metal",
  "mlx-rs",
  "mlx-sys 0.1.0",
+ "oxidize-kernels",
  "rayon",
  "safetensors",
  "serde",
@@ -3082,6 +3085,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxidize-kernels"
+version = "0.1.0"
+
+[[package]]
+name = "oxidize-merge"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "memmap2",
+ "safetensors",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "oxidize-prune"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "oxidize-core",
+ "oxidize-kernels",
+ "rayon",
+]
+
+[[package]]
 name = "oxidize-py"
 version = "0.1.0"
 dependencies = [
@@ -3096,6 +3127,7 @@ dependencies = [
  "anyhow",
  "clap",
  "oxidize-core",
+ "rayon",
 ]
 
 [[package]]

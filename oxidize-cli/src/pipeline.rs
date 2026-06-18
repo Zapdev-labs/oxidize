@@ -336,7 +336,7 @@ pub fn run_head(
     let prompt_ids = tokenizer.encode_with_special_tokens(
         prompt,
         EncodeOptions {
-            add_bos: true,
+            add_bos: tokenizer.add_bos_default(),
             add_eos: false,
             pad_to: None,
         },

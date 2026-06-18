@@ -1,0 +1,24 @@
+[package]
+name = "oxidize-merge"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[lib]
+name = "oxidize_merge"
+path = "src/lib.rs"
+
+[[bin]]
+name = "oxidize-merge"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+memmap2 = "0.9"
+safetensors = "0.4"
+serde.workspace = true
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"

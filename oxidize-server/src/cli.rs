@@ -4,6 +4,26 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 
 use clap::{Parser, ValueEnum};
+use oxidize_core::tensor::DType;
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+pub enum KvCacheDType {
+    F32,
+    F16,
+    Q8,
+    Q4,
+}
+
+impl KvCacheDType {
+    pub fn dtype(self) -> DType {
+        match self {
+            Self::F32 => DType::F32,
+            Self::F16 => DType::F16,
+            Self::Q8 => DType::I8,
+            Self::Q4 => DType::I16,
+        }
+    }
+}
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 pub enum Backend {
@@ -12,6 +32,8 @@ pub enum Backend {
     /// macOS only
     Mlx,
     Cuda,
+    /// AMD ROCm / HIP
+    Rocm,
     Vulkan,
     /// Intel Arc GPUs via Vulkan compute
     IntelArc,
@@ -24,6 +46,7 @@ impl Backend {
             Backend::Metal => oxidize_core::backend::Backend::Metal,
             Backend::Mlx => oxidize_core::backend::Backend::Mlx,
             Backend::Cuda => oxidize_core::backend::Backend::Cuda,
+            Backend::Rocm => oxidize_core::backend::Backend::Rocm,
             Backend::Vulkan => oxidize_core::backend::Backend::Vulkan,
             Backend::IntelArc => oxidize_core::backend::Backend::IntelArc,
         }
@@ -84,9 +107,12 @@ pub struct Args {
     pub layer_wise: bool,
     #[arg(long, default_value_t = 1)]
     pub layer_cache: usize,
-    /// Use TurboQuant block-quantized KV cache (only affects --kv-cache-dtype q4/q8).
+    /// Use TurboQuant block-quantized KV cache (default; only affects --kv-cache-dtype q4/q8).
     #[arg(long, default_value_t = false)]
     pub turboquant_kv: bool,
+    /// Use the legacy asymmetric q4/q8 KV cache quantizer instead of TurboQuant.
+    #[arg(long, default_value_t = false)]
+    pub no_turboquant_kv: bool,
     /// Enable mesh cluster mode: this node becomes the master that routes
     /// OpenAI-compatible requests to worker shards over the mesh data plane.
     #[arg(long, default_value_t = false)]
@@ -98,6 +124,32 @@ pub struct Args {
     /// Useful for draft models (e.g. DFlash) that do not embed a tokenizer.
     #[arg(long)]
     pub tokenizer_model: Option<PathBuf>,
+    /// Path to DFlash draft model for speculative decoding.
+    #[arg(long)]
+    pub draft_model: Option<PathBuf>,
+    /// Number of draft tokens per speculative step.
+    #[arg(long, default_value_t = 4)]
+    pub draft_tokens: usize,
+    #[arg(long, value_enum, default_value_t = KvCacheDType::F32)]
+    pub kv_cache_dtype: KvCacheDType,
+    /// Rayon thread pool size (0 = logical CPU count).
+    #[arg(long, default_value_t = 0)]
+    pub threads: usize,
+    /// Parallel RAM prefault threads for --ram-offload (0 = logical CPU count).
+    #[arg(long, default_value_t = 0)]
+    pub ram_offload_threads: usize,
+    /// Auto-detect hardware and pick inference knobs (threads, ctx,
+    /// KV dtype, n_gpu_layers, layer_wise, mmap, mlock, ISA, pipeline).
+    /// On by default; explicit flags always win.
+    #[arg(long, default_value_t = true)]
+    pub auto: bool,
+    /// Opt out of auto-tuning.
+    #[arg(long, default_value_t = false)]
+    pub no_auto: bool,
+    /// Print the resolved autotune plan to stderr on startup.
+    /// "json" emits machine-readable JSON instead of text.
+    #[arg(long, default_value = "auto")]
+    pub print_plan: String,
 }
 
 #[cfg(test)]

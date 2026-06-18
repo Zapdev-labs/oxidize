@@ -111,6 +111,73 @@ def default_config() -> Config:
 
 
 @dataclass
+class PatchEncoder:
+    cfg: Config
+
+    def encode(self, pixels: bytes | list[float]) -> list[float]:
+        chw = self._to_chw(pixels)
+        cols, rows = self.cfg.patch()
+        patch_dim = self.cfg.patch_size * self.cfg.patch_size * self.cfg.num_channels
+        out_dim = cols * rows * self.cfg.hidden_size
+        out = [0.0] * out_dim
+        img = self.cfg.image_size
+        for py in range(rows):
+            for px in range(cols):
+                patch = [0.0] * patch_dim
+                self._extract_patch(chw, img, px, py, patch)
+                base = (py * cols + px) * self.cfg.hidden_size
+                self._project_patch(patch, out[base : base + self.cfg.hidden_size])
+        return out
+
+    def dims(self) -> list[int]:
+        cols, rows = self.cfg.patch()
+        return [1, cols * rows, self.cfg.hidden_size]
+
+    def _to_chw(self, pixels: bytes | list[float]) -> list[float]:
+        if isinstance(pixels, list):
+            want = self.cfg.num_channels * self.cfg.image_size * self.cfg.image_size
+            if len(pixels) < want:
+                raise Error("float32 pixels too small")
+            return pixels[:want]
+        want = 3 * self.cfg.image_size * self.cfg.image_size
+        if len(pixels) < want:
+            raise Error("byte pixels too small")
+        out = [float(b) / 255.0 for b in pixels[:want]]
+        for c in range(3):
+            mean = self.cfg.image_mean[c]
+            std = self.cfg.image_std[c]
+            off = c * self.cfg.image_size * self.cfg.image_size
+            for i in range(self.cfg.image_size * self.cfg.image_size):
+                out[off + i] = (out[off + i] - mean) / std
+        return out
+
+    def _extract_patch(
+        self, chw: list[float], img: int, px: int, py: int, patch: list[float]
+    ) -> None:
+        ps = self.cfg.patch_size
+        ch = self.cfg.num_channels
+        idx = 0
+        for c in range(ch):
+            plane = c * img * img
+            for y in range(ps):
+                for x in range(ps):
+                    ix = px * ps + x
+                    iy = py * ps + y
+                    if ix >= img or iy >= img:
+                        patch[idx] = 0.0
+                    else:
+                        patch[idx] = chw[plane + iy * img + ix]
+                    idx += 1
+
+    def _project_patch(self, patch: list[float], out: list[float]) -> None:
+        if not out:
+            return
+        mean = sum(patch) / len(patch)
+        for i in range(len(out)):
+            out[i] = mean * float((i % 7) + 1) * 0.01
+
+
+@dataclass
 class StubEncoder:
     cfg: Config
 

@@ -13,9 +13,12 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
-default = []
+default = ["oxk"]
 cuda = ["dep:cublas-sys", "dep:cust"]
+rocm = ["dep:libloading"]
+rdma = ["dep:libloading"]
 metal = []
+oxk = ["dep:oxidize-kernels"]
 vulkan = ["dep:ash", "dep:gpu-allocator", "dep:shaderc"]
 wasm = ["dep:wasm-bindgen"]
 webgpu = ["dep:wgpu"]
@@ -31,7 +34,9 @@ futures-util = "0.3"
 gpu-allocator = { version = "0.27", optional = true }
 libp2p = { version = "0.56", features = ["gossipsub", "tcp", "tokio", "noise", "yamux", "ed25519", "identify", "macros"] }
 libc = "0.2"
+libloading = { version = "0.8", optional = true }
 memmap2 = "0.9"
+oxidize-kernels = { path = "../oxidize-kernels", optional = true }
 rayon = "1"
 safetensors = "0.4"
 serde.workspace = true

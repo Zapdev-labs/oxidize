@@ -2,6 +2,7 @@
 //!
 //! This crate exposes model/runtime primitives and a small public health surface
 //! used by CLI, server, and WASM integrations.
+#![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
 //!
 //! # API quick check
 //!
@@ -29,6 +30,10 @@ pub mod backend;
 pub use backend::ComputeBackend;
 #[path = "model/advanced_features.rs"]
 pub mod advanced_features;
+#[path = "compute/activation_stats.rs"]
+pub mod activation_stats;
+#[path = "autotune/mod.rs"]
+pub mod autotune;
 #[path = "util/benchmark_suite.rs"]
 pub mod benchmark_suite;
 #[path = "format/conversion.rs"]
@@ -39,8 +44,14 @@ pub mod cpu_kernels;
 pub mod cross_validation;
 #[path = "backends/cuda.rs"]
 pub mod cuda;
+#[path = "backends/rocm.rs"]
+pub mod rocm;
+#[path = "compute/gpu_dispatch.rs"]
+pub mod gpu_dispatch;
 #[path = "model/dflash.rs"]
 pub mod dflash;
+#[path = "model/diffusion_gemma.rs"]
+pub mod diffusion_gemma;
 #[path = "compute/flash_attention.rs"]
 pub mod flash_attention;
 #[path = "model/generation.rs"]
@@ -96,7 +107,7 @@ pub mod speculative;
 pub mod spinpool;
 #[path = "backends/strix.rs"]
 pub mod strix;
-#[path = "compute/tensor.rs"]
+#[path = "compute/tensor/mod.rs"]
 pub mod tensor;
 #[path = "format/tokenizer.rs"]
 pub mod tokenizer;

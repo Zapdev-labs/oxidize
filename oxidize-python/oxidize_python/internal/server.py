@@ -12,7 +12,6 @@ from oxidize_python.core.model.loader import LoaderConfig
 from oxidize_python.internal.api.responses import (
     build_chat_chunk,
     build_chat_completion,
-    build_embeddings_response,
     build_models_response,
     build_text_chunk,
     build_text_completion,
@@ -31,6 +30,9 @@ from oxidize_python.internal.api.schema import (
 from oxidize_python.internal.generate import PlaceholderSpec, placeholder_text
 from oxidize_python.internal.generate.cache import default_model_cache
 from oxidize_python.internal.generate.stream import CompletionParams, stream_completion
+from oxidize_python.internal.auth import wrap_handler
+from oxidize_python.internal import buildinfo
+from oxidize_python.internal.realtime import handle_realtime
 from oxidize_python.internal.serviceinfo.models import default_model_id, discover_models
 
 MAX_JSON_BODY_BYTES = 1 << 20
@@ -166,13 +168,12 @@ class _App:
         if not self.ensure_model(model):
             err = model_not_found(model)
             return error_response_to_dict(err), err.status_code
-        resp = build_embeddings_response(model)
         return {
-            "object": resp.object,
-            "model": resp.model,
-            "data": [asdict(d) for d in resp.data],
-            "usage": {"prompt_tokens": 0, "total_tokens": 0},
-        }, 200
+            "error": {
+                "message": "embeddings are not implemented in the Python port; use chat/completions",
+                "type": "not_implemented",
+            }
+        }, 501
 
     def mesh_chat_completion(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
         ChatCompletionRequest.from_json(body)
@@ -329,11 +330,13 @@ def listen(host: str = "127.0.0.1", port: int = 8080, models_dir: str = "") -> N
                 self._json(
                     {
                         "openapi": "3.0.0",
-                        "info": {"title": "oxidize-python", "version": "0.1.0"},
+                        "info": {"title": buildinfo.NAME, "version": buildinfo.VERSION},
                     }
                 )
             elif self.path == "/v1/models":
                 self._json(app.models_list())
+            elif self.path == "/v1/realtime":
+                handle_realtime(self)
             else:
                 self.send_error(404)
 
@@ -389,6 +392,7 @@ def listen(host: str = "127.0.0.1", port: int = 8080, models_dir: str = "") -> N
                 with app._lock:
                     app.requests_inflight -= 1
 
+    Handler = wrap_handler(Handler)
     httpd = ThreadingHTTPServer((host, port), Handler)
     print(f"oxidize-python server listening on http://{host}:{port}")
     httpd.serve_forever()

@@ -12,3 +12,4 @@ path = "src/main.rs"
 anyhow.workspace = true
 clap.workspace = true
 oxidize-core = { path = "../oxidize-core" }
+oxidize-prune = { path = "../oxidize-prune" }

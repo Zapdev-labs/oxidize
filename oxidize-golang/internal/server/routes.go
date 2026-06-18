@@ -96,7 +96,13 @@ func (a *application) embeddings(w http.ResponseWriter, r *http.Request) {
 	if !a.ensureModel(w, payload.Model) {
 		return
 	}
-	writeJSON(w, http.StatusOK, api.BuildEmbeddingsResponse(payload.Model))
+	writeJSON(w, http.StatusNotImplemented, api.ErrorResponse{
+		StatusCode: http.StatusNotImplemented,
+		Error: api.APIError{
+			Message: "embeddings are not implemented in the Go port; use chat/completions or a dedicated embedding model server",
+			Type:    "not_implemented",
+		},
+	})
 }
 
 func (a *application) ensureModel(w http.ResponseWriter, model string) bool {

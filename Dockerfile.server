@@ -12,6 +12,7 @@ COPY oxidize-train/Cargo.toml oxidize-train/Cargo.toml
 COPY oxidize-finetuning/Cargo.toml oxidize-finetuning/Cargo.toml
 COPY oxidize-convert/Cargo.toml oxidize-convert/Cargo.toml
 COPY oxidize-ffi/Cargo.toml oxidize-ffi/Cargo.toml
+COPY oxidize-kernels/Cargo.toml oxidize-kernels/Cargo.toml
 COPY oxidize-core/src oxidize-core/src
 COPY oxidize-core/benches oxidize-core/benches
 COPY oxidize-core/kernels oxidize-core/kernels
@@ -23,13 +24,17 @@ COPY oxidize-train/src oxidize-train/src
 COPY oxidize-finetuning/src oxidize-finetuning/src
 COPY oxidize-convert/src oxidize-convert/src
 COPY oxidize-ffi/src oxidize-ffi/src
+COPY oxidize-kernels/src oxidize-kernels/src
+COPY oxidize-kernels/benches oxidize-kernels/benches
 
 RUN cargo build --release --package oxidize-server
 
 FROM debian:bookworm-slim
-RUN useradd --create-home --shell /usr/sbin/nologin oxidize
+RUN useradd --create-home --shell /usr/sbin/nologin oxidize \
+    && mkdir -p /var/lib/oxidize/model-cache \
+    && chown -R oxidize:oxidize /var/lib/oxidize
 WORKDIR /app
 COPY --from=builder /workspace/target/release/oxidize-server /usr/local/bin/oxidize-server
 USER oxidize
-EXPOSE 3000
+EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/oxidize-server"]

@@ -10,6 +10,8 @@ func TestImplementedSuites(t *testing.T) {
 
 func TestRunnerRun(t *testing.T) {
 	r := NewRunner()
+	RegisterProbe(SuiteForward, func() error { return nil })
+	RegisterProbe(SuiteSampling, func() error { return nil })
 	r.Enable(SuiteForward)
 	r.Enable(SuiteSampling)
 	rep := r.Run()

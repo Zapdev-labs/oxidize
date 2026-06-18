@@ -95,7 +95,7 @@ func TestInspectCommand(t *testing.T) {
 }
 
 func TestParseGenFlagsBackendAndTopK(t *testing.T) {
-	_, opts, rest, err := parseGenFlags("run", []string{
+	_, opts, _, rest, err := parseGenFlags("run", []string{
 		"--backend", "cuda",
 		"--top-k", "40",
 		"--ctx-size", "4096",

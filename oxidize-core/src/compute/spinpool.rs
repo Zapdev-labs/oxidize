@@ -20,7 +20,8 @@
 //! Workers spin briefly between regions (covering per-layer glue during
 //! decode) and park on a condvar when idle, so an idle server costs nothing.
 //!
-//! Disable with `OXIDIZE_SPINPOOL=0` (falls back to rayon).
+//! Enabled by default (all decode hot loops dispatch through [`run_chunks`]);
+//! disable with `OXIDIZE_SPINPOOL=0` (falls back to rayon).
 
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex, OnceLock};
@@ -40,6 +41,11 @@ struct Shared {
     n_chunks: AtomicUsize,
     /// One ack slot per worker, cache-line padded: written only by its owner.
     acks: Box<[AckSlot]>,
+    /// Set by any worker whose chunk panicked in the current region. Reset by
+    /// the submitter before each region is published; checked after the
+    /// ack-drain so a swallowed worker panic is propagated to the caller
+    /// instead of silently producing incomplete output.
+    region_failed: AtomicBool,
     busy: AtomicBool,
     shutdown: AtomicBool,
     idle_lock: Mutex<()>,
@@ -57,6 +63,102 @@ pub struct SpinPool {
 /// per-layer glue between decode GEMVs; truly idle workers park.
 const SPIN_BUDGET: u32 = 60_000;
 
+struct Topology {
+    /// All online logical CPUs, core-first: the first `cores` entries are the
+    /// first SMT sibling of each physical core, the rest are the remaining
+    /// siblings. Pinning worker `i` to `order[i]` spreads the first `cores`
+    /// workers across whole cores; an identity map does not (Linux enumerates
+    /// sibling pairs adjacently on AMD, so identity stacks pairs of workers
+    /// onto half the cores).
+    order: Vec<usize>,
+    cores: usize,
+}
+
+#[cfg(target_os = "linux")]
+fn parse_cpu_list(s: &str) -> Vec<usize> {
+    let mut cpus = Vec::new();
+    for part in s.trim().split(',') {
+        if let Some((a, b)) = part.split_once('-') {
+            if let (Ok(a), Ok(b)) = (a.parse::<usize>(), b.parse::<usize>()) {
+                cpus.extend(a..=b);
+            }
+        } else if let Ok(v) = part.parse::<usize>() {
+            cpus.push(v);
+        }
+    }
+    cpus
+}
+
+#[cfg(target_os = "linux")]
+fn read_topology() -> Option<Topology> {
+    let online = std::fs::read_to_string("/sys/devices/system/cpu/online").ok()?;
+    let cpus = parse_cpu_list(&online);
+    let mut order = Vec::with_capacity(cpus.len());
+    let mut rest = Vec::new();
+    for &cpu in &cpus {
+        let path = format!("/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list");
+        let siblings = std::fs::read_to_string(&path).ok()?;
+        let first = parse_cpu_list(&siblings).into_iter().min()?;
+        if first == cpu {
+            order.push(cpu);
+        } else {
+            rest.push(cpu);
+        }
+    }
+    if order.is_empty() {
+        return None;
+    }
+    let cores = order.len();
+    order.extend(rest);
+    Some(Topology { order, cores })
+}
+
+fn topology() -> &'static Topology {
+    static TOPOLOGY: OnceLock<Topology> = OnceLock::new();
+    TOPOLOGY.get_or_init(|| {
+        #[cfg(target_os = "linux")]
+        if let Some(t) = read_topology() {
+            return t;
+        }
+        let n = std::thread::available_parallelism().map_or(1, usize::from);
+        Topology {
+            order: (0..n).collect(),
+            cores: n,
+        }
+    })
+}
+
+/// Number of physical cores (logical CPUs when the SMT topology is
+/// unreadable). Decode GEMV is DRAM-bound and saturates with one worker per
+/// core — SMT siblings only split issue slots — so thread-count defaults use
+/// this rather than `available_parallelism`.
+pub fn physical_core_count() -> usize {
+    topology().cores
+}
+
+/// Pin the calling thread to the `slot`-th CPU in core-first order (one
+/// physical core per slot until cores run out, then the remaining SMT
+/// siblings). Stable placement keeps each worker's weight stream on one
+/// core's prefetcher and, on NUMA hosts, on one node. No-op with
+/// `OXIDIZE_NO_PIN=1` or off Linux.
+#[cfg(target_os = "linux")]
+pub fn pin_to_slot(slot: usize) {
+    if std::env::var_os("OXIDIZE_NO_PIN").is_some() {
+        return;
+    }
+    let order = &topology().order;
+    let cpu = order[slot % order.len()];
+    unsafe {
+        let mut set: libc::cpu_set_t = std::mem::zeroed();
+        libc::CPU_ZERO(&mut set);
+        libc::CPU_SET(cpu, &mut set);
+        libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set);
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn pin_to_slot(_slot: usize) {}
+
 impl SpinPool {
     fn new(workers: usize) -> Self {
         let acks: Box<[AckSlot]> = (0..workers)
@@ -70,6 +172,7 @@ impl SpinPool {
             task_vtable: AtomicU64::new(0),
             n_chunks: AtomicUsize::new(0),
             acks,
+            region_failed: AtomicBool::new(false),
             busy: AtomicBool::new(false),
             shutdown: AtomicBool::new(false),
             idle_lock: Mutex::new(()),
@@ -97,6 +200,19 @@ impl SpinPool {
         if n_chunks == 0 {
             return;
         }
+        // Pin the submitting thread to slot 0 (workers own slots 1..P). An
+        // unpinned submitter floats onto cores where workers are spinning and
+        // timeshares against them — all the serial glue between regions (and
+        // the submitter's own chunk range) then runs at half speed.
+        thread_local! {
+            static PINNED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        }
+        PINNED.with(|pinned| {
+            if !pinned.get() {
+                pin_to_slot(0);
+                pinned.set(true);
+            }
+        });
         let s = self.shared;
         if n_chunks == 1
             || s.busy
@@ -112,6 +228,9 @@ impl SpinPool {
         // Publish payload, then the new serial (release): workers read the
         // payload only after observing the bumped serial.
         let fat: [u64; 2] = unsafe { std::mem::transmute(f) };
+        // Clear the previous region's failure flag before workers can observe
+        // the new serial.
+        s.region_failed.store(false, Ordering::Relaxed);
         s.task_data.store(fat[0], Ordering::Relaxed);
         s.task_vtable.store(fat[1], Ordering::Relaxed);
         s.n_chunks.store(n_chunks, Ordering::Relaxed);
@@ -126,37 +245,49 @@ impl SpinPool {
         // ranges so each worker streams sequential weight rows (strided
         // ownership defeats the hardware prefetcher).
         let participants = self.participants;
-        for i in 0..n_chunks / participants {
-            f(i);
-        }
+        // Run the submitter's own contiguous chunk range. If `f` panics here we
+        // must NOT unwind out of `run` before every worker has acked: workers
+        // still hold a fat pointer to `f` (borrowed from the caller's stack) and
+        // may call it until they ack, so an early return would invalidate that
+        // borrow => use-after-free. Catch the panic, drain the acks below, then
+        // resume the unwind so the caller still observes it.
+        let submitter_panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            for i in 0..n_chunks / participants {
+                f(i);
+            }
+        }))
+        .err();
         // Tail chunks (n % P) belong to the last participants by the block
         // formula; participant 0's range is exactly [0, n/P).
 
         // Wait until every worker acks this serial; the payload and `f`'s
-        // borrow must outlive any straggler still reading them.
+        // borrow must outlive any straggler still reading them. Workers always
+        // ack (even on a panicking chunk), so this cannot deadlock.
         for slot in s.acks.iter() {
             while slot.done_serial.load(Ordering::Acquire) != serial {
                 std::hint::spin_loop();
             }
         }
         s.busy.store(false, Ordering::Release);
+
+        // Propagate failures only after every worker has acked (and thus
+        // dropped its borrow of `f`). The submitter's own panic takes priority;
+        // otherwise surface a worker-chunk panic so `run` never reports success
+        // with partially computed output.
+        if let Some(payload) = submitter_panic {
+            std::panic::resume_unwind(payload);
+        }
+        if s.region_failed.load(Ordering::Acquire) {
+            panic!("[spinpool] a worker chunk panicked; region output is incomplete");
+        }
     }
 }
 
 fn worker_loop(s: &'static Shared, worker_idx: usize, participants: usize) {
-    // Pin like the rayon workers (identity map, submitter-adjacent CPUs).
-    // The spin workers are never active at the same time as a rayon GEMV
-    // region, so sharing cores is fine; OXIDIZE_NO_PIN=1 disables.
-    #[cfg(target_os = "linux")]
-    unsafe {
-        let ncpu = libc::sysconf(libc::_SC_NPROCESSORS_ONLN);
-        if ncpu > 0 && std::env::var_os("OXIDIZE_NO_PIN").is_none() {
-            let mut set: libc::cpu_set_t = std::mem::zeroed();
-            libc::CPU_ZERO(&mut set);
-            libc::CPU_SET((worker_idx + 1) % ncpu as usize, &mut set);
-            libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set);
-        }
-    }
+    // Pin like the rayon workers (core-first order, submitter-adjacent
+    // slots). The spin workers are never active at the same time as a rayon
+    // GEMV region, so sharing cores is fine; OXIDIZE_NO_PIN=1 disables.
+    pin_to_slot(worker_idx + 1);
 
     let my_participant = worker_idx + 1;
     let mut last_serial: u64 = 0;
@@ -183,10 +314,18 @@ fn worker_loop(s: &'static Shared, worker_idx: usize, participants: usize) {
                 // before taking this lock to notify, so we cannot sleep
                 // through a publish.
                 if s.serial.load(Ordering::Acquire) == last_serial {
-                    let _guard = s
+                    let (_guard, timeout) = s
                         .idle_cv
                         .wait_timeout(guard, std::time::Duration::from_millis(50))
                         .unwrap();
+                    // Only a notify means a region is imminent; a timeout on
+                    // an idle pool must NOT re-enter the spin phase, or every
+                    // idle worker burns a few ms of CPU per 50ms — poisonous
+                    // when other processes share these cores.
+                    if timeout.timed_out() {
+                        spins = SPIN_BUDGET;
+                        continue;
+                    }
                 }
                 spins = 0;
             }
@@ -202,12 +341,27 @@ fn worker_loop(s: &'static Shared, worker_idx: usize, participants: usize) {
         let n = s.n_chunks.load(Ordering::Relaxed);
         let start = (my_participant * n) / participants;
         let end = ((my_participant + 1) * n) / participants;
-        for i in start..end {
-            f(i);
+        // Catch a panicking chunk so we still ack below: the submitter spins on
+        // this worker's ack and would deadlock the whole pool (and every future
+        // region) if a panic skipped it. The worker stays alive to serve the
+        // next region; the partial region's output is simply incomplete.
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            for i in start..end {
+                f(i);
+            }
+        }))
+        .is_err();
+        // Record the failure before acking so the submitter, which only reads
+        // `region_failed` after observing this ack, is guaranteed to see it.
+        if panicked {
+            s.region_failed.store(true, Ordering::Release);
         }
         s.acks[worker_idx]
             .done_serial
             .store(serial, Ordering::Release);
+        if panicked {
+            eprintln!("[spinpool] worker {worker_idx} chunk panicked; region output is incomplete");
+        }
     }
 }
 
@@ -215,6 +369,12 @@ static POOL: OnceLock<Option<SpinPool>> = OnceLock::new();
 
 fn pool() -> Option<&'static SpinPool> {
     POOL.get_or_init(|| {
+        // Default on: with every decode hot loop dispatched through
+        // run_chunks (GEMV fused regions + attention heads), the resident
+        // workers beat rayon's sleep/wake handoff on single-socket parts too
+        // (11.8 vs 10.9 tok/s, Ryzen 6850H) — but only with the submitter
+        // pinned to slot 0 and no nested/concurrent regions, which would run
+        // inline-serial. OXIDIZE_SPINPOOL=0 falls back to rayon.
         if std::env::var("OXIDIZE_SPINPOOL").is_ok_and(|v| v == "0") {
             return None;
         }
@@ -234,7 +394,27 @@ pub fn run_chunks(n_chunks: usize, f: impl Fn(usize) + Sync + Send) {
         Some(p) => p.run(n_chunks, &f),
         None => {
             use rayon::prelude::*;
-            (0..n_chunks).into_par_iter().for_each(f);
+            // Static block partitioning, like the spin pool: one contiguous
+            // chunk range per worker. Decode GEMV chunks are ~1-10us each;
+            // letting rayon schedule hundreds of them individually buries
+            // the kernels in steal/join overhead (a 9728x2560 Q4_K GEMV
+            // measured 21 GB/s with per-chunk tasks vs ~36 GB/s for shapes
+            // with coarser chunks). Chunks are uniform, so blocks balance
+            // within one chunk of ideal.
+            let tasks = rayon::current_num_threads().min(n_chunks);
+            if tasks <= 1 {
+                for i in 0..n_chunks {
+                    f(i);
+                }
+                return;
+            }
+            (0..tasks).into_par_iter().for_each(|t| {
+                let start = t * n_chunks / tasks;
+                let end = (t + 1) * n_chunks / tasks;
+                for i in start..end {
+                    f(i);
+                }
+            });
         }
     }
 }
@@ -304,5 +484,18 @@ mod tests {
                 assert_eq!(parallel[ci * chunk + j], (ci * 31 + j * 7) as f32 * 0.5);
             }
         }
+    }
+
+    #[test]
+    fn topology_pin_order_covers_each_cpu_once() {
+        let t = topology();
+        assert!(t.cores >= 1);
+        assert!(t.cores <= t.order.len());
+        let mut seen = t.order.clone();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), t.order.len(), "pin order must not repeat CPUs");
+        let logical = std::thread::available_parallelism().map_or(1, usize::from);
+        assert_eq!(t.order.len(), logical);
     }
 }

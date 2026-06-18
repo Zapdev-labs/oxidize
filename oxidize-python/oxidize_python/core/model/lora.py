@@ -16,6 +16,38 @@ class LoraLayer:
     base_shape: list[int]
     up_loaded: bool = False
     down_loaded: bool = False
+    up: list[float] = field(default_factory=list)
+    down: list[float] = field(default_factory=list)
+    in_dim: int = 0
+    out_dim: int = 0
+
+    def set_low_rank_weights(
+        self, up: list[float], down: list[float], in_dim: int, out_dim: int
+    ) -> None:
+        self.up = up
+        self.down = down
+        self.in_dim = in_dim
+        self.out_dim = out_dim
+        self.up_loaded = len(up) > 0
+        self.down_loaded = len(down) > 0
+
+    def apply_low_rank_delta(self, x: list[float], out: list[float]) -> None:
+        if not self.up_loaded or not self.down_loaded or self.rank <= 0:
+            return
+        if self.in_dim <= 0 or self.out_dim <= 0:
+            return
+        if len(x) < self.in_dim or len(out) < self.out_dim:
+            return
+        hidden = [0.0] * self.rank
+        for r in range(self.rank):
+            base = r * self.in_dim
+            hidden[r] = sum(self.up[base + i] * x[i] for i in range(self.in_dim))
+        scale = self.scale
+        if scale == 0 and self.alpha > 0 and self.rank > 0:
+            scale = self.alpha / self.rank
+        for o in range(self.out_dim):
+            delta = sum(self.down[o * self.rank + r] * hidden[r] for r in range(self.rank))
+            out[o] += scale * delta
 
 
 def new_lora_layer(name: str, rank: int, alpha: float, base_shape: list[int]) -> LoraLayer:

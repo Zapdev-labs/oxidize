@@ -7,7 +7,7 @@ import (
 
 type runOptions = genOptions
 
-func parseRunFlags(name string, args []string) (*flag.FlagSet, runOptions, []string, error) {
+func parseRunFlags(name string, args []string) (*flag.FlagSet, runOptions, flagVisits, []string, error) {
 	return parseGenFlags(name, args)
 }
 

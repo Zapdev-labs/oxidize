@@ -40,7 +40,7 @@ Options:
 	iterations := fs.Int("iterations", 3, "benchmark rounds")
 	maxTokens := fs.Int("max-tokens", 32, "tokens per round")
 	prompt := fs.String("prompt", "benchmark", "prompt seed")
-	_, genOpts, flagRest, err := parseGenFlags("bench", rest)
+	_, genOpts, _, flagRest, err := parseGenFlags("bench", rest)
 	if err != nil {
 		return err
 	}
@@ -144,7 +144,7 @@ Options:
 	var draftModel model.Model
 	if engine == "dflash" {
 		if genOpts.DraftModel != "" {
-			draftModel, err = generate.LoadDraftFromPath(genOpts.DraftModel, loader)
+			draftModel, err = generate.LoadDraftFromPath(genOpts.DraftModel, loader, inference.Config.HiddenSize)
 			if err != nil {
 				return fmt.Errorf("bench: draft: %w", err)
 			}

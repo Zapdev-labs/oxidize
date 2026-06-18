@@ -30,6 +30,7 @@ type genOptions struct {
 	DFlashFusion   bool
 	Mesh           bool
 	MeshPort       int
+	MeshPeers      string
 	PipeHead       bool
 	PipeTail       bool
 	PipePeer       string
@@ -37,6 +38,12 @@ type genOptions struct {
 	Profile        bool
 	Vision         bool
 	ImagePath      string
+	Auto           bool
+	NoAuto         bool
+	PrintPlan      string
+	LayerWise      bool
+	LayerCache     int
+	RAMOffload     bool
 }
 
 func registerGenFlags(fs *flag.FlagSet, opts *genOptions) {
@@ -59,6 +66,7 @@ func registerGenFlags(fs *flag.FlagSet, opts *genOptions) {
 	fs.BoolVar(&opts.DFlashFusion, "dflash-fusion", false, "use SpeculativeDecoder fusion (heuristic or --draft-model)")
 	fs.BoolVar(&opts.Mesh, "mesh", false, "start mesh node (chat REPL broadcasts prompts)")
 	fs.IntVar(&opts.MeshPort, "mesh-port", 0, "mesh listen port (0 = ephemeral)")
+	fs.StringVar(&opts.MeshPeers, "mesh-peers", "", "comma-separated mesh peer addresses")
 	fs.BoolVar(&opts.PipeHead, "pipe-head", false, "pipeline head stage")
 	fs.BoolVar(&opts.PipeTail, "pipe-tail", false, "pipeline tail stage")
 	fs.StringVar(&opts.PipePeer, "pipe-peer", "", "pipeline next stage address")
@@ -66,22 +74,30 @@ func registerGenFlags(fs *flag.FlagSet, opts *genOptions) {
 	fs.BoolVar(&opts.Profile, "profile", false, "print generation profile stats after run")
 	fs.BoolVar(&opts.Vision, "vision", false, "enable vision/multimodal path")
 	fs.StringVar(&opts.ImagePath, "image", "", "image file for vision mode")
+	fs.BoolVar(&opts.Auto, "auto", true, "enable hardware auto-tuning (default on)")
+	fs.BoolVar(&opts.NoAuto, "no-auto", false, "disable auto-tuning")
+	fs.StringVar(&opts.PrintPlan, "print-plan", "auto", "print autotune plan: auto, json, yes, no")
+	fs.BoolVar(&opts.LayerWise, "layer-wise", false, "stream layers with LRU cache (RAM offload)")
+	fs.IntVar(&opts.LayerCache, "layer-cache", 1, "number of transformer layers to keep resident")
+	fs.BoolVar(&opts.RAMOffload, "ram-offload", false, "enable RAM offload / streaming weights")
 }
 
-func parseGenFlags(name string, args []string) (*flag.FlagSet, genOptions, []string, error) {
+func parseGenFlags(name string, args []string) (*flag.FlagSet, genOptions, flagVisits, []string, error) {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	var opts genOptions
 	registerGenFlags(fs, &opts)
 	if err := fs.Parse(args); err != nil {
-		return nil, genOptions{}, nil, err
+		return nil, genOptions{}, nil, nil, err
 	}
+	visits := flagVisits{}
+	fs.Visit(func(f *flag.Flag) { visits.set(f.Name) })
 	rest := fs.Args()
 	if strings.TrimSpace(opts.Prompt) == "" && len(rest) > 1 && !strings.HasPrefix(rest[1], "-") {
 		opts.Prompt = strings.Join(rest[1:], " ")
 		rest = rest[:1]
 	}
-	return fs, opts, rest, nil
+	return fs, opts, visits, rest, nil
 }
 
 func (o genOptions) runConfig(modelPath string) generate.RunConfig {
@@ -108,6 +124,9 @@ func (o genOptions) runConfig(modelPath string) generate.RunConfig {
 	cfg.UseDFlashFusion = o.DFlashFusion
 	cfg.Vision = o.Vision
 	cfg.ImagePath = strings.TrimSpace(o.ImagePath)
+	cfg.LayerWise = o.LayerWise
+	cfg.LayerCache = o.LayerCache
+	cfg.RAMOffload = o.RAMOffload
 	return cfg
 }
 

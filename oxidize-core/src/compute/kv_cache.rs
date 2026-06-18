@@ -13,8 +13,8 @@ use std::path::Path;
 /// scale, at the cost of `blocks_per_token` extra f32 scales per token.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum KvQuantization {
-    #[default]
     Asymmetric,
+    #[default]
     TurboQuant,
 }
 
@@ -441,6 +441,26 @@ impl KvCache {
         self.f32_layer_prefix(&self.value, layer, seq_len)
     }
 
+    /// Borrow all F16 keys (raw half bits) for positions [0, seq_len) in a
+    /// layer when they are already contiguous in the cache storage. Same
+    /// validity rules as [`Self::f32_layer_key_prefix`], for `DType::F16`.
+    pub fn f16_layer_key_prefix(
+        &self,
+        layer: usize,
+        seq_len: usize,
+    ) -> Result<Option<&[u16]>, KvCacheError> {
+        self.f16_layer_prefix(&self.key, layer, seq_len)
+    }
+
+    /// See [`Self::f16_layer_key_prefix`].
+    pub fn f16_layer_value_prefix(
+        &self,
+        layer: usize,
+        seq_len: usize,
+    ) -> Result<Option<&[u16]>, KvCacheError> {
+        self.f16_layer_prefix(&self.value, layer, seq_len)
+    }
+
     pub fn bytes_per_tensor(&self) -> usize {
         match &self.key {
             KvStorage::F32(data) => data.len() * std::mem::size_of::<f32>(),
@@ -666,6 +686,32 @@ impl KvCache {
         }
 
         let KvStorage::F32(data) = storage else {
+            return Ok(None);
+        };
+        let token_size = self.config.token_size();
+        let start = token_range(&self.config, layer, 0).start;
+        let end = start + seq_len.saturating_mul(token_size);
+        Ok(data.get(start..end))
+    }
+
+    fn f16_layer_prefix<'a>(
+        &self,
+        storage: &'a KvStorage,
+        layer: usize,
+        seq_len: usize,
+    ) -> Result<Option<&'a [u16]>, KvCacheError> {
+        self.validate_layer(layer)?;
+        if seq_len == 0 {
+            return match storage {
+                KvStorage::F16(data) => Ok(Some(&data[0..0])),
+                _ => Ok(None),
+            };
+        }
+        if self.config.dtype != DType::F16 || !self.prefix_is_contiguous_and_available(seq_len) {
+            return Ok(None);
+        }
+
+        let KvStorage::F16(data) = storage else {
             return Ok(None);
         };
         let token_size = self.config.token_size();
@@ -1291,7 +1337,7 @@ fn f16_bits_to_f32(bits: u16) -> f32 {
     f32::from_bits(f32_bits)
 }
 
-fn f32_to_f16_bits(value: f32) -> u16 {
+pub(crate) fn f32_to_f16_bits(value: f32) -> u16 {
     let x = value.to_bits();
     let sign = ((x >> 16) & 0x8000) as u16;
     let exp = ((x >> 23) & 0xFF) as i32;
@@ -2438,7 +2484,7 @@ mod tests {
     }
 
     #[test]
-    fn turboquant_default_is_asymmetric() {
+    fn turboquant_is_default_kv_quantization() {
         let cfg = KvCacheConfig {
             layer_count: 1,
             context_size: 1,
@@ -2447,6 +2493,6 @@ mod tests {
             dtype: DType::I8,
             quantization: Default::default(),
         };
-        assert_eq!(cfg.quantization, KvQuantization::Asymmetric);
+        assert_eq!(cfg.quantization, KvQuantization::TurboQuant);
     }
 }

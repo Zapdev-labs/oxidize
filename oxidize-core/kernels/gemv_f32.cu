@@ -57,19 +57,30 @@ extern "C" __global__ void gemv_f32_kernel(
 }
 
 // f16-weight variant: `matrix` holds half-precision weights as raw u16 bits.
+// Processes two half weights per iteration with half2 + float2 loads.
 extern "C" __global__ void gemv_f16_kernel(
     const unsigned short* matrix, const float* vector, float* output,
     unsigned int rows, unsigned int cols)
 {
     unsigned int global_thread = blockIdx.x * blockDim.x + threadIdx.x;
-    unsigned int row = global_thread >> 5;     // one warp per row
+    unsigned int row = global_thread >> 5;
     unsigned int lane = threadIdx.x & 31u;
     if (row >= rows) return;
 
     const __half* w = reinterpret_cast<const __half*>(matrix) + (size_t)row * cols;
+    const float* v = vector;
     float sum = 0.0f;
-    for (unsigned int c = lane; c < cols; c += 32u)
-        sum += __half2float(w[c]) * vector[c];
+
+    unsigned int c = lane * 2u;
+    for (; c + 1u < cols; c += 64u) {
+        __half2 wh = *reinterpret_cast<const __half2*>(w + c);
+        float2 vf = *reinterpret_cast<const float2*>(v + c);
+        float2 wf = __half22float2(wh);
+        sum = fmaf(wf.x, vf.x, sum);
+        sum = fmaf(wf.y, vf.y, sum);
+    }
+    if ((cols & 1u) != 0u && c < cols)
+        sum = fmaf(__half2float(w[c]), v[c], sum);
 
     sum = warp_reduce_sum(sum);
     if (lane == 0u) output[row] = sum;
@@ -238,6 +249,282 @@ extern "C" __global__ void gemv_q4_0_kernel(
         }
     }
 
+    sum = warp_reduce_sum(sum);
+    if (lane == 0u) output[row] = sum;
+}
+
+// --------------------------------------------------------------------------
+// Q4_K × Q8_K direct GEMV (OXK GPU path)
+//
+// Mirrors the CPU OXK kernels: quantize the activation vector to Q8_K once,
+// then stream compressed Q4_K weights without expanding to f16 in VRAM.
+// One warp per output row; lanes stripe across super-blocks.
+// --------------------------------------------------------------------------
+
+__device__ __forceinline__ int q8k_bsum_i16(const unsigned char* bsums, int index) {
+    const unsigned char* p = bsums + (size_t)index * 2u;
+    return (int)(short)((unsigned int)p[0] | ((unsigned int)p[1] << 8));
+}
+
+__device__ float q4k_q8k_block_dot(const unsigned char* w_blk, const unsigned char* q8_blk) {
+    float d_w = __half2float(*reinterpret_cast<const __half*>(w_blk));
+    float dmin_w = __half2float(*reinterpret_cast<const __half*>(w_blk + 2));
+    float d_q8 = *reinterpret_cast<const float*>(q8_blk);
+    const unsigned char* scales = w_blk + 4;
+    const unsigned char* qs = w_blk + 16;
+    const signed char* q8 = reinterpret_cast<const signed char*>(q8_blk + 4);
+    const unsigned char* bsums = q8_blk + 4 + 256;
+
+    int pos = 0;
+    int min_acc = 0;
+    for (int gp = 0; gp < 4; gp++) {
+        int g1 = gp * 2;
+        int g2 = g1 + 1;
+        unsigned char sc1, mn1, sc2, mn2;
+        q4k_scale_min(g1, scales, &sc1, &mn1);
+        q4k_scale_min(g2, scales, &sc2, &mn2);
+        int sum1 = 0;
+        int sum2 = 0;
+#pragma unroll
+        for (int i = 0; i < 32; i++) {
+            unsigned char byte = qs[gp * 32 + i];
+            sum1 += (int)(byte & 0xF) * (int)q8[g1 * 32 + i];
+            sum2 += (int)(byte >> 4) * (int)q8[g2 * 32 + i];
+        }
+        pos += (int)sc1 * sum1 + (int)sc2 * sum2;
+        int bs1 = q8k_bsum_i16(bsums, g1 * 2) + q8k_bsum_i16(bsums, g1 * 2 + 1);
+        int bs2 = q8k_bsum_i16(bsums, g2 * 2) + q8k_bsum_i16(bsums, g2 * 2 + 1);
+        min_acc += (int)mn1 * bs1 + (int)mn2 * bs2;
+    }
+    return d_w * d_q8 * (float)pos - dmin_w * d_q8 * (float)min_acc;
+}
+
+// Q4_K GEMV: matrix rows are `blocks_per_row` × 144-byte blocks; q8k holds
+// one Q8_K block (292 bytes) per super-block along the shared dimension.
+extern "C" __global__ void gemv_q4_k_kernel(
+    const unsigned char* matrix, const unsigned char* q8k, float* output,
+    unsigned int rows, unsigned int blocks_per_row)
+{
+    unsigned int global_thread = blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned int row = global_thread >> 5;
+    unsigned int lane = threadIdx.x & 31u;
+    if (row >= rows) return;
+
+    const unsigned char* row_blocks = matrix + (size_t)row * blocks_per_row * 144u;
+    float sum = 0.0f;
+    for (unsigned int b = lane; b < blocks_per_row; b += 32u) {
+        const unsigned char* w_blk = row_blocks + (size_t)b * 144u;
+        const unsigned char* q8_blk = q8k + (size_t)b * 292u;
+        sum += q4k_q8k_block_dot(w_blk, q8_blk);
+    }
+
+    sum = warp_reduce_sum(sum);
+    if (lane == 0u) output[row] = sum;
+}
+
+// --------------------------------------------------------------------------
+// IQ1_S / IQ1_M (TQ1 family) — on-the-fly ternary GEMV for ultra-low-bit GGUFs
+// (e.g. freakyskittle/GLM-5.2-GGUF, Kimi-K2.7 on HF). Mirrors CPU reference.
+// --------------------------------------------------------------------------
+
+__device__ __forceinline__ void iq1s_grid_decode(unsigned short index, signed char* out8) {
+    unsigned short idx = index;
+    for (int i = 0; i < 8; i++) {
+        unsigned int bits = idx & 3u;
+        out8[i] = (bits == 0u) ? (signed char)-1 : ((bits == 1u) ? (signed char)0 : (signed char)1);
+        idx >>= 2;
+        if (i == 3) idx = index >> 8;
+    }
+}
+
+__device__ __forceinline__ float iq1s_block_dot(const unsigned char* blk, const float* vector) {
+    const float IQ1S_DELTA = 0.125f;
+    float d = __half2float(*reinterpret_cast<const __half*>(blk));
+    const unsigned char* qs = blk + 2;
+    const unsigned short* qh = reinterpret_cast<const unsigned short*>(blk + 34);
+    float sum = 0.0f;
+    signed char grid_vals[8];
+    unsigned int out_ptr = 0;
+    for (int ib = 0; ib < 8; ib++) {
+        float dl = d * (2.0f * (float)((qh[ib] >> 12) & 7u) + 1.0f);
+        float delta = (qh[ib] & 0x8000u) ? -IQ1S_DELTA : IQ1S_DELTA;
+        for (int l = 0; l < 4; l++) {
+            unsigned short grid_idx = (unsigned short)qs[l + ib * 4]
+                | (unsigned short)(((qh[ib] >> (3 * l)) & 7u) << 8);
+            iq1s_grid_decode(grid_idx, grid_vals);
+            for (int j = 0; j < 8; j++) {
+                sum += dl * ((float)grid_vals[j] + delta) * vector[out_ptr + j];
+            }
+            out_ptr += 8;
+        }
+    }
+    return sum;
+}
+
+extern "C" __global__ void gemv_iq1_s_kernel(
+    const unsigned char* matrix, const float* vector, float* output,
+    unsigned int rows, unsigned int blocks_per_row)
+{
+    unsigned int global_thread = blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned int row = global_thread >> 5;
+    unsigned int lane = threadIdx.x & 31u;
+    if (row >= rows) return;
+
+    const unsigned char* row_blocks = matrix + (size_t)row * blocks_per_row * 50u;
+    float sum = 0.0f;
+    for (unsigned int b = lane; b < blocks_per_row; b += 32u) {
+        sum += iq1s_block_dot(row_blocks + (size_t)b * 50u, vector + (size_t)b * 256u);
+    }
+    sum = warp_reduce_sum(sum);
+    if (lane == 0u) output[row] = sum;
+}
+
+__device__ __forceinline__ float iq1m_block_dot(const unsigned char* blk, const float* vector) {
+    const float IQ1S_DELTA = 0.125f;
+    const unsigned char* qs = blk;
+    const unsigned char* qh = blk + 32;
+    const unsigned char* scales = blk + 48;
+    float sum = 0.0f;
+    signed char grid_vals[8];
+    unsigned int out_ptr = 0;
+    for (int ib = 0; ib < 8; ib++) {
+        unsigned short sc = (unsigned short)scales[ib * 2]
+            | ((unsigned short)scales[ib * 2 + 1] << 8);
+        float dl = __half2float(*reinterpret_cast<const __half*>(&sc));
+        for (int l = 0; l < 4; l++) {
+            unsigned short idxs[4] = {
+                (unsigned short)qs[l + ib * 4] | (unsigned short)(((qh[l + ib * 4] >> 0) & 7u) << 8),
+                (unsigned short)qs[l + ib * 4] | (unsigned short)(((qh[l + ib * 4] >> 3) & 7u) << 8),
+                (unsigned short)qs[l + ib * 4] | (unsigned short)(((qh[l + ib * 4] >> 6) & 7u) << 8),
+                (unsigned short)qs[l + ib * 4 + 32] | (unsigned short)(((qh[l + ib * 4] >> 1) & 7u) << 8),
+            };
+            float deltas[4] = {
+                (qh[l + ib * 4] & 1u) ? -IQ1S_DELTA : IQ1S_DELTA,
+                (qh[l + ib * 4] & 2u) ? -IQ1S_DELTA : IQ1S_DELTA,
+                (qh[l + ib * 4] & 4u) ? -IQ1S_DELTA : IQ1S_DELTA,
+                (qh[l + ib * 4 + 32] & 1u) ? -IQ1S_DELTA : IQ1S_DELTA,
+            };
+            for (int g = 0; g < 4; g++) {
+                iq1s_grid_decode(idxs[g], grid_vals);
+                for (int j = 0; j < 8; j++) {
+                    sum += dl * ((float)grid_vals[j] + deltas[g]) * vector[out_ptr + j];
+                }
+                out_ptr += 8;
+            }
+        }
+    }
+    return sum;
+}
+
+extern "C" __global__ void gemv_iq1_m_kernel(
+    const unsigned char* matrix, const float* vector, float* output,
+    unsigned int rows, unsigned int blocks_per_row)
+{
+    unsigned int global_thread = blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned int row = global_thread >> 5;
+    unsigned int lane = threadIdx.x & 31u;
+    if (row >= rows) return;
+
+    const unsigned char* row_blocks = matrix + (size_t)row * blocks_per_row * 56u;
+    float sum = 0.0f;
+    for (unsigned int b = lane; b < blocks_per_row; b += 32u) {
+        sum += iq1m_block_dot(row_blocks + (size_t)b * 56u, vector + (size_t)b * 256u);
+    }
+    sum = warp_reduce_sum(sum);
+    if (lane == 0u) output[row] = sum;
+}
+
+extern "C" __global__ void dequant_q2_k_kernel(
+    const unsigned char* in, unsigned short* out, unsigned int nblocks)
+{
+    unsigned int b = blockIdx.x * blockDim.x + threadIdx.x;
+    if (b >= nblocks) return;
+    const unsigned char* blk = in + (size_t)b * 84u;
+    float d = __half2float(*reinterpret_cast<const __half*>(blk + 80));
+    float mn = __half2float(*reinterpret_cast<const __half*>(blk + 82));
+    const unsigned char* scales = blk;
+    const unsigned char* qs = blk + 16;
+    __half* o = reinterpret_cast<__half*>(out) + (size_t)b * 256u;
+    unsigned int q_ptr = 0;
+    int is = 0;
+    for (int outer = 0; outer < 2; outer++) {
+        unsigned int qs_base = outer * 32u;
+        for (int inner = 0; inner < 4; inner++) {
+            unsigned char sc1 = scales[is++];
+            float dl1 = d * (float)(sc1 & 0xF);
+            float ml1 = mn * (float)(sc1 >> 4);
+            unsigned char sc2 = scales[is++];
+            float dl2 = d * (float)(sc2 & 0xF);
+            float ml2 = mn * (float)(sc2 >> 4);
+            for (int l = 0; l < 32; l++) {
+                unsigned char qbyte = qs[qs_base + l];
+                o[q_ptr + l] = __float2half(dl1 * (float)(qbyte & 3) - ml1);
+                o[q_ptr + 32 + l] = __float2half(dl2 * (float)((qbyte >> 2) & 3) - ml2);
+            }
+            q_ptr += 64;
+        }
+    }
+}
+
+__device__ __constant__ float E2M1_DOUBLED[16] = {
+    0.0f, 1.0f, 2.0f, 3.0f, 4.0f, 6.0f, 8.0f, 12.0f,
+    0.0f, -1.0f, -2.0f, -3.0f, -4.0f, -6.0f, -8.0f, -12.0f
+};
+
+__device__ __forceinline__ float ue4m3_to_f32(unsigned char b) {
+    unsigned int sign = (b >> 7) & 1u;
+    unsigned int exp = (b >> 3) & 0xFu;
+    unsigned int mant = b & 7u;
+    float v = (exp == 0u)
+        ? (float)mant * exp2f(-9.0f)
+        : (1.0f + (float)mant / 8.0f) * exp2f((float)exp - 7.0f);
+    return sign != 0u ? -v : v;
+}
+
+extern "C" __global__ void dequant_nvfp4_kernel(
+    const unsigned char* in, unsigned short* out, unsigned int nblocks)
+{
+    unsigned int b = blockIdx.x * blockDim.x + threadIdx.x;
+    if (b >= nblocks) return;
+    const unsigned char* blk = in + (size_t)b * 36u;
+    __half* o = reinterpret_cast<__half*>(out) + (size_t)b * 64u;
+    for (int sub = 0; sub < 4; sub++) {
+        float scale = ue4m3_to_f32(blk[sub]);
+        unsigned int q_base = 4u + (unsigned int)sub * 8u;
+        unsigned int out_base = (unsigned int)sub * 16u;
+        for (int j = 0; j < 8; j++) {
+            unsigned char packed = blk[q_base + j];
+            o[out_base + j] = __float2half(scale * E2M1_DOUBLED[packed & 0xF]);
+            o[out_base + j + 8] = __float2half(scale * E2M1_DOUBLED[packed >> 4]);
+        }
+    }
+}
+
+extern "C" __global__ void gemv_nvfp4_kernel(
+    const unsigned char* matrix, const float* vector, float* output,
+    unsigned int rows, unsigned int blocks_per_row)
+{
+    unsigned int global_thread = blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned int row = global_thread >> 5;
+    unsigned int lane = threadIdx.x & 31u;
+    if (row >= rows) return;
+
+    const unsigned char* row_blocks = matrix + (size_t)row * blocks_per_row * 36u;
+    float sum = 0.0f;
+    for (unsigned int b = lane; b < blocks_per_row; b += 32u) {
+        const unsigned char* blk = row_blocks + (size_t)b * 36u;
+        const float* v = vector + (size_t)b * 64u;
+        for (int sub = 0; sub < 4; sub++) {
+            float scale = ue4m3_to_f32(blk[sub]);
+            unsigned int q_base = 4u + (unsigned int)sub * 8u;
+            unsigned int v_base = (unsigned int)sub * 16u;
+            for (int j = 0; j < 8; j++) {
+                unsigned char packed = blk[q_base + j];
+                sum += scale * E2M1_DOUBLED[packed & 0xF] * v[v_base + j];
+                sum += scale * E2M1_DOUBLED[packed >> 4] * v[v_base + j + 8];
+            }
+        }
+    }
     sum = warp_reduce_sum(sum);
     if (lane == 0u) output[row] = sum;
 }

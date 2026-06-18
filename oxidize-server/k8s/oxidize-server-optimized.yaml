@@ -1,0 +1,223 @@
+# Optimized oxidize-server deployment for the k3s cluster (ai / ai-2).
+#
+# Assumptions:
+#   - Both worker nodes have /opt/oxidize/models symlinked to the local GGUF
+#     directory (e.g. /home/ai/models on ai and /home/ai-2/models on ai-2).
+#   - The image is built from Dockerfile.server after the readiness check
+#     change in oxidize-server/src/routes/health.rs.
+#   - Cluster is CPU-only; each node exposes ~32 logical CPUs.
+#
+# Highlights:
+#   - Readiness probe reports 503 until the model is fully loaded.
+#   - Startup probe gives the model load up to 10 minutes before the
+#     kubelet begins liveness/readiness checks.
+#   - Pods are spread one-per-node with required anti-affinity.
+#   - Resource requests/limits are sized for CPU inference of a ~4B Q4 GGUF.
+#   - KV cache is quantized to Q8 to reduce memory and increase batch size.
+#   - Paged batching is enabled, prefill batch size raised to 256.
+#   - Prometheus scraping annotations are kept.
+#   - A PodDisruptionBudget keeps at least one replica available.
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: oxidize-server
+  namespace: oxidize
+  labels:
+    app.kubernetes.io/name: oxidize-server
+data:
+  OXIDIZE_CLUSTER_UID: "oxidize-k3s-local"
+  OXIDIZE_MESH_NAMESPACE: "oxidize-mesh-cluster"
+  OXIDIZE_MODEL_CACHE_DIR: "/var/lib/oxidize/model-cache"
+  OXIDIZE_MODEL_ID: "qwen3-4b"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: oxidize-server
+  namespace: oxidize
+  labels:
+    app.kubernetes.io/name: oxidize-server
+spec:
+  type: LoadBalancer
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: oxidize-server
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: oxidize-server-headless
+  namespace: oxidize
+  labels:
+    app.kubernetes.io/name: oxidize-server
+spec:
+  clusterIP: None
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: oxidize-server
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: oxidize-server
+  namespace: oxidize
+  labels:
+    app.kubernetes.io/name: oxidize-server
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: oxidize-server
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oxidize-server
+  namespace: oxidize
+  labels:
+    app.kubernetes.io/name: oxidize-server
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      # With required one-per-node anti-affinity and only two nodes,
+      # maxUnavailable must be >=1 so the rollout can terminate an old pod
+      # before its replacement has landed.
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: oxidize-server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: oxidize-server
+        oxidize.io/component: server
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: "OnRootMismatch"
+        seccompProfile:
+          type: RuntimeDefault
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: oxidize-server
+              topologyKey: kubernetes.io/hostname
+      containers:
+        - name: oxidize-server
+          # Pin an immutable tag (or digest) for reproducible rollouts across
+          # replicas; `latest` drifts and can leave pods on different builds.
+          image: oxidize-server:0.1.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - --host=0.0.0.0
+            - --port=8080
+            - --model=/models/Qwen3-4B-Q4_K_M.gguf
+            - --model-id=$(OXIDIZE_MODEL_ID)
+            - --backend=cpu
+            - --batch-mode=paged
+            - --cpu-optimized
+            - --threads=32
+            - --kv-cache-dtype=q8
+            - --turboquant-kv
+            - --prefill-batch-size=256
+            - --ctx-size=4096
+            - --mesh
+            - --mesh-port=0
+          envFrom:
+            - configMapRef:
+                name: oxidize-server
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          resources:
+            requests:
+              cpu: "10"
+              memory: "12Gi"
+            limits:
+              cpu: "32"
+              memory: "32Gi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          startupProbe:
+            httpGet:
+              path: /readyz
+              port: http
+              scheme: HTTP
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+              scheme: HTTP
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+            successThreshold: 1
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+              scheme: HTTP
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - sleep 15
+          volumeMounts:
+            - name: models
+              mountPath: /models
+              readOnly: true
+            - name: model-cache
+              mountPath: /var/lib/oxidize/model-cache
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: models
+          hostPath:
+            path: /opt/oxidize/models
+            type: Directory
+        - name: model-cache
+          emptyDir:
+            sizeLimit: 10Gi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 5Gi
+      terminationGracePeriodSeconds: 60

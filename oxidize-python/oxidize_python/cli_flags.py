@@ -27,6 +27,9 @@ class RunOptions:
     hf_file: str = ""
     use_paged: bool = False
     dflash_fusion: bool = False
+    layer_wise: bool = False
+    layer_cache: int = 1
+    ram_offload: bool = False
     mesh: bool = False
     mesh_port: int = 0
     pipe_head: bool = False
@@ -36,6 +39,8 @@ class RunOptions:
     profile: bool = False
     vision: bool = False
     image: str = ""
+    auto_tune: bool = True
+    print_plan: str = "auto"
 
     def loader_config(self) -> LoaderConfig:
         cfg = LoaderConfig()
@@ -61,6 +66,8 @@ class RunOptions:
             loader=self.loader_config(),
             use_paged=self.use_paged,
             use_dflash_fusion=self.dflash_fusion,
+            layer_wise=self.layer_wise,
+            layer_cache=self.layer_cache if self.layer_cache > 0 else 4,
             vision=self.vision,
             image_path=self.image.strip(),
         )
@@ -91,6 +98,13 @@ def add_run_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--profile", action="store_true")
     parser.add_argument("--vision", action="store_true")
     parser.add_argument("--image", default="")
+    parser.add_argument("--auto", dest="auto_tune", action="store_true")
+    parser.add_argument("--no-auto", dest="auto_tune", action="store_false")
+    parser.set_defaults(auto_tune=True)
+    parser.add_argument("--print-plan", default="auto")
+    parser.add_argument("--layer-wise", action="store_true")
+    parser.add_argument("--layer-cache", type=int, default=1)
+    parser.add_argument("--ram-offload", action="store_true")
 
 
 def options_from_namespace(
@@ -131,6 +145,11 @@ def options_from_namespace(
             profile=bool(getattr(ns, "profile", False)),
             vision=bool(getattr(ns, "vision", False)),
             image=str(getattr(ns, "image", "") or ""),
+            auto_tune=bool(getattr(ns, "auto_tune", True)),
+            print_plan=str(getattr(ns, "print_plan", "auto") or "auto"),
+            layer_wise=bool(getattr(ns, "layer_wise", False)),
+            layer_cache=int(getattr(ns, "layer_cache", 1)),
+            ram_offload=bool(getattr(ns, "ram_offload", False)),
         ),
         positional,
     )
