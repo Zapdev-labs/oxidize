@@ -42,10 +42,15 @@ pub struct MappedShard {
     tensors: BTreeMap<String, TensorRef>,
 }
 
+fn map_readonly(file: &File) -> std::io::Result<Mmap> {
+    // SAFETY: read-only mapping; caller owns the `Mmap` for its lifetime.
+    unsafe { Mmap::map(file) }
+}
+
 impl MappedShard {
     pub fn open(path: &Path) -> Result<Self> {
         let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
-        let mmap = unsafe { Mmap::map(&file) }
+        let mmap = map_readonly(&file)
             .with_context(|| format!("failed to mmap {}", path.display()))?;
         let st = SafeTensors::deserialize(&mmap)
             .map_err(|e| anyhow!("failed to parse SafeTensors {}: {e:?}", path.display()))?;
@@ -246,7 +251,7 @@ fn find_weight_index(dir: &Path) -> Result<Option<PathBuf>> {
 fn read_file_metadata(path: &Path) -> Result<BTreeMap<String, String>> {
     let file = File::open(path)
         .with_context(|| format!("failed to open {}", path.display()))?;
-    let mmap = unsafe { Mmap::map(&file) }
+    let mmap = map_readonly(&file)
         .with_context(|| format!("failed to mmap {}", path.display()))?;
     if mmap.len() < 8 {
         return Ok(BTreeMap::new());
