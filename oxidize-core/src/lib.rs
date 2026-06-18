@@ -36,6 +36,8 @@ pub mod activation_stats;
 pub mod autotune;
 #[path = "util/benchmark_suite.rs"]
 pub mod benchmark_suite;
+#[path = "util/bytes.rs"]
+pub(crate) mod bytes;
 #[path = "format/conversion.rs"]
 pub mod conversion;
 #[path = "compute/cpu_kernels.rs"]
