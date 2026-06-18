@@ -127,8 +127,7 @@ impl MappedGgufFile {
         let bytes = self.bytes();
         let mut checksum = 0_u8;
         for offset in (0..bytes.len()).step_by(4096) {
-            // SAFETY: offset is in-bounds by construction.
-            checksum ^= unsafe { std::ptr::read_volatile(bytes.as_ptr().add(offset)) };
+            checksum ^= crate::bytes::read_volatile_byte(bytes, offset);
         }
         if let Some(last) = bytes.last() {
             checksum ^= *last;
@@ -461,7 +460,7 @@ pub fn load_mapped_gguf<P: AsRef<Path>>(path: P) -> Result<MappedGgufFile, GgufP
     let file = File::open(path)?;
     // SAFETY: The returned mapping is read-only and we keep it alive for as long as
     // parsed metadata is exposed from MappedGgufFile.
-    let mmap = unsafe { Mmap::map(&file)? };
+    let mmap = crate::bytes::map_readonly(&file)?;
     // Tell the kernel we'll read the whole file front-to-back and that it should
     // start prefetching it immediately.  This queues async readahead so pages are
     // warm by the time inference begins — critical for multi-hundred-GB models.

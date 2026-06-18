@@ -52,7 +52,7 @@ pub fn load_mapped_safetensors<P: AsRef<Path>>(
     let file = File::open(path)?;
     // SAFETY: The returned mapping is read-only and we keep it alive for as long as
     // the metadata is exposed from MappedSafeTensorsFile.
-    let mmap = unsafe { Mmap::map(&file)? };
+    let mmap = crate::bytes::map_readonly(&file)?;
     let st =
         SafeTensors::deserialize(&mmap).map_err(|e| SafeTensorsError::Parse(format!("{e:?}")))?;
 
