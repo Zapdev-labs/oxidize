@@ -338,9 +338,9 @@ pub(crate) fn f16_le_to_f32(bytes: [u8; 2]) -> f32 {
 }
 
 #[inline]
-pub(crate) unsafe fn read_q8_k_bsum(bsums: *const u8, index: usize) -> i16 {
-    let ptr = unsafe { bsums.add(index * 2) };
-    i16::from_le_bytes([unsafe { *ptr }, unsafe { *ptr.add(1) }])
+pub(crate) fn read_q8_k_bsum(bsums: &[u8], index: usize) -> i16 {
+    let off = index * 2;
+    i16::from_le_bytes([bsums[off], bsums[off + 1]])
 }
 
 #[cfg(test)]

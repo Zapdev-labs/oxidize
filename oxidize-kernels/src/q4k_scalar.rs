@@ -22,7 +22,7 @@ pub fn q4k_q8k_row_dot_scalar(row: &[u8], blocks_per_row: usize, q8k: &[u8]) -> 
         let scales = &w[4..16];
         let qs = &w[16..16 + QK_K / 2];
         let q8 = &q8b[4..4 + QK_K];
-        let bsums = q8b[4 + QK_K..].as_ptr();
+        let bsums = &q8b[4 + QK_K..];
 
         let mut pos: i32 = 0;
         let mut min_acc: i32 = 0;
@@ -39,10 +39,10 @@ pub fn q4k_q8k_row_dot_scalar(row: &[u8], blocks_per_row: usize, q8k: &[u8]) -> 
                 sum2 += (byte >> 4) as i32 * (q8[g2 * 32 + i] as i8) as i32;
             }
             pos += s1 as i32 * sum1 + s2 as i32 * sum2;
-            let bs1 = unsafe { read_q8_k_bsum(bsums, g1 * 2) } as i32
-                + unsafe { read_q8_k_bsum(bsums, g1 * 2 + 1) } as i32;
-            let bs2 = unsafe { read_q8_k_bsum(bsums, g2 * 2) } as i32
-                + unsafe { read_q8_k_bsum(bsums, g2 * 2 + 1) } as i32;
+            let bs1 = read_q8_k_bsum(bsums, g1 * 2) as i32
+                + read_q8_k_bsum(bsums, g1 * 2 + 1) as i32;
+            let bs2 = read_q8_k_bsum(bsums, g2 * 2) as i32
+                + read_q8_k_bsum(bsums, g2 * 2 + 1) as i32;
             min_acc += ms1 as i32 * bs1;
             min_acc += ms2 as i32 * bs2;
         }
