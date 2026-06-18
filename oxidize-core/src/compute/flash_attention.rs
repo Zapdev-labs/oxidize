@@ -1,8 +1,6 @@
 //! Hand-rolled flash-attention kernels (prefill + decode).
 //!
-//! `unsafe` here constructs disjoint head slices from a contiguous output buffer; each site
-//! documents length/alias preconditions. Mutex error capture in the parallel decode path is
-//! synchronous (spin pool / rayon), not async.
+//! `unsafe` is limited to SIMD intrinsics and parallel head-slice construction.
 
 use crate::tensor::AttentionError;
 
@@ -57,19 +55,58 @@ unsafe fn dot_product_f32_avx512(a: &[f32], b: &[f32]) -> f32 {
     use std::arch::x86_64::*;
 
     let len = a.len();
-    let mut sum = _mm512_setzero_ps();
+    // Four independent accumulators break the FMA dependency chain so short
+    // head_dim loops (64/96/128) approach FMA throughput instead of being
+    // latency-bound on a single chain.
+    let mut s0 = _mm512_setzero_ps();
+    let mut s1 = _mm512_setzero_ps();
+    let mut s2 = _mm512_setzero_ps();
+    let mut s3 = _mm512_setzero_ps();
 
-    let chunks = len / 16;
-    for i in 0..chunks {
-        let va = unsafe { _mm512_loadu_ps(a.as_ptr().add(i * 16)) };
-        let vb = unsafe { _mm512_loadu_ps(b.as_ptr().add(i * 16)) };
-        sum = _mm512_fmadd_ps(va, vb, sum);
+    let pa = a.as_ptr();
+    let pb = b.as_ptr();
+
+    let main = len / 64;
+    for i in 0..main {
+        let o = i * 64;
+        s0 = _mm512_fmadd_ps(
+            unsafe { _mm512_loadu_ps(pa.add(o)) },
+            unsafe { _mm512_loadu_ps(pb.add(o)) },
+            s0,
+        );
+        s1 = _mm512_fmadd_ps(
+            unsafe { _mm512_loadu_ps(pa.add(o + 16)) },
+            unsafe { _mm512_loadu_ps(pb.add(o + 16)) },
+            s1,
+        );
+        s2 = _mm512_fmadd_ps(
+            unsafe { _mm512_loadu_ps(pa.add(o + 32)) },
+            unsafe { _mm512_loadu_ps(pb.add(o + 32)) },
+            s2,
+        );
+        s3 = _mm512_fmadd_ps(
+            unsafe { _mm512_loadu_ps(pa.add(o + 48)) },
+            unsafe { _mm512_loadu_ps(pb.add(o + 48)) },
+            s3,
+        );
     }
 
-    let mut total = _mm512_reduce_add_ps(sum);
+    // Remainder of full 16-wide vectors before the scalar tail.
+    let mut i = main * 64;
+    while i + 16 <= len {
+        s0 = _mm512_fmadd_ps(
+            unsafe { _mm512_loadu_ps(pa.add(i)) },
+            unsafe { _mm512_loadu_ps(pb.add(i)) },
+            s0,
+        );
+        i += 16;
+    }
 
-    for i in (chunks * 16)..len {
-        total += unsafe { a.get_unchecked(i) * b.get_unchecked(i) };
+    s0 = _mm512_add_ps(_mm512_add_ps(s0, s1), _mm512_add_ps(s2, s3));
+    let mut total = _mm512_reduce_add_ps(s0);
+
+    for j in i..len {
+        total += a[j] * b[j];
     }
 
     total
@@ -81,23 +118,57 @@ unsafe fn dot_product_f32_avx2(a: &[f32], b: &[f32]) -> f32 {
     use std::arch::x86_64::*;
 
     let len = a.len();
-    let mut sum = _mm256_setzero_ps();
+    // Four independent accumulators (see avx512 variant) to saturate FMA units.
+    let mut s0 = _mm256_setzero_ps();
+    let mut s1 = _mm256_setzero_ps();
+    let mut s2 = _mm256_setzero_ps();
+    let mut s3 = _mm256_setzero_ps();
 
-    let chunks = len / 8;
-    for i in 0..chunks {
-        let va = unsafe { _mm256_loadu_ps(a.as_ptr().add(i * 8)) };
-        let vb = unsafe { _mm256_loadu_ps(b.as_ptr().add(i * 8)) };
-        sum = _mm256_fmadd_ps(va, vb, sum);
+    let pa = a.as_ptr();
+    let pb = b.as_ptr();
+
+    let main = len / 32;
+    for i in 0..main {
+        let o = i * 32;
+        s0 = _mm256_fmadd_ps(
+            unsafe { _mm256_loadu_ps(pa.add(o)) },
+            unsafe { _mm256_loadu_ps(pb.add(o)) },
+            s0,
+        );
+        s1 = _mm256_fmadd_ps(
+            unsafe { _mm256_loadu_ps(pa.add(o + 8)) },
+            unsafe { _mm256_loadu_ps(pb.add(o + 8)) },
+            s1,
+        );
+        s2 = _mm256_fmadd_ps(
+            unsafe { _mm256_loadu_ps(pa.add(o + 16)) },
+            unsafe { _mm256_loadu_ps(pb.add(o + 16)) },
+            s2,
+        );
+        s3 = _mm256_fmadd_ps(
+            unsafe { _mm256_loadu_ps(pa.add(o + 24)) },
+            unsafe { _mm256_loadu_ps(pb.add(o + 24)) },
+            s3,
+        );
     }
 
-    // Horizontal sum of 8 floats
+    let mut i = main * 32;
+    while i + 8 <= len {
+        s0 = _mm256_fmadd_ps(
+            unsafe { _mm256_loadu_ps(pa.add(i)) },
+            unsafe { _mm256_loadu_ps(pb.add(i)) },
+            s0,
+        );
+        i += 8;
+    }
+
+    let sum = _mm256_add_ps(_mm256_add_ps(s0, s1), _mm256_add_ps(s2, s3));
     let mut result = [0.0_f32; 8];
     unsafe { _mm256_storeu_ps(result.as_mut_ptr(), sum) };
     let mut total = result.iter().sum::<f32>();
 
-    // Tail
-    for i in (chunks * 8)..len {
-        total += unsafe { a.get_unchecked(i) * b.get_unchecked(i) };
+    for j in i..len {
+        total += a[j] * b[j];
     }
 
     total
@@ -121,7 +192,7 @@ unsafe fn dot_product_f32_neon_aarch64(a: &[f32], b: &[f32]) -> f32 {
     let mut total = vaddvq_f32(sum);
 
     for i in (chunks * 4)..len {
-        total += unsafe { a.get_unchecked(i) * b.get_unchecked(i) };
+        total += a[i] * b[i];
     }
 
     total
@@ -147,7 +218,7 @@ unsafe fn dot_product_f32_neon_arm(a: &[f32], b: &[f32]) -> f32 {
     let mut total = vget_lane_f32(pair, 0);
 
     for i in (chunks * 4)..len {
-        total += unsafe { a.get_unchecked(i) * b.get_unchecked(i) };
+        total += a[i] * b[i];
     }
 
     total
@@ -170,9 +241,60 @@ impl KvElem for f32 {
 
     #[inline]
     fn axpy(out: &mut [f32], scale: f32, row: &[f32]) {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if is_x86_feature_detected!("avx512f") {
+                unsafe { axpy_f32_avx512(out, scale, row) };
+                return;
+            }
+            if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+                unsafe { axpy_f32_avx2(out, scale, row) };
+                return;
+            }
+        }
         for (o, v) in out.iter_mut().zip(row.iter()) {
             *o += scale * v;
         }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn axpy_f32_avx512(out: &mut [f32], scale: f32, row: &[f32]) {
+    use std::arch::x86_64::*;
+    let len = out.len().min(row.len());
+    let vs = _mm512_set1_ps(scale);
+    let po = out.as_mut_ptr();
+    let pr = row.as_ptr();
+    let mut i = 0;
+    while i + 16 <= len {
+        let vv = unsafe { _mm512_loadu_ps(pr.add(i)) };
+        let vo = unsafe { _mm512_loadu_ps(po.add(i)) };
+        unsafe { _mm512_storeu_ps(po.add(i), _mm512_fmadd_ps(vs, vv, vo)) };
+        i += 16;
+    }
+    for j in i..len {
+        out[j] += scale * row[j];
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn axpy_f32_avx2(out: &mut [f32], scale: f32, row: &[f32]) {
+    use std::arch::x86_64::*;
+    let len = out.len().min(row.len());
+    let vs = _mm256_set1_ps(scale);
+    let po = out.as_mut_ptr();
+    let pr = row.as_ptr();
+    let mut i = 0;
+    while i + 8 <= len {
+        let vv = unsafe { _mm256_loadu_ps(pr.add(i)) };
+        let vo = unsafe { _mm256_loadu_ps(po.add(i)) };
+        unsafe { _mm256_storeu_ps(po.add(i), _mm256_fmadd_ps(vs, vv, vo)) };
+        i += 8;
+    }
+    for j in i..len {
+        out[j] += scale * row[j];
     }
 }
 
@@ -221,19 +343,35 @@ fn f16c_available() -> bool {
 unsafe fn dot_product_f32_f16_avx2(a: &[f32], b: &[u16]) -> f32 {
     use std::arch::x86_64::*;
     let len = a.len().min(b.len());
-    let mut sum = _mm256_setzero_ps();
-    let chunks = len / 8;
-    for i in 0..chunks {
-        let va = unsafe { _mm256_loadu_ps(a.as_ptr().add(i * 8)) };
-        let vh = unsafe { _mm_loadu_si128(b.as_ptr().add(i * 8) as *const __m128i) };
-        let vb = _mm256_cvtph_ps(vh);
-        sum = _mm256_fmadd_ps(va, vb, sum);
+    // Two independent accumulators: the f16->f32 conversion adds latency, so
+    // breaking the FMA chain still helps despite the cvtph throughput limit.
+    let mut s0 = _mm256_setzero_ps();
+    let mut s1 = _mm256_setzero_ps();
+    let pa = a.as_ptr();
+    let pb = b.as_ptr();
+    let main = len / 16;
+    for i in 0..main {
+        let o = i * 16;
+        let va0 = unsafe { _mm256_loadu_ps(pa.add(o)) };
+        let vb0 = _mm256_cvtph_ps(unsafe { _mm_loadu_si128(pb.add(o) as *const __m128i) });
+        s0 = _mm256_fmadd_ps(va0, vb0, s0);
+        let va1 = unsafe { _mm256_loadu_ps(pa.add(o + 8)) };
+        let vb1 = _mm256_cvtph_ps(unsafe { _mm_loadu_si128(pb.add(o + 8) as *const __m128i) });
+        s1 = _mm256_fmadd_ps(va1, vb1, s1);
     }
+    let mut i = main * 16;
+    while i + 8 <= len {
+        let va = unsafe { _mm256_loadu_ps(pa.add(i)) };
+        let vb = _mm256_cvtph_ps(unsafe { _mm_loadu_si128(pb.add(i) as *const __m128i) });
+        s0 = _mm256_fmadd_ps(va, vb, s0);
+        i += 8;
+    }
+    let sum = _mm256_add_ps(s0, s1);
     let mut result = [0.0_f32; 8];
     unsafe { _mm256_storeu_ps(result.as_mut_ptr(), sum) };
     let mut total = result.iter().sum::<f32>();
-    for i in (chunks * 8)..len {
-        total += a[i] * crate::tensor::f16_le_to_f32(b[i].to_le_bytes());
+    for j in i..len {
+        total += a[j] * crate::tensor::f16_le_to_f32(b[j].to_le_bytes());
     }
     total
 }

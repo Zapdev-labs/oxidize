@@ -1,7 +1,7 @@
 use crate::gguf::GgufQuantizationType;
 use crate::quantization::{
-    BLOCK_NVFP4_SIZE, BLOCK_Q2_K_SIZE, BLOCK_Q4_K_SIZE, BLOCK_Q6_K_SIZE, BLOCK_Q8_0_SIZE, QK8_0,
-    QK_K, QK_NVFP4, QK_NVFP4_SUB,
+    BLOCK_IQ4_XS_SIZE, BLOCK_NVFP4_SIZE, BLOCK_Q2_K_SIZE, BLOCK_Q4_K_SIZE, BLOCK_Q6_K_SIZE,
+    BLOCK_Q8_0_SIZE, QK8_0, QK_K, QK_NVFP4, QK_NVFP4_SUB, dequantize_iq4_xs_scalar,
 };
 use rayon::prelude::*;
 #[cfg(target_arch = "x86")]
@@ -194,6 +194,9 @@ fn gemm_quantized_f32_inner(
     let k_quant = match quantization {
         GgufQuantizationType::Q2_K => Some((BLOCK_Q2_K_SIZE, q2_k_dot as fn(&[u8], &[f32]) -> f32)),
         GgufQuantizationType::Q6_K => Some((BLOCK_Q6_K_SIZE, q6_k_dot as fn(&[u8], &[f32]) -> f32)),
+        GgufQuantizationType::IQ4_XS => {
+            Some((BLOCK_IQ4_XS_SIZE, iq4_xs_dot as fn(&[u8], &[f32]) -> f32))
+        }
         _ => None,
     };
 
@@ -478,11 +481,87 @@ unsafe fn dot4_f32_avx2(
     (s0, s1, s2, s3)
 }
 
+/// AVX-512 counterpart of [`dot4_f32_avx2`]: 16-wide FMA, four shared-`a`
+/// accumulators. On Skylake-SP this doubles the dot lanes versus AVX2 while the
+/// 32-zmm register file absorbs the four input streams without spilling.
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f,avx512vl,avx2,fma")]
+#[allow(unsafe_op_in_unsafe_fn)]
+#[inline]
+unsafe fn dot4_f32_avx512(
+    a: *const f32,
+    b0: *const f32,
+    b1: *const f32,
+    b2: *const f32,
+    b3: *const f32,
+    len: usize,
+) -> (f32, f32, f32, f32) {
+    let mut acc0 = _mm512_setzero_ps();
+    let mut acc1 = _mm512_setzero_ps();
+    let mut acc2 = _mm512_setzero_ps();
+    let mut acc3 = _mm512_setzero_ps();
+    let mut i = 0;
+    while i + 16 <= len {
+        let av = _mm512_loadu_ps(a.add(i));
+        acc0 = _mm512_fmadd_ps(av, _mm512_loadu_ps(b0.add(i)), acc0);
+        acc1 = _mm512_fmadd_ps(av, _mm512_loadu_ps(b1.add(i)), acc1);
+        acc2 = _mm512_fmadd_ps(av, _mm512_loadu_ps(b2.add(i)), acc2);
+        acc3 = _mm512_fmadd_ps(av, _mm512_loadu_ps(b3.add(i)), acc3);
+        i += 16;
+    }
+    let mut s0 = _mm512_reduce_add_ps(acc0);
+    let mut s1 = _mm512_reduce_add_ps(acc1);
+    let mut s2 = _mm512_reduce_add_ps(acc2);
+    let mut s3 = _mm512_reduce_add_ps(acc3);
+    while i < len {
+        let av = *a.add(i);
+        s0 += av * *b0.add(i);
+        s1 += av * *b1.add(i);
+        s2 += av * *b2.add(i);
+        s3 += av * *b3.add(i);
+        i += 1;
+    }
+    (s0, s1, s2, s3)
+}
+
+/// AVX-512 counterpart of [`dot_f32_avx2`].
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f,avx512vl,avx2,fma")]
+#[allow(unsafe_op_in_unsafe_fn)]
+#[inline]
+unsafe fn dot_f32_avx512(a: *const f32, b: *const f32, len: usize) -> f32 {
+    let mut acc0 = _mm512_setzero_ps();
+    let mut acc1 = _mm512_setzero_ps();
+    let mut i = 0;
+    while i + 32 <= len {
+        acc0 = _mm512_fmadd_ps(_mm512_loadu_ps(a.add(i)), _mm512_loadu_ps(b.add(i)), acc0);
+        acc1 = _mm512_fmadd_ps(
+            _mm512_loadu_ps(a.add(i + 16)),
+            _mm512_loadu_ps(b.add(i + 16)),
+            acc1,
+        );
+        i += 32;
+    }
+    while i + 16 <= len {
+        acc0 = _mm512_fmadd_ps(_mm512_loadu_ps(a.add(i)), _mm512_loadu_ps(b.add(i)), acc0);
+        i += 16;
+    }
+    let mut sum = _mm512_reduce_add_ps(_mm512_add_ps(acc0, acc1));
+    while i < len {
+        sum += *a.add(i) * *b.add(i);
+        i += 1;
+    }
+    sum
+}
+
 #[inline]
 fn dot_f32_fast(a: &[f32], b: &[f32]) -> f32 {
     debug_assert_eq!(a.len(), b.len());
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
+        if is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512vl") {
+            return unsafe { dot_f32_avx512(a.as_ptr(), b.as_ptr(), a.len()) };
+        }
         if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
             return unsafe { dot_f32_avx2(a.as_ptr(), b.as_ptr(), a.len()) };
         }
@@ -575,42 +654,42 @@ unsafe fn gemm_q4_k_decode_once_avx2(
     batch: usize,
     blocks_per_row: usize,
 ) -> Result<(), GemvError> {
-    let qm_ptr_addr = quantized_matrix.as_ptr() as usize;
     let in_ptr_addr = inputs.as_ptr() as usize;
     let out_ptr_addr = outputs.as_mut_ptr() as usize;
     let row_stride_bytes = blocks_per_row * BLOCK_Q4_K_SIZE;
 
+    // The weight decode stays AVX2, but the per-token dot product over the
+    // 256-element f32 scratch runs 16-wide on AVX-512 hardware (Skylake-SP).
+    // Detected once here; the branch in the inner loop is perfectly predicted.
+    let use_avx512 =
+        is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512vl");
+
     // Rows are processed in chunks to amortize rayon task dispatch overhead.
     const ROW_CHUNK: usize = 16;
     let process_row = |row_idx: usize, partial: &mut [f32]| {
-        let qm_ptr = qm_ptr_addr as *const u8;
         let in_ptr = in_ptr_addr as *const f32;
         let mut scratch = [0.0_f32; QK_K];
         partial.fill(0.0);
-        let row_base = unsafe { qm_ptr.add(row_idx * row_stride_bytes) };
+        let row_start = row_idx * row_stride_bytes;
+        let row_slice = &quantized_matrix[row_start..row_start + row_stride_bytes];
         for block_idx in 0..blocks_per_row {
-            // SAFETY: `row_base` points into the packed matrix row; each block is `BLOCK_Q4_K_SIZE`
-            // bytes and `block_idx` is bounded by `blocks_per_row`.
-            let block_ptr = unsafe { row_base.add(block_idx * BLOCK_Q4_K_SIZE) };
-            let block = unsafe { std::slice::from_raw_parts(block_ptr, BLOCK_Q4_K_SIZE) };
+            let block = &row_slice[block_idx * BLOCK_Q4_K_SIZE..][..BLOCK_Q4_K_SIZE];
             let d = f16_le_to_f32([block[0], block[1]]);
             let min = f16_le_to_f32([block[2], block[3]]);
             let scales = &block[4..16];
-            let qs_ptr = unsafe { block_ptr.add(16) };
+            let qs_ptr = block[16..].as_ptr();
             for g in 0..8 {
                 let (sc, m) = get_scale_min_k4(g, scales);
                 let dl = d * sc as f32;
                 let ml = min * m as f32;
                 let pair = g / 2;
-                unsafe {
-                    decode_q4_k_group_avx2(
-                        qs_ptr.add(pair * 32),
-                        dl,
-                        ml,
-                        g & 1 != 0,
-                        scratch.as_mut_ptr().add(g * 32),
-                    );
-                }
+                decode_q4_k_group_avx2(
+                    qs_ptr.wrapping_add(pair * 32),
+                    dl,
+                    ml,
+                    g & 1 != 0,
+                    scratch.as_mut_ptr().add(g * 32),
+                );
             }
             let in_offset_floats = block_idx * QK_K;
             // Process batch in groups of 4 — sweet spot for the 16 ymm
@@ -624,8 +703,11 @@ unsafe fn gemm_q4_k_decode_once_avx2(
                 let v1 = unsafe { in_ptr.add((t0 + 1) * cols + in_offset_floats) };
                 let v2 = unsafe { in_ptr.add((t0 + 2) * cols + in_offset_floats) };
                 let v3 = unsafe { in_ptr.add((t0 + 3) * cols + in_offset_floats) };
-                let (s0, s1, s2, s3) =
-                    unsafe { dot4_f32_avx2(scratch.as_ptr(), v0, v1, v2, v3, QK_K) };
+                let (s0, s1, s2, s3) = if use_avx512 {
+                    unsafe { dot4_f32_avx512(scratch.as_ptr(), v0, v1, v2, v3, QK_K) }
+                } else {
+                    unsafe { dot4_f32_avx2(scratch.as_ptr(), v0, v1, v2, v3, QK_K) }
+                };
                 partial[t0] += s0;
                 partial[t0 + 1] += s1;
                 partial[t0 + 2] += s2;
@@ -634,7 +716,11 @@ unsafe fn gemm_q4_k_decode_once_avx2(
             for ti in 0..tail {
                 let t = chunks * 4 + ti;
                 let v_ptr = unsafe { in_ptr.add(t * cols + in_offset_floats) };
-                partial[t] += unsafe { dot_f32_avx2(scratch.as_ptr(), v_ptr, QK_K) };
+                partial[t] += if use_avx512 {
+                    unsafe { dot_f32_avx512(scratch.as_ptr(), v_ptr, QK_K) }
+                } else {
+                    unsafe { dot_f32_avx2(scratch.as_ptr(), v_ptr, QK_K) }
+                };
             }
         }
     };
@@ -753,6 +839,8 @@ fn gemm_q6_k_decode_once(
             let in_ptr = in_ptr_addr as *const f32;
             let start = chunk_idx * ROW_CHUNK;
             let end = (start + ROW_CHUNK).min(rows);
+            let use_avx512 =
+                is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512vl");
             let mut scratch = [0.0_f32; QK_K];
             for row in start..end {
                 let local = row - start;
@@ -772,8 +860,11 @@ fn gemm_q6_k_decode_once(
                         let v1 = unsafe { in_ptr.add((t0 + 1) * cols + in_offset_floats) };
                         let v2 = unsafe { in_ptr.add((t0 + 2) * cols + in_offset_floats) };
                         let v3 = unsafe { in_ptr.add((t0 + 3) * cols + in_offset_floats) };
-                        let (s0, s1, s2, s3) =
-                            unsafe { dot4_f32_avx2(scratch.as_ptr(), v0, v1, v2, v3, QK_K) };
+                        let (s0, s1, s2, s3) = if use_avx512 {
+                            unsafe { dot4_f32_avx512(scratch.as_ptr(), v0, v1, v2, v3, QK_K) }
+                        } else {
+                            unsafe { dot4_f32_avx2(scratch.as_ptr(), v0, v1, v2, v3, QK_K) }
+                        };
                         partial[t0] += s0;
                         partial[t0 + 1] += s1;
                         partial[t0 + 2] += s2;
@@ -782,7 +873,11 @@ fn gemm_q6_k_decode_once(
                     for ti in 0..tail {
                         let t = chunks * 4 + ti;
                         let v_ptr = unsafe { in_ptr.add(t * cols + in_offset_floats) };
-                        partial[t] += unsafe { dot_f32_avx2(scratch.as_ptr(), v_ptr, QK_K) };
+                        partial[t] += if use_avx512 {
+                            unsafe { dot_f32_avx512(scratch.as_ptr(), v_ptr, QK_K) }
+                        } else {
+                            unsafe { dot_f32_avx2(scratch.as_ptr(), v_ptr, QK_K) }
+                        };
                     }
                 }
             }
@@ -1555,6 +1650,9 @@ pub fn gemv_quantized_f32(
         }
         GgufQuantizationType::NVFP4 if cols.is_multiple_of(QK_NVFP4) => {
             gemv_nvfp4_f32_fused(quantized_matrix, rows, cols, vector, output)
+        }
+        GgufQuantizationType::IQ4_XS if cols.is_multiple_of(QK_K) => {
+            gemv_iq4_xs_f32(quantized_matrix, rows, cols, vector, output)
         }
         _ => Err(GemvError::UnsupportedQuantizationType { quantization }),
     };
@@ -2329,30 +2427,23 @@ unsafe fn q4_k_q8_k_row_dot_avx2(row: &[u8], blocks_per_row: usize, q8k: &[u8]) 
     let mask = _mm256_set1_epi8(0x0f);
     let mut acc = 0.0_f32;
     for block_idx in 0..blocks_per_row {
-        let w_ptr = row.as_ptr().wrapping_add(block_idx * BLOCK_Q4_K_SIZE);
-        let q8_ptr = q8k.as_ptr().wrapping_add(block_idx * BLOCK_Q8_K_BYTES);
+        let w_off = block_idx * BLOCK_Q4_K_SIZE;
+        let q8_off = block_idx * BLOCK_Q8_K_BYTES;
+        let block = &row[w_off..w_off + BLOCK_Q4_K_SIZE];
+        let q8_block = &q8k[q8_off..q8_off + BLOCK_Q8_K_BYTES];
 
-        // Prefetch the weight stream ~4 blocks (576B) ahead: rows stream from
-        // DRAM (often the remote NUMA node here) and the OOO window alone does
-        // not hide that latency. 3 lines cover the 144B consumed per iteration.
-        // Prefetch hints never fault, so running past the row end is safe.
-        let ahead = w_ptr.wrapping_add(4 * BLOCK_Q4_K_SIZE).cast::<i8>();
+        let ahead = block.as_ptr().wrapping_add(4 * BLOCK_Q4_K_SIZE).cast::<i8>();
         _mm_prefetch::<{ _MM_HINT_T0 }>(ahead);
         _mm_prefetch::<{ _MM_HINT_T0 }>(ahead.wrapping_add(64));
         _mm_prefetch::<{ _MM_HINT_T0 }>(ahead.wrapping_add(128));
 
-        let d_w = f16_le_to_f32([unsafe { *w_ptr }, unsafe { *w_ptr.add(1) }]);
-        let dmin_w = f16_le_to_f32([unsafe { *w_ptr.add(2) }, unsafe { *w_ptr.add(3) }]);
-        let d_q8 = f32::from_le_bytes([
-            unsafe { *q8_ptr },
-            unsafe { *q8_ptr.add(1) },
-            unsafe { *q8_ptr.add(2) },
-            unsafe { *q8_ptr.add(3) },
-        ]);
-        let scales = unsafe { std::slice::from_raw_parts(w_ptr.add(4), 12) };
-        let qs = unsafe { w_ptr.add(16) };
-        let q8 = unsafe { q8_ptr.add(4) };
-        let bsums = unsafe { q8_ptr.add(4 + QK_K) };
+        let d_w = f16_le_to_f32([block[0], block[1]]);
+        let dmin_w = f16_le_to_f32([block[2], block[3]]);
+        let d_q8 = f32::from_le_bytes([q8_block[0], q8_block[1], q8_block[2], q8_block[3]]);
+        let scales = &block[4..16];
+        let qs = block[16..].as_ptr();
+        let q8 = q8_block[4..].as_ptr();
+        let bsums = &q8_block[4 + QK_K..];
 
         // Single vector accumulator across all 8 sub-groups → 1 hsum per block.
         let mut vec_pos = _mm256_setzero_si256();
@@ -2376,10 +2467,10 @@ unsafe fn q4_k_q8_k_row_dot_avx2(row: &[u8], blocks_per_row: usize, q8k: &[u8]) 
             let p32_high = _mm256_madd_epi16(p16_high, _mm256_set1_epi16(s2 as i16));
             vec_pos = _mm256_add_epi32(vec_pos, _mm256_add_epi32(p32_low, p32_high));
 
-            let bs1 = unsafe { read_q8_k_bsum(bsums, g1 * 2) } as i32
-                + unsafe { read_q8_k_bsum(bsums, g1 * 2 + 1) } as i32;
-            let bs2 = unsafe { read_q8_k_bsum(bsums, g2 * 2) } as i32
-                + unsafe { read_q8_k_bsum(bsums, g2 * 2 + 1) } as i32;
+            let bs1 = read_q8_k_bsum(bsums, g1 * 2) as i32
+                + read_q8_k_bsum(bsums, g1 * 2 + 1) as i32;
+            let bs2 = read_q8_k_bsum(bsums, g2 * 2) as i32
+                + read_q8_k_bsum(bsums, g2 * 2 + 1) as i32;
             min_acc += ms1 as i32 * bs1;
             min_acc += ms2 as i32 * bs2;
         }
@@ -2415,10 +2506,10 @@ unsafe fn q4_k_q8_k_row_dot_x4_avx2(
     let mask = _mm256_set1_epi8(0x0f);
     let mut acc = [0.0_f32; 4];
     for block_idx in 0..blocks_per_row {
-        let q8_ptr = q8k.as_ptr().add(block_idx * BLOCK_Q8_K_BYTES);
-        let d_q8 = f32::from_le_bytes([*q8_ptr, *q8_ptr.add(1), *q8_ptr.add(2), *q8_ptr.add(3)]);
-        let q8 = q8_ptr.add(4);
-        let bsums = q8_ptr.add(4 + QK_K);
+        let q8_block = &q8k[block_idx * BLOCK_Q8_K_BYTES..][..BLOCK_Q8_K_BYTES];
+        let d_q8 = f32::from_le_bytes([q8_block[0], q8_block[1], q8_block[2], q8_block[3]]);
+        let q8 = q8_block[4..].as_ptr();
+        let bsums = &q8_block[4 + QK_K..];
 
         // Shared across all 4 rows: the 8 q8 sub-group vectors and the
         // per-group-pair bsum sums (these depend only on the input vector).
@@ -2526,15 +2617,16 @@ unsafe fn q6_k_q8_k_row_dot_avx2(row: &[u8], blocks_per_row: usize, q8k: &[u8]) 
     let mask_high = _mm256_set1_epi8(0x03);
     let mut acc = 0.0_f32;
     for block_idx in 0..blocks_per_row {
-        let w_ptr = row.as_ptr().add(block_idx * BLOCK_Q6_K_SIZE);
-        let q8_ptr = q8k.as_ptr().add(block_idx * BLOCK_Q8_K_BYTES);
-        let d_q8 = f32::from_le_bytes([*q8_ptr, *q8_ptr.add(1), *q8_ptr.add(2), *q8_ptr.add(3)]);
-        let q8 = q8_ptr.add(4);
-        let bsums = q8_ptr.add(4 + QK_K);
-        let d = f16_le_to_f32([*w_ptr.add(208), *w_ptr.add(209)]);
-        let ql = w_ptr;
-        let qh = w_ptr.add(128);
-        let sc = std::slice::from_raw_parts(w_ptr.add(192) as *const i8, 16);
+        let w_off = block_idx * BLOCK_Q6_K_SIZE;
+        let block = &row[w_off..w_off + BLOCK_Q6_K_SIZE];
+        let q8_block = &q8k[block_idx * BLOCK_Q8_K_BYTES..][..BLOCK_Q8_K_BYTES];
+        let d_q8 = f32::from_le_bytes([q8_block[0], q8_block[1], q8_block[2], q8_block[3]]);
+        let q8 = q8_block[4..].as_ptr();
+        let bsums = &q8_block[4 + QK_K..];
+        let d = f16_le_to_f32([block[208], block[209]]);
+        let ql = block[0..128].as_ptr();
+        let qh = block[128..192].as_ptr();
+        let sc = &block[192..208];
 
         let mut vec_pos = _mm256_setzero_si256();
         let mut min_acc: i32 = 0;
@@ -2564,8 +2656,8 @@ unsafe fn q6_k_q8_k_row_dot_avx2(row: &[u8], blocks_per_row: usize, q8k: &[u8]) 
             );
 
             for (g, qv) in [q1, q2, q3, q4].into_iter().enumerate() {
-                let sa = sc[s_base + g * 2] as i16;
-                let sb = sc[s_base + g * 2 + 1] as i16;
+                let sa = sc[s_base + g * 2] as i8 as i16;
+                let sb = sc[s_base + g * 2 + 1] as i8 as i16;
                 let q8v = _mm256_loadu_si256(q8.add(v_base + g * 32) as *const __m256i);
                 let p16 = _mm256_maddubs_epi16(qv, q8v);
                 let scale_pair = _mm256_set_m128i(_mm_set1_epi16(sb), _mm_set1_epi16(sa));
@@ -2602,10 +2694,10 @@ unsafe fn q6_k_q8_k_row_dot_x4_avx2(
     let mask_high = _mm256_set1_epi8(0x03);
     let mut acc = [0.0_f32; 4];
     for block_idx in 0..blocks_per_row {
-        let q8_ptr = q8k.as_ptr().add(block_idx * BLOCK_Q8_K_BYTES);
-        let d_q8 = f32::from_le_bytes([*q8_ptr, *q8_ptr.add(1), *q8_ptr.add(2), *q8_ptr.add(3)]);
-        let q8 = q8_ptr.add(4);
-        let bsums = q8_ptr.add(4 + QK_K);
+        let q8_block = &q8k[block_idx * BLOCK_Q8_K_BYTES..][..BLOCK_Q8_K_BYTES];
+        let d_q8 = f32::from_le_bytes([q8_block[0], q8_block[1], q8_block[2], q8_block[3]]);
+        let q8 = q8_block[4..].as_ptr();
+        let bsums = &q8_block[4 + QK_K..];
         let mut bs = [0_i32; 16];
         for (g, b) in bs.iter_mut().enumerate() {
             *b = read_q8_k_bsum(bsums, g) as i32;
@@ -2701,16 +2793,17 @@ unsafe fn q4_k_q8_k_row_dot_vnni(row: &[u8], blocks_per_row: usize, q8k: &[u8]) 
     let mask = _mm256_set1_epi8(0x0f);
     let mut acc = 0.0_f32;
     for block_idx in 0..blocks_per_row {
-        let w_ptr = row.as_ptr().wrapping_add(block_idx * BLOCK_Q4_K_SIZE);
-        let q8_ptr = q8k.as_ptr().wrapping_add(block_idx * BLOCK_Q8_K_BYTES);
+        let w_off = block_idx * BLOCK_Q4_K_SIZE;
+        let block = &row[w_off..w_off + BLOCK_Q4_K_SIZE];
+        let q8_block = &q8k[block_idx * BLOCK_Q8_K_BYTES..][..BLOCK_Q8_K_BYTES];
 
-        let d_w = f16_le_to_f32([*w_ptr, *w_ptr.add(1)]);
-        let dmin_w = f16_le_to_f32([*w_ptr.add(2), *w_ptr.add(3)]);
-        let d_q8 = f32::from_le_bytes([*q8_ptr, *q8_ptr.add(1), *q8_ptr.add(2), *q8_ptr.add(3)]);
-        let scales = std::slice::from_raw_parts(w_ptr.add(4), 12);
-        let qs = w_ptr.add(16);
-        let q8 = q8_ptr.add(4);
-        let bsums = q8_ptr.add(4 + QK_K);
+        let d_w = f16_le_to_f32([block[0], block[1]]);
+        let dmin_w = f16_le_to_f32([block[2], block[3]]);
+        let d_q8 = f32::from_le_bytes([q8_block[0], q8_block[1], q8_block[2], q8_block[3]]);
+        let scales = &block[4..16];
+        let qs = block[16..].as_ptr();
+        let q8 = q8_block[4..].as_ptr();
+        let bsums = &q8_block[4 + QK_K..];
 
         let mut vec_pos = _mm512_setzero_si512();
         let mut min_acc: i32 = 0;
@@ -2804,17 +2897,11 @@ unsafe fn q4_k_q8_k_row_dot_chunk_avx2(
         ];
 
         for (token, out_value) in out.iter_mut().enumerate().take(token_count) {
-            let q8_base = q8_panel
-                .as_ptr()
-                .wrapping_add((token_start + token) * q8_stride + block_idx * BLOCK_Q8_K_BYTES);
-            let d_q8 = f32::from_le_bytes([
-                unsafe { *q8_base },
-                unsafe { *q8_base.add(1) },
-                unsafe { *q8_base.add(2) },
-                unsafe { *q8_base.add(3) },
-            ]);
-            let q8 = unsafe { q8_base.add(4) };
-            let bsums = unsafe { q8_base.add(4 + QK_K) };
+            let q8_off = (token_start + token) * q8_stride + block_idx * BLOCK_Q8_K_BYTES;
+            let q8_block = &q8_panel[q8_off..q8_off + BLOCK_Q8_K_BYTES];
+            let d_q8 = f32::from_le_bytes([q8_block[0], q8_block[1], q8_block[2], q8_block[3]]);
+            let q8 = q8_block[4..].as_ptr();
+            let bsums = &q8_block[4 + QK_K..];
 
             // Single vector accumulator across all 8 groups → 1 hsum per block.
             let mut vec_pos = _mm256_setzero_si256();
@@ -2835,8 +2922,8 @@ unsafe fn q4_k_q8_k_row_dot_chunk_avx2(
             // precomputed bsums directly as i16.
             let mut min: i32 = 0;
             for (g, min_scale) in g_min_scales.iter().enumerate() {
-                let bs = unsafe { read_q8_k_bsum(bsums, g * 2) } as i32
-                    + unsafe { read_q8_k_bsum(bsums, g * 2 + 1) } as i32;
+                let bs = read_q8_k_bsum(bsums, g * 2) as i32
+                    + read_q8_k_bsum(bsums, g * 2 + 1) as i32;
                 min += min_scale * bs;
             }
 
@@ -2848,9 +2935,8 @@ unsafe fn q4_k_q8_k_row_dot_chunk_avx2(
 }
 
 #[inline]
-unsafe fn read_q8_k_bsum(bsums: *const u8, index: usize) -> i16 {
-    let ptr = unsafe { bsums.add(index * 2) };
-    i16::from_le_bytes([unsafe { *ptr }, unsafe { *ptr.add(1) }])
+fn read_q8_k_bsum(bsums: &[u8], index: usize) -> i16 {
+    crate::bytes::read_q8_k_bsum(bsums, index)
 }
 
 /// Horizontal sum of 8 packed int32 values.
@@ -3609,7 +3695,8 @@ fn iq1s_dequantize_block(block: &[u8], out: &mut [f32]) {
     let d = f16_le_to_f32([block[0], block[1]]);
     let qs = &block[2..34];
     let qh = &block[34..50];
-    let qh_u16: &[u16] = unsafe { std::slice::from_raw_parts(qh.as_ptr() as *const u16, 16) };
+    let qh_u16: [u16; 16] =
+        std::array::from_fn(|i| u16::from_le_bytes([qh[i * 2], qh[i * 2 + 1]]));
     let mut out_ptr = 0_usize;
     let mut grid_vals = [0_i8; 8];
     for ib in 0..(QK_K / 32) {
@@ -3787,7 +3874,8 @@ fn iq1m_dequantize_block(block: &[u8], out: &mut [f32]) {
     let qs = &block[0..32];
     let qh = &block[32..48];
     let scales = &block[48..56];
-    let sc: &[u16] = unsafe { std::slice::from_raw_parts(scales.as_ptr() as *const u16, 4) };
+    let sc: [u16; 4] =
+        std::array::from_fn(|i| u16::from_le_bytes([scales[i * 2], scales[i * 2 + 1]]));
     let scale_u16 =
         (sc[0] >> 12) | ((sc[1] >> 8) & 0x00f0) | ((sc[2] >> 4) & 0x0f00) | (sc[3] & 0xf000);
     let d = f16_bits_to_f32(scale_u16);
@@ -3899,6 +3987,78 @@ fn gemv_iq1_m_f32_fused(
         let mut scratch = [0.0_f32; QK_K];
         for (row_idx, out) in output.iter_mut().enumerate() {
             *out = compute_row(row_idx, &mut scratch);
+        }
+    }
+    Ok(())
+}
+
+/// Decode one IQ4_XS block (256 weights) and dot it against 256 vector values.
+///
+/// Reuses the tested scalar decoder; the non-linear LUT lookup makes a dedicated
+/// integer kernel awkward, and token generation is memory-bound anyway, so
+/// decode-then-dot is the pragmatic path.
+fn iq4_xs_dot(block: &[u8], vector: &[f32]) -> f32 {
+    let mut decoded = [0.0_f32; QK_K];
+    if dequantize_iq4_xs_scalar(block, &mut decoded).is_err() {
+        return 0.0;
+    }
+    let mut sum = 0.0_f32;
+    for i in 0..QK_K {
+        sum += decoded[i] * vector[i];
+    }
+    sum
+}
+
+/// IQ4_XS GEMV: per row, decode each 136-byte block and dot against the input.
+fn gemv_iq4_xs_f32(
+    quantized_matrix: &[u8],
+    rows: usize,
+    cols: usize,
+    vector: &[f32],
+    output: &mut [f32],
+) -> Result<(), GemvError> {
+    let blocks_per_row = cols / QK_K;
+    let expected_matrix_len = rows * blocks_per_row * BLOCK_IQ4_XS_SIZE;
+    if quantized_matrix.len() != expected_matrix_len {
+        return Err(GemvError::InvalidMatrixLength {
+            expected: expected_matrix_len,
+            actual: quantized_matrix.len(),
+        });
+    }
+    if vector.len() != cols {
+        return Err(GemvError::InvalidVectorLength {
+            expected: cols,
+            actual: vector.len(),
+        });
+    }
+    if output.len() != rows {
+        return Err(GemvError::InvalidOutputLength {
+            expected: rows,
+            actual: output.len(),
+        });
+    }
+
+    let row_bytes = blocks_per_row * BLOCK_IQ4_XS_SIZE;
+    let compute_row = |row_idx: usize| -> f32 {
+        let row_start = row_idx * row_bytes;
+        let row = &quantized_matrix[row_start..row_start + row_bytes];
+        let mut sum = 0.0_f32;
+        for (block_idx, block) in row.chunks_exact(BLOCK_IQ4_XS_SIZE).enumerate() {
+            let v_off = block_idx * QK_K;
+            sum += iq4_xs_dot(block, &vector[v_off..v_off + QK_K]);
+        }
+        sum
+    };
+
+    if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
+        output
+            .par_iter_mut()
+            .with_min_len(32)
+            .enumerate()
+            .for_each(|(row_idx, out)| *out = compute_row(row_idx));
+    } else {
+        for (row_idx, out) in output.iter_mut().enumerate() {
+            *out = compute_row(row_idx);
         }
     }
     Ok(())
@@ -5194,7 +5354,6 @@ fn gemm_f32_cpu(
     cols: usize,
     output: &mut [f32],
 ) {
-    const PREFETCH_DISTANCE: usize = 16;
     let expected_right_len = shared_dim.saturating_mul(cols);
     let mut right_transposed = vec![0.0_f32; expected_right_len];
     for shared_idx in 0..shared_dim {
@@ -5210,18 +5369,12 @@ fn gemm_f32_cpu(
         let left_row = &left_matrix[row * shared_dim..(row + 1) * shared_dim];
         let out_row = &mut output[row * cols..(row + 1) * cols];
         for (col, out_cell) in out_row.iter_mut().enumerate() {
+            // `right_transposed` makes each column contiguous, so this is a
+            // plain dot product — dispatch to the SIMD kernel (AVX-512/AVX2)
+            // instead of a scalar loop fenced by a `black_box` "prefetch" that
+            // also blocked autovectorization.
             let right_col = &right_transposed[col * shared_dim..(col + 1) * shared_dim];
-            let mut sum = 0.0_f32;
-            for (k, left_value) in left_row.iter().enumerate() {
-                if let (Some(next_left), Some(next_right)) = (
-                    left_row.get(k + PREFETCH_DISTANCE),
-                    right_col.get(k + PREFETCH_DISTANCE),
-                ) {
-                    std::hint::black_box(*next_left + *next_right);
-                }
-                sum += left_value * right_col[k];
-            }
-            *out_cell = sum;
+            *out_cell = crate::flash_attention::dot_product_f32(left_row, right_col);
         }
     }
 }
@@ -6855,6 +7008,60 @@ mod tests {
 
         for (lhs, rhs) in quantized_out.iter().zip(reference.iter()) {
             assert!((lhs - rhs).abs() < CUDA_TOL);
+        }
+    }
+
+    #[test]
+    fn iq4_xs_gemv_matches_dequantize_then_gemv_reference() {
+        let rows = 3;
+        let cols = QK_K * 2;
+        let matrix = (0..rows * cols)
+            .map(|i| ((i as f32 * 0.017).sin() * 3.0) - 0.5)
+            .collect::<Vec<_>>();
+        let vector = (0..cols)
+            .map(|i| ((i as f32 * 0.07).cos() * 0.5) + 0.1)
+            .collect::<Vec<_>>();
+
+        let mut matrix_bytes = Vec::with_capacity(matrix.len() * 4);
+        for value in &matrix {
+            matrix_bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        let bytes_len =
+            crate::quantization::quantized_size(GgufQuantizationType::IQ4_XS, matrix.len())
+                .expect("quantized size is known");
+        let mut quantized_matrix = vec![0_u8; bytes_len];
+        crate::quantization::quantize_scalar(
+            GgufQuantizationType::F32,
+            GgufQuantizationType::IQ4_XS,
+            &matrix_bytes,
+            &mut quantized_matrix,
+        )
+        .expect("iq4_xs quantization should succeed");
+
+        let mut quantized_out = vec![0.0_f32; rows];
+        gemv_quantized_f32(
+            GgufQuantizationType::IQ4_XS,
+            &quantized_matrix,
+            rows,
+            cols,
+            &vector,
+            &mut quantized_out,
+        )
+        .expect("iq4_xs gemv should succeed");
+
+        let mut dequantized = vec![0.0_f32; rows * cols];
+        crate::quantization::dequantize_scalar(
+            GgufQuantizationType::IQ4_XS,
+            &quantized_matrix,
+            &mut dequantized,
+        )
+        .expect("dequantization should succeed");
+        let mut reference = vec![0.0_f32; rows];
+        gemv_f32(&dequantized, rows, cols, &vector, &mut reference)
+            .expect("f32 gemv should succeed");
+
+        for (lhs, rhs) in quantized_out.iter().zip(reference.iter()) {
+            assert!((lhs - rhs).abs() < 1.0e-3, "{lhs} vs {rhs}");
         }
     }
 

@@ -33,3 +33,7 @@ tracing = "0.1"
 [profile.release]
 lto = true
 panic = "abort"
+# Single codegen unit lets LLVM inline and optimize across the whole crate
+# (no parallel-codegen boundaries). Slower builds, faster deploy binary — the
+# right trade for a latency-bound inference engine.
+codegen-units = 1
