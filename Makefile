@@ -1,17 +1,18 @@
 SHELL := /bin/bash
 
-.PHONY: help fmt lint audit test build wasm check ci
+.PHONY: help fmt lint audit udeps test build wasm check ci
 
 help:
 	@echo "Common tasks:"
 	@echo "  make fmt    - Check Rust formatting"
 	@echo "  make lint   - Run clippy with warnings denied"
 	@echo "  make audit  - Run cargo-deny license/security audit"
+	@echo "  make udeps  - Detect unused Cargo dependencies (cargo-udeps + nightly)"
 	@echo "  make test   - Run workspace tests"
 	@echo "  make build  - Build release binaries for workspace crates"
 	@echo "  make wasm   - Build oxidize-core with wasm-bindgen output"
 	@echo "  make check  - Run fmt + lint + test"
-	@echo "  make ci     - Run check + build"
+	@echo "  make ci     - Run check + build + udeps"
 
 fmt:
 	cargo fmt --all --check
@@ -21,6 +22,9 @@ lint:
 
 audit:
 	cargo deny check
+
+udeps:
+	./scripts/check-udeps.sh
 
 test:
 	cargo test --workspace --all-targets
@@ -35,4 +39,4 @@ wasm:
 
 check: fmt lint audit test
 
-ci: check build
+ci: check udeps build

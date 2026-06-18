@@ -35,6 +35,7 @@ At minimum, run these before opening a pull request:
 make test
 make lint
 make fmt
+make udeps   # unused Cargo dependencies (needs nightly + cargo-udeps)
 ```
 
 For quick validation while iterating:
