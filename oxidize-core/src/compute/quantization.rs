@@ -43,11 +43,11 @@ const BLOCK_IQ1_M_SIZE: usize = QK_K / 8 + QK_K / 16 + QK_K / 32;
 // block_nvfp4: uint8_t d[4] (UE4M3 scales) + uint8_t qs[32] (packed E2M1)
 pub const BLOCK_NVFP4_SIZE: usize = QK_NVFP4 / QK_NVFP4_SUB + QK_NVFP4 / 2;
 // block_iq4_xs: ggml_half d + uint16_t scales_h + uint8_t scales_l[QK_K/64] + uint8_t qs[QK_K/2]
-const BLOCK_IQ4_XS_SIZE: usize = sizeof_of_f16() + 2 + QK_K / 64 + QK_K / 2;
+pub const BLOCK_IQ4_XS_SIZE: usize = sizeof_of_f16() + 2 + QK_K / 64 + QK_K / 2;
 // block_iq3_s: ggml_half d + uint8_t qs[QK_K/4] + uint8_t qh[QK_K/32] + uint8_t signs[QK_K/8] + uint8_t scales[QK_K/64]
 const BLOCK_IQ3_S_SIZE: usize = sizeof_of_f16() + QK_K / 4 + QK_K / 32 + QK_K / 8 + QK_K / 64;
 // IQ4_NL nonlinear codebook (shared by IQ4_NL and IQ4_XS)
-const KVALUES_IQ4NL: [i8; 16] = [
+pub(crate) const KVALUES_IQ4NL: [i8; 16] = [
     -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113,
 ];
 // sign mask used by IQ2/IQ3 dequant (kmask_iq2xs)
@@ -373,12 +373,79 @@ pub fn quantize_scalar_with_imatrix(
 
     let mut values = vec![0.0_f32; value_count];
     dequantize_scalar(source, input, &mut values)?;
+
+    // IQ4_XS minimizes a properly importance-weighted error in the encoder, so
+    // the raw values and the importance weights are passed through untouched.
+    // Other targets keep the legacy behaviour of pre-scaling values by
+    // importance before a plain encode.
+    if target == GgufQuantizationType::IQ4_XS {
+        return quantize_iq4_xs(&values, Some(imatrix.values()), output);
+    }
+
     let weighted_values = values
         .iter()
         .zip(imatrix.values())
         .map(|(value, importance)| value * importance)
         .collect::<Vec<_>>();
     quantize_from_f32_scalar(target, &weighted_values, output)
+}
+
+/// Quantize one F16/F32 byte chunk with per-value importance weights.
+///
+/// `weights` must hold one non-negative value per source element. Only targets
+/// with an importance-aware encoder (currently IQ4_XS) consume the weights;
+/// other targets fall back to the unweighted encode so callers can use a single
+/// streaming path regardless of target.
+pub fn quantize_scalar_weighted(
+    source: GgufQuantizationType,
+    target: GgufQuantizationType,
+    input: &[u8],
+    output: &mut [u8],
+    weights: &[f32],
+) -> Result<(), QuantizationError> {
+    let value_count = match source {
+        GgufQuantizationType::F32 => {
+            if !input.len().is_multiple_of(4) {
+                return Err(QuantizationError::InvalidInputLength {
+                    quantization: source,
+                    expected_multiple: 4,
+                    actual: input.len(),
+                });
+            }
+            input.len() / 4
+        }
+        GgufQuantizationType::F16 | GgufQuantizationType::BF16 => {
+            if !input.len().is_multiple_of(2) {
+                return Err(QuantizationError::InvalidInputLength {
+                    quantization: source,
+                    expected_multiple: 2,
+                    actual: input.len(),
+                });
+            }
+            input.len() / 2
+        }
+        other => return Err(QuantizationError::UnsupportedQuantizationType(other)),
+    };
+    if weights.len() != value_count {
+        return Err(QuantizationError::InvalidImportanceMatrix {
+            reason: "matrix length must match input value count",
+        });
+    }
+    let expected_output = quantized_size(target, value_count)?;
+    if output.len() != expected_output {
+        return Err(QuantizationError::InvalidOutputLength {
+            quantization: target,
+            expected: expected_output,
+            actual: output.len(),
+        });
+    }
+
+    let mut values = vec![0.0_f32; value_count];
+    dequantize_scalar(source, input, &mut values)?;
+    match target {
+        GgufQuantizationType::IQ4_XS => quantize_iq4_xs(&values, Some(weights), output),
+        other => quantize_from_f32_scalar(other, &values, output),
+    }
 }
 
 pub fn quantize_mixed_scalar(
@@ -629,6 +696,7 @@ fn quantize_from_f32_scalar(
             6,
             32.0,
         ),
+        GgufQuantizationType::IQ4_XS => quantize_iq4_xs(input, None, output),
         other => Err(QuantizationError::UnsupportedQuantizationType(other)),
     }
 }
@@ -1071,6 +1139,196 @@ pub fn quantize_q4_k_scalar(
     Ok(())
 }
 
+/// Nearest index into the (sorted, asymmetric) `KVALUES_IQ4NL` codebook.
+///
+/// The codebook is deliberately asymmetric: scaling a finite Gaussian sample so
+/// its max-magnitude entry maps to a fixed value yields an asymmetric
+/// distribution, so a symmetric table reconstructs poorly (see ikawrakow's
+/// IQ4_NL design notes). Linear scan over 16 entries is cheap and branchless.
+#[inline]
+fn best_index_iq4nl(value: f32) -> usize {
+    let mut best = 0usize;
+    let mut best_dist = f32::INFINITY;
+    for (idx, &v) in KVALUES_IQ4NL.iter().enumerate() {
+        let dist = (value - v as f32).abs();
+        if dist < best_dist {
+            best_dist = dist;
+            best = idx;
+        }
+    }
+    best
+}
+
+/// IQ4_XS encoder (inverse of [`dequantize_iq4_xs_scalar`]).
+///
+/// Non-linear 4-bit at ~4.25 bpw: super-block of 256 = 8 sub-blocks of 32, each
+/// reconstructed as `d * ls * KVALUES_IQ4NL[q]` with a 6-bit signed sub-block
+/// scale `ls` and a single f16 super-scale `d`. `weights` (when provided) is the
+/// per-value importance used to steer error away from activation-heavy columns;
+/// `None` falls back to the `x²` heuristic. The per-sub-block scale search is the
+/// `ntry` heuristic from ggml — deliberately *not* an exact RMSE solve, which is
+/// known to hurt observed quality.
+pub fn quantize_iq4_xs(
+    input: &[f32],
+    weights: Option<&[f32]>,
+    output: &mut [u8],
+) -> Result<(), QuantizationError> {
+    if !input.len().is_multiple_of(QK_K) {
+        return Err(QuantizationError::InvalidInputLength {
+            quantization: GgufQuantizationType::IQ4_XS,
+            expected_multiple: QK_K,
+            actual: input.len(),
+        });
+    }
+    if output.len() != (input.len() / QK_K) * BLOCK_IQ4_XS_SIZE {
+        return Err(QuantizationError::InvalidOutputLength {
+            quantization: GgufQuantizationType::IQ4_XS,
+            expected: (input.len() / QK_K) * BLOCK_IQ4_XS_SIZE,
+            actual: output.len(),
+        });
+    }
+    if let Some(w) = weights
+        && w.len() != input.len()
+    {
+        return Err(QuantizationError::InvalidImportanceMatrix {
+            reason: "matrix length must match input value count",
+        });
+    }
+
+    const SUB_BLOCKS: usize = QK_K / 32;
+    const NTRY: i32 = 7;
+    let val0 = KVALUES_IQ4NL[0] as f32;
+
+    let mut scales = [0.0_f32; SUB_BLOCKS];
+    let mut l_idx = [0_u8; QK_K];
+    let mut weight = [0.0_f32; 32];
+
+    for (block_idx, (in_block, out_block)) in input
+        .chunks_exact(QK_K)
+        .zip(output.chunks_exact_mut(BLOCK_IQ4_XS_SIZE))
+        .enumerate()
+    {
+        let block_weights = weights.map(|w| &w[block_idx * QK_K..block_idx * QK_K + QK_K]);
+
+        let mut sigma2 = 0.0_f32;
+        for &v in in_block {
+            sigma2 += v * v;
+        }
+        sigma2 *= 2.0 / QK_K as f32;
+
+        out_block.fill(0);
+
+        for sb in 0..SUB_BLOCKS {
+            let xb = &in_block[sb * 32..sb * 32 + 32];
+            match block_weights {
+                Some(qw) => {
+                    let qw = &qw[sb * 32..sb * 32 + 32];
+                    for j in 0..32 {
+                        weight[j] = qw[j] * (sigma2 + xb[j] * xb[j]).sqrt();
+                    }
+                }
+                None => {
+                    for j in 0..32 {
+                        weight[j] = xb[j] * xb[j];
+                    }
+                }
+            }
+
+            let mut amax = 0.0_f32;
+            let mut max = 0.0_f32;
+            for &v in xb {
+                let ax = v.abs();
+                if ax > amax {
+                    amax = ax;
+                    max = v;
+                }
+            }
+            if amax < 1.0e-8 {
+                scales[sb] = 0.0;
+                for j in 0..32 {
+                    l_idx[sb * 32 + j] = 0;
+                }
+                continue;
+            }
+
+            // Evaluate a candidate inverse-scale: returns (Σ w·q·x, Σ w·q²).
+            let eval = |inv_scale: f32| -> (f32, f32) {
+                let mut sumqx = 0.0_f32;
+                let mut sumq2 = 0.0_f32;
+                for j in 0..32 {
+                    let q = KVALUES_IQ4NL[best_index_iq4nl(inv_scale * xb[j])] as f32;
+                    let w = weight[j];
+                    sumqx += w * q * xb[j];
+                    sumq2 += w * q * q;
+                }
+                (sumqx, sumq2)
+            };
+
+            let inv0 = -val0 / max;
+            let (sumqx, sumq2) = eval(inv0);
+            let mut best = if sumq2 > 0.0 { sumqx * sumqx / sumq2 } else { 0.0 };
+            let mut best_scale = if sumq2 > 0.0 { sumqx / sumq2 } else { 0.0 };
+            for itry in -NTRY..=NTRY {
+                let inv_scale = (itry as f32 + val0) / max;
+                let (sx, s2) = eval(inv_scale);
+                if s2 > 0.0 && sx * sx > best * s2 {
+                    best = sx * sx / s2;
+                    best_scale = sx / s2;
+                }
+            }
+
+            scales[sb] = best_scale;
+            let inv_final = if best_scale != 0.0 { 1.0 / best_scale } else { 0.0 };
+            for j in 0..32 {
+                l_idx[sb * 32 + j] = best_index_iq4nl(inv_final * xb[j]) as u8;
+            }
+        }
+
+        // Quantize the eight sub-block scales against one f16 super-scale into
+        // signed 6-bit values, matching the decoder's `dl = d * (ls - 32)`.
+        let mut amax_scale = 0.0_f32;
+        let mut max_scale = 0.0_f32;
+        for &s in &scales {
+            let a = s.abs();
+            if a > amax_scale {
+                amax_scale = a;
+                max_scale = s;
+            }
+        }
+        if amax_scale == 0.0 {
+            continue;
+        }
+
+        let d_super = -max_scale / 32.0;
+        let inv_super = 1.0 / d_super;
+        let mut scales_h: u16 = 0;
+        for sb in 0..SUB_BLOCKS {
+            let ls = nearest_int(inv_super * scales[sb]).clamp(-32, 31);
+            let si = (ls + 32) as u16;
+            out_block[4 + sb / 2] |= ((si & 0xf) as u8) << (4 * (sb % 2));
+            scales_h |= (si >> 4) << (2 * sb);
+        }
+        out_block[0..2].copy_from_slice(&f32_to_f16_bits(d_super).to_le_bytes());
+        out_block[2..4].copy_from_slice(&scales_h.to_le_bytes());
+
+        for sb in 0..SUB_BLOCKS {
+            let qoff = 8 + sb * 16;
+            for k in 0..16 {
+                let lo = l_idx[sb * 32 + k] & 0xf;
+                let hi = l_idx[sb * 32 + k + 16] & 0xf;
+                out_block[qoff + k] = lo | (hi << 4);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// IQ4_XS encoder without an importance matrix (uses the `x²` weight heuristic).
+pub fn quantize_iq4_xs_scalar(input: &[f32], output: &mut [u8]) -> Result<(), QuantizationError> {
+    quantize_iq4_xs(input, None, output)
+}
+
 fn quantize_k_packed_scalar(
     quantization: GgufQuantizationType,
     input: &[f32],
@@ -1362,14 +1620,17 @@ pub fn dequantize_q3_k_scalar(input: &[u8], output: &mut [f32]) -> Result<(), Qu
         scales_raw[3] = ((scales_raw[1] >> 4) & 0x0F0F0F0F) | (((tmp >> 6) & 0x03030303) << 4);
         scales_raw[0] = (scales_raw[0] & 0x0F0F0F0F) | ((tmp & 0x03030303) << 4);
         scales_raw[1] = (scales_raw[1] & 0x0F0F0F0F) | (((tmp >> 2) & 0x03030303) << 4);
-        let scales = unsafe { std::slice::from_raw_parts(scales_raw.as_ptr() as *const i8, 16) };
+        let mut scale_bytes = [0u8; 16];
+        for (i, word) in scales_raw.iter().enumerate() {
+            scale_bytes[i * 4..(i + 1) * 4].copy_from_slice(&word.to_le_bytes());
+        }
 
         let mut q_ptr = 0;
         let mut is = 0;
         let mut m = 1u8;
         for _ in 0..2 {
             for _ in 0..4 {
-                let dl = d_all * (scales[is] as i32 - 32) as f32;
+                let dl = d_all * (scale_bytes[is] as i8 as i32 - 32) as f32;
                 is += 1;
                 let shift = ((is - 1) % 4) * 2;
                 for l in 0..16 {
@@ -1377,7 +1638,7 @@ pub fn dequantize_q3_k_scalar(input: &[u8], output: &mut [f32]) -> Result<(), Qu
                     let hbit = if (hmask[l] & m) != 0 { 0 } else { 4 };
                     out[q_ptr + l] = dl * ((qv - hbit) as f32);
                 }
-                let dl2 = d_all * (scales[is] as i32 - 32) as f32;
+                let dl2 = d_all * (scale_bytes[is] as i8 as i32 - 32) as f32;
                 is += 1;
                 for l in 0..16 {
                     let qv = ((qs[l + 16] >> shift) & 3) as i32;
@@ -1505,7 +1766,7 @@ pub fn dequantize_q6_k_scalar(input: &[u8], output: &mut [f32]) -> Result<(), Qu
         let d = f16_le_to_f32(&block[208..210]);
         let ql = &block[0..128];
         let qh = &block[128..192];
-        let sc = unsafe { std::slice::from_raw_parts(block[192..208].as_ptr() as *const i8, 16) };
+        let sc = &block[192..208];
         // QK_K=256 values are processed in two 128-element groups. Each group
         // advances into ql/qh/scales (ql+=64, qh+=32, scales+=8), matching the
         // reference dequantize_row_q6_K. Without these per-group offsets the
@@ -1528,10 +1789,10 @@ pub fn dequantize_q6_k_scalar(input: &[u8], output: &mut [f32]) -> Result<(), Qu
                 let q4 = ((ql[ql_off + l + 32] >> 4) as i32
                     | ((((qh[qh_off + l] >> 6) & 3) as i32) << 4))
                     - 32;
-                out[q_ptr + l] = d * sc[sc_off + is] as f32 * q1 as f32;
-                out[q_ptr + 32 + l] = d * sc[sc_off + is + 2] as f32 * q2 as f32;
-                out[q_ptr + 64 + l] = d * sc[sc_off + is + 4] as f32 * q3 as f32;
-                out[q_ptr + 96 + l] = d * sc[sc_off + is + 6] as f32 * q4 as f32;
+                out[q_ptr + l] = d * sc[sc_off + is] as i8 as f32 * q1 as f32;
+                out[q_ptr + 32 + l] = d * sc[sc_off + is + 2] as i8 as f32 * q2 as f32;
+                out[q_ptr + 64 + l] = d * sc[sc_off + is + 4] as i8 as f32 * q3 as f32;
+                out[q_ptr + 96 + l] = d * sc[sc_off + is + 6] as i8 as f32 * q4 as f32;
             }
             q_ptr += 128;
         }
@@ -1665,9 +1926,8 @@ pub fn dequantize_q8_k_scalar(input: &[u8], output: &mut [f32]) -> Result<(), Qu
         .zip(output.chunks_exact_mut(QK_K))
     {
         let d = f32::from_le_bytes([block[0], block[1], block[2], block[3]]);
-        let qs = unsafe { std::slice::from_raw_parts(block[4..260].as_ptr() as *const i8, 256) };
         for j in 0..QK_K {
-            out[j] = d * qs[j] as f32;
+            out[j] = d * (block[4 + j] as i8) as f32;
         }
     }
     Ok(())
@@ -1893,7 +2153,8 @@ pub fn dequantize_iq1_s_scalar(input: &[u8], output: &mut [f32]) -> Result<(), Q
         let qs = &block[2..34];
         let qh = &block[34..50];
         // qh is 16 uint16_t values
-        let qh_u16: &[u16] = unsafe { std::slice::from_raw_parts(qh.as_ptr() as *const u16, 16) };
+        let qh_u16: [u16; 16] =
+            std::array::from_fn(|i| u16::from_le_bytes([qh[i * 2], qh[i * 2 + 1]]));
 
         let mut out_ptr = 0_usize;
         let mut grid_vals = [0_i8; 8];
@@ -1937,7 +2198,8 @@ pub fn dequantize_iq1_m_scalar(input: &[u8], output: &mut [f32]) -> Result<(), Q
         let scales = &block[48..56];
 
         // Reconstruct scale f16 from 4 uint16_t values packed in scales
-        let sc: &[u16] = unsafe { std::slice::from_raw_parts(scales.as_ptr() as *const u16, 4) };
+        let sc: [u16; 4] =
+            std::array::from_fn(|i| u16::from_le_bytes([scales[i * 2], scales[i * 2 + 1]]));
         let scale_u16 =
             (sc[0] >> 12) | ((sc[1] >> 8) & 0x00f0) | ((sc[2] >> 4) & 0x0f00) | (sc[3] & 0xf000);
         let d = crate::tensor::f16_bits_to_f32(scale_u16);
@@ -2040,6 +2302,114 @@ mod tests {
         assert!(out.iter().all(|v| v.is_finite()));
         // scale = -32, low nibble of qs[0]=0 -> codebook[0] = -127 => -32*-127
         assert_eq!(out[0], -32.0 * KVALUES_IQ4NL[0] as f32);
+    }
+
+    /// Deterministic pseudo-Gaussian sample (Box–Muller on a LCG) so tests don't
+    /// need an RNG dependency but still exercise a realistic weight distribution.
+    fn gaussian_sample(count: usize) -> Vec<f32> {
+        let mut state: u64 = 0x1234_5678_9abc_def1;
+        let mut next = || {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((state >> 33) as f32) / ((1u64 << 31) as f32)
+        };
+        let mut out = Vec::with_capacity(count);
+        while out.len() < count {
+            let u1 = next().max(1.0e-7);
+            let u2 = next();
+            let r = (-2.0 * u1.ln()).sqrt();
+            out.push(r * (std::f32::consts::TAU * u2).cos());
+            if out.len() < count {
+                out.push(r * (std::f32::consts::TAU * u2).sin());
+            }
+        }
+        out
+    }
+
+    fn mse(a: &[f32], b: &[f32]) -> f64 {
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| {
+                let d = (*x - *y) as f64;
+                d * d
+            })
+            .sum::<f64>()
+            / a.len() as f64
+    }
+
+    #[test]
+    fn iq4_xs_encode_decode_is_self_consistent() {
+        let values = gaussian_sample(QK_K * 4);
+        let mut encoded = vec![0u8; (values.len() / QK_K) * BLOCK_IQ4_XS_SIZE];
+        quantize_iq4_xs_scalar(&values, &mut encoded).expect("encode");
+        let mut decoded = vec![0f32; values.len()];
+        dequantize_iq4_xs_scalar(&encoded, &mut decoded).expect("decode");
+        assert!(decoded.iter().all(|v| v.is_finite()));
+        // Re-encoding the decoded values must reproduce identical bytes: the
+        // decoded values already sit on the codebook grid, so the encoder is a
+        // fixed point there.
+        let mut re_encoded = vec![0u8; encoded.len()];
+        quantize_iq4_xs_scalar(&decoded, &mut re_encoded).expect("re-encode");
+        assert_eq!(encoded, re_encoded);
+    }
+
+    #[test]
+    fn iq4_xs_beats_q4_0_on_gaussian_weights() {
+        let values = gaussian_sample(QK_K * 8);
+
+        let mut iq4 = vec![0u8; (values.len() / QK_K) * BLOCK_IQ4_XS_SIZE];
+        quantize_iq4_xs_scalar(&values, &mut iq4).expect("iq4 encode");
+        let mut iq4_dec = vec![0f32; values.len()];
+        dequantize_iq4_xs_scalar(&iq4, &mut iq4_dec).expect("iq4 decode");
+
+        let mut q40 = vec![0u8; (values.len() / QK4_0) * BLOCK_Q4_0_SIZE];
+        quantize_q4_0_scalar(&values, &mut q40).expect("q4_0 encode");
+        let mut q40_dec = vec![0f32; values.len()];
+        dequantize_q4_0_scalar(&q40, &mut q40_dec).expect("q4_0 decode");
+
+        let iq4_err = mse(&values, &iq4_dec);
+        let q40_err = mse(&values, &q40_dec);
+        assert!(
+            iq4_err < q40_err,
+            "IQ4_XS MSE {iq4_err} should beat Q4_0 MSE {q40_err}"
+        );
+    }
+
+    #[test]
+    fn iq4_xs_imatrix_lowers_error_on_weighted_columns() {
+        let values = gaussian_sample(QK_K * 4);
+        // Importance heavily favors the first half of every 32-wide sub-block.
+        let weights = (0..values.len())
+            .map(|i| if i % 32 < 16 { 8.0 } else { 1.0 })
+            .collect::<Vec<_>>();
+
+        let mut plain = vec![0u8; (values.len() / QK_K) * BLOCK_IQ4_XS_SIZE];
+        quantize_iq4_xs(&values, None, &mut plain).expect("plain encode");
+        let mut plain_dec = vec![0f32; values.len()];
+        dequantize_iq4_xs_scalar(&plain, &mut plain_dec).expect("plain decode");
+
+        let mut weighted = vec![0u8; plain.len()];
+        quantize_iq4_xs(&values, Some(&weights), &mut weighted).expect("weighted encode");
+        let mut weighted_dec = vec![0f32; values.len()];
+        dequantize_iq4_xs_scalar(&weighted, &mut weighted_dec).expect("weighted decode");
+
+        // Weighted error on the high-importance columns should drop.
+        let important_err = |dec: &[f32]| -> f64 {
+            values
+                .iter()
+                .zip(dec)
+                .enumerate()
+                .filter(|(i, _)| i % 32 < 16)
+                .map(|(_, (x, y))| {
+                    let d = (*x - *y) as f64;
+                    d * d
+                })
+                .sum()
+        };
+        assert!(
+            important_err(&weighted_dec) <= important_err(&plain_dec),
+            "imatrix should not increase error on important columns"
+        );
+        assert!(weighted_dec.iter().all(|v| v.is_finite()));
     }
 
     #[test]
