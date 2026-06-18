@@ -39,8 +39,8 @@ pub fn clip_to_tensor(
     decode_clip(&frames, cfg)
 }
 
-/// Like [`clip_to_tensor`], but returns the decoded RGB frames themselves
-/// (used to build prototype/average clips rather than training tensors).
+/// Decode cached/extracted frames to RGB images (used by tooling).
+#[allow(dead_code)]
 pub fn clip_to_frames(
     sample: &VideoSample,
     cfg: FrameConfig,
@@ -175,6 +175,33 @@ fn patchify_into(img: &RgbImage, cfg: FrameConfig, out: &mut Vec<f32>) {
     }
 }
 
+/// Turn normalized patch values back into an RGB image.
+pub fn patches_to_image(patches: &[f32], cfg: FrameConfig) -> RgbImage {
+    let side = cfg.patches_per_side();
+    let p = cfg.patch_size as u32;
+    let mut img = RgbImage::new(cfg.frame_size as u32, cfg.frame_size as u32);
+    let mut idx = 0usize;
+    for gy in 0..side as u32 {
+        for gx in 0..side as u32 {
+            for ly in 0..p {
+                for lx in 0..p {
+                    let r = denorm(patches[idx]);
+                    let g = denorm(patches[idx + 1]);
+                    let b = denorm(patches[idx + 2]);
+                    img.put_pixel(gx * p + lx, gy * p + ly, image::Rgb([r, g, b]));
+                    idx += 3;
+                }
+            }
+        }
+    }
+    img
+}
+
+#[inline]
+fn denorm(v: f32) -> u8 {
+    ((v + 1.0) * 127.5).clamp(0.0, 255.0) as u8
+}
+
 /// Evenly spaced indices into `available` items (with repetition if scarce).
 fn pick_indices(available: usize, want: usize) -> Vec<usize> {
     if available == 0 || want == 0 {
@@ -222,5 +249,19 @@ mod tests {
         assert_eq!(out.len(), cfg.num_patches() * cfg.patch_dim());
         // A black pixel maps to -1.0 under the normalization.
         assert!(out.iter().all(|&v| (v + 1.0).abs() < 1e-6));
+    }
+
+    #[test]
+    fn patches_roundtrip_preserves_black() {
+        let cfg = FrameConfig {
+            num_frames: 1,
+            frame_size: 8,
+            patch_size: 4,
+        };
+        let img = RgbImage::new(8, 8);
+        let mut patches = Vec::new();
+        patchify_into(&img, cfg, &mut patches);
+        let back = patches_to_image(&patches, cfg);
+        assert_eq!(back.dimensions(), img.dimensions());
     }
 }

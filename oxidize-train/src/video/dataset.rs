@@ -86,6 +86,7 @@ pub fn load_dataset(config: &VideoTrainingConfig) -> Result<VideoDataset, VideoE
     config.validate()?;
 
     let mut samples = build_manifest(&config.data_root)?;
+    filter_samples(&mut samples, &config.exclude, config.merge_aliases);
     if let Some(cap) = config.max_videos {
         let mut rng = StdRng::seed_from_u64(config.seed);
         samples.shuffle(&mut rng);
@@ -202,6 +203,18 @@ fn balanced_indices(labels: &[usize], classes: usize, seed: u64) -> Vec<usize> {
     }
     selection.sort_unstable();
     selection
+}
+
+pub fn filter_samples(samples: &mut Vec<VideoSample>, exclude: &[String], merge_aliases: bool) {
+    let exclude_lc: Vec<String> = exclude.iter().map(|s| s.to_lowercase()).collect();
+    samples.retain(|s| !exclude_lc.contains(&s.username.to_lowercase()));
+    if merge_aliases {
+        for sample in samples.iter_mut() {
+            if sample.username.eq_ignore_ascii_case("sanymaaa") {
+                sample.username = "sanymaa".to_string();
+            }
+        }
+    }
 }
 
 fn assign_labels(
