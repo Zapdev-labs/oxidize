@@ -1,0 +1,21 @@
+oxidize-cli/src/pipeline.rs
+  s_9977901d17a81e::t_d078987a8760e0 216-220,245,256-257,259-261
+oxidize-quantize/src/main.rs
+  s_9977901d17a81e::t_d078987a8760e0 1,12,15-93,107-110,138,169-180,187,197,203,261-263,270,284,302,307,315,344-345,356,360-386,463,466,566-567,600,621,830-852,1033,1102,1134,1140,1146,1152,1201,1235
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.8",
+  "base_commit_sha": "3e264570e2aaefcd938babb0d8ae8e5b0a4e09be",
+  "prompts": {},
+  "sessions": {
+    "s_9977901d17a81e": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "3cd73ec3-5368-4b64-bd49-5601fc62d824",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
