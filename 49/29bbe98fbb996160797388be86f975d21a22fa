@@ -1,0 +1,21 @@
+oxidize-train/src/video/config.rs
+  s_9977901d17a81e::t_88fdd51c243340 114-117,150,152-154,156-157,163-164
+oxidize-train/src/video/mod.rs
+  s_9977901d17a81e::t_88fdd51c243340 1,3-6,12,18,21-25
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.8",
+  "base_commit_sha": "4929bbe98fbb996160797388be86f975d21a22fa",
+  "prompts": {},
+  "sessions": {
+    "s_9977901d17a81e": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "3cd73ec3-5368-4b64-bd49-5601fc62d824",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
