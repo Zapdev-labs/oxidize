@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File};
 use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
@@ -9,8 +9,87 @@ use oxidize_core::gguf::{
     GgufFile, GgufMetadataArray, GgufMetadataType, GgufMetadataValue, GgufQuantizationType,
     GgufTensorInfo, load_mapped_gguf, parse_gguf,
 };
-use oxidize_core::quantization::{quantize_scalar, quantized_size};
+use oxidize_core::quantization::{quantize_scalar, quantize_scalar_weighted, quantized_size};
 use rayon::prelude::*;
+
+/// Per-tensor importance vectors (one entry per input column), keyed by tensor
+/// name. Parsed from a llama.cpp `.imatrix`/`.dat` file.
+type Imatrix = HashMap<String, Vec<f32>>;
+
+/// Parse a llama.cpp legacy importance-matrix file.
+///
+/// Layout: `int32 n_entries`, then per entry `int32 name_len`, `name bytes`,
+/// `int32 ncall`, `int32 nval`, `f32[nval]`. Stored values are summed squared
+/// activations; we divide by `ncall` for a stable per-column mean.
+fn load_imatrix(path: &Path) -> Result<Imatrix> {
+    let bytes = fs::read(path)
+        .with_context(|| format!("failed to read imatrix file: {}", path.display()))?;
+    if bytes.len() >= 4 && &bytes[0..4] == b"GGUF" {
+        bail!(
+            "imatrix {} looks like a GGUF-format imatrix; only the legacy .dat layout is supported",
+            path.display()
+        );
+    }
+    let mut cursor = 0usize;
+    let read_i32 = |buf: &[u8], at: &mut usize| -> Result<i32> {
+        let end = at.checked_add(4).ok_or_else(|| anyhow!("imatrix truncated"))?;
+        if end > buf.len() {
+            bail!("imatrix truncated while reading i32");
+        }
+        let value = i32::from_le_bytes([buf[*at], buf[*at + 1], buf[*at + 2], buf[*at + 3]]);
+        *at = end;
+        Ok(value)
+    };
+
+    let n_entries = read_i32(&bytes, &mut cursor)?;
+    if n_entries < 0 {
+        bail!("imatrix has negative entry count: {n_entries}");
+    }
+    let mut matrix = Imatrix::with_capacity(n_entries as usize);
+    for _ in 0..n_entries {
+        let name_len = read_i32(&bytes, &mut cursor)?;
+        if name_len < 0 {
+            bail!("imatrix entry has negative name length");
+        }
+        let name_len = name_len as usize;
+        let name_end = cursor
+            .checked_add(name_len)
+            .ok_or_else(|| anyhow!("imatrix truncated"))?;
+        if name_end > bytes.len() {
+            bail!("imatrix truncated while reading name");
+        }
+        let name = String::from_utf8_lossy(&bytes[cursor..name_end]).into_owned();
+        cursor = name_end;
+
+        let ncall = read_i32(&bytes, &mut cursor)?;
+        let nval = read_i32(&bytes, &mut cursor)?;
+        if nval < 0 {
+            bail!("imatrix entry {name} has negative value count");
+        }
+        let nval = nval as usize;
+        let data_end = cursor
+            .checked_add(nval * 4)
+            .ok_or_else(|| anyhow!("imatrix truncated"))?;
+        if data_end > bytes.len() {
+            bail!("imatrix truncated while reading values for {name}");
+        }
+        let scale = if ncall > 0 { ncall as f32 } else { 1.0 };
+        let mut values = Vec::with_capacity(nval);
+        for chunk in bytes[cursor..data_end].chunks_exact(4) {
+            let raw = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            // Clamp to non-negative finite importance; the encoder requires it.
+            let v = if raw.is_finite() && raw > 0.0 {
+                raw / scale
+            } else {
+                0.0
+            };
+            values.push(v);
+        }
+        cursor = data_end;
+        matrix.insert(name, values);
+    }
+    Ok(matrix)
+}
 
 const STREAM_VALUES_PER_CHUNK: usize = 256 * 4096;
 
@@ -25,6 +104,10 @@ struct Args {
     source: Option<GgufQuantizationType>,
     #[arg(long, value_parser = parse_quantization_type)]
     target: Option<GgufQuantizationType>,
+    /// Optional llama.cpp importance matrix (.imatrix/.dat) to steer error away
+    /// from activation-heavy columns. Currently consumed by IQ4_XS.
+    #[arg(long)]
+    imatrix: Option<PathBuf>,
     /// Append an already-encoded tensor to an input GGUF without requantizing
     /// existing tensors. Format: name:path:dim0,dim1:type
     #[arg(long)]
@@ -52,6 +135,7 @@ fn parse_quantization_type(value: &str) -> Result<GgufQuantizationType, String> 
         "Q5_K_S" => Ok(GgufQuantizationType::Q5_K_S),
         "Q5_K_M" => Ok(GgufQuantizationType::Q5_K_M),
         "Q6_K" => Ok(GgufQuantizationType::Q6_K),
+        "IQ4_XS" => Ok(GgufQuantizationType::IQ4_XS),
         _ => Err(format!("unsupported quantization type: {value}")),
     }
 }
@@ -82,12 +166,25 @@ fn run(args: Args) -> Result<()> {
             .map_err(|err| anyhow!(err))
             .context("failed to initialize quantization thread pool")?;
     }
+    let imatrix = match &args.imatrix {
+        Some(path) => {
+            let loaded = load_imatrix(path)?;
+            eprintln!(
+                "loaded imatrix {} ({} tensors)",
+                path.display(),
+                loaded.len()
+            );
+            Some(loaded)
+        }
+        None => None,
+    };
     quantize_file(
         &args.input,
         &args.output,
         args.source,
         args.target,
         &args.append_tensor,
+        imatrix.as_ref(),
     )
 }
 
@@ -97,12 +194,13 @@ fn quantize_file(
     source: Option<GgufQuantizationType>,
     target: Option<GgufQuantizationType>,
     append_specs: &[String],
+    imatrix: Option<&Imatrix>,
 ) -> Result<()> {
     if input_is_gguf(input_path)? {
         if append_specs.is_empty() {
             let target =
                 target.ok_or_else(|| anyhow!("--target is required for GGUF quantization"))?;
-            quantize_gguf_stream(input_path, output_path, target)?;
+            quantize_gguf_stream(input_path, output_path, target, imatrix)?;
         } else {
             let input = fs::read(input_path)
                 .with_context(|| format!("failed to read input file: {}", input_path.display()))?;
@@ -160,12 +258,16 @@ struct TensorPlan {
     source_quantization: GgufQuantizationType,
     output_quantization: GgufQuantizationType,
     quantize: bool,
+    /// Per-input-column importance (length == dimensions[0]) when an imatrix
+    /// entry exists for this tensor and the target consumes it.
+    importance: Option<Vec<f32>>,
 }
 
 fn quantize_gguf_stream(
     input_path: &Path,
     output_path: &Path,
     target: GgufQuantizationType,
+    imatrix: Option<&Imatrix>,
 ) -> Result<()> {
     ensure_gguf_target_supported(target)?;
     let mapped = load_mapped_gguf(input_path)
@@ -179,7 +281,7 @@ fn quantize_gguf_stream(
         "general.file_type".to_owned(),
         GgufMetadataValue::Uint32(gguf_type_id(target)?),
     );
-    let plans = build_tensor_plans(parsed, input.len(), target)?;
+    let plans = build_tensor_plans(parsed, input.len(), target, imatrix)?;
 
     let mut output = File::create(output_path)
         .with_context(|| format!("failed to create output file: {}", output_path.display()))?;
@@ -197,11 +299,12 @@ fn build_tensor_plans(
     parsed: &GgufFile,
     input_len: usize,
     target: GgufQuantizationType,
+    imatrix: Option<&Imatrix>,
 ) -> Result<Vec<TensorPlan>> {
     parsed
         .tensor_infos
         .iter()
-        .map(|tensor| build_tensor_plan(tensor, input_len, target))
+        .map(|tensor| build_tensor_plan(tensor, input_len, target, imatrix))
         .collect()
 }
 
@@ -209,6 +312,7 @@ fn build_tensor_plan(
     tensor: &GgufTensorInfo,
     input_len: usize,
     target: GgufQuantizationType,
+    imatrix: Option<&Imatrix>,
 ) -> Result<TensorPlan> {
     let source = GgufQuantizationType::from_ggml_type(tensor.ggml_type);
     let value_count = tensor_value_count(tensor)?;
@@ -237,6 +341,8 @@ fn build_tensor_plan(
         tensor.ggml_type
     };
 
+    let importance = tensor_importance(tensor, output_quantization, quantize, imatrix);
+
     Ok(TensorPlan {
         name: tensor.name.clone(),
         dimensions: tensor.dimensions.clone(),
@@ -247,7 +353,35 @@ fn build_tensor_plan(
         source_quantization: source,
         output_quantization,
         quantize,
+        importance,
     })
+}
+
+/// Look up the per-column importance for a tensor, if the target consumes an
+/// imatrix and a length-matching entry exists. Length must equal `dimensions[0]`
+/// (the input-column count) so it can be broadcast across rows during encode.
+fn tensor_importance(
+    tensor: &GgufTensorInfo,
+    output_quantization: GgufQuantizationType,
+    quantize: bool,
+    imatrix: Option<&Imatrix>,
+) -> Option<Vec<f32>> {
+    if !quantize || output_quantization != GgufQuantizationType::IQ4_XS {
+        return None;
+    }
+    let imatrix = imatrix?;
+    let columns = usize::try_from(*tensor.dimensions.first()?).ok()?;
+    let values = imatrix.get(&tensor.name)?;
+    if values.len() != columns {
+        eprintln!(
+            "imatrix entry {} has {} values but tensor expects {} columns; quantizing without it",
+            tensor.name,
+            values.len(),
+            columns
+        );
+        return None;
+    }
+    Some(values.clone())
 }
 
 fn select_output_quantization(
@@ -326,9 +460,10 @@ fn uses_k_quant_blocks(quantization: GgufQuantizationType) -> bool {
             | GgufQuantizationType::Q3_K_L
             | GgufQuantizationType::Q4_K_S
             | GgufQuantizationType::Q4_K_M
-            | GgufQuantizationType::Q5_K_S
+            |         GgufQuantizationType::Q5_K_S
             | GgufQuantizationType::Q5_K_M
             | GgufQuantizationType::Q6_K
+            | GgufQuantizationType::IQ4_XS
     )
 }
 
@@ -428,7 +563,8 @@ fn ensure_gguf_target_supported(target: GgufQuantizationType) -> Result<()> {
         | GgufQuantizationType::Q4_K_M
         | GgufQuantizationType::Q5_K_S
         | GgufQuantizationType::Q5_K_M
-        | GgufQuantizationType::Q6_K => Ok(()),
+        | GgufQuantizationType::Q6_K
+        | GgufQuantizationType::IQ4_XS => Ok(()),
         other => bail!("unsupported quantization target: {other:?}"),
     }
 }
@@ -461,6 +597,7 @@ fn gguf_type_id(quantization: GgufQuantizationType) -> Result<u32> {
         GgufQuantizationType::Q5_K_S => Ok(16),
         GgufQuantizationType::Q5_K_M => Ok(17),
         GgufQuantizationType::Q6_K => Ok(18),
+        GgufQuantizationType::IQ4_XS => Ok(30),
         other => bail!("unsupported GGUF tensor type: {other:?}"),
     }
 }
@@ -481,6 +618,7 @@ fn ggml_type_id(quantization: GgufQuantizationType) -> Result<u32> {
         GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M => Ok(12),
         GgufQuantizationType::Q5_K_S | GgufQuantizationType::Q5_K_M => Ok(13),
         GgufQuantizationType::Q6_K => Ok(14),
+        GgufQuantizationType::IQ4_XS => Ok(23),
         GgufQuantizationType::BF16 => Ok(30),
         other => bail!("unsupported GGML tensor type: {other:?}"),
     }
@@ -689,12 +827,29 @@ fn quantize_tensor_chunk(
     let output_len =
         quantized_size(tensor.output_quantization, values).map_err(|err| anyhow!(err))?;
     let mut output_chunk = vec![0_u8; output_len];
-    quantize_scalar(
-        tensor.source_quantization,
-        tensor.output_quantization,
-        input_chunk,
-        &mut output_chunk,
-    )
+    match &tensor.importance {
+        Some(importance) => {
+            // Broadcast per-column importance across rows: the global value index
+            // `start_value + i` maps to column `index % columns` (row-major).
+            let columns = importance.len();
+            let weights = (0..values)
+                .map(|i| importance[(start_value + i) % columns])
+                .collect::<Vec<_>>();
+            quantize_scalar_weighted(
+                tensor.source_quantization,
+                tensor.output_quantization,
+                input_chunk,
+                &mut output_chunk,
+                &weights,
+            )
+        }
+        None => quantize_scalar(
+            tensor.source_quantization,
+            tensor.output_quantization,
+            input_chunk,
+            &mut output_chunk,
+        ),
+    }
     .map_err(|err| anyhow!(err))
     .with_context(|| format!("failed to quantize tensor {}", tensor.name))?;
     Ok(output_chunk)
@@ -875,6 +1030,7 @@ mod tests {
             Some(GgufQuantizationType::F32),
             Some(GgufQuantizationType::F16),
             &[],
+            None,
         )
         .expect("quantization should succeed");
 
@@ -943,6 +1099,7 @@ mod tests {
             None,
             Some(GgufQuantizationType::Q8_0),
             &[],
+            None,
         )
         .expect("GGUF quantization should succeed");
 
@@ -974,25 +1131,25 @@ mod tests {
     #[test]
     fn q4_k_m_policy_uses_mixed_types_and_deepseek_fallbacks() {
         let output = tensor_info("output.weight", vec![256, 256], 1);
-        let output_plan = build_tensor_plan(&output, 256 * 256 * 2, GgufQuantizationType::Q4_K_M)
+        let output_plan = build_tensor_plan(&output, 256 * 256 * 2, GgufQuantizationType::Q4_K_M, None)
             .expect("output plan should build");
         assert_eq!(output_plan.output_quantization, GgufQuantizationType::Q6_K);
         assert_eq!(output_plan.output_ggml_type, 14);
 
         let mla = tensor_info("blk.0.attn_k_b.weight", vec![128, 512, 64, 1], 30);
-        let mla_plan = build_tensor_plan(&mla, 128 * 512 * 64 * 2, GgufQuantizationType::Q4_K_M)
+        let mla_plan = build_tensor_plan(&mla, 128 * 512 * 64 * 2, GgufQuantizationType::Q4_K_M, None)
             .expect("MLA plan should build");
         assert_eq!(mla_plan.output_quantization, GgufQuantizationType::Q5_0);
         assert_eq!(mla_plan.output_ggml_type, 6);
 
         let norm = tensor_info("blk.0.attn_norm.weight", vec![256], 0);
-        let norm_plan = build_tensor_plan(&norm, 256 * 4, GgufQuantizationType::Q4_K_M)
+        let norm_plan = build_tensor_plan(&norm, 256 * 4, GgufQuantizationType::Q4_K_M, None)
             .expect("norm plan should build");
         assert_eq!(norm_plan.output_quantization, GgufQuantizationType::F32);
         assert!(!norm_plan.quantize);
 
         let router = tensor_info("blk.0.ffn_gate_inp.weight", vec![7168, 268], 0);
-        let router_plan = build_tensor_plan(&router, 7168 * 268 * 4, GgufQuantizationType::Q4_K_M)
+        let router_plan = build_tensor_plan(&router, 7168 * 268 * 4, GgufQuantizationType::Q4_K_M, None)
             .expect("router plan should build");
         assert_eq!(router_plan.output_quantization, GgufQuantizationType::F32);
         assert!(!router_plan.quantize);
@@ -1041,6 +1198,7 @@ mod tests {
             None,
             Some(GgufQuantizationType::Q4_K_M),
             &[],
+            None,
         )
         .expect("GGUF Q4_K_M quantization should succeed");
 
@@ -1074,6 +1232,7 @@ mod tests {
             None,
             Some(GgufQuantizationType::F16),
             &[],
+            None,
         )
         .expect_err("raw input without source should fail");
         assert!(err.to_string().contains("--source is required"));
