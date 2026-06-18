@@ -187,9 +187,18 @@ pub const GEMV_Q8_0_DIRECT_KERNEL_NAME: &str = "gemv_q8_0_kernel";
 pub const GEMV_Q4_0_DIRECT_KERNEL_NAME: &str = "gemv_q4_0_kernel";
 /// On-the-fly Q4_K × Q8_K GEMV (no f16 materialization; OXK GPU path).
 pub const GEMV_Q4_K_DIRECT_KERNEL_NAME: &str = "gemv_q4_k_kernel";
+/// Q4_K × F32 GEMV — GPU-native activation path (input stays on GPU, no Q8K quantization).
+pub const GEMV_Q4K_F32IN_KERNEL_NAME: &str = "gemv_q4k_f32in_kernel";
+/// Q6_K × F32 GEMV — GPU-native activation path for Q6_K weight matrices.
+pub const GEMV_Q6K_F32IN_KERNEL_NAME: &str = "gemv_q6k_f32in_kernel";
 pub const GEMV_IQ1_S_KERNEL_NAME: &str = "gemv_iq1_s_kernel";
 pub const GEMV_IQ1_M_KERNEL_NAME: &str = "gemv_iq1_m_kernel";
 pub const GEMV_NVFP4_KERNEL_NAME: &str = "gemv_nvfp4_kernel";
+pub const RMS_NORM_KERNEL_NAME: &str = "rms_norm_f32_kernel";
+pub const RESIDUAL_ADD_KERNEL_NAME: &str = "residual_add_f32_kernel";
+pub const SILU_MUL_KERNEL_NAME: &str = "silu_mul_f32_kernel";
+pub const CAST_F32_TO_F16_KERNEL_NAME: &str = "cast_f32_to_f16_kernel";
+pub const CAST_F16_TO_F32_KERNEL_NAME: &str = "cast_f16_to_f32_kernel";
 
 /// Whether [`gemv_quantized_cuda`] has a GPU dequant kernel for this type.
 /// Callers should fall back to the CPU quantized path when this is `false`.
@@ -220,41 +229,22 @@ fn dequant_kernel_for(quantization: GgufQuantizationType) -> Option<(&'static st
 const GEMV_F32_PTX: &str = include_str!(concat!(env!("OUT_DIR"), "/gemv_f32.ptx"));
 
 #[cfg(feature = "cuda")]
-type WeightCacheKey = (usize, usize, u64);
-
-/// Fast, non-cryptographic FNV-1a 64-bit hash for content-aware cache keys.
-#[cfg(feature = "cuda")]
-fn hash_bytes(data: &[u8]) -> u64 {
-    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
-    const FNV_PRIME: u64 = 0x0100_0000_01b3;
-    let mut hash = FNV_OFFSET;
-    for &byte in data {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(FNV_PRIME);
-    }
-    hash
-}
+// Weight cache key: (ptr, len). Model weights are mmap'd and immutable for
+// the lifetime of inference — the pointer is a stable unique identity. No
+// content hashing needed; hashing MB-sized tensors on every GEMV call was
+// the primary throughput bottleneck (400MB+ hashed per token on 1B models).
+type WeightCacheKey = (usize, usize);
 
 #[cfg(feature = "cuda")]
-fn hash_f32_slice(slice: &[f32]) -> u64 {
-    // SAFETY: `f32` has a fixed-size, padding-free representation.
-    let bytes = unsafe {
-        std::slice::from_raw_parts(
-            slice.as_ptr() as *const u8,
-            slice.len() * std::mem::size_of::<f32>(),
-        )
-    };
-    hash_bytes(bytes)
-}
-
-#[cfg(feature = "cuda")]
+#[inline(always)]
 fn f32_cache_key(slice: &[f32]) -> WeightCacheKey {
-    (slice.as_ptr() as usize, slice.len(), hash_f32_slice(slice))
+    (slice.as_ptr() as usize, slice.len())
 }
 
 #[cfg(feature = "cuda")]
+#[inline(always)]
 fn bytes_cache_key(slice: &[u8]) -> WeightCacheKey {
-    (slice.as_ptr() as usize, slice.len(), hash_bytes(slice))
+    (slice.as_ptr() as usize, slice.len())
 }
 
 // ---------------------------------------------------------------------------
@@ -294,6 +284,26 @@ struct LayerEntry {
     bytes: usize,
 }
 
+/// GPU-resident activation buffers for a single decode step.
+///
+/// Allocated once (sized to the model's `hidden_size` / `intermediate_size`)
+/// and reused across tokens to avoid per-token device allocations.
+#[cfg(feature = "cuda")]
+pub struct GpuActivationBuffer {
+    /// Current residual hidden state `[hidden_size]`.
+    pub hidden: cust::memory::DeviceBuffer<f32>,
+    /// RMS-normed copy of `hidden` `[hidden_size]`.
+    pub normed: cust::memory::DeviceBuffer<f32>,
+    /// FFN gate-projection output `[intermediate_size]`.
+    pub ffn_gate: cust::memory::DeviceBuffer<f32>,
+    /// FFN up-projection output `[intermediate_size]`.
+    pub ffn_up: cust::memory::DeviceBuffer<f32>,
+    /// SiLU(gate) * up result fed into the down-projection `[intermediate_size]`.
+    pub ffn_down_in: cust::memory::DeviceBuffer<f32>,
+    pub hidden_size: usize,
+    pub intermediate_size: usize,
+}
+
 #[cfg(feature = "cuda")]
 struct GpuState {
     // Held to keep the CUDA context current for this thread; never read.
@@ -325,6 +335,9 @@ struct GpuState {
     orphan_quant_keys: std::collections::VecDeque<WeightCacheKey>,
     /// Reusable Q8_K activation buffers keyed by byte length.
     q8k_pool: std::collections::HashMap<usize, Vec<cust::memory::DeviceBuffer<u8>>>,
+    /// Optional GPU-resident activation buffers (hidden state, normed, FFN
+    /// gate/up/down_in).  `None` until `gpu_init_activation_buffers` is called.
+    activation: Option<GpuActivationBuffer>,
 }
 
 #[cfg(feature = "cuda")]
@@ -564,6 +577,7 @@ fn gpu_init() -> Result<GpuState, String> {
         resident_quant: std::collections::HashMap::new(),
         orphan_quant_keys: std::collections::VecDeque::new(),
         q8k_pool: std::collections::HashMap::new(),
+        activation: None,
     })
 }
 
@@ -1114,6 +1128,77 @@ pub fn gemv_q4_k_direct_cuda(
     .map_err(GemvCudaError::Cuda)
 }
 
+/// Q4_K × F32 GEMV where the input vector already lives in a GPU buffer
+/// (`d_input`) and the result is written into `d_output` without any D2H copy.
+///
+/// This is the hot path for the GPU-native forward pass: the hidden state stays
+/// on the GPU across all FFN operations, eliminating the per-layer CPU↔GPU
+/// round-trips that otherwise dominate decode latency.
+#[cfg(feature = "cuda")]
+pub fn gemv_q4k_f32in_to_device_cuda(
+    quantized_matrix: &[u8],
+    rows: usize,
+    cols: usize,
+    d_input: &cust::memory::DeviceBuffer<f32>,
+    d_output: &cust::memory::DeviceBuffer<f32>,
+) -> Result<(), GemvCudaError> {
+    if !cols.is_multiple_of(256) {
+        return Err(GemvCudaError::InvalidVectorLength {
+            expected: cols.div_ceil(256) * 256,
+            actual: cols,
+        });
+    }
+    let blocks_per_row = cols / 256;
+    let expected_len = rows.saturating_mul(blocks_per_row).saturating_mul(144);
+    if quantized_matrix.len() != expected_len {
+        return Err(GemvCudaError::InvalidMatrixLength {
+            expected: expected_len,
+            actual: quantized_matrix.len(),
+        });
+    }
+    if d_input.len() < cols || d_output.len() < rows {
+        return Err(GemvCudaError::InvalidOutputLength {
+            expected: rows,
+            actual: d_output.len(),
+        });
+    }
+    let rows_u32 = rows as u32;
+    let blocks_u32 = blocks_per_row as u32;
+
+    with_gpu(|gpu| {
+        let key = bytes_cache_key(quantized_matrix);
+        gpu.ensure_resident_quant(key, quantized_matrix)?;
+        let matrix_ptr = gpu
+            .resident_quant
+            .get(&key)
+            .ok_or_else(|| "Q4K weight missing from resident cache".to_string())?
+            .as_device_ptr();
+
+        let block_size = 256_u32;
+        let grid_size = rows_u32.saturating_mul(32).div_ceil(block_size);
+        let function = gpu
+            .module
+            .get_function(GEMV_Q4K_F32IN_KERNEL_NAME)
+            .map_err(stringify)?;
+        let stream = &gpu.stream;
+        unsafe {
+            cust::launch!(
+                function<<<grid_size, block_size, 0, stream>>>(
+                    matrix_ptr,
+                    d_input.as_device_ptr(),
+                    d_output.as_device_ptr(),
+                    rows_u32,
+                    blocks_u32
+                )
+            )
+            .map_err(stringify)?;
+        }
+        // No D2H copy — result stays on GPU in d_output.
+        Ok(())
+    })
+    .map_err(GemvCudaError::Cuda)
+}
+
 #[cfg(feature = "cuda")]
 fn gemv_superblock_direct_cuda(
     kernel_name: &str,
@@ -1553,6 +1638,584 @@ pub fn gemm_f32_cuda(
         Ok(())
     })
     .map_err(GemmCudaError::Cuda)
+}
+
+// ---------------------------------------------------------------------------
+// GPU-resident activation buffer management and per-layer kernel wrappers
+// ---------------------------------------------------------------------------
+
+/// Allocate (or reallocate) the GPU activation buffers for a given model size.
+///
+/// Safe to call multiple times; existing buffers are replaced only if the
+/// dimensions change.
+#[cfg(feature = "cuda")]
+pub fn gpu_init_activation_buffers(
+    hidden_size: usize,
+    intermediate_size: usize,
+) -> Result<(), String> {
+    with_gpu(|gpu| {
+        if let Some(ref ab) = gpu.activation {
+            if ab.hidden_size == hidden_size && ab.intermediate_size == intermediate_size {
+                return Ok(());
+            }
+        }
+        let hidden =
+            cust::memory::DeviceBuffer::<f32>::zeroed(hidden_size).map_err(stringify)?;
+        let normed =
+            cust::memory::DeviceBuffer::<f32>::zeroed(hidden_size).map_err(stringify)?;
+        let ffn_gate =
+            cust::memory::DeviceBuffer::<f32>::zeroed(intermediate_size).map_err(stringify)?;
+        let ffn_up =
+            cust::memory::DeviceBuffer::<f32>::zeroed(intermediate_size).map_err(stringify)?;
+        let ffn_down_in =
+            cust::memory::DeviceBuffer::<f32>::zeroed(intermediate_size).map_err(stringify)?;
+        gpu.activation = Some(GpuActivationBuffer {
+            hidden,
+            normed,
+            ffn_gate,
+            ffn_up,
+            ffn_down_in,
+            hidden_size,
+            intermediate_size,
+        });
+        Ok(())
+    })
+}
+
+/// Upload a CPU f32 hidden-state slice into `activation.hidden` on the GPU.
+///
+/// The activation buffers must have been initialised via
+/// [`gpu_init_activation_buffers`] before calling this function.
+#[cfg(feature = "cuda")]
+pub fn gpu_upload_hidden(hidden: &[f32]) -> Result<(), String> {
+    with_gpu(|gpu| {
+        let ab = gpu
+            .activation
+            .as_mut()
+            .ok_or_else(|| "activation buffers not initialised".to_string())?;
+        if hidden.len() != ab.hidden_size {
+            return Err(format!(
+                "gpu_upload_hidden: slice len {} != hidden_size {}",
+                hidden.len(),
+                ab.hidden_size
+            ));
+        }
+        ab.hidden.copy_from(hidden).map_err(stringify)
+    })
+}
+
+/// Run RMS-norm on the GPU: reads `activation.hidden`, writes `activation.normed`.
+///
+/// `weight` is a per-element scale vector of length `hidden_size`; it is
+/// cached in `resident_f32` (mmap-stable pointer identity, same as ordinary
+/// weight matrices).
+#[cfg(feature = "cuda")]
+pub fn gpu_rms_norm(weight: &[f32], eps: f32) -> Result<(), String> {
+    with_gpu(|gpu| {
+        let ab = gpu
+            .activation
+            .as_ref()
+            .ok_or_else(|| "activation buffers not initialised".to_string())?;
+        let hidden_size = ab.hidden_size;
+        if weight.len() != hidden_size {
+            return Err(format!(
+                "gpu_rms_norm: weight len {} != hidden_size {}",
+                weight.len(),
+                hidden_size
+            ));
+        }
+
+        // Cache norm weight in resident_f32 (same pointer-stable identity pattern).
+        let key = f32_cache_key(weight);
+        if !gpu.resident_f32.contains_key(&key) {
+            let buf = cust::memory::DeviceBuffer::from_slice(weight).map_err(stringify)?;
+            gpu.resident_f32.insert(key, buf);
+        }
+
+        let ab = gpu
+            .activation
+            .as_ref()
+            .ok_or_else(|| "activation buffers not initialised".to_string())?;
+        let hidden_ptr = ab.hidden.as_device_ptr();
+        let normed_ptr = ab.normed.as_device_ptr();
+        let weight_ptr = gpu
+            .resident_f32
+            .get(&key)
+            .unwrap()
+            .as_device_ptr();
+
+        // One warp-reduction block per token; blockDim capped at 512 for the
+        // parallel-reduction within the block (must be power-of-two).
+        let block_size = hidden_size.next_power_of_two().min(512) as u32;
+        let grid_size = 1_u32;
+        let n = hidden_size as u32;
+
+        let function = gpu
+            .module
+            .get_function(RMS_NORM_KERNEL_NAME)
+            .map_err(stringify)?;
+        let stream = &gpu.stream;
+        let shmem_bytes = block_size * 4; // rms_norm kernel uses block_size floats of dynamic shared mem
+        unsafe {
+            cust::launch!(
+                function<<<grid_size, block_size, shmem_bytes, stream>>>(
+                    hidden_ptr,
+                    weight_ptr,
+                    normed_ptr,
+                    n,
+                    eps
+                )
+            )
+            .map_err(stringify)?;
+        }
+        Ok(())
+    })
+}
+
+/// GPU residual add: `activation.hidden[i] += delta[i]` for all i.
+///
+/// `delta` must be a device buffer of exactly `hidden_size` f32 elements.
+#[cfg(feature = "cuda")]
+pub fn gpu_residual_add(
+    delta: &cust::memory::DeviceBuffer<f32>,
+) -> Result<(), String> {
+    with_gpu(|gpu| {
+        let ab = gpu
+            .activation
+            .as_ref()
+            .ok_or_else(|| "activation buffers not initialised".to_string())?;
+        let hidden_size = ab.hidden_size;
+        if delta.len() != hidden_size {
+            return Err(format!(
+                "gpu_residual_add: delta len {} != hidden_size {}",
+                delta.len(),
+                hidden_size
+            ));
+        }
+
+        let hidden_ptr = ab.hidden.as_device_ptr();
+        let delta_ptr = delta.as_device_ptr();
+        let n = hidden_size as u32;
+
+        let block_size = 256_u32;
+        let grid_size = n.div_ceil(block_size);
+
+        let function = gpu
+            .module
+            .get_function(RESIDUAL_ADD_KERNEL_NAME)
+            .map_err(stringify)?;
+        let stream = &gpu.stream;
+        unsafe {
+            cust::launch!(
+                function<<<grid_size, block_size, 0, stream>>>(
+                    hidden_ptr,
+                    delta_ptr,
+                    n
+                )
+            )
+            .map_err(stringify)?;
+        }
+        Ok(())
+    })
+}
+
+/// GPU SiLU-mul: `activation.ffn_down_in[i] = silu(ffn_gate[i]) * ffn_up[i]`.
+///
+/// Reads `activation.ffn_gate` and `activation.ffn_up`, writes
+/// `activation.ffn_down_in`.  `intermediate_size` must equal the value used
+/// when the buffers were allocated.
+#[cfg(feature = "cuda")]
+pub fn gpu_silu_mul(intermediate_size: usize) -> Result<(), String> {
+    with_gpu(|gpu| {
+        let ab = gpu
+            .activation
+            .as_ref()
+            .ok_or_else(|| "activation buffers not initialised".to_string())?;
+        if intermediate_size != ab.intermediate_size {
+            return Err(format!(
+                "gpu_silu_mul: intermediate_size {} != buffer size {}",
+                intermediate_size, ab.intermediate_size
+            ));
+        }
+
+        let gate_ptr = ab.ffn_gate.as_device_ptr();
+        let up_ptr = ab.ffn_up.as_device_ptr();
+        let out_ptr = ab.ffn_down_in.as_device_ptr();
+        let n = intermediate_size as u32;
+
+        let block_size = 256_u32;
+        let grid_size = n.div_ceil(block_size);
+
+        let function = gpu
+            .module
+            .get_function(SILU_MUL_KERNEL_NAME)
+            .map_err(stringify)?;
+        let stream = &gpu.stream;
+        unsafe {
+            cust::launch!(
+                function<<<grid_size, block_size, 0, stream>>>(
+                    gate_ptr,
+                    up_ptr,
+                    out_ptr,
+                    n
+                )
+            )
+            .map_err(stringify)?;
+        }
+        Ok(())
+    })
+}
+
+/// Synchronise the GPU stream so that all preceding asynchronous kernel launches
+/// have completed before the caller reads any device buffers.
+#[cfg(feature = "cuda")]
+pub fn gpu_sync_stream() -> Result<(), String> {
+    with_gpu(|gpu| gpu.stream.synchronize().map_err(stringify))
+}
+
+/// GPU-native attention block: RMS-norm the hidden state, run Q/K/V projections,
+/// then download Q/K/V to CPU for the attention computation.
+///
+/// The three GEMV results stay on the GPU until the combined D2H sync at the
+/// end, keeping the GPU busy and reducing the CPU↔GPU round-trips from 3 to 1
+/// per attention block.
+///
+/// Only supports Q4_K_S / Q4_K_M quantised weight matrices (which covers the
+/// vast majority of GGUF files in the wild).  Returns `Err` if called without
+/// having first called [`gpu_init_activation_buffers`].
+#[cfg(feature = "cuda")]
+#[allow(clippy::too_many_arguments)]
+pub fn gpu_attn_rms_and_qkv_q4k(
+    attn_norm: &[f32],
+    eps: f32,
+    wq: &[u8],
+    q_len: usize,
+    hidden_size: usize,
+    wk: &[u8],
+    kv_len: usize,
+    wv: &[u8],
+    q_out: &mut [f32],
+    k_out: &mut [f32],
+    v_out: &mut [f32],
+) -> Result<(), String> {
+    if !hidden_size.is_multiple_of(256) {
+        return Err(format!("gpu_attn_rms_and_qkv: hidden_size {hidden_size} not multiple of 256"));
+    }
+    let blocks_per_row = hidden_size / 256;
+    let bpr_u32 = blocks_per_row as u32;
+    let q_u32 = q_len as u32;
+    let kv_u32 = kv_len as u32;
+
+    with_gpu(|gpu| {
+        // --- RMS-norm: hidden → normed ---
+        let norm_key = f32_cache_key(attn_norm);
+        if !gpu.resident_f32.contains_key(&norm_key) {
+            let buf = cust::memory::DeviceBuffer::from_slice(attn_norm).map_err(stringify)?;
+            gpu.resident_f32.insert(norm_key, buf);
+        }
+
+        let ab = gpu.activation.as_ref()
+            .ok_or_else(|| "activation buffers not initialised".to_string())?;
+        let hidden_ptr = ab.hidden.as_device_ptr();
+        let normed_ptr = ab.normed.as_device_ptr();
+        let hidden_size_u32 = ab.hidden_size as u32;
+        let weight_ptr = gpu.resident_f32[&norm_key].as_device_ptr();
+
+        let block_dim = ab.hidden_size.next_power_of_two().min(512) as u32;
+        let shmem_attn = block_dim * 4;
+        let function_norm = gpu.module.get_function(RMS_NORM_KERNEL_NAME).map_err(stringify)?;
+        let stream = &gpu.stream;
+        unsafe {
+            cust::launch!(function_norm<<<1, block_dim, shmem_attn, stream>>>(
+                hidden_ptr, weight_ptr, normed_ptr, hidden_size_u32, eps
+            )).map_err(stringify)?;
+        }
+
+        // Detect Q4K vs Q6K from block byte-size (Q4K=144, Q6K=210 bytes per 256-value block).
+        let quant_kern_name = |w: &[u8], rows: usize| -> &'static str {
+            let bsz = if rows > 0 && blocks_per_row > 0 { w.len() / (rows * blocks_per_row) } else { 144 };
+            if bsz >= 200 { GEMV_Q6K_F32IN_KERNEL_NAME } else { GEMV_Q4K_F32IN_KERNEL_NAME }
+        };
+        let qname_q = quant_kern_name(wq, q_len);
+        let qname_k = quant_kern_name(wk, kv_len);
+        let qname_v = quant_kern_name(wv, kv_len);
+
+        // --- Upload weight matrices (Q4K or Q6K) ---
+        let q_key = bytes_cache_key(wq);
+        gpu.ensure_resident_quant(q_key, wq)?;
+        let k_key = bytes_cache_key(wk);
+        gpu.ensure_resident_quant(k_key, wk)?;
+        let v_key = bytes_cache_key(wv);
+        gpu.ensure_resident_quant(v_key, wv)?;
+
+        // --- Allocate temporary GPU output buffers ---
+        let d_q = gpu.get_f32_buffer(q_len)?;
+        let d_k = gpu.get_f32_buffer(kv_len)?;
+        let d_v = gpu.get_f32_buffer(kv_len)?;
+
+        let block_size = 256_u32;
+        let stream = &gpu.stream;
+
+        let ab = gpu.activation.as_ref()
+            .ok_or_else(|| "activation buffers not initialised".to_string())?;
+        let normed_ptr = ab.normed.as_device_ptr();
+
+        let q_grid = q_u32.saturating_mul(32).div_ceil(block_size);
+        let k_grid = kv_u32.saturating_mul(32).div_ceil(block_size);
+
+        let wq_ptr = gpu.resident_quant[&q_key].as_device_ptr();
+        let wk_ptr = gpu.resident_quant[&k_key].as_device_ptr();
+        let wv_ptr = gpu.resident_quant[&v_key].as_device_ptr();
+
+        let fn_q = gpu.module.get_function(qname_q).map_err(stringify)?;
+        let fn_k = gpu.module.get_function(qname_k).map_err(stringify)?;
+        let fn_v = gpu.module.get_function(qname_v).map_err(stringify)?;
+
+        unsafe {
+            cust::launch!(fn_q<<<q_grid, block_size, 0, stream>>>(
+                wq_ptr, normed_ptr, d_q.as_device_ptr(), q_u32, bpr_u32
+            )).map_err(stringify)?;
+            cust::launch!(fn_k<<<k_grid, block_size, 0, stream>>>(
+                wk_ptr, normed_ptr, d_k.as_device_ptr(), kv_u32, bpr_u32
+            )).map_err(stringify)?;
+            cust::launch!(fn_v<<<k_grid, block_size, 0, stream>>>(
+                wv_ptr, normed_ptr, d_v.as_device_ptr(), kv_u32, bpr_u32
+            )).map_err(stringify)?;
+        }
+
+        // --- Single combined D2H sync: download Q, K, V ---
+        gpu.stream.synchronize().map_err(stringify)?;
+        d_q.copy_to(q_out).map_err(stringify)?;
+        d_k.copy_to(k_out).map_err(stringify)?;
+        d_v.copy_to(v_out).map_err(stringify)?;
+
+        gpu.return_f32_buffer(d_q);
+        gpu.return_f32_buffer(d_k);
+        gpu.return_f32_buffer(d_v);
+        Ok(())
+    })
+}
+
+/// GPU-native O-projection + attention residual add.
+///
+/// Uploads the CPU attention output to the GPU, runs the wo Q4K GEMV, then
+/// does an in-place residual add on the GPU hidden state.  The hidden state
+/// remains on the GPU after this call; no D2H copy is performed.
+#[cfg(feature = "cuda")]
+pub fn gpu_wo_residual_q4k(
+    attn_out: &[f32],
+    wo: &[u8],
+    rows: usize,
+    cols: usize,
+) -> Result<(), String> {
+    if !cols.is_multiple_of(256) {
+        return Err(format!("gpu_wo_residual_q4k: cols {cols} not multiple of 256"));
+    }
+    let bpr = (cols / 256) as u32;
+    let rows_u32 = rows as u32;
+
+    with_gpu(|gpu| {
+        // Upload attention output to a temporary GPU buffer.
+        let mut d_attn = gpu.get_f32_buffer(attn_out.len())?;
+        d_attn.copy_from(attn_out).map_err(stringify)?;
+
+        let wo_key = bytes_cache_key(wo);
+        gpu.ensure_resident_quant(wo_key, wo)?;
+
+        // Reuse `activation.normed` as the wo-projection output buffer — it is
+        // no longer needed after the attention QKV step.
+        let ab = gpu.activation.as_ref()
+            .ok_or_else(|| "activation buffers not initialised".to_string())?;
+        let normed_ptr = ab.normed.as_device_ptr();
+        let hidden_ptr = ab.hidden.as_device_ptr();
+        let hidden_n = ab.hidden_size as u32;
+
+        let block_size = 256_u32;
+        let wo_grid = rows_u32.saturating_mul(32).div_ceil(block_size);
+        let res_grid = hidden_n.div_ceil(block_size);
+        let wo_ptr = gpu.resident_quant[&wo_key].as_device_ptr();
+
+        let bpr_usize = (cols / 256) as usize;
+        let wo_kern_name = if bpr_usize > 0 && rows > 0 && wo.len() / (rows * bpr_usize) >= 200 {
+            GEMV_Q6K_F32IN_KERNEL_NAME
+        } else {
+            GEMV_Q4K_F32IN_KERNEL_NAME
+        };
+        let fn_wo = gpu.module.get_function(wo_kern_name).map_err(stringify)?;
+        let fn_res = gpu.module.get_function(RESIDUAL_ADD_KERNEL_NAME).map_err(stringify)?;
+        let stream = &gpu.stream;
+
+        unsafe {
+            cust::launch!(fn_wo<<<wo_grid, block_size, 0, stream>>>(
+                wo_ptr, d_attn.as_device_ptr(), normed_ptr, rows_u32, bpr
+            )).map_err(stringify)?;
+            cust::launch!(fn_res<<<res_grid, block_size, 0, stream>>>(
+                hidden_ptr, normed_ptr, hidden_n
+            )).map_err(stringify)?;
+        }
+
+        gpu.return_f32_buffer(d_attn);
+        Ok(())
+    })
+}
+
+/// GPU-native FFN block: RMS-norm + gate + up + SiLU-mul + down + residual.
+///
+/// Runs the complete feed-forward network on the GPU without any CPU↔GPU data
+/// movement.  Reads `activation.hidden`, writes back to `activation.hidden`.
+/// Intermediate results (gate, up, silu output) stay in the activation buffers.
+///
+/// The hidden state is **not** downloaded; the caller owns the GPU-resident
+/// hidden state across layers and only downloads it once (for logit sampling).
+#[cfg(feature = "cuda")]
+#[allow(clippy::too_many_arguments)]
+pub fn gpu_ffn_q4k(
+    ffn_norm: &[f32],
+    eps: f32,
+    gate_w: &[u8],
+    gate_rows: usize,
+    gate_cols: usize,
+    up_w: &[u8],
+    up_rows: usize,
+    down_w: &[u8],
+    down_rows: usize,
+    down_cols: usize,
+) -> Result<(), String> {
+    if !gate_cols.is_multiple_of(256) || !down_cols.is_multiple_of(256) {
+        return Err(format!(
+            "gpu_ffn_q4k: gate_cols {gate_cols} or down_cols {down_cols} not multiple of 256"
+        ));
+    }
+    let gate_bpr = (gate_cols / 256) as u32;
+    let down_bpr = (down_cols / 256) as u32;
+    let gate_u32 = gate_rows as u32;
+    let up_u32 = up_rows as u32;
+    let down_u32 = down_rows as u32;
+
+    with_gpu(|gpu| {
+        // --- FFN RMS-norm: hidden → normed ---
+        let norm_key = f32_cache_key(ffn_norm);
+        if !gpu.resident_f32.contains_key(&norm_key) {
+            let buf = cust::memory::DeviceBuffer::from_slice(ffn_norm).map_err(stringify)?;
+            gpu.resident_f32.insert(norm_key, buf);
+        }
+        let ab = gpu.activation.as_ref()
+            .ok_or_else(|| "activation buffers not initialised".to_string())?;
+        let hidden_ptr = ab.hidden.as_device_ptr();
+        let normed_ptr = ab.normed.as_device_ptr();
+        let hidden_n = ab.hidden_size as u32;
+        let norm_weight_ptr = gpu.resident_f32[&norm_key].as_device_ptr();
+        let block_dim = ab.hidden_size.next_power_of_two().min(512) as u32;
+
+        let shmem_ffn = block_dim * 4;
+        let fn_norm = gpu.module.get_function(RMS_NORM_KERNEL_NAME).map_err(stringify)?;
+        let stream = &gpu.stream;
+        unsafe {
+            cust::launch!(fn_norm<<<1, block_dim, shmem_ffn, stream>>>(
+                hidden_ptr, norm_weight_ptr, normed_ptr, hidden_n, eps
+            )).map_err(stringify)?;
+        }
+
+        // --- Upload FFN weight matrices ---
+        let gate_key = bytes_cache_key(gate_w);
+        gpu.ensure_resident_quant(gate_key, gate_w)?;
+        let up_key = bytes_cache_key(up_w);
+        gpu.ensure_resident_quant(up_key, up_w)?;
+        let down_key = bytes_cache_key(down_w);
+        gpu.ensure_resident_quant(down_key, down_w)?;
+
+        let ab = gpu.activation.as_ref()
+            .ok_or_else(|| "activation buffers not initialised".to_string())?;
+        let normed_ptr = ab.normed.as_device_ptr();
+        let gate_buf_ptr = ab.ffn_gate.as_device_ptr();
+        let up_buf_ptr = ab.ffn_up.as_device_ptr();
+        let ffn_down_in_ptr = ab.ffn_down_in.as_device_ptr();
+        let inter_n = ab.intermediate_size as u32;
+
+        let block_size = 256_u32;
+        let gate_grid = gate_u32.saturating_mul(32).div_ceil(block_size);
+        let up_grid = up_u32.saturating_mul(32).div_ceil(block_size);
+        let silu_grid = inter_n.div_ceil(block_size);
+        let down_grid = down_u32.saturating_mul(32).div_ceil(block_size);
+        let res_grid = hidden_n.div_ceil(block_size);
+
+        let gate_ptr = gpu.resident_quant[&gate_key].as_device_ptr();
+        let up_ptr = gpu.resident_quant[&up_key].as_device_ptr();
+        let down_ptr = gpu.resident_quant[&down_key].as_device_ptr();
+
+        // Auto-detect Q4K vs Q6K for each FFN weight by block byte-size.
+        let gate_bpr_usize = gate_bpr as usize;
+        let down_bpr_usize = down_bpr as usize;
+        let gate_kern = if gate_bpr_usize > 0 && gate_rows > 0 && gate_w.len() / (gate_rows * gate_bpr_usize) >= 200 {
+            GEMV_Q6K_F32IN_KERNEL_NAME
+        } else { GEMV_Q4K_F32IN_KERNEL_NAME };
+        let up_kern = if gate_bpr_usize > 0 && up_rows > 0 && up_w.len() / (up_rows * gate_bpr_usize) >= 200 {
+            GEMV_Q6K_F32IN_KERNEL_NAME
+        } else { GEMV_Q4K_F32IN_KERNEL_NAME };
+        let down_kern = if down_bpr_usize > 0 && down_rows > 0 && down_w.len() / (down_rows * down_bpr_usize) >= 200 {
+            GEMV_Q6K_F32IN_KERNEL_NAME
+        } else { GEMV_Q4K_F32IN_KERNEL_NAME };
+        let fn_gate = gpu.module.get_function(gate_kern).map_err(stringify)?;
+        let fn_up   = gpu.module.get_function(up_kern).map_err(stringify)?;
+        let fn_down = gpu.module.get_function(down_kern).map_err(stringify)?;
+        let fn_silu = gpu.module.get_function(SILU_MUL_KERNEL_NAME).map_err(stringify)?;
+        let fn_res  = gpu.module.get_function(RESIDUAL_ADD_KERNEL_NAME).map_err(stringify)?;
+        let stream = &gpu.stream;
+
+        // Reuse `normed` as the down-projection output buffer (safe: gate/up
+        // GEMVs only READ normed; by the time down runs, normed is free).
+        let down_out_ptr = normed_ptr;
+        let hidden_ptr = ab.hidden.as_device_ptr();
+
+        unsafe {
+            // gate × normed → ffn_gate
+            cust::launch!(fn_gate<<<gate_grid, block_size, 0, stream>>>(
+                gate_ptr, normed_ptr, gate_buf_ptr, gate_u32, gate_bpr
+            )).map_err(stringify)?;
+            // up × normed → ffn_up
+            cust::launch!(fn_up<<<up_grid, block_size, 0, stream>>>(
+                up_ptr, normed_ptr, up_buf_ptr, up_u32, gate_bpr
+            )).map_err(stringify)?;
+            // silu(ffn_gate) * ffn_up → ffn_down_in
+            cust::launch!(fn_silu<<<silu_grid, block_size, 0, stream>>>(
+                gate_buf_ptr, up_buf_ptr, ffn_down_in_ptr, inter_n
+            )).map_err(stringify)?;
+            // down × ffn_down_in → normed (reused as temp)
+            cust::launch!(fn_down<<<down_grid, block_size, 0, stream>>>(
+                down_ptr, ffn_down_in_ptr, down_out_ptr, down_u32, down_bpr
+            )).map_err(stringify)?;
+            // hidden += normed (ffn delta)
+            cust::launch!(fn_res<<<res_grid, block_size, 0, stream>>>(
+                hidden_ptr, down_out_ptr, hidden_n
+            )).map_err(stringify)?;
+        }
+        // No D2H — hidden remains GPU-resident.
+        Ok(())
+    })
+}
+
+/// Download the current `activation.hidden` back to a CPU slice.
+///
+/// Triggers a device-to-host DMA transfer; the stream is synchronised before
+/// the copy returns so the caller receives a consistent snapshot.
+#[cfg(feature = "cuda")]
+pub fn gpu_download_hidden(out: &mut [f32]) -> Result<(), String> {
+    with_gpu(|gpu| {
+        // Flush any pending kernel work on the stream before reading back.
+        gpu.stream.synchronize().map_err(stringify)?;
+        let ab = gpu
+            .activation
+            .as_ref()
+            .ok_or_else(|| "activation buffers not initialised".to_string())?;
+        if out.len() != ab.hidden_size {
+            return Err(format!(
+                "gpu_download_hidden: out len {} != hidden_size {}",
+                out.len(),
+                ab.hidden_size
+            ));
+        }
+        ab.hidden.copy_to(out).map_err(stringify)
+    })
 }
 
 #[cfg(test)]

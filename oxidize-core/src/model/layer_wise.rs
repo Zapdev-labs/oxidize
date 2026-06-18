@@ -580,12 +580,12 @@ impl LayerWiseModel {
                         dense_ranges.push((offset, qsize));
                         tok_embeddings = Some(WeightStorage::MmapQuantized(
                             qtype,
-                            mapped.mmap(),
+                            mapped.tensor_mmap(tensor),
                             offset,
                             qsize,
                         ));
                     } else {
-                        let qdata = &mapped.bytes()[offset..offset + qsize];
+                        let qdata = mapped.tensor_bytes(tensor, qsize);
                         let mut f32_data = vec![0.0_f32; value_count];
                         dequantize_scalar(qtype, qdata, &mut f32_data)
                             .map_err(|e| format!("dequantize: {:?}", e))?;
@@ -593,7 +593,7 @@ impl LayerWiseModel {
                     }
                 }
                 "norm.weight" | "output_norm.weight" => {
-                    let qdata = &mapped.bytes()[offset..offset + qsize];
+                    let qdata = mapped.tensor_bytes(tensor, qsize);
                     let mut f32_data = vec![0.0_f32; value_count];
                     dequantize_scalar(qtype, qdata, &mut f32_data)
                         .map_err(|e| format!("dequantize: {:?}", e))?;
@@ -604,12 +604,12 @@ impl LayerWiseModel {
                         dense_ranges.push((offset, qsize));
                         output_weight = Some(WeightStorage::MmapQuantized(
                             qtype,
-                            mapped.mmap(),
+                            mapped.tensor_mmap(tensor),
                             offset,
                             qsize,
                         ));
                     } else {
-                        let qdata = &mapped.bytes()[offset..offset + qsize];
+                        let qdata = mapped.tensor_bytes(tensor, qsize);
                         let mut f32_data = vec![0.0_f32; value_count];
                         dequantize_scalar(qtype, qdata, &mut f32_data)
                             .map_err(|e| format!("dequantize: {:?}", e))?;
@@ -694,7 +694,7 @@ impl LayerWiseModel {
             // back to replicating only the dense tensors — a few GB that
             // carry roughly half the per-token weight reads.
             let full_budget = crate::numa::min_node_total_bytes() / 2;
-            let full_fits = (mapped.bytes().len() as u64) <= full_budget;
+            let full_fits = mapped.total_bytes_len() <= full_budget;
             let replicated = if numa_mode == "1" && full_fits {
                 if crate::numa::replicate(mapped.bytes()) {
                     mapped.bytes().len()

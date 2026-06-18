@@ -41,6 +41,9 @@ pub fn gemv_f32(
         }
         #[cfg(any(feature = "cuda", feature = "rocm"))]
         None => Err("no GPU backend available".to_string()),
+        #[cfg(any(feature = "cuda", feature = "rocm"))]
+        #[allow(unreachable_patterns)]
+        Some(_) => Err("no GPU backend available".to_string()),
     }
 }
 
@@ -85,6 +88,9 @@ pub fn gemv_quantized(
         }
         #[cfg(any(feature = "cuda", feature = "rocm"))]
         None => Err("no GPU backend available".to_string()),
+        #[cfg(any(feature = "cuda", feature = "rocm"))]
+        #[allow(unreachable_patterns)]
+        Some(_) => Err("no GPU backend available".to_string()),
     }
 }
 
@@ -97,7 +103,7 @@ fn dispatch_cuda_quant(
     vector: &[f32],
     output: &mut [f32],
 ) -> Result<(), String> {
-    use crate::compute::quantization::{BLOCK_Q8_K_BYTES, QK_K};
+    use crate::quantization::{BLOCK_Q8_K_SIZE, QK_K};
     use crate::tensor::quantize_vector_q8_k_into;
 
     match quantization {
@@ -119,7 +125,7 @@ fn dispatch_cuda_quant(
         .map_err(|e| format!("{e:?}")),
         GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M if cols.is_multiple_of(QK_K) => {
             let blocks_per_row = cols / QK_K;
-            let mut q8k = vec![0_u8; blocks_per_row * BLOCK_Q8_K_BYTES];
+            let mut q8k = vec![0_u8; blocks_per_row * BLOCK_Q8_K_SIZE];
             quantize_vector_q8_k_into(vector, blocks_per_row, &mut q8k);
             crate::cuda::gemv_q4_k_direct_cuda(quantized_matrix, rows, cols, &q8k, output)
                 .map_err(|e| format!("{e:?}"))

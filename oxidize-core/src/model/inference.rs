@@ -698,6 +698,72 @@ fn first_layer_tensor_dims(mapped: &MappedGgufFile, suffix: &str) -> Option<Vec<
         .map(|t| t.dimensions.clone())
 }
 
+fn kv_cache_token_size_for_layers(config: &InferenceConfig, layers: &[LayerWeights]) -> usize {
+    let widest_loaded_kv = layers
+        .iter()
+        .take(config.layer_count)
+        .filter(|layer| {
+            !layer.attn_k.is_empty() || !layer.attn_v.is_empty() || !layer.mla_kv_a_mqa.is_empty()
+        })
+        .map(|layer| {
+            if !layer.mla_kv_a_mqa.is_empty() {
+                // DeepSeek-V3 MLA: the KV cache stores the full decompressed
+                // per-head K/V (n_heads * k_head_dim), not the compressed
+                // latent. k_head_dim = cfg.kv_head_dim() (the MLA key length).
+                let kv_lora = layer.mla_kv_a_norm.len();
+                let n_heads = config.num_attention_heads.max(1);
+                let k_head_dim = config.kv_head_dim();
+                let k_nope_dim = layer.mla_k_b.output_dim(kv_lora) / n_heads;
+                let v_head_dim = layer.mla_v_b.output_dim(kv_lora) / n_heads;
+                let total_k = n_heads * k_head_dim;
+                let total_v = n_heads * v_head_dim;
+                total_k.max(total_v)
+            } else {
+                let key_width = layer.attn_k.output_dim(config.hidden_size);
+                let value_width = layer.attn_v.output_dim(config.hidden_size);
+                key_width.max(value_width)
+            }
+        })
+        .max()
+        .unwrap_or(0);
+    if widest_loaded_kv > 0 {
+        widest_loaded_kv
+    } else {
+        config.num_key_value_heads * config.kv_head_dim()
+    }
+}
+
+fn attention_head_dims(
+    config: &InferenceConfig,
+    layer: &LayerWeights,
+    q_len: usize,
+    kv_len: usize,
+) -> (usize, usize, usize, usize) {
+    let q_head_dim = if !layer.attn_q_norm.is_empty()
+        && q_len.is_multiple_of(layer.attn_q_norm.len())
+    {
+        layer.attn_q_norm.len()
+    } else if config.num_attention_heads > 0 && q_len.is_multiple_of(config.num_attention_heads) {
+        q_len / config.num_attention_heads
+    } else {
+        q_len
+    };
+    let q_heads = q_len.checked_div(q_head_dim.max(1)).unwrap_or(1);
+    let kv_head_dim = if !layer.attn_k_norm.is_empty()
+        && kv_len.is_multiple_of(layer.attn_k_norm.len())
+    {
+        layer.attn_k_norm.len()
+    } else if config.num_key_value_heads > 0 && kv_len.is_multiple_of(config.num_key_value_heads) {
+        kv_len / config.num_key_value_heads
+    } else if kv_len > 0 {
+        kv_len
+    } else {
+        q_head_dim
+    };
+    let kv_heads = kv_len.checked_div(kv_head_dim.max(1)).unwrap_or(1);
+    (q_head_dim, q_heads, kv_head_dim, kv_heads)
+}
+
 /// Pre-allocated scratch buffers reused across tokens and layers to eliminate
 /// per-token `Vec<f32>` allocations in the hot decode path.
 #[derive(Debug, Clone, PartialEq)]
@@ -1344,7 +1410,7 @@ impl InferenceModel {
         let mut layers: Vec<LayerWeights> = vec![LayerWeights::default(); config.layer_count];
         let mut mtp: Option<MtpWeights> =
             (config.nextn_predict_layers > 0).then(MtpWeights::default);
-        let mmap_arc = if use_mmap { Some(mapped.mmap()) } else { None };
+        let use_mmap_flag = use_mmap;
 
         let tensor_list = mapped.mapped_tensor_infos();
         for tensor in tensor_list.iter() {
@@ -1353,7 +1419,7 @@ impl InferenceModel {
             let qsize = quantized_size(qtype, value_count)
                 .map_err(|e| format!("quantized_size: {:?}", e))?;
             let offset = tensor.absolute_offset as usize;
-            let qdata = &mapped.bytes()[offset..offset + qsize];
+            let qdata = mapped.tensor_bytes(tensor, qsize);
 
             // Helper to decide whether to keep quantized or dequantize
             let should_keep_quantized = |name: &str| -> bool {
@@ -1378,10 +1444,10 @@ impl InferenceModel {
                         | GgufQuantizationType::NVFP4
                 );
                 if should_keep_quantized(name) && is_supported_quant_gemv {
-                    if let Some(ref arc) = mmap_arc {
+                    if use_mmap_flag {
                         Ok(WeightStorage::MmapQuantized(
                             qtype,
-                            arc.clone(),
+                            mapped.tensor_mmap(tensor),
                             offset,
                             qsize,
                         ))
@@ -1815,8 +1881,8 @@ impl InferenceModel {
         let kv_cache_config = KvCacheConfig {
             layer_count: attn_layer_count,
             context_size: config.context_size,
-            head_count: kv_head_count,
-            head_dim: config.kv_head_dim(),
+            head_count: 1,
+            head_dim: kv_cache_token_size_for_layers(&config, &layers).max(kv_head_count),
             dtype: config.kv_cache_dtype,
             quantization: config.kv_quantization,
         };
@@ -1896,6 +1962,7 @@ impl InferenceModel {
         if self.layers.is_empty() {
             return false;
         }
+        let mut attention_widths: Option<(usize, usize, usize)> = None;
         for layer in &self.layers {
             let is_mamba = !layer.attn_qkv.is_empty() && layer.attn_q.is_empty();
             if is_mamba {
@@ -1911,6 +1978,18 @@ impl InferenceModel {
             // No standard attention → can't batch the layer (degenerate case).
             if layer.attn_q.is_empty() {
                 return false;
+            }
+            let widths = (
+                layer.attn_q.output_dim(self.config.hidden_size),
+                layer.attn_k.output_dim(self.config.hidden_size),
+                layer.attn_v.output_dim(self.config.hidden_size),
+            );
+            if let Some(first_widths) = attention_widths {
+                if widths != first_widths {
+                    return false;
+                }
+            } else {
+                attention_widths = Some(widths);
             }
         }
         true
@@ -2095,6 +2174,8 @@ impl InferenceModel {
             }
             let q_heads = q_len_used0 / q_head_dim.max(1);
             let kv_heads = kv_len.checked_div(kv_head_dim).unwrap_or(0);
+            let mut key_copy_buf: Vec<f32> = Vec::new();
+            let mut value_copy_buf: Vec<f32> = Vec::new();
 
             // 4. Per-token: Q/K norm, RoPE, KV cache writes.
             for i in 0..batch {
@@ -2191,9 +2272,20 @@ impl InferenceModel {
                     k[off..off + k_rope_len].copy_from_slice(rotated);
                 }
 
-                self.kv_cache
-                    .set(kv_layer_idx, pos, k, v)
-                    .map_err(|e| ModelError::InferenceFailed(format!("kv set: {:?}", e)))?;
+                let cache_token_size = self.kv_cache.config().token_size();
+                if cache_token_size == kv_len {
+                    self.kv_cache
+                        .set(kv_layer_idx, pos, k, v)
+                        .map_err(|e| ModelError::InferenceFailed(format!("kv set: {:?}", e)))?;
+                } else {
+                    key_copy_buf.resize(cache_token_size, 0.0_f32);
+                    value_copy_buf.resize(cache_token_size, 0.0_f32);
+                    key_copy_buf[..kv_len].copy_from_slice(k);
+                    value_copy_buf[..kv_len].copy_from_slice(v);
+                    self.kv_cache
+                        .set(kv_layer_idx, pos, &key_copy_buf, &value_copy_buf)
+                        .map_err(|e| ModelError::InferenceFailed(format!("kv set: {:?}", e)))?;
+                }
             }
 
             // 5. Per-token: attention. Each position attends to its own causal
@@ -2202,9 +2294,6 @@ impl InferenceModel {
             // For F32 KV caches we try to borrow the prefix directly (zero-copy).
             // For quantized KV caches we copy into temporary buffers. Both paths
             // use the same flash attention kernel.
-            let mut key_copy_buf: Vec<f32> = Vec::new();
-            let mut value_copy_buf: Vec<f32> = Vec::new();
-
             for i in 0..batch {
                 let pos = start_pos + i;
                 let seq_len = pos + 1;
@@ -2213,6 +2302,7 @@ impl InferenceModel {
                 attn_out_slice.fill(0.0_f32);
 
                 let (key_cache, value_cache): (&[f32], &[f32]) = {
+                    let cache_token_size = self.kv_cache.config().token_size();
                     let key_borrow = self
                         .kv_cache
                         .f32_layer_key_prefix(kv_layer_idx, seq_len)
@@ -2226,10 +2316,11 @@ impl InferenceModel {
                             ModelError::InferenceFailed(format!("kv borrow vals: {:?}", e))
                         })?;
 
-                    if let (Some(keys), Some(values)) = (key_borrow, value_borrow) {
+                    if cache_token_size == kv_len
+                        && let (Some(keys), Some(values)) = (key_borrow, value_borrow)
+                    {
                         (keys, values)
                     } else {
-                        // Quantized KV cache: copy into reusable buffers.
                         let needed = seq_len * kv_len;
                         if key_copy_buf.len() < needed {
                             key_copy_buf.resize(needed, 0.0_f32);
@@ -2237,16 +2328,43 @@ impl InferenceModel {
                         if value_copy_buf.len() < needed {
                             value_copy_buf.resize(needed, 0.0_f32);
                         }
-                        self.kv_cache
-                            .copy_layer_keys(kv_layer_idx, seq_len, &mut key_copy_buf[..needed])
-                            .map_err(|e| {
-                                ModelError::InferenceFailed(format!("kv copy keys: {:?}", e))
-                            })?;
-                        self.kv_cache
-                            .copy_layer_values(kv_layer_idx, seq_len, &mut value_copy_buf[..needed])
-                            .map_err(|e| {
-                                ModelError::InferenceFailed(format!("kv copy vals: {:?}", e))
-                            })?;
+                        if cache_token_size == kv_len {
+                            self.kv_cache
+                                .copy_layer_keys(kv_layer_idx, seq_len, &mut key_copy_buf[..needed])
+                                .map_err(|e| {
+                                    ModelError::InferenceFailed(format!("kv copy keys: {:?}", e))
+                                })?;
+                            self.kv_cache
+                                .copy_layer_values(
+                                    kv_layer_idx,
+                                    seq_len,
+                                    &mut value_copy_buf[..needed],
+                                )
+                                .map_err(|e| {
+                                    ModelError::InferenceFailed(format!("kv copy vals: {:?}", e))
+                                })?;
+                        } else {
+                            self.kv_cache
+                                .copy_layer_key_prefix_values(
+                                    kv_layer_idx,
+                                    seq_len,
+                                    kv_len,
+                                    &mut key_copy_buf[..needed],
+                                )
+                                .map_err(|e| {
+                                    ModelError::InferenceFailed(format!("kv copy keys: {:?}", e))
+                                })?;
+                            self.kv_cache
+                                .copy_layer_value_prefix_values(
+                                    kv_layer_idx,
+                                    seq_len,
+                                    kv_len,
+                                    &mut value_copy_buf[..needed],
+                                )
+                                .map_err(|e| {
+                                    ModelError::InferenceFailed(format!("kv copy vals: {:?}", e))
+                                })?;
+                        }
                         (&key_copy_buf[..needed], &value_copy_buf[..needed])
                     }
                 };
@@ -3005,6 +3123,116 @@ impl InferenceModel {
         Ok(())
     }
 
+    /// Return the raw quantized byte slice of a Q4K weight matrix, or `None`
+    /// if the storage variant is not Q4K (S or M) quantised.
+    fn q4k_bytes(ws: &WeightStorage) -> Option<&[u8]> {
+        match ws {
+            WeightStorage::Quantized(
+                GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M,
+                data,
+            ) => Some(data.as_slice()),
+            WeightStorage::MmapQuantized(
+                GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M,
+                mmap,
+                offset,
+                size,
+            ) => Some(&mmap[*offset..*offset + *size]),
+            _ => None,
+        }
+    }
+
+    /// Like `q4k_bytes` but also accepts Q6_K (used in mixed-precision models such as Q4_K_M).
+    fn q4k_or_q6k_bytes(ws: &WeightStorage) -> Option<&[u8]> {
+        match ws {
+            WeightStorage::Quantized(
+                GgufQuantizationType::Q4_K_S
+                | GgufQuantizationType::Q4_K_M
+                | GgufQuantizationType::Q6_K,
+                data,
+            ) => Some(data.as_slice()),
+            WeightStorage::MmapQuantized(
+                GgufQuantizationType::Q4_K_S
+                | GgufQuantizationType::Q4_K_M
+                | GgufQuantizationType::Q6_K,
+                mmap,
+                offset,
+                size,
+            ) => Some(&mmap[*offset..*offset + *size]),
+            _ => None,
+        }
+    }
+
+    /// Returns true if ALL weights required for the standard attention + dense
+    /// FFN path of `layer` are Q4K-or-Q6K quantised and the runtime has an
+    /// active CUDA device.  Layers that fail this check fall back to the CPU path.
+    #[cfg(feature = "cuda")]
+    fn layer_can_use_gpu_native(layer: &LayerWeights, cfg: &InferenceConfig) -> bool {
+        // Must be a plain attention layer (not shortconv / Mamba / MLA).
+        if !layer.shortconv_in_proj.is_empty()
+            || !layer.attn_qkv.is_empty()
+            || !layer.mla_kv_a_mqa.is_empty()
+        {
+            return false;
+        }
+        if layer.attn_q.is_empty() || layer.attn_k.is_empty() || layer.attn_v.is_empty() {
+            return false;
+        }
+        // No attention biases handled yet.
+        if !layer.attn_q_bias.is_empty()
+            || !layer.attn_k_bias.is_empty()
+            || !layer.attn_v_bias.is_empty()
+        {
+            return false;
+        }
+        // No per-head norms (require extra CPU work between projections).
+        if !layer.attn_q_norm.is_empty() || !layer.attn_k_norm.is_empty() {
+            return false;
+        }
+        // Dense FFN required.
+        if layer.ffn_gate.is_empty() || layer.ffn_up.is_empty() || layer.ffn_down.is_empty() {
+            return false;
+        }
+        // Must not use GeGLU (SwiGLU only — our silu_mul_f32_kernel implements that).
+        if cfg.gelu_ffn {
+            return false;
+        }
+        // All projections must be Q4K or Q6K (mixed-precision models like Q4_K_M use Q6K for some tensors).
+        for ws in [
+            &layer.attn_q,
+            &layer.attn_k,
+            &layer.attn_v,
+            &layer.attn_output,
+            &layer.ffn_gate,
+            &layer.ffn_up,
+            &layer.ffn_down,
+        ] {
+            if Self::q4k_or_q6k_bytes(ws).is_none() {
+                return false;
+            }
+        }
+        // Hidden size must be aligned to a Q4K block (256 values per block).
+        if !cfg.hidden_size.is_multiple_of(256) || !cfg.intermediate_size.is_multiple_of(256) {
+            return false;
+        }
+        // Attention projection sizes must also be aligned (Q/K have different sizes in GQA).
+        let q_len = layer.attn_q.output_dim(cfg.hidden_size);
+        let kv_len = if !layer.attn_k.is_empty() {
+            layer.attn_k.output_dim(cfg.hidden_size)
+        } else {
+            256
+        };
+        let attn_out_len = if !layer.attn_output.is_empty() {
+            layer.attn_output.output_dim(cfg.hidden_size)
+        } else {
+            256
+        };
+        if !q_len.is_multiple_of(256) || !kv_len.is_multiple_of(256) || !attn_out_len.is_multiple_of(256) {
+            return false;
+        }
+        // CUDA must be active at runtime.
+        crate::gpu_dispatch::active_gpu().is_some()
+    }
+
     /// Run layers `range` against the hidden state currently in
     /// `workspace.x[..hidden_size]`, mutating it in place. `pos` is the
     /// absolute position for KV cache writes / RoPE.
@@ -3017,9 +3245,38 @@ impl InferenceModel {
         let h = cfg.hidden_size;
         let n = cfg.num_attention_heads;
         let k = cfg.num_key_value_heads;
-        let ws = &mut self.workspace;
         // Silence unused warnings for paths that don't reference both names.
         let _ = (n, k);
+
+        // GPU-native path: keep the hidden state resident on the GPU across all
+        // layers in this range.  The CPU only touches q/k/v (for rope + KV cache
+        // + attention) and the attention result (for the wo upload).  All other
+        // memory traffic (rms_norm, gate/up/silu/down/residual) stays on the GPU,
+        // reducing CPU↔GPU round-trips from 252 to ~56 per token for a 28-layer
+        // Llama-3 style model with Q4_K_M weights.
+        #[cfg(feature = "cuda")]
+        let gpu_native: bool = {
+            let all_eligible = range.clone().all(|i| {
+                self.layers
+                    .get(i)
+                    .is_some_and(|l| Self::layer_can_use_gpu_native(l, cfg))
+            });
+            if all_eligible && !range.is_empty() {
+                match crate::cuda::gpu_init_activation_buffers(h, cfg.intermediate_size) {
+                    Ok(()) => match crate::cuda::gpu_upload_hidden(&self.workspace.x[..h]) {
+                        Ok(()) => true,
+                        Err(_) => false,
+                    },
+                    Err(_) => false,
+                }
+            } else {
+                false
+            }
+        };
+        #[cfg(not(feature = "cuda"))]
+        let gpu_native = false;
+
+        let ws = &mut self.workspace;
 
         for layer_idx in range {
             let layer = &self.layers[layer_idx];
@@ -3340,12 +3597,7 @@ impl InferenceModel {
                 let attn_out = &mut ws.hidden_a[..h];
                 attn_out.fill(0.0_f32);
                 {
-                    let normed = &mut ws.hidden_b[..h];
-                    normed.fill(0.0_f32);
-                    rms_norm_f32(&ws.x[..h], &layer.attn_norm, cfg.rms_norm_eps, normed)
-                        .map_err(|e| ModelError::InferenceFailed(format!("rms_norm: {:?}", e)))?;
-
-                    // Compute dynamic dimensions
+                    // Compute dynamic dimensions (shared by both CPU and GPU paths).
                     let q_len = layer.attn_q.output_dim(h);
                     let kv_len = if !layer.attn_k.is_empty() {
                         layer.attn_k.output_dim(h)
@@ -3365,27 +3617,70 @@ impl InferenceModel {
                     let v_vec = &mut ws.v_vec[..kv_len];
                     v_vec.fill(0.0_f32);
 
-                    // Run Q, K, V projections as ONE fused parallel region —
-                    // they share the same normed input and write to
-                    // non-overlapping buffers (q_full, k_vec, v_vec).
-                    gemv_weight_fused(
-                        vec![
-                            (&layer.attn_q, q_len, &mut *q_full),
-                            (
-                                &layer.attn_k,
-                                if layer.attn_k.is_empty() { 0 } else { kv_len },
-                                &mut *k_vec,
-                            ),
-                            (
-                                &layer.attn_v,
-                                if layer.attn_v.is_empty() { 0 } else { kv_len },
-                                &mut *v_vec,
-                            ),
-                        ],
-                        h,
-                        normed,
-                    )
-                    .map_err(|e| ModelError::InferenceFailed(format!("attn_qkv: {:?}", e)))?;
+                    // ---- RMS-norm + QKV projections ----
+                    // GPU-native path: GPU keeps the hidden state; runs rms_norm and
+                    // the three GEMVs entirely on-device, then DMA-copies only q, k, v
+                    // (≪ the full hidden state) to CPU for rope + attention.
+                    #[cfg(feature = "cuda")]
+                    let used_gpu_qkv = if gpu_native {
+                        let wq = Self::q4k_or_q6k_bytes(&layer.attn_q)
+                            .ok_or_else(|| ModelError::InferenceFailed("gpu_native: wq not Q4K/Q6K".into()))?;
+                        let wk = Self::q4k_or_q6k_bytes(&layer.attn_k)
+                            .ok_or_else(|| ModelError::InferenceFailed("gpu_native: wk not Q4K/Q6K".into()))?;
+                        let wv = Self::q4k_or_q6k_bytes(&layer.attn_v)
+                            .ok_or_else(|| ModelError::InferenceFailed("gpu_native: wv not Q4K/Q6K".into()))?;
+                        crate::cuda::gpu_attn_rms_and_qkv_q4k(
+                            &layer.attn_norm,
+                            cfg.rms_norm_eps,
+                            wq,
+                            q_len,
+                            h,
+                            wk,
+                            kv_len,
+                            wv,
+                            q_full,
+                            k_vec,
+                            v_vec,
+                        )
+                        .map_err(|e| ModelError::InferenceFailed(format!("gpu_attn_qkv: {e}")))?;
+                        true
+                    } else {
+                        false
+                    };
+                    #[cfg(not(feature = "cuda"))]
+                    let used_gpu_qkv = false;
+
+                    if !used_gpu_qkv {
+                        let normed = &mut ws.hidden_b[..h];
+                        normed.fill(0.0_f32);
+                        rms_norm_f32(&ws.x[..h], &layer.attn_norm, cfg.rms_norm_eps, normed)
+                            .map_err(|e| {
+                                ModelError::InferenceFailed(format!("rms_norm: {:?}", e))
+                            })?;
+                        // Run Q, K, V projections as ONE fused parallel region —
+                        // they share the same normed input and write to
+                        // non-overlapping buffers (q_full, k_vec, v_vec).
+                        gemv_weight_fused(
+                            vec![
+                                (&layer.attn_q, q_len, &mut *q_full),
+                                (
+                                    &layer.attn_k,
+                                    if layer.attn_k.is_empty() { 0 } else { kv_len },
+                                    &mut *k_vec,
+                                ),
+                                (
+                                    &layer.attn_v,
+                                    if layer.attn_v.is_empty() { 0 } else { kv_len },
+                                    &mut *v_vec,
+                                ),
+                            ],
+                            h,
+                            normed,
+                        )
+                        .map_err(|e| {
+                            ModelError::InferenceFailed(format!("attn_qkv: {:?}", e))
+                        })?;
+                    }
                     let glue_t0 =
                         crate::tensor::decode_profile_enabled().then(std::time::Instant::now);
 
@@ -3417,21 +3712,8 @@ impl InferenceModel {
 
                     // Compute head dimensions based on ACTUAL Q length after splitting
                     let q_len_used = q.len();
-                    let q_head_dim = if n > 0 && q_len_used.is_multiple_of(n) {
-                        q_len_used / n
-                    } else {
-                        q_len_used
-                    };
-                    let q_heads = q_len_used.checked_div(q_head_dim).unwrap_or(1);
-
-                    let kv_head_dim = if k > 0 && kv_len.is_multiple_of(k) {
-                        kv_len / k
-                    } else if kv_len > 0 {
-                        kv_len
-                    } else {
-                        q_head_dim
-                    };
-                    let kv_heads = kv_len.checked_div(kv_head_dim).unwrap_or(1);
+                    let (q_head_dim, q_heads, kv_head_dim, kv_heads) =
+                        attention_head_dims(cfg, layer, q_len_used, kv_len);
 
                     // Apply per-head Q/K norm if available
                     if !layer.attn_q_norm.is_empty() && q.len() == layer.attn_q_norm.len() {
@@ -3526,10 +3808,26 @@ impl InferenceModel {
                         k_vec[off..off + k_rope_len].copy_from_slice(rotated);
                     }
 
-                    // store in KV cache
-                    self.kv_cache
-                        .set(kv_layer_idx, pos, k_vec, v_vec)
-                        .map_err(|e| ModelError::InferenceFailed(format!("kv set: {:?}", e)))?;
+                    let cache_token_size = self.kv_cache.config().token_size();
+                    if cache_token_size == kv_len {
+                        self.kv_cache
+                            .set(kv_layer_idx, pos, k_vec, v_vec)
+                            .map_err(|e| {
+                                ModelError::InferenceFailed(format!("kv set: {:?}", e))
+                            })?;
+                    } else {
+                        let key_row = &mut ws.kv_keys_copy[..cache_token_size];
+                        let value_row = &mut ws.kv_values_copy[..cache_token_size];
+                        key_row.fill(0.0_f32);
+                        value_row.fill(0.0_f32);
+                        key_row[..kv_len].copy_from_slice(k_vec);
+                        value_row[..kv_len].copy_from_slice(v_vec);
+                        self.kv_cache
+                            .set(kv_layer_idx, pos, key_row, value_row)
+                            .map_err(|e| {
+                                ModelError::InferenceFailed(format!("kv set: {:?}", e))
+                            })?;
+                    }
 
                     let seq_len = pos + 1;
 
@@ -3558,18 +3856,27 @@ impl InferenceModel {
                     // into workspace buffers. Borrowing avoids materializing an
                     // f32 prefix copy per layer per token, and F16 also halves
                     // the attention DRAM reads vs an F32 cache.
-                    let f16_keys = self
+                    let cache_token_size = self.kv_cache.config().token_size();
+                    let f16_keys = if cache_token_size == kv_len {
+                        self
                         .kv_cache
                         .f16_layer_key_prefix(kv_layer_idx, seq_len)
                         .map_err(|e| {
                             ModelError::InferenceFailed(format!("kv borrow f16 keys: {:?}", e))
-                        })?;
-                    let f16_values = self
+                        })?
+                    } else {
+                        None
+                    };
+                    let f16_values = if cache_token_size == kv_len {
+                        self
                         .kv_cache
                         .f16_layer_value_prefix(kv_layer_idx, seq_len)
                         .map_err(|e| {
                             ModelError::InferenceFailed(format!("kv borrow f16 values: {:?}", e))
-                        })?;
+                        })?
+                    } else {
+                        None
+                    };
                     if let (Some(key16), Some(value16)) = (f16_keys, f16_values) {
                         // Sliding-window attention: a local layer attends only to
                         // the most recent `layer_window` positions (see the F32
@@ -3613,22 +3920,31 @@ impl InferenceModel {
                             );
                         }
                     } else {
-                        let borrowed_key_cache = self
+                        let borrowed_key_cache = if cache_token_size == kv_len {
+                            self
                             .kv_cache
                             .f32_layer_key_prefix(kv_layer_idx, seq_len)
                             .map_err(|e| {
                                 ModelError::InferenceFailed(format!("kv borrow keys: {:?}", e))
-                            })?;
-                        let borrowed_value_cache = self
+                            })?
+                        } else {
+                            None
+                        };
+                        let borrowed_value_cache = if cache_token_size == kv_len {
+                            self
                             .kv_cache
                             .f32_layer_value_prefix(kv_layer_idx, seq_len)
                             .map_err(|e| {
                                 ModelError::InferenceFailed(format!("kv borrow values: {:?}", e))
-                            })?;
+                            })?
+                        } else {
+                            None
+                        };
 
                         let key_cache: &[f32];
                         let value_cache: &[f32];
-                        if let (Some(keys), Some(values)) =
+                        if cache_token_size == kv_len
+                            && let (Some(keys), Some(values)) =
                             (borrowed_key_cache, borrowed_value_cache)
                         {
                             key_cache = keys;
@@ -3636,16 +3952,51 @@ impl InferenceModel {
                         } else {
                             let key_copy = &mut ws.kv_keys_copy[..seq_len * kv_len];
                             let value_copy = &mut ws.kv_values_copy[..seq_len * kv_len];
-                            self.kv_cache
-                                .copy_layer_keys(kv_layer_idx, seq_len, key_copy)
-                                .map_err(|e| {
-                                    ModelError::InferenceFailed(format!("kv copy keys: {:?}", e))
-                                })?;
-                            self.kv_cache
-                                .copy_layer_values(kv_layer_idx, seq_len, value_copy)
-                                .map_err(|e| {
-                                    ModelError::InferenceFailed(format!("kv copy values: {:?}", e))
-                                })?;
+                            if cache_token_size == kv_len {
+                                self.kv_cache
+                                    .copy_layer_keys(kv_layer_idx, seq_len, key_copy)
+                                    .map_err(|e| {
+                                        ModelError::InferenceFailed(format!(
+                                            "kv copy keys: {:?}",
+                                            e
+                                        ))
+                                    })?;
+                                self.kv_cache
+                                    .copy_layer_values(kv_layer_idx, seq_len, value_copy)
+                                    .map_err(|e| {
+                                        ModelError::InferenceFailed(format!(
+                                            "kv copy values: {:?}",
+                                            e
+                                        ))
+                                    })?;
+                            } else {
+                                self.kv_cache
+                                    .copy_layer_key_prefix_values(
+                                        kv_layer_idx,
+                                        seq_len,
+                                        kv_len,
+                                        key_copy,
+                                    )
+                                    .map_err(|e| {
+                                        ModelError::InferenceFailed(format!(
+                                            "kv copy keys: {:?}",
+                                            e
+                                        ))
+                                    })?;
+                                self.kv_cache
+                                    .copy_layer_value_prefix_values(
+                                        kv_layer_idx,
+                                        seq_len,
+                                        kv_len,
+                                        value_copy,
+                                    )
+                                    .map_err(|e| {
+                                        ModelError::InferenceFailed(format!(
+                                            "kv copy values: {:?}",
+                                            e
+                                        ))
+                                    })?;
+                            }
                             key_cache = key_copy;
                             value_cache = value_copy;
                         }
@@ -3708,27 +4059,53 @@ impl InferenceModel {
                     };
 
                     if !layer.attn_output.is_empty() && attn_output_input_len > 0 {
-                        gemv_weight(
-                            &layer.attn_output,
-                            h,
-                            attn_output_input_len,
-                            attn_input,
-                            attn_out,
-                        )
-                        .map_err(|e| {
-                            ModelError::InferenceFailed(format!("attn_output: {:?}", e))
-                        })?;
-                        if !layer.attn_output_bias.is_empty() {
-                            for (i, out) in attn_out.iter_mut().enumerate() {
-                                *out += layer.attn_output_bias[i % layer.attn_output_bias.len()];
+                        // GPU-native: upload attn_result to GPU, run wo GEMV + residual
+                        // entirely on device.  No CPU residual add needed.
+                        #[cfg(feature = "cuda")]
+                        let used_gpu_wo = if gpu_native {
+                            let wo = Self::q4k_or_q6k_bytes(&layer.attn_output).ok_or_else(|| {
+                                ModelError::InferenceFailed("gpu_native: wo not Q4K".into())
+                            })?;
+                            crate::cuda::gpu_wo_residual_q4k(
+                                attn_input,
+                                wo,
+                                h,
+                                attn_output_input_len,
+                            )
+                            .map_err(|e| {
+                                ModelError::InferenceFailed(format!("gpu_wo_residual: {e}"))
+                            })?;
+                            true
+                        } else {
+                            false
+                        };
+                        #[cfg(not(feature = "cuda"))]
+                        let used_gpu_wo = false;
+
+                        if !used_gpu_wo {
+                            gemv_weight(
+                                &layer.attn_output,
+                                h,
+                                attn_output_input_len,
+                                attn_input,
+                                attn_out,
+                            )
+                            .map_err(|e| {
+                                ModelError::InferenceFailed(format!("attn_output: {:?}", e))
+                            })?;
+                            if !layer.attn_output_bias.is_empty() {
+                                for (i, out) in attn_out.iter_mut().enumerate() {
+                                    *out +=
+                                        layer.attn_output_bias[i % layer.attn_output_bias.len()];
+                                }
                             }
                         }
                     }
                 }
 
                 // Gemma sandwich norm: normalize the attention output before the
-                // residual add (post_attention_norm).
-                if cfg.sandwich_norm && !layer.post_attention_norm.is_empty() {
+                // residual add (post_attention_norm).  Not used in GPU-native path.
+                if !gpu_native && cfg.sandwich_norm && !layer.post_attention_norm.is_empty() {
                     let normed_attn = &mut ws.hidden_b[..h];
                     rms_norm_f32(
                         attn_out,
@@ -3740,8 +4117,11 @@ impl InferenceModel {
                     attn_out.copy_from_slice(normed_attn);
                 }
 
-                for i in 0..h {
-                    ws.x[i] += attn_out[i];
+                // CPU residual add (skipped when GPU-native handled it above).
+                if !gpu_native {
+                    for i in 0..h {
+                        ws.x[i] += attn_out[i];
+                    }
                 }
             }
 
@@ -3757,7 +4137,40 @@ impl InferenceModel {
                 && !layer.ffn_gate_inp.is_empty()
                 && !ffn_norm_weight.is_empty();
 
-            if has_dense_ffn || has_moe {
+            // GPU-native dense FFN: rms-norm + gate/up/silu/down + residual stay on
+            // the GPU; hidden state is NOT downloaded between layers.
+            #[cfg(feature = "cuda")]
+            let gpu_ran_ffn = if gpu_native && has_dense_ffn && !has_moe && !cfg.sandwich_norm {
+                let gate = Self::q4k_or_q6k_bytes(&layer.ffn_gate).ok_or_else(|| {
+                    ModelError::InferenceFailed("gpu_native: ffn_gate not Q4K/Q6K".into())
+                })?;
+                let up = Self::q4k_or_q6k_bytes(&layer.ffn_up).ok_or_else(|| {
+                    ModelError::InferenceFailed("gpu_native: ffn_up not Q4K/Q6K".into())
+                })?;
+                let down = Self::q4k_or_q6k_bytes(&layer.ffn_down).ok_or_else(|| {
+                    ModelError::InferenceFailed("gpu_native: ffn_down not Q4K/Q6K".into())
+                })?;
+                crate::cuda::gpu_ffn_q4k(
+                    ffn_norm_weight,
+                    cfg.rms_norm_eps,
+                    gate,
+                    cfg.intermediate_size,
+                    h,
+                    up,
+                    cfg.intermediate_size,
+                    down,
+                    h,
+                    cfg.intermediate_size,
+                )
+                .map_err(|e| ModelError::InferenceFailed(format!("gpu_ffn: {e}")))?;
+                true
+            } else {
+                false
+            };
+            #[cfg(not(feature = "cuda"))]
+            let gpu_ran_ffn = false;
+
+            if (has_dense_ffn || has_moe) && !gpu_ran_ffn {
                 let ffn_out = &mut ws.hidden_a[..h];
                 ffn_out.fill(0.0_f32);
                 {
@@ -3890,6 +4303,17 @@ impl InferenceModel {
                 eprintln!("TRACE inf pos={pos} layer={layer_idx} sum={sum:.9e}");
             }
         }
+
+        // When the GPU-native path was used, the hidden state lives in
+        // `activation.hidden`; download it back to `ws.x` for the final norm +
+        // logit projection that runs on CPU.
+        #[cfg(feature = "cuda")]
+        if gpu_native {
+            let ws = &mut self.workspace;
+            crate::cuda::gpu_download_hidden(&mut ws.x[..h])
+                .map_err(|e| ModelError::InferenceFailed(e))?;
+        }
+
         Ok(())
     }
 
@@ -4663,6 +5087,7 @@ mod tests {
                 ggml_type: 0,
                 relative_offset: 0,
                 absolute_offset: 0,
+                mmap_index: 0,
             }],
             alignment: 32,
             data_section_start: 0,
@@ -4748,6 +5173,7 @@ mod tests {
                     ggml_type: 0,
                     relative_offset: 0,
                     absolute_offset: 0,
+                    mmap_index: 0,
                 },
                 GgufTensorInfo {
                     name: "blk.1.ffn_gate_inp.weight".to_owned(),
@@ -4755,6 +5181,7 @@ mod tests {
                     ggml_type: 0,
                     relative_offset: 0,
                     absolute_offset: 0,
+                    mmap_index: 0,
                 },
                 GgufTensorInfo {
                     name: "blk.1.ffn_gate_shexp.weight".to_owned(),
@@ -4762,6 +5189,7 @@ mod tests {
                     ggml_type: 0,
                     relative_offset: 0,
                     absolute_offset: 0,
+                    mmap_index: 0,
                 },
             ],
             alignment: 32,
@@ -4806,6 +5234,51 @@ mod tests {
         assert_eq!(cfg.layer_rope_theta(5), 1_000_000.0);
         assert_eq!(cfg.layer_sliding_window(5), 0);
         assert!(cfg.layer_is_global(11));
+    }
+
+    #[test]
+    fn gemma4_mixed_kv_layers_size_cache_for_widest_projection() {
+        let cfg = InferenceConfig {
+            architecture: ModelArchitecture::Gemma,
+            hidden_size: 3840,
+            num_key_value_heads: 8,
+            key_value_head_dim: 512,
+            ..Default::default()
+        };
+        let local_layer = LayerWeights {
+            attn_k: WeightStorage::F32(vec![0.0; 3840 * 2048]),
+            attn_v: WeightStorage::F32(vec![0.0; 3840 * 2048]),
+            ..Default::default()
+        };
+        let global_layer = LayerWeights {
+            attn_k: WeightStorage::F32(vec![0.0; 3840 * 512]),
+            attn_v: WeightStorage::F32(vec![0.0; 3840 * 512]),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            kv_cache_token_size_for_layers(&cfg, &[local_layer, global_layer]),
+            2048
+        );
+    }
+
+    #[test]
+    fn gemma4_global_attention_uses_norm_width_for_kv_head_dim() {
+        let cfg = InferenceConfig {
+            num_attention_heads: 16,
+            num_key_value_heads: 8,
+            ..Default::default()
+        };
+        let layer = LayerWeights {
+            attn_q_norm: vec![0.0; 512],
+            attn_k_norm: vec![0.0; 512],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            attention_head_dims(&cfg, &layer, 8192, 512),
+            (512, 16, 512, 1)
+        );
     }
 
     #[test]
@@ -4887,6 +5360,28 @@ mod tests {
             ..Default::default()
         };
         model.layers.push(layer);
+
+        assert!(!model.layers_supported_for_batched());
+    }
+
+    #[test]
+    fn batched_prefill_rejects_mixed_attention_widths() {
+        let mut model = tiny_inference_model();
+        model.config.hidden_size = 2;
+        model.layers = vec![
+            LayerWeights {
+                attn_q: WeightStorage::F32(vec![0.0; 4]),
+                attn_k: WeightStorage::F32(vec![0.0; 4]),
+                attn_v: WeightStorage::F32(vec![0.0; 4]),
+                ..Default::default()
+            },
+            LayerWeights {
+                attn_q: WeightStorage::F32(vec![0.0; 8]),
+                attn_k: WeightStorage::F32(vec![0.0; 2]),
+                attn_v: WeightStorage::F32(vec![0.0; 2]),
+                ..Default::default()
+            },
+        ];
 
         assert!(!model.layers_supported_for_batched());
     }

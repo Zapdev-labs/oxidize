@@ -43,7 +43,7 @@ pub struct ModelFingerprint {
 /// models the existing parser doesn't understand).
 pub fn fingerprint(mapped: &MappedGgufFile) -> ModelFingerprint {
     let config = InferenceConfig::from_gguf(mapped);
-    let file_size_bytes = mapped.bytes().len() as u64;
+    let file_size_bytes = mapped.total_bytes_len();
 
     let tensor_infos = mapped.mapped_tensor_infos();
     let (quant, expert_count, is_moe, has_mtp) =

@@ -414,6 +414,26 @@ impl KvCache {
         Ok(())
     }
 
+    pub fn copy_layer_key_prefix_values(
+        &self,
+        layer: usize,
+        seq_len: usize,
+        logical_token_size: usize,
+        out: &mut [f32],
+    ) -> Result<(), KvCacheError> {
+        self.copy_layer_prefix_values(&self.key, layer, seq_len, logical_token_size, out)
+    }
+
+    pub fn copy_layer_value_prefix_values(
+        &self,
+        layer: usize,
+        seq_len: usize,
+        logical_token_size: usize,
+        out: &mut [f32],
+    ) -> Result<(), KvCacheError> {
+        self.copy_layer_prefix_values(&self.value, layer, seq_len, logical_token_size, out)
+    }
+
     /// Borrow all F32 keys for positions [0, seq_len) in a layer when they are
     /// already contiguous in the cache storage.
     ///
@@ -664,6 +684,49 @@ impl KvCache {
                 layer,
                 layer_count: self.config.layer_count,
             });
+        }
+        Ok(())
+    }
+
+    fn copy_layer_prefix_values(
+        &self,
+        storage: &KvStorage,
+        layer: usize,
+        seq_len: usize,
+        logical_token_size: usize,
+        out: &mut [f32],
+    ) -> Result<(), KvCacheError> {
+        self.validate_layer(layer)?;
+        let token_size = self.config.token_size();
+        if logical_token_size > token_size {
+            return Err(KvCacheError::ValueLengthMismatch {
+                expected: token_size,
+                actual: logical_token_size,
+            });
+        }
+        let expected = seq_len.saturating_mul(logical_token_size);
+        if out.len() != expected {
+            return Err(KvCacheError::ValueLengthMismatch {
+                expected,
+                actual: out.len(),
+            });
+        }
+        let mut row = vec![0.0_f32; token_size];
+        for p in 0..seq_len {
+            if !self.position_available(p) {
+                let newest_available = self.newest_position.unwrap_or(0);
+                let oldest_available = self.oldest_available_position().unwrap_or(0);
+                return Err(KvCacheError::PositionEvicted {
+                    position: p,
+                    oldest_available,
+                    newest_available,
+                });
+            }
+            let physical_position = self.physical_position(p);
+            read_storage(storage, &self.config, layer, physical_position, &mut row);
+            let out_off = p * logical_token_size;
+            out[out_off..out_off + logical_token_size]
+                .copy_from_slice(&row[..logical_token_size]);
         }
         Ok(())
     }

@@ -254,6 +254,86 @@ extern "C" __global__ void gemv_q4_0_kernel(
 }
 
 // --------------------------------------------------------------------------
+// Q4_K × F32 direct GEMV — GPU-native activation path
+//
+// Takes a plain float32 input vector (already on GPU as part of the activation
+// buffer) instead of a pre-quantized Q8_K vector.  Eliminates the CPU-side
+// Q8_K quantization step and the H2D upload, enabling the fully GPU-resident
+// forward pass where the hidden state never leaves the GPU between layers.
+//
+// One warp (32 threads) per output row.  Lanes stripe across blocks.
+// --------------------------------------------------------------------------
+
+__device__ float q4k_f32in_block_dot(const unsigned char* w_blk,
+                                      const float* x,
+                                      unsigned int block_offset)
+{
+    float d_w    = __half2float(*reinterpret_cast<const __half*>(w_blk));
+    float dmin_w = __half2float(*reinterpret_cast<const __half*>(w_blk + 2));
+    const unsigned char* scales = w_blk + 4;
+    const unsigned char* qs     = w_blk + 16;   // 128 bytes = 256 nibbles
+
+    const float* xb = x + (size_t)block_offset * 256u;
+
+    float pos_acc = 0.0f;
+    float min_acc = 0.0f;
+
+    for (int gp = 0; gp < 4; gp++) {
+        unsigned char sc1, mn1, sc2, mn2;
+        q4k_scale_min(gp * 2,     scales, &sc1, &mn1);
+        q4k_scale_min(gp * 2 + 1, scales, &sc2, &mn2);
+
+        float sum1 = 0.0f, sum2 = 0.0f;
+        float xsum1 = 0.0f, xsum2 = 0.0f;
+
+        const unsigned char* gp_qs = qs + gp * 32;
+        const float* xb1 = xb + gp * 64;
+        const float* xb2 = xb + gp * 64 + 32;
+
+#pragma unroll
+        for (int i = 0; i < 32; i++) {
+            unsigned char byte = gp_qs[i];
+            float lo = (float)(byte & 0xFu);
+            float hi = (float)(byte >> 4u);
+            float x1 = xb1[i];
+            float x2 = xb2[i];
+            sum1  += lo * x1;
+            sum2  += hi * x2;
+            xsum1 += x1;
+            xsum2 += x2;
+        }
+
+        pos_acc += (float)sc1 * sum1 + (float)sc2 * sum2;
+        min_acc += (float)mn1 * xsum1 + (float)mn2 * xsum2;
+    }
+
+    return d_w * pos_acc - dmin_w * min_acc;
+}
+
+// Q4K GEMV with GPU-resident float32 input (GPU-native activation path).
+extern "C" __global__ void gemv_q4k_f32in_kernel(
+    const unsigned char* __restrict__ matrix,  // Q4K weights [rows × blocks_per_row × 144 B]
+    const float*          __restrict__ x,      // F32 input  [blocks_per_row * 256]
+    float*                __restrict__ output, // F32 output [rows]
+    unsigned int rows,
+    unsigned int blocks_per_row)
+{
+    unsigned int global_thread = blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned int row  = global_thread >> 5u;
+    unsigned int lane = threadIdx.x & 31u;
+    if (row >= rows) return;
+
+    const unsigned char* row_blocks = matrix + (size_t)row * blocks_per_row * 144u;
+    float sum = 0.0f;
+
+    for (unsigned int b = lane; b < blocks_per_row; b += 32u)
+        sum += q4k_f32in_block_dot(row_blocks + (size_t)b * 144u, x, b);
+
+    sum = warp_reduce_sum(sum);
+    if (lane == 0u) output[row] = sum;
+}
+
+// --------------------------------------------------------------------------
 // Q4_K × Q8_K direct GEMV (OXK GPU path)
 //
 // Mirrors the CPU OXK kernels: quantize the activation vector to Q8_K once,
@@ -527,4 +607,245 @@ extern "C" __global__ void gemv_nvfp4_kernel(
     }
     sum = warp_reduce_sum(sum);
     if (lane == 0u) output[row] = sum;
+}
+
+// --------------------------------------------------------------------------
+// GPU-resident forward-pass utility kernels
+// These are used to keep the hidden state (residual stream) on device across
+// the full transformer forward pass, eliminating per-layer CPU<->GPU trips.
+// --------------------------------------------------------------------------
+
+// gemv_q6k_f32in_kernel: Q6_K matrix × F32 input → F32 output
+//
+// Q6_K block layout (block_q6_K, 210 bytes per 256 values):
+//   ql[128]     — lower 4 bits, interleaved: byte l holds lo4 for values l and l+32
+//   qh[64]      — upper 2 bits, interleaved: byte l holds hi2 for values l, l+32, l+64, l+96
+//   scales[16]  — int8 scales, one per 16 values
+//   d (2 bytes) — half-float superblock scale
+//
+// Layout matches ggml block_q6_K; the block has TWO sub-groups of 128 values each.
+// Within each sub-group, for l=0..31: q(l), q(l+32), q(l+64), q(l+96) share qh[l].
+//
+// One warp (32 threads) computes one output row; threads stride over blocks.
+__device__ float q6k_f32in_block_dot(
+    const unsigned char* __restrict__ w_blk,
+    const float* __restrict__ x,
+    unsigned int block_offset)
+{
+    float d  = __half2float(*reinterpret_cast<const __half*>(w_blk + 208));
+    const int8_t*          sc = reinterpret_cast<const int8_t*>(w_blk + 192);
+    const unsigned char*   ql = w_blk;        // [128 bytes]
+    const unsigned char*   qh = w_blk + 128;  // [64 bytes]
+    const float*           xb = x + (size_t)block_offset * 256u;
+    float sum = 0.0f;
+    // Two sub-groups of 128 values (n=0 → values 0..127, n=1 → values 128..255)
+    for (int n = 0; n < 2; n++) {
+        const unsigned char* qln = ql + n * 64;   // 64 bytes per sub-group
+        const unsigned char* qhn = qh + n * 32;   // 32 bytes per sub-group
+        const int8_t*        scn = sc + n * 8;    // 8 scales per sub-group
+        const float*         xn  = xb + n * 128;
+        for (int l = 0; l < 32; l++) {
+            int is = l >> 4;  // 0 for l=0..15, 1 for l=16..31
+            int8_t q1 = (int8_t)(((qln[l     ] & 0xFu) | (((qhn[l] >> 0) & 3u) << 4)) - 32);
+            int8_t q2 = (int8_t)(((qln[l + 32] & 0xFu) | (((qhn[l] >> 2) & 3u) << 4)) - 32);
+            int8_t q3 = (int8_t)(((qln[l     ] >>    4) | (((qhn[l] >> 4) & 3u) << 4)) - 32);
+            int8_t q4 = (int8_t)(((qln[l + 32] >>    4) | (((qhn[l] >> 6) & 3u) << 4)) - 32);
+            sum += d * (float)scn[is    ] * (float)q1 * xn[l     ];
+            sum += d * (float)scn[is + 2] * (float)q2 * xn[l + 32];
+            sum += d * (float)scn[is + 4] * (float)q3 * xn[l + 64];
+            sum += d * (float)scn[is + 6] * (float)q4 * xn[l + 96];
+        }
+    }
+    return sum;
+}
+
+extern "C" __global__ void gemv_q6k_f32in_kernel(
+    const unsigned char* __restrict__ matrix,
+    const float*          __restrict__ x,
+    float*                __restrict__ output,
+    unsigned int rows, unsigned int blocks_per_row)
+{
+    unsigned int global_thread = blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned int row  = global_thread >> 5u;
+    unsigned int lane = threadIdx.x & 31u;
+    if (row >= rows) return;
+    const unsigned char* row_blocks = matrix + (size_t)row * blocks_per_row * 210u;
+    float sum = 0.0f;
+    for (unsigned int b = lane; b < blocks_per_row; b += 32u)
+        sum += q6k_f32in_block_dot(row_blocks + (size_t)b * 210u, x, b);
+    sum = warp_reduce_sum(sum);
+    if (lane == 0u) output[row] = sum;
+}
+
+// rms_norm_f32_kernel: y[i] = x[i] / rms(x) * weight[i]
+//
+// One block per row. All threads in the block cooperate to compute the
+// sum-of-squares via shared-memory parallel reduction, then each thread
+// applies the normalised weight scale. Supports hidden sizes up to 16 384
+// (512 threads * 32 elements per thread) which covers every model class in
+// the oxidize weight set.
+//
+// Launch: gridDim.x = batch (typically 1 for decode), blockDim.x = 256 (tunable).
+// Dynamic shared memory: blockDim.x * sizeof(float) bytes.
+extern "C" __global__ void rms_norm_f32_kernel(
+    const float* __restrict__ x,
+    const float* __restrict__ weight,
+    float* __restrict__ y,
+    int hidden_size, float eps)
+{
+    extern __shared__ float sdata[];  // blockDim.x floats
+
+    int tid = threadIdx.x;
+    int row = blockIdx.x;
+    const float* xrow = x + (size_t)row * hidden_size;
+    float* yrow = y + (size_t)row * hidden_size;
+
+    // Each thread accumulates its partial sum of squares.
+    float partial = 0.0f;
+    for (int i = tid; i < hidden_size; i += blockDim.x) {
+        float v = xrow[i];
+        partial += v * v;
+    }
+    sdata[tid] = partial;
+    __syncthreads();
+
+    // Tree reduction in shared memory.
+    for (int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride)
+            sdata[tid] += sdata[tid + stride];
+        __syncthreads();
+    }
+
+    // sdata[0] now holds the full sum-of-squares.
+    float inv_rms = rsqrtf(sdata[0] / (float)hidden_size + eps);
+
+    // Apply scale.
+    for (int i = tid; i < hidden_size; i += blockDim.x)
+        yrow[i] = xrow[i] * inv_rms * weight[i];
+}
+
+// residual_add_f32_kernel: x[i] += delta[i]  (in-place residual stream update)
+//
+// Launch: blockDim.x = 256, gridDim.x = ceil(n / 256).
+extern "C" __global__ void residual_add_f32_kernel(
+    float* __restrict__ x,
+    const float* __restrict__ delta,
+    int n)
+{
+    int i = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+    if (i < n)
+        x[i] += delta[i];
+}
+
+// silu_mul_f32_kernel: out[i] = silu(gate[i]) * up[i]
+//
+// This is the SwiGLU non-linearity used by the FFN block of Llama / Mistral /
+// Qwen / Gemma models.  gate and up are separate f32 arrays of length n.
+// out may alias gate (in-place update is safe because each thread writes to
+// exactly the same index it reads from both inputs).
+//
+// Launch: blockDim.x = 256, gridDim.x = ceil(n / 256).
+extern "C" __global__ void silu_mul_f32_kernel(
+    const float* __restrict__ gate,
+    const float* __restrict__ up,
+    float* __restrict__ out,
+    int n)
+{
+    int i = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+    if (i < n) {
+        float g = gate[i];
+        // silu(g) = g * sigmoid(g) = g / (1 + exp(-g))
+        float silu_g = g / (1.0f + expf(-g));
+        out[i] = silu_g * up[i];
+    }
+}
+
+// softmax_f32_kernel: in-place numerically stable softmax over n elements.
+//
+// Runs as a single block. Uses shared memory to find the maximum (for
+// numerical stability) and the normalisation sum, then writes the final
+// probabilities back in-place. The primary consumer is final-logit softmax
+// (vocab_size ~ 32k-128k); for attention scores use the flash-attention path.
+//
+// Launch: gridDim.x = 1, blockDim.x = 256.
+// Dynamic shared memory: 2 * blockDim.x * sizeof(float) bytes.
+extern "C" __global__ void softmax_f32_kernel(float* __restrict__ x, int n)
+{
+    extern __shared__ float smem[];
+    int tid = threadIdx.x;
+    int bdx = blockDim.x;
+    float* max_buf = smem;
+    float* sum_buf = smem + bdx;
+
+    // Pass 1: find max for numerical stability.
+    float local_max = -3.402823466e+38f;  // -FLT_MAX
+    for (int i = tid; i < n; i += bdx) {
+        float v = x[i];
+        if (v > local_max) local_max = v;
+    }
+    max_buf[tid] = local_max;
+    __syncthreads();
+    for (int stride = bdx >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride && max_buf[tid + stride] > max_buf[tid])
+            max_buf[tid] = max_buf[tid + stride];
+        __syncthreads();
+    }
+    float gmax = max_buf[0];
+
+    // Pass 2: compute exp(x - max) in-place and accumulate sum.
+    float local_sum = 0.0f;
+    for (int i = tid; i < n; i += bdx) {
+        float v = expf(x[i] - gmax);
+        x[i] = v;
+        local_sum += v;
+    }
+    sum_buf[tid] = local_sum;
+    __syncthreads();
+    for (int stride = bdx >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride)
+            sum_buf[tid] += sum_buf[tid + stride];
+        __syncthreads();
+    }
+    float inv_sum = 1.0f / sum_buf[0];
+
+    // Pass 3: normalise.
+    for (int i = tid; i < n; i += bdx)
+        x[i] *= inv_sum;
+}
+
+// cast_f32_to_f16_kernel: convert n f32 values to f16 (stored as u16 bit patterns).
+//
+// Used to upload f32 activations to device as f16 to halve bandwidth on the
+// activation->GEMV path when the model is running in mixed-precision mode.
+//
+// Launch: blockDim.x = 256, gridDim.x = ceil(n / 256).
+extern "C" __global__ void cast_f32_to_f16_kernel(
+    const float* __restrict__ in,
+    unsigned short* __restrict__ out,
+    int n)
+{
+    int i = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+    if (i < n) {
+        __half h = __float2half(in[i]);
+        // Store as raw u16 bits - matches DeviceBuffer<u16> on the Rust side.
+        out[i] = *reinterpret_cast<const unsigned short*>(&h);
+    }
+}
+
+// cast_f16_to_f32_kernel: convert n f16 values (stored as u16 bit patterns) to f32.
+//
+// Used to download device f16 activations back to f32 for CPU-side operations
+// that do not yet have a GPU implementation.
+//
+// Launch: blockDim.x = 256, gridDim.x = ceil(n / 256).
+extern "C" __global__ void cast_f16_to_f32_kernel(
+    const unsigned short* __restrict__ in,
+    float* __restrict__ out,
+    int n)
+{
+    int i = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+    if (i < n) {
+        __half h = *reinterpret_cast<const __half*>(&in[i]);
+        out[i] = __half2float(h);
+    }
 }
