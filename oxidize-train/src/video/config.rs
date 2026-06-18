@@ -111,6 +111,10 @@ pub struct VideoTrainingConfig {
     pub max_videos: Option<usize>,
     /// Downsample every class to the size of the smallest one before training.
     pub balance: bool,
+    /// Creator usernames to drop before training (case-insensitive).
+    pub exclude: Vec<String>,
+    /// Merge duplicate accounts (`sanymaaa` → `sanymaa`).
+    pub merge_aliases: bool,
 }
 
 impl VideoTrainingConfig {
@@ -143,19 +147,21 @@ impl Default for VideoTrainingConfig {
         Self {
             data_root: PathBuf::from("."),
             cache_dir: PathBuf::new(),
-            task: LabelTask::Creator,
+            task: LabelTask::Virality,
             frames: FrameConfig::default(),
-            embed_dim: 128,
-            hidden_size: 256,
-            epochs: 30,
+            embed_dim: 64,
+            hidden_size: 128,
+            epochs: 40,
             batch_size: 16,
-            learning_rate: 1e-3,
-            weight_decay: 0.01,
+            learning_rate: 5e-4,
+            weight_decay: 0.05,
             seed: 42,
             val_split: 0.15,
             buckets: 3,
             max_videos: None,
             balance: false,
+            exclude: vec!["cellow111".into()],
+            merge_aliases: true,
         }
     }
 }
