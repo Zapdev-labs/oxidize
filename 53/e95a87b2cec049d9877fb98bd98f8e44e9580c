@@ -1,0 +1,21 @@
+.gitignore
+  s_9977901d17a81e::t_4761f1934aeb94 24
+oxidize-golang/cmd/bench_oxk/main.go
+  s_9977901d17a81e::t_4761f1934aeb94 1-202
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.8",
+  "base_commit_sha": "53e95a87b2cec049d9877fb98bd98f8e44e9580c",
+  "prompts": {},
+  "sessions": {
+    "s_9977901d17a81e": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "3cd73ec3-5368-4b64-bd49-5601fc62d824",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
