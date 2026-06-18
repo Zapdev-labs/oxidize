@@ -3,15 +3,16 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use oxidize_train::video::{
-    FrameConfig, LabelTask, VideoTrainingConfig, build_prototype, default_model_path,
-    ffmpeg_available, load_dataset, save_model, train_video_classifier,
+    FrameConfig, GenTrainingConfig, LabelTask, VideoTrainingConfig, default_generator_path,
+    default_model_path, ffmpeg_available, generate_video, load_gen_dataset, load_generator,
+    load_dataset, save_generator, save_model, train_generator, train_video_classifier,
 };
 use oxidize_train::{TrainingConfig, load_csv_dataset, train_classifier};
 
 #[derive(Debug, Parser)]
 #[command(
     name = "oxidize-train",
-    about = "Train classifiers on CPU: tabular CSV rows or short-video clips"
+    about = "Train classifiers and generative video models on CPU"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -22,10 +23,12 @@ struct Cli {
 enum Command {
     /// Train the MLP classifier on a CSV dataset.
     Csv(CsvArgs),
-    /// Train a video classifier on a directory of clips + JSON metadata.
+    /// Train a clip classifier (virality / engagement labels).
     Video(VideoArgs),
-    /// Render a "base" prototype clip by averaging selected creators' frames.
-    Prototype(PrototypeArgs),
+    /// Train an autoregressive next-frame video generator.
+    GenTrain(GenTrainArgs),
+    /// Generate a new video from a trained generator checkpoint.
+    Generate(GenerateArgs),
 }
 
 #[derive(Debug, Args)]
@@ -50,11 +53,8 @@ struct CsvArgs {
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum TaskArg {
-    /// Predict which creator/account a clip is from.
     Creator,
-    /// Predict a view-count bucket (how viral).
     Virality,
-    /// Predict a like/view engagement bucket.
     Engagement,
 }
 
@@ -70,87 +70,122 @@ impl From<TaskArg> for LabelTask {
 
 #[derive(Debug, Args)]
 struct VideoArgs {
-    /// Root directory holding clips and `*_metadata.json` files.
     #[arg(long)]
     data: PathBuf,
-    /// Frame cache directory (default: `<data>/.oxidize-frames`).
     #[arg(long)]
     cache: Option<PathBuf>,
-    #[arg(long, value_enum, default_value_t = TaskArg::Creator)]
+    #[arg(long, value_enum, default_value_t = TaskArg::Virality)]
     task: TaskArg,
-    /// Frames sampled per clip.
     #[arg(long, default_value_t = 8)]
     frames: usize,
     #[arg(long = "frame-size", default_value_t = 64)]
     frame_size: usize,
     #[arg(long = "patch-size", default_value_t = 16)]
     patch_size: usize,
-    #[arg(long = "embed-dim", default_value_t = 128)]
+    #[arg(long = "embed-dim", default_value_t = 64)]
     embed_dim: usize,
-    #[arg(long = "hidden-size", default_value_t = 256)]
+    #[arg(long = "hidden-size", default_value_t = 128)]
     hidden_size: usize,
-    #[arg(long, default_value_t = 30)]
+    #[arg(long, default_value_t = 40)]
     epochs: usize,
     #[arg(long = "batch-size", default_value_t = 16)]
     batch_size: usize,
-    #[arg(long = "learning-rate", default_value_t = 1e-3)]
+    #[arg(long = "learning-rate", default_value_t = 5e-4)]
     learning_rate: f32,
-    #[arg(long = "weight-decay", default_value_t = 0.01)]
+    #[arg(long = "weight-decay", default_value_t = 0.05)]
     weight_decay: f32,
     #[arg(long, default_value_t = 42)]
     seed: u64,
-    /// Fraction of clips held out for validation.
     #[arg(long = "val-split", default_value_t = 0.15)]
     val_split: f32,
-    /// Quantile buckets for virality/engagement tasks.
     #[arg(long, default_value_t = 3)]
     buckets: usize,
-    /// Optional cap on number of clips (for quick runs).
     #[arg(long = "max-videos")]
     max_videos: Option<usize>,
-    /// Downsample each class to the smallest class size before training.
     #[arg(long)]
     balance: bool,
-    /// Where to write the trained model (JSON).
+    #[arg(long)]
+    exclude: Vec<String>,
+    #[arg(long, default_value_t = true)]
+    merge_aliases: bool,
     #[arg(long)]
     out: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
-struct PrototypeArgs {
-    /// Root directory holding clips and `*_metadata.json` files.
+struct GenTrainArgs {
     #[arg(long)]
     data: PathBuf,
-    /// Frame cache directory (default: `<data>/.oxidize-frames`).
     #[arg(long)]
     cache: Option<PathBuf>,
-    /// Creator(s) to exclude from the average (repeatable).
-    #[arg(long)]
-    exclude: Vec<String>,
-    /// Frames sampled per clip (temporal slots in the base video).
-    #[arg(long, default_value_t = 8)]
+    #[arg(long, default_value_t = 16)]
     frames: usize,
     #[arg(long = "frame-size", default_value_t = 64)]
     frame_size: usize,
-    /// Output resolution of the rendered base video (square).
-    #[arg(long, default_value_t = 256)]
-    upscale: u32,
-    /// Output frame rate (smoothed via interpolation).
-    #[arg(long, default_value_t = 24)]
+    #[arg(long = "patch-size", default_value_t = 8)]
+    patch_size: usize,
+    #[arg(long = "context-frames", default_value_t = 4)]
+    context_frames: usize,
+    #[arg(long = "hidden-size", default_value_t = 256)]
+    hidden_size: usize,
+    #[arg(long = "patch-hidden", default_value_t = 128)]
+    patch_hidden: usize,
+    #[arg(long, default_value_t = 60)]
+    epochs: usize,
+    #[arg(long = "batch-size", default_value_t = 32)]
+    batch_size: usize,
+    #[arg(long = "learning-rate", default_value_t = 1e-3)]
+    learning_rate: f32,
+    #[arg(long = "weight-decay", default_value_t = 0.001)]
+    weight_decay: f32,
+    #[arg(long, default_value_t = 42)]
+    seed: u64,
+    #[arg(long = "val-split", default_value_t = 0.1)]
+    val_split: f32,
+    #[arg(long = "max-videos")]
+    max_videos: Option<usize>,
+    #[arg(long)]
+    exclude: Vec<String>,
+    #[arg(long, default_value_t = true)]
+    merge_aliases: bool,
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct GenerateArgs {
+    /// Trained generator checkpoint (JSON).
+    #[arg(long)]
+    model: PathBuf,
+    /// Clip source root (for seed frames).
+    #[arg(long)]
+    data: PathBuf,
+    #[arg(long)]
+    cache: Option<PathBuf>,
+    #[arg(long)]
+    exclude: Vec<String>,
+    #[arg(long, default_value_t = true)]
+    merge_aliases: bool,
+    /// Number of new frames to synthesize after the seed context.
+    #[arg(long = "output-frames", default_value_t = 32)]
+    output_frames: usize,
+    /// Sampling noise (0 = deterministic).
+    #[arg(long, default_value_t = 0.02)]
+    temperature: f32,
+    #[arg(long, default_value_t = 8)]
     fps: u32,
-    /// Where to write the base video (mp4).
+    #[arg(long, default_value_t = 42)]
+    seed: u64,
     #[arg(long)]
     out: PathBuf,
-    /// Optional contact-sheet PNG of the averaged frames.
-    #[arg(long)]
-    sheet: Option<PathBuf>,
 }
 
 fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Csv(args) => run_csv(args),
         Command::Video(args) => run_video(args),
-        Command::Prototype(args) => run_prototype(args),
+        Command::GenTrain(args) => run_gen_train(args),
+        Command::Generate(args) => run_generate(args),
     }
 }
 
@@ -178,11 +213,10 @@ fn run_csv(args: CsvArgs) -> Result<()> {
 
 fn run_video(args: VideoArgs) -> Result<()> {
     if !ffmpeg_available() {
-        eprintln!(
-            "oxidize-train video: warning — `ffmpeg` not found on PATH; only already-cached frames can be used."
-        );
+        eprintln!("oxidize-train video: warning — ffmpeg not found; only cached frames work.");
     }
 
+    let exclude = default_exclude(args.exclude);
     let config = VideoTrainingConfig {
         data_root: args.data,
         cache_dir: args.cache.unwrap_or_default(),
@@ -203,14 +237,107 @@ fn run_video(args: VideoArgs) -> Result<()> {
         buckets: args.buckets,
         max_videos: args.max_videos,
         balance: args.balance,
+        exclude,
+        merge_aliases: args.merge_aliases,
     };
 
     let dataset = load_dataset(&config)?;
     let (model, report) = train_video_classifier(&dataset, &config)?;
-
     let out = args.out.unwrap_or_else(|| default_model_path(&config));
     save_model(&out, &model, &dataset, &config)?;
 
+    print_video_report(&report, &out);
+    Ok(())
+}
+
+fn run_gen_train(args: GenTrainArgs) -> Result<()> {
+    if !ffmpeg_available() {
+        eprintln!("oxidize-train gen-train: warning — ffmpeg not found.");
+    }
+
+    let exclude = default_exclude(args.exclude);
+    let config = GenTrainingConfig {
+        data_root: args.data,
+        cache_dir: args.cache.unwrap_or_default(),
+        frames: FrameConfig {
+            num_frames: args.frames,
+            frame_size: args.frame_size,
+            patch_size: args.patch_size,
+        },
+        context_frames: args.context_frames,
+        hidden_size: args.hidden_size,
+        patch_hidden: args.patch_hidden,
+        epochs: args.epochs,
+        batch_size: args.batch_size,
+        learning_rate: args.learning_rate,
+        weight_decay: args.weight_decay,
+        seed: args.seed,
+        val_split: args.val_split,
+        max_videos: args.max_videos,
+        exclude,
+        merge_aliases: args.merge_aliases,
+    };
+
+    let dataset = load_gen_dataset(&config)?;
+    let (model, report) = train_generator(&dataset, &config)?;
+    let out = args.out.unwrap_or_else(|| default_generator_path(&config));
+    save_generator(&out, &model, &config)?;
+
+    println!();
+    println!("oxidize-train gen-train: pairs      = {}", report.pairs);
+    println!(
+        "oxidize-train gen-train: train/val   = {}/{}",
+        report.train_pairs, report.val_pairs
+    );
+    println!(
+        "oxidize-train gen-train: final_mse   = {:.5}",
+        report.final_train_loss
+    );
+    println!(
+        "oxidize-train gen-train: val_mse     = {:.5}  (best {:.5})",
+        report.val_loss, report.best_val_loss
+    );
+    println!("oxidize-train gen-train: model       = {}", out.display());
+    Ok(())
+}
+
+fn run_generate(args: GenerateArgs) -> Result<()> {
+    let saved = load_generator(&args.model)?;
+    let cache = args
+        .cache
+        .unwrap_or_else(|| args.data.join(".oxidize-frames"));
+    let exclude = default_exclude(args.exclude);
+
+    let report = generate_video(
+        &saved.generator,
+        &saved,
+        &args.data,
+        &cache,
+        &exclude,
+        args.merge_aliases,
+        args.output_frames,
+        args.temperature,
+        args.fps,
+        &args.out,
+        args.seed,
+    )?;
+
+    println!();
+    println!("oxidize-train generate: seed_clip = {}", report.seed_clip);
+    println!("oxidize-train generate: frames    = {}", report.frames);
+    println!("oxidize-train generate: video     = {}", report.out.display());
+    Ok(())
+}
+
+fn default_exclude(exclude: Vec<String>) -> Vec<String> {
+    if exclude.is_empty() {
+        vec!["cellow111".into()]
+    } else {
+        exclude
+    }
+}
+
+fn print_video_report(report: &oxidize_train::video::VideoTrainingReport, out: &std::path::Path) {
     println!();
     println!("oxidize-train video: task            = {}", report.task);
     println!("oxidize-train video: clips           = {}", report.clips);
@@ -231,47 +358,8 @@ fn run_video(args: VideoArgs) -> Result<()> {
         report.train_accuracy
     );
     println!(
-        "oxidize-train video: val_accuracy    = {:.4}  (majority baseline {:.4})",
-        report.val_accuracy, report.majority_baseline
+        "oxidize-train video: val_accuracy    = {:.4}  (best {:.4}, majority baseline {:.4})",
+        report.val_accuracy, report.best_val_accuracy, report.majority_baseline
     );
     println!("oxidize-train video: model           = {}", out.display());
-    Ok(())
-}
-
-fn run_prototype(args: PrototypeArgs) -> Result<()> {
-    let cache = args
-        .cache
-        .unwrap_or_else(|| args.data.join(".oxidize-frames"));
-    let frames = FrameConfig {
-        num_frames: args.frames,
-        frame_size: args.frame_size,
-        patch_size: 16,
-    };
-
-    let report = build_prototype(
-        &args.data,
-        &cache,
-        frames,
-        &args.exclude,
-        &args.out,
-        args.sheet.as_deref(),
-        args.upscale,
-        args.fps,
-    )?;
-
-    println!();
-    println!("oxidize-train prototype: clips    = {}", report.clips);
-    println!("oxidize-train prototype: frames   = {}", report.frames);
-    println!(
-        "oxidize-train prototype: creators = {}",
-        report.creators.join(", ")
-    );
-    println!(
-        "oxidize-train prototype: video    = {}",
-        report.out.display()
-    );
-    if let Some(sheet) = &report.sheet {
-        println!("oxidize-train prototype: sheet    = {}", sheet.display());
-    }
-    Ok(())
 }

@@ -23,6 +23,7 @@ pub struct VideoTrainingReport {
     pub final_train_loss: f32,
     pub train_accuracy: f32,
     pub val_accuracy: f32,
+    pub best_val_accuracy: f32,
     pub majority_baseline: f32,
     pub epoch_losses: Vec<f32>,
 }
@@ -56,6 +57,8 @@ pub fn train_video_classifier(
     let mut rng = StdRng::seed_from_u64(config.seed.wrapping_add(1));
     let mut order = train_idx.clone();
     let mut epoch_losses = Vec::with_capacity(config.epochs);
+    let mut best_val = 0.0f32;
+    let mut best_model = model.clone();
 
     for epoch in 0..config.epochs {
         order.shuffle(&mut rng);
@@ -72,13 +75,18 @@ pub fn train_video_classifier(
         let train_loss = weighted_loss / seen.max(1) as f32;
         epoch_losses.push(train_loss);
         let val_acc = accuracy(&model, dataset, &val_idx, config.batch_size)?;
+        if val_acc >= best_val {
+            best_val = val_acc;
+            best_model = model.clone();
+        }
         eprintln!(
-            "  epoch {:>3}/{}  train_loss={train_loss:.4}  val_acc={val_acc:.4}",
+            "  epoch {:>3}/{}  train_loss={train_loss:.4}  val_acc={val_acc:.4}  best={best_val:.4}",
             epoch + 1,
             config.epochs
         );
     }
 
+    model = best_model;
     let train_accuracy = accuracy(&model, dataset, &train_idx, config.batch_size)?;
     let val_accuracy = accuracy(&model, dataset, &val_idx, config.batch_size)?;
     let majority_baseline = majority_baseline(dataset, &val_idx);
@@ -95,6 +103,7 @@ pub fn train_video_classifier(
         final_train_loss: epoch_losses.last().copied().unwrap_or(f32::NAN),
         train_accuracy,
         val_accuracy,
+        best_val_accuracy: best_val,
         majority_baseline,
         epoch_losses,
     };
