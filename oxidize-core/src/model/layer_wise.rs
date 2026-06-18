@@ -945,7 +945,8 @@ impl LayerWiseModel {
         for layer_idx in 0..cfg.layer_count {
             self.ensure_layer_loaded(layer_idx)
                 .map_err(|e| ModelError::InferenceFailed(format!("layer load: {}", e)))?;
-            // SAFETY: layer weights live in a fixed cache slot; we only touch kv/ssm state below.
+            // SAFETY: layer weights live in a fixed cache slot; extending the
+            // ref via raw pointer lets us call `&mut self` methods in the same scope.
             let layer = unsafe {
                 let layer_ptr = self.layer_ref(layer_idx) as *const LayerWeights;
                 &*layer_ptr
@@ -1277,8 +1278,7 @@ impl LayerWiseModel {
         for layer_idx in 0..cfg.layer_count {
             self.ensure_layer_loaded(layer_idx)
                 .map_err(|e| ModelError::InferenceFailed(format!("layer load: {}", e)))?;
-            // SAFETY: layer weights live in a fixed cache slot; we only touch
-            // kv/ssm state below (same invariant as forward_single).
+            // SAFETY: same lifetime extension as forward_single (see above).
             let layer = unsafe {
                 let layer_ptr = self.layer_ref(layer_idx) as *const LayerWeights;
                 &*layer_ptr
@@ -1591,8 +1591,6 @@ impl LayerWiseModel {
         let state_base = state.as_mut_ptr() as usize;
         let out_base = core_out.as_mut_ptr() as usize;
         crate::spinpool::run_chunks(num_v_heads, |v_head| {
-            // Safety: per-head state/output chunks are disjoint and both
-            // buffers outlive the blocking dispatch below.
             let state_h = unsafe {
                 std::slice::from_raw_parts_mut(
                     (state_base as *mut f32).add(v_head * head_state),
@@ -2374,8 +2372,7 @@ impl LayerWiseModel {
                 if write_start + kv_head_dim > attn_len {
                     return;
                 }
-                // Safety: per-head ranges are disjoint and attn_result
-                // outlives the blocking dispatch.
+                // SAFETY: per-head output ranges are disjoint; attn_result outlives dispatch.
                 let out_head = unsafe {
                     std::slice::from_raw_parts_mut(
                         (out_base as *mut f32).add(write_start),
