@@ -71,11 +71,19 @@ fn main() {
     }
 }
 
-/// Compile `kernels/gemv_f32.cu` to PTX in `OUT_DIR` using nvcc.
+/// Compile `kernels/gemv_f32.cu` to PTX (+ optional native cubins) in `OUT_DIR`.
 ///
-/// `-arch=compute_75` emits a virtual-architecture PTX that the driver JITs to
-/// the physical GPU at load time; it forward-compiles to any newer GPU while
-/// staying broadly compatible. The crate embeds the result via
+/// Strategy: always emit `compute_75` PTX — a virtual-architecture image that
+/// the CUDA driver JITs to native code for any GPU ≥ SM7.5 (including SM120).
+/// Additionally, if the installed toolkit is new enough, emit a native cubin for
+/// the current generation so the driver can skip JIT on that GPU:
+///
+///   CUDA ≥ 12.8  →  also emit native SM120 (Blackwell RTX 50-series)
+///   CUDA ≥ 12.0  →  also emit native SM90  (Hopper H100/H200)
+///   CUDA ≥ 11.8  →  also emit native SM89  (Ada Lovelace L40/RTX 4090)
+///   CUDA ≥ 11.0  →  also emit native SM80  (Ampere A100)
+///
+/// The crate embeds the result via
 /// `include_str!(concat!(env!("OUT_DIR"), "/gemv_f32.ptx"))`.
 fn compile_cuda_kernels(cuda_root: &Path) {
     let out_dir = env::var("OUT_DIR").expect("OUT_DIR is set by cargo");
@@ -84,30 +92,56 @@ fn compile_cuda_kernels(cuda_root: &Path) {
     println!("cargo:rerun-if-changed=kernels/gemv_f32.cu");
 
     let nvcc = {
-        // Windows ships `nvcc.exe`; probe the platform-correct filename and fall
-        // back to looking it up on PATH.
-        let exe = if cfg!(target_os = "windows") {
-            "nvcc.exe"
-        } else {
-            "nvcc"
-        };
+        let exe = if cfg!(target_os = "windows") { "nvcc.exe" } else { "nvcc" };
         let candidate = cuda_root.join("bin").join(exe);
-        if candidate.is_file() {
-            candidate
-        } else {
-            PathBuf::from(exe)
-        }
+        if candidate.is_file() { candidate } else { PathBuf::from(exe) }
     };
 
-    let status = std::process::Command::new(&nvcc)
-        .arg("-ptx")
-        .arg("-O3")
-        .arg("--use_fast_math")
-        .arg("-arch=compute_75")
-        .arg("-o")
-        .arg(&ptx_out)
-        .arg(src)
-        .status();
+    // Probe toolkit version to decide which native archs to embed alongside PTX.
+    let toolkit_version: u32 = std::process::Command::new(&nvcc)
+        .arg("--version")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|s| {
+            // e.g. "release 12.8, V12.8.93"
+            s.split("release ").nth(1)?.split(',').next()
+                .and_then(|v| {
+                    let mut parts = v.trim().split('.');
+                    let major: u32 = parts.next()?.parse().ok()?;
+                    let minor: u32 = parts.next()?.parse().ok()?;
+                    Some(major * 10 + minor)
+                })
+        })
+        .unwrap_or(0);
+
+    // Build -gencode flags: PTX fallback always included; native cubins when
+    // the toolkit supports the target arch.
+    let mut gencode: Vec<String> = vec![
+        "-gencode".into(),
+        "arch=compute_75,code=compute_75".into(),  // forward-JIT PTX
+    ];
+    let native_archs: &[(&str, u32)] = &[
+        ("sm_80",  110),  // Ampere  — CUDA 11.0+
+        ("sm_89",  118),  // Ada     — CUDA 11.8+
+        ("sm_90",  120),  // Hopper  — CUDA 12.0+
+        ("sm_100", 125),  // Blackwell DC — CUDA 12.5+
+        ("sm_120", 128),  // Blackwell consumer (RTX 50xx) — CUDA 12.8+
+    ];
+    for &(sm, min_ver) in native_archs {
+        if toolkit_version >= min_ver {
+            let cc = sm.replace("sm_", "compute_");
+            gencode.push("-gencode".into());
+            gencode.push(format!("arch={cc},code={sm}"));
+        }
+    }
+
+    let mut cmd = std::process::Command::new(&nvcc);
+    cmd.arg("-ptx").arg("-O3").arg("--use_fast_math");
+    for arg in &gencode {
+        cmd.arg(arg);
+    }
+    let status = cmd.arg("-o").arg(&ptx_out).arg(src).status();
 
     match status {
         Ok(s) if s.success() => {}

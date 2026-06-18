@@ -2218,6 +2218,93 @@ pub fn gpu_download_hidden(out: &mut [f32]) -> Result<(), String> {
     })
 }
 
+/// GPU-resident lm_head (output projection): Q4K or Q6K weight × F32 normed hidden → F32 logits.
+///
+/// The weight matrix `weight_bytes` must be quantized (Q4_K or Q6_K); `rows` is the vocabulary
+/// size, `hidden_size` is the input dimension.  The weight is uploaded once and kept resident.
+/// The `normed` input (hidden_size floats) is uploaded, the kernel runs, and `vocab_size` logits
+/// are downloaded into `logits`.
+///
+/// Calling this instead of the CPU `gemv_weight` path saves 6–16 ms per token on a 128 k-vocab
+/// model because the weight read is bounded by GPU HBM bandwidth (~3 TB/s) rather than CPU RAM
+/// bandwidth (~50 GB/s).
+#[cfg(feature = "cuda")]
+pub fn gpu_lm_head_quantized(
+    weight_bytes: &[u8],
+    rows: usize,
+    hidden_size: usize,
+    normed: &[f32],
+    logits: &mut [f32],
+) -> Result<(), String> {
+    if !hidden_size.is_multiple_of(256) {
+        return Err(format!(
+            "gpu_lm_head: hidden_size {hidden_size} not a multiple of 256"
+        ));
+    }
+    if normed.len() != hidden_size {
+        return Err(format!(
+            "gpu_lm_head: normed len {} != hidden_size {hidden_size}",
+            normed.len()
+        ));
+    }
+    if logits.len() != rows {
+        return Err(format!(
+            "gpu_lm_head: logits len {} != rows {rows}",
+            logits.len()
+        ));
+    }
+
+    let blocks_per_row = hidden_size / 256;
+    let bpr_u32 = blocks_per_row as u32;
+    let rows_u32 = rows as u32;
+
+    let kern_name = if blocks_per_row > 0
+        && rows > 0
+        && weight_bytes.len() / (rows * blocks_per_row) >= 200
+    {
+        GEMV_Q6K_F32IN_KERNEL_NAME
+    } else {
+        GEMV_Q4K_F32IN_KERNEL_NAME
+    };
+
+    with_gpu(|gpu| {
+        // Keep the weight matrix resident across tokens.
+        let w_key = bytes_cache_key(weight_bytes);
+        gpu.ensure_resident_quant(w_key, weight_bytes)?;
+
+        // Upload the F32 normed vector.
+        let mut d_input = gpu.get_f32_buffer(hidden_size)?;
+        d_input.copy_from(normed).map_err(stringify)?;
+
+        // Allocate GPU output buffer for logits.
+        let d_output = gpu.get_f32_buffer(rows)?;
+
+        let block_size = 256_u32;
+        // One warp (32 threads) per output row.
+        let grid = (rows_u32 * 32).div_ceil(block_size);
+
+        let fn_gemv = gpu.module.get_function(kern_name).map_err(stringify)?;
+        let w_ptr = gpu.resident_quant[&w_key].as_device_ptr();
+        let stream = &gpu.stream;
+
+        unsafe {
+            cust::launch!(fn_gemv<<<grid, block_size, 0, stream>>>(
+                w_ptr, d_input.as_device_ptr(), d_output.as_device_ptr(),
+                rows_u32, bpr_u32
+            ))
+            .map_err(stringify)?;
+        }
+
+        // Sync and download — logits needed on CPU immediately for sampling.
+        gpu.stream.synchronize().map_err(stringify)?;
+        d_output.copy_to(logits).map_err(stringify)?;
+
+        gpu.return_f32_buffer(d_input);
+        gpu.return_f32_buffer(d_output);
+        Ok(())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
