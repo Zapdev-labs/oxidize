@@ -5,7 +5,9 @@ use rand::{SeedableRng, rngs::StdRng, seq::SliceRandom};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub mod video;
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Matrix {
     rows: usize,
     cols: usize,
@@ -276,11 +278,19 @@ impl MlpClassifier {
 pub struct Linear {
     weights: Matrix,
     bias: Vec<f32>,
+    // Transient training state — never persisted. A deserialized layer is
+    // inference-only until these are re-initialized.
+    #[serde(skip)]
     grad_weights: Matrix,
+    #[serde(skip)]
     grad_bias: Vec<f32>,
+    #[serde(skip)]
     adam_w_m: Vec<f32>,
+    #[serde(skip)]
     adam_w_v: Vec<f32>,
+    #[serde(skip)]
     adam_b_m: Vec<f32>,
+    #[serde(skip)]
     adam_b_v: Vec<f32>,
 }
 
