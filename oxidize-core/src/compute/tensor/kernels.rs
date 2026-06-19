@@ -478,11 +478,91 @@ unsafe fn dot4_f32_avx2(
     (s0, s1, s2, s3)
 }
 
+/// AVX-512 counterpart of [`dot4_f32_avx2`]: 16-wide FMA, four shared-`a`
+/// accumulators. On Skylake-SP this doubles the dot lanes versus AVX2 while the
+/// 32-zmm register file absorbs the four input streams without spilling.
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f,avx512vl,avx2,fma")]
+#[allow(unsafe_op_in_unsafe_fn)]
+#[inline]
+unsafe fn dot4_f32_avx512(
+    a: *const f32,
+    b0: *const f32,
+    b1: *const f32,
+    b2: *const f32,
+    b3: *const f32,
+    len: usize,
+) -> (f32, f32, f32, f32) {
+    let mut acc0 = _mm512_setzero_ps();
+    let mut acc1 = _mm512_setzero_ps();
+    let mut acc2 = _mm512_setzero_ps();
+    let mut acc3 = _mm512_setzero_ps();
+    let mut i = 0;
+    while i + 16 <= len {
+        let av = _mm512_loadu_ps(a.add(i));
+        acc0 = _mm512_fmadd_ps(av, _mm512_loadu_ps(b0.add(i)), acc0);
+        acc1 = _mm512_fmadd_ps(av, _mm512_loadu_ps(b1.add(i)), acc1);
+        acc2 = _mm512_fmadd_ps(av, _mm512_loadu_ps(b2.add(i)), acc2);
+        acc3 = _mm512_fmadd_ps(av, _mm512_loadu_ps(b3.add(i)), acc3);
+        i += 16;
+    }
+    let mut s0 = _mm512_reduce_add_ps(acc0);
+    let mut s1 = _mm512_reduce_add_ps(acc1);
+    let mut s2 = _mm512_reduce_add_ps(acc2);
+    let mut s3 = _mm512_reduce_add_ps(acc3);
+    while i < len {
+        let av = *a.add(i);
+        s0 += av * *b0.add(i);
+        s1 += av * *b1.add(i);
+        s2 += av * *b2.add(i);
+        s3 += av * *b3.add(i);
+        i += 1;
+    }
+    (s0, s1, s2, s3)
+}
+
+/// AVX-512 counterpart of [`dot_f32_avx2`].
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f,avx512vl,avx2,fma")]
+#[allow(unsafe_op_in_unsafe_fn)]
+#[inline]
+unsafe fn dot_f32_avx512(a: *const f32, b: *const f32, len: usize) -> f32 {
+    let mut acc0 = _mm512_setzero_ps();
+    let mut acc1 = _mm512_setzero_ps();
+    let mut i = 0;
+    while i + 32 <= len {
+        acc0 = _mm512_fmadd_ps(_mm512_loadu_ps(a.add(i)), _mm512_loadu_ps(b.add(i)), acc0);
+        acc1 = _mm512_fmadd_ps(
+            _mm512_loadu_ps(a.add(i + 16)),
+            _mm512_loadu_ps(b.add(i + 16)),
+            acc1,
+        );
+        i += 32;
+    }
+    while i + 16 <= len {
+        acc0 = _mm512_fmadd_ps(_mm512_loadu_ps(a.add(i)), _mm512_loadu_ps(b.add(i)), acc0);
+        i += 16;
+    }
+    let mut sum = _mm512_reduce_add_ps(_mm512_add_ps(acc0, acc1));
+    while i < len {
+        sum += *a.add(i) * *b.add(i);
+        i += 1;
+    }
+    sum
+}
+
 #[inline]
 fn dot_f32_fast(a: &[f32], b: &[f32]) -> f32 {
     debug_assert_eq!(a.len(), b.len());
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
+        if is_x86_feature_detected!("avx512f")
+            && is_x86_feature_detected!("avx512vl")
+            && is_x86_feature_detected!("avx2")
+            && is_x86_feature_detected!("fma")
+        {
+            return unsafe { dot_f32_avx512(a.as_ptr(), b.as_ptr(), a.len()) };
+        }
         if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
             return unsafe { dot_f32_avx2(a.as_ptr(), b.as_ptr(), a.len()) };
         }
@@ -580,6 +660,12 @@ unsafe fn gemm_q4_k_decode_once_avx2(
     let out_ptr_addr = outputs.as_mut_ptr() as usize;
     let row_stride_bytes = blocks_per_row * BLOCK_Q4_K_SIZE;
 
+    // The weight decode stays AVX2, but the per-token dot over the 256-element
+    // f32 scratch runs 16-wide on AVX-512 hardware (Skylake-SP). Detected once;
+    // the inner branch is perfectly predicted.
+    let use_avx512 =
+        is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512vl");
+
     // Rows are processed in chunks to amortize rayon task dispatch overhead.
     const ROW_CHUNK: usize = 16;
     let process_row = |row_idx: usize, partial: &mut [f32]| {
@@ -624,8 +710,11 @@ unsafe fn gemm_q4_k_decode_once_avx2(
                 let v1 = unsafe { in_ptr.add((t0 + 1) * cols + in_offset_floats) };
                 let v2 = unsafe { in_ptr.add((t0 + 2) * cols + in_offset_floats) };
                 let v3 = unsafe { in_ptr.add((t0 + 3) * cols + in_offset_floats) };
-                let (s0, s1, s2, s3) =
-                    unsafe { dot4_f32_avx2(scratch.as_ptr(), v0, v1, v2, v3, QK_K) };
+                let (s0, s1, s2, s3) = if use_avx512 {
+                    unsafe { dot4_f32_avx512(scratch.as_ptr(), v0, v1, v2, v3, QK_K) }
+                } else {
+                    unsafe { dot4_f32_avx2(scratch.as_ptr(), v0, v1, v2, v3, QK_K) }
+                };
                 partial[t0] += s0;
                 partial[t0 + 1] += s1;
                 partial[t0 + 2] += s2;
@@ -634,7 +723,11 @@ unsafe fn gemm_q4_k_decode_once_avx2(
             for ti in 0..tail {
                 let t = chunks * 4 + ti;
                 let v_ptr = unsafe { in_ptr.add(t * cols + in_offset_floats) };
-                partial[t] += unsafe { dot_f32_avx2(scratch.as_ptr(), v_ptr, QK_K) };
+                partial[t] += if use_avx512 {
+                    unsafe { dot_f32_avx512(scratch.as_ptr(), v_ptr, QK_K) }
+                } else {
+                    unsafe { dot_f32_avx2(scratch.as_ptr(), v_ptr, QK_K) }
+                };
             }
         }
     };
@@ -753,6 +846,8 @@ fn gemm_q6_k_decode_once(
             let in_ptr = in_ptr_addr as *const f32;
             let start = chunk_idx * ROW_CHUNK;
             let end = (start + ROW_CHUNK).min(rows);
+            let use_avx512 =
+                is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512vl");
             let mut scratch = [0.0_f32; QK_K];
             for row in start..end {
                 let local = row - start;
@@ -772,8 +867,11 @@ fn gemm_q6_k_decode_once(
                         let v1 = unsafe { in_ptr.add((t0 + 1) * cols + in_offset_floats) };
                         let v2 = unsafe { in_ptr.add((t0 + 2) * cols + in_offset_floats) };
                         let v3 = unsafe { in_ptr.add((t0 + 3) * cols + in_offset_floats) };
-                        let (s0, s1, s2, s3) =
-                            unsafe { dot4_f32_avx2(scratch.as_ptr(), v0, v1, v2, v3, QK_K) };
+                        let (s0, s1, s2, s3) = if use_avx512 {
+                            unsafe { dot4_f32_avx512(scratch.as_ptr(), v0, v1, v2, v3, QK_K) }
+                        } else {
+                            unsafe { dot4_f32_avx2(scratch.as_ptr(), v0, v1, v2, v3, QK_K) }
+                        };
                         partial[t0] += s0;
                         partial[t0 + 1] += s1;
                         partial[t0 + 2] += s2;
@@ -782,7 +880,11 @@ fn gemm_q6_k_decode_once(
                     for ti in 0..tail {
                         let t = chunks * 4 + ti;
                         let v_ptr = unsafe { in_ptr.add(t * cols + in_offset_floats) };
-                        partial[t] += unsafe { dot_f32_avx2(scratch.as_ptr(), v_ptr, QK_K) };
+                        partial[t] += if use_avx512 {
+                            unsafe { dot_f32_avx512(scratch.as_ptr(), v_ptr, QK_K) }
+                        } else {
+                            unsafe { dot_f32_avx2(scratch.as_ptr(), v_ptr, QK_K) }
+                        };
                     }
                 }
             }
@@ -5194,7 +5296,6 @@ fn gemm_f32_cpu(
     cols: usize,
     output: &mut [f32],
 ) {
-    const PREFETCH_DISTANCE: usize = 16;
     let expected_right_len = shared_dim.saturating_mul(cols);
     let mut right_transposed = vec![0.0_f32; expected_right_len];
     for shared_idx in 0..shared_dim {
@@ -5210,18 +5311,12 @@ fn gemm_f32_cpu(
         let left_row = &left_matrix[row * shared_dim..(row + 1) * shared_dim];
         let out_row = &mut output[row * cols..(row + 1) * cols];
         for (col, out_cell) in out_row.iter_mut().enumerate() {
+            // `right_transposed` makes each column contiguous, so this is a
+            // plain dot product — dispatch to the SIMD kernel (AVX-512/AVX2)
+            // instead of a scalar loop fenced by a `black_box` "prefetch" that
+            // also blocked autovectorization.
             let right_col = &right_transposed[col * shared_dim..(col + 1) * shared_dim];
-            let mut sum = 0.0_f32;
-            for (k, left_value) in left_row.iter().enumerate() {
-                if let (Some(next_left), Some(next_right)) = (
-                    left_row.get(k + PREFETCH_DISTANCE),
-                    right_col.get(k + PREFETCH_DISTANCE),
-                ) {
-                    std::hint::black_box(*next_left + *next_right);
-                }
-                sum += left_value * right_col[k];
-            }
-            *out_cell = sum;
+            *out_cell = crate::flash_attention::dot_product_f32(left_row, right_col);
         }
     }
 }
