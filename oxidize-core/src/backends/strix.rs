@@ -73,8 +73,10 @@ mod tests {
 
     #[test]
     fn rdna35_workgroups_are_wavefront_multiples() {
-        // Every workgroup size must be a whole number of wavefronts so the
-        // one-wavefront-per-row GEMV launch tiles cleanly.
+        // Workgroup sizes advertised for RDNA3.5 must each be a whole number of
+        // wavefronts. (The HIP GEMV path itself launches a fixed 256-thread
+        // block = 4 wave64 wavefronts; this invariant guards any other consumer
+        // of rdna35_workgroup_size against a partial-wavefront block.)
         let wave = rdna35_wavefront_width();
         assert_eq!(wave, 64);
         for hidden in [1024, 2048, 4096, 8192] {

@@ -53,13 +53,15 @@
 // Dense matrix-vector products: output[row] = sum_c matrix[row*cols + c] * vector[c]
 // --------------------------------------------------------------------------
 
-// One warp (32 lanes) per output row. Lanes stride across `cols` so that
-// adjacent lanes touch adjacent weights — fully coalesced VRAM reads — then a
-// shuffle reduction sums the partials. Decode-time gemv is bandwidth-bound, so
-// coalescing is what gets close to the GPU's peak memory throughput.
+// One lane group (OX_WAVE lanes: 32 on CUDA, 64 on AMD) per output row. Lanes
+// stride across `cols` so that adjacent lanes touch adjacent weights — fully
+// coalesced VRAM reads — then a shuffle reduction sums the partials. Decode-time
+// gemv is bandwidth-bound, so coalescing is what gets close to the GPU's peak
+// memory throughput.
 //
-// Launch with `blockDim.x` a multiple of 32 and enough total warps to cover
-// every row (grid sized as `ceil(rows * 32 / blockDim.x)`).
+// Launch with `blockDim.x` a multiple of OX_WAVE and enough total lane groups to
+// cover every row (grid sized as `ceil(rows * OX_WAVE / blockDim.x)`; the host
+// uses rocm::GEMV_LANES_PER_ROW for the OX_WAVE factor).
 
 __device__ __forceinline__ float warp_reduce_sum(float v) {
 #if defined(__HIP_PLATFORM_AMD__)
@@ -301,7 +303,7 @@ extern "C" __global__ void gemv_q4_0_kernel(
 // Q8_K quantization step and the H2D upload, enabling the fully GPU-resident
 // forward pass where the hidden state never leaves the GPU between layers.
 //
-// One warp (32 threads) per output row.  Lanes stripe across blocks.
+// One lane group (OX_WAVE threads) per output row.  Lanes stripe across blocks.
 // --------------------------------------------------------------------------
 
 __device__ float q4k_f32in_block_dot(const unsigned char* w_blk,
@@ -666,7 +668,7 @@ extern "C" __global__ void gemv_nvfp4_kernel(
 // Layout matches ggml block_q6_K; the block has TWO sub-groups of 128 values each.
 // Within each sub-group, for l=0..31: q(l), q(l+32), q(l+64), q(l+96) share qh[l].
 //
-// One warp (32 threads) computes one output row; threads stride over blocks.
+// One lane group (OX_WAVE threads) computes one output row; threads stride over blocks.
 __device__ float q6k_f32in_block_dot(
     const unsigned char* __restrict__ w_blk,
     const float* __restrict__ x,
