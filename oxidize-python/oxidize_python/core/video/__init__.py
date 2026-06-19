@@ -1,59 +1,137 @@
-"""Video helpers mirroring oxidize-golang/core/video."""
+"""Video understanding helpers mirroring oxidize-golang/core/video.
+
+CPU-first port of oxidize-core/src/video: frame decoding/resizing, parallel
+preprocessing, a temporal self-attention encoder with RoPE + SwiGLU FFN, the
+full VideoEncoder pipeline, and multimodal prompt assembly.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import IntEnum
 
-
-class FrameSamplingStrategy(IntEnum):
-    UNIFORM = 0
-    DENSE = 1
-    ADAPTIVE = 2
+from oxidize_python.core.video.config import (
+    TemporalConfig,
+    TemporalPool,
+    VideoConfig,
+    VisionConfig,
+    clip_base_vision,
+    default_temporal_config,
+    default_video_config,
+)
+from oxidize_python.core.video.decoder import (
+    DecodedFrame,
+    RawFrameDecoder,
+    RepetitiveFrameDecoder,
+    ResizingDecoder,
+    VideoDecoder,
+    VideoSource,
+    resize_rgb_nearest,
+)
+from oxidize_python.core.video.encoder import (
+    FrameEncoder,
+    VideoEncoder,
+    VideoEncoderWeights,
+    VideoEncoderWorkspace,
+    new_video_encoder_workspace,
+    zero_video_encoder_weights,
+)
+from oxidize_python.core.video.errors import (
+    EmptySampleError,
+    FrameCountOutOfRangeError,
+    InvalidFrameError,
+    ShapeMismatchError,
+    VideoError,
+)
+from oxidize_python.core.video.frame_sampler import (
+    FrameSamplingStrategy,
+    luma_histogram_rgb,
+    sample_indices,
+    sample_indices_adaptive,
+)
+from oxidize_python.core.video.preprocess import (
+    FramePreprocessFn,
+    ImagePatches,
+    VideoFrames,
+    VideoPreprocessor,
+    new_video_preprocessor,
+)
+from oxidize_python.core.video.prompt import (
+    PromptSegment,
+    VideoPrompt,
+    VideoSegment,
+)
+from oxidize_python.core.video.temporal import (
+    TemporalLayerWeights,
+    TemporalWeights,
+    TemporalWorkspace,
+    forward_temporal,
+    new_temporal_workspace,
+    zero_temporal_layer_weights,
+    zero_temporal_weights,
+)
 
 
 @dataclass
 class Config:
+    """Video preprocessing defaults (legacy top-level config)."""
+
     target_frames: int = 8
     strategy: FrameSamplingStrategy = FrameSamplingStrategy.UNIFORM
     dense_stride: int = 1
 
 
-@dataclass
-class DecodedFrame:
-    width: int
-    height: int
-    data: bytes
-
-
-class VideoError(Exception):
-    pass
-
-
-def sample_indices(total_frames: int, target_frames: int, strategy: FrameSamplingStrategy) -> list[int]:
-    if total_frames <= 0 or target_frames <= 0:
-        raise VideoError("frame count out of range")
-    if total_frames <= target_frames:
-        return list(range(total_frames))
-    step = (total_frames - 1) / max(target_frames - 1, 1)
-    out: list[int] = []
-    seen: set[int] = set()
-    for i in range(target_frames):
-        idx = min(total_frames - 1, int(round(i * step)))
-        if idx not in seen:
-            seen.add(idx)
-            out.append(idx)
-    return sorted(out)
-
-
-def luma_histogram_rgb(data: bytes) -> list[float]:
-    hist = [0.0] * 16
-    total = 0.0
-    for i in range(0, len(data) - 2, 3):
-        luma = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]
-        bin_idx = min(15, int(luma / 16))
-        hist[bin_idx] += 1
-        total += 1
-    if total:
-        hist = [v / total for v in hist]
-    return hist
+__all__ = [
+    # config
+    "VisionConfig",
+    "TemporalConfig",
+    "TemporalPool",
+    "VideoConfig",
+    "Config",
+    "clip_base_vision",
+    "default_temporal_config",
+    "default_video_config",
+    # decoder
+    "DecodedFrame",
+    "VideoSource",
+    "VideoDecoder",
+    "RawFrameDecoder",
+    "RepetitiveFrameDecoder",
+    "ResizingDecoder",
+    "resize_rgb_nearest",
+    # preprocess
+    "ImagePatches",
+    "VideoFrames",
+    "VideoPreprocessor",
+    "FramePreprocessFn",
+    "new_video_preprocessor",
+    # temporal
+    "TemporalLayerWeights",
+    "TemporalWeights",
+    "TemporalWorkspace",
+    "forward_temporal",
+    "new_temporal_workspace",
+    "zero_temporal_layer_weights",
+    "zero_temporal_weights",
+    # encoder
+    "FrameEncoder",
+    "VideoEncoder",
+    "VideoEncoderWeights",
+    "VideoEncoderWorkspace",
+    "new_video_encoder_workspace",
+    "zero_video_encoder_weights",
+    # prompt
+    "VideoPrompt",
+    "PromptSegment",
+    "VideoSegment",
+    # sampling
+    "FrameSamplingStrategy",
+    "sample_indices",
+    "sample_indices_adaptive",
+    "luma_histogram_rgb",
+    # errors
+    "VideoError",
+    "EmptySampleError",
+    "FrameCountOutOfRangeError",
+    "InvalidFrameError",
+    "ShapeMismatchError",
+]

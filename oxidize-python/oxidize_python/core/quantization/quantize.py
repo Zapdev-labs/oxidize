@@ -16,6 +16,7 @@ from oxidize_python.core.quantization.types import (
     BLOCK_Q5_K_SIZE,
     BLOCK_Q6_K_SIZE,
     BLOCK_Q8_0_SIZE,
+    BLOCK_Q8_K_SIZE,
     QK4_0,
     QK4_1,
     QK5_0,
@@ -318,3 +319,65 @@ def _quantize_q6_k(input_: list[float], output: memoryview, _imatrix: IMatrix | 
                     v += 64
                 packed |= (v & 0x3) << (j * 2)
             output[base + 128 + i] = packed
+
+
+def quantize_vector_q8_k_into(
+    vector: list[float],
+    n_blocks: int,
+    out: bytearray | memoryview,
+) -> None:
+    """Quantize ``vector`` (length n_blocks*256) into ``n_blocks`` Q8_K blocks.
+
+    Mirrors ``QuantizeVectorQ8KInto`` in oxidize-golang (and
+    ``quantize_vector_q8_k_into`` in oxidize-core). Each Q8_K block is 292 bytes:
+    4 bytes ``d`` (f32 LE), 256 bytes ``qs`` (int8), then 16 int16 LE ``bsums``
+    (one per 16-element group).
+    """
+    if len(vector) < n_blocks * QK_K:
+        raise Error("q8_k: input vector too small")
+    mv = out if isinstance(out, memoryview) else memoryview(out)
+    if len(mv) < n_blocks * BLOCK_Q8_K_SIZE:
+        raise Error("q8_k: output buffer too small")
+    for b in range(n_blocks):
+        src = vector[b * QK_K : (b + 1) * QK_K]
+        base = b * BLOCK_Q8_K_SIZE
+        _quantize_block_q8_k_scalar(src, mv, base)
+
+
+def _quantize_block_q8_k_scalar(
+    src: list[float], out: memoryview, base: int
+) -> None:
+    amax = 0.0
+    max_v = 0.0
+    for v in src:
+        av = abs(v)
+        if av > amax:
+            amax = av
+            max_v = v
+    qs_off = base + 4
+    if amax == 0.0:
+        for i in range(BLOCK_Q8_K_SIZE):
+            out[base + i] = 0
+        return
+    # iscale = -128 / max (sign-preserving), d = 1/iscale.
+    iscale = -128.0 / max_v
+    d = 1.0 / iscale
+    struct.pack_into("<f", out, base, d)
+    for i, v in enumerate(src):
+        q = int(round(iscale * v))
+        if q < -128:
+            q = -128
+        elif q > 127:
+            q = 127
+        out[qs_off + i] = q & 0xFF
+    bsums_off = qs_off + QK_K
+    for g in range(QK_K // 16):
+        s = 0
+        for i in range(16):
+            q = out[qs_off + g * 16 + i]
+            s += q - 256 if q >= 128 else q
+        if s < -32768:
+            s = -32768
+        elif s > 32767:
+            s = 32767
+        struct.pack_into("<h", out, bsums_off + g * 2, s)

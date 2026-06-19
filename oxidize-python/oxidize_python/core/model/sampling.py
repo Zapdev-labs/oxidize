@@ -10,6 +10,7 @@ from typing import Protocol
 from oxidize_python.core.model.model import Logits, Model, Session, Token
 
 NEG_INF_F32 = float("-inf")
+MIN_POSITIVE_F32 = 1.1754944e-38
 
 
 class SamplingError(Exception):
@@ -108,6 +109,7 @@ class SamplingConfig:
     min_p: float = 0.0
     typical_p: float = 0.0
     tail_free_z: float = 0.0
+    locally_typical_tau: float = 0.0
     repetition: RepetitionPenaltyConfig = field(default_factory=default_repetition_penalty)
     mirostat: MirostatConfig = field(default_factory=MirostatConfig)
     newline_penalty: NewlinePenalty = field(default_factory=NewlinePenalty)
@@ -126,6 +128,7 @@ def default_sampling_config() -> SamplingConfig:
         min_p=0.0,
         typical_p=0.0,
         tail_free_z=0.0,
+        locally_typical_tau=0.0,
         repetition=default_repetition_penalty(),
         mirostat=MirostatConfig(),
         newline_penalty=NewlinePenalty(),
@@ -170,8 +173,149 @@ def sample(
         work = _min_p(work, config.min_p)
     if 0 < config.top_p < 1.0:
         work = _top_p(work, config.top_p)
+    # Typical-P (entropy-based typicality filtering)
+    if 0 < config.typical_p < 1.0:
+        work = _typical_p(work, config.typical_p)
+    # Tail-free (second-derivative cutoff)
+    if 0 < config.tail_free_z < 1.0:
+        work = _tail_free_z(work, config.tail_free_z)
+    # Locally-typical (tau-based entropy deviation filtering)
+    if config.locally_typical_tau > 0:
+        work = _locally_typical_tau(work, config.locally_typical_tau)
+    # Fast unfiltered path for large vocabularies when no rank/probability
+    # filters are active: avoids an allocating full softmax pass.
+    if (
+        len(work) >= 4096
+        and config.top_k == 0
+        and config.min_p == 0
+        and (config.top_p == 0 or config.top_p >= 1.0)
+        and config.typical_p == 0
+        and config.tail_free_z == 0
+        and config.locally_typical_tau == 0
+    ):
+        temp = config.temperature if config.temperature > 0 else 1.0
+        return sample_unfiltered(work, temp, rng)
     probs = _softmax(work)
     return _sample_categorical(probs, rng)
+
+
+def sample_unfiltered(
+    logits: Logits,
+    temperature: float,
+    rng: random.Random | None = None,
+) -> Token:
+    """Draw a token directly from temperature-scaled logits without building an
+    intermediate normalized softmax slice. Mirrors sample_unfiltered in
+    sampling.rs and is a fast path for large vocabularies."""
+    if not logits:
+        return 0
+    if rng is None:
+        rng = random.Random(1)
+    if temperature <= 0:
+        temperature = 1.0
+    max_logit = max(logits)
+    raw_sum = 0.0
+    for v in logits:
+        raw_sum += math.exp((v - max_logit) / temperature)
+    if raw_sum <= 0 or math.isinf(raw_sum) or math.isnan(raw_sum):
+        return greedy(logits)
+    target = rng.random() * raw_sum
+    cumulative = 0.0
+    for i, v in enumerate(logits):
+        cumulative += math.exp((v - max_logit) / temperature)
+        if target <= cumulative:
+            return i
+    return greedy(logits)
+
+
+def _typical_p(logits: Logits, p: float) -> Logits:
+    """Keep the minimal set of tokens (ordered by closeness of their surprise to
+    the distribution entropy) whose cumulative probability reaches p. Mirrors
+    apply_typical_sampling in sampling.rs."""
+    if p <= 0 or not logits:
+        return logits
+    probs = _softmax(logits)
+    entropy = 0.0
+    for pr in probs:
+        pr = max(pr, MIN_POSITIVE_F32)
+        entropy -= pr * math.log(pr)
+    cands = []
+    for i, pr in enumerate(probs):
+        surprise = -math.log(max(pr, MIN_POSITIVE_F32))
+        cands.append((abs(surprise - entropy), i))
+    cands.sort(key=lambda c: c[0])
+    keep = [False] * len(probs)
+    cum = 0.0
+    for _, idx in cands:
+        keep[idx] = True
+        cum += probs[idx]
+        if cum >= p:
+            break
+    out = list(logits)
+    for i in range(len(out)):
+        if not keep[i]:
+            out[i] = NEG_INF_F32
+    return out
+
+
+def _tail_free_z(logits: Logits, z: float) -> Logits:
+    """Remove the low-probability tail using the second derivative of the sorted
+    probability curve. Mirrors apply_tail_free_sampling in sampling.rs."""
+    if z <= 0 or len(logits) <= 2:
+        return logits
+    idx = _sorted_indices(logits)
+    probs = _softmax(logits)
+    second_deriv = []
+    for i in range(len(idx) - 2):
+        d1 = probs[idx[i]] - probs[idx[i + 1]]
+        d2 = probs[idx[i + 1]] - probs[idx[i + 2]]
+        second_deriv.append(abs(d1 - d2))
+    sd_sum = sum(second_deriv)
+    if sd_sum <= 0 or math.isinf(sd_sum) or math.isnan(sd_sum):
+        return logits
+    cutoff = len(idx)
+    cum = 0.0
+    for i, sd in enumerate(second_deriv):
+        cum += sd / sd_sum
+        if cum >= z:
+            cutoff = max(i + 2, 1)
+            break
+    keep = [False] * len(logits)
+    for i in range(min(cutoff, len(idx))):
+        keep[idx[i]] = True
+    out = list(logits)
+    for i in range(len(out)):
+        if not keep[i]:
+            out[i] = NEG_INF_F32
+    return out
+
+
+def _locally_typical_tau(logits: Logits, tau: float) -> Logits:
+    """Keep tokens whose surprise lies within tau*entropy of the distribution
+    entropy. Mirrors apply_locally_typical_sampling in sampling.rs."""
+    if tau <= 0 or not logits:
+        return logits
+    probs = _softmax(logits)
+    entropy = 0.0
+    for pr in probs:
+        pr = max(pr, MIN_POSITIVE_F32)
+        entropy -= pr * math.log(pr)
+    deviation_limit = entropy * tau
+    keep = [False] * len(probs)
+    any_kept = False
+    for i, pr in enumerate(probs):
+        surprise = -math.log(max(pr, MIN_POSITIVE_F32))
+        if abs(surprise - entropy) <= deviation_limit:
+            keep[i] = True
+            any_kept = True
+    if not any_kept:
+        max_idx = max(range(len(probs)), key=lambda i: probs[i])
+        keep[max_idx] = True
+    out = list(logits)
+    for i in range(len(out)):
+        if not keep[i]:
+            out[i] = NEG_INF_F32
+    return out
 
 
 def sample_with_repetition(
@@ -241,6 +385,191 @@ def speculative_decode(
     return accepted, len(accepted)
 
 
+@dataclass
+class SpeculativeVerifyResult:
+    """Mirrors SpeculativeDecodeResult in sampling.rs and carries enough detail
+    for statistics tracking."""
+
+    tokens: list[Token]
+    accepted_draft_tokens: int
+    used_residual_fallback: bool
+
+
+def _softmax_probs_temp(logits: Logits, temperature: float) -> list[float]:
+    """Temperature-scaled softmax over logits."""
+    if not logits:
+        raise SamplingError("empty logits")
+    if temperature <= 0 or math.isinf(temperature) or math.isnan(temperature):
+        temperature = 1.0
+    max_logit = max(logits)
+    out = [math.exp((v - max_logit) / temperature) for v in logits]
+    total = sum(out)
+    if total <= 0 or math.isinf(total) or math.isnan(total):
+        raise SamplingError("non-finite softmax sum")
+    inv = 1.0 / total
+    return [x * inv for x in out]
+
+
+def _residual_probs(target: list[float], draft: list[float]) -> list[float]:
+    """Compute the normalized residual distribution max(p-q, 0). Mirrors
+    residual_probs in sampling.rs."""
+    out = []
+    total = 0.0
+    for i in range(len(target)):
+        d = draft[i] if i < len(draft) else 0.0
+        r = target[i] - d
+        if r < 0:
+            r = 0.0
+        out.append(r)
+        total += r
+    if total <= 0:
+        out = list(target)
+        tsum = sum(target)
+        if tsum > 0:
+            inv = 1.0 / tsum
+            out = [v * inv for v in out]
+        return out
+    inv = 1.0 / total
+    return [v * inv for v in out]
+
+
+def _sample_probabilities(probs: list[float], r: float) -> int:
+    """Draw an index from a normalized distribution using a single random value."""
+    cum = 0.0
+    for i, p in enumerate(probs):
+        cum += p
+        if r <= cum:
+            return i
+    return len(probs) - 1
+
+
+def speculative_decode_logits(
+    draft_tokens: list[Token],
+    draft_logits: list[Logits],
+    target_logits: list[Logits],
+    config: SamplingConfig,
+    randoms: list[float],
+) -> SpeculativeVerifyResult:
+    """Verify draft tokens against precomputed target logits using the
+    speculative acceptance/rejection rule with residual fallback. Faithful port
+    of speculative_decode in sampling.rs.
+
+    - draft_tokens:  proposed tokens (len = N)
+    - draft_logits:  draft model logits per proposed token (len = N)
+    - target_logits: target model logits (len = N+1; last is the bonus position)
+    - randoms:       random draws in [0,1) (len >= N+1)
+    """
+    n = len(draft_tokens)
+    if (
+        n == 0
+        or len(draft_logits) != n
+        or len(target_logits) != n + 1
+        or len(randoms) < n + 1
+    ):
+        raise SamplingError("invalid speculative inputs")
+    greedy_mode = config.temperature <= 0 or config.top_k == 1
+    verify_temp = 1.0 if greedy_mode else config.temperature
+    emitted: list[Token] = []
+    for step in range(n):
+        draft_tok = draft_tokens[step]
+        if greedy_mode:
+            target_argmax = greedy(target_logits[step])
+            if draft_tok == target_argmax:
+                emitted.append(draft_tok)
+                continue
+            emitted.append(target_argmax)
+            return SpeculativeVerifyResult(
+                tokens=emitted,
+                accepted_draft_tokens=step,
+                used_residual_fallback=True,
+            )
+        draft_probs = _softmax_probs_temp(draft_logits[step], verify_temp)
+        target_probs = _softmax_probs_temp(target_logits[step], verify_temp)
+        if len(draft_probs) != len(target_probs):
+            raise SamplingError("speculative vocab mismatch")
+        ti = int(draft_tok)
+        if ti >= len(draft_probs):
+            raise SamplingError("speculative token out of range")
+        q = max(draft_probs[ti], MIN_POSITIVE_F32)
+        p = target_probs[ti]
+        accept_prob = min(p / q, 1.0)
+        if randoms[step] <= accept_prob:
+            emitted.append(draft_tok)
+            continue
+        residual = _residual_probs(target_probs, draft_probs)
+        sampled = _sample_probabilities(residual, randoms[step])
+        emitted.append(sampled)
+        return SpeculativeVerifyResult(
+            tokens=emitted,
+            accepted_draft_tokens=step,
+            used_residual_fallback=True,
+        )
+    # All drafts accepted: sample the bonus token from the final position.
+    final_rng = random.Random(int.from_bytes(_f32_bits(randoms[n]), "little"))
+    final_tok = sample(list(target_logits[n]), config, final_rng)
+    emitted.append(final_tok)
+    return SpeculativeVerifyResult(
+        tokens=emitted,
+        accepted_draft_tokens=n,
+        used_residual_fallback=False,
+    )
+
+
+def _f32_bits(value: float) -> bytes:
+    import struct
+
+    return struct.pack("<f", value)
+
+
+def sample_mirostat_v2(
+    logits: Logits,
+    temperature: float,
+    config: MirostatConfig,
+    mu: float,
+    rand_value: float,
+) -> tuple[Token, float]:
+    """Fully-validated Mirostat v2 sampler mirroring sample_mirostat in
+    sampling.rs: validates temperature, tau/eta/mu and the random draw, builds a
+    temperature-scaled softmax, picks the token whose surprisal is closest to the
+    running target mu, and returns the updated mu."""
+    if not logits:
+        raise SamplingError("empty logits")
+    if math.isinf(temperature) or math.isnan(temperature) or temperature <= 0:
+        raise SamplingError("invalid temperature")
+    if (
+        math.isinf(config.tau)
+        or math.isnan(config.tau)
+        or config.tau <= 0
+        or math.isinf(config.eta)
+        or math.isnan(config.eta)
+        or config.eta <= 0
+        or math.isinf(mu)
+        or math.isnan(mu)
+    ):
+        raise SamplingError("invalid mirostat parameters")
+    if math.isinf(rand_value) or math.isnan(rand_value) or rand_value < 0 or rand_value >= 1:
+        raise SamplingError("invalid random")
+    probs = _softmax_probs_temp(logits, temperature)
+    indexed = list(enumerate(probs))
+    # Order by closeness of surprisal to the running target mu.
+    indexed.sort(
+        key=lambda e: abs(-math.log(max(e[1], MIN_POSITIVE_F32)) - mu)
+    )
+    total = sum(p for _, p in indexed)
+    chosen = indexed[0]
+    if total > 0:
+        target = rand_value * total
+        cum = 0.0
+        for e in indexed:
+            cum += e[1]
+            if target <= cum:
+                chosen = e
+                break
+    observed = -math.log(max(chosen[1], MIN_POSITIVE_F32))
+    updated_mu = mu - config.eta * (observed - config.tau)
+    return chosen[0], updated_mu
+
+
 def sample_mirostat(
     logits: Logits,
     config: MirostatConfig,
@@ -270,6 +599,61 @@ def sample_mirostat(
 class BeamSearchResult:
     tokens: list[Token]
     score: float
+
+
+def beam_search_logits(
+    logits_per_step: list[Logits],
+    beam_width: int,
+    eos_token: Token | None = None,
+) -> BeamSearchResult:
+    """Run beam search over precomputed per-step logits with EOS early stopping
+    and final length-aware selection. Mirrors beam_search in sampling.rs."""
+    if beam_width <= 0:
+        raise SamplingError("invalid beam width")
+    if not logits_per_step:
+        raise SamplingError("invalid beam search inputs")
+    for layer in logits_per_step:
+        if not layer:
+            raise SamplingError("invalid beam search inputs")
+
+    @dataclass
+    class _Beam:
+        tokens: list[Token]
+        score: float
+        finished: bool
+
+    beams = [_Beam(tokens=[], score=0.0, finished=False)]
+    for step_logits in logits_per_step:
+        probs = _softmax(step_logits)
+        candidates: list[_Beam] = []
+        for b in beams:
+            if b.finished:
+                candidates.append(b)
+                continue
+            for tok_idx, p in enumerate(probs):
+                if p <= 0 or math.isinf(p) or math.isnan(p):
+                    continue
+                nxt = list(b.tokens)
+                nxt.append(tok_idx)
+                finished = eos_token is not None and eos_token == tok_idx
+                candidates.append(
+                    _Beam(
+                        tokens=nxt,
+                        score=b.score + math.log(p),
+                        finished=finished,
+                    )
+                )
+        if not candidates:
+            raise SamplingError("empty logits")
+        candidates.sort(key=lambda x: x.score, reverse=True)
+        beams = candidates[:beam_width]
+        if all(b.finished for b in beams):
+            break
+    best = beams[0]
+    for b in beams[1:]:
+        if b.score > best.score:
+            best = b
+    return BeamSearchResult(tokens=best.tokens, score=best.score)
 
 
 def beam_search(

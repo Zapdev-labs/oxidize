@@ -1,0 +1,23 @@
+backend: cpu (CPU)
+api server: starting in background at http://0.0.0.0:18082 (REST /v1/*, WebSocket /v1/realtime)
+load progress: 0% stage=starting bytes=0/7381381664
+load progress: 35% stage=mapping bytes=2460460554/7381381664
+server: loading model=/home/ai-2/models/gemma4-coding-Q4_K_M.gguf backend=cpu addr=0.0.0.0:18082
+load progress: 85% stage=parsing bytes=4920921108/7381381664
+load progress: 100% stage=complete bytes=7381381664/7381381664
+[oxidize auto-tune] applied: threads=Some(16) ctx=Some(2048) n_gpu_layers=0 kv=Q8 layer_wise=false layer_cache=8 turboquant=true (cores=16 ram=246 GiB gpu=0 MiB)
+offload plan: gpu_layers=0/48 gpu_tensors=0 cpu_tensors=667
+InferenceConfig: vocab=262144, context=2048, layers=48, mtp_nextn=0, hidden=3840, intermediate=15360, heads=16, kv_heads=8, kv_head_dim=512, eps=0.000001, theta=1000000
+╭─ oxidize chat ─────────────────────────────────────╮
+│ API server is running if enabled; type /exit to quit │
+│ multiline: end a line with \                         │
+╰──────────────────────────────────────────────────────╯
+
+You › InferenceConfig: vocab=262144, context=2048, layers=48, mtp_nextn=0, hidden=3840, intermediate=15360, heads=16, kv_heads=8, kv_head_dim=512, eps=0.000001, theta=1000000
+server: listening on http://0.0.0.0:18082 (REST /v1/*, WebSocket ws://0.0.0.0:18082/v1/realtime)
+
+--- listener ---
+LISTEN 0      128                        0.0.0.0:18082      0.0.0.0:*    users:(("oxidize",pid=1250367,fd=3))
+
+--- sessions ---
+oxidize-gemma4-fixed: 1 windows (created Thu Jun 18 19:28:29 2026)

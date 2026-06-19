@@ -1,0 +1,12 @@
+HTTP/1.1 200 OK
+content-length: 0
+date: Thu, 18 Jun 2026 19:28:46 GMT
+
+
+--- models ---
+HTTP/1.1 200 OK
+content-type: application/json
+content-length: 94
+date: Thu, 18 Jun 2026 19:28:46 GMT
+
+{"object":"list","data":[{"id":"gemma4-coding-Q4_K_M","object":"model","owned_by":"oxidize"}]}

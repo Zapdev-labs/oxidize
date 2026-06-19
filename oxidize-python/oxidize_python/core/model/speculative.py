@@ -63,6 +63,44 @@ class SpeculativeStats:
             return 0.0
         return self.accepted / self.total
 
+    def record_step(
+        self,
+        draft_tokens: int,
+        accepted_draft_tokens: int,
+        used_residual_fallback: bool,
+    ) -> None:
+        """Record the outcome of a single speculative verification step.
+        Mirrors SpeculativeStats.RecordStep in speculative.go."""
+        self.total_draft_tokens += draft_tokens
+        self.total_accepted_tokens += accepted_draft_tokens
+        rejected = draft_tokens - accepted_draft_tokens
+        if rejected < 0:
+            rejected = 0
+        self.total_rejected_tokens += rejected
+        self.draft_forward_passes += 1
+        self.target_forward_passes += 1
+        if used_residual_fallback:
+            self.fallback_tokens += 1
+        self.total += draft_tokens
+        self.accepted += accepted_draft_tokens
+        if accepted_draft_tokens < draft_tokens:
+            self.rejected += 1
+
+    def draft_acceptance_rate(self) -> float:
+        """Fraction of proposed draft tokens that were accepted. Mirrors
+        SpeculativeStats.DraftAcceptanceRate in speculative.go."""
+        if self.total_draft_tokens == 0:
+            return 0.0
+        return self.total_accepted_tokens / self.total_draft_tokens
+
+    def tokens_per_target_forward(self) -> float:
+        """Average number of emitted tokens produced per target forward pass.
+        Mirrors SpeculativeStats.TokensPerTargetForward in speculative.go."""
+        if self.target_forward_passes == 0:
+            return 0.0
+        emitted = self.total_accepted_tokens + self.fallback_tokens
+        return emitted / self.target_forward_passes
+
 
 class SpeculativeError(Exception):
     def __init__(self, message: str) -> None:

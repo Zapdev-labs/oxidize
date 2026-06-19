@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::{AdamW, Linear, Matrix};
 
 use super::dataset::filter_samples;
-use super::frames::{clip_to_tensor, ffmpeg_available, patches_to_image};
+use super::frames::{clip_to_tensor, clips_to_tensors_parallel, ffmpeg_available, patches_to_image};
 use super::manifest::build_manifest;
 use super::{FrameConfig, VideoError};
 
@@ -34,16 +34,12 @@ impl Default for GenTrainingConfig {
         Self {
             data_root: std::path::PathBuf::from("."),
             cache_dir: std::path::PathBuf::new(),
-            frames: FrameConfig {
-                num_frames: 16,
-                frame_size: 64,
-                patch_size: 8,
-            },
+            frames: FrameConfig::portrait_9_16(72, 8, 12),
             context_frames: 4,
             hidden_size: 256,
             patch_hidden: 128,
-            epochs: 60,
-            batch_size: 32,
+            epochs: 40,
+            batch_size: 64,
             learning_rate: 1e-3,
             weight_decay: 0.001,
             seed: 42,
@@ -146,25 +142,23 @@ pub fn load_gen_dataset(config: &GenTrainingConfig) -> Result<GenDataset, VideoE
         source,
     })?;
 
-    let frames_cfg = config.frames;
+    let frames_cfg = config.frames.validate()?;
     let ctx = config.context_frames;
     let patch_dim = frames_cfg.patch_dim();
     let patches = frames_cfg.num_patches();
     let frame_flat = patches * patch_dim;
 
     eprintln!(
-        "oxidize-train gen: building next-frame dataset from {} clips ({} ctx → 1 frame)…",
+        "oxidize-train gen: extracting {} clips @ {} (9:16 portrait)…",
         samples.len(),
-        ctx
+        frames_cfg.aspect_label()
     );
 
+    let extracted = clips_to_tensors_parallel(&samples, frames_cfg, &cache_dir);
     let mut context = Vec::new();
     let mut target = Vec::new();
 
-    for sample in &samples {
-        let Ok(tensor) = clip_to_tensor(sample, frames_cfg, &cache_dir) else {
-            continue;
-        };
+    for tensor in extracted.into_iter().flatten() {
         let num_frames = frames_cfg.num_frames;
         if tensor.len() != num_frames * frame_flat {
             continue;
@@ -226,7 +220,7 @@ struct GenForward {
 
 impl VideoGenerator {
     pub fn new(config: &GenTrainingConfig, seed: u64) -> Self {
-        let frames = config.frames;
+        let frames = config.frames.validate().expect("validated in train/load");
         let patch_dim = frames.patch_dim();
         let num_patches = frames.num_patches();
         let context_frames = config.context_frames;
@@ -299,11 +293,19 @@ impl VideoGenerator {
         self.forward(context_flat).patch_logits.data().to_vec()
     }
 
-    pub(crate) fn train_step(
+    pub(crate) fn zero_grad(&mut self) {
+        self.patch_enc.zero_grad();
+        self.temporal.zero_grad();
+        self.temporal2.zero_grad();
+        self.frame_dec.zero_grad();
+        self.patch_dec.zero_grad();
+    }
+
+    pub(crate) fn backward_step(
         &mut self,
         context_flat: &[f32],
         target_flat: &[f32],
-        optimizer: &mut AdamW,
+        grad_scale: f32,
     ) -> f32 {
         let cache = self.forward(context_flat);
         let target = Matrix::from_vec(
@@ -315,12 +317,11 @@ impl VideoGenerator {
 
         let mut grad = Matrix::zeros(self.num_patches, self.patch_dim);
         let loss = mse_loss(&cache.patch_logits, &target, &mut grad);
-
-        self.patch_enc.zero_grad();
-        self.temporal.zero_grad();
-        self.temporal2.zero_grad();
-        self.frame_dec.zero_grad();
-        self.patch_dec.zero_grad();
+        if grad_scale != 1.0 {
+            for g in grad.data_mut() {
+                *g *= grad_scale;
+            }
+        }
 
         let mut patch_states_grad = Matrix::zeros(self.num_patches, self.patch_hidden);
         self.patch_dec.backward(
@@ -366,13 +367,28 @@ impl VideoGenerator {
         self.patch_enc
             .backward(&cache.ctx_matrix, &patch_h_grad, None);
 
+        loss
+    }
+
+    pub(crate) fn apply_optimizer(&mut self, optimizer: &mut AdamW) {
         optimizer.next_step();
         optimizer.step(&mut self.patch_enc);
         optimizer.step(&mut self.temporal);
         optimizer.step(&mut self.temporal2);
         optimizer.step(&mut self.frame_dec);
         optimizer.step(&mut self.patch_dec);
+    }
 
+    #[allow(dead_code)]
+    pub(crate) fn train_step(
+        &mut self,
+        context_flat: &[f32],
+        target_flat: &[f32],
+        optimizer: &mut AdamW,
+    ) -> f32 {
+        self.zero_grad();
+        let loss = self.backward_step(context_flat, target_flat, 1.0);
+        self.apply_optimizer(optimizer);
         loss
     }
 }
@@ -422,11 +438,19 @@ pub fn train_generator(
         let mut seen = 0usize;
 
         for batch in order.chunks(config.batch_size) {
+            model.zero_grad();
+            let mut batch_loss = 0.0f32;
+            let scale = 1.0 / batch.len() as f32;
             for &idx in batch {
-                let loss = model.train_step(&dataset.context[idx], &dataset.target[idx], &mut optimizer);
-                weighted += loss;
-                seen += 1;
+                batch_loss += model.backward_step(
+                    &dataset.context[idx],
+                    &dataset.target[idx],
+                    scale,
+                );
             }
+            model.apply_optimizer(&mut optimizer);
+            weighted += batch_loss / batch.len() as f32;
+            seen += batch.len();
         }
         let train_loss = weighted / seen.max(1) as f32;
         epoch_losses.push(train_loss);
@@ -477,7 +501,7 @@ fn eval_loss(model: &VideoGenerator, dataset: &GenDataset, indices: &[usize]) ->
 pub fn save_generator(path: &Path, model: &VideoGenerator, config: &GenTrainingConfig) -> Result<(), VideoError> {
     let saved = SavedGenerator {
         generator: model.clone(),
-        frames: config.frames,
+        frames: config.frames.validate()?,
         context_frames: config.context_frames,
     };
     let json = serde_json::to_vec_pretty(&saved).map_err(|source| VideoError::Metadata {
@@ -495,10 +519,12 @@ pub fn load_generator(path: &Path) -> Result<SavedGenerator, VideoError> {
         path: path.to_path_buf(),
         source,
     })?;
-    serde_json::from_slice(&bytes).map_err(|source| VideoError::Metadata {
+    let mut saved: SavedGenerator = serde_json::from_slice(&bytes).map_err(|source| VideoError::Metadata {
         path: path.to_path_buf(),
         source,
-    })
+    })?;
+    saved.frames = saved.frames.validate()?;
+    Ok(saved)
 }
 
 pub fn default_generator_path(config: &GenTrainingConfig) -> std::path::PathBuf {
@@ -527,6 +553,7 @@ pub fn generate_video(
     fps: u32,
     out: &Path,
     seed: u64,
+    upscale_height: u32,
 ) -> Result<GenerateReport, VideoError> {
     if !ffmpeg_available() {
         return Err(VideoError::FfmpegMissing);
@@ -537,6 +564,11 @@ pub fn generate_video(
     let patch_dim = frames_cfg.patch_dim();
     let patches = frames_cfg.num_patches();
     let frame_flat = patches * patch_dim;
+
+    eprintln!(
+        "oxidize-train generate: model resolution {} (output upscale height={upscale_height})",
+        frames_cfg.aspect_label()
+    );
 
     let mut samples = build_manifest(data_root)?;
     filter_samples(&mut samples, exclude, merge_aliases);
@@ -597,7 +629,7 @@ pub fn generate_video(
         })?;
     }
 
-    encode_generated(&work, out, fps)?;
+    encode_generated(&work, out, fps, upscale_height)?;
 
     Ok(GenerateReport {
         frames: timeline.len(),
@@ -606,15 +638,21 @@ pub fn generate_video(
     })
 }
 
-fn encode_generated(work: &Path, out: &Path, fps: u32) -> Result<(), VideoError> {
+fn encode_generated(work: &Path, out: &Path, fps: u32, upscale_height: u32) -> Result<(), VideoError> {
     let pattern = work.join("gen_%04d.jpg");
-    let vf = "minterpolate=fps=24:mi_mode=mci:mc_mode=aobmc,format=yuv420p";
+    let vf = if upscale_height > 0 {
+        format!(
+            "scale=-2:{upscale_height}:flags=lanczos,minterpolate=fps=24:mi_mode=mci:mc_mode=aobmc,format=yuv420p"
+        )
+    } else {
+        "minterpolate=fps=24:mi_mode=mci:mc_mode=aobmc,format=yuv420p".to_string()
+    };
     let output = std::process::Command::new("ffmpeg")
         .args(["-y", "-loglevel", "error", "-framerate"])
         .arg(fps.to_string())
         .args(["-i"])
         .arg(&pattern)
-        .args(["-vf", vf])
+        .args(["-vf", &vf])
         .args(["-c:v", "libx264", "-crf", "18", "-pix_fmt", "yuv420p"])
         .arg(out)
         .output()
@@ -715,14 +753,16 @@ mod tests {
         GenTrainingConfig {
             frames: FrameConfig {
                 num_frames: 6,
-                frame_size: 8,
+                frame_width: 8,
+                frame_height: 8,
+                frame_size: 0,
                 patch_size: 4,
             },
             context_frames: 2,
             hidden_size: 16,
             patch_hidden: 8,
-            epochs: 5,
-            batch_size: 4,
+            epochs: 8,
+            batch_size: 1,
             ..GenTrainingConfig::default()
         }
     }

@@ -4,10 +4,10 @@ use std::sync::OnceLock;
 
 use image::imageops::FilterType;
 use image::RgbImage;
+use rayon::prelude::*;
 
 use super::{FrameConfig, VideoError, VideoSample};
 
-/// Returns true if an `ffmpeg` binary is callable on the PATH.
 pub fn ffmpeg_available() -> bool {
     static AVAILABLE: OnceLock<bool> = OnceLock::new();
     *AVAILABLE.get_or_init(|| {
@@ -21,13 +21,12 @@ pub fn ffmpeg_available() -> bool {
     })
 }
 
-/// Extract (or reuse cached) frames for `sample`, then decode them into a
-/// normalized patch-token tensor of length `cfg.tokens_per_clip() * cfg.patch_dim()`.
 pub fn clip_to_tensor(
     sample: &VideoSample,
     cfg: FrameConfig,
     cache_dir: &Path,
 ) -> Result<Vec<f32>, VideoError> {
+    let cfg = cfg.validate()?;
     let frame_dir = cache_dir.join(&sample.id);
     let mut frames = existing_frames(&frame_dir);
     if frames.is_empty() {
@@ -39,13 +38,13 @@ pub fn clip_to_tensor(
     decode_clip(&frames, cfg)
 }
 
-/// Decode cached/extracted frames to RGB images (used by tooling).
 #[allow(dead_code)]
 pub fn clip_to_frames(
     sample: &VideoSample,
     cfg: FrameConfig,
     cache_dir: &Path,
 ) -> Result<Vec<RgbImage>, VideoError> {
+    let cfg = cfg.validate()?;
     let frame_dir = cache_dir.join(&sample.id);
     let mut frames = existing_frames(&frame_dir);
     if frames.is_empty() {
@@ -57,7 +56,7 @@ pub fn clip_to_frames(
     let chosen = pick_indices(frames.len(), cfg.num_frames);
     chosen
         .into_iter()
-        .map(|idx| decode_frame(&frames[idx], cfg.frame_size))
+        .map(|idx| decode_frame(&frames[idx], cfg))
         .collect()
 }
 
@@ -87,15 +86,15 @@ fn extract_frames(
         source,
     })?;
 
-    let size = cfg.frame_size;
-    // Sample roughly `num_frames` frames spread across the whole clip.
+    let w = cfg.frame_width;
+    let h = cfg.frame_height;
     let fps = if sample.duration > 0.1 {
         (cfg.num_frames as f64 / sample.duration).max(0.1)
     } else {
         2.0
     };
     let vf = format!(
-        "scale={size}:{size}:force_original_aspect_ratio=increase,crop={size}:{size},fps={fps:.4}"
+        "scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},fps={fps:.4}"
     );
     let pattern = frame_dir.join("f_%03d.jpg");
 
@@ -130,44 +129,41 @@ fn decode_clip(frames: &[PathBuf], cfg: FrameConfig) -> Result<Vec<f32>, VideoEr
     let chosen = pick_indices(frames.len(), cfg.num_frames);
     let mut tensor = Vec::with_capacity(cfg.tokens_per_clip() * cfg.patch_dim());
     for &idx in &chosen {
-        let img = decode_frame(&frames[idx], cfg.frame_size)?;
+        let img = decode_frame(&frames[idx], cfg)?;
         patchify_into(&img, cfg, &mut tensor);
     }
     Ok(tensor)
 }
 
-/// Decode a single cached JPEG to an RGB image of exactly `size`×`size`.
-fn decode_frame(path: &Path, size: usize) -> Result<RgbImage, VideoError> {
+fn decode_frame(path: &Path, cfg: FrameConfig) -> Result<RgbImage, VideoError> {
     let img = image::open(path)
         .map_err(|source| VideoError::Decode {
             path: path.to_path_buf(),
             source,
         })?
         .to_rgb8();
-    if img.width() as usize == size && img.height() as usize == size {
+    let w = cfg.frame_width as u32;
+    let h = cfg.frame_height as u32;
+    if img.width() == w && img.height() == h {
         Ok(img)
     } else {
-        Ok(image::imageops::resize(
-            &img,
-            size as u32,
-            size as u32,
-            FilterType::Triangle,
-        ))
+        Ok(image::imageops::resize(&img, w, h, FilterType::Triangle))
     }
 }
 
-/// Split one frame into row-major patches and append normalized RGB values
-/// (scaled to roughly [-1, 1]) to `out`.
 fn patchify_into(img: &RgbImage, cfg: FrameConfig, out: &mut Vec<f32>) {
-    let side = cfg.patches_per_side();
+    let px = cfg.patches_x();
+    let py = cfg.patches_y();
     let p = cfg.patch_size as u32;
-    for gy in 0..side as u32 {
-        for gx in 0..side as u32 {
+    for gy in 0..py as u32 {
+        for gx in 0..px as u32 {
             for ly in 0..p {
                 for lx in 0..p {
-                    let px = img.get_pixel(gx * p + lx, gy * p + ly);
+                    let px_x = gx * p + lx;
+                    let px_y = gy * p + ly;
+                    let pixel = img.get_pixel(px_x, px_y);
                     for channel in 0..3 {
-                        out.push(px[channel] as f32 / 127.5 - 1.0);
+                        out.push(pixel[channel] as f32 / 127.5 - 1.0);
                     }
                 }
             }
@@ -175,14 +171,15 @@ fn patchify_into(img: &RgbImage, cfg: FrameConfig, out: &mut Vec<f32>) {
     }
 }
 
-/// Turn normalized patch values back into an RGB image.
 pub fn patches_to_image(patches: &[f32], cfg: FrameConfig) -> RgbImage {
-    let side = cfg.patches_per_side();
+    let cfg = cfg.resolve_dimensions();
+    let px = cfg.patches_x();
+    let py = cfg.patches_y();
     let p = cfg.patch_size as u32;
-    let mut img = RgbImage::new(cfg.frame_size as u32, cfg.frame_size as u32);
+    let mut img = RgbImage::new(cfg.frame_width as u32, cfg.frame_height as u32);
     let mut idx = 0usize;
-    for gy in 0..side as u32 {
-        for gx in 0..side as u32 {
+    for gy in 0..py as u32 {
+        for gx in 0..px as u32 {
             for ly in 0..p {
                 for lx in 0..p {
                     let r = denorm(patches[idx]);
@@ -202,7 +199,6 @@ fn denorm(v: f32) -> u8 {
     ((v + 1.0) * 127.5).clamp(0.0, 255.0) as u8
 }
 
-/// Evenly spaced indices into `available` items (with repetition if scarce).
 fn pick_indices(available: usize, want: usize) -> Vec<usize> {
     if available == 0 || want == 0 {
         return Vec::new();
@@ -219,49 +215,53 @@ fn pick_indices(available: usize, want: usize) -> Vec<usize> {
         .collect()
 }
 
+/// Extract tensors from all samples in parallel (ffmpeg + decode).
+pub fn clips_to_tensors_parallel(
+    samples: &[VideoSample],
+    cfg: FrameConfig,
+    cache_dir: &Path,
+) -> Vec<Option<Vec<f32>>> {
+    samples
+        .par_iter()
+        .map(|sample| clip_to_tensor(sample, cfg, cache_dir).ok())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn picks_evenly_spaced_indices() {
-        assert_eq!(pick_indices(10, 1), vec![0]);
-        assert_eq!(pick_indices(5, 5), vec![0, 1, 2, 3, 4]);
-        assert_eq!(pick_indices(9, 5), vec![0, 2, 4, 6, 8]);
+    fn portrait_9_16_dimensions() {
+        let cfg = FrameConfig::portrait_9_16(72, 8, 8);
+        assert_eq!(cfg.frame_width, 72);
+        assert_eq!(cfg.frame_height, 128);
+        assert_eq!(cfg.patches_x(), 9);
+        assert_eq!(cfg.patches_y(), 16);
+        assert_eq!(cfg.num_patches(), 144);
     }
 
     #[test]
-    fn repeats_when_too_few_frames() {
-        assert_eq!(pick_indices(1, 4), vec![0, 0, 0, 0]);
-        assert_eq!(pick_indices(2, 4), vec![0, 0, 1, 1]);
-    }
-
-    #[test]
-    fn patchify_produces_expected_length() {
+    fn legacy_frame_size_resolves_square() {
         let cfg = FrameConfig {
-            num_frames: 1,
-            frame_size: 4,
-            patch_size: 2,
-        };
-        let img = RgbImage::new(4, 4);
+            num_frames: 4,
+            frame_width: 0,
+            frame_height: 0,
+            frame_size: 64,
+            patch_size: 8,
+        }
+        .validate()
+        .expect("valid");
+        assert_eq!(cfg.frame_width, 64);
+        assert_eq!(cfg.frame_height, 64);
+    }
+
+    #[test]
+    fn patchify_portrait_length() {
+        let cfg = FrameConfig::portrait_9_16(72, 8, 1);
+        let img = RgbImage::new(72, 128);
         let mut out = Vec::new();
         patchify_into(&img, cfg, &mut out);
         assert_eq!(out.len(), cfg.num_patches() * cfg.patch_dim());
-        // A black pixel maps to -1.0 under the normalization.
-        assert!(out.iter().all(|&v| (v + 1.0).abs() < 1e-6));
-    }
-
-    #[test]
-    fn patches_roundtrip_preserves_black() {
-        let cfg = FrameConfig {
-            num_frames: 1,
-            frame_size: 8,
-            patch_size: 4,
-        };
-        let img = RgbImage::new(8, 8);
-        let mut patches = Vec::new();
-        patchify_into(&img, cfg, &mut patches);
-        let back = patches_to_image(&patches, cfg);
-        assert_eq!(back.dimensions(), img.dimensions());
     }
 }

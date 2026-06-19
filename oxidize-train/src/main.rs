@@ -118,9 +118,17 @@ struct GenTrainArgs {
     data: PathBuf,
     #[arg(long)]
     cache: Option<PathBuf>,
-    #[arg(long, default_value_t = 16)]
+    #[arg(long, default_value_t = 12)]
     frames: usize,
-    #[arg(long = "frame-size", default_value_t = 64)]
+    /// Portrait short edge (9:16). Ignored if `--frame-size` or explicit width/height set.
+    #[arg(long = "portrait-width", default_value_t = 72)]
+    portrait_width: usize,
+    #[arg(long = "frame-width", default_value_t = 0)]
+    frame_width: usize,
+    #[arg(long = "frame-height", default_value_t = 0)]
+    frame_height: usize,
+    /// Legacy square edge; 0 = use 9:16 portrait.
+    #[arg(long = "frame-size", default_value_t = 0)]
     frame_size: usize,
     #[arg(long = "patch-size", default_value_t = 8)]
     patch_size: usize,
@@ -130,9 +138,9 @@ struct GenTrainArgs {
     hidden_size: usize,
     #[arg(long = "patch-hidden", default_value_t = 128)]
     patch_hidden: usize,
-    #[arg(long, default_value_t = 60)]
+    #[arg(long, default_value_t = 40)]
     epochs: usize,
-    #[arg(long = "batch-size", default_value_t = 32)]
+    #[arg(long = "batch-size", default_value_t = 64)]
     batch_size: usize,
     #[arg(long = "learning-rate", default_value_t = 1e-3)]
     learning_rate: f32,
@@ -172,8 +180,11 @@ struct GenerateArgs {
     /// Sampling noise (0 = deterministic).
     #[arg(long, default_value_t = 0.02)]
     temperature: f32,
-    #[arg(long, default_value_t = 8)]
+    #[arg(long, default_value_t = 24)]
     fps: u32,
+    /// Upscale output to this height (720×1280 TikTok). 0 = native model resolution.
+    #[arg(long = "upscale-height", default_value_t = 1280)]
+    upscale_height: u32,
     #[arg(long, default_value_t = 42)]
     seed: u64,
     #[arg(long)]
@@ -223,9 +234,12 @@ fn run_video(args: VideoArgs) -> Result<()> {
         task: args.task.into(),
         frames: FrameConfig {
             num_frames: args.frames,
+            frame_width: 0,
+            frame_height: 0,
             frame_size: args.frame_size,
             patch_size: args.patch_size,
-        },
+        }
+        .resolve_dimensions(),
         embed_dim: args.embed_dim,
         hidden_size: args.hidden_size,
         epochs: args.epochs,
@@ -256,14 +270,18 @@ fn run_gen_train(args: GenTrainArgs) -> Result<()> {
     }
 
     let exclude = default_exclude(args.exclude);
+    let frames = resolve_frame_config(
+        args.frames,
+        args.frame_size,
+        args.frame_width,
+        args.frame_height,
+        args.patch_size,
+        args.portrait_width,
+    );
     let config = GenTrainingConfig {
         data_root: args.data,
         cache_dir: args.cache.unwrap_or_default(),
-        frames: FrameConfig {
-            num_frames: args.frames,
-            frame_size: args.frame_size,
-            patch_size: args.patch_size,
-        },
+        frames,
         context_frames: args.context_frames,
         hidden_size: args.hidden_size,
         patch_hidden: args.patch_hidden,
@@ -320,6 +338,7 @@ fn run_generate(args: GenerateArgs) -> Result<()> {
         args.fps,
         &args.out,
         args.seed,
+        args.upscale_height,
     )?;
 
     println!();
@@ -334,6 +353,37 @@ fn default_exclude(exclude: Vec<String>) -> Vec<String> {
         vec!["cellow111".into()]
     } else {
         exclude
+    }
+}
+
+fn resolve_frame_config(
+    num_frames: usize,
+    frame_size: usize,
+    frame_width: usize,
+    frame_height: usize,
+    patch_size: usize,
+    portrait_width: usize,
+) -> FrameConfig {
+    if frame_size > 0 {
+        FrameConfig {
+            num_frames,
+            frame_width: 0,
+            frame_height: 0,
+            frame_size,
+            patch_size,
+        }
+        .resolve_dimensions()
+    } else if frame_width > 0 && frame_height > 0 {
+        FrameConfig {
+            num_frames,
+            frame_width,
+            frame_height,
+            frame_size: 0,
+            patch_size,
+        }
+        .resolve_dimensions()
+    } else {
+        FrameConfig::portrait_9_16(portrait_width, patch_size, num_frames)
     }
 }
 

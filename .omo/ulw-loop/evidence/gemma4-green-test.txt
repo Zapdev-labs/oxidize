@@ -1,0 +1,97 @@
+Protected by Socket Firewall
+warning: /run/media/dih/8CEDA5F938E73A48/AI/home/oxidize-2/oxidize/oxidize-cli/Cargo.toml: file `/run/media/dih/8CEDA5F938E73A48/AI/home/oxidize-2/oxidize/oxidize-cli/src/main.rs` found to be present in multiple build targets:
+  * `bin` target `oxidize-cli`
+  * `bin` target `oxidize`
+   Compiling oxidize-core v0.1.0 (/run/media/dih/8CEDA5F938E73A48/AI/home/oxidize-2/oxidize/oxidize-core)
+warning: unnecessary parentheses around match arm expression
+   --> oxidize-core/src/autotune/fingerprint.rs:197:41
+    |
+197 |         GgufMetadataValue::Uint64(x) => (*x as i64),
+    |                                         ^         ^
+    |
+    = note: `#[warn(unused_parens)]` (part of `#[warn(unused)]`) on by default
+help: remove these parentheses
+    |
+197 -         GgufMetadataValue::Uint64(x) => (*x as i64),
+197 +         GgufMetadataValue::Uint64(x) => *x as i64,
+    |
+
+warning: unused import: `CpuVendor`
+  --> oxidize-core/src/autotune/rules.rs:19:28
+   |
+19 | use oxidize_kernels::cpu::{CpuVendor, is_skylake_sp};
+   |                            ^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `crate::gpu_cluster::GpuFamily`
+   --> oxidize-core/src/autotune/apply.rs:109:9
+    |
+109 |     use crate::gpu_cluster::GpuFamily;
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `CpuVendor`
+  --> oxidize-core/src/autotune/rules.rs:19:28
+   |
+19 | use oxidize_kernels::cpu::{CpuVendor, is_skylake_sp};
+   |                            ^^^^^^^^^
+
+warning: associated functions `q4k_bytes` and `q4k_or_q6k_bytes` are never used
+    --> oxidize-core/src/model/inference.rs:3070:8
+     |
+1350 | impl InferenceModel {
+     | ------------------- associated functions in this implementation
+...
+3070 |     fn q4k_bytes(ws: &WeightStorage) -> Option<&[u8]> {
+     |        ^^^^^^^^^
+...
+3087 |     fn q4k_or_q6k_bytes(ws: &WeightStorage) -> Option<&[u8]> {
+     |        ^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> oxidize-core/src/autotune/rules.rs:791:13
+    |
+791 |         let mut m = model_qwen3_4b();
+    |             ----^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: `oxidize-core` (lib test) generated 5 warnings (2 duplicates) (run `cargo fix --lib -p oxidize-core --tests` to apply 3 suggestions)
+warning: `oxidize-core` (lib) generated 3 warnings (run `cargo fix --lib -p oxidize-core` to apply 2 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.99s
+     Running unittests src/lib.rs (target/debug/deps/oxidize_core-837974d0c19e66d4)
+
+running 1 test
+test inference::tests::gemma4_mixed_kv_layers_size_cache_for_widest_projection ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 602 filtered out; finished in 0.00s
+
+     Running tests/architecture_docs.rs (target/debug/deps/architecture_docs-965c4e14a458d766)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+     Running tests/gguf_real_models.rs (target/debug/deps/gguf_real_models-8a5e27bf78dc4bd5)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/mesh_integration.rs (target/debug/deps/mesh_integration-23d37d93c3505fdb)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+
+
+=== Socket Firewall ===
+
+Warning: Socket Firewall did not detect any package fetch attempts
+

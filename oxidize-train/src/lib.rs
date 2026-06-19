@@ -358,7 +358,7 @@ impl Linear {
                     sum += input.data[row * in_features + in_col]
                         * grad_output.data[row * out_features + out_col];
                 }
-                *grad = sum;
+                *grad += sum;
             });
 
         self.grad_bias
@@ -369,7 +369,7 @@ impl Linear {
                 for row in 0..batch {
                     sum += grad_output.data[row * out_features + out_col];
                 }
-                *grad = sum;
+                *grad += sum;
             });
 
         if let Some(grad_input) = grad_input.as_mut() {

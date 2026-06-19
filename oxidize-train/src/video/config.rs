@@ -7,11 +7,8 @@ use super::VideoError;
 /// What the classifier learns to predict from a clip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LabelTask {
-    /// Predict which creator/account a clip came from.
     Creator,
-    /// Predict a view-count bucket (quantile) — "how viral".
     Virality,
-    /// Predict a like/view engagement-ratio bucket.
     Engagement,
 }
 
@@ -28,92 +25,124 @@ impl LabelTask {
 /// How each clip is turned into a fixed-size tensor of patch tokens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrameConfig {
-    /// Number of frames sampled evenly across the clip.
     pub num_frames: usize,
-    /// Square edge length each frame is resized/cropped to (pixels).
+    /// Frame width in pixels (9 for 9:16 portrait).
+    #[serde(default)]
+    pub frame_width: usize,
+    /// Frame height in pixels (16 for 9:16 portrait).
+    #[serde(default)]
+    pub frame_height: usize,
+    /// Legacy square edge length; used when width/height are unset.
+    #[serde(default)]
     pub frame_size: usize,
-    /// Square edge length of a patch (pixels). Must divide `frame_size`.
     pub patch_size: usize,
 }
 
 impl FrameConfig {
-    pub fn patches_per_side(self) -> usize {
-        self.frame_size / self.patch_size
+    /// Resolve width/height from legacy `frame_size` when needed.
+    pub fn resolve_dimensions(mut self) -> Self {
+        if self.frame_width > 0 && self.frame_height > 0 {
+            return self;
+        }
+        if self.frame_size > 0 {
+            self.frame_width = self.frame_size;
+            self.frame_height = self.frame_size;
+            return self;
+        }
+        if self.frame_width > 0 {
+            self.frame_height = self.frame_width;
+        } else if self.frame_height > 0 {
+            self.frame_width = self.frame_height;
+        } else {
+            self.frame_width = 64;
+            self.frame_height = 64;
+        }
+        self
+    }
+
+    /// 9:16 portrait TikTok layout (`width` × `width*16/9`).
+    pub fn portrait_9_16(width: usize, patch_size: usize, num_frames: usize) -> Self {
+        Self {
+            num_frames,
+            frame_width: width,
+            frame_height: width * 16 / 9,
+            frame_size: 0,
+            patch_size,
+        }
+        .resolve_dimensions()
+    }
+
+    pub fn patches_x(self) -> usize {
+        self.frame_width / self.patch_size
+    }
+
+    pub fn patches_y(self) -> usize {
+        self.frame_height / self.patch_size
     }
 
     pub fn num_patches(self) -> usize {
-        let side = self.patches_per_side();
-        side * side
+        self.patches_x() * self.patches_y()
     }
 
-    /// Floats per patch token: `patch_size^2 * 3` (RGB).
     pub fn patch_dim(self) -> usize {
         self.patch_size * self.patch_size * 3
     }
 
-    /// Patch tokens per clip: `num_frames * num_patches`.
     pub fn tokens_per_clip(self) -> usize {
         self.num_frames * self.num_patches()
     }
 
-    pub fn validate(self) -> Result<(), VideoError> {
-        if self.num_frames == 0 {
+    pub fn aspect_label(self) -> String {
+        format!("{}x{}", self.frame_width, self.frame_height)
+    }
+
+    pub fn validate(self) -> Result<Self, VideoError> {
+        let cfg = self.resolve_dimensions();
+        if cfg.num_frames == 0 {
             return Err(VideoError::Config("num_frames must be > 0".into()));
         }
-        if self.frame_size == 0 || self.patch_size == 0 {
+        if cfg.frame_width == 0 || cfg.frame_height == 0 || cfg.patch_size == 0 {
             return Err(VideoError::Config(
-                "frame_size and patch_size must be > 0".into(),
+                "frame_width, frame_height, patch_size must be > 0".into(),
             ));
         }
-        if !self.frame_size.is_multiple_of(self.patch_size) {
+        if !cfg.frame_width.is_multiple_of(cfg.patch_size)
+            || !cfg.frame_height.is_multiple_of(cfg.patch_size)
+        {
             return Err(VideoError::Config(format!(
-                "frame_size ({}) must be divisible by patch_size ({})",
-                self.frame_size, self.patch_size
+                "frame {}x{} must be divisible by patch_size ({})",
+                cfg.frame_width, cfg.frame_height, cfg.patch_size
             )));
         }
-        Ok(())
+        Ok(cfg)
     }
 }
 
 impl Default for FrameConfig {
     fn default() -> Self {
-        Self {
-            num_frames: 8,
-            frame_size: 64,
-            patch_size: 16,
-        }
+        Self::portrait_9_16(72, 8, 8)
     }
 }
 
 /// Full configuration for a video-classifier training run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VideoTrainingConfig {
-    /// Root that holds `videos/` + `*_metadata.json` (the tt-downloader layout).
     pub data_root: PathBuf,
-    /// Where extracted frames are cached (defaults to `<data_root>/.oxidize-frames`).
     pub cache_dir: PathBuf,
     pub task: LabelTask,
     pub frames: FrameConfig,
-    /// Width of the learned patch embedding.
     pub embed_dim: usize,
-    /// Hidden width of the classifier head.
     pub hidden_size: usize,
     pub epochs: usize,
     pub batch_size: usize,
     pub learning_rate: f32,
     pub weight_decay: f32,
     pub seed: u64,
-    /// Fraction of clips held out for validation (0.0..1.0).
     pub val_split: f32,
-    /// Number of quantile buckets for Virality/Engagement tasks.
     pub buckets: usize,
-    /// Optional cap on number of clips (handy for quick smoke runs).
     pub max_videos: Option<usize>,
-    /// Downsample every class to the size of the smallest one before training.
     pub balance: bool,
-    /// Creator usernames to drop before training (case-insensitive).
     pub exclude: Vec<String>,
-    /// Merge duplicate accounts (`sanymaaa` → `sanymaa`).
     pub merge_aliases: bool,
 }
 

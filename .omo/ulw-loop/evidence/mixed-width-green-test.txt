@@ -1,0 +1,11 @@
+Protected by Socket Firewall
+error: unexpected argument 'gemma4_mixed_kv_layers_size_cache_for_widest_projection' found
+
+Usage: cargo test [OPTIONS] [TESTNAME] [-- [ARGS]...]
+
+For more information, try '--help'.
+
+=== Socket Firewall ===
+
+Warning: Socket Firewall did not detect any package fetch attempts
+

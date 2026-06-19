@@ -188,9 +188,12 @@ mod tests {
     fn synthetic_dataset() -> VideoDataset {
         let frames = FrameConfig {
             num_frames: 2,
+            frame_width: 0,
+            frame_height: 0,
             frame_size: 4,
             patch_size: 2,
-        };
+        }
+        .resolve_dimensions();
         let tokens = frames.tokens_per_clip();
         let patch_dim = frames.patch_dim();
         let mut data = Vec::new();

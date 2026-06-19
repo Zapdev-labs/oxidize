@@ -105,13 +105,14 @@ pub fn load_dataset(config: &VideoTrainingConfig) -> Result<VideoDataset, VideoE
     })?;
 
     let total = samples.len();
+    let frames_cfg = config.frames.validate()?;
     eprintln!(
-        "oxidize-train video: extracting frames for {total} clips ({} frames @ {}px each)…",
-        config.frames.num_frames, config.frames.frame_size
+        "oxidize-train video: extracting frames for {total} clips ({} frames @ {} each)…",
+        frames_cfg.num_frames,
+        frames_cfg.aspect_label()
     );
 
     let done = AtomicUsize::new(0);
-    let frames_cfg = config.frames;
     let cache_ref = cache_dir.as_path();
     let extracted: Vec<Option<Vec<f32>>> = samples
         .par_iter()
