@@ -18,6 +18,38 @@
 #include <cuda_fp16.h>
 
 // --------------------------------------------------------------------------
+// Wavefront / warp width abstraction.
+//
+// This file is compiled by BOTH nvcc (the `cuda` feature) and hipcc (the
+// `rocm` feature). The GEMV kernels follow a "one lane group computes one
+// output row" contract: lanes stripe across the columns/blocks of a row with a
+// stride equal to the lane-group width, then a shuffle reduction sums the
+// per-lane partials.
+//
+// On NVIDIA the lane group is a 32-lane warp; on AMD it is a 64-lane wavefront
+// (GCN/CDNA always, and RDNA when compiled `-mwavefrontsize64`, which build.rs
+// pins by default). OX_WAVE is the SINGLE source of truth for that width so the
+// device stride, the lane mask, the row index shift, the reduction tree depth,
+// and the host launch grid (rocm::GEMV_LANES_PER_ROW) cannot drift apart.
+//
+// IMPORTANT: the quantization BLOCK SIZE (32 values per Q8_0/Q4_0 block, the
+// `cols >> 5` super-block counts, `b << 5` block offsets, and the inner
+// `i < 32` dequant loops) is a SEPARATE, architecture-independent constant and
+// is intentionally NOT routed through OX_WAVE.
+#if defined(__HIP_PLATFORM_AMD__)
+  #ifndef OX_WAVE
+    #define OX_WAVE 64u
+  #endif
+  #define OX_WAVE_LOG2 6u   // log2(64)
+#else
+  #ifndef OX_WAVE
+    #define OX_WAVE 32u
+  #endif
+  #define OX_WAVE_LOG2 5u   // log2(32)
+#endif
+#define OX_LANE_MASK (OX_WAVE - 1u)   // 31u on CUDA, 63u on AMD
+
+// --------------------------------------------------------------------------
 // Dense matrix-vector products: output[row] = sum_c matrix[row*cols + c] * vector[c]
 // --------------------------------------------------------------------------
 
@@ -30,8 +62,16 @@
 // every row (grid sized as `ceil(rows * 32 / blockDim.x)`).
 
 __device__ __forceinline__ float warp_reduce_sum(float v) {
-    for (int offset = 16; offset > 0; offset >>= 1)
+#if defined(__HIP_PLATFORM_AMD__)
+    // HIP: __shfl_down is wavefront-width aware and takes no lane mask. Start at
+    // OX_WAVE/2 (=32) so lanes 32..63 are folded in (6 steps for wave64).
+    for (int offset = (int)(OX_WAVE >> 1); offset > 0; offset >>= 1)
+        v += __shfl_down(v, offset);
+#else
+    // CUDA: OX_WAVE>>1 == 16, identical to the original 5-step, full-mask loop.
+    for (int offset = (int)(OX_WAVE >> 1); offset > 0; offset >>= 1)
         v += __shfl_down_sync(0xffffffffu, v, offset);
+#endif
     return v;
 }
 
@@ -43,13 +83,13 @@ extern "C" __global__ void gemv_f32_kernel(
     unsigned int rows, unsigned int cols)
 {
     unsigned int global_thread = blockIdx.x * blockDim.x + threadIdx.x;
-    unsigned int row = global_thread >> 5;     // one warp per row
-    unsigned int lane = threadIdx.x & 31u;
+    unsigned int row = global_thread >> OX_WAVE_LOG2;     // one warp per row
+    unsigned int lane = threadIdx.x & OX_LANE_MASK;
     if (row >= rows) return;
 
     const float* w = matrix + (size_t)row * cols;
     float sum = 0.0f;
-    for (unsigned int c = lane; c < cols; c += 32u)
+    for (unsigned int c = lane; c < cols; c += OX_WAVE)
         sum += w[c] * vector[c];
 
     sum = warp_reduce_sum(sum);
@@ -63,8 +103,8 @@ extern "C" __global__ void gemv_f16_kernel(
     unsigned int rows, unsigned int cols)
 {
     unsigned int global_thread = blockIdx.x * blockDim.x + threadIdx.x;
-    unsigned int row = global_thread >> 5;
-    unsigned int lane = threadIdx.x & 31u;
+    unsigned int row = global_thread >> OX_WAVE_LOG2;
+    unsigned int lane = threadIdx.x & OX_LANE_MASK;
     if (row >= rows) return;
 
     const __half* w = reinterpret_cast<const __half*>(matrix) + (size_t)row * cols;
@@ -72,7 +112,7 @@ extern "C" __global__ void gemv_f16_kernel(
     float sum = 0.0f;
 
     unsigned int c = lane * 2u;
-    for (; c + 1u < cols; c += 64u) {
+    for (; c + 1u < cols; c += (OX_WAVE * 2u)) {   // wave lanes * 2 halves/lane
         __half2 wh = *reinterpret_cast<const __half2*>(w + c);
         float2 vf = *reinterpret_cast<const float2*>(v + c);
         float2 wf = __half22float2(wh);
@@ -196,15 +236,15 @@ extern "C" __global__ void gemv_q8_0_kernel(
     unsigned int rows, unsigned int cols)
 {
     unsigned int global_thread = blockIdx.x * blockDim.x + threadIdx.x;
-    unsigned int row = global_thread >> 5;     // one warp per row
-    unsigned int lane = threadIdx.x & 31u;
+    unsigned int row = global_thread >> OX_WAVE_LOG2;     // one warp per row
+    unsigned int lane = threadIdx.x & OX_LANE_MASK;
     if (row >= rows) return;
 
     unsigned int blocks_per_row = cols >> 5;   // cols / 32
     const unsigned char* row_blocks = matrix + (size_t)row * blocks_per_row * 34;
 
     float sum = 0.0f;
-    for (unsigned int b = lane; b < blocks_per_row; b += 32u) {
+    for (unsigned int b = lane; b < blocks_per_row; b += OX_WAVE) {
         const unsigned char* blk = row_blocks + (size_t)b * 34;
         float d = __half2float(*reinterpret_cast<const __half*>(blk));
         const signed char* q = reinterpret_cast<const signed char*>(blk + 2);
@@ -226,15 +266,15 @@ extern "C" __global__ void gemv_q4_0_kernel(
     unsigned int rows, unsigned int cols)
 {
     unsigned int global_thread = blockIdx.x * blockDim.x + threadIdx.x;
-    unsigned int row = global_thread >> 5;
-    unsigned int lane = threadIdx.x & 31u;
+    unsigned int row = global_thread >> OX_WAVE_LOG2;
+    unsigned int lane = threadIdx.x & OX_LANE_MASK;
     if (row >= rows) return;
 
     unsigned int blocks_per_row = cols >> 5;   // cols / 32
     const unsigned char* row_blocks = matrix + (size_t)row * blocks_per_row * 18;
 
     float sum = 0.0f;
-    for (unsigned int b = lane; b < blocks_per_row; b += 32u) {
+    for (unsigned int b = lane; b < blocks_per_row; b += OX_WAVE) {
         const unsigned char* blk = row_blocks + (size_t)b * 18;
         float d = __half2float(*reinterpret_cast<const __half*>(blk));
         const unsigned char* q = blk + 2;
@@ -319,14 +359,14 @@ extern "C" __global__ void gemv_q4k_f32in_kernel(
     unsigned int blocks_per_row)
 {
     unsigned int global_thread = blockIdx.x * blockDim.x + threadIdx.x;
-    unsigned int row  = global_thread >> 5u;
-    unsigned int lane = threadIdx.x & 31u;
+    unsigned int row  = global_thread >> OX_WAVE_LOG2;
+    unsigned int lane = threadIdx.x & OX_LANE_MASK;
     if (row >= rows) return;
 
     const unsigned char* row_blocks = matrix + (size_t)row * blocks_per_row * 144u;
     float sum = 0.0f;
 
-    for (unsigned int b = lane; b < blocks_per_row; b += 32u)
+    for (unsigned int b = lane; b < blocks_per_row; b += OX_WAVE)
         sum += q4k_f32in_block_dot(row_blocks + (size_t)b * 144u, x, b);
 
     sum = warp_reduce_sum(sum);
@@ -386,13 +426,13 @@ extern "C" __global__ void gemv_q4_k_kernel(
     unsigned int rows, unsigned int blocks_per_row)
 {
     unsigned int global_thread = blockIdx.x * blockDim.x + threadIdx.x;
-    unsigned int row = global_thread >> 5;
-    unsigned int lane = threadIdx.x & 31u;
+    unsigned int row = global_thread >> OX_WAVE_LOG2;
+    unsigned int lane = threadIdx.x & OX_LANE_MASK;
     if (row >= rows) return;
 
     const unsigned char* row_blocks = matrix + (size_t)row * blocks_per_row * 144u;
     float sum = 0.0f;
-    for (unsigned int b = lane; b < blocks_per_row; b += 32u) {
+    for (unsigned int b = lane; b < blocks_per_row; b += OX_WAVE) {
         const unsigned char* w_blk = row_blocks + (size_t)b * 144u;
         const unsigned char* q8_blk = q8k + (size_t)b * 292u;
         sum += q4k_q8k_block_dot(w_blk, q8_blk);
@@ -446,13 +486,13 @@ extern "C" __global__ void gemv_iq1_s_kernel(
     unsigned int rows, unsigned int blocks_per_row)
 {
     unsigned int global_thread = blockIdx.x * blockDim.x + threadIdx.x;
-    unsigned int row = global_thread >> 5;
-    unsigned int lane = threadIdx.x & 31u;
+    unsigned int row = global_thread >> OX_WAVE_LOG2;
+    unsigned int lane = threadIdx.x & OX_LANE_MASK;
     if (row >= rows) return;
 
     const unsigned char* row_blocks = matrix + (size_t)row * blocks_per_row * 50u;
     float sum = 0.0f;
-    for (unsigned int b = lane; b < blocks_per_row; b += 32u) {
+    for (unsigned int b = lane; b < blocks_per_row; b += OX_WAVE) {
         sum += iq1s_block_dot(row_blocks + (size_t)b * 50u, vector + (size_t)b * 256u);
     }
     sum = warp_reduce_sum(sum);
@@ -501,13 +541,13 @@ extern "C" __global__ void gemv_iq1_m_kernel(
     unsigned int rows, unsigned int blocks_per_row)
 {
     unsigned int global_thread = blockIdx.x * blockDim.x + threadIdx.x;
-    unsigned int row = global_thread >> 5;
-    unsigned int lane = threadIdx.x & 31u;
+    unsigned int row = global_thread >> OX_WAVE_LOG2;
+    unsigned int lane = threadIdx.x & OX_LANE_MASK;
     if (row >= rows) return;
 
     const unsigned char* row_blocks = matrix + (size_t)row * blocks_per_row * 56u;
     float sum = 0.0f;
-    for (unsigned int b = lane; b < blocks_per_row; b += 32u) {
+    for (unsigned int b = lane; b < blocks_per_row; b += OX_WAVE) {
         sum += iq1m_block_dot(row_blocks + (size_t)b * 56u, vector + (size_t)b * 256u);
     }
     sum = warp_reduce_sum(sum);
@@ -585,13 +625,13 @@ extern "C" __global__ void gemv_nvfp4_kernel(
     unsigned int rows, unsigned int blocks_per_row)
 {
     unsigned int global_thread = blockIdx.x * blockDim.x + threadIdx.x;
-    unsigned int row = global_thread >> 5;
-    unsigned int lane = threadIdx.x & 31u;
+    unsigned int row = global_thread >> OX_WAVE_LOG2;
+    unsigned int lane = threadIdx.x & OX_LANE_MASK;
     if (row >= rows) return;
 
     const unsigned char* row_blocks = matrix + (size_t)row * blocks_per_row * 36u;
     float sum = 0.0f;
-    for (unsigned int b = lane; b < blocks_per_row; b += 32u) {
+    for (unsigned int b = lane; b < blocks_per_row; b += OX_WAVE) {
         const unsigned char* blk = row_blocks + (size_t)b * 36u;
         const float* v = vector + (size_t)b * 64u;
         for (int sub = 0; sub < 4; sub++) {
@@ -666,12 +706,12 @@ extern "C" __global__ void gemv_q6k_f32in_kernel(
     unsigned int rows, unsigned int blocks_per_row)
 {
     unsigned int global_thread = blockIdx.x * blockDim.x + threadIdx.x;
-    unsigned int row  = global_thread >> 5u;
-    unsigned int lane = threadIdx.x & 31u;
+    unsigned int row  = global_thread >> OX_WAVE_LOG2;
+    unsigned int lane = threadIdx.x & OX_LANE_MASK;
     if (row >= rows) return;
     const unsigned char* row_blocks = matrix + (size_t)row * blocks_per_row * 210u;
     float sum = 0.0f;
-    for (unsigned int b = lane; b < blocks_per_row; b += 32u)
+    for (unsigned int b = lane; b < blocks_per_row; b += OX_WAVE)
         sum += q6k_f32in_block_dot(row_blocks + (size_t)b * 210u, x, b);
     sum = warp_reduce_sum(sum);
     if (lane == 0u) output[row] = sum;

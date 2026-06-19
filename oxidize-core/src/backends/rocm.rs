@@ -311,6 +311,15 @@ mod hip_rt {
     }
 }
 
+/// Lanes assigned per output row on the host launch grid. MUST equal `OX_WAVE`
+/// in `kernels/gemv_f32.cu` (64 for AMD wave64, which `build.rs` pins via
+/// `-mwavefrontsize64`). If these diverge, half the rows get no wavefront (too
+/// small) or out-of-range rows launch (too large). To run wave32 you must flip
+/// all three together: this constant, `OX_WAVE`, and the build.rs wavefront
+/// flag — see `build.rs` and `strix::rdna35_wavefront_width`.
+#[cfg(all(feature = "rocm", rocm_available))]
+const GEMV_LANES_PER_ROW: u32 = 64;
+
 #[cfg(all(feature = "rocm", rocm_available))]
 type WeightCacheKey = (usize, usize, u64);
 
@@ -389,7 +398,7 @@ fn launch_gemv_rows_cols(
     ];
 
     let func = gpu.function(kernel)?;
-    let grid = (rows_u32.saturating_mul(32).div_ceil(256), 1, 1);
+    let grid = (rows_u32.saturating_mul(GEMV_LANES_PER_ROW).div_ceil(256), 1, 1);
     gpu.launch(func, grid, (256, 1, 1), &mut args)?;
 
     let out_bytes: &mut [u8] = unsafe {
@@ -442,7 +451,7 @@ fn launch_gemv_superblock(
     ];
 
     let func = gpu.function(kernel)?;
-    let grid = (rows_u32.saturating_mul(32).div_ceil(256), 1, 1);
+    let grid = (rows_u32.saturating_mul(GEMV_LANES_PER_ROW).div_ceil(256), 1, 1);
     gpu.launch(func, grid, (256, 1, 1), &mut args)?;
 
     let out_bytes: &mut [u8] = unsafe {
@@ -565,7 +574,7 @@ pub fn gemv_quantized_rocm(
                     let func = gpu.function("gemv_q4_k_kernel")?;
                     gpu.launch(
                         func,
-                        (rows_u32.saturating_mul(32).div_ceil(256), 1, 1),
+                        (rows_u32.saturating_mul(GEMV_LANES_PER_ROW).div_ceil(256), 1, 1),
                         (256, 1, 1),
                         &mut args,
                     )?;
