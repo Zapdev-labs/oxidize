@@ -1,0 +1,22 @@
+oxidize-core/src/backends/strix.rs
+  s_ead96b63491235::t_95caa3ce76782d 73-83
+  s_ead96b63491235::t_a6c0511e750ef5 26-32,39-44
+oxidize-core/build.rs
+  s_ead96b63491235::t_cf7f53c5953456 174-179,182-196,199-203
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.8",
+  "base_commit_sha": "c0f161bd448e7199490adbd8cadb2d05e14704d1",
+  "prompts": {},
+  "sessions": {
+    "s_ead96b63491235": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "965c6551-fb19-4ba5-b9fa-dc013a07b328",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
