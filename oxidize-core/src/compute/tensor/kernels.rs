@@ -556,7 +556,11 @@ fn dot_f32_fast(a: &[f32], b: &[f32]) -> f32 {
     debug_assert_eq!(a.len(), b.len());
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
-        if is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512vl") {
+        if is_x86_feature_detected!("avx512f")
+            && is_x86_feature_detected!("avx512vl")
+            && is_x86_feature_detected!("avx2")
+            && is_x86_feature_detected!("fma")
+        {
             return unsafe { dot_f32_avx512(a.as_ptr(), b.as_ptr(), a.len()) };
         }
         if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
