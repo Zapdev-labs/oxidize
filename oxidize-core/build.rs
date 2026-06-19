@@ -171,19 +171,36 @@ fn compile_rocm_kernels(rocm_root: &Path) {
         }
     };
 
+    // Default to a portable multi-arch fat binary instead of bare "native".
+    // "native" emits host-only code on a GPU-less build host (a runtime
+    // hipErrorNoBinaryForGpu) and a single-GPU artifact otherwise. The default
+    // list spans Vega20/CDNA (gfx906/908/90a/942) and RDNA2/3/3.5
+    // (gfx1030/1100/1101/1102/1151 Strix Halo). Override with ROCM_ARCH or
+    // GPU_TARGETS (semicolon-separated, or "native" for the local GPU).
     let arch = env::var("ROCM_ARCH")
         .or_else(|_| env::var("GPU_TARGETS"))
-        .unwrap_or_else(|_| "native".to_string());
+        .unwrap_or_else(|_| {
+            "gfx906;gfx908;gfx90a;gfx942;gfx1030;gfx1100;gfx1101;gfx1102;gfx1151".to_string()
+        });
 
-    let status = std::process::Command::new(&hipcc)
-        .arg("--genco")
+    // Pin the wavefront width the kernels are compiled for. CDNA/GCN are always
+    // wave64; RDNA defaults to wave32, which would make the OX_WAVE=64 kernel
+    // contract (and rocm::GEMV_LANES_PER_ROW=64) wrong. Forcing wave64 keeps the
+    // host launch geometry, the OX_WAVE macro, and the device wavefront in sync.
+    // Override via ROCM_WAVEFRONT_FLAG (must be flipped together with OX_WAVE and
+    // GEMV_LANES_PER_ROW for a wave32 build).
+    let wave_flag = env::var("ROCM_WAVEFRONT_FLAG")
+        .unwrap_or_else(|_| "-mwavefrontsize64".to_string());
+
+    let mut cmd = std::process::Command::new(&hipcc);
+    cmd.arg("--genco")
         .arg("-O3")
         .arg("-ffast-math")
-        .arg(format!("--offload-arch={arch}"))
-        .arg("-o")
-        .arg(&co_out)
-        .arg(src)
-        .status();
+        .arg(&wave_flag);
+    for a in arch.split(';').filter(|s| !s.is_empty()) {
+        cmd.arg(format!("--offload-arch={a}"));
+    }
+    let status = cmd.arg("-o").arg(&co_out).arg(src).status();
 
     match status {
         Ok(s) if s.success() => {}
