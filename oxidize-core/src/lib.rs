@@ -28,10 +28,12 @@ pub use futures_core::Stream;
 #[path = "backend.rs"]
 pub mod backend;
 pub use backend::ComputeBackend;
-#[path = "model/advanced_features.rs"]
-pub mod advanced_features;
 #[path = "compute/activation_stats.rs"]
 pub mod activation_stats;
+#[path = "model/advanced_features.rs"]
+pub mod advanced_features;
+#[path = "util/attn_dump.rs"]
+pub(crate) mod attn_dump;
 #[path = "autotune/mod.rs"]
 pub mod autotune;
 #[path = "util/benchmark_suite.rs"]
@@ -46,10 +48,6 @@ pub mod cpu_kernels;
 pub mod cross_validation;
 #[path = "backends/cuda.rs"]
 pub mod cuda;
-#[path = "backends/rocm.rs"]
-pub mod rocm;
-#[path = "compute/gpu_dispatch.rs"]
-pub mod gpu_dispatch;
 #[path = "model/dflash.rs"]
 pub mod dflash;
 #[path = "model/diffusion_gemma.rs"]
@@ -62,6 +60,8 @@ pub mod generation;
 pub mod gguf;
 #[path = "cluster/gpu_cluster.rs"]
 pub mod gpu_cluster;
+#[path = "compute/gpu_dispatch.rs"]
+pub mod gpu_dispatch;
 #[path = "model/inference.rs"]
 pub mod inference;
 #[path = "compute/kv_cache.rs"]
@@ -95,6 +95,8 @@ pub mod paged_attention;
 pub mod prefix_cache;
 #[path = "compute/quantization.rs"]
 pub mod quantization;
+#[path = "backends/rocm.rs"]
+pub mod rocm;
 #[path = "format/safetensors.rs"]
 pub mod safetensors;
 #[path = "format/safetensors_to_gguf.rs"]
