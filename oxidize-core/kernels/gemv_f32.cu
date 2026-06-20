@@ -93,6 +93,10 @@ __device__ __forceinline__ void rope_sincos(double angle, float* s_out, float* c
 //
 // Under OX_GPU_ATTN the device F16 KV cache must be argmax-identical to the CPU
 // reference, so the on-device store MUST mirror the host routine bit-for-bit.
+// Forward declaration: q8k_bsum_i16 is defined later but used by the Q4K dp4a
+// block-dot above its definition (nvcc requires a prior declaration).
+__device__ __forceinline__ int q8k_bsum_i16(const unsigned char* bsums, int index);
+
 // This is pure integer arithmetic — unaffected by --use_fast_math and
 // compute_75-safe. Returns the raw f16 bit pattern (the cache holds u16 bits).
 __device__ __forceinline__ unsigned short f32_to_f16_bits_dev(float value) {
@@ -522,8 +526,8 @@ __device__ float q4k_q8kin_block_dot_dp4a(const unsigned char* __restrict__ w_bl
         // for value gp*64 + 32 + i0 (4 contiguous each).
         unsigned int x_lo = *reinterpret_cast<const unsigned int*>(q8 + gp * 64u + i0);
         unsigned int x_hi = *reinterpret_cast<const unsigned int*>(q8 + gp * 64u + 32u + i0);
-        pos[gp * 2u]      = __dp4a(lo4, x_lo, pos[gp * 2u]);
-        pos[gp * 2u + 1u] = __dp4a(hi4, x_hi, pos[gp * 2u + 1u]);
+        pos[gp * 2u]      = __dp4a((int)lo4, (int)x_lo, pos[gp * 2u]);
+        pos[gp * 2u + 1u] = __dp4a((int)hi4, (int)x_hi, pos[gp * 2u + 1u]);
     }
 
     // Fold this lane's partials with the shared integer scales; mins from bsums.
