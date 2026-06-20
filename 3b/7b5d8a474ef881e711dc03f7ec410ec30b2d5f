@@ -1,0 +1,38 @@
+oxidize-core/src/backends/cuda/flash_decode_launch.rs
+  s_7db891e64d27df::t_98d79548534219 91-94
+  s_7db891e64d27df::t_2089751fb62208 71-78
+  s_1b37f3c1d1e7b7::t_88ff7aeaf41695 123-129,136-144,186
+  s_1b37f3c1d1e7b7::t_e89855b6f76de2 3-29,32-70,79-90,97-103,108-111,113-122
+  s_1b37f3c1d1e7b7::t_bdee60744a0640 30-31,95-96,104-107,112
+  s_1b37f3c1d1e7b7::t_b183459ecad9ce 1-2,145-185,187-189,201-204,215-217
+  s_7db891e64d27df::t_e9b01bb5a16793 130-135
+  s_1b37f3c1d1e7b7::t_4a90361c6b5214 190-200,205-214
+oxidize-core/src/backends/cuda/flash_decode.rs
+  s_1b37f3c1d1e7b7::t_8812857044fd18 21,26-27,48-49,51-54
+  s_1b37f3c1d1e7b7::t_38bfca40938bab 1-20,22-25,28-40,42-47,50,55-78
+  s_1b37f3c1d1e7b7::t_3677b1cbed8694 41
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "3b7b5d8a474ef881e711dc03f7ec410ec30b2d5f",
+  "prompts": {},
+  "sessions": {
+    "s_1b37f3c1d1e7b7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ee600-1957-70f2-b3f9-e51f217a3ee9",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_7db891e64d27df": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d821c29a-5761-4949-8aad-c39dfe26c264",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
