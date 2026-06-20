@@ -734,6 +734,28 @@ fn main() {
                     );
                     return;
                 }
+                // DFlash speculative decoding is opt-in behind OX_DFLASH_SPECULATIVE.
+                // When the flag is unset (default), a loaded draft model is ignored
+                // and we fall back to plain target-only generation, preserving the
+                // previous non-speculative default behavior exactly.
+                if std::env::var("OX_DFLASH_SPECULATIVE").is_err() {
+                    eprintln!(
+                        "DFlash draft loaded but OX_DFLASH_SPECULATIVE is not set; using target-only generation (set OX_DFLASH_SPECULATIVE=1 to enable speculative decoding)"
+                    );
+                    if let Err(error) = generate_with_model(
+                        &args.prompt,
+                        target_model.as_mut(),
+                        &tokenizer,
+                        args.max_tokens,
+                        args.temperature,
+                        args.top_p,
+                        args.top_k,
+                        &mut writer,
+                    ) {
+                        eprintln!("generation failed: {error}");
+                    }
+                    return;
+                }
                 eprintln!(
                     "using DFlash speculative decoding: target={} draft={} draft_tokens={}",
                     model_path.display(),

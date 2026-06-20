@@ -87,6 +87,16 @@ impl ActiveGenerationStream<'_> {
     }
 }
 
+/// Cached check for DFlash speculative decoding (env `OX_DFLASH_SPECULATIVE`).
+/// When unset (default), a loaded draft model is ignored and the plain
+/// non-speculative (native-MTP or target-only) stream is used — preserving the
+/// previous default behavior exactly. When set AND a draft is present, the
+/// `SpeculativeGenerationStream` is selected.
+fn ox_dflash_speculative_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("OX_DFLASH_SPECULATIVE").is_ok())
+}
+
 fn open_generation_stream<'a>(
     runtime: &'a ModelRuntime,
     model: &'a mut LoadedModel,
@@ -96,7 +106,7 @@ fn open_generation_stream<'a>(
     config: GenerationConfig,
     random: impl FnMut() -> f32 + 'a,
 ) -> ActiveGenerationStream<'a> {
-    if let Some(draft_model) = draft {
+    if let Some(draft_model) = draft.filter(|_| ox_dflash_speculative_enabled()) {
         ActiveGenerationStream::Speculative(SpeculativeGenerationStream::new(
             model,
             draft_model,
