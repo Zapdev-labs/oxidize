@@ -32,6 +32,11 @@ required-features = ["oxk"]
 
 [features]
 oxk = ["oxidize-core/oxk", "oxidize-server/oxk"]
+# GPU backends — passthrough to oxidize-core so `oxidize run --backend cuda` works
+# from a single `cargo build -p oxidize-cli --features cuda`.
+cuda = ["oxidize-core/cuda"]
+rocm = ["oxidize-core/rocm"]
+vulkan = ["oxidize-core/vulkan"]
 
 [dependencies]
 clap.workspace = true
