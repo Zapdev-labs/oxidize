@@ -1,0 +1,23 @@
+modal_app.py
+  s_7db891e64d27df::t_2995c0b4d846f7 786-788
+  s_7db891e64d27df::t_1f1694fdb5b3aa 837-838
+  s_7db891e64d27df::t_17dc302b97eb60 45-53
+  s_7db891e64d27df::t_ec06e6643cf022 212
+  s_7db891e64d27df::t_d7436a2854aa48 211,213-305
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "cf45405aa3386b36883cac4c950428f187b29a67",
+  "prompts": {},
+  "sessions": {
+    "s_7db891e64d27df": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d821c29a-5761-4949-8aad-c39dfe26c264",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
