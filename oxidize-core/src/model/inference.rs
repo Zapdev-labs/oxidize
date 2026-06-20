@@ -718,7 +718,7 @@ pub(super) fn kv_cache_token_size_for_layers(
                 let kv_lora = layer.mla_kv_a_norm.len();
                 let n_heads = config.num_attention_heads.max(1);
                 let k_head_dim = config.kv_head_dim();
-                let k_nope_dim = layer.mla_k_b.output_dim(kv_lora) / n_heads;
+                let _k_nope_dim = layer.mla_k_b.output_dim(kv_lora) / n_heads;
                 let v_head_dim = layer.mla_v_b.output_dim(kv_lora) / n_heads;
                 let total_k = n_heads * k_head_dim;
                 let total_v = n_heads * v_head_dim;
@@ -1713,7 +1713,26 @@ impl Model for InferenceModel {
         };
         self.kv_cache
             .rewind_to(position)
-            .map_err(|e| ModelError::InferenceFailed(format!("{e:?}")))
+            .map_err(|e| ModelError::InferenceFailed(format!("{e:?}")))?;
+        // On the CUDA gpu-native attention path the device-resident F16 KV cache
+        // is authoritative for the whole run (the host cache above is warmed but
+        // not read by the fused decode). It must be rolled back in lock-step for
+        // speculative rejection/commit. The host gets the inclusive INDEX
+        // (`consumed_tokens - 1`); the device gets the row COUNT
+        // (`consumed_tokens`) — gpu_kv_rewind sets kv_seq_len = count, which keeps
+        // exactly `consumed_tokens` valid rows, matching the host after rewind.
+        // Gated by both cfg(cuda) and the runtime OX_GPU_ATTN flag so non-CUDA
+        // builds and non-gpu-attn runs are byte-identical to the host-only path.
+        #[cfg(feature = "cuda")]
+        if layers::ox_gpu_attn_enabled() {
+            let kv_layers = self.kv_cache.config().layer_count;
+            for kv_layer in 0..kv_layers {
+                crate::cuda::gpu_kv_rewind(kv_layer, consumed_tokens).map_err(|e| {
+                    ModelError::InferenceFailed(format!("gpu_kv_rewind l{kv_layer}: {e}"))
+                })?;
+            }
+        }
+        Ok(())
     }
 
     fn forward_many(
@@ -2234,6 +2253,121 @@ mod tests {
         assert_eq!(prefill_logits, single_logits);
         assert_eq!(prefill_session.consumed_tokens(), 2);
         assert_eq!(single_session.consumed_tokens(), 1);
+    }
+
+    /// A tiny model with one real attention layer so the KV cache holds rows
+    /// (the default `tiny_inference_model` has `layer_count: 0`). Used to exercise
+    /// `rewind_to` against a populated cache for speculative rollback parity.
+    fn tiny_inference_model_one_layer() -> InferenceModel {
+        let mut model = tiny_inference_model();
+        model.config.layer_count = 1;
+        model.config.intermediate_size = 2;
+        let layer = LayerWeights {
+            attn_norm: vec![1.0, 1.0],
+            attn_q: WeightStorage::F32(vec![0.05; 2 * 2]),
+            attn_k: WeightStorage::F32(vec![0.05; 2 * 2]),
+            attn_v: WeightStorage::F32(vec![0.05; 2 * 2]),
+            attn_output: WeightStorage::F32(vec![0.05; 2 * 2]),
+            post_attention_norm: vec![1.0, 1.0],
+            ffn_gate: WeightStorage::F32(vec![0.05; 2 * 2]),
+            ffn_up: WeightStorage::F32(vec![0.05; 2 * 2]),
+            ffn_down: WeightStorage::F32(vec![0.05; 2 * 2]),
+            ..Default::default()
+        };
+        model.layers = vec![layer];
+        let kv_cache_config = KvCacheConfig {
+            layer_count: 1,
+            context_size: model.config.context_size,
+            head_count: model.config.num_key_value_heads,
+            head_dim: model.config.kv_head_dim(),
+            dtype: DType::F32,
+            quantization: Default::default(),
+        };
+        model.kv_cache = KvCache::new(kv_cache_config).expect("one-layer kv cache should be valid");
+        model.kv_layer_map = vec![Some(0)];
+        model
+    }
+
+    /// Speculative rollback parity (CPU): `Model::rewind_to` paired with
+    /// `Session::rewind_to` must leave the model in a state where re-forwarding the
+    /// rewound suffix reproduces the original per-position logits byte-for-byte.
+    /// This is the lossless-under-greedy invariant the CUDA device-cache rewind
+    /// (`gpu_kv_rewind`) mirrors on the GPU-native path. The device branch in
+    /// `rewind_to` is `cfg(cuda)`-gated, so on this CPU build only the host path
+    /// runs and it must already hold.
+    #[test]
+    fn rewind_to_is_lossless_for_reforwarded_suffix() {
+        let prompt: [Token; 3] = [0, 1, 2];
+
+        // Reference: forward the whole prompt once, capturing per-position logits.
+        let mut reference = tiny_inference_model_one_layer();
+        let mut ref_session = Session::new();
+        let reference_logits = reference
+            .forward_many(&prompt, &mut ref_session)
+            .expect("reference forward_many should succeed");
+        assert_eq!(reference_logits.len(), prompt.len());
+        assert_eq!(ref_session.consumed_tokens(), prompt.len());
+
+        // Subject: forward the prefix, rewind to the end of the first token, then
+        // re-forward the suffix. The re-forwarded positions must match the
+        // reference exactly.
+        let mut subject = tiny_inference_model_one_layer();
+        let mut session = Session::new();
+        let _ = subject
+            .forward_many(&prompt, &mut session)
+            .expect("subject prefix forward should succeed");
+        assert_eq!(session.consumed_tokens(), prompt.len());
+
+        // Roll both the model KV cache and the session back to "1 token consumed".
+        let rewind_to = 1usize;
+        subject
+            .rewind_to(rewind_to)
+            .expect("rewind_to should accept an in-range position");
+        session.rewind_to(rewind_to);
+        assert_eq!(session.consumed_tokens(), rewind_to);
+
+        // Re-forward positions 1..3 and compare against the reference.
+        let suffix = &prompt[rewind_to..];
+        let replayed = subject
+            .forward_many(suffix, &mut session)
+            .expect("suffix replay should succeed");
+        assert_eq!(replayed.len(), suffix.len());
+        assert_eq!(session.consumed_tokens(), prompt.len());
+        for (offset, replay_logits) in replayed.iter().enumerate() {
+            assert_eq!(
+                replay_logits,
+                &reference_logits[rewind_to + offset],
+                "replayed logits at position {} diverged from reference",
+                rewind_to + offset
+            );
+        }
+    }
+
+    /// `rewind_to(0)` must be accepted on a populated cache and leave the model
+    /// equivalent to a freshly constructed one (a fresh forward reproduces the
+    /// from-scratch logits). Guards the speculative "commit to empty prefix" edge.
+    #[test]
+    fn rewind_to_zero_restores_fresh_state() {
+        let mut fresh = tiny_inference_model_one_layer();
+        let mut fresh_session = Session::new();
+        let fresh_logits = fresh
+            .forward(&[0, 1], &mut fresh_session)
+            .expect("fresh forward should succeed");
+
+        let mut reused = tiny_inference_model_one_layer();
+        let mut session = Session::new();
+        let _ = reused
+            .forward(&[2, 0, 1], &mut session)
+            .expect("warm-up forward should succeed");
+        reused.rewind_to(0).expect("rewind_to(0) should be accepted");
+        session.rewind_to(0);
+        assert_eq!(session.consumed_tokens(), 0);
+
+        let after_reset = reused
+            .forward(&[0, 1], &mut session)
+            .expect("post-reset forward should succeed");
+        assert_eq!(after_reset, fresh_logits);
+        assert_eq!(session.consumed_tokens(), 2);
     }
 
     #[test]
