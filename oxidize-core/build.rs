@@ -92,9 +92,17 @@ fn compile_cuda_kernels(cuda_root: &Path) {
     println!("cargo:rerun-if-changed=kernels/gemv_f32.cu");
 
     let nvcc = {
-        let exe = if cfg!(target_os = "windows") { "nvcc.exe" } else { "nvcc" };
+        let exe = if cfg!(target_os = "windows") {
+            "nvcc.exe"
+        } else {
+            "nvcc"
+        };
         let candidate = cuda_root.join("bin").join(exe);
-        if candidate.is_file() { candidate } else { PathBuf::from(exe) }
+        if candidate.is_file() {
+            candidate
+        } else {
+            PathBuf::from(exe)
+        }
     };
 
     // Probe toolkit version to decide which native archs to embed alongside PTX.
@@ -105,43 +113,36 @@ fn compile_cuda_kernels(cuda_root: &Path) {
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .and_then(|s| {
             // e.g. "release 12.8, V12.8.93"
-            s.split("release ").nth(1)?.split(',').next()
-                .and_then(|v| {
-                    let mut parts = v.trim().split('.');
-                    let major: u32 = parts.next()?.parse().ok()?;
-                    let minor: u32 = parts.next()?.parse().ok()?;
-                    Some(major * 10 + minor)
-                })
+            s.split("release ").nth(1)?.split(',').next().and_then(|v| {
+                let mut parts = v.trim().split('.');
+                let major: u32 = parts.next()?.parse().ok()?;
+                let minor: u32 = parts.next()?.parse().ok()?;
+                Some(major * 10 + minor)
+            })
         })
         .unwrap_or(0);
 
-    // Build -gencode flags: PTX fallback always included; native cubins when
-    // the toolkit supports the target arch.
-    let mut gencode: Vec<String> = vec![
-        "-gencode".into(),
-        "arch=compute_75,code=compute_75".into(),  // forward-JIT PTX
-    ];
-    let native_archs: &[(&str, u32)] = &[
-        ("sm_80",  110),  // Ampere  — CUDA 11.0+
-        ("sm_89",  118),  // Ada     — CUDA 11.8+
-        ("sm_90",  120),  // Hopper  — CUDA 12.0+
-        ("sm_100", 125),  // Blackwell DC — CUDA 12.5+
-        ("sm_120", 128),  // Blackwell consumer (RTX 50xx) — CUDA 12.8+
-    ];
-    for &(sm, min_ver) in native_archs {
-        if toolkit_version >= min_ver {
-            let cc = sm.replace("sm_", "compute_");
-            gencode.push("-gencode".into());
-            gencode.push(format!("arch={cc},code={sm}"));
-        }
-    }
-
-    let mut cmd = std::process::Command::new(&nvcc);
-    cmd.arg("-ptx").arg("-O3").arg("--use_fast_math");
-    for arg in &gencode {
-        cmd.arg(arg);
-    }
-    let status = cmd.arg("-o").arg(&ptx_out).arg(src).status();
+    // We only ever consume the generated PTX (loaded as text via include_str!
+    // in backends/cuda.rs); the CUDA driver JITs it to the live GPU's native
+    // SASS at module-load time. So compile a single forward-compatible PTX for
+    // the lowest supported virtual arch (compute_75) — it runs on every GPU
+    // sm_75 and newer (Turing → Blackwell).
+    //
+    // NB: `-ptx` may target only ONE architecture; passing multiple native
+    // `-gencode arch=compute_X,code=sm_X` targets makes nvcc ≥ 12.8 fail with
+    // "Option '--ptx' is not allowed when compiling for multiple GPU
+    // architectures". Native cubins would need `-fatbin` + a fatbin loader,
+    // which we don't use.
+    let _ = toolkit_version; // probed for diagnostics; PTX target is fixed.
+    let status = std::process::Command::new(&nvcc)
+        .arg("-ptx")
+        .arg("-O3")
+        .arg("--use_fast_math")
+        .arg("-arch=compute_75")
+        .arg("-o")
+        .arg(&ptx_out)
+        .arg(src)
+        .status();
 
     match status {
         Ok(s) if s.success() => {}
@@ -189,8 +190,8 @@ fn compile_rocm_kernels(rocm_root: &Path) {
     // host launch geometry, the OX_WAVE macro, and the device wavefront in sync.
     // Override via ROCM_WAVEFRONT_FLAG (must be flipped together with OX_WAVE and
     // GEMV_LANES_PER_ROW for a wave32 build).
-    let wave_flag = env::var("ROCM_WAVEFRONT_FLAG")
-        .unwrap_or_else(|_| "-mwavefrontsize64".to_string());
+    let wave_flag =
+        env::var("ROCM_WAVEFRONT_FLAG").unwrap_or_else(|_| "-mwavefrontsize64".to_string());
 
     let mut cmd = std::process::Command::new(&hipcc);
     cmd.arg("--genco")
