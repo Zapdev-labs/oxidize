@@ -700,7 +700,10 @@ pub(super) fn first_layer_tensor_dims(mapped: &MappedGgufFile, suffix: &str) -> 
         .map(|t| t.dimensions.clone())
 }
 
-pub(super) fn kv_cache_token_size_for_layers(config: &InferenceConfig, layers: &[LayerWeights]) -> usize {
+pub(super) fn kv_cache_token_size_for_layers(
+    config: &InferenceConfig,
+    layers: &[LayerWeights],
+) -> usize {
     let widest_loaded_kv = layers
         .iter()
         .take(config.layer_count)
@@ -1394,17 +1397,16 @@ pub(super) fn lookup_embedding_from_storage(
     }
 }
 
-#[path = "inference/load.rs"]
-mod load;
 #[path = "inference/forward.rs"]
 mod forward;
-#[path = "inference/mtp.rs"]
-mod mtp;
 #[path = "inference/layers.rs"]
 mod layers;
+#[path = "inference/load.rs"]
+mod load;
 #[path = "inference/moe.rs"]
 mod moe;
-
+#[path = "inference/mtp.rs"]
+mod mtp;
 
 /// MoE FFN weight bundle shared by inference and layer-wise runtimes.
 pub(crate) struct MoeFfnWeights<'a> {
@@ -1522,8 +1524,7 @@ pub(crate) fn moe_ffn_forward_weights(
                 }
                 (g, if top2.is_finite() { top1 + top2 } else { top1 })
             }));
-            group_scores
-                .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            group_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
             for &(g, _) in group_scores.iter().skip(cfg.expert_group_used_count) {
                 for e in &mut expert_scores[g * group_size..g * group_size + group_size] {
                     e.1 = f32::NEG_INFINITY;
@@ -1756,7 +1757,18 @@ impl Model for InferenceModel {
         }
 
         let start_pos = session.consumed_tokens();
-        let logits = if tokens.len() > 1 && self.layers_supported_for_batched() {
+        // Under OX_GPU_ATTN the device F16 KV cache (not the host cache) is
+        // authoritative for the whole run. forward_batched only warms the HOST
+        // cache, so device prompt rows [0, prompt_len) would stay zero and the
+        // fused decode would attend over an all-zero prefix → token-0 divergence +
+        // early EOS. Force the per-token path so each prompt position is appended
+        // to the device cache via gpu_attn_block_fused_q4k's launch_kv_append_f16
+        // (identical RoPE + f16 store to decode). With OX_GPU_ATTN unset this is
+        // byte-identical to the previous condition.
+        let use_batched = tokens.len() > 1
+            && self.layers_supported_for_batched()
+            && !layers::ox_gpu_attn_enabled();
+        let logits = if use_batched {
             // Prefill the prompt in one batched pass so every weight matmul is a
             // GEMM (decode-once per weight block) rather than `tokens.len()`
             // separate GEMVs. Intermediate logits are discarded so only the

@@ -89,10 +89,7 @@ impl TuningPlan {
         ));
         s.push_str(&format!("n_gpu_layers      : {}\n", self.n_gpu_layers));
         if !self.gpu_split.is_empty() {
-            s.push_str(&format!(
-                "gpu_split         : {:?}\n",
-                self.gpu_split
-            ));
+            s.push_str(&format!("gpu_split         : {:?}\n", self.gpu_split));
         }
         s.push_str(&format!(
             "mmap={} mlock={} mmap_hugepages={} mmap_prefetch={}\n",
@@ -112,7 +109,10 @@ impl TuningPlan {
             "decode_tile_tokens: {}\n",
             self.decode_tile_tokens
         ));
-        s.push_str(&format!("oxk_isa/tile      : {:?} / {:?}\n", self.oxk_isa, self.oxk_tile));
+        s.push_str(&format!(
+            "oxk_isa/tile      : {:?} / {:?}\n",
+            self.oxk_isa, self.oxk_tile
+        ));
         s.push_str(&format!(
             "expected t/s      : prompt ≈ {:.1}  decode ≈ {:.1}\n",
             self.expected_prompt_tps, self.expected_decode_tps
@@ -193,9 +193,9 @@ fn tier0_hard_rules(inv: &HardwareInventory, model: &ModelFingerprint, plan: &mu
     }
     if model.is_moe && inv.physical_cores <= 8 {
         plan.numa_replicate_dense = false;
-        plan
-            .rationale
-            .push("MoE on <= 8 cores → NUMA replication disabled (overhead exceeds benefit)".to_string());
+        plan.rationale.push(
+            "MoE on <= 8 cores → NUMA replication disabled (overhead exceeds benefit)".to_string(),
+        );
     }
     if inv.os == crate::autotune::detect::OsKind::Macos && inv.has_metal {
         plan
@@ -239,7 +239,8 @@ fn tier1_isa(inv: &HardwareInventory, plan: &mut TuningPlan) {
         SimdBackend::Neon => {
             plan.oxk_isa = OxkIsa::Scalar; // no Neon oxk path yet
             plan.oxk_tile = OxkTile::T1;
-            plan.rationale.push("ARM/Neon → scalar oxk (no Neon kernel yet)".to_string());
+            plan.rationale
+                .push("ARM/Neon → scalar oxk (no Neon kernel yet)".to_string());
         }
         _ => {
             plan.oxk_isa = OxkIsa::Scalar;
@@ -288,7 +289,8 @@ fn tier2_gpu_offload(inv: &HardwareInventory, model: &ModelFingerprint, plan: &m
             plan.mlock = false;
             plan.rationale.push(format!(
                 "GPU can hold the full model ({}/{} layers, {:.1} GiB on GPU) → mmap=OFF",
-                n, model.layer_count,
+                n,
+                model.layer_count,
                 inv.gpu_vram_bytes as f64 / (1u64 << 30) as f64
             ));
         } else {
@@ -313,21 +315,21 @@ fn tier3_kv_and_ctx(inv: &HardwareInventory, model: &ModelFingerprint, plan: &mu
     if inv.has_gpu && vram_gib >= 16 {
         plan.kv_cache_dtype = DType::F16;
         plan.kv_quantization = KvQuantization::Asymmetric;
-        plan
-            .rationale
+        plan.rationale
             .push(">= 16 GiB VRAM → kv=F16 (no additional quantization)".to_string());
     } else if (inv.has_gpu && vram_gib >= 8) || model.layer_count >= 80 {
         plan.kv_cache_dtype = DType::F16;
         plan.kv_quantization = KvQuantization::Asymmetric;
-        plan
-            .rationale
-            .push("8-16 GiB VRAM or deep model → kv=F16 + asymmetric INT8 quant on the long tail".to_string());
+        plan.rationale.push(
+            "8-16 GiB VRAM or deep model → kv=F16 + asymmetric INT8 quant on the long tail"
+                .to_string(),
+        );
     } else if vram_gib < 8 || model.layer_count >= 60 || inv.total_ram_bytes < (32u64 << 30) {
         plan.kv_cache_dtype = DType::F16;
         plan.kv_quantization = KvQuantization::TurboQuant;
-        plan
-            .rationale
-            .push("low VRAM / RAM or very deep model → kv=F16 + TurboQuant (block INT4)".to_string());
+        plan.rationale.push(
+            "low VRAM / RAM or very deep model → kv=F16 + TurboQuant (block INT4)".to_string(),
+        );
     } else {
         plan.kv_cache_dtype = DType::F16;
         plan.kv_quantization = KvQuantization::Asymmetric;
@@ -343,13 +345,15 @@ fn tier3_kv_and_ctx(inv: &HardwareInventory, model: &ModelFingerprint, plan: &mu
     // down to 512 tokens) on systems where the model mostly lives on the GPU.
     let model_bytes = if plan.n_gpu_layers > 0 && model.layer_count > 0 {
         let resident_layers = model.layer_count.saturating_sub(plan.n_gpu_layers);
-        ((model.file_size_bytes as u128 * resident_layers as u128)
-            / model.layer_count as u128) as u64
+        ((model.file_size_bytes as u128 * resident_layers as u128) / model.layer_count as u128)
+            as u64
     } else {
         model.file_size_bytes
     };
     let overhead = 8u64 << 30;
-    let kv_budget = ram_budget.saturating_sub(model_bytes).saturating_sub(overhead);
+    let kv_budget = ram_budget
+        .saturating_sub(model_bytes)
+        .saturating_sub(overhead);
     let kv_bytes = kv_bytes_per_token(model, plan.kv_cache_dtype.size_in_bytes());
     let ctx_cap = if kv_bytes > 0 {
         (kv_budget / kv_bytes).min(131_072) as usize
@@ -372,7 +376,11 @@ fn tier3_kv_and_ctx(inv: &HardwareInventory, model: &ModelFingerprint, plan: &mu
 
 // ---------- tier 4: layer cache + NUMA ----------
 
-fn tier4_layer_cache_and_numa(inv: &HardwareInventory, model: &ModelFingerprint, plan: &mut TuningPlan) {
+fn tier4_layer_cache_and_numa(
+    inv: &HardwareInventory,
+    model: &ModelFingerprint,
+    plan: &mut TuningPlan,
+) {
     if plan.n_gpu_layers == model.layer_count && model.layer_count > 0 {
         // Whole model on GPU — layer cache is irrelevant.
         plan.layer_cache = 0;
@@ -392,8 +400,10 @@ fn tier4_layer_cache_and_numa(inv: &HardwareInventory, model: &ModelFingerprint,
         && plan.oxk_isa != OxkIsa::Scalar
     {
         plan.numa_replicate_dense = true;
-        plan.rationale
-            .push("NUMA nodes>=2, cores>=16, dense model, SIMD available → NUMA-replicate dense weights".to_string());
+        plan.rationale.push(
+            "NUMA nodes>=2, cores>=16, dense model, SIMD available → NUMA-replicate dense weights"
+                .to_string(),
+        );
     }
 }
 
@@ -426,25 +436,31 @@ fn is_dflash_compatible(arch: &str) -> bool {
 
 fn tier6_threads(inv: &HardwareInventory, plan: &mut TuningPlan) {
     if inv.has_gpu && plan.n_gpu_layers > 0 {
-        // GPU doing the heavy lifting; CPU only schedules + samples. GPU
-        // offload alone justifies a low thread count regardless of CPU ISA
-        // (e.g. ARM reports `oxk_isa = Scalar` despite having Neon SIMD).
-        plan.threads = 4.max(inv.physical_cores / 8);
+        // Even with full GPU offload, attention is computed host-side between
+        // the GPU projection and output kernels, so the CPU sits on the decode
+        // critical path and the GPU stalls waiting for it. Measured on an L4 +
+        // Qwen3-4B Q4_K_M: threads 4→8 gave +31% tok/s (13.9→18.2); 16/24
+        // regressed via oversubscription. So floor at 8 (enough to keep the GPU
+        // fed) while still scaling on very large hosts, and never oversubscribe.
+        plan.threads = 8.max(inv.physical_cores / 8);
         plan
             .rationale
-            .push("GPU does most work → CPU threads kept low to avoid contention".to_string());
+            .push("GPU offload but host-side attention on critical path → threads floored at 8 to keep the GPU fed".to_string());
         return;
     }
     if inv.container_mem_limit.is_some() {
         plan.threads = inv.physical_cores.clamp(2, 8);
-        plan
-            .rationale
-            .push("container memory limit present → cap threads to avoid host scheduler thrash".to_string());
+        plan.rationale.push(
+            "container memory limit present → cap threads to avoid host scheduler thrash"
+                .to_string(),
+        );
         return;
     }
     plan.threads = inv.physical_cores;
-    plan.rationale
-        .push(format!("CPU-only path → threads = physical_cores ({})", inv.physical_cores));
+    plan.rationale.push(format!(
+        "CPU-only path → threads = physical_cores ({})",
+        inv.physical_cores
+    ));
 }
 
 // ---------- tier 7: decode tile (split-K attention) ----------
@@ -472,14 +488,12 @@ fn tier8_pipeline(inv: &HardwareInventory, model: &ModelFingerprint, plan: &mut 
     }
     if inv.physical_cores >= 8 && inv.total_ram_bytes >= (64u64 << 30) && !model.is_moe {
         plan.pipeline = PipelineMode::Continuous;
-        plan
-            .rationale
+        plan.rationale
             .push(">= 8 cores, >= 64 GiB, dense model → continuous batching".to_string());
         return;
     }
     plan.pipeline = PipelineMode::Sequential;
-    plan
-        .rationale
+    plan.rationale
         .push("low-resource or MoE → sequential (default)".to_string());
 }
 

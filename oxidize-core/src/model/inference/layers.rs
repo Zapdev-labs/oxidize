@@ -1,5 +1,18 @@
 use super::*;
 
+/// Cached check for the on-device attention mode (env `OX_GPU_ATTN`). When set,
+/// the gpu-native attention island runs RoPE + KV append + flash-attention on the
+/// GPU (device-resident F16 KV cache) instead of downloading Q/K/V and running
+/// CPU attention. OFF by default → default runs are byte-identical to today.
+///
+/// Defined unconditionally (it only reads an env var) so the prefill dispatch in
+/// `forward.rs` can consult it without a `cfg(cuda)` split; on non-CUDA builds it
+/// simply gates a code path that is otherwise a no-op.
+pub(super) fn ox_gpu_attn_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("OX_GPU_ATTN").is_ok())
+}
+
 impl InferenceModel {
     /// Return the raw quantized byte slice of a Q4K weight matrix, or `None`
     /// if the storage variant is not Q4K (S or M) quantised.
@@ -106,7 +119,10 @@ impl InferenceModel {
         } else {
             256
         };
-        if !q_len.is_multiple_of(256) || !kv_len.is_multiple_of(256) || !attn_out_len.is_multiple_of(256) {
+        if !q_len.is_multiple_of(256)
+            || !kv_len.is_multiple_of(256)
+            || !attn_out_len.is_multiple_of(256)
+        {
             return false;
         }
         // CUDA must be active at runtime.
@@ -155,6 +171,39 @@ impl InferenceModel {
         };
         #[cfg(not(feature = "cuda"))]
         let gpu_native = false;
+
+        // On-device attention (env OX_GPU_ATTN). Requires gpu_native (all layers
+        // eligible) AND a device-resident F16 KV cache whose geometry matches the
+        // host KV cache. When active, the attention island runs entirely on the
+        // GPU; the host KvCache is NOT updated, so OX_GPU_ATTN is a whole-run mode.
+        #[cfg(feature = "cuda")]
+        let gpu_attn: bool = if gpu_native && ox_gpu_attn_enabled() {
+            let kv_cfg = self.kv_cache.config();
+            let kv_token_size = kv_cfg.token_size();
+            // `gpu_kv_init` runs once per decode token but only (re)allocates on a
+            // geometry change; it deliberately leaves `kv_seq_len` MONOTONIC. The
+            // new-sequence reset is driven HERE, gated on `pos == 0`, so a fresh
+            // prompt never reads stale F16 rows left by a prior generation.
+            match crate::cuda::gpu_kv_init(kv_cfg.layer_count, kv_token_size, kv_cfg.context_size) {
+                Ok(()) => {
+                    if pos == 0 {
+                        // Hard error: a reset failure means the device cache state
+                        // is undefined; do NOT silently fall through to a host
+                        // cache the GPU path never populates.
+                        crate::cuda::gpu_kv_reset().map_err(|e| {
+                            ModelError::InferenceFailed(format!("gpu_kv_reset: {e}"))
+                        })?;
+                    }
+                    true
+                }
+                Err(_) => false,
+            }
+        } else {
+            false
+        };
+        #[cfg(not(feature = "cuda"))]
+        let gpu_attn = false;
+        let _ = gpu_attn;
 
         let ws = &mut self.workspace;
 
@@ -502,13 +551,25 @@ impl InferenceModel {
                     // the three GEMVs entirely on-device, then DMA-copies only q, k, v
                     // (≪ the full hidden state) to CPU for rope + attention.
                     #[cfg(feature = "cuda")]
-                    let used_gpu_qkv = if gpu_native {
-                        let wq = Self::q4k_or_q6k_bytes(&layer.attn_q)
-                            .ok_or_else(|| ModelError::InferenceFailed("gpu_native: wq not Q4K/Q6K".into()))?;
-                        let wk = Self::q4k_or_q6k_bytes(&layer.attn_k)
-                            .ok_or_else(|| ModelError::InferenceFailed("gpu_native: wk not Q4K/Q6K".into()))?;
-                        let wv = Self::q4k_or_q6k_bytes(&layer.attn_v)
-                            .ok_or_else(|| ModelError::InferenceFailed("gpu_native: wv not Q4K/Q6K".into()))?;
+                    let used_gpu_qkv = if gpu_native && gpu_attn {
+                        // OX_GPU_ATTN: the QKV projections run INSIDE the fused
+                        // attention block (gpu_attn_block_fused_q4k, below), reading
+                        // the device-resident hidden state directly. Skip the
+                        // host-marshalling QKV download here; just mark the CPU QKV
+                        // island as bypassed. The host q_full/k_vec/v_vec are left
+                        // as-is (their VALUES are unused by the fused path — only the
+                        // derived dims/geometry feed the fused call).
+                        true
+                    } else if gpu_native {
+                        let wq = Self::q4k_or_q6k_bytes(&layer.attn_q).ok_or_else(|| {
+                            ModelError::InferenceFailed("gpu_native: wq not Q4K/Q6K".into())
+                        })?;
+                        let wk = Self::q4k_or_q6k_bytes(&layer.attn_k).ok_or_else(|| {
+                            ModelError::InferenceFailed("gpu_native: wk not Q4K/Q6K".into())
+                        })?;
+                        let wv = Self::q4k_or_q6k_bytes(&layer.attn_v).ok_or_else(|| {
+                            ModelError::InferenceFailed("gpu_native: wv not Q4K/Q6K".into())
+                        })?;
                         crate::cuda::gpu_attn_rms_and_qkv_q4k(
                             &layer.attn_norm,
                             cfg.rms_norm_eps,
@@ -557,9 +618,7 @@ impl InferenceModel {
                             h,
                             normed,
                         )
-                        .map_err(|e| {
-                            ModelError::InferenceFailed(format!("attn_qkv: {:?}", e))
-                        })?;
+                        .map_err(|e| ModelError::InferenceFailed(format!("attn_qkv: {:?}", e)))?;
                     }
                     let glue_t0 =
                         crate::tensor::decode_profile_enabled().then(std::time::Instant::now);
@@ -648,279 +707,443 @@ impl InferenceModel {
                         }
                     }
 
-                    // apply RoPE to Q (partial RoPE: first rope_dim elements per head)
-                    let q_rope_len = cfg.effective_rope_dim().min(q_head_dim);
-                    for head in 0..q_heads {
-                        let off = head * q_head_dim;
-                        if off + q_head_dim > q.len() {
-                            break;
-                        }
-                        let rotated = &mut ws.head_scratch[..q_rope_len];
-                        rotated.fill(0.0_f32);
-                        apply_rope_f32(
-                            &q[off..off + q_rope_len],
-                            pos,
-                            q_rope_len,
-                            layer_rope,
-                            rotated,
-                        )
-                        .map_err(|e| ModelError::InferenceFailed(format!("rope q: {:?}", e)))?;
-                        q[off..off + q_rope_len].copy_from_slice(rotated);
-                    }
-
-                    // apply RoPE to K (partial RoPE)
-                    let k_rope_len = cfg.effective_rope_dim().min(kv_head_dim);
-                    for head in 0..kv_heads {
-                        let off = head * kv_head_dim;
-                        if off + kv_head_dim > k_vec.len() {
-                            break;
-                        }
-                        let rotated = &mut ws.head_scratch[..k_rope_len];
-                        rotated.fill(0.0_f32);
-                        apply_rope_f32(
-                            &k_vec[off..off + k_rope_len],
-                            pos,
-                            k_rope_len,
-                            layer_rope,
-                            rotated,
-                        )
-                        .map_err(|e| ModelError::InferenceFailed(format!("rope k: {:?}", e)))?;
-                        k_vec[off..off + k_rope_len].copy_from_slice(rotated);
-                    }
-
-                    let cache_token_size = self.kv_cache.config().token_size();
-                    if cache_token_size == kv_len {
-                        self.kv_cache
-                            .set(kv_layer_idx, pos, k_vec, v_vec)
-                            .map_err(|e| {
-                                ModelError::InferenceFailed(format!("kv set: {:?}", e))
-                            })?;
-                    } else {
-                        let key_row = &mut ws.kv_keys_copy[..cache_token_size];
-                        let value_row = &mut ws.kv_values_copy[..cache_token_size];
-                        key_row.fill(0.0_f32);
-                        value_row.fill(0.0_f32);
-                        key_row[..kv_len].copy_from_slice(k_vec);
-                        value_row[..kv_len].copy_from_slice(v_vec);
-                        self.kv_cache
-                            .set(kv_layer_idx, pos, key_row, value_row)
-                            .map_err(|e| {
-                                ModelError::InferenceFailed(format!("kv set: {:?}", e))
-                            })?;
-                    }
-
-                    let seq_len = pos + 1;
-
-                    // compute attention using parallel flash attention decode over heads
+                    // Attention output buffer (filled by either the GPU or CPU path
+                    // below). Bound here so it stays in scope for the wo step.
                     let attn_result = &mut ws.attn_result[..q_len_used];
                     attn_result.fill(0.0_f32);
 
-                    // For MLA-style where q_head_dim > kv_head_dim, truncate Q heads into scratch.
-                    // Otherwise pass the Q projection directly and avoid a per-layer allocation.
-                    let q_for_flash: &[f32] = if q_head_dim > kv_head_dim {
-                        let q_truncated = &mut ws.flash_q[..q_heads * kv_head_dim];
-                        for head in 0..q_heads {
-                            let src_start = head * q_head_dim;
-                            let dst_start = head * kv_head_dim;
-                            q_truncated[dst_start..dst_start + kv_head_dim]
-                                .copy_from_slice(&q[src_start..src_start + kv_head_dim]);
-                        }
-                        q_truncated
-                    } else {
-                        q
-                    };
-
-                    // Borrow the KV prefix in its storage dtype when the logical
-                    // prefix is still contiguous in storage (F32 directly, F16 as
-                    // half bits converted in-kernel); otherwise dequantize-copy
-                    // into workspace buffers. Borrowing avoids materializing an
-                    // f32 prefix copy per layer per token, and F16 also halves
-                    // the attention DRAM reads vs an F32 cache.
-                    let cache_token_size = self.kv_cache.config().token_size();
-                    let f16_keys = if cache_token_size == kv_len {
-                        self
-                        .kv_cache
-                        .f16_layer_key_prefix(kv_layer_idx, seq_len)
-                        .map_err(|e| {
-                            ModelError::InferenceFailed(format!("kv borrow f16 keys: {:?}", e))
-                        })?
-                    } else {
-                        None
-                    };
-                    let f16_values = if cache_token_size == kv_len {
-                        self
-                        .kv_cache
-                        .f16_layer_value_prefix(kv_layer_idx, seq_len)
-                        .map_err(|e| {
-                            ModelError::InferenceFailed(format!("kv borrow f16 values: {:?}", e))
-                        })?
-                    } else {
-                        None
-                    };
-                    if let (Some(key16), Some(value16)) = (f16_keys, f16_values) {
-                        // Sliding-window attention: a local layer attends only to
-                        // the most recent `layer_window` positions (see the F32
-                        // branch below for why slicing preserves the mask).
-                        let (eff_seq_len, key16, value16) =
-                            if layer_window > 0 && seq_len > layer_window {
-                                let skip = (seq_len - layer_window) * kv_len;
-                                (layer_window, &key16[skip..], &value16[skip..])
-                            } else {
-                                (seq_len, key16, value16)
-                            };
-                        if let Some(t0) = glue_t0 {
-                            crate::tensor::decode_profile_record(
-                                "pre_attn_glue",
-                                t0.elapsed().as_nanos() as u64,
-                            );
-                        }
-                        let attn_t0 =
-                            crate::tensor::decode_profile_enabled().then(std::time::Instant::now);
-                        flash_attention_decode_heads_f16(
-                            q_for_flash,
-                            key16,
-                            value16,
-                            eff_seq_len,
-                            kv_head_dim,
+                    // ---- On-device attention (OX_GPU_ATTN) ----
+                    // When enabled and this is a standard GQA layer (the gpu_native
+                    // gate already guarantees no biases, no per-head norm, and
+                    // q_head_dim == kv_head_dim == head_dim), run RoPE + KV append +
+                    // flash-attention entirely on the GPU. The device F16 KV cache
+                    // is authoritative for the WHOLE run, so the host KvCache is NOT
+                    // updated here (OX_GPU_ATTN is a whole-run, all-or-nothing mode).
+                    //
+                    // CRITICAL (gating-fallback): because the host KvCache is never
+                    // populated under gpu_attn, the CPU attention island below would
+                    // read an all-zero host cache and silently produce garbage. So a
+                    // per-token failure of `gpu_attn_rope_append_flash` is NOT a safe
+                    // fallback — it is a HARD error. The static geometry guards
+                    // (q_head_dim == kv_head_dim, head-count products) are checked in
+                    // the `if` condition below and cannot flip token-to-token; the
+                    // only remaining reasons the call can Err are a transient CUDA
+                    // fault or an unsupported runtime configuration (e.g. KV-context
+                    // wraparound on very long generations). In both cases we abort the
+                    // run instead of corrupting output. The `else { false }` branch
+                    // (static geometry ineligible) is unreachable under the gpu_native
+                    // gate (which guarantees q_head_dim == kv_head_dim for every layer
+                    // in range), but is kept as a defensive uniform fallback: if it
+                    // ever triggers, gpu_attn would have to be false for the whole
+                    // range anyway, so the pure-CPU path (host cache warm) is used.
+                    #[cfg(feature = "cuda")]
+                    let used_gpu_attn = if gpu_attn
+                        && q_head_dim == kv_head_dim
+                        && q_head_dim * q_heads == q_len_used
+                        && kv_head_dim * kv_heads == kv_len
+                    {
+                        let rope_dim = cfg.effective_rope_dim().min(q_head_dim);
+                        // Fully fused, device-resident attention block: rms_norm +
+                        // QKV GEMV + RoPE + KV append + flash decode + Wo GEMV +
+                        // residual add, all inside ONE with_gpu() closure with NO
+                        // host round-trip. Subsumes the former three calls
+                        // (gpu_attn_rms_and_qkv_q4k + gpu_attn_rope_append_flash +
+                        // gpu_wo_residual_q4k). The host glue between them (biases,
+                        // per-head q/k norms) is guaranteed inert by the gpu_native
+                        // gate, so fusing is sound.
+                        let wq = Self::q4k_or_q6k_bytes(&layer.attn_q).ok_or_else(|| {
+                            ModelError::InferenceFailed("gpu_native: wq not Q4K/Q6K".into())
+                        })?;
+                        let wk = Self::q4k_or_q6k_bytes(&layer.attn_k).ok_or_else(|| {
+                            ModelError::InferenceFailed("gpu_native: wk not Q4K/Q6K".into())
+                        })?;
+                        let wv = Self::q4k_or_q6k_bytes(&layer.attn_v).ok_or_else(|| {
+                            ModelError::InferenceFailed("gpu_native: wv not Q4K/Q6K".into())
+                        })?;
+                        let wo = Self::q4k_or_q6k_bytes(&layer.attn_output).ok_or_else(|| {
+                            ModelError::InferenceFailed("gpu_native: wo not Q4K/Q6K".into())
+                        })?;
+                        match crate::cuda::gpu_attn_block_fused_q4k(
+                            &layer.attn_norm,
+                            cfg.rms_norm_eps,
+                            wq,
+                            q_len_used,
+                            h,
+                            wk,
                             kv_len,
+                            wv,
+                            q_head_dim,
                             q_heads,
                             kv_heads,
-                            attn_result,
-                        )
-                        .map_err(|e| {
-                            ModelError::InferenceFailed(format!(
-                                "flash attention heads (f16): {:?}",
-                                e
-                            ))
-                        })?;
-                        if let Some(t0) = attn_t0 {
-                            crate::tensor::decode_profile_record(
-                                "attention",
-                                t0.elapsed().as_nanos() as u64,
-                            );
-                        }
-                    } else {
-                        let borrowed_key_cache = if cache_token_size == kv_len {
-                            self
-                            .kv_cache
-                            .f32_layer_key_prefix(kv_layer_idx, seq_len)
-                            .map_err(|e| {
-                                ModelError::InferenceFailed(format!("kv borrow keys: {:?}", e))
-                            })?
-                        } else {
-                            None
-                        };
-                        let borrowed_value_cache = if cache_token_size == kv_len {
-                            self
-                            .kv_cache
-                            .f32_layer_value_prefix(kv_layer_idx, seq_len)
-                            .map_err(|e| {
-                                ModelError::InferenceFailed(format!("kv borrow values: {:?}", e))
-                            })?
-                        } else {
-                            None
-                        };
-
-                        let key_cache: &[f32];
-                        let value_cache: &[f32];
-                        if cache_token_size == kv_len
-                            && let (Some(keys), Some(values)) =
-                            (borrowed_key_cache, borrowed_value_cache)
-                        {
-                            key_cache = keys;
-                            value_cache = values;
-                        } else {
-                            let key_copy = &mut ws.kv_keys_copy[..seq_len * kv_len];
-                            let value_copy = &mut ws.kv_values_copy[..seq_len * kv_len];
-                            if cache_token_size == kv_len {
-                                self.kv_cache
-                                    .copy_layer_keys(kv_layer_idx, seq_len, key_copy)
-                                    .map_err(|e| {
-                                        ModelError::InferenceFailed(format!(
-                                            "kv copy keys: {:?}",
-                                            e
-                                        ))
-                                    })?;
-                                self.kv_cache
-                                    .copy_layer_values(kv_layer_idx, seq_len, value_copy)
-                                    .map_err(|e| {
-                                        ModelError::InferenceFailed(format!(
-                                            "kv copy values: {:?}",
-                                            e
-                                        ))
-                                    })?;
-                            } else {
-                                self.kv_cache
-                                    .copy_layer_key_prefix_values(
-                                        kv_layer_idx,
-                                        seq_len,
-                                        kv_len,
-                                        key_copy,
-                                    )
-                                    .map_err(|e| {
-                                        ModelError::InferenceFailed(format!(
-                                            "kv copy keys: {:?}",
-                                            e
-                                        ))
-                                    })?;
-                                self.kv_cache
-                                    .copy_layer_value_prefix_values(
-                                        kv_layer_idx,
-                                        seq_len,
-                                        kv_len,
-                                        value_copy,
-                                    )
-                                    .map_err(|e| {
-                                        ModelError::InferenceFailed(format!(
-                                            "kv copy values: {:?}",
-                                            e
-                                        ))
-                                    })?;
+                            rope_dim,
+                            layer_rope,
+                            pos,
+                            kv_layer_idx,
+                            layer_window,
+                            wo,
+                            h,
+                            attn_output_input_len,
+                        ) {
+                            Ok(()) => true,
+                            // Hard error: the host cache is stale under gpu_attn, so
+                            // there is no safe CPU fallback for this token.
+                            Err(e) => {
+                                return Err(ModelError::InferenceFailed(format!(
+                                    "gpu_attn (whole-run mode, no safe host-cache fallback): {e}"
+                                )));
                             }
-                            key_cache = key_copy;
-                            value_cache = value_copy;
+                        }
+                    } else if gpu_attn {
+                        // gpu_attn is on but this layer's geometry is ineligible for
+                        // the fused path (q_head_dim != kv_head_dim, or head-count
+                        // products don't match q_len_used/kv_len). The QKV download was
+                        // SKIPPED above (used_gpu_qkv=true under gpu_native && gpu_attn),
+                        // so host q/k/v are all-zero and the CPU attention island below
+                        // would silently produce garbage. Abort instead of corrupting
+                        // output — matching the whole-run, no-host-cache-fallback policy.
+                        return Err(ModelError::InferenceFailed(
+                            "gpu_attn: layer geometry ineligible for fused attention but \
+                             QKV download was skipped; no safe CPU fallback"
+                                .into(),
+                        ));
+                    } else {
+                        false
+                    };
+                    #[cfg(not(feature = "cuda"))]
+                    let used_gpu_attn = false;
+
+                    if !used_gpu_attn {
+                        // apply RoPE to Q (partial RoPE: first rope_dim elements per head)
+                        let q_rope_len = cfg.effective_rope_dim().min(q_head_dim);
+                        for head in 0..q_heads {
+                            let off = head * q_head_dim;
+                            if off + q_head_dim > q.len() {
+                                break;
+                            }
+                            let rotated = &mut ws.head_scratch[..q_rope_len];
+                            rotated.fill(0.0_f32);
+                            apply_rope_f32(
+                                &q[off..off + q_rope_len],
+                                pos,
+                                q_rope_len,
+                                layer_rope,
+                                rotated,
+                            )
+                            .map_err(|e| ModelError::InferenceFailed(format!("rope q: {:?}", e)))?;
+                            q[off..off + q_rope_len].copy_from_slice(rotated);
                         }
 
-                        // Sliding-window attention: a local layer attends only to the
-                        // most recent `layer_window` positions. RoPE encodes absolute
-                        // positions, so slicing off the oldest rows yields the
-                        // windowed-causal mask with relative positions preserved.
-                        let (eff_seq_len, key_cache, value_cache) =
-                            if layer_window > 0 && seq_len > layer_window {
-                                let skip = (seq_len - layer_window) * kv_len;
-                                (layer_window, &key_cache[skip..], &value_cache[skip..])
+                        // apply RoPE to K (partial RoPE)
+                        let k_rope_len = cfg.effective_rope_dim().min(kv_head_dim);
+                        for head in 0..kv_heads {
+                            let off = head * kv_head_dim;
+                            if off + kv_head_dim > k_vec.len() {
+                                break;
+                            }
+                            let rotated = &mut ws.head_scratch[..k_rope_len];
+                            rotated.fill(0.0_f32);
+                            apply_rope_f32(
+                                &k_vec[off..off + k_rope_len],
+                                pos,
+                                k_rope_len,
+                                layer_rope,
+                                rotated,
+                            )
+                            .map_err(|e| ModelError::InferenceFailed(format!("rope k: {:?}", e)))?;
+                            k_vec[off..off + k_rope_len].copy_from_slice(rotated);
+                        }
+
+                        // --- Env-gated attention debug dump (OX_ATTN_DUMP), CPU path ---
+                        // Snapshot the post-RoPE Q/K/V (and the post-RMSNorm input to
+                        // QKV, recomputed here so it is available even when the QKV GEMV
+                        // ran on the GPU) for the FIRST decode token's FIRST eligible
+                        // attention layer. One-shot, fully behind the env flag; the
+                        // attn_out vector is appended after the attention compute below.
+                        // The GPU fused path emits the SAME labels/order/sizes so the
+                        // two files diff cleanly.
+                        let attn_dump_cpu: Option<(Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>)> =
+                            if crate::attn_dump::should_dump() {
+                                let mut norm_in = vec![0.0_f32; h];
+                                rms_norm_f32(
+                                    &ws.x[..h],
+                                    &layer.attn_norm,
+                                    cfg.rms_norm_eps,
+                                    &mut norm_in,
+                                )
+                                .map_err(|e| {
+                                    ModelError::InferenceFailed(format!(
+                                        "attn_dump rms_norm: {:?}",
+                                        e
+                                    ))
+                                })?;
+                                Some((norm_in, q.to_vec(), k_vec.to_vec(), v_vec.to_vec()))
                             } else {
-                                (seq_len, key_cache, value_cache)
+                                None
                             };
-                        if let Some(t0) = glue_t0 {
-                            crate::tensor::decode_profile_record(
-                                "pre_attn_glue",
-                                t0.elapsed().as_nanos() as u64,
+
+                        let cache_token_size = self.kv_cache.config().token_size();
+                        if cache_token_size == kv_len {
+                            self.kv_cache
+                                .set(kv_layer_idx, pos, k_vec, v_vec)
+                                .map_err(|e| {
+                                    ModelError::InferenceFailed(format!("kv set: {:?}", e))
+                                })?;
+                        } else {
+                            let key_row = &mut ws.kv_keys_copy[..cache_token_size];
+                            let value_row = &mut ws.kv_values_copy[..cache_token_size];
+                            key_row.fill(0.0_f32);
+                            value_row.fill(0.0_f32);
+                            key_row[..kv_len].copy_from_slice(k_vec);
+                            value_row[..kv_len].copy_from_slice(v_vec);
+                            self.kv_cache
+                                .set(kv_layer_idx, pos, key_row, value_row)
+                                .map_err(|e| {
+                                    ModelError::InferenceFailed(format!("kv set: {:?}", e))
+                                })?;
+                        }
+
+                        let seq_len = pos + 1;
+
+                        // compute attention using parallel flash attention decode over heads
+                        // (`attn_result` was bound + zeroed above the GPU/CPU branch).
+
+                        // For MLA-style where q_head_dim > kv_head_dim, truncate Q heads into scratch.
+                        // Otherwise pass the Q projection directly and avoid a per-layer allocation.
+                        let q_for_flash: &[f32] = if q_head_dim > kv_head_dim {
+                            let q_truncated = &mut ws.flash_q[..q_heads * kv_head_dim];
+                            for head in 0..q_heads {
+                                let src_start = head * q_head_dim;
+                                let dst_start = head * kv_head_dim;
+                                q_truncated[dst_start..dst_start + kv_head_dim]
+                                    .copy_from_slice(&q[src_start..src_start + kv_head_dim]);
+                            }
+                            q_truncated
+                        } else {
+                            q
+                        };
+
+                        // Borrow the KV prefix in its storage dtype when the logical
+                        // prefix is still contiguous in storage (F32 directly, F16 as
+                        // half bits converted in-kernel); otherwise dequantize-copy
+                        // into workspace buffers. Borrowing avoids materializing an
+                        // f32 prefix copy per layer per token, and F16 also halves
+                        // the attention DRAM reads vs an F32 cache.
+                        let cache_token_size = self.kv_cache.config().token_size();
+                        let f16_keys = if cache_token_size == kv_len {
+                            self.kv_cache
+                                .f16_layer_key_prefix(kv_layer_idx, seq_len)
+                                .map_err(|e| {
+                                    ModelError::InferenceFailed(format!(
+                                        "kv borrow f16 keys: {:?}",
+                                        e
+                                    ))
+                                })?
+                        } else {
+                            None
+                        };
+                        let f16_values = if cache_token_size == kv_len {
+                            self.kv_cache
+                                .f16_layer_value_prefix(kv_layer_idx, seq_len)
+                                .map_err(|e| {
+                                    ModelError::InferenceFailed(format!(
+                                        "kv borrow f16 values: {:?}",
+                                        e
+                                    ))
+                                })?
+                        } else {
+                            None
+                        };
+                        if let (Some(key16), Some(value16)) = (f16_keys, f16_values) {
+                            // Sliding-window attention: a local layer attends only to
+                            // the most recent `layer_window` positions (see the F32
+                            // branch below for why slicing preserves the mask).
+                            let (eff_seq_len, key16, value16) =
+                                if layer_window > 0 && seq_len > layer_window {
+                                    let skip = (seq_len - layer_window) * kv_len;
+                                    (layer_window, &key16[skip..], &value16[skip..])
+                                } else {
+                                    (seq_len, key16, value16)
+                                };
+                            if let Some(t0) = glue_t0 {
+                                crate::tensor::decode_profile_record(
+                                    "pre_attn_glue",
+                                    t0.elapsed().as_nanos() as u64,
+                                );
+                            }
+                            let attn_t0 = crate::tensor::decode_profile_enabled()
+                                .then(std::time::Instant::now);
+                            flash_attention_decode_heads_f16(
+                                q_for_flash,
+                                key16,
+                                value16,
+                                eff_seq_len,
+                                kv_head_dim,
+                                kv_len,
+                                q_heads,
+                                kv_heads,
+                                attn_result,
+                            )
+                            .map_err(|e| {
+                                ModelError::InferenceFailed(format!(
+                                    "flash attention heads (f16): {:?}",
+                                    e
+                                ))
+                            })?;
+                            if let Some(t0) = attn_t0 {
+                                crate::tensor::decode_profile_record(
+                                    "attention",
+                                    t0.elapsed().as_nanos() as u64,
+                                );
+                            }
+                        } else {
+                            let borrowed_key_cache = if cache_token_size == kv_len {
+                                self.kv_cache
+                                    .f32_layer_key_prefix(kv_layer_idx, seq_len)
+                                    .map_err(|e| {
+                                        ModelError::InferenceFailed(format!(
+                                            "kv borrow keys: {:?}",
+                                            e
+                                        ))
+                                    })?
+                            } else {
+                                None
+                            };
+                            let borrowed_value_cache = if cache_token_size == kv_len {
+                                self.kv_cache
+                                    .f32_layer_value_prefix(kv_layer_idx, seq_len)
+                                    .map_err(|e| {
+                                        ModelError::InferenceFailed(format!(
+                                            "kv borrow values: {:?}",
+                                            e
+                                        ))
+                                    })?
+                            } else {
+                                None
+                            };
+
+                            let key_cache: &[f32];
+                            let value_cache: &[f32];
+                            if cache_token_size == kv_len
+                                && let (Some(keys), Some(values)) =
+                                    (borrowed_key_cache, borrowed_value_cache)
+                            {
+                                key_cache = keys;
+                                value_cache = values;
+                            } else {
+                                let key_copy = &mut ws.kv_keys_copy[..seq_len * kv_len];
+                                let value_copy = &mut ws.kv_values_copy[..seq_len * kv_len];
+                                if cache_token_size == kv_len {
+                                    self.kv_cache
+                                        .copy_layer_keys(kv_layer_idx, seq_len, key_copy)
+                                        .map_err(|e| {
+                                            ModelError::InferenceFailed(format!(
+                                                "kv copy keys: {:?}",
+                                                e
+                                            ))
+                                        })?;
+                                    self.kv_cache
+                                        .copy_layer_values(kv_layer_idx, seq_len, value_copy)
+                                        .map_err(|e| {
+                                            ModelError::InferenceFailed(format!(
+                                                "kv copy values: {:?}",
+                                                e
+                                            ))
+                                        })?;
+                                } else {
+                                    self.kv_cache
+                                        .copy_layer_key_prefix_values(
+                                            kv_layer_idx,
+                                            seq_len,
+                                            kv_len,
+                                            key_copy,
+                                        )
+                                        .map_err(|e| {
+                                            ModelError::InferenceFailed(format!(
+                                                "kv copy keys: {:?}",
+                                                e
+                                            ))
+                                        })?;
+                                    self.kv_cache
+                                        .copy_layer_value_prefix_values(
+                                            kv_layer_idx,
+                                            seq_len,
+                                            kv_len,
+                                            value_copy,
+                                        )
+                                        .map_err(|e| {
+                                            ModelError::InferenceFailed(format!(
+                                                "kv copy values: {:?}",
+                                                e
+                                            ))
+                                        })?;
+                                }
+                                key_cache = key_copy;
+                                value_cache = value_copy;
+                            }
+
+                            // Sliding-window attention: a local layer attends only to the
+                            // most recent `layer_window` positions. RoPE encodes absolute
+                            // positions, so slicing off the oldest rows yields the
+                            // windowed-causal mask with relative positions preserved.
+                            let (eff_seq_len, key_cache, value_cache) =
+                                if layer_window > 0 && seq_len > layer_window {
+                                    let skip = (seq_len - layer_window) * kv_len;
+                                    (layer_window, &key_cache[skip..], &value_cache[skip..])
+                                } else {
+                                    (seq_len, key_cache, value_cache)
+                                };
+                            if let Some(t0) = glue_t0 {
+                                crate::tensor::decode_profile_record(
+                                    "pre_attn_glue",
+                                    t0.elapsed().as_nanos() as u64,
+                                );
+                            }
+                            let attn_t0 = crate::tensor::decode_profile_enabled()
+                                .then(std::time::Instant::now);
+                            flash_attention_decode_heads_f32(
+                                q_for_flash,
+                                key_cache,
+                                value_cache,
+                                eff_seq_len,
+                                kv_head_dim,
+                                kv_len,
+                                q_heads,
+                                kv_heads,
+                                attn_result,
+                            )
+                            .map_err(|e| {
+                                ModelError::InferenceFailed(format!(
+                                    "flash attention heads: {:?}",
+                                    e
+                                ))
+                            })?;
+                            if let Some(t0) = attn_t0 {
+                                crate::tensor::decode_profile_record(
+                                    "attention",
+                                    t0.elapsed().as_nanos() as u64,
+                                );
+                            }
+                        }
+                        // --- Env-gated attention debug dump (OX_ATTN_DUMP), CPU path ---
+                        // Emit the full labeled block now that attn_result is computed.
+                        // `attn_dump_cpu` is Some only for the one-shot first eligible
+                        // layer; write_block claims the one-shot token and no-ops if the
+                        // GPU path already claimed it (the two are mutually exclusive per
+                        // run — OX_GPU_ATTN selects one attention path).
+                        if let Some((norm_in, q_rope, k_cur, v_cur)) = attn_dump_cpu {
+                            crate::attn_dump::write_block(
+                                "cpu",
+                                pos,
+                                layer_idx,
+                                kv_layer_idx,
+                                &norm_in,
+                                &q_rope,
+                                &k_cur,
+                                &v_cur,
+                                attn_result,
                             );
                         }
-                        let attn_t0 =
-                            crate::tensor::decode_profile_enabled().then(std::time::Instant::now);
-                        flash_attention_decode_heads_f32(
-                            q_for_flash,
-                            key_cache,
-                            value_cache,
-                            eff_seq_len,
-                            kv_head_dim,
-                            kv_len,
-                            q_heads,
-                            kv_heads,
-                            attn_result,
-                        )
-                        .map_err(|e| {
-                            ModelError::InferenceFailed(format!("flash attention heads: {:?}", e))
-                        })?;
-                        if let Some(t0) = attn_t0 {
-                            crate::tensor::decode_profile_record(
-                                "attention",
-                                t0.elapsed().as_nanos() as u64,
-                            );
-                        }
-                    }
+                    } // end `if !used_gpu_attn` (CPU attention island)
 
                     // Reconcile attention result size with attn_output expected input
                     let attn_input = if attn_output_input_len > 0
@@ -942,10 +1165,16 @@ impl InferenceModel {
                         // GPU-native: upload attn_result to GPU, run wo GEMV + residual
                         // entirely on device.  No CPU residual add needed.
                         #[cfg(feature = "cuda")]
-                        let used_gpu_wo = if gpu_native {
-                            let wo = Self::q4k_or_q6k_bytes(&layer.attn_output).ok_or_else(|| {
-                                ModelError::InferenceFailed("gpu_native: wo not Q4K".into())
-                            })?;
+                        let used_gpu_wo = if gpu_native && used_gpu_attn {
+                            // Wo GEMV + residual add were already performed inside
+                            // gpu_attn_block_fused_q4k (device-resident). Nothing to
+                            // do here — just mark the CPU/GPU wo fallback as bypassed.
+                            true
+                        } else if gpu_native {
+                            let wo =
+                                Self::q4k_or_q6k_bytes(&layer.attn_output).ok_or_else(|| {
+                                    ModelError::InferenceFailed("gpu_native: wo not Q4K".into())
+                                })?;
                             crate::cuda::gpu_wo_residual_q4k(
                                 attn_input,
                                 wo,

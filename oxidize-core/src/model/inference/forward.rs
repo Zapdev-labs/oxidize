@@ -1,5 +1,96 @@
 use super::*;
 
+/// Golden-logits oracle (env `OX_GOLDEN_LOGITS`). When the env var is set, every
+/// token's logits are summarised (argmax + top-5 `(idx, logit)`) and appended to
+/// the file named by the env value (or stderr when the value is empty). This is a
+/// cheap, architecture-independent reference for diffing the CPU path against the
+/// on-device attention path (env `OX_GPU_ATTN`); it is OFF by default and adds a
+/// single relaxed bool load to the hot path when disabled.
+#[derive(Clone)]
+enum GoldenSink {
+    Disabled,
+    Stderr,
+    File(std::path::PathBuf),
+}
+
+fn golden_sink() -> &'static GoldenSink {
+    static SINK: std::sync::OnceLock<GoldenSink> = std::sync::OnceLock::new();
+    SINK.get_or_init(|| match std::env::var("OX_GOLDEN_LOGITS") {
+        Ok(p) if !p.is_empty() => GoldenSink::File(std::path::PathBuf::from(p)),
+        Ok(_) => GoldenSink::Stderr,
+        Err(_) => GoldenSink::Disabled,
+    })
+}
+
+/// Append one `GOLDEN tok=... argmax=... logit=... top5=[...]` line for `logits`.
+/// No-op unless `OX_GOLDEN_LOGITS` is set. Kept off the hot path (cold).
+#[cold]
+fn dump_golden_logits(logits: &[f32]) {
+    let sink = golden_sink();
+    if matches!(sink, GoldenSink::Disabled) || logits.is_empty() {
+        return;
+    }
+    static TOK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let tok = TOK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    // argmax over the full logit vector.
+    let mut argmax = 0usize;
+    let mut argmax_v = f32::NEG_INFINITY;
+    for (i, &v) in logits.iter().enumerate() {
+        if v > argmax_v {
+            argmax_v = v;
+            argmax = i;
+        }
+    }
+
+    // top-5 by partial selection (no full vocab sort).
+    let mut idx: Vec<usize> = (0..logits.len()).collect();
+    let k = 5.min(idx.len());
+    if k > 0 && idx.len() > k {
+        idx.select_nth_unstable_by(k - 1, |&a, &b| {
+            logits[b]
+                .partial_cmp(&logits[a])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+    }
+    let mut top: Vec<usize> = idx.into_iter().take(k).collect();
+    top.sort_by(|&a, &b| {
+        logits[b]
+            .partial_cmp(&logits[a])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut top5 = String::from("[");
+    for (j, &i) in top.iter().enumerate() {
+        if j > 0 {
+            top5.push(',');
+        }
+        top5.push_str(&format!("({},{:.6e})", i, logits[i]));
+    }
+    top5.push(']');
+
+    let line = format!(
+        "GOLDEN tok={} argmax={} logit={:.6e} top5={}\n",
+        tok, argmax, argmax_v, top5
+    );
+    match sink {
+        GoldenSink::File(path) => {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+            {
+                let _ = f.write_all(line.as_bytes());
+            }
+        }
+        GoldenSink::Stderr => {
+            eprint!("{line}");
+        }
+        GoldenSink::Disabled => {}
+    }
+}
+
 impl InferenceModel {
     pub fn forward_tokens_no_logits(
         &mut self,
@@ -17,7 +108,21 @@ impl InferenceModel {
             });
         }
         let start_pos = session.consumed_tokens();
-        if tokens.len() > 1 && self.layers_supported_for_batched() {
+        // OX_GPU_ATTN owns the device F16 KV cache for the whole run; the batched
+        // prefill only warms the HOST cache via `self.kv_cache.set(...)`, leaving
+        // device rows `[0, prompt_len)` zero. The fused decode then reads an all-zero
+        // key/value prefix → garbage attention at layer 0 → divergence at token 0 and
+        // an early EOS. Force the per-token path when OX_GPU_ATTN is active so each
+        // prompt position is appended to the device cache through
+        // `gpu_attn_block_fused_q4k`'s `launch_kv_append_f16` (same RoPE + f16 store
+        // as decode, so prefill and decode agree bit-for-bit).
+        //
+        // Default path (OX_GPU_ATTN unset) is byte-identical: `ox_gpu_attn_enabled()`
+        // is false, so `use_batched` collapses to the original condition.
+        let use_batched = tokens.len() > 1
+            && self.layers_supported_for_batched()
+            && !super::layers::ox_gpu_attn_enabled();
+        if use_batched {
             self.forward_batched(tokens, start_pos, false)?;
         } else {
             for (i, &token) in tokens.iter().enumerate() {
@@ -781,9 +886,12 @@ impl InferenceModel {
         {
             if let Some(w_bytes) = Self::q4k_or_q6k_bytes(&self.output_weight) {
                 let logits = &mut ws.logits[..vocab_size];
-                if let Ok(()) = crate::cuda::gpu_lm_head_quantized(
-                    w_bytes, vocab_size, h, normed, logits,
-                ) {
+                if let Ok(()) =
+                    crate::cuda::gpu_lm_head_quantized(w_bytes, vocab_size, h, normed, logits)
+                {
+                    if !matches!(golden_sink(), GoldenSink::Disabled) {
+                        dump_golden_logits(&logits[..vocab_size]);
+                    }
                     let logits_out = logits.to_vec();
                     self.last_output_hidden = last_hidden;
                     return Ok(logits_out);
@@ -796,6 +904,9 @@ impl InferenceModel {
         logits.fill(0.0_f32);
         gemv_weight(&self.output_weight, vocab_size, h, normed, logits)
             .map_err(|e| ModelError::InferenceFailed(format!("output: {:?}", e)))?;
+        if !matches!(golden_sink(), GoldenSink::Disabled) {
+            dump_golden_logits(&logits[..vocab_size]);
+        }
         let logits_out = logits.to_vec();
         self.last_output_hidden = last_hidden;
         Ok(logits_out)
