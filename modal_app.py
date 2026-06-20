@@ -42,6 +42,15 @@ image = (
     .add_local_dir(".", REPO_ROOT, ignore=IGNORE, copy=False)
 )
 
+# Fresh-mount CPU image: copy=True bakes source into the layer so edits ALWAYS
+# bust the content hash. Use for benches that depend on just-edited source (the
+# copy=False `image` above can serve a stale snapshot across rapid edits).
+cpu_fresh_image = (
+    modal.Image.from_registry(f"rust:{RUST_VERSION}", add_python="3.12")
+    .apt_install("pkg-config", "libssl-dev", "cmake", "clang")
+    .add_local_dir(".", REPO_ROOT, ignore=IGNORE, copy=True)
+)
+
 # Writable, persistent caches. `target/` is the big one; the registry cache
 # avoids re-downloading crates.io deps on every run.
 target_cache = modal.Volume.from_name("oxidize-target-cache", create_if_missing=True)
@@ -194,6 +203,106 @@ def tps(
         f"prompt tokens cap: {max_tokens}, iterations: {iterations}\n"
         + "\n".join(transcript)
         + f"\nbest: {best:.2f} tok/s   avg: {avg:.2f} tok/s\n"
+    )
+    print(summary, flush=True)
+    return summary
+
+
+@app.function(
+    image=cpu_fresh_image,
+    volumes={
+        f"{REPO_ROOT}/target": target_cache,
+        "/usr/local/cargo/registry": registry_cache,
+        "/root/.cache/oxidize": model_cache,
+    },
+    cpu=8.0,
+    memory=32768,
+    timeout=3600,
+)
+def batched_decode_tps(
+    model: str = "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+    hf_file: str = "qwen2.5-0.5b-instruct-q4_k_m.gguf",
+    steps: int = 64,
+    batches: str = "1,8,16",
+) -> str:
+    """Prove TRUE continuous-batching decode: aggregate tok/s should scale with
+    batch size because decode is memory-bound and N sequences share one set of
+    batched weight reads (`InferenceModel::forward_batch`). Runs on Modal's 8 vCPU
+    CPU box and reports tok/s for each batch size, plus a flag-off control."""
+    import glob
+    import os
+    import re
+    import subprocess
+
+    # Build the CLI (includes the batched_decode_bench bin) into the cache.
+    if _run("cargo build --release --package oxidize-cli --bin batched_decode_bench") != 0:
+        raise SystemExit("batched_decode_bench build failed")
+    bench = f"{REPO_ROOT}/target/release/batched_decode_bench"
+    cli = f"{REPO_ROOT}/target/release/oxidize-cli"
+    if _run("cargo build --release --package oxidize-cli --bin oxidize-cli") != 0:
+        raise SystemExit("oxidize-cli build failed")
+
+    # `cache_safe_name` in model_resolution.rs replaces every non-alphanumeric
+    # char with '-'. The GGUF lands at ~/.cache/oxidize/hf/<safe>/main/<file>.
+    safe = re.sub(r"[^A-Za-z0-9]", "-", model)
+    gguf = f"/root/.cache/oxidize/hf/{safe}/main/{hf_file}"
+    if not os.path.exists(gguf):
+        # Trigger oxidize's HF resolver to populate the cache (1 token is enough).
+        warm = [cli, "run", model]
+        if hf_file:
+            warm += ["--file", hf_file]
+        warm += ["warm", "--no-api", "--max-tokens", "1"]
+        print(f"$ {' '.join(warm)}", flush=True)
+        w = subprocess.run(warm, cwd=REPO_ROOT, capture_output=True, text=True)
+        print(((w.stdout or "") + (w.stderr or ""))[-1200:], flush=True)
+        if not os.path.exists(gguf):
+            hits = glob.glob(f"/root/.cache/oxidize/hf/{safe}/main/*.gguf")
+            if hits:
+                gguf = hits[0]
+            else:
+                raise SystemExit(f"could not locate GGUF at {gguf} (warm exit {w.returncode})")
+    print(f"resolved GGUF: {gguf}", flush=True)
+
+    sizes = [int(b) for b in batches.split(",") if b.strip()]
+
+    def run_one(batch: int, flag_on: bool) -> float:
+        env = dict(os.environ)
+        if flag_on:
+            env["OX_BATCHED_DECODE"] = "1"
+        else:
+            env.pop("OX_BATCHED_DECODE", None)
+        cmd = [bench, "--model", gguf, "--batch", str(batch), "--steps", str(steps)]
+        print(f"\n\033[1;36m# batch={batch} flag={'on' if flag_on else 'off'}\033[0m", flush=True)
+        print(f"$ {' '.join(cmd)}", flush=True)
+        out = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True, env=env)
+        blob = (out.stdout or "") + (out.stderr or "")
+        print(blob[-1500:], flush=True)
+        if out.returncode != 0:
+            raise SystemExit(f"batched_decode_bench failed (exit {out.returncode}) at batch={batch}")
+        m = re.findall(r"(\d+\.\d+)\s*tok/s", blob)
+        if not m:
+            raise SystemExit(f"could not parse tok/s at batch={batch}")
+        return float(m[-1])
+
+    # Control: flag OFF at batch=1 (proves default path is unaffected).
+    control = run_one(1, flag_on=False)
+
+    results = {b: run_one(b, flag_on=True) for b in sizes}
+    base = results.get(1, results[sizes[0]])
+
+    lines = [f"control (flag off) batch=1: {control:.2f} tok/s"]
+    for b in sizes:
+        ratio = results[b] / base if base > 0 else float("nan")
+        lines.append(f"batch={b:<3d} {results[b]:.2f} tok/s   ({ratio:.2f}x vs batch=1)")
+
+    model_cache.commit()
+    summary = (
+        f"\n=== Batched decode TPS on Modal (8 vCPU, CPU backend) ===\n"
+        f"model: {model} ({hf_file or 'auto'})  steps/seq: {steps}\n"
+        + "\n".join(lines)
+        + "\n\nExpectation: aggregate tok/s grows with batch size (decode is\n"
+        "memory-bound, so N sequences amortize one set of weight reads) until\n"
+        "compute-bound; ~2-4x by batch=16 on 8 vCPU is the success signal.\n"
     )
     print(summary, flush=True)
     return summary
@@ -674,6 +783,9 @@ def main(
         print(test.remote(package))
     elif action == "tps":
         print(tps.remote(model, hf_file, prompt, max_tokens, iterations))
+    elif action == "batched-tps":
+        # max_tokens doubles as decode steps/seq here; default batches 1,8,16.
+        print(batched_decode_tps.remote(model, hf_file, max(max_tokens, 64), "1,8,16"))
     elif action == "gpu-build":
         print(gpu_build.remote())
     elif action == "gpu-splitk-bench":
@@ -722,6 +834,6 @@ def main(
         print(gpu_tps.remote(model, hf_file, prompt, max_tokens, iterations, gpu_layers, threads))
     else:
         raise SystemExit(
-            "unknown action (use: smoke | test | tps | gpu-build | gpu-profile | "
-            "gpu-tps | gpu-splitk-bench | gpu-splitk-test | gpu-sweep | gpu)"
+            "unknown action (use: smoke | test | tps | batched-tps | gpu-build | "
+            "gpu-profile | gpu-tps | gpu-splitk-bench | gpu-splitk-test | gpu-sweep | gpu)"
         )
