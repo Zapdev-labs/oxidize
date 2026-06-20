@@ -1298,10 +1298,66 @@ pub struct InferenceModel {
     pub(super) last_output_hidden: Vec<f32>,
 }
 
+/// Caller-owned per-sequence KV buffer for [`InferenceModel::forward_batch`].
+///
+/// The model's own `kv_cache` is a single flat timeline and cannot multiplex N
+/// concurrent decode sequences, so continuous batching keeps each sequence's KV
+/// in its own `SeqKv`. Layout (F32 only) is layer-major then position-major:
+/// element for `(kv_layer_idx, pos, channel)` lives at
+/// `kv_layer_idx * capacity_tokens * kv_len + pos * kv_len + channel`,
+/// where `kv_len = num_key_value_heads * kv_head_dim`. `len` is the number of
+/// KV positions already written (== the sequence's next decode position).
+#[derive(Debug, Clone)]
+pub struct SeqKv {
+    pub key: Vec<f32>,
+    pub value: Vec<f32>,
+    pub len: usize,
+    pub capacity_tokens: usize,
+}
+
+impl SeqKv {
+    /// Allocate a zeroed KV buffer for one sequence sized for `kv_layer_count`
+    /// attention layers, `capacity_tokens` positions, and `kv_len` channels.
+    pub fn new(kv_layer_count: usize, capacity_tokens: usize, kv_len: usize) -> Self {
+        let elems = kv_layer_count * capacity_tokens * kv_len;
+        Self {
+            key: vec![0.0_f32; elems],
+            value: vec![0.0_f32; elems],
+            len: 0,
+            capacity_tokens,
+        }
+    }
+}
+
 impl InferenceModel {
     /// Access the model's inference configuration.
     pub fn config(&self) -> &InferenceConfig {
         &self.config
+    }
+
+    /// Number of attention layers stored in the KV cache (== the number of
+    /// per-layer slots a [`SeqKv`] buffer must reserve for `forward_batch`).
+    pub fn kv_layer_count(&self) -> usize {
+        self.kv_cache.config().layer_count
+    }
+
+    /// Whether continuous-batching decode is enabled (env `OX_BATCHED_DECODE`).
+    /// The paged runtime / batched-decode bench consult this before routing N
+    /// decode tokens through [`InferenceModel::forward_batch`]; OFF by default so
+    /// every existing path stays byte-identical.
+    pub fn batched_decode_enabled(&self) -> bool {
+        layers::ox_batched_decode_enabled()
+    }
+
+    /// KV row width (`num_key_value_heads * kv_head_dim`) used to size a
+    /// [`SeqKv`] buffer for `forward_batch`.
+    pub fn kv_row_len(&self) -> usize {
+        if let Some(layer0) = self.layers.first() {
+            if !layer0.attn_k.is_empty() {
+                return layer0.attn_k.output_dim(self.config.hidden_size);
+            }
+        }
+        self.kv_cache.config().token_size()
     }
 }
 
@@ -2451,5 +2507,263 @@ mod tests {
                 assert!((a - b).abs() < 1e-4, "pos={pos} idx={i} full={a} split={b}");
             }
         }
+    }
+
+    /// CORE CONTINUOUS-BATCHING INVARIANT: a batch of N sequences run through
+    /// `forward_batch` must produce per-sequence logits IDENTICAL (bit-for-bit)
+    /// to running each sequence alone. The N sequences here are byte-identical
+    /// (same token + same position + same KV history), so every `result[i]` must
+    /// equal `result[0]` at every decode step — the amortized GEMM must not mix
+    /// rows. Also asserts the absolute value matches the N=1 reference.
+    #[test]
+    fn forward_batch_per_sequence_logits_match_single_sequence() {
+        let prompt: [Token; 3] = [0, 1, 2];
+        let steps = 5usize;
+        let cap = 32usize;
+
+        // --- N=1 reference: drive forward_batch one sequence, greedy decode. ---
+        let mut reference = tiny_inference_model_one_layer();
+        let kv_layers = reference.kv_layer_count();
+        let kv_len = reference.kv_row_len();
+        let mut ref_kv = vec![SeqKv::new(kv_layers, cap, kv_len)];
+        let mut ref_pos = 0usize;
+        // Seed the prompt (positions 0..prompt.len()).
+        let mut ref_last: Token = 0;
+        for &tok in &prompt {
+            let out = reference
+                .forward_batch(&[(tok, ref_pos)], &mut ref_kv, true)
+                .expect("reference seed forward_batch");
+            ref_last = argmax(&out[0]) as Token;
+            ref_pos += 1;
+        }
+        let mut reference_decode_logits: Vec<Logits> = Vec::with_capacity(steps);
+        for _ in 0..steps {
+            let out = reference
+                .forward_batch(&[(ref_last, ref_pos)], &mut ref_kv, true)
+                .expect("reference decode forward_batch");
+            ref_last = argmax(&out[0]) as Token;
+            reference_decode_logits.push(out.into_iter().next().unwrap());
+            ref_pos += 1;
+        }
+
+        // --- N>1 batched: 3 byte-identical sequences decoded together. ---
+        let n = 3usize;
+        let mut model = tiny_inference_model_one_layer();
+        let mut kv: Vec<SeqKv> = (0..n).map(|_| SeqKv::new(kv_layers, cap, kv_len)).collect();
+        let mut pos = 0usize;
+        let mut last = vec![0 as Token; n];
+        for &tok in &prompt {
+            let rows: Vec<(Token, usize)> = (0..n).map(|_| (tok, pos)).collect();
+            let out = model
+                .forward_batch(&rows, &mut kv, true)
+                .expect("batched seed forward_batch");
+            for i in 0..n {
+                last[i] = argmax(&out[i]) as Token;
+            }
+            pos += 1;
+        }
+        for step in 0..steps {
+            let rows: Vec<(Token, usize)> = (0..n).map(|i| (last[i], pos)).collect();
+            let out = model
+                .forward_batch(&rows, &mut kv, true)
+                .expect("batched decode forward_batch");
+            assert_eq!(out.len(), n);
+            // (a) all rows identical to each other (no cross-row contamination).
+            for i in 1..n {
+                assert_eq!(
+                    out[i], out[0],
+                    "step {step}: batched row {i} diverged from row 0"
+                );
+            }
+            // (b) batched row equals the N=1 reference bit-for-bit.
+            assert_eq!(
+                out[0], reference_decode_logits[step],
+                "step {step}: batched logits diverged from single-sequence reference"
+            );
+            for i in 0..n {
+                last[i] = argmax(&out[i]) as Token;
+            }
+            pos += 1;
+        }
+    }
+
+    /// DISTINCT sequences in one batch must each match their own standalone run.
+    /// Two same-length but DIFFERENT-token sequences are seeded and decoded; each
+    /// batched row must equal that sequence run alone at every step, proving the
+    /// batched GEMM keeps per-row KV/position isolation (no cross-contamination).
+    #[test]
+    fn forward_batch_distinct_sequences_match_standalone() {
+        let cap = 32usize;
+        let steps = 4usize;
+        let prompt_a: [Token; 3] = [0, 1, 2];
+        let prompt_b: [Token; 3] = [2, 0, 1];
+
+        // Standalone runner: seed `prompt`, then greedily decode `steps`,
+        // returning the per-step logits.
+        fn run_alone(prompt: &[Token], steps: usize, cap: usize) -> Vec<Logits> {
+            let mut m = tiny_inference_model_one_layer();
+            let kvl = m.kv_layer_count();
+            let kw = m.kv_row_len();
+            let mut kv = vec![SeqKv::new(kvl, cap, kw)];
+            let mut pos = 0usize;
+            let mut last: Token = 0;
+            for &t in prompt {
+                let out = m.forward_batch(&[(t, pos)], &mut kv, true).expect("seed");
+                last = argmax(&out[0]) as Token;
+                pos += 1;
+            }
+            let mut decoded = Vec::with_capacity(steps);
+            for _ in 0..steps {
+                let mut out = m.forward_batch(&[(last, pos)], &mut kv, true).expect("decode");
+                last = argmax(&out[0]) as Token;
+                decoded.push(out.remove(0));
+                pos += 1;
+            }
+            decoded
+        }
+
+        let a_alone = run_alone(&prompt_a, steps, cap);
+        let b_alone = run_alone(&prompt_b, steps, cap);
+
+        // Batched A+B together.
+        let mut m = tiny_inference_model_one_layer();
+        let kvl = m.kv_layer_count();
+        let kw = m.kv_row_len();
+        let mut kv = vec![SeqKv::new(kvl, cap, kw), SeqKv::new(kvl, cap, kw)];
+        let mut pos = 0usize;
+        let mut last = [0 as Token; 2];
+        for p in 0..prompt_a.len() {
+            let rows = vec![(prompt_a[p], pos), (prompt_b[p], pos)];
+            let out = m.forward_batch(&rows, &mut kv, true).expect("joint seed");
+            last[0] = argmax(&out[0]) as Token;
+            last[1] = argmax(&out[1]) as Token;
+            pos += 1;
+        }
+        for step in 0..steps {
+            let rows = vec![(last[0], pos), (last[1], pos)];
+            let out = m.forward_batch(&rows, &mut kv, true).expect("joint decode");
+            assert_eq!(
+                out[0], a_alone[step],
+                "step {step}: batched seq A diverged from standalone A"
+            );
+            assert_eq!(
+                out[1], b_alone[step],
+                "step {step}: batched seq B diverged from standalone B"
+            );
+            last[0] = argmax(&out[0]) as Token;
+            last[1] = argmax(&out[1]) as Token;
+            pos += 1;
+        }
+    }
+
+    /// VARIABLE-LENGTH continuous batching: real serving mixes sequences at
+    /// different KV depths in ONE batch call (a freshly-admitted request decodes
+    /// alongside an older one). This drives `forward_batch` with rows whose
+    /// positions differ — `rows=[(tok_a, 4), (tok_b, 2)]` — so each row reads a
+    /// genuinely different `kv[i].len`, exercising per-sequence KV prefix reads,
+    /// causal extent (`seq_len = kv[i].len + 1`), and per-row RoPE position. Each
+    /// batched row must still match its own standalone run bit-for-bit.
+    #[test]
+    fn forward_batch_variable_length_sequences() {
+        let cap = 32usize;
+        let steps = 4usize;
+        // Sequence A is prefilled with 4 tokens, sequence B with 2 — so on the
+        // first joint decode call kv[A].len=4 and kv[B].len=2 (variable length).
+        let prompt_a: [Token; 4] = [0, 1, 2, 1];
+        let prompt_b: [Token; 2] = [2, 0];
+
+        // Standalone runner: seed `prompt`, then greedily decode `steps`,
+        // returning the per-step logits. Mirrors run_alone above but reused here
+        // with differing prompt lengths to build the variable-length references.
+        fn run_alone(prompt: &[Token], steps: usize, cap: usize) -> Vec<Logits> {
+            let mut m = tiny_inference_model_one_layer();
+            let kvl = m.kv_layer_count();
+            let kw = m.kv_row_len();
+            let mut kv = vec![SeqKv::new(kvl, cap, kw)];
+            let mut pos = 0usize;
+            let mut last: Token = 0;
+            for &t in prompt {
+                let out = m.forward_batch(&[(t, pos)], &mut kv, true).expect("seed");
+                last = argmax(&out[0]) as Token;
+                pos += 1;
+            }
+            let mut decoded = Vec::with_capacity(steps);
+            for _ in 0..steps {
+                let mut out = m.forward_batch(&[(last, pos)], &mut kv, true).expect("decode");
+                last = argmax(&out[0]) as Token;
+                decoded.push(out.remove(0));
+                pos += 1;
+            }
+            decoded
+        }
+
+        let a_alone = run_alone(&prompt_a, steps, cap);
+        let b_alone = run_alone(&prompt_b, steps, cap);
+
+        // Batched A+B together, where A and B start at DIFFERENT KV depths. Each
+        // sequence advances its own `pos` independently; the joint call always
+        // passes each row at its own `kv[i].len`.
+        let mut m = tiny_inference_model_one_layer();
+        let kvl = m.kv_layer_count();
+        let kw = m.kv_row_len();
+        let mut kv = vec![SeqKv::new(kvl, cap, kw), SeqKv::new(kvl, cap, kw)];
+        let mut pos = [0usize; 2];
+        let mut last = [0 as Token; 2];
+
+        // Seed both prompts in lockstep up to the SHORTER prompt; then finish
+        // seeding A's tail alone so its kv length runs ahead of B's.
+        let shared = prompt_a.len().min(prompt_b.len());
+        for p in 0..shared {
+            let rows = vec![(prompt_a[p], pos[0]), (prompt_b[p], pos[1])];
+            let out = m.forward_batch(&rows, &mut kv, true).expect("joint seed");
+            last[0] = argmax(&out[0]) as Token;
+            last[1] = argmax(&out[1]) as Token;
+            pos[0] += 1;
+            pos[1] += 1;
+        }
+        // Seed A's remaining prompt tokens alone (single-row batch over kv[0..1]).
+        for &t in &prompt_a[shared..] {
+            let out = m
+                .forward_batch(&[(t, pos[0])], &mut kv[0..1], true)
+                .expect("seq A tail seed");
+            last[0] = argmax(&out[0]) as Token;
+            pos[0] += 1;
+        }
+        // Sanity: the two sequences are now at different KV depths.
+        assert_eq!(kv[0].len, prompt_a.len());
+        assert_eq!(kv[1].len, prompt_b.len());
+        assert_ne!(kv[0].len, kv[1].len, "test must exercise variable lengths");
+
+        for step in 0..steps {
+            // The joint decode call mixes pos[0] != pos[1] — exactly the case the
+            // synchronized-length tests never hit.
+            let rows = vec![(last[0], pos[0]), (last[1], pos[1])];
+            assert_ne!(rows[0].1, rows[1].1, "batch rows must have distinct positions");
+            let out = m.forward_batch(&rows, &mut kv, true).expect("joint decode");
+            assert_eq!(
+                out[0], a_alone[step],
+                "step {step}: variable-length batched seq A diverged from standalone A"
+            );
+            assert_eq!(
+                out[1], b_alone[step],
+                "step {step}: variable-length batched seq B diverged from standalone B"
+            );
+            last[0] = argmax(&out[0]) as Token;
+            last[1] = argmax(&out[1]) as Token;
+            pos[0] += 1;
+            pos[1] += 1;
+        }
+    }
+
+    fn argmax(v: &[f32]) -> usize {
+        let mut best = 0usize;
+        let mut best_v = f32::NEG_INFINITY;
+        for (i, &x) in v.iter().enumerate() {
+            if x > best_v {
+                best_v = x;
+                best = i;
+            }
+        }
+        best
     }
 }

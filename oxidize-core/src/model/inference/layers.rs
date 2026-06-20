@@ -13,6 +13,24 @@ pub(super) fn ox_gpu_attn_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var("OX_GPU_ATTN").is_ok())
 }
 
+/// Cached check for true continuous-batching decode (env `OX_BATCHED_DECODE`).
+/// When set, the paged runtime / batched-decode bench may run N decode tokens
+/// (one per running sequence) through [`InferenceModel::forward_batch`] as a
+/// single set of batched GEMMs, amortizing the weight reads across sequences.
+///
+/// OFF by default → `forward_batch` is only reachable through the bench or a
+/// future flagged runtime branch, so every existing path stays byte-identical.
+/// CPU/backend-agnostic: when `OX_GPU_ATTN` is set it owns the device KV cache
+/// and takes precedence; `OX_BATCHED_DECODE` only governs the host-side path.
+pub fn ox_batched_decode_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("OX_BATCHED_DECODE")
+            .map(|v| v != "0" && !v.is_empty())
+            .unwrap_or(false)
+    })
+}
+
 impl InferenceModel {
     /// Return the raw quantized byte slice of a Q4K weight matrix, or `None`
     /// if the storage variant is not Q4K (S or M) quantised.

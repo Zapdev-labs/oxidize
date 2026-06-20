@@ -723,6 +723,479 @@ impl InferenceModel {
         Ok(Some(logits))
     }
 
+    /// True continuous-batching decode across N **sequences** (one decode token
+    /// each), as opposed to [`forward_batched`] which batches positions of ONE
+    /// sequence. `rows[i] = (token, absolute_position)` for sequence `i`, and
+    /// `kv[i]` is that sequence's caller-owned KV buffer (see [`SeqKv`]). All
+    /// weight matrices are read once and fanned out across the `N = rows.len()`
+    /// rows via [`gemm_weight`] — that amortization is the whole point: decode is
+    /// memory-bound, so N sequences as one batched GEMM run at ~N× the per-token
+    /// throughput until compute-bound.
+    ///
+    /// Per-sequence attention reads each sequence's own contiguous KV slice (no
+    /// gather) and uses `rows[i].1` for RoPE, so each sequence produces logits
+    /// IDENTICAL to running it alone. Returns `Vec<Logits>` in `rows` order
+    /// (positional identity `rows[i] <-> result[i]`).
+    ///
+    /// This method NEVER touches `self.kv_cache` (that cache is a single flat
+    /// timeline and would alias all N sequences onto one position axis). F32 KV
+    /// only in this first cut; a non-F32 model KV dtype is rejected up front.
+    #[allow(clippy::too_many_lines)]
+    pub fn forward_batch(
+        &mut self,
+        rows: &[(Token, usize)],
+        kv: &mut [SeqKv],
+        need_logits: bool,
+    ) -> Result<Vec<Logits>, ModelError> {
+        if rows.is_empty() {
+            return Err(ModelError::EmptyInput);
+        }
+        if rows.len() != kv.len() {
+            return Err(ModelError::InferenceFailed(format!(
+                "forward_batch: rows ({}) and kv ({}) length mismatch",
+                rows.len(),
+                kv.len()
+            )));
+        }
+        if self.kv_cache.config().dtype != crate::tensor::DType::F32 {
+            return Err(ModelError::InferenceFailed(
+                "forward_batch: only F32 KV cache is supported in this path".to_owned(),
+            ));
+        }
+        if !self.layers_supported_for_batched() {
+            return Err(ModelError::InferenceFailed(
+                "forward_batch: model layers are not supported by the batched path".to_owned(),
+            ));
+        }
+
+        let batch = rows.len();
+        let cfg = self.config.clone();
+        let h = cfg.hidden_size;
+        let n = cfg.num_attention_heads;
+        let kvh = cfg.num_key_value_heads;
+
+        // 1. Embedding lookup for every sequence into x_batch[batch, h].
+        let mut x_batch = vec![0.0_f32; batch * h];
+        for (i, &(token, _pos)) in rows.iter().enumerate() {
+            let token_idx = (token as usize).min(cfg.vocab_size.saturating_sub(1));
+            let target = &mut x_batch[i * h..(i + 1) * h];
+            match &self.tok_embeddings {
+                WeightStorage::F32(data) => {
+                    let row = &data[token_idx * h..(token_idx + 1) * h];
+                    target.copy_from_slice(row);
+                }
+                WeightStorage::Quantized(qtype, data) => {
+                    lookup_quantized_embedding(h, *qtype, data, token_idx, target);
+                }
+                WeightStorage::MmapQuantized(qtype, mmap, offset, size) => {
+                    let data = &mmap[*offset..*offset + *size];
+                    lookup_quantized_embedding(h, *qtype, data, token_idx, target);
+                }
+            }
+            if cfg.embedding_scale != 1.0 {
+                for v in target.iter_mut() {
+                    *v *= cfg.embedding_scale;
+                }
+            }
+        }
+
+        // Dimensions — identical derivation to forward_batched (lines 224-254).
+        let layer0 = &self.layers[0];
+        let q_len = layer0.attn_q.output_dim(h);
+        let kv_len = if !layer0.attn_k.is_empty() {
+            layer0.attn_k.output_dim(h)
+        } else {
+            0
+        };
+        let aoil0 = if !layer0.attn_output.is_empty() {
+            layer0.attn_output.output_dim(h)
+        } else {
+            0
+        };
+        let q_len_used0 = if aoil0 > 0 {
+            q_len.min(aoil0)
+        } else if q_len > h {
+            h
+        } else {
+            q_len
+        };
+        let q_head_dim = if n > 0 && q_len_used0.is_multiple_of(n) {
+            q_len_used0 / n
+        } else {
+            q_len_used0
+        };
+        let kv_head_dim = if kvh > 0 && kv_len > 0 && kv_len.is_multiple_of(kvh) {
+            kv_len / kvh
+        } else if kv_len > 0 {
+            kv_len
+        } else {
+            q_head_dim
+        };
+        let i_size = cfg.intermediate_size;
+
+        // The caller-owned SeqKv layout must agree with the model's KV width.
+        for (i, seq) in kv.iter().enumerate() {
+            let needed = self.kv_layer_count() * seq.capacity_tokens * kv_len;
+            if seq.key.len() < needed || seq.value.len() < needed {
+                return Err(ModelError::InferenceFailed(format!(
+                    "forward_batch: kv[{i}] buffer too small (have {}/{}, need {needed} for kv_len={kv_len})",
+                    seq.key.len(),
+                    seq.value.len()
+                )));
+            }
+            if rows[i].1 != seq.len {
+                return Err(ModelError::InferenceFailed(format!(
+                    "forward_batch: rows[{i}] pos {} != kv[{i}].len {} (KV write slot must equal decode position)",
+                    rows[i].1, seq.len
+                )));
+            }
+            if seq.len >= seq.capacity_tokens {
+                return Err(ModelError::InferenceFailed(format!(
+                    "forward_batch: kv[{i}] is full (len {} >= capacity {})",
+                    seq.len, seq.capacity_tokens
+                )));
+            }
+        }
+
+        let mut normed_batch = vec![0.0_f32; batch * h];
+        let mut q_batch = vec![0.0_f32; batch * q_len];
+        let mut k_batch = vec![0.0_f32; batch * kv_len.max(1)];
+        let mut v_batch = vec![0.0_f32; batch * kv_len.max(1)];
+        let mut attn_result_batch = vec![0.0_f32; batch * q_len_used0];
+        let mut attn_proj_batch = vec![0.0_f32; batch * h];
+        let mut gate_batch = vec![0.0_f32; batch * i_size];
+        let mut up_batch = vec![0.0_f32; batch * i_size];
+        let mut ffn_out_batch = vec![0.0_f32; batch * h];
+        let mut head_scratch = vec![0.0_f32; q_head_dim.max(kv_head_dim)];
+        let mut qk_norm_scratch = vec![0.0_f32; q_len.max(kv_len)];
+
+        for layer_idx in 0..cfg.layer_count {
+            let layer = &self.layers[layer_idx];
+            // Only attention layers own a KV slot; non-attention layers (MoE
+            // routers, shortconv, etc.) map to `None`. Never fall back to
+            // `layer_idx` — that can index past `kv_layer_count` and corrupt /
+            // panic on the raw SeqKv slice. `None` ⇒ skip all KV access.
+            let kv_layer_idx: Option<usize> =
+                self.kv_layer_map.get(layer_idx).copied().flatten();
+
+            let ffn_norm_weight: &[f32] = if cfg.sandwich_norm {
+                &layer.ffn_norm
+            } else if !layer.post_attention_norm.is_empty() {
+                &layer.post_attention_norm
+            } else if !layer.ffn_norm.is_empty() {
+                &layer.ffn_norm
+            } else {
+                &[]
+            };
+
+            let layer_rope = cfg.layer_rope_theta(layer_idx);
+            let layer_window = cfg.layer_sliding_window(layer_idx);
+
+            // 2. Per-row attn RMSNorm.
+            for i in 0..batch {
+                rms_norm_f32(
+                    &x_batch[i * h..(i + 1) * h],
+                    &layer.attn_norm,
+                    cfg.rms_norm_eps,
+                    &mut normed_batch[i * h..(i + 1) * h],
+                )
+                .map_err(|e| ModelError::InferenceFailed(format!("rms_norm: {:?}", e)))?;
+            }
+
+            // 3. Batched Q/K/V GEMM — amortizes one weight read across all N seqs.
+            gemm_weight(&layer.attn_q, q_len, h, &normed_batch, &mut q_batch, batch)
+                .map_err(|e| ModelError::InferenceFailed(format!("attn_q: {:?}", e)))?;
+            if !layer.attn_q_bias.is_empty() {
+                add_repeating_bias(&mut q_batch, &layer.attn_q_bias);
+            }
+            if kv_len > 0 {
+                gemm_weight(
+                    &layer.attn_k,
+                    kv_len,
+                    h,
+                    &normed_batch,
+                    &mut k_batch[..batch * kv_len],
+                    batch,
+                )
+                .map_err(|e| ModelError::InferenceFailed(format!("attn_k: {:?}", e)))?;
+                if !layer.attn_k_bias.is_empty() {
+                    add_repeating_bias(&mut k_batch[..batch * kv_len], &layer.attn_k_bias);
+                }
+                gemm_weight(
+                    &layer.attn_v,
+                    kv_len,
+                    h,
+                    &normed_batch,
+                    &mut v_batch[..batch * kv_len],
+                    batch,
+                )
+                .map_err(|e| ModelError::InferenceFailed(format!("attn_v: {:?}", e)))?;
+                if !layer.attn_v_bias.is_empty() {
+                    add_repeating_bias(&mut v_batch[..batch * kv_len], &layer.attn_v_bias);
+                }
+            }
+
+            let q_heads = q_len_used0 / q_head_dim.max(1);
+            let kv_heads = kv_len.checked_div(kv_head_dim).unwrap_or(0);
+
+            // 4. Per-row: Q/K norm, RoPE (using the sequence's OWN position), then
+            //    KV write into that sequence's own buffer at slot (layer, len).
+            for i in 0..batch {
+                let pos = rows[i].1;
+                let q = &mut q_batch[i * q_len..i * q_len + q_len_used0];
+                let k = &mut k_batch[i * kv_len..(i + 1) * kv_len];
+                let v = &v_batch[i * kv_len..(i + 1) * kv_len];
+
+                if !layer.attn_q_norm.is_empty() && q.len() == layer.attn_q_norm.len() {
+                    let normed_q = &mut qk_norm_scratch[..q.len()];
+                    rms_norm_f32(q, &layer.attn_q_norm, cfg.rms_norm_eps, normed_q)
+                        .map_err(|e| ModelError::InferenceFailed(format!("q_norm: {:?}", e)))?;
+                    q.copy_from_slice(normed_q);
+                } else if !layer.attn_q_norm.is_empty() && q_head_dim == layer.attn_q_norm.len() {
+                    for head in 0..q_heads {
+                        let start = head * q_head_dim;
+                        let end = start + q_head_dim;
+                        if end > q.len() {
+                            break;
+                        }
+                        let normed_head = &mut head_scratch[..q_head_dim];
+                        normed_head.fill(0.0_f32);
+                        rms_norm_f32(
+                            &q[start..end],
+                            &layer.attn_q_norm,
+                            cfg.rms_norm_eps,
+                            normed_head,
+                        )
+                        .map_err(|e| ModelError::InferenceFailed(format!("q_norm: {:?}", e)))?;
+                        q[start..end].copy_from_slice(normed_head);
+                    }
+                }
+                if !layer.attn_k_norm.is_empty() && k.len() == layer.attn_k_norm.len() {
+                    let normed_k = &mut qk_norm_scratch[..k.len()];
+                    rms_norm_f32(k, &layer.attn_k_norm, cfg.rms_norm_eps, normed_k)
+                        .map_err(|e| ModelError::InferenceFailed(format!("k_norm: {:?}", e)))?;
+                    k.copy_from_slice(normed_k);
+                } else if !layer.attn_k_norm.is_empty() && kv_head_dim == layer.attn_k_norm.len() {
+                    for head in 0..kv_heads {
+                        let start = head * kv_head_dim;
+                        let end = start + kv_head_dim;
+                        if end > k.len() {
+                            break;
+                        }
+                        let normed_head = &mut head_scratch[..kv_head_dim];
+                        normed_head.fill(0.0_f32);
+                        rms_norm_f32(
+                            &k[start..end],
+                            &layer.attn_k_norm,
+                            cfg.rms_norm_eps,
+                            normed_head,
+                        )
+                        .map_err(|e| ModelError::InferenceFailed(format!("k_norm: {:?}", e)))?;
+                        k[start..end].copy_from_slice(normed_head);
+                    }
+                }
+
+                let q_rope_len = cfg.effective_rope_dim().min(q_head_dim);
+                for head in 0..q_heads {
+                    let off = head * q_head_dim;
+                    if off + q_head_dim > q.len() {
+                        break;
+                    }
+                    let rotated = &mut head_scratch[..q_rope_len];
+                    rotated.fill(0.0_f32);
+                    apply_rope_f32(&q[off..off + q_rope_len], pos, q_rope_len, layer_rope, rotated)
+                        .map_err(|e| ModelError::InferenceFailed(format!("rope q: {:?}", e)))?;
+                    q[off..off + q_rope_len].copy_from_slice(rotated);
+                }
+                let k_rope_len = cfg.effective_rope_dim().min(kv_head_dim);
+                for head in 0..kv_heads {
+                    let off = head * kv_head_dim;
+                    if off + kv_head_dim > k.len() {
+                        break;
+                    }
+                    let rotated = &mut head_scratch[..k_rope_len];
+                    rotated.fill(0.0_f32);
+                    apply_rope_f32(&k[off..off + k_rope_len], pos, k_rope_len, layer_rope, rotated)
+                        .map_err(|e| ModelError::InferenceFailed(format!("rope k: {:?}", e)))?;
+                    k[off..off + k_rope_len].copy_from_slice(rotated);
+                }
+
+                // 5. KV WRITE into the sequence's own buffer at slot (layer, len).
+                //    Only attention layers have a KV slot; skip otherwise.
+                if kv_len > 0 {
+                    if let Some(kv_idx) = kv_layer_idx {
+                        let seq = &mut kv[i];
+                        let cap = seq.capacity_tokens;
+                        let base = kv_idx * cap * kv_len + seq.len * kv_len;
+                        seq.key[base..base + kv_len].copy_from_slice(k);
+                        seq.value[base..base + kv_len].copy_from_slice(v);
+                    }
+                }
+            }
+
+            // 6. Per-row attention over each sequence's OWN contiguous KV prefix.
+            //    Guarded on `Some(kv_idx)`: non-attention layers wrote no KV and
+            //    must not read the (out-of-bounds) raw SeqKv slice.
+            if let (true, Some(kv_idx)) = (kv_len > 0, kv_layer_idx) {
+                for i in 0..batch {
+                    let seq_len = kv[i].len + 1; // current token now written
+                    let q = &q_batch[i * q_len..i * q_len + q_len_used0];
+                    let attn_out_slice =
+                        &mut attn_result_batch[i * q_len_used0..(i + 1) * q_len_used0];
+                    attn_out_slice.fill(0.0_f32);
+
+                    let cap = kv[i].capacity_tokens;
+                    let layer_base = kv_idx * cap * kv_len;
+                    let key_cache = &kv[i].key[layer_base..layer_base + seq_len * kv_len];
+                    let value_cache = &kv[i].value[layer_base..layer_base + seq_len * kv_len];
+
+                    // Sliding window: drop oldest rows (RoPE preserves relative pos).
+                    let (eff_seq_len, key_cache, value_cache) =
+                        if layer_window > 0 && seq_len > layer_window {
+                            let skip = (seq_len - layer_window) * kv_len;
+                            (layer_window, &key_cache[skip..], &value_cache[skip..])
+                        } else {
+                            (seq_len, key_cache, value_cache)
+                        };
+
+                    flash_attention_decode_heads_f32(
+                        q,
+                        key_cache,
+                        value_cache,
+                        eff_seq_len,
+                        kv_head_dim,
+                        kv_len,
+                        q_heads,
+                        kv_heads,
+                        attn_out_slice,
+                    )
+                    .map_err(|e| ModelError::InferenceFailed(format!("flash attn: {:?}", e)))?;
+                }
+            }
+
+            // 7. Batched attn_output projection + per-row residual.
+            if !layer.attn_output.is_empty() && aoil0 > 0 {
+                gemm_weight(
+                    &layer.attn_output,
+                    h,
+                    aoil0,
+                    &attn_result_batch,
+                    &mut attn_proj_batch,
+                    batch,
+                )
+                .map_err(|e| ModelError::InferenceFailed(format!("attn_output: {:?}", e)))?;
+                if !layer.attn_output_bias.is_empty() {
+                    add_repeating_bias(&mut attn_proj_batch, &layer.attn_output_bias);
+                }
+            } else {
+                attn_proj_batch.fill(0.0_f32);
+            }
+
+            if cfg.sandwich_norm && !layer.post_attention_norm.is_empty() {
+                for i in 0..batch {
+                    let range = i * h..(i + 1) * h;
+                    rms_norm_f32(
+                        &attn_proj_batch[range.clone()],
+                        &layer.post_attention_norm,
+                        cfg.rms_norm_eps,
+                        &mut normed_batch[range.clone()],
+                    )
+                    .map_err(|e| ModelError::InferenceFailed(format!("post_attn_norm: {:?}", e)))?;
+                    attn_proj_batch[range.clone()].copy_from_slice(&normed_batch[range]);
+                }
+            }
+
+            for i in 0..batch * h {
+                x_batch[i] += attn_proj_batch[i];
+            }
+
+            // 8. FFN: per-row norm, batched gate+up, SwiGLU, batched down.
+            let has_ffn = !layer.ffn_gate.is_empty()
+                && !layer.ffn_up.is_empty()
+                && !layer.ffn_down.is_empty()
+                && !ffn_norm_weight.is_empty();
+            if has_ffn {
+                for i in 0..batch {
+                    rms_norm_f32(
+                        &x_batch[i * h..(i + 1) * h],
+                        ffn_norm_weight,
+                        cfg.rms_norm_eps,
+                        &mut normed_batch[i * h..(i + 1) * h],
+                    )
+                    .map_err(|e| ModelError::InferenceFailed(format!("ffn_norm: {:?}", e)))?;
+                }
+
+                gemm_weight(&layer.ffn_gate, i_size, h, &normed_batch, &mut gate_batch, batch)
+                    .map_err(|e| ModelError::InferenceFailed(format!("ffn_gate: {:?}", e)))?;
+                gemm_weight(&layer.ffn_up, i_size, h, &normed_batch, &mut up_batch, batch)
+                    .map_err(|e| ModelError::InferenceFailed(format!("ffn_up: {:?}", e)))?;
+
+                if cfg.gelu_ffn {
+                    apply_geglu_inplace_f32(&mut gate_batch, &up_batch);
+                } else {
+                    for (g, u) in gate_batch.iter_mut().zip(up_batch.iter()) {
+                        let sigmoid = 1.0_f32 / (1.0 + (-*g).exp());
+                        *g = *g * sigmoid * *u;
+                    }
+                }
+
+                gemm_weight(&layer.ffn_down, h, i_size, &gate_batch, &mut ffn_out_batch, batch)
+                    .map_err(|e| ModelError::InferenceFailed(format!("ffn_down: {:?}", e)))?;
+                if !layer.ffn_down_bias.is_empty() {
+                    add_repeating_bias(&mut ffn_out_batch, &layer.ffn_down_bias);
+                }
+
+                if cfg.sandwich_norm && !layer.post_ffn_norm.is_empty() {
+                    for i in 0..batch {
+                        let range = i * h..(i + 1) * h;
+                        rms_norm_f32(
+                            &ffn_out_batch[range.clone()],
+                            &layer.post_ffn_norm,
+                            cfg.rms_norm_eps,
+                            &mut normed_batch[range.clone()],
+                        )
+                        .map_err(|e| {
+                            ModelError::InferenceFailed(format!("post_ffn_norm: {:?}", e))
+                        })?;
+                        ffn_out_batch[range.clone()].copy_from_slice(&normed_batch[range]);
+                    }
+                }
+
+                for i in 0..batch * h {
+                    x_batch[i] += ffn_out_batch[i];
+                }
+            }
+        }
+
+        // 8b. Bump each sequence's KV length exactly once, after the last layer.
+        for seq in kv.iter_mut() {
+            seq.len += 1;
+        }
+
+        if !need_logits {
+            return Ok(Vec::new());
+        }
+
+        // 9. LM HEAD per sequence — final norm + lm_head for EVERY row (unlike
+        //    forward_batched which only emits the last position).
+        let mut out: Vec<Logits> = Vec::with_capacity(batch);
+        let mut final_normed = vec![0.0_f32; h];
+        for i in 0..batch {
+            rms_norm_f32(
+                &x_batch[i * h..(i + 1) * h],
+                &self.norm_weight,
+                cfg.rms_norm_eps,
+                &mut final_normed,
+            )
+            .map_err(|e| ModelError::InferenceFailed(format!("final_norm: {:?}", e)))?;
+            let mut logits = vec![0.0_f32; cfg.vocab_size];
+            gemv_weight(&self.output_weight, cfg.vocab_size, h, &final_normed, &mut logits)
+                .map_err(|e| ModelError::InferenceFailed(format!("output: {:?}", e)))?;
+            out.push(logits);
+        }
+        Ok(out)
+    }
+
     pub(super) fn forward_single(
         &mut self,
         token: Token,
