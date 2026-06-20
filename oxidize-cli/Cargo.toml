@@ -18,6 +18,10 @@ name = "oxidize-bench"
 path = "src/bin/bench.rs"
 
 [[bin]]
+name = "batched_decode_bench"
+path = "src/bin/batched_decode_bench.rs"
+
+[[bin]]
 name = "inspect_gguf"
 path = "src/bin/inspect_gguf.rs"
 
