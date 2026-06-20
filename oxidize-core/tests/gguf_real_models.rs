@@ -245,3 +245,82 @@ fn real_gguf_models_emit_monotonic_progress_events() {
         );
     }
 }
+
+/// Speculative rejection must roll the KV cache back to the last accepted token.
+/// This re-forwards an identical probe token after `rewind_to` and asserts the
+/// logits match the first forward. The KV state must be restored exactly for
+/// this to hold: on a CUDA build with `OX_GPU_ATTN=1` it covers the
+/// device-resident F16 cache via `gpu_kv_rewind` (the Phase-2 fix); on a CPU
+/// build it covers the host `KvCache::rewind_to`. A missed device rollback would
+/// make the replay attend over a stale/duplicated KV row and the logits would
+/// diverge. Env-gated (needs a real GGUF); run on Modal H100 with
+/// `--features cuda` + `OX_GPU_ATTN=1`.
+#[test]
+#[ignore = "needs OXIDIZE_TEST_GGUF_MODELS; run with --features cuda + OX_GPU_ATTN=1 for the device path"]
+fn rewind_to_round_trip_is_deterministic_on_real_model() {
+    use oxidize_core::inference::{InferenceConfig, InferenceModel};
+    use oxidize_core::model::{Model, Session};
+
+    let Some(model_paths) = model_paths_from_env() else {
+        eprintln!("skipping rewind determinism test: {SKIP_MODEL_HINT}");
+        return;
+    };
+    let path = &model_paths[0];
+    let loader = GgufModelLoader;
+    let mapped = loader
+        .load(path)
+        .unwrap_or_else(|err| panic!("load failed for {}: {err}", path.display()));
+    let config = InferenceConfig::from_gguf(&mapped);
+    let mut model = InferenceModel::load_from_gguf(&mapped, config, true)
+        .unwrap_or_else(|err| panic!("model load failed for {}: {err}", path.display()));
+
+    // A short prompt of low token ids (valid in any non-trivial vocab) plus a
+    // probe token we forward, roll back, and re-forward.
+    let prompt: [u32; 6] = [1, 2, 3, 4, 5, 6];
+    let probe: u32 = 7;
+
+    let mut session = Session::new();
+    model
+        .forward_many(&prompt, &mut session)
+        .expect("prompt forward should succeed");
+    let consumed = session.consumed_tokens();
+    assert_eq!(consumed, prompt.len());
+
+    let logits1 = model
+        .forward(&[probe], &mut session)
+        .expect("first probe forward should succeed");
+    assert_eq!(session.consumed_tokens(), consumed + 1);
+
+    // Roll model KV cache + session back to before the probe, then re-forward it.
+    model.rewind_to(consumed).expect("rewind_to should succeed");
+    session.rewind_to(consumed);
+    assert_eq!(session.consumed_tokens(), consumed);
+
+    let logits2 = model
+        .forward(&[probe], &mut session)
+        .expect("replayed probe forward should succeed");
+    assert_eq!(logits1.len(), logits2.len(), "logit vector lengths differ");
+
+    let argmax = |v: &[f32]| {
+        v.iter()
+            .enumerate()
+            .fold((0usize, f32::NEG_INFINITY), |(bi, bv), (i, &x)| {
+                if x > bv { (i, x) } else { (bi, bv) }
+            })
+            .0
+    };
+    assert_eq!(
+        argmax(&logits1),
+        argmax(&logits2),
+        "argmax diverged after rewind -> KV cache was not restored"
+    );
+    let max_abs = logits1
+        .iter()
+        .zip(&logits2)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0_f32, f32::max);
+    assert!(
+        max_abs < 1e-3,
+        "logits diverged after rewind (max|delta|={max_abs}); KV rollback incomplete"
+    );
+}

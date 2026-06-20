@@ -30,6 +30,7 @@ IGNORE = [
     "**/*.gguf.bak",
     "rust_out/**",
     ".omo/**",       # background automation artifacts churn during build
+    ".cursor/**",
     ".git/**",
     "**/*.log",
 ]
@@ -394,6 +395,37 @@ GPU_RUN = dict(
     memory=32768,
     timeout=3600,
 )
+
+
+@app.function(**GPU_RUN)
+def gpu_rewind_determinism(
+    repo: str = "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+    hf_file: str = "qwen2.5-0.5b-instruct-q4_k_m.gguf",
+) -> str:
+    """Phase-2 device KV-rollback validation. Forwards a probe token, rewind_to,
+    re-forwards it, asserts identical logits. With OX_GPU_ATTN=1 on CUDA this
+    exercises gpu_kv_rewind across every layer (the speculative-rejection fix);
+    a missed device rollback would attend over a stale row and diverge."""
+    import os
+    import subprocess
+
+    subprocess.run("pip install -q huggingface_hub", shell=True, check=True)
+    from huggingface_hub import hf_hub_download
+
+    path = hf_hub_download(repo, hf_file, cache_dir="/root/.cache/oxidize/hf-determinism")
+    os.environ["OXIDIZE_TEST_GGUF_MODELS"] = path
+    os.environ["OX_GPU_ATTN"] = "1"
+    cmd = (
+        "cargo test -p oxidize-core --features cuda "
+        "rewind_to_round_trip_is_deterministic_on_real_model -- --ignored --nocapture"
+    )
+    rc = _run(cmd)
+    cuda_target_cache.commit()
+    registry_cache.commit()
+    model_cache.commit()
+    if rc != 0:
+        raise SystemExit(f"rewind determinism (device KV rollback) test failed (exit {rc})")
+    return "rewind determinism (device KV rollback) test passed"
 
 
 @app.function(**GPU_RUN)
