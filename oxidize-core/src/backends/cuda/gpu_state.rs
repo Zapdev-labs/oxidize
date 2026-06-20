@@ -26,6 +26,12 @@ pub(super) fn gpu_init() -> Result<GpuState, String> {
     if status != cublas_sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS {
         return Err(format!("cublasCreate_v2 failed with status {status:?}"));
     }
+    // Probe the SM count so the split-K decode-attention heuristic can size its
+    // KV partitions to saturate the grid (default 132 = H100 on probe failure).
+    let sm_count = cust::device::Device::get_device(0)
+        .and_then(|dev| dev.get_attribute(cust::device::DeviceAttribute::MultiprocessorCount))
+        .map(|n| (n.max(1)) as u32)
+        .unwrap_or(132);
     Ok(GpuState {
         _ctx,
         module,
@@ -43,6 +49,13 @@ pub(super) fn gpu_init() -> Result<GpuState, String> {
         orphan_quant_keys: std::collections::VecDeque::new(),
         q8k_pool: std::collections::HashMap::new(),
         activation: None,
+        kv_k_cache: Vec::new(),
+        kv_v_cache: Vec::new(),
+        kv_layers: 0,
+        kv_len: 0,
+        kv_context: 0,
+        kv_seq_len: Vec::new(),
+        sm_count,
     })
 }
 
@@ -145,6 +158,13 @@ pub fn clear_resident_cache() -> Result<(), String> {
         gpu.layer_lru.clear();
         gpu.orphan_f16_keys.clear();
         gpu.resident_bytes = 0;
+        // Drop the device-resident KV cache too, so a model reload starts fresh.
+        gpu.kv_k_cache.clear();
+        gpu.kv_v_cache.clear();
+        gpu.kv_seq_len.clear();
+        gpu.kv_layers = 0;
+        gpu.kv_len = 0;
+        gpu.kv_context = 0;
         Ok(())
     })
 }

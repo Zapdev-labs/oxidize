@@ -212,9 +212,11 @@ pub(super) struct GpuState {
     pub(super) cublas: cublas_sys::cublasHandle_t,
     /// Quantized weights dequantized once on the GPU to resident f16 (stored as
     /// raw u16 bits), keyed by `(pointer, len, content_hash)`.
-    pub(super) resident_f16: std::collections::HashMap<WeightCacheKey, cust::memory::DeviceBuffer<u16>>,
+    pub(super) resident_f16:
+        std::collections::HashMap<WeightCacheKey, cust::memory::DeviceBuffer<u16>>,
     /// Resident f32 weight matrices for the dense gemv path, same keying.
-    pub(super) resident_f32: std::collections::HashMap<WeightCacheKey, cust::memory::DeviceBuffer<f32>>,
+    pub(super) resident_f32:
+        std::collections::HashMap<WeightCacheKey, cust::memory::DeviceBuffer<f32>>,
     /// Pool of reusable f32 device buffers keyed by length.
     pub(super) f32_pool: std::collections::HashMap<usize, Vec<cust::memory::DeviceBuffer<f32>>>,
     /// Layer-by-layer VRAM management.
@@ -230,13 +232,31 @@ pub(super) struct GpuState {
     /// subject to the same budget enforcement as layer-managed weights.
     pub(super) orphan_f16_keys: std::collections::VecDeque<WeightCacheKey>,
     /// Raw quantized weights for on-the-fly GEMV (Q8_0, Q4_0, Q4_K).
-    pub(super) resident_quant: std::collections::HashMap<WeightCacheKey, cust::memory::DeviceBuffer<u8>>,
+    pub(super) resident_quant:
+        std::collections::HashMap<WeightCacheKey, cust::memory::DeviceBuffer<u8>>,
     pub(super) orphan_quant_keys: std::collections::VecDeque<WeightCacheKey>,
     /// Reusable Q8_K activation buffers keyed by byte length.
     pub(super) q8k_pool: std::collections::HashMap<usize, Vec<cust::memory::DeviceBuffer<u8>>>,
     /// Optional GPU-resident activation buffers (hidden state, normed, FFN
     /// gate/up/down_in).  `None` until `gpu_init_activation_buffers` is called.
     pub(super) activation: Option<GpuActivationBuffer>,
+    // --- On-device attention (OX_GPU_ATTN) ---
+    /// Per-layer device KV cache (raw F16 bits). Index = kv_layer_idx.
+    /// Each buffer length = `kv_context * kv_len` (== context_size * token_size).
+    pub(super) kv_k_cache: Vec<cust::memory::DeviceBuffer<u16>>,
+    pub(super) kv_v_cache: Vec<cust::memory::DeviceBuffer<u16>>,
+    /// Geometry of the resident KV cache; (0,0,0) until initialised.
+    pub(super) kv_layers: usize,
+    /// `token_size` = kv_heads*head_dim (per-token row stride within a layer).
+    pub(super) kv_len: usize,
+    /// `context_size` (row capacity per layer).
+    pub(super) kv_context: usize,
+    /// Number of tokens written so far, per layer (0 = empty).
+    pub(super) kv_seq_len: Vec<usize>,
+    /// Streaming-multiprocessor count of the active device (probed at init,
+    /// default 132 = H100). Used by the split-K decode-attention heuristic to
+    /// size the number of KV partitions so the grid saturates all SMs.
+    pub(super) sm_count: u32,
 }
 
 #[cfg(feature = "cuda")]
@@ -255,7 +275,10 @@ impl Drop for GpuState {
 
 #[cfg(feature = "cuda")]
 impl GpuState {
-    pub(super) fn get_f32_buffer(&mut self, len: usize) -> Result<cust::memory::DeviceBuffer<f32>, String> {
+    pub(super) fn get_f32_buffer(
+        &mut self,
+        len: usize,
+    ) -> Result<cust::memory::DeviceBuffer<f32>, String> {
         if let Some(pool) = self.f32_pool.get_mut(&len) {
             if let Some(buf) = pool.pop() {
                 return Ok(buf);
@@ -378,7 +401,10 @@ impl GpuState {
         self.orphan_quant_keys.push_back(key);
     }
 
-    pub(super) fn get_q8k_buffer(&mut self, len: usize) -> Result<cust::memory::DeviceBuffer<u8>, String> {
+    pub(super) fn get_q8k_buffer(
+        &mut self,
+        len: usize,
+    ) -> Result<cust::memory::DeviceBuffer<u8>, String> {
         if let Some(pool) = self.q8k_pool.get_mut(&len) {
             if let Some(buf) = pool.pop() {
                 return Ok(buf);
@@ -393,7 +419,11 @@ impl GpuState {
     }
 
     /// Upload quantized weights once; reuse the device buffer on later tokens.
-    pub(super) fn ensure_resident_quant(&mut self, key: WeightCacheKey, host: &[u8]) -> Result<(), String> {
+    pub(super) fn ensure_resident_quant(
+        &mut self,
+        key: WeightCacheKey,
+        host: &[u8],
+    ) -> Result<(), String> {
         if !self.resident_quant.contains_key(&key) {
             self.ensure_vram_headroom(host.len());
             let buf = cust::memory::DeviceBuffer::from_slice(host).map_err(stringify)?;

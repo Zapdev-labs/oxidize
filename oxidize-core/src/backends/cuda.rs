@@ -30,6 +30,16 @@ pub const RESIDUAL_ADD_KERNEL_NAME: &str = "residual_add_f32_kernel";
 pub const SILU_MUL_KERNEL_NAME: &str = "silu_mul_f32_kernel";
 pub const CAST_F32_TO_F16_KERNEL_NAME: &str = "cast_f32_to_f16_kernel";
 pub const CAST_F16_TO_F32_KERNEL_NAME: &str = "cast_f16_to_f32_kernel";
+/// On-device attention (OX_GPU_ATTN): cast post-RoPE F32 K/V into the F16 KV cache row.
+pub const KV_APPEND_F16_KERNEL_NAME: &str = "kv_append_f16_kernel";
+/// On-device attention (OX_GPU_ATTN): in-place partial NeoX RoPE on F32 Q and K.
+pub const ROPE_F32_KERNEL_NAME: &str = "rope_f32_kernel";
+/// On-device attention (OX_GPU_ATTN): GQA decode flash attention (F16 cache -> F32 out).
+pub const FLASH_ATTN_DECODE_KERNEL_NAME: &str = "flash_attn_decode_kernel";
+/// Split-K decode attention: emits one online-softmax state per head and KV split.
+pub const FLASH_ATTN_DECODE_SPLITK_KERNEL_NAME: &str = "flash_attn_decode_splitk_kernel";
+/// Split-K decode attention: merges per-split online-softmax states exactly.
+pub const FLASH_ATTN_DECODE_REDUCE_KERNEL_NAME: &str = "flash_attn_decode_reduce_kernel";
 
 // PTX is generated from `kernels/gemv_f32.cu` by `build.rs` (nvcc) into OUT_DIR.
 #[cfg(feature = "cuda")]
@@ -108,6 +118,26 @@ mod gpu_native_forward;
 #[allow(unused_imports)]
 pub use gpu_native_forward::*;
 
+#[path = "cuda/flash_decode.rs"]
+mod flash_decode;
+pub use flash_decode::*;
+
+#[cfg(feature = "cuda")]
+#[path = "cuda/flash_decode_launch.rs"]
+mod flash_decode_launch;
+#[cfg(feature = "cuda")]
+use flash_decode_launch::*;
+
 #[cfg(test)]
 #[path = "cuda/tests.rs"]
 mod tests;
+
+#[cfg(all(test, feature = "cuda"))]
+#[path = "cuda/flash_decode_cuda_tests.rs"]
+mod flash_decode_cuda_tests;
+
+#[cfg(all(test, feature = "cuda"))]
+#[path = "cuda/flash_decode_cuda_fixture.rs"]
+mod flash_decode_cuda_fixture;
+#[cfg(all(test, feature = "cuda"))]
+use flash_decode_cuda_fixture::*;
