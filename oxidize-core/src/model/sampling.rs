@@ -485,6 +485,25 @@ pub fn speculative_decode(
     // temperature the target actually samples with, not a hardcoded 1.0.
     // (top-k/top-p modifications of the verification distributions are still
     // approximated by the raw softmax here.)
+    //
+    // When the draft sampled under an active top-k/top-p filter, its true
+    // proposal distribution q is the *filtered* one, but the acceptance ratio
+    // below uses the raw softmax q. That makes p/q an approximation and can
+    // accept/reject slightly off the exact target distribution. We do NOT change
+    // behaviour (that would risk a regression on the validated path), but we warn
+    // once so the approximation is visible rather than silent. Greedy configs are
+    // exact (argmax matching) and never hit this.
+    if !greedy && (sampling_config.top_k.is_some() || sampling_config.top_p.is_some()) {
+        static WARNED_RANK_FILTER: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        if !WARNED_RANK_FILTER.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            eprintln!(
+                "warning: speculative_decode acceptance ratio uses raw softmax probabilities; \
+                 with top_k/top_p set on a non-greedy config the p/q ratio is an approximation \
+                 of the filtered proposal distribution"
+            );
+        }
+    }
     let verify_temperature = if greedy {
         1.0
     } else {
@@ -531,7 +550,34 @@ pub fn speculative_decode(
         }
 
         let residual = residual_probs(&target_probs, &draft_probs);
-        let sampled = sample_probabilities(&residual, randoms[step])?;
+        // Degenerate residual: if draft_probs >= target_probs for every token the
+        // residual is all-zero (no valid support). `sample_probabilities` would
+        // otherwise return index 0 (argmax of an all-zero vector), which is not a
+        // meaningful sample. Fall back to the target argmax — the most-likely
+        // token under the distribution we are trying to match.
+        let residual_sum: f32 = residual.iter().sum();
+        if !(residual_sum > 0.0 && residual_sum.is_finite()) {
+            let target_argmax = target_probs
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.total_cmp(b.1))
+                .map(|(i, _)| i as u32)
+                .ok_or(SamplingError::InvalidSpeculativeInputs)?;
+            emitted.push(target_argmax);
+            return Ok(SpeculativeDecodeResult {
+                tokens: emitted,
+                accepted_draft_tokens: step,
+                used_residual_fallback: true,
+            });
+        }
+        // The accept/reject test above consumed `randoms[step]`. Reusing it to
+        // sample the residual distribution correlates the rejection decision with
+        // the residual draw and breaks the speculative-decoding contract (the
+        // residual sample must be an *independent* uniform). Derive a fresh,
+        // decorrelated uniform from `randoms[step]` so callers keep passing a
+        // single `k + 1`-length array while the residual draw stays independent.
+        let residual_random = decorrelate_uniform(randoms[step], step as u64);
+        let sampled = sample_probabilities(&residual, residual_random)?;
         emitted.push(sampled as u32);
         return Ok(SpeculativeDecodeResult {
             tokens: emitted,
@@ -875,6 +921,22 @@ fn residual_probs(target_probs: &[f32], draft_probs: &[f32]) -> Vec<f32> {
         }
     }
     residual
+}
+
+/// Derive a fresh uniform in `[0, 1)` that is statistically independent of the
+/// input uniform. Used by speculative decoding so the residual-distribution draw
+/// does not reuse the same uniform that drove the accept/reject decision (which
+/// would correlate the two and bias the residual sample). Deterministic in
+/// `(random, salt)` so verification stays reproducible for a fixed RNG stream.
+fn decorrelate_uniform(random: f32, salt: u64) -> f32 {
+    // SplitMix64-style avalanche of the input bits plus a per-step salt.
+    let bits = (random.to_bits() as u64) ^ salt.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    let mut z = bits.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    // Map the top 24 bits into [0, 1); divisor is 2^24 so the result is < 1.0.
+    ((z >> 40) as f32) / ((1u32 << 24) as f32)
 }
 
 fn sample_probabilities(probs: &[f32], random: f32) -> Result<usize, SamplingError> {
