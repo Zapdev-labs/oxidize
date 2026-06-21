@@ -13,12 +13,18 @@ pub(super) fn launch_flash_attn_decode_legacy(
     head_dim: u32,
     scale: f32,
 ) -> Result<(), String> {
-    if kv_layer_idx >= gpu.kv_layers {
-        return Err(format!(
-            "launch_flash_attn_decode: kv_layer_idx {kv_layer_idx} out of range (kv_layers {})",
-            gpu.kv_layers
-        ));
-    }
+    validate_flash_decode_launch(
+        gpu.kv_layers,
+        kv_layer_idx,
+        gpu.kv_context,
+        gpu.kv_len,
+        eff_seq_len as usize,
+        base_row as usize,
+        n_q_heads as usize,
+        n_kv_heads as usize,
+        head_dim as usize,
+        1,
+    )?;
     let func = gpu
         .module
         .get_function(FLASH_ATTN_DECODE_KERNEL_NAME)
@@ -53,18 +59,28 @@ pub(super) fn launch_flash_attn_decode_splitk(
     scale: f32,
     num_splits: u32,
 ) -> Result<(), String> {
-    if kv_layer_idx >= gpu.kv_layers {
-        return Err(format!(
-            "launch_flash_attn_decode_splitk: kv_layer_idx {kv_layer_idx} out of range (kv_layers {})",
-            gpu.kv_layers
-        ));
-    }
+    validate_flash_decode_launch(
+        gpu.kv_layers,
+        kv_layer_idx,
+        gpu.kv_context,
+        gpu.kv_len,
+        eff_seq_len as usize,
+        base_row as usize,
+        n_q_heads as usize,
+        n_kv_heads as usize,
+        head_dim as usize,
+        num_splits as usize,
+    )?;
     let kc_ptr = gpu.kv_k_cache[kv_layer_idx].as_device_ptr();
     let vc_ptr = gpu.kv_v_cache[kv_layer_idx].as_device_ptr();
-    let n_slots = n_q_heads as usize * num_splits as usize;
+    let (n_slots, accumulator_len) =
+        flash_decode_scratch_lengths(n_q_heads as usize, num_splits as usize, head_dim as usize)
+            .ok_or_else(|| {
+                "flash_attn_decode_splitk: invalid or overflowing scratch shape".to_owned()
+            })?;
     let d_pmax = gpu.get_f32_buffer(n_slots)?;
     let d_psum = gpu.get_f32_buffer(n_slots)?;
-    let d_pacc = gpu.get_f32_buffer(n_slots * head_dim as usize)?;
+    let d_pacc = gpu.get_f32_buffer(accumulator_len)?;
     let pmax_ptr = d_pmax.as_device_ptr();
     let psum_ptr = d_psum.as_device_ptr();
     let pacc_ptr = d_pacc.as_device_ptr();
@@ -121,25 +137,14 @@ pub(super) fn launch_flash_attn_decode_splitk(
 }
 
 fn selected_split_count(gpu: &GpuState, query_heads: u32, sequence_length: u32) -> u32 {
-    if std::env::var_os("OX_FLASH_DECODE_FORCE_LEGACY").is_some() {
-        return 1;
-    }
-    if let Some(forced) = std::env::var_os("OX_FLASH_DECODE_SPLITS")
-        .and_then(|value| value.to_str().and_then(|text| text.parse::<u32>().ok()))
-    {
-        // Clamp to [1, sequence_length]: split_count > seq_len would launch
-        // blocks for empty splits (the reduce kernel skips them via
-        // `partial_sum[idx] > 0.0f`, so output is still correct, but those
-        // blocks waste SM resources). seq_len==0 cannot reach here (decode
-        // always has >=1 key), but max(1) keeps the launch geometry valid.
-        return forced.clamp(1, sequence_length.max(1));
-    }
-    SplitKPlan::select(
+    let forced = std::env::var("OX_FLASH_DECODE_SPLITS").ok();
+    select_split_count(
         gpu.sm_count as usize,
         query_heads as usize,
         sequence_length as usize,
-    )
-    .map_or(1, |plan| plan.split_count as u32)
+        std::env::var_os("OX_FLASH_DECODE_FORCE_LEGACY").is_some(),
+        forced.as_deref(),
+    ) as u32
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
