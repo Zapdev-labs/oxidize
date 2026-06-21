@@ -70,7 +70,10 @@ pub(super) unsafe fn q4_k_q8_k_row_dot_avx2(row: &[u8], blocks_per_row: usize, q
         let block = &row[w_off..w_off + BLOCK_Q4_K_SIZE];
         let q8_block = &q8k[q8_off..q8_off + BLOCK_Q8_K_BYTES];
 
-        let ahead = block.as_ptr().wrapping_add(4 * BLOCK_Q4_K_SIZE).cast::<i8>();
+        let ahead = block
+            .as_ptr()
+            .wrapping_add(4 * BLOCK_Q4_K_SIZE)
+            .cast::<i8>();
         _mm_prefetch::<{ _MM_HINT_T0 }>(ahead);
         _mm_prefetch::<{ _MM_HINT_T0 }>(ahead.wrapping_add(64));
         _mm_prefetch::<{ _MM_HINT_T0 }>(ahead.wrapping_add(128));
@@ -105,10 +108,10 @@ pub(super) unsafe fn q4_k_q8_k_row_dot_avx2(row: &[u8], blocks_per_row: usize, q
             let p32_high = _mm256_madd_epi16(p16_high, _mm256_set1_epi16(s2 as i16));
             vec_pos = _mm256_add_epi32(vec_pos, _mm256_add_epi32(p32_low, p32_high));
 
-            let bs1 = read_q8_k_bsum(bsums, g1 * 2) as i32
-                + read_q8_k_bsum(bsums, g1 * 2 + 1) as i32;
-            let bs2 = read_q8_k_bsum(bsums, g2 * 2) as i32
-                + read_q8_k_bsum(bsums, g2 * 2 + 1) as i32;
+            let bs1 =
+                read_q8_k_bsum(bsums, g1 * 2) as i32 + read_q8_k_bsum(bsums, g1 * 2 + 1) as i32;
+            let bs2 =
+                read_q8_k_bsum(bsums, g2 * 2) as i32 + read_q8_k_bsum(bsums, g2 * 2 + 1) as i32;
             min_acc += ms1 as i32 * bs1;
             min_acc += ms2 as i32 * bs2;
         }
@@ -560,8 +563,8 @@ pub(super) unsafe fn q4_k_q8_k_row_dot_chunk_avx2(
             // precomputed bsums directly as i16.
             let mut min: i32 = 0;
             for (g, min_scale) in g_min_scales.iter().enumerate() {
-                let bs = read_q8_k_bsum(bsums, g * 2) as i32
-                    + read_q8_k_bsum(bsums, g * 2 + 1) as i32;
+                let bs =
+                    read_q8_k_bsum(bsums, g * 2) as i32 + read_q8_k_bsum(bsums, g * 2 + 1) as i32;
                 min += min_scale * bs;
             }
 
@@ -1331,8 +1334,7 @@ pub(super) fn iq1s_dequantize_block(block: &[u8], out: &mut [f32]) {
     let d = f16_le_to_f32([block[0], block[1]]);
     let qs = &block[2..34];
     let qh = &block[34..50];
-    let qh_u16: [u16; 16] =
-        std::array::from_fn(|i| u16::from_le_bytes([qh[i * 2], qh[i * 2 + 1]]));
+    let qh_u16: [u16; 16] = std::array::from_fn(|i| u16::from_le_bytes([qh[i * 2], qh[i * 2 + 1]]));
     let mut out_ptr = 0_usize;
     let mut grid_vals = [0_i8; 8];
     for ib in 0..(QK_K / 32) {
