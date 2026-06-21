@@ -40,7 +40,9 @@ func randomFixture(rows, blocksPerRow int, seed uint64) ([]byte, []byte) {
 		vector[i] = (float32(b) - 127.5) / 32.0
 	}
 	q8k := make([]byte, blocksPerRow*BLOCK_Q8_K_BYTES)
-	QuantizeQ8KInto(vector, blocksPerRow, q8k)
+	if err := QuantizeQ8KInto(vector, blocksPerRow, q8k); err != nil {
+		panic(err)
+	}
 	return weights, q8k
 }
 
@@ -55,13 +57,20 @@ func TestTileVariantsMatchScalarExactly(t *testing.T) {
 		scalar := make([]float32, tc.rows)
 		for r := 0; r < tc.rows; r++ {
 			row := weights[r*rowBytes : (r+1)*rowBytes]
-			scalar[r] = Q4kQ8kRowDotScalar(row, tc.bpr, q8k)
+			v, err := Q4kQ8kRowDotScalar(row, tc.bpr, q8k)
+			if err != nil {
+				t.Fatal(err)
+			}
+			scalar[r] = v
 		}
 
 		// x1
 		for r := 0; r < tc.rows; r++ {
 			row := weights[r*rowBytes : (r+1)*rowBytes]
-			got := Q4kQ8kRowDotX1Scalar(row, tc.bpr, q8k)
+			got, err := Q4kQ8kRowDotX1Scalar(row, tc.bpr, q8k)
+			if err != nil {
+				t.Fatal(err)
+			}
 			if math.Float32bits(got) != math.Float32bits(scalar[r]) {
 				t.Errorf("x1 row %d mismatch: got %v want %v", r, got, scalar[r])
 			}
@@ -70,7 +79,9 @@ func TestTileVariantsMatchScalarExactly(t *testing.T) {
 		// x4
 		if tc.rows >= 4 {
 			var quad [4]float32
-			Q4kQ8kRowDotX4Scalar(weights, rowBytes, tc.bpr, q8k, quad[:])
+			if err := Q4kQ8kRowDotX4Scalar(weights, rowBytes, tc.bpr, q8k, quad[:]); err != nil {
+				t.Fatal(err)
+			}
 			for r := 0; r < 4; r++ {
 				if math.Float32bits(quad[r]) != math.Float32bits(scalar[r]) {
 					t.Errorf("x4 row %d mismatch: got %v want %v", r, quad[r], scalar[r])
@@ -81,7 +92,9 @@ func TestTileVariantsMatchScalarExactly(t *testing.T) {
 		// x8
 		if tc.rows >= 8 {
 			var octet [8]float32
-			Q4kQ8kRowDotX8Scalar(weights, rowBytes, tc.bpr, q8k, octet[:])
+			if err := Q4kQ8kRowDotX8Scalar(weights, rowBytes, tc.bpr, q8k, octet[:]); err != nil {
+				t.Fatal(err)
+			}
 			for r := 0; r < 8; r++ {
 				if math.Float32bits(octet[r]) != math.Float32bits(scalar[r]) {
 					t.Errorf("x8 row %d mismatch: got %v want %v", r, octet[r], scalar[r])
@@ -92,7 +105,9 @@ func TestTileVariantsMatchScalarExactly(t *testing.T) {
 		// x16
 		if tc.rows >= 16 {
 			var hex [16]float32
-			Q4kQ8kRowDotX16Scalar(weights, rowBytes, tc.bpr, q8k, hex[:])
+			if err := Q4kQ8kRowDotX16Scalar(weights, rowBytes, tc.bpr, q8k, hex[:]); err != nil {
+				t.Fatal(err)
+			}
 			for r := 0; r < 16; r++ {
 				if math.Float32bits(hex[r]) != math.Float32bits(scalar[r]) {
 					t.Errorf("x16 row %d mismatch: got %v want %v", r, hex[r], scalar[r])
@@ -107,10 +122,15 @@ func TestGemvRangeMatchesScalar(t *testing.T) {
 	weights, q8k := randomFixture(13, 8, 7)
 	rowBytes := 8 * BLOCK_Q4_K_SIZE
 	out := make([]float32, 13)
-	GemvQ4kRange(weights, 8, q8k, out)
+	if err := GemvQ4kRange(weights, 8, q8k, out); err != nil {
+		t.Fatal(err)
+	}
 	for r := 0; r < 13; r++ {
 		row := weights[r*rowBytes : (r+1)*rowBytes]
-		want := Q4kQ8kRowDotScalar(row, 8, q8k)
+		want, err := Q4kQ8kRowDotScalar(row, 8, q8k)
+		if err != nil {
+			t.Fatal(err)
+		}
 		if math.Float32bits(out[r]) != math.Float32bits(want) {
 			t.Errorf("row %d mismatch: got %v want %v", r, out[r], want)
 		}
