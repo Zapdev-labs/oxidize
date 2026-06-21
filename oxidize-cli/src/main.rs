@@ -41,22 +41,22 @@ const PROFILE_CHILD_ENV: &str = "OXIDIZE_PROFILE_CHILD";
 // Submodules split out of the original monolithic main.rs (mechanical move).
 // `main.rs` is the binary crate root, so its child modules would otherwise
 // resolve to `src/<name>.rs`; `#[path]` keeps them under `src/main/`.
-#[path = "main/model_resolution.rs"]
-mod model_resolution;
-#[path = "main/gpu_cluster.rs"]
-mod gpu_cluster;
 #[path = "main/command_rewrite.rs"]
 mod command_rewrite;
-#[path = "main/rendering.rs"]
-mod rendering;
 #[path = "main/conversation.rs"]
 mod conversation;
 #[path = "main/generation.rs"]
 mod generation;
-#[path = "main/server.rs"]
-mod server;
+#[path = "main/gpu_cluster.rs"]
+mod gpu_cluster;
 #[path = "main/inference.rs"]
 mod inference;
+#[path = "main/model_resolution.rs"]
+mod model_resolution;
+#[path = "main/rendering.rs"]
+mod rendering;
+#[path = "main/server.rs"]
+mod server;
 
 use command_rewrite::*;
 use conversation::*;
@@ -456,9 +456,7 @@ fn main() {
         }
         // Now that autotune has finalized `args.threads`, build the rayon pool
         // if we deferred it above. This is the first point rayon is used.
-        if defer_pool_for_autotune
-            && let Err(error) = build_rayon_pool(resolve_threads(&args))
-        {
+        if defer_pool_for_autotune && let Err(error) = build_rayon_pool(resolve_threads(&args)) {
             eprintln!("failed to set rayon thread pool: {error}");
             return;
         }
