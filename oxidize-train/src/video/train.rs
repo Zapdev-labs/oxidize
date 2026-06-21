@@ -234,6 +234,10 @@ mod tests {
             report.val_accuracy,
             report.majority_baseline
         );
-        assert!(report.train_accuracy > 0.8, "train_acc={}", report.train_accuracy);
+        assert!(
+            report.train_accuracy > 0.8,
+            "train_acc={}",
+            report.train_accuracy
+        );
     }
 }
