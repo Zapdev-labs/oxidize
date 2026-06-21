@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 use crate::{AdamW, Linear, Matrix};
 
 use super::dataset::filter_samples;
-use super::frames::{clip_to_tensor, clips_to_tensors_parallel, ffmpeg_available, patches_to_image};
+use super::frames::{
+    clip_to_tensor, clips_to_tensors_parallel, ffmpeg_available, patches_to_image,
+};
 use super::manifest::build_manifest;
 use super::{FrameConfig, VideoError};
 
@@ -253,8 +255,8 @@ impl VideoGenerator {
         let mut frame_h = Matrix::zeros(self.context_frames, self.patch_hidden);
         mean_pool_rows(&patch_h, self.num_patches, &mut frame_h);
 
-        let temporal_in =
-            Matrix::from_vec(1, frame_h.data().len(), frame_h.data().to_vec()).expect("temporal in");
+        let temporal_in = Matrix::from_vec(1, frame_h.data().len(), frame_h.data().to_vec())
+            .expect("temporal in");
         let mut t1_pre = Matrix::zeros(1, self.hidden_size);
         self.temporal.forward(&temporal_in, &mut t1_pre);
         let mut t1 = t1_pre.clone();
@@ -308,12 +310,8 @@ impl VideoGenerator {
         grad_scale: f32,
     ) -> f32 {
         let cache = self.forward(context_flat);
-        let target = Matrix::from_vec(
-            self.num_patches,
-            self.patch_dim,
-            target_flat.to_vec(),
-        )
-        .expect("target shape");
+        let target = Matrix::from_vec(self.num_patches, self.patch_dim, target_flat.to_vec())
+            .expect("target shape");
 
         let mut grad = Matrix::zeros(self.num_patches, self.patch_dim);
         let loss = mse_loss(&cache.patch_logits, &target, &mut grad);
@@ -324,14 +322,10 @@ impl VideoGenerator {
         }
 
         let mut patch_states_grad = Matrix::zeros(self.num_patches, self.patch_hidden);
-        self.patch_dec.backward(
-            &cache.patch_states,
-            &grad,
-            Some(&mut patch_states_grad),
-        );
+        self.patch_dec
+            .backward(&cache.patch_states, &grad, Some(&mut patch_states_grad));
 
-        let mut frame_states_grad =
-            Matrix::zeros(1, self.patch_hidden * self.num_patches);
+        let mut frame_states_grad = Matrix::zeros(1, self.patch_hidden * self.num_patches);
         frame_states_grad
             .data_mut()
             .copy_from_slice(patch_states_grad.data());
@@ -358,10 +352,8 @@ impl VideoGenerator {
             }
         }
 
-        let mut patch_h_grad = Matrix::zeros(
-            self.context_frames * self.num_patches,
-            self.patch_hidden,
-        );
+        let mut patch_h_grad =
+            Matrix::zeros(self.context_frames * self.num_patches, self.patch_hidden);
         unpool_rows(&frame_grad, self.context_frames, &mut patch_h_grad);
 
         self.patch_enc
@@ -442,11 +434,8 @@ pub fn train_generator(
             let mut batch_loss = 0.0f32;
             let scale = 1.0 / batch.len() as f32;
             for &idx in batch {
-                batch_loss += model.backward_step(
-                    &dataset.context[idx],
-                    &dataset.target[idx],
-                    scale,
-                );
+                batch_loss +=
+                    model.backward_step(&dataset.context[idx], &dataset.target[idx], scale);
             }
             model.apply_optimizer(&mut optimizer);
             weighted += batch_loss / batch.len() as f32;
@@ -498,7 +487,11 @@ fn eval_loss(model: &VideoGenerator, dataset: &GenDataset, indices: &[usize]) ->
     sum / indices.len() as f32
 }
 
-pub fn save_generator(path: &Path, model: &VideoGenerator, config: &GenTrainingConfig) -> Result<(), VideoError> {
+pub fn save_generator(
+    path: &Path,
+    model: &VideoGenerator,
+    config: &GenTrainingConfig,
+) -> Result<(), VideoError> {
     let saved = SavedGenerator {
         generator: model.clone(),
         frames: config.frames.validate()?,
@@ -519,18 +512,17 @@ pub fn load_generator(path: &Path) -> Result<SavedGenerator, VideoError> {
         path: path.to_path_buf(),
         source,
     })?;
-    let mut saved: SavedGenerator = serde_json::from_slice(&bytes).map_err(|source| VideoError::Metadata {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let mut saved: SavedGenerator =
+        serde_json::from_slice(&bytes).map_err(|source| VideoError::Metadata {
+            path: path.to_path_buf(),
+            source,
+        })?;
     saved.frames = saved.frames.validate()?;
     Ok(saved)
 }
 
 pub fn default_generator_path(config: &GenTrainingConfig) -> std::path::PathBuf {
-    config
-        .data_root
-        .join("oxidize-video-generator.json")
+    config.data_root.join("oxidize-video-generator.json")
 }
 
 #[derive(Debug, Clone)]
@@ -638,7 +630,12 @@ pub fn generate_video(
     })
 }
 
-fn encode_generated(work: &Path, out: &Path, fps: u32, upscale_height: u32) -> Result<(), VideoError> {
+fn encode_generated(
+    work: &Path,
+    out: &Path,
+    fps: u32,
+    upscale_height: u32,
+) -> Result<(), VideoError> {
     let pattern = work.join("gen_%04d.jpg");
     let vf = if upscale_height > 0 {
         format!(
@@ -803,7 +800,11 @@ mod tests {
         let cfg = tiny_config();
         let dataset = synthetic_dataset();
         let (model, report) = train_generator(&dataset, &cfg).expect("train");
-        assert!(report.best_val_loss < 0.5, "val_mse={}", report.best_val_loss);
+        assert!(
+            report.best_val_loss < 0.5,
+            "val_mse={}",
+            report.best_val_loss
+        );
         let pred = model.predict_frame(&dataset.context[0]);
         let err = mse_value(&pred, &dataset.target[0]);
         assert!(err < 0.5, "sample err={err}");
