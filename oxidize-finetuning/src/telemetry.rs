@@ -89,10 +89,7 @@ impl MetricsLog {
 
     /// Lowest training loss seen so far (f32::MAX if history is empty).
     pub fn best_loss(&self) -> f32 {
-        self.history
-            .iter()
-            .map(|m| m.loss)
-            .fold(f32::MAX, f32::min)
+        self.history.iter().map(|m| m.loss).fold(f32::MAX, f32::min)
     }
 
     /// Serialise the full history to a CSV string.
@@ -102,20 +99,10 @@ impl MetricsLog {
         let mut out = String::with_capacity(self.history.len() * 80 + 128);
         out.push_str("timestamp_ms,epoch,step,loss,lr,tokens_per_sec,grad_norm,eval_loss\n");
         for m in &self.history {
-            let eval = m
-                .eval_loss
-                .map(|v| format!("{v:.6}"))
-                .unwrap_or_default();
+            let eval = m.eval_loss.map(|v| format!("{v:.6}")).unwrap_or_default();
             out.push_str(&format!(
                 "{},{},{},{:.6},{:.6e},{:.2},{:.6},{}\n",
-                m.timestamp_ms,
-                m.epoch,
-                m.step,
-                m.loss,
-                m.lr,
-                m.tokens_per_sec,
-                m.grad_norm,
-                eval,
+                m.timestamp_ms, m.epoch, m.step, m.loss, m.lr, m.tokens_per_sec, m.grad_norm, eval,
             ));
         }
         out
@@ -206,9 +193,7 @@ impl MetricsLog {
         // Append a simple axis label.
         rows.push(format!(
             "loss {:.4}..{:.4}  steps {}",
-            min_loss,
-            max_loss,
-            n
+            min_loss, max_loss, n
         ));
         rows.join("\n")
     }
@@ -415,11 +400,7 @@ mod tests {
         assert_eq!(lines.len(), 5, "expected 5 lines, got {}", lines.len());
         // Each data row should be exactly `width` chars wide.
         for row in &lines[..4] {
-            assert_eq!(
-                row.chars().count(),
-                20,
-                "unexpected row width: {row:?}"
-            );
+            assert_eq!(row.chars().count(), 20, "unexpected row width: {row:?}");
         }
     }
 
@@ -429,7 +410,7 @@ mod tests {
         assert!(!es.should_stop(1.0));
         assert!(!es.should_stop(1.0)); // no improvement
         assert!(!es.should_stop(1.0)); // no improvement (count=2, patience=3)
-        assert!(es.should_stop(1.0));  // count hits patience
+        assert!(es.should_stop(1.0)); // count hits patience
     }
 
     #[test]
