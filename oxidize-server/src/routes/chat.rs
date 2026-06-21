@@ -22,11 +22,14 @@ use crate::routes::responses::{
     chat_completion_stream_response_paged, generation_error_response, model_not_found,
     validate_candidate_count,
 };
+use crate::runtime::batched_engine::EngineSubmit;
 use crate::runtime::generate::{
-    GenerationError, GenerationRequest, generate_text, generate_with_scheduler_blocking,
-    generate_with_scheduler_streaming_blocking, render_chat_prompt,
+    GenerationError, GenerationRequest, GenerationResult, generate_text,
+    generate_with_scheduler_blocking, generate_with_scheduler_streaming_blocking,
+    render_chat_prompt, trim_stop_text,
 };
 use crate::schema::{ChatCompletionRequest, ResponseFormat, StopSequences};
+use oxidize_core::tokenizer::EncodeOptions;
 
 pub async fn chat_completions(
     State(state): State<AppState>,
@@ -68,6 +71,15 @@ pub async fn chat_completions(
         if stream {
             let (tx, rx) = tokio::sync::mpsc::channel::<Result<String, GenerationError>>(128);
             let cancel = Arc::new(AtomicBool::new(false));
+            // Continuous-batching engine: submit and let the shared engine thread
+            // batch this request's decode with all other in-flight sequences.
+            if let Some(engine) = paged.engine.clone() {
+                engine.submit(EngineSubmit {
+                    request: req,
+                    out_tx: tx,
+                });
+                return chat_completion_stream_response_paged(model_id, rx, cancel);
+            }
             let cancel_for_task = Arc::clone(&cancel);
             let paged_for_task = Arc::clone(&paged);
             tokio::task::spawn_blocking(move || {
@@ -81,10 +93,63 @@ pub async fn chat_completions(
             return chat_completion_stream_response_paged(model_id, rx, cancel);
         }
 
-        let generated =
+        let generated = if let Some(engine) = paged.engine.clone() {
+            // Non-streaming over the batched engine: submit, then drain the token
+            // channel to a full completion. One `Ok(piece)` per decoded token.
+            let (tx, mut rx) =
+                tokio::sync::mpsc::channel::<Result<String, GenerationError>>(128);
+            let prompt = req.prompt.clone();
+            let echo = req.echo;
+            let stops = req.stop.clone();
+            engine.submit(EngineSubmit {
+                request: req,
+                out_tx: tx,
+            });
+            let mut text = String::new();
+            let mut completion = 0usize;
+            let mut stream_err: Option<GenerationError> = None;
+            while let Some(msg) = rx.recv().await {
+                match msg {
+                    Ok(piece) => {
+                        text.push_str(&piece);
+                        completion += 1;
+                    }
+                    Err(err) => {
+                        stream_err = Some(err);
+                        break;
+                    }
+                }
+            }
+            let result = match stream_err {
+                Some(err) => Err(err),
+                None => {
+                    let prompt_tokens = paged
+                        .runtime
+                        .tokenizer
+                        .encode_with_special_tokens(
+                            &prompt,
+                            EncodeOptions {
+                                add_bos: paged.runtime.tokenizer.add_bos_default(),
+                                add_eos: false,
+                                pad_to: None,
+                            },
+                        )
+                        .len();
+                    let text = trim_stop_text(&text, &stops);
+                    let text = if echo { format!("{prompt}{text}") } else { text };
+                    Ok(GenerationResult {
+                        text,
+                        prompt_tokens,
+                        completion_tokens: completion,
+                    })
+                }
+            };
+            Ok(result)
+        } else {
             tokio::task::spawn_blocking(move || generate_with_scheduler_blocking(&paged, req))
                 .await
-                .map_err(|e| GenerationError::Other(format!("generation task failed: {e}")));
+                .map_err(|e| GenerationError::Other(format!("generation task failed: {e}")))
+        };
 
         let _result = match generated {
             Ok(Ok(result)) => {
