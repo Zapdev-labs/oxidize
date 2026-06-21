@@ -413,8 +413,9 @@ pub unsafe fn q4k_q8k_row_dot_avxvnni(row: &[u8], blocks_per_row: usize, q8k: &[
             crate::q4k_avx2::prefetch3(ahead, tune.pf_nta);
         }
         let b = decode_q4_block_vnni256(w_ptr);
-        let (d_q8, q8v, bs) =
-            crate::q4k_avx2::load_q8_block(&q8k[block_idx * BLOCK_Q8_K_BYTES..][..BLOCK_Q8_K_BYTES]);
+        let (d_q8, q8v, bs) = crate::q4k_avx2::load_q8_block(
+            &q8k[block_idx * BLOCK_Q8_K_BYTES..][..BLOCK_Q8_K_BYTES],
+        );
         acc += row_dot_decoded_vnni256(&b, d_q8, &q8v, &bs);
     }
     acc
@@ -435,8 +436,9 @@ pub unsafe fn q4k_q8k_row_dot_x4_avxvnni(
     let tune = crate::cpu::tune();
     let mut acc = [0.0_f32; 4];
     for block_idx in 0..blocks_per_row {
-        let (d_q8, q8v, bs) =
-            crate::q4k_avx2::load_q8_block(&q8k[block_idx * BLOCK_Q8_K_BYTES..][..BLOCK_Q8_K_BYTES]);
+        let (d_q8, q8v, bs) = crate::q4k_avx2::load_q8_block(
+            &q8k[block_idx * BLOCK_Q8_K_BYTES..][..BLOCK_Q8_K_BYTES],
+        );
         for (r, acc_r) in acc.iter_mut().enumerate() {
             let w_block = rows_base.add(r * row_bytes + block_idx * BLOCK_Q4_K_SIZE);
             crate::q4k_avx2::prefetch_row_stream(w_block, row_bytes, blocks_per_row, r, 4, tune);
