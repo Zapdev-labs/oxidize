@@ -48,14 +48,17 @@ struct Args {
         help = "Pruning method: name-filter (substring match), wanda (calibrated), or magnitude"
     )]
     method: CliPruneMethod,
-    #[arg(long, help = "Keep only tensors whose names contain this text (name-filter only)")]
-    keep: Vec<String>,
-    #[arg(long, help = "Drop tensors whose names contain this text (name-filter only)")]
-    drop: Vec<String>,
     #[arg(
         long,
-        help = "L2-norms cache from the calibration runner (Wanda only)"
+        help = "Keep only tensors whose names contain this text (name-filter only)"
     )]
+    keep: Vec<String>,
+    #[arg(
+        long,
+        help = "Drop tensors whose names contain this text (name-filter only)"
+    )]
+    drop: Vec<String>,
+    #[arg(long, help = "L2-norms cache from the calibration runner (Wanda only)")]
     calibration: Option<PathBuf>,
     #[arg(
         long,
@@ -85,7 +88,10 @@ struct Args {
         help = "Print selected and removed tensors without writing output"
     )]
     dry_run: bool,
-    #[arg(long, help = "Print per-phase timings (dequant/mask/requant) to stderr")]
+    #[arg(
+        long,
+        help = "Print per-phase timings (dequant/mask/requant) to stderr"
+    )]
     timing: bool,
 }
 
