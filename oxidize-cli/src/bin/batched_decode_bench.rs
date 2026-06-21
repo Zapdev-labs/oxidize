@@ -69,7 +69,11 @@ fn main() {
         .filter(|s| !s.is_empty())
         .map(|s| s.trim().parse::<u32>().expect("prompt token must be u32"))
         .collect();
-    let prompt = if prompt.is_empty() { vec![1u32] } else { prompt };
+    let prompt = if prompt.is_empty() {
+        vec![1u32]
+    } else {
+        prompt
+    };
 
     let batched_flag = std::env::var("OX_BATCHED_DECODE").unwrap_or_default();
     eprintln!(
