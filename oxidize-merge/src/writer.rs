@@ -24,7 +24,11 @@ pub(crate) enum MergeWriter {
 }
 
 impl MergeWriter {
-    pub fn new(output: &Path, max_shard_bytes: u64, metadata: BTreeMap<String, String>) -> Result<Self> {
+    pub fn new(
+        output: &Path,
+        max_shard_bytes: u64,
+        metadata: BTreeMap<String, String>,
+    ) -> Result<Self> {
         if output.extension().and_then(|s| s.to_str()) == Some("safetensors") {
             if let Some(parent) = output.parent() {
                 fs::create_dir_all(parent)?;
@@ -190,12 +194,17 @@ fn write_safetensors_file(
     let meta = if metadata.is_empty() {
         None
     } else {
-        Some(metadata.iter().map(|(k, v)| (k.clone(), v.clone())).collect::<HashMap<_, _>>())
+        Some(
+            metadata
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect::<HashMap<_, _>>(),
+        )
     };
     let bytes = safetensors::tensor::serialize(&views, &meta)
         .context("failed to serialize safetensors shard")?;
-    let mut file = File::create(path)
-        .with_context(|| format!("failed to create {}", path.display()))?;
+    let mut file =
+        File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
     file.write_all(&bytes)?;
     Ok(())
 }
