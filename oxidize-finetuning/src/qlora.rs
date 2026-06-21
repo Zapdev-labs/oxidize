@@ -159,10 +159,7 @@ impl QLoRAAdapter {
         let block_size = 64_usize;
 
         // Quantize the base weight in consecutive `block_size` chunks.
-        let base_q: Vec<NF4Block> = base
-            .chunks(block_size)
-            .map(NF4Block::quantize)
-            .collect();
+        let base_q: Vec<NF4Block> = base.chunks(block_size).map(NF4Block::quantize).collect();
 
         let lora = LoRAAdapter::new(LoRATarget::AttentionQ, in_dim, out_dim, config);
 
@@ -315,9 +312,7 @@ mod tests {
     fn nf4_quantize_error_bounded() {
         // Random-ish weights in [-1, 1]; max absolute error should be well
         // below 0.1 for these table spacings.
-        let weights: Vec<f32> = (0..128)
-            .map(|i| ((i as f32 * 0.137).sin()))
-            .collect();
+        let weights: Vec<f32> = (0..128).map(|i| ((i as f32 * 0.137).sin())).collect();
         let block = NF4Block::quantize(&weights);
         let rt = block.dequantize();
         assert_eq!(rt.len(), weights.len());
@@ -329,7 +324,10 @@ mod tests {
         // The widest gap between adjacent NF4 levels is ~0.18 (at the extremes),
         // so the worst-case half-interval error is ~0.09; we allow a comfortable
         // 0.20 headroom here.
-        assert!(max_err < 0.20, "max NF4 quant error {max_err} exceeds bound");
+        assert!(
+            max_err < 0.20,
+            "max NF4 quant error {max_err} exceeds bound"
+        );
     }
 
     #[test]
@@ -392,9 +390,7 @@ mod tests {
         let batched = q.forward_batch(&xs, 3).expect("batch");
 
         for t in 0..3 {
-            let single = q
-                .forward_batch(&xs[t * 8..(t + 1) * 8], 1)
-                .expect("single");
+            let single = q.forward_batch(&xs[t * 8..(t + 1) * 8], 1).expect("single");
             for (b, s) in batched[t * 16..(t + 1) * 16].iter().zip(single.iter()) {
                 assert!((b - s).abs() < 1e-5, "t={t} b={b} s={s}");
             }
@@ -407,8 +403,8 @@ mod tests {
         let xs = vec![1.0_f32; 8];
         let grad = vec![1.0_f32; 16];
         q.backward_batch(&xs, &grad, 1).expect("backward");
-        let any_nonzero = q.lora.grad_a.iter().any(|&v| v != 0.0)
-            || q.lora.grad_b.iter().any(|&v| v != 0.0);
+        let any_nonzero =
+            q.lora.grad_a.iter().any(|&v| v != 0.0) || q.lora.grad_b.iter().any(|&v| v != 0.0);
         assert!(any_nonzero, "backward produced all-zero gradients");
     }
 
