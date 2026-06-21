@@ -93,7 +93,10 @@ pub(super) fn read_chat_prompt<R: BufRead, W: Write>(
     Ok(Some(lines.join("\n")))
 }
 
-pub(super) fn run_chat_mode<R: BufRead, W: Write>(reader: &mut R, writer: &mut W) -> io::Result<()> {
+pub(super) fn run_chat_mode<R: BufRead, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+) -> io::Result<()> {
     writeln!(writer, "oxidize-cli chat mode. type 'exit' to quit.")?;
     let mut history = ConversationHistory::default();
     let mut prompt_cache = PromptCache::default();
