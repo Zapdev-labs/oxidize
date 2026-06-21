@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
-use image::imageops::FilterType;
 use image::RgbImage;
+use image::imageops::FilterType;
 use rayon::prelude::*;
 
 use super::{FrameConfig, VideoError, VideoSample};
@@ -93,9 +93,8 @@ fn extract_frames(
     } else {
         2.0
     };
-    let vf = format!(
-        "scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},fps={fps:.4}"
-    );
+    let vf =
+        format!("scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},fps={fps:.4}");
     let pattern = frame_dir.join("f_%03d.jpg");
 
     let output = Command::new("ffmpeg")
