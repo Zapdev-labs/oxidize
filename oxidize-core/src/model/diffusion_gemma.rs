@@ -31,9 +31,8 @@
 use crate::gguf::{GgufQuantizationType, GgufTensorInfo, load_mapped_gguf};
 use crate::quantization::QuantizationError;
 use crate::tensor::{
-    apply_geglu_inplace_f32, gemm_quantized_f32, gemv_f32, gemv_quantized_experts_f32,
-    gemv_quantized_f32, rms_norm_f32, softmax_f32, GemmError, GemvError, RmsNormError,
-    SoftmaxError,
+    GemmError, GemvError, RmsNormError, SoftmaxError, apply_geglu_inplace_f32, gemm_quantized_f32,
+    gemv_f32, gemv_quantized_experts_f32, gemv_quantized_f32, rms_norm_f32, softmax_f32,
 };
 use memmap2::Mmap;
 use rayon::prelude::*;
@@ -168,11 +167,7 @@ struct EW {
 }
 
 /// Requantize an OXK-unsupported buffer to Q8_0 bytes (via f32). `n` = element count.
-fn requant_to_q8_0(
-    q: GgufQuantizationType,
-    bytes: &[u8],
-    n: usize,
-) -> DiffusionResult<Vec<u8>> {
+fn requant_to_q8_0(q: GgufQuantizationType, bytes: &[u8], n: usize) -> DiffusionResult<Vec<u8>> {
     let f = dequant_any(q, bytes, n)?;
     let mut out = vec![0u8; (n / 32) * 34];
     crate::quantization::quantize_q8_0_scalar(&f, &mut out)?;
@@ -374,9 +369,8 @@ impl DiffusionGemma {
     }
 
     pub fn load(path: &str) -> Result<DiffusionGemma, DiffusionGemmaError> {
-        let mapped = load_mapped_gguf(path).map_err(|e| {
-            DiffusionGemmaError::UnsupportedQuant(format!("gguf: {e:?}"))
-        })?;
+        let mapped = load_mapped_gguf(path)
+            .map_err(|e| DiffusionGemmaError::UnsupportedQuant(format!("gguf: {e:?}")))?;
         let mmap = mapped.mmap();
         let infos = mapped.mapped_tensor_infos();
         let mut by_name: HashMap<String, GgufTensorInfo> = HashMap::new();
@@ -728,13 +722,7 @@ impl DiffusionGemma {
         Ok(outv)
     }
 
-    fn dense_ffn(
-        &self,
-        l: &Layer,
-        src: &[f32],
-        out: &mut [f32],
-        nt: usize,
-    ) -> DiffusionResult<()> {
+    fn dense_ffn(&self, l: &Layer, src: &[f32], out: &mut [f32], nt: usize) -> DiffusionResult<()> {
         let mut nrm = vec![0.0_f32; nt * N_EMBD];
         for i in 0..nt {
             rms_norm_f32(
@@ -766,13 +754,7 @@ impl DiffusionGemma {
     /// Routed MoE for the whole token batch, batched mul_mat_id-style: all `nt*N_USED`
     /// (token, expert) pairs flow through ONE gate_up experts GEMV and ONE down experts GEMV,
     /// giving a single level of rayon parallelism over the full output (no per-token nesting).
-    fn moe_ffn(
-        &self,
-        l: &Layer,
-        src: &[f32],
-        out: &mut [f32],
-        nt: usize,
-    ) -> DiffusionResult<()> {
+    fn moe_ffn(&self, l: &Layer, src: &[f32], out: &mut [f32], nt: usize) -> DiffusionResult<()> {
         let ones = vec![1.0_f32; N_EMBD];
         let inv = 1.0 / (N_EMBD as f32).sqrt();
         let ns = nt * N_USED;
@@ -893,12 +875,7 @@ impl DiffusionGemma {
 
     /// Run the single-block block-diffusion denoise loop over a `CANVAS` of tokens conditioned
     /// on `prompt`. Returns timing + the final argmax canvas tokens + the per-step entropy trace.
-    pub fn generate(
-        &self,
-        prompt: &[u32],
-        steps: usize,
-        seed: u64,
-    ) -> DiffusionResult<GenStats> {
+    pub fn generate(&self, prompt: &[u32], steps: usize, seed: u64) -> DiffusionResult<GenStats> {
         const SC_K: usize = 256;
         let scale = (N_EMBD as f32).sqrt();
         let prefix = prompt.len();
