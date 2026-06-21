@@ -183,10 +183,7 @@ fn lerp_vec(va: &[f32], vb: &[f32], t: f32) -> Vec<f32> {
 ///    surviving (non-zero) values, weighted by adapter weights.
 /// 3. Keep only values whose sign matches the elected sign, then compute the
 ///    weighted average of those kept values.
-pub fn ties_merge(
-    adapters: &[(LoRAAdapter, f32)],
-    density: f32,
-) -> Result<LoRAAdapter, String> {
+pub fn ties_merge(adapters: &[(LoRAAdapter, f32)], density: f32) -> Result<LoRAAdapter, String> {
     let (template, _) = adapters.first().ok_or("empty adapter list")?;
     validate_compatibility(adapters)?;
 
@@ -267,11 +264,7 @@ fn ties_combine(trimmed: &[Vec<f32>], weights: &[f32]) -> Vec<f32> {
                     total_w += weights[k];
                 }
             }
-            if total_w == 0.0 {
-                0.0
-            } else {
-                sum / total_w
-            }
+            if total_w == 0.0 { 0.0 } else { sum / total_w }
         })
         .collect()
 }
@@ -335,7 +328,13 @@ mod tests {
     use crate::config::FinetuneConfig;
     use crate::lora::LoRATarget;
 
-    fn make_adapter(in_dim: usize, out_dim: usize, rank: usize, fill_a: f32, fill_b: f32) -> LoRAAdapter {
+    fn make_adapter(
+        in_dim: usize,
+        out_dim: usize,
+        rank: usize,
+        fill_a: f32,
+        fill_b: f32,
+    ) -> LoRAAdapter {
         let cfg = FinetuneConfig {
             rank,
             alpha: rank as f32 * 2.0,
@@ -440,9 +439,7 @@ mod tests {
     #[test]
     fn builder_requires_two_for_slerp() {
         let a = make_adapter(4, 8, 2, 1.0, 1.0);
-        let result = AdapterMerger::new(MergeStrategy::Slerp)
-            .add(a, 1.0)
-            .merge();
+        let result = AdapterMerger::new(MergeStrategy::Slerp).add(a, 1.0).merge();
         assert!(result.is_err());
     }
 
