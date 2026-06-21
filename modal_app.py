@@ -31,6 +31,9 @@ IGNORE = [
     "rust_out/**",
     ".omo/**",       # background automation artifacts churn during build
     ".cursor/**",
+    ".claude/**",    # agent scheduler/lock files churn during build (modified-during-build guard)
+    "deploy/**",
+    "**/*.lock",
     ".git/**",
     "**/*.log",
 ]
@@ -263,8 +266,8 @@ def batched_decode_tps(
             warm += ["--file", hf_file]
         warm += ["warm", "--no-api", "--max-tokens", "1"]
         print(f"$ {' '.join(warm)}", flush=True)
-        w = subprocess.run(warm, cwd=REPO_ROOT, capture_output=True, text=True)
-        print(((w.stdout or "") + (w.stderr or ""))[-1200:], flush=True)
+        print("(streaming model download/warm output below)", flush=True)
+        w = subprocess.run(warm, cwd=REPO_ROOT)
         if not os.path.exists(gguf):
             hits = glob.glob(f"/root/.cache/oxidize/hf/{safe}/main/*.gguf")
             if hits:
@@ -392,6 +395,31 @@ def gpu_splitk_test() -> str:
     return "split-K GPU parity test passed"
 
 
+@app.function(
+    image=cuda_image,
+    gpu="H100",
+    volumes={
+        f"{REPO_ROOT}/target": cuda_target_cache,
+        "/usr/local/cargo/registry": registry_cache,
+    },
+    cpu=8.0,
+    memory=32768,
+    timeout=3600,
+)
+def gpu_gemv_mw_bench() -> str:
+    command = (
+        "cargo test --release -p oxidize-core --features cuda "
+        "q4k_gemv_block_size_sweep_is_exact_and_faster "
+        "-- --ignored --nocapture"
+    )
+    rc = _run(command)
+    cuda_target_cache.commit()
+    registry_cache.commit()
+    if rc != 0:
+        raise SystemExit(f"multi-row Q4_K benchmark failed (exit {rc})")
+    return "multi-row Q4_K benchmark passed"
+
+
 GPU_RUN = dict(
     image=cuda_image,
     gpu="L4",
@@ -404,6 +432,173 @@ GPU_RUN = dict(
     memory=32768,
     timeout=3600,
 )
+
+
+def _requantize_q4ks(gguf: str) -> str:
+    """Produce a uniform strict-Q4_K (Q4_K_S) copy of `gguf`.
+
+    The on-device batched decode path requires EVERY projection + the lm_head to
+    be strict Q4_K (144-byte blocks). Stock Q4_K_M mixes in Q6_K tensors (attn_v,
+    ffn_down, output) so it is ineligible and falls back to CPU. Q4_K_S in
+    oxidize-quantize applies Q4_K uniformly (no Q6_K), making the model eligible.
+    Caches the result next to the source so repeat runs skip the conversion."""
+    import os
+    import subprocess
+
+    out = gguf + ".q4ks.gguf"
+    if os.path.exists(out) and os.path.getsize(out) > 0:
+        print(f"requantized Q4_K_S GGUF (cached): {out}", flush=True)
+        return out
+    if _run("cargo build --release --package oxidize-quantize") != 0:
+        raise SystemExit("oxidize-quantize build failed")
+    qbin = f"{REPO_ROOT}/target/release/oxidize-quantize"
+    cmd = [qbin, "--input", gguf, "--output", out, "--target", "Q4_K_S"]
+    print(f"$ {' '.join(cmd)}", flush=True)
+    print("(streaming requantize output below)", flush=True)
+    r = subprocess.run(cmd, cwd=REPO_ROOT)
+    if r.returncode != 0 or not os.path.exists(out):
+        raise SystemExit(f"requantize to Q4_K_S failed (exit {r.returncode})")
+    model_cache.commit()
+    print(f"requantized Q4_K_S GGUF: {out}", flush=True)
+    return out
+
+
+@app.function(**GPU_RUN)
+def gpu_batched_verify(
+    model: str = "bartowski/Mistral-7B-Instruct-v0.3-GGUF",
+    hf_file: str = "Mistral-7B-Instruct-v0.3-f32.gguf",
+) -> str:
+    """Numerical-correctness gate for the on-device batched decode forward:
+    `batched_gpu_matches_single_seq` asserts the B-row `forward_batch_gpu` output
+    matches B independent single-seq runs by argmax (+ top-1 logit tolerance)."""
+    import glob
+    import os
+    import re
+    import subprocess
+
+    # Resolve / warm a real Q4_K GGUF the test can mmap (the test reads
+    # OX_BATCHED_TEST_GGUF, defaulting to /root/models/<file>).
+    if _run("cargo build --release --package oxidize-cli --bin oxidize-cli --features cuda") != 0:
+        raise SystemExit("oxidize-cli CUDA build failed")
+    cli = f"{REPO_ROOT}/target/release/oxidize-cli"
+    safe = re.sub(r"[^A-Za-z0-9]", "-", model)
+    gguf = f"/root/.cache/oxidize/hf/{safe}/main/{hf_file}"
+    if not os.path.exists(gguf):
+        warm = [cli, "run", model, "--file", hf_file, "warm", "--no-api", "--max-tokens", "1"]
+        print(f"$ {' '.join(warm)}", flush=True)
+        print("(streaming model download/warm output below)", flush=True)
+        w = subprocess.run(warm, cwd=REPO_ROOT)
+        if not os.path.exists(gguf):
+            hits = glob.glob(f"/root/.cache/oxidize/hf/{safe}/main/*.gguf")
+            gguf = hits[0] if hits else gguf
+    print(f"resolved GGUF: {gguf}", flush=True)
+    gguf = _requantize_q4ks(gguf)
+
+    env = dict(os.environ)
+    env["OX_BATCHED_TEST_GGUF"] = gguf
+    env["OX_GPU_BATCHED_DEBUG"] = "1"
+    command = (
+        "cargo test -p oxidize-core --features cuda "
+        "batched_gpu_matches_single_seq -- --include-ignored --nocapture"
+    )
+    print(f"$ {command}", flush=True)
+    rc = subprocess.run(command, shell=True, cwd=REPO_ROOT, env=env).returncode
+    cuda_target_cache.commit()
+    registry_cache.commit()
+    model_cache.commit()
+    if rc != 0:
+        raise SystemExit(f"batched GPU parity test failed (exit {rc})")
+    return "batched GPU parity test passed"
+
+
+@app.function(**GPU_RUN)
+def gpu_batched_tps(
+    model: str = "bartowski/Mistral-7B-Instruct-v0.3-GGUF",
+    hf_file: str = "Mistral-7B-Instruct-v0.3-f32.gguf",
+    prompt: str = "1,2,3,4",
+    max_tokens: int = 64,
+) -> str:
+    """Throughput of the on-device batched decode path at B=1,4,8. Drives
+    `batched_decode_bench` with OX_GPU_BATCHED=1 (which routes decode rows through
+    `forward_batch_gpu`, falling back to CPU when ineligible) and prints aggregate
+    tok/s scaling vs B=1, plus a flag-OFF control proving the default path is
+    unchanged."""
+    import glob
+    import os
+    import re
+    import subprocess
+
+    if _run("cargo build --release --package oxidize-cli --bin batched_decode_bench --features cuda") != 0:
+        raise SystemExit("batched_decode_bench CUDA build failed")
+    if _run("cargo build --release --package oxidize-cli --bin oxidize-cli --features cuda") != 0:
+        raise SystemExit("oxidize-cli CUDA build failed")
+    bench = f"{REPO_ROOT}/target/release/batched_decode_bench"
+    cli = f"{REPO_ROOT}/target/release/oxidize-cli"
+
+    safe = re.sub(r"[^A-Za-z0-9]", "-", model)
+    gguf = f"/root/.cache/oxidize/hf/{safe}/main/{hf_file}"
+    if not os.path.exists(gguf):
+        warm = [cli, "run", model, "--file", hf_file, "warm", "--no-api", "--max-tokens", "1"]
+        print(f"$ {' '.join(warm)}", flush=True)
+        print("(streaming model download/warm output below)", flush=True)
+        w = subprocess.run(warm, cwd=REPO_ROOT)
+        if not os.path.exists(gguf):
+            hits = glob.glob(f"/root/.cache/oxidize/hf/{safe}/main/*.gguf")
+            if hits:
+                gguf = hits[0]
+            else:
+                raise SystemExit(f"could not locate GGUF at {gguf}")
+    print(f"resolved GGUF: {gguf}", flush=True)
+    gguf = _requantize_q4ks(gguf)
+
+    steps = max(max_tokens, 64)
+
+    def run_one(batch: int, gpu_batched: bool) -> float:
+        env = dict(os.environ)
+        if gpu_batched:
+            env["OX_GPU_BATCHED"] = "1"
+        else:
+            env.pop("OX_GPU_BATCHED", None)
+        cmd = [bench, "--model", gguf, "--batch", str(batch), "--steps", str(steps),
+               "--prompt", prompt]
+        label = "gpu_batched" if gpu_batched else "default"
+        print(f"\n\033[1;36m# batch={batch} {label}\033[0m\n$ {' '.join(cmd)}", flush=True)
+        out = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True, env=env)
+        blob = (out.stdout or "") + (out.stderr or "")
+        print(blob[-1500:], flush=True)
+        if out.returncode != 0:
+            raise SystemExit(f"batched_decode_bench failed (exit {out.returncode}) at batch={batch}")
+        m = re.findall(r"(\d+\.\d+)\s*tok/s", blob)
+        if not m:
+            raise SystemExit(f"could not parse tok/s at batch={batch}")
+        return float(m[-1])
+
+    # Control: OX_GPU_BATCHED unset at B=1 (default device forward unchanged).
+    control = run_one(1, gpu_batched=False)
+
+    sizes = [1, 4, 8]
+    results = {b: run_one(b, gpu_batched=True) for b in sizes}
+    base = results[1]
+
+    lines = [f"control (OX_GPU_BATCHED unset) batch=1: {control:.2f} tok/s"]
+    for b in sizes:
+        ratio = results[b] / base if base > 0 else float("nan")
+        lines.append(f"batch={b:<2d} {results[b]:.2f} tok/s   ({ratio:.2f}x vs batch=1)")
+
+    cuda_target_cache.commit()
+    registry_cache.commit()
+    model_cache.commit()
+    summary = (
+        f"\n=== Batched GPU decode TPS on H100 ===\n"
+        f"model: {model} ({hf_file})  steps/seq: {steps}\n"
+        + "\n".join(lines)
+        + "\n\nExpectation: aggregate tok/s grows with B because decode is\n"
+        "HBM-bandwidth-bound and B sequences amortize one weight pass per\n"
+        "projection (`forward_batch_gpu`). The control proves OX_GPU_BATCHED\n"
+        "unset leaves the single-token device path untouched.\n"
+    )
+    print(summary, flush=True)
+    return summary
 
 
 @app.function(**GPU_RUN)
@@ -662,8 +857,22 @@ def gpu_next_profile(
         *common_args,
     ]
     variants = (
-        ("off", {"OX_GPU_FFN_FUSE": "0", "OX_GPU_LMHEAD_MULTIROW": "0"}),
-        ("on", {"OX_GPU_FFN_FUSE": "1", "OX_GPU_LMHEAD_MULTIROW": "1"}),
+        (
+            "off",
+            {
+                "OX_GPU_FFN_FUSE": "0",
+                "OX_GPU_LMHEAD_MULTIROW": "0",
+                "OX_GPU_GEMV_BLOCK": "256",
+            },
+        ),
+        (
+            "on",
+            {
+                "OX_GPU_FFN_FUSE": "1",
+                "OX_GPU_LMHEAD_MULTIROW": "0",
+                "OX_GPU_GEMV_BLOCK": "1024",
+            },
+        ),
     )
     measurements: dict[str, list[float]] = {}
     traces: dict[str, tuple[tuple[int, ...], str]] = {}
@@ -1088,10 +1297,17 @@ def gpu_flag_sweep(
     configs = [
         ("cpu_baseline", {"OX_GPU_ATTN": "0"}),
         ("gpu_attn", {"OX_GPU_ATTN": "1"}),
+        # Multi-warp-per-row Q4_K f32-in GEMV (QKV+Wo). Same f32 activation as
+        # gpu_attn, so it must share gpu_attn's divergence point exactly while
+        # running faster (more in-flight HBM requests per row).
+        ("gpu_attn+gemv_mw", {"OX_GPU_ATTN": "1", "OX_GPU_GEMV_MW": "1"}),
         ("gpu_attn+ffn_fuse", {"OX_GPU_ATTN": "1", "OX_GPU_FFN_FUSE": "1"}),
         ("gpu_attn+fused_mmq", {"OX_GPU_ATTN": "1", "OX_GPU_FUSED_MMQ": "1"}),
         ("gpu_full_stack", {"OX_GPU_ATTN": "1", "OX_GPU_FFN_FUSE": "1",
                             "OX_GPU_FUSED_MMQ": "1", "OX_GPU_LMHEAD_MULTIROW": "1"}),
+        ("gpu_full_stack+gemv_mw", {"OX_GPU_ATTN": "1", "OX_GPU_FFN_FUSE": "1",
+                                    "OX_GPU_FUSED_MMQ": "1", "OX_GPU_LMHEAD_MULTIROW": "1",
+                                    "OX_GPU_GEMV_MW": "1"}),
     ]
     results = []
     base_tps, base_arg, _ = run(*configs[0])
@@ -1160,6 +1376,50 @@ def _path_exists(p: str) -> bool:
     return os.path.exists(p)
 
 
+@app.function(**GPU_RUN)
+def llama_cpp_bench(
+    gguf: str = "/root/.cache/oxidize/hf/bartowski-Mistral-7B-Instruct-v0-3-GGUF/main/Mistral-7B-Instruct-v0.3-f32.gguf.q4ks.gguf",
+) -> str:
+    """Same-box llama.cpp reference on H100 against the SAME Q4_K_S GGUF oxidize
+    benches. Builds llama.cpp (CUDA, sm_90) once into the model_cache volume, then
+    reports single-stream tg (llama-bench) and batched aggregate t/s at npl=1,4,8
+    (llama-batched-bench) for an apples-to-apples comparison."""
+    import os
+    import subprocess
+
+    root = "/root/.cache/oxidize/llamacpp"
+    bench = f"{root}/build/bin/llama-bench"
+    bbench = f"{root}/build/bin/llama-batched-bench"
+    if not (os.path.exists(bench) and os.path.exists(bbench)):
+        if not os.path.exists(f"{root}/CMakeLists.txt"):
+            subprocess.run(
+                ["git", "clone", "--depth", "1",
+                 "https://github.com/ggml-org/llama.cpp", root], check=True)
+        subprocess.run(
+            ["cmake", "-B", f"{root}/build", "-S", root,
+             "-DGGML_CUDA=ON", "-DCMAKE_CUDA_ARCHITECTURES=90",
+             "-DLLAMA_CURL=OFF", "-DCMAKE_BUILD_TYPE=Release"], check=True)
+        subprocess.run(
+            ["cmake", "--build", f"{root}/build", "-j", "--config", "Release",
+             "--target", "llama-bench", "llama-batched-bench"], check=True)
+        model_cache.commit()
+    if not os.path.exists(gguf):
+        raise SystemExit(f"GGUF not found: {gguf} (run gpu-batched-tps first to populate it)")
+
+    subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"])
+    print("\n\033[1;36m# llama.cpp single-stream (tg128)\033[0m", flush=True)
+    s = subprocess.run([bench, "-m", gguf, "-ngl", "99", "-p", "0", "-n", "128", "-r", "3"],
+                       capture_output=True, text=True)
+    print((s.stdout or "") + (s.stderr or "")[-500:], flush=True)
+    print("\n\033[1;36m# llama.cpp batched-bench (npl 1,4,8)\033[0m", flush=True)
+    b = subprocess.run(
+        [bbench, "-m", gguf, "-ngl", "99", "-c", "8192",
+         "-npp", "16", "-ntg", "128", "-npl", "1,4,8"],
+        capture_output=True, text=True)
+    print((b.stdout or "") + (b.stderr or "")[-500:], flush=True)
+    return "llama.cpp bench done"
+
+
 @app.local_entrypoint()
 def main(
     action: str = "smoke",
@@ -1189,6 +1449,8 @@ def main(
         print(gpu_splitk_bench.with_options(gpu=gpu).remote())
     elif action == "gpu-splitk-test":
         print(gpu_splitk_test.with_options(gpu=gpu).remote())
+    elif action == "gpu-gemv-mw-bench":
+        print(gpu_gemv_mw_bench.with_options(gpu=gpu).remote())
     elif action == "gpu-profile":
         if model == "Qwen/Qwen2.5-0.5B-Instruct-GGUF":
             model, hf_file = "Qwen/Qwen3-4B-GGUF", "Qwen3-4B-Q4_K_M.gguf"
@@ -1221,6 +1483,21 @@ def main(
     elif action == "gpu-attn":
         fn = gpu_attn_verify.with_options(gpu=gpu) if gpu != "L4" else gpu_attn_verify
         print(fn.remote(model, hf_file, prompt, max_tokens))
+    elif action == "gpu-batched-verify":
+        fn = gpu_batched_verify.with_options(gpu=gpu) if gpu != "L4" else gpu_batched_verify
+        print(fn.remote())
+    elif action == "llama-cpp-bench":
+        print(llama_cpp_bench.with_options(gpu="H100").remote())
+    elif action == "gpu-batched-tps":
+        # Pin the eligible no-bias model + a NUMERIC prompt (the bench parses
+        # --prompt as comma-separated u32 token ids, not free text).
+        fn = gpu_batched_tps.with_options(gpu="H100")
+        print(fn.remote(
+            "bartowski/Mistral-7B-Instruct-v0.3-GGUF",
+            "Mistral-7B-Instruct-v0.3-f32.gguf",
+            "1,2,3,4",
+            max(max_tokens, 64),
+        ))
     elif action == "gpu-dump":
         m = "bartowski/Mistral-7B-Instruct-v0.3-GGUF" if model.startswith("Qwen/Qwen2.5-0.5B") else model
         hf = "Mistral-7B-Instruct-v0.3-Q4_K_M.gguf" if model.startswith("Qwen/Qwen2.5-0.5B") else hf_file
