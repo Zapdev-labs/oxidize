@@ -9,12 +9,16 @@
 package oxk
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"os"
 	"strconv"
 	"sync"
 )
+
+// ErrInvalidInput is returned when buffer sizes or shapes do not match.
+var ErrInvalidInput = errors.New("oxk: invalid input")
 
 // ---------------------------------------------------------------------------
 // Constants (match GGUF K-quants)
@@ -249,17 +253,18 @@ func readQ8kBsum(bsums []byte, index int) int16 {
 // ---------------------------------------------------------------------------
 
 // QuantizeQ8KInto quantizes vector (length nBlocks*256) into nBlocks Q8_K blocks.
-func QuantizeQ8KInto(vector []float32, nBlocks int, out []byte) {
+func QuantizeQ8KInto(vector []float32, nBlocks int, out []byte) error {
 	if len(vector) != nBlocks*QK_K {
-		panic("vector length mismatch")
+		return fmt.Errorf("%w: vector length mismatch", ErrInvalidInput)
 	}
 	if len(out) < nBlocks*BLOCK_Q8_K_BYTES {
-		panic("output buffer too small")
+		return fmt.Errorf("%w: output buffer too small", ErrInvalidInput)
 	}
 	for b, blockIn := range chunksExact(vector, QK_K) {
 		blockOut := out[b*BLOCK_Q8_K_BYTES : (b+1)*BLOCK_Q8_K_BYTES]
 		quantizeQ8KBlock(blockIn, blockOut)
 	}
+	return nil
 }
 
 func quantizeQ8KBlock(blockIn []float32, blockOut []byte) {
@@ -288,7 +293,7 @@ func quantizeQ8KBlock(blockIn []float32, blockOut []byte) {
 	blockOut[3] = byte(bits >> 24)
 	qsOff := 4
 	for i, v := range blockIn {
-		q := int(iscale * float64(v))
+		q := int(math.Round(iscale * float64(v)))
 		if q < -128 {
 			q = -128
 		}
@@ -320,12 +325,12 @@ func quantizeQ8KBlock(blockIn []float32, blockOut []byte) {
 // ---------------------------------------------------------------------------
 
 // Q4kQ8kRowDotScalar dots one Q4_K row (blocksPerRow blocks) against a Q8_K vector.
-func Q4kQ8kRowDotScalar(row []byte, blocksPerRow int, q8k []byte) float32 {
+func Q4kQ8kRowDotScalar(row []byte, blocksPerRow int, q8k []byte) (float32, error) {
 	if len(row) < blocksPerRow*BLOCK_Q4_K_SIZE {
-		panic("row too small")
+		return 0, fmt.Errorf("%w: row too small", ErrInvalidInput)
 	}
 	if len(q8k) < blocksPerRow*BLOCK_Q8_K_BYTES {
-		panic("q8k too small")
+		return 0, fmt.Errorf("%w: q8k too small", ErrInvalidInput)
 	}
 	var acc float32
 	for blockIdx := 0; blockIdx < blocksPerRow; blockIdx++ {
@@ -360,7 +365,7 @@ func Q4kQ8kRowDotScalar(row []byte, blocksPerRow int, q8k []byte) float32 {
 		}
 		acc += dW*dQ8*float32(pos) - dminW*dQ8*float32(minAcc)
 	}
-	return acc
+	return acc, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -368,41 +373,56 @@ func Q4kQ8kRowDotScalar(row []byte, blocksPerRow int, q8k []byte) float32 {
 // ---------------------------------------------------------------------------
 
 // Q4kQ8kRowDotX1Scalar is the single-row scalar dot (alias for the scalar function).
-func Q4kQ8kRowDotX1Scalar(row []byte, blocksPerRow int, q8k []byte) float32 {
+func Q4kQ8kRowDotX1Scalar(row []byte, blocksPerRow int, q8k []byte) (float32, error) {
 	return Q4kQ8kRowDotScalar(row, blocksPerRow, q8k)
 }
 
 // Q4kQ8kRowDotX4Scalar dots 4 consecutive rows against one q8k vector.
-func Q4kQ8kRowDotX4Scalar(rows []byte, rowBytes int, blocksPerRow int, q8k []byte, out []float32) {
+func Q4kQ8kRowDotX4Scalar(rows []byte, rowBytes int, blocksPerRow int, q8k []byte, out []float32) error {
 	if len(out) < 4 {
-		panic("out too small")
+		return fmt.Errorf("%w: out too small", ErrInvalidInput)
 	}
 	for r := 0; r < 4; r++ {
 		row := rows[r*rowBytes : (r+1)*rowBytes]
-		out[r] = Q4kQ8kRowDotScalar(row, blocksPerRow, q8k)
+		v, err := Q4kQ8kRowDotScalar(row, blocksPerRow, q8k)
+		if err != nil {
+			return err
+		}
+		out[r] = v
 	}
+	return nil
 }
 
 // Q4kQ8kRowDotX8Scalar dots 8 consecutive rows against one q8k vector.
-func Q4kQ8kRowDotX8Scalar(rows []byte, rowBytes int, blocksPerRow int, q8k []byte, out []float32) {
+func Q4kQ8kRowDotX8Scalar(rows []byte, rowBytes int, blocksPerRow int, q8k []byte, out []float32) error {
 	if len(out) < 8 {
-		panic("out too small")
+		return fmt.Errorf("%w: out too small", ErrInvalidInput)
 	}
 	for r := 0; r < 8; r++ {
 		row := rows[r*rowBytes : (r+1)*rowBytes]
-		out[r] = Q4kQ8kRowDotScalar(row, blocksPerRow, q8k)
+		v, err := Q4kQ8kRowDotScalar(row, blocksPerRow, q8k)
+		if err != nil {
+			return err
+		}
+		out[r] = v
 	}
+	return nil
 }
 
 // Q4kQ8kRowDotX16Scalar dots 16 consecutive rows against one q8k vector.
-func Q4kQ8kRowDotX16Scalar(rows []byte, rowBytes int, blocksPerRow int, q8k []byte, out []float32) {
+func Q4kQ8kRowDotX16Scalar(rows []byte, rowBytes int, blocksPerRow int, q8k []byte, out []float32) error {
 	if len(out) < 16 {
-		panic("out too small")
+		return fmt.Errorf("%w: out too small", ErrInvalidInput)
 	}
 	for r := 0; r < 16; r++ {
 		row := rows[r*rowBytes : (r+1)*rowBytes]
-		out[r] = Q4kQ8kRowDotScalar(row, blocksPerRow, q8k)
+		v, err := Q4kQ8kRowDotScalar(row, blocksPerRow, q8k)
+		if err != nil {
+			return err
+		}
+		out[r] = v
 	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -414,13 +434,13 @@ func Q4kQ8kRowDotX16Scalar(rows []byte, rowBytes int, blocksPerRow int, q8k []by
 // rows must point at out.len() rows of blocksPerRow Q4_K blocks laid out back-to-back
 // (rowBytes = blocksPerRow * BLOCK_Q4_K_SIZE apart); q8k holds blocksPerRow Q8_K blocks.
 // Uses the widest available tile width (default 16) with scalar fallback.
-func GemvQ4kRange(rows []byte, blocksPerRow int, q8k []byte, out []float32) {
+func GemvQ4kRange(rows []byte, blocksPerRow int, q8k []byte, out []float32) error {
 	rowBytes := blocksPerRow * BLOCK_Q4_K_SIZE
 	if len(rows) < len(out)*rowBytes {
-		panic("rows buffer too small")
+		return fmt.Errorf("%w: rows buffer too small", ErrInvalidInput)
 	}
 	if len(q8k) < blocksPerRow*BLOCK_Q8_K_BYTES {
-		panic("q8k buffer too small")
+		return fmt.Errorf("%w: q8k buffer too small", ErrInvalidInput)
 	}
 
 	tile := MaxTile()
@@ -431,7 +451,9 @@ func GemvQ4kRange(rows []byte, blocksPerRow int, q8k []byte, out []float32) {
 	for tile >= 16 && r+16 <= n {
 		base := rows[r*rowBytes:]
 		var hex [16]float32
-		Q4kQ8kRowDotX16Scalar(base, rowBytes, blocksPerRow, q8k, hex[:])
+		if err := Q4kQ8kRowDotX16Scalar(base, rowBytes, blocksPerRow, q8k, hex[:]); err != nil {
+			return err
+		}
 		copy(out[r:r+16], hex[:])
 		r += 16
 	}
@@ -439,7 +461,9 @@ func GemvQ4kRange(rows []byte, blocksPerRow int, q8k []byte, out []float32) {
 	for tile >= 8 && r+8 <= n {
 		base := rows[r*rowBytes:]
 		var octet [8]float32
-		Q4kQ8kRowDotX8Scalar(base, rowBytes, blocksPerRow, q8k, octet[:])
+		if err := Q4kQ8kRowDotX8Scalar(base, rowBytes, blocksPerRow, q8k, octet[:]); err != nil {
+			return err
+		}
 		copy(out[r:r+8], octet[:])
 		r += 8
 	}
@@ -447,16 +471,23 @@ func GemvQ4kRange(rows []byte, blocksPerRow int, q8k []byte, out []float32) {
 	for tile >= 4 && r+4 <= n {
 		base := rows[r*rowBytes:]
 		var quad [4]float32
-		Q4kQ8kRowDotX4Scalar(base, rowBytes, blocksPerRow, q8k, quad[:])
+		if err := Q4kQ8kRowDotX4Scalar(base, rowBytes, blocksPerRow, q8k, quad[:]); err != nil {
+			return err
+		}
 		copy(out[r:r+4], quad[:])
 		r += 4
 	}
 	// x1 tail
 	for r < n {
 		row := rows[r*rowBytes : (r+1)*rowBytes]
-		out[r] = Q4kQ8kRowDotScalar(row, blocksPerRow, q8k)
+		v, err := Q4kQ8kRowDotScalar(row, blocksPerRow, q8k)
+		if err != nil {
+			return err
+		}
+		out[r] = v
 		r++
 	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -465,7 +496,7 @@ func GemvQ4kRange(rows []byte, blocksPerRow int, q8k []byte, out []float32) {
 
 func chunksExact[T any](s []T, size int) [][]T {
 	if len(s)%size != 0 {
-		panic("slice length not divisible by chunk size")
+		return nil
 	}
 	var out [][]T
 	for i := 0; i < len(s); i += size {
