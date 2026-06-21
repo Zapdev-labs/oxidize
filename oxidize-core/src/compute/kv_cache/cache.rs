@@ -535,8 +535,7 @@ impl KvCache {
             let physical_position = self.physical_position(p);
             read_storage(storage, &self.config, layer, physical_position, &mut row);
             let out_off = p * logical_token_size;
-            out[out_off..out_off + logical_token_size]
-                .copy_from_slice(&row[..logical_token_size]);
+            out[out_off..out_off + logical_token_size].copy_from_slice(&row[..logical_token_size]);
         }
         Ok(())
     }
