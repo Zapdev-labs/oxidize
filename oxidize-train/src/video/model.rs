@@ -1,7 +1,9 @@
 use rand::{SeedableRng, rngs::StdRng};
 use serde::{Deserialize, Serialize};
 
-use crate::{AdamW, Linear, Matrix, argmax, cross_entropy_with_logits, relu_backward_in_place, relu_in_place};
+use crate::{
+    AdamW, Linear, Matrix, argmax, cross_entropy_with_logits, relu_backward_in_place, relu_in_place,
+};
 
 /// A compact, fully-trainable video classifier:
 /// learned patch embedding → ReLU → mean-pool patches within each frame →
@@ -209,8 +211,8 @@ mod tests {
 
     #[test]
     fn mean_pool_then_unpool_preserves_totals() {
-        let input = Matrix::from_vec(4, 2, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])
-            .expect("matrix");
+        let input =
+            Matrix::from_vec(4, 2, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]).expect("matrix");
         let pooled = mean_pool(&input, 2);
         assert_eq!(pooled.rows(), 2);
         // clip 0 rows (1,2),(3,4) -> mean (2,3); clip 1 (5,6),(7,8) -> (6,7)
