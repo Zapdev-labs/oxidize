@@ -32,7 +32,9 @@ fn load_imatrix(path: &Path) -> Result<Imatrix> {
     }
     let mut cursor = 0usize;
     let read_i32 = |buf: &[u8], at: &mut usize| -> Result<i32> {
-        let end = at.checked_add(4).ok_or_else(|| anyhow!("imatrix truncated"))?;
+        let end = at
+            .checked_add(4)
+            .ok_or_else(|| anyhow!("imatrix truncated"))?;
         if end > buf.len() {
             bail!("imatrix truncated while reading i32");
         }
@@ -460,7 +462,7 @@ fn uses_k_quant_blocks(quantization: GgufQuantizationType) -> bool {
             | GgufQuantizationType::Q3_K_L
             | GgufQuantizationType::Q4_K_S
             | GgufQuantizationType::Q4_K_M
-            |         GgufQuantizationType::Q5_K_S
+            | GgufQuantizationType::Q5_K_S
             | GgufQuantizationType::Q5_K_M
             | GgufQuantizationType::Q6_K
             | GgufQuantizationType::IQ4_XS
@@ -1131,14 +1133,16 @@ mod tests {
     #[test]
     fn q4_k_m_policy_uses_mixed_types_and_deepseek_fallbacks() {
         let output = tensor_info("output.weight", vec![256, 256], 1);
-        let output_plan = build_tensor_plan(&output, 256 * 256 * 2, GgufQuantizationType::Q4_K_M, None)
-            .expect("output plan should build");
+        let output_plan =
+            build_tensor_plan(&output, 256 * 256 * 2, GgufQuantizationType::Q4_K_M, None)
+                .expect("output plan should build");
         assert_eq!(output_plan.output_quantization, GgufQuantizationType::Q6_K);
         assert_eq!(output_plan.output_ggml_type, 14);
 
         let mla = tensor_info("blk.0.attn_k_b.weight", vec![128, 512, 64, 1], 30);
-        let mla_plan = build_tensor_plan(&mla, 128 * 512 * 64 * 2, GgufQuantizationType::Q4_K_M, None)
-            .expect("MLA plan should build");
+        let mla_plan =
+            build_tensor_plan(&mla, 128 * 512 * 64 * 2, GgufQuantizationType::Q4_K_M, None)
+                .expect("MLA plan should build");
         assert_eq!(mla_plan.output_quantization, GgufQuantizationType::Q5_0);
         assert_eq!(mla_plan.output_ggml_type, 6);
 
@@ -1149,8 +1153,9 @@ mod tests {
         assert!(!norm_plan.quantize);
 
         let router = tensor_info("blk.0.ffn_gate_inp.weight", vec![7168, 268], 0);
-        let router_plan = build_tensor_plan(&router, 7168 * 268 * 4, GgufQuantizationType::Q4_K_M, None)
-            .expect("router plan should build");
+        let router_plan =
+            build_tensor_plan(&router, 7168 * 268 * 4, GgufQuantizationType::Q4_K_M, None)
+                .expect("router plan should build");
         assert_eq!(router_plan.output_quantization, GgufQuantizationType::F32);
         assert!(!router_plan.quantize);
     }
