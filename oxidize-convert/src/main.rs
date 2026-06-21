@@ -113,7 +113,9 @@ fn run(args: Args) -> Result<()> {
     } else {
         None
     };
-    let convert_output = intermediate_output.clone().unwrap_or_else(|| final_output.clone());
+    let convert_output = intermediate_output
+        .clone()
+        .unwrap_or_else(|| final_output.clone());
     let convert_opts = ConvertOptions {
         output: convert_output,
         ..convert_opts
@@ -121,7 +123,8 @@ fn run(args: Args) -> Result<()> {
     let summary = run::convert(convert_opts)?;
     println!(
         "Converted {} tensors -> {}",
-        summary.tensor_count, summary.output.display()
+        summary.tensor_count,
+        summary.output.display()
     );
 
     // Phase 2 (optional): Wanda / magnitude prune.
@@ -147,14 +150,18 @@ fn run(args: Args) -> Result<()> {
                 let report = oxidize_prune::wanda::wanda_prune(opts)?;
                 println!(
                     "Wanda-pruned {} of {} tensors -> {}",
-                    report.pruned_tensors, report.total_tensors, report.output.display()
+                    report.pruned_tensors,
+                    report.total_tensors,
+                    report.output.display()
                 );
             }
             CliPruneMethod::Magnitude => {
                 let report = oxidize_prune::wanda::magnitude_prune(opts)?;
                 println!(
                     "Magnitude-pruned {} of {} tensors -> {}",
-                    report.pruned_tensors, report.total_tensors, report.output.display()
+                    report.pruned_tensors,
+                    report.total_tensors,
+                    report.output.display()
                 );
             }
         }
