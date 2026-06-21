@@ -4,8 +4,8 @@ use anyhow::Result;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use oxidize_train::video::{
     FrameConfig, GenTrainingConfig, LabelTask, VideoTrainingConfig, default_generator_path,
-    default_model_path, ffmpeg_available, generate_video, load_gen_dataset, load_generator,
-    load_dataset, save_generator, save_model, train_generator, train_video_classifier,
+    default_model_path, ffmpeg_available, generate_video, load_dataset, load_gen_dataset,
+    load_generator, save_generator, save_model, train_generator, train_video_classifier,
 };
 use oxidize_train::{TrainingConfig, load_csv_dataset, train_classifier};
 
@@ -344,7 +344,10 @@ fn run_generate(args: GenerateArgs) -> Result<()> {
     println!();
     println!("oxidize-train generate: seed_clip = {}", report.seed_clip);
     println!("oxidize-train generate: frames    = {}", report.frames);
-    println!("oxidize-train generate: video     = {}", report.out.display());
+    println!(
+        "oxidize-train generate: video     = {}",
+        report.out.display()
+    );
     Ok(())
 }
 
