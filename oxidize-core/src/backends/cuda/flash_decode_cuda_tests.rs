@@ -1,4 +1,6 @@
-use super::{benchmark_flash_decode_case, run_flash_decode_parity_case};
+use super::{
+    benchmark_flash_decode_case, benchmark_flash_decode_dispatch_case, run_flash_decode_parity_case,
+};
 
 const PARITY_TOLERANCE: f32 = 2.0e-5;
 
@@ -30,12 +32,13 @@ fn split_k_decode_matches_dense_reference_for_gqa_tail_and_base_row() {
     let (query_heads, kv_heads, head_dim, seq_len, base_row) = (8, 2, 64, 1025, 3);
 
     // When the real split-K CUDA decode is compared with dense CPU attention.
-    let (actual, expected) =
+    let (actual, legacy, expected) =
         run_flash_decode_parity_case(query_heads, kv_heads, head_dim, seq_len, base_row, false)
             .expect("CUDA parity fixture must execute");
 
     // Then every output lane is finite and agrees within the f32 kernel tolerance.
     assert_lane_parity(&actual, &expected);
+    assert_lane_parity(&legacy, &expected);
 }
 
 #[test]
@@ -44,12 +47,28 @@ fn split_k_decode_matches_dense_reference_for_extreme_scores() {
     let (query_heads, kv_heads, head_dim, seq_len, base_row) = (8, 2, 64, 1025, 3);
 
     // When the stabilized split-K CUDA path is compared with the dense reference.
-    let (actual, expected) =
+    let (actual, legacy, expected) =
         run_flash_decode_parity_case(query_heads, kv_heads, head_dim, seq_len, base_row, true)
             .expect("extreme-score CUDA parity fixture must execute");
 
     // Then every lane remains finite and matches the stable dense result.
     assert_lane_parity(&actual, &expected);
+    assert_lane_parity(&legacy, &expected);
+}
+
+#[test]
+fn split_k_decode_matches_dense_reference_for_full_width_heads() {
+    // Given the production Llama head width with GQA and an uneven split tail.
+    let (query_heads, kv_heads, head_dim, seq_len, base_row) = (32, 8, 128, 1025, 3);
+
+    // When both real CUDA kernels are compared with dense CPU attention.
+    let (actual, legacy, expected) =
+        run_flash_decode_parity_case(query_heads, kv_heads, head_dim, seq_len, base_row, false)
+            .expect("full-width CUDA parity fixture must execute");
+
+    // Then split-K and legacy decode preserve dense semantics at head_dim=128.
+    assert_lane_parity(&actual, &expected);
+    assert_lane_parity(&legacy, &expected);
 }
 
 fn sorted_median(samples: &[f64]) -> f64 {
@@ -100,4 +119,35 @@ fn split_k_h100_benchmark_reports_long_context_speedup() {
             "seq_len={seq_len}: split-K median {split_median_ms:.4} ms must beat legacy {legacy_median_ms:.4} ms"
         );
     }
+}
+
+#[test]
+#[ignore = "requires a CUDA GPU"]
+fn production_dispatch_short_context_preserves_legacy_latency_and_output() {
+    // Given a short decode below the automatic split-K threshold.
+    let (query_heads, kv_heads, head_dim, seq_len, warmup_count, sample_count) =
+        (32, 8, 128, 512, 3, 10);
+
+    // When production dispatch and the direct legacy baseline are measured.
+    let (selected_splits, dispatch_output, legacy_output, dispatch_ms, legacy_ms) =
+        benchmark_flash_decode_dispatch_case(
+            query_heads,
+            kv_heads,
+            head_dim,
+            seq_len,
+            warmup_count,
+            sample_count,
+        )
+        .expect("short-context production dispatch benchmark must execute");
+
+    // Then dispatch selects legacy, preserves output, and adds no material latency.
+    assert_eq!(selected_splits, 1, "seq_len=512 must select legacy decode");
+    assert_lane_parity(&dispatch_output, &legacy_output);
+    let dispatch_median_ms = sorted_median(&dispatch_ms);
+    let legacy_median_ms = sorted_median(&legacy_ms);
+    let jitter_budget_ms = (legacy_median_ms * 0.10).max(0.10);
+    assert!(
+        dispatch_median_ms <= legacy_median_ms + jitter_budget_ms,
+        "dispatch median {dispatch_median_ms:.4} ms exceeds legacy {legacy_median_ms:.4} ms plus {jitter_budget_ms:.4} ms jitter budget"
+    );
 }
