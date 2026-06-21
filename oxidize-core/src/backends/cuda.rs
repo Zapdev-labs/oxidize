@@ -30,6 +30,22 @@ pub const GEMV_Q4K_Q8K_FUSED_KERNEL_NAME: &str = "gemv_q4k_q8k_fused_kernel";
 pub const GEMV_Q4K_F32IN_MULTIROW_KERNEL_NAME: &str = "gemv_q4k_f32in_multirow_kernel";
 /// Q4_K × F32 GEMV — fallback when weights are Q6_K or DP4A path unavailable.
 pub const GEMV_Q4K_F32IN_KERNEL_NAME: &str = "gemv_q4k_f32in_kernel";
+/// Multi-warp-per-row Q4_K × F32 GEMV (OX_GPU_GEMV_MW): NWARPS warps cooperate on
+/// one output row for more in-flight HBM requests/row (H100 bandwidth). Output is
+/// numerically identical to [`GEMV_Q4K_F32IN_KERNEL_NAME`].
+pub const GEMV_Q4K_F32IN_MW_KERNEL_NAME: &str = "gemv_q4k_f32in_mw_kernel";
+pub const GEMV_Q4K_F32IN_2ROW_KERNEL_NAME: &str = "gemv_q4k_f32in_2row_kernel";
+pub const GEMV_Q4K_F32IN_RESIDUAL_KERNEL_NAME: &str = "gemv_q4k_f32in_residual_kernel";
+pub const GEMV_Q6K_F32IN_RESIDUAL_KERNEL_NAME: &str = "gemv_q6k_f32in_residual_kernel";
+/// Batched Q4_K × Q8_K GEMV: `ncols` (batch B) activation vectors share each
+/// weight stream (B GEMVs → one weight pass; weights reused via warm L2). The
+/// continuous-batching GPU decode lever. Output row-major `[rows, ncols]`; each
+/// column matches [`GEMV_Q4_K_DIRECT_KERNEL_NAME`] on that activation alone.
+pub const GEMV_Q4K_Q8KIN_BN_KERNEL_NAME: &str = "gemv_q4k_q8kin_bN_kernel";
+/// Transpose the bN GEMV output `[rows, ncols]` -> per-row activation
+/// `[ncols, rows]` so each batched sequence's vector is contiguous for the
+/// per-seq attention/quantize steps. Pure index gather (no arithmetic).
+pub const TRANSPOSE_ROWB_KERNEL_NAME: &str = "transpose_rowB_to_Brow_kernel";
 /// Q6_K × F32 GEMV — GPU-native activation path for Q6_K weight matrices.
 pub const GEMV_Q6K_F32IN_KERNEL_NAME: &str = "gemv_q6k_f32in_kernel";
 pub const GEMV_IQ1_S_KERNEL_NAME: &str = "gemv_iq1_s_kernel";
@@ -90,6 +106,21 @@ fn f32_cache_key(slice: &[f32]) -> WeightCacheKey {
 #[inline(always)]
 fn bytes_cache_key(slice: &[u8]) -> WeightCacheKey {
     (slice.as_ptr() as usize, slice.len())
+}
+
+/// Env gate for the device-side batched decode forward (`OX_GPU_BATCHED=1`).
+///
+/// Default OFF: when unset the single-token GPU forward path is byte-identical.
+/// Consulted ONLY inside the batched forward orchestration (never by the
+/// single-token `layers.rs` driver), so the shipped default forward is untouched.
+#[cfg(feature = "cuda")]
+pub fn ox_gpu_batched_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("OX_GPU_BATCHED")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    })
 }
 
 pub fn cuda_build_info() -> CudaBuildInfo {

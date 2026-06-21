@@ -375,6 +375,33 @@ pub(crate) fn launch_quantize_f32_to_q8k_device(
     Ok(())
 }
 
+/// Pointer-variant of [`launch_quantize_f32_to_q8k_device`]: quantize a
+/// device-resident F32 vector into the Q8_K buffer at the raw device pointer
+/// `d_q8k` (used by the batched forward to write column `j` at the offset
+/// `j * blocks_per_row * 292` inside a shared activation buffer).
+#[cfg(feature = "cuda")]
+pub(crate) fn launch_quantize_f32_to_q8k_device_ptr(
+    gpu: &mut super::GpuState,
+    d_input: cust::memory::DevicePointer<f32>,
+    d_q8k: cust::memory::DevicePointer<u8>,
+    blocks_per_row: u32,
+) -> Result<(), String> {
+    let fn_q = gpu
+        .module
+        .get_function(QUANTIZE_F32_TO_Q8K_KERNEL_NAME)
+        .map_err(stringify)?;
+    let stream = &gpu.stream;
+    unsafe {
+        cust::launch!(fn_q<<<blocks_per_row, 256u32, 0, stream>>>(
+            d_input,
+            d_q8k,
+            blocks_per_row
+        ))
+        .map_err(stringify)?;
+    }
+    Ok(())
+}
+
 /// Q4_K × Q8_K GEMV: `d_q8k` holds `blocks_per_row` Q8_K blocks; output → `d_output`.
 #[cfg(feature = "cuda")]
 pub(crate) fn launch_gemv_q4k_q8kin_device(
@@ -406,6 +433,77 @@ pub(crate) fn launch_gemv_q4k_q8kin_device(
     Ok(())
 }
 
+/// Batched Q4_K × Q8_K GEMV: `ncols` (batch B ≤ 8) Q8_K activation vectors share
+/// each weight stream. `d_xq8k` holds `ncols` consecutive Q8_K activations
+/// (`ncols × blocks_per_row × 292` bytes); `d_output` is row-major `[rows, ncols]`.
+/// This is the GPU continuous-batching lever — one weighted pass over the matrix
+/// serves all B decode rows, the device analogue of CPU `forward_batch`.
+#[cfg(feature = "cuda")]
+pub(crate) fn launch_gemv_q4k_q8kin_bN_device(
+    gpu: &mut super::GpuState,
+    w_ptr: cust::memory::DevicePointer<u8>,
+    rows: u32,
+    blocks_per_row: u32,
+    ncols: u32,
+    d_xq8k: cust::memory::DevicePointer<u8>,
+    d_output: cust::memory::DevicePointer<f32>,
+) -> Result<(), String> {
+    let block_size = 256_u32;
+    let grid = rows.saturating_mul(32).div_ceil(block_size);
+    let fn_gemv = gpu
+        .module
+        .get_function(GEMV_Q4K_Q8KIN_BN_KERNEL_NAME)
+        .map_err(stringify)?;
+    let stream = &gpu.stream;
+    unsafe {
+        cust::launch!(fn_gemv<<<grid, block_size, 0, stream>>>(
+            w_ptr,
+            d_xq8k,
+            d_output,
+            rows,
+            blocks_per_row,
+            ncols
+        ))
+        .map_err(stringify)?;
+    }
+    Ok(())
+}
+
+/// Transpose the bN GEMV output `[rows, ncols]` (out[r*ncols + b]) into the
+/// per-sequence-contiguous layout `[ncols, rows]` (out[b*rows + r]) consumed by
+/// the per-seq RoPE / attention / quantize steps. Pure index gather — no
+/// arithmetic, so it cannot perturb numerics. One flat grid over `rows*ncols`.
+#[cfg(feature = "cuda")]
+pub(crate) fn launch_transpose_rowB(
+    gpu: &mut super::GpuState,
+    d_in: cust::memory::DevicePointer<f32>,
+    d_out: cust::memory::DevicePointer<f32>,
+    rows: u32,
+    ncols: u32,
+) -> Result<(), String> {
+    let total = rows.saturating_mul(ncols);
+    if total == 0 {
+        return Ok(());
+    }
+    let block_size = 256_u32;
+    let grid = total.div_ceil(block_size);
+    let func = gpu
+        .module
+        .get_function(TRANSPOSE_ROWB_KERNEL_NAME)
+        .map_err(stringify)?;
+    let stream = &gpu.stream;
+    unsafe {
+        cust::launch!(func<<<grid, block_size, 0, stream>>>(
+            d_in,
+            d_out,
+            rows,
+            ncols
+        ))
+        .map_err(stringify)?;
+    }
+    Ok(())
+}
+
 /// Launch F32-in GEMV (Q4_K or Q6_K) for device-resident activations.
 #[cfg(feature = "cuda")]
 pub(crate) fn launch_gemv_f32in_device(
@@ -417,7 +515,35 @@ pub(crate) fn launch_gemv_f32in_device(
     rows: u32,
     blocks_per_row: u32,
 ) -> Result<(), String> {
-    let block_size = 256_u32;
+    // Multi-warp-per-row path (Q4_K f32-in only): one block per output row, with
+    // OX_GEMV_MW_NWARPS warps cooperating for more in-flight HBM requests/row.
+    // Numerically identical to the single-warp kernel.
+    if kern_name == GEMV_Q4K_F32IN_KERNEL_NAME && ox_gpu_gemv_mw_enabled() {
+        let nwarps = ox_gpu_gemv_mw_nwarps();
+        let block_size = nwarps.saturating_mul(32).clamp(32, 1024);
+        let shmem = nwarps.saturating_mul(4); // one f32 per warp
+        let fn_mw = gpu
+            .module
+            .get_function(GEMV_Q4K_F32IN_MW_KERNEL_NAME)
+            .map_err(stringify)?;
+        let stream = &gpu.stream;
+        unsafe {
+            cust::launch!(fn_mw<<<rows, block_size, shmem, stream>>>(
+                w_ptr,
+                d_input,
+                d_output,
+                rows,
+                blocks_per_row
+            ))
+            .map_err(stringify)?;
+        }
+        return Ok(());
+    }
+
+    let block_size = super::gpu_native_forward::projection_gemv_block_size(
+        kern_name == GEMV_Q4K_F32IN_KERNEL_NAME,
+        rows,
+    );
     let grid = rows.saturating_mul(32).div_ceil(block_size);
     let fn_gemv = gpu.module.get_function(kern_name).map_err(stringify)?;
     let stream = &gpu.stream;
@@ -432,6 +558,35 @@ pub(crate) fn launch_gemv_f32in_device(
         .map_err(stringify)?;
     }
     Ok(())
+}
+
+/// Opt-in multi-warp-per-row Q4_K F32-in GEMV (`OX_GPU_GEMV_MW=1`). Each output
+/// row is computed by several cooperating warps so more HBM requests are in
+/// flight per row (Little's law) — the H100 bandwidth fix from llama.cpp PR
+/// #5394. Default OFF so the shipped single-warp path stays byte-identical until
+/// validated on GPU.
+#[cfg(feature = "cuda")]
+pub(super) fn ox_gpu_gemv_mw_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("OX_GPU_GEMV_MW")
+            .map(|v| v != "0" && !v.is_empty())
+            .unwrap_or(false)
+    })
+}
+
+/// Warps-per-row for the multi-warp GEMV (`OX_GEMV_MW_NWARPS`, default 4 per PR
+/// #5394). Clamped to [1, 32] so the cross-warp reduction fits a single warp.
+#[cfg(feature = "cuda")]
+pub(super) fn ox_gpu_gemv_mw_nwarps() -> u32 {
+    static NWARPS: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *NWARPS.get_or_init(|| {
+        std::env::var("OX_GEMV_MW_NWARPS")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(4)
+            .clamp(1, 32)
+    })
 }
 
 /// Opt-in: fuse activation Q8_K quantization into the Q4_K GEMV kernel

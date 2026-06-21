@@ -51,17 +51,15 @@ impl InferenceModel {
                         | GgufQuantizationType::IQ1_M
                         | GgufQuantizationType::NVFP4
                 );
-                if should_keep_quantized(name) && is_supported_quant_gemv {
-                    if use_mmap_flag {
-                        Ok(WeightStorage::MmapQuantized(
-                            qtype,
-                            mapped.tensor_mmap(tensor),
-                            offset,
-                            qsize,
-                        ))
-                    } else {
-                        Ok(WeightStorage::Quantized(qtype, qdata.to_vec()))
-                    }
+                if should_keep_quantized(name) && use_mmap_flag {
+                    Ok(WeightStorage::MmapQuantized(
+                        qtype,
+                        mapped.tensor_mmap(tensor),
+                        offset,
+                        qsize,
+                    ))
+                } else if should_keep_quantized(name) && is_supported_quant_gemv {
+                    Ok(WeightStorage::Quantized(qtype, qdata.to_vec()))
                 } else {
                     let mut f32_data = vec![0.0_f32; count];
                     dequantize_scalar(qtype, qdata, &mut f32_data)
@@ -518,6 +516,11 @@ impl InferenceModel {
 
         let workspace = Workspace::for_config(&config);
         let last_output_hidden = vec![0.0_f32; config.hidden_size];
+        // Bind before the struct literal: `config` is moved into the `config`
+        // field below, so read `layer_count` from it first (struct-literal fields
+        // evaluate in source order, so an inline `config.layer_count` after the
+        // moved field fails to compile — notably only on the cuda build path).
+        let eagle3_layer_hiddens = vec![None; config.layer_count];
 
         Ok(Self {
             config,
@@ -533,6 +536,8 @@ impl InferenceModel {
             ssm_conv_buffers,
             workspace,
             last_output_hidden,
+            eagle3_capture_layers: Vec::new(),
+            eagle3_layer_hiddens,
             #[cfg(feature = "cuda")]
             pending_embed_token: None,
         })

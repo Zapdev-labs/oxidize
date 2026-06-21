@@ -76,8 +76,14 @@ fn main() {
     };
 
     let batched_flag = std::env::var("OX_BATCHED_DECODE").unwrap_or_default();
+    // When OX_GPU_BATCHED=1 (+ CUDA active + an eligible model) the decode rows
+    // are driven through the on-device batched forward (`forward_batch_gpu`), with
+    // a transparent fall back to the CPU `forward_batch` when it returns `None`.
+    let gpu_batched = std::env::var("OX_GPU_BATCHED")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
     eprintln!(
-        "batched_decode_bench: model={} batch={batch} steps={} prompt_len={} OX_BATCHED_DECODE={:?}",
+        "batched_decode_bench: model={} batch={batch} steps={} prompt_len={} OX_BATCHED_DECODE={:?} OX_GPU_BATCHED={gpu_batched}",
         args.model.display(),
         args.steps,
         prompt.len(),
@@ -108,13 +114,29 @@ fn main() {
 
     // Seed every sequence with the SAME prompt → byte-identical sequences, so
     // each decoded row must equal row 0 (a direct cross-row correctness check).
+    // GPU-then-CPU dispatch (mirrors ContinuousBatchEngine::step). When
+    // `gpu_batched` is false, or the device path is ineligible, this is exactly
+    // the CPU `forward_batch`.
+    let decode = |model: &mut InferenceModel,
+                      rows: &[(u32, usize)],
+                      kv: &mut [SeqKv]|
+     -> Vec<Vec<f32>> {
+        if gpu_batched {
+            if let Some(l) = model
+                .forward_batch_gpu(rows, kv, true)
+                .expect("forward_batch_gpu")
+            {
+                return l;
+            }
+        }
+        model.forward_batch(rows, kv, true).expect("forward_batch")
+    };
+
     let mut last = vec![0u32; batch];
     let mut pos = 0usize;
     for &tok in &prompt {
         let rows: Vec<(u32, usize)> = (0..batch).map(|_| (tok, pos)).collect();
-        let out = model
-            .forward_batch(&rows, &mut kv, true)
-            .expect("seed forward_batch");
+        let out = decode(&mut model, &rows, &mut kv);
         for i in 0..batch {
             last[i] = argmax(&out[i]);
         }
@@ -125,9 +147,7 @@ fn main() {
     let start = Instant::now();
     for step in 0..args.steps {
         let rows: Vec<(u32, usize)> = (0..batch).map(|i| (last[i], pos)).collect();
-        let out = model
-            .forward_batch(&rows, &mut kv, true)
-            .expect("decode forward_batch");
+        let out = decode(&mut model, &rows, &mut kv);
         if args.verify {
             for i in 1..batch {
                 assert!(

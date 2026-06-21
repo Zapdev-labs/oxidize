@@ -6,7 +6,7 @@ pub(super) use crate::flash_attention::{
 pub(super) use crate::gguf::{GgufQuantizationType, MappedGgufFile};
 pub(super) use crate::kv_cache::{KvCache, KvCacheConfig};
 pub(super) use crate::model::{Logits, Model, ModelError, Session, Token};
-pub(super) use crate::quantization::{dequantize_scalar, quantized_size};
+pub(super) use crate::quantization::{dequantize_scalar, quant_block_layout, quantized_size};
 pub(super) use crate::tensor::{
     DType, GemvJob, apply_geglu_inplace_f32, apply_rope_f32, apply_swiglu_inplace_f32,
     f16_le_to_f32, gemm_quantized_f32, gemv_f32, gemv_quantized_experts_f32,
@@ -49,6 +49,8 @@ pub enum ModelArchitecture {
     Lfm2,
     /// LiquidAI LFM2 hybrid with sparse MoE FFN (lfm2moe).
     Lfm2Moe,
+    /// Z.ai GLM MoE with DSA sparse attention (GLM-5.x family).
+    GlmMoeDsa,
 }
 
 impl ModelArchitecture {
@@ -56,7 +58,8 @@ impl ModelArchitecture {
     pub fn from_gguf(mapped: &MappedGgufFile) -> Self {
         let parsed = mapped.parsed();
         if let Some(arch) = parsed.architecture() {
-            match arch {
+            let arch = arch.replace('-', "_");
+            match arch.as_str() {
                 "llama" => Self::Llama,
                 "mistral" => Self::Mistral,
                 "mixtral" => Self::Mixtral,
@@ -75,6 +78,9 @@ impl ModelArchitecture {
                 "minimax" | "minimax-m2" | "minimax-text-01" => Self::MiniMax,
                 "lfm2" => Self::Lfm2,
                 "lfm2moe" => Self::Lfm2Moe,
+                "glm" | "glm4" | "glm_moe" | "glm_moe_dsa" | "glm_dsa" | "glmmoe" | "glmmoedsa" => {
+                    Self::GlmMoeDsa
+                }
                 _ => Self::Llama,
             }
         } else {
@@ -96,7 +102,7 @@ impl ModelArchitecture {
     pub fn uses_moe(&self) -> bool {
         matches!(
             self,
-            Self::Mixtral | Self::MiniMax | Self::Lfm2Moe | Self::DeepSeek
+            Self::Mixtral | Self::MiniMax | Self::Lfm2Moe | Self::DeepSeek | Self::GlmMoeDsa
         )
     }
 
@@ -113,7 +119,7 @@ impl ModelArchitecture {
 
     /// Whether this architecture uses MLA compressed attention.
     pub fn uses_mla(&self) -> bool {
-        matches!(self, Self::DeepSeek)
+        matches!(self, Self::DeepSeek | Self::GlmMoeDsa)
     }
 }
 
@@ -296,6 +302,8 @@ impl InferenceConfig {
         match arch {
             "qwen3_5_moe_text" | "qwen3_5_moe" | "qwen35moe" | "qwen3_5" | "qwen3_5_text"
             | "qwen35_text" => "qwen35",
+            // Unsloth GLM-5.2 GGUF uses hyphenated metadata keys (`glm-dsa.*`).
+            "glm_dsa" => "glm-dsa",
             other => other,
         }
     }
@@ -964,15 +972,7 @@ impl WeightStorage {
 }
 
 pub(super) fn weight_block_info(qtype: GgufQuantizationType) -> (usize, usize) {
-    match qtype {
-        GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M => (256, 144),
-        GgufQuantizationType::Q6_K => (256, 210),
-        GgufQuantizationType::Q8_0 => (32, 34),
-        GgufQuantizationType::NVFP4 => (64, 36),
-        GgufQuantizationType::IQ1_S => (256, 50),
-        GgufQuantizationType::IQ1_M => (256, 56),
-        _ => (1, 4), // fallback to f32
-    }
+    quant_block_layout(qtype).unwrap_or((1, 4))
 }
 
 /// Borrow a quantized weight tensor's raw bytes for the batched expert GEMV.
@@ -1296,6 +1296,9 @@ pub struct InferenceModel {
     /// Final output-normalized hidden row for the most recent target token.
     /// Native MTP consumes this row as its target-hidden input.
     pub(super) last_output_hidden: Vec<f32>,
+    /// Target layer indices whose hidden states are snapshotted for EAGLE3 draft fusion.
+    pub(super) eagle3_capture_layers: Vec<usize>,
+    pub(super) eagle3_layer_hiddens: Vec<Option<Vec<f32>>>,
     /// Token pending GPU embedding lookup in the next `run_layer_range` call.
     #[cfg(feature = "cuda")]
     pub(super) pending_embed_token: Option<crate::model::Token>,
@@ -1456,6 +1459,9 @@ pub(super) fn lookup_embedding_from_storage(
     }
 }
 
+#[path = "inference/batch_engine.rs"]
+mod batch_engine;
+pub use batch_engine::{BatchConfig, ContinuousBatchEngine, SeqId, StepOutput};
 #[path = "inference/forward.rs"]
 mod forward;
 #[path = "inference/layers.rs"]
@@ -1811,6 +1817,18 @@ impl Model for InferenceModel {
         }
 
         let start_pos = session.consumed_tokens();
+        let use_batched_verifier = std::env::var("OX_SPEC_VERIFY_BATCHED")
+            .ok()
+            .is_some_and(|value| !matches!(value.as_str(), "0" | "false" | "off"))
+            && tokens.len() > 1
+            && self.layers_supported_for_batched();
+        if use_batched_verifier {
+            let logits = self
+                .forward_batched(tokens, start_pos, true)?
+                .unwrap_or_default();
+            session.record_tokens(tokens.len());
+            return Ok(logits);
+        }
         let mut logits = Vec::with_capacity(tokens.len());
         for (i, &token) in tokens.iter().enumerate() {
             let pos = start_pos + i;
@@ -1856,6 +1874,7 @@ impl Model for InferenceModel {
             // F32). The KV cache writes in forward_batched use kv_cache.set()
             // which already handles all quant types correctly.
             self.forward_batched(tokens, start_pos, true)?
+                .and_then(|mut rows| rows.pop())
                 .unwrap_or_default()
         } else {
             let mut logits = Vec::new();
@@ -2063,6 +2082,106 @@ mod tests {
     }
 
     #[test]
+    fn glm_dsa_config_from_gguf_metadata() {
+        let mapped = MappedGgufFile::from_parsed_for_test(GgufFile {
+            version: 3,
+            tensor_count: 1,
+            metadata: BTreeMap::from([
+                (
+                    "general.architecture".to_owned(),
+                    GgufMetadataValue::String("glm-dsa".to_owned()),
+                ),
+                (
+                    "glm-dsa.block_count".to_owned(),
+                    GgufMetadataValue::Uint32(79),
+                ),
+                (
+                    "glm-dsa.nextn_predict_layers".to_owned(),
+                    GgufMetadataValue::Uint32(1),
+                ),
+                (
+                    "glm-dsa.embedding_length".to_owned(),
+                    GgufMetadataValue::Uint32(6144),
+                ),
+                (
+                    "glm-dsa.feed_forward_length".to_owned(),
+                    GgufMetadataValue::Uint32(12288),
+                ),
+                (
+                    "glm-dsa.attention.head_count".to_owned(),
+                    GgufMetadataValue::Uint32(64),
+                ),
+                (
+                    "glm-dsa.attention.head_count_kv".to_owned(),
+                    GgufMetadataValue::Uint32(1),
+                ),
+                (
+                    "glm-dsa.attention.key_length_mla".to_owned(),
+                    GgufMetadataValue::Uint32(256),
+                ),
+                (
+                    "glm-dsa.expert_count".to_owned(),
+                    GgufMetadataValue::Uint32(256),
+                ),
+                (
+                    "glm-dsa.expert_used_count".to_owned(),
+                    GgufMetadataValue::Uint32(8),
+                ),
+                (
+                    "glm-dsa.expert_feed_forward_length".to_owned(),
+                    GgufMetadataValue::Uint32(2048),
+                ),
+                (
+                    "glm-dsa.leading_dense_block_count".to_owned(),
+                    GgufMetadataValue::Uint32(3),
+                ),
+                (
+                    "glm-dsa.expert_gating_func".to_owned(),
+                    GgufMetadataValue::Uint32(2),
+                ),
+                (
+                    "glm-dsa.expert_weights_scale".to_owned(),
+                    GgufMetadataValue::Float32(2.5),
+                ),
+                (
+                    "glm-dsa.rope.freq_base".to_owned(),
+                    GgufMetadataValue::Float32(8_000_000.0),
+                ),
+                (
+                    "glm-dsa.vocab_size".to_owned(),
+                    GgufMetadataValue::Uint32(154880),
+                ),
+            ]),
+            tensor_infos: vec![GgufTensorInfo {
+                name: "tok_embeddings.weight".to_owned(),
+                dimensions: vec![6144, 154880],
+                ggml_type: 0,
+                relative_offset: 0,
+                absolute_offset: 0,
+                mmap_index: 0,
+            }],
+            alignment: 32,
+            data_section_start: 0,
+        });
+
+        let cfg = InferenceConfig::from_gguf(&mapped);
+
+        assert_eq!(cfg.architecture, ModelArchitecture::GlmMoeDsa);
+        assert!(cfg.architecture.uses_moe());
+        assert!(cfg.architecture.uses_mla());
+        assert_eq!(cfg.layer_count, 78);
+        assert_eq!(cfg.hidden_size, 6144);
+        assert_eq!(cfg.num_experts, 256);
+        assert_eq!(cfg.num_experts_per_tok, 8);
+        assert_eq!(cfg.leading_dense_layers, 3);
+        assert!(cfg.expert_gating_sigmoid);
+        assert!((cfg.expert_weights_scale - 2.5).abs() < 1e-6);
+        assert_eq!(cfg.kv_head_dim(), 256);
+        assert_eq!(cfg.vocab_size, 154880);
+        assert!((cfg.rope_theta - 8_000_000.0).abs() < 1.0);
+    }
+
+    #[test]
     fn gemma_sliding_window_pattern_selects_global_layers() {
         // Gemma 3/4: every 6th layer (1-indexed) is global, the rest local SWA.
         let cfg = InferenceConfig {
@@ -2197,6 +2316,8 @@ mod tests {
             ssm_conv_buffers: Vec::new(),
             workspace: Workspace::for_config(&config),
             last_output_hidden: vec![0.0_f32; config.hidden_size],
+            eagle3_capture_layers: Vec::new(),
+            eagle3_layer_hiddens: Vec::new(),
             #[cfg(feature = "cuda")]
             pending_embed_token: None,
         }
@@ -2474,6 +2595,7 @@ mod tests {
                     ..Default::default()
                 },
                 &mut random,
+                false,
             )
             .expect("tiny MTP draft should run");
 
@@ -2768,6 +2890,158 @@ mod tests {
             pos[0] += 1;
             pos[1] += 1;
         }
+    }
+
+    /// Greedy standalone decode reference: feed `prompt`, then emit exactly
+    /// `max_new` tokens (the first comes from the prompt's final-position logits,
+    /// matching [`ContinuousBatchEngine`]'s prefill semantics). Returns the
+    /// generated token sequence.
+    fn decode_alone(prompt: &[Token], max_new: usize, cap: usize) -> Vec<Token> {
+        let mut m = tiny_inference_model_one_layer();
+        let kvl = m.kv_layer_count();
+        let kw = m.kv_row_len();
+        let mut kv = vec![SeqKv::new(kvl, cap, kw)];
+        let mut pos = 0usize;
+        let mut first_logits: Logits = Vec::new();
+        let last_idx = prompt.len() - 1;
+        for (i, &t) in prompt.iter().enumerate() {
+            let need = i == last_idx;
+            let out = m
+                .forward_batch(&[(t, pos)], &mut kv, need)
+                .expect("standalone seed");
+            if need {
+                first_logits = out.into_iter().next().unwrap_or_default();
+            }
+            pos += 1;
+        }
+        let mut last = argmax(&first_logits) as Token;
+        let mut toks = vec![last];
+        while toks.len() < max_new {
+            let out = m
+                .forward_batch(&[(last, pos)], &mut kv, true)
+                .expect("standalone decode");
+            last = argmax(&out[0]) as Token;
+            toks.push(last);
+            pos += 1;
+        }
+        toks
+    }
+
+    /// CONTINUOUS-BATCHING ENGINE EQUIVALENCE: heterogeneous prompts (different
+    /// lengths) and different `max_new` budgets, all driven by one
+    /// [`ContinuousBatchEngine`] with greedy selection, must each produce the
+    /// EXACT token sequence they produce when decoded alone. Sequences finish at
+    /// different steps, exercising mid-batch retirement (swap_remove keeps the
+    /// active KV slice aligned).
+    #[test]
+    fn engine_heterogeneous_matches_standalone() {
+        let cap = 64usize;
+        let prompts: [Vec<Token>; 3] = [vec![0, 1, 2], vec![2, 0], vec![1, 2, 0, 1]];
+        let max_new: [usize; 3] = [5, 7, 4];
+
+        let refs: Vec<Vec<Token>> = prompts
+            .iter()
+            .zip(max_new.iter())
+            .map(|(p, &mn)| decode_alone(p, mn, cap))
+            .collect();
+
+        let mut model = tiny_inference_model_one_layer();
+        let cfg = BatchConfig {
+            max_batch: 8,
+            default_capacity_tokens: cap,
+        };
+        let mut engine = ContinuousBatchEngine::new(&model, cfg);
+        let ids: Vec<SeqId> = prompts
+            .iter()
+            .zip(max_new.iter())
+            .map(|(p, &mn)| engine.submit(p.clone(), mn, None))
+            .collect();
+
+        let mut got: BTreeMap<SeqId, Vec<Token>> = BTreeMap::new();
+        let mut steps = 0usize;
+        while engine.has_work() {
+            let outs = engine
+                .step(&mut model, |_id, logits| argmax(logits) as Token)
+                .expect("engine step");
+            for o in outs {
+                got.entry(o.seq_id).or_default().push(o.token);
+            }
+            steps += 1;
+            assert!(steps < 1000, "engine failed to terminate");
+        }
+
+        for (i, &id) in ids.iter().enumerate() {
+            assert_eq!(
+                got.get(&id).map(Vec::as_slice),
+                Some(refs[i].as_slice()),
+                "engine seq {id} (prompt {:?}) diverged from standalone",
+                prompts[i]
+            );
+            assert_eq!(got[&id].len(), max_new[i], "seq {id} wrong token count");
+        }
+        assert!(!engine.has_work());
+        assert_eq!(engine.active_len(), 0);
+    }
+
+    /// MID-FLIGHT ADMISSION: a request submitted AFTER another is already
+    /// decoding must still match its standalone run, proving the batched GEMM
+    /// keeps per-sequence isolation when batch membership changes over time
+    /// (the defining property of continuous batching).
+    #[test]
+    fn engine_mid_flight_admission_matches_standalone() {
+        let cap = 64usize;
+        let prompt_a: Vec<Token> = vec![0, 1, 2, 1];
+        let prompt_b: Vec<Token> = vec![2, 0];
+        let max_a = 8usize;
+        let max_b = 6usize;
+
+        let ref_a = decode_alone(&prompt_a, max_a, cap);
+        let ref_b = decode_alone(&prompt_b, max_b, cap);
+
+        let mut model = tiny_inference_model_one_layer();
+        let mut engine = ContinuousBatchEngine::new(
+            &model,
+            BatchConfig {
+                max_batch: 8,
+                default_capacity_tokens: cap,
+            },
+        );
+
+        let mut got: BTreeMap<SeqId, Vec<Token>> = BTreeMap::new();
+        let id_a = engine.submit(prompt_a.clone(), max_a, None);
+
+        // Run A alone for two steps (prefill + one decode) before B joins.
+        for _ in 0..2 {
+            let outs = engine
+                .step(&mut model, |_id, l| argmax(l) as Token)
+                .expect("step A-only");
+            for o in outs {
+                got.entry(o.seq_id).or_default().push(o.token);
+            }
+        }
+        assert_eq!(engine.active_len(), 1, "A should be solo-active before B");
+
+        // B joins mid-flight.
+        let id_b = engine.submit(prompt_b.clone(), max_b, None);
+        while engine.has_work() {
+            let outs = engine
+                .step(&mut model, |_id, l| argmax(l) as Token)
+                .expect("step A+B");
+            for o in outs {
+                got.entry(o.seq_id).or_default().push(o.token);
+            }
+        }
+
+        assert_eq!(
+            got.get(&id_a).map(Vec::as_slice),
+            Some(ref_a.as_slice()),
+            "mid-flight: seq A diverged from standalone"
+        );
+        assert_eq!(
+            got.get(&id_b).map(Vec::as_slice),
+            Some(ref_b.as_slice()),
+            "mid-flight: seq B diverged from standalone"
+        );
     }
 
     fn argmax(v: &[f32]) -> usize {

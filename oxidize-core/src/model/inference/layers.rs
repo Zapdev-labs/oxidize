@@ -33,7 +33,7 @@ impl InferenceModel {
     /// Return the raw quantized byte slice of a Q4K weight matrix, or `None`
     /// if the storage variant is not Q4K (S or M) quantised.
     #[allow(dead_code)]
-    fn q4k_bytes(ws: &WeightStorage) -> Option<&[u8]> {
+    pub(crate) fn q4k_bytes(ws: &WeightStorage) -> Option<&[u8]> {
         match ws {
             WeightStorage::Quantized(
                 GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M,
@@ -75,7 +75,7 @@ impl InferenceModel {
     /// FFN path of `layer` are Q4K-or-Q6K quantised and the runtime has an
     /// active CUDA device.  Layers that fail this check fall back to the CPU path.
     #[cfg(feature = "cuda")]
-    fn layer_can_use_gpu_native(layer: &LayerWeights, cfg: &InferenceConfig) -> bool {
+    pub(crate) fn layer_can_use_gpu_native(layer: &LayerWeights, cfg: &InferenceConfig) -> bool {
         // Must be a plain attention layer (not shortconv / Mamba / MLA).
         if !layer.shortconv_in_proj.is_empty()
             || !layer.attn_qkv.is_empty()
@@ -1473,6 +1473,13 @@ impl InferenceModel {
                 for i in 0..h {
                     ws.x[i] += ffn_out[i];
                 }
+            }
+            if self.eagle3_capture_layers.contains(&layer_idx) {
+                if self.eagle3_layer_hiddens.len() <= layer_idx {
+                    self.eagle3_layer_hiddens
+                        .resize(self.config.layer_count, None);
+                }
+                self.eagle3_layer_hiddens[layer_idx] = Some(ws.x[..h].to_vec());
             }
             if trace_fwd_enabled() {
                 let sum: f64 = ws.x[..h].iter().map(|v| *v as f64).sum();

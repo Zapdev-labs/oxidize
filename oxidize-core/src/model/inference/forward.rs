@@ -170,16 +170,13 @@ impl InferenceModel {
     /// matrix across all batch positions via [`gemm_weight`]. Per-token work
     /// (per-head Q/K norms, RoPE, KV cache writes, attention) stays in a
     /// position loop — only the matmuls are batched, but those dominate.
-    ///
-    /// Only the final token's logits are computed when `need_logits` is true;
-    /// intermediate tokens' logits would be discarded anyway.
     #[allow(clippy::too_many_lines)]
     pub(super) fn forward_batched(
         &mut self,
         tokens: &[Token],
         start_pos: usize,
         need_logits: bool,
-    ) -> Result<Option<Logits>, ModelError> {
+    ) -> Result<Option<Vec<Logits>>, ModelError> {
         let batch = tokens.len();
         debug_assert!(batch >= 1);
         let cfg = self.config.clone();
@@ -698,22 +695,24 @@ impl InferenceModel {
             return Ok(None);
         }
 
-        // Final norm + lm_head only for the last batch position.
-        let last = &x_batch[(batch - 1) * h..batch * h];
+        let mut all_logits = Vec::with_capacity(batch);
         let mut final_normed = vec![0.0_f32; h];
-        rms_norm_f32(last, &self.norm_weight, cfg.rms_norm_eps, &mut final_normed)
-            .map_err(|e| ModelError::InferenceFailed(format!("final_norm: {:?}", e)))?;
-        self.last_output_hidden = final_normed.clone();
-        let mut logits = vec![0.0_f32; cfg.vocab_size];
-        gemv_weight(
-            &self.output_weight,
-            cfg.vocab_size,
-            h,
-            &final_normed,
-            &mut logits,
-        )
-        .map_err(|e| ModelError::InferenceFailed(format!("output: {:?}", e)))?;
-        Ok(Some(logits))
+        for row in x_batch.chunks_exact(h) {
+            rms_norm_f32(row, &self.norm_weight, cfg.rms_norm_eps, &mut final_normed)
+                .map_err(|e| ModelError::InferenceFailed(format!("final_norm: {e:?}")))?;
+            let mut logits = vec![0.0_f32; cfg.vocab_size];
+            gemv_weight(
+                &self.output_weight,
+                cfg.vocab_size,
+                h,
+                &final_normed,
+                &mut logits,
+            )
+            .map_err(|e| ModelError::InferenceFailed(format!("output: {e:?}")))?;
+            all_logits.push(logits);
+        }
+        self.last_output_hidden.clone_from(&final_normed);
+        Ok(Some(all_logits))
     }
 
     /// True continuous-batching decode across N **sequences** (one decode token
@@ -1227,6 +1226,336 @@ impl InferenceModel {
         Ok(out)
     }
 
+    /// True when EVERY layer is representable by the device batched forward
+    /// (`gpu_forward_batch_layer`): strict Q4_K for all of `attn_q/k/v/output`
+    /// and `ffn_gate/up/down`, no sliding window, no sandwich norm, SwiGLU (not
+    /// GeGLU). QK-norm (Qwen3) is allowed (the device path reuses the per-head
+    /// `rms_norm_f32_kernel`). The bN GEMV kernel requires 144-byte Q4_K blocks,
+    /// so Q6_K tensors (mixed-precision Q4_K_M) are NOT eligible here and force a
+    /// fall back to the CPU `forward_batch`.
+    #[cfg(feature = "cuda")]
+    fn layers_supported_for_batched_gpu(&self) -> bool {
+        let cfg = &self.config;
+        if cfg.sandwich_norm || cfg.gelu_ffn {
+            return false;
+        }
+        // Hidden / intermediate must be Q8_K block aligned (256) for the device
+        // quantize + bN GEMV.
+        if !cfg.hidden_size.is_multiple_of(256) || !cfg.intermediate_size.is_multiple_of(256) {
+            return false;
+        }
+        if self.layers.is_empty() {
+            return false;
+        }
+        for (idx, layer) in self.layers.iter().enumerate() {
+            if cfg.layer_sliding_window(idx) != 0 {
+                return false;
+            }
+            for ws in [
+                &layer.attn_q,
+                &layer.attn_k,
+                &layer.attn_v,
+                &layer.attn_output,
+                &layer.ffn_gate,
+                &layer.ffn_up,
+                &layer.ffn_down,
+            ] {
+                if Self::q4k_bytes(ws).is_none() {
+                    return false;
+                }
+            }
+            // Attention projection widths must be Q4_K-block aligned too.
+            let q_len = layer.attn_q.output_dim(cfg.hidden_size);
+            let kv_len = layer.attn_k.output_dim(cfg.hidden_size);
+            let ao_len = layer.attn_output.output_dim(cfg.hidden_size);
+            if !q_len.is_multiple_of(256)
+                || !kv_len.is_multiple_of(256)
+                || !ao_len.is_multiple_of(256)
+            {
+                return false;
+            }
+            // The batched Wo/QKV path quantizes q_len/kv_len-wide activations into
+            // the `xq8k` scratch sized for `hidden_size`; if a projection is wider
+            // than hidden, that write would overrun the device buffer. Fall back to
+            // CPU in that (rare) case rather than corrupt VRAM.
+            if q_len > cfg.hidden_size || kv_len > cfg.hidden_size {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// GPU analogue of [`forward_batch`](Self::forward_batch): `B` decode rows
+    /// (one token each, distinct sequences) in one weighted pass per projection
+    /// matrix on-device. Returns `Ok(Some(logits))` when the device batched path
+    /// ran, `Ok(None)` when ineligible — the caller MUST then fall back to
+    /// [`forward_batch`](Self::forward_batch). Never touches `self.kv_cache`; the
+    /// batched F16 KV lives device-side (`kv_*_batched`). Host `SeqKv.key/value`
+    /// arrays are NOT written here (only `len` is bumped for bookkeeping); this is
+    /// the documented divergence from the CPU `forward_batch`.
+    ///
+    /// Eligibility (any failure → `Ok(None)`): `OX_GPU_BATCHED=1`, `B <= 8`, F32
+    /// model KV-cache config, `layers_supported_for_batched`, every layer
+    /// `layer_can_use_gpu_native` + `layers_supported_for_batched_gpu`, and an
+    /// active CUDA device. Capacity / position violations are hard `Err` (caller
+    /// bug, matching CPU `forward_batch`).
+    #[cfg(feature = "cuda")]
+    #[allow(clippy::too_many_lines)]
+    pub fn forward_batch_gpu(
+        &mut self,
+        rows: &[(Token, usize)],
+        kv: &mut [SeqKv],
+        need_logits: bool,
+    ) -> Result<Option<Vec<Logits>>, ModelError> {
+        if !crate::cuda::ox_gpu_batched_enabled() {
+            return Ok(None);
+        }
+        if rows.is_empty() || rows.len() != kv.len() {
+            return Ok(None);
+        }
+        let batch = rows.len();
+        if batch > crate::cuda::GPU_BATCHED_MAX_B {
+            return Ok(None);
+        }
+        let dbg = std::env::var("OX_GPU_BATCHED_DEBUG").is_ok();
+        if self.kv_cache.config().dtype != crate::tensor::DType::F32 {
+            if dbg {
+                eprintln!("forward_batch_gpu ineligible: KV dtype {:?} != F32", self.kv_cache.config().dtype);
+            }
+            return Ok(None);
+        }
+        if !self.layers_supported_for_batched() {
+            if dbg {
+                eprintln!("forward_batch_gpu ineligible: layers_supported_for_batched()=false");
+            }
+            return Ok(None);
+        }
+        if !self.layers_supported_for_batched_gpu() {
+            if dbg {
+                eprintln!(
+                    "forward_batch_gpu ineligible: layers_supported_for_batched_gpu()=false (a projection is not strict Q4_K, or q_len/kv_len > hidden)"
+                );
+            }
+            return Ok(None);
+        }
+        let cfg = self.config.clone();
+        if !self
+            .layers
+            .iter()
+            .all(|l| Self::layer_can_use_gpu_native(l, &cfg))
+        {
+            if dbg {
+                eprintln!("forward_batch_gpu ineligible: a layer fails layer_can_use_gpu_native");
+            }
+            return Ok(None);
+        }
+        if crate::gpu_dispatch::active_gpu().is_none() {
+            if dbg {
+                eprintln!("forward_batch_gpu ineligible: active_gpu() is None");
+            }
+            return Ok(None);
+        }
+
+        let h = cfg.hidden_size;
+        let i_size = cfg.intermediate_size;
+        let vocab = cfg.vocab_size;
+        let n_q = cfg.num_attention_heads;
+        let n_kv = cfg.num_key_value_heads;
+
+        let layer0 = &self.layers[0];
+        let q_len = layer0.attn_q.output_dim(h);
+        let kv_len = layer0.attn_k.output_dim(h);
+        let head_dim = if n_q > 0 && q_len.is_multiple_of(n_q) {
+            q_len / n_q
+        } else {
+            cfg.head_dim()
+        };
+        let rope_dim = {
+            let eff = cfg.effective_rope_dim();
+            if eff == 0 { head_dim } else { eff }
+        };
+
+        // The output (lm_head) weight must be strict Q4_K for the batched head;
+        // otherwise we cannot run the whole forward on-device → fall back.
+        let out_q4k = Self::q4k_bytes(&self.output_weight).map(<[u8]>::to_vec);
+        if need_logits && out_q4k.is_none() {
+            if dbg {
+                eprintln!("forward_batch_gpu ineligible: output (lm_head) weight is not strict Q4_K");
+            }
+            return Ok(None);
+        }
+
+        // Per-seq KV / position validation — hard error (caller contract).
+        for (i, seq) in kv.iter().enumerate() {
+            let needed = self.kv_layer_count() * seq.capacity_tokens * kv_len;
+            if seq.key.len() < needed || seq.value.len() < needed {
+                return Err(ModelError::InferenceFailed(format!(
+                    "forward_batch_gpu: kv[{i}] buffer too small (have {}/{}, need {needed})",
+                    seq.key.len(),
+                    seq.value.len()
+                )));
+            }
+            if rows[i].1 != seq.len {
+                return Err(ModelError::InferenceFailed(format!(
+                    "forward_batch_gpu: rows[{i}] pos {} != kv[{i}].len {}",
+                    rows[i].1, seq.len
+                )));
+            }
+            if seq.len >= seq.capacity_tokens {
+                return Err(ModelError::InferenceFailed(format!(
+                    "forward_batch_gpu: kv[{i}] is full (len {} >= capacity {})",
+                    seq.len, seq.capacity_tokens
+                )));
+            }
+        }
+
+        let context_size = cfg.context_size;
+        let kv_layers = self.kv_layer_count();
+        let bn_rows = q_len.max(kv_len).max(i_size).max(if need_logits {
+            vocab
+        } else {
+            0
+        });
+
+        // Lazy device buffer init (no-op when geometry+B match prior calls).
+        crate::cuda::gpu_batched_activation_init(batch, h, i_size, q_len, kv_len, bn_rows)
+            .map_err(ModelError::InferenceFailed)?;
+        crate::cuda::gpu_kv_batched_init(kv_layers, kv_len, context_size, batch)
+            .map_err(ModelError::InferenceFailed)?;
+        // New prompt (all rows at position 0) ⇒ clear per-seq KV counters.
+        if rows.iter().all(|&(_, p)| p == 0) {
+            crate::cuda::gpu_kv_batched_reset().map_err(ModelError::InferenceFailed)?;
+        }
+
+        // 1. Host-side embedding lookup into row-major [B, h], then upload.
+        let mut x_batch = vec![0.0_f32; batch * h];
+        for (i, &(token, _pos)) in rows.iter().enumerate() {
+            let token_idx = (token as usize).min(vocab.saturating_sub(1));
+            let target = &mut x_batch[i * h..(i + 1) * h];
+            match &self.tok_embeddings {
+                WeightStorage::F32(data) => {
+                    target.copy_from_slice(&data[token_idx * h..(token_idx + 1) * h]);
+                }
+                WeightStorage::Quantized(qtype, data) => {
+                    lookup_quantized_embedding(h, *qtype, data, token_idx, target);
+                }
+                WeightStorage::MmapQuantized(qtype, mmap, offset, size) => {
+                    let data = &mmap[*offset..*offset + *size];
+                    lookup_quantized_embedding(h, *qtype, data, token_idx, target);
+                }
+            }
+            if cfg.embedding_scale != 1.0 {
+                for v in target.iter_mut() {
+                    *v *= cfg.embedding_scale;
+                }
+            }
+        }
+        crate::cuda::gpu_batched_upload_hidden(&x_batch).map_err(ModelError::InferenceFailed)?;
+
+        let pos: Vec<usize> = rows.iter().map(|&(_, p)| p).collect();
+        let kv_seq_len_pre: Vec<usize> = kv.iter().map(|s| s.len).collect();
+
+        let geom = crate::cuda::BatchedGeom {
+            batch,
+            hidden_size: h,
+            intermediate_size: i_size,
+            q_len,
+            kv_len,
+            head_dim,
+            n_q_heads: n_q,
+            n_kv_heads: n_kv,
+            rope_dim,
+        };
+
+        // 2. Run every transformer layer on-device (one weight pass per proj).
+        for layer_idx in 0..cfg.layer_count {
+            let layer = &self.layers[layer_idx];
+            let kv_layer_idx = self
+                .kv_layer_map
+                .get(layer_idx)
+                .copied()
+                .flatten()
+                .unwrap_or(layer_idx);
+            let ffn_norm_weight: &[f32] = if !layer.post_attention_norm.is_empty() {
+                &layer.post_attention_norm
+            } else {
+                &layer.ffn_norm
+            };
+            let wq = Self::q4k_bytes(&layer.attn_q).expect("eligibility checked");
+            let wk = Self::q4k_bytes(&layer.attn_k).expect("eligibility checked");
+            let wv = Self::q4k_bytes(&layer.attn_v).expect("eligibility checked");
+            let wo = Self::q4k_bytes(&layer.attn_output).expect("eligibility checked");
+            let gate = Self::q4k_bytes(&layer.ffn_gate).expect("eligibility checked");
+            let up = Self::q4k_bytes(&layer.ffn_up).expect("eligibility checked");
+            let down = Self::q4k_bytes(&layer.ffn_down).expect("eligibility checked");
+            let weights = crate::cuda::BatchedLayerWeights {
+                attn_norm: &layer.attn_norm,
+                ffn_norm: ffn_norm_weight,
+                eps: cfg.rms_norm_eps,
+                wq,
+                wk,
+                wv,
+                wo,
+                gate,
+                up,
+                down,
+                q_norm: &layer.attn_q_norm,
+                k_norm: &layer.attn_k_norm,
+                kv_layer_idx,
+                layer_window: cfg.layer_sliding_window(layer_idx),
+                theta: cfg.layer_rope_theta(layer_idx),
+            };
+            crate::cuda::gpu_forward_batch_layer(&weights, geom, &pos, &kv_seq_len_pre)
+                .map_err(ModelError::InferenceFailed)?;
+        }
+
+        // 3. Bump each sequence's KV length once after the last layer (host
+        //    bookkeeping; device counters were bumped during KV-append).
+        for seq in kv.iter_mut() {
+            seq.len += 1;
+        }
+
+        if !need_logits {
+            // Sync so the device residual accumulator is complete before return.
+            let mut sink = vec![0.0_f32; batch * h];
+            crate::cuda::gpu_batched_download_hidden(&mut sink)
+                .map_err(ModelError::InferenceFailed)?;
+            return Ok(Some(Vec::new()));
+        }
+
+        // 4. Batched final head: per-row final norm + bN lm_head GEMV.
+        let out_bytes = out_q4k.expect("checked above");
+        let mut flat = vec![0.0_f32; batch * vocab];
+        crate::cuda::gpu_batched_final_head(
+            &self.norm_weight,
+            cfg.rms_norm_eps,
+            &out_bytes,
+            vocab,
+            h,
+            batch,
+            &mut flat,
+        )
+        .map_err(ModelError::InferenceFailed)?;
+
+        let mut out: Vec<Logits> = Vec::with_capacity(batch);
+        for i in 0..batch {
+            out.push(flat[i * vocab..(i + 1) * vocab].to_vec());
+        }
+        Ok(Some(out))
+    }
+
+    /// Non-CUDA stub: the device batched path is never eligible, so the caller
+    /// always falls back to the CPU [`forward_batch`](Self::forward_batch).
+    #[cfg(not(feature = "cuda"))]
+    pub fn forward_batch_gpu(
+        &mut self,
+        _rows: &[(Token, usize)],
+        _kv: &mut [SeqKv],
+        _need_logits: bool,
+    ) -> Result<Option<Vec<Logits>>, ModelError> {
+        Ok(None)
+    }
+
     pub(super) fn forward_single(
         &mut self,
         token: Token,
@@ -1337,6 +1666,30 @@ impl InferenceModel {
     /// Final output-normalized hidden row for the latest committed target token.
     pub fn last_output_hidden(&self) -> &[f32] {
         &self.last_output_hidden
+    }
+
+    /// Configure which target layers are snapshotted for EAGLE3 feature fusion.
+    pub fn set_eagle3_capture_layers(&mut self, layers: Vec<usize>) {
+        self.eagle3_capture_layers = layers;
+        self.eagle3_layer_hiddens = vec![None; self.config.layer_count];
+    }
+
+    /// Concatenate the most recent hidden rows from [`set_eagle3_capture_layers`].
+    pub fn concat_eagle3_features(&self) -> Result<Vec<f32>, ModelError> {
+        let mut out = Vec::new();
+        for &layer in &self.eagle3_capture_layers {
+            let hidden = self
+                .eagle3_layer_hiddens
+                .get(layer)
+                .and_then(|row| row.as_ref())
+                .ok_or_else(|| {
+                    ModelError::InferenceFailed(format!(
+                        "missing EAGLE3 capture for target layer {layer}"
+                    ))
+                })?;
+            out.extend_from_slice(hidden);
+        }
+        Ok(out)
     }
 
     /// Project already-normalized hidden states through the output (lm_head) matrix.

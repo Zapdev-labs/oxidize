@@ -45,6 +45,81 @@ pub(super) fn launch_flash_attn_decode_legacy(
     Ok(())
 }
 
+/// Batched flash-attention decode (OX_GPU_BATCHED): same single-block legacy
+/// kernel as [`launch_flash_attn_decode_legacy`], but reads sequence `seq`'s
+/// own KV region inside the batched per-layer buffer. The region base is added
+/// to the K/V cache pointers (`base_off * kv_len` u16 elements), so the kernel
+/// sees a contiguous prefix `[base_row, base_row + eff_seq_len)` exactly as the
+/// single-stream path. The CUDA kernel is unchanged — only the pointer offset
+/// and the source buffer differ. Split-K is not used here (decode attention is
+/// cheap and per-seq; the MVP keeps the launcher self-contained).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn launch_flash_attn_decode_batched(
+    gpu: &GpuState,
+    kv_layer_idx: usize,
+    seq: usize,
+    d_q: cust::memory::DevicePointer<f32>,
+    d_attn: cust::memory::DevicePointer<f32>,
+    eff_seq_len: u32,
+    base_row: u32,
+    n_q_heads: u32,
+    n_kv_heads: u32,
+    head_dim: u32,
+    scale: f32,
+) -> Result<(), String> {
+    if kv_layer_idx >= gpu.kv_k_batched.len() {
+        return Err(format!(
+            "launch_flash_attn_decode_batched: layer {kv_layer_idx} out of range ({})",
+            gpu.kv_k_batched.len()
+        ));
+    }
+    if seq >= gpu.kv_batched_b {
+        return Err(format!(
+            "launch_flash_attn_decode_batched: seq {seq} out of range ({})",
+            gpu.kv_batched_b
+        ));
+    }
+    // Validate the per-seq window against the per-region capacity (kv_context).
+    validate_flash_decode_launch(
+        gpu.kv_k_batched.len(),
+        kv_layer_idx,
+        gpu.kv_context,
+        gpu.kv_len,
+        eff_seq_len as usize,
+        base_row as usize,
+        n_q_heads as usize,
+        n_kv_heads as usize,
+        head_dim as usize,
+        1,
+    )?;
+    let base_off = seq
+        .checked_mul(gpu.kv_context)
+        .and_then(|r| r.checked_mul(gpu.kv_len))
+        .ok_or_else(|| "launch_flash_attn_decode_batched: KV region offset overflow".to_owned())?;
+    let kc_ptr = gpu.kv_k_batched[kv_layer_idx]
+        .as_device_ptr()
+        .wrapping_add(base_off);
+    let vc_ptr = gpu.kv_v_batched[kv_layer_idx]
+        .as_device_ptr()
+        .wrapping_add(base_off);
+    let func = gpu
+        .module
+        .get_function(FLASH_ATTN_DECODE_KERNEL_NAME)
+        .map_err(stringify)?;
+    let shmem = (2 * head_dim + 1) * 4;
+    let stream = &gpu.stream;
+    // SAFETY: KV pointers point inside the live region [base_off, base_off +
+    // kv_context*kv_len); the kernel only reads rows [base_row, base_row+eff).
+    unsafe {
+        cust::launch!(func<<<n_q_heads, head_dim, shmem, stream>>>(
+            d_q, kc_ptr, vc_ptr, d_attn,
+            eff_seq_len, base_row, n_q_heads, n_kv_heads, head_dim, scale
+        ))
+        .map_err(stringify)?;
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn launch_flash_attn_decode_splitk(
     gpu: &mut GpuState,

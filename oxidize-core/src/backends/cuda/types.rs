@@ -203,6 +203,53 @@ pub struct GpuActivationBuffer {
     pub intermediate_size: usize,
 }
 
+/// GPU-resident activation buffers for a batched (`B`-row) decode step
+/// (`OX_GPU_BATCHED`). Kept entirely separate from [`GpuActivationBuffer`] so
+/// the single-token path stays byte-identical. All row-major `[b][feature]`.
+///
+/// `xq8k` is laid out column-major over the B activations exactly as the bN
+/// GEMV kernel expects: activation column `j` starts at byte offset
+/// `j * blocks_per_row * BLOCK_Q8_K_BYTES`.
+#[cfg(feature = "cuda")]
+pub struct GpuBatchedActivation {
+    /// Residual hidden state `[B * hidden_size]`.
+    pub hidden: cust::memory::DeviceBuffer<f32>,
+    /// RMS-normed copy `[B * hidden_size]`.
+    pub normed: cust::memory::DeviceBuffer<f32>,
+    /// Q projection `[B * q_len]` (per-seq contiguous after transpose).
+    pub q: cust::memory::DeviceBuffer<f32>,
+    /// K projection `[B * kv_len]`.
+    pub k: cust::memory::DeviceBuffer<f32>,
+    /// V projection `[B * kv_len]`.
+    pub v: cust::memory::DeviceBuffer<f32>,
+    /// Per-seq attention output `[B * q_len]`.
+    pub attn: cust::memory::DeviceBuffer<f32>,
+    /// Wo projection / attention residual delta `[B * hidden_size]`.
+    pub attn_proj: cust::memory::DeviceBuffer<f32>,
+    /// FFN gate `[B * intermediate_size]`.
+    pub ffn_gate: cust::memory::DeviceBuffer<f32>,
+    /// FFN up `[B * intermediate_size]`.
+    pub ffn_up: cust::memory::DeviceBuffer<f32>,
+    /// SiLU(gate)*up fed into the down projection `[B * intermediate_size]`.
+    pub ffn_down: cust::memory::DeviceBuffer<f32>,
+    /// bN output scratch `[max(q_len,kv_len,intermediate_size,vocab_chunk) * B]`
+    /// (row-major `[rows, B]`) before transpose to per-seq layout.
+    pub bn_out: cust::memory::DeviceBuffer<f32>,
+    /// Column-major Q8_K activations for projection inputs
+    /// `[B * blocks_per_row_hidden * BLOCK_Q8_K_BYTES]`.
+    pub xq8k: cust::memory::DeviceBuffer<u8>,
+    /// Column-major Q8_K activations for the FFN-down input
+    /// `[B * blocks_per_row_inter * BLOCK_Q8_K_BYTES]`.
+    pub xq8k_ffn: cust::memory::DeviceBuffer<u8>,
+    pub batch: usize,
+    pub hidden_size: usize,
+    pub intermediate_size: usize,
+    pub q_len: usize,
+    pub kv_len: usize,
+    /// Row capacity of `bn_out` (== `bn_out.len() / batch`).
+    pub bn_rows: usize,
+}
+
 #[cfg(feature = "cuda")]
 pub(super) struct GpuState {
     // Held to keep the CUDA context current for this thread; never read.
@@ -253,6 +300,19 @@ pub(super) struct GpuState {
     pub(super) kv_context: usize,
     /// Number of tokens written so far, per layer (0 = empty).
     pub(super) kv_seq_len: Vec<usize>,
+    // --- Batched device decode (OX_GPU_BATCHED), kept fully separate from the
+    //     single-stream KV cache above so the single-token path is untouched. ---
+    /// Per-layer batched KV cache (raw F16 bits). Each buffer length =
+    /// `kv_batched_b * kv_context * kv_len`; sequence `s` owns the contiguous
+    /// block `[s*kv_context*kv_len, (s+1)*kv_context*kv_len)`.
+    pub(super) kv_k_batched: Vec<cust::memory::DeviceBuffer<u16>>,
+    pub(super) kv_v_batched: Vec<cust::memory::DeviceBuffer<u16>>,
+    /// Number of sequence regions allocated per layer (0 = uninitialised).
+    pub(super) kv_batched_b: usize,
+    /// Tokens written so far per `[layer][seq]`.
+    pub(super) kv_batched_seq_len: Vec<Vec<usize>>,
+    /// Optional batched activation buffers; `None` until first batched forward.
+    pub(super) batched_activation: Option<GpuBatchedActivation>,
     /// Streaming-multiprocessor count of the active device (probed at init,
     /// default 132 = H100). Used by the split-K decode-attention heuristic to
     /// size the number of KV partitions so the grid saturates all SMs.

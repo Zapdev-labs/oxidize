@@ -54,6 +54,11 @@ pub(super) fn gpu_init() -> Result<GpuState, String> {
         kv_len: 0,
         kv_context: 0,
         kv_seq_len: Vec::new(),
+        kv_k_batched: Vec::new(),
+        kv_v_batched: Vec::new(),
+        kv_batched_b: 0,
+        kv_batched_seq_len: Vec::new(),
+        batched_activation: None,
         sm_count,
     })
 }
@@ -164,6 +169,12 @@ pub fn clear_resident_cache() -> Result<(), String> {
         gpu.kv_layers = 0;
         gpu.kv_len = 0;
         gpu.kv_context = 0;
+        // Drop the batched device state too (separate from the single-stream cache).
+        gpu.kv_k_batched.clear();
+        gpu.kv_v_batched.clear();
+        gpu.kv_batched_b = 0;
+        gpu.kv_batched_seq_len.clear();
+        gpu.batched_activation = None;
         Ok(())
     })
 }

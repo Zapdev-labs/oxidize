@@ -536,6 +536,111 @@ extern "C" __global__ void gemv_q4k_f32in_kernel(
     if (lane == 0u) output[row] = sum;
 }
 
+extern "C" __global__ void gemv_q4k_f32in_residual_kernel(
+    const unsigned char* __restrict__ matrix,
+    const float*          __restrict__ x,
+    float*                __restrict__ residual,
+    unsigned int rows,
+    unsigned int blocks_per_row)
+{
+    unsigned int global_thread = blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned int row  = global_thread >> OX_WAVE_LOG2;
+    unsigned int lane = threadIdx.x & OX_LANE_MASK;
+    if (row >= rows) return;
+    const unsigned char* row_blocks = matrix + (size_t)row * blocks_per_row * 144u;
+    float sum = 0.0f;
+    for (unsigned int b = 0; b < blocks_per_row; b++) {
+        const unsigned char* w_blk = row_blocks + (size_t)b * 144u;
+        const float* xb = x + (size_t)b * 256u;
+        sum += q4k_f32in_block_dot_coop(w_blk, xb, lane);
+    }
+    sum = warp_reduce_sum(sum);
+    if (lane == 0u) residual[row] += sum;
+}
+
+extern "C" __global__ void gemv_q4k_f32in_2row_kernel(
+    const unsigned char* __restrict__ matrix,
+    const float*          __restrict__ x,
+    float*                __restrict__ output,
+    unsigned int rows,
+    unsigned int blocks_per_row)
+{
+    unsigned int global_thread = blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned int pair = global_thread >> OX_WAVE_LOG2;
+    unsigned int row0 = pair * 2u;
+    unsigned int row1 = row0 + 1u;
+    unsigned int lane = threadIdx.x & OX_LANE_MASK;
+    if (row0 >= rows) return;
+    const unsigned char* blocks0 = matrix + (size_t)row0 * blocks_per_row * 144u;
+    const unsigned char* blocks1 = matrix + (size_t)row1 * blocks_per_row * 144u;
+    float sum0 = 0.0f;
+    float sum1 = 0.0f;
+    for (unsigned int b = 0; b < blocks_per_row; b++) {
+        const float* xb = x + (size_t)b * 256u;
+        sum0 += q4k_f32in_block_dot_coop(blocks0 + (size_t)b * 144u, xb, lane);
+        if (row1 < rows) {
+            sum1 += q4k_f32in_block_dot_coop(blocks1 + (size_t)b * 144u, xb, lane);
+        }
+    }
+    sum0 = warp_reduce_sum(sum0);
+    sum1 = warp_reduce_sum(sum1);
+    if (lane == 0u) {
+        output[row0] = sum0;
+        if (row1 < rows) output[row1] = sum1;
+    }
+}
+
+// --------------------------------------------------------------------------
+// Q4_K × F32 GEMV — multi-warp-per-row (H100 HBM saturation).
+//
+// The single-warp-per-row kernel above issues too few concurrent memory
+// requests per row to hide HBM latency (Little's law: bandwidth × latency =
+// in-flight bytes needed to saturate). This variant has ONE thread-block
+// compute ONE output row with NWARPS cooperating warps, each streaming a
+// strided subset of the row's 144-byte Q4_K blocks — NWARPS× more outstanding
+// loads per row, the fix validated by llama.cpp PR #5394 (+14-21% decode on
+// NVIDIA k-quants).
+//
+// Numerically identical to gemv_q4k_f32in_kernel: the same per-lane
+// `q4k_f32in_block_dot_coop` partials over the SAME set of blocks, just
+// partitioned across warps. Each warp warp-reduces its partials; warp 0 then
+// reduces the per-warp totals via shared memory. Requires NWARPS <= 32 (so the
+// cross-warp reduction fits one warp) and blockDim.x == 32*NWARPS.
+// Launch: blockDim.x = 32*NWARPS, grid.x = rows, dynamic shmem = NWARPS floats.
+// --------------------------------------------------------------------------
+extern "C" __global__ void gemv_q4k_f32in_mw_kernel(
+    const unsigned char* __restrict__ matrix,
+    const float*          __restrict__ x,
+    float*                __restrict__ output,
+    unsigned int rows,
+    unsigned int blocks_per_row)
+{
+    unsigned int row = blockIdx.x;
+    if (row >= rows) return;
+    unsigned int warp_id = threadIdx.x >> OX_WAVE_LOG2;
+    unsigned int lane    = threadIdx.x & OX_LANE_MASK;
+    unsigned int nwarps  = blockDim.x >> OX_WAVE_LOG2;
+
+    const unsigned char* row_blocks = matrix + (size_t)row * blocks_per_row * 144u;
+    float sum = 0.0f;
+    for (unsigned int b = warp_id; b < blocks_per_row; b += nwarps) {
+        const unsigned char* w_blk = row_blocks + (size_t)b * 144u;
+        const float* xb = x + (size_t)b * 256u;
+        sum += q4k_f32in_block_dot_coop(w_blk, xb, lane);
+    }
+    sum = warp_reduce_sum(sum);            // lane 0 of each warp holds its total
+
+    extern __shared__ float s_warp[];      // [nwarps]
+    if (lane == 0u) s_warp[warp_id] = sum;
+    __syncthreads();
+
+    if (warp_id == 0u) {
+        float total = (lane < nwarps) ? s_warp[lane] : 0.0f;
+        total = warp_reduce_sum(total);    // nwarps <= 32 (one-warp reduction)
+        if (lane == 0u) output[row] = total;
+    }
+}
+
 // --------------------------------------------------------------------------
 // Q4_K × Q8_K direct GEMV — OXK path (dp4a, optional split-K).
 // --------------------------------------------------------------------------
@@ -656,6 +761,85 @@ extern "C" __global__ void gemv_q4k_q8kin_kernel(
             acc += s_partial[warp_in_block + j];
         output[row] = acc;
     }
+}
+
+// --------------------------------------------------------------------------
+// Batched Q4_K × Q8_K GEMV — the continuous-batching decode lever.
+//
+// `ncols` (= batch B) activation vectors share each weight stream. One warp per
+// output row; for each Q4_K block the warp accumulates B dp4a dot products
+// against the B activations' matching block. The weight block is re-read per
+// column, but the B reads are back-to-back so they hit warm L2 (~5.5 TB/s on
+// H100, well above HBM's 3.35) — i.e. each weight block leaves HBM ~once and is
+// reused across all B rows. That weight-reuse is exactly what makes batched
+// decode bandwidth-efficient (B GEMVs → one weighted pass), the GPU analogue of
+// the CPU forward_batch amortization.
+//
+// Column j's result is bit-identical to gemv_q4k_q8kin_kernel run on activation
+// j alone (same proven `q4k_q8kin_block_dot_dp4a`, incl. the lane-0 min term).
+// Output is row-major [rows, ncols]: output[row*ncols + j].
+// Launch: blockDim.x a multiple of OX_WAVE, grid covers rows*OX_WAVE; ncols<=8.
+// xq8k layout: [ncols][blocks_per_row*292] (column-major over activations).
+// --------------------------------------------------------------------------
+extern "C" __global__ void gemv_q4k_q8kin_bN_kernel(
+    const unsigned char* __restrict__ matrix,
+    const unsigned char* __restrict__ xq8k,
+    float*                __restrict__ output,
+    unsigned int rows,
+    unsigned int blocks_per_row,
+    unsigned int ncols)
+{
+    unsigned int global_thread = blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned int row  = global_thread >> OX_WAVE_LOG2;
+    unsigned int lane = threadIdx.x & OX_LANE_MASK;
+    if (row >= rows) return;
+
+    unsigned int nc = ncols < 8u ? ncols : 8u;
+    const unsigned char* row_blocks = matrix + (size_t)row * blocks_per_row * 144u;
+    float acc[8];
+#pragma unroll
+    for (unsigned int j = 0; j < 8u; j++) acc[j] = 0.0f;
+
+    size_t col_stride = (size_t)blocks_per_row * 292u;
+    for (unsigned int b = 0; b < blocks_per_row; b++) {
+        const unsigned char* w_blk = row_blocks + (size_t)b * 144u;
+        for (unsigned int j = 0; j < nc; j++) {
+            const unsigned char* q8_blk = xq8k + (size_t)j * col_stride + (size_t)b * 292u;
+            acc[j] += q4k_q8kin_block_dot_dp4a(w_blk, q8_blk, lane);
+        }
+    }
+    for (unsigned int j = 0; j < nc; j++) {
+        float s = warp_reduce_sum(acc[j]);
+        if (lane == 0u) output[(size_t)row * ncols + j] = s;
+    }
+}
+
+// --------------------------------------------------------------------------
+// Transpose the bN GEMV output [rows, ncols] -> per-row activation [ncols, rows].
+//
+// gemv_q4k_q8kin_bN_kernel writes row-major `[rows, ncols]` (out[r*ncols + j]):
+// for a fixed output row r, the B=ncols batched results are contiguous. The
+// batched decode path, however, needs each sequence's activation contiguous —
+// act[b*rows + r] — so RoPE / KV-append / flash-decode / the next quantize step
+// can consume sequence b's vector as a single contiguous run. This kernel is a
+// flat element-wise gather that performs exactly that index swap; it does no
+// arithmetic, so it cannot perturb the per-column numerics.
+//
+//   out[b*rows + r] = in[r*ncols + b]
+//
+// Launch: blockDim.x = 256, gridDim.x = ceil(rows * ncols / 256).
+extern "C" __global__ void transpose_rowB_to_Brow_kernel(
+    const float* __restrict__ in,   // [rows, ncols] row-major (out[r*ncols + b])
+    float* __restrict__ out,        // [ncols, rows] row-major (out[b*rows + r])
+    unsigned int rows,
+    unsigned int ncols)
+{
+    unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned int total = rows * ncols;
+    if (idx >= total) return;
+    unsigned int r = idx / ncols;   // source row
+    unsigned int b = idx % ncols;   // source column (sequence / batch index)
+    out[(size_t)b * rows + r] = in[(size_t)r * ncols + b];
 }
 
 // --------------------------------------------------------------------------
@@ -1161,6 +1345,28 @@ extern "C" __global__ void gemv_q6k_f32in_kernel(
     }
     sum = warp_reduce_sum(sum);
     if (lane == 0u) output[row] = sum;
+}
+
+extern "C" __global__ void gemv_q6k_f32in_residual_kernel(
+    const unsigned char* __restrict__ matrix,
+    const float*          __restrict__ x,
+    float*                __restrict__ residual,
+    unsigned int rows,
+    unsigned int blocks_per_row)
+{
+    unsigned int global_thread = blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned int row  = global_thread >> OX_WAVE_LOG2;
+    unsigned int lane = threadIdx.x & OX_LANE_MASK;
+    if (row >= rows) return;
+    const unsigned char* row_blocks = matrix + (size_t)row * blocks_per_row * 210u;
+    float sum = 0.0f;
+    for (unsigned int b = 0; b < blocks_per_row; b++) {
+        const unsigned char* w_blk = row_blocks + (size_t)b * 210u;
+        const float* xb = x + (size_t)b * 256u;
+        sum += q6k_f32in_block_dot_coop(w_blk, xb, lane);
+    }
+    sum = warp_reduce_sum(sum);
+    if (lane == 0u) residual[row] += sum;
 }
 
 // rms_norm_f32_kernel: y[i] = x[i] / rms(x) * weight[i]
