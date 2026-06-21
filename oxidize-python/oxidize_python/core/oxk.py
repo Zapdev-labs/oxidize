@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import struct
+import sys
 import threading
 from typing import Final
 
@@ -102,7 +103,10 @@ def tune() -> OxkTune:
                     try:
                         blocks = int(v)
                     except ValueError:
-                        pass
+                        print(
+                            f"OXIDIZE_OXK_PF={v!r} invalid; using default {default_blocks}",
+                            file=sys.stderr,
+                        )
                 pf_nta = False
                 hint = os.environ.get("OXIDIZE_OXK_PF_HINT", "")
                 if hint == "nta":
@@ -110,7 +114,7 @@ def tune() -> OxkTune:
                 elif hint == "t0" or hint == "":
                     pf_nta = False
                 else:
-                    print(f"OXIDIZE_OXK_PF_HINT={hint} unknown (use t0|nta); using t0", file=os.stderr)
+                    print(f"OXIDIZE_OXK_PF_HINT={hint} unknown (use t0|nta); using t0", file=sys.stderr)
                 _tune_val = OxkTune(pf_bytes=blocks * BLOCK_Q4_K_SIZE, pf_nta=pf_nta)
     return _tune_val
 
@@ -154,7 +158,10 @@ def max_tile() -> int:
                         if t in (1, 4, 8, 16):
                             _max_tile_val = t
                     except ValueError:
-                        pass
+                        print(
+                            f"OXIDIZE_OXK_TILE={v!r} invalid (use 1|4|8|16); using default 16",
+                            file=sys.stderr,
+                        )
     return _max_tile_val
 
 
@@ -235,7 +242,7 @@ def _quantize_q8_k_block(block_in: list[float], block_out: memoryview) -> None:
     struct.pack_into("<f", block_out, 0, d)
     qs_off = 4
     for i, v in enumerate(block_in):
-        q = int(iscale * v)
+        q = int(round(iscale * v))
         q = max(-128, min(127, q))
         block_out[qs_off + i] = q & 0xFF
     bsums_off = qs_off + QK_K
