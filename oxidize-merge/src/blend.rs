@@ -70,7 +70,7 @@ pub fn linear_bytes(
     out: &mut [u8],
 ) -> anyhow::Result<()> {
     match dtype {
-        safetensors::tensor::        Dtype::F32 => {
+        safetensors::tensor::Dtype::F32 => {
             blend_slice(a, b, t, out, linear_f32)?;
         }
         safetensors::tensor::Dtype::F16 => {
@@ -92,7 +92,7 @@ pub fn slerp_bytes(
     out: &mut [u8],
 ) -> anyhow::Result<()> {
     match dtype {
-        safetensors::tensor::        Dtype::F32 => {
+        safetensors::tensor::Dtype::F32 => {
             blend_slice(a, b, t, out, slerp_f32)?;
         }
         safetensors::tensor::Dtype::F16 => {
@@ -106,13 +106,7 @@ pub fn slerp_bytes(
     Ok(())
 }
 
-fn blend_slice<F>(
-    a: &[u8],
-    b: &[u8],
-    t: f32,
-    out: &mut [u8],
-    blend_fn: F,
-) -> anyhow::Result<()>
+fn blend_slice<F>(a: &[u8], b: &[u8], t: f32, out: &mut [u8], blend_fn: F) -> anyhow::Result<()>
 where
     F: Fn(&[f32], &[f32], f32, &mut [f32]),
 {
@@ -146,7 +140,13 @@ where
     Ok(())
 }
 
-fn blend_slice_bf16<F>(a: &[u8], b: &[u8], t: f32, out: &mut [u8], blend_fn: F) -> anyhow::Result<()>
+fn blend_slice_bf16<F>(
+    a: &[u8],
+    b: &[u8],
+    t: f32,
+    out: &mut [u8],
+    blend_fn: F,
+) -> anyhow::Result<()>
 where
     F: Fn(&[f32], &[f32], f32, &mut [f32]),
 {
