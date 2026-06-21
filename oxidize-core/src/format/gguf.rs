@@ -499,7 +499,8 @@ pub fn load_mapped_gguf<P: AsRef<Path>>(path: P) -> Result<MappedGgufFile, GgufP
     let file = File::open(path)?;
     // SAFETY: The returned mapping is read-only and we keep it alive for as long as
     // parsed metadata is exposed from MappedGgufFile.
-    let mmap = crate::bytes::map_readonly(&file)?;
+    // SAFETY: GGUF files are opened read-only and not modified while mapped.
+    let mmap = unsafe { crate::bytes::map_readonly(&file)? };
     // Tell the kernel we'll read the whole file front-to-back and that it should
     // start prefetching it immediately.  This queues async readahead so pages are
     // warm by the time inference begins — critical for multi-hundred-GB models.
@@ -539,7 +540,8 @@ fn load_mapped_gguf_shards(shards: &[PathBuf]) -> Result<MappedGgufFile, GgufPar
 
     let open_mmap = |path: &PathBuf| -> Result<Mmap, GgufParseError> {
         let file = File::open(path)?;
-        let mmap = crate::bytes::map_readonly(&file)?;
+        // SAFETY: GGUF files are opened read-only and not modified while mapped.
+    let mmap = unsafe { crate::bytes::map_readonly(&file)? };
         let _ = mmap.advise(Advice::Sequential);
         let _ = mmap.advise(Advice::WillNeed);
         Ok(mmap)
