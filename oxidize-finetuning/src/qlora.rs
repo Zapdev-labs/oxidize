@@ -43,8 +43,7 @@ fn nearest_nf4(v: f32) -> u8 {
 /// NF4-quantized block covering up to `block_size` weight scalars.
 ///
 /// Weights are normalised by `absmax` before quantisation so the full dynamic
-/// range of [-1, 1] is used, and `scale` stores the inverse (absmax) needed to
-/// restore the original magnitude at dequantisation.
+/// range of [-1, 1] is used; `absmax` restores the original magnitude at dequant.
 ///
 /// Nibble packing: element `i` is stored in
 ///   - bits 3..0 of `data[i/2]` when `i` is even,
@@ -57,8 +56,6 @@ pub struct NF4Block {
     pub len: usize,
     /// Absolute maximum of the original weights (dequant scale).
     pub absmax: f32,
-    /// `alpha / absmax` convenience scale (1.0 for standard NF4).
-    pub scale: f32,
 }
 
 impl NF4Block {
@@ -92,7 +89,6 @@ impl NF4Block {
             data,
             len: n,
             absmax,
-            scale: absmax,
         }
     }
 
@@ -135,6 +131,7 @@ pub struct QLoRAAdapter {
     pub block_size: usize,
     pub in_dim: usize,
     pub out_dim: usize,
+    base_dequant: Option<Vec<f32>>,
 }
 
 impl QLoRAAdapter {
@@ -169,19 +166,22 @@ impl QLoRAAdapter {
             block_size,
             in_dim,
             out_dim,
+            base_dequant: None,
         }
     }
 
     /// Dequantize the full base weight matrix back to f32 ([out_dim * in_dim]).
-    fn dequantize_base(&self) -> Vec<f32> {
-        let total = self.out_dim * self.in_dim;
-        let mut weights = Vec::with_capacity(total);
-        for block in &self.base_q {
-            weights.extend_from_slice(&block.dequantize());
+    fn dequantize_base(&mut self) -> &[f32] {
+        if self.base_dequant.is_none() {
+            let total = self.out_dim * self.in_dim;
+            let mut weights = Vec::with_capacity(total);
+            for block in &self.base_q {
+                weights.extend_from_slice(&block.dequantize());
+            }
+            weights.truncate(total);
+            self.base_dequant = Some(weights);
         }
-        // Trim to exact size in case the last block was padded during packing.
-        weights.truncate(total);
-        weights
+        self.base_dequant.as_ref().expect("base_dequant just initialized")
     }
 
     /// Run the full QLoRA forward pass for `count` input rows.
@@ -190,7 +190,7 @@ impl QLoRAAdapter {
     ///
     /// Memory layout: both `xs` and the returned slice are row-major with
     /// strides `in_dim` and `out_dim` respectively.
-    pub fn forward_batch(&self, xs: &[f32], count: usize) -> Result<Vec<f32>> {
+    pub fn forward_batch(&mut self, xs: &[f32], count: usize) -> Result<Vec<f32>> {
         if xs.len() != count * self.in_dim {
             return Err(FinetuneError::Adapter(format!(
                 "QLoRAAdapter::forward_batch: xs.len()={} != count*in_dim={}",
@@ -376,7 +376,7 @@ mod tests {
 
     #[test]
     fn qlora_forward_batch_shape() {
-        let q = make_qlora(8, 16);
+        let mut q = make_qlora(8, 16);
         let xs: Vec<f32> = (0..3 * 8).map(|i| (i as f32 * 0.1).sin()).collect();
         let out = q.forward_batch(&xs, 3).expect("forward_batch");
         assert_eq!(out.len(), 3 * 16);
@@ -384,7 +384,7 @@ mod tests {
 
     #[test]
     fn qlora_forward_single_consistent_with_batch() {
-        let q = make_qlora(8, 16);
+        let mut q = make_qlora(8, 16);
         let xs: Vec<f32> = (0..3 * 8).map(|i| (i as f32 * 0.23).cos()).collect();
 
         let batched = q.forward_batch(&xs, 3).expect("batch");
