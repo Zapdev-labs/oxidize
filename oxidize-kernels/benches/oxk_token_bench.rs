@@ -37,14 +37,46 @@ struct Op {
 
 fn one_layer_plan() -> Vec<Op> {
     vec![
-        Op { rows: Q_OUT, cols: HIDDEN, count: 1 },     // attn.q
-        Op { rows: KV_OUT, cols: HIDDEN, count: 1 },    // attn.k
-        Op { rows: KV_OUT, cols: HIDDEN, count: 1 },    // attn.v
-        Op { rows: HIDDEN, cols: Q_OUT, count: 1 },     // attn.o
-        Op { rows: ROUTER_OUT, cols: HIDDEN, count: 1 }, // moe.router
-        Op { rows: MOE_INTER, cols: HIDDEN, count: N_EXPERTS }, // moe.gate
-        Op { rows: MOE_INTER, cols: HIDDEN, count: N_EXPERTS }, // moe.up
-        Op { rows: HIDDEN, cols: MOE_INTER, count: N_EXPERTS }, // moe.down
+        Op {
+            rows: Q_OUT,
+            cols: HIDDEN,
+            count: 1,
+        }, // attn.q
+        Op {
+            rows: KV_OUT,
+            cols: HIDDEN,
+            count: 1,
+        }, // attn.k
+        Op {
+            rows: KV_OUT,
+            cols: HIDDEN,
+            count: 1,
+        }, // attn.v
+        Op {
+            rows: HIDDEN,
+            cols: Q_OUT,
+            count: 1,
+        }, // attn.o
+        Op {
+            rows: ROUTER_OUT,
+            cols: HIDDEN,
+            count: 1,
+        }, // moe.router
+        Op {
+            rows: MOE_INTER,
+            cols: HIDDEN,
+            count: N_EXPERTS,
+        }, // moe.gate
+        Op {
+            rows: MOE_INTER,
+            cols: HIDDEN,
+            count: N_EXPERTS,
+        }, // moe.up
+        Op {
+            rows: HIDDEN,
+            cols: MOE_INTER,
+            count: N_EXPERTS,
+        }, // moe.down
     ]
 }
 
@@ -53,7 +85,11 @@ fn token_plan(n_layers: usize) -> Vec<Op> {
     for _ in 0..n_layers {
         ops.extend(one_layer_plan());
     }
-    ops.push(Op { rows: VOCAB, cols: HIDDEN, count: 1 }); // lm_head
+    ops.push(Op {
+        rows: VOCAB,
+        cols: HIDDEN,
+        count: 1,
+    }); // lm_head
     ops
 }
 
@@ -87,7 +123,10 @@ fn fill_pseudo(bytes: &mut [u8], mut state: u64) {
 }
 
 fn env_usize(key: &str, def: usize) -> usize {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(def)
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(def)
 }
 
 fn main() {
@@ -124,9 +163,8 @@ fn main() {
     }
     let mut out = vec![0_f32; max_rows];
 
-    let q8k_for = |cols: usize| -> &[u8] {
-        &q8k_by_cols.iter().find(|(w, _)| *w == cols).unwrap().1
-    };
+    let q8k_for =
+        |cols: usize| -> &[u8] { &q8k_by_cols.iter().find(|(w, _)| *w == cols).unwrap().1 };
 
     let run_token = |weights: &[u8], out: &mut [f32]| -> f32 {
         let mut sink = 0.0_f32;
@@ -162,7 +200,10 @@ fn main() {
     let proj_tok_s = 1.0 / full_token_sec;
 
     println!("\nTimed: {n_layers} layer(s) + lm_head, {tokens} token-pass(es)  (sink={sink:.3e})");
-    println!("Streamed per timed pass: {:.2} MB", timed_bytes as f64 / 1e6);
+    println!(
+        "Streamed per timed pass: {:.2} MB",
+        timed_bytes as f64 / 1e6
+    );
     println!("Throughput:              {gflops:.2} GFLOP/s");
     println!("Memory bandwidth:        {gbps:.2} GB/s");
     println!(
@@ -170,5 +211,7 @@ fn main() {
         full_bytes as f64 / 1e9,
         full_flops / 1e9
     );
-    println!("Projected full-token decode:   {full_token_sec:.3} s/token  =>  {proj_tok_s:.3} tok/s");
+    println!(
+        "Projected full-token decode:   {full_token_sec:.3} s/token  =>  {proj_tok_s:.3} tok/s"
+    );
 }
