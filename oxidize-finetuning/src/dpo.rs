@@ -30,6 +30,11 @@ pub struct DpoExample {
     pub prompt: Vec<u32>,
     pub chosen: Vec<u32>,
     pub rejected: Vec<u32>,
+    /// Reference-policy log-probability of the chosen continuation (required when
+    /// `DpoConfig::reference_free` is false).
+    pub ref_chosen_logprob: Option<f32>,
+    /// Reference-policy log-probability of the rejected continuation.
+    pub ref_rejected_logprob: Option<f32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -45,6 +50,10 @@ struct DpoJsonlRow {
     prompt: TokensOrString,
     chosen: TokensOrString,
     rejected: TokensOrString,
+    #[serde(default)]
+    ref_chosen_logprob: Option<f32>,
+    #[serde(default)]
+    ref_rejected_logprob: Option<f32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -92,6 +101,8 @@ pub fn load_jsonl_dpo(path: impl AsRef<Path>) -> Result<Vec<DpoExample>> {
             prompt,
             chosen,
             rejected,
+            ref_chosen_logprob: row.ref_chosen_logprob,
+            ref_rejected_logprob: row.ref_rejected_logprob,
         });
     }
 
@@ -299,19 +310,22 @@ impl DpoTrainer {
         let log_p_rejected =
             self.sequence_logprob_with_buf(base_hidden_rejected, &example.rejected, &mut logits_r)?;
 
-        // Reference log-probs: in reference_free mode the reference is implicit
-        // (treated as uniform/constant), so the ratio collapses to the policy
-        // ratio alone and the reference terms are 0.
         let (ref_c, ref_r) = if self.dpo_config.reference_free {
             (0.0_f32, 0.0_f32)
         } else {
-            // Without a separate reference model we approximate the reference
-            // by treating the current adapter-only contribution as the delta
-            // and the base (zero-adapter) as the reference.  For a proper
-            // reference model the caller should pass pre-computed reference
-            // log-probs; here we conservatively set reference = 0 when the
-            // flag is off, matching the implicit-reference interpretation.
-            (0.0_f32, 0.0_f32)
+            match (
+                example.ref_chosen_logprob,
+                example.ref_rejected_logprob,
+            ) {
+                (Some(rc), Some(rr)) => (rc, rr),
+                _ => {
+                    return Err(FinetuneError::Adapter(
+                        "reference_free=false requires ref_chosen_logprob and \
+                         ref_rejected_logprob on each DpoExample"
+                            .into(),
+                    ));
+                }
+            }
         };
 
         let policy_margin = (log_p_chosen - ref_c) - (log_p_rejected - ref_r);
@@ -499,6 +513,8 @@ mod tests {
             prompt: vec![1, 2],
             chosen: vec![3, 4, 5],
             rejected: vec![6, 7],
+            ref_chosen_logprob: None,
+            ref_rejected_logprob: None,
         }
     }
 
@@ -622,6 +638,8 @@ mod tests {
             prompt: vec![0],
             chosen: vec![1, 2, 3, 4],
             rejected: vec![5, 6, 7, 8],
+            ref_chosen_logprob: None,
+            ref_rejected_logprob: None,
         };
         let hidden_c: Vec<f32> = (0..example.chosen.len() * 8)
             .map(|i| (i as f32 * 0.1).sin())
