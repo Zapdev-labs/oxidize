@@ -95,7 +95,7 @@ def main():
     print(oxk_cpu_summary())
 
     n_layers = max(1, min(NUM_LAYERS, env_int("OXK_BENCH_LAYERS", 1)))
-    tokens = env_int("OXK_BENCH_TOKENS", 1)
+    tokens = max(1, env_int("OXK_BENCH_TOKENS", 1))
 
     timed_ops = token_plan(n_layers)
     full_ops = token_plan(NUM_LAYERS)
