@@ -358,7 +358,7 @@ fn run_dpo(args: DpoArgs) -> Result<()> {
     // reference-model log-prob tracking. Wire DpoTrainer here once the
     // model-side gradient API stabilises.
     eprintln!("oxidize-finetuning dpo: full training loop not yet wired — coming soon");
-    Ok(())
+    anyhow::bail!("DPO training is not implemented yet; no adapter was written to {}", args.output.display())
 }
 
 // ---------------------------------------------------------------------------
@@ -382,7 +382,7 @@ fn run_ppo(args: PpoArgs) -> Result<()> {
     // Full PPO requires a reward model and rollout collection loop.
     // Wire PpoTrainer + RewardModel here once the reward-model API stabilises.
     eprintln!("oxidize-finetuning ppo: full training loop not yet wired — coming soon");
-    Ok(())
+    anyhow::bail!("PPO training is not implemented yet; no adapter was written to {}", args.output.display())
 }
 
 // ---------------------------------------------------------------------------
