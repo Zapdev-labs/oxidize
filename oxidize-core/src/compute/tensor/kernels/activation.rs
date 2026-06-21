@@ -358,7 +358,12 @@ pub fn rms_norm_f32(
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
 #[allow(unsafe_op_in_unsafe_fn)]
-pub(super) unsafe fn rms_norm_f32_avx2(input: &[f32], weight: &[f32], eps: f32, output: &mut [f32]) {
+pub(super) unsafe fn rms_norm_f32_avx2(
+    input: &[f32],
+    weight: &[f32],
+    eps: f32,
+    output: &mut [f32],
+) {
     let len = output.len();
     let mut acc0 = _mm256_setzero_ps();
     let mut acc1 = _mm256_setzero_ps();
