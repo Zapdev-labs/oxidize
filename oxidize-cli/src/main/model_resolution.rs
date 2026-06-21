@@ -96,7 +96,10 @@ impl HfRepo {
     }
 }
 
-pub(super) fn model_files_for_repo(repo: &HfRepo, spec: &str) -> io::Result<(Vec<String>, Vec<String>)> {
+pub(super) fn model_files_for_repo(
+    repo: &HfRepo,
+    spec: &str,
+) -> io::Result<(Vec<String>, Vec<String>)> {
     let info = repo
         .info()
         .map_err(|error| io::Error::other(format!("failed to inspect HF repo {spec}: {error}")))?;
@@ -153,7 +156,11 @@ pub(super) fn cache_safe_name(spec: &str) -> String {
         .collect()
 }
 
-pub(super) fn copy_hf_file_to_dir(repo: &HfRepo, filename: &str, dir: &Path) -> io::Result<PathBuf> {
+pub(super) fn copy_hf_file_to_dir(
+    repo: &HfRepo,
+    filename: &str,
+    dir: &Path,
+) -> io::Result<PathBuf> {
     let source = repo.get(filename).map_err(|error| {
         io::Error::other(format!("failed to download hf file {filename}: {error}"))
     })?;
@@ -240,7 +247,10 @@ pub(super) fn convert_hf_safetensors_repo(
     requantize_gguf_to_q8(&intermediate, &output)
 }
 
-pub(super) fn requantize_gguf_to_q8(input: &std::path::Path, output: &std::path::Path) -> io::Result<PathBuf> {
+pub(super) fn requantize_gguf_to_q8(
+    input: &std::path::Path,
+    output: &std::path::Path,
+) -> io::Result<PathBuf> {
     use oxidize_core::gguf::GgufQuantizationType;
     use oxidize_core::safetensors_to_gguf::quantize_gguf_to_target;
     eprintln!(
@@ -276,7 +286,11 @@ pub(super) fn gguf_repo_candidates(spec: &str) -> Vec<String> {
     candidates
 }
 
-pub(super) fn resolve_hf_model_spec(api: &HfApi, spec: &str, hf_file: Option<&str>) -> io::Result<PathBuf> {
+pub(super) fn resolve_hf_model_spec(
+    api: &HfApi,
+    spec: &str,
+    hf_file: Option<&str>,
+) -> io::Result<PathBuf> {
     let mut attempted = Vec::new();
     for candidate in std::iter::once(spec.to_owned()).chain(gguf_repo_candidates(spec)) {
         if attempted.contains(&candidate) {
