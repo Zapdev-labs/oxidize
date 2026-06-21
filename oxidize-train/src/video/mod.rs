@@ -15,14 +15,14 @@ mod model;
 mod train;
 
 pub use config::{FrameConfig, LabelTask, VideoTrainingConfig};
-pub use dataset::{default_model_path, filter_samples, load_dataset, split_indices, VideoDataset};
+pub use dataset::{VideoDataset, default_model_path, filter_samples, load_dataset, split_indices};
 pub use error::VideoError;
 pub use frames::ffmpeg_available;
 pub use generator::{
-    default_generator_path, generate_video, load_gen_dataset, load_generator, save_generator,
-    train_generator, GenDataset, GenTrainingConfig, GenTrainingReport, GenerateReport,
-    SavedGenerator, VideoGenerator,
+    GenDataset, GenTrainingConfig, GenTrainingReport, GenerateReport, SavedGenerator,
+    VideoGenerator, default_generator_path, generate_video, load_gen_dataset, load_generator,
+    save_generator, train_generator,
 };
-pub use manifest::{build_manifest, VideoSample};
+pub use manifest::{VideoSample, build_manifest};
 pub use model::VideoClassifier;
-pub use train::{save_model, train_video_classifier, SavedModel, VideoTrainingReport};
+pub use train::{SavedModel, VideoTrainingReport, save_model, train_video_classifier};
