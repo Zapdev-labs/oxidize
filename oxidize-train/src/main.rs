@@ -107,6 +107,7 @@ struct VideoArgs {
     #[arg(long)]
     exclude: Vec<String>,
     #[arg(long, default_value_t = true)]
+    #[arg(long = "no-merge-aliases", action = clap::ArgAction::SetFalse)]
     merge_aliases: bool,
     #[arg(long)]
     out: Option<PathBuf>,
@@ -155,6 +156,7 @@ struct GenTrainArgs {
     #[arg(long)]
     exclude: Vec<String>,
     #[arg(long, default_value_t = true)]
+    #[arg(long = "no-merge-aliases", action = clap::ArgAction::SetFalse)]
     merge_aliases: bool,
     #[arg(long)]
     out: Option<PathBuf>,
@@ -173,6 +175,7 @@ struct GenerateArgs {
     #[arg(long)]
     exclude: Vec<String>,
     #[arg(long, default_value_t = true)]
+    #[arg(long = "no-merge-aliases", action = clap::ArgAction::SetFalse)]
     merge_aliases: bool,
     /// Number of new frames to synthesize after the seed context.
     #[arg(long = "output-frames", default_value_t = 32)]
@@ -266,7 +269,7 @@ fn run_video(args: VideoArgs) -> Result<()> {
 
 fn run_gen_train(args: GenTrainArgs) -> Result<()> {
     if !ffmpeg_available() {
-        eprintln!("oxidize-train gen-train: warning — ffmpeg not found.");
+        anyhow::bail!("ffmpeg is required for gen-train; install ffmpeg and retry");
     }
 
     let exclude = default_exclude(args.exclude);
