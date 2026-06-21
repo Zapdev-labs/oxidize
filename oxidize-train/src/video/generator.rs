@@ -167,10 +167,9 @@ pub fn load_gen_dataset(config: &GenTrainingConfig) -> Result<GenDataset, VideoE
     let mut pair_clip = Vec::new();
 
     for (clip_idx, tensor) in extracted.into_iter().enumerate() {
-        if tensor.is_none() {
+        let Some(tensor) = tensor else {
             continue;
-        }
-        let tensor = tensor.unwrap();
+        };
         let num_frames = frames_cfg.num_frames;
         if tensor.len() != num_frames * frame_flat {
             continue;
@@ -481,9 +480,19 @@ pub fn train_generator(
             best_model = model.clone();
         }
         eprintln!(
-            "  epoch {:>3}/{}  train_mse={train_loss:.5}  val_mse={val_loss:.5}  best={best_val:.5}",
+            "  epoch {:>3}/{}  train_mse={train_loss:.5}  val_mse={}  best={}",
             epoch + 1,
-            config.epochs
+            config.epochs,
+            if track_val {
+                format!("{val_loss:.5}")
+            } else {
+                "n/a".into()
+            },
+            if track_val {
+                format!("{best_val:.5}")
+            } else {
+                "n/a".into()
+            },
         );
     }
 
