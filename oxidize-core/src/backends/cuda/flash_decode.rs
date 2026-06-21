@@ -2,7 +2,7 @@ use std::ops::Range;
 
 const MIN_SPLIT_K_SEQUENCE_LENGTH: usize = 1024;
 const TOKENS_PER_SPLIT: usize = 256;
-const MAX_SPLITS: usize = 32;
+pub(crate) const MAX_SPLITS: usize = 32;
 const TARGET_BLOCKS_PER_SM: usize = 2;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -25,6 +25,9 @@ impl SplitKPlan {
         };
         let occupancy_splits = const_min(target_blocks.div_ceil(query_heads), MAX_SPLITS);
         let split_count = const_min(context_splits, occupancy_splits);
+        if split_count < 2 {
+            return None;
+        }
         let block_count = match query_heads.checked_mul(split_count) {
             Some(value) => value,
             None => return None,
@@ -35,6 +38,118 @@ impl SplitKPlan {
             block_count,
         })
     }
+}
+
+#[must_use]
+pub const fn flash_decode_scratch_lengths(
+    query_heads: usize,
+    split_count: usize,
+    head_dim: usize,
+) -> Option<(usize, usize)> {
+    if query_heads == 0 || split_count == 0 || head_dim == 0 {
+        return None;
+    }
+    let slots = match query_heads.checked_mul(split_count) {
+        Some(value) => value,
+        None => return None,
+    };
+    let accumulator_len = match slots.checked_mul(head_dim) {
+        Some(value) => value,
+        None => return None,
+    };
+    Some((slots, accumulator_len))
+}
+
+#[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+pub(crate) fn validate_flash_decode_launch(
+    kv_layers: usize,
+    kv_layer_idx: usize,
+    kv_context: usize,
+    kv_len: usize,
+    sequence_length: usize,
+    base_row: usize,
+    query_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    split_count: usize,
+) -> Result<(), String> {
+    if kv_layers == 0
+        || kv_context == 0
+        || kv_len == 0
+        || sequence_length == 0
+        || query_heads == 0
+        || kv_heads == 0
+        || head_dim == 0
+        || split_count == 0
+    {
+        return Err("flash decode launch dimensions must be nonzero".to_owned());
+    }
+    if kv_layer_idx >= kv_layers {
+        return Err(format!(
+            "flash decode layer {kv_layer_idx} is outside {kv_layers} KV layers"
+        ));
+    }
+    if !query_heads.is_multiple_of(kv_heads) {
+        return Err("flash decode query heads must be divisible by KV heads".to_owned());
+    }
+    if !head_dim.is_power_of_two() {
+        return Err("flash decode head dimension must be a power of two".to_owned());
+    }
+    if head_dim > 256 {
+        return Err("flash decode head dimension must not exceed 256".to_owned());
+    }
+    if split_count > sequence_length {
+        return Err("flash decode split count must not exceed sequence length".to_owned());
+    }
+    let expected_kv_len = kv_heads
+        .checked_mul(head_dim)
+        .ok_or_else(|| "flash decode KV width overflow".to_owned())?;
+    if expected_kv_len != kv_len {
+        return Err(format!(
+            "flash decode KV width mismatch: cache={kv_len}, expected={expected_kv_len}"
+        ));
+    }
+    let window_end = base_row
+        .checked_add(sequence_length)
+        .ok_or_else(|| "flash decode cache row overflow".to_owned())?;
+    if window_end > kv_context {
+        return Err(format!(
+            "flash decode window ends at {window_end}, beyond cache context {kv_context}"
+        ));
+    }
+    flash_decode_scratch_lengths(query_heads, split_count, head_dim)
+        .ok_or_else(|| "flash decode scratch shape overflow".to_owned())?;
+    Ok(())
+}
+
+#[must_use]
+#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+pub(crate) fn select_split_count(
+    sm_count: usize,
+    query_heads: usize,
+    sequence_length: usize,
+    force_legacy: bool,
+    forced_text: Option<&str>,
+) -> usize {
+    if force_legacy {
+        return 1;
+    }
+    if let Some(forced) = forced_text.and_then(|text| text.parse::<usize>().ok()) {
+        return forced.clamp(1, const_min(sequence_length.max(1), MAX_SPLITS));
+    }
+    SplitKPlan::select(sm_count, query_heads, sequence_length).map_or(1, |plan| plan.split_count)
+}
+
+#[cfg(test)]
+pub(crate) fn select_split_count_for_test(
+    sm_count: usize,
+    query_heads: usize,
+    seq_len: usize,
+    force_legacy: bool,
+    forced_text: Option<&str>,
+) -> usize {
+    select_split_count(sm_count, query_heads, seq_len, force_legacy, forced_text)
 }
 
 #[must_use]
