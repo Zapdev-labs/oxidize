@@ -181,9 +181,9 @@ pub fn patches_to_image(patches: &[f32], cfg: FrameConfig) -> RgbImage {
         for gx in 0..px as u32 {
             for ly in 0..p {
                 for lx in 0..p {
-                    let r = denorm(patches[idx]);
-                    let g = denorm(patches[idx + 1]);
-                    let b = denorm(patches[idx + 2]);
+                    let r = denorm(*patches.get(idx).unwrap_or(&0.0));
+                    let g = denorm(*patches.get(idx + 1).unwrap_or(&0.0));
+                    let b = denorm(*patches.get(idx + 2).unwrap_or(&0.0));
                     img.put_pixel(gx * p + lx, gy * p + ly, image::Rgb([r, g, b]));
                     idx += 3;
                 }
