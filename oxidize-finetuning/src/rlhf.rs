@@ -52,7 +52,11 @@ impl RewardModel {
             let u = ((state >> 32) as u32 as f32) / (u32::MAX as f32) * 2.0 - 1.0;
             *v = u * limit;
         }
-        Self { weights, bias: 0.0, in_dim }
+        Self {
+            weights,
+            bias: 0.0,
+            in_dim,
+        }
     }
 
     /// Compute a scalar reward for a single hidden-state vector.
@@ -153,14 +157,7 @@ impl RolloutBuffer {
     }
 
     /// Append one (state, action, reward, log_prob, value) transition.
-    pub fn add(
-        &mut self,
-        state: Vec<f32>,
-        action: u32,
-        reward: f32,
-        log_prob: f32,
-        value: f32,
-    ) {
+    pub fn add(&mut self, state: Vec<f32>, action: u32, reward: f32, log_prob: f32, value: f32) {
         self.states.push(state);
         self.actions.push(action);
         self.rewards.push(reward);
@@ -197,7 +194,11 @@ impl RolloutBuffer {
         let gl = config.gamma * config.gae_lambda;
 
         for t in (0..n).rev() {
-            let next_value = if t + 1 < n { self.values[t + 1] } else { last_value };
+            let next_value = if t + 1 < n {
+                self.values[t + 1]
+            } else {
+                last_value
+            };
             let delta = self.rewards[t] + config.gamma * next_value - self.values[t];
             gae = delta + gl * gae;
             self.advantages[t] = gae;
@@ -321,12 +322,7 @@ impl PpoTrainer {
     ///
     /// Returns the *positive* loss scalar (gradient descent minimises it).
     #[inline]
-    pub fn ppo_loss(
-        old_log_prob: f32,
-        new_log_prob: f32,
-        advantage: f32,
-        clip_eps: f32,
-    ) -> f32 {
+    pub fn ppo_loss(old_log_prob: f32, new_log_prob: f32, advantage: f32, clip_eps: f32) -> f32 {
         let ratio = (new_log_prob - old_log_prob).exp();
         let clipped = ratio.clamp(1.0 - clip_eps, 1.0 + clip_eps);
         // Objective is MAXIMISED — negate to turn into a minimisation loss.
@@ -398,7 +394,11 @@ impl PpoTrainer {
 
         // Flatten all hidden states into a single contiguous buffer for the
         // batched LoRA forward.
-        let flat_states: Vec<f32> = buffer.states.iter().flat_map(|s| s.iter().copied()).collect();
+        let flat_states: Vec<f32> = buffer
+            .states
+            .iter()
+            .flat_map(|s| s.iter().copied())
+            .collect();
         debug_assert_eq!(flat_states.len(), n * in_dim);
 
         // LoRA forward: base logits start at zero; the LoRA residual is added
@@ -540,12 +540,15 @@ impl PpoTrainer {
 
         // AdamW optimizer step.
         self.step += 1;
-        let lr = warmup_lr(self.config.learning_rate, self.step, self.config.warmup_steps);
+        let lr = warmup_lr(
+            self.config.learning_rate,
+            self.step,
+            self.config.warmup_steps,
+        );
         self.lora.step(lr, self.config.weight_decay, self.step);
         self.lora.zero_grad();
 
-        let total_loss = sum_policy_loss * scale
-            + value_coef * sum_value_loss * scale
+        let total_loss = sum_policy_loss * scale + value_coef * sum_value_loss * scale
             - entropy_coef * sum_entropy * scale
             + kl_penalty * sum_kl * scale;
 
@@ -693,9 +696,17 @@ mod tests {
     fn gae_terminal_advantage_matches_td_residual() {
         // Single step: A_0 = δ_0 = r_0 + γ·0 − V_0 (last_value = 0, terminal).
         let mut buf = make_buffer(&[2.0], &[1.0]);
-        let cfg = PpoConfig { gamma: 1.0, gae_lambda: 0.95, ..Default::default() };
+        let cfg = PpoConfig {
+            gamma: 1.0,
+            gae_lambda: 0.95,
+            ..Default::default()
+        };
         buf.compute_gae(&cfg, 0.0);
-        assert!((buf.advantages[0] - 1.0).abs() < 1e-5, "A_0={}", buf.advantages[0]);
+        assert!(
+            (buf.advantages[0] - 1.0).abs() < 1e-5,
+            "A_0={}",
+            buf.advantages[0]
+        );
     }
 
     #[test]
@@ -705,7 +716,11 @@ mod tests {
         // A_1 = δ_1 = 1.1
         // A_0 = δ_0 + γλ·A_1 = 1.4 + 0.9·1.1 = 2.39
         let mut buf = make_buffer(&[1.0, 2.0], &[0.5, 0.9]);
-        let cfg = PpoConfig { gamma: 1.0, gae_lambda: 0.9, ..Default::default() };
+        let cfg = PpoConfig {
+            gamma: 1.0,
+            gae_lambda: 0.9,
+            ..Default::default()
+        };
         buf.compute_gae(&cfg, 0.0);
         let a0 = buf.advantages[0];
         let a1 = buf.advantages[1];
@@ -717,10 +732,18 @@ mod tests {
     fn gae_bootstrap_last_value() {
         // last_value = 5.0: δ_0 = r_0 + γ·last_value − V_0
         let mut buf = make_buffer(&[1.0], &[0.5]);
-        let cfg = PpoConfig { gamma: 1.0, gae_lambda: 0.95, ..Default::default() };
+        let cfg = PpoConfig {
+            gamma: 1.0,
+            gae_lambda: 0.95,
+            ..Default::default()
+        };
         buf.compute_gae(&cfg, 5.0);
         let expected = 1.0 + 5.0 - 0.5; // = 5.5
-        assert!((buf.advantages[0] - expected).abs() < 1e-4, "A_0={}", buf.advantages[0]);
+        assert!(
+            (buf.advantages[0] - expected).abs() < 1e-4,
+            "A_0={}",
+            buf.advantages[0]
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -804,7 +827,10 @@ mod tests {
         let buf = toy_rollout(4);
         t.train_step(&buf);
         assert!(
-            before.iter().zip(t.lora.a.iter()).any(|(a, b)| (a - b).abs() > 1e-12),
+            before
+                .iter()
+                .zip(t.lora.a.iter())
+                .any(|(a, b)| (a - b).abs() > 1e-12),
             "LoRA A weights did not change after train_step"
         );
     }
@@ -838,7 +864,11 @@ mod tests {
             warmup_steps: 0,
             ..Default::default()
         };
-        let ppo = PpoConfig { entropy_coef: 0.0, kl_penalty: 0.0, ..Default::default() };
+        let ppo = PpoConfig {
+            entropy_coef: 0.0,
+            kl_penalty: 0.0,
+            ..Default::default()
+        };
         let mut t = PpoTrainer::new(8, 16, ft, ppo);
         for (i, v) in t.lora.b.iter_mut().enumerate() {
             *v = ((i % 7) as f32 - 3.0) * 0.05;
