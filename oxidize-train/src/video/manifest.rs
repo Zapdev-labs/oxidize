@@ -151,7 +151,11 @@ fn id_from_filename(path: &Path) -> Option<String> {
     let stem = path.file_stem().and_then(|s| s.to_str())?;
     let candidate = stem.rsplit('_').next().unwrap_or(stem);
     let digits: String = candidate.chars().filter(|c| c.is_ascii_digit()).collect();
-    if digits.is_empty() { None } else { Some(digits) }
+    if digits.is_empty() {
+        None
+    } else {
+        Some(digits)
+    }
 }
 
 fn json_id(value: Option<&Value>) -> Option<String> {
