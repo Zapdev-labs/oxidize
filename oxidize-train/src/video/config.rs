@@ -157,6 +157,9 @@ impl VideoTrainingConfig {
         if self.batch_size == 0 {
             return Err(VideoError::Config("batch_size must be > 0".into()));
         }
+        if self.epochs == 0 {
+            return Err(VideoError::Config("epochs must be > 0".into()));
+        }
         if !(0.0..1.0).contains(&self.val_split) {
             return Err(VideoError::Config("val_split must be in [0.0, 1.0)".into()));
         }
