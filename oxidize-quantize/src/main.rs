@@ -70,8 +70,9 @@ fn load_imatrix(path: &Path) -> Result<Imatrix> {
         }
         let nval = nval as usize;
         let data_end = cursor
-            .checked_add(nval * 4)
-            .ok_or_else(|| anyhow!("imatrix truncated"))?;
+            .checked_mul(4)
+            .and_then(|bytes| bytes.checked_add(cursor))
+            .ok_or_else(|| anyhow!("imatrix entry {name} size overflow"))?;
         if data_end > bytes.len() {
             bail!("imatrix truncated while reading values for {name}");
         }
