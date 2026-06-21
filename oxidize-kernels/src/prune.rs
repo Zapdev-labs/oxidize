@@ -22,7 +22,12 @@ pub fn magnitude_mask(weights_f32: &[f32], rows: usize, cols: usize, sparsity: f
     for r in 0..rows {
         let row = &weights_f32[r * cols..(r + 1) * cols];
         fill_abs_scores(row, &mut scratch);
-        mask_row_by_scores(&scratch, &mut indices, drop, &mut mask[r * cols..(r + 1) * cols]);
+        mask_row_by_scores(
+            &scratch,
+            &mut indices,
+            drop,
+            &mut mask[r * cols..(r + 1) * cols],
+        );
     }
     mask
 }
@@ -48,7 +53,12 @@ pub fn wanda_mask(
     for r in 0..rows {
         let row = &weights_f32[r * cols..(r + 1) * cols];
         fill_wanda_scores(row, act_norms, &mut scratch);
-        mask_row_by_scores(&scratch, &mut indices, drop, &mut mask[r * cols..(r + 1) * cols]);
+        mask_row_by_scores(
+            &scratch,
+            &mut indices,
+            drop,
+            &mut mask[r * cols..(r + 1) * cols],
+        );
     }
     mask
 }
