@@ -8,7 +8,7 @@ use rand::{SeedableRng, rngs::StdRng};
 use rayon::prelude::*;
 
 use super::frames::clip_to_tensor;
-use super::manifest::{build_manifest, VideoSample};
+use super::manifest::{VideoSample, build_manifest};
 use super::{FrameConfig, LabelTask, VideoError, VideoTrainingConfig};
 
 /// A fully materialized set of clips: patch tensors + integer labels.
@@ -236,10 +236,7 @@ fn assign_labels(
                 .enumerate()
                 .map(|(i, name)| (name.as_str(), i))
                 .collect();
-            let labels = samples
-                .iter()
-                .map(|s| index[s.username.as_str()])
-                .collect();
+            let labels = samples.iter().map(|s| index[s.username.as_str()]).collect();
             (labels, names)
         }
         LabelTask::Virality => {
@@ -275,11 +272,7 @@ fn bucketize(values: &[f64], buckets: usize, prefix: &str) -> (Vec<usize>, Vec<S
 }
 
 /// Deterministic train/validation split returning index lists.
-pub fn split_indices(
-    num_clips: usize,
-    val_split: f32,
-    seed: u64,
-) -> (Vec<usize>, Vec<usize>) {
+pub fn split_indices(num_clips: usize, val_split: f32, seed: u64) -> (Vec<usize>, Vec<usize>) {
     let mut indices: Vec<usize> = (0..num_clips).collect();
     let mut rng = StdRng::seed_from_u64(seed ^ 0x5f3759df);
     indices.shuffle(&mut rng);
