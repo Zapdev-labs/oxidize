@@ -1,0 +1,40 @@
+modal_app.py
+  s_ae271cf91b6845::t_c2866ade4bc55c 269-270,457-458,489-490,543-544
+  s_1b37f3c1d1e7b7::t_9cfc81dfe7f180 398-399,401-411,413-418,421-422,1452-1453
+  s_1b37f3c1d1e7b7::t_ab21c8f953b6ae 35
+  s_1b37f3c1d1e7b7::t_0417b5fc507acc 419-420
+  s_ae271cf91b6845::t_e4408967c11346 1486-1488,1491
+  s_ae271cf91b6845::t_d2220dce0d6b17 499
+  s_ae271cf91b6845::t_8d6dcb876330bc 437-456,459-465
+  s_ae271cf91b6845::t_0a5a1b740b81c1 466-488,491-494,496-498,500-542,545-551,553-601
+  s_ae271cf91b6845::t_5f542f43dbf8d0 552
+  s_ae271cf91b6845::t_9b8693d0926567 34,36
+  s_ae271cf91b6845::t_4f0c20a34c0270 495
+  s_ae271cf91b6845::t_556086eee49767 1300-1303,1308-1310
+  s_ae271cf91b6845::t_b889867ed84e62 400,412,873,1379-1420,1489-1490,1492-1500
+  s_1b37f3c1d1e7b7::t_c0917a72fa735c 860-872,874-875
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "bfaa11b985ac212ccd72187f86202c15f1cd8261",
+  "prompts": {},
+  "sessions": {
+    "s_1b37f3c1d1e7b7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ee600-1957-70f2-b3f9-e51f217a3ee9",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_ae271cf91b6845": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "957249c3-68ab-4695-b756-15409c8c86f1",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
