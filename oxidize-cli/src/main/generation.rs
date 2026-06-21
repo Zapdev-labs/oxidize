@@ -8,7 +8,10 @@ pub(super) fn run_single_shot_mode<W: Write>(prompt: &str, writer: &mut W) -> io
     write_generated_response(prompt, writer).map(|_| ())
 }
 
-pub(super) fn write_generated_response<W: Write>(prompt: &str, writer: &mut W) -> io::Result<String> {
+pub(super) fn write_generated_response<W: Write>(
+    prompt: &str,
+    writer: &mut W,
+) -> io::Result<String> {
     write_generated_response_with_clock(prompt, writer, Instant::now)
 }
 
@@ -44,7 +47,10 @@ pub(super) fn format_generation_stats(tokens: usize, elapsed: Duration) -> Strin
     )
 }
 
-pub(super) fn suppressed_generation_tokens(tokenizer: &LoadedTokenizer, vocab_size: usize) -> Vec<u32> {
+pub(super) fn suppressed_generation_tokens(
+    tokenizer: &LoadedTokenizer,
+    vocab_size: usize,
+) -> Vec<u32> {
     let special_tokens = tokenizer.special_tokens();
     let mut suppressed = Vec::new();
     let mut seen = HashSet::new();
