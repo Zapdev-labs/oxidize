@@ -1,6 +1,9 @@
 use super::*;
 
-pub(super) fn quantize_f32_scalar(input: &[f32], output: &mut [u8]) -> Result<(), QuantizationError> {
+pub(super) fn quantize_f32_scalar(
+    input: &[f32],
+    output: &mut [u8],
+) -> Result<(), QuantizationError> {
     if output.len() != input.len() * 4 {
         return Err(QuantizationError::InvalidOutputLength {
             quantization: GgufQuantizationType::F32,
@@ -14,7 +17,10 @@ pub(super) fn quantize_f32_scalar(input: &[f32], output: &mut [u8]) -> Result<()
     Ok(())
 }
 
-pub(super) fn quantize_f16_scalar(input: &[f32], output: &mut [u8]) -> Result<(), QuantizationError> {
+pub(super) fn quantize_f16_scalar(
+    input: &[f32],
+    output: &mut [u8],
+) -> Result<(), QuantizationError> {
     if output.len() != input.len() * 2 {
         return Err(QuantizationError::InvalidOutputLength {
             quantization: GgufQuantizationType::F16,
@@ -67,7 +73,10 @@ pub(crate) fn quantize_q8_0_scalar(
     Ok(())
 }
 
-pub(super) fn quantize_q4_0_scalar(input: &[f32], output: &mut [u8]) -> Result<(), QuantizationError> {
+pub(super) fn quantize_q4_0_scalar(
+    input: &[f32],
+    output: &mut [u8],
+) -> Result<(), QuantizationError> {
     if !input.len().is_multiple_of(QK4_0) {
         return Err(QuantizationError::InvalidInputLength {
             quantization: GgufQuantizationType::Q4_0,
@@ -108,7 +117,10 @@ pub(super) fn quantize_q4_0_scalar(input: &[f32], output: &mut [u8]) -> Result<(
     Ok(())
 }
 
-pub(super) fn quantize_q4_1_scalar(input: &[f32], output: &mut [u8]) -> Result<(), QuantizationError> {
+pub(super) fn quantize_q4_1_scalar(
+    input: &[f32],
+    output: &mut [u8],
+) -> Result<(), QuantizationError> {
     quantize_linear_4bit(
         input,
         output,
@@ -120,7 +132,10 @@ pub(super) fn quantize_q4_1_scalar(input: &[f32], output: &mut [u8]) -> Result<(
     )
 }
 
-pub(super) fn quantize_q5_0_scalar(input: &[f32], output: &mut [u8]) -> Result<(), QuantizationError> {
+pub(super) fn quantize_q5_0_scalar(
+    input: &[f32],
+    output: &mut [u8],
+) -> Result<(), QuantizationError> {
     if !input.len().is_multiple_of(QK5_0) {
         return Err(QuantizationError::InvalidInputLength {
             quantization: GgufQuantizationType::Q5_0,
@@ -167,7 +182,10 @@ pub(super) fn quantize_q5_0_scalar(input: &[f32], output: &mut [u8]) -> Result<(
     Ok(())
 }
 
-pub(super) fn quantize_q5_1_scalar(input: &[f32], output: &mut [u8]) -> Result<(), QuantizationError> {
+pub(super) fn quantize_q5_1_scalar(
+    input: &[f32],
+    output: &mut [u8],
+) -> Result<(), QuantizationError> {
     if !input.len().is_multiple_of(QK5_1) {
         return Err(QuantizationError::InvalidInputLength {
             quantization: GgufQuantizationType::Q5_1,
