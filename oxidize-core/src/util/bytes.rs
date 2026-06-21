@@ -2,14 +2,18 @@
 //!
 //! Platform-specific `unsafe` is centralized here so call sites stay in safe Rust.
 
+use memmap2::Mmap;
 use std::fs::File;
 use std::io;
-use memmap2::Mmap;
 
 /// Memory-map a file for read-only access.
-pub fn map_readonly(file: &File) -> io::Result<Mmap> {
-    // SAFETY: Mapping is read-only; callers keep the file unmodified while mapped
-    // and own the `Mmap` for its lifetime.
+///
+/// # Safety
+///
+/// The mapped file must not be modified (including truncation or in-place writes)
+/// while the returned [`Mmap`] is alive. Violating this invariant is undefined
+/// behavior. Callers must keep the `File` open for the lifetime of the mapping.
+pub unsafe fn map_readonly(file: &File) -> io::Result<Mmap> {
     unsafe { Mmap::map(file) }
 }
 
@@ -27,6 +31,9 @@ pub fn read_q8_k_bsum(bsums: &[u8], index: usize) -> i16 {
 /// Volatile byte read for page prefaulting / NUMA warm-up.
 #[inline]
 pub fn read_volatile_byte(bytes: &[u8], offset: usize) -> u8 {
-    // SAFETY: `offset` is always page-aligned and in-bounds at call sites.
+    if offset >= bytes.len() {
+        return 0;
+    }
+    // SAFETY: `offset` is in-bounds.
     unsafe { std::ptr::read_volatile(bytes.as_ptr().add(offset)) }
 }
