@@ -467,30 +467,84 @@ extern "C" __global__ void quantize_f32_to_q8k_kernel(
 }
 
 // --------------------------------------------------------------------------
-// Q4_K × Q8_K direct GEMV — GPU-native activation path (memory-bound, dp4a).
-//
-// The activation vector is pre-quantized to Q8_K by `quantize_f32_to_q8k_kernel`
-// ONCE per shared buffer, then this kernel streams the compressed Q4_K weights
-// and accumulates the dot with int8 `__dp4a` MACs (4 MACs/instruction, no
-// per-weight f32 dequant). This is bit-for-bit the `gemv_q4_k_kernel` (Q8_K)
-// reference modulo f32 summation order — NOT the old per-nibble f32 path.
-//
-// SPLIT-K: each row is computed by `n_splits` warps, each owning a 1/n_splits
-// stride of the blocks_per_row super-blocks; their f32 partials are summed in
-// shared memory (deterministic per-row, no atomics).
-//
-// dp4a is available on sm_61+ (compute_75-safe). OX_WAVE-portable: lanes stripe
-// the 128-byte qs payload coalesced; `__dp4a` works identically on AMD (HIP
-// provides it / build.rs maps it). One warp cooperates per block.
+// Q4_K × F32 GEMV — GPU-native activation path (device-resident hidden).
 // --------------------------------------------------------------------------
 
-// Per-block Q4_K × Q8_K dot, lanes cooperative + dp4a.
-//
-// The 128-byte `qs` payload holds 4 groups of 32 bytes; group gp's low nibbles
-// are sub-block 2*gp, high nibbles are sub-block 2*gp+1. Lanes stripe the 32
-// bytes of each group as 4-byte chunks so each `__dp4a` consumes 4 contiguous
-// weights against 4 contiguous Q8 activations. The integer sub-block scales
-// (`sc`) and mins (`mn`) fold once per block; d/dmin/d_q8 apply once.
+__device__ float q4k_f32in_block_dot_coop(const unsigned char* __restrict__ w_blk,
+                                          const float* __restrict__ xb,
+                                          unsigned int lane)
+{
+    float d_w    = __half2float(*reinterpret_cast<const __half*>(w_blk));
+    float dmin_w = __half2float(*reinterpret_cast<const __half*>(w_blk + 2));
+    const unsigned char* scales = w_blk + 4;
+    const unsigned char* qs     = w_blk + 16;
+
+    float pos[8];
+    float xacc[8];
+#pragma unroll
+    for (int s = 0; s < 8; s++) { pos[s] = 0.0f; xacc[s] = 0.0f; }
+
+#pragma unroll
+    for (unsigned int k = 0; k * OX_WAVE < 128u; k++) {
+        unsigned int q = k * OX_WAVE + lane;
+        unsigned char byte = qs[q];
+        unsigned int gp = q >> 5;
+        unsigned int i  = q & 31u;
+        float lo = (float)(byte & 0xFu);
+        float hi = (float)(byte >> 4u);
+        float x_lo = xb[gp * 64u + i];
+        float x_hi = xb[gp * 64u + 32u + i];
+        unsigned int s1 = gp * 2u;
+        unsigned int s2 = s1 + 1u;
+        pos[s1]  += lo * x_lo;  xacc[s1] += x_lo;
+        pos[s2]  += hi * x_hi;  xacc[s2] += x_hi;
+    }
+
+    float pos_acc = 0.0f;
+    float min_acc = 0.0f;
+#pragma unroll
+    for (int gp = 0; gp < 4; gp++) {
+        unsigned char sc1, mn1, sc2, mn2;
+        q4k_scale_min(gp * 2,     scales, &sc1, &mn1);
+        q4k_scale_min(gp * 2 + 1, scales, &sc2, &mn2);
+        pos_acc += (float)sc1 * pos[gp * 2] + (float)sc2 * pos[gp * 2 + 1];
+        min_acc += (float)mn1 * xacc[gp * 2] + (float)mn2 * xacc[gp * 2 + 1];
+    }
+
+    return d_w * pos_acc - dmin_w * min_acc;
+}
+
+extern "C" __global__ void gemv_q4k_f32in_kernel(
+    const unsigned char* __restrict__ matrix,
+    const float*          __restrict__ x,
+    float*                __restrict__ output,
+    unsigned int rows,
+    unsigned int blocks_per_row)
+{
+    unsigned int global_thread = blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned int row  = global_thread >> OX_WAVE_LOG2;
+    unsigned int lane = threadIdx.x & OX_LANE_MASK;
+    if (row >= rows) return;
+    const unsigned char* row_blocks = matrix + (size_t)row * blocks_per_row * 144u;
+    float sum = 0.0f;
+    for (unsigned int b = 0; b < blocks_per_row; b++) {
+        const unsigned char* w_blk = row_blocks + (size_t)b * 144u;
+        const float* xb = x + (size_t)b * 256u;
+        sum += q4k_f32in_block_dot_coop(w_blk, xb, lane);
+    }
+    sum = warp_reduce_sum(sum);
+    if (lane == 0u) output[row] = sum;
+}
+
+// --------------------------------------------------------------------------
+// Q4_K × Q8_K direct GEMV — OXK path (dp4a, optional split-K).
+// --------------------------------------------------------------------------
+
+__device__ __forceinline__ int q8k_bsum_i16(const unsigned char* bsums, int index) {
+    const unsigned char* p = bsums + (size_t)index * 2u;
+    return (int)(short)((unsigned int)p[0] | ((unsigned int)p[1] << 8));
+}
+
 __device__ float q4k_q8kin_block_dot_dp4a(const unsigned char* __restrict__ w_blk,
                                           const unsigned char* __restrict__ q8_blk,
                                           unsigned int lane)
@@ -530,26 +584,39 @@ __device__ float q4k_q8kin_block_dot_dp4a(const unsigned char* __restrict__ w_bl
         pos[gp * 2u + 1u] = __dp4a((int)hi4, (int)x_hi, pos[gp * 2u + 1u]);
     }
 
-    // Fold this lane's partials with the shared integer scales; mins from bsums.
+    // Fold this lane's positive partials with the shared integer scales.
     int pos_acc = 0;
-    int min_acc = 0;
 #pragma unroll
     for (int gp = 0; gp < 4; gp++) {
         unsigned char sc1, mn1, sc2, mn2;
         q4k_scale_min(gp * 2,     scales, &sc1, &mn1);
         q4k_scale_min(gp * 2 + 1, scales, &sc2, &mn2);
         pos_acc += (int)sc1 * pos[gp * 2] + (int)sc2 * pos[gp * 2 + 1];
-        int bs1 = q8k_bsum_i16(bsums, gp * 4)     + q8k_bsum_i16(bsums, gp * 4 + 1);
-        int bs2 = q8k_bsum_i16(bsums, gp * 4 + 2) + q8k_bsum_i16(bsums, gp * 4 + 3);
-        min_acc += (int)mn1 * bs1 + (int)mn2 * bs2;
     }
+    float out = d_w * d_q8 * (float)pos_acc;
 
-    return d_w * d_q8 * (float)pos_acc - dmin_w * d_q8 * (float)min_acc;
+    // The Q8_K `min` correction uses the block-wide bsums (identical on every
+    // lane), so it must be emitted by ONE lane only — a warp_reduce_sum over the
+    // returned values would otherwise count it OX_WAVE times (the historical
+    // dp4a min over-count bug). Gate it to lane 0.
+    if (lane == 0u) {
+        int min_acc = 0;
+#pragma unroll
+        for (int gp = 0; gp < 4; gp++) {
+            unsigned char sc1, mn1, sc2, mn2;
+            q4k_scale_min(gp * 2,     scales, &sc1, &mn1);
+            q4k_scale_min(gp * 2 + 1, scales, &sc2, &mn2);
+            int bs1 = q8k_bsum_i16(bsums, gp * 4)     + q8k_bsum_i16(bsums, gp * 4 + 1);
+            int bs2 = q8k_bsum_i16(bsums, gp * 4 + 2) + q8k_bsum_i16(bsums, gp * 4 + 3);
+            min_acc += (int)mn1 * bs1 + (int)mn2 * bs2;
+        }
+        out -= dmin_w * d_q8 * (float)min_acc;
+    }
+    return out;
 }
 
-// Q4K GEMV with a GPU-resident Q8_K-quantized input (GPU-native path).
-// Split-K: `n_splits` warps per row; one warp cooperates per block.
-extern "C" __global__ void gemv_q4k_f32in_kernel(
+// Q4K GEMV with a GPU-resident Q8_K-quantized input (OXK path).
+extern "C" __global__ void gemv_q4k_q8kin_kernel(
     const unsigned char* __restrict__ matrix,  // Q4K weights [rows × blocks_per_row × 144 B]
     const unsigned char* __restrict__ xq8k,    // Q8_K input  [blocks_per_row * 292 B]
     float*                __restrict__ output, // F32 output [rows]
@@ -592,17 +659,159 @@ extern "C" __global__ void gemv_q4k_f32in_kernel(
 }
 
 // --------------------------------------------------------------------------
+// Fused Q4_K × Q8_K MMQ GEMV (llama.cpp mmq pattern, single launch).
+//
+// The two-kernel device path (quantize_f32_to_q8k_kernel + gemv_q4k_q8kin)
+// writes the Q8_K activation to VRAM, then every output row re-reads it. This
+// fused kernel instead quantizes the *whole* activation vector into SHARED
+// memory once per thread-block, then a tile of output rows (one warp each)
+// reuses it with __dp4a — one launch, no activation round-trip through VRAM.
+//
+//   * blockDim.x is a multiple of OX_WAVE; the block computes
+//     ROWS_PER_BLOCK = blockDim.x / OX_WAVE output rows (one warp per row).
+//   * Dynamic shared memory holds the Q8_K activation: blocks_per_row * 292 B.
+//     The launcher only selects this kernel when that fits the shared budget;
+//     otherwise it falls back to the two-kernel path.
+//   * Phase 1: all threads cooperatively quantize x[cols] → shared Q8_K, reusing
+//     the exact amax / round / bsum arithmetic of quantize_f32_to_q8k_kernel so
+//     the result is bit-identical to the standalone quantizer.
+//   * Phase 2: each warp dots its row with the shared activation via __dp4a,
+//     reusing q4k_q8kin_block_dot_dp4a (which already gates the Q8_K `min`
+//     correction to lane 0, so the warp reduction counts it exactly once per
+//     (row, block) — folding it on every lane would over-count it OX_WAVE times).
+
+// Fused MMQ kernel: quantize activation to shared Q8_K, then tile of rows.
+// Launch: blockDim.x multiple of OX_WAVE (256 recommended → 8 rows/block on
+// CUDA); grid.x = ceil(rows * OX_WAVE / blockDim.x); dynamic shared memory =
+// blocks_per_row * 292 bytes.
+extern "C" __global__ void gemv_q4k_q8k_fused_kernel(
+    const unsigned char* __restrict__ matrix,  // Q4K weights [rows × bpr × 144 B]
+    const float*          __restrict__ x,       // F32 activation [bpr * 256]
+    float*                __restrict__ output,  // F32 output [rows]
+    unsigned int rows,
+    unsigned int blocks_per_row)
+{
+    extern __shared__ unsigned char s_q8k[];   // bpr * 292 bytes
+    // blockDim.x is fixed at 256 (one thread per Q8_K value); scratch is sized
+    // to exactly 256, not blockDim, so it never over-allocates shared memory.
+    __shared__ float s_amax[256];              // amax reduction scratch
+    __shared__ int   s_bsum[256];              // bsum reduction scratch
+
+    unsigned int tid = threadIdx.x;
+
+    // ---- Phase 1: cooperatively quantize x → shared Q8_K (one col-block / iter).
+    // Mirrors quantize_f32_to_q8k_kernel bit-for-bit (amax, round-to-nearest,
+    // per-sub-block bsums). Requires blockDim.x == 256 (one thread per value).
+    for (unsigned int b = 0; b < blocks_per_row; b++) {
+        const float* xb = x + (size_t)b * 256u;
+        float v = (tid < 256u) ? xb[tid] : 0.0f;
+
+        s_amax[tid] = fabsf(v);
+        __syncthreads();
+        for (unsigned int stride = 128u; stride > 0u; stride >>= 1) {
+            if (tid < stride) {
+                float other = s_amax[tid + stride];
+                if (other > s_amax[tid]) s_amax[tid] = other;
+            }
+            __syncthreads();
+        }
+        float d = s_amax[0] / 127.0f;
+        float inv_d = (d != 0.0f) ? (1.0f / d) : 0.0f;
+        int qi = (int)lrintf(v * inv_d);
+        if (qi > 127) qi = 127;
+        if (qi < -128) qi = -128;
+
+        unsigned char* out = s_q8k + (size_t)b * 292u;
+        if (tid == 0u) *reinterpret_cast<float*>(out) = d;
+        if (tid < 256u) reinterpret_cast<signed char*>(out + 4)[tid] = (signed char)qi;
+
+        s_bsum[tid] = (tid < 256u) ? qi : 0;
+        __syncthreads();
+        for (unsigned int stride = 8u; stride > 0u; stride >>= 1) {
+            if ((tid & 15u) < stride && tid < 256u) {
+                s_bsum[tid] += s_bsum[tid + stride];
+            }
+            __syncthreads();
+        }
+        if ((tid & 15u) == 0u && tid < 256u) {
+            short* bsums = reinterpret_cast<short*>(out + 4 + 256);
+            bsums[tid >> 4] = (short)s_bsum[tid];
+        }
+        __syncthreads();   // scratch reuse barrier before next col-block
+    }
+
+    // ---- Phase 2: each warp computes one output row from the shared activation.
+    unsigned int warp_in_block = tid >> OX_WAVE_LOG2;
+    unsigned int lane          = tid & OX_LANE_MASK;
+    unsigned int rows_per_block = blockDim.x >> OX_WAVE_LOG2;
+    unsigned int row = blockIdx.x * rows_per_block + warp_in_block;
+    if (row >= rows) return;
+
+    const unsigned char* row_blocks = matrix + (size_t)row * blocks_per_row * 144u;
+    float sum = 0.0f;
+    for (unsigned int b = 0; b < blocks_per_row; b++) {
+        const unsigned char* w_blk  = row_blocks + (size_t)b * 144u;
+        const unsigned char* q8_blk = s_q8k + (size_t)b * 292u;
+        sum += q4k_q8kin_block_dot_dp4a(w_blk, q8_blk, lane);
+    }
+    sum = warp_reduce_sum(sum);
+    if (lane == 0u) output[row] = sum;
+}
+
+// --------------------------------------------------------------------------
+// Multi-row Q4_K × F32 GEMV for the lm_head / output projection.
+//
+// The output projection is the single largest GEMV (vocab≈19k–151k rows ×
+// hidden). gemv_q4k_f32in_kernel runs one warp per row, and every warp re-reads
+// the full F32 activation from global memory. This variant caches the activation
+// once in shared memory and computes a TILE of ROWS_PER_BLOCK rows (one warp
+// each), so the activation is read from VRAM once per block instead of once per
+// row, and more rows are in flight per block (better occupancy on the long
+// vocab dimension). Numerically identical to gemv_q4k_f32in_kernel (same
+// q4k_f32in_block_dot_coop, same f32 accumulation order).
+//
+// Launch: blockDim.x multiple of OX_WAVE; grid.x = ceil(rows*OX_WAVE/blockDim.x);
+// dynamic shared memory = blocks_per_row * 256 * sizeof(float) (the activation).
+extern "C" __global__ void gemv_q4k_f32in_multirow_kernel(
+    const unsigned char* __restrict__ matrix,
+    const float*          __restrict__ x,
+    float*                __restrict__ output,
+    unsigned int rows,
+    unsigned int blocks_per_row)
+{
+    extern __shared__ float s_x[];          // blocks_per_row * 256 floats
+    unsigned int cols = blocks_per_row * 256u;
+
+    // Cooperatively stage the activation into shared memory.
+    for (unsigned int i = threadIdx.x; i < cols; i += blockDim.x) {
+        s_x[i] = x[i];
+    }
+    __syncthreads();
+
+    unsigned int warp_in_block = threadIdx.x >> OX_WAVE_LOG2;
+    unsigned int lane          = threadIdx.x & OX_LANE_MASK;
+    unsigned int rows_per_block = blockDim.x >> OX_WAVE_LOG2;
+    unsigned int row = blockIdx.x * rows_per_block + warp_in_block;
+    if (row >= rows) return;
+
+    const unsigned char* row_blocks = matrix + (size_t)row * blocks_per_row * 144u;
+    float sum = 0.0f;
+    for (unsigned int b = 0; b < blocks_per_row; b++) {
+        const unsigned char* w_blk = row_blocks + (size_t)b * 144u;
+        const float* xb = s_x + (size_t)b * 256u;
+        sum += q4k_f32in_block_dot_coop(w_blk, xb, lane);
+    }
+    sum = warp_reduce_sum(sum);
+    if (lane == 0u) output[row] = sum;
+}
+
+// --------------------------------------------------------------------------
 // Q4_K × Q8_K direct GEMV (OXK GPU path)
 //
 // Mirrors the CPU OXK kernels: quantize the activation vector to Q8_K once,
 // then stream compressed Q4_K weights without expanding to f16 in VRAM.
 // One warp per output row; lanes stripe across super-blocks.
 // --------------------------------------------------------------------------
-
-__device__ __forceinline__ int q8k_bsum_i16(const unsigned char* bsums, int index) {
-    const unsigned char* p = bsums + (size_t)index * 2u;
-    return (int)(short)((unsigned int)p[0] | ((unsigned int)p[1] << 8));
-}
 
 __device__ float q4k_q8k_block_dot(const unsigned char* w_blk, const unsigned char* q8_blk) {
     float d_w = __half2float(*reinterpret_cast<const __half*>(w_blk));
@@ -945,8 +1154,6 @@ extern "C" __global__ void gemv_q6k_f32in_kernel(
     if (row >= rows) return;
     const unsigned char* row_blocks = matrix + (size_t)row * blocks_per_row * 210u;
     float sum = 0.0f;
-    // Loop blocks sequentially; the whole warp cooperates on each block so the
-    // 192-byte ql+qh payload streams coalesced (vs. the old 210-B-per-lane stride).
     for (unsigned int b = 0; b < blocks_per_row; b++) {
         const unsigned char* w_blk = row_blocks + (size_t)b * 210u;
         const float* xb = x + (size_t)b * 256u;
@@ -1036,6 +1243,54 @@ extern "C" __global__ void silu_mul_f32_kernel(
         // silu(g) = g * sigmoid(g) = g / (1 + exp(-g))
         float silu_g = g / (1.0f + expf(-g));
         out[i] = silu_g * up[i];
+    }
+}
+
+// gemv_q4k_f32in_gate_up_silu_kernel: fused SwiGLU FFN gate/up projection.
+//
+// Computes, for each output row r of the intermediate dimension:
+//     gate_r = dot(gate_w[r], x)
+//     up_r   = dot(up_w[r],   x)
+//     out[r] = silu(gate_r) * up_r
+// in ONE launch, where the eager path runs three (gate GEMV, up GEMV,
+// silu_mul) and round-trips the full intermediate-size gate/up vectors through
+// VRAM. Both weight matrices must be Q4_K with identical [rows x blocks_per_row]
+// shape (true for every SwiGLU FFN: gate and up both project hidden->inter).
+//
+// The arithmetic is BYTE-IDENTICAL to the eager path: the per-row dot reuses
+// q4k_f32in_block_dot_coop + warp_reduce_sum exactly as gemv_q4k_f32in_kernel,
+// and the SiLU uses the same g / (1 + exp(-g)) expression as silu_mul. Only the
+// data path changes (gate/up stay in registers; no intermediate VRAM writes).
+//
+// Launch geometry matches gemv_q4k_f32in_kernel: one warp (OX_WAVE lanes) per
+// output row, blockDim.x a multiple of OX_WAVE.
+extern "C" __global__ void gemv_q4k_f32in_gate_up_silu_kernel(
+    const unsigned char* __restrict__ gate_w,
+    const unsigned char* __restrict__ up_w,
+    const float*          __restrict__ x,
+    float*                __restrict__ output,
+    unsigned int rows,
+    unsigned int blocks_per_row)
+{
+    unsigned int global_thread = blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned int row  = global_thread >> OX_WAVE_LOG2;
+    unsigned int lane = threadIdx.x & OX_LANE_MASK;
+    if (row >= rows) return;
+    const unsigned char* g_row = gate_w + (size_t)row * blocks_per_row * 144u;
+    const unsigned char* u_row = up_w   + (size_t)row * blocks_per_row * 144u;
+    float gsum = 0.0f;
+    float usum = 0.0f;
+    for (unsigned int b = 0; b < blocks_per_row; b++) {
+        const float* xb = x + (size_t)b * 256u;
+        gsum += q4k_f32in_block_dot_coop(g_row + (size_t)b * 144u, xb, lane);
+        usum += q4k_f32in_block_dot_coop(u_row + (size_t)b * 144u, xb, lane);
+    }
+    gsum = warp_reduce_sum(gsum);
+    usum = warp_reduce_sum(usum);
+    if (lane == 0u) {
+        // silu(g) = g / (1 + exp(-g)) — identical to silu_mul_f32_kernel.
+        float silu_g = gsum / (1.0f + expf(-gsum));
+        output[row] = silu_g * usum;
     }
 }
 
@@ -1466,4 +1721,266 @@ extern "C" __global__ void flash_attn_decode_reduce_kernel(
     }
 
     attn_out[qh * head_dim + d] = denominator > 0.0f ? numerator / denominator : 0.0f;
+}
+
+// --------------------------------------------------------------------------
+// Token embedding lookup on device (decode hot path — skip CPU dequant + H2D).
+// --------------------------------------------------------------------------
+
+__device__ void q4k_block_to_f32(const unsigned char* blk, float* out) {
+    float d = __half2float(*reinterpret_cast<const __half*>(blk));
+    float mn = __half2float(*reinterpret_cast<const __half*>(blk + 2));
+    const unsigned char* scales = blk + 4;
+    const unsigned char* qs = blk + 16;
+
+    unsigned int out_ptr = 0;
+    int is = 0;
+    for (int gp = 0; gp < 4; gp++) {
+        unsigned int q_base = gp * 32;
+        unsigned char sc1, m1, sc2, m2;
+        q4k_scale_min(is, scales, &sc1, &m1);
+        q4k_scale_min(is + 1, scales, &sc2, &m2);
+        float d1 = d * (float)sc1, min1 = mn * (float)m1;
+        float d2 = d * (float)sc2, min2 = mn * (float)m2;
+        for (int l = 0; l < 32; l++)
+            out[out_ptr + l] = d1 * (float)(qs[q_base + l] & 0xF) - min1;
+        for (int l = 0; l < 32; l++)
+            out[out_ptr + 32 + l] = d2 * (float)(qs[q_base + l] >> 4) - min2;
+        out_ptr += 64;
+        is += 2;
+    }
+}
+
+extern "C" __global__ void embed_f32_row_kernel(
+    const float* table,
+    unsigned int token_id,
+    unsigned int hidden_size,
+    float scale,
+    float* out)
+{
+    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= hidden_size) return;
+    float v = table[(size_t)token_id * hidden_size + i];
+    out[i] = v * scale;
+}
+
+extern "C" __global__ void embed_q4k_f32_row_kernel(
+    const unsigned char* table,
+    unsigned int token_id,
+    unsigned int blocks_per_row,
+    float scale,
+    float* out)
+{
+    unsigned int b = blockIdx.x * blockDim.x + threadIdx.x;
+    if (b >= blocks_per_row) return;
+    const unsigned char* blk = table + ((size_t)token_id * blocks_per_row + b) * 144u;
+    float* xb = out + (size_t)b * 256u;
+    q4k_block_to_f32(blk, xb);
+    if (scale != 1.0f) {
+        for (int l = 0; l < 256; l++) {
+            xb[l] *= scale;
+        }
+    }
+}
+
+// ==========================================================================
+// CUDA-graph device-scalar decode kernels (OX_GPU_CUDA_GRAPH).
+//
+// A captured CUDA graph freezes every kernel ARGUMENT, so the per-token scalars
+// (token id, absolute position, and the seq_len / phys_pos / base_row derived
+// from it) cannot be passed as kernel args — a single captured graph must stay
+// valid as the sequence grows. These `_gph` variants instead read the live
+// per-token state from a 3-word device buffer that the host patches with one
+// tiny H2D copy before each cuGraphLaunch:
+//
+//     d_state[0] = pos          (absolute position of the new token, >= 1)
+//     d_state[1] = context      (KV ring capacity; phys = pos % context)
+//     d_state[2] = token_id     (embedding row for this step)
+//
+// They are otherwise BYTE-FOR-BYTE the math of the eager kernels above (same
+// range-reduced RoPE, same f32_to_f16_bits_dev KV store, same online-softmax /
+// tree reduction), so a graph token is argmax-identical to an eager token. They
+// are standalone (the eager kernels are untouched) and inert until the capture
+// harness launches them.
+//
+// v1 constraint: the host guards `pos + 1 <= context` before launch, so the KV
+// ring never wraps within a captured graph (logical row == physical row), and
+// flash decode is single-block only (split-K grid varies with seq_len and is
+// incompatible with a frozen-topology graph).
+// ==========================================================================
+
+// RoPE — identical to rope_f32_kernel but pos comes from d_state[0].
+extern "C" __global__ void rope_f32_gph_kernel(
+    float* q,
+    float* k,
+    const unsigned int* __restrict__ d_state,
+    unsigned int n_q_heads,
+    unsigned int n_kv_heads,
+    unsigned int head_dim,
+    unsigned int rope_dim,
+    float theta)
+{
+    unsigned int pos = d_state[0];
+    if (pos == 0u) return;
+
+    unsigned int head = blockIdx.x;
+    unsigned int total_heads = n_q_heads + n_kv_heads;
+    if (head >= total_heads) return;
+
+    float* buf;
+    unsigned int head_local;
+    if (head < n_q_heads) {
+        buf = q;
+        head_local = head;
+    } else {
+        buf = k;
+        head_local = head - n_q_heads;
+    }
+
+    unsigned int half = rope_dim >> 1;
+    unsigned int i = threadIdx.x;
+    if (i >= half) return;
+
+    double inv = 1.0 / (double)rope_dim;
+    double freq = pow((double)theta, -2.0 * (double)i * inv);
+    double angle = (double)pos * freq;
+    float c, s;
+    rope_sincos(angle, &s, &c);
+
+    unsigned int base = head_local * head_dim;
+    float x0 = buf[base + i];
+    float x1 = buf[base + half + i];
+    buf[base + i]        = x0 * c - x1 * s;
+    buf[base + half + i] = x0 * s + x1 * c;
+}
+
+// KV append — identical to kv_append_f16_kernel but the physical write row is
+// derived on-device: phys_pos = pos % context.
+extern "C" __global__ void kv_append_f16_gph_kernel(
+    const float* k,
+    const float* v,
+    unsigned short* kc,
+    unsigned short* vc,
+    const unsigned int* __restrict__ d_state,
+    unsigned int kv_len)
+{
+    unsigned int pos     = d_state[0];
+    unsigned int context = d_state[1];
+    unsigned int phys    = (context != 0u) ? (pos % context) : pos;
+    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < kv_len) {
+        size_t row = (size_t)phys * (size_t)kv_len + (size_t)i;
+        kc[row] = f32_to_f16_bits_dev(k[i]);
+        vc[row] = f32_to_f16_bits_dev(v[i]);
+    }
+}
+
+// Flash decode (single-block) — identical math to flash_attn_decode_kernel, but
+// seq_len and base_row are derived on-device from pos and a frozen per-layer
+// sliding-window size (`layer_window`; 0 = no window). v1 assumes no ring wrap
+// (host-guarded pos+1 <= context), so logical rows map 1:1 to physical rows.
+extern "C" __global__ void flash_attn_decode_gph_kernel(
+    const float* q,
+    const unsigned short* k_cache,
+    const unsigned short* v_cache,
+    float* attn_out,
+    const unsigned int* __restrict__ d_state,
+    unsigned int layer_window,
+    unsigned int q_heads,
+    unsigned int kv_heads,
+    unsigned int head_dim,
+    float scale)
+{
+    extern __shared__ float smem[];
+    float* qsh   = smem;
+    float* redux = smem + head_dim;
+    float* score = smem + 2u * head_dim;
+
+    unsigned int qh = blockIdx.x;
+    unsigned int d  = threadIdx.x;
+    if (qh >= q_heads || d >= head_dim) return;
+
+    // seq_len = pos + 1; windowed-causal base_row when the window is exceeded.
+    unsigned int pos      = d_state[0];
+    unsigned int full_len = pos + 1u;
+    unsigned int base_row = 0u;
+    unsigned int seq_len  = full_len;
+    if (layer_window != 0u && full_len > layer_window) {
+        base_row = full_len - layer_window;
+        seq_len  = layer_window;
+    }
+
+    unsigned int group_size = q_heads / kv_heads;
+    unsigned int kv_head    = qh / group_size;
+    unsigned int kv_len     = kv_heads * head_dim;
+    unsigned int kv_off     = kv_head * head_dim;
+
+    qsh[d] = q[qh * head_dim + d];
+    __syncthreads();
+
+    float running_max = -3.402823466e+38f;
+    float running_sum = 0.0f;
+    float acc = 0.0f;
+
+    for (unsigned int t = 0; t < seq_len; ++t) {
+        size_t krow = ((size_t)base_row + (size_t)t) * (size_t)kv_len + (size_t)kv_off;
+        __half hk = *reinterpret_cast<const __half*>(&k_cache[krow + d]);
+        redux[d] = qsh[d] * __half2float(hk);
+        __syncthreads();
+        for (unsigned int stride = head_dim >> 1; stride > 0; stride >>= 1) {
+            if (d < stride) redux[d] += redux[d + stride];
+            __syncthreads();
+        }
+        if (d == 0) score[0] = redux[0] * scale;
+        __syncthreads();
+
+        float s = score[0];
+        float new_max = running_max > s ? running_max : s;
+        float corr = expf(running_max - new_max);
+        float p    = expf(s - new_max);
+        __half hv = *reinterpret_cast<const __half*>(&v_cache[krow + d]);
+        acc = acc * corr + p * __half2float(hv);
+        running_sum = running_sum * corr + p;
+        running_max = new_max;
+        __syncthreads();
+    }
+
+    float inv = running_sum > 0.0f ? (1.0f / running_sum) : 0.0f;
+    attn_out[qh * head_dim + d] = acc * inv;
+}
+
+// Embedding (F32 table) — token id from d_state[2].
+extern "C" __global__ void embed_f32_row_gph_kernel(
+    const float* table,
+    const unsigned int* __restrict__ d_state,
+    unsigned int hidden_size,
+    float scale,
+    float* out)
+{
+    unsigned int token_id = d_state[2];
+    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= hidden_size) return;
+    float v = table[(size_t)token_id * hidden_size + i];
+    out[i] = v * scale;
+}
+
+// Embedding (Q4_K table) — token id from d_state[2].
+extern "C" __global__ void embed_q4k_f32_row_gph_kernel(
+    const unsigned char* table,
+    const unsigned int* __restrict__ d_state,
+    unsigned int blocks_per_row,
+    float scale,
+    float* out)
+{
+    unsigned int token_id = d_state[2];
+    unsigned int b = blockIdx.x * blockDim.x + threadIdx.x;
+    if (b >= blocks_per_row) return;
+    const unsigned char* blk = table + ((size_t)token_id * blocks_per_row + b) * 144u;
+    float* xb = out + (size_t)b * 256u;
+    q4k_block_to_f32(blk, xb);
+    if (scale != 1.0f) {
+        for (int l = 0; l < 256; l++) {
+            xb[l] *= scale;
+        }
+    }
 }
