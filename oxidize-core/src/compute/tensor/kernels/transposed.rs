@@ -397,7 +397,11 @@ pub(super) fn accumulate_q4_block(
 #[target_feature(enable = "avx512f,avx512bw")]
 #[allow(unsafe_op_in_unsafe_fn)]
 #[allow(dead_code)]
-pub(super) unsafe fn accumulate_q4_block_avx512(bitstream: *const u8, factor: f32, output: *mut f32) {
+pub(super) unsafe fn accumulate_q4_block_avx512(
+    bitstream: *const u8,
+    factor: f32,
+    output: *mut f32,
+) {
     let mask = _mm_set1_epi8(0x0F);
     let zero_point = _mm_set1_epi8(8);
     let factor = _mm512_set1_ps(factor);
