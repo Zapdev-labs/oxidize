@@ -1,0 +1,65 @@
+oxidize-core/src/backends/cuda/gpu_native_forward.rs
+  s_cd586a2897ef61::t_069d5d6c042504 596-598
+  s_12e6da73ef0ffc::t_52d006e457eb5a 21-27,30-32,687
+  s_aeb161c4b0c20a::t_c70b0f4e7833e1 599-622,641-675
+  s_1b37f3c1d1e7b7::t_3466e2a91e5bbc 995-997,1347-1348
+  s_ec8b23f0af1de8::t_03c0a0ce536088 567-595,623-627,635-640,676-679,684,1319
+  s_12e6da73ef0ffc::t_73a0e24d301b68 396-400,408-417,419-441
+  s_ec8b23f0af1de8::t_bb0c68d310ec23 680-683
+  s_aeb161c4b0c20a::t_8c916689b0350d 4-13,16-18
+  s_1b37f3c1d1e7b7::t_04e408163bd9bd 14-15
+  s_12e6da73ef0ffc::t_64b5b6539b65d5 1120-1133
+  s_ec8b23f0af1de8::t_1bbadc1cb910d5 628-634
+  s_1b37f3c1d1e7b7::t_804beb4079a6b5 19-20
+  s_12e6da73ef0ffc::t_655443e5633221 1070-1074
+  s_1b37f3c1d1e7b7::t_dc388a5235d73e 28-29,33-42,401-407,688
+  s_12e6da73ef0ffc::t_dfb6b2ff2179ae 1272-1318
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "e5267c23a0fe6676eb140975aedd53376ba455a3",
+  "prompts": {},
+  "sessions": {
+    "s_12e6da73ef0ffc": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "95ee7510-db39-43dd-b443-55d6c3759a32",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_1b37f3c1d1e7b7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ee600-1957-70f2-b3f9-e51f217a3ee9",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_aeb161c4b0c20a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "b8c71b27-f823-4353-bbaa-0eecc7b13ae2",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_cd586a2897ef61": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ee77d-c9cf-75f0-83e1-340f811bcb1d",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_ec8b23f0af1de8": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "3715abea-0d3e-44e5-acf7-58ce8583b08f",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
