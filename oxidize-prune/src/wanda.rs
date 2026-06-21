@@ -112,10 +112,7 @@ pub fn magnitude_prune(options: WandaOptions) -> Result<PruneReport> {
     })
 }
 
-fn run_inner(
-    options: WandaOptions,
-    all_norms: BTreeMap<String, Vec<f32>>,
-) -> Result<PruneReport> {
+fn run_inner(options: WandaOptions, all_norms: BTreeMap<String, Vec<f32>>) -> Result<PruneReport> {
     let WandaOptions {
         input,
         output,
@@ -254,13 +251,9 @@ fn run_inner(
                             norms_owned = vec![1.0_f32; job.in_dim];
                             norms_owned.as_slice()
                         };
-                        apply_nm_pattern(
-                            &mut mask,
-                            job.out_dim,
-                            job.in_dim,
-                            pattern,
-                            |r, c| weights_f32[r * job.in_dim + c].abs() * norms_for_score[c],
-                        )?;
+                        apply_nm_pattern(&mut mask, job.out_dim, job.in_dim, pattern, |r, c| {
+                            weights_f32[r * job.in_dim + c].abs() * norms_for_score[c]
+                        })?;
                     }
                     apply_mask_inplace(&mut weights_f32, &mask);
                     {
@@ -270,12 +263,17 @@ fn run_inner(
 
                     let t = Instant::now();
                     let target = joint_quantize.unwrap_or(job.qtype);
-                    let new_size =
-                        quantized_size(target, job.out_dim * job.in_dim).map_err(|e| anyhow::anyhow!(e))?;
+                    let new_size = quantized_size(target, job.out_dim * job.in_dim)
+                        .map_err(|e| anyhow::anyhow!(e))?;
                     let mut new_bytes = vec![0u8; new_size];
                     let f32_bytes = f32_slice_to_bytes(&weights_f32);
-                    quantize_scalar(GgufQuantizationType::F32, target, &f32_bytes, &mut new_bytes)
-                        .map_err(|e| anyhow::anyhow!(e))?;
+                    quantize_scalar(
+                        GgufQuantizationType::F32,
+                        target,
+                        &f32_bytes,
+                        &mut new_bytes,
+                    )
+                    .map_err(|e| anyhow::anyhow!(e))?;
                     {
                         let mut g = timing.lock().expect("timing lock");
                         g.2 += t.elapsed().as_millis();
@@ -299,8 +297,12 @@ fn run_inner(
     let out_tensors: Vec<OutputTensor> = results.into_iter().map(|(_, t)| t).collect();
 
     if !dry_run {
-        let out_bytes =
-            write_gguf(parsed.version, &parsed.metadata, &out_tensors, parsed.alignment)?;
+        let out_bytes = write_gguf(
+            parsed.version,
+            &parsed.metadata,
+            &out_tensors,
+            parsed.alignment,
+        )?;
         fs::write(&output, &out_bytes)
             .with_context(|| format!("failed to write output file: {}", output.display()))?;
     }
@@ -329,11 +331,7 @@ fn run_inner(
     })
 }
 
-fn dequantize_weights(
-    qtype: GgufQuantizationType,
-    raw: &[u8],
-    out: &mut [f32],
-) -> Result<()> {
+fn dequantize_weights(qtype: GgufQuantizationType, raw: &[u8], out: &mut [f32]) -> Result<()> {
     match qtype {
         GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M => {
             dequantize_q4_k_into(raw, out);
@@ -440,10 +438,7 @@ pub fn load_l2_norms_cache(path: &Path) -> Result<BTreeMap<String, Vec<f32>>> {
 
 /// Write the L2-norms cache to disk. Used by the calibration runner
 /// (typically a CLI subcommand or the server's calibration endpoint).
-pub fn write_l2_norms_cache(
-    path: &Path,
-    norms: &BTreeMap<String, Vec<f32>>,
-) -> Result<()> {
+pub fn write_l2_norms_cache(path: &Path, norms: &BTreeMap<String, Vec<f32>>) -> Result<()> {
     let mut out = String::new();
     out.push_str("# oxidize-prune L2 norms cache\n");
     out.push_str("# one row per linear weight tensor, N f32 values per row\n");
@@ -463,10 +458,7 @@ pub fn write_l2_norms_cache(
 
 /// Sanity-check the calibration cache has the dimensions we expect for
 /// the tensors in the input GGUF. Used by the CLI to fail fast.
-pub fn validate_calibration(
-    cache: &BTreeMap<String, Vec<f32>>,
-    gguf_bytes: &[u8],
-) -> Result<()> {
+pub fn validate_calibration(cache: &BTreeMap<String, Vec<f32>>, gguf_bytes: &[u8]) -> Result<()> {
     let parsed = parse_gguf(gguf_bytes).map_err(|e| anyhow::anyhow!(e))?;
     for info in &parsed.tensor_infos {
         if !is_linear_weight(info) {
@@ -510,7 +502,9 @@ fn ggml_type_for_qtype(q: GgufQuantizationType) -> u32 {
         GgufQuantizationType::Q5_1 => 7,
         GgufQuantizationType::Q8_0 => 8,
         GgufQuantizationType::Q2_K => 10,
-        GgufQuantizationType::Q3_K_S | GgufQuantizationType::Q3_K_M | GgufQuantizationType::Q3_K_L => 11,
+        GgufQuantizationType::Q3_K_S
+        | GgufQuantizationType::Q3_K_M
+        | GgufQuantizationType::Q3_K_L => 11,
         GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M => 12,
         GgufQuantizationType::Q5_K_S | GgufQuantizationType::Q5_K_M => 13,
         GgufQuantizationType::Q6_K => 14,
@@ -563,8 +557,14 @@ mod tests {
                 "general.architecture".to_string(),
                 GgufMetadataValue::String("llama".to_string()),
             ),
-            ("general.alignment".to_string(), GgufMetadataValue::Uint32(32)),
-            ("general.file_type".to_string(), GgufMetadataValue::Uint32(0)),
+            (
+                "general.alignment".to_string(),
+                GgufMetadataValue::Uint32(32),
+            ),
+            (
+                "general.file_type".to_string(),
+                GgufMetadataValue::Uint32(0),
+            ),
         ]);
         let w1: Vec<f32> = (0..32).map(|i| i as f32).collect();
         let w2: Vec<f32> = (0..32).map(|i| -(i as f32)).collect();
@@ -603,7 +603,10 @@ mod tests {
         let path = dir.join("norms.txt");
         let mut cache: BTreeMap<String, Vec<f32>> = BTreeMap::new();
         cache.insert("blk.0.attn_q.weight".to_string(), vec![1.0, 2.0, 3.0, 4.0]);
-        cache.insert("blk.0.ffn_gate.weight".to_string(), vec![0.5, 0.5, 0.5, 0.5]);
+        cache.insert(
+            "blk.0.ffn_gate.weight".to_string(),
+            vec![0.5, 0.5, 0.5, 0.5],
+        );
         write_l2_norms_cache(&path, &cache).unwrap();
         let read = load_l2_norms_cache(&path).unwrap();
         assert_eq!(read.len(), 2);
@@ -646,7 +649,11 @@ mod tests {
         .unwrap();
         // Row 0 had values 0..8; keep top 4 (4,5,6,7) and zero the rest.
         for c in 0..4 {
-            assert!(values[c].abs() < 1e-6, "col {c} should be zero, got {}", values[c]);
+            assert!(
+                values[c].abs() < 1e-6,
+                "col {c} should be zero, got {}",
+                values[c]
+            );
         }
         for c in 4..8 {
             assert!(
@@ -708,10 +715,18 @@ mod tests {
         )
         .unwrap();
         for c in 0..4 {
-            assert!(values[c].abs() < 1e-6, "col {c} should be zero, got {}", values[c]);
+            assert!(
+                values[c].abs() < 1e-6,
+                "col {c} should be zero, got {}",
+                values[c]
+            );
         }
         for c in 4..8 {
-            assert!(values[c].abs() > 1e-6, "col {c} should be kept, got {}", values[c]);
+            assert!(
+                values[c].abs() > 1e-6,
+                "col {c} should be kept, got {}",
+                values[c]
+            );
         }
     }
 
@@ -723,14 +738,8 @@ mod tests {
         let calib = dir.join("norms.txt");
         fs::write(&input, tiny_gguf_with_weights()).unwrap();
         let mut cache: BTreeMap<String, Vec<f32>> = BTreeMap::new();
-        cache.insert(
-            "blk.0.attn_q.weight".to_string(),
-            vec![1.0; 8],
-        );
-        cache.insert(
-            "blk.0.ffn_gate.weight".to_string(),
-            vec![1.0; 8],
-        );
+        cache.insert("blk.0.attn_q.weight".to_string(), vec![1.0; 8]);
+        cache.insert("blk.0.ffn_gate.weight".to_string(), vec![1.0; 8]);
         write_l2_norms_cache(&calib, &cache).unwrap();
         let opts = WandaOptions {
             input,
