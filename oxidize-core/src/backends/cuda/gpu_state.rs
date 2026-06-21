@@ -26,12 +26,11 @@ pub(super) fn gpu_init() -> Result<GpuState, String> {
     if status != cublas_sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS {
         return Err(format!("cublasCreate_v2 failed with status {status:?}"));
     }
-    // Probe the SM count so the split-K decode-attention heuristic can size its
-    // KV partitions to saturate the grid (default 132 = H100 on probe failure).
+    const CONSERVATIVE_UNKNOWN_SM_COUNT: u32 = 1;
     let sm_count = cust::device::Device::get_device(0)
         .and_then(|dev| dev.get_attribute(cust::device::DeviceAttribute::MultiprocessorCount))
         .map(|n| (n.max(1)) as u32)
-        .unwrap_or(132);
+        .unwrap_or(CONSERVATIVE_UNKNOWN_SM_COUNT);
     Ok(GpuState {
         _ctx,
         module,
