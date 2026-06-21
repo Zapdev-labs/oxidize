@@ -1,6 +1,45 @@
 #[allow(unused_imports)]
 use super::*;
 
+/// Opt-in: route the Q4_K lm_head through the multi-row kernel that caches the
+/// F32 activation in shared memory and computes a tile of rows per block. OFF by
+/// default (`OX_GPU_LMHEAD_MULTIROW=1`); numerically identical to the default
+/// one-warp-per-row kernel. Ignored when `OX_GPU_FUSED_MMQ` is set (fused MMQ
+/// already gives a multi-row DP4A lm_head).
+#[cfg(feature = "cuda")]
+pub(super) fn ox_gpu_lmhead_multirow_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("OX_GPU_LMHEAD_MULTIROW")
+            .map(|v| v != "0")
+            .unwrap_or(true)
+    })
+}
+
+/// Opt-in: fuse the SwiGLU FFN gate/up projections + SiLU into a single kernel
+/// launch (`OX_GPU_FFN_FUSE=1`). Collapses three per-layer launches (gate GEMV,
+/// up GEMV, silu_mul) and two intermediate-size VRAM round-trips into one.
+/// Numerically identical; only applies when both gate and up weights are Q4_K.
+#[cfg(feature = "cuda")]
+pub(super) fn ox_gpu_ffn_fuse_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("OX_GPU_FFN_FUSE")
+            .map(|v| v != "0")
+            .unwrap_or(true)
+    })
+}
+
+pub(super) const fn select_ffn_fusion(
+    gate_is_q4k: bool,
+    up_is_q4k: bool,
+    rows: usize,
+    blocks_per_row: usize,
+    enabled: bool,
+) -> bool {
+    enabled && gate_is_q4k && up_is_q4k && rows > 0 && blocks_per_row > 0
+}
+
 /// GPU-native attention block: RMS-norm the hidden state, run Q/K/V projections,
 /// then download Q/K/V to CPU for the attention computation.
 ///
@@ -354,22 +393,52 @@ pub fn gpu_ffn_q4k(
         let down_out_ptr = normed_ptr;
         let hidden_ptr = ab.hidden.as_device_ptr();
 
+        // Fuse gate+up+silu into one launch when enabled and both weights are
+        // Q4_K (the dot helper the fused kernel uses is Q4_K-only). gate and up
+        // share the [gate_rows × gate_bpr] shape, so one warp-per-row grid over
+        // gate_rows writes silu(gate)*up straight into ffn_down_in — no gate/up
+        // VRAM round-trip. Byte-identical to the gate→up→silu_mul sequence.
+        let fuse_ffn = select_ffn_fusion(
+            gate_kern == GEMV_Q4K_F32IN_KERNEL_NAME,
+            up_kern == GEMV_Q4K_F32IN_KERNEL_NAME,
+            gate_rows,
+            gate_bpr as usize,
+            ox_gpu_ffn_fuse_enabled(),
+        );
+        let fn_gate_up_silu = if fuse_ffn {
+            Some(
+                gpu.module
+                    .get_function(GEMV_Q4K_F32IN_GATE_UP_SILU_KERNEL_NAME)
+                    .map_err(stringify)?,
+            )
+        } else {
+            None
+        };
+
         unsafe {
-            // gate × normed → ffn_gate
-            cust::launch!(fn_gate<<<gate_grid, block_size, 0, stream>>>(
-                gate_ptr, normed_ptr, gate_buf_ptr, gate_u32, gate_bpr
-            ))
-            .map_err(stringify)?;
-            // up × normed → ffn_up
-            cust::launch!(fn_up<<<up_grid, block_size, 0, stream>>>(
-                up_ptr, normed_ptr, up_buf_ptr, up_u32, gate_bpr
-            ))
-            .map_err(stringify)?;
-            // silu(ffn_gate) * ffn_up → ffn_down_in
-            cust::launch!(fn_silu<<<silu_grid, block_size, 0, stream>>>(
-                gate_buf_ptr, up_buf_ptr, ffn_down_in_ptr, inter_n
-            ))
-            .map_err(stringify)?;
+            if let Some(fn_fused) = fn_gate_up_silu.as_ref() {
+                // silu(gate × normed) * (up × normed) → ffn_down_in (one launch)
+                cust::launch!(fn_fused<<<gate_grid, block_size, 0, stream>>>(
+                    gate_ptr, up_ptr, normed_ptr, ffn_down_in_ptr, gate_u32, gate_bpr
+                ))
+                .map_err(stringify)?;
+            } else {
+                // gate × normed → ffn_gate
+                cust::launch!(fn_gate<<<gate_grid, block_size, 0, stream>>>(
+                    gate_ptr, normed_ptr, gate_buf_ptr, gate_u32, gate_bpr
+                ))
+                .map_err(stringify)?;
+                // up × normed → ffn_up
+                cust::launch!(fn_up<<<up_grid, block_size, 0, stream>>>(
+                    up_ptr, normed_ptr, up_buf_ptr, up_u32, gate_bpr
+                ))
+                .map_err(stringify)?;
+                // silu(ffn_gate) * ffn_up → ffn_down_in
+                cust::launch!(fn_silu<<<silu_grid, block_size, 0, stream>>>(
+                    gate_buf_ptr, up_buf_ptr, ffn_down_in_ptr, inter_n
+                ))
+                .map_err(stringify)?;
+            }
             // down × ffn_down_in → normed (reused as temp)
             cust::launch!(fn_down<<<down_grid, block_size, 0, stream>>>(
                 down_ptr, ffn_down_in_ptr, down_out_ptr, down_u32, down_bpr
@@ -490,6 +559,129 @@ pub fn gpu_lm_head_quantized(
         d_output.copy_to(logits).map_err(stringify)?;
 
         gpu.return_f32_buffer(d_input);
+        gpu.return_f32_buffer(d_output);
+        Ok(())
+    })
+}
+
+/// Device-resident lm_head: RMSNorm on `activation.hidden`, GEMV from
+/// `activation.normed` → logits, single sync at the end.
+///
+/// Used when the hidden state never left the GPU during the layer stack
+/// (gpu_native decode). Avoids re-uploading the normed vector for lm_head.
+#[cfg(feature = "cuda")]
+pub fn gpu_final_head_device_resident(
+    norm_weight: &[f32],
+    eps: f32,
+    weight_bytes: &[u8],
+    vocab_size: usize,
+    hidden_size: usize,
+    logits: &mut [f32],
+    last_hidden: &mut [f32],
+) -> Result<(), String> {
+    if !hidden_size.is_multiple_of(256) {
+        return Err(format!(
+            "gpu_final_head: hidden_size {hidden_size} not a multiple of 256"
+        ));
+    }
+    if logits.len() != vocab_size || last_hidden.len() != hidden_size {
+        return Err("gpu_final_head: output buffer size mismatch".to_string());
+    }
+
+    super::gpu_kernels::gpu_rms_norm(norm_weight, eps)?;
+
+    let blocks_per_row = hidden_size / 256;
+    let bpr_u32 = blocks_per_row as u32;
+    let rows_u32 = vocab_size as u32;
+    let is_q6k = blocks_per_row > 0
+        && vocab_size > 0
+        && weight_bytes.len() / (vocab_size * blocks_per_row) >= 200;
+
+    // lm_head launch strategy for the (common) Q4_K output projection:
+    //   * OX_GPU_FUSED_MMQ → fused MMQ (in-kernel Q8_K quantize + DP4A, 8 rows/blk)
+    //   * OX_GPU_LMHEAD_MULTIROW → cache F32 activation in shared, 8 rows/blk
+    //   * otherwise the original one-warp-per-row gemv_q4k_f32in_kernel
+    // Q6_K always uses the f32-in kernel (no Q8_K dp4a path for 6-bit weights).
+    // Both opt-in paths are numerically identical to the default and OFF by
+    // default, so shipped behavior is unchanged until validated on GPU.
+    enum LmHeadKern {
+        F32In(&'static str),
+        Multirow,
+        FusedMmq,
+    }
+    let strategy = if is_q6k {
+        LmHeadKern::F32In(GEMV_Q6K_F32IN_KERNEL_NAME)
+    } else if super::gemv_quantized::ox_gpu_fused_mmq_enabled()
+        && blocks_per_row.saturating_mul(292) <= 44 * 1024
+    {
+        LmHeadKern::FusedMmq
+    } else if ox_gpu_lmhead_multirow_enabled() && hidden_size.saturating_mul(4) <= 44 * 1024 {
+        LmHeadKern::Multirow
+    } else {
+        LmHeadKern::F32In(GEMV_Q4K_F32IN_KERNEL_NAME)
+    };
+
+    with_gpu(|gpu| {
+        let w_key = bytes_cache_key(weight_bytes);
+        gpu.ensure_resident_quant(w_key, weight_bytes)?;
+
+        let normed_ptr = {
+            let ab = gpu
+                .activation
+                .as_ref()
+                .ok_or_else(|| "activation buffers not initialised".to_string())?;
+            ab.normed.as_device_ptr()
+        };
+
+        let d_output = gpu.get_f32_buffer(vocab_size)?;
+        let block_size = 256_u32;
+        let grid = rows_u32.saturating_mul(32).div_ceil(block_size);
+        let w_ptr = gpu.resident_quant[&w_key].as_device_ptr();
+
+        match strategy {
+            LmHeadKern::FusedMmq => {
+                super::gemv_quantized::launch_gemv_q4k_q8k_fused_device(
+                    gpu,
+                    w_ptr,
+                    normed_ptr,
+                    d_output.as_device_ptr(),
+                    rows_u32,
+                    bpr_u32,
+                )?;
+            }
+            LmHeadKern::Multirow => {
+                let shmem = (hidden_size * std::mem::size_of::<f32>()) as u32;
+                let fn_gemv = gpu
+                    .module
+                    .get_function(GEMV_Q4K_F32IN_MULTIROW_KERNEL_NAME)
+                    .map_err(stringify)?;
+                let stream = &gpu.stream;
+                unsafe {
+                    cust::launch!(fn_gemv<<<grid, block_size, shmem, stream>>>(
+                        w_ptr, normed_ptr, d_output.as_device_ptr(), rows_u32, bpr_u32
+                    ))
+                    .map_err(stringify)?;
+                }
+            }
+            LmHeadKern::F32In(kern_name) => {
+                let fn_gemv = gpu.module.get_function(kern_name).map_err(stringify)?;
+                let stream = &gpu.stream;
+                unsafe {
+                    cust::launch!(fn_gemv<<<grid, block_size, 0, stream>>>(
+                        w_ptr, normed_ptr, d_output.as_device_ptr(), rows_u32, bpr_u32
+                    ))
+                    .map_err(stringify)?;
+                }
+            }
+        }
+
+        gpu.stream.synchronize().map_err(stringify)?;
+        d_output.copy_to(logits).map_err(stringify)?;
+        let ab = gpu
+            .activation
+            .as_ref()
+            .ok_or_else(|| "activation buffers not initialised".to_string())?;
+        ab.normed.copy_to(last_hidden).map_err(stringify)?;
         gpu.return_f32_buffer(d_output);
         Ok(())
     })
@@ -800,9 +992,9 @@ pub fn gpu_attn_rope_append_flash(
         launch_kv_append_f16(gpu, kv_layer_idx, k_ptr, v_ptr, phys_pos, pos)?;
 
         // 3) GQA online-softmax flash-attention decode → d_attn.
-        //    Split-K (env OX_GPU_ATTN_SPLITK) partitions the KV sequence across
-        //    extra blocks for better SM occupancy on long context; ns == 1
-        //    falls back to the byte-for-byte unchanged single-block kernel.
+        //    Decode dispatch automatically partitions long KV sequences across
+        //    extra blocks for better SM occupancy and keeps short contexts on
+        //    the unchanged single-block kernel.
         launch_flash_attn_decode(
             gpu,
             kv_layer_idx,
@@ -875,6 +1067,11 @@ pub fn gpu_attn_block_fused_q4k(
     pos: usize,
     kv_layer_idx: usize,
     layer_window: usize,
+    // --- per-head Q/K RMSNorm (Qwen3-style QK-norm). Empty slices = no norm.
+    //     When present, length MUST equal head_dim; applied per head AFTER the
+    //     QKV projection and BEFORE RoPE, matching the CPU rms_norm_f32 path. ---
+    q_norm: &[f32],
+    k_norm: &[f32],
     // --- Wo + residual (from gpu_wo_residual_q4k) ---
     wo: &[u8],
     wo_rows: usize,
@@ -918,6 +1115,20 @@ pub fn gpu_attn_block_fused_q4k(
     if !head_dim.is_power_of_two() || head_dim > 256 || rope_dim > head_dim || rope_dim % 2 != 0 {
         return Err(format!(
             "gpu_attn_block_fused: head_dim {head_dim} / rope_dim {rope_dim} unsupported"
+        ));
+    }
+    // QK-norm (if present) must be a per-head [head_dim] weight — the rms_norm
+    // launch below assumes one block per head over exactly head_dim elements.
+    if !q_norm.is_empty() && q_norm.len() != head_dim {
+        return Err(format!(
+            "gpu_attn_block_fused: q_norm len {} != head_dim {head_dim}",
+            q_norm.len()
+        ));
+    }
+    if !k_norm.is_empty() && k_norm.len() != head_dim {
+        return Err(format!(
+            "gpu_attn_block_fused: k_norm len {} != head_dim {head_dim}",
+            k_norm.len()
         ));
     }
 
@@ -1059,6 +1270,55 @@ pub fn gpu_attn_block_fused_q4k(
         }
 
         // ============================================================
+        // (B') per-head Q/K RMSNorm (Qwen3-style QK-norm), in-place on d_q/d_k,
+        //      applied AFTER the QKV projection and BEFORE RoPE. Reuses the
+        //      per-row rms_norm_f32_kernel with one block per head (rows =
+        //      n_heads, hidden_size = head_dim, reading the shared [head_dim]
+        //      norm weight) — numerically equivalent to the CPU rms_norm_f32
+        //      applied per head in layers.rs. Inert (skipped) for models without
+        //      QK-norm (Llama/Mistral pass empty slices).
+        // ============================================================
+        if !q_norm.is_empty() || !k_norm.is_empty() {
+            if !q_norm.is_empty() {
+                let qn_key = f32_cache_key(q_norm);
+                if !gpu.resident_f32.contains_key(&qn_key) {
+                    let buf = cust::memory::DeviceBuffer::from_slice(q_norm).map_err(stringify)?;
+                    gpu.resident_f32.insert(qn_key, buf);
+                }
+            }
+            if !k_norm.is_empty() {
+                let kn_key = f32_cache_key(k_norm);
+                if !gpu.resident_f32.contains_key(&kn_key) {
+                    let buf = cust::memory::DeviceBuffer::from_slice(k_norm).map_err(stringify)?;
+                    gpu.resident_f32.insert(kn_key, buf);
+                }
+            }
+            let hd_u32 = head_dim as u32;
+            let shmem_norm = hd_u32 * 4;
+            let fn_rms = gpu
+                .module
+                .get_function(RMS_NORM_KERNEL_NAME)
+                .map_err(stringify)?;
+            let stream = &gpu.stream;
+            unsafe {
+                if !q_norm.is_empty() {
+                    let qn_ptr = gpu.resident_f32[&f32_cache_key(q_norm)].as_device_ptr();
+                    cust::launch!(fn_rms<<<n_q_heads as u32, hd_u32, shmem_norm, stream>>>(
+                        d_q_ptr, qn_ptr, d_q_ptr, hd_u32, eps
+                    ))
+                    .map_err(stringify)?;
+                }
+                if !k_norm.is_empty() {
+                    let kn_ptr = gpu.resident_f32[&f32_cache_key(k_norm)].as_device_ptr();
+                    cust::launch!(fn_rms<<<n_kv_heads as u32, hd_u32, shmem_norm, stream>>>(
+                        d_k_ptr, kn_ptr, d_k_ptr, hd_u32, eps
+                    ))
+                    .map_err(stringify)?;
+                }
+            }
+        }
+
+        // ============================================================
         // (C) partial NeoX RoPE on d_q, d_k (in-place)  (from rope/append/flash)
         // ============================================================
         launch_rope_f32(
@@ -1084,8 +1344,8 @@ pub fn gpu_attn_block_fused_q4k(
         // ============================================================
         let d_attn = gpu.get_f32_buffer(q_len)?;
         let d_attn_ptr = d_attn.as_device_ptr();
-        // Split-K (env OX_GPU_ATTN_SPLITK) for SM occupancy on long context;
-        // ns == 1 falls back to the unchanged single-block kernel. Note the
+        // Split-K is selected automatically for SM occupancy on long context;
+        // one split falls back to the unchanged single-block kernel. Note the
         // splitk launcher allocates/returns its own pooled scratch internally,
         // which is safe here because `d_attn` is already held and the pool is
         // single-stream-ordered (see launch_flash_attn_decode_splitk).
