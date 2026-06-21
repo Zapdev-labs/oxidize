@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use rand::{Rng, SeedableRng, rngs::StdRng, seq::SliceRandom};
@@ -70,6 +71,9 @@ impl GenTrainingConfig {
                 "hidden_size, patch_hidden, batch_size must be > 0".into(),
             ));
         }
+        if self.epochs == 0 {
+            return Err(VideoError::Config("epochs must be > 0".into()));
+        }
         if !(0.0..1.0).contains(&self.val_split) {
             return Err(VideoError::Config("val_split must be in [0.0, 1.0)".into()));
         }
@@ -81,6 +85,7 @@ impl GenTrainingConfig {
 pub struct GenDataset {
     context: Vec<Vec<f32>>,
     target: Vec<Vec<f32>>,
+    pair_clip: Vec<usize>,
     frames: FrameConfig,
     context_frames: usize,
 }
@@ -159,8 +164,13 @@ pub fn load_gen_dataset(config: &GenTrainingConfig) -> Result<GenDataset, VideoE
     let extracted = clips_to_tensors_parallel(&samples, frames_cfg, &cache_dir);
     let mut context = Vec::new();
     let mut target = Vec::new();
+    let mut pair_clip = Vec::new();
 
-    for tensor in extracted.into_iter().flatten() {
+    for (clip_idx, tensor) in extracted.into_iter().enumerate() {
+        if tensor.is_none() {
+            continue;
+        }
+        let tensor = tensor.unwrap();
         let num_frames = frames_cfg.num_frames;
         if tensor.len() != num_frames * frame_flat {
             continue;
@@ -172,6 +182,7 @@ pub fn load_gen_dataset(config: &GenTrainingConfig) -> Result<GenDataset, VideoE
             let tgt_end = tgt_start + frame_flat;
             context.push(tensor[ctx_start..ctx_end].to_vec());
             target.push(tensor[tgt_start..tgt_end].to_vec());
+            pair_clip.push(clip_idx);
         }
     }
 
@@ -188,6 +199,7 @@ pub fn load_gen_dataset(config: &GenTrainingConfig) -> Result<GenDataset, VideoE
     Ok(GenDataset {
         context,
         target,
+        pair_clip,
         frames: frames_cfg,
         context_frames: ctx,
     })
@@ -413,11 +425,26 @@ pub fn train_generator(
     let mut rng = StdRng::seed_from_u64(config.seed.wrapping_add(1));
 
     let n = dataset.len();
-    let val_count = ((n as f32) * config.val_split).round() as usize;
-    let val_count = val_count.min(n.saturating_sub(1));
-    let mut indices: Vec<usize> = (0..n).collect();
-    indices.shuffle(&mut rng);
-    let (val_idx, train_idx) = indices.split_at(val_count);
+    let mut by_clip: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for (pair_idx, &clip) in dataset.pair_clip.iter().enumerate() {
+        by_clip.entry(clip).or_default().push(pair_idx);
+    }
+    let mut clip_ids: Vec<usize> = by_clip.keys().copied().collect();
+    clip_ids.shuffle(&mut rng);
+    let val_clip_count = ((clip_ids.len() as f32) * config.val_split).round() as usize;
+    let val_clip_count = val_clip_count.min(clip_ids.len().saturating_sub(1));
+    let (val_clips, train_clips) = clip_ids.split_at(val_clip_count);
+    let val_idx: Vec<usize> = val_clips
+        .iter()
+        .flat_map(|clip| &by_clip[clip])
+        .copied()
+        .collect();
+    let train_idx: Vec<usize> = train_clips
+        .iter()
+        .flat_map(|clip| &by_clip[clip])
+        .copied()
+        .collect();
+    let track_val = !val_idx.is_empty();
 
     let mut epoch_losses = Vec::with_capacity(config.epochs);
     let mut best_val = f32::MAX;
@@ -444,8 +471,12 @@ pub fn train_generator(
         let train_loss = weighted / seen.max(1) as f32;
         epoch_losses.push(train_loss);
 
-        let val_loss = eval_loss(&model, dataset, val_idx);
-        if val_loss < best_val {
+        let val_loss = if track_val {
+            eval_loss(&model, dataset, &val_idx)
+        } else {
+            f32::NAN
+        };
+        if track_val && val_loss < best_val {
             best_val = val_loss;
             best_model = model.clone();
         }
@@ -456,8 +487,13 @@ pub fn train_generator(
         );
     }
 
-    model = best_model;
-    let val_loss = eval_loss(&model, dataset, val_idx);
+    model = if track_val { best_model } else { model };
+    let val_loss = if track_val {
+        eval_loss(&model, dataset, &val_idx)
+    } else {
+        f32::NAN
+    };
+    let best_val_loss = if track_val { best_val } else { f32::NAN };
 
     Ok((
         model,
@@ -468,7 +504,7 @@ pub fn train_generator(
             epochs: config.epochs,
             final_train_loss: epoch_losses.last().copied().unwrap_or(f32::NAN),
             val_loss,
-            best_val_loss: best_val,
+            best_val_loss,
             epoch_losses,
         },
     ))
@@ -790,6 +826,7 @@ mod tests {
         GenDataset {
             context,
             target,
+            pair_clip: vec![0; context.len()],
             frames: cfg.frames,
             context_frames: cfg.context_frames,
         }
