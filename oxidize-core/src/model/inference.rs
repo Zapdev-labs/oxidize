@@ -1296,6 +1296,9 @@ pub struct InferenceModel {
     /// Final output-normalized hidden row for the most recent target token.
     /// Native MTP consumes this row as its target-hidden input.
     pub(super) last_output_hidden: Vec<f32>,
+    /// Token pending GPU embedding lookup in the next `run_layer_range` call.
+    #[cfg(feature = "cuda")]
+    pub(super) pending_embed_token: Option<crate::model::Token>,
 }
 
 /// Caller-owned per-sequence KV buffer for [`InferenceModel::forward_batch`].
@@ -2194,6 +2197,8 @@ mod tests {
             ssm_conv_buffers: Vec::new(),
             workspace: Workspace::for_config(&config),
             last_output_hidden: vec![0.0_f32; config.hidden_size],
+            #[cfg(feature = "cuda")]
+            pending_embed_token: None,
         }
     }
 
@@ -2341,6 +2346,7 @@ mod tests {
         };
         model.kv_cache = KvCache::new(kv_cache_config).expect("one-layer kv cache should be valid");
         model.kv_layer_map = vec![Some(0)];
+        model.workspace = Workspace::for_config(&model.config);
         model
     }
 
@@ -2415,7 +2421,9 @@ mod tests {
         let _ = reused
             .forward(&[2, 0, 1], &mut session)
             .expect("warm-up forward should succeed");
-        reused.rewind_to(0).expect("rewind_to(0) should be accepted");
+        reused
+            .rewind_to(0)
+            .expect("rewind_to(0) should be accepted");
         session.rewind_to(0);
         assert_eq!(session.consumed_tokens(), 0);
 
@@ -2614,7 +2622,9 @@ mod tests {
             }
             let mut decoded = Vec::with_capacity(steps);
             for _ in 0..steps {
-                let mut out = m.forward_batch(&[(last, pos)], &mut kv, true).expect("decode");
+                let mut out = m
+                    .forward_batch(&[(last, pos)], &mut kv, true)
+                    .expect("decode");
                 last = argmax(&out[0]) as Token;
                 decoded.push(out.remove(0));
                 pos += 1;
@@ -2689,7 +2699,9 @@ mod tests {
             }
             let mut decoded = Vec::with_capacity(steps);
             for _ in 0..steps {
-                let mut out = m.forward_batch(&[(last, pos)], &mut kv, true).expect("decode");
+                let mut out = m
+                    .forward_batch(&[(last, pos)], &mut kv, true)
+                    .expect("decode");
                 last = argmax(&out[0]) as Token;
                 decoded.push(out.remove(0));
                 pos += 1;
@@ -2738,7 +2750,10 @@ mod tests {
             // The joint decode call mixes pos[0] != pos[1] — exactly the case the
             // synchronized-length tests never hit.
             let rows = vec![(last[0], pos[0]), (last[1], pos[1])];
-            assert_ne!(rows[0].1, rows[1].1, "batch rows must have distinct positions");
+            assert_ne!(
+                rows[0].1, rows[1].1,
+                "batch rows must have distinct positions"
+            );
             let out = m.forward_batch(&rows, &mut kv, true).expect("joint decode");
             assert_eq!(
                 out[0], a_alone[step],
