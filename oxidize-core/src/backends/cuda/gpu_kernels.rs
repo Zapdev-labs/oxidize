@@ -16,10 +16,8 @@ pub fn gpu_init_activation_buffers(
                 return Ok(());
             }
         }
-        let hidden =
-            cust::memory::DeviceBuffer::<f32>::zeroed(hidden_size).map_err(stringify)?;
-        let normed =
-            cust::memory::DeviceBuffer::<f32>::zeroed(hidden_size).map_err(stringify)?;
+        let hidden = cust::memory::DeviceBuffer::<f32>::zeroed(hidden_size).map_err(stringify)?;
+        let normed = cust::memory::DeviceBuffer::<f32>::zeroed(hidden_size).map_err(stringify)?;
         let ffn_gate =
             cust::memory::DeviceBuffer::<f32>::zeroed(intermediate_size).map_err(stringify)?;
         let ffn_up =
@@ -95,11 +93,7 @@ pub fn gpu_rms_norm(weight: &[f32], eps: f32) -> Result<(), String> {
             .ok_or_else(|| "activation buffers not initialised".to_string())?;
         let hidden_ptr = ab.hidden.as_device_ptr();
         let normed_ptr = ab.normed.as_device_ptr();
-        let weight_ptr = gpu
-            .resident_f32
-            .get(&key)
-            .unwrap()
-            .as_device_ptr();
+        let weight_ptr = gpu.resident_f32.get(&key).unwrap().as_device_ptr();
 
         // One warp-reduction block per token; blockDim capped at 512 for the
         // parallel-reduction within the block (must be power-of-two).
@@ -133,9 +127,7 @@ pub fn gpu_rms_norm(weight: &[f32], eps: f32) -> Result<(), String> {
 ///
 /// `delta` must be a device buffer of exactly `hidden_size` f32 elements.
 #[cfg(feature = "cuda")]
-pub fn gpu_residual_add(
-    delta: &cust::memory::DeviceBuffer<f32>,
-) -> Result<(), String> {
+pub fn gpu_residual_add(delta: &cust::memory::DeviceBuffer<f32>) -> Result<(), String> {
     with_gpu(|gpu| {
         let ab = gpu
             .activation
@@ -228,4 +220,154 @@ pub fn gpu_silu_mul(intermediate_size: usize) -> Result<(), String> {
 #[cfg(feature = "cuda")]
 pub fn gpu_sync_stream() -> Result<(), String> {
     with_gpu(|gpu| gpu.stream.synchronize().map_err(stringify))
+}
+
+/// True when GPU activation buffers are allocated (gpu_native decode path).
+#[cfg(feature = "cuda")]
+pub fn gpu_activation_ready() -> bool {
+    with_gpu(|gpu| Ok(gpu.activation.is_some())).unwrap_or(false)
+}
+
+/// Write one token's embedding row directly into `activation.hidden` on the GPU.
+///
+/// Avoids CPU quantized dequant + host-to-device upload on every decode token.
+#[cfg(feature = "cuda")]
+pub fn gpu_embed_token(
+    storage: &crate::inference::WeightStorage,
+    hidden_size: usize,
+    vocab_size: usize,
+    token: crate::model::Token,
+    scale: f32,
+) -> Result<(), String> {
+    use crate::gguf::GgufQuantizationType;
+    use crate::inference::WeightStorage;
+
+    if hidden_size == 0 || !hidden_size.is_multiple_of(256) {
+        return Err(format!(
+            "gpu_embed_token: hidden_size {hidden_size} must be a non-zero multiple of 256"
+        ));
+    }
+    let token_idx = (token as usize).min(vocab_size.saturating_sub(1));
+    let blocks_per_row = hidden_size / 256;
+
+    with_gpu(|gpu| {
+        let hidden_ptr = {
+            let ab = gpu
+                .activation
+                .as_mut()
+                .ok_or_else(|| "activation buffers not initialised".to_string())?;
+            if ab.hidden_size != hidden_size {
+                return Err(format!(
+                    "gpu_embed_token: activation hidden_size {} != {hidden_size}",
+                    ab.hidden_size
+                ));
+            }
+            ab.hidden.as_device_ptr()
+        };
+
+        match storage {
+            WeightStorage::F32(data) => {
+                if data.len() < (token_idx + 1) * hidden_size {
+                    return Err("gpu_embed_token: F32 embedding table too small".to_string());
+                }
+                let key = f32_cache_key(data);
+                if !gpu.resident_f32.contains_key(&key) {
+                    let buf = cust::memory::DeviceBuffer::from_slice(data).map_err(stringify)?;
+                    gpu.resident_f32.insert(key, buf);
+                }
+                let table_ptr = gpu.resident_f32[&key].as_device_ptr();
+                let block_size = 256_u32;
+                let grid = hidden_size.div_ceil(256) as u32;
+                let fn_embed = gpu
+                    .module
+                    .get_function(EMBED_F32_ROW_KERNEL_NAME)
+                    .map_err(stringify)?;
+                let stream = &gpu.stream;
+                unsafe {
+                    cust::launch!(fn_embed<<<grid, block_size, 0, stream>>>(
+                        table_ptr,
+                        token_idx as u32,
+                        hidden_size as u32,
+                        scale,
+                        hidden_ptr
+                    ))
+                    .map_err(stringify)?;
+                }
+            }
+            WeightStorage::Quantized(qtype, data) => match qtype {
+                GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M => {
+                    let row_bytes = blocks_per_row * 144;
+                    if data.len() < (token_idx + 1) * row_bytes {
+                        return Err("gpu_embed_token: Q4K embedding table too small".to_string());
+                    }
+                    let key = bytes_cache_key(data);
+                    gpu.ensure_resident_quant(key, data)?;
+                    let table_ptr = gpu.resident_quant[&key].as_device_ptr();
+                    let block_size = 256_u32;
+                    let grid = blocks_per_row.div_ceil(256) as u32;
+                    let fn_embed = gpu
+                        .module
+                        .get_function(EMBED_Q4K_F32_ROW_KERNEL_NAME)
+                        .map_err(stringify)?;
+                    let stream = &gpu.stream;
+                    unsafe {
+                        cust::launch!(fn_embed<<<grid, block_size, 0, stream>>>(
+                            table_ptr,
+                            token_idx as u32,
+                            blocks_per_row as u32,
+                            scale,
+                            hidden_ptr
+                        ))
+                        .map_err(stringify)?;
+                    }
+                }
+                _ => {
+                    return Err(format!(
+                        "gpu_embed_token: unsupported embedding quant type {:?}",
+                        qtype
+                    ));
+                }
+            },
+            WeightStorage::MmapQuantized(qtype, mmap, offset, size) => {
+                let data = &mmap[*offset..*offset + *size];
+                match qtype {
+                    GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M => {
+                        let row_bytes = blocks_per_row * 144;
+                        if data.len() < (token_idx + 1) * row_bytes {
+                            return Err(
+                                "gpu_embed_token: Q4K embedding table too small".to_string()
+                            );
+                        }
+                        let key = bytes_cache_key(data);
+                        gpu.ensure_resident_quant(key, data)?;
+                        let table_ptr = gpu.resident_quant[&key].as_device_ptr();
+                        let block_size = 256_u32;
+                        let grid = blocks_per_row.div_ceil(256) as u32;
+                        let fn_embed = gpu
+                            .module
+                            .get_function(EMBED_Q4K_F32_ROW_KERNEL_NAME)
+                            .map_err(stringify)?;
+                        let stream = &gpu.stream;
+                        unsafe {
+                            cust::launch!(fn_embed<<<grid, block_size, 0, stream>>>(
+                                table_ptr,
+                                token_idx as u32,
+                                blocks_per_row as u32,
+                                scale,
+                                hidden_ptr
+                            ))
+                            .map_err(stringify)?;
+                        }
+                    }
+                    _ => {
+                        return Err(format!(
+                            "gpu_embed_token: unsupported embedding quant type {:?}",
+                            qtype
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    })
 }
