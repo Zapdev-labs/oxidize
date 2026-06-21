@@ -1,16 +1,14 @@
 use super::*;
 
-/// Cached check for the on-device attention mode (env `OX_GPU_ATTN`). When set,
-/// the gpu-native attention island runs RoPE + KV append + flash-attention on the
-/// GPU (device-resident F16 KV cache) instead of downloading Q/K/V and running
-/// CPU attention. OFF by default → default runs are byte-identical to today.
-///
-/// Defined unconditionally (it only reads an env var) so the prefill dispatch in
-/// `forward.rs` can consult it without a `cfg(cuda)` split; on non-CUDA builds it
-/// simply gates a code path that is otherwise a no-op.
+/// On-device attention when gpu_native is active (default ON). Set `OX_GPU_ATTN=0`
+/// to force CPU attention for parity debugging.
 pub(super) fn ox_gpu_attn_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("OX_GPU_ATTN").is_ok())
+    *ENABLED.get_or_init(|| match std::env::var("OX_GPU_ATTN") {
+        Ok(v) if v == "0" || v.is_empty() => false,
+        Ok(_) => true,
+        Err(_) => true,
+    })
 }
 
 /// Cached check for true continuous-batching decode (env `OX_BATCHED_DECODE`).
@@ -95,9 +93,33 @@ impl InferenceModel {
         {
             return false;
         }
-        // No per-head norms (require extra CPU work between projections).
+        // Per-head Q/K norm (Qwen3-style QK-RMSNorm). The GPU fused path CAN
+        // apply this (per-head [head_dim] rms_norm before RoPE), but it is OFF by
+        // default: routing a QK-norm model to the GPU currently diverges from the
+        // validated CPU output on the first token and only buys ~6% on L4, so the
+        // safe default is the CPU path. Opt in with `OX_GPU_QK_NORM=1` for
+        // experimentation (kernel + plumbing live in gpu_attn_block_fused_q4k).
         if !layer.attn_q_norm.is_empty() || !layer.attn_k_norm.is_empty() {
-            return false;
+            let qk_norm_gpu =
+                std::env::var("OX_GPU_QK_NORM").is_ok_and(|v| v != "0" && !v.is_empty());
+            if !qk_norm_gpu {
+                return false;
+            }
+            // Opt-in path: only per-head [head_dim] norms are representable.
+            let n_q = cfg.num_attention_heads.max(1);
+            let n_kv = cfg.num_key_value_heads.max(1);
+            let q_hd = layer.attn_q.output_dim(cfg.hidden_size) / n_q;
+            let kv_hd = if !layer.attn_k.is_empty() {
+                layer.attn_k.output_dim(cfg.hidden_size) / n_kv
+            } else {
+                0
+            };
+            if !layer.attn_q_norm.is_empty() && layer.attn_q_norm.len() != q_hd {
+                return false;
+            }
+            if !layer.attn_k_norm.is_empty() && layer.attn_k_norm.len() != kv_hd {
+                return false;
+            }
         }
         // Dense FFN required.
         if layer.ffn_gate.is_empty() || layer.ffn_up.is_empty() || layer.ffn_down.is_empty() {
@@ -177,10 +199,32 @@ impl InferenceModel {
             });
             if all_eligible && !range.is_empty() {
                 match crate::cuda::gpu_init_activation_buffers(h, cfg.intermediate_size) {
-                    Ok(()) => match crate::cuda::gpu_upload_hidden(&self.workspace.x[..h]) {
-                        Ok(()) => true,
-                        Err(_) => false,
-                    },
+                    Ok(()) => {
+                        #[cfg(feature = "cuda")]
+                        let embed_ok = self
+                            .pending_embed_token
+                            .take()
+                            .and_then(|token| {
+                                crate::cuda::gpu_embed_token(
+                                    &self.tok_embeddings,
+                                    h,
+                                    cfg.vocab_size,
+                                    token,
+                                    cfg.embedding_scale,
+                                )
+                                .ok()
+                            })
+                            .is_some();
+                        #[cfg(feature = "cuda")]
+                        let upload_ok = if embed_ok {
+                            true
+                        } else {
+                            crate::cuda::gpu_upload_hidden(&self.workspace.x[..h]).is_ok()
+                        };
+                        #[cfg(not(feature = "cuda"))]
+                        let upload_ok = false;
+                        upload_ok
+                    }
                     Err(_) => false,
                 }
             } else {
@@ -190,10 +234,12 @@ impl InferenceModel {
         #[cfg(not(feature = "cuda"))]
         let gpu_native = false;
 
-        // On-device attention (env OX_GPU_ATTN). Requires gpu_native (all layers
-        // eligible) AND a device-resident F16 KV cache whose geometry matches the
-        // host KV cache. When active, the attention island runs entirely on the
-        // GPU; the host KvCache is NOT updated, so OX_GPU_ATTN is a whole-run mode.
+        // On-device attention when gpu_native is active: the hybrid path that
+        // downloads Q/K/V to CPU for attention costs ~32 stream syncs per token
+        // (one per layer) and is the dominant decode bottleneck vs llama.cpp.
+        // When all layers are gpu_native-eligible, run RoPE + KV + flash-decode on
+        // the GPU by default. Set OX_GPU_ATTN=0 to force the legacy CPU-attention
+        // path for parity debugging.
         #[cfg(feature = "cuda")]
         let gpu_attn: bool = if gpu_native && ox_gpu_attn_enabled() {
             let kv_cfg = self.kv_cache.config();
@@ -798,6 +844,9 @@ impl InferenceModel {
                             pos,
                             kv_layer_idx,
                             layer_window,
+                            // Qwen3-style per-head QK-norm (empty for Llama/Mistral).
+                            &layer.attn_q_norm,
+                            &layer.attn_k_norm,
                             wo,
                             h,
                             attn_output_input_len,
@@ -1431,16 +1480,7 @@ impl InferenceModel {
             }
         }
 
-        // When the GPU-native path was used, the hidden state lives in
-        // `activation.hidden`; download it back to `ws.x` for the final norm +
-        // logit projection that runs on CPU.
-        #[cfg(feature = "cuda")]
-        if gpu_native {
-            let ws = &mut self.workspace;
-            crate::cuda::gpu_download_hidden(&mut ws.x[..h])
-                .map_err(|e| ModelError::InferenceFailed(e))?;
-        }
-
+        // gpu_native leaves hidden on device; final_head uses gpu_final_head_device_resident.
         Ok(())
     }
 
