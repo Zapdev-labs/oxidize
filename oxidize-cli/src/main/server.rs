@@ -57,7 +57,10 @@ pub(super) fn profiler_command(
     command
 }
 
-pub(super) fn run_profiled_inference(profiler: Profiler, output: Option<&PathBuf>) -> io::Result<ExitStatus> {
+pub(super) fn run_profiled_inference(
+    profiler: Profiler,
+    output: Option<&PathBuf>,
+) -> io::Result<ExitStatus> {
     let exe = std::env::current_exe()?;
     let passthrough_args = current_args_without_profile_flags();
     let mut command = profiler_command(profiler, output, &exe, &passthrough_args);
