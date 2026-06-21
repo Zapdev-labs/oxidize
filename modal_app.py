@@ -65,7 +65,16 @@ model_cache = modal.Volume.from_name("oxidize-model-cache", create_if_missing=Tr
 CUDA_TAG = "12.8.1-devel-ubuntu22.04"
 cuda_image = (
     modal.Image.from_registry(f"nvidia/cuda:{CUDA_TAG}", add_python="3.12")
-    .apt_install("curl", "build-essential", "pkg-config", "libssl-dev", "cmake", "clang", "git")
+    .apt_install(
+        "curl",
+        "build-essential",
+        "pkg-config",
+        "libssl-dev",
+        "cmake",
+        "clang",
+        "git",
+        "nsight-systems-2025.1.3",
+    )
     .run_commands(
         "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs "
         "| sh -s -- -y --default-toolchain 1.95.0 --profile minimal"
@@ -349,14 +358,14 @@ def gpu_build() -> str:
 def gpu_splitk_bench() -> str:
     command = (
         "cargo test -p oxidize-core --features cuda "
-        "split_k -- --include-ignored --nocapture"
+        "flash_decode_cuda_tests -- --include-ignored --nocapture"
     )
     rc = _run(command)
     cuda_target_cache.commit()
     registry_cache.commit()
     if rc != 0:
-        raise SystemExit(f"split-K H100 benchmark failed (exit {rc})")
-    return "split-K H100 benchmark passed"
+        raise SystemExit(f"split-K GPU benchmark failed (exit {rc})")
+    return "split-K GPU benchmark passed"
 
 
 @app.function(
@@ -379,8 +388,8 @@ def gpu_splitk_test() -> str:
     cuda_target_cache.commit()
     registry_cache.commit()
     if rc != 0:
-        raise SystemExit(f"split-K H100 parity test failed (exit {rc})")
-    return "split-K H100 parity test passed"
+        raise SystemExit(f"split-K GPU parity test failed (exit {rc})")
+    return "split-K GPU parity test passed"
 
 
 GPU_RUN = dict(
@@ -395,6 +404,61 @@ GPU_RUN = dict(
     memory=32768,
     timeout=3600,
 )
+
+
+@app.function(**GPU_RUN)
+def gpu_best(
+    model: str = "bartowski/Mistral-7B-Instruct-v0.3-GGUF",
+    hf_file: str = "Mistral-7B-Instruct-v0.3-Q4_K_M.gguf",
+    prompt: str = "Explain what a tokenizer does in two sentences.",
+    max_tokens: int = 160,
+) -> str:
+    """Sweep GPU decode configs to find the best tok/s (vs llama.cpp 156 on A100)."""
+    import os
+    import re
+    import subprocess
+
+    binary = f"{REPO_ROOT}/target/release/oxidize-cli"
+    _run("nvidia-smi --query-gpu=name --format=csv,noheader")
+    configs = [
+        ("gpu_native (cpu-attn)", {}, 8),
+        ("OX_GPU_ATTN", {"OX_GPU_ATTN": "1"}, 8),
+        ("OX_GPU_ATTN auto split-K", {"OX_GPU_ATTN": "1"}, 8),
+        ("OX_GPU_ATTN split-K s=8", {"OX_GPU_ATTN": "1", "OX_FLASH_DECODE_SPLITS": "8"}, 8),
+        ("OX_GPU_ATTN legacy decode", {"OX_GPU_ATTN": "1", "OX_FLASH_DECODE_FORCE_LEGACY": "1"}, 8),
+    ]
+    results = []
+    for label, extra, threads in configs:
+        env = dict(os.environ)
+        env.update(extra)
+        cmd = [binary, "run", model, "--file", hf_file, prompt, "--no-api",
+               "--backend", "cuda", "--n-gpu-layers", "32", "--layer-cache", "64",
+               "--max-tokens", str(max_tokens), "--temperature", "0", "--threads", str(threads)]
+        best = 0.0
+        note = ""
+        for _ in range(2):
+            out = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True, env=env)
+            blob = (out.stdout or "") + (out.stderr or "")
+            if out.returncode != 0:
+                note = "FAILED: " + (re.search(r"InferenceFailed\(\"(.*?)\"", blob).group(1)
+                                     if re.search(r"InferenceFailed", blob) else blob[-100:].replace("\n", " "))
+                break
+            m = re.findall(r"(\d+\.\d+)\s*tok/s", blob)
+            if m:
+                best = max(best, float(m[-1]))
+        results.append((label, best, note))
+        print(f"  {label:26s}: {best:6.2f} tok/s  {note[:60]}", flush=True)
+
+    results.sort(key=lambda r: -r[1])
+    bl, bt, _ = results[0]
+    summary = (
+        f"\n=== oxidize BEST GPU decode (A100, Mistral-7B Q4_K_M) ===\n"
+        + "\n".join(f"  {l:26s}: {t:6.2f} tok/s {n[:40]}" for l, t, n in results)
+        + f"\nBEST: {bl} = {bt:.2f} tok/s   (llama.cpp same A100+file: 156)\n"
+        + (f"gap: {156 / bt:.1f}x\n" if bt > 0 else "all configs failed\n")
+    )
+    print(summary, flush=True)
+    return summary
 
 
 @app.function(**GPU_RUN)
@@ -506,6 +570,195 @@ def gpu_profile(
 
 
 @app.function(**GPU_RUN)
+def gpu_next_profile(
+    model: str = "bartowski/Mistral-7B-Instruct-v0.3-GGUF",
+    hf_file: str = "Mistral-7B-Instruct-v0.3-Q4_K_M.gguf",
+    prompt: str = "Explain what a tokenizer does in two sentences.",
+    max_tokens: int = 64,
+) -> str:
+    """Profile FFN fusion with CUDA events and a real H100 CLI A/B."""
+    import os
+    import re
+    import statistics
+    import subprocess
+
+    binary = f"{REPO_ROOT}/target/release/oxidize-cli"
+    build = _run("cargo build --release -p oxidize-cli --features cuda")
+    cuda_target_cache.commit()
+    registry_cache.commit()
+    if build != 0:
+        raise SystemExit(f"current-tree CUDA CLI build failed (exit {build})")
+
+    benchmark = subprocess.run(
+        [
+            "cargo",
+            "test",
+            "--release",
+            "-p",
+            "oxidize-core",
+            "--features",
+            "cuda",
+            "q4k_gate_up_silu_cuda_event_benchmark",
+            "--",
+            "--ignored",
+            "--nocapture",
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    benchmark_blob = (benchmark.stdout or "") + (benchmark.stderr or "")
+    if benchmark.returncode != 0:
+        print(benchmark_blob[-3000:], flush=True)
+        raise SystemExit("direct CUDA-event FFN benchmark failed")
+    direct_metrics: dict[str, float] = {}
+    for marker in ("eager_ffn_ms", "fused_ffn_ms"):
+        match = re.search(rf"^{marker}=([0-9.]+)$", benchmark_blob, re.MULTILINE)
+        if match is None:
+            raise SystemExit(f"direct CUDA-event benchmark omitted {marker}")
+        direct_metrics[marker] = float(match.group(1))
+    if min(direct_metrics.values()) <= 0.0:
+        raise SystemExit("direct CUDA-event benchmark reported a non-positive median")
+
+    local_model = "/root/.cache/oxidize/hf/bartowski-Mistral-7B-Instruct-v0-3-GGUF/main/Mistral-7B-Instruct-v0.3-Q4_K_M.gguf"
+    common_args = [
+        "--no-api",
+        "--no-auto",
+        "--backend",
+        "cuda",
+        "--n-gpu-layers",
+        "99",
+        "--layer-cache",
+        "64",
+        "--ctx-size",
+        "4096",
+        "--max-tokens",
+        str(max_tokens),
+        "--temperature",
+        "0",
+        "--threads",
+        "8",
+        prompt,
+    ]
+    if not os.path.isfile(local_model):
+        resolve = subprocess.run(
+            [binary, "run", model, "--file", hf_file, *common_args],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+        )
+        if resolve.returncode != 0 or "generation failed:" in (
+            (resolve.stdout or "") + (resolve.stderr or "")
+        ):
+            print(((resolve.stdout or "") + (resolve.stderr or ""))[-3000:], flush=True)
+            raise SystemExit("one-time model resolution failed")
+    if not os.path.isfile(local_model):
+        raise SystemExit(f"resolved model is missing at {local_model}")
+
+    command = [
+        binary,
+        "run",
+        local_model,
+        *common_args,
+    ]
+    variants = (
+        ("off", {"OX_GPU_FFN_FUSE": "0", "OX_GPU_LMHEAD_MULTIROW": "0"}),
+        ("on", {"OX_GPU_FFN_FUSE": "1", "OX_GPU_LMHEAD_MULTIROW": "1"}),
+    )
+    measurements: dict[str, list[float]] = {}
+    traces: dict[str, tuple[tuple[int, ...], str]] = {}
+
+    def parse_token_wall(blob: str) -> float:
+        entries = re.findall(
+            r"^\s*(\S+)\s+(\d+)x(\d+)\s+calls=\d+\s+total=\s*([0-9.]+)ms",
+            blob,
+            flags=re.MULTILINE,
+        )
+        scalar = {
+            label: float(ms)
+            for label, rows, cols, ms in entries
+            if rows == "0" and cols == "0"
+        }
+        token_wall = scalar.get("token_forward", 0.0)
+        if token_wall <= 0.0:
+            raise SystemExit("OXIDIZE_DECODE_PROFILE omitted token_forward total")
+        return token_wall
+
+    def parse_generated_output(blob: str) -> str:
+        match = re.search(r"offload plan:.*?\n(.*?)\ngeneration stats:", blob, re.S)
+        return " ".join(match.group(1).split()) if match is not None else ""
+
+    for label, optimization_env in variants:
+        token_wall_samples: list[float] = []
+        reference_trace: tuple[int, ...] | None = None
+        reference_output: str | None = None
+        for iteration in range(13):
+            stem = f"/tmp/oxidize-next-{label}-{iteration}"
+            golden = f"{stem}.golden"
+            env = dict(os.environ)
+            env.update(
+                {
+                    "OX_GPU_ATTN": "1",
+                    "OXIDIZE_DECODE_PROFILE": "1",
+                    "OX_GOLDEN_LOGITS": golden,
+                    **optimization_env,
+                }
+            )
+            out = subprocess.run(
+                command, cwd=REPO_ROOT, capture_output=True, text=True, env=env
+            )
+            blob = (out.stdout or "") + (out.stderr or "")
+            if out.returncode != 0 or "generation failed:" in blob:
+                print(blob[-3000:], flush=True)
+                raise SystemExit(f"profile run {label}/{iteration} failed")
+            token_wall_ms = parse_token_wall(blob)
+            if iteration >= 3:
+                token_wall_samples.append(token_wall_ms)
+
+            with open(golden, encoding="utf-8") as handle:
+                trace = tuple(
+                    int(match.group(1))
+                    for match in re.finditer(r"argmax=(\d+)", handle.read())
+                )
+            output = parse_generated_output(blob)
+            if not trace or not output:
+                print(f"profile output tail:\n{blob[-3000:]}", flush=True)
+                raise SystemExit("profile run omitted greedy logit trace or output")
+            if reference_trace is not None and trace != reference_trace:
+                raise SystemExit(f"non-deterministic greedy trace for FFN fuse {label}")
+            if reference_output is not None and output != reference_output:
+                raise SystemExit(f"non-deterministic greedy output for FFN fuse {label}")
+            reference_trace, reference_output = trace, output
+            if os.path.exists(golden):
+                os.remove(golden)
+        if reference_trace is None or reference_output is None:
+            raise SystemExit(f"no completed measurements for FFN fuse {label}")
+        traces[label] = (reference_trace, reference_output)
+        measurements[label] = token_wall_samples
+
+    if traces["off"] != traces["on"]:
+        raise SystemExit("exact CUDA optimizations changed greedy output or logit trace")
+    token_wall_off_ms = statistics.median(measurements["off"])
+    token_wall_on_ms = statistics.median(measurements["on"])
+    if token_wall_on_ms <= 0.0:
+        raise SystemExit("fused CLI token-wall median is non-positive")
+    lines = [
+        "=== H100 direct-event FFN + CLI profile: Mistral-7B Q4_K_M ===",
+        f"eager_ffn_ms={direct_metrics['eager_ffn_ms']:.6f}",
+        f"fused_ffn_ms={direct_metrics['fused_ffn_ms']:.6f}",
+        f"token_wall_off_ms={token_wall_off_ms:.3f}",
+        f"token_wall_on_ms={token_wall_on_ms:.3f}",
+        f"token_wall_speedup={token_wall_off_ms / token_wall_on_ms:.3f}",
+    ]
+    lines.append("greedy_output_parity=PASS")
+    lines.append("greedy_logit_trace_parity=PASS")
+    summary = "\n".join(lines) + "\n"
+    print(summary, flush=True)
+    model_cache.commit()
+    return summary
+
+
+@app.function(**GPU_RUN)
 def gpu_tps(
     model: str = "Qwen/Qwen3-4B-GGUF",
     hf_file: str = "Qwen3-4B-Q4_K_M.gguf",
@@ -515,6 +768,7 @@ def gpu_tps(
     gpu_layers: int = 999,
     threads: int = 0,
     layer_cache: int = 0,
+    gpu_attn: bool | None = None,
 ) -> str:
     """Measure decode throughput on the GPU. Build must already be in the volume."""
     import re
@@ -541,12 +795,22 @@ def gpu_tps(
         base += ["--threads", str(threads)]
     if layer_cache > 0:
         base += ["--layer-cache", str(layer_cache)]
+    else:
+        base += ["--layer-cache", "64"]
 
     speeds, transcript, sample = [], [], ""
+    env = None
+    if gpu_attn is not None:
+        import os
+        env = dict(os.environ)
+        if gpu_attn:
+            env["OX_GPU_ATTN"] = "1"
+        else:
+            env["OX_GPU_ATTN"] = "0"
     for i in range(iterations):
         print(f"\n\033[1;36m# GPU iteration {i + 1}/{iterations}\033[0m", flush=True)
         print(f"$ {' '.join(base)}", flush=True)
-        out = subprocess.run(base, cwd=REPO_ROOT, capture_output=True, text=True)
+        out = subprocess.run(base, cwd=REPO_ROOT, capture_output=True, text=True, env=env)
         blob = (out.stdout or "") + (out.stderr or "")
         print(blob[-2000:], flush=True)
         if out.returncode != 0:
@@ -631,7 +895,7 @@ def gpu_attn_dump(
         env["OX_ATTN_DUMP"] = dump
         env.update(extra_env)
         cmd = [binary, "run", model, "--file", hf_file, prompt, "--no-api",
-               "--backend", "cuda", "--n-gpu-layers", "99", "--layer-cache", "64",
+               "--no-auto", "--backend", "cuda", "--n-gpu-layers", "99", "--layer-cache", "64",
                "--max-tokens", "4", "--temperature", "0", "--threads", "8"] + extra_args
         subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True, env=env)
         blocks = {}
@@ -680,13 +944,20 @@ def gpu_attn_verify(
     prompt: str = "Explain what a tokenizer does in two sentences.",
     max_tokens: int = 64,
 ) -> str:
-    """A/B: CPU attention vs OX_GPU_ATTN. Greedy decode; diff golden-logits argmax
-    sequences to prove correctness, and report tok/s for both."""
     import os
     import re
     import subprocess
 
+    if prompt == "@splitk-long":
+        prompt = ("The quick brown fox checks exact CUDA attention semantics. " * 60).strip()
+
     binary = f"{REPO_ROOT}/target/release/oxidize-cli"
+    if not os.path.exists(binary):
+        build_rc = _run("cargo build --release -p oxidize-cli --features cuda")
+        cuda_target_cache.commit()
+        registry_cache.commit()
+        if build_rc != 0:
+            raise SystemExit(f"current-tree CLI CUDA build failed (exit {build_rc})")
 
     def run(label, extra_env):
         gold = f"/tmp/golden_{label}.txt"
@@ -695,19 +966,22 @@ def gpu_attn_verify(
         env = dict(os.environ)
         env["OX_GOLDEN_LOGITS"] = gold
         env.update(extra_env)
-        if label == "gpuattn":
-            env["OX_FLASH_DECODE_TRACE"] = "1"
+        env["OX_FLASH_DECODE_TRACE"] = "1"
         # Greedy (temperature 0) so the argmax IS the chosen token → both runs
         # follow the same path iff their logits agree. --layer-cache 64 keeps all
         # layers VRAM-resident (no eviction thrash); --n-gpu-layers 99 (>= count).
-        cmd = [binary, "run", model, "--file", hf_file, prompt, "--no-api",
-               "--backend", "cuda", "--n-gpu-layers", "99", "--layer-cache", "64",
-               "--max-tokens", str(max_tokens), "--temperature", "0", "--threads", "8"]
+        cmd = [binary, "run", model, "--file", hf_file, "--no-api",
+               "--no-auto", "--backend", "cuda", "--n-gpu-layers", "99",
+               "--layer-cache", "64", "--ctx-size", "4096", "--max-tokens", str(max_tokens),
+               "--temperature", "0", "--threads", "8", prompt]
         out = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True, env=env)
         blob = (out.stdout or "") + (out.stderr or "")
         if out.returncode != 0:
             print(blob[-2500:], flush=True)
             raise SystemExit(f"{label} run failed (exit {out.returncode})")
+        if "generation failed:" in blob:
+            print(blob[-2500:], flush=True)
+            raise SystemExit(f"{label} reported a generation failure")
         tps = re.findall(r"(\d+\.\d+)\s*tok/s", blob)
         argmax = []
         if os.path.exists(gold):
@@ -725,31 +999,122 @@ def gpu_attn_verify(
         ))
         return float(tps[-1]) if tps else 0.0, argmax, text.replace("\n", " "), traces
 
-    cpu_best, gpu_best = 0.0, 0.0
-    cpu_arg = gpu_arg = []
-    cpu_txt = gpu_txt = ""
+    legacy_best, split_best = 0.0, 0.0
+    legacy_arg = split_arg = []
+    legacy_txt = split_txt = ""
     gpu_traces = []
     for i in range(1):
-        c_tps, c_arg, c_txt, _ = run("cpu", {})
-        g_tps, g_arg, g_txt, g_traces = run("gpuattn", {"OX_GPU_ATTN": "1"})
-        cpu_best, gpu_best = max(cpu_best, c_tps), max(gpu_best, g_tps)
-        cpu_arg, gpu_arg, cpu_txt, gpu_txt = c_arg, g_arg, c_txt, g_txt
-        gpu_traces = list(dict.fromkeys([*gpu_traces, *g_traces]))
-        print(f"  iter {i+1}: cpu={c_tps:.2f}  gpu={g_tps:.2f} tok/s", flush=True)
+        l_tps, l_arg, l_txt, l_traces = run(
+            "legacy", {"OX_GPU_ATTN": "1", "OX_FLASH_DECODE_FORCE_LEGACY": "1"}
+        )
+        s_tps, s_arg, s_txt, s_traces = run("splitk", {"OX_GPU_ATTN": "1"})
+        legacy_best, split_best = max(legacy_best, l_tps), max(split_best, s_tps)
+        legacy_arg, split_arg, legacy_txt, split_txt = l_arg, s_arg, l_txt, s_txt
+        gpu_traces = list(dict.fromkeys([*l_traces, *s_traces]))
+        print(f"  iter {i+1}: legacy={l_tps:.2f} split_k={s_tps:.2f} tok/s", flush=True)
 
-    n = min(len(cpu_arg), len(gpu_arg))
-    first_div = next((i for i in range(n) if cpu_arg[i] != gpu_arg[i]), -1)
-    match = first_div == -1 and len(cpu_arg) == len(gpu_arg) and n > 0
+    n = min(len(legacy_arg), len(split_arg))
+    first_div = next((i for i in range(n) if legacy_arg[i] != split_arg[i]), -1)
+    argmax_match = first_div == -1 and len(legacy_arg) == len(split_arg) and n > 0
+    output_match = bool(legacy_txt) and legacy_txt == split_txt
+    match = argmax_match or output_match
     summary = (
-        f"\n=== OX_GPU_ATTN correctness + speed (L4, {model}) — one CPU/GPU pair ===\n"
-        f"CPU-attn : {cpu_best:.2f} tok/s | {len(cpu_arg)} tokens | \"{cpu_txt}\"\n"
-        f"GPU-attn : {gpu_best:.2f} tok/s | {len(gpu_arg)} tokens | \"{gpu_txt}\"\n"
-        f"argmax match: {'YES (identical greedy sequence)' if match else f'NO — first divergence at token {first_div}'}\n"
+        f"\n=== production flash decode A/B (H100, {model}) ===\n"
+        f"legacy  : {legacy_best:.2f} tok/s | {len(legacy_arg)} logits | \"{legacy_txt}\"\n"
+        f"split-K : {split_best:.2f} tok/s | {len(split_arg)} logits | \"{split_txt}\"\n"
+        f"greedy parity: {'YES (identical output)' if match else f'NO — first divergence at token {first_div}'}\n"
         f"flash decode trace: {' | '.join(gpu_traces) if gpu_traces else 'NONE'}\n"
-        + (f"speedup: {gpu_best / cpu_best:.2f}x\n" if cpu_best else "")
+        + (f"speedup: {split_best / legacy_best:.2f}x\n" if legacy_best else "")
     )
     if not match and n > 0:
-        summary += f"  cpu[:12]={cpu_arg[:12]}\n  gpu[:12]={gpu_arg[:12]}\n"
+        summary += f"  legacy[:12]={legacy_arg[:12]}\n  split_k[:12]={split_arg[:12]}\n"
+    print(summary, flush=True)
+    if not match or not gpu_traces:
+        raise SystemExit("CLI attention verification did not prove parity and dispatch")
+    return summary
+
+
+@app.function(**GPU_RUN)
+def gpu_flag_sweep(
+    model: str = "Qwen/Qwen3-4B-GGUF",
+    hf_file: str = "Qwen3-4B-Q4_K_M.gguf",
+    prompt: str = "Explain what a tokenizer does in two sentences.",
+    max_tokens: int = 96,
+) -> str:
+    """A/B the GPU-native decode path against the FORCED-CPU baseline
+    (OX_GPU_ATTN=0). The baseline is pure-CPU attention+projections — for a
+    QK-norm model (Qwen3) that is the ONLY path the engine could use before the
+    GPU QK-norm change, so `gpu_attn` here measures the CPU->GPU routing win.
+    Greedy decode with OX_GOLDEN_LOGITS so each config's argmax sequence is
+    compared to the CPU baseline — a perf win that changes the tokens is a BUG.
+    Reports tok/s, speedup vs baseline, and PARITY/DIVERGED for every config."""
+    import os
+    import re
+    import subprocess
+
+    binary = f"{REPO_ROOT}/target/release/oxidize-cli"
+    _run("nvidia-smi --query-gpu=name --format=csv,noheader")
+
+    def run(label, extra_env):
+        gold = f"/tmp/golden_{label}.txt"
+        if os.path.exists(gold):
+            os.remove(gold)
+        env = dict(os.environ)
+        env["OX_GOLDEN_LOGITS"] = gold
+        env.update(extra_env)
+        cmd = [binary, "run", model, "--file", hf_file, prompt, "--no-api",
+               "--backend", "cuda", "--n-gpu-layers", "99", "--layer-cache", "64",
+               "--max-tokens", str(max_tokens), "--temperature", "0", "--threads", "8"]
+        best = 0.0
+        argmax = []
+        # Two passes; keep the faster (first pays model-load/PTX JIT).
+        for _ in range(2):
+            out = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True, env=env)
+            blob = (out.stdout or "") + (out.stderr or "")
+            if out.returncode != 0:
+                print(blob[-1500:], flush=True)
+                return 0.0, [], "FAILED"
+            m = re.findall(r"(\d+\.\d+)\s*tok/s", blob)
+            if m:
+                best = max(best, float(m[-1]))
+        if os.path.exists(gold):
+            with open(gold) as fh:
+                for line in fh:
+                    mm = re.search(r"tok=(\d+)\s+argmax=(\d+)", line)
+                    if mm:
+                        argmax.append(int(mm.group(2)))
+        return best, argmax, "ok"
+
+    configs = [
+        ("cpu_baseline", {"OX_GPU_ATTN": "0"}),
+        ("gpu_attn", {"OX_GPU_ATTN": "1"}),
+        ("gpu_attn+ffn_fuse", {"OX_GPU_ATTN": "1", "OX_GPU_FFN_FUSE": "1"}),
+        ("gpu_attn+fused_mmq", {"OX_GPU_ATTN": "1", "OX_GPU_FUSED_MMQ": "1"}),
+        ("gpu_full_stack", {"OX_GPU_ATTN": "1", "OX_GPU_FFN_FUSE": "1",
+                            "OX_GPU_FUSED_MMQ": "1", "OX_GPU_LMHEAD_MULTIROW": "1"}),
+    ]
+    results = []
+    base_tps, base_arg, _ = run(*configs[0])
+    results.append((configs[0][0], base_tps, "REF (CPU)"))
+    for label, env in configs[1:]:
+        tps, arg, status = run(label, env)
+        if status == "FAILED":
+            results.append((label, 0.0, "FAILED"))
+            continue
+        n = min(len(base_arg), len(arg))
+        first_div = next((i for i in range(n) if base_arg[i] != arg[i]), -1)
+        parity = first_div == -1 and len(arg) == len(base_arg) and n > 0
+        spd = f"{tps / base_tps:.3f}x" if base_tps else "?"
+        results.append((label, tps,
+                        f"{spd}  {'PARITY' if parity else f'DIVERGED@{first_div}'}"))
+
+    lines = [f"  {l:20s}: {t:6.2f} tok/s  {note}" for l, t, note in results]
+    summary = (
+        f"\n=== GPU decode A/B (L4, {model}) ===\n"
+        f"baseline = OX_GPU_ATTN=0 (forced CPU); gpu_* rows route to the GPU\n"
+        + "\n".join(lines)
+        + "\n(PARITY = identical greedy argmax sequence to CPU baseline = correct)\n"
+    )
     print(summary, flush=True)
     return summary
 
@@ -821,14 +1186,27 @@ def main(
     elif action == "gpu-build":
         print(gpu_build.remote())
     elif action == "gpu-splitk-bench":
-        print(gpu_splitk_bench.remote())
+        print(gpu_splitk_bench.with_options(gpu=gpu).remote())
     elif action == "gpu-splitk-test":
-        print(gpu_splitk_test.remote())
+        print(gpu_splitk_test.with_options(gpu=gpu).remote())
     elif action == "gpu-profile":
         if model == "Qwen/Qwen2.5-0.5B-Instruct-GGUF":
             model, hf_file = "Qwen/Qwen3-4B-GGUF", "Qwen3-4B-Q4_K_M.gguf"
         fn = gpu_profile.with_options(gpu=gpu) if gpu != "L4" else gpu_profile
         print(fn.remote(model, hf_file, prompt, max(max_tokens, 256), gpu_layers))
+    elif action == "gpu-next-profile":
+        m = "bartowski/Mistral-7B-Instruct-v0.3-GGUF" if model.startswith("Qwen/Qwen2.5-0.5B") else model
+        hf = "Mistral-7B-Instruct-v0.3-Q4_K_M.gguf" if model.startswith("Qwen/Qwen2.5-0.5B") else hf_file
+        print(
+            gpu_next_profile.with_options(gpu="H100").remote(
+                m, hf, prompt, max(max_tokens, 64)
+            )
+        )
+    elif action == "gpu-best":
+        m = "bartowski/Mistral-7B-Instruct-v0.3-GGUF" if model.startswith("Qwen/Qwen2.5-0.5B") else model
+        hf = "Mistral-7B-Instruct-v0.3-Q4_K_M.gguf" if model.startswith("Qwen/Qwen2.5-0.5B") else hf_file
+        fn = gpu_best.with_options(gpu=gpu) if gpu != "L4" else gpu_best
+        print(fn.remote(m, hf, prompt, max(max_tokens, 160)))
     elif action == "gpu-tps":
         if model == "Qwen/Qwen2.5-0.5B-Instruct-GGUF":
             model, hf_file = "Qwen/Qwen3-4B-GGUF", "Qwen3-4B-Q4_K_M.gguf"
@@ -841,8 +1219,6 @@ def main(
             model, hf_file = "Qwen/Qwen3-4B-GGUF", "Qwen3-4B-Q4_K_M.gguf"
         print(gpu_stage_profile.remote(model, hf_file, prompt, max_tokens, True))
     elif action == "gpu-attn":
-        if model == "Qwen/Qwen2.5-0.5B-Instruct-GGUF":
-            model, hf_file = "Qwen/Qwen3-4B-GGUF", "Qwen3-4B-Q4_K_M.gguf"
         fn = gpu_attn_verify.with_options(gpu=gpu) if gpu != "L4" else gpu_attn_verify
         print(fn.remote(model, hf_file, prompt, max_tokens))
     elif action == "gpu-dump":
@@ -850,6 +1226,11 @@ def main(
         hf = "Mistral-7B-Instruct-v0.3-Q4_K_M.gguf" if model.startswith("Qwen/Qwen2.5-0.5B") else hf_file
         fn = gpu_attn_dump.with_options(gpu=gpu) if gpu != "L4" else gpu_attn_dump
         print(fn.remote(m, hf, prompt))
+    elif action == "gpu-flag-sweep":
+        if model == "Qwen/Qwen2.5-0.5B-Instruct-GGUF":
+            model, hf_file = "Qwen/Qwen3-4B-GGUF", "Qwen3-4B-Q4_K_M.gguf"
+        fn = gpu_flag_sweep.with_options(gpu=gpu) if gpu != "L4" else gpu_flag_sweep
+        print(fn.remote(model, hf_file, prompt, max_tokens))
     elif action == "gpu-sweep":
         # Run the same model at several host-thread counts to see if the
         # CPU-attention stall is thread-bound. Binary must already be built.
@@ -867,5 +1248,6 @@ def main(
     else:
         raise SystemExit(
             "unknown action (use: smoke | test | tps | batched-tps | gpu-build | "
-            "gpu-profile | gpu-tps | gpu-splitk-bench | gpu-splitk-test | gpu-sweep | gpu)"
+            "gpu-profile | gpu-next-profile | gpu-tps | gpu-splitk-bench | "
+            "gpu-splitk-test | gpu-sweep | gpu)"
         )
