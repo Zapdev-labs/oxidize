@@ -286,7 +286,11 @@ pub fn quantize_iq4_xs(
             };
             let inv0 = -val0 / max;
             let (sumqx, sumq2) = eval(inv0);
-            let mut best = if sumq2 > 0.0 { sumqx * sumqx / sumq2 } else { 0.0 };
+            let mut best = if sumq2 > 0.0 {
+                sumqx * sumqx / sumq2
+            } else {
+                0.0
+            };
             let mut best_scale = if sumq2 > 0.0 { sumqx / sumq2 } else { 0.0 };
             for itry in -NTRY..=NTRY {
                 let inv_scale = (itry as f32 + val0) / max;
@@ -298,7 +302,11 @@ pub fn quantize_iq4_xs(
             }
 
             scales[sb] = best_scale;
-            let inv_final = if best_scale != 0.0 { 1.0 / best_scale } else { 0.0 };
+            let inv_final = if best_scale != 0.0 {
+                1.0 / best_scale
+            } else {
+                0.0
+            };
             for j in 0..32 {
                 l_idx[sb * 32 + j] = best_index_iq4nl(inv_final * xb[j]) as u8;
             }
