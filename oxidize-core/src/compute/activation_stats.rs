@@ -190,12 +190,7 @@ impl CalibrationRunner {
     }
 
     /// Observe a batch of tokens' inputs to a registered linear layer.
-    pub fn observe_linear_input_batch(
-        &mut self,
-        weight_name: &str,
-        xs: &[f32],
-        n_rows: usize,
-    ) {
+    pub fn observe_linear_input_batch(&mut self, weight_name: &str, xs: &[f32], n_rows: usize) {
         let stats = self
             .per_layer
             .get_mut(weight_name)
