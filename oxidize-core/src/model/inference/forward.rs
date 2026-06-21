@@ -108,17 +108,10 @@ impl InferenceModel {
             });
         }
         let start_pos = session.consumed_tokens();
-        // OX_GPU_ATTN owns the device F16 KV cache for the whole run; the batched
-        // prefill only warms the HOST cache via `self.kv_cache.set(...)`, leaving
-        // device rows `[0, prompt_len)` zero. The fused decode then reads an all-zero
-        // key/value prefix → garbage attention at layer 0 → divergence at token 0 and
-        // an early EOS. Force the per-token path when OX_GPU_ATTN is active so each
-        // prompt position is appended to the device cache through
-        // `gpu_attn_block_fused_q4k`'s `launch_kv_append_f16` (same RoPE + f16 store
-        // as decode, so prefill and decode agree bit-for-bit).
-        //
-        // Default path (OX_GPU_ATTN unset) is byte-identical: `ox_gpu_attn_enabled()`
-        // is false, so `use_batched` collapses to the original condition.
+        // On-device attention (default ON with gpu_native) owns the device F16 KV
+        // cache; batched prefill only warms the HOST cache. Force per-token prefill
+        // so each position is appended via `launch_kv_append_f16`. Set OX_GPU_ATTN=0
+        // to allow batched prefill on the legacy CPU-attention path.
         let use_batched = tokens.len() > 1
             && self.layers_supported_for_batched()
             && !super::layers::ox_gpu_attn_enabled();
@@ -875,8 +868,7 @@ impl InferenceModel {
             // routers, shortconv, etc.) map to `None`. Never fall back to
             // `layer_idx` — that can index past `kv_layer_count` and corrupt /
             // panic on the raw SeqKv slice. `None` ⇒ skip all KV access.
-            let kv_layer_idx: Option<usize> =
-                self.kv_layer_map.get(layer_idx).copied().flatten();
+            let kv_layer_idx: Option<usize> = self.kv_layer_map.get(layer_idx).copied().flatten();
 
             let ffn_norm_weight: &[f32] = if cfg.sandwich_norm {
                 &layer.ffn_norm
@@ -1003,8 +995,14 @@ impl InferenceModel {
                     }
                     let rotated = &mut head_scratch[..q_rope_len];
                     rotated.fill(0.0_f32);
-                    apply_rope_f32(&q[off..off + q_rope_len], pos, q_rope_len, layer_rope, rotated)
-                        .map_err(|e| ModelError::InferenceFailed(format!("rope q: {:?}", e)))?;
+                    apply_rope_f32(
+                        &q[off..off + q_rope_len],
+                        pos,
+                        q_rope_len,
+                        layer_rope,
+                        rotated,
+                    )
+                    .map_err(|e| ModelError::InferenceFailed(format!("rope q: {:?}", e)))?;
                     q[off..off + q_rope_len].copy_from_slice(rotated);
                 }
                 let k_rope_len = cfg.effective_rope_dim().min(kv_head_dim);
@@ -1015,8 +1013,14 @@ impl InferenceModel {
                     }
                     let rotated = &mut head_scratch[..k_rope_len];
                     rotated.fill(0.0_f32);
-                    apply_rope_f32(&k[off..off + k_rope_len], pos, k_rope_len, layer_rope, rotated)
-                        .map_err(|e| ModelError::InferenceFailed(format!("rope k: {:?}", e)))?;
+                    apply_rope_f32(
+                        &k[off..off + k_rope_len],
+                        pos,
+                        k_rope_len,
+                        layer_rope,
+                        rotated,
+                    )
+                    .map_err(|e| ModelError::InferenceFailed(format!("rope k: {:?}", e)))?;
                     k[off..off + k_rope_len].copy_from_slice(rotated);
                 }
 
@@ -1125,10 +1129,24 @@ impl InferenceModel {
                     .map_err(|e| ModelError::InferenceFailed(format!("ffn_norm: {:?}", e)))?;
                 }
 
-                gemm_weight(&layer.ffn_gate, i_size, h, &normed_batch, &mut gate_batch, batch)
-                    .map_err(|e| ModelError::InferenceFailed(format!("ffn_gate: {:?}", e)))?;
-                gemm_weight(&layer.ffn_up, i_size, h, &normed_batch, &mut up_batch, batch)
-                    .map_err(|e| ModelError::InferenceFailed(format!("ffn_up: {:?}", e)))?;
+                gemm_weight(
+                    &layer.ffn_gate,
+                    i_size,
+                    h,
+                    &normed_batch,
+                    &mut gate_batch,
+                    batch,
+                )
+                .map_err(|e| ModelError::InferenceFailed(format!("ffn_gate: {:?}", e)))?;
+                gemm_weight(
+                    &layer.ffn_up,
+                    i_size,
+                    h,
+                    &normed_batch,
+                    &mut up_batch,
+                    batch,
+                )
+                .map_err(|e| ModelError::InferenceFailed(format!("ffn_up: {:?}", e)))?;
 
                 if cfg.gelu_ffn {
                     apply_geglu_inplace_f32(&mut gate_batch, &up_batch);
@@ -1139,8 +1157,15 @@ impl InferenceModel {
                     }
                 }
 
-                gemm_weight(&layer.ffn_down, h, i_size, &gate_batch, &mut ffn_out_batch, batch)
-                    .map_err(|e| ModelError::InferenceFailed(format!("ffn_down: {:?}", e)))?;
+                gemm_weight(
+                    &layer.ffn_down,
+                    h,
+                    i_size,
+                    &gate_batch,
+                    &mut ffn_out_batch,
+                    batch,
+                )
+                .map_err(|e| ModelError::InferenceFailed(format!("ffn_down: {:?}", e)))?;
                 if !layer.ffn_down_bias.is_empty() {
                     add_repeating_bias(&mut ffn_out_batch, &layer.ffn_down_bias);
                 }
@@ -1189,8 +1214,14 @@ impl InferenceModel {
             )
             .map_err(|e| ModelError::InferenceFailed(format!("final_norm: {:?}", e)))?;
             let mut logits = vec![0.0_f32; cfg.vocab_size];
-            gemv_weight(&self.output_weight, cfg.vocab_size, h, &final_normed, &mut logits)
-                .map_err(|e| ModelError::InferenceFailed(format!("output: {:?}", e)))?;
+            gemv_weight(
+                &self.output_weight,
+                cfg.vocab_size,
+                h,
+                &final_normed,
+                &mut logits,
+            )
+            .map_err(|e| ModelError::InferenceFailed(format!("output: {:?}", e)))?;
             out.push(logits);
         }
         Ok(out)
@@ -1219,6 +1250,10 @@ impl InferenceModel {
     /// Write `token`'s embedding into `workspace.x[..hidden_size]`. First stage
     /// of pipeline-parallel decode.
     pub fn embed_token_into_workspace(&mut self, token: Token) {
+        #[cfg(feature = "cuda")]
+        {
+            self.pending_embed_token = Some(token);
+        }
         let h = self.config.hidden_size;
         let x = &mut self.workspace.x[..h];
         x.fill(0.0_f32);
@@ -1346,8 +1381,37 @@ impl InferenceModel {
         let vocab_size = self.config.vocab_size;
         let rms_norm_eps = self.config.rms_norm_eps;
 
-        // Apply final RMS norm on CPU (tiny: 3072 floats, negligible).
         let ws = &mut self.workspace;
+
+        #[cfg(feature = "cuda")]
+        {
+            if crate::cuda::gpu_activation_ready() {
+                if let Some(w_bytes) = Self::q4k_or_q6k_bytes(&self.output_weight) {
+                    let logits = &mut ws.logits[..vocab_size];
+                    let last_hidden = &mut ws.hidden_a[..h];
+                    if crate::cuda::gpu_final_head_device_resident(
+                        &self.norm_weight,
+                        rms_norm_eps,
+                        w_bytes,
+                        vocab_size,
+                        h,
+                        logits,
+                        last_hidden,
+                    )
+                    .is_ok()
+                    {
+                        if !matches!(golden_sink(), GoldenSink::Disabled) {
+                            dump_golden_logits(&logits[..vocab_size]);
+                        }
+                        let logits_out = logits.to_vec();
+                        self.last_output_hidden = last_hidden.to_vec();
+                        return Ok(logits_out);
+                    }
+                }
+            }
+        }
+
+        // CPU final norm + lm_head (fallback when gpu_native inactive).
         let normed = &mut ws.hidden_a[..h];
         normed.fill(0.0_f32);
         rms_norm_f32(&ws.x[..h], &self.norm_weight, rms_norm_eps, normed)
