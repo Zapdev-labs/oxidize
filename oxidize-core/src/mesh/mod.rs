@@ -11,8 +11,8 @@ mod fault_tolerance;
 mod gossip;
 mod node;
 mod progress;
-mod ring;
 mod rdma;
+mod ring;
 mod scrutiny;
 mod sharding;
 mod topology;
@@ -37,13 +37,13 @@ pub use node::{MeshConfig, MeshNode, NodeCapabilities};
 pub use progress::{
     AggregatedProgress, LoadProgressReport, aggregate_progress, render_cluster_progress_bar,
 };
-pub use ring::{
-    ChannelTransport, DualTcpTransport, RingBackend, RingError, RingTransport, TcpTransport,
-    create_mock_ring, create_tcp_ring,
-};
 pub use rdma::{
     RdmaConfig, RdmaMockTransport, RdmaRingTransport, create_mock_rdma_ring, rdma_build_available,
     rdma_runtime_available,
+};
+pub use ring::{
+    ChannelTransport, DualTcpTransport, RingBackend, RingError, RingTransport, TcpTransport,
+    create_mock_ring, create_tcp_ring,
 };
 pub use scrutiny::{
     MeshValidationReport, validate_mesh_command, validate_mesh_prompt, validate_node_capabilities,
