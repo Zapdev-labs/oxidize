@@ -358,7 +358,11 @@ pub fn gemv_quantized_experts_gate_up_f32(
 
 /// Run `body(chunk_idx, out_chunk)` over `output` split into `chunk`-sized
 /// pieces, dispatched through the persistent spin pool (decode-latency path).
-pub(super) fn run_output_chunks(output: &mut [f32], chunk: usize, body: impl Fn(usize, &mut [f32]) + Sync) {
+pub(super) fn run_output_chunks(
+    output: &mut [f32],
+    chunk: usize,
+    body: impl Fn(usize, &mut [f32]) + Sync,
+) {
     let len = output.len();
     let base = output.as_mut_ptr() as usize;
     let n_chunks = len.div_ceil(chunk);
