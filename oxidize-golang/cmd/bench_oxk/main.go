@@ -129,6 +129,9 @@ func main() {
 		nLayers = numLayers
 	}
 	tokens := envInt("OXK_BENCH_TOKENS", 3)
+	if tokens < 1 {
+		tokens = 1
+	}
 
 	timedOps := tokenPlan(nLayers)
 	fullOps := tokenPlan(numLayers)
@@ -152,7 +155,9 @@ func main() {
 				input[i] = float32(i%255)/64.0 - 2.0
 			}
 			q8k := make([]byte, blocks*oxk.BLOCK_Q8_K_BYTES)
-			oxk.QuantizeQ8KInto(input, blocks, q8k)
+			if err := oxk.QuantizeQ8KInto(input, blocks, q8k); err != nil {
+				panic(err)
+			}
 			q8kByCols[op.cols] = q8k
 		}
 		if op.rows > maxRows {
@@ -170,7 +175,9 @@ func main() {
 			q8k := q8kByCols[op.cols]
 			for c := 0; c < op.count; c++ {
 				region := weights[cursor : cursor+op.rows*rowBytes]
-				oxk.GemvQ4kRange(region, blocks, q8k, out[:op.rows])
+				if err := oxk.GemvQ4kRange(region, blocks, q8k, out[:op.rows]); err != nil {
+					panic(err)
+				}
 				cursor += op.rows * rowBytes
 				sink += float64(out[0])
 			}
