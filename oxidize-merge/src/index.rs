@@ -46,7 +46,8 @@ pub struct MappedShard {
 }
 
 fn map_readonly(file: &File) -> std::io::Result<Mmap> {
-    // SAFETY: read-only mapping; caller owns the `Mmap` for its lifetime.
+    // SAFETY: read-only mapping; the file must not be modified while mapped.
+    // Callers own the `Mmap` for its lifetime and open shards read-only.
     unsafe { Mmap::map(file) }
 }
 
