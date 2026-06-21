@@ -10,7 +10,10 @@ use serde_json::Value;
 
 /// Merge per-shard metadata, erroring on conflicting values for the same key
 /// rather than silently letting a later shard overwrite an earlier one.
-fn merge_metadata(into: &mut BTreeMap<String, String>, from: BTreeMap<String, String>) -> Result<()> {
+fn merge_metadata(
+    into: &mut BTreeMap<String, String>,
+    from: BTreeMap<String, String>,
+) -> Result<()> {
     for (k, v) in from {
         match into.get(&k) {
             Some(existing) if *existing != v => {
@@ -49,9 +52,10 @@ fn map_readonly(file: &File) -> std::io::Result<Mmap> {
 
 impl MappedShard {
     pub fn open(path: &Path) -> Result<Self> {
-        let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
-        let mmap = map_readonly(&file)
-            .with_context(|| format!("failed to mmap {}", path.display()))?;
+        let file =
+            File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+        let mmap =
+            map_readonly(&file).with_context(|| format!("failed to mmap {}", path.display()))?;
         let st = SafeTensors::deserialize(&mmap)
             .map_err(|e| anyhow!("failed to parse SafeTensors {}: {e:?}", path.display()))?;
         let mut tensors = BTreeMap::new();
@@ -106,7 +110,10 @@ impl ModelIndex {
         if path.is_dir() {
             return Self::from_directory(path);
         }
-        bail!("model path {} is neither a file nor a directory", path.display())
+        bail!(
+            "model path {} is neither a file nor a directory",
+            path.display()
+        )
     }
 
     fn from_single_file(path: &Path) -> Result<Self> {
@@ -249,10 +256,8 @@ fn find_weight_index(dir: &Path) -> Result<Option<PathBuf>> {
 }
 
 fn read_file_metadata(path: &Path) -> Result<BTreeMap<String, String>> {
-    let file = File::open(path)
-        .with_context(|| format!("failed to open {}", path.display()))?;
-    let mmap = map_readonly(&file)
-        .with_context(|| format!("failed to mmap {}", path.display()))?;
+    let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let mmap = map_readonly(&file).with_context(|| format!("failed to mmap {}", path.display()))?;
     if mmap.len() < 8 {
         return Ok(BTreeMap::new());
     }
