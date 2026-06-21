@@ -1,7 +1,11 @@
 use super::*;
 
 impl LayerWiseModel {
-    pub(super) fn forward_single(&mut self, token: Token, pos: usize) -> Result<Logits, ModelError> {
+    pub(super) fn forward_single(
+        &mut self,
+        token: Token,
+        pos: usize,
+    ) -> Result<Logits, ModelError> {
         self.trace_state("fwd1-entry", pos);
         let cfg = self.config.clone();
         let h = cfg.hidden_size;
