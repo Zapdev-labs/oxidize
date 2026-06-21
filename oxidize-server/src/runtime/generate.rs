@@ -121,9 +121,7 @@ fn open_generation_stream<'a>(
     } else {
         let use_native_mtp =
             matches!(model, LoadedModel::Inference(inference) if inference.has_mtp());
-        if use_native_mtp
-            && let LoadedModel::Inference(inference_model) = model
-        {
+        if use_native_mtp && let LoadedModel::Inference(inference_model) = model {
             return ActiveGenerationStream::Mtp(MtpGenerationStream::new(
                 inference_model.as_mut(),
                 session,
