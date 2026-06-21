@@ -533,6 +533,8 @@ impl InferenceModel {
             ssm_conv_buffers,
             workspace,
             last_output_hidden,
+            #[cfg(feature = "cuda")]
+            pending_embed_token: None,
         })
     }
 }
