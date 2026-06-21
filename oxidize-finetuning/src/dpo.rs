@@ -70,8 +70,7 @@ impl TokensOrString {
 /// strings (stub-tokenized as bytes).  Lines that produce an empty prompt,
 /// chosen, or rejected sequence are silently skipped.
 pub fn load_jsonl_dpo(path: impl AsRef<Path>) -> Result<Vec<DpoExample>> {
-    let file =
-        File::open(path.as_ref()).map_err(|e| FinetuneError::Model(e.to_string()))?;
+    let file = File::open(path.as_ref()).map_err(|e| FinetuneError::Model(e.to_string()))?;
     let reader = BufReader::new(file);
     let mut out = Vec::new();
 
@@ -81,16 +80,19 @@ pub fn load_jsonl_dpo(path: impl AsRef<Path>) -> Result<Vec<DpoExample>> {
         if trimmed.is_empty() {
             continue;
         }
-        let row: DpoJsonlRow = serde_json::from_str(trimmed).map_err(|e| {
-            FinetuneError::Model(format!("dpo jsonl line {}: {e}", line_no + 1))
-        })?;
+        let row: DpoJsonlRow = serde_json::from_str(trimmed)
+            .map_err(|e| FinetuneError::Model(format!("dpo jsonl line {}: {e}", line_no + 1)))?;
         let prompt = row.prompt.into_tokens();
         let chosen = row.chosen.into_tokens();
         let rejected = row.rejected.into_tokens();
         if prompt.is_empty() || chosen.is_empty() || rejected.is_empty() {
             continue;
         }
-        out.push(DpoExample { prompt, chosen, rejected });
+        out.push(DpoExample {
+            prompt,
+            chosen,
+            rejected,
+        });
     }
 
     if out.is_empty() {
@@ -185,11 +187,7 @@ impl DpoTrainer {
     ///
     /// (In the reference-free variant the reference terms cancel to 1 so the
     /// ratio simplifies to the policy ratio alone.)
-    pub fn dpo_loss(
-        chosen_logprob: f32,
-        rejected_logprob: f32,
-        beta: f32,
-    ) -> f32 {
+    pub fn dpo_loss(chosen_logprob: f32, rejected_logprob: f32, beta: f32) -> f32 {
         let margin = beta * (chosen_logprob - rejected_logprob);
         // -log σ(x) = log(1 + exp(-x)) — computed in a numerically stable way.
         log1p_exp(-margin)
@@ -298,11 +296,8 @@ impl DpoTrainer {
         // Forward pass — compute log-probabilities under the current policy.
         let log_p_chosen =
             self.sequence_logprob_with_buf(base_hidden_chosen, &example.chosen, &mut logits_c)?;
-        let log_p_rejected = self.sequence_logprob_with_buf(
-            base_hidden_rejected,
-            &example.rejected,
-            &mut logits_r,
-        )?;
+        let log_p_rejected =
+            self.sequence_logprob_with_buf(base_hidden_rejected, &example.rejected, &mut logits_r)?;
 
         // Reference log-probs: in reference_free mode the reference is implicit
         // (treated as uniform/constant), so the ratio collapses to the policy
@@ -356,11 +351,8 @@ impl DpoTrainer {
             -grad_rejected_coeff,
             &mut grad_logits_r,
         );
-        self.lora.backward_batch(
-            base_hidden_rejected,
-            &grad_logits_r,
-            example.rejected.len(),
-        )?;
+        self.lora
+            .backward_batch(base_hidden_rejected, &grad_logits_r, example.rejected.len())?;
 
         // AdamW update.
         self.step += 1;
@@ -595,7 +587,10 @@ mod tests {
         trainer.train_step(&example, &hidden_c, &hidden_r).unwrap();
         // At least some weights must have changed.
         assert!(
-            before.iter().zip(trainer.lora.a.iter()).any(|(a, b)| (a - b).abs() > 1e-12),
+            before
+                .iter()
+                .zip(trainer.lora.a.iter())
+                .any(|(a, b)| (a - b).abs() > 1e-12),
             "LoRA A weights did not change after train_step"
         );
     }
@@ -628,10 +623,12 @@ mod tests {
             chosen: vec![1, 2, 3, 4],
             rejected: vec![5, 6, 7, 8],
         };
-        let hidden_c: Vec<f32> =
-            (0..example.chosen.len() * 8).map(|i| (i as f32 * 0.1).sin()).collect();
-        let hidden_r: Vec<f32> =
-            (0..example.rejected.len() * 8).map(|i| (i as f32 * 0.13).cos()).collect();
+        let hidden_c: Vec<f32> = (0..example.chosen.len() * 8)
+            .map(|i| (i as f32 * 0.1).sin())
+            .collect();
+        let hidden_r: Vec<f32> = (0..example.rejected.len() * 8)
+            .map(|i| (i as f32 * 0.13).cos())
+            .collect();
 
         let first_loss = trainer.train_step(&example, &hidden_c, &hidden_r).unwrap();
         let mut last_loss = first_loss;
