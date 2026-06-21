@@ -158,9 +158,7 @@ impl VideoTrainingConfig {
             return Err(VideoError::Config("batch_size must be > 0".into()));
         }
         if !(0.0..1.0).contains(&self.val_split) {
-            return Err(VideoError::Config(
-                "val_split must be in [0.0, 1.0)".into(),
-            ));
+            return Err(VideoError::Config("val_split must be in [0.0, 1.0)".into()));
         }
         if matches!(self.task, LabelTask::Virality | LabelTask::Engagement) && self.buckets < 2 {
             return Err(VideoError::Config(
