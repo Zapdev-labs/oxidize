@@ -46,8 +46,11 @@ impl AdapterMerger {
         match &self.strategy {
             MergeStrategy::Linear => linear_merge(&self.adapters),
             MergeStrategy::Slerp => {
-                if self.adapters.len() < 2 {
-                    return Err("slerp requires exactly 2 adapters".into());
+                if self.adapters.len() != 2 {
+                    return Err(format!(
+                        "slerp requires exactly 2 adapters, got {}",
+                        self.adapters.len()
+                    ));
                 }
                 let (a, _) = &self.adapters[0];
                 let (b, wb) = &self.adapters[1];
@@ -117,6 +120,18 @@ pub fn linear_merge(adapters: &[(LoRAAdapter, f32)]) -> Result<LoRAAdapter, Stri
 /// When the two vectors are nearly collinear (|cosθ| ≥ 0.9995) the function
 /// falls back to linear interpolation to avoid numerical instability.
 pub fn slerp_merge(a: &LoRAAdapter, b: &LoRAAdapter, t: f32) -> Result<LoRAAdapter, String> {
+    if a.target != b.target {
+        return Err(format!(
+            "slerp adapters must share the same target ({:?} vs {:?})",
+            a.target, b.target
+        ));
+    }
+    if (a.scale - b.scale).abs() > f32::EPSILON {
+        return Err(format!(
+            "slerp adapters must share the same scale ({} vs {})",
+            a.scale, b.scale
+        ));
+    }
     if a.in_dim != b.in_dim
         || a.out_dim != b.out_dim
         || a.rank != b.rank
@@ -277,6 +292,18 @@ fn ties_combine(trimmed: &[Vec<f32>], weights: &[f32]) -> Vec<f32> {
 fn validate_compatibility(adapters: &[(LoRAAdapter, f32)]) -> Result<(), String> {
     let (first, _) = &adapters[0];
     for (i, (ad, _)) in adapters.iter().enumerate().skip(1) {
+        if ad.target != first.target {
+            return Err(format!(
+                "adapter {i} target {:?} != template {:?}",
+                ad.target, first.target
+            ));
+        }
+        if (ad.scale - first.scale).abs() > f32::EPSILON {
+            return Err(format!(
+                "adapter {i} scale {} != template {}",
+                ad.scale, first.scale
+            ));
+        }
         if ad.in_dim != first.in_dim
             || ad.out_dim != first.out_dim
             || ad.rank != first.rank
