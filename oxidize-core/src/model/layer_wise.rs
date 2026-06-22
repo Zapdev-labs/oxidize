@@ -2,7 +2,7 @@
 
 use crate::conversion::normalize_gguf_tensor_name;
 use crate::flash_attention::flash_attention_decode_f32;
-use crate::gguf::{GgufQuantizationType, MappedGgufFile};
+use crate::gguf::{GgufQuantizationType, GgufTensorInfo, MappedGgufFile};
 use crate::inference::{
     InferenceConfig, MoeFfnWeights, WeightStorage, lookup_quantized_embedding,
     moe_ffn_forward_weights,

@@ -112,6 +112,7 @@ impl LayerWiseModel {
                         key,
                         GgufTensorRef {
                             qtype,
+                            mmap_index: tensor.mmap_index,
                             offset,
                             size: qsize,
                             value_count,

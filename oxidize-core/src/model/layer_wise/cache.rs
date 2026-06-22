@@ -3,6 +3,7 @@ use super::*;
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct GgufTensorRef {
     pub(super) qtype: GgufQuantizationType,
+    pub(super) mmap_index: usize,
     pub(super) offset: usize,
     pub(super) size: usize,
     pub(super) value_count: usize,

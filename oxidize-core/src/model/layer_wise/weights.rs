@@ -43,22 +43,47 @@ impl LayerWiseModel {
     pub(super) fn load_quant_weight(
         &self,
         qtype: GgufQuantizationType,
+        mmap_index: usize,
         offset: usize,
         size: usize,
         qdata: &[u8],
         prefer_mmap: bool,
     ) -> WeightStorage {
         if prefer_mmap {
-            WeightStorage::MmapQuantized(qtype, self.mmap.mmap(), offset, size)
+            let info = GgufTensorInfo {
+                name: String::new(),
+                dimensions: Vec::new(),
+                ggml_type: 0,
+                relative_offset: 0,
+                absolute_offset: offset as u64,
+                mmap_index,
+            };
+            WeightStorage::MmapQuantized(
+                qtype,
+                self.mmap.tensor_mmap(&info),
+                offset,
+                size,
+            )
         } else {
             WeightStorage::Quantized(qtype, qdata.to_vec())
         }
     }
 
+    fn tensor_ref_bytes(&self, tensor_ref: &GgufTensorRef) -> &[u8] {
+        let info = GgufTensorInfo {
+            name: String::new(),
+            dimensions: Vec::new(),
+            ggml_type: 0,
+            relative_offset: 0,
+            absolute_offset: tensor_ref.offset as u64,
+            mmap_index: tensor_ref.mmap_index,
+        };
+        self.mmap.tensor_bytes(&info, tensor_ref.size)
+    }
+
     pub(super) fn load_layer_weights(&self, layer_idx: usize) -> Result<LayerWeights, String> {
         let refs = &self.layer_tensors[layer_idx];
         let mut layer = LayerWeights::default();
-        let bytes = self.mmap.bytes();
         let is_supported_quant_gemv = |qtype: GgufQuantizationType| {
             matches!(
                 qtype,
@@ -81,7 +106,7 @@ impl LayerWiseModel {
         };
 
         for (key, tensor_ref) in refs.iter() {
-            let qdata = &bytes[tensor_ref.offset..tensor_ref.offset + tensor_ref.size];
+            let qdata = self.tensor_ref_bytes(tensor_ref);
             let count = tensor_ref.value_count;
             let qtype = tensor_ref.qtype;
             let weight_key = key.as_str();
@@ -96,6 +121,7 @@ impl LayerWiseModel {
             {
                 let ws = self.load_quant_weight(
                     qtype,
+                    tensor_ref.mmap_index,
                     tensor_ref.offset,
                     tensor_ref.size,
                     qdata,
