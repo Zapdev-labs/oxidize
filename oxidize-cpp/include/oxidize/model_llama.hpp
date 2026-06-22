@@ -79,6 +79,13 @@ class LlamaModel : public Model {
  public:
   explicit LlamaModel(GgufModel gguf);
 
+  // Route the dense-decode hot path (matmuls, rms_norm, rope, attention, FFN)
+  // through the CUDA backend when `on` and a device is available. Weights stay
+  // resident on the GPU; only activation vectors transfer per op. Returns the
+  // effective state (false if requested but no CUDA device / non-CUDA build).
+  bool set_cuda(bool on);
+  bool cuda_enabled() const { return use_cuda_; }
+
   Logits forward(const std::vector<Token>& tokens, Session& session) override;
   size_t vocab_size() const override { return config_.vocab_size; }
   size_t context_size() const override { return config_.context_size; }
@@ -94,6 +101,22 @@ class LlamaModel : public Model {
   void embed_token(Token token, float* x) const;
   void run_layers(size_t pos);
   Logits final_head();
+
+  // Op dispatch: CUDA backend when use_cuda_, else the CPU tensor.hpp kernels.
+  // Signatures mirror tensor.hpp / cuda_backend.hpp exactly (host pointers).
+  void d_rms_norm(float* out, const float* x, const float* w, size_t n,
+                  float eps, bool plus_one);
+  void d_apply_rope(float* vec, size_t head_dim, size_t num_heads, size_t pos,
+                    float theta, size_t rope_dim);
+  void d_swiglu(float* gate, const float* up, float* out, size_t n);
+  void d_geglu(float* gate, const float* up, float* out, size_t n);
+  void d_attention(float* out, const float* q, const float* k_cache,
+                   const float* v_cache, size_t seq_len, size_t num_heads,
+                   size_t kv_heads, size_t head_dim);
+  void d_gemv_weight(const LlamaWeight& w, size_t rows, size_t cols,
+                     const float* x, float* y);
+
+  bool use_cuda_ = false;
 
   static void reject_unsupported(const InferenceConfig& cfg);
   LlamaWeight load_weight(const GgufModel& g, const std::string& name,
@@ -120,8 +143,11 @@ class LlamaModel : public Model {
   std::vector<float> x_;
 };
 
-// Factory: mmap + parse a .gguf and build a dense LlamaModel.
+// Factory: mmap + parse a .gguf and build a dense LlamaModel. When `want_cuda`
+// the model routes the decode hot path to the GPU if a CUDA device is available
+// (silently falls back to CPU otherwise).
 // Throws std::runtime_error on parse failure or unsupported architecture.
-std::unique_ptr<Model> load_llama_gguf(const std::string& path);
+std::unique_ptr<Model> load_llama_gguf(const std::string& path,
+                                       bool want_cuda = false);
 
 }  // namespace oxidize

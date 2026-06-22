@@ -19,6 +19,10 @@
 
 #include "oxidize/tensor.hpp"
 
+#ifdef OXIDIZE_CUDA
+#include "oxidize/cuda_backend.hpp"
+#endif
+
 namespace oxidize {
 
 namespace {
@@ -87,6 +91,93 @@ void gemv_weight(const LlamaWeight& w, size_t rows, size_t cols, const float* x,
 }
 
 }  // namespace
+
+// --- backend dispatch -------------------------------------------------------
+// Each helper routes to the CUDA backend when use_cuda_ (weights resident on the
+// GPU, activation vectors transferred per op) or the CPU tensor.hpp kernels.
+
+bool LlamaModel::set_cuda(bool on) {
+#ifdef OXIDIZE_CUDA
+  use_cuda_ = on && CudaBackend::available();
+#else
+  (void)on;
+  use_cuda_ = false;
+#endif
+  return use_cuda_;
+}
+
+void LlamaModel::d_rms_norm(float* out, const float* x, const float* w, size_t n,
+                            float eps, bool plus_one) {
+#ifdef OXIDIZE_CUDA
+  if (use_cuda_) {
+    CudaBackend::instance().rms_norm(out, x, w, n, eps, plus_one);
+    return;
+  }
+#endif
+  rms_norm(out, x, w, n, eps, plus_one);
+}
+
+void LlamaModel::d_apply_rope(float* vec, size_t head_dim, size_t num_heads,
+                              size_t pos, float theta, size_t rope_dim) {
+#ifdef OXIDIZE_CUDA
+  if (use_cuda_) {
+    CudaBackend::instance().apply_rope(vec, head_dim, num_heads, pos, theta,
+                                       rope_dim);
+    return;
+  }
+#endif
+  apply_rope(vec, head_dim, num_heads, pos, theta, rope_dim);
+}
+
+void LlamaModel::d_swiglu(float* gate, const float* up, float* out, size_t n) {
+#ifdef OXIDIZE_CUDA
+  if (use_cuda_) {
+    CudaBackend::instance().swiglu_inplace(gate, up, out, n);
+    return;
+  }
+#endif
+  swiglu_inplace(gate, up, out, n);
+}
+
+void LlamaModel::d_geglu(float* gate, const float* up, float* out, size_t n) {
+#ifdef OXIDIZE_CUDA
+  if (use_cuda_) {
+    CudaBackend::instance().geglu_inplace(gate, up, out, n);
+    return;
+  }
+#endif
+  geglu_inplace(gate, up, out, n);
+}
+
+void LlamaModel::d_attention(float* out, const float* q, const float* k_cache,
+                             const float* v_cache, size_t seq_len,
+                             size_t num_heads, size_t kv_heads,
+                             size_t head_dim) {
+#ifdef OXIDIZE_CUDA
+  if (use_cuda_) {
+    CudaBackend::instance().attention_decode(out, q, k_cache, v_cache, seq_len,
+                                             num_heads, kv_heads, head_dim);
+    return;
+  }
+#endif
+  attention_decode(out, q, k_cache, v_cache, seq_len, num_heads, kv_heads,
+                   head_dim);
+}
+
+void LlamaModel::d_gemv_weight(const LlamaWeight& w, size_t rows, size_t cols,
+                               const float* x, float* y) {
+#ifdef OXIDIZE_CUDA
+  if (use_cuda_) {
+    if (w.quantized) {
+      CudaBackend::instance().gemv_quantized(y, w.quant, w.data, rows, cols, x);
+    } else {
+      CudaBackend::instance().matvec(y, w.f32.data(), x, rows, cols);
+    }
+    return;
+  }
+#endif
+  gemv_weight(w, rows, cols, x, y);
+}
 
 void LlamaModel::reject_unsupported(const InferenceConfig& cfg) {
   switch (cfg.architecture) {
@@ -306,12 +397,12 @@ void LlamaModel::run_layers(size_t pos) {
 
     // ---- Attention block ----
     // pre-attention RMSNorm
-    rms_norm(normed.data(), x_.data(), layer.attn_norm.data(), h, eps, plus_one);
+    d_rms_norm(normed.data(), x_.data(), layer.attn_norm.data(), h, eps, plus_one);
 
     // QKV projections (each consumes the same normed input).
-    gemv_weight(layer.attn_q, q_len, h, normed.data(), q.data());
-    gemv_weight(layer.attn_k, kv_len, h, normed.data(), k.data());
-    gemv_weight(layer.attn_v, kv_len, h, normed.data(), v.data());
+    d_gemv_weight(layer.attn_q, q_len, h, normed.data(), q.data());
+    d_gemv_weight(layer.attn_k, kv_len, h, normed.data(), k.data());
+    d_gemv_weight(layer.attn_v, kv_len, h, normed.data(), v.data());
 
     if (!layer.attn_q_bias.empty()) {
       size_t bl = layer.attn_q_bias.size();
@@ -331,29 +422,29 @@ void LlamaModel::run_layers(size_t pos) {
     if (!layer.attn_q_norm.empty() && layer.attn_q_norm.size() == head_dim) {
       for (size_t head = 0; head < n_heads; ++head) {
         float* hp = q.data() + head * head_dim;
-        rms_norm(head_scratch.data(), hp, layer.attn_q_norm.data(), head_dim, eps, plus_one);
+        d_rms_norm(head_scratch.data(), hp, layer.attn_q_norm.data(), head_dim, eps, plus_one);
         for (size_t i = 0; i < head_dim; ++i) hp[i] = head_scratch[i];
       }
     } else if (!layer.attn_q_norm.empty() && layer.attn_q_norm.size() == q_len) {
       std::vector<float> tmp(q_len);
-      rms_norm(tmp.data(), q.data(), layer.attn_q_norm.data(), q_len, eps, plus_one);
+      d_rms_norm(tmp.data(), q.data(), layer.attn_q_norm.data(), q_len, eps, plus_one);
       q = tmp;
     }
     if (!layer.attn_k_norm.empty() && layer.attn_k_norm.size() == head_dim) {
       for (size_t head = 0; head < kv_heads; ++head) {
         float* hp = k.data() + head * head_dim;
-        rms_norm(head_scratch.data(), hp, layer.attn_k_norm.data(), head_dim, eps, plus_one);
+        d_rms_norm(head_scratch.data(), hp, layer.attn_k_norm.data(), head_dim, eps, plus_one);
         for (size_t i = 0; i < head_dim; ++i) hp[i] = head_scratch[i];
       }
     } else if (!layer.attn_k_norm.empty() && layer.attn_k_norm.size() == kv_len) {
       std::vector<float> tmp(kv_len);
-      rms_norm(tmp.data(), k.data(), layer.attn_k_norm.data(), kv_len, eps, plus_one);
+      d_rms_norm(tmp.data(), k.data(), layer.attn_k_norm.data(), kv_len, eps, plus_one);
       k = tmp;
     }
 
     // RoPE (partial-aware via apply_rope's rope_dim parameter; 0 => full head).
-    apply_rope(q.data(), head_dim, n_heads, pos, rope_theta, rope_dim);
-    apply_rope(k.data(), head_dim, kv_heads, pos, rope_theta, rope_dim);
+    d_apply_rope(q.data(), head_dim, n_heads, pos, rope_theta, rope_dim);
+    d_apply_rope(k.data(), head_dim, kv_heads, pos, rope_theta, rope_dim);
 
     // Append K/V to the layer-major cache at physical position pos.
     // token_slot_index = l*context_size + (pos % context_size); F32 storage.
@@ -379,11 +470,11 @@ void LlamaModel::run_layers(size_t pos) {
       val_prefix += skip;
       eff_seq_len = window;
     }
-    attention_decode(attn_result.data(), q.data(), key_prefix, val_prefix,
-                     eff_seq_len, n_heads, kv_heads, head_dim);
+    d_attention(attn_result.data(), q.data(), key_prefix, val_prefix,
+                eff_seq_len, n_heads, kv_heads, head_dim);
 
     // Output projection: [q_len] -> [h].
-    gemv_weight(layer.attn_output, h, q_len, attn_result.data(), attn_out.data());
+    d_gemv_weight(layer.attn_output, h, q_len, attn_result.data(), attn_out.data());
     if (!layer.attn_output_bias.empty()) {
       size_t bl = layer.attn_output_bias.size();
       for (size_t i = 0; i < h; ++i) attn_out[i] += layer.attn_output_bias[i % bl];
@@ -392,8 +483,8 @@ void LlamaModel::run_layers(size_t pos) {
     // Gemma "sandwich" norm: post-attention RMSNorm applied to the attention
     // output *before* the residual add (inference.rs sandwich_norm path).
     if (cfg.sandwich_norm && !layer.post_attention_norm.empty()) {
-      rms_norm(attn_out.data(), attn_out.data(), layer.post_attention_norm.data(),
-               h, eps, plus_one);
+      d_rms_norm(attn_out.data(), attn_out.data(), layer.post_attention_norm.data(),
+                 h, eps, plus_one);
     }
 
     // Residual add.
@@ -413,17 +504,17 @@ void LlamaModel::run_layers(size_t pos) {
                                " missing dense FFN weights");
     }
 
-    rms_norm(normed.data(), x_.data(), ffn_norm_w.data(), h, eps, plus_one);
-    gemv_weight(layer.ffn_gate, inter, h, normed.data(), gate.data());
-    gemv_weight(layer.ffn_up, inter, h, normed.data(), up.data());
+    d_rms_norm(normed.data(), x_.data(), ffn_norm_w.data(), h, eps, plus_one);
+    d_gemv_weight(layer.ffn_gate, inter, h, normed.data(), gate.data());
+    d_gemv_weight(layer.ffn_up, inter, h, normed.data(), up.data());
 
     if (cfg.gelu_ffn) {
-      geglu_inplace(gate.data(), up.data(), gate.data(), inter);
+      d_geglu(gate.data(), up.data(), gate.data(), inter);
     } else {
-      swiglu_inplace(gate.data(), up.data(), gate.data(), inter);
+      d_swiglu(gate.data(), up.data(), gate.data(), inter);
     }
 
-    gemv_weight(layer.ffn_down, h, inter, gate.data(), ffn_out.data());
+    d_gemv_weight(layer.ffn_down, h, inter, gate.data(), ffn_out.data());
     if (!layer.ffn_down_bias.empty()) {
       size_t bl = layer.ffn_down_bias.size();
       for (size_t i = 0; i < h; ++i) ffn_out[i] += layer.ffn_down_bias[i % bl];
@@ -432,8 +523,8 @@ void LlamaModel::run_layers(size_t pos) {
     // Gemma "sandwich" norm: post-FFN RMSNorm applied to the FFN output *before*
     // the residual add (inference.rs sandwich_norm path).
     if (cfg.sandwich_norm && !layer.post_ffn_norm.empty()) {
-      rms_norm(ffn_out.data(), ffn_out.data(), layer.post_ffn_norm.data(),
-               h, eps, plus_one);
+      d_rms_norm(ffn_out.data(), ffn_out.data(), layer.post_ffn_norm.data(),
+                 h, eps, plus_one);
     }
 
     for (size_t i = 0; i < h; ++i) x_[i] += ffn_out[i];
@@ -444,12 +535,12 @@ Logits LlamaModel::final_head() {
   const size_t h = config_.hidden_size;
   const size_t vocab = config_.vocab_size;
   std::vector<float> normed(h, 0.0f);
-  rms_norm(normed.data(), x_.data(), norm_weight_.data(), h, config_.rms_norm_eps,
-           config_.rms_norm_weight_plus_one);
+  d_rms_norm(normed.data(), x_.data(), norm_weight_.data(), h, config_.rms_norm_eps,
+             config_.rms_norm_weight_plus_one);
 
   Logits logits(vocab, 0.0f);
   const LlamaWeight& head = output_tied_ ? tok_embeddings_ : output_weight_;
-  gemv_weight(head, vocab, h, normed.data(), logits.data());
+  d_gemv_weight(head, vocab, h, normed.data(), logits.data());
   return logits;
 }
 
@@ -489,9 +580,11 @@ void LlamaModel::rewind_to(size_t consumed_tokens) {
   (void)consumed_tokens;
 }
 
-std::unique_ptr<Model> load_llama_gguf(const std::string& path) {
+std::unique_ptr<Model> load_llama_gguf(const std::string& path, bool want_cuda) {
   GgufModel gguf = GgufModel::load(path);
-  return std::make_unique<LlamaModel>(std::move(gguf));
+  auto model = std::make_unique<LlamaModel>(std::move(gguf));
+  model->set_cuda(want_cuda);
+  return model;
 }
 
 }  // namespace oxidize

@@ -239,12 +239,23 @@ int main(int argc, char** argv) {
       args.cuda = false;
 #endif
     }
-    const char* device = args.cuda ? "cuda" : "cpu";
-
     // ---- load model ----
     auto t_load0 = std::chrono::steady_clock::now();
-    std::unique_ptr<Model> model = oxidize::load_llama_gguf(args.model);
+    std::unique_ptr<Model> model =
+        oxidize::load_llama_gguf(args.model, args.cuda);
     auto t_load1 = std::chrono::steady_clock::now();
+
+    // Report the device actually in use: --cuda falls back to CPU when no
+    // device is present, so query the model rather than trusting the request.
+    bool cuda_active = false;
+    if (auto* lm = dynamic_cast<LlamaModel*>(model.get()))
+      cuda_active = lm->cuda_enabled();
+    if (args.cuda && !cuda_active) {
+      std::fprintf(stderr,
+                   "warning: --cuda requested but no CUDA device active; "
+                   "running on CPU\n");
+    }
+    const char* device = cuda_active ? "cuda" : "cpu";
 
     const size_t vocab = model->vocab_size();
     const size_t ctx = model->context_size();
