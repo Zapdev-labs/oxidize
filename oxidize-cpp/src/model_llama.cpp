@@ -31,6 +31,12 @@ namespace {
 // block layout (decoded on the fly by gemv_quantized); norms/biases dequantize.
 bool is_supported_quant_gemv(QuantType q) {
   switch (q) {
+    // Keep 16-bit float weights NATIVE (2 bytes/param) and dequantize per row in
+    // gemv_quantized, instead of expanding to f32 at load (4 bytes/param). Decode
+    // is memory-bandwidth bound, so halving the weight bytes read per token is a
+    // large speedup for F16/BF16 models.
+    case QuantType::F16:
+    case QuantType::BF16:
     case QuantType::Q8_0:
     case QuantType::Q4_K_S:
     case QuantType::Q4_K_M:

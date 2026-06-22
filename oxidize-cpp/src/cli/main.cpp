@@ -20,6 +20,11 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 #include <exception>
 #include <iostream>
 #include <memory>
@@ -229,6 +234,18 @@ double secs(std::chrono::steady_clock::duration d) {
 
 int main(int argc, char** argv) {
   Args args = parse_args(argc, argv);
+
+#ifdef _OPENMP
+  // Default OpenMP threads to physical-ish cores. On hyperthreaded machines,
+  // using every logical core saturates memory bandwidth and oversubscribes the
+  // memory-bound matmuls (measured: 8 threads = 44 tok/s, 16 = 12 tok/s on an
+  // 8-core/16-thread box). Respect an explicit OMP_NUM_THREADS if the user set it.
+  if (!std::getenv("OMP_NUM_THREADS")) {
+    int logical = omp_get_max_threads();
+    int want = (logical > 4 && logical % 2 == 0) ? logical / 2 : logical;
+    omp_set_num_threads(want);
+  }
+#endif
 
   try {
     if (args.cuda) {

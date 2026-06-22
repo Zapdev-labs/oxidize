@@ -27,18 +27,71 @@
 #include <omp.h>
 #endif
 
+#if defined(__F16C__) && defined(__AVX2__)
+#include <immintrin.h>
+#define OXIDIZE_HAVE_F16C 1
+#endif
+
 namespace oxidize {
 
 namespace {
 
-// Scalar f32 dot product (matches the non-SIMD fallback in kernels.rs and the
-// reference math the SIMD dot kernels are validated against).
-inline float dot_f32(const float* a, const float* b, size_t n) {
-  float sum = 0.0f;
-  for (size_t i = 0; i < n; ++i) {
-    sum += a[i] * b[i];
+// f32 dot product with 8 independent accumulators. A single-accumulator float
+// reduction is NOT auto-vectorizable (float add is non-associative, so the
+// compiler must keep it scalar without -ffast-math). Eight parallel reduction
+// chains let -O3 -march=native emit AVX/FMA, ~4-8x faster than the scalar loop,
+// while staying deterministic (fixed reduction tree -> identical across runs).
+inline float dot_f32(const float* __restrict a, const float* __restrict b,
+                     size_t n) {
+  float s0 = 0, s1 = 0, s2 = 0, s3 = 0, s4 = 0, s5 = 0, s6 = 0, s7 = 0;
+  size_t i = 0;
+  for (; i + 8 <= n; i += 8) {
+    s0 += a[i + 0] * b[i + 0];
+    s1 += a[i + 1] * b[i + 1];
+    s2 += a[i + 2] * b[i + 2];
+    s3 += a[i + 3] * b[i + 3];
+    s4 += a[i + 4] * b[i + 4];
+    s5 += a[i + 5] * b[i + 5];
+    s6 += a[i + 6] * b[i + 6];
+    s7 += a[i + 7] * b[i + 7];
   }
+  float sum = ((s0 + s1) + (s2 + s3)) + ((s4 + s5) + (s6 + s7));
+  for (; i < n; ++i) sum += a[i] * b[i];
   return sum;
+}
+
+// Fused f16(weight) . f32(activation) dot. Keeping weights as f16 halves the
+// memory traffic of a memory-bound decode; F16C converts 8 halves -> f32 in one
+// instruction so there is no separate (scalar) dequant pass. `w` is a row of
+// little-endian IEEE half precision values; `x` is f32.
+inline float dot_f16(const uint16_t* __restrict w, const float* __restrict x,
+                     size_t n) {
+#ifdef OXIDIZE_HAVE_F16C
+  __m256 acc0 = _mm256_setzero_ps();
+  __m256 acc1 = _mm256_setzero_ps();
+  size_t i = 0;
+  for (; i + 16 <= n; i += 16) {
+    __m256 w0 = _mm256_cvtph_ps(_mm_loadu_si128(
+        reinterpret_cast<const __m128i*>(w + i)));
+    __m256 w1 = _mm256_cvtph_ps(_mm_loadu_si128(
+        reinterpret_cast<const __m128i*>(w + i + 8)));
+    acc0 = _mm256_fmadd_ps(w0, _mm256_loadu_ps(x + i), acc0);
+    acc1 = _mm256_fmadd_ps(w1, _mm256_loadu_ps(x + i + 8), acc1);
+  }
+  __m256 acc = _mm256_add_ps(acc0, acc1);
+  __m128 lo = _mm256_castps256_ps128(acc);
+  __m128 hi = _mm256_extractf128_ps(acc, 1);
+  __m128 s = _mm_add_ps(lo, hi);
+  s = _mm_hadd_ps(s, s);
+  s = _mm_hadd_ps(s, s);
+  float sum = _mm_cvtss_f32(s);
+  for (; i < n; ++i) sum += f16_le_to_f32(reinterpret_cast<const uint8_t*>(w + i)) * x[i];
+  return sum;
+#else
+  float sum = 0.0f;
+  for (size_t i = 0; i < n; ++i) sum += f16_le_to_f32(reinterpret_cast<const uint8_t*>(w + i)) * x[i];
+  return sum;
+#endif
 }
 
 }  // namespace
@@ -166,6 +219,17 @@ void matvec(float* y, const float* W, const float* x, size_t rows,
 
 void gemv_quantized(float* y, QuantType quant, const uint8_t* W, size_t rows,
                     size_t cols, const float* x) {
+  // Fast path: native F16 weights. Fused F16C convert+FMA dot, no dequant pass.
+  if (quant == QuantType::F16) {
+#pragma omp parallel for schedule(static)
+    for (long long r = 0; r < static_cast<long long>(rows); ++r) {
+      const uint16_t* row = reinterpret_cast<const uint16_t*>(
+          W + static_cast<size_t>(r) * cols * 2);
+      y[r] = dot_f16(row, x, cols);
+    }
+    return;
+  }
+
   // Per-row dequant then dot: y[r] = dot(dequant(W_row_r), x). This matches the
   // semantics of gemv_quantized_f32 (the Rust fused kernels are a perf
   // specialization of exactly this). dequantize_row enforces block layout.
