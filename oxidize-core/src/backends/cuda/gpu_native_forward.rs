@@ -27,13 +27,84 @@ pub(super) fn projection_gemv_block_size(is_q4k: bool, rows: u32) -> u32 {
     select_projection_gemv_block_size(is_q4k, rows, override_block)
 }
 
+/// Q4_K or Q6_K projection GEMV from a device-resident F32 activation.
+/// Routes through [`launch_gemv_f32in_device`] so multi-warp, fused MMQ, and
+/// block-size tuning share one dispatch table (fused MMQ used to bypass MW).
+#[cfg(feature = "cuda")]
+pub(super) fn launch_q4k_or_q6k_projection_gemv(
+    gpu: &mut GpuState,
+    kern_name: &str,
+    w_ptr: cust::memory::DevicePointer<u8>,
+    d_input: cust::memory::DevicePointer<f32>,
+    d_output: cust::memory::DevicePointer<f32>,
+    rows: u32,
+    blocks_per_row: u32,
+) -> Result<(), String> {
+    super::gemv_quantized::launch_gemv_f32in_device(
+        gpu, kern_name, w_ptr, d_input, d_output, rows, blocks_per_row,
+    )
+}
+
 pub(super) fn ox_gpu_fused_residual_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {
         std::env::var("OX_GPU_FUSED_RESIDUAL")
             .map(|value| value != "0")
-            .unwrap_or(true)
+            .unwrap_or(false)
     })
+}
+
+/// Q4K projection + in-place residual add. Uses fused MMQ (shared Q8_K) when
+/// eligible; never routes through the slow f32-in residual kernel.
+#[cfg(feature = "cuda")]
+pub(super) fn launch_q4k_proj_residual_add(
+    gpu: &mut GpuState,
+    kern_name: &str,
+    w_ptr: cust::memory::DevicePointer<u8>,
+    d_input: cust::memory::DevicePointer<f32>,
+    d_scratch: cust::memory::DevicePointer<f32>,
+    hidden_ptr: cust::memory::DevicePointer<f32>,
+    rows: u32,
+    blocks_per_row: u32,
+    hidden_n: u32,
+) -> Result<(), String> {
+    if ox_gpu_fused_residual_enabled()
+        && kern_name == GEMV_Q4K_F32IN_KERNEL_NAME
+        && !super::gemv_quantized::q4k_fused_mmq_eligible(blocks_per_row)
+    {
+        let wo_block = projection_gemv_block_size(true, rows);
+        let wo_grid = rows.saturating_mul(32).div_ceil(wo_block);
+        let fn_res = gpu
+            .module
+            .get_function(residual_projection_kernel_name(kern_name))
+            .map_err(stringify)?;
+        let stream = &gpu.stream;
+        unsafe {
+            cust::launch!(fn_res<<<wo_grid, wo_block, 0, stream>>>(
+                w_ptr, d_input, hidden_ptr, rows, blocks_per_row
+            ))
+            .map_err(stringify)?;
+        }
+        return Ok(());
+    }
+
+    launch_q4k_or_q6k_projection_gemv(
+        gpu, kern_name, w_ptr, d_input, d_scratch, rows, blocks_per_row,
+    )?;
+    let fn_res = gpu
+        .module
+        .get_function(RESIDUAL_ADD_KERNEL_NAME)
+        .map_err(stringify)?;
+    let block_size = 256_u32;
+    let res_grid = hidden_n.div_ceil(block_size);
+    let stream = &gpu.stream;
+    unsafe {
+        cust::launch!(fn_res<<<res_grid, block_size, 0, stream>>>(
+            hidden_ptr, d_scratch, hidden_n
+        ))
+        .map_err(stringify)?;
+    }
+    Ok(())
 }
 
 fn residual_projection_kernel_name(projection_kernel: &str) -> &'static str {
@@ -68,8 +139,8 @@ pub(super) fn ox_gpu_ffn_fuse_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {
         std::env::var("OX_GPU_FFN_FUSE")
-            .map(|v| v != "0")
-            .unwrap_or(true)
+            .map(|v| v != "0" && !v.is_empty())
+            .unwrap_or(false)
     })
 }
 
@@ -295,22 +366,28 @@ pub fn gpu_wo_residual_q4k(
         let fuse_residual = ox_gpu_fused_residual_enabled();
         let stream = &gpu.stream;
 
-        unsafe {
-            if fuse_residual {
+        if fuse_residual
+            && wo_kern_name == GEMV_Q4K_F32IN_KERNEL_NAME
+            && !super::gemv_quantized::q4k_fused_mmq_eligible(bpr)
+        {
+            unsafe {
                 cust::launch!(fn_wo_residual<<<wo_grid, wo_block, 0, stream>>>(
                     wo_ptr, d_attn.as_device_ptr(), hidden_ptr, rows_u32, bpr
                 ))
                 .map_err(stringify)?;
-            } else {
-                cust::launch!(fn_wo<<<wo_grid, wo_block, 0, stream>>>(
-                    wo_ptr, d_attn.as_device_ptr(), normed_ptr, rows_u32, bpr
-                ))
-                .map_err(stringify)?;
-                cust::launch!(fn_res<<<res_grid, residual_block, 0, stream>>>(
-                    hidden_ptr, normed_ptr, hidden_n
-                ))
-                .map_err(stringify)?;
             }
+        } else {
+            launch_q4k_proj_residual_add(
+                gpu,
+                wo_kern_name,
+                wo_ptr,
+                d_attn.as_device_ptr(),
+                normed_ptr,
+                hidden_ptr,
+                rows_u32,
+                bpr,
+                hidden_n,
+            )?;
         }
 
         gpu.return_f32_buffer(d_attn);
@@ -434,29 +511,7 @@ pub fn gpu_ffn_q4k(
         } else {
             GEMV_Q4K_F32IN_KERNEL_NAME
         };
-        let gate_block = projection_gemv_block_size(gate_kern == GEMV_Q4K_F32IN_KERNEL_NAME, gate_u32);
-        let up_block = projection_gemv_block_size(up_kern == GEMV_Q4K_F32IN_KERNEL_NAME, up_u32);
-        let down_block = projection_gemv_block_size(down_kern == GEMV_Q4K_F32IN_KERNEL_NAME, down_u32);
-        let gate_grid = gate_u32.saturating_mul(32).div_ceil(gate_block);
         let fused_gate_grid = gate_u32.saturating_mul(32).div_ceil(block_size);
-        let up_grid = up_u32.saturating_mul(32).div_ceil(up_block);
-        let down_grid = down_u32.saturating_mul(32).div_ceil(down_block);
-        let fn_gate = gpu.module.get_function(gate_kern).map_err(stringify)?;
-        let fn_up = gpu.module.get_function(up_kern).map_err(stringify)?;
-        let fn_down = gpu.module.get_function(down_kern).map_err(stringify)?;
-        let fn_down_residual = gpu
-            .module
-            .get_function(residual_projection_kernel_name(down_kern))
-            .map_err(stringify)?;
-        let fn_silu = gpu
-            .module
-            .get_function(SILU_MUL_KERNEL_NAME)
-            .map_err(stringify)?;
-        let fn_res = gpu
-            .module
-            .get_function(RESIDUAL_ADD_KERNEL_NAME)
-            .map_err(stringify)?;
-        let stream = &gpu.stream;
 
         // Reuse `normed` as the down-projection output buffer (safe: gate/up
         // GEMVs only READ normed; by the time down runs, normed is free).
@@ -475,55 +530,96 @@ pub fn gpu_ffn_q4k(
             gate_bpr as usize,
             ox_gpu_ffn_fuse_enabled(),
         );
-        let fn_gate_up_silu = if fuse_ffn {
-            Some(
-                gpu.module
-                    .get_function(GEMV_Q4K_F32IN_GATE_UP_SILU_KERNEL_NAME)
-                    .map_err(stringify)?,
-            )
-        } else {
-            None
-        };
+        let layer_q8k = super::gemv_quantized::ox_gpu_layer_q8k_enabled()
+            && gate_kern == GEMV_Q4K_F32IN_KERNEL_NAME
+            && up_kern == GEMV_Q4K_F32IN_KERNEL_NAME
+            && down_kern == GEMV_Q4K_F32IN_KERNEL_NAME;
+        let q8kin_splits = super::gemv_quantized::ox_gpu_q8kin_splits();
+        let fn_gate_up_silu = fuse_ffn && !layer_q8k;
 
-        unsafe {
-            if let Some(fn_fused) = fn_gate_up_silu.as_ref() {
-                // silu(gate × normed) * (up × normed) → ffn_down_in (one launch)
-                cust::launch!(fn_fused<<<fused_gate_grid, block_size, 0, stream>>>(
-                    gate_ptr, up_ptr, normed_ptr, ffn_down_in_ptr, gate_u32, gate_bpr
-                ))
+        if layer_q8k {
+            let xq8k_ptr = ab.xq8k.as_device_ptr();
+            let xq8k_ffn_ptr = ab.xq8k_ffn.as_device_ptr();
+            super::gemv_quantized::launch_quantize_f32_to_q8k_device_ptr(
+                gpu, normed_ptr, xq8k_ptr, gate_bpr,
+            )?;
+            super::gemv_quantized::launch_gemv_q4k_q8kin_device(
+                gpu, gate_ptr, gate_u32, gate_bpr, xq8k_ptr, gate_buf_ptr, q8kin_splits,
+            )?;
+            super::gemv_quantized::launch_gemv_q4k_q8kin_device(
+                gpu, up_ptr, up_u32, gate_bpr, xq8k_ptr, up_buf_ptr, q8kin_splits,
+            )?;
+            let fn_silu = gpu
+                .module
+                .get_function(SILU_MUL_KERNEL_NAME)
                 .map_err(stringify)?;
-            } else {
-                // gate × normed → ffn_gate
-                cust::launch!(fn_gate<<<gate_grid, gate_block, 0, stream>>>(
-                    gate_ptr, normed_ptr, gate_buf_ptr, gate_u32, gate_bpr
-                ))
-                .map_err(stringify)?;
-                // up × normed → ffn_up
-                cust::launch!(fn_up<<<up_grid, up_block, 0, stream>>>(
-                    up_ptr, normed_ptr, up_buf_ptr, up_u32, gate_bpr
-                ))
-                .map_err(stringify)?;
-                // silu(ffn_gate) * ffn_up → ffn_down_in
+            let stream = &gpu.stream;
+            unsafe {
                 cust::launch!(fn_silu<<<silu_grid, block_size, 0, stream>>>(
                     gate_buf_ptr, up_buf_ptr, ffn_down_in_ptr, inter_n
                 ))
                 .map_err(stringify)?;
             }
-            if ox_gpu_fused_residual_enabled() {
-                cust::launch!(fn_down_residual<<<down_grid, down_block, 0, stream>>>(
-                    down_ptr, ffn_down_in_ptr, hidden_ptr, down_u32, down_bpr
-                ))
+            super::gemv_quantized::launch_quantize_f32_to_q8k_device_ptr(
+                gpu, ffn_down_in_ptr, xq8k_ffn_ptr, down_bpr,
+            )?;
+            super::gemv_quantized::launch_gemv_q4k_q8kin_device(
+                gpu, down_ptr, down_u32, down_bpr, xq8k_ffn_ptr, down_out_ptr, q8kin_splits,
+            )?;
+            let fn_res = gpu
+                .module
+                .get_function(RESIDUAL_ADD_KERNEL_NAME)
                 .map_err(stringify)?;
-            } else {
-                cust::launch!(fn_down<<<down_grid, down_block, 0, stream>>>(
-                    down_ptr, ffn_down_in_ptr, down_out_ptr, down_u32, down_bpr
-                ))
-                .map_err(stringify)?;
+            let stream = &gpu.stream;
+            unsafe {
                 cust::launch!(fn_res<<<res_grid, block_size, 0, stream>>>(
                     hidden_ptr, down_out_ptr, hidden_n
                 ))
                 .map_err(stringify)?;
             }
+        } else {
+            if fn_gate_up_silu {
+                let fn_fused = gpu
+                    .module
+                    .get_function(GEMV_Q4K_F32IN_GATE_UP_SILU_KERNEL_NAME)
+                    .map_err(stringify)?;
+                let stream = &gpu.stream;
+                unsafe {
+                    cust::launch!(fn_fused<<<fused_gate_grid, block_size, 0, stream>>>(
+                        gate_ptr, up_ptr, normed_ptr, ffn_down_in_ptr, gate_u32, gate_bpr
+                    ))
+                    .map_err(stringify)?;
+                }
+            } else {
+                launch_q4k_or_q6k_projection_gemv(
+                    gpu, gate_kern, gate_ptr, normed_ptr, gate_buf_ptr, gate_u32, gate_bpr,
+                )?;
+                launch_q4k_or_q6k_projection_gemv(
+                    gpu, up_kern, up_ptr, normed_ptr, up_buf_ptr, up_u32, gate_bpr,
+                )?;
+                let fn_silu = gpu
+                    .module
+                    .get_function(SILU_MUL_KERNEL_NAME)
+                    .map_err(stringify)?;
+                let stream = &gpu.stream;
+                unsafe {
+                    cust::launch!(fn_silu<<<silu_grid, block_size, 0, stream>>>(
+                        gate_buf_ptr, up_buf_ptr, ffn_down_in_ptr, inter_n
+                    ))
+                    .map_err(stringify)?;
+                }
+            }
+            launch_q4k_proj_residual_add(
+                gpu,
+                down_kern,
+                down_ptr,
+                ffn_down_in_ptr,
+                down_out_ptr,
+                hidden_ptr,
+                down_u32,
+                down_bpr,
+                hidden_n,
+            )?;
         }
         // No D2H — hidden remains GPU-resident.
         Ok(())
@@ -672,25 +768,29 @@ pub fn gpu_final_head_device_resident(
         && vocab_size > 0
         && weight_bytes.len() / (vocab_size * blocks_per_row) >= 200;
 
-    // lm_head launch strategy for the (common) Q4_K output projection:
-    //   * OX_GPU_FUSED_MMQ → fused MMQ (in-kernel Q8_K quantize + DP4A, 8 rows/blk)
-    //   * OX_GPU_LMHEAD_MULTIROW → cache F32 activation in shared, 8 rows/blk
-    //   * otherwise the original one-warp-per-row gemv_q4k_f32in_kernel
-    // Q6_K always uses the f32-in kernel (no Q8_K dp4a path for 6-bit weights).
-    // Both opt-in paths are numerically identical to the default and OFF by
-    // default, so shipped behavior is unchanged until validated on GPU.
+    // lm_head: Q8K-in MW (default wide vocab), fused MMQ, multi-row f32-in, or MW f32-in.
     enum LmHeadKern {
         F32In(&'static str),
         Multirow,
         FusedMmq,
+        Q8kinMw,
     }
+    let use_lmhead_q8k = !is_q6k
+        && super::gemv_quantized::ox_gpu_gemv_mw_enabled()
+        && (super::gemv_quantized::ox_gpu_lmhead_q8k_enabled()
+            || super::gemv_quantized::ox_gpu_layer_q8k_enabled());
     let strategy = if is_q6k {
         LmHeadKern::F32In(GEMV_Q6K_F32IN_KERNEL_NAME)
     } else if super::gemv_quantized::ox_gpu_fused_mmq_enabled()
-        && blocks_per_row.saturating_mul(292) <= 44 * 1024
+        && super::gemv_quantized::q4k_fused_mmq_eligible(bpr_u32)
     {
         LmHeadKern::FusedMmq
-    } else if ox_gpu_lmhead_multirow_enabled() && hidden_size.saturating_mul(4) <= 44 * 1024 {
+    } else if use_lmhead_q8k {
+        LmHeadKern::Q8kinMw
+    } else if (ox_gpu_lmhead_multirow_enabled() || rows_u32 >= 8192)
+        && !super::gemv_quantized::ox_gpu_gemv_mw_enabled()
+        && hidden_size.saturating_mul(4) <= 44 * 1024
+    {
         LmHeadKern::Multirow
     } else {
         LmHeadKern::F32In(GEMV_Q4K_F32IN_KERNEL_NAME)
@@ -714,8 +814,27 @@ pub fn gpu_final_head_device_resident(
         let w_ptr = gpu.resident_quant[&w_key].as_device_ptr();
 
         match strategy {
+            LmHeadKern::Q8kinMw => {
+                let xq8k_ptr = gpu
+                    .activation
+                    .as_ref()
+                    .ok_or_else(|| "activation buffers not initialised".to_string())?
+                    .xq8k
+                    .as_device_ptr();
+                super::gemv_quantized::launch_quantize_f32_to_q8k_device_ptr(
+                    gpu, normed_ptr, xq8k_ptr, bpr_u32,
+                )?;
+                super::gemv_quantized::launch_gemv_q4k_q8kin_mw_device(
+                    gpu,
+                    w_ptr,
+                    rows_u32,
+                    bpr_u32,
+                    xq8k_ptr,
+                    d_output.as_device_ptr(),
+                )?;
+            }
             LmHeadKern::FusedMmq => {
-                super::gemv_quantized::launch_gemv_q4k_q8k_fused_device(
+                super::gemv_quantized::launch_fused_mmq_device(
                     gpu,
                     w_ptr,
                     normed_ptr,
@@ -739,17 +858,15 @@ pub fn gpu_final_head_device_resident(
                 }
             }
             LmHeadKern::F32In(kern_name) => {
-                let f32in_block =
-                    projection_gemv_block_size(kern_name == GEMV_Q4K_F32IN_KERNEL_NAME, rows_u32);
-                let f32in_grid = rows_u32.saturating_mul(32).div_ceil(f32in_block);
-                let fn_gemv = gpu.module.get_function(kern_name).map_err(stringify)?;
-                let stream = &gpu.stream;
-                unsafe {
-                    cust::launch!(fn_gemv<<<f32in_grid, f32in_block, 0, stream>>>(
-                        w_ptr, normed_ptr, d_output.as_device_ptr(), rows_u32, bpr_u32
-                    ))
-                    .map_err(stringify)?;
-                }
+                super::launch_q4k_or_q6k_projection_gemv(
+                    gpu,
+                    kern_name,
+                    w_ptr,
+                    normed_ptr,
+                    d_output.as_device_ptr(),
+                    rows_u32,
+                    bpr_u32,
+                )?;
             }
         }
 
@@ -1305,7 +1422,6 @@ pub fn gpu_attn_block_fused_q4k(
         let d_v = gpu.get_f32_buffer(kv_len)?;
 
         let block_size = 256_u32;
-        let stream = &gpu.stream;
 
         // Re-borrow ab.normed after the mutable ensure_resident_quant calls.
         let ab = gpu
@@ -1314,41 +1430,100 @@ pub fn gpu_attn_block_fused_q4k(
             .ok_or_else(|| "activation buffers not initialised".to_string())?;
         let normed_ptr = ab.normed.as_device_ptr();
 
-        let q_block = projection_gemv_block_size(qname_q == GEMV_Q4K_F32IN_KERNEL_NAME, q_u32);
-        let k_block = projection_gemv_block_size(qname_k == GEMV_Q4K_F32IN_KERNEL_NAME, kv_u32);
-        let v_block = projection_gemv_block_size(qname_v == GEMV_Q4K_F32IN_KERNEL_NAME, kv_u32);
-        let q_grid = q_u32.saturating_mul(32).div_ceil(q_block);
-        let k_grid = kv_u32.saturating_mul(32).div_ceil(k_block);
-        let v_grid = kv_u32.saturating_mul(32).div_ceil(v_block);
-
         let wq_ptr = gpu.resident_quant[&q_key].as_device_ptr();
         let wk_ptr = gpu.resident_quant[&k_key].as_device_ptr();
         let wv_ptr = gpu.resident_quant[&v_key].as_device_ptr();
 
-        let fn_q = gpu.module.get_function(qname_q).map_err(stringify)?;
-        let fn_k = gpu.module.get_function(qname_k).map_err(stringify)?;
-        let fn_v = gpu.module.get_function(qname_v).map_err(stringify)?;
-
-        // Capture device pointers for the downstream device-resident kernels so
-        // the d_q/d_k/d_v owned buffers can be reused while `gpu` is re-borrowed
-        // mutably by launch_kv_append_f16.
         let d_q_ptr = d_q.as_device_ptr();
         let d_k_ptr = d_k.as_device_ptr();
         let d_v_ptr = d_v.as_device_ptr();
 
-        unsafe {
-            cust::launch!(fn_q<<<q_grid, q_block, 0, stream>>>(
-                wq_ptr, normed_ptr, d_q_ptr, q_u32, bpr_u32
-            ))
-            .map_err(stringify)?;
-            cust::launch!(fn_k<<<k_grid, k_block, 0, stream>>>(
-                wk_ptr, normed_ptr, d_k_ptr, kv_u32, bpr_u32
-            ))
-            .map_err(stringify)?;
-            cust::launch!(fn_v<<<v_grid, v_block, 0, stream>>>(
-                wv_ptr, normed_ptr, d_v_ptr, kv_u32, bpr_u32
-            ))
-            .map_err(stringify)?;
+        let layer_q8k = super::gemv_quantized::ox_gpu_layer_q8k_enabled();
+        let all_q4k = qname_q == GEMV_Q4K_F32IN_KERNEL_NAME
+            && qname_k == GEMV_Q4K_F32IN_KERNEL_NAME
+            && qname_v == GEMV_Q4K_F32IN_KERNEL_NAME;
+        let q8kin_splits = super::gemv_quantized::ox_gpu_q8kin_splits();
+
+        if layer_q8k && all_q4k {
+            let xq8k_ptr = gpu
+                .activation
+                .as_ref()
+                .ok_or_else(|| "activation buffers not initialised".to_string())?
+                .xq8k
+                .as_device_ptr();
+            super::gemv_quantized::launch_quantize_f32_to_q8k_device_ptr(
+                gpu, normed_ptr, xq8k_ptr, bpr_u32,
+            )?;
+            super::gemv_quantized::launch_gemv_q4k_q8kin_device(
+                gpu, wq_ptr, q_u32, bpr_u32, xq8k_ptr, d_q_ptr, q8kin_splits,
+            )?;
+            super::gemv_quantized::launch_gemv_q4k_q8kin_device(
+                gpu, wk_ptr, kv_u32, bpr_u32, xq8k_ptr, d_k_ptr, q8kin_splits,
+            )?;
+            super::gemv_quantized::launch_gemv_q4k_q8kin_device(
+                gpu, wv_ptr, kv_u32, bpr_u32, xq8k_ptr, d_v_ptr, q8kin_splits,
+            )?;
+        } else {
+        let q4k_fused_qkv = super::gemv_quantized::ox_gpu_fused_qkv_enabled()
+            && super::gemv_quantized::ox_gpu_gemv_mw_enabled()
+            && qname_q == GEMV_Q4K_F32IN_KERNEL_NAME
+            && qname_k == GEMV_Q4K_F32IN_KERNEL_NAME
+            && qname_v == GEMV_Q4K_F32IN_KERNEL_NAME;
+
+        if q4k_fused_qkv {
+            let xq8k_ptr = gpu
+                .activation
+                .as_ref()
+                .ok_or_else(|| "activation buffers not initialised".to_string())?
+                .xq8k
+                .as_device_ptr();
+            super::gemv_quantized::launch_quantize_f32_to_q8k_device_ptr(
+                gpu, normed_ptr, xq8k_ptr, bpr_u32,
+            )?;
+            super::gemv_quantized::launch_gemv_q4k_q8kin_qkv_mw_device(
+                gpu,
+                wq_ptr,
+                wk_ptr,
+                wv_ptr,
+                xq8k_ptr,
+                d_q_ptr,
+                d_k_ptr,
+                d_v_ptr,
+                q_u32,
+                kv_u32,
+                bpr_u32,
+            )?;
+        } else if super::gemv_quantized::ox_gpu_fused_qkv_enabled()
+            && super::gemv_quantized::ox_gpu_fused_mmq_enabled()
+            && qname_q == GEMV_Q4K_F32IN_KERNEL_NAME
+            && qname_k == GEMV_Q4K_F32IN_KERNEL_NAME
+            && qname_v == GEMV_Q4K_F32IN_KERNEL_NAME
+            && super::gemv_quantized::q4k_fused_mmq_eligible(bpr_u32)
+        {
+            super::gemv_quantized::launch_gemv_q4k_q8k_fused_qkv_mw_device(
+                gpu,
+                wq_ptr,
+                wk_ptr,
+                wv_ptr,
+                normed_ptr,
+                d_q_ptr,
+                d_k_ptr,
+                d_v_ptr,
+                q_u32,
+                kv_u32,
+                bpr_u32,
+            )?;
+        } else {
+            super::launch_q4k_or_q6k_projection_gemv(
+                gpu, qname_q, wq_ptr, normed_ptr, d_q_ptr, q_u32, bpr_u32,
+            )?;
+            super::launch_q4k_or_q6k_projection_gemv(
+                gpu, qname_k, wk_ptr, normed_ptr, d_k_ptr, kv_u32, bpr_u32,
+            )?;
+            super::launch_q4k_or_q6k_projection_gemv(
+                gpu, qname_v, wv_ptr, normed_ptr, d_v_ptr, kv_u32, bpr_u32,
+            )?;
+        }
         }
 
         // ============================================================
@@ -1400,49 +1575,68 @@ pub fn gpu_attn_block_fused_q4k(
             }
         }
 
-        // ============================================================
-        // (C) partial NeoX RoPE on d_q, d_k (in-place)  (from rope/append/flash)
-        // ============================================================
-        launch_rope_f32(
-            gpu,
-            d_q_ptr,
-            d_k_ptr,
-            pos as u32,
-            n_q_heads as u32,
-            n_kv_heads as u32,
-            head_dim as u32,
-            rope_dim as u32,
-            theta,
-        )?;
-
-        // ============================================================
-        // (D) append post-RoPE K/V into the F16 device cache at row pos%context.
-        // ============================================================
-        let phys_pos = (pos % gpu.kv_context) as u32;
-        launch_kv_append_f16(gpu, kv_layer_idx, d_k_ptr, d_v_ptr, phys_pos, pos)?;
-
-        // ============================================================
-        // (E) GQA online-softmax flash-attention decode → d_attn (device-resident).
-        // ============================================================
         let d_attn = gpu.get_f32_buffer(q_len)?;
         let d_attn_ptr = d_attn.as_device_ptr();
-        // Split-K is selected automatically for SM occupancy on long context;
-        // one split falls back to the unchanged single-block kernel. Note the
-        // splitk launcher allocates/returns its own pooled scratch internally,
-        // which is safe here because `d_attn` is already held and the pool is
-        // single-stream-ordered (see launch_flash_attn_decode_splitk).
-        launch_flash_attn_decode(
-            gpu,
-            kv_layer_idx,
-            d_q_ptr,
-            d_attn_ptr,
-            eff_seq_len as u32,
-            base_row as u32,
-            n_q_heads as u32,
-            n_kv_heads as u32,
-            head_dim as u32,
-            scale,
-        )?;
+
+        // ============================================================
+        // (C–E) RoPE + KV append + flash decode (GPH kernels under CUDA graph).
+        // ============================================================
+        if super::cuda_decode_graph::decode_graph_use_gph(pos, gpu.kv_context) {
+            let d_state = super::cuda_decode_graph::decode_d_state_ptr(gpu)?;
+            super::cuda_decode_graph::launch_rope_f32_gph(
+                gpu,
+                d_state,
+                d_q_ptr,
+                d_k_ptr,
+                n_q_heads as u32,
+                n_kv_heads as u32,
+                head_dim as u32,
+                rope_dim as u32,
+                theta,
+            )?;
+            super::cuda_decode_graph::launch_kv_append_f16_gph(
+                gpu, kv_layer_idx, d_state, d_k_ptr, d_v_ptr,
+            )?;
+            super::cuda_decode_graph::update_kv_seq_len_after_gph_append(gpu, kv_layer_idx, pos);
+            super::cuda_decode_graph::launch_flash_attn_decode_gph(
+                gpu,
+                kv_layer_idx,
+                d_state,
+                d_q_ptr,
+                d_attn_ptr,
+                layer_window as u32,
+                n_q_heads as u32,
+                n_kv_heads as u32,
+                head_dim as u32,
+                scale,
+            )?;
+        } else {
+            launch_rope_f32(
+                gpu,
+                d_q_ptr,
+                d_k_ptr,
+                pos as u32,
+                n_q_heads as u32,
+                n_kv_heads as u32,
+                head_dim as u32,
+                rope_dim as u32,
+                theta,
+            )?;
+            let phys_pos = (pos % gpu.kv_context) as u32;
+            launch_kv_append_f16(gpu, kv_layer_idx, d_k_ptr, d_v_ptr, phys_pos, pos)?;
+            launch_flash_attn_decode(
+                gpu,
+                kv_layer_idx,
+                d_q_ptr,
+                d_attn_ptr,
+                eff_seq_len as u32,
+                base_row as u32,
+                n_q_heads as u32,
+                n_kv_heads as u32,
+                head_dim as u32,
+                scale,
+            )?;
+        }
 
         // ============================================================
         // (E') Env-gated attention debug dump (OX_ATTN_DUMP), GPU path.
@@ -1507,39 +1701,47 @@ pub fn gpu_attn_block_fused_q4k(
             } else {
                 GEMV_Q4K_F32IN_KERNEL_NAME
             };
-        let wo_block = projection_gemv_block_size(
-            wo_kern_name == GEMV_Q4K_F32IN_KERNEL_NAME,
-            wo_rows_u32,
-        );
-        let wo_grid = wo_rows_u32.saturating_mul(32).div_ceil(wo_block);
-        let fn_wo = gpu.module.get_function(wo_kern_name).map_err(stringify)?;
-        let fn_res = gpu
-            .module
-            .get_function(RESIDUAL_ADD_KERNEL_NAME)
-            .map_err(stringify)?;
-        let fn_wo_residual = gpu
-            .module
-            .get_function(residual_projection_kernel_name(wo_kern_name))
-            .map_err(stringify)?;
-        let fuse_residual = ox_gpu_fused_residual_enabled();
-        let stream = &gpu.stream;
+        let q8kin_splits = super::gemv_quantized::ox_gpu_q8kin_splits();
 
-        unsafe {
-            if fuse_residual {
-                cust::launch!(fn_wo_residual<<<wo_grid, wo_block, 0, stream>>>(
-                    wo_ptr, d_attn_ptr, hidden_ptr, wo_rows_u32, wo_bpr
-                ))
+        let wo_layer_q8k = super::gemv_quantized::ox_gpu_layer_q8k_enabled()
+            && wo_kern_name == GEMV_Q4K_F32IN_KERNEL_NAME;
+
+        if wo_layer_q8k {
+            let xq8k_ptr = gpu
+                .activation
+                .as_ref()
+                .ok_or_else(|| "activation buffers not initialised".to_string())?
+                .xq8k
+                .as_device_ptr();
+            super::gemv_quantized::launch_quantize_f32_to_q8k_device_ptr(
+                gpu, d_attn_ptr, xq8k_ptr, wo_bpr,
+            )?;
+            super::gemv_quantized::launch_gemv_q4k_q8kin_device(
+                gpu, wo_ptr, wo_rows_u32, wo_bpr, xq8k_ptr, normed_ptr, q8kin_splits,
+            )?;
+            let fn_res = gpu
+                .module
+                .get_function(RESIDUAL_ADD_KERNEL_NAME)
                 .map_err(stringify)?;
-            } else {
-                cust::launch!(fn_wo<<<wo_grid, wo_block, 0, stream>>>(
-                    wo_ptr, d_attn_ptr, normed_ptr, wo_rows_u32, wo_bpr
-                ))
-                .map_err(stringify)?;
+            let stream = &gpu.stream;
+            unsafe {
                 cust::launch!(fn_res<<<res_grid, block_size, 0, stream>>>(
                     hidden_ptr, normed_ptr, hidden_n
                 ))
                 .map_err(stringify)?;
             }
+        } else {
+            launch_q4k_proj_residual_add(
+                gpu,
+                wo_kern_name,
+                wo_ptr,
+                d_attn_ptr,
+                normed_ptr,
+                hidden_ptr,
+                wo_rows_u32,
+                wo_bpr,
+                hidden_n,
+            )?;
         }
 
         // ============================================================
