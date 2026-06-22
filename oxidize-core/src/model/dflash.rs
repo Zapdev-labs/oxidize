@@ -531,6 +531,24 @@ impl DFlashDraftModel {
         self.position_offset = 0;
     }
 
+    fn tie_output_to_embeddings_if_missing(&mut self) {
+        if !self.output.is_loaded() && self.tok_embeddings.is_loaded() {
+            self.output = if self.tok_embeddings.quant.is_some() {
+                self.tok_embeddings.clone()
+            } else {
+                F32Weight::from_slice(
+                    transpose_f32(
+                        &self.tok_embeddings.data,
+                        self.tok_embeddings.rows,
+                        self.tok_embeddings.cols,
+                    ),
+                    self.tok_embeddings.rows,
+                    self.tok_embeddings.cols,
+                )
+            };
+        }
+    }
+
     /// Load DFlash draft model from a mapped SafeTensors file.
     pub fn load_from_safetensors(
         mapped: &MappedSafeTensorsFile,
@@ -1064,6 +1082,8 @@ impl DFlashDraftModel {
                 break;
             }
         }
+
+        self.tie_output_to_embeddings_if_missing();
 
         if self.output.is_loaded() {
             self.config.vocab_size = self.output.output_dim();
@@ -1827,6 +1847,27 @@ mod tests {
 
         let logits = model.logits(&hidden).unwrap();
         assert_eq!(logits, vec![1.0, 2.0]);
+    }
+
+    #[test]
+    fn tied_embeddings_supply_missing_dflash_output_head() {
+        let mut model = DFlashDraftModel::new(DFlashConfig {
+            hidden_size: 2,
+            num_hidden_layers: 0,
+            num_target_layers: 0,
+            block_size: 1,
+            target_layer_ids: Vec::new(),
+            mask_token_id: 0,
+            vocab_size: 2,
+            num_attention_heads: 1,
+            num_key_value_heads: 1,
+            intermediate_size: 2,
+            rms_norm_eps: 1e-5,
+            rope_theta: 10000.0,
+        });
+        model.tok_embeddings = F32Weight::from_slice(vec![1.0, 2.0, 3.0, 4.0], 2, 2);
+        model.tie_output_to_embeddings_if_missing();
+        assert_eq!(model.logits(&[1.0, 1.0]).unwrap(), vec![3.0, 7.0]);
     }
 
     #[test]
