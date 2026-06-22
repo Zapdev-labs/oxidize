@@ -1,5 +1,6 @@
 /target/
 /dist/wasm/
+/dist/liboxk/
 
 # Rust/profiling artifacts
 *.profraw
