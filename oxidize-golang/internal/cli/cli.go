@@ -135,17 +135,26 @@ func listCommand(args []string, stdout io.Writer) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	printBanner(stdout)
+	printSection(stdout, "Local models")
 	dir := resolveModelsDir(*modelsDir)
-	if _, err := io.WriteString(stdout, fmt.Sprintf("%-48s %9s %s\n", "NAME", "SIZE", "PATH")); err != nil {
-		return err
-	}
 	if dir == "" {
+		_, _ = fmt.Fprintln(stdout, styleDim.Render("  (no models directory configured)"))
 		return nil
 	}
 	models, err := serviceinfo.DiscoverModels(dir)
 	if err != nil {
 		return err
 	}
+	if len(models) == 0 {
+		_, _ = fmt.Fprintf(stdout, "  %s\n", styleDim.Render(fmt.Sprintf("no .gguf files in %s", dir)))
+		return nil
+	}
+	_, _ = fmt.Fprintf(stdout, "  %s  %s  %s\n",
+		styleCmd.Render(padRight("NAME", 40)),
+		styleCmd.Render(padRight("SIZE", 8)),
+		styleCmd.Render("PATH"),
+	)
 	for _, model := range models {
 		sizeGiB := "?"
 		if stat, statErr := os.Stat(model.Path); statErr == nil {
@@ -155,10 +164,11 @@ func listCommand(args []string, stdout io.Writer) error {
 		if name == "" {
 			name = model.Path
 		}
-		line := fmt.Sprintf("%-48s %9s %s\n", name, sizeGiB, model.Path)
-		if _, writeErr := io.WriteString(stdout, line); writeErr != nil {
-			return writeErr
-		}
+		_, _ = fmt.Fprintf(stdout, "  %s  %s  %s\n",
+			padRight(name, 40),
+			padRight(sizeGiB, 8),
+			styleDim.Render(model.Path),
+		)
 	}
 	return nil
 }
@@ -202,24 +212,25 @@ func serveCommand(ctx context.Context, args []string) error {
 }
 
 func printOllamaHelp(w io.Writer) {
-	_, _ = fmt.Fprintln(w, `Usage: oxidize <command> [args]
-
-Commands:
-  run <model> [prompt]     Run a model locally
-  chat <model>             Interactive chat REPL
-  bench <model>            Decode throughput benchmark
-  inspect <model.gguf>     Print GGUF metadata and tensors
-  serve [options]          Start the OpenAI-compatible server
-  gpu-cluster <subcmd>     Generate or detect GPU cluster configs
-  list                     List local GGUF models in ./models
-
-Examples:
-  oxidize run ./models/Qwen3-4B-Q4_K_M.gguf "hello"
-  oxidize chat ./models/model.gguf
-  oxidize bench ./models/model.gguf --iterations 5
-  oxidize inspect ./models/model.gguf
-  oxidize serve --host 0.0.0.0 --port 11434
-  oxidize list`)
+	printBanner(w)
+	printSection(w, "Usage")
+	_, _ = fmt.Fprintln(w, "  oxidize <command> [args]")
+	_, _ = fmt.Fprintln(w)
+	printSection(w, "Commands")
+	printCommandRow(w, "run <model> [prompt]", "Run a model locally")
+	printCommandRow(w, "chat <model>", "Interactive chat REPL")
+	printCommandRow(w, "bench <model>", "Decode throughput benchmark")
+	printCommandRow(w, "inspect <model.gguf>", "Print GGUF metadata and tensors")
+	printCommandRow(w, "serve [options]", "Start the OpenAI-compatible server")
+	printCommandRow(w, "convert", "SafeTensors to GGUF conversion")
+	printCommandRow(w, "gpu-cluster <subcmd>", "GPU cluster config generation")
+	printCommandRow(w, "list, ls", "List local GGUF models in ./models")
+	_, _ = fmt.Fprintln(w)
+	printSection(w, "Examples")
+	_, _ = fmt.Fprintln(w, styleDim.Render("  oxidize run ./models/Qwen3-4B-Q4_K_M.gguf \"hello\""))
+	_, _ = fmt.Fprintln(w, styleDim.Render("  oxidize chat ./models/model.gguf"))
+	_, _ = fmt.Fprintln(w, styleDim.Render("  oxidize bench ./models/model.gguf --iterations 5"))
+	_, _ = fmt.Fprintln(w, styleDim.Render("  oxidize serve --host 0.0.0.0 --port 11434"))
 }
 
 func printRunHelp(w io.Writer) {

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from oxidize_python.core.ffi import gemv_quantized_rust
+from oxidize_python.core.oxk import gemv_quantized_oxk
 from oxidize_python.core.quantization import types as quant
 from oxidize_python.core.quantization.dequant_k import dequantize
 from oxidize_python.core.tensor import gemv
@@ -76,6 +77,9 @@ class F32Weight:
                 )
             v_np = np.asarray(input_[: q.in_dim], dtype=np.float32)
             o_np = np.zeros(q.out_dim, dtype=np.float32)
+            if gemv_quantized_oxk(q.bytes, q.q_type.name, q.out_dim, q.in_dim, v_np, o_np):
+                output[: q.out_dim] = o_np.tolist()
+                return
             if gemv_quantized_rust(q.bytes, q.q_type.name, q.out_dim, q.in_dim, v_np, o_np):
                 output[: q.out_dim] = o_np.tolist()
                 return

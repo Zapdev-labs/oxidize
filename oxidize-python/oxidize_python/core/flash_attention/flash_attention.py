@@ -7,6 +7,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
+from oxidize_python.core.oxk import dot_f32 as oxk_dot_f32
+from oxidize_python.core.oxk import has_avx2 as oxk_has_avx2
 from oxidize_python.core.simd import simd
 
 
@@ -18,6 +20,10 @@ class Error(Exception):
 def dot_product_f32(a: list[float], b: list[float]) -> float:
     if len(a) != len(b):
         return 0.0
+    if oxk_has_avx2():
+        av = np.asarray(a, dtype=np.float32)
+        bv = np.asarray(b, dtype=np.float32)
+        return oxk_dot_f32(av, bv)
     width = preferred().lane_width_f32()
     if width <= 1:
         return sum(x * y for x, y in zip(a, b, strict=True))

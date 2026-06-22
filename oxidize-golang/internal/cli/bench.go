@@ -81,14 +81,7 @@ Options:
 		promptTokens = []model.Token{1}
 	}
 
-	_, _ = fmt.Fprintf(
-		stdout,
-		"=== Oxidize bench ===\nmodel: %s\nengine: %s\niterations: %d max_tokens: %d\n\n",
-		modelPath,
-		engine,
-		*iterations,
-		*maxTokens,
-	)
+	printBenchHeader(stdout, modelPath, engine, *iterations, *maxTokens)
 
 	// Fast path: use Rust FFI model (same AVX2+Rayon kernels as the Rust binary).
 	if rm, err2 := quantization.LoadRustModel(modelPath); err2 == nil {
@@ -123,13 +116,13 @@ Options:
 			speed := float64(generated) / elapsed
 			totalTokens += generated
 			totalSeconds += elapsed
-			_, _ = fmt.Fprintf(stdout, "round %d: tokens=%d elapsed=%.3fs speed=%.2f tok/s\n", round, generated, elapsed, speed)
+			printBenchRound(stdout, round, generated, elapsed, speed)
 		}
 		avg := 0.0
 		if totalSeconds > 0 {
 			avg = float64(totalTokens) / totalSeconds
 		}
-		_, _ = fmt.Fprintf(stdout, "\naverage: %.2f tok/s over %d tokens\n", avg, totalTokens)
+		printBenchAverage(stdout, avg, totalTokens)
 		return nil
 	}
 
@@ -208,7 +201,7 @@ Options:
 		speed := float64(tokens) / elapsed
 		totalTokens += tokens
 		totalSeconds += elapsed
-		_, _ = fmt.Fprintf(stdout, "round %d: tokens=%d elapsed=%.3fs speed=%.2f tok/s\n", round, tokens, elapsed, speed)
+		printBenchRound(stdout, round, tokens, elapsed, speed)
 	}
 	avg := float64(totalTokens) / totalSeconds
 	_, _ = fmt.Fprintf(stdout, "\naverage: %.2f tok/s over %d tokens\n", avg, totalTokens)

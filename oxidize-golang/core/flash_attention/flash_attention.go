@@ -7,6 +7,7 @@ import (
 	"math"
 	"sync"
 
+	"github.com/Zapdev-labs/oxidize/golang/core/quantization"
 	"github.com/Zapdev-labs/oxidize/golang/core/simd"
 )
 
@@ -16,17 +17,19 @@ type Error struct{ Message string }
 func (e *Error) Error() string { return "flash_attention: " + e.Message }
 
 // DotProductF32 returns the dot product of two float32 slices. The
-// implementation dispatches to the highest available SIMD lane width.
+// implementation dispatches to OXK SIMD kernels when linked, otherwise
+// chunked scalar with auto-vectorization hints.
 func DotProductF32(a, b []float32) float32 {
 	if len(a) != len(b) {
 		return 0
+	}
+	if quantization.OxkHasAVX2() {
+		return quantization.OxkDotF32(a, b)
 	}
 	width := simd.Preferred().LaneWidthF32()
 	if width <= 1 {
 		return dotScalar(a, b)
 	}
-	// For non-scalar lanes, perform the dot product in chunked fashion so
-	// that the Go runtime can apply auto-vectorization on contiguous loads.
 	var sum float32
 	for i := 0; i < len(a); i += width {
 		end := i + width
