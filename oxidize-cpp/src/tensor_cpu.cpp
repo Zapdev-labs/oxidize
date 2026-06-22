@@ -105,6 +105,111 @@ inline float dot_f16(const uint16_t* __restrict w, const float* __restrict x,
 #endif
 }
 
+#ifdef OXIDIZE_HAVE_F16C
+// Horizontal sum of a __m256.
+inline float hsum256(__m256 v) {
+  __m128 lo = _mm256_castps256_ps128(v);
+  __m128 hi = _mm256_extractf128_ps(v, 1);
+  __m128 s = _mm_add_ps(lo, hi);
+  s = _mm_hadd_ps(s, s);
+  s = _mm_hadd_ps(s, s);
+  return _mm_cvtss_f32(s);
+}
+#endif
+
+// Fused Q4_0 row . f32 dot (block: f16 d + 16B nibbles, ggml split-halves:
+// low nibble of byte j -> out j, high -> out j+16; value = (nibble-8)*d).
+inline float dot_q4_0(const uint8_t* __restrict row, const float* __restrict x,
+                      size_t cols) {
+  const size_t nb = cols / 32;
+#ifdef OXIDIZE_HAVE_F16C
+  __m256 acc = _mm256_setzero_ps();
+  for (size_t b = 0; b < nb; ++b) {
+    const uint8_t* blk = row + b * 18;
+    const float* xb = x + b * 32;
+    __m256 vd = _mm256_set1_ps(f16_le_to_f32(blk));
+    const uint8_t* qs = blk + 2;
+    for (int g = 0; g < 4; ++g) {
+      int half = g / 2, sub = g % 2, base = half * 16 + sub * 8;
+      __m256i n32 = _mm256_cvtepu8_epi32(_mm_loadl_epi64(
+          reinterpret_cast<const __m128i*>(qs + sub * 8)));
+      __m256i nib = half == 0 ? _mm256_and_si256(n32, _mm256_set1_epi32(0x0F))
+                              : _mm256_srli_epi32(n32, 4);
+      __m256i q = _mm256_sub_epi32(nib, _mm256_set1_epi32(8));
+      __m256 f = _mm256_mul_ps(_mm256_cvtepi32_ps(q), vd);
+      acc = _mm256_fmadd_ps(f, _mm256_loadu_ps(xb + base), acc);
+    }
+  }
+  return hsum256(acc);
+#else
+  float sum = 0.0f;
+  for (size_t b = 0; b < nb; ++b) {
+    const uint8_t* blk = row + b * 18;
+    float d = f16_le_to_f32(blk);
+    const uint8_t* qs = blk + 2;
+    for (int j = 0; j < 16; ++j) {
+      sum += (static_cast<int>(qs[j] & 0x0F) - 8) * d * x[b * 32 + j];
+      sum += (static_cast<int>(qs[j] >> 4) - 8) * d * x[b * 32 + j + 16];
+    }
+  }
+  return sum;
+#endif
+}
+
+// Fused Q5_0 row . f32 dot (block: f16 d + u32 qh + 16B nibbles; value =
+// ((nibble | (bit_of_qh<<4)) - 16) * d, ggml split-halves with bit j<->out j,
+// bit j+16<->out j+16).
+inline float dot_q5_0(const uint8_t* __restrict row, const float* __restrict x,
+                      size_t cols) {
+  const size_t nb = cols / 32;
+#ifdef OXIDIZE_HAVE_F16C
+  __m256 acc = _mm256_setzero_ps();
+  const __m256i lane = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
+  for (size_t b = 0; b < nb; ++b) {
+    const uint8_t* blk = row + b * 22;
+    const float* xb = x + b * 32;
+    __m256 vd = _mm256_set1_ps(f16_le_to_f32(blk));
+    uint32_t qh = static_cast<uint32_t>(blk[2]) | (static_cast<uint32_t>(blk[3]) << 8) |
+                  (static_cast<uint32_t>(blk[4]) << 16) | (static_cast<uint32_t>(blk[5]) << 24);
+    const uint8_t* qs = blk + 6;
+    __m256i qhv = _mm256_set1_epi32(static_cast<int>(qh));
+    for (int g = 0; g < 4; ++g) {
+      int half = g / 2, sub = g % 2, base = half * 16 + sub * 8;
+      __m256i n32 = _mm256_cvtepu8_epi32(_mm_loadl_epi64(
+          reinterpret_cast<const __m128i*>(qs + sub * 8)));
+      __m256i nib = half == 0 ? _mm256_and_si256(n32, _mm256_set1_epi32(0x0F))
+                              : _mm256_srli_epi32(n32, 4);
+      __m256i bitidx = _mm256_add_epi32(_mm256_set1_epi32(base), lane);
+      __m256i mask = _mm256_sllv_epi32(_mm256_set1_epi32(1), bitidx);
+      __m256i isset = _mm256_xor_si256(
+          _mm256_cmpeq_epi32(_mm256_and_si256(qhv, mask), _mm256_setzero_si256()),
+          _mm256_set1_epi32(-1));
+      __m256i fifth = _mm256_and_si256(isset, _mm256_set1_epi32(16));
+      __m256i q = _mm256_sub_epi32(_mm256_add_epi32(nib, fifth), _mm256_set1_epi32(16));
+      __m256 f = _mm256_mul_ps(_mm256_cvtepi32_ps(q), vd);
+      acc = _mm256_fmadd_ps(f, _mm256_loadu_ps(xb + base), acc);
+    }
+  }
+  return hsum256(acc);
+#else
+  float sum = 0.0f;
+  for (size_t b = 0; b < nb; ++b) {
+    const uint8_t* blk = row + b * 22;
+    float d = f16_le_to_f32(blk);
+    uint32_t qh = static_cast<uint32_t>(blk[2]) | (static_cast<uint32_t>(blk[3]) << 8) |
+                  (static_cast<uint32_t>(blk[4]) << 16) | (static_cast<uint32_t>(blk[5]) << 24);
+    const uint8_t* qs = blk + 6;
+    for (int j = 0; j < 16; ++j) {
+      int lo = (qs[j] & 0x0F) | (((qh >> j) & 1) << 4);
+      int hi = (qs[j] >> 4) | (((qh >> (j + 16)) & 1) << 4);
+      sum += (lo - 16) * d * x[b * 32 + j];
+      sum += (hi - 16) * d * x[b * 32 + j + 16];
+    }
+  }
+  return sum;
+#endif
+}
+
 }  // namespace
 
 void rms_norm(float* out, const float* x, const float* weight, size_t n,
@@ -238,6 +343,21 @@ void gemv_quantized(float* y, QuantType quant, const uint8_t* W, size_t rows,
           W + static_cast<size_t>(r) * cols * 2);
       y[r] = dot_f16(row, x, cols);
     }
+    return;
+  }
+  // Fast paths: native Q4_0 / Q5_0 fused unpack+dot (SIMD), no scalar dequant pass.
+  if (quant == QuantType::Q4_0) {
+    const size_t rb = (cols / 32) * 18;
+#pragma omp parallel for schedule(static)
+    for (long long r = 0; r < static_cast<long long>(rows); ++r)
+      y[r] = dot_q4_0(W + static_cast<size_t>(r) * rb, x, cols);
+    return;
+  }
+  if (quant == QuantType::Q5_0) {
+    const size_t rb = (cols / 32) * 22;
+#pragma omp parallel for schedule(static)
+    for (long long r = 0; r < static_cast<long long>(rows); ++r)
+      y[r] = dot_q5_0(W + static_cast<size_t>(r) * rb, x, cols);
     return;
   }
 
