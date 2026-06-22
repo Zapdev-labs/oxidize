@@ -1,0 +1,19 @@
+.gitignore
+  s_7d0d50bc68f118::t_3e837ef1c5bb73 25-29
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "fe86377cefd8ad601dbf7b88f1575c8629a67edb",
+  "prompts": {},
+  "sessions": {
+    "s_7d0d50bc68f118": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "574f82cd-95dc-47f4-8725-bdd25dbad482",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
