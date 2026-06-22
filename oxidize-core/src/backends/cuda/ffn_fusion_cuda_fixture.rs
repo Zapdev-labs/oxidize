@@ -1,4 +1,5 @@
 use super::*;
+use crate::quantization::BLOCK_Q6_K_SIZE;
 use cust::event::{Event, EventFlags};
 use cust::memory::CopyDestination;
 
@@ -7,6 +8,120 @@ pub(super) struct FfnCudaEventBenchmark {
     pub(super) fused_output: Vec<f32>,
     pub(super) eager_ms: Vec<f64>,
     pub(super) fused_ms: Vec<f64>,
+}
+
+pub(super) struct GemvBlockSizeCudaEventBenchmark {
+    pub(super) eager_output: Vec<f32>,
+    pub(super) candidate_output: Vec<f32>,
+    pub(super) eager_ms: Vec<f64>,
+    pub(super) candidate_ms: Vec<f64>,
+}
+
+pub(super) fn run_q4k_gemv_block_size_cuda_event_benchmark(
+    rows: usize,
+    blocks_per_row: usize,
+    candidate_block: u32,
+    q6k: bool,
+) -> Result<GemvBlockSizeCudaEventBenchmark, String> {
+    const WARMUPS: usize = 3;
+    const SAMPLES: usize = 10;
+    let cols = blocks_per_row
+        .checked_mul(QK_K)
+        .ok_or_else(|| "Q4_K fixture column count overflow".to_owned())?;
+    let block_bytes = if q6k { BLOCK_Q6_K_SIZE } else { BLOCK_Q4_K_SIZE };
+    let weight_bytes = rows
+        .checked_mul(blocks_per_row)
+        .and_then(|blocks| blocks.checked_mul(block_bytes))
+        .ok_or_else(|| "Q4_K fixture weight size overflow".to_owned())?;
+    let weights = if q6k {
+        q6k_fixture_weights(weight_bytes, 0x1234_5678)
+    } else {
+        q4k_fixture_weights(weight_bytes, 0x1234_5678)
+    };
+    let input = (0..cols)
+        .map(|index| ((index as f32 * 0.017).sin() * 0.7) + ((index % 11) as f32 - 5.0) * 0.02)
+        .collect::<Vec<_>>();
+    let gpu = gpu_init()?;
+    let d_weights = cust::memory::DeviceBuffer::from_slice(&weights).map_err(stringify)?;
+    let d_input = cust::memory::DeviceBuffer::from_slice(&input).map_err(stringify)?;
+    let d_eager = cust::memory::DeviceBuffer::<f32>::zeroed(rows).map_err(stringify)?;
+    let d_candidate = cust::memory::DeviceBuffer::<f32>::zeroed(rows).map_err(stringify)?;
+    let kernel_name = if q6k {
+        GEMV_Q6K_F32IN_KERNEL_NAME
+    } else {
+        GEMV_Q4K_F32IN_KERNEL_NAME
+    };
+    let eager = gpu
+        .module
+        .get_function(kernel_name)
+        .map_err(stringify)?;
+    let candidate = gpu
+        .module
+        .get_function(kernel_name)
+        .map_err(stringify)?;
+    let rows_u32 = u32::try_from(rows).map_err(|_| "fixture rows exceed u32".to_owned())?;
+    let blocks_u32 =
+        u32::try_from(blocks_per_row).map_err(|_| "fixture blocks exceed u32".to_owned())?;
+    let eager_block = 256_u32;
+    let eager_grid = rows_u32.saturating_mul(32).div_ceil(eager_block);
+    let candidate_grid = rows_u32.saturating_mul(32).div_ceil(candidate_block);
+    let stream = &gpu.stream;
+    let launch_eager = || -> Result<(), String> {
+        unsafe {
+            cust::launch!(eager<<<eager_grid, eager_block, 0, stream>>>(
+                d_weights.as_device_ptr(), d_input.as_device_ptr(),
+                d_eager.as_device_ptr(), rows_u32, blocks_u32
+            ))
+            .map_err(stringify)?;
+        }
+        Ok(())
+    };
+    let launch_candidate = || -> Result<(), String> {
+        unsafe {
+            cust::launch!(candidate<<<candidate_grid, candidate_block, 0, stream>>>(
+                d_weights.as_device_ptr(), d_input.as_device_ptr(),
+                d_candidate.as_device_ptr(), rows_u32, blocks_u32
+            ))
+            .map_err(stringify)?;
+        }
+        Ok(())
+    };
+    for _ in 0..WARMUPS {
+        launch_eager()?;
+        launch_candidate()?;
+    }
+    gpu.stream.synchronize().map_err(stringify)?;
+    let start = Event::new(EventFlags::DEFAULT).map_err(stringify)?;
+    let stop = Event::new(EventFlags::DEFAULT).map_err(stringify)?;
+    let mut eager_ms = Vec::with_capacity(SAMPLES);
+    let mut candidate_ms = Vec::with_capacity(SAMPLES);
+    for _ in 0..SAMPLES {
+        start.record(&gpu.stream).map_err(stringify)?;
+        launch_eager()?;
+        stop.record(&gpu.stream).map_err(stringify)?;
+        stop.synchronize().map_err(stringify)?;
+        eager_ms.push(f64::from(stop.elapsed_time_f32(&start).map_err(stringify)?));
+        start.record(&gpu.stream).map_err(stringify)?;
+        launch_candidate()?;
+        stop.record(&gpu.stream).map_err(stringify)?;
+        stop.synchronize().map_err(stringify)?;
+        candidate_ms.push(f64::from(stop.elapsed_time_f32(&start).map_err(stringify)?));
+    }
+    launch_eager()?;
+    launch_candidate()?;
+    gpu.stream.synchronize().map_err(stringify)?;
+    let mut eager_output = vec![0.0_f32; rows];
+    let mut candidate_output = vec![0.0_f32; rows];
+    d_eager.copy_to(&mut eager_output).map_err(stringify)?;
+    d_candidate
+        .copy_to(&mut candidate_output)
+        .map_err(stringify)?;
+    Ok(GemvBlockSizeCudaEventBenchmark {
+        eager_output,
+        candidate_output,
+        eager_ms,
+        candidate_ms,
+    })
 }
 
 pub(super) fn run_q4k_gate_up_silu_parity_case(
@@ -237,6 +352,21 @@ fn q4k_fixture_weights(byte_len: usize, mut state: u32) -> Vec<u8> {
             state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
             *quant = (state >> 16) as u8;
         }
+    }
+    weights
+}
+
+fn q6k_fixture_weights(byte_len: usize, mut state: u32) -> Vec<u8> {
+    let mut weights = vec![0_u8; byte_len];
+    for block in weights.chunks_exact_mut(BLOCK_Q6_K_SIZE) {
+        for byte in block.iter_mut() {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            *byte = state as u8;
+        }
+        block[208] = 0x00;
+        block[209] = 0x34;
     }
     weights
 }

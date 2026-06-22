@@ -19,6 +19,17 @@ fn q4k_gate_up_silu_kernel_source_contract_exists() {
 }
 
 #[test]
+fn projection_residual_fusion_kernel_source_contract_exists() {
+    let source = include_str!("../../../kernels/gemv_f32.cu");
+    for entry in [
+        "gemv_q4k_f32in_residual_kernel",
+        "gemv_q6k_f32in_residual_kernel",
+    ] {
+        assert!(source.contains(entry), "missing CUDA entry point: {entry}");
+    }
+}
+
+#[test]
 fn ffn_fusion_selection_uses_supported_q4k_geometry() {
     // Given valid production Q4_K gate/up geometry without an opt-in override.
     let selected = super::gpu_native_forward::select_ffn_fusion(true, true, 11_008, 16, true);
@@ -40,6 +51,39 @@ fn ffn_fusion_selection_falls_back_for_invalid_geometry() {
         !selected,
         "invalid Q4_K FFN geometry must retain eager fallback"
     );
+}
+
+#[test]
+fn q4k_projection_selector_uses_h100_tuned_block() {
+    assert_eq!(
+        super::gpu_native_forward::select_projection_gemv_block_size(true, 4096, None),
+        1024
+    );
+}
+
+#[test]
+fn q6k_projection_selector_retains_legacy_block() {
+    assert_eq!(
+        super::gpu_native_forward::select_projection_gemv_block_size(false, 4096, Some(1024)),
+        256
+    );
+}
+
+#[test]
+fn malformed_projection_block_override_uses_tuned_default() {
+    assert_eq!(
+        super::gpu_native_forward::select_projection_gemv_block_size(true, 32_000, Some(7)),
+        128
+    );
+}
+
+#[test]
+fn q4k_projection_selector_uses_shape_specific_blocks() {
+    use super::gpu_native_forward::select_projection_gemv_block_size;
+    assert_eq!(select_projection_gemv_block_size(true, 1024, None), 128);
+    assert_eq!(select_projection_gemv_block_size(true, 4096, None), 1024);
+    assert_eq!(select_projection_gemv_block_size(true, 11_008, None), 128);
+    assert_eq!(select_projection_gemv_block_size(true, 32_000, None), 128);
 }
 
 #[test]
@@ -164,10 +208,17 @@ fn gemv_cuda_kernel_name_matches_ptx_entry() {
 }
 
 #[test]
-fn split_k_plan_selects_legacy_below_threshold() {
-    let seq_len = 1023;
-    let plan = SplitKPlan::select(132, 32, seq_len);
-    assert_eq!(plan, None, "seq_len=1023 must select legacy decode");
+fn split_k_plan_uses_occupancy_splits_for_short_context_on_h100() {
+    // Decode benches often have context < 1024; occupancy-only splits still help.
+    let plan = SplitKPlan::select(132, 32, 64).expect("H100 short ctx must split-K");
+    assert_eq!(plan.split_count, 9, "132 SM / 32 heads → 9 occupancy splits");
+    assert_eq!(plan.block_count, 288);
+}
+
+#[test]
+fn split_k_plan_selects_legacy_on_tiny_gpu() {
+    let plan = SplitKPlan::select(1, 32, 1023);
+    assert_eq!(plan, None, "single-SM GPU must retain legacy decode");
 }
 
 #[test]
@@ -188,9 +239,10 @@ fn split_k_plan_fills_h100_for_long_decode() {
 }
 
 #[test]
-fn split_k_plan_rejects_single_split() {
-    let plan = SplitKPlan::select(1, 32, 1024);
-    assert_eq!(plan, None, "a one-split plan must retain legacy decode");
+fn split_k_plan_caps_splits_by_sequence_length() {
+    let plan = SplitKPlan::select(132, 32, 5).expect("seq_len=5 allows 5 splits");
+    assert_eq!(plan.split_count, 5);
+    assert_eq!(SplitKPlan::select(132, 32, 1), None);
 }
 
 #[test]
@@ -580,4 +632,17 @@ fn gpu_next_profile_reuses_resolved_local_model_for_repeated_trials() {
         !command.contains("\n        model,") && !command.contains(r#""--file""#),
         "measured CLI command must not query Hugging Face or use --file"
     );
+}
+
+#[test]
+fn modal_harness_exposes_real_dflash_cli_ab() {
+    let source = include_str!("../../../../modal_app.py");
+    for marker in [
+        "def gpu_dflash_ab(",
+        "--draft-model",
+        "Qwen3-4B-DFlash-q8_0.gguf",
+        "dflash_output_parity=PASS",
+    ] {
+        assert!(source.contains(marker), "missing DFlash A/B marker: {marker}");
+    }
 }

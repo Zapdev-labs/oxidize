@@ -1,5 +1,6 @@
 use super::ffn_fusion_cuda_fixture::{
     run_q4k_gate_up_silu_cuda_event_benchmark, run_q4k_gate_up_silu_parity_case,
+    run_q4k_gemv_block_size_cuda_event_benchmark,
 };
 
 fn assert_bitwise_equal(actual: &[f32], expected: &[f32]) {
@@ -62,4 +63,52 @@ fn q4k_gate_up_silu_cuda_event_benchmark() {
     assert_bitwise_equal(&benchmark.fused_output, &benchmark.eager_output);
     println!("eager_ffn_ms={:.6}", median(&benchmark.eager_ms));
     println!("fused_ffn_ms={:.6}", median(&benchmark.fused_ms));
+}
+
+#[test]
+#[ignore = "requires an H100 CUDA GPU"]
+fn q4k_gemv_block_size_sweep_is_exact_and_faster() {
+    for (rows, blocks_per_row) in [(1024, 16), (4096, 16), (11_008, 16), (32_000, 16), (4096, 43)] {
+        let mut best = f64::INFINITY;
+        let mut eager = 0.0;
+        for block_size in [128, 256, 512, 1024] {
+            let benchmark = run_q4k_gemv_block_size_cuda_event_benchmark(
+                rows,
+                blocks_per_row,
+                block_size,
+                false,
+            )
+            .expect("Q4_K block-size benchmark must execute");
+            assert_bitwise_equal(&benchmark.candidate_output, &benchmark.eager_output);
+            assert_eq!(benchmark.eager_ms.len(), 10);
+            assert_eq!(benchmark.candidate_ms.len(), 10);
+            eager = median(&benchmark.eager_ms);
+            let candidate = median(&benchmark.candidate_ms);
+            println!("q4k_gemv_{rows}x{blocks_per_row}_block_{block_size}_ms={candidate:.6}");
+            best = best.min(candidate);
+        }
+        println!("eager_q4k_gemv_{rows}x{blocks_per_row}_ms={eager:.6}");
+        assert!(best <= eager * 1.01, "rows={rows} bpr={blocks_per_row} best={best:.6}ms eager={eager:.6}ms");
+    }
+}
+
+#[test]
+#[ignore = "requires an H100 CUDA GPU"]
+fn q6k_gemv_block_size_sweep_is_exact() {
+    for (rows, blocks_per_row) in [(1024, 16), (4096, 16), (11_008, 16), (32_000, 16), (4096, 43)] {
+        for block_size in [128, 256, 512, 1024] {
+            let benchmark = run_q4k_gemv_block_size_cuda_event_benchmark(
+                rows,
+                blocks_per_row,
+                block_size,
+                true,
+            )
+            .expect("Q6_K block-size benchmark must execute");
+            assert_bitwise_equal(&benchmark.candidate_output, &benchmark.eager_output);
+            let eager = median(&benchmark.eager_ms);
+            let candidate = median(&benchmark.candidate_ms);
+            println!("q6k_gemv_{rows}x{blocks_per_row}_block_{block_size}_ms={candidate:.6}");
+            println!("eager_q6k_gemv_{rows}x{blocks_per_row}_ms={eager:.6}");
+        }
+    }
 }
