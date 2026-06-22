@@ -616,18 +616,17 @@ def gpu_best(
     binary = f"{REPO_ROOT}/target/release/oxidize-cli"
     _run("nvidia-smi --query-gpu=name --format=csv,noheader")
     configs = [
+        ("default (attn+mw+lmhead_q8k)", {"OX_GPU_ATTN": "1"}, 8),
+        ("no lmhead_q8k", {"OX_GPU_ATTN": "1", "OX_GPU_LMHEAD_Q8K": "0"}, 8),
+        ("fused_qkv", {"OX_GPU_ATTN": "1", "OX_GPU_FUSED_QKV": "1"}, 8),
         ("gpu_native (cpu-attn)", {}, 8),
-        ("OX_GPU_ATTN", {"OX_GPU_ATTN": "1"}, 8),
-        ("OX_GPU_ATTN auto split-K", {"OX_GPU_ATTN": "1"}, 8),
-        ("OX_GPU_ATTN split-K s=8", {"OX_GPU_ATTN": "1", "OX_FLASH_DECODE_SPLITS": "8"}, 8),
-        ("OX_GPU_ATTN legacy decode", {"OX_GPU_ATTN": "1", "OX_FLASH_DECODE_FORCE_LEGACY": "1"}, 8),
     ]
     results = []
     for label, extra, threads in configs:
         env = dict(os.environ)
         env.update(extra)
         cmd = [binary, "run", model, "--file", hf_file, prompt, "--no-api",
-               "--backend", "cuda", "--n-gpu-layers", "32", "--layer-cache", "64",
+               "--backend", "cuda", "--n-gpu-layers", "99", "--layer-cache", "64",
                "--max-tokens", str(max_tokens), "--temperature", "0", "--threads", str(threads)]
         best = 0.0
         note = ""
@@ -1064,7 +1063,7 @@ def gpu_stage_profile(
     if gpu_attn:
         env["OX_GPU_ATTN"] = "1"
     cmd = [binary, "run", model, "--file", hf_file, prompt, "--no-api",
-           "--backend", "cuda", "--n-gpu-layers", "32", "--layer-cache", "64",
+           "--backend", "cuda", "--n-gpu-layers", "99", "--layer-cache", "64",
            "--max-tokens", str(max_tokens), "--temperature", "0", "--threads", "8"]
     out = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True, env=env)
     blob = (out.stdout or "") + (out.stderr or "")
@@ -1245,10 +1244,10 @@ def gpu_attn_verify(
 
 @app.function(**GPU_RUN)
 def gpu_flag_sweep(
-    model: str = "Qwen/Qwen3-4B-GGUF",
-    hf_file: str = "Qwen3-4B-Q4_K_M.gguf",
+    model: str = "bartowski/Mistral-7B-Instruct-v0.3-GGUF",
+    hf_file: str = "Mistral-7B-Instruct-v0.3-Q4_K_M.gguf",
     prompt: str = "Explain what a tokenizer does in two sentences.",
-    max_tokens: int = 96,
+    max_tokens: int = 128,
 ) -> str:
     """A/B the GPU-native decode path against the FORCED-CPU baseline
     (OX_GPU_ATTN=0). The baseline is pure-CPU attention+projections — for a
@@ -1302,12 +1301,22 @@ def gpu_flag_sweep(
         # running faster (more in-flight HBM requests per row).
         ("gpu_attn+gemv_mw", {"OX_GPU_ATTN": "1", "OX_GPU_GEMV_MW": "1"}),
         ("gpu_attn+ffn_fuse", {"OX_GPU_ATTN": "1", "OX_GPU_FFN_FUSE": "1"}),
-        ("gpu_attn+fused_mmq", {"OX_GPU_ATTN": "1", "OX_GPU_FUSED_MMQ": "1"}),
+        ("gpu_attn+fused_qkv", {"OX_GPU_ATTN": "1", "OX_GPU_FUSED_QKV": "1"}),
+        ("gpu_attn+layer_q8k", {"OX_GPU_ATTN": "1", "OX_GPU_LAYER_Q8K": "1"}),
         ("gpu_full_stack", {"OX_GPU_ATTN": "1", "OX_GPU_FFN_FUSE": "1",
                             "OX_GPU_FUSED_MMQ": "1", "OX_GPU_LMHEAD_MULTIROW": "1"}),
         ("gpu_full_stack+gemv_mw", {"OX_GPU_ATTN": "1", "OX_GPU_FFN_FUSE": "1",
                                     "OX_GPU_FUSED_MMQ": "1", "OX_GPU_LMHEAD_MULTIROW": "1",
                                     "OX_GPU_GEMV_MW": "1"}),
+        ("gpu_full+cuda_graph", {"OX_GPU_ATTN": "1", "OX_GPU_FFN_FUSE": "1",
+                                 "OX_GPU_FUSED_MMQ": "1", "OX_GPU_LMHEAD_MULTIROW": "1",
+                                 "OX_GPU_CUDA_GRAPH": "1"}),
+        ("gpu_full+mw+graph", {"OX_GPU_ATTN": "1", "OX_GPU_FFN_FUSE": "1",
+                               "OX_GPU_FUSED_MMQ": "1", "OX_GPU_LMHEAD_MULTIROW": "1",
+                               "OX_GPU_GEMV_MW": "1", "OX_GPU_CUDA_GRAPH": "1"}),
+        ("eager_no_opts", {"OX_GPU_ATTN": "1", "OX_GPU_FFN_FUSE": "0",
+                           "OX_GPU_FUSED_MMQ": "0", "OX_GPU_CUDA_GRAPH": "0",
+                           "OX_GPU_LMHEAD_MULTIROW": "0", "OX_GPU_GEMV_MW": "0"}),
     ]
     results = []
     base_tps, base_arg, _ = run(*configs[0])
@@ -1325,10 +1334,13 @@ def gpu_flag_sweep(
                         f"{spd}  {'PARITY' if parity else f'DIVERGED@{first_div}'}"))
 
     lines = [f"  {l:20s}: {t:6.2f} tok/s  {note}" for l, t, note in results]
+    best_gpu = max((t for l, t, n in results if l != "cpu_baseline"), default=0.0)
     summary = (
-        f"\n=== GPU decode A/B (L4, {model}) ===\n"
+        f"\n=== GPU decode A/B ({model}) ===\n"
         f"baseline = OX_GPU_ATTN=0 (forced CPU); gpu_* rows route to the GPU\n"
         + "\n".join(lines)
+        + f"\nBEST gpu row: {best_gpu:.2f} tok/s  (llama.cpp Mistral-7B Q4_K_M A100 ref: ~156 tok/s)\n"
+        + (f"gap vs llama.cpp: {156 / best_gpu:.1f}x\n" if best_gpu > 0 else "")
         + "\n(PARITY = identical greedy argmax sequence to CPU baseline = correct)\n"
     )
     print(summary, flush=True)
