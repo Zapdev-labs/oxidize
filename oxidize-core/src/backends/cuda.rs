@@ -22,9 +22,17 @@ pub const GEMV_Q4_K_DIRECT_KERNEL_NAME: &str = "gemv_q4_k_kernel";
 pub const QUANTIZE_F32_TO_Q8K_KERNEL_NAME: &str = "quantize_f32_to_q8k_kernel";
 /// Q4_K × Q8_K GEMV with DP4A — device-resident activation (OXK GPU path).
 pub const GEMV_Q4K_Q8KIN_KERNEL_NAME: &str = "gemv_q4k_q8kin_kernel";
+/// Multi-warp Q4_K × Q8_K GEMV against a pre-quantized global xq8k buffer.
+pub const GEMV_Q4K_Q8KIN_MW_KERNEL_NAME: &str = "gemv_q4k_q8kin_mw_kernel";
 /// Fused Q4_K × Q8_K MMQ GEMV: activation quantized to shared Q8_K in-kernel,
 /// then a tile of rows reuses it with DP4A — one launch, no VRAM round-trip.
 pub const GEMV_Q4K_Q8K_FUSED_KERNEL_NAME: &str = "gemv_q4k_q8k_fused_kernel";
+/// Fused MMQ + 4 warps/row (H100 HBM); shared activation, 2 rows/block.
+pub const GEMV_Q4K_Q8K_FUSED_MW_KERNEL_NAME: &str = "gemv_q4k_q8k_fused_mw_kernel";
+/// One launch: in-kernel shared quantize + Q/K/V multi-warp MMQ (legacy).
+pub const GEMV_Q4K_Q8K_FUSED_QKV_MW_KERNEL_NAME: &str = "gemv_q4k_q8k_fused_qkv_mw_kernel";
+/// One launch: global xq8k + Q/K/V multi-warp DP4A (shared-quantize QKV path).
+pub const GEMV_Q4K_Q8KIN_QKV_MW_KERNEL_NAME: &str = "gemv_q4k_q8kin_qkv_mw_kernel";
 /// Multi-row Q4_K × F32 lm_head GEMV: ROWS_PER_BLK rows share one cached
 /// activation tile (the 19k×hidden output projection is the largest GEMV).
 pub const GEMV_Q4K_F32IN_MULTIROW_KERNEL_NAME: &str = "gemv_q4k_f32in_multirow_kernel";
@@ -176,6 +184,15 @@ pub use gpu_kernels::*;
 mod gpu_native_forward;
 #[allow(unused_imports)]
 pub use gpu_native_forward::*;
+
+#[cfg(feature = "cuda")]
+#[path = "cuda/cuda_decode_graph.rs"]
+mod cuda_decode_graph;
+#[cfg(feature = "cuda")]
+pub use cuda_decode_graph::{
+    gpu_decode_graph_eligible, gpu_decode_graph_reset, gpu_decode_graph_set_token,
+    gpu_decode_layer_graph_begin, gpu_decode_layer_graph_end, ox_gpu_cuda_graph_enabled,
+};
 
 #[path = "cuda/flash_decode.rs"]
 mod flash_decode;

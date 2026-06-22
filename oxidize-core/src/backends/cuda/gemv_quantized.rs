@@ -402,26 +402,26 @@ pub(crate) fn launch_quantize_f32_to_q8k_device_ptr(
     Ok(())
 }
 
-/// Q4_K × Q8_K GEMV: `d_q8k` holds `blocks_per_row` Q8_K blocks; output → `d_output`.
+/// Q4_K × Q8_K GEMV with split-K warps per row, or multi-warp when MW enabled.
 #[cfg(feature = "cuda")]
-pub(crate) fn launch_gemv_q4k_q8kin_device(
+pub(crate) fn launch_gemv_q4k_q8kin_mw_device(
     gpu: &mut super::GpuState,
     w_ptr: cust::memory::DevicePointer<u8>,
     rows: u32,
     blocks_per_row: u32,
     d_q8k: cust::memory::DevicePointer<u8>,
     d_output: cust::memory::DevicePointer<f32>,
-    _n_splits: u32,
 ) -> Result<(), String> {
-    let block_size = 256_u32;
-    let grid = rows.saturating_mul(32).div_ceil(block_size);
-    let fn_gemv = gpu
+    let nwarps = ox_gpu_gemv_mw_nwarps();
+    let block_size = nwarps.saturating_mul(32).clamp(32, 1024);
+    let shmem = nwarps.saturating_mul(4);
+    let fn_mw = gpu
         .module
-        .get_function(GEMV_Q4_K_DIRECT_KERNEL_NAME)
+        .get_function(GEMV_Q4K_Q8KIN_MW_KERNEL_NAME)
         .map_err(stringify)?;
     let stream = &gpu.stream;
     unsafe {
-        cust::launch!(fn_gemv<<<grid, block_size, 0, stream>>>(
+        cust::launch!(fn_mw<<<rows, block_size, shmem, stream>>>(
             w_ptr,
             d_q8k,
             d_output,
@@ -431,6 +431,108 @@ pub(crate) fn launch_gemv_q4k_q8kin_device(
         .map_err(stringify)?;
     }
     Ok(())
+}
+
+#[cfg(feature = "cuda")]
+pub(crate) fn launch_gemv_q4k_q8kin_device(
+    gpu: &mut super::GpuState,
+    w_ptr: cust::memory::DevicePointer<u8>,
+    rows: u32,
+    blocks_per_row: u32,
+    d_q8k: cust::memory::DevicePointer<u8>,
+    d_output: cust::memory::DevicePointer<f32>,
+    n_splits: u32,
+) -> Result<(), String> {
+    if ox_gpu_gemv_mw_enabled() {
+        return launch_gemv_q4k_q8kin_mw_device(
+            gpu, w_ptr, rows, blocks_per_row, d_q8k, d_output,
+        );
+    }
+    let n_splits = n_splits.clamp(1, 8);
+    const WARPS_PER_BLOCK: u32 = 8; // blockDim 256 / 32
+    let block_size = 256_u32;
+    let grid = rows
+        .saturating_mul(n_splits)
+        .saturating_add(WARPS_PER_BLOCK - 1)
+        / WARPS_PER_BLOCK;
+    let shmem = WARPS_PER_BLOCK.saturating_mul(4);
+    let fn_gemv = gpu
+        .module
+        .get_function(GEMV_Q4K_Q8KIN_KERNEL_NAME)
+        .map_err(stringify)?;
+    let stream = &gpu.stream;
+    unsafe {
+        cust::launch!(fn_gemv<<<grid, block_size, shmem, stream>>>(
+            w_ptr,
+            d_q8k,
+            d_output,
+            rows,
+            blocks_per_row,
+            n_splits
+        ))
+        .map_err(stringify)?;
+    }
+    Ok(())
+}
+
+/// Quantize a device F32 activation to `xq8k`, then Q4_K × Q8_K split-K GEMV.
+#[cfg(feature = "cuda")]
+pub(crate) fn launch_q4k_q8kin_from_f32_activation(
+    gpu: &mut super::GpuState,
+    w_ptr: cust::memory::DevicePointer<u8>,
+    d_input: cust::memory::DevicePointer<f32>,
+    d_q8k: cust::memory::DevicePointer<u8>,
+    d_output: cust::memory::DevicePointer<f32>,
+    rows: u32,
+    blocks_per_row: u32,
+) -> Result<(), String> {
+    launch_quantize_f32_to_q8k_device_ptr(gpu, d_input, d_q8k, blocks_per_row)?;
+    launch_gemv_q4k_q8kin_device(
+        gpu,
+        w_ptr,
+        rows,
+        blocks_per_row,
+        d_q8k,
+        d_output,
+        ox_gpu_q8kin_splits(),
+    )
+}
+
+/// Split-K warp count for [`launch_gemv_q4k_q8kin_device`] (default 4).
+#[cfg(feature = "cuda")]
+pub(super) fn ox_gpu_q8kin_splits() -> u32 {
+    static SPLITS: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *SPLITS.get_or_init(|| {
+        std::env::var("OX_GPU_Q8KIN_SPLITS")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(4)
+            .clamp(1, 8)
+    })
+}
+
+/// Layer-wise Q8_K path: quantize once per norm, reuse for all Q4_K GEMVs in that
+/// step. OFF by default (slower than f32-in MW on H100 Mistral); `OX_GPU_LAYER_Q8K=1`.
+#[cfg(feature = "cuda")]
+pub(super) fn ox_gpu_layer_q8k_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("OX_GPU_LAYER_Q8K")
+            .map(|v| v != "0" && !v.is_empty())
+            .unwrap_or(false)
+    })
+}
+
+/// lm_head only: one quantize + Q8K-in MW for wide vocab (32k rows). ON by default.
+/// Set `OX_GPU_LMHEAD_Q8K=0` to keep f32-in MW on the output projection.
+#[cfg(feature = "cuda")]
+pub(super) fn ox_gpu_lmhead_q8k_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("OX_GPU_LMHEAD_Q8K")
+            .map(|v| v != "0" && !v.is_empty())
+            .unwrap_or(true)
+    })
 }
 
 /// Batched Q4_K × Q8_K GEMV: `ncols` (batch B ≤ 8) Q8_K activation vectors share
@@ -515,9 +617,13 @@ pub(crate) fn launch_gemv_f32in_device(
     rows: u32,
     blocks_per_row: u32,
 ) -> Result<(), String> {
-    // Multi-warp-per-row path (Q4_K f32-in only): one block per output row, with
-    // OX_GEMV_MW_NWARPS warps cooperating for more in-flight HBM requests/row.
-    // Numerically identical to the single-warp kernel.
+    if kern_name == GEMV_Q4K_F32IN_KERNEL_NAME && q4k_fused_mmq_eligible(blocks_per_row) {
+        return launch_fused_mmq_device(
+            gpu, w_ptr, d_input, d_output, rows, blocks_per_row,
+        );
+    }
+
+    // F32-in MW fallback when activation is too wide for fused shared memory.
     if kern_name == GEMV_Q4K_F32IN_KERNEL_NAME && ox_gpu_gemv_mw_enabled() {
         let nwarps = ox_gpu_gemv_mw_nwarps();
         let block_size = nwarps.saturating_mul(32).clamp(32, 1024);
@@ -560,18 +666,15 @@ pub(crate) fn launch_gemv_f32in_device(
     Ok(())
 }
 
-/// Opt-in multi-warp-per-row Q4_K F32-in GEMV (`OX_GPU_GEMV_MW=1`). Each output
-/// row is computed by several cooperating warps so more HBM requests are in
-/// flight per row (Little's law) — the H100 bandwidth fix from llama.cpp PR
-/// #5394. Default OFF so the shipped single-warp path stays byte-identical until
-/// validated on GPU.
+/// Multi-warp-per-row Q4_K F32-in GEMV — default ON for H100-class bandwidth.
+/// Set `OX_GPU_GEMV_MW=0` to force one-warp-per-row.
 #[cfg(feature = "cuda")]
 pub(super) fn ox_gpu_gemv_mw_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {
         std::env::var("OX_GPU_GEMV_MW")
             .map(|v| v != "0" && !v.is_empty())
-            .unwrap_or(false)
+            .unwrap_or(true)
     })
 }
 
@@ -589,10 +692,12 @@ pub(super) fn ox_gpu_gemv_mw_nwarps() -> u32 {
     })
 }
 
-/// Opt-in: fuse activation Q8_K quantization into the Q4_K GEMV kernel
-/// (`gemv_q4k_q8k_fused_kernel`), eliminating the separate quantize launch and
-/// the Q8_K VRAM round-trip. OFF by default (`OX_GPU_FUSED_MMQ=1` to enable)
-/// so the shipped two-kernel path stays byte-identical until validated on GPU.
+/// fused kernel instead quantizes the *whole* activation vector into SHARED
+/// memory once per thread-block, then a tile of output rows (one warp each)
+/// reuses it with __dp4a — one launch, no activation round-trip through VRAM.
+///
+/// OFF by default on decode: re-quantizing per projection loses to the tuned
+/// f32-in GEMV path on H100 Mistral-class models. Set `OX_GPU_FUSED_MMQ=1`.
 #[cfg(feature = "cuda")]
 pub(super) fn ox_gpu_fused_mmq_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -603,6 +708,13 @@ pub(super) fn ox_gpu_fused_mmq_enabled() -> bool {
     })
 }
 
+#[cfg(feature = "cuda")]
+#[must_use]
+pub(crate) fn q4k_fused_mmq_eligible(blocks_per_row: u32) -> bool {
+    ox_gpu_fused_mmq_enabled()
+        && (blocks_per_row as usize).saturating_mul(292) <= FUSED_MMQ_MAX_SHMEM
+}
+
 /// Per-block dynamic shared-memory budget for the fused MMQ kernel. The fused
 /// kernel holds the whole Q8_K activation (blocks_per_row × 292 B) in shared
 /// memory; above this it falls back to the two-kernel path. 44 KB stays under
@@ -610,6 +722,167 @@ pub(super) fn ox_gpu_fused_mmq_enabled() -> bool {
 /// attribute needed).
 #[cfg(feature = "cuda")]
 const FUSED_MMQ_MAX_SHMEM: usize = 44 * 1024;
+
+/// Fused QKV: one global quantize + one Q/K/V launch (shared xq8k, DP4A MW).
+/// OFF by default — f32-in MW wins on H100 Mistral decode; set `OX_GPU_FUSED_QKV=1`.
+#[cfg(feature = "cuda")]
+pub(super) fn ox_gpu_fused_qkv_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("OX_GPU_FUSED_QKV")
+            .map(|v| v != "0" && !v.is_empty())
+            .unwrap_or(false)
+    })
+}
+
+/// Multi-warp fused MMQ (4 warps/row, blockDim=1024). Opt-in via `OX_GPU_FUSED_MW=1`.
+#[cfg(feature = "cuda")]
+pub(super) fn ox_gpu_fused_mw_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("OX_GPU_FUSED_MW")
+            .map(|v| v != "0" && !v.is_empty())
+            .unwrap_or(false)
+    })
+}
+
+/// Pick fused MMQ: single-warp 8-rows/block tile by default; multi-warp tile for
+/// very wide outputs (lm_head) or when `OX_GPU_FUSED_MW=1`.
+#[cfg(feature = "cuda")]
+pub(crate) fn launch_fused_mmq_device(
+    gpu: &mut super::GpuState,
+    w_ptr: cust::memory::DevicePointer<u8>,
+    d_input: cust::memory::DevicePointer<f32>,
+    d_output: cust::memory::DevicePointer<f32>,
+    rows: u32,
+    blocks_per_row: u32,
+) -> Result<(), String> {
+    if !q4k_fused_mmq_eligible(blocks_per_row) {
+        return Err("launch_fused_mmq_device: blocks_per_row too large for fused shmem".into());
+    }
+    if ox_gpu_fused_mw_enabled() || rows >= 8192 {
+        launch_gemv_q4k_q8k_fused_mw_device(gpu, w_ptr, d_input, d_output, rows, blocks_per_row)
+    } else {
+        launch_gemv_q4k_q8k_fused_device(gpu, w_ptr, d_input, d_output, rows, blocks_per_row)
+    }
+}
+
+/// Fused MMQ + 4 warps/row, 2 output rows/block (shared activation quantize once).
+#[cfg(feature = "cuda")]
+pub(crate) fn launch_gemv_q4k_q8k_fused_mw_device(
+    gpu: &mut super::GpuState,
+    w_ptr: cust::memory::DevicePointer<u8>,
+    d_input: cust::memory::DevicePointer<f32>,
+    d_output: cust::memory::DevicePointer<f32>,
+    rows: u32,
+    blocks_per_row: u32,
+) -> Result<(), String> {
+    const ROWS_PER_BLOCK: u32 = 8;
+    let block_size = 1024_u32;
+    let grid = rows.saturating_add(ROWS_PER_BLOCK - 1) / ROWS_PER_BLOCK;
+    let shmem = blocks_per_row.saturating_mul(292);
+    let fn_gemv = gpu
+        .module
+        .get_function(GEMV_Q4K_Q8K_FUSED_MW_KERNEL_NAME)
+        .map_err(stringify)?;
+    let stream = &gpu.stream;
+    unsafe {
+        cust::launch!(fn_gemv<<<grid, block_size, shmem, stream>>>(
+            w_ptr,
+            d_input,
+            d_output,
+            rows,
+            blocks_per_row
+        ))
+        .map_err(stringify)?;
+    }
+    Ok(())
+}
+
+/// One launch: global xq8k + Q/K/V multi-warp DP4A (quantize once before call).
+#[cfg(feature = "cuda")]
+pub(crate) fn launch_gemv_q4k_q8kin_qkv_mw_device(
+    gpu: &mut super::GpuState,
+    wq_ptr: cust::memory::DevicePointer<u8>,
+    wk_ptr: cust::memory::DevicePointer<u8>,
+    wv_ptr: cust::memory::DevicePointer<u8>,
+    xq8k_ptr: cust::memory::DevicePointer<u8>,
+    d_q: cust::memory::DevicePointer<f32>,
+    d_k: cust::memory::DevicePointer<f32>,
+    d_v: cust::memory::DevicePointer<f32>,
+    q_rows: u32,
+    kv_rows: u32,
+    blocks_per_row: u32,
+) -> Result<(), String> {
+    const ROWS_PER_BLOCK: u32 = 8;
+    let block_size = 1024_u32;
+    let max_rows = q_rows.max(kv_rows);
+    let grid = max_rows.saturating_add(ROWS_PER_BLOCK - 1) / ROWS_PER_BLOCK;
+    let fn_gemv = gpu
+        .module
+        .get_function(GEMV_Q4K_Q8KIN_QKV_MW_KERNEL_NAME)
+        .map_err(stringify)?;
+    let stream = &gpu.stream;
+    unsafe {
+        cust::launch!(fn_gemv<<<grid, block_size, 0, stream>>>(
+            wq_ptr,
+            wk_ptr,
+            wv_ptr,
+            xq8k_ptr,
+            d_q,
+            d_k,
+            d_v,
+            q_rows,
+            kv_rows,
+            blocks_per_row
+        ))
+        .map_err(stringify)?;
+    }
+    Ok(())
+}
+
+/// One launch: shared activation quantize + Q/K/V multi-warp MMQ (legacy).
+#[cfg(feature = "cuda")]
+pub(crate) fn launch_gemv_q4k_q8k_fused_qkv_mw_device(
+    gpu: &mut super::GpuState,
+    wq_ptr: cust::memory::DevicePointer<u8>,
+    wk_ptr: cust::memory::DevicePointer<u8>,
+    wv_ptr: cust::memory::DevicePointer<u8>,
+    d_input: cust::memory::DevicePointer<f32>,
+    d_q: cust::memory::DevicePointer<f32>,
+    d_k: cust::memory::DevicePointer<f32>,
+    d_v: cust::memory::DevicePointer<f32>,
+    q_rows: u32,
+    kv_rows: u32,
+    blocks_per_row: u32,
+) -> Result<(), String> {
+    const ROWS_PER_BLOCK: u32 = 8;
+    let block_size = 1024_u32;
+    let max_rows = q_rows.max(kv_rows);
+    let grid = max_rows.saturating_add(ROWS_PER_BLOCK - 1) / ROWS_PER_BLOCK;
+    let shmem = blocks_per_row.saturating_mul(292);
+    let fn_gemv = gpu
+        .module
+        .get_function(GEMV_Q4K_Q8K_FUSED_QKV_MW_KERNEL_NAME)
+        .map_err(stringify)?;
+    let stream = &gpu.stream;
+    unsafe {
+        cust::launch!(fn_gemv<<<grid, block_size, shmem, stream>>>(
+            wq_ptr,
+            wk_ptr,
+            wv_ptr,
+            d_input,
+            d_q,
+            d_k,
+            d_v,
+            q_rows,
+            kv_rows,
+            blocks_per_row
+        ))
+        .map_err(stringify)?;
+    }
+    Ok(())
+}
 
 /// Single-launch fused Q4_K × Q8_K MMQ GEMV. `blockDim.x` must be 256 (one
 /// thread per activation value during the in-kernel quantization phase); the
@@ -670,8 +943,7 @@ pub(super) fn launch_gemv_q4k_q8kin_or_q6k_f32in_device(
         let kern = GEMV_Q6K_F32IN_KERNEL_NAME;
         launch_gemv_f32in_device(gpu, kern, w_ptr, d_input, d_output, rows, blocks_per_row)
     } else if ox_gpu_fused_mmq_enabled() && bpr.saturating_mul(292) <= FUSED_MMQ_MAX_SHMEM {
-        // One launch: quantize activation to shared Q8_K + DP4A GEMV.
-        launch_gemv_q4k_q8k_fused_device(gpu, w_ptr, d_input, d_output, rows, blocks_per_row)
+        launch_fused_mmq_device(gpu, w_ptr, d_input, d_output, rows, blocks_per_row)
     } else {
         launch_quantize_f32_to_q8k_device(gpu, d_input, d_q8k, blocks_per_row)?;
         launch_gemv_q4k_q8kin_device(
