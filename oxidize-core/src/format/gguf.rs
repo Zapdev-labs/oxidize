@@ -367,7 +367,9 @@ impl GgufQuantizationType {
             13 => Self::Q5_K_M, // ggml Q5_K
             14 => Self::Q6_K,   // ggml Q6_K
             15 => Self::Q4_K_M, // ggml Q8_K — no Q8_K enum variant; closest supported type
-            // 16-18 = IQ2_XXS, IQ2_XS, IQ3_XXS in ggml — not in our enum, fall through to Unknown
+            16 => Self::IQ2_XXS,
+            17 => Self::IQ2_XS,
+            18 => Self::IQ3_XXS,
             19 => Self::IQ1_S,
             20 => Self::IQ4_NL,
             21 => Self::IQ3_S,
@@ -688,7 +690,7 @@ fn detect_architecture_from_metadata_keys(
             "llama" | "mistral" | "mixtral" | "qwen" | "qwen2" | "qwen2moe" | "qwen35"
             | "deepseek" | "deepseek2" | "deepseek_v2" | "deepseek_v3" | "deepseek_moe"
             | "gemma" | "phi" | "falcon" | "gpt2" | "gptj" | "gptneox" | "dflash"
-            | "dflash-draft" => Some(namespace),
+            | "dflash-draft" | "glm-dsa" | "glm_dsa" | "glm_moe_dsa" => Some(namespace),
             _ => None,
         };
         if architecture.is_some() {
@@ -710,9 +712,8 @@ fn map_tensor_name(architecture: &str, name: &str) -> String {
     let architecture = architecture.to_ascii_lowercase();
     let mapped = match architecture.as_str() {
         "llama" | "mistral" | "mixtral" | "qwen" | "qwen2" | "qwen2moe" | "qwen35" | "deepseek"
-        | "deepseek2" | "deepseek_v2" | "deepseek_v3" | "deepseek_moe" | "gemma" | "phi" => {
-            map_hf_decoder_name(name)
-        }
+        | "deepseek2" | "deepseek_v2" | "deepseek_v3" | "deepseek_moe" | "gemma" | "phi"
+        | "glm-dsa" | "glm_dsa" | "glm_moe_dsa" => map_hf_decoder_name(name),
         "falcon" => map_falcon_name(name),
         "gpt2" => map_gpt2_name(name),
         "gptj" => map_gptj_name(name),
