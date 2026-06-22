@@ -1,0 +1,22 @@
+oxidize-cpp/src/cli/main.cpp
+  s_5b078de97b8925::t_11c48c0fe01979 362-364
+  s_5b078de97b8925::t_8fa8be3145a790 127-128
+  s_5b078de97b8925::t_07e639296a8a0d 54
+  s_5b078de97b8925::t_eebb074107239c 294-305
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "0943feace70c2f340fd70913c348144cd506eb1d",
+  "prompts": {},
+  "sessions": {
+    "s_5b078de97b8925": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a2fd32be-d532-4929-8226-7967c93996a1",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
