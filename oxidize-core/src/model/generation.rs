@@ -1,4 +1,5 @@
 use crate::dflash::DFlashDraftModel;
+use crate::eagle3::Eagle3DraftModel;
 use crate::inference::InferenceModel;
 use crate::model::{Model, ModelError, Session, Token};
 use crate::sampling::{SamplingConfig, SamplingError, sample, speculative_decode};
@@ -54,6 +55,8 @@ pub struct SpeculativeGenerationConfig {
     pub generation: GenerationConfig,
     /// Number of tokens the draft model generates per speculative step.
     pub draft_tokens_per_step: usize,
+    /// QuantSpec: draft with hierarchical I8 TurboQuant KV (self-speculative MTP path).
+    pub quantspec_draft_kv: bool,
 }
 
 impl Default for SpeculativeGenerationConfig {
@@ -61,6 +64,7 @@ impl Default for SpeculativeGenerationConfig {
         Self {
             generation: GenerationConfig::default(),
             draft_tokens_per_step: 4,
+            quantspec_draft_kv: false,
         }
     }
 }
@@ -564,6 +568,7 @@ impl<'a> MtpGenerationStream<'a> {
                 k,
                 self.config.generation.sampling,
                 self.random.as_mut(),
+                self.config.quantspec_draft_kv,
             )
             .map_err(GenerationError::Model)?;
         draft_tokens.extend_from_slice(&sampled_draft_tokens);
@@ -689,6 +694,342 @@ impl Stream for MtpGenerationStream<'_> {
         }
         self.state = GenerationState::Done;
         Poll::Ready(None)
+    }
+}
+
+/// Speculative generation with an external EAGLE3 draft model fused from target
+/// layer hidden states captured during target forward.
+pub struct Eagle3GenerationStream<'a> {
+    target_model: Option<&'a mut InferenceModel>,
+    draft_model: Option<&'a mut Eagle3DraftModel>,
+    session: Option<&'a mut Session>,
+    prompt: &'a [Token],
+    state: GenerationState,
+    config: SpeculativeGenerationConfig,
+    generated: usize,
+    last_token: Option<Token>,
+    recent_tokens: Vec<Token>,
+    max_stop_sequence_len: usize,
+    random: Box<dyn FnMut() -> f32 + 'a>,
+    draft_token_buffer: Vec<Token>,
+    emit_buffer: VecDeque<Token>,
+    last_token_pending_kv: bool,
+    pending_target_logits: Option<Vec<f32>>,
+    drafted_tokens: usize,
+    accepted_draft_tokens: usize,
+    zero_acceptance_rounds: usize,
+    speculation_disabled: bool,
+}
+
+impl<'a> Eagle3GenerationStream<'a> {
+    pub fn new(
+        target_model: &'a mut InferenceModel,
+        draft_model: &'a mut Eagle3DraftModel,
+        session: &'a mut Session,
+        prompt: &'a [Token],
+        config: SpeculativeGenerationConfig,
+        random: impl FnMut() -> f32 + 'a,
+    ) -> Self {
+        target_model.set_eagle3_capture_layers(draft_model.config.extract_layers.clone());
+        let max_stop_sequence_len = config
+            .generation
+            .stop_sequences
+            .iter()
+            .map(Vec::len)
+            .max()
+            .unwrap_or(0);
+        let draft_tokens_per_step = config.draft_tokens_per_step;
+        Self {
+            target_model: Some(target_model),
+            draft_model: Some(draft_model),
+            session: Some(session),
+            prompt,
+            state: GenerationState::Prefill,
+            config,
+            generated: 0,
+            last_token: None,
+            recent_tokens: Vec::with_capacity(max_stop_sequence_len),
+            max_stop_sequence_len,
+            random: Box::new(random),
+            draft_token_buffer: Vec::with_capacity(draft_tokens_per_step),
+            emit_buffer: VecDeque::with_capacity(draft_tokens_per_step + 1),
+            last_token_pending_kv: false,
+            pending_target_logits: None,
+            drafted_tokens: 0,
+            accepted_draft_tokens: 0,
+            zero_acceptance_rounds: 0,
+            speculation_disabled: false,
+        }
+    }
+
+    fn emit_token(&mut self, token: Token) -> Option<Result<Token, GenerationError>> {
+        self.generated = self.generated.saturating_add(1);
+        self.last_token = Some(token);
+        if self.max_stop_sequence_len > 0 {
+            self.recent_tokens.push(token);
+            if self.recent_tokens.len() > self.max_stop_sequence_len {
+                let to_drop = self.recent_tokens.len() - self.max_stop_sequence_len;
+                self.recent_tokens.drain(..to_drop);
+            }
+        }
+        let matched_stop_sequence = self
+            .config
+            .generation
+            .stop_sequences
+            .iter()
+            .filter(|sequence| !sequence.is_empty())
+            .any(|sequence| self.recent_tokens.ends_with(sequence));
+        if self.config.generation.stop_token == Some(token) || matched_stop_sequence {
+            self.state = GenerationState::Done;
+        }
+        Some(Ok(token))
+    }
+
+    fn update_speculation_health(&mut self, drafted: usize, accepted: usize) {
+        self.drafted_tokens = self.drafted_tokens.saturating_add(drafted);
+        self.accepted_draft_tokens = self.accepted_draft_tokens.saturating_add(accepted);
+        if accepted == 0 {
+            self.zero_acceptance_rounds = self.zero_acceptance_rounds.saturating_add(1);
+        } else {
+            self.zero_acceptance_rounds = 0;
+        }
+        let enough_samples = self.drafted_tokens >= self.config.draft_tokens_per_step.max(1) * 4;
+        let acceptance_rate = if self.drafted_tokens == 0 {
+            1.0
+        } else {
+            self.accepted_draft_tokens as f32 / self.drafted_tokens as f32
+        };
+        if self.zero_acceptance_rounds >= 2 || (enough_samples && acceptance_rate < 0.2) {
+            self.speculation_disabled = true;
+        }
+    }
+
+    fn run_target_step(&mut self) -> Result<(), GenerationError> {
+        let target_model = self.target_model.take().ok_or_else(|| {
+            GenerationError::Model(ModelError::InferenceFailed(
+                "target model missing".to_string(),
+            ))
+        })?;
+        let session = self.session.take().ok_or_else(|| {
+            GenerationError::Model(ModelError::InferenceFailed("session missing".to_string()))
+        })?;
+        let last_token = self.last_token.ok_or_else(|| {
+            GenerationError::Model(ModelError::InferenceFailed("no last token".to_string()))
+        })?;
+        let logits = if self.last_token_pending_kv {
+            self.pending_target_logits = None;
+            target_model
+                .forward(&[last_token], session)
+                .map_err(GenerationError::Model)?
+        } else if let Some(logits) = self.pending_target_logits.take() {
+            logits
+        } else {
+            target_model
+                .forward(&[last_token], session)
+                .map_err(GenerationError::Model)?
+        };
+        let token = sample(
+            &logits,
+            self.config.generation.sampling,
+            (self.random.as_mut())(),
+        )
+        .map_err(GenerationError::Sampling)?;
+        self.last_token_pending_kv = true;
+        self.emit_buffer.push_back(token);
+        self.target_model = Some(target_model);
+        self.session = Some(session);
+        Ok(())
+    }
+
+    fn run_eagle3_step(&mut self) -> Result<(), GenerationError> {
+        let draft_model = self.draft_model.take().ok_or_else(|| {
+            GenerationError::Model(ModelError::InferenceFailed(
+                "EAGLE3 draft model missing".to_string(),
+            ))
+        })?;
+        let target_model = self.target_model.take().ok_or_else(|| {
+            GenerationError::Model(ModelError::InferenceFailed(
+                "target model missing".to_string(),
+            ))
+        })?;
+        let session = self.session.take().ok_or_else(|| {
+            GenerationError::Model(ModelError::InferenceFailed("session missing".to_string()))
+        })?;
+        let start_token = self.last_token.ok_or_else(|| {
+            GenerationError::Model(ModelError::InferenceFailed("no last token".to_string()))
+        })?;
+
+        let features = target_model
+            .concat_eagle3_features()
+            .map_err(GenerationError::Model)?;
+        draft_model
+            .encode_features(&features)
+            .map_err(|e| GenerationError::Model(ModelError::InferenceFailed(e)))?;
+
+        let k = self.config.draft_tokens_per_step;
+        let mut draft_tokens = std::mem::take(&mut self.draft_token_buffer);
+        draft_tokens.clear();
+        let mut draft_logits = Vec::with_capacity(k);
+        let mut current_token = start_token;
+        draft_model.reset_cache();
+        draft_model.reserve_cache_tokens(k);
+        for _ in 0..k {
+            let (_, logits) = draft_model
+                .forward_decoder(current_token)
+                .map_err(|e| GenerationError::Model(ModelError::InferenceFailed(e)))?;
+            let token = sample(
+                &logits,
+                self.config.generation.sampling,
+                (self.random.as_mut())(),
+            )
+            .map_err(GenerationError::Sampling)?;
+            draft_tokens.push(token);
+            draft_logits.push(logits);
+            current_token = token;
+        }
+
+        let verify_start = session.consumed_tokens();
+        let mut target_logits = Vec::with_capacity(draft_tokens.len() + 1);
+        if self.last_token_pending_kv {
+            target_model
+                .rewind_to(verify_start)
+                .map_err(GenerationError::Model)?;
+            session.rewind_to(verify_start);
+            let logits = target_model
+                .forward(&[start_token], session)
+                .map_err(GenerationError::Model)?;
+            target_logits.push(logits);
+        } else if let Some(logits) = self.pending_target_logits.take() {
+            target_logits.push(logits);
+        } else {
+            return Err(GenerationError::Model(ModelError::InferenceFailed(
+                "missing target logits for EAGLE3 verification".to_string(),
+            )));
+        }
+        target_logits.extend(
+            target_model
+                .forward_many(&draft_tokens, session)
+                .map_err(GenerationError::Model)?,
+        );
+
+        let randoms: Vec<f32> = (0..=draft_tokens.len())
+            .map(|_| (self.random.as_mut())())
+            .collect();
+        let result = speculative_decode(
+            &draft_tokens,
+            &draft_logits,
+            &target_logits,
+            self.config.generation.sampling,
+            &randoms,
+        )
+        .map_err(GenerationError::Sampling)?;
+
+        target_model
+            .rewind_to(verify_start)
+            .map_err(GenerationError::Model)?;
+        session.rewind_to(verify_start);
+        let next_target_logits = target_model
+            .forward(&result.tokens, session)
+            .map_err(GenerationError::Model)?;
+        self.pending_target_logits = Some(next_target_logits);
+        self.last_token_pending_kv = false;
+        self.update_speculation_health(draft_tokens.len(), result.accepted_draft_tokens);
+        for token in result.tokens {
+            self.emit_buffer.push_back(token);
+        }
+        draft_tokens.clear();
+        self.draft_token_buffer = draft_tokens;
+        self.draft_model = Some(draft_model);
+        self.target_model = Some(target_model);
+        self.session = Some(session);
+        Ok(())
+    }
+}
+
+impl Stream for Eagle3GenerationStream<'_> {
+    type Item = Result<Token, GenerationError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if let Some(token) = self.emit_buffer.pop_front() {
+            return Poll::Ready(self.emit_token(token));
+        }
+        if self.generated >= self.config.generation.max_new_tokens
+            || matches!(self.state, GenerationState::Done)
+        {
+            self.state = GenerationState::Done;
+            return Poll::Ready(None);
+        }
+
+        let Some(target_model) = self.target_model.take() else {
+            self.state = GenerationState::Done;
+            return Poll::Ready(None);
+        };
+        let Some(session) = self.session.take() else {
+            self.state = GenerationState::Done;
+            return Poll::Ready(None);
+        };
+
+        match self.state {
+            GenerationState::Prefill => {
+                self.state = GenerationState::Decode;
+                let prompt = self.prompt;
+                let logits = if prompt.is_empty() {
+                    target_model
+                        .forward(prompt, session)
+                        .map_err(GenerationError::Model)?
+                } else {
+                    let batch_size = self.config.generation.prefill_batch_size.max(1);
+                    let mut last_logits = None;
+                    for chunk in prompt.chunks(batch_size) {
+                        last_logits = Some(
+                            target_model
+                                .forward(chunk, session)
+                                .map_err(GenerationError::Model)?,
+                        );
+                    }
+                    last_logits.ok_or_else(|| {
+                        GenerationError::Model(ModelError::InferenceFailed(
+                            "empty prefill logits".to_string(),
+                        ))
+                    })?
+                };
+                let token = sample(
+                    &logits,
+                    self.config.generation.sampling,
+                    (self.random.as_mut())(),
+                )
+                .map_err(GenerationError::Sampling)?;
+                self.last_token = Some(token);
+                self.pending_target_logits = Some(logits);
+                self.last_token_pending_kv = false;
+                self.emit_buffer.push_back(token);
+                self.target_model = Some(target_model);
+                self.session = Some(session);
+                if let Some(token) = self.emit_buffer.pop_front() {
+                    return Poll::Ready(self.emit_token(token));
+                }
+                Poll::Pending
+            }
+            GenerationState::Decode => {
+                self.target_model = Some(target_model);
+                self.session = Some(session);
+                let result = if self.speculation_disabled {
+                    self.run_target_step()
+                } else {
+                    self.run_eagle3_step()
+                };
+                if let Err(e) = result {
+                    self.state = GenerationState::Done;
+                    return Poll::Ready(Some(Err(e)));
+                }
+                if let Some(token) = self.emit_buffer.pop_front() {
+                    return Poll::Ready(self.emit_token(token));
+                }
+                self.state = GenerationState::Done;
+                Poll::Ready(None)
+            }
+            GenerationState::Done => Poll::Ready(None),
+        }
     }
 }
 

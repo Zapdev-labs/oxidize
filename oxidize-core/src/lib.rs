@@ -50,6 +50,8 @@ pub mod cross_validation;
 pub mod cuda;
 #[path = "model/dflash.rs"]
 pub mod dflash;
+#[path = "model/eagle3.rs"]
+pub mod eagle3;
 #[path = "model/diffusion_gemma.rs"]
 pub mod diffusion_gemma;
 #[path = "compute/flash_attention.rs"]
