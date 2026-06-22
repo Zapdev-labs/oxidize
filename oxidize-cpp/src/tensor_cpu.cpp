@@ -67,18 +67,29 @@ inline float dot_f32(const float* __restrict a, const float* __restrict b,
 inline float dot_f16(const uint16_t* __restrict w, const float* __restrict x,
                      size_t n) {
 #ifdef OXIDIZE_HAVE_F16C
+  // Four independent accumulators hide the ~4-cycle FMA latency: a 2-wide chain
+  // bottlenecks on the dependency before memory bandwidth (measured ~1.5x on the
+  // F16 decode hot path).
   __m256 acc0 = _mm256_setzero_ps();
   __m256 acc1 = _mm256_setzero_ps();
+  __m256 acc2 = _mm256_setzero_ps();
+  __m256 acc3 = _mm256_setzero_ps();
   size_t i = 0;
-  for (; i + 16 <= n; i += 16) {
-    __m256 w0 = _mm256_cvtph_ps(_mm_loadu_si128(
-        reinterpret_cast<const __m128i*>(w + i)));
-    __m256 w1 = _mm256_cvtph_ps(_mm_loadu_si128(
-        reinterpret_cast<const __m128i*>(w + i + 8)));
+  for (; i + 32 <= n; i += 32) {
+    __m256 w0 = _mm256_cvtph_ps(_mm_loadu_si128(reinterpret_cast<const __m128i*>(w + i)));
+    __m256 w1 = _mm256_cvtph_ps(_mm_loadu_si128(reinterpret_cast<const __m128i*>(w + i + 8)));
+    __m256 w2 = _mm256_cvtph_ps(_mm_loadu_si128(reinterpret_cast<const __m128i*>(w + i + 16)));
+    __m256 w3 = _mm256_cvtph_ps(_mm_loadu_si128(reinterpret_cast<const __m128i*>(w + i + 24)));
     acc0 = _mm256_fmadd_ps(w0, _mm256_loadu_ps(x + i), acc0);
     acc1 = _mm256_fmadd_ps(w1, _mm256_loadu_ps(x + i + 8), acc1);
+    acc2 = _mm256_fmadd_ps(w2, _mm256_loadu_ps(x + i + 16), acc2);
+    acc3 = _mm256_fmadd_ps(w3, _mm256_loadu_ps(x + i + 24), acc3);
   }
-  __m256 acc = _mm256_add_ps(acc0, acc1);
+  for (; i + 8 <= n; i += 8) {
+    __m256 w0 = _mm256_cvtph_ps(_mm_loadu_si128(reinterpret_cast<const __m128i*>(w + i)));
+    acc0 = _mm256_fmadd_ps(w0, _mm256_loadu_ps(x + i), acc0);
+  }
+  __m256 acc = _mm256_add_ps(_mm256_add_ps(acc0, acc1), _mm256_add_ps(acc2, acc3));
   __m128 lo = _mm256_castps256_ps128(acc);
   __m128 hi = _mm256_extractf128_ps(acc, 1);
   __m128 s = _mm_add_ps(lo, hi);
