@@ -41,16 +41,22 @@ models_volume = modal.Volume.from_name(MODELS_VOLUME_NAME, create_if_missing=Tru
 
 def _build_commands() -> list[str]:
     return [
-        # ---- C++ engine: CMake + CUDA backend -----------------------------
+        # ---- C++ engine: CMake + CUDA backend (REQUIRED) ------------------
+        # nvcc compiles here at image-build time (CPU) so CUDA compile errors
+        # surface without ever touching a paid GPU.
         f"cmake -S {CPP_DIR} -B {CPP_BUILD} "
         f"-DCMAKE_BUILD_TYPE=Release -DOXIDIZE_CUDA=ON "
         f"-DCMAKE_CUDA_ARCHITECTURES='80;90'",
         f"cmake --build {CPP_BUILD} --target oxidize-cpp -j",
-        f"test -x {CPP_BIN}",
-        # ---- Rust 'oxidize' CLI -------------------------------------------
+        f"test -x {CPP_BIN}",  # hard gate: the C++ CUDA engine MUST build
+        # ---- Rust 'oxidize' CLI (BEST-EFFORT baseline) --------------------
+        # Non-fatal: the Rust workspace is large and the GPU baseline is
+        # optional. A failure here must not block the C++ image.
         f"bash -lc 'source $HOME/.cargo/env && cd {IMAGE_REPO} && "
-        f"cargo build --release -p oxidize-cli'",
-        f"test -x {RUST_BIN}",
+        f"cargo build --release -p oxidize-cli "
+        f"|| echo OXIDIZE_RUST_BUILD_FAILED'",
+        f"bash -lc 'test -x {RUST_BIN} && echo rust-ok || "
+        f"echo \"rust baseline unavailable (non-fatal)\"'",
     ]
 
 
@@ -71,6 +77,7 @@ image = (
         "libssl-dev",
         "libomp-dev",
     )
+    .pip_install("huggingface_hub")
     # Rust toolchain (stable; edition-2024 capable). Pin via RUST_TOOLCHAIN if needed.
     .run_commands(
         "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | "
@@ -94,6 +101,15 @@ image = (
             "**/models/**",
             "**/*.gguf",
             "**/node_modules/**",
+            # Heavy non-Rust trees not needed to build either engine.
+            "oxidize-golang/**",
+            "oxidize-python/**",
+            "dist/**",
+            "evidence/**",
+            "results/**",
+            "docs/**",
+            ".firecrawl/**",
+            "**/__pycache__/**",
         ],
         copy=True,  # needed so subsequent run_commands can compile the source
     )
