@@ -1,0 +1,20 @@
+oxidize-cpp/src/cuda/backend.cu
+  s_5b078de97b8925::t_b716c9ad7e3d9d 61-67,69,72
+  s_5b078de97b8925::t_619c942d8430d3 37
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "0c9434666f2c94d6d2d6d2d61381bbe17a8ddfde",
+  "prompts": {},
+  "sessions": {
+    "s_5b078de97b8925": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a2fd32be-d532-4929-8226-7967c93996a1",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
