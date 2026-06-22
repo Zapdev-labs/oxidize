@@ -13,9 +13,13 @@
 
 #include "oxidize/model_llama.hpp"
 
+#include <algorithm>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "oxidize/tensor.hpp"
 
@@ -187,19 +191,18 @@ void LlamaModel::d_gemv_weight(const LlamaWeight& w, size_t rows, size_t cols,
 
 void LlamaModel::reject_unsupported(const InferenceConfig& cfg) {
   switch (cfg.architecture) {
-    case Architecture::Mixtral:
-    case Architecture::DeepSeek:
-    case Architecture::MiniMax:
-    case Architecture::Lfm2:
+    case Architecture::DeepSeek:  // MLA compressed attention (unsupported)
+    case Architecture::MiniMax:   // lightning attention
+    case Architecture::Lfm2:      // short-conv token mixing
     case Architecture::Lfm2Moe:
       throw std::runtime_error(
-          "LlamaModel: MoE / MLA / shortconv architecture is out of Phase 1 scope");
+          "LlamaModel: MLA / lightning-attn / shortconv architecture is unsupported");
     default:
       break;
   }
-  if (cfg.num_experts > 0) {
-    throw std::runtime_error("LlamaModel: MoE FFN (num_experts > 0) is out of Phase 1 scope");
-  }
+  // Mixtral / Qwen-MoE (standard attention + routed-expert FFN) ARE supported
+  // via moe_ffn(); only MoE that also needs MLA/shortconv attention is rejected
+  // by the arch switch above.
   if (cfg.shortconv_l_cache > 0) {
     throw std::runtime_error("LlamaModel: LFM2 shortconv is out of Phase 1 scope");
   }
@@ -333,10 +336,18 @@ LlamaModel::LlamaModel(GgufModel gguf) : gguf_(std::move(gguf)) {
     opt_w("ffn_down.weight", layer.ffn_down);
     opt_vec("ffn_down.bias", layer.ffn_down_bias);
 
+    // MoE routed experts (Mixtral / Qwen-MoE). Present only on MoE layers.
+    opt_w("ffn_gate_exps.weight", layer.ffn_gate_exps);
+    opt_w("ffn_up_exps.weight", layer.ffn_up_exps);
+    opt_w("ffn_down_exps.weight", layer.ffn_down_exps);
+    opt_w("ffn_gate_inp.weight", layer.ffn_gate_inp);
+    opt_vec("exp_probs_b.bias", layer.ffn_exp_probs_b);
+
     if (layer.attn_q.empty()) {
       throw std::runtime_error("LlamaModel: layer " + std::to_string(l) +
                                " has no attn_q (non-dense-attention layer unsupported in Phase 1)");
     }
+    if (layer.is_moe()) any_moe_ = true;
   }
 
   // ---- KV cache (F32, layer-major). Only attention layers are stored; in the
@@ -370,6 +381,80 @@ void LlamaModel::embed_token(Token token, float* x) const {
   }
   if (config_.embedding_scale != 1.0f) {
     for (size_t i = 0; i < h; ++i) x[i] *= config_.embedding_scale;
+  }
+}
+
+void LlamaModel::moe_ffn(const LlamaLayer& layer, const float* normed,
+                         float* ffn_out) {
+  const InferenceConfig& cfg = config_;
+  const size_t h = cfg.hidden_size;
+  const size_t i_size = cfg.expert_intermediate_size > 0
+                            ? cfg.expert_intermediate_size
+                            : cfg.intermediate_size;
+  const size_t n_experts = cfg.num_experts;
+  if (n_experts == 0)
+    throw std::runtime_error("moe_ffn: layer has experts but num_experts==0");
+  const size_t n_sel =
+      std::min(std::max<size_t>(cfg.num_experts_per_tok, 1), n_experts);
+  const bool sigmoid = cfg.expert_gating_sigmoid;
+
+  // Expert e's [rows,cols] slice of a 3D [n_experts,rows,cols] weight.
+  auto gemv_expert = [&](const LlamaWeight& w, size_t e, size_t rows,
+                         size_t cols, const float* x, float* y) {
+    if (w.quantized) {
+      size_t rb = quantized_size(w.quant, cols);
+      gemv_quantized(y, w.quant, w.data + e * rows * rb, rows, cols, x);
+    } else {
+      matvec(y, w.f32.data() + e * rows * cols, x, rows, cols);
+    }
+  };
+
+  // 1. Router logits.
+  std::vector<float> rw(n_experts, 0.0f);  // routing weight (renorm source)
+  gemv_weight(layer.ffn_gate_inp, n_experts, h, normed, rw.data());
+
+  // 2. Gating: softmax (Mixtral/Qwen) or sigmoid+bias (LFM2MoE). sel = selection
+  // score, rw = routing weight.
+  std::vector<std::pair<size_t, float>> sel(n_experts);  // (idx, selection score)
+  if (sigmoid) {
+    for (size_t i = 0; i < n_experts; ++i) rw[i] = 1.0f / (1.0f + std::exp(-rw[i]));
+    for (size_t i = 0; i < n_experts; ++i) {
+      float bias = i < layer.ffn_exp_probs_b.size() ? layer.ffn_exp_probs_b[i] : 0.0f;
+      sel[i] = {i, rw[i] + bias};
+    }
+  } else {
+    float mx = -std::numeric_limits<float>::infinity();
+    for (float v : rw) mx = std::max(mx, v);
+    float sum = 0.0f;
+    for (float& v : rw) { v = std::exp(v - mx); sum += v; }
+    if (sum > 0.0f) for (float& v : rw) v /= sum;
+    for (size_t i = 0; i < n_experts; ++i) sel[i] = {i, rw[i]};
+  }
+
+  // 3. Top-k by selection score (desc).
+  auto by_score = [](const std::pair<size_t, float>& a,
+                     const std::pair<size_t, float>& b) { return a.second > b.second; };
+  if (n_sel < n_experts)
+    std::partial_sort(sel.begin(), sel.begin() + n_sel, sel.end(), by_score);
+  else
+    std::sort(sel.begin(), sel.end(), by_score);
+
+  // 4. Renormalize routing weights over selected; apply routed scale.
+  float wnorm = 0.0f;
+  for (size_t s = 0; s < n_sel; ++s) wnorm += rw[sel[s].first];
+  if (wnorm <= 0.0f) wnorm = 1.0f;
+  float scale = cfg.expert_weights_scale > 0.0f ? cfg.expert_weights_scale : 1.0f;
+
+  // 5. Per-expert FFN, accumulated into ffn_out.
+  std::vector<float> gate(i_size), up(i_size), down(h);
+  for (size_t s = 0; s < n_sel; ++s) {
+    size_t e = sel[s].first;
+    float w = scale * rw[e] / wnorm;
+    gemv_expert(layer.ffn_gate_exps, e, i_size, h, normed, gate.data());
+    gemv_expert(layer.ffn_up_exps, e, i_size, h, normed, up.data());
+    swiglu_inplace(gate.data(), up.data(), gate.data(), i_size);
+    gemv_expert(layer.ffn_down_exps, e, h, i_size, gate.data(), down.data());
+    for (size_t i = 0; i < h; ++i) ffn_out[i] += w * down[i];
   }
 }
 
@@ -504,26 +589,34 @@ void LlamaModel::run_layers(size_t pos) {
         !layer.ffn_norm.empty()
             ? layer.ffn_norm
             : (cfg.sandwich_norm ? layer.ffn_norm : layer.post_attention_norm);
-    if (ffn_norm_w.empty() || layer.ffn_gate.empty() || layer.ffn_up.empty() ||
-        layer.ffn_down.empty()) {
+    if (ffn_norm_w.empty()) {
       throw std::runtime_error("LlamaModel: layer " + std::to_string(l) +
-                               " missing dense FFN weights");
+                               " missing ffn_norm");
     }
-
     d_rms_norm(normed.data(), x_.data(), ffn_norm_w.data(), h, eps, plus_one);
-    d_gemv_weight(layer.ffn_gate, inter, h, normed.data(), gate.data());
-    d_gemv_weight(layer.ffn_up, inter, h, normed.data(), up.data());
 
-    if (cfg.gelu_ffn) {
-      d_geglu(gate.data(), up.data(), gate.data(), inter);
+    if (layer.is_moe()) {
+      // Routed-expert MoE FFN (Mixtral / Qwen-MoE).
+      std::fill(ffn_out.begin(), ffn_out.end(), 0.0f);
+      moe_ffn(layer, normed.data(), ffn_out.data());
     } else {
-      d_swiglu(gate.data(), up.data(), gate.data(), inter);
-    }
-
-    d_gemv_weight(layer.ffn_down, h, inter, gate.data(), ffn_out.data());
-    if (!layer.ffn_down_bias.empty()) {
-      size_t bl = layer.ffn_down_bias.size();
-      for (size_t i = 0; i < h; ++i) ffn_out[i] += layer.ffn_down_bias[i % bl];
+      if (layer.ffn_gate.empty() || layer.ffn_up.empty() ||
+          layer.ffn_down.empty()) {
+        throw std::runtime_error("LlamaModel: layer " + std::to_string(l) +
+                                 " missing dense FFN weights");
+      }
+      d_gemv_weight(layer.ffn_gate, inter, h, normed.data(), gate.data());
+      d_gemv_weight(layer.ffn_up, inter, h, normed.data(), up.data());
+      if (cfg.gelu_ffn) {
+        d_geglu(gate.data(), up.data(), gate.data(), inter);
+      } else {
+        d_swiglu(gate.data(), up.data(), gate.data(), inter);
+      }
+      d_gemv_weight(layer.ffn_down, h, inter, gate.data(), ffn_out.data());
+      if (!layer.ffn_down_bias.empty()) {
+        size_t bl = layer.ffn_down_bias.size();
+        for (size_t i = 0; i < h; ++i) ffn_out[i] += layer.ffn_down_bias[i % bl];
+      }
     }
 
     // Gemma "sandwich" norm: post-FFN RMSNorm applied to the FFN output *before*
@@ -619,10 +712,11 @@ CudaBackend::ModelView LlamaModel::build_cuda_view() const {
 
 Logits LlamaModel::forward_single(Token token, size_t pos, bool need_logits) {
 #ifdef OXIDIZE_CUDA
-  if (use_cuda_) {
+  if (use_cuda_ && !any_moe_) {
     // Resident GPU decode: one host<->device sync per token (vs ~290 in the
     // per-op path). embed_token dequantizes + scales the row on the host; the
-    // rest of the forward stays on the device.
+    // rest of the forward stays on the device. (MoE layers fall back to the CPU
+    // path below — the resident forward computes a dense FFN only.)
     embed_token(token, x_.data());
     Logits logits(config_.vocab_size, 0.0f);
     CudaBackend::instance().resident_forward(build_cuda_view(), x_.data(), pos,

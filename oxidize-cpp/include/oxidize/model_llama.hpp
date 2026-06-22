@@ -74,6 +74,17 @@ struct LlamaLayer {
   LlamaWeight ffn_up;
   LlamaWeight ffn_down;
   std::vector<float> ffn_down_bias;
+
+  // MoE (Mixtral / Qwen-MoE): routed-expert FFN. Expert tensors are 3D
+  // [n_experts, *, *]; gate_inp is the router [n_experts, hidden]. Empty on
+  // dense layers. Mirrors inference.rs::moe_ffn_forward_weights.
+  LlamaWeight ffn_gate_exps;  // [n_experts, expert_inter, hidden]
+  LlamaWeight ffn_up_exps;    // [n_experts, expert_inter, hidden]
+  LlamaWeight ffn_down_exps;  // [n_experts, hidden, expert_inter]
+  LlamaWeight ffn_gate_inp;   // router [n_experts, hidden]
+  std::vector<float> ffn_exp_probs_b;  // sigmoid-gating per-expert bias (LFM2MoE)
+
+  bool is_moe() const { return !ffn_gate_exps.empty() || !ffn_gate_inp.empty(); }
 };
 
 // Dense Llama-family model. Owns the GgufModel (for mmap lifetime) and the
@@ -126,6 +137,10 @@ class LlamaModel : public Model {
 #endif
 
   bool use_cuda_ = false;
+  bool any_moe_ = false;  // true if any layer is MoE (resident GPU path is dense-only)
+
+  // Routed-expert MoE FFN: ffn_out += sum over top-k experts of w_e * FFN_e(normed).
+  void moe_ffn(const LlamaLayer& layer, const float* normed, float* ffn_out);
 
   static void reject_unsupported(const InferenceConfig& cfg);
   LlamaWeight load_weight(const GgufModel& g, const std::string& name,
