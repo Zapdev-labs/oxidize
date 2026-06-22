@@ -51,6 +51,7 @@ struct Args {
   bool cuda = false;
   uint64_t seed = 0;
   bool json = false;
+  bool debug_logits = false;
 };
 
 [[noreturn]] void usage_and_exit(const char* prog, int code) {
@@ -123,6 +124,8 @@ Args parse_args(int argc, char** argv) {
       }
     } else if (arg == "--json") {
       a.json = true;
+    } else if (arg == "--debug-logits") {
+      a.debug_logits = true;
     } else if (arg == "-h" || arg == "--help") {
       usage_and_exit(argv[0], 0);
     } else {
@@ -288,6 +291,18 @@ int main(int argc, char** argv) {
           " but vocab_size=" + std::to_string(vocab));
     }
 
+    // ---- debug: top-5 logits of the prefill's final position ----
+    if (args.debug_logits) {
+      std::vector<size_t> idx(logits.size());
+      for (size_t i = 0; i < idx.size(); ++i) idx[i] = i;
+      std::partial_sort(idx.begin(), idx.begin() + 5, idx.end(),
+                        [&](size_t a, size_t b) { return logits[a] > logits[b]; });
+      std::fprintf(stderr, "top5:");
+      for (int i = 0; i < 5; ++i)
+        std::fprintf(stderr, " %zu=%.4f", idx[i], logits[idx[i]]);
+      std::fprintf(stderr, "\n");
+    }
+
     // ---- decode ----
     oxidize::Rng rng(args.seed);  // reserved for non-greedy paths; greedy below.
     (void)rng;
@@ -344,6 +359,9 @@ int main(int argc, char** argv) {
                   generated.empty() ? 0u : generated.front());
       std::printf("  last_token:    %u\n",
                   generated.empty() ? 0u : generated.back());
+      std::printf("  gen_tokens:   ");
+      for (Token t : generated) std::printf(" %u", t);
+      std::printf("\n");
     }
     return 0;
   } catch (const std::exception& e) {
