@@ -62,6 +62,10 @@ endif()
 add_executable(oxidize-cpp src/cli/main.cpp)
 target_link_libraries(oxidize-cpp PRIVATE oxidize_core)
 
+# ---- OpenAI-compatible HTTP server ----------------------------------------
+add_executable(oxidize-cpp-server src/server/main.cpp src/server/json.cpp)
+target_link_libraries(oxidize-cpp-server PRIVATE oxidize_core)
+
 # ---- tests ----------------------------------------------------------------
 enable_testing()
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests")
