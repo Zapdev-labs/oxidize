@@ -14,6 +14,7 @@ impl InferenceModel {
         max_tokens: usize,
         sampling: crate::sampling::SamplingConfig,
         random: &mut dyn FnMut() -> f32,
+        quantspec_draft_kv: bool,
     ) -> Result<(Vec<Token>, Vec<Logits>), ModelError> {
         if max_tokens == 0 {
             return Ok((Vec::new(), Vec::new()));
@@ -36,8 +37,16 @@ impl InferenceModel {
             context_size: max_tokens.max(1),
             head_count: self.config.num_key_value_heads,
             head_dim: self.config.kv_head_dim(),
-            dtype: DType::F32,
-            quantization: crate::kv_cache::KvQuantization::default(),
+            dtype: if quantspec_draft_kv {
+                DType::I8
+            } else {
+                DType::F32
+            },
+            quantization: if quantspec_draft_kv {
+                crate::kv_cache::KvQuantization::TurboQuant
+            } else {
+                crate::kv_cache::KvQuantization::default()
+            },
         };
         let mut mtp_kv = KvCache::new(mtp_kv_config)
             .map_err(|e| ModelError::InferenceFailed(format!("mtp kv_cache: {e:?}")))?;

@@ -115,6 +115,7 @@ fn open_generation_stream<'a>(
             SpeculativeGenerationConfig {
                 generation: config,
                 draft_tokens_per_step: runtime.draft_tokens.max(1),
+                quantspec_draft_kv: false,
             },
             random,
         ))
@@ -129,6 +130,7 @@ fn open_generation_stream<'a>(
                 SpeculativeGenerationConfig {
                     generation: config,
                     draft_tokens_per_step: runtime.draft_tokens.max(1),
+                    quantspec_draft_kv: false,
                 },
                 random,
             ));
