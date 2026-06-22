@@ -112,6 +112,23 @@ struct CudaBackend::Impl {
   uint8_t* d_scratch = nullptr;
   size_t d_scratch_cap = 0;
 
+  // GPU-resident decode buffers (allocated by resident_setup, freed here).
+  float* r_x = nullptr;       // [hidden] running activation
+  float* r_norm = nullptr;    // [hidden] norm scratch
+  float* r_q = nullptr;       // [q_len]
+  float* r_k = nullptr;       // [kv_len]
+  float* r_v = nullptr;       // [kv_len]
+  float* r_attn = nullptr;    // [q_len]
+  float* r_o = nullptr;       // [hidden] attn/ffn output
+  float* r_gate = nullptr;    // [inter]
+  float* r_up = nullptr;      // [inter]
+  float* r_logits = nullptr;  // [vocab]
+  float* r_kvk = nullptr;     // [layers * ctx * kv_token]
+  float* r_kvv = nullptr;     // [layers * ctx * kv_token]
+  size_t r_hidden = 0, r_qlen = 0, r_kvlen = 0, r_inter = 0, r_vocab = 0;
+  size_t r_layers = 0, r_ctx = 0, r_kvtok = 0;
+  bool r_ready = false;
+
   Impl() { CUDA_CHECK(cudaStreamCreate(&stream)); }
   ~Impl() {
     for (auto& kv : resident_f32) cudaFree(kv.second);
@@ -120,7 +137,16 @@ struct CudaBackend::Impl {
     if (d_vec2) cudaFree(d_vec2);
     if (d_out) cudaFree(d_out);
     if (d_scratch) cudaFree(d_scratch);
+    for (float* p : {r_x, r_norm, r_q, r_k, r_v, r_attn, r_o, r_gate, r_up,
+                     r_logits, r_kvk, r_kvv})
+      if (p) cudaFree(p);
     if (stream) cudaStreamDestroy(stream);
+  }
+
+  static float* dalloc(size_t n) {
+    float* p = nullptr;
+    CUDA_CHECK(cudaMalloc(&p, (n ? n : 1) * sizeof(float)));
+    return p;
   }
 
   float* vec_buf(size_t n) {
@@ -440,6 +466,175 @@ uint32_t CudaBackend::argmax(const float* logits, size_t n) {
 float* CudaBackend::vec_buf_x(size_t n) { return impl_->vec_buf(n); }
 float* CudaBackend::vec_buf_w(size_t n) { return impl_->vec_buf2(n); }
 float* CudaBackend::out_buf_(size_t n) { return impl_->out_buf(n); }
+
+// --- GPU-resident decode (WIP / UNVERIFIED) --------------------------------
+
+void CudaBackend::resident_setup(const ModelView& mv) {
+  const InferenceConfig& cfg = mv.cfg;
+  size_t head_dim = cfg.head_dim();
+  size_t q_len = cfg.num_attention_heads * head_dim;
+  size_t kv_tok = cfg.num_key_value_heads * head_dim;
+  size_t inter = cfg.intermediate_size;
+  // Reallocate only if uninitialized or a dimension grew.
+  bool need = !impl_->r_ready || cfg.hidden_size > impl_->r_hidden ||
+              q_len > impl_->r_qlen || kv_tok > impl_->r_kvtok ||
+              inter > impl_->r_inter || cfg.vocab_size > impl_->r_vocab ||
+              cfg.layer_count > impl_->r_layers || cfg.context_size > impl_->r_ctx;
+  if (!need) return;
+
+  for (float* p : {impl_->r_x, impl_->r_norm, impl_->r_q, impl_->r_k, impl_->r_v,
+                   impl_->r_attn, impl_->r_o, impl_->r_gate, impl_->r_up,
+                   impl_->r_logits, impl_->r_kvk, impl_->r_kvv})
+    if (p) cudaFree(p);
+
+  impl_->r_hidden = cfg.hidden_size;
+  impl_->r_qlen = q_len;
+  impl_->r_kvtok = kv_tok;
+  impl_->r_kvlen = kv_tok;
+  impl_->r_inter = inter;
+  impl_->r_vocab = cfg.vocab_size;
+  impl_->r_layers = cfg.layer_count;
+  impl_->r_ctx = cfg.context_size;
+
+  impl_->r_x = Impl::dalloc(cfg.hidden_size);
+  impl_->r_norm = Impl::dalloc(cfg.hidden_size);
+  impl_->r_q = Impl::dalloc(q_len);
+  impl_->r_k = Impl::dalloc(kv_tok);
+  impl_->r_v = Impl::dalloc(kv_tok);
+  impl_->r_attn = Impl::dalloc(q_len);
+  impl_->r_o = Impl::dalloc(cfg.hidden_size);
+  impl_->r_gate = Impl::dalloc(inter);
+  impl_->r_up = Impl::dalloc(inter);
+  impl_->r_logits = Impl::dalloc(cfg.vocab_size);
+  impl_->r_kvk = Impl::dalloc(cfg.layer_count * cfg.context_size * kv_tok);
+  impl_->r_kvv = Impl::dalloc(cfg.layer_count * cfg.context_size * kv_tok);
+  impl_->r_ready = true;
+}
+
+void CudaBackend::resident_forward(const ModelView& mv, const float* embed_row,
+                                   size_t pos, float* logits_out) {
+  resident_setup(mv);
+  const InferenceConfig& cfg = mv.cfg;
+  const float eps = cfg.rms_norm_eps;
+  const bool plus_one = cfg.rms_norm_weight_plus_one;
+  const size_t hidden = cfg.hidden_size;
+  const size_t n_heads = cfg.num_attention_heads;
+  const size_t kv_heads = cfg.num_key_value_heads;
+  const size_t head_dim = cfg.head_dim();
+  const size_t q_len = n_heads * head_dim;
+  const size_t kv_tok = kv_heads * head_dim;
+  const size_t inter = cfg.intermediate_size;
+  const size_t seq_len = pos + 1;
+  size_t rope_len = (cfg.rope_dim == 0) ? head_dim : cfg.rope_dim;
+  if (rope_len > head_dim) rope_len = head_dim;
+  cudaStream_t s = impl_->stream;
+  Impl* I = impl_.get();
+
+  auto u = [](size_t v) { return static_cast<unsigned>(v); };
+  auto dev = [&](const float* host, size_t n) { return I->ensure_f32(host, n); };
+  auto gemv = [&](const WeightView& w, const float* in, float* out) {
+    if (w.quantized) {
+      const __half* dW = I->ensure_f16_from_quant(w.quant, w.data, w.rows * w.cols);
+      cuda::launch_gemv_f16(dW, in, out, u(w.rows), u(w.cols), s);
+    } else {
+      const float* dW = I->ensure_f32(w.f32, w.rows * w.cols);
+      cuda::launch_gemv_f32(dW, in, out, u(w.rows), u(w.cols), s);
+    }
+  };
+  auto bias = [&](float* y, const float* b, size_t n, size_t blen) {
+    if (b && blen) cuda::launch_add_bias_mod(y, dev(b, blen), u(n), u(blen), s);
+  };
+
+  // Embedding (already dequantized + scaled by the caller) -> resident x.
+  CUDA_CHECK(cudaMemcpyAsync(I->r_x, embed_row, hidden * sizeof(float),
+                             cudaMemcpyHostToDevice, s));
+
+  for (size_t l = 0; l < cfg.layer_count; ++l) {
+    const LayerView& ly = mv.layers[l];
+
+    // Attention.
+    cuda::launch_rms_norm(I->r_norm, I->r_x, dev(ly.attn_norm, hidden), u(hidden),
+                          eps, plus_one, s);
+    gemv(ly.wq, I->r_norm, I->r_q);
+    gemv(ly.wk, I->r_norm, I->r_k);
+    gemv(ly.wv, I->r_norm, I->r_v);
+    bias(I->r_q, ly.wq_bias, q_len, ly.q_bias_len);
+    bias(I->r_k, ly.wk_bias, kv_tok, ly.k_bias_len);
+    bias(I->r_v, ly.wv_bias, kv_tok, ly.v_bias_len);
+
+    // Per-head Q/K RMSNorm (Qwen3): in-place over each head_dim slice.
+    if (ly.attn_q_norm) {
+      const float* dn = dev(ly.attn_q_norm, head_dim);
+      for (size_t h = 0; h < n_heads; ++h)
+        cuda::launch_rms_norm(I->r_q + h * head_dim, I->r_q + h * head_dim, dn,
+                              u(head_dim), eps, plus_one, s);
+    }
+    if (ly.attn_k_norm) {
+      const float* dn = dev(ly.attn_k_norm, head_dim);
+      for (size_t h = 0; h < kv_heads; ++h)
+        cuda::launch_rms_norm(I->r_k + h * head_dim, I->r_k + h * head_dim, dn,
+                              u(head_dim), eps, plus_one, s);
+    }
+
+    cuda::launch_apply_rope(I->r_q, u(head_dim), u(n_heads), u(pos),
+                            ly.rope_theta, u(rope_len), s);
+    cuda::launch_apply_rope(I->r_k, u(head_dim), u(kv_heads), u(pos),
+                            ly.rope_theta, u(rope_len), s);
+
+    // Append K/V to this layer's resident cache slot.
+    size_t phys = pos % cfg.context_size;
+    float* kbase = I->r_kvk + (l * cfg.context_size + phys) * kv_tok;
+    float* vbase = I->r_kvv + (l * cfg.context_size + phys) * kv_tok;
+    CUDA_CHECK(cudaMemcpyAsync(kbase, I->r_k, kv_tok * sizeof(float),
+                               cudaMemcpyDeviceToDevice, s));
+    CUDA_CHECK(cudaMemcpyAsync(vbase, I->r_v, kv_tok * sizeof(float),
+                               cudaMemcpyDeviceToDevice, s));
+
+    const float* kpre = I->r_kvk + (l * cfg.context_size) * kv_tok;
+    const float* vpre = I->r_kvv + (l * cfg.context_size) * kv_tok;
+    size_t eff = seq_len;
+    if (ly.sliding_window > 0 && seq_len > ly.sliding_window) {
+      size_t skip = (seq_len - ly.sliding_window) * kv_tok;
+      kpre += skip;
+      vpre += skip;
+      eff = ly.sliding_window;
+    }
+    cuda::launch_flash_decode(I->r_attn, I->r_q, kpre, vpre, u(eff), u(n_heads),
+                              u(kv_heads), u(head_dim), s);
+
+    gemv(ly.wo, I->r_attn, I->r_o);
+    bias(I->r_o, ly.wo_bias, hidden, ly.o_bias_len);
+    if (ly.post_attn_norm)  // Gemma sandwich
+      cuda::launch_rms_norm(I->r_o, I->r_o, dev(ly.post_attn_norm, hidden),
+                            u(hidden), eps, plus_one, s);
+    cuda::launch_residual_add(I->r_x, I->r_o, u(hidden), s);
+
+    // FFN.
+    cuda::launch_rms_norm(I->r_norm, I->r_x, dev(ly.ffn_norm, hidden), u(hidden),
+                          eps, plus_one, s);
+    gemv(ly.gate, I->r_norm, I->r_gate);
+    gemv(ly.up, I->r_norm, I->r_up);
+    if (cfg.gelu_ffn)
+      cuda::launch_geglu(I->r_gate, I->r_up, I->r_gate, u(inter), s);
+    else
+      cuda::launch_swiglu(I->r_gate, I->r_up, I->r_gate, u(inter), s);
+    gemv(ly.down, I->r_gate, I->r_o);
+    bias(I->r_o, ly.down_bias, hidden, ly.down_bias_len);
+    if (ly.post_ffn_norm)
+      cuda::launch_rms_norm(I->r_o, I->r_o, dev(ly.post_ffn_norm, hidden),
+                            u(hidden), eps, plus_one, s);
+    cuda::launch_residual_add(I->r_x, I->r_o, u(hidden), s);
+  }
+
+  // Final norm + lm_head, then one sync to bring logits home.
+  cuda::launch_rms_norm(I->r_norm, I->r_x, dev(mv.final_norm, hidden), u(hidden),
+                        eps, plus_one, s);
+  gemv(mv.lm_head, I->r_norm, I->r_logits);
+  CUDA_CHECK(cudaMemcpyAsync(logits_out, I->r_logits,
+                             cfg.vocab_size * sizeof(float),
+                             cudaMemcpyDeviceToHost, s));
+  CUDA_CHECK(cudaStreamSynchronize(s));
+}
 
 }  // namespace oxidize
 

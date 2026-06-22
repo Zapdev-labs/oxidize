@@ -550,7 +550,86 @@ Logits LlamaModel::final_head() {
   return logits;
 }
 
+#ifdef OXIDIZE_CUDA
+// Build a CudaBackend::ModelView referencing this model's (host) weights for the
+// GPU-resident decode. Pointers are borrowed; the backend caches device copies.
+// WIP / UNVERIFIED — see cuda_backend.hpp::resident_forward.
+CudaBackend::ModelView LlamaModel::build_cuda_view() const {
+  const InferenceConfig& cfg = config_;
+  const size_t h = cfg.hidden_size;
+  const size_t head_dim = cfg.head_dim();
+  const size_t q_len = cfg.num_attention_heads * head_dim;
+  const size_t kv_len = cfg.num_key_value_heads * head_dim;
+  const size_t inter = cfg.intermediate_size;
+
+  auto mkw = [](const LlamaWeight& w, size_t rows, size_t cols) {
+    CudaBackend::WeightView v;
+    v.quantized = w.quantized;
+    v.quant = w.quant;
+    v.data = w.data;
+    v.f32 = w.f32.empty() ? nullptr : w.f32.data();
+    v.rows = rows;
+    v.cols = cols;
+    return v;
+  };
+  auto vptr = [](const std::vector<float>& v) {
+    return v.empty() ? nullptr : v.data();
+  };
+
+  CudaBackend::ModelView mv;
+  mv.cfg = cfg;
+  mv.final_norm = norm_weight_.data();
+  mv.lm_head = mkw(output_tied_ ? tok_embeddings_ : output_weight_,
+                   cfg.vocab_size, h);
+  mv.layers.resize(cfg.layer_count);
+  for (size_t l = 0; l < cfg.layer_count; ++l) {
+    const LlamaLayer& s = layers_[l];
+    CudaBackend::LayerView& d = mv.layers[l];
+    d.attn_norm = vptr(s.attn_norm);
+    d.wq = mkw(s.attn_q, q_len, h);
+    d.wk = mkw(s.attn_k, kv_len, h);
+    d.wv = mkw(s.attn_v, kv_len, h);
+    d.wo = mkw(s.attn_output, h, q_len);
+    d.wq_bias = vptr(s.attn_q_bias);
+    d.wk_bias = vptr(s.attn_k_bias);
+    d.wv_bias = vptr(s.attn_v_bias);
+    d.wo_bias = vptr(s.attn_output_bias);
+    d.q_bias_len = s.attn_q_bias.size();
+    d.k_bias_len = s.attn_k_bias.size();
+    d.v_bias_len = s.attn_v_bias.size();
+    d.o_bias_len = s.attn_output_bias.size();
+    d.attn_q_norm = vptr(s.attn_q_norm);
+    d.attn_k_norm = vptr(s.attn_k_norm);
+    d.ffn_norm = !s.ffn_norm.empty() ? s.ffn_norm.data() : vptr(s.post_attention_norm);
+    d.gate = mkw(s.ffn_gate, inter, h);
+    d.up = mkw(s.ffn_up, inter, h);
+    d.down = mkw(s.ffn_down, h, inter);
+    d.down_bias = vptr(s.ffn_down_bias);
+    d.down_bias_len = s.ffn_down_bias.size();
+    d.post_attn_norm =
+        (cfg.sandwich_norm && !s.post_attention_norm.empty()) ? s.post_attention_norm.data() : nullptr;
+    d.post_ffn_norm =
+        (cfg.sandwich_norm && !s.post_ffn_norm.empty()) ? s.post_ffn_norm.data() : nullptr;
+    d.rope_theta = layer_rope_theta(cfg, l);
+    d.sliding_window = layer_sliding_window(cfg, l);
+  }
+  return mv;
+}
+#endif
+
 Logits LlamaModel::forward_single(Token token, size_t pos, bool need_logits) {
+#ifdef OXIDIZE_CUDA
+  if (use_cuda_) {
+    // Resident GPU decode: one host<->device sync per token (vs ~290 in the
+    // per-op path). embed_token dequantizes + scales the row on the host; the
+    // rest of the forward stays on the device.
+    embed_token(token, x_.data());
+    Logits logits(config_.vocab_size, 0.0f);
+    CudaBackend::instance().resident_forward(build_cuda_view(), x_.data(), pos,
+                                             logits.data());
+    return need_logits ? logits : Logits{};
+  }
+#endif
   embed_token(token, x_.data());
   run_layers(pos);
   if (!need_logits) return Logits{};

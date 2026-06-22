@@ -20,6 +20,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <vector>
 
 #include "oxidize/config.hpp"
 
@@ -93,6 +94,59 @@ class CudaBackend {
   // Argmax over `n` logits with total_cmp-style tie-break (first max wins),
   // computed on the GPU. Mirrors sampler.hpp::greedy semantics.
   uint32_t argmax(const float* logits, size_t n);
+
+  // --- GPU-resident decode (WIP / UNVERIFIED) -------------------------------
+  // The op set above bounces every activation host<->device and syncs per op
+  // (~290 round-trips/token) — that, not the math, is why --cuda is slow. The
+  // resident path keeps activations + KV cache on the device for the whole
+  // forward and syncs once per token. Weights (host pointers) are uploaded and
+  // cached on first use, identical to the op-set caches.
+  //
+  // A weight matrix as the model sees it: either f32 (use `f32`) or a packed
+  // quantized / native-f16 block sequence (use `quant` + `data`).
+  struct WeightView {
+    bool quantized = false;
+    QuantType quant = QuantType::F32;
+    const uint8_t* data = nullptr;  // quantized blocks (host)
+    const float* f32 = nullptr;     // f32 weights (host)
+    size_t rows = 0;
+    size_t cols = 0;
+  };
+  struct LayerView {
+    const float* attn_norm = nullptr;
+    WeightView wq, wk, wv, wo;
+    const float* wq_bias = nullptr;
+    const float* wk_bias = nullptr;
+    const float* wv_bias = nullptr;
+    const float* wo_bias = nullptr;
+    size_t q_bias_len = 0, k_bias_len = 0, v_bias_len = 0, o_bias_len = 0;
+    const float* attn_q_norm = nullptr;  // per-head (Qwen3), len head_dim or q_len
+    const float* attn_k_norm = nullptr;
+    const float* ffn_norm = nullptr;
+    WeightView gate, up, down;
+    const float* down_bias = nullptr;
+    size_t down_bias_len = 0;
+    const float* post_attn_norm = nullptr;  // Gemma sandwich
+    const float* post_ffn_norm = nullptr;
+    float rope_theta = 10000.0f;
+    size_t sliding_window = 0;  // 0 = full attention
+  };
+  struct ModelView {
+    InferenceConfig cfg;
+    const float* final_norm = nullptr;
+    WeightView lm_head;  // (tied embeddings already resolved by the caller)
+    std::vector<LayerView> layers;
+  };
+
+  // Allocate device activation + KV buffers for `mv` dims (idempotent; only
+  // reallocates when dims grow). Safe to call once after model load.
+  void resident_setup(const ModelView& mv);
+
+  // Run one decode step on the GPU. `embed_row` is the (already dequantized and
+  // embedding-scaled) hidden-size embedding for `token`; `logits_out` receives
+  // `cfg.vocab_size` f32 logits. One host<->device sync per call.
+  void resident_forward(const ModelView& mv, const float* embed_row, size_t pos,
+                        float* logits_out);
 
  private:
   // Reusable per-call device scratch (separate x / weight / out arenas so the

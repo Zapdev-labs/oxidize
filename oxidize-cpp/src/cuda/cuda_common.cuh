@@ -120,6 +120,13 @@ void launch_flash_decode(float* out, const float* q, const float* k_cache,
                          unsigned head_dim, cudaStream_t stream);
 
 // ---------------------------------------------------------------------------
+// resident.cu: elementwise helpers for the GPU-resident decode path.
+void launch_residual_add(float* y, const float* x, unsigned n,
+                         cudaStream_t stream);
+void launch_add_bias_mod(float* y, const float* bias, unsigned n,
+                         unsigned bias_len, cudaStream_t stream);
+
+// ---------------------------------------------------------------------------
 // Sampling (sampling.cu): softmax in place + argmax.
 // ---------------------------------------------------------------------------
 void launch_softmax_inplace(float* x, unsigned n, cudaStream_t stream);

@@ -32,6 +32,9 @@
 #include "oxidize/gguf.hpp"
 #include "oxidize/model.hpp"
 #include "oxidize/quant.hpp"
+#ifdef OXIDIZE_CUDA
+#include "oxidize/cuda_backend.hpp"
+#endif
 
 namespace oxidize {
 
@@ -115,6 +118,11 @@ class LlamaModel : public Model {
                    size_t kv_heads, size_t head_dim);
   void d_gemv_weight(const LlamaWeight& w, size_t rows, size_t cols,
                      const float* x, float* y);
+
+#ifdef OXIDIZE_CUDA
+  // Build a device-resident decode view of this model's weights (WIP).
+  CudaBackend::ModelView build_cuda_view() const;
+#endif
 
   bool use_cuda_ = false;
 
