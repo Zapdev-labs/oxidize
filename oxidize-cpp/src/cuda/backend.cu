@@ -34,7 +34,7 @@ namespace {
 
 // FNV-1a 64-bit hash (matches backends/cuda.rs::hash_bytes) for content-aware
 // cache keys, so a mutated host buffer is not silently reused.
-uint64_t fnv1a(const uint8_t* data, size_t len) {
+[[maybe_unused]] uint64_t fnv1a(const uint8_t* data, size_t len) {
   uint64_t h = 0xcbf29ce484222325ull;
   for (size_t i = 0; i < len; ++i) {
     h ^= static_cast<uint64_t>(data[i]);
@@ -58,12 +58,18 @@ struct CacheKeyHash {
   }
 };
 
+// Cache key = (host pointer, length). Weight buffers are immutable after model
+// load and each has a stable, unique host address, so (ptr, len) identifies a
+// weight uniquely. We deliberately do NOT content-hash here: these helpers run
+// on EVERY op of every layer of every token, and FNV-1a over a multi-hundred-MB
+// weight (e.g. a dequantized f32 lm_head) per call costs seconds/token on the
+// CPU and was making the GPU path slower than CPU. (fnv1a retained for the
+// one-time content check below.)
 CacheKey key_f32(const float* p, size_t n) {
-  return {reinterpret_cast<uintptr_t>(p), n,
-          fnv1a(reinterpret_cast<const uint8_t*>(p), n * sizeof(float))};
+  return {reinterpret_cast<uintptr_t>(p), n, 0};
 }
 CacheKey key_bytes(const uint8_t* p, size_t n) {
-  return {reinterpret_cast<uintptr_t>(p), n, fnv1a(p, n)};
+  return {reinterpret_cast<uintptr_t>(p), n, 0};
 }
 
 // Map QuantType to its GPU dequant launcher + block geometry. Returns false for
