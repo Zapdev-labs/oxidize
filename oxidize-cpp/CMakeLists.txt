@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.24)
+cmake_minimum_required(VERSION 3.20)
 project(oxidize_cpp LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -36,7 +36,18 @@ if(OXIDIZE_CUDA)
   file(GLOB CUDA_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/cuda/*.cu")
   add_library(oxidize_cuda ${CUDA_SOURCES})
   target_include_directories(oxidize_cuda PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
-  set_target_properties(oxidize_cuda PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+  # Pin the CUDA dialect to C++17: the .cu sources don't need C++20, and older
+  # CMake (Ubuntu 22.04 ships 3.22) lacks the CUDA20 dialect flags, which would
+  # otherwise be inherited from the project-wide CMAKE_CXX_STANDARD=20.
+  # Separable compilation OFF: each .cu is self-contained (its own kernels +
+  # host launchers), so no cross-TU device link is needed. With it ON, the
+  # static lib would require an nvcc device-link step that the g++-linked
+  # executable can't satisfy (undefined __cudaRegisterLinkedBinary_*).
+  set_target_properties(oxidize_cuda PROPERTIES
+    CUDA_SEPARABLE_COMPILATION OFF
+    CUDA_STANDARD 17
+    CUDA_STANDARD_REQUIRED ON
+    CUDA_EXTENSIONS OFF)
   # The .cu sources (backend.cu) are themselves guarded by OXIDIZE_CUDA.
   target_compile_definitions(oxidize_cuda PUBLIC OXIDIZE_CUDA=1)
   target_compile_options(oxidize_cuda PRIVATE

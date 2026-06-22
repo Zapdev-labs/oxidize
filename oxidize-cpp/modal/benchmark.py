@@ -21,18 +21,82 @@
 # deterministic and apples-to-apples across engines/devices.
 
 import json
+import os
+import pathlib
 import re
 import subprocess
 import time
 
 import modal
 
-from image import (
-    CPP_BIN,
-    MODELS_MOUNT,
-    RUST_BIN,
-    image,
-    models_volume,
+# ---- image definition (inlined so the Modal container needs no sibling import) ----
+# This file lives at <repo>/oxidize-cpp/modal/benchmark.py. REPO_ROOT is only
+# used locally (add_local_dir reads from it at build time); inside the Modal
+# container __file__ is /root/benchmark.py with no parents[2], so guard it.
+_THIS = pathlib.Path(__file__).resolve()
+REPO_ROOT = _THIS.parents[2] if len(_THIS.parents) >= 3 else pathlib.Path("/opt/oxidize-src")
+
+IMAGE_REPO = "/opt/oxidize-src"
+CPP_DIR = f"{IMAGE_REPO}/oxidize-cpp"
+CPP_BUILD = f"{CPP_DIR}/build"
+CPP_BIN = f"{CPP_BUILD}/oxidize-cpp"
+RUST_BIN = f"{IMAGE_REPO}/target/release/oxidize"
+
+MODELS_VOLUME_NAME = os.environ.get("OXIDIZE_MODELS_VOLUME", "oxidize-models")
+MODELS_MOUNT = "/models"
+models_volume = modal.Volume.from_name(MODELS_VOLUME_NAME, create_if_missing=True)
+
+
+def _build_commands() -> list[str]:
+    return [
+        # C++ engine: CMake + CUDA backend (REQUIRED). nvcc compiles here at
+        # image-build time (CPU), so CUDA errors surface with no GPU cost.
+        f"cmake -S {CPP_DIR} -B {CPP_BUILD} "
+        f"-DCMAKE_BUILD_TYPE=Release -DOXIDIZE_CUDA=ON "
+        f"-DCMAKE_CUDA_ARCHITECTURES='80;90'",
+        f"cmake --build {CPP_BUILD} --target oxidize-cpp -j",
+        f"test -x {CPP_BIN}",
+        # Rust 'oxidize' CLI (BEST-EFFORT baseline; never blocks the C++ image).
+        f"bash -lc 'source $HOME/.cargo/env && cd {IMAGE_REPO} && "
+        f"cargo build --release -p oxidize-cli || echo OXIDIZE_RUST_BUILD_FAILED'",
+        f"bash -lc 'test -x {RUST_BIN} && echo rust-ok || "
+        f"echo \"rust baseline unavailable (non-fatal)\"'",
+    ]
+
+
+image = (
+    modal.Image.from_registry(
+        "nvidia/cuda:12.4.1-devel-ubuntu22.04", add_python="3.11"
+    )
+    .apt_install(
+        "build-essential", "g++", "cmake", "ninja-build", "git", "curl",
+        "ca-certificates", "pkg-config", "libssl-dev", "libomp-dev",
+    )
+    .pip_install("huggingface_hub")
+    .run_commands(
+        "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | "
+        "sh -s -- -y --default-toolchain stable --profile minimal",
+    )
+    .env({
+        "PATH": "/root/.cargo/bin:/usr/local/cuda/bin:/usr/local/bin:/usr/bin:/bin",
+        "CUDACXX": "/usr/local/cuda/bin/nvcc",
+        "CMAKE_CUDA_COMPILER": "/usr/local/cuda/bin/nvcc",
+    })
+    .add_local_dir(
+        str(REPO_ROOT),
+        remote_path=IMAGE_REPO,
+        ignore=[
+            "**/target/**", "**/build/**", "**/.git/**", "**/models/**",
+            "**/*.gguf", "**/node_modules/**",
+            "oxidize-golang/**", "oxidize-python/**", "dist/**", "evidence/**",
+            "results/**", "docs/**", ".firecrawl/**", "**/__pycache__/**",
+            # Harness scripts aren't needed to BUILD the engines; excluding them
+            # decouples benchmark.py edits from image rebuilds.
+            "oxidize-cpp/modal/**",
+        ],
+        copy=True,
+    )
+    .run_commands(*_build_commands())
 )
 
 APP_NAME = "oxidize-cpp-bench"
