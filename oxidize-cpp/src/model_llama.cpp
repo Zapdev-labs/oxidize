@@ -41,6 +41,9 @@ bool is_supported_quant_gemv(QuantType q) {
     // large speedup for F16/BF16 models.
     case QuantType::F16:
     case QuantType::BF16:
+    case QuantType::Q4_0:
+    case QuantType::Q5_0:
+    case QuantType::Q5_1:
     case QuantType::Q8_0:
     case QuantType::Q4_K_S:
     case QuantType::Q4_K_M:

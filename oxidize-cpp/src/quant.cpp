@@ -209,8 +209,8 @@ void dequant_q4_0(const uint8_t* in, float* out, size_t n) {
     float d = f16_le_to_f32(block);
     for (size_t i = 0; i < 16; ++i) {
       uint8_t packed = block[2 + i];
-      o[2 * i] = static_cast<float>(static_cast<int8_t>(packed & 0x0F) - 8) * d;
-      o[2 * i + 1] = static_cast<float>(static_cast<int8_t>((packed >> 4) & 0x0F) - 8) * d;
+      o[i] = static_cast<float>(static_cast<int>(packed & 0x0F) - 8) * d;
+      o[i + 16] = static_cast<float>(static_cast<int>(packed >> 4) - 8) * d;
     }
   }
 }
@@ -225,8 +225,8 @@ void dequant_q4_1(const uint8_t* in, float* out, size_t n) {
     float m = f16_le_to_f32(block + 2);
     for (size_t i = 0; i < 16; ++i) {
       uint8_t packed = block[4 + i];
-      o[2 * i] = static_cast<float>(packed & 0x0F) * d + m;
-      o[2 * i + 1] = static_cast<float>((packed >> 4) & 0x0F) * d + m;
+      o[i] = static_cast<float>(packed & 0x0F) * d + m;
+      o[i + 16] = static_cast<float>(packed >> 4) * d + m;
     }
   }
 }
@@ -238,13 +238,16 @@ void dequant_q5_0(const uint8_t* in, float* out, size_t n) {
     const uint8_t* block = in + b * BLOCK_Q5_0_SIZE;
     float* o = out + b * QK5_0;
     float d = f16_le_to_f32(block);
-    const uint8_t* qh = block + 2;
+    uint32_t qh;
+    std::memcpy(&qh, block + 2, 4);  // 4 bytes little-endian
     const uint8_t* qs = block + 6;
-    for (size_t i = 0; i < QK5_0; ++i) {
-      uint8_t low = (i % 2 == 0) ? (qs[i / 2] & 0x0F) : ((qs[i / 2] >> 4) & 0x0F);
-      uint8_t high = (qh[i / 8] >> (i % 8)) & 0x01;
-      uint8_t q = low | (high << 4);
-      o[i] = static_cast<float>(static_cast<int8_t>(q) - 16) * d;
+    for (size_t j = 0; j < QK5_0 / 2; ++j) {  // j = 0..15
+      uint8_t xh_0 = ((qh >> j) & 0x01) << 4;
+      uint8_t xh_1 = ((qh >> (j + 16)) & 0x01) << 4;
+      int q0 = static_cast<int>((qs[j] & 0x0F) | xh_0) - 16;
+      int q1 = static_cast<int>((qs[j] >> 4) | xh_1) - 16;
+      o[j] = static_cast<float>(q0) * d;
+      o[j + QK5_0 / 2] = static_cast<float>(q1) * d;
     }
   }
 }
@@ -257,13 +260,16 @@ void dequant_q5_1(const uint8_t* in, float* out, size_t n) {
     float* o = out + b * QK5_1;
     float d = f16_le_to_f32(block);
     float m = f16_le_to_f32(block + 2);
-    const uint8_t* qh = block + 4;
+    uint32_t qh;
+    std::memcpy(&qh, block + 4, 4);  // 4 bytes little-endian
     const uint8_t* qs = block + 8;
-    for (size_t i = 0; i < QK5_1; ++i) {
-      uint8_t low = (i % 2 == 0) ? (qs[i / 2] & 0x0F) : ((qs[i / 2] >> 4) & 0x0F);
-      uint8_t high = (qh[i / 8] >> (i % 8)) & 0x01;
-      uint8_t q = low | (high << 4);
-      o[i] = static_cast<float>(q) * d + m;
+    for (size_t j = 0; j < QK5_1 / 2; ++j) {  // j = 0..15
+      uint8_t xh_0 = ((qh >> j) & 0x01) << 4;
+      uint8_t xh_1 = ((qh >> (j + 16)) & 0x01) << 4;
+      uint8_t q0 = (qs[j] & 0x0F) | xh_0;
+      uint8_t q1 = (qs[j] >> 4) | xh_1;
+      o[j] = static_cast<float>(q0) * d + m;
+      o[j + QK5_1 / 2] = static_cast<float>(q1) * d + m;
     }
   }
 }
