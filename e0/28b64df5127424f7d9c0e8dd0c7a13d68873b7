@@ -1,0 +1,88 @@
+oxidize-cpp/include/oxidize/gguf.hpp
+  s_5b078de97b8925::t_f9b6b316a24690 1-168
+oxidize-cpp/include/oxidize/quant.hpp
+  s_5b078de97b8925::t_466a82394bb183 1-69
+oxidize-cpp/src/cuda/rmsnorm.cu
+  s_5b078de97b8925::t_4929764fcdaafd 1-67
+oxidize-cpp/include/oxidize/model.hpp
+  s_5b078de97b8925::t_0acf174515e917 1-42
+oxidize-cpp/src/sampler.cpp
+  s_5b078de97b8925::t_b6674dde43cfb7 1-31,37-870
+  s_5b078de97b8925::t_362c32b5901c16 32-36
+oxidize-cpp/include/oxidize/config.hpp
+  s_5b078de97b8925::t_44c994c0947792 1-85
+docs/superpowers/specs/2026-06-21-cpp-port-design.md
+  s_5b078de97b8925::t_14a1416945e49b 1-78
+oxidize-cpp/src/cuda/gemm.cu
+  s_5b078de97b8925::t_c6ae8465475242 1-21,23-281
+  s_5b078de97b8925::t_37a81a86af754d 22
+oxidize-cpp/modal/image.py
+  s_5b078de97b8925::t_ff3276edd12b4d 1-101
+oxidize-cpp/src/tensor_cpu.cpp
+  s_5b078de97b8925::t_0ecc0ff27a351d 19
+  s_5b078de97b8925::t_a37d631557d2c2 1-18,20-256
+oxidize-cpp/modal/benchmark.py
+  s_5b078de97b8925::t_8e7a87d42c3398 1-298
+oxidize-cpp/src/cuda/sampling.cu
+  s_5b078de97b8925::t_e5a8fb0640b4b6 1-120
+oxidize-cpp/.gitignore
+  s_5b078de97b8925::t_abdf25361a0553 1-4
+oxidize-cpp/src/cuda/flash_attn.cu
+  s_5b078de97b8925::t_98337c939e8eaf 1-133
+oxidize-cpp/src/cuda/dequant.cu
+  s_5b078de97b8925::t_20eb605daffc06 1-208
+oxidize-cpp/CMakeLists.txt
+  s_5b078de97b8925::t_76fe715d2abf5f 1-39,44-64
+  s_5b078de97b8925::t_5b6990cca66ab4 40-43
+oxidize-cpp/src/cuda/cuda_common.cuh
+  s_5b078de97b8925::t_311a060e914d04 85-91
+  s_5b078de97b8925::t_2fcc2dc273144d 1-84,92-131
+oxidize-cpp/tests/parity_test.cpp
+  s_5b078de97b8925::t_b90ad0e7c68384 32
+  s_5b078de97b8925::t_cca3f7602c6404 1-30,33-296,306,311,319,327-349
+  s_5b078de97b8925::t_bce9e9042c9b3e 297-305,307-310,312-318,320-326
+  s_5b078de97b8925::t_40c8f5e7ae8ce9 31
+oxidize-cpp/src/cuda/rope.cu
+  s_5b078de97b8925::t_c0c9150321da6a 1-68
+oxidize-cpp/src/model_llama.cpp
+  s_5b078de97b8925::t_b6040b91a97d3f 392-398
+  s_5b078de97b8925::t_09c5be48de54dc 432-438
+  s_5b078de97b8925::t_9226675081161e 1-391,399-402,406,410-431,439-497
+  s_5b078de97b8925::t_545bb0dac7daa3 403-405,407-409
+oxidize-cpp/src/cli/main.cpp
+  s_5b078de97b8925::t_f99e0725f72d12 1-353
+oxidize-cpp/include/oxidize/tensor.hpp
+  s_5b078de97b8925::t_70700de6c33992 1-71
+oxidize-cpp/src/cuda/backend.cu
+  s_5b078de97b8925::t_f36cd7540a8ca8 1-101,104-113,115-126,135-434,436-440
+  s_5b078de97b8925::t_f2253632669489 102-103,114,127-134
+  s_5b078de97b8925::t_ab6d6fb209bffe 435
+oxidize-cpp/src/quant.cpp
+  s_5b078de97b8925::t_e2e73178d7580b 10
+  s_5b078de97b8925::t_515fb9beff2129 1-9,11-869
+oxidize-cpp/src/gguf.cpp
+  s_5b078de97b8925::t_b37b3202774b1b 1-1013
+oxidize-cpp/include/oxidize/model_llama.hpp
+  s_5b078de97b8925::t_3c56bfb18bee9e 1-127
+oxidize-cpp/include/oxidize/sampler.hpp
+  s_5b078de97b8925::t_59dce24cde80c4 1-163
+oxidize-cpp/include/oxidize/cuda_backend.hpp
+  s_5b078de97b8925::t_6cc0ac6fdaaef6 98-103
+  s_5b078de97b8925::t_2b6882e84fb0ba 1-97,104-110
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "e028b64df5127424f7d9c0e8dd0c7a13d68873b7",
+  "prompts": {},
+  "sessions": {
+    "s_5b078de97b8925": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a2fd32be-d532-4929-8226-7967c93996a1",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
