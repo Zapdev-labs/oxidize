@@ -1,0 +1,25 @@
+oxidize-core/src/backends/cuda/gpu_kernels.rs
+  s_7d0d50bc68f118::t_24a53230a9e926 27-36,43-44
+oxidize-core/src/backends/cuda/types.rs
+  s_7d0d50bc68f118::t_b2ff504df5f01b 328,331-345
+  s_7d0d50bc68f118::t_5ceede3a94d42d 202-205
+  s_7d0d50bc68f118::t_921b15a01937ee 324-327,329-330
+oxidize-core/src/backends/cuda/gpu_state.rs
+  s_7d0d50bc68f118::t_c149adf93479a3 63-65
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "c34399e1291b634d038462ea4775a65e012bdaae",
+  "prompts": {},
+  "sessions": {
+    "s_7d0d50bc68f118": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "574f82cd-95dc-47f4-8725-bdd25dbad482",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
