@@ -1,0 +1,42 @@
+oxidize-core/src/backends/cuda.rs
+  s_7d0d50bc68f118::t_0f9ebe0132053a 194
+  s_7d0d50bc68f118::t_88705bc8e1d8db 25-26
+  s_7d0d50bc68f118::t_7a50070a219c7d 32-33
+  s_7d0d50bc68f118::t_1d50e1c2a88ddd 34-35
+  s_7d0d50bc68f118::t_4daa4d046effe6 30-31
+  s_7d0d50bc68f118::t_2b835937057dea 188-193,195
+oxidize-core/src/backends/cuda/gemv_quantized.rs
+  s_7d0d50bc68f118::t_5fb5a4166966c7 735-745
+  s_7d0d50bc68f118::t_8fbf21f32cf261 749-750,760-763
+  s_7d0d50bc68f118::t_592f43c93a7dba 695-700
+  s_7d0d50bc68f118::t_f0726213c3e898 522
+  s_7d0d50bc68f118::t_3dd55a7cb0ebf4 515,523-534
+  s_7d0d50bc68f118::t_ab7b50e4c0ea60 405-435,446-450
+  s_7d0d50bc68f118::t_829bd5c32abe7d 802-844
+  s_7d0d50bc68f118::t_2a56cb0e94cd9c 726
+  s_7d0d50bc68f118::t_caa23528272f34 620-626
+  s_7d0d50bc68f118::t_2ddb38db222cc9 727,734
+  s_7d0d50bc68f118::t_b354b8f2e5c5a2 669-670,677
+  s_7d0d50bc68f118::t_dcaf198beb7f9a 444,451-452,454-458,461,465,470-471,478-514,516-521,535
+  s_7d0d50bc68f118::t_a29d565070f0f1 711-715
+  s_7d0d50bc68f118::t_2c30c719078427 780-781
+  s_7d0d50bc68f118::t_68a5d1e4ae7a0d 946
+  s_7d0d50bc68f118::t_0c0bec62d8f265 536,716,728-733,746-748,751-759,764-779,782-801,845-858,863-886
+  s_7d0d50bc68f118::t_eba697f512aa2b 859-862
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "10534923e1e961eace31c97caf6b5b4d85eeb1c3",
+  "prompts": {},
+  "sessions": {
+    "s_7d0d50bc68f118": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "574f82cd-95dc-47f4-8725-bdd25dbad482",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
