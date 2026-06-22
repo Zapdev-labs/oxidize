@@ -1,0 +1,26 @@
+modal_app.py
+  s_7d0d50bc68f118::t_692dd9c7868647 1066
+  s_7d0d50bc68f118::t_4e9b8d3e9a0c89 1304-1305
+  s_7d0d50bc68f118::t_22933d471bcfcf 1311-1319
+  s_7d0d50bc68f118::t_ffa2a1f7b71e60 629
+  s_7d0d50bc68f118::t_d8cce5b9d10fef 1337,1339,1342-1343
+  s_7d0d50bc68f118::t_7641ba03ac13a4 619-620
+  s_7d0d50bc68f118::t_5f0f3ca960a0d2 621
+  s_7d0d50bc68f118::t_de0b0603dd37d9 1247-1248,1250
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "40f56b8ba21bfb2468b6e46552dce2331546b304",
+  "prompts": {},
+  "sessions": {
+    "s_7d0d50bc68f118": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "574f82cd-95dc-47f4-8725-bdd25dbad482",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
