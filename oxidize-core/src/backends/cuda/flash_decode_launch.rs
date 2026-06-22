@@ -213,11 +213,13 @@ pub(super) fn launch_flash_attn_decode_splitk(
 
 fn selected_split_count(gpu: &GpuState, query_heads: u32, sequence_length: u32) -> u32 {
     let forced = std::env::var("OX_FLASH_DECODE_SPLITS").ok();
+    let force_legacy = std::env::var_os("OX_FLASH_DECODE_FORCE_LEGACY").is_some()
+        || super::cuda_decode_graph::ox_gpu_cuda_graph_enabled();
     select_split_count(
         gpu.sm_count as usize,
         query_heads as usize,
         sequence_length as usize,
-        std::env::var_os("OX_FLASH_DECODE_FORCE_LEGACY").is_some(),
+        force_legacy,
         forced.as_deref(),
     ) as u32
 }

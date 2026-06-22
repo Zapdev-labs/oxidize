@@ -14,17 +14,32 @@ pub struct SplitKPlan {
 impl SplitKPlan {
     #[must_use]
     pub const fn select(sm_count: usize, query_heads: usize, seq_len: usize) -> Option<Self> {
-        if sm_count == 0 || query_heads == 0 || seq_len < MIN_SPLIT_K_SEQUENCE_LENGTH {
+        if sm_count == 0 || query_heads == 0 || seq_len == 0 {
             return None;
         }
 
-        let context_splits = const_min(seq_len.div_ceil(TOKENS_PER_SPLIT), MAX_SPLITS);
         let target_blocks = match sm_count.checked_mul(TARGET_BLOCKS_PER_SM) {
             Some(value) => value,
             None => usize::MAX,
         };
         let occupancy_splits = const_min(target_blocks.div_ceil(query_heads), MAX_SPLITS);
-        let split_count = const_min(context_splits, occupancy_splits);
+        let context_splits = if seq_len >= MIN_SPLIT_K_SEQUENCE_LENGTH {
+            const_min(seq_len.div_ceil(TOKENS_PER_SPLIT), MAX_SPLITS)
+        } else {
+            1
+        };
+        // Long contexts: cap splits by both occupancy and KV length. Short contexts
+        // (typical decode benches): still use occupancy splits so H100-class GPUs
+        // launch enough flash-attn blocks to fill SMs (OX_FLASH_DECODE_SPLITS=8
+        // was +14% on Mistral-7B; auto-select now picks the same on sm_90).
+        let split_count = if context_splits >= 2 {
+            const_min(context_splits, occupancy_splits)
+        } else if occupancy_splits >= 2 {
+            occupancy_splits
+        } else {
+            return None;
+        };
+        let split_count = const_min(split_count, seq_len);
         if split_count < 2 {
             return None;
         }
