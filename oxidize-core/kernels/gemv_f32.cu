@@ -763,6 +763,41 @@ extern "C" __global__ void gemv_q4k_q8kin_kernel(
     }
 }
 
+// Multi-warp-per-row Q4_K × Q8_K GEMV — reads a pre-quantized global activation
+// (layer-shared xq8k). One quantize per norm step, then many DP4A GEMVs reuse it.
+extern "C" __global__ void gemv_q4k_q8kin_mw_kernel(
+    const unsigned char* __restrict__ matrix,
+    const unsigned char* __restrict__ xq8k,
+    float*                __restrict__ output,
+    unsigned int rows,
+    unsigned int blocks_per_row)
+{
+    unsigned int row = blockIdx.x;
+    if (row >= rows) return;
+    unsigned int warp_id = threadIdx.x >> OX_WAVE_LOG2;
+    unsigned int lane    = threadIdx.x & OX_LANE_MASK;
+    unsigned int nwarps  = blockDim.x >> OX_WAVE_LOG2;
+
+    const unsigned char* row_blocks = matrix + (size_t)row * blocks_per_row * 144u;
+    float sum = 0.0f;
+    for (unsigned int b = warp_id; b < blocks_per_row; b += nwarps) {
+        const unsigned char* w_blk = row_blocks + (size_t)b * 144u;
+        const unsigned char* q8_blk = xq8k + (size_t)b * 292u;
+        sum += q4k_q8kin_block_dot_dp4a(w_blk, q8_blk, lane);
+    }
+    sum = warp_reduce_sum(sum);
+
+    extern __shared__ float s_warp[];
+    if (lane == 0u) s_warp[warp_id] = sum;
+    __syncthreads();
+
+    if (warp_id == 0u) {
+        float total = (lane < nwarps) ? s_warp[lane] : 0.0f;
+        total = warp_reduce_sum(total);
+        if (lane == 0u) output[row] = total;
+    }
+}
+
 // --------------------------------------------------------------------------
 // Batched Q4_K × Q8_K GEMV — the continuous-batching decode lever.
 //
@@ -940,6 +975,269 @@ extern "C" __global__ void gemv_q4k_q8k_fused_kernel(
     }
     sum = warp_reduce_sum(sum);
     if (lane == 0u) output[row] = sum;
+}
+
+// Shared phase-1 quantize for fused MMQ variants (activation → shared Q8_K).
+// Every thread in the block must enter this function so __syncthreads() covers
+// the full block (phase-2 may use blockDim > 256).
+__device__ void fused_mmq_quantize_x_to_shared(
+    const float* __restrict__ x,
+    unsigned char* __restrict__ s_q8k,
+    unsigned int blocks_per_row,
+    float* s_amax,
+    int* s_bsum)
+{
+    unsigned int tid = threadIdx.x;
+    for (unsigned int b = 0; b < blocks_per_row; b++) {
+        const float* xb = x + (size_t)b * 256u;
+        float v = (tid < 256u) ? xb[tid] : 0.0f;
+
+        if (tid < 256u) s_amax[tid] = fabsf(v);
+        __syncthreads();
+        for (unsigned int stride = 128u; stride > 0u; stride >>= 1) {
+            if (tid < stride && tid < 256u) {
+                float other = s_amax[tid + stride];
+                if (other > s_amax[tid]) s_amax[tid] = other;
+            }
+            __syncthreads();
+        }
+        float d = s_amax[0] / 127.0f;
+        float inv_d = (d != 0.0f) ? (1.0f / d) : 0.0f;
+        int qi = 0;
+        if (tid < 256u) {
+            qi = (int)lrintf(v * inv_d);
+            if (qi > 127) qi = 127;
+            if (qi < -128) qi = -128;
+        }
+
+        unsigned char* out = s_q8k + (size_t)b * 292u;
+        if (tid == 0u) *reinterpret_cast<float*>(out) = d;
+        if (tid < 256u) reinterpret_cast<signed char*>(out + 4)[tid] = (signed char)qi;
+
+        if (tid < 256u) s_bsum[tid] = qi;
+        __syncthreads();
+        for (unsigned int stride = 8u; stride > 0u; stride >>= 1) {
+            if ((tid & 15u) < stride && tid < 256u) {
+                s_bsum[tid] += s_bsum[tid + stride];
+            }
+            __syncthreads();
+        }
+        if ((tid & 15u) == 0u && tid < 256u) {
+            short* bsums = reinterpret_cast<short*>(out + 4 + 256);
+            bsums[tid >> 4] = (short)s_bsum[tid];
+        }
+        __syncthreads();
+    }
+}
+
+// Multi-warp row dot against shared Q8_K activation (fused MMQ phase 2).
+__device__ float fused_mmq_mw_row_dot(
+    const unsigned char* __restrict__ row_blocks,
+    const unsigned char* __restrict__ s_q8k,
+    unsigned int blocks_per_row,
+    unsigned int warp_in_row,
+    unsigned int nwarps_per_row,
+    unsigned int lane)
+{
+    float sum = 0.0f;
+    for (unsigned int b = warp_in_row; b < blocks_per_row; b += nwarps_per_row) {
+        const unsigned char* w_blk  = row_blocks + (size_t)b * 144u;
+        const unsigned char* q8_blk = s_q8k + (size_t)b * 292u;
+        sum += q4k_q8kin_block_dot_dp4a(w_blk, q8_blk, lane);
+    }
+    return warp_reduce_sum(sum);
+}
+
+__device__ void fused_mmq_mw_commit_row(
+    float* __restrict__ output,
+    unsigned int row,
+    unsigned int warp_id,
+    unsigned int warp_in_row,
+    unsigned int nwarps_per_row,
+    unsigned int row_in_block,
+    unsigned int lane,
+    float sum,
+    float* s_warp_partials)
+{
+    if (lane == 0u) s_warp_partials[warp_id] = sum;
+    __syncthreads();
+    if (warp_in_row == 0u && lane == 0u) {
+        float total = 0.0f;
+        for (unsigned int w = 0; w < nwarps_per_row; w++) {
+            total += s_warp_partials[row_in_block * nwarps_per_row + w];
+        }
+        output[row] = total;
+    }
+    __syncthreads();
+}
+
+// Fused MMQ + multi-warp-per-row (H100 HBM saturation + shared activation).
+// Phase 1: threads 0..255 quantize x → shared Q8_K once per block.
+// Phase 2: 8 rows/block × 4 warps/row = 32 warps (blockDim=1024).
+// Launch: blockDim=1024, grid=ceil(rows/8), dynamic shmem=bpr*292.
+extern "C" __global__ void gemv_q4k_q8k_fused_mw_kernel(
+    const unsigned char* __restrict__ matrix,
+    const float*          __restrict__ x,
+    float*                __restrict__ output,
+    unsigned int rows,
+    unsigned int blocks_per_row)
+{
+    extern __shared__ unsigned char s_q8k[];
+    __shared__ float s_amax[256];
+    __shared__ int   s_bsum[256];
+    __shared__ float s_warp_partials[32];
+
+    unsigned int tid = threadIdx.x;
+    fused_mmq_quantize_x_to_shared(x, s_q8k, blocks_per_row, s_amax, s_bsum);
+
+    const unsigned int nwarps_per_row = 4u;
+    const unsigned int rows_per_block = 8u;
+    const unsigned int warps_per_block = blockDim.x >> OX_WAVE_LOG2;
+    if (warps_per_block < rows_per_block * nwarps_per_row) return;
+
+    unsigned int warp_id = tid >> OX_WAVE_LOG2;
+    unsigned int lane    = tid & OX_LANE_MASK;
+    unsigned int row_in_block = warp_id / nwarps_per_row;
+    unsigned int warp_in_row  = warp_id % nwarps_per_row;
+    unsigned int row = blockIdx.x * rows_per_block + row_in_block;
+    if (row >= rows || row_in_block >= rows_per_block) return;
+
+    const unsigned char* row_blocks = matrix + (size_t)row * blocks_per_row * 144u;
+    float sum = fused_mmq_mw_row_dot(row_blocks, s_q8k, blocks_per_row, warp_in_row,
+                                       nwarps_per_row, lane);
+    fused_mmq_mw_commit_row(output, row, warp_id, warp_in_row, nwarps_per_row,
+                            row_in_block, lane, sum, s_warp_partials);
+}
+
+// Fused QKV: one shared quantize per block, 8 rows/block, 4 warps/row (same tiling as
+// gemv_q4k_q8k_fused_mw_kernel). Grid = ceil(max(q_rows, kv_rows) / 8).
+extern "C" __global__ void gemv_q4k_q8k_fused_qkv_mw_kernel(
+    const unsigned char* __restrict__ wq,
+    const unsigned char* __restrict__ wk,
+    const unsigned char* __restrict__ wv,
+    const float*          __restrict__ x,
+    float*                __restrict__ dq,
+    float*                __restrict__ dk,
+    float*                __restrict__ dv,
+    unsigned int q_rows,
+    unsigned int kv_rows,
+    unsigned int blocks_per_row)
+{
+    extern __shared__ unsigned char s_q8k[];
+    __shared__ float s_amax[256];
+    __shared__ int   s_bsum[256];
+    __shared__ float s_warp_partials[32];
+
+    unsigned int tid = threadIdx.x;
+    fused_mmq_quantize_x_to_shared(x, s_q8k, blocks_per_row, s_amax, s_bsum);
+
+    const unsigned int nwarps_per_row = 4u;
+    const unsigned int rows_per_block = 8u;
+    const unsigned int warps_per_block = blockDim.x >> OX_WAVE_LOG2;
+    if (warps_per_block < rows_per_block * nwarps_per_row) return;
+
+    unsigned int warp_id = tid >> OX_WAVE_LOG2;
+    unsigned int lane    = tid & OX_LANE_MASK;
+    unsigned int row_in_block = warp_id / nwarps_per_row;
+    unsigned int warp_in_row  = warp_id % nwarps_per_row;
+    unsigned int row = blockIdx.x * rows_per_block + row_in_block;
+    if (row_in_block >= rows_per_block) return;
+
+    if (row < q_rows) {
+        const unsigned char* row_blocks = wq + (size_t)row * blocks_per_row * 144u;
+        float sum = fused_mmq_mw_row_dot(row_blocks, s_q8k, blocks_per_row, warp_in_row,
+                                         nwarps_per_row, lane);
+        fused_mmq_mw_commit_row(dq, row, warp_id, warp_in_row, nwarps_per_row,
+                                row_in_block, lane, sum, s_warp_partials);
+    }
+    __syncthreads();
+
+    if (row < kv_rows) {
+        const unsigned char* row_blocks = wk + (size_t)row * blocks_per_row * 144u;
+        float sum = fused_mmq_mw_row_dot(row_blocks, s_q8k, blocks_per_row, warp_in_row,
+                                         nwarps_per_row, lane);
+        fused_mmq_mw_commit_row(dk, row, warp_id, warp_in_row, nwarps_per_row,
+                                row_in_block, lane, sum, s_warp_partials);
+    }
+    __syncthreads();
+
+    if (row < kv_rows) {
+        const unsigned char* row_blocks = wv + (size_t)row * blocks_per_row * 144u;
+        float sum = fused_mmq_mw_row_dot(row_blocks, s_q8k, blocks_per_row, warp_in_row,
+                                         nwarps_per_row, lane);
+        fused_mmq_mw_commit_row(dv, row, warp_id, warp_in_row, nwarps_per_row,
+                                row_in_block, lane, sum, s_warp_partials);
+    }
+}
+
+// Fused Q/K/V from a layer-shared global xq8k buffer (one quantize before launch).
+extern "C" __global__ void gemv_q4k_q8kin_qkv_mw_kernel(
+    const unsigned char* __restrict__ wq,
+    const unsigned char* __restrict__ wk,
+    const unsigned char* __restrict__ wv,
+    const unsigned char* __restrict__ xq8k,
+    float*                __restrict__ dq,
+    float*                __restrict__ dk,
+    float*                __restrict__ dv,
+    unsigned int q_rows,
+    unsigned int kv_rows,
+    unsigned int blocks_per_row)
+{
+    __shared__ float s_warp_partials[32];
+
+    const unsigned int nwarps_per_row = 4u;
+    const unsigned int rows_per_block = 8u;
+    const unsigned int warps_per_block = blockDim.x >> OX_WAVE_LOG2;
+    if (warps_per_block < rows_per_block * nwarps_per_row) return;
+
+    unsigned int tid = threadIdx.x;
+    unsigned int warp_id = tid >> OX_WAVE_LOG2;
+    unsigned int lane    = tid & OX_LANE_MASK;
+    unsigned int row_in_block = warp_id / nwarps_per_row;
+    unsigned int warp_in_row  = warp_id % nwarps_per_row;
+    unsigned int row = blockIdx.x * rows_per_block + row_in_block;
+    if (row_in_block >= rows_per_block) return;
+
+    if (row < q_rows) {
+        const unsigned char* row_blocks = wq + (size_t)row * blocks_per_row * 144u;
+        float sum = 0.0f;
+        for (unsigned int b = warp_in_row; b < blocks_per_row; b += nwarps_per_row) {
+            const unsigned char* w_blk = row_blocks + (size_t)b * 144u;
+            const unsigned char* q8_blk = xq8k + (size_t)b * 292u;
+            sum += q4k_q8kin_block_dot_dp4a(w_blk, q8_blk, lane);
+        }
+        sum = warp_reduce_sum(sum);
+        fused_mmq_mw_commit_row(dq, row, warp_id, warp_in_row, nwarps_per_row,
+                                row_in_block, lane, sum, s_warp_partials);
+    }
+    __syncthreads();
+
+    if (row < kv_rows) {
+        const unsigned char* row_blocks = wk + (size_t)row * blocks_per_row * 144u;
+        float sum = 0.0f;
+        for (unsigned int b = warp_in_row; b < blocks_per_row; b += nwarps_per_row) {
+            const unsigned char* w_blk = row_blocks + (size_t)b * 144u;
+            const unsigned char* q8_blk = xq8k + (size_t)b * 292u;
+            sum += q4k_q8kin_block_dot_dp4a(w_blk, q8_blk, lane);
+        }
+        sum = warp_reduce_sum(sum);
+        fused_mmq_mw_commit_row(dk, row, warp_id, warp_in_row, nwarps_per_row,
+                                row_in_block, lane, sum, s_warp_partials);
+    }
+    __syncthreads();
+
+    if (row < kv_rows) {
+        const unsigned char* row_blocks = wv + (size_t)row * blocks_per_row * 144u;
+        float sum = 0.0f;
+        for (unsigned int b = warp_in_row; b < blocks_per_row; b += nwarps_per_row) {
+            const unsigned char* w_blk = row_blocks + (size_t)b * 144u;
+            const unsigned char* q8_blk = xq8k + (size_t)b * 292u;
+            sum += q4k_q8kin_block_dot_dp4a(w_blk, q8_blk, lane);
+        }
+        sum = warp_reduce_sum(sum);
+        fused_mmq_mw_commit_row(dv, row, warp_id, warp_in_row, nwarps_per_row,
+                                row_in_block, lane, sum, s_warp_partials);
+    }
 }
 
 // --------------------------------------------------------------------------
