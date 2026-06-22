@@ -1,0 +1,30 @@
+oxidize-core/src/compute/quantization.rs
+  s_1697c02732864d::t_34b352f9f09ab6 48-50
+  s_1697c02732864d::t_7ef465d04d358a 238-273,278
+oxidize-core/src/compute/tensor/kernels/gemv.rs
+  s_1697c02732864d::t_817861522a9c2d 456-479
+  s_1697c02732864d::t_f203d1cd2b09ea 533
+oxidize-core/src/compute/quantization/iq_grids.rs
+  s_1697c02732864d::t_5826098d2d3bb3 1-94
+oxidize-core/src/compute/quantization/quant_dispatch.rs
+  s_1697c02732864d::t_16631b75936e95 84-91
+oxidize-core/src/compute/quantization/quant_iq_series.rs
+  s_1697c02732864d::t_b785ee9b334585 161-249
+  s_1697c02732864d::t_e53e38e6e2fbea 3-6
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "39c0105ec7a5f074f311820d2fa45ae42ca04bb6",
+  "prompts": {},
+  "sessions": {
+    "s_1697c02732864d": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "7915669e-551c-4bdd-9a20-841308d4c91a",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
