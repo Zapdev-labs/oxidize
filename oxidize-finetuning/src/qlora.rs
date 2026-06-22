@@ -199,8 +199,8 @@ impl QLoRAAdapter {
             )));
         }
 
-        let base_w = self.dequantize_base();
         let (in_dim, out_dim) = (self.in_dim, self.out_dim);
+        let base_w = self.dequantize_base();
 
         // Base matmul: out[t][o] = sum_i base_w[o * in_dim + i] * xs[t * in_dim + i]
         let mut outs = vec![0.0_f32; count * out_dim];
@@ -468,7 +468,7 @@ mod tests {
 
     #[test]
     fn qlora_forward_wrong_xs_len_returns_err() {
-        let q = make_qlora(8, 16);
+        let mut q = make_qlora(8, 16);
         let result = q.forward_batch(&[0.0_f32; 7], 1);
         assert!(result.is_err());
     }

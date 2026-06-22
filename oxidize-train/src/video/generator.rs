@@ -817,6 +817,7 @@ mod tests {
         let ctx = cfg.context_frames * frame;
         let mut context = Vec::new();
         let mut target = Vec::new();
+        let mut pair_clip = Vec::new();
         for i in 0..20 {
             let phase = i as f32 * 0.1;
             let mut ctx_vec = vec![0.0; ctx];
@@ -831,11 +832,12 @@ mod tests {
             }
             context.push(ctx_vec);
             target.push(tgt);
+            pair_clip.push(i / 4);
         }
         GenDataset {
             context,
             target,
-            pair_clip: vec![0; context.len()],
+            pair_clip,
             frames: cfg.frames,
             context_frames: cfg.context_frames,
         }
