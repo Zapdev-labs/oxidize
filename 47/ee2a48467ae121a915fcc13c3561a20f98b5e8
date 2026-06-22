@@ -1,0 +1,26 @@
+oxidize-cpp/tests/kernels_test.cpp
+  s_5b078de97b8925::t_b0464d296a6dbe 1-3,5-8,10-86,88-125
+  s_5b078de97b8925::t_adf47f4e537ea4 4,9
+  s_5b078de97b8925::t_73e81672e91831 87
+oxidize-cpp/include/oxidize/kernels.hpp
+  s_5b078de97b8925::t_e04777030c7442 1-55
+oxidize-cpp/src/kernels.cpp
+  s_5b078de97b8925::t_46648b57644c94 1-70,72-249
+  s_5b078de97b8925::t_d9919431bf5179 71
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "47ee2a48467ae121a915fcc13c3561a20f98b5e8",
+  "prompts": {},
+  "sessions": {
+    "s_5b078de97b8925": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a2fd32be-d532-4929-8226-7967c93996a1",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
