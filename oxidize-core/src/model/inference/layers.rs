@@ -93,15 +93,14 @@ impl InferenceModel {
         {
             return false;
         }
-        // Per-head Q/K norm (Qwen3-style QK-RMSNorm). The GPU fused path CAN
-        // apply this (per-head [head_dim] rms_norm before RoPE), but it is OFF by
-        // default: routing a QK-norm model to the GPU currently diverges from the
-        // validated CPU output on the first token and only buys ~6% on L4, so the
-        // safe default is the CPU path. Opt in with `OX_GPU_QK_NORM=1` for
-        // experimentation (kernel + plumbing live in gpu_attn_block_fused_q4k).
+        // Per-head Q/K norm (Qwen3-style QK-RMSNorm). The fused GPU path applies
+        // per-head [head_dim] rms_norm before RoPE in gpu_attn_block_fused_q4k.
+        // Without this, Qwen3 models fall back to the full CPU decode path (~10×
+        // slower than llama.cpp on GPU). Set `OX_GPU_QK_NORM=0` to force CPU.
         if !layer.attn_q_norm.is_empty() || !layer.attn_k_norm.is_empty() {
-            let qk_norm_gpu =
-                std::env::var("OX_GPU_QK_NORM").is_ok_and(|v| v != "0" && !v.is_empty());
+            let qk_norm_gpu = std::env::var("OX_GPU_QK_NORM")
+                .map(|v| v != "0" && !v.is_empty())
+                .unwrap_or(true);
             if !qk_norm_gpu {
                 return false;
             }
@@ -257,6 +256,7 @@ impl InferenceModel {
                         crate::cuda::gpu_kv_reset().map_err(|e| {
                             ModelError::InferenceFailed(format!("gpu_kv_reset: {e}"))
                         })?;
+                        let _ = crate::cuda::gpu_decode_graph_reset(kv_cfg.layer_count);
                     }
                     true
                 }
@@ -268,6 +268,15 @@ impl InferenceModel {
         #[cfg(not(feature = "cuda"))]
         let gpu_attn = false;
         let _ = gpu_attn;
+
+        #[cfg(feature = "cuda")]
+        if gpu_native && pos > 0 {
+            let _ = crate::cuda::gpu_decode_graph_set_token(
+                pos as u32,
+                cfg.context_size as u32,
+                self.pending_embed_token.unwrap_or(0) as u32,
+            );
+        }
 
         let ws = &mut self.workspace;
 
@@ -295,6 +304,11 @@ impl InferenceModel {
             // Per-layer RoPE theta and sliding-window size (Gemma local/global mix).
             let layer_rope = cfg.layer_rope_theta(layer_idx);
             let layer_window = cfg.layer_sliding_window(layer_idx);
+
+            #[cfg(feature = "cuda")]
+            let mut decode_graph_launched = false;
+            #[cfg(not(feature = "cuda"))]
+            let decode_graph_launched = false;
 
             if is_shortconv {
                 // ---- LFM2 short-convolution token mixing ----
@@ -579,6 +593,17 @@ impl InferenceModel {
                 }
             } else if !layer.attn_q.is_empty() {
                 // ---- Standard attention ----
+                #[cfg(feature = "cuda")]
+                if gpu_native && gpu_attn && pos > 0 {
+                    decode_graph_launched = crate::cuda::gpu_decode_layer_graph_begin(
+                        layer_idx,
+                        pos,
+                        cfg.context_size,
+                    )
+                    .map_err(|e| ModelError::InferenceFailed(format!("cuda_graph_begin: {e}")))?;
+                }
+
+                if !decode_graph_launched {
                 // Look up the KV cache index for this attention layer.  Non-attention
                 // layers are skipped above, so this entry is always Some for this path.
                 let kv_layer_idx = self
@@ -1299,6 +1324,7 @@ impl InferenceModel {
                         ws.x[i] += attn_out[i];
                     }
                 }
+                } // !decode_graph_launched
             }
 
             // ---- FFN (shared between Mamba and standard layers) ----
@@ -1316,7 +1342,9 @@ impl InferenceModel {
             // GPU-native dense FFN: rms-norm + gate/up/silu/down + residual stay on
             // the GPU; hidden state is NOT downloaded between layers.
             #[cfg(feature = "cuda")]
-            let gpu_ran_ffn = if gpu_native && has_dense_ffn && !has_moe && !cfg.sandwich_norm {
+            let gpu_ran_ffn = if decode_graph_launched {
+                true
+            } else if gpu_native && has_dense_ffn && !has_moe && !cfg.sandwich_norm {
                 let gate = Self::q4k_or_q6k_bytes(&layer.ffn_gate).ok_or_else(|| {
                     ModelError::InferenceFailed("gpu_native: ffn_gate not Q4K/Q6K".into())
                 })?;
@@ -1345,6 +1373,12 @@ impl InferenceModel {
             };
             #[cfg(not(feature = "cuda"))]
             let gpu_ran_ffn = false;
+
+            #[cfg(feature = "cuda")]
+            if gpu_native && gpu_attn && pos > 0 && !decode_graph_launched {
+                crate::cuda::gpu_decode_layer_graph_end(layer_idx, pos, cfg.context_size)
+                    .map_err(|e| ModelError::InferenceFailed(format!("cuda_graph_end: {e}")))?;
+            }
 
             if (has_dense_ffn || has_moe) && !gpu_ran_ffn {
                 let ffn_out = &mut ws.hidden_a[..h];
