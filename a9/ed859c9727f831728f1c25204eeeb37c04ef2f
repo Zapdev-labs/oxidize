@@ -1,0 +1,81 @@
+oxidize-golang/core/flash_attention/flash_attention.go
+  s_85db2d52afb882::t_8ac6755e0e328f 153-154,175
+oxidize-golang/internal/gguf/writer.go
+  s_85db2d52afb882::t_a1985655c9e31e 112-115
+  s_85db2d52afb882::t_58fadfca11e406 155
+evidence/task-10-chat.txt
+  s_85db2d52afb882::t_95810254d4db75 1
+oxidize-golang/scripts/manual_qa.sh
+  s_85db2d52afb882::t_9c26220993d363 26-27
+  s_85db2d52afb882::t_761b4f2e323044 40,45,50
+oxidize-golang/internal/gguf/reader.go
+  s_85db2d52afb882::t_581d894866d13b 9-10
+  s_85db2d52afb882::t_ef2ebc7dc4b8dc 119-121
+oxidize-golang/core/ggufcore/gguf.go
+  s_85db2d52afb882::t_2e77467a6dcb8a 189,191-192
+  s_85db2d52afb882::t_ab72a9b5eed316 234,236-237
+oxidize-golang/internal/gguf/errors.go
+  s_85db2d52afb882::t_728317df52620f 32-35
+oxidize-golang/core/backends/cpu/cpu.go
+  s_85db2d52afb882::t_a8bb9aa6d92c8c 129,131,139,143
+  s_85db2d52afb882::t_cdd12f8490aec3 135,138
+evidence/task-10-completions.txt
+  s_85db2d52afb882::t_95810254d4db75 1
+evidence/task-10-embeddings.txt
+  s_85db2d52afb882::t_95810254d4db75 1
+evidence/task-10-stream.txt
+  s_85db2d52afb882::t_95810254d4db75 1,3
+oxidize-golang/core/backend/backend_test.go
+  s_85db2d52afb882::t_d1585751319c84 62-68
+oxidize-golang/core/quantization/dequant_k.go
+  s_85db2d52afb882::t_dc616330e6981e 76-83
+  s_85db2d52afb882::t_ed2c611be05600 20-22,24-45
+  s_85db2d52afb882::t_5648ee418082a8 119-125,138,140,142-158
+  s_85db2d52afb882::t_8266feda9c25eb 226,229-232,234-247
+  s_85db2d52afb882::t_47ed39d6432769 62,65-69,71-75,84-113
+  s_85db2d52afb882::t_268a0a2bac4637 176-179,181-209
+oxidize-golang/internal/gguf/gguf_test.go
+  s_85db2d52afb882::t_23a6943581f9f6 47-85
+oxidize-golang/internal/gguf/parse.go
+  s_85db2d52afb882::t_47da2218be6dd6 39-107
+  s_85db2d52afb882::t_830de72ae669fc 5
+oxidize-golang/core/backend/backend.go
+  s_85db2d52afb882::t_c470c3013379e8 73
+oxidize-golang/core/tensor/gemv.go
+  s_85db2d52afb882::t_8dc597778b886e 82
+  s_85db2d52afb882::t_d1c50b268e5c17 154
+oxidize-golang/internal/api/responses_test.go
+  s_85db2d52afb882::t_b252dd2839b9d5 48
+  s_85db2d52afb882::t_7c68885db4a637 64
+oxidize-golang/internal/serviceinfo/models.go
+  s_85db2d52afb882::t_25daf525463da8 12-13
+  s_85db2d52afb882::t_30a81d004dc252 42-49
+  s_85db2d52afb882::t_a85eddeaace461 50
+oxidize-golang/internal/api/responses.go
+  s_85db2d52afb882::t_099d02c4a808a4 9-11,16,20-21
+  s_85db2d52afb882::t_5ffde40155769b 94
+  s_85db2d52afb882::t_be222f9f894a60 117
+  s_85db2d52afb882::t_53405c5ca70922 127,129
+  s_85db2d52afb882::t_58e9192b295f80 144,147
+  s_85db2d52afb882::t_984214c9307906 174-175
+evidence/task-10-auth.txt
+  s_85db2d52afb882::t_95810254d4db75 1
+oxidize-golang/internal/cli/cli_test.go
+  s_85db2d52afb882::t_37f8b8582155e3 42-46
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "a9ed859c9727f831728f1c25204eeeb37c04ef2f",
+  "prompts": {},
+  "sessions": {
+    "s_85db2d52afb882": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "465c1bf2-e828-4116-bff1-d05604f189d9",
+        "model": "default"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

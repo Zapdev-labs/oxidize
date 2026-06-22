@@ -1,0 +1,19 @@
+oxidize-merge/src/writer.rs
+  s_cd586a2897ef61::t_069d5d6c042504 27-31,197-202,206-207
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "b707c5b9f57348af5639355cd6728da4a2da0bb9",
+  "prompts": {},
+  "sessions": {
+    "s_cd586a2897ef61": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ee77d-c9cf-75f0-83e1-340f811bcb1d",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

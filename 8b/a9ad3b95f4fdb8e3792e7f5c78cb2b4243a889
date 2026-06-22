@@ -1,0 +1,30 @@
+Cargo.toml
+  s_2ea1597e4dcc6e::t_49ffd206abfd82 36-39
+oxidize-core/src/compute/flash_attention.rs
+  s_2ea1597e4dcc6e::t_795d73a10000d6 348-369,371,375-376
+  s_2ea1597e4dcc6e::t_6efd6c84700ab7 60-94,96-104,107-108,110-111
+  s_2ea1597e4dcc6e::t_bb3326e3ba8c53 246-256,263-299
+  s_2ea1597e4dcc6e::t_555b3051ec90c7 123-155,157-164,167,172-173
+oxidize-core/src/compute/tensor/kernels.rs
+  s_2ea1597e4dcc6e::t_7db3baca814daa 5310-5313,5315
+  s_2ea1597e4dcc6e::t_1d964ba157fa09 659-664
+  s_2ea1597e4dcc6e::t_53fb4f23a7219f 709-713,722-726
+  s_2ea1597e4dcc6e::t_7c6c669f414f39 481-553,559-561
+  s_2ea1597e4dcc6e::t_5c95a19e5e79be 845-846,866-870,879-883
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.8",
+  "base_commit_sha": "8ba9ad3b95f4fdb8e3792e7f5c78cb2b4243a889",
+  "prompts": {},
+  "sessions": {
+    "s_2ea1597e4dcc6e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e3a0c9da-56bf-4fe8-a850-3c50176f1c20",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

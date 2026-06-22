@@ -1,0 +1,20 @@
+oxidize-core/src/model/inference.rs
+  s_d8b5af6870ab84::t_a630976e440523 52
+  s_d8b5af6870ab84::t_e3791816fffecb 321-324
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "3042939d7a91ef48d4ff343bda797773450f9e95",
+  "prompts": {},
+  "sessions": {
+    "s_d8b5af6870ab84": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "747c40af-74b1-4c68-a8f8-83589cf844b7",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

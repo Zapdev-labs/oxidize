@@ -1,0 +1,19 @@
+oxidize-quantize/src/main.rs
+  s_d696a9bcb3c378::t_ec1e02e3b84790 73-75
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "7fed51c6d4826b4f5909041957a3da2ad412d7ab",
+  "prompts": {},
+  "sessions": {
+    "s_d696a9bcb3c378": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "853d1fc4-7588-4e2c-8845-bd957bd215b6",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

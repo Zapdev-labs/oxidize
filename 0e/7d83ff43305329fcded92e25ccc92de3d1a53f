@@ -1,0 +1,29 @@
+oxidize-golang/core/tensor/gemv_bench_test.go
+  s_1bbe4678bd45c7::t_a08fb8f3dae5b4 1-27
+oxidize-golang/core/tensor/gemv_transposed_test.go
+  s_1bbe4678bd45c7::t_ac1fcc0e767881 1-77
+oxidize-golang/core/model/dflash_weights.go
+  s_1bbe4678bd45c7::t_b63636a9c374ce 88-91
+oxidize-golang/internal/cli/bench.go
+  s_1bbe4678bd45c7::t_e24560ed5381a9 160-171
+  s_1bbe4678bd45c7::t_a1bad862fb5f4f 8-9
+  s_1bbe4678bd45c7::t_49a112104310f0 45
+oxidize-golang/core/tensor/gemv.go
+  s_1bbe4678bd45c7::t_aec7a69df920a6 50-61,63-67,69-70
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.8",
+  "base_commit_sha": "0e7d83ff43305329fcded92e25ccc92de3d1a53f",
+  "prompts": {},
+  "sessions": {
+    "s_1bbe4678bd45c7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "810efb90-a3c3-4126-95fc-049cc89b3606",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

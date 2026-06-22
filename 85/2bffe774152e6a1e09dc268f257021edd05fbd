@@ -1,0 +1,57 @@
+oxidize-server/src/app.rs
+  s_9be9193dce4a26::t_814d3dcef91569 12
+oxidize-cli/src/bin/bench.rs
+  s_9be9193dce4a26::t_63437bf313a8bd 395
+oxidize-server/src/metrics.rs
+  s_9be9193dce4a26::t_5f9098c61b6d08 12
+oxidize-finetuning/src/trainer.rs
+  s_9be9193dce4a26::t_56776b36fac114 65
+  s_9be9193dce4a26::t_03828a3c391fe5 164
+oxidize-core/src/model/inference.rs
+  s_9be9193dce4a26::t_4b5f70f2566213 3212
+oxidize-core/src/model/speculative.rs
+  s_9be9193dce4a26::t_2833d779a25af9 27
+  s_9be9193dce4a26::t_c4a9e42d17b1fb 28
+  s_9be9193dce4a26::t_3b1ea17abd9df7 29
+  s_9be9193dce4a26::t_3399b121f8975c 159
+Dockerfile.cli
+  s_9be9193dce4a26::t_7d0f1a4a3b6c39 11-14
+  s_9be9193dce4a26::t_0fbe901235a932 22-25
+  s_9be9193dce4a26::t_de0a1f4319117a 1
+oxidize-core/src/compute/tensor.rs
+  s_9be9193dce4a26::t_1ea96afaa5b1b3 1688,3630
+  s_9be9193dce4a26::t_c3c8488f7ae0ec 335,427,480,525,661,1488,1622,1744,1851,1910,2010,2122,2270,2481,2965,3176,3659,4440,4513
+  s_9be9193dce4a26::t_3f434d89fbe1c4 3632
+oxidize-server/src/routes/chat.rs
+  s_9be9193dce4a26::t_ed1105fa7bb38e 19
+  s_9be9193dce4a26::t_aec707806768ba 90
+  s_9be9193dce4a26::t_253cc8d624a66c 26
+oxidize-core/src/format/safetensors_to_gguf.rs
+  s_9be9193dce4a26::t_7cc597e1da5bc2 641
+oxidize-core/src/model/prefix_cache.rs
+  s_9be9193dce4a26::t_294c0ecb6d32f9 34
+oxidize-finetuning/src/lora.rs
+  s_9be9193dce4a26::t_8c95cbe9212a83 141
+Dockerfile.server
+  s_9be9193dce4a26::t_0b9b35354fbf29 1
+  s_9be9193dce4a26::t_587e5329a9e752 11-14
+  s_9be9193dce4a26::t_384ee1d6eca364 22-25
+oxidize-core/src/backends/mlx.rs
+  s_9be9193dce4a26::t_4541543d1b0cf2 263-267
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.3",
+  "base_commit_sha": "852bffe774152e6a1e09dc268f257021edd05fbd",
+  "prompts": {},
+  "sessions": {
+    "s_9be9193dce4a26": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_15e377a37ffe7GMeC36rwZH6Yx",
+        "model": "k2p6"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

@@ -1,0 +1,9 @@
+.github/workflows/python.yml
+  ai_agent 1-31
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "6e18427325b9fba6b9d6720315642eb16605b62a",
+  "prompts": {}
+}

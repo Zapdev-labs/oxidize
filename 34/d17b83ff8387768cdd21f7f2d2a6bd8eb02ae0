@@ -1,0 +1,40 @@
+oxidize-core/kernels/gemv_f32.cu
+  s_ead96b63491235::t_70fdb6231a207a 247,277,369,435,495,550,634,714
+  s_ead96b63491235::t_b2ab3a184e0904 21-51
+  s_ead96b63491235::t_1e41aa6ea47bb6 87,107,240,270,363,430,490,545,629,710
+  s_ead96b63491235::t_b740a74d41afad 65-72,74
+  s_ead96b63491235::t_76d6882faeb59f 92
+  s_ead96b63491235::t_35fe2c47a805f1 362,709
+  s_dab23adf311f95::t_b2eeba58c0a542 20
+  s_ead96b63491235::t_d2bf706e101b11 86,106,239,269,429,489,544,628
+  s_ead96b63491235::t_786d01c8dbd429 115
+oxidize-core/src/backends/rocm.rs
+  s_ead96b63491235::t_4da8a590d7803e 454
+  s_ead96b63491235::t_b9e651ffb334f8 577
+  s_ead96b63491235::t_7df94355b069d2 314-322
+  s_ead96b63491235::t_cadb8ce20ec9dd 401
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.8",
+  "base_commit_sha": "34d17b83ff8387768cdd21f7f2d2a6bd8eb02ae0",
+  "prompts": {},
+  "sessions": {
+    "s_dab23adf311f95": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "46bdccab-e382-4179-918c-0641791e7f3b",
+        "model": "claude-sonnet-4-6"
+      },
+      "human_author": null
+    },
+    "s_ead96b63491235": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "965c6551-fb19-4ba5-b9fa-dc013a07b328",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

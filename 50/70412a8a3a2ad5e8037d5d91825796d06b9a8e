@@ -1,0 +1,23 @@
+oxidize-core/kernels/gemv_f32.cu
+  s_ead96b63491235::t_6e4d0b143e03d1 671
+  s_ead96b63491235::t_dd4090c3c777ac 56-60,62-64
+  s_ead96b63491235::t_4f8e64c73b3519 306
+oxidize-core/src/backends/strix.rs
+  s_ead96b63491235::t_33607e36667a91 76-79
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.8",
+  "base_commit_sha": "5070412a8a3a2ad5e8037d5d91825796d06b9a8e",
+  "prompts": {},
+  "sessions": {
+    "s_ead96b63491235": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "965c6551-fb19-4ba5-b9fa-dc013a07b328",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

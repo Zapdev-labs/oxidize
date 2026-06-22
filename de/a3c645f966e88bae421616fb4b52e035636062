@@ -1,0 +1,19 @@
+oxidize-finetuning/src/main.rs
+  s_9977901d17a81e::t_b26eb608f4786e 4,10-11,18,20-47,51,87,97,102-198,204-206,208,212-225,282,288,305,320,331-543
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.8",
+  "base_commit_sha": "dea3c645f966e88bae421616fb4b52e035636062",
+  "prompts": {},
+  "sessions": {
+    "s_9977901d17a81e": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "3cd73ec3-5368-4b64-bd49-5601fc62d824",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

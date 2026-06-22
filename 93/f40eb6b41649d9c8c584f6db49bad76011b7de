@@ -1,0 +1,38 @@
+oxidize-core/src/model/inference/forward.rs
+  s_ebdea6739e703a::t_c577465e9ceb3c 111-114
+  s_ebdea6739e703a::t_62b6fc92d89fbc 1385-1414
+  s_ec8b23f0af1de8::t_2defaf8cedc694 1253-1256
+  s_cd586a2897ef61::t_069d5d6c042504 871,998-1005,1016-1023,1132-1149,1160-1168,1217-1224
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "93f40eb6b41649d9c8c584f6db49bad76011b7de",
+  "prompts": {},
+  "sessions": {
+    "s_cd586a2897ef61": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ee77d-c9cf-75f0-83e1-340f811bcb1d",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_ebdea6739e703a": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "8a8ba380-b3c9-4d0a-8393-a3d777cf6f7f",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_ec8b23f0af1de8": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "3715abea-0d3e-44e5-acf7-58ce8583b08f",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

@@ -1,0 +1,19 @@
+oxidize-python/oxidize_python/cli.py
+  ai_agent 1-129
+oxidize-python/pyproject.toml
+  ai_agent 1-34
+oxidize-python/.gitignore
+  ai_agent 1-5
+oxidize-python/README.md
+  ai_agent 1-24
+oxidize-python/uv.lock
+  ai_agent 1-107
+oxidize-python/oxidize_python/__init__.py
+  ai_agent 1-11
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "fc17177a767c21526cdf325b143637cb4a31f02b",
+  "prompts": {}
+}

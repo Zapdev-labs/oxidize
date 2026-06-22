@@ -1,0 +1,21 @@
+oxidize-golang/core/oxk/oxk_test.go
+  s_9977901d17a81e::t_144c9016e819c8 1-166
+oxidize-golang/core/oxk/oxk.go
+  s_9977901d17a81e::t_144c9016e819c8 1-475
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.8",
+  "base_commit_sha": "90a72643cecfb3fc408a67d738a93ee2e5d5b744",
+  "prompts": {},
+  "sessions": {
+    "s_9977901d17a81e": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "3cd73ec3-5368-4b64-bd49-5601fc62d824",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

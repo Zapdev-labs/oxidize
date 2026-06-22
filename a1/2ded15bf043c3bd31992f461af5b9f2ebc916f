@@ -1,0 +1,48 @@
+oxidize-core/src/backends/cuda/gpu_native_forward.rs
+  s_7d0d50bc68f118::t_a4d17bc11d241e 30,33-42,46-47,108
+  s_7d0d50bc68f118::t_35f8c11f8ee2fd 533-537
+  s_7d0d50bc68f118::t_4df3d37554d9f6 1719-1724,1727
+  s_7d0d50bc68f118::t_88390770dab463 1467,1469-1470,1472-1473,1503-1525
+  s_7d0d50bc68f118::t_193b70df04039b 771,776,778-781,788-789
+  s_7d0d50bc68f118::t_a7bcb9eefed6ed 791
+  s_7d0d50bc68f118::t_7bbd075087e949 1584
+  s_7d0d50bc68f118::t_b7a2be11c7db70 587,589-592,605,607-610
+  s_7d0d50bc68f118::t_94a45018aba82f 369-373,379-390
+  s_7d0d50bc68f118::t_24b927cae1d984 586,588,604,606
+  s_7d0d50bc68f118::t_659f5dff128093 1468,1471,1474-1502
+  s_7d0d50bc68f118::t_741c18536ff124 790,792-793
+  s_7d0d50bc68f118::t_e62dad8e3e4872 31-32,43-45
+  s_7d0d50bc68f118::t_0186b2bd510064 1441-1466
+  s_7d0d50bc68f118::t_747c6cde0189cc 611,817-835
+  s_7d0d50bc68f118::t_ecc89c29ef66af 861-869
+  s_7d0d50bc68f118::t_562914545b173d 581-585,600-603
+  s_7d0d50bc68f118::t_dd85cc8f9668b3 540-554,556-557,563-571,573-574,580
+  s_7d0d50bc68f118::t_7399e52e35e88e 1526,1582,1585-1639
+  s_7d0d50bc68f118::t_a3759fff43cf09 1706-1718,1726,1733
+  s_7d0d50bc68f118::t_78d61a7dd7989c 594-599,612-622
+  s_7d0d50bc68f118::t_1e821b3faddd1d 142
+  s_7d0d50bc68f118::t_f4b8482f571a08 1704
+  s_7d0d50bc68f118::t_bba824756f138d 1734-1744
+  s_7d0d50bc68f118::t_5228b144aa62a4 53,57-107
+  s_7d0d50bc68f118::t_e27943bc34afac 143
+  s_7d0d50bc68f118::t_14e6d58413a891 538
+  s_7d0d50bc68f118::t_388f027b5b7ea1 837
+  s_7d0d50bc68f118::t_eca12256779528 1578-1579
+  s_7d0d50bc68f118::t_10d9b633e3a645 785
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "a12ded15bf043c3bd31992f461af5b9f2ebc916f",
+  "prompts": {},
+  "sessions": {
+    "s_7d0d50bc68f118": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "574f82cd-95dc-47f4-8725-bdd25dbad482",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

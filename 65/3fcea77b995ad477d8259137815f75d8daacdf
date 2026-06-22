@@ -1,0 +1,19 @@
+oxidize-core/src/compute/kv_cache/tests.rs
+  s_cd586a2897ef61::t_069d5d6c042504 1-227,229-251,253-287,289-290,292-322,324-325,327-357,359-360,362-392,394-431,433-441,443-506,508-541,543-585,587-590,597-620,622-625,632-788,790-856,866-882,884-980,982-1003,1005-1006,1008-1029,1031-1032,1034-1079,1081-1082,1084-1108
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "653fcea77b995ad477d8259137815f75d8daacdf",
+  "prompts": {},
+  "sessions": {
+    "s_cd586a2897ef61": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ee77d-c9cf-75f0-83e1-340f811bcb1d",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

@@ -1,0 +1,229 @@
+.omo/ulw-loop/evidence/gpu-k8s-rust-core-green.txt
+  s_ff1a0084ebdb02::t_f6c9b5de1f2ea5 1-570
+.omo/ulw-loop/evidence/gpu-k8s-go-tmux-final.txt
+  s_ff1a0084ebdb02::t_d702f2f1717403 1-24
+oxidize-core/src/lib.rs
+  s_cbe2b017104a95::t_fefbd3e55955e9 50-51
+.omo/ulw-loop/evidence/gpu-k8s-rust-tmux-final.txt
+  s_ff1a0084ebdb02::t_d96acf73cb190a 1-67
+.omo/ulw-loop/evidence/gpu-k8s-go-review-green.txt
+  s_ff1a0084ebdb02::t_6d5a53bec7400d 1
+oxidize-core/build.rs
+  s_e1faced19cd1f4::t_aa1ebbe621dfea 29
+  s_85b25d1872420c::t_6dffddc7940cb1 50-92
+  s_1330dccb364bc7::t_1cc1929a2cacb9 24-28
+oxidize-golang/core/gpucluster/gpucluster_test.go
+  s_cbe2b017104a95::t_76917b075a528b 1-191
+.omo/ulw-loop/evidence/gpu-k8s-rust-review-green.txt
+  s_ff1a0084ebdb02::t_6d5a53bec7400d 1
+  s_ff1a0084ebdb02::t_fb0e55b264e1de 2-28
+.omo/ulw-loop/evidence/gpu-k8s-go-mesh-green.txt
+  s_ff1a0084ebdb02::t_d2c259d3487573 1
+.omo/ulw-loop/evidence/gpu-k8s-python-target-green.txt
+  s_ff1a0084ebdb02::t_0a80ae4a5937b2 2-7
+  s_ff1a0084ebdb02::t_d2c259d3487573 1
+oxidize-cli/src/main.rs
+  s_cbe2b017104a95::t_ab44e022f4ba5c 567-633,649-651,667-679,685-717,719-724,726-746
+  s_be560b9f1c5f07::t_57cb06ae130777 634-637,641-648,652-655,659-666
+  s_be560b9f1c5f07::t_202725944bb01a 718,725
+  s_d4a773a2729b7f::t_4fdbe86c89e638 638-640,656-658
+  s_cbe2b017104a95::t_fefbd3e55955e9 680-684
+  s_cbe2b017104a95::t_1f9ab788903e8b 762-770
+oxidize-golang/core/gpucluster/gpucluster.go
+  s_cbe2b017104a95::t_bf4143ad2cf367 1-400,402-425,427-428
+  s_05d1308e4314e8::t_b59e4ca4dbcd76 401
+  s_05d1308e4314e8::t_8ed22cdadff514 426
+docs/gpu_cluster_spec.md
+  s_9a7118fe3b3328::t_0bed1081a1ed4d 292-304
+  s_9a7118fe3b3328::t_5dc1be44fbf903 579
+  s_9a7118fe3b3328::t_3b4f076db59a37 334-335
+.omo/ulw-loop/evidence/gpu-k8s-python-green-attempt1.txt
+  s_ff1a0084ebdb02::t_41a2d8bec14eae 1
+  s_ff1a0084ebdb02::t_40df64edcfe39a 2-7
+.omo/ulw-loop/evidence/gpu-k8s-python-target-review-green.txt
+  s_ff1a0084ebdb02::t_315772b51ff7b9 1
+  s_ff1a0084ebdb02::t_437102548d13f6 2-7
+.omo/ulw-loop/evidence/gpu-k8s-go-review-red.txt
+  s_ff1a0084ebdb02::t_063a985317d15b 1-2
+oxidize-golang/internal/cli/cli.go
+  s_6037dcd77f0dff::t_b16b7a62540a0a 208
+  s_cbe2b017104a95::t_29317114830844 33-34
+oxidize-golang/internal/cli/gpucluster.go
+  s_cbe2b017104a95::t_6dd1d57939bcb8 1-133
+.omo/ulw-loop/evidence/gpu-k8s-rust-mesh-green.txt
+  s_ff1a0084ebdb02::t_d2c259d3487573 1
+  s_ff1a0084ebdb02::t_0a80ae4a5937b2 2-110
+.omo/ulw-loop/evidence/gpu-k8s-go-all.txt
+  s_ff1a0084ebdb02::t_80f20385cd5fbe 12-44
+  s_ff1a0084ebdb02::t_f6c9b5de1f2ea5 1-11
+.omo/ulw-loop/evidence/gpu-k8s-python-all.txt
+  s_ff1a0084ebdb02::t_f6c9b5de1f2ea5 1
+  s_ff1a0084ebdb02::t_80f20385cd5fbe 2
+.omo/ulw-loop/evidence/gpu-k8s-python-tmux.txt
+  s_ff1a0084ebdb02::t_fa9e23cce28de5 1-32
+.omo/ulw-loop/evidence/gpu-k8s-go-cleanup.txt
+  s_ff1a0084ebdb02::t_b39a6a842bc38a 1
+.omo/ulw-loop/evidence/gpu-k8s-go-red.txt
+  s_ff1a0084ebdb02::t_82368570294f24 1-2
+.omo/ulw-loop/evidence/gpu-k8s-rust-cleanup-final.txt
+  s_ff1a0084ebdb02::t_d96acf73cb190a 1
+.omo/ulw-loop/evidence/gpu-k8s-rust-red.txt
+  s_ff1a0084ebdb02::t_2cf9d71efee372 2-5
+  s_ff1a0084ebdb02::t_82368570294f24 1
+.omo/ulw-loop/evidence/gpu-k8s-rust-green.txt
+  s_ff1a0084ebdb02::t_6519dfa9882576 1-28
+.omo/ulw-loop/evidence/gpu-k8s-rust-cleanup.txt
+  s_ff1a0084ebdb02::t_89fa0e3923fad7 1
+.omo/ulw-loop/evidence/gpu-k8s-python-review-green.txt
+  s_ff1a0084ebdb02::t_6d5a53bec7400d 1
+  s_ff1a0084ebdb02::t_2aef24a6b2ce4d 2-7
+oxidize-python/oxidize_python/gpucluster/test_gpucluster.py
+  s_cbe2b017104a95::t_b371394ceb63aa 1-133
+oxidize-python/oxidize_python/cli.py
+  s_1bbc6da24d7b3b::t_0c2531e1c73895 474
+  s_cbe2b017104a95::t_54fc33cec4f02e 365-392,402-407,412-416,423-457
+  s_cbe2b017104a95::t_3960b142176a27 28
+  s_1bbc6da24d7b3b::t_ec72152174bdd6 393-401
+  s_1bbc6da24d7b3b::t_0497ede28f1f15 408-411
+  s_d4a773a2729b7f::t_af31ddd0481c8e 417-422
+.omo/ulw-loop/evidence/gpu-k8s-python-cleanup-final.txt
+  s_ff1a0084ebdb02::t_d702f2f1717403 1
+.omo/ulw-loop/evidence/gpu-k8s-python-tmux-final.txt
+  s_ff1a0084ebdb02::t_d702f2f1717403 1-32
+.omo/ulw-loop/evidence/gpu-k8s-rust-tmux.txt
+  s_ff1a0084ebdb02::t_89fa0e3923fad7 1-67
+.omo/ulw-loop/gpu-k8s-ports-notepad.md
+  s_ff1a0084ebdb02::t_dcf0129e48f6d4 12-33
+  s_ff1a0084ebdb02::t_71868632f2d8e5 34-48
+  s_ff1a0084ebdb02::t_691a8c58c4d4fb 1-11
+.omo/ulw-loop/evidence/gpu-k8s-python-red.txt
+  s_ff1a0084ebdb02::t_db0330ace49ad4 1-22
+.omo/ulw-loop/evidence/gpu-k8s-rust-green-attempt1.txt
+  s_ff1a0084ebdb02::t_5c5070e714a617 2-5
+  s_ff1a0084ebdb02::t_41a2d8bec14eae 1
+.omo/ulw-loop/evidence/gpu-k8s-python-cleanup.txt
+  s_ff1a0084ebdb02::t_fa9e23cce28de5 1
+.omo/ulw-loop/evidence/gpu-k8s-go-mesh-review-green.txt
+  s_ff1a0084ebdb02::t_315772b51ff7b9 1
+oxidize-golang/core/mesh/k8s_test.go
+  s_ff1a0084ebdb02::t_3a8896cfb9d19d 1-61
+  s_ff1a0084ebdb02::t_88199086605269 62-104
+.omo/ulw-loop/evidence/gpu-k8s-go-cleanup-final.txt
+  s_ff1a0084ebdb02::t_d702f2f1717403 1
+oxidize-golang/core/quantization/gemv_rust_stub.go
+  s_cbe2b017104a95::t_c04b6bf34b856e 1-13
+.omo/ulw-loop/evidence/gpu-k8s-go-green-attempt1.txt
+  s_ff1a0084ebdb02::t_41a2d8bec14eae 1
+.omo/ulw-loop/evidence/gpu-k8s-rust-mesh-review-green.txt
+  s_ff1a0084ebdb02::t_315772b51ff7b9 1-110
+oxidize-python/oxidize_python/gpucluster/__init__.py
+  s_cbe2b017104a95::t_47ca51cec74055 1-331,333-384,386,388-401
+  s_c9300717a40a8f::t_60ee7e7f4688ca 332
+  s_c9300717a40a8f::t_06ae3935882cda 385,387
+.omo/ulw-loop/evidence/gpu-k8s-go-tmux.txt
+  s_ff1a0084ebdb02::t_b39a6a842bc38a 1-24
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "7617c3d0b5bfa466b9a1b53f9df5b11b110c490e",
+  "prompts": {},
+  "sessions": {
+    "s_05d1308e4314e8": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_1504a9312ffeyxafPvATT7dKkR",
+        "model": "k2p6"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_1330dccb364bc7": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_1591f6c3cffeJjEJP6ngXiqODO",
+        "model": "k2p6"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_1bbc6da24d7b3b": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_1504aba44ffeYnx4zcCVX1baes",
+        "model": "k2p6"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_6037dcd77f0dff": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_1504acda8ffesvbj3EBusvB2ml",
+        "model": "k2p6"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_85b25d1872420c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "959b1a48-5aab-425a-a585-6ee99f086433",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_9a7118fe3b3328": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_1504a4cdeffe4lS4gJYIq2I6ap",
+        "model": "k2p6"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_be560b9f1c5f07": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_1504a7c2affe95QrJkH4sVkUFU",
+        "model": "k2p6"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_c9300717a40a8f": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_1504a6808ffepLV8mCsJBYngSh",
+        "model": "k2p6"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_cbe2b017104a95": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "17a42a49-1f39-45ee-9679-d827d9a3f50c",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_d4a773a2729b7f": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_14d94d1adffeVORuIAApUqmlbi",
+        "model": "k2p6"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_e1faced19cd1f4": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_14d958503ffeQSE9BaGDSZW2IV",
+        "model": "k2p6"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_ff1a0084ebdb02": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ea3d6-beae-7392-a0b2-58ba10514bd6",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

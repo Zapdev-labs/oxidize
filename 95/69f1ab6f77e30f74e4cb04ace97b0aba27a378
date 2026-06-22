@@ -1,0 +1,27 @@
+CONTRIBUTING.md
+  s_e8a77e8c7516d0::t_6d6e90e2e97032 38
+.github/workflows/ci.yml
+  s_e8a77e8c7516d0::t_c67117e975d415 51-69
+scripts/check-udeps.sh
+  s_e8a77e8c7516d0::t_9a8f60924119bf 1-19
+Makefile
+  s_e8a77e8c7516d0::t_f7553b5745f9c9 3,10,15
+  s_e8a77e8c7516d0::t_c2494e09badab5 26-28
+  s_e8a77e8c7516d0::t_ea485ec02184ca 42
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.8",
+  "base_commit_sha": "9569f1ab6f77e30f74e4cb04ace97b0aba27a378",
+  "prompts": {},
+  "sessions": {
+    "s_e8a77e8c7516d0": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "5b02ddb6-d674-44cd-af8f-11cf57523d61",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

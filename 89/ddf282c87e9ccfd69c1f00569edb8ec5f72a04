@@ -1,0 +1,92 @@
+oxidize-core/src/autotune/apply.rs
+  s_0a5560a0931aeb::t_0b09fe5c6b4d60 127-128
+oxidize-core/src/compute/tensor.rs
+  s_0a5560a0931aeb::t_7e3320d34d2b05 1636
+  s_0a5560a0931aeb::t_7de60de29063f2 1637-1646
+  s_0a5560a0931aeb::t_46d72b5ba0fe15 187-190
+oxidize-cli/src/backend.rs
+  s_0a5560a0931aeb::t_636d91a5c9fdc2 10-11
+  s_0a5560a0931aeb::t_4534d47d774858 24
+  s_0a5560a0931aeb::t_b2aca7174e6ab5 37
+oxidize-core/src/lib.rs
+  s_0a5560a0931aeb::t_ed16df8293d0ad 46-49
+oxidize-core/src/autotune/detect.rs
+  s_0a5560a0931aeb::t_d42e9e71e7267c 127-128
+  s_0a5560a0931aeb::t_7c9f3f8003518c 107-108
+  s_0a5560a0931aeb::t_c498ce7f042a36 190-197
+  s_0a5560a0931aeb::t_8a17b2376927c7 42-43
+oxidize-core/src/autotune/rules.rs
+  s_0a5560a0931aeb::t_1ec4e7004b5438 575-576
+  s_0a5560a0931aeb::t_b3ebaf98af12a1 256-259,262-267
+  s_0a5560a0931aeb::t_75ce2b04c632d5 610-611
+oxidize-core/src/compute/gpu_dispatch.rs
+  s_0a5560a0931aeb::t_23f6be663d6992 74-87
+  s_0a5560a0931aeb::t_910d93c1284625 1-36,44-73,88-173
+  s_0a5560a0931aeb::t_ef9cb550fad4e6 37-43
+oxidize-core/src/mesh/rdma.rs
+  s_0a5560a0931aeb::t_563718d181f7b4 1-250,253-258
+  s_0a5560a0931aeb::t_de5fb6a2a1c635 251-252
+oxidize-core/build.rs
+  s_0a5560a0931aeb::t_8ab42ff2e1f70b 6-7
+  s_0a5560a0931aeb::t_77816c944f4c0e 38-56
+  s_0a5560a0931aeb::t_6b06410ef4aee2 119-198
+  s_0a5560a0931aeb::t_1cb0aa055b04a5 14-16
+oxidize-core/src/backend.rs
+  s_0a5560a0931aeb::t_87e7c391aa7268 184-185
+  s_0a5560a0931aeb::t_556fcd08c044ca 60-66
+  s_0a5560a0931aeb::t_24558d3cfc5e36 42
+  s_0a5560a0931aeb::t_81750f3f1e668f 11
+  s_0a5560a0931aeb::t_d147b76278ae94 199
+  s_0a5560a0931aeb::t_8e5d74b4469391 26
+oxidize-server/src/cli.rs
+  s_0a5560a0931aeb::t_0ab76904efde85 35-36
+  s_0a5560a0931aeb::t_7f25d0bc470ded 49
+Cargo.lock
+  s_191e25f446b3e3::t_aa5a2362e5bbf6 3045
+oxidize-core/kernels/gemv_f32.cu
+  s_0a5560a0931aeb::t_e3b7104ad34970 324-530
+oxidize-core/Cargo.toml
+  s_0a5560a0931aeb::t_96f3e7e598ef31 37
+  s_0a5560a0931aeb::t_5c2abf2496203a 18-19
+oxidize-core/src/backends/cuda.rs
+  s_0a5560a0931aeb::t_e28e0cefa81383 1102-1245
+  s_0a5560a0931aeb::t_03021a3b7eeaf9 190-192
+  s_0a5560a0931aeb::t_3b39baf2119f07 212-213
+oxidize-core/src/backends/rocm.rs
+  s_0a5560a0931aeb::t_988c60734899ab 508
+  s_0a5560a0931aeb::t_b1ca952cdbe474 514-525,527,532
+  s_0a5560a0931aeb::t_42061cf3d8dd0c 545-546,552-553,555-563
+  s_0a5560a0931aeb::t_360c56f503d931 1-353,406-429,435-436,442-507,509-513,526,528-531,533-544,547-551,554,564-649
+  s_0a5560a0931aeb::t_bcd2b74ea0ffa9 354-405
+  s_0a5560a0931aeb::t_2e09d9a03df1c2 430-434,437-441
+oxidize-core/src/mesh/mod.rs
+  s_0a5560a0931aeb::t_50fd49b4bc5be7 15
+  s_0a5560a0931aeb::t_166471132af4db 44-47
+oxidize-cli/src/main.rs
+  s_0a5560a0931aeb::t_619f44669a24a1 1817
+  s_0a5560a0931aeb::t_5d1efdf5cc77ed 1956
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "89ddf282c87e9ccfd69c1f00569edb8ec5f72a04",
+  "prompts": {},
+  "sessions": {
+    "s_0a5560a0931aeb": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "e3206f46-e557-4173-964c-8ecd2b0ee856",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_191e25f446b3e3": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_12bf087d5ffeAXHavCN1LZTyRP",
+        "model": "gpt-5.4-mini"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

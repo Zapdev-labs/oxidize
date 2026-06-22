@@ -1,0 +1,21 @@
+oxidize-python/oxidize_python/core/test_oxk.py
+  s_9977901d17a81e::t_e64e967ea87072 1-124
+oxidize-python/oxidize_python/core/oxk.py
+  s_9977901d17a81e::t_e64e967ea87072 1-400
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.8",
+  "base_commit_sha": "b47e9e4c487d07a71abf4c903b5894467bc119c9",
+  "prompts": {},
+  "sessions": {
+    "s_9977901d17a81e": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "3cd73ec3-5368-4b64-bd49-5601fc62d824",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

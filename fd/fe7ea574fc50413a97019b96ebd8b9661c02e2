@@ -1,0 +1,34 @@
+oxidize-core/src/format/conversion.rs
+  s_945d76c33d9b52::t_cec257d109ce42 456
+  s_945d76c33d9b52::t_bab5fabf78b948 457-502
+  s_945d76c33d9b52::t_0d6267f5140c12 174-180
+  s_945d76c33d9b52::t_81eb474bae1911 43-48,67-70
+  s_945d76c33d9b52::t_0f49aedb0aee7d 40-42,49-66,71-119
+  s_945d76c33d9b52::t_1b1de3f7dd483e 120-131
+oxidize-core/src/format/safetensors_to_gguf.rs
+  s_945d76c33d9b52::t_618b534ab1d0bd 959-962,965
+  s_945d76c33d9b52::t_91d65815cf4ffa 43-70
+  s_945d76c33d9b52::t_795ce51c6d0e37 963-964
+  s_945d76c33d9b52::t_e54845fa167e52 167,177-180,182
+  s_945d76c33d9b52::t_d33110a4e97015 2-4
+  s_945d76c33d9b52::t_db235b4b8712b6 894
+  s_945d76c33d9b52::t_e0bd568e4d28ed 1058-1060,1089
+  s_945d76c33d9b52::t_2e34ce6daf47ae 181
+  s_945d76c33d9b52::t_b5b7dbefb6e195 500-504
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "fdfe7ea574fc50413a97019b96ebd8b9661c02e2",
+  "prompts": {},
+  "sessions": {
+    "s_945d76c33d9b52": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_13cae326dffeqitvZvRCS8btTw",
+        "model": "k2p7"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

@@ -1,0 +1,21 @@
+oxidize-core/src/model/inference.rs
+  s_7db891e64d27df::t_73558c2565f414 721
+  s_7db891e64d27df::t_343114f80355b6 2258-2372
+  s_7db891e64d27df::t_04b5a4728528d4 1716-1735
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "9ac484afba42db3673a01a8382e54ead1cc28e5a",
+  "prompts": {},
+  "sessions": {
+    "s_7db891e64d27df": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d821c29a-5761-4949-8aad-c39dfe26c264",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

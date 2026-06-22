@@ -1,0 +1,20 @@
+oxidize-train/src/video/generator.rs
+  s_d696a9bcb3c378::t_1b3856396ee35a 483,485-495
+  s_d696a9bcb3c378::t_602c69cfabbbd5 170,172
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "473ac2ec9423682c41d4b0ae5ff451d70c741578",
+  "prompts": {},
+  "sessions": {
+    "s_d696a9bcb3c378": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "853d1fc4-7588-4e2c-8845-bd957bd215b6",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

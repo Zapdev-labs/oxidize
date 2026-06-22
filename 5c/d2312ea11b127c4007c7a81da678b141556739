@@ -1,0 +1,19 @@
+oxidize-core/src/model/inference/load.rs
+  s_ec8b23f0af1de8::t_718fee6104434b 536-537
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "5cd2312ea11b127c4007c7a81da678b141556739",
+  "prompts": {},
+  "sessions": {
+    "s_ec8b23f0af1de8": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "3715abea-0d3e-44e5-acf7-58ce8583b08f",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

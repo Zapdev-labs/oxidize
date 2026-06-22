@@ -1,0 +1,55 @@
+oxidize-python/oxidize_python/core/tensor/test_tensor.py
+  ai_agent 1-70
+oxidize-python/oxidize_python/core/quantization/imatrix.py
+  ai_agent 1-58
+oxidize-python/oxidize_python/core/tensor/__init__.py
+  ai_agent 1-105
+oxidize-python/oxidize_python/core/__init__.py
+  ai_agent 1-88
+oxidize-python/oxidize_python/core/quantization/types.py
+  ai_agent 1-237
+oxidize-python/oxidize_python/core/tensor/errors.py
+  ai_agent 1-46
+oxidize-python/oxidize_python/core/tensor/constants.py
+  ai_agent 1-46
+oxidize-python/oxidize_python/core/ggufcore/test_gguf.py
+  ai_agent 1-19
+oxidize-python/oxidize_python/core/ggufcore/gguf.py
+  ai_agent 1-175
+oxidize-python/oxidize_python/core/quantization/test_quantization.py
+  ai_agent 1-19
+oxidize-python/oxidize_python/core/tensor/dtype.py
+  ai_agent 1-237
+oxidize-python/oxidize_python/core/backend.py
+  ai_agent 1-134
+oxidize-python/oxidize_python/core/ggufcore/__init__.py
+  ai_agent 1-21
+oxidize-python/oxidize_python/core/tensor/kernels_extended.py
+  ai_agent 1-218
+oxidize-python/oxidize_python/core/quantization/__init__.py
+  ai_agent 1-4
+oxidize-python/oxidize_python/core/quantization/dequant_k.py
+  ai_agent 1-336
+oxidize-python/oxidize_python/core/tensor/ops.py
+  ai_agent 1-195
+oxidize-python/oxidize_python/core/tensor/parallel.py
+  ai_agent 1-42
+oxidize-python/oxidize_python/core/workspace.py
+  ai_agent 1-22
+oxidize-python/oxidize_python/core/kv_cache.py
+  ai_agent 1-172
+oxidize-python/oxidize_python/core/quantization/_f16.py
+  ai_agent 1-22
+oxidize-python/oxidize_python/core/quantization/dequant_simple.py
+  ai_agent 1-145
+oxidize-python/oxidize_python/core/quantization/quantize.py
+  ai_agent 1-320
+oxidize-python/oxidize_python/core/tensor/gemv.py
+  ai_agent 1-279
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "f99c48097bdf3367419f6e58bbc99108cd2f54fa",
+  "prompts": {}
+}

@@ -1,0 +1,327 @@
+golang/core/model/loader.go
+  s_b884af7059773d::t_606cb7b82ea05b 152,154,156,158,160,162,164,166,168,170,172,174
+  s_b884af7059773d::t_2479a8eded1f93 87-94,96-97,107
+  s_b884af7059773d::t_af1f921240de94 1-86,95,98-104,106,108-151,153,155,157,159,161,163,165,167,169,171,173,175-249
+golang/core/tokenizer/wordpiece.go
+  s_b884af7059773d::t_3e242c55bbe355 1-126
+golang/internal/gguf/writer.go
+  s_b884af7059773d::t_3d25353f895778 167
+  s_b884af7059773d::t_4a2619c8a01053 1-166
+evidence/task-12-status.txt
+  s_1a3d3c1a9b4408::t_95ad06643f2218 1-4
+golang/core/backends/strix/strix.go
+  s_b884af7059773d::t_aac9359095efa8 1-61
+golang/core/tokenizer/tiktoken.go
+  s_b884af7059773d::t_250b02b483c967 1-111
+golang/core/validation/validation_test.go
+  s_b884af7059773d::t_15da56ff12b70f 1-26
+evidence/task-3-auth.txt
+  s_1a3d3c1a9b4408::t_7c3b50902b0241 1-10
+golang/core/conversion/conversion_test.go
+  s_b884af7059773d::t_1c63bee08f9b8c 1-64
+golang/core/safetensors/safetensors.go
+  s_b884af7059773d::t_91303cb0e611da 1-214
+golang/core/model/model.go
+  s_b884af7059773d::t_3b4de78c7b7092 1-184
+golang/core/backends/webgpu/webgpu.go
+  s_b884af7059773d::t_5161cdc6c1d2cc 1-39
+golang/core/cpu_kernels/cpu_kernels_test.go
+  s_b884af7059773d::t_2fb5a2273233a1 1-55
+golang/core/quantization/quantization_test.go
+  s_b884af7059773d::t_ae5527b1517c1a 45-46
+  s_b884af7059773d::t_4ac4c97454f628 3
+  s_b884af7059773d::t_e7c28261bdbf6e 1-2,4-30,32-44,47-90
+golang/core/ggufcore/gguf_test.go
+  s_b884af7059773d::t_39de8caf6b950d 1-2,8-30
+  s_b884af7059773d::t_21b24461046133 3-7
+golang/core/tokenizer/sp.go
+  s_b884af7059773d::t_281d4152ee1871 1-89
+golang/core/backends/metal/metal.go
+  s_b884af7059773d::t_013dfe9fe6897e 1-86
+evidence/task-10-manual-qa-shape.txt
+  s_1a3d3c1a9b4408::t_ea1cb0fbdef7ec 1-4
+golang/core/cpu_kernels/cpu_kernels.go
+  s_b884af7059773d::t_284b2c5ca9111e 1-124
+golang/core/model/llama.go
+  s_b884af7059773d::t_304c465ffbaf76 1-80
+golang/core/model/offload.go
+  s_b884af7059773d::t_e57f6891351092 1-197
+golang/core/validation/validation.go
+  s_b884af7059773d::t_e2a9a396c51855 1-119
+golang/core/tensor/ops.go
+  s_b884af7059773d::t_821f2fabbabb8d 1-228
+golang/core/quantization/dequant_k.go
+  s_b884af7059773d::t_e75f6e24057a80 10,44,77,98-100,102,109,121-123,126-128,131-135,137,144,160-166,172-173,183-193,195-196,202-203,214-215,221-222,233-234,240-241,252-253,259-260,271-272,278-279,290-291,297-298,309-310,316-317,328-329,335-336,347-351,353,355,361-362,373-377,379,381,388
+  s_b884af7059773d::t_d3bd0f7ab1f770 1-9,11-26,29-43,45-76,78-97,101,103-108,110-120,124-125,129-130,136,138-143,145-159,167-171,174-182,194,197-201,204-213,216-220,223-232,235-239,242-251,254-258,261-270,273-277,280-289,292-296,299-308,311-315,318-327,330-334,337-346,352,354,356-360,363-372,378,380,382-387,389-442
+  s_b884af7059773d::t_94137089a053a6 27-28
+golang/core/workspace/workspace_test.go
+  s_b884af7059773d::t_4bd3be7eee2232 1-21
+golang/core/model/model_test.go
+  s_b884af7059773d::t_770bb3236d5967 140
+  s_b884af7059773d::t_f696125b053019 153-154
+  s_b884af7059773d::t_d2fd749db0f823 88-89
+  s_b884af7059773d::t_a6def1add7cb2f 338-345
+  s_b884af7059773d::t_b26bc414dc54e7 1-3,5-7,27,30,38,41-43,50,53,61,68-70,80-81,106-107,122,130,147,155,167-169,174,217,268,319-321,328,347-348
+  s_b884af7059773d::t_23dfcf4149685f 12
+  s_b884af7059773d::t_025392c9ef25ed 86-87,90-100,105
+  s_b884af7059773d::t_2c64b4b1309f69 4,8-11,13-26,28-29,31-37,39-40,44-49,51-52,54-60,62-67,71-79,82-85,101-104,108-121,123-129,131-139,141-146,148-152,156-166,170-173,175-216,218-267,269-318,322-327,329-337,346
+evidence/task-10-stream-done.txt
+  s_1a3d3c1a9b4408::t_57598456aa5d2c 1
+golang/core/simd/simd.go
+  s_b884af7059773d::t_2c57886dc52eb1 1-93
+evidence/task-2-api.txt
+  s_1a3d3c1a9b4408::t_06a0711044a0c7 1-12
+evidence/task-6-serviceinfo-red.txt
+  s_1a3d3c1a9b4408::t_2bd7facb651ee1 1-10
+golang/core/mesh/mesh_test.go
+  s_b884af7059773d::t_20ee3f04cd8e0b 1-92
+golang/core/backends/cpu/cpu_test.go
+  s_b884af7059773d::t_cd2d9d6a470516 1-50
+evidence/task-8-cli.txt
+  s_1a3d3c1a9b4408::t_6d5a262e454203 6-8
+  s_1a3d3c1a9b4408::t_7c3b50902b0241 1-5
+evidence/task-7-server.txt
+  s_1a3d3c1a9b4408::t_e54b08924b9a6c 1-10
+evidence/task-10-completions.txt
+  s_1a3d3c1a9b4408::t_56c0a6cfe571af 1
+golang/core/safetensors/safetensors_test.go
+  s_b884af7059773d::t_1af430a8dce8e6 1-43
+golang/core/kv_cache/kv_cache_test.go
+  s_b884af7059773d::t_95e08a49a47073 1-67
+golang/core/tokenizer/tokenizer.go
+  s_b884af7059773d::t_7dc5ba03b34ee3 180-183
+  s_b884af7059773d::t_be24c41537f4b5 1-179,184-435
+evidence/task-9-go-test-race.txt
+  s_1a3d3c1a9b4408::t_3b7ff13b634dd2 1
+golang/core/tensor/tensor_test.go
+  s_b884af7059773d::t_5d63edb2f82c87 1-159
+evidence/task-12-rust-fmt.txt
+  s_1a3d3c1a9b4408::t_5d331b35d9b5af 2-5
+  s_1a3d3c1a9b4408::t_56c0a6cfe571af 1
+golang/core/tensor/dtype.go
+  s_b884af7059773d::t_5ea832d2d14d34 1-379
+golang/core/tensor/gemv.go
+  s_b884af7059773d::t_8f6e3880fe13f1 1-298
+evidence/task-6-serviceinfo.txt
+  s_1a3d3c1a9b4408::t_904d9fff4a08d1 1-10
+golang/core/conversion/conversion.go
+  s_b884af7059773d::t_4df386d4813985 1-185
+golang/core/backend/backend_test.go
+  s_b884af7059773d::t_6aeaa68d5bf220 1-73
+golang/core/flash_attention/flash_attention.go
+  s_b884af7059773d::t_9188c78d14f787 1-69,71-74,79-183
+  s_b884af7059773d::t_565a8bf6380799 70,75-78
+golang/core/backends/cuda/cuda.go
+  s_b884af7059773d::t_834ecf0608feb8 1-93
+golang/core/backends/cuda/cuda_test.go
+  s_b884af7059773d::t_30722e2fcd9df7 1-28
+evidence/task-12-rust-test.txt
+  s_1a3d3c1a9b4408::t_e99f45dcac885a 1
+  s_1a3d3c1a9b4408::t_f611ef1d21df2d 2-110
+golang/core/model/advanced_features.go
+  s_b884af7059773d::t_80bc87a9cb254b 308
+  s_b884af7059773d::t_2d7cf9a4865974 8,10
+  s_b884af7059773d::t_ab1d32bd032894 122
+  s_b884af7059773d::t_b88c46a35179e1 1-7,11-121,123-134,136-152,154-173,175-253,255-307,309-369
+  s_b884af7059773d::t_6d40be3b47d66d 153
+  s_b884af7059773d::t_810b0f7059d97a 135
+  s_b884af7059773d::t_c65592db839043 9
+  s_b884af7059773d::t_8ab596e055314d 174
+golang/core/vision/vision_test.go
+  s_b884af7059773d::t_eae20c5dd12701 1-41
+golang/core/util/util.go
+  s_b884af7059773d::t_5629e6d1141df7 1-184
+golang/core/model/layer_wise.go
+  s_b884af7059773d::t_9b2ce8f519163f 1-94
+golang/core/paged/paged.go
+  s_b884af7059773d::t_470647a8236cfd 1-256
+evidence/task-10-auth.txt
+  s_1a3d3c1a9b4408::t_57598456aa5d2c 1
+evidence/task-7-cli-run.txt
+  s_1a3d3c1a9b4408::t_d488b12881f4b5 1-4
+golang/core/paged/paged_test.go
+  s_b884af7059773d::t_c255620cb6c776 1-66
+evidence/task-5-gguf-red.txt
+  s_1a3d3c1a9b4408::t_2bd7facb651ee1 1-5
+evidence/task-fix-manual-completions-red.txt
+  s_1a3d3c1a9b4408::t_f66925c1eb3fb3 1-6
+golang/core/backends/cpu/cpu.go
+  s_b884af7059773d::t_e27e17f1ee6697 7-8
+  s_b884af7059773d::t_7d544baef103a3 134-142
+  s_b884af7059773d::t_acf77d83dd6436 1-6,9-133,143-238
+evidence/task-fix-chat-chunk-red.txt
+  s_1a3d3c1a9b4408::t_721dd25efbf60a 1-6
+golang/core/model/sampling.go
+  s_b884af7059773d::t_c3e621d102adcf 265
+  s_b884af7059773d::t_97a491a7cd62f5 1-3,5-172,174-207,209-230,232-255,257-264,266-368,372-379,381,383-385,387-402,404-411,413-415,417-421,423-481
+  s_b884af7059773d::t_a3473522b26c1a 231
+  s_b884af7059773d::t_0921de59e65e03 380,382,386,403,412,416,422
+  s_b884af7059773d::t_a71857400d9087 208
+  s_b884af7059773d::t_2aad1dac832156 173
+  s_b884af7059773d::t_6ea0362335804a 4
+  s_b884af7059773d::t_f9112819f31709 256,369-371
+evidence/task-fix-cli-run-green.txt
+  s_1a3d3c1a9b4408::t_2d8ee4f59599de 1-4
+evidence/task-13-pr.json
+  s_1a3d3c1a9b4408::t_519edf2b52de49 1
+golang/core/vision/vision.go
+  s_b884af7059773d::t_648d7abf29fa22 1-126
+evidence/task-10-models.txt
+  s_1a3d3c1a9b4408::t_57598456aa5d2c 1
+golang/core/quantization/types.go
+  s_b884af7059773d::t_0bf3e9b85961d5 1-42,45-300,302-304,306-409
+  s_b884af7059773d::t_9dad9a0495311e 305
+  s_b884af7059773d::t_b63df4a726391e 301
+  s_b884af7059773d::t_9b194aa3c57c1a 43-44
+evidence/task-4-generate-red.txt
+  s_1a3d3c1a9b4408::t_2bd7facb651ee1 1-3
+evidence/task-9-go-test.txt
+  s_1a3d3c1a9b4408::t_7a11120ab8cf9d 2-10
+  s_1a3d3c1a9b4408::t_c4d5720e1a6dac 1
+evidence/task-13-status-before-commit.txt
+  s_1a3d3c1a9b4408::t_5263165c68613c 1-38
+evidence/task-12-scope-audit.txt
+  s_1a3d3c1a9b4408::t_d488b12881f4b5 1
+golang/core/flash_attention/flash_attention_test.go
+  s_b884af7059773d::t_547deefc701943 1-65
+evidence/task-9-go-vet.txt
+  s_1a3d3c1a9b4408::t_9ddfc32f2123ae 1
+evidence/task-5-gguf.txt
+  s_1a3d3c1a9b4408::t_e01fc48817d87d 1-12
+golang/core/quantization/dequant_simple.go
+  s_b884af7059773d::t_0d468e51fc13a4 171
+  s_b884af7059773d::t_0a2e0ab4e2bde9 1-8,11-12,17-20,22-63,65-91,93-117,119-139,141-147,149-170,172-178,180-199,201-218
+  s_b884af7059773d::t_e222bcf685b46e 140
+  s_b884af7059773d::t_797d50fd013860 9-10,13-16,21,64,92,118,148,179,200
+golang/core/backends/vulkan/vulkan.go
+  s_b884af7059773d::t_5f4a69d07b2e67 1-208
+evidence/task-10-cli-list.txt
+  s_1a3d3c1a9b4408::t_c7f92b22b8257f 1
+golang/core/tokenizer/tokenizer_test.go
+  s_b884af7059773d::t_db017b0c7c69ff 1-88
+golang/core/backends/vulkan/vulkan_test.go
+  s_b884af7059773d::t_f7de29f228046e 1-49
+golang/core/model/inference.go
+  s_b884af7059773d::t_c4e5c6ba341453 1-271
+evidence/task-12-go-full.txt
+  s_1a3d3c1a9b4408::t_56c0a6cfe571af 1-4
+  s_1a3d3c1a9b4408::t_5af2482a8a4d06 5-10
+golang/core/backends/mlx/mlx.go
+  s_b884af7059773d::t_7b1d93d7148e27 1-26
+golang/core/model/prefix_cache.go
+  s_b884af7059773d::t_36b9464726233e 1-159
+evidence/task-fix-cli-run-red.txt
+  s_1a3d3c1a9b4408::t_e1aa3dfcefde87 1-6
+golang/core/util/util_test.go
+  s_b884af7059773d::t_d08902914e3909 1-54
+golang/core/backends/mlx/mlx_test.go
+  s_b884af7059773d::t_626900ddfdd29e 1-9
+evidence/task-10-embeddings.txt
+  s_1a3d3c1a9b4408::t_57598456aa5d2c 1
+evidence/task-7-cli-error.txt
+  s_1a3d3c1a9b4408::t_d488b12881f4b5 1-3
+evidence/task-4-generate.txt
+  s_1a3d3c1a9b4408::t_66be365977a7d8 1-8
+evidence/task-10-cli-prompt.txt
+  s_1a3d3c1a9b4408::t_a39c1bf2eefc03 1-4
+golang/core/backends/metal/metal_test.go
+  s_b884af7059773d::t_0f93247e0670e1 1-19
+evidence/task-10-chat.txt
+  s_1a3d3c1a9b4408::t_a39c1bf2eefc03 1
+golang/core/tensor/errors.go
+  s_b884af7059773d::t_71ee54f68ad1ca 1-70
+evidence/task-1-buildinfo-red.txt
+  s_1a3d3c1a9b4408::t_2bd7facb651ee1 1-8
+golang/core/model/generation.go
+  s_b884af7059773d::t_11a2fe3af17cb0 1-70,80-173
+  s_b884af7059773d::t_27bb36d5cedaab 71-79
+evidence/task-10-auth-status.txt
+  s_1a3d3c1a9b4408::t_57598456aa5d2c 1
+golang/core/model/lora.go
+  s_b884af7059773d::t_653e5a34140c54 115
+  s_b884af7059773d::t_b41cf09e2d9114 21-22
+  s_b884af7059773d::t_afa14672ecde2f 1-20,23-114,116-175
+evidence/task-13-status-precommit.txt
+  s_1a3d3c1a9b4408::t_bc97c225eb1572 1-4
+evidence/task-13-status-after-commit.txt
+  s_1a3d3c1a9b4408::t_a28253ca6c51dc 1
+golang/core/core.go
+  s_b884af7059773d::t_4b9fe9ddae6cc9 52
+  s_b884af7059773d::t_86069779c71e17 348-349,361,373
+  s_b884af7059773d::t_f597f312f101ad 169-170,172-174,176,179-185,188,191-195,200-211
+  s_b884af7059773d::t_ee48d42c49f60d 1-51,53-168,171,175,177-178,186-187,189-190,196-199,212-347,350-360,362-372,374-385,393-401
+golang/core/workspace/workspace.go
+  s_b884af7059773d::t_247b0692736ac9 1-19
+evidence/task-2-api-red.txt
+  s_1a3d3c1a9b4408::t_2bd7facb651ee1 1-9
+evidence/task-12-go-full-after-review.txt
+  s_1a3d3c1a9b4408::t_a39c1bf2eefc03 1-10
+golang/core/tokenizer/bpe.go
+  s_b884af7059773d::t_75ba053eee3bda 1-123
+golang/core/quantization/quantize.go
+  s_b884af7059773d::t_a79ccd1beeaeba 458
+  s_b884af7059773d::t_8313ecca3ada2b 1-457,459-460
+golang/core/turboquant/turboquant_test.go
+  s_b884af7059773d::t_ddb2c207dcdd70 1-42
+golang/core/model/dflash.go
+  s_b884af7059773d::t_24e6aa2449d059 110
+  s_b884af7059773d::t_ca2cf11708c818 1-108,111-178
+evidence/task-12-manual-qa.txt
+  s_1a3d3c1a9b4408::t_56c0a6cfe571af 1-15
+evidence/task-fix-manual-completions-green.txt
+  s_1a3d3c1a9b4408::t_ae50cee570a66b 1-4
+golang/core/kv_cache/kv_cache.go
+  s_b884af7059773d::t_3517a3ce73820b 1-369
+golang/core/mesh/mesh.go
+  s_b884af7059773d::t_0850b344a44ff4 1-341
+golang/core/turboquant/turboquant.go
+  s_b884af7059773d::t_fbc6feb3ef9c85 1-190
+golang/core/ggufcore/gguf.go
+  s_b884af7059773d::t_5c7c5d4baa3fe3 149
+  s_b884af7059773d::t_40a14f306515a8 1-148,150-239
+evidence/task-fix-chat-chunk-green.txt
+  s_1a3d3c1a9b4408::t_b742aae37f19d4 1-4
+evidence/task-10-stream.txt
+  s_1a3d3c1a9b4408::t_a39c1bf2eefc03 1,3
+  s_1a3d3c1a9b4408::t_57598456aa5d2c 2,4-6
+golang/core/backend/backend.go
+  s_b884af7059773d::t_2c3ab3e272b338 1-155
+golang/core/backends/webgpu/webgpu_test.go
+  s_b884af7059773d::t_27884641fb4cf1 1-18
+golang/core/backends/strix/strix_test.go
+  s_b884af7059773d::t_53982da042212c 1-35
+golang/core/model/speculative.go
+  s_b884af7059773d::t_b001e56c17b051 1-144
+evidence/task-12-manual-qa-after-review.txt
+  s_1a3d3c1a9b4408::t_a39c1bf2eefc03 1-15
+golang/core/quantization/imatrix.go
+  s_b884af7059773d::t_503f89202747fd 1-72
+golang/core/simd/simd_test.go
+  s_b884af7059773d::t_53ee05992ef587 1-25
+evidence/task-7-cli-error.status
+  s_1a3d3c1a9b4408::t_d488b12881f4b5 1
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "990597ada6bed05bd5ac88283e0d94ff81a55aa9",
+  "prompts": {},
+  "sessions": {
+    "s_1a3d3c1a9b4408": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e8852-99ff-74f0-bde1-c32a32deddfa",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_b884af7059773d": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_17743e93dffecYdtaN3rU3Q2D6",
+        "model": "minimax-m3-free"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

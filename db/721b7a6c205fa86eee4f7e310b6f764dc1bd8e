@@ -1,0 +1,26 @@
+oxidize-core/src/model/layer_wise.rs
+  s_d8b5af6870ab84::t_cc9d94e77b69ad 1896-1897
+  s_d8b5af6870ab84::t_bddd44e00425ac 1893-1895,1898-1899
+oxidize-core/src/model/inference.rs
+  s_d8b5af6870ab84::t_4394301f207997 513-517,519-520
+  s_d8b5af6870ab84::t_4b57ff3ecca120 2097-2102
+  s_d8b5af6870ab84::t_dcba90eccbeb71 3052-3055
+  s_d8b5af6870ab84::t_ff6d3adb61852e 518
+  s_d8b5af6870ab84::t_b3f6a5824d2a7f 1783-1795
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "db721b7a6c205fa86eee4f7e310b6f764dc1bd8e",
+  "prompts": {},
+  "sessions": {
+    "s_d8b5af6870ab84": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "747c40af-74b1-4c68-a8f8-83589cf844b7",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

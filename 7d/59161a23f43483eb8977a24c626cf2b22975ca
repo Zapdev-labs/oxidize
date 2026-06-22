@@ -1,0 +1,23 @@
+oxidize-core/src/model/diffusion_gemma.rs
+  s_b00d83cf31cf3c::t_b183470c47d460 1-836
+oxidize-core/src/lib.rs
+  s_b00d83cf31cf3c::t_b183470c47d460 54-55
+oxidize-cli/src/bin/diffusion_gemma_bench.rs
+  s_b00d83cf31cf3c::t_b183470c47d460 1-47
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "7d59161a23f43483eb8977a24c626cf2b22975ca",
+  "prompts": {},
+  "sessions": {
+    "s_b00d83cf31cf3c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5030d2a0-9c7e-4f17-ace1-8fb2d0a8b61e",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

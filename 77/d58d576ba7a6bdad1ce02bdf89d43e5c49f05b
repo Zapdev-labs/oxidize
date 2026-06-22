@@ -1,0 +1,81 @@
+oxidize-cli/src/bin/bench.rs
+  s_86b2fd23789a38::t_3b9bf71e4193db 417
+oxidize-cli/src/main.rs
+  s_86b2fd23789a38::t_98f6a021cd7e2c 97-99
+  s_ebebf75be5154e::t_fef7d91e13351f 290-291
+  s_86b2fd23789a38::t_6468459ffa9dcd 1674,1676-1678,1680,1682
+  s_86b2fd23789a38::t_7583c7a96d3cf0 1925-1926,1928-1932,1934-1936,1938-1939,1947-1960
+  s_86b2fd23789a38::t_c165d681e35121 662-663
+  s_86b2fd23789a38::t_bf9ee9fa114c95 1933,1937
+  s_86b2fd23789a38::t_d8da336046594d 1663-1673,1675,1681
+  s_86b2fd23789a38::t_6b96f6ba568a41 1679
+  s_86b2fd23789a38::t_f4c72b6ac9e5d5 1940-1946
+  s_86b2fd23789a38::t_7864304e613d93 2019,2202,2218,2228
+  s_ebebf75be5154e::t_183ca9be62fbd2 22,236,240-289,292-325,327,387,405,516
+  s_86b2fd23789a38::t_f8d6c92bc478af 1927
+oxidize-core/src/compute/quantization.rs
+  s_86b2fd23789a38::t_4647f4bd656b31 1170,1172-1175,1183,1186,1188
+  s_ebebf75be5154e::t_5409699adb9843 1267-1268
+oxidize-core/Cargo.toml
+  s_86b2fd23789a38::t_c095ced179f43a 50
+  s_86b2fd23789a38::t_0259e91547daaf 33
+oxidize-cli/Cargo.toml
+  s_ebebf75be5154e::t_183ca9be62fbd2 31-32
+  s_ebebf75be5154e::t_3bed5f95895181 35
+oxidize-core/src/lib.rs
+  s_ebebf75be5154e::t_5409699adb9843 83-84
+oxidize-core/src/format/conversion.rs
+  s_ebebf75be5154e::t_5409699adb9843 132-135
+oxidize-core/src/format/gguf.rs
+  s_86b2fd23789a38::t_d18184533042b4 1389,1391,1403
+  s_86b2fd23789a38::t_8497ecfedb4b1c 1318-1323,1326-1328,1332-1345,1358-1364,1366-1370,1372-1374,1376-1378,1381,1386,1392,1394-1399,1405
+  s_86b2fd23789a38::t_19a7c9c06d1795 1385,1402
+  s_86b2fd23789a38::t_283e1618baa5a8 124-132,142,150-159,161-169,172-173
+  s_86b2fd23789a38::t_38fc2f9a7c976f 17
+  s_86b2fd23789a38::t_b4331d7229082e 14-16,18-27
+  s_ebebf75be5154e::t_5409699adb9843 160,314-318,1346-1357
+  s_86b2fd23789a38::t_8a1bb764830aab 6-7
+  s_86b2fd23789a38::t_49111353008a5e 448-452
+  s_86b2fd23789a38::t_468971e6c0db40 1324-1325,1329-1331
+  s_86b2fd23789a38::t_47a097d335bae7 319
+  s_86b2fd23789a38::t_82134e68fde86e 1365,1371,1375,1379-1380,1382-1384,1387-1388,1390,1393,1400-1401,1404
+  s_86b2fd23789a38::t_a951742e6f6a1b 122,133-135,138,143-149,179,195
+  s_86b2fd23789a38::t_3a3d4d1c639747 108,113,123,136-137,139-141,170-171,174-178,180-194
+  s_86b2fd23789a38::t_db59cddd232cf0 86-90,93-100
+oxidize-core/src/format/safetensors_to_gguf.rs
+  s_ebebf75be5154e::t_5409699adb9843 41,75,132,216-220,226-229,255-257,294-298,322-325,390-393,433-437,443-447,449-452,459,576-580,596,828
+AGENTS.md
+  s_b138499838f940::t_11c190ddacbe73 125
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.3",
+  "base_commit_sha": "77d58d576ba7a6bdad1ce02bdf89d43e5c49f05b",
+  "prompts": {},
+  "sessions": {
+    "s_86b2fd23789a38": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ed1b8ba7-1ad5-4b99-bfa2-02f64163e479",
+        "model": "claude-sonnet-4-6"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_b138499838f940": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d9fdb403-1cbc-4339-afa2-fcd8b1e5171d",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_ebebf75be5154e": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_1681da4d0ffeTmZHUXQiYVZ98u",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

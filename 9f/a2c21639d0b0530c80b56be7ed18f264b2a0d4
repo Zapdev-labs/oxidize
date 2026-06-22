@@ -1,0 +1,19 @@
+oxidize-cli/src/main.rs
+  s_0a30b443494469::t_09f23a8bbf32d7 542
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "9fa2c21639d0b0530c80b56be7ed18f264b2a0d4",
+  "prompts": {},
+  "sessions": {
+    "s_0a30b443494469": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_133425cf8ffee5c1eYiKq5Uc0v",
+        "model": "nex-agi/nex-n2-pro:free"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
