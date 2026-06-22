@@ -1,5 +1,17 @@
 use super::*;
 
+fn dump_emitted_tokens(tokens: &[u32]) -> io::Result<()> {
+    let Ok(path) = std::env::var("OX_GOLDEN_TOKENS") else {
+        return Ok(());
+    };
+    let encoded = tokens
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    std::fs::write(path, encoded)
+}
+
 pub(super) fn run_single_shot_mode<W: Write>(prompt: &str, writer: &mut W) -> io::Result<()> {
     let prompt = prompt.trim();
     if prompt.is_empty() {
@@ -212,6 +224,7 @@ pub(super) fn generate_with_model<W: Write, M: Model + ?Sized>(
         }
     }
 
+    dump_emitted_tokens(&generated_tokens)?;
     let response = tokenizer
         .decode_without_special_tokens(&generated_tokens)
         .unwrap_or_default();
@@ -278,6 +291,7 @@ pub(super) fn generate_with_dflash_draft<W: Write, M: Model + ?Sized>(
     let config = SpeculativeGenerationConfig {
         generation,
         draft_tokens_per_step: draft_tokens.max(1),
+        quantspec_draft_kv: false,
     };
 
     let mut rng = rand::thread_rng();
@@ -305,6 +319,7 @@ pub(super) fn generate_with_dflash_draft<W: Write, M: Model + ?Sized>(
         }
     }
 
+    dump_emitted_tokens(&generated_tokens)?;
     let response = tokenizer
         .decode_without_special_tokens(&generated_tokens)
         .unwrap_or_default();
@@ -326,6 +341,96 @@ pub(super) fn generate_with_dflash_draft<W: Write, M: Model + ?Sized>(
 pub(super) fn generate_with_mtp_model<W: Write>(
     prompt: &str,
     target_model: &mut InferenceModel,
+    tokenizer: &LoadedTokenizer,
+    max_tokens: usize,
+    temperature: f32,
+    top_p: Option<f32>,
+    top_k: Option<usize>,
+    draft_tokens: usize,
+    writer: &mut W,
+    quantspec: bool,
+) -> io::Result<String> {
+    use futures_core::Stream;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Waker};
+
+    let started_at = Instant::now();
+    let mut session = Session::new();
+    let prompt_tokens = tokenizer.encode_with_special_tokens(
+        prompt,
+        EncodeOptions {
+            add_bos: tokenizer.add_bos_default(),
+            add_eos: false,
+            pad_to: None,
+        },
+    );
+    let eos_token = tokenizer.special_tokens().eos;
+    let suppressed_tokens = suppressed_generation_tokens(tokenizer, target_model.vocab_size());
+    let generation = GenerationConfig {
+        max_new_tokens: max_tokens,
+        stop_token: eos_token,
+        suppressed_tokens,
+        sampling: SamplingConfig {
+            temperature,
+            top_p,
+            top_k,
+            ..SamplingConfig::default()
+        },
+        ..GenerationConfig::default()
+    };
+    let config = SpeculativeGenerationConfig {
+        generation,
+        draft_tokens_per_step: draft_tokens.max(1),
+        quantspec_draft_kv: quantspec,
+    };
+
+    let mut rng = rand::thread_rng();
+    let mut stream =
+        MtpGenerationStream::new(target_model, &mut session, &prompt_tokens, config, || {
+            rand::Rng::r#gen::<f32>(&mut rng)
+        });
+    let waker = Waker::from(Arc::new(NoopWaker));
+    let mut cx = Context::from_waker(&waker);
+    let mut pinned = Pin::new(&mut stream);
+    let mut generated_tokens: Vec<u32> = Vec::new();
+
+    loop {
+        match Stream::poll_next(pinned.as_mut(), &mut cx) {
+            Poll::Ready(Some(Ok(token))) => generated_tokens.push(token),
+            Poll::Ready(Some(Err(e))) => {
+                return Err(io::Error::other(format!("generation error: {:?}", e)));
+            }
+            Poll::Ready(None) => break,
+            Poll::Pending => break,
+        }
+    }
+
+    dump_emitted_tokens(&generated_tokens)?;
+    let response = tokenizer
+        .decode_without_special_tokens(&generated_tokens)
+        .unwrap_or_default();
+    if !response.is_empty() {
+        write!(writer, "{response}")?;
+    } else if !generated_tokens.is_empty() {
+        write!(writer, "[generated token ids: {generated_tokens:?}]")?;
+    }
+    writer.flush()?;
+    let elapsed = started_at.elapsed();
+    writeln!(writer)?;
+    writeln!(
+        writer,
+        "{}",
+        format_generation_stats(generated_tokens.len(), elapsed)
+    )?;
+    Ok(response)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn generate_with_eagle3_draft<W: Write>(
+    prompt: &str,
+    target_model: &mut InferenceModel,
+    draft_model: &mut oxidize_core::eagle3::Eagle3DraftModel,
     tokenizer: &LoadedTokenizer,
     max_tokens: usize,
     temperature: f32,
@@ -366,13 +471,18 @@ pub(super) fn generate_with_mtp_model<W: Write>(
     let config = SpeculativeGenerationConfig {
         generation,
         draft_tokens_per_step: draft_tokens.max(1),
+        quantspec_draft_kv: false,
     };
 
     let mut rng = rand::thread_rng();
-    let mut stream =
-        MtpGenerationStream::new(target_model, &mut session, &prompt_tokens, config, || {
-            rand::Rng::r#gen::<f32>(&mut rng)
-        });
+    let mut stream = Eagle3GenerationStream::new(
+        target_model,
+        draft_model,
+        &mut session,
+        &prompt_tokens,
+        config,
+        || rand::Rng::r#gen::<f32>(&mut rng),
+    );
     let waker = Waker::from(Arc::new(NoopWaker));
     let mut cx = Context::from_waker(&waker);
     let mut pinned = Pin::new(&mut stream);
@@ -389,15 +499,14 @@ pub(super) fn generate_with_mtp_model<W: Write>(
         }
     }
 
+    dump_emitted_tokens(&generated_tokens)?;
     let response = tokenizer
         .decode_without_special_tokens(&generated_tokens)
         .unwrap_or_default();
     if !response.is_empty() {
         write!(writer, "{response}")?;
-    } else if !generated_tokens.is_empty() {
-        write!(writer, "[generated token ids: {generated_tokens:?}]")?;
+        writer.flush()?;
     }
-    writer.flush()?;
     let elapsed = started_at.elapsed();
     writeln!(writer)?;
     writeln!(
@@ -406,6 +515,32 @@ pub(super) fn generate_with_mtp_model<W: Write>(
         format_generation_stats(generated_tokens.len(), elapsed)
     )?;
     Ok(response)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn generate_with_quantspec<W: Write>(
+    prompt: &str,
+    target_model: &mut InferenceModel,
+    tokenizer: &LoadedTokenizer,
+    max_tokens: usize,
+    temperature: f32,
+    top_p: Option<f32>,
+    top_k: Option<usize>,
+    draft_tokens: usize,
+    writer: &mut W,
+) -> io::Result<String> {
+    generate_with_mtp_model(
+        prompt,
+        target_model,
+        tokenizer,
+        max_tokens,
+        temperature,
+        top_p,
+        top_k,
+        draft_tokens,
+        writer,
+        true,
+    )
 }
 
 pub(super) struct NoopWaker;

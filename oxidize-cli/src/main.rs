@@ -6,8 +6,8 @@ use backend::Backend;
 use clap::{Parser, ValueEnum};
 use help::{print_model_list, print_ollama_help, print_run_help, print_serve_help};
 use oxidize_core::generation::{
-    GenerationConfig, GenerationStream, MtpGenerationStream, SpeculativeGenerationConfig,
-    SpeculativeGenerationStream,
+    Eagle3GenerationStream, GenerationConfig, GenerationStream, MtpGenerationStream,
+    SpeculativeGenerationConfig, SpeculativeGenerationStream,
 };
 use oxidize_core::gguf::MappedGgufFile;
 use oxidize_core::inference::{InferenceConfig, InferenceModel};
@@ -182,6 +182,9 @@ struct Args {
     /// Disable native in-GGUF MTP/nextn speculative decoding when present.
     #[arg(long, default_value_t = false)]
     no_mtp: bool,
+    /// Self-speculative QuantSpec decoding (hierarchical I8 TurboQuant MTP draft KV).
+    #[arg(long, default_value_t = false)]
+    quantspec: bool,
     /// Auto-detect hardware and pick inference knobs (threads, ctx,
     /// KV dtype, n_gpu_layers, layer_wise, mmap, mlock, ISA, pipeline).
     /// On by default for `run`; explicit flags always win.
@@ -621,6 +624,121 @@ fn main() {
                     return;
                 }
 
+                if oxidize_core::eagle3::is_eagle3_safetensors_path(draft_model_path) {
+                    if args.layer_wise {
+                        eprintln!(
+                            "EAGLE3 speculative decoding requires a dense InferenceModel target (omit --layer-wise)"
+                        );
+                        return;
+                    }
+                    let mut target_model =
+                        match InferenceModel::load_from_gguf(&mapped, config.clone(), true) {
+                            Ok(model) => model,
+                            Err(error) => {
+                                eprintln!("failed to load target model weights: {error}");
+                                return;
+                            }
+                        };
+                    let target_hints = oxidize_core::eagle3::Eagle3TargetHints {
+                        target_hidden_size: config.hidden_size,
+                        target_layer_count: target_model.layer_count(),
+                        target_vocab_size: Some(target_model.vocab_size()),
+                    };
+                    let mut draft_model =
+                        match oxidize_core::eagle3::Eagle3DraftModel::load_eagle3_draft(
+                            draft_model_path,
+                            target_hints,
+                        ) {
+                            Ok(model) => model,
+                            Err(error) => {
+                                eprintln!("failed to load EAGLE3 SafeTensors draft: {error}");
+                                return;
+                            }
+                        };
+                    eprintln!(
+                        "using EAGLE3 speculative decoding (SafeTensors): target={} draft={} draft_tokens={}",
+                        model_path.display(),
+                        draft_model_path.display(),
+                        args.draft_tokens
+                    );
+                    if let Err(error) = generate_with_eagle3_draft(
+                        &args.prompt,
+                        &mut target_model,
+                        &mut draft_model,
+                        &tokenizer,
+                        args.max_tokens,
+                        args.temperature,
+                        args.top_p,
+                        args.top_k,
+                        args.draft_tokens,
+                        &mut writer,
+                    ) {
+                        eprintln!("generation failed: {error}");
+                    }
+                    return;
+                }
+
+                let draft_mapped = match loader.load(draft_model_path) {
+                    Ok(mapped) => mapped,
+                    Err(error) => {
+                        eprintln!(
+                            "failed to load draft model {}: {error}",
+                            draft_model_path.display()
+                        );
+                        return;
+                    }
+                };
+                let draft_arch = draft_mapped.parsed().architecture();
+                if matches!(draft_arch, Some("eagle3" | "eagle")) {
+                    if args.layer_wise {
+                        eprintln!(
+                            "EAGLE3 speculative decoding requires a dense InferenceModel target (omit --layer-wise)"
+                        );
+                        return;
+                    }
+                    let mut target_model =
+                        match InferenceModel::load_from_gguf(&mapped, config.clone(), true) {
+                            Ok(model) => model,
+                            Err(error) => {
+                                eprintln!("failed to load target model weights: {error}");
+                                return;
+                            }
+                        };
+                    let draft_config =
+                        oxidize_core::eagle3::Eagle3Config::from_gguf(&draft_mapped);
+                    let mut draft_model = match oxidize_core::eagle3::Eagle3DraftModel::load_from_gguf(
+                        &draft_mapped,
+                        draft_config,
+                    ) {
+                        Ok(model) => model,
+                        Err(error) => {
+                            eprintln!("failed to load EAGLE3 draft model: {error}");
+                            return;
+                        }
+                    };
+                    eprintln!(
+                        "using EAGLE3 speculative decoding: target={} draft={} draft_tokens={}",
+                        model_path.display(),
+                        draft_model_path.display(),
+                        args.draft_tokens
+                    );
+                    if let Err(error) = generate_with_eagle3_draft(
+                        &args.prompt,
+                        &mut target_model,
+                        &mut draft_model,
+                        &tokenizer,
+                        args.max_tokens,
+                        args.temperature,
+                        args.top_p,
+                        args.top_k,
+                        args.draft_tokens,
+                        &mut writer,
+                    ) {
+                        eprintln!("generation failed: {error}");
+                    }
+                    return;
+                }
+
                 let mut target_model: Box<dyn Model> = if args.layer_wise {
                     match oxidize_core::layer_wise::LayerWiseModel::load_from_gguf(
                         &mapped,
@@ -651,20 +769,9 @@ fn main() {
                 let target_hidden_size = config.hidden_size;
                 let target_layer_count = target_model.layer_count();
 
-                let draft_mapped = match loader.load(draft_model_path) {
-                    Ok(mapped) => mapped,
-                    Err(error) => {
-                        eprintln!(
-                            "failed to load DFlash draft model {}: {error}",
-                            draft_model_path.display()
-                        );
-                        return;
-                    }
-                };
-                let draft_arch = draft_mapped.parsed().architecture();
                 if !matches!(draft_arch, Some("dflash" | "dflash-draft")) {
                     eprintln!(
-                        "--draft-model must point to a DFlash GGUF, got architecture {:?}",
+                        "--draft-model must point to a DFlash, EAGLE3 GGUF, or EAGLE3 SafeTensors draft, got architecture {:?}",
                         draft_arch
                     );
                     return;
@@ -790,7 +897,34 @@ fn main() {
                             return;
                         }
                     };
-                if concrete_model.has_mtp() && !args.no_mtp && !args.chat {
+                if args.quantspec && !args.no_mtp && !args.chat {
+                    if !concrete_model.has_mtp() {
+                        eprintln!(
+                            "--quantspec requires native MTP/nextn weights in the target GGUF; falling back to target-only generation"
+                        );
+                    } else {
+                        eprintln!(
+                            "using QuantSpec self-speculative decoding (I8 TurboQuant MTP draft KV): target={} draft_tokens={}",
+                            model_path.display(),
+                            args.draft_tokens
+                        );
+                        if let Err(error) = generate_with_quantspec(
+                            &args.prompt,
+                            &mut concrete_model,
+                            &tokenizer,
+                            args.max_tokens,
+                            args.temperature,
+                            args.top_p,
+                            args.top_k,
+                            args.draft_tokens,
+                            &mut writer,
+                        ) {
+                            eprintln!("generation failed: {error}");
+                        }
+                        return;
+                    }
+                }
+                if concrete_model.has_mtp() && !args.no_mtp && !args.chat && !args.quantspec {
                     eprintln!(
                         "using native MTP/nextn speculative decoding: target={} nextn_layers={} draft_tokens={}",
                         model_path.display(),
@@ -807,6 +941,7 @@ fn main() {
                         args.top_k,
                         args.draft_tokens,
                         &mut writer,
+                        false,
                     ) {
                         eprintln!("generation failed: {error}");
                     }
