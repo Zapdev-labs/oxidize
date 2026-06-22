@@ -60,6 +60,9 @@ pub(super) fn gpu_init() -> Result<GpuState, String> {
         kv_batched_seq_len: Vec::new(),
         batched_activation: None,
         sm_count,
+        decode_d_state: None,
+        decode_layer_graphs: Vec::new(),
+        decode_graph_layers: 0,
     })
 }
 

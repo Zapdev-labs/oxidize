@@ -199,6 +199,10 @@ pub struct GpuActivationBuffer {
     pub ffn_up: cust::memory::DeviceBuffer<f32>,
     /// SiLU(gate) * up result fed into the down-projection `[intermediate_size]`.
     pub ffn_down_in: cust::memory::DeviceBuffer<f32>,
+    /// Q8_K-quantized hidden activation (one quantize per layer step).
+    pub xq8k: cust::memory::DeviceBuffer<u8>,
+    /// Q8_K-quantized FFN intermediate activation.
+    pub xq8k_ffn: cust::memory::DeviceBuffer<u8>,
     pub hidden_size: usize,
     pub intermediate_size: usize,
 }
@@ -317,6 +321,28 @@ pub(super) struct GpuState {
     /// default 132 = H100). Used by the split-K decode-attention heuristic to
     /// size the number of KV partitions so the grid saturates all SMs.
     pub(super) sm_count: u32,
+    // --- CUDA graph decode (OX_GPU_CUDA_GRAPH) ---
+    /// Per-token device scalars: `[pos, context, token_id]`.
+    pub(super) decode_d_state: Option<cust::memory::DeviceBuffer<u32>>,
+    /// Captured per-layer decode graphs (attn + FFN kernel sequence).
+    pub(super) decode_layer_graphs: Vec<Option<CudaGraphExec>>,
+    /// Number of layers `decode_layer_graphs` was sized for.
+    pub(super) decode_graph_layers: usize,
+}
+
+/// Opaque CUDA graph executable handle (`CUgraphExec`).
+#[cfg(feature = "cuda")]
+pub(super) struct CudaGraphExec(pub cust::sys::CUgraphExec);
+
+#[cfg(feature = "cuda")]
+impl Drop for CudaGraphExec {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe {
+                cust::sys::cuGraphExecDestroy(self.0);
+            }
+        }
+    }
 }
 
 #[cfg(feature = "cuda")]

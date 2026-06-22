@@ -24,12 +24,24 @@ pub fn gpu_init_activation_buffers(
             cust::memory::DeviceBuffer::<f32>::zeroed(intermediate_size).map_err(stringify)?;
         let ffn_down_in =
             cust::memory::DeviceBuffer::<f32>::zeroed(intermediate_size).map_err(stringify)?;
+        let bpr_hidden = hidden_size / 256;
+        let bpr_inter = intermediate_size / 256;
+        let xq8k = cust::memory::DeviceBuffer::<u8>::zeroed(
+            bpr_hidden * super::BLOCK_Q8_K_BYTES,
+        )
+        .map_err(stringify)?;
+        let xq8k_ffn = cust::memory::DeviceBuffer::<u8>::zeroed(
+            bpr_inter * super::BLOCK_Q8_K_BYTES,
+        )
+        .map_err(stringify)?;
         gpu.activation = Some(GpuActivationBuffer {
             hidden,
             normed,
             ffn_gate,
             ffn_up,
             ffn_down_in,
+            xq8k,
+            xq8k_ffn,
             hidden_size,
             intermediate_size,
         });
