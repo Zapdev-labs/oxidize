@@ -63,6 +63,7 @@ struct Args {
   float top_p = 1.0f;
   bool no_bos = false;
   bool stream = false;
+  std::string quantize;  // "q8_0" => on-the-fly F16/BF16->Q8_0 at load
 };
 
 [[noreturn]] void usage_and_exit(const char* prog, int code) {
@@ -80,6 +81,7 @@ struct Args {
       "  --top-p <f>           Top-p/nucleus filter (default 1.0)\n"
       "  --no-bos              Do not prepend the BOS token\n"
       "  --stream              Stream decoded text to stdout as it generates\n"
+      "  --quantize q8_0       Quantize F16/BF16 weights to Q8_0 at load (~1.3x, near-lossless)\n"
       "  --json                Emit timing JSON\n",
       prog);
   std::exit(code);
@@ -142,6 +144,8 @@ Args parse_args(int argc, char** argv) {
       a.json = true;
     } else if (arg == "--debug-logits") {
       a.debug_logits = true;
+    } else if (arg == "--quantize") {
+      a.quantize = take_value(argc, argv, i, "--quantize");
     } else if (arg == "--no-bos") {
       a.no_bos = true;
     } else if (arg == "--stream") {
@@ -235,9 +239,16 @@ int main(int argc, char** argv) {
 #endif
     }
     // ---- load model ----
+    oxidize::QuantType qto = oxidize::QuantType::F32;
+    if (args.quantize == "q8_0" || args.quantize == "q8") {
+      qto = oxidize::QuantType::Q8_0;
+    } else if (!args.quantize.empty()) {
+      std::fprintf(stderr, "error: --quantize supports only 'q8_0'\n");
+      return 2;
+    }
     auto t_load0 = std::chrono::steady_clock::now();
     std::unique_ptr<Model> model =
-        oxidize::load_llama_gguf(args.model, args.cuda);
+        oxidize::load_llama_gguf(args.model, args.cuda, qto);
     auto t_load1 = std::chrono::steady_clock::now();
 
     // Report the device actually in use: --cuda falls back to CPU when no

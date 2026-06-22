@@ -66,4 +66,9 @@ void dequantize_row(QuantType q, const uint8_t* src, float* dst, size_t n);
 // quantization.rs::f16_le_to_f32.
 float f16_le_to_f32(const uint8_t* bytes);
 
+// Quantize `n` f32 values (n % 32 == 0) into Q8_0 blocks (d:f16 + 32×int8).
+// `out` must hold quantized_size(Q8_0, n) bytes. Used for on-the-fly F16->Q8_0
+// weight quantization at load (halves weight bytes, ~1.3x decode, near-lossless).
+void quantize_row_q8_0(const float* x, uint8_t* out, size_t n);
+
 }  // namespace oxidize

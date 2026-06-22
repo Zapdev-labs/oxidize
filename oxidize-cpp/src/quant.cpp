@@ -287,6 +287,34 @@ void dequant_q8_0(const uint8_t* in, float* out, size_t n) {
   }
 }
 
+namespace {
+// f32 -> IEEE half-precision bits, round-to-nearest-even.
+uint16_t f32_to_f16_bits(float f) {
+  uint32_t x;
+  std::memcpy(&x, &f, 4);
+  uint32_t sign = (x >> 16) & 0x8000u;
+  uint32_t e = (x >> 23) & 0xff;
+  uint32_t mant = x & 0x7fffffu;
+  if (e == 0xff) return static_cast<uint16_t>(sign | 0x7c00u | (mant ? 0x200u : 0u));
+  int32_t exp = static_cast<int32_t>(e) - 127 + 15;
+  if (exp >= 0x1f) return static_cast<uint16_t>(sign | 0x7c00u);  // overflow -> inf
+  if (exp <= 0) {
+    if (exp < -10) return static_cast<uint16_t>(sign);  // underflow -> 0
+    mant |= 0x800000u;
+    int shift = 14 - exp;
+    uint32_t half = mant >> shift;
+    uint32_t rem = mant & ((1u << shift) - 1u);
+    uint32_t halfway = 1u << (shift - 1);
+    if (rem > halfway || (rem == halfway && (half & 1u))) half++;
+    return static_cast<uint16_t>(sign | half);
+  }
+  uint16_t h = static_cast<uint16_t>(sign | (static_cast<uint32_t>(exp) << 10) | (mant >> 13));
+  uint32_t rem = mant & 0x1fffu;
+  if (rem > 0x1000u || (rem == 0x1000u && (h & 1u))) h++;  // round-to-even (carry ok)
+  return h;
+}
+}  // namespace
+
 void dequant_q2_k(const uint8_t* in, float* out, size_t n) {
   validate_layout(QuantType::Q2_K, n / QK_K * BLOCK_Q2_K_SIZE, n, BLOCK_Q2_K_SIZE, QK_K);
   size_t nb = n / QK_K;
@@ -666,6 +694,30 @@ void dequant_nvfp4(const uint8_t* in, float* out, size_t n) {
 }
 
 }  // namespace
+
+void quantize_row_q8_0(const float* x, uint8_t* out, size_t n) {
+  size_t nb = n / QK8_0;
+  for (size_t b = 0; b < nb; ++b) {
+    const float* xb = x + b * QK8_0;
+    uint8_t* o = out + b * BLOCK_Q8_0_SIZE;
+    float amax = 0.0f;
+    for (size_t i = 0; i < QK8_0; ++i) {
+      float a = std::fabs(xb[i]);
+      if (a > amax) amax = a;
+    }
+    float d = amax / 127.0f;
+    float id = d != 0.0f ? 1.0f / d : 0.0f;
+    uint16_t dh = f32_to_f16_bits(d);
+    o[0] = static_cast<uint8_t>(dh & 0xff);
+    o[1] = static_cast<uint8_t>(dh >> 8);
+    for (size_t i = 0; i < QK8_0; ++i) {
+      int q = static_cast<int>(std::lround(xb[i] * id));
+      if (q > 127) q = 127;
+      if (q < -127) q = -127;
+      o[2 + i] = static_cast<uint8_t>(static_cast<int8_t>(q));
+    }
+  }
+}
 
 float f16_le_to_f32(const uint8_t* bytes) {
   uint16_t bits = read_u16_le(bytes);

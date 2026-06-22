@@ -44,12 +44,17 @@ namespace oxidize {
 struct LlamaWeight {
   bool quantized = false;
   QuantType quant = QuantType::F32;
-  const uint8_t* data = nullptr;   // valid when quantized: mmap-backed blocks
+  const uint8_t* data = nullptr;   // valid when quantized + mmap-backed
+  std::vector<uint8_t> owned;      // valid when quantized + on-the-fly quantized
   std::vector<float> f32;          // valid when !quantized
   size_t rows = 0;                 // output features
   size_t cols = 0;                 // input features
 
-  bool empty() const { return quantized ? (data == nullptr) : f32.empty(); }
+  // Quantized block bytes (owned takes precedence over the borrowed mmap ptr).
+  const uint8_t* qbytes() const { return owned.empty() ? data : owned.data(); }
+  bool empty() const {
+    return quantized ? (data == nullptr && owned.empty()) : f32.empty();
+  }
 };
 
 // Per-layer dense weights (Llama/Mistral/Qwen/Gemma). Mirrors the dense subset
@@ -91,7 +96,9 @@ struct LlamaLayer {
 // decoded/borrowed weights. Implements oxidize::Model.
 class LlamaModel : public Model {
  public:
-  explicit LlamaModel(GgufModel gguf);
+  // `quantize_to` (Q8_0) quantizes F16/BF16/F32 weight matrices to Q8_0 at load
+  // for ~1.3x faster, near-lossless decode; QuantType::F32 = keep as-is.
+  explicit LlamaModel(GgufModel gguf, QuantType quantize_to = QuantType::F32);
 
   // Route the dense-decode hot path (matmuls, rms_norm, rope, attention, FFN)
   // through the CUDA backend when `on` and a device is available. Weights stay
@@ -138,13 +145,14 @@ class LlamaModel : public Model {
 
   bool use_cuda_ = false;
   bool any_moe_ = false;  // true if any layer is MoE (resident GPU path is dense-only)
+  QuantType quantize_to_ = QuantType::F32;  // on-the-fly weight quant (F32 = none)
 
   // Routed-expert MoE FFN: ffn_out += sum over top-k experts of w_e * FFN_e(normed).
   void moe_ffn(const LlamaLayer& layer, const float* normed, float* ffn_out);
 
   static void reject_unsupported(const InferenceConfig& cfg);
   LlamaWeight load_weight(const GgufModel& g, const std::string& name,
-                          bool keep_quantized);
+                          bool keep_quantized, bool allow_quant = true);
   std::vector<float> load_vector(const GgufModel& g, const std::string& name);
 
   GgufModel gguf_;
@@ -172,6 +180,7 @@ class LlamaModel : public Model {
 // (silently falls back to CPU otherwise).
 // Throws std::runtime_error on parse failure or unsupported architecture.
 std::unique_ptr<Model> load_llama_gguf(const std::string& path,
-                                       bool want_cuda = false);
+                                       bool want_cuda = false,
+                                       QuantType quantize_to = QuantType::F32);
 
 }  // namespace oxidize

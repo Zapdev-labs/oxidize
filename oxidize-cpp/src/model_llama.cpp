@@ -97,7 +97,7 @@ size_t effective_rope_dim(const InferenceConfig& cfg) {
 void gemv_weight(const LlamaWeight& w, size_t rows, size_t cols, const float* x,
                  float* y) {
   if (w.quantized) {
-    gemv_quantized(y, w.quant, w.data, rows, cols, x);
+    gemv_quantized(y, w.quant, w.qbytes(), rows, cols, x);
   } else {
     matvec(y, w.f32.data(), x, rows, cols);
   }
@@ -182,7 +182,7 @@ void LlamaModel::d_gemv_weight(const LlamaWeight& w, size_t rows, size_t cols,
 #ifdef OXIDIZE_CUDA
   if (use_cuda_) {
     if (w.quantized) {
-      CudaBackend::instance().gemv_quantized(y, w.quant, w.data, rows, cols, x);
+      CudaBackend::instance().gemv_quantized(y, w.quant, w.qbytes(), rows, cols, x);
     } else {
       CudaBackend::instance().matvec(y, w.f32.data(), x, rows, cols);
     }
@@ -230,7 +230,7 @@ std::vector<float> LlamaModel::load_vector(const GgufModel& g, const std::string
 }
 
 LlamaWeight LlamaModel::load_weight(const GgufModel& g, const std::string& name,
-                                    bool keep_quantized) {
+                                    bool keep_quantized, bool allow_quant) {
   TensorView tv = g.tensor(name);
   size_t count = 1;
   for (uint64_t d : tv.dims) count *= static_cast<size_t>(d);
@@ -249,7 +249,21 @@ LlamaWeight LlamaModel::load_weight(const GgufModel& g, const std::string& name,
     w.rows = 1;
   }
 
-  if (keep_quantized && is_supported_quant_gemv(tv.quant)) {
+  // On-the-fly F16/BF16/F32 -> Q8_0 quantization (near-lossless, halves weight
+  // bytes -> ~1.3x decode). Only for high-precision sources with 32-aligned rows.
+  bool can_q8 = allow_quant && quantize_to_ == QuantType::Q8_0 &&
+                (tv.quant == QuantType::F16 || tv.quant == QuantType::BF16 ||
+                 tv.quant == QuantType::F32) &&
+                count % 32 == 0 && w.cols % 32 == 0;
+  if (can_q8) {
+    std::vector<float> tmp(count, 0.0f);
+    dequantize_row(tv.quant, tv.data, tmp.data(), count);
+    w.owned.resize(quantized_size(QuantType::Q8_0, count));
+    quantize_row_q8_0(tmp.data(), w.owned.data(), count);
+    w.quantized = true;
+    w.quant = QuantType::Q8_0;
+    w.data = nullptr;
+  } else if (keep_quantized && is_supported_quant_gemv(tv.quant)) {
     w.quantized = true;
     w.quant = tv.quant;
     w.data = tv.data;
@@ -262,7 +276,8 @@ LlamaWeight LlamaModel::load_weight(const GgufModel& g, const std::string& name,
   return w;
 }
 
-LlamaModel::LlamaModel(GgufModel gguf) : gguf_(std::move(gguf)) {
+LlamaModel::LlamaModel(GgufModel gguf, QuantType quantize_to)
+    : gguf_(std::move(gguf)), quantize_to_(quantize_to) {
   config_ = build_inference_config(gguf_);
   reject_unsupported(config_);
 
@@ -281,7 +296,10 @@ LlamaModel::LlamaModel(GgufModel gguf) : gguf_(std::move(gguf)) {
   }
   // Keep embeddings quantized when supported (decoded per-token at lookup), to
   // mirror inference.rs lookup_quantized_embedding.
-  tok_embeddings_ = load_weight(g, embd_name, /*keep_quantized=*/true);
+  // Embeddings are gathered per-token via dequantize_row (not gemv), so keep
+  // them in their original layout — never on-the-fly quantized.
+  tok_embeddings_ = load_weight(g, embd_name, /*keep_quantized=*/true,
+                                /*allow_quant=*/false);
 
   // ---- Final norm (output_norm / norm / token_embd_norm) ----
   if (g.has_tensor("output_norm.weight")) {
@@ -314,6 +332,12 @@ LlamaModel::LlamaModel(GgufModel gguf) : gguf_(std::move(gguf)) {
     auto opt_w = [&](const std::string& suffix, LlamaWeight& dst) {
       if (g.has_tensor(p + suffix)) dst = load_weight(g, p + suffix, /*keep_quantized=*/true);
     };
+    // MoE expert tensors are 3D and addressed per-expert via the borrowed mmap
+    // pointer, so they must not be on-the-fly quantized into an owned buffer.
+    auto opt_w_raw = [&](const std::string& suffix, LlamaWeight& dst) {
+      if (g.has_tensor(p + suffix))
+        dst = load_weight(g, p + suffix, /*keep_quantized=*/true, /*allow_quant=*/false);
+    };
 
     opt_vec("attn_norm.weight", layer.attn_norm);
     opt_w("attn_q.weight", layer.attn_q);
@@ -340,10 +364,10 @@ LlamaModel::LlamaModel(GgufModel gguf) : gguf_(std::move(gguf)) {
     opt_vec("ffn_down.bias", layer.ffn_down_bias);
 
     // MoE routed experts (Mixtral / Qwen-MoE). Present only on MoE layers.
-    opt_w("ffn_gate_exps.weight", layer.ffn_gate_exps);
-    opt_w("ffn_up_exps.weight", layer.ffn_up_exps);
-    opt_w("ffn_down_exps.weight", layer.ffn_down_exps);
-    opt_w("ffn_gate_inp.weight", layer.ffn_gate_inp);
+    opt_w_raw("ffn_gate_exps.weight", layer.ffn_gate_exps);
+    opt_w_raw("ffn_up_exps.weight", layer.ffn_up_exps);
+    opt_w_raw("ffn_down_exps.weight", layer.ffn_down_exps);
+    opt_w_raw("ffn_gate_inp.weight", layer.ffn_gate_inp);
     opt_vec("exp_probs_b.bias", layer.ffn_exp_probs_b);
 
     if (layer.attn_q.empty()) {
@@ -762,9 +786,10 @@ void LlamaModel::rewind_to(size_t consumed_tokens) {
   (void)consumed_tokens;
 }
 
-std::unique_ptr<Model> load_llama_gguf(const std::string& path, bool want_cuda) {
+std::unique_ptr<Model> load_llama_gguf(const std::string& path, bool want_cuda,
+                                       QuantType quantize_to) {
   GgufModel gguf = GgufModel::load(path);
-  auto model = std::make_unique<LlamaModel>(std::move(gguf));
+  auto model = std::make_unique<LlamaModel>(std::move(gguf), quantize_to);
   model->set_cuda(want_cuda);
   return model;
 }
