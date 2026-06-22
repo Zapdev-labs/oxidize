@@ -38,6 +38,7 @@
 #include "oxidize/model.hpp"
 #include "oxidize/model_llama.hpp"
 #include "oxidize/sampler.hpp"
+#include "oxidize/tokenizer.hpp"
 
 namespace {
 
@@ -57,6 +58,11 @@ struct Args {
   uint64_t seed = 0;
   bool json = false;
   bool debug_logits = false;
+  float temperature = 0.0f;  // <=0 => greedy
+  size_t top_k = 0;          // 0 => disabled
+  float top_p = 1.0f;
+  bool no_bos = false;
+  bool stream = false;
 };
 
 [[noreturn]] void usage_and_exit(const char* prog, int code) {
@@ -69,6 +75,11 @@ struct Args {
       "  --max-tokens <n>      Decode steps (default 64)\n"
       "  --cuda                Request the CUDA device\n"
       "  --seed <n>            RNG seed (default 0)\n"
+      "  --temperature <f>     Sampling temperature (<=0 = greedy; default 0)\n"
+      "  --top-k <n>           Top-k filter (0 = disabled)\n"
+      "  --top-p <f>           Top-p/nucleus filter (default 1.0)\n"
+      "  --no-bos              Do not prepend the BOS token\n"
+      "  --stream              Stream decoded text to stdout as it generates\n"
       "  --json                Emit timing JSON\n",
       prog);
   std::exit(code);
@@ -131,6 +142,20 @@ Args parse_args(int argc, char** argv) {
       a.json = true;
     } else if (arg == "--debug-logits") {
       a.debug_logits = true;
+    } else if (arg == "--no-bos") {
+      a.no_bos = true;
+    } else if (arg == "--stream") {
+      a.stream = true;
+    } else if (arg == "--temperature") {
+      a.temperature = std::strtof(take_value(argc, argv, i, "--temperature").c_str(), nullptr);
+    } else if (arg == "--top-p") {
+      a.top_p = std::strtof(take_value(argc, argv, i, "--top-p").c_str(), nullptr);
+    } else if (arg == "--top-k") {
+      std::string v = take_value(argc, argv, i, "--top-k");
+      if (!parse_size(v, a.top_k)) {
+        std::fprintf(stderr, "error: invalid --top-k '%s'\n", v.c_str());
+        usage_and_exit(argv[0], 2);
+      }
     } else if (arg == "-h" || arg == "--help") {
       usage_and_exit(argv[0], 0);
     } else {
@@ -177,53 +202,6 @@ std::vector<Token> parse_token_list(const std::string& csv, size_t vocab) {
   }
   if (out.empty()) throw std::runtime_error("--tokens produced no ids");
   return out;
-}
-
-// Trivial whitespace/byte fallback: hashes each prompt token (or byte) into the
-// vocab range. Deterministic but NOT a faithful tokenizer; used only when no
-// --tokens and no GGUF-side encoder are available, so prefill has real work.
-std::vector<Token> fallback_tokens(const std::string& prompt, size_t vocab,
-                                   std::optional<uint32_t> bos) {
-  std::vector<Token> out;
-  if (bos.has_value() && (vocab == 0 || *bos < vocab)) out.push_back(*bos);
-
-  auto push_word = [&](std::string_view w) {
-    if (w.empty()) return;
-    uint64_t h = 1469598103934665603ull;  // FNV-1a 64
-    for (unsigned char c : w) {
-      h ^= c;
-      h *= 1099511628211ull;
-    }
-    Token t = vocab ? static_cast<Token>(h % vocab) : static_cast<Token>(h);
-    out.push_back(t);
-  };
-
-  size_t i = 0;
-  while (i < prompt.size()) {
-    while (i < prompt.size() &&
-           (prompt[i] == ' ' || prompt[i] == '\t' || prompt[i] == '\n' ||
-            prompt[i] == '\r'))
-      ++i;
-    size_t start = i;
-    while (i < prompt.size() &&
-           !(prompt[i] == ' ' || prompt[i] == '\t' || prompt[i] == '\n' ||
-             prompt[i] == '\r'))
-      ++i;
-    if (i > start) push_word(std::string_view(prompt.data() + start, i - start));
-  }
-
-  if (out.empty()) {
-    // Empty prompt: feed a single in-range token so prefill is non-trivial.
-    out.push_back(bos.value_or(0) < (vocab ? vocab : SIZE_MAX)
-                      ? static_cast<Token>(bos.value_or(0))
-                      : static_cast<Token>(0));
-  }
-  return out;
-}
-
-std::optional<uint32_t> read_bos(const GgufModel& g) {
-  if (auto v = g.get_u32("tokenizer.ggml.bos_token_id")) return v;
-  return std::nullopt;
 }
 
 double secs(std::chrono::steady_clock::duration d) {
@@ -277,31 +255,35 @@ int main(int argc, char** argv) {
     const size_t vocab = model->vocab_size();
     const size_t ctx = model->context_size();
 
-    // ---- determine prefill tokens ----
-    std::optional<uint32_t> bos;
-    {
-      // Re-open just for BOS metadata (cheap header parse, no extra mmap kept).
-      // The model already mmapped the file; this second parse only reads the
-      // header region. If it fails we simply skip BOS seeding.
+    // ---- tokenizer (from the model's GGUF) ----
+    std::optional<oxidize::Tokenizer> tok;
+    if (auto* lm = dynamic_cast<LlamaModel*>(model.get())) {
       try {
-        GgufModel g = GgufModel::load(args.model);
-        bos = read_bos(g);
-      } catch (...) {
-        bos = std::nullopt;
+        tok = oxidize::Tokenizer::from_gguf(lm->gguf());
+      } catch (const std::exception& e) {
+        std::fprintf(stderr, "warning: tokenizer unavailable (%s); use --tokens\n",
+                     e.what());
       }
     }
 
+    // ---- determine prefill tokens ----
     std::vector<Token> prefill;
     if (!args.tokens.empty()) {
-      prefill = parse_token_list(args.tokens, vocab);
+      prefill = parse_token_list(args.tokens, vocab);  // pre-tokenized (bench/parity)
+    } else if (tok) {
+      prefill = tok->encode(args.prompt, !args.no_bos);
     } else {
-      prefill = fallback_tokens(args.prompt, vocab, bos);
+      std::fprintf(stderr,
+                   "error: no usable tokenizer; pass --tokens \"id,id,...\"\n");
+      return 2;
     }
+    if (prefill.empty()) throw std::runtime_error("empty prefill after tokenize");
 
     // Respect context: prefill + decode must fit.
     if (ctx != 0 && prefill.size() >= ctx) {
       prefill.resize(ctx - 1);
-      if (prefill.empty()) prefill.push_back(bos.value_or(0));
+      if (prefill.empty())
+        prefill.push_back((tok && tok->has_bos()) ? tok->bos_id() : 0);
     }
     size_t room = (ctx == 0) ? args.max_tokens
                              : std::min(args.max_tokens, ctx - prefill.size());
@@ -332,22 +314,44 @@ int main(int argc, char** argv) {
     }
 
     // ---- decode ----
-    oxidize::Rng rng(args.seed);  // reserved for non-greedy paths; greedy below.
-    (void)rng;
+    oxidize::Rng rng(args.seed);
+    oxidize::SamplerConfig scfg;
+    scfg.temperature = args.temperature > 0.0f ? args.temperature : 1.0f;
+    if (args.top_k > 0) scfg.top_k = args.top_k;
+    if (args.top_p < 1.0f) scfg.top_p = args.top_p;
+    const bool greedy = args.temperature <= 0.0f;
+    auto pick = [&](const Logits& l) -> Token {
+      return greedy ? oxidize::greedy(l)
+                    : oxidize::sample(l, scfg, rng.next_unit());
+    };
+
     std::vector<Token> generated;
     generated.reserve(room);
 
+    auto emit = [&](Token t) {
+      if (args.stream && tok) {
+        std::fputs(tok->decode_token(t).c_str(), stdout);
+        std::fflush(stdout);
+      }
+    };
+
     auto t_dec0 = std::chrono::steady_clock::now();
     size_t produced = 0;
-    Token next = oxidize::greedy(logits);
-    generated.push_back(next);
-    ++produced;
-    for (; produced < room; ++produced) {
-      logits = model->forward({next}, session);
-      next = oxidize::greedy(logits);
+    Token next = pick(logits);
+    if (!(tok && tok->is_eog(next))) {
       generated.push_back(next);
+      emit(next);
+      ++produced;
+      for (; produced < room; ++produced) {
+        logits = model->forward({next}, session);
+        next = pick(logits);
+        if (tok && tok->is_eog(next)) break;
+        generated.push_back(next);
+        emit(next);
+      }
     }
     auto t_dec1 = std::chrono::steady_clock::now();
+    if (args.stream) std::fputc('\n', stdout);
 
     // ---- timings ----
     double load_s = secs(t_load1 - t_load0);
@@ -390,6 +394,9 @@ int main(int argc, char** argv) {
       std::printf("  gen_tokens:   ");
       for (Token t : generated) std::printf(" %u", t);
       std::printf("\n");
+      if (tok && !args.stream) {
+        std::printf("  ---\n  text: %s\n", tok->decode(generated).c_str());
+      }
     }
     return 0;
   } catch (const std::exception& e) {

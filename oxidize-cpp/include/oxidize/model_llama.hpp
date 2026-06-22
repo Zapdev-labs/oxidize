@@ -96,6 +96,7 @@ class LlamaModel : public Model {
   void rewind_to(size_t consumed_tokens) override;
 
   const InferenceConfig& config() const { return config_; }
+  const GgufModel& gguf() const { return gguf_; }
 
  private:
   // One decode step for `token` at absolute position `pos`. When need_logits is
