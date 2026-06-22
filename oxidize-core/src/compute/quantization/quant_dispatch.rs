@@ -81,6 +81,14 @@ pub fn dequantize_scalar(
             dequantize_iq3_s_scalar(input, output)?;
             Ok(())
         }
+        GgufQuantizationType::IQ2_XXS => {
+            dequantize_iq2_xxs_scalar(input, output)?;
+            Ok(())
+        }
+        GgufQuantizationType::IQ3_XXS => {
+            dequantize_iq3_xxs_scalar(input, output)?;
+            Ok(())
+        }
         other => Err(QuantizationError::UnsupportedQuantizationType(other)),
     }
 }

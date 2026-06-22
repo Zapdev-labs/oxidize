@@ -453,6 +453,30 @@ pub fn decode_profile_record(label: &str, ns: u64) {
     gemv_profile::record(label.to_string(), 0, 0, 0, ns);
 }
 
+fn gemv_dequant_scalar_fallback(
+    quantization: GgufQuantizationType,
+    quantized_matrix: &[u8],
+    rows: usize,
+    cols: usize,
+    vector: &[f32],
+    output: &mut [f32],
+) -> Result<(), GemvError> {
+    let row_bytes = crate::quantization::quantized_size(quantization, cols)
+        .map_err(|_| GemvError::UnsupportedQuantizationType { quantization })?;
+    let mut row = vec![0.0_f32; cols];
+    for (row_idx, out) in output.iter_mut().enumerate().take(rows) {
+        let start = row_idx * row_bytes;
+        let end = start + row_bytes;
+        if end > quantized_matrix.len() {
+            return Err(GemvError::UnsupportedQuantizationType { quantization });
+        }
+        crate::quantization::dequantize_scalar(quantization, &quantized_matrix[start..end], &mut row)
+            .map_err(|_| GemvError::UnsupportedQuantizationType { quantization })?;
+        *out = row.iter().zip(vector).map(|(w, v)| w * v).sum();
+    }
+    Ok(())
+}
+
 pub fn gemv_quantized_f32(
     quantization: GgufQuantizationType,
     quantized_matrix: &[u8],
@@ -506,7 +530,7 @@ pub fn gemv_quantized_f32(
         GgufQuantizationType::IQ4_XS if cols.is_multiple_of(QK_K) => {
             gemv_iq4_xs_f32(quantized_matrix, rows, cols, vector, output)
         }
-        _ => Err(GemvError::UnsupportedQuantizationType { quantization }),
+        _ => gemv_dequant_scalar_fallback(quantization, quantized_matrix, rows, cols, vector, output),
     };
     if let Some(start) = profile_start {
         gemv_profile::record(

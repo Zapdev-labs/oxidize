@@ -45,6 +45,9 @@ pub const BLOCK_NVFP4_SIZE: usize = QK_NVFP4 / QK_NVFP4_SUB + QK_NVFP4 / 2;
 pub const BLOCK_IQ4_XS_SIZE: usize = sizeof_of_f16() + 2 + QK_K / 64 + QK_K / 2;
 // block_iq3_s: ggml_half d + uint8_t qs[QK_K/4] + uint8_t qh[QK_K/32] + uint8_t signs[QK_K/8] + uint8_t scales[QK_K/64]
 const BLOCK_IQ3_S_SIZE: usize = sizeof_of_f16() + QK_K / 4 + QK_K / 32 + QK_K / 8 + QK_K / 64;
+const BLOCK_IQ2_XXS_SIZE: usize = sizeof_of_f16() + QK_K / 4;
+const BLOCK_IQ2_XS_SIZE: usize = sizeof_of_f16() + QK_K / 32 + QK_K / 4;
+const BLOCK_IQ3_XXS_SIZE: usize = sizeof_of_f16() + 3 * (QK_K / 8);
 // IQ4_NL nonlinear codebook (shared by IQ4_NL and IQ4_XS)
 pub(crate) const KVALUES_IQ4NL: [i8; 16] = [
     -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113,
@@ -232,43 +235,47 @@ impl IMatrix {
     }
 }
 
+pub fn quant_block_layout(quantization: GgufQuantizationType) -> Result<(usize, usize), QuantizationError> {
+    match quantization {
+        GgufQuantizationType::F32 => Ok((1, 4)),
+        GgufQuantizationType::F16 => Ok((1, 2)),
+        GgufQuantizationType::I8 => Ok((1, 1)),
+        GgufQuantizationType::I16 => Ok((1, 2)),
+        GgufQuantizationType::I32 => Ok((1, 4)),
+        GgufQuantizationType::I64 => Ok((1, 8)),
+        GgufQuantizationType::F64 => Ok((1, 8)),
+        GgufQuantizationType::BF16 => Ok((1, 2)),
+        GgufQuantizationType::Q4_0 => Ok((QK4_0, BLOCK_Q4_0_SIZE)),
+        GgufQuantizationType::Q4_1 => Ok((QK4_1, BLOCK_Q4_1_SIZE)),
+        GgufQuantizationType::Q5_0 => Ok((QK5_0, BLOCK_Q5_0_SIZE)),
+        GgufQuantizationType::Q5_1 => Ok((QK5_1, BLOCK_Q5_1_SIZE)),
+        GgufQuantizationType::Q8_0 => Ok((QK8_0, BLOCK_Q8_0_SIZE)),
+        GgufQuantizationType::Q2_K => Ok((QK_K, BLOCK_Q2_K_SIZE)),
+        GgufQuantizationType::Q3_K_S
+        | GgufQuantizationType::Q3_K_M
+        | GgufQuantizationType::Q3_K_L => Ok((QK_K, BLOCK_Q3_K_SIZE)),
+        GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M => Ok((QK_K, BLOCK_Q4_K_SIZE)),
+        GgufQuantizationType::Q5_K_S | GgufQuantizationType::Q5_K_M => Ok((QK_K, BLOCK_Q5_K_SIZE)),
+        GgufQuantizationType::Q6_K => Ok((QK_K, BLOCK_Q6_K_SIZE)),
+        GgufQuantizationType::IQ1_S => Ok((QK_K, BLOCK_IQ1_S_SIZE)),
+        GgufQuantizationType::IQ1_M => Ok((QK_K, BLOCK_IQ1_M_SIZE)),
+        GgufQuantizationType::NVFP4 => Ok((QK_NVFP4, BLOCK_NVFP4_SIZE)),
+        GgufQuantizationType::IQ2_XXS => Ok((QK_K, BLOCK_IQ2_XXS_SIZE)),
+        GgufQuantizationType::IQ2_XS => Ok((QK_K, BLOCK_IQ2_XS_SIZE)),
+        GgufQuantizationType::IQ2_S => Ok((QK_K, BLOCK_Q2_K_SIZE)),
+        GgufQuantizationType::IQ3_S => Ok((QK_K, BLOCK_IQ3_S_SIZE)),
+        GgufQuantizationType::IQ4_XS => Ok((QK_K, BLOCK_IQ4_XS_SIZE)),
+        GgufQuantizationType::IQ3_XXS => Ok((QK_K, BLOCK_IQ3_XXS_SIZE)),
+        GgufQuantizationType::IQ4_NL => Ok((QK_K, BLOCK_Q4_K_SIZE)),
+        other => Err(QuantizationError::UnsupportedQuantizationType(other)),
+    }
+}
+
 pub fn quantized_size(
     quantization: GgufQuantizationType,
     value_count: usize,
 ) -> Result<usize, QuantizationError> {
-    let (values_per_block, bytes_per_block) = match quantization {
-        GgufQuantizationType::F32 => (1, 4),
-        GgufQuantizationType::F16 => (1, 2),
-        GgufQuantizationType::I8 => (1, 1),
-        GgufQuantizationType::I16 => (1, 2),
-        GgufQuantizationType::I32 => (1, 4),
-        GgufQuantizationType::I64 => (1, 8),
-        GgufQuantizationType::F64 => (1, 8),
-        GgufQuantizationType::BF16 => (1, 2),
-        GgufQuantizationType::Q4_0 => (QK4_0, BLOCK_Q4_0_SIZE),
-        GgufQuantizationType::Q4_1 => (QK4_1, BLOCK_Q4_1_SIZE),
-        GgufQuantizationType::Q5_0 => (QK5_0, BLOCK_Q5_0_SIZE),
-        GgufQuantizationType::Q5_1 => (QK5_1, BLOCK_Q5_1_SIZE),
-        GgufQuantizationType::Q8_0 => (QK8_0, BLOCK_Q8_0_SIZE),
-        GgufQuantizationType::Q2_K => (QK_K, BLOCK_Q2_K_SIZE),
-        GgufQuantizationType::Q3_K_S
-        | GgufQuantizationType::Q3_K_M
-        | GgufQuantizationType::Q3_K_L => (QK_K, BLOCK_Q3_K_SIZE),
-        GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M => (QK_K, BLOCK_Q4_K_SIZE),
-        GgufQuantizationType::Q5_K_S | GgufQuantizationType::Q5_K_M => (QK_K, BLOCK_Q5_K_SIZE),
-        GgufQuantizationType::Q6_K => (QK_K, BLOCK_Q6_K_SIZE),
-        GgufQuantizationType::IQ1_S => (QK_K, BLOCK_IQ1_S_SIZE),
-        GgufQuantizationType::IQ1_M => (QK_K, BLOCK_IQ1_M_SIZE),
-        GgufQuantizationType::NVFP4 => (QK_NVFP4, BLOCK_NVFP4_SIZE),
-        GgufQuantizationType::IQ2_XXS
-        | GgufQuantizationType::IQ2_XS
-        | GgufQuantizationType::IQ2_S => (QK_K, BLOCK_Q2_K_SIZE), // approximate
-        GgufQuantizationType::IQ3_S => (QK_K, BLOCK_IQ3_S_SIZE),
-        GgufQuantizationType::IQ4_XS => (QK_K, BLOCK_IQ4_XS_SIZE),
-        GgufQuantizationType::IQ3_XXS => (QK_K, BLOCK_Q3_K_SIZE), // approximate (unsupported dequant)
-        GgufQuantizationType::IQ4_NL => (QK_K, BLOCK_Q4_K_SIZE), // approximate (unsupported dequant)
-        other => return Err(QuantizationError::UnsupportedQuantizationType(other)),
-    };
+    let (values_per_block, bytes_per_block) = quant_block_layout(quantization)?;
 
     if !value_count.is_multiple_of(values_per_block) {
         return Err(QuantizationError::InvalidInputLength {

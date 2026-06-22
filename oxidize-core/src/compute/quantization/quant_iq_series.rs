@@ -1,5 +1,9 @@
 use super::*;
 
+#[path = "iq_grids.rs"]
+mod iq_grids;
+use iq_grids::{IQ2XXS_GRID, IQ3XXS_GRID, KMASK_IQ2XS, KSIGNS_IQ2XS};
+
 const IQ1S_DELTA: f32 = 0.125;
 
 /// Decode an 11-bit iq1s_grid index into 8 ternary values.
@@ -149,11 +153,96 @@ pub fn dequantize_iq1_m_scalar(input: &[u8], output: &mut [f32]) -> Result<(), Q
             }
             out_ptr += 8;
 
-            iq1s_grid_decode(idx3, &mut grid_vals);
-            for j in 0..8 {
-                out[out_ptr + j] = dl2 * (grid_vals[j] as f32 + deltas[3]);
-            }
             out_ptr += 8;
+        }
+    }
+    Ok(())
+}
+
+pub fn dequantize_iq2_xxs_scalar(input: &[u8], output: &mut [f32]) -> Result<(), QuantizationError> {
+    validate_layout(
+        GgufQuantizationType::IQ2_XXS,
+        input,
+        output,
+        BLOCK_IQ2_XXS_SIZE,
+        QK_K,
+    )?;
+    for (block, out) in input
+        .chunks_exact(BLOCK_IQ2_XXS_SIZE)
+        .zip(output.chunks_exact_mut(QK_K))
+    {
+        let d = f16_le_to_f32(&block[0..2]);
+        let qs = &block[2..];
+        let mut out_ptr = 0_usize;
+        for ib32 in 0..(QK_K / 32) {
+            let aux0 = u32::from_le_bytes(qs[4 * ib32..4 * ib32 + 4].try_into().unwrap());
+            let aux1 = u32::from_le_bytes(qs[4 * ib32 + 4..4 * ib32 + 8].try_into().unwrap());
+            let aux_bytes = aux0.to_le_bytes();
+            let db = d * (0.5 + ((aux1 >> 28) as f32)) * 0.25;
+            for l in 0..4 {
+                let grid_idx = aux_bytes[l] as usize;
+                let grid = IQ2XXS_GRID[grid_idx].to_le_bytes();
+                let signs = KSIGNS_IQ2XS[((aux1 >> (7 * l)) & 127) as usize];
+                for j in 0..8 {
+                    let sign = if signs & KMASK_IQ2XS[j] != 0 {
+                        -1.0_f32
+                    } else {
+                        1.0_f32
+                    };
+                    out[out_ptr + j] = db * grid[j] as f32 * sign;
+                }
+                out_ptr += 8;
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn dequantize_iq3_xxs_scalar(input: &[u8], output: &mut [f32]) -> Result<(), QuantizationError> {
+    validate_layout(
+        GgufQuantizationType::IQ3_XXS,
+        input,
+        output,
+        BLOCK_IQ3_XXS_SIZE,
+        QK_K,
+    )?;
+    for (block, out) in input
+        .chunks_exact(BLOCK_IQ3_XXS_SIZE)
+        .zip(output.chunks_exact_mut(QK_K))
+    {
+        let d = f16_le_to_f32(&block[0..2]);
+        let qs = &block[2..2 + QK_K / 4];
+        let scales_and_signs = &block[2 + QK_K / 4..];
+        let mut qs_ptr = 0_usize;
+        let mut out_ptr = 0_usize;
+        for ib32 in 0..(QK_K / 32) {
+            let aux32 = u32::from_le_bytes(
+                scales_and_signs[4 * ib32..4 * ib32 + 4]
+                    .try_into()
+                    .unwrap(),
+            );
+            let db = d * (0.5 + ((aux32 >> 28) as f32)) * 0.5;
+            for l in 0..4 {
+                let signs = KSIGNS_IQ2XS[((aux32 >> (7 * l)) & 127) as usize];
+                let grid1 = IQ3XXS_GRID[qs[qs_ptr + 2 * l] as usize].to_le_bytes();
+                let grid2 = IQ3XXS_GRID[qs[qs_ptr + 2 * l + 1] as usize].to_le_bytes();
+                for j in 0..4 {
+                    let sign_lo = if signs & KMASK_IQ2XS[j] != 0 {
+                        -1.0_f32
+                    } else {
+                        1.0_f32
+                    };
+                    let sign_hi = if signs & KMASK_IQ2XS[j + 4] != 0 {
+                        -1.0_f32
+                    } else {
+                        1.0_f32
+                    };
+                    out[out_ptr + j] = db * grid1[j] as f32 * sign_lo;
+                    out[out_ptr + j + 4] = db * grid2[j] as f32 * sign_hi;
+                }
+                out_ptr += 8;
+            }
+            qs_ptr += 8;
         }
     }
     Ok(())
