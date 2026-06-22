@@ -19,7 +19,10 @@ const E2M1_DOUBLED_VALUES: [f32; 16] = [
     0.0, 1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0, 0.0, -1.0, -2.0, -3.0, -4.0, -6.0, -8.0, -12.0,
 ];
 const FLASH_ATTENTION_BLOCK_TOKENS: usize = 64;
-const PARALLEL_GEMV_MIN_OPS: usize = 1 << 20;
+// Parallelize a GEMV once rows*cols exceeds this. Lowered from 1<<20 so the
+// attention q/k/v/o projections (e.g. 896x896 = 0.8M ops) run multi-threaded
+// instead of single-threaded; they were a measurable serial chunk of decode.
+const PARALLEL_GEMV_MIN_OPS: usize = 1 << 17;
 
 /// Rows per spin-pool dispatch chunk. Small chunks cost nothing under static
 /// partitioning (no claim contention) and cut straggler imbalance on
@@ -1608,6 +1611,177 @@ pub fn decode_profile_record(label: &str, ns: u64) {
     gemv_profile::record(label.to_string(), 0, 0, 0, ns);
 }
 
+// ---- Native 16-bit-float GEMV ---------------------------------------------
+// F16/BF16 weights are kept in their on-disk 2-bytes/elem layout and converted
+// to f32 inside the dot, instead of being expanded to a 4-bytes/elem f32 matrix
+// at load. Decode is memory-bandwidth bound, so halving the bytes streamed per
+// token is a large win (mirrors the C++ port's F16C path).
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,fma,f16c")]
+#[allow(unsafe_op_in_unsafe_fn)]
+#[inline]
+unsafe fn dot_f16_avx2(w: *const u16, b: *const f32, len: usize) -> f32 {
+    // Four independent accumulators to hide the FMA latency (a 2-wide chain
+    // bottlenecks on the ~4-cycle FMA dependency before memory bandwidth).
+    let mut acc0 = _mm256_setzero_ps();
+    let mut acc1 = _mm256_setzero_ps();
+    let mut acc2 = _mm256_setzero_ps();
+    let mut acc3 = _mm256_setzero_ps();
+    let mut i = 0;
+    while i + 32 <= len {
+        let w0 = _mm256_cvtph_ps(_mm_loadu_si128(w.add(i) as *const __m128i));
+        let w1 = _mm256_cvtph_ps(_mm_loadu_si128(w.add(i + 8) as *const __m128i));
+        let w2 = _mm256_cvtph_ps(_mm_loadu_si128(w.add(i + 16) as *const __m128i));
+        let w3 = _mm256_cvtph_ps(_mm_loadu_si128(w.add(i + 24) as *const __m128i));
+        acc0 = _mm256_fmadd_ps(w0, _mm256_loadu_ps(b.add(i)), acc0);
+        acc1 = _mm256_fmadd_ps(w1, _mm256_loadu_ps(b.add(i + 8)), acc1);
+        acc2 = _mm256_fmadd_ps(w2, _mm256_loadu_ps(b.add(i + 16)), acc2);
+        acc3 = _mm256_fmadd_ps(w3, _mm256_loadu_ps(b.add(i + 24)), acc3);
+        i += 32;
+    }
+    while i + 8 <= len {
+        let w0 = _mm256_cvtph_ps(_mm_loadu_si128(w.add(i) as *const __m128i));
+        acc0 = _mm256_fmadd_ps(w0, _mm256_loadu_ps(b.add(i)), acc0);
+        i += 8;
+    }
+    let acc = _mm256_add_ps(_mm256_add_ps(acc0, acc1), _mm256_add_ps(acc2, acc3));
+    let lo = _mm256_castps256_ps128(acc);
+    let hi = _mm256_extractf128_ps(acc, 1);
+    let sum128 = _mm_add_ps(lo, hi);
+    let shuf = _mm_movehdup_ps(sum128);
+    let sums = _mm_add_ps(sum128, shuf);
+    let shuf2 = _mm_movehl_ps(shuf, sums);
+    let mut sum = _mm_cvtss_f32(_mm_add_ss(sums, shuf2));
+    while i < len {
+        sum += f16_bits_to_f32(*w.add(i)) * *b.add(i);
+        i += 1;
+    }
+    sum
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,fma")]
+#[allow(unsafe_op_in_unsafe_fn)]
+#[inline]
+unsafe fn dot_bf16_avx2(w: *const u16, b: *const f32, len: usize) -> f32 {
+    // bf16 -> f32 is a left shift of the 16 stored bits into the high half.
+    let mut acc0 = _mm256_setzero_ps();
+    let mut acc1 = _mm256_setzero_ps();
+    let mut i = 0;
+    let widen = |p: *const u16| -> __m256 {
+        _mm256_castsi256_ps(_mm256_slli_epi32(
+            _mm256_cvtepu16_epi32(_mm_loadu_si128(p as *const __m128i)),
+            16,
+        ))
+    };
+    while i + 16 <= len {
+        acc0 = _mm256_fmadd_ps(widen(w.add(i)), _mm256_loadu_ps(b.add(i)), acc0);
+        acc1 = _mm256_fmadd_ps(widen(w.add(i + 8)), _mm256_loadu_ps(b.add(i + 8)), acc1);
+        i += 16;
+    }
+    while i + 8 <= len {
+        acc0 = _mm256_fmadd_ps(widen(w.add(i)), _mm256_loadu_ps(b.add(i)), acc0);
+        i += 8;
+    }
+    let acc = _mm256_add_ps(acc0, acc1);
+    let lo = _mm256_castps256_ps128(acc);
+    let hi = _mm256_extractf128_ps(acc, 1);
+    let sum128 = _mm_add_ps(lo, hi);
+    let shuf = _mm_movehdup_ps(sum128);
+    let sums = _mm_add_ps(sum128, shuf);
+    let shuf2 = _mm_movehl_ps(shuf, sums);
+    let mut sum = _mm_cvtss_f32(_mm_add_ss(sums, shuf2));
+    while i < len {
+        sum += f32::from_bits((*w.add(i) as u32) << 16) * *b.add(i);
+        i += 1;
+    }
+    sum
+}
+
+// Scalar fallbacks read 2 bytes at a time (no u16 alignment assumption).
+#[inline]
+fn dot_f16_scalar_bytes(row: &[u8], b: &[f32]) -> f32 {
+    let mut s = 0.0_f32;
+    for (i, v) in b.iter().enumerate() {
+        s += f16_le_to_f32([row[2 * i], row[2 * i + 1]]) * *v;
+    }
+    s
+}
+#[inline]
+fn dot_bf16_scalar_bytes(row: &[u8], b: &[f32]) -> f32 {
+    let mut s = 0.0_f32;
+    for (i, v) in b.iter().enumerate() {
+        let bits = (u16::from_le_bytes([row[2 * i], row[2 * i + 1]]) as u32) << 16;
+        s += f32::from_bits(bits) * *v;
+    }
+    s
+}
+
+/// GEMV for native F16/BF16 weight matrices (2 bytes/elem, row-major).
+fn gemv_16bit_float(
+    matrix: &[u8],
+    rows: usize,
+    cols: usize,
+    vector: &[f32],
+    output: &mut [f32],
+    is_bf16: bool,
+) -> Result<(), GemvError> {
+    let row_bytes = cols * 2;
+    if matrix.len() < rows * row_bytes {
+        return Err(GemvError::InvalidMatrixLength {
+            expected: rows * row_bytes,
+            actual: matrix.len(),
+        });
+    }
+    if vector.len() < cols || output.len() < rows {
+        return Err(GemvError::InvalidVectorLength {
+            expected: cols,
+            actual: vector.len(),
+        });
+    }
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    let simd = is_x86_feature_detected!("avx2")
+        && is_x86_feature_detected!("fma")
+        && (is_bf16 || is_x86_feature_detected!("f16c"));
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+    let simd = false;
+
+    let compute_row = |row_idx: usize| -> f32 {
+        let start = row_idx * row_bytes;
+        let row = &matrix[start..start + row_bytes];
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        if simd {
+            let wptr = row.as_ptr() as *const u16;
+            return unsafe {
+                if is_bf16 {
+                    dot_bf16_avx2(wptr, vector.as_ptr(), cols)
+                } else {
+                    dot_f16_avx2(wptr, vector.as_ptr(), cols)
+                }
+            };
+        }
+        if is_bf16 {
+            dot_bf16_scalar_bytes(row, &vector[..cols])
+        } else {
+            dot_f16_scalar_bytes(row, &vector[..cols])
+        }
+    };
+
+    if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
+        output
+            .par_iter_mut()
+            .with_min_len(32)
+            .enumerate()
+            .for_each(|(row_idx, out)| *out = compute_row(row_idx));
+    } else {
+        for (row_idx, out) in output.iter_mut().enumerate() {
+            *out = compute_row(row_idx);
+        }
+    }
+    Ok(())
+}
+
 pub fn gemv_quantized_f32(
     quantization: GgufQuantizationType,
     quantized_matrix: &[u8],
@@ -1631,6 +1805,12 @@ pub fn gemv_quantized_f32(
 
     let profile_start = gemv_profile::enabled().then(std::time::Instant::now);
     let result = match quantization {
+        GgufQuantizationType::F16 => {
+            gemv_16bit_float(quantized_matrix, rows, cols, vector, output, false)
+        }
+        GgufQuantizationType::BF16 => {
+            gemv_16bit_float(quantized_matrix, rows, cols, vector, output, true)
+        }
         GgufQuantizationType::Q8_0 => gemv_q8_0_f32_fused(quantized_matrix, cols, vector, output),
         GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M
             if cols.is_multiple_of(QK_K) && q4_k_q8_k_avx2_available() =>

@@ -900,6 +900,8 @@ fn weight_block_info(qtype: GgufQuantizationType) -> (usize, usize) {
         GgufQuantizationType::NVFP4 => (64, 36),
         GgufQuantizationType::IQ1_S => (256, 50),
         GgufQuantizationType::IQ1_M => (256, 56),
+        // Native 16-bit floats: 1 value per "block", 2 bytes each.
+        GgufQuantizationType::F16 | GgufQuantizationType::BF16 => (1, 2),
         _ => (1, 4), // fallback to f32
     }
 }
@@ -1251,11 +1253,13 @@ pub(crate) fn lookup_quantized_embedding(
         GgufQuantizationType::NVFP4 => 36,
         GgufQuantizationType::IQ1_S => 50,
         GgufQuantizationType::IQ1_M => 56,
+        GgufQuantizationType::F16 | GgufQuantizationType::BF16 => 2,
         _ => return,
     };
     let block_width = match qtype {
         GgufQuantizationType::Q8_0 => 32,
         GgufQuantizationType::NVFP4 => 64,
+        GgufQuantizationType::F16 | GgufQuantizationType::BF16 => 1,
         _ => 256,
     };
     let blocks_per_row = h / block_width;
@@ -1291,6 +1295,17 @@ pub(crate) fn lookup_quantized_embedding(
         GgufQuantizationType::NVFP4 => {
             let _ =
                 crate::quantization::dequantize_nvfp4_scalar(row, &mut x[..blocks_per_row * 64]);
+        }
+        GgufQuantizationType::F16 => {
+            for (i, pair) in row.chunks_exact(2).enumerate() {
+                x[i] = f16_le_to_f32([pair[0], pair[1]]);
+            }
+        }
+        GgufQuantizationType::BF16 => {
+            for (i, pair) in row.chunks_exact(2).enumerate() {
+                let bits = (u16::from_le_bytes([pair[0], pair[1]]) as u32) << 16;
+                x[i] = f32::from_bits(bits);
+            }
         }
         _ => {}
     }
@@ -1367,9 +1382,15 @@ impl InferenceModel {
                                count: usize|
              -> Result<WeightStorage, String> {
                 // Keep only formats with implemented on-the-fly GEMV kernels quantized.
+                // F16/BF16 stay native (2 bytes/elem) and use the F16C/widening
+                // GEMV instead of being expanded to a 4-bytes/elem f32 matrix —
+                // halves the weight bytes streamed per token on a memory-bound
+                // decode.
                 let is_supported_quant_gemv = matches!(
                     qtype,
-                    GgufQuantizationType::Q8_0
+                    GgufQuantizationType::F16
+                        | GgufQuantizationType::BF16
+                        | GgufQuantizationType::Q8_0
                         | GgufQuantizationType::Q4_K_S
                         | GgufQuantizationType::Q4_K_M
                         | GgufQuantizationType::Q6_K
