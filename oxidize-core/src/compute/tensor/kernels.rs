@@ -1769,11 +1769,21 @@ fn gemv_16bit_float(
     };
 
     if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
-        output
-            .par_iter_mut()
-            .with_min_len(32)
-            .enumerate()
-            .for_each(|(row_idx, out)| *out = compute_row(row_idx));
+        // Drive single F16/BF16 GEMVs (ffn_down, o_proj, lm_head) through the same
+        // low-overhead spin pool as the fused multi-GEMV — rayon's per-call
+        // fork/join left these at ~20 GB/s vs ~45 for the spin-pool path.
+        let out_ptr = output.as_mut_ptr() as usize;
+        let nchunks = rows.div_ceil(GEMV_CHUNK_ROWS);
+        crate::spinpool::run_chunks(nchunks, |ci| {
+            let row0 = ci * GEMV_CHUNK_ROWS;
+            let nr = GEMV_CHUNK_ROWS.min(rows - row0);
+            for k in 0..nr {
+                let r = row0 + k;
+                let v = compute_row(r);
+                // Safety: chunks write disjoint rows; output outlives the region.
+                unsafe { *((out_ptr as *mut f32).add(r)) = v };
+            }
+        });
     } else {
         for (row_idx, out) in output.iter_mut().enumerate() {
             *out = compute_row(row_idx);
