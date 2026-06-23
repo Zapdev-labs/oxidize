@@ -89,7 +89,36 @@ struct LlamaLayer {
   LlamaWeight ffn_gate_inp;   // router [n_experts, hidden]
   std::vector<float> ffn_exp_probs_b;  // sigmoid-gating per-expert bias (LFM2MoE)
 
+  // Shared (always-on) expert FFN (GLM-5.2 / DeepSeek-V2). Runs unconditionally
+  // alongside the routed experts and is summed into the MoE output. Empty when
+  // the model has no shared expert. Mirrors the shexp tensors in the GGUF.
+  LlamaWeight ffn_gate_shexp;
+  LlamaWeight ffn_up_shexp;
+  LlamaWeight ffn_down_shexp;
+
+  // MLA (GLM-5.2 glm-dsa / DeepSeek-V2 compressed attention). These replace the
+  // dense attn_q/attn_k/attn_v projections. Empty on dense-attention layers.
+  //   attn_q_a       : x -> q_lora_rank          (q down-proj)
+  //   attn_q_a_norm  : RMSNorm over q_lora_rank
+  //   attn_q_b       : q_lora_rank -> n_heads*mla_key_dim  (q up-proj)
+  //   attn_kv_a_mqa  : x -> kv_lora_rank + rope  (kv down-proj, MQA)
+  //   attn_kv_a_norm : RMSNorm over kv_lora_rank
+  //   attn_k_b       : kv_lora_rank -> per-head key   (k up-proj, 3D)
+  //   attn_v_b       : kv_lora_rank -> per-head value (v up-proj, 3D)
+  LlamaWeight attn_q_a;
+  std::vector<float> attn_q_a_norm;
+  LlamaWeight attn_q_b;
+  LlamaWeight attn_kv_a_mqa;
+  std::vector<float> attn_kv_a_norm;
+  LlamaWeight attn_k_b;
+  LlamaWeight attn_v_b;
+
   bool is_moe() const { return !ffn_gate_exps.empty() || !ffn_gate_inp.empty(); }
+  // MLA layer: uses compressed q/kv projections instead of dense attn_q/k/v.
+  bool is_mla() const { return !attn_q_a.empty() || !attn_kv_a_mqa.empty(); }
+  bool has_shared_expert() const {
+    return !ffn_gate_shexp.empty() || !ffn_down_shexp.empty();
+  }
 };
 
 // Dense Llama-family model. Owns the GgufModel (for mmap lifetime) and the
@@ -150,9 +179,18 @@ class LlamaModel : public Model {
   // Routed-expert MoE FFN: ffn_out += sum over top-k experts of w_e * FFN_e(normed).
   void moe_ffn(const LlamaLayer& layer, const float* normed, float* ffn_out);
 
+  // MLA (GLM-5.2 glm-dsa / DeepSeek-V2) compressed-attention forward for one
+  // layer at absolute position `pos`. Reads x_ (post-attn_norm done inside),
+  // writes the attention output (pre-residual) into attn_out[hidden_size].
+  // Uses kv_keys_ as the 576-dim compressed-latent cache (kv_heads=1); V aliases
+  // the first kv_lora_rank dims of each cached row (no separate V cache).
+  void mla_attention(const LlamaLayer& layer, size_t l, size_t pos,
+                     float* attn_out);
+
   static void reject_unsupported(const InferenceConfig& cfg);
   LlamaWeight load_weight(const GgufModel& g, const std::string& name,
-                          bool keep_quantized, bool allow_quant = true);
+                          bool keep_quantized, bool allow_quant = true,
+                          bool force_keep_quantized = false);
   std::vector<float> load_vector(const GgufModel& g, const std::string& name);
 
   GgufModel gguf_;
@@ -170,6 +208,11 @@ class LlamaModel : public Model {
   std::vector<float> kv_keys_;
   std::vector<float> kv_values_;
   size_t kv_token_size_ = 0;  // kv_heads * head_dim
+  // Allocated KV-cache context (== context_size for normal models; capped below
+  // context_size only for models whose advertised context would require an
+  // impractically large up-front F32 cache, e.g. GLM-5.2's 1M-token context).
+  // Used as the layer stride for KV slot indexing; positions must be < this.
+  size_t kv_context_ = 0;
 
   // Persistent activation + scratch (mirrors inference.rs::Workspace, dense subset).
   std::vector<float> x_;

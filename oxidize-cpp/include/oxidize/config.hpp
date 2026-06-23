@@ -37,7 +37,7 @@ enum class QuantType : uint16_t {
 // Mirror of oxidize-core/src/model/inference.rs::ModelArchitecture
 enum class Architecture : uint8_t {
   Llama, Mistral, Mixtral, DeepSeek, Qwen, Gemma, Phi, Falcon,
-  Gpt2, GptJ, GptNeoX, MiniMax, Lfm2, Lfm2Moe,
+  Gpt2, GptJ, GptNeoX, MiniMax, Lfm2, Lfm2Moe, GlmDsa,
 };
 
 Architecture architecture_from_name(const std::string& name);
@@ -75,6 +75,14 @@ struct InferenceConfig {
   float  expert_weights_scale = 1.0f;
   size_t expert_group_count = 0;
   size_t expert_group_used_count = 0;
+
+  // MLA (GLM-5.2 glm-dsa / DeepSeek-V2 style compressed attention).
+  size_t q_lora_rank = 0;        // q down-projection rank (glm-dsa.attention.q_lora_rank)
+  size_t kv_lora_rank = 0;       // kv compressed latent dim (glm-dsa.attention.kv_lora_rank)
+  size_t mla_key_dim = 0;        // per-head MLA key dim (attention.key_length_mla)
+  size_t mla_val_dim = 0;        // per-head MLA value dim (attention.value_length_mla)
+  size_t num_shared_experts = 0; // shared (always-on) experts (expert_shared_count)
+  bool   expert_weights_norm = false;  // normalize routed top-k expert weights
 
   size_t head_dim() const {
     return key_value_head_dim != 0 ? key_value_head_dim

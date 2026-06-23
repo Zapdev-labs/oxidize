@@ -38,6 +38,14 @@ void rms_norm(float* out, const float* x, const float* weight, size_t n,
 void apply_rope(float* vec, size_t head_dim, size_t num_heads, size_t pos,
                 float theta, size_t rope_dim);
 
+// In-place adjacent-pair rotary position embedding (LLAMA_ROPE_TYPE_NORM).
+// Used by GLM-DSA / DeepSeek-V2 MLA. Rotates pairs (h[2i], h[2i+1]) with
+// angle = pos * theta^(-2i/rope_len). Same partial-RoPE semantics as
+// apply_rope (rope_dim==0 => full head_dim; dims >= rope_len pass through).
+// Do NOT use for Qwen/GPT-NeoX models — they use apply_rope (split-half).
+void apply_rope_norm(float* vec, size_t head_dim, size_t num_heads, size_t pos,
+                     float theta, size_t rope_dim);
+
 // out[i] = silu(gate[i]) * up[i],  silu(x) = x * sigmoid(x).
 // May write in place (out == gate is allowed). Length n each.
 void swiglu_inplace(float* gate, const float* up, float* out, size_t n);
