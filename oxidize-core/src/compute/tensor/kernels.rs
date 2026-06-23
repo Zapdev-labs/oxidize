@@ -1895,87 +1895,119 @@ pub fn gemv_quantized_multi_f32(
         });
     }
 
-    // All-F16 fused region: q/k/v (and gate/up) are decoded in ONE low-overhead
-    // spin-pool pass instead of separate rayon par_iters. F16 lacks the integer
-    // Q8_K fast path, so without this it fell back to per-job sequential GEMVs
-    // (separate parallel regions -> poor bandwidth on the medium projections,
-    // ~24 GB/s vs ~45 on the big lm_head). Mirrors the Q4_K fast-path flattening.
+    // Fused spin-pool region for F16/Q8_0 weights: q/k/v (and gate/up) decoded
+    // in ONE low-overhead pass instead of separate rayon par_iters (which left
+    // the medium projections at ~13-24 GB/s vs ~40 here). These quants lack the
+    // integer Q8_K multi fast path; this is their equivalent.
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    if !jobs.is_empty()
-        && jobs.iter().all(|j| j.quantization == GgufQuantizationType::F16)
-        && is_x86_feature_detected!("f16c")
-        && is_x86_feature_detected!("avx2")
-        && is_x86_feature_detected!("fma")
     {
-        for job in jobs.iter() {
-            if job.matrix.len() != job.rows * cols * 2 {
-                return Err(GemvError::InvalidMatrixLength {
-                    expected: job.rows * cols * 2,
-                    actual: job.matrix.len(),
-                });
-            }
-            if job.output.len() != job.rows {
-                return Err(GemvError::InvalidOutputLength {
-                    expected: job.rows,
-                    actual: job.output.len(),
-                });
-            }
-        }
-        let profile_start = gemv_profile::enabled().then(std::time::Instant::now);
-        let rows_per_chunk = GEMV_CHUNK_ROWS;
-        let mut chunk_starts = Vec::with_capacity(jobs.len() + 1);
-        let mut total_chunks = 0usize;
-        for job in jobs.iter() {
-            chunk_starts.push(total_chunks);
-            total_chunks += job.rows.div_ceil(rows_per_chunk);
-        }
-        chunk_starts.push(total_chunks);
-
-        struct JobRef {
-            matrix_ptr: usize,
-            out_ptr: usize,
-            rows: usize,
-        }
-        let refs: Vec<JobRef> = jobs
-            .iter_mut()
-            .map(|job| JobRef {
-                matrix_ptr: job.matrix.as_ptr() as usize,
-                out_ptr: job.output.as_mut_ptr() as usize,
-                rows: job.rows,
-            })
-            .collect();
-        let total_rows: usize = refs.iter().map(|r| r.rows).sum();
-        let vptr = vector.as_ptr() as usize;
-        let row_bytes = cols * 2;
-
-        crate::spinpool::run_chunks(total_chunks, |ci| {
-            let job_idx = chunk_starts.partition_point(|&s| s <= ci) - 1;
-            let job = &refs[job_idx];
-            let row0 = (ci - chunk_starts[job_idx]) * rows_per_chunk;
-            let nrows = rows_per_chunk.min(job.rows - row0);
-            for r in 0..nrows {
-                // Safety: chunks partition each job's rows disjointly; matrices +
-                // outputs are caller borrows that outlive this region; f16c/avx2/
-                // fma gated above so dot_f16_avx2's target features are present.
-                let wptr = unsafe {
-                    (job.matrix_ptr as *const u8).add((row0 + r) * row_bytes) as *const u16
+        let all_fused = !jobs.is_empty()
+            && cols % QK8_0 == 0
+            && jobs.iter().all(|j| {
+                matches!(
+                    j.quantization,
+                    GgufQuantizationType::F16 | GgufQuantizationType::Q8_0
+                )
+            });
+        let any_f16 = jobs
+            .iter()
+            .any(|j| j.quantization == GgufQuantizationType::F16);
+        if all_fused
+            && is_x86_feature_detected!("avx2")
+            && is_x86_feature_detected!("fma")
+            && (!any_f16 || is_x86_feature_detected!("f16c"))
+        {
+            for job in jobs.iter() {
+                let expected = match job.quantization {
+                    GgufQuantizationType::F16 => job.rows * cols * 2,
+                    _ => job.rows * (cols / QK8_0) * BLOCK_Q8_0_SIZE,
                 };
-                let val = unsafe { dot_f16_avx2(wptr, vptr as *const f32, cols) };
-                unsafe {
-                    *((job.out_ptr as *mut f32).add(row0 + r)) = val;
+                if job.matrix.len() != expected {
+                    return Err(GemvError::InvalidMatrixLength {
+                        expected,
+                        actual: job.matrix.len(),
+                    });
+                }
+                if job.output.len() != job.rows {
+                    return Err(GemvError::InvalidOutputLength {
+                        expected: job.rows,
+                        actual: job.output.len(),
+                    });
                 }
             }
-        });
-        if let Some(start) = profile_start {
-            gemv_profile::record(
-                "F16-fused".to_string(),
-                total_rows,
-                cols,
-                total_rows * row_bytes,
-                start.elapsed().as_nanos() as u64,
-            );
+            let profile_start = gemv_profile::enabled().then(std::time::Instant::now);
+            let rows_per_chunk = GEMV_CHUNK_ROWS;
+            let mut chunk_starts = Vec::with_capacity(jobs.len() + 1);
+            let mut total_chunks = 0usize;
+            for job in jobs.iter() {
+                chunk_starts.push(total_chunks);
+                total_chunks += job.rows.div_ceil(rows_per_chunk);
+            }
+            chunk_starts.push(total_chunks);
+
+            struct JobRef {
+                matrix_ptr: usize,
+                out_ptr: usize,
+                rows: usize,
+                is_f16: bool,
+            }
+            let refs: Vec<JobRef> = jobs
+                .iter_mut()
+                .map(|job| JobRef {
+                    matrix_ptr: job.matrix.as_ptr() as usize,
+                    out_ptr: job.output.as_mut_ptr() as usize,
+                    rows: job.rows,
+                    is_f16: job.quantization == GgufQuantizationType::F16,
+                })
+                .collect();
+            let total_rows: usize = refs.iter().map(|r| r.rows).sum();
+            let vec: &[f32] = vector;
+
+            crate::spinpool::run_chunks(total_chunks, |ci| {
+                let job_idx = chunk_starts.partition_point(|&s| s <= ci) - 1;
+                let job = &refs[job_idx];
+                let row0 = (ci - chunk_starts[job_idx]) * rows_per_chunk;
+                let nrows = rows_per_chunk.min(job.rows - row0);
+                // Safety: chunks partition each job's rows disjointly; matrices +
+                // outputs are caller borrows that outlive this region; the ISA
+                // features needed by the dots are gated above.
+                if job.is_f16 {
+                    let rb = cols * 2;
+                    for r in 0..nrows {
+                        let wptr = unsafe {
+                            (job.matrix_ptr as *const u8).add((row0 + r) * rb) as *const u16
+                        };
+                        let val = unsafe { dot_f16_avx2(wptr, vec.as_ptr(), cols) };
+                        unsafe { *((job.out_ptr as *mut f32).add(row0 + r)) = val };
+                    }
+                } else {
+                    let rb = (cols / QK8_0) * BLOCK_Q8_0_SIZE;
+                    for r in 0..nrows {
+                        let row = unsafe {
+                            std::slice::from_raw_parts(
+                                (job.matrix_ptr as *const u8).add((row0 + r) * rb),
+                                rb,
+                            )
+                        };
+                        let mut sum = 0.0_f32;
+                        for (bi, block) in row.chunks_exact(BLOCK_Q8_0_SIZE).enumerate() {
+                            sum += q8_0_dot(block, &vec[bi * QK8_0..bi * QK8_0 + QK8_0]);
+                        }
+                        unsafe { *((job.out_ptr as *mut f32).add(row0 + r)) = sum };
+                    }
+                }
+            });
+            if let Some(start) = profile_start {
+                gemv_profile::record(
+                    "fused".to_string(),
+                    total_rows,
+                    cols,
+                    0,
+                    start.elapsed().as_nanos() as u64,
+                );
+            }
+            return Ok(());
         }
-        return Ok(());
     }
 
     let fast = cols.is_multiple_of(QK_K)
@@ -4515,11 +4547,19 @@ fn gemv_q8_0_f32_fused(
     };
 
     if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
-        output
-            .par_iter_mut()
-            .with_min_len(32)
-            .enumerate()
-            .for_each(|(row_idx, out)| *out = compute_row(row_idx));
+        // Low-overhead spin pool (vs rayon par_iter) — same fix applied to the
+        // F16 path; lifts single Q8_0 gemvs (ffn_down/lm_head) toward bandwidth.
+        let out_ptr = output.as_mut_ptr() as usize;
+        let nchunks = rows.div_ceil(GEMV_CHUNK_ROWS);
+        crate::spinpool::run_chunks(nchunks, |ci| {
+            let row0 = ci * GEMV_CHUNK_ROWS;
+            let nr = GEMV_CHUNK_ROWS.min(rows - row0);
+            for k in 0..nr {
+                let r = row0 + k;
+                let v = compute_row(r);
+                unsafe { *((out_ptr as *mut f32).add(r)) = v };
+            }
+        });
     } else {
         for (row_idx, out) in output.iter_mut().enumerate() {
             *out = compute_row(row_idx);
