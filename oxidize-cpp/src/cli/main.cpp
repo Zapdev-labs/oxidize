@@ -326,6 +326,30 @@ int main(int argc, char** argv) {
     const size_t vocab = model->vocab_size();
     const size_t ctx = model->context_size();
 
+    // Print derived config once the model has loaded (observable even if the
+    // forward path is not yet implemented for this architecture, e.g. GLM MLA).
+    if (auto* lm = dynamic_cast<LlamaModel*>(model.get())) {
+      const auto& c = lm->config();
+      std::fprintf(stderr,
+                   "loaded: arch=%d layers=%zu hidden=%zu heads=%zu kv_heads=%zu "
+                   "head_dim=%zu vocab=%zu ctx=%zu\n",
+                   static_cast<int>(c.architecture), c.layer_count, c.hidden_size,
+                   c.num_attention_heads, c.num_key_value_heads, c.head_dim(),
+                   c.vocab_size, c.context_size);
+      std::fprintf(stderr,
+                   "  moe: experts=%zu used=%zu expert_inter=%zu shared=%zu "
+                   "wscale=%.3f wnorm=%d gating_sigmoid=%d\n",
+                   c.num_experts, c.num_experts_per_tok, c.expert_intermediate_size,
+                   c.num_shared_experts, c.expert_weights_scale,
+                   static_cast<int>(c.expert_weights_norm),
+                   static_cast<int>(c.expert_gating_sigmoid));
+      std::fprintf(stderr,
+                   "  mla: q_lora=%zu kv_lora=%zu mla_key=%zu mla_val=%zu "
+                   "rope_dim=%zu rope_theta=%.1f\n",
+                   c.q_lora_rank, c.kv_lora_rank, c.mla_key_dim, c.mla_val_dim,
+                   c.rope_dim, c.rope_theta);
+    }
+
     // ---- tokenizer (from the model's GGUF) ----
     std::optional<oxidize::Tokenizer> tok;
     if (auto* lm = dynamic_cast<LlamaModel*>(model.get())) {

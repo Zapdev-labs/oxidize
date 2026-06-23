@@ -16,6 +16,11 @@ namespace oxidize {
 
 namespace {
 
+// IQ grid / sign tables (iq1s_grid, iq2xxs_grid, iq3xxs_grid, ksigns_iq2xs,
+// kmask_iq2xs) extracted verbatim from llama.cpp/ggml. Included inside this
+// anonymous namespace per the file's contract.
+#include "iq_grids.inc"
+
 // IQ4_NL nonlinear codebook (shared by IQ4_NL and IQ4_XS).
 constexpr std::array<int8_t, 16> KVALUES_IQ4NL = {
     -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113,
@@ -37,6 +42,8 @@ constexpr size_t BLOCK_IQ1_M_SIZE = QK_K / 8 + QK_K / 16 + QK_K / 32;           
 constexpr size_t BLOCK_IQ4_XS_SIZE = 2 + 2 + QK_K / 64 + QK_K / 2;              // 136
 constexpr size_t BLOCK_IQ3_S_SIZE =
     2 + QK_K / 4 + QK_K / 32 + QK_K / 8 + QK_K / 64;                            // 110
+constexpr size_t BLOCK_IQ2_XXS_SIZE = 2 + QK_K / 8 * 2;                          // 66
+constexpr size_t BLOCK_IQ3_XXS_SIZE = 2 + 3 * (QK_K / 8);                        // 98
 
 // iq3s_grid: 512 packed u32 entries (4 nonlinear int8 grid values each, LE).
 // Verbatim from ggml-common.h.
@@ -158,16 +165,13 @@ inline float ue4m3_to_f32(uint8_t byte) {
          std::ldexp(1.0f, static_cast<int>(exp) - 7);
 }
 
-// iq1s_grid_decode (quantization.rs) — simplified ternary reconstruction.
+// iq1s_grid_decode — DIRECT lookup into the real ggml iq1s_grid[2048] table.
+// Each uint64 packs 8 int8 values in {-1,0,+1}, little-endian; copy g[0..7].
+// Shared by IQ1_S and IQ1_M.
 inline void iq1s_grid_decode(uint16_t index, int8_t* out) {
-  uint16_t idx = index;
+  const int8_t* g = reinterpret_cast<const int8_t*>(&iq1s_grid[index]);
   for (int i = 0; i < 8; ++i) {
-    int bits = idx & 3;
-    out[i] = (bits == 0) ? -1 : (bits == 1) ? 0 : 1;
-    idx >>= 2;
-    if (i == 3) {
-      idx = static_cast<uint16_t>(index >> 8);
-    }
+    out[i] = g[i];
   }
 }
 
@@ -584,6 +588,67 @@ void dequant_iq3_s(const uint8_t* in, float* out, size_t n) {
   }
 }
 
+// IQ2_XXS: block = { f16 d; uint16_t qs[QK_K/8]; } (66 bytes). Each ib32 reads
+// 4 grid indices (one byte each, low u32) + a u32 of signs(4x7 bits)+scale(top
+// 4 bits). Ported verbatim from ggml dequantize_row_iq2_xxs.
+void dequant_iq2_xxs(const uint8_t* in, float* out, size_t n) {
+  validate_layout(QuantType::IQ2_XXS, n / QK_K * BLOCK_IQ2_XXS_SIZE, n, BLOCK_IQ2_XXS_SIZE, QK_K);
+  size_t nb = n / QK_K;
+  for (size_t b = 0; b < nb; ++b) {
+    const uint8_t* block = in + b * BLOCK_IQ2_XXS_SIZE;
+    float* y = out + b * QK_K;
+    float d = f16_le_to_f32(block);
+    const uint8_t* qs = block + 2;  // QK_K/8 u16 = 64 bytes
+    for (size_t ib32 = 0; ib32 < QK_K / 32; ++ib32) {
+      uint32_t aux0 = read_u32_le(qs + 8 * ib32);      // 4 grid indices (bytes)
+      uint32_t aux1 = read_u32_le(qs + 8 * ib32 + 4);  // signs (4x7b) + scale (top 4b)
+      const uint8_t* aux8 = reinterpret_cast<const uint8_t*>(&aux0);
+      float db = d * (0.5f + static_cast<float>(aux1 >> 28)) * 0.25f;
+      for (size_t l = 0; l < 4; ++l) {
+        const uint8_t* grid = reinterpret_cast<const uint8_t*>(&iq2xxs_grid[aux8[l]]);
+        uint8_t signs = ksigns_iq2xs[(aux1 >> (7 * l)) & 127];
+        for (size_t j = 0; j < 8; ++j) {
+          y[j] = db * static_cast<float>(grid[j]) *
+                 ((signs & kmask_iq2xs[j]) != 0 ? -1.0f : 1.0f);
+        }
+        y += 8;
+      }
+    }
+  }
+}
+
+// IQ3_XXS: block = { f16 d; uint8_t qs[3*QK_K/8]; } (98 bytes). qs region is
+// QK_K/4 grid indices (bytes) followed by QK_K/8 scales_and_signs bytes.
+// Ported verbatim from ggml dequantize_row_iq3_xxs.
+void dequant_iq3_xxs(const uint8_t* in, float* out, size_t n) {
+  validate_layout(QuantType::IQ3_XXS, n / QK_K * BLOCK_IQ3_XXS_SIZE, n, BLOCK_IQ3_XXS_SIZE, QK_K);
+  size_t nb = n / QK_K;
+  for (size_t b = 0; b < nb; ++b) {
+    const uint8_t* block = in + b * BLOCK_IQ3_XXS_SIZE;
+    float* y = out + b * QK_K;
+    float d = f16_le_to_f32(block);
+    const uint8_t* qs = block + 2;                          // QK_K/4 grid indices
+    const uint8_t* scales_and_signs = qs + QK_K / 4;        // QK_K/8 bytes
+    for (size_t ib32 = 0; ib32 < QK_K / 32; ++ib32) {
+      uint32_t aux32 = read_u32_le(scales_and_signs + 4 * ib32);
+      float db = d * (0.5f + static_cast<float>(aux32 >> 28)) * 0.5f;
+      for (size_t l = 0; l < 4; ++l) {
+        uint8_t signs = ksigns_iq2xs[(aux32 >> (7 * l)) & 127];
+        const uint8_t* grid1 = reinterpret_cast<const uint8_t*>(&iq3xxs_grid[qs[2 * l + 0]]);
+        const uint8_t* grid2 = reinterpret_cast<const uint8_t*>(&iq3xxs_grid[qs[2 * l + 1]]);
+        for (size_t j = 0; j < 4; ++j) {
+          y[j + 0] = db * static_cast<float>(grid1[j]) *
+                     ((signs & kmask_iq2xs[j + 0]) != 0 ? -1.0f : 1.0f);
+          y[j + 4] = db * static_cast<float>(grid2[j]) *
+                     ((signs & kmask_iq2xs[j + 4]) != 0 ? -1.0f : 1.0f);
+        }
+        y += 8;
+      }
+      qs += 8;
+    }
+  }
+}
+
 void dequant_iq1_s(const uint8_t* in, float* out, size_t n) {
   validate_layout(QuantType::IQ1_S, n / QK_K * BLOCK_IQ1_S_SIZE, n, BLOCK_IQ1_S_SIZE, QK_K);
   size_t nb = n / QK_K;
@@ -636,9 +701,12 @@ void dequant_iq1_m(const uint8_t* in, float* out, size_t n) {
     size_t out_ptr = 0;
     int8_t grid_vals[8];
     for (size_t ib = 0; ib < QK_K / 32; ++ib) {
-      uint8_t sc_ib = scales[ib / 2];
-      float dl1 = d * (2.0f * static_cast<float>((sc_ib >> (6 * (ib % 2))) & 0x7) + 1.0f);
-      float dl2 = d * (2.0f * static_cast<float>((sc_ib >> (6 * (ib % 2) + 3)) & 0x7) + 1.0f);
+      // scales[8] is logically 4 x uint16_t LE; read the right word, not a byte,
+      // so odd sub-blocks (sh=6) don't truncate/overflow the 3-bit fields.
+      uint16_t sc_ib = read_u16_le(scales + 2 * (ib / 2));
+      size_t sh = 6 * (ib % 2);
+      float dl1 = d * (2.0f * static_cast<float>((sc_ib >> sh) & 0x7) + 1.0f);
+      float dl2 = d * (2.0f * static_cast<float>((sc_ib >> (sh + 3)) & 0x7) + 1.0f);
 
       uint16_t idx0 = static_cast<uint16_t>(qs[ib * 4]) |
                       ((static_cast<uint16_t>(qh[ib * 2]) << 8) & 0x700);
@@ -785,6 +853,8 @@ size_t quant_block_values(QuantType q) {
     case QuantType::IQ1_M:
     case QuantType::IQ4_XS:
     case QuantType::IQ3_S:
+    case QuantType::IQ2_XXS:
+    case QuantType::IQ3_XXS:
       return QK_K;
     case QuantType::NVFP4:
       return QK_NVFP4;
@@ -841,6 +911,10 @@ size_t quant_block_bytes(QuantType q) {
       return BLOCK_IQ4_XS_SIZE;
     case QuantType::IQ3_S:
       return BLOCK_IQ3_S_SIZE;
+    case QuantType::IQ2_XXS:
+      return BLOCK_IQ2_XXS_SIZE;
+    case QuantType::IQ3_XXS:
+      return BLOCK_IQ3_XXS_SIZE;
     case QuantType::NVFP4:
       return BLOCK_NVFP4_SIZE;
     default:
@@ -873,6 +947,10 @@ QuantType from_ggml_type(uint32_t ggml_type) {
     case 13: return QuantType::Q5_K_M;  // ggml Q5_K
     case 14: return QuantType::Q6_K;    // ggml Q6_K
     case 15: return QuantType::Q4_K_M;  // ggml Q8_K — closest supported type
+    // ggml IQ block types (canonical ggml.h numbering).
+    case 16: return QuantType::IQ2_XXS;
+    case 17: return QuantType::IQ2_XS;
+    case 18: return QuantType::IQ3_XXS;
     case 19: return QuantType::IQ1_S;
     case 20: return QuantType::IQ4_NL;
     case 21: return QuantType::IQ3_S;
@@ -885,11 +963,6 @@ QuantType from_ggml_type(uint32_t ggml_type) {
     case 28: return QuantType::F64;
     case 29: return QuantType::IQ1_M;
     case 30: return QuantType::BF16;
-    case 31: return QuantType::Q4_0;
-    case 32: return QuantType::Q8_0;
-    case 33: return QuantType::IQ2_XXS;
-    case 34: return QuantType::IQ2_XS;
-    case 35: return QuantType::IQ3_XXS;
     case 40: return QuantType::NVFP4;
     default: return QuantType::Unknown;
   }
@@ -918,6 +991,8 @@ void dequantize_row(QuantType q, const uint8_t* src, float* dst, size_t n) {
     case QuantType::IQ1_M: dequant_iq1_m(src, dst, n); return;
     case QuantType::IQ4_XS: dequant_iq4_xs(src, dst, n); return;
     case QuantType::IQ3_S: dequant_iq3_s(src, dst, n); return;
+    case QuantType::IQ2_XXS: dequant_iq2_xxs(src, dst, n); return;
+    case QuantType::IQ3_XXS: dequant_iq3_xxs(src, dst, n); return;
     case QuantType::NVFP4: dequant_nvfp4(src, dst, n); return;
     default:
       throw std::runtime_error("quant: unsupported dequantization type");

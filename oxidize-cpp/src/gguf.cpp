@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <stdexcept>
 
@@ -211,6 +212,7 @@ uint64_t alignment_from_metadata(const GgufMetadataValue& v) {
 std::optional<uint32_t> metadata_as_u32(const GgufMetadataValue& v) {
   using K = GgufMetadataValue::Kind;
   switch (v.kind) {
+    case K::Bool:  // bool flags (e.g. expert_weights_norm) widen to 0/1
     case K::Uint8:
     case K::Uint16:
     case K::Uint32:
@@ -437,6 +439,7 @@ Architecture architecture_from_name(const std::string& name) {
     return Architecture::MiniMax;
   if (a == "lfm2") return Architecture::Lfm2;
   if (a == "lfm2moe") return Architecture::Lfm2Moe;
+  if (a == "glm-dsa" || a == "glm_dsa" || a == "glmdsa") return Architecture::GlmDsa;
   return Architecture::Llama;  // gguf.rs default
 }
 
@@ -562,35 +565,129 @@ GgufModel GgufModel::load(const std::string& path) {
     model.size_ = 0;
     throw;
   }
+  // shard 0 view (all tensor_infos default shard_index = 0).
+  model.shards_.push_back(Shard{map, model.base_, size});
+
+  // Split (sharded) GGUF: mmap + merge every sibling shard. split.count and
+  // split.no are global keys (see llama.cpp llama-arch.cpp). A single-file GGUF
+  // has split.count == 0 or 1.
+  uint32_t split_count = 0;
+  if (auto sc = model.get_u32("split.count")) split_count = *sc;
+  if (split_count > 1) {
+    return load_split(path, std::move(model), split_count);
+  }
   return model;
+}
+
+// gguf.rs has no split support; this mirrors llama.cpp's llama_split_path
+// ("%s-%05d-of-%05d.gguf") + gguf_meta merge for multi-file models.
+GgufModel GgufModel::load_split(const std::string& first_path,
+                               GgufModel first_model, uint32_t split_count) {
+  // Derive the split prefix by stripping the "-NNNNN-of-NNNNN.gguf" suffix from
+  // the supplied first-shard path (llama.cpp llama_split_prefix).
+  std::string prefix = first_path;
+  {
+    char postfix[64];
+    std::snprintf(postfix, sizeof(postfix), "-%05u-of-%05u.gguf",
+                  1u, split_count);
+    std::string str_post(postfix);
+    if (first_path.size() > str_post.size() &&
+        first_path.compare(first_path.size() - str_post.size(), str_post.size(),
+                           str_post) == 0) {
+      prefix = first_path.substr(0, first_path.size() - str_post.size());
+    } else {
+      throw std::runtime_error(
+          "gguf: split model first shard path does not match "
+          "'-00001-of-%05d.gguf' naming: " + first_path);
+    }
+  }
+
+  // shard 0 is already mmap'd + parsed in first_model. Merge in shards 1..N-1.
+  for (uint32_t i = 1; i < split_count; ++i) {
+    char path_buf[1024];
+    std::snprintf(path_buf, sizeof(path_buf), "%s-%05u-of-%05u.gguf",
+                  prefix.c_str(), i + 1u, split_count);
+    std::string shard_path(path_buf);
+
+    int fd = ::open(shard_path.c_str(), O_RDONLY);
+    if (fd < 0) {
+      throw std::runtime_error("gguf: io error: cannot open shard " + shard_path);
+    }
+    struct stat st;
+    if (::fstat(fd, &st) != 0) {
+      ::close(fd);
+      throw std::runtime_error("gguf: io error: cannot stat shard " + shard_path);
+    }
+    size_t ssize = static_cast<size_t>(st.st_size);
+    if (ssize == 0) {
+      ::close(fd);
+      throw std::runtime_error("gguf: empty shard: " + shard_path);
+    }
+    void* smap = ::mmap(nullptr, ssize, PROT_READ, MAP_PRIVATE, fd, 0);
+    ::close(fd);
+    if (smap == MAP_FAILED) {
+      throw std::runtime_error("gguf: io error: mmap failed for shard " + shard_path);
+    }
+    ::madvise(smap, ssize, MADV_RANDOM);
+
+    const uint8_t* sbase = static_cast<const uint8_t*>(smap);
+    GgufFile shard_hdr;
+    try {
+      shard_hdr = parse(sbase, ssize);
+    } catch (...) {
+      ::munmap(smap, ssize);
+      throw;
+    }
+
+    size_t shard_idx = first_model.shards_.size();
+    first_model.shards_.push_back(Shard{smap, sbase, ssize});
+
+    // Append this shard's tensor infos, tagging their owning shard so tensor()
+    // resolves the data pointer against the right mmap base.
+    for (auto& info : shard_hdr.tensor_infos) {
+      info.shard_index = shard_idx;
+      first_model.parsed_.tensor_infos.push_back(std::move(info));
+    }
+  }
+  return first_model;
 }
 
 GgufModel::GgufModel(GgufModel&& other) noexcept
     : map_(other.map_),
       base_(other.base_),
       size_(other.size_),
+      shards_(std::move(other.shards_)),
       parsed_(std::move(other.parsed_)) {
   other.map_ = nullptr;
   other.base_ = nullptr;
   other.size_ = 0;
+  other.shards_.clear();
 }
 
 GgufModel& GgufModel::operator=(GgufModel&& other) noexcept {
   if (this != &other) {
-    if (map_ != nullptr) ::munmap(map_, size_);
+    for (auto& s : shards_) {
+      if (s.map != nullptr) ::munmap(s.map, s.size);
+    }
     map_ = other.map_;
     base_ = other.base_;
     size_ = other.size_;
+    shards_ = std::move(other.shards_);
     parsed_ = std::move(other.parsed_);
     other.map_ = nullptr;
     other.base_ = nullptr;
     other.size_ = 0;
+    other.shards_.clear();
   }
   return *this;
 }
 
 GgufModel::~GgufModel() {
-  if (map_ != nullptr) ::munmap(map_, size_);
+  // shards_[0] aliases map_/base_/size_, so munmap via shards_ only (no separate
+  // munmap of map_) to avoid a double-unmap.
+  for (auto& s : shards_) {
+    if (s.map != nullptr) ::munmap(s.map, s.size);
+  }
 }
 
 // ── metadata accessors ───────────────────────────────────────────────────────
@@ -636,8 +733,10 @@ bool GgufModel::has_tensor(const std::string& name) const {
 TensorView GgufModel::tensor(const std::string& name) const {
   for (const auto& t : parsed_.tensor_infos) {
     if (t.name == name) {
+      const uint8_t* shard_base = base_;
+      if (t.shard_index < shards_.size()) shard_base = shards_[t.shard_index].base;
       TensorView v;
-      v.data = base_ + t.absolute_offset;
+      v.data = shard_base + t.absolute_offset;
       v.dims = t.dimensions;
       v.quant = t.quant;
       v.byte_offset = t.absolute_offset;
@@ -733,7 +832,9 @@ InferenceConfig build_inference_config(const GgufModel& model) {
     return model.get_f32(arch + "." + suffix);
   };
 
-  bool uses_mla = (architecture == Architecture::DeepSeek);
+  bool uses_mla = (architecture == Architecture::DeepSeek ||
+                   architecture == Architecture::GlmDsa);
+  bool is_glm_dsa = (architecture == Architecture::GlmDsa);
 
   // token embedding dims, used for fallbacks.
   std::optional<std::vector<uint64_t>> token_embd_dims =
@@ -842,7 +943,13 @@ InferenceConfig build_inference_config(const GgufModel& model) {
       v = num_attention_heads ? hidden_size / num_attention_heads : 0;
     key_value_head_dim = *v;
   }
-  if (uses_mla) {
+  // DeepSeek-V2 MLA stores the per-head MLA key dim in key_value_head_dim so the
+  // KV cache slots size to the (small) MLA key. GLM-5.2 (glm-dsa), however,
+  // caches the *compressed latent* (kv_lora_rank + rope) of width key_length=576
+  // per token (kv_heads=1). For glm-dsa we therefore KEEP key_value_head_dim at
+  // the cached width (576) and expose the MLA key/val dims (256) separately via
+  // mla_key_dim / mla_val_dim below.
+  if (uses_mla && !is_glm_dsa) {
     std::optional<size_t> mla_k;
     if (auto u = arch_u32("attention.key_length_mla")) mla_k = static_cast<size_t>(*u);
     if (!mla_k) {
@@ -942,6 +1049,26 @@ InferenceConfig build_inference_config(const GgufModel& model) {
     expert_group_used_count = v ? static_cast<size_t>(*v) : 0;
   }
 
+  // MLA (glm-dsa / DeepSeek-V2) ranks and per-head MLA key/value dims.
+  size_t q_lora_rank = static_cast<size_t>(arch_u32("attention.q_lora_rank").value_or(0));
+  size_t kv_lora_rank = static_cast<size_t>(arch_u32("attention.kv_lora_rank").value_or(0));
+  size_t mla_key_dim = static_cast<size_t>(arch_u32("attention.key_length_mla").value_or(0));
+  size_t mla_val_dim = static_cast<size_t>(arch_u32("attention.value_length_mla").value_or(0));
+
+  // Shared (always-on) experts and routed-expert weight normalization.
+  size_t num_shared_experts;
+  {
+    std::optional<uint32_t> v = arch_u32("expert_shared_count");
+    if (!v) v = model.get_u32("expert_shared_count");
+    num_shared_experts = v ? static_cast<size_t>(*v) : 0;
+  }
+  bool expert_weights_norm;
+  {
+    std::optional<uint32_t> v = arch_u32("expert_weights_norm");
+    if (!v) v = model.get_u32("expert_weights_norm");
+    expert_weights_norm = v ? (*v != 0) : false;
+  }
+
   // rope_dim (partial RoPE).
   size_t rope_dim = static_cast<size_t>(arch_u32("rope.dimension_count").value_or(0));
   if (rope_dim == 0 && is_qwen35_family(arch) && key_value_head_dim > 0) {
@@ -1007,6 +1134,12 @@ InferenceConfig build_inference_config(const GgufModel& model) {
   cfg.expert_weights_scale = expert_weights_scale;
   cfg.expert_group_count = expert_group_count;
   cfg.expert_group_used_count = expert_group_used_count;
+  cfg.q_lora_rank = q_lora_rank;
+  cfg.kv_lora_rank = kv_lora_rank;
+  cfg.mla_key_dim = mla_key_dim;
+  cfg.mla_val_dim = mla_val_dim;
+  cfg.num_shared_experts = num_shared_experts;
+  cfg.expert_weights_norm = expert_weights_norm;
   return cfg;
 }
 

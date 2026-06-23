@@ -81,7 +81,8 @@ struct GgufTensorInfo {
   uint32_t ggml_type = 0;           // raw ggml_type id
   QuantType quant = QuantType::F32; // from_ggml_type(ggml_type)
   uint64_t relative_offset = 0;     // offset within data section
-  uint64_t absolute_offset = 0;     // data_section_start + relative_offset
+  uint64_t absolute_offset = 0;     // data_section_start + relative_offset (within its shard)
+  size_t shard_index = 0;           // which mmap'd shard this tensor lives in (0 = single file)
 };
 
 // Mirror of gguf.rs::GgufFile (the parsed header), parsed from a byte slice.
@@ -148,10 +149,23 @@ class GgufModel {
  private:
   GgufModel() = default;
 
-  void* map_ = nullptr;       // mmap base (for munmap)
-  const uint8_t* base_ = nullptr;
-  size_t size_ = 0;
-  GgufFile parsed_;
+  // One mmap'd file (a single GGUF or one shard of a split GGUF).
+  struct Shard {
+    void* map = nullptr;
+    const uint8_t* base = nullptr;
+    size_t size = 0;
+  };
+
+  // Load a split GGUF: open shard 0 at `path`, read split.count, then mmap and
+  // parse every sibling shard and merge their tensor tables into one model.
+  static GgufModel load_split(const std::string& first_path,
+                              GgufModel first_model, uint32_t split_count);
+
+  void* map_ = nullptr;       // mmap base of shard 0 (for munmap); also shards_[0]
+  const uint8_t* base_ = nullptr;  // shard 0 base
+  size_t size_ = 0;           // shard 0 size
+  std::vector<Shard> shards_; // all mmap'd shards (>=1). shards_[0] mirrors map_/base_/size_.
+  GgufFile parsed_;           // merged header (metadata from shard 0, all tensor_infos)
 };
 
 // Map a GGUF general.architecture / namespace prefix string to a config.hpp

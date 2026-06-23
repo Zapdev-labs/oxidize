@@ -481,6 +481,54 @@ void apply_rope(float* vec, size_t head_dim, size_t num_heads, size_t pos,
   }
 }
 
+void apply_rope_norm(float* vec, size_t head_dim, size_t num_heads, size_t pos,
+                     float theta, size_t rope_dim) {
+  // Adjacent-pair (LLAMA_ROPE_TYPE_NORM / GLM-DSA) rotation.
+  // Pairs h[2i] with h[2i+1] for i in [0, rope_len/2).
+  // angle_i = pos * theta^(-2i / rope_len)
+  // This is distinct from apply_rope (GPT-NeoX / split-half) which pairs
+  // h[i] with h[i + rope_len/2]. Do NOT modify apply_rope — Qwen uses it.
+  if (head_dim == 0) {
+    throw std::runtime_error("apply_rope_norm: zero head_dim");
+  }
+  size_t rope_len = (rope_dim == 0) ? head_dim : rope_dim;
+  if (rope_len > head_dim) {
+    rope_len = head_dim;
+  }
+  if (rope_len % 2 != 0) {
+    throw std::runtime_error("apply_rope_norm: odd rotary dimension " +
+                             std::to_string(rope_len));
+  }
+  if (pos == 0) {
+    return;
+  }
+  if (rope_len == 0) {
+    return;
+  }
+
+  const float position_f = static_cast<float>(pos);
+  const size_t half_dim = rope_len / 2;
+  const float inv_rope_len = 1.0f / static_cast<float>(rope_len);
+  // freq multiplier per pair: theta^(-2/rope_len), same geometric recurrence.
+  const float freq_multiplier = std::pow(theta, -2.0f * inv_rope_len);
+
+  for (size_t head = 0; head < num_heads; ++head) {
+    float* h = vec + head * head_dim;
+    float freq = 1.0f;
+    for (size_t i = 0; i < half_dim; ++i) {
+      const float x0 = h[2 * i];
+      const float x1 = h[2 * i + 1];
+      const float angle = position_f * freq;
+      const float cos_a = std::cos(angle);
+      const float sin_a = std::sin(angle);
+      h[2 * i]     = x0 * cos_a - x1 * sin_a;
+      h[2 * i + 1] = x0 * sin_a + x1 * cos_a;
+      freq *= freq_multiplier;
+    }
+    // Dims [rope_len, head_dim) pass through unchanged (partial RoPE).
+  }
+}
+
 void swiglu_inplace(float* gate, const float* up, float* out, size_t n) {
   // silu(g) * up = g * sigmoid(g) * up (kernels.rs::apply_swiglu_inplace_f32
   // scalar path). out may alias gate.

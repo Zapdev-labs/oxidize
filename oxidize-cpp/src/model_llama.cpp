@@ -16,11 +16,35 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
+
+// Debug helper: print first N floats from a named vector. Gated by OXIDIZE_DEBUG env.
+static bool g_debug = false;
+static void dbg_vec(const char* label, const float* v, size_t n, size_t show = 8) {
+  if (!g_debug) return;
+  std::fprintf(stderr, "DBG %-40s [", label);
+  for (size_t i = 0; i < std::min(n, show); ++i)
+    std::fprintf(stderr, "%s%.4f", i ? " " : "", v[i]);
+  std::fprintf(stderr, "]\n");
+}
+static void dbg_topk(const char* label, const float* v, size_t n, size_t k = 5) {
+  if (!g_debug) return;
+  // find top-k indices by value
+  std::vector<size_t> idx(n);
+  for (size_t i = 0; i < n; ++i) idx[i] = i;
+  std::partial_sort(idx.begin(), idx.begin() + std::min(k, n), idx.end(),
+                    [&](size_t a, size_t b){ return v[a] > v[b]; });
+  std::fprintf(stderr, "DBG %-40s top%zu: ", label, k);
+  for (size_t i = 0; i < std::min(k, n); ++i)
+    std::fprintf(stderr, "[%zu]=%.4f ", idx[i], v[idx[i]]);
+  std::fprintf(stderr, "\n");
+}
 
 #include "oxidize/tensor.hpp"
 
@@ -40,6 +64,10 @@ bool is_supported_quant_gemv(QuantType q) {
     // gemv_quantized, instead of expanding to f32 at load (4 bytes/param). Decode
     // is memory-bandwidth bound, so halving the weight bytes read per token is a
     // large speedup for F16/BF16 models.
+    // F32 is included so that F32 weight tensors stay mmap'd (w.data = mmap ptr,
+    // w.quantized=true) rather than being heap-copied at load time. For a 213 GB
+    // model like GLM-5.2 this avoids OOM from duplicate anonymous pages.
+    case QuantType::F32:
     case QuantType::F16:
     case QuantType::BF16:
     case QuantType::Q4_0:
@@ -242,7 +270,10 @@ void LlamaModel::reject_unsupported(const InferenceConfig& cfg) {
   if (cfg.shortconv_l_cache > 0) {
     throw std::runtime_error("LlamaModel: LFM2 shortconv is out of Phase 1 scope");
   }
-  if (cfg.nextn_predict_layers > 0) {
+  // GLM-5.2 (glm-dsa) ships 1 nextn/MTP head; we simply skip it (layer_count
+  // already excludes it via from_gguf). Other architectures with MTP heads stay
+  // out of Phase 1 scope.
+  if (cfg.nextn_predict_layers > 0 && cfg.architecture != Architecture::GlmDsa) {
     throw std::runtime_error("LlamaModel: MTP/nextn draft layers are out of Phase 1 scope");
   }
   // Gemma-family interleaved global/local sliding window is out of Phase 1.
@@ -263,7 +294,8 @@ std::vector<float> LlamaModel::load_vector(const GgufModel& g, const std::string
 }
 
 LlamaWeight LlamaModel::load_weight(const GgufModel& g, const std::string& name,
-                                    bool keep_quantized, bool allow_quant) {
+                                    bool keep_quantized, bool allow_quant,
+                                    bool force_keep_quantized) {
   TensorView tv = g.tensor(name);
   size_t count = 1;
   for (uint64_t d : tv.dims) count *= static_cast<size_t>(d);
@@ -296,7 +328,14 @@ LlamaWeight LlamaModel::load_weight(const GgufModel& g, const std::string& name,
     w.quantized = true;
     w.quant = QuantType::Q8_0;
     w.data = nullptr;
-  } else if (keep_quantized && is_supported_quant_gemv(tv.quant)) {
+  } else if (keep_quantized &&
+             (is_supported_quant_gemv(tv.quant) || force_keep_quantized)) {
+    // Borrow the mmap'd quantized bytes in their native block layout. With
+    // force_keep_quantized we keep types not yet wired into gemv (e.g. the IQ
+    // MoE experts and Q5_K MLA projections of GLM-5.2) quantized rather than
+    // eagerly dequantizing — required to mmap the 213GB model without expanding
+    // every tensor to f32 in RAM. The MLA/MoE forward path is responsible for
+    // decoding these on demand.
     w.quantized = true;
     w.quant = tv.quant;
     w.data = tv.data;
@@ -371,6 +410,14 @@ LlamaModel::LlamaModel(GgufModel gguf, QuantType quantize_to)
       if (g.has_tensor(p + suffix))
         dst = load_weight(g, p + suffix, /*keep_quantized=*/true, /*allow_quant=*/false);
     };
+    // Keep the tensor in its native mmap'd quantized layout regardless of
+    // whether gemv supports the type yet (used for MLA + MoE/shared-expert
+    // tensors so the 213GB GLM-5.2 maps without dequantizing into RAM).
+    auto opt_w_keepq = [&](const std::string& suffix, LlamaWeight& dst) {
+      if (g.has_tensor(p + suffix))
+        dst = load_weight(g, p + suffix, /*keep_quantized=*/true,
+                          /*allow_quant=*/false, /*force_keep_quantized=*/true);
+    };
 
     opt_vec("attn_norm.weight", layer.attn_norm);
     opt_w("attn_q.weight", layer.attn_q);
@@ -396,14 +443,33 @@ LlamaModel::LlamaModel(GgufModel gguf, QuantType quantize_to)
     opt_w("ffn_down.weight", layer.ffn_down);
     opt_vec("ffn_down.bias", layer.ffn_down_bias);
 
-    // MoE routed experts (Mixtral / Qwen-MoE). Present only on MoE layers.
-    opt_w_raw("ffn_gate_exps.weight", layer.ffn_gate_exps);
-    opt_w_raw("ffn_up_exps.weight", layer.ffn_up_exps);
-    opt_w_raw("ffn_down_exps.weight", layer.ffn_down_exps);
+    // MoE routed experts (Mixtral / Qwen-MoE / GLM-5.2). Present only on MoE
+    // layers. Use keepq so IQ-quantized GLM experts stay mmap'd (not dequantized).
+    opt_w_keepq("ffn_gate_exps.weight", layer.ffn_gate_exps);
+    opt_w_keepq("ffn_up_exps.weight", layer.ffn_up_exps);
+    opt_w_keepq("ffn_down_exps.weight", layer.ffn_down_exps);
     opt_w_raw("ffn_gate_inp.weight", layer.ffn_gate_inp);
     opt_vec("exp_probs_b.bias", layer.ffn_exp_probs_b);
 
-    if (layer.attn_q.empty()) {
+    // Shared (always-on) expert FFN (GLM-5.2 / DeepSeek-V2).
+    opt_w_keepq("ffn_gate_shexp.weight", layer.ffn_gate_shexp);
+    opt_w_keepq("ffn_up_shexp.weight", layer.ffn_up_shexp);
+    opt_w_keepq("ffn_down_shexp.weight", layer.ffn_down_shexp);
+
+    // MLA compressed-attention projections (GLM-5.2 glm-dsa). Replace dense
+    // attn_q/attn_k/attn_v. attn_q_b / attn_k_b / attn_v_b can be Q8_0 (gemv-ok)
+    // or other quant; keepq keeps them mmap'd regardless. 3D k_b/v_b must NOT be
+    // on-the-fly quantized, hence keepq (allow_quant=false).
+    opt_w_keepq("attn_q_a.weight", layer.attn_q_a);
+    opt_vec("attn_q_a_norm.weight", layer.attn_q_a_norm);
+    opt_w_keepq("attn_q_b.weight", layer.attn_q_b);
+    opt_w_keepq("attn_kv_a_mqa.weight", layer.attn_kv_a_mqa);
+    opt_vec("attn_kv_a_norm.weight", layer.attn_kv_a_norm);
+    opt_w_keepq("attn_k_b.weight", layer.attn_k_b);
+    opt_w_keepq("attn_v_b.weight", layer.attn_v_b);
+
+    // A layer must have either dense attn_q OR the MLA q/kv down-projections.
+    if (layer.attn_q.empty() && !layer.is_mla()) {
       throw std::runtime_error("LlamaModel: layer " + std::to_string(l) +
                                " has no attn_q (non-dense-attention layer unsupported in Phase 1)");
     }
@@ -414,7 +480,31 @@ LlamaModel::LlamaModel(GgufModel gguf, QuantType quantize_to)
   // dense path every layer is an attention layer, so attn_layer_count ==
   // layer_count and the layer index maps directly. ----
   kv_token_size_ = config_.num_key_value_heads * config_.head_dim();
-  size_t kv_elems = config_.layer_count * config_.context_size * kv_token_size_;
+  // Up-front F32 KV cache. Cap the allocated context only when the full
+  // advertised context would need an impractically large cache (GLM-5.2 reports
+  // a 1,048,576-token context => a 377 GB F32 cache). Below the budget the cache
+  // is allocated for the full context, so qwen/llama/etc. behavior is unchanged
+  // (kv_context_ == context_size). kv_context_ is the KV slot layer-stride and
+  // forward() rejects positions >= kv_context_.
+  constexpr size_t kKvBudgetBytes = static_cast<size_t>(8) << 30;  // 8 GB
+  constexpr size_t kKvMinPositions = 4096;
+  kv_context_ = config_.context_size;
+  size_t bytes_per_pos = config_.layer_count * kv_token_size_ * sizeof(float) * 2;
+  if (bytes_per_pos > 0 &&
+      config_.context_size * bytes_per_pos > kKvBudgetBytes) {
+    kv_context_ = std::max(kKvMinPositions, kKvBudgetBytes / bytes_per_pos);
+    kv_context_ = std::min(kv_context_, config_.context_size);
+  }
+  if (kv_context_ == 0) kv_context_ = config_.context_size;
+  size_t kv_elems = config_.layer_count * kv_context_ * kv_token_size_;
+  if (kv_context_ < config_.context_size) {
+    std::fprintf(stderr,
+                 "warning: KV cache capped to %zu positions (model advertises "
+                 "%zu); a full F32 cache would need %.1f GB\n",
+                 kv_context_, config_.context_size,
+                 (double)config_.layer_count * config_.context_size *
+                     kv_token_size_ * 2 * 4 / 1e9);
+  }
   kv_keys_.assign(kv_elems, 0.0f);
   kv_values_.assign(kv_elems, 0.0f);
 
@@ -480,6 +570,7 @@ void LlamaModel::moe_ffn(const LlamaLayer& layer, const float* normed,
   // 1. Router logits.
   std::vector<float> rw(n_experts, 0.0f);  // routing weight (renorm source)
   gemv_weight(layer.ffn_gate_inp, n_experts, h, normed, rw.data());
+  dbg_vec("moe router logits (raw)", rw.data(), n_experts, 8);
 
   // 2. Gating: softmax (Mixtral/Qwen) or sigmoid+bias (LFM2MoE). sel = selection
   // score, rw = routing weight.
@@ -507,10 +598,19 @@ void LlamaModel::moe_ffn(const LlamaLayer& layer, const float* normed,
   else
     std::sort(sel.begin(), sel.end(), by_score);
 
-  // 4. Renormalize routing weights over selected; apply routed scale.
-  float wnorm = 0.0f;
-  for (size_t s = 0; s < n_sel; ++s) wnorm += rw[sel[s].first];
-  if (wnorm <= 0.0f) wnorm = 1.0f;
+  // 4. Renormalize routing weights over selected; apply routed scale. The
+  // routing *weights* are gathered from the UNBIASED probs `rw` (the per-expert
+  // bias only affects top-k selection above). For softmax gating rw already sums
+  // to 1 over all experts; GLM/DeepSeek sigmoid gating renormalizes the selected
+  // gates (expert_weights_norm) and scales by expert_weights_scale (2.5).
+  // Mixtral/Qwen (softmax, norm=false) keep the per-expert softmax probs as-is.
+  float wnorm = 1.0f;
+  if (cfg.expert_weights_norm || !sigmoid) {
+    wnorm = 0.0f;
+    for (size_t s = 0; s < n_sel; ++s) wnorm += rw[sel[s].first];
+    // llama.cpp clamps the divisor to avoid blow-up on tiny sigmoid gates.
+    wnorm = std::max(wnorm, 6.103515625e-5f);
+  }
   float scale = cfg.expert_weights_scale > 0.0f ? cfg.expert_weights_scale : 1.0f;
 
   // 5. Per-expert FFN, accumulated into ffn_out.
@@ -524,9 +624,166 @@ void LlamaModel::moe_ffn(const LlamaLayer& layer, const float* normed,
     gemv_expert(layer.ffn_down_exps, e, h, i_size, gate.data(), down.data());
     for (size_t i = 0; i < h; ++i) ffn_out[i] += w * down[i];
   }
+
+  dbg_vec("moe routed ffn_out (pre-shexp)", ffn_out, h);
+  // 6. Shared (always-on) expert (GLM-5.2 / DeepSeek-V2): a standard SwiGLU FFN
+  // over the SAME normed input, added with weight 1.0 (NOT routed, NOT scaled by
+  // expert_weights_scale). n_ff_shexp = expert_inter * num_shared_experts.
+  if (layer.has_shared_expert()) {
+    size_t n_shared = std::max<size_t>(cfg.num_shared_experts, 1);
+    size_t sh_inter = i_size * n_shared;
+    std::vector<float> sgate(sh_inter), sup(sh_inter), sdown(h);
+    gemv_weight(layer.ffn_gate_shexp, sh_inter, h, normed, sgate.data());
+    gemv_weight(layer.ffn_up_shexp, sh_inter, h, normed, sup.data());
+    swiglu_inplace(sgate.data(), sup.data(), sgate.data(), sh_inter);
+    gemv_weight(layer.ffn_down_shexp, h, sh_inter, sgate.data(), sdown.data());
+    for (size_t i = 0; i < h; ++i) ffn_out[i] += sdown[i];
+  }
+}
+
+void LlamaModel::mla_attention(const LlamaLayer& layer, size_t l, size_t pos,
+                               float* attn_out) {
+  const InferenceConfig& cfg = config_;
+  const size_t h = cfg.hidden_size;
+  const size_t n_heads = cfg.num_attention_heads;       // 64
+  const size_t q_rank = cfg.q_lora_rank;                // 2048
+  const size_t kv_rank = cfg.kv_lora_rank;              // 512 (latent)
+  const size_t mla_key = cfg.mla_key_dim;               // 256 per-head q/k width
+  const size_t mla_val = cfg.mla_val_dim;               // 256 per-head v width
+  const size_t n_rot = cfg.rope_dim;                    // 64 (partial rope)
+  const size_t n_nope = mla_key - n_rot;                // 192
+  const size_t latent_row = kv_rank + n_rot;            // 576 (cache row)
+  const float theta = cfg.rope_theta;                   // 8e6
+  const float eps = cfg.rms_norm_eps;
+  const float kq_scale = 1.0f / std::sqrt(static_cast<float>(mla_key));  // 1/16
+  const size_t seq_len = pos + 1;
+
+  // Per-head gemv on a 3D [n_heads, rows, cols] absorb tensor (k_b / v_b). Head h
+  // occupies a contiguous rows*cols quantized block.
+  auto gemv_head = [&](const LlamaWeight& w, size_t head, size_t rows,
+                       size_t cols, const float* x, float* y) {
+    if (w.quantized) {
+      size_t rb = quantized_size(w.quant, cols);  // bytes per row
+      const uint8_t* base = w.qbytes() + head * rows * rb;
+      gemv_quantized(y, w.quant, base, rows, cols, x);
+    } else {
+      matvec(y, w.f32.data() + head * rows * cols, x, rows, cols);
+    }
+  };
+
+  bool is_l0p0 = (l == 0 && pos == 0);
+
+  // 0. pre-attention RMSNorm.
+  std::vector<float> normed(h);
+  d_rms_norm(normed.data(), x_.data(), layer.attn_norm.data(), h, eps, /*plus_one=*/false);
+  if (is_l0p0) {
+    dbg_vec("x (embed)", x_.data(), h);
+    dbg_vec("normed (l0 attn_norm)", normed.data(), h);
+  }
+
+  // 1. Query: x -> q_a(2048) -> norm -> q(n_heads*mla_key).
+  std::vector<float> q_a(q_rank);
+  gemv_weight(layer.attn_q_a, q_rank, h, normed.data(), q_a.data());
+  if (is_l0p0) dbg_vec("q_a (pre-norm)", q_a.data(), q_rank);
+  {
+    std::vector<float> tmp(q_rank);
+    rms_norm(tmp.data(), q_a.data(), layer.attn_q_a_norm.data(), q_rank, eps, false);
+    q_a.swap(tmp);
+  }
+  if (is_l0p0) dbg_vec("q_a (post-norm)", q_a.data(), q_rank);
+  std::vector<float> q(n_heads * mla_key);
+  gemv_weight(layer.attn_q_b, n_heads * mla_key, q_rank, q_a.data(), q.data());
+  if (is_l0p0) dbg_vec("q[h0] (pre-rope)", q.data(), mla_key);
+
+  // 2. Partial RoPE on the rope part (last n_rot dims) of each q head.
+  // GLM-DSA uses LLAMA_ROPE_TYPE_NORM (adjacent-pair rotation), NOT NeoX
+  // split-half. apply_rope_norm rotates pairs (h[2i], h[2i+1]).
+  for (size_t hd = 0; hd < n_heads; ++hd) {
+    float* q_pe = q.data() + hd * mla_key + n_nope;
+    apply_rope_norm(q_pe, n_rot, 1, pos, theta, /*rope_dim=*/0);
+  }
+
+  // 3. KV: x -> kv_a_mqa(576). Split latent(512) + k_pe(64); norm latent; rope k_pe.
+  std::vector<float> kv(latent_row);
+  gemv_weight(layer.attn_kv_a_mqa, latent_row, h, normed.data(), kv.data());
+  if (is_l0p0) {
+    dbg_vec("kv (pre-norm latent part)", kv.data(), kv_rank);
+    dbg_vec("kv (k_pe part)", kv.data() + kv_rank, n_rot);
+  }
+  std::vector<float> cache_row(latent_row);
+  rms_norm(cache_row.data(), kv.data(), layer.attn_kv_a_norm.data(), kv_rank, eps, false);
+  // k_pe (the n_rot rope dims) is NOT normed; rope then store.
+  for (size_t i = 0; i < n_rot; ++i) cache_row[kv_rank + i] = kv[kv_rank + i];
+  apply_rope_norm(cache_row.data() + kv_rank, n_rot, 1, pos, theta, /*rope_dim=*/0);
+  if (is_l0p0) {
+    dbg_vec("cache_row (normed latent)", cache_row.data(), kv_rank);
+    dbg_vec("cache_row (roped k_pe)", cache_row.data() + kv_rank, n_rot);
+  }
+
+  // 4. Store the 576-dim compressed latent row in the KV cache (kv_heads=1).
+  size_t phys = pos % kv_context_;
+  size_t base = (l * kv_context_ + phys) * kv_token_size_;
+  for (size_t i = 0; i < latent_row; ++i) kv_keys_[base + i] = cache_row[i];
+
+  // 5. Per-head MLA attention over the compressed latent cache (MQA: one shared
+  // K/V row per position). Q_head = [absorb(q_nope)->512 ++ q_pe(64)] (576).
+  const float* cache_layer = kv_keys_.data() + (l * kv_context_) * kv_token_size_;
+  std::vector<float> attn_result(n_heads * mla_val, 0.0f);
+  std::vector<float> q_absorbed(kv_rank);     // 512
+  std::vector<float> Q(latent_row);           // 576
+  std::vector<float> scores(seq_len);
+  std::vector<float> ctx_latent(kv_rank);     // 512
+  for (size_t hd = 0; hd < n_heads; ++hd) {
+    const float* q_head = q.data() + hd * mla_key;
+    // absorb wk_b[h]: q_nope(192) -> q_absorbed(512).
+    gemv_head(layer.attn_k_b, hd, kv_rank, n_nope, q_head, q_absorbed.data());
+    for (size_t i = 0; i < kv_rank; ++i) Q[i] = q_absorbed[i];
+    for (size_t i = 0; i < n_rot; ++i) Q[kv_rank + i] = q_head[n_nope + i];
+
+    // scores over cached positions (causal: all [0, seq_len) are valid).
+    float mx = -std::numeric_limits<float>::infinity();
+    for (size_t t = 0; t < seq_len; ++t) {
+      const float* row = cache_layer + t * kv_token_size_;
+      float dot = 0.0f;
+      for (size_t i = 0; i < latent_row; ++i) dot += Q[i] * row[i];
+      dot *= kq_scale;
+      scores[t] = dot;
+      mx = std::max(mx, dot);
+    }
+    float sum = 0.0f;
+    for (size_t t = 0; t < seq_len; ++t) {
+      scores[t] = std::exp(scores[t] - mx);
+      sum += scores[t];
+    }
+    float inv = sum > 0.0f ? 1.0f / sum : 0.0f;
+    // ctx_latent = sum_t a[t] * row[t][0:512]  (V aliases the latent part).
+    for (size_t i = 0; i < kv_rank; ++i) ctx_latent[i] = 0.0f;
+    for (size_t t = 0; t < seq_len; ++t) {
+      float a = scores[t] * inv;
+      const float* row = cache_layer + t * kv_token_size_;
+      for (size_t i = 0; i < kv_rank; ++i) ctx_latent[i] += a * row[i];
+    }
+    // decompress via wv_b[h]: ctx_latent(512) -> out(256).
+    gemv_head(layer.attn_v_b, hd, mla_val, kv_rank, ctx_latent.data(),
+              attn_result.data() + hd * mla_val);
+    if (is_l0p0 && hd == 0) {
+      dbg_vec("q_absorbed (h0)", q_absorbed.data(), kv_rank);
+      dbg_vec("Q[h0] (576)", Q.data(), latent_row);
+      char lbl[64]; std::snprintf(lbl, sizeof(lbl), "scores (h0, seq=%zu)", seq_len);
+      dbg_vec(lbl, scores.data(), seq_len, seq_len);
+      dbg_vec("ctx_latent (h0)", ctx_latent.data(), kv_rank);
+      dbg_vec("attn_result (h0)", attn_result.data(), mla_val);
+    }
+  }
+  if (is_l0p0) dbg_vec("attn_result (all heads, first 8)", attn_result.data(), n_heads * mla_val);
+
+  // 6. Output projection: [n_heads*mla_val] -> [hidden].
+  gemv_weight(layer.attn_output, h, n_heads * mla_val, attn_result.data(), attn_out);
+  if (is_l0p0) dbg_vec("attn_out (post o_proj)", attn_out, h);
 }
 
 void LlamaModel::run_layers(size_t pos) {
+  if (pos == 0) g_debug = (std::getenv("OXIDIZE_DEBUG") != nullptr);
   const InferenceConfig& cfg = config_;
   const size_t h = cfg.hidden_size;
   const size_t n_heads = cfg.num_attention_heads;
@@ -553,6 +810,43 @@ void LlamaModel::run_layers(size_t pos) {
     const LlamaLayer& layer = layers_[l];
     const float rope_theta = layer_rope_theta(cfg, l);
     const size_t window = layer_sliding_window(cfg, l);
+
+    // MLA (GLM-5.2 glm-dsa / DeepSeek-V2) compressed-attention forward. Computes
+    // the attention output into attn_out (RMSNorm + projections done inside),
+    // then residual-add and fall through to the shared FFN block below.
+    if (layer.is_mla()) {
+      mla_attention(layer, l, pos, attn_out.data());
+      for (size_t i = 0; i < h; ++i) x_[i] += attn_out[i];
+      // ---- FFN block (shared with dense path) ----
+      const std::vector<float>& ffn_norm_w = layer.ffn_norm;
+      if (ffn_norm_w.empty()) {
+        throw std::runtime_error("LlamaModel: MLA layer " + std::to_string(l) +
+                                 " missing ffn_norm");
+      }
+      d_rms_norm(normed.data(), x_.data(), ffn_norm_w.data(), h, eps, plus_one);
+      if (pos == 0 && l <= 1) {
+        char lbl[64]; std::snprintf(lbl, sizeof(lbl), "x after attn+res (l%zu)", l);
+        dbg_vec(lbl, x_.data(), h);
+        std::snprintf(lbl, sizeof(lbl), "normed ffn (l%zu)", l);
+        dbg_vec(lbl, normed.data(), h);
+      }
+      std::fill(ffn_out.begin(), ffn_out.end(), 0.0f);
+      if (layer.is_moe()) {
+        moe_ffn(layer, normed.data(), ffn_out.data());
+      } else {
+        // Leading dense layers (0..leading_dense-1): plain SwiGLU FFN.
+        d_gemv_weight(layer.ffn_gate, inter, h, normed.data(), gate.data());
+        d_gemv_weight(layer.ffn_up, inter, h, normed.data(), up.data());
+        d_swiglu(gate.data(), up.data(), gate.data(), inter);
+        d_gemv_weight(layer.ffn_down, h, inter, gate.data(), ffn_out.data());
+      }
+      if (pos == 0 && l <= 1) {
+        char lbl[64]; std::snprintf(lbl, sizeof(lbl), "ffn_out (l%zu)", l);
+        dbg_vec(lbl, ffn_out.data(), h);
+      }
+      for (size_t i = 0; i < h; ++i) x_[i] += ffn_out[i];
+      continue;
+    }
 
     // ---- Attention block ----
     // pre-attention RMSNorm
@@ -606,9 +900,10 @@ void LlamaModel::run_layers(size_t pos) {
     d_apply_rope(k.data(), head_dim, kv_heads, pos, rope_theta, rope_dim);
 
     // Append K/V to the layer-major cache at physical position pos.
-    // token_slot_index = l*context_size + (pos % context_size); F32 storage.
-    size_t phys = pos % cfg.context_size;
-    size_t base = (l * cfg.context_size + phys) * kv_token_size_;
+    // token_slot_index = l*kv_context_ + (pos % kv_context_); F32 storage.
+    // (kv_context_ == context_size for normal models.)
+    size_t phys = pos % kv_context_;
+    size_t base = (l * kv_context_ + phys) * kv_token_size_;
     for (size_t i = 0; i < kv_len; ++i) {
       kv_keys_[base + i] = k[i];
       kv_values_[base + i] = v[i];
@@ -616,7 +911,7 @@ void LlamaModel::run_layers(size_t pos) {
 
     // GQA causal attention over the contiguous [0, seq_len) prefix.
     // Layer prefix start is at position 0 within this layer's slice.
-    size_t layer_start = (l * cfg.context_size) * kv_token_size_;
+    size_t layer_start = (l * kv_context_) * kv_token_size_;
     size_t eff_seq_len = seq_len;
     const float* key_prefix = kv_keys_.data() + layer_start;
     const float* val_prefix = kv_values_.data() + layer_start;
@@ -704,10 +999,13 @@ Logits LlamaModel::final_head() {
   std::vector<float> normed(h, 0.0f);
   d_rms_norm(normed.data(), x_.data(), norm_weight_.data(), h, config_.rms_norm_eps,
              config_.rms_norm_weight_plus_one);
+  dbg_vec("final norm x", x_.data(), h);
+  dbg_vec("final normed", normed.data(), h);
 
   Logits logits(vocab, 0.0f);
   const LlamaWeight& head = output_tied_ ? tok_embeddings_ : output_weight_;
   d_gemv_weight(head, vocab, h, normed.data(), logits.data());
+  dbg_topk("final logits", logits.data(), vocab, 10);
   return logits;
 }
 
@@ -978,10 +1276,12 @@ Logits LlamaModel::forward(const std::vector<Token>& tokens, Session& session) {
     throw std::runtime_error("LlamaModel::forward: empty input");
   }
   size_t requested_total = session.consumed_tokens() + tokens.size();
-  if (requested_total > config_.context_size) {
+  // Bound by the *allocated* KV context (== context_size for normal models; a
+  // smaller cap for huge-context models like GLM-5.2, see ctor).
+  if (requested_total > kv_context_) {
     throw std::runtime_error("LlamaModel::forward: context exceeded (requested " +
-                             std::to_string(requested_total) + " > context " +
-                             std::to_string(config_.context_size) + ")");
+                             std::to_string(requested_total) + " > kv context " +
+                             std::to_string(kv_context_) + ")");
   }
   size_t start_pos = session.consumed_tokens();
   Logits logits;
