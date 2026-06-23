@@ -49,18 +49,58 @@ __global__ void apply_rope_kernel(float* __restrict__ vec, unsigned head_dim,
   h[half_dim + i] = x0 * sin_a + x1 * cos_a;
 }
 
+__global__ void apply_rope_dpos_kernel(float* __restrict__ vec, unsigned head_dim,
+                                       unsigned num_heads, const unsigned* d_pos,
+                                       float theta, unsigned rope_len) {
+  unsigned pos = *d_pos;
+  if (pos == 0) return;
+  unsigned half_dim = rope_len / 2u;
+  unsigned total = num_heads * half_dim;
+  unsigned tid = blockIdx.x * blockDim.x + threadIdx.x;
+  if (tid >= total) return;
+
+  unsigned head = tid / half_dim;
+  unsigned i = tid % half_dim;
+
+  float inv_rope_len = 1.0f / static_cast<float>(rope_len);
+  float freq_multiplier = powf(theta, -2.0f * inv_rope_len);
+  float freq = powf(freq_multiplier, static_cast<float>(i));
+
+  float* h = vec + static_cast<size_t>(head) * head_dim;
+  float x0 = h[i];
+  float x1 = h[half_dim + i];
+  float angle = static_cast<float>(pos) * freq;
+  float cos_a = cosf(angle);
+  float sin_a = sinf(angle);
+  h[i] = x0 * cos_a - x1 * sin_a;
+  h[half_dim + i] = x0 * sin_a + x1 * cos_a;
+}
+
 }  // namespace
 
 void launch_apply_rope(float* vec, unsigned head_dim, unsigned num_heads,
                        unsigned pos, float theta, unsigned rope_len,
                        cudaStream_t stream) {
-  if (rope_len < 2 || pos == 0) return;  // identity (host already guards pos==0)
+  if (rope_len < 2 || pos == 0) return;
   unsigned half_dim = rope_len / 2u;
   unsigned total = num_heads * half_dim;
   if (total == 0) return;
   int grid = grid_for(total, kBlockSize);
   apply_rope_kernel<<<grid, kBlockSize, 0, stream>>>(vec, head_dim, num_heads,
                                                      pos, theta, rope_len);
+  CUDA_CHECK_KERNEL();
+}
+
+void launch_apply_rope_dpos(float* vec, unsigned head_dim, unsigned num_heads,
+                            const unsigned* d_pos, float theta,
+                            unsigned rope_len, cudaStream_t stream) {
+  if (rope_len < 2) return;
+  unsigned half_dim = rope_len / 2u;
+  unsigned total = num_heads * half_dim;
+  if (total == 0) return;
+  int grid = grid_for(total, kBlockSize);
+  apply_rope_dpos_kernel<<<grid, kBlockSize, 0, stream>>>(
+      vec, head_dim, num_heads, d_pos, theta, rope_len);
   CUDA_CHECK_KERNEL();
 }
 

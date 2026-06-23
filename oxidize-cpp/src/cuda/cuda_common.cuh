@@ -100,6 +100,10 @@ void launch_rms_norm(float* out, const float* x, const float* weight,
 void launch_apply_rope(float* vec, unsigned head_dim, unsigned num_heads,
                        unsigned pos, float theta, unsigned rope_len,
                        cudaStream_t stream);
+// Same as above but `d_pos` is a device pointer (for CUDA graph replay).
+void launch_apply_rope_dpos(float* vec, unsigned head_dim, unsigned num_heads,
+                            const unsigned* d_pos, float theta,
+                            unsigned rope_len, cudaStream_t stream);
 // gemm.cu (small elementwise helpers kept with the GEMV kernels)
 void launch_swiglu(float* gate, const float* up, float* out, unsigned n,
                    cudaStream_t stream);
@@ -118,6 +122,11 @@ void launch_flash_decode(float* out, const float* q, const float* k_cache,
                          const float* v_cache, unsigned seq_len,
                          unsigned num_heads, unsigned kv_heads,
                          unsigned head_dim, cudaStream_t stream);
+// seq_len = *d_pos + 1 (device-side position for CUDA graph replay).
+void launch_flash_decode_dpos(float* out, const float* q, const float* k_cache,
+                              const float* v_cache, const unsigned* d_pos,
+                              unsigned num_heads, unsigned kv_heads,
+                              unsigned head_dim, cudaStream_t stream);
 
 // ---------------------------------------------------------------------------
 // resident.cu: elementwise helpers for the GPU-resident decode path.
@@ -125,6 +134,10 @@ void launch_residual_add(float* y, const float* x, unsigned n,
                          cudaStream_t stream);
 void launch_add_bias_mod(float* y, const float* bias, unsigned n,
                          unsigned bias_len, cudaStream_t stream);
+// Append K/V vectors to layer `layer` slot at position *d_pos % ctx.
+void launch_kv_append(float* kvk, float* kvv, const float* k, const float* v,
+                      unsigned kv_tok, unsigned ctx, unsigned layer,
+                      const unsigned* d_pos, cudaStream_t stream);
 
 // ---------------------------------------------------------------------------
 // Sampling (sampling.cu): softmax in place + argmax.

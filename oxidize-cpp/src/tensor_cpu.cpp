@@ -36,13 +36,43 @@ namespace oxidize {
 
 namespace {
 
-// f32 dot product with 8 independent accumulators. A single-accumulator float
+#ifdef OXIDIZE_HAVE_F16C
+inline float hsum256(__m256 v) {
+  __m128 lo = _mm256_castps256_ps128(v);
+  __m128 hi = _mm256_extractf128_ps(v, 1);
+  __m128 s = _mm_add_ps(lo, hi);
+  s = _mm_hadd_ps(s, s);
+  s = _mm_hadd_ps(s, s);
+  return _mm_cvtss_f32(s);
+}
+#endif
+
+// f32 dot product with 8 independent accumulators.
 // reduction is NOT auto-vectorizable (float add is non-associative, so the
 // compiler must keep it scalar without -ffast-math). Eight parallel reduction
 // chains let -O3 -march=native emit AVX/FMA, ~4-8x faster than the scalar loop,
 // while staying deterministic (fixed reduction tree -> identical across runs).
 inline float dot_f32(const float* __restrict a, const float* __restrict b,
                      size_t n) {
+#ifdef OXIDIZE_HAVE_F16C
+  if (n >= 8 && __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma")) {
+    __m256 acc0 = _mm256_setzero_ps();
+    __m256 acc1 = _mm256_setzero_ps();
+    __m256 acc2 = _mm256_setzero_ps();
+    __m256 acc3 = _mm256_setzero_ps();
+    size_t i = 0;
+    for (; i + 32 <= n; i += 32) {
+      acc0 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i), _mm256_loadu_ps(b + i), acc0);
+      acc1 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i + 8), _mm256_loadu_ps(b + i + 8), acc1);
+      acc2 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i + 16), _mm256_loadu_ps(b + i + 16), acc2);
+      acc3 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i + 24), _mm256_loadu_ps(b + i + 24), acc3);
+    }
+    __m256 acc = _mm256_add_ps(_mm256_add_ps(acc0, acc1), _mm256_add_ps(acc2, acc3));
+    float sum = hsum256(acc);
+    for (; i < n; ++i) sum += a[i] * b[i];
+    return sum;
+  }
+#endif
   float s0 = 0, s1 = 0, s2 = 0, s3 = 0, s4 = 0, s5 = 0, s6 = 0, s7 = 0;
   size_t i = 0;
   for (; i + 8 <= n; i += 8) {
@@ -104,18 +134,6 @@ inline float dot_f16(const uint16_t* __restrict w, const float* __restrict x,
   return sum;
 #endif
 }
-
-#ifdef OXIDIZE_HAVE_F16C
-// Horizontal sum of a __m256.
-inline float hsum256(__m256 v) {
-  __m128 lo = _mm256_castps256_ps128(v);
-  __m128 hi = _mm256_extractf128_ps(v, 1);
-  __m128 s = _mm_add_ps(lo, hi);
-  s = _mm_hadd_ps(s, s);
-  s = _mm_hadd_ps(s, s);
-  return _mm_cvtss_f32(s);
-}
-#endif
 
 // Fused Q4_0 row . f32 dot (block: f16 d + 16B nibbles, ggml split-halves:
 // low nibble of byte j -> out j, high -> out j+16; value = (nibble-8)*d).
@@ -208,6 +226,190 @@ inline float dot_q5_0(const uint8_t* __restrict row, const float* __restrict x,
   }
   return sum;
 #endif
+}
+
+inline void get_scale_min_k4(size_t j, const uint8_t* scales, uint8_t& sc,
+                             uint8_t& mn) {
+  if (j < 4) {
+    sc = scales[j] & 63;
+    mn = scales[j + 4] & 63;
+  } else {
+    sc = (scales[j + 4] & 0x0f) | ((scales[j - 4] >> 6) << 4);
+    mn = (scales[j + 4] >> 4) | ((scales[j] >> 6) << 4);
+  }
+}
+
+inline float q4_k_dot_scalar(const uint8_t* block, const float* vector) {
+  float d = f16_le_to_f32(block);
+  float min = f16_le_to_f32(block + 2);
+  const uint8_t* scales = block + 4;
+  const uint8_t* qs = block + 16;
+  float sum = 0.0f;
+  for (int group_pair = 0; group_pair < 4; ++group_pair) {
+    const int group1 = group_pair * 2;
+    const int group2 = group1 + 1;
+    uint8_t scale1, min_scale1, scale2, min_scale2;
+    get_scale_min_k4(static_cast<size_t>(group1), scales, scale1, min_scale1);
+    get_scale_min_k4(static_cast<size_t>(group2), scales, scale2, min_scale2);
+    const float d1 = d * static_cast<float>(scale1);
+    const float min1 = min * static_cast<float>(min_scale1);
+    const float d2 = d * static_cast<float>(scale2);
+    const float min2 = min * static_cast<float>(min_scale2);
+    const size_t q_base = static_cast<size_t>(group_pair) * 32;
+    const size_t v_base = static_cast<size_t>(group_pair) * 64;
+    for (size_t l = 0; l < 32; ++l) {
+      const uint8_t packed = qs[q_base + l];
+      sum += (d1 * static_cast<float>(packed & 0x0f) - min1) * vector[v_base + l];
+      sum += (d2 * static_cast<float>(packed >> 4) - min2) * vector[v_base + 32 + l];
+    }
+  }
+  return sum;
+}
+
+inline float dot_q4_k(const uint8_t* row, const float* x, size_t cols) {
+  const size_t blocks_per_row = cols / QK_K;
+#ifdef OXIDIZE_HAVE_F16C
+  if (__builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma")) {
+    const __m128i mask = _mm_set1_epi8(0x0f);
+    __m256 acc0 = _mm256_setzero_ps();
+    __m256 acc1 = _mm256_setzero_ps();
+    __m256 acc2 = _mm256_setzero_ps();
+    __m256 acc3 = _mm256_setzero_ps();
+    for (size_t block_idx = 0; block_idx < blocks_per_row; ++block_idx) {
+      const uint8_t* block = row + block_idx * BLOCK_Q4_K_SIZE;
+      const float* v_ptr = x + block_idx * QK_K;
+      const float d = f16_le_to_f32(block);
+      const float min = f16_le_to_f32(block + 2);
+      const uint8_t* scales = block + 4;
+      const uint8_t* qs = block + 16;
+      for (int group_pair = 0; group_pair < 4; ++group_pair) {
+        const int group1 = group_pair * 2;
+        const int group2 = group1 + 1;
+        uint8_t scale1, min_scale1, scale2, min_scale2;
+        get_scale_min_k4(static_cast<size_t>(group1), scales, scale1, min_scale1);
+        get_scale_min_k4(static_cast<size_t>(group2), scales, scale2, min_scale2);
+        const __m256 d1 = _mm256_set1_ps(d * static_cast<float>(scale1));
+        const __m256 min1 = _mm256_set1_ps(min * static_cast<float>(min_scale1));
+        const __m256 d2 = _mm256_set1_ps(d * static_cast<float>(scale2));
+        const __m256 min2 = _mm256_set1_ps(min * static_cast<float>(min_scale2));
+        const int q_base = group_pair * 32;
+        const int v_base = group_pair * 64;
+        const __m128i p0 = _mm_loadl_epi64(reinterpret_cast<const __m128i*>(qs + q_base));
+        const __m128i p1 = _mm_loadl_epi64(reinterpret_cast<const __m128i*>(qs + q_base + 8));
+        const __m128i p2 = _mm_loadl_epi64(reinterpret_cast<const __m128i*>(qs + q_base + 16));
+        const __m128i p3 = _mm_loadl_epi64(reinterpret_cast<const __m128i*>(qs + q_base + 24));
+        const __m256 l0 = _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(_mm_and_si128(p0, mask)));
+        const __m256 h0 = _mm256_cvtepi32_ps(
+            _mm256_cvtepu8_epi32(_mm_and_si128(_mm_srli_epi16(p0, 4), mask)));
+        const __m256 l1 = _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(_mm_and_si128(p1, mask)));
+        const __m256 h1 = _mm256_cvtepi32_ps(
+            _mm256_cvtepu8_epi32(_mm_and_si128(_mm_srli_epi16(p1, 4), mask)));
+        const __m256 l2 = _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(_mm_and_si128(p2, mask)));
+        const __m256 h2 = _mm256_cvtepi32_ps(
+            _mm256_cvtepu8_epi32(_mm_and_si128(_mm_srli_epi16(p2, 4), mask)));
+        const __m256 l3 = _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(_mm_and_si128(p3, mask)));
+        const __m256 h3 = _mm256_cvtepi32_ps(
+            _mm256_cvtepu8_epi32(_mm_and_si128(_mm_srli_epi16(p3, 4), mask)));
+        const __m256 t_l0 = _mm256_fmsub_ps(l0, d1, min1);
+        const __m256 t_l1 = _mm256_fmsub_ps(l1, d1, min1);
+        const __m256 t_l2 = _mm256_fmsub_ps(l2, d1, min1);
+        const __m256 t_l3 = _mm256_fmsub_ps(l3, d1, min1);
+        const __m256 t_h0 = _mm256_fmsub_ps(h0, d2, min2);
+        const __m256 t_h1 = _mm256_fmsub_ps(h1, d2, min2);
+        const __m256 t_h2 = _mm256_fmsub_ps(h2, d2, min2);
+        const __m256 t_h3 = _mm256_fmsub_ps(h3, d2, min2);
+        acc0 = _mm256_fmadd_ps(t_l0, _mm256_loadu_ps(v_ptr + v_base), acc0);
+        acc1 = _mm256_fmadd_ps(t_l1, _mm256_loadu_ps(v_ptr + v_base + 8), acc1);
+        acc2 = _mm256_fmadd_ps(t_l2, _mm256_loadu_ps(v_ptr + v_base + 16), acc2);
+        acc3 = _mm256_fmadd_ps(t_l3, _mm256_loadu_ps(v_ptr + v_base + 24), acc3);
+        acc0 = _mm256_fmadd_ps(t_h0, _mm256_loadu_ps(v_ptr + v_base + 32), acc0);
+        acc1 = _mm256_fmadd_ps(t_h1, _mm256_loadu_ps(v_ptr + v_base + 40), acc1);
+        acc2 = _mm256_fmadd_ps(t_h2, _mm256_loadu_ps(v_ptr + v_base + 48), acc2);
+        acc3 = _mm256_fmadd_ps(t_h3, _mm256_loadu_ps(v_ptr + v_base + 56), acc3);
+      }
+    }
+    const __m256 acc01 = _mm256_add_ps(acc0, acc1);
+    const __m256 acc23 = _mm256_add_ps(acc2, acc3);
+    const __m256 acc = _mm256_add_ps(acc01, acc23);
+    const __m128 lo = _mm256_castps256_ps128(acc);
+    const __m128 hi = _mm256_extractf128_ps(acc, 1);
+    const __m128 sum128 = _mm_add_ps(lo, hi);
+    const __m128 shuf = _mm_movehdup_ps(sum128);
+    const __m128 sums = _mm_add_ps(sum128, shuf);
+    const __m128 shuf2 = _mm_movehl_ps(shuf, sums);
+    return _mm_cvtss_f32(_mm_add_ss(sums, shuf2));
+  }
+#endif
+  float sum = 0.0f;
+  for (size_t bi = 0; bi < blocks_per_row; ++bi) {
+    sum += q4_k_dot_scalar(row + bi * BLOCK_Q4_K_SIZE, x + bi * QK_K);
+  }
+  return sum;
+}
+
+inline void decode_q4_k_block(const uint8_t* block, float* out) {
+  float d = f16_le_to_f32(block);
+  float min = f16_le_to_f32(block + 2);
+  const uint8_t* scales = block + 4;
+  const uint8_t* qs = block + 16;
+  for (int g = 0; g < 8; ++g) {
+    uint8_t sc, m;
+    get_scale_min_k4(static_cast<size_t>(g), scales, sc, m);
+    const float dl = d * static_cast<float>(sc);
+    const float ml = min * static_cast<float>(m);
+    const int pair = g / 2;
+    const size_t qs_off = static_cast<size_t>(pair) * 32;
+    const size_t out_off = static_cast<size_t>(g) * 32;
+    if ((g & 1) == 0) {
+      for (size_t l = 0; l < 32; ++l) {
+        out[out_off + l] = dl * static_cast<float>(qs[qs_off + l] & 0x0f) - ml;
+      }
+    } else {
+      for (size_t l = 0; l < 32; ++l) {
+        out[out_off + l] = dl * static_cast<float>(qs[qs_off + l] >> 4) - ml;
+      }
+    }
+  }
+}
+
+inline float q8_0_dot_scalar(const uint8_t* block, const float* vector) {
+  const float scale = f16_le_to_f32(block);
+#ifdef OXIDIZE_HAVE_F16C
+  __m256 acc = _mm256_setzero_ps();
+  __m256 vs = _mm256_set1_ps(scale);
+  for (int i = 0; i < 32; i += 8) {
+    __m128i q8 = _mm_loadl_epi64(reinterpret_cast<const __m128i*>(block + 2 + i));
+    __m256i q32 = _mm256_cvtepi8_epi32(q8);
+    __m256 w = _mm256_mul_ps(_mm256_cvtepi32_ps(q32), vs);
+    acc = _mm256_fmadd_ps(w, _mm256_loadu_ps(vector + i), acc);
+  }
+  return hsum256(acc);
+#else
+  for (size_t l = 0; l < QK8_0; ++l) {
+    sum += static_cast<float>(static_cast<int8_t>(block[2 + l])) * scale * vector[l];
+  }
+  return sum;
+#endif
+}
+
+inline float dot_q8_0(const uint8_t* row, const float* x, size_t cols) {
+  const size_t nb = cols / QK8_0;
+  float sum = 0.0f;
+  for (size_t b = 0; b < nb; ++b) {
+    sum += q8_0_dot_scalar(row + b * BLOCK_Q8_0_SIZE, x + b * QK8_0);
+  }
+  return sum;
+}
+
+inline void decode_q8_0_block(const uint8_t* block, float* out) {
+  const float scale = f16_le_to_f32(block);
+  for (size_t l = 0; l < QK8_0; ++l) {
+    out[l] = static_cast<float>(static_cast<int8_t>(block[2 + l])) * scale;
+  }
+}
+
+inline bool is_q4_k(QuantType q) {
+  return q == QuantType::Q4_K_S || q == QuantType::Q4_K_M;
 }
 
 }  // namespace
@@ -360,6 +562,20 @@ void gemv_quantized(float* y, QuantType quant, const uint8_t* W, size_t rows,
       y[r] = dot_q5_0(W + static_cast<size_t>(r) * rb, x, cols);
     return;
   }
+  if (is_q4_k(quant) && cols % QK_K == 0) {
+    const size_t rb = (cols / QK_K) * BLOCK_Q4_K_SIZE;
+#pragma omp parallel for schedule(static)
+    for (long long r = 0; r < static_cast<long long>(rows); ++r)
+      y[r] = dot_q4_k(W + static_cast<size_t>(r) * rb, x, cols);
+    return;
+  }
+  if (quant == QuantType::Q8_0 && cols % QK8_0 == 0) {
+    const size_t rb = (cols / QK8_0) * BLOCK_Q8_0_SIZE;
+#pragma omp parallel for schedule(static)
+    for (long long r = 0; r < static_cast<long long>(rows); ++r)
+      y[r] = dot_q8_0(W + static_cast<size_t>(r) * rb, x, cols);
+    return;
+  }
 
   // Per-row dequant then dot: y[r] = dot(dequant(W_row_r), x). This matches the
   // semantics of gemv_quantized_f32 (the Rust fused kernels are a perf
@@ -374,6 +590,131 @@ void gemv_quantized(float* y, QuantType quant, const uint8_t* W, size_t rows,
       const uint8_t* src = W + static_cast<size_t>(r) * row_bytes;
       dequantize_row(quant, src, row.data(), cols);
       y[r] = dot_f32(row.data(), x, cols);
+    }
+  }
+}
+
+void gemm_quantized(float* outputs, QuantType quant, const uint8_t* W,
+                    size_t rows, size_t cols, const float* inputs, size_t batch) {
+  if (batch == 0) return;
+  if (batch == 1) {
+    gemv_quantized(outputs, quant, W, rows, cols, inputs);
+    return;
+  }
+
+  const size_t row_bytes = quantized_size(quant, cols);
+
+  if (quant == QuantType::F16) {
+#pragma omp parallel for schedule(static)
+    for (long long r = 0; r < static_cast<long long>(rows); ++r) {
+      const uint16_t* row = reinterpret_cast<const uint16_t*>(
+          W + static_cast<size_t>(r) * cols * 2);
+      for (size_t b = 0; b < batch; ++b) {
+        outputs[b * rows + static_cast<size_t>(r)] =
+            dot_f16(row, inputs + b * cols, cols);
+      }
+    }
+    return;
+  }
+  if (quant == QuantType::BF16) {
+#pragma omp parallel for schedule(static)
+    for (long long r = 0; r < static_cast<long long>(rows); ++r) {
+      const uint8_t* row = W + static_cast<size_t>(r) * cols * 2;
+      for (size_t b = 0; b < batch; ++b) {
+        float acc = 0.0f;
+        for (size_t c = 0; c < cols; ++c) {
+          acc += f16_le_to_f32(row + c * 2) * inputs[b * cols + c];
+        }
+        outputs[b * rows + static_cast<size_t>(r)] = acc;
+      }
+    }
+    return;
+  }
+  if (quant == QuantType::Q4_0) {
+    const size_t rb = (cols / 32) * 18;
+#pragma omp parallel for schedule(static)
+    for (long long r = 0; r < static_cast<long long>(rows); ++r) {
+      const uint8_t* row = W + static_cast<size_t>(r) * rb;
+      for (size_t b = 0; b < batch; ++b) {
+        outputs[b * rows + static_cast<size_t>(r)] =
+            dot_q4_0(row, inputs + b * cols, cols);
+      }
+    }
+    return;
+  }
+  if (quant == QuantType::Q5_0) {
+    const size_t rb = (cols / 32) * 22;
+#pragma omp parallel for schedule(static)
+    for (long long r = 0; r < static_cast<long long>(rows); ++r) {
+      const uint8_t* row = W + static_cast<size_t>(r) * rb;
+      for (size_t b = 0; b < batch; ++b) {
+        outputs[b * rows + static_cast<size_t>(r)] =
+            dot_q5_0(row, inputs + b * cols, cols);
+      }
+    }
+    return;
+  }
+  if (is_q4_k(quant) && cols % QK_K == 0) {
+    const size_t blocks_per_row = cols / QK_K;
+    const size_t rb = blocks_per_row * BLOCK_Q4_K_SIZE;
+#pragma omp parallel
+    {
+      float scratch[QK_K];
+#pragma omp for schedule(static)
+      for (long long r = 0; r < static_cast<long long>(rows); ++r) {
+        const uint8_t* row = W + static_cast<size_t>(r) * rb;
+        for (size_t b = 0; b < batch; ++b) {
+          outputs[b * rows + static_cast<size_t>(r)] = 0.0f;
+        }
+        for (size_t bi = 0; bi < blocks_per_row; ++bi) {
+          decode_q4_k_block(row + bi * BLOCK_Q4_K_SIZE, scratch);
+          const size_t in_off = bi * QK_K;
+          for (size_t b = 0; b < batch; ++b) {
+            outputs[b * rows + static_cast<size_t>(r)] +=
+                dot_f32(scratch, inputs + b * cols + in_off, QK_K);
+          }
+        }
+      }
+    }
+    return;
+  }
+  if (quant == QuantType::Q8_0 && cols % QK8_0 == 0) {
+    const size_t blocks_per_row = cols / QK8_0;
+    const size_t rb = blocks_per_row * BLOCK_Q8_0_SIZE;
+#pragma omp parallel
+    {
+      float scratch[QK8_0];
+#pragma omp for schedule(static)
+      for (long long r = 0; r < static_cast<long long>(rows); ++r) {
+        const uint8_t* row = W + static_cast<size_t>(r) * rb;
+        for (size_t b = 0; b < batch; ++b) {
+          outputs[b * rows + static_cast<size_t>(r)] = 0.0f;
+        }
+        for (size_t bi = 0; bi < blocks_per_row; ++bi) {
+          decode_q8_0_block(row + bi * BLOCK_Q8_0_SIZE, scratch);
+          const size_t in_off = bi * QK8_0;
+          for (size_t b = 0; b < batch; ++b) {
+            outputs[b * rows + static_cast<size_t>(r)] +=
+                dot_f32(scratch, inputs + b * cols + in_off, QK8_0);
+          }
+        }
+      }
+    }
+    return;
+  }
+
+  // Decode-once path: dequantize each row once, dot all batch positions.
+#pragma omp parallel
+  {
+    std::vector<float> row(cols);
+#pragma omp for schedule(static)
+    for (long long r = 0; r < static_cast<long long>(rows); ++r) {
+      const uint8_t* src = W + static_cast<size_t>(r) * row_bytes;
+      dequantize_row(quant, src, row.data(), cols);
+      for (size_t b = 0; b < batch; ++b) {
+        outputs[b * rows + static_cast<size_t>(r)] =
+            dot_f32(row.data(), inputs + b * cols, cols);
+      }
     }
   }
 }

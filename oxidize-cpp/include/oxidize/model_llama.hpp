@@ -120,7 +120,10 @@ class LlamaModel : public Model {
   // One decode step for `token` at absolute position `pos`. When need_logits is
   // false the lm_head is skipped (returns empty logits).
   Logits forward_single(Token token, size_t pos, bool need_logits);
+  Logits forward_batched(const std::vector<Token>& tokens, size_t start_pos,
+                         bool need_logits);
   void embed_token(Token token, float* x) const;
+  void embed_tokens_batched(const std::vector<Token>& tokens, float* x_batch) const;
   void run_layers(size_t pos);
   Logits final_head();
 
@@ -137,8 +140,11 @@ class LlamaModel : public Model {
                    size_t kv_heads, size_t head_dim);
   void d_gemv_weight(const LlamaWeight& w, size_t rows, size_t cols,
                      const float* x, float* y);
+  void d_gemm_weight(const LlamaWeight& w, size_t rows, size_t cols,
+                     const float* inputs, float* outputs, size_t batch);
 
 #ifdef OXIDIZE_CUDA
+  void resident_sync_kv_to_gpu(size_t seq_len);
   // Build a device-resident decode view of this model's weights (WIP).
   CudaBackend::ModelView build_cuda_view() const;
 #endif

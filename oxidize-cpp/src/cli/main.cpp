@@ -37,8 +37,13 @@
 #include "oxidize/gguf.hpp"
 #include "oxidize/model.hpp"
 #include "oxidize/model_llama.hpp"
+#include "oxidize/numa_util.hpp"
 #include "oxidize/sampler.hpp"
 #include "oxidize/tokenizer.hpp"
+
+#ifdef OXIDIZE_CUDA
+#include "oxidize/cuda_backend.hpp"
+#endif
 
 namespace {
 
@@ -61,9 +66,15 @@ struct Args {
   float temperature = 0.0f;  // <=0 => greedy
   size_t top_k = 0;          // 0 => disabled
   float top_p = 1.0f;
+  float min_p = 0.0f;
+  float frequency_penalty = 0.0f;
+  float presence_penalty = 0.0f;
+  bool cuda_graph = true;
   bool no_bos = false;
   bool stream = false;
   std::string quantize;  // "q8_0" => on-the-fly F16/BF16->Q8_0 at load
+  std::string numa_mode;  // "" = default (single), "single","interleave","all","replicate",<N>
+  int threads = 0;        // 0 = auto
 };
 
 [[noreturn]] void usage_and_exit(const char* prog, int code) {
@@ -79,9 +90,15 @@ struct Args {
       "  --temperature <f>     Sampling temperature (<=0 = greedy; default 0)\n"
       "  --top-k <n>           Top-k filter (0 = disabled)\n"
       "  --top-p <f>           Top-p/nucleus filter (default 1.0)\n"
+      "  --min-p <f>           Min-p filter (0 = disabled)\n"
+      "  --frequency-penalty <f>  OpenAI-style frequency penalty\n"
+      "  --presence-penalty <f>   OpenAI-style presence penalty\n"
+      "  --no-cuda-graph       Disable CUDA graph replay on decode\n"
       "  --no-bos              Do not prepend the BOS token\n"
       "  --stream              Stream decoded text to stdout as it generates\n"
       "  --quantize q8_0       Quantize F16/BF16 weights to Q8_0 at load (~1.3x, near-lossless)\n"
+      "  --numa <mode>         NUMA binding: single|interleave|all|replicate|<node-id> (default: single)\n"
+      "  --threads <n>         OpenMP thread count (0 = auto based on NUMA node physical cores)\n"
       "  --json                Emit timing JSON\n",
       prog);
   std::exit(code);
@@ -160,6 +177,26 @@ Args parse_args(int argc, char** argv) {
         std::fprintf(stderr, "error: invalid --top-k '%s'\n", v.c_str());
         usage_and_exit(argv[0], 2);
       }
+    } else if (arg == "--min-p") {
+      a.min_p = std::strtof(take_value(argc, argv, i, "--min-p").c_str(), nullptr);
+    } else if (arg == "--frequency-penalty") {
+      a.frequency_penalty =
+          std::strtof(take_value(argc, argv, i, "--frequency-penalty").c_str(), nullptr);
+    } else if (arg == "--presence-penalty") {
+      a.presence_penalty =
+          std::strtof(take_value(argc, argv, i, "--presence-penalty").c_str(), nullptr);
+    } else if (arg == "--no-cuda-graph") {
+      a.cuda_graph = false;
+    } else if (arg == "--numa") {
+      a.numa_mode = take_value(argc, argv, i, "--numa");
+    } else if (arg == "--threads") {
+      std::string v = take_value(argc, argv, i, "--threads");
+      size_t n = 0;
+      if (!parse_size(v, n)) {
+        std::fprintf(stderr, "error: invalid --threads '%s'\n", v.c_str());
+        usage_and_exit(argv[0], 2);
+      }
+      a.threads = static_cast<int>(n);
     } else if (arg == "-h" || arg == "--help") {
       usage_and_exit(argv[0], 0);
     } else {
@@ -217,17 +254,35 @@ double secs(std::chrono::steady_clock::duration d) {
 int main(int argc, char** argv) {
   Args args = parse_args(argc, argv);
 
-#ifdef _OPENMP
-  // Default OpenMP threads to physical-ish cores. On hyperthreaded machines,
-  // using every logical core saturates memory bandwidth and oversubscribes the
-  // memory-bound matmuls (measured: 8 threads = 44 tok/s, 16 = 12 tok/s on an
-  // 8-core/16-thread box). Respect an explicit OMP_NUM_THREADS if the user set it.
-  if (!std::getenv("OMP_NUM_THREADS")) {
-    int logical = omp_get_max_threads();
-    int want = (logical > 4 && logical % 2 == 0) ? logical / 2 : logical;
-    omp_set_num_threads(want);
+  // ---- NUMA / affinity / thread binding ------------------------------------
+  // Discover NUMA topology and pin threads + memory policy before model load
+  // so that first-touch page allocation lands on the bound node.
+  // Default (no --numa flag): single-node binding (node 0) with physical-core
+  // threads. This reproduces "numactl --cpunodebind=0 --membind=0" without
+  // needing the external wrapper.
+  // Respect OMP_NUM_THREADS if set externally (override our auto-choice).
+  {
+    std::string numa_arg = args.numa_mode.empty() ? "single" : args.numa_mode;
+    oxidize::NumaConfig ncfg;
+    try {
+      ncfg = oxidize::parse_numa_arg(numa_arg);
+    } catch (const std::invalid_argument& e) {
+      std::fprintf(stderr, "error: %s\n", e.what());
+      return 2;
+    }
+    ncfg.threads = args.threads;
+    // If user set OMP_NUM_THREADS externally, respect it (don't override).
+    if (std::getenv("OMP_NUM_THREADS")) {
+      ncfg.threads = 0;  // will be overridden by env var inside omp
+    }
+    auto nodes = oxidize::discover_numa_nodes();
+    int n_threads = oxidize::init_numa(ncfg, nodes);
+    if (!nodes.empty()) {
+      std::fprintf(stderr,
+          "oxidize: NUMA mode=%s node=%d threads=%d (numa nodes discovered: %zu)\n",
+          numa_arg.c_str(), ncfg.node, n_threads, nodes.size());
+    }
   }
-#endif
 
   try {
     if (args.cuda) {
@@ -254,8 +309,13 @@ int main(int argc, char** argv) {
     // Report the device actually in use: --cuda falls back to CPU when no
     // device is present, so query the model rather than trusting the request.
     bool cuda_active = false;
-    if (auto* lm = dynamic_cast<LlamaModel*>(model.get()))
-      cuda_active = lm->cuda_enabled();
+    auto* lm = dynamic_cast<LlamaModel*>(model.get());
+    if (args.cuda && lm) cuda_active = lm->cuda_enabled();
+#ifdef OXIDIZE_CUDA
+    if (cuda_active) {
+      CudaBackend::instance().set_cuda_graph(args.cuda_graph);
+    }
+#endif
     if (args.cuda && !cuda_active) {
       std::fprintf(stderr,
                    "warning: --cuda requested but no CUDA device active; "
@@ -330,10 +390,26 @@ int main(int argc, char** argv) {
     scfg.temperature = args.temperature > 0.0f ? args.temperature : 1.0f;
     if (args.top_k > 0) scfg.top_k = args.top_k;
     if (args.top_p < 1.0f) scfg.top_p = args.top_p;
+    if (args.min_p > 0.0f) scfg.min_p = args.min_p;
+    oxidize::RepetitionPenaltyConfig rep;
+    rep.frequency_penalty = args.frequency_penalty;
+    rep.presence_penalty = args.presence_penalty;
     const bool greedy = args.temperature <= 0.0f;
+    std::vector<Token> recent;
+    recent.reserve(room + prefill.size());
+    recent.insert(recent.end(), prefill.begin(), prefill.end());
+
     auto pick = [&](const Logits& l) -> Token {
-      return greedy ? oxidize::greedy(l)
-                    : oxidize::sample(l, scfg, rng.next_unit());
+      if (greedy) {
+#ifdef OXIDIZE_CUDA
+        if (cuda_active) {
+          return static_cast<Token>(
+              CudaBackend::instance().argmax(l.data(), l.size()));
+        }
+#endif
+        return oxidize::greedy(l);
+      }
+      return oxidize::sample_with_repetition(l, scfg, rng.next_unit(), recent, rep);
     };
 
     std::vector<Token> generated;
@@ -351,6 +427,7 @@ int main(int argc, char** argv) {
     Token next = pick(logits);
     if (!(tok && tok->is_eog(next))) {
       generated.push_back(next);
+      recent.push_back(next);
       emit(next);
       ++produced;
       for (; produced < room; ++produced) {
@@ -358,6 +435,7 @@ int main(int argc, char** argv) {
         next = pick(logits);
         if (tok && tok->is_eog(next)) break;
         generated.push_back(next);
+        recent.push_back(next);
         emit(next);
       }
     }

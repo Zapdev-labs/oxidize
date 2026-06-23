@@ -66,6 +66,21 @@ target_link_libraries(oxidize-cpp PRIVATE oxidize_core)
 add_executable(oxidize-cpp-server src/server/main.cpp src/server/json.cpp)
 target_link_libraries(oxidize-cpp-server PRIVATE oxidize_core)
 
+# ---- training library (fp32, no CUDA dep) ---------------------------------
+file(GLOB TRAIN_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/train/*.cpp")
+# Exclude grad_check.cpp (it has its own main()).
+list(FILTER TRAIN_SOURCES EXCLUDE REGEX ".*grad_check\\.cpp$")
+add_library(oxidize_train ${TRAIN_SOURCES})
+target_include_directories(oxidize_train PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_link_libraries(oxidize_train PUBLIC oxidize_core)
+if(OpenMP_CXX_FOUND)
+  target_link_libraries(oxidize_train PUBLIC OpenMP::OpenMP_CXX)
+endif()
+
+# ---- training CLI binary --------------------------------------------------
+add_executable(oxidize-cpp-train src/cli/train_main.cpp)
+target_link_libraries(oxidize-cpp-train PRIVATE oxidize_train)
+
 # ---- tests ----------------------------------------------------------------
 enable_testing()
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests")
@@ -77,3 +92,8 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests")
     add_test(NAME ${test_name} COMMAND ${test_name})
   endforeach()
 endif()
+
+# grad_check test (has its own main, links oxidize_train).
+add_executable(grad_check src/train/grad_check.cpp)
+target_link_libraries(grad_check PRIVATE oxidize_train)
+add_test(NAME grad_check COMMAND grad_check)

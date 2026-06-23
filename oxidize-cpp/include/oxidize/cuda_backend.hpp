@@ -95,12 +95,10 @@ class CudaBackend {
   // computed on the GPU. Mirrors sampler.hpp::greedy semantics.
   uint32_t argmax(const float* logits, size_t n);
 
-  // --- GPU-resident decode (WIP / UNVERIFIED) -------------------------------
-  // The op set above bounces every activation host<->device and syncs per op
-  // (~290 round-trips/token) — that, not the math, is why --cuda is slow. The
-  // resident path keeps activations + KV cache on the device for the whole
-  // forward and syncs once per token. Weights (host pointers) are uploaded and
-  // cached on first use, identical to the op-set caches.
+  // --- GPU-resident decode ---------------------------------------------------
+  // Keeps activations + KV cache on device; one sync/token. Weights upload once
+  // via content-addressed cache. CUDA graphs replay the layer loop on decode when
+  // no sliding-window layers are present (--no-cuda-graph to disable).
   //
   // A weight matrix as the model sees it: either f32 (use `f32`) or a packed
   // quantized / native-f16 block sequence (use `quant` + `data`).
@@ -148,6 +146,17 @@ class CudaBackend {
   void resident_forward(const ModelView& mv, const float* embed_row, size_t pos,
                         float* logits_out);
 
+  // Copy CPU layer-major KV cache into the resident GPU buffers after batched
+  // CPU prefill so decode can continue on the device.
+  void resident_sync_kv(const float* keys, const float* values, size_t layers,
+                        size_t ctx, size_t kv_tok, size_t seq_len);
+
+  // Enable CUDA graph replay for resident decode (default on). Graphs require
+  // fixed attention geometry; disabled automatically when sliding-window layers
+  // are present.
+  void set_cuda_graph(bool on) { cuda_graph_ = on; }
+  bool cuda_graph_enabled() const { return cuda_graph_; }
+
  private:
   // Reusable per-call device scratch (separate x / weight / out arenas so the
   // three operands of one op never alias).
@@ -157,6 +166,7 @@ class CudaBackend {
 
   struct Impl;
   std::unique_ptr<Impl> impl_;
+  bool cuda_graph_ = true;
 };
 
 }  // namespace oxidize

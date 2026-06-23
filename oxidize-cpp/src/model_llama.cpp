@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -100,6 +101,32 @@ void gemv_weight(const LlamaWeight& w, size_t rows, size_t cols, const float* x,
     gemv_quantized(y, w.quant, w.qbytes(), rows, cols, x);
   } else {
     matvec(y, w.f32.data(), x, rows, cols);
+  }
+}
+
+void gemm_weight(const LlamaWeight& w, size_t rows, size_t cols,
+                 const float* inputs, float* outputs, size_t batch) {
+  if (batch == 0) return;
+  if (batch == 1) {
+    gemv_weight(w, rows, cols, inputs, outputs);
+    return;
+  }
+  if (w.quantized) {
+    gemm_quantized(outputs, w.quant, w.qbytes(), rows, cols, inputs, batch);
+  } else {
+    for (size_t b = 0; b < batch; ++b) {
+      matvec(outputs + b * rows, w.f32.data(), inputs + b * cols, rows, cols);
+    }
+  }
+}
+
+void add_repeating_bias_batched(float* y, const std::vector<float>& bias,
+                                size_t dim, size_t batch) {
+  if (bias.empty()) return;
+  const size_t bl = bias.size();
+  for (size_t b = 0; b < batch; ++b) {
+    float* row = y + b * dim;
+    for (size_t i = 0; i < dim; ++i) row[i] += bias[i % bl];
   }
 }
 
@@ -190,6 +217,12 @@ void LlamaModel::d_gemv_weight(const LlamaWeight& w, size_t rows, size_t cols,
   }
 #endif
   gemv_weight(w, rows, cols, x, y);
+}
+
+void LlamaModel::d_gemm_weight(const LlamaWeight& w, size_t rows, size_t cols,
+                               const float* inputs, float* outputs,
+                               size_t batch) {
+  gemm_weight(w, rows, cols, inputs, outputs, batch);
 }
 
 void LlamaModel::reject_unsupported(const InferenceConfig& cfg) {
@@ -408,6 +441,14 @@ void LlamaModel::embed_token(Token token, float* x) const {
   }
   if (config_.embedding_scale != 1.0f) {
     for (size_t i = 0; i < h; ++i) x[i] *= config_.embedding_scale;
+  }
+}
+
+void LlamaModel::embed_tokens_batched(const std::vector<Token>& tokens,
+                                      float* x_batch) const {
+  const size_t h = config_.hidden_size;
+  for (size_t t = 0; t < tokens.size(); ++t) {
+    embed_token(tokens[t], x_batch + t * h);
   }
 }
 
@@ -670,6 +711,175 @@ Logits LlamaModel::final_head() {
   return logits;
 }
 
+Logits LlamaModel::forward_batched(const std::vector<Token>& tokens,
+                                   size_t start_pos, bool need_logits) {
+  const size_t batch = tokens.size();
+  if (batch == 0) throw std::runtime_error("forward_batched: empty input");
+  if (batch == 1) return forward_single(tokens[0], start_pos, need_logits);
+
+  const InferenceConfig& cfg = config_;
+  const size_t h = cfg.hidden_size;
+  const size_t n_heads = cfg.num_attention_heads;
+  const size_t kv_heads = cfg.num_key_value_heads;
+  const size_t head_dim = cfg.head_dim();
+  const size_t q_len = n_heads * head_dim;
+  const size_t kv_len = kv_heads * head_dim;
+  const size_t inter = cfg.intermediate_size;
+  const float eps = cfg.rms_norm_eps;
+  const bool plus_one = cfg.rms_norm_weight_plus_one;
+  const size_t rope_dim = cfg.rope_dim;
+
+  std::vector<float> x_batch(batch * h);
+  embed_tokens_batched(tokens, x_batch.data());
+
+  std::vector<float> normed_batch(batch * h);
+  std::vector<float> q_batch(batch * q_len);
+  std::vector<float> k_batch(batch * kv_len);
+  std::vector<float> v_batch(batch * kv_len);
+  std::vector<float> attn_batch(batch * q_len);
+  std::vector<float> attn_proj(batch * h);
+  std::vector<float> gate_batch(batch * inter);
+  std::vector<float> up_batch(batch * inter);
+  std::vector<float> ffn_batch(batch * h);
+  std::vector<float> head_scratch(head_dim);
+  std::vector<float> qk_scratch(std::max(q_len, kv_len));
+
+  for (size_t l = 0; l < cfg.layer_count; ++l) {
+    const LlamaLayer& layer = layers_[l];
+    const float rope_theta = layer_rope_theta(cfg, l);
+    const size_t window = layer_sliding_window(cfg, l);
+
+    for (size_t i = 0; i < batch; ++i) {
+      rms_norm(normed_batch.data() + i * h, x_batch.data() + i * h,
+               layer.attn_norm.data(), h, eps, plus_one);
+    }
+
+    d_gemm_weight(layer.attn_q, q_len, h, normed_batch.data(), q_batch.data(), batch);
+    d_gemm_weight(layer.attn_k, kv_len, h, normed_batch.data(), k_batch.data(), batch);
+    d_gemm_weight(layer.attn_v, kv_len, h, normed_batch.data(), v_batch.data(), batch);
+    add_repeating_bias_batched(q_batch.data(), layer.attn_q_bias, q_len, batch);
+    add_repeating_bias_batched(k_batch.data(), layer.attn_k_bias, kv_len, batch);
+    add_repeating_bias_batched(v_batch.data(), layer.attn_v_bias, kv_len, batch);
+
+    for (size_t i = 0; i < batch; ++i) {
+      size_t pos = start_pos + i;
+      float* q = q_batch.data() + i * q_len;
+      float* k = k_batch.data() + i * kv_len;
+      float* v = v_batch.data() + i * kv_len;
+
+      if (!layer.attn_q_norm.empty() && layer.attn_q_norm.size() == head_dim) {
+        for (size_t head = 0; head < n_heads; ++head) {
+          float* hp = q + head * head_dim;
+          rms_norm(head_scratch.data(), hp, layer.attn_q_norm.data(), head_dim, eps,
+                   plus_one);
+          for (size_t d = 0; d < head_dim; ++d) hp[d] = head_scratch[d];
+        }
+      } else if (!layer.attn_q_norm.empty() && layer.attn_q_norm.size() == q_len) {
+        rms_norm(qk_scratch.data(), q, layer.attn_q_norm.data(), q_len, eps, plus_one);
+        for (size_t d = 0; d < q_len; ++d) q[d] = qk_scratch[d];
+      }
+      if (!layer.attn_k_norm.empty() && layer.attn_k_norm.size() == head_dim) {
+        for (size_t head = 0; head < kv_heads; ++head) {
+          float* hp = k + head * head_dim;
+          rms_norm(head_scratch.data(), hp, layer.attn_k_norm.data(), head_dim, eps,
+                   plus_one);
+          for (size_t d = 0; d < head_dim; ++d) hp[d] = head_scratch[d];
+        }
+      } else if (!layer.attn_k_norm.empty() && layer.attn_k_norm.size() == kv_len) {
+        rms_norm(qk_scratch.data(), k, layer.attn_k_norm.data(), kv_len, eps, plus_one);
+        for (size_t d = 0; d < kv_len; ++d) k[d] = qk_scratch[d];
+      }
+
+      apply_rope(q, head_dim, n_heads, pos, rope_theta, rope_dim);
+      apply_rope(k, head_dim, kv_heads, pos, rope_theta, rope_dim);
+
+      size_t phys = pos % cfg.context_size;
+      size_t base = (l * cfg.context_size + phys) * kv_token_size_;
+      for (size_t d = 0; d < kv_len; ++d) {
+        kv_keys_[base + d] = k[d];
+        kv_values_[base + d] = v[d];
+      }
+
+      size_t seq_len = pos + 1;
+      size_t layer_start = (l * cfg.context_size) * kv_token_size_;
+      size_t eff_seq_len = seq_len;
+      const float* key_prefix = kv_keys_.data() + layer_start;
+      const float* val_prefix = kv_values_.data() + layer_start;
+      if (window > 0 && seq_len > window) {
+        size_t skip = (seq_len - window) * kv_token_size_;
+        key_prefix += skip;
+        val_prefix += skip;
+        eff_seq_len = window;
+      }
+      attention_decode(attn_batch.data() + i * q_len, q, key_prefix, val_prefix,
+                       eff_seq_len, n_heads, kv_heads, head_dim);
+    }
+
+    d_gemm_weight(layer.attn_output, h, q_len, attn_batch.data(), attn_proj.data(),
+                  batch);
+    add_repeating_bias_batched(attn_proj.data(), layer.attn_output_bias, h, batch);
+
+    if (cfg.sandwich_norm && !layer.post_attention_norm.empty()) {
+      for (size_t i = 0; i < batch; ++i) {
+        rms_norm(attn_proj.data() + i * h, attn_proj.data() + i * h,
+                 layer.post_attention_norm.data(), h, eps, plus_one);
+      }
+    }
+
+    for (size_t i = 0; i < batch; ++i) {
+      float* x = x_batch.data() + i * h;
+      const float* a = attn_proj.data() + i * h;
+      for (size_t d = 0; d < h; ++d) x[d] += a[d];
+    }
+
+    const std::vector<float>& ffn_norm_w =
+        !layer.ffn_norm.empty()
+            ? layer.ffn_norm
+            : (cfg.sandwich_norm ? layer.ffn_norm : layer.post_attention_norm);
+    if (ffn_norm_w.empty()) {
+      throw std::runtime_error("LlamaModel: layer " + std::to_string(l) +
+                               " missing ffn_norm");
+    }
+    for (size_t i = 0; i < batch; ++i) {
+      rms_norm(normed_batch.data() + i * h, x_batch.data() + i * h,
+               ffn_norm_w.data(), h, eps, plus_one);
+    }
+
+    d_gemm_weight(layer.ffn_gate, inter, h, normed_batch.data(), gate_batch.data(),
+                  batch);
+    d_gemm_weight(layer.ffn_up, inter, h, normed_batch.data(), up_batch.data(),
+                  batch);
+    for (size_t i = 0; i < batch; ++i) {
+      float* gate = gate_batch.data() + i * inter;
+      const float* up = up_batch.data() + i * inter;
+      if (cfg.gelu_ffn)
+        geglu_inplace(gate, up, gate, inter);
+      else
+        swiglu_inplace(gate, up, gate, inter);
+    }
+    d_gemm_weight(layer.ffn_down, h, inter, gate_batch.data(), ffn_batch.data(),
+                  batch);
+    add_repeating_bias_batched(ffn_batch.data(), layer.ffn_down_bias, h, batch);
+
+    if (cfg.sandwich_norm && !layer.post_ffn_norm.empty()) {
+      for (size_t i = 0; i < batch; ++i) {
+        rms_norm(ffn_batch.data() + i * h, ffn_batch.data() + i * h,
+                 layer.post_ffn_norm.data(), h, eps, plus_one);
+      }
+    }
+
+    for (size_t i = 0; i < batch; ++i) {
+      float* x = x_batch.data() + i * h;
+      const float* f = ffn_batch.data() + i * h;
+      for (size_t d = 0; d < h; ++d) x[d] += f[d];
+    }
+  }
+
+  std::memcpy(x_.data(), x_batch.data() + (batch - 1) * h, h * sizeof(float));
+  if (!need_logits) return Logits{};
+  return final_head();
+}
+
 #ifdef OXIDIZE_CUDA
 // Build a CudaBackend::ModelView referencing this model's (host) weights for the
 // GPU-resident decode. Pointers are borrowed; the backend caches device copies.
@@ -735,6 +945,12 @@ CudaBackend::ModelView LlamaModel::build_cuda_view() const {
   }
   return mv;
 }
+
+void LlamaModel::resident_sync_kv_to_gpu(size_t seq_len) {
+  CudaBackend::instance().resident_sync_kv(
+      kv_keys_.data(), kv_values_.data(), config_.layer_count,
+      config_.context_size, kv_token_size_, seq_len);
+}
 #endif
 
 Logits LlamaModel::forward_single(Token token, size_t pos, bool need_logits) {
@@ -769,11 +985,22 @@ Logits LlamaModel::forward(const std::vector<Token>& tokens, Session& session) {
   }
   size_t start_pos = session.consumed_tokens();
   Logits logits;
-  for (size_t i = 0; i < tokens.size(); ++i) {
-    size_t pos = start_pos + i;
-    bool need = (i + 1 == tokens.size());
-    Logits step = forward_single(tokens[i], pos, need);
-    if (need) logits = std::move(step);
+
+  if (!any_moe_ && tokens.size() > 1) {
+    logits = forward_batched(tokens, start_pos, true);
+#ifdef OXIDIZE_CUDA
+    if (use_cuda_) {
+      resident_sync_kv_to_gpu(start_pos + tokens.size());
+      CudaBackend::instance().resident_setup(build_cuda_view());
+    }
+#endif
+  } else {
+    for (size_t i = 0; i < tokens.size(); ++i) {
+      size_t pos = start_pos + i;
+      bool need = (i + 1 == tokens.size());
+      Logits step = forward_single(tokens[i], pos, need);
+      if (need) logits = std::move(step);
+    }
   }
   session.record_tokens(tokens.size());
   return logits;

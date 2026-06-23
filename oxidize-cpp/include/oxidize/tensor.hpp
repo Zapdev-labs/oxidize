@@ -56,6 +56,13 @@ void matvec(float* y, const float* W, const float* x, size_t rows, size_t cols);
 void gemv_quantized(float* y, QuantType quant, const uint8_t* W, size_t rows,
                     size_t cols, const float* x);
 
+// Batched GEMM: outputs[b*rows + r] = dot(W[r,:], inputs[b*cols + :]) for
+// b in [0,batch). W is row-major [rows x cols]; inputs/outputs are
+// row-major [batch x cols] / [batch x rows]. For quantized W each weight row is
+// decoded once and dotted against every batch position (llama.cpp-style prefill).
+void gemm_quantized(float* outputs, QuantType quant, const uint8_t* W,
+                    size_t rows, size_t cols, const float* inputs, size_t batch);
+
 // Single decode-step attention over a KV cache (causal, GQA-aware).
 //   q          : [num_heads * head_dim] query for the current position
 //   k_cache    : [seq_len * kv_heads * head_dim] keys   (row per position)
