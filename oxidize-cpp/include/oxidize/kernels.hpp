@@ -22,6 +22,7 @@ namespace kernels {
 constexpr size_t QK_K = 256;                  // values per super-block
 constexpr size_t BLOCK_Q4_K_SIZE = 144;       // f16 d + f16 dmin + 12 scales + 128 nibbles
 constexpr size_t BLOCK_Q8_K_BYTES = 4 + 256 + 32;  // f32 d + 256 int8 + 16 i16 bsums
+constexpr size_t BLOCK_Q6_K_SIZE = 210;       // 128 ql + 64 qh + 16 scales + f16 d
 
 // --- ISA detection (oxidize-kernels/src/lib.rs + cpu.rs) -------------------
 bool avx2_available();        // AVX2 + FMA
@@ -36,6 +37,10 @@ void quantize_q8_k_into(const float* vector, size_t n_blocks, uint8_t* out);
 // --- Q4_K x Q8_K dot (oxidize-kernels/src/q4k_scalar.rs) -------------------
 // Dot one Q4_K row (blocks_per_row blocks) against a Q8_K vector.
 float q4k_q8k_row_dot(const uint8_t* row, size_t blocks_per_row,
+                      const uint8_t* q8k);
+
+// Dot one Q6_K row against a Q8_K vector (matches dequant_q6_k).
+float q6k_q8k_row_dot(const uint8_t* row, size_t blocks_per_row,
                       const uint8_t* q8k);
 
 // Dot `n_rows` contiguous Q4_K rows against one Q8_K vector into `out`.

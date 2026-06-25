@@ -2,3 +2,5 @@ build/
 **/__pycache__/
 *.pyc
 compile_commands.json
+build-asan/
+build-dbg/

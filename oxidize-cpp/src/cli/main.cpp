@@ -41,7 +41,7 @@
 #include "oxidize/sampler.hpp"
 #include "oxidize/tokenizer.hpp"
 
-#ifdef OXIDIZE_CUDA
+#ifdef OXIDIZE_GPU
 #include "oxidize/cuda_backend.hpp"
 #endif
 
@@ -73,7 +73,8 @@ struct Args {
   bool no_bos = false;
   bool stream = false;
   std::string quantize;  // "q8_0" => on-the-fly F16/BF16->Q8_0 at load
-  std::string numa_mode;  // "" = default (single), "single","interleave","all","replicate",<N>
+  std::string numa_mode;
+  std::string lm_head_path;  // "" = default (single), "single","interleave","all","replicate",<N>
   int threads = 0;        // 0 = auto
 };
 
@@ -85,7 +86,8 @@ struct Args {
       "  --prompt <str>        Prompt text (default \"Hello\")\n"
       "  --tokens \"1,2,3\"      Pre-tokenized prefill ids (overrides --prompt)\n"
       "  --max-tokens <n>      Decode steps (default 64)\n"
-      "  --cuda                Request the CUDA device\n"
+      "  --cuda                Request the GPU (CUDA when built with -DOXIDIZE_CUDA=ON)\n"
+      "  --hip, --rocm, --gpu  Alias for --cuda (ROCm when built with -DOXIDIZE_ROCM=ON)\n"
       "  --seed <n>            RNG seed (default 0)\n"
       "  --temperature <f>     Sampling temperature (<=0 = greedy; default 0)\n"
       "  --top-k <n>           Top-k filter (0 = disabled)\n"
@@ -97,7 +99,7 @@ struct Args {
       "  --no-bos              Do not prepend the BOS token\n"
       "  --stream              Stream decoded text to stdout as it generates\n"
       "  --quantize q8_0       Quantize F16/BF16 weights to Q8_0 at load (~1.3x, near-lossless)\n"
-      "  --numa <mode>         NUMA binding: single|interleave|all|replicate|<node-id> (default: single)\n"
+      "  --numa <mode>         NUMA binding: single|interleave|all|replicate|split|<node-id> (default: single)\n"
       "  --threads <n>         OpenMP thread count (0 = auto based on NUMA node physical cores)\n"
       "  --json                Emit timing JSON\n",
       prog);
@@ -149,7 +151,8 @@ Args parse_args(int argc, char** argv) {
         std::fprintf(stderr, "error: invalid --max-tokens '%s'\n", v.c_str());
         usage_and_exit(argv[0], 2);
       }
-    } else if (arg == "--cuda") {
+    } else if (arg == "--cuda" || arg == "--hip" || arg == "--rocm" ||
+               arg == "--gpu") {
       a.cuda = true;
     } else if (arg == "--seed") {
       std::string v = take_value(argc, argv, i, "--seed");
@@ -189,6 +192,8 @@ Args parse_args(int argc, char** argv) {
       a.cuda_graph = false;
     } else if (arg == "--numa") {
       a.numa_mode = take_value(argc, argv, i, "--numa");
+    } else if (arg == "--lm-head") {
+      a.lm_head_path = take_value(argc, argv, i, "--lm-head");
     } else if (arg == "--threads") {
       std::string v = take_value(argc, argv, i, "--threads");
       size_t n = 0;
@@ -286,10 +291,10 @@ int main(int argc, char** argv) {
 
   try {
     if (args.cuda) {
-#ifndef OXIDIZE_CUDA
+#ifndef OXIDIZE_GPU
       std::fprintf(stderr,
-                   "warning: --cuda requested but binary built without CUDA; "
-                   "falling back to CPU\n");
+                   "warning: GPU requested (--cuda/--hip) but binary built "
+                   "without GPU support; falling back to CPU\n");
       args.cuda = false;
 #endif
     }
@@ -305,23 +310,34 @@ int main(int argc, char** argv) {
     std::unique_ptr<Model> model =
         oxidize::load_llama_gguf(args.model, args.cuda, qto);
     auto t_load1 = std::chrono::steady_clock::now();
+    if (auto* lm_numa = dynamic_cast<LlamaModel*>(model.get())) {
+      if (!args.lm_head_path.empty())
+        lm_numa->load_external_lm_head(args.lm_head_path);
+      lm_numa->numa_place_weights();
+    }
 
     // Report the device actually in use: --cuda falls back to CPU when no
     // device is present, so query the model rather than trusting the request.
     bool cuda_active = false;
     auto* lm = dynamic_cast<LlamaModel*>(model.get());
     if (args.cuda && lm) cuda_active = lm->cuda_enabled();
-#ifdef OXIDIZE_CUDA
+#ifdef OXIDIZE_GPU
     if (cuda_active) {
       CudaBackend::instance().set_cuda_graph(args.cuda_graph);
     }
 #endif
     if (args.cuda && !cuda_active) {
       std::fprintf(stderr,
-                   "warning: --cuda requested but no CUDA device active; "
+                   "warning: GPU requested but no device active; "
                    "running on CPU\n");
     }
+#if defined(OXIDIZE_HIP)
+    const char* device = cuda_active ? "hip" : "cpu";
+#elif defined(OXIDIZE_CUDA)
     const char* device = cuda_active ? "cuda" : "cpu";
+#else
+    const char* device = "cpu";
+#endif
 
     const size_t vocab = model->vocab_size();
     const size_t ctx = model->context_size();
@@ -425,7 +441,7 @@ int main(int argc, char** argv) {
 
     auto pick = [&](const Logits& l) -> Token {
       if (greedy) {
-#ifdef OXIDIZE_CUDA
+#ifdef OXIDIZE_GPU
         if (cuda_active) {
           return static_cast<Token>(
               CudaBackend::instance().argmax(l.data(), l.size()));

@@ -46,6 +46,13 @@ void apply_rope(float* vec, size_t head_dim, size_t num_heads, size_t pos,
 void apply_rope_norm(float* vec, size_t head_dim, size_t num_heads, size_t pos,
                      float theta, size_t rope_dim);
 
+// YaRN-scaled adjacent-pair RoPE over the first n_rot dims of `vec` (DeepSeek-V2/V3
+// / Kimi MLA rope part). freq_scale = 1/factor. Frequency interpolation only; the
+// YaRN mscale attention factor is folded into kq_scale by the caller.
+void apply_rope_yarn_norm(float* vec, size_t n_rot, size_t pos, float base,
+                          float freq_scale, float beta_fast, float beta_slow,
+                          size_t n_ctx_orig);
+
 // out[i] = silu(gate[i]) * up[i],  silu(x) = x * sigmoid(x).
 // May write in place (out == gate is allowed). Length n each.
 void swiglu_inplace(float* gate, const float* up, float* out, size_t n);

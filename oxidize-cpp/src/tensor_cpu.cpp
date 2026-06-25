@@ -16,12 +16,14 @@
 #include "oxidize/tensor.hpp"
 
 #include <cmath>
+#include <cstdlib>
 #include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 #include "oxidize/quant.hpp"
+#include "oxidize/kernels.hpp"
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -529,6 +531,38 @@ void apply_rope_norm(float* vec, size_t head_dim, size_t num_heads, size_t pos,
   }
 }
 
+void apply_rope_yarn_norm(float* vec, size_t n_rot, size_t pos, float base,
+                          float freq_scale, float beta_fast, float beta_slow,
+                          size_t n_ctx_orig) {
+  if (pos == 0) return;  // matches apply_rope_norm: identity at position 0
+  const float pi2 = 6.283185307179586f;
+  auto corr = [&](float nr) {
+    return static_cast<float>(n_rot) *
+           std::log(static_cast<float>(n_ctx_orig) / (nr * pi2)) /
+           (2.0f * std::log(base));
+  };
+  float low = std::floor(corr(beta_fast));
+  float high = std::ceil(corr(beta_slow));
+  if (low < 0.0f) low = 0.0f;
+  if (high > static_cast<float>(n_rot) - 1.0f) high = static_cast<float>(n_rot) - 1.0f;
+  const float denom = std::max(0.001f, high - low);
+  for (size_t i = 0; i + 1 < n_rot; i += 2) {
+    const float theta_extrap =
+        std::pow(base, -static_cast<float>(i) / static_cast<float>(n_rot)) *
+        static_cast<float>(pos);
+    const float theta_interp = freq_scale * theta_extrap;
+    float y = (static_cast<float>(i / 2) - low) / denom;
+    if (y < 0.0f) y = 0.0f;
+    if (y > 1.0f) y = 1.0f;
+    const float ramp_mix = 1.0f - y;  // ext_factor == 1
+    const float theta = theta_interp * (1.0f - ramp_mix) + theta_extrap * ramp_mix;
+    const float c = std::cos(theta), s = std::sin(theta);
+    const float x0 = vec[i], x1 = vec[i + 1];
+    vec[i] = x0 * c - x1 * s;
+    vec[i + 1] = x0 * s + x1 * c;
+  }
+}
+
 void swiglu_inplace(float* gate, const float* up, float* out, size_t n) {
   // silu(g) * up = g * sigmoid(g) * up (kernels.rs::apply_swiglu_inplace_f32
   // scalar path). out may alias gate.
@@ -585,6 +619,20 @@ void matvec(float* y, const float* W, const float* x, size_t rows,
 
 void gemv_quantized(float* y, QuantType quant, const uint8_t* W, size_t rows,
                     size_t cols, const float* x) {
+  static const bool no_fused = std::getenv("OXK_NO_FUSED") != nullptr;
+  if (no_fused) {
+    const size_t rb = quantized_size(quant, cols);
+#pragma omp parallel
+    {
+      std::vector<float> row(cols);
+#pragma omp for schedule(static)
+      for (long long r = 0; r < static_cast<long long>(rows); ++r) {
+        dequantize_row(quant, W + static_cast<size_t>(r) * rb, row.data(), cols);
+        y[r] = dot_f32(row.data(), x, cols);
+      }
+    }
+    return;
+  }
   // Fast path: native F16 weights. Fused F16C convert+FMA dot, no dequant pass.
   if (quant == QuantType::F16) {
 #pragma omp parallel for schedule(static)
@@ -612,6 +660,17 @@ void gemv_quantized(float* y, QuantType quant, const uint8_t* W, size_t rows,
   }
   if (is_q4_k(quant) && cols % QK_K == 0) {
     const size_t rb = (cols / QK_K) * BLOCK_Q4_K_SIZE;
+    if (kernels::avx512vnni_available()) {
+      // Quantize the activation to Q8_K once, then integer (VNNI) row dots.
+      const size_t nblk = cols / QK_K;
+      std::vector<uint8_t> q8(nblk * kernels::BLOCK_Q8_K_BYTES);
+      kernels::quantize_q8_k_into(x, nblk, q8.data());
+#pragma omp parallel for schedule(static)
+      for (long long r = 0; r < static_cast<long long>(rows); ++r)
+        y[r] = kernels::q4k_q8k_row_dot(W + static_cast<size_t>(r) * rb, nblk,
+                                        q8.data());
+      return;
+    }
 #pragma omp parallel for schedule(static)
     for (long long r = 0; r < static_cast<long long>(rows); ++r)
       y[r] = dot_q4_k(W + static_cast<size_t>(r) * rb, x, cols);
@@ -622,6 +681,19 @@ void gemv_quantized(float* y, QuantType quant, const uint8_t* W, size_t rows,
 #pragma omp parallel for schedule(static)
     for (long long r = 0; r < static_cast<long long>(rows); ++r)
       y[r] = dot_q8_0(W + static_cast<size_t>(r) * rb, x, cols);
+    return;
+  }
+
+  if (quant == QuantType::Q6_K && cols % QK_K == 0 &&
+      kernels::avx512vnni_available()) {
+    const size_t nblk = cols / QK_K;
+    const size_t rb = nblk * kernels::BLOCK_Q6_K_SIZE;
+    std::vector<uint8_t> q8(nblk * kernels::BLOCK_Q8_K_BYTES);
+    kernels::quantize_q8_k_into(x, nblk, q8.data());
+#pragma omp parallel for schedule(static)
+    for (long long r = 0; r < static_cast<long long>(rows); ++r)
+      y[r] = kernels::q6k_q8k_row_dot(W + static_cast<size_t>(r) * rb, nblk,
+                                      q8.data());
     return;
   }
 
@@ -702,6 +774,22 @@ void gemm_quantized(float* outputs, QuantType quant, const uint8_t* W,
     }
     return;
   }
+  if (is_q4_k(quant) && cols % QK_K == 0 && kernels::avx512vnni_available()) {
+    const size_t nblk = cols / QK_K;
+    const size_t rb = nblk * BLOCK_Q4_K_SIZE;
+    const size_t qstride = nblk * kernels::BLOCK_Q8_K_BYTES;
+    std::vector<uint8_t> q8(batch * qstride);
+    for (size_t b = 0; b < batch; ++b)
+      kernels::quantize_q8_k_into(inputs + b * cols, nblk, q8.data() + b * qstride);
+#pragma omp parallel for schedule(static)
+    for (long long r = 0; r < static_cast<long long>(rows); ++r) {
+      const uint8_t* row = W + static_cast<size_t>(r) * rb;
+      for (size_t b = 0; b < batch; ++b)
+        outputs[b * rows + static_cast<size_t>(r)] =
+            kernels::q4k_q8k_row_dot(row, nblk, q8.data() + b * qstride);
+    }
+    return;
+  }
   if (is_q4_k(quant) && cols % QK_K == 0) {
     const size_t blocks_per_row = cols / QK_K;
     const size_t rb = blocks_per_row * BLOCK_Q4_K_SIZE;
@@ -747,6 +835,24 @@ void gemm_quantized(float* outputs, QuantType quant, const uint8_t* W,
           }
         }
       }
+    }
+    return;
+  }
+
+  if (quant == QuantType::Q6_K && cols % QK_K == 0 &&
+      kernels::avx512vnni_available()) {
+    const size_t nblk = cols / QK_K;
+    const size_t rb = nblk * kernels::BLOCK_Q6_K_SIZE;
+    const size_t qstride = nblk * kernels::BLOCK_Q8_K_BYTES;
+    std::vector<uint8_t> q8(batch * qstride);
+    for (size_t b = 0; b < batch; ++b)
+      kernels::quantize_q8_k_into(inputs + b * cols, nblk, q8.data() + b * qstride);
+#pragma omp parallel for schedule(static)
+    for (long long r = 0; r < static_cast<long long>(rows); ++r) {
+      const uint8_t* rowp = W + static_cast<size_t>(r) * rb;
+      for (size_t b = 0; b < batch; ++b)
+        outputs[b * rows + static_cast<size_t>(r)] =
+            kernels::q6k_q8k_row_dot(rowp, nblk, q8.data() + b * qstride);
     }
     return;
   }

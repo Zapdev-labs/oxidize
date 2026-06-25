@@ -14,6 +14,7 @@
 #include "oxidize/numa_util.hpp"
 
 #include <cerrno>
+#include <cstdint>
 #include <cstring>
 #include <fstream>
 #include <sstream>
@@ -46,11 +47,15 @@
 #define OXIDIZE_MPOL_DEFAULT    0
 #define OXIDIZE_MPOL_BIND       2
 #define OXIDIZE_MPOL_INTERLEAVE 3
+#define OXIDIZE_MPOL_MF_MOVE 2
 
 // MPOL_F_STATIC_NODES (bit 15) — nodemask is literal node ids, not relative.
 // We don't need it; we always build a proper bitmask.
 
 namespace oxidize {
+
+static NumaTopo g_topo;
+const NumaTopo& numa_topo() { return g_topo; }
 
 // ---------------------------------------------------------------------------
 // Sysfs helpers
@@ -129,6 +134,8 @@ NumaConfig parse_numa_arg(const std::string& s) {
         cfg.mode = NumaMode::All;
     } else if (s == "replicate") {
         cfg.mode = NumaMode::Replicate;
+    } else if (s == "split") {
+        cfg.mode = NumaMode::Split;
     } else {
         // Numeric node id
         bool numeric = !s.empty() &&
@@ -193,6 +200,27 @@ static bool pin_thread_to_cpuset(const cpu_set_t& cpuset) {
 // Core init
 // ---------------------------------------------------------------------------
 
+void numa_bind_split(void* base, size_t total_bytes, size_t splitBytes,
+                     int nodeA, int nodeB) {
+  if (!base || total_bytes == 0) return;
+  const size_t PG = 4096;
+  size_t sb = splitBytes & ~(PG - 1);  // page-align the boundary down
+  auto bind = [&](void* a, size_t len, int node) {
+    if (len == 0) return;
+    auto mask = make_nodemask_single(node);
+    uintptr_t addr = reinterpret_cast<uintptr_t>(a);
+    uintptr_t start = addr & ~(PG - 1);
+    size_t pad = addr - start;
+    syscall(__NR_mbind, reinterpret_cast<void*>(start), len + pad,
+            OXIDIZE_MPOL_BIND, mask.data(),
+            static_cast<unsigned long>(mask.size() * sizeof(unsigned long) * 8),
+            OXIDIZE_MPOL_MF_MOVE);
+  };
+  char* p = static_cast<char*>(base);
+  if (sb > 0) bind(p, sb, nodeA);
+  if (total_bytes > sb) bind(p + sb, total_bytes - sb, nodeB);
+}
+
 int init_numa(const NumaConfig& cfg, const std::vector<NumaNode>& nodes) {
     if (nodes.empty()) {
         // No sysfs NUMA info — skip binding, just set threads.
@@ -204,6 +232,36 @@ int init_numa(const NumaConfig& cfg, const std::vector<NumaNode>& nodes) {
 #else
         return 1;
 #endif
+    }
+
+    // ---- Split mode: half the physical cores per node, first-touch (no
+    // mempolicy). Weights are mbind-placed per node by numa_bind_split. ----
+    if (cfg.mode == NumaMode::Split && nodes.size() >= 2) {
+        int per = cfg.threads > 0 ? cfg.threads / 2
+                                  : static_cast<int>(nodes[0].cpus.size() / 2);
+        if (per < 1) per = 1;
+        std::vector<int> tcpus;
+        for (int i = 0; i < per && i < static_cast<int>(nodes[0].cpus.size()); ++i)
+            tcpus.push_back(nodes[0].cpus[static_cast<size_t>(i)]);
+        for (int i = 0; i < per && i < static_cast<int>(nodes[1].cpus.size()); ++i)
+            tcpus.push_back(nodes[1].cpus[static_cast<size_t>(i)]);
+        int nthr = static_cast<int>(tcpus.size());
+#ifdef _OPENMP
+        omp_set_num_threads(nthr);
+        #pragma omp parallel num_threads(nthr)
+        {
+            int tid = omp_get_thread_num();
+            if (tid < static_cast<int>(tcpus.size())) {
+                cpu_set_t cs; CPU_ZERO(&cs); CPU_SET(tcpus[static_cast<size_t>(tid)], &cs);
+                pin_thread_to_cpuset(cs);
+            }
+        }
+#endif
+        g_topo.split_active = true;
+        g_topo.nodeA = nodes[0].id;
+        g_topo.nodeB = nodes[1].id;
+        g_topo.threads = nthr;
+        return nthr;
     }
 
     // ---- Determine which node(s) to bind ----

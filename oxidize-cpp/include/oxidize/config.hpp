@@ -84,6 +84,13 @@ struct InferenceConfig {
   size_t num_shared_experts = 0; // shared (always-on) experts (expert_shared_count)
   bool   expert_weights_norm = false;  // normalize routed top-k expert weights
 
+  // YaRN rope scaling (DeepSeek-V2/V3 / Kimi). factor==0 => no YaRN.
+  float  rope_yarn_factor = 0.0f;      // rope.scaling.factor (e.g. 64)
+  size_t rope_yarn_orig_ctx = 0;       // rope.scaling.original_context_length
+  float  rope_yarn_beta_fast = 32.0f;  // rope.scaling.yarn_beta_fast
+  float  rope_yarn_beta_slow = 1.0f;   // rope.scaling.yarn_beta_slow
+  float  rope_yarn_log_mul = 0.0f;     // rope.scaling.yarn_log_multiplier
+
   size_t head_dim() const {
     return key_value_head_dim != 0 ? key_value_head_dim
                                    : (num_attention_heads ? hidden_size / num_attention_heads : 0);

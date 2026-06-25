@@ -950,16 +950,26 @@ InferenceConfig build_inference_config(const GgufModel& model) {
   // the cached width (576) and expose the MLA key/val dims (256) separately via
   // mla_key_dim / mla_val_dim below.
   if (uses_mla && !is_glm_dsa) {
-    std::optional<size_t> mla_k;
-    if (auto u = arch_u32("attention.key_length_mla")) mla_k = static_cast<size_t>(*u);
-    if (!mla_k) {
-      auto d = first_layer_tensor_dims(meta, "attn_q_b.weight");
-      if (d && d->size() >= 2) {
-        size_t denom = std::max<size_t>(num_attention_heads, 1);
-        mla_k = static_cast<size_t>((*d)[1]) / denom;
+    // Compressed-latent caching (DeepSeek-V2/V3 absorbed MLA, same scheme as
+    // glm-dsa): key_length == kv_lora_rank + rope_dim. The forward caches the
+    // full latent row (kv_heads=1), so key_value_head_dim must stay at that width;
+    // only the naive per-head-key variant shrinks it to the MLA key.
+    size_t kvr_ = static_cast<size_t>(arch_u32("attention.kv_lora_rank").value_or(0));
+    size_t rdim_ = static_cast<size_t>(arch_u32("rope.dimension_count").value_or(0));
+    bool latent_caching =
+        kvr_ > 0 && rdim_ > 0 && key_value_head_dim == kvr_ + rdim_;
+    if (!latent_caching) {
+      std::optional<size_t> mla_k;
+      if (auto u = arch_u32("attention.key_length_mla")) mla_k = static_cast<size_t>(*u);
+      if (!mla_k) {
+        auto d = first_layer_tensor_dims(meta, "attn_q_b.weight");
+        if (d && d->size() >= 2) {
+          size_t denom = std::max<size_t>(num_attention_heads, 1);
+          mla_k = static_cast<size_t>((*d)[1]) / denom;
+        }
       }
+      if (mla_k && *mla_k > 0) key_value_head_dim = *mla_k;
     }
-    if (mla_k && *mla_k > 0) key_value_head_dim = *mla_k;
   }
 
   float rms_norm_eps = arch_f32("attention.layer_norm_rms_epsilon").value_or(1e-5f);
@@ -1069,6 +1079,16 @@ InferenceConfig build_inference_config(const GgufModel& model) {
     expert_weights_norm = v ? (*v != 0) : false;
   }
 
+  // YaRN rope scaling (DeepSeek-V2/V3 / Kimi). Detect by presence of yarn keys.
+  bool is_yarn = arch_f32("rope.scaling.yarn_beta_fast").has_value() ||
+                 arch_f32("rope.scaling.yarn_log_multiplier").has_value();
+  float rope_yarn_factor = is_yarn ? arch_f32("rope.scaling.factor").value_or(0.0f) : 0.0f;
+  size_t rope_yarn_orig_ctx =
+      static_cast<size_t>(arch_u32("rope.scaling.original_context_length").value_or(0));
+  float rope_yarn_beta_fast = arch_f32("rope.scaling.yarn_beta_fast").value_or(32.0f);
+  float rope_yarn_beta_slow = arch_f32("rope.scaling.yarn_beta_slow").value_or(1.0f);
+  float rope_yarn_log_mul = arch_f32("rope.scaling.yarn_log_multiplier").value_or(0.0f);
+
   // rope_dim (partial RoPE).
   size_t rope_dim = static_cast<size_t>(arch_u32("rope.dimension_count").value_or(0));
   if (rope_dim == 0 && is_qwen35_family(arch) && key_value_head_dim > 0) {
@@ -1124,6 +1144,11 @@ InferenceConfig build_inference_config(const GgufModel& model) {
   cfg.leading_dense_layers = leading_dense_layers;
   cfg.expert_gating_sigmoid = expert_gating_sigmoid;
   cfg.rope_dim = rope_dim;
+  cfg.rope_yarn_factor = rope_yarn_factor;
+  cfg.rope_yarn_orig_ctx = rope_yarn_orig_ctx;
+  cfg.rope_yarn_beta_fast = rope_yarn_beta_fast;
+  cfg.rope_yarn_beta_slow = rope_yarn_beta_slow;
+  cfg.rope_yarn_log_mul = rope_yarn_log_mul;
   cfg.rope_theta_swa = rope_theta_swa;
   cfg.sliding_window_pattern = sliding_window_pattern;
   cfg.embedding_scale = embedding_scale;

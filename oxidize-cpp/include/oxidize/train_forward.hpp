@@ -95,6 +95,7 @@ class TrainModel {
   size_t activation_bytes() const;
 
   const InferenceConfig& config() const { return base_->config(); }
+  const std::vector<std::vector<LoraAdapter>>& lora_adapters() const { return lora_adapters_; }
 
  private:
   const LlamaModel* base_;

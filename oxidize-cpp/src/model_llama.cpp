@@ -12,6 +12,8 @@
 // Gemma GeGLU + embedding scale, tied embeddings, uniform sliding window).
 
 #include "oxidize/model_llama.hpp"
+#include "oxidize/numa_util.hpp"
+#include <fstream>
 
 #include <algorithm>
 #include <cmath>
@@ -48,7 +50,7 @@ static void dbg_topk(const char* label, const float* v, size_t n, size_t k = 5) 
 
 #include "oxidize/tensor.hpp"
 
-#ifdef OXIDIZE_CUDA
+#ifdef OXIDIZE_GPU
 #include "oxidize/cuda_backend.hpp"
 #endif
 
@@ -165,7 +167,7 @@ void add_repeating_bias_batched(float* y, const std::vector<float>& bias,
 // GPU, activation vectors transferred per op) or the CPU tensor.hpp kernels.
 
 bool LlamaModel::set_cuda(bool on) {
-#ifdef OXIDIZE_CUDA
+#ifdef OXIDIZE_GPU
   use_cuda_ = on && CudaBackend::available();
 #else
   (void)on;
@@ -176,7 +178,7 @@ bool LlamaModel::set_cuda(bool on) {
 
 void LlamaModel::d_rms_norm(float* out, const float* x, const float* w, size_t n,
                             float eps, bool plus_one) {
-#ifdef OXIDIZE_CUDA
+#ifdef OXIDIZE_GPU
   if (use_cuda_) {
     CudaBackend::instance().rms_norm(out, x, w, n, eps, plus_one);
     return;
@@ -187,7 +189,7 @@ void LlamaModel::d_rms_norm(float* out, const float* x, const float* w, size_t n
 
 void LlamaModel::d_apply_rope(float* vec, size_t head_dim, size_t num_heads,
                               size_t pos, float theta, size_t rope_dim) {
-#ifdef OXIDIZE_CUDA
+#ifdef OXIDIZE_GPU
   if (use_cuda_) {
     CudaBackend::instance().apply_rope(vec, head_dim, num_heads, pos, theta,
                                        rope_dim);
@@ -198,7 +200,7 @@ void LlamaModel::d_apply_rope(float* vec, size_t head_dim, size_t num_heads,
 }
 
 void LlamaModel::d_swiglu(float* gate, const float* up, float* out, size_t n) {
-#ifdef OXIDIZE_CUDA
+#ifdef OXIDIZE_GPU
   if (use_cuda_) {
     CudaBackend::instance().swiglu_inplace(gate, up, out, n);
     return;
@@ -208,7 +210,7 @@ void LlamaModel::d_swiglu(float* gate, const float* up, float* out, size_t n) {
 }
 
 void LlamaModel::d_geglu(float* gate, const float* up, float* out, size_t n) {
-#ifdef OXIDIZE_CUDA
+#ifdef OXIDIZE_GPU
   if (use_cuda_) {
     CudaBackend::instance().geglu_inplace(gate, up, out, n);
     return;
@@ -221,7 +223,7 @@ void LlamaModel::d_attention(float* out, const float* q, const float* k_cache,
                              const float* v_cache, size_t seq_len,
                              size_t num_heads, size_t kv_heads,
                              size_t head_dim) {
-#ifdef OXIDIZE_CUDA
+#ifdef OXIDIZE_GPU
   if (use_cuda_) {
     CudaBackend::instance().attention_decode(out, q, k_cache, v_cache, seq_len,
                                              num_heads, kv_heads, head_dim);
@@ -234,7 +236,7 @@ void LlamaModel::d_attention(float* out, const float* q, const float* k_cache,
 
 void LlamaModel::d_gemv_weight(const LlamaWeight& w, size_t rows, size_t cols,
                                const float* x, float* y) {
-#ifdef OXIDIZE_CUDA
+#ifdef OXIDIZE_GPU
   if (use_cuda_) {
     if (w.quantized) {
       CudaBackend::instance().gemv_quantized(y, w.quant, w.qbytes(), rows, cols, x);
@@ -255,12 +257,13 @@ void LlamaModel::d_gemm_weight(const LlamaWeight& w, size_t rows, size_t cols,
 
 void LlamaModel::reject_unsupported(const InferenceConfig& cfg) {
   switch (cfg.architecture) {
-    case Architecture::DeepSeek:  // MLA compressed attention (unsupported)
+    // DeepSeek-V2/V3 (incl. Kimi K2 deepseek2) absorbed MLA IS supported via
+    // mla_attention() when the GGUF caches the compressed latent.
     case Architecture::MiniMax:   // lightning attention
     case Architecture::Lfm2:      // short-conv token mixing
     case Architecture::Lfm2Moe:
       throw std::runtime_error(
-          "LlamaModel: MLA / lightning-attn / shortconv architecture is unsupported");
+          "LlamaModel: lightning-attn / shortconv architecture is unsupported");
     default:
       break;
   }
@@ -388,6 +391,23 @@ LlamaModel::LlamaModel(GgufModel gguf, QuantType quantize_to)
   if (g.has_tensor("output.weight")) {
     output_weight_ = load_weight(g, "output.weight", /*keep_quantized=*/true);
     output_tied_ = false;
+    // Guard against a corrupt/zeroed lm_head (seen in some pruned GGUF
+    // conversions): dequantize row 0; if entirely zero, fall back to tied
+    // token_embd so the model still produces tokens.
+    if (output_weight_.quantized && !output_weight_.empty() &&
+        output_weight_.cols > 0) {
+      std::vector<float> probe(output_weight_.cols, 0.0f);
+      dequantize_row(output_weight_.quant, output_weight_.qbytes(), probe.data(),
+                     output_weight_.cols);
+      float m = 0.0f;
+      for (float v : probe) m = std::max(m, std::fabs(v));
+      if (m == 0.0f) {
+        std::fprintf(stderr,
+                     "warning: output.weight (lm_head) is all-zero in this GGUF; "
+                     "falling back to tied token_embd\n");
+        output_tied_ = true;
+      }
+    }
   } else {
     output_tied_ = true;  // reuse tok_embeddings_ as lm_head
   }
@@ -655,7 +675,23 @@ void LlamaModel::mla_attention(const LlamaLayer& layer, size_t l, size_t pos,
   const size_t latent_row = kv_rank + n_rot;            // 576 (cache row)
   const float theta = cfg.rope_theta;                   // 8e6
   const float eps = cfg.rms_norm_eps;
-  const float kq_scale = 1.0f / std::sqrt(static_cast<float>(mla_key));  // 1/16
+  // YaRN: frequency interpolation on the rope part + mscale^2 on the score scale
+  // (matches DeepSeek-V2/V3 reference: softmax_scale = head_dim^-0.5 * mscale^2).
+  const float yfac = cfg.rope_yarn_factor;
+  const bool use_yarn = yfac > 1.0f;
+  const float yfscale = use_yarn ? 1.0f / yfac : 1.0f;
+  float ymscale = 1.0f;
+  if (use_yarn && cfg.rope_yarn_log_mul > 0.0f)
+    ymscale = 1.0f + cfg.rope_yarn_log_mul * std::log(yfac);
+  auto rope_pe = [&](float* v) {
+    if (use_yarn)
+      apply_rope_yarn_norm(v, n_rot, pos, theta, yfscale, cfg.rope_yarn_beta_fast,
+                           cfg.rope_yarn_beta_slow, cfg.rope_yarn_orig_ctx);
+    else
+      apply_rope_norm(v, n_rot, 1, pos, theta, /*rope_dim=*/0);
+  };
+  const float kq_scale =
+      (1.0f / std::sqrt(static_cast<float>(mla_key))) * ymscale * ymscale;
   const size_t seq_len = pos + 1;
 
   // Per-head gemv on a 3D [n_heads, rows, cols] absorb tensor (k_b / v_b). Head h
@@ -700,7 +736,7 @@ void LlamaModel::mla_attention(const LlamaLayer& layer, size_t l, size_t pos,
   // split-half. apply_rope_norm rotates pairs (h[2i], h[2i+1]).
   for (size_t hd = 0; hd < n_heads; ++hd) {
     float* q_pe = q.data() + hd * mla_key + n_nope;
-    apply_rope_norm(q_pe, n_rot, 1, pos, theta, /*rope_dim=*/0);
+    rope_pe(q_pe);
   }
 
   // 3. KV: x -> kv_a_mqa(576). Split latent(512) + k_pe(64); norm latent; rope k_pe.
@@ -714,7 +750,7 @@ void LlamaModel::mla_attention(const LlamaLayer& layer, size_t l, size_t pos,
   rms_norm(cache_row.data(), kv.data(), layer.attn_kv_a_norm.data(), kv_rank, eps, false);
   // k_pe (the n_rot rope dims) is NOT normed; rope then store.
   for (size_t i = 0; i < n_rot; ++i) cache_row[kv_rank + i] = kv[kv_rank + i];
-  apply_rope_norm(cache_row.data() + kv_rank, n_rot, 1, pos, theta, /*rope_dim=*/0);
+  rope_pe(cache_row.data() + kv_rank);
   if (is_l0p0) {
     dbg_vec("cache_row (normed latent)", cache_row.data(), kv_rank);
     dbg_vec("cache_row (roped k_pe)", cache_row.data() + kv_rank, n_rot);
@@ -1003,8 +1039,16 @@ Logits LlamaModel::final_head() {
   dbg_vec("final normed", normed.data(), h);
 
   Logits logits(vocab, 0.0f);
-  const LlamaWeight& head = output_tied_ ? tok_embeddings_ : output_weight_;
+  const bool force_tie = std::getenv("OXIDIZE_TIE_HEAD") != nullptr;
+  const LlamaWeight& head = (output_tied_ || force_tie) ? tok_embeddings_ : output_weight_;
   d_gemv_weight(head, vocab, h, normed.data(), logits.data());
+  if (std::getenv("OXIDIZE_DEBUG")) {
+    size_t nz = 0; float mn = 1e30f, mx = -1e30f;
+    for (size_t i = 0; i < vocab; ++i) { if (logits[i] != 0.0f) ++nz; if(logits[i]<mn)mn=logits[i]; if(logits[i]>mx)mx=logits[i]; }
+    std::fprintf(stderr, "DBG head q=%d quant=%d rows=%zu cols=%zu empty=%d | logits nz=%zu min=%.4f max=%.4f | [0]=%.4f [100]=%.4f [50000]=%.4f [last]=%.4f\n",
+      (int)head.quantized, (int)head.quant, head.rows, head.cols, (int)head.empty(), nz, mn, mx,
+      logits[0], logits[100], logits[50000], logits[vocab-1]);
+  }
   dbg_topk("final logits", logits.data(), vocab, 10);
   return logits;
 }
@@ -1091,15 +1135,15 @@ Logits LlamaModel::forward_batched(const std::vector<Token>& tokens,
       apply_rope(q, head_dim, n_heads, pos, rope_theta, rope_dim);
       apply_rope(k, head_dim, kv_heads, pos, rope_theta, rope_dim);
 
-      size_t phys = pos % cfg.context_size;
-      size_t base = (l * cfg.context_size + phys) * kv_token_size_;
+      size_t phys = pos % kv_context_;
+      size_t base = (l * kv_context_ + phys) * kv_token_size_;
       for (size_t d = 0; d < kv_len; ++d) {
         kv_keys_[base + d] = k[d];
         kv_values_[base + d] = v[d];
       }
 
       size_t seq_len = pos + 1;
-      size_t layer_start = (l * cfg.context_size) * kv_token_size_;
+      size_t layer_start = (l * kv_context_) * kv_token_size_;
       size_t eff_seq_len = seq_len;
       const float* key_prefix = kv_keys_.data() + layer_start;
       const float* val_prefix = kv_values_.data() + layer_start;
@@ -1178,7 +1222,7 @@ Logits LlamaModel::forward_batched(const std::vector<Token>& tokens,
   return final_head();
 }
 
-#ifdef OXIDIZE_CUDA
+#ifdef OXIDIZE_GPU
 // Build a CudaBackend::ModelView referencing this model's (host) weights for the
 // GPU-resident decode. Pointers are borrowed; the backend caches device copies.
 // WIP / UNVERIFIED — see cuda_backend.hpp::resident_forward.
@@ -1252,7 +1296,7 @@ void LlamaModel::resident_sync_kv_to_gpu(size_t seq_len) {
 #endif
 
 Logits LlamaModel::forward_single(Token token, size_t pos, bool need_logits) {
-#ifdef OXIDIZE_CUDA
+#ifdef OXIDIZE_GPU
   if (use_cuda_ && !any_moe_) {
     // Resident GPU decode: one host<->device sync per token (vs ~290 in the
     // per-op path). embed_token dequantizes + scales the row on the host; the
@@ -1288,7 +1332,7 @@ Logits LlamaModel::forward(const std::vector<Token>& tokens, Session& session) {
 
   if (!any_moe_ && tokens.size() > 1) {
     logits = forward_batched(tokens, start_pos, true);
-#ifdef OXIDIZE_CUDA
+#ifdef OXIDIZE_GPU
     if (use_cuda_) {
       resident_sync_kv_to_gpu(start_pos + tokens.size());
       CudaBackend::instance().resident_setup(build_cuda_view());
@@ -1311,6 +1355,60 @@ void LlamaModel::rewind_to(size_t consumed_tokens) {
   // physical slot; the F32 cache requires no explicit truncation because reads
   // are bounded by seq_len = pos + 1. Nothing to do for the dense F32 cache.
   (void)consumed_tokens;
+}
+
+void LlamaModel::load_external_lm_head(const std::string& path) {
+  const size_t vocab = config_.vocab_size, h = config_.hidden_size;
+  const size_t n = vocab * h;
+  std::ifstream f(path, std::ios::binary);
+  if (!f) throw std::runtime_error("cannot open --lm-head file: " + path);
+  output_weight_.f32.assign(n, 0.0f);
+  f.read(reinterpret_cast<char*>(output_weight_.f32.data()),
+         static_cast<std::streamsize>(n * sizeof(float)));
+  if (static_cast<size_t>(f.gcount()) != n * sizeof(float))
+    throw std::runtime_error("--lm-head file size mismatch (expected " +
+                             std::to_string(n * sizeof(float)) + " bytes)");
+  output_weight_.owned.clear();
+  output_weight_.data = nullptr;
+  output_weight_.quantized = false;
+  output_weight_.quant = QuantType::F32;
+  output_weight_.rows = vocab;
+  output_weight_.cols = h;
+  output_tied_ = false;
+  std::fprintf(stderr, "oxidize: loaded external lm_head (%zu x %zu f32) from %s\n",
+               vocab, h, path.c_str());
+}
+
+void LlamaModel::numa_place_weights() {
+  const NumaTopo& t = numa_topo();
+  if (!t.split_active) return;
+  auto place = [&](LlamaWeight& w) {
+    if (w.rows < 2 || w.cols == 0) return;
+    const uint8_t* p;
+    size_t row_bytes;
+    if (w.quantized) {
+      p = w.qbytes();
+      row_bytes = quantized_size(w.quant, w.cols);
+    } else {
+      if (w.f32.empty()) return;
+      p = reinterpret_cast<const uint8_t*>(w.f32.data());
+      row_bytes = w.cols * sizeof(float);
+    }
+    if (!p) return;
+    size_t total = w.rows * row_bytes;
+    size_t split_bytes = (w.rows / 2) * row_bytes;
+    numa_bind_split(const_cast<uint8_t*>(p), total, split_bytes, t.nodeA, t.nodeB);
+  };
+  place(tok_embeddings_);
+  if (output_weight_.qbytes() != tok_embeddings_.qbytes()) place(output_weight_);
+  for (auto& L : layers_) {
+    place(L.attn_q); place(L.attn_k); place(L.attn_v); place(L.attn_output);
+    place(L.ffn_gate); place(L.ffn_up); place(L.ffn_down);
+    place(L.attn_q_a); place(L.attn_q_b); place(L.attn_kv_a_mqa);
+    place(L.ffn_gate_shexp); place(L.ffn_up_shexp); place(L.ffn_down_shexp);
+  }
+  std::fprintf(stderr, "oxidize: NUMA split placement applied (nodes %d/%d)\n",
+               t.nodeA, t.nodeB);
 }
 
 std::unique_ptr<Model> load_llama_gguf(const std::string& path, bool want_cuda,

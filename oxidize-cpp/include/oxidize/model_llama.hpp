@@ -32,7 +32,7 @@
 #include "oxidize/gguf.hpp"
 #include "oxidize/model.hpp"
 #include "oxidize/quant.hpp"
-#ifdef OXIDIZE_CUDA
+#ifdef OXIDIZE_GPU
 #include "oxidize/cuda_backend.hpp"
 #endif
 
@@ -172,7 +172,7 @@ class LlamaModel : public Model {
   void d_gemm_weight(const LlamaWeight& w, size_t rows, size_t cols,
                      const float* inputs, float* outputs, size_t batch);
 
-#ifdef OXIDIZE_CUDA
+#ifdef OXIDIZE_GPU
   void resident_sync_kv_to_gpu(size_t seq_len);
   // Build a device-resident decode view of this model's weights (WIP).
   CudaBackend::ModelView build_cuda_view() const;
@@ -203,6 +203,13 @@ class LlamaModel : public Model {
   InferenceConfig config_;
 
   LlamaWeight tok_embeddings_;
+ public:
+  // NUMA Split mode: mbind each weight's output-row halves onto the two nodes so
+  // the static-scheduled gemv reads node-local memory. No-op unless Split active.
+  void numa_place_weights();
+  // Override the lm_head with an external row-major f32 [vocab, hidden] file.
+  void load_external_lm_head(const std::string& path);
+ private:
   size_t tok_embeddings_cols_ = 0;
   std::vector<float> norm_weight_;
   LlamaWeight output_weight_;  // lm_head (may alias tok_embeddings_ when tied)

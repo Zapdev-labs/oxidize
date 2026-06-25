@@ -43,7 +43,26 @@ enum class NumaMode {
   /// allocate two copies).  Reported here for completeness; current CLI
   /// surfaces it as --numa replicate.
   Replicate,
+  /// Node-local row split: half the physical cores on each node, each weight's
+  /// output-row halves mbind'd to the matching node so every thread reads local
+  /// memory. Aggregates both memory controllers' bandwidth without doubling RAM.
+  Split,
 };
+
+/// Topology resolved by init_numa() (for Split-mode weight placement).
+struct NumaTopo {
+  bool split_active = false;
+  int nodeA = 0;
+  int nodeB = 1;
+  int threads = 0;
+};
+/// Topology resolved by the last init_numa() call.
+const NumaTopo& numa_topo();
+/// Bind [base, base+splitBytes) to nodeA and the remainder to nodeB (mbind,
+/// page-aligned, MPOL_MF_MOVE). No-op on failure. Used for Split-mode weights.
+void numa_bind_split(void* base, size_t total_bytes, size_t splitBytes,
+                     int nodeA, int nodeB);
+
 
 /// Per-node CPU info discovered from sysfs.
 struct NumaNode {

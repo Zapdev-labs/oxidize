@@ -61,7 +61,7 @@ static void usage(const char* prog) {
 
 int main(int argc, char** argv) {
   oxidize::TrainConfig cfg;
-  std::string model_path, data_path;
+  std::string model_path, data_path, save_lora_path;
   bool overfit = false;
 
   for (int i = 1; i < argc; ++i) {
@@ -76,6 +76,7 @@ int main(int argc, char** argv) {
     else if (arg("--mode"))       { std::string m = next(); cfg.mode = (m == "full") ? oxidize::TrainMode::FullFT : oxidize::TrainMode::LoRA; }
     else if (arg("--lr"))         { cfg.adamw.lr = std::stof(next()); }
     else if (arg("--steps"))      { cfg.max_steps = std::stoul(next()); }
+    else if (arg("--save-lora"))  { save_lora_path = next(); }
     else if (arg("--rank"))       { cfg.lora.rank = std::stoul(next()); }
     else if (arg("--alpha"))      { cfg.lora.alpha = std::stof(next()); }
     else if (arg("--seq-len"))    { cfg.seq_len = std::stoul(next()); }
@@ -243,6 +244,28 @@ int main(int argc, char** argv) {
 
   printf("\n[train] Done. Steps=%d  Final loss=%.4f  Time=%.1fs  Peak RSS=%.1f MB\n",
          opt_step, last_loss, elapsed, rss / 1e6);
+
+  if (!save_lora_path.empty() && cfg.mode == oxidize::TrainMode::LoRA) {
+    FILE* fo = std::fopen(save_lora_path.c_str(), "wb");
+    if (!fo) { fprintf(stderr, "save-lora: cannot open %s\n", save_lora_path.c_str()); return 1; }
+    const auto& AD = model.lora_adapters();
+    uint32_t magic = 0x4C4F5241u, L = (uint32_t)AD.size();
+    std::fwrite(&magic,4,1,fo); std::fwrite(&L,4,1,fo);
+    for (uint32_t l=0;l<L;++l){
+      uint32_t np=(uint32_t)AD[l].size(); std::fwrite(&np,4,1,fo);
+      for (uint32_t p=0;p<np;++p){
+        const auto& a=AD[l][p];
+        uint32_t rows=(uint32_t)a.rows, cols=(uint32_t)a.cols, rank=(uint32_t)a.rank;
+        float scaling=a.scaling;
+        std::fwrite(&p,4,1,fo); std::fwrite(&rows,4,1,fo); std::fwrite(&cols,4,1,fo);
+        std::fwrite(&rank,4,1,fo); std::fwrite(&scaling,4,1,fo);
+        std::fwrite(a.A.data(),4,a.A.size(),fo);
+        std::fwrite(a.B.data(),4,a.B.size(),fo);
+      }
+    }
+    std::fclose(fo);
+    printf("[train] Saved LoRA adapters -> %s\n", save_lora_path.c_str());
+  }
 
   return 0;
 }
