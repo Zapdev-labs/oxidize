@@ -488,8 +488,27 @@ LlamaModel::LlamaModel(GgufModel gguf, QuantType quantize_to)
     opt_w_keepq("attn_k_b.weight", layer.attn_k_b);
     opt_w_keepq("attn_v_b.weight", layer.attn_v_b);
 
-    // A layer must have either dense attn_q OR the MLA q/kv down-projections.
-    if (layer.attn_q.empty() && !layer.is_mla()) {
+    // Qwen3.5 / Qwen3-Next: recurrent (gated DeltaNet) layers carry ssm_* tensors
+    // instead of dense attn_q/k/v; full-attention layers use the dense tensors
+    // loaded above (attn_q here is the [query|gate] joint projection).
+    if (config_.architecture == Architecture::Qwen35) {
+      layer.is_recurrent = qwen35_is_recurrent(l);
+      if (layer.is_recurrent) {
+        layer.wqkv = load_weight(g, p + "attn_qkv.weight", /*keep_quantized=*/true);
+        layer.wqkv_gate = load_weight(g, p + "attn_gate.weight", /*keep_quantized=*/true);
+        layer.ssm_conv1d = load_vector(g, p + "ssm_conv1d.weight");
+        layer.ssm_dt_bias = load_vector(g, p + "ssm_dt.bias");
+        layer.ssm_a = load_vector(g, p + "ssm_a");
+        layer.ssm_alpha = load_weight(g, p + "ssm_alpha.weight", /*keep_quantized=*/true);
+        layer.ssm_beta = load_weight(g, p + "ssm_beta.weight", /*keep_quantized=*/true);
+        layer.ssm_norm = load_vector(g, p + "ssm_norm.weight");
+        layer.ssm_out = load_weight(g, p + "ssm_out.weight", /*keep_quantized=*/true);
+      }
+    }
+
+    // A layer must have either dense attn_q OR the MLA q/kv down-projections OR
+    // be a Qwen3.5 recurrent (DeltaNet) layer.
+    if (layer.attn_q.empty() && !layer.is_mla() && !layer.is_recurrent) {
       throw std::runtime_error("LlamaModel: layer " + std::to_string(l) +
                                " has no attn_q (non-dense-attention layer unsupported in Phase 1)");
     }
@@ -527,6 +546,23 @@ LlamaModel::LlamaModel(GgufModel gguf, QuantType quantize_to)
   }
   kv_keys_.assign(kv_elems, 0.0f);
   kv_values_.assign(kv_elems, 0.0f);
+
+  // Qwen3.5 DeltaNet persistent recurrent state (conv history + [Sd x Sd] per
+  // v-head matrix), allocated per recurrent layer.
+  if (config_.architecture == Architecture::Qwen35) {
+    ssm_conv_state_.resize(config_.layer_count);
+    ssm_rec_state_.resize(config_.layer_count);
+    const size_t conv_dim =
+        config_.ssm_n_group * config_.ssm_d_state * 2 + config_.ssm_d_inner;
+    const size_t Sd = config_.ssm_d_state;
+    for (size_t l = 0; l < config_.layer_count; ++l) {
+      if (layers_[l].is_recurrent) {
+        size_t hist = config_.ssm_d_conv > 0 ? config_.ssm_d_conv - 1 : 0;
+        ssm_conv_state_[l].assign(hist * conv_dim, 0.0f);
+        ssm_rec_state_[l].assign(config_.ssm_dt_rank * Sd * Sd, 0.0f);
+      }
+    }
+  }
 
   x_.assign(h, 0.0f);
 }
@@ -818,8 +854,216 @@ void LlamaModel::mla_attention(const LlamaLayer& layer, size_t l, size_t pos,
   if (is_l0p0) dbg_vec("attn_out (post o_proj)", attn_out, h);
 }
 
+bool LlamaModel::qwen35_is_recurrent(size_t l) const {
+  const size_t iv = config_.full_attention_interval;
+  if (iv == 0) return false;
+  // Full-attention every iv-th layer (1-indexed): (l+1)%iv==0 => full attention.
+  return ((l + 1) % iv) != 0;
+}
+
+// softplus(x) = log(1+e^x), numerically stable.
+static inline float oxk_softplus(float x) {
+  return x > 20.0f ? x : std::log1p(std::exp(x));
+}
+
+// Qwen3.5 / Qwen3-Next gated DeltaNet linear-attention layer (CPU AR recurrence).
+// Mirrors llama.cpp qwen35.cpp::build_layer_attn_linear + delta-net-base
+// build_delta_net_autoregressive, run one token at a time with persistent
+// conv + recurrent state. attn_norm -> wqkv/z -> causal conv1d(k=4)+silu ->
+// split q/k/v, L2-norm q/k, repeat k/q heads -> gated delta rule -> gated
+// RMSNorm(silu(z)) -> ssm_out.
+void LlamaModel::qwen35_deltanet(const LlamaLayer& layer, size_t l, size_t pos,
+                                 float* attn_out) {
+  const InferenceConfig& cfg = config_;
+  const size_t h = cfg.hidden_size;
+  const float eps = cfg.rms_norm_eps;
+  const bool plus_one = cfg.rms_norm_weight_plus_one;
+
+  const size_t Sd = cfg.ssm_d_state;       // 128 head_k_dim == head_v_dim
+  const size_t n_k = cfg.ssm_n_group;      // 16 key heads
+  const size_t n_v = cfg.ssm_dt_rank;      // 32 value heads
+  const size_t key_dim = Sd * n_k;         // 2048
+  const size_t val_dim = Sd * n_v;         // 4096 (== d_inner)
+  const size_t conv_dim = key_dim * 2 + val_dim;  // 8192
+  const size_t d_conv = cfg.ssm_d_conv;    // 4
+  const size_t hist = d_conv - 1;          // 3
+
+  // 0. pre-attention RMSNorm.
+  std::vector<float> normed(h);
+  d_rms_norm(normed.data(), x_.data(), layer.attn_norm.data(), h, eps, plus_one);
+
+  // 1. fused QKV projection (-> conv_dim) and z gate (-> val_dim).
+  std::vector<float> qkv(conv_dim), z(val_dim);
+  d_gemv_weight(layer.wqkv, conv_dim, h, normed.data(), qkv.data());
+  d_gemv_weight(layer.wqkv_gate, val_dim, h, normed.data(), z.data());
+
+  // 2. per-v-head beta = sigmoid(beta_proj); decay g = exp(ssm_a * softplus(alpha+dt)).
+  std::vector<float> beta_raw(n_v), alpha_raw(n_v), beta(n_v), gdecay(n_v);
+  d_gemv_weight(layer.ssm_beta, n_v, h, normed.data(), beta_raw.data());
+  d_gemv_weight(layer.ssm_alpha, n_v, h, normed.data(), alpha_raw.data());
+  for (size_t i = 0; i < n_v; ++i) {
+    beta[i] = 1.0f / (1.0f + std::exp(-beta_raw[i]));
+    float a_soft = oxk_softplus(alpha_raw[i] + layer.ssm_dt_bias[i]);
+    gdecay[i] = std::exp(layer.ssm_a[i] * a_soft);
+  }
+
+  // 3. causal depthwise conv1d (kernel d_conv) over the conv_dim channels using
+  //    the persistent history, then SiLU. conv operates on raw qkv (pre-silu).
+  std::vector<float>& cs = ssm_conv_state_[l];  // [hist * conv_dim], cs[tap*conv_dim + c]
+  std::vector<float> conv(conv_dim);
+  const float* w = layer.ssm_conv1d.data();     // [c*d_conv + k]
+  for (size_t c = 0; c < conv_dim; ++c) {
+    float acc = 0.0f;
+    for (size_t k = 0; k < hist; ++k) acc += w[c * d_conv + k] * cs[k * conv_dim + c];
+    acc += w[c * d_conv + hist] * qkv[c];
+    // SiLU
+    conv[c] = acc / (1.0f + std::exp(-acc)) * 1.0f;  // silu(acc)=acc*sigmoid(acc)
+    conv[c] = acc * (1.0f / (1.0f + std::exp(-acc)));
+    // advance history: shift left, append current raw qkv value.
+    for (size_t k = 0; k + 1 < hist; ++k) cs[k * conv_dim + c] = cs[(k + 1) * conv_dim + c];
+    if (hist > 0) cs[(hist - 1) * conv_dim + c] = qkv[c];
+  }
+
+  // 4. split conv output: q[n_k][Sd], k[n_k][Sd], v[n_v][Sd].
+  const float* qc = conv.data();
+  const float* kc = conv.data() + key_dim;
+  const float* vc = conv.data() + key_dim * 2;
+  // L2-normalize q,k per head (over Sd); scale q by 1/sqrt(Sd).
+  const float qscale = 1.0f / std::sqrt(static_cast<float>(Sd));
+  std::vector<float> qn(key_dim), kn(key_dim);
+  for (size_t head = 0; head < n_k; ++head) {
+    float sq = 0.0f, sk = 0.0f;
+    for (size_t i = 0; i < Sd; ++i) { sq += qc[head*Sd+i]*qc[head*Sd+i]; sk += kc[head*Sd+i]*kc[head*Sd+i]; }
+    float rq = 1.0f / std::sqrt(sq + eps), rk = 1.0f / std::sqrt(sk + eps);
+    for (size_t i = 0; i < Sd; ++i) { qn[head*Sd+i] = qc[head*Sd+i]*rq*qscale; kn[head*Sd+i] = kc[head*Sd+i]*rk; }
+  }
+
+  // 5. gated delta rule per v-head. State S[hv] is [Sd(i) x Sd(j)] row-major
+  //    flat = hv*Sd*Sd + i*Sd + j. k-head for v-head hv is (hv % n_k) (ggml tile).
+  std::vector<float>& S = ssm_rec_state_[l];
+  std::vector<float> out(val_dim);
+  std::vector<float> vpred(Sd), dvec(Sd);
+  for (size_t hv = 0; hv < n_v; ++hv) {
+    const size_t hk = hv % n_k;
+    const float* qh = qn.data() + hk * Sd;
+    const float* kh = kn.data() + hk * Sd;
+    const float* vh = vc + hv * Sd;
+    float* Sh = S.data() + hv * Sd * Sd;
+    const float g = gdecay[hv], bta = beta[hv];
+    // S *= g ; v_pred[i] = sum_j S[i][j]*k[j]
+    for (size_t i = 0; i < Sd; ++i) {
+      float* Si = Sh + i * Sd;
+      float vp = 0.0f;
+      for (size_t j = 0; j < Sd; ++j) { Si[j] *= g; vp += Si[j] * kh[j]; }
+      vpred[i] = vp;
+      dvec[i] = bta * (vh[i] - vp);
+    }
+    // S[i][j] += k[j]*d[i] ; o[i] = sum_j S[i][j]*q[j]
+    float* oh = out.data() + hv * Sd;
+    for (size_t i = 0; i < Sd; ++i) {
+      float* Si = Sh + i * Sd;
+      const float di = dvec[i];
+      float o = 0.0f;
+      for (size_t j = 0; j < Sd; ++j) { Si[j] += kh[j] * di; o += Si[j] * qh[j]; }
+      oh[i] = o;
+    }
+  }
+
+  // 6. gated RMSNorm per v-head: rmsnorm(o_head, ssm_norm) * silu(z_head).
+  std::vector<float> gated(val_dim);
+  std::vector<float> tmp(Sd);
+  for (size_t hv = 0; hv < n_v; ++hv) {
+    d_rms_norm(tmp.data(), out.data() + hv * Sd, layer.ssm_norm.data(), Sd, eps, plus_one);
+    const float* zh = z.data() + hv * Sd;
+    for (size_t i = 0; i < Sd; ++i) {
+      float zs = zh[i] * (1.0f / (1.0f + std::exp(-zh[i])));  // silu(z)
+      gated[hv * Sd + i] = tmp[i] * zs;
+    }
+  }
+
+  // 7. output projection: val_dim -> hidden.
+  d_gemv_weight(layer.ssm_out, h, val_dim, gated.data(), attn_out);
+}
+
+// Qwen3.5 gated full-attention layer. attn_q outputs interleaved [query(256),
+// gate(256)] per head; standard GQA + per-head q/k RMSNorm + partial RoPE;
+// attention output is multiplied by sigmoid(gate) before the output projection.
+void LlamaModel::qwen35_gated_attention(const LlamaLayer& layer, size_t l,
+                                        size_t pos, float* attn_out) {
+  const InferenceConfig& cfg = config_;
+  const size_t h = cfg.hidden_size;
+  const size_t n_heads = cfg.num_attention_heads;   // 16
+  const size_t kv_heads = cfg.num_key_value_heads;  // 4
+  const size_t hd = cfg.head_dim();                 // 256
+  const size_t n_rot = cfg.rope_dim;                // 64
+  const float eps = cfg.rms_norm_eps;
+  const bool plus_one = cfg.rms_norm_weight_plus_one;
+  const float theta = cfg.rope_theta;               // 1e7
+  const size_t q_len = n_heads * hd;                // 4096
+  const size_t kv_len = kv_heads * hd;              // 1024
+  const size_t seq_len = pos + 1;
+
+  std::vector<float> normed(h);
+  d_rms_norm(normed.data(), x_.data(), layer.attn_norm.data(), h, eps, plus_one);
+
+  // q projection emits [query, gate] interleaved per head (stride 2*hd).
+  std::vector<float> qg(n_heads * hd * 2);
+  d_gemv_weight(layer.attn_q, n_heads * hd * 2, h, normed.data(), qg.data());
+  std::vector<float> q(q_len), gate(q_len);
+  for (size_t head = 0; head < n_heads; ++head) {
+    const float* base = qg.data() + head * hd * 2;
+    for (size_t i = 0; i < hd; ++i) { q[head*hd+i] = base[i]; gate[head*hd+i] = base[hd+i]; }
+  }
+  std::vector<float> k(kv_len), v(kv_len);
+  d_gemv_weight(layer.attn_k, kv_len, h, normed.data(), k.data());
+  d_gemv_weight(layer.attn_v, kv_len, h, normed.data(), v.data());
+
+  // per-head q/k RMSNorm over head_dim.
+  std::vector<float> hs(hd);
+  if (!layer.attn_q_norm.empty()) {
+    for (size_t head = 0; head < n_heads; ++head) {
+      d_rms_norm(hs.data(), q.data()+head*hd, layer.attn_q_norm.data(), hd, eps, plus_one);
+      for (size_t i = 0; i < hd; ++i) q[head*hd+i] = hs[i];
+    }
+  }
+  if (!layer.attn_k_norm.empty()) {
+    for (size_t head = 0; head < kv_heads; ++head) {
+      d_rms_norm(hs.data(), k.data()+head*hd, layer.attn_k_norm.data(), hd, eps, plus_one);
+      for (size_t i = 0; i < hd; ++i) k[head*hd+i] = hs[i];
+    }
+  }
+
+  // partial RoPE (NeoX) on the first n_rot dims of each head. TODO: YaRN scaling
+  // for positions beyond the original context; ignored below the orig context.
+  d_apply_rope(q.data(), hd, n_heads, pos, theta, n_rot);
+  d_apply_rope(k.data(), hd, kv_heads, pos, theta, n_rot);
+
+  // append K/V to the layer-major cache.
+  size_t phys = pos % kv_context_;
+  size_t base = (l * kv_context_ + phys) * kv_token_size_;
+  for (size_t i = 0; i < kv_len; ++i) { kv_keys_[base+i] = k[i]; kv_values_[base+i] = v[i]; }
+
+  size_t layer_start = (l * kv_context_) * kv_token_size_;
+  std::vector<float> attn_result(q_len);
+  d_attention(attn_result.data(), q.data(), kv_keys_.data()+layer_start,
+              kv_values_.data()+layer_start, seq_len, n_heads, kv_heads, hd);
+
+  // gate the attention output: out *= sigmoid(gate).
+  for (size_t i = 0; i < q_len; ++i)
+    attn_result[i] *= 1.0f / (1.0f + std::exp(-gate[i]));
+
+  d_gemv_weight(layer.attn_output, h, q_len, attn_result.data(), attn_out);
+}
+
 void LlamaModel::run_layers(size_t pos) {
-  if (pos == 0) g_debug = (std::getenv("OXIDIZE_DEBUG") != nullptr);
+  if (pos == 0) {
+    g_debug = (std::getenv("OXIDIZE_DEBUG") != nullptr);
+    // Fresh sequence: reset Qwen3.5 DeltaNet conv + recurrent state.
+    if (config_.architecture == Architecture::Qwen35) {
+      for (auto& s : ssm_conv_state_) std::fill(s.begin(), s.end(), 0.0f);
+      for (auto& s : ssm_rec_state_) std::fill(s.begin(), s.end(), 0.0f);
+    }
+  }
   const InferenceConfig& cfg = config_;
   const size_t h = cfg.hidden_size;
   const size_t n_heads = cfg.num_attention_heads;
@@ -846,6 +1090,28 @@ void LlamaModel::run_layers(size_t pos) {
     const LlamaLayer& layer = layers_[l];
     const float rope_theta = layer_rope_theta(cfg, l);
     const size_t window = layer_sliding_window(cfg, l);
+
+    // Qwen3.5 / Qwen3-Next hybrid: gated DeltaNet (recurrent) or gated
+    // full-attention, then dense SwiGLU FFN gated by post_attention_norm (no
+    // separate ffn_norm). Block = x += attn(attn_norm(x)); x += ffn(post_norm(x)).
+    if (cfg.architecture == Architecture::Qwen35) {
+      if (layer.is_recurrent) {
+        qwen35_deltanet(layer, l, pos, attn_out.data());
+      } else {
+        qwen35_gated_attention(layer, l, pos, attn_out.data());
+      }
+      for (size_t i = 0; i < h; ++i) x_[i] += attn_out[i];
+
+      const std::vector<float>& fnw =
+          !layer.ffn_norm.empty() ? layer.ffn_norm : layer.post_attention_norm;
+      d_rms_norm(normed.data(), x_.data(), fnw.data(), h, eps, plus_one);
+      d_gemv_weight(layer.ffn_gate, inter, h, normed.data(), gate.data());
+      d_gemv_weight(layer.ffn_up, inter, h, normed.data(), up.data());
+      d_swiglu(gate.data(), up.data(), gate.data(), inter);
+      d_gemv_weight(layer.ffn_down, h, inter, gate.data(), ffn_out.data());
+      for (size_t i = 0; i < h; ++i) x_[i] += ffn_out[i];
+      continue;
+    }
 
     // MLA (GLM-5.2 glm-dsa / DeepSeek-V2) compressed-attention forward. Computes
     // the attention output into attn_out (RMSNorm + projections done inside),
@@ -1330,7 +1596,11 @@ Logits LlamaModel::forward(const std::vector<Token>& tokens, Session& session) {
   size_t start_pos = session.consumed_tokens();
   Logits logits;
 
-  if (!any_moe_ && tokens.size() > 1) {
+  // Qwen3.5 DeltaNet is a sequential recurrence: prefill must run token-by-token
+  // (forward_single advances the per-layer conv/recurrent state), so it cannot
+  // use the parallel batched path.
+  if (!any_moe_ && config_.architecture != Architecture::Qwen35 &&
+      tokens.size() > 1) {
     logits = forward_batched(tokens, start_pos, true);
 #ifdef OXIDIZE_GPU
     if (use_cuda_) {

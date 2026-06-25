@@ -423,9 +423,12 @@ Architecture architecture_from_name(const std::string& name) {
   if (a == "deepseek" || a == "deepseek2" || a == "deepseek_v2" ||
       a == "deepseek_v3" || a == "deepseek_moe")
     return Architecture::DeepSeek;
+  // Qwen3.5 / Qwen3-Next hybrid (gated DeltaNet + gated full-attn): dedicated
+  // path. MoE variants stay on the standard Qwen path for now.
+  if (a == "qwen35" || a == "qwen3_5" || a == "qwen3_5_text" || a == "qwen35_text")
+    return Architecture::Qwen35;
   if (a == "qwen" || a == "qwen2" || a == "qwen2moe" || a == "qwen3" ||
-      a == "qwen3moe" || a == "qwen35" || a == "qwen3_5" || a == "qwen3_5_text" ||
-      a == "qwen35_text" || a == "qwen3_5_moe" || a == "qwen3_5_moe_text" ||
+      a == "qwen3moe" || a == "qwen3_5_moe" || a == "qwen3_5_moe_text" ||
       a == "qwen35moe")
     return Architecture::Qwen;
   if (a == "gemma" || a == "gemma2" || a == "gemma3" || a == "gemma4")
@@ -1095,6 +1098,19 @@ InferenceConfig build_inference_config(const GgufModel& model) {
     rope_dim = key_value_head_dim / 4;
   }
 
+  // Qwen3.5 / Qwen3-Next hybrid (gated DeltaNet linear-attn) specifics.
+  size_t ssm_d_conv = 0, ssm_d_inner = 0, ssm_d_state = 0, ssm_dt_rank = 0,
+         ssm_n_group = 0, full_attention_interval = 0;
+  if (is_qwen35_family(arch)) {
+    ssm_d_conv = static_cast<size_t>(arch_u32("ssm.conv_kernel").value_or(4));
+    ssm_d_inner = static_cast<size_t>(arch_u32("ssm.inner_size").value_or(0));
+    ssm_d_state = static_cast<size_t>(arch_u32("ssm.state_size").value_or(0));
+    ssm_dt_rank = static_cast<size_t>(arch_u32("ssm.time_step_rank").value_or(0));
+    ssm_n_group = static_cast<size_t>(arch_u32("ssm.group_count").value_or(0));
+    full_attention_interval =
+        static_cast<size_t>(arch_u32("full_attention_interval").value_or(4));
+  }
+
   // Gemma-family specifics.
   bool is_gemma = (architecture == Architecture::Gemma);
   size_t sliding_window_pattern = 0;
@@ -1121,6 +1137,9 @@ InferenceConfig build_inference_config(const GgufModel& model) {
   bool rms_norm_weight_plus_one =
       (arch == "qwen35" || arch == "qwen35moe" || arch == "qwen3_5_moe" ||
        arch == "qwen3_5_moe_text");
+  // Debug A/B hook: OXIDIZE_RMS_PLUS_ONE=0/1 forces the flag at load time.
+  if (const char* e = std::getenv("OXIDIZE_RMS_PLUS_ONE"))
+    rms_norm_weight_plus_one = (e[0] == '1');
 
   InferenceConfig cfg;
   cfg.vocab_size = vocab_size;
@@ -1144,6 +1163,12 @@ InferenceConfig build_inference_config(const GgufModel& model) {
   cfg.leading_dense_layers = leading_dense_layers;
   cfg.expert_gating_sigmoid = expert_gating_sigmoid;
   cfg.rope_dim = rope_dim;
+  cfg.ssm_d_conv = ssm_d_conv;
+  cfg.ssm_d_inner = ssm_d_inner;
+  cfg.ssm_d_state = ssm_d_state;
+  cfg.ssm_dt_rank = ssm_dt_rank;
+  cfg.ssm_n_group = ssm_n_group;
+  cfg.full_attention_interval = full_attention_interval;
   cfg.rope_yarn_factor = rope_yarn_factor;
   cfg.rope_yarn_orig_ctx = rope_yarn_orig_ctx;
   cfg.rope_yarn_beta_fast = rope_yarn_beta_fast;

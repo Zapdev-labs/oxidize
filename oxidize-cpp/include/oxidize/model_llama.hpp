@@ -113,6 +113,27 @@ struct LlamaLayer {
   LlamaWeight attn_k_b;
   LlamaWeight attn_v_b;
 
+  // Qwen3.5 / Qwen3-Next gated DeltaNet linear-attention layer. Present only on
+  // recurrent (non-full-attention) layers; full-attention layers use the dense
+  // attn_q/k/v above (with attn_q carrying an interleaved per-head output gate).
+  //   wqkv     : x -> [q(n_k*d_state) ++ k(n_k*d_state) ++ v(n_v*head_v)] (conv_dim)
+  //   wqkv_gate: x -> z gate (ssm_d_inner)
+  //   ssm_conv1d: depthwise causal conv kernel [d_conv, conv_dim] (f32)
+  //   ssm_dt_bias/ssm_a : per-v-head (dt_rank) softplus bias + (-exp(A_log)) decay
+  //   ssm_alpha/ssm_beta: x -> per-v-head (dt_rank) decay-input / beta gates
+  //   ssm_norm : gated RMSNorm weight over head_v_dim
+  //   ssm_out  : value_dim -> hidden output projection
+  LlamaWeight wqkv;
+  LlamaWeight wqkv_gate;
+  std::vector<float> ssm_conv1d;   // [d_conv * conv_dim], row-major [d_conv][conv_dim]
+  std::vector<float> ssm_dt_bias;  // [dt_rank]
+  std::vector<float> ssm_a;        // [dt_rank]
+  LlamaWeight ssm_alpha;
+  LlamaWeight ssm_beta;
+  std::vector<float> ssm_norm;     // [head_v_dim]
+  LlamaWeight ssm_out;
+  bool is_recurrent = false;       // qwen35 DeltaNet linear-attention layer
+
   bool is_moe() const { return !ffn_gate_exps.empty() || !ffn_gate_inp.empty(); }
   // MLA layer: uses compressed q/kv projections instead of dense attn_q/k/v.
   bool is_mla() const { return !attn_q_a.empty() || !attn_kv_a_mqa.empty(); }
@@ -193,6 +214,21 @@ class LlamaModel : public Model {
   void mla_attention(const LlamaLayer& layer, size_t l, size_t pos,
                      float* attn_out);
 
+  // Qwen3.5 gated DeltaNet linear-attention forward for recurrent layer `l` at
+  // absolute position `pos`. Reads x_ (RMSNorm done inside via attn_norm), runs
+  // the causal conv1d + gated delta-rule recurrence, advancing the persistent
+  // per-layer conv/recurrent state, and writes the (pre-residual) output into
+  // attn_out[hidden_size].
+  void qwen35_deltanet(const LlamaLayer& layer, size_t l, size_t pos,
+                       float* attn_out);
+  // Qwen3.5 gated full-attention forward for full-attention layer `l`. attn_q
+  // carries interleaved [query, gate] per head; standard GQA + per-head q/k
+  // RMSNorm + partial RoPE, output multiplied by sigmoid(gate).
+  void qwen35_gated_attention(const LlamaLayer& layer, size_t l, size_t pos,
+                              float* attn_out);
+  // (l+1)%full_attention_interval==0 => full-attention; else DeltaNet recurrent.
+  bool qwen35_is_recurrent(size_t l) const;
+
   static void reject_unsupported(const InferenceConfig& cfg);
   LlamaWeight load_weight(const GgufModel& g, const std::string& name,
                           bool keep_quantized, bool allow_quant = true,
@@ -226,6 +262,13 @@ class LlamaModel : public Model {
   // impractically large up-front F32 cache, e.g. GLM-5.2's 1M-token context).
   // Used as the layer stride for KV slot indexing; positions must be < this.
   size_t kv_context_ = 0;
+
+  // Qwen3.5 DeltaNet persistent recurrent state, per layer (empty on non-qwen35
+  // models / non-recurrent layers). Reset on pos==0 / rewind_to(0).
+  //   ssm_conv_state_[l] : [(d_conv-1) * conv_dim] rolling causal-conv history.
+  //   ssm_rec_state_[l]  : [dt_rank * d_state * d_state] per-v-head [S_v,S_v] matrix.
+  std::vector<std::vector<float>> ssm_conv_state_;
+  std::vector<std::vector<float>> ssm_rec_state_;
 
   // Persistent activation + scratch (mirrors inference.rs::Workspace, dense subset).
   std::vector<float> x_;
