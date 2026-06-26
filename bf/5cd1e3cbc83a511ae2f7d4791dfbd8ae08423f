@@ -1,0 +1,37 @@
+oxidize-cpp/include/oxidize/model_llama.hpp
+  s_5b078de97b8925::t_961d44e7c21f77 99
+oxidize-cpp/src/tokenizer.cpp
+  s_5b078de97b8925::t_88729c3085e4c8 1-6,9-150,152,157-290,293-299,301,303-314,323,327-328,330-332,339,342-384,387-435
+  s_5b078de97b8925::t_a7e2aee5b65f40 151,153-156
+  s_5b078de97b8925::t_1435b7c9ec6f8f 385-386
+  s_5b078de97b8925::t_2389122ab28b5e 7-8
+  s_5b078de97b8925::t_f03a32524ed92e 291-292,300,302,315-322,324-326,329,333-338,340-341
+oxidize-cpp/src/cli/main.cpp
+  s_5b078de97b8925::t_e8b261edbf06ec 285-286
+  s_5b078de97b8925::t_2d687a65dc4402 41
+  s_5b078de97b8925::t_df8fd7dc300fed 61-65
+  s_5b078de97b8925::t_16ac36a1bd3744 397-399
+  s_5b078de97b8925::t_391a41f2ad94e3 258-260,262-265,269,272-274,276-278,280
+  s_5b078de97b8925::t_9b74252203e8ed 78-82
+  s_5b078de97b8925::t_b5c30772b70941 317-327,331-337,340-341,343-351,354
+  s_5b078de97b8925::t_f3a45fdc4f80ad 145-158
+oxidize-cpp/include/oxidize/tokenizer.hpp
+  s_5b078de97b8925::t_ee60e475d8575a 52
+  s_5b078de97b8925::t_82b6983d5b793b 1-51,53-59
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "bf5cd1e3cbc83a511ae2f7d4791dfbd8ae08423f",
+  "prompts": {},
+  "sessions": {
+    "s_5b078de97b8925": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a2fd32be-d532-4929-8226-7967c93996a1",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

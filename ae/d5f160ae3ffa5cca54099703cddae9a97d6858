@@ -1,0 +1,19 @@
+oxidize-cpp/src/model_llama.cpp
+  s_a0962759aed1bf::t_99ced3de22f257 66-69
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "aed5f160ae3ffa5cca54099703cddae9a97d6858",
+  "prompts": {},
+  "sessions": {
+    "s_a0962759aed1bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "662eeb0e-ef0a-4b12-b842-fdfb9cda156f",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

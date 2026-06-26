@@ -1,0 +1,190 @@
+scripts/bench-ai-box.sh
+  s_e658c70c93080d::t_fc12d9639fe8fe 1-52
+oxidize-cpp/src/train/train_loss.cpp
+  s_a0962759aed1bf::t_cf098ad3e75612 1-23
+oxidize-cpp/include/oxidize/train_loss.hpp
+  s_a0962759aed1bf::t_df5142452978f7 1-16
+docs/superpowers/specs/2026-06-22-cpp-perf-and-training-design.md
+  s_a0962759aed1bf::t_7be2a3d6947b27 1-39
+oxidize-cpp/src/numa_util.cpp
+  s_a0962759aed1bf::t_b893a64e285362 201
+  s_a0962759aed1bf::t_88c994dadb321f 1-200,202-228,235,237-238,241-345
+  s_a0962759aed1bf::t_ce6986fe24cfc6 229-234,236,239-240
+oxidize-cpp/src/cuda/rope.cu
+  s_2985c8f8766b09::t_34e2f32c6da735 52-78,84,94-103,105
+oxidize-cpp/src/train/train_forward.cpp
+  s_a0962759aed1bf::t_61d5c71d791fbd 629-634
+  s_a0962759aed1bf::t_291c8cb1ea7311 563-566
+  s_a0962759aed1bf::t_d19a407df30ced 517-520
+  s_a0962759aed1bf::t_338df4d4afb788 823-839,841-844,849,854,856-858,860,862-863,865,867,871
+  s_a0962759aed1bf::t_93876d5c36a093 9,11
+  s_a0962759aed1bf::t_86eb17a53900fa 119-121,123-133,135-141,147-182
+  s_a0962759aed1bf::t_4af0527e3300f5 79-83
+  s_a0962759aed1bf::t_4f8f806179d50b 134,142-146
+  s_a0962759aed1bf::t_d665a728d89a3c 568-569,571-576,578-586,597-598,600,602
+  s_a0962759aed1bf::t_62641ed8bd3da4 1-8,10,12-78,84-118,188-319,321-322,324,326-367,374-375,379,397,399,404-405,407,411-419,421-427,440-442,446,454-455,462-463,467,471,488-490,498,505,507,513-516,521,524,527,532-562,567,570,599,601,603-628,635-636,638-639,661,663-665,668,670,698-700,702-705,707,710,712,715,717,720-722,725-730,740,749,751-753,756-757,761-822,840,845-848,850-853,855,859,861,864,866,868-870,872-888,949-1027
+  s_a0962759aed1bf::t_121048681c2cef 376-378,380-396,398,400-403,406,408-410,420,428-439,443-445,447-453,456-461,464-466,468-470,472-487,491-497,500-504,506,508-512
+  s_a0962759aed1bf::t_e5699ccaef63c8 320,323,325
+  s_a0962759aed1bf::t_27bb63127cac37 122
+  s_a0962759aed1bf::t_4385eae0b7812c 529
+  s_a0962759aed1bf::t_b8e4db3017751d 522-523,525-526,528,530-531
+  s_a0962759aed1bf::t_1e4367ba0d1983 183-187
+  s_a0962759aed1bf::t_ce47de3552cca1 587-596
+  s_a0962759aed1bf::t_fe8d75bbd503ef 368-373
+  s_a0962759aed1bf::t_a935e7950f8cb6 637,640-660,662,666-667,669,671-697,701,706,708-709,711,713-714,716,718-719,723-724
+  s_a0962759aed1bf::t_2ec6aff4e583c2 889-948
+  s_a0962759aed1bf::t_a1c11f21e451fb 499
+  s_a0962759aed1bf::t_44e3ecdbc2bfa2 577
+  s_a0962759aed1bf::t_d83a251a69f0aa 731-739,741-748,750,754-755,758-760
+oxidize-cpp/include/oxidize/train_forward.hpp
+  s_a0962759aed1bf::t_f3fdb68119a0bc 146
+  s_a0962759aed1bf::t_45ffa87b000de0 88-93
+  s_a0962759aed1bf::t_79d3889ee2ce38 1-87,94-107,120-145,147-150
+  s_a0962759aed1bf::t_bb1e4aca77750a 108-119
+oxidize-cpp/include/oxidize/tensor.hpp
+  s_2985c8f8766b09::t_5133d7f6cbeb0b 59-65
+oxidize-cpp/src/cli/train_main.cpp
+  s_a0962759aed1bf::t_3d02767021f12f 169,171
+  s_a0962759aed1bf::t_2b4cb7760e0b4a 85
+  s_a0962759aed1bf::t_d6d2d8a097c043 1-84,86-120,122,136-168,170,172-196,198-199,212-248
+  s_a0962759aed1bf::t_7de089fbb5cd63 197,200,206-211
+  s_a0962759aed1bf::t_9424d98a6ec2a6 121,123-135
+  s_a0962759aed1bf::t_55e4e3eb9ad37e 201-205
+oxidize-cpp/include/oxidize/cuda_backend.hpp
+  s_2985c8f8766b09::t_c5227854a5e45d 98-101
+  s_2985c8f8766b09::t_6722744b1f2402 169
+  s_2985c8f8766b09::t_c294d23da0f561 149-159
+oxidize-cpp/src/train/train_data.cpp
+  s_a0962759aed1bf::t_33f95d4f18b343 1-222
+oxidize-cpp/include/oxidize/model_llama.hpp
+  s_2985c8f8766b09::t_33cb6df8d724f8 143-144,147
+  s_2985c8f8766b09::t_807f4193698c3f 123-124,126
+oxidize-cpp/include/oxidize/lora.hpp
+  s_a0962759aed1bf::t_b52221404404dd 1-64
+oxidize-cpp/src/train/autograd.cpp
+  s_a0962759aed1bf::t_840bc79254b32b 1-69,72,85-184,190,192-194,199,201-207,209-215,217-218,220,222-264
+  s_a0962759aed1bf::t_1dea915af1c873 185-189,191,195-198,200,208,216,219,221
+  s_a0962759aed1bf::t_804b0f6cf7bc3f 70-71,73-84
+oxidize-cpp/src/cli/main.cpp
+  s_a0962759aed1bf::t_6130a612eb7f0d 100-101
+  s_2985c8f8766b09::t_750c4e10b3b406 180-189
+  s_2985c8f8766b09::t_d9910f25601e57 44-47
+  s_a0962759aed1bf::t_6e52566e6f919c 190-199
+  s_a0962759aed1bf::t_a3d2272c76647f 76-77
+  s_2985c8f8766b09::t_2f8f10a4421054 93-96
+  s_a0962759aed1bf::t_bdc836ca0470ab 40
+  s_a0962759aed1bf::t_afb8f7fdd1bfa5 257-284
+  s_2985c8f8766b09::t_37e3bb32b99627 312-318
+  s_2985c8f8766b09::t_4c8c18a39864ec 393-396,398-401,403-412
+  s_2985c8f8766b09::t_509f23e56fc3f9 69-72
+  s_2985c8f8766b09::t_b8c8449cd41eb6 430,438
+oxidize-cpp/src/tensor_cpu.cpp
+  s_2985c8f8766b09::t_84aae51ec269c9 39-50
+  s_2985c8f8766b09::t_16bc5584674215 231-270,343-414
+  s_2985c8f8766b09::t_535fbe2134b897 271-342
+  s_2985c8f8766b09::t_c220674123a2b6 57-75
+  s_2985c8f8766b09::t_40aa663c966615 565-578
+  s_2985c8f8766b09::t_b89215e24cf976 597-656,705-721
+  s_2985c8f8766b09::t_e533c1d1f57092 657-704
+oxidize-cpp/src/train/train_matmul.cpp
+  s_a0962759aed1bf::t_f978a94b726988 89-91,94-129
+  s_a0962759aed1bf::t_a7a33a87c58fc2 88
+  s_a0962759aed1bf::t_75bee272febf6b 1-7,9-87,92-93,130-133
+  s_a0962759aed1bf::t_e368aeaaf18155 8
+oxidize-cpp/src/train/grad_check.cpp
+  s_a0962759aed1bf::t_449949000ba0af 1-3,6-18,22,26,28-33,37,39-44,46,58-61,63-73,77,80-90,93,96-113,115-120,124,127,129-135,138-140,143-145,148-150,153-168,175-176,178-181,191-194,196-208,216,218-220,222-230,232-238,245,247,251,254-256,258,261,263-269,274-276,278-279,307,309,311,313,315-322,324-325,327,329,355,359,364,380,382-398,404,407,411-420,425,428,430-439,441,445,447-453,455,459-461,463-464,466-474,476-486,489
+  s_a0962759aed1bf::t_11edec5dc5a784 23-25
+  s_a0962759aed1bf::t_3ae797eb79e593 4-5,19-21,27,34-36,38,45,47-57,62,74-76,78-79,91-92,94-95,114,121-123,125-126,128,136-137,141-142,146-147,151-152,169-174,177,182-190,195,209-215,217,221,231,239-244,246,248-250,252-253,257,259-260,262,270-273,277,280-306,308,310,312,314,323,326,328,330-354,356-358,360-363,365-379,381,399-403,405-406,408-410,421-424,426-427,429,440,442-444,446,454,456-458,462,465,475,487-488
+oxidize-cpp/src/cuda/flash_attn.cu
+  s_2985c8f8766b09::t_0d677a0864579c 103-179
+  s_2985c8f8766b09::t_061e5a75329cf1 209-228
+oxidize-cpp/include/oxidize/train_optim.hpp
+  s_a0962759aed1bf::t_7ac42b1a9560bd 1-39
+oxidize-cpp/include/oxidize/autograd.hpp
+  s_a0962759aed1bf::t_9d56cdf1f0719d 1-130
+oxidize-cpp/src/cuda/resident.cu
+  s_2985c8f8766b09::t_bde71e44baf3b0 59-68
+  s_2985c8f8766b09::t_ecce38aaa53642 28-40
+oxidize-cpp/src/train/lora.cpp
+  s_a0962759aed1bf::t_acaf303c79582b 1-126
+oxidize-cpp/src/cuda/cuda_common.cuh
+  s_2985c8f8766b09::t_89d838b305cba9 103-106
+  s_2985c8f8766b09::t_340b32a8d37747 125-129
+  s_2985c8f8766b09::t_368b99626c1e76 137-140
+oxidize-cpp/include/oxidize/train_data.hpp
+  s_a0962759aed1bf::t_1653bb8ab5304b 1-71
+oxidize-cpp/CMakeLists.txt
+  s_a0962759aed1bf::t_580dc3db7f855a 69-83,95-99
+docs/superpowers/plans/2026-06-23-cpp-ai-box-max-speed.md
+  s_e658c70c93080d::t_57cf2857fd80ff 1-93
+oxidize-cpp/src/model_llama.cpp
+  s_2985c8f8766b09::t_3cfc0a3e14db7f 222-227
+  s_2985c8f8766b09::t_470bec95b66ca4 18
+  s_2985c8f8766b09::t_1ba6121b709f01 988-993,995-1003
+  s_2985c8f8766b09::t_d4834caac6a9d0 994
+  s_2985c8f8766b09::t_6690fc305a59c5 714-882
+  s_2985c8f8766b09::t_ec81eee1b54411 447-454
+  s_2985c8f8766b09::t_bdf0b17ad9a643 107-132
+  s_2985c8f8766b09::t_93aba26d2e4f2a 948-953
+oxidize-cpp/src/cuda/backend.cu
+  s_abb6299ac8eb57::t_7a7d790867d072 492-494
+  s_2985c8f8766b09::t_01c880e24ded9f 138,143-147
+  s_2985c8f8766b09::t_e57f779ef314d3 209
+  s_abb6299ac8eb57::t_aeb4b711d2ad4f 96-111,113-121,123-126,128-131,133-137,140-142,148-149,157-161,169,171-176,178-208,210,212-232,235-238
+  s_abb6299ac8eb57::t_58073788f4dc35 537
+  s_abb6299ac8eb57::t_468e68d7f896c8 518
+  s_2985c8f8766b09::t_86b08457de2a4f 560
+  s_abb6299ac8eb57::t_2202d5823782d5 608-614,618,624,666-667,671,675-676,678,680-682,686,691
+  s_2985c8f8766b09::t_5ce2d796cf612b 538-554,557-559,561-574,590,604-607,628-663,668-670,673-674,684-685,687,689-690,692-725,728
+  s_abb6299ac8eb57::t_d110be7b8448bb 462,464-467
+  s_2985c8f8766b09::t_78ef17ae0e41c7 162-168
+  s_2985c8f8766b09::t_15bfe21fa54314 257-280
+oxidize-cpp/include/oxidize/train_types.hpp
+  s_a0962759aed1bf::t_8c5320d0f5a3fa 38
+  s_a0962759aed1bf::t_fcd0d6b6d4e1fa 1-37,39-48
+  s_a0962759aed1bf::t_e30ff6284da339 49-61
+oxidize-cpp/docs/training/CPU-training-design.md
+  s_a0962759aed1bf::t_0d488378e0bb9c 1-37
+oxidize-cpp/src/train/train_optim.cpp
+  s_a0962759aed1bf::t_cea9fc7140938a 1-31
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "2d559339fc2bdfde62ae022cdcdfa245dcec66af",
+  "prompts": {},
+  "sessions": {
+    "s_2985c8f8766b09": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "3d87dae6-b395-4296-876c-481af6bf6812",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_a0962759aed1bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "662eeb0e-ef0a-4b12-b842-fdfb9cda156f",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_abb6299ac8eb57": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "b7257c8f-ca8b-4817-9735-b92f00a7a336",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_e658c70c93080d": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "bc6356cd-fafd-435c-a5dc-0c8b3e1fc9d7",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

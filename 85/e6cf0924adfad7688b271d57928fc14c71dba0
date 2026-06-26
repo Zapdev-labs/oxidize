@@ -1,0 +1,41 @@
+oxidize-cpp/src/model_llama.cpp
+  s_a0962759aed1bf::t_44735335d6e24f 19-20,27-48,67-70,273-276,297-298,331-338,413-420,446-450,454-472,483-507,573,601-613,627-782,786,814-850,903-906,914,1002-1003,1008,1279-1281,1283-1284
+oxidize-cpp/src/quant.cpp
+  s_a0962759aed1bf::t_44735335d6e24f 19-23,45-46,168-170,172,174,591-651,704-709,856-857,914-917,950-953,994-995
+oxidize-cpp/include/oxidize/config.hpp
+  s_a0962759aed1bf::t_44735335d6e24f 40,79-85
+oxidize-cpp/include/oxidize/gguf.hpp
+  s_a0962759aed1bf::t_44735335d6e24f 84-85,152-168
+oxidize-cpp/src/gguf.cpp
+  s_a0962759aed1bf::t_44735335d6e24f 16,215,442,568-578,582-654,659,664,669-671,675,680,686-690,736-737,739,835-837,946-952,1052-1071,1137-1142
+oxidize-cpp/include/oxidize/model_llama.hpp
+  s_a0962759aed1bf::t_44735335d6e24f 92-115,117-121,188-195,198-199,217-221
+oxidize-cpp/docs/glm/IQ-quant-impl-spec.md
+  s_a0962759aed1bf::t_44735335d6e24f 1-29
+oxidize-cpp/include/oxidize/tensor.hpp
+  s_a0962759aed1bf::t_44735335d6e24f 41-48
+oxidize-cpp/src/iq_grids.inc
+  s_a0962759aed1bf::t_44735335d6e24f 1-720
+oxidize-cpp/src/tensor_cpu.cpp
+  s_a0962759aed1bf::t_44735335d6e24f 484-531
+oxidize-cpp/docs/glm/GLM-5.2-impl-spec.md
+  s_a0962759aed1bf::t_44735335d6e24f 1-68
+oxidize-cpp/src/cli/main.cpp
+  s_a0962759aed1bf::t_44735335d6e24f 329-352
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "85e6cf0924adfad7688b271d57928fc14c71dba0",
+  "prompts": {},
+  "sessions": {
+    "s_a0962759aed1bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "662eeb0e-ef0a-4b12-b842-fdfb9cda156f",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

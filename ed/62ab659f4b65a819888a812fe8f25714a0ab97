@@ -1,0 +1,36 @@
+oxidize-cpp/src/gguf.cpp
+  s_aabdca2f3f5957::t_352f8bdec936c7 1101-1113
+  s_aabdca2f3f5957::t_88bbf0fbbb7a73 426-429,431
+  s_aabdca2f3f5957::t_d8f982c7da1bc7 1166-1171
+  s_aabdca2f3f5957::t_2de38f977d428f 1140-1142
+oxidize-cpp/include/oxidize/model_llama.hpp
+  s_aabdca2f3f5957::t_fdf1aa8e11750e 217-231
+  s_aabdca2f3f5957::t_11adf84293209c 266-272
+  s_aabdca2f3f5957::t_d8f0b58dcd1875 116-136
+oxidize-cpp/src/model_llama.cpp
+  s_aabdca2f3f5957::t_7f4ff4cb3e08b7 491-511
+  s_aabdca2f3f5957::t_89f0a70864f6f2 1094-1115
+  s_aabdca2f3f5957::t_50c4a73d19d0a7 550-566
+  s_aabdca2f3f5957::t_f68bba02bc08b8 1599-1603
+  s_aabdca2f3f5957::t_bd360c5c219b86 857-1057
+  s_aabdca2f3f5957::t_77445762b776f7 1059-1066
+oxidize-cpp/include/oxidize/config.hpp
+  s_aabdca2f3f5957::t_c78f19cf2e862c 87-99
+  s_aabdca2f3f5957::t_5dfd1a9b0f8322 40
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.1",
+  "base_commit_sha": "ed62ab659f4b65a819888a812fe8f25714a0ab97",
+  "prompts": {},
+  "sessions": {
+    "s_aabdca2f3f5957": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "91839ce9-42cb-42a9-abf3-3b8053aa5537",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
