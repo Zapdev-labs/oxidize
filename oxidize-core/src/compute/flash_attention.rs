@@ -106,7 +106,7 @@ unsafe fn dot_product_f32_avx512(a: &[f32], b: &[f32]) -> f32 {
     let mut total = _mm512_reduce_add_ps(s0);
 
     for j in i..len {
-        total += a[j] * b[j];
+        total += unsafe { a.get_unchecked(j) * b.get_unchecked(j) };
     }
 
     total
@@ -168,7 +168,7 @@ unsafe fn dot_product_f32_avx2(a: &[f32], b: &[f32]) -> f32 {
     let mut total = result.iter().sum::<f32>();
 
     for j in i..len {
-        total += a[j] * b[j];
+        total += unsafe { a.get_unchecked(j) * b.get_unchecked(j) };
     }
 
     total
