@@ -154,7 +154,7 @@ func parseBenchEngine(args []string) (engine string, rest []string, err error) {
 			return "", nil, fmt.Errorf("missing value for --engine")
 		}
 		engine = strings.ToLower(strings.TrimSpace(rest[i+1]))
-		rest = append(append(rest[:i], rest[i+2:]...))
+		rest = append(rest[:i], rest[i+2:]...)
 		break
 	}
 	return engine, rest, nil

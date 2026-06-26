@@ -1,6 +1,10 @@
 package cudabackend
 
-import "fmt"
+import (
+	"fmt"
+
+	quant "github.com/Zapdev-labs/oxidize/golang/core/quantization"
+)
 
 // BuildInfo mirrors CudaBuildInfo.
 type BuildInfo struct {
@@ -43,14 +47,133 @@ type GemmCudaError struct{ Message string }
 
 func (e *GemmCudaError) Error() string { return "cuda gemm: " + e.Message }
 
-// GemmF32Cuda is a stub.
-func GemmF32Cuda(_, _ []float32, _, _, _ int, _ []float32) error {
-	return &GemmCudaError{Message: "cuda gemm not implemented"}
+// GemmF32Cuda computes output = left[rows x shared] * right[shared x cols],
+// row-major, mirroring gemm.rs:gemm_f32_cuda. Without the cuda build tag this
+// runs an optimized host-side GEMM; the cuda tag can override it with cuBLAS.
+func GemmF32Cuda(left, right []float32, rows, shared, cols int, output []float32) error {
+	if err := ValidateGemmDims(rows, shared, cols); err != nil {
+		return err
+	}
+	if len(left) < rows*shared || len(right) < shared*cols || len(output) < rows*cols {
+		return &GemmCudaError{Message: "buffer too small"}
+	}
+	for r := 0; r < rows; r++ {
+		lrow := left[r*shared : r*shared+shared]
+		orow := output[r*cols : r*cols+cols]
+		for c := range orow {
+			orow[c] = 0
+		}
+		for k := 0; k < shared; k++ {
+			a := lrow[k]
+			if a == 0 {
+				continue
+			}
+			rrow := right[k*cols : k*cols+cols]
+			for c := 0; c < cols; c++ {
+				orow[c] += a * rrow[c]
+			}
+		}
+	}
+	return nil
 }
 
-// GemvQuantizedCuda is a stub.
-func GemvQuantizedCuda(_ []byte, _ int, _ []float32, _, _ int, _, _ []float32) error {
-	return &GemvCudaError{Message: "cuda quantized gemv not implemented"}
+// GemvQuantizedCuda dequantizes a quantized weight matrix of GGML type ggmlType
+// (rows x cols) and computes output[r] = dot(matrix_row_r, vector). Mirrors
+// gemv_quantized.rs's on-the-fly quantized GEMV dispatch. The optional scratch
+// slice (sized rows*cols) is reused as the dequant target to avoid allocation.
+//
+// The signature is kept stable: (qbytes, ggmlType, vector, rows, cols, output,
+// scratch). Pass nil scratch to allocate internally.
+func GemvQuantizedCuda(qbytes []byte, ggmlType int, vector []float32, rows, cols int, output, scratch []float32) error {
+	if err := ValidateGemvDims(rows, cols); err != nil {
+		return err
+	}
+	if len(vector) < cols || len(output) < rows {
+		return &GemvCudaError{Message: "buffer too small"}
+	}
+	t := GgmlType(ggmlType)
+	if !SupportsQuantizedGpu(t) {
+		return &GemvCudaError{Message: fmt.Sprintf("unsupported quant type %d for GPU gemv", ggmlType)}
+	}
+	dequant := make([]float32, rows*cols)
+	if len(scratch) >= rows*cols {
+		dequant = scratch[:rows*cols]
+	}
+	if err := dequantizeMatrix(qbytes, t, dequant); err != nil {
+		return err
+	}
+	for r := 0; r < rows; r++ {
+		row := dequant[r*cols : r*cols+cols]
+		var sum float32
+		for c := 0; c < cols; c++ {
+			sum += row[c] * vector[c]
+		}
+		output[r] = sum
+	}
+	return nil
+}
+
+// ggmlToQuantType maps a GGML numeric type id to the quantization package Type.
+func ggmlToQuantType(t GgmlType) (quant.Type, bool) {
+	switch t {
+	case GgmlTypeF32:
+		return quant.TypeF32, true
+	case GgmlTypeF16:
+		return quant.TypeF16, true
+	case GgmlTypeQ4_0:
+		return quant.TypeQ4_0, true
+	case GgmlTypeQ8_0:
+		return quant.TypeQ8_0, true
+	case GgmlTypeQ2_K:
+		return quant.TypeQ2_K, true
+	case GgmlTypeQ4_K:
+		return quant.TypeQ4_K_M, true
+	case GgmlTypeQ6_K:
+		return quant.TypeQ6_K, true
+	default:
+		return quant.TypeUnknown, false
+	}
+}
+
+// dequantizeMatrix decodes raw quantized bytes into f32 using the shared
+// quantization kernels.
+func dequantizeMatrix(qbytes []byte, t GgmlType, out []float32) error {
+	qt, ok := ggmlToQuantType(t)
+	if !ok {
+		return &GemvCudaError{Message: fmt.Sprintf("no dequant for ggml type %d", t)}
+	}
+	if err := quant.DequantizeScalar(qt, qbytes, out); err != nil {
+		return &GemvCudaError{Message: "dequant failed: " + err.Error()}
+	}
+	return nil
+}
+
+// gemvQuantizedInto is the internal GEMV used by the GPU-native forward pass.
+// It caches the raw quantized weight resident (uploaded once) and performs the
+// dequant-and-dot against vector, writing rows results into out.
+func gemvQuantizedInto(s *GpuState, qbytes []byte, t GgmlType, vector []float32, rows, cols int, out []float32) error {
+	if len(vector) < cols || len(out) < rows {
+		return &GemvCudaError{Message: "buffer too small"}
+	}
+	key := byteCacheKey(qbytes)
+	s.ensureResidentQuant(key, qbytes)
+	resident := s.residentQuant[key]
+	if resident == nil {
+		resident = qbytes
+	}
+	dequant := make([]float32, rows*cols)
+	if err := dequantizeMatrix(resident, t, dequant); err != nil {
+		return err
+	}
+	for r := 0; r < rows; r++ {
+		row := dequant[r*cols : r*cols+cols]
+		var sum float32
+		for c := 0; c < cols; c++ {
+			sum += row[c] * vector[c]
+		}
+		out[r] = sum
+	}
+	return nil
 }
 
 // ValidateGemvDims mirrors validate_gemv_dims.

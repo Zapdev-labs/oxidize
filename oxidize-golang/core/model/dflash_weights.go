@@ -85,8 +85,10 @@ func (w F32Weight) Gemv(input, output []float32) error {
 		if ok {
 			return nil
 		}
-		// Fallback: pure-Go dequant+dot for any type Rust doesn't handle.
-		return tensor.GemvQuantizedF32(q.Bytes, w.dequantFn(), q.OutDim, q.InDim, input, output, nil)
+		// Pure-Go fallback: fused integer GEMV (Q4_K×Q8_K direct row-dot,
+		// no full-matrix dequant) where supported, scalar dequant+dot otherwise.
+		// This is the CGO_ENABLED=0 hot path.
+		return tensor.GemvQuantizedDispatch(q.Bytes, q.QType, q.OutDim, q.InDim, input, output)
 	}
 	return tensor.GemvF32Transposed(w.Data, w.Cols, w.Rows, input, output)
 }

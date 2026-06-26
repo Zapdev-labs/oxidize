@@ -379,7 +379,8 @@ fn load_safetensors_tensor_index(
     path: &Path,
 ) -> Result<(Vec<(String, Dtype, Vec<usize>)>, BTreeMap<String, String>)> {
     let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
-    let mmap = unsafe { memmap2::Mmap::map(&file) }
+    // SAFETY: shard files are opened read-only and not modified while mapped.
+    let mmap = unsafe { crate::bytes::map_readonly(&file) }
         .with_context(|| format!("failed to mmap {}", path.display()))?;
     let st = SafeTensors::deserialize(&mmap)
         .map_err(|e| anyhow!("failed to parse SafeTensors: {e:?}"))?;
@@ -399,7 +400,8 @@ fn load_safetensors_file(
 )> {
     let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     // SAFETY: read-only mapping; file handle kept alive for the mapping's lifetime.
-    let mmap = unsafe { memmap2::Mmap::map(&file) }
+    // SAFETY: shard files are opened read-only and not modified while mapped.
+    let mmap = unsafe { crate::bytes::map_readonly(&file) }
         .with_context(|| format!("failed to mmap {}", path.display()))?;
     let st = SafeTensors::deserialize(&mmap)
         .map_err(|e| anyhow!("failed to parse SafeTensors: {e:?}"))?;
@@ -1017,7 +1019,8 @@ fn read_tensor_from_shard(
 ) -> Result<(Dtype, Vec<usize>, Vec<u8>)> {
     let file = File::open(shard_path)
         .with_context(|| format!("failed to open {}", shard_path.display()))?;
-    let mmap = unsafe { memmap2::Mmap::map(&file) }
+    // SAFETY: shard files are opened read-only and not modified while mapped.
+    let mmap = unsafe { crate::bytes::map_readonly(&file) }
         .with_context(|| format!("failed to mmap {}", shard_path.display()))?;
     let st = SafeTensors::deserialize(&mmap)
         .map_err(|e| anyhow!("failed to parse SafeTensors: {e:?}"))?;

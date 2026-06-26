@@ -176,6 +176,7 @@ mod tests {
             ggml_type: 0,
             relative_offset: 0,
             absolute_offset: 0,
+            mmap_index: 0,
         }
     }
 }

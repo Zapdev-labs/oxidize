@@ -1,0 +1,33 @@
+# Default owners for all repository changes.
+* @Jackson57279 @dogesman098
+
+# Repository governance and automation.
+/.github/ @Jackson57279 @dogesman098
+/AGENTS.md @Jackson57279 @dogesman098
+/Cargo.toml @Jackson57279 @dogesman098
+/Cargo.lock @Jackson57279 @dogesman098
+/Makefile @Jackson57279 @dogesman098
+/deny.toml @Jackson57279 @dogesman098
+
+# Rust inference engine, server, and command-line tools.
+/oxidize-core/ @Jackson57279 @dogesman098
+/oxidize-kernels/ @Jackson57279 @dogesman098
+/oxidize-cli/ @Jackson57279 @dogesman098
+/oxidize-server/ @Jackson57279 @dogesman098
+/oxidize-quantize/ @Jackson57279 @dogesman098
+/oxidize-convert/ @Jackson57279 @dogesman098
+/oxidize-prune/ @Jackson57279 @dogesman098
+/oxidize-merge/ @Jackson57279 @dogesman098
+/oxidize-train/ @Jackson57279 @dogesman098
+/oxidize-finetuning/ @Jackson57279 @dogesman098
+/oxidize-ffi/ @Jackson57279 @dogesman098
+/oxidize-py/ @Jackson57279 @dogesman098
+
+# Parallel language ports.
+/oxidize-golang/ @Jackson57279 @dogesman098
+/oxidize-python/ @Jackson57279 @dogesman098
+
+# Deployment, containers, scripts, and benchmark tooling.
+/Dockerfile.* @Jackson57279 @dogesman098
+/scripts/ @Jackson57279 @dogesman098
+/docs/ @Jackson57279 @dogesman098

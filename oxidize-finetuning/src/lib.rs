@@ -1,14 +1,24 @@
 mod config;
 mod dataset;
+pub mod dpo;
 mod error;
 mod export;
 mod fused;
 mod lora;
+pub mod merge;
+pub mod qlora;
+pub mod rlhf;
+pub mod telemetry;
 mod trainer;
 
 pub use config::FinetuneConfig;
 pub use dataset::{SftExample, load_jsonl_sft, pack_chunks};
+pub use dpo::{DpoConfig, DpoExample, DpoReport, DpoTrainer, load_jsonl_dpo};
 pub use error::FinetuneError;
 pub use export::export_lora_gguf;
 pub use lora::{LoRAAdapter, LoRATarget};
+pub use merge::{AdapterMerger, MergeStrategy, linear_merge, slerp_merge, ties_merge};
+pub use qlora::{NF4Block, QLoRAAdapter};
+pub use rlhf::{PpoConfig, PpoReport, PpoStepReport, PpoTrainer, RewardModel, RolloutBuffer};
+pub use telemetry::{EarlyStopping, MetricsLog, ProgressReporter, TrainingMetrics};
 pub use trainer::{FinetuneReport, SftTrainer};

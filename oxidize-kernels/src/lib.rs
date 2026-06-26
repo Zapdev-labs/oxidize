@@ -14,6 +14,7 @@
 //! optional `oxk` cargo feature with runtime selection via `OXIDIZE_GEMV`.
 
 pub mod cpu;
+pub mod prune;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 mod q4k_avx2;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -21,9 +22,9 @@ mod q4k_avx512;
 mod q4k_dequant;
 mod q4k_scalar;
 mod q8k;
-pub mod prune;
 
 pub use cpu::{CpuInfo, CpuVendor, OxkTune, cpu_vendor, cpuinfo, oxk_cpu_summary};
+pub use prune::{apply_mask_inplace, magnitude_mask, wanda_mask};
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 pub use q4k_avx2::{
     q4k_q8k_row_dot_avx2, q4k_q8k_row_dot_x4_avx2, q4k_q8k_row_dot_x8_avx2,
@@ -32,7 +33,6 @@ pub use q4k_avx2::{
 pub use q4k_dequant::dequantize_q4_k_into;
 pub use q4k_scalar::q4k_q8k_row_dot_scalar;
 pub use q8k::quantize_q8_k_into;
-pub use prune::{apply_mask_inplace, magnitude_mask, wanda_mask};
 
 /// Values per super-block (matches GGUF K-quants).
 pub const QK_K: usize = 256;
@@ -338,9 +338,9 @@ pub(crate) fn f16_le_to_f32(bytes: [u8; 2]) -> f32 {
 }
 
 #[inline]
-pub(crate) unsafe fn read_q8_k_bsum(bsums: *const u8, index: usize) -> i16 {
-    let ptr = unsafe { bsums.add(index * 2) };
-    i16::from_le_bytes([unsafe { *ptr }, unsafe { *ptr.add(1) }])
+pub(crate) fn read_q8_k_bsum(bsums: &[u8], index: usize) -> i16 {
+    let off = index * 2;
+    i16::from_le_bytes([bsums[off], bsums[off + 1]])
 }
 
 #[cfg(test)]

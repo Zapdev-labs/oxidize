@@ -39,14 +39,24 @@ type PhysicalBlock struct {
 	ID    int
 	Ref   int
 	Dirty bool
+	// BlockHash is the prefix-cache hash for this block, or hasHash=false when
+	// the block is not currently part of the prefix cache.
+	Hash    BlockHash
+	HasHash bool
+	// LastAccessed is the monotonic access counter used for LRU eviction.
+	LastAccessed uint64
 }
 
 // BlockPool mirrors BlockPool.
 type BlockPool struct {
-	mu      sync.Mutex
-	blocks  []PhysicalBlock
-	free    []int
+	mu        sync.Mutex
+	blocks    []PhysicalBlock
+	free      []int
 	BlockSize int
+	// prefixCache maps a block hash to the physical block id holding that prefix.
+	prefixCache map[BlockHash]int
+	// accessCounter is a monotonically increasing LRU clock.
+	accessCounter uint64
 }
 
 // NewBlockPool constructs a pool with `n` blocks of given size.
@@ -57,7 +67,12 @@ func NewBlockPool(n, blockSize int) *BlockPool {
 	if blockSize <= 0 {
 		blockSize = 16
 	}
-	bp := &BlockPool{blocks: make([]PhysicalBlock, n), free: make([]int, 0, n), BlockSize: blockSize}
+	bp := &BlockPool{
+		blocks:      make([]PhysicalBlock, n),
+		free:        make([]int, 0, n),
+		BlockSize:   blockSize,
+		prefixCache: make(map[BlockHash]int),
+	}
 	for i := 0; i < n; i++ {
 		bp.free = append(bp.free, i)
 		bp.blocks[i] = PhysicalBlock{ID: i}
@@ -103,6 +118,216 @@ func (p *BlockPool) FreeCount() int {
 // TotalCount returns the number of blocks managed.
 func (p *BlockPool) TotalCount() int { return len(p.blocks) }
 
+// AllocatedCount returns the number of currently allocated (non-free) blocks.
+func (p *BlockPool) AllocatedCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.blocks) - len(p.free)
+}
+
+// allocateLocked pops a free block and marks it allocated (ref=1). Caller holds mu.
+func (p *BlockPool) allocateLocked() (int, error) {
+	if len(p.free) == 0 {
+		return 0, errors.New("paged: no free blocks")
+	}
+	id := p.free[len(p.free)-1]
+	p.free = p.free[:len(p.free)-1]
+	p.blocks[id].Ref = 1
+	p.blocks[id].HasHash = false
+	p.blocks[id].Dirty = false
+	return id, nil
+}
+
+// AllocateBlocks allocates `n` physical blocks with all-or-nothing semantics:
+// if fewer than `n` blocks are free, no blocks are allocated and an error is
+// returned. Mirrors BlockPool::allocate_blocks.
+func (p *BlockPool) AllocateBlocks(n int) ([]int, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if n <= 0 {
+		return nil, nil
+	}
+	if len(p.free) < n {
+		return nil, errors.New("paged: no free blocks")
+	}
+	ids := make([]int, 0, n)
+	for i := 0; i < n; i++ {
+		id, err := p.allocateLocked()
+		if err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
+}
+
+// IncRef increments the reference count of an allocated block. Returns an error
+// if the block was not allocated (ref==0). Mirrors BlockPool::inc_ref.
+func (p *BlockPool) IncRef(id int) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if id < 0 || id >= len(p.blocks) {
+		return errors.New("paged: invalid block id")
+	}
+	if p.blocks[id].Ref == 0 {
+		return errors.New("paged: block not allocated")
+	}
+	p.blocks[id].Ref++
+	return nil
+}
+
+// DecRef decrements the reference count of a block, returning it to the free
+// list when the count reaches zero. Returns an error if the block was not
+// allocated. Mirrors BlockPool::dec_ref.
+func (p *BlockPool) DecRef(id int) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if id < 0 || id >= len(p.blocks) {
+		return errors.New("paged: invalid block id")
+	}
+	if p.blocks[id].Ref == 0 {
+		return errors.New("paged: block not allocated")
+	}
+	p.blocks[id].Ref--
+	if p.blocks[id].Ref == 0 {
+		p.blocks[id].Dirty = false
+		if !p.isFreeLocked(id) {
+			p.free = append(p.free, id)
+		}
+	}
+	return nil
+}
+
+func (p *BlockPool) isFreeLocked(id int) bool {
+	for _, f := range p.free {
+		if f == id {
+			return true
+		}
+	}
+	return false
+}
+
+// RefCount returns the reference count of a block (0 if invalid).
+func (p *BlockPool) RefCount(id int) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if id < 0 || id >= len(p.blocks) {
+		return 0
+	}
+	return p.blocks[id].Ref
+}
+
+// LookupPrefixCache returns the physical block id for a cached prefix hash,
+// updating its LRU access time. Stale entries (block freed) are pruned and
+// reported as not found. Mirrors BlockPool::lookup_prefix_cache.
+func (p *BlockPool) LookupPrefixCache(h BlockHash) (int, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	id, ok := p.prefixCache[h]
+	if !ok {
+		return 0, false
+	}
+	if id < 0 || id >= len(p.blocks) || p.blocks[id].Ref == 0 {
+		delete(p.prefixCache, h)
+		return 0, false
+	}
+	p.accessCounter++
+	p.blocks[id].LastAccessed = p.accessCounter
+	return id, true
+}
+
+// InsertPrefixCache records a hash → block mapping for prefix reuse. The block
+// must be allocated. If the hash already exists the existing mapping wins
+// (first-seen). Mirrors BlockPool::insert_prefix_cache.
+func (p *BlockPool) InsertPrefixCache(h BlockHash, id int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if id < 0 || id >= len(p.blocks) || p.blocks[id].Ref == 0 {
+		return
+	}
+	p.blocks[id].Hash = h
+	p.blocks[id].HasHash = true
+	p.accessCounter++
+	p.blocks[id].LastAccessed = p.accessCounter
+	if _, exists := p.prefixCache[h]; !exists {
+		p.prefixCache[h] = id
+	}
+}
+
+// EvictLRUPrefixCacheEntry removes the least-recently-used cache entry whose
+// block ref count is zero. Returns true if an entry was evicted. Mirrors
+// BlockPool::evict_lru_prefix_cache_entry.
+func (p *BlockPool) EvictLRUPrefixCacheEntry() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var (
+		victimHash  BlockHash
+		victimID    = -1
+		victimClock uint64
+	)
+	for h, id := range p.prefixCache {
+		if id < 0 || id >= len(p.blocks) {
+			continue
+		}
+		if p.blocks[id].Ref != 0 {
+			continue
+		}
+		if victimID == -1 || p.blocks[id].LastAccessed < victimClock {
+			victimHash = h
+			victimID = id
+			victimClock = p.blocks[id].LastAccessed
+		}
+	}
+	if victimID == -1 {
+		return false
+	}
+	delete(p.prefixCache, victimHash)
+	p.blocks[victimID].HasHash = false
+	return true
+}
+
+// ClearPrefixCache removes all prefix-cache entries (e.g. on model switch).
+// Mirrors BlockPool::clear_prefix_cache.
+func (p *BlockPool) ClearPrefixCache() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for h, id := range p.prefixCache {
+		if id >= 0 && id < len(p.blocks) && p.blocks[id].HasHash && p.blocks[id].Hash == h {
+			p.blocks[id].HasHash = false
+		}
+	}
+	p.prefixCache = make(map[BlockHash]int)
+}
+
+// PrefixCacheLen returns the number of prefix-cache entries.
+func (p *BlockPool) PrefixCacheLen() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.prefixCache)
+}
+
+// CopyOnWrite implements copy-on-write for a shared block. If the block's ref
+// count is > 1, a new block is allocated, the original's ref is decremented,
+// and the new block id is returned (found=true). If the block is not shared,
+// (0, false, nil) is returned. Mirrors BlockPool::copy_on_write.
+func (p *BlockPool) CopyOnWrite(id int) (int, bool, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if id < 0 || id >= len(p.blocks) {
+		return 0, false, errors.New("paged: invalid block id")
+	}
+	if p.blocks[id].Ref <= 1 {
+		return 0, false, nil
+	}
+	newID, err := p.allocateLocked()
+	if err != nil {
+		return 0, false, err
+	}
+	// Decrement original (still > 0 since it was > 1).
+	p.blocks[id].Ref--
+	return newID, true, nil
+}
+
 // BlockTable mirrors BlockTable.
 type BlockTable struct {
 	RequestID int
@@ -111,12 +336,12 @@ type BlockTable struct {
 
 // Request mirrors PagedRequest.
 type Request struct {
-	ID           int
-	Tokens       []int
-	BlockTable   []int
-	MaxTokens    int
-	Priority     int
-	Preempted    bool
+	ID         int
+	Tokens     []int
+	BlockTable []int
+	MaxTokens  int
+	Priority   int
+	Preempted  bool
 }
 
 // SchedulerError mirrors PagedSchedulerError.
@@ -250,12 +475,24 @@ func (s *Scheduler) LookupBlockHash(h BlockHash) (int, bool) {
 	return id, ok
 }
 
-// ComputeBlockHash computes a simple block hash from tokens.
+// ComputeBlockHash computes a deterministic FNV-1a block hash from tokens,
+// mirroring the Rust `compute_block_hash` (64-bit FNV-1a). The 64-bit digest is
+// stored in the leading 8 bytes of the [16]byte hash so existing String()/map
+// behaviour is preserved while collisions are far less likely than the old
+// XOR-fold scheme.
 func ComputeBlockHash(tokens []int) BlockHash {
-	var h BlockHash
-	for i, t := range tokens {
-		b := byte(t)
-		h[i%len(h)] ^= b
+	const (
+		fnvOffset uint64 = 0xcbf29ce484222325
+		fnvPrime  uint64 = 0x100000001b3
+	)
+	h := fnvOffset
+	for _, t := range tokens {
+		h *= fnvPrime
+		h ^= uint64(uint32(t))
 	}
-	return h
+	var out BlockHash
+	for i := 0; i < 8; i++ {
+		out[i] = byte(h >> (8 * uint(7-i)))
+	}
+	return out
 }

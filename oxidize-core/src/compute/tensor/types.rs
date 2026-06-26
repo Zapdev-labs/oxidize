@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 pub enum DType {
     F32,
     F16,
+    BF16,
     I8,
     I16,
     I32,
@@ -19,6 +20,7 @@ impl DType {
         match self {
             DType::F32 => 4,
             DType::F16 => 2,
+            DType::BF16 => 2,
             DType::I8 => 1,
             DType::I16 => 2,
             DType::I32 => 4,

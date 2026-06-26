@@ -93,7 +93,8 @@ pub fn detect() -> HardwareInventory {
         .max(physical_cores);
     let numa_nodes = numa::node_count().max(1);
     let min_node_ram_bytes = numa::min_node_total_bytes();
-    let total_ram_bytes = detect_total_ram_bytes().unwrap_or(min_node_ram_bytes * numa_nodes as u64);
+    let total_ram_bytes =
+        detect_total_ram_bytes().unwrap_or(min_node_ram_bytes * numa_nodes as u64);
 
     let gpus = detect_gpus();
     let has_gpu = !gpus.is_empty();
@@ -230,7 +231,8 @@ fn detect_cgroup_mem_limit() -> Option<u64> {
         }
     }
     // cgroup v1 fallback.
-    if let Some(limit) = read_cgroup_v1_limit(Path::new("/sys/fs/cgroup/memory/memory.limit_in_bytes"))
+    if let Some(limit) =
+        read_cgroup_v1_limit(Path::new("/sys/fs/cgroup/memory/memory.limit_in_bytes"))
     {
         // v1 uses 2^63 - 1 or `9223372036854775807` for "no limit"; treat
         // anything >= 2^60 as "unlimited" and skip.

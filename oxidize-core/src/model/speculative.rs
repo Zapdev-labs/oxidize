@@ -370,7 +370,7 @@ impl<'a, T: Model> SpeculativeDecoder<'a, T> {
         self.stats.target_forward_passes += 1;
 
         // 3. Speculative decode: accept/reject
-        let randoms: Vec<f32> = (0..=k).map(|_| fastrand::f32()).collect();
+        let randoms: Vec<f32> = (0..=2 * k).map(|_| fastrand::f32()).collect();
 
         let result = speculative_decode(
             &draft_tokens,
@@ -405,12 +405,27 @@ impl<'a, T: Model> SpeculativeDecoder<'a, T> {
 
         self.last_token_pending_kv = false;
 
-        // 5. Update draft model KV cache to match accepted tokens
+        // 5. Update draft model KV cache to match accepted tokens.
+        // The cache must hold the full context up to (but not including) the next
+        // step's start token. The next step's first `forward_token` re-feeds that
+        // start token, so the cache here must contain `start_token` followed by
+        // EVERY accepted draft token `dt[0..accepted_count]`.
+        //
+        // The loop below forwards `start_token`, then `dt[0]..dt[accepted_count-2]`
+        // (each iteration forwards the *previous* `replay_token` before advancing
+        // it to `dt`). The final accepted token `dt[accepted_count-1]` is left in
+        // `replay_token` and must be forwarded after the loop, otherwise the draft
+        // cache is one token short whenever a rejection/residual token (rather than
+        // the last draft token) becomes the next start token.
         self.draft_model.reset_cache();
         let mut replay_token = start_token;
         for &dt in draft_tokens.iter().take(accepted_count) {
             let _ = self.draft_model.forward_token(replay_token, None);
             replay_token = dt;
+        }
+        if accepted_count > 0 {
+            // Process the final accepted draft token left in `replay_token`.
+            let _ = self.draft_model.forward_token(replay_token, None);
         }
 
         // 6. Queue accepted tokens for emission

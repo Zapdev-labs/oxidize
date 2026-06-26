@@ -98,16 +98,16 @@ pub fn overrides_from_plan(plan: &TuningPlan) -> PlanOverrides {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::autotune::rules::PipelineMode;
-    use crate::kv_cache::KvQuantization;
-    use crate::tensor::DType;
-    use oxidize_kernels::cpu::CpuVendor;
     use crate::autotune::detect::{HardwareInventory, OsKind};
     use crate::autotune::fingerprint::fingerprint_from_parts;
-    use crate::autotune::rules::{plan, OxkIsa, OxkTile, SpeculativeSpec};
+    use crate::autotune::rules::PipelineMode;
+    use crate::autotune::rules::{OxkIsa, OxkTile, SpeculativeSpec, plan};
     use crate::gguf::GgufQuantizationType;
     use crate::gpu_cluster::GpuFamily;
+    use crate::kv_cache::KvQuantization;
     use crate::simd::SimdBackend;
+    use crate::tensor::DType;
+    use oxidize_kernels::cpu::CpuVendor;
 
     fn inv() -> HardwareInventory {
         HardwareInventory {
@@ -134,7 +134,15 @@ mod tests {
 
     fn m() -> crate::autotune::fingerprint::ModelFingerprint {
         fingerprint_from_parts(
-            "qwen2", 32, 2048, 16, 8, 128, 5504, 32000, 4_000_000_000,
+            "qwen2",
+            32,
+            2048,
+            16,
+            8,
+            128,
+            5504,
+            32000,
+            4_000_000_000,
             GgufQuantizationType::Q4_K_M,
         )
     }

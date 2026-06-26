@@ -46,15 +46,15 @@ func Aggressive() SpeculativeConfig {
 
 // SpeculativeStats mirrors SpeculativeStats.
 type SpeculativeStats struct {
-	TotalDraftTokens     int
-	TotalAcceptedTokens  int
-	TotalRejectedTokens  int
-	DraftForwardPasses   int
-	TargetForwardPasses  int
-	FallbackTokens       int
-	Accepted             int
-	Rejected             int
-	Total                int
+	TotalDraftTokens    int
+	TotalAcceptedTokens int
+	TotalRejectedTokens int
+	DraftForwardPasses  int
+	TargetForwardPasses int
+	FallbackTokens      int
+	Accepted            int
+	Rejected            int
+	Total               int
 }
 
 // AcceptanceRate returns the ratio of accepted drafts to total.
@@ -65,13 +65,55 @@ func (s SpeculativeStats) AcceptanceRate() float32 {
 	return float32(s.Accepted) / float32(s.Total)
 }
 
+// DraftAcceptanceRate returns the ratio of accepted draft tokens to all draft
+// tokens proposed (mirrors SpeculativeStats acceptance accounting in
+// speculative.rs).
+func (s SpeculativeStats) DraftAcceptanceRate() float32 {
+	if s.TotalDraftTokens == 0 {
+		return 0
+	}
+	return float32(s.TotalAcceptedTokens) / float32(s.TotalDraftTokens)
+}
+
+// TokensPerTargetForward reports how many emitted tokens were produced per
+// target forward pass; higher is better (the whole point of speculation).
+func (s SpeculativeStats) TokensPerTargetForward() float32 {
+	if s.TargetForwardPasses == 0 {
+		return 0
+	}
+	emitted := s.TotalAcceptedTokens + s.FallbackTokens
+	return float32(emitted) / float32(s.TargetForwardPasses)
+}
+
+// RecordStep folds the outcome of a single verified speculative step (from
+// SpeculativeDecodeLogits) into the running statistics.
+func (s *SpeculativeStats) RecordStep(r SpeculativeVerifyResult, draftTokens int) {
+	s.TargetForwardPasses++
+	s.DraftForwardPasses++
+	s.TotalDraftTokens += draftTokens
+	s.TotalAcceptedTokens += r.AcceptedDraftTokens
+	rejected := draftTokens - r.AcceptedDraftTokens
+	if rejected < 0 {
+		rejected = 0
+	}
+	s.TotalRejectedTokens += rejected
+	if r.UsedResidualFallback {
+		s.FallbackTokens++
+	}
+	s.Total += draftTokens
+	s.Accepted += r.AcceptedDraftTokens
+	if r.AcceptedDraftTokens < draftTokens {
+		s.Rejected++
+	}
+}
+
 // SpeculativeDecoder mirrors SpeculativeDecoder<'a, T: Model>.
 type SpeculativeDecoder struct {
-	Draft     Model
-	Target    Model
-	Session   *Session
-	Config    SpeculativeConfig
-	Stats     SpeculativeStats
+	Draft   Model
+	Target  Model
+	Session *Session
+	Config  SpeculativeConfig
+	Stats   SpeculativeStats
 }
 
 // NewSpeculativeDecoder constructs a decoder with the given draft + target
@@ -132,16 +174,27 @@ type SpeculativeConfigBuilder struct {
 }
 
 // NewSpeculativeConfigBuilder constructs a builder.
-func NewSpeculativeConfigBuilder() *SpeculativeConfigBuilder { return &SpeculativeConfigBuilder{cfg: DefaultSpeculativeConfig()} }
+func NewSpeculativeConfigBuilder() *SpeculativeConfigBuilder {
+	return &SpeculativeConfigBuilder{cfg: DefaultSpeculativeConfig()}
+}
 
 // WithDraftTokens sets the draft tokens per step.
-func (b *SpeculativeConfigBuilder) WithDraftTokens(n int) *SpeculativeConfigBuilder { b.cfg.DraftTokensPerStep = n; return b }
+func (b *SpeculativeConfigBuilder) WithDraftTokens(n int) *SpeculativeConfigBuilder {
+	b.cfg.DraftTokensPerStep = n
+	return b
+}
 
 // WithMaxNewTokens sets the maximum new tokens.
-func (b *SpeculativeConfigBuilder) WithMaxNewTokens(n int) *SpeculativeConfigBuilder { b.cfg.MaxNewTokens = n; return b }
+func (b *SpeculativeConfigBuilder) WithMaxNewTokens(n int) *SpeculativeConfigBuilder {
+	b.cfg.MaxNewTokens = n
+	return b
+}
 
 // WithStrict sets strict mode.
-func (b *SpeculativeConfigBuilder) WithStrict(s bool) *SpeculativeConfigBuilder { b.cfg.StrictMode = s; return b }
+func (b *SpeculativeConfigBuilder) WithStrict(s bool) *SpeculativeConfigBuilder {
+	b.cfg.StrictMode = s
+	return b
+}
 
 // Build returns the final config.
 func (b *SpeculativeConfigBuilder) Build() SpeculativeConfig { return b.cfg }

@@ -228,7 +228,7 @@ impl MlxInferenceModel {
             let qsize = quantized_size(qtype, value_count)
                 .map_err(|e| format!("quantized_size: {:?}", e))?;
             let offset = tensor.absolute_offset as usize;
-            let qdata = &mapped.bytes()[offset..offset + qsize];
+            let qdata = mapped.tensor_bytes(tensor, qsize);
 
             let load_weight = |_name: &str,
                                qtype: GgufQuantizationType,
@@ -1436,6 +1436,7 @@ mod tests {
                     ggml_type: 0,
                     relative_offset: 0,
                     absolute_offset: 0,
+                    mmap_index: 0,
                 }],
                 alignment: 32,
                 data_section_start: 0,

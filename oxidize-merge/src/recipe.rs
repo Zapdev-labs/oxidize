@@ -90,7 +90,10 @@ pub fn recipe_metadata(recipe: &MergeRecipe, method: &str) -> BTreeMap<String, S
         recipe.attention_t.to_string(),
     );
     meta.insert("oxidize-merge.mlp_t".to_owned(), recipe.mlp_t.to_string());
-    meta.insert("oxidize-merge.other_t".to_owned(), recipe.other_t.to_string());
+    meta.insert(
+        "oxidize-merge.other_t".to_owned(),
+        recipe.other_t.to_string(),
+    );
     if let Some(default_t) = recipe.default_t {
         meta.insert("oxidize-merge.default_t".to_owned(), default_t.to_string());
     }

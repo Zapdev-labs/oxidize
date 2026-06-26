@@ -16,7 +16,7 @@ pub mod rules;
 pub use apply::{PlanOverrides, overrides_from_plan};
 pub use detect::{HardwareInventory, OsKind, detect};
 pub use fingerprint::{
-    ModelFingerprint, fingerprint, fingerprint_from_parts, kv_bytes_per_token, per_layer_weight_bytes,
-    summary as model_summary,
+    ModelFingerprint, fingerprint, fingerprint_from_parts, kv_bytes_per_token,
+    per_layer_weight_bytes, summary as model_summary,
 };
 pub use rules::{OxkIsa, OxkTile, PipelineMode, SpeculativeSpec, TuningPlan, plan};

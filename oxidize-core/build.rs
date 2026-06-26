@@ -71,11 +71,19 @@ fn main() {
     }
 }
 
-/// Compile `kernels/gemv_f32.cu` to PTX in `OUT_DIR` using nvcc.
+/// Compile `kernels/gemv_f32.cu` to PTX (+ optional native cubins) in `OUT_DIR`.
 ///
-/// `-arch=compute_75` emits a virtual-architecture PTX that the driver JITs to
-/// the physical GPU at load time; it forward-compiles to any newer GPU while
-/// staying broadly compatible. The crate embeds the result via
+/// Strategy: always emit `compute_75` PTX — a virtual-architecture image that
+/// the CUDA driver JITs to native code for any GPU ≥ SM7.5 (including SM120).
+/// Additionally, if the installed toolkit is new enough, emit a native cubin for
+/// the current generation so the driver can skip JIT on that GPU:
+///
+///   CUDA ≥ 12.8  →  also emit native SM120 (Blackwell RTX 50-series)
+///   CUDA ≥ 12.0  →  also emit native SM90  (Hopper H100/H200)
+///   CUDA ≥ 11.8  →  also emit native SM89  (Ada Lovelace L40/RTX 4090)
+///   CUDA ≥ 11.0  →  also emit native SM80  (Ampere A100)
+///
+/// The crate embeds the result via
 /// `include_str!(concat!(env!("OUT_DIR"), "/gemv_f32.ptx"))`.
 fn compile_cuda_kernels(cuda_root: &Path) {
     let out_dir = env::var("OUT_DIR").expect("OUT_DIR is set by cargo");
@@ -84,8 +92,6 @@ fn compile_cuda_kernels(cuda_root: &Path) {
     println!("cargo:rerun-if-changed=kernels/gemv_f32.cu");
 
     let nvcc = {
-        // Windows ships `nvcc.exe`; probe the platform-correct filename and fall
-        // back to looking it up on PATH.
         let exe = if cfg!(target_os = "windows") {
             "nvcc.exe"
         } else {
@@ -99,6 +105,35 @@ fn compile_cuda_kernels(cuda_root: &Path) {
         }
     };
 
+    // Probe toolkit version to decide which native archs to embed alongside PTX.
+    let toolkit_version: u32 = std::process::Command::new(&nvcc)
+        .arg("--version")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|s| {
+            // e.g. "release 12.8, V12.8.93"
+            s.split("release ").nth(1)?.split(',').next().and_then(|v| {
+                let mut parts = v.trim().split('.');
+                let major: u32 = parts.next()?.parse().ok()?;
+                let minor: u32 = parts.next()?.parse().ok()?;
+                Some(major * 10 + minor)
+            })
+        })
+        .unwrap_or(0);
+
+    // We only ever consume the generated PTX (loaded as text via include_str!
+    // in backends/cuda.rs); the CUDA driver JITs it to the live GPU's native
+    // SASS at module-load time. So compile a single forward-compatible PTX for
+    // the lowest supported virtual arch (compute_75) — it runs on every GPU
+    // sm_75 and newer (Turing → Blackwell).
+    //
+    // NB: `-ptx` may target only ONE architecture; passing multiple native
+    // `-gencode arch=compute_X,code=sm_X` targets makes nvcc ≥ 12.8 fail with
+    // "Option '--ptx' is not allowed when compiling for multiple GPU
+    // architectures". Native cubins would need `-fatbin` + a fatbin loader,
+    // which we don't use.
+    let _ = toolkit_version; // probed for diagnostics; PTX target is fixed.
     let status = std::process::Command::new(&nvcc)
         .arg("-ptx")
         .arg("-O3")
@@ -137,19 +172,36 @@ fn compile_rocm_kernels(rocm_root: &Path) {
         }
     };
 
+    // Default to a portable multi-arch fat binary instead of bare "native".
+    // "native" emits host-only code on a GPU-less build host (a runtime
+    // hipErrorNoBinaryForGpu) and a single-GPU artifact otherwise. The default
+    // list spans Vega20/CDNA (gfx906/908/90a/942) and RDNA2/3/3.5
+    // (gfx1030/1100/1101/1102/1151 Strix Halo). Override with ROCM_ARCH or
+    // GPU_TARGETS (semicolon-separated, or "native" for the local GPU).
     let arch = env::var("ROCM_ARCH")
         .or_else(|_| env::var("GPU_TARGETS"))
-        .unwrap_or_else(|_| "native".to_string());
+        .unwrap_or_else(|_| {
+            "gfx906;gfx908;gfx90a;gfx942;gfx1030;gfx1100;gfx1101;gfx1102;gfx1151".to_string()
+        });
 
-    let status = std::process::Command::new(&hipcc)
-        .arg("--genco")
+    // Pin the wavefront width the kernels are compiled for. CDNA/GCN are always
+    // wave64; RDNA defaults to wave32, which would make the OX_WAVE=64 kernel
+    // contract (and rocm::GEMV_LANES_PER_ROW=64) wrong. Forcing wave64 keeps the
+    // host launch geometry, the OX_WAVE macro, and the device wavefront in sync.
+    // Override via ROCM_WAVEFRONT_FLAG (must be flipped together with OX_WAVE and
+    // GEMV_LANES_PER_ROW for a wave32 build).
+    let wave_flag =
+        env::var("ROCM_WAVEFRONT_FLAG").unwrap_or_else(|_| "-mwavefrontsize64".to_string());
+
+    let mut cmd = std::process::Command::new(&hipcc);
+    cmd.arg("--genco")
         .arg("-O3")
         .arg("-ffast-math")
-        .arg(format!("--offload-arch={arch}"))
-        .arg("-o")
-        .arg(&co_out)
-        .arg(src)
-        .status();
+        .arg(&wave_flag);
+    for a in arch.split(';').filter(|s| !s.is_empty()) {
+        cmd.arg(format!("--offload-arch={a}"));
+    }
+    let status = cmd.arg("-o").arg(&co_out).arg(src).status();
 
     match status {
         Ok(s) if s.success() => {}

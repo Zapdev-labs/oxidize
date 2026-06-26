@@ -1,0 +1,63 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-added-large-files
+        args: ["--maxkb=1024"]
+      - id: check-case-conflict
+      - id: check-merge-conflict
+      - id: check-toml
+      - id: check-yaml
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt
+        entry: cargo fmt --all --check
+        language: system
+        pass_filenames: false
+        types_or: [rust]
+
+      - id: cargo-clippy
+        name: cargo clippy
+        entry: cargo clippy --workspace --all-targets -- -D warnings
+        language: system
+        pass_filenames: false
+        types_or: [rust]
+
+      - id: cargo-udeps
+        name: cargo udeps (unused dependencies)
+        entry: ./scripts/check-udeps.sh
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+        types_or: [rust]
+
+      - id: gofmt
+        name: gofmt
+        entry: gofmt -w
+        language: system
+        files: ^oxidize-golang/.*\.go$
+
+      - id: go-test
+        name: go test
+        entry: bash -c 'cd oxidize-golang && go test ./...'
+        language: system
+        pass_filenames: false
+        files: ^oxidize-golang/.*\.go$
+
+      - id: python-ruff
+        name: ruff check
+        entry: bash -c 'cd oxidize-python && uv run ruff check oxidize_python'
+        language: system
+        pass_filenames: false
+        files: ^oxidize-python/.*\.py$
+
+      - id: python-tests
+        name: pytest
+        entry: bash -c 'cd oxidize-python && uv run pytest -q'
+        language: system
+        pass_filenames: false
+        files: ^oxidize-python/.*\.py$

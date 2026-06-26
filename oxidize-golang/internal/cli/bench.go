@@ -5,6 +5,8 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
+	"runtime/pprof"
 	"time"
 
 	"github.com/Zapdev-labs/oxidize/golang/core/model"
@@ -40,6 +42,7 @@ Options:
 	iterations := fs.Int("iterations", 3, "benchmark rounds")
 	maxTokens := fs.Int("max-tokens", 32, "tokens per round")
 	prompt := fs.String("prompt", "benchmark", "prompt seed")
+	cpuprofile := fs.String("cpuprofile", "", "write a CPU profile to this path")
 	_, genOpts, _, flagRest, err := parseGenFlags("bench", rest)
 	if err != nil {
 		return err
@@ -152,6 +155,18 @@ Options:
 			dcfg := model.DefaultDFlashConfig()
 			draftModel = model.NewHeuristicDFlashDraft(inference, dcfg)
 		}
+	}
+
+	if *cpuprofile != "" {
+		f, perr := os.Create(*cpuprofile)
+		if perr != nil {
+			return fmt.Errorf("bench: cpuprofile: %w", perr)
+		}
+		defer f.Close()
+		if perr := pprof.StartCPUProfile(f); perr != nil {
+			return fmt.Errorf("bench: start cpuprofile: %w", perr)
+		}
+		defer pprof.StopCPUProfile()
 	}
 
 	var totalTokens int

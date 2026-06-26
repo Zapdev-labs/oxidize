@@ -1,3 +1,5 @@
+use crate::gguf::GgufQuantizationType;
+use crate::quantization::dequantize_scalar;
 use crate::tensor::DType;
 use memmap2::Mmap;
 use safetensors::tensor::SafeTensors;
@@ -44,6 +46,86 @@ impl MappedSafeTensorsFile {
         let info = self.tensors.iter().find(|t| t.name == name)?;
         Some(&self.mmap[info.absolute_offset..info.absolute_offset + info.size_bytes])
     }
+
+    pub fn tensor_info(&self, name: &str) -> Option<&SafeTensorsTensorInfo> {
+        self.tensors.iter().find(|t| t.name == name)
+    }
+
+    /// Dequantize a mapped tensor to F32 (supports F32/F16/BF16).
+    pub fn tensor_as_f32(&self, name: &str) -> Result<Vec<f32>, SafeTensorsError> {
+        let info = self
+            .tensor_info(name)
+            .ok_or_else(|| SafeTensorsError::Parse(format!("tensor not found: {name}")))?;
+        let bytes = self.tensor_data(name).expect("tensor_info implies data");
+        let element_count: usize = info.shape.iter().product();
+        tensor_bytes_to_f32(info.dtype, bytes, element_count)
+    }
+}
+
+pub fn tensor_bytes_to_f32(
+    dtype: DType,
+    bytes: &[u8],
+    element_count: usize,
+) -> Result<Vec<f32>, SafeTensorsError> {
+    let mut out = vec![0.0_f32; element_count];
+    let qtype = match dtype {
+        DType::F32 => GgufQuantizationType::F32,
+        DType::F16 => GgufQuantizationType::F16,
+        DType::BF16 => GgufQuantizationType::BF16,
+        other => {
+            return Err(SafeTensorsError::Parse(format!(
+                "unsupported dtype for f32 decode: {other:?}"
+            )));
+        }
+    };
+    dequantize_scalar(qtype, bytes, &mut out).map_err(|e| SafeTensorsError::Parse(format!("{e:?}")))?;
+    Ok(out)
+}
+
+pub fn tensor_bytes_to_i64(
+    dtype: DType,
+    bytes: &[u8],
+    element_count: usize,
+) -> Result<Vec<i64>, SafeTensorsError> {
+    match dtype {
+        DType::I64 => {
+            if bytes.len() < element_count * 8 {
+                return Err(SafeTensorsError::Parse("i64 tensor truncated".into()));
+            }
+            Ok(bytes
+                .chunks_exact(8)
+                .take(element_count)
+                .map(|chunk| i64::from_le_bytes(chunk.try_into().expect("i64 chunk")))
+                .collect())
+        }
+        DType::I32 => {
+            if bytes.len() < element_count * 4 {
+                return Err(SafeTensorsError::Parse("i32 tensor truncated".into()));
+            }
+            Ok(bytes
+                .chunks_exact(4)
+                .take(element_count)
+                .map(|chunk| i32::from_le_bytes(chunk.try_into().expect("i32 chunk")) as i64)
+                .collect())
+        }
+        DType::F32 | DType::F16 | DType::BF16 => {
+            let floats = tensor_bytes_to_f32(dtype, bytes, element_count)?;
+            floats
+                .into_iter()
+                .map(|v| {
+                    if !v.is_finite() {
+                        return Err(SafeTensorsError::Parse(format!(
+                            "non-finite float {v} cannot be decoded as integer"
+                        )));
+                    }
+                    Ok(v.trunc() as i64)
+                })
+                .collect()
+        }
+        other => Err(SafeTensorsError::Parse(format!(
+            "unsupported dtype for integer decode: {other:?}"
+        ))),
+    }
 }
 
 pub fn load_mapped_safetensors<P: AsRef<Path>>(
@@ -52,7 +134,8 @@ pub fn load_mapped_safetensors<P: AsRef<Path>>(
     let file = File::open(path)?;
     // SAFETY: The returned mapping is read-only and we keep it alive for as long as
     // the metadata is exposed from MappedSafeTensorsFile.
-    let mmap = unsafe { Mmap::map(&file)? };
+    // SAFETY: SafeTensors files are opened read-only and not modified while mapped.
+    let mmap = unsafe { crate::bytes::map_readonly(&file)? };
     let st =
         SafeTensors::deserialize(&mmap).map_err(|e| SafeTensorsError::Parse(format!("{e:?}")))?;
 
@@ -86,6 +169,7 @@ fn convert_dtype(dt: safetensors::tensor::Dtype) -> Result<DType, SafeTensorsErr
     match dt {
         safetensors::tensor::Dtype::F32 => Ok(DType::F32),
         safetensors::tensor::Dtype::F16 => Ok(DType::F16),
+        safetensors::tensor::Dtype::BF16 => Ok(DType::BF16),
         safetensors::tensor::Dtype::I8 => Ok(DType::I8),
         safetensors::tensor::Dtype::I16 => Ok(DType::I16),
         safetensors::tensor::Dtype::I32 => Ok(DType::I32),

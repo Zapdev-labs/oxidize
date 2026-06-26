@@ -130,6 +130,18 @@ impl Model for LoadedModel {
     }
 }
 
+impl LoadedModel {
+    /// Mutable access to the underlying [`InferenceModel`] — the only backend
+    /// with a batched `forward_batch`, which the continuous-batching engine
+    /// requires. Returns `None` for all other backends.
+    pub fn as_inference_mut(&mut self) -> Option<&mut InferenceModel> {
+        match self {
+            Self::Inference(model) => Some(model.as_mut()),
+            _ => None,
+        }
+    }
+}
+
 pub fn load_model_runtime(args: &Args) -> Result<Option<Arc<ModelRuntime>>, String> {
     let Some(model_path) = args.model.as_ref() else {
         return Ok(None);

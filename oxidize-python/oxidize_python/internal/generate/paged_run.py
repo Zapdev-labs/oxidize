@@ -11,7 +11,14 @@ if TYPE_CHECKING:
 from oxidize_python.core.model.loader import LoaderConfig, load_gguf_model_from_path
 from oxidize_python.core.model.model import Model, Session, Token
 from oxidize_python.core.model.sampling import greedy
-from oxidize_python.core.paged.paged import Scheduler, default_scheduler_config
+from oxidize_python.core.paged.paged import (
+    Scheduler,
+    SchedulerV2,
+    SchedulerV2Config,
+    SequenceStatus,
+    default_scheduler_config,
+    default_scheduler_v2_config,
+)
 from oxidize_python.core.tokenizer import from_gguf_metadata
 from oxidize_python.core.tokenizer.bpe import BpeTokenizer
 from oxidize_python.core.tokenizer.tokenizer import EncodeOptions, SpecialTokens
@@ -75,6 +82,91 @@ class PagedGenerateRuntime:
                 self.max_tok.pop(rid, None)
                 self.generated.pop(rid, None)
         return out
+
+
+class PagedGenerateRuntimeV2:
+    """Budgeted three-phase paged runtime mirroring
+    oxidize-golang/internal/server/paged_runtime.go::PagedRuntimeV2.
+
+    It enforces a token budget per step, supports prefill chunking and prefix
+    caching, and builds an InputBatch each step so multiple sequences can be
+    processed together. The model forward is still driven per-sequence (one
+    session each) because the pure-Python model backend does not yet expose a
+    fused multi-sequence kernel, but scheduling, batching metadata, and block
+    management mirror the Rust scheduler.
+    """
+
+    def __init__(
+        self,
+        model_path: str,
+        config: SchedulerV2Config | None = None,
+        total_blocks: int = 1024,
+        block_size: int = 16,
+    ) -> None:
+        loaded = load_gguf_model_from_path(model_path, LoaderConfig())
+        self.mdl: Model = loaded
+        self.sched = SchedulerV2(
+            config or default_scheduler_v2_config(), total_blocks, block_size
+        )
+        self.sessions: dict[int, Session] = {}
+        self.model_prefilled: dict[int, int] = {}
+
+    def enqueue(
+        self,
+        prompt_tokens: list[int],
+        max_new: int,
+        stop_token: int = 2,
+        has_stop: bool = True,
+    ) -> int:
+        seq_id = self.sched.add_request(prompt_tokens, max_new, stop_token, has_stop)
+        self.sessions[seq_id] = Session()
+        self.model_prefilled[seq_id] = 0
+        return seq_id
+
+    def step(self) -> dict[int, Token]:
+        res = self.sched.step()
+        if not res.scheduled_seq_ids:
+            return {}
+        batch = self.sched.build_input_batch(res)
+
+        sampled: dict[int, int] = {}
+        out: dict[int, Token] = {}
+        for i, seq_id in enumerate(batch.seq_ids):
+            sess = self.sessions.get(seq_id)
+            if sess is None:
+                sess = Session()
+                self.sessions[seq_id] = sess
+            toks = [Token(t) for t in batch.token_ids[i]]
+            if not toks:
+                continue
+            logits = self.mdl.forward(toks, sess)
+            # Only sequences finishing their prefill (or decoding) produce a
+            # sampled token this step. For a prefill chunk that does not yet
+            # reach the end of the prompt, we keep accumulating context and skip
+            # sampling so we do not emit mid-prompt tokens.
+            if batch.is_prefill[i]:
+                seq = self.sched.get_sequence(seq_id)
+                if seq is None or seq.remaining_prefill_tokens() > 0:
+                    continue
+            next_tok = greedy(logits)
+            sampled[seq_id] = int(next_tok)
+            out[seq_id] = next_tok
+
+        self.sched.postprocess_step(sampled)
+        # Reap fully finished sequences' sessions.
+        for seq_id in list(out.keys()):
+            seq = self.sched.get_sequence(seq_id)
+            if seq is not None and seq.status == SequenceStatus.FINISHED:
+                self.sessions.pop(seq_id, None)
+                self.model_prefilled.pop(seq_id, None)
+        return out
+
+    def stats(self) -> tuple[int, int, int]:
+        return (
+            self.sched.waiting_count(),
+            self.sched.running_count(),
+            self.sched.pool.free_count(),
+        )
 
 
 def run_paged_from_gguf(cfg: "RunConfig", stdout: _Stdout) -> None:
