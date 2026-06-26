@@ -370,7 +370,7 @@ impl<'a, T: Model> SpeculativeDecoder<'a, T> {
         self.stats.target_forward_passes += 1;
 
         // 3. Speculative decode: accept/reject
-        let randoms: Vec<f32> = (0..=k).map(|_| fastrand::f32()).collect();
+        let randoms: Vec<f32> = (0..=2 * k).map(|_| fastrand::f32()).collect();
 
         let result = speculative_decode(
             &draft_tokens,

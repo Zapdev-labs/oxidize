@@ -72,10 +72,6 @@ pub(crate) fn write_block(
     attn_out: &[f32],
 ) {
     let Some(path) = dump_path() else { return };
-    // Claim the one-shot token exactly once.
-    if FIRED.swap(true, Ordering::SeqCst) {
-        return;
-    }
 
     let mut buf = String::new();
     buf.push_str(&format!(
@@ -87,13 +83,17 @@ pub(crate) fn write_block(
     write_labeled(&mut buf, "v_cur", v_cur, 128);
     write_labeled(&mut buf, "attn_out", attn_out, 256);
 
-    if let Ok(mut f) = std::fs::OpenOptions::new()
+    if FIRED.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+        return;
+    }
+    let write_ok = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)
-    {
-        let _ = f.write_all(buf.as_bytes());
-        let _ = f.flush();
+        .and_then(|mut f| f.write_all(buf.as_bytes()).and_then(|_| f.flush()))
+        .is_ok();
+    if !write_ok {
+        FIRED.store(false, Ordering::SeqCst);
     }
 }
 

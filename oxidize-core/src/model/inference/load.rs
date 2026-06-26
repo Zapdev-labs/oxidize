@@ -51,7 +51,7 @@ impl InferenceModel {
                         | GgufQuantizationType::IQ1_M
                         | GgufQuantizationType::NVFP4
                 );
-                if should_keep_quantized(name) && use_mmap_flag {
+                if should_keep_quantized(name) && use_mmap_flag && is_supported_quant_gemv {
                     Ok(WeightStorage::MmapQuantized(
                         qtype,
                         mapped.tensor_mmap(tensor),

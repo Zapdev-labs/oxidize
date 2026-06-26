@@ -1377,7 +1377,7 @@ impl InferenceModel {
 
         // The output (lm_head) weight must be strict Q4_K for the batched head;
         // otherwise we cannot run the whole forward on-device → fall back.
-        let out_q4k = Self::q4k_bytes(&self.output_weight).map(<[u8]>::to_vec);
+        let out_q4k = Self::q4k_bytes(&self.output_weight);
         if need_logits && out_q4k.is_none() {
             if dbg {
                 eprintln!("forward_batch_gpu ineligible: output (lm_head) weight is not strict Q4_K");

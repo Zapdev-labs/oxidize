@@ -1,7 +1,0 @@
-HTTP/1.1 200 OK
-content-type: application/json
-content-length: 358
-date: Thu, 18 Jun 2026 19:43:05 GMT
-
-{"choices":[{"finish_reason":"stop","index":0,"text":"нің▁dire▁একটি핞▁rapproche▁함께どんどんtPeq▁लिए▁जाहिरand▁подро▁__för▁და"}],"created":1781811785,"id":"cmpl-oxidize","model":"gemma4-coding-Q4_K_M","object":"text_completion","usage":{"completion_tokens":16,"prompt_tokens":2,"total_tokens":18}}
-TOTAL_TIME=3.120087

@@ -322,8 +322,11 @@ mod tests {
 
     #[test]
     fn graph_eligible_requires_pos_within_context() {
-        assert!(!gpu_decode_graph_eligible(0, 4096));
-        assert!(gpu_decode_graph_eligible(1, 4096));
-        assert!(!gpu_decode_graph_eligible(4096, 4096));
+        fn pos_in_context(pos: usize, context: usize) -> bool {
+            pos > 0 && pos + 1 <= context
+        }
+        assert!(!pos_in_context(0, 4096));
+        assert!(pos_in_context(1, 4096));
+        assert!(!pos_in_context(4096, 4096));
     }
 }

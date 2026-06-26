@@ -14,9 +14,14 @@ if [[ -z "${HF_TOKEN:-}" ]]; then
   exit 1
 fi
 
-if [[ ! -d "$SPECFORGE_REPO" ]]; then
+if [[ ! -d "$SPECFORGE_REPO/.git" ]] || [[ ! -f "$SPECFORGE_REPO/pyproject.toml" ]]; then
   echo "==> cloning SpecForge"
   git clone https://github.com/sgl-project/SpecForge.git "$SPECFORGE_REPO"
+fi
+
+if [[ ! -f "$SPECFORGE_REPO/pyproject.toml" ]]; then
+  echo "error: $SPECFORGE_REPO does not look like a SpecForge checkout" >&2
+  exit 1
 fi
 
 mkdir -p "$DRAFT_OUT"

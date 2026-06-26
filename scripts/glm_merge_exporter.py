@@ -21,7 +21,8 @@ SHARD_TOTAL = 282
 TARGET_BYTES = 1_508_000_000_000  # ~1.5 TB per model
 
 _last_cpu_sample: tuple[int, int] | None = None
-
+_dir_bytes_cache: dict[str, tuple[float, int]] = {}
+_DIR_BYTES_TTL_SEC = 60.0
 
 def proc_root() -> Path:
     host = Path(os.environ.get("HOST_PROC", "/host/proc"))
@@ -265,10 +266,17 @@ def host_metrics_lines() -> list[str]:
 def dir_bytes(path: Path) -> int:
     if not path.exists():
         return 0
+    key = str(path)
+    now = time.monotonic()
+    cached = _dir_bytes_cache.get(key)
+    if cached is not None and now - cached[0] < _DIR_BYTES_TTL_SEC:
+        return cached[1]
     out = run(["du", "-sb", str(path)])
     if not out:
         return 0
-    return int(out.split()[0])
+    nbytes = int(out.split()[0])
+    _dir_bytes_cache[key] = (now, nbytes)
+    return nbytes
 
 
 def count_shards(path: Path) -> int:

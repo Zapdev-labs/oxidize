@@ -1,6 +1,0 @@
-HTTP/1.1 500 Internal Server Error
-content-type: application/json
-content-length: 171
-date: Thu, 18 Jun 2026 19:34:27 GMT
-
-{"error":{"message":"generation error: Model(InferenceFailed(\"flash attention heads: InvalidOutputLength { expected: 1024, actual: 8192 }\"))","type":"generation_error"}}

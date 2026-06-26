@@ -471,7 +471,7 @@ pub fn speculative_decode(
     if draft_tokens.is_empty()
         || draft_logits.len() != draft_tokens.len()
         || target_logits.len() != draft_tokens.len() + 1
-        || randoms.len() < draft_tokens.len() + 1
+        || randoms.len() < 2 * draft_tokens.len() + 1
     {
         return Err(SamplingError::InvalidSpeculativeInputs);
     }
@@ -570,13 +570,8 @@ pub fn speculative_decode(
                 used_residual_fallback: true,
             });
         }
-        // The accept/reject test above consumed `randoms[step]`. Reusing it to
-        // sample the residual distribution correlates the rejection decision with
-        // the residual draw and breaks the speculative-decoding contract (the
-        // residual sample must be an *independent* uniform). Derive a fresh,
-        // decorrelated uniform from `randoms[step]` so callers keep passing a
-        // single `k + 1`-length array while the residual draw stays independent.
-        let residual_random = decorrelate_uniform(randoms[step], step as u64);
+        let k = draft_tokens.len();
+        let residual_random = randoms[k + 1 + step];
         let sampled = sample_probabilities(&residual, residual_random)?;
         emitted.push(sampled as u32);
         return Ok(SpeculativeDecodeResult {
@@ -921,22 +916,6 @@ fn residual_probs(target_probs: &[f32], draft_probs: &[f32]) -> Vec<f32> {
         }
     }
     residual
-}
-
-/// Derive a fresh uniform in `[0, 1)` that is statistically independent of the
-/// input uniform. Used by speculative decoding so the residual-distribution draw
-/// does not reuse the same uniform that drove the accept/reject decision (which
-/// would correlate the two and bias the residual sample). Deterministic in
-/// `(random, salt)` so verification stays reproducible for a fixed RNG stream.
-fn decorrelate_uniform(random: f32, salt: u64) -> f32 {
-    // SplitMix64-style avalanche of the input bits plus a per-step salt.
-    let bits = (random.to_bits() as u64) ^ salt.wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    let mut z = bits.wrapping_add(0x9E37_79B9_7F4A_7C15);
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    z ^= z >> 31;
-    // Map the top 24 bits into [0, 1); divisor is 2^24 so the result is < 1.0.
-    ((z >> 40) as f32) / ((1u32 << 24) as f32)
 }
 
 fn sample_probabilities(probs: &[f32], random: f32) -> Result<usize, SamplingError> {
@@ -1386,7 +1365,7 @@ mod tests {
                 vec![10.0, 0.0, 0.0],
             ],
             SamplingConfig::default(),
-            &[0.2, 0.3, 0.2],
+            &[0.2, 0.3, 0.2, 0.0, 0.2],
         )
         .expect("speculative decode should succeed");
 
@@ -1402,7 +1381,7 @@ mod tests {
             &[vec![10.0, 0.0, 0.0]],
             &[vec![0.0, 10.0, 0.0], vec![0.0, 0.0, 10.0]],
             SamplingConfig::default(),
-            &[0.9, 0.1],
+            &[0.9, 0.0, 0.1],
         )
         .expect("speculative decode should succeed");
 

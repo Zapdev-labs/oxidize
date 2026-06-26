@@ -1,6 +1,0 @@
-HTTP/1.1 500 Internal Server Error
-content-type: application/json
-content-length: 171
-date: Thu, 18 Jun 2026 19:28:46 GMT
-
-{"error":{"message":"generation error: Model(InferenceFailed(\"attn_q: \\\"InvalidMatrixLength { expected: 8847360, actual: 17694720 }\\\"\"))","type":"generation_error"}}

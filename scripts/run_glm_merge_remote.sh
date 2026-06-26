@@ -4,6 +4,8 @@ set -euo pipefail
 export HF_TOKEN="${HF_TOKEN:?set HF_TOKEN}"
 export PATH="$HOME/.venvs/merge/bin:$HOME/.local/bin:$PATH"
 
+mkdir -p "$HOME/work"
+
 A_DIR="$HOME/models/GLM-5.1"
 B_CACHE="$HOME/models/GLM-5.2-cache"
 OUT_DIR="$HOME/models/GLM-5.1-5.2-merged"
@@ -22,6 +24,11 @@ while true; do
     break
   fi
   if ! pgrep -f 'hf download zai-org/GLM-5.1' >/dev/null 2>&1; then
+    if [[ "$partial" -gt 0 ]]; then
+      log "download process not running but ${partial} incomplete shards remain — waiting"
+      sleep 120
+      continue
+    fi
     if [[ "$n" -lt 282 ]]; then
       log "download process ended with $n shards — restarting"
       nohup hf download zai-org/GLM-5.1 --local-dir "$A_DIR" >> "$HOME/work/glm51-download.log" 2>&1 &
@@ -57,9 +64,8 @@ log "copying tokenizer/config from GLM-5.2..."
 for f in config.json tokenizer.json tokenizer_config.json generation_config.json chat_template.jinja; do
   python3 -c "
 from huggingface_hub import hf_hub_download
-import shutil, os
-p = hf_hub_download('zai-org/GLM-5.2', '$f', local_dir='$OUT_DIR', token=os.environ['HF_TOKEN'])
-shutil.copy(p, '$OUT_DIR/$f')
+import os
+hf_hub_download('zai-org/GLM-5.2', '$f', local_dir='$OUT_DIR', token=os.environ['HF_TOKEN'])
 " 2>/dev/null || true
 done
 

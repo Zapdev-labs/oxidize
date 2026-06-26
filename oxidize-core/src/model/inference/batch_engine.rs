@@ -107,7 +107,10 @@ pub struct ContinuousBatchEngine {
 impl ContinuousBatchEngine {
     /// Build an engine sized for `model`'s KV geometry. Reads only shape
     /// (`kv_layer_count`, `kv_row_len`); it does not borrow the model afterwards.
-    pub fn new(model: &InferenceModel, cfg: BatchConfig) -> Self {
+    pub fn new(model: &InferenceModel, mut cfg: BatchConfig) -> Self {
+        if cfg.max_batch == 0 {
+            cfg.max_batch = 1;
+        }
         Self {
             cfg,
             kv_layers: model.kv_layer_count(),
@@ -182,6 +185,11 @@ impl ContinuousBatchEngine {
     where
         F: FnMut(SeqId, &[f32]) -> Token,
     {
+        if model.kv_layer_count() != self.kv_layers || model.kv_row_len() != self.kv_len {
+            return Err(ModelError::InferenceFailed(
+                "continuous batch engine KV geometry does not match model".to_string(),
+            ));
+        }
         let mut outputs = Vec::new();
         self.decode_active(model, &mut select, &mut outputs)?;
         self.admit_and_prefill(model, &mut select, &mut outputs)?;

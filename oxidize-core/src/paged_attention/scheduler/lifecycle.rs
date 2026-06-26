@@ -48,6 +48,9 @@ impl Scheduler {
             .sequences
             .get_mut(&seq_id)
             .ok_or(SchedulerError::SequenceNotFound { seq_id })?;
+        if seq.status != SequenceStatus::Running {
+            return Ok(());
+        }
         seq.set_status(SequenceStatus::Finished);
         let physical_blocks: Vec<BlockId> = seq.block_table.physical_blocks().to_vec();
         for block_id in physical_blocks {
@@ -63,10 +66,9 @@ impl Scheduler {
     pub fn remove_sequence(&mut self, seq_id: SeqId) -> Result<(), SchedulerError> {
         let seq = self
             .sequences
-            .remove(&seq_id)
+            .get(&seq_id)
             .ok_or(SchedulerError::SequenceNotFound { seq_id })?;
 
-        // If the sequence was still running (not yet finished), free its blocks.
         if seq.status == SequenceStatus::Running {
             for &block_id in seq.block_table.physical_blocks() {
                 self.block_pool.dec_ref(block_id)?;
@@ -75,6 +77,7 @@ impl Scheduler {
         }
 
         self.waiting.retain(|&id| id != seq_id);
+        self.sequences.remove(&seq_id);
         Ok(())
     }
 

@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-const MIN_SPLIT_K_SEQUENCE_LENGTH: usize = 1024;
+const MIN_CONTEXT_SPLIT_K_SEQUENCE_LENGTH: usize = 1024;
 const TOKENS_PER_SPLIT: usize = 256;
 pub(crate) const MAX_SPLITS: usize = 32;
 const TARGET_BLOCKS_PER_SM: usize = 2;
@@ -23,7 +23,7 @@ impl SplitKPlan {
             None => usize::MAX,
         };
         let occupancy_splits = const_min(target_blocks.div_ceil(query_heads), MAX_SPLITS);
-        let context_splits = if seq_len >= MIN_SPLIT_K_SEQUENCE_LENGTH {
+        let context_splits = if seq_len >= MIN_CONTEXT_SPLIT_K_SEQUENCE_LENGTH {
             const_min(seq_len.div_ceil(TOKENS_PER_SPLIT), MAX_SPLITS)
         } else {
             1
@@ -198,6 +198,11 @@ pub(crate) fn merge_softmax_partials_for_test(partials: &[(f32, f32, Vec<f32>)])
     let mut output = vec![0.0_f32; output_len];
 
     for (local_max, _, numerator) in partials {
+        assert_eq!(
+            numerator.len(),
+            output_len,
+            "split-K partial numerator length mismatch"
+        );
         let scale = (*local_max - global_max).exp() / denominator;
         for (component, partial_component) in output.iter_mut().zip(numerator) {
             *component += scale * partial_component;

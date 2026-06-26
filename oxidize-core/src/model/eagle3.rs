@@ -30,6 +30,7 @@ pub struct Eagle3Config {
     pub draft_vocab_size: usize,
     pub num_attention_heads: usize,
     pub num_key_value_heads: usize,
+    pub head_dim: Option<usize>,
     pub intermediate_size: usize,
     pub rms_norm_eps: f32,
     pub rope_theta: f32,
@@ -41,6 +42,9 @@ impl Eagle3Config {
     }
 
     pub fn head_dim(&self) -> usize {
+        if let Some(hd) = self.head_dim.filter(|&d| d > 0) {
+            return hd;
+        }
         if self.num_attention_heads == 0 {
             return 0;
         }
@@ -153,6 +157,7 @@ impl Eagle3Config {
             draft_vocab_size,
             num_attention_heads,
             num_key_value_heads,
+            head_dim: arch_u32("head_dim").map(|v| v as usize),
             intermediate_size,
             rms_norm_eps: arch_f32("attention.layer_norm_rms_epsilon")
                 .or_else(|| arch_f32("rms_norm_eps"))
@@ -225,6 +230,10 @@ impl Eagle3Config {
             .get("norm_before_residual")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        let head_dim = draft
+            .get("head_dim")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize);
 
         Self {
             hidden_size,
@@ -236,6 +245,7 @@ impl Eagle3Config {
             draft_vocab_size,
             num_attention_heads,
             num_key_value_heads,
+            head_dim,
             intermediate_size,
             rms_norm_eps,
             rope_theta,
@@ -294,20 +304,29 @@ pub fn is_eagle3_safetensors_path(path: &Path) -> bool {
     }
     if path.is_dir() {
         let config_path = path.join("config.json");
-        if let Ok(content) = std::fs::read_to_string(config_path) {
+        if let Ok(content) = std::fs::read_to_string(&config_path) {
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-                let single_layer = json
-                    .get("num_hidden_layers")
-                    .and_then(|v| v.as_u64())
-                    .is_some_and(|n| n == 1);
-                return json.get("draft_vocab_size").is_some() && single_layer;
+                if json.get("draft_vocab_size").is_some() {
+                    return true;
+                }
+                if json.get("eagle_config").is_some() || json.get("extract_layers").is_some() {
+                    return true;
+                }
             }
         }
+        return std::fs::read_dir(path).ok().is_some_and(|entries| {
+            entries.filter_map(Result::ok).any(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("safetensors"))
+            })
+        });
     }
     false
 }
 
-pub fn resolve_eagle3_safetensors_paths(path: &Path) -> Result<(PathBuf, PathBuf), String> {
+pub fn resolve_eagle3_safetensors_paths(path: &Path) -> Result<(Vec<PathBuf>, PathBuf), String> {
     if path.is_file() {
         if !path
             .extension()
@@ -328,7 +347,7 @@ pub fn resolve_eagle3_safetensors_paths(path: &Path) -> Result<(PathBuf, PathBuf
                 path.display()
             ));
         }
-        return Ok((path.to_path_buf(), config));
+        return Ok((vec![path.to_path_buf()], config));
     }
 
     if path.is_dir() {
@@ -338,7 +357,7 @@ pub fn resolve_eagle3_safetensors_paths(path: &Path) -> Result<(PathBuf, PathBuf
         }
         let preferred = path.join("model.safetensors");
         if preferred.is_file() {
-            return Ok((preferred, config));
+            return Ok((vec![preferred], config));
         }
         let mut shards: Vec<PathBuf> = std::fs::read_dir(path)
             .map_err(|e| format!("read {}: {e}", path.display()))?
@@ -350,11 +369,10 @@ pub fn resolve_eagle3_safetensors_paths(path: &Path) -> Result<(PathBuf, PathBuf
             })
             .collect();
         shards.sort();
-        let weights = shards
-            .into_iter()
-            .next()
-            .ok_or_else(|| format!("no .safetensors weights found in {}", path.display()))?;
-        return Ok((weights, config));
+        if shards.is_empty() {
+            return Err(format!("no .safetensors weights found in {}", path.display()));
+        }
+        return Ok((shards, config));
     }
 
     Err(format!("EAGLE3 draft path not found: {}", path.display()))
@@ -695,8 +713,14 @@ impl Eagle3DraftModel {
                     .map_err(|e| format!("quantized_size: {e:?}"))?;
                 let offset = info.absolute_offset as usize;
                 let shard = mapped.tensor_mmap(info);
+                let end = offset
+                    .checked_add(qsize)
+                    .ok_or_else(|| format!("offset overflow for {name}"))?;
+                if end > shard.len() {
+                    return Err(format!("tensor {name} out of bounds"));
+                }
                 return Ok(F32Weight::from_quantized(
-                    shard[offset..offset + qsize].to_vec(),
+                    shard[offset..end].to_vec(),
                     qtype,
                     out_dim,
                     in_dim,
@@ -750,7 +774,7 @@ impl Eagle3DraftModel {
     ) -> Result<Self, String> {
         let mapped = load_mapped_safetensors(weights_path)
             .map_err(|e| format!("load safetensors {}: {e}", weights_path.display()))?;
-        Self::load_from_mapped_safetensors(&mapped, config, target_vocab_size)
+        Self::load_from_mapped_safetensors_shards(std::slice::from_ref(&mapped), config, target_vocab_size)
     }
 
     pub fn load_eagle3_draft(
@@ -758,14 +782,21 @@ impl Eagle3DraftModel {
         target: Eagle3TargetHints,
     ) -> Result<Self, String> {
         if is_eagle3_safetensors_path(path) {
-            let (weights, config_path) = resolve_eagle3_safetensors_paths(path)?;
+            let (weight_paths, config_path) = resolve_eagle3_safetensors_paths(path)?;
             let config_json: serde_json::Value = serde_json::from_str(
                 &std::fs::read_to_string(&config_path)
                     .map_err(|e| format!("read {}: {e}", config_path.display()))?,
             )
             .map_err(|e| format!("parse {}: {e}", config_path.display()))?;
             let config = Eagle3Config::from_hf_json(&config_json, Some(&target));
-            return Self::load_from_safetensors(&weights, config, target.target_vocab_size);
+            let mut shards = Vec::with_capacity(weight_paths.len());
+            for weights_path in &weight_paths {
+                shards.push(
+                    load_mapped_safetensors(weights_path)
+                        .map_err(|e| format!("load safetensors {}: {e}", weights_path.display()))?,
+                );
+            }
+            return Self::load_from_mapped_safetensors_shards(&shards, config, target.target_vocab_size);
         }
         Err(format!(
             "expected EAGLE3 SafeTensors draft at {}, got unsupported format",
@@ -773,19 +804,21 @@ impl Eagle3DraftModel {
         ))
     }
 
-    fn load_from_mapped_safetensors(
-        mapped: &MappedSafeTensorsFile,
+    fn load_from_mapped_safetensors_shards(
+        shards: &[MappedSafeTensorsFile],
         config: Eagle3Config,
         target_vocab_size: Option<usize>,
     ) -> Result<Self, String> {
-        let mut canonical: HashMap<String, String> = HashMap::new();
-        for info in mapped.tensors() {
-            if let Some(gguf_name) = map_hf_eagle3_tensor_name(&info.name) {
-                canonical.insert(gguf_name, info.name.clone());
+        let mut canonical: HashMap<String, (usize, String)> = HashMap::new();
+        for (shard_idx, mapped) in shards.iter().enumerate() {
+            for info in mapped.tensors() {
+                if let Some(gguf_name) = map_hf_eagle3_tensor_name(&info.name) {
+                    canonical.insert(gguf_name, (shard_idx, info.name.clone()));
+                }
             }
         }
 
-        let resolve_name = |gguf_name: &str| -> Option<String> {
+        let resolve_name = |gguf_name: &str| -> Option<(usize, String)> {
             canonical.get(gguf_name).cloned()
         };
 
@@ -794,10 +827,11 @@ impl Eagle3DraftModel {
 
         let load_f32_with_dims =
             |gguf_name: &str| -> Result<Option<(Vec<f32>, Vec<u64>)>, String> {
-                let hf_name = match resolve_name(gguf_name) {
-                    Some(name) => name,
+                let (shard_idx, hf_name) = match resolve_name(gguf_name) {
+                    Some(names) => names,
                     None => return Ok(None),
                 };
+                let mapped = &shards[shard_idx];
                 let info = mapped
                     .tensor_info(&hf_name)
                     .ok_or_else(|| format!("missing tensor info for {hf_name}"))?;
@@ -872,7 +906,8 @@ impl Eagle3DraftModel {
         model.output = load_proj("output.weight")?;
         model.tok_embeddings = load_proj("token_embd.weight")?;
 
-        if let Some(hf_name) = resolve_name("d2t") {
+        if let Some((shard_idx, hf_name)) = resolve_name("d2t") {
+            let mapped = &shards[shard_idx];
             let info = mapped
                 .tensor_info(&hf_name)
                 .ok_or_else(|| format!("missing tensor info for {hf_name}"))?;
@@ -950,10 +985,10 @@ fn map_hf_eagle3_tensor_name(hf_name: &str) -> Option<String> {
     if name == "t2d" || name.contains("fc_norm") {
         return None;
     }
-    if name == "model.embed_tokens.weight" {
+    if name == "model.embed_tokens.weight" || name == "embed_tokens.weight" {
         return Some("token_embd.weight".into());
     }
-    if name == "model.norm.weight" {
+    if name == "model.norm.weight" || name == "norm.weight" {
         return Some("output_norm.weight".into());
     }
     if name == "lm_head.weight" || name == "model.lm_head.weight" {
@@ -1065,6 +1100,7 @@ mod tests {
             draft_vocab_size: 64_000,
             num_attention_heads: 32,
             num_key_value_heads: 8,
+            head_dim: None,
             intermediate_size: 14_336,
             rms_norm_eps: 1e-5,
             rope_theta: 500_000.0,

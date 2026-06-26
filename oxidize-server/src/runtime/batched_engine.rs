@@ -43,13 +43,13 @@ pub struct EngineSubmit {
 /// request handlers submit concurrently.
 #[derive(Clone)]
 pub struct BatchedEngineHandle {
-    submit_tx: mpsc::Sender<EngineSubmit>,
+    submit_tx: mpsc::SyncSender<EngineSubmit>,
 }
 
 impl BatchedEngineHandle {
     /// Submit a request; returns `false` if the engine thread has stopped.
     pub fn submit(&self, req: EngineSubmit) -> bool {
-        self.submit_tx.send(req).is_ok()
+        self.submit_tx.try_send(req).is_ok()
     }
 
     /// Spawn the engine thread for `runtime`. Returns `None` when batched decode
@@ -84,7 +84,7 @@ impl BatchedEngineHandle {
             default_capacity_tokens: ctx.max(256),
         };
 
-        let (submit_tx, submit_rx) = mpsc::channel::<EngineSubmit>();
+        let (submit_tx, submit_rx) = mpsc::sync_channel::<EngineSubmit>(256);
         let thread_runtime = Arc::clone(&runtime);
         let spawned = std::thread::Builder::new()
             .name("oxidize-batch-engine".to_string())
@@ -201,7 +201,11 @@ fn route_output(
         return;
     };
     let piece = runtime.tokenizer.decode(&[out.token]).unwrap_or_default();
-    let send_ok = st.out_tx.blocking_send(Ok(piece)).is_ok();
+    let send_ok = match st.out_tx.try_send(Ok(piece)) {
+        Ok(()) => true,
+        Err(tokio::sync::mpsc::error::TrySendError::Full(_))
+        | Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => false,
+    };
     if !send_ok {
         // Client gone — reclaim the slot so other sequences keep the batch full.
         engine.cancel(out.seq_id);

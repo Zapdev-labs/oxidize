@@ -2124,7 +2124,12 @@ pub fn gpu_forward_batch_layer(
                 .batched_activation
                 .as_ref()
                 .ok_or_else(|| "batched activation not initialised".to_string())?;
-            if ab.batch != b || ab.hidden_size != geom.hidden_size {
+            if ab.batch != b
+                || ab.hidden_size != geom.hidden_size
+                || ab.q_len != geom.q_len
+                || ab.kv_len != geom.kv_len
+                || ab.intermediate_size != geom.intermediate_size
+            {
                 return Err("gpu_forward_batch_layer: batched activation geometry mismatch".into());
             }
             (

@@ -153,6 +153,10 @@ pub fn dequantize_iq1_m_scalar(input: &[u8], output: &mut [f32]) -> Result<(), Q
             }
             out_ptr += 8;
 
+            iq1s_grid_decode(idx3, &mut grid_vals);
+            for j in 0..8 {
+                out[out_ptr + j] = dl2 * (grid_vals[j] as f32 + deltas[3]);
+            }
             out_ptr += 8;
         }
     }

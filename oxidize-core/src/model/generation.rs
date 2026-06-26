@@ -291,7 +291,7 @@ impl<'a, T: Model + ?Sized> SpeculativeGenerationStream<'a, T> {
         };
 
         // 3. Speculative decode: accept/reject draft tokens.
-        let randoms: Vec<f32> = (0..=draft_tokens.len())
+        let randoms: Vec<f32> = (0..=2 * draft_tokens.len())
             .map(|_| (self.random.as_mut())())
             .collect();
 
@@ -586,7 +586,7 @@ impl<'a> MtpGenerationStream<'a> {
             .map_err(GenerationError::Model)?;
         target_logits.extend(verified_logits);
 
-        let randoms: Vec<f32> = (0..=draft_tokens.len())
+        let randoms: Vec<f32> = (0..=2 * draft_tokens.len())
             .map(|_| (self.random.as_mut())())
             .collect();
         let result = speculative_decode(
@@ -912,7 +912,7 @@ impl<'a> Eagle3GenerationStream<'a> {
                 .map_err(GenerationError::Model)?,
         );
 
-        let randoms: Vec<f32> = (0..=draft_tokens.len())
+        let randoms: Vec<f32> = (0..=2 * draft_tokens.len())
             .map(|_| (self.random.as_mut())())
             .collect();
         let result = speculative_decode(
@@ -950,14 +950,16 @@ impl Stream for Eagle3GenerationStream<'_> {
     type Item = Result<Token, GenerationError>;
 
     fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        if let Some(token) = self.emit_buffer.pop_front() {
-            return Poll::Ready(self.emit_token(token));
-        }
         if self.generated >= self.config.generation.max_new_tokens
             || matches!(self.state, GenerationState::Done)
         {
             self.state = GenerationState::Done;
+            self.emit_buffer.clear();
             return Poll::Ready(None);
+        }
+
+        if let Some(token) = self.emit_buffer.pop_front() {
+            return Poll::Ready(self.emit_token(token));
         }
 
         let Some(target_model) = self.target_model.take() else {

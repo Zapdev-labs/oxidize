@@ -77,7 +77,7 @@ def bench_vllm():
 
     llm = LLM(model=AWQ_REPO, quantization="awq", max_model_len=4096,
               gpu_memory_utilization=0.9, enforce_eager=False)
-    sp = SamplingParams(temperature=0.0, max_tokens=MAX_TOKENS, ignore_eos=True)
+    sp = SamplingParams(temperature=0.0, max_tokens=MAX_TOKENS)
     llm.generate(["warmup"], sp)  # warmup (CUDA graph capture)
     best = 0.0
     for _ in range(3):

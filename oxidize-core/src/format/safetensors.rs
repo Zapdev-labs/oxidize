@@ -110,7 +110,17 @@ pub fn tensor_bytes_to_i64(
         }
         DType::F32 | DType::F16 | DType::BF16 => {
             let floats = tensor_bytes_to_f32(dtype, bytes, element_count)?;
-            Ok(floats.into_iter().map(|v| v as i64).collect())
+            floats
+                .into_iter()
+                .map(|v| {
+                    if !v.is_finite() {
+                        return Err(SafeTensorsError::Parse(format!(
+                            "non-finite float {v} cannot be decoded as integer"
+                        )));
+                    }
+                    Ok(v.trunc() as i64)
+                })
+                .collect()
         }
         other => Err(SafeTensorsError::Parse(format!(
             "unsupported dtype for integer decode: {other:?}"

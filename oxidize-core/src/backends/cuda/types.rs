@@ -348,9 +348,8 @@ impl Drop for CudaGraphExec {
 #[cfg(feature = "cuda")]
 impl Drop for GpuState {
     fn drop(&mut self) {
-        // The cuBLAS handle (from `cublasCreate_v2`) is a raw resource the other
-        // RAII fields don't release. `Drop::drop` runs before the struct's
-        // fields are dropped, so the CUDA context (`_ctx`) is still current.
+        // Graph executables must be destroyed while the CUDA context is current.
+        self.decode_layer_graphs.clear();
         if !self.cublas.is_null() {
             unsafe {
                 cublas_sys::cublasDestroy_v2(self.cublas);

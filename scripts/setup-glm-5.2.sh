@@ -29,7 +29,11 @@ if [[ -z "$HF_BIN" ]]; then
   exit 1
 fi
 
-"$HF_BIN" auth login --token "$HF_TOKEN" --add-to-git-credential 2>/dev/null || true
+if [[ "${HF_PERSIST_CREDENTIAL:-0}" == "1" ]]; then
+  "$HF_BIN" auth login --token "$HF_TOKEN" --add-to-git-credential 2>/dev/null || true
+else
+  "$HF_BIN" auth login --token "$HF_TOKEN" 2>/dev/null || true
+fi
 
 mkdir -p "$ROOT"/{target,eagle3/draft,quantspec,logs}
 
@@ -46,6 +50,7 @@ echo "==> downloading target GGUF: $TARGET_REPO ($TARGET_QUANT) -> $ROOT/target"
 
 wait "$EAGLE3_PID" || {
   echo "warning: EAGLE3 draft download failed; see $ROOT/logs/eagle3-download.log" >&2
+  exit 1
 }
 
 OXIDIZE_SCRIPTS="${OXIDIZE_REPO}/scripts/glm-5.2-eagle3/prepare-draft.py"
@@ -57,24 +62,26 @@ fi
 ln -sfn "$ROOT/target" "$ROOT/eagle3/target"
 ln -sfn "$ROOT/target" "$ROOT/quantspec/target"
 
-cat >"$ROOT/manifest.json" <<EOF
-{
-  "model": "GLM-5.2",
-  "target_repo": "$TARGET_REPO",
-  "target_quant": "$TARGET_QUANT",
-  "target_dir": "$ROOT/target",
-  "eagle3": {
-    "draft_repo": "$EAGLE3_DRAFT_REPO",
-    "draft_dir": "$ROOT/eagle3/draft",
-    "target_link": "$ROOT/eagle3/target",
-    "oxidize_run": "oxidize run $ROOT/eagle3/target/${TARGET_QUANT}/*.gguf --draft-model $ROOT/eagle3/draft/model.safetensors --draft-tokens 4 --tokenizer-model $ROOT/eagle3/target/${TARGET_QUANT}"
-  },
-  "quantspec": {
-    "target_link": "$ROOT/quantspec/target",
-    "oxidize_run": "oxidize run $ROOT/quantspec/target/${TARGET_QUANT}/*.gguf --quantspec --draft-tokens 6"
-  }
-}
-EOF
+python3 -c "
+import json, sys
+root, target_repo, target_quant, eagle3_repo = sys.argv[1:5]
+print(json.dumps({
+    'model': 'GLM-5.2',
+    'target_repo': target_repo,
+    'target_quant': target_quant,
+    'target_dir': root + '/target',
+    'eagle3': {
+        'draft_repo': eagle3_repo,
+        'draft_dir': root + '/eagle3/draft',
+        'target_link': root + '/eagle3/target',
+        'oxidize_run': f'oxidize run {root}/eagle3/target/{target_quant}/*.gguf --draft-model {root}/eagle3/draft/model.safetensors --draft-tokens 4 --tokenizer-model {root}/eagle3/target/{target_quant}'
+    },
+    'quantspec': {
+        'target_link': root + '/quantspec/target',
+        'oxidize_run': f'oxidize run {root}/quantspec/target/{target_quant}/*.gguf --quantspec --draft-tokens 6'
+    }
+}, indent=2))
+" "$ROOT" "$TARGET_REPO" "$TARGET_QUANT" "$EAGLE3_DRAFT_REPO" > "$ROOT/manifest.json"
 
 if [[ -d "$OXIDIZE_REPO" ]]; then
   echo "==> building oxidize in $OXIDIZE_REPO"

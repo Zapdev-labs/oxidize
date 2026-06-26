@@ -48,6 +48,8 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    if args.target_layers < 4:
+        parser.error("--target-layers must be >= 4 for valid extract_layers")
     draft_dir = args.draft_dir.expanduser().resolve()
     config_path = draft_dir / "config.json"
     if not config_path.is_file():

@@ -33,7 +33,11 @@ IGNORE = [
     ".cursor/**",
     ".claude/**",    # agent scheduler/lock files churn during build (modified-during-build guard)
     "deploy/**",
-    "**/*.lock",
+    "uv.lock",
+    "bun.lock",
+    "pnpm-lock.yaml",
+    "package-lock.json",
+    "yarn.lock",
     ".git/**",
     "**/*.log",
 ]
@@ -267,7 +271,7 @@ def batched_decode_tps(
         warm += ["warm", "--no-api", "--max-tokens", "1"]
         print(f"$ {' '.join(warm)}", flush=True)
         print("(streaming model download/warm output below)", flush=True)
-        w = subprocess.run(warm, cwd=REPO_ROOT)
+        subprocess.run(warm, cwd=REPO_ROOT)
         if not os.path.exists(gguf):
             hits = glob.glob(f"/root/.cache/oxidize/hf/{safe}/main/*.gguf")
             if hits:
@@ -487,7 +491,7 @@ def gpu_batched_verify(
         warm = [cli, "run", model, "--file", hf_file, "warm", "--no-api", "--max-tokens", "1"]
         print(f"$ {' '.join(warm)}", flush=True)
         print("(streaming model download/warm output below)", flush=True)
-        w = subprocess.run(warm, cwd=REPO_ROOT)
+        subprocess.run(warm, cwd=REPO_ROOT)
         if not os.path.exists(gguf):
             hits = glob.glob(f"/root/.cache/oxidize/hf/{safe}/main/*.gguf")
             gguf = hits[0] if hits else gguf
@@ -541,7 +545,7 @@ def gpu_batched_tps(
         warm = [cli, "run", model, "--file", hf_file, "warm", "--no-api", "--max-tokens", "1"]
         print(f"$ {' '.join(warm)}", flush=True)
         print("(streaming model download/warm output below)", flush=True)
-        w = subprocess.run(warm, cwd=REPO_ROOT)
+        subprocess.run(warm, cwd=REPO_ROOT)
         if not os.path.exists(gguf):
             hits = glob.glob(f"/root/.cache/oxidize/hf/{safe}/main/*.gguf")
             if hits:
@@ -741,6 +745,7 @@ def gpu_profile(
                 mem_utils.append(float(parts[1]))
                 powers.append(float(parts[2]))
             except ValueError:
+                # Ignore malformed sampler lines and continue.
                 pass
     warm = len(gpu_utils) // 3
     g, m, p = gpu_utils[warm:], mem_utils[warm:], powers[warm:]
@@ -1006,7 +1011,7 @@ def gpu_tps(
     else:
         base += ["--layer-cache", "64"]
 
-    speeds, transcript, sample = [], [], ""
+    speeds, transcript = [], []
     env = None
     if gpu_attn is not None:
         import os
@@ -1027,8 +1032,6 @@ def gpu_tps(
         if m:
             speeds.append(float(m[-1]))
         transcript.append(f"iter {i + 1}: {m[-1] if m else '?'} tok/s")
-        if i == 0:
-            sample = blob
 
     model_cache.commit()
     if not speeds:
@@ -1497,7 +1500,7 @@ def main(
         print(fn.remote(model, hf_file, prompt, max_tokens))
     elif action == "gpu-batched-verify":
         fn = gpu_batched_verify.with_options(gpu=gpu) if gpu != "L4" else gpu_batched_verify
-        print(fn.remote())
+        print(fn.remote(model, hf_file))
     elif action == "llama-cpp-bench":
         print(llama_cpp_bench.with_options(gpu="H100").remote())
     elif action == "gpu-batched-tps":

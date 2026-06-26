@@ -63,8 +63,12 @@ pub fn gemm_f32_cuda(
         // Cache left matrix (model weights) in VRAM.
         let left_key = f32_cache_key(left_matrix);
         if !gpu.resident_f32.contains_key(&left_key) {
+            let bytes = left_matrix.len() * std::mem::size_of::<f32>();
+            gpu.ensure_vram_headroom(bytes);
             let buffer = cust::memory::DeviceBuffer::from_slice(left_matrix).map_err(stringify)?;
+            gpu.resident_bytes += buffer.len();
             gpu.resident_f32.insert(left_key, buffer);
+            gpu.enforce_budget_protecting(Some(left_key));
         }
         let left_ptr = gpu
             .resident_f32
