@@ -1,0 +1,29 @@
+oxidize-core/src/compute/tensor/kernels/gemm_decode.rs
+  s_982228141f85f5::t_9ac33e4d057006 538-542
+.github/workflows/ci.yml
+  s_982228141f85f5::t_fb2a3f1e07a10e 51-69
+CONTRIBUTING.md
+  s_982228141f85f5::t_db4a431a3d62ec 38
+Cargo.lock
+  s_982228141f85f5::t_5c4d8cac3f9946 3579,3581,3593,3595,3602,3604,3612,3614,3624,3626
+Cargo.toml
+  s_982228141f85f5::t_3cfaaf43194183 27
+Makefile
+  s_982228141f85f5::t_090460e9995e09 3,10,15,26-28,42
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.1",
+  "base_commit_sha": "dce52f3638f71374c999716bf8aa9136d80ee200",
+  "prompts": {},
+  "sessions": {
+    "s_982228141f85f5": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "bc6c70ed-35e6-4c6f-b445-1194fdf2845c",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
