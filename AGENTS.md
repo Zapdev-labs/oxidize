@@ -121,9 +121,9 @@ make wasm     # outputs to dist/wasm
 
 ## Learned User Preferences
 - When adding `oxidize-python` or expanding `oxidize-golang`, keep all Rust crates and features; do not delete or replace the Rust workspace.
-- Parallel language ports should reach feature parity with `oxidize-core` (user asked for every Rust feature in Python/Go, with Python targeting similar CLOC to Rust).
+- Parallel Go/Python ports should reach `oxidize-core` feature parity (Python targeting similar CLOC to Rust); implement in `oxidize-golang` first, mirror to `oxidize-python`, and sync new `master` Rust features.
 - Keep `oxidize-py` (PyO3/maturin bindings) alongside the pure-Python `oxidize-python` package.
-- When extending Go/Python ports, implement in `oxidize-golang` first, mirror to `oxidize-python`, and sync new `master` Rust features rather than leaving ports stale.
+- Prioritize oxidize-cpp speed and llama.cpp feature parity for large-model inference; benchmark CPU deployments on the remote NUMA box `ai@192.168.1.132` when tuning.
 - For Go/Python GPU backends, use pure native implementations (no Rust FFI at runtime; CGO permitted for native GPU bindings); CUDA first, then Vulkan/Metal/WebGPU.
 - Avoid creating extra markdown documentation files unless asked; update README when needed.
 - On feature branches, stage and commit only files related to the task; exclude unrelated workspace changes.
@@ -133,14 +133,14 @@ make wasm     # outputs to dist/wasm
 - Prefer building and testing over starting development servers unless the user explicitly asks to run or serve.
 ## Learned Workspace Facts
 - `oxidize-golang/` is the active Go port of `oxidize-core`; CLI lives in `internal/cli/` (`run`, `chat`, `bench`, `inspect`, `list`, `serve`); HF GGUF resolver in `hf/`.
-- `oxidize-python/` is a pure-Python implementation (`oxidize_python`, `pyproject.toml`, uv/pytest); CLI mirrors Go subcommands; HF resolver in `oxidize_python/hf/hub.py` with cache `~/.cache/oxidize/hf`.
+- `oxidize-python/` is a pure-Python implementation (`oxidize_python`, `pyproject.toml`, uv/pytest); CLI mirrors Go subcommands; HF resolver in `oxidize_python/hf/hub.py` with cache `~/.cache/oxidize/hf`; `oxidize-py/` is the separate PyO3/maturin bindings crate.
 - Do not modify Rust crates when extending `oxidize-python`; port from `oxidize-golang` or Rust sources.
-- `oxidize-py/` is the PyO3 bindings crate, separate from `oxidize-python`.
+- `oxidize-cpp/` is the C++ Llama-family inference port (CPU + optional `OXIDIZE_CUDA` or `OXIDIZE_ROCM`); CLI `--auto`/`--print-plan` autotune NUMA/threads from model file size; CUDA fast path is `resident_forward` (~1 sync/token); llama.cpp parity is an active focus.
+- Remote inference box `ai@192.168.1.132` (primary NUMA bench host): 2× Xeon Gold 5220R, 96 logical CPUs, 376 GB RAM, dual NUMA (~192 GB/node), no GPU; checkout `~/oxidize/`, models `~/models/`; legacy box `ai@192.168.1.68` (32 logical, 123 GB); `scripts/bench-ai-box.sh` defaults to `.132`; `oxidize-cpp-glm/` is a separate GLM fork (MLA/IQ1/MoE) for GLM-5.2 — main `oxidize-cpp/` rejects MLA/GLM archs.
 - Go and Python port tests reuse GGUF fixtures under `oxidize-core/tests/fixtures/` (e.g. `valid-v3.gguf`).
 - DFlash speculative decoding in `oxidize-core/src/model/dflash.rs` is an active port target for `oxidize-golang` (and downstream Python); inference needs a compatible target GGUF paired with the draft (hidden-size mismatch falls back to target-only).
 - Rust `oxidize run` rewrites to `--serve-api` by default (background in-process server on `--api-host`/`--api-port`); realtime WebSocket at `ws://HOST:PORT/v1/realtime` (`oxidize-server/tests/realtime_ws.rs`).
 - `oxidize-convert` converts HuggingFace SafeTensors (file or model directory with `config.json`) to GGUF; core logic in `oxidize-core/src/format/safetensors_to_gguf.rs`.
 - Git installs must name `oxidize-cli` explicitly (`cargo install --git … oxidize-cli --bin oxidize`) because the workspace ships multiple binary crates.
 - `oxidize-prune` depends on `oxidize-kernels` for SIMD magnitude/Wanda masks (`prune.rs`), Q4_K dequant (`q4k_dequant.rs`), and rayon-parallel tensor processing in `wanda.rs`.
-- Both Go and Python ports include `core/autotune/` with `--auto`, `--no-auto`, and `--print-plan` CLI flags.
-- Run Go port tests with `CGO_ENABLED=0` (exclude `scripts` package); Python tests via `uv run pytest` (`OXIDIZE_SLOW_TESTS=1` for slow GGUF integrations).
+- Go/Python ports and `oxidize-cpp` expose `--auto`, `--no-auto`, `--print-plan` autotune; on dual-socket CPU, dense models ≤192 GB use `--numa single --threads 16`, models >192 GB use `--numa interleave --threads 48`; test Go with `CGO_ENABLED=0` or Python with `uv run pytest` (`OXIDIZE_SLOW_TESTS=1` for slow GGUF).
