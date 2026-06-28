@@ -1,0 +1,40 @@
+oxidize-cpp/src/cuda/gemm.cu
+  s_d803201cdc43b1::t_ce6b1a9a769fd4 204-220
+  s_d803201cdc43b1::t_4a2faf25239379 21,24-26
+  s_d803201cdc43b1::t_2348e0d373928a 268
+  s_d803201cdc43b1::t_c56b48dad39246 301-315
+  s_d803201cdc43b1::t_969cabc12d945c 103-104
+oxidize-cpp/CMakeLists.txt
+  s_d803201cdc43b1::t_f2d50216710720 1,9-13
+  s_d803201cdc43b1::t_68ed71b8c863dc 34-37,39-40,42-87
+oxidize-cpp/include/oxidize/gpu_config.hpp
+  s_d803201cdc43b1::t_678f98083efd07 1-12
+oxidize-cpp/src/cuda/cuda_common.cuh
+  s_d803201cdc43b1::t_ca209bd5dd91eb 2-3,13,19,21-24,29-30,32,34-37,42
+  s_d803201cdc43b1::t_5e38e628526d00 43
+oxidize-cpp/src/cuda/gpu_common.cuh
+  s_d803201cdc43b1::t_0b34c3d1b8b5d7 1-49
+oxidize-cpp/include/oxidize/cuda_backend.hpp
+  s_d803201cdc43b1::t_360640b0ab971a 2-4
+  s_d803201cdc43b1::t_57b72fc7ecb842 173
+  s_d803201cdc43b1::t_fec8b3d60c7bb6 14-15,17
+oxidize-cpp/src/cuda/backend.cu
+  s_d803201cdc43b1::t_7726146382ac76 735
+  s_d803201cdc43b1::t_58d3c5456ea6c2 16,18
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "db414b64623629ece9ea7584beb989325f2e6a7f",
+  "prompts": {},
+  "sessions": {
+    "s_d803201cdc43b1": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "eefdb158-8772-40c4-9f85-b0e0fbeb26dd",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
