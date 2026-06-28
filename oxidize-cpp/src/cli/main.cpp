@@ -33,6 +33,7 @@
 #include <string_view>
 #include <vector>
 
+#include "oxidize/autotune.hpp"
 #include "oxidize/config.hpp"
 #include "oxidize/gguf.hpp"
 #include "oxidize/model.hpp"
@@ -41,7 +42,7 @@
 #include "oxidize/sampler.hpp"
 #include "oxidize/tokenizer.hpp"
 
-#ifdef OXIDIZE_CUDA
+#ifdef OXIDIZE_GPU
 #include "oxidize/cuda_backend.hpp"
 #endif
 
@@ -75,6 +76,11 @@ struct Args {
   std::string quantize;  // "q8_0" => on-the-fly F16/BF16->Q8_0 at load
   std::string numa_mode;  // "" = default (single), "single","interleave","all","replicate",<N>
   int threads = 0;        // 0 = auto
+  bool auto_tune = false;
+  bool no_auto = false;
+  bool print_plan = false;
+  bool numa_explicit = false;
+  bool threads_explicit = false;
 };
 
 [[noreturn]] void usage_and_exit(const char* prog, int code) {
@@ -85,7 +91,8 @@ struct Args {
       "  --prompt <str>        Prompt text (default \"Hello\")\n"
       "  --tokens \"1,2,3\"      Pre-tokenized prefill ids (overrides --prompt)\n"
       "  --max-tokens <n>      Decode steps (default 64)\n"
-      "  --cuda                Request the CUDA device\n"
+      "  --cuda                Request the GPU (CUDA when built with -DOXIDIZE_CUDA=ON)\n"
+      "  --hip, --rocm, --gpu  Alias for --cuda (ROCm when built with -DOXIDIZE_ROCM=ON)\n"
       "  --seed <n>            RNG seed (default 0)\n"
       "  --temperature <f>     Sampling temperature (<=0 = greedy; default 0)\n"
       "  --top-k <n>           Top-k filter (0 = disabled)\n"
@@ -99,6 +106,9 @@ struct Args {
       "  --quantize q8_0       Quantize F16/BF16 weights to Q8_0 at load (~1.3x, near-lossless)\n"
       "  --numa <mode>         NUMA binding: single|interleave|all|replicate|<node-id> (default: single)\n"
       "  --threads <n>         OpenMP thread count (0 = auto based on NUMA node physical cores)\n"
+      "  --auto                Autotune NUMA/threads from model size + hardware\n"
+      "  --no-auto             Disable autotune even if --auto was set elsewhere\n"
+      "  --print-plan          Print autotune plan (JSON with --json) and exit\n"
       "  --json                Emit timing JSON\n",
       prog);
   std::exit(code);
@@ -149,7 +159,8 @@ Args parse_args(int argc, char** argv) {
         std::fprintf(stderr, "error: invalid --max-tokens '%s'\n", v.c_str());
         usage_and_exit(argv[0], 2);
       }
-    } else if (arg == "--cuda") {
+    } else if (arg == "--cuda" || arg == "--hip" || arg == "--rocm" ||
+               arg == "--gpu") {
       a.cuda = true;
     } else if (arg == "--seed") {
       std::string v = take_value(argc, argv, i, "--seed");
@@ -189,6 +200,14 @@ Args parse_args(int argc, char** argv) {
       a.cuda_graph = false;
     } else if (arg == "--numa") {
       a.numa_mode = take_value(argc, argv, i, "--numa");
+      a.numa_explicit = true;
+    } else if (arg == "--auto") {
+      a.auto_tune = true;
+    } else if (arg == "--no-auto") {
+      a.no_auto = true;
+    } else if (arg == "--print-plan") {
+      a.print_plan = true;
+      a.auto_tune = true;
     } else if (arg == "--threads") {
       std::string v = take_value(argc, argv, i, "--threads");
       size_t n = 0;
@@ -197,6 +216,7 @@ Args parse_args(int argc, char** argv) {
         usage_and_exit(argv[0], 2);
       }
       a.threads = static_cast<int>(n);
+      a.threads_explicit = true;
     } else if (arg == "-h" || arg == "--help") {
       usage_and_exit(argv[0], 0);
     } else {
@@ -254,6 +274,33 @@ double secs(std::chrono::steady_clock::duration d) {
 int main(int argc, char** argv) {
   Args args = parse_args(argc, argv);
 
+  const bool use_auto = args.auto_tune && !args.no_auto;
+  auto nodes = oxidize::discover_numa_nodes();
+  oxidize::TuningPlan tune_plan;
+  if (use_auto || args.print_plan) {
+    auto inv = oxidize::detect_hardware(static_cast<int>(nodes.size()));
+    auto model_fp = oxidize::fingerprint_model_file(args.model);
+    tune_plan = oxidize::plan_cpu(inv, model_fp);
+    if (args.print_plan) {
+      if (args.json) {
+        std::cout << oxidize::plan_to_json(tune_plan) << '\n';
+      } else {
+        std::cout << oxidize::plan_summary(tune_plan);
+      }
+      return 0;
+    }
+    if (!args.numa_explicit) {
+      args.numa_mode = tune_plan.numa_mode;
+    }
+    if (!args.threads_explicit) {
+      args.threads = tune_plan.threads;
+    }
+    if (!args.json) {
+      std::fprintf(stderr, "oxidize: autotune %s\n",
+                   oxidize::plan_summary(tune_plan).c_str());
+    }
+  }
+
   // ---- NUMA / affinity / thread binding ------------------------------------
   // Discover NUMA topology and pin threads + memory policy before model load
   // so that first-touch page allocation lands on the bound node.
@@ -275,7 +322,6 @@ int main(int argc, char** argv) {
     if (std::getenv("OMP_NUM_THREADS")) {
       ncfg.threads = 0;  // will be overridden by env var inside omp
     }
-    auto nodes = oxidize::discover_numa_nodes();
     int n_threads = oxidize::init_numa(ncfg, nodes);
     if (!nodes.empty()) {
       std::fprintf(stderr,
@@ -286,10 +332,10 @@ int main(int argc, char** argv) {
 
   try {
     if (args.cuda) {
-#ifndef OXIDIZE_CUDA
+#ifndef OXIDIZE_GPU
       std::fprintf(stderr,
-                   "warning: --cuda requested but binary built without CUDA; "
-                   "falling back to CPU\n");
+                   "warning: GPU requested (--cuda/--hip) but binary built "
+                   "without GPU support; falling back to CPU\n");
       args.cuda = false;
 #endif
     }
@@ -311,17 +357,23 @@ int main(int argc, char** argv) {
     bool cuda_active = false;
     auto* lm = dynamic_cast<LlamaModel*>(model.get());
     if (args.cuda && lm) cuda_active = lm->cuda_enabled();
-#ifdef OXIDIZE_CUDA
+#ifdef OXIDIZE_GPU
     if (cuda_active) {
       CudaBackend::instance().set_cuda_graph(args.cuda_graph);
     }
 #endif
     if (args.cuda && !cuda_active) {
       std::fprintf(stderr,
-                   "warning: --cuda requested but no CUDA device active; "
+                   "warning: GPU requested but no device active; "
                    "running on CPU\n");
     }
+#if defined(OXIDIZE_HIP)
+    const char* device = cuda_active ? "hip" : "cpu";
+#elif defined(OXIDIZE_CUDA)
     const char* device = cuda_active ? "cuda" : "cpu";
+#else
+    const char* device = "cpu";
+#endif
 
     const size_t vocab = model->vocab_size();
     const size_t ctx = model->context_size();
@@ -425,7 +477,7 @@ int main(int argc, char** argv) {
 
     auto pick = [&](const Logits& l) -> Token {
       if (greedy) {
-#ifdef OXIDIZE_CUDA
+#ifdef OXIDIZE_GPU
         if (cuda_active) {
           return static_cast<Token>(
               CudaBackend::instance().argmax(l.data(), l.size()));

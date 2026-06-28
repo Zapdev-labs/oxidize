@@ -32,7 +32,7 @@
 #include "oxidize/gguf.hpp"
 #include "oxidize/model.hpp"
 #include "oxidize/quant.hpp"
-#ifdef OXIDIZE_CUDA
+#ifdef OXIDIZE_GPU
 #include "oxidize/cuda_backend.hpp"
 #endif
 
@@ -172,7 +172,7 @@ class LlamaModel : public Model {
   void d_gemm_weight(const LlamaWeight& w, size_t rows, size_t cols,
                      const float* inputs, float* outputs, size_t batch);
 
-#ifdef OXIDIZE_CUDA
+#ifdef OXIDIZE_GPU
   void resident_sync_kv_to_gpu(size_t seq_len);
   // Build a device-resident decode view of this model's weights (WIP).
   CudaBackend::ModelView build_cuda_view() const;

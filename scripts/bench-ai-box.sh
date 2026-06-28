@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Benchmark oxidize-cpp on ai@192.168.1.68 (dual Xeon Silver 4110, 123GB, 2 NUMA).
+# Benchmark oxidize-cpp on the remote NUMA inference box.
+# P0 defaults: Qwen 0.5B uses --numa single --threads 16; large models use --auto.
 set -euo pipefail
 
-HOST="${OXIDIZE_AI_HOST:-ai@192.168.1.68}"
+HOST="${OXIDIZE_AI_HOST:-ai@192.168.1.132}"
 PASS="${OXIDIZE_AI_PASS:-machine}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CMAKE_REMOTE='/home/ai/.local/lib/python3.14/site-packages/cmake/data/bin/cmake'
@@ -26,27 +27,42 @@ bench_qwen() {
   run_remote "cd ~/oxidize/oxidize-cpp/build && ./oxidize-cpp \
     --model ~/models/qwen2.5-0.5b-instruct-q4_0.gguf \
     --tokens '1,2,3,4,5,6,7,8,9,10' --max-tokens 64 \
-    --numa interleave --threads 32 --json $extra"
+    --numa single --threads 16 --json $extra"
+}
+
+bench_qwen_auto() {
+  local extra="${1:-}"
+  run_remote "cd ~/oxidize/oxidize-cpp/build && ./oxidize-cpp \
+    --model ~/models/qwen2.5-0.5b-instruct-q4_0.gguf \
+    --tokens '1,2,3,4,5,6,7,8,9,10' --max-tokens 64 \
+    --auto --json $extra"
 }
 
 bench_glm() {
   run_remote "cd ~/oxidize/oxidize-cpp-glm/build && ./oxidize-cpp \
     --model ~/models/glm-5.2/target/UD-IQ1_M/GLM-5.2-UD-IQ1_M-00001-of-00006.gguf \
-    --tokens '1,2,3,4,5' --max-tokens 8 --json"
+    --tokens '1,2,3,4,5' --max-tokens 8 --auto --json"
 }
 
 case "${1:-all}" in
   sync)   sync_cpp ;;
   build)  build_cpp ;;
   qwen)   bench_qwen ;;
+  qwen-auto) bench_qwen_auto ;;
   glm)    bench_glm ;;
+  plan)
+    run_remote "cd ~/oxidize/oxidize-cpp/build && ./oxidize-cpp \
+      --model ~/models/qwen2.5-0.5b-instruct-q4_0.gguf --print-plan --json"
+    ;;
   all)
     sync_cpp
     build_cpp
-    echo "=== Qwen 0.5B (oxidize-cpp, NUMA interleave) ==="
+    echo "=== Qwen 0.5B (oxidize-cpp, NUMA single / 16 threads) ==="
     bench_qwen
-    echo "=== GLM-5.2 shard (oxidize-cpp-glm) ==="
+    echo "=== Qwen 0.5B (--auto) ==="
+    bench_qwen_auto || true
+    echo "=== GLM-5.2 shard (oxidize-cpp-glm, --auto) ==="
     bench_glm || true
     ;;
-  *) echo "usage: $0 {sync|build|qwen|glm|all}"; exit 1 ;;
+  *) echo "usage: $0 {sync|build|qwen|qwen-auto|glm|plan|all}"; exit 1 ;;
 esac

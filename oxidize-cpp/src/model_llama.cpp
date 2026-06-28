@@ -48,7 +48,7 @@ static void dbg_topk(const char* label, const float* v, size_t n, size_t k = 5) 
 
 #include "oxidize/tensor.hpp"
 
-#ifdef OXIDIZE_CUDA
+#ifdef OXIDIZE_GPU
 #include "oxidize/cuda_backend.hpp"
 #endif
 
@@ -165,7 +165,7 @@ void add_repeating_bias_batched(float* y, const std::vector<float>& bias,
 // GPU, activation vectors transferred per op) or the CPU tensor.hpp kernels.
 
 bool LlamaModel::set_cuda(bool on) {
-#ifdef OXIDIZE_CUDA
+#ifdef OXIDIZE_GPU
   use_cuda_ = on && CudaBackend::available();
 #else
   (void)on;
@@ -176,7 +176,7 @@ bool LlamaModel::set_cuda(bool on) {
 
 void LlamaModel::d_rms_norm(float* out, const float* x, const float* w, size_t n,
                             float eps, bool plus_one) {
-#ifdef OXIDIZE_CUDA
+#ifdef OXIDIZE_GPU
   if (use_cuda_) {
     CudaBackend::instance().rms_norm(out, x, w, n, eps, plus_one);
     return;
@@ -187,7 +187,7 @@ void LlamaModel::d_rms_norm(float* out, const float* x, const float* w, size_t n
 
 void LlamaModel::d_apply_rope(float* vec, size_t head_dim, size_t num_heads,
                               size_t pos, float theta, size_t rope_dim) {
-#ifdef OXIDIZE_CUDA
+#ifdef OXIDIZE_GPU
   if (use_cuda_) {
     CudaBackend::instance().apply_rope(vec, head_dim, num_heads, pos, theta,
                                        rope_dim);
@@ -198,7 +198,7 @@ void LlamaModel::d_apply_rope(float* vec, size_t head_dim, size_t num_heads,
 }
 
 void LlamaModel::d_swiglu(float* gate, const float* up, float* out, size_t n) {
-#ifdef OXIDIZE_CUDA
+#ifdef OXIDIZE_GPU
   if (use_cuda_) {
     CudaBackend::instance().swiglu_inplace(gate, up, out, n);
     return;
@@ -208,7 +208,7 @@ void LlamaModel::d_swiglu(float* gate, const float* up, float* out, size_t n) {
 }
 
 void LlamaModel::d_geglu(float* gate, const float* up, float* out, size_t n) {
-#ifdef OXIDIZE_CUDA
+#ifdef OXIDIZE_GPU
   if (use_cuda_) {
     CudaBackend::instance().geglu_inplace(gate, up, out, n);
     return;
@@ -221,7 +221,7 @@ void LlamaModel::d_attention(float* out, const float* q, const float* k_cache,
                              const float* v_cache, size_t seq_len,
                              size_t num_heads, size_t kv_heads,
                              size_t head_dim) {
-#ifdef OXIDIZE_CUDA
+#ifdef OXIDIZE_GPU
   if (use_cuda_) {
     CudaBackend::instance().attention_decode(out, q, k_cache, v_cache, seq_len,
                                              num_heads, kv_heads, head_dim);
@@ -234,7 +234,7 @@ void LlamaModel::d_attention(float* out, const float* q, const float* k_cache,
 
 void LlamaModel::d_gemv_weight(const LlamaWeight& w, size_t rows, size_t cols,
                                const float* x, float* y) {
-#ifdef OXIDIZE_CUDA
+#ifdef OXIDIZE_GPU
   if (use_cuda_) {
     if (w.quantized) {
       CudaBackend::instance().gemv_quantized(y, w.quant, w.qbytes(), rows, cols, x);
@@ -1178,7 +1178,7 @@ Logits LlamaModel::forward_batched(const std::vector<Token>& tokens,
   return final_head();
 }
 
-#ifdef OXIDIZE_CUDA
+#ifdef OXIDIZE_GPU
 // Build a CudaBackend::ModelView referencing this model's (host) weights for the
 // GPU-resident decode. Pointers are borrowed; the backend caches device copies.
 // WIP / UNVERIFIED — see cuda_backend.hpp::resident_forward.
@@ -1252,7 +1252,7 @@ void LlamaModel::resident_sync_kv_to_gpu(size_t seq_len) {
 #endif
 
 Logits LlamaModel::forward_single(Token token, size_t pos, bool need_logits) {
-#ifdef OXIDIZE_CUDA
+#ifdef OXIDIZE_GPU
   if (use_cuda_ && !any_moe_) {
     // Resident GPU decode: one host<->device sync per token (vs ~290 in the
     // per-op path). embed_token dequantizes + scales the row on the host; the
@@ -1288,7 +1288,7 @@ Logits LlamaModel::forward(const std::vector<Token>& tokens, Session& session) {
 
   if (!any_moe_ && tokens.size() > 1) {
     logits = forward_batched(tokens, start_pos, true);
-#ifdef OXIDIZE_CUDA
+#ifdef OXIDIZE_GPU
     if (use_cuda_) {
       resident_sync_kv_to_gpu(start_pos + tokens.size());
       CudaBackend::instance().resident_setup(build_cuda_view());

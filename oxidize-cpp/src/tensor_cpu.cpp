@@ -585,6 +585,20 @@ void matvec(float* y, const float* W, const float* x, size_t rows,
 
 void gemv_quantized(float* y, QuantType quant, const uint8_t* W, size_t rows,
                     size_t cols, const float* x) {
+  static const bool no_fused = std::getenv("OXK_NO_FUSED") != nullptr;
+  if (no_fused) {
+    const size_t rb = quantized_size(quant, cols);
+#pragma omp parallel
+    {
+      std::vector<float> row(cols);
+#pragma omp for schedule(static)
+      for (long long r = 0; r < static_cast<long long>(rows); ++r) {
+        dequantize_row(quant, W + static_cast<size_t>(r) * rb, row.data(), cols);
+        y[r] = dot_f32(row.data(), x, cols);
+      }
+    }
+    return;
+  }
   // Fast path: native F16 weights. Fused F16C convert+FMA dot, no dequant pass.
   if (quant == QuantType::F16) {
 #pragma omp parallel for schedule(static)
