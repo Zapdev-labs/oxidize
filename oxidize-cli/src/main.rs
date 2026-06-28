@@ -1,4 +1,5 @@
 mod backend;
+mod commands;
 mod help;
 mod pipeline;
 
@@ -183,7 +184,7 @@ fn user_passed_flag(argv: &[String], flag: &str) -> bool {
 }
 
 
-fn resolve_model_spec(spec: &str, hf_file: Option<&str>) -> io::Result<PathBuf> {
+pub(crate) fn resolve_model_spec(spec: &str, hf_file: Option<&str>) -> io::Result<PathBuf> {
     let path = PathBuf::from(spec);
     if path.exists() || !spec.contains('/') {
         return Ok(path);
@@ -704,6 +705,29 @@ where
         Some("list" | "ls") => {
             print_model_list()?;
             std::process::exit(0);
+        }
+        Some(cmd @ ("show" | "info" | "pull" | "inspect")) => {
+            let rest: Vec<String> = raw
+                .iter()
+                .skip(2)
+                .filter_map(|a| a.to_str().map(str::to_string))
+                .collect();
+            let result = match cmd {
+                "pull" => commands::run_pull(&rest),
+                "inspect" => commands::run_inspect(&rest),
+                _ => commands::run_show(&rest),
+            };
+            if let Err(error) = result {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+            std::process::exit(0);
+        }
+        Some("chat") => {
+            let mut rewritten = vec![raw[0].clone(), "run".into()];
+            rewritten.extend(raw.iter().skip(2).cloned());
+            rewritten.push("--chat".into());
+            return rewrite_run_args(rewritten);
         }
         Some("serve") => return rewrite_serve_args(raw),
         Some("gpu-cluster") => {
