@@ -13,9 +13,9 @@
 //   oxidize-cpp tensor_cpu.cpp / tensor.hpp (op contract + scalar math the
 //     kernels stay faithful to).
 //
-// Compiled only with OXIDIZE_CUDA defined (Modal: nvcc + CUDA 12.x, sm_80/90).
+// Compiled only with OXIDIZE_GPU defined (CUDA or ROCm-HIP).
 
-#ifdef OXIDIZE_CUDA
+#ifdef OXIDIZE_GPU
 
 #include "oxidize/cuda_backend.hpp"
 
@@ -732,4 +732,4 @@ void CudaBackend::resident_forward(const ModelView& mv, const float* embed_row,
 
 }  // namespace oxidize
 
-#endif  // OXIDIZE_CUDA
+#endif  // OXIDIZE_GPU

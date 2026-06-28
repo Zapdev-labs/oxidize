@@ -1,9 +1,6 @@
 #pragma once
-// Shared CUDA backend internals: error-checking macros and the device kernel
-// launch declarations used across the .cu translation units.
-//
-// Compiled only on the Modal build (nvcc + CUDA 12.x, sm_80 / sm_90). Not built
-// locally (no nvcc here) — that is expected.
+// Shared GPU backend internals (CUDA or ROCm-HIP): error-checking macros and
+// device kernel launch declarations used across the .cu translation units.
 //
 // Ported from: oxidize-core/src/backends/cuda.rs (kernel geometry: 256 threads
 // per block, rows*32 threads for the per-row GEMV kernels) and
@@ -13,33 +10,36 @@
 #include <cstdio>
 #include <cstdlib>
 
-#include <cuda_runtime.h>
-#include <cuda_fp16.h>
+#include "gpu_common.cuh"
 
 // ---------------------------------------------------------------------------
 // Error checking
 // ---------------------------------------------------------------------------
 
-#define CUDA_CHECK(expr)                                                     \
+#define GPU_CHECK(expr)                                                      \
   do {                                                                       \
-    cudaError_t _ox_err = (expr);                                           \
-    if (_ox_err != cudaSuccess) {                                           \
-      std::fprintf(stderr, "CUDA error %s at %s:%d: %s\n", #expr, __FILE__, \
-                   __LINE__, cudaGetErrorString(_ox_err));                  \
+    cudaError_t _ox_err = (expr);                                            \
+    if (_ox_err != cudaSuccess) {                                            \
+      std::fprintf(stderr, "GPU error %s at %s:%d: %s\n", #expr, __FILE__,   \
+                   __LINE__, cudaGetErrorString(_ox_err));                 \
       std::abort();                                                          \
     }                                                                        \
   } while (0)
 
+#define CUDA_CHECK GPU_CHECK
+
 // Check after a kernel launch (captures launch + async errors).
-#define CUDA_CHECK_KERNEL()                                                  \
+#define GPU_CHECK_KERNEL()                                                   \
   do {                                                                       \
-    cudaError_t _ox_err = cudaGetLastError();                              \
-    if (_ox_err != cudaSuccess) {                                           \
-      std::fprintf(stderr, "CUDA kernel launch error at %s:%d: %s\n",       \
-                   __FILE__, __LINE__, cudaGetErrorString(_ox_err));        \
+    cudaError_t _ox_err = cudaGetLastError();                                \
+    if (_ox_err != cudaSuccess) {                                            \
+      std::fprintf(stderr, "GPU kernel launch error at %s:%d: %s\n",         \
+                   __FILE__, __LINE__, cudaGetErrorString(_ox_err));       \
       std::abort();                                                          \
     }                                                                        \
   } while (0)
+
+#define CUDA_CHECK_KERNEL GPU_CHECK_KERNEL
 
 namespace oxidize {
 namespace cuda {

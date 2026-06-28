@@ -18,8 +18,12 @@
 
 #include "cuda_common.cuh"
 
+#ifndef OXIDIZE_HIP
 #include <cublasLt.h>
 #include <cuda_fp8.h>
+#else
+#include <hipblas/hipblas.h>
+#endif
 
 namespace oxidize {
 namespace cuda {
@@ -96,7 +100,8 @@ __global__ void geglu_kernel(float* __restrict__ gate,
   out[i] = gelu * up[i];
 }
 
-// --- cuBLASLt GEMM machinery ----------------------------------------------
+#ifndef OXIDIZE_HIP
+// --- cuBLASLt GEMM machinery (CUDA only) ----------------------------------
 
 cublasLtHandle_t g_lt_handle = nullptr;
 bool g_lt_inited = false;
@@ -196,6 +201,23 @@ void lt_matmul(cudaDataType_t in_type, cublasComputeType_t compute_type,
   cublasLtMatmulDescDestroy(op_desc);
 }
 
+#else  // OXIDIZE_HIP
+
+hipblasHandle_t g_hipblas = nullptr;
+bool g_hipblas_inited = false;
+
+void ensure_hipblas() {
+  if (!g_hipblas_inited) {
+    if (hipblasCreate(&g_hipblas) != HIPBLAS_STATUS_SUCCESS) {
+      std::fprintf(stderr, "hipblasCreate failed\n");
+      std::abort();
+    }
+    g_hipblas_inited = true;
+  }
+}
+
+#endif  // OXIDIZE_HIP
+
 }  // namespace
 
 void launch_gemv_f16(const __half* W, const float* x, float* y, unsigned rows,
@@ -243,6 +265,7 @@ void launch_geglu(float* gate, const float* up, float* out, unsigned n,
 void cuda_gemm_device(const float* dA, const float* dB, float* dC, int m, int k,
                       int n, void* scratch, size_t scratch_bytes,
                       cudaStream_t stream) {
+#ifndef OXIDIZE_HIP
   ensure_lt();
 
   const size_t a_elems = static_cast<size_t>(m) * k;
@@ -275,6 +298,21 @@ void cuda_gemm_device(const float* dA, const float* dB, float* dC, int m, int k,
     lt_matmul(CUDA_R_16F, CUBLAS_COMPUTE_32F, b16, a16, dC, n, m, k, n, k, n,
               CUBLAS_OP_N, CUBLAS_OP_N, nullptr, 0, stream);
   }
+#else
+  ensure_hipblas();
+  (void)scratch;
+  (void)scratch_bytes;
+  float alpha = 1.0f;
+  float beta = 0.0f;
+  hipblasSetStream(g_hipblas, stream);
+  // Row-major C[m x n] = A[m x k] * B[k x n] via column-major hipBLAS trick.
+  hipblasStatus_t st = hipblasSgemm(g_hipblas, HIPBLAS_OP_N, HIPBLAS_OP_N, n, m,
+                                    k, &alpha, dB, n, dA, k, &beta, dC, n);
+  if (st != HIPBLAS_STATUS_SUCCESS) {
+    std::fprintf(stderr, "hipblasSgemm failed: %d\n", static_cast<int>(st));
+    std::abort();
+  }
+#endif
 }
 
 }  // namespace cuda

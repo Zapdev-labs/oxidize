@@ -1,7 +1,7 @@
 #pragma once
-// CUDA GPU backend exposing the same dense-decode op set as
-// include/oxidize/tensor.hpp, so model_llama can run on the GPU when the
-// OXIDIZE_CUDA env var is set.
+// GPU backend (CUDA or ROCm-HIP) exposing the same dense-decode op set as
+// include/oxidize/tensor.hpp, so model_llama can run on the GPU when --cuda or
+// --hip is passed.
 //
 // Ported from (math + dispatch semantics):
 //   oxidize-core/src/backends/cuda.rs  (cuBLAS GEMV/GEMM, on-the-fly quantized
@@ -11,11 +11,10 @@
 //   oxidize-cpp tensor.hpp / tensor_cpu.cpp  (rms_norm, apply_rope, swiglu,
 //     geglu, softmax scalar reference math this backend stays faithful to)
 //
-// The whole file is compiled only when OXIDIZE_CUDA is defined (Modal build with
-// nvcc + CUDA 12.x targeting sm_80 / sm_90). On a host without CUDA the header
-// is an empty translation unit and nothing here is referenced.
+// Compiled only when OXIDIZE_GPU is defined (CUDA via nvcc, or ROCm via hipcc).
+// On CPU-only builds the header is empty and nothing here is referenced.
 
-#ifdef OXIDIZE_CUDA
+#ifdef OXIDIZE_GPU
 
 #include <cstddef>
 #include <cstdint>
@@ -171,4 +170,4 @@ class CudaBackend {
 
 }  // namespace oxidize
 
-#endif  // OXIDIZE_CUDA
+#endif  // OXIDIZE_GPU
