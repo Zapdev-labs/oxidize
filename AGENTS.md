@@ -144,3 +144,11 @@ make wasm     # outputs to dist/wasm
 - `oxidize-prune` depends on `oxidize-kernels` for SIMD magnitude/Wanda masks (`prune.rs`), Q4_K dequant (`q4k_dequant.rs`), and rayon-parallel tensor processing in `wanda.rs`.
 - Both Go and Python ports include `core/autotune/` with `--auto`, `--no-auto`, and `--print-plan` CLI flags.
 - Run Go port tests with `CGO_ENABLED=0` (exclude `scripts` package); Python tests via `uv run pytest` (`OXIDIZE_SLOW_TESTS=1` for slow GGUF integrations).
+
+## Cursor Cloud specific instructions
+- The startup update script ensures the Rust `stable` toolchain (edition 2024 needs >= 1.85; the base image ships 1.83 which is too old), `cargo fetch`, Go module deps, and the Python port's `uv sync`. Standard build/test/run commands live in `Makefile`, `QUICKSTART.md`, and `HOW_TO_INSTALL.md`.
+- Non-obvious gotcha: `make build` / `cargo build --workspace` currently FAILS to compile the optional `oxidize-finetuning` crate (`src/qlora.rs` borrow-check error, pre-existing). Build/test the core product per-crate instead, e.g. `cargo build -p oxidize-cli -p oxidize-server -p oxidize-quantize -p oxidize-convert` and `cargo test -p oxidize-core -p oxidize-cli -p oxidize-server -p oxidize-kernels`. The MUST product (CLI + server) is unaffected.
+- `make lint` (clippy `-D warnings`), `make audit` (needs `cargo install cargo-deny`), and the Python `ruff check` all currently report pre-existing warnings/errors; these are code-quality debts, not environment breakage.
+- CLI/server run with placeholder weights when no `--model` is given: `oxidize-cli --prompt ...` echoes the prompt and `/v1/chat/completions` returns an empty `chatcmpl-placeholder`. This is expected; real token generation requires a real GGUF (`--model path.gguf`, or an HF id via the resolver). Committed `oxidize-core/tests/fixtures/*.gguf` are tiny parser fixtures, not runnable models.
+- Go port auto-downloads the `go1.26.2` toolchain via `GOTOOLCHAIN=auto` on first `go build`/`go test` (base image has Go 1.22); no manual Go upgrade needed.
+- `uv` is installed to `~/.local/bin`; if not on PATH, invoke as `~/.local/bin/uv`. Run Python port commands from `oxidize-python/` (or pass `--directory oxidize-python`).
