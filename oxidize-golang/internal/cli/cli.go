@@ -13,37 +13,6 @@ import (
 	"github.com/Zapdev-labs/oxidize/golang/internal/serviceinfo"
 )
 
-func Run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer) error {
-	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
-		return runLegacy(ctx, args, stdout, stderr)
-	}
-	switch args[0] {
-	case "run":
-		return runCommand(ctx, args[1:], stdout, stderr)
-	case "chat":
-		return chatCommand(ctx, args[1:], stdout, stderr)
-	case "inspect":
-		return inspectCommand(args[1:], stdout)
-	case "bench":
-		return benchCommand(ctx, args[1:], stdout)
-	case "list", "ls":
-		return listCommand(args[1:], stdout)
-	case "serve":
-		return serveCommand(ctx, args[1:])
-	case "convert":
-		return convertCommand(args[1:], stdout)
-	case "gpu-cluster":
-		return gpuClusterCommand(args[1:], stdout, stderr)
-	case "-h", "--help", "help":
-		printOllamaHelp(stdout)
-		return nil
-	default:
-		_, _ = fmt.Fprintf(stderr, "unknown command: %s\n", args[0])
-		printOllamaHelp(stderr)
-		return fmt.Errorf("unknown command: %s", args[0])
-	}
-}
-
 func runLegacy(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer) error {
 	fs := flag.NewFlagSet("oxidize", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -99,9 +68,13 @@ func runOrChat(ctx context.Context, args []string, stdout io.Writer, stderr io.W
 	if err != nil {
 		return fmt.Errorf("oxidize %s %w", cmd, err)
 	}
+
 	if !chat && strings.TrimSpace(opts.Prompt) == "" {
-		return nil
+		if stdinPrompt, ok := readStdinPrompt(); ok {
+			opts.Prompt = stdinPrompt
+		}
 	}
+
 	modelPath, err := resolveModelPathWithHF(modelArg, opts.HFFile)
 	if err != nil {
 		return err
@@ -118,8 +91,13 @@ func runOrChat(ctx context.Context, args []string, stdout io.Writer, stderr io.W
 		}
 	}
 	cfg := opts.runConfig(modelPath)
-	if chat {
+
+	interactiveRun := !chat && strings.TrimSpace(opts.Prompt) == "" && isInteractiveTerminal()
+	if chat || interactiveRun {
 		return chatREPL(ctx, cfg, stdout, stderr)
+	}
+	if strings.TrimSpace(opts.Prompt) == "" {
+		return nil
 	}
 	if err := generateRun(ctx, cfg, stdout, stderr); err != nil {
 		_, _ = fmt.Fprintf(stderr, "generation failed: %v\n", err)
@@ -136,31 +114,68 @@ func listCommand(args []string, stdout io.Writer) error {
 		return err
 	}
 	dir := resolveModelsDir(*modelsDir)
-	if _, err := io.WriteString(stdout, fmt.Sprintf("%-48s %9s %s\n", "NAME", "SIZE", "PATH")); err != nil {
-		return err
-	}
 	if dir == "" {
+		_, _ = fmt.Fprintln(stdout, "No models directory found. Use --models-dir or create ./models")
 		return nil
 	}
 	models, err := serviceinfo.DiscoverModels(dir)
 	if err != nil {
 		return err
 	}
+	if len(models) == 0 {
+		_, _ = fmt.Fprintf(stdout, "No GGUF models found in %s\n", dir)
+		return nil
+	}
+
+	filter := ""
+	if len(fs.Args()) > 0 {
+		filter = strings.ToLower(fs.Arg(0))
+	}
+
+	var rows [][]string
 	for _, model := range models {
-		sizeGiB := "?"
-		if stat, statErr := os.Stat(model.Path); statErr == nil {
-			sizeGiB = fmt.Sprintf("%.2fG", float64(stat.Size())/1024/1024/1024)
-		}
 		name := model.ID
 		if name == "" {
 			name = model.Path
 		}
-		line := fmt.Sprintf("%-48s %9s %s\n", name, sizeGiB, model.Path)
-		if _, writeErr := io.WriteString(stdout, line); writeErr != nil {
-			return writeErr
+		if filter != "" && !strings.HasPrefix(strings.ToLower(name), filter) {
+			continue
 		}
+		size := "?"
+		modified := "Never"
+		if stat, statErr := os.Stat(model.Path); statErr == nil {
+			size = humanBytes(stat.Size())
+			modified = humanTime(stat.ModTime(), "Never")
+		}
+		rows = append(rows, []string{name, modelDigest(model.Path), size, modified})
 	}
+	if len(rows) == 0 {
+		_, _ = fmt.Fprintf(stdout, "No models matching %q in %s\n", filter, dir)
+		return nil
+	}
+	renderTable(stdout, []string{"NAME", "ID", "SIZE", "MODIFIED"}, rows)
 	return nil
+}
+
+func readStdinPrompt() (string, bool) {
+	fi, err := os.Stdin.Stat()
+	if err != nil || (fi.Mode()&os.ModeCharDevice) != 0 {
+		return "", false
+	}
+	in, err := io.ReadAll(os.Stdin)
+	if err != nil || len(in) == 0 {
+		return "", false
+	}
+	return strings.TrimSpace(string(in)), true
+}
+
+func isInteractiveTerminal() bool {
+	fi, err := os.Stdin.Stat()
+	if err != nil || (fi.Mode()&os.ModeCharDevice) == 0 {
+		return false
+	}
+	fo, err := os.Stdout.Stat()
+	return err == nil && (fo.Mode()&os.ModeCharDevice) != 0
 }
 
 func serveCommand(ctx context.Context, args []string) error {
@@ -199,27 +214,6 @@ func serveCommand(ctx context.Context, args []string) error {
 		TopK:         genOpts.TopK,
 		Loader:       loader,
 	})
-}
-
-func printOllamaHelp(w io.Writer) {
-	_, _ = fmt.Fprintln(w, `Usage: oxidize <command> [args]
-
-Commands:
-  run <model> [prompt]     Run a model locally
-  chat <model>             Interactive chat REPL
-  bench <model>            Decode throughput benchmark
-  inspect <model.gguf>     Print GGUF metadata and tensors
-  serve [options]          Start the OpenAI-compatible server
-  gpu-cluster <subcmd>     Generate or detect GPU cluster configs
-  list                     List local GGUF models in ./models
-
-Examples:
-  oxidize run ./models/Qwen3-4B-Q4_K_M.gguf "hello"
-  oxidize chat ./models/model.gguf
-  oxidize bench ./models/model.gguf --iterations 5
-  oxidize inspect ./models/model.gguf
-  oxidize serve --host 0.0.0.0 --port 11434
-  oxidize list`)
 }
 
 func printRunHelp(w io.Writer) {

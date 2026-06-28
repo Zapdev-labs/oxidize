@@ -23,6 +23,7 @@ type ResolveOptions struct {
 	HTTPClient *http.Client
 	APIBase    string
 	CDNBase    string
+	OnProgress func(downloaded, total int64)
 }
 
 // ResolveGGUF downloads (or returns a cached) GGUF file for a Hugging Face repo.
@@ -58,7 +59,7 @@ func ResolveGGUF(opts ResolveOptions) (string, error) {
 		return dest, nil
 	}
 	tmp := dest + ".part"
-	if err := downloadFile(resolveURL(opts.CDNBase, repo, rev, filename), tmp, opts.HTTPClient); err != nil {
+	if err := downloadFile(resolveURL(opts.CDNBase, repo, rev, filename), tmp, opts.HTTPClient, opts.OnProgress); err != nil {
 		_ = os.Remove(tmp)
 		return "", err
 	}
@@ -171,7 +172,7 @@ func ListGGUFFiles(repo, revision string, client *http.Client, apiBase string) (
 	return out, nil
 }
 
-func downloadFile(url, dest string, client *http.Client) error {
+func downloadFile(url, dest string, client *http.Client, onProgress func(downloaded, total int64)) error {
 	if client == nil {
 		client = &http.Client{Timeout: 0}
 	}
@@ -192,8 +193,32 @@ func downloadFile(url, dest string, client *http.Client) error {
 		return err
 	}
 	defer f.Close()
-	if _, err := io.Copy(f, resp.Body); err != nil {
+	reader := io.Reader(resp.Body)
+	total := resp.ContentLength
+	if onProgress != nil && total > 0 {
+		reader = &progressReader{r: resp.Body, total: total, onProgress: onProgress}
+	}
+	if _, err := io.Copy(f, reader); err != nil {
 		return err
 	}
+	if onProgress != nil && total > 0 {
+		onProgress(total, total)
+	}
 	return f.Close()
+}
+
+type progressReader struct {
+	r          io.Reader
+	total      int64
+	downloaded int64
+	onProgress func(downloaded, total int64)
+}
+
+func (p *progressReader) Read(b []byte) (int, error) {
+	n, err := p.r.Read(b)
+	if n > 0 {
+		p.downloaded += int64(n)
+		p.onProgress(p.downloaded, p.total)
+	}
+	return n, err
 }

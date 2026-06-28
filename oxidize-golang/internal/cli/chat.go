@@ -20,10 +20,11 @@ func chatCommand(ctx context.Context, args []string, stdout io.Writer, stderr io
 }
 
 func chatREPL(ctx context.Context, cfg generate.RunConfig, stdout, stderr io.Writer) error {
-	_, _ = fmt.Fprintln(stdout, "oxidize chat mode. type 'exit' or 'quit' to leave.")
+	_, _ = fmt.Fprintf(stdout, ">>> oxidize · %s\n", shortModelName(cfg.ModelPath))
+	_, _ = fmt.Fprintln(stdout, "Send a message. /help for commands, /bye to exit.")
 	scanner := bufio.NewScanner(os.Stdin)
 	for {
-		if _, err := io.WriteString(stdout, "> "); err != nil {
+		if _, err := io.WriteString(stdout, "\n>>> "); err != nil {
 			return err
 		}
 		if !scanner.Scan() {
@@ -35,15 +36,32 @@ func chatREPL(ctx context.Context, cfg generate.RunConfig, stdout, stderr io.Wri
 			continue
 		}
 		lower := strings.ToLower(line)
-		if lower == "exit" || lower == "quit" {
+		switch lower {
+		case "exit", "quit", "/bye", "/exit":
 			return nil
+		case "/help", "help":
+			_, _ = fmt.Fprintln(stdout, "  /help  show commands")
+			_, _ = fmt.Fprintln(stdout, "  /bye   exit chat")
+			continue
+		case "/clear":
+			continue
 		}
 		cfg.Prompt = line
 		if err := generate.RunFromGGUF(ctx, cfg, stdout); err != nil {
 			_, _ = fmt.Fprintf(stderr, "generation failed: %v\n", err)
 		}
-		_, _ = io.WriteString(stdout, "\n")
 	}
+}
+
+func shortModelName(path string) string {
+	base := path
+	for i := len(path) - 1; i >= 0; i-- {
+		if path[i] == '/' || path[i] == '\\' {
+			base = path[i+1:]
+			break
+		}
+	}
+	return strings.TrimSuffix(base, ".gguf")
 }
 
 func printChatHelp(w io.Writer) {
