@@ -22,3 +22,6 @@ __pycache__/
 # Local k8s deployment scripts (not part of upstream)
 deploy/
 /bench_results.json
+
+# Go build output
+oxidize-golang/oxidize
