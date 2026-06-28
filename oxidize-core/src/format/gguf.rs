@@ -333,7 +333,9 @@ impl GgufQuantizationType {
             13 => Self::Q5_K_M, // ggml Q5_K
             14 => Self::Q6_K,   // ggml Q6_K
             15 => Self::Q4_K_M, // ggml Q8_K — no Q8_K enum variant; closest supported type
-            // 16-18 = IQ2_XXS, IQ2_XS, IQ3_XXS in ggml — not in our enum, fall through to Unknown
+            16 => Self::IQ2_XXS,
+            17 => Self::IQ2_XS,
+            18 => Self::IQ3_XXS,
             19 => Self::IQ1_S,
             20 => Self::IQ4_NL,
             21 => Self::IQ3_S,
