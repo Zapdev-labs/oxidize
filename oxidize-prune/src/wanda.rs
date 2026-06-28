@@ -27,14 +27,12 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use oxidize_core::gguf::{GgufQuantizationType, GgufTensorInfo, parse_gguf};
 use oxidize_core::quantization::{dequantize_scalar, quantize_scalar, quantized_size};
 use oxidize_kernels::dequantize_q4_k_into;
-use rayon::prelude::*;
 
 use crate::mask::{
     SparsityPattern, apply_mask_inplace, apply_nm_pattern, magnitude_mask, wanda_mask,
@@ -144,42 +142,24 @@ fn run_inner(
         keep_names
     };
 
-    enum WorkItem {
-        PassThrough { index: usize, tensor: OutputTensor },
-        Prune(PruneJob),
-    }
-
-    struct PruneJob {
-        index: usize,
-        name: String,
-        dimensions: Vec<u64>,
-        qtype: GgufQuantizationType,
-        raw: Vec<u8>,
-        out_dim: usize,
-        in_dim: usize,
-        norms: Option<Vec<f32>>,
-    }
-
-    let mut work: Vec<WorkItem> = Vec::with_capacity(parsed.tensor_infos.len());
     let mut skipped = 0_usize;
     let mut pruned = 0_usize;
+    let mut timing_dequant_ms = 0_u128;
+    let mut timing_mask_ms = 0_u128;
+    let mut timing_requant_ms = 0_u128;
+    let mut results: Vec<OutputTensor> = Vec::with_capacity(parsed.tensor_infos.len());
 
-    for (index, info) in parsed.tensor_infos.iter().enumerate() {
+    for info in &parsed.tensor_infos {
         if !is_linear_weight(info) {
-            work.push(WorkItem::PassThrough {
-                index,
-                tensor: pass_through(info, &bytes)?,
-            });
+            results.push(pass_through(info, &bytes)?);
             continue;
         }
         if keep_all.iter().any(|k| info.name.contains(k)) {
-            work.push(WorkItem::PassThrough {
-                index,
-                tensor: pass_through(info, &bytes)?,
-            });
+            results.push(pass_through(info, &bytes)?);
             skipped += 1;
             continue;
         }
+
         let in_dim = info
             .dimensions
             .last()
@@ -211,92 +191,57 @@ fn run_inner(
                 in_dim
             );
         }
-        work.push(WorkItem::Prune(PruneJob {
-            index,
+
+        let mut weights_f32 = vec![0.0_f32; out_dim * in_dim];
+        let t = Instant::now();
+        dequantize_weights(qtype, &raw, &mut weights_f32)?;
+        timing_dequant_ms += t.elapsed().as_millis();
+
+        let t = Instant::now();
+        let mut mask = if let Some(ref norms) = norms {
+            wanda_mask(&weights_f32, norms, out_dim, in_dim, sparsity)
+        } else {
+            magnitude_mask(&weights_f32, out_dim, in_dim, sparsity)
+        };
+        if !matches!(pattern, SparsityPattern::Unstructured) {
+            let norms_owned;
+            let norms_for_score: &[f32] = if let Some(ref n) = norms {
+                n.as_slice()
+            } else {
+                norms_owned = vec![1.0_f32; in_dim];
+                norms_owned.as_slice()
+            };
+            apply_nm_pattern(
+                &mut mask,
+                out_dim,
+                in_dim,
+                pattern,
+                |r, c| weights_f32[r * in_dim + c].abs() * norms_for_score[c],
+            )?;
+        }
+        apply_mask_inplace(&mut weights_f32, &mask);
+        timing_mask_ms += t.elapsed().as_millis();
+
+        let t = Instant::now();
+        let target = joint_quantize.unwrap_or(qtype);
+        let new_size =
+            quantized_size(target, out_dim * in_dim).map_err(|e| anyhow::anyhow!(e))?;
+        let mut new_bytes = vec![0u8; new_size];
+        let f32_bytes = f32_slice_to_bytes(&weights_f32);
+        quantize_scalar(GgufQuantizationType::F32, target, &f32_bytes, &mut new_bytes)
+            .map_err(|e| anyhow::anyhow!(e))?;
+        timing_requant_ms += t.elapsed().as_millis();
+
+        results.push(OutputTensor {
             name: info.name.clone(),
             dimensions: info.dimensions.clone(),
-            qtype,
-            raw,
-            out_dim,
-            in_dim,
-            norms,
-        }));
+            ggml_type: ggml_type_for_qtype(target),
+            data: new_bytes,
+        });
         pruned += 1;
     }
 
-    let timing = Mutex::new((0_u128, 0_u128, 0_u128));
-
-    let mut results: Vec<(usize, OutputTensor)> = work
-        .into_par_iter()
-        .map(|item| -> Result<(usize, OutputTensor)> {
-            match item {
-                WorkItem::PassThrough { index, tensor } => Ok((index, tensor)),
-                WorkItem::Prune(job) => {
-                    let mut weights_f32 = vec![0.0_f32; job.out_dim * job.in_dim];
-                    let t = Instant::now();
-                    dequantize_weights(job.qtype, &job.raw, &mut weights_f32)?;
-                    {
-                        let mut g = timing.lock().expect("timing lock");
-                        g.0 += t.elapsed().as_millis();
-                    }
-
-                    let t = Instant::now();
-                    let mut mask = if let Some(ref norms) = job.norms {
-                        wanda_mask(&weights_f32, norms, job.out_dim, job.in_dim, sparsity)
-                    } else {
-                        magnitude_mask(&weights_f32, job.out_dim, job.in_dim, sparsity)
-                    };
-                    if !matches!(pattern, SparsityPattern::Unstructured) {
-                        let norms_owned;
-                        let norms_for_score: &[f32] = if let Some(ref n) = job.norms {
-                            n.as_slice()
-                        } else {
-                            norms_owned = vec![1.0_f32; job.in_dim];
-                            norms_owned.as_slice()
-                        };
-                        apply_nm_pattern(
-                            &mut mask,
-                            job.out_dim,
-                            job.in_dim,
-                            pattern,
-                            |r, c| weights_f32[r * job.in_dim + c].abs() * norms_for_score[c],
-                        )?;
-                    }
-                    apply_mask_inplace(&mut weights_f32, &mask);
-                    {
-                        let mut g = timing.lock().expect("timing lock");
-                        g.1 += t.elapsed().as_millis();
-                    }
-
-                    let t = Instant::now();
-                    let target = joint_quantize.unwrap_or(job.qtype);
-                    let new_size =
-                        quantized_size(target, job.out_dim * job.in_dim).map_err(|e| anyhow::anyhow!(e))?;
-                    let mut new_bytes = vec![0u8; new_size];
-                    let f32_bytes = f32_slice_to_bytes(&weights_f32);
-                    quantize_scalar(GgufQuantizationType::F32, target, &f32_bytes, &mut new_bytes)
-                        .map_err(|e| anyhow::anyhow!(e))?;
-                    {
-                        let mut g = timing.lock().expect("timing lock");
-                        g.2 += t.elapsed().as_millis();
-                    }
-
-                    Ok((
-                        job.index,
-                        OutputTensor {
-                            name: job.name,
-                            dimensions: job.dimensions,
-                            ggml_type: ggml_type_for_qtype(target),
-                            data: new_bytes,
-                        },
-                    ))
-                }
-            }
-        })
-        .collect::<Result<Vec<_>>>()?;
-
-    results.sort_unstable_by_key(|(index, _)| *index);
-    let out_tensors: Vec<OutputTensor> = results.into_iter().map(|(_, t)| t).collect();
+    let out_tensors = results;
 
     if !dry_run {
         let out_bytes =
@@ -306,8 +251,6 @@ fn run_inner(
     }
 
     if print_timings {
-        let (timing_dequant_ms, timing_mask_ms, timing_requant_ms) =
-            *timing.lock().expect("timing lock");
         eprintln!(
             "[oxidize-prune] dequant={}ms mask={}ms requant={}ms pruned={} skipped={} total={}",
             timing_dequant_ms,
