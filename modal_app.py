@@ -1246,6 +1246,85 @@ def gpu_attn_verify(
 
 
 @app.function(**GPU_RUN)
+def gpu_dflash_ab(
+    target_model: str = "Qwen/Qwen3-4B-GGUF",
+    target_file: str = "Qwen3-4B-Q4_K_M.gguf",
+    draft_model: str = "Zapdev/Qwen3-4B-DFlash-GGUF",
+    draft_file: str = "Qwen3-4B-DFlash-q8_0.gguf",
+    prompt: str = "Explain speculative decoding in two concise paragraphs.",
+    max_tokens: int = 96,
+) -> str:
+    import os
+    import re
+    import subprocess
+
+    binary = f"{REPO_ROOT}/target/release/oxidize-cli"
+
+    def run(label: str, extra_args: list[str]) -> tuple[float, str]:
+        env = dict(os.environ)
+        env["OX_DFLASH_OUTPUT_PARITY"] = "1"
+        cmd = [
+            binary,
+            "run",
+            target_model,
+            "--file",
+            target_file,
+            "--no-api",
+            "--backend",
+            "cuda",
+            "--n-gpu-layers",
+            "99",
+            "--layer-cache",
+            "64",
+            "--max-tokens",
+            str(max_tokens),
+            "--temperature",
+            "0",
+            "--threads",
+            "8",
+            *extra_args,
+            prompt,
+        ]
+        out = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True, env=env)
+        blob = (out.stdout or "") + (out.stderr or "")
+        if out.returncode != 0:
+            print(blob[-2500:], flush=True)
+            raise SystemExit(f"{label} DFlash A/B run failed")
+        speeds = re.findall(r"(\d+\.\d+)\s*tok/s", blob)
+        return float(speeds[-1]) if speeds else 0.0, blob
+
+    target_tps, target_blob = run("target", [])
+    dflash_tps, dflash_blob = run(
+        "dflash",
+        ["--draft-model", draft_model, "--draft-file", draft_file],
+    )
+    target_text = _generated_text_sample(target_blob)
+    dflash_text = _generated_text_sample(dflash_blob)
+    parity = target_text == dflash_text and bool(target_text)
+    parity_line = "dflash_output_parity=PASS" if parity else "dflash_output_parity=FAIL"
+    summary = (
+        "\n=== DFlash CLI A/B ===\n"
+        f"target : {target_tps:.2f} tok/s | \"{target_text}\"\n"
+        f"dflash : {dflash_tps:.2f} tok/s | \"{dflash_text}\"\n"
+        f"{parity_line}\n"
+        f"draft_file={draft_file}\n"
+    )
+    print(summary, flush=True)
+    if not parity:
+        raise SystemExit("dflash_output_parity=FAIL")
+    return summary
+
+
+def _generated_text_sample(blob: str) -> str:
+    import re
+
+    match = re.search(r"offload plan:.*?\n(.*?)\ngeneration stats:", blob, re.S)
+    if match:
+        return match.group(1).strip()[:260].replace("\n", " ")
+    return blob[-260:].strip().replace("\n", " ")
+
+
+@app.function(**GPU_RUN)
 def gpu_flag_sweep(
     model: str = "bartowski/Mistral-7B-Instruct-v0.3-GGUF",
     hf_file: str = "Mistral-7B-Instruct-v0.3-Q4_K_M.gguf",
