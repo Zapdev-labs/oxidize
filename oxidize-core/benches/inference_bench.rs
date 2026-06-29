@@ -172,18 +172,18 @@ fn bench_model(vocab: usize, h: usize, inter: usize, layers: usize, iters: usize
     x.copy_from_slice(&tok_emb[token_id * h..(token_id + 1) * h]);
     rms_norm(&x, &norm_w, 1e-5, &mut x_normed);
     x.copy_from_slice(&x_normed);
-    for l in 0..layers {
+    for _ in 0..layers {
         layer_forward(
             &mut x,
             h,
             inter,
-            &attn_q[l * h * h..(l + 1) * h * h],
-            &attn_k[l * h * h..(l + 1) * h * h],
-            &attn_v[l * h * h..(l + 1) * h * h],
-            &attn_o[l * h * h..(l + 1) * h * h],
-            &ffn_gate[l * inter * h..(l + 1) * inter * h],
-            &ffn_up[l * inter * h..(l + 1) * inter * h],
-            &ffn_down[l * h * inter..(l + 1) * h * inter],
+            &attn_q,
+            &attn_k,
+            &attn_v,
+            &attn_o,
+            &ffn_gate,
+            &ffn_up,
+            &ffn_down,
             &mut scratch,
             &mut bufs,
         );
