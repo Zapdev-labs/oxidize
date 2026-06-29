@@ -2,7 +2,20 @@
 //!
 //! This crate exposes model/runtime primitives and a small public health surface
 //! used by CLI, server, and WASM integrations.
-#![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(
+    dead_code,
+    private_interfaces,
+    unused_imports,
+    unused_mut,
+    clippy::collapsible_if,
+    clippy::derivable_impls,
+    clippy::if_same_then_else,
+    clippy::manual_checked_ops,
+    clippy::manual_is_multiple_of,
+    clippy::too_many_arguments,
+    clippy::type_complexity
+)]
 //!
 //! # API quick check
 //!

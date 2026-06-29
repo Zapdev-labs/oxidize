@@ -1,3 +1,5 @@
+#![allow(clippy::collapsible_if)]
+
 mod backend;
 mod help;
 mod pipeline;

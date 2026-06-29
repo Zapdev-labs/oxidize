@@ -1,3 +1,5 @@
+#![allow(clippy::needless_range_loop)]
+
 use std::{error::Error, fmt, path::Path};
 
 use anyhow::{Context, Result, anyhow, bail};

@@ -15,6 +15,8 @@
 //! `forward_batch` (it is the bench's only execution path), but the flag is what
 //! a future paged runtime consults before taking the batched decode branch.
 
+#![allow(clippy::collapsible_if)]
+
 use clap::Parser;
 use oxidize_core::inference::{InferenceConfig, InferenceModel, SeqKv};
 use oxidize_core::model_loader::ModelLoader;

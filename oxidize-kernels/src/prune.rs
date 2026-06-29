@@ -167,6 +167,8 @@ unsafe fn fill_wanda_avx2(row: &[f32], norms: &[f32], scores: &mut [f32]) {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::needless_range_loop)]
+
     use super::*;
 
     #[test]

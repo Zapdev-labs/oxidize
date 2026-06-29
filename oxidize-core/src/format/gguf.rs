@@ -5,7 +5,9 @@ use std::sync::Arc;
 
 #[cfg(target_os = "linux")]
 use libc;
-use memmap2::{Advice, Mmap};
+#[cfg(unix)]
+use memmap2::Advice;
+use memmap2::Mmap;
 use thiserror::Error;
 
 const GGUF_MAGIC: &[u8; 4] = b"GGUF";
@@ -97,6 +99,7 @@ impl MappedGgufFile {
     }
 
     pub fn advise_random_access(&self) -> std::io::Result<()> {
+        #[cfg(unix)]
         for mmap in &self.mmaps {
             mmap.advise(Advice::Random)?;
         }
@@ -104,6 +107,7 @@ impl MappedGgufFile {
     }
 
     pub fn advise_will_need(&self) -> std::io::Result<()> {
+        #[cfg(unix)]
         for mmap in &self.mmaps {
             mmap.advise(Advice::WillNeed)?;
         }
@@ -180,10 +184,11 @@ impl MappedGgufFile {
     pub fn prefault_pages_locked(&self, threads: usize) -> (bool, u8, u64) {
         let t0 = std::time::Instant::now();
         let bytes = self.bytes();
-        let mut mlocked = false;
+        let mlocked = false;
 
         #[cfg(target_os = "linux")]
         {
+            let mut mlocked = mlocked;
             // Raise RLIMIT_MEMLOCK (requires CAP_IPC_LOCK or root).
             let unlimited = libc::rlimit {
                 rlim_cur: libc::RLIM_INFINITY,
@@ -506,8 +511,11 @@ pub fn load_mapped_gguf<P: AsRef<Path>>(path: P) -> Result<MappedGgufFile, GgufP
     // Tell the kernel we'll read the whole file front-to-back and that it should
     // start prefetching it immediately.  This queues async readahead so pages are
     // warm by the time inference begins — critical for multi-hundred-GB models.
-    let _ = mmap.advise(Advice::Sequential);
-    let _ = mmap.advise(Advice::WillNeed);
+    #[cfg(unix)]
+    {
+        let _ = mmap.advise(Advice::Sequential);
+        let _ = mmap.advise(Advice::WillNeed);
+    }
     let parsed = parse_gguf(&mmap)?;
     Ok(MappedGgufFile {
         mmaps: vec![Arc::new(mmap)],
@@ -544,8 +552,11 @@ fn load_mapped_gguf_shards(shards: &[PathBuf]) -> Result<MappedGgufFile, GgufPar
         let file = File::open(path)?;
         // SAFETY: GGUF files are opened read-only and not modified while mapped.
         let mmap = unsafe { crate::bytes::map_readonly(&file)? };
-        let _ = mmap.advise(Advice::Sequential);
-        let _ = mmap.advise(Advice::WillNeed);
+        #[cfg(unix)]
+        {
+            let _ = mmap.advise(Advice::Sequential);
+            let _ = mmap.advise(Advice::WillNeed);
+        }
         Ok(mmap)
     };
 

@@ -8,7 +8,7 @@ pub fn should_use_gpu_activations(hidden_size: usize) -> bool {
     #[cfg(not(any(feature = "cuda", feature = "rocm")))]
     {
         let _ = hidden_size;
-        return false;
+        false
     }
     #[cfg(any(feature = "cuda", feature = "rocm"))]
     {

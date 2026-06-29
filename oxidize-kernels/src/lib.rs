@@ -160,10 +160,10 @@ pub fn gemv_q4k_range(rows: &[u8], blocks_per_row: usize, q8k: &[u8], out: &mut 
     debug_assert!(rows.len() >= out.len() * row_bytes);
     debug_assert!(q8k.len() >= blocks_per_row * BLOCK_Q8_K_BYTES);
 
-    let isa = select_isa();
-
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
+        let isa = select_isa();
+
         // AVX-512 VNNI (Ice Lake / Sapphire Rapids / Granite Rapids)
         if (isa == "avx512vnni" || isa == "auto") && oxk_avx512vnni_available() {
             let n = out.len();

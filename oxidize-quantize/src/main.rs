@@ -1258,6 +1258,7 @@ mod tests {
             ggml_type,
             relative_offset: 0,
             absolute_offset: 0,
+            mmap_index: 0,
         }
     }
 

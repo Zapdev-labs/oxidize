@@ -16,7 +16,9 @@ use crate::gguf::GgufQuantizationType;
 use crate::kv_cache::KvQuantization;
 use crate::simd::SimdBackend;
 use crate::tensor::DType;
-use oxidize_kernels::cpu::{CpuVendor, is_skylake_sp};
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+use oxidize_kernels::cpu::CpuVendor;
+use oxidize_kernels::cpu::is_skylake_sp;
 
 /// Pipeline / batch mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
