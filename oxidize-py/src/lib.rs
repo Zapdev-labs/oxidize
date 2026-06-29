@@ -629,6 +629,15 @@ mod tests {
     fn extract_coroutine_result<'py>(coroutine: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
         let py = coroutine.py();
         if let Ok(asyncio) = py.import("asyncio") {
+            #[cfg(windows)]
+            py.run(
+                c_str!(
+                    "import asyncio\n\
+                    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())"
+                ),
+                None,
+                None,
+            )?;
             return asyncio.call_method1("run", (coroutine,));
         }
 
