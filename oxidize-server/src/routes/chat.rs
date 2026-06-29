@@ -96,8 +96,7 @@ pub async fn chat_completions(
         let generated = if let Some(engine) = paged.engine.clone() {
             // Non-streaming over the batched engine: submit, then drain the token
             // channel to a full completion. One `Ok(piece)` per decoded token.
-            let (tx, mut rx) =
-                tokio::sync::mpsc::channel::<Result<String, GenerationError>>(128);
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<String, GenerationError>>(128);
             let prompt = req.prompt.clone();
             let echo = req.echo;
             let stops = req.stop.clone();
@@ -136,7 +135,11 @@ pub async fn chat_completions(
                         )
                         .len();
                     let text = trim_stop_text(&text, &stops);
-                    let text = if echo { format!("{prompt}{text}") } else { text };
+                    let text = if echo {
+                        format!("{prompt}{text}")
+                    } else {
+                        text
+                    };
                     Ok(GenerationResult {
                         text,
                         prompt_tokens,

@@ -1320,7 +1320,10 @@ impl InferenceModel {
         let dbg = std::env::var("OX_GPU_BATCHED_DEBUG").is_ok();
         if self.kv_cache.config().dtype != crate::tensor::DType::F32 {
             if dbg {
-                eprintln!("forward_batch_gpu ineligible: KV dtype {:?} != F32", self.kv_cache.config().dtype);
+                eprintln!(
+                    "forward_batch_gpu ineligible: KV dtype {:?} != F32",
+                    self.kv_cache.config().dtype
+                );
             }
             return Ok(None);
         }
@@ -1380,7 +1383,9 @@ impl InferenceModel {
         let out_q4k = Self::q4k_bytes(&self.output_weight);
         if need_logits && out_q4k.is_none() {
             if dbg {
-                eprintln!("forward_batch_gpu ineligible: output (lm_head) weight is not strict Q4_K");
+                eprintln!(
+                    "forward_batch_gpu ineligible: output (lm_head) weight is not strict Q4_K"
+                );
             }
             return Ok(None);
         }
@@ -1411,11 +1416,10 @@ impl InferenceModel {
 
         let context_size = cfg.context_size;
         let kv_layers = self.kv_layer_count();
-        let bn_rows = q_len.max(kv_len).max(i_size).max(if need_logits {
-            vocab
-        } else {
-            0
-        });
+        let bn_rows = q_len
+            .max(kv_len)
+            .max(i_size)
+            .max(if need_logits { vocab } else { 0 });
 
         // Lazy device buffer init (no-op when geometry+B match prior calls).
         crate::cuda::gpu_batched_activation_init(batch, h, i_size, q_len, kv_len, bn_rows)

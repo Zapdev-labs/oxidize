@@ -58,12 +58,7 @@ impl LayerWiseModel {
                 absolute_offset: offset as u64,
                 mmap_index,
             };
-            WeightStorage::MmapQuantized(
-                qtype,
-                self.mmap.tensor_mmap(&info),
-                offset,
-                size,
-            )
+            WeightStorage::MmapQuantized(qtype, self.mmap.tensor_mmap(&info), offset, size)
         } else {
             WeightStorage::Quantized(qtype, qdata.to_vec())
         }

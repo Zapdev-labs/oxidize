@@ -235,7 +235,9 @@ impl IMatrix {
     }
 }
 
-pub fn quant_block_layout(quantization: GgufQuantizationType) -> Result<(usize, usize), QuantizationError> {
+pub fn quant_block_layout(
+    quantization: GgufQuantizationType,
+) -> Result<(usize, usize), QuantizationError> {
     match quantization {
         GgufQuantizationType::F32 => Ok((1, 4)),
         GgufQuantizationType::F16 => Ok((1, 2)),

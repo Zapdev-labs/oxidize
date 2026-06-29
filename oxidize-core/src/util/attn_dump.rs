@@ -83,7 +83,10 @@ pub(crate) fn write_block(
     write_labeled(&mut buf, "v_cur", v_cur, 128);
     write_labeled(&mut buf, "attn_out", attn_out, 256);
 
-    if FIRED.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+    if FIRED
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
         return;
     }
     let write_ok = std::fs::OpenOptions::new()

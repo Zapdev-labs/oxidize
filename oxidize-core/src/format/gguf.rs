@@ -543,7 +543,7 @@ fn load_mapped_gguf_shards(shards: &[PathBuf]) -> Result<MappedGgufFile, GgufPar
     let open_mmap = |path: &PathBuf| -> Result<Mmap, GgufParseError> {
         let file = File::open(path)?;
         // SAFETY: GGUF files are opened read-only and not modified while mapped.
-    let mmap = unsafe { crate::bytes::map_readonly(&file)? };
+        let mmap = unsafe { crate::bytes::map_readonly(&file)? };
         let _ = mmap.advise(Advice::Sequential);
         let _ = mmap.advise(Advice::WillNeed);
         Ok(mmap)

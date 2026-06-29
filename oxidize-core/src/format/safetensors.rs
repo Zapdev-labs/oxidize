@@ -78,7 +78,8 @@ pub fn tensor_bytes_to_f32(
             )));
         }
     };
-    dequantize_scalar(qtype, bytes, &mut out).map_err(|e| SafeTensorsError::Parse(format!("{e:?}")))?;
+    dequantize_scalar(qtype, bytes, &mut out)
+        .map_err(|e| SafeTensorsError::Parse(format!("{e:?}")))?;
     Ok(out)
 }
 

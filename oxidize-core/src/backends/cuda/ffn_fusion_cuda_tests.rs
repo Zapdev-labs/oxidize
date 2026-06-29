@@ -68,7 +68,13 @@ fn q4k_gate_up_silu_cuda_event_benchmark() {
 #[test]
 #[ignore = "requires an H100 CUDA GPU"]
 fn q4k_gemv_block_size_sweep_is_exact_and_faster() {
-    for (rows, blocks_per_row) in [(1024, 16), (4096, 16), (11_008, 16), (32_000, 16), (4096, 43)] {
+    for (rows, blocks_per_row) in [
+        (1024, 16),
+        (4096, 16),
+        (11_008, 16),
+        (32_000, 16),
+        (4096, 43),
+    ] {
         let mut best = f64::INFINITY;
         let mut eager = 0.0;
         for block_size in [128, 256, 512, 1024] {
@@ -88,14 +94,23 @@ fn q4k_gemv_block_size_sweep_is_exact_and_faster() {
             best = best.min(candidate);
         }
         println!("eager_q4k_gemv_{rows}x{blocks_per_row}_ms={eager:.6}");
-        assert!(best <= eager * 1.01, "rows={rows} bpr={blocks_per_row} best={best:.6}ms eager={eager:.6}ms");
+        assert!(
+            best <= eager * 1.01,
+            "rows={rows} bpr={blocks_per_row} best={best:.6}ms eager={eager:.6}ms"
+        );
     }
 }
 
 #[test]
 #[ignore = "requires an H100 CUDA GPU"]
 fn q6k_gemv_block_size_sweep_is_exact() {
-    for (rows, blocks_per_row) in [(1024, 16), (4096, 16), (11_008, 16), (32_000, 16), (4096, 43)] {
+    for (rows, blocks_per_row) in [
+        (1024, 16),
+        (4096, 16),
+        (11_008, 16),
+        (32_000, 16),
+        (4096, 43),
+    ] {
         for block_size in [128, 256, 512, 1024] {
             let benchmark = run_q4k_gemv_block_size_cuda_event_benchmark(
                 rows,

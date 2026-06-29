@@ -470,8 +470,12 @@ fn gemv_dequant_scalar_fallback(
         if end > quantized_matrix.len() {
             return Err(GemvError::UnsupportedQuantizationType { quantization });
         }
-        crate::quantization::dequantize_scalar(quantization, &quantized_matrix[start..end], &mut row)
-            .map_err(|_| GemvError::UnsupportedQuantizationType { quantization })?;
+        crate::quantization::dequantize_scalar(
+            quantization,
+            &quantized_matrix[start..end],
+            &mut row,
+        )
+        .map_err(|_| GemvError::UnsupportedQuantizationType { quantization })?;
         *out = row.iter().zip(vector).map(|(w, v)| w * v).sum();
     }
     Ok(())
@@ -530,7 +534,9 @@ pub fn gemv_quantized_f32(
         GgufQuantizationType::IQ4_XS if cols.is_multiple_of(QK_K) => {
             gemv_iq4_xs_f32(quantized_matrix, rows, cols, vector, output)
         }
-        _ => gemv_dequant_scalar_fallback(quantization, quantized_matrix, rows, cols, vector, output),
+        _ => {
+            gemv_dequant_scalar_fallback(quantization, quantized_matrix, rows, cols, vector, output)
+        }
     };
     if let Some(start) = profile_start {
         gemv_profile::record(

@@ -163,7 +163,10 @@ pub fn dequantize_iq1_m_scalar(input: &[u8], output: &mut [f32]) -> Result<(), Q
     Ok(())
 }
 
-pub fn dequantize_iq2_xxs_scalar(input: &[u8], output: &mut [f32]) -> Result<(), QuantizationError> {
+pub fn dequantize_iq2_xxs_scalar(
+    input: &[u8],
+    output: &mut [f32],
+) -> Result<(), QuantizationError> {
     validate_layout(
         GgufQuantizationType::IQ2_XXS,
         input,
@@ -202,7 +205,10 @@ pub fn dequantize_iq2_xxs_scalar(input: &[u8], output: &mut [f32]) -> Result<(),
     Ok(())
 }
 
-pub fn dequantize_iq3_xxs_scalar(input: &[u8], output: &mut [f32]) -> Result<(), QuantizationError> {
+pub fn dequantize_iq3_xxs_scalar(
+    input: &[u8],
+    output: &mut [f32],
+) -> Result<(), QuantizationError> {
     validate_layout(
         GgufQuantizationType::IQ3_XXS,
         input,
@@ -220,11 +226,8 @@ pub fn dequantize_iq3_xxs_scalar(input: &[u8], output: &mut [f32]) -> Result<(),
         let mut qs_ptr = 0_usize;
         let mut out_ptr = 0_usize;
         for ib32 in 0..(QK_K / 32) {
-            let aux32 = u32::from_le_bytes(
-                scales_and_signs[4 * ib32..4 * ib32 + 4]
-                    .try_into()
-                    .unwrap(),
-            );
+            let aux32 =
+                u32::from_le_bytes(scales_and_signs[4 * ib32..4 * ib32 + 4].try_into().unwrap());
             let db = d * (0.5 + ((aux32 >> 28) as f32)) * 0.5;
             for l in 0..4 {
                 let signs = KSIGNS_IQ2XS[((aux32 >> (7 * l)) & 127) as usize];

@@ -704,18 +704,18 @@ fn main() {
                                 return;
                             }
                         };
-                    let draft_config =
-                        oxidize_core::eagle3::Eagle3Config::from_gguf(&draft_mapped);
-                    let mut draft_model = match oxidize_core::eagle3::Eagle3DraftModel::load_from_gguf(
-                        &draft_mapped,
-                        draft_config,
-                    ) {
-                        Ok(model) => model,
-                        Err(error) => {
-                            eprintln!("failed to load EAGLE3 draft model: {error}");
-                            return;
-                        }
-                    };
+                    let draft_config = oxidize_core::eagle3::Eagle3Config::from_gguf(&draft_mapped);
+                    let mut draft_model =
+                        match oxidize_core::eagle3::Eagle3DraftModel::load_from_gguf(
+                            &draft_mapped,
+                            draft_config,
+                        ) {
+                            Ok(model) => model,
+                            Err(error) => {
+                                eprintln!("failed to load EAGLE3 draft model: {error}");
+                                return;
+                            }
+                        };
                     eprintln!(
                         "using EAGLE3 speculative decoding: target={} draft={} draft_tokens={}",
                         model_path.display(),

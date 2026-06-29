@@ -444,9 +444,7 @@ pub(crate) fn launch_gemv_q4k_q8kin_device(
     n_splits: u32,
 ) -> Result<(), String> {
     if ox_gpu_gemv_mw_enabled() {
-        return launch_gemv_q4k_q8kin_mw_device(
-            gpu, w_ptr, rows, blocks_per_row, d_q8k, d_output,
-        );
+        return launch_gemv_q4k_q8kin_mw_device(gpu, w_ptr, rows, blocks_per_row, d_q8k, d_output);
     }
     let n_splits = n_splits.clamp(1, 8);
     const WARPS_PER_BLOCK: u32 = 8; // blockDim 256 / 32
@@ -618,9 +616,7 @@ pub(crate) fn launch_gemv_f32in_device(
     blocks_per_row: u32,
 ) -> Result<(), String> {
     if kern_name == GEMV_Q4K_F32IN_KERNEL_NAME && q4k_fused_mmq_eligible(blocks_per_row) {
-        return launch_fused_mmq_device(
-            gpu, w_ptr, d_input, d_output, rows, blocks_per_row,
-        );
+        return launch_fused_mmq_device(gpu, w_ptr, d_input, d_output, rows, blocks_per_row);
     }
 
     // F32-in MW fallback when activation is too wide for fused shared memory.

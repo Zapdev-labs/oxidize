@@ -13,6 +13,8 @@ COPY oxidize-finetuning/Cargo.toml oxidize-finetuning/Cargo.toml
 COPY oxidize-convert/Cargo.toml oxidize-convert/Cargo.toml
 COPY oxidize-ffi/Cargo.toml oxidize-ffi/Cargo.toml
 COPY oxidize-kernels/Cargo.toml oxidize-kernels/Cargo.toml
+COPY oxidize-prune/Cargo.toml oxidize-prune/Cargo.toml
+COPY oxidize-merge/Cargo.toml oxidize-merge/Cargo.toml
 COPY oxidize-core/src oxidize-core/src
 COPY oxidize-core/benches oxidize-core/benches
 COPY oxidize-core/kernels oxidize-core/kernels
@@ -26,6 +28,8 @@ COPY oxidize-convert/src oxidize-convert/src
 COPY oxidize-ffi/src oxidize-ffi/src
 COPY oxidize-kernels/src oxidize-kernels/src
 COPY oxidize-kernels/benches oxidize-kernels/benches
+COPY oxidize-prune/src oxidize-prune/src
+COPY oxidize-merge/src oxidize-merge/src
 
 RUN cargo build --release --package oxidize-cli
 

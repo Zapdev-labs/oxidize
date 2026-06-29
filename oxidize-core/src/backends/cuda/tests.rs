@@ -211,7 +211,10 @@ fn gemv_cuda_kernel_name_matches_ptx_entry() {
 fn split_k_plan_uses_occupancy_splits_for_short_context_on_h100() {
     // Decode benches often have context < 1024; occupancy-only splits still help.
     let plan = SplitKPlan::select(132, 32, 64).expect("H100 short ctx must split-K");
-    assert_eq!(plan.split_count, 9, "132 SM / 32 heads → 9 occupancy splits");
+    assert_eq!(
+        plan.split_count, 9,
+        "132 SM / 32 heads → 9 occupancy splits"
+    );
     assert_eq!(plan.block_count, 288);
 }
 
@@ -643,6 +646,9 @@ fn modal_harness_exposes_real_dflash_cli_ab() {
         "Qwen3-4B-DFlash-q8_0.gguf",
         "dflash_output_parity=PASS",
     ] {
-        assert!(source.contains(marker), "missing DFlash A/B marker: {marker}");
+        assert!(
+            source.contains(marker),
+            "missing DFlash A/B marker: {marker}"
+        );
     }
 }
