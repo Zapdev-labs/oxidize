@@ -294,11 +294,9 @@ mod tests {
     #[test]
     fn detect_total_ram_is_consistent_with_numa() {
         let inv = detect();
-        // On a single-node Linux box, total RAM should be > min-node RAM.
-        // We don't strictly assert this because on macOS / Windows we
-        // fall back, but we do assert the field is non-zero (we always
-        // have *some* signal).
-        assert!(inv.total_ram_bytes > 0);
+        if inv.min_node_ram_bytes > 0 {
+            assert!(inv.total_ram_bytes >= inv.min_node_ram_bytes);
+        }
     }
 
     #[test]

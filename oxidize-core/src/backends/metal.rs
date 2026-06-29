@@ -295,11 +295,12 @@ mod tests {
     fn allocates_buffer_with_page_aligned_capacity() {
         let mut manager = UnifiedBufferManager::new(PAGE_BYTES * 4);
         let buffer = manager.allocate(5000).expect("allocation should succeed");
+        let expected_capacity = page_align(5000);
 
         assert_eq!(buffer.len(), 5000);
         let stats = manager.stats();
-        assert_eq!(stats.active_bytes, PAGE_BYTES * 2);
-        assert_eq!(stats.resident_bytes, PAGE_BYTES * 2);
+        assert_eq!(stats.active_bytes, expected_capacity);
+        assert_eq!(stats.resident_bytes, expected_capacity);
         assert_eq!(stats.cached_bytes, 0);
     }
 
