@@ -320,7 +320,7 @@ mod tests {
             .join("Makefile");
         let makefile = std::fs::read_to_string(makefile).expect("workspace Makefile exists");
 
-        assert!(makefile.contains(".PHONY: help fmt lint audit test build wasm check ci"));
+        assert!(makefile.contains(".PHONY: help fmt lint audit udeps test build wasm check ci"));
         assert!(makefile.contains(
             "cargo build -p oxidize-core --target wasm32-unknown-unknown --release --features wasm"
         ));

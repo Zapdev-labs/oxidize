@@ -1439,13 +1439,15 @@ mod tests {
 
         assert_eq!(f32_cache.bytes_per_tensor(), 2 * 4 * 2 * 8 * 4);
         assert_eq!(f16_cache.bytes_per_tensor(), 2 * 4 * 2 * 8 * 2);
-        assert_eq!(
-            q8_cache.bytes_per_tensor(),
-            (2 * 4 * 2 * 8) + (2 * 4 * 4) + (2 * 4 * 4)
-        );
+        let token_slots: usize = 2 * 4;
+        let token_size: usize = 2 * 8;
+        let turbo_blocks_per_token = token_size.div_ceil(TURBOQUANT_BLOCK_SIZE);
+        let turbo_scale_bytes = token_slots * turbo_blocks_per_token * std::mem::size_of::<f32>();
+
+        assert_eq!(q8_cache.bytes_per_tensor(), (token_slots * token_size) + turbo_scale_bytes);
         assert_eq!(
             q4_cache.bytes_per_tensor(),
-            (2_usize * 4 * 2 * 8).div_ceil(2) + (2 * 4 * 4) + (2 * 4 * 4)
+            (token_slots * token_size).div_ceil(2) + turbo_scale_bytes
         );
     }
 

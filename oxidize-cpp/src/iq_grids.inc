@@ -662,14 +662,14 @@ static const uint64_t iq1s_grid[2048] = {
 // void dequantize_row_iq2_xxs(const block_iq2_xxs * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
 //     assert(k % QK_K == 0);
 //     const int64_t nb = k / QK_K;
-// 
+//
 //     uint32_t aux32[2];
 //     const uint8_t * aux8 = (const uint8_t *)aux32;
-// 
+//
 //     for (int i = 0; i < nb; i++) {
-// 
+//
 //         const float d = GGML_FP16_TO_FP32(x[i].d);
-// 
+//
 //         for (int ib32 = 0; ib32 < QK_K/32; ++ib32) {
 //             memcpy(aux32, x[i].qs + 4*ib32, 2*sizeof(uint32_t));
 //             const float db = d * (0.5f + (aux32[1] >> 28)) * 0.25f;
@@ -690,15 +690,15 @@ static const uint64_t iq1s_grid[2048] = {
 // void dequantize_row_iq3_xxs(const block_iq3_xxs * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
 //     assert(k % QK_K == 0);
 //     const int64_t nb = k / QK_K;
-// 
+//
 //     uint32_t aux32;
-// 
+//
 //     for (int i = 0; i < nb; i++) {
-// 
+//
 //         const float d = GGML_FP16_TO_FP32(x[i].d);
 //         const uint8_t * qs = x[i].qs;
 //         const uint8_t * scales_and_signs = qs + QK_K/4;
-// 
+//
 //         for (int ib32 = 0; ib32 < QK_K/32; ++ib32) {
 //             memcpy(&aux32, scales_and_signs + 4*ib32, sizeof(uint32_t));
 //             const float db = d * (0.5f + (aux32 >> 28)) * 0.5f;

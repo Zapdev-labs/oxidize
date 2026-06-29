@@ -31,7 +31,7 @@ g'=g+wd*p; m=b1*m+(1-b1)g'; v=b2*v+(1-b2)g'^2; p-=lr*(m/(1-b1^t))/(sqrt(v/(1-b2^
 
 ## Verification (REQUIRED, gate completion):
 1. grad_check.cpp finite-difference (delta 1e-4, rtol 1%) on: matmul, rmsnorm, swiglu, attention, cross_entropy, lora. As ctest tests.
-2. `--overfit-one-batch`: train 200 steps on one batch; loss must fall from ~11.9 (=-log(1/V)) toward <0.5 (LoRA) / <0.1 (full-FT). 
+2. `--overfit-one-batch`: train 200 steps on one batch; loss must fall from ~11.9 (=-log(1/V)) toward <0.5 (LoRA) / <0.1 (full-FT).
 3. Inference unchanged: logits byte-identical before/after adding training code (TrainModel holds const model*, never mutates LlamaLayer/LlamaWeight; separate fp32/adapter buffers).
 
 Verify on box: build oxidize-cpp-train, run grad-checks (ctest), run overfit on qwen0.5b (LoRA then full-FT), confirm qwen inference still token-exact + existing ctest green. Report loss curves + memory (RSS).

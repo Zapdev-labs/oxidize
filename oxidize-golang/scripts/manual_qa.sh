@@ -48,7 +48,7 @@ PORT="$(pick_port)"
 
 (
   cd "${ROOT_DIR}/oxidize-golang"
-  go run ./cmd/oxidize run "${MODEL_FILE}" "Write a Python function that returns the factorial of n." \
+  go run ./cmd/oxidize run "${MODEL_FILE}" --prompt "Write a Python function that returns the factorial of n." \
     --max-tokens 80 --temperature 0.7 --top-p 0.9
 ) | tee "${EVIDENCE_DIR}/task-10-cli-prompt.txt"
 
