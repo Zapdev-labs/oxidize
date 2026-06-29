@@ -11,10 +11,9 @@ from oxidize_python.core.autotune.fingerprint import (
     kv_bytes_per_token,
     per_layer_weight_bytes,
 )
-from oxidize_python.gpucluster import GpuFamily
 from oxidize_python.core.kv_cache import Quantization as KvQuant
-from oxidize_python.core.quantization.types import Type
 from oxidize_python.core.simd.simd import Backend
+from oxidize_python.gpucluster import GpuFamily
 
 
 class PipelineMode(Enum):
@@ -57,7 +56,9 @@ class TuningPlan:
             f"layer_wise={self.layer_wise} layer_cache={self.layer_cache}",
             f"pipeline          : {self.pipeline.name}",
             f"speculative       : {self.speculative.name}",
-            f"expected t/s      : prompt ≈ {self.expected_prompt_tps:.1f}  decode ≈ {self.expected_decode_tps:.1f}",
+            "expected t/s      : "
+            f"prompt ≈ {self.expected_prompt_tps:.1f}  "
+            f"decode ≈ {self.expected_decode_tps:.1f}",
         ]
         if self.rationale:
             lines.append("\nRationale:")

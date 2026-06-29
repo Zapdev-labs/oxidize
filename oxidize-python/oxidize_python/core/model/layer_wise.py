@@ -7,7 +7,12 @@ from collections import OrderedDict
 
 from oxidize_python.core.kv_cache import Cache, EvictionStrategy, Quantization
 from oxidize_python.core.kv_cache import Config as KvConfig
-from oxidize_python.core.model.inference import InferenceConfig, InferenceModel, WeightStorage, Workspace
+from oxidize_python.core.model.inference import (
+    InferenceConfig,
+    InferenceModel,
+    WeightStorage,
+    Workspace,
+)
 from oxidize_python.core.model.model import EmptyInputError, Logits, Session, Token
 
 

@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import os
 import platform
-import re
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Optional
 
-from oxidize_python.gpucluster import GpuFamily, DetectedGpu, detect_gpus
 from oxidize_python.core.simd.simd import Backend, preferred
+from oxidize_python.gpucluster import GpuFamily, detect_gpus
 
 
 class OsKind(Enum):

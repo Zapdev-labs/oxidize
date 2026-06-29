@@ -10,6 +10,7 @@ from oxidize_python.core.oxk import (
     BLOCK_Q4_K_SIZE,
     BLOCK_Q8_K_BYTES,
     QK_K,
+    cpu_info,
     gemv_q4k_range,
     max_tile,
     oxk_cpu_summary,
@@ -20,7 +21,6 @@ from oxidize_python.core.oxk import (
     q4k_q8k_row_dot_x16_scalar,
     quantize_q8_k_into,
     tune,
-    cpu_info,
 )
 
 

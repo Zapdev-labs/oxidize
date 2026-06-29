@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import enum
 import threading
+from collections import deque
 from dataclasses import dataclass, field
 
 
@@ -361,9 +363,6 @@ def compute_block_hash(tokens: list[int]) -> BlockHash:
 # working, while ``SchedulerV2`` provides budgeted batching, prefill chunking,
 # prefix caching, and copy-on-write.
 # ---------------------------------------------------------------------------
-
-import enum
-from collections import deque
 
 SeqID = int
 

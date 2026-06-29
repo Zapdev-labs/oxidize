@@ -23,9 +23,9 @@ from oxidize_python.core.backends.cuda.gpu_kernels import (
     gpu_upload_hidden,
 )
 from oxidize_python.core.backends.cuda.gpu_state import (
+    enforce_budget,
     ensure_resident_quant,
     ensure_vram_headroom,
-    enforce_budget,
     get_f32_buffer,
     get_q8k_buffer,
     global_gpu_state,

@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from oxidize_python.core.model.inference import InferenceConfig, InferenceModel, WeightStorage
-from oxidize_python.core.model.layer_wise import LayerWiseModel, new_layer_wise_from_inference
-from oxidize_python.core.model.lora import LoraLayer, new_lora_layer
+from oxidize_python.core.model.layer_wise import new_layer_wise_from_inference
+from oxidize_python.core.model.lora import new_lora_layer
 from oxidize_python.core.model.model import Session
 
 

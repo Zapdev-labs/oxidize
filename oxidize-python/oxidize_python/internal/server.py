@@ -9,6 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from oxidize_python.core.model.loader import LoaderConfig
+from oxidize_python.internal import buildinfo
 from oxidize_python.internal.api.responses import (
     build_chat_chunk,
     build_chat_completion,
@@ -27,11 +28,10 @@ from oxidize_python.internal.api.schema import (
     CompletionRequest,
     EmbeddingsRequest,
 )
+from oxidize_python.internal.auth import wrap_handler
 from oxidize_python.internal.generate import PlaceholderSpec, placeholder_text
 from oxidize_python.internal.generate.cache import default_model_cache
 from oxidize_python.internal.generate.stream import CompletionParams, stream_completion
-from oxidize_python.internal.auth import wrap_handler
-from oxidize_python.internal import buildinfo
 from oxidize_python.internal.realtime import handle_realtime
 from oxidize_python.internal.serviceinfo.models import default_model_id, discover_models
 
@@ -170,7 +170,10 @@ class _App:
             return error_response_to_dict(err), err.status_code
         return {
             "error": {
-                "message": "embeddings are not implemented in the Python port; use chat/completions",
+                "message": (
+                    "embeddings are not implemented in the Python port; "
+                    "use chat/completions"
+                ),
                 "type": "not_implemented",
             }
         }, 501
