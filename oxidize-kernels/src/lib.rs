@@ -13,6 +13,8 @@
 //! benchmarked and tested in isolation; `oxidize-core` consumes it behind the
 //! optional `oxk` cargo feature with runtime selection via `OXIDIZE_GEMV`.
 
+#![allow(dead_code)]
+
 pub mod cpu;
 pub mod prune;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
