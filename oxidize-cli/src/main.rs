@@ -1055,7 +1055,7 @@ fn main() {
                     }
                 }
             } else if effective_backend == oxidize_core::backend::Backend::Mlx {
-                #[cfg(target_os = "macos")]
+                #[cfg(all(target_os = "macos", feature = "mlx"))]
                 {
                     match oxidize_core::mlx_inference::MlxInferenceModel::load_from_gguf(
                         &mapped, config,
@@ -1077,10 +1077,10 @@ fn main() {
                         }
                     }
                 }
-                #[cfg(not(target_os = "macos"))]
+                #[cfg(not(all(target_os = "macos", feature = "mlx")))]
                 {
                     eprintln!(
-                        "MLX backend requested but unavailable on Linux; falling back to CPU"
+                        "MLX backend requested but unavailable in this build; falling back to CPU"
                     );
                     let use_mmap = true;
                     match InferenceModel::load_from_gguf(&mapped, config, use_mmap) {
