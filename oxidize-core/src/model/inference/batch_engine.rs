@@ -212,11 +212,7 @@ impl ContinuousBatchEngine {
 
         // The whole point: ALL active sequences' decode tokens go through ONE
         // forward_batch, so the weights stream from memory once for the batch.
-        let rows: Vec<(Token, usize)> = self
-            .active_meta
-            .iter()
-            .map(|m| (m.last, m.pos))
-            .collect();
+        let rows: Vec<(Token, usize)> = self.active_meta.iter().map(|m| (m.last, m.pos)).collect();
         // The CPU `forward_batch` is the engine's decode path. The device batched
         // forward (`forward_batch_gpu`) is intentionally NOT used here: it is
         // lockstep-only (every row must share one position/length) and keeps KV
@@ -233,8 +229,7 @@ impl ContinuousBatchEngine {
             meta.last = token;
             meta.pos += 1;
             meta.generated += 1;
-            let finished =
-                meta.generated >= meta.max_new || meta.stop.is_some_and(|s| s == token);
+            let finished = meta.generated >= meta.max_new || meta.stop.is_some_and(|s| s == token);
             outputs.push(StepOutput {
                 seq_id: meta.id,
                 token,
@@ -287,8 +282,11 @@ impl ContinuousBatchEngine {
             let mut first_logits: Vec<f32> = Vec::new();
             for (i, &tok) in req.prompt.iter().enumerate() {
                 let need_logits = i == last_idx;
-                let out =
-                    model.forward_batch(&[(tok, pos)], std::slice::from_mut(&mut kv), need_logits)?;
+                let out = model.forward_batch(
+                    &[(tok, pos)],
+                    std::slice::from_mut(&mut kv),
+                    need_logits,
+                )?;
                 if need_logits {
                     first_logits = out.into_iter().next().unwrap_or_default();
                 }

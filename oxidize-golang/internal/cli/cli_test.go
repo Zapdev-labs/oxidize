@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"flag"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -77,6 +78,83 @@ func TestHelpCommand(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "chat") {
 		t.Fatal("expected chat in help output")
+	}
+}
+
+func TestVersionCommand(t *testing.T) {
+	var stdout bytes.Buffer
+	if err := Run(context.Background(), []string{"version"}, &stdout, &bytes.Buffer{}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "0.1.0") {
+		t.Fatalf("expected version in output: %q", stdout.String())
+	}
+}
+
+func TestRootHelpFlag(t *testing.T) {
+	var stdout bytes.Buffer
+	if err := Run(context.Background(), []string{"--help"}, &stdout, &bytes.Buffer{}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "Available Commands:") {
+		t.Fatalf("expected cobra help: %q", stdout.String())
+	}
+}
+
+func TestRootVersionFlag(t *testing.T) {
+	var stdout bytes.Buffer
+	if err := Run(context.Background(), []string{"-v"}, &stdout, &bytes.Buffer{}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "0.1.0") {
+		t.Fatalf("expected version: %q", stdout.String())
+	}
+}
+
+func TestShowCommand(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "encoded.gguf")
+	testutil.WriteEncodedGGUF(t, path)
+
+	var stdout bytes.Buffer
+	if err := Run(context.Background(), []string{"show", path}, &stdout, &bytes.Buffer{}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got := stdout.String()
+	if !strings.Contains(got, "Model") {
+		t.Fatalf("expected model summary: %q", got)
+	}
+	if !strings.Contains(got, "architecture") {
+		t.Fatalf("expected architecture in show output: %q", got)
+	}
+}
+
+func TestRmCommand(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "temp.gguf")
+	testutil.WriteEncodedGGUF(t, path)
+
+	var stdout bytes.Buffer
+	if err := Run(context.Background(), []string{"rm", path}, &stdout, &bytes.Buffer{}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatal("expected file removed")
+	}
+}
+
+func TestCpCommand(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src.gguf")
+	dstDir := filepath.Join(dir, "models")
+	testutil.WriteEncodedGGUF(t, src)
+
+	var stdout bytes.Buffer
+	if err := Run(context.Background(), []string{"cp", src, filepath.Join(dstDir, "copy.gguf")}, &stdout, &bytes.Buffer{}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dstDir, "copy.gguf")); err != nil {
+		t.Fatalf("copy missing: %v", err)
 	}
 }
 

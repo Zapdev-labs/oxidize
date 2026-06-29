@@ -114,7 +114,10 @@ def tune() -> OxkTune:
                 elif hint == "t0" or hint == "":
                     pf_nta = False
                 else:
-                    print(f"OXIDIZE_OXK_PF_HINT={hint} unknown (use t0|nta); using t0", file=sys.stderr)
+                    print(
+                        f"OXIDIZE_OXK_PF_HINT={hint} unknown (use t0|nta); using t0",
+                        file=sys.stderr,
+                    )
                 _tune_val = OxkTune(pf_bytes=blocks * BLOCK_Q4_K_SIZE, pf_nta=pf_nta)
     return _tune_val
 
@@ -264,7 +267,11 @@ def _int8_array(buf: bytes | bytearray) -> np.ndarray:
     return np.frombuffer(buf, dtype=np.uint8).astype(np.int8)
 
 
-def q4k_q8k_row_dot_scalar(row: bytes | bytearray, blocks_per_row: int, q8k: bytes | bytearray) -> float:
+def q4k_q8k_row_dot_scalar(
+    row: bytes | bytearray,
+    blocks_per_row: int,
+    q8k: bytes | bytearray,
+) -> float:
     """Dot one Q4_K row against a Q8_K vector.
 
     Uses NumPy vectorization for the inner loops while keeping the exact same
@@ -302,9 +309,19 @@ def q4k_q8k_row_dot_scalar(row: bytes | bytearray, blocks_per_row: int, q8k: byt
 
             base = gp * 32
             # Vectorized sum1: low nibbles * q8[g1*32:(g1+1)*32]
-            sum1 = int(np.dot(low[base : base + 32].astype(np.int32), q8[g1 * 32 : (g1 + 1) * 32].astype(np.int32)))
+            sum1 = int(
+                np.dot(
+                    low[base : base + 32].astype(np.int32),
+                    q8[g1 * 32 : (g1 + 1) * 32].astype(np.int32),
+                )
+            )
             # Vectorized sum2: high nibbles * q8[g2*32:(g2+1)*32]
-            sum2 = int(np.dot(high[base : base + 32].astype(np.int32), q8[g2 * 32 : (g2 + 1) * 32].astype(np.int32)))
+            sum2 = int(
+                np.dot(
+                    high[base : base + 32].astype(np.int32),
+                    q8[g2 * 32 : (g2 + 1) * 32].astype(np.int32),
+                )
+            )
 
             pos += s1 * sum1 + s2 * sum2
             bs1 = int(bsums[g1 * 2]) + int(bsums[g1 * 2 + 1])
@@ -321,12 +338,20 @@ def q4k_q8k_row_dot_scalar(row: bytes | bytearray, blocks_per_row: int, q8k: byt
 # ---------------------------------------------------------------------------
 
 
-def q4k_q8k_row_dot_x1_scalar(row: bytes | bytearray, blocks_per_row: int, q8k: bytes | bytearray) -> float:
+def q4k_q8k_row_dot_x1_scalar(
+    row: bytes | bytearray,
+    blocks_per_row: int,
+    q8k: bytes | bytearray,
+) -> float:
     return q4k_q8k_row_dot_scalar(row, blocks_per_row, q8k)
 
 
 def q4k_q8k_row_dot_x4_scalar(
-    rows: bytes | bytearray, row_bytes: int, blocks_per_row: int, q8k: bytes | bytearray, out: list[float]
+    rows: bytes | bytearray,
+    row_bytes: int,
+    blocks_per_row: int,
+    q8k: bytes | bytearray,
+    out: list[float],
 ) -> None:
     if len(out) < 4:
         raise ValueError("out too small")
@@ -336,7 +361,11 @@ def q4k_q8k_row_dot_x4_scalar(
 
 
 def q4k_q8k_row_dot_x8_scalar(
-    rows: bytes | bytearray, row_bytes: int, blocks_per_row: int, q8k: bytes | bytearray, out: list[float]
+    rows: bytes | bytearray,
+    row_bytes: int,
+    blocks_per_row: int,
+    q8k: bytes | bytearray,
+    out: list[float],
 ) -> None:
     if len(out) < 8:
         raise ValueError("out too small")
@@ -346,7 +375,11 @@ def q4k_q8k_row_dot_x8_scalar(
 
 
 def q4k_q8k_row_dot_x16_scalar(
-    rows: bytes | bytearray, row_bytes: int, blocks_per_row: int, q8k: bytes | bytearray, out: list[float]
+    rows: bytes | bytearray,
+    row_bytes: int,
+    blocks_per_row: int,
+    q8k: bytes | bytearray,
+    out: list[float],
 ) -> None:
     if len(out) < 16:
         raise ValueError("out too small")
@@ -360,7 +393,12 @@ def q4k_q8k_row_dot_x16_scalar(
 # ---------------------------------------------------------------------------
 
 
-def gemv_q4k_range(rows: bytes | bytearray, blocks_per_row: int, q8k: bytes | bytearray, out: list[float]) -> None:
+def gemv_q4k_range(
+    rows: bytes | bytearray,
+    blocks_per_row: int,
+    q8k: bytes | bytearray,
+    out: list[float],
+) -> None:
     row_bytes = blocks_per_row * BLOCK_Q4_K_SIZE
     if len(rows) < len(out) * row_bytes:
         raise ValueError("rows buffer too small")

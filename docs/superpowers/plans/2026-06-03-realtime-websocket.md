@@ -13,11 +13,13 @@
 ## File Structure
 
 **New files:**
+
 - `oxidize-server/src/realtime/mod.rs` — module declarations + the `/v1/realtime` axum handler and reader/writer loops.
 - `oxidize-server/src/realtime/protocol.rs` — `ClientEvent`, `ServerEvent` serde enums, tool types (`RealtimeTool`, `ToolChoice`), and the realtime-local request config.
 - `oxidize-server/src/realtime/session.rs` — `RealtimeSession`, `ConversationItem`, `SessionConfig`, prompt building, and tool-call parsing. Socket-independent.
 
 **Modified files:**
+
 - `oxidize-server/Cargo.toml` — enable axum `ws` feature; add `tokio-tungstenite` + `futures-util` dev-deps.
 - `oxidize-server/src/lib.rs` — add `pub mod realtime;`.
 - `oxidize-server/src/runtime/generate.rs` — add `generate_text_streaming_blocking`.
@@ -32,9 +34,10 @@ Files are split by responsibility (protocol vs. session logic vs. transport) to 
 ## Task 1: Enable axum `ws` feature and add dev-dependencies
 
 **Files:**
+
 - Modify: `oxidize-server/Cargo.toml`
 
-- [ ] **Step 1: Edit Cargo.toml dependencies**
+- [x] **Step 1: Edit Cargo.toml dependencies**
 
 Change the `axum.workspace = true` line and add dev-deps. The `[dependencies]` axum line becomes:
 
@@ -49,12 +52,12 @@ tokio-tungstenite = "0.24"
 futures-util = "0.3"
 ```
 
-- [ ] **Step 2: Verify it compiles**
+- [x] **Step 2: Verify it compiles**
 
 Run: `sfw cargo build -p oxidize-server`
 Expected: builds successfully (no behavior change yet).
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add oxidize-server/Cargo.toml
@@ -68,10 +71,11 @@ git commit -m "build: enable axum ws feature and add tokio-tungstenite dev-dep"
 The sequential runtime only has the blocking `generate_text`. Add a streaming variant mirroring the paged channel/cancel contract so `RealtimeSession` can drive either runtime identically.
 
 **Files:**
+
 - Modify: `oxidize-server/src/runtime/generate.rs`
 - Test: `oxidize-server/src/runtime/generate.rs` (co-located `#[cfg(test)]`)
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to the bottom of `generate.rs` (create the `#[cfg(test)] mod tests` block if absent; if a test module already exists, add the test inside it):
 
@@ -231,6 +235,7 @@ git commit -m "feat: add sequential streaming generation path for realtime"
 ## Task 3: Protocol types (`protocol.rs`)
 
 **Files:**
+
 - Create: `oxidize-server/src/realtime/protocol.rs`
 - Create: `oxidize-server/src/realtime/mod.rs` (stub, expanded in Task 6)
 - Modify: `oxidize-server/src/lib.rs`
@@ -431,6 +436,7 @@ git commit -m "feat: add realtime websocket protocol types"
 ## Task 4: `RealtimeSession` config merge + conversation items
 
 **Files:**
+
 - Create: `oxidize-server/src/realtime/session.rs`
 - Test: same file, co-located.
 
@@ -606,9 +612,10 @@ git commit -m "feat: add RealtimeSession config merge and conversation items"
 ## Task 5: Prompt building + tool-call parsing
 
 The tool-call marker convention: the model is instructed to emit a single fenced block:
-`` ```tool_call\n{"name": "...", "arguments": {...}}\n``` ``. We scan the full generated text for this marker.
+````tool_call\n{"name": "...", "arguments": {...}}\n````. We scan the full generated text for this marker.
 
 **Files:**
+
 - Modify: `oxidize-server/src/realtime/session.rs`
 - Test: same file.
 
@@ -767,6 +774,7 @@ git commit -m "feat: add realtime prompt building and tool-call parsing"
 ## Task 6: Metrics — realtime gauges/counters
 
 **Files:**
+
 - Modify: `oxidize-server/src/metrics.rs`
 - Test: same file.
 
@@ -844,6 +852,7 @@ git commit -m "feat: add realtime connection and response metrics"
 Browsers cannot set custom headers on a WebSocket, so accept `?api_key=` as a fallback.
 
 **Files:**
+
 - Modify: `oxidize-server/src/auth.rs`
 - Test: same file.
 
@@ -923,6 +932,7 @@ git commit -m "feat: accept api_key query param for websocket auth"
 This wires `RealtimeSession` to a live socket. The handler runs behind existing middleware. One in-flight response at a time.
 
 **Files:**
+
 - Modify: `oxidize-server/src/realtime/mod.rs`
 - Modify: `oxidize-server/src/app.rs`
 
@@ -1252,6 +1262,7 @@ git commit -m "feat: add /v1/realtime websocket handler with reader/writer loops
 Exercises the full socket against the no-model placeholder path (so it runs in CI without a GGUF). With no model loaded, `spawn_response` emits an `error` event ("no model loaded"); we assert the lifecycle events up to that point plus session creation. A model-backed round trip is covered manually (see Task 10 verification).
 
 **Files:**
+
 - Create: `oxidize-server/tests/realtime_ws.rs`
 
 - [ ] **Step 1: Write the failing integration test**
@@ -1354,6 +1365,7 @@ where
 - [ ] **Step 2: Ensure required items are public**
 
 The integration test imports `AppState`, `build_app_with_state`, `AuditLogger`, `AuthConfig`, `RequestLimiter`, `ContinuousBatcher`, `RequestLimitConfig`, `MetricsRegistry`. Verify each is `pub` and reachable:
+
 - `AppState`, `build_app_with_state` — `pub` in `app.rs` (confirmed).
 - `RequestLimitConfig` — currently used behind `#[cfg(test)]` import only; confirm the struct itself is `pub` in `limits.rs`. Run: `grep -n "pub struct RequestLimitConfig\|pub struct RequestLimiter\|pub struct ContinuousBatcher" oxidize-server/src/limits.rs`. If any is not `pub`, make it `pub`.
 - `AuditLogger::new` — confirm `pub`. Run: `grep -n "pub struct AuditLogger\|pub fn new" oxidize-server/src/audit.rs`.
@@ -1378,6 +1390,7 @@ git commit -m "test: add realtime websocket lifecycle integration test"
 ## Task 10: Full verification + docs note
 
 **Files:**
+
 - Modify: `oxidize-server/src/realtime/mod.rs` (only if verification surfaces a bug)
 
 - [ ] **Step 1: Run the whole server test suite**
@@ -1396,7 +1409,7 @@ Start the server with a model and connect a Realtime text client to `ws://127.0.
 
 - [ ] **Step 4: Update the design spec status**
 
-In `docs/superpowers/specs/2026-06-03-realtime-websocket-design.md`, change the `**Status:**` line from `Approved for planning` to `Implemented`.
+In `docs/superpowers/specs/2026-06-03-realtime-websocket-design.md`, change the `**Status:`** line from `Approved for planning` to `Implemented`.
 
 - [ ] **Step 5: Commit**
 
@@ -1410,10 +1423,11 @@ git commit -m "docs: mark realtime websocket design as implemented"
 ## Self-Review Notes
 
 **Spec coverage check:**
+
 - Route `GET /v1/realtime` behind middleware → Task 8 (route registration in `app.rs`, middleware applies automatically).
 - Auth via header + `?api_key=` fallback → Task 7. (Auth failure closing with a policy code is handled by the existing middleware returning 401 before upgrade; the spec's "policy-violation close code" is satisfied by rejecting the upgrade pre-handshake.)
 - Reader/writer split via `mpsc` → Task 8.
-- `RealtimeSession` pure methods (`apply_session_update`, `add_item`, `build_*`, take_cancel) → Tasks 4–5. (`take_cancel` is realized as the `Arc<AtomicBool>` held in the handler's `in_flight`, per Task 8 — the cancel flag lives at the transport layer, not inside the pure session, which keeps `RealtimeSession` socket-independent as the spec intends.)
+- `RealtimeSession` pure methods (`apply_session_update`, `add_item`, `build_`*, take_cancel) → Tasks 4–5. (`take_cancel` is realized as the `Arc<AtomicBool>` held in the handler's `in_flight`, per Task 8 — the cancel flag lives at the transport layer, not inside the pure session, which keeps `RealtimeSession` socket-independent as the spec intends.)
 - Runtime selection: paged preferred, sequential fallback via new `generate_text_streaming_blocking` → Tasks 2, 8.
 - Event protocol (all listed client/server events) → Task 3 enums; emitted in Task 8.
 - Function calling (tools on a realtime-local request type, preamble injection, marker scan, hit/miss, function_call_output round trip) → Tasks 3 (types), 5 (preamble + parse), 8 (emit). Round-trip input handled by `add_item` for `function_call_output`.

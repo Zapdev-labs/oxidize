@@ -84,7 +84,7 @@ def flash_attention_decode_f16(
     kv_off = kv_head * head_dim
     q = query[:head_dim]
     m = float("-inf")
-    l = 0.0
+    norm = 0.0
     for i in range(head_dim):
         output[i] = 0.0
     for t in range(seq_len):
@@ -95,14 +95,13 @@ def flash_attention_decode_f16(
         alpha = math.exp(m - new_max) if m != float("-inf") else 0.0
         beta = math.exp(score - new_max)
         m = new_max
-        l = l * alpha + beta
-        # out = out*alpha + beta*value (online softmax), value is f16.
+        norm = norm * alpha + beta
         if alpha != 1.0:
             for d in range(head_dim):
                 output[d] *= alpha
         axpy_f32_f16(output, beta, value_layer[row : row + head_dim])
-    if l > 0.0:
-        inv = 1.0 / l
+    if norm > 0.0:
+        inv = 1.0 / norm
         for d in range(head_dim):
             output[d] *= inv
 

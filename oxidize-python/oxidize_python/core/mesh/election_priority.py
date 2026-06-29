@@ -6,7 +6,7 @@ state machine that selects a master peer.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from .topology_extended import CapTopologyGraph
 

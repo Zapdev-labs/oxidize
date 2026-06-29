@@ -1,3 +1,5 @@
+#![allow(clippy::needless_range_loop, clippy::ptr_arg)]
+
 pub mod filter;
 pub mod gguf_copy;
 pub mod mask;

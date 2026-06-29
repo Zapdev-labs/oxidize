@@ -15,11 +15,11 @@ from oxidize_python.core.model.generation import (
     default_generation_config,
     default_speculative_generation_config,
 )
-from oxidize_python.core.model.layer_wise import new_layer_wise_from_inference
-from oxidize_python.core.model.mtp import MtpGenerationStream, has_mtp_weights
 from oxidize_python.core.model.inference import InferenceModel
+from oxidize_python.core.model.layer_wise import new_layer_wise_from_inference
 from oxidize_python.core.model.loader import LoaderConfig, load_gguf_model_from_path
 from oxidize_python.core.model.model import Model, Session, Token
+from oxidize_python.core.model.mtp import MtpGenerationStream, has_mtp_weights
 from oxidize_python.core.model.speculative import (
     SpeculativeConfig,
     SpeculativeDecoder,

@@ -42,19 +42,14 @@ pub fn gpu_decode_graph_eligible(pos: usize, context: usize) -> bool {
 #[cfg(feature = "cuda")]
 fn ensure_decode_d_state(gpu: &mut GpuState) -> Result<(), String> {
     if gpu.decode_d_state.is_none() {
-        gpu.decode_d_state =
-            Some(cust::memory::DeviceBuffer::<u32>::zeroed(3).map_err(stringify)?);
+        gpu.decode_d_state = Some(cust::memory::DeviceBuffer::<u32>::zeroed(3).map_err(stringify)?);
     }
     Ok(())
 }
 
 /// Patch live per-token scalars before each graph replay (one tiny H2D).
 #[cfg(feature = "cuda")]
-pub fn gpu_decode_graph_set_token(
-    pos: u32,
-    context: u32,
-    token_id: u32,
-) -> Result<(), String> {
+pub fn gpu_decode_graph_set_token(pos: u32, context: u32, token_id: u32) -> Result<(), String> {
     with_gpu(|gpu| {
         ensure_decode_d_state(gpu)?;
         let host = [pos, context, token_id];

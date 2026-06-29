@@ -195,7 +195,7 @@ pub fn metadata_usize(
         GgufMetadataValue::Int16(x) => (*x).into(),
         GgufMetadataValue::Uint32(x) => (*x).into(),
         GgufMetadataValue::Int32(x) => (*x).into(),
-        GgufMetadataValue::Uint64(x) => (*x as i64),
+        GgufMetadataValue::Uint64(x) => *x as i64,
         GgufMetadataValue::Int64(x) => *x,
         GgufMetadataValue::Float32(x) => *x as i64,
         GgufMetadataValue::Float64(x) => *x as i64,

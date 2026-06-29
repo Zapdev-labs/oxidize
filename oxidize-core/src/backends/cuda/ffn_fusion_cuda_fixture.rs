@@ -28,7 +28,11 @@ pub(super) fn run_q4k_gemv_block_size_cuda_event_benchmark(
     let cols = blocks_per_row
         .checked_mul(QK_K)
         .ok_or_else(|| "Q4_K fixture column count overflow".to_owned())?;
-    let block_bytes = if q6k { BLOCK_Q6_K_SIZE } else { BLOCK_Q4_K_SIZE };
+    let block_bytes = if q6k {
+        BLOCK_Q6_K_SIZE
+    } else {
+        BLOCK_Q4_K_SIZE
+    };
     let weight_bytes = rows
         .checked_mul(blocks_per_row)
         .and_then(|blocks| blocks.checked_mul(block_bytes))
@@ -51,14 +55,8 @@ pub(super) fn run_q4k_gemv_block_size_cuda_event_benchmark(
     } else {
         GEMV_Q4K_F32IN_KERNEL_NAME
     };
-    let eager = gpu
-        .module
-        .get_function(kernel_name)
-        .map_err(stringify)?;
-    let candidate = gpu
-        .module
-        .get_function(kernel_name)
-        .map_err(stringify)?;
+    let eager = gpu.module.get_function(kernel_name).map_err(stringify)?;
+    let candidate = gpu.module.get_function(kernel_name).map_err(stringify)?;
     let rows_u32 = u32::try_from(rows).map_err(|_| "fixture rows exceed u32".to_owned())?;
     let blocks_u32 =
         u32::try_from(blocks_per_row).map_err(|_| "fixture blocks exceed u32".to_owned())?;

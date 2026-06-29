@@ -313,10 +313,7 @@ impl DpoTrainer {
         let (ref_c, ref_r) = if self.dpo_config.reference_free {
             (0.0_f32, 0.0_f32)
         } else {
-            match (
-                example.ref_chosen_logprob,
-                example.ref_rejected_logprob,
-            ) {
+            match (example.ref_chosen_logprob, example.ref_rejected_logprob) {
                 (Some(rc), Some(rr)) => (rc, rr),
                 _ => {
                     return Err(FinetuneError::Adapter(

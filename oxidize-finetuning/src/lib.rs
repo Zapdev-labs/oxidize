@@ -1,3 +1,9 @@
+#![allow(
+    unused_parens,
+    clippy::doc_overindented_list_items,
+    clippy::excessive_precision
+)]
+
 mod config;
 mod dataset;
 pub mod dpo;

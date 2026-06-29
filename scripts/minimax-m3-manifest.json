@@ -1,0 +1,19 @@
+{
+  "model": "MiniMax-M3",
+  "eagle3_draft": {
+    "repo": "Inferact/MiniMax-M3-EAGLE3",
+    "path": "/home/ai/models/minimax-m3/eagle3/draft",
+    "format": "safetensors",
+    "size_gb": 6.1,
+    "extract_layers": [2, 30, 57],
+    "note": "No GGUF conversion needed — oxidize loads SafeTensors directly via --draft-model"
+  },
+  "target": {
+    "repo": "unsloth/MiniMax-M3-GGUF",
+    "quant": "UD-IQ1_M",
+    "path": "/home/ai/models/minimax-m3/target/UD-IQ1_M",
+    "shards": 4,
+    "first_shard": "MiniMax-M3-UD-IQ1_M-00001-of-00004.gguf"
+  },
+  "oxidize_run": "numactl --interleave=all ~/oxidize/target/release/oxidize run /home/ai/models/minimax-m3/target/UD-IQ1_M/MiniMax-M3-UD-IQ1_M-00001-of-00004.gguf --draft-model=/home/ai/models/minimax-m3/eagle3/draft --draft-tokens=3 --prompt 'Hello' --max-tokens 32 --no-api --no-auto --threads 32"
+}

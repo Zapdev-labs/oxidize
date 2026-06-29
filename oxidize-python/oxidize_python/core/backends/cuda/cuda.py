@@ -18,7 +18,6 @@ from oxidize_python.core.backends.cuda.types import (
     GgmlType,
     GpuState,
     byte_cache_key,
-    dequant_kernel_for,
     supports_quantized_gpu,
 )
 

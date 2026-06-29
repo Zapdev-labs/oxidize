@@ -13,6 +13,8 @@
 //! benchmarked and tested in isolation; `oxidize-core` consumes it behind the
 //! optional `oxk` cargo feature with runtime selection via `OXIDIZE_GEMV`.
 
+#![allow(dead_code)]
+
 pub mod cpu;
 pub mod prune;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -160,10 +162,10 @@ pub fn gemv_q4k_range(rows: &[u8], blocks_per_row: usize, q8k: &[u8], out: &mut 
     debug_assert!(rows.len() >= out.len() * row_bytes);
     debug_assert!(q8k.len() >= blocks_per_row * BLOCK_Q8_K_BYTES);
 
-    let isa = select_isa();
-
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
+        let isa = select_isa();
+
         // AVX-512 VNNI (Ice Lake / Sapphire Rapids / Granite Rapids)
         if (isa == "avx512vnni" || isa == "auto") && oxk_avx512vnni_available() {
             let n = out.len();
@@ -392,7 +394,7 @@ mod tests {
         for &(rows, bpr, seed) in &[(8usize, 16usize, 1u64), (12, 4, 2), (32, 8, 3)] {
             let (weights, q8k) = random_fixture(rows, bpr, seed);
             let row_bytes = bpr * BLOCK_Q4_K_SIZE;
-            let scalar: Vec<f32> = (0..rows)
+            let _scalar: Vec<f32> = (0..rows)
                 .map(|r| {
                     q4k_q8k_row_dot_scalar(&weights[r * row_bytes..(r + 1) * row_bytes], bpr, &q8k)
                 })
@@ -407,14 +409,14 @@ mod tests {
                             &q8k,
                         )
                     };
-                    assert_eq!(single.to_bits(), scalar[r].to_bits(), "x1 row {r}");
+                    assert_eq!(single.to_bits(), _scalar[r].to_bits(), "x1 row {r}");
                 }
                 let mut quad = [0.0_f32; 4];
                 unsafe {
                     q4k_q8k_row_dot_x4_avx2(weights.as_ptr(), row_bytes, bpr, &q8k, &mut quad)
                 };
                 for r in 0..4 {
-                    assert_eq!(quad[r].to_bits(), scalar[r].to_bits(), "x4 row {r}");
+                    assert_eq!(quad[r].to_bits(), _scalar[r].to_bits(), "x4 row {r}");
                 }
                 if rows >= 8 {
                     let mut octet = [0.0_f32; 8];
@@ -422,7 +424,7 @@ mod tests {
                         q4k_q8k_row_dot_x8_avx2(weights.as_ptr(), row_bytes, bpr, &q8k, &mut octet)
                     };
                     for r in 0..8 {
-                        assert_eq!(octet[r].to_bits(), scalar[r].to_bits(), "x8 row {r}");
+                        assert_eq!(octet[r].to_bits(), _scalar[r].to_bits(), "x8 row {r}");
                     }
                 }
                 if rows >= 16 {
@@ -431,7 +433,7 @@ mod tests {
                         q4k_q8k_row_dot_x16_avx2(weights.as_ptr(), row_bytes, bpr, &q8k, &mut hex)
                     };
                     for r in 0..16 {
-                        assert_eq!(hex[r].to_bits(), scalar[r].to_bits(), "x16 row {r}");
+                        assert_eq!(hex[r].to_bits(), _scalar[r].to_bits(), "x16 row {r}");
                     }
                 }
             }

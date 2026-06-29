@@ -181,7 +181,9 @@ impl QLoRAAdapter {
             weights.truncate(total);
             self.base_dequant = Some(weights);
         }
-        self.base_dequant.as_ref().expect("base_dequant just initialized")
+        self.base_dequant
+            .as_ref()
+            .expect("base_dequant just initialized")
     }
 
     /// Run the full QLoRA forward pass for `count` input rows.

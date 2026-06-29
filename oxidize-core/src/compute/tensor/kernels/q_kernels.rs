@@ -239,6 +239,15 @@ pub(super) unsafe fn q4_k_q8_k_row_dot_x4_avx2(
     unreachable!("x4 kernel is gated on x86 availability at call sites")
 }
 
+#[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+pub(super) unsafe fn q4_k_q8_k_row_dot_avx2(
+    _row: &[u8],
+    _blocks_per_row: usize,
+    _q8k: &[u8],
+) -> f32 {
+    unreachable!("Q4_K AVX2 kernel is gated on x86 availability at call sites")
+}
+
 /// Integer Q6_K x Q8_K row dot (llama.cpp-style). Decodes 6-bit weights to
 /// unsigned 0..63, runs `maddubs`/`madd` integer dot products against the
 /// pre-quantized Q8_K input, and removes the implicit -32 offset analytically
@@ -312,6 +321,15 @@ pub(super) unsafe fn q6_k_q8_k_row_dot_avx2(row: &[u8], blocks_per_row: usize, q
         acc += d * d_q8 * (pos - 32 * min_acc) as f32;
     }
     acc
+}
+
+#[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+pub(super) unsafe fn q6_k_q8_k_row_dot_avx2(
+    _row: &[u8],
+    _blocks_per_row: usize,
+    _q8k: &[u8],
+) -> f32 {
+    unreachable!("Q6_K AVX2 kernel is gated on x86 availability at call sites")
 }
 
 /// 4-row variant of [`q6_k_q8_k_row_dot_avx2`]: shares the Q8_K loads and
@@ -419,6 +437,17 @@ pub(super) unsafe fn q6_k_q8_k_row_dot_x4_avx2(
         }
     }
     *out = acc;
+}
+
+#[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+pub(super) unsafe fn q6_k_q8_k_row_dot_x4_avx2(
+    _rows_base: *const u8,
+    _row_bytes: usize,
+    _blocks_per_row: usize,
+    _q8k: &[u8],
+    _out: &mut [f32; 4],
+) {
+    unreachable!("Q6_K x4 AVX2 kernel is gated on x86 availability at call sites")
 }
 
 /// AVX-512 VNNI variant of [`q4_k_q8_k_row_dot_avx2`]. Uses `_mm512_dpbusd_epi32`

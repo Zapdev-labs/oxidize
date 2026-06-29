@@ -30,7 +30,11 @@ def fingerprint(mapped: ggufcore.MappedFile) -> ModelFingerprint:
     cfg = inference_config_from_gguf(mapped)
     file_size = len(mapped.bytes)
     quant, is_moe, expert_count, has_mtp = _scan_tensors(mapped.parsed)
-    arch = str(cfg.architecture).lower() if cfg.architecture else ggufcore.architecture(mapped.parsed).lower()
+    arch = (
+        str(cfg.architecture).lower()
+        if cfg.architecture
+        else ggufcore.architecture(mapped.parsed).lower()
+    )
     return ModelFingerprint(
         architecture=arch or "llama",
         layer_count=cfg.layer_count,
@@ -114,7 +118,8 @@ def model_summary(model: ModelFingerprint) -> str:
     mtp = " mtp=yes" if model.has_mtp else ""
     return (
         f"{model.architecture}-like layers={model.layer_count} hidden={model.hidden_size} "
-        f"heads={model.num_attention_heads} kv_heads={model.num_kv_heads} head_dim={model.head_dim} "
+        f"heads={model.num_attention_heads} kv_heads={model.num_kv_heads} "
+        f"head_dim={model.head_dim} "
         f"vocab={model.vocab_size} size={model.file_size_bytes // (1024 * 1024)} MiB "
         f"quant={model.quant}{moe}{mtp}"
     )

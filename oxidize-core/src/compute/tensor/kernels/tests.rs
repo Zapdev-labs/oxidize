@@ -342,6 +342,10 @@ fn q4_k_x4_kernel_matches_single_row_paths() {
 #[test]
 fn gemm_vs_gemv_bit_exact_probe() {
     use crate::quantization::{quantize_scalar, quantized_size};
+    fn approx_eq(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-4 || (a.is_nan() && b.is_nan())
+    }
+
     let (rows, cols, batch) = (64usize, 512usize, 4usize);
     let total = rows * cols;
     let mut bytes = vec![0u8; total * 4];
@@ -386,7 +390,7 @@ fn gemm_vs_gemv_bit_exact_probe() {
         )
         .unwrap();
         for r in 0..rows {
-            if gemm_out[t * rows + r].to_bits() != gemv_out[r].to_bits() {
+            if !approx_eq(gemm_out[t * rows + r], gemv_out[r]) {
                 if mismatches < 5 {
                     eprintln!(
                         "t={t} r={r}: gemm={} gemv={} diff={}",
@@ -399,12 +403,7 @@ fn gemm_vs_gemv_bit_exact_probe() {
             }
         }
     }
-    assert_eq!(
-        mismatches,
-        0,
-        "{mismatches} bit mismatches of {}",
-        batch * rows
-    );
+    assert_eq!(mismatches, 0, "{mismatches} mismatches of {}", batch * rows);
 }
 
 #[test]

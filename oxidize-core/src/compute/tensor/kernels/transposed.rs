@@ -364,14 +364,14 @@ pub(super) fn accumulate_q4_block(
     bitstream: &[u8],
     factor: f32,
     output: &mut [f32],
-    use_avx512: bool,
-    use_avx2: bool,
+    _use_avx512: bool,
+    _use_avx2: bool,
 ) {
     debug_assert!(bitstream.len() >= QK_K / 2);
     debug_assert!(output.len() >= QK_K);
 
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    if use_avx512 {
+    if _use_avx512 {
         unsafe {
             accumulate_q4_block_avx512(bitstream.as_ptr(), factor, output.as_mut_ptr());
         }
@@ -379,7 +379,7 @@ pub(super) fn accumulate_q4_block(
     }
 
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    if use_avx2 {
+    if _use_avx2 {
         unsafe {
             accumulate_q4_block_avx2(bitstream.as_ptr(), factor, output.as_mut_ptr());
         }

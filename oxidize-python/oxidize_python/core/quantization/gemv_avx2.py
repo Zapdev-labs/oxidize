@@ -66,10 +66,10 @@ def q4_k_q8k_row_dot(
             base = gp * 32
             p1 = 0
             p2 = 0
-            for l in range(32):
-                packed = qs[base + l]
-                p1 += (packed & 0x0F) * _i8(q8k[q8_base + g1 * 32 + l])
-                p2 += (packed >> 4) * _i8(q8k[q8_base + g2 * 32 + l])
+            for lane in range(32):
+                packed = qs[base + lane]
+                p1 += (packed & 0x0F) * _i8(q8k[q8_base + g1 * 32 + lane])
+                p2 += (packed >> 4) * _i8(q8k[q8_base + g2 * 32 + lane])
             pos_acc += s1 * p1
             pos_acc += s2 * p2
 
@@ -130,10 +130,10 @@ def q4_k_q8k_row_dot_x4(
                 base = gp * 32
                 p1 = 0
                 p2 = 0
-                for l in range(32):
-                    packed = qs[base + l]
-                    p1 += (packed & 0x0F) * q8[g1 * 32 + l]
-                    p2 += (packed >> 4) * q8[g2 * 32 + l]
+                for lane in range(32):
+                    packed = qs[base + lane]
+                    p1 += (packed & 0x0F) * q8[g1 * 32 + lane]
+                    p2 += (packed >> 4) * q8[g2 * 32 + lane]
                 pos_acc += s1 * p1
                 pos_acc += s2 * p2
                 min_acc += ms1 * bs[g1]

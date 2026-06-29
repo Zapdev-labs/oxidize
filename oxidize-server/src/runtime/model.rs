@@ -45,9 +45,9 @@ pub enum LoadedModel {
     Inference(Box<InferenceModel>),
     LayerWise(Box<LayerWiseModel>),
     DFlash(Box<DFlashDraftModel>),
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "mlx"))]
     Mlx(Box<oxidize_core::mlx_inference::MlxInferenceModel>),
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(all(target_os = "macos", feature = "mlx")))]
     #[allow(dead_code)]
     Mlx(Box<InferenceModel>),
 }
@@ -58,9 +58,9 @@ impl Model for LoadedModel {
             Self::Inference(model) => model.forward(tokens, session),
             Self::LayerWise(model) => model.forward(tokens, session),
             Self::DFlash(model) => model.forward(tokens, session),
-            #[cfg(target_os = "macos")]
+            #[cfg(all(target_os = "macos", feature = "mlx"))]
             Self::Mlx(model) => model.forward(tokens, session),
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(all(target_os = "macos", feature = "mlx")))]
             Self::Mlx(model) => model.forward(tokens, session),
         }
     }
@@ -70,9 +70,9 @@ impl Model for LoadedModel {
             Self::Inference(model) => model.vocab_size(),
             Self::LayerWise(model) => model.vocab_size(),
             Self::DFlash(model) => model.vocab_size(),
-            #[cfg(target_os = "macos")]
+            #[cfg(all(target_os = "macos", feature = "mlx"))]
             Self::Mlx(model) => model.vocab_size(),
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(all(target_os = "macos", feature = "mlx")))]
             Self::Mlx(model) => model.vocab_size(),
         }
     }
@@ -82,9 +82,9 @@ impl Model for LoadedModel {
             Self::Inference(model) => model.context_size(),
             Self::LayerWise(model) => model.context_size(),
             Self::DFlash(model) => model.context_size(),
-            #[cfg(target_os = "macos")]
+            #[cfg(all(target_os = "macos", feature = "mlx"))]
             Self::Mlx(model) => model.context_size(),
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(all(target_os = "macos", feature = "mlx")))]
             Self::Mlx(model) => model.context_size(),
         }
     }
@@ -94,9 +94,9 @@ impl Model for LoadedModel {
             Self::Inference(model) => model.layer_count(),
             Self::LayerWise(model) => model.layer_count(),
             Self::DFlash(model) => model.layer_count(),
-            #[cfg(target_os = "macos")]
+            #[cfg(all(target_os = "macos", feature = "mlx"))]
             Self::Mlx(model) => model.layer_count(),
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(all(target_os = "macos", feature = "mlx")))]
             Self::Mlx(model) => model.layer_count(),
         }
     }
@@ -106,9 +106,9 @@ impl Model for LoadedModel {
             Self::Inference(model) => model.rewind_to(consumed_tokens),
             Self::LayerWise(model) => model.rewind_to(consumed_tokens),
             Self::DFlash(model) => model.rewind_to(consumed_tokens),
-            #[cfg(target_os = "macos")]
+            #[cfg(all(target_os = "macos", feature = "mlx"))]
             Self::Mlx(model) => model.rewind_to(consumed_tokens),
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(all(target_os = "macos", feature = "mlx")))]
             Self::Mlx(model) => model.rewind_to(consumed_tokens),
         }
     }
@@ -122,9 +122,9 @@ impl Model for LoadedModel {
             Self::Inference(model) => model.forward_many(tokens, session),
             Self::LayerWise(model) => model.forward_many(tokens, session),
             Self::DFlash(model) => model.forward_many(tokens, session),
-            #[cfg(target_os = "macos")]
+            #[cfg(all(target_os = "macos", feature = "mlx"))]
             Self::Mlx(model) => model.forward_many(tokens, session),
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(all(target_os = "macos", feature = "mlx")))]
             Self::Mlx(model) => model.forward_many(tokens, session),
         }
     }
@@ -320,7 +320,7 @@ pub fn load_model_runtime(args: &Args) -> Result<Option<Arc<ModelRuntime>>, Stri
         if args.turboquant_kv {
             config.kv_quantization = oxidize_core::kv_cache::KvQuantization::TurboQuant;
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(all(target_os = "macos", feature = "mlx"))]
         {
             match oxidize_core::mlx_inference::MlxInferenceModel::load_from_gguf(&mapped, config) {
                 Ok(m) => {
@@ -336,9 +336,11 @@ pub fn load_model_runtime(args: &Args) -> Result<Option<Arc<ModelRuntime>>, Stri
                 }
             }
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(all(target_os = "macos", feature = "mlx")))]
         {
-            tracing::warn!("MLX backend requested but unavailable on Linux; falling back to CPU");
+            tracing::warn!(
+                "MLX backend requested but unavailable in this build; falling back to CPU"
+            );
             LoadedModel::Inference(Box::new(
                 InferenceModel::load_from_gguf(&mapped, config, args.cpu_optimized)
                     .map_err(|error| format!("failed to load model weights: {error}"))?,
@@ -360,9 +362,9 @@ pub fn load_model_runtime(args: &Args) -> Result<Option<Arc<ModelRuntime>>, Stri
         LoadedModel::Inference(m) => m.layer_count(),
         LoadedModel::LayerWise(m) => m.layer_count(),
         LoadedModel::DFlash(m) => m.layer_count(),
-        #[cfg(target_os = "macos")]
+        #[cfg(all(target_os = "macos", feature = "mlx"))]
         LoadedModel::Mlx(m) => m.layer_count(),
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(all(target_os = "macos", feature = "mlx")))]
         LoadedModel::Mlx(m) => m.layer_count(),
     };
     let (draft, draft_tokens) = load_speculative_draft(

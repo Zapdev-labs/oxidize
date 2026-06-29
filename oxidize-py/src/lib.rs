@@ -255,6 +255,7 @@ impl Llama {
 #[derive(Default)]
 struct NoopWaker;
 
+#[allow(unknown_lints, clippy::manual_noop_waker)]
 impl Wake for NoopWaker {
     fn wake(self: std::sync::Arc<Self>) {}
 }
@@ -434,7 +435,6 @@ fn oxidize(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
 mod tests {
     use super::*;
     use pyo3::Python;
-    use pyo3::exceptions::PyStopIteration;
 
     #[test]
     fn health_status_matches_core_workspace_health() {
@@ -627,10 +627,24 @@ mod tests {
     }
 
     fn extract_coroutine_result<'py>(coroutine: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
-        match coroutine.call_method1("send", (coroutine.py().None(),)) {
+        let py = coroutine.py();
+        if let Ok(asyncio) = py.import("asyncio") {
+            #[cfg(windows)]
+            py.run(
+                c_str!(
+                    "import asyncio\n\
+                    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())"
+                ),
+                None,
+                None,
+            )?;
+            return asyncio.call_method1("run", (coroutine,));
+        }
+
+        match coroutine.call_method1("send", (py.None(),)) {
             Ok(_) => Err(PyValueError::new_err("coroutine unexpectedly yielded")),
-            Err(err) if err.is_instance_of::<PyStopIteration>(coroutine.py()) => {
-                Ok(err.value(coroutine.py()).getattr("value")?.to_owned())
+            Err(err) if err.is_instance_of::<pyo3::exceptions::PyStopIteration>(py) => {
+                Ok(err.value(py).getattr("value")?.to_owned())
             }
             Err(err) => Err(err),
         }

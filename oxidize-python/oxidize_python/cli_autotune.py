@@ -6,9 +6,9 @@ import json
 import sys
 from typing import Any
 
+from oxidize_python.cli_flags import RunOptions
 from oxidize_python.core import autotune
 from oxidize_python.core.ggufcore import gguf as ggufcore
-from oxidize_python.cli_flags import RunOptions
 
 
 def apply_autotune(model_path: str, opts: RunOptions, visited: set[str]) -> None:
@@ -45,7 +45,11 @@ def apply_autotune(model_path: str, opts: RunOptions, visited: set[str]) -> None
         opts.layer_wise = overrides.layer_wise
     if "paged" not in visited and overrides.paged:
         opts.use_paged = True
-    if plan.speculative.name == "DFLASH" and "dflash_fusion" not in visited and not opts.draft_model:
+    if (
+        plan.speculative.name == "DFLASH"
+        and "dflash_fusion" not in visited
+        and not opts.draft_model
+    ):
         opts.dflash_fusion = True
     print(
         f"[oxidize auto-tune] applied: threads={opts.threads} ctx={opts.ctx_size} "

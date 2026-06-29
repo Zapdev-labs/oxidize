@@ -15,6 +15,8 @@
 //! `forward_batch` (it is the bench's only execution path), but the flag is what
 //! a future paged runtime consults before taking the batched decode branch.
 
+#![allow(clippy::collapsible_if)]
+
 use clap::Parser;
 use oxidize_core::inference::{InferenceConfig, InferenceModel, SeqKv};
 use oxidize_core::model_loader::ModelLoader;
@@ -117,20 +119,18 @@ fn main() {
     // GPU-then-CPU dispatch (mirrors ContinuousBatchEngine::step). When
     // `gpu_batched` is false, or the device path is ineligible, this is exactly
     // the CPU `forward_batch`.
-    let decode = |model: &mut InferenceModel,
-                      rows: &[(u32, usize)],
-                      kv: &mut [SeqKv]|
-     -> Vec<Vec<f32>> {
-        if gpu_batched {
-            if let Some(l) = model
-                .forward_batch_gpu(rows, kv, true)
-                .expect("forward_batch_gpu")
-            {
-                return l;
+    let decode =
+        |model: &mut InferenceModel, rows: &[(u32, usize)], kv: &mut [SeqKv]| -> Vec<Vec<f32>> {
+            if gpu_batched {
+                if let Some(l) = model
+                    .forward_batch_gpu(rows, kv, true)
+                    .expect("forward_batch_gpu")
+                {
+                    return l;
+                }
             }
-        }
-        model.forward_batch(rows, kv, true).expect("forward_batch")
-    };
+            model.forward_batch(rows, kv, true).expect("forward_batch")
+        };
 
     let mut last = vec![0u32; batch];
     let mut pos = 0usize;

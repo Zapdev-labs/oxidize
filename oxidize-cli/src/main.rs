@@ -1,3 +1,5 @@
+#![allow(clippy::collapsible_if)]
+
 mod backend;
 mod help;
 mod pipeline;
@@ -704,18 +706,18 @@ fn main() {
                                 return;
                             }
                         };
-                    let draft_config =
-                        oxidize_core::eagle3::Eagle3Config::from_gguf(&draft_mapped);
-                    let mut draft_model = match oxidize_core::eagle3::Eagle3DraftModel::load_from_gguf(
-                        &draft_mapped,
-                        draft_config,
-                    ) {
-                        Ok(model) => model,
-                        Err(error) => {
-                            eprintln!("failed to load EAGLE3 draft model: {error}");
-                            return;
-                        }
-                    };
+                    let draft_config = oxidize_core::eagle3::Eagle3Config::from_gguf(&draft_mapped);
+                    let mut draft_model =
+                        match oxidize_core::eagle3::Eagle3DraftModel::load_from_gguf(
+                            &draft_mapped,
+                            draft_config,
+                        ) {
+                            Ok(model) => model,
+                            Err(error) => {
+                                eprintln!("failed to load EAGLE3 draft model: {error}");
+                                return;
+                            }
+                        };
                     eprintln!(
                         "using EAGLE3 speculative decoding: target={} draft={} draft_tokens={}",
                         model_path.display(),
@@ -1053,7 +1055,7 @@ fn main() {
                     }
                 }
             } else if effective_backend == oxidize_core::backend::Backend::Mlx {
-                #[cfg(target_os = "macos")]
+                #[cfg(all(target_os = "macos", feature = "mlx"))]
                 {
                     match oxidize_core::mlx_inference::MlxInferenceModel::load_from_gguf(
                         &mapped, config,
@@ -1075,10 +1077,10 @@ fn main() {
                         }
                     }
                 }
-                #[cfg(not(target_os = "macos"))]
+                #[cfg(not(all(target_os = "macos", feature = "mlx")))]
                 {
                     eprintln!(
-                        "MLX backend requested but unavailable on Linux; falling back to CPU"
+                        "MLX backend requested but unavailable in this build; falling back to CPU"
                     );
                     let use_mmap = true;
                     match InferenceModel::load_from_gguf(&mapped, config, use_mmap) {

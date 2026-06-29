@@ -69,9 +69,7 @@ fn bench_gemv_q8_0(rows: usize, cols: usize, iters: usize) -> Duration {
 fn main() {
     #[cfg(not(feature = "cuda"))]
     {
-        eprintln!("ERROR: This benchmark requires the 'cuda' feature to be enabled.");
-        eprintln!("       Run with: cargo run --bench gemv_bench --features cuda");
-        std::process::exit(1);
+        eprintln!("Skipping CUDA GEMV benchmark; enable with --features cuda.");
     }
 
     #[cfg(feature = "cuda")]

@@ -29,7 +29,10 @@ def handle_realtime(handler: BaseHTTPRequestHandler) -> None:
             f"Sec-WebSocket-Accept: {accept}\r\n\r\n"
         ).encode()
     )
-    _write_json(handler.connection, {"type": "session.created", "session": {"modalities": ["text"]}})
+    _write_json(
+        handler.connection,
+        {"type": "session.created", "session": {"modalities": ["text"]}},
+    )
     while True:
         payload, opcode = _read_frame(handler.connection)
         if payload is None:
@@ -114,5 +117,7 @@ def _write_text(conn: socket.socket, payload: bytes) -> None:
     elif n <= 65535:
         header.extend([126, (n >> 8) & 0xFF, n & 0xFF])
     else:
-        header.extend([127, 0, 0, 0, 0, (n >> 24) & 0xFF, (n >> 16) & 0xFF, (n >> 8) & 0xFF, n & 0xFF])
+        header.extend(
+            [127, 0, 0, 0, 0, (n >> 24) & 0xFF, (n >> 16) & 0xFF, (n >> 8) & 0xFF, n & 0xFF]
+        )
     conn.sendall(bytes(header) + payload)

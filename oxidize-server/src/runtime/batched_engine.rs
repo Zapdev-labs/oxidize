@@ -268,7 +268,9 @@ fn engine_loop(
             Err(error) => {
                 let msg = format!("batched forward failed: {error:?}");
                 for st in states.values() {
-                    let _ = st.out_tx.blocking_send(Err(GenerationError::Other(msg.clone())));
+                    let _ = st
+                        .out_tx
+                        .blocking_send(Err(GenerationError::Other(msg.clone())));
                 }
                 states.clear();
                 // Active sequences are now invalid; drop them and resume serving.

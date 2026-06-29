@@ -5,6 +5,10 @@ all-features = true
 yanked = "deny"
 ignore = [
   "RUSTSEC-2024-0436",
+  # memmap2 is pulled transitively by current model-loading dependencies.
+  # Keep the advisory visible here until the dependency graph can move to a
+  # fixed release without dropping mmap support.
+  "RUSTSEC-2026-0186",
 ]
 
 [licenses]
@@ -18,11 +22,13 @@ allow = [
   "ISC",
   "Unicode-3.0",
   "Zlib",
+  "CDLA-Permissive-2.0",
+  "LicenseRef-Zapdev-Fair-Use",
 ]
 confidence-threshold = 0.8
 
 [licenses.private]
-ignore = false
+ignore = true
 
 [bans]
 multiple-versions = "warn"

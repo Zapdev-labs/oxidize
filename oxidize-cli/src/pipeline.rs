@@ -37,6 +37,33 @@ const TAG_HIDDEN: u8 = 0x01;
 const TAG_BYE: u8 = 0xFE;
 const TAG_TOKEN: u8 = 0x10;
 
+#[cfg(unix)]
+fn tune_socket_buffers(stream: &TcpStream) {
+    use std::os::fd::AsRawFd;
+
+    let fd = stream.as_raw_fd();
+    unsafe {
+        let bufsz: libc::c_int = 4 * 1024 * 1024;
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_SNDBUF,
+            &bufsz as *const _ as *const _,
+            std::mem::size_of_val(&bufsz) as _,
+        );
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_RCVBUF,
+            &bufsz as *const _ as *const _,
+            std::mem::size_of_val(&bufsz) as _,
+        );
+    }
+}
+
+#[cfg(not(unix))]
+fn tune_socket_buffers(_stream: &TcpStream) {}
+
 /// Inclusive log helper.
 fn log(stage: &str, msg: impl AsRef<str>) {
     eprintln!("[pipe/{stage}] {}", msg.as_ref());
@@ -306,27 +333,7 @@ pub fn run_head(
         .set_write_timeout(Some(std::time::Duration::from_secs(60)))
         .and(stream.set_read_timeout(Some(std::time::Duration::from_secs(120))));
     // Bigger socket buffers help latency on long activation streams.
-    {
-        use std::os::fd::AsRawFd;
-        let fd = stream.as_raw_fd();
-        unsafe {
-            let bufsz: libc::c_int = 4 * 1024 * 1024;
-            libc::setsockopt(
-                fd,
-                libc::SOL_SOCKET,
-                libc::SO_SNDBUF,
-                &bufsz as *const _ as *const _,
-                std::mem::size_of_val(&bufsz) as _,
-            );
-            libc::setsockopt(
-                fd,
-                libc::SOL_SOCKET,
-                libc::SO_RCVBUF,
-                &bufsz as *const _ as *const _,
-                std::mem::size_of_val(&bufsz) as _,
-            );
-        }
-    }
+    tune_socket_buffers(&stream);
 
     // Send the split point so tail knows its own layer range.
     let mut hello = [0u8; 8];
@@ -478,27 +485,7 @@ pub fn run_tail(model_path: &Path, listen_addr: &str, use_mmap: bool) -> std::io
     log("tail", format!("listening on {listen_addr}"));
     let (mut stream, peer) = listener.accept()?;
     stream.set_nodelay(true)?;
-    {
-        use std::os::fd::AsRawFd;
-        let fd = stream.as_raw_fd();
-        unsafe {
-            let bufsz: libc::c_int = 4 * 1024 * 1024;
-            libc::setsockopt(
-                fd,
-                libc::SOL_SOCKET,
-                libc::SO_SNDBUF,
-                &bufsz as *const _ as *const _,
-                std::mem::size_of_val(&bufsz) as _,
-            );
-            libc::setsockopt(
-                fd,
-                libc::SOL_SOCKET,
-                libc::SO_RCVBUF,
-                &bufsz as *const _ as *const _,
-                std::mem::size_of_val(&bufsz) as _,
-            );
-        }
-    }
+    tune_socket_buffers(&stream);
     log("tail", format!("accepted {peer}"));
 
     let mut hello = [0u8; 8];

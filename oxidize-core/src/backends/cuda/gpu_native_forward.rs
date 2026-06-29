@@ -41,7 +41,13 @@ pub(super) fn launch_q4k_or_q6k_projection_gemv(
     blocks_per_row: u32,
 ) -> Result<(), String> {
     super::gemv_quantized::launch_gemv_f32in_device(
-        gpu, kern_name, w_ptr, d_input, d_output, rows, blocks_per_row,
+        gpu,
+        kern_name,
+        w_ptr,
+        d_input,
+        d_output,
+        rows,
+        blocks_per_row,
     )
 }
 
@@ -89,7 +95,13 @@ pub(super) fn launch_q4k_proj_residual_add(
     }
 
     launch_q4k_or_q6k_projection_gemv(
-        gpu, kern_name, w_ptr, d_input, d_scratch, rows, blocks_per_row,
+        gpu,
+        kern_name,
+        w_ptr,
+        d_input,
+        d_scratch,
+        rows,
+        blocks_per_row,
     )?;
     let fn_res = gpu
         .module
@@ -348,10 +360,8 @@ pub fn gpu_wo_residual_q4k(
         } else {
             GEMV_Q4K_F32IN_KERNEL_NAME
         };
-        let wo_block = projection_gemv_block_size(
-            wo_kern_name == GEMV_Q4K_F32IN_KERNEL_NAME,
-            rows_u32,
-        );
+        let wo_block =
+            projection_gemv_block_size(wo_kern_name == GEMV_Q4K_F32IN_KERNEL_NAME, rows_u32);
         let wo_grid = rows_u32.saturating_mul(32).div_ceil(wo_block);
         let res_grid = hidden_n.div_ceil(residual_block);
         let fn_wo = gpu.module.get_function(wo_kern_name).map_err(stringify)?;
@@ -544,10 +554,22 @@ pub fn gpu_ffn_q4k(
                 gpu, normed_ptr, xq8k_ptr, gate_bpr,
             )?;
             super::gemv_quantized::launch_gemv_q4k_q8kin_device(
-                gpu, gate_ptr, gate_u32, gate_bpr, xq8k_ptr, gate_buf_ptr, q8kin_splits,
+                gpu,
+                gate_ptr,
+                gate_u32,
+                gate_bpr,
+                xq8k_ptr,
+                gate_buf_ptr,
+                q8kin_splits,
             )?;
             super::gemv_quantized::launch_gemv_q4k_q8kin_device(
-                gpu, up_ptr, up_u32, gate_bpr, xq8k_ptr, up_buf_ptr, q8kin_splits,
+                gpu,
+                up_ptr,
+                up_u32,
+                gate_bpr,
+                xq8k_ptr,
+                up_buf_ptr,
+                q8kin_splits,
             )?;
             let fn_silu = gpu
                 .module
@@ -561,10 +583,19 @@ pub fn gpu_ffn_q4k(
                 .map_err(stringify)?;
             }
             super::gemv_quantized::launch_quantize_f32_to_q8k_device_ptr(
-                gpu, ffn_down_in_ptr, xq8k_ffn_ptr, down_bpr,
+                gpu,
+                ffn_down_in_ptr,
+                xq8k_ffn_ptr,
+                down_bpr,
             )?;
             super::gemv_quantized::launch_gemv_q4k_q8kin_device(
-                gpu, down_ptr, down_u32, down_bpr, xq8k_ffn_ptr, down_out_ptr, q8kin_splits,
+                gpu,
+                down_ptr,
+                down_u32,
+                down_bpr,
+                xq8k_ffn_ptr,
+                down_out_ptr,
+                q8kin_splits,
             )?;
             let fn_res = gpu
                 .module
@@ -592,7 +623,13 @@ pub fn gpu_ffn_q4k(
                 }
             } else {
                 launch_q4k_or_q6k_projection_gemv(
-                    gpu, gate_kern, gate_ptr, normed_ptr, gate_buf_ptr, gate_u32, gate_bpr,
+                    gpu,
+                    gate_kern,
+                    gate_ptr,
+                    normed_ptr,
+                    gate_buf_ptr,
+                    gate_u32,
+                    gate_bpr,
                 )?;
                 launch_q4k_or_q6k_projection_gemv(
                     gpu, up_kern, up_ptr, normed_ptr, up_buf_ptr, up_u32, gate_bpr,
@@ -1455,75 +1492,75 @@ pub fn gpu_attn_block_fused_q4k(
                 gpu, normed_ptr, xq8k_ptr, bpr_u32,
             )?;
             super::gemv_quantized::launch_gemv_q4k_q8kin_device(
-                gpu, wq_ptr, q_u32, bpr_u32, xq8k_ptr, d_q_ptr, q8kin_splits,
-            )?;
-            super::gemv_quantized::launch_gemv_q4k_q8kin_device(
-                gpu, wk_ptr, kv_u32, bpr_u32, xq8k_ptr, d_k_ptr, q8kin_splits,
-            )?;
-            super::gemv_quantized::launch_gemv_q4k_q8kin_device(
-                gpu, wv_ptr, kv_u32, bpr_u32, xq8k_ptr, d_v_ptr, q8kin_splits,
-            )?;
-        } else {
-        let q4k_fused_qkv = super::gemv_quantized::ox_gpu_fused_qkv_enabled()
-            && super::gemv_quantized::ox_gpu_gemv_mw_enabled()
-            && qname_q == GEMV_Q4K_F32IN_KERNEL_NAME
-            && qname_k == GEMV_Q4K_F32IN_KERNEL_NAME
-            && qname_v == GEMV_Q4K_F32IN_KERNEL_NAME;
-
-        if q4k_fused_qkv {
-            let xq8k_ptr = gpu
-                .activation
-                .as_ref()
-                .ok_or_else(|| "activation buffers not initialised".to_string())?
-                .xq8k
-                .as_device_ptr();
-            super::gemv_quantized::launch_quantize_f32_to_q8k_device_ptr(
-                gpu, normed_ptr, xq8k_ptr, bpr_u32,
-            )?;
-            super::gemv_quantized::launch_gemv_q4k_q8kin_qkv_mw_device(
                 gpu,
                 wq_ptr,
-                wk_ptr,
-                wv_ptr,
+                q_u32,
+                bpr_u32,
                 xq8k_ptr,
                 d_q_ptr,
-                d_k_ptr,
-                d_v_ptr,
-                q_u32,
-                kv_u32,
-                bpr_u32,
+                q8kin_splits,
             )?;
-        } else if super::gemv_quantized::ox_gpu_fused_qkv_enabled()
-            && super::gemv_quantized::ox_gpu_fused_mmq_enabled()
-            && qname_q == GEMV_Q4K_F32IN_KERNEL_NAME
-            && qname_k == GEMV_Q4K_F32IN_KERNEL_NAME
-            && qname_v == GEMV_Q4K_F32IN_KERNEL_NAME
-            && super::gemv_quantized::q4k_fused_mmq_eligible(bpr_u32)
-        {
-            super::gemv_quantized::launch_gemv_q4k_q8k_fused_qkv_mw_device(
+            super::gemv_quantized::launch_gemv_q4k_q8kin_device(
                 gpu,
-                wq_ptr,
                 wk_ptr,
-                wv_ptr,
-                normed_ptr,
-                d_q_ptr,
-                d_k_ptr,
-                d_v_ptr,
-                q_u32,
                 kv_u32,
                 bpr_u32,
+                xq8k_ptr,
+                d_k_ptr,
+                q8kin_splits,
+            )?;
+            super::gemv_quantized::launch_gemv_q4k_q8kin_device(
+                gpu,
+                wv_ptr,
+                kv_u32,
+                bpr_u32,
+                xq8k_ptr,
+                d_v_ptr,
+                q8kin_splits,
             )?;
         } else {
-            super::launch_q4k_or_q6k_projection_gemv(
-                gpu, qname_q, wq_ptr, normed_ptr, d_q_ptr, q_u32, bpr_u32,
-            )?;
-            super::launch_q4k_or_q6k_projection_gemv(
-                gpu, qname_k, wk_ptr, normed_ptr, d_k_ptr, kv_u32, bpr_u32,
-            )?;
-            super::launch_q4k_or_q6k_projection_gemv(
-                gpu, qname_v, wv_ptr, normed_ptr, d_v_ptr, kv_u32, bpr_u32,
-            )?;
-        }
+            let q4k_fused_qkv = super::gemv_quantized::ox_gpu_fused_qkv_enabled()
+                && super::gemv_quantized::ox_gpu_gemv_mw_enabled()
+                && qname_q == GEMV_Q4K_F32IN_KERNEL_NAME
+                && qname_k == GEMV_Q4K_F32IN_KERNEL_NAME
+                && qname_v == GEMV_Q4K_F32IN_KERNEL_NAME;
+
+            if q4k_fused_qkv {
+                let xq8k_ptr = gpu
+                    .activation
+                    .as_ref()
+                    .ok_or_else(|| "activation buffers not initialised".to_string())?
+                    .xq8k
+                    .as_device_ptr();
+                super::gemv_quantized::launch_quantize_f32_to_q8k_device_ptr(
+                    gpu, normed_ptr, xq8k_ptr, bpr_u32,
+                )?;
+                super::gemv_quantized::launch_gemv_q4k_q8kin_qkv_mw_device(
+                    gpu, wq_ptr, wk_ptr, wv_ptr, xq8k_ptr, d_q_ptr, d_k_ptr, d_v_ptr, q_u32,
+                    kv_u32, bpr_u32,
+                )?;
+            } else if super::gemv_quantized::ox_gpu_fused_qkv_enabled()
+                && super::gemv_quantized::ox_gpu_fused_mmq_enabled()
+                && qname_q == GEMV_Q4K_F32IN_KERNEL_NAME
+                && qname_k == GEMV_Q4K_F32IN_KERNEL_NAME
+                && qname_v == GEMV_Q4K_F32IN_KERNEL_NAME
+                && super::gemv_quantized::q4k_fused_mmq_eligible(bpr_u32)
+            {
+                super::gemv_quantized::launch_gemv_q4k_q8k_fused_qkv_mw_device(
+                    gpu, wq_ptr, wk_ptr, wv_ptr, normed_ptr, d_q_ptr, d_k_ptr, d_v_ptr, q_u32,
+                    kv_u32, bpr_u32,
+                )?;
+            } else {
+                super::launch_q4k_or_q6k_projection_gemv(
+                    gpu, qname_q, wq_ptr, normed_ptr, d_q_ptr, q_u32, bpr_u32,
+                )?;
+                super::launch_q4k_or_q6k_projection_gemv(
+                    gpu, qname_k, wk_ptr, normed_ptr, d_k_ptr, kv_u32, bpr_u32,
+                )?;
+                super::launch_q4k_or_q6k_projection_gemv(
+                    gpu, qname_v, wv_ptr, normed_ptr, d_v_ptr, kv_u32, bpr_u32,
+                )?;
+            }
         }
 
         // ============================================================
@@ -1595,7 +1632,11 @@ pub fn gpu_attn_block_fused_q4k(
                 theta,
             )?;
             super::cuda_decode_graph::launch_kv_append_f16_gph(
-                gpu, kv_layer_idx, d_state, d_k_ptr, d_v_ptr,
+                gpu,
+                kv_layer_idx,
+                d_state,
+                d_k_ptr,
+                d_v_ptr,
             )?;
             super::cuda_decode_graph::update_kv_seq_len_after_gph_append(gpu, kv_layer_idx, pos);
             super::cuda_decode_graph::launch_flash_attn_decode_gph(
@@ -1717,7 +1758,13 @@ pub fn gpu_attn_block_fused_q4k(
                 gpu, d_attn_ptr, xq8k_ptr, wo_bpr,
             )?;
             super::gemv_quantized::launch_gemv_q4k_q8kin_device(
-                gpu, wo_ptr, wo_rows_u32, wo_bpr, xq8k_ptr, normed_ptr, q8kin_splits,
+                gpu,
+                wo_ptr,
+                wo_rows_u32,
+                wo_bpr,
+                xq8k_ptr,
+                normed_ptr,
+                q8kin_splits,
             )?;
             let fn_res = gpu
                 .module
@@ -2359,12 +2406,18 @@ pub fn gpu_forward_batch_layer(
             gpu, gate_ptr, inter_u32, bpr_hidden, b_u32, xq8k_ptr, bn_out_ptr,
         )?;
         super::gemv_quantized::launch_transpose_rowB(
-            gpu, bn_out_ptr, ffn_gate_ptr, inter_u32, b_u32,
+            gpu,
+            bn_out_ptr,
+            ffn_gate_ptr,
+            inter_u32,
+            b_u32,
         )?;
         super::gemv_quantized::launch_gemv_q4k_q8kin_bN_device(
             gpu, up_ptr, inter_u32, bpr_hidden, b_u32, xq8k_ptr, bn_out_ptr,
         )?;
-        super::gemv_quantized::launch_transpose_rowB(gpu, bn_out_ptr, ffn_up_ptr, inter_u32, b_u32)?;
+        super::gemv_quantized::launch_transpose_rowB(
+            gpu, bn_out_ptr, ffn_up_ptr, inter_u32, b_u32,
+        )?;
 
         // ---- (10) silu_mul (flat over B*inter) -> ffn_down ----
         {
@@ -2395,7 +2448,13 @@ pub fn gpu_forward_batch_layer(
             )?;
         }
         super::gemv_quantized::launch_gemv_q4k_q8kin_bN_device(
-            gpu, down_ptr, h_u32, bpr_inter, b_u32, xq8k_ffn_ptr, bn_out_ptr,
+            gpu,
+            down_ptr,
+            h_u32,
+            bpr_inter,
+            b_u32,
+            xq8k_ffn_ptr,
+            bn_out_ptr,
         )?;
         super::gemv_quantized::launch_transpose_rowB(gpu, bn_out_ptr, normed_ptr, h_u32, b_u32)?;
 
@@ -2704,7 +2763,11 @@ mod batched_parity_tests {
         for step in 0..(prompt_len + decode_steps) {
             let rows: Vec<(Token, usize)> = (0..b)
                 .map(|s| {
-                    let tok = if step < prompt_len { prompts[s][step] } else { last[s] };
+                    let tok = if step < prompt_len {
+                        prompts[s][step]
+                    } else {
+                        last[s]
+                    };
                     (tok, pos)
                 })
                 .collect();
@@ -2723,7 +2786,11 @@ mod batched_parity_tests {
         for s in 0..b {
             let ref_logits = &refs[s];
             let got = &final_out[s];
-            assert_eq!(got.len(), ref_logits.len(), "seq {s}: logit length mismatch");
+            assert_eq!(
+                got.len(),
+                ref_logits.len(),
+                "seq {s}: logit length mismatch"
+            );
             let ra = argmax(ref_logits);
             let ga = argmax(got);
             assert_eq!(

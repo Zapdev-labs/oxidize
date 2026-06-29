@@ -545,6 +545,7 @@ pub(super) fn generate_with_quantspec<W: Write>(
 
 pub(super) struct NoopWaker;
 
+#[allow(unknown_lints, clippy::manual_noop_waker)]
 impl Wake for NoopWaker {
     fn wake(self: Arc<Self>) {}
 }

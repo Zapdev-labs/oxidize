@@ -35,6 +35,7 @@ path = "src/bin/diffusion_gemma_bench.rs"
 required-features = ["oxk"]
 
 [features]
+mlx = ["oxidize-core/mlx", "oxidize-server/mlx"]
 oxk = ["oxidize-core/oxk", "oxidize-server/oxk"]
 # GPU backends — passthrough to oxidize-core so `oxidize run --backend cuda` works
 # from a single `cargo build -p oxidize-cli --features cuda`.

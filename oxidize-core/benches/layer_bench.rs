@@ -270,6 +270,13 @@ fn layer_gemvs(
 }
 
 fn main() {
+    if cfg!(test) && std::env::var_os("OXIDIZE_RUN_STANDALONE_BENCHES").is_none() {
+        eprintln!(
+            "Skipping standalone layer benchmark under cargo test; set OXIDIZE_RUN_STANDALONE_BENCHES=1 to run it."
+        );
+        return;
+    }
+
     println!("=== Oxidize Layer-by-Layer VRAM Benchmark ===\n");
 
     let h = 4096_usize;

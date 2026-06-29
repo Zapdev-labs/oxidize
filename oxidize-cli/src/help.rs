@@ -29,11 +29,16 @@ pub fn print_ollama_help() {
         "Usage: oxidize <command> [args]\n\n\
          Commands:\n\
            run <model> [prompt]     Run a model locally\n\
-           serve [model]            Start the OpenAI-compatible server\n\
-           list                     List local GGUF models in ./models\n\n\
+           chat <model>             Interactive chat (alias for run --chat)\n\
+           pull <model>             Download a model from Hugging Face\n\
+           show <model>             Show model information\n\
+           list                     List local GGUF models in ./models\n\
+           inspect <model>          Print raw GGUF metadata and tensors\n\
+           serve [model]            Start the OpenAI-compatible server\n\n\
          Examples:\n\
            oxidize run ./models/Qwen3-4B-Q4_K_M.gguf \"hello\"\n\
-           oxidize serve ./models/Qwen3-4B-Q4_K_M.gguf\n\
+           oxidize pull Qwen/Qwen2.5-0.5B-Instruct-GGUF\n\
+           oxidize show qwen2.5-0.5b\n\
            oxidize list"
     );
 }
