@@ -13,6 +13,7 @@ name = "oxidize-server"
 path = "src/main.rs"
 
 [features]
+mlx = ["oxidize-core/mlx"]
 oxk = ["oxidize-core/oxk"]
 
 [dependencies]
