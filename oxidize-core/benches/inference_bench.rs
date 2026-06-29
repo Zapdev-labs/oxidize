@@ -221,6 +221,13 @@ fn bench_model(vocab: usize, h: usize, inter: usize, layers: usize, iters: usize
 }
 
 fn main() {
+    if cfg!(test) && std::env::var_os("OXIDIZE_RUN_STANDALONE_BENCHES").is_none() {
+        eprintln!(
+            "Skipping standalone inference benchmark under cargo test; set OXIDIZE_RUN_STANDALONE_BENCHES=1 to run it."
+        );
+        return;
+    }
+
     println!("=== Oxidize Normal Inference Benchmark ===\n");
 
     // Use smaller configs that fit comfortably on typical consumer machines.
