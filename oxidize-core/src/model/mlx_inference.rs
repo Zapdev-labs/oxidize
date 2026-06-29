@@ -1517,13 +1517,14 @@ mod tests {
                 num_experts: if arch.uses_moe() { 2 } else { 0 },
                 num_experts_per_tok: if arch.uses_moe() { 1 } else { 0 },
                 alibi_num_heads: 2,
+                ..InferenceConfig::default()
             }
         }
 
         #[test]
         fn tiny_llama_forward_runs() {
             let cfg = tiny_mlx_model_config(ModelArchitecture::Llama);
-            let model = build_tiny_mlx_model(cfg);
+            let mut model = build_tiny_mlx_model(cfg);
             let mut session = Session::new();
             let logits = model
                 .forward(&[1], &mut session)
@@ -1534,7 +1535,7 @@ mod tests {
         #[test]
         fn tiny_mixtral_moe_forward_runs() {
             let cfg = tiny_mlx_model_config(ModelArchitecture::Mixtral);
-            let model = build_tiny_mlx_model(cfg);
+            let mut model = build_tiny_mlx_model(cfg);
             let mut session = Session::new();
             let logits = model
                 .forward(&[1], &mut session)
@@ -1545,7 +1546,7 @@ mod tests {
         #[test]
         fn tiny_deepseek_mla_forward_runs() {
             let cfg = tiny_mlx_model_config(ModelArchitecture::DeepSeek);
-            let model = build_tiny_mlx_model(cfg);
+            let mut model = build_tiny_mlx_model(cfg);
             let mut session = Session::new();
             let logits = model
                 .forward(&[1], &mut session)
@@ -1556,7 +1557,7 @@ mod tests {
         #[test]
         fn tiny_falcon_alibi_forward_runs() {
             let cfg = tiny_mlx_model_config(ModelArchitecture::Falcon);
-            let model = build_tiny_mlx_model(cfg);
+            let mut model = build_tiny_mlx_model(cfg);
             let mut session = Session::new();
             let logits = model
                 .forward(&[1], &mut session)
@@ -1567,7 +1568,7 @@ mod tests {
         #[test]
         fn tiny_qwen_sliding_window_forward_runs() {
             let cfg = tiny_mlx_model_config(ModelArchitecture::Qwen);
-            let model = build_tiny_mlx_model(cfg);
+            let mut model = build_tiny_mlx_model(cfg);
             let mut session = Session::new();
             let logits = model
                 .forward(&[1], &mut session)
@@ -1578,7 +1579,7 @@ mod tests {
         #[test]
         fn tiny_gemma_parallel_forward_runs() {
             let cfg = tiny_mlx_model_config(ModelArchitecture::Gemma);
-            let model = build_tiny_mlx_model(cfg);
+            let mut model = build_tiny_mlx_model(cfg);
             let mut session = Session::new();
             let logits = model
                 .forward(&[1], &mut session)
@@ -1589,7 +1590,7 @@ mod tests {
         #[test]
         fn tiny_phi_parallel_forward_runs() {
             let cfg = tiny_mlx_model_config(ModelArchitecture::Phi);
-            let model = build_tiny_mlx_model(cfg);
+            let mut model = build_tiny_mlx_model(cfg);
             let mut session = Session::new();
             let logits = model
                 .forward(&[1], &mut session)
@@ -1741,6 +1742,7 @@ mod tests {
                 layers,
                 kv_cache: MlxKvCache::new(&config),
                 workspace: MlxWorkspace::for_config(&config),
+                alibi_slopes: vec![0.0_f32; config.alibi_num_heads.max(1)],
             }
         }
     }
