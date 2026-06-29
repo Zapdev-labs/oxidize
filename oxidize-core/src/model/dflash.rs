@@ -531,6 +531,24 @@ impl DFlashDraftModel {
         self.position_offset = 0;
     }
 
+    fn tie_output_to_embeddings_if_missing(&mut self) {
+        if !self.output.is_loaded() && self.tok_embeddings.is_loaded() {
+            self.output = if self.tok_embeddings.quant.is_some() {
+                self.tok_embeddings.clone()
+            } else {
+                F32Weight::from_slice(
+                    transpose_f32(
+                        &self.tok_embeddings.data,
+                        self.tok_embeddings.rows,
+                        self.tok_embeddings.cols,
+                    ),
+                    self.tok_embeddings.rows,
+                    self.tok_embeddings.cols,
+                )
+            };
+        }
+    }
+
     /// Load DFlash draft model from a mapped SafeTensors file.
     pub fn load_from_safetensors(
         mapped: &MappedSafeTensorsFile,
@@ -737,14 +755,14 @@ impl DFlashDraftModel {
             let end = offset.checked_add(qsize).ok_or_else(|| {
                 format!("tensor {name}: offset overflow (offset={offset}, size={qsize})")
             })?;
-            let bytes = mapped.bytes();
-            if end > bytes.len() {
+            let shard = &mapped.tensor_mmap(info);
+            if end > shard.len() {
                 return Err(format!(
                     "tensor {name}: data out of bounds (offset={offset}, size={qsize}, file_len={})",
-                    bytes.len()
+                    shard.len()
                 ));
             }
-            let qdata = &bytes[offset..end];
+            let qdata = &shard[offset..end];
             let mut f32_data = vec![0.0_f32; value_count];
             dequantize_scalar(qtype, qdata, &mut f32_data)
                 .map_err(|e| format!("dequantize_scalar for {}: {:?}", name, e))?;
@@ -754,7 +772,6 @@ impl DFlashDraftModel {
         // Load a projection weight, preferring the on-the-fly quantized GEMV
         // path (8x less memory traffic during decode) and falling back to a
         // dequantized f32 transpose for unsupported quant types / shapes.
-        let bytes_all = mapped.bytes();
         let load_proj = |name: &str| -> Result<F32Weight, String> {
             let info = match tensor_infos.iter().find(|t| t.name == name) {
                 Some(i) => i,
@@ -794,14 +811,15 @@ impl DFlashDraftModel {
                 let end = offset.checked_add(qsize).ok_or_else(|| {
                     format!("tensor {name}: offset overflow (offset={offset}, size={qsize})")
                 })?;
-                if end > bytes_all.len() {
+                let shard = &mapped.tensor_mmap(info);
+                if end > shard.len() {
                     return Err(format!(
                         "tensor {name}: data out of bounds (offset={offset}, size={qsize}, file_len={})",
-                        bytes_all.len()
+                        shard.len()
                     ));
                 }
                 return Ok(F32Weight::from_quantized(
-                    bytes_all[offset..end].to_vec(),
+                    shard[offset..end].to_vec(),
                     qtype,
                     out_dim,
                     in_dim,
@@ -935,7 +953,6 @@ impl DFlashDraftModel {
     /// the overlapping prefix and zero-fill the rest.
     pub fn load_external_io_from_gguf(&mut self, mapped: &MappedGgufFile) -> Result<(), String> {
         let tensor_infos = mapped.mapped_tensor_infos();
-        let bytes_all = mapped.bytes();
 
         type LoadF32Result = Result<Option<(Vec<f32>, Vec<u64>)>, String>;
         let load_f32_with_dims = |name: &str| -> LoadF32Result {
@@ -951,15 +968,15 @@ impl DFlashDraftModel {
             let end = offset.checked_add(qsize).ok_or_else(|| {
                 format!("tensor {name}: offset overflow (offset={offset}, size={qsize})")
             })?;
-            let bytes = mapped.bytes();
-            if end > bytes.len() {
+            let shard = &mapped.tensor_mmap(info);
+            if end > shard.len() {
                 return Err(format!(
                     "tensor {name}: data out of bounds (offset={offset}, size={qsize}, file_len={})",
-                    bytes.len()
+                    shard.len()
                 ));
             }
             let mut f32_data = vec![0.0_f32; value_count];
-            dequantize_scalar(qtype, &bytes[offset..end], &mut f32_data)
+            dequantize_scalar(qtype, &shard[offset..end], &mut f32_data)
                 .map_err(|e| format!("dequantize_scalar for {}: {:?}", name, e))?;
             Ok(Some((f32_data, info.dimensions.clone())))
         };
@@ -984,14 +1001,15 @@ impl DFlashDraftModel {
                 let end = offset.checked_add(qsize).ok_or_else(|| {
                     format!("tensor {name}: offset overflow (offset={offset}, size={qsize})")
                 })?;
-                if end > bytes_all.len() {
+                let shard = &mapped.tensor_mmap(info);
+                if end > shard.len() {
                     return Err(format!(
                         "tensor {name}: data out of bounds (offset={offset}, size={qsize}, file_len={})",
-                        bytes_all.len()
+                        shard.len()
                     ));
                 }
                 return Ok(F32Weight::from_quantized(
-                    bytes_all[offset..end].to_vec(),
+                    shard[offset..end].to_vec(),
                     qtype,
                     out_dim,
                     in_dim,
@@ -1030,9 +1048,10 @@ impl DFlashDraftModel {
             let end = offset.checked_add(qsize).ok_or_else(|| {
                 format!("tensor {name}: offset overflow (offset={offset}, size={qsize})")
             })?;
-            if end <= bytes_all.len() {
+            let shard = &mapped.tensor_mmap(info);
+            if end <= shard.len() {
                 return Ok(F32Weight::from_quantized(
-                    bytes_all[offset..end].to_vec(),
+                    shard[offset..end].to_vec(),
                     qtype,
                     out_dim,
                     in_dim,
@@ -1040,7 +1059,7 @@ impl DFlashDraftModel {
             }
             Err(format!(
                 "tensor {name}: data out of bounds (offset={offset}, size={qsize}, file_len={})",
-                bytes_all.len()
+                shard.len()
             ))
         };
 
@@ -1063,6 +1082,8 @@ impl DFlashDraftModel {
                 break;
             }
         }
+
+        self.tie_output_to_embeddings_if_missing();
 
         if self.output.is_loaded() {
             self.config.vocab_size = self.output.output_dim();
@@ -1784,6 +1805,7 @@ mod tests {
                 ggml_type: 8,
                 relative_offset: 0,
                 absolute_offset: 0,
+                mmap_index: 0,
             }],
             alignment: 32,
             data_section_start: 0,
@@ -1825,6 +1847,27 @@ mod tests {
 
         let logits = model.logits(&hidden).unwrap();
         assert_eq!(logits, vec![1.0, 2.0]);
+    }
+
+    #[test]
+    fn tied_embeddings_supply_missing_dflash_output_head() {
+        let mut model = DFlashDraftModel::new(DFlashConfig {
+            hidden_size: 2,
+            num_hidden_layers: 0,
+            num_target_layers: 0,
+            block_size: 1,
+            target_layer_ids: Vec::new(),
+            mask_token_id: 0,
+            vocab_size: 2,
+            num_attention_heads: 1,
+            num_key_value_heads: 1,
+            intermediate_size: 2,
+            rms_norm_eps: 1e-5,
+            rope_theta: 10000.0,
+        });
+        model.tok_embeddings = F32Weight::from_slice(vec![1.0, 2.0, 3.0, 4.0], 2, 2);
+        model.tie_output_to_embeddings_if_missing();
+        assert_eq!(model.logits(&[1.0, 1.0]).unwrap(), vec![3.0, 7.0]);
     }
 
     #[test]

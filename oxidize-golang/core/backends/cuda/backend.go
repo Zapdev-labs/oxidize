@@ -31,7 +31,9 @@ func (c *Cuda) TensorToF32(tensor backend.TensorHandle, out []float32) (int, err
 
 func (c *Cuda) TensorShape(tensor backend.TensorHandle) []int { return c.cpu.TensorShape(tensor) }
 
-func (c *Cuda) TensorDType(tensor backend.TensorHandle) backend.DType { return c.cpu.TensorDType(tensor) }
+func (c *Cuda) TensorDType(tensor backend.TensorHandle) backend.DType {
+	return c.cpu.TensorDType(tensor)
+}
 
 func (c *Cuda) RmsNorm(input, weight backend.TensorHandle, eps float32) (backend.TensorHandle, error) {
 	return c.cpu.RmsNorm(input, weight, eps)
@@ -63,6 +65,15 @@ func (c *Cuda) Gemv(matrix backend.WeightStorage, vector backend.TensorHandle, r
 }
 
 func (c *Cuda) Gemm(a, b backend.TensorHandle, rows, sharedDim, cols int) (backend.TensorHandle, error) {
+	if at, ok := a.(*cpubackend.CpuTensor); ok {
+		if bt, ok := b.(*cpubackend.CpuTensor); ok &&
+			len(at.Data) >= rows*sharedDim && len(bt.Data) >= sharedDim*cols {
+			out := make([]float32, rows*cols)
+			if err := GemmF32Cuda(at.Data, bt.Data, rows, sharedDim, cols, out); err == nil {
+				return c.cpu.TensorFromF32_2D(out, rows, cols)
+			}
+		}
+	}
 	return c.cpu.Gemm(a, b, rows, sharedDim, cols)
 }
 

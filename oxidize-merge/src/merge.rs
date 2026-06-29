@@ -198,10 +198,7 @@ fn resolve_single_side(
     }
 }
 
-fn validate_compatible(
-    a: &crate::index::TensorRef,
-    b: &crate::index::TensorRef,
-) -> Result<()> {
+fn validate_compatible(a: &crate::index::TensorRef, b: &crate::index::TensorRef) -> Result<()> {
     if a.dtype != b.dtype {
         bail!(
             "dtype mismatch for {}: {:?} vs {:?}",

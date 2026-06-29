@@ -471,7 +471,7 @@ pub fn speculative_decode(
     if draft_tokens.is_empty()
         || draft_logits.len() != draft_tokens.len()
         || target_logits.len() != draft_tokens.len() + 1
-        || randoms.len() < draft_tokens.len() + 1
+        || randoms.len() < 2 * draft_tokens.len() + 1
     {
         return Err(SamplingError::InvalidSpeculativeInputs);
     }
@@ -485,6 +485,25 @@ pub fn speculative_decode(
     // temperature the target actually samples with, not a hardcoded 1.0.
     // (top-k/top-p modifications of the verification distributions are still
     // approximated by the raw softmax here.)
+    //
+    // When the draft sampled under an active top-k/top-p filter, its true
+    // proposal distribution q is the *filtered* one, but the acceptance ratio
+    // below uses the raw softmax q. That makes p/q an approximation and can
+    // accept/reject slightly off the exact target distribution. We do NOT change
+    // behaviour (that would risk a regression on the validated path), but we warn
+    // once so the approximation is visible rather than silent. Greedy configs are
+    // exact (argmax matching) and never hit this.
+    if !greedy && (sampling_config.top_k.is_some() || sampling_config.top_p.is_some()) {
+        static WARNED_RANK_FILTER: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        if !WARNED_RANK_FILTER.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            eprintln!(
+                "warning: speculative_decode acceptance ratio uses raw softmax probabilities; \
+                 with top_k/top_p set on a non-greedy config the p/q ratio is an approximation \
+                 of the filtered proposal distribution"
+            );
+        }
+    }
     let verify_temperature = if greedy {
         1.0
     } else {
@@ -531,7 +550,29 @@ pub fn speculative_decode(
         }
 
         let residual = residual_probs(&target_probs, &draft_probs);
-        let sampled = sample_probabilities(&residual, randoms[step])?;
+        // Degenerate residual: if draft_probs >= target_probs for every token the
+        // residual is all-zero (no valid support). `sample_probabilities` would
+        // otherwise return index 0 (argmax of an all-zero vector), which is not a
+        // meaningful sample. Fall back to the target argmax — the most-likely
+        // token under the distribution we are trying to match.
+        let residual_sum: f32 = residual.iter().sum();
+        if !(residual_sum > 0.0 && residual_sum.is_finite()) {
+            let target_argmax = target_probs
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.total_cmp(b.1))
+                .map(|(i, _)| i as u32)
+                .ok_or(SamplingError::InvalidSpeculativeInputs)?;
+            emitted.push(target_argmax);
+            return Ok(SpeculativeDecodeResult {
+                tokens: emitted,
+                accepted_draft_tokens: step,
+                used_residual_fallback: true,
+            });
+        }
+        let k = draft_tokens.len();
+        let residual_random = randoms[k + 1 + step];
+        let sampled = sample_probabilities(&residual, residual_random)?;
         emitted.push(sampled as u32);
         return Ok(SpeculativeDecodeResult {
             tokens: emitted,
@@ -1324,7 +1365,7 @@ mod tests {
                 vec![10.0, 0.0, 0.0],
             ],
             SamplingConfig::default(),
-            &[0.2, 0.3, 0.2],
+            &[0.2, 0.3, 0.2, 0.0, 0.2],
         )
         .expect("speculative decode should succeed");
 
@@ -1340,7 +1381,7 @@ mod tests {
             &[vec![10.0, 0.0, 0.0]],
             &[vec![0.0, 10.0, 0.0], vec![0.0, 0.0, 10.0]],
             SamplingConfig::default(),
-            &[0.9, 0.1],
+            &[0.9, 0.0, 0.1],
         )
         .expect("speculative decode should succeed");
 

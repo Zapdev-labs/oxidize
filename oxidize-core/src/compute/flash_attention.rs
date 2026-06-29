@@ -1,8 +1,6 @@
 //! Hand-rolled flash-attention kernels (prefill + decode).
 //!
-//! `unsafe` here constructs disjoint head slices from a contiguous output buffer; each site
-//! documents length/alias preconditions. Mutex error capture in the parallel decode path is
-//! synchronous (spin pool / rayon), not async.
+//! `unsafe` is limited to SIMD intrinsics and parallel head-slice construction.
 
 use crate::tensor::AttentionError;
 
@@ -194,7 +192,7 @@ unsafe fn dot_product_f32_neon_aarch64(a: &[f32], b: &[f32]) -> f32 {
     let mut total = vaddvq_f32(sum);
 
     for i in (chunks * 4)..len {
-        total += unsafe { a.get_unchecked(i) * b.get_unchecked(i) };
+        total += a[i] * b[i];
     }
 
     total
@@ -220,7 +218,7 @@ unsafe fn dot_product_f32_neon_arm(a: &[f32], b: &[f32]) -> f32 {
     let mut total = vget_lane_f32(pair, 0);
 
     for i in (chunks * 4)..len {
-        total += unsafe { a.get_unchecked(i) * b.get_unchecked(i) };
+        total += a[i] * b[i];
     }
 
     total

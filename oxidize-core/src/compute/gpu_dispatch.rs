@@ -41,6 +41,9 @@ pub fn gemv_f32(
         }
         #[cfg(any(feature = "cuda", feature = "rocm"))]
         None => Err("no GPU backend available".to_string()),
+        #[cfg(any(feature = "cuda", feature = "rocm"))]
+        #[allow(unreachable_patterns)]
+        Some(_) => Err("no GPU backend available".to_string()),
     }
 }
 
@@ -54,37 +57,23 @@ pub fn gemv_quantized(
 ) -> Result<(), String> {
     match active_gpu() {
         #[cfg(feature = "cuda")]
-        Some(ActiveGpu::Cuda) => dispatch_cuda_quant(
-            quantization,
-            quantized_matrix,
-            rows,
-            cols,
-            vector,
-            output,
-        ),
+        Some(ActiveGpu::Cuda) => {
+            dispatch_cuda_quant(quantization, quantized_matrix, rows, cols, vector, output)
+        }
         #[cfg(feature = "rocm")]
-        Some(ActiveGpu::Rocm) => dispatch_rocm_quant(
-            quantization,
-            quantized_matrix,
-            rows,
-            cols,
-            vector,
-            output,
-        ),
+        Some(ActiveGpu::Rocm) => {
+            dispatch_rocm_quant(quantization, quantized_matrix, rows, cols, vector, output)
+        }
         #[cfg(not(any(feature = "cuda", feature = "rocm")))]
         _ => {
-            let _ = (
-                quantization,
-                quantized_matrix,
-                rows,
-                cols,
-                vector,
-                output,
-            );
+            let _ = (quantization, quantized_matrix, rows, cols, vector, output);
             Err("no GPU backend available".to_string())
         }
         #[cfg(any(feature = "cuda", feature = "rocm"))]
         None => Err("no GPU backend available".to_string()),
+        #[cfg(any(feature = "cuda", feature = "rocm"))]
+        #[allow(unreachable_patterns)]
+        Some(_) => Err("no GPU backend available".to_string()),
     }
 }
 
@@ -97,29 +86,23 @@ fn dispatch_cuda_quant(
     vector: &[f32],
     output: &mut [f32],
 ) -> Result<(), String> {
-    use crate::compute::quantization::{BLOCK_Q8_K_BYTES, QK_K};
+    use crate::quantization::{BLOCK_Q8_K_SIZE, QK_K};
     use crate::tensor::quantize_vector_q8_k_into;
 
     match quantization {
-        GgufQuantizationType::Q8_0 => crate::cuda::gemv_q8_0_direct_cuda(
-            quantized_matrix,
-            rows,
-            cols,
-            vector,
-            output,
-        )
-        .map_err(|e| format!("{e:?}")),
-        GgufQuantizationType::Q4_0 => crate::cuda::gemv_q4_0_direct_cuda(
-            quantized_matrix,
-            rows,
-            cols,
-            vector,
-            output,
-        )
-        .map_err(|e| format!("{e:?}")),
-        GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M if cols.is_multiple_of(QK_K) => {
+        GgufQuantizationType::Q8_0 => {
+            crate::cuda::gemv_q8_0_direct_cuda(quantized_matrix, rows, cols, vector, output)
+                .map_err(|e| format!("{e:?}"))
+        }
+        GgufQuantizationType::Q4_0 => {
+            crate::cuda::gemv_q4_0_direct_cuda(quantized_matrix, rows, cols, vector, output)
+                .map_err(|e| format!("{e:?}"))
+        }
+        GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M
+            if cols.is_multiple_of(QK_K) =>
+        {
             let blocks_per_row = cols / QK_K;
-            let mut q8k = vec![0_u8; blocks_per_row * BLOCK_Q8_K_BYTES];
+            let mut q8k = vec![0_u8; blocks_per_row * BLOCK_Q8_K_SIZE];
             quantize_vector_q8_k_into(vector, blocks_per_row, &mut q8k);
             crate::cuda::gemv_q4_k_direct_cuda(quantized_matrix, rows, cols, &q8k, output)
                 .map_err(|e| format!("{e:?}"))
@@ -132,14 +115,10 @@ fn dispatch_cuda_quant(
             crate::cuda::gemv_iq1_m_direct_cuda(quantized_matrix, rows, cols, vector, output)
                 .map_err(|e| format!("{e:?}"))
         }
-        GgufQuantizationType::NVFP4 => crate::cuda::gemv_nvfp4_direct_cuda(
-            quantized_matrix,
-            rows,
-            cols,
-            vector,
-            output,
-        )
-        .map_err(|e| format!("{e:?}")),
+        GgufQuantizationType::NVFP4 => {
+            crate::cuda::gemv_nvfp4_direct_cuda(quantized_matrix, rows, cols, vector, output)
+                .map_err(|e| format!("{e:?}"))
+        }
         _ => crate::cuda::gemv_quantized_cuda(
             quantization,
             quantized_matrix,
@@ -161,13 +140,6 @@ fn dispatch_rocm_quant(
     vector: &[f32],
     output: &mut [f32],
 ) -> Result<(), String> {
-    crate::rocm::gemv_quantized_rocm(
-        quantization,
-        quantized_matrix,
-        rows,
-        cols,
-        vector,
-        output,
-    )
-    .map_err(|e| format!("{e:?}"))
+    crate::rocm::gemv_quantized_rocm(quantization, quantized_matrix, rows, cols, vector, output)
+        .map_err(|e| format!("{e:?}"))
 }

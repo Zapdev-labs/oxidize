@@ -41,6 +41,7 @@ type NewlinePenalty struct {
 	Count  int
 	Reward float32
 }
+
 // GrammarSymbol mirrors GrammarSymbol.
 type GrammarSymbol interface{ isGrammar() }
 
@@ -96,35 +97,37 @@ func (g *GrammarConstraint) AllowsToken(token Token, _ []Token) bool {
 
 // SamplingConfig mirrors SamplingConfig.
 type SamplingConfig struct {
-	Temperature      float32
-	TopP             float32
-	TopK             int
-	MinP             float32
-	TypicalP         float32
-	TailFreeZ        float32
-	Repetition       RepetitionPenaltyConfig
-	Mirostat         MirostatConfig
-	NewlinePenalty   NewlinePenalty
-	Grammar          *GrammarConstraint
-	SuppressedTokens []Token
-	XTC              *XtcSamplerConfig
-	DRY              *DrySamplerConfig
-	Chain            *SamplerChain
+	Temperature       float32
+	TopP              float32
+	TopK              int
+	MinP              float32
+	TypicalP          float32
+	TailFreeZ         float32
+	LocallyTypicalTau float32
+	Repetition        RepetitionPenaltyConfig
+	Mirostat          MirostatConfig
+	NewlinePenalty    NewlinePenalty
+	Grammar           *GrammarConstraint
+	SuppressedTokens  []Token
+	XTC               *XtcSamplerConfig
+	DRY               *DrySamplerConfig
+	Chain             *SamplerChain
 }
 
 // DefaultSamplingConfig returns sensible sampling defaults.
 func DefaultSamplingConfig() SamplingConfig {
 	return SamplingConfig{
-		Temperature:    1.0,
-		TopP:           1.0,
-		TopK:           0,
-		MinP:           0.0,
-		TypicalP:       0.0,
-		TailFreeZ:      0.0,
-		Repetition:     DefaultRepetitionPenalty(),
-		Mirostat:       MirostatConfig{},
-		NewlinePenalty: NewlinePenalty{},
-		SuppressedTokens: nil,
+		Temperature:       1.0,
+		TopP:              1.0,
+		TopK:              0,
+		MinP:              0.0,
+		TypicalP:          0.0,
+		TailFreeZ:         0.0,
+		LocallyTypicalTau: 0.0,
+		Repetition:        DefaultRepetitionPenalty(),
+		Mirostat:          MirostatConfig{},
+		NewlinePenalty:    NewlinePenalty{},
+		SuppressedTokens:  nil,
 	}
 }
 
@@ -186,10 +189,212 @@ func Sample(logits Logits, config SamplingConfig, rng *rand.Rand) (Token, error)
 	if config.TopP > 0 && config.TopP < 1.0 {
 		logits = topP(logits, config.TopP)
 	}
+	// Typical-P (entropy-based typicality filtering)
+	if config.TypicalP > 0 && config.TypicalP < 1.0 {
+		logits = typicalP(logits, config.TypicalP)
+	}
+	// Tail-free (second-derivative cutoff)
+	if config.TailFreeZ > 0 && config.TailFreeZ < 1.0 {
+		logits = tailFreeZ(logits, config.TailFreeZ)
+	}
+	// Locally-typical (tau-based entropy deviation filtering)
+	if config.LocallyTypicalTau > 0 {
+		logits = locallyTypicalTau(logits, config.LocallyTypicalTau)
+	}
+	// Fast unfiltered path for large vocabularies when no rank/probability
+	// filters are active: avoids an allocating full softmax pass.
+	if len(logits) >= 4096 && config.TopK == 0 && config.MinP == 0 &&
+		(config.TopP == 0 || config.TopP >= 1.0) &&
+		config.TypicalP == 0 && config.TailFreeZ == 0 && config.LocallyTypicalTau == 0 {
+		temp := config.Temperature
+		if temp <= 0 {
+			temp = 1.0
+		}
+		return SampleUnfiltered(logits, temp, rng), nil
+	}
 	// Softmax
 	probs := softmax(logits)
 	// Sample
 	return sampleCategorical(probs, rng), nil
+}
+
+// SampleUnfiltered draws a token directly from temperature-scaled logits
+// without building an intermediate normalized softmax slice. It mirrors
+// sample_unfiltered in sampling.rs and is a fast path for large vocabularies.
+func SampleUnfiltered(logits Logits, temperature float32, rng *rand.Rand) Token {
+	if len(logits) == 0 {
+		return 0
+	}
+	if rng == nil {
+		rng = rand.New(rand.NewSource(1))
+	}
+	if temperature <= 0 {
+		temperature = 1.0
+	}
+	maxLogit := logits[0]
+	for _, v := range logits {
+		if v > maxLogit {
+			maxLogit = v
+		}
+	}
+	var rawSum float32
+	for _, v := range logits {
+		rawSum += float32(math.Exp(float64((v - maxLogit) / temperature)))
+	}
+	if rawSum <= 0 || math.IsInf(float64(rawSum), 0) || math.IsNaN(float64(rawSum)) {
+		tok, _ := Greedy(logits)
+		return tok
+	}
+	target := rng.Float32() * rawSum
+	var cumulative float32
+	for i, v := range logits {
+		cumulative += float32(math.Exp(float64((v - maxLogit) / temperature)))
+		if target <= cumulative {
+			return Token(i)
+		}
+	}
+	tok, _ := Greedy(logits)
+	return tok
+}
+
+// typicalP keeps the minimal set of tokens (ordered by closeness of their
+// surprise to the distribution entropy) whose cumulative probability reaches p.
+// Mirrors apply_typical_sampling in sampling.rs.
+func typicalP(logits Logits, p float32) Logits {
+	if p <= 0 || len(logits) == 0 {
+		return logits
+	}
+	probs := softmax(logits)
+	var entropy float32
+	for _, pr := range probs {
+		pr = maxF32(pr, minPositiveF32)
+		entropy -= pr * float32(math.Log(float64(pr)))
+	}
+	type cand struct {
+		idx  int
+		diff float32
+	}
+	cands := make([]cand, len(probs))
+	for i, pr := range probs {
+		surprise := -float32(math.Log(float64(maxF32(pr, minPositiveF32))))
+		cands[i] = cand{idx: i, diff: absF32(surprise - entropy)}
+	}
+	sort.Slice(cands, func(i, j int) bool { return cands[i].diff < cands[j].diff })
+	keep := make([]bool, len(probs))
+	var cum float32
+	for _, c := range cands {
+		keep[c.idx] = true
+		cum += probs[c.idx]
+		if cum >= p {
+			break
+		}
+	}
+	for i := range logits {
+		if !keep[i] {
+			logits[i] = negInfF32
+		}
+	}
+	return logits
+}
+
+// tailFreeZ removes the low-probability tail using the second derivative of the
+// sorted probability curve. Mirrors apply_tail_free_sampling in sampling.rs.
+func tailFreeZ(logits Logits, z float32) Logits {
+	if z <= 0 || len(logits) <= 2 {
+		return logits
+	}
+	idx := sortedIndices(logits)
+	probs := softmax(logits)
+	secondDeriv := make([]float32, len(idx)-2)
+	for i := 0; i < len(idx)-2; i++ {
+		d1 := probs[idx[i]] - probs[idx[i+1]]
+		d2 := probs[idx[i+1]] - probs[idx[i+2]]
+		secondDeriv[i] = absF32(d1 - d2)
+	}
+	var sdSum float32
+	for _, sd := range secondDeriv {
+		sdSum += sd
+	}
+	if sdSum <= 0 || math.IsInf(float64(sdSum), 0) || math.IsNaN(float64(sdSum)) {
+		return logits
+	}
+	cutoff := len(idx)
+	var cum float32
+	for i, sd := range secondDeriv {
+		cum += sd / sdSum
+		if cum >= z {
+			cutoff = i + 2
+			if cutoff < 1 {
+				cutoff = 1
+			}
+			break
+		}
+	}
+	keep := make([]bool, len(logits))
+	for i := 0; i < cutoff && i < len(idx); i++ {
+		keep[idx[i]] = true
+	}
+	for i := range logits {
+		if !keep[i] {
+			logits[i] = negInfF32
+		}
+	}
+	return logits
+}
+
+// locallyTypicalTau keeps tokens whose surprise lies within tau*entropy of the
+// distribution entropy. Mirrors apply_locally_typical_sampling in sampling.rs.
+func locallyTypicalTau(logits Logits, tau float32) Logits {
+	if tau <= 0 || len(logits) == 0 {
+		return logits
+	}
+	probs := softmax(logits)
+	var entropy float32
+	for _, pr := range probs {
+		pr = maxF32(pr, minPositiveF32)
+		entropy -= pr * float32(math.Log(float64(pr)))
+	}
+	deviationLimit := entropy * tau
+	keep := make([]bool, len(probs))
+	any := false
+	for i, pr := range probs {
+		surprise := -float32(math.Log(float64(maxF32(pr, minPositiveF32))))
+		if absF32(surprise-entropy) <= deviationLimit {
+			keep[i] = true
+			any = true
+		}
+	}
+	if !any {
+		maxIdx := 0
+		for i, pr := range probs {
+			if pr > probs[maxIdx] {
+				maxIdx = i
+			}
+		}
+		keep[maxIdx] = true
+	}
+	for i := range logits {
+		if !keep[i] {
+			logits[i] = negInfF32
+		}
+	}
+	return logits
+}
+
+const minPositiveF32 = float32(1.1754944e-38)
+
+func maxF32(a, b float32) float32 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func absF32(v float32) float32 {
+	if v < 0 {
+		return -v
+	}
+	return v
 }
 
 // SampleWithRepetition applies repetition penalty before sampling.
@@ -255,6 +460,169 @@ func SpeculativeDecode(draft, target Model, draftTokens int, session *Session) (
 
 func sessionContext() context.Context { return context.Background() }
 
+// SpeculativeVerifyResult mirrors SpeculativeDecodeResult in sampling.rs and
+// carries enough detail for statistics tracking.
+type SpeculativeVerifyResult struct {
+	Tokens               []Token
+	AcceptedDraftTokens  int
+	UsedResidualFallback bool
+}
+
+// softmaxProbsTemp returns a temperature-scaled softmax over logits.
+func softmaxProbsTemp(logits Logits, temperature float32) ([]float32, error) {
+	if len(logits) == 0 {
+		return nil, &SamplingError{Message: "empty logits"}
+	}
+	if temperature <= 0 || math.IsInf(float64(temperature), 0) || math.IsNaN(float64(temperature)) {
+		temperature = 1.0
+	}
+	maxLogit := logits[0]
+	for _, v := range logits {
+		if v > maxLogit {
+			maxLogit = v
+		}
+	}
+	out := make([]float32, len(logits))
+	var sum float32
+	for i, v := range logits {
+		e := float32(math.Exp(float64((v - maxLogit) / temperature)))
+		out[i] = e
+		sum += e
+	}
+	if sum <= 0 || math.IsInf(float64(sum), 0) || math.IsNaN(float64(sum)) {
+		return nil, &SamplingError{Message: "non-finite softmax sum"}
+	}
+	inv := 1 / sum
+	for i := range out {
+		out[i] *= inv
+	}
+	return out, nil
+}
+
+// residualProbs computes the normalized residual distribution max(p-q, 0).
+// Mirrors residual_probs in sampling.rs.
+func residualProbs(target, draft []float32) []float32 {
+	out := make([]float32, len(target))
+	var sum float32
+	for i := range target {
+		d := float32(0)
+		if i < len(draft) {
+			d = draft[i]
+		}
+		r := target[i] - d
+		if r < 0 {
+			r = 0
+		}
+		out[i] = r
+		sum += r
+	}
+	if sum <= 0 {
+		// Fall back to the raw target distribution.
+		copy(out, target)
+		var tsum float32
+		for _, v := range target {
+			tsum += v
+		}
+		if tsum > 0 {
+			inv := 1 / tsum
+			for i := range out {
+				out[i] *= inv
+			}
+		}
+		return out
+	}
+	inv := 1 / sum
+	for i := range out {
+		out[i] *= inv
+	}
+	return out
+}
+
+// SpeculativeDecodeLogits verifies draft tokens against precomputed target
+// logits using the speculative acceptance/rejection rule with residual
+// fallback. It is a faithful port of speculative_decode in sampling.rs.
+//
+//   - draftTokens:  proposed tokens (len = N)
+//   - draftLogits:  draft model logits per proposed token (len = N)
+//   - targetLogits: target model logits (len = N+1; last is the bonus position)
+//   - randoms:      random draws in [0,1) (len >= N+1)
+func SpeculativeDecodeLogits(draftTokens []Token, draftLogits, targetLogits []Logits, cfg SamplingConfig, randoms []float32) (SpeculativeVerifyResult, error) {
+	n := len(draftTokens)
+	if n == 0 || len(draftLogits) != n || len(targetLogits) != n+1 || len(randoms) < n+1 {
+		return SpeculativeVerifyResult{}, &SamplingError{Message: "invalid speculative inputs"}
+	}
+	greedyMode := cfg.Temperature <= 0 || cfg.TopK == 1
+	verifyTemp := float32(1.0)
+	if !greedyMode {
+		verifyTemp = cfg.Temperature
+	}
+	emitted := make([]Token, 0, n+1)
+	for step := 0; step < n; step++ {
+		draftTok := draftTokens[step]
+		if greedyMode {
+			targetArgmax, err := Greedy(targetLogits[step])
+			if err != nil {
+				return SpeculativeVerifyResult{}, err
+			}
+			if draftTok == targetArgmax {
+				emitted = append(emitted, draftTok)
+				continue
+			}
+			emitted = append(emitted, targetArgmax)
+			return SpeculativeVerifyResult{Tokens: emitted, AcceptedDraftTokens: step, UsedResidualFallback: true}, nil
+		}
+		draftProbs, err := softmaxProbsTemp(draftLogits[step], verifyTemp)
+		if err != nil {
+			return SpeculativeVerifyResult{}, err
+		}
+		targetProbs, err := softmaxProbsTemp(targetLogits[step], verifyTemp)
+		if err != nil {
+			return SpeculativeVerifyResult{}, err
+		}
+		if len(draftProbs) != len(targetProbs) {
+			return SpeculativeVerifyResult{}, &SamplingError{Message: "speculative vocab mismatch"}
+		}
+		ti := int(draftTok)
+		if ti >= len(draftProbs) {
+			return SpeculativeVerifyResult{}, &SamplingError{Message: "speculative token out of range"}
+		}
+		q := maxF32(draftProbs[ti], minPositiveF32)
+		p := targetProbs[ti]
+		acceptProb := p / q
+		if acceptProb > 1.0 {
+			acceptProb = 1.0
+		}
+		if randoms[step] <= acceptProb {
+			emitted = append(emitted, draftTok)
+			continue
+		}
+		residual := residualProbs(targetProbs, draftProbs)
+		sampled := sampleProbabilities(residual, randoms[step])
+		emitted = append(emitted, Token(sampled))
+		return SpeculativeVerifyResult{Tokens: emitted, AcceptedDraftTokens: step, UsedResidualFallback: true}, nil
+	}
+	finalRng := rand.New(rand.NewSource(int64(math.Float32bits(randoms[n]))))
+	finalTok, err := Sample(append(Logits(nil), targetLogits[n]...), cfg, finalRng)
+	if err != nil {
+		return SpeculativeVerifyResult{}, err
+	}
+	emitted = append(emitted, finalTok)
+	return SpeculativeVerifyResult{Tokens: emitted, AcceptedDraftTokens: n, UsedResidualFallback: false}, nil
+}
+
+// sampleProbabilities draws an index from a normalized distribution using a
+// single random value in [0,1).
+func sampleProbabilities(probs []float32, r float32) int {
+	var cum float32
+	for i, p := range probs {
+		cum += p
+		if r <= cum {
+			return i
+		}
+	}
+	return len(probs) - 1
+}
+
 // SampleMirostat implements Mirostat v2 sampling.
 func SampleMirostat(logits Logits, config MirostatConfig, lastSurprise float32) (Token, float32, error) {
 	if len(logits) == 0 {
@@ -292,10 +660,140 @@ func SampleMirostat(logits Logits, config MirostatConfig, lastSurprise float32) 
 	return Token(bestIdx), updatedSurprise, nil
 }
 
+// SampleMirostatV2 is a fully-validated Mirostat v2 sampler that mirrors
+// sample_mirostat in sampling.rs: it validates temperature, tau/eta/mu and the
+// random draw, builds a temperature-scaled softmax, picks the token whose
+// surprisal is closest to the running target mu, and returns the updated mu.
+func SampleMirostatV2(logits Logits, temperature float32, config MirostatConfig, mu, random float32) (Token, float32, error) {
+	if len(logits) == 0 {
+		return 0, mu, &SamplingError{Message: "empty logits"}
+	}
+	if math.IsInf(float64(temperature), 0) || math.IsNaN(float64(temperature)) || temperature <= 0 {
+		return 0, mu, &SamplingError{Message: "invalid temperature"}
+	}
+	if math.IsInf(float64(config.Tau), 0) || math.IsNaN(float64(config.Tau)) || config.Tau <= 0 ||
+		math.IsInf(float64(config.Eta), 0) || math.IsNaN(float64(config.Eta)) || config.Eta <= 0 ||
+		math.IsInf(float64(mu), 0) || math.IsNaN(float64(mu)) {
+		return 0, mu, &SamplingError{Message: "invalid mirostat parameters"}
+	}
+	if math.IsInf(float64(random), 0) || math.IsNaN(float64(random)) || random < 0 || random >= 1 {
+		return 0, mu, &SamplingError{Message: "invalid random"}
+	}
+	probs, err := softmaxProbsTemp(logits, temperature)
+	if err != nil {
+		return 0, mu, err
+	}
+	type ip struct {
+		idx  int
+		prob float32
+	}
+	indexed := make([]ip, len(probs))
+	for i, p := range probs {
+		indexed[i] = ip{idx: i, prob: p}
+	}
+	// Order by closeness of surprisal to the running target mu.
+	sort.Slice(indexed, func(a, b int) bool {
+		sa := -float32(math.Log(float64(maxF32(indexed[a].prob, minPositiveF32))))
+		sb := -float32(math.Log(float64(maxF32(indexed[b].prob, minPositiveF32))))
+		return absF32(sa-mu) < absF32(sb-mu)
+	})
+	// Weighted pick over the reordered, renormalized probabilities.
+	var sum float32
+	for _, e := range indexed {
+		sum += e.prob
+	}
+	chosen := indexed[0]
+	if sum > 0 {
+		target := random * sum
+		var cum float32
+		for _, e := range indexed {
+			cum += e.prob
+			if target <= cum {
+				chosen = e
+				break
+			}
+		}
+	}
+	observed := -float32(math.Log(float64(maxF32(chosen.prob, minPositiveF32))))
+	updatedMu := mu - config.Eta*(observed-config.Tau)
+	return Token(chosen.idx), updatedMu, nil
+}
+
+// BeamSearchLogits runs beam search over precomputed per-step logits with EOS
+// early stopping and final length-aware selection. Mirrors beam_search in
+// sampling.rs.
+func BeamSearchLogits(logitsPerStep []Logits, beamWidth int, eosToken *Token) (BeamSearchResult, error) {
+	if beamWidth <= 0 {
+		return BeamSearchResult{}, &SamplingError{Message: "invalid beam width"}
+	}
+	if len(logitsPerStep) == 0 {
+		return BeamSearchResult{}, &SamplingError{Message: "invalid beam search inputs"}
+	}
+	for _, l := range logitsPerStep {
+		if len(l) == 0 {
+			return BeamSearchResult{}, &SamplingError{Message: "invalid beam search inputs"}
+		}
+	}
+	type beam struct {
+		tokens   []Token
+		score    float32
+		finished bool
+	}
+	beams := []beam{{}}
+	for _, stepLogits := range logitsPerStep {
+		probs := softmax(stepLogits)
+		var candidates []beam
+		for _, b := range beams {
+			if b.finished {
+				candidates = append(candidates, b)
+				continue
+			}
+			for tokIdx, p := range probs {
+				if p <= 0 || math.IsInf(float64(p), 0) || math.IsNaN(float64(p)) {
+					continue
+				}
+				next := append([]Token(nil), b.tokens...)
+				next = append(next, Token(tokIdx))
+				finished := eosToken != nil && *eosToken == Token(tokIdx)
+				candidates = append(candidates, beam{
+					tokens:   next,
+					score:    b.score + float32(math.Log(float64(p))),
+					finished: finished,
+				})
+			}
+		}
+		if len(candidates) == 0 {
+			return BeamSearchResult{}, &SamplingError{Message: "empty logits"}
+		}
+		sort.Slice(candidates, func(i, j int) bool { return candidates[i].score > candidates[j].score })
+		if len(candidates) > beamWidth {
+			candidates = candidates[:beamWidth]
+		}
+		beams = candidates
+		allFinished := true
+		for _, b := range beams {
+			if !b.finished {
+				allFinished = false
+				break
+			}
+		}
+		if allFinished {
+			break
+		}
+	}
+	best := beams[0]
+	for _, b := range beams[1:] {
+		if b.score > best.score {
+			best = b
+		}
+	}
+	return BeamSearchResult{Tokens: best.tokens, Score: best.score}, nil
+}
+
 // BeamSearchResult mirrors BeamSearchResult.
 type BeamSearchResult struct {
-	Tokens  []Token
-	Score   float32
+	Tokens []Token
+	Score  float32
 }
 
 // BeamSearch implements a simple length-normalized beam search.

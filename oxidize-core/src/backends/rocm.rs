@@ -59,9 +59,12 @@ mod hip_rt {
             'static,
             unsafe extern "C" fn(hipDeviceptr_t, *const c_void, usize, c_uint) -> hipError_t,
         >,
-        hipModuleLoad: Symbol<'static, unsafe extern "C" fn(*mut hipModule_t, *const c_char) -> hipError_t>,
-        hipModuleGetFunction:
-            Symbol<'static, unsafe extern "C" fn(*mut hipFunction_t, hipModule_t, *const c_char) -> hipError_t>,
+        hipModuleLoad:
+            Symbol<'static, unsafe extern "C" fn(*mut hipModule_t, *const c_char) -> hipError_t>,
+        hipModuleGetFunction: Symbol<
+            'static,
+            unsafe extern "C" fn(*mut hipFunction_t, hipModule_t, *const c_char) -> hipError_t,
+        >,
         hipModuleLaunchKernel: Symbol<
             'static,
             unsafe extern "C" fn(
@@ -286,11 +289,18 @@ mod hip_rt {
                     ),
                     "hipModuleLaunchKernel",
                 )?;
-                check((api.hipStreamSynchronize)(self.stream), "hipStreamSynchronize")
+                check(
+                    (api.hipStreamSynchronize)(self.stream),
+                    "hipStreamSynchronize",
+                )
             }
         }
 
-        pub fn ensure_quant(&mut self, key: (usize, usize, u64), host: &[u8]) -> Result<(), String> {
+        pub fn ensure_quant(
+            &mut self,
+            key: (usize, usize, u64),
+            host: &[u8],
+        ) -> Result<(), String> {
             if !self.resident_quant.contains_key(&key) {
                 self.resident_quant
                     .insert(key, DeviceBuffer::from_slice(host)?);
@@ -310,6 +320,15 @@ mod hip_rt {
         PathBuf::from(env!("OUT_DIR")).join("gemv_f32.co")
     }
 }
+
+/// Lanes assigned per output row on the host launch grid. MUST equal `OX_WAVE`
+/// in `kernels/gemv_f32.cu` (64 for AMD wave64, which `build.rs` pins via
+/// `-mwavefrontsize64`). If these diverge, half the rows get no wavefront (too
+/// small) or out-of-range rows launch (too large). To run wave32 you must flip
+/// all three together: this constant, `OX_WAVE`, and the build.rs wavefront
+/// flag — see `build.rs` and `strix::rdna35_wavefront_width`.
+#[cfg(all(feature = "rocm", rocm_available))]
+const GEMV_LANES_PER_ROW: u32 = 64;
 
 #[cfg(all(feature = "rocm", rocm_available))]
 type WeightCacheKey = (usize, usize, u64);
@@ -389,7 +408,11 @@ fn launch_gemv_rows_cols(
     ];
 
     let func = gpu.function(kernel)?;
-    let grid = (rows_u32.saturating_mul(32).div_ceil(256), 1, 1);
+    let grid = (
+        rows_u32.saturating_mul(GEMV_LANES_PER_ROW).div_ceil(256),
+        1,
+        1,
+    );
     gpu.launch(func, grid, (256, 1, 1), &mut args)?;
 
     let out_bytes: &mut [u8] = unsafe {
@@ -442,7 +465,11 @@ fn launch_gemv_superblock(
     ];
 
     let func = gpu.function(kernel)?;
-    let grid = (rows_u32.saturating_mul(32).div_ceil(256), 1, 1);
+    let grid = (
+        rows_u32.saturating_mul(GEMV_LANES_PER_ROW).div_ceil(256),
+        1,
+        1,
+    );
     gpu.launch(func, grid, (256, 1, 1), &mut args)?;
 
     let out_bytes: &mut [u8] = unsafe {
@@ -467,7 +494,9 @@ pub fn gemv_f32_rocm(
     #[cfg(not(rocm_available))]
     {
         let _ = (matrix, rows, cols, vector, output);
-        return Err(GemvRocmError::Hip("ROCm not available at build time".into()));
+        return Err(GemvRocmError::Hip(
+            "ROCm not available at build time".into(),
+        ));
     }
 
     #[cfg(rocm_available)]
@@ -500,7 +529,9 @@ pub fn gemv_quantized_rocm(
     #[cfg(not(rocm_available))]
     {
         let _ = (quantization, quantized_matrix, rows, cols, vector, output);
-        return Err(GemvRocmError::Hip("ROCm not available at build time".into()));
+        return Err(GemvRocmError::Hip(
+            "ROCm not available at build time".into(),
+        ));
     }
 
     #[cfg(rocm_available)]
@@ -549,7 +580,8 @@ pub fn gemv_quantized_rocm(
                     let q8k_dev = hip_rt::DeviceBuffer::from_slice(&q8k)?;
                     let mut output_dev =
                         hip_rt::DeviceBuffer::alloc(rows * std::mem::size_of::<f32>())?;
-                    let mut rows_u32 = u32::try_from(rows).map_err(|_| "rows overflow".to_string())?;
+                    let mut rows_u32 =
+                        u32::try_from(rows).map_err(|_| "rows overflow".to_string())?;
                     let mut blocks_u32 =
                         u32::try_from(blocks_per_row).map_err(|_| "blocks overflow".to_string())?;
                     let mut matrix_ptr = gpu.quant_ptr(key)?;
@@ -565,7 +597,11 @@ pub fn gemv_quantized_rocm(
                     let func = gpu.function("gemv_q4_k_kernel")?;
                     gpu.launch(
                         func,
-                        (rows_u32.saturating_mul(32).div_ceil(256), 1, 1),
+                        (
+                            rows_u32.saturating_mul(GEMV_LANES_PER_ROW).div_ceil(256),
+                            1,
+                            1,
+                        ),
                         (256, 1, 1),
                         &mut args,
                     )?;

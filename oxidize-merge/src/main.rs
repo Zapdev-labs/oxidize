@@ -2,9 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::Parser;
-use oxidize_merge::{
-    MergeMethod, MergeOptions, MergeRecipe, MissingTensorPolicy, merge_models,
-};
+use oxidize_merge::{MergeMethod, MergeOptions, MergeRecipe, MissingTensorPolicy, merge_models};
 
 const DEFAULT_MAX_SHARD_GIB: u64 = 5;
 
@@ -14,9 +12,15 @@ const DEFAULT_MAX_SHARD_GIB: u64 = 5;
     about = "Merge two HuggingFace SafeTensors checkpoints with linear or SLERP blending"
 )]
 struct Args {
-    #[arg(long, help = "First model (SafeTensors file or HuggingFace model directory)")]
+    #[arg(
+        long,
+        help = "First model (SafeTensors file or HuggingFace model directory)"
+    )]
     a: PathBuf,
-    #[arg(long, help = "Second model (SafeTensors file or HuggingFace model directory)")]
+    #[arg(
+        long,
+        help = "Second model (SafeTensors file or HuggingFace model directory)"
+    )]
     b: PathBuf,
     #[arg(
         long,

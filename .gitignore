@@ -25,3 +25,9 @@ deploy/
 
 # Go build output
 oxidize-golang/oxidize
+.firecrawl/
+
+# IDE / agent session artifacts (never commit)
+.cursor/hooks/state/
+.omo/
+modal_app.py.tmp.*

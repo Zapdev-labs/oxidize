@@ -213,9 +213,11 @@ fn send_hidden(
     header[5] = wants_token as u8;
     header[6..10].copy_from_slice(&payload_bytes.to_le_bytes());
     write_all(stream, &header)?;
-    let bytes: &[u8] =
-        unsafe { std::slice::from_raw_parts(scratch.as_ptr() as *const u8, scratch.len() * 2) };
-    write_all(stream, bytes)
+    let mut payload = Vec::with_capacity(scratch.len() * 2);
+    for &bits in &*scratch {
+        payload.extend_from_slice(&bits.to_le_bytes());
+    }
+    write_all(stream, &payload)
 }
 
 fn send_bye(stream: &mut TcpStream) -> std::io::Result<()> {
@@ -240,7 +242,7 @@ fn recv_tag(stream: &mut TcpStream) -> std::io::Result<u8> {
 fn recv_hidden_payload(
     stream: &mut TcpStream,
     into: &mut Vec<f32>,
-    f16_scratch: &mut Vec<u16>,
+    _f16_scratch: &mut Vec<u16>,
 ) -> std::io::Result<(u32, bool)> {
     let mut buf = [0u8; 4 + 1 + 4];
     read_exact(stream, &mut buf)?;
@@ -251,13 +253,12 @@ fn recv_hidden_payload(
         return Err(std::io::Error::other("hidden payload not f16-aligned"));
     }
     let n = nbytes / 2;
-    f16_scratch.resize(n, 0);
-    let bytes: &mut [u8] =
-        unsafe { std::slice::from_raw_parts_mut(f16_scratch.as_mut_ptr() as *mut u8, nbytes) };
-    read_exact(stream, bytes)?;
+    let mut payload = vec![0u8; nbytes];
+    read_exact(stream, &mut payload)?;
     into.resize(n, 0.0);
-    for (dst, &src) in into.iter_mut().zip(f16_scratch.iter()) {
-        *dst = f16_bits_to_f32(src);
+    for (i, dst) in into.iter_mut().enumerate() {
+        let bits = u16::from_le_bytes([payload[i * 2], payload[i * 2 + 1]]);
+        *dst = f16_bits_to_f32(bits);
     }
     Ok((pos, wants_token))
 }

@@ -8,9 +8,7 @@
 
 use std::collections::HashMap;
 
-use crate::gguf::{
-    GgufMetadataValue, GgufQuantizationType, GgufTensorInfo, MappedGgufFile,
-};
+use crate::gguf::{GgufMetadataValue, GgufQuantizationType, GgufTensorInfo, MappedGgufFile};
 use crate::inference::InferenceConfig;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,11 +41,10 @@ pub struct ModelFingerprint {
 /// models the existing parser doesn't understand).
 pub fn fingerprint(mapped: &MappedGgufFile) -> ModelFingerprint {
     let config = InferenceConfig::from_gguf(mapped);
-    let file_size_bytes = mapped.bytes().len() as u64;
+    let file_size_bytes = mapped.total_bytes_len();
 
     let tensor_infos = mapped.mapped_tensor_infos();
-    let (quant, expert_count, is_moe, has_mtp) =
-        scan_tensors(&tensor_infos);
+    let (quant, expert_count, is_moe, has_mtp) = scan_tensors(&tensor_infos);
 
     ModelFingerprint {
         architecture: format!("{:?}", config.architecture).to_ascii_lowercase(),
@@ -139,7 +136,8 @@ pub fn kv_bytes_per_token(model: &ModelFingerprint, kv_dtype_bytes: usize) -> u6
     if model.layer_count == 0 || model.head_dim == 0 {
         return 0;
     }
-    let per_layer = (model.num_kv_heads as u64) * (model.head_dim as u64) * 2 /*K+V*/ * (kv_dtype_bytes as u64);
+    let per_layer =
+        (model.num_kv_heads as u64) * (model.head_dim as u64) * 2 /*K+V*/ * (kv_dtype_bytes as u64);
     per_layer.saturating_mul(model.layer_count as u64)
 }
 
@@ -185,7 +183,10 @@ pub fn summary(model: &ModelFingerprint) -> String {
 
 /// Look up a metadata integer by key with type coercion (U32 / I32 /
 /// F32 → usize). Returns `None` if missing or unparseable.
-pub fn metadata_usize(metadata: &std::collections::BTreeMap<String, GgufMetadataValue>, key: &str) -> Option<usize> {
+pub fn metadata_usize(
+    metadata: &std::collections::BTreeMap<String, GgufMetadataValue>,
+    key: &str,
+) -> Option<usize> {
     let v = metadata.get(key)?;
     let n: i64 = match v {
         GgufMetadataValue::Uint8(x) => (*x).into(),
@@ -210,7 +211,16 @@ mod tests {
     #[test]
     fn kv_bytes_per_token_uses_layer_x_kv_x_head_x_2() {
         let m = fingerprint_from_parts(
-            "llama", 32, 4096, 32, 8, 128, 11008, 32000, 8u64 << 30, GgufQuantizationType::Q4_K_M,
+            "llama",
+            32,
+            4096,
+            32,
+            8,
+            128,
+            11008,
+            32000,
+            8u64 << 30,
+            GgufQuantizationType::Q4_K_M,
         );
         // 32 * 8 * 128 * 2 * 2 (f16) = 131072
         assert_eq!(kv_bytes_per_token(&m, 2), 131_072);

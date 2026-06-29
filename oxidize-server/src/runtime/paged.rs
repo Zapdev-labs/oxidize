@@ -12,6 +12,7 @@ use oxidize_core::{
 };
 
 use crate::cli::Args;
+use crate::runtime::batched_engine::BatchedEngineHandle;
 use crate::runtime::model::{LoadedModel, ModelRuntime};
 
 /// Runtime state for PagedAttention-based generation.
@@ -25,6 +26,10 @@ pub struct PagedModelRuntime {
     pub scheduler: Mutex<Scheduler>,
     pub next_seq_id: AtomicU64,
     pub block_size: usize,
+    /// Shared continuous-batching engine. `Some` when `OX_BATCHED_DECODE` is set
+    /// and the backend supports batched `forward_batch`; requests are then routed
+    /// through it so concurrent decode is batched into one forward per step.
+    pub engine: Option<BatchedEngineHandle>,
 }
 
 pub fn build_paged_runtime(args: &Args, runtime: Arc<ModelRuntime>) -> Arc<PagedModelRuntime> {
@@ -84,10 +89,13 @@ pub fn build_paged_runtime(args: &Args, runtime: Arc<ModelRuntime>) -> Arc<Paged
     };
     let scheduler = Scheduler::new(scheduler_config, block_pool);
 
+    let engine = BatchedEngineHandle::spawn_if_enabled(Arc::clone(&runtime));
+
     Arc::new(PagedModelRuntime {
         runtime,
         scheduler: Mutex::new(scheduler),
         next_seq_id: AtomicU64::new(1),
         block_size: config.block_size,
+        engine,
     })
 }

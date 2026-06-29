@@ -47,22 +47,27 @@ func GemvF32Transposed(matrix []float32, rows, cols int, vector, output []float3
 	if len(output) < cols {
 		return &GemvError{Message: "output buffer too small"}
 	}
-	for c := 0; c < cols; c += TransposedGemvColChunk {
-		end := c + TransposedGemvColChunk
-		if end > cols {
-			end = cols
+	// Parallelize over disjoint output-column ranges in a SINGLE barrier (the
+	// old code spawned a fresh worker pool for every 64-column chunk, so a wide
+	// output projection paid thousands of barriers and capped at ~1.9x scaling).
+	// Within each range we accumulate via rank-1 updates (output[c] += row[c]*v)
+	// so the matrix is streamed contiguously row-by-row instead of being read
+	// column-strided, which is both cache-friendly and ~2x faster per core.
+	// Summation order per output element is unchanged (r = 0..rows), so results
+	// are bit-identical to the naive definition.
+	parallelizeRows(cols, func(cstart, cend int) {
+		dst := output[cstart:cend]
+		for i := range dst {
+			dst[i] = 0
 		}
-		parallelizeRange(end-c, func(start, stop int) {
-			for k := start; k < stop; k++ {
-				col := c + k
-				var sum float32
-				for r := 0; r < rows; r++ {
-					sum += matrix[r*cols+col] * vector[r]
-				}
-				output[col] = sum
+		for r := 0; r < rows; r++ {
+			v := vector[r]
+			row := matrix[r*cols+cstart : r*cols+cend]
+			for i, m := range row {
+				dst[i] += m * v
 			}
-		})
-	}
+		}
+	})
 	return nil
 }
 
@@ -293,10 +298,6 @@ func parallelizeRows(rows int, fn func(start, end int)) {
 		}(start, end)
 	}
 	wg.Wait()
-}
-
-func parallelizeRange(n int, fn func(start, end int)) {
-	parallelizeRows(n, fn)
 }
 
 func parallelWorkers(n int) int {

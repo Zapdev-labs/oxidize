@@ -172,10 +172,11 @@ unsafe fn row_dot_decoded(b: &Q4Block, d_q8: f32, q8v: &[__m256i; 8], bs: &[i32;
 /// per-group-pair bsum sums.
 #[inline]
 #[target_feature(enable = "avx2,fma")]
-pub(crate) unsafe fn load_q8_block(q8_ptr: *const u8) -> (f32, [__m256i; 8], [i32; 8]) {
-    let d_q8 = f32::from_le_bytes([*q8_ptr, *q8_ptr.add(1), *q8_ptr.add(2), *q8_ptr.add(3)]);
-    let q8 = q8_ptr.add(4);
-    let bsums = q8_ptr.add(4 + QK_K);
+pub(crate) unsafe fn load_q8_block(q8_block: &[u8]) -> (f32, [__m256i; 8], [i32; 8]) {
+    debug_assert!(q8_block.len() >= BLOCK_Q8_K_BYTES);
+    let d_q8 = f32::from_le_bytes([q8_block[0], q8_block[1], q8_block[2], q8_block[3]]);
+    let q8 = q8_block[4..].as_ptr();
+    let bsums = &q8_block[4 + QK_K..];
     let q8v = [
         _mm256_loadu_si256(q8 as *const __m256i),
         _mm256_loadu_si256(q8.add(32) as *const __m256i),
@@ -209,7 +210,8 @@ pub unsafe fn q4k_q8k_row_dot_avx2(row: &[u8], blocks_per_row: usize, q8k: &[u8]
             prefetch3(ahead, tune.pf_nta);
         }
         let b = decode_q4_block(w_ptr);
-        let (d_q8, q8v, bs) = load_q8_block(q8k.as_ptr().add(block_idx * BLOCK_Q8_K_BYTES));
+        let q8_block = &q8k[block_idx * BLOCK_Q8_K_BYTES..][..BLOCK_Q8_K_BYTES];
+        let (d_q8, q8v, bs) = load_q8_block(q8_block);
         acc += row_dot_decoded(&b, d_q8, &q8v, &bs);
     }
     acc
@@ -230,7 +232,8 @@ pub unsafe fn q4k_q8k_row_dot_x4_avx2(
     let tune = crate::cpu::tune();
     let mut acc = [0.0_f32; 4];
     for block_idx in 0..blocks_per_row {
-        let (d_q8, q8v, bs) = load_q8_block(q8k.as_ptr().add(block_idx * BLOCK_Q8_K_BYTES));
+        let q8_block = &q8k[block_idx * BLOCK_Q8_K_BYTES..][..BLOCK_Q8_K_BYTES];
+        let (d_q8, q8v, bs) = load_q8_block(q8_block);
         for (r, acc_r) in acc.iter_mut().enumerate() {
             let w_block = rows_base.add(r * row_bytes + block_idx * BLOCK_Q4_K_SIZE);
             prefetch_row_stream(w_block, row_bytes, blocks_per_row, r, 4, tune);
@@ -256,7 +259,8 @@ pub unsafe fn q4k_q8k_row_dot_x8_avx2(
     let tune = crate::cpu::tune();
     let mut acc = [0.0_f32; 8];
     for block_idx in 0..blocks_per_row {
-        let (d_q8, q8v, bs) = load_q8_block(q8k.as_ptr().add(block_idx * BLOCK_Q8_K_BYTES));
+        let q8_block = &q8k[block_idx * BLOCK_Q8_K_BYTES..][..BLOCK_Q8_K_BYTES];
+        let (d_q8, q8v, bs) = load_q8_block(q8_block);
         for (r, acc_r) in acc.iter_mut().enumerate() {
             let w_block = rows_base.add(r * row_bytes + block_idx * BLOCK_Q4_K_SIZE);
             prefetch_row_stream(w_block, row_bytes, blocks_per_row, r, 8, tune);
@@ -282,7 +286,8 @@ pub unsafe fn q4k_q8k_row_dot_x16_avx2(
     let tune = crate::cpu::tune();
     let mut acc = [0.0_f32; 16];
     for block_idx in 0..blocks_per_row {
-        let (d_q8, q8v, bs) = load_q8_block(q8k.as_ptr().add(block_idx * BLOCK_Q8_K_BYTES));
+        let q8_block = &q8k[block_idx * BLOCK_Q8_K_BYTES..][..BLOCK_Q8_K_BYTES];
+        let (d_q8, q8v, bs) = load_q8_block(q8_block);
         for (r, acc_r) in acc.iter_mut().enumerate() {
             let w_block = rows_base.add(r * row_bytes + block_idx * BLOCK_Q4_K_SIZE);
             prefetch_row_stream(w_block, row_bytes, blocks_per_row, r, 16, tune);

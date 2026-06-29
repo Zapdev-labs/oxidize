@@ -161,8 +161,8 @@ mod rdma_ffi {
             .or_else(|_| unsafe { Library::new("libibverbs.so") })
             .map_err(|e| e.to_string())?;
         // SAFETY: ibv_get_device_list signature from rdma-core.
-        let get_list: Symbol<IbvGetDeviceList> = unsafe { lib.get(b"ibv_get_device_list\0") }
-            .map_err(|e| e.to_string())?;
+        let get_list: Symbol<IbvGetDeviceList> =
+            unsafe { lib.get(b"ibv_get_device_list\0") }.map_err(|e| e.to_string())?;
         let mut n: i32 = 0;
         let list = unsafe { get_list(&mut n) };
         if list.is_null() || n <= 0 {
@@ -213,9 +213,8 @@ pub fn create_mock_rdma_ring(num_ranks: usize) -> Vec<super::ring::RingBackend> 
     use super::ring::RingBackend;
 
     let mut rights: Vec<tokio::sync::mpsc::Sender<Vec<u8>>> = Vec::with_capacity(num_ranks);
-    let mut lefts: Vec<
-        Option<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<Vec<u8>>>>,
-    > = Vec::with_capacity(num_ranks);
+    let mut lefts: Vec<Option<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<Vec<u8>>>>> =
+        Vec::with_capacity(num_ranks);
 
     for _ in 0..num_ranks {
         let (tx, rx) = tokio::sync::mpsc::channel(64);

@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 #[cfg(target_os = "linux")]
@@ -37,7 +37,7 @@ pub struct GgufFile {
 
 #[derive(Debug, Clone)]
 pub struct MappedGgufFile {
-    mmap: Arc<Mmap>,
+    mmaps: Vec<Arc<Mmap>>,
     parsed: GgufFile,
 }
 
@@ -52,35 +52,62 @@ impl MappedGgufFile {
         &self.parsed
     }
 
+    /// Returns the bytes of the first (or only) shard. For single-file GGUFs
+    /// this is the whole model; for split GGUFs use `tensor_mmap` / `tensor_bytes`
+    /// when you need a specific tensor's backing bytes.
     pub fn bytes(&self) -> &[u8] {
-        &self.mmap
+        &self.mmaps[0]
     }
 
+    /// Total byte length across all shards (useful for size reporting).
+    pub fn total_bytes_len(&self) -> u64 {
+        self.mmaps.iter().map(|m| m.len() as u64).sum()
+    }
+
+    /// Arc to the first (or only) shard's mmap.
     pub fn mmap(&self) -> Arc<Mmap> {
-        self.mmap.clone()
+        Arc::clone(&self.mmaps[0])
+    }
+
+    /// Arc to the shard mmap that contains this tensor.
+    pub fn tensor_mmap(&self, info: &GgufTensorInfo) -> Arc<Mmap> {
+        Arc::clone(&self.mmaps[info.mmap_index])
+    }
+
+    /// Byte slice for this tensor's data within its shard.
+    pub fn tensor_bytes(&self, info: &GgufTensorInfo, size: usize) -> &[u8] {
+        let mmap = &self.mmaps[info.mmap_index];
+        let start = info.absolute_offset as usize;
+        &mmap[start..start + size]
     }
 
     #[cfg(test)]
     pub fn from_parsed_for_test(parsed: GgufFile) -> Self {
         Self {
-            mmap: std::sync::Arc::new(
+            mmaps: vec![std::sync::Arc::new(
                 memmap2::MmapOptions::new()
                     .len(1)
                     .map_anon()
                     .unwrap()
                     .make_read_only()
                     .unwrap(),
-            ),
+            )],
             parsed,
         }
     }
 
     pub fn advise_random_access(&self) -> std::io::Result<()> {
-        self.mmap.advise(Advice::Random)
+        for mmap in &self.mmaps {
+            mmap.advise(Advice::Random)?;
+        }
+        Ok(())
     }
 
     pub fn advise_will_need(&self) -> std::io::Result<()> {
-        self.mmap.advise(Advice::WillNeed)
+        for mmap in &self.mmaps {
+            mmap.advise(Advice::WillNeed)?;
+        }
+        Ok(())
     }
 
     /// Enable THP only when the model fits in RAM with ≥2× headroom.
@@ -90,26 +117,28 @@ impl MappedGgufFile {
     /// large models.  Skip it when the model would exhaust available RAM.
     #[cfg(target_os = "linux")]
     pub fn advise_huge_pages(&self) -> std::io::Result<()> {
-        let model_bytes = self.bytes().len() as u64;
+        let model_bytes = self.total_bytes_len();
         let available = linux_mem_available_bytes().unwrap_or(0);
         // Only enable THP when model is <50% of available RAM (2× headroom).
         if model_bytes > 0 && available > 0 && model_bytes * 2 <= available {
-            self.mmap.advise(Advice::HugePage)?;
-            // MADV_HUGEPAGE only hints khugepaged, which in practice never
-            // collapses read-only file pages while decode is running — the
-            // model stays in 4 KB pages and every token's full weight sweep
-            // pays a TLB walk per 64 cache lines (~600K walks/token for a
-            // 2.5 GB model). MADV_COLLAPSE (kernel >= 6.1) collapses the
-            // page-cache folios synchronously at load. Best effort: older
-            // kernels return EINVAL and we keep the khugepaged hint.
             const MADV_COLLAPSE: libc::c_int = 25;
-            let bytes = self.bytes();
-            unsafe {
-                libc::madvise(
-                    bytes.as_ptr() as *mut libc::c_void,
-                    bytes.len(),
-                    MADV_COLLAPSE,
-                );
+            for mmap in &self.mmaps {
+                mmap.advise(Advice::HugePage)?;
+                // MADV_HUGEPAGE only hints khugepaged, which in practice never
+                // collapses read-only file pages while decode is running — the
+                // model stays in 4 KB pages and every token's full weight sweep
+                // pays a TLB walk per 64 cache lines (~600K walks/token for a
+                // 2.5 GB model). MADV_COLLAPSE (kernel >= 6.1) collapses the
+                // page-cache folios synchronously at load. Best effort: older
+                // kernels return EINVAL and we keep the khugepaged hint.
+                let bytes: &[u8] = mmap;
+                unsafe {
+                    libc::madvise(
+                        bytes.as_ptr() as *mut libc::c_void,
+                        bytes.len(),
+                        MADV_COLLAPSE,
+                    );
+                }
             }
             Ok(())
         } else {
@@ -127,8 +156,7 @@ impl MappedGgufFile {
         let bytes = self.bytes();
         let mut checksum = 0_u8;
         for offset in (0..bytes.len()).step_by(4096) {
-            // SAFETY: offset is in-bounds by construction.
-            checksum ^= unsafe { std::ptr::read_volatile(bytes.as_ptr().add(offset)) };
+            checksum ^= crate::bytes::read_volatile_byte(bytes, offset);
         }
         if let Some(last) = bytes.last() {
             checksum ^= *last;
@@ -182,7 +210,9 @@ impl MappedGgufFile {
                 // Headroom too tight for mlock — fall back to async readahead only.
                 // Pages land in page-cache and will be warm for inference but can be
                 // evicted under pressure.
-                let _ = self.mmap.advise(Advice::WillNeed);
+                for mmap in &self.mmaps {
+                    let _ = mmap.advise(Advice::WillNeed);
+                }
             }
         }
 
@@ -235,6 +265,7 @@ impl GgufFile {
                 ggml_type: tensor.ggml_type,
                 relative_offset: tensor.relative_offset,
                 absolute_offset: tensor.absolute_offset,
+                mmap_index: tensor.mmap_index,
             })
             .collect()
     }
@@ -252,6 +283,9 @@ pub struct GgufTensorInfo {
     pub ggml_type: u32,
     pub relative_offset: u64,
     pub absolute_offset: u64,
+    /// Index into `MappedGgufFile::mmaps` that holds this tensor's data.
+    /// Always 0 for single-file GGUFs; identifies the shard for split files.
+    pub mmap_index: usize,
 }
 
 #[allow(non_camel_case_types)]
@@ -460,10 +494,15 @@ impl PartialEq for GgufParseError {
 }
 
 pub fn load_mapped_gguf<P: AsRef<Path>>(path: P) -> Result<MappedGgufFile, GgufParseError> {
+    let path = path.as_ref();
+    if let Some(shards) = collect_split_shards(path) {
+        return load_mapped_gguf_shards(&shards);
+    }
     let file = File::open(path)?;
     // SAFETY: The returned mapping is read-only and we keep it alive for as long as
     // parsed metadata is exposed from MappedGgufFile.
-    let mmap = unsafe { Mmap::map(&file)? };
+    // SAFETY: GGUF files are opened read-only and not modified while mapped.
+    let mmap = unsafe { crate::bytes::map_readonly(&file)? };
     // Tell the kernel we'll read the whole file front-to-back and that it should
     // start prefetching it immediately.  This queues async readahead so pages are
     // warm by the time inference begins — critical for multi-hundred-GB models.
@@ -471,8 +510,69 @@ pub fn load_mapped_gguf<P: AsRef<Path>>(path: P) -> Result<MappedGgufFile, GgufP
     let _ = mmap.advise(Advice::WillNeed);
     let parsed = parse_gguf(&mmap)?;
     Ok(MappedGgufFile {
-        mmap: Arc::new(mmap),
+        mmaps: vec![Arc::new(mmap)],
         parsed,
+    })
+}
+
+/// If `path` matches the pattern `<base>-NNNNN-of-MMMMM.gguf` and all sibling
+/// shards exist on disk, returns them in order (shard 1 … MMMMM). Returns
+/// `None` for regular (non-split) GGUF files.
+fn collect_split_shards(path: &Path) -> Option<Vec<PathBuf>> {
+    let filename = path.file_name()?.to_str()?;
+    let stem = filename.strip_suffix(".gguf")?;
+    let (prefix_with_no, total_str) = stem.rsplit_once("-of-")?;
+    let total: usize = total_str.parse().ok().filter(|&n| n >= 2)?;
+    let base = prefix_with_no.rsplit_once('-')?.0;
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let shards: Vec<PathBuf> = (1..=total)
+        .map(|i| dir.join(format!("{base}-{i:05}-of-{total:05}.gguf")))
+        .collect();
+    if shards.iter().all(|p| p.exists()) {
+        Some(shards)
+    } else {
+        None
+    }
+}
+
+/// Load a set of split-GGUF shard paths (in order) into a single `MappedGgufFile`.
+/// Shard 0 provides all metadata; subsequent shards contribute only their tensors.
+fn load_mapped_gguf_shards(shards: &[PathBuf]) -> Result<MappedGgufFile, GgufParseError> {
+    debug_assert!(!shards.is_empty());
+
+    let open_mmap = |path: &PathBuf| -> Result<Mmap, GgufParseError> {
+        let file = File::open(path)?;
+        // SAFETY: GGUF files are opened read-only and not modified while mapped.
+    let mmap = unsafe { crate::bytes::map_readonly(&file)? };
+        let _ = mmap.advise(Advice::Sequential);
+        let _ = mmap.advise(Advice::WillNeed);
+        Ok(mmap)
+    };
+
+    let mmap0 = open_mmap(&shards[0])?;
+    let mut parsed0 = parse_gguf(&mmap0)?;
+    // Stamp shard-0 tensors with mmap_index = 0.
+    for t in &mut parsed0.tensor_infos {
+        t.mmap_index = 0;
+    }
+
+    let mut mmaps: Vec<Arc<Mmap>> = vec![Arc::new(mmap0)];
+
+    for (idx, shard_path) in shards[1..].iter().enumerate() {
+        let mmap = open_mmap(shard_path)?;
+        let mut parsed = parse_gguf(&mmap)?;
+        let mmap_index = idx + 1;
+        for t in &mut parsed.tensor_infos {
+            t.mmap_index = mmap_index;
+        }
+        parsed0.tensor_infos.extend(parsed.tensor_infos);
+        parsed0.tensor_count += parsed.tensor_count;
+        mmaps.push(Arc::new(mmap));
+    }
+
+    Ok(MappedGgufFile {
+        mmaps,
+        parsed: parsed0,
     })
 }
 
@@ -516,6 +616,7 @@ pub fn parse_gguf(bytes: &[u8]) -> Result<GgufFile, GgufParseError> {
             ggml_type,
             relative_offset,
             absolute_offset: 0,
+            mmap_index: 0,
         });
     }
 
@@ -589,7 +690,7 @@ fn detect_architecture_from_metadata_keys(
             "llama" | "mistral" | "mixtral" | "qwen" | "qwen2" | "qwen2moe" | "qwen35"
             | "deepseek" | "deepseek2" | "deepseek_v2" | "deepseek_v3" | "deepseek_moe"
             | "gemma" | "phi" | "falcon" | "gpt2" | "gptj" | "gptneox" | "dflash"
-            | "dflash-draft" => Some(namespace),
+            | "dflash-draft" | "glm-dsa" | "glm_dsa" | "glm_moe_dsa" => Some(namespace),
             _ => None,
         };
         if architecture.is_some() {
@@ -611,9 +712,8 @@ fn map_tensor_name(architecture: &str, name: &str) -> String {
     let architecture = architecture.to_ascii_lowercase();
     let mapped = match architecture.as_str() {
         "llama" | "mistral" | "mixtral" | "qwen" | "qwen2" | "qwen2moe" | "qwen35" | "deepseek"
-        | "deepseek2" | "deepseek_v2" | "deepseek_v3" | "deepseek_moe" | "gemma" | "phi" => {
-            map_hf_decoder_name(name)
-        }
+        | "deepseek2" | "deepseek_v2" | "deepseek_v3" | "deepseek_moe" | "gemma" | "phi"
+        | "glm-dsa" | "glm_dsa" | "glm_moe_dsa" => map_hf_decoder_name(name),
         "falcon" => map_falcon_name(name),
         "gpt2" => map_gpt2_name(name),
         "gptj" => map_gptj_name(name),
@@ -1406,6 +1506,7 @@ mod tests {
             ggml_type: 0,
             relative_offset: 0,
             absolute_offset: 0,
+            mmap_index: 0,
         }
     }
 

@@ -8,6 +8,16 @@
 - `oxidize-quantize`: file quantization utility
 - `oxidize-py`: Python bindings built with `pyo3`
 
+## Install with your AI agent
+
+Copy and paste the prompt below into your agent (Claude, Cursor, Codex, etc.) and it will install `oxidize` for you.
+
+```text
+Install the oxidize LLM inference workspace from https://github.com/Zapdev-labs/oxidize.git.
+
+Follow the exact steps in HOW_TO_INSTALL.md in the repo root. Before building, verify that rustup, cargo, make, and git are available and that the Rust toolchain supports edition 2024. Build the workspace from source with `make build` (prefix cargo commands with `sfw` if your environment uses Socket Firewall Free). After building, run a smoke test with `cargo run -p oxidize-cli --release -- --prompt "What is 2+2?"` and confirm there is no panic. If a GGUF model path is available, also verify inference works by running `cargo run -p oxidize-cli --release -- --model <path> --prompt "Summarize Rust ownership in one paragraph." --max-tokens 128`. Report back the install method used, the path to the `oxidize` binary, and the verification output. If anything fails, pause and ask before proceeding.
+```
+
 ## Quick start
 
 ### Prerequisites
