@@ -91,9 +91,10 @@ pub mod lora;
 pub mod mesh;
 #[path = "backends/metal.rs"]
 pub mod metal;
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", feature = "mlx"))]
 #[path = "backends/mlx.rs"]
 pub mod mlx;
+#[cfg(all(target_os = "macos", feature = "mlx"))]
 #[path = "model/mlx_inference.rs"]
 pub mod mlx_inference;
 #[path = "model/model.rs"]

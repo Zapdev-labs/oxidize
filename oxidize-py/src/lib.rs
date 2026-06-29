@@ -255,6 +255,7 @@ impl Llama {
 #[derive(Default)]
 struct NoopWaker;
 
+#[allow(unknown_lints, clippy::manual_noop_waker)]
 impl Wake for NoopWaker {
     fn wake(self: std::sync::Arc<Self>) {}
 }

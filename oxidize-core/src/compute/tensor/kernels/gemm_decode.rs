@@ -355,6 +355,15 @@ pub(super) unsafe fn dot_f32_avx2(a: *const f32, b: *const f32, len: usize) -> f
     sum
 }
 
+#[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+pub(super) unsafe fn dot_f32_avx2(a: *const f32, b: *const f32, len: usize) -> f32 {
+    let mut sum = 0.0_f32;
+    for i in 0..len {
+        sum += unsafe { *a.add(i) * *b.add(i) };
+    }
+    sum
+}
+
 /// Eight dot products that share the `a` load. Writes results to `out[0..8]`.
 /// At eight accumulators we exceed the 16-ymm register file by a few — the
 /// compiler spills the inputs but the load amortization on `a` is the dominant
@@ -457,6 +466,23 @@ pub(super) unsafe fn dot4_f32_avx2(
     (s0, s1, s2, s3)
 }
 
+#[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+pub(super) unsafe fn dot4_f32_avx2(
+    a: *const f32,
+    b0: *const f32,
+    b1: *const f32,
+    b2: *const f32,
+    b3: *const f32,
+    len: usize,
+) -> (f32, f32, f32, f32) {
+    (
+        unsafe { dot_f32_avx2(a, b0, len) },
+        unsafe { dot_f32_avx2(a, b1, len) },
+        unsafe { dot_f32_avx2(a, b2, len) },
+        unsafe { dot_f32_avx2(a, b3, len) },
+    )
+}
+
 /// AVX-512 counterpart of [`dot4_f32_avx2`]: 16-wide FMA, four shared-`a`
 /// accumulators. On Skylake-SP this doubles the dot lanes versus AVX2 while the
 /// 32-zmm register file absorbs the four input streams without spilling.
@@ -500,6 +526,18 @@ pub(super) unsafe fn dot4_f32_avx512(
     (s0, s1, s2, s3)
 }
 
+#[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+pub(super) unsafe fn dot4_f32_avx512(
+    a: *const f32,
+    b0: *const f32,
+    b1: *const f32,
+    b2: *const f32,
+    b3: *const f32,
+    len: usize,
+) -> (f32, f32, f32, f32) {
+    unsafe { dot4_f32_avx2(a, b0, b1, b2, b3, len) }
+}
+
 /// AVX-512 counterpart of [`dot_f32_avx2`].
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f,avx512vl,avx2,fma")]
@@ -528,6 +566,11 @@ pub(super) unsafe fn dot_f32_avx512(a: *const f32, b: *const f32, len: usize) ->
         i += 1;
     }
     sum
+}
+
+#[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+pub(super) unsafe fn dot_f32_avx512(a: *const f32, b: *const f32, len: usize) -> f32 {
+    unsafe { dot_f32_avx2(a, b, len) }
 }
 
 #[inline]
@@ -641,7 +684,16 @@ pub(super) unsafe fn gemm_q4_k_decode_once_avx2(
     // The weight decode stays AVX2, but the per-token dot product over the
     // 256-element f32 scratch runs 16-wide on AVX-512 hardware (Skylake-SP).
     // Detected once here; the branch in the inner loop is perfectly predicted.
-    let use_avx512 = is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512vl");
+    let use_avx512 = {
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        {
+            is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512vl")
+        }
+        #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+        {
+            false
+        }
+    };
 
     // Rows are processed in chunks to amortize rayon task dispatch overhead.
     const ROW_CHUNK: usize = 16;
@@ -818,8 +870,16 @@ pub(super) fn gemm_q6_k_decode_once(
             let in_ptr = in_ptr_addr as *const f32;
             let start = chunk_idx * ROW_CHUNK;
             let end = (start + ROW_CHUNK).min(rows);
-            let use_avx512 =
-                is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512vl");
+            let use_avx512 = {
+                #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+                {
+                    is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512vl")
+                }
+                #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+                {
+                    false
+                }
+            };
             let mut scratch = [0.0_f32; QK_K];
             for row in start..end {
                 let local = row - start;

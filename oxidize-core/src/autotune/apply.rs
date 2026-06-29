@@ -113,7 +113,10 @@ mod tests {
         HardwareInventory {
             os: OsKind::Linux,
             cpu_vendor: CpuVendor::Amd,
+            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
             simd: SimdBackend::Avx2,
+            #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+            simd: SimdBackend::Scalar,
             physical_cores: 8,
             logical_cores: 16,
             numa_nodes: 1,

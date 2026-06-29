@@ -210,6 +210,7 @@ fn tier0_hard_rules(inv: &HardwareInventory, model: &ModelFingerprint, plan: &mu
 
 fn tier1_isa(inv: &HardwareInventory, plan: &mut TuningPlan) {
     match inv.simd {
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         SimdBackend::Avx512f => {
             if is_skylake_sp() {
                 plan.oxk_isa = OxkIsa::Avx2;
@@ -225,6 +226,7 @@ fn tier1_isa(inv: &HardwareInventory, plan: &mut TuningPlan) {
                     .push("AVX-512F available + non-Skylake → AVX-512 x8".to_string());
             }
         }
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         SimdBackend::Avx2 => {
             plan.oxk_isa = OxkIsa::Avx2;
             plan.oxk_tile = if inv.physical_cores >= 16 {
@@ -589,7 +591,10 @@ mod tests {
         HardwareInventory {
             os: OsKind::Linux,
             cpu_vendor: CpuVendor::Amd,
+            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
             simd: SimdBackend::Avx2,
+            #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+            simd: SimdBackend::Scalar,
             physical_cores: 16,
             logical_cores: 32,
             numa_nodes: 2,
@@ -773,8 +778,8 @@ mod tests {
         let m = model_qwen3_4b();
         let p = plan(&inv, &m);
         assert!(matches!(p.oxk_isa, OxkIsa::Scalar)); // no Neon oxk yet
-        assert!(matches!(p.simd, SimdBackend::Neon));
-        assert!(!p.has_gpu, "no discrete GPU on macbook");
+        assert!(matches!(inv.simd, SimdBackend::Neon));
+        assert!(!inv.has_gpu, "no discrete GPU on macbook");
     }
 
     #[test]
@@ -800,6 +805,7 @@ mod tests {
         assert!(p.threads <= 8);
     }
 
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     #[test]
     fn decode_tile_set_for_long_context() {
         let mut inv = inv_desktop();

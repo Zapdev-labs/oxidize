@@ -239,6 +239,15 @@ pub(super) unsafe fn q4_k_q8_k_row_dot_x4_avx2(
     unreachable!("x4 kernel is gated on x86 availability at call sites")
 }
 
+#[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+pub(super) unsafe fn q4_k_q8_k_row_dot_avx2(
+    _row: &[u8],
+    _blocks_per_row: usize,
+    _q8k: &[u8],
+) -> f32 {
+    unreachable!("Q4_K AVX2 kernel is gated on x86 availability at call sites")
+}
+
 /// Integer Q6_K x Q8_K row dot (llama.cpp-style). Decodes 6-bit weights to
 /// unsigned 0..63, runs `maddubs`/`madd` integer dot products against the
 /// pre-quantized Q8_K input, and removes the implicit -32 offset analytically
