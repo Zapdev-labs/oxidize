@@ -23,6 +23,7 @@ struct TuningPlan {
   int threads = 0;
   bool mmap_hugepages = false;
   std::string mmap_policy = "prefetch";
+  int prefetch_layers = 0;  // async layer-ahead prefetch depth
   std::vector<std::string> rationale;
 };
 

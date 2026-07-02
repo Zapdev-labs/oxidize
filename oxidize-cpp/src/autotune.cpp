@@ -94,10 +94,12 @@ TuningPlan plan_cpu(const HardwareInventory& inv, const ModelFingerprint& model)
   const uint64_t size = model.file_size_bytes;
   const bool exceeds_ram = size > (ram * 8 / 10);
   const bool huge_model = size > k192GiB || exceeds_ram;
+  const bool way_over_ram = size > (ram * 15 / 10);
 
   if (huge_model) {
     plan.numa_mode = "interleave";
     plan.mmap_policy = "demand";
+    plan.prefetch_layers = way_over_ram ? 2 : 1;
     if (inv.logical_cores > 48) {
       plan.threads = 48;
       plan.rationale.push_back(
@@ -112,6 +114,14 @@ TuningPlan plan_cpu(const HardwareInventory& inv, const ModelFingerprint& model)
     plan.rationale.push_back(
         "model exceeds RAM locality budget → demand mmap policy avoids "
         "whole-file SSD prefetch");
+    {
+      char buf[128];
+      std::snprintf(buf, sizeof(buf),
+                    "model > RAM working-set budget → async layer-ahead "
+                    "prefetch depth=%d hides SSD latency",
+                    plan.prefetch_layers);
+      plan.rationale.push_back(buf);
+    }
   } else if (inv.numa_nodes >= 2) {
     plan.numa_mode = "single";
     plan.mmap_policy = "prefetch";
@@ -157,6 +167,7 @@ std::string plan_to_json(const TuningPlan& plan) {
   os << "  \"mmap_hugepages\": " << (plan.mmap_hugepages ? "true" : "false")
      << ",\n";
   os << "  \"mmap_policy\": \"" << json_escape(plan.mmap_policy) << "\",\n";
+  os << "  \"prefetch_layers\": " << plan.prefetch_layers << ",\n";
   os << "  \"rationale\": [";
   for (size_t i = 0; i < plan.rationale.size(); ++i) {
     if (i) os << ", ";
@@ -174,6 +185,7 @@ std::string plan_summary(const TuningPlan& plan) {
   os << "mmap_hugepages    : " << (plan.mmap_hugepages ? "true" : "false")
      << "\n";
   os << "mmap_policy       : " << plan.mmap_policy << "\n";
+  os << "prefetch_layers   : " << plan.prefetch_layers << "\n";
   if (!plan.rationale.empty()) {
     os << "\nRationale:\n";
     for (const auto& r : plan.rationale) {

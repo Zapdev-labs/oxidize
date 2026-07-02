@@ -22,6 +22,15 @@
 
 namespace oxidize {
 
+// Byte range inside a single mmap'd GGUF shard. Used by the layer prefetcher.
+struct ShardRange {
+  size_t shard_index = 0;
+  size_t offset = 0;
+  size_t length = 0;
+};
+
+using LayerRanges = std::map<size_t, std::vector<ShardRange>>;
+
 // Mirror of gguf.rs::GgufMetadataType (repr(u32) discriminants).
 enum class GgufMetadataType : uint32_t {
   Uint8 = 0,
@@ -117,6 +126,7 @@ enum class MmapPolicy : uint8_t {
 
 struct GgufLoadOptions {
   MmapPolicy mmap_policy = MmapPolicy::Prefetch;
+  bool mmap_hugepages = false;  // request transparent hugepages for the mapping
 };
 
 const char* mmap_policy_name(MmapPolicy policy);
@@ -163,6 +173,13 @@ class GgufModel {
   TensorView tensor(const std::string& name) const;
   bool has_tensor(const std::string& name) const;
 
+  // Layer byte ranges for async prefetch. Populated during load.
+  const LayerRanges& layer_ranges() const { return layer_ranges_; }
+
+  // File descriptors of the underlying mmap'd shards. Kept open so readahead(2)
+  // can be issued. Indices match layer_ranges() shard_index values.
+  std::vector<int> shard_fds() const;
+
  private:
   GgufModel() = default;
 
@@ -171,6 +188,7 @@ class GgufModel {
     void* map = nullptr;
     const uint8_t* base = nullptr;
     size_t size = 0;
+    int fd = -1;  // kept open for readahead(2); closed on destruction
   };
 
   // Load a split GGUF: open shard 0 at `path`, read split.count, then mmap and
@@ -179,11 +197,15 @@ class GgufModel {
                               GgufModel first_model, uint32_t split_count,
                               const GgufLoadOptions& options);
 
+  // Group blk.<N>.* tensors into per-layer byte ranges for prefetch.
+  void build_layer_ranges();
+
   void* map_ = nullptr;       // mmap base of shard 0 (for munmap); also shards_[0]
   const uint8_t* base_ = nullptr;  // shard 0 base
   size_t size_ = 0;           // shard 0 size
   std::vector<Shard> shards_; // all mmap'd shards (>=1). shards_[0] mirrors map_/base_/size_.
   GgufFile parsed_;           // merged header (metadata from shard 0, all tensor_infos)
+  LayerRanges layer_ranges_;  // layer index -> byte ranges inside shards_
 };
 
 // Map a GGUF general.architecture / namespace prefix string to a config.hpp

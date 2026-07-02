@@ -31,6 +31,7 @@
 #include "oxidize/config.hpp"
 #include "oxidize/gguf.hpp"
 #include "oxidize/model.hpp"
+#include "oxidize/prefetcher.hpp"
 #include "oxidize/quant.hpp"
 #ifdef OXIDIZE_GPU
 #include "oxidize/cuda_backend.hpp"
@@ -127,7 +128,9 @@ class LlamaModel : public Model {
  public:
   // `quantize_to` (Q8_0) quantizes F16/BF16/F32 weight matrices to Q8_0 at load
   // for ~1.3x faster, near-lossless decode; QuantType::F32 = keep as-is.
-  explicit LlamaModel(GgufModel gguf, QuantType quantize_to = QuantType::F32);
+  // `prefetch_layers` enables async layer-ahead readahead for mmap'd weights.
+  explicit LlamaModel(GgufModel gguf, QuantType quantize_to = QuantType::F32,
+                      int prefetch_layers = 0);
 
   // Route the dense-decode hot path (matmuls, rms_norm, rope, attention, FFN)
   // through the CUDA backend when `on` and a device is available. Weights stay
@@ -222,6 +225,9 @@ class LlamaModel : public Model {
 
   // Persistent activation + scratch (mirrors inference.rs::Workspace, dense subset).
   std::vector<float> x_;
+
+  int prefetch_layers_ = 0;
+  std::unique_ptr<LayerPrefetcher> prefetcher_;
 };
 
 // Factory: mmap + parse a .gguf and build a dense LlamaModel. When `want_cuda`
@@ -230,6 +236,7 @@ class LlamaModel : public Model {
 // Throws std::runtime_error on parse failure or unsupported architecture.
 std::unique_ptr<Model> load_llama_gguf(const std::string& path,
                                        bool want_cuda = false,
-                                       QuantType quantize_to = QuantType::F32);
+                                       QuantType quantize_to = QuantType::F32,
+                                       int prefetch_layers = 0);
 
 }  // namespace oxidize

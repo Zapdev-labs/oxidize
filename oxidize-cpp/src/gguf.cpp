@@ -221,6 +221,16 @@ void advise_mmap(void* map, size_t size, const GgufLoadOptions& options) {
       ::madvise(map, size, MADV_RANDOM);
       break;
   }
+#if defined(__linux__) && defined(MADV_HUGEPAGE)
+  if (options.mmap_hugepages) {
+    // Best-effort request for transparent hugepages. Reduces TLB pressure and
+    // page-fault count for large mappings, which helps both cold-start and
+    // steady-state decode throughput.
+    ::madvise(map, size, MADV_HUGEPAGE);
+  }
+#else
+  (void)size;
+#endif
 }
 
 // gguf.rs::alignment_from_metadata
@@ -585,8 +595,8 @@ GgufModel GgufModel::load(const std::string& path,
     throw std::runtime_error("gguf: unexpected end of file");
   }
   void* map = ::mmap(nullptr, size, PROT_READ, MAP_PRIVATE, fd, 0);
-  ::close(fd);
   if (map == MAP_FAILED) {
+    ::close(fd);
     throw std::runtime_error("gguf: io error: mmap failed for " + path);
   }
   advise_mmap(map, size, options);
@@ -599,13 +609,14 @@ GgufModel GgufModel::load(const std::string& path,
     model.parsed_ = parse(model.base_, model.size_);
   } catch (...) {
     ::munmap(map, size);
+    ::close(fd);
     model.map_ = nullptr;
     model.base_ = nullptr;
     model.size_ = 0;
     throw;
   }
   // shard 0 view (all tensor_infos default shard_index = 0).
-  model.shards_.push_back(Shard{map, model.base_, size});
+  model.shards_.push_back(Shard{map, model.base_, size, fd});
 
   // Split (sharded) GGUF: mmap + merge every sibling shard. split.count and
   // split.no are global keys (see llama.cpp llama-arch.cpp). A single-file GGUF
@@ -615,6 +626,7 @@ GgufModel GgufModel::load(const std::string& path,
   if (split_count > 1) {
     return load_split(path, std::move(model), split_count, options);
   }
+  model.build_layer_ranges();
   return model;
 }
 
@@ -664,8 +676,8 @@ GgufModel GgufModel::load_split(const std::string& first_path,
       throw std::runtime_error("gguf: empty shard: " + shard_path);
     }
     void* smap = ::mmap(nullptr, ssize, PROT_READ, MAP_PRIVATE, fd, 0);
-    ::close(fd);
     if (smap == MAP_FAILED) {
+      ::close(fd);
       throw std::runtime_error("gguf: io error: mmap failed for shard " + shard_path);
     }
     advise_mmap(smap, ssize, options);
@@ -680,7 +692,7 @@ GgufModel GgufModel::load_split(const std::string& first_path,
     }
 
     size_t shard_idx = first_model.shards_.size();
-    first_model.shards_.push_back(Shard{smap, sbase, ssize});
+    first_model.shards_.push_back(Shard{smap, sbase, ssize, fd});
 
     // Append this shard's tensor infos, tagging their owning shard so tensor()
     // resolves the data pointer against the right mmap base.
@@ -689,6 +701,7 @@ GgufModel GgufModel::load_split(const std::string& first_path,
       first_model.parsed_.tensor_infos.push_back(std::move(info));
     }
   }
+  first_model.build_layer_ranges();
   return first_model;
 }
 
@@ -697,27 +710,32 @@ GgufModel::GgufModel(GgufModel&& other) noexcept
       base_(other.base_),
       size_(other.size_),
       shards_(std::move(other.shards_)),
-      parsed_(std::move(other.parsed_)) {
+      parsed_(std::move(other.parsed_)),
+      layer_ranges_(std::move(other.layer_ranges_)) {
   other.map_ = nullptr;
   other.base_ = nullptr;
   other.size_ = 0;
   other.shards_.clear();
+  other.layer_ranges_.clear();
 }
 
 GgufModel& GgufModel::operator=(GgufModel&& other) noexcept {
   if (this != &other) {
     for (auto& s : shards_) {
       if (s.map != nullptr) ::munmap(s.map, s.size);
+      if (s.fd >= 0) ::close(s.fd);
     }
     map_ = other.map_;
     base_ = other.base_;
     size_ = other.size_;
     shards_ = std::move(other.shards_);
     parsed_ = std::move(other.parsed_);
+    layer_ranges_ = std::move(other.layer_ranges_);
     other.map_ = nullptr;
     other.base_ = nullptr;
     other.size_ = 0;
     other.shards_.clear();
+    other.layer_ranges_.clear();
   }
   return *this;
 }
@@ -727,6 +745,7 @@ GgufModel::~GgufModel() {
   // munmap of map_) to avoid a double-unmap.
   for (auto& s : shards_) {
     if (s.map != nullptr) ::munmap(s.map, s.size);
+    if (s.fd >= 0) ::close(s.fd);
   }
 }
 
@@ -761,6 +780,99 @@ Architecture GgufModel::architecture() const {
   std::string arch = parsed_.architecture();
   if (arch.empty()) arch = "llama";
   return architecture_from_name(arch);
+}
+
+std::vector<int> GgufModel::shard_fds() const {
+  std::vector<int> fds;
+  fds.reserve(shards_.size());
+  for (const auto& s : shards_) fds.push_back(s.fd);
+  return fds;
+}
+
+namespace {
+
+// Parse a layer index from a mapped tensor name like "blk.7.attn_q.weight".
+// Returns true and writes `out_layer` on success.
+bool parse_layer_index(const std::string& name, size_t& out_layer) {
+  const char* prefix = "blk.";
+  if (name.rfind(prefix, 0) != 0) return false;
+  size_t i = std::strlen(prefix);
+  if (i >= name.size() || !std::isdigit(static_cast<unsigned char>(name[i])))
+    return false;
+  size_t layer = 0;
+  for (; i < name.size(); ++i) {
+    char c = name[i];
+    if (c == '.') break;
+    if (!std::isdigit(static_cast<unsigned char>(c))) return false;
+    layer = layer * 10 + static_cast<size_t>(c - '0');
+  }
+  out_layer = layer;
+  return true;
+}
+
+}  // namespace
+
+void GgufModel::build_layer_ranges() {
+  layer_ranges_.clear();
+  for (const auto& info : parsed_.tensor_infos) {
+    size_t layer = 0;
+    if (!parse_layer_index(info.name, layer)) continue;
+
+    uint64_t numel = 1;
+    for (uint64_t d : info.dimensions) {
+      if (d == 0 || numel > UINT64_MAX / d) {
+        numel = 0;
+        break;
+      }
+      numel *= d;
+    }
+    if (numel == 0) continue;
+
+    size_t byte_len = 0;
+    try {
+      byte_len = quantized_size(info.quant, static_cast<size_t>(numel));
+    } catch (...) {
+      // Unknown quantization layout: skip this tensor for prefetch purposes.
+      continue;
+    }
+
+    size_t shard = info.shard_index;
+    if (shard >= shards_.size()) continue;
+    size_t offset = static_cast<size_t>(info.absolute_offset);
+    if (offset > shards_[shard].size) continue;
+    size_t clamped_len = byte_len;
+    if (offset + clamped_len > shards_[shard].size) {
+      clamped_len = shards_[shard].size - offset;
+    }
+    if (clamped_len == 0) continue;
+
+    layer_ranges_[layer].push_back(ShardRange{shard, offset, clamped_len});
+  }
+
+  // Merge adjacent/overlapping ranges within each layer to reduce readahead
+  // syscall count and avoid redundant I/O hints.
+  for (auto& kv : layer_ranges_) {
+    auto& ranges = kv.second;
+    std::sort(ranges.begin(), ranges.end(),
+              [](const ShardRange& a, const ShardRange& b) {
+                if (a.shard_index != b.shard_index) return a.shard_index < b.shard_index;
+                return a.offset < b.offset;
+              });
+    std::vector<ShardRange> merged;
+    merged.reserve(ranges.size());
+    for (const auto& r : ranges) {
+      if (!merged.empty() &&
+          r.shard_index == merged.back().shard_index &&
+          r.offset <= merged.back().offset + merged.back().length) {
+        size_t end = std::max(merged.back().offset + merged.back().length,
+                              r.offset + r.length);
+        merged.back().length = end - merged.back().offset;
+      } else {
+        merged.push_back(r);
+      }
+    }
+    ranges = std::move(merged);
+  }
 }
 
 bool GgufModel::has_tensor(const std::string& name) const {

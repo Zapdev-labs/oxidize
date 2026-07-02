@@ -4,6 +4,17 @@
 #include <cstdio>
 #include <string>
 
+static void test_mmap_hugepages_load() {
+  // The fixture is tiny; this mainly verifies the option is accepted and the
+  // madvise(MADV_HUGEPAGE) hint does not fail the load.
+  oxidize::GgufLoadOptions opts;
+  opts.mmap_policy = oxidize::MmapPolicy::Prefetch;
+  opts.mmap_hugepages = true;
+  auto model = oxidize::GgufModel::load(
+      "../tests/fixtures/valid-v3.gguf", opts);
+  assert(model.size() > 0);
+}
+
 static void test_parse_mmap_policy_rejects_invalid_value() {
   auto parsed = oxidize::parse_mmap_policy("nonsense");
   assert(!parsed.has_value());
@@ -22,6 +33,7 @@ static void test_parse_mmap_policy_names() {
 }
 
 int main() {
+  test_mmap_hugepages_load();
   test_parse_mmap_policy_rejects_invalid_value();
   test_parse_mmap_policy_names();
   std::printf("gguf_mmap_policy_test: ok\n");

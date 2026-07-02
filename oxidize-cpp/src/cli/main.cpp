@@ -82,7 +82,11 @@ struct Args {
   bool numa_explicit = false;
   bool threads_explicit = false;
   bool mmap_policy_explicit = false;
+  bool mmap_hugepages_explicit = false;
+  bool prefetch_layers_explicit = false;
   std::string mmap_policy;
+  bool mmap_hugepages = false;
+  int prefetch_layers = -1;  // -1 means "follow autotune plan"
 };
 
 [[noreturn]] void usage_and_exit(const char* prog, int code) {
@@ -112,6 +116,9 @@ struct Args {
       "  --no-auto             Disable autotune even if --auto was set elsewhere\n"
       "  --print-plan          Print autotune plan (JSON with --json) and exit\n"
       "  --mmap-policy <mode>  GGUF paging: demand|prefetch|sequential|random\n"
+      "  --mmap-hugepages      Request transparent hugepages for the weight mmap\n"
+      "  --prefetch-layers <n> Async layer-ahead prefetch depth (-1=auto, 0=off,\n"
+      "                        1+=lookahead layer count)\n"
       "  --json                Emit timing JSON\n",
       prog);
   std::exit(code);
@@ -214,6 +221,18 @@ Args parse_args(int argc, char** argv) {
     } else if (arg == "--mmap-policy") {
       a.mmap_policy = take_value(argc, argv, i, "--mmap-policy");
       a.mmap_policy_explicit = true;
+    } else if (arg == "--mmap-hugepages") {
+      a.mmap_hugepages = true;
+      a.mmap_hugepages_explicit = true;
+    } else if (arg == "--prefetch-layers") {
+      std::string v = take_value(argc, argv, i, "--prefetch-layers");
+      size_t n = 0;
+      if (!parse_size(v, n) || static_cast<int>(n) < -1) {
+        std::fprintf(stderr, "error: invalid --prefetch-layers '%s'\n", v.c_str());
+        usage_and_exit(argv[0], 2);
+      }
+      a.prefetch_layers = static_cast<int>(n);
+      a.prefetch_layers_explicit = true;
     } else if (arg == "--threads") {
       std::string v = take_value(argc, argv, i, "--threads");
       size_t n = 0;
@@ -318,6 +337,12 @@ int main(int argc, char** argv) {
     if (!args.mmap_policy_explicit) {
       args.mmap_policy = tune_plan.mmap_policy;
     }
+    if (!args.mmap_hugepages_explicit) {
+      args.mmap_hugepages = tune_plan.mmap_hugepages;
+    }
+    if (!args.prefetch_layers_explicit) {
+      args.prefetch_layers = tune_plan.prefetch_layers;
+    }
     if (!args.json) {
       std::fprintf(stderr, "oxidize: autotune %s\n",
                    oxidize::plan_summary(tune_plan).c_str());
@@ -377,9 +402,11 @@ int main(int argc, char** argv) {
       explicit_mmap_policy = oxidize::parse_mmap_policy(policy_name);
     }
     load_options.mmap_policy = *explicit_mmap_policy;
+    load_options.mmap_hugepages = args.mmap_hugepages;
+    int prefetch_layers = args.prefetch_layers < 0 ? 0 : args.prefetch_layers;
     auto t_load0 = std::chrono::steady_clock::now();
     auto gguf = GgufModel::load(args.model, load_options);
-    auto llama = std::make_unique<LlamaModel>(std::move(gguf), qto);
+    auto llama = std::make_unique<LlamaModel>(std::move(gguf), qto, prefetch_layers);
     llama->set_cuda(args.cuda);
     std::unique_ptr<Model> model = std::move(llama);
     auto t_load1 = std::chrono::steady_clock::now();

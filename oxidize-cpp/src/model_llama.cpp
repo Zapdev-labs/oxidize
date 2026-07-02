@@ -348,8 +348,10 @@ LlamaWeight LlamaModel::load_weight(const GgufModel& g, const std::string& name,
   return w;
 }
 
-LlamaModel::LlamaModel(GgufModel gguf, QuantType quantize_to)
-    : gguf_(std::move(gguf)), quantize_to_(quantize_to) {
+LlamaModel::LlamaModel(GgufModel gguf, QuantType quantize_to,
+                       int prefetch_layers)
+    : gguf_(std::move(gguf)), quantize_to_(quantize_to),
+      prefetch_layers_(prefetch_layers) {
   config_ = build_inference_config(gguf_);
   reject_unsupported(config_);
 
@@ -509,6 +511,17 @@ LlamaModel::LlamaModel(GgufModel gguf, QuantType quantize_to)
   kv_values_.assign(kv_elems, 0.0f);
 
   x_.assign(h, 0.0f);
+
+  // Async layer-ahead prefetcher: overlap SSD reads with compute.
+  if (prefetch_layers_ > 0 && !gguf_.layer_ranges().empty()) {
+    prefetcher_ = std::make_unique<LayerPrefetcher>(
+        gguf_.layer_ranges(), gguf_.shard_fds(), prefetch_layers_);
+    // Warm the first layers synchronously so the initial prefill/decode is not
+    // stalled waiting for the background worker.
+    for (int i = 0; i < prefetch_layers_; ++i) {
+      prefetcher_->prefetch_sync(static_cast<size_t>(i));
+    }
+  }
 }
 
 void LlamaModel::embed_token(Token token, float* x) const {
@@ -807,6 +820,11 @@ void LlamaModel::run_layers(size_t pos) {
   std::vector<float> head_scratch(head_dim);
 
   for (size_t l = 0; l < cfg.layer_count; ++l) {
+    if (prefetcher_) {
+      size_t ahead = l + static_cast<size_t>(prefetch_layers_);
+      if (ahead < cfg.layer_count) prefetcher_->request(ahead);
+    }
+
     const LlamaLayer& layer = layers_[l];
     const float rope_theta = layer_rope_theta(cfg, l);
     const size_t window = layer_sliding_window(cfg, l);
@@ -1314,9 +1332,11 @@ void LlamaModel::rewind_to(size_t consumed_tokens) {
 }
 
 std::unique_ptr<Model> load_llama_gguf(const std::string& path, bool want_cuda,
-                                       QuantType quantize_to) {
+                                       QuantType quantize_to,
+                                       int prefetch_layers) {
   GgufModel gguf = GgufModel::load(path);
-  auto model = std::make_unique<LlamaModel>(std::move(gguf), quantize_to);
+  auto model = std::make_unique<LlamaModel>(std::move(gguf), quantize_to,
+                                            prefetch_layers);
   model->set_cuda(want_cuda);
   return model;
 }
