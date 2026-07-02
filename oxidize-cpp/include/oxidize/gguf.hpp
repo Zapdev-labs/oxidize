@@ -14,6 +14,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "oxidize/config.hpp"
@@ -107,6 +108,20 @@ struct TensorView {
   uint64_t byte_offset = 0;  // absolute offset into the mmap
 };
 
+enum class MmapPolicy : uint8_t {
+  Demand,
+  Prefetch,
+  Sequential,
+  Random,
+};
+
+struct GgufLoadOptions {
+  MmapPolicy mmap_policy = MmapPolicy::Prefetch;
+};
+
+const char* mmap_policy_name(MmapPolicy policy);
+std::optional<MmapPolicy> parse_mmap_policy(std::string_view value);
+
 // Owns a POSIX mmap of a .gguf file and the parsed header. Mirrors
 // gguf.rs::MappedGgufFile + accessor surface needed by downstream modules.
 class GgufModel {
@@ -119,6 +134,8 @@ class GgufModel {
   // mmap a .gguf file (read-only, MAP_PRIVATE) and parse its header.
   // Throws std::runtime_error on open/mmap/parse failure.
   static GgufModel load(const std::string& path);
+  static GgufModel load(const std::string& path,
+                        const GgufLoadOptions& options);
 
   GgufModel(const GgufModel&) = delete;
   GgufModel& operator=(const GgufModel&) = delete;
@@ -159,7 +176,8 @@ class GgufModel {
   // Load a split GGUF: open shard 0 at `path`, read split.count, then mmap and
   // parse every sibling shard and merge their tensor tables into one model.
   static GgufModel load_split(const std::string& first_path,
-                              GgufModel first_model, uint32_t split_count);
+                              GgufModel first_model, uint32_t split_count,
+                              const GgufLoadOptions& options);
 
   void* map_ = nullptr;       // mmap base of shard 0 (for munmap); also shards_[0]
   const uint8_t* base_ = nullptr;  // shard 0 base

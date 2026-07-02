@@ -22,6 +22,7 @@ struct TuningPlan {
   std::string numa_mode;  // "single" | "interleave" | "replicate"
   int threads = 0;
   bool mmap_hugepages = false;
+  std::string mmap_policy = "prefetch";
   std::vector<std::string> rationale;
 };
 

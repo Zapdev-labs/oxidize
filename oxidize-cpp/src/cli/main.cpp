@@ -81,6 +81,8 @@ struct Args {
   bool print_plan = false;
   bool numa_explicit = false;
   bool threads_explicit = false;
+  bool mmap_policy_explicit = false;
+  std::string mmap_policy;
 };
 
 [[noreturn]] void usage_and_exit(const char* prog, int code) {
@@ -109,6 +111,7 @@ struct Args {
       "  --auto                Autotune NUMA/threads from model size + hardware\n"
       "  --no-auto             Disable autotune even if --auto was set elsewhere\n"
       "  --print-plan          Print autotune plan (JSON with --json) and exit\n"
+      "  --mmap-policy <mode>  GGUF paging: demand|prefetch|sequential|random\n"
       "  --json                Emit timing JSON\n",
       prog);
   std::exit(code);
@@ -208,6 +211,9 @@ Args parse_args(int argc, char** argv) {
     } else if (arg == "--print-plan") {
       a.print_plan = true;
       a.auto_tune = true;
+    } else if (arg == "--mmap-policy") {
+      a.mmap_policy = take_value(argc, argv, i, "--mmap-policy");
+      a.mmap_policy_explicit = true;
     } else if (arg == "--threads") {
       std::string v = take_value(argc, argv, i, "--threads");
       size_t n = 0;
@@ -273,6 +279,17 @@ double secs(std::chrono::steady_clock::duration d) {
 
 int main(int argc, char** argv) {
   Args args = parse_args(argc, argv);
+  std::optional<oxidize::MmapPolicy> explicit_mmap_policy;
+  if (args.mmap_policy_explicit) {
+    explicit_mmap_policy = oxidize::parse_mmap_policy(args.mmap_policy);
+    if (!explicit_mmap_policy) {
+      std::fprintf(stderr,
+                   "error: invalid --mmap-policy '%s' "
+                   "(use demand|prefetch|sequential|random)\n",
+                   args.mmap_policy.c_str());
+      return 2;
+    }
+  }
 
   const bool use_auto = args.auto_tune && !args.no_auto;
   auto nodes = oxidize::discover_numa_nodes();
@@ -281,6 +298,9 @@ int main(int argc, char** argv) {
     auto inv = oxidize::detect_hardware(static_cast<int>(nodes.size()));
     auto model_fp = oxidize::fingerprint_model_file(args.model);
     tune_plan = oxidize::plan_cpu(inv, model_fp);
+    if (explicit_mmap_policy) {
+      tune_plan.mmap_policy = oxidize::mmap_policy_name(*explicit_mmap_policy);
+    }
     if (args.print_plan) {
       if (args.json) {
         std::cout << oxidize::plan_to_json(tune_plan) << '\n';
@@ -294,6 +314,9 @@ int main(int argc, char** argv) {
     }
     if (!args.threads_explicit) {
       args.threads = tune_plan.threads;
+    }
+    if (!args.mmap_policy_explicit) {
+      args.mmap_policy = tune_plan.mmap_policy;
     }
     if (!args.json) {
       std::fprintf(stderr, "oxidize: autotune %s\n",
@@ -347,9 +370,18 @@ int main(int argc, char** argv) {
       std::fprintf(stderr, "error: --quantize supports only 'q8_0'\n");
       return 2;
     }
+    oxidize::GgufLoadOptions load_options;
+    if (!explicit_mmap_policy) {
+      std::string policy_name =
+          args.mmap_policy.empty() ? "prefetch" : args.mmap_policy;
+      explicit_mmap_policy = oxidize::parse_mmap_policy(policy_name);
+    }
+    load_options.mmap_policy = *explicit_mmap_policy;
     auto t_load0 = std::chrono::steady_clock::now();
-    std::unique_ptr<Model> model =
-        oxidize::load_llama_gguf(args.model, args.cuda, qto);
+    auto gguf = GgufModel::load(args.model, load_options);
+    auto llama = std::make_unique<LlamaModel>(std::move(gguf), qto);
+    llama->set_cuda(args.cuda);
+    std::unique_ptr<Model> model = std::move(llama);
     auto t_load1 = std::chrono::steady_clock::now();
 
     // Report the device actually in use: --cuda falls back to CPU when no

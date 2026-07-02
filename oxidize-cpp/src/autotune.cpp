@@ -97,6 +97,7 @@ TuningPlan plan_cpu(const HardwareInventory& inv, const ModelFingerprint& model)
 
   if (huge_model) {
     plan.numa_mode = "interleave";
+    plan.mmap_policy = "demand";
     if (inv.logical_cores > 48) {
       plan.threads = 48;
       plan.rationale.push_back(
@@ -108,8 +109,12 @@ TuningPlan plan_cpu(const HardwareInventory& inv, const ModelFingerprint& model)
           "model exceeds single-node budget → NUMA interleave, "
           "threads=all logical cores");
     }
+    plan.rationale.push_back(
+        "model exceeds RAM locality budget → demand mmap policy avoids "
+        "whole-file SSD prefetch");
   } else if (inv.numa_nodes >= 2) {
     plan.numa_mode = "single";
+    plan.mmap_policy = "prefetch";
     plan.threads = inv.logical_cores / inv.numa_nodes;
     if (plan.threads < 1) plan.threads = inv.physical_cores / inv.numa_nodes;
     if (plan.threads < 1) plan.threads = inv.physical_cores;
@@ -118,6 +123,7 @@ TuningPlan plan_cpu(const HardwareInventory& inv, const ModelFingerprint& model)
         "threads=logical cores on node 0");
   } else {
     plan.numa_mode = "single";
+    plan.mmap_policy = "prefetch";
     plan.threads = inv.physical_cores;
     plan.rationale.push_back("single NUMA node → threads=physical cores");
   }
@@ -150,6 +156,7 @@ std::string plan_to_json(const TuningPlan& plan) {
   os << "  \"threads\": " << plan.threads << ",\n";
   os << "  \"mmap_hugepages\": " << (plan.mmap_hugepages ? "true" : "false")
      << ",\n";
+  os << "  \"mmap_policy\": \"" << json_escape(plan.mmap_policy) << "\",\n";
   os << "  \"rationale\": [";
   for (size_t i = 0; i < plan.rationale.size(); ++i) {
     if (i) os << ", ";
@@ -166,6 +173,7 @@ std::string plan_summary(const TuningPlan& plan) {
   os << "threads           : " << plan.threads << "\n";
   os << "mmap_hugepages    : " << (plan.mmap_hugepages ? "true" : "false")
      << "\n";
+  os << "mmap_policy       : " << plan.mmap_policy << "\n";
   if (!plan.rationale.empty()) {
     os << "\nRationale:\n";
     for (const auto& r : plan.rationale) {

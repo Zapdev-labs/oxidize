@@ -24,6 +24,24 @@
 
 namespace oxidize {
 
+const char* mmap_policy_name(MmapPolicy policy) {
+  switch (policy) {
+    case MmapPolicy::Demand: return "demand";
+    case MmapPolicy::Prefetch: return "prefetch";
+    case MmapPolicy::Sequential: return "sequential";
+    case MmapPolicy::Random: return "random";
+  }
+  return "prefetch";
+}
+
+std::optional<MmapPolicy> parse_mmap_policy(std::string_view value) {
+  if (value == "demand") return MmapPolicy::Demand;
+  if (value == "prefetch") return MmapPolicy::Prefetch;
+  if (value == "sequential") return MmapPolicy::Sequential;
+  if (value == "random") return MmapPolicy::Random;
+  return std::nullopt;
+}
+
 namespace {
 
 constexpr uint64_t kDefaultAlignment = 32;
@@ -186,6 +204,24 @@ uint64_t align_up(uint64_t value, uint64_t alignment) {
 }
 
 bool is_power_of_two(uint64_t v) { return v != 0 && (v & (v - 1)) == 0; }
+
+void advise_mmap(void* map, size_t size, const GgufLoadOptions& options) {
+  switch (options.mmap_policy) {
+    case MmapPolicy::Demand:
+      ::madvise(map, size, MADV_RANDOM);
+      break;
+    case MmapPolicy::Prefetch:
+      ::madvise(map, size, MADV_SEQUENTIAL);
+      ::madvise(map, size, MADV_WILLNEED);
+      break;
+    case MmapPolicy::Sequential:
+      ::madvise(map, size, MADV_SEQUENTIAL);
+      break;
+    case MmapPolicy::Random:
+      ::madvise(map, size, MADV_RANDOM);
+      break;
+  }
+}
 
 // gguf.rs::alignment_from_metadata
 uint64_t alignment_from_metadata(const GgufMetadataValue& v) {
@@ -529,6 +565,11 @@ GgufFile GgufModel::parse(const uint8_t* bytes, size_t len) {
 
 // ── GgufModel::load (POSIX mmap) ─────────────────────────────────────────────
 GgufModel GgufModel::load(const std::string& path) {
+  return load(path, GgufLoadOptions{});
+}
+
+GgufModel GgufModel::load(const std::string& path,
+                          const GgufLoadOptions& options) {
   int fd = ::open(path.c_str(), O_RDONLY);
   if (fd < 0) {
     throw std::runtime_error("gguf: io error: cannot open " + path);
@@ -548,9 +589,7 @@ GgufModel GgufModel::load(const std::string& path) {
   if (map == MAP_FAILED) {
     throw std::runtime_error("gguf: io error: mmap failed for " + path);
   }
-  // Match load_mapped_gguf advice: sequential read, prefetch whole file.
-  ::madvise(map, size, MADV_SEQUENTIAL);
-  ::madvise(map, size, MADV_WILLNEED);
+  advise_mmap(map, size, options);
 
   GgufModel model;
   model.map_ = map;
@@ -574,7 +613,7 @@ GgufModel GgufModel::load(const std::string& path) {
   uint32_t split_count = 0;
   if (auto sc = model.get_u32("split.count")) split_count = *sc;
   if (split_count > 1) {
-    return load_split(path, std::move(model), split_count);
+    return load_split(path, std::move(model), split_count, options);
   }
   return model;
 }
@@ -582,7 +621,8 @@ GgufModel GgufModel::load(const std::string& path) {
 // gguf.rs has no split support; this mirrors llama.cpp's llama_split_path
 // ("%s-%05d-of-%05d.gguf") + gguf_meta merge for multi-file models.
 GgufModel GgufModel::load_split(const std::string& first_path,
-                               GgufModel first_model, uint32_t split_count) {
+                               GgufModel first_model, uint32_t split_count,
+                               const GgufLoadOptions& options) {
   // Derive the split prefix by stripping the "-NNNNN-of-NNNNN.gguf" suffix from
   // the supplied first-shard path (llama.cpp llama_split_prefix).
   std::string prefix = first_path;
@@ -628,7 +668,7 @@ GgufModel GgufModel::load_split(const std::string& first_path,
     if (smap == MAP_FAILED) {
       throw std::runtime_error("gguf: io error: mmap failed for shard " + shard_path);
     }
-    ::madvise(smap, ssize, MADV_RANDOM);
+    advise_mmap(smap, ssize, options);
 
     const uint8_t* sbase = static_cast<const uint8_t*>(smap);
     GgufFile shard_hdr;

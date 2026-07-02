@@ -1,8 +1,16 @@
 #include "oxidize/autotune.hpp"
 
 #include <cassert>
+#include <cstdlib>
 #include <cstdio>
 #include <string>
+
+static void require(bool ok, const char* message) {
+  if (!ok) {
+    std::fprintf(stderr, "autotune_test failed: %s\n", message);
+    std::abort();
+  }
+}
 
 static void test_small_dense_dual_numa() {
   oxidize::HardwareInventory inv;
@@ -47,6 +55,22 @@ static void test_exceeds_ram_threshold() {
 
   auto plan = oxidize::plan_cpu(inv, model);
   assert(plan.numa_mode == "interleave");
+  require(plan.mmap_policy == "demand",
+          "huge model should use demand mmap policy");
+}
+
+static void test_small_model_prefetch_mmap_policy() {
+  oxidize::HardwareInventory inv;
+  inv.logical_cores = 16;
+  inv.numa_nodes = 1;
+  inv.total_ram_bytes = 64ULL << 30;
+
+  oxidize::ModelFingerprint model;
+  model.file_size_bytes = 2ULL << 30;
+
+  auto plan = oxidize::plan_cpu(inv, model);
+  require(plan.mmap_policy == "prefetch",
+          "small model should use prefetch mmap policy");
 }
 
 static void test_json_nonempty() {
@@ -60,12 +84,15 @@ static void test_json_nonempty() {
   std::string json = oxidize::plan_to_json(plan);
   assert(json.find("\"numa_mode\"") != std::string::npos);
   assert(json.find("\"threads\"") != std::string::npos);
+  require(json.find("\"mmap_policy\"") != std::string::npos,
+          "JSON plan should include mmap_policy");
 }
 
 int main() {
   test_small_dense_dual_numa();
   test_huge_model_interleave();
   test_exceeds_ram_threshold();
+  test_small_model_prefetch_mmap_policy();
   test_json_nonempty();
   std::printf("autotune_test: ok\n");
   return 0;
