@@ -15,12 +15,15 @@
 
 #include "oxidize/tensor.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
+#include "oxidize/kernels.hpp"
+#include "oxidize/numa_util.hpp"
 #include "oxidize/quant.hpp"
 
 #ifdef _OPENMP
@@ -625,10 +628,14 @@ void gemv_quantized(float* y, QuantType quant, const uint8_t* W, size_t rows,
     return;
   }
   if (is_q4_k(quant) && cols % QK_K == 0) {
-    const size_t rb = (cols / QK_K) * BLOCK_Q4_K_SIZE;
-#pragma omp parallel for schedule(static)
-    for (long long r = 0; r < static_cast<long long>(rows); ++r)
-      y[r] = dot_q4_k(W + static_cast<size_t>(r) * rb, x, cols);
+    const size_t blocks_per_row = cols / QK_K;
+    const size_t rb = blocks_per_row * BLOCK_Q4_K_SIZE;
+    // Quantize the activation vector once to Q8_K, then use the integer
+    // Q4_K x Q8_K path (scalar, AVX-512F/BW, or AVX-512 VNNI depending on
+    // the host). This is faster than dequantizing every weight row to f32.
+    std::vector<uint8_t> q8k(blocks_per_row * oxidize::kernels::BLOCK_Q8_K_BYTES);
+    oxidize::kernels::quantize_q8_k_into(x, blocks_per_row, q8k.data());
+    oxidize::kernels::gemv_q4k_range(W, blocks_per_row, q8k.data(), y, rows);
     return;
   }
   if (quant == QuantType::Q8_0 && cols % QK8_0 == 0) {
@@ -654,6 +661,49 @@ void gemv_quantized(float* y, QuantType quant, const uint8_t* W, size_t rows,
       y[r] = dot_f32(row.data(), x, cols);
     }
   }
+}
+
+void gemv_quantized(float* y, QuantType quant, const uint8_t* W,
+                    const uint8_t* W_replica, size_t rows, size_t cols,
+                    const float* x) {
+  if (!W_replica || !numa_replication_enabled()) {
+    gemv_quantized(y, quant, W, rows, cols, x);
+    return;
+  }
+  // Replicated path: each socket reads from its local weight copy.  We only
+  // implement the split for Q4_K (the dominant CPU inference format); other
+  // quant types fall back to the single-copy path.
+  if (is_q4_k(quant) && cols % QK_K == 0) {
+    const size_t blocks_per_row = cols / QK_K;
+    const size_t row_bytes = blocks_per_row * BLOCK_Q4_K_SIZE;
+    std::vector<uint8_t> q8k(blocks_per_row *
+                             oxidize::kernels::BLOCK_Q8_K_BYTES);
+    oxidize::kernels::quantize_q8_k_into(x, blocks_per_row, q8k.data());
+#pragma omp parallel
+    {
+      int tid = 0;
+      int n_threads = 1;
+#ifdef _OPENMP
+      tid = omp_get_thread_num();
+      n_threads = omp_get_num_threads();
+#endif
+      int node = current_thread_numa_node();
+      const uint8_t* W_local = (node == 1) ? W_replica : W;
+      // Static block partitioning of output rows.
+      long long chunk = static_cast<long long>(rows + n_threads - 1) /
+                        static_cast<long long>(n_threads);
+      long long r0 = static_cast<long long>(tid) * chunk;
+      long long r1 = std::min(r0 + chunk, static_cast<long long>(rows));
+      if (r0 < r1) {
+        oxidize::kernels::gemv_q4k_range(
+            W_local + static_cast<size_t>(r0) * row_bytes, blocks_per_row,
+            q8k.data(), y + static_cast<size_t>(r0),
+            static_cast<size_t>(r1 - r0));
+      }
+    }
+    return;
+  }
+  gemv_quantized(y, quant, W, rows, cols, x);
 }
 
 void gemm_quantized(float* outputs, QuantType quant, const uint8_t* W,
@@ -779,6 +829,52 @@ void gemm_quantized(float* outputs, QuantType quant, const uint8_t* W,
       }
     }
   }
+}
+
+void gemm_quantized(float* outputs, QuantType quant, const uint8_t* W,
+                    const uint8_t* W_replica, size_t rows, size_t cols,
+                    const float* inputs, size_t batch) {
+  if (!W_replica || !numa_replication_enabled() || batch == 1) {
+    gemm_quantized(outputs, quant, W, rows, cols, inputs, batch);
+    return;
+  }
+  // Replicated batched path only for Q4_K; other formats fall back.
+  if (is_q4_k(quant) && cols % QK_K == 0) {
+    const size_t blocks_per_row = cols / QK_K;
+    const size_t rb = blocks_per_row * BLOCK_Q4_K_SIZE;
+#pragma omp parallel
+    {
+      int tid = 0;
+      int n_threads = 1;
+#ifdef _OPENMP
+      tid = omp_get_thread_num();
+      n_threads = omp_get_num_threads();
+#endif
+      int node = current_thread_numa_node();
+      const uint8_t* W_local = (node == 1) ? W_replica : W;
+      float scratch[QK_K];
+      long long chunk = static_cast<long long>(rows + n_threads - 1) /
+                        static_cast<long long>(n_threads);
+      long long r0 = static_cast<long long>(tid) * chunk;
+      long long r1 = std::min(r0 + chunk, static_cast<long long>(rows));
+      for (long long r = r0; r < r1; ++r) {
+        const uint8_t* row = W_local + static_cast<size_t>(r) * rb;
+        for (size_t b = 0; b < batch; ++b) {
+          outputs[b * rows + static_cast<size_t>(r)] = 0.0f;
+        }
+        for (size_t bi = 0; bi < blocks_per_row; ++bi) {
+          decode_q4_k_block(row + bi * BLOCK_Q4_K_SIZE, scratch);
+          const size_t in_off = bi * QK_K;
+          for (size_t b = 0; b < batch; ++b) {
+            outputs[b * rows + static_cast<size_t>(r)] +=
+                dot_f32(scratch, inputs + b * cols + in_off, QK_K);
+          }
+        }
+      }
+    }
+    return;
+  }
+  gemm_quantized(outputs, quant, W, rows, cols, inputs, batch);
 }
 
 void attention_decode(float* out, const float* q, const float* k_cache,

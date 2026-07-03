@@ -78,4 +78,17 @@ NumaConfig parse_numa_arg(const std::string& s);
 int init_numa(const NumaConfig& cfg,
               const std::vector<NumaNode>& nodes);
 
+/// Return the NUMA node id pinned to the calling OpenMP thread.  If no
+/// replication binding was configured (or OpenMP is unavailable) this
+/// returns -1.  Used by replicated gemv to pick the local weight copy.
+int current_thread_numa_node();
+
+/// True when init_numa configured replicate mode (weights live on both
+/// sockets and threads are split across them).
+bool numa_replication_enabled();
+
+/// Bind an already-allocated buffer to a specific NUMA node using mbind.
+/// Pages are faulted in on that node.  Returns false if the syscall fails.
+bool bind_memory_to_node(void* ptr, size_t len, int node);
+
 }  // namespace oxidize

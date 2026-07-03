@@ -181,6 +181,12 @@ void quantize_q8_k_into(const float* vector, size_t n_blocks, uint8_t* out) {
 
 float q4k_q8k_row_dot(const uint8_t* row, size_t blocks_per_row,
                       const uint8_t* q8k) {
+  if (avx512vnni_available()) {
+    return q4k_q8k_row_dot_avx512vnni(row, blocks_per_row, q8k);
+  }
+  if (avx512_available()) {
+    return q4k_q8k_row_dot_avx512(row, blocks_per_row, q8k);
+  }
   float acc = 0.0f;
   for (size_t bi = 0; bi < blocks_per_row; ++bi) {
     const uint8_t* w = row + bi * BLOCK_Q4_K_SIZE;
@@ -222,6 +228,14 @@ float q4k_q8k_row_dot(const uint8_t* row, size_t blocks_per_row,
 
 void gemv_q4k_range(const uint8_t* rows, size_t blocks_per_row,
                     const uint8_t* q8k, float* out, size_t n_rows) {
+  if (avx512vnni_available()) {
+    gemv_q4k_range_avx512vnni(rows, blocks_per_row, q8k, out, n_rows);
+    return;
+  }
+  if (avx512_available()) {
+    gemv_q4k_range_avx512(rows, blocks_per_row, q8k, out, n_rows);
+    return;
+  }
   const size_t row_bytes = blocks_per_row * BLOCK_Q4_K_SIZE;
 #pragma omp parallel for schedule(static)
   for (long long r = 0; r < static_cast<long long>(n_rows); ++r) {

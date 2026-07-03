@@ -47,6 +47,7 @@ static void dbg_topk(const char* label, const float* v, size_t n, size_t k = 5) 
 }
 
 #include "oxidize/tensor.hpp"
+#include "oxidize/numa_util.hpp"
 
 #ifdef OXIDIZE_GPU
 #include "oxidize/cuda_backend.hpp"
@@ -126,7 +127,11 @@ size_t effective_rope_dim(const InferenceConfig& cfg) {
 void gemv_weight(const LlamaWeight& w, size_t rows, size_t cols, const float* x,
                  float* y) {
   if (w.quantized) {
-    gemv_quantized(y, w.quant, w.qbytes(), rows, cols, x);
+    if (!w.replica.empty() && numa_replication_enabled()) {
+      gemv_quantized(y, w.quant, w.qbytes(0), w.qbytes(1), rows, cols, x);
+    } else {
+      gemv_quantized(y, w.quant, w.qbytes(), rows, cols, x);
+    }
   } else {
     matvec(y, w.f32.data(), x, rows, cols);
   }
@@ -140,7 +145,12 @@ void gemm_weight(const LlamaWeight& w, size_t rows, size_t cols,
     return;
   }
   if (w.quantized) {
-    gemm_quantized(outputs, w.quant, w.qbytes(), rows, cols, inputs, batch);
+    if (!w.replica.empty() && numa_replication_enabled()) {
+      gemm_quantized(outputs, w.quant, w.qbytes(0), w.qbytes(1), rows, cols,
+                     inputs, batch);
+    } else {
+      gemm_quantized(outputs, w.quant, w.qbytes(), rows, cols, inputs, batch);
+    }
   } else {
     for (size_t b = 0; b < batch; ++b) {
       matvec(outputs + b * rows, w.f32.data(), inputs + b * cols, rows, cols);
@@ -323,7 +333,8 @@ LlamaWeight LlamaModel::load_weight(const GgufModel& g, const std::string& name,
   if (can_q8) {
     std::vector<float> tmp(count, 0.0f);
     dequantize_row(tv.quant, tv.data, tmp.data(), count);
-    w.owned.resize(quantized_size(QuantType::Q8_0, count));
+    w.qbytes_size = quantized_size(QuantType::Q8_0, count);
+    w.owned.resize(w.qbytes_size);
     quantize_row_q8_0(tmp.data(), w.owned.data(), count);
     w.quantized = true;
     w.quant = QuantType::Q8_0;
@@ -339,6 +350,7 @@ LlamaWeight LlamaModel::load_weight(const GgufModel& g, const std::string& name,
     w.quantized = true;
     w.quant = tv.quant;
     w.data = tv.data;
+    w.qbytes_size = quantized_size(tv.quant, count);
   } else {
     w.quantized = false;
     w.quant = QuantType::F32;
@@ -346,6 +358,42 @@ LlamaWeight LlamaModel::load_weight(const GgufModel& g, const std::string& name,
     dequantize_row(tv.quant, tv.data, w.f32.data(), count);
   }
   return w;
+}
+
+static void replicate_one_weight(LlamaWeight& w) {
+  if (!w.quantized) return;
+  const uint8_t* src = w.qbytes();
+  if (!src || w.qbytes_size == 0) return;
+  w.replica.resize(w.qbytes_size);
+  std::memcpy(w.replica.data(), src, w.qbytes_size);
+  if (!bind_memory_to_node(w.replica.data(), w.qbytes_size, 1)) {
+    std::fprintf(stderr,
+                 "oxidize: NUMA replicate warning: mbind(node=1) failed for "
+                 "%zu bytes (errno=%d)\n",
+                 w.qbytes_size, errno);
+  }
+}
+
+void LlamaModel::replicate_weights_to_node1() {
+  size_t total_bytes = 0;
+  auto rep = [&](LlamaWeight& w) {
+    replicate_one_weight(w);
+    total_bytes += w.replica.size();
+  };
+  rep(tok_embeddings_);
+  rep(output_weight_);
+  for (auto& layer : layers_) {
+    rep(layer.attn_q);
+    rep(layer.attn_k);
+    rep(layer.attn_v);
+    rep(layer.attn_output);
+    rep(layer.ffn_gate);
+    rep(layer.ffn_up);
+    rep(layer.ffn_down);
+  }
+  std::fprintf(stderr,
+               "oxidize: NUMA replicate copied %.1f GB to node 1\n",
+               total_bytes / 1e9);
 }
 
 LlamaModel::LlamaModel(GgufModel gguf, QuantType quantize_to,
@@ -511,6 +559,13 @@ LlamaModel::LlamaModel(GgufModel gguf, QuantType quantize_to,
   kv_values_.assign(kv_elems, 0.0f);
 
   x_.assign(h, 0.0f);
+
+  // When the user requested NUMA replication, create a local copy of every
+  // quantized weight tensor on node 1 so threads on the second socket can
+  // read from local memory instead of crossing the QPI/UPI link.
+  if (numa_replication_enabled()) {
+    replicate_weights_to_node1();
+  }
 
   // Async layer-ahead prefetcher: overlap SSD reads with compute.
   if (prefetch_layers_ > 0 && !gguf_.layer_ranges().empty()) {
@@ -1109,15 +1164,15 @@ Logits LlamaModel::forward_batched(const std::vector<Token>& tokens,
       apply_rope(q, head_dim, n_heads, pos, rope_theta, rope_dim);
       apply_rope(k, head_dim, kv_heads, pos, rope_theta, rope_dim);
 
-      size_t phys = pos % cfg.context_size;
-      size_t base = (l * cfg.context_size + phys) * kv_token_size_;
+      size_t phys = pos % kv_context_;
+      size_t base = (l * kv_context_ + phys) * kv_token_size_;
       for (size_t d = 0; d < kv_len; ++d) {
         kv_keys_[base + d] = k[d];
         kv_values_[base + d] = v[d];
       }
 
       size_t seq_len = pos + 1;
-      size_t layer_start = (l * cfg.context_size) * kv_token_size_;
+      size_t layer_start = (l * kv_context_) * kv_token_size_;
       size_t eff_seq_len = seq_len;
       const float* key_prefix = kv_keys_.data() + layer_start;
       const float* val_prefix = kv_values_.data() + layer_start;

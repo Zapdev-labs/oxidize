@@ -47,12 +47,22 @@ struct LlamaWeight {
   QuantType quant = QuantType::F32;
   const uint8_t* data = nullptr;   // valid when quantized + mmap-backed
   std::vector<uint8_t> owned;      // valid when quantized + on-the-fly quantized
+  std::vector<uint8_t> replica;    // optional NUMA-local copy on the second node
   std::vector<float> f32;          // valid when !quantized
   size_t rows = 0;                 // output features
   size_t cols = 0;                 // input features
+  size_t qbytes_size = 0;          // byte length of quantized data (owned or mmap)
 
-  // Quantized block bytes (owned takes precedence over the borrowed mmap ptr).
-  const uint8_t* qbytes() const { return owned.empty() ? data : owned.data(); }
+  // Quantized block bytes.  `owned` (node 0 primary copy) takes precedence over
+  // the borrowed mmap ptr.  When `node == 1` and a replica exists, return it so
+  // threads on the second socket use local memory.
+  const uint8_t* qbytes(int node = -1) const {
+    if (quantized) {
+      if (!replica.empty() && node == 1) return replica.data();
+      return owned.empty() ? data : owned.data();
+    }
+    return nullptr;
+  }
   bool empty() const {
     return quantized ? (data == nullptr && owned.empty()) : f32.empty();
   }
@@ -201,6 +211,11 @@ class LlamaModel : public Model {
                           bool keep_quantized, bool allow_quant = true,
                           bool force_keep_quantized = false);
   std::vector<float> load_vector(const GgufModel& g, const std::string& name);
+
+  // Allocate a NUMA-local replica of every quantized weight tensor on node 1.
+  // Must be called after load but before the first forward, while the main
+  // thread's memory policy still points to node 0 for the primary copies.
+  void replicate_weights_to_node1();
 
   GgufModel gguf_;
   InferenceConfig config_;

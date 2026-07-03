@@ -42,6 +42,18 @@ float q4k_q8k_row_dot(const uint8_t* row, size_t blocks_per_row,
 void gemv_q4k_range(const uint8_t* rows, size_t blocks_per_row,
                     const uint8_t* q8k, float* out, size_t n_rows);
 
+// AVX-512 dispatch targets (compiled with target attributes; safe to call
+// only after the corresponding ISA check above).
+float q4k_q8k_row_dot_avx512(const uint8_t* row, size_t blocks_per_row,
+                             const uint8_t* q8k);
+float q4k_q8k_row_dot_avx512vnni(const uint8_t* row, size_t blocks_per_row,
+                                 const uint8_t* q8k);
+void gemv_q4k_range_avx512(const uint8_t* rows, size_t blocks_per_row,
+                           const uint8_t* q8k, float* out, size_t n_rows);
+void gemv_q4k_range_avx512vnni(const uint8_t* rows, size_t blocks_per_row,
+                               const uint8_t* q8k, float* out,
+                               size_t n_rows);
+
 // --- Pruning (oxidize-kernels/src/prune.rs) -------------------------------
 // Per-output-row masks; 1 = keep, 0 = prune. Row-major weights[rows*cols].
 std::vector<uint8_t> magnitude_mask(const float* weights, size_t rows,
