@@ -28,6 +28,27 @@ static void test_small_dense_dual_numa() {
   assert(!plan.mmap_hugepages);
 }
 
+static void test_large_dense_dual_numa_interleave() {
+  oxidize::HardwareInventory inv;
+  inv.physical_cores = 48;
+  inv.logical_cores = 96;
+  inv.numa_nodes = 2;
+  inv.total_ram_bytes = 376ULL << 30;
+
+  oxidize::ModelFingerprint model;
+  model.file_size_bytes = 18ULL << 30;  // ~18 GiB Qwen 32B Q4_K_M
+
+  auto plan = oxidize::plan_cpu(inv, model);
+  require(plan.numa_mode == "interleave",
+          "large dense dual-socket model should use interleave");
+  require(plan.threads == 96,
+          "large dense dual-socket model should use all logical cores");
+  require(plan.mmap_policy == "prefetch",
+          "large dense model should still use prefetch mmap policy");
+  require(plan.prefetch_layers == 0,
+          "in-RAM model should not need async layer prefetch");
+}
+
 static void test_huge_model_interleave() {
   oxidize::HardwareInventory inv;
   inv.physical_cores = 48;
@@ -111,6 +132,7 @@ static void test_json_nonempty() {
 
 int main() {
   test_small_dense_dual_numa();
+  test_large_dense_dual_numa_interleave();
   test_huge_model_interleave();
   test_exceeds_ram_threshold();
   test_way_over_ram_prefetch_depth();

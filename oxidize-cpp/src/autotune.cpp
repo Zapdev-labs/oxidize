@@ -123,14 +123,28 @@ TuningPlan plan_cpu(const HardwareInventory& inv, const ModelFingerprint& model)
       plan.rationale.push_back(buf);
     }
   } else if (inv.numa_nodes >= 2) {
-    plan.numa_mode = "single";
-    plan.mmap_policy = "prefetch";
-    plan.threads = inv.logical_cores / inv.numa_nodes;
-    if (plan.threads < 1) plan.threads = inv.physical_cores / inv.numa_nodes;
-    if (plan.threads < 1) plan.threads = inv.physical_cores;
-    plan.rationale.push_back(
-        "dense model fits single NUMA node → --numa single, "
-        "threads=logical cores on node 0");
+    // Dense dual-socket models that are large enough to be memory-bandwidth
+    // bound run faster when weights are interleaved across both sockets and
+    // all logical cores are used. Tiny models stay single-node to avoid
+    // cross-node overhead.
+    constexpr uint64_t k4GiB = 4ULL << 30;
+    if (size > k4GiB) {
+      plan.numa_mode = "interleave";
+      plan.mmap_policy = "prefetch";
+      plan.threads = inv.logical_cores;
+      plan.rationale.push_back(
+          "dense dual-socket model benefits from aggregated memory bandwidth "
+          "→ --numa interleave, threads=all logical cores");
+    } else {
+      plan.numa_mode = "single";
+      plan.mmap_policy = "prefetch";
+      plan.threads = inv.logical_cores / inv.numa_nodes;
+      if (plan.threads < 1) plan.threads = inv.physical_cores / inv.numa_nodes;
+      if (plan.threads < 1) plan.threads = inv.physical_cores;
+      plan.rationale.push_back(
+          "small dense model fits single NUMA node → --numa single, "
+          "threads=logical cores on node 0");
+    }
   } else {
     plan.numa_mode = "single";
     plan.mmap_policy = "prefetch";

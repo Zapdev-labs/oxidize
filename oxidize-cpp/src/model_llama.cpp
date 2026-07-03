@@ -1109,15 +1109,15 @@ Logits LlamaModel::forward_batched(const std::vector<Token>& tokens,
       apply_rope(q, head_dim, n_heads, pos, rope_theta, rope_dim);
       apply_rope(k, head_dim, kv_heads, pos, rope_theta, rope_dim);
 
-      size_t phys = pos % cfg.context_size;
-      size_t base = (l * cfg.context_size + phys) * kv_token_size_;
+      size_t phys = pos % kv_context_;
+      size_t base = (l * kv_context_ + phys) * kv_token_size_;
       for (size_t d = 0; d < kv_len; ++d) {
         kv_keys_[base + d] = k[d];
         kv_values_[base + d] = v[d];
       }
 
       size_t seq_len = pos + 1;
-      size_t layer_start = (l * cfg.context_size) * kv_token_size_;
+      size_t layer_start = (l * kv_context_) * kv_token_size_;
       size_t eff_seq_len = seq_len;
       const float* key_prefix = kv_keys_.data() + layer_start;
       const float* val_prefix = kv_values_.data() + layer_start;
