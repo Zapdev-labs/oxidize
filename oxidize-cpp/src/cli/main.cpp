@@ -277,9 +277,15 @@ int main(int argc, char** argv) {
   const bool use_auto = args.auto_tune && !args.no_auto;
   auto nodes = oxidize::discover_numa_nodes();
   oxidize::TuningPlan tune_plan;
+  std::string active_numa_arg = args.numa_mode.empty() ? "single" : args.numa_mode;
   if (use_auto || args.print_plan) {
     auto inv = oxidize::detect_hardware(static_cast<int>(nodes.size()));
     auto model_fp = oxidize::fingerprint_model_file(args.model);
+    if (!model_fp.exists || model_fp.file_size_bytes == 0) {
+      std::fprintf(stderr, "error: cannot stat non-empty model file: %s\n",
+                   args.model.c_str());
+      return 2;
+    }
     tune_plan = oxidize::plan_cpu(inv, model_fp);
     if (args.print_plan) {
       if (args.json) {
@@ -291,6 +297,7 @@ int main(int argc, char** argv) {
     }
     if (!args.numa_explicit) {
       args.numa_mode = tune_plan.numa_mode;
+      active_numa_arg = args.numa_mode.empty() ? "single" : args.numa_mode;
     }
     if (!args.threads_explicit) {
       args.threads = tune_plan.threads;
@@ -309,10 +316,10 @@ int main(int argc, char** argv) {
   // needing the external wrapper.
   // Respect OMP_NUM_THREADS if set externally (override our auto-choice).
   {
-    std::string numa_arg = args.numa_mode.empty() ? "single" : args.numa_mode;
+    active_numa_arg = args.numa_mode.empty() ? "single" : args.numa_mode;
     oxidize::NumaConfig ncfg;
     try {
-      ncfg = oxidize::parse_numa_arg(numa_arg);
+      ncfg = oxidize::parse_numa_arg(active_numa_arg);
     } catch (const std::invalid_argument& e) {
       std::fprintf(stderr, "error: %s\n", e.what());
       return 2;
@@ -326,7 +333,7 @@ int main(int argc, char** argv) {
     if (!nodes.empty()) {
       std::fprintf(stderr,
           "oxidize: NUMA mode=%s node=%d threads=%d (numa nodes discovered: %zu)\n",
-          numa_arg.c_str(), ncfg.node, n_threads, nodes.size());
+          active_numa_arg.c_str(), ncfg.node, n_threads, nodes.size());
     }
   }
 
@@ -348,8 +355,17 @@ int main(int argc, char** argv) {
       return 2;
     }
     auto t_load0 = std::chrono::steady_clock::now();
+    auto mmap_advice = oxidize::gguf_mmap_advice_from_numa_mode(active_numa_arg);
+    if (use_auto && !args.numa_explicit) {
+      try {
+        mmap_advice = oxidize::gguf_mmap_advice_from_name(tune_plan.mmap_advice);
+      } catch (const std::invalid_argument& e) {
+        std::fprintf(stderr, "error: %s\n", e.what());
+        return 2;
+      }
+    }
     std::unique_ptr<Model> model =
-        oxidize::load_llama_gguf(args.model, args.cuda, qto);
+        oxidize::load_llama_gguf(args.model, args.cuda, qto, mmap_advice);
     auto t_load1 = std::chrono::steady_clock::now();
 
     // Report the device actually in use: --cuda falls back to CPU when no

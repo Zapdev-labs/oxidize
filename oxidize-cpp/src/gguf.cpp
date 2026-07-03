@@ -11,6 +11,7 @@
 #include "oxidize/gguf.hpp"
 
 #include <algorithm>
+#include <cerrno>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
@@ -402,7 +403,55 @@ std::string map_tensor_name(const std::string& architecture, const std::string& 
   return mapped.value_or(name);
 }
 
+void warn_madvise_failed(const char* advice_name) {
+  std::fprintf(stderr, "warning: madvise(%s) failed: %s\n", advice_name,
+               std::strerror(errno));
+}
+
+void apply_one_mmap_advice(void* map, size_t size, int advice,
+                           const char* advice_name) {
+  if (::madvise(map, size, advice) != 0) {
+    warn_madvise_failed(advice_name);
+  }
+}
+
+void apply_mmap_advice(void* map, size_t size, GgufMmapAdvice advice) {
+  if (advice == GgufMmapAdvice::Random) {
+    apply_one_mmap_advice(map, size, MADV_RANDOM, "MADV_RANDOM");
+    return;
+  }
+  apply_one_mmap_advice(map, size, MADV_SEQUENTIAL, "MADV_SEQUENTIAL");
+  apply_one_mmap_advice(map, size, MADV_WILLNEED, "MADV_WILLNEED");
+}
+
 }  // namespace
+
+const char* gguf_mmap_advice_name(GgufMmapAdvice advice) {
+  switch (advice) {
+    case GgufMmapAdvice::SequentialPrefetch:
+      return "sequential_prefetch";
+    case GgufMmapAdvice::Random:
+      return "random";
+  }
+  return "sequential_prefetch";
+}
+
+GgufMmapAdvice gguf_mmap_advice_from_numa_mode(const std::string& numa_mode) {
+  if (numa_mode == "interleave" || numa_mode == "all" || numa_mode == "replicate") {
+    return GgufMmapAdvice::Random;
+  }
+  return GgufMmapAdvice::SequentialPrefetch;
+}
+
+GgufMmapAdvice gguf_mmap_advice_from_name(const std::string& name) {
+  if (name == "sequential_prefetch") {
+    return GgufMmapAdvice::SequentialPrefetch;
+  }
+  if (name == "random") {
+    return GgufMmapAdvice::Random;
+  }
+  throw std::invalid_argument("unknown GGUF mmap advice '" + name + "'");
+}
 
 // ── GgufFile::architecture ───────────────────────────────────────────────────
 std::string GgufFile::architecture() const {
@@ -528,7 +577,7 @@ GgufFile GgufModel::parse(const uint8_t* bytes, size_t len) {
 }
 
 // ── GgufModel::load (POSIX mmap) ─────────────────────────────────────────────
-GgufModel GgufModel::load(const std::string& path) {
+GgufModel GgufModel::load(const std::string& path, GgufMmapAdvice advice) {
   int fd = ::open(path.c_str(), O_RDONLY);
   if (fd < 0) {
     throw std::runtime_error("gguf: io error: cannot open " + path);
@@ -548,9 +597,7 @@ GgufModel GgufModel::load(const std::string& path) {
   if (map == MAP_FAILED) {
     throw std::runtime_error("gguf: io error: mmap failed for " + path);
   }
-  // Match load_mapped_gguf advice: sequential read, prefetch whole file.
-  ::madvise(map, size, MADV_SEQUENTIAL);
-  ::madvise(map, size, MADV_WILLNEED);
+  apply_mmap_advice(map, size, advice);
 
   GgufModel model;
   model.map_ = map;
@@ -574,7 +621,7 @@ GgufModel GgufModel::load(const std::string& path) {
   uint32_t split_count = 0;
   if (auto sc = model.get_u32("split.count")) split_count = *sc;
   if (split_count > 1) {
-    return load_split(path, std::move(model), split_count);
+    return load_split(path, std::move(model), split_count, advice);
   }
   return model;
 }
@@ -582,7 +629,8 @@ GgufModel GgufModel::load(const std::string& path) {
 // gguf.rs has no split support; this mirrors llama.cpp's llama_split_path
 // ("%s-%05d-of-%05d.gguf") + gguf_meta merge for multi-file models.
 GgufModel GgufModel::load_split(const std::string& first_path,
-                               GgufModel first_model, uint32_t split_count) {
+                               GgufModel first_model, uint32_t split_count,
+                               GgufMmapAdvice advice) {
   // Derive the split prefix by stripping the "-NNNNN-of-NNNNN.gguf" suffix from
   // the supplied first-shard path (llama.cpp llama_split_prefix).
   std::string prefix = first_path;
@@ -628,7 +676,7 @@ GgufModel GgufModel::load_split(const std::string& first_path,
     if (smap == MAP_FAILED) {
       throw std::runtime_error("gguf: io error: mmap failed for shard " + shard_path);
     }
-    ::madvise(smap, ssize, MADV_RANDOM);
+    apply_mmap_advice(smap, ssize, advice);
 
     const uint8_t* sbase = static_cast<const uint8_t*>(smap);
     GgufFile shard_hdr;

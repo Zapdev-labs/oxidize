@@ -21,6 +21,15 @@
 
 namespace oxidize {
 
+enum class GgufMmapAdvice {
+  SequentialPrefetch,
+  Random,
+};
+
+const char* gguf_mmap_advice_name(GgufMmapAdvice advice);
+GgufMmapAdvice gguf_mmap_advice_from_name(const std::string& name);
+GgufMmapAdvice gguf_mmap_advice_from_numa_mode(const std::string& numa_mode);
+
 // Mirror of gguf.rs::GgufMetadataType (repr(u32) discriminants).
 enum class GgufMetadataType : uint32_t {
   Uint8 = 0,
@@ -118,7 +127,9 @@ class GgufModel {
 
   // mmap a .gguf file (read-only, MAP_PRIVATE) and parse its header.
   // Throws std::runtime_error on open/mmap/parse failure.
-  static GgufModel load(const std::string& path);
+  static GgufModel load(
+      const std::string& path,
+      GgufMmapAdvice advice = GgufMmapAdvice::SequentialPrefetch);
 
   GgufModel(const GgufModel&) = delete;
   GgufModel& operator=(const GgufModel&) = delete;
@@ -159,7 +170,8 @@ class GgufModel {
   // Load a split GGUF: open shard 0 at `path`, read split.count, then mmap and
   // parse every sibling shard and merge their tensor tables into one model.
   static GgufModel load_split(const std::string& first_path,
-                              GgufModel first_model, uint32_t split_count);
+                              GgufModel first_model, uint32_t split_count,
+                              GgufMmapAdvice advice);
 
   void* map_ = nullptr;       // mmap base of shard 0 (for munmap); also shards_[0]
   const uint8_t* base_ = nullptr;  // shard 0 base

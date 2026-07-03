@@ -16,12 +16,14 @@ struct HardwareInventory {
 
 struct ModelFingerprint {
   uint64_t file_size_bytes = 0;
+  bool exists = false;
 };
 
 struct TuningPlan {
   std::string numa_mode;  // "single" | "interleave" | "replicate"
   int threads = 0;
   bool mmap_hugepages = false;
+  std::string mmap_advice = "sequential_prefetch";
   std::vector<std::string> rationale;
 };
 

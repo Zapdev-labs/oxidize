@@ -230,6 +230,8 @@ class LlamaModel : public Model {
 // Throws std::runtime_error on parse failure or unsupported architecture.
 std::unique_ptr<Model> load_llama_gguf(const std::string& path,
                                        bool want_cuda = false,
-                                       QuantType quantize_to = QuantType::F32);
+                                       QuantType quantize_to = QuantType::F32,
+                                       GgufMmapAdvice mmap_advice =
+                                           GgufMmapAdvice::SequentialPrefetch);
 
 }  // namespace oxidize
