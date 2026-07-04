@@ -1,0 +1,53 @@
+#version 450
+// Single-workgroup softmax in place: data[i] = softmax(data[i] * scale).
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) buffer Data { float data[]; };
+
+layout(push_constant) uniform Push {
+  uint n;
+  float scale;
+} pc;
+
+shared float sh[256];
+
+void main() {
+  const uint tid = gl_LocalInvocationID.x;
+
+  float m = -3.4e38;
+  for (uint i = tid; i < pc.n; i += 256u) {
+    m = max(m, data[i] * pc.scale);
+  }
+  sh[tid] = m;
+  barrier();
+  for (uint s = 128u; s > 0u; s >>= 1u) {
+    if (tid < s) {
+      sh[tid] = max(sh[tid], sh[tid + s]);
+    }
+    barrier();
+  }
+  const float max_v = sh[0];
+  barrier();
+
+  float sum = 0.0;
+  for (uint i = tid; i < pc.n; i += 256u) {
+    const float e = exp(data[i] * pc.scale - max_v);
+    data[i] = e;
+    sum += e;
+  }
+  sh[tid] = sum;
+  barrier();
+  for (uint s = 128u; s > 0u; s >>= 1u) {
+    if (tid < s) {
+      sh[tid] += sh[tid + s];
+    }
+    barrier();
+  }
+  const float inv = 1.0 / sh[0];
+  barrier();
+
+  for (uint i = tid; i < pc.n; i += 256u) {
+    data[i] *= inv;
+  }
+}

@@ -1,0 +1,59 @@
+#version 450
+// One thread per token: attention logit against the polar-quantized cold keys.
+// rho = exp(min + step*code), phase reconstructed relative to the query angle;
+// GPU native exp/cos make the per-pair math trivial.
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) readonly buffer KeyCodes { uint key_codes[]; };
+layout(std430, binding = 1) readonly buffer Active { uint active_bits[]; };
+layout(std430, binding = 2) readonly buffer Mu { float mu_phi[]; };
+layout(std430, binding = 3) readonly buffer MinLog { float log_rho_min[]; };
+layout(std430, binding = 4) readonly buffer StepLog { float log_rho_step[]; };
+// freq | q_mag | q_phi, pc.pairs floats each.
+layout(std430, binding = 5) readonly buffer Query { float qdata[]; };
+layout(std430, binding = 6) readonly buffer Positions { uint positions[]; };
+layout(std430, binding = 7) readonly buffer PageOf { uint page_of[]; };
+layout(std430, binding = 8) writeonly buffer Logits { float logits_out[]; };
+
+layout(push_constant) uniform Push {
+  uint n_tokens;
+  uint pairs;
+  uint query_position;
+} pc;
+
+const float PHI_STEP = 0.39269908169872414;  // pi/8
+
+uint code_byte(uint idx) {
+  return (key_codes[idx >> 2] >> ((idx & 3u) * 8u)) & 0xFFu;
+}
+
+bool is_active(uint idx) {
+  return ((active_bits[idx >> 5] >> (idx & 31u)) & 1u) != 0u;
+}
+
+void main() {
+  const uint t = gl_GlobalInvocationID.x;
+  if (t >= pc.n_tokens) {
+    return;
+  }
+  const uint page = page_of[t];
+  const uint pbase = page * pc.pairs;
+  const float rel = float(int(positions[t]) - int(pc.query_position));
+  const uint cbase = t * pc.pairs;
+  float logit = 0.0;
+  for (uint p = 0; p < pc.pairs; ++p) {
+    const uint idx = cbase + p;
+    if (!is_active(idx)) {
+      continue;
+    }
+    const uint code = code_byte(idx);
+    const float rho =
+        exp(log_rho_min[pbase + p] + log_rho_step[pbase + p] * float(code >> 4));
+    const float beta = (float(code & 15u) - 8.0) * PHI_STEP;
+    const float angle = qdata[2u * pc.pairs + p] + qdata[p] * rel -
+                        mu_phi[pbase + p] - beta;
+    logit += qdata[pc.pairs + p] * rho * cos(angle);
+  }
+  logits_out[t] = logit;
+}
