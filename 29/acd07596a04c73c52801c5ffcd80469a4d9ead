@@ -1,0 +1,19 @@
+oxidize-kernels/benches/oxk_token_bench.rs
+  s_cd586a2897ef61::t_069d5d6c042504 40-79,88-92,126-129,166-167,203-206,214-216
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "29acd07596a04c73c52801c5ffcd80469a4d9ead",
+  "prompts": {},
+  "sessions": {
+    "s_cd586a2897ef61": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ee77d-c9cf-75f0-83e1-340f811bcb1d",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

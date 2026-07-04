@@ -1,0 +1,20 @@
+oxidize-core/benches/inference_bench.rs
+  s_1330dccb364bc7::t_6760a95b90496c 111,132
+  s_1330dccb364bc7::t_8086de08c060a9 85
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.3",
+  "base_commit_sha": "489ed3ebe6af3f22f5c92ba1e601166897f785db",
+  "prompts": {},
+  "sessions": {
+    "s_1330dccb364bc7": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_1591f6c3cffeJjEJP6ngXiqODO",
+        "model": "k2p6"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

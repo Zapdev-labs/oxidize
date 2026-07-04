@@ -1,0 +1,63 @@
+oxidize-cpp/.gitignore
+  s_aabdca2f3f5957::t_e66c7bde9ff97f 5-6
+oxidize-cpp/CMakeLists.txt
+  s_aabdca2f3f5957::t_63d26914726891 1,9-13,34-37,39-40,42-87
+oxidize-cpp/include/oxidize/config.hpp
+  s_aabdca2f3f5957::t_f51541cf575d6e 87-93
+oxidize-cpp/include/oxidize/cuda_backend.hpp
+  s_aabdca2f3f5957::t_edda60bc910d49 2-4,14-15,17,173
+oxidize-cpp/include/oxidize/gpu_config.hpp
+  s_aabdca2f3f5957::t_162829e58443bb 1-12
+oxidize-cpp/include/oxidize/kernels.hpp
+  s_aabdca2f3f5957::t_9ae218d805b6bd 25,42-45
+oxidize-cpp/include/oxidize/model_llama.hpp
+  s_aabdca2f3f5957::t_3b01aa996a7b65 35,175,206-212
+oxidize-cpp/include/oxidize/numa_util.hpp
+  s_aabdca2f3f5957::t_76ea00e1190f11 46-49,52-66
+oxidize-cpp/include/oxidize/tensor.hpp
+  s_aabdca2f3f5957::t_8687a4dc714c16 49-55
+oxidize-cpp/include/oxidize/train_forward.hpp
+  s_aabdca2f3f5957::t_fa444d2257a0a2 98
+oxidize-cpp/include/oxidize/vision.hpp
+  s_aabdca2f3f5957::t_755bcec04658b5 1-65
+oxidize-cpp/src/cli/main.cpp
+  s_aabdca2f3f5957::t_7e39ee685365aa 44,76-77,89-90,102,154-155,195-196,294,296-297,313-317,324,331,334-336,338-340,444
+oxidize-cpp/src/cli/train_main.cpp
+  s_aabdca2f3f5957::t_dd2bf06fb4f755 64,79,248-269
+oxidize-cpp/src/cuda/backend.cu
+  s_aabdca2f3f5957::t_f68bb0841e1d0d 16,18,735
+oxidize-cpp/src/cuda/cuda_common.cuh
+  s_aabdca2f3f5957::t_5746f427edca8a 2-3,13,19,21-24,29-30,32,34-37,42-43
+oxidize-cpp/src/cuda/gemm.cu
+  s_aabdca2f3f5957::t_23fa0c9d15eb5b 21,24-26,103-104,204-220,268,301-315
+oxidize-cpp/src/cuda/gpu_common.cuh
+  s_aabdca2f3f5957::t_58a2ca9e88b78f 1-49
+oxidize-cpp/src/gguf.cpp
+  s_aabdca2f3f5957::t_be4af20ffec39d 953-969,971,1082-1091,1147-1151
+oxidize-cpp/src/kernels.cpp
+  s_aabdca2f3f5957::t_8efd08939b9829 12-31,204-252,302-393
+oxidize-cpp/src/model_llama.cpp
+  s_aabdca2f3f5957::t_7ee5cc387feae4 15-16,53,170,181,192,203,213,226,239,260-261,266,394-410,678-694,739,753,1042-1043,1045-1051,1138-1139,1146,1225,1299,1335,1360-1413
+oxidize-cpp/src/numa_util.cpp
+  s_aabdca2f3f5957::t_9244f329e3b45b 17,50,57-59,137-138,203-223,237-266
+oxidize-cpp/src/tensor_cpu.cpp
+  s_aabdca2f3f5957::t_6b8019ff61a744 19,26,534-565,622-635,663-673,687-699,777-792,842-859
+oxidize-cpp/src/vision.cpp
+  s_aabdca2f3f5957::t_ddc8eb1a822ad3 1-124
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.1",
+  "base_commit_sha": "617fd2e60c4758f1e8e5f9189291e077503e1b09",
+  "prompts": {},
+  "sessions": {
+    "s_aabdca2f3f5957": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "91839ce9-42cb-42a9-abf3-3b8053aa5537",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

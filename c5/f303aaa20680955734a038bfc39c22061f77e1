@@ -1,0 +1,41 @@
+AGENTS.md
+  s_b8318c3e58c101::t_2e2610d1f7f50f 136
+  s_b8318c3e58c101::t_a80b6b3bab20a0 124
+  s_931b77b2b7dc17::t_00ad6ce26de116 146
+  s_931b77b2b7dc17::t_66f07f50dcb244 138-139
+  s_931b77b2b7dc17::t_990814f8c12df2 126
+docs/superpowers/plans/2026-06-03-realtime-websocket.md
+  s_106ca8065cc634::t_6b07cebd4e50c1 16,22,37,40,55,60,74,78,238,439,615,618,777,855,935,1265,1368,1393,1412,1426,1430,1439
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "c5f303aaa20680955734a038bfc39c22061f77e1",
+  "prompts": {},
+  "sessions": {
+    "s_106ca8065cc634": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "99cf666e-3bf5-4da4-8285-dff148b2cd64",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_931b77b2b7dc17": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "86aef5f4-05aa-4a06-b810-f82bc096b7da",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_b8318c3e58c101": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "2d5c2388-ce2f-4425-b62c-9dac235dee77",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

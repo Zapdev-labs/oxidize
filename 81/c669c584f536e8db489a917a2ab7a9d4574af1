@@ -1,0 +1,25 @@
+oxidize-golang/core/conversion/conversion.go
+  s_b138499838f940::t_99e53ef932ce4a 90-94,97,99,101,103,115,118,120,122
+oxidize-python/oxidize_python/core/conversion/conversion.py
+  s_b138499838f940::t_8e1365f4b457ec 69-73,75-78,87,89-91
+oxidize-golang/core/conversion/conversion_test.go
+  s_b138499838f940::t_a98fa3b579585c 36-41
+oxidize-python/oxidize_python/core/conversion/test_conversion.py
+  s_b138499838f940::t_758da82708b455 1-36
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.3",
+  "base_commit_sha": "81c669c584f536e8db489a917a2ab7a9d4574af1",
+  "prompts": {},
+  "sessions": {
+    "s_b138499838f940": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d9fdb403-1cbc-4339-afa2-fcd8b1e5171d",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

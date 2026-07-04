@@ -1,0 +1,20 @@
+oxidize-train/src/main.rs
+  s_d696a9bcb3c378::t_c15a160afb29a8 272
+  s_d696a9bcb3c378::t_93e42cc96ac925 110,159,178
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "59ea7498a33010771364d1481b9fcfef6906fe7c",
+  "prompts": {},
+  "sessions": {
+    "s_d696a9bcb3c378": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "853d1fc4-7588-4e2c-8845-bd957bd215b6",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

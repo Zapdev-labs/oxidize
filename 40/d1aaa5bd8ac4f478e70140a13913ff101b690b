@@ -1,0 +1,20 @@
+docs/spec-gpu-k8s-mesh.md
+  s_ff1a0084ebdb02::t_33d7e735e7c138 1-83,85-106,108,110,112-119,121,123,125-132,134,136-138,140-146,148,150,153,156-157,160-177,179-192,195,197-220,222-279,283-450
+  s_ff1a0084ebdb02::t_7927735c818ddc 280-282
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.3",
+  "base_commit_sha": "40d1aaa5bd8ac4f478e70140a13913ff101b690b",
+  "prompts": {},
+  "sessions": {
+    "s_ff1a0084ebdb02": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ea3d6-beae-7392-a0b2-58ba10514bd6",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

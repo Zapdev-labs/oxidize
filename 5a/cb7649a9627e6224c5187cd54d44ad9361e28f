@@ -1,0 +1,19 @@
+.gitignore
+  s_7bffed45e88231::t_a3bfd58d9ead8b 25-27
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "5acb7649a9627e6224c5187cd54d44ad9361e28f",
+  "prompts": {},
+  "sessions": {
+    "s_7bffed45e88231": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c7aa2b04-33cf-4373-bb3d-6f15366c50da",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

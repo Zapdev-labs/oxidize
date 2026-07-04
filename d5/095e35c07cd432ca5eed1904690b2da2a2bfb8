@@ -1,0 +1,24 @@
+oxidize-finetuning/src/qlora.rs
+  s_d696a9bcb3c378::t_502dc0fc4367fd 193
+  s_d696a9bcb3c378::t_0d758bc05c2702 387
+  s_d696a9bcb3c378::t_48b4bd1494fe33 134
+  s_d696a9bcb3c378::t_e8075bc4a9e476 169,174-182,184
+  s_d696a9bcb3c378::t_dd9f73520fe87c 46
+  s_d696a9bcb3c378::t_eed2c0457b4738 379
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "d5095e35c07cd432ca5eed1904690b2da2a2bfb8",
+  "prompts": {},
+  "sessions": {
+    "s_d696a9bcb3c378": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "853d1fc4-7588-4e2c-8845-bd957bd215b6",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

@@ -1,0 +1,28 @@
+oxidize-core/src/compute/tensor/kernels/transposed.rs
+  s_3582b5342698b9::t_480f7f3455e666 367-368,374,382
+oxidize-core/src/model/mlx_inference.rs
+  s_3582b5342698b9::t_29db09e7185156 1520,1527,1538,1549,1560,1571,1582,1593,1745
+oxidize-cli/src/main/generation.rs
+  s_3582b5342698b9::t_30bdc07df22587 548
+oxidize-core/src/model/generation.rs
+  s_3582b5342698b9::t_e5ac1e2b50820a 1210
+oxidize-core/src/compute/tensor/kernels/q_kernels.rs
+  s_3582b5342698b9::t_22a2e45c560e8b 317-325,433-442
+  s_3582b5342698b9::t_2123f1f4258069 443
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "815d8f05495d12892509cc84009e154496cc54c3",
+  "prompts": {},
+  "sessions": {
+    "s_3582b5342698b9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f1219-02c1-7713-9f8b-d532e4c17a17",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

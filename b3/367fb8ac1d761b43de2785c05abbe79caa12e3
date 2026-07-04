@@ -1,0 +1,43 @@
+oxidize-core/src/backends/cuda/ffn_fusion_cuda_fixture.rs
+  s_1b37f3c1d1e7b7::t_699fcf221f4909 13-23,25,48,58,67-123
+  s_1b37f3c1d1e7b7::t_cbf3a89e187ef1 24,31-40,49-56,60,358-369
+  s_1b37f3c1d1e7b7::t_8b11dba180826b 2
+oxidize-core/src/backends/cuda/tests.rs
+  s_1b37f3c1d1e7b7::t_d4da2fd5e60794 22-31
+  s_1b37f3c1d1e7b7::t_110da324f0dc72 59,67,75-87,216,648
+  s_1b37f3c1d1e7b7::t_035fdbac8005ad 21,56,218,636-647
+  s_1b4fa8b8dd024d::t_8a2a7f29634264 211-213,219-221
+  s_1b37f3c1d1e7b7::t_9d46ef1f9100dd 58,60-61,66,68-74
+  s_1b4fa8b8dd024d::t_57cc7c8b98bd15 242-245
+  s_1b4fa8b8dd024d::t_a4f5e252c4c9c9 214-215
+  s_1b37f3c1d1e7b7::t_36b1ec88486176 57,62-65
+oxidize-core/src/backends/cuda/ffn_fusion_cuda_tests.rs
+  s_1b37f3c1d1e7b7::t_699fcf221f4909 3,67-70,81,113
+  s_1b37f3c1d1e7b7::t_4af095a8587ba6 71-78,80,82-90
+  s_1b37f3c1d1e7b7::t_0d237b1694b252 91
+  s_1b37f3c1d1e7b7::t_cbf3a89e187ef1 79,92-112,114
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "b3367fb8ac1d761b43de2785c05abbe79caa12e3",
+  "prompts": {},
+  "sessions": {
+    "s_1b37f3c1d1e7b7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ee600-1957-70f2-b3f9-e51f217a3ee9",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_1b4fa8b8dd024d": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "b5311b11-a9bb-47f1-88a6-444ce4accbe7",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

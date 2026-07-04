@@ -1,0 +1,33 @@
+oxidize-python/oxidize_python/core/backends/cuda/__init__.py
+  ai_agent 1-35
+oxidize-python/oxidize_python/core/flash_attention/__init__.py
+  ai_agent 1-17
+oxidize-python/oxidize_python/core/simd/simd.py
+  ai_agent 1-79
+oxidize-python/oxidize_python/core/flash_attention/flash_attention.py
+  ai_agent 1-210
+oxidize-python/oxidize_python/core/cpu_kernels/cpu_kernels.py
+  ai_agent 1-91
+oxidize-python/oxidize_python/core/backends/webgpu.py
+  ai_agent 1-14
+oxidize-python/oxidize_python/core/backends/mlx.py
+  ai_agent 1-14
+oxidize-python/oxidize_python/core/backends/metal.py
+  ai_agent 1-19
+oxidize-python/oxidize_python/core/backends/__init__.py
+  ai_agent 1-5
+oxidize-python/oxidize_python/core/backends/cpu.py
+  ai_agent 1-145
+oxidize-python/oxidize_python/core/backends/cuda/cuda.py
+  ai_agent 1-99
+oxidize-python/oxidize_python/core/backends/strix.py
+  ai_agent 1-14
+oxidize-python/oxidize_python/core/backends/vulkan.py
+  ai_agent 1-55
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "10ddf29ffba1352bacd7a7e6ca60122959c002a9",
+  "prompts": {}
+}

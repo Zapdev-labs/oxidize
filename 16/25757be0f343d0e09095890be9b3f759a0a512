@@ -1,0 +1,22 @@
+oxidize-core/kernels/gemv_f32.cu
+  s_1330dccb364bc7::t_8b314083f88692 170-175,178-182,184-205,208-212,214-239
+oxidize-core/src/backends/cuda.rs
+  s_1330dccb364bc7::t_66c0812a8a2c77 648-798
+  s_1330dccb364bc7::t_e3b3751ca6d597 181-184
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.3",
+  "base_commit_sha": "1625757be0f343d0e09095890be9b3f759a0a512",
+  "prompts": {},
+  "sessions": {
+    "s_1330dccb364bc7": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_1591f6c3cffeJjEJP6ngXiqODO",
+        "model": "k2p6"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

@@ -1,0 +1,32 @@
+oxidize-cpp/src/cuda/cuda_common.cuh
+  s_5b078de97b8925::t_8b0d20e140bbf0 123-128
+oxidize-cpp/include/oxidize/cuda_backend.hpp
+  s_5b078de97b8925::t_fbe59abc03124c 23
+  s_5b078de97b8925::t_15d18a49ddd2b5 98-150
+oxidize-cpp/src/cuda/resident.cu
+  s_5b078de97b8925::t_91f64e7abb8a9d 1-47
+oxidize-cpp/src/model_llama.cpp
+  s_5b078de97b8925::t_8fa91914e2005b 553-619,621-632
+oxidize-cpp/src/cuda/backend.cu
+  s_5b078de97b8925::t_bc7db8f54e1435 115-131,140-142,146-149
+  s_5b078de97b8925::t_4f05a10d6638d9 150,470-638
+oxidize-cpp/include/oxidize/model_llama.hpp
+  s_5b078de97b8925::t_24f53bdae61c97 35-37
+  s_5b078de97b8925::t_531ffb39636d1f 122-126
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "653c761dc99716a044e11bbeb8566846458a732b",
+  "prompts": {},
+  "sessions": {
+    "s_5b078de97b8925": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a2fd32be-d532-4929-8226-7967c93996a1",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

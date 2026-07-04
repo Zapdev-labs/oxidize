@@ -1,0 +1,19 @@
+oxidize-core/src/compute/tensor.rs
+  s_1330dccb364bc7::t_1dcf5a28fa36dd 4939-4944,4946
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.3",
+  "base_commit_sha": "d34eb1ed51f2184e0ec47502a3bd82a7732374d2",
+  "prompts": {},
+  "sessions": {
+    "s_1330dccb364bc7": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_1591f6c3cffeJjEJP6ngXiqODO",
+        "model": "k2p6"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

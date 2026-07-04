@@ -1,0 +1,53 @@
+oxidize-core/benches/gemv_bench.rs
+  s_e1faced19cd1f4::t_d4990d3f466938 57-74
+oxidize-core/build.rs
+  s_e1faced19cd1f4::t_aa1ebbe621dfea 49-55
+  s_e1faced19cd1f4::t_c091f0fe05e6f0 43,46
+oxidize-core/benches/layer_bench.rs
+  s_e1faced19cd1f4::t_baf080b65e21ee 51,55,59,71,88,91,110,113
+  s_e1faced19cd1f4::t_9734948c7b1802 130-153,167,169,171-181,194,199-200,204
+  s_e1faced19cd1f4::t_6bdd310ada9ad1 4-5
+oxidize-core/src/backends/cuda.rs
+  s_e1faced19cd1f4::t_776df55afdfaec 643-654
+  s_e1faced19cd1f4::t_ad15d4cc775f76 329,342-348
+  s_e1faced19cd1f4::t_b278535c38c031 981-982,984
+  s_e1faced19cd1f4::t_98811fb76cc71f 415
+  s_e1faced19cd1f4::t_b1790cffd64657 356-362,366-371
+  s_e1faced19cd1f4::t_92eabb7c6249e7 1099-1103
+  s_e1faced19cd1f4::t_93eb367de6c530 508-524
+  s_e1faced19cd1f4::t_51fd98358c9444 284-287
+  s_e1faced19cd1f4::t_645a6a9408718a 378-384
+oxidize-core/benches/inference_bench.rs
+  s_e1faced19cd1f4::t_2d9da1e2d7add7 19-46,48,61,63-73,75-78,86,91,97-100
+  s_e1faced19cd1f4::t_05222fc851f99b 143,160,184,196,199-200
+oxidize-core/src/compute/tensor.rs
+  s_d8b5af6870ab84::t_8dfdab2767a125 1228,1310,1460-1461,1669,1768
+  s_e1faced19cd1f4::t_b97782ae8d781e 5544
+oxidize-core/kernels/gemv_f32.cu
+  s_e1faced19cd1f4::t_6586d57120a1ff 38-40
+  s_e1faced19cd1f4::t_aff6877880544a 234-235
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "c688028feb010ec492680fbf6c2a7d2cdf7d920f",
+  "prompts": {},
+  "sessions": {
+    "s_d8b5af6870ab84": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "747c40af-74b1-4c68-a8f8-83589cf844b7",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_e1faced19cd1f4": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_14d958503ffeQSE9BaGDSZW2IV",
+        "model": "k2p6"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

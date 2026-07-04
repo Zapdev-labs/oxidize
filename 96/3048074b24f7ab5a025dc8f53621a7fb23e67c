@@ -1,0 +1,69 @@
+oxidize-cli/src/pipeline.rs
+  s_4ea0c180e3aee4::t_24362a03b2839f 339
+oxidize-core/src/format/tokenizer.rs
+  s_17c54972077cf6::t_6b6433787b7642 661-664
+  s_4ea0c180e3aee4::t_25e60eb0c4104f 230-232,247
+  s_4ea0c180e3aee4::t_7506428a8dacce 66-79
+  s_4ea0c180e3aee4::t_ec6ca5ca8eaf9e 665-673
+oxidize-core/src/model/layer_wise.rs
+  s_4ea0c180e3aee4::t_0b874e27d93dfa 1976,2027,2032-2037
+  s_4ea0c180e3aee4::t_80a8d05d231370 348-353
+  s_4ea0c180e3aee4::t_9c224e8615852f 1208
+  s_4ea0c180e3aee4::t_84d3fa9a52fcab 1272-1274
+  s_4ea0c180e3aee4::t_98107ceef8240d 2059,2061-2062
+  s_4ea0c180e3aee4::t_6f5e0b4cfb4482 619-620
+  s_4ea0c180e3aee4::t_cbf7931cacc0cd 2094-2099
+  s_4ea0c180e3aee4::t_6b9c4a546e651e 2261-2267
+  s_4ea0c180e3aee4::t_c8e2bddaf032ad 1950-1975,2028-2029,2031
+  s_4ea0c180e3aee4::t_79d25a5abbd1b1 1481
+  s_4ea0c180e3aee4::t_77b1f65ca051a0 629-635
+  s_4ea0c180e3aee4::t_5407cc3a95e90a 361-368,370-372
+  s_4ea0c180e3aee4::t_b13042916dad59 1948-1949,1989,2030,2038-2039,2054-2055,2058,2063
+  s_4ea0c180e3aee4::t_05f0ee9bcb0cb0 1993-2006,2015,2017-2018,2023,2025
+  s_4ea0c180e3aee4::t_d3acba1f539f09 2285-2287
+  s_4ea0c180e3aee4::t_9e4e4249169802 2057,2060,2064
+  s_4ea0c180e3aee4::t_354b53069ed346 1977-1988
+  s_4ea0c180e3aee4::t_659fb031b559fd 2056
+  s_4ea0c180e3aee4::t_5897b242391766 2007-2011,2021-2022
+  s_4ea0c180e3aee4::t_0d39d44a70959b 2012-2014,2016,2019-2020,2024
+  s_4ea0c180e3aee4::t_5ce0e25c6ac0b4 1892-1899
+  s_4ea0c180e3aee4::t_a58ce6c58e5174 1153-1207,1209-1250
+  s_4ea0c180e3aee4::t_faff4102f53a9d 1809-1819,1821,1824
+  s_4ea0c180e3aee4::t_c0756720f66991 1990-1992,2026
+  s_18e991452520ed::t_33c6e531203b77 159-161,442-445,478-482,488-491,508-509,709-713,769,1039-1042,1386-1394,1529-1530,1784-1792,1803,2191-2196,2206-2212,2402-2410,2412-2413,2546-2550
+  s_4ea0c180e3aee4::t_d06d018f5a24cf 354-360,369,373
+  s_4ea0c180e3aee4::t_6d120f716f15ff 1874-1881
+  s_4ea0c180e3aee4::t_45e57a84816d9a 454-465
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "963048074b24f7ab5a025dc8f53621a7fb23e67c",
+  "prompts": {},
+  "sessions": {
+    "s_17c54972077cf6": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_147dd58ceffeAz5ju46hiNAXVq",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_18e991452520ed": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9b009849-d334-433f-b626-4fee84fb4340",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_4ea0c180e3aee4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3fb31a53-3c85-470b-a12e-128cce51631a",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

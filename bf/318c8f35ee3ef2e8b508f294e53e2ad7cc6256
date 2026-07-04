@@ -1,0 +1,21 @@
+oxidize-core/src/lib.rs
+  s_4ed8bdabbd94db::t_34e6150777ea07 39-40
+oxidize-core/src/util/bytes.rs
+  s_4ed8bdabbd94db::t_d7a76f962b35b0 1-32
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.8",
+  "base_commit_sha": "bf318c8f35ee3ef2e8b508f294e53e2ad7cc6256",
+  "prompts": {},
+  "sessions": {
+    "s_4ed8bdabbd94db": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "c1c7711a-075a-41fe-be7e-e392355b52f1",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

@@ -1,0 +1,37 @@
+oxidize-core/src/model/layer_wise.rs
+  s_34ac2f46a02c82::t_19c3c6c213b900 159-161,416-419,441-445,451-454,471-472,681,951-954,1197-1205,1373-1374,1628-1636,1647,1654,1902-1907,1917-1923,2103-2111,2113-2114,2247-2251
+oxidize-core/benches/layer_bench.rs
+  s_34ac2f46a02c82::t_19c3c6c213b900 27-29,32-34,37-39,42-44,47-49,52-54,57-59,69,73-74,78-90,99-111,113-127,138-150,152-166,222-230,279-280,282-289,313-329
+oxidize-cli/src/main.rs
+  s_34ac2f46a02c82::t_19c3c6c213b900 959-972,1848
+oxidize-core/src/compute/spinpool.rs
+  s_34ac2f46a02c82::t_19c3c6c213b900 102,255-259
+oxidize-core/src/lib.rs
+  s_34ac2f46a02c82::t_19c3c6c213b900 75-76,97-98
+oxidize-core/src/model/inference.rs
+  s_34ac2f46a02c82::t_19c3c6c213b900 48-49,2093-2096,2404-2405,3418-3457,3459,3462-3463,3465,3467-3477,3479-3530,3532,3534-3553,3556-3557,3559-3579,3581-3584,3586-3595,3597-3598,3600,3602
+oxidize-core/src/compute/tensor.rs
+  s_34ac2f46a02c82::t_19c3c6c213b900 1228-1261,1263-1264,1310-1343,1345-1346,1458-1484,1486-1487,1493,1524-1528,1534-1538,1570,2083,2175,2213,2215,2250,2310-2311,5669-5675,5681-5690,5694-5702,5706-5711,5717-5722
+oxidize-core/benches/inference_bench.rs
+  s_34ac2f46a02c82::t_19c3c6c213b900 63-73,117,130-156,173-175,199-201,224-247
+oxidize-core/src/backends/cuda.rs
+  s_34ac2f46a02c82::t_19c3c6c213b900 197,242,247,326,335,519,754-756,803-804,885-886,965-966,1156-1161,1166-1167,1273-1274,1296-1297
+oxidize-core/benches/gemv_bench.rs
+  s_34ac2f46a02c82::t_19c3c6c213b900 9,13,37-38,42-49,54-61,80-82,100-103
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "da3cdf98707fe8b8b8d0d4fd387f994d38138b1b",
+  "prompts": {},
+  "sessions": {
+    "s_34ac2f46a02c82": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "74ef7c23-ebaa-4408-ae12-87093af648d5",
+        "model": "default"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

@@ -1,0 +1,24 @@
+golang/core/ggufcore/gguf.go
+  s_b884af7059773d::t_5c7c5d4baa3fe3 149
+golang/core/ggufcore/gguf_test.go
+  s_b884af7059773d::t_21b24461046133 3-7
+golang/core/core.go
+  s_b884af7059773d::t_4b9fe9ddae6cc9 51-53,55
+  s_b884af7059773d::t_ee48d42c49f60d 389-395,402-403,407
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "acb3d43ccef4aa4a6bf9523f53932366e5ed9522",
+  "prompts": {},
+  "sessions": {
+    "s_b884af7059773d": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_17743e93dffecYdtaN3rU3Q2D6",
+        "model": "minimax-m3-free"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

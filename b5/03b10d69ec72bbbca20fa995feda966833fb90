@@ -1,0 +1,32 @@
+oxidize-golang/core/tensor/gemv.go
+  s_9df89de3bde73a::t_50e9d6a10cd69a 144,149,153,158-160,167
+  s_9df89de3bde73a::t_5b44ee0dbcf47f 145-148,150-152,154-157,161-166
+oxidize-golang/core/tensor/tensor_test.go
+  s_9df89de3bde73a::t_d00371c81b060e 50-65
+oxidize-golang/core/tensor/ops.go
+  s_d9a61c121d09ae::t_8647603a199531 5-34
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "b503b10d69ec72bbbca20fa995feda966833fb90",
+  "prompts": {},
+  "sessions": {
+    "s_9df89de3bde73a": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "7ea7bbcc-43ad-4243-a823-4f40ca203960",
+        "model": "default"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_d9a61c121d09ae": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "e9de5fd3-e609-40c2-ac05-b69f37d22d70",
+        "model": "default"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

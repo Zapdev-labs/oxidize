@@ -1,0 +1,25 @@
+oxidize-core/build.rs
+  s_dab23adf311f95::t_3418ead2e7c26a 74,76-86,95,97,100-144
+oxidize-core/src/backends/cuda.rs
+  s_dab23adf311f95::t_91b32f64ad1c3c 2221-2307
+oxidize-core/src/model/inference.rs
+  s_dab23adf311f95::t_8e1acc50898913 3166
+  s_dab23adf311f95::t_ed940d89c5790e 2689-2692,2697-2726
+  s_dab23adf311f95::t_2a61045013f129 3148
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.8",
+  "base_commit_sha": "e4074dba1f8bcf12b387b55dcc6ec626e23b9e1f",
+  "prompts": {},
+  "sessions": {
+    "s_dab23adf311f95": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "46bdccab-e382-4179-918c-0641791e7f3b",
+        "model": "claude-sonnet-4-6"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

@@ -1,0 +1,22 @@
+oxidize-core/src/format/safetensors.rs
+  s_4ed8bdabbd94db::t_ae5c429120fe76 55
+oxidize-core/src/format/gguf.rs
+  s_4ed8bdabbd94db::t_311a8a4150c5b3 130
+  s_4ed8bdabbd94db::t_6764f16ae5d453 463
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.8",
+  "base_commit_sha": "745ad0227ac47be610546bf2196e439433f7a3b7",
+  "prompts": {},
+  "sessions": {
+    "s_4ed8bdabbd94db": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "c1c7711a-075a-41fe-be7e-e392355b52f1",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

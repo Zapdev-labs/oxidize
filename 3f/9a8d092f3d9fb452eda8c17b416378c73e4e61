@@ -1,0 +1,21 @@
+oxidize-core/src/backends/cuda/flash_decode_launch.rs
+  s_1b37f3c1d1e7b7::t_a264072c0c3d35 16,27,62,72-73
+  s_1b37f3c1d1e7b7::t_fd625388735916 17-26,63-71
+  s_1b37f3c1d1e7b7::t_48befd20064c65 76-80,83,140-141,145-147
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "3f9a8d092f3d9fb452eda8c17b416378c73e4e61",
+  "prompts": {},
+  "sessions": {
+    "s_1b37f3c1d1e7b7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ee600-1957-70f2-b3f9-e51f217a3ee9",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

@@ -1,0 +1,21 @@
+oxidize-core/src/compute/quantization.rs
+  s_9977901d17a81e::t_56a1dd3c5789ef 46,50,376-384,393-450,699,1142-1331,1623-1626,1633,1641,1769,1792-1795,1930,2156-2157,2201-2202,2307-2412
+oxidize-core/src/compute/tensor/mod.rs
+  s_9977901d17a81e::t_56a1dd3c5789ef 4
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.8",
+  "base_commit_sha": "06266bfc22a340e4de3d342c922bc19fddea85f8",
+  "prompts": {},
+  "sessions": {
+    "s_9977901d17a81e": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "3cd73ec3-5368-4b64-bd49-5601fc62d824",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

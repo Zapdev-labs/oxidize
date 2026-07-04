@@ -1,0 +1,19 @@
+oxidize-core/src/model/diffusion_gemma.rs
+  s_cd586a2897ef61::t_069d5d6c042504 34-35,170,372-373,725,757,878
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "876bf2da6d0b7a4da374132b9694f054f767b92c",
+  "prompts": {},
+  "sessions": {
+    "s_cd586a2897ef61": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ee77d-c9cf-75f0-83e1-340f811bcb1d",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

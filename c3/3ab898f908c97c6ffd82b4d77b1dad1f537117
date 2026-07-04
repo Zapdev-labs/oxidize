@@ -1,0 +1,24 @@
+oxidize-core/src/model/speculative.rs
+  s_7db891e64d27df::t_f7bd6a6f759192 408-419,426-428
+oxidize-core/src/model/sampling.rs
+  s_7db891e64d27df::t_f553832bfbb67c 573-580
+  s_7db891e64d27df::t_fc2b3d20c9cad9 488-506
+  s_7db891e64d27df::t_1352dcac7ac271 553-572
+  s_7db891e64d27df::t_3f62ed53a09c2e 926-939
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "c33ab898f908c97c6ffd82b4d77b1dad1f537117",
+  "prompts": {},
+  "sessions": {
+    "s_7db891e64d27df": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d821c29a-5761-4949-8aad-c39dfe26c264",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

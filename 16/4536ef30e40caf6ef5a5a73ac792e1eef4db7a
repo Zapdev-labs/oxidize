@@ -1,0 +1,23 @@
+oxidize-core/src/compute/tensor.rs
+  s_d8b5af6870ab84::t_2fb1d3182ef30e 27
+  s_d8b5af6870ab84::t_39993f8476a00e 23-26,28,1227-1228,1308-1309,1456-1457,1687-1688,1783-1784
+oxidize-core/src/compute/spinpool.rs
+  s_d8b5af6870ab84::t_3656bdf0594db8 6-11,130,133-134
+  s_d8b5af6870ab84::t_2fb1d3182ef30e 126-128,204-206
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "164536ef30e40caf6ef5a5a73ac792e1eef4db7a",
+  "prompts": {},
+  "sessions": {
+    "s_d8b5af6870ab84": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "747c40af-74b1-4c68-a8f8-83589cf844b7",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

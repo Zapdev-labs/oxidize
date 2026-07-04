@@ -1,0 +1,27 @@
+oxidize-core/src/model/layer_wise/cache.rs
+  s_1697c02732864d::t_5a2ee349d9917b 6
+oxidize-core/src/model/layer_wise/loading.rs
+  s_1697c02732864d::t_3f633c78446965 115
+oxidize-core/src/model/layer_wise/weights.rs
+  s_1697c02732864d::t_679118dcce8a3f 124
+  s_1697c02732864d::t_3578c87c4a0add 46,53-66,72-81
+  s_1697c02732864d::t_99f373d0e550a2 109
+oxidize-core/src/model/layer_wise.rs
+  s_1697c02732864d::t_f652139bf6bc23 5
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "d6328c35520bfe220808215ad86a30fc54b90a12",
+  "prompts": {},
+  "sessions": {
+    "s_1697c02732864d": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "7915669e-551c-4bdd-9a20-841308d4c91a",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

@@ -1,0 +1,19 @@
+docs/superpowers/specs/2026-06-05-perf-and-features-design.md
+  s_b138499838f940::t_6b1cf1c4c142b0 33-42
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.3",
+  "base_commit_sha": "9828bd4c3645d454b00d2863481faf59122fe68b",
+  "prompts": {},
+  "sessions": {
+    "s_b138499838f940": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d9fdb403-1cbc-4339-afa2-fcd8b1e5171d",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

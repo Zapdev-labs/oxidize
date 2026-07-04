@@ -1,0 +1,74 @@
+oxidize-finetuning/src/qlora.rs
+  s_3582b5342698b9::t_09feac6a6da68b 184-186
+oxidize-core/src/backends/cuda/tests.rs
+  s_3582b5342698b9::t_09feac6a6da68b 214-217,649-652
+oxidize-core/src/compute/tensor/kernels/gemv.rs
+  s_3582b5342698b9::t_09feac6a6da68b 473-478,537-538
+  s_3582b5342698b9::t_ec23b118296007 539
+oxidize-core/src/backends/cuda/ffn_fusion_cuda_tests.rs
+  s_3582b5342698b9::t_09feac6a6da68b 71-77,97-100,107-113
+oxidize-cli/src/main.rs
+  s_3582b5342698b9::t_09feac6a6da68b 707-718
+oxidize-core/src/model/layer_wise/weights.rs
+  s_3582b5342698b9::t_09feac6a6da68b 61
+Dockerfile.cli
+  s_3582b5342698b9::t_8bded9bace7bf0 16-17,31-32
+oxidize-core/src/compute/quantization/iq_grids.rs
+  s_3582b5342698b9::t_09feac6a6da68b 3,6-12,16-271
+oxidize-cli/src/bin/batched_decode_bench.rs
+  s_3582b5342698b9::t_09feac6a6da68b 120-128,130-131
+oxidize-core/src/model/eagle3.rs
+  s_3582b5342698b9::t_09feac6a6da68b 13-15,172,193-198,206-208,293,343,368-371,517-523,551-557,663,782-786,789,800-803,805-809,831-832,837-840,842-877,1178-1179
+oxidize-core/src/format/gguf.rs
+  s_3582b5342698b9::t_09feac6a6da68b 546
+oxidize-core/src/util/attn_dump.rs
+  s_3582b5342698b9::t_09feac6a6da68b 86-89
+oxidize-core/src/model/inference/layers.rs
+  s_3582b5342698b9::t_09feac6a6da68b 598-602,606-628,630-653,655-662,664-672,674-709,711-713,715-716,718-720,723-725,728-730,734-767,769-770,772,775,777-782,784,786-803,805,807-808,811-899,901-913,915,917-918,920-936,938-958,960-988,990,992-1009,1011-1039,1041,1044,1051,1053,1056,1063-1104,1106,1108,1111,1114,1116-1118,1120,1123,1126,1128,1130-1232,1234-1250,1253-1266,1268-1269,1271-1291,1293-1298,1300-1315,1321-1335,1337-1341
+oxidize-core/src/compute/quantization.rs
+  s_3582b5342698b9::t_09feac6a6da68b 238-240
+oxidize-finetuning/src/main.rs
+  s_3582b5342698b9::t_09feac6a6da68b 361-364,388-391
+oxidize-core/src/lib.rs
+  s_3582b5342698b9::t_09feac6a6da68b 55-56
+oxidize-core/src/backends/cuda/gpu_kernels.rs
+  s_3582b5342698b9::t_09feac6a6da68b 29-33
+oxidize-core/src/backends/cuda/ffn_fusion_cuda_fixture.rs
+  s_3582b5342698b9::t_09feac6a6da68b 31-35,58-59
+oxidize-core/src/compute/quantization/quant_iq_series.rs
+  s_3582b5342698b9::t_09feac6a6da68b 166-169,208-211,229-230
+oxidize-server/src/runtime/batched_engine.rs
+  s_3582b5342698b9::t_09feac6a6da68b 271-273
+oxidize-core/src/backends/cuda/cuda_decode_graph.rs
+  s_3582b5342698b9::t_09feac6a6da68b 45,52
+oxidize-core/src/format/safetensors.rs
+  s_3582b5342698b9::t_09feac6a6da68b 81-82
+oxidize-server/src/routes/chat.rs
+  s_3582b5342698b9::t_09feac6a6da68b 99,138-142
+oxidize-core/src/backends/cuda/gpu_native_forward.rs
+  s_3582b5342698b9::t_09feac6a6da68b 44-50,98-104,363-364,557-563,566-572,586-589,592-598,626-632,1497-1498,1501-1505,1508-1510,1512,1517-1519,1522-1563,1635-1639,1761-1767,2409-2413,2418-2420,2451-2457,2766-2770,2789-2793
+oxidize-core/src/model/inference/forward.rs
+  s_3582b5342698b9::t_09feac6a6da68b 1323-1326,1386-1388,1419-1422
+oxidize-core/src/backends/cuda/gemv_quantized.rs
+  s_3582b5342698b9::t_09feac6a6da68b 447,619
+oxidize-finetuning/src/dpo.rs
+  s_3582b5342698b9::t_09feac6a6da68b 316
+oxidize-core/src/model/inference/batch_engine.rs
+  s_3582b5342698b9::t_09feac6a6da68b 215,232,285-289
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "2fce16d7551d57563db9db48bdbcfd784506aaa0",
+  "prompts": {},
+  "sessions": {
+    "s_3582b5342698b9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f1219-02c1-7713-9f8b-d532e4c17a17",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

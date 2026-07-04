@@ -1,0 +1,21 @@
+oxidize-golang/cmd/bench_oxk/main.go
+  s_d696a9bcb3c378::t_ed596ba65e044a 158-160
+  s_d696a9bcb3c378::t_80a05c26d5b7b2 178-180
+  s_d696a9bcb3c378::t_56e5b0a2d0ed5b 132-134
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "f2bc4a693c30c5eb7c75f2de4ab8c02fbb75f9f3",
+  "prompts": {},
+  "sessions": {
+    "s_d696a9bcb3c378": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "853d1fc4-7588-4e2c-8845-bd957bd215b6",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

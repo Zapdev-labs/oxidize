@@ -1,0 +1,23 @@
+golang/core/quantization/dequant_k.go
+  s_b884af7059773d::t_94137089a053a6 27-28
+golang/core/quantization/types.go
+  s_b884af7059773d::t_17288cfe5f61be 146-147
+  s_b884af7059773d::t_9dad9a0495311e 304
+  s_b884af7059773d::t_b63df4a726391e 305
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "43a56e4a220209ba44429348e83631e7cd40ebc8",
+  "prompts": {},
+  "sessions": {
+    "s_b884af7059773d": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_17743e93dffecYdtaN3rU3Q2D6",
+        "model": "minimax-m3-free"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

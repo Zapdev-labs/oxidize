@@ -1,0 +1,33 @@
+oxidize-golang/core/backends/factory_test.go
+  s_df9c78e59b2a5c::t_bf78f58b1d219e 1-40
+oxidize-golang/core/backend/backend_test.go
+  s_9df89de3bde73a::t_775f23da76c910 63-64
+oxidize-golang/core/backends/factory.go
+  s_df9c78e59b2a5c::t_a9957c0009956a 1-98
+oxidize-golang/core/backend/backend.go
+  s_9df89de3bde73a::t_2dd93983f65569 72-76
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "e8de2096d18d2a2fa724730e1e496163095382fd",
+  "prompts": {},
+  "sessions": {
+    "s_9df89de3bde73a": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "7ea7bbcc-43ad-4243-a823-4f40ca203960",
+        "model": "default"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_df9c78e59b2a5c": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "d22a59f1-9349-430c-8998-8ced993f2fad",
+        "model": "default"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

@@ -1,0 +1,21 @@
+oxidize-finetuning/src/merge.rs
+  s_9977901d17a81e::t_fa1bb7532945c2 1-462
+oxidize-finetuning/src/rlhf.rs
+  s_9977901d17a81e::t_fa1bb7532945c2 1-869
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.8",
+  "base_commit_sha": "b35f0f932dc536ed28be42467c1d84cc66f72bfc",
+  "prompts": {},
+  "sessions": {
+    "s_9977901d17a81e": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "3cd73ec3-5368-4b64-bd49-5601fc62d824",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
