@@ -77,6 +77,8 @@ pub mod gguf;
 pub mod gpu_cluster;
 #[path = "compute/gpu_dispatch.rs"]
 pub mod gpu_dispatch;
+#[path = "compute/helix_cache.rs"]
+pub mod helix_cache;
 #[path = "model/inference.rs"]
 pub mod inference;
 #[path = "compute/kv_cache.rs"]
