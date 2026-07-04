@@ -22,8 +22,10 @@ pub mod shutdown;
 
 pub use app::{AppState, MAX_BODY_SIZE_BYTES, build_app_with_state};
 pub use auth::AuthConfig;
-pub use cli::{Args, Backend, BatchMode, KvCacheDType};
+pub use cli::{Args, Backend, BatchMode, KvCacheDType, effective_batch_mode};
 pub use limits::{ContinuousBatchConfig, ContinuousBatcher, RequestLimitConfig, RequestLimiter};
 pub use runtime::generate::GenerationError;
-pub use runtime::model::{LoadedModel, ModelRuntime, load_model_runtime};
+pub use runtime::model::{
+    LoadedModel, ModelRuntime, ModelRuntimeLoad, load_model_runtime, load_model_runtime_with_plan,
+};
 pub use runtime::paged::{PagedModelRuntime, build_paged_runtime};

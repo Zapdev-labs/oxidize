@@ -385,6 +385,7 @@ inline float q8_0_dot_scalar(const uint8_t* block, const float* vector) {
   }
   return hsum256(acc);
 #else
+  float sum = 0.0f;
   for (size_t l = 0; l < QK8_0; ++l) {
     sum += static_cast<float>(static_cast<int8_t>(block[2 + l])) * scale * vector[l];
   }

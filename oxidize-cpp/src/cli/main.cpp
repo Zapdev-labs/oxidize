@@ -295,6 +295,11 @@ int main(int argc, char** argv) {
     if (!args.threads_explicit) {
       args.threads = tune_plan.threads;
     }
+#ifdef OXIDIZE_GPU
+    if (!args.cuda && tune_plan.use_cuda) {
+      args.cuda = true;
+    }
+#endif
     if (!args.json) {
       std::fprintf(stderr, "oxidize: autotune %s\n",
                    oxidize::plan_summary(tune_plan).c_str());
