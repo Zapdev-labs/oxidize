@@ -108,6 +108,8 @@ oc_tokenizer *oc_tokenizer_load(const oc_gguf *g) {
   bool bpe;
   if (strcmp(model, "gpt2") == 0 || strcmp(model, "bpe") == 0) bpe = true;
   else if (strcmp(model, "llama") == 0) bpe = false;
+  else if (strcmp(model, "gemma4") == 0) bpe = false; /* SPM pieces; merges as BPE
+    ranks in llama.cpp — greedy SPM segmentation is close enough here */
   else {
     fprintf(stderr, "warning: unsupported tokenizer '%s'\n", model);
     return NULL;

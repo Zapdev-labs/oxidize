@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 void oc_die(const char *fmt, ...) {
   va_list ap;
@@ -51,7 +52,8 @@ size_t oc_block_values(oc_quant q) {
   switch (q) {
     case OC_F32: case OC_F16: case OC_BF16: return 1;
     case OC_Q4_0: case OC_Q4_1: case OC_Q5_0: case OC_Q5_1: case OC_Q8_0: return QK;
-    case OC_Q2_K: case OC_Q3_K: case OC_Q4_K: case OC_Q5_K: case OC_Q6_K: return QK_K;
+    case OC_Q2_K: case OC_Q3_K: case OC_Q4_K: case OC_Q5_K: case OC_Q6_K:
+    case OC_IQ4_XS: return QK_K;
     default: oc_die("quant: no block layout (type %d)", (int)q);
   }
   return 0;
@@ -71,6 +73,7 @@ size_t oc_block_bytes(oc_quant q) {
     case OC_Q4_K: return 144;
     case OC_Q5_K: return 176;
     case OC_Q6_K: return 210;
+    case OC_IQ4_XS: return 136;
     default: oc_die("quant: no block layout (type %d)", (int)q);
   }
   return 0;
@@ -96,6 +99,7 @@ oc_quant oc_from_ggml_type(uint32_t t) {
     case 12: return OC_Q4_K;
     case 13: return OC_Q5_K;
     case 14: return OC_Q6_K;
+    case 23: return OC_IQ4_XS;
     case 30: return OC_BF16;
     default: return OC_UNKNOWN;
   }
@@ -103,8 +107,115 @@ oc_quant oc_from_ggml_type(uint32_t t) {
 
 const char *oc_quant_name(oc_quant q) {
   static const char *n[] = {"F32","F16","BF16","Q4_0","Q4_1","Q5_0","Q5_1",
-                            "Q8_0","Q2_K","Q3_K","Q4_K","Q5_K","Q6_K","?"};
+                            "Q8_0","Q2_K","Q3_K","Q4_K","Q5_K","Q6_K","IQ4_XS","?"};
   return n[q <= OC_UNKNOWN ? q : OC_UNKNOWN];
+}
+
+uint32_t oc_to_ggml_type(oc_quant q) {
+  switch (q) {
+    case OC_F32: return 0;
+    case OC_F16: return 1;
+    case OC_Q4_0: return 2;
+    case OC_Q4_1: return 3;
+    case OC_Q5_0: return 6;
+    case OC_Q5_1: return 7;
+    case OC_Q8_0: return 8;
+    case OC_Q2_K: return 10;
+    case OC_Q3_K: return 11;
+    case OC_Q4_K: return 12;
+    case OC_Q5_K: return 13;
+    case OC_Q6_K: return 14;
+    case OC_IQ4_XS: return 23;
+    case OC_BF16: return 30;
+    default: oc_die("quant: no ggml type for %d", (int)q);
+  }
+  return 0;
+}
+
+oc_quant oc_quant_parse(const char *name) {
+  for (int q = OC_F32; q < OC_UNKNOWN; ++q)
+    if (strcasecmp(name, oc_quant_name((oc_quant)q)) == 0) return (oc_quant)q;
+  return OC_UNKNOWN;
+}
+
+uint16_t oc_f32_to_f16(float f) {
+  uint32_t x;
+  memcpy(&x, &f, 4);
+  uint32_t sign = (x >> 16) & 0x8000;
+  int32_t exp = (int32_t)((x >> 23) & 0xFF) - 127 + 15;
+  uint32_t mant = x & 0x7FFFFF;
+  if (exp >= 31) return (uint16_t)(sign | 0x7C00);       /* inf / overflow */
+  if (exp <= 0) {                                        /* subnormal / zero */
+    if (exp < -10) return (uint16_t)sign;
+    mant |= 0x800000;
+    uint32_t shift = (uint32_t)(14 - exp);
+    uint32_t half = (mant >> shift) + ((mant >> (shift - 1)) & 1); /* rne-ish */
+    return (uint16_t)(sign | half);
+  }
+  uint16_t h = (uint16_t)(sign | ((uint32_t)exp << 10) | (mant >> 13));
+  if (mant & 0x1000) h++; /* round to nearest */
+  return h;
+}
+
+bool oc_quantize_row(oc_quant q, const float *src, uint8_t *dst, size_t n) {
+  switch (q) {
+    case OC_F32:
+      memcpy(dst, src, n * sizeof(float));
+      return true;
+    case OC_F16:
+      for (size_t i = 0; i < n; ++i) {
+        uint16_t h = oc_f32_to_f16(src[i]);
+        memcpy(dst + 2 * i, &h, 2);
+      }
+      return true;
+    case OC_Q8_0: /* per-32 block: f16 d + 32 int8, v = d*q */
+      for (size_t b = 0; b < n / QK; ++b) {
+        const float *x = src + b * QK;
+        uint8_t *o = dst + b * 34;
+        float amax = 0;
+        for (size_t i = 0; i < QK; ++i) {
+          float a = fabsf(x[i]);
+          if (a > amax) amax = a;
+        }
+        float d = amax / 127.0f;
+        float id = d > 0 ? 1.0f / d : 0.0f;
+        uint16_t dh = oc_f32_to_f16(d);
+        memcpy(o, &dh, 2);
+        for (size_t i = 0; i < QK; ++i) {
+          int v = (int)lrintf(x[i] * id);
+          if (v > 127) v = 127;
+          if (v < -128) v = -128;
+          ((int8_t *)(o + 2))[i] = (int8_t)v;
+        }
+      }
+      return true;
+    case OC_Q4_0: /* per-32 block: f16 d + 16 nibble bytes, v = d*(nib-8) */
+      for (size_t b = 0; b < n / QK; ++b) {
+        const float *x = src + b * QK;
+        uint8_t *o = dst + b * 18;
+        float amax = 0, mx = 0;
+        for (size_t i = 0; i < QK; ++i) {
+          float a = fabsf(x[i]);
+          if (a > amax) { amax = a; mx = x[i]; }
+        }
+        float d = mx / -8.0f;
+        float id = d != 0 ? 1.0f / d : 0.0f;
+        uint16_t dh = oc_f32_to_f16(d);
+        memcpy(o, &dh, 2);
+        for (size_t i = 0; i < QK / 2; ++i) {
+          int lo = (int)(x[i] * id + 8.5f);
+          int hi = (int)(x[i + QK / 2] * id + 8.5f);
+          if (lo > 15) lo = 15;
+          if (lo < 0) lo = 0;
+          if (hi > 15) hi = 15;
+          if (hi < 0) hi = 0;
+          o[2 + i] = (uint8_t)((hi << 4) | lo);
+        }
+      }
+      return true;
+    default:
+      return false;
+  }
 }
 
 /* K-quant 6-bit scale/min extraction (ggml get_scale_min_k4). */
@@ -321,6 +432,29 @@ void oc_dequant_row(oc_quant q, const uint8_t *src, float *dst, size_t n) {
             o[qp + 96 + l] = d * (float)sc[sco + is + 6] * (float)q4;
           }
           qp += 128;
+        }
+      }
+      return;
+    case OC_IQ4_XS:
+      /* 136-byte superblocks: fp16 d, u16 scales_h, u8 scales_l[4], qs[128].
+       * value = d * (6-bit scale - 32) * kvalues[nibble] (ggml block_iq4_xs). */
+      for (b = 0; b < n / QK_K; ++b) {
+        static const int8_t kv16[16] = {-127, -104, -83, -65, -49, -35, -22, -10,
+                                        1, 13, 25, 38, 53, 69, 89, 113};
+        const uint8_t *blk = src + b * 136;
+        float d = oc_f16_to_f32(blk);
+        uint16_t sh = rd16(blk + 2);
+        const uint8_t *sl = blk + 4, *qs = blk + 8;
+        float *o = dst + b * QK_K;
+        for (int ib = 0; ib < 8; ++ib) {
+          int ls = ((sl[ib / 2] >> 4 * (ib % 2)) & 0xF) | (((sh >> 2 * ib) & 3) << 4);
+          float dl = d * (float)(ls - 32);
+          for (l = 0; l < 16; ++l) {
+            o[l] = dl * (float)kv16[qs[l] & 0xF];
+            o[l + 16] = dl * (float)kv16[qs[l] >> 4];
+          }
+          o += 32;
+          qs += 16;
         }
       }
       return;

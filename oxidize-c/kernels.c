@@ -35,7 +35,8 @@ static float yarn_corr_dim(float n_dims, float orig_ctx, float n_rot, float base
 }
 
 void oc_rope(float *vec, size_t head_dim, size_t n_heads, size_t pos,
-             float theta, size_t rope_dim, float yarn_factor, float yarn_orig_ctx) {
+             float theta, size_t rope_dim, float yarn_factor, float yarn_orig_ctx,
+             const float *ff) {
   size_t rl = rope_dim == 0 || rope_dim > head_dim ? head_dim : rope_dim;
   if (rl == 0) return;
   size_t half = rl / 2;
@@ -50,17 +51,18 @@ void oc_rope(float *vec, size_t head_dim, size_t n_heads, size_t pos,
     corr_hi = ceilf(yarn_corr_dim((float)rl, yarn_orig_ctx, 1.0f, theta));
     if (corr_lo < 0) corr_lo = 0;
     if (corr_hi > (float)rl - 1) corr_hi = (float)rl - 1;
-  } else if (pos == 0) {
+  } else if (pos == 0 && !ff) {
     return; /* identity without yarn magnitude scaling */
   }
   for (size_t h = 0; h < n_heads; ++h) {
     float *hp = vec + h * head_dim;
     float freq = 1.0f;
     for (size_t i = 0; i < half; ++i) {
-      float ang = posf * freq;
+      float f_i = ff ? freq / ff[i] : freq;
+      float ang = posf * f_i;
       float c, s;
       if (yarn) {
-        float theta_extrap = posf * freq;
+        float theta_extrap = posf * f_i;
         float theta_interp = theta_extrap * freq_scale;
         float denom = corr_hi - corr_lo;
         float ramp = 1.0f - fminf(1.0f, fmaxf(0.0f, ((float)(2 * i) / 2.0f - corr_lo) /
@@ -84,6 +86,14 @@ void oc_swiglu(float *gate, const float *up, size_t n) {
   for (size_t i = 0; i < n; ++i) {
     float g = gate[i];
     gate[i] = g / (1.0f + expf(-g)) * up[i];
+  }
+}
+
+void oc_geglu(float *gate, const float *up, size_t n) {
+  const float k = 0.7978845608028654f; /* sqrt(2/pi) */
+  for (size_t i = 0; i < n; ++i) {
+    float g = gate[i];
+    gate[i] = 0.5f * g * (1.0f + tanhf(k * (g + 0.044715f * g * g * g))) * up[i];
   }
 }
 
@@ -366,6 +376,52 @@ static float dot_q6_k(const uint8_t *row, const oc_q8blk *xq, size_t cols) {
   return sum;
 }
 
+/* IQ4_XS: 136-byte superblocks; value = d*(scale6-32)*kvalues[nib]. Integer
+ * dot vs q8 activations; nibbles mapped through the nonlinear LUT. */
+static const int8_t oc_kvalues_iq4nl[16] = {-127, -104, -83, -65, -49, -35, -22,
+                                            -10, 1, 13, 25, 38, 53, 69, 89, 113};
+
+static float dot_iq4_xs(const uint8_t *row, const oc_q8blk *xq, size_t cols) {
+  size_t nsb = cols / QK_K;
+  float sum = 0.0f;
+  for (size_t sb = 0; sb < nsb; ++sb) {
+    const uint8_t *blk = row + sb * 136;
+    float d = f16s(blk);
+    uint16_t sh = (uint16_t)(blk[2] | (blk[3] << 8));
+    const uint8_t *sl = blk + 4, *qs = blk + 8;
+    const oc_q8blk *x8 = xq + sb * (QK_K / QK);
+    for (int ib = 0; ib < 8; ++ib) {
+      int ls = ((sl[ib / 2] >> 4 * (ib % 2)) & 0xF) | (((sh >> 2 * ib) & 3) << 4);
+      const oc_q8blk *xb = &x8[ib];
+      const uint8_t *qp = qs + ib * 16;
+#ifdef OC_AVX2
+      __m128i q16 = _mm_loadu_si128((const __m128i *)qp);
+      __m128i lut = _mm_loadu_si128((const __m128i *)oc_kvalues_iq4nl);
+      __m128i lo = _mm_and_si128(q16, _mm_set1_epi8(0x0F));
+      __m128i hi = _mm_and_si128(_mm_srli_epi16(q16, 4), _mm_set1_epi8(0x0F));
+      __m256i w = _mm256_set_m128i(_mm_shuffle_epi8(lut, hi),
+                                   _mm_shuffle_epi8(lut, lo));
+      __m256i y = _mm256_loadu_si256((const __m256i *)xb->q);
+      __m256i dsum = i8dot(w, y);
+      __m128i s4 = _mm_add_epi32(_mm256_castsi256_si128(dsum),
+                                 _mm256_extracti128_si256(dsum, 1));
+      s4 = _mm_add_epi32(s4, _mm_shuffle_epi32(s4, 0x4E));
+      s4 = _mm_add_epi32(s4, _mm_shuffle_epi32(s4, 0xB1));
+      int isum = _mm_cvtsi128_si32(s4);
+      sum += d * (float)(ls - 32) * xb->d * (float)isum;
+#else
+      int isum = 0;
+      for (int l = 0; l < 16; ++l) {
+        isum += oc_kvalues_iq4nl[qp[l] & 0xF] * xb->q[l];
+        isum += oc_kvalues_iq4nl[qp[l] >> 4] * xb->q[l + 16];
+      }
+      sum += d * (float)(ls - 32) * xb->d * (float)isum;
+#endif
+    }
+  }
+  return sum;
+}
+
 /* F16 row fused dot */
 static float dot_f16(const uint8_t *row, const float *x, size_t n) {
 #ifdef OC_AVX2
@@ -443,6 +499,7 @@ static float row_dot(const oc_weight *w, size_t r, size_t cols, const float *x,
     case OC_Q8_0: return dot_q8_0(row, xq, cols);
     case OC_Q4_K: return dot_q4_k(row, xq, cols);
     case OC_Q6_K: return dot_q6_k(row, xq, cols);
+    case OC_IQ4_XS: return dot_iq4_xs(row, xq, cols);
     default:
       oc_dequant_row(w->quant, row, scratch, cols);
       return oc_dot_f32(scratch, x, cols);
@@ -451,7 +508,8 @@ static float row_dot(const oc_weight *w, size_t r, size_t cols, const float *x,
 
 static bool needs_q8(const oc_weight *w) {
   return w->quantized && (w->quant == OC_Q4_0 || w->quant == OC_Q8_0 ||
-                          w->quant == OC_Q4_K || w->quant == OC_Q6_K);
+                          w->quant == OC_Q4_K || w->quant == OC_Q6_K ||
+                          w->quant == OC_IQ4_XS);
 }
 
 void oc_gemv(const oc_weight *w, size_t rows, size_t cols, const float *x,
@@ -511,10 +569,10 @@ void oc_gemm(const oc_weight *w, size_t rows, size_t cols, const float *in,
 
 void oc_attention(float *out, const float *q, const float *k_cache,
                   const float *v_cache, size_t seq_len, size_t n_heads,
-                  size_t kv_heads, size_t head_dim) {
+                  size_t kv_heads, size_t head_dim, float scale) {
   size_t group = n_heads / kv_heads;
   size_t kv_len = kv_heads * head_dim;
-  float scale = 1.0f / sqrtf((float)head_dim);
+  if (scale == 0.0f) scale = 1.0f / sqrtf((float)head_dim);
 #pragma omp parallel for schedule(static)
   for (long long hh = 0; hh < (long long)n_heads; ++hh) {
     size_t h = (size_t)hh;

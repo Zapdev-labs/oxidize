@@ -86,7 +86,9 @@ oc_gguf *oc_gguf_load(const char *path) {
   if (memcmp(take(&r, 4), "GGUF", 4) != 0) oc_die("gguf: bad magic");
   uint32_t version = r32(&r);
   if (version != 2 && version != 3) oc_die("gguf: unsupported version %u", version);
+  g->version = version;
   uint64_t n_tensors = r64(&r), n_meta = r64(&r);
+  g->kv_off = r.cur;
 
   g->meta = calloc((size_t)n_meta, sizeof(oc_meta));
   g->n_meta = (size_t)n_meta;
@@ -118,6 +120,7 @@ oc_gguf *oc_gguf_load(const char *path) {
     }
   }
 
+  g->kv_end = r.cur;
   g->tensors = calloc((size_t)n_tensors, sizeof(oc_tensor_info));
   g->n_tensors = (size_t)n_tensors;
   for (uint64_t t = 0; t < n_tensors; ++t) {
@@ -127,6 +130,7 @@ oc_gguf *oc_gguf_load(const char *path) {
     if (ti->n_dims > 4) oc_die("gguf: tensor %s has %u dims", ti->name, ti->n_dims);
     for (uint32_t d = 0; d < ti->n_dims; ++d) ti->dims[d] = r64(&r);
     uint32_t ggml_type = r32(&r);
+    ti->ggml_type = ggml_type;
     ti->quant = oc_from_ggml_type(ggml_type);
     ti->offset = r64(&r); /* relative; resolved below */
   }
@@ -138,6 +142,7 @@ oc_gguf *oc_gguf_load(const char *path) {
   }
   if (align == 0 || (align & (align - 1)) != 0) oc_die("gguf: bad alignment %llu",
                                                        (unsigned long long)align);
+  g->align = align;
   uint64_t data_start = ((uint64_t)r.cur + align - 1) & ~(align - 1);
   if (data_start > size) oc_die("gguf: unexpected EOF");
   for (size_t t = 0; t < g->n_tensors; ++t) {

@@ -41,7 +41,7 @@ static float *load_vec_n(const oc_gguf *g, const char *name, size_t *n) {
   return load_vec(g, name);
 }
 
-static bool keepq_ok(oc_quant q) { return q <= OC_Q6_K; }
+static bool keepq_ok(oc_quant q) { return q <= OC_IQ4_XS; }
 
 static oc_weight load_weight(const oc_gguf *g, const char *name) {
   oc_weight w = {0};
@@ -222,6 +222,67 @@ oc_model *oc_model_load(const char *path, size_t max_ctx) {
   }
   m->n_kv_layers = kv_slots ? kv_slots : 1;
 
+  /* Per-layer attention geometry defaults (global config values). */
+  m->emb_scale = 1.0f;
+  for (size_t l = 0; l < c->layer_count; ++l) {
+    oc_layer *L = &m->layers[l];
+    L->out_scale_v = 1.0f;
+    if (L->is_gdn) continue;
+    L->hd = c->head_dim;
+    L->n_kv = c->kv_heads;
+    L->n_rot = c->rope_dim;
+    L->theta = c->rope_theta;
+  }
+
+  /* ---- gemma4: dual attention geometry, K==V, post-norms, GELU ---- */
+  const char *arch_s = oc_meta_str(g, "general.architecture");
+  if (arch_s && strcmp(arch_s, "gemma4") == 0) {
+    m->gemma = true;
+    m->emb_scale = sqrtf((float)c->hidden_size);
+    oc_meta_f32(g, "gemma4.final_logit_softcapping", &m->logit_softcap);
+    m->rope_freqs = load_vec(g, "rope_freqs.weight");
+    uint32_t u;
+    float f;
+    size_t hd_full = c->head_dim;
+    size_t hd_swa =
+        oc_meta_u32(g, "gemma4.attention.key_length_swa", &u) ? u : hd_full;
+    size_t rot_full =
+        oc_meta_u32(g, "gemma4.rope.dimension_count", &u) ? u : hd_full;
+    size_t rot_swa =
+        oc_meta_u32(g, "gemma4.rope.dimension_count_swa", &u) ? u : hd_swa;
+    float theta_swa =
+        oc_meta_f32(g, "gemma4.rope.freq_base_swa", &f) ? f : 10000.0f;
+    size_t window = c->sliding_window ? c->sliding_window : 1024;
+    const oc_meta *kvh = oc_meta_get(g, "gemma4.attention.head_count_kv");
+    const oc_meta *swa = oc_meta_get(g, "gemma4.attention.sliding_window_pattern");
+    char nm[160];
+    for (size_t l = 0; l < c->layer_count; ++l) {
+      oc_layer *L = &m->layers[l];
+      bool is_swa = (swa && swa->kind == 2 && l < swa->count)
+                        ? swa->nums[l] != 0
+                        : ((l + 1) % 6 != 0);
+      L->hd = is_swa ? hd_swa : hd_full;
+      if (kvh && kvh->kind == 2 && l < kvh->count)
+        L->n_kv = (size_t)kvh->nums[l];
+      L->n_rot = is_swa ? rot_swa : rot_full;
+      L->theta = is_swa ? theta_swa : c->rope_theta;
+      L->rope_ff = is_swa ? NULL : m->rope_freqs;
+      L->attn_scale = 1.0f;   /* gemma4: no 1/sqrt(hd) pre-scaling */
+      L->v_from_k = weight_empty(&L->wv);
+      L->v_rms = true;
+      snprintf(nm, sizeof nm, "blk.%zu.post_attention_norm.weight", l);
+      L->attn_post_norm = load_vec(g, nm);
+      snprintf(nm, sizeof nm, "blk.%zu.post_ffw_norm.weight", l);
+      L->ffn_post_norm = load_vec(g, nm);
+      snprintf(nm, sizeof nm, "blk.%zu.layer_output_scale.weight", l);
+      float *osv = load_vec(g, nm);
+      if (osv) { L->out_scale_v = osv[0]; free(osv); }
+      L->kv_cap = is_swa ? window : 0;   /* 0 = full context, set below */
+      if (!L->attn_post_norm || !L->ffn_post_norm)
+        oc_die("model: gemma4 layer %zu missing post-norms", l);
+    }
+  }
+
   /* MTP/nextn block: first block index past the main stack. */
   snprintf(prefix, sizeof prefix, "blk.%zu.", c->layer_count);
   char probe[160];
@@ -239,6 +300,11 @@ oc_model *oc_model_load(const char *path, size_t max_ctx) {
     snprintf(name, sizeof name, "%snextn.shared_head_norm.weight", prefix);
     m->mtp->head_norm = load_vec(g, name);
     m->mtp->layer.kv_slot = 0;
+    m->mtp->layer.hd = c->head_dim;
+    m->mtp->layer.n_kv = c->kv_heads;
+    m->mtp->layer.n_rot = c->rope_dim;
+    m->mtp->layer.theta = c->rope_theta;
+    m->mtp->layer.out_scale_v = 1.0f;
     m->mtp->draft_max = 16;
     size_t kvn = c->kv_heads * c->head_dim;
     m->mtp->kv_k = calloc(m->mtp->draft_max * kvn, sizeof(float));
@@ -281,19 +347,32 @@ oc_model *oc_model_load(const char *path, size_t max_ctx) {
   m->kv_stride = c->kv_heads * c->head_dim;
   m->kv_ctx = c->max_ctx > 0 && c->max_ctx < c->context_size ? c->max_ctx
                                                              : c->context_size;
-  /* cap the up-front F32 KV cache at 4 GB */
-  size_t per_pos = m->n_kv_layers * m->kv_stride * sizeof(float) * 2;
-  size_t budget = (size_t)4 << 30;
-  if (per_pos > 0 && m->kv_ctx * per_pos > budget) {
-    m->kv_ctx = budget / per_pos;
-    if (m->kv_ctx < 4096) m->kv_ctx = 4096;
-    fprintf(stderr, "note: KV cache capped to %zu positions\n", m->kv_ctx);
+  if (m->gemma) {
+    /* per-layer caches; sliding-window layers ring at `window` positions */
+    for (size_t l = 0; l < c->layer_count; ++l) {
+      oc_layer *L = &m->layers[l];
+      if (L->is_gdn) continue;
+      if (L->kv_cap == 0 || L->kv_cap > m->kv_ctx) L->kv_cap = m->kv_ctx;
+      size_t elems = L->kv_cap * L->n_kv * L->hd;
+      L->kv_ck = calloc(elems, sizeof(float));
+      L->kv_cv = calloc(elems, sizeof(float));
+      if (!L->kv_ck || !L->kv_cv) oc_die("model: KV cache allocation failed");
+    }
+  } else {
+    /* cap the up-front F32 KV cache at 4 GB */
+    size_t per_pos = m->n_kv_layers * m->kv_stride * sizeof(float) * 2;
+    size_t budget = (size_t)4 << 30;
+    if (per_pos > 0 && m->kv_ctx * per_pos > budget) {
+      m->kv_ctx = budget / per_pos;
+      if (m->kv_ctx < 4096) m->kv_ctx = 4096;
+      fprintf(stderr, "note: KV cache capped to %zu positions\n", m->kv_ctx);
+    }
+    size_t kv_elems = m->n_kv_layers * m->kv_ctx * m->kv_stride;
+    m->kv_k = calloc(kv_elems, sizeof(float));
+    m->kv_v = calloc(kv_elems, sizeof(float));
+    if (!m->kv_k || !m->kv_v) oc_die("model: KV cache allocation failed");
   }
-  size_t kv_elems = m->n_kv_layers * m->kv_ctx * m->kv_stride;
-  m->kv_k = calloc(kv_elems, sizeof(float));
-  m->kv_v = calloc(kv_elems, sizeof(float));
   m->x = calloc(c->hidden_size, sizeof(float));
-  if (!m->kv_k || !m->kv_v) oc_die("model: KV cache allocation failed");
 
 #ifdef OC_CUDA
   /* Build the device-resident forward (weights + KV/SSM state on GPU). Falls
@@ -310,6 +389,8 @@ static void free_block(oc_layer *L) {
   free(L->gate.f32); free(L->up.f32); free(L->down.f32);
   free(L->q_bias); free(L->k_bias); free(L->v_bias);
   free(L->q_norm); free(L->k_norm);
+  free(L->attn_post_norm); free(L->ffn_post_norm);
+  free(L->kv_ck); free(L->kv_cv);
   free(L->qkv.f32); free(L->gdn_gate.f32); free(L->ssm_alpha.f32);
   free(L->ssm_beta.f32); free(L->ssm_out.f32);
   free(L->ssm_a); free(L->ssm_dt_bias); free(L->ssm_conv1d); free(L->ssm_norm);
@@ -331,6 +412,7 @@ void oc_model_free(oc_model *m) {
   if (!m->tied) free(m->lm_head.f32);
   free(m->final_norm);
   free(m->kv_k); free(m->kv_v); free(m->x);
+  free(m->rope_freqs);
   oc_gguf_free(m->g);
   free(m);
 }
@@ -395,6 +477,8 @@ static void embed_token(const oc_model *m, uint32_t tok, float *x) {
   } else {
     memcpy(x, m->tok_emb.f32 + idx * h, h * sizeof(float));
   }
+  if (m->emb_scale != 1.0f)
+    for (size_t i = 0; i < h; ++i) x[i] *= m->emb_scale;
 }
 
 static void add_bias(float *y, const float *bias, size_t bn, size_t n) {
@@ -403,10 +487,15 @@ static void add_bias(float *y, const float *bias, size_t bn, size_t n) {
 }
 
 static void head_norm(float *v, const float *w, size_t heads, size_t hd, float eps) {
-  float tmp[512];
   for (size_t h = 0; h < heads; ++h) {
-    oc_rms_norm(tmp, v + h * hd, w, hd, eps);
-    memcpy(v + h * hd, tmp, hd * sizeof(float));
+    float *p = v + h * hd;
+    float ss = 0.0f;
+    for (size_t i = 0; i < hd; ++i) ss += p[i] * p[i];
+    float inv = 1.0f / sqrtf(ss / (float)hd + eps);
+    if (w)
+      for (size_t i = 0; i < hd; ++i) p[i] *= inv * w[i];
+    else
+      for (size_t i = 0; i < hd; ++i) p[i] *= inv;
   }
 }
 
@@ -634,17 +723,22 @@ static void attn_layer_token(const oc_model *m, const oc_layer *L,
                              float *kv_k, float *kv_v, size_t kv_ctx,
                              float *attn_out, scratch_t *s) {
   const oc_config *c = &m->cfg;
-  size_t h = c->hidden_size, hd = c->head_dim;
+  size_t h = c->hidden_size;
+  size_t hd = L->hd ? L->hd : c->head_dim;
+  size_t n_kv = L->n_kv ? L->n_kv : c->kv_heads;
   size_t qg_len = L->wq.rows;
   size_t q_len = L->wo.cols;                 /* gate half excluded */
-  size_t kvn = c->kv_heads * hd;
+  size_t kvn = n_kv * hd;
   float *qg = s->q, *k = s->k, *v = s->v;
 
   const oc_q8blk *nq = quant_acts((scratch_t *)s, normed, h, 1,
       w_needs_q8(&L->wq) || w_needs_q8(&L->wk) || w_needs_q8(&L->wv));
   oc_gemv(&L->wq, qg_len, h, normed, nq, qg);
   oc_gemv(&L->wk, kvn, h, normed, nq, k);
-  oc_gemv(&L->wv, kvn, h, normed, nq, v);
+  if (L->v_from_k)
+    memcpy(v, k, kvn * sizeof(float));       /* gemma4: no v_proj, V = K-proj */
+  else
+    oc_gemv(&L->wv, kvn, h, normed, nq, v);
   add_bias(qg, L->q_bias, L->q_bias_n, qg_len);
   add_bias(k, L->k_bias, L->k_bias_n, kvn);
   add_bias(v, L->v_bias, L->v_bias_n, kvn);
@@ -662,11 +756,14 @@ static void attn_layer_token(const oc_model *m, const oc_layer *L,
     }
   }
   if (L->q_norm) head_norm(q, L->q_norm, q_heads, hd, c->rms_eps);
-  if (L->k_norm) head_norm(k, L->k_norm, c->kv_heads, hd, c->rms_eps);
-  oc_rope(q, hd, q_heads, rope_pos, c->rope_theta, c->rope_dim, c->yarn_factor,
-          c->yarn_orig_ctx);
-  oc_rope(k, hd, c->kv_heads, rope_pos, c->rope_theta, c->rope_dim, c->yarn_factor,
-          c->yarn_orig_ctx);
+  if (L->k_norm) head_norm(k, L->k_norm, n_kv, hd, c->rms_eps);
+  if (L->v_rms) head_norm(v, NULL, n_kv, hd, c->rms_eps);
+  float theta = L->theta != 0.0f ? L->theta : c->rope_theta;
+  size_t n_rot = L->n_rot ? L->n_rot : c->rope_dim;
+  oc_rope(q, hd, q_heads, rope_pos, theta, n_rot, c->yarn_factor,
+          c->yarn_orig_ctx, L->rope_ff);
+  oc_rope(k, hd, n_kv, rope_pos, theta, n_rot, c->yarn_factor,
+          c->yarn_orig_ctx, L->rope_ff);
 
   size_t base = (slot % kv_ctx) * kvn;
   memcpy(kv_k + base, k, kvn * sizeof(float));
@@ -674,7 +771,8 @@ static void attn_layer_token(const oc_model *m, const oc_layer *L,
   size_t seq_len = slot + 1;
   if (seq_len > kv_ctx) seq_len = kv_ctx;
 
-  oc_attention(s->attn, q, kv_k, kv_v, seq_len, q_heads, c->kv_heads, hd);
+  oc_attention(s->attn, q, kv_k, kv_v, seq_len, q_heads, n_kv, hd,
+               L->attn_scale);
   if (gate)
     for (size_t i = 0; i < q_len; ++i) s->attn[i] *= sigmoidf_(gate[i]);
 
@@ -694,10 +792,16 @@ static void ffn_block(const oc_model *m, const oc_layer *L, float *x_batch,
       w_needs_q8(&L->gate) || w_needs_q8(&L->up));
   oc_gemm(&L->gate, in, h, s->normed, fq, s->gate, batch);
   oc_gemm(&L->up, in, h, s->normed, fq, s->up, batch);
-  for (size_t b = 0; b < batch; ++b)
-    oc_swiglu(s->gate + b * in, s->up + b * in, in);
+  for (size_t b = 0; b < batch; ++b) {
+    if (m->gemma) oc_geglu(s->gate + b * in, s->up + b * in, in);
+    else oc_swiglu(s->gate + b * in, s->up + b * in, in);
+  }
   const oc_q8blk *gq = quant_acts(s, s->gate, in, batch, w_needs_q8(&L->down));
   oc_gemm(&L->down, h, in, s->gate, gq, s->ffn_out, batch);
+  if (L->ffn_post_norm)
+    for (size_t b = 0; b < batch; ++b)
+      oc_rms_norm(s->ffn_out + b * h, s->ffn_out + b * h, L->ffn_post_norm, h,
+                  c->rms_eps);
   for (size_t b = 0; b < batch; ++b)
     for (size_t i = 0; i < h; ++i) x_batch[b * h + i] += s->ffn_out[b * h + i];
 }
@@ -718,15 +822,27 @@ static void run_layers(oc_model *m, float *x_batch, size_t batch,
         for (size_t i = 0; i < h; ++i)
           x_batch[b * h + i] += s->attn_out[b * h + i];
     } else {
-      float *kv_k = m->kv_k + (size_t)L->kv_slot * m->kv_ctx * m->kv_stride;
-      float *kv_v = m->kv_v + (size_t)L->kv_slot * m->kv_ctx * m->kv_stride;
+      float *kv_k, *kv_v;
+      size_t cap;
+      if (L->kv_ck) {
+        kv_k = L->kv_ck; kv_v = L->kv_cv; cap = L->kv_cap;
+      } else {
+        kv_k = m->kv_k + (size_t)L->kv_slot * m->kv_ctx * m->kv_stride;
+        kv_v = m->kv_v + (size_t)L->kv_slot * m->kv_ctx * m->kv_stride;
+        cap = m->kv_ctx;
+      }
       for (size_t b = 0; b < batch; ++b) {
         attn_layer_token(m, L, s->normed + b * h, start_pos + b, start_pos + b,
-                         kv_k, kv_v, m->kv_ctx, s->attn_out, s);
+                         kv_k, kv_v, cap, s->attn_out, s);
+        if (L->attn_post_norm)
+          oc_rms_norm(s->attn_out, s->attn_out, L->attn_post_norm, h, c->rms_eps);
         for (size_t i = 0; i < h; ++i) x_batch[b * h + i] += s->attn_out[i];
       }
     }
     ffn_block(m, L, x_batch, batch, s);
+    if (L->out_scale_v != 1.0f && L->out_scale_v != 0.0f)
+      for (size_t b = 0; b < batch; ++b)
+        for (size_t i = 0; i < h; ++i) x_batch[b * h + i] *= L->out_scale_v;
     if (start_pos == 0 && getenv("OC_TRACE")) {
       double sum = 0, asum = 0;
       for (size_t i = 0; i < h; ++i) {
@@ -748,6 +864,11 @@ static void final_logits(oc_model *m, const float *x_batch, size_t batch,
     oc_rms_norm(s->normed + b * h, x_batch + b * h, m->final_norm, h, c->rms_eps);
   const oc_q8blk *hq = quant_acts(s, s->normed, h, batch, w_needs_q8(&m->lm_head));
   oc_gemm(&m->lm_head, c->vocab_size, h, s->normed, hq, logits_all, batch);
+  if (m->logit_softcap > 0.0f) {
+    float cap = m->logit_softcap;
+    for (size_t i = 0; i < batch * c->vocab_size; ++i)
+      logits_all[i] = cap * tanhf(logits_all[i] / cap);
+  }
 }
 
 static void forward_impl(oc_model *m, const uint32_t *tokens, size_t n,
@@ -795,6 +916,33 @@ void oc_forward(oc_model *m, const uint32_t *tokens, size_t n, size_t start_pos,
 void oc_forward_all(oc_model *m, const uint32_t *tokens, size_t n,
                     size_t start_pos, float *logits_all) {
   forward_impl(m, tokens, n, start_pos, logits_all, true);
+}
+
+/* Training path (finetune.c): CPU only, exposes the post-final-norm hidden
+ * rows that the LoRA head trains against. */
+void oc_forward_train(oc_model *m, const uint32_t *tokens, size_t n,
+                      size_t start_pos, float *normed_all, float *logits_all) {
+  const oc_config *c = &m->cfg;
+  if (n == 0) oc_die("forward: empty input");
+  if (start_pos + n > m->kv_ctx)
+    oc_die("forward: context exceeded (%zu > %zu)", start_pos + n, m->kv_ctx);
+  size_t h = c->hidden_size;
+  scratch_t s = scratch_alloc(m, n);
+  float *xb = malloc(n * h * sizeof(float));
+  for (size_t i = 0; i < n; ++i) embed_token(m, tokens[i], xb + i * h);
+  run_layers(m, xb, n, start_pos, &s);
+  memcpy(m->x, xb + (n - 1) * h, h * sizeof(float));
+  for (size_t b = 0; b < n; ++b)
+    oc_rms_norm(normed_all + b * h, xb + b * h, m->final_norm, h, c->rms_eps);
+  const oc_q8blk *hq = quant_acts(&s, normed_all, h, n, w_needs_q8(&m->lm_head));
+  oc_gemm(&m->lm_head, c->vocab_size, h, normed_all, hq, logits_all, n);
+  if (m->logit_softcap > 0.0f) {
+    float cap = m->logit_softcap;
+    for (size_t i = 0; i < n * c->vocab_size; ++i)
+      logits_all[i] = cap * tanhf(logits_all[i] / cap);
+  }
+  free(xb);
+  scratch_free(&s);
 }
 
 /* ---- MTP drafting (greedy). Anchored on m->x (last committed hidden). ---- */

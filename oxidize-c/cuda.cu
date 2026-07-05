@@ -35,8 +35,12 @@ extern "C" {
 
 namespace {
 
-struct GpuW {           /* FP16 weight matrix [rows x cols] row-major on device */
+struct GpuW {           /* weight matrix [rows x cols] row-major on device:
+                         * either FP16 dense (d) or raw quant blocks (qd) with a
+                         * fused dequant-GEMV kernel (IQ4_XS / Q4_K) */
   __half *d = nullptr;
+  uint8_t *qd = nullptr;
+  int quant = -1;
   int rows = 0, cols = 0;
 };
 
@@ -47,6 +51,15 @@ struct GpuLayer {
   GpuW wq, wk, wv, wo;
   float *q_norm = nullptr, *k_norm = nullptr;  /* per-head, may be null */
   int kv_slot = -1;
+  /* per-layer geometry (gemma4 dual attention) */
+  int hd = 0, n_kv = 0, n_rot = 0;
+  float theta = 0.0f, attn_scale = 0.0f;      /* attn_scale 0 = 1/sqrt(hd) */
+  const float *rope_ff = nullptr;             /* device freq divisors or null */
+  bool v_from_k = false, v_rms = false;
+  float *attn_post_norm = nullptr, *ffn_post_norm = nullptr;
+  float out_scale = 1.0f;
+  float *my_kv_k = nullptr, *my_kv_v = nullptr; /* private cache (gemma) */
+  int my_kv_cap = 0;
   /* gdn */
   GpuW qkv, ssm_alpha, ssm_beta, ssm_out, gdn_gate;
   float *ssm_a = nullptr, *ssm_dt_bias = nullptr, *ssm_conv1d = nullptr,
@@ -64,6 +77,9 @@ struct GpuCtx {
   cublasHandle_t cublas;
   int h, n_heads, kv_heads, head_dim, rope_dim, inter, vocab, n_layers;
   float rms_eps, rope_theta, yarn_factor, yarn_orig_ctx;
+  bool gemma = false;
+  float logit_softcap = 0.0f;
+  float *rope_freqs = nullptr;               /* device, shared by full layers */
   int kv_ctx, kv_stride;
   GpuLayer *layers;
   GpuW lm_head;
@@ -115,7 +131,8 @@ __global__ void k_head_rms_norm(float *v, const float *w, int hd, float eps) {
     __syncthreads();
   }
   float inv = rsqrtf(red[0] / (float)hd + eps);
-  for (int i = threadIdx.x; i < hd; i += blockDim.x) hp[i] = hp[i] * inv * w[i];
+  for (int i = threadIdx.x; i < hd; i += blockDim.x)
+    hp[i] = hp[i] * inv * (w ? w[i] : 1.0f);
 }
 
 __global__ void k_add(float *x, const float *b, int n) {
@@ -129,6 +146,30 @@ __global__ void k_swiglu(float *gate, const float *up, int n) {
     float g = gate[i];
     gate[i] = g / (1.0f + expf(-g)) * up[i];
   }
+}
+
+__global__ void k_geglu(float *gate, const float *up, int n) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < n) {
+    float g = gate[i];
+    const float kk = 0.7978845608028654f;
+    gate[i] = 0.5f * g * (1.0f + tanhf(kk * (g + 0.044715f * g * g * g))) * up[i];
+  }
+}
+
+__global__ void k_scale(float *x, float s, int n) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < n) x[i] *= s;
+}
+
+__global__ void k_softcap(float *x, float cap, int n) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < n) x[i] = cap * tanhf(x[i] / cap);
+}
+
+__global__ void k_copy(float *dst, const float *srcv, int n) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < n) dst[i] = srcv[i];
 }
 
 __global__ void k_sigmoid_gate(float *x, const float *gate, int n) {
@@ -149,15 +190,17 @@ __global__ void k_deinterleave(const float *qg, float *q, float *gate, int heads
 /* RoPE (NeoX split-half, partial) with optional YaRN. One thread per
  * (head, i<half). Ports oc_rope. */
 __global__ void k_rope(float *vec, int head_dim, int n_heads, int pos,
-                       float theta, int rope_dim, float yf, float yorig) {
+                       float theta, int rope_dim, float yf, float yorig,
+                       const float *ff) {
   int rl = (rope_dim == 0 || rope_dim > head_dim) ? head_dim : rope_dim;
   int half = rl / 2;
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx >= n_heads * half) return;
   int hh = idx / half, i = idx % half;
   bool yarn = yf > 1.0f && yorig > 0.0f;
-  if (!yarn && pos == 0) return;
+  if (!yarn && pos == 0 && !ff) return;
   float freq = powf(theta, -2.0f * (float)i / (float)rl);
+  if (ff) freq /= ff[i];
   float ang = (float)pos * freq, c, s;
   if (yarn) {
     float fs = 1.0f / yf, msc = 1.0f + 0.1f * logf(yf);
@@ -198,7 +241,7 @@ __global__ void k_kv_append(float *kv_k, float *kv_v, const float *k,
  * threads). Ports oc_attention. kv_k/kv_v point at this layer's slice. */
 __global__ void k_attention(float *out, const float *q, const float *kv_k,
                             const float *kv_v, int seq_len, int n_heads,
-                            int kv_heads, int head_dim) {
+                            int kv_heads, int head_dim, float scale) {
   int head = blockIdx.x;
   int d = threadIdx.x;                 /* one thread per head_dim element */
   if (head >= n_heads || d >= head_dim) return;
@@ -206,14 +249,14 @@ __global__ void k_attention(float *out, const float *q, const float *kv_k,
   int kv_off = (head / group) * head_dim;
   int kvn = kv_heads * head_dim;
   const float *qh = q + head * head_dim;
-  __shared__ float sh_q[256];
-  __shared__ float sh_red[256];
+  __shared__ float sh_q[512];
+  __shared__ float sh_red[512];
   __shared__ float s_max, s_sum, s_score, s_factor, s_es;
   sh_q[d] = qh[d];
   float acc = 0.0f;                    /* this thread's out[d] accumulator */
   if (d == 0) { s_max = -1e30f; s_sum = 0.0f; }
   __syncthreads();
-  float scale = rsqrtf((float)head_dim);
+  if (scale == 0.0f) scale = rsqrtf((float)head_dim);
   for (int t = 0; t < seq_len; ++t) {
     const float *kr = kv_k + t * kvn + kv_off;
     /* score = dot(q, k) * scale  via block reduction */
@@ -353,8 +396,114 @@ __global__ void k_gated_rms_norm(float *core, const float *w, const float *z,
   }
 }
 
+/* ---- fused dequant-GEMV kernels: weights stay 4-bit resident on device.
+ * One block per output row; each thread accumulates 32-value sub-blocks,
+ * then a shared-memory tree reduction. Bandwidth-bound by design. ---- */
+
+__constant__ float c_kv_iq4nl[16] = {-127.f, -104.f, -83.f, -65.f, -49.f, -35.f,
+                                     -22.f,  -10.f,  1.f,   13.f,  25.f,  38.f,
+                                     53.f,   69.f,   89.f,  113.f};
+
+__global__ void k_gemv_iq4xs(const uint8_t *__restrict__ W,
+                             const float *__restrict__ x, float *__restrict__ y,
+                             int rows, int cols) {
+  int r = blockIdx.x;
+  if (r >= rows) return;
+  const uint8_t *row = W + (size_t)r * (cols / 256) * 136;
+  int nsub = cols / 32;
+  float acc = 0.0f;
+  for (int i = threadIdx.x; i < nsub; i += blockDim.x) {
+    int sb = i >> 3, ib = i & 7;
+    const uint8_t *blk = row + (size_t)sb * 136;
+    float d = __half2float(*(const __half *)blk);
+    uint16_t shl = *(const uint16_t *)(blk + 2);
+    int ls = ((blk[4 + ib / 2] >> (4 * (ib & 1))) & 0xF) |
+             (((shl >> (2 * ib)) & 3) << 4);
+    const uint8_t *qs = blk + 8 + ib * 16;
+    const float *xp = x + sb * 256 + ib * 32;
+    /* 16 bytes as two uint4-ish loads */
+    float s = 0.0f;
+#pragma unroll
+    for (int j = 0; j < 16; ++j) {
+      uint8_t b = qs[j];
+      s += c_kv_iq4nl[b & 0xF] * xp[j] + c_kv_iq4nl[b >> 4] * xp[j + 16];
+    }
+    acc += d * (float)(ls - 32) * s;
+  }
+  __shared__ float red[256];
+  red[threadIdx.x] = acc;
+  __syncthreads();
+  for (int st = blockDim.x / 2; st > 0; st >>= 1) {
+    if (threadIdx.x < st) red[threadIdx.x] += red[threadIdx.x + st];
+    __syncthreads();
+  }
+  if (threadIdx.x == 0) y[r] = red[0];
+}
+
+__device__ inline void d_scale_min_k4(int j, const uint8_t *s, int *sc, int *m) {
+  if (j < 4) {
+    *sc = s[j] & 63;
+    *m = s[j + 4] & 63;
+  } else {
+    *sc = (s[j + 4] & 0xF) | ((s[j - 4] >> 6) << 4);
+    *m = (s[j + 4] >> 4) | ((s[j] >> 6) << 4);
+  }
+}
+
+__global__ void k_gemv_q4k(const uint8_t *__restrict__ W,
+                           const float *__restrict__ x, float *__restrict__ y,
+                           int rows, int cols) {
+  int r = blockIdx.x;
+  if (r >= rows) return;
+  const uint8_t *row = W + (size_t)r * (cols / 256) * 144;
+  int nsub = cols / 32;                /* 32-value groups; 8 per superblock */
+  float acc = 0.0f;
+  for (int i = threadIdx.x; i < nsub; i += blockDim.x) {
+    int sb = i >> 3, g = i & 7;        /* group g: values g*32..g*32+31 */
+    const uint8_t *blk = row + (size_t)sb * 144;
+    float d = __half2float(*(const __half *)blk);
+    float mn = __half2float(*(const __half *)(blk + 2));
+    int sc, m;
+    d_scale_min_k4(g, blk + 4, &sc, &m);
+    /* q4_k layout: 32-byte chunk p=g/2 holds groups 2p (lo nibbles) and
+     * 2p+1 (hi nibbles) */
+    const uint8_t *qs = blk + 16 + (g / 2) * 32;
+    const float *xp = x + sb * 256 + g * 32;
+    float s = 0.0f, xs = 0.0f;
+    if (g & 1) {
+#pragma unroll
+      for (int j = 0; j < 32; ++j) {
+        s += (float)(qs[j] >> 4) * xp[j];
+        xs += xp[j];
+      }
+    } else {
+#pragma unroll
+      for (int j = 0; j < 32; ++j) {
+        s += (float)(qs[j] & 0xF) * xp[j];
+        xs += xp[j];
+      }
+    }
+    acc += d * (float)sc * s - mn * (float)m * xs;
+  }
+  __shared__ float red[256];
+  red[threadIdx.x] = acc;
+  __syncthreads();
+  for (int st = blockDim.x / 2; st > 0; st >>= 1) {
+    if (threadIdx.x < st) red[threadIdx.x] += red[threadIdx.x + st];
+    __syncthreads();
+  }
+  if (threadIdx.x == 0) y[r] = red[0];
+}
+
 /* ---------- matmul helper: y[rows] = W[rows x cols] @ x[cols], device fp32 ---- */
 void gemv(GpuCtx *c, const GpuW &w, const float *d_in, float *d_out) {
+  if (w.qd) {
+    if (w.quant == OC_IQ4_XS)
+      k_gemv_iq4xs<<<w.rows, 256>>>(w.qd, d_in, d_out, w.rows, w.cols);
+    else
+      k_gemv_q4k<<<w.rows, 256>>>(w.qd, d_in, d_out, w.rows, w.cols);
+    return;
+  }
   int n = w.cols;
   int blk = 256, grid = (n + blk - 1) / blk;
   k_f32_to_f16<<<grid, blk>>>(c->d_xh, d_in, n);
@@ -408,11 +557,18 @@ float *upload_fp32(const float *host, size_t n) {
 
 GpuW mkw(const oc_weight *w) {
   GpuW g;
-  if (w->quantized || w->f32) {
-    g.d = upload_weight_fp16(w);
-    g.rows = (int)w->rows;
-    g.cols = (int)w->cols;
+  if (!w->quantized && !w->f32) return g;
+  g.rows = (int)w->rows;
+  g.cols = (int)w->cols;
+  if (w->quantized && (w->quant == OC_IQ4_XS || w->quant == OC_Q4_K) &&
+      w->cols % 256 == 0) {
+    size_t bytes = w->rows * oc_row_bytes(w->quant, w->cols);
+    CDIE(cudaMalloc(&g.qd, bytes));
+    CDIE(cudaMemcpy(g.qd, w->data, bytes, cudaMemcpyHostToDevice));
+    g.quant = (int)w->quant;
+    return g;
   }
+  g.d = upload_weight_fp16(w);
   return g;
 }
 
@@ -449,6 +605,12 @@ int oc_cuda_build(oc_model *m) {
   c->yarn_orig_ctx = cf->yarn_orig_ctx;
   c->kv_ctx = (int)m->kv_ctx;
   c->kv_stride = (int)m->kv_stride;
+  c->gemma = m->gemma;
+  c->logit_softcap = m->logit_softcap;
+  if (m->rope_freqs && m->gemma) {
+    /* full-attn freq divisors sized n_rot/2 (largest head_dim / 2 is enough) */
+    c->rope_freqs = upload_fp32(m->rope_freqs, (size_t)cf->head_dim / 2);
+  }
 
   c->layers = (GpuLayer *)calloc(c->n_layers, sizeof(GpuLayer));
   size_t wbytes = 0;
@@ -494,17 +656,36 @@ int oc_cuda_build(oc_model *m) {
       g->wk = mkw(&L->wk);
       g->wv = mkw(&L->wv);
       g->wo = mkw(&L->wo);
-      g->q_norm = upload_fp32(L->q_norm, c->head_dim);
-      g->k_norm = upload_fp32(L->k_norm, c->head_dim);
+      g->hd = L->hd ? (int)L->hd : c->head_dim;
+      g->n_kv = L->n_kv ? (int)L->n_kv : c->kv_heads;
+      g->n_rot = L->n_rot ? (int)L->n_rot : c->rope_dim;
+      g->theta = L->theta != 0.0f ? L->theta : c->rope_theta;
+      g->attn_scale = L->attn_scale;
+      g->v_from_k = L->v_from_k;
+      g->v_rms = L->v_rms;
+      g->out_scale = L->out_scale_v != 0.0f ? L->out_scale_v : 1.0f;
+      g->rope_ff = L->rope_ff ? c->rope_freqs : nullptr;
+      g->q_norm = upload_fp32(L->q_norm, g->hd);
+      g->k_norm = upload_fp32(L->k_norm, g->hd);
+      g->attn_post_norm = upload_fp32(L->attn_post_norm, c->h);
+      g->ffn_post_norm = upload_fp32(L->ffn_post_norm, c->h);
+      if (L->kv_ck) {   /* gemma: private per-layer cache on device */
+        g->my_kv_cap = (int)L->kv_cap;
+        size_t elems = (size_t)g->my_kv_cap * g->n_kv * g->hd;
+        CDIE(cudaMalloc(&g->my_kv_k, elems * sizeof(float)));
+        CDIE(cudaMalloc(&g->my_kv_v, elems * sizeof(float)));
+      }
     }
   }
   c->final_norm = upload_fp32(m->final_norm, c->h);
   c->lm_head = mkw(&m->lm_head);
 
-  /* KV cache (device) */
-  size_t kv_elems = (size_t)m->n_kv_layers * c->kv_ctx * c->kv_stride;
-  CDIE(cudaMalloc(&c->kv_k, kv_elems * sizeof(float)));
-  CDIE(cudaMalloc(&c->kv_v, kv_elems * sizeof(float)));
+  /* KV cache (device); gemma uses per-layer private caches instead */
+  if (!m->gemma) {
+    size_t kv_elems = (size_t)m->n_kv_layers * c->kv_ctx * c->kv_stride;
+    CDIE(cudaMalloc(&c->kv_k, kv_elems * sizeof(float)));
+    CDIE(cudaMalloc(&c->kv_v, kv_elems * sizeof(float)));
+  }
 
   /* scratch: size the widest matmul output */
   int wide = c->inter;
@@ -583,37 +764,56 @@ void oc_cuda_forward(oc_model *m, const float *embed_host, size_t pos,
     k_rms_norm<<<1, 256>>>(c->d_norm, c->d_x, g->attn_norm, h, c->rms_eps);
 
     if (!g->is_gdn) {
-      int qg_len = g->wq.rows, kvn = c->kv_stride, q_len = g->wo.cols;
-      int q_heads = q_len / hd;
+      int lhd = g->hd ? g->hd : hd;
+      int lkv = g->n_kv ? g->n_kv : kvh;
+      int qg_len = g->wq.rows, kvn = lkv * lhd, q_len = g->wo.cols;
+      int q_heads = q_len / lhd;
+      float ltheta = g->theta != 0.0f ? g->theta : c->rope_theta;
+      int lrot = g->n_rot ? g->n_rot : c->rope_dim;
       gemv(c, g->wq, c->d_norm, c->d_qg);
       gemv(c, g->wk, c->d_norm, c->d_k);
-      gemv(c, g->wv, c->d_norm, c->d_v);
+      if (g->v_from_k)
+        k_copy<<<G(kvn), B>>>(c->d_v, c->d_k, kvn);
+      else
+        gemv(c, g->wv, c->d_norm, c->d_v);
       float *qptr = c->d_qg, *gate = nullptr;
       if (qg_len >= 2 * q_len) {
-        k_deinterleave<<<G(q_heads * hd), B>>>(c->d_qg, c->d_q, c->d_gate,
-                                               q_heads, hd);
+        k_deinterleave<<<G(q_heads * lhd), B>>>(c->d_qg, c->d_q, c->d_gate,
+                                                q_heads, lhd);
         qptr = c->d_q;
         gate = c->d_gate;
       }
       if (g->q_norm)
-        k_head_rms_norm<<<q_heads, 256>>>(qptr, g->q_norm, hd, c->rms_eps);
+        k_head_rms_norm<<<q_heads, 256>>>(qptr, g->q_norm, lhd, c->rms_eps);
       if (g->k_norm)
-        k_head_rms_norm<<<kvh, 256>>>(c->d_k, g->k_norm, hd, c->rms_eps);
-      k_rope<<<G(q_heads * (hd / 2)), B>>>(qptr, hd, q_heads, (int)pos,
-                                           c->rope_theta, c->rope_dim,
-                                           c->yarn_factor, c->yarn_orig_ctx);
-      k_rope<<<G(kvh * (hd / 2)), B>>>(c->d_k, hd, kvh, (int)pos, c->rope_theta,
-                                       c->rope_dim, c->yarn_factor,
-                                       c->yarn_orig_ctx);
-      float *kv_k = c->kv_k + (size_t)g->kv_slot * c->kv_ctx * c->kv_stride;
-      float *kv_v = c->kv_v + (size_t)g->kv_slot * c->kv_ctx * c->kv_stride;
-      k_kv_append<<<G(kvn), B>>>(kv_k, kv_v, c->d_k, c->d_v, (int)pos, c->kv_ctx,
-                                 kvn);
+        k_head_rms_norm<<<lkv, 256>>>(c->d_k, g->k_norm, lhd, c->rms_eps);
+      if (g->v_rms)
+        k_head_rms_norm<<<lkv, 256>>>(c->d_v, nullptr, lhd, c->rms_eps);
+      k_rope<<<G(q_heads * (lhd / 2)), B>>>(qptr, lhd, q_heads, (int)pos,
+                                            ltheta, lrot, c->yarn_factor,
+                                            c->yarn_orig_ctx, g->rope_ff);
+      k_rope<<<G(lkv * (lhd / 2)), B>>>(c->d_k, lhd, lkv, (int)pos, ltheta,
+                                        lrot, c->yarn_factor, c->yarn_orig_ctx,
+                                        g->rope_ff);
+      float *kv_k, *kv_v;
+      int cap;
+      if (g->my_kv_k) {
+        kv_k = g->my_kv_k; kv_v = g->my_kv_v; cap = g->my_kv_cap;
+      } else {
+        kv_k = c->kv_k + (size_t)g->kv_slot * c->kv_ctx * c->kv_stride;
+        kv_v = c->kv_v + (size_t)g->kv_slot * c->kv_ctx * c->kv_stride;
+        cap = c->kv_ctx;
+      }
+      k_kv_append<<<G(kvn), B>>>(kv_k, kv_v, c->d_k, c->d_v, (int)pos, cap, kvn);
       int seq_len = (int)pos + 1;
-      if (seq_len > c->kv_ctx) seq_len = c->kv_ctx;
-      k_attention<<<nh, hd>>>(c->d_attn, qptr, kv_k, kv_v, seq_len, nh, kvh, hd);
+      if (seq_len > cap) seq_len = cap;
+      k_attention<<<q_heads, lhd>>>(c->d_attn, qptr, kv_k, kv_v, seq_len,
+                                    q_heads, lkv, lhd, g->attn_scale);
       if (gate) k_sigmoid_gate<<<G(q_len), B>>>(c->d_attn, gate, q_len);
       gemv(c, g->wo, c->d_attn, c->d_tmp);
+      if (g->attn_post_norm)
+        k_rms_norm<<<1, 256>>>(c->d_tmp, c->d_tmp, g->attn_post_norm, h,
+                               c->rms_eps);
       k_add<<<G(h), B>>>(c->d_x, c->d_tmp, h);
     } else {
       int qo = g->qkv_out, vd = g->value_dim, kd = g->key_dim;
@@ -644,9 +844,16 @@ void oc_cuda_forward(oc_model *m, const float *embed_host, size_t pos,
     k_rms_norm<<<1, 256>>>(c->d_norm, c->d_x, g->ffn_norm, h, c->rms_eps);
     gemv(c, g->gate, c->d_norm, c->d_gf);
     gemv(c, g->up, c->d_norm, c->d_uf);
-    k_swiglu<<<G(c->inter), B>>>(c->d_gf, c->d_uf, c->inter);
+    if (c->gemma)
+      k_geglu<<<G(c->inter), B>>>(c->d_gf, c->d_uf, c->inter);
+    else
+      k_swiglu<<<G(c->inter), B>>>(c->d_gf, c->d_uf, c->inter);
     gemv(c, g->down, c->d_gf, c->d_tmp);
+    if (g->ffn_post_norm)
+      k_rms_norm<<<1, 256>>>(c->d_tmp, c->d_tmp, g->ffn_post_norm, h, c->rms_eps);
     k_add<<<G(h), B>>>(c->d_x, c->d_tmp, h);
+    if (g->out_scale != 1.0f && g->out_scale != 0.0f)
+      k_scale<<<G(h), B>>>(c->d_x, g->out_scale, h);
   }
 
   if (!want_logits) {
@@ -655,6 +862,8 @@ void oc_cuda_forward(oc_model *m, const float *embed_host, size_t pos,
   }
   k_rms_norm<<<1, 256>>>(c->d_norm, c->d_x, c->final_norm, h, c->rms_eps);
   gemv(c, c->lm_head, c->d_norm, c->d_logits);
+  if (c->logit_softcap > 0.0f)
+    k_softcap<<<G(c->vocab), B>>>(c->d_logits, c->logit_softcap, c->vocab);
   CDIE(cudaMemcpy(logits_host, c->d_logits, c->vocab * sizeof(float),
                   cudaMemcpyDeviceToHost));
   (void)m;
