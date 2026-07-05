@@ -17,6 +17,7 @@ typedef enum {
   OC_Q4_0, OC_Q4_1, OC_Q5_0, OC_Q5_1, OC_Q8_0,
   OC_Q2_K, OC_Q3_K, OC_Q4_K, OC_Q5_K, OC_Q6_K,
   OC_IQ4_XS,
+  OC_Q4_O,       /* custom: Q4_0-sized (18B) symmetric 4-bit, MSE-optimal scale */
   OC_UNKNOWN,
 } oc_quant;
 

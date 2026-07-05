@@ -51,7 +51,8 @@ float oc_f16_to_f32(const uint8_t *le2) {
 size_t oc_block_values(oc_quant q) {
   switch (q) {
     case OC_F32: case OC_F16: case OC_BF16: return 1;
-    case OC_Q4_0: case OC_Q4_1: case OC_Q5_0: case OC_Q5_1: case OC_Q8_0: return QK;
+    case OC_Q4_0: case OC_Q4_1: case OC_Q5_0: case OC_Q5_1: case OC_Q8_0:
+    case OC_Q4_O: return QK;
     case OC_Q2_K: case OC_Q3_K: case OC_Q4_K: case OC_Q5_K: case OC_Q6_K:
     case OC_IQ4_XS: return QK_K;
     default: oc_die("quant: no block layout (type %d)", (int)q);
@@ -63,7 +64,7 @@ size_t oc_block_bytes(oc_quant q) {
   switch (q) {
     case OC_F32: return 4;
     case OC_F16: case OC_BF16: return 2;
-    case OC_Q4_0: return 18;
+    case OC_Q4_0: case OC_Q4_O: return 18;
     case OC_Q4_1: return 20;
     case OC_Q5_0: return 22;
     case OC_Q5_1: return 24;
@@ -101,13 +102,15 @@ oc_quant oc_from_ggml_type(uint32_t t) {
     case 14: return OC_Q6_K;
     case 23: return OC_IQ4_XS;
     case 30: return OC_BF16;
+    case 240: return OC_Q4_O; /* custom, oxidize-c only */
     default: return OC_UNKNOWN;
   }
 }
 
 const char *oc_quant_name(oc_quant q) {
   static const char *n[] = {"F32","F16","BF16","Q4_0","Q4_1","Q5_0","Q5_1",
-                            "Q8_0","Q2_K","Q3_K","Q4_K","Q5_K","Q6_K","IQ4_XS","?"};
+                            "Q8_0","Q2_K","Q3_K","Q4_K","Q5_K","Q6_K","IQ4_XS",
+                            "Q4_O","?"};
   return n[q <= OC_UNKNOWN ? q : OC_UNKNOWN];
 }
 
@@ -127,6 +130,7 @@ uint32_t oc_to_ggml_type(oc_quant q) {
     case OC_Q6_K: return 14;
     case OC_IQ4_XS: return 23;
     case OC_BF16: return 30;
+    case OC_Q4_O: return 240; /* custom, oxidize-c only */
     default: oc_die("quant: no ggml type for %d", (int)q);
   }
   return 0;
@@ -546,6 +550,49 @@ bool oc_quantize_row(oc_quant q, const float *src, uint8_t *dst, size_t n) {
         }
       }
       return true;
+    case OC_Q4_O: /* custom: Q4_0 layout, MSE-optimal scale (make_qx_quants) */
+      for (size_t b = 0; b < n / QK; ++b) {
+        const float *x = src + b * QK;
+        uint8_t *o = dst + b * 18;
+        float amax = 0, mx = 0;
+        for (size_t i = 0; i < QK; ++i) {
+          float a = fabsf(x[i]);
+          if (a > amax) { amax = a; mx = x[i]; }
+        }
+        float best_d = mx / -8.0f;
+        if (amax > 0) {
+          /* search integer scale of the max element; for each level assignment
+           * take the L2-optimal d = sum(x*l)/sum(l*l), keep min sq-error. */
+          float best_err = INFINITY;
+          for (int is = -9; is <= 9; ++is) {
+            if (is == 0) continue;
+            float id = (float)is / mx;
+            float sumlx = 0, suml2 = 0;
+            for (size_t i = 0; i < QK; ++i) {
+              int l = clampi((int)lrintf(x[i] * id), -8, 7);
+              sumlx += x[i] * (float)l;
+              suml2 += (float)(l * l);
+            }
+            if (suml2 <= 0) continue;
+            float d = sumlx / suml2;
+            float err = 0;
+            for (size_t i = 0; i < QK; ++i) {
+              int l = clampi((int)lrintf(x[i] * id), -8, 7);
+              float diff = d * (float)l - x[i];
+              err += diff * diff;
+            }
+            if (err < best_err) { best_err = err; best_d = d; }
+          }
+        }
+        float id = best_d != 0 ? 1.0f / best_d : 0.0f;
+        wr16(o, oc_f32_to_f16(best_d));
+        for (size_t i = 0; i < QK / 2; ++i) {
+          int lo = clampi((int)lrintf(x[i] * id), -8, 7) + 8;
+          int hi = clampi((int)lrintf(x[i + QK / 2] * id), -8, 7) + 8;
+          o[2 + i] = (uint8_t)((hi << 4) | lo);
+        }
+      }
+      return true;
     default:
       return false;
   }
@@ -578,6 +625,7 @@ void oc_dequant_row(oc_quant q, const uint8_t *src, float *dst, size_t n) {
       }
       return;
     case OC_Q4_0:
+    case OC_Q4_O: /* same bitstream as Q4_0: (nib-8)*d */
       for (b = 0; b < n / QK; ++b) {
         const uint8_t *blk = src + b * 18;
         float d = oc_f16_to_f32(blk);
