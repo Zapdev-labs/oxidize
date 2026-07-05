@@ -1,0 +1,19 @@
+oxidize-c/model.c
+  s_1f84e407671e0c::t_f18e322b3bcd32 199-200
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "a34fc4c9fab4a21f2170c0910cd3aac93d4b533c",
+  "prompts": {},
+  "sessions": {
+    "s_1f84e407671e0c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "b93ce11a-21ff-4c69-a290-7e9148494956",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
