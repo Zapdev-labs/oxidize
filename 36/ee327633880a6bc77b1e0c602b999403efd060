@@ -1,0 +1,19 @@
+Cargo.lock
+  s_56a772afbecc12::t_ae874adf841cb4 134,136
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "36ee327633880a6bc77b1e0c602b999403efd060",
+  "prompts": {},
+  "sessions": {
+    "s_56a772afbecc12": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "29a9458d-1ba4-41b2-a837-c0dbfee7bab7",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
