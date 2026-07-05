@@ -1,0 +1,19 @@
+oxidize-prune/src/wanda.rs
+  s_e658c70c93080d::t_00b5b35b73b2ec 147-150,152,154,158,162,195-198,200-223,225-233,235-242,244
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "703178d12b15fc720bff18aa721875bc37ac913c",
+  "prompts": {},
+  "sessions": {
+    "s_e658c70c93080d": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "bc6356cd-fafd-435c-a5dc-0c8b3e1fc9d7",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

@@ -1,0 +1,35 @@
+oxidize-cpp/src/gguf.cpp
+  s_5212ca84111762::t_5cee95205ebe6c 27-44,208-225,568-572,592,616,624-625,671
+oxidize-cpp/include/oxidize/gguf.hpp
+  s_5212ca84111762::t_5cee95205ebe6c 17,111-124,137-138,179-180
+oxidize-cpp/src/cli/main.cpp
+  s_5212ca84111762::t_5cee95205ebe6c 84-85,114,214-216,282-292,301-303,318-320,373-379
+  s_5212ca84111762::t_c41b7b6281e586 381-384
+oxidize-cpp/tests/autotune_test.cpp
+  s_5212ca84111762::t_2436f84316548a 8-14,58-60,72-73,87-88
+  s_5212ca84111762::t_7d3d331e4e5761 4
+  s_5212ca84111762::t_99ac992047648b 62-71,95
+  s_5212ca84111762::t_a078b5a3eedec2 61
+oxidize-cpp/include/oxidize/autotune.hpp
+  s_5212ca84111762::t_70a8acdcf01008 25
+oxidize-cpp/src/autotune.cpp
+  s_5212ca84111762::t_5cee95205ebe6c 100,112-114,117,126,159,176
+oxidize-cpp/tests/gguf_mmap_policy_test.cpp
+  s_5212ca84111762::t_99ac992047648b 1-29
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.9",
+  "base_commit_sha": "1b2a73515fb9b706135f8810b80605a62f9d0e72",
+  "prompts": {},
+  "sessions": {
+    "s_5212ca84111762": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f2383-7472-7f40-9115-29b70a98d721",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

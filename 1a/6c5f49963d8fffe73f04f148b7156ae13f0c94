@@ -1,0 +1,28 @@
+oxidize-core/src/lib.rs
+  s_3582b5342698b9::t_8eee6edcd32d4f 323
+oxidize-cpp/docs/training/CPU-training-design.md
+  s_3582b5342698b9::t_af3c3c718c8003 34
+oxidize-core/src/compute/kv_cache.rs
+  s_3582b5342698b9::t_b5a9ac4ba5fc97 1442-1443
+  s_3582b5342698b9::t_8eee6edcd32d4f 1444-1447,1450
+oxidize-cpp/src/iq_grids.inc
+  s_3582b5342698b9::t_af3c3c718c8003 665,668,670,672,693,695,697,701
+oxidize-golang/scripts/manual_qa.sh
+  s_3582b5342698b9::t_0a70e91d279185 51
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "1a6c5f49963d8fffe73f04f148b7156ae13f0c94",
+  "prompts": {},
+  "sessions": {
+    "s_3582b5342698b9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f1219-02c1-7713-9f8b-d532e4c17a17",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

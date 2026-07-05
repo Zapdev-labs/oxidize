@@ -1,0 +1,70 @@
+oxidize-golang/internal/cli/cli_test.go
+  s_2be026474e10fe::t_bd98a8e0b10769 84-103
+  s_2be026474e10fe::t_63aec772aba6cb 104-159
+  s_2be026474e10fe::t_2c2ec042dc2099 7
+  s_2be026474e10fe::t_0375b336501f11 160
+oxidize-golang/hf/hub.go
+  s_2be026474e10fe::t_5c6818cd2396a7 62
+  s_2be026474e10fe::t_96954e8d16c74f 26
+  s_2be026474e10fe::t_541455f9f45ae3 175,196-201,204-206,209-224
+oxidize-golang/internal/cli/root.go
+  s_2be026474e10fe::t_f80d065bb890df 5,9,37-38,44-50,53-59,65
+  s_2be026474e10fe::t_f1e2f6b2d97e87 14,21-33
+  s_2be026474e10fe::t_dcc30d0fa0929c 12-13
+  s_2be026474e10fe::t_8dd0f690fb65a2 1-4,6-8,10-11,15-20,34-36,39-43,51-52,60-64,66-69
+oxidize-golang/internal/cli/cp.go
+  s_2be026474e10fe::t_647e93660d7dce 1-76
+oxidize-golang/internal/cli/format.go
+  s_2be026474e10fe::t_e03aff955e30b5 1-83
+oxidize-golang/internal/cli/show.go
+  s_2be026474e10fe::t_5d0da79b1996d8 1-92,94-121
+  s_2be026474e10fe::t_fea825e1e73340 93
+oxidize-golang/internal/cli/commands.go
+  s_2be026474e10fe::t_5df640944a02d7 215-217
+  s_2be026474e10fe::t_43f9a3d2853cc5 141-142
+  s_2be026474e10fe::t_d925582f4b425f 82-83
+  s_2be026474e10fe::t_1b6128c09bd721 96-97
+  s_2be026474e10fe::t_c892ec877973e9 1-12,17-20,23-29,34,39-40,71-76,78,80,84-91,93-94,98-105,111-117,119,123,127,129-134,143-152,156-157,188-193,197-200,203-207,210-214,218-231,233-246
+  s_2be026474e10fe::t_f7267aa070a51a 154-155
+  s_2be026474e10fe::t_a0f72c160497c3 109-110
+  s_2be026474e10fe::t_edd21605367f73 37-38
+  s_2be026474e10fe::t_e9d1522c41910f 118,125-126,128
+  s_2be026474e10fe::t_39a972275c9c79 13-16,21-22,30-33,35-36,41-70,77,79,81,92,95,106-108,120-122,124,135-140,153,158-187,194-196,201-202,208-209,232
+oxidize-golang/internal/cli/cli.go
+  s_2be026474e10fe::t_a44fb2775f786c 71,73-75,77,94-96,99-100
+  s_2be026474e10fe::t_a7d417c4db554c 101,129-135,141-148,150,152-156,160-179
+  s_2be026474e10fe::t_8cc14da4626ee3 118,125-128
+  s_2be026474e10fe::t_2c568347da8d12 180
+oxidize-golang/internal/cli/pull.go
+  s_2be026474e10fe::t_5c251d9bec1f2b 48,60
+  s_2be026474e10fe::t_bab22541a602e2 1-47,49-59,61-114
+oxidize-golang/internal/cli/chat.go
+  s_2be026474e10fe::t_fcfc966fb16e66 39,42,45-47
+  s_2be026474e10fe::t_2e31de27799eb2 23-24,27,40,43-44,56-64
+  s_2be026474e10fe::t_1dc1a3e03ce678 65-66
+oxidize-golang/internal/cli/table.go
+  s_2be026474e10fe::t_66e98fa9c5543e 1-20
+oxidize-golang/internal/cli/rm.go
+  s_2be026474e10fe::t_77d26d15775190 1-67
+oxidize-golang/go.mod
+  s_2be026474e10fe::t_695cfa4f560855 7-8
+  s_2be026474e10fe::t_cb12e9f4dc5e99 4-6,9-11
+oxidize-golang/go.sum
+  s_2be026474e10fe::t_978ba551bb4931 1-14
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "a14f7df6cb8cd1bd78244f263381445ad5aa9a83",
+  "prompts": {},
+  "sessions": {
+    "s_2be026474e10fe": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "103d6f85-fdaa-45ce-b12f-d5e47b1e087e",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

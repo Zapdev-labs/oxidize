@@ -1,0 +1,26 @@
+oxidize-server/Cargo.toml
+  s_3582b5342698b9::t_4a84b5254a49f6 16
+deny.toml
+  s_3582b5342698b9::t_e73111fb47731a 8-11,25,30
+oxidize-server/src/runtime/model.rs
+  s_3582b5342698b9::t_209ec36afea130 48,50,61,63,73,75,85,87,97,99,109,111,125,127,323,339,365,367
+  s_3582b5342698b9::t_d7904c7b13ca34 341-343
+scripts/ci_benchmark_regression.py
+  s_3582b5342698b9::t_f9eab4ff3972db 102
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "5e6eabfff3b9da978448b2f629a98c14cac557df",
+  "prompts": {},
+  "sessions": {
+    "s_3582b5342698b9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f1219-02c1-7713-9f8b-d532e4c17a17",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

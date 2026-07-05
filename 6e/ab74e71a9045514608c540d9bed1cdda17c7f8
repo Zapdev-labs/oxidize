@@ -1,0 +1,36 @@
+oxidize-cli/src/commands.rs
+  s_2be026474e10fe::t_7c4240c60b5279 1,3-181,186-222
+  s_2be026474e10fe::t_a7fabf75b24e6b 2
+  s_2be026474e10fe::t_163bad9a8a336f 182-185
+oxidize-cli/src/main.rs
+  s_2be026474e10fe::t_73dadbf7ae515b 710-714,721-731
+  s_7bffed45e88231::t_de0ee8919de922 709,715-720
+  s_2be026474e10fe::t_1b0d26ed49e7d7 187
+  s_2be026474e10fe::t_c845bbc3bdf015 2
+oxidize-cli/src/help.rs
+  s_2be026474e10fe::t_7ed31c5cb395e0 32-37,40-41
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "6eab74e71a9045514608c540d9bed1cdda17c7f8",
+  "prompts": {},
+  "sessions": {
+    "s_2be026474e10fe": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "103d6f85-fdaa-45ce-b12f-d5e47b1e087e",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_7bffed45e88231": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c7aa2b04-33cf-4373-bb3d-6f15366c50da",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

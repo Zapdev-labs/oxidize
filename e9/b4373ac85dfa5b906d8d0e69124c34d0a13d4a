@@ -1,0 +1,33 @@
+oxidize-core/src/lib.rs
+  s_3582b5342698b9::t_12f9184ed0e956 94,97
+oxidize-core/Cargo.toml
+  s_3582b5342698b9::t_526d2c21c55166 21,59-60
+oxidize-core/src/autotune/apply.rs
+  s_3582b5342698b9::t_503ba6e067f97c 116,118-119
+oxidize-core/src/autotune/rules.rs
+  s_3582b5342698b9::t_705eae0d5a1c4d 594,596-597,781-782
+  s_3582b5342698b9::t_4f790d440025f9 808
+  s_3582b5342698b9::t_c2a5bb2cfb3dfb 213,229
+oxidize-py/src/lib.rs
+  s_3582b5342698b9::t_28ceec864a6b1b 258
+oxidize-core/src/compute/tensor/kernels/gemm_decode.rs
+  s_3582b5342698b9::t_5413a849c1de98 358-366,469-485,529-540,571-575,687-696,873-882
+oxidize-core/src/compute/tensor/kernels/q_kernels.rs
+  s_3582b5342698b9::t_f7efaf6dbbd77e 242-250
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "e9b4373ac85dfa5b906d8d0e69124c34d0a13d4a",
+  "prompts": {},
+  "sessions": {
+    "s_3582b5342698b9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f1219-02c1-7713-9f8b-d532e4c17a17",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

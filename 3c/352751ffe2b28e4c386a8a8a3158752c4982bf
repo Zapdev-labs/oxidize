@@ -1,0 +1,22 @@
+oxidize-cpp/include/oxidize/vision.hpp
+  s_e658c70c93080d::t_289206cf946980 1-65
+oxidize-cpp/src/vision.cpp
+  s_e658c70c93080d::t_710d3d8c674471 1-79,85-124
+  s_e658c70c93080d::t_b7008281ce8645 80-84
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "3c352751ffe2b28e4c386a8a8a3158752c4982bf",
+  "prompts": {},
+  "sessions": {
+    "s_e658c70c93080d": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "bc6356cd-fafd-435c-a5dc-0c8b3e1fc9d7",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

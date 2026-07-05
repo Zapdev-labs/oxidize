@@ -1,0 +1,23 @@
+oxidize-cli/src/main.rs
+  s_3582b5342698b9::t_f3bc9d061725f9 1058,1080,1083
+deny.toml
+  s_3582b5342698b9::t_bda8642b5ea653 11,26
+oxidize-cli/Cargo.toml
+  s_3582b5342698b9::t_c8862e0ce0b16f 38
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "d4a8af9b525ca26ca86d1ff39915e3ccecee34e8",
+  "prompts": {},
+  "sessions": {
+    "s_3582b5342698b9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f1219-02c1-7713-9f8b-d532e4c17a17",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
