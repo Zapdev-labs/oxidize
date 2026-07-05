@@ -1342,10 +1342,12 @@ mod tests {
     fn single_shot_mode_writes_one_response() {
         let mut writer = Vec::new();
         write_generated_response_with_clock("hello", &mut writer, {
+            // Anchor to one Instant so real elapsed time between calls
+            // cannot skew the mocked deltas.
+            let base = Instant::now();
             let mut ticks = [0u64, 500].into_iter();
             move || {
-                Instant::now()
-                    .checked_add(Duration::from_millis(ticks.next().expect("clock tick")))
+                base.checked_add(Duration::from_millis(ticks.next().expect("clock tick")))
                     .expect("valid instant")
             }
         })
@@ -1390,10 +1392,12 @@ mod tests {
     fn write_generated_response_emits_progress_and_final_response() {
         let mut writer = Vec::new();
         let response = write_generated_response_with_clock("there", &mut writer, {
+            // Anchor to one Instant so real elapsed time between calls
+            // cannot skew the mocked deltas.
+            let base = Instant::now();
             let mut ticks = [0u64, 200].into_iter();
             move || {
-                Instant::now()
-                    .checked_add(Duration::from_millis(ticks.next().expect("clock tick")))
+                base.checked_add(Duration::from_millis(ticks.next().expect("clock tick")))
                     .expect("valid instant")
             }
         })
