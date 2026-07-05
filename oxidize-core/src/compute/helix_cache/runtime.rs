@@ -171,8 +171,9 @@ impl HelixCache {
                 let weight = scores[score_index];
                 score_index += 1;
                 if page.tier == HelixPageTier::Hot {
-                    for dim in 0..head_dim {
-                        out[dim] += weight * page.hot_values[token * head_dim + dim];
+                    let values = &page.hot_values[token * head_dim..(token + 1) * head_dim];
+                    for (acc, value) in out.iter_mut().zip(values) {
+                        *acc += weight * value;
                     }
                 } else {
                     accumulate_cold_value(page, token, head_dim, weight, out);
@@ -203,9 +204,9 @@ fn accumulate_cold_value(page: &Page, token: usize, head_dim: usize, weight: f32
     for group in 0..head_dim / 8 {
         let mut decoded = [0.0; 8];
         let mut inverse = [0.0; 8];
-        for coeff in 0..8 {
+        for (coeff, slot) in decoded.iter_mut().enumerate() {
             let code = get_int3(&page.cold_value.codes, token * head_dim + group * 8 + coeff);
-            decoded[coeff] = (i32::from(code) - 3) as f32 * page.cold_value.scales[group];
+            *slot = (i32::from(code) - 3) as f32 * page.cold_value.scales[group];
         }
         hadamard8(&decoded, &mut inverse);
         for coeff in 0..8 {
