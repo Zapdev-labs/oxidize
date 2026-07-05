@@ -344,7 +344,7 @@ int oc_finetune_main(int argc, char **argv) {
   if (window < 2) window = 2;
   if (tokens_per_step < 1) tokens_per_step = 1;
 
-  oc_model *m = oc_model_load(model_path, max_seq_len);
+  oc_model *m = oc_model_load(model_path, max_seq_len, 0);
   oc_tokenizer *tok = oc_tokenizer_load(m->g);
   if (!tok) oc_die("finetune: unsupported tokenizer");
   size_t h = m->cfg.hidden_size, vocab = m->cfg.vocab_size;

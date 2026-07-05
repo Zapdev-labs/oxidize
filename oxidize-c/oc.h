@@ -73,6 +73,15 @@ void oc_gemm(const oc_weight *w, size_t rows, size_t cols, const float *in,
 void oc_attention(float *out, const float *q, const float *k_cache,
                   const float *v_cache, size_t seq_len, size_t n_heads,
                   size_t kv_heads, size_t head_dim, float scale);
+/* int8 KV cache: k8/v8 are per-(pos,head) symmetric int8; ks/vs the scales
+ * [pos*kv_heads + head]. Query stays f32. */
+void oc_attention_q8(float *out, const float *q, const int8_t *k8,
+                     const float *ks, const int8_t *v8, const float *vs,
+                     size_t seq_len, size_t n_heads, size_t kv_heads,
+                     size_t head_dim, float scale);
+/* Quantize a K/V row [n_kv*hd] into int8 with one scale per head. */
+void oc_quantize_kv(const float *x, int8_t *q, float *scale, size_t n_kv,
+                    size_t hd);
 
 /* ---- GGUF ---- */
 typedef struct {
@@ -122,6 +131,7 @@ typedef struct {
   float rms_eps, rope_theta;
   float yarn_factor, yarn_orig_ctx;  /* rope scaling (0 = off) */
   size_t max_ctx;          /* CLI-capped KV context (0 = context_size) */
+  int kv_int8;             /* 1 = store KV cache as int8 (per-head scale) */
 } oc_config;
 
 typedef struct {
@@ -143,6 +153,8 @@ typedef struct {
   float *attn_post_norm, *ffn_post_norm;   /* gemma post-norms, NULL else */
   float out_scale_v;                       /* per-layer output scalar (1.0) */
   float *kv_ck, *kv_cv;                    /* private KV cache (gemma; owned) */
+  int8_t *kv_ck8, *kv_cv8;                 /* int8 variant (cfg.kv_int8) */
+  float *kv_cks, *kv_cvs;                  /* per-(pos,head) scales for int8 */
   size_t kv_cap;                           /* positions in private cache */
 
   /* Gated-DeltaNet (qwen3.5 linear-attention) layer, detected by ssm_a. */
@@ -178,6 +190,8 @@ typedef struct {
   oc_layer *layers;
   size_t n_kv_layers;     /* attention layers only */
   float *kv_k, *kv_v;     /* [kv_slot][pos][kv_heads*head_dim] */
+  int8_t *kv_k8, *kv_v8;  /* int8 variant (cfg.kv_int8); same indexing */
+  float *kv_ks, *kv_vs;   /* per-(slot,pos,head) scales for int8 */
   size_t kv_stride;       /* kv_heads*head_dim */
   size_t kv_ctx;          /* allocated positions per layer */
   float *x;               /* hidden state [hidden] */
@@ -190,7 +204,8 @@ typedef struct {
   float *rope_freqs;      /* shared full-attn freq divisors (owned) */
 } oc_model;
 
-oc_model *oc_model_load(const char *path, size_t max_ctx); /* 0 = model default */
+/* max_ctx: 0 = model default. kv_int8: 1 = int8 KV cache (4x smaller). */
+oc_model *oc_model_load(const char *path, size_t max_ctx, int kv_int8);
 void oc_model_free(oc_model *m);
 /* Run tokens[0..n) starting at absolute position start_pos; returns logits for
  * the last token in caller-provided buf [vocab]. */

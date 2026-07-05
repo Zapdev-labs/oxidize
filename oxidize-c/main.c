@@ -59,6 +59,7 @@ static void usage(const char *prog) {
           "  --chat              wrap prompt in ChatML (qwen chat models)\n"
           "  --max-tokens N      decode budget (default 64)\n"
           "  --ctx N             context/KV limit (default 8192)\n"
+          "  --kv-int8           int8 KV cache (4x smaller, faster full ctx)\n"
           "  --draft N           speculative draft length (default 4, 0=off)\n"
           "  --spec MODE         drafting: ngram (default) | mtp | off\n"
           "  --threads N         worker threads (default: physical cores)\n"
@@ -81,6 +82,7 @@ int main(int argc, char **argv) {
 
   const char *model_path = NULL, *prompt = "Hello", *host = "127.0.0.1";
   size_t max_tokens = 64, top_k = 0, ctx = 8192, draft = 4;
+  int kv_int8 = 0;
   int spec_mode = 2; /* off by default: spec pays only at high acceptance on CPU */
   float temperature = 0.0f, top_p = 1.0f;
   int threads = 0, port = 8090;
@@ -103,6 +105,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[i], "--top-k")) top_k = strtoull(VAL(), 0, 10);
     else if (!strcmp(argv[i], "--top-p")) top_p = strtof(VAL(), 0);
     else if (!strcmp(argv[i], "--seed")) seed = strtoull(VAL(), 0, 10);
+    else if (!strcmp(argv[i], "--kv-int8")) kv_int8 = 1;
     else if (!strcmp(argv[i], "--no-bos")) no_bos = true;
     else if (!strcmp(argv[i], "--stream")) stream = true;
     else if (!strcmp(argv[i], "--serve")) serve = true;
@@ -126,7 +129,7 @@ int main(int argc, char **argv) {
 #endif
 
   double t0 = now_s();
-  oc_model *m = oc_model_load(model_path, ctx);
+  oc_model *m = oc_model_load(model_path, ctx, kv_int8);
   double t_load = now_s() - t0;
   const oc_config *c = &m->cfg;
   size_t n_gdn = 0;

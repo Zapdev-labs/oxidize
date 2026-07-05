@@ -567,6 +567,72 @@ void oc_gemm(const oc_weight *w, size_t rows, size_t cols, const float *in,
   free(own);
 }
 
+void oc_quantize_kv(const float *x, int8_t *q, float *scale, size_t n_kv,
+                    size_t hd) {
+  for (size_t h = 0; h < n_kv; ++h) {
+    const float *xr = x + h * hd;
+    int8_t *qr = q + h * hd;
+    float amax = 0.0f;
+    for (size_t d = 0; d < hd; ++d) {
+      float a = fabsf(xr[d]);
+      if (a > amax) amax = a;
+    }
+    float s = amax > 0.0f ? amax / 127.0f : 0.0f;
+    float inv = s > 0.0f ? 1.0f / s : 0.0f;
+    for (size_t d = 0; d < hd; ++d) {
+      int v = (int)lrintf(xr[d] * inv);
+      if (v > 127) v = 127;
+      else if (v < -127) v = -127;
+      qr[d] = (int8_t)v;
+    }
+    scale[h] = s;
+  }
+}
+
+/* int8 KV attention. Mirrors oc_attention but dequantizes each cached K/V row
+ * (int8, one scale per head) on read. Query stays f32.
+ * ponytail: K row expanded to a stack f32 buffer to reuse the SIMD dot; the
+ * cache traffic (the long-context bottleneck) is int8, which is the win.
+ * Upgrade path: fused int8xf32 SIMD dot to drop the expand copy. */
+void oc_attention_q8(float *out, const float *q, const int8_t *k8,
+                     const float *ks, const int8_t *v8, const float *vs,
+                     size_t seq_len, size_t n_heads, size_t kv_heads,
+                     size_t head_dim, float scale) {
+  size_t group = n_heads / kv_heads;
+  size_t kv_len = kv_heads * head_dim;
+  if (scale == 0.0f) scale = 1.0f / sqrtf((float)head_dim);
+#pragma omp parallel for schedule(static)
+  for (long long hh = 0; hh < (long long)n_heads; ++hh) {
+    size_t h = (size_t)hh;
+    size_t kh = h / group;
+    size_t kv_off = kh * head_dim;
+    const float *qh = q + h * head_dim;
+    float *oh = out + h * head_dim;
+    float kf[512]; /* head_dim bound; asserted at model load */
+    float rmax = -INFINITY, rsum = 0.0f;
+    memset(oh, 0, head_dim * sizeof(float));
+    for (size_t t = 0; t < seq_len; ++t) {
+      const int8_t *kr = k8 + t * kv_len + kv_off;
+      for (size_t d = 0; d < head_dim; ++d) kf[d] = (float)kr[d];
+      float sk = ks[t * kv_heads + kh];
+      float score = oc_dot_f32(qh, kf, head_dim) * sk * scale;
+      float nmax = rmax > score ? rmax : score;
+      float ef = expf(rmax - nmax), es = expf(score - nmax);
+      if (ef != 1.0f)
+        for (size_t d = 0; d < head_dim; ++d) oh[d] *= ef;
+      const int8_t *vr = v8 + t * kv_len + kv_off;
+      float sv = vs[t * kv_heads + kh] * es;
+      for (size_t d = 0; d < head_dim; ++d) oh[d] += sv * (float)vr[d];
+      rsum = rsum * ef + es;
+      rmax = nmax;
+    }
+    if (rsum > 0.0f) {
+      float inv = 1.0f / rsum;
+      for (size_t d = 0; d < head_dim; ++d) oh[d] *= inv;
+    }
+  }
+}
+
 void oc_attention(float *out, const float *q, const float *k_cache,
                   const float *v_cache, size_t seq_len, size_t n_heads,
                   size_t kv_heads, size_t head_dim, float scale) {

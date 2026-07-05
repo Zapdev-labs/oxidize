@@ -232,6 +232,44 @@ static void check_prune_e2e(void) {
   printf("ok prune end-to-end (magnitude 0.5, gguf write/reload)\n");
 }
 
+/* int8 KV attention must track the f32 reference within int8 tolerance. */
+static void check_kv_int8(void) {
+  size_t n_heads = 8, kv_heads = 2, hd = 64, seq = 40;
+  size_t kv_len = kv_heads * hd;
+  float *q = malloc(n_heads * hd * sizeof(float));
+  float *kf = malloc(seq * kv_len * sizeof(float));
+  float *vf = malloc(seq * kv_len * sizeof(float));
+  int8_t *k8 = malloc(seq * kv_len), *v8 = malloc(seq * kv_len);
+  float *ks = malloc(seq * kv_heads * sizeof(float));
+  float *vs = malloc(seq * kv_heads * sizeof(float));
+  float *o_ref = malloc(n_heads * hd * sizeof(float));
+  float *o_q8 = malloc(n_heads * hd * sizeof(float));
+  for (size_t i = 0; i < n_heads * hd; ++i)
+    q[i] = ((float)(rnd() >> 8) / 8388608.0f) - 1.0f;
+  for (size_t t = 0; t < seq; ++t) {
+    for (size_t i = 0; i < kv_len; ++i) {
+      kf[t * kv_len + i] = ((float)(rnd() >> 8) / 8388608.0f) - 1.0f;
+      vf[t * kv_len + i] = ((float)(rnd() >> 8) / 8388608.0f) - 1.0f;
+    }
+    oc_quantize_kv(kf + t * kv_len, k8 + t * kv_len, ks + t * kv_heads, kv_heads, hd);
+    oc_quantize_kv(vf + t * kv_len, v8 + t * kv_len, vs + t * kv_heads, kv_heads, hd);
+  }
+  oc_attention(o_ref, q, kf, vf, seq, n_heads, kv_heads, hd, 0.0f);
+  oc_attention_q8(o_q8, q, k8, ks, v8, vs, seq, n_heads, kv_heads, hd, 0.0f);
+  float worst = 0.0f;
+  for (size_t i = 0; i < n_heads * hd; ++i) {
+    float e = fabsf(o_ref[i] - o_q8[i]);
+    if (e > worst) worst = e;
+  }
+  if (worst > 0.02f) {
+    fprintf(stderr, "FAIL kv-int8: worst diff %f\n", worst);
+    exit(1);
+  }
+  printf("ok kv-int8 attention worst=%.5f\n", worst);
+  free(q); free(kf); free(vf); free(k8); free(v8);
+  free(ks); free(vs); free(o_ref); free(o_q8);
+}
+
 int main(void) {
   size_t cols = 512;
   oc_quant types[] = {OC_F16, OC_BF16, OC_Q4_0, OC_Q4_1, OC_Q5_0, OC_Q5_1,
@@ -251,6 +289,7 @@ int main(void) {
   check_quantize_roundtrip();
   check_lora_gradients();
   check_ce_grad();
+  check_kv_int8();
 
   printf("all checks passed\n");
   return 0;

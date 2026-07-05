@@ -189,12 +189,13 @@ static void bake_plus_one(float *v, size_t n) {
   if (v) for (size_t i = 0; i < n; ++i) v[i] += 1.0f;
 }
 
-oc_model *oc_model_load(const char *path, size_t max_ctx) {
+oc_model *oc_model_load(const char *path, size_t max_ctx, int kv_int8) {
   oc_gguf *g = oc_gguf_load(path);
   oc_model *m = calloc(1, sizeof(*m));
   m->g = g;
   build_config(g, &m->cfg);
   m->cfg.max_ctx = max_ctx;
+  m->cfg.kv_int8 = kv_int8;
   oc_config *c = &m->cfg;
 
   const char *emb_name = oc_find_tensor(g, "token_embd.weight")
@@ -347,6 +348,10 @@ oc_model *oc_model_load(const char *path, size_t max_ctx) {
   m->kv_stride = c->kv_heads * c->head_dim;
   m->kv_ctx = c->max_ctx > 0 && c->max_ctx < c->context_size ? c->max_ctx
                                                              : c->context_size;
+  int kvq = c->kv_int8;
+  if (kvq && c->head_dim > 512)
+    oc_die("model: kv-int8 needs head_dim<=512 (got %zu)", c->head_dim);
+  size_t kesz = kvq ? sizeof(int8_t) : sizeof(float);
   if (m->gemma) {
     /* per-layer caches; sliding-window layers ring at `window` positions */
     for (size_t l = 0; l < c->layer_count; ++l) {
@@ -354,13 +359,22 @@ oc_model *oc_model_load(const char *path, size_t max_ctx) {
       if (L->is_gdn) continue;
       if (L->kv_cap == 0 || L->kv_cap > m->kv_ctx) L->kv_cap = m->kv_ctx;
       size_t elems = L->kv_cap * L->n_kv * L->hd;
-      L->kv_ck = calloc(elems, sizeof(float));
-      L->kv_cv = calloc(elems, sizeof(float));
-      if (!L->kv_ck || !L->kv_cv) oc_die("model: KV cache allocation failed");
+      if (kvq) {
+        L->kv_ck8 = calloc(elems, 1);
+        L->kv_cv8 = calloc(elems, 1);
+        L->kv_cks = calloc(L->kv_cap * L->n_kv, sizeof(float));
+        L->kv_cvs = calloc(L->kv_cap * L->n_kv, sizeof(float));
+        if (!L->kv_ck8 || !L->kv_cv8 || !L->kv_cks || !L->kv_cvs)
+          oc_die("model: KV cache allocation failed");
+      } else {
+        L->kv_ck = calloc(elems, sizeof(float));
+        L->kv_cv = calloc(elems, sizeof(float));
+        if (!L->kv_ck || !L->kv_cv) oc_die("model: KV cache allocation failed");
+      }
     }
   } else {
-    /* cap the up-front F32 KV cache at 4 GB */
-    size_t per_pos = m->n_kv_layers * m->kv_stride * sizeof(float) * 2;
+    /* cap the up-front KV cache at 4 GB */
+    size_t per_pos = m->n_kv_layers * m->kv_stride * kesz * 2;
     size_t budget = (size_t)4 << 30;
     if (per_pos > 0 && m->kv_ctx * per_pos > budget) {
       m->kv_ctx = budget / per_pos;
@@ -368,9 +382,19 @@ oc_model *oc_model_load(const char *path, size_t max_ctx) {
       fprintf(stderr, "note: KV cache capped to %zu positions\n", m->kv_ctx);
     }
     size_t kv_elems = m->n_kv_layers * m->kv_ctx * m->kv_stride;
-    m->kv_k = calloc(kv_elems, sizeof(float));
-    m->kv_v = calloc(kv_elems, sizeof(float));
-    if (!m->kv_k || !m->kv_v) oc_die("model: KV cache allocation failed");
+    if (kvq) {
+      size_t scales = m->n_kv_layers * m->kv_ctx * c->kv_heads;
+      m->kv_k8 = calloc(kv_elems, 1);
+      m->kv_v8 = calloc(kv_elems, 1);
+      m->kv_ks = calloc(scales, sizeof(float));
+      m->kv_vs = calloc(scales, sizeof(float));
+      if (!m->kv_k8 || !m->kv_v8 || !m->kv_ks || !m->kv_vs)
+        oc_die("model: KV cache allocation failed");
+    } else {
+      m->kv_k = calloc(kv_elems, sizeof(float));
+      m->kv_v = calloc(kv_elems, sizeof(float));
+      if (!m->kv_k || !m->kv_v) oc_die("model: KV cache allocation failed");
+    }
   }
   m->x = calloc(c->hidden_size, sizeof(float));
 
@@ -391,6 +415,7 @@ static void free_block(oc_layer *L) {
   free(L->q_norm); free(L->k_norm);
   free(L->attn_post_norm); free(L->ffn_post_norm);
   free(L->kv_ck); free(L->kv_cv);
+  free(L->kv_ck8); free(L->kv_cv8); free(L->kv_cks); free(L->kv_cvs);
   free(L->qkv.f32); free(L->gdn_gate.f32); free(L->ssm_alpha.f32);
   free(L->ssm_beta.f32); free(L->ssm_out.f32);
   free(L->ssm_a); free(L->ssm_dt_bias); free(L->ssm_conv1d); free(L->ssm_norm);
@@ -411,7 +436,9 @@ void oc_model_free(oc_model *m) {
   free(m->tok_emb.f32);
   if (!m->tied) free(m->lm_head.f32);
   free(m->final_norm);
-  free(m->kv_k); free(m->kv_v); free(m->x);
+  free(m->kv_k); free(m->kv_v);
+  free(m->kv_k8); free(m->kv_v8); free(m->kv_ks); free(m->kv_vs);
+  free(m->x);
   free(m->rope_freqs);
   oc_gguf_free(m->g);
   free(m);
@@ -721,7 +748,8 @@ static void gdn_layer(oc_model *m, oc_layer *L, const float *normed_all,
 static void attn_layer_token(const oc_model *m, const oc_layer *L,
                              const float *normed, size_t rope_pos, size_t slot,
                              float *kv_k, float *kv_v, size_t kv_ctx,
-                             float *attn_out, scratch_t *s) {
+                             int8_t *kv_k8, int8_t *kv_v8, float *kv_ks,
+                             float *kv_vs, float *attn_out, scratch_t *s) {
   const oc_config *c = &m->cfg;
   size_t h = c->hidden_size;
   size_t hd = L->hd ? L->hd : c->head_dim;
@@ -765,14 +793,22 @@ static void attn_layer_token(const oc_model *m, const oc_layer *L,
   oc_rope(k, hd, n_kv, rope_pos, theta, n_rot, c->yarn_factor,
           c->yarn_orig_ctx, L->rope_ff);
 
-  size_t base = (slot % kv_ctx) * kvn;
-  memcpy(kv_k + base, k, kvn * sizeof(float));
-  memcpy(kv_v + base, v, kvn * sizeof(float));
+  size_t pos = slot % kv_ctx;
+  size_t base = pos * kvn;
   size_t seq_len = slot + 1;
   if (seq_len > kv_ctx) seq_len = kv_ctx;
 
-  oc_attention(s->attn, q, kv_k, kv_v, seq_len, q_heads, n_kv, hd,
-               L->attn_scale);
+  if (kv_k8) {
+    oc_quantize_kv(k, kv_k8 + base, kv_ks + pos * n_kv, n_kv, hd);
+    oc_quantize_kv(v, kv_v8 + base, kv_vs + pos * n_kv, n_kv, hd);
+    oc_attention_q8(s->attn, q, kv_k8, kv_ks, kv_v8, kv_vs, seq_len, q_heads,
+                    n_kv, hd, L->attn_scale);
+  } else {
+    memcpy(kv_k + base, k, kvn * sizeof(float));
+    memcpy(kv_v + base, v, kvn * sizeof(float));
+    oc_attention(s->attn, q, kv_k, kv_v, seq_len, q_heads, n_kv, hd,
+                 L->attn_scale);
+  }
   if (gate)
     for (size_t i = 0; i < q_len; ++i) s->attn[i] *= sigmoidf_(gate[i]);
 
@@ -822,18 +858,30 @@ static void run_layers(oc_model *m, float *x_batch, size_t batch,
         for (size_t i = 0; i < h; ++i)
           x_batch[b * h + i] += s->attn_out[b * h + i];
     } else {
-      float *kv_k, *kv_v;
+      float *kv_k = NULL, *kv_v = NULL;
+      int8_t *kv_k8 = NULL, *kv_v8 = NULL;
+      float *kv_ks = NULL, *kv_vs = NULL;
       size_t cap;
-      if (L->kv_ck) {
-        kv_k = L->kv_ck; kv_v = L->kv_cv; cap = L->kv_cap;
+      if (L->kv_ck || L->kv_ck8) {
+        cap = L->kv_cap;
+        kv_k = L->kv_ck; kv_v = L->kv_cv;
+        kv_k8 = L->kv_ck8; kv_v8 = L->kv_cv8;
+        kv_ks = L->kv_cks; kv_vs = L->kv_cvs;
       } else {
-        kv_k = m->kv_k + (size_t)L->kv_slot * m->kv_ctx * m->kv_stride;
-        kv_v = m->kv_v + (size_t)L->kv_slot * m->kv_ctx * m->kv_stride;
         cap = m->kv_ctx;
+        size_t off = (size_t)L->kv_slot * m->kv_ctx * m->kv_stride;
+        size_t soff = (size_t)L->kv_slot * m->kv_ctx * c->kv_heads;
+        if (m->kv_k8) {
+          kv_k8 = m->kv_k8 + off; kv_v8 = m->kv_v8 + off;
+          kv_ks = m->kv_ks + soff; kv_vs = m->kv_vs + soff;
+        } else {
+          kv_k = m->kv_k + off; kv_v = m->kv_v + off;
+        }
       }
       for (size_t b = 0; b < batch; ++b) {
         attn_layer_token(m, L, s->normed + b * h, start_pos + b, start_pos + b,
-                         kv_k, kv_v, cap, s->attn_out, s);
+                         kv_k, kv_v, cap, kv_k8, kv_v8, kv_ks, kv_vs,
+                         s->attn_out, s);
         if (L->attn_post_norm)
           oc_rms_norm(s->attn_out, s->attn_out, L->attn_post_norm, h, c->rms_eps);
         for (size_t i = 0; i < h; ++i) x_batch[b * h + i] += s->attn_out[i];
@@ -976,7 +1024,8 @@ size_t oc_mtp_draft(oc_model *m, uint32_t start_token, size_t start_pos, size_t 
     /* one attention layer against the tiny draft KV (positions 0..step) */
     oc_rms_norm(s.normed, x, t->layer.attn_norm, h, c->rms_eps);
     attn_layer_token(m, &t->layer, s.normed, start_pos + step, step, t->kv_k,
-                     t->kv_v, t->draft_max, s.attn_out, &s);
+                     t->kv_v, t->draft_max, NULL, NULL, NULL, NULL, s.attn_out,
+                     &s);
     for (size_t i = 0; i < h; ++i) x[i] += s.attn_out[i];
     ffn_block(m, &t->layer, x, 1, &s);
 
