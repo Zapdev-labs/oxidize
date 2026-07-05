@@ -1,0 +1,31 @@
+oxidize-server/src/runtime/batched_engine.rs
+  s_ae271cf91b6845::t_e6042d5c3d799b 1-64,66-281
+  s_ae271cf91b6845::t_aa2dcab9c66f52 65
+oxidize-server/src/runtime/paged.rs
+  s_ae271cf91b6845::t_3a6e70146da010 29-32
+  s_ae271cf91b6845::t_38070081c1250a 15
+  s_ae271cf91b6845::t_a33f0dfaef77c1 92-93,99
+oxidize-server/src/runtime/model.rs
+  s_ae271cf91b6845::t_3899ada344a139 133-144
+oxidize-server/src/routes/chat.rs
+  s_ae271cf91b6845::t_12793f44213e7d 25,27-29,32
+  s_ae271cf91b6845::t_878e2b6e9c8e30 74-82,96-148,151-152
+oxidize-server/src/runtime/mod.rs
+  s_ae271cf91b6845::t_c2479712c00c03 3
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "c16216fc896584264e125f10b524962667676aaf",
+  "prompts": {},
+  "sessions": {
+    "s_ae271cf91b6845": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "957249c3-68ab-4695-b756-15409c8c86f1",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

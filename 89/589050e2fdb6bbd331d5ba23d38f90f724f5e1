@@ -1,0 +1,74 @@
+oxidize-core/src/backends/cuda.rs
+  s_85b25d1872420c::t_cc95e73a5ab7d8 183-189
+  s_85b25d1872420c::t_386d51dd10c29a 229-235
+  s_85b25d1872420c::t_f5a88fc886f591 599-615,617,631-639
+  s_85b25d1872420c::t_7d8aaac0454859 315-317,512-514
+  s_85b25d1872420c::t_837db37cb1ff34 207-209
+  s_85b25d1872420c::t_ce0d3a801e2de3 211-228,236-260,263-264,266,268-276,297,307-309,314,318-329,331-344
+  s_85b25d1872420c::t_affa65b043a03d 426-458,469-472,475-477,479-480,482-501,508,510,517
+  s_85b25d1872420c::t_2048f5986bad9a 3-5
+  s_85b25d1872420c::t_e9f1f80c4c5836 261-262
+  s_85b25d1872420c::t_56386dbd12571f 298-306,310-313
+  s_85b25d1872420c::t_2188f4a0f97bfd 473-474,478,481,502,504-507,509,515-516,518-529,531-537
+  s_85b25d1872420c::t_b99bcacbc15829 629
+  s_85b25d1872420c::t_f3183b2401c4d2 180-182,190-205
+oxidize-golang/internal/cli/cli.go
+  s_cbe2b017104a95::t_29317114830844 33-34
+oxidize-cli/src/main.rs
+  s_cbe2b017104a95::t_ab44e022f4ba5c 559-644,650-712
+  s_cbe2b017104a95::t_fefbd3e55955e9 645-649
+  s_cbe2b017104a95::t_1f9ab788903e8b 728-736
+oxidize-core/src/lib.rs
+  s_cbe2b017104a95::t_fefbd3e55955e9 50-51
+oxidize-core/build.rs
+  s_85b25d1872420c::t_07ad3b28b6aae2 23-30
+  s_85b25d1872420c::t_6dffddc7940cb1 50-85
+oxidize-core/src/cluster/gpu_cluster.rs
+  s_cbe2b017104a95::t_c5d2ab06bc2647 1-154,160-283,314-366,372-476,480,484-488,496-539,544-631,636-659,672-707
+  s_cbe2b017104a95::t_fefbd3e55955e9 155-159,284-313,367-371,477-479,481-483,489-495,540-543,632-635,660-671
+oxidize-golang/core/gpucluster/gpucluster_test.go
+  s_cbe2b017104a95::t_76917b075a528b 1-191
+oxidize-python/oxidize_python/gpucluster/__init__.py
+  s_cbe2b017104a95::t_47ca51cec74055 1-400
+oxidize-golang/core/quantization/gemv_rust_stub.go
+  s_cbe2b017104a95::t_c04b6bf34b856e 1-13
+oxidize-core/src/compute/tensor.rs
+  s_85b25d1872420c::t_847ecb82c6be4c 1272-1274
+oxidize-python/oxidize_python/gpucluster/test_gpucluster.py
+  s_cbe2b017104a95::t_b371394ceb63aa 1-133
+oxidize-core/kernels/gemv_f32.cu
+  s_85b25d1872420c::t_370cc9e89be74c 1,4-7,9-16,19-22,56-58,66,69,73-163,165
+  s_85b25d1872420c::t_4719490caa9812 2-3,8,17-18,23,38-41,45,48,54-55,59-60,64,67,164,166-167
+  s_85b25d1872420c::t_d14384054e6819 24-37,42-44,46-47,49-53,61-63,65,68,70-72
+oxidize-python/oxidize_python/cli.py
+  s_cbe2b017104a95::t_54fc33cec4f02e 365-440
+  s_cbe2b017104a95::t_3960b142176a27 28
+oxidize-golang/core/gpucluster/gpucluster.go
+  s_cbe2b017104a95::t_bf4143ad2cf367 1-430
+oxidize-golang/internal/cli/gpucluster.go
+  s_cbe2b017104a95::t_6dd1d57939bcb8 1-133
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.3",
+  "base_commit_sha": "89589050e2fdb6bbd331d5ba23d38f90f724f5e1",
+  "prompts": {},
+  "sessions": {
+    "s_85b25d1872420c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "959b1a48-5aab-425a-a585-6ee99f086433",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_cbe2b017104a95": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "17a42a49-1f39-45ee-9679-d827d9a3f50c",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

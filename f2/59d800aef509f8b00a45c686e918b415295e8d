@@ -1,0 +1,17 @@
+oxidize-golang/core/core.go
+  ai_agent 55-62
+oxidize-golang/internal/cli/cli_test.go
+  ai_agent 7,51-60,66-67
+oxidize-golang/internal/cli/cli.go
+  ai_agent 8,13,26,30-32,35,55-58,71-99,109-114,118,121-123,125-130,139-142,151-208
+oxidize-golang/core/tokenizer/tokenizer.go
+  ai_agent 9,11-12,273-285
+oxidize-golang/internal/gguf/types.go
+  ai_agent 59-70
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "f259d800aef509f8b00a45c686e918b415295e8d",
+  "prompts": {}
+}

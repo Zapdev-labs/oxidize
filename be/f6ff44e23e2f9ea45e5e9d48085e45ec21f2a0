@@ -1,0 +1,51 @@
+oxidize-golang/core/model/inference_test.go
+  s_df9c78e59b2a5c::t_7802354115ebc5 1-35
+oxidize-golang/core/model/moe.go
+  s_df9c78e59b2a5c::t_325c53ce031c57 26,33,36-37
+  s_df9c78e59b2a5c::t_296de84971c82c 10-13,27-29,31-32,38-41,44,99,106-109,130-132
+  s_df9c78e59b2a5c::t_e7967945313aa6 1-9,14-25,30,34-35,42-43,45-98,100-105,111-112,114-119,121-129,133-134
+  s_df9c78e59b2a5c::t_0dc6549364430e 120
+  s_df9c78e59b2a5c::t_c866b882b2cd9a 110,113
+oxidize-golang/core/model/model_test.go
+  s_df9c78e59b2a5c::t_1b72c1e6172de8 5
+  s_d9a61c121d09ae::t_38af394875ee24 112
+  s_df9c78e59b2a5c::t_0db3a7a756d77d 177-179,181-182,184
+  s_9df89de3bde73a::t_07aa22dde8d118 121-124
+  s_df9c78e59b2a5c::t_e4b417e6d3e63e 341-351
+oxidize-golang/core/model/model.go
+  s_df9c78e59b2a5c::t_c12c3aa0db1340 178-180
+oxidize-golang/core/model/moe_test.go
+  s_df9c78e59b2a5c::t_28e6b40aa96373 1-39
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "bef6ff44e23e2f9ea45e5e9d48085e45ec21f2a0",
+  "prompts": {},
+  "sessions": {
+    "s_9df89de3bde73a": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "7ea7bbcc-43ad-4243-a823-4f40ca203960",
+        "model": "default"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_d9a61c121d09ae": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "e9de5fd3-e609-40c2-ac05-b69f37d22d70",
+        "model": "default"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_df9c78e59b2a5c": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "d22a59f1-9349-430c-8998-8ced993f2fad",
+        "model": "default"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

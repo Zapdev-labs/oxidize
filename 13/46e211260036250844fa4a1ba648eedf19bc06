@@ -1,0 +1,27 @@
+oxidize-golang/core/oxk/oxk.go
+  s_d696a9bcb3c378::t_9fb30923fee82c 328,330,333
+  s_d696a9bcb3c378::t_20cd2b3f751245 296
+  s_d696a9bcb3c378::t_ca6801cbb3c773 376,381,383,387-391,393,397,399,403-407,409,413,415,419-423,425
+  s_d696a9bcb3c378::t_5498e4441cb78d 20-22
+  s_d696a9bcb3c378::t_30d256ab4de505 12
+  s_d696a9bcb3c378::t_402a7cc66ff4df 368
+  s_d696a9bcb3c378::t_af5ed83cf12df9 499
+  s_d696a9bcb3c378::t_733d8642336fcc 256,258,261,267
+  s_d696a9bcb3c378::t_4fb4f0a4b11cbf 437,440,443,454-456,464-466,474-476,483-487,490
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "1346e211260036250844fa4a1ba648eedf19bc06",
+  "prompts": {},
+  "sessions": {
+    "s_d696a9bcb3c378": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "853d1fc4-7588-4e2c-8845-bd957bd215b6",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

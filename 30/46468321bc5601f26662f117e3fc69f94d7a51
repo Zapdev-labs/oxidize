@@ -1,0 +1,27 @@
+oxidize-core/src/compute/tensor/kernels.rs
+  s_5b078de97b8925::t_7bea0bc004703f 22-25
+  s_5b078de97b8925::t_50b19e77920051 1614-1624,1627-1628,1631,1633-1634,1637-1638,1642-1647,1649-1784
+  s_5b078de97b8925::t_0a1208e8c70c6d 1808-1813
+  s_5b078de97b8925::t_8056b59c968de2 1625-1626,1629-1630,1632,1635-1636,1639-1641,1648
+oxidize-core/src/model/inference.rs
+  s_5b078de97b8925::t_e99dd5163d68b0 1299-1309
+  s_5b078de97b8925::t_e26f97527dc08b 1385-1388,1391-1393
+  s_5b078de97b8925::t_599823bc0ee31f 903-904
+  s_5b078de97b8925::t_d0764c4732c4eb 1256,1262
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "3046468321bc5601f26662f117e3fc69f94d7a51",
+  "prompts": {},
+  "sessions": {
+    "s_5b078de97b8925": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a2fd32be-d532-4929-8226-7967c93996a1",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

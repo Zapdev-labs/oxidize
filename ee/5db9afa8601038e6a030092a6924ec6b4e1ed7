@@ -1,0 +1,19 @@
+oxidize-golang/internal/api/schema.go
+  ai_agent 127-158
+oxidize-golang/internal/server/paged_runtime.go
+  ai_agent 1-112
+oxidize-golang/internal/server/routes.go
+  ai_agent 52-55,75-77
+oxidize-golang/internal/generate/completion.go
+  ai_agent 1-70
+oxidize-golang/internal/generate/runtime.go
+  ai_agent 1-111
+oxidize-golang/internal/server/completion.go
+  ai_agent 1-28
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "ee5db9afa8601038e6a030092a6924ec6b4e1ed7",
+  "prompts": {}
+}

@@ -1,0 +1,21 @@
+golang/core/cpu_kernels/cpu_kernels.go
+  s_b884af7059773d::t_2d6614d89c86ce 87-88,90-91
+golang/core/cpu_kernels/cpu_kernels_test.go
+  s_b884af7059773d::t_36f9f39c143e98 27-33,36,38-41,43-44,51-55
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "2a44ecd07225f2b052fbde399e003a5d56fbc950",
+  "prompts": {},
+  "sessions": {
+    "s_b884af7059773d": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_17743e93dffecYdtaN3rU3Q2D6",
+        "model": "minimax-m3-free"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

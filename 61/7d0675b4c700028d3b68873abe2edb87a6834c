@@ -1,0 +1,35 @@
+oxidize-golang/core/flash_attention/sliding_test.go
+  s_df9c78e59b2a5c::t_8df6af5ec3c334 1-34
+oxidize-golang/core/flash_attention/alibi.go
+  s_df9c78e59b2a5c::t_f61d1379c09bd2 1-97
+oxidize-golang/core/flash_attention/sliding.go
+  s_df9c78e59b2a5c::t_cf109e10134da6 1-89
+oxidize-golang/core/flash_attention/alibi_test.go
+  s_df9c78e59b2a5c::t_a211669037c099 1-26
+oxidize-golang/core/flash_attention/flash_attention.go
+  s_d9a61c121d09ae::t_554a2607af08d4 95-181
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "617d0675b4c700028d3b68873abe2edb87a6834c",
+  "prompts": {},
+  "sessions": {
+    "s_d9a61c121d09ae": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "e9de5fd3-e609-40c2-ac05-b69f37d22d70",
+        "model": "default"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_df9c78e59b2a5c": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "d22a59f1-9349-430c-8998-8ced993f2fad",
+        "model": "default"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

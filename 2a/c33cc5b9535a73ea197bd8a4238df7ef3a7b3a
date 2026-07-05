@@ -1,0 +1,28 @@
+oxidize-train/src/video/generator.rs
+  s_d696a9bcb3c378::t_151b6d22afc93a 507
+  s_d696a9bcb3c378::t_3904a8b73ccc10 1
+  s_d696a9bcb3c378::t_b8cd3121d62e73 167,169-173,185
+  s_d696a9bcb3c378::t_829eccf5e437c1 490-496
+  s_d696a9bcb3c378::t_bd90a0b744a796 474-479
+  s_d696a9bcb3c378::t_68a6a58e553ea1 74-76
+  s_d696a9bcb3c378::t_d952c17d8e545f 829
+  s_d696a9bcb3c378::t_a1ac81e71d678d 202
+  s_d696a9bcb3c378::t_1d8e5fa67db6c5 428-447
+  s_d696a9bcb3c378::t_0e28347455374c 88
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "2ac33cc5b9535a73ea197bd8a4238df7ef3a7b3a",
+  "prompts": {},
+  "sessions": {
+    "s_d696a9bcb3c378": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "853d1fc4-7588-4e2c-8845-bd957bd215b6",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

@@ -1,0 +1,21 @@
+oxidize-core/Cargo.toml
+  s_1330dccb364bc7::t_508be86db5a44c 70-73
+oxidize-core/benches/layer_bench.rs
+  s_1330dccb364bc7::t_5b0354ce0dadfa 1-230
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.3",
+  "base_commit_sha": "8c8b14225d6b90e539e28eedb9c29cad125acbe1",
+  "prompts": {},
+  "sessions": {
+    "s_1330dccb364bc7": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_1591f6c3cffeJjEJP6ngXiqODO",
+        "model": "k2p6"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

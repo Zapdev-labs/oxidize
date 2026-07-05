@@ -1,0 +1,35 @@
+oxidize-core/src/backends/cuda/tests.rs
+  s_1b37f3c1d1e7b7::t_f3835576a6da04 410-432
+  s_1b37f3c1d1e7b7::t_9a469137f0cdf3 458-459
+  s_1b37f3c1d1e7b7::t_f902adfc0f17bc 3,190,223,543-579,581-582
+  s_1b37f3c1d1e7b7::t_e59185ebfbc68b 514-542,583
+  s_1b37f3c1d1e7b7::t_2c2f7fa3d9205e 510-511
+  s_1b37f3c1d1e7b7::t_3a744ab6de8bf2 22-23,25-35,37-44
+  s_1b37f3c1d1e7b7::t_065d5ace20d10e 435,443-447,460
+  s_1b37f3c1d1e7b7::t_968d833e948b96 191-221,224,314-315
+  s_1b37f3c1d1e7b7::t_7219e9ede1f4b8 580
+  s_1b37f3c1d1e7b7::t_3a52aef6759404 4-21
+  s_1b37f3c1d1e7b7::t_aa2401458be8f5 433-434,436-442,448-457
+  s_1b37f3c1d1e7b7::t_dc388a5235d73e 24,36
+  s_1b37f3c1d1e7b7::t_856bc7c695352a 468-471
+  s_1b37f3c1d1e7b7::t_2c1af64be59ec9 222
+  s_1b37f3c1d1e7b7::t_fd285060718ea2 461-467,472
+  s_1b37f3c1d1e7b7::t_4ab0b80e11bd35 225-313
+  s_1b37f3c1d1e7b7::t_ba60f2108a9208 473-509,512-513
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "1490c31760d20212652286025e8e2a2c39ef17a0",
+  "prompts": {},
+  "sessions": {
+    "s_1b37f3c1d1e7b7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ee600-1957-70f2-b3f9-e51f217a3ee9",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

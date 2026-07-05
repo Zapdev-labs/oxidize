@@ -1,0 +1,22 @@
+oxidize-cli/src/main.rs
+  s_56a772afbecc12::t_9cdb3b3fc2ac77 1395-1397,1400
+  s_56a772afbecc12::t_39deb28bca0638 1345-1347,1350
+Cargo.lock
+  s_56a772afbecc12::t_ef8d3ffd3ca78c 134,136
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "7ee4eddf4e62df78d9835bae7894e1679c1c032f",
+  "prompts": {},
+  "sessions": {
+    "s_56a772afbecc12": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "29a9458d-1ba4-41b2-a837-c0dbfee7bab7",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

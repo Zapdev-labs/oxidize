@@ -1,0 +1,52 @@
+oxidize-python/oxidize_python/internal/realtime.py
+  s_3582b5342698b9::t_a655f6caba4fd9 32-35,120-122
+oxidize-python/oxidize_python/core/model/layer_wise.py
+  s_3582b5342698b9::t_bd57f4d98b9992 10-15
+oxidize-python/oxidize_python/core/mesh/election_priority.py
+  s_3582b5342698b9::t_bd57f4d98b9992 9
+oxidize-python/oxidize_python/core/test_oxk.py
+  s_3582b5342698b9::t_bd57f4d98b9992 13
+oxidize-python/oxidize_python/internal/generate/runtime.py
+  s_3582b5342698b9::t_bd57f4d98b9992 19,22
+oxidize-python/oxidize_python/internal/server.py
+  s_3582b5342698b9::t_a655f6caba4fd9 173-176
+  s_3582b5342698b9::t_bd57f4d98b9992 12,31
+oxidize-python/oxidize_python/core/autotune/fingerprint.py
+  s_3582b5342698b9::t_43b36368cad57f 33-37,121-122
+oxidize-python/oxidize_python/core/paged/paged.py
+  s_3582b5342698b9::t_a655f6caba4fd9 5,7
+oxidize-python/oxidize_python/test_phase1_parity.py
+  s_3582b5342698b9::t_bd57f4d98b9992 6-7
+oxidize-python/oxidize_python/core/flash_attention/flash_attention_f16.py
+  s_3582b5342698b9::t_b51f6aa9965549 87,98,103-104
+oxidize-python/oxidize_python/core/quantization/gemv_avx2.py
+  s_3582b5342698b9::t_b51f6aa9965549 69-72,133-136
+oxidize-python/oxidize_python/cli_autotune.py
+  s_3582b5342698b9::t_43b36368cad57f 48-52
+  s_3582b5342698b9::t_bd57f4d98b9992 9
+oxidize-python/oxidize_python/core/autotune/rules.py
+  s_3582b5342698b9::t_43b36368cad57f 59-61
+  s_3582b5342698b9::t_bd57f4d98b9992 16
+oxidize-python/oxidize_python/core/oxk.py
+  s_3582b5342698b9::t_4bb0bdf0f6c836 117-120,270-274,312-317,319-324,341-345,350-354,364-368,378-382,396-401
+oxidize-python/oxidize_python/core/autotune/detect.py
+  s_3582b5342698b9::t_bd57f4d98b9992 12
+oxidize-python/oxidize_python/core/backends/cuda/__init__.py
+  s_3582b5342698b9::t_bd57f4d98b9992 26
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "0e16f0ef0daf9e15a7f633840393c0c2c3bf9490",
+  "prompts": {},
+  "sessions": {
+    "s_3582b5342698b9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f1219-02c1-7713-9f8b-d532e4c17a17",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

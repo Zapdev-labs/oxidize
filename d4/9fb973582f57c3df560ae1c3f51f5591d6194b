@@ -1,0 +1,19 @@
+oxidize-core/src/compute/tensor/kernels.rs
+  s_5b078de97b8925::t_c2948459400ec2 1887-1970
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "d49fb973582f57c3df560ae1c3f51f5591d6194b",
+  "prompts": {},
+  "sessions": {
+    "s_5b078de97b8925": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a2fd32be-d532-4929-8226-7967c93996a1",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

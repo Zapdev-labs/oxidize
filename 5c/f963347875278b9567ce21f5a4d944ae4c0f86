@@ -1,0 +1,21 @@
+AGENTS.md
+  s_344e8e73ed6deb::t_331b5b33a002d6 33-45
+  s_344e8e73ed6deb::t_8b9e418bd78688 3-5,8,13-28,31-32
+  s_344e8e73ed6deb::t_e349b60c12027a 58-70,115
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "5cf963347875278b9567ce21f5a4d944ae4c0f86",
+  "prompts": {},
+  "sessions": {
+    "s_344e8e73ed6deb": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_17255ca01ffexa5ne4KWQCh1ld",
+        "model": "moonshotai/kimi-k2.6"
+      },
+      "human_author": null
+    }
+  }
+}

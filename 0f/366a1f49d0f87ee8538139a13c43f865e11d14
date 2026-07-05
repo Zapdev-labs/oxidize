@@ -1,0 +1,19 @@
+oxidize-core/src/backends/cuda.rs
+  s_1330dccb364bc7::t_605f2346ec9026 419,421-423,442
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.3",
+  "base_commit_sha": "0f366a1f49d0f87ee8538139a13c43f865e11d14",
+  "prompts": {},
+  "sessions": {
+    "s_1330dccb364bc7": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_1591f6c3cffeJjEJP6ngXiqODO",
+        "model": "k2p6"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

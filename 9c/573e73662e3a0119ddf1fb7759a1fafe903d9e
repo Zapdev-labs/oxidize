@@ -1,0 +1,21 @@
+oxidize-cli/src/main.rs
+  s_7db891e64d27df::t_c50fcec78258d1 737-758
+oxidize-server/src/runtime/generate.rs
+  s_7db891e64d27df::t_d5135fb2121824 90-99,109
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "9c573e73662e3a0119ddf1fb7759a1fafe903d9e",
+  "prompts": {},
+  "sessions": {
+    "s_7db891e64d27df": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d821c29a-5761-4949-8aad-c39dfe26c264",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

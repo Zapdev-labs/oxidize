@@ -1,0 +1,38 @@
+oxidize-cli/src/main/generation.rs
+  s_1697c02732864d::t_d007d581b6f41b 429-501,503-544
+  s_1697c02732864d::t_7bd53eb2838c25 294
+  s_1697c02732864d::t_459afcbd079dd8 351
+  s_1b37f3c1d1e7b7::t_46e7348cd89a2f 3-14,227,322,409,502
+  s_1697c02732864d::t_fa14711c32582b 385
+oxidize-cli/src/main.rs
+  s_1697c02732864d::t_af40d4b8428d07 740,900-927,944
+  s_1697c02732864d::t_0fa728cb75a4cc 9-10
+  s_1697c02732864d::t_59394cb0e4cf3d 185-187
+  s_1697c02732864d::t_b94d93b222b5b5 681-738
+  s_1697c02732864d::t_60e725bbd500b4 774
+  s_1697c02732864d::t_247d31e1f6b341 627-680,739
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "13d2e5f234184daab0abb45bb3df92e48d0f9275",
+  "prompts": {},
+  "sessions": {
+    "s_1697c02732864d": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "7915669e-551c-4bdd-9a20-841308d4c91a",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_1b37f3c1d1e7b7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ee600-1957-70f2-b3f9-e51f217a3ee9",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

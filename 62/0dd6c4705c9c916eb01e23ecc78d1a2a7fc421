@@ -1,0 +1,21 @@
+oxidize-core/src/model/dflash.rs
+  s_1b37f3c1d1e7b7::t_5d766fd2e1dc21 1853-1870
+  s_1b37f3c1d1e7b7::t_05c19de583b76f 534-535,549-551,1086,1850
+  s_1b37f3c1d1e7b7::t_c21a13f756c2d1 536-548
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "620dd6c4705c9c916eb01e23ecc78d1a2a7fc421",
+  "prompts": {},
+  "sessions": {
+    "s_1b37f3c1d1e7b7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ee600-1957-70f2-b3f9-e51f217a3ee9",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

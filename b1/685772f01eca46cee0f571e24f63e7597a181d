@@ -1,0 +1,21 @@
+oxidize-cpp/tests/gguf_mmap_policy_test.cpp
+  s_91877f0837c687::t_ba572f3f1c5ed2 4,7-13,15-18,21-26,28-32
+oxidize-cpp/tests/autotune_test.cpp
+  s_91877f0837c687::t_1d281622c66adb 25-27,41-42,56,84-85
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "b1685772f01eca46cee0f571e24f63e7597a181d",
+  "prompts": {},
+  "sessions": {
+    "s_91877f0837c687": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "7316a8cf-5f32-4c83-a74c-08ba07be3ed0",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

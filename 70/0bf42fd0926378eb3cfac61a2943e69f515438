@@ -1,0 +1,31 @@
+oxidize-core/build.rs
+  s_18e991452520ed::t_33c6e531203b77 28-30
+oxidize-core/src/backends/cuda.rs
+  s_18e991452520ed::t_33c6e531203b77 197,290,299,451,686-688,735-736,817-818,897-898,1084-1089,1094-1095,1201-1202,1224-1225
+oxidize-core/benches/gemv_bench.rs
+  s_18e991452520ed::t_33c6e531203b77 9,13,37-38,42-49,54-61,80-82,100-103
+oxidize-core/benches/layer_bench.rs
+  s_18e991452520ed::t_33c6e531203b77 27-29,32-34,37-39,42-44,47-49,52-54,57-59,69,73-74,78-90,99-111,113-127,138-150,152-166,222-230,287-288,290-297,321-337
+oxidize-core/src/lib.rs
+  s_18e991452520ed::t_33c6e531203b77 73-74,95-96
+oxidize-core/benches/inference_bench.rs
+  s_18e991452520ed::t_33c6e531203b77 63-73,117,130-156,173-175,199-201,224-247
+oxidize-core/src/compute/numa.rs
+  s_18e991452520ed::t_33c6e531203b77 195-199,250
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "700bf42fd0926378eb3cfac61a2943e69f515438",
+  "prompts": {},
+  "sessions": {
+    "s_18e991452520ed": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9b009849-d334-433f-b626-4fee84fb4340",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

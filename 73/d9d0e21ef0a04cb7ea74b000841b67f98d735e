@@ -1,0 +1,26 @@
+docs/superpowers/specs/2026-06-05-perf-and-features-design.md
+  s_b138499838f940::t_11e2dfbc25f460 1-42
+oxidize-core/src/compute/tensor.rs
+  s_b138499838f940::t_02ccf93645c318 1701
+  s_b138499838f940::t_9667f7534a9496 5022-5061
+  s_b138499838f940::t_d3cc2f7a3c1f5a 1393-1395
+  s_b138499838f940::t_02824b8b3014d1 1320-1347
+  s_b138499838f940::t_df4807c06b4c75 1216-1218
+  s_b138499838f940::t_35509b84972717 1660-1700,1702-1725
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.3",
+  "base_commit_sha": "73d9d0e21ef0a04cb7ea74b000841b67f98d735e",
+  "prompts": {},
+  "sessions": {
+    "s_b138499838f940": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d9fdb403-1cbc-4339-afa2-fcd8b1e5171d",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

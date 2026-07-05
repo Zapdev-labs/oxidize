@@ -1,0 +1,35 @@
+oxidize-core/src/compute/numa.rs
+  s_d8b5af6870ab84::t_0f2ee7c778194a 1-49,54-94,97-101,104-204
+  s_e1faced19cd1f4::t_7fb59aae050c74 50-53
+  s_d8b5af6870ab84::t_97485455741290 95-96,102-103
+oxidize-core/src/compute/spinpool.rs
+  s_d8b5af6870ab84::t_330b6dc849b48d 187,191-198
+oxidize-core/src/model/layer_wise.rs
+  s_d8b5af6870ab84::t_dba1870d2e22e8 625-636
+oxidize-core/src/lib.rs
+  s_d8b5af6870ab84::t_dba1870d2e22e8 93-94
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "04d3739bc076cf7b93c9e2a22ca7ef276a66d8eb",
+  "prompts": {},
+  "sessions": {
+    "s_d8b5af6870ab84": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "747c40af-74b1-4c68-a8f8-83589cf844b7",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_e1faced19cd1f4": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_14d958503ffeQSE9BaGDSZW2IV",
+        "model": "k2p6"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

@@ -1,0 +1,23 @@
+oxidize-cpp/modal/image.py
+  s_5b078de97b8925::t_219b6d4b9a50f7 104-112
+  s_5b078de97b8925::t_94359a306ab200 44-46,51-54,56-59
+  s_5b078de97b8925::t_9b225c77f8448e 80
+oxidize-cpp/modal/benchmark.py
+  s_5b078de97b8925::t_5904e7990fff53 3,5-7,9-17,19-21,41-51,57,63-84,86-89,91-103,106-109,113-124,127-128,131-132,134-136,139,141-157,159-198,202-205,207-228,230-238,242-244,246-248,250,253-257,259
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "6bf48c7dd4596649bfbcbc133350649e13b96eb6",
+  "prompts": {},
+  "sessions": {
+    "s_5b078de97b8925": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a2fd32be-d532-4929-8226-7967c93996a1",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

@@ -1,0 +1,20 @@
+Dockerfile.server
+  s_3582b5342698b9::t_fba62b0de8b664 17,32
+  s_3582b5342698b9::t_23984872ce238a 16,31
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "d37ba36bce697d30fd9441f73a516fdf512dcfb5",
+  "prompts": {},
+  "sessions": {
+    "s_3582b5342698b9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f1219-02c1-7713-9f8b-d532e4c17a17",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

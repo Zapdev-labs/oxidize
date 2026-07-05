@@ -1,0 +1,27 @@
+oxidize-cli/src/main.rs
+  s_d4a773a2729b7f::t_4fdbe86c89e638 630-632,648-650
+oxidize-server/src/metrics.rs
+  s_d4a773a2729b7f::t_4fdbe86c89e638 12-13
+oxidize-python/oxidize_python/cli.py
+  s_d4a773a2729b7f::t_af31ddd0481c8e 417-422
+oxidize-server/src/routes/chat.rs
+  s_d4a773a2729b7f::t_4fdbe86c89e638 26-27
+oxidize-core/src/backends/cuda.rs
+  s_d4a773a2729b7f::t_4fdbe86c89e638 194,340,349-352,463-464,544
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "de305b6049c2f3f4c9ef52272770c875213dff16",
+  "prompts": {},
+  "sessions": {
+    "s_d4a773a2729b7f": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_14d94d1adffeVORuIAApUqmlbi",
+        "model": "k2p6"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

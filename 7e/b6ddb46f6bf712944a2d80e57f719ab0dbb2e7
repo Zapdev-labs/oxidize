@@ -1,0 +1,21 @@
+oxidize-kernels/src/lib.rs
+  s_3582b5342698b9::t_88002aa74e5ca2 397,412,419,427,436
+oxidize-cli/src/pipeline.rs
+  s_3582b5342698b9::t_82ee62d3994bb2 40-66,336,488
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "7eb6ddb46f6bf712944a2d80e57f719ab0dbb2e7",
+  "prompts": {},
+  "sessions": {
+    "s_3582b5342698b9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f1219-02c1-7713-9f8b-d532e4c17a17",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

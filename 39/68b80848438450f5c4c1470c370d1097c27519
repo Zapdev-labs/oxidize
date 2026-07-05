@@ -1,0 +1,31 @@
+oxidize-golang/core/vision/patch_encoder_test.go
+  s_df9c78e59b2a5c::t_d561280587190d 1-24
+oxidize-golang/core/vision/vision.go
+  s_9df89de3bde73a::t_2fd9b38ff5f8a6 30-32,35-102
+oxidize-golang/core/vision/patch_encoder.go
+  s_df9c78e59b2a5c::t_a2e267b92cc901 1-109
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "3968b80848438450f5c4c1470c370d1097c27519",
+  "prompts": {},
+  "sessions": {
+    "s_9df89de3bde73a": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "7ea7bbcc-43ad-4243-a823-4f40ca203960",
+        "model": "default"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_df9c78e59b2a5c": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "d22a59f1-9349-430c-8998-8ced993f2fad",
+        "model": "default"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

@@ -1,0 +1,25 @@
+oxidize-golang/core/oxk/oxk_test.go
+  s_d696a9bcb3c378::t_216a5021d9f8d4 125-127,130-133
+  s_d696a9bcb3c378::t_d17a1af56d8ce3 43-45
+  s_d696a9bcb3c378::t_0e4ea1763539f8 95-97
+  s_d696a9bcb3c378::t_a0ee4680172d17 108-110
+  s_d696a9bcb3c378::t_89053587bb3468 82-84
+  s_d696a9bcb3c378::t_e4c14e3954c38c 60-64
+  s_d696a9bcb3c378::t_269b6e4ffa49a3 70-73
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "4324e7ac1d4f1a5b2d37d036673e40ec7e7da3d9",
+  "prompts": {},
+  "sessions": {
+    "s_d696a9bcb3c378": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "853d1fc4-7588-4e2c-8845-bd957bd215b6",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

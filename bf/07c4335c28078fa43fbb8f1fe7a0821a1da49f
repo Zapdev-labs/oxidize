@@ -1,0 +1,46 @@
+oxidize-core/src/format/conversion.rs
+  s_94587b4ca2ecd9::t_5616f9b22d4c63 74-75,215-216,275,377-379
+  s_94587b4ca2ecd9::t_ee954ccd757d3d 1-2
+oxidize-server/src/runtime/generate.rs
+  s_94587b4ca2ecd9::t_fa413f4c1ff316 113
+  s_94587b4ca2ecd9::t_271629bac1a8f1 247,378
+oxidize-core/src/model/diffusion_gemma.rs
+  s_94587b4ca2ecd9::t_4649df3d1277b4 23-28
+oxidize-finetuning/src/trainer.rs
+  s_94587b4ca2ecd9::t_65a3528b2650e2 170
+oxidize-core/src/compute/numa.rs
+  s_94587b4ca2ecd9::t_434db786180c22 114
+oxidize-core/src/model/layer_wise.rs
+  s_94587b4ca2ecd9::t_5616f9b22d4c63 2057-2058
+oxidize-cli/src/bin/bench.rs
+  s_94587b4ca2ecd9::t_23b6d7d7f2f3fe 387,389
+oxidize-cli/src/main.rs
+  s_94587b4ca2ecd9::t_d51d06be333f9a 2075-2079
+  s_94587b4ca2ecd9::t_a22b94963cf2d1 516
+oxidize-core/src/format/safetensors_to_gguf.rs
+  s_94587b4ca2ecd9::t_5616f9b22d4c63 563-565,931,1141-1142
+  s_94587b4ca2ecd9::t_8071bb7d0335ed 5
+  s_94587b4ca2ecd9::t_e7f30ca43dd401 1256,1260
+oxidize-core/benches/layer_bench.rs
+  s_94587b4ca2ecd9::t_dc40e92f13aaa8 287
+oxidize-core/benches/gemv_bench.rs
+  s_94587b4ca2ecd9::t_1a40b49f2ffbed 1
+  s_94587b4ca2ecd9::t_7e2f89c7c0a68e 4
+  s_94587b4ca2ecd9::t_4b2fa236dddbf7 20
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "bf07c4335c28078fa43fbb8f1fe7a0821a1da49f",
+  "prompts": {},
+  "sessions": {
+    "s_94587b4ca2ecd9": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "bdb3edac-bdef-4078-b890-115feb3a457a",
+        "model": "default"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

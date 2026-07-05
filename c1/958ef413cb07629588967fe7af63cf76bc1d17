@@ -1,0 +1,29 @@
+oxidize-core/src/backends/cuda.rs
+  s_a7b9057d3615ee::t_63b16bc664971a 407-415
+.gitignore
+  s_94587b4ca2ecd9::t_4da71f2369b0c9 21-23
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "c1958ef413cb07629588967fe7af63cf76bc1d17",
+  "prompts": {},
+  "sessions": {
+    "s_94587b4ca2ecd9": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "bdb3edac-bdef-4078-b890-115feb3a457a",
+        "model": "default"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_a7b9057d3615ee": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "a0aa037c-6486-4fe7-9973-f32440798833",
+        "model": "default"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

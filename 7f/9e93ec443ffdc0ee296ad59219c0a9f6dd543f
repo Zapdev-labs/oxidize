@@ -1,0 +1,32 @@
+scripts/glm-52-prune.sh
+  s_e658c70c93080d::t_bc5664e053cf2e 28-32
+  s_e658c70c93080d::t_205a10165ee8d9 12-13
+  s_e658c70c93080d::t_57c4037156f32b 1-11,14-27,33-63
+scripts/minimax-m3-eagle3-wait-and-run.sh
+  s_e658c70c93080d::t_404cbf7a36ef05 1-8,16-18,23,25,30,34-36,42-67
+  s_e658c70c93080d::t_6863850dc76ba3 9-15,19-22,24,26-29,31-33,37-41
+scripts/run-minimax-m3-eagle3.sh
+  s_e658c70c93080d::t_bffb122e32dc75 22-27,29-30
+  s_e658c70c93080d::t_800495417febb1 1-21,28
+scripts/minimax-m3-manifest.json
+  s_e658c70c93080d::t_3bb3cb71d70897 1-19
+scripts/glm-vision-download.sh
+  s_e658c70c93080d::t_3c743fb273f794 7,9,14,17-18
+  s_e658c70c93080d::t_255a02d2d2eee7 1-6,8,10-13,15-16,19-20
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "7f9e93ec443ffdc0ee296ad59219c0a9f6dd543f",
+  "prompts": {},
+  "sessions": {
+    "s_e658c70c93080d": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "bc6356cd-fafd-435c-a5dc-0c8b3e1fc9d7",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

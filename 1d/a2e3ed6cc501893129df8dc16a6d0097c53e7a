@@ -1,0 +1,24 @@
+oxidize-core/src/model/layer_wise.rs
+  s_d8b5af6870ab84::t_011b8d48875f8c 1826-1827,1829-1857,1863-1872,1911
+oxidize-core/src/compute/tensor.rs
+  s_d8b5af6870ab84::t_a622d1675ccb44 2134-2308
+  s_d8b5af6870ab84::t_6ace51d6379209 1547-1551,1608-1675
+  s_d8b5af6870ab84::t_eebd672616f3b4 5638-5672
+  s_d8b5af6870ab84::t_1e2fa440497977 1284-1286,1294-1362
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "1da2e3ed6cc501893129df8dc16a6d0097c53e7a",
+  "prompts": {},
+  "sessions": {
+    "s_d8b5af6870ab84": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "747c40af-74b1-4c68-a8f8-83589cf844b7",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

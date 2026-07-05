@@ -1,0 +1,32 @@
+oxidize-core/src/backends/cuda/flash_decode.rs
+  s_1b37f3c1d1e7b7::t_45dd9a837c06b1 63,65-92,94-125
+  s_1b37f3c1d1e7b7::t_b662d65968d3a6 64,93,127
+  s_ec8b23f0af1de8::t_6a31d47ec5a1a9 141
+  s_1b37f3c1d1e7b7::t_a264072c0c3d35 5,139
+  s_1b37f3c1d1e7b7::t_2f219b5ce21ed4 61,128-138,140,142-153
+  s_1b37f3c1d1e7b7::t_48befd20064c65 28-30,43-60,126
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "549492afdbb37210e433fd9b883ce75289239c07",
+  "prompts": {},
+  "sessions": {
+    "s_1b37f3c1d1e7b7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ee600-1957-70f2-b3f9-e51f217a3ee9",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_ec8b23f0af1de8": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "3715abea-0d3e-44e5-acf7-58ce8583b08f",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
