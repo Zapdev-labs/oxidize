@@ -1,0 +1,45 @@
+modal_oxidize.py
+  s_30bfa233838671::t_5f18c0182c8bc8 1-101
+oxidize-c/Makefile
+  s_30bfa233838671::t_af824d38306e30 1-22
+oxidize-c/gen.h
+  s_30bfa233838671::t_9f341f01906f3c 1-25
+oxidize-c/main.c
+  s_30bfa233838671::t_e3f17427160106 1-193
+oxidize-c/cuda.cu
+  s_30bfa233838671::t_f9bc3f6e2b818c 1-663
+oxidize-c/gen.c
+  s_30bfa233838671::t_d46cc753cadb6e 1-211
+oxidize-c/gguf.c
+  s_30bfa233838671::t_aff4a8a7cc2f21 1-197
+oxidize-c/kernels.c
+  s_30bfa233838671::t_0a5ba8b3ed6954 1-542
+oxidize-c/model.c
+  s_30bfa233838671::t_047c5e385f9551 1-849
+oxidize-c/oc.h
+  s_30bfa233838671::t_760cab9caee01c 1-204
+oxidize-c/quant.c
+  s_30bfa233838671::t_129b3948011ec3 1-330
+oxidize-c/server.c
+  s_30bfa233838671::t_cae49c14e674eb 1-600
+oxidize-c/test_oc.c
+  s_30bfa233838671::t_b9291c8ca7ab6b 1-79
+oxidize-c/tokenizer.c
+  s_30bfa233838671::t_d79412bad8484a 1-469
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "ea6586f020368e8e83dd56b8cbcee09d2f5fe0b8",
+  "prompts": {},
+  "sessions": {
+    "s_30bfa233838671": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "fffc182b-914d-44e4-b94d-b1e5c0fe956c",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
