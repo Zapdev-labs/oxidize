@@ -196,7 +196,8 @@ static void load_block(const oc_gguf *g, const char *prefix, oc_layer *L,
     L->v_bias = load_vec_n(g, T("attn_v.bias"), &L->v_bias_n);
     L->q_norm = load_vec(g, T("attn_q_norm.weight"));
     L->k_norm = load_vec(g, T("attn_k_norm.weight"));
-    if (!L->attn_norm || weight_empty(&L->wq) || weight_empty(&L->gate))
+    if (!L->attn_norm || weight_empty(&L->wq) ||
+        (weight_empty(&L->gate) && !L->is_moe))
       oc_die("model: layer %s missing dense weights (unsupported arch?)", prefix);
   }
   (void)c;
