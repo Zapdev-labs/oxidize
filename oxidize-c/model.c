@@ -106,8 +106,14 @@ static void build_config(const oc_gguf *g, oc_config *c) {
                                                                       : 0.0f;
   }
 
-  if (oc_meta_u32(g, K("expert_count"), &u) && u > 0)
-    oc_die("model: MoE (%u experts) is out of scope for oxidize-c", u);
+  if (oc_meta_u32(g, K("expert_count"), &u) && u > 0) {
+    c->n_expert = u;
+    c->n_expert_used = oc_meta_u32(g, K("expert_used_count"), &u) ? u : 2;
+    c->expert_ff = oc_meta_u32(g, K("expert_feed_forward_length"), &u) && u > 0
+                       ? u : c->intermediate_size;
+    /* norm_topk_prob: default on for softmax routers (mixtral/qwen3moe). */
+    c->expert_weights_norm = 1;
+  }
   if (oc_meta_u32(g, K("attention.kv_lora_rank"), &u) && u > 0)
     oc_die("model: MLA attention is out of scope for oxidize-c");
 #undef K
@@ -124,6 +130,18 @@ static void load_block(const oc_gguf *g, const char *prefix, oc_layer *L,
   L->gate = load_weight(g, T("ffn_gate.weight"));
   L->up = load_weight(g, T("ffn_up.weight"));
   L->down = load_weight(g, T("ffn_down.weight"));
+
+  /* MoE: router present -> expert-stacked FFN (dense gate/up/down are empty). */
+  L->router = load_weight(g, T("ffn_gate_inp.weight"));
+  if (!weight_empty(&L->router)) {
+    L->is_moe = true;
+    L->e_gate = load_weight(g, T("ffn_gate_exps.weight"));
+    L->e_up = load_weight(g, T("ffn_up_exps.weight"));
+    L->e_down = load_weight(g, T("ffn_down_exps.weight"));
+    if (weight_empty(&L->e_gate) || weight_empty(&L->e_up) ||
+        weight_empty(&L->e_down))
+      oc_die("model: MoE layer %s missing expert tensors", prefix);
+  }
 
   size_t na;
   L->ssm_a = load_vec_n(g, T("ssm_a"), &na);
@@ -566,6 +584,7 @@ static void gated_rms_norm(float *x, const float *w, const float *gate, size_t n
 typedef struct {
   float *normed, *q, *k, *v, *attn, *attn_out, *gate, *up, *ffn_out;
   float *mixed, *conv, *ab, *z, *core;   /* GDN scratch (batch-sized) */
+  float *e_logits, *e_g, *e_u, *e_out;   /* MoE scratch (single token) */
   oc_q8blk *xq;
   size_t batch;
 } scratch_t;
@@ -607,9 +626,17 @@ static scratch_t scratch_alloc(const oc_model *m, size_t batch) {
     s.z = malloc(batch * max_qkv * sizeof(float));
     s.core = malloc(batch * max_qkv * sizeof(float));
   }
+  size_t ff = c->expert_ff;
+  if (c->n_expert) {
+    s.e_logits = malloc(c->n_expert * sizeof(float));
+    s.e_g = malloc(ff * sizeof(float));
+    s.e_u = malloc(ff * sizeof(float));
+    s.e_out = malloc(h * sizeof(float));
+  }
   size_t maxc = h > in ? h : in;
   if (max_q > maxc) maxc = max_q;
   if (max_qkv > maxc) maxc = max_qkv;
+  if (ff > maxc) maxc = ff;
   s.xq = malloc(batch * (maxc / QK + 1) * sizeof(oc_q8blk));
   return s;
 }
@@ -618,6 +645,7 @@ static void scratch_free(scratch_t *s) {
   free(s->normed); free(s->q); free(s->k); free(s->v); free(s->attn);
   free(s->attn_out); free(s->gate); free(s->up); free(s->ffn_out);
   free(s->mixed); free(s->conv); free(s->ab); free(s->z); free(s->core);
+  free(s->e_logits); free(s->e_g); free(s->e_u); free(s->e_out);
   free(s->xq);
 }
 
@@ -817,6 +845,68 @@ static void attn_layer_token(const oc_model *m, const oc_layer *L,
   oc_gemv(&L->wo, h, q_len, s->attn, aq, attn_out);
 }
 
+/* View expert e of a stacked [n_expert][rows x cols] weight as a 2D oc_weight. */
+static oc_weight expert_view(const oc_weight *w, size_t e) {
+  oc_weight v = *w;
+  size_t plane = w->rows * w->cols;
+  if (w->quantized)
+    v.data = w->data + (size_t)e * w->rows * oc_row_bytes(w->quant, w->cols);
+  else
+    v.f32 = w->f32 + (size_t)e * plane;
+  return v;
+}
+
+/* MoE FFN for one token: softmax router -> top-k experts -> weighted sum.
+ * ponytail: normed is re-quantized per expert (quant_acts shares s->xq, and the
+ * down-proj quant clobbers it); k is small so this is cheap. */
+static void ffn_moe(const oc_model *m, const oc_layer *L, float *x,
+                    scratch_t *s) {
+  const oc_config *c = &m->cfg;
+  size_t h = c->hidden_size, ff = c->expert_ff;
+  size_t ne = c->n_expert, k = c->n_expert_used;
+  if (k > 64) k = 64;
+  oc_rms_norm(s->normed, x, L->ffn_norm, h, c->rms_eps);
+  const oc_q8blk *rq = quant_acts(s, s->normed, h, 1, w_needs_q8(&L->router));
+  oc_gemv(&L->router, ne, h, s->normed, rq, s->e_logits);
+  oc_softmax(s->e_logits, ne);
+
+  size_t idx[64];
+  float wts[64];
+  for (size_t j = 0; j < k; ++j) {
+    float best = -1.0f;
+    size_t bi = 0;
+    for (size_t e = 0; e < ne; ++e) {
+      bool taken = false;
+      for (size_t t = 0; t < j; ++t) if (idx[t] == e) taken = true;
+      if (!taken && s->e_logits[e] > best) { best = s->e_logits[e]; bi = e; }
+    }
+    idx[j] = bi;
+    wts[j] = best;
+  }
+  if (c->expert_weights_norm) {
+    float wsum = 0.0f;
+    for (size_t j = 0; j < k; ++j) wsum += wts[j];
+    if (wsum > 0.0f) for (size_t j = 0; j < k; ++j) wts[j] /= wsum;
+  }
+
+  memset(s->ffn_out, 0, h * sizeof(float));
+  for (size_t j = 0; j < k; ++j) {
+    oc_weight wg = expert_view(&L->e_gate, idx[j]);
+    oc_weight wu = expert_view(&L->e_up, idx[j]);
+    oc_weight wd = expert_view(&L->e_down, idx[j]);
+    const oc_q8blk *nq = quant_acts(s, s->normed, h, 1,
+                                    w_needs_q8(&wg) || w_needs_q8(&wu));
+    oc_gemv(&wg, ff, h, s->normed, nq, s->e_g);
+    oc_gemv(&wu, ff, h, s->normed, nq, s->e_u);
+    oc_swiglu(s->e_g, s->e_u, ff);
+    const oc_q8blk *gq = quant_acts(s, s->e_g, ff, 1, w_needs_q8(&wd));
+    oc_gemv(&wd, h, ff, s->e_g, gq, s->e_out);
+    float wj = wts[j];
+    for (size_t i = 0; i < h; ++i) s->ffn_out[i] += wj * s->e_out[i];
+  }
+  for (size_t i = 0; i < h; ++i) x[i] += s->ffn_out[i];
+}
+
 /* shared FFN block: x += down(swiglu(gate(norm(x)), up(norm(x)))) */
 static void ffn_block(const oc_model *m, const oc_layer *L, float *x_batch,
                       size_t batch, scratch_t *s) {
@@ -887,7 +977,10 @@ static void run_layers(oc_model *m, float *x_batch, size_t batch,
         for (size_t i = 0; i < h; ++i) x_batch[b * h + i] += s->attn_out[i];
       }
     }
-    ffn_block(m, L, x_batch, batch, s);
+    if (L->is_moe)
+      for (size_t b = 0; b < batch; ++b) ffn_moe(m, L, x_batch + b * h, s);
+    else
+      ffn_block(m, L, x_batch, batch, s);
     if (L->out_scale_v != 1.0f && L->out_scale_v != 0.0f)
       for (size_t b = 0; b < batch; ++b)
         for (size_t i = 0; i < h; ++i) x_batch[b * h + i] *= L->out_scale_v;

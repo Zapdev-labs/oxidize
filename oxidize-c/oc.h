@@ -133,11 +133,18 @@ typedef struct {
   float yarn_factor, yarn_orig_ctx;  /* rope scaling (0 = off) */
   size_t max_ctx;          /* CLI-capped KV context (0 = context_size) */
   int kv_int8;             /* 1 = store KV cache as int8 (per-head scale) */
+  size_t n_expert;         /* MoE: total experts (0 = dense) */
+  size_t n_expert_used;    /* MoE: top-k experts per token */
+  size_t expert_ff;        /* MoE: per-expert intermediate size */
+  int expert_weights_norm; /* MoE: renormalize the top-k routing weights */
 } oc_config;
 
 typedef struct {
   float *attn_norm, *ffn_norm;
   oc_weight wq, wk, wv, wo, gate, up, down;
+  /* MoE: router + expert-stacked FFN weights (per-expert 2D slices). */
+  bool is_moe;
+  oc_weight router, e_gate, e_up, e_down;
   float *q_bias, *k_bias, *v_bias;         /* NULL when absent */
   size_t q_bias_n, k_bias_n, v_bias_n;
   float *q_norm, *k_norm;                  /* per-head (Qwen3), NULL when absent */
