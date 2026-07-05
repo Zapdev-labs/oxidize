@@ -51,6 +51,10 @@ static void print_token(uint32_t id, void *ud) {
 static void usage(const char *prog) {
   fprintf(stderr,
           "Usage: %s --model <path.gguf> [options]\n"
+          "       %s prune --input in.gguf --output out.gguf [options]\n"
+          "       %s finetune --model m.gguf --data data.jsonl [options]\n",
+          prog, prog, prog);
+  fprintf(stderr,
           "  --prompt <str>      prompt text (raw)\n"
           "  --chat              wrap prompt in ChatML (qwen chat models)\n"
           "  --max-tokens N      decode budget (default 64)\n"
@@ -65,12 +69,16 @@ static void usage(const char *prog) {
           "  --stream            stream text to stdout\n"
           "  --serve             run HTTP+WebSocket server instead of one-shot\n"
           "  --port N            server port (default 8090)\n"
-          "  --host A            bind address (default 127.0.0.1; 0.0.0.0 for LAN)\n",
-          prog);
+          "  --host A            bind address (default 127.0.0.1; 0.0.0.0 for LAN)\n");
   exit(2);
 }
 
 int main(int argc, char **argv) {
+  if (argc > 1 && !strcmp(argv[1], "prune"))
+    return oc_prune_main(argc - 2, argv + 2);
+  if (argc > 1 && !strcmp(argv[1], "finetune"))
+    return oc_finetune_main(argc - 2, argv + 2);
+
   const char *model_path = NULL, *prompt = "Hello", *host = "127.0.0.1";
   size_t max_tokens = 64, top_k = 0, ctx = 8192, draft = 4;
   int spec_mode = 2; /* off by default: spec pays only at high acceptance on CPU */

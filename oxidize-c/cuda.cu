@@ -15,6 +15,7 @@
 
 #include <math.h>
 #include <stdio.h>
+#include <time.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -90,6 +91,11 @@ struct GpuCtx {
   float *d_gf, *d_uf;                 /* ffn gate/up */
   float *d_mixed, *d_conv, *d_a, *d_b, *d_z, *d_core, *d_logits;
   __half *d_xh;                       /* fp16 matmul input staging (max width) */
+  float *aq_d, *aq_s;                 /* int8 activation blocks (per 32 values) */
+  int *aq_q;                          /* packed q8, 8 ints per block */
+  cudaStream_t stream;
+  int *d_pos;                         /* current absolute position (device) */
+  cudaGraphExec_t graph[2] = {nullptr, nullptr};   /* [want_logits] */
   float *h_pin;                       /* pinned host staging (embedding / logits) */
   size_t h_pin_cap;
 };
@@ -189,9 +195,10 @@ __global__ void k_deinterleave(const float *qg, float *q, float *gate, int heads
 
 /* RoPE (NeoX split-half, partial) with optional YaRN. One thread per
  * (head, i<half). Ports oc_rope. */
-__global__ void k_rope(float *vec, int head_dim, int n_heads, int pos,
-                       float theta, int rope_dim, float yf, float yorig,
-                       const float *ff) {
+__global__ void k_rope(float *vec, int head_dim, int n_heads,
+                       const int *__restrict__ posp, float theta, int rope_dim,
+                       float yf, float yorig, const float *ff) {
+  int pos = *posp;
   int rl = (rope_dim == 0 || rope_dim > head_dim) ? head_dim : rope_dim;
   int half = rl / 2;
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -229,57 +236,81 @@ __global__ void k_rope(float *vec, int head_dim, int n_heads, int pos,
 
 /* append current k/v (kv_heads*head_dim) to the device KV cache at slot */
 __global__ void k_kv_append(float *kv_k, float *kv_v, const float *k,
-                            const float *v, int slot, int kv_ctx, int kvn) {
+                            const float *v, const int *__restrict__ posp,
+                            int kv_ctx, int kvn) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= kvn) return;
-  int base = (slot % kv_ctx) * kvn;
+  int base = (*posp % kv_ctx) * kvn;
   kv_k[base + i] = k[i];
   kv_v[base + i] = v[i];
 }
 
 /* GQA attention decode, online softmax. One block per query head (head_dim
  * threads). Ports oc_attention. kv_k/kv_v point at this layer's slice. */
+/* GQA attention decode: one block (4 warps) per query head. Warps take
+ * interleaved position chunks with private online-softmax state, merged at
+ * the end (flash-decoding style). Lanes own head_dim/32 dims. */
 __global__ void k_attention(float *out, const float *q, const float *kv_k,
-                            const float *kv_v, int seq_len, int n_heads,
-                            int kv_heads, int head_dim, float scale) {
+                            const float *kv_v, const int *__restrict__ posp,
+                            int cap, int n_heads, int kv_heads, int head_dim,
+                            float scale) {
+  int seq_len = *posp + 1;
+  if (seq_len > cap) seq_len = cap;
   int head = blockIdx.x;
-  int d = threadIdx.x;                 /* one thread per head_dim element */
-  if (head >= n_heads || d >= head_dim) return;
+  if (head >= n_heads) return;
+  int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
   int group = n_heads / kv_heads;
   int kv_off = (head / group) * head_dim;
   int kvn = kv_heads * head_dim;
-  const float *qh = q + head * head_dim;
-  __shared__ float sh_q[512];
-  __shared__ float sh_red[512];
-  __shared__ float s_max, s_sum, s_score, s_factor, s_es;
-  sh_q[d] = qh[d];
-  float acc = 0.0f;                    /* this thread's out[d] accumulator */
-  if (d == 0) { s_max = -1e30f; s_sum = 0.0f; }
-  __syncthreads();
+  int per = head_dim / 32;             /* dims per lane (8 or 16) */
+  const float *qh = q + head * head_dim + lane * per;
   if (scale == 0.0f) scale = rsqrtf((float)head_dim);
-  for (int t = 0; t < seq_len; ++t) {
-    const float *kr = kv_k + t * kvn + kv_off;
-    /* score = dot(q, k) * scale  via block reduction */
-    sh_red[d] = sh_q[d] * kr[d];
-    __syncthreads();
-    for (int st = blockDim.x / 2; st > 0; st >>= 1) {
-      if (d < st) sh_red[d] += sh_red[d + st];
-      __syncthreads();
-    }
-    if (d == 0) {
-      float score = sh_red[0] * scale;
-      float nm = s_max > score ? s_max : score;
-      s_factor = expf(s_max - nm);
-      s_es = expf(score - nm);
-      s_sum = s_sum * s_factor + s_es;
-      s_max = nm;
-    }
-    __syncthreads();
-    const float *vr = kv_v + t * kvn + kv_off;
-    acc = acc * s_factor + s_es * vr[d];
-    __syncthreads();
+  float qreg[16], acc[16];
+#pragma unroll
+  for (int j = 0; j < 16; ++j) acc[j] = 0.0f;
+  for (int j = 0; j < per; ++j) qreg[j] = qh[j];
+  float rmax = -1e30f, rsum = 0.0f;
+  for (int t = warp; t < seq_len; t += 4) {
+    const float *kr = kv_k + (size_t)t * kvn + kv_off + lane * per;
+    float sc = 0.0f;
+    for (int j = 0; j < per; ++j) sc += qreg[j] * kr[j];
+#pragma unroll
+    for (int off = 16; off > 0; off >>= 1)
+      sc += __shfl_xor_sync(0xFFFFFFFF, sc, off);
+    sc *= scale;
+    float nm = rmax > sc ? rmax : sc;
+    float f = __expf(rmax - nm), es = __expf(sc - nm);
+    const float *vr = kv_v + (size_t)t * kvn + kv_off + lane * per;
+    for (int j = 0; j < per; ++j) acc[j] = acc[j] * f + es * vr[j];
+    rsum = rsum * f + es;
+    rmax = nm;
   }
-  out[head * head_dim + d] = s_sum > 0.0f ? acc / s_sum : 0.0f;
+  /* merge the 4 warp-partials */
+  __shared__ float sm[4], ss[4];
+  __shared__ float sacc[4][512];
+  sm[warp] = rmax;
+  ss[warp] = rsum;
+  for (int j = 0; j < per; ++j) sacc[warp][lane * per + j] = acc[j];
+  __syncthreads();
+  if (warp == 0) {
+    float m = sm[0];
+#pragma unroll
+    for (int w = 1; w < 4; ++w) m = fmaxf(m, sm[w]);
+    float fw[4], sum = 0.0f;
+#pragma unroll
+    for (int w = 0; w < 4; ++w) {
+      fw[w] = __expf(sm[w] - m);
+      sum += ss[w] * fw[w];
+    }
+    float inv = sum > 0.0f ? 1.0f / sum : 0.0f;
+    float *oh = out + head * head_dim + lane * per;
+    for (int j = 0; j < per; ++j) {
+      float o = 0.0f;
+#pragma unroll
+      for (int w = 0; w < 4; ++w) o += sacc[w][lane * per + j] * fw[w];
+      oh[j] = o * inv;
+    }
+  }
 }
 
 /* ---- gated-DeltaNet kernels ---- */
@@ -400,44 +431,90 @@ __global__ void k_gated_rms_norm(float *core, const float *w, const float *z,
  * One block per output row; each thread accumulates 32-value sub-blocks,
  * then a shared-memory tree reduction. Bandwidth-bound by design. ---- */
 
+
+/* quantize fp32 activations to int8 blocks of 32 (mirrors oc_quantize_act):
+ * one thread per block-of-32. d = amax/127, s = d*sum(q). q packed 4/int. */
+__global__ void k_quant_act(const float *__restrict__ x, float *__restrict__ qd,
+                            float *__restrict__ qs, int *__restrict__ qq, int nb) {
+  int bidx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (bidx >= nb) return;
+  const float *xb = x + bidx * 32;
+  float amax = 0.0f;
+#pragma unroll
+  for (int i = 0; i < 32; ++i) amax = fmaxf(amax, fabsf(xb[i]));
+  float d = amax / 127.0f;
+  float id = d != 0.0f ? 1.0f / d : 0.0f;
+  int sum = 0;
+#pragma unroll
+  for (int w = 0; w < 8; ++w) {
+    unsigned packed = 0;
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+      int q = __float2int_rn(xb[w * 4 + j] * id);
+      q = max(-127, min(127, q));
+      sum += q;
+      packed |= (unsigned)(q & 0xFF) << (8 * j);
+    }
+    qq[bidx * 8 + w] = (int)packed;
+  }
+  qd[bidx] = d;
+  qs[bidx] = d * (float)sum;
+}
+
+/* warp-per-row int8 GEMV, dp4a integer dots. 4 warps/block = 4 rows. */
 __constant__ float c_kv_iq4nl[16] = {-127.f, -104.f, -83.f, -65.f, -49.f, -35.f,
                                      -22.f,  -10.f,  1.f,   13.f,  25.f,  38.f,
                                      53.f,   69.f,   89.f,  113.f};
 
 __global__ void k_gemv_iq4xs(const uint8_t *__restrict__ W,
-                             const float *__restrict__ x, float *__restrict__ y,
+                             const float *__restrict__ qd,
+                             const float *__restrict__ qs,
+                             const int *__restrict__ qq, float *__restrict__ y,
                              int rows, int cols) {
-  int r = blockIdx.x;
+  __shared__ int lut[16];             /* kvalues as int8 in low byte */
+  if (threadIdx.x < 16) lut[threadIdx.x] = (int)c_kv_iq4nl[threadIdx.x] & 0xFF;
+  __syncthreads();
+  int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+  int r = blockIdx.x * 8 + warp;
   if (r >= rows) return;
   const uint8_t *row = W + (size_t)r * (cols / 256) * 136;
   int nsub = cols / 32;
   float acc = 0.0f;
-  for (int i = threadIdx.x; i < nsub; i += blockDim.x) {
-    int sb = i >> 3, ib = i & 7;
-    const uint8_t *blk = row + (size_t)sb * 136;
-    float d = __half2float(*(const __half *)blk);
-    uint16_t shl = *(const uint16_t *)(blk + 2);
-    int ls = ((blk[4 + ib / 2] >> (4 * (ib & 1))) & 0xF) |
-             (((shl >> (2 * ib)) & 3) << 4);
-    const uint8_t *qs = blk + 8 + ib * 16;
-    const float *xp = x + sb * 256 + ib * 32;
-    /* 16 bytes as two uint4-ish loads */
-    float s = 0.0f;
+  /* two consecutive sub-blocks per lane: 32B contiguous weight reads and two
+   * independent dp4a chains to hide DRAM latency */
+  for (int i0 = lane * 2; i0 < nsub; i0 += 64) {
 #pragma unroll
-    for (int j = 0; j < 16; ++j) {
-      uint8_t b = qs[j];
-      s += c_kv_iq4nl[b & 0xF] * xp[j] + c_kv_iq4nl[b >> 4] * xp[j + 16];
+    for (int k = 0; k < 2; ++k) {
+      int i = i0 + k;
+      if (i >= nsub) break;
+      int sb = i >> 3, ib = i & 7;
+      const uint8_t *blk = row + (size_t)sb * 136;
+      float d = __half2float(*(const __half *)blk);
+      uint16_t shl = *(const uint16_t *)(blk + 2);
+      int ls = ((blk[4 + ib / 2] >> (4 * (ib & 1))) & 0xF) |
+               (((shl >> (2 * ib)) & 3) << 4);
+      const uint2 qa = *(const uint2 *)(blk + 8 + ib * 16);
+      const uint2 qb = *(const uint2 *)(blk + 8 + ib * 16 + 8);
+      unsigned wds[4] = {qa.x, qa.y, qb.x, qb.y};
+      const int *xq = qq + i * 8;
+      int isum = 0;
+#pragma unroll
+      for (int w = 0; w < 4; ++w) {
+        unsigned wv = wds[w];
+        int lo = lut[wv & 0xF] | (lut[(wv >> 8) & 0xF] << 8) |
+                 (lut[(wv >> 16) & 0xF] << 16) | (lut[(wv >> 24) & 0xF] << 24);
+        int hi = lut[(wv >> 4) & 0xF] | (lut[(wv >> 12) & 0xF] << 8) |
+                 (lut[(wv >> 20) & 0xF] << 16) | (lut[(wv >> 28) & 0xF] << 24);
+        isum = __dp4a(lo, xq[w], isum);
+        isum = __dp4a(hi, xq[4 + w], isum);
+      }
+      acc += d * (float)(ls - 32) * qd[i] * (float)isum;
     }
-    acc += d * (float)(ls - 32) * s;
   }
-  __shared__ float red[256];
-  red[threadIdx.x] = acc;
-  __syncthreads();
-  for (int st = blockDim.x / 2; st > 0; st >>= 1) {
-    if (threadIdx.x < st) red[threadIdx.x] += red[threadIdx.x + st];
-    __syncthreads();
-  }
-  if (threadIdx.x == 0) y[r] = red[0];
+#pragma unroll
+  for (int off = 16; off > 0; off >>= 1)
+    acc += __shfl_down_sync(0xFFFFFFFF, acc, off);
+  if (lane == 0) y[r] = acc;
 }
 
 __device__ inline void d_scale_min_k4(int j, const uint8_t *s, int *sc, int *m) {
@@ -451,62 +528,89 @@ __device__ inline void d_scale_min_k4(int j, const uint8_t *s, int *sc, int *m) 
 }
 
 __global__ void k_gemv_q4k(const uint8_t *__restrict__ W,
-                           const float *__restrict__ x, float *__restrict__ y,
+                           const float *__restrict__ qd,
+                           const float *__restrict__ qs,
+                           const int *__restrict__ qq, float *__restrict__ y,
                            int rows, int cols) {
-  int r = blockIdx.x;
+  int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+  int r = blockIdx.x * 8 + warp;
   if (r >= rows) return;
   const uint8_t *row = W + (size_t)r * (cols / 256) * 144;
-  int nsub = cols / 32;                /* 32-value groups; 8 per superblock */
+  int nsub = cols / 32;
   float acc = 0.0f;
-  for (int i = threadIdx.x; i < nsub; i += blockDim.x) {
-    int sb = i >> 3, g = i & 7;        /* group g: values g*32..g*32+31 */
+  for (int i = lane; i < nsub; i += 32) {
+    int sb = i >> 3, g = i & 7;
     const uint8_t *blk = row + (size_t)sb * 144;
     float d = __half2float(*(const __half *)blk);
     float mn = __half2float(*(const __half *)(blk + 2));
     int sc, m;
     d_scale_min_k4(g, blk + 4, &sc, &m);
-    /* q4_k layout: 32-byte chunk p=g/2 holds groups 2p (lo nibbles) and
-     * 2p+1 (hi nibbles) */
-    const uint8_t *qs = blk + 16 + (g / 2) * 32;
-    const float *xp = x + sb * 256 + g * 32;
-    float s = 0.0f, xs = 0.0f;
-    if (g & 1) {
+    const uint8_t *qsrc = blk + 16 + (g / 2) * 32;
+    const int *xq = qq + i * 8;
+    int shift = (g & 1) * 4;
+    int isum = 0;
 #pragma unroll
-      for (int j = 0; j < 32; ++j) {
-        s += (float)(qs[j] >> 4) * xp[j];
-        xs += xp[j];
-      }
-    } else {
-#pragma unroll
-      for (int j = 0; j < 32; ++j) {
-        s += (float)(qs[j] & 0xF) * xp[j];
-        xs += xp[j];
-      }
+    for (int w = 0; w < 4; ++w) {
+      uint2 qv = *(const uint2 *)(qsrc + w * 8);
+      unsigned lo0 = (qv.x >> shift) & 0x0F0F0F0F;
+      unsigned lo1 = (qv.y >> shift) & 0x0F0F0F0F;
+      isum = __dp4a((int)lo0, xq[w * 2], isum);
+      isum = __dp4a((int)lo1, xq[w * 2 + 1], isum);
     }
-    acc += d * (float)sc * s - mn * (float)m * xs;
+    acc += d * (float)sc * qd[i] * (float)isum - mn * (float)m * qs[i];
   }
-  __shared__ float red[256];
-  red[threadIdx.x] = acc;
-  __syncthreads();
-  for (int st = blockDim.x / 2; st > 0; st >>= 1) {
-    if (threadIdx.x < st) red[threadIdx.x] += red[threadIdx.x + st];
-    __syncthreads();
-  }
-  if (threadIdx.x == 0) y[r] = red[0];
+#pragma unroll
+  for (int off = 16; off > 0; off >>= 1)
+    acc += __shfl_down_sync(0xFFFFFFFF, acc, off);
+  if (lane == 0) y[r] = acc;
 }
 
 /* ---------- matmul helper: y[rows] = W[rows x cols] @ x[cols], device fp32 ---- */
-void gemv(GpuCtx *c, const GpuW &w, const float *d_in, float *d_out) {
+double g_prof[8];          /* 0 qkvo 1 ffn 2 head 3 attn 4 other */
+bool g_prof_on = false;
+cudaStream_t g_prof_stream = 0;
+
+struct ProfScope {
+  int slot;
+  cudaEvent_t e0, e1;
+  ProfScope(int s) : slot(s) {
+    if (!g_prof_on) return;
+    cudaEventCreate(&e0);
+    cudaEventCreate(&e1);
+    cudaEventRecord(e0, g_prof_stream);
+  }
+  ~ProfScope() {
+    if (!g_prof_on) return;
+    cudaEventRecord(e1, g_prof_stream);
+    cudaEventSynchronize(e1);
+    float ms = 0;
+    cudaEventElapsedTime(&ms, e0, e1);
+    g_prof[slot] += ms;
+    cudaEventDestroy(e0);
+    cudaEventDestroy(e1);
+  }
+};
+
+void gemv(GpuCtx *c, const GpuW &w, const float *d_in, float *d_out,
+          bool requant = true) {
   if (w.qd) {
+    int slot = w.rows >= 200000 ? 2 : (w.cols > 16000 || w.rows > 16000) ? 1 : 0;
+    ProfScope ps(slot);
+    int nb = w.cols / 32;
+    if (requant)
+      k_quant_act<<<(nb + 255) / 256, 256, 0, c->stream>>>(d_in, c->aq_d, c->aq_s, c->aq_q, nb);
+    int grid = (w.rows + 7) / 8;
     if (w.quant == OC_IQ4_XS)
-      k_gemv_iq4xs<<<w.rows, 256>>>(w.qd, d_in, d_out, w.rows, w.cols);
+      k_gemv_iq4xs<<<grid, 256, 0, c->stream>>>(w.qd, c->aq_d, c->aq_s, c->aq_q, d_out,
+                                  w.rows, w.cols);
     else
-      k_gemv_q4k<<<w.rows, 256>>>(w.qd, d_in, d_out, w.rows, w.cols);
+      k_gemv_q4k<<<grid, 256, 0, c->stream>>>(w.qd, c->aq_d, c->aq_s, c->aq_q, d_out,
+                                w.rows, w.cols);
     return;
   }
   int n = w.cols;
   int blk = 256, grid = (n + blk - 1) / blk;
-  k_f32_to_f16<<<grid, blk>>>(c->d_xh, d_in, n);
+  k_f32_to_f16<<<grid, blk, 0, c->stream>>>(c->d_xh, d_in, n);
   const float alpha = 1.0f, beta = 0.0f;
   cublasStatus_t st = cublasGemmEx(
       c->cublas, CUBLAS_OP_T, CUBLAS_OP_N, w.rows, 1, w.cols, &alpha, w.d,
@@ -712,6 +816,15 @@ int oc_cuda_build(oc_model *m) {
   A(&c->d_core, 8192);
   A(&c->d_logits, c->vocab);
   CDIE(cudaMalloc(&c->d_xh, (size_t)(maxcol) * sizeof(__half)));
+  {
+    int nbmax = maxcol / 32 + 8;
+    CDIE(cudaMalloc(&c->aq_d, nbmax * sizeof(float)));
+    CDIE(cudaMalloc(&c->aq_s, nbmax * sizeof(float)));
+    CDIE(cudaMalloc(&c->aq_q, nbmax * 8 * sizeof(int)));
+  }
+  CDIE(cudaStreamCreate(&c->stream));
+  CDIE(cudaMalloc(&c->d_pos, sizeof(int)));
+  g_prof_stream = c->stream;
   c->h_pin_cap = (size_t)(c->vocab > c->h ? c->vocab : c->h);
   CDIE(cudaMallocHost(&c->h_pin, c->h_pin_cap * sizeof(float)));
   (void)wide;
@@ -752,16 +865,42 @@ void oc_cuda_reset(oc_model *m) {
 void oc_cuda_forward(oc_model *m, const float *embed_host, size_t pos,
                      int want_logits, float *logits_host) {
   GpuCtx *c = g_ctx;
+  g_prof_on = getenv("OC_PROF") != NULL;
+  if (g_prof_on) memset(g_prof, 0, sizeof(g_prof));
+  double prof_t0 = 0;
+  if (g_prof_on) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    prof_t0 = ts.tv_sec + ts.tv_nsec * 1e-9;
+  }
   const int h = c->h, hd = c->head_dim, nh = c->n_heads, kvh = c->kv_heads;
   const int B = 256;
   auto G = [&](int n) { return (n + B - 1) / B; };
 
   memcpy(c->h_pin, embed_host, h * sizeof(float));
-  CDIE(cudaMemcpy(c->d_x, c->h_pin, h * sizeof(float), cudaMemcpyHostToDevice));
+  int posi = (int)pos;
+  /* pos travels via device memory so a captured graph replays correctly */
+  CDIE(cudaMemcpyAsync(c->d_pos, &posi, sizeof(int), cudaMemcpyHostToDevice,
+                       c->stream));
+  CDIE(cudaStreamSynchronize(c->stream)); /* &posi is stack memory */
+  bool use_graph = c->gemma && !g_prof_on && !getenv("OC_TRACE") &&
+                   !getenv("OC_NO_GRAPH");
+  int gi = want_logits ? 1 : 0;
+  if (use_graph && c->graph[gi]) {
+    CDIE(cudaGraphLaunch(c->graph[gi], c->stream));
+    CDIE(cudaStreamSynchronize(c->stream));
+    if (want_logits)
+      memcpy(logits_host, c->h_pin, c->vocab * sizeof(float));
+    return;
+  }
+  if (use_graph)
+    CDIE(cudaStreamBeginCapture(c->stream, cudaStreamCaptureModeGlobal));
+  CDIE(cudaMemcpyAsync(c->d_x, c->h_pin, h * sizeof(float),
+                       cudaMemcpyHostToDevice, c->stream));
 
   for (int l = 0; l < c->n_layers; ++l) {
     GpuLayer *g = &c->layers[l];
-    k_rms_norm<<<1, 256>>>(c->d_norm, c->d_x, g->attn_norm, h, c->rms_eps);
+    k_rms_norm<<<1, 256, 0, c->stream>>>(c->d_norm, c->d_x, g->attn_norm, h, c->rms_eps);
 
     if (!g->is_gdn) {
       int lhd = g->hd ? g->hd : hd;
@@ -771,30 +910,30 @@ void oc_cuda_forward(oc_model *m, const float *embed_host, size_t pos,
       float ltheta = g->theta != 0.0f ? g->theta : c->rope_theta;
       int lrot = g->n_rot ? g->n_rot : c->rope_dim;
       gemv(c, g->wq, c->d_norm, c->d_qg);
-      gemv(c, g->wk, c->d_norm, c->d_k);
+      gemv(c, g->wk, c->d_norm, c->d_k, false);
       if (g->v_from_k)
-        k_copy<<<G(kvn), B>>>(c->d_v, c->d_k, kvn);
+        k_copy<<<G(kvn), B, 0, c->stream>>>(c->d_v, c->d_k, kvn);
       else
-        gemv(c, g->wv, c->d_norm, c->d_v);
+        gemv(c, g->wv, c->d_norm, c->d_v, false);
       float *qptr = c->d_qg, *gate = nullptr;
       if (qg_len >= 2 * q_len) {
-        k_deinterleave<<<G(q_heads * lhd), B>>>(c->d_qg, c->d_q, c->d_gate,
+        k_deinterleave<<<G(q_heads * lhd), B, 0, c->stream>>>(c->d_qg, c->d_q, c->d_gate,
                                                 q_heads, lhd);
         qptr = c->d_q;
         gate = c->d_gate;
       }
       if (g->q_norm)
-        k_head_rms_norm<<<q_heads, 256>>>(qptr, g->q_norm, lhd, c->rms_eps);
+        k_head_rms_norm<<<q_heads, 256, 0, c->stream>>>(qptr, g->q_norm, lhd, c->rms_eps);
       if (g->k_norm)
-        k_head_rms_norm<<<lkv, 256>>>(c->d_k, g->k_norm, lhd, c->rms_eps);
+        k_head_rms_norm<<<lkv, 256, 0, c->stream>>>(c->d_k, g->k_norm, lhd, c->rms_eps);
       if (g->v_rms)
-        k_head_rms_norm<<<lkv, 256>>>(c->d_v, nullptr, lhd, c->rms_eps);
-      k_rope<<<G(q_heads * (lhd / 2)), B>>>(qptr, lhd, q_heads, (int)pos,
-                                            ltheta, lrot, c->yarn_factor,
-                                            c->yarn_orig_ctx, g->rope_ff);
-      k_rope<<<G(lkv * (lhd / 2)), B>>>(c->d_k, lhd, lkv, (int)pos, ltheta,
-                                        lrot, c->yarn_factor, c->yarn_orig_ctx,
-                                        g->rope_ff);
+        k_head_rms_norm<<<lkv, 256, 0, c->stream>>>(c->d_v, nullptr, lhd, c->rms_eps);
+      k_rope<<<G(q_heads * (lhd / 2)), B, 0, c->stream>>>(
+          qptr, lhd, q_heads, c->d_pos, ltheta, lrot, c->yarn_factor,
+          c->yarn_orig_ctx, g->rope_ff);
+      k_rope<<<G(lkv * (lhd / 2)), B, 0, c->stream>>>(
+          c->d_k, lhd, lkv, c->d_pos, ltheta, lrot, c->yarn_factor,
+          c->yarn_orig_ctx, g->rope_ff);
       float *kv_k, *kv_v;
       int cap;
       if (g->my_kv_k) {
@@ -804,68 +943,99 @@ void oc_cuda_forward(oc_model *m, const float *embed_host, size_t pos,
         kv_v = c->kv_v + (size_t)g->kv_slot * c->kv_ctx * c->kv_stride;
         cap = c->kv_ctx;
       }
-      k_kv_append<<<G(kvn), B>>>(kv_k, kv_v, c->d_k, c->d_v, (int)pos, cap, kvn);
-      int seq_len = (int)pos + 1;
-      if (seq_len > cap) seq_len = cap;
-      k_attention<<<q_heads, lhd>>>(c->d_attn, qptr, kv_k, kv_v, seq_len,
-                                    q_heads, lkv, lhd, g->attn_scale);
-      if (gate) k_sigmoid_gate<<<G(q_len), B>>>(c->d_attn, gate, q_len);
+      k_kv_append<<<G(kvn), B, 0, c->stream>>>(kv_k, kv_v, c->d_k, c->d_v,
+                                               c->d_pos, cap, kvn);
+      {
+        ProfScope ps(3);
+        k_attention<<<q_heads, 128, 0, c->stream>>>(
+            c->d_attn, qptr, kv_k, kv_v, c->d_pos, cap, q_heads, lkv, lhd,
+            g->attn_scale);
+      }
+      if (gate) k_sigmoid_gate<<<G(q_len), B, 0, c->stream>>>(c->d_attn, gate, q_len);
       gemv(c, g->wo, c->d_attn, c->d_tmp);
       if (g->attn_post_norm)
-        k_rms_norm<<<1, 256>>>(c->d_tmp, c->d_tmp, g->attn_post_norm, h,
+        k_rms_norm<<<1, 256, 0, c->stream>>>(c->d_tmp, c->d_tmp, g->attn_post_norm, h,
                                c->rms_eps);
-      k_add<<<G(h), B>>>(c->d_x, c->d_tmp, h);
+      k_add<<<G(h), B, 0, c->stream>>>(c->d_x, c->d_tmp, h);
     } else {
       int qo = g->qkv_out, vd = g->value_dim, kd = g->key_dim;
       int nvh = g->n_v_heads, hk = g->head_k, hv = g->head_v;
       gemv(c, g->qkv, c->d_norm, c->d_mixed);
-      gemv(c, g->ssm_alpha, c->d_norm, c->d_a);
-      if (g->ssm_beta.d) gemv(c, g->ssm_beta, c->d_norm, c->d_b);
+      gemv(c, g->ssm_alpha, c->d_norm, c->d_a, false);
+      if (g->ssm_beta.d) gemv(c, g->ssm_beta, c->d_norm, c->d_b, false);
       else cudaMemset(c->d_b, 0, nvh * sizeof(float));
-      gemv(c, g->gdn_gate, c->d_norm, c->d_z);
-      k_conv_silu<<<G(qo), B>>>(c->d_mixed, c->d_conv, g->ssm_conv1d,
+      gemv(c, g->gdn_gate, c->d_norm, c->d_z, false);
+      k_conv_silu<<<G(qo), B, 0, c->stream>>>(c->d_mixed, c->d_conv, g->ssm_conv1d,
                                 g->conv_ring, qo, g->ring_head, g->ring_len);
-      k_ring_push<<<G(qo), B>>>(g->conv_ring, c->d_mixed, qo, g->ring_head);
+      k_ring_push<<<G(qo), B, 0, c->stream>>>(g->conv_ring, c->d_mixed, qo, g->ring_head);
       g->ring_head = (g->ring_head + 1) % CONV_K;
       if (g->ring_len < CONV_K) g->ring_len++;
       float out_scale = 1.0f / sqrtf((float)hv);
       size_t shmem = 2 * hk * sizeof(float);
-      k_delta_rule<<<nvh, hv, shmem>>>(c->d_conv, g->state, c->d_core, c->d_a,
+      k_delta_rule<<<nvh, hv, shmem, c->stream>>>(c->d_conv, g->state, c->d_core, c->d_a,
                                        c->d_b, g->ssm_a, g->ssm_dt_bias, qo, kd,
                                        vd, g->n_k_heads, hk, hv, g->a_baked,
                                        out_scale);
-      k_gated_rms_norm<<<nvh, 128>>>(c->d_core, g->ssm_norm, c->d_z, hv,
+      k_gated_rms_norm<<<nvh, 128, 0, c->stream>>>(c->d_core, g->ssm_norm, c->d_z, hv,
                                      c->rms_eps);
       gemv(c, g->ssm_out, c->d_core, c->d_tmp);
-      k_add<<<G(h), B>>>(c->d_x, c->d_tmp, h);
+      k_add<<<G(h), B, 0, c->stream>>>(c->d_x, c->d_tmp, h);
     }
 
     /* FFN */
-    k_rms_norm<<<1, 256>>>(c->d_norm, c->d_x, g->ffn_norm, h, c->rms_eps);
+    k_rms_norm<<<1, 256, 0, c->stream>>>(c->d_norm, c->d_x, g->ffn_norm, h, c->rms_eps);
     gemv(c, g->gate, c->d_norm, c->d_gf);
-    gemv(c, g->up, c->d_norm, c->d_uf);
+    gemv(c, g->up, c->d_norm, c->d_uf, false);
     if (c->gemma)
-      k_geglu<<<G(c->inter), B>>>(c->d_gf, c->d_uf, c->inter);
+      k_geglu<<<G(c->inter), B, 0, c->stream>>>(c->d_gf, c->d_uf, c->inter);
     else
-      k_swiglu<<<G(c->inter), B>>>(c->d_gf, c->d_uf, c->inter);
+      k_swiglu<<<G(c->inter), B, 0, c->stream>>>(c->d_gf, c->d_uf, c->inter);
     gemv(c, g->down, c->d_gf, c->d_tmp);
     if (g->ffn_post_norm)
-      k_rms_norm<<<1, 256>>>(c->d_tmp, c->d_tmp, g->ffn_post_norm, h, c->rms_eps);
-    k_add<<<G(h), B>>>(c->d_x, c->d_tmp, h);
+      k_rms_norm<<<1, 256, 0, c->stream>>>(c->d_tmp, c->d_tmp, g->ffn_post_norm, h, c->rms_eps);
+    k_add<<<G(h), B, 0, c->stream>>>(c->d_x, c->d_tmp, h);
     if (g->out_scale != 1.0f && g->out_scale != 0.0f)
-      k_scale<<<G(h), B>>>(c->d_x, g->out_scale, h);
+      k_scale<<<G(h), B, 0, c->stream>>>(c->d_x, g->out_scale, h);
+    if (pos == 0 && getenv("OC_TRACE")) {
+      cudaStreamSynchronize(c->stream);
+      float *dbg = (float *)malloc(c->h * sizeof(float));
+      cudaMemcpy(dbg, c->d_x, c->h * sizeof(float), cudaMemcpyDeviceToHost);
+      double sum = 0, asum = 0;
+      for (int i = 0; i < c->h; ++i) { sum += dbg[i]; asum += fabsf(dbg[i]); }
+      fprintf(stderr, "TRACE L%d gpu  t0 sum=%.6e |sum|=%.6e x[0..4]=%.4f %.4f %.4f %.4f\n",
+              l, sum, asum, dbg[0], dbg[1], dbg[2], dbg[3]);
+      free(dbg);
+    }
   }
 
-  if (!want_logits) {
-    cudaDeviceSynchronize();
-    return;
+  if (g_prof_on) {
+    cudaStreamSynchronize(c->stream);
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    double total = (ts.tv_sec + ts.tv_nsec * 1e-9 - prof_t0) * 1e3;
+    fprintf(stderr, "prof pos=%zu total=%.1fms qkvo=%.1f ffn=%.1f head=%.1f attn=%.1f\n",
+            pos, total, g_prof[0], g_prof[1], g_prof[2], g_prof[3]);
   }
-  k_rms_norm<<<1, 256>>>(c->d_norm, c->d_x, c->final_norm, h, c->rms_eps);
-  gemv(c, c->lm_head, c->d_norm, c->d_logits);
-  if (c->logit_softcap > 0.0f)
-    k_softcap<<<G(c->vocab), B>>>(c->d_logits, c->logit_softcap, c->vocab);
-  CDIE(cudaMemcpy(logits_host, c->d_logits, c->vocab * sizeof(float),
-                  cudaMemcpyDeviceToHost));
+  if (want_logits) {
+    k_rms_norm<<<1, 256, 0, c->stream>>>(c->d_norm, c->d_x, c->final_norm, h,
+                                         c->rms_eps);
+    gemv(c, c->lm_head, c->d_norm, c->d_logits);
+    if (c->logit_softcap > 0.0f)
+      k_softcap<<<G(c->vocab), B, 0, c->stream>>>(c->d_logits, c->logit_softcap,
+                                                  c->vocab);
+    CDIE(cudaMemcpyAsync(c->h_pin, c->d_logits, c->vocab * sizeof(float),
+                         cudaMemcpyDeviceToHost, c->stream));
+  }
+  if (use_graph) {
+    cudaGraph_t gr;
+    CDIE(cudaStreamEndCapture(c->stream, &gr));
+    CDIE(cudaGraphInstantiate(&c->graph[gi], gr, nullptr, nullptr, 0));
+    cudaGraphDestroy(gr);
+    CDIE(cudaGraphLaunch(c->graph[gi], c->stream));
+  }
+  CDIE(cudaStreamSynchronize(c->stream));
+  if (want_logits)
+    memcpy(logits_host, c->h_pin, c->vocab * sizeof(float));
   (void)m;
 }
 

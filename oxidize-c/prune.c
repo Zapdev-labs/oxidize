@@ -135,18 +135,21 @@ static const calib_row *calib_get(const calib_t *c, const char *name) {
 
 /* ---- GGUF writer ---- */
 
-static void w32(FILE *f, uint32_t v) { fwrite(&v, 4, 1, f); }
-static void w64(FILE *f, uint64_t v) { fwrite(&v, 8, 1, f); }
+static void wbytes(FILE *f, const void *p, size_t n) {
+  if (fwrite(p, 1, n, f) != n) oc_die("prune: short write (disk full or bad source)");
+}
+static void w32(FILE *f, uint32_t v) { wbytes(f, &v, 4); }
+static void w64(FILE *f, uint64_t v) { wbytes(f, &v, 8); }
 static void wstr(FILE *f, const char *s) {
   uint64_t n = strlen(s);
   w64(f, n);
-  fwrite(s, 1, n, f);
+  wbytes(f, s, n);
 }
 static void wpad(FILE *f, uint64_t align) {
   long pos = ftell(f);
   size_t pad = (size_t)(((pos + (long)align - 1) / (long)align) * (long)align - pos);
   static const uint8_t zeros[64] = {0};
-  while (pad) { size_t k = pad > 64 ? 64 : pad; fwrite(zeros, 1, k, f); pad -= k; }
+  while (pad) { size_t k = pad > 64 ? 64 : pad; wbytes(f, zeros, k); pad -= k; }
 }
 
 typedef struct {
@@ -167,13 +170,19 @@ static uint64_t tensor_elems(const oc_tensor_info *ti) {
 /* exact byte size for known types; offset-delta fallback for unknown */
 static size_t tensor_src_bytes(const oc_gguf *g, size_t idx) {
   const oc_tensor_info *ti = &g->tensors[idx];
-  if (ti->quant != OC_UNKNOWN)
-    return tensor_elems(ti) / oc_block_values(ti->quant) * oc_block_bytes(ti->quant);
-  uint64_t next = g->map_size;
-  for (size_t t = 0; t < g->n_tensors; ++t)
-    if (g->tensors[t].offset > ti->offset && g->tensors[t].offset < next)
-      next = g->tensors[t].offset;
-  return (size_t)(next - ti->offset);
+  size_t bytes;
+  if (ti->quant != OC_UNKNOWN) {
+    bytes = tensor_elems(ti) / oc_block_values(ti->quant) * oc_block_bytes(ti->quant);
+  } else {
+    uint64_t next = g->map_size;
+    for (size_t t = 0; t < g->n_tensors; ++t)
+      if (g->tensors[t].offset > ti->offset && g->tensors[t].offset < next)
+        next = g->tensors[t].offset;
+    bytes = (size_t)(next - ti->offset);
+  }
+  if (ti->offset + bytes > g->map_size)
+    oc_die("prune: tensor %s data (%zu bytes) exceeds file size", ti->name, bytes);
+  return bytes;
 }
 
 static void write_gguf(const char *path, const oc_gguf *g,
@@ -200,7 +209,7 @@ static void write_gguf(const char *path, const oc_gguf *g,
   for (size_t i = 0; i < n_ts; ++i) {
     const uint8_t *data = ts[i].raw ? ts[i].raw : ts[i].owned;
     size_t bytes = ts[i].raw ? ts[i].raw_bytes : ts[i].owned_bytes;
-    fwrite(data, 1, bytes, f);
+    wbytes(f, data, bytes);
     if (i + 1 < n_ts) wpad(f, g->align);
   }
   if (fclose(f) != 0) oc_die("prune: write failed for %s", path);
@@ -265,8 +274,8 @@ int oc_prune_main(int argc, char **argv) {
       else if (strcmp(v, "unstructured")) prune_usage();
     } else if (!strcmp(argv[i], "--joint-quantize")) {
       joint = oc_quant_parse(PVAL());
-      if (!oc_quantize_row(joint, (float[QK]){0}, (uint8_t[136]){0}, QK))
-        oc_die("prune: unsupported --joint-quantize target (use F32|F16|Q8_0|Q4_0)");
+      if (joint == OC_UNKNOWN)
+        oc_die("prune: unknown --joint-quantize type");
     } else prune_usage();
 #undef PVAL
   }
@@ -332,6 +341,8 @@ int oc_prune_main(int argc, char **argv) {
 
     float *w = malloc(rows * cols * sizeof(float));
     size_t srow = oc_row_bytes(ti->quant, cols);
+    if (ti->offset + rows * srow > g->map_size)
+      oc_die("prune: tensor %s data exceeds file size", ti->name);
 #pragma omp parallel for schedule(static)
     for (size_t r = 0; r < rows; ++r)
       oc_dequant_row(ti->quant, g->base + ti->offset + r * srow, w + r * cols, cols);
@@ -353,10 +364,13 @@ int oc_prune_main(int argc, char **argv) {
     free(mask);
 
     oc_quant oq = joint != OC_UNKNOWN ? joint : ti->quant;
-    { /* probe requant support; fall back to Q8_0 for K-quants etc. */
-      float probe[QK] = {0};
-      uint8_t pbuf[136];
-      if (!oc_quantize_row(oq, probe, pbuf, QK)) {
+    { /* probe requant support (all engine types have quantizers now) */
+      float probe[QK_K] = {0};
+      uint8_t pbuf[QK_K * 4];
+      if (cols % oc_block_values(oq) != 0)
+        oc_die("prune: %s cols %zu not a multiple of %s block", ti->name, cols,
+               oc_quant_name(oq));
+      if (!oc_quantize_row(oq, probe, pbuf, QK_K)) {
         fprintf(stderr, "warning: no %s quantizer; re-emitting %s as Q8_0\n",
                 oc_quant_name(oq), ti->name);
         oq = OC_Q8_0;

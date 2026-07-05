@@ -157,6 +157,45 @@ uint16_t oc_f32_to_f16(float f) {
   return h;
 }
 
+static int nearest_i(float x) { return (int)lrintf(x); }
+static int clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
+static void wr16(uint8_t *p, uint16_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); }
+static void wr32(uint8_t *p, uint32_t v) {
+  p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8);
+  p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
+}
+
+/* affine range of a group: m = -min clamped >= 0, sc = (max+m)/levels */
+static void group_affine(const float *x, size_t n, int levels, float *sc, float *m) {
+  float mn = x[0], mx = x[0];
+  for (size_t i = 1; i < n; ++i) {
+    if (x[i] < mn) mn = x[i];
+    if (x[i] > mx) mx = x[i];
+  }
+  if (mn > 0) mn = 0;
+  *m = -mn;
+  *sc = (mx - mn) / (float)levels;
+}
+
+static float group_amax(const float *x, size_t n) {
+  float a = 0;
+  for (size_t i = 0; i < n; ++i) {
+    float v = fabsf(x[i]);
+    if (v > a) a = v;
+  }
+  return a;
+}
+
+/* ggml K-quant 6-bit scale/min packing (inverse of scale_min_k4) */
+static void pack_k4(uint8_t *s, const uint8_t *sc6, const uint8_t *m6) {
+  for (int j = 0; j < 4; ++j) { s[j] = sc6[j]; s[j + 4] = m6[j]; }
+  for (int j = 4; j < 8; ++j) {
+    s[j + 4] = (uint8_t)((sc6[j] & 0xF) | ((m6[j] & 0xF) << 4));
+    s[j - 4] |= (uint8_t)((sc6[j] >> 4) << 6);
+    s[j] |= (uint8_t)((m6[j] >> 4) << 6);
+  }
+}
+
 bool oc_quantize_row(oc_quant q, const float *src, uint8_t *dst, size_t n) {
   switch (q) {
     case OC_F32:
@@ -168,6 +207,300 @@ bool oc_quantize_row(oc_quant q, const float *src, uint8_t *dst, size_t n) {
         memcpy(dst + 2 * i, &h, 2);
       }
       return true;
+    case OC_BF16:
+      for (size_t i = 0; i < n; ++i) {
+        uint32_t bits;
+        memcpy(&bits, &src[i], 4);
+        bits += 0x8000; /* round to nearest */
+        wr16(dst + 2 * i, (uint16_t)(bits >> 16));
+      }
+      return true;
+    case OC_Q4_1:
+      for (size_t b = 0; b < n / QK; ++b) {
+        const float *x = src + b * QK;
+        uint8_t *o = dst + b * 20;
+        float mnv = x[0], mxv = x[0];
+        for (size_t i = 1; i < QK; ++i) {
+          if (x[i] < mnv) mnv = x[i];
+          if (x[i] > mxv) mxv = x[i];
+        }
+        float d = (mxv - mnv) / 15.0f;
+        float id = d > 0 ? 1.0f / d : 0.0f;
+        wr16(o, oc_f32_to_f16(d));
+        wr16(o + 2, oc_f32_to_f16(mnv));
+        for (size_t i = 0; i < 16; ++i) {
+          int lo = clampi(nearest_i((x[i] - mnv) * id), 0, 15);
+          int hi = clampi(nearest_i((x[i + 16] - mnv) * id), 0, 15);
+          o[4 + i] = (uint8_t)(lo | (hi << 4));
+        }
+      }
+      return true;
+    case OC_Q5_0:
+      for (size_t b = 0; b < n / QK; ++b) {
+        const float *x = src + b * QK;
+        uint8_t *o = dst + b * 22;
+        float amax = 0, mx = 0;
+        for (size_t i = 0; i < QK; ++i) {
+          float a = fabsf(x[i]);
+          if (a > amax) { amax = a; mx = x[i]; }
+        }
+        float d = mx / -16.0f;
+        float id = d != 0 ? 1.0f / d : 0.0f;
+        wr16(o, oc_f32_to_f16(d));
+        uint32_t qh = 0;
+        for (size_t i = 0; i < 16; ++i) {
+          int q0 = clampi(nearest_i(x[i] * id) + 16, 0, 31);
+          int q1 = clampi(nearest_i(x[i + 16] * id) + 16, 0, 31);
+          o[6 + i] = (uint8_t)((q0 & 0xF) | ((q1 & 0xF) << 4));
+          qh |= (uint32_t)(q0 >> 4) << i;
+          qh |= (uint32_t)(q1 >> 4) << (i + 16);
+        }
+        wr32(o + 2, qh);
+      }
+      return true;
+    case OC_Q5_1:
+      for (size_t b = 0; b < n / QK; ++b) {
+        const float *x = src + b * QK;
+        uint8_t *o = dst + b * 24;
+        float mnv = x[0], mxv = x[0];
+        for (size_t i = 1; i < QK; ++i) {
+          if (x[i] < mnv) mnv = x[i];
+          if (x[i] > mxv) mxv = x[i];
+        }
+        float d = (mxv - mnv) / 31.0f;
+        float id = d > 0 ? 1.0f / d : 0.0f;
+        wr16(o, oc_f32_to_f16(d));
+        wr16(o + 2, oc_f32_to_f16(mnv));
+        uint32_t qh = 0;
+        for (size_t i = 0; i < 16; ++i) {
+          int q0 = clampi(nearest_i((x[i] - mnv) * id), 0, 31);
+          int q1 = clampi(nearest_i((x[i + 16] - mnv) * id), 0, 31);
+          o[8 + i] = (uint8_t)((q0 & 0xF) | ((q1 & 0xF) << 4));
+          qh |= (uint32_t)(q0 >> 4) << i;
+          qh |= (uint32_t)(q1 >> 4) << (i + 16);
+        }
+        wr32(o + 4, qh);
+      }
+      return true;
+    /* K-quants: simple per-group min/max (affine) or amax (symmetric) fits.
+     * ponytail: no llama.cpp rmse scale search — byte-layout compatible,
+     * slightly higher quantization error; add the search if perplexity on
+     * requantized outputs ever matters. */
+    case OC_Q2_K: /* 84B: scales[16] (sc|m nibbles), qs[64], d, dmin */
+      for (size_t b = 0; b < n / QK_K; ++b) {
+        const float *x = src + b * QK_K;
+        uint8_t *o = dst + b * 84;
+        memset(o, 0, 84);
+        float scf[16], mf[16], max_sc = 0, max_m = 0;
+        for (int g = 0; g < 16; ++g) {
+          group_affine(x + g * 16, 16, 3, &scf[g], &mf[g]);
+          if (scf[g] > max_sc) max_sc = scf[g];
+          if (mf[g] > max_m) max_m = mf[g];
+        }
+        float d = max_sc / 15.0f, dmin = max_m / 15.0f;
+        wr16(o + 80, oc_f32_to_f16(d));
+        wr16(o + 82, oc_f32_to_f16(dmin));
+        for (int g = 0; g < 16; ++g) {
+          int s4 = d > 0 ? clampi(nearest_i(scf[g] / d), 0, 15) : 0;
+          int m4 = dmin > 0 ? clampi(nearest_i(mf[g] / dmin), 0, 15) : 0;
+          o[g] = (uint8_t)(s4 | (m4 << 4));
+          float dl = d * (float)s4, ml = dmin * (float)m4;
+          float idl = dl > 0 ? 1.0f / dl : 0.0f;
+          int outer = g / 8, k = (g % 8) / 2, half = g % 2;
+          uint8_t *qs = o + 16 + outer * 32 + half * 16;
+          for (int l = 0; l < 16; ++l) {
+            int qv = clampi(nearest_i((x[g * 16 + l] + ml) * idl), 0, 3);
+            qs[l] |= (uint8_t)(qv << (2 * k));
+          }
+        }
+      }
+      return true;
+    case OC_Q3_K: /* 110B: hmask[32], qs[64], packed scales[12], d */
+      for (size_t b = 0; b < n / QK_K; ++b) {
+        const float *x = src + b * QK_K;
+        uint8_t *o = dst + b * 110;
+        memset(o, 0, 110);
+        float dg[16], maxd = 0;
+        for (int g = 0; g < 16; ++g) {
+          /* grid is [-4,3]; amax/3.5 splits the clamp error across both ends */
+          dg[g] = group_amax(x + g * 16, 16) / 3.5f;
+          if (dg[g] > maxd) maxd = dg[g];
+        }
+        float d_all = maxd / 31.0f;
+        wr16(o + 108, oc_f32_to_f16(d_all));
+        uint8_t s6[16];
+        for (int g = 0; g < 16; ++g) {
+          int sc = d_all > 0 ? clampi(nearest_i(dg[g] / d_all), 0, 31) : 0;
+          s6[g] = (uint8_t)(sc + 32);
+          float dl = d_all * (float)sc;
+          float idl = dl > 0 ? 1.0f / dl : 0.0f;
+          int outer = g / 8, k = (g % 8) / 2, half = g % 2;
+          uint8_t *qs = o + 32 + outer * 32 + half * 16;
+          uint8_t *hm = o + half * 16;
+          uint8_t hbit = (uint8_t)(1 << (outer * 4 + k));
+          for (int l = 0; l < 16; ++l) {
+            int qf = clampi(nearest_i(x[g * 16 + l] * idl), -4, 3) + 4; /* 0..7 */
+            if (qf >= 4) hm[l] |= hbit;      /* h set => no -4 offset */
+            qs[l] |= (uint8_t)((qf & 3) << (2 * k));
+          }
+        }
+        /* pack 16 6-bit scales into 12 bytes (inverse of the loader) */
+        uint32_t la0 = 0, la1 = 0, ha = 0;
+        for (int i = 0; i < 4; ++i) {
+          la0 |= (uint32_t)((s6[i] & 0xF) | ((s6[8 + i] & 0xF) << 4)) << (8 * i);
+          la1 |= (uint32_t)((s6[4 + i] & 0xF) | ((s6[12 + i] & 0xF) << 4)) << (8 * i);
+          ha |= (uint32_t)((s6[i] >> 4) | ((s6[4 + i] >> 4) << 2) |
+                           ((s6[8 + i] >> 4) << 4) | ((s6[12 + i] >> 4) << 6))
+                << (8 * i);
+        }
+        wr32(o + 96, la0);
+        wr32(o + 100, la1);
+        wr32(o + 104, ha);
+      }
+      return true;
+    case OC_Q4_K: /* 144B: d, dmin, scales[12], qs[128] */
+      for (size_t b = 0; b < n / QK_K; ++b) {
+        const float *x = src + b * QK_K;
+        uint8_t *o = dst + b * 144;
+        memset(o, 0, 144);
+        float scf[8], mf[8], max_sc = 0, max_m = 0;
+        for (int g = 0; g < 8; ++g) {
+          group_affine(x + g * 32, 32, 15, &scf[g], &mf[g]);
+          if (scf[g] > max_sc) max_sc = scf[g];
+          if (mf[g] > max_m) max_m = mf[g];
+        }
+        float d = max_sc / 63.0f, dmin = max_m / 63.0f;
+        wr16(o, oc_f32_to_f16(d));
+        wr16(o + 2, oc_f32_to_f16(dmin));
+        uint8_t sc6[8], m6[8];
+        for (int g = 0; g < 8; ++g) {
+          sc6[g] = (uint8_t)(d > 0 ? clampi(nearest_i(scf[g] / d), 0, 63) : 0);
+          m6[g] = (uint8_t)(dmin > 0 ? clampi(nearest_i(mf[g] / dmin), 0, 63) : 0);
+        }
+        pack_k4(o + 4, sc6, m6);
+        for (int gp = 0; gp < 4; ++gp) {
+          float d1 = d * (float)sc6[2 * gp], mn1 = dmin * (float)m6[2 * gp];
+          float d2 = d * (float)sc6[2 * gp + 1], mn2 = dmin * (float)m6[2 * gp + 1];
+          float id1 = d1 > 0 ? 1.0f / d1 : 0.0f, id2 = d2 > 0 ? 1.0f / d2 : 0.0f;
+          uint8_t *qs = o + 16 + gp * 32;
+          for (int l = 0; l < 32; ++l) {
+            int lo = clampi(nearest_i((x[gp * 64 + l] + mn1) * id1), 0, 15);
+            int hi = clampi(nearest_i((x[gp * 64 + 32 + l] + mn2) * id2), 0, 15);
+            qs[l] = (uint8_t)(lo | (hi << 4));
+          }
+        }
+      }
+      return true;
+    case OC_Q5_K: /* 176B: d, dmin, scales[12], qh[32], qs[128] */
+      for (size_t b = 0; b < n / QK_K; ++b) {
+        const float *x = src + b * QK_K;
+        uint8_t *o = dst + b * 176;
+        memset(o, 0, 176);
+        float scf[8], mf[8], max_sc = 0, max_m = 0;
+        for (int g = 0; g < 8; ++g) {
+          group_affine(x + g * 32, 32, 31, &scf[g], &mf[g]);
+          if (scf[g] > max_sc) max_sc = scf[g];
+          if (mf[g] > max_m) max_m = mf[g];
+        }
+        float d = max_sc / 63.0f, dmin = max_m / 63.0f;
+        wr16(o, oc_f32_to_f16(d));
+        wr16(o + 2, oc_f32_to_f16(dmin));
+        uint8_t sc6[8], m6[8];
+        for (int g = 0; g < 8; ++g) {
+          sc6[g] = (uint8_t)(d > 0 ? clampi(nearest_i(scf[g] / d), 0, 63) : 0);
+          m6[g] = (uint8_t)(dmin > 0 ? clampi(nearest_i(mf[g] / dmin), 0, 63) : 0);
+        }
+        pack_k4(o + 4, sc6, m6);
+        uint8_t *qh = o + 16;
+        for (int g = 0; g < 4; ++g) {
+          float d1 = d * (float)sc6[2 * g], mn1 = dmin * (float)m6[2 * g];
+          float d2 = d * (float)sc6[2 * g + 1], mn2 = dmin * (float)m6[2 * g + 1];
+          float id1 = d1 > 0 ? 1.0f / d1 : 0.0f, id2 = d2 > 0 ? 1.0f / d2 : 0.0f;
+          uint8_t *qs = o + 48 + g * 32;
+          for (int l = 0; l < 32; ++l) {
+            int q1 = clampi(nearest_i((x[g * 64 + l] + mn1) * id1), 0, 31);
+            int q2 = clampi(nearest_i((x[g * 64 + 32 + l] + mn2) * id2), 0, 31);
+            qs[l] = (uint8_t)((q1 & 0xF) | ((q2 & 0xF) << 4));
+            if (q1 >> 4) qh[l] |= (uint8_t)(1 << (2 * g));
+            if (q2 >> 4) qh[l] |= (uint8_t)(2 << (2 * g));
+          }
+        }
+      }
+      return true;
+    case OC_Q6_K: /* 210B: ql[128], qh[64], int8 scales[16], d */
+      for (size_t b = 0; b < n / QK_K; ++b) {
+        const float *x = src + b * QK_K;
+        uint8_t *o = dst + b * 210;
+        memset(o, 0, 210);
+        float dg[16], maxd = 0;
+        for (int g = 0; g < 16; ++g) {
+          dg[g] = group_amax(x + g * 16, 16) / 31.0f;
+          if (dg[g] > maxd) maxd = dg[g];
+        }
+        float d = maxd / 127.0f;
+        wr16(o + 208, oc_f32_to_f16(d));
+        int8_t *sc = (int8_t *)(o + 192);
+        for (int g = 0; g < 16; ++g)
+          sc[g] = (int8_t)(d > 0 ? clampi(nearest_i(dg[g] / d), 0, 127) : 0);
+        for (int g2 = 0; g2 < 2; ++g2) {
+          uint8_t *ql = o + g2 * 64, *qh = o + 128 + g2 * 32;
+          for (int l = 0; l < 32; ++l) {
+            int L[4];
+            for (int off = 0; off < 4; ++off) {
+              int gidx = g2 * 8 + off * 2 + l / 16;
+              float dl = d * (float)sc[gidx];
+              float idl = dl > 0 ? 1.0f / dl : 0.0f;
+              float v = x[g2 * 128 + off * 32 + l];
+              L[off] = clampi(nearest_i(v * idl), -32, 31) + 32; /* 0..63 */
+            }
+            ql[l] = (uint8_t)((L[0] & 0xF) | ((L[2] & 0xF) << 4));
+            ql[l + 32] = (uint8_t)((L[1] & 0xF) | ((L[3] & 0xF) << 4));
+            qh[l] = (uint8_t)((L[0] >> 4) | ((L[1] >> 4) << 2) |
+                              ((L[2] >> 4) << 4) | ((L[3] >> 4) << 6));
+          }
+        }
+      }
+      return true;
+    case OC_IQ4_XS: { /* 136B: d, scales_h u16, scales_l[4], qs[128] */
+      static const int8_t kv16[16] = {-127, -104, -83, -65, -49, -35, -22, -10,
+                                      1, 13, 25, 38, 53, 69, 89, 113};
+      for (size_t b = 0; b < n / QK_K; ++b) {
+        const float *x = src + b * QK_K;
+        uint8_t *o = dst + b * 136;
+        memset(o, 0, 136);
+        float dg[8], maxd = 0;
+        for (int g = 0; g < 8; ++g) {
+          dg[g] = group_amax(x + g * 32, 32) / 127.0f;
+          if (dg[g] > maxd) maxd = dg[g];
+        }
+        float d = maxd / 31.0f;
+        wr16(o, oc_f32_to_f16(d));
+        uint16_t sh = 0;
+        for (int g = 0; g < 8; ++g) {
+          int ls = d > 0 ? clampi(nearest_i(dg[g] / d), 0, 31) : 0;
+          int stored = ls + 32; /* 6-bit, dequant subtracts 32 */
+          o[4 + g / 2] |= (uint8_t)((stored & 0xF) << (4 * (g % 2)));
+          sh |= (uint16_t)((stored >> 4) << (2 * g));
+          float dl = d * (float)ls;
+          float idl = dl > 0 ? 1.0f / dl : 0.0f;
+          uint8_t *qs = o + 8 + g * 16;
+          for (int l = 0; l < 16; ++l) {
+            int bi = 0, bj = 0;
+            float t0 = x[g * 32 + l] * idl, t1 = x[g * 32 + 16 + l] * idl;
+            float e0 = 1e30f, e1 = 1e30f;
+            for (int k = 0; k < 16; ++k) {
+              float d0 = fabsf(t0 - (float)kv16[k]);
+              float d1 = fabsf(t1 - (float)kv16[k]);
+              if (d0 < e0) { e0 = d0; bi = k; }
+              if (d1 < e1) { e1 = d1; bj = k; }
+            }
+            qs[l] = (uint8_t)(bi | (bj << 4));
+          }
+        }
+        wr16(o + 2, sh);
+      }
+      return true;
+    }
     case OC_Q8_0: /* per-32 block: f16 d + 32 int8, v = d*q */
       for (size_t b = 0; b < n / QK; ++b) {
         const float *x = src + b * QK;
