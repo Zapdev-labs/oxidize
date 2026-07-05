@@ -1,0 +1,45 @@
+oxidize-c/test_oc.c
+  s_1f84e407671e0c::t_eb97b3a6ee8efe 292
+  s_1f84e407671e0c::t_02aab5a9bb5487 235-272
+oxidize-c/kernels.c
+  s_1f84e407671e0c::t_25e791e2a928a6 570-635
+oxidize-c/model.c
+  s_1f84e407671e0c::t_4abfea10b035c3 751-752
+  s_1f84e407671e0c::t_f9174e75f1310b 192
+  s_1f84e407671e0c::t_0f5309c8e54a92 198
+  s_1f84e407671e0c::t_ff13a58a49739d 418
+  s_1f84e407671e0c::t_667cf851cd88ee 796-797,801-811
+  s_1f84e407671e0c::t_5509dfc460bb5c 351-354,362-373,376-377,385-397
+  s_1f84e407671e0c::t_cefdb419409337 439-441
+  s_1f84e407671e0c::t_e969e667c90772 861-863,865-869,872-879,883-884
+  s_1f84e407671e0c::t_81c6bc07e084d9 1027-1028
+oxidize-c/main.c
+  s_1f84e407671e0c::t_06a5a1c8e858a3 85
+  s_1f84e407671e0c::t_5c9ea126cb8de9 62
+  s_1f84e407671e0c::t_4fb82dea625cff 132
+  s_1f84e407671e0c::t_c8da652a92bb75 108
+oxidize-c/finetune.c
+  s_1f84e407671e0c::t_a63d3a4acda81f 347
+oxidize-c/oc.h
+  s_1f84e407671e0c::t_bb9d944c3c8a83 134
+  s_1f84e407671e0c::t_7098fd896f9767 156-157
+  s_1f84e407671e0c::t_a3dd4e7b524424 193-194
+  s_1f84e407671e0c::t_d21e30b38aac5d 207-208
+  s_1f84e407671e0c::t_1aa92b1da02c7a 76-84
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "8b1963f01e1a96f30b0caa1011fba68878dc3501",
+  "prompts": {},
+  "sessions": {
+    "s_1f84e407671e0c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "b93ce11a-21ff-4c69-a290-7e9148494956",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
