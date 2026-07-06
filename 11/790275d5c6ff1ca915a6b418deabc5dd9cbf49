@@ -1,0 +1,77 @@
+oxidize-core/src/compute/quantization/quant_simple.rs
+  s_a72f83f4acb932::t_73dc90abf0e9b2 120-138,140-157,159-174
+  s_a72f83f4acb932::t_677097f4ed94a8 194,196
+  s_a72f83f4acb932::t_982885b7630b86 139,158
+  s_a72f83f4acb932::t_e15c8e554c0267 175
+  s_a72f83f4acb932::t_01cc5d65964525 197-199
+  s_a72f83f4acb932::t_75fafbaa5cc40c 181,188,440-443
+oxidize-c/quant.c
+  s_a72f83f4acb932::t_5260aaa978f78c 190-203,220-221
+  s_a72f83f4acb932::t_8cdb476bd0aebb 56,70,120,155,617,653
+  s_a72f83f4acb932::t_87b90ae803996b 129
+  s_a72f83f4acb932::t_514e2d96873704 219
+  s_a72f83f4acb932::t_8229b06b6b0a50 619
+oxidize-c/model.c
+  s_a72f83f4acb932::t_8bca5ecdca57f0 663
+oxidize-c/kernels.c
+  s_a72f83f4acb932::t_b48e2b72490338 576,592
+scripts/bench_al5_remote.sh
+  s_a72f83f4acb932::t_6bb361d6e39d4c 1-66
+oxidize-quantize/src/main.rs
+  s_a72f83f4acb932::t_21573820cf8afb 128
+  s_a72f83f4acb932::t_2fd2e019157c95 800-805,817-831
+  s_a72f83f4acb932::t_e9688d8518a222 595,620
+  s_a72f83f4acb932::t_baf665f20ae433 898
+  s_a72f83f4acb932::t_146ca717266a7e 560
+oxidize-c/test_oc.c
+  s_a72f83f4acb932::t_7840cad78cff99 159
+  s_a72f83f4acb932::t_0c5bb81df4e375 188
+  s_a72f83f4acb932::t_20d3f6a6531ccb 177,179
+  s_a72f83f4acb932::t_6c6cd1abcad7a6 181
+oxidize-cpp/include/oxidize/quant.hpp
+  s_a72f83f4acb932::t_87dc39ef385cbf 82-84
+oxidize-cpp/tests/parity_test.cpp
+  s_a72f83f4acb932::t_d5cd83b5895053 451
+  s_a72f83f4acb932::t_d3087349010dbd 468
+  s_a72f83f4acb932::t_4ff743df22cf4a 436,438
+  s_a72f83f4acb932::t_fe72371bb09c62 420,422
+oxidize-c/oc.h
+  s_a72f83f4acb932::t_e4d8b01650b659 21
+oxidize-cpp/src/tensor_cpu.cpp
+  s_a72f83f4acb932::t_1e630569e65077 705
+  s_a72f83f4acb932::t_68bfdace7db6f0 691
+oxidize-core/src/compute/quantization.rs
+  s_a72f83f4acb932::t_7e3d1505419af7 254
+oxidize-core/src/compute/quantization/quant_dispatch.rs
+  s_a72f83f4acb932::t_05a5a6de4b65f0 26-27
+  s_a72f83f4acb932::t_d8fc80c143d2e4 121
+oxidize-core/src/compute/quantization/tests.rs
+  s_a72f83f4acb932::t_d8ef6c81c0a2a9 120,128-131,134,136-137
+  s_a72f83f4acb932::t_8b341ef0dbffe7 337-338
+oxidize-cpp/src/quant.cpp
+  s_a72f83f4acb932::t_e6069da8a0fe96 940,943
+  s_a72f83f4acb932::t_5bd1a39b78e529 887-900,920-921
+  s_a72f83f4acb932::t_09052278fb7c72 919
+  s_a72f83f4acb932::t_f17a24c72b890b 1014,1068,1159,1170
+oxidize-core/src/format/gguf.rs
+  s_a72f83f4acb932::t_c77877fd3c30e9 302
+  s_a72f83f4acb932::t_ccf64bd5ec098d 397
+scripts/bench_iq_remote.sh
+  s_a72f83f4acb932::t_53c72ee33551ae 55,61,176-180,189-193,198,205,207
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "11790275d5c6ff1ca915a6b418deabc5dd9cbf49",
+  "prompts": {},
+  "sessions": {
+    "s_a72f83f4acb932": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "f5e01a3f-5914-48bf-9df9-4d5f9288661b",
+        "model": "default"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
