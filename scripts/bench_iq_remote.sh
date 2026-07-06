@@ -15,6 +15,8 @@ ssh "$HOST" "mkdir -p $REMOTE_REPO"
 rsync -az \
   --exclude 'target' \
   --exclude 'oxidize-cpp/build' \
+  --exclude 'oxidize-c/oxidize-c' \
+  --exclude 'oxidize-c/test_oc' \
   --exclude 'dist' \
   --exclude '.git' \
   "$ROOT/" "$HOST:${REMOTE_REPO}/"
@@ -52,7 +54,7 @@ fi
 rm -rf oxidize-cpp/build
 cmake -S oxidize-cpp -B oxidize-cpp/build -DCMAKE_BUILD_TYPE=Release >/dev/null
 cmake --build oxidize-cpp/build -j"$(nproc)" --target oxidize-cpp 2>&1 | tail -3
-make -C oxidize-c oxidize-c CFLAGS="-O3 -march=native -fopenmp" 2>&1 | tail -3
+make -C oxidize-c clean oxidize-c CFLAGS="-O3 -march=native -fopenmp" 2>&1 | tail -5
 
 RUST_BENCH=./target/release/oxidize-bench
 RUST_CLI=./target/release/oxidize
