@@ -1,0 +1,19 @@
+scripts/bench_iq_remote.sh
+  s_a72f83f4acb932::t_3eefb25020ddb0 18-19,57
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "73d1dd2c224004def4d3fbb5ca59bc86a1702384",
+  "prompts": {},
+  "sessions": {
+    "s_a72f83f4acb932": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "f5e01a3f-5914-48bf-9df9-4d5f9288661b",
+        "model": "unknown"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
