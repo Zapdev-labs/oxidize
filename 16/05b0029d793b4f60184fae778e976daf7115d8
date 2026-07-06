@@ -1,0 +1,68 @@
+Cargo.toml
+  s_49e65f5424f6dd::t_fbd2a02d2c1db2 16-20
+  s_49e65f5424f6dd::t_2d65f7b0fc7b8f 45-49
+Cargo.lock
+  s_49e65f5424f6dd::t_873cbaaca96250 29,566-577,587,721-730,788-796,925,1466,1678-1679,1681,1689,1692-1710,1712-1713,1723,1725,1729,1732-1733,1735,1738,1741,2099-2101,2144-2173,2597,2929-2934,3472,3484,3546-3556,3838-3848,3887-3892,4235,4246,4311-4326
+vendor/libp2p-dns/.cargo_vcs_info.json
+  s_49e65f5424f6dd::t_d49299ce128b42 1-6
+vendor/libp2p-dns/CHANGELOG.md
+  s_49e65f5424f6dd::t_e05da4bb47a2ca 1-169
+vendor/libp2p-dns/Cargo.toml.orig
+  s_49e65f5424f6dd::t_f085e2b54852ce 1-37
+vendor/libp2p-dns/src/lib.rs
+  s_49e65f5424f6dd::t_234dd4c425553a 1-848
+vendor/libp2p-mdns/.cargo_vcs_info.json
+  s_49e65f5424f6dd::t_ab09f8a1ced163 1-6
+vendor/libp2p-mdns/CHANGELOG.md
+  s_49e65f5424f6dd::t_4f07595b058cf4 1-304
+vendor/libp2p-mdns/Cargo.toml
+  s_49e65f5424f6dd::t_fbf3c6ac7d3b0c 1-131
+vendor/libp2p-mdns/Cargo.toml.orig
+  s_49e65f5424f6dd::t_e91d5d82dc904e 1-46
+vendor/libp2p-mdns/src/behaviour.rs
+  s_49e65f5424f6dd::t_75f3cbf7407c60 1-397
+vendor/libp2p-mdns/src/behaviour/iface.rs
+  s_49e65f5424f6dd::t_34506eb6850c53 1-337
+vendor/libp2p-mdns/src/behaviour/iface/dns.rs
+  s_49e65f5424f6dd::t_d89fc842c18ef5 1-439
+vendor/libp2p-mdns/src/behaviour/iface/query.rs
+  s_49e65f5424f6dd::t_2bee577e79f69f 1-356
+vendor/libp2p-mdns/src/behaviour/socket.rs
+  s_49e65f5424f6dd::t_347d1ef0160825 1-93
+vendor/libp2p-mdns/src/behaviour/timer.rs
+  s_49e65f5424f6dd::t_c2ddaa557e0efe 1-92
+vendor/libp2p-mdns/src/lib.rs
+  s_49e65f5424f6dd::t_b70c67b9540891 1-82
+vendor/libp2p-mdns/tests/use-tokio.rs
+  s_49e65f5424f6dd::t_23fa7299185ae7 1-132
+vendor/libp2p-yamux/.cargo_vcs_info.json
+  s_49e65f5424f6dd::t_40274094475eb8 1-6
+vendor/libp2p-yamux/CHANGELOG.md
+  s_49e65f5424f6dd::t_db9d49bd62294c 1-235
+vendor/libp2p-yamux/Cargo.toml.orig
+  s_49e65f5424f6dd::t_36e4948410e682 1-32
+vendor/libp2p-yamux/src/lib.rs
+  s_49e65f5424f6dd::t_eb021381c4f98f 1-281
+vendor/libp2p-yamux/tests/compliance.rs
+  s_49e65f5424f6dd::t_fe51190121b94f 1-17
+vendor/libp2p-dns/Cargo.toml
+  s_49e65f5424f6dd::t_1d9a9a5379a5c0 1-102
+vendor/libp2p-yamux/Cargo.toml
+  s_49e65f5424f6dd::t_b9a7e3317f9c06 1-55
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "1605b0029d793b4f60184fae778e976daf7115d8",
+  "prompts": {},
+  "sessions": {
+    "s_49e65f5424f6dd": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "2d8159d6-2efa-4a4c-a584-f13e875850c8",
+        "model": "default"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
