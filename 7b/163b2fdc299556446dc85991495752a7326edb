@@ -1,0 +1,23 @@
+oxidize-cpp/src/numa_util.cpp
+  s_30bfa233838671::t_eb69cd61b73d9c 20-21,198-219,259-265
+oxidize-cpp/src/tensor_cpu.cpp
+  s_30bfa233838671::t_ac65c02f1f9167 19,416-651,849-859,929-944
+oxidize-cpp/src/quant.cpp
+  s_30bfa233838671::t_4a6de544ab54c9 381-382,387,403,476-477
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "7b163b2fdc299556446dc85991495752a7326edb",
+  "prompts": {},
+  "sessions": {
+    "s_30bfa233838671": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "fffc182b-914d-44e4-b94d-b1e5c0fe956c",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
