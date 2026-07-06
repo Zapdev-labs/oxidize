@@ -253,6 +253,31 @@ static float dot_q4_0(const uint8_t *row, const oc_q8blk *xq, size_t cols) {
 #endif
 }
 
+/* IQ2 superblocks: decode one block at a time instead of the full row. */
+static float dot_iq_block(const uint8_t *row, size_t cols, oc_quant q,
+                          const float *x) {
+  size_t nv = oc_block_values(q);
+  size_t bb = oc_block_bytes(q);
+  size_t nb = cols / nv;
+  float sum = 0.0f;
+  float block[QK_K];
+  for (size_t b = 0; b < nb; ++b) {
+    oc_dequant_row(q, row + b * bb, block, nv);
+    sum += oc_dot_f32(block, x + b * nv, nv);
+  }
+  return sum;
+}
+
+static float dot_iq2_xxs(const uint8_t *row, const float *x, size_t cols) {
+  return dot_iq_block(row, cols, OC_IQ2_XXS, x);
+}
+static float dot_iq2_xs(const uint8_t *row, const float *x, size_t cols) {
+  return dot_iq_block(row, cols, OC_IQ2_XS, x);
+}
+static float dot_iq2_s(const uint8_t *row, const float *x, size_t cols) {
+  return dot_iq_block(row, cols, OC_IQ2_S, x);
+}
+
 /* Q8_0: 34-byte blocks. */
 static float dot_q8_0(const uint8_t *row, const oc_q8blk *xq, size_t cols) {
   size_t nb = cols / QK;
@@ -422,6 +447,59 @@ static float dot_iq4_xs(const uint8_t *row, const oc_q8blk *xq, size_t cols) {
   return sum;
 }
 
+/* IQ4_NL: 18-byte blocks; value = d*kvalues_iq4nl[nib]. Same qs layout as Q4_0. */
+static float dot_iq4_nl(const uint8_t *row, const oc_q8blk *xq, size_t cols) {
+  size_t nb = cols / QK4_NL;
+#ifdef OC_AVX2
+  __m256 acc0 = _mm256_setzero_ps(), acc1 = _mm256_setzero_ps();
+  __m128i lut = _mm_loadu_si128((const __m128i *)oc_kvalues_iq4nl);
+  size_t b = 0;
+  for (; b + 2 <= nb; b += 2) {
+    const uint8_t *blk0 = row + b * 18, *blk1 = blk0 + 18;
+    __m128i q40 = _mm_loadu_si128((const __m128i *)(blk0 + 2));
+    __m128i q41 = _mm_loadu_si128((const __m128i *)(blk1 + 2));
+    __m128i lo0 = _mm_and_si128(q40, _mm_set1_epi8(0x0F));
+    __m128i hi0 = _mm_and_si128(_mm_srli_epi16(q40, 4), _mm_set1_epi8(0x0F));
+    __m128i lo1 = _mm_and_si128(q41, _mm_set1_epi8(0x0F));
+    __m128i hi1 = _mm_and_si128(_mm_srli_epi16(q41, 4), _mm_set1_epi8(0x0F));
+    __m256i w0 = _mm256_set_m128i(_mm_shuffle_epi8(lut, hi0),
+                                  _mm_shuffle_epi8(lut, lo0));
+    __m256i w1 = _mm256_set_m128i(_mm_shuffle_epi8(lut, hi1),
+                                  _mm_shuffle_epi8(lut, lo1));
+    __m256i y0 = _mm256_loadu_si256((const __m256i *)xq[b].q);
+    __m256i y1 = _mm256_loadu_si256((const __m256i *)xq[b + 1].q);
+    acc0 = _mm256_fmadd_ps(_mm256_cvtepi32_ps(i8dot(w0, y0)),
+                           _mm256_set1_ps(f16s(blk0) * xq[b].d), acc0);
+    acc1 = _mm256_fmadd_ps(_mm256_cvtepi32_ps(i8dot(w1, y1)),
+                           _mm256_set1_ps(f16s(blk1) * xq[b + 1].d), acc1);
+  }
+  for (; b < nb; ++b) {
+    const uint8_t *blk = row + b * 18;
+    __m128i q4 = _mm_loadu_si128((const __m128i *)(blk + 2));
+    __m128i lo = _mm_and_si128(q4, _mm_set1_epi8(0x0F));
+    __m128i hi = _mm_and_si128(_mm_srli_epi16(q4, 4), _mm_set1_epi8(0x0F));
+    __m256i w = _mm256_set_m128i(_mm_shuffle_epi8(lut, hi),
+                                 _mm_shuffle_epi8(lut, lo));
+    __m256i y = _mm256_loadu_si256((const __m256i *)xq[b].q);
+    acc0 = _mm256_fmadd_ps(_mm256_cvtepi32_ps(i8dot(w, y)),
+                           _mm256_set1_ps(f16s(blk) * xq[b].d), acc0);
+  }
+  return hsum8(_mm256_add_ps(acc0, acc1));
+#else
+  float sum = 0.0f;
+  for (size_t b = 0; b < nb; ++b) {
+    const uint8_t *blk = row + b * 18;
+    int isum = 0;
+    for (int j = 0; j < 16; ++j) {
+      isum += oc_kvalues_iq4nl[blk[2 + j] & 0xF] * xq[b].q[j];
+      isum += oc_kvalues_iq4nl[blk[2 + j] >> 4] * xq[b].q[j + 16];
+    }
+    sum += f16s(blk) * xq[b].d * (float)isum;
+  }
+  return sum;
+#endif
+}
+
 /* F16 row fused dot */
 static float dot_f16(const uint8_t *row, const float *x, size_t n) {
 #ifdef OC_AVX2
@@ -500,6 +578,10 @@ static float row_dot(const oc_weight *w, size_t r, size_t cols, const float *x,
     case OC_Q4_K: return dot_q4_k(row, xq, cols);
     case OC_Q6_K: return dot_q6_k(row, xq, cols);
     case OC_IQ4_XS: return dot_iq4_xs(row, xq, cols);
+    case OC_IQ4_NL: return dot_iq4_nl(row, xq, cols);
+    case OC_IQ2_XXS: return dot_iq2_xxs(row, x, cols);
+    case OC_IQ2_XS: return dot_iq2_xs(row, x, cols);
+    case OC_IQ2_S: return dot_iq2_s(row, x, cols);
     default:
       oc_dequant_row(w->quant, row, scratch, cols);
       return oc_dot_f32(scratch, x, cols);
@@ -510,7 +592,7 @@ static bool needs_q8(const oc_weight *w) {
   return w->quantized && (w->quant == OC_Q4_0 || w->quant == OC_Q4_O ||
                           w->quant == OC_Q8_0 ||
                           w->quant == OC_Q4_K || w->quant == OC_Q6_K ||
-                          w->quant == OC_IQ4_XS);
+                          w->quant == OC_IQ4_XS || w->quant == OC_IQ4_NL);
 }
 
 void oc_gemv(const oc_weight *w, size_t rows, size_t cols, const float *x,

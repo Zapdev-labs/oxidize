@@ -295,6 +295,43 @@ void test_dequant_iq4_nl() {
   }
 }
 
+// Fused int8 GEMV for IQ4_NL must match dequant-then-dot within act-quant tolerance.
+void test_gemv_iq4_nl() {
+  constexpr size_t cols = 256;
+  constexpr size_t nb = cols / oxidize::QK4_NL;
+  std::vector<uint8_t> row(nb * oxidize::BLOCK_IQ4_NL_SIZE);
+  uint32_t state = 12345u;
+  for (size_t i = 0; i < row.size(); ++i)
+    row[i] = static_cast<uint8_t>((state = state * 1664525u + 1013904223u) >> 13);
+  for (size_t b = 0; b < nb; ++b) {
+    uint8_t* blk = row.data() + b * oxidize::BLOCK_IQ4_NL_SIZE;
+    blk[0] = static_cast<uint8_t>(0x00 | (state & 0xFF));
+    blk[1] = 0x2C;  // ~0.06 f16 scale
+  }
+
+  std::vector<float> x(cols);
+  for (size_t i = 0; i < cols; ++i)
+    x[i] = (static_cast<float>((state = state * 1664525u + 1013904223u) & 0xFFFFu) /
+            65536.0f - 0.5f) *
+           2.0f;
+
+  std::vector<float> dq(cols);
+  oxidize::dequantize_row(oxidize::QuantType::IQ4_NL, row.data(), dq.data(), cols);
+  float ref = 0.0f;
+  for (size_t i = 0; i < cols; ++i) ref += dq[i] * x[i];
+
+  std::vector<float> got(1, 0.f);
+  oxidize::gemv_quantized(got.data(), oxidize::QuantType::IQ4_NL, row.data(), 1,
+                          cols, x.data());
+
+  float mag = 0.0f;
+  for (size_t i = 0; i < cols; ++i) mag += std::fabs(dq[i] * x[i]);
+  const float tol = 0.02f * (mag > 1.0f ? mag : 1.0f);
+  CHECK(std::fabs(got[0] - ref) <= tol);
+  std::fprintf(stderr, "[iq4_nl gemv] fused=%.5f ref=%.5f tol=%.5f\n", got[0], ref,
+               tol);
+}
+
 void test_dequant_iq2_xs_finite() {
   std::vector<uint8_t> blk(oxidize::BLOCK_IQ2_XS_SIZE, 0);
   blk[0] = 0x00;
@@ -425,6 +462,7 @@ int main() {
   test_dequant_q8_0();
   test_dequant_q4_k();
   test_dequant_iq4_nl();
+  test_gemv_iq4_nl();
   test_dequant_iq2_xs_finite();
   test_dequant_iq2_s_finite();
   test_quant_q4_o();

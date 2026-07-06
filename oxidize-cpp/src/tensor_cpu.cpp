@@ -515,6 +515,61 @@ inline float dot_q4_0_i8(const uint8_t* row, const Q8Act* xq, size_t cols) {
 #endif
 }
 
+inline float dot_iq4_nl_i8(const uint8_t* row, const Q8Act* xq, size_t cols) {
+  const size_t nb = cols / 32;
+  static constexpr int8_t kIq4Nl[16] = {
+      -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113};
+#ifdef OXIDIZE_HAVE_F16C
+  __m256 acc0 = _mm256_setzero_ps(), acc1 = _mm256_setzero_ps();
+  const __m128i lut = _mm_loadu_si128(reinterpret_cast<const __m128i*>(kIq4Nl));
+  size_t b = 0;
+  for (; b + 2 <= nb; b += 2) {
+    const uint8_t* blk0 = row + b * BLOCK_IQ4_NL_SIZE;
+    const uint8_t* blk1 = blk0 + BLOCK_IQ4_NL_SIZE;
+    __m128i q40 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(blk0 + 2));
+    __m128i q41 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(blk1 + 2));
+    __m128i lo0 = _mm_and_si128(q40, _mm_set1_epi8(0x0F));
+    __m128i hi0 = _mm_and_si128(_mm_srli_epi16(q40, 4), _mm_set1_epi8(0x0F));
+    __m128i lo1 = _mm_and_si128(q41, _mm_set1_epi8(0x0F));
+    __m128i hi1 = _mm_and_si128(_mm_srli_epi16(q41, 4), _mm_set1_epi8(0x0F));
+    __m256i w0 = _mm256_set_m128i(_mm_shuffle_epi8(lut, hi0),
+                                  _mm_shuffle_epi8(lut, lo0));
+    __m256i w1 = _mm256_set_m128i(_mm_shuffle_epi8(lut, hi1),
+                                  _mm_shuffle_epi8(lut, lo1));
+    __m256i y0 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(xq[b].q));
+    __m256i y1 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(xq[b + 1].q));
+    acc0 = _mm256_fmadd_ps(_mm256_cvtepi32_ps(i8dot(w0, y0)),
+                           _mm256_set1_ps(f16s(blk0) * xq[b].d), acc0);
+    acc1 = _mm256_fmadd_ps(_mm256_cvtepi32_ps(i8dot(w1, y1)),
+                           _mm256_set1_ps(f16s(blk1) * xq[b + 1].d), acc1);
+  }
+  for (; b < nb; ++b) {
+    const uint8_t* blk = row + b * BLOCK_IQ4_NL_SIZE;
+    __m128i q4 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(blk + 2));
+    __m128i lo = _mm_and_si128(q4, _mm_set1_epi8(0x0F));
+    __m128i hi = _mm_and_si128(_mm_srli_epi16(q4, 4), _mm_set1_epi8(0x0F));
+    __m256i w = _mm256_set_m128i(_mm_shuffle_epi8(lut, hi),
+                                 _mm_shuffle_epi8(lut, lo));
+    __m256i y = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(xq[b].q));
+    acc0 = _mm256_fmadd_ps(_mm256_cvtepi32_ps(i8dot(w, y)),
+                           _mm256_set1_ps(f16s(blk) * xq[b].d), acc0);
+  }
+  return hsum256(_mm256_add_ps(acc0, acc1));
+#else
+  float sum = 0.0f;
+  for (size_t b = 0; b < nb; ++b) {
+    const uint8_t* blk = row + b * BLOCK_IQ4_NL_SIZE;
+    int isum = 0;
+    for (int j = 0; j < 16; ++j) {
+      isum += kIq4Nl[blk[2 + j] & 0x0F] * xq[b].q[j];
+      isum += kIq4Nl[blk[2 + j] >> 4] * xq[b].q[j + 16];
+    }
+    sum += f16s(blk) * xq[b].d * static_cast<float>(isum);
+  }
+  return sum;
+#endif
+}
+
 inline float dot_q8_0_i8(const uint8_t* row, const Q8Act* xq, size_t cols) {
   const size_t nb = cols / 32;
 #ifdef OXIDIZE_HAVE_F16C
@@ -632,9 +687,13 @@ inline float dot_q6_k_i8(const uint8_t* row, const Q8Act* xq, size_t cols) {
   return sum;
 }
 
+inline bool is_q4_sym(QuantType q) {
+  return q == QuantType::Q4_0 || q == QuantType::Q4_O;
+}
+
 inline bool int8_gemv_ok(QuantType q, size_t cols) {
   if (cols % 32 != 0) return false;
-  if (q == QuantType::Q4_0 || q == QuantType::Q8_0) return true;
+  if (is_q4_sym(q) || q == QuantType::Q8_0 || q == QuantType::IQ4_NL) return true;
   if ((is_q4_k(q) || q == QuantType::Q6_K) && cols % QK_K == 0) return true;
   return false;
 }
@@ -642,8 +701,11 @@ inline bool int8_gemv_ok(QuantType q, size_t cols) {
 inline float int8_row_dot(QuantType q, const uint8_t* row, const Q8Act* xq,
                           size_t cols) {
   switch (q) {
-    case QuantType::Q4_0: return dot_q4_0_i8(row, xq, cols);
+    case QuantType::Q4_0:
+    case QuantType::Q4_O:
+      return dot_q4_0_i8(row, xq, cols);
     case QuantType::Q8_0: return dot_q8_0_i8(row, xq, cols);
+    case QuantType::IQ4_NL: return dot_iq4_nl_i8(row, xq, cols);
     case QuantType::Q6_K: return dot_q6_k_i8(row, xq, cols);
     default: return dot_q4_k_i8(row, xq, cols);  // Q4_K_S / Q4_K_M
   }
@@ -858,7 +920,7 @@ void gemv_quantized(float* y, QuantType quant, const uint8_t* W, size_t rows,
     return;
   }
   // Fast paths: native Q4_0 / Q5_0 fused unpack+dot (SIMD), no scalar dequant pass.
-  if (quant == QuantType::Q4_0) {
+  if (is_q4_sym(quant)) {
     const size_t rb = (cols / 32) * 18;
 #pragma omp parallel for schedule(static)
     for (long long r = 0; r < static_cast<long long>(rows); ++r)
@@ -956,7 +1018,7 @@ void gemm_quantized(float* outputs, QuantType quant, const uint8_t* W,
     }
     return;
   }
-  if (quant == QuantType::Q4_0) {
+  if (is_q4_sym(quant)) {
     const size_t rb = (cols / 32) * 18;
 #pragma omp parallel for schedule(static)
     for (long long r = 0; r < static_cast<long long>(rows); ++r) {
