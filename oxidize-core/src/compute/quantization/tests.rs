@@ -117,7 +117,7 @@ fn iq4_xs_beats_q4_0_on_gaussian_weights() {
 }
 
 #[test]
-fn q4_o_beats_q4_0_mse_on_gaussian_weights() {
+fn al5_beats_q4_0_mse_on_gaussian_weights() {
     let values = gaussian_sample(QK4_0 * 64);
 
     let mut q40 = vec![0u8; (values.len() / QK4_0) * BLOCK_Q4_0_SIZE];
@@ -125,16 +125,16 @@ fn q4_o_beats_q4_0_mse_on_gaussian_weights() {
     let mut q40_dec = vec![0f32; values.len()];
     dequantize_q4_0_scalar(&q40, &mut q40_dec).expect("q4_0 decode");
 
-    let mut q4o = vec![0u8; (values.len() / QK4_0) * BLOCK_Q4_0_SIZE];
-    quantize_q4_o_scalar(&values, &mut q4o).expect("q4_o encode");
-    let mut q4o_dec = vec![0f32; values.len()];
-    dequantize_q4_o_scalar(&q4o, &mut q4o_dec).expect("q4_o decode");
+    let mut al5 = vec![0u8; (values.len() / QK4_0) * BLOCK_Q4_0_SIZE];
+    quantize_al5_scalar(&values, &mut al5).expect("al5 encode");
+    let mut al5_dec = vec![0f32; values.len()];
+    dequantize_al5_scalar(&al5, &mut al5_dec).expect("al5 decode");
 
     let q40_err = mse(&values, &q40_dec);
-    let q4o_err = mse(&values, &q4o_dec);
+    let al5_err = mse(&values, &al5_dec);
     assert!(
-        q4o_err < q40_err,
-        "Q4_O MSE {q4o_err} should beat Q4_0 MSE {q40_err}"
+        al5_err < q40_err,
+        "AL5 MSE {al5_err} should beat Q4_0 MSE {q40_err}"
     );
 }
 
@@ -334,13 +334,8 @@ fn dequantizes_q4_0_scalar_block() {
     let mut out = vec![0.0_f32; 32];
     dequantize_q4_0_scalar(&input, &mut out).expect("q4_0 dequant succeeds");
 
-    assert!(out.iter().step_by(2).all(|v| (*v - 0.0).abs() < 1e-6));
-    assert!(
-        out.iter()
-            .skip(1)
-            .step_by(2)
-            .all(|v| (*v - 1.0).abs() < 1e-6)
-    );
+    assert!(out[..16].iter().all(|v| (*v - 0.0).abs() < 1e-6));
+    assert!(out[16..].iter().all(|v| (*v - 1.0).abs() < 1e-6));
 }
 
 #[test]

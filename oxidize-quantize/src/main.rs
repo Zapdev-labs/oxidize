@@ -125,7 +125,7 @@ fn parse_quantization_type(value: &str) -> Result<GgufQuantizationType, String> 
         "F32" => Ok(GgufQuantizationType::F32),
         "F16" => Ok(GgufQuantizationType::F16),
         "Q4_0" => Ok(GgufQuantizationType::Q4_0),
-        "Q4_O" => Ok(GgufQuantizationType::Q4_O),
+        "AL5" => Ok(GgufQuantizationType::AL5),
         "Q4_1" => Ok(GgufQuantizationType::Q4_1),
         "Q5_0" => Ok(GgufQuantizationType::Q5_0),
         "Q5_1" => Ok(GgufQuantizationType::Q5_1),
@@ -557,7 +557,7 @@ fn ensure_gguf_target_supported(target: GgufQuantizationType) -> Result<()> {
         GgufQuantizationType::F32
         | GgufQuantizationType::F16
         | GgufQuantizationType::Q4_0
-        | GgufQuantizationType::Q4_O
+        | GgufQuantizationType::AL5
         | GgufQuantizationType::Q4_1
         | GgufQuantizationType::Q5_0
         | GgufQuantizationType::Q5_1
@@ -592,7 +592,7 @@ fn gguf_type_id(quantization: GgufQuantizationType) -> Result<u32> {
         GgufQuantizationType::F32 => Ok(0),
         GgufQuantizationType::F16 => Ok(1),
         GgufQuantizationType::Q4_0 => Ok(2),
-        GgufQuantizationType::Q4_O => Ok(240),
+        GgufQuantizationType::AL5 => Ok(240),
         GgufQuantizationType::Q4_1 => Ok(3),
         GgufQuantizationType::Q5_0 => Ok(6),
         GgufQuantizationType::Q5_1 => Ok(7),
@@ -617,7 +617,7 @@ fn ggml_type_id(quantization: GgufQuantizationType) -> Result<u32> {
         GgufQuantizationType::F32 => Ok(0),
         GgufQuantizationType::F16 => Ok(1),
         GgufQuantizationType::Q4_0 => Ok(2),
-        GgufQuantizationType::Q4_O => Ok(240),
+        GgufQuantizationType::AL5 => Ok(240),
         GgufQuantizationType::Q4_1 => Ok(3),
         GgufQuantizationType::Q5_0 => Ok(6),
         GgufQuantizationType::Q5_1 => Ok(7),
@@ -797,7 +797,12 @@ fn write_tensor_data_stream(tensor: &TensorPlan, input: &[u8], output: &mut File
     let source_width = scalar_source_width(tensor.source_quantization)?;
     let value_count = tensor_value_count_from_dimensions(&tensor.name, &tensor.dimensions)?;
     let chunk_values = stream_chunk_values(tensor.output_quantization);
-    let batch_chunks = rayon::current_num_threads().max(1) * 2;
+    let al5_blocks_parallel = matches!(tensor.output_quantization, GgufQuantizationType::AL5);
+    let batch_chunks = if al5_blocks_parallel {
+        1
+    } else {
+        rayon::current_num_threads().max(1) * 2
+    };
     let mut processed = 0_usize;
     while processed < value_count {
         let mut batch = Vec::with_capacity(batch_chunks);
@@ -809,12 +814,21 @@ fn write_tensor_data_stream(tensor: &TensorPlan, input: &[u8], output: &mut File
             batch.push((processed, values));
             processed += values;
         }
-        let chunks = batch
-            .par_iter()
-            .map(|(start_value, values)| {
-                quantize_tensor_chunk(tensor, input_bytes, source_width, *start_value, *values)
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let chunks = if al5_blocks_parallel {
+            batch
+                .into_iter()
+                .map(|(start_value, values)| {
+                    quantize_tensor_chunk(tensor, input_bytes, source_width, start_value, values)
+                })
+                .collect::<Result<Vec<_>>>()?
+        } else {
+            batch
+                .par_iter()
+                .map(|(start_value, values)| {
+                    quantize_tensor_chunk(tensor, input_bytes, source_width, *start_value, *values)
+                })
+                .collect::<Result<Vec<_>>>()?
+        };
         for chunk in chunks {
             output.write_all(&chunk)?;
         }
@@ -881,6 +895,7 @@ fn stream_chunk_values(target: GgufQuantizationType) -> usize {
     } else if matches!(
         target,
         GgufQuantizationType::Q4_0
+            | GgufQuantizationType::AL5
             | GgufQuantizationType::Q4_1
             | GgufQuantizationType::Q5_0
             | GgufQuantizationType::Q5_1

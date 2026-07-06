@@ -156,7 +156,7 @@ static void check_quantize_roundtrip(void) {
       {OC_Q8_0, 0.01f},  {OC_Q4_0, 0.14f},  {OC_Q4_1, 0.08f},
       {OC_Q5_0, 0.07f},  {OC_Q5_1, 0.04f},  {OC_Q2_K, 0.45f},
       {OC_Q3_K, 0.20f},  {OC_Q4_K, 0.09f},  {OC_Q5_K, 0.05f},
-      {OC_Q6_K, 0.04f},  {OC_IQ4_XS, 0.15f}, {OC_Q4_O, 0.14f},
+      {OC_Q6_K, 0.04f},  {OC_IQ4_XS, 0.15f}, {OC_AL5, 0.14f},
   };
   for (size_t k = 0; k < sizeof(cases) / sizeof(*cases); ++k) {
     assert(oc_quantize_row(cases[k].q, x, buf, N));
@@ -174,18 +174,18 @@ static void check_quantize_roundtrip(void) {
     printf("ok requant %-6s worst=%.4f\n", oc_quant_name(cases[k].q), worst);
   }
 
-  /* Q4_O must beat Q4_0 in RMSE at identical 18-byte size. */
+  /* AL5 must beat Q4_0 in RMSE at identical 18-byte size. */
   float rmse[2] = {0, 0};
-  oc_quant q40 = OC_Q4_0, q4o = OC_Q4_O;
+  oc_quant q40 = OC_Q4_0, al5 = OC_AL5;
   for (int p = 0; p < 2; ++p) {
-    oc_quant q = p ? q4o : q40;
+    oc_quant q = p ? al5 : q40;
     oc_quantize_row(q, x, buf, N);
     oc_dequant_row(q, buf, dq, N);
     double se = 0;
     for (int i = 0; i < N; ++i) se += (double)(dq[i] - x[i]) * (dq[i] - x[i]);
     rmse[p] = (float)sqrt(se / N);
   }
-  printf("ok Q4_O rmse=%.5f vs Q4_0 rmse=%.5f (%.1f%% lower)\n", rmse[1],
+  printf("ok AL5 rmse=%.5f vs Q4_0 rmse=%.5f (%.1f%% lower)\n", rmse[1],
          rmse[0], 100.0f * (rmse[0] - rmse[1]) / rmse[0]);
   assert(rmse[1] < rmse[0]);
 }

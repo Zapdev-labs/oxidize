@@ -23,8 +23,8 @@ pub fn dequantize_scalar(
             dequantize_q4_0_scalar(input, output)?;
             Ok(())
         }
-        GgufQuantizationType::Q4_O => {
-            dequantize_q4_o_scalar(input, output)?;
+        GgufQuantizationType::AL5 => {
+            dequantize_al5_scalar(input, output)?;
             Ok(())
         }
         GgufQuantizationType::Q4_1 => {
@@ -118,7 +118,7 @@ pub(super) fn quantize_from_f32_scalar(
         GgufQuantizationType::F32 => quantize_f32_scalar(input, output),
         GgufQuantizationType::F16 => quantize_f16_scalar(input, output),
         GgufQuantizationType::Q4_0 => quantize_q4_0_scalar(input, output),
-        GgufQuantizationType::Q4_O => quantize_q4_o_scalar(input, output),
+        GgufQuantizationType::AL5 => quantize_al5_scalar(input, output),
         GgufQuantizationType::Q4_1 => quantize_q4_1_scalar(input, output),
         GgufQuantizationType::Q5_0 => quantize_q5_0_scalar(input, output),
         GgufQuantizationType::Q5_1 => quantize_q5_1_scalar(input, output),

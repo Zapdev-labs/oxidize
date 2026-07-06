@@ -660,7 +660,7 @@ static const oc_q8blk *quant_acts(scratch_t *s, const float *src, size_t cols,
 }
 
 static bool w_needs_q8(const oc_weight *w) {
-  return w->quantized && (w->quant == OC_Q4_0 || w->quant == OC_Q4_O ||
+  return w->quantized && (w->quant == OC_Q4_0 || w->quant == OC_AL5 ||
                           w->quant == OC_Q8_0 || w->quant == OC_Q4_K ||
                           w->quant == OC_Q6_K);
 }

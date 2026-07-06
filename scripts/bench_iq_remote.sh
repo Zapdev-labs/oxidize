@@ -52,11 +52,13 @@ fi
 rm -rf oxidize-cpp/build
 cmake -S oxidize-cpp -B oxidize-cpp/build -DCMAKE_BUILD_TYPE=Release >/dev/null
 cmake --build oxidize-cpp/build -j"$(nproc)" --target oxidize-cpp 2>&1 | tail -3
+make -C oxidize-c oxidize-c CFLAGS="-O3 -march=native -fopenmp" 2>&1 | tail -3
 
 RUST_BENCH=./target/release/oxidize-bench
 RUST_CLI=./target/release/oxidize
 QZ=./target/release/oxidize-quantize
 OX=./oxidize-cpp/build/oxidize-cpp
+OC=./oxidize-c/oxidize-c
 
 find_iq_gguf() {
   local f
@@ -171,6 +173,11 @@ bench_cpp() {
     --threads "$THREADS" --no-auto --json 2>/dev/null
 }
 
+bench_oc() {
+  "$OC" --model "$MODEL" --prompt "The speed of light is" \
+    --max-tokens "$DECODE_TOKENS" --threads "$THREADS" 2>&1
+}
+
 echo "==> oxidize (Rust) decode bench"
 RUST_OUT=$(bench_rust | tee "$OUT/rust.log")
 RUST_TPS=$(echo "$RUST_OUT" | grep -oE 'Throughput: [0-9.]+ tok/s' | tail -1 | awk '{print $2}')
@@ -179,18 +186,25 @@ RUST_TPS=${RUST_TPS:-$(echo "$RUST_OUT" | grep -oE 'speed=[0-9.]+' | tail -1 | c
 echo "==> oxidize-cpp decode bench"
 CPP_JSON=$(bench_cpp | tee "$OUT/cpp.json")
 CPP_TPS=$(python3 -c "import json,sys; print(json.load(sys.stdin)['decode_tps'])" <<<"$CPP_JSON")
-CPP_TOTAL=$(python3 -c "import json,sys; print(json.load(sys.stdin)['total_s'])" <<<"$CPP_JSON")
+
+echo "==> oxidize-c decode bench"
+OC_OUT=$(bench_oc | tee "$OUT/oc.log")
+OC_TPS=$(echo "$OC_OUT" | grep -oE '[0-9]+\.[0-9]+ tok/s' | tail -1 | awk '{print $1}')
+OC_TPS=${OC_TPS:-0}
 
 RUST_TPS=${RUST_TPS:-0}
 CPP_TPS=${CPP_TPS:-0}
 RATIO=$(python3 -c "r=float('$RUST_TPS'); c=float('$CPP_TPS'); print(f'{r/c:.3f}' if c>0 else 'n/a')")
+OC_RATIO=$(python3 -c "c=float('$OC_TPS'); r=float('$CPP_TPS'); print(f'{c/r:.3f}' if r>0 else 'n/a')")
 
 echo ""
 echo "================ IQ decode benchmark ================"
 printf '%-18s %14s %14s\n' "engine" "decode_tok/s" "notes"
 printf '%-18s %14s %14s\n' "oxidize (Rust)" "$RUST_TPS" "oxidize-bench decode"
 printf '%-18s %14s %14s\n' "oxidize-cpp" "$CPP_TPS" "json decode_tps"
+printf '%-18s %14s %14s\n' "oxidize-c" "$OC_TPS" "CLI tok/s line"
 printf '%-18s %14s %14s\n' "rust/cpp ratio" "$RATIO" ""
+printf '%-18s %14s %14s\n' "oc/cpp ratio" "$OC_RATIO" ""
 echo "model: $MODEL"
 echo "threads: $THREADS  decode_tokens: $DECODE_TOKENS"
 echo "artifacts: $OUT"

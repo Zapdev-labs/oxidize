@@ -79,8 +79,8 @@ void quantize_row_q8_0(const float* x, uint8_t* out, size_t n);
 // Quantize `n` f32 values (n % 32 == 0) into Q4_0 blocks (d:f16 + 16×nibbles).
 void quantize_row_q4_0(const float* x, uint8_t* out, size_t n);
 
-// Q4_O: same 18-byte layout as Q4_0, MSE-optimal per-block scale (ggml type 240).
-// Decode uses dequantize_row(Q4_O) == Q4_0 bitstream.
-void quantize_row_q4_o(const float* x, uint8_t* out, size_t n);
+// AL5: same 18-byte layout as Q4_0, MSE-optimal per-block scale (ggml type 240).
+// Decode uses dequantize_row(AL5) == Q4_0 bitstream.
+void quantize_row_al5(const float* x, uint8_t* out, size_t n);
 
 }  // namespace oxidize

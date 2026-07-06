@@ -688,7 +688,7 @@ inline float dot_q6_k_i8(const uint8_t* row, const Q8Act* xq, size_t cols) {
 }
 
 inline bool is_q4_sym(QuantType q) {
-  return q == QuantType::Q4_0 || q == QuantType::Q4_O;
+  return q == QuantType::Q4_0 || q == QuantType::AL5;
 }
 
 inline bool int8_gemv_ok(QuantType q, size_t cols) {
@@ -702,7 +702,7 @@ inline float int8_row_dot(QuantType q, const uint8_t* row, const Q8Act* xq,
                           size_t cols) {
   switch (q) {
     case QuantType::Q4_0:
-    case QuantType::Q4_O:
+    case QuantType::AL5:
       return dot_q4_0_i8(row, xq, cols);
     case QuantType::Q8_0: return dot_q8_0_i8(row, xq, cols);
     case QuantType::IQ4_NL: return dot_iq4_nl_i8(row, xq, cols);

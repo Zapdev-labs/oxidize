@@ -251,7 +251,7 @@ pub fn quant_block_layout(
         GgufQuantizationType::F64 => Ok((1, 8)),
         GgufQuantizationType::BF16 => Ok((1, 2)),
         GgufQuantizationType::Q4_0 => Ok((QK4_0, BLOCK_Q4_0_SIZE)),
-        GgufQuantizationType::Q4_O => Ok((QK4_0, BLOCK_Q4_0_SIZE)),
+        GgufQuantizationType::AL5 => Ok((QK4_0, BLOCK_Q4_0_SIZE)),
         GgufQuantizationType::Q4_1 => Ok((QK4_1, BLOCK_Q4_1_SIZE)),
         GgufQuantizationType::Q5_0 => Ok((QK5_0, BLOCK_Q5_0_SIZE)),
         GgufQuantizationType::Q5_1 => Ok((QK5_1, BLOCK_Q5_1_SIZE)),

@@ -417,9 +417,9 @@ void test_gguf_forward_if_present() {
   }
 }
 
-// ── Q4_O vs Q4_0 RMSE (same 18-byte layout, MSE-optimal scale) ───────────────
+// ── AL5 vs Q4_0 RMSE (same 18-byte layout, MSE-optimal scale) ───────────────
 
-void test_quant_q4_o() {
+void test_quant_al5() {
   constexpr size_t N = 256;
   std::array<float, N> x{};
   for (size_t i = 0; i < N; ++i)
@@ -433,9 +433,9 @@ void test_quant_q4_o() {
   std::array<float, N> dq4o{};
 
   oxidize::quantize_row_q4_0(x.data(), buf40.data(), N);
-  oxidize::quantize_row_q4_o(x.data(), buf4o.data(), N);
+  oxidize::quantize_row_al5(x.data(), buf4o.data(), N);
   oxidize::dequantize_row(oxidize::QuantType::Q4_0, buf40.data(), dq40.data(), N);
-  oxidize::dequantize_row(oxidize::QuantType::Q4_O, buf4o.data(), dq4o.data(), N);
+  oxidize::dequantize_row(oxidize::QuantType::AL5, buf4o.data(), dq4o.data(), N);
 
   double se40 = 0.0;
   double se4o = 0.0;
@@ -448,7 +448,7 @@ void test_quant_q4_o() {
   const double rmse40 = std::sqrt(se40 / static_cast<double>(N));
   const double rmse4o = std::sqrt(se4o / static_cast<double>(N));
   CHECK(rmse4o < rmse40);
-  std::fprintf(stderr, "[q4_o] rmse=%.5f vs q4_0 rmse=%.5f (%.1f%% lower)\n",
+  std::fprintf(stderr, "[al5] rmse=%.5f vs q4_0 rmse=%.5f (%.1f%% lower)\n",
                rmse4o, rmse40, 100.0 * (rmse40 - rmse4o) / rmse40);
 }
 
@@ -465,7 +465,7 @@ int main() {
   test_gemv_iq4_nl();
   test_dequant_iq2_xs_finite();
   test_dequant_iq2_s_finite();
-  test_quant_q4_o();
+  test_quant_al5();
   test_f16();
   test_gguf_forward_if_present();
 
