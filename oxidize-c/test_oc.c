@@ -62,6 +62,56 @@ static void check_quant(oc_quant q, size_t cols) {
 
 /* ---- prune + finetune primitives ---- */
 
+static void check_iq_reference_dequant(void) {
+  /* mirrors oxidize-core quantization/tests.rs iq4_nl + iq2/iq3 smoke cases */
+  uint8_t nl[18] = {0};
+  nl[1] = 0x3c; /* f16 1.0 */
+  nl[2] = 0x10; /* nibbles 0 and 1 */
+  float out_nl[32];
+  oc_dequant_row(OC_IQ4_NL, nl, out_nl, 32);
+  if (out_nl[0] != -127.0f || out_nl[16] != -104.0f) {
+    fprintf(stderr, "FAIL IQ4_NL ref: got %f %f\n", out_nl[0], out_nl[16]);
+    exit(1);
+  }
+  printf("ok IQ4_NL reference dequant\n");
+
+  struct { oc_quant q; size_t bs; size_t n; } cases[] = {
+    {OC_IQ2_XXS, 66, QK_K}, {OC_IQ2_XS, 74, QK_K}, {OC_IQ2_S, 82, QK_K},
+    {OC_IQ3_XXS, 98, QK_K}, {OC_IQ3_S, 110, QK_K},
+  };
+  for (size_t k = 0; k < sizeof(cases) / sizeof(*cases); ++k) {
+    uint8_t *blk = calloc(1, cases[k].bs);
+    blk[1] = 0x3c;
+    for (size_t i = 2; i < cases[k].bs; ++i) blk[i] = (uint8_t)(i % 251);
+    float *out = malloc(cases[k].n * sizeof(float));
+    oc_dequant_row(cases[k].q, blk, out, cases[k].n);
+    for (size_t i = 0; i < cases[k].n; ++i) {
+      if (!isfinite(out[i])) {
+        fprintf(stderr, "FAIL %s ref: non-finite at %zu\n",
+                oc_quant_name(cases[k].q), i);
+        exit(1);
+      }
+    }
+    printf("ok %-7s reference dequant (finite)\n", oc_quant_name(cases[k].q));
+    free(blk);
+    free(out);
+  }
+
+  struct { uint32_t ggml; oc_quant q; } map[] = {
+    {16, OC_IQ2_XXS}, {17, OC_IQ2_XS}, {18, OC_IQ3_XXS}, {20, OC_IQ4_NL},
+    {21, OC_IQ3_S}, {22, OC_IQ2_S}, {23, OC_IQ4_XS},
+  };
+  for (size_t k = 0; k < sizeof(map) / sizeof(*map); ++k) {
+    if (oc_from_ggml_type(map[k].ggml) != map[k].q ||
+        oc_to_ggml_type(map[k].q) != map[k].ggml) {
+      fprintf(stderr, "FAIL ggml map type %u <-> %s\n", map[k].ggml,
+              oc_quant_name(map[k].q));
+      exit(1);
+    }
+  }
+  printf("ok IQ ggml type round-trip\n");
+}
+
 static void check_prune_masks(void) {
   /* magnitude keeps top half per row */
   float w[16];
@@ -288,9 +338,14 @@ static void check_kv_int8(void) {
 int main(void) {
   size_t cols = 512;
   oc_quant types[] = {OC_F16, OC_BF16, OC_Q4_0, OC_Q4_1, OC_Q5_0, OC_Q5_1,
-                      OC_Q8_0, OC_Q2_K, OC_Q3_K, OC_Q4_K, OC_Q5_K, OC_Q6_K};
+                      OC_Q8_0, OC_Q2_K, OC_Q3_K, OC_Q4_K, OC_Q5_K, OC_Q6_K,
+                      OC_IQ4_XS, OC_IQ2_XXS, OC_IQ2_XS, OC_IQ2_S,
+                      OC_IQ3_XXS, OC_IQ3_S};
   for (size_t i = 0; i < sizeof(types) / sizeof(*types); ++i)
     check_quant(types[i], cols);
+  check_quant(OC_IQ4_NL, 256);
+
+  check_iq_reference_dequant();
 
   /* GGUF fixture parse */
   oc_gguf *g = oc_gguf_load(

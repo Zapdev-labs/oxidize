@@ -23,6 +23,7 @@
 //
 // No test framework: plain assert-style checks; non-zero exit on failure.
 
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -272,6 +273,58 @@ void test_dequant_q4_k() {
   CHECK_CLOSE(out[255], 7.5f, kTol);
 }
 
+// KVALUES_IQ4NL codebook (quant.cpp) — spot-check IQ4_NL dequant.
+constexpr int8_t kIq4NlCodebook[16] = {
+    -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113,
+};
+
+void test_dequant_iq4_nl() {
+  std::vector<uint8_t> blk(oxidize::BLOCK_IQ4_NL_SIZE, 0);
+  blk[0] = 0x00;
+  blk[1] = 0x3C;  // f16 1.0
+  blk[2] = 0x10;  // nibbles 0 and 1
+  CHECK(blk.size() == oxidize::BLOCK_IQ4_NL_SIZE);
+
+  std::vector<float> out(oxidize::QK4_NL, 0.f);
+  oxidize::dequantize_row(oxidize::QuantType::IQ4_NL, blk.data(), out.data(),
+                          oxidize::QK4_NL);
+  CHECK_CLOSE(out[0], static_cast<float>(kIq4NlCodebook[0]), kTol);
+  CHECK_CLOSE(out[16], static_cast<float>(kIq4NlCodebook[1]), kTol);
+  for (float v : out) {
+    CHECK(std::isfinite(v));
+  }
+}
+
+void test_dequant_iq2_xs_finite() {
+  std::vector<uint8_t> blk(oxidize::BLOCK_IQ2_XS_SIZE, 0);
+  blk[0] = 0x00;
+  blk[1] = 0x3C;  // f16 1.0
+  for (size_t i = 2; i < blk.size(); ++i) {
+    blk[i] = static_cast<uint8_t>(i % 251);
+  }
+  std::vector<float> out(oxidize::QK_K, 0.f);
+  oxidize::dequantize_row(oxidize::QuantType::IQ2_XS, blk.data(), out.data(),
+                          oxidize::QK_K);
+  for (float v : out) {
+    CHECK(std::isfinite(v));
+  }
+}
+
+void test_dequant_iq2_s_finite() {
+  std::vector<uint8_t> blk(oxidize::BLOCK_IQ2_S_SIZE, 0);
+  blk[0] = 0x00;
+  blk[1] = 0x3C;  // f16 1.0
+  for (size_t i = 2; i < blk.size(); ++i) {
+    blk[i] = static_cast<uint8_t>(i % 251);
+  }
+  std::vector<float> out(oxidize::QK_K, 0.f);
+  oxidize::dequantize_row(oxidize::QuantType::IQ2_S, blk.data(), out.data(),
+                          oxidize::QK_K);
+  for (float v : out) {
+    CHECK(std::isfinite(v));
+  }
+}
+
 // f16_le_to_f32 bit-exact spot checks (quantization.rs::f16_le_to_f32).
 void test_f16() {
   uint8_t half[2] = {0x00, 0x3C};  // 1.0
@@ -327,6 +380,41 @@ void test_gguf_forward_if_present() {
   }
 }
 
+// ── Q4_O vs Q4_0 RMSE (same 18-byte layout, MSE-optimal scale) ───────────────
+
+void test_quant_q4_o() {
+  constexpr size_t N = 256;
+  std::array<float, N> x{};
+  for (size_t i = 0; i < N; ++i)
+    x[i] = (static_cast<float>((i * 1103515245u + 12345u) & 0xffffu) / 65536.0f -
+            0.5f) *
+           2.0f;
+
+  std::array<uint8_t, N / 32 * 18> buf40{};
+  std::array<uint8_t, N / 32 * 18> buf4o{};
+  std::array<float, N> dq40{};
+  std::array<float, N> dq4o{};
+
+  oxidize::quantize_row_q4_0(x.data(), buf40.data(), N);
+  oxidize::quantize_row_q4_o(x.data(), buf4o.data(), N);
+  oxidize::dequantize_row(oxidize::QuantType::Q4_0, buf40.data(), dq40.data(), N);
+  oxidize::dequantize_row(oxidize::QuantType::Q4_O, buf4o.data(), dq4o.data(), N);
+
+  double se40 = 0.0;
+  double se4o = 0.0;
+  for (size_t i = 0; i < N; ++i) {
+    double e40 = static_cast<double>(dq40[i] - x[i]);
+    double e4o = static_cast<double>(dq4o[i] - x[i]);
+    se40 += e40 * e40;
+    se4o += e4o * e4o;
+  }
+  const double rmse40 = std::sqrt(se40 / static_cast<double>(N));
+  const double rmse4o = std::sqrt(se4o / static_cast<double>(N));
+  CHECK(rmse4o < rmse40);
+  std::fprintf(stderr, "[q4_o] rmse=%.5f vs q4_0 rmse=%.5f (%.1f%% lower)\n",
+               rmse4o, rmse40, 100.0 * (rmse40 - rmse4o) / rmse40);
+}
+
 }  // namespace
 
 int main() {
@@ -336,6 +424,10 @@ int main() {
   test_matvec();
   test_dequant_q8_0();
   test_dequant_q4_k();
+  test_dequant_iq4_nl();
+  test_dequant_iq2_xs_finite();
+  test_dequant_iq2_s_finite();
+  test_quant_q4_o();
   test_f16();
   test_gguf_forward_if_present();
 

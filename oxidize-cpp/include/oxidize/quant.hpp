@@ -19,6 +19,7 @@ constexpr size_t QK4_1 = 32;
 constexpr size_t QK5_0 = 32;
 constexpr size_t QK5_1 = 32;
 constexpr size_t QK8_0 = 32;
+constexpr size_t QK4_NL = 32;
 constexpr size_t QK_K = 256;
 constexpr size_t QK_NVFP4 = 64;
 constexpr size_t QK_NVFP4_SUB = 16;
@@ -38,6 +39,10 @@ constexpr size_t BLOCK_Q6_K_SIZE = 2 + QK_K / 16 + 3 * QK_K / 4;       // 210
 constexpr size_t BLOCK_Q8_K_SIZE = 4 + QK_K + QK_K / 16 * 2;          // 292
 
 constexpr size_t BLOCK_NVFP4_SIZE = QK_NVFP4 / QK_NVFP4_SUB + QK_NVFP4 / 2;  // 36
+
+constexpr size_t BLOCK_IQ2_XS_SIZE = 2 + QK_K / 8 * 2 + QK_K / 32;               // 74
+constexpr size_t BLOCK_IQ2_S_SIZE = 2 + QK_K / 4 + QK_K / 32 + QK_K / 32;      // 82
+constexpr size_t BLOCK_IQ4_NL_SIZE = 2 + QK4_NL / 2;                             // 18
 
 // Number of scalar values represented by one block of the given type.
 // Returns 1 for the per-element (non-blocked) types.
@@ -70,5 +75,12 @@ float f16_le_to_f32(const uint8_t* bytes);
 // `out` must hold quantized_size(Q8_0, n) bytes. Used for on-the-fly F16->Q8_0
 // weight quantization at load (halves weight bytes, ~1.3x decode, near-lossless).
 void quantize_row_q8_0(const float* x, uint8_t* out, size_t n);
+
+// Quantize `n` f32 values (n % 32 == 0) into Q4_0 blocks (d:f16 + 16×nibbles).
+void quantize_row_q4_0(const float* x, uint8_t* out, size_t n);
+
+// Q4_O: same 18-byte layout as Q4_0, MSE-optimal per-block scale (ggml type 240).
+// Decode uses dequantize_row(Q4_O) == Q4_0 bitstream.
+void quantize_row_q4_o(const float* x, uint8_t* out, size_t n);
 
 }  // namespace oxidize

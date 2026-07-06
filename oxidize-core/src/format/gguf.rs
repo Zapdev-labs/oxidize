@@ -299,6 +299,7 @@ pub enum GgufQuantizationType {
     F32,
     F16,
     Q4_0,
+    Q4_O,
     Q4_1,
     Q5_0,
     Q5_1,
@@ -393,6 +394,7 @@ impl GgufQuantizationType {
             34 => Self::IQ2_XS,
             35 => Self::IQ3_XXS,
             40 => Self::NVFP4,
+            240 => Self::Q4_O,
             other => Self::Unknown(other),
         }
     }

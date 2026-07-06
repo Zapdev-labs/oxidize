@@ -17,12 +17,14 @@ typedef enum {
   OC_Q4_0, OC_Q4_1, OC_Q5_0, OC_Q5_1, OC_Q8_0,
   OC_Q2_K, OC_Q3_K, OC_Q4_K, OC_Q5_K, OC_Q6_K,
   OC_IQ4_XS,
+  OC_IQ2_XXS, OC_IQ2_XS, OC_IQ2_S, OC_IQ3_XXS, OC_IQ3_S, OC_IQ4_NL,
   OC_Q4_O,       /* custom: Q4_0-sized (18B) symmetric 4-bit, MSE-optimal scale */
   OC_UNKNOWN,
 } oc_quant;
 
 #define QK 32          /* small-block element count */
 #define QK_K 256       /* K-quant superblock element count */
+#define QK4_NL 32      /* IQ4_NL block element count */
 
 size_t oc_block_values(oc_quant q);
 size_t oc_block_bytes(oc_quant q);

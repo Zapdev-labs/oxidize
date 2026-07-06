@@ -117,6 +117,82 @@ pub(super) fn quantize_q4_0_scalar(
     Ok(())
 }
 
+/// ggml split-halves Q4_O: same 18-byte block as Q4_0, MSE-optimal per-block scale.
+pub(super) fn quantize_q4_o_scalar(
+    input: &[f32],
+    output: &mut [u8],
+) -> Result<(), QuantizationError> {
+    if !input.len().is_multiple_of(QK4_0) {
+        return Err(QuantizationError::InvalidInputLength {
+            quantization: GgufQuantizationType::Q4_O,
+            expected_multiple: QK4_0,
+            actual: input.len(),
+        });
+    }
+    if output.len() != (input.len() / QK4_0) * BLOCK_Q4_0_SIZE {
+        return Err(QuantizationError::InvalidOutputLength {
+            quantization: GgufQuantizationType::Q4_O,
+            expected: (input.len() / QK4_0) * BLOCK_Q4_0_SIZE,
+            actual: output.len(),
+        });
+    }
+
+    for (in_block, out_block) in input
+        .chunks_exact(QK4_0)
+        .zip(output.chunks_exact_mut(BLOCK_Q4_0_SIZE))
+    {
+        let mut amax = 0.0_f32;
+        let mut mx = 0.0_f32;
+        for &v in in_block {
+            let a = v.abs();
+            if a > amax {
+                amax = a;
+                mx = v;
+            }
+        }
+        if amax == 0.0 {
+            out_block[0..2].copy_from_slice(&f32_to_f16_bits(0.0).to_le_bytes());
+            out_block[2..].fill(0x88);
+            continue;
+        }
+
+        let mut best_d = mx / -8.0;
+        let mut best_metric = -1.0_f32;
+        for is in -9..=9_i32 {
+            if is == 0 {
+                continue;
+            }
+            let id = is as f32 / mx;
+            let mut sumlx = 0.0_f32;
+            let mut suml2 = 0.0_f32;
+            for &v in in_block {
+                let l = (v * id).round() as i32;
+                let l = l.clamp(-8, 7) as f32;
+                sumlx += v * l;
+                suml2 += l * l;
+            }
+            if suml2 <= 0.0 {
+                continue;
+            }
+            let metric = (sumlx * sumlx) / suml2;
+            if metric > best_metric {
+                best_metric = metric;
+                best_d = sumlx / suml2;
+            }
+        }
+
+        let inv_d = if best_d != 0.0 { 1.0 / best_d } else { 0.0 };
+        out_block[0..2].copy_from_slice(&f32_to_f16_bits(best_d).to_le_bytes());
+        for i in 0..16 {
+            let lo = ((in_block[i] * inv_d).round() as i32).clamp(-8, 7) + 8;
+            let hi = ((in_block[i + 16] * inv_d).round() as i32).clamp(-8, 7) + 8;
+            out_block[2 + i] = lo as u8 | ((hi as u8) << 4);
+        }
+    }
+
+    Ok(())
+}
+
 pub(super) fn quantize_q4_1_scalar(
     input: &[f32],
     output: &mut [u8],
@@ -347,6 +423,30 @@ pub fn dequantize_q4_0_scalar(input: &[u8], output: &mut [f32]) -> Result<(), Qu
             let packed = block[2 + i];
             out[2 * i] = ((packed & 0x0F) as i8 - 8) as f32 * d;
             out[2 * i + 1] = (((packed >> 4) & 0x0F) as i8 - 8) as f32 * d;
+        }
+    }
+
+    Ok(())
+}
+
+pub fn dequantize_q4_o_scalar(input: &[u8], output: &mut [f32]) -> Result<(), QuantizationError> {
+    validate_layout(
+        GgufQuantizationType::Q4_O,
+        input,
+        output,
+        BLOCK_Q4_0_SIZE,
+        QK4_0,
+    )?;
+
+    for (block, out) in input
+        .chunks_exact(BLOCK_Q4_0_SIZE)
+        .zip(output.chunks_exact_mut(QK4_0))
+    {
+        let d = f16_le_to_f32(&block[0..2]);
+        for i in 0..16 {
+            let packed = block[2 + i];
+            out[i] = ((packed & 0x0F) as i32 - 8) as f32 * d;
+            out[i + 16] = (((packed >> 4) & 0x0F) as i32 - 8) as f32 * d;
         }
     }
 

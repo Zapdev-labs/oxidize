@@ -41,7 +41,7 @@ static float *load_vec_n(const oc_gguf *g, const char *name, size_t *n) {
   return load_vec(g, name);
 }
 
-static bool keepq_ok(oc_quant q) { return q <= OC_IQ4_XS; }
+static bool keepq_ok(oc_quant q) { return q <= OC_IQ4_NL; }
 
 static oc_weight load_weight(const oc_gguf *g, const char *name) {
   oc_weight w = {0};
@@ -660,8 +660,9 @@ static const oc_q8blk *quant_acts(scratch_t *s, const float *src, size_t cols,
 }
 
 static bool w_needs_q8(const oc_weight *w) {
-  return w->quantized && (w->quant == OC_Q4_0 || w->quant == OC_Q8_0 ||
-                          w->quant == OC_Q4_K || w->quant == OC_Q6_K);
+  return w->quantized && (w->quant == OC_Q4_0 || w->quant == OC_Q4_O ||
+                          w->quant == OC_Q8_0 || w->quant == OC_Q4_K ||
+                          w->quant == OC_Q6_K);
 }
 
 /* ---- gated-DeltaNet layer (batch: projections batched, recurrence

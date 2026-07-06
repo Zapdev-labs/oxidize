@@ -1,6 +1,7 @@
 /* Dequantization kernels. Byte/bit-faithful port of oxidize-cpp/src/quant.cpp
  * (itself ported from oxidize-core quantization.rs / ggml layouts). */
 #include "oc.h"
+#include "oc_iq_grids.h"
 
 #include <math.h>
 #include <stdarg.h>
@@ -54,7 +55,9 @@ size_t oc_block_values(oc_quant q) {
     case OC_Q4_0: case OC_Q4_1: case OC_Q5_0: case OC_Q5_1: case OC_Q8_0:
     case OC_Q4_O: return QK;
     case OC_Q2_K: case OC_Q3_K: case OC_Q4_K: case OC_Q5_K: case OC_Q6_K:
-    case OC_IQ4_XS: return QK_K;
+    case OC_IQ4_XS: case OC_IQ2_XXS: case OC_IQ2_XS: case OC_IQ2_S:
+    case OC_IQ3_XXS: case OC_IQ3_S: return QK_K;
+    case OC_IQ4_NL: return QK4_NL;
     default: oc_die("quant: no block layout (type %d)", (int)q);
   }
   return 0;
@@ -75,6 +78,12 @@ size_t oc_block_bytes(oc_quant q) {
     case OC_Q5_K: return 176;
     case OC_Q6_K: return 210;
     case OC_IQ4_XS: return 136;
+    case OC_IQ2_XXS: return 66;
+    case OC_IQ2_XS: return 74;
+    case OC_IQ2_S: return 82;
+    case OC_IQ3_XXS: return 98;
+    case OC_IQ3_S: return 110;
+    case OC_IQ4_NL: return 18;
     default: oc_die("quant: no block layout (type %d)", (int)q);
   }
   return 0;
@@ -100,6 +109,12 @@ oc_quant oc_from_ggml_type(uint32_t t) {
     case 12: return OC_Q4_K;
     case 13: return OC_Q5_K;
     case 14: return OC_Q6_K;
+    case 16: return OC_IQ2_XXS;
+    case 17: return OC_IQ2_XS;
+    case 18: return OC_IQ3_XXS;
+    case 20: return OC_IQ4_NL;
+    case 21: return OC_IQ3_S;
+    case 22: return OC_IQ2_S;
     case 23: return OC_IQ4_XS;
     case 30: return OC_BF16;
     case 240: return OC_Q4_O; /* custom, oxidize-c only */
@@ -110,6 +125,7 @@ oc_quant oc_from_ggml_type(uint32_t t) {
 const char *oc_quant_name(oc_quant q) {
   static const char *n[] = {"F32","F16","BF16","Q4_0","Q4_1","Q5_0","Q5_1",
                             "Q8_0","Q2_K","Q3_K","Q4_K","Q5_K","Q6_K","IQ4_XS",
+                            "IQ2_XXS","IQ2_XS","IQ2_S","IQ3_XXS","IQ3_S","IQ4_NL",
                             "Q4_O","?"};
   return n[q <= OC_UNKNOWN ? q : OC_UNKNOWN];
 }
@@ -129,6 +145,12 @@ uint32_t oc_to_ggml_type(oc_quant q) {
     case OC_Q5_K: return 13;
     case OC_Q6_K: return 14;
     case OC_IQ4_XS: return 23;
+    case OC_IQ2_XXS: return 16;
+    case OC_IQ2_XS: return 17;
+    case OC_IQ3_XXS: return 18;
+    case OC_IQ4_NL: return 20;
+    case OC_IQ3_S: return 21;
+    case OC_IQ2_S: return 22;
     case OC_BF16: return 30;
     case OC_Q4_O: return 240; /* custom, oxidize-c only */
     default: oc_die("quant: no ggml type for %d", (int)q);
@@ -164,6 +186,50 @@ uint16_t oc_f32_to_f16(float f) {
 static int nearest_i(float x) { return (int)lrintf(x); }
 static int clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
 static void wr16(uint8_t *p, uint16_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); }
+
+/* Q4_O: Q4_0 layout (18B/32w), MSE-optimal per-block scale. Decode == Q4_0. */
+static void quantize_block_q4_o(const float *x, uint8_t *o) {
+  float amax = 0.0f, mx = 0.0f;
+  for (size_t i = 0; i < QK; ++i) {
+    float a = fabsf(x[i]);
+    if (a > amax) {
+      amax = a;
+      mx = x[i];
+    }
+  }
+  if (amax == 0.0f) {
+    wr16(o, oc_f32_to_f16(0.0f));
+    memset(o + 2, 0x88, 16);
+    return;
+  }
+
+  float best_d = mx / -8.0f;
+  float best_metric = -1.0f;
+  for (int is = -9; is <= 9; ++is) {
+    if (is == 0) continue;
+    float id = (float)is / mx;
+    float sumlx = 0.0f, suml2 = 0.0f;
+    for (size_t i = 0; i < QK; ++i) {
+      int l = clampi((int)lrintf(x[i] * id), -8, 7);
+      sumlx += x[i] * (float)l;
+      suml2 += (float)(l * l);
+    }
+    if (suml2 <= 0.0f) continue;
+    float metric = (sumlx * sumlx) / suml2;
+    if (metric > best_metric) {
+      best_metric = metric;
+      best_d = sumlx / suml2;
+    }
+  }
+
+  float id = best_d != 0.0f ? 1.0f / best_d : 0.0f;
+  wr16(o, oc_f32_to_f16(best_d));
+  for (size_t i = 0; i < QK / 2; ++i) {
+    int lo = clampi((int)lrintf(x[i] * id), -8, 7) + 8;
+    int hi = clampi((int)lrintf(x[i + QK / 2] * id), -8, 7) + 8;
+    o[2 + i] = (uint8_t)((hi << 4) | lo);
+  }
+}
 static void wr32(uint8_t *p, uint32_t v) {
   p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8);
   p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
@@ -550,48 +616,9 @@ bool oc_quantize_row(oc_quant q, const float *src, uint8_t *dst, size_t n) {
         }
       }
       return true;
-    case OC_Q4_O: /* custom: Q4_0 layout, MSE-optimal scale (make_qx_quants) */
-      for (size_t b = 0; b < n / QK; ++b) {
-        const float *x = src + b * QK;
-        uint8_t *o = dst + b * 18;
-        float amax = 0, mx = 0;
-        for (size_t i = 0; i < QK; ++i) {
-          float a = fabsf(x[i]);
-          if (a > amax) { amax = a; mx = x[i]; }
-        }
-        float best_d = mx / -8.0f;
-        if (amax > 0) {
-          /* search integer scale of the max element; for each level assignment
-           * take the L2-optimal d = sum(x*l)/sum(l*l), keep min sq-error. */
-          float best_err = INFINITY;
-          for (int is = -9; is <= 9; ++is) {
-            if (is == 0) continue;
-            float id = (float)is / mx;
-            float sumlx = 0, suml2 = 0;
-            for (size_t i = 0; i < QK; ++i) {
-              int l = clampi((int)lrintf(x[i] * id), -8, 7);
-              sumlx += x[i] * (float)l;
-              suml2 += (float)(l * l);
-            }
-            if (suml2 <= 0) continue;
-            float d = sumlx / suml2;
-            float err = 0;
-            for (size_t i = 0; i < QK; ++i) {
-              int l = clampi((int)lrintf(x[i] * id), -8, 7);
-              float diff = d * (float)l - x[i];
-              err += diff * diff;
-            }
-            if (err < best_err) { best_err = err; best_d = d; }
-          }
-        }
-        float id = best_d != 0 ? 1.0f / best_d : 0.0f;
-        wr16(o, oc_f32_to_f16(best_d));
-        for (size_t i = 0; i < QK / 2; ++i) {
-          int lo = clampi((int)lrintf(x[i] * id), -8, 7) + 8;
-          int hi = clampi((int)lrintf(x[i + QK / 2] * id), -8, 7) + 8;
-          o[2 + i] = (uint8_t)((hi << 4) | lo);
-        }
-      }
+    case OC_Q4_O:
+      for (size_t b = 0; b < n / QK; ++b)
+        quantize_block_q4_o(src + b * QK, dst + b * 18);
       return true;
     default:
       return false;
@@ -836,6 +863,173 @@ void oc_dequant_row(oc_quant q, const uint8_t *src, float *dst, size_t n) {
           }
           o += 32;
           qs += 16;
+        }
+      }
+      return;
+    case OC_IQ4_NL:
+      for (b = 0; b < n / QK4_NL; ++b) {
+        const uint8_t *blk = src + b * 18;
+        float d = oc_f16_to_f32(blk);
+        const uint8_t *qs = blk + 2;
+        float *o = dst + b * QK4_NL;
+        for (l = 0; l < QK4_NL / 2; ++l) {
+          o[l] = d * (float)oc_kvalues_iq4nl[qs[l] & 0xF];
+          o[l + QK4_NL / 2] = d * (float)oc_kvalues_iq4nl[qs[l] >> 4];
+        }
+      }
+      return;
+    case OC_IQ2_XXS:
+      for (b = 0; b < n / QK_K; ++b) {
+        const uint8_t *blk = src + b * 66;
+        float d = oc_f16_to_f32(blk);
+        const uint8_t *qs = blk + 2;
+        float *y = dst + b * QK_K;
+        for (size_t ib32 = 0; ib32 < QK_K / 32; ++ib32) {
+          uint32_t aux0 = rd32(qs + 8 * ib32);
+          uint32_t aux1 = rd32(qs + 8 * ib32 + 4);
+          const uint8_t *aux8 = (const uint8_t *)&aux0;
+          float db = d * (0.5f + (float)(aux1 >> 28)) * 0.25f;
+          for (size_t ll = 0; ll < 4; ++ll) {
+            uint64_t grid_u = oc_iq2xxs_grid[aux8[ll]];
+            const uint8_t *grid = (const uint8_t *)&grid_u;
+            uint8_t signs = oc_ksigns_iq2xs[(aux1 >> (7 * ll)) & 127];
+            for (size_t j = 0; j < 8; ++j)
+              y[j] = db * (float)grid[j] *
+                     ((signs & oc_kmask_iq2xs[j]) ? -1.0f : 1.0f);
+            y += 8;
+          }
+        }
+      }
+      return;
+    case OC_IQ2_XS:
+      for (b = 0; b < n / QK_K; ++b) {
+        const uint8_t *blk = src + b * 74;
+        float d = oc_f16_to_f32(blk);
+        const uint8_t *scales = blk + 2 + QK_K / 4;
+        float *y = dst + b * QK_K;
+        size_t out_ptr = 0;
+        for (size_t ib32 = 0; ib32 < QK_K / 32; ++ib32) {
+          uint8_t sc = scales[ib32];
+          float db[2] = {d * (0.5f + (float)(sc & 0xf)) * 0.25f,
+                         d * (0.5f + (float)(sc >> 4)) * 0.25f};
+          for (size_t ll = 0; ll < 4; ++ll) {
+            size_t qs_off = 2 + 2 * (4 * ib32 + ll);
+            uint16_t qs_val = rd16(blk + qs_off);
+            uint64_t grid_u = oc_iq2xs_grid[qs_val & 511];
+            const uint8_t *grid = (const uint8_t *)&grid_u;
+            uint8_t signs = oc_ksigns_iq2xs[qs_val >> 9];
+            float dl = db[ll / 2];
+            for (size_t j = 0; j < 8; ++j)
+              y[out_ptr + j] = dl * (float)grid[j] *
+                               ((signs & oc_kmask_iq2xs[j]) ? -1.0f : 1.0f);
+            out_ptr += 8;
+          }
+        }
+      }
+      return;
+    case OC_IQ2_S:
+      for (b = 0; b < n / QK_K; ++b) {
+        const uint8_t *blk = src + b * 82;
+        float d = oc_f16_to_f32(blk);
+        const uint8_t *qs = blk + 2;
+        const uint8_t *qh = blk + 2 + QK_K / 4;
+        const uint8_t *scales = blk + 2 + QK_K / 4 + QK_K / 32;
+        float *y = dst + b * QK_K;
+        size_t qs_ptr = 0, signs_ptr = QK_K / 8, out_ptr = 0;
+        for (size_t ib32 = 0; ib32 < QK_K / 32; ++ib32) {
+          uint8_t sc = scales[ib32];
+          float db[2] = {d * (0.5f + (float)(sc & 0xf)) * 0.25f,
+                         d * (0.5f + (float)(sc >> 4)) * 0.25f};
+          for (size_t ll = 0; ll < 4; ++ll) {
+            float dl = db[ll / 2];
+            size_t grid_idx = (size_t)qs[qs_ptr + ll] |
+                              (((size_t)qh[ib32] << (8 - 2 * ll)) & 0x300);
+            uint64_t grid_u = oc_iq2s_grid[grid_idx];
+            const uint8_t *grid = (const uint8_t *)&grid_u;
+            uint8_t signs = qs[signs_ptr + ll];
+            for (size_t j = 0; j < 8; ++j)
+              y[out_ptr + j] = dl * (float)grid[j] *
+                               ((signs & oc_kmask_iq2xs[j]) ? -1.0f : 1.0f);
+            out_ptr += 8;
+          }
+          qs_ptr += 4;
+          signs_ptr += 4;
+        }
+      }
+      return;
+    case OC_IQ3_XXS:
+      for (b = 0; b < n / QK_K; ++b) {
+        const uint8_t *blk = src + b * 98;
+        float d = oc_f16_to_f32(blk);
+        const uint8_t *qs = blk + 2;
+        const uint8_t *scales_and_signs = qs + QK_K / 4;
+        float *y = dst + b * QK_K;
+        for (size_t ib32 = 0; ib32 < QK_K / 32; ++ib32) {
+          uint32_t aux32 = rd32(scales_and_signs + 4 * ib32);
+          float db = d * (0.5f + (float)(aux32 >> 28)) * 0.5f;
+          for (size_t ll = 0; ll < 4; ++ll) {
+            uint8_t signs = oc_ksigns_iq2xs[(aux32 >> (7 * ll)) & 127];
+            uint32_t g1 = oc_iq3xxs_grid[qs[2 * ll + 0]];
+            uint32_t g2 = oc_iq3xxs_grid[qs[2 * ll + 1]];
+            const uint8_t *grid1 = (const uint8_t *)&g1;
+            const uint8_t *grid2 = (const uint8_t *)&g2;
+            for (size_t j = 0; j < 4; ++j) {
+              y[j] = db * (float)grid1[j] *
+                     ((signs & oc_kmask_iq2xs[j]) ? -1.0f : 1.0f);
+              y[j + 4] = db * (float)grid2[j] *
+                         ((signs & oc_kmask_iq2xs[j + 4]) ? -1.0f : 1.0f);
+            }
+            y += 8;
+          }
+          qs += 8;
+        }
+      }
+      return;
+    case OC_IQ3_S:
+      for (b = 0; b < n / QK_K; ++b) {
+        const uint8_t *blk = src + b * 110;
+        float d = oc_f16_to_f32(blk);
+        const uint8_t *qs = blk + 2;
+        const uint8_t *qh = blk + 66;
+        const uint8_t *signs = blk + 74;
+        const uint8_t *scales = blk + 106;
+        float *o = dst + b * QK_K;
+        size_t qs_o = 0, qh_o = 0, sg_o = 0, y = 0, ib32 = 0;
+        while (ib32 < QK_K / 32) {
+          float db1 = d * (float)(1 + 2 * (scales[ib32 / 2] & 0xf));
+          float db2 = d * (float)(1 + 2 * (scales[ib32 / 2] >> 4));
+          for (size_t ll = 0; ll < 4; ++ll) {
+            size_t h = qh[qh_o];
+            size_t i1 = (size_t)qs[qs_o + 2 * ll] | ((h << (8 - 2 * ll)) & 256);
+            size_t i2 = (size_t)qs[qs_o + 2 * ll + 1] | ((h << (7 - 2 * ll)) & 256);
+            uint8_t s = signs[sg_o + ll];
+            for (size_t j = 0; j < 4; ++j) {
+              float f1 = (s & oc_kmask_iq2xs[j]) ? -1.0f : 1.0f;
+              float f2 = (s & oc_kmask_iq2xs[j + 4]) ? -1.0f : 1.0f;
+              o[y + j] = db1 * (float)((oc_iq3s_grid[i1] >> (8 * j)) & 0xff) * f1;
+              o[y + j + 4] = db1 * (float)((oc_iq3s_grid[i2] >> (8 * j)) & 0xff) * f2;
+            }
+            y += 8;
+          }
+          qs_o += 8;
+          sg_o += 4;
+          for (size_t ll = 0; ll < 4; ++ll) {
+            size_t h = qh[qh_o + 1];
+            size_t i1 = (size_t)qs[qs_o + 2 * ll] | ((h << (8 - 2 * ll)) & 256);
+            size_t i2 = (size_t)qs[qs_o + 2 * ll + 1] | ((h << (7 - 2 * ll)) & 256);
+            uint8_t s = signs[sg_o + ll];
+            for (size_t j = 0; j < 4; ++j) {
+              float f1 = (s & oc_kmask_iq2xs[j]) ? -1.0f : 1.0f;
+              float f2 = (s & oc_kmask_iq2xs[j + 4]) ? -1.0f : 1.0f;
+              o[y + j] = db2 * (float)((oc_iq3s_grid[i1] >> (8 * j)) & 0xff) * f1;
+              o[y + j + 4] = db2 * (float)((oc_iq3s_grid[i2] >> (8 * j)) & 0xff) * f2;
+            }
+            y += 8;
+          }
+          qh_o += 2;
+          qs_o += 8;
+          sg_o += 4;
+          ib32 += 2;
         }
       }
       return;

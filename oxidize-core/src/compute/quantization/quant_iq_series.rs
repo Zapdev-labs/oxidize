@@ -2,7 +2,7 @@ use super::*;
 
 #[path = "iq_grids.rs"]
 mod iq_grids;
-use iq_grids::{IQ2XXS_GRID, IQ3XXS_GRID, KMASK_IQ2XS, KSIGNS_IQ2XS};
+use iq_grids::{IQ2S_GRID, IQ2XXS_GRID, IQ2XS_GRID, IQ3XXS_GRID, KMASK_IQ2XS, KSIGNS_IQ2XS};
 
 const IQ1S_DELTA: f32 = 0.125;
 
@@ -200,6 +200,120 @@ pub fn dequantize_iq2_xxs_scalar(
                 }
                 out_ptr += 8;
             }
+        }
+    }
+    Ok(())
+}
+
+pub fn dequantize_iq2_xs_scalar(input: &[u8], output: &mut [f32]) -> Result<(), QuantizationError> {
+    validate_layout(
+        GgufQuantizationType::IQ2_XS,
+        input,
+        output,
+        BLOCK_IQ2_XS_SIZE,
+        QK_K,
+    )?;
+    for (block, out) in input
+        .chunks_exact(BLOCK_IQ2_XS_SIZE)
+        .zip(output.chunks_exact_mut(QK_K))
+    {
+        let d = f16_le_to_f32(&block[0..2]);
+        let qs_base = 2;
+        let scales = &block[2 + QK_K / 4..];
+        let mut out_ptr = 0_usize;
+        for ib32 in 0..(QK_K / 32) {
+            let sc = scales[ib32];
+            let db = [
+                d * (0.5 + (sc & 0xf) as f32) * 0.25,
+                d * (0.5 + (sc >> 4) as f32) * 0.25,
+            ];
+            for l in 0..4 {
+                let qs_off = qs_base + 2 * (4 * ib32 + l);
+                let qs_val = u16::from_le_bytes([block[qs_off], block[qs_off + 1]]);
+                let grid = IQ2XS_GRID[(qs_val & 511) as usize].to_le_bytes();
+                let signs = KSIGNS_IQ2XS[(qs_val >> 9) as usize];
+                let dl = db[l / 2];
+                for j in 0..8 {
+                    let sign = if signs & KMASK_IQ2XS[j] != 0 {
+                        -1.0_f32
+                    } else {
+                        1.0_f32
+                    };
+                    out[out_ptr + j] = dl * grid[j] as f32 * sign;
+                }
+                out_ptr += 8;
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn dequantize_iq2_s_scalar(input: &[u8], output: &mut [f32]) -> Result<(), QuantizationError> {
+    validate_layout(
+        GgufQuantizationType::IQ2_S,
+        input,
+        output,
+        BLOCK_IQ2_S_SIZE,
+        QK_K,
+    )?;
+    for (block, out) in input
+        .chunks_exact(BLOCK_IQ2_S_SIZE)
+        .zip(output.chunks_exact_mut(QK_K))
+    {
+        let d = f16_le_to_f32(&block[0..2]);
+        let qs = &block[2..2 + QK_K / 4];
+        let qh = &block[2 + QK_K / 4..2 + QK_K / 4 + QK_K / 32];
+        let scales = &block[2 + QK_K / 4 + QK_K / 32..];
+        let mut qs_ptr = 0_usize;
+        let mut signs_ptr = QK_K / 8;
+        let mut out_ptr = 0_usize;
+        for ib32 in 0..(QK_K / 32) {
+            let sc = scales[ib32];
+            let db = [
+                d * (0.5 + (sc & 0xf) as f32) * 0.25,
+                d * (0.5 + (sc >> 4) as f32) * 0.25,
+            ];
+            for l in 0..4 {
+                let dl = db[l / 2];
+                let grid_idx = qs[qs_ptr + l] as usize
+                    | ((qh[ib32] as usize) << (8 - 2 * l) & 0x300);
+                let grid = IQ2S_GRID[grid_idx].to_le_bytes();
+                let signs = qs[signs_ptr + l];
+                for j in 0..8 {
+                    let sign = if signs & KMASK_IQ2XS[j] != 0 {
+                        -1.0_f32
+                    } else {
+                        1.0_f32
+                    };
+                    out[out_ptr + j] = dl * grid[j] as f32 * sign;
+                }
+                out_ptr += 8;
+            }
+            qs_ptr += 4;
+            signs_ptr += 4;
+        }
+    }
+    Ok(())
+}
+
+pub fn dequantize_iq4_nl_scalar(input: &[u8], output: &mut [f32]) -> Result<(), QuantizationError> {
+    validate_layout(
+        GgufQuantizationType::IQ4_NL,
+        input,
+        output,
+        BLOCK_IQ4_NL_SIZE,
+        QK4_NL,
+    )?;
+    for (block, out) in input
+        .chunks_exact(BLOCK_IQ4_NL_SIZE)
+        .zip(output.chunks_exact_mut(QK4_NL))
+    {
+        let d = f16_le_to_f32(&block[0..2]);
+        let qs = &block[2..];
+        for j in 0..(QK4_NL / 2) {
+            let packed = qs[j];
+            out[j] = d * KVALUES_IQ4NL[(packed & 0xf) as usize] as f32;
+            out[j + QK4_NL / 2] = d * KVALUES_IQ4NL[(packed >> 4) as usize] as f32;
         }
     }
     Ok(())

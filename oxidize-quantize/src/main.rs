@@ -125,6 +125,7 @@ fn parse_quantization_type(value: &str) -> Result<GgufQuantizationType, String> 
         "F32" => Ok(GgufQuantizationType::F32),
         "F16" => Ok(GgufQuantizationType::F16),
         "Q4_0" => Ok(GgufQuantizationType::Q4_0),
+        "Q4_O" => Ok(GgufQuantizationType::Q4_O),
         "Q4_1" => Ok(GgufQuantizationType::Q4_1),
         "Q5_0" => Ok(GgufQuantizationType::Q5_0),
         "Q5_1" => Ok(GgufQuantizationType::Q5_1),
@@ -139,6 +140,7 @@ fn parse_quantization_type(value: &str) -> Result<GgufQuantizationType, String> 
         "Q5_K_M" => Ok(GgufQuantizationType::Q5_K_M),
         "Q6_K" => Ok(GgufQuantizationType::Q6_K),
         "IQ4_XS" => Ok(GgufQuantizationType::IQ4_XS),
+        "IQ4_NL" => Ok(GgufQuantizationType::IQ4_NL),
         _ => Err(format!("unsupported quantization type: {value}")),
     }
 }
@@ -467,6 +469,7 @@ fn uses_k_quant_blocks(quantization: GgufQuantizationType) -> bool {
             | GgufQuantizationType::Q5_K_M
             | GgufQuantizationType::Q6_K
             | GgufQuantizationType::IQ4_XS
+            | GgufQuantizationType::IQ4_NL
     )
 }
 
@@ -554,6 +557,7 @@ fn ensure_gguf_target_supported(target: GgufQuantizationType) -> Result<()> {
         GgufQuantizationType::F32
         | GgufQuantizationType::F16
         | GgufQuantizationType::Q4_0
+        | GgufQuantizationType::Q4_O
         | GgufQuantizationType::Q4_1
         | GgufQuantizationType::Q5_0
         | GgufQuantizationType::Q5_1
@@ -567,7 +571,8 @@ fn ensure_gguf_target_supported(target: GgufQuantizationType) -> Result<()> {
         | GgufQuantizationType::Q5_K_S
         | GgufQuantizationType::Q5_K_M
         | GgufQuantizationType::Q6_K
-        | GgufQuantizationType::IQ4_XS => Ok(()),
+        | GgufQuantizationType::IQ4_XS
+        | GgufQuantizationType::IQ4_NL => Ok(()),
         other => bail!("unsupported quantization target: {other:?}"),
     }
 }
@@ -587,6 +592,7 @@ fn gguf_type_id(quantization: GgufQuantizationType) -> Result<u32> {
         GgufQuantizationType::F32 => Ok(0),
         GgufQuantizationType::F16 => Ok(1),
         GgufQuantizationType::Q4_0 => Ok(2),
+        GgufQuantizationType::Q4_O => Ok(240),
         GgufQuantizationType::Q4_1 => Ok(3),
         GgufQuantizationType::Q5_0 => Ok(6),
         GgufQuantizationType::Q5_1 => Ok(7),
@@ -601,6 +607,7 @@ fn gguf_type_id(quantization: GgufQuantizationType) -> Result<u32> {
         GgufQuantizationType::Q5_K_M => Ok(17),
         GgufQuantizationType::Q6_K => Ok(18),
         GgufQuantizationType::IQ4_XS => Ok(30),
+        GgufQuantizationType::IQ4_NL => Ok(20),
         other => bail!("unsupported GGUF tensor type: {other:?}"),
     }
 }
@@ -610,6 +617,7 @@ fn ggml_type_id(quantization: GgufQuantizationType) -> Result<u32> {
         GgufQuantizationType::F32 => Ok(0),
         GgufQuantizationType::F16 => Ok(1),
         GgufQuantizationType::Q4_0 => Ok(2),
+        GgufQuantizationType::Q4_O => Ok(240),
         GgufQuantizationType::Q4_1 => Ok(3),
         GgufQuantizationType::Q5_0 => Ok(6),
         GgufQuantizationType::Q5_1 => Ok(7),
@@ -622,6 +630,7 @@ fn ggml_type_id(quantization: GgufQuantizationType) -> Result<u32> {
         GgufQuantizationType::Q5_K_S | GgufQuantizationType::Q5_K_M => Ok(13),
         GgufQuantizationType::Q6_K => Ok(14),
         GgufQuantizationType::IQ4_XS => Ok(23),
+        GgufQuantizationType::IQ4_NL => Ok(20),
         GgufQuantizationType::BF16 => Ok(30),
         other => bail!("unsupported GGML tensor type: {other:?}"),
     }

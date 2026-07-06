@@ -7,6 +7,7 @@ pub const QK4_1: usize = 32;
 pub const QK5_0: usize = 32;
 pub const QK5_1: usize = 32;
 pub const QK8_0: usize = 32;
+pub const QK4_NL: usize = 32;
 pub const QK_K: usize = 256;
 pub const QK_NVFP4: usize = 64;
 pub const QK_NVFP4_SUB: usize = 16;
@@ -46,8 +47,10 @@ pub const BLOCK_IQ4_XS_SIZE: usize = sizeof_of_f16() + 2 + QK_K / 64 + QK_K / 2;
 // block_iq3_s: ggml_half d + uint8_t qs[QK_K/4] + uint8_t qh[QK_K/32] + uint8_t signs[QK_K/8] + uint8_t scales[QK_K/64]
 const BLOCK_IQ3_S_SIZE: usize = sizeof_of_f16() + QK_K / 4 + QK_K / 32 + QK_K / 8 + QK_K / 64;
 const BLOCK_IQ2_XXS_SIZE: usize = sizeof_of_f16() + QK_K / 4;
-const BLOCK_IQ2_XS_SIZE: usize = sizeof_of_f16() + QK_K / 32 + QK_K / 4;
+const BLOCK_IQ2_XS_SIZE: usize = sizeof_of_f16() + QK_K / 8 * sizeof_of_i16() + QK_K / 32;
+const BLOCK_IQ2_S_SIZE: usize = sizeof_of_f16() + QK_K / 4 + QK_K / 32 + QK_K / 32;
 const BLOCK_IQ3_XXS_SIZE: usize = sizeof_of_f16() + 3 * (QK_K / 8);
+pub const BLOCK_IQ4_NL_SIZE: usize = sizeof_of_f16() + QK4_NL / 2;
 // IQ4_NL nonlinear codebook (shared by IQ4_NL and IQ4_XS)
 pub(crate) const KVALUES_IQ4NL: [i8; 16] = [
     -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113,
@@ -248,6 +251,7 @@ pub fn quant_block_layout(
         GgufQuantizationType::F64 => Ok((1, 8)),
         GgufQuantizationType::BF16 => Ok((1, 2)),
         GgufQuantizationType::Q4_0 => Ok((QK4_0, BLOCK_Q4_0_SIZE)),
+        GgufQuantizationType::Q4_O => Ok((QK4_0, BLOCK_Q4_0_SIZE)),
         GgufQuantizationType::Q4_1 => Ok((QK4_1, BLOCK_Q4_1_SIZE)),
         GgufQuantizationType::Q5_0 => Ok((QK5_0, BLOCK_Q5_0_SIZE)),
         GgufQuantizationType::Q5_1 => Ok((QK5_1, BLOCK_Q5_1_SIZE)),
@@ -264,11 +268,11 @@ pub fn quant_block_layout(
         GgufQuantizationType::NVFP4 => Ok((QK_NVFP4, BLOCK_NVFP4_SIZE)),
         GgufQuantizationType::IQ2_XXS => Ok((QK_K, BLOCK_IQ2_XXS_SIZE)),
         GgufQuantizationType::IQ2_XS => Ok((QK_K, BLOCK_IQ2_XS_SIZE)),
-        GgufQuantizationType::IQ2_S => Ok((QK_K, BLOCK_Q2_K_SIZE)),
+        GgufQuantizationType::IQ2_S => Ok((QK_K, BLOCK_IQ2_S_SIZE)),
         GgufQuantizationType::IQ3_S => Ok((QK_K, BLOCK_IQ3_S_SIZE)),
         GgufQuantizationType::IQ4_XS => Ok((QK_K, BLOCK_IQ4_XS_SIZE)),
         GgufQuantizationType::IQ3_XXS => Ok((QK_K, BLOCK_IQ3_XXS_SIZE)),
-        GgufQuantizationType::IQ4_NL => Ok((QK_K, BLOCK_Q4_K_SIZE)),
+        GgufQuantizationType::IQ4_NL => Ok((QK4_NL, BLOCK_IQ4_NL_SIZE)),
         other => Err(QuantizationError::UnsupportedQuantizationType(other)),
     }
 }
