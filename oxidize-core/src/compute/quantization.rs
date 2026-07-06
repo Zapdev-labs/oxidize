@@ -476,6 +476,10 @@ pub use quant_k_blocks::*;
 mod quant_nvfp4;
 pub use quant_nvfp4::*;
 
+#[path = "quantization/iq_grids.rs"]
+pub(crate) mod iq_grids;
+pub(crate) use iq_grids::iq1s_grid_decode;
+
 #[path = "quantization/quant_iq_series.rs"]
 mod quant_iq_series;
 pub use quant_iq_series::*;

@@ -1017,6 +1017,64 @@ fn iq4_xs_gemv_matches_dequantize_then_gemv_reference() {
 }
 
 #[test]
+fn iq4_nl_gemv_matches_dequantize_then_gemv_reference() {
+    let rows = 3;
+    let cols = QK4_NL * 4;
+    let matrix = (0..rows * cols)
+        .map(|i| ((i as f32 * 0.019).sin() * 2.5) - 0.3)
+        .collect::<Vec<_>>();
+    let vector = (0..cols)
+        .map(|i| ((i as f32 * 0.05).cos() * 0.4) + 0.05)
+        .collect::<Vec<_>>();
+
+    let mut matrix_bytes = Vec::with_capacity(matrix.len() * 4);
+    for value in &matrix {
+        matrix_bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    let bytes_len = crate::quantization::quantized_size(GgufQuantizationType::IQ4_NL, matrix.len())
+        .expect("quantized size is known");
+    let mut quantized_matrix = vec![0_u8; bytes_len];
+    crate::quantization::quantize_scalar(
+        GgufQuantizationType::F32,
+        GgufQuantizationType::IQ4_NL,
+        &matrix_bytes,
+        &mut quantized_matrix,
+    )
+    .expect("iq4_nl quantization should succeed");
+
+    let mut quantized_out = vec![0.0_f32; rows];
+    gemv_quantized_f32(
+        GgufQuantizationType::IQ4_NL,
+        &quantized_matrix,
+        rows,
+        cols,
+        &vector,
+        &mut quantized_out,
+    )
+    .expect("iq4_nl gemv should succeed");
+
+    let blocks_per_row = cols / QK4_NL;
+    let mut q8 = vec![0_u8; blocks_per_row * BLOCK_Q8_0_SIZE];
+    quantize_vector_q8_0_into(&vector, blocks_per_row, &mut q8);
+    let row_bytes = blocks_per_row * BLOCK_IQ4_NL_SIZE;
+    let mut reference = vec![0.0_f32; rows];
+    for row_idx in 0..rows {
+        let row_start = row_idx * row_bytes;
+        let row = &quantized_matrix[row_start..row_start + row_bytes];
+        let mut sum = 0.0_f32;
+        for (block_idx, iq_block) in row.chunks_exact(BLOCK_IQ4_NL_SIZE).enumerate() {
+            let q8_off = block_idx * BLOCK_Q8_0_SIZE;
+            sum += iq4_nl_q8_dot(iq_block, &q8[q8_off..q8_off + BLOCK_Q8_0_SIZE]);
+        }
+        reference[row_idx] = sum;
+    }
+
+    for (lhs, rhs) in quantized_out.iter().zip(reference.iter()) {
+        assert!((lhs - rhs).abs() < 1.0e-5, "{lhs} vs {rhs}");
+    }
+}
+
+#[test]
 fn fused_q8_0_gemv_matches_dequantize_then_gemv_reference() {
     let rows = 3;
     let cols = QK8_0 * 2;

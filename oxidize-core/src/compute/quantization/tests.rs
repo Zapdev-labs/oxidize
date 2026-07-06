@@ -177,6 +177,15 @@ fn iq4_xs_imatrix_lowers_error_on_weighted_columns() {
 }
 
 #[test]
+fn iq1s_grid_decode_uses_real_table() {
+    let mut out = [0_i8; 8];
+    iq1s_grid_decode(0, &mut out);
+    assert_eq!(out, [-1, -1, -1, -1, -1, -1, -1, -1]);
+    iq1s_grid_decode(1, &mut out);
+    assert_eq!(out, [1, -1, -1, -1, -1, -1, -1, -1]);
+}
+
+#[test]
 fn iq4_nl_dequant_and_round_trip() {
     let mut block = vec![0u8; BLOCK_IQ4_NL_SIZE];
     block[0] = 0x00;

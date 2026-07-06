@@ -534,6 +534,9 @@ pub fn gemv_quantized_f32(
         GgufQuantizationType::IQ4_XS if cols.is_multiple_of(QK_K) => {
             gemv_iq4_xs_f32(quantized_matrix, rows, cols, vector, output)
         }
+        GgufQuantizationType::IQ4_NL if cols.is_multiple_of(QK4_NL) => {
+            gemv_iq4_nl_q8_fused(quantized_matrix, rows, cols, vector, output)
+        }
         _ => {
             gemv_dequant_scalar_fallback(quantization, quantized_matrix, rows, cols, vector, output)
         }

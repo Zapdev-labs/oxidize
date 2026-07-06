@@ -308,3 +308,14 @@ pub(super) const IQ3XXS_GRID: [u32; 256] = [
 
 include!("iq2xs_grid_fragment.rs");
 include!("iq2s_grid_fragment.rs");
+include!("iq1s_grid_fragment.rs");
+
+/// Decode an 11-bit iq1s_grid index into 8 ternary values {-1, 0, +1}.
+/// Shared by IQ1_S and IQ1_M; table is verbatim from ggml-common.h.
+#[inline]
+pub(crate) fn iq1s_grid_decode(index: u16, out: &mut [i8; 8]) {
+    let packed = IQ1S_GRID[index as usize].to_le_bytes();
+    for (dst, &src) in out.iter_mut().zip(packed.iter()) {
+        *dst = src as i8;
+    }
+}

@@ -1,37 +1,10 @@
 use super::*;
 
-#[path = "iq_grids.rs"]
-mod iq_grids;
-use iq_grids::{IQ2S_GRID, IQ2XXS_GRID, IQ2XS_GRID, IQ3XXS_GRID, KMASK_IQ2XS, KSIGNS_IQ2XS};
+use super::iq_grids::{
+    iq1s_grid_decode, IQ2S_GRID, IQ2XXS_GRID, IQ2XS_GRID, IQ3XXS_GRID, KMASK_IQ2XS, KSIGNS_IQ2XS,
+};
 
 const IQ1S_DELTA: f32 = 0.125;
-
-/// Decode an 11-bit iq1s_grid index into 8 ternary values.
-/// The grid encodes combinations of {-1, 0, +1} for 8 positions.
-/// This is a simplified reconstruction without the full 2048-entry table.
-#[inline]
-fn iq1s_grid_decode(index: u16, out: &mut [i8; 8]) {
-    // The grid index selects one of 2048 patterns of 8 ternary values.
-    // Without the full lookup table, we use a deterministic mapping
-    // that spreads patterns across the space.
-    //
-    // Pattern generation: use index bits to select values.
-    // Each position gets -1, 0, or +1 based on 2 bits (with one spare).
-    let mut idx = index;
-    for i in 0..8 {
-        let bits = (idx & 3) as i8;
-        out[i] = match bits {
-            0 => -1,
-            1 => 0,
-            _ => 1,
-        };
-        idx >>= 2;
-        if i == 3 {
-            // After 4 positions we've used 8 bits; get next bits from upper byte
-            idx = index >> 8;
-        }
-    }
-}
 
 pub fn dequantize_iq1_s_scalar(input: &[u8], output: &mut [f32]) -> Result<(), QuantizationError> {
     validate_layout(
