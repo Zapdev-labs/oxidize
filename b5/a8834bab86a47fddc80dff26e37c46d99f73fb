@@ -1,0 +1,39 @@
+oxidize-cpp/tests/parity_test.cpp
+  s_d6e66f06e8be4b::t_f3fdc94dc47896 298-334
+  s_d6e66f06e8be4b::t_a5d6e76903819e 465
+oxidize-cpp/src/tensor_cpu.cpp
+  s_d6e66f06e8be4b::t_2b2824dccb6714 696,708
+  s_d6e66f06e8be4b::t_ab202f83962837 518-572
+  s_a72f83f4acb932::t_004bc92d64b229 704-706
+  s_a72f83f4acb932::t_7d47376763f92b 690-693
+  s_a72f83f4acb932::t_cab9facd8ea73f 923,1021
+oxidize-c/kernels.c
+  s_d6e66f06e8be4b::t_25816857152511 595
+  s_d6e66f06e8be4b::t_09b90d91c0a363 450-502
+  s_d6e66f06e8be4b::t_060b126f236c63 256-280
+  s_d6e66f06e8be4b::t_81003a1c714274 581-584
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "b5a8834bab86a47fddc80dff26e37c46d99f73fb",
+  "prompts": {},
+  "sessions": {
+    "s_a72f83f4acb932": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "f5e01a3f-5914-48bf-9df9-4d5f9288661b",
+        "model": "default"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_d6e66f06e8be4b": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "928d5952-9039-407d-bc39-d609c3130c47",
+        "model": "default"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
