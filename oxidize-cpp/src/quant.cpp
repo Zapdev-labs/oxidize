@@ -378,11 +378,13 @@ void dequant_q3_k(const uint8_t* in, float* out, size_t n) {
     size_t q_ptr = 0;
     size_t is = 0;
     uint8_t m = 1;
+    // ggml dequantize_row_q3_K: shift cycles 0,2,4,6 within each 128-value
+    // half, qs advances 32 bytes per half, hmask stays fixed (m covers 8 bits).
     for (int g = 0; g < 2; ++g) {
       for (int k = 0; k < 4; ++k) {
         float dl = d_all * static_cast<float>(static_cast<int>(scales[is]) - 32);
         ++is;
-        size_t shift = ((is - 1) % 4) * 2;
+        size_t shift = static_cast<size_t>(k) * 2;
         for (size_t l = 0; l < 16; ++l) {
           int qv = (qs[l] >> shift) & 3;
           int hbit = (hmask[l] & m) != 0 ? 0 : 4;
@@ -398,6 +400,7 @@ void dequant_q3_k(const uint8_t* in, float* out, size_t n) {
         q_ptr += 32;
         m <<= 1;
       }
+      qs += 32;
     }
   }
 }
@@ -470,6 +473,8 @@ void dequant_q5_k(const uint8_t* in, float* out, size_t n) {
       is += 2;
       u1 <<= 2;
       u2 <<= 2;
+      // ggml dequantize_row_q5_K: ql advances 32 bytes per 64 values (qh fixed).
+      qs += 32;
     }
   }
 }

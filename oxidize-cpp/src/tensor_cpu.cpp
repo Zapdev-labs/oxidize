@@ -16,6 +16,7 @@
 #include "oxidize/tensor.hpp"
 
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -412,6 +413,242 @@ inline bool is_q4_k(QuantType q) {
   return q == QuantType::Q4_K_S || q == QuantType::Q4_K_M;
 }
 
+// ---- int8 fused-dot path (ported back from oxidize-c) ----------------------
+// The activation vector is quantized to int8 blocks of 32 ONCE per matvec,
+// then Q4_0/Q8_0/Q4_K/Q6_K weight rows are dotted with AVX2 maddubs integer
+// ops instead of nibble->float->FMA. ~2.4x measured on Q4_0 decode. Trade-off:
+// ~1e-3 relative rounding from activation quantization (llama.cpp-standard).
+// s = d * sum(q) lets K-quant mins fold in without a second pass.
+struct Q8Act {
+  float d, s;
+  int8_t q[32];
+};
+
+inline void quantize_act(const float* x, Q8Act* out, size_t n) {
+  for (size_t b = 0; b < n / 32; ++b) {
+    const float* xb = x + b * 32;
+    float amax = 0.0f;
+    for (size_t i = 0; i < 32; ++i) amax = std::max(amax, std::fabs(xb[i]));
+    float d = amax / 127.0f;
+    float id = d != 0.0f ? 1.0f / d : 0.0f;
+    int sum = 0;
+    for (size_t i = 0; i < 32; ++i) {
+      int q = static_cast<int>(std::lrintf(xb[i] * id));
+      q = q > 127 ? 127 : (q < -127 ? -127 : q);
+      out[b].q[i] = static_cast<int8_t>(q);
+      sum += q;
+    }
+    out[b].d = d;
+    out[b].s = d * static_cast<float>(sum);
+  }
+}
+
+#ifdef OXIDIZE_HAVE_F16C
+// f16 scale load without the cross-TU f16_le_to_f32 call (hot: one per block).
+inline float f16s(const uint8_t* p) {
+  uint16_t bits;
+  std::memcpy(&bits, p, 2);
+  return _mm_cvtss_f32(_mm_cvtph_ps(_mm_cvtsi32_si128(bits)));
+}
+
+inline __m256i i8dot(__m256i x, __m256i y) {  // signed x * signed y -> 8 x i32
+  __m256i ax = _mm256_sign_epi8(x, x);
+  __m256i sy = _mm256_sign_epi8(y, x);
+  return _mm256_madd_epi16(_mm256_maddubs_epi16(ax, sy), _mm256_set1_epi16(1));
+}
+inline __m256i u8dot(__m256i x, __m256i y) {  // unsigned nibbles * signed y
+  return _mm256_madd_epi16(_mm256_maddubs_epi16(x, y), _mm256_set1_epi16(1));
+}
+#else
+inline float f16s(const uint8_t* p) { return f16_le_to_f32(p); }
+#endif
+
+inline float dot_q4_0_i8(const uint8_t* row, const Q8Act* xq, size_t cols) {
+  const size_t nb = cols / 32;
+#ifdef OXIDIZE_HAVE_F16C
+  __m256 acc0 = _mm256_setzero_ps(), acc1 = _mm256_setzero_ps();
+  size_t b = 0;
+  for (; b + 2 <= nb; b += 2) {
+    const uint8_t* blk0 = row + b * 18;
+    const uint8_t* blk1 = blk0 + 18;
+    __m128i q40 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(blk0 + 2));
+    __m128i q41 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(blk1 + 2));
+    __m256i w0 = _mm256_sub_epi8(
+        _mm256_set_m128i(_mm_and_si128(_mm_srli_epi16(q40, 4), _mm_set1_epi8(0x0F)),
+                         _mm_and_si128(q40, _mm_set1_epi8(0x0F))),
+        _mm256_set1_epi8(8));
+    __m256i w1 = _mm256_sub_epi8(
+        _mm256_set_m128i(_mm_and_si128(_mm_srli_epi16(q41, 4), _mm_set1_epi8(0x0F)),
+                         _mm_and_si128(q41, _mm_set1_epi8(0x0F))),
+        _mm256_set1_epi8(8));
+    __m256i y0 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(xq[b].q));
+    __m256i y1 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(xq[b + 1].q));
+    acc0 = _mm256_fmadd_ps(_mm256_cvtepi32_ps(i8dot(w0, y0)),
+                           _mm256_set1_ps(f16s(blk0) * xq[b].d), acc0);
+    acc1 = _mm256_fmadd_ps(_mm256_cvtepi32_ps(i8dot(w1, y1)),
+                           _mm256_set1_ps(f16s(blk1) * xq[b + 1].d), acc1);
+  }
+  for (; b < nb; ++b) {
+    const uint8_t* blk = row + b * 18;
+    __m128i q4 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(blk + 2));
+    __m256i w = _mm256_sub_epi8(
+        _mm256_set_m128i(_mm_and_si128(_mm_srli_epi16(q4, 4), _mm_set1_epi8(0x0F)),
+                         _mm_and_si128(q4, _mm_set1_epi8(0x0F))),
+        _mm256_set1_epi8(8));
+    __m256i y = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(xq[b].q));
+    acc0 = _mm256_fmadd_ps(_mm256_cvtepi32_ps(i8dot(w, y)),
+                           _mm256_set1_ps(f16s(blk) * xq[b].d), acc0);
+  }
+  return hsum256(_mm256_add_ps(acc0, acc1));
+#else
+  float sum = 0.0f;
+  for (size_t b = 0; b < nb; ++b) {
+    const uint8_t* blk = row + b * 18;
+    int isum = 0;
+    for (int j = 0; j < 16; ++j) {
+      isum += ((blk[2 + j] & 0x0F) - 8) * xq[b].q[j];
+      isum += ((blk[2 + j] >> 4) - 8) * xq[b].q[j + 16];
+    }
+    sum += f16s(blk) * xq[b].d * static_cast<float>(isum);
+  }
+  return sum;
+#endif
+}
+
+inline float dot_q8_0_i8(const uint8_t* row, const Q8Act* xq, size_t cols) {
+  const size_t nb = cols / 32;
+#ifdef OXIDIZE_HAVE_F16C
+  __m256 acc = _mm256_setzero_ps();
+  for (size_t b = 0; b < nb; ++b) {
+    const uint8_t* blk = row + b * 34;
+    __m256i w = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(blk + 2));
+    __m256i y = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(xq[b].q));
+    acc = _mm256_fmadd_ps(_mm256_cvtepi32_ps(i8dot(w, y)),
+                          _mm256_set1_ps(f16s(blk) * xq[b].d), acc);
+  }
+  return hsum256(acc);
+#else
+  float sum = 0.0f;
+  for (size_t b = 0; b < nb; ++b) {
+    const uint8_t* blk = row + b * 34;
+    int isum = 0;
+    for (int j = 0; j < 32; ++j) isum += static_cast<int8_t>(blk[2 + j]) * xq[b].q[j];
+    sum += f16s(blk) * xq[b].d * static_cast<float>(isum);
+  }
+  return sum;
+#endif
+}
+
+// Q4_K: per 32-value group g, value = d*sc_g*nib - min*m_g, so
+// group dot = d*sc*dx*idot(nib, q8) - min*m * (dx * sum(q8) == xq.s).
+inline float dot_q4_k_i8(const uint8_t* row, const Q8Act* xq, size_t cols) {
+  const size_t nsb = cols / QK_K;
+  float sum = 0.0f;
+  for (size_t sb = 0; sb < nsb; ++sb) {
+    const uint8_t* blk = row + sb * BLOCK_Q4_K_SIZE;
+    float d = f16s(blk);
+    float min = f16s(blk + 2);
+    const uint8_t* scales = blk + 4;
+    const uint8_t* qs = blk + 16;
+    const Q8Act* x8 = xq + sb * (QK_K / 32);
+#ifdef OXIDIZE_HAVE_F16C
+    __m256 acc = _mm256_setzero_ps();
+    float msum = 0.0f;
+    for (int p = 0; p < 4; ++p) {
+      uint8_t sc1, m1, sc2, m2;
+      get_scale_min_k4(static_cast<size_t>(p) * 2, scales, sc1, m1);
+      get_scale_min_k4(static_cast<size_t>(p) * 2 + 1, scales, sc2, m2);
+      __m256i q = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(qs + p * 32));
+      __m256i lo = _mm256_and_si256(q, _mm256_set1_epi8(0x0F));
+      __m256i hi = _mm256_and_si256(_mm256_srli_epi16(q, 4), _mm256_set1_epi8(0x0F));
+      const Q8Act* b1 = &x8[p * 2];
+      const Q8Act* b2 = &x8[p * 2 + 1];
+      __m256i y1 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(b1->q));
+      __m256i y2 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(b2->q));
+      acc = _mm256_fmadd_ps(_mm256_cvtepi32_ps(u8dot(lo, y1)),
+                            _mm256_set1_ps(d * static_cast<float>(sc1) * b1->d), acc);
+      acc = _mm256_fmadd_ps(_mm256_cvtepi32_ps(u8dot(hi, y2)),
+                            _mm256_set1_ps(d * static_cast<float>(sc2) * b2->d), acc);
+      msum += min * static_cast<float>(m1) * b1->s + min * static_cast<float>(m2) * b2->s;
+    }
+    sum += hsum256(acc) - msum;
+#else
+    for (int p = 0; p < 4; ++p) {
+      uint8_t sc1, m1, sc2, m2;
+      get_scale_min_k4(static_cast<size_t>(p) * 2, scales, sc1, m1);
+      get_scale_min_k4(static_cast<size_t>(p) * 2 + 1, scales, sc2, m2);
+      const Q8Act* b1 = &x8[p * 2];
+      const Q8Act* b2 = &x8[p * 2 + 1];
+      int i1 = 0, i2 = 0;
+      for (int l = 0; l < 32; ++l) {
+        i1 += (qs[p * 32 + l] & 0x0F) * b1->q[l];
+        i2 += (qs[p * 32 + l] >> 4) * b2->q[l];
+      }
+      sum += d * static_cast<float>(sc1) * b1->d * static_cast<float>(i1) -
+             min * static_cast<float>(m1) * b1->s;
+      sum += d * static_cast<float>(sc2) * b2->d * static_cast<float>(i2) -
+             min * static_cast<float>(m2) * b2->s;
+    }
+#endif
+  }
+  return sum;
+}
+
+// Q6_K int dot (scalar int accumulation; still beats dequant+f32-dot by
+// skipping the float row expansion). Layout mirrors dequant_q6_k.
+inline float dot_q6_k_i8(const uint8_t* row, const Q8Act* xq, size_t cols) {
+  const size_t nsb = cols / QK_K;
+  float sum = 0.0f;
+  for (size_t sb = 0; sb < nsb; ++sb) {
+    const uint8_t* blk = row + sb * BLOCK_Q6_K_SIZE;
+    float d = f16s(blk + 208);
+    const uint8_t* ql = blk;
+    const uint8_t* qh = blk + 128;
+    const int8_t* sc = reinterpret_cast<const int8_t*>(blk + 192);
+    const Q8Act* x8 = xq + sb * (QK_K / 32);
+    for (int g = 0; g < 2; ++g) {
+      size_t qlo = static_cast<size_t>(g) * 64, qho = static_cast<size_t>(g) * 32,
+             sco = static_cast<size_t>(g) * 8;
+      for (int half = 0; half < 4; ++half) {
+        const Q8Act* xb = &x8[g * 4 + half];
+        int isum0 = 0, isum1 = 0;
+        for (int l = 0; l < 32; ++l) {
+          int q;
+          switch (half) {
+            case 0: q = ((ql[qlo + l] & 0x0F) | ((qh[qho + l] & 3) << 4)) - 32; break;
+            case 1: q = ((ql[qlo + l + 32] & 0x0F) | (((qh[qho + l] >> 2) & 3) << 4)) - 32; break;
+            case 2: q = ((ql[qlo + l] >> 4) | (((qh[qho + l] >> 4) & 3) << 4)) - 32; break;
+            default: q = ((ql[qlo + l + 32] >> 4) | (((qh[qho + l] >> 6) & 3) << 4)) - 32; break;
+          }
+          if (l < 16) isum0 += q * xb->q[l];
+          else isum1 += q * xb->q[l];
+        }
+        sum += d * xb->d *
+               (static_cast<float>(sc[sco + static_cast<size_t>(half) * 2]) * isum0 +
+                static_cast<float>(sc[sco + static_cast<size_t>(half) * 2 + 1]) * isum1);
+      }
+    }
+  }
+  return sum;
+}
+
+inline bool int8_gemv_ok(QuantType q, size_t cols) {
+  if (cols % 32 != 0) return false;
+  if (q == QuantType::Q4_0 || q == QuantType::Q8_0) return true;
+  if ((is_q4_k(q) || q == QuantType::Q6_K) && cols % QK_K == 0) return true;
+  return false;
+}
+
+inline float int8_row_dot(QuantType q, const uint8_t* row, const Q8Act* xq,
+                          size_t cols) {
+  switch (q) {
+    case QuantType::Q4_0: return dot_q4_0_i8(row, xq, cols);
+    case QuantType::Q8_0: return dot_q8_0_i8(row, xq, cols);
+    case QuantType::Q6_K: return dot_q6_k_i8(row, xq, cols);
+    default: return dot_q4_k_i8(row, xq, cols);  // Q4_K_S / Q4_K_M
+  }
+}
+
 }  // namespace
 
 void rms_norm(float* out, const float* x, const float* weight, size_t n,
@@ -609,6 +846,17 @@ void gemv_quantized(float* y, QuantType quant, const uint8_t* W, size_t rows,
     }
     return;
   }
+  // Fastest path: quantize the activation to int8 once, then integer maddubs
+  // row dots (Q4_0/Q8_0/Q4_K/Q6_K). ~2.4x over the float fused kernels below.
+  if (int8_gemv_ok(quant, cols)) {
+    std::vector<Q8Act> xq(cols / 32);
+    quantize_act(x, xq.data(), cols);
+    const size_t rb = quantized_size(quant, cols);
+#pragma omp parallel for schedule(static)
+    for (long long r = 0; r < static_cast<long long>(rows); ++r)
+      y[r] = int8_row_dot(quant, W + static_cast<size_t>(r) * rb, xq.data(), cols);
+    return;
+  }
   // Fast paths: native Q4_0 / Q5_0 fused unpack+dot (SIMD), no scalar dequant pass.
   if (quant == QuantType::Q4_0) {
     const size_t rb = (cols / 32) * 18;
@@ -674,6 +922,22 @@ void gemm_quantized(float* outputs, QuantType quant, const uint8_t* W,
       for (size_t b = 0; b < batch; ++b) {
         outputs[b * rows + static_cast<size_t>(r)] =
             dot_f16(row, inputs + b * cols, cols);
+      }
+    }
+    return;
+  }
+  // Int8 fused path: quantize every batch row once, integer row dots.
+  if (int8_gemv_ok(quant, cols)) {
+    const size_t xstride = cols / 32;
+    std::vector<Q8Act> xq(batch * xstride);
+    for (size_t b = 0; b < batch; ++b)
+      quantize_act(inputs + b * cols, xq.data() + b * xstride, cols);
+#pragma omp parallel for schedule(static)
+    for (long long r = 0; r < static_cast<long long>(rows); ++r) {
+      const uint8_t* row = W + static_cast<size_t>(r) * row_bytes;
+      for (size_t b = 0; b < batch; ++b) {
+        outputs[b * rows + static_cast<size_t>(r)] =
+            int8_row_dot(quant, row, xq.data() + b * xstride, cols);
       }
     }
     return;
