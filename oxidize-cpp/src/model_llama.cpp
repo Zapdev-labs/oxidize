@@ -71,6 +71,7 @@ bool is_supported_quant_gemv(QuantType q) {
     case QuantType::F16:
     case QuantType::BF16:
     case QuantType::Q4_0:
+    case QuantType::Q4_O:
     case QuantType::Q5_0:
     case QuantType::Q5_1:
     case QuantType::Q8_0:

@@ -31,6 +31,7 @@ enum class QuantType : uint16_t {
   Q2_K, Q3_K_S, Q3_K_M, Q3_K_L, Q4_K_S, Q4_K_M, Q5_K_S, Q5_K_M, Q6_K,
   IQ2_XXS, IQ2_XS, IQ3_XXS, IQ1_S, IQ4_NL, IQ3_S, IQ2_S, IQ4_XS, IQ1_M,
   I8, I16, I32, I64, F64, BF16, NVFP4,
+  Q4_O,  /* oxidize custom: Q4_0 layout, MSE-optimal scale (ggml type 240) */
   Unknown,
 };
 
