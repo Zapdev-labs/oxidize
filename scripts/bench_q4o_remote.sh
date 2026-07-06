@@ -25,13 +25,18 @@ REPO="${REPO/#\~/$HOME}"
 mkdir -p "$OUT"
 
 cd "$REPO"
-echo "==> building oxidize-quantize + oxidize-cpp (release)"
-cargo build -p oxidize-quantize -p oxidize-core --release 2>&1 | tail -3
-cmake -S oxidize-cpp -B oxidize-cpp/build -DCMAKE_BUILD_TYPE=Release >/dev/null
-cmake --build oxidize-cpp/build -j"$(nproc)" --target oxidize-cpp 2>&1 | tail -3
+QZ="${QZ:-$REPO/bin/oxidize-quantize}"
+OX="${OX:-$REPO/oxidize-cpp/build/oxidize-cpp}"
 
-QZ=./target/release/oxidize-quantize
-OX=./oxidize-cpp/build/oxidize-cpp
+if [[ ! -x "$QZ" ]]; then
+  echo "missing $QZ — build locally: cargo build -p oxidize-quantize --release" >&2
+  exit 1
+fi
+if [[ ! -x "$OX" ]]; then
+  echo "==> building oxidize-cpp on host (cmake only)"
+  cmake -S oxidize-cpp -B oxidize-cpp/build -DCMAKE_BUILD_TYPE=Release >/dev/null
+  cmake --build oxidize-cpp/build -j"$(nproc)" --target oxidize-cpp
+fi
 
 echo "==> requant F16 -> Q4_0"
 /usr/bin/time -f 'q40 quant wall=%e s' \
