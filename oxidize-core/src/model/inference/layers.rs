@@ -490,6 +490,7 @@ impl InferenceModel {
                         // Update state: h = h * exp(A * delta) + Bx * delta
                         for (i, &bx_value) in bx.iter().enumerate().take(state_dim) {
                             let a = layer.ssm_a[i % layer.ssm_a.len()];
+                            let a = if a > 0.0 { -a.exp() } else { a };
                             let dt = if !layer.ssm_dt_bias.is_empty() {
                                 let b = layer.ssm_dt_bias[i % layer.ssm_dt_bias.len()];
                                 (1.0_f32 + b.exp()).ln() // softplus
