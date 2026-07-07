@@ -47,6 +47,18 @@ echo "==> requant F16 -> AL5"
 /usr/bin/time -f 'al5 quant wall=%e s' \
   "$QZ" --input "$MODEL" --output "$OUT/al5.gguf" --source F16 --target AL5 --threads "$THREADS"
 
+echo "==> requant F16 -> AL8"
+/usr/bin/time -f 'al8 quant wall=%e s' \
+  "$QZ" --input "$MODEL" --output "$OUT/al8.gguf" --source F16 --target AL8 --threads "$THREADS"
+
+echo "==> requant F16 -> AL6"
+/usr/bin/time -f 'al6 quant wall=%e s' \
+  "$QZ" --input "$MODEL" --output "$OUT/al6.gguf" --source F16 --target AL6 --threads "$THREADS"
+
+echo "==> requant F16 -> AL5_XS"
+/usr/bin/time -f 'al5_xs quant wall=%e s' \
+  "$QZ" --input "$MODEL" --output "$OUT/al5_xs.gguf" --source F16 --target AL5_XS --threads "$THREADS"
+
 ls -lh "$OUT"/*.gguf
 echo "==> F16 source: $(ls -lh "$MODEL" | awk '{print $5}')"
 
@@ -56,11 +68,14 @@ bench_decode() {
   echo "==> decode bench $label"
   /usr/bin/time -f "${label} wall=%e s" \
     "$OX" --model "$gguf" --prompt "The speed of light is" --max-tokens "$DECODE_TOKENS" \
-    --threads 16 --no-auto 2>&1 | rg -i "tok/s|tokens|benchmark|error|light|text:" || true
+    --threads 16 --no-auto 2>&1 | grep -iE "tok/s|tokens|benchmark|error|light|text:" || true
 }
 
 bench_decode q40 "$OUT/q40.gguf"
+bench_decode al8 "$OUT/al8.gguf"
 bench_decode al5 "$OUT/al5.gguf"
+bench_decode al6 "$OUT/al6.gguf"
+bench_decode al5_xs "$OUT/al5_xs.gguf"
 
 echo "==> done out=$OUT"
 REMOTE

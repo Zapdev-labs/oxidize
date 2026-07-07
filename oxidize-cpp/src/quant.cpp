@@ -917,8 +917,6 @@ static void quantize_block_al5(const float* x, uint8_t* o) {
 
   float best_d = mx / -8.0f;
   best_d = al5_refine_scale(x, best_d);
-  best_d = al5_refine_scale(x, best_d);
-  best_d = al5_refine_scale(x, best_d);
 
   float id = best_d != 0.0f ? 1.0f / best_d : 0.0f;
   uint16_t dh = f32_to_f16_bits(best_d);
@@ -1013,13 +1011,17 @@ size_t quant_block_values(QuantType q) {
     case QuantType::Q4_0:
     case QuantType::AL5:
       return QK4_0;
+    case QuantType::AL5_XS:
+      return QK4_0;
     case QuantType::Q4_1:
       return QK4_1;
     case QuantType::Q5_0:
+    case QuantType::AL6:
       return QK5_0;
     case QuantType::Q5_1:
       return QK5_1;
     case QuantType::Q8_0:
+    case QuantType::AL8:
       return QK8_0;
     case QuantType::Q2_K:
     case QuantType::Q3_K_S:
@@ -1067,13 +1069,17 @@ size_t quant_block_bytes(QuantType q) {
     case QuantType::Q4_0:
     case QuantType::AL5:
       return BLOCK_Q4_0_SIZE;
+    case QuantType::AL5_XS:
+      return 14;
     case QuantType::Q4_1:
       return BLOCK_Q4_1_SIZE;
     case QuantType::Q5_0:
+    case QuantType::AL6:
       return BLOCK_Q5_0_SIZE;
     case QuantType::Q5_1:
       return BLOCK_Q5_1_SIZE;
     case QuantType::Q8_0:
+    case QuantType::AL8:
       return BLOCK_Q8_0_SIZE;
     case QuantType::Q2_K:
       return BLOCK_Q2_K_SIZE;
@@ -1157,7 +1163,31 @@ QuantType from_ggml_type(uint32_t ggml_type) {
     case 30: return QuantType::BF16;
     case 40: return QuantType::NVFP4;
     case 240: return QuantType::AL5;
+    case 241: return QuantType::AL8;
+    case 242: return QuantType::AL6;
+    case 243: return QuantType::AL5_XS;
     default: return QuantType::Unknown;
+  }
+}
+
+static void dequant_al5_xs(const uint8_t* src, float* dst, size_t n) {
+  constexpr size_t QK = 32;
+  constexpr size_t BS = 14;
+  size_t nb = n / QK;
+  for (size_t b = 0; b < nb; ++b) {
+    const uint8_t* block = src + b * BS;
+    float d = f16_le_to_f32(block);
+    uint32_t bitpos = 0;
+    for (size_t i = 0; i < QK; ++i) {
+      uint8_t lvl = 0;
+      for (int bit = 0; bit < 3; ++bit) {
+        size_t byte_idx = bitpos / 8;
+        size_t bit_idx = bitpos % 8;
+        if ((block[2 + byte_idx] >> bit_idx) & 1) lvl |= (1u << bit);
+        ++bitpos;
+      }
+      dst[b * QK + i] = (static_cast<float>(static_cast<int>(lvl) - 4)) * d;
+    }
   }
 }
 
@@ -1170,10 +1200,19 @@ void dequantize_row(QuantType q, const uint8_t* src, float* dst, size_t n) {
     case QuantType::AL5:
       dequant_q4_0(src, dst, n);
       return;
+    case QuantType::AL5_XS:
+      dequant_al5_xs(src, dst, n);
+      return;
     case QuantType::Q4_1: dequant_q4_1(src, dst, n); return;
-    case QuantType::Q5_0: dequant_q5_0(src, dst, n); return;
+    case QuantType::Q5_0:
+    case QuantType::AL6:
+      dequant_q5_0(src, dst, n);
+      return;
     case QuantType::Q5_1: dequant_q5_1(src, dst, n); return;
-    case QuantType::Q8_0: dequant_q8_0(src, dst, n); return;
+    case QuantType::Q8_0:
+    case QuantType::AL8:
+      dequant_q8_0(src, dst, n);
+      return;
     case QuantType::Q2_K: dequant_q2_k(src, dst, n); return;
     case QuantType::Q3_K_S:
     case QuantType::Q3_K_M:

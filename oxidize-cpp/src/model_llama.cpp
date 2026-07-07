@@ -71,10 +71,13 @@ bool is_supported_quant_gemv(QuantType q) {
     case QuantType::F16:
     case QuantType::BF16:
     case QuantType::Q4_0:
-    case QuantType::Q4_O:
+    case QuantType::AL5:
+    case QuantType::AL5_XS:
     case QuantType::Q5_0:
+    case QuantType::AL6:
     case QuantType::Q5_1:
     case QuantType::Q8_0:
+    case QuantType::AL8:
     case QuantType::Q4_K_S:
     case QuantType::Q4_K_M:
     case QuantType::Q6_K:
@@ -329,6 +332,7 @@ LlamaWeight LlamaModel::load_weight(const GgufModel& g, const std::string& name,
     w.quantized = true;
     w.quant = QuantType::Q8_0;
     w.data = nullptr;
+    w.quant_nbytes = w.owned.size();
   } else if (keep_quantized &&
              (is_supported_quant_gemv(tv.quant) || force_keep_quantized)) {
     // Borrow the mmap'd quantized bytes in their native block layout. With
@@ -340,6 +344,7 @@ LlamaWeight LlamaModel::load_weight(const GgufModel& g, const std::string& name,
     w.quantized = true;
     w.quant = tv.quant;
     w.data = tv.data;
+    w.quant_nbytes = quantized_size(tv.quant, count);
   } else {
     w.quantized = false;
     w.quant = QuantType::F32;
@@ -449,6 +454,30 @@ LlamaModel::LlamaModel(GgufModel gguf, QuantType quantize_to)
     opt_w_keepq("ffn_gate_exps.weight", layer.ffn_gate_exps);
     opt_w_keepq("ffn_up_exps.weight", layer.ffn_up_exps);
     opt_w_keepq("ffn_down_exps.weight", layer.ffn_down_exps);
+    if (layer.ffn_gate_exps.empty() || layer.ffn_up_exps.empty() ||
+        layer.ffn_down_exps.empty()) {
+      layer.ffn_gate_expert_list.clear();
+      layer.ffn_up_expert_list.clear();
+      layer.ffn_down_expert_list.clear();
+      layer.ffn_gate_expert_list.reserve(config_.num_experts);
+      layer.ffn_up_expert_list.reserve(config_.num_experts);
+      layer.ffn_down_expert_list.reserve(config_.num_experts);
+      for (size_t e = 0; e < config_.num_experts; ++e) {
+        const std::string es = std::to_string(e);
+        const std::string gate_name = p + "ffn_gate." + es + ".weight";
+        const std::string up_name = p + "ffn_up." + es + ".weight";
+        const std::string down_name = p + "ffn_down." + es + ".weight";
+        if (!g.has_tensor(gate_name) || !g.has_tensor(up_name) || !g.has_tensor(down_name)) {
+          break;
+        }
+        layer.ffn_gate_expert_list.push_back(
+            load_weight(g, gate_name, /*keep_quantized=*/true, /*allow_quant=*/false));
+        layer.ffn_up_expert_list.push_back(
+            load_weight(g, up_name, /*keep_quantized=*/true, /*allow_quant=*/false));
+        layer.ffn_down_expert_list.push_back(
+            load_weight(g, down_name, /*keep_quantized=*/true, /*allow_quant=*/false));
+      }
+    }
     opt_w_raw("ffn_gate_inp.weight", layer.ffn_gate_inp);
     opt_vec("exp_probs_b.bias", layer.ffn_exp_probs_b);
 
@@ -557,14 +586,33 @@ void LlamaModel::moe_ffn(const LlamaLayer& layer, const float* normed,
       std::min(std::max<size_t>(cfg.num_experts_per_tok, 1), n_experts);
   const bool sigmoid = cfg.expert_gating_sigmoid;
 
-  // Expert e's [rows,cols] slice of a 3D [n_experts,rows,cols] weight.
-  auto gemv_expert = [&](const LlamaWeight& w, size_t e, size_t rows,
-                         size_t cols, const float* x, float* y) {
+  auto gemv_single = [&](const LlamaWeight& w, size_t rows, size_t cols,
+                         const float* x, float* y) {
+    if (w.quantized) {
+      gemv_quantized(y, w.quant, w.qbytes(), rows, cols, x);
+    } else {
+      matvec(y, w.f32.data(), x, rows, cols);
+    }
+  };
+  // Expert e's [rows,cols] slice of a packed 3D [n_experts,rows,cols] tensor.
+  auto gemv_expert_packed = [&](const LlamaWeight& w, size_t e, size_t rows,
+                                size_t cols, const float* x, float* y) {
     if (w.quantized) {
       size_t rb = quantized_size(w.quant, cols);
-      gemv_quantized(y, w.quant, w.data + e * rows * rb, rows, cols, x);
+      size_t expert_bytes = rows * rb;
+      size_t expert_offset = e * expert_bytes;
+      size_t total_bytes = w.qbytes_size();
+      if (expert_offset + expert_bytes > total_bytes) {
+        throw std::runtime_error(
+            "moe_ffn: expert slice out of range for quantized tensor");
+      }
+      gemv_quantized(y, w.quant, w.qbytes() + expert_offset, rows, cols, x);
     } else {
-      matvec(y, w.f32.data() + e * rows * cols, x, rows, cols);
+      size_t expert_offset = e * rows * cols;
+      if (expert_offset + rows * cols > w.f32.size()) {
+        throw std::runtime_error("moe_ffn: expert slice out of range for f32 tensor");
+      }
+      matvec(y, w.f32.data() + expert_offset, x, rows, cols);
     }
   };
 
@@ -616,13 +664,29 @@ void LlamaModel::moe_ffn(const LlamaLayer& layer, const float* normed,
 
   // 5. Per-expert FFN, accumulated into ffn_out.
   std::vector<float> gate(i_size), up(i_size), down(h);
+  const bool use_split_experts =
+      !layer.ffn_gate_expert_list.empty() && !layer.ffn_up_expert_list.empty() &&
+      !layer.ffn_down_expert_list.empty();
   for (size_t s = 0; s < n_sel; ++s) {
     size_t e = sel[s].first;
     float w = scale * rw[e] / wnorm;
-    gemv_expert(layer.ffn_gate_exps, e, i_size, h, normed, gate.data());
-    gemv_expert(layer.ffn_up_exps, e, i_size, h, normed, up.data());
+    if (use_split_experts) {
+      if (e >= layer.ffn_gate_expert_list.size() || e >= layer.ffn_up_expert_list.size() ||
+          e >= layer.ffn_down_expert_list.size()) {
+        throw std::runtime_error("moe_ffn: selected expert index out of split tensor range");
+      }
+      gemv_single(layer.ffn_gate_expert_list[e], i_size, h, normed, gate.data());
+      gemv_single(layer.ffn_up_expert_list[e], i_size, h, normed, up.data());
+    } else {
+      gemv_expert_packed(layer.ffn_gate_exps, e, i_size, h, normed, gate.data());
+      gemv_expert_packed(layer.ffn_up_exps, e, i_size, h, normed, up.data());
+    }
     swiglu_inplace(gate.data(), up.data(), gate.data(), i_size);
-    gemv_expert(layer.ffn_down_exps, e, h, i_size, gate.data(), down.data());
+    if (use_split_experts) {
+      gemv_single(layer.ffn_down_expert_list[e], h, i_size, gate.data(), down.data());
+    } else {
+      gemv_expert_packed(layer.ffn_down_exps, e, h, i_size, gate.data(), down.data());
+    }
     for (size_t i = 0; i < h; ++i) ffn_out[i] += w * down[i];
   }
 

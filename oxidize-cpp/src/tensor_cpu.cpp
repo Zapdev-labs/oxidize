@@ -386,6 +386,7 @@ inline float q8_0_dot_scalar(const uint8_t* block, const float* vector) {
   }
   return hsum256(acc);
 #else
+  float sum = 0.0f;
   for (size_t l = 0; l < QK8_0; ++l) {
     sum += static_cast<float>(static_cast<int8_t>(block[2 + l])) * scale * vector[l];
   }
@@ -693,7 +694,7 @@ inline bool is_q4_sym(QuantType q) {
 
 inline bool int8_gemv_ok(QuantType q, size_t cols) {
   if (cols % 32 != 0) return false;
-  if (is_q4_sym(q) || q == QuantType::Q8_0 || q == QuantType::IQ4_NL) return true;
+  if (is_q4_sym(q) || q == QuantType::Q8_0 || q == QuantType::AL8 || q == QuantType::IQ4_NL) return true;
   if ((is_q4_k(q) || q == QuantType::Q6_K) && cols % QK_K == 0) return true;
   return false;
 }
@@ -704,7 +705,9 @@ inline float int8_row_dot(QuantType q, const uint8_t* row, const Q8Act* xq,
     case QuantType::Q4_0:
     case QuantType::AL5:
       return dot_q4_0_i8(row, xq, cols);
-    case QuantType::Q8_0: return dot_q8_0_i8(row, xq, cols);
+    case QuantType::Q8_0:
+    case QuantType::AL8:
+      return dot_q8_0_i8(row, xq, cols);
     case QuantType::IQ4_NL: return dot_iq4_nl_i8(row, xq, cols);
     case QuantType::Q6_K: return dot_q6_k_i8(row, xq, cols);
     default: return dot_q4_k_i8(row, xq, cols);  // Q4_K_S / Q4_K_M
@@ -927,7 +930,7 @@ void gemv_quantized(float* y, QuantType quant, const uint8_t* W, size_t rows,
       y[r] = dot_q4_0(W + static_cast<size_t>(r) * rb, x, cols);
     return;
   }
-  if (quant == QuantType::Q5_0) {
+  if (quant == QuantType::Q5_0 || quant == QuantType::AL6) {
     const size_t rb = (cols / 32) * 22;
 #pragma omp parallel for schedule(static)
     for (long long r = 0; r < static_cast<long long>(rows); ++r)
@@ -941,7 +944,7 @@ void gemv_quantized(float* y, QuantType quant, const uint8_t* W, size_t rows,
       y[r] = dot_q4_k(W + static_cast<size_t>(r) * rb, x, cols);
     return;
   }
-  if (quant == QuantType::Q8_0 && cols % QK8_0 == 0) {
+  if ((quant == QuantType::Q8_0 || quant == QuantType::AL8) && cols % QK8_0 == 0) {
     const size_t rb = (cols / QK8_0) * BLOCK_Q8_0_SIZE;
 #pragma omp parallel for schedule(static)
     for (long long r = 0; r < static_cast<long long>(rows); ++r)
@@ -1030,7 +1033,7 @@ void gemm_quantized(float* outputs, QuantType quant, const uint8_t* W,
     }
     return;
   }
-  if (quant == QuantType::Q5_0) {
+  if (quant == QuantType::Q5_0 || quant == QuantType::AL6) {
     const size_t rb = (cols / 32) * 22;
 #pragma omp parallel for schedule(static)
     for (long long r = 0; r < static_cast<long long>(rows); ++r) {
@@ -1066,7 +1069,7 @@ void gemm_quantized(float* outputs, QuantType quant, const uint8_t* W,
     }
     return;
   }
-  if (quant == QuantType::Q8_0 && cols % QK8_0 == 0) {
+  if ((quant == QuantType::Q8_0 || quant == QuantType::AL8) && cols % QK8_0 == 0) {
     const size_t blocks_per_row = cols / QK8_0;
     const size_t rb = blocks_per_row * BLOCK_Q8_0_SIZE;
 #pragma omp parallel

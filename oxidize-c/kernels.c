@@ -574,7 +574,7 @@ static float row_dot(const oc_weight *w, size_t r, size_t cols, const float *x,
     case OC_F16: return dot_f16(row, x, cols);
     case OC_BF16: return dot_bf16(row, x, cols);
     case OC_Q4_0: case OC_AL5: return dot_q4_0(row, xq, cols);
-    case OC_Q8_0: return dot_q8_0(row, xq, cols);
+    case OC_Q8_0: case OC_AL8: return dot_q8_0(row, xq, cols);
     case OC_Q4_K: return dot_q4_k(row, xq, cols);
     case OC_Q6_K: return dot_q6_k(row, xq, cols);
     case OC_IQ4_XS: return dot_iq4_xs(row, xq, cols);
@@ -590,7 +590,7 @@ static float row_dot(const oc_weight *w, size_t r, size_t cols, const float *x,
 
 static bool needs_q8(const oc_weight *w) {
   return w->quantized && (w->quant == OC_Q4_0 || w->quant == OC_AL5 ||
-                          w->quant == OC_Q8_0 ||
+                          w->quant == OC_Q8_0 || w->quant == OC_AL8 ||
                           w->quant == OC_Q4_K || w->quant == OC_Q6_K ||
                           w->quant == OC_IQ4_XS || w->quant == OC_IQ4_NL);
 }

@@ -54,6 +54,7 @@ size_t oc_block_values(oc_quant q) {
     case OC_F32: case OC_F16: case OC_BF16: return 1;
     case OC_Q4_0: case OC_Q4_1: case OC_Q5_0: case OC_Q5_1: case OC_Q8_0:
     case OC_AL5: return QK;
+    case OC_AL8: case OC_AL6: case OC_AL5_XS:
     case OC_Q2_K: case OC_Q3_K: case OC_Q4_K: case OC_Q5_K: case OC_Q6_K:
     case OC_IQ4_XS: case OC_IQ2_XXS: case OC_IQ2_XS: case OC_IQ2_S:
     case OC_IQ3_XXS: case OC_IQ3_S: return QK_K;
@@ -68,6 +69,9 @@ size_t oc_block_bytes(oc_quant q) {
     case OC_F32: return 4;
     case OC_F16: case OC_BF16: return 2;
     case OC_Q4_0: case OC_AL5: return 18;
+    case OC_AL8: return 34;
+    case OC_AL6: return 22;
+    case OC_AL5_XS: return 14;
     case OC_Q4_1: return 20;
     case OC_Q5_0: return 22;
     case OC_Q5_1: return 24;
@@ -118,6 +122,9 @@ oc_quant oc_from_ggml_type(uint32_t t) {
     case 23: return OC_IQ4_XS;
     case 30: return OC_BF16;
     case 240: return OC_AL5; /* custom, oxidize-c only */
+    case 241: return OC_AL8;
+    case 242: return OC_AL6;
+    case 243: return OC_AL5_XS;
     default: return OC_UNKNOWN;
   }
 }
@@ -126,7 +133,7 @@ const char *oc_quant_name(oc_quant q) {
   static const char *n[] = {"F32","F16","BF16","Q4_0","Q4_1","Q5_0","Q5_1",
                             "Q8_0","Q2_K","Q3_K","Q4_K","Q5_K","Q6_K","IQ4_XS",
                             "IQ2_XXS","IQ2_XS","IQ2_S","IQ3_XXS","IQ3_S","IQ4_NL",
-                            "AL5","?"};
+                            "AL5","AL8","AL6","AL5_XS","?"};
   return n[q <= OC_UNKNOWN ? q : OC_UNKNOWN];
 }
 
@@ -153,6 +160,9 @@ uint32_t oc_to_ggml_type(oc_quant q) {
     case OC_IQ2_S: return 22;
     case OC_BF16: return 30;
     case OC_AL5: return 240; /* custom, oxidize-c only */
+    case OC_AL8: return 241;
+    case OC_AL6: return 242;
+    case OC_AL5_XS: return 243;
     default: oc_die("quant: no ggml type for %d", (int)q);
   }
   return 0;
@@ -216,8 +226,6 @@ static void quantize_block_al5(const float *x, uint8_t *o) {
   }
 
   float best_d = mx / -8.0f;
-  best_d = al5_refine_scale(x, best_d);
-  best_d = al5_refine_scale(x, best_d);
   best_d = al5_refine_scale(x, best_d);
 
   float id = best_d != 0.0f ? 1.0f / best_d : 0.0f;
@@ -618,6 +626,10 @@ bool oc_quantize_row(oc_quant q, const float *src, uint8_t *dst, size_t n) {
       for (size_t b = 0; b < n / QK; ++b)
         quantize_block_al5(src + b * QK, dst + b * 18);
       return true;
+    case OC_AL8:
+      return oc_quantize_row(OC_Q8_0, src, dst, n);
+    case OC_AL6:
+      return oc_quantize_row(OC_Q5_0, src, dst, n);
     default:
       return false;
   }
@@ -673,6 +685,7 @@ void oc_dequant_row(oc_quant q, const uint8_t *src, float *dst, size_t n) {
       }
       return;
     case OC_Q5_0:
+    case OC_AL6:
       for (b = 0; b < n / QK; ++b) {
         const uint8_t *blk = src + b * 22;
         float d = oc_f16_to_f32(blk);
@@ -701,6 +714,25 @@ void oc_dequant_row(oc_quant q, const uint8_t *src, float *dst, size_t n) {
       }
       return;
     case OC_Q8_0:
+    case OC_AL8:
+    case OC_AL5_XS:
+      for (b = 0; b < n / QK; ++b) {
+        const uint8_t *blk = src + b * 14;
+        float d = oc_f16_to_f32(blk);
+        float *o = dst + b * QK;
+        uint32_t bitpos = 0;
+        for (i = 0; i < QK; ++i) {
+          uint8_t lvl = 0;
+          for (int bit = 0; bit < 3; ++bit) {
+            size_t byte_idx = (size_t)(bitpos / 8);
+            size_t bit_idx = (size_t)(bitpos % 8);
+            if ((blk[2 + byte_idx] >> bit_idx) & 1) lvl |= (uint8_t)(1u << bit);
+            ++bitpos;
+          }
+          o[i] = (float)((int)lvl - 4) * d;
+        }
+      }
+      return;
       for (b = 0; b < n / QK; ++b) {
         const uint8_t *blk = src + b * 34;
         float d = oc_f16_to_f32(blk);

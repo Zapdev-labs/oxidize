@@ -96,21 +96,32 @@ pub(super) fn quantize_q4_0_scalar(
         .chunks_exact(QK4_0)
         .zip(output.chunks_exact_mut(BLOCK_Q4_0_SIZE))
     {
-        let max_abs = in_block.iter().fold(0.0_f32, |acc, v| acc.max(v.abs()));
-        let d = if max_abs == 0.0 { 0.0 } else { max_abs / 8.0 };
+        let mut amax = 0.0_f32;
+        let mut mx = 0.0_f32;
+        for &v in in_block {
+            let a = v.abs();
+            if a > amax {
+                amax = a;
+                mx = v;
+            }
+        }
+        let d = if mx != 0.0 { mx / -8.0 } else { 0.0 };
+        let inv_d = if d != 0.0 { 1.0 / d } else { 0.0 };
         out_block[0..2].copy_from_slice(&f32_to_f16_bits(d).to_le_bytes());
         for i in 0..16 {
-            let q_low = if d == 0.0 {
+            let lo = if d == 0.0 {
                 8_u8
             } else {
-                ((in_block[2 * i] / d).round() as i32 + 8).clamp(0, 15) as u8
+                (in_block[i] * inv_d + 8.5).trunc().clamp(0.0, 15.0) as u8
             };
-            let q_high = if d == 0.0 {
+            let hi = if d == 0.0 {
                 8_u8
             } else {
-                ((in_block[2 * i + 1] / d).round() as i32 + 8).clamp(0, 15) as u8
+                (in_block[i + 16] * inv_d + 8.5)
+                    .trunc()
+                    .clamp(0.0, 15.0) as u8
             };
-            out_block[2 + i] = q_low | (q_high << 4);
+            out_block[2 + i] = lo | (hi << 4);
         }
     }
 
@@ -139,7 +150,7 @@ fn al5_refine_scale(block: &[f32], d: f32) -> f32 {
     }
 }
 
-/// Fast AL5 block quant: Q4_0 seed + three refinement passes (~6× faster than full sweep).
+/// Fast AL5 block quant: Q4_0 seed + one refinement pass (~2× Q4_0 block cost).
 #[inline]
 fn quantize_block_al5(in_block: &[f32], out_block: &mut [u8]) {
     let mut amax = 0.0_f32;
@@ -158,8 +169,6 @@ fn quantize_block_al5(in_block: &[f32], out_block: &mut [u8]) {
     }
 
     let mut best_d = mx / -8.0;
-    best_d = al5_refine_scale(in_block, best_d);
-    best_d = al5_refine_scale(in_block, best_d);
     best_d = al5_refine_scale(in_block, best_d);
 
     let inv_d = if best_d != 0.0 { 1.0 / best_d } else { 0.0 };
@@ -197,6 +206,82 @@ pub(super) fn quantize_al5_scalar(
         .par_chunks_exact(QK4_0)
         .zip(output.par_chunks_exact_mut(BLOCK_Q4_0_SIZE))
         .for_each(|(in_block, out_block)| quantize_block_al5(in_block, out_block));
+
+    Ok(())
+}
+
+/// F16 → AL5 without materializing a full intermediate f32 tensor.
+pub(super) fn quantize_f16_to_al5_scalar(
+    input: &[u8],
+    output: &mut [u8],
+) -> Result<(), QuantizationError> {
+    if !input.len().is_multiple_of(QK4_0 * 2) {
+        return Err(QuantizationError::InvalidInputLength {
+            quantization: GgufQuantizationType::F16,
+            expected_multiple: QK4_0 * 2,
+            actual: input.len(),
+        });
+    }
+    if output.len() != (input.len() / (QK4_0 * 2)) * BLOCK_Q4_0_SIZE {
+        return Err(QuantizationError::InvalidOutputLength {
+            quantization: GgufQuantizationType::AL5,
+            expected: (input.len() / (QK4_0 * 2)) * BLOCK_Q4_0_SIZE,
+            actual: output.len(),
+        });
+    }
+
+    use rayon::prelude::*;
+
+    input
+        .par_chunks_exact(QK4_0 * 2)
+        .zip(output.par_chunks_exact_mut(BLOCK_Q4_0_SIZE))
+        .for_each(|(f16_block, out_block)| {
+            let mut block = [0.0_f32; QK4_0];
+            for i in 0..QK4_0 {
+                block[i] = f16_le_to_f32(&f16_block[2 * i..2 * i + 2]);
+            }
+            quantize_block_al5(&block, out_block);
+        });
+
+    Ok(())
+}
+
+/// BF16 → AL5 without materializing a full intermediate f32 tensor.
+pub(super) fn quantize_bf16_to_al5_scalar(
+    input: &[u8],
+    output: &mut [u8],
+) -> Result<(), QuantizationError> {
+    if !input.len().is_multiple_of(QK4_0 * 2) {
+        return Err(QuantizationError::InvalidInputLength {
+            quantization: GgufQuantizationType::BF16,
+            expected_multiple: QK4_0 * 2,
+            actual: input.len(),
+        });
+    }
+    if output.len() != (input.len() / (QK4_0 * 2)) * BLOCK_Q4_0_SIZE {
+        return Err(QuantizationError::InvalidOutputLength {
+            quantization: GgufQuantizationType::AL5,
+            expected: (input.len() / (QK4_0 * 2)) * BLOCK_Q4_0_SIZE,
+            actual: output.len(),
+        });
+    }
+
+    use rayon::prelude::*;
+
+    input
+        .par_chunks_exact(QK4_0 * 2)
+        .zip(output.par_chunks_exact_mut(BLOCK_Q4_0_SIZE))
+        .for_each(|(bf16_block, out_block)| {
+            let mut block = [0.0_f32; QK4_0];
+            for i in 0..QK4_0 {
+                let bits = u32::from(u16::from_le_bytes([
+                    bf16_block[2 * i],
+                    bf16_block[2 * i + 1],
+                ])) << 16;
+                block[i] = f32::from_bits(bits);
+            }
+            quantize_block_al5(&block, out_block);
+        });
 
     Ok(())
 }
