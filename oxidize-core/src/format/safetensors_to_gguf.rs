@@ -134,6 +134,10 @@ pub fn quantize_gguf_to_target(input: &[u8], target: GgufQuantizationType) -> Re
                 GgufQuantizationType::Q5_K_S => 16,
                 GgufQuantizationType::Q5_K_M => 17,
                 GgufQuantizationType::Q6_K => 18,
+                GgufQuantizationType::AL5 => 240,
+                GgufQuantizationType::AL8 => 241,
+                GgufQuantizationType::AL6 => 242,
+                GgufQuantizationType::AL5_XS => 243,
                 other => {
                     bail!("unsupported GGUF target type {other:?}")
                 }
@@ -901,6 +905,9 @@ enum StreamTransform {
     SplitGateUpGate,
     SplitGateUpUp,
     FlattenConv1d,
+    /// Concatenate `stack_sources` (one unfused per-expert 2D weight each, in
+    /// expert-index order) into a single expert-major 3D `_exps` tensor.
+    StackExperts,
 }
 
 #[derive(Debug, Clone)]
@@ -911,6 +918,9 @@ struct PlannedTensor {
     source_name: String,
     source_shard: PathBuf,
     transform: StreamTransform,
+    /// Per-expert (tensor_name, shard) in expert-index order. Only used by
+    /// `StreamTransform::StackExperts`; empty otherwise.
+    stack_sources: Vec<(String, PathBuf)>,
 }
 
 fn dtype_to_ggml_type(dtype: Dtype) -> Result<u32> {
@@ -977,6 +987,7 @@ fn plan_stream_outputs(
                 source_name: source_name.clone(),
                 source_shard: shard.clone(),
                 transform: StreamTransform::SplitGateUpGate,
+                stack_sources: Vec::new(),
             },
             PlannedTensor {
                 name: format!("blk.{layer}.ffn_up_exps.weight"),
@@ -985,6 +996,7 @@ fn plan_stream_outputs(
                 source_name,
                 source_shard: shard,
                 transform: StreamTransform::SplitGateUpUp,
+                stack_sources: Vec::new(),
             },
         ]);
     }
@@ -1005,6 +1017,7 @@ fn plan_stream_outputs(
             source_name,
             source_shard: shard,
             transform: StreamTransform::FlattenConv1d,
+            stack_sources: Vec::new(),
         }]);
     }
 
@@ -1043,7 +1056,29 @@ fn plan_stream_outputs(
         source_name,
         source_shard: shard,
         transform: StreamTransform::Passthrough,
+        stack_sources: Vec::new(),
     }])
+}
+
+/// Parse an unfused per-expert MoE weight name (Hunyuan/DeepSeek layout, e.g.
+/// `model.layers.3.mlp.experts.17.gate_proj.weight`) into
+/// `(layer, canonical_exps_name, expert_index)`. Returns None for anything else.
+fn parse_unfused_expert(name: &str) -> Option<(usize, &'static str, usize)> {
+    let rest = name
+        .strip_prefix("model.language_model.layers.")
+        .or_else(|| name.strip_prefix("model.layers."))?;
+    let (layer_str, rest) = rest.split_once('.')?;
+    let layer: usize = layer_str.parse().ok()?;
+    let rest = rest.strip_prefix("mlp.experts.")?;
+    let (expert_str, proj) = rest.split_once('.')?;
+    let expert: usize = expert_str.parse().ok()?;
+    let exps = match proj {
+        "gate_proj.weight" => "ffn_gate_exps",
+        "up_proj.weight" => "ffn_up_exps",
+        "down_proj.weight" => "ffn_down_exps",
+        _ => return None,
+    };
+    Some((layer, exps, expert))
 }
 
 fn read_tensor_from_shard(
@@ -1091,6 +1126,32 @@ fn materialize_planned_tensor(plan: &PlannedTensor) -> Result<Vec<u8>> {
                 .ok_or_else(|| anyhow!("failed to flatten conv1d {}", plan.source_name))?;
             Ok(flat)
         }
+        StreamTransform::StackExperts => {
+            // Concatenate each per-expert 2D weight (expert-index order) into a
+            // single expert-major blob matching dims [n_expert, rows, cols].
+            // `raw`/`shape` above already hold expert 0 (plan.source_name).
+            let per_expert_len = tensor_byte_len(plan.ggml_type, &plan.dimensions[1..])?;
+            let mut out = Vec::with_capacity(plan.stack_sources.len() * per_expert_len);
+            for (idx, (tensor_name, shard)) in plan.stack_sources.iter().enumerate() {
+                let (edtype, eshape, eraw) = read_tensor_from_shard(shard, tensor_name)?;
+                if edtype != dtype || eshape != shape {
+                    bail!(
+                        "expert {idx} of {} has mismatched dtype/shape ({edtype:?} {eshape:?} \
+                         vs {dtype:?} {shape:?})",
+                        plan.name
+                    );
+                }
+                if eraw.len() != per_expert_len {
+                    bail!(
+                        "expert {idx} of {} has {} bytes, expected {per_expert_len}",
+                        plan.name,
+                        eraw.len()
+                    );
+                }
+                out.extend_from_slice(&eraw);
+            }
+            Ok(out)
+        }
     }
 }
 
@@ -1120,6 +1181,11 @@ fn convert_safetensors_dir_streaming(
 
     let mut shard_meta_cache: BTreeMap<String, Vec<(String, Dtype, Vec<usize>)>> = BTreeMap::new();
     let mut planned: Vec<PlannedTensor> = Vec::new();
+    // Unfused per-expert MoE weights (Hunyuan/DeepSeek layout) are gathered here
+    // and emitted as stacked `_exps` tensors after the scan. Key: (layer,exps).
+    // Value: expert_idx -> (tensor_name, shard, dtype, shape).
+    type ExpertGroup = BTreeMap<usize, (String, PathBuf, Dtype, Vec<usize>)>;
+    let mut expert_groups: BTreeMap<(usize, &'static str), ExpertGroup> = BTreeMap::new();
     let auto_config = input.join("config.json");
     let cfg_path = config.config_path.as_ref().unwrap_or(&auto_config);
     let mtp_base_layer = mtp_base_layer_from_config(Some(cfg_path));
@@ -1145,6 +1211,17 @@ fn convert_safetensors_dir_streaming(
                 shard_path.display()
             );
         };
+        // Accumulate unfused per-expert weights instead of planning them 1:1
+        // (the loader needs a single stacked expert-major `_exps` tensor).
+        if config.map_hf_tensor_names
+            && let Some((layer, exps, expert)) = parse_unfused_expert(tensor_name)
+        {
+            expert_groups.entry((layer, exps)).or_default().insert(
+                expert,
+                (tensor_name.clone(), shard_path.clone(), dtype, shape.clone()),
+            );
+            continue;
+        }
         planned.extend(plan_stream_outputs(
             tensor_name,
             dtype,
@@ -1153,6 +1230,46 @@ fn convert_safetensors_dir_streaming(
             config.map_hf_tensor_names,
             mtp_base_layer,
         )?);
+    }
+
+    // Emit one stacked `_exps` PlannedTensor per (layer, projection).
+    for ((layer, exps), experts) in expert_groups {
+        let n_expert = experts.len();
+        // Experts must be a contiguous 0..n_expert run.
+        for (expected, idx) in experts.keys().enumerate() {
+            if expected != *idx {
+                bail!(
+                    "blk.{layer}.{exps}: expert indices are not contiguous \
+                     (missing expert {expected})"
+                );
+            }
+        }
+        let (_, _, dtype0, shape0) = experts
+            .values()
+            .next()
+            .expect("expert group is non-empty");
+        if shape0.len() != 2 {
+            bail!("blk.{layer}.{exps}: expected 2D expert weights, got {shape0:?}");
+        }
+        let ggml_type = dtype_to_ggml_type(*dtype0)?;
+        let dimensions = vec![n_expert as u64, shape0[0] as u64, shape0[1] as u64];
+        let mut sources = experts.into_values();
+        let (first_name, first_shard, _, _) = sources.next().expect("non-empty");
+        // stack_sources holds every expert (including the first) in order so the
+        // materializer can concatenate them without special-casing expert 0.
+        let mut stack_sources = vec![(first_name.clone(), first_shard.clone())];
+        for (name, shard, _, _) in sources {
+            stack_sources.push((name, shard));
+        }
+        planned.push(PlannedTensor {
+            name: format!("blk.{layer}.{exps}.weight"),
+            dimensions,
+            ggml_type,
+            source_name: first_name,
+            source_shard: first_shard,
+            transform: StreamTransform::StackExperts,
+            stack_sources,
+        });
     }
 
     planned.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1202,6 +1319,7 @@ fn gguf_file_type_id(target: GgufQuantizationType) -> Option<u32> {
         GgufQuantizationType::Q4_K_M => Some(15),
         GgufQuantizationType::Q4_K_S => Some(14),
         GgufQuantizationType::Q6_K => Some(18),
+        // AL-family custom quant IDs are stored in ggml_type; file_type falls back to Unknown.
         _ => None,
     }
 }
@@ -1224,6 +1342,10 @@ fn ggml_type_id(target: GgufQuantizationType) -> Result<u32> {
         GgufQuantizationType::Q5_K_S => 16,
         GgufQuantizationType::Q5_K_M => 17,
         GgufQuantizationType::Q6_K => 18,
+        GgufQuantizationType::AL5 => 240,
+        GgufQuantizationType::AL8 => 241,
+        GgufQuantizationType::AL6 => 242,
+        GgufQuantizationType::AL5_XS => 243,
         other => bail!("unsupported GGUF target type {other:?}"),
     })
 }
@@ -1612,6 +1734,101 @@ mod tests {
             parsed.metadata.get("llama.block_count"),
             Some(&GgufMetadataValue::Uint32(2))
         );
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_file(output);
+    }
+
+    #[test]
+    fn parses_unfused_expert_names() {
+        assert_eq!(
+            parse_unfused_expert("model.layers.3.mlp.experts.17.gate_proj.weight"),
+            Some((3, "ffn_gate_exps", 17))
+        );
+        assert_eq!(
+            parse_unfused_expert("model.layers.0.mlp.experts.0.down_proj.weight"),
+            Some((0, "ffn_down_exps", 0))
+        );
+        assert_eq!(
+            parse_unfused_expert("model.layers.2.mlp.experts.5.up_proj.weight"),
+            Some((2, "ffn_up_exps", 5))
+        );
+        // Dense / shared / non-expert weights must not match.
+        assert_eq!(
+            parse_unfused_expert("model.layers.0.mlp.gate_proj.weight"),
+            None
+        );
+        assert_eq!(
+            parse_unfused_expert("model.layers.0.mlp.shared_mlp.gate_proj.weight"),
+            None
+        );
+    }
+
+    #[test]
+    fn streaming_stacks_unfused_experts() {
+        let dir = std::env::temp_dir().join(format!(
+            "oxidize-st2gguf-moe-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 3 experts, each gate_proj shape [ff=2, hidden=2], distinct bytes so we
+        // can assert expert-major ordering in the stacked output.
+        let f32v = |vals: [f32; 4]| vals.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>();
+        write_test_safetensors(
+            &dir.join("shard-0.safetensors"),
+            &[
+                ("model.layers.0.mlp.experts.0.gate_proj.weight", Dtype::F32, vec![2, 2], f32v([0.0, 0.0, 0.0, 0.0])),
+                ("model.layers.0.mlp.experts.1.gate_proj.weight", Dtype::F32, vec![2, 2], f32v([1.0, 1.0, 1.0, 1.0])),
+            ],
+        );
+        write_test_safetensors(
+            &dir.join("shard-1.safetensors"),
+            &[(
+                "model.layers.0.mlp.experts.2.gate_proj.weight",
+                Dtype::F32,
+                vec![2, 2],
+                f32v([2.0, 2.0, 2.0, 2.0]),
+            )],
+        );
+
+        std::fs::write(
+            dir.join("model.safetensors.index.json"),
+            r#"{"weight_map":{
+                "model.layers.0.mlp.experts.0.gate_proj.weight":"shard-0.safetensors",
+                "model.layers.0.mlp.experts.1.gate_proj.weight":"shard-0.safetensors",
+                "model.layers.0.mlp.experts.2.gate_proj.weight":"shard-1.safetensors"
+            }}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("config.json"),
+            r#"{"model_type":"hy_v3","num_experts":3,"num_experts_per_tok":1}"#,
+        )
+        .unwrap();
+
+        let output = tmp_path(".gguf");
+        convert_safetensors_to_gguf(&dir, &output, &SafetensorsToGgufConfig::default()).unwrap();
+        let parsed = parse_gguf(&std::fs::read(&output).unwrap()).unwrap();
+
+        let exps = parsed
+            .tensor_infos
+            .iter()
+            .find(|t| t.name == "blk.0.ffn_gate_exps.weight")
+            .expect("stacked ffn_gate_exps tensor must exist");
+        // dims: [n_expert, ff, hidden] = [3, 2, 2].
+        assert_eq!(exps.dimensions, vec![3, 2, 2]);
+        // No per-expert tensor should leak into the output.
+        assert!(
+            !parsed
+                .tensor_infos
+                .iter()
+                .any(|t| t.name == "blk.0.ffn_gate.0.weight"),
+            "per-expert tensors must not be emitted"
+        );
+
         let _ = std::fs::remove_dir_all(dir);
         let _ = std::fs::remove_file(output);
     }

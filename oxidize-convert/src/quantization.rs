@@ -9,6 +9,10 @@ pub fn parse_target(value: &str) -> Result<GgufQuantizationType, String> {
         "Q4_K_M" => Ok(GgufQuantizationType::Q4_K_M),
         "Q6_K" => Ok(GgufQuantizationType::Q6_K),
         "Q8_0" => Ok(GgufQuantizationType::Q8_0),
+        "AL5" => Ok(GgufQuantizationType::AL5),
+        "AL5_XS" => Ok(GgufQuantizationType::AL5_XS),
+        "AL6" => Ok(GgufQuantizationType::AL6),
+        "AL8" => Ok(GgufQuantizationType::AL8),
         _ => Err(format!("unsupported --target quantization: {value}")),
     }
 }
