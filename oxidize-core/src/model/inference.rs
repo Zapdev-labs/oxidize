@@ -338,9 +338,19 @@ impl InferenceConfig {
     /// Map `general.architecture` values to the GGUF metadata key prefix.
     fn gguf_metadata_prefix(arch: &str) -> &str {
         match arch {
+            // Unsloth GLM-5.2 GGUF uses hyphenated metadata keys (`glm-dsa.*`).
+            "glm_dsa" => "glm-dsa",
+            other => other,
+        }
+    }
+
+    /// Canonical architecture string used for downstream behavior (RMSNorm
+    /// `(1+w)`, GDN detection, RoPE overrides, etc.). Qwen3.5 variants are
+    /// normalized to `qwen35` so the rest of the loader sees one family.
+    fn canonical_architecture(arch: &str) -> &str {
+        match arch {
             "qwen3_5_moe_text" | "qwen3_5_moe" | "qwen35moe" | "qwen3_5" | "qwen3_5_text"
             | "qwen35_text" => "qwen35",
-            // Unsloth GLM-5.2 GGUF uses hyphenated metadata keys (`glm-dsa.*`).
             "glm_dsa" => "glm-dsa",
             other => other,
         }
@@ -361,7 +371,7 @@ impl InferenceConfig {
         let metadata_prefix = Self::gguf_metadata_prefix(&raw_arch);
         // Canonicalize the arch string so downstream behavior matches (RMSNorm
         // (1+w), GDN detection, etc.) see `qwen35` even for `qwen3_5_text`.
-        let arch = metadata_prefix.to_string();
+        let arch = Self::canonical_architecture(&raw_arch).to_string();
         let key = |suffix: &str| format!("{metadata_prefix}.{suffix}");
         let arch_u32 = |suffix: &str| {
             metadata_u32_lookup(metadata, &key(suffix)).or_else(|| {
