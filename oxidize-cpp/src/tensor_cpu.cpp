@@ -740,12 +740,11 @@ void rms_norm(float* out, const float* x, const float* weight, size_t n,
 }
 
 void apply_rope(float* vec, size_t head_dim, size_t num_heads, size_t pos,
-                float theta, size_t rope_dim) {
+                float theta, size_t rope_dim, float yarn_factor,
+                float yarn_orig_ctx) {
   if (head_dim == 0) {
     throw std::runtime_error("apply_rope: zero head_dim");
   }
-  // Effective rotary width per head: full head_dim unless a smaller rope_dim is
-  // requested (partial RoPE, e.g. MiniMax / some Qwen variants).
   size_t rope_len = (rope_dim == 0) ? head_dim : rope_dim;
   if (rope_len > head_dim) {
     rope_len = head_dim;
@@ -754,8 +753,8 @@ void apply_rope(float* vec, size_t head_dim, size_t num_heads, size_t pos,
     throw std::runtime_error("apply_rope: odd rotary dimension " +
                              std::to_string(rope_len));
   }
-  if (pos == 0) {
-    // apply_rope_f32 returns the input unchanged at position 0.
+  const bool yarn = yarn_factor > 1.0f && yarn_orig_ctx > 0.0f;
+  if (pos == 0 && !yarn) {
     return;
   }
   if (rope_len == 0) {
@@ -765,9 +764,28 @@ void apply_rope(float* vec, size_t head_dim, size_t num_heads, size_t pos,
   const float position_f = static_cast<float>(pos);
   const size_t half_dim = rope_len / 2;
   const float inv_rope_len = 1.0f / static_cast<float>(rope_len);
-  // freq_{i+1} = freq_i * theta^(-2/rope_len) geometric recurrence (matches the
-  // powf recurrence in apply_rope_f32 to stay numerically identical).
   const float freq_multiplier = std::pow(theta, -2.0f * inv_rope_len);
+
+  float freq_scale = 1.0f;
+  float mscale = 1.0f;
+  float corr_lo = 0.0f;
+  float corr_hi = 0.0f;
+  if (yarn) {
+    freq_scale = 1.0f / yarn_factor;
+    mscale = 1.0f + 0.1f * std::log(yarn_factor);
+    auto yarn_corr = [](float n_dims, float orig_ctx, float n_rot, float base) {
+      return n_dims * std::log(orig_ctx / (n_rot * 2.0f * static_cast<float>(M_PI))) /
+             (2.0f * std::log(base));
+    };
+    corr_lo = std::floor(yarn_corr(static_cast<float>(rope_len), yarn_orig_ctx,
+                                   32.0f, theta));
+    corr_hi = std::ceil(yarn_corr(static_cast<float>(rope_len), yarn_orig_ctx,
+                                  1.0f, theta));
+    if (corr_lo < 0.0f) corr_lo = 0.0f;
+    if (corr_hi > static_cast<float>(rope_len) - 1.0f) {
+      corr_hi = static_cast<float>(rope_len) - 1.0f;
+    }
+  }
 
   for (size_t head = 0; head < num_heads; ++head) {
     float* h = vec + head * head_dim;
@@ -775,9 +793,23 @@ void apply_rope(float* vec, size_t head_dim, size_t num_heads, size_t pos,
     for (size_t i = 0; i < half_dim; ++i) {
       const float x0 = h[i];
       const float x1 = h[half_dim + i];
-      const float angle = position_f * freq;
-      const float cos_a = std::cos(angle);
-      const float sin_a = std::sin(angle);
+      float cos_a;
+      float sin_a;
+      if (yarn) {
+        const float theta_extrap = position_f * freq;
+        const float theta_interp = theta_extrap * freq_scale;
+        const float denom = corr_hi - corr_lo;
+        const float ramp = 1.0f - std::fmin(
+            1.0f, std::fmax(0.0f, (static_cast<float>(i) - corr_lo) /
+                                       (denom > 0.001f ? denom : 0.001f)));
+        const float angle = theta_interp * (1.0f - ramp) + theta_extrap * ramp;
+        cos_a = std::cos(angle) * mscale;
+        sin_a = std::sin(angle) * mscale;
+      } else {
+        const float angle = position_f * freq;
+        cos_a = std::cos(angle);
+        sin_a = std::sin(angle);
+      }
       h[i] = x0 * cos_a - x1 * sin_a;
       h[half_dim + i] = x0 * sin_a + x1 * cos_a;
       freq *= freq_multiplier;

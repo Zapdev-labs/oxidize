@@ -4,6 +4,7 @@
 #include "oc_iq_grids.h"
 
 #include <math.h>
+#include <float.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -204,17 +205,86 @@ static int nearest_i(float x) { return (int)lrintf(x); }
 static int clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
 static void wr16(uint8_t *p, uint16_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); }
 
-/* AL5: Q4_0 layout (18B/32w), MSE-optimal per-block scale. Decode == Q4_0. */
-static float al5_refine_scale(const float *x, float d) {
+/* AL family: MSE-optimal per-block scale with multi-seed + iterative refinement. */
+static float al_refine_scale(const float *x, size_t n, float d, int lo, int hi) {
   if (d == 0.0f) return 0.0f;
   float id = 1.0f / d;
   float sumlx = 0.0f, suml2 = 0.0f;
-  for (size_t i = 0; i < QK; ++i) {
-    int l = clampi((int)lrintf(x[i] * id), -8, 7);
+  for (size_t i = 0; i < n; ++i) {
+    int l = clampi((int)lrintf(x[i] * id), lo, hi);
     sumlx += x[i] * (float)l;
     suml2 += (float)(l * l);
   }
   return suml2 > 0.0f ? sumlx / suml2 : d;
+}
+
+static float al_refine_scale_iter(const float *x, size_t n, float d, int lo, int hi) {
+  for (int it = 0; it < 4; ++it) {
+    float nd = al_refine_scale(x, n, d, lo, hi);
+    if (fabsf(nd - d) <= FLT_EPSILON * fmaxf(fabsf(nd), 1.0f)) return nd;
+    d = nd;
+  }
+  return d;
+}
+
+static float al_block_mse(const float *x, size_t n, float d, int lo, int hi) {
+  if (d == 0.0f) return 0.0f;
+  float id = 1.0f / d, mse = 0.0f;
+  for (size_t i = 0; i < n; ++i) {
+    int l = clampi((int)lrintf(x[i] * id), lo, hi);
+    float err = x[i] - (float)l * d;
+    mse += err * err;
+  }
+  return mse / (float)n;
+}
+
+static float al_best_initial_scale(const float *x, size_t n, float mx, float amax,
+                                   int lo, int hi) {
+  float seeds[3] = {mx / -(float)lo, amax / (float)hi, -amax / (float)lo};
+  float best_d = seeds[0], best_mse = FLT_MAX;
+  for (int s = 0; s < 3; ++s) {
+    float seed = seeds[s];
+    if (!isfinite(seed) || seed == 0.0f) continue;
+    float d = al_refine_scale_iter(x, n, seed, lo, hi);
+    float mse = al_block_mse(x, n, d, lo, hi);
+    if (mse < best_mse) {
+      best_mse = mse;
+      best_d = d;
+    }
+  }
+  return best_d;
+}
+
+static void al5_try_seed(const float *x, float seed, float *best_d, int *levels,
+                         float *best_mse) {
+  if (!isfinite(seed) || seed == 0.0f) return;
+  int lv[QK];
+  float id = 1.0f / seed;
+  for (size_t i = 0; i < QK; ++i)
+    lv[i] = clampi((int)lrintf(x[i] * id), -8, 7);
+  float sumlx = 0.0f, suml2 = 0.0f;
+  for (size_t i = 0; i < QK; ++i) {
+    float l = (float)lv[i];
+    sumlx += x[i] * l;
+    suml2 += l * l;
+  }
+  float d = suml2 > 0.0f ? sumlx / suml2 : seed;
+  if (fabsf(d - seed) > FLT_EPSILON * fmaxf(fabsf(d), 1.0f)) {
+    id = 1.0f / d;
+    for (size_t i = 0; i < QK; ++i)
+      lv[i] = clampi((int)lrintf(x[i] * id), -8, 7);
+  }
+  float mse = 0.0f;
+  for (size_t i = 0; i < QK; ++i) {
+    float err = x[i] - (float)lv[i] * d;
+    mse += err * err;
+  }
+  mse /= (float)QK;
+  if (mse < *best_mse) {
+    *best_mse = mse;
+    *best_d = d;
+    for (size_t i = 0; i < QK; ++i) levels[i] = lv[i];
+  }
 }
 
 static void quantize_block_al5(const float *x, uint8_t *o) {
@@ -233,13 +303,22 @@ static void quantize_block_al5(const float *x, uint8_t *o) {
   }
 
   float best_d = mx / -8.0f;
-  best_d = al5_refine_scale(x, best_d);
+  float best_mse = FLT_MAX;
+  int levels[QK];
+  al5_try_seed(x, mx / -8.0f, &best_d, levels, &best_mse);
+  int saturated = 0;
+  for (size_t i = 0; i < QK; ++i) {
+    if (levels[i] == -8 || levels[i] == 7) {
+      saturated = 1;
+      break;
+    }
+  }
+  if (saturated) al5_try_seed(x, amax / 7.0f, &best_d, levels, &best_mse);
 
-  float id = best_d != 0.0f ? 1.0f / best_d : 0.0f;
   wr16(o, oc_f32_to_f16(best_d));
   for (size_t i = 0; i < QK / 2; ++i) {
-    int lo = clampi((int)lrintf(x[i] * id), -8, 7) + 8;
-    int hi = clampi((int)lrintf(x[i + QK / 2] * id), -8, 7) + 8;
+    int lo = levels[i] + 8;
+    int hi = levels[i + QK / 2] + 8;
     o[2 + i] = (uint8_t)((hi << 4) | lo);
   }
 }

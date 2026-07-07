@@ -8,7 +8,7 @@ pub(super) use crate::kv_cache::{KvCache, KvCacheConfig};
 pub(super) use crate::model::{Logits, Model, ModelError, Session, Token};
 pub(super) use crate::quantization::{dequantize_scalar, quant_block_layout, quantized_size};
 pub(super) use crate::tensor::{
-    DType, GemvJob, apply_geglu_inplace_f32, apply_rope_f32, apply_swiglu_inplace_f32,
+    DType, GemvJob, apply_geglu_inplace_f32, apply_rope_f32_yarn, apply_swiglu_inplace_f32,
     f16_le_to_f32, gemm_quantized_f32, gemv_f32, gemv_quantized_experts_f32,
     gemv_quantized_experts_gate_up_f32, gemv_quantized_f32, gemv_quantized_multi_f32, rms_norm_f32,
 };
@@ -51,6 +51,9 @@ pub enum ModelArchitecture {
     Lfm2Moe,
     /// Z.ai GLM MoE with DSA sparse attention (GLM-5.x family).
     GlmMoeDsa,
+    /// Tencent Hunyuan (hy_v3): GQA + qk_norm attention, sigmoid-routed MoE
+    /// with a shared expert and leading dense blocks. Standard attention (no MLA).
+    HunyuanMoe,
 }
 
 impl ModelArchitecture {
@@ -81,6 +84,9 @@ impl ModelArchitecture {
                 "glm" | "glm4" | "glm_moe" | "glm_moe_dsa" | "glm_dsa" | "glmmoe" | "glmmoedsa" => {
                     Self::GlmMoeDsa
                 }
+                "hunyuan" | "hunyuan_moe" | "hunyuanmoe" | "hy_v3" | "hyv3" | "hunyuan_v3" => {
+                    Self::HunyuanMoe
+                }
                 _ => Self::Llama,
             }
         } else {
@@ -102,7 +108,12 @@ impl ModelArchitecture {
     pub fn uses_moe(&self) -> bool {
         matches!(
             self,
-            Self::Mixtral | Self::MiniMax | Self::Lfm2Moe | Self::DeepSeek | Self::GlmMoeDsa
+            Self::Mixtral
+                | Self::MiniMax
+                | Self::Lfm2Moe
+                | Self::DeepSeek
+                | Self::GlmMoeDsa
+                | Self::HunyuanMoe
         )
     }
 
@@ -195,6 +206,11 @@ pub struct InferenceConfig {
     /// DeepSeek-V3 group-limited routing: groups kept per token (`topk_group`).
     /// Only consulted when `expert_group_count > 1`.
     pub expert_group_used_count: usize,
+    /// YaRN rope extension factor (0 = disabled). GGUF `rope.scaling.factor`.
+    pub yarn_factor: f32,
+    /// Training context length before YaRN extension. GGUF
+    /// `rope.scaling.original_context_length`.
+    pub yarn_orig_ctx: f32,
 }
 
 impl Default for InferenceConfig {
@@ -232,11 +248,33 @@ impl Default for InferenceConfig {
             expert_weights_scale: 1.0,
             expert_group_count: 0,
             expert_group_used_count: 0,
+            yarn_factor: 0.0,
+            yarn_orig_ctx: 0.0,
         }
     }
 }
 
 impl InferenceConfig {
+    #[inline]
+    pub fn apply_rope_head(
+        &self,
+        input: &[f32],
+        position: usize,
+        head_dim: usize,
+        theta: f32,
+        output: &mut [f32],
+    ) -> Result<(), crate::tensor::RopeError> {
+        apply_rope_f32_yarn(
+            input,
+            position,
+            head_dim,
+            theta,
+            output,
+            self.yarn_factor,
+            self.yarn_orig_ctx,
+        )
+    }
+
     pub fn head_dim(&self) -> usize {
         self.hidden_size / self.num_attention_heads
     }
@@ -340,6 +378,15 @@ impl InferenceConfig {
                     None
                 } else {
                     metadata_f32_lookup(metadata, &format!("{arch}.{suffix}"))
+                }
+            })
+        };
+        let arch_str = |suffix: &str| {
+            metadata_str_lookup(metadata, &key(suffix)).or_else(|| {
+                if metadata_prefix == arch {
+                    None
+                } else {
+                    metadata_str_lookup(metadata, &format!("{arch}.{suffix}"))
                 }
             })
         };
@@ -589,6 +636,17 @@ impl InferenceConfig {
             rms_norm_weight_plus_one = v != "0";
         }
 
+        let (yarn_factor, yarn_orig_ctx) =
+            if arch_str("rope.scaling.type").as_deref() == Some("yarn") {
+                let factor = arch_f32("rope.scaling.factor").unwrap_or(0.0);
+                let orig = arch_u32("rope.scaling.original_context_length")
+                    .map(|v| v as f32)
+                    .unwrap_or(0.0);
+                (factor, orig)
+            } else {
+                (0.0, 0.0)
+            };
+
         Self {
             vocab_size,
             context_size,
@@ -622,6 +680,8 @@ impl InferenceConfig {
             expert_weights_scale,
             expert_group_count,
             expert_group_used_count,
+            yarn_factor,
+            yarn_orig_ctx,
         }
     }
 }
@@ -688,6 +748,16 @@ pub(super) fn metadata_f32_lookup(
         Some(GgufMetadataValue::Uint16(v)) => Some(*v as f32),
         Some(GgufMetadataValue::Uint32(v)) => Some(*v as f32),
         Some(GgufMetadataValue::Uint64(v)) => Some(*v as f32),
+        _ => None,
+    }
+}
+
+pub(super) fn metadata_str_lookup(
+    metadata: &std::collections::BTreeMap<String, crate::gguf::GgufMetadataValue>,
+    key: &str,
+) -> Option<String> {
+    match metadata.get(key) {
+        Some(crate::gguf::GgufMetadataValue::String(v)) => Some(v.clone()),
         _ => None,
     }
 }
@@ -2179,6 +2249,115 @@ mod tests {
         assert_eq!(cfg.kv_head_dim(), 256);
         assert_eq!(cfg.vocab_size, 154880);
         assert!((cfg.rope_theta - 8_000_000.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn hunyuan_moe_config_from_gguf_metadata() {
+        // Tencent Hunyuan (hy_v3): standard GQA + qk_norm attention, sigmoid
+        // MoE with a shared expert and one leading dense block. Not MLA.
+        let mapped = MappedGgufFile::from_parsed_for_test(GgufFile {
+            version: 3,
+            tensor_count: 1,
+            metadata: BTreeMap::from([
+                (
+                    "general.architecture".to_owned(),
+                    GgufMetadataValue::String("hunyuan-moe".to_owned()),
+                ),
+                (
+                    "hunyuan-moe.block_count".to_owned(),
+                    GgufMetadataValue::Uint32(80),
+                ),
+                (
+                    "hunyuan-moe.embedding_length".to_owned(),
+                    GgufMetadataValue::Uint32(4096),
+                ),
+                (
+                    "hunyuan-moe.feed_forward_length".to_owned(),
+                    GgufMetadataValue::Uint32(13312),
+                ),
+                (
+                    "hunyuan-moe.attention.head_count".to_owned(),
+                    GgufMetadataValue::Uint32(64),
+                ),
+                (
+                    "hunyuan-moe.attention.head_count_kv".to_owned(),
+                    GgufMetadataValue::Uint32(8),
+                ),
+                (
+                    "hunyuan-moe.attention.key_length".to_owned(),
+                    GgufMetadataValue::Uint32(128),
+                ),
+                (
+                    "hunyuan-moe.attention.value_length".to_owned(),
+                    GgufMetadataValue::Uint32(128),
+                ),
+                (
+                    "hunyuan-moe.expert_count".to_owned(),
+                    GgufMetadataValue::Uint32(192),
+                ),
+                (
+                    "hunyuan-moe.expert_used_count".to_owned(),
+                    GgufMetadataValue::Uint32(8),
+                ),
+                (
+                    "hunyuan-moe.expert_feed_forward_length".to_owned(),
+                    GgufMetadataValue::Uint32(1536),
+                ),
+                (
+                    "hunyuan-moe.expert_shared_count".to_owned(),
+                    GgufMetadataValue::Uint32(1),
+                ),
+                (
+                    "hunyuan-moe.leading_dense_block_count".to_owned(),
+                    GgufMetadataValue::Uint32(1),
+                ),
+                (
+                    "hunyuan-moe.expert_gating_func".to_owned(),
+                    GgufMetadataValue::Uint32(2),
+                ),
+                (
+                    "hunyuan-moe.expert_weights_scale".to_owned(),
+                    GgufMetadataValue::Float32(2.826),
+                ),
+                (
+                    "hunyuan-moe.rope.freq_base".to_owned(),
+                    GgufMetadataValue::Float32(11_158_840.0),
+                ),
+                (
+                    "hunyuan-moe.vocab_size".to_owned(),
+                    GgufMetadataValue::Uint32(120832),
+                ),
+            ]),
+            tensor_infos: vec![GgufTensorInfo {
+                name: "tok_embeddings.weight".to_owned(),
+                dimensions: vec![4096, 120832],
+                ggml_type: 0,
+                relative_offset: 0,
+                absolute_offset: 0,
+                mmap_index: 0,
+            }],
+            alignment: 32,
+            data_section_start: 0,
+        });
+
+        let cfg = InferenceConfig::from_gguf(&mapped);
+
+        assert_eq!(cfg.architecture, ModelArchitecture::HunyuanMoe);
+        assert!(cfg.architecture.uses_moe());
+        assert!(!cfg.architecture.uses_mla());
+        assert_eq!(cfg.layer_count, 80);
+        assert_eq!(cfg.hidden_size, 4096);
+        assert_eq!(cfg.num_experts, 192);
+        assert_eq!(cfg.num_experts_per_tok, 8);
+        assert_eq!(cfg.expert_intermediate_size, 1536);
+        assert_eq!(cfg.leading_dense_layers, 1);
+        assert!(cfg.expert_gating_sigmoid);
+        assert!((cfg.expert_weights_scale - 2.826).abs() < 1e-6);
+        assert_eq!(cfg.num_attention_heads, 64);
+        assert_eq!(cfg.num_key_value_heads, 8);
+        assert_eq!(cfg.kv_head_dim(), 128);
+        assert_eq!(cfg.vocab_size, 120832);
+        assert!((cfg.rope_theta - 11_158_840.0).abs() < 1.0);
     }
 
     #[test]

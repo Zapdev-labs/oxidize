@@ -118,6 +118,12 @@ struct Args {
     /// Worker threads for GGUF tensor quantization. Defaults to Rayon default.
     #[arg(long)]
     threads: Option<usize>,
+    /// Extend output context length with YaRN rope scaling baked into metadata.
+    #[arg(long)]
+    context_length: Option<u32>,
+    /// Training context before YaRN extension. Defaults to the input GGUF context_length.
+    #[arg(long)]
+    yarn_orig_ctx: Option<u32>,
 }
 
 fn parse_quantization_type(value: &str) -> Result<GgufQuantizationType, String> {
@@ -193,6 +199,8 @@ fn run(args: Args) -> Result<()> {
         args.target,
         &args.append_tensor,
         imatrix.as_ref(),
+        args.context_length,
+        args.yarn_orig_ctx,
     )
 }
 
@@ -203,12 +211,21 @@ fn quantize_file(
     target: Option<GgufQuantizationType>,
     append_specs: &[String],
     imatrix: Option<&Imatrix>,
+    context_length: Option<u32>,
+    yarn_orig_ctx: Option<u32>,
 ) -> Result<()> {
     if input_is_gguf(input_path)? {
         if append_specs.is_empty() {
             let target =
                 target.ok_or_else(|| anyhow!("--target is required for GGUF quantization"))?;
-            quantize_gguf_stream(input_path, output_path, target, imatrix)?;
+            quantize_gguf_stream(
+                input_path,
+                output_path,
+                target,
+                imatrix,
+                context_length,
+                yarn_orig_ctx,
+            )?;
         } else {
             let input = fs::read(input_path)
                 .with_context(|| format!("failed to read input file: {}", input_path.display()))?;
@@ -271,11 +288,39 @@ struct TensorPlan {
     importance: Option<Vec<f32>>,
 }
 
+fn patch_yarn_context(
+    metadata: &mut BTreeMap<String, GgufMetadataValue>,
+    arch: &str,
+    new_ctx: u32,
+    orig_ctx: u32,
+) {
+    let prefix = format!("{arch}.");
+    metadata.insert(
+        format!("{prefix}context_length"),
+        GgufMetadataValue::Uint32(new_ctx),
+    );
+    metadata.insert(
+        format!("{prefix}rope.scaling.type"),
+        GgufMetadataValue::String("yarn".to_owned()),
+    );
+    let factor = new_ctx as f32 / orig_ctx.max(1) as f32;
+    metadata.insert(
+        format!("{prefix}rope.scaling.factor"),
+        GgufMetadataValue::Float32(factor),
+    );
+    metadata.insert(
+        format!("{prefix}rope.scaling.original_context_length"),
+        GgufMetadataValue::Uint32(orig_ctx),
+    );
+}
+
 fn quantize_gguf_stream(
     input_path: &Path,
     output_path: &Path,
     target: GgufQuantizationType,
     imatrix: Option<&Imatrix>,
+    context_length: Option<u32>,
+    yarn_orig_ctx: Option<u32>,
 ) -> Result<()> {
     ensure_gguf_target_supported(target)?;
     let mapped = load_mapped_gguf(input_path)
@@ -289,6 +334,23 @@ fn quantize_gguf_stream(
         "general.file_type".to_owned(),
         GgufMetadataValue::Uint32(gguf_type_id(target)?),
     );
+    if let Some(new_ctx) = context_length {
+        let arch = parsed.architecture().unwrap_or("llama");
+        let orig = yarn_orig_ctx.or_else(|| {
+            metadata
+                .get(&format!("{arch}.context_length"))
+                .and_then(|v| match v {
+                    GgufMetadataValue::Uint32(n) => Some(*n),
+                    GgufMetadataValue::Uint64(n) => (*n).try_into().ok(),
+                    _ => None,
+                })
+        }).unwrap_or(262144);
+        patch_yarn_context(&mut metadata, arch, new_ctx, orig);
+        eprintln!(
+            "context: YaRN {orig} -> {new_ctx} (factor {:.3})",
+            new_ctx as f32 / orig.max(1) as f32
+        );
+    }
     let plans = build_tensor_plans(parsed, input.len(), target, imatrix)?;
 
     let mut output = File::create(output_path)

@@ -113,6 +113,13 @@ static void build_config(const oc_gguf *g, oc_config *c) {
                        ? u : c->intermediate_size;
     /* norm_topk_prob: default on for softmax routers (mixtral/qwen3moe). */
     c->expert_weights_norm = 1;
+    /* expert_gating_func: 1 = softmax (default), 2 = sigmoid (hunyuan/deepseek). */
+    c->expert_gating_sigmoid =
+        (oc_meta_u32(g, K("expert_gating_func"), &u) && u == 2) ? 1 : 0;
+    /* routed-expert output scale (hunyuan router_scaling_factor / deepseek
+     * routed_scaling_factor); absent -> 1.0 (no scaling). */
+    c->expert_weights_scale =
+        (oc_meta_f32(g, K("expert_weights_scale"), &f) && f > 0.0f) ? f : 1.0f;
   }
   if (oc_meta_u32(g, K("attention.kv_lora_rank"), &u) && u > 0)
     oc_die("model: MLA attention is out of scope for oxidize-c");
@@ -141,6 +148,12 @@ static void load_block(const oc_gguf *g, const char *prefix, oc_layer *L,
     if (weight_empty(&L->e_gate) || weight_empty(&L->e_up) ||
         weight_empty(&L->e_down))
       oc_die("model: MoE layer %s missing expert tensors", prefix);
+    /* Per-expert selection bias (hunyuan sigmoid router), NULL when absent. */
+    L->exp_probs_b = load_vec_n(g, T("exp_probs_b.bias"), &L->exp_probs_b_n);
+    /* Always-on shared expert (hunyuan shared_mlp / qwen-moe shared_expert). */
+    L->sh_gate = load_weight(g, T("ffn_gate_shexp.weight"));
+    L->sh_up = load_weight(g, T("ffn_up_shexp.weight"));
+    L->sh_down = load_weight(g, T("ffn_down_shexp.weight"));
   }
 
   size_t na;
@@ -431,6 +444,8 @@ static void free_block(oc_layer *L) {
   free(L->wq.f32); free(L->wk.f32); free(L->wv.f32); free(L->wo.f32);
   free(L->gate.f32); free(L->up.f32); free(L->down.f32);
   free(L->router.f32); free(L->e_gate.f32); free(L->e_up.f32); free(L->e_down.f32);
+  free(L->exp_probs_b);
+  free(L->sh_gate.f32); free(L->sh_up.f32); free(L->sh_down.f32);
   free(L->q_bias); free(L->k_bias); free(L->v_bias);
   free(L->q_norm); free(L->k_norm);
   free(L->attn_post_norm); free(L->ffn_post_norm);
@@ -863,7 +878,8 @@ static oc_weight expert_view(const oc_weight *w, size_t e) {
   return v;
 }
 
-/* MoE FFN for one token: softmax router -> top-k experts -> weighted sum.
+/* MoE FFN for one token: router (softmax or sigmoid) -> top-k experts ->
+ * weighted sum, plus an optional always-on shared expert (hunyuan/qwen-moe).
  * ponytail: normed is re-quantized per expert (quant_acts shares s->xq, and the
  * down-proj quant clobbers it); k is small so this is cheap. */
 static void ffn_moe(const oc_model *m, const oc_layer *L, float *x,
@@ -875,26 +891,39 @@ static void ffn_moe(const oc_model *m, const oc_layer *L, float *x,
   oc_rms_norm(s->normed, x, L->ffn_norm, h, c->rms_eps);
   const oc_q8blk *rq = quant_acts(s, s->normed, h, 1, w_needs_q8(&L->router));
   oc_gemv(&L->router, ne, h, s->normed, rq, s->e_logits);
-  oc_softmax(s->e_logits, ne);
+  /* Gating: sigmoid (hunyuan/deepseek) keeps per-expert probabilities as the
+   * routing weight; softmax (mixtral/qwen-moe) normalizes across all experts.
+   * For sigmoid, selection uses weight + per-expert bias but the weight itself
+   * stays the raw sigmoid score (renormalized over the top-k below). */
+  if (c->expert_gating_sigmoid)
+    for (size_t e = 0; e < ne; ++e)
+      s->e_logits[e] = 1.0f / (1.0f + expf(-s->e_logits[e]));
+  else
+    oc_softmax(s->e_logits, ne);
 
   size_t idx[64];
   float wts[64];
   for (size_t j = 0; j < k; ++j) {
-    float best = -1.0f;
+    float best = -INFINITY;
     size_t bi = 0;
     for (size_t e = 0; e < ne; ++e) {
       bool taken = false;
       for (size_t t = 0; t < j; ++t) if (idx[t] == e) taken = true;
-      if (!taken && s->e_logits[e] > best) { best = s->e_logits[e]; bi = e; }
+      if (taken) continue;
+      float score = s->e_logits[e];
+      if (L->exp_probs_b && e < L->exp_probs_b_n) score += L->exp_probs_b[e];
+      if (score > best) { best = score; bi = e; }
     }
     idx[j] = bi;
-    wts[j] = best;
+    wts[j] = s->e_logits[bi]; /* routing weight, not the biased selection score */
   }
   if (c->expert_weights_norm) {
     float wsum = 0.0f;
     for (size_t j = 0; j < k; ++j) wsum += wts[j];
     if (wsum > 0.0f) for (size_t j = 0; j < k; ++j) wts[j] /= wsum;
   }
+  if (c->expert_weights_scale != 1.0f)
+    for (size_t j = 0; j < k; ++j) wts[j] *= c->expert_weights_scale;
 
   memset(s->ffn_out, 0, h * sizeof(float));
   for (size_t j = 0; j < k; ++j) {
@@ -911,6 +940,21 @@ static void ffn_moe(const oc_model *m, const oc_layer *L, float *x,
     float wj = wts[j];
     for (size_t i = 0; i < h; ++i) s->ffn_out[i] += wj * s->e_out[i];
   }
+
+  /* Always-on shared expert (unscaled). Uses s->gate/s->up as scratch (sized to
+   * the dense intermediate width >= shared FF) so it never overruns e_g/e_u. */
+  if (!weight_empty(&L->sh_gate)) {
+    size_t sff = L->sh_gate.rows;
+    const oc_q8blk *snq = quant_acts(s, s->normed, h, 1,
+                                     w_needs_q8(&L->sh_gate) || w_needs_q8(&L->sh_up));
+    oc_gemv(&L->sh_gate, sff, h, s->normed, snq, s->gate);
+    oc_gemv(&L->sh_up, sff, h, s->normed, snq, s->up);
+    oc_swiglu(s->gate, s->up, sff);
+    const oc_q8blk *sgq = quant_acts(s, s->gate, sff, 1, w_needs_q8(&L->sh_down));
+    oc_gemv(&L->sh_down, h, sff, s->gate, sgq, s->e_out);
+    for (size_t i = 0; i < h; ++i) s->ffn_out[i] += s->e_out[i];
+  }
+
   for (size_t i = 0; i < h; ++i) x[i] += s->ffn_out[i];
 }
 

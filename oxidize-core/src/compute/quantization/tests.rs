@@ -132,6 +132,8 @@ fn al5_beats_q4_0_mse_on_gaussian_weights() {
 
     let q40_err = mse(&values, &q40_dec);
     let al5_err = mse(&values, &al5_dec);
+    let pct = (1.0 - al5_err / q40_err) * 100.0;
+    eprintln!("AL5 MSE {al5_err:.6} vs Q4_0 {q40_err:.6} ({pct:.1}% lower)");
     assert!(
         al5_err < q40_err,
         "AL5 MSE {al5_err} should beat Q4_0 MSE {q40_err}"

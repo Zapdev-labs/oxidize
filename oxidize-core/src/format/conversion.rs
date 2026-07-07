@@ -263,6 +263,13 @@ pub fn map_hf_tensor_name(name: &str) -> String {
                 "mlp.shared_expert.down_proj.weight" => "ffn_down_shexp.weight",
                 "mlp.shared_expert_gate.weight" => "ffn_gate_inp_shexp.weight",
                 "block_sparse_moe.gate.weight" => "ffn_gate_inp.weight",
+                // Hunyuan (hy_v3): sigmoid router, per-expert selection bias,
+                // and a single always-on shared expert (`shared_mlp`).
+                "mlp.router.gate.weight" => "ffn_gate_inp.weight",
+                "mlp.expert_bias" => "exp_probs_b.bias",
+                "mlp.shared_mlp.gate_proj.weight" => "ffn_gate_shexp.weight",
+                "mlp.shared_mlp.up_proj.weight" => "ffn_up_shexp.weight",
+                "mlp.shared_mlp.down_proj.weight" => "ffn_down_shexp.weight",
                 _ => return name.to_owned(),
             };
             format!("blk.{layer}.{mapped_suffix}")

@@ -129,19 +129,21 @@ pub(super) fn quantize_q4_0_scalar(
 }
 
 /// MSE-optimal scale for one 32-weight block (ggml Q4_0 layout).
-#[inline]
-fn al5_refine_scale(block: &[f32], d: f32) -> f32 {
-    if d == 0.0 {
-        return 0.0;
+#[inline(always)]
+fn al5_quant_levels(block: &[f32], inv_d: f32, levels: &mut [i32; QK4_0]) {
+    for (dst, &v) in levels.iter_mut().zip(block) {
+        *dst = ((v * inv_d).round() as i32).clamp(-8, 7);
     }
-    let inv_d = 1.0 / d;
+}
+
+#[inline(always)]
+fn al5_refine_from_levels(block: &[f32], levels: &[i32; QK4_0], d: f32) -> f32 {
     let mut sumlx = 0.0_f32;
     let mut suml2 = 0.0_f32;
-    for &v in block {
-        let l = (v * inv_d).round() as i32;
-        let l = l.clamp(-8, 7) as f32;
-        sumlx += v * l;
-        suml2 += l * l;
+    for (&v, &l) in block.iter().zip(levels.iter()) {
+        let lf = l as f32;
+        sumlx += v * lf;
+        suml2 += lf * lf;
     }
     if suml2 > 0.0 {
         sumlx / suml2
@@ -150,7 +152,45 @@ fn al5_refine_scale(block: &[f32], d: f32) -> f32 {
     }
 }
 
-/// Fast AL5 block quant: Q4_0 seed + one refinement pass (~2× Q4_0 block cost).
+#[inline(always)]
+fn al5_block_mse(block: &[f32], levels: &[i32; QK4_0], d: f32) -> f32 {
+    if d == 0.0 {
+        return 0.0;
+    }
+    let mut mse = 0.0_f32;
+    for (&v, &l) in block.iter().zip(levels.iter()) {
+        let err = v - l as f32 * d;
+        mse += err * err;
+    }
+    mse / QK4_0 as f32
+}
+
+#[inline(always)]
+fn al5_try_seed(block: &[f32], seed: f32) -> (f32, [i32; QK4_0], f32) {
+    if seed == 0.0 || !seed.is_finite() {
+        return (0.0, [0; QK4_0], f32::MAX);
+    }
+    let mut levels = [0_i32; QK4_0];
+    let inv_seed = 1.0 / seed;
+    al5_quant_levels(block, inv_seed, &mut levels);
+    let d = al5_refine_from_levels(block, &levels, seed);
+    if (d - seed).abs() > f32::EPSILON * d.abs().max(1.0) {
+        al5_quant_levels(block, 1.0 / d, &mut levels);
+    }
+    (d, levels, al5_block_mse(block, &levels, d))
+}
+
+#[inline(always)]
+fn al5_pack_levels(out_block: &mut [u8], d: f32, levels: &[i32; QK4_0]) {
+    out_block[0..2].copy_from_slice(&f32_to_f16_bits(d).to_le_bytes());
+    for i in 0..16 {
+        let lo = (levels[i] + 8) as u8;
+        let hi = (levels[i + 16] + 8) as u8;
+        out_block[2 + i] = lo | (hi << 4);
+    }
+}
+
+/// Fast AL5 block quant: Q4_0 seed + one refinement; second seed if clipped.
 #[inline]
 fn quantize_block_al5(in_block: &[f32], out_block: &mut [u8]) {
     let mut amax = 0.0_f32;
@@ -168,16 +208,18 @@ fn quantize_block_al5(in_block: &[f32], out_block: &mut [u8]) {
         return;
     }
 
-    let mut best_d = mx / -8.0;
-    best_d = al5_refine_scale(in_block, best_d);
-
-    let inv_d = if best_d != 0.0 { 1.0 / best_d } else { 0.0 };
-    out_block[0..2].copy_from_slice(&f32_to_f16_bits(best_d).to_le_bytes());
-    for i in 0..16 {
-        let lo = ((in_block[i] * inv_d).round() as i32).clamp(-8, 7) + 8;
-        let hi = ((in_block[i + 16] * inv_d).round() as i32).clamp(-8, 7) + 8;
-        out_block[2 + i] = lo as u8 | ((hi as u8) << 4);
+    let (mut best_d, mut best_levels, mut best_mse) = al5_try_seed(in_block, mx / -8.0);
+    let saturated = best_levels.iter().any(|&l| l == -8 || l == 7);
+    if saturated {
+        let (d2, levels2, mse2) = al5_try_seed(in_block, amax / 7.0);
+        if mse2 < best_mse {
+            best_d = d2;
+            best_levels = levels2;
+            best_mse = mse2;
+        }
     }
+
+    al5_pack_levels(out_block, best_d, &best_levels);
 }
 
 /// ggml split-halves AL5: same 18-byte block as Q4_0, MSE-optimal per-block scale.

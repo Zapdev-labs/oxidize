@@ -198,7 +198,8 @@ void LlamaModel::d_apply_rope(float* vec, size_t head_dim, size_t num_heads,
     return;
   }
 #endif
-  apply_rope(vec, head_dim, num_heads, pos, theta, rope_dim);
+  apply_rope(vec, head_dim, num_heads, pos, theta, rope_dim,
+             config_.yarn_factor, config_.yarn_orig_ctx);
 }
 
 void LlamaModel::d_swiglu(float* gate, const float* up, float* out, size_t n) {
@@ -277,7 +278,8 @@ void LlamaModel::reject_unsupported(const InferenceConfig& cfg) {
   // GLM-5.2 (glm-dsa) ships 1 nextn/MTP head; we simply skip it (layer_count
   // already excludes it via from_gguf). Other architectures with MTP heads stay
   // out of Phase 1 scope.
-  if (cfg.nextn_predict_layers > 0 && cfg.architecture != Architecture::GlmDsa) {
+  if (cfg.nextn_predict_layers > 0 && cfg.architecture != Architecture::GlmDsa &&
+      cfg.architecture != Architecture::HunyuanMoe) {
     throw std::runtime_error("LlamaModel: MTP/nextn draft layers are out of Phase 1 scope");
   }
   // Gemma-family interleaved global/local sliding window is out of Phase 1.

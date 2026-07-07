@@ -139,6 +139,8 @@ typedef struct {
   size_t n_expert_used;    /* MoE: top-k experts per token */
   size_t expert_ff;        /* MoE: per-expert intermediate size */
   int expert_weights_norm; /* MoE: renormalize the top-k routing weights */
+  int expert_gating_sigmoid; /* MoE: sigmoid router (hunyuan/deepseek); else softmax */
+  float expert_weights_scale; /* MoE: routed-expert output scale (1.0 = off) */
 } oc_config;
 
 typedef struct {
@@ -147,6 +149,10 @@ typedef struct {
   /* MoE: router + expert-stacked FFN weights (per-expert 2D slices). */
   bool is_moe;
   oc_weight router, e_gate, e_up, e_down;
+  float *exp_probs_b;                      /* per-expert selection bias [n_expert], NULL else */
+  size_t exp_probs_b_n;
+  /* MoE shared expert (hunyuan/qwen-moe): always-on FFN, NULL when absent. */
+  oc_weight sh_gate, sh_up, sh_down;
   float *q_bias, *k_bias, *v_bias;         /* NULL when absent */
   size_t q_bias_n, k_bias_n, v_bias_n;
   float *q_norm, *k_norm;                  /* per-head (Qwen3), NULL when absent */

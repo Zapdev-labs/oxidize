@@ -927,7 +927,7 @@ impl InferenceModel {
                                 }
                                 let rotated = &mut ws.head_scratch[..q_rope_len];
                                 rotated.fill(0.0_f32);
-                                apply_rope_f32(
+                                cfg.apply_rope_head(
                                     &q[off..off + q_rope_len],
                                     pos,
                                     q_rope_len,
@@ -949,7 +949,7 @@ impl InferenceModel {
                                 }
                                 let rotated = &mut ws.head_scratch[..k_rope_len];
                                 rotated.fill(0.0_f32);
-                                apply_rope_f32(
+                                cfg.apply_rope_head(
                                     &k_vec[off..off + k_rope_len],
                                     pos,
                                     k_rope_len,
@@ -1716,7 +1716,7 @@ impl InferenceModel {
 
         let k_pe_raw = &kv_pe[kv_lora..kv_lora + kv_pe_dim];
         let k_pe_rope = &mut ws.flash_q[..kv_pe_dim];
-        apply_rope_f32(k_pe_raw, pos, kv_pe_dim, cfg.rope_theta, k_pe_rope)
+        cfg.apply_rope_head(k_pe_raw, pos, kv_pe_dim, cfg.rope_theta, k_pe_rope)
             .map_err(|e| ModelError::InferenceFailed(format!("mla k_pe rope: {:?}", e)))?;
 
         let total_k = n_heads * k_head_dim;
@@ -1761,7 +1761,7 @@ impl InferenceModel {
                 let q_pe = &mut q[q_off + k_nope_dim..q_off + k_head_dim];
                 let rotated = &mut ws.head_scratch[..q_pe_dim];
                 rotated.fill(0.0_f32);
-                apply_rope_f32(q_pe, pos, q_pe_dim, cfg.rope_theta, rotated)
+                cfg.apply_rope_head(q_pe, pos, q_pe_dim, cfg.rope_theta, rotated)
                     .map_err(|e| ModelError::InferenceFailed(format!("mla q_pe: {:?}", e)))?;
                 q_pe.copy_from_slice(&rotated[..q_pe.len()]);
             }

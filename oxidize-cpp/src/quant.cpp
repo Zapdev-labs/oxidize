@@ -8,6 +8,7 @@
 
 #include <array>
 #include <cmath>
+#include <cfloat>
 #include <cstring>
 #include <stdexcept>
 #include <string>
@@ -884,17 +885,90 @@ static void quantize_block_q4_0(const float* x, uint8_t* o) {
   }
 }
 
-static float al5_refine_scale(const float* x, float d) {
+static float al_refine_scale(const float* x, size_t n, float d, int lo, int hi) {
   if (d == 0.0f) return 0.0f;
   float id = 1.0f / d;
   float sumlx = 0.0f;
   float suml2 = 0.0f;
-  for (size_t i = 0; i < QK4_0; ++i) {
-    int l = clamp_i(static_cast<int>(std::lrint(x[i] * id)), -8, 7);
+  for (size_t i = 0; i < n; ++i) {
+    int l = clamp_i(static_cast<int>(std::lrint(x[i] * id)), lo, hi);
     sumlx += x[i] * static_cast<float>(l);
     suml2 += static_cast<float>(l * l);
   }
   return suml2 > 0.0f ? sumlx / suml2 : d;
+}
+
+static float al_refine_scale_iter(const float* x, size_t n, float d, int lo, int hi) {
+  for (int it = 0; it < 4; ++it) {
+    float nd = al_refine_scale(x, n, d, lo, hi);
+    if (std::fabs(nd - d) <= FLT_EPSILON * std::fmax(std::fabs(nd), 1.0f)) return nd;
+    d = nd;
+  }
+  return d;
+}
+
+static float al_block_mse(const float* x, size_t n, float d, int lo, int hi) {
+  if (d == 0.0f) return 0.0f;
+  float id = 1.0f / d;
+  float mse = 0.0f;
+  for (size_t i = 0; i < n; ++i) {
+    int l = clamp_i(static_cast<int>(std::lrint(x[i] * id)), lo, hi);
+    float err = x[i] - static_cast<float>(l) * d;
+    mse += err * err;
+  }
+  return mse / static_cast<float>(n);
+}
+
+static float al_best_initial_scale(const float* x, size_t n, float mx, float amax, int lo, int hi) {
+  const float seeds[3] = {mx / -static_cast<float>(lo), amax / static_cast<float>(hi),
+                          -amax / static_cast<float>(lo)};
+  float best_d = seeds[0];
+  float best_mse = FLT_MAX;
+  for (float seed : seeds) {
+    if (!std::isfinite(seed) || seed == 0.0f) continue;
+    float d = al_refine_scale_iter(x, n, seed, lo, hi);
+    float mse = al_block_mse(x, n, d, lo, hi);
+    if (mse < best_mse) {
+      best_mse = mse;
+      best_d = d;
+    }
+  }
+  return best_d;
+}
+
+static float al5_try_seed(const float* x, float seed, float* best_d, int* levels,
+                          float* best_mse) {
+  if (!std::isfinite(seed) || seed == 0.0f) return *best_mse;
+  int lv[QK4_0];
+  float id = 1.0f / seed;
+  for (size_t i = 0; i < QK4_0; ++i) {
+    lv[i] = clamp_i(static_cast<int>(std::lrint(x[i] * id)), -8, 7);
+  }
+  float sumlx = 0.0f, suml2 = 0.0f;
+  for (size_t i = 0; i < QK4_0; ++i) {
+    float l = static_cast<float>(lv[i]);
+    sumlx += x[i] * l;
+    suml2 += l * l;
+  }
+  float d = suml2 > 0.0f ? sumlx / suml2 : seed;
+  if (std::fabs(d - seed) > FLT_EPSILON * std::fmax(std::fabs(d), 1.0f)) {
+    id = 1.0f / d;
+    for (size_t i = 0; i < QK4_0; ++i) {
+      lv[i] = clamp_i(static_cast<int>(std::lrint(x[i] * id)), -8, 7);
+    }
+  }
+  float mse = 0.0f;
+  for (size_t i = 0; i < QK4_0; ++i) {
+    float err = x[i] - static_cast<float>(lv[i]) * d;
+    mse += err * err;
+  }
+  mse /= static_cast<float>(QK4_0);
+  if (mse < *best_mse) {
+    *best_mse = mse;
+    *best_d = d;
+    for (size_t i = 0; i < QK4_0; ++i) levels[i] = lv[i];
+  }
+  return *best_mse;
 }
 
 static void quantize_block_al5(const float* x, uint8_t* o) {
@@ -916,15 +990,24 @@ static void quantize_block_al5(const float* x, uint8_t* o) {
   }
 
   float best_d = mx / -8.0f;
-  best_d = al5_refine_scale(x, best_d);
+  float best_mse = FLT_MAX;
+  int levels[QK4_0];
+  al5_try_seed(x, mx / -8.0f, &best_d, levels, &best_mse);
+  bool saturated = false;
+  for (size_t i = 0; i < QK4_0; ++i) {
+    if (levels[i] == -8 || levels[i] == 7) {
+      saturated = true;
+      break;
+    }
+  }
+  if (saturated) al5_try_seed(x, amax / 7.0f, &best_d, levels, &best_mse);
 
-  float id = best_d != 0.0f ? 1.0f / best_d : 0.0f;
   uint16_t dh = f32_to_f16_bits(best_d);
   o[0] = static_cast<uint8_t>(dh & 0xff);
   o[1] = static_cast<uint8_t>(dh >> 8);
   for (size_t i = 0; i < QK4_0 / 2; ++i) {
-    int lo = clamp_i(static_cast<int>(std::lrint(x[i] * id)), -8, 7) + 8;
-    int hi = clamp_i(static_cast<int>(std::lrint(x[i + QK4_0 / 2] * id)), -8, 7) + 8;
+    int lo = levels[i] + 8;
+    int hi = levels[i + QK4_0 / 2] + 8;
     o[2 + i] = static_cast<uint8_t>((hi << 4) | lo);
   }
 }

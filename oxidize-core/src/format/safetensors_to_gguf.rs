@@ -265,6 +265,9 @@ fn normalize_hf_arch(model_type: &str) -> String {
             "qwen35".to_owned()
         }
         "llama" | "mistral" | "gemma" | "phi" | "phi3" | "mixtral" => model_type.to_owned(),
+        "hy_v3" | "hyv3" | "hunyuan_v3" | "hunyuan" | "hunyuan_moe" | "hunyuanmoe" => {
+            "hunyuan-moe".to_owned()
+        }
         other => other.to_owned(),
     }
 }
@@ -578,6 +581,36 @@ fn merge_hf_config_metadata(
         &prefix("expert_feed_forward_length"),
         "moe_intermediate_size",
     );
+    // Shared (always-on) experts + leading dense blocks (Hunyuan/DeepSeek MoE).
+    insert_u32(meta, &prefix("expert_shared_count"), "num_shared_experts");
+    insert_u32(
+        meta,
+        &prefix("leading_dense_block_count"),
+        "first_k_dense_replace",
+    );
+    // Routed-expert output scale (Hunyuan `router_scaling_factor`,
+    // DeepSeek `routed_scaling_factor`).
+    if !insert_f32(meta, &prefix("expert_weights_scale"), "router_scaling_factor") {
+        insert_f32(
+            meta,
+            &prefix("expert_weights_scale"),
+            "routed_scaling_factor",
+        );
+    }
+    // Sigmoid routing (expert_gating_func: 1 = softmax, 2 = sigmoid). Hunyuan
+    // sets `moe_router_use_sigmoid`; DeepSeek/LFM2MoE use `scoring_func`.
+    let sigmoid_router = cfg
+        .get("moe_router_use_sigmoid")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+        || cfg
+            .get("scoring_func")
+            .and_then(|v| v.as_str())
+            .map(|s| s.eq_ignore_ascii_case("sigmoid"))
+            .unwrap_or(false);
+    if sigmoid_router {
+        meta.insert(prefix("expert_gating_func"), GgufMetadataValue::Uint32(2));
+    }
 
     // general.architecture MUST match the metadata key prefix (`arch`),
     // otherwise the loader builds keys like `qwen3_5_text.attention.head_count`
