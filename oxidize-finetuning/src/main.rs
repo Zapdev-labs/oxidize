@@ -272,6 +272,11 @@ fn main() -> Result<()> {
             .num_threads(cli.threads)
             .build_global()
             .context("build rayon pool")?;
+    } else if let Ok(n) = std::thread::available_parallelism() {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(n.get())
+            .build_global()
+            .context("build rayon pool")?;
     }
 
     match cli.command {
