@@ -217,6 +217,29 @@ static int count_physical_cores(const std::vector<int>& cpus) {
     return static_cast<int>(cores.size());
 }
 
+static std::vector<int> unique_physical_cpus(const std::vector<int>& cpus) {
+    std::set<std::pair<int, int>> seen;
+    std::vector<int> out;
+    out.reserve(cpus.size());
+    for (int cpu : cpus) {
+        char path[128];
+        std::snprintf(path, sizeof(path),
+                      "/sys/devices/system/cpu/cpu%d/topology/core_id", cpu);
+        std::ifstream f(path);
+        int core = -1;
+        if (!(f >> core)) return cpus;
+        std::snprintf(path, sizeof(path),
+                      "/sys/devices/system/cpu/cpu%d/topology/physical_package_id",
+                      cpu);
+        std::ifstream g(path);
+        int pkg = 0;
+        if (!(g >> pkg)) return cpus;
+        auto key = std::make_pair(pkg, core);
+        if (seen.insert(key).second) out.push_back(cpu);
+    }
+    return out.empty() ? cpus : out;
+}
+
 int init_numa(const NumaConfig& cfg, const std::vector<NumaNode>& nodes) {
     if (nodes.empty()) {
         // No sysfs NUMA info — skip binding, just set threads.
@@ -248,6 +271,7 @@ int init_numa(const NumaConfig& cfg, const std::vector<NumaNode>& nodes) {
 
     // ---- Determine thread count ----
     int n_threads = cfg.threads;
+    bool cap_single_node_physical = false;
     if (n_threads <= 0) {
         if (bound_node) {
             // For memory-bandwidth-bound LLM decode, ALL logical CPUs on one
@@ -261,7 +285,10 @@ int init_numa(const NumaConfig& cfg, const std::vector<NumaNode>& nodes) {
             // 58 tok/s). Multi-node servers keep the all-logical behavior above.
             if (nodes.size() == 1) {
                 int phys = count_physical_cores(bound_node->cpus);
-                if (phys > 0 && phys < n_threads) n_threads = phys;
+                if (phys > 0 && phys < n_threads) {
+                    n_threads = phys;
+                    cap_single_node_physical = true;
+                }
             }
         } else {
             // All / Interleave mode: total logical cores across all nodes.
@@ -325,6 +352,9 @@ int init_numa(const NumaConfig& cfg, const std::vector<NumaNode>& nodes) {
         cfg.mode == NumaMode::Replicate) {
         if (bound_node) {
             target_cpus = bound_node->cpus;
+            if (cap_single_node_physical) {
+                target_cpus = unique_physical_cpus(target_cpus);
+            }
         }
     } else {
         // All / Interleave: gather all cpus across nodes (already sorted by node id).
