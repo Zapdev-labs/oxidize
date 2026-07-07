@@ -430,6 +430,7 @@ static void free_block(oc_layer *L) {
   free(L->attn_norm); free(L->ffn_norm);
   free(L->wq.f32); free(L->wk.f32); free(L->wv.f32); free(L->wo.f32);
   free(L->gate.f32); free(L->up.f32); free(L->down.f32);
+  free(L->router.f32); free(L->e_gate.f32); free(L->e_up.f32); free(L->e_down.f32);
   free(L->q_bias); free(L->k_bias); free(L->v_bias);
   free(L->q_norm); free(L->k_norm);
   free(L->attn_post_norm); free(L->ffn_post_norm);
@@ -557,7 +558,7 @@ static void l2norm(float *v, size_t n) {
 }
 
 /* gated RMS norm, HF Qwen3NextRMSNormGated order: gate FIRST (variance over
- * the gated values), then normalize and scale. Set OC_GDN_GATE_AFTER=1 to use
+ * the gated values), then normalize and scale. Set OC_GDN_GATE_FIRST=0 to use
  * the alternative order (norm of raw x, then gate). */
 static void gated_rms_norm(float *x, const float *w, const float *gate, size_t n,
                            float eps) {
@@ -591,30 +592,34 @@ typedef struct {
 } scratch_t;
 
 /* max projection widths across all layers (q incl. gate half, qkv_out) */
-static void model_maxdims(const oc_model *m, size_t *max_q, size_t *max_qkv) {
+static void model_maxdims(const oc_model *m, size_t *max_q, size_t *max_qkv,
+                          size_t *max_kv) {
   size_t q = m->cfg.n_heads * m->cfg.head_dim, s = 0;
+  size_t kv = m->cfg.kv_heads * m->cfg.head_dim;
   for (size_t l = 0; l < m->cfg.layer_count; ++l) {
     const oc_layer *L = &m->layers[l];
+    size_t lkv = L->n_kv * L->hd;
+    if (lkv > kv) kv = lkv;
     if (L->is_gdn) { if (L->qkv_out > s) s = L->qkv_out; }
     else if (L->wq.rows > q) q = L->wq.rows;
   }
   if (m->mtp && m->mtp->layer.wq.rows > q) q = m->mtp->layer.wq.rows;
   *max_q = q;
   *max_qkv = s;
+  *max_kv = kv;
 }
 
 static scratch_t scratch_alloc(const oc_model *m, size_t batch) {
   const oc_config *c = &m->cfg;
   size_t h = c->hidden_size, in = c->intermediate_size;
-  size_t kvn = c->kv_heads * c->head_dim;
-  size_t max_q, max_qkv;
-  model_maxdims(m, &max_q, &max_qkv);
+  size_t max_q, max_qkv, max_kv;
+  model_maxdims(m, &max_q, &max_qkv, &max_kv);
   scratch_t s = {0};
   s.batch = batch;
   s.normed = malloc(batch * h * sizeof(float));
   s.q = malloc(batch * max_q * sizeof(float));
-  s.k = malloc(batch * (kvn ? kvn : 1) * sizeof(float));
-  s.v = malloc(batch * (kvn ? kvn : 1) * sizeof(float));
+  s.k = malloc(batch * (max_kv ? max_kv : 1) * sizeof(float));
+  s.v = malloc(batch * (max_kv ? max_kv : 1) * sizeof(float));
   s.attn = malloc(batch * max_q * sizeof(float));
   s.attn_out = malloc(batch * h * sizeof(float));
   s.gate = malloc(batch * in * sizeof(float));

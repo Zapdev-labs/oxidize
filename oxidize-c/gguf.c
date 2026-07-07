@@ -66,6 +66,21 @@ static double rnum(rdr *r, uint32_t t) {
   return 0;
 }
 
+static void skip_meta_value(rdr *r, uint32_t t) {
+  if (t == 8) {
+    uint64_t n = r64(r);
+    (void)take(r, (size_t)n);
+    return;
+  }
+  if (t == 9) {
+    uint32_t et = r32(r);
+    uint64_t n = r64(r);
+    for (uint64_t i = 0; i < n; ++i) skip_meta_value(r, et);
+    return;
+  }
+  (void)rnum(r, t);
+}
+
 oc_gguf *oc_gguf_load(const char *path) {
   int fd = open(path, O_RDONLY);
   if (fd < 0) oc_die("gguf: cannot open %s", path);
@@ -109,7 +124,7 @@ oc_gguf *oc_gguf_load(const char *path) {
         e->strs = malloc((size_t)n * sizeof(char *));
         for (uint64_t i = 0; i < n; ++i) e->strs[i] = rstr(&r);
       } else if (et == 9) {
-        oc_die("gguf: nested metadata arrays unsupported");
+        for (uint64_t i = 0; i < n; ++i) skip_meta_value(&r, et);
       } else {
         e->nums = malloc((size_t)n * sizeof(double));
         for (uint64_t i = 0; i < n; ++i) e->nums[i] = rnum(&r, et);
@@ -146,6 +161,8 @@ oc_gguf *oc_gguf_load(const char *path) {
   uint64_t data_start = ((uint64_t)r.cur + align - 1) & ~(align - 1);
   if (data_start > size) oc_die("gguf: unexpected EOF");
   for (size_t t = 0; t < g->n_tensors; ++t) {
+    if (g->tensors[t].offset > UINT64_MAX - data_start)
+      oc_die("gguf: tensor offset overflow");
     g->tensors[t].offset += data_start;
     if (g->tensors[t].offset > size) oc_die("gguf: tensor offset out of range");
   }

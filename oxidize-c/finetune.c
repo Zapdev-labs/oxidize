@@ -378,6 +378,7 @@ int oc_finetune_main(int argc, char **argv) {
       continue;
     }
     for (size_t i = 0; i <= tn; ++i) { /* <= tn: trailing EOS separator */
+      if (i == tn && cur_n == 0) continue; /* avoid synthetic EOS-only boundary */
       uint32_t id = i < tn ? ids[i] : eos;
       cur[cur_n++] = id;
       if (cur_n == max_seq_len) {

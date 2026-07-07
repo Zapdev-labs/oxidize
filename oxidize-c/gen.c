@@ -86,7 +86,8 @@ static size_t ngram_draft(const uint32_t *hist, size_t n_hist, size_t k,
   for (size_t start = n_hist - N; start-- > 0;) {
     if (memcmp(hist + start, tail, N * sizeof(uint32_t)) == 0) {
       size_t src = start + N;
-      size_t avail = n_hist - N - src; /* don't copy the tail itself */
+      if (src >= n_hist - N) continue;
+      size_t avail = (n_hist - N) - src; /* don't copy the tail itself */
       size_t nd = avail < k ? avail : k;
       if (nd == 0) return 0;
       memcpy(out, hist + src, nd * sizeof(uint32_t));
@@ -98,6 +99,7 @@ static size_t ngram_draft(const uint32_t *hist, size_t n_hist, size_t k,
 
 size_t oc_generate(oc_gen *g, const uint32_t *prompt, size_t n_prompt,
                    size_t max_new, uint32_t *out) {
+  if (!g || !g->m || !prompt || n_prompt == 0 || !out) return 0;
   oc_model *m = g->m;
   const size_t vocab = m->cfg.vocab_size;
   size_t k = g->draft_k;
@@ -107,6 +109,7 @@ size_t oc_generate(oc_gen *g, const uint32_t *prompt, size_t n_prompt,
    * CPU-only. The resident GPU forward keeps state on-device, so disable spec
    * there (the GPU is fast enough not to need it). */
   if (m->gpu_active) k = 0;
+  if (k > 63) k = 63;
 
   oc_reset_state(m);
   float *pending = malloc(vocab * sizeof(float));
@@ -161,7 +164,7 @@ size_t oc_generate(oc_gen *g, const uint32_t *prompt, size_t n_prompt,
           break;
         }
       }
-      if (full)
+      if (full && total < 64)
         tokens[total++] = sample_pick(verify + nd * vocab, vocab, g->temperature,
                                       g->top_k, g->top_p);
       g->drafted += nd;

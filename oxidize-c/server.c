@@ -18,6 +18,7 @@
 #include <errno.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <math.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -101,6 +102,20 @@ static double json_number(const char *body, const char *key, double dflt) {
   return v ? strtod(v, NULL) : dflt;
 }
 
+static bool json_size_t_bounded(const char *body, const char *key, size_t dflt,
+                                size_t min_v, size_t max_v, size_t *out) {
+  const char *v = json_value(body, key);
+  if (!v) {
+    *out = dflt;
+    return true;
+  }
+  char *end = NULL;
+  double dv = strtod(v, &end);
+  if (v == end || !isfinite(dv) || dv < (double)min_v || dv > (double)max_v) return false;
+  *out = (size_t)dv;
+  return true;
+}
+
 static bool json_bool(const char *body, const char *key, bool dflt) {
   const char *v = json_value(body, key);
   if (!v) return dflt;
@@ -133,8 +148,9 @@ static char *build_prompt(const char *body) {
     while ((p = strstr(p, "\"role\"")) != NULL) {
       const char *rv = json_value(p, "role");
       if (!rv || *rv != '"') break;
-      const char *e;
+      const char *e = p + 6;
       char *role = json_string(rv, &e);
+      if (!role || !e) { free(role); break; }
       const char *cv = json_value(p, "content");
       char *content = cv && *cv == '"' ? json_string(cv, NULL) : NULL;
       if (role && content) {
@@ -188,22 +204,20 @@ typedef struct {
 
 static void stream_token(uint32_t id, void *ud) {
   stream_ctx *ctx = ud;
-  char frag[512], esc[1200], chunk[1400];
+  char frag[512], chunk[2048];
   size_t fn = oc_detokenize(ctx->tok, id, frag, sizeof frag);
-  char *e = esc;
-  size_t en = 0, ecap = sizeof esc;
-  {
-    char *ep = e;
-    size_t tmpn = 0, tmpcap = ecap;
-    buf_append_json(&ep, &tmpn, &tmpcap, frag, fn); /* esc is stack; cap fits */
-    en = tmpn;
-  }
+  size_t ecap = fn * 6 + 64;
+  char *esc = malloc(ecap);
+  char *ep = esc;
+  size_t en = 0, tmpcap = ecap;
+  buf_append_json(&ep, &en, &tmpcap, frag, fn);
   esc[en] = 0;
   int cn = snprintf(chunk, sizeof chunk,
                     "data: {\"choices\":[{\"delta\":{\"content\":\"%s\"},"
                     "\"index\":0}]}\n\n",
                     esc);
   send_all(ctx->fd, chunk, (size_t)cn);
+  free(ep);
 }
 
 static volatile sig_atomic_t g_stop = 0;
@@ -344,14 +358,17 @@ typedef struct { int fd; oc_tokenizer *tok; } ws_ctx;
 
 static void ws_token(uint32_t id, void *ud) {
   ws_ctx *ctx = ud;
-  char frag[512], esc[1200], frame[1400];
+  char frag[512], frame[2048];
   size_t fn = oc_detokenize(ctx->tok, id, frag, sizeof frag);
+  size_t ecap = fn * 6 + 64;
+  char *esc = malloc(ecap);
   char *ep = esc;
-  size_t en = 0, ecap = sizeof esc;
-  buf_append_json(&ep, &en, &ecap, frag, fn);
+  size_t en = 0, tmpcap = ecap;
+  buf_append_json(&ep, &en, &tmpcap, frag, fn);
   esc[en] = 0;
   snprintf(frame, sizeof frame, "{\"type\":\"token\",\"content\":\"%s\"}", esc);
   ws_send_text(ctx->fd, frame);
+  free(ep);
 }
 
 /* One WebSocket session: each client text message is a request (same JSON as
@@ -396,7 +413,12 @@ static void ws_session(int fd, const char *req_headers, oc_model *m,
       snprintf(prompt, need,
                "<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n", msg);
     }
-    size_t max_new = (size_t)json_number(msg, "max_tokens", 512);
+    size_t max_new = 512;
+    if (!json_size_t_bounded(msg, "max_tokens", 512, 1, m->kv_ctx, &max_new)) {
+      ws_send_text(fd, "{\"type\":\"error\",\"message\":\"bad max_tokens\"}");
+      free(msg);
+      continue;
+    }
     float temp = (float)json_number(msg, "temperature", (double)temperature);
     free(msg);
     if (max_new > m->kv_ctx - 64) max_new = m->kv_ctx - 64;
@@ -523,7 +545,12 @@ int oc_serve(oc_model *m, oc_tokenizer *tok, const char *host, int port,
       close(fd);
       continue;
     }
-    size_t max_new = (size_t)json_number(body, "max_tokens", 512);
+    size_t max_new = 512;
+    if (!json_size_t_bounded(body, "max_tokens", 512, 1, m->kv_ctx, &max_new)) {
+      send_simple(fd, 400, "application/json", "{\"error\":\"bad max_tokens\"}");
+      close(fd);
+      continue;
+    }
     float temp = (float)json_number(body, "temperature", (double)temperature);
     bool stream = json_bool(body, "stream", false);
     if (max_new > m->kv_ctx - 64) max_new = m->kv_ctx - 64;

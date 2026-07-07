@@ -85,7 +85,16 @@ def download():
 
 
 def _bench(max_tokens: int, ctx: int) -> None:
+    import os
     import subprocess
+
+    if not (os.path.exists(GGUF) and os.path.getsize(GGUF) > 16_000_000_000):
+        subprocess.run(
+            ["aria2c", "-x16", "-s16", "-c", "--console-log-level=warn",
+             "--summary-interval=15", "-d", "/vol", "-o", GGUF.split("/")[-1], GGUF_URL],
+            check=True,
+        )
+        vol.commit()
 
     subprocess.run(["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv"])
     subprocess.run(["make", "cuda"], cwd="/src/oxidize-c", check=True)

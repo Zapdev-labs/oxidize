@@ -26,6 +26,18 @@ image = (
 )
 
 
+def ensure_model() -> None:
+    import os
+
+    if os.path.exists(MODEL_PATH):
+        return
+    subprocess.run(
+        ["wget", "-q", "-O", MODEL_PATH + ".part", MODEL_URL], check=True
+    )
+    os.rename(MODEL_PATH + ".part", MODEL_PATH)
+    vol.commit()
+
+
 @app.function(
     image=image,
     gpu="A10G",
@@ -38,12 +50,9 @@ image = (
 def serve():
     import os
 
-    if not os.path.exists(MODEL_PATH):
-        subprocess.run(
-            ["wget", "-q", "-O", MODEL_PATH + ".part", MODEL_URL], check=True
-        )
-        os.rename(MODEL_PATH + ".part", MODEL_PATH)
-        vol.commit()
+    ensure_model()
+    if not os.getenv("OXIDIZE_API_KEY") and not os.getenv("OXIDIZE_API_KEYS"):
+        raise RuntimeError("missing OXIDIZE_API_KEY or OXIDIZE_API_KEYS")
     subprocess.Popen(
         [
             "/src/oxidize-c-cuda",
@@ -58,6 +67,7 @@ def serve():
 def debug():
     """One-shot: load model on GPU + generate a few tokens, stderr visible."""
     import subprocess
+    ensure_model()
     r = subprocess.run(
         ["/src/oxidize-c-cuda", "--model", MODEL_PATH, "--prompt",
          "The capital of France is a beautiful city with a long history and", "--max-tokens", "64", "--ctx", "8192"],
@@ -72,6 +82,7 @@ def debug():
 def debug_serve():
     """Start --serve, probe with urllib (curl absent), capture real behavior."""
     import subprocess, time, json, urllib.request, socket
+    ensure_model()
     p = subprocess.Popen(
         ["/src/oxidize-c-cuda", "--model", MODEL_PATH, "--serve",
          "--host", "127.0.0.1", "--port", "8090", "--ctx", "8192"],

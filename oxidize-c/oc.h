@@ -1,9 +1,6 @@
-/* oxidize-c: plain-C port of the oxidize-cpp dense Llama-family CPU inference
- * path (GGUF parse, quant dequant + fused int8 gemv, tokenizer, model, CLI).
- *
- * Scope (ponytail): dense Llama/Mistral/Qwen/TinyLlama decode only. No MoE,
- * MLA, CUDA, split GGUF, training, or server. Errors exit(1) with a message
- * (single-purpose CLI process). */
+/* oxidize-c: plain-C runtime + tools surface (GGUF parse, quant/dequant,
+ * tokenizer, model forward, generation, server, pruning, finetune, optional CUDA).
+ * Errors exit(1) with a message for CLI-first tooling. */
 #ifndef OC_H
 #define OC_H
 

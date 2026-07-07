@@ -108,7 +108,7 @@ oc_tokenizer *oc_tokenizer_load(const oc_gguf *g) {
   bool bpe;
   if (strcmp(model, "gpt2") == 0 || strcmp(model, "bpe") == 0) bpe = true;
   else if (strcmp(model, "llama") == 0) bpe = false;
-  else if (strcmp(model, "gemma4") == 0) bpe = false; /* SPM pieces; merges as BPE
+  else if (strcmp(model, "gemma") == 0 || strcmp(model, "gemma4") == 0) bpe = false; /* SPM pieces; merges as BPE
     ranks in llama.cpp — greedy SPM segmentation is close enough here */
   else {
     fprintf(stderr, "warning: unsupported tokenizer '%s'\n", model);
@@ -413,25 +413,35 @@ uint32_t *oc_tokenize(const oc_tokenizer *t, const char *text, bool add_bos,
   /* Split on "<|...|>" special tokens that exist verbatim in the vocab
    * (ChatML markers etc.); BPE/SPM the plain spans between them. */
   const char *p = text;
-  char span[4096];
-  size_t sn = 0;
+  size_t scap = 4096, sn = 0;
+  char *span = malloc(scap);
   while (*p) {
-    if (p[0] == '<' && p[1] == '|') {
-      const char *end = strstr(p + 2, "|>");
-      if (end && (size_t)(end + 2 - p) <= 64) {
-        int32_t id = map_get(&t->piece_to_id, p, (size_t)(end + 2 - p));
+    if (p[0] == '<') {
+      const char *end = NULL;
+      if (p[1] == '|') end = strstr(p + 2, "|>");
+      if (!end) end = strchr(p + 1, '>');
+      if (end && (size_t)(end + 1 - p) <= 96) {
+        size_t tok_len = (size_t)(end + 1 - p);
+        int32_t id = map_get(&t->piece_to_id, p, tok_len);
         if (id >= 0) {
           if (sn) { span[sn] = 0; encode_span(t, span, &out); sn = 0; }
           idpush(&out, (uint32_t)id);
-          p = end + 2;
+          p = end + 1;
           continue;
         }
       }
     }
-    if (sn + 1 >= sizeof span) { span[sn] = 0; encode_span(t, span, &out); sn = 0; }
+    unsigned char c = (unsigned char)*p;
+    size_t ulen = utf8_len(c);
+    if (sn + ulen + 1 >= scap) {
+      while (sn + ulen + 1 >= scap) scap *= 2;
+      span = realloc(span, scap);
+    }
     span[sn++] = *p++;
+    for (size_t i = 1; i < ulen && *p; ++i) span[sn++] = *p++;
   }
   if (sn) { span[sn] = 0; encode_span(t, span, &out); }
+  free(span);
   *n_out = out.n;
   return out.v;
 }

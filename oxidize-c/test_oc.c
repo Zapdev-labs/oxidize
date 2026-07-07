@@ -21,17 +21,26 @@ static void check_quant(oc_quant q, size_t cols) {
   size_t rb = oc_row_bytes(q, cols);
   uint8_t *row = malloc(rb);
   for (size_t i = 0; i < rb; ++i) row[i] = (uint8_t)(rnd() >> 13);
+  if (q == OC_F16 || q == OC_BF16 || q == OC_F32 || q == OC_Q8_0 || q == OC_AL8) {
+    float *tmp = malloc(cols * sizeof(float));
+    for (size_t i = 0; i < cols; ++i)
+      tmp[i] = ((float)(rnd() & 0xFFFF) / 65536.0f - 0.5f) * 2.0f;
+    assert(oc_quantize_row(q, tmp, row, cols));
+    free(tmp);
+  }
   /* overwrite f16 scale fields with sane small values to avoid inf/nan */
   size_t bb = oc_block_bytes(q), nv = oc_block_values(q);
-  for (size_t b = 0; b < cols / nv; ++b) {
-    uint8_t *blk = row + b * bb;
-    uint16_t half = 0x2c00 | (rnd() & 0xFF); /* ~[0.06, 0.12) */
-    size_t off = q == OC_Q2_K ? 80 : q == OC_Q3_K ? 108 : q == OC_Q6_K ? 208 : 0;
-    memcpy(blk + off, &half, 2);
-    if (q == OC_Q4_K || q == OC_Q5_K || q == OC_Q2_K || q == OC_Q4_1 ||
-        q == OC_Q5_1) {
-      uint16_t mh = 0x2800 | (rnd() & 0xFF);
-      memcpy(blk + (q == OC_Q2_K ? 82 : 2), &mh, 2);
+  if (q != OC_F32 && q != OC_F16 && q != OC_BF16) {
+    for (size_t b = 0; b < cols / nv; ++b) {
+      uint8_t *blk = row + b * bb;
+      uint16_t half = 0x2c00 | (rnd() & 0xFF); /* ~[0.06, 0.12) */
+      size_t off = q == OC_Q2_K ? 80 : q == OC_Q3_K ? 108 : q == OC_Q6_K ? 208 : 0;
+      memcpy(blk + off, &half, 2);
+      if (q == OC_Q4_K || q == OC_Q5_K || q == OC_Q2_K || q == OC_Q4_1 ||
+          q == OC_Q5_1) {
+        uint16_t mh = 0x2800 | (rnd() & 0xFF);
+        memcpy(blk + (q == OC_Q2_K ? 82 : 2), &mh, 2);
+      }
     }
   }
 
@@ -339,7 +348,7 @@ int main(void) {
   size_t cols = 512;
   oc_quant types[] = {OC_F16, OC_BF16, OC_Q4_0, OC_Q4_1, OC_Q5_0, OC_Q5_1,
                       OC_Q8_0, OC_Q2_K, OC_Q3_K, OC_Q4_K, OC_Q5_K, OC_Q6_K,
-                      OC_IQ4_XS, OC_IQ2_XXS, OC_IQ2_XS, OC_IQ2_S,
+                      OC_AL5, OC_IQ4_XS, OC_IQ2_XXS, OC_IQ2_XS, OC_IQ2_S,
                       OC_IQ3_XXS, OC_IQ3_S};
   for (size_t i = 0; i < sizeof(types) / sizeof(*types); ++i)
     check_quant(types[i], cols);

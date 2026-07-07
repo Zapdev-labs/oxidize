@@ -180,7 +180,14 @@ uint16_t oc_f32_to_f16(float f) {
   uint32_t sign = (x >> 16) & 0x8000;
   int32_t exp = (int32_t)((x >> 23) & 0xFF) - 127 + 15;
   uint32_t mant = x & 0x7FFFFF;
-  if (exp >= 31) return (uint16_t)(sign | 0x7C00);       /* inf / overflow */
+  if (exp >= 31) {
+    if ((x & 0x7FFFFFFFu) > 0x7F800000u) {
+      uint16_t payload = (uint16_t)((mant >> 13) & 0x03FFu);
+      if (payload == 0) payload = 1;
+      return (uint16_t)(sign | 0x7C00u | payload);       /* NaN */
+    }
+    return (uint16_t)(sign | 0x7C00u);                   /* inf / overflow */
+  }
   if (exp <= 0) {                                        /* subnormal / zero */
     if (exp < -10) return (uint16_t)sign;
     mant |= 0x800000;

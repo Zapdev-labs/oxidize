@@ -83,7 +83,7 @@ int main(int argc, char **argv) {
   const char *model_path = NULL, *prompt = "Hello", *host = "127.0.0.1";
   size_t max_tokens = 64, top_k = 0, ctx = 8192, draft = 4;
   int kv_int8 = 0;
-  int spec_mode = 2; /* off by default: spec pays only at high acceptance on CPU */
+  int spec_mode = OC_SPEC_NGRAM;
   float temperature = 0.0f, top_p = 1.0f;
   int threads = 0, port = 8090;
   bool no_bos = false, stream = false, serve = false, chat = false;
@@ -98,7 +98,10 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[i], "--draft")) draft = strtoull(VAL(), 0, 10);
     else if (!strcmp(argv[i], "--spec")) {
       const char *v = VAL();
-      spec_mode = !strcmp(v, "mtp") ? 1 : !strcmp(v, "off") ? 2 : 0;
+      if (!strcmp(v, "ngram")) spec_mode = OC_SPEC_NGRAM;
+      else if (!strcmp(v, "mtp")) spec_mode = OC_SPEC_MTP;
+      else if (!strcmp(v, "off")) spec_mode = OC_SPEC_OFF;
+      else usage(argv[0]);
     }
     else if (!strcmp(argv[i], "--threads")) threads = atoi(VAL());
     else if (!strcmp(argv[i], "--temperature")) temperature = strtof(VAL(), 0);
@@ -110,7 +113,13 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[i], "--stream")) stream = true;
     else if (!strcmp(argv[i], "--serve")) serve = true;
     else if (!strcmp(argv[i], "--chat")) chat = true;
-    else if (!strcmp(argv[i], "--port")) port = atoi(VAL());
+    else if (!strcmp(argv[i], "--port")) {
+      const char *p = VAL();
+      char *end = NULL;
+      long v = strtol(p, &end, 10);
+      if (!p[0] || (end && *end) || v < 1 || v > 65535) oc_die("bad --port %s", p);
+      port = (int)v;
+    }
     else if (!strcmp(argv[i], "--host")) host = VAL();
     else usage(argv[0]);
 #undef VAL
@@ -145,7 +154,11 @@ int main(int argc, char **argv) {
   oc_tokenizer *tok = oc_tokenizer_load(m->g);
   if (!tok) oc_die("no usable tokenizer in GGUF");
 
-  if (serve) return oc_serve(m, tok, host, port, temperature, draft, spec_mode);
+  if (serve) {
+    if (!getenv("OXIDIZE_API_KEY") && !getenv("OXIDIZE_API_KEYS"))
+      oc_die("serve: set OXIDIZE_API_KEY or OXIDIZE_API_KEYS");
+    return oc_serve(m, tok, host, port, temperature, draft, spec_mode);
+  }
 
   /* ---- one-shot CLI ---- */
   char *wrapped = NULL;

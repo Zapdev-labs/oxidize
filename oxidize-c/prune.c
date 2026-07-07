@@ -79,13 +79,17 @@ void oc_nm_mask(const float *scores, size_t rows, size_t cols, size_t n,
     for (size_t blk = 0; blk < cols / m; ++blk) {
       const float *s = scores + r * cols + blk * m;
       bool *mk = mask + r * cols + blk * m;
-      for (size_t kept = n; kept < m; ++kept) {
+      size_t cur_true = 0;
+      for (size_t k = 0; k < m; ++k)
+        if (mk[k]) cur_true++;
+      while (cur_true > n) {
         /* drop the lowest-scoring still-kept entry (m is 4 or 8: O(m^2) ok) */
         size_t worst = m;
         for (size_t k = 0; k < m; ++k)
           if (mk[k] && (worst == m || s[k] < s[worst])) worst = k;
         if (worst == m) break;
         mk[worst] = false;
+        cur_true--;
       }
     }
   }
@@ -257,9 +261,16 @@ int oc_prune_main(int argc, char **argv) {
     else if (!strcmp(argv[i], "--output")) output = PVAL();
     else if (!strcmp(argv[i], "--calibration")) calibration = PVAL();
     else if (!strcmp(argv[i], "--sparsity")) sparsity = strtof(PVAL(), NULL);
-    else if (!strcmp(argv[i], "--keep")) keeps[n_keeps++ % 64] = PVAL();
-    else if (!strcmp(argv[i], "--drop")) drops[n_drops++ % 64] = PVAL();
-    else if (!strcmp(argv[i], "--keep-name")) keep_names[n_keep_names++ % 64] = PVAL();
+    else if (!strcmp(argv[i], "--keep")) {
+      if (n_keeps >= 64) oc_die("prune: too many --keep filters (max 64)");
+      keeps[n_keeps++] = PVAL();
+    } else if (!strcmp(argv[i], "--drop")) {
+      if (n_drops >= 64) oc_die("prune: too many --drop filters (max 64)");
+      drops[n_drops++] = PVAL();
+    } else if (!strcmp(argv[i], "--keep-name")) {
+      if (n_keep_names >= 64) oc_die("prune: too many --keep-name filters (max 64)");
+      keep_names[n_keep_names++] = PVAL();
+    }
     else if (!strcmp(argv[i], "--dry-run")) dry_run = true;
     else if (!strcmp(argv[i], "--method")) {
       const char *v = PVAL();

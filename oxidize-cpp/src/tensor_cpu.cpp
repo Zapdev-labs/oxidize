@@ -693,6 +693,9 @@ inline bool is_q4_sym(QuantType q) {
 }
 
 inline bool int8_gemv_ok(QuantType q, size_t cols) {
+  if (!(__builtin_cpu_supports("avx2") && __builtin_cpu_supports("f16c"))) {
+    return false;
+  }
   if (cols % 32 != 0) return false;
   if (is_q4_sym(q) || q == QuantType::Q8_0 || q == QuantType::AL8 || q == QuantType::IQ4_NL) return true;
   if ((is_q4_k(q) || q == QuantType::Q6_K) && cols % QK_K == 0) return true;
