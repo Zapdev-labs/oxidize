@@ -23,6 +23,70 @@ pub(super) fn longcat_dense_forced() -> bool {
     })
 }
 
+/// GatedDeltaNet helpers (Qwen3.5 hybrid `is_mamba` layers). Mirrors the
+/// reference math in `layer_wise/ssm.rs`; kept module-local to avoid coupling
+/// the fast `InferenceModel` path to the streaming `LayerWiseModel` module.
+fn gdn_l2_normalize(v: &mut [f32]) {
+    let mut sum = 0.0_f32;
+    for x in v.iter() {
+        sum += x * x;
+    }
+    let inv = 1.0_f32 / (sum + 1e-6_f32).sqrt();
+    for x in v.iter_mut() {
+        *x *= inv;
+    }
+}
+
+fn gdn_sigmoid(x: f32) -> f32 {
+    1.0_f32 / (1.0_f32 + (-x).exp())
+}
+
+fn gdn_softplus(x: f32) -> f32 {
+    if x > 20.0_f32 { x } else { (1.0_f32 + x.exp()).ln() }
+}
+
+/// llama.cpp qwen3next gated RMSNorm: rmsnorm(x)*weight*silu(gate). Near-zero eps
+/// (env `OXIDIZE_GDN_EPS`); `OXIDIZE_GDN_GATE_FIRST` selects HF gate-before-norm.
+fn gdn_gated_rms_norm(x: &mut [f32], weight: &[f32], gate: &[f32], eps: f32) {
+    let n = x.len();
+    if n == 0 {
+        return;
+    }
+    let eps = std::env::var("OXIDIZE_GDN_EPS")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(eps);
+    if std::env::var_os("OXIDIZE_GDN_GATE_FIRST").is_some() {
+        for i in 0..n {
+            let g = gate.get(i).copied().unwrap_or(0.0_f32);
+            x[i] *= g * (1.0_f32 / (1.0_f32 + (-g).exp()));
+        }
+        let mut var = 0.0_f32;
+        for val in x.iter() {
+            var += val * val;
+        }
+        var /= n as f32;
+        let inv = 1.0_f32 / (var + eps).sqrt();
+        for i in 0..n {
+            let w = weight.get(i).copied().unwrap_or(1.0_f32);
+            x[i] = x[i] * inv * w;
+        }
+        return;
+    }
+    let mut var = 0.0_f32;
+    for val in x.iter() {
+        var += val * val;
+    }
+    var /= n as f32;
+    let inv = 1.0_f32 / (var + eps).sqrt();
+    for i in 0..n {
+        let w = weight.get(i).copied().unwrap_or(1.0_f32);
+        let g = gate.get(i).copied().unwrap_or(0.0_f32);
+        let silu = g * (1.0_f32 / (1.0_f32 + (-g).exp()));
+        x[i] = x[i] * inv * w * silu;
+    }
+}
+
 /// Cached check for true continuous-batching decode (env `OX_BATCHED_DECODE`).
 /// When set, the paged runtime / batched-decode bench may run N decode tokens
 /// (one per running sequence) through [`InferenceModel::forward_batch`] as a
@@ -571,203 +635,205 @@ impl InferenceModel {
                     ws.x[i] += attn_out[i];
                 }
             } else if is_mamba {
-                // ---- Mamba/SSM layer ----
+                // ---- Qwen3.5 GatedDeltaNet (linear-attention) layer ----
+                // in_proj -> causal conv1d + SiLU -> split q/k/v -> L2-norm q,k ->
+                // per-head delta rule: state *= exp(-exp(A)*dt); state += k⊗((v -
+                // state·k)·β); out = state·q -> gated RMSNorm(z) -> out_proj.
+                // Matches llama.cpp GATED_DELTA_NET / layer_wise/ssm.rs (NOT the
+                // diagonal Mamba SSM that previously lived here).
                 let mamba_out = {
-                    let normed = &mut ws.hidden_a[..h];
-                    normed.fill(0.0_f32);
-                    rms_norm_f32(&ws.x[..h], &layer.attn_norm, cfg.rms_norm_eps, normed)
-                        .map_err(|e| ModelError::InferenceFailed(format!("mamba_norm: {:?}", e)))?;
+                    let mut normed = vec![0.0_f32; h];
+                    rms_norm_f32(&ws.x[..h], &layer.attn_norm, cfg.rms_norm_eps, &mut normed)
+                        .map_err(|e| ModelError::InferenceFailed(format!("gdn_norm: {:?}", e)))?;
 
-                    // Gate branch
-                    let gate_len = if !layer.attn_gate.is_empty() {
-                        layer.attn_gate.output_dim(h)
-                    } else {
-                        0
-                    };
-                    if gate_len > 0 {
-                        let gate = &mut ws.intermediate_a[..gate_len];
-                        gate.fill(0.0_f32);
-                        gemv_weight(&layer.attn_gate, gate_len, h, normed, gate).map_err(|e| {
-                            ModelError::InferenceFailed(format!("attn_gate: {:?}", e))
-                        })?;
-                    }
-
-                    // SSM branch projection: [h] -> [qkv_out_len]
                     let qkv_out_len = layer.attn_qkv.output_dim(h);
-                    let x_proj = &mut ws.q_full[..qkv_out_len];
-                    x_proj.fill(0.0_f32);
-                    gemv_weight(&layer.attn_qkv, qkv_out_len, h, normed, x_proj)
-                        .map_err(|e| ModelError::InferenceFailed(format!("attn_qkv: {:?}", e)))?;
+                    let value_dim = layer.attn_gate.output_dim(h);
+                    if qkv_out_len == 0 || value_dim == 0 || value_dim >= qkv_out_len {
+                        vec![0.0_f32; h]
+                    } else {
+                        let key_dim = (qkv_out_len - value_dim) / 2;
+                        let num_v_heads = layer.ssm_a.len().max(1);
+                        let head_v_dim = if layer.ssm_norm.len() > 1 {
+                            layer.ssm_norm.len()
+                        } else {
+                            value_dim / num_v_heads
+                        };
+                        let num_k_heads = if head_v_dim > 0 && key_dim >= head_v_dim {
+                            key_dim / head_v_dim
+                        } else {
+                            1
+                        };
+                        let head_k_dim = if num_k_heads > 0 {
+                            key_dim / num_k_heads
+                        } else {
+                            head_v_dim
+                        };
+                        let head_repeat = num_v_heads / num_k_heads.max(1);
 
-                    // Causal conv1d over qkv_out_len channels
-                    let conv_kernel = 4_usize;
-                    let conv_out = &mut ws.conv_out[..qkv_out_len];
-                    conv_out.fill(0.0_f32);
-                    if !layer.ssm_conv1d.is_empty()
-                        && layer.ssm_conv1d.len() == conv_kernel * qkv_out_len
-                    {
-                        let buffer = &self.ssm_conv_buffers[layer_idx];
-                        for c in 0..qkv_out_len {
-                            let mut sum = 0.0_f32;
-                            // Tap-major [kernel, channels]; newest input uses the last tap.
-                            sum +=
-                                layer.ssm_conv1d[(conv_kernel - 1) * qkv_out_len + c] * x_proj[c];
-                            for b in 1..conv_kernel {
-                                if let Some(prev) = buffer.past_frame(b) {
-                                    let weight_idx = (conv_kernel - 1 - b) * qkv_out_len + c;
-                                    sum += layer.ssm_conv1d[weight_idx] * prev[c];
+                        let mut mixed_qkv = vec![0.0_f32; qkv_out_len];
+                        gemv_weight(&layer.attn_qkv, qkv_out_len, h, &normed, &mut mixed_qkv)
+                            .map_err(|e| ModelError::InferenceFailed(format!("attn_qkv: {:?}", e)))?;
+
+                        // Causal depthwise conv1d (kernel 4, tap-major) then SiLU.
+                        let conv_kernel = 4_usize;
+                        let mut conv_out = vec![0.0_f32; qkv_out_len];
+                        if !layer.ssm_conv1d.is_empty()
+                            && layer.ssm_conv1d.len() == conv_kernel * qkv_out_len
+                        {
+                            let buffer = &self.ssm_conv_buffers[layer_idx];
+                            for c in 0..qkv_out_len {
+                                let mut sum = layer.ssm_conv1d[(conv_kernel - 1) * qkv_out_len + c]
+                                    * mixed_qkv[c];
+                                for b in 1..conv_kernel {
+                                    if let Some(prev) = buffer.past_frame(b) {
+                                        let widx = (conv_kernel - 1 - b) * qkv_out_len + c;
+                                        sum += layer.ssm_conv1d[widx] * prev[c];
+                                    }
+                                }
+                                conv_out[c] = sum;
+                            }
+                            self.ssm_conv_buffers[layer_idx].push(&mixed_qkv);
+                        } else {
+                            conv_out.copy_from_slice(&mixed_qkv);
+                        }
+                        for val in conv_out.iter_mut() {
+                            *val *= 1.0_f32 / (1.0_f32 + (-*val).exp());
+                        }
+
+                        // Per-head gates: beta (sigmoid), decay input a (softplus),
+                        // output gate z. ssm_beta/ssm_alpha are raw f32 [v_heads, h]
+                        // row-major projections (not gemv-able WeightStorage here).
+                        let mut b_proj = vec![0.0_f32; num_v_heads];
+                        if layer.ssm_beta.len() == num_v_heads * h {
+                            for (head, bp) in b_proj.iter_mut().enumerate() {
+                                let row = &layer.ssm_beta[head * h..(head + 1) * h];
+                                *bp = row.iter().zip(normed.iter()).map(|(w, x)| w * x).sum();
+                            }
+                        }
+                        let mut a_proj = vec![0.0_f32; num_v_heads];
+                        if layer.ssm_alpha.len() == num_v_heads * h {
+                            for (head, ap) in a_proj.iter_mut().enumerate() {
+                                let row = &layer.ssm_alpha[head * h..(head + 1) * h];
+                                *ap = row.iter().zip(normed.iter()).map(|(w, x)| w * x).sum();
+                            }
+                        }
+                        let mut z = vec![0.0_f32; value_dim];
+                        gemv_weight(&layer.attn_gate, value_dim, h, &normed, &mut z)
+                            .map_err(|e| ModelError::InferenceFailed(format!("attn_gate: {:?}", e)))?;
+
+                        // Self-healing recurrent state: [v_heads * head_k * head_v].
+                        let head_state = head_k_dim * head_v_dim;
+                        let state_elems = num_v_heads * head_state;
+                        if self.ssm_states[layer_idx].len() != state_elems {
+                            self.ssm_states[layer_idx] = vec![0.0_f32; state_elems];
+                        }
+
+                        let mut core_out = vec![0.0_f32; value_dim];
+                        for v_head in 0..num_v_heads {
+                            let k_head = v_head / head_repeat.max(1);
+                            let q_off = k_head * head_k_dim;
+                            let k_off = key_dim + k_head * head_k_dim;
+                            let v_off = key_dim * 2 + v_head * head_v_dim;
+                            let state_h = &mut self.ssm_states[layer_idx]
+                                [v_head * head_state..(v_head + 1) * head_state];
+
+                            let mut q = conv_out[q_off..q_off + head_k_dim].to_vec();
+                            let mut k = conv_out[k_off..k_off + head_k_dim].to_vec();
+                            gdn_l2_normalize(&mut q);
+                            gdn_l2_normalize(&mut k);
+                            // GatedDeltaNet scales the L2-normed query by 1/sqrt(head_dim)
+                            // (softmax-style temperature). Required for coherent decode;
+                            // OXIDIZE_NO_QSCALE=1 disables it for A/B parity checks.
+                            if std::env::var_os("OXIDIZE_NO_QSCALE").is_none() {
+                                let qs = 1.0_f32 / (head_k_dim as f32).sqrt();
+                                for x in q.iter_mut() {
+                                    *x *= qs;
                                 }
                             }
-                            conv_out[c] = sum;
+
+                            let v = &conv_out[v_off..v_off + head_v_dim];
+                            let beta = gdn_sigmoid(b_proj[v_head]);
+                            let dt = if v_head < layer.ssm_dt_bias.len() {
+                                gdn_softplus(a_proj[v_head] + layer.ssm_dt_bias[v_head])
+                            } else {
+                                gdn_softplus(a_proj[v_head])
+                            };
+                            let a_log = if v_head < layer.ssm_a.len() {
+                                layer.ssm_a[v_head]
+                            } else {
+                                0.0_f32
+                            };
+                            let decay = (-(a_log.exp()) * dt).exp();
+
+                            for s in state_h.iter_mut() {
+                                *s *= decay;
+                            }
+                            // kv_mem = state·k
+                            let mut kv_mem = vec![0.0_f32; head_v_dim];
+                            for j in 0..head_v_dim {
+                                let mut sum = 0.0_f32;
+                                for i in 0..head_k_dim {
+                                    sum += state_h[i * head_v_dim + j] * k[i];
+                                }
+                                kv_mem[j] = sum;
+                            }
+                            // state += k ⊗ ((v - kv_mem)·β)
+                            for i in 0..head_k_dim {
+                                let ki = k[i];
+                                for j in 0..head_v_dim {
+                                    state_h[i * head_v_dim + j] += ki * (v[j] - kv_mem[j]) * beta;
+                                }
+                            }
+                            // out = state·q
+                            let out_h = &mut core_out[v_head * head_v_dim..(v_head + 1) * head_v_dim];
+                            for j in 0..head_v_dim {
+                                let mut sum = 0.0_f32;
+                                for i in 0..head_k_dim {
+                                    sum += state_h[i * head_v_dim + j] * q[i];
+                                }
+                                out_h[j] = sum;
+                            }
                         }
-                    } else {
-                        conv_out.copy_from_slice(x_proj);
-                    }
 
-                    self.ssm_conv_buffers[layer_idx].push(x_proj);
-
-                    // SiLU activation
-                    for val in conv_out.iter_mut() {
-                        *val = *val * (1.0_f32 / (1.0_f32 + (-*val).exp()));
-                    }
-
-                    // Split into SSM input and gate
-                    let half = qkv_out_len / 2;
-                    let mut mamba_out = vec![0.0_f32; half];
-                    let mut x_ssm = conv_out[..half].to_vec();
-                    let z_gate: Vec<f32> = if qkv_out_len > half {
-                        conv_out[half..].to_vec()
-                    } else {
-                        vec![0.0_f32; half]
-                    };
-
-                    // Group RMSNorm on x_ssm
-                    if !layer.ssm_norm.is_empty() && !x_ssm.is_empty() {
-                        let group_size = layer.ssm_norm.len();
-                        if x_ssm.len().is_multiple_of(group_size) {
-                            let num_groups = x_ssm.len() / group_size;
-                            for g in 0..num_groups {
-                                let start = g * group_size;
-                                let end = start + group_size;
-                                let mut normed_group = vec![0.0_f32; group_size];
-                                rms_norm_f32(
-                                    &x_ssm[start..end],
+                        // Gated RMSNorm per head with the z output gate.
+                        if !layer.ssm_norm.is_empty() && layer.ssm_norm.len() == head_v_dim {
+                            for head in 0..num_v_heads {
+                                let s = head * head_v_dim;
+                                let e = s + head_v_dim;
+                                gdn_gated_rms_norm(
+                                    &mut core_out[s..e],
                                     &layer.ssm_norm,
+                                    &z[s..e],
                                     cfg.rms_norm_eps,
-                                    &mut normed_group,
+                                );
+                            }
+                        }
+
+                        // Output projection: [value_dim] -> [h].
+                        let mut residual = vec![0.0_f32; h];
+                        if !layer.ssm_out.is_empty() {
+                            let out_len = layer.ssm_out.output_dim(value_dim);
+                            if out_len > 0 {
+                                let mut projected = vec![0.0_f32; out_len];
+                                gemv_weight(
+                                    &layer.ssm_out,
+                                    out_len,
+                                    value_dim,
+                                    &core_out,
+                                    &mut projected,
                                 )
                                 .map_err(|e| {
-                                    ModelError::InferenceFailed(format!("ssm_norm: {:?}", e))
+                                    ModelError::InferenceFailed(format!("ssm_out: {:?}", e))
                                 })?;
-                                x_ssm[start..end].copy_from_slice(&normed_group);
+                                let copy_len = h.min(projected.len());
+                                residual[..copy_len].copy_from_slice(&projected[..copy_len]);
                             }
-                        }
-                    }
-
-                    // Selective Scan SSM
-                    let state_dim = self.ssm_states[layer_idx].len();
-                    if state_dim > 0
-                        && !layer.ssm_a.is_empty()
-                        && !layer.ssm_alpha.is_empty()
-                        && !layer.ssm_beta.is_empty()
-                    {
-                        // Compute Bx: ssm_beta maps x_ssm -> state
-                        // ssm_beta is [x_ssm_len, state_dim], stored row-major
-                        let mut bx = vec![0.0_f32; state_dim];
-                        let x_ssm_len = x_ssm.len();
-                        if layer.ssm_beta.len() == x_ssm_len * state_dim {
-                            for (j, &x_value) in x_ssm.iter().enumerate().take(x_ssm_len) {
-                                for (i, bx_value) in bx.iter_mut().enumerate().take(state_dim) {
-                                    *bx_value += layer.ssm_beta[j * state_dim + i] * x_value;
-                                }
-                            }
-                        }
-
-                        // Update state: h = h * exp(A * delta) + Bx * delta
-                        for (i, &bx_value) in bx.iter().enumerate().take(state_dim) {
-                            let a = layer.ssm_a[i % layer.ssm_a.len()];
-                            let a = if a > 0.0 { -a.exp() } else { a };
-                            let dt = if !layer.ssm_dt_bias.is_empty() {
-                                let b = layer.ssm_dt_bias[i % layer.ssm_dt_bias.len()];
-                                (1.0_f32 + b.exp()).ln() // softplus
-                            } else {
-                                0.01_f32
-                            };
-                            let decay = (a * dt).exp();
-                            self.ssm_states[layer_idx][i] =
-                                self.ssm_states[layer_idx][i] * decay + bx_value * dt;
-                        }
-
-                        // Compute output: y = C * h = ssm_alpha * state
-                        // ssm_alpha is [y_len, state_dim]
-                        let y_len = layer.ssm_alpha.len() / state_dim;
-                        let mut y_ssm = vec![0.0_f32; y_len];
-                        if layer.ssm_alpha.len() == y_len * state_dim {
-                            for (j, y_value) in y_ssm.iter_mut().enumerate().take(y_len) {
-                                for (i, &state_value) in self.ssm_states[layer_idx]
-                                    .iter()
-                                    .enumerate()
-                                    .take(state_dim)
-                                {
-                                    *y_value += layer.ssm_alpha[j * state_dim + i] * state_value;
-                                }
-                            }
-                        }
-
-                        // Pad or truncate y_ssm to match the Mamba inner width.
-                        if y_ssm.len() >= mamba_out.len() {
-                            let out_len = mamba_out.len();
-                            mamba_out.copy_from_slice(&y_ssm[..out_len]);
                         } else {
-                            mamba_out[..y_ssm.len()].copy_from_slice(&y_ssm);
+                            let copy_len = h.min(core_out.len());
+                            residual[..copy_len].copy_from_slice(&core_out[..copy_len]);
                         }
+                        residual
                     }
-
-                    // Apply gate: y = y * silu(z_gate or gate)
-                    let gate_to_use: Vec<f32> = if gate_len > 0 && gate_len == mamba_out.len() {
-                        // Use attn_gate if available
-                        let silu_gate = &mut ws.intermediate_a[..gate_len];
-                        for val in silu_gate.iter_mut() {
-                            *val = *val * (1.0_f32 / (1.0_f32 + (-*val).exp()));
-                        }
-                        silu_gate[..mamba_out.len()].to_vec()
-                    } else if z_gate.len() == mamba_out.len() {
-                        // Use second half of qkv projection
-                        z_gate.clone()
-                    } else {
-                        vec![]
-                    };
-
-                    if gate_to_use.len() == mamba_out.len() {
-                        for i in 0..mamba_out.len() {
-                            mamba_out[i] *= gate_to_use[i];
-                        }
-                    }
-
-                    // Final output projection
-                    let mut residual = vec![0.0_f32; h];
-                    if !layer.ssm_out.is_empty() {
-                        let out_len = layer.ssm_out.output_dim(mamba_out.len());
-                        if out_len > 0 {
-                            let mut projected = vec![0.0_f32; out_len];
-                            gemv_weight(
-                                &layer.ssm_out,
-                                out_len,
-                                mamba_out.len(),
-                                &mamba_out,
-                                &mut projected,
-                            )
-                            .map_err(|e| {
-                                ModelError::InferenceFailed(format!("ssm_out: {:?}", e))
-                            })?;
-                            let copy_len = h.min(projected.len());
-                            residual[..copy_len].copy_from_slice(&projected[..copy_len]);
-                        }
-                    } else {
-                        let copy_len = h.min(mamba_out.len());
-                        residual[..copy_len].copy_from_slice(&mamba_out[..copy_len]);
-                    }
-                    residual
                 };
 
                 for i in 0..h {
@@ -927,6 +993,42 @@ impl InferenceModel {
                                 *v += layer.attn_v_bias[i % layer.attn_v_bias.len()];
                             }
                         }
+
+                        // Qwen3-Next gated attention: attn_q packs [q_head, gate_head]
+                        // interleaved per head (q_len == 2 * o_proj input). De-interleave
+                        // Q to the front of q_full and extract the per-head output gate,
+                        // which is applied as sigmoid(gate) to the attention result before
+                        // the output projection (matches layer_wise/attention.rs).
+                        let attn_gate: Option<Vec<f32>> = if attn_output_input_len > 0
+                            && q_len == 2 * attn_output_input_len
+                        {
+                            let hd = if !layer.attn_q_norm.is_empty() {
+                                layer.attn_q_norm.len()
+                            } else {
+                                attn_output_input_len / cfg.num_attention_heads.max(1)
+                            };
+                            if hd > 0 && q_len % (2 * hd) == 0 {
+                                let heads = q_len / (2 * hd);
+                                let mut gate = vec![0.0_f32; heads * hd];
+                                for head in 0..heads {
+                                    let base = head * 2 * hd;
+                                    gate[head * hd..(head + 1) * hd]
+                                        .copy_from_slice(&ws.q_full[base + hd..base + 2 * hd]);
+                                }
+                                // Compact Q to the front: dst (head*hd) < src (head*2*hd),
+                                // and every gate slice was already copied out above.
+                                for head in 0..heads {
+                                    let src = head * 2 * hd;
+                                    let dst = head * hd;
+                                    ws.q_full.copy_within(src..src + hd, dst);
+                                }
+                                Some(gate)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
 
                         // In MLA-style attention, attn_q output is split into Q and auxiliary projection.
                         let q_len_actual = if attn_output_input_len > 0 {
@@ -1448,6 +1550,15 @@ impl InferenceModel {
                                 );
                             }
                         } // end `if !used_gpu_attn` (CPU attention island)
+
+                        // Qwen3-Next gated attention: multiply the attention result by
+                        // sigmoid(gate) (de-interleaved above) before the output projection.
+                        if let Some(gate) = &attn_gate {
+                            let n = attn_result.len().min(gate.len());
+                            for i in 0..n {
+                                attn_result[i] *= gdn_sigmoid(gate[i]);
+                            }
+                        }
 
                         // Reconcile attention result size with attn_output expected input
                         let attn_input = if attn_output_input_len > 0

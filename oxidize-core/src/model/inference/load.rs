@@ -527,8 +527,30 @@ impl InferenceModel {
         }
 
         let tok_embeddings = tok_embeddings.ok_or("missing tok_embeddings.weight")?;
-        let norm_weight = norm_weight.ok_or("missing norm.weight")?;
+        let mut norm_weight = norm_weight.ok_or("missing norm.weight")?;
         let output_weight = output_weight.unwrap_or_else(|| tok_embeddings.clone());
+
+        // qwen35 & co. store RMSNorm weights in the HF `(1 + w)` convention. The
+        // InferenceModel applies plain rms_norm_f32 (unlike the layer-wise path,
+        // which honors the flag via rms_norm_model), so bake the +1 into every
+        // standard norm weight here. The gated GatedDeltaNet `ssm_norm` stays raw
+        // — it matches HF Qwen3NextRMSNormGated, which uses the weight directly.
+        if config.rms_norm_weight_plus_one {
+            fn bump(v: &mut [f32]) {
+                for w in v.iter_mut() {
+                    *w += 1.0;
+                }
+            }
+            for layer in layers.iter_mut() {
+                bump(&mut layer.attn_norm);
+                bump(&mut layer.ffn_norm);
+                bump(&mut layer.post_attention_norm);
+                bump(&mut layer.post_ffn_norm);
+                bump(&mut layer.attn_q_norm);
+                bump(&mut layer.attn_k_norm);
+            }
+            bump(&mut norm_weight);
+        }
 
         // LongCat-2.0 n-gram over-embedding: only activate once every table's
         // tensors are present and `hidden_size` divides evenly into per-table
