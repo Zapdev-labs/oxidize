@@ -1,0 +1,67 @@
+oxidize-core/src/model/inference.rs
+  s_f370a470bf91ca::t_8ab02265bd8501 695-705
+  s_f370a470bf91ca::t_5351e68c4e8763 480,482-488
+  s_f370a470bf91ca::t_c40c54f399d28a 224-242
+  s_f370a470bf91ca::t_08306eba2ebfa4 966-970
+  s_f370a470bf91ca::t_93474a09c77fff 752-759
+  s_f370a470bf91ca::t_7b8634f674a592 96-98
+  s_f370a470bf91ca::t_d6804c66ea8a46 990-992
+  s_f370a470bf91ca::t_f757d46a94951f 57-62
+  s_f370a470bf91ca::t_ce30cb99c6e443 126
+  s_f370a470bf91ca::t_f9055c24108e67 2568-2571,2624-2629,2633-2644,2648-2659,2662-2745,2747-2782,2790-2798,2801-2836,2846-2847,2884-2887
+  s_f98fb3b5c0a1ac::t_0b5c7c8d4da8d4 449-451
+  s_f370a470bf91ca::t_1993a90f6db32f 1010-1011,1019
+  s_f370a470bf91ca::t_bc56039aa9e501 143
+  s_f370a470bf91ca::t_f49bdd435ef4ce 282-289
+  s_f370a470bf91ca::t_b4c9367861a5ea 2447-2567,2572-2623,2630-2632,2645-2647,2660-2661,2746,2783-2789,2799-2800,2837-2845,2848-2883,2888-2894
+oxidize-core/src/model/inference/layers.rs
+  s_f370a470bf91ca::t_c422e395451ff9 1667-1716,1725-1733,1741-1780,1789-1797,1805-1839,1844-1853
+  s_f370a470bf91ca::t_d061aa6db054c7 179-186
+  s_f370a470bf91ca::t_f9055c24108e67 1717-1724,1734-1740,1781-1788,1798-1804,1840-1843
+oxidize-core/src/model/inference/moe.rs
+  s_f370a470bf91ca::t_cfb7bef11eef2b 64-73
+  s_f370a470bf91ca::t_df62c918140d4c 33-63,74-193,206-214,224-242,253-274
+  s_f370a470bf91ca::t_f9055c24108e67 194-205,215-223,243-252
+oxidize-core/src/model/inference/forward.rs
+  s_f370a470bf91ca::t_f9055c24108e67 1822
+  s_d2add3ac9f912a::t_edb808e3ad633a 1808-1821,1823-1852
+oxidize-core/src/model/inference/load.rs
+  s_f370a470bf91ca::t_65a1ce3d35ed77 106,109-131
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "4070e277fa9a057f63c660d09e2c20fa7c9e317a",
+  "prompts": {},
+  "humans": {
+    "h_cf4e3af6880df2": {
+      "author": "Jackson57279 <otdoges@proton.me>"
+    }
+  },
+  "sessions": {
+    "s_d2add3ac9f912a": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "4e8f36e6-bed9-4b23-9800-52e5fa6e2e79",
+        "model": "default"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_f370a470bf91ca": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e5af42c6-a8f0-490a-a118-5425d37244da",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_f98fb3b5c0a1ac": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "4d6ff7f8-80ac-4cb6-9488-4a4254e92276",
+        "model": "default"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
