@@ -41,7 +41,12 @@ static float *load_vec_n(const oc_gguf *g, const char *name, size_t *n) {
   return load_vec(g, name);
 }
 
-static bool keepq_ok(oc_quant q) { return q <= OC_IQ4_NL; }
+/* Quant types kept quantized in RAM (dequantized per-row in the GEMV) instead
+   of expanded to F32 at load. The AL family sits after IQ4_NL in the enum, so
+   the old `q <= OC_IQ4_NL` silently expanded AL weights to F32 — 7x the RAM and
+   7x the decode memory traffic (a 31B AL5 model ballooned to ~124GB F32 and
+   ran at ~1/7 speed). All AL types have quantized row_dot paths, so keep them. */
+static bool keepq_ok(oc_quant q) { return q <= OC_AL5_XS; }
 
 static oc_weight load_weight(const oc_gguf *g, const char *name,
                              const oc_config *c) {
