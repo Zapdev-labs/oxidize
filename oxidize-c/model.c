@@ -434,11 +434,20 @@ oc_model *oc_model_load(const char *path, size_t max_ctx, int kv_int8) {
     }
   }
 
-  /* Zero-centered norm detection: raw qwen3.5 norms sit near 0, baked near 1. */
+  /* Zero-centered norm detection: raw qwen3.5 norms sit near 0, baked near 1.
+   * Qwen3.5 (qwen3_5 / qwen35 / qwen3_5_moe / qwen35moe) always uses the
+   * Gemma-style (1 + w) RMSNorm convention, so force-bake +1. */
   {
     double s = 0;
     for (size_t i = 0; i < c->hidden_size; ++i) s += m->final_norm[i];
-    if (s / (double)c->hidden_size < 0.5) {
+    double mean = s / (double)c->hidden_size;
+    const char *arch = oc_meta_str(g, "general.architecture");
+    bool qwen35 = arch && (strncmp(arch, "qwen35", 6) == 0 ||
+                           strncmp(arch, "qwen3_5", 7) == 0 ||
+                           strcmp(arch, "qwen35moe") == 0 ||
+                           strcmp(arch, "qwen3_5_moe") == 0);
+    fprintf(stderr, "model: final_norm mean=%.6f qwen35=%d\n", mean, qwen35);
+    if (mean < 0.5 || qwen35) {
       fprintf(stderr, "model: baking (1+w) into norm weights\n");
       size_t h = c->hidden_size;
       bake_plus_one(m->final_norm, h);
@@ -449,7 +458,9 @@ oc_model *oc_model_load(const char *path, size_t max_ctx, int kv_int8) {
         size_t hd = L->hd ? L->hd : c->head_dim;
         if (L->q_norm) bake_plus_one(L->q_norm, hd);
         if (L->k_norm) bake_plus_one(L->k_norm, hd);
-        if (L->ssm_norm && L->head_v) bake_plus_one(L->ssm_norm, L->head_v);
+        /* NOTE: ssm_norm (gated GatedDeltaNet RMSNorm) is NOT (1+w) — HF
+         * Qwen3NextRMSNormGated uses the weight directly. Baking +1 here
+         * over-amplifies the GDN output ~34x and collapses generation. */
         bake_plus_one(L->attn_post_norm, h);
         bake_plus_one(L->ffn_post_norm, h);
       }
