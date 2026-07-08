@@ -990,6 +990,12 @@ pub struct Workspace {
     pub indexer_weights: Vec<f32>,
     pub indexer_scores: Vec<f32>,
     pub indexer_scratch_idx: Vec<usize>,
+    // LongCat-2.0 n-gram over-embedding scratch: one dequantized table row
+    // (`oe_dim` wide) and one projected-into-hidden-space result, reused
+    // across all `n_grams` tables per token. Zero-length when the config
+    // doesn't declare n-gram tables.
+    pub ngram_row: Vec<f32>,
+    pub ngram_proj_out: Vec<f32>,
 }
 
 impl Workspace {
@@ -1016,6 +1022,19 @@ impl Workspace {
         // (or LongCat GGUF) that doesn't set these fields.
         let indexer_active = config.indexer_head_count > 0 && config.indexer_head_dim > 0;
         let indexer_ctx = if indexer_active { config.context_size } else { 0 };
+        // n-gram scratch sizing only needs the declared table count/width from
+        // metadata; actual tensor availability is resolved at load time (see
+        // `NgramEmbedding` in load.rs) and merely leaves these unused if absent.
+        let ngram_n_grams = if config.ngram_neighbor_num > 1 {
+            (config.ngram_neighbor_num - 1) * config.ngram_split_num
+        } else {
+            0
+        };
+        let ngram_oe_dim = if ngram_n_grams > 0 {
+            h / ngram_n_grams
+        } else {
+            0
+        };
 
         Self {
             x: vec![0.0_f32; h],
@@ -1050,6 +1069,8 @@ impl Workspace {
             indexer_weights: vec![0.0_f32; config.indexer_head_count],
             indexer_scores: vec![0.0_f32; indexer_ctx],
             indexer_scratch_idx: vec![0usize; indexer_ctx],
+            ngram_row: vec![0.0_f32; ngram_oe_dim],
+            ngram_proj_out: vec![0.0_f32; if ngram_n_grams > 0 { h } else { 0 }],
         }
     }
 }
@@ -1489,6 +1510,15 @@ pub struct InferenceModel {
     /// (dense-attention fallback for that pair). Tiny vs. the MLA KV cache
     /// (one `head_dim`-wide row per token vs. per-head K+V).
     pub(super) indexer_k_cache: Vec<Vec<f32>>,
+    /// LongCat-2.0 n-gram over-embedding tables + projections. See
+    /// [`NgramEmbedding::is_active`] — empty for every non-LongCat
+    /// architecture and LongCat GGUFs without n-gram tensors.
+    pub(super) ngram: NgramEmbedding,
+    /// Token history for the n-gram hash, indexed directly by absolute
+    /// position (mirrors the KV cache's addressing: a new generation always
+    /// starts at position 0, naturally overwriting a previous generation's
+    /// history). Empty when `ngram` is inactive.
+    pub(super) ngram_history: Vec<Token>,
     // Mamba/SSM persistent state
     pub(super) ssm_states: Vec<Vec<f32>>, // [layer][state_dim]
     pub(super) ssm_conv_buffers: Vec<ConvHistoryRing>,
@@ -1584,11 +1614,13 @@ pub(crate) fn lookup_quantized_embedding(
         GgufQuantizationType::NVFP4 => 36,
         GgufQuantizationType::IQ1_S => 50,
         GgufQuantizationType::IQ1_M => 56,
+        GgufQuantizationType::BF16 => 2,
         _ => return,
     };
     let block_width = match qtype {
         GgufQuantizationType::Q8_0 => 32,
         GgufQuantizationType::NVFP4 => 64,
+        GgufQuantizationType::BF16 => 1,
         _ => 256,
     };
     let blocks_per_row = h / block_width;
@@ -1625,8 +1657,101 @@ pub(crate) fn lookup_quantized_embedding(
             let _ =
                 crate::quantization::dequantize_nvfp4_scalar(row, &mut x[..blocks_per_row * 64]);
         }
+        GgufQuantizationType::BF16 => {
+            // No block structure: one contiguous bf16 value per element.
+            let _ = crate::quantization::dequantize_bf16_scalar(row, &mut x[..h]);
+        }
         _ => {}
     }
+}
+
+/// Quant types [`lookup_quantized_embedding`] can dequantize one row of
+/// without materializing the whole table to f32. Used to decide whether
+/// LongCat-2.0 n-gram hash tables (`NgramEmbedding::tables`, up to ~16.5M rows
+/// each in the real model) stay GGUF-resident instead of being fully
+/// dequantized (which would blow up RAM by 4x for no benefit — they're only
+/// ever read one row at a time, never through a GEMV/GEMM kernel).
+pub(super) fn embedding_lookup_supported(qtype: GgufQuantizationType) -> bool {
+    matches!(
+        qtype,
+        GgufQuantizationType::Q4_K_S
+            | GgufQuantizationType::Q4_K_M
+            | GgufQuantizationType::Q6_K
+            | GgufQuantizationType::Q8_0
+            | GgufQuantizationType::NVFP4
+            | GgufQuantizationType::IQ1_S
+            | GgufQuantizationType::IQ1_M
+            | GgufQuantizationType::BF16
+    )
+}
+
+/// LongCat-2.0 n-gram "over-embedding": per-table hash-table embeddings looked
+/// up from recent token history, projected into hidden space, and averaged
+/// together with the plain word embedding. Ported from SGLang's
+/// `NgramEmbedding.forward` / `sglang.jit_kernel.csrc.ngram_embedding.cuh`
+/// (`ComputeNGramIdsKernel`).
+///
+/// Table `i` corresponds to n-gram order `n' = i / split_num + 2` (n' ranges
+/// 2..=neighbor_num) and split index `k = i % split_num`. Empty
+/// (`tables.is_empty()`, checked via [`NgramEmbedding::is_active`]) when the
+/// GGUF has no `ngram_embd_*`/`ngram_proj_*` tensors — every non-LongCat
+/// architecture, and LongCat GGUFs converted before n-gram support — in which
+/// case the runtime falls back to the plain `tok_embeddings` lookup.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub(super) struct NgramEmbedding {
+    /// Per-table hash-table embeddings (`ngram_embd_{i}.weight`), natural GGUF
+    /// layout `[mod_i (rows), oe_dim (cols)]` — looked up exactly like
+    /// `tok_embeddings` (see [`lookup_embedding_from_storage`]).
+    pub tables: Vec<WeightStorage>,
+    /// Per-table output projection (`ngram_proj_{i}.weight`), natural GGUF
+    /// layout `[hidden_size (rows), oe_dim (cols)]` — a plain [`gemv_weight`].
+    pub proj: Vec<WeightStorage>,
+    /// Row count of table `i` (`tables[i].output_dim(oe_dim)`), read directly
+    /// off the loaded tensor rather than reconstructed from
+    /// `longcat.ngram.vocab_size_ratio`.
+    pub mods: Vec<u64>,
+    /// `weights[i][delta] = vocab_size^delta mod mods[i]`, `delta` in
+    /// `0..order(i)` where `order(i) = i / split_num + 2`.
+    pub weights: Vec<Vec<u64>>,
+    /// Embedding width per table (`hidden_size / n_grams`).
+    pub oe_dim: usize,
+    /// `(neighbor_num - 1) * split_num` — total table count.
+    pub n_grams: usize,
+    pub split_num: usize,
+    /// GGUF `tokenizer.ggml.eos_token_id`. The n-gram context never looks
+    /// further back than a history token equal to this id (a turn/eos
+    /// boundary) — see `ComputeNGramIdsKernel`'s `j > 0 && table_token ==
+    /// eos_token_id` check. `None` when the GGUF has no eos metadata (never
+    /// matches any token).
+    pub eos_token_id: Option<u32>,
+}
+
+impl NgramEmbedding {
+    pub(super) fn is_active(&self) -> bool {
+        !self.tables.is_empty()
+    }
+}
+
+/// Modular exponentiation `base^exp mod modu` (`modu <= 1` → 0, matching
+/// `x mod 1 == 0` for all `x`). n-gram exponents are tiny (< 5), but this is
+/// written as generic fast exponentiation via `u128` intermediates to stay
+/// correct for any modulus up to `u64::MAX`.
+pub(super) fn modpow_u64(base: u64, exp: u64, modu: u64) -> u64 {
+    if modu <= 1 {
+        return 0;
+    }
+    let m = modu as u128;
+    let mut result: u128 = 1 % m;
+    let mut b: u128 = (base as u128) % m;
+    let mut e = exp;
+    while e > 0 {
+        if e & 1 == 1 {
+            result = (result * b) % m;
+        }
+        b = (b * b) % m;
+        e >>= 1;
+    }
+    result as u64
 }
 
 pub(super) fn lookup_embedding_from_storage(
@@ -2919,7 +3044,7 @@ mod tests {
             let mapped = loader.load(&output).unwrap();
             let cfg = InferenceConfig::from_gguf(&mapped);
             let mut model = InferenceModel::load_from_gguf(&mapped, cfg, false).unwrap();
-            model.embed_token_into_workspace(0);
+            model.embed_token_into_workspace(0, 0);
             model
                 .run_layer_range_in_workspace(0, 0..model.config.layer_count)
                 .unwrap();
@@ -3532,6 +3657,8 @@ mod tests {
             kv_cache: KvCache::new(kv_cache_config).expect("tiny kv cache should be valid"),
             kv_layer_map: Vec::new(),
             indexer_k_cache: Vec::new(),
+            ngram: NgramEmbedding::default(),
+            ngram_history: Vec::new(),
             ssm_states: Vec::new(),
             ssm_conv_buffers: Vec::new(),
             workspace: Workspace::for_config(&config),
@@ -3842,7 +3969,7 @@ mod tests {
                 .expect("logits");
             // Split path: embed, run head layers, snapshot hidden,
             // set hidden, run tail layers, final head.
-            split.embed_token_into_workspace(tok);
+            split.embed_token_into_workspace(tok, pos);
             split
                 .run_layer_range_in_workspace(pos, 0..k)
                 .expect("head layers ok");
@@ -4274,5 +4401,239 @@ mod tests {
             }
         }
         best
+    }
+
+    /// LongCat-2.0 n-gram over-embedding, built end-to-end through the real
+    /// converter (`convert_safetensors_to_gguf`) so the GGUF roundtrip (per-
+    /// table row counts that differ table-to-table, top-level `ngram_embd_*`/
+    /// `ngram_proj_*` tensors) is exercised exactly like the real model.
+    ///
+    /// Tiny config: `neighbor_num=3, split_num=2` -> 4 tables (order 2 for
+    /// i=0,1; order 3 for i=2,3), `hidden=8` -> `oe_dim = 8/4 = 2`,
+    /// `vocab_size=8`, distinct tiny per-table row counts (mods)
+    /// `[7,9,11,13]`, `eos_token_id=2`. `num_layers=0` so the GGUF has no
+    /// decoder at all — the test drives `embed_token_into_workspace` directly
+    /// and inspects the raw embedding, never touching attention/FFN/MoE.
+    ///
+    /// Word-embedding row `t` and every table row `r` are crafted as constant
+    /// vectors (`[1000*t; hidden]` and `[r; oe_dim]`) and every `proj_i` row is
+    /// `[1, 0]` (so `proj_i([r, r]) == [r; hidden]`), so the final embedding is
+    /// itself a constant vector equal to `(1000*token + sum_i row_id_i) / 5`
+    /// — letting a single scalar assert per position also pin down the 4
+    /// hash ids (recoverable as `sum_i row_id_i = embedding*5 - 1000*token`).
+    #[test]
+    fn longcat_ngram_over_embedding_matches_hand_computed_hash() {
+        use crate::model_loader::{GgufModelLoader, ModelLoader};
+        use crate::safetensors_to_gguf::{SafetensorsToGgufConfig, convert_safetensors_to_gguf};
+        use safetensors::tensor::{Dtype as StDtype, TensorView};
+        use std::collections::HashMap;
+
+        fn f32s(vals: &[f32]) -> Vec<u8> {
+            vals.iter().flat_map(|v| v.to_le_bytes()).collect()
+        }
+        fn write_test_safetensors(
+            path: &std::path::Path,
+            tensors: &[(&str, StDtype, Vec<usize>, Vec<u8>)],
+        ) {
+            let views: HashMap<String, TensorView> = tensors
+                .iter()
+                .map(|(name, dtype, shape, data)| {
+                    (
+                        (*name).to_owned(),
+                        TensorView::new(*dtype, shape.clone(), data).unwrap(),
+                    )
+                })
+                .collect();
+            let bytes = safetensors::tensor::serialize(&views, &None).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        }
+        fn tmp_path(suffix: &str) -> std::path::PathBuf {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            std::env::temp_dir().join(format!("oxidize-longcat-ngram-{nanos}{suffix}"))
+        }
+
+        let dir = tmp_path("");
+        std::fs::create_dir_all(&dir).unwrap();
+        let output = tmp_path(".gguf");
+
+        std::fs::write(
+            dir.join("config.json"),
+            r#"{
+                "architectures": ["LongcatCausalLM"],
+                "hidden_size": 8, "num_layers": 0, "vocab_size": 8,
+                "eos_token_id": 2,
+                "q_lora_rank": 2, "kv_lora_rank": 2,
+                "qk_nope_head_dim": 2, "v_head_dim": 2,
+                "oe_neighbor_num": 3, "oe_split_num": 2
+            }"#,
+        )
+        .unwrap();
+        // A tokenizer.json is required for `eos_token_id` (from config.json) to
+        // reach GGUF metadata — `merge_hf_tokenizer_metadata` bails out (only a
+        // warning, non-fatal) before running `apply_special_token_ids` when
+        // it's absent. 8 tokens matching `vocab_size`.
+        std::fs::write(
+            dir.join("tokenizer.json"),
+            r#"{"model": {"type": "BPE", "vocab": {
+                "<unk>": 0, "a": 1, "b": 2, "c": 3, "d": 4, "e": 5, "f": 6, "g": 7
+            }}}"#,
+        )
+        .unwrap();
+
+        const HIDDEN: usize = 8;
+        const VOCAB: usize = 8;
+        const OE_DIM: usize = 2;
+        let mods = [7usize, 9, 11, 13];
+
+        // Word embedding: row t = [1000*t; HIDDEN].
+        let mut embed = vec![0.0_f32; VOCAB * HIDDEN];
+        for t in 0..VOCAB {
+            embed[t * HIDDEN..(t + 1) * HIDDEN].fill(1000.0 * t as f32);
+        }
+
+        let shard = "model-00001-of-00001.safetensors";
+        let mut tensors: Vec<(&str, StDtype, Vec<usize>, Vec<u8>)> = vec![
+            (
+                "model.embed_tokens.weight",
+                StDtype::F32,
+                vec![VOCAB, HIDDEN],
+                f32s(&embed),
+            ),
+            (
+                "model.norm.weight",
+                StDtype::F32,
+                vec![HIDDEN],
+                f32s(&[1.0; HIDDEN]),
+            ),
+            (
+                "lm_head.weight",
+                StDtype::F32,
+                vec![VOCAB, HIDDEN],
+                f32s(&vec![0.0_f32; VOCAB * HIDDEN]),
+            ),
+        ];
+        // Table i: row r = [r; OE_DIM]. Proj i: every output row = [1, 0], so
+        // proj_i(table_i[r]) == [r; HIDDEN] (broadcasts the row index).
+        let mut table_bufs: Vec<Vec<u8>> = Vec::with_capacity(4);
+        let mut proj_bufs: Vec<Vec<u8>> = Vec::with_capacity(4);
+        for &m in &mods {
+            let mut rows = vec![0.0_f32; m * OE_DIM];
+            for r in 0..m {
+                rows[r * OE_DIM..(r + 1) * OE_DIM].fill(r as f32);
+            }
+            table_bufs.push(f32s(&rows));
+            let mut proj = vec![0.0_f32; HIDDEN * OE_DIM];
+            for row in 0..HIDDEN {
+                proj[row * OE_DIM] = 1.0; // [1, 0] per output row
+            }
+            proj_bufs.push(f32s(&proj));
+        }
+        let embd_names = [
+            "model.oe_embed_tokens0.weight",
+            "model.oe_embed_tokens1.weight",
+            "model.oe_embed_tokens2.weight",
+            "model.oe_embed_tokens3.weight",
+        ];
+        let proj_names = [
+            "model.oe_embed_proj0.weight",
+            "model.oe_embed_proj1.weight",
+            "model.oe_embed_proj2.weight",
+            "model.oe_embed_proj3.weight",
+        ];
+        for i in 0..4 {
+            tensors.push((
+                embd_names[i],
+                StDtype::F32,
+                vec![mods[i], OE_DIM],
+                table_bufs[i].clone(),
+            ));
+            tensors.push((
+                proj_names[i],
+                StDtype::F32,
+                vec![HIDDEN, OE_DIM],
+                proj_bufs[i].clone(),
+            ));
+        }
+        write_test_safetensors(&dir.join(shard), &tensors);
+        let weight_map: BTreeMap<&str, &str> = tensors.iter().map(|(n, ..)| (*n, shard)).collect();
+        std::fs::write(
+            dir.join("model.safetensors.index.json"),
+            serde_json::to_string(&serde_json::json!({"weight_map": weight_map})).unwrap(),
+        )
+        .unwrap();
+
+        convert_safetensors_to_gguf(&dir, &output, &SafetensorsToGgufConfig::default()).unwrap();
+
+        let loader = GgufModelLoader;
+        let mapped = loader.load(&output).unwrap();
+        let tensor_infos = mapped.mapped_tensor_infos();
+        let names: Vec<&str> = tensor_infos.iter().map(|t| t.name.as_str()).collect();
+        for expected in [
+            "ngram_embd_0.weight",
+            "ngram_embd_1.weight",
+            "ngram_embd_2.weight",
+            "ngram_embd_3.weight",
+            "ngram_proj_0.weight",
+            "ngram_proj_1.weight",
+            "ngram_proj_2.weight",
+            "ngram_proj_3.weight",
+        ] {
+            assert!(names.contains(&expected), "missing {expected}: {names:?}");
+        }
+
+        let cfg = InferenceConfig::from_gguf(&mapped);
+        assert_eq!(cfg.architecture, ModelArchitecture::LongCat);
+        assert_eq!(cfg.ngram_neighbor_num, 3);
+        assert_eq!(cfg.ngram_split_num, 2);
+
+        let tokens: [Token; 5] = [3, 5, 2, 6, 1]; // token 2 == eos_token_id
+        let expected: [f32; 5] = [
+            602.4,    // pos 0: before-sequence-start truncates every table to j=0 only
+            1002.6,   // pos 1: order-2 tables fully resolved, order-3 truncated by start
+            f32::NAN, // pos 2 unchecked (token IS eos; only asserting later positions)
+            f32::NAN, // pos 3 unchecked
+            203.8,    // pos 4: history crosses the eos at pos 2 -> truncated mid-order-3
+        ];
+
+        // ---- 1. n-gram path active: embeddings match the hand-computed mean. ----
+        {
+            let mut model = InferenceModel::load_from_gguf(&mapped, cfg.clone(), false).unwrap();
+            assert!(model.ngram.is_active());
+            for (pos, &tok) in tokens.iter().enumerate() {
+                model.embed_token_into_workspace(tok, pos);
+                let want = expected[pos];
+                if want.is_nan() {
+                    continue;
+                }
+                for (k, &v) in model.hidden_state().iter().enumerate() {
+                    assert!(
+                        (v - want).abs() < 1e-3,
+                        "pos={pos} dim={k}: got {v}, want {want}"
+                    );
+                }
+            }
+        }
+
+        // ---- 2. OXIDIZE_LONGCAT_NO_NGRAM=1 reverts to the plain lookup. ----
+        {
+            // SAFETY: test-only env mutation; no other test reads this var.
+            unsafe {
+                std::env::set_var("OXIDIZE_LONGCAT_NO_NGRAM", "1");
+            }
+            let mut model = InferenceModel::load_from_gguf(&mapped, cfg, false).unwrap();
+            model.embed_token_into_workspace(3, 0);
+            for &v in model.hidden_state() {
+                assert!(
+                    (v - 3000.0).abs() < 1e-3,
+                    "plain lookup expected 3000.0, got {v}"
+                );
+            }
+            unsafe {
+                std::env::remove_var("OXIDIZE_LONGCAT_NO_NGRAM");
+            }
+        }
     }
 }

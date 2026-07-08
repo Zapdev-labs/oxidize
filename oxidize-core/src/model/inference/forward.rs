@@ -91,6 +91,19 @@ fn dump_golden_logits(logits: &[f32]) {
     }
 }
 
+/// LongCat-2.0 n-gram over-embedding escape hatch: `OXIDIZE_LONGCAT_NO_NGRAM=1`
+/// forces the plain `tok_embeddings` lookup even when the GGUF has n-gram
+/// tensors, for A/B validation against the over-embedding path. Read fresh on
+/// every call (NOT cached in a `OnceLock` like most env-gated flags in this
+/// module) — this only runs once per token (not a per-layer/per-attention hot
+/// path), and staying uncached keeps the flag toggleable within a single test
+/// binary run.
+fn longcat_ngram_disabled() -> bool {
+    std::env::var("OXIDIZE_LONGCAT_NO_NGRAM")
+        .map(|v| v != "0" && !v.is_empty())
+        .unwrap_or(false)
+}
+
 impl InferenceModel {
     pub fn forward_tokens_no_logits(
         &mut self,
@@ -1567,7 +1580,7 @@ impl InferenceModel {
         need_logits: bool,
     ) -> Result<Option<Logits>, ModelError> {
         let token_t0 = crate::tensor::decode_profile_enabled().then(std::time::Instant::now);
-        self.embed_token_into_workspace(token);
+        self.embed_token_into_workspace(token, pos);
         let layer_count = self.config.layer_count;
         self.run_layer_range_in_workspace(pos, 0..layer_count)?;
         if !need_logits {
@@ -1581,11 +1594,18 @@ impl InferenceModel {
     }
 
     /// Write `token`'s embedding into `workspace.x[..hidden_size]`. First stage
-    /// of pipeline-parallel decode.
-    pub fn embed_token_into_workspace(&mut self, token: Token) {
+    /// of pipeline-parallel decode. `pos` is the absolute position of `token`
+    /// (needed by LongCat-2.0's n-gram over-embedding to hash recent token
+    /// history — see [`Self::embed_token_ngram`]; every other architecture,
+    /// and LongCat GGUFs without n-gram tensors, ignore it).
+    pub fn embed_token_into_workspace(&mut self, token: Token, pos: usize) {
         #[cfg(feature = "cuda")]
         {
             self.pending_embed_token = Some(token);
+        }
+        if self.ngram.is_active() && pos < self.ngram_history.len() && !longcat_ngram_disabled() {
+            self.embed_token_ngram(token, pos);
+            return;
         }
         let h = self.config.hidden_size;
         let x = &mut self.workspace.x[..h];
@@ -1607,6 +1627,83 @@ impl InferenceModel {
         let scale = self.config.embedding_scale;
         if scale != 1.0 {
             for v in x.iter_mut() {
+                *v *= scale;
+            }
+        }
+    }
+
+    /// LongCat-2.0 n-gram over-embedding: `(word_embedding + Σ_i proj_i(table_i[id_i])) / (n_grams + 1)`.
+    /// Ported from SGLang's `NgramEmbedding.forward` / `ComputeNGramIdsKernel`
+    /// (`sglang.jit_kernel.csrc.ngram_embedding.cuh`): table `i`'s hash id sums
+    /// `history_token[pos-j] * vocab_size^j mod mods[i]` for `j` in `0..order`,
+    /// stopping EARLY — truncating the window, never substituting a
+    /// placeholder token — at the start of the sequence (`pos < j`) or when a
+    /// history token (`j > 0`, the current token itself is always allowed) equals
+    /// `eos_token_id` (an n-gram context never crosses an eos/turn boundary).
+    fn embed_token_ngram(&mut self, token: Token, pos: usize) {
+        let h = self.config.hidden_size;
+        self.ngram_history[pos] = token;
+
+        self.workspace.x[..h].fill(0.0_f32);
+        lookup_embedding_from_storage(
+            &self.tok_embeddings,
+            h,
+            self.config.vocab_size,
+            token,
+            &mut self.workspace.x[..h],
+        );
+
+        let n_grams = self.ngram.n_grams;
+        let split_num = self.ngram.split_num.max(1);
+        let oe_dim = self.ngram.oe_dim;
+        let eos_token_id = self.ngram.eos_token_id;
+
+        for i in 0..n_grams {
+            let order = i / split_num + 2;
+            let modu = self.ngram.mods[i].max(1);
+
+            let mut id: u64 = 0;
+            for j in 0..order {
+                if pos < j {
+                    break;
+                }
+                let hist = self.ngram_history[pos - j];
+                if j > 0 && eos_token_id == Some(hist) {
+                    break;
+                }
+                let term = (hist as u64) * self.ngram.weights[i][j];
+                id += term % modu;
+            }
+            let row_id = (id % modu) as u32;
+
+            lookup_embedding_from_storage(
+                &self.ngram.tables[i],
+                oe_dim,
+                self.ngram.mods[i] as usize,
+                row_id,
+                &mut self.workspace.ngram_row[..oe_dim],
+            );
+
+            let _ = gemv_weight(
+                &self.ngram.proj[i],
+                h,
+                oe_dim,
+                &self.workspace.ngram_row[..oe_dim],
+                &mut self.workspace.ngram_proj_out[..h],
+            );
+            for k in 0..h {
+                self.workspace.x[k] += self.workspace.ngram_proj_out[k];
+            }
+        }
+
+        let denom = (n_grams + 1) as f32;
+        for v in self.workspace.x[..h].iter_mut() {
+            *v /= denom;
+        }
+
+        let scale = self.config.embedding_scale;
+        if scale != 1.0 {
+            for v in self.workspace.x[..h].iter_mut() {
                 *v *= scale;
             }
         }

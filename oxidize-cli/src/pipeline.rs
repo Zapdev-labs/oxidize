@@ -362,7 +362,7 @@ pub fn run_head(
     // with tail's compute for pos.
     let n_prompt = prompt_ids.len();
     for (pos, &tok) in prompt_ids.iter().enumerate() {
-        model.embed_token_into_workspace(tok);
+        model.embed_token_into_workspace(tok, pos);
         model
             .run_layer_range_in_workspace(pos, head_range.clone())
             .map_err(|e| std::io::Error::other(format!("head forward: {e:?}")))?;
@@ -415,7 +415,7 @@ pub fn run_head(
         {
             break;
         }
-        model.embed_token_into_workspace(next_input);
+        model.embed_token_into_workspace(next_input, decode_pos);
         model
             .run_layer_range_in_workspace(decode_pos, head_range.clone())
             .map_err(|e| std::io::Error::other(format!("head forward: {e:?}")))?;

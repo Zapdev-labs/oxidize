@@ -20,6 +20,21 @@ impl InferenceModel {
             (config.nextn_predict_layers > 0).then(MtpWeights::default);
         let use_mmap_flag = use_mmap;
 
+        // LongCat-2.0 n-gram over-embedding: table count comes from metadata
+        // (`longcat.ngram.neighbor_num`/`.split_num`); actual tensors are
+        // collected below and may be absent (older conversions), in which case
+        // `ngram` stays inactive and the runtime falls back to plain lookup.
+        let ngram_n_grams =
+            if config.architecture == ModelArchitecture::LongCat && config.ngram_neighbor_num > 1 {
+                (config.ngram_neighbor_num - 1) * config.ngram_split_num
+            } else {
+                0
+            };
+        let mut ngram_tables_raw: Vec<Option<WeightStorage>> =
+            (0..ngram_n_grams).map(|_| None).collect();
+        let mut ngram_proj_raw: Vec<Option<WeightStorage>> =
+            (0..ngram_n_grams).map(|_| None).collect();
+
         let tensor_list = mapped.mapped_tensor_infos();
         for tensor in tensor_list.iter() {
             let qtype = GgufQuantizationType::from_ggml_type(tensor.ggml_type);
@@ -97,6 +112,46 @@ impl InferenceModel {
                 }
                 "output.weight" => {
                     output_weight = Some(load_tensor(&tensor.name, qtype, qdata, value_count)?);
+                }
+                // LongCat-2.0 n-gram hash-table embeddings: rows are read one
+                // at a time (never through a GEMV/GEMM kernel), so keep them
+                // GGUF-resident whenever the format supports per-row dequant
+                // instead of materializing the whole (huge) table to f32.
+                name if ngram_n_grams > 0 && name.starts_with("ngram_embd_") => {
+                    if let Some(idx) = name["ngram_embd_".len()..]
+                        .strip_suffix(".weight")
+                        .and_then(|s| s.parse::<usize>().ok())
+                        && idx < ngram_n_grams
+                    {
+                        let storage = if embedding_lookup_supported(qtype) && use_mmap_flag {
+                            WeightStorage::MmapQuantized(
+                                qtype,
+                                mapped.tensor_mmap(tensor),
+                                offset,
+                                qsize,
+                            )
+                        } else if embedding_lookup_supported(qtype) {
+                            WeightStorage::Quantized(qtype, qdata.to_vec())
+                        } else {
+                            let mut f32_data = vec![0.0_f32; value_count];
+                            dequantize_scalar(qtype, qdata, &mut f32_data)
+                                .map_err(|e| format!("dequantize_scalar: {:?}", e))?;
+                            WeightStorage::F32(f32_data)
+                        };
+                        ngram_tables_raw[idx] = Some(storage);
+                    }
+                }
+                // Projections are small (`hidden_size x oe_dim`, ~4M elements
+                // even for the real 8192/512 model) — loaded exactly like any
+                // other Linear weight (`load_tensor`'s usual quantized-GEMV gate).
+                name if ngram_n_grams > 0 && name.starts_with("ngram_proj_") => {
+                    if let Some(idx) = name["ngram_proj_".len()..]
+                        .strip_suffix(".weight")
+                        .and_then(|s| s.parse::<usize>().ok())
+                        && idx < ngram_n_grams
+                    {
+                        ngram_proj_raw[idx] = Some(load_tensor(name, qtype, qdata, value_count)?);
+                    }
                 }
                 name if name.starts_with("blk.") => {
                     let parts: Vec<&str> = name.split('.').collect();
@@ -474,6 +529,60 @@ impl InferenceModel {
         let tok_embeddings = tok_embeddings.ok_or("missing tok_embeddings.weight")?;
         let norm_weight = norm_weight.ok_or("missing norm.weight")?;
         let output_weight = output_weight.unwrap_or_else(|| tok_embeddings.clone());
+
+        // LongCat-2.0 n-gram over-embedding: only activate once every table's
+        // tensors are present and `hidden_size` divides evenly into per-table
+        // width; otherwise fall back to plain `tok_embeddings` (same pattern
+        // as the native-MTP usability check above).
+        let ngram = if ngram_n_grams > 0
+            && ngram_tables_raw.iter().all(Option::is_some)
+            && ngram_proj_raw.iter().all(Option::is_some)
+            && config.hidden_size.is_multiple_of(ngram_n_grams)
+        {
+            let oe_dim = config.hidden_size / ngram_n_grams;
+            let tables: Vec<WeightStorage> =
+                ngram_tables_raw.into_iter().map(Option::unwrap).collect();
+            let proj: Vec<WeightStorage> = ngram_proj_raw.into_iter().map(Option::unwrap).collect();
+            let split_num = config.ngram_split_num.max(1);
+            let vocab_size = config.vocab_size as u64;
+            let mut mods = Vec::with_capacity(ngram_n_grams);
+            let mut weights = Vec::with_capacity(ngram_n_grams);
+            for (i, table) in tables.iter().enumerate() {
+                let order = (i / split_num + 2) as u64; // n' in 2..=neighbor_num
+                let modu = table.output_dim(oe_dim) as u64;
+                mods.push(modu);
+                weights.push(
+                    (0..order)
+                        .map(|delta| modpow_u64(vocab_size, delta, modu))
+                        .collect(),
+                );
+            }
+            let eos_token_id =
+                metadata_u32_lookup(&mapped.parsed().metadata, "tokenizer.ggml.eos_token_id");
+            NgramEmbedding {
+                tables,
+                proj,
+                mods,
+                weights,
+                oe_dim,
+                n_grams: ngram_n_grams,
+                split_num: config.ngram_split_num,
+                eos_token_id,
+            }
+        } else {
+            if ngram_n_grams > 0 {
+                eprintln!(
+                    "LongCat n-gram metadata advertises {ngram_n_grams} table(s), but ngram_embd_*/ngram_proj_* tensors were incomplete (or hidden_size {} doesn't divide evenly); disabling n-gram over-embedding",
+                    config.hidden_size
+                );
+            }
+            NgramEmbedding::default()
+        };
+        let ngram_history: Vec<Token> = if ngram.is_active() {
+            vec![0; config.context_size]
+        } else {
+            Vec::new()
+        };
         let mtp = mtp.and_then(|weights| {
             if weights.is_usable(&config) {
                 Some(weights)
@@ -593,6 +702,8 @@ impl InferenceModel {
             kv_cache,
             kv_layer_map,
             indexer_k_cache,
+            ngram,
+            ngram_history,
             ssm_states,
             ssm_conv_buffers,
             workspace,
