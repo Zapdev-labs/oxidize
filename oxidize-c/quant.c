@@ -54,8 +54,10 @@ size_t oc_block_values(oc_quant q) {
   switch (q) {
     case OC_F32: case OC_F16: case OC_BF16: return 1;
     case OC_Q4_0: case OC_Q4_1: case OC_Q5_0: case OC_Q5_1: case OC_Q8_0:
-    case OC_AL5: return QK;
-    case OC_AL8: case OC_AL6: case OC_AL5_XS:
+    /* AL8/AL6/AL5_XS are 32-weight blocks (34/22/14 bytes), NOT 256-wide
+       K-quants — grouping them below poisoned oc_row_bytes (8x-small stride)
+       and mangled every AL8/AL6/AL5_XS weight row. */
+    case OC_AL5: case OC_AL8: case OC_AL6: case OC_AL5_XS: return QK;
     case OC_Q2_K: case OC_Q3_K: case OC_Q4_K: case OC_Q5_K: case OC_Q6_K:
     case OC_IQ4_XS: case OC_IQ2_XXS: case OC_IQ2_XS: case OC_IQ2_S:
     case OC_IQ3_XXS: case OC_IQ3_S: return QK_K;
