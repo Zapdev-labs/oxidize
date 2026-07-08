@@ -179,6 +179,46 @@ fn iq4_xs_imatrix_lowers_error_on_weighted_columns() {
 }
 
 #[test]
+fn al5_imatrix_lowers_error_on_weighted_columns() {
+    let values = gaussian_sample(QK4_0 * 64);
+    // Importance heavily favors the first half of every 32-wide block.
+    let weights = (0..values.len())
+        .map(|i| if i % 32 < 16 { 8.0 } else { 1.0 })
+        .collect::<Vec<_>>();
+
+    let mut plain = vec![0u8; (values.len() / QK4_0) * BLOCK_Q4_0_SIZE];
+    quantize_al5_scalar(&values, &mut plain).expect("plain encode");
+    let mut plain_dec = vec![0f32; values.len()];
+    dequantize_al5_scalar(&plain, &mut plain_dec).expect("plain decode");
+
+    let mut weighted = vec![0u8; plain.len()];
+    quantize_al5_scalar_weighted(&values, &weights, &mut weighted).expect("weighted encode");
+    let mut weighted_dec = vec![0f32; values.len()];
+    dequantize_al5_scalar(&weighted, &mut weighted_dec).expect("weighted decode");
+
+    let important_err = |dec: &[f32]| -> f64 {
+        values
+            .iter()
+            .zip(dec)
+            .enumerate()
+            .filter(|(i, _)| i % 32 < 16)
+            .map(|(_, (x, y))| {
+                let d = (*x - *y) as f64;
+                d * d
+            })
+            .sum()
+    };
+    let w = important_err(&weighted_dec);
+    let p = important_err(&plain_dec);
+    eprintln!("AL5 imatrix important-col err: weighted {w:.4} vs plain {p:.4}");
+    assert!(
+        w < p,
+        "imatrix should lower error on important columns: {w} !< {p}"
+    );
+    assert!(weighted_dec.iter().all(|v| v.is_finite()));
+}
+
+#[test]
 fn iq1s_grid_decode_uses_real_table() {
     let mut out = [0_i8; 8];
     iq1s_grid_decode(0, &mut out);

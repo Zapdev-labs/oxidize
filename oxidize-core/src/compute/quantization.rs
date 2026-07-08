@@ -420,12 +420,15 @@ pub fn quantize_scalar_with_imatrix(
     let mut values = vec![0.0_f32; value_count];
     dequantize_scalar(source, input, &mut values)?;
 
-    // IQ4_XS minimizes a properly importance-weighted error in the encoder, so
-    // the raw values and the importance weights are passed through untouched.
-    // Other targets keep the legacy behaviour of pre-scaling values by
-    // importance before a plain encode.
+    // IQ4_XS and AL5 minimize a properly importance-weighted error in the
+    // encoder, so the raw values and the importance weights are passed through
+    // untouched. Other targets keep the legacy behaviour of pre-scaling values
+    // by importance before a plain encode.
     if target == GgufQuantizationType::IQ4_XS {
         return quantize_iq4_xs(&values, Some(imatrix.values()), output);
+    }
+    if target == GgufQuantizationType::AL5 {
+        return quantize_al5_scalar_weighted(&values, imatrix.values(), output);
     }
 
     let weighted_values = values
@@ -490,6 +493,7 @@ pub fn quantize_scalar_weighted(
     dequantize_scalar(source, input, &mut values)?;
     match target {
         GgufQuantizationType::IQ4_XS => quantize_iq4_xs(&values, Some(weights), output),
+        GgufQuantizationType::AL5 => quantize_al5_scalar_weighted(&values, weights, output),
         other => quantize_from_f32_scalar(other, &values, output),
     }
 }

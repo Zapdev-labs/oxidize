@@ -257,70 +257,50 @@ static float al_best_initial_scale(const float *x, size_t n, float mx, float ama
   return best_d;
 }
 
-static void al5_try_seed(const float *x, float seed, float *best_d, int *levels,
-                         float *best_mse) {
-  if (!isfinite(seed) || seed == 0.0f) return;
-  int lv[QK];
-  float id = 1.0f / seed;
-  for (size_t i = 0; i < QK; ++i)
-    lv[i] = clampi((int)lrintf(x[i] * id), -8, 7);
-  float sumlx = 0.0f, suml2 = 0.0f;
-  for (size_t i = 0; i < QK; ++i) {
-    float l = (float)lv[i];
-    sumlx += x[i] * l;
-    suml2 += l * l;
-  }
-  float d = suml2 > 0.0f ? sumlx / suml2 : seed;
-  if (fabsf(d - seed) > FLT_EPSILON * fmaxf(fabsf(d), 1.0f)) {
-    id = 1.0f / d;
-    for (size_t i = 0; i < QK; ++i)
-      lv[i] = clampi((int)lrintf(x[i] * id), -8, 7);
-  }
-  float mse = 0.0f;
-  for (size_t i = 0; i < QK; ++i) {
-    float err = x[i] - (float)lv[i] * d;
-    mse += err * err;
-  }
-  mse /= (float)QK;
-  if (mse < *best_mse) {
-    *best_mse = mse;
-    *best_d = d;
-    for (size_t i = 0; i < QK; ++i) levels[i] = lv[i];
-  }
-}
 
+/* Optimized AL5 encoder: make_qx_quants-style search (llama.cpp). Grid-search
+   19 candidate scales around absmax; for each, take the least-squares-optimal d
+   that minimizes the importance-weighted block error sum_i w_i (x_i - d*l_i)^2
+   with w_i = x_i^2. The x^2 weight is the imatrix-less default that tracks model
+   quality far better than plain RMSE; a real imatrix would swap it for per-
+   column activation importance. Same 18-byte Q4_0 bitstream + dot_q4_0 kernel
+   => zero runtime cost, strictly better scale than the old 2-seed search. */
 static void quantize_block_al5(const float *x, uint8_t *o) {
   float amax = 0.0f, mx = 0.0f;
   for (size_t i = 0; i < QK; ++i) {
     float a = fabsf(x[i]);
-    if (a > amax) {
-      amax = a;
-      mx = x[i];
-    }
+    if (a > amax) { amax = a; mx = x[i]; }
   }
   if (amax == 0.0f) {
     wr16(o, oc_f32_to_f16(0.0f));
     memset(o + 2, 0x88, 16);
     return;
   }
-
-  float best_d = mx / -8.0f;
-  float best_mse = FLT_MAX;
-  int levels[QK];
-  al5_try_seed(x, mx / -8.0f, &best_d, levels, &best_mse);
-  int saturated = 0;
-  for (size_t i = 0; i < QK; ++i) {
-    if (levels[i] == -8 || levels[i] == 7) {
-      saturated = 1;
-      break;
+  int best_l[QK];
+  float best_d = mx / -8.0f, best_obj = -1.0f;
+  for (int is = -9; is <= 9; ++is) {
+    float iscale = -(8.0f + 0.1f * (float)is) / mx;
+    float sumlx = 0.0f, suml2 = 0.0f;
+    int l[QK];
+    for (size_t i = 0; i < QK; ++i) {
+      l[i] = clampi((int)lrintf(iscale * x[i]), -8, 7);
+      float w = x[i] * x[i];
+      sumlx += w * x[i] * (float)l[i];
+      suml2 += w * (float)l[i] * (float)l[i];
+    }
+    if (suml2 > 0.0f) {
+      float obj = sumlx * sumlx / suml2; /* weighted error reduction; larger=better */
+      if (obj > best_obj) {
+        best_obj = obj;
+        best_d = sumlx / suml2;
+        for (size_t i = 0; i < QK; ++i) best_l[i] = l[i];
+      }
     }
   }
-  if (saturated) al5_try_seed(x, amax / 7.0f, &best_d, levels, &best_mse);
-
   wr16(o, oc_f32_to_f16(best_d));
   for (size_t i = 0; i < QK / 2; ++i) {
-    int lo = levels[i] + 8;
-    int hi = levels[i + QK / 2] + 8;
+    int lo = best_l[i] + 8;
+    int hi = best_l[i + QK / 2] + 8;
     o[2 + i] = (uint8_t)((hi << 4) | lo);
   }
 }

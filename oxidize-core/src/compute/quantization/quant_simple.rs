@@ -128,58 +128,6 @@ pub(super) fn quantize_q4_0_scalar(
     Ok(())
 }
 
-/// MSE-optimal scale for one 32-weight block (ggml Q4_0 layout).
-#[inline(always)]
-fn al5_quant_levels(block: &[f32], inv_d: f32, levels: &mut [i32; QK4_0]) {
-    for (dst, &v) in levels.iter_mut().zip(block) {
-        *dst = ((v * inv_d).round() as i32).clamp(-8, 7);
-    }
-}
-
-#[inline(always)]
-fn al5_refine_from_levels(block: &[f32], levels: &[i32; QK4_0], d: f32) -> f32 {
-    let mut sumlx = 0.0_f32;
-    let mut suml2 = 0.0_f32;
-    for (&v, &l) in block.iter().zip(levels.iter()) {
-        let lf = l as f32;
-        sumlx += v * lf;
-        suml2 += lf * lf;
-    }
-    if suml2 > 0.0 {
-        sumlx / suml2
-    } else {
-        d
-    }
-}
-
-#[inline(always)]
-fn al5_block_mse(block: &[f32], levels: &[i32; QK4_0], d: f32) -> f32 {
-    if d == 0.0 {
-        return 0.0;
-    }
-    let mut mse = 0.0_f32;
-    for (&v, &l) in block.iter().zip(levels.iter()) {
-        let err = v - l as f32 * d;
-        mse += err * err;
-    }
-    mse / QK4_0 as f32
-}
-
-#[inline(always)]
-fn al5_try_seed(block: &[f32], seed: f32) -> (f32, [i32; QK4_0], f32) {
-    if seed == 0.0 || !seed.is_finite() {
-        return (0.0, [0; QK4_0], f32::MAX);
-    }
-    let mut levels = [0_i32; QK4_0];
-    let inv_seed = 1.0 / seed;
-    al5_quant_levels(block, inv_seed, &mut levels);
-    let d = al5_refine_from_levels(block, &levels, seed);
-    if (d - seed).abs() > f32::EPSILON * d.abs().max(1.0) {
-        al5_quant_levels(block, 1.0 / d, &mut levels);
-    }
-    (d, levels, al5_block_mse(block, &levels, d))
-}
-
 #[inline(always)]
 fn al5_pack_levels(out_block: &mut [u8], d: f32, levels: &[i32; QK4_0]) {
     out_block[0..2].copy_from_slice(&f32_to_f16_bits(d).to_le_bytes());
@@ -190,9 +138,15 @@ fn al5_pack_levels(out_block: &mut [u8], d: f32, levels: &[i32; QK4_0]) {
     }
 }
 
-/// Fast AL5 block quant: Q4_0 seed + one refinement; second seed if clipped.
+/// Optimized AL5 block quant: `make_qx_quants`-style search (llama.cpp).
+/// Grid-searches 19 candidate scales around absmax; for each, takes the
+/// least-squares-optimal `d` that minimizes the importance-weighted block error
+/// `sum_i w_i (x_i - d*l_i)^2`. `imp` supplies per-column importance (imatrix);
+/// when `None` the weight defaults to `x_i^2` — llama.cpp's imatrix-less default,
+/// which tracks model quality far better than plain RMSE. Same 18-byte Q4_0
+/// bitstream + `dot_q4_0` kernel => zero runtime cost.
 #[inline]
-fn quantize_block_al5(in_block: &[f32], out_block: &mut [u8]) {
+fn quantize_block_al5(in_block: &[f32], imp: Option<&[f32]>, out_block: &mut [u8]) {
     let mut amax = 0.0_f32;
     let mut mx = 0.0_f32;
     for &v in in_block {
@@ -208,14 +162,29 @@ fn quantize_block_al5(in_block: &[f32], out_block: &mut [u8]) {
         return;
     }
 
-    let (mut best_d, mut best_levels, mut best_mse) = al5_try_seed(in_block, mx / -8.0);
-    let saturated = best_levels.iter().any(|&l| l == -8 || l == 7);
-    if saturated {
-        let (d2, levels2, mse2) = al5_try_seed(in_block, amax / 7.0);
-        if mse2 < best_mse {
-            best_d = d2;
-            best_levels = levels2;
-            best_mse = mse2;
+    let mut best_d = mx / -8.0;
+    let mut best_levels = [0_i32; QK4_0];
+    let mut best_obj = -1.0_f32;
+    let mut levels = [0_i32; QK4_0];
+    for is in -9..=9 {
+        let iscale = -(8.0 + 0.1 * is as f32) / mx;
+        let mut sumlx = 0.0_f32;
+        let mut suml2 = 0.0_f32;
+        for (i, &v) in in_block.iter().enumerate() {
+            let l = ((v * iscale).round() as i32).clamp(-8, 7);
+            levels[i] = l;
+            let w = imp.map_or(v * v, |m| m[i]);
+            let lf = l as f32;
+            sumlx += w * v * lf;
+            suml2 += w * lf * lf;
+        }
+        if suml2 > 0.0 {
+            let obj = sumlx * sumlx / suml2; // weighted error reduction; larger = better
+            if obj > best_obj {
+                best_obj = obj;
+                best_d = sumlx / suml2;
+                best_levels = levels;
+            }
         }
     }
 
@@ -247,7 +216,50 @@ pub(super) fn quantize_al5_scalar(
     input
         .par_chunks_exact(QK4_0)
         .zip(output.par_chunks_exact_mut(BLOCK_Q4_0_SIZE))
-        .for_each(|(in_block, out_block)| quantize_block_al5(in_block, out_block));
+        .for_each(|(in_block, out_block)| quantize_block_al5(in_block, None, out_block));
+
+    Ok(())
+}
+
+/// Importance-weighted AL5 quantize. Each 32-weight block minimizes the
+/// imatrix-weighted error using its per-column importance slice, so weights that
+/// multiply high-activation inputs are quantized more faithfully. Same 18-byte
+/// output as `quantize_al5_scalar`. `imatrix` is per-element (one importance per
+/// input value, tiled across rows by the caller).
+pub(super) fn quantize_al5_scalar_weighted(
+    input: &[f32],
+    imatrix: &[f32],
+    output: &mut [u8],
+) -> Result<(), QuantizationError> {
+    if !input.len().is_multiple_of(QK4_0) {
+        return Err(QuantizationError::InvalidInputLength {
+            quantization: GgufQuantizationType::AL5,
+            expected_multiple: QK4_0,
+            actual: input.len(),
+        });
+    }
+    if imatrix.len() != input.len() {
+        return Err(QuantizationError::InvalidImportanceMatrix {
+            reason: "matrix length must match input value count",
+        });
+    }
+    if output.len() != (input.len() / QK4_0) * BLOCK_Q4_0_SIZE {
+        return Err(QuantizationError::InvalidOutputLength {
+            quantization: GgufQuantizationType::AL5,
+            expected: (input.len() / QK4_0) * BLOCK_Q4_0_SIZE,
+            actual: output.len(),
+        });
+    }
+
+    use rayon::prelude::*;
+
+    input
+        .par_chunks_exact(QK4_0)
+        .zip(imatrix.par_chunks_exact(QK4_0))
+        .zip(output.par_chunks_exact_mut(BLOCK_Q4_0_SIZE))
+        .for_each(|((in_block, imp_block), out_block)| {
+            quantize_block_al5(in_block, Some(imp_block), out_block);
+        });
 
     Ok(())
 }
@@ -282,7 +294,7 @@ pub(super) fn quantize_f16_to_al5_scalar(
             for i in 0..QK4_0 {
                 block[i] = f16_le_to_f32(&f16_block[2 * i..2 * i + 2]);
             }
-            quantize_block_al5(&block, out_block);
+            quantize_block_al5(&block, None, out_block);
         });
 
     Ok(())
@@ -322,7 +334,7 @@ pub(super) fn quantize_bf16_to_al5_scalar(
                 ])) << 16;
                 block[i] = f32::from_bits(bits);
             }
-            quantize_block_al5(&block, out_block);
+            quantize_block_al5(&block, None, out_block);
         });
 
     Ok(())
