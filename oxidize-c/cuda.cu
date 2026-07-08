@@ -825,7 +825,7 @@ int oc_cuda_build(oc_model *m) {
   CDIE(cudaStreamCreate(&c->stream));
   CDIE(cudaMalloc(&c->d_pos, sizeof(int)));
   g_prof_stream = c->stream;
-  c->h_pin_cap = (size_t)(c->vocab > c->h ? c->vocab : c->h);
+  c->h_pin_cap = (size_t)c->h + (size_t)c->vocab;
   CDIE(cudaMallocHost(&c->h_pin, c->h_pin_cap * sizeof(float)));
   (void)wide;
 
@@ -863,7 +863,7 @@ void oc_cuda_reset(oc_model *m) {
  * host fp32 row (already dequantized + scaled by the caller). Writes logits to
  * host buf when want_logits. */
 void oc_cuda_forward(oc_model *m, const float *embed_host, size_t pos,
-                     int want_logits, float *logits_host) {
+                     int want_logits, float *logits_host, float *normed_host) {
   GpuCtx *c = g_ctx;
   g_prof_on = getenv("OC_PROF") != NULL;
   if (g_prof_on) memset(g_prof, 0, sizeof(g_prof));
@@ -884,7 +884,7 @@ void oc_cuda_forward(oc_model *m, const float *embed_host, size_t pos,
                        c->stream));
   CDIE(cudaStreamSynchronize(c->stream)); /* &posi is stack memory */
   bool use_graph = c->gemma && !g_prof_on && !getenv("OC_TRACE") &&
-                   !getenv("OC_NO_GRAPH");
+                   !getenv("OC_NO_GRAPH") && !normed_host;
   int gi = want_logits ? 1 : 0;
   if (use_graph && c->graph[gi]) {
     CDIE(cudaGraphLaunch(c->graph[gi], c->stream));
@@ -1016,15 +1016,22 @@ void oc_cuda_forward(oc_model *m, const float *embed_host, size_t pos,
     fprintf(stderr, "prof pos=%zu total=%.1fms qkvo=%.1f ffn=%.1f head=%.1f attn=%.1f\n",
             pos, total, g_prof[0], g_prof[1], g_prof[2], g_prof[3]);
   }
-  if (want_logits) {
+  if (want_logits || normed_host) {
     k_rms_norm<<<1, 256, 0, c->stream>>>(c->d_norm, c->d_x, c->final_norm, h,
                                          c->rms_eps);
-    gemv(c, c->lm_head, c->d_norm, c->d_logits);
-    if (c->logit_softcap > 0.0f)
-      k_softcap<<<G(c->vocab), B, 0, c->stream>>>(c->d_logits, c->logit_softcap,
-                                                  c->vocab);
-    CDIE(cudaMemcpyAsync(c->h_pin, c->d_logits, c->vocab * sizeof(float),
-                         cudaMemcpyDeviceToHost, c->stream));
+    if (normed_host) {
+      CDIE(cudaMemcpyAsync(c->h_pin, c->d_norm, h * sizeof(float),
+                           cudaMemcpyDeviceToHost, c->stream));
+    }
+    if (want_logits) {
+      gemv(c, c->lm_head, c->d_norm, c->d_logits);
+      if (c->logit_softcap > 0.0f)
+        k_softcap<<<G(c->vocab), B, 0, c->stream>>>(c->d_logits, c->logit_softcap,
+                                                    c->vocab);
+      CDIE(cudaMemcpyAsync(c->h_pin + (normed_host ? h : 0), c->d_logits,
+                           c->vocab * sizeof(float), cudaMemcpyDeviceToHost,
+                           c->stream));
+    }
   }
   if (use_graph) {
     cudaGraph_t gr;
@@ -1034,8 +1041,10 @@ void oc_cuda_forward(oc_model *m, const float *embed_host, size_t pos,
     CDIE(cudaGraphLaunch(c->graph[gi], c->stream));
   }
   CDIE(cudaStreamSynchronize(c->stream));
+  if (normed_host)
+    memcpy(normed_host, c->h_pin, h * sizeof(float));
   if (want_logits)
-    memcpy(logits_host, c->h_pin, c->vocab * sizeof(float));
+    memcpy(logits_host, c->h_pin + (normed_host ? h : 0), c->vocab * sizeof(float));
   (void)m;
 }
 

@@ -799,9 +799,7 @@ void oc_dequant_row(oc_quant q, const uint8_t *src, float *dst, size_t n) {
         }
       }
       return;
-    case OC_Q8_0:
-    case OC_AL8:
-    case OC_AL5_XS:
+    case OC_AL5_XS: /* 14B: f16 scale + 32x3-bit packed values: (lvl-4)*d */
       for (b = 0; b < n / QK; ++b) {
         const uint8_t *blk = src + b * 14;
         float d = oc_f16_to_f32(blk);
@@ -819,11 +817,13 @@ void oc_dequant_row(oc_quant q, const uint8_t *src, float *dst, size_t n) {
         }
       }
       return;
-      for (b = 0; b < n / QK; ++b) {
+    case OC_Q8_0:
+    case OC_AL8: /* 34B: f16 scale + 32 int8: value = d*q */
+      for (size_t b = 0; b < n / QK; ++b) {
         const uint8_t *blk = src + b * 34;
         float d = oc_f16_to_f32(blk);
         float *o = dst + b * QK;
-        for (i = 0; i < QK; ++i) o[i] = (float)(int8_t)blk[2 + i] * d;
+        for (size_t j = 0; j < QK; ++j) o[j] = (float)(int8_t)blk[2 + j] * d;
       }
       return;
     case OC_Q2_K:

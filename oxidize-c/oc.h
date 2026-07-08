@@ -148,6 +148,7 @@ typedef struct {
   oc_weight wq, wk, wv, wo, gate, up, down;
   /* MoE: router + expert-stacked FFN weights (per-expert 2D slices). */
   bool is_moe;
+  bool split_moe;                        /* expert weights malloc'd from split tensors */
   oc_weight router, e_gate, e_up, e_down;
   float *exp_probs_b;                      /* per-expert selection bias [n_expert], NULL else */
   size_t exp_probs_b_n;
@@ -262,10 +263,13 @@ bool oc_is_eog(const oc_tokenizer *t, uint32_t id);
  * oc_cuda_build uploads FP16 weights + norms + KV/SSM state to the GPU and sets
  * m->gpu_active. oc_cuda_forward runs the ENTIRE per-token forward on-device:
  * `embed_host` is the (host, dequantized+scaled) embedding row for one token at
- * absolute position `pos`; logits are copied back only when want_logits. */
+ * absolute position `pos`; logits are copied back only when want_logits.
+ * When `normed_host` is non-NULL the post-final-norm hidden row (LoRA head
+ * input, `hidden_size` floats) is also copied back — used by the training
+ * path so the frozen base forward runs on-device. */
 int oc_cuda_build(oc_model *m);            /* 0 ok, -1 no GPU / disabled */
 void oc_cuda_forward(oc_model *m, const float *embed_host, size_t pos,
-                     int want_logits, float *logits_host);
+                     int want_logits, float *logits_host, float *normed_host);
 void oc_cuda_reset(oc_model *m);           /* zero device SSM state + conv rings */
 
 /* ---- tools (prune.c / finetune.c): CLI subcommand entry points ---- */

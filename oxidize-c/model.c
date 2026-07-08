@@ -43,14 +43,32 @@ static float *load_vec_n(const oc_gguf *g, const char *name, size_t *n) {
 
 static bool keepq_ok(oc_quant q) { return q <= OC_IQ4_NL; }
 
-static oc_weight load_weight(const oc_gguf *g, const char *name) {
+static oc_weight load_weight(const oc_gguf *g, const char *name,
+                             const oc_config *c) {
   oc_weight w = {0};
   const oc_tensor_info *ti = oc_find_tensor(g, name);
   if (!ti) return w;
   size_t count;
   tensor_count_dims(ti, &count);
-  w.cols = (size_t)ti->dims[0];
-  w.rows = ti->n_dims >= 2 ? (size_t)ti->dims[1] : 1;
+  if (ti->n_dims >= 3) {
+    w.cols = (size_t)ti->dims[ti->n_dims - 1];
+    w.rows = (size_t)ti->dims[ti->n_dims - 2];
+  } else if (ti->n_dims == 2 && c) {
+    /* PyTorch / oxidize-convert [out,in] vs ggml [in,out] */
+    if (ti->dims[1] == c->hidden_size) {
+      w.rows = (size_t)ti->dims[0];
+      w.cols = (size_t)ti->dims[1];
+    } else if (ti->dims[0] == c->hidden_size) {
+      w.rows = (size_t)ti->dims[1];
+      w.cols = (size_t)ti->dims[0];
+    } else {
+      w.cols = (size_t)ti->dims[0];
+      w.rows = (size_t)ti->dims[1];
+    }
+  } else {
+    w.cols = (size_t)ti->dims[0];
+    w.rows = ti->n_dims >= 2 ? (size_t)ti->dims[1] : 1;
+  }
   if (keepq_ok(ti->quant)) {
     w.quantized = true;
     w.quant = ti->quant;
@@ -65,6 +83,47 @@ static oc_weight load_weight(const oc_gguf *g, const char *name) {
 
 static bool weight_empty(const oc_weight *w) { return !w->quantized && !w->f32; }
 
+static size_t weight_plane_bytes(const oc_weight *w) {
+  return w->quantized ? w->rows * oc_row_bytes(w->quant, w->cols)
+                      : w->rows * w->cols * sizeof(float);
+}
+
+/* llama.cpp / mixtral-style split experts: ffn_gate.0.weight … ffn_gate.N.weight */
+static oc_weight stack_split_experts(const oc_gguf *g, const char *prefix,
+                                     const char *base, size_t n_expert,
+                                     const oc_config *c) {
+  oc_weight w = {0};
+  char name[160];
+  snprintf(name, sizeof name, "%s%s.0.weight", prefix, base);
+  oc_weight e0 = load_weight(g, name, c);
+  if (weight_empty(&e0) || n_expert == 0) return w;
+
+  size_t plane = weight_plane_bytes(&e0);
+  uint8_t *buf = malloc(n_expert * plane);
+  if (!buf) oc_die("model: MoE expert stack alloc failed");
+
+  for (size_t e = 0; e < n_expert; ++e) {
+    snprintf(name, sizeof name, "%s%s.%zu.weight", prefix, base, e);
+    oc_weight ew = load_weight(g, name, c);
+    if (weight_empty(&ew) || ew.cols != e0.cols || ew.rows != e0.rows ||
+        ew.quant != e0.quant)
+      oc_die("model: MoE expert %s missing or mismatched", name);
+    if (ew.quantized)
+      memcpy(buf + e * plane, ew.data, plane);
+    else
+      memcpy(buf + e * plane, ew.f32, plane);
+    if (e > 0) free(ew.f32);
+  }
+  if (!e0.quantized) free(e0.f32);
+
+  w = e0;
+  if (w.quantized)
+    w.data = buf;
+  else
+    w.f32 = (float *)buf;
+  return w;
+}
+
 static void build_config(const oc_gguf *g, oc_config *c) {
   const char *arch = oc_meta_str(g, "general.architecture");
   if (!arch) arch = "llama";
@@ -76,10 +135,23 @@ static void build_config(const oc_gguf *g, oc_config *c) {
   const oc_tensor_info *emb = oc_find_tensor(g, "token_embd.weight");
   if (!emb) emb = oc_find_tensor(g, "tok_embeddings.weight");
 
-  c->hidden_size = oc_meta_u32(g, K("embedding_length"), &u) ? u
-                   : (emb && emb->n_dims >= 2 ? (size_t)emb->dims[0] : 4096);
-  c->vocab_size = oc_meta_u32(g, K("vocab_size"), &u) ? u
-                  : (emb && emb->n_dims >= 2 ? (size_t)emb->dims[1] : 32000);
+  /* token_embd.weight is [n_embd, n_vocab] in GGUF. No arch defines a
+     vocab_size metadata key, so derive from the embedding: vocab >> hidden for
+     every real LLM, so max=vocab, min=hidden is robust to either storage order.
+     Getting this backwards truncates the lm_head to the first `hidden` tokens
+     and clamps input ids, yielding control-token word-salad instead of text. */
+  c->hidden_size = oc_meta_u32(g, K("embedding_length"), &u) ? u : 0;
+  if (!c->hidden_size && emb && emb->n_dims >= 2) {
+    size_t d0 = (size_t)emb->dims[0], d1 = (size_t)emb->dims[1];
+    c->hidden_size = d1 > d0 ? d0 : d1;
+  }
+  c->vocab_size = oc_meta_u32(g, K("vocab_size"), &u) ? u : 0;
+  if (!c->vocab_size && emb && emb->n_dims >= 2) {
+    size_t d0 = (size_t)emb->dims[0], d1 = (size_t)emb->dims[1];
+    c->vocab_size = d1 > d0 ? d1 : d0;
+  }
+  if (!c->hidden_size) c->hidden_size = 4096;
+  if (!c->vocab_size) c->vocab_size = 32000;
   c->context_size = oc_meta_u32(g, K("context_length"), &u) ? u : 4096;
   size_t nextn = oc_meta_u32(g, K("nextn_predict_layers"), &u) ? u : 0;
   size_t blocks = oc_meta_u32(g, K("block_count"), &u) ? u : 32;
@@ -134,40 +206,48 @@ static void load_block(const oc_gguf *g, const char *prefix, oc_layer *L,
   L->attn_norm = load_vec(g, T("attn_norm.weight"));
   L->ffn_norm = load_vec(g, T("ffn_norm.weight"));
   if (!L->ffn_norm) L->ffn_norm = load_vec(g, T("post_attention_norm.weight"));
-  L->gate = load_weight(g, T("ffn_gate.weight"));
-  L->up = load_weight(g, T("ffn_up.weight"));
-  L->down = load_weight(g, T("ffn_down.weight"));
+  L->gate = load_weight(g, T("ffn_gate.weight"), c);
+  L->up = load_weight(g, T("ffn_up.weight"), c);
+  L->down = load_weight(g, T("ffn_down.weight"), c);
 
   /* MoE: router present -> expert-stacked FFN (dense gate/up/down are empty). */
-  L->router = load_weight(g, T("ffn_gate_inp.weight"));
+  L->router = load_weight(g, T("ffn_gate_inp.weight"), c);
   if (!weight_empty(&L->router)) {
     L->is_moe = true;
-    L->e_gate = load_weight(g, T("ffn_gate_exps.weight"));
-    L->e_up = load_weight(g, T("ffn_up_exps.weight"));
-    L->e_down = load_weight(g, T("ffn_down_exps.weight"));
+    L->e_gate = load_weight(g, T("ffn_gate_exps.weight"), c);
+    L->e_up = load_weight(g, T("ffn_up_exps.weight"), c);
+    L->e_down = load_weight(g, T("ffn_down_exps.weight"), c);
+    if (weight_empty(&L->e_gate) || weight_empty(&L->e_up) ||
+        weight_empty(&L->e_down)) {
+      L->e_gate = stack_split_experts(g, prefix, "ffn_gate", c->n_expert, c);
+      L->e_up = stack_split_experts(g, prefix, "ffn_up", c->n_expert, c);
+      L->e_down = stack_split_experts(g, prefix, "ffn_down", c->n_expert, c);
+      L->split_moe = !weight_empty(&L->e_gate);
+    }
     if (weight_empty(&L->e_gate) || weight_empty(&L->e_up) ||
         weight_empty(&L->e_down))
       oc_die("model: MoE layer %s missing expert tensors", prefix);
     /* Per-expert selection bias (hunyuan sigmoid router), NULL when absent. */
     L->exp_probs_b = load_vec_n(g, T("exp_probs_b.bias"), &L->exp_probs_b_n);
     /* Always-on shared expert (hunyuan shared_mlp / qwen-moe shared_expert). */
-    L->sh_gate = load_weight(g, T("ffn_gate_shexp.weight"));
-    L->sh_up = load_weight(g, T("ffn_up_shexp.weight"));
-    L->sh_down = load_weight(g, T("ffn_down_shexp.weight"));
+    L->sh_gate = load_weight(g, T("ffn_gate_shexp.weight"), c);
+    L->sh_up = load_weight(g, T("ffn_up_shexp.weight"), c);
+    L->sh_down = load_weight(g, T("ffn_down_shexp.weight"), c);
   }
 
   size_t na;
   L->ssm_a = load_vec_n(g, T("ssm_a"), &na);
+  if (!L->ssm_a) L->ssm_a = load_vec_n(g, T("ssm_a.weight"), &na);
   if (L->ssm_a) {
     /* ---- gated-DeltaNet layer ---- */
     L->is_gdn = true;
     L->kv_slot = -1;
     L->n_v_heads = na;
-    L->qkv = load_weight(g, T("attn_qkv.weight"));
-    L->gdn_gate = load_weight(g, T("attn_gate.weight"));
-    L->ssm_alpha = load_weight(g, T("ssm_alpha.weight"));
-    L->ssm_beta = load_weight(g, T("ssm_beta.weight"));
-    L->ssm_out = load_weight(g, T("ssm_out.weight"));
+    L->qkv = load_weight(g, T("attn_qkv.weight"), c);
+    L->gdn_gate = load_weight(g, T("attn_gate.weight"), c);
+    L->ssm_alpha = load_weight(g, T("ssm_alpha.weight"), c);
+    L->ssm_beta = load_weight(g, T("ssm_beta.weight"), c);
+    L->ssm_out = load_weight(g, T("ssm_out.weight"), c);
     size_t nn, nd;
     L->ssm_norm = load_vec_n(g, T("ssm_norm.weight"), &nn);
     L->ssm_dt_bias = load_vec_n(g, T("ssm_dt.bias"), &nd);
@@ -200,10 +280,10 @@ static void load_block(const oc_gguf *g, const char *prefix, oc_layer *L,
     L->conv_ring = calloc(CONV_K * L->qkv_out, sizeof(float));
   } else {
     /* ---- (gated) full-attention layer ---- */
-    L->wq = load_weight(g, T("attn_q.weight"));
-    L->wk = load_weight(g, T("attn_k.weight"));
-    L->wv = load_weight(g, T("attn_v.weight"));
-    L->wo = load_weight(g, T("attn_output.weight"));
+    L->wq = load_weight(g, T("attn_q.weight"), c);
+    L->wk = load_weight(g, T("attn_k.weight"), c);
+    L->wv = load_weight(g, T("attn_v.weight"), c);
+    L->wo = load_weight(g, T("attn_output.weight"), c);
     L->q_bias = load_vec_n(g, T("attn_q.bias"), &L->q_bias_n);
     L->k_bias = load_vec_n(g, T("attn_k.bias"), &L->k_bias_n);
     L->v_bias = load_vec_n(g, T("attn_v.bias"), &L->v_bias_n);
@@ -232,14 +312,14 @@ oc_model *oc_model_load(const char *path, size_t max_ctx, int kv_int8) {
 
   const char *emb_name = oc_find_tensor(g, "token_embd.weight")
                              ? "token_embd.weight" : "tok_embeddings.weight";
-  m->tok_emb = load_weight(g, emb_name);
+  m->tok_emb = load_weight(g, emb_name, c);
   if (weight_empty(&m->tok_emb)) oc_die("model: missing token embedding");
 
   m->final_norm = load_vec(g, "output_norm.weight");
   if (!m->final_norm) m->final_norm = load_vec(g, "norm.weight");
   if (!m->final_norm) oc_die("model: missing final norm");
 
-  m->lm_head = load_weight(g, "output.weight");
+  m->lm_head = load_weight(g, "output.weight", c);
   if (weight_empty(&m->lm_head)) {
     m->lm_head = m->tok_emb;
     m->tied = true;
@@ -267,26 +347,17 @@ oc_model *oc_model_load(const char *path, size_t max_ctx, int kv_int8) {
     L->theta = c->rope_theta;
   }
 
-  /* ---- gemma4: dual attention geometry, K==V, post-norms, GELU ---- */
+  /* ---- gemma4: per-layer head dims (256 SWA / 512 global), GELU ---- */
   const char *arch_s = oc_meta_str(g, "general.architecture");
   if (arch_s && strcmp(arch_s, "gemma4") == 0) {
     m->gemma = true;
     m->emb_scale = sqrtf((float)c->hidden_size);
     oc_meta_f32(g, "gemma4.final_logit_softcapping", &m->logit_softcap);
     m->rope_freqs = load_vec(g, "rope_freqs.weight");
-    uint32_t u;
     float f;
-    size_t hd_full = c->head_dim;
-    size_t hd_swa =
-        oc_meta_u32(g, "gemma4.attention.key_length_swa", &u) ? u : hd_full;
-    size_t rot_full =
-        oc_meta_u32(g, "gemma4.rope.dimension_count", &u) ? u : hd_full;
-    size_t rot_swa =
-        oc_meta_u32(g, "gemma4.rope.dimension_count_swa", &u) ? u : hd_swa;
     float theta_swa =
         oc_meta_f32(g, "gemma4.rope.freq_base_swa", &f) ? f : 10000.0f;
     size_t window = c->sliding_window ? c->sliding_window : 1024;
-    const oc_meta *kvh = oc_meta_get(g, "gemma4.attention.head_count_kv");
     const oc_meta *swa = oc_meta_get(g, "gemma4.attention.sliding_window_pattern");
     char nm[160];
     for (size_t l = 0; l < c->layer_count; ++l) {
@@ -294,13 +365,20 @@ oc_model *oc_model_load(const char *path, size_t max_ctx, int kv_int8) {
       bool is_swa = (swa && swa->kind == 2 && l < swa->count)
                         ? swa->nums[l] != 0
                         : ((l + 1) % 6 != 0);
-      L->hd = is_swa ? hd_swa : hd_full;
-      if (kvh && kvh->kind == 2 && l < kvh->count)
-        L->n_kv = (size_t)kvh->nums[l];
-      L->n_rot = is_swa ? rot_swa : rot_full;
+      snprintf(nm, sizeof nm, "blk.%zu.attn_q_norm.weight", l);
+      const oc_tensor_info *qni = oc_find_tensor(g, nm);
+      snprintf(nm, sizeof nm, "blk.%zu.attn_k_norm.weight", l);
+      const oc_tensor_info *kni = oc_find_tensor(g, nm);
+      size_t hd_q = qni ? (size_t)qni->dims[0]
+                        : (c->n_heads ? L->wq.rows / c->n_heads : c->head_dim);
+      size_t hd_k = kni ? (size_t)kni->dims[0] : hd_q;
+      L->hd = hd_q;
+      if (!weight_empty(&L->wk) && hd_k > 0)
+        L->n_kv = L->wk.rows / hd_k;
+      L->attn_scale = 1.0f;
+      L->n_rot = L->hd;
       L->theta = is_swa ? theta_swa : c->rope_theta;
       L->rope_ff = is_swa ? NULL : m->rope_freqs;
-      L->attn_scale = 1.0f;   /* gemma4: no 1/sqrt(hd) pre-scaling */
       L->v_from_k = weight_empty(&L->wv);
       L->v_rms = true;
       snprintf(nm, sizeof nm, "blk.%zu.post_attention_norm.weight", l);
@@ -325,7 +403,7 @@ oc_model *oc_model_load(const char *path, size_t max_ctx, int kv_int8) {
     load_block(g, prefix, &m->mtp->layer, c);
     char name[160];
     snprintf(name, sizeof name, "%snextn.eh_proj.weight", prefix);
-    m->mtp->eh_proj = load_weight(g, name);
+    m->mtp->eh_proj = load_weight(g, name, c);
     snprintf(name, sizeof name, "%snextn.enorm.weight", prefix);
     m->mtp->enorm = load_vec(g, name);
     snprintf(name, sizeof name, "%snextn.hnorm.weight", prefix);
@@ -354,22 +432,26 @@ oc_model *oc_model_load(const char *path, size_t max_ctx, int kv_int8) {
     for (size_t i = 0; i < c->hidden_size; ++i) s += m->final_norm[i];
     if (s / (double)c->hidden_size < 0.5) {
       fprintf(stderr, "model: baking (1+w) into norm weights\n");
-      size_t h = c->hidden_size, hd = c->head_dim;
+      size_t h = c->hidden_size;
       bake_plus_one(m->final_norm, h);
       for (size_t l = 0; l < c->layer_count; ++l) {
         oc_layer *L = &m->layers[l];
         bake_plus_one(L->attn_norm, h);
         bake_plus_one(L->ffn_norm, h);
-        bake_plus_one(L->q_norm, hd);
-        bake_plus_one(L->k_norm, hd);
-        bake_plus_one(L->ssm_norm, L->head_v);
+        size_t hd = L->hd ? L->hd : c->head_dim;
+        if (L->q_norm) bake_plus_one(L->q_norm, hd);
+        if (L->k_norm) bake_plus_one(L->k_norm, hd);
+        if (L->ssm_norm && L->head_v) bake_plus_one(L->ssm_norm, L->head_v);
+        bake_plus_one(L->attn_post_norm, h);
+        bake_plus_one(L->ffn_post_norm, h);
       }
       if (m->mtp) {
         oc_layer *L = &m->mtp->layer;
         bake_plus_one(L->attn_norm, h);
         bake_plus_one(L->ffn_norm, h);
-        bake_plus_one(L->q_norm, hd);
-        bake_plus_one(L->k_norm, hd);
+        size_t mhd = L->hd ? L->hd : c->head_dim;
+        if (L->q_norm) bake_plus_one(L->q_norm, mhd);
+        if (L->k_norm) bake_plus_one(L->k_norm, mhd);
         bake_plus_one(m->mtp->enorm, h);
         bake_plus_one(m->mtp->hnorm, h);
         bake_plus_one(m->mtp->head_norm, h);
@@ -443,7 +525,19 @@ static void free_block(oc_layer *L) {
   free(L->attn_norm); free(L->ffn_norm);
   free(L->wq.f32); free(L->wk.f32); free(L->wv.f32); free(L->wo.f32);
   free(L->gate.f32); free(L->up.f32); free(L->down.f32);
-  free(L->router.f32); free(L->e_gate.f32); free(L->e_up.f32); free(L->e_down.f32);
+  free(L->router.f32);
+  if (L->split_moe) {
+    if (L->e_gate.quantized) free((void *)L->e_gate.data);
+    else free(L->e_gate.f32);
+    if (L->e_up.quantized) free((void *)L->e_up.data);
+    else free(L->e_up.f32);
+    if (L->e_down.quantized) free((void *)L->e_down.data);
+    else free(L->e_down.f32);
+  } else {
+    free(L->e_gate.f32);
+    free(L->e_up.f32);
+    free(L->e_down.f32);
+  }
   free(L->exp_probs_b);
   free(L->sh_gate.f32); free(L->sh_up.f32); free(L->sh_down.f32);
   free(L->q_bias); free(L->k_bias); free(L->v_bias);
@@ -744,8 +838,8 @@ static void gdn_layer(oc_model *m, oc_layer *L, const float *normed_all,
   for (long long vh_ = 0; vh_ < (long long)nvh; ++vh_) {
     size_t vh = (size_t)vh_;
     float *st = L->state + vh * hk * hv;
-    /* ggml repeats q/k heads by TILING: k_head = v_head % n_k_heads */
-    size_t k_head = vh % nkh;
+    /* GQA grouping: each key head is shared by nvh/nkh value heads. */
+    size_t k_head = (nkh > 0 && nvh >= nkh) ? (vh / (nvh / nkh)) : (vh % nkh);
     size_t q_off = k_head * hk, k_off = kd + k_head * hk;
     size_t v_off = kd * 2 + vh * hv;
     float qbuf[512], kbuf[512], kv_mem[512], delta[512];
@@ -805,7 +899,7 @@ static void attn_layer_token(const oc_model *m, const oc_layer *L,
   size_t hd = L->hd ? L->hd : c->head_dim;
   size_t n_kv = L->n_kv ? L->n_kv : c->kv_heads;
   size_t qg_len = L->wq.rows;
-  size_t q_len = L->wo.cols;                 /* gate half excluded */
+  size_t q_len = L->wo.rows;
   size_t kvn = n_kv * hd;
   float *qg = s->q, *k = s->k, *v = s->v;
 
@@ -1080,7 +1174,7 @@ static void forward_impl(oc_model *m, const uint32_t *tokens, size_t n,
       bool want = all ? (logits != NULL) : (logits != NULL && i + 1 == n);
       embed_token(m, tokens[i], emb);
       float *lp = all ? (logits ? logits + i * c->vocab_size : NULL) : logits;
-      oc_cuda_forward(m, emb, start_pos + i, want, want ? lp : NULL);
+      oc_cuda_forward(m, emb, start_pos + i, want, want ? lp : NULL, NULL);
     }
     free(emb);
     return;
@@ -1110,8 +1204,8 @@ void oc_forward_all(oc_model *m, const uint32_t *tokens, size_t n,
   forward_impl(m, tokens, n, start_pos, logits_all, true);
 }
 
-/* Training path (finetune.c): CPU only, exposes the post-final-norm hidden
- * rows that the LoRA head trains against. */
+/* Training path (finetune.c): GPU resident forward when available, else CPU.
+ * Exposes post-final-norm hidden rows for the LoRA head. */
 void oc_forward_train(oc_model *m, const uint32_t *tokens, size_t n,
                       size_t start_pos, float *normed_all, float *logits_all) {
   const oc_config *c = &m->cfg;
@@ -1119,6 +1213,31 @@ void oc_forward_train(oc_model *m, const uint32_t *tokens, size_t n,
   if (start_pos + n > m->kv_ctx)
     oc_die("forward: context exceeded (%zu > %zu)", start_pos + n, m->kv_ctx);
   size_t h = c->hidden_size;
+  size_t vocab = c->vocab_size;
+
+#ifdef OC_CUDA
+  if (m->gpu_active) {
+    float *emb = malloc(h * sizeof(float));
+    scratch_t s = scratch_alloc(m, 1);
+    for (size_t i = 0; i < n; ++i) {
+      embed_token(m, tokens[i], emb);
+      oc_cuda_forward(m, emb, start_pos + i, 0, NULL, normed_all + i * h);
+      const oc_q8blk *hq =
+          quant_acts(&s, normed_all + i * h, h, 1, w_needs_q8(&m->lm_head));
+      oc_gemm(&m->lm_head, vocab, h, normed_all + i * h, hq,
+              logits_all + i * vocab, 1);
+    }
+    scratch_free(&s);
+    free(emb);
+    if (m->logit_softcap > 0.0f) {
+      float cap = m->logit_softcap;
+      for (size_t i = 0; i < n * vocab; ++i)
+        logits_all[i] = cap * tanhf(logits_all[i] / cap);
+    }
+    return;
+  }
+#endif
+
   scratch_t s = scratch_alloc(m, n);
   float *xb = malloc(n * h * sizeof(float));
   for (size_t i = 0; i < n; ++i) embed_token(m, tokens[i], xb + i * h);
