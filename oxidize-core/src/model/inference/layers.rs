@@ -11,6 +11,18 @@ pub(super) fn ox_gpu_attn_enabled() -> bool {
     })
 }
 
+/// LongCat-2.0 LSA escape hatch: `OXIDIZE_LONGCAT_DENSE=1` forces plain dense
+/// MLA attention over the full KV cache even when the GGUF has indexer
+/// tensors, for A/B comparisons against the sparse (top-k) path.
+pub(super) fn longcat_dense_forced() -> bool {
+    static FORCED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FORCED.get_or_init(|| {
+        std::env::var("OXIDIZE_LONGCAT_DENSE")
+            .map(|v| v != "0" && !v.is_empty())
+            .unwrap_or(false)
+    })
+}
+
 /// Cached check for true continuous-batching decode (env `OX_BATCHED_DECODE`).
 /// When set, the paged runtime / batched-decode bench may run N decode tokens
 /// (one per running sequence) through [`InferenceModel::forward_batch`] as a
@@ -27,6 +39,182 @@ pub fn ox_batched_decode_enabled() -> bool {
             .map(|v| v != "0" && !v.is_empty())
             .unwrap_or(false)
     })
+}
+
+/// LongCat-2.0 LSA (lightning) indexer: score every cached token 0..=`pos`
+/// against this token's query and select the top-`indexer_topk` physical
+/// positions, forcing the first `indexer_init_tokens` (attention sink) and
+/// most recent `indexer_local_tokens` (local window) to always be included.
+/// Runs only for the ScMoE pair's sub-block 0 (the owning sub-block — GGUF
+/// only ever attaches indexer tensors there); sub-block 1 reuses the
+/// resulting `selected` list unchanged (`indexer_cli_factor=2`: index
+/// computation is shared across the pair). Clears and refills `selected`
+/// every call.
+///
+/// Pinned against SGLang's DeepSeek-V3.2 `dsa_indexer.py` (`class Indexer`)
+/// and LongCat's own `DeepseekV2AttentionMLA` reuse (`longcat_flash.py`):
+///
+/// ```text
+/// index_score(t, s) = sum_j w_j(t) * relu(q_j(t) . k(s))
+/// w_j(t)  = weights_proj(normed_t)_j * n_heads^-0.5 * head_dim^-0.5   (raw, no softmax)
+/// q_j(t)  = rope_partial(wq_b(c_q(t)))_j                             (per indexer head)
+/// k(s)    = rope_partial(k_norm(wk(normed_s)))                        (ONE shared key, MQA-style)
+/// c_q(t)  = the SAME q_lora activation MLA's own q_b projection consumes
+///           (`mla_q_a`, optionally `mla_q_a_norm`'d)
+/// normed_s = rms_norm(hidden_s, attn_norm)                            (same input as kv_a_proj
+///           AND weights_proj/wk -- confirmed against real LongCat-2.0 checkpoint
+///           shard headers: `weights_proj.weight` is `[n_heads, hidden_size]`)
+/// ```
+/// `rope_partial` rotates only the first `min(qk_rope_head_dim, indexer_head_dim)`
+/// channels (NoPE on the remainder), same convention as MLA's own q_pe/k_pe.
+/// Forced tokens are folded into the SAME top-k budget by pinning their score
+/// to `+inf` before selection (mirrors `_mask_init_and_local_tokens`), so they
+/// always win ties for inclusion instead of being added on top of the budget.
+/// When `indexer_topk >= seq_len`, every position is selected — LSA then
+/// scores byte-for-byte the same SET of positions as dense attention (summed
+/// in a different order, well within the `~1e-5` float tolerance).
+///
+/// ponytail: recomputes `normed`/`c_q` (already computed by the paired
+/// `deepseek_mla_layer` call for sub-block 0) instead of threading them
+/// through — one small extra GEMV pair (hidden -> q_lora) per owning
+/// sub-block per token. Fuse into `deepseek_mla_layer` directly if this shows
+/// up in profiles; kept separate for clarity in this first implementation.
+#[allow(clippy::too_many_arguments)]
+fn longcat_indexer_select(
+    layer: &LayerWeights,
+    cfg: &InferenceConfig,
+    pos: usize,
+    ws: &mut Workspace,
+    indexer_k_cache: &mut [f32],
+    selected: &mut Vec<usize>,
+) -> Result<(), ModelError> {
+    selected.clear();
+    let h = cfg.hidden_size;
+    let n_heads = cfg.indexer_head_count;
+    let head_dim = cfg.indexer_head_dim;
+    if n_heads == 0 || head_dim == 0 || layer.indexer_wk.is_empty() {
+        return Ok(());
+    }
+
+    // normed = rms_norm(x, attn_norm) -- the same input MLA's kv_a_proj (and
+    // this pair's indexer wk) both consume.
+    let normed = &mut ws.indexer_normed[..h];
+    rms_norm_f32(&ws.x[..h], &layer.attn_norm, cfg.rms_norm_eps, normed)
+        .map_err(|e| ModelError::InferenceFailed(format!("indexer attn_norm: {:?}", e)))?;
+
+    // c_q = mla_q_a(normed), optionally re-normed by mla_q_a_norm -- the SAME
+    // compressed query latent MLA's own q_b projection consumes.
+    let q_lora = layer.mla_q_a.output_dim(h);
+    let c_q = &mut ws.indexer_c_q[..q_lora];
+    gemv_weight(&layer.mla_q_a, q_lora, h, normed, c_q)
+        .map_err(|e| ModelError::InferenceFailed(format!("indexer q_a: {:?}", e)))?;
+    if !layer.mla_q_a_norm.is_empty() {
+        let tmp = c_q.to_vec();
+        rms_norm_f32(&tmp, &layer.mla_q_a_norm, cfg.rms_norm_eps, c_q)
+            .map_err(|e| ModelError::InferenceFailed(format!("indexer q_a_norm: {:?}", e)))?;
+    }
+
+    // Single shared indexer key (MQA-style, not per-head): wk(normed) -> k_norm.
+    let k_raw = &mut ws.indexer_k[..head_dim];
+    gemv_weight(&layer.indexer_wk, head_dim, h, normed, k_raw)
+        .map_err(|e| ModelError::InferenceFailed(format!("indexer wk: {:?}", e)))?;
+    let mut k_normed = vec![0.0_f32; head_dim];
+    rms_norm_f32(k_raw, &layer.indexer_k_norm, cfg.rms_norm_eps, &mut k_normed)
+        .map_err(|e| ModelError::InferenceFailed(format!("indexer k_norm: {:?}", e)))?;
+
+    // Partial RoPE: rotate only the first `rope_dim` channels (mirrors the
+    // main MLA rope width, i.e. `qk_rope_head_dim`), clamped to `head_dim`.
+    let kv_lora = layer.mla_kv_a_norm.len();
+    let kv_pe_dim = layer.mla_kv_a_mqa.output_dim(h).saturating_sub(kv_lora);
+    let rope_dim = kv_pe_dim.min(head_dim);
+    if rope_dim > 0 {
+        let mut rotated = vec![0.0_f32; rope_dim];
+        cfg.apply_rope_head(&k_normed[..rope_dim], pos, rope_dim, cfg.rope_theta, &mut rotated)
+            .map_err(|e| ModelError::InferenceFailed(format!("indexer k rope: {:?}", e)))?;
+        k_normed[..rope_dim].copy_from_slice(&rotated);
+    }
+
+    let cache_off = pos * head_dim;
+    let cache_end = cache_off + head_dim;
+    if cache_end > indexer_k_cache.len() {
+        return Err(ModelError::InferenceFailed(format!(
+            "indexer_k_cache too small: need {cache_end}, have {}",
+            indexer_k_cache.len()
+        )));
+    }
+    indexer_k_cache[cache_off..cache_end].copy_from_slice(&k_normed);
+
+    // Per-indexer-head queries (+ per-head partial RoPE) and raw head gates,
+    // both projected from c_q.
+    let q_all = &mut ws.indexer_q_all[..n_heads * head_dim];
+    gemv_weight(&layer.indexer_wq_b, n_heads * head_dim, q_lora, c_q, q_all)
+        .map_err(|e| ModelError::InferenceFailed(format!("indexer wq_b: {:?}", e)))?;
+    if rope_dim > 0 {
+        let mut rotated = vec![0.0_f32; rope_dim];
+        for head in 0..n_heads {
+            let off = head * head_dim;
+            cfg.apply_rope_head(
+                &q_all[off..off + rope_dim],
+                pos,
+                rope_dim,
+                cfg.rope_theta,
+                &mut rotated,
+            )
+            .map_err(|e| ModelError::InferenceFailed(format!("indexer q rope: {:?}", e)))?;
+            q_all[off..off + rope_dim].copy_from_slice(&rotated);
+        }
+    }
+
+    let weights = &mut ws.indexer_weights[..n_heads];
+    gemv_weight(&layer.indexer_weights_proj, n_heads, h, normed, weights)
+        .map_err(|e| ModelError::InferenceFailed(format!("indexer weights_proj: {:?}", e)))?;
+    let gate_scale = 1.0_f32 / ((n_heads as f32).sqrt() * (head_dim as f32).sqrt());
+    for w in weights.iter_mut() {
+        *w *= gate_scale;
+    }
+
+    // Score every cached position 0..=pos.
+    let seq_len = pos + 1;
+    let scores = &mut ws.indexer_scores[..seq_len];
+    for (t, score) in scores.iter_mut().enumerate() {
+        let k_t = &indexer_k_cache[t * head_dim..t * head_dim + head_dim];
+        let mut s = 0.0_f32;
+        for head in 0..n_heads {
+            let q_h = &q_all[head * head_dim..head * head_dim + head_dim];
+            let mut dot = 0.0_f32;
+            for d in 0..head_dim {
+                dot += q_h[d] * k_t[d];
+            }
+            s += weights[head] * dot.max(0.0); // ReLU
+        }
+        *score = s;
+    }
+
+    // Forced tokens (attention sink + local window) always win selection --
+    // pin their score to +inf so they're never displaced by the top-k cut.
+    let init_n = cfg.indexer_init_tokens.min(seq_len);
+    scores[..init_n].fill(f32::INFINITY);
+    let local_n = cfg.indexer_local_tokens.min(seq_len);
+    scores[seq_len - local_n..].fill(f32::INFINITY);
+
+    let topk = cfg.indexer_topk.max(1).min(seq_len);
+    if topk >= seq_len {
+        selected.extend(0..seq_len);
+        return Ok(());
+    }
+    let idx = &mut ws.indexer_scratch_idx[..seq_len];
+    for (i, v) in idx.iter_mut().enumerate() {
+        *v = i;
+    }
+    idx.select_nth_unstable_by(topk - 1, |&a, &b| {
+        scores[b]
+            .partial_cmp(&scores[a])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut top = idx[..topk].to_vec();
+    top.sort_unstable();
+    selected.extend(top);
+    Ok(())
 }
 
 impl InferenceModel {
@@ -595,7 +783,7 @@ impl InferenceModel {
                 ws.hidden_a[..h].fill(0.0_f32);
                 {
                     let kv_cache = &mut self.kv_cache;
-                    Self::deepseek_mla_layer(kv_cache, layer, cfg, kv_layer_idx, pos, ws)?;
+                    Self::deepseek_mla_layer(kv_cache, layer, cfg, kv_layer_idx, pos, ws, None)?;
                 }
                 for i in 0..h {
                     ws.x[i] += ws.hidden_a[i];
@@ -1704,9 +1892,37 @@ impl InferenceModel {
 
         let pair_start = range.start / 2;
         let pair_end = range.end / 2;
+        // LSA selected-position list: computed by sub-block 0 (the indexer
+        // owner) and reused unchanged by sub-block 1 (`cli_factor=2` index
+        // sharing). Reused across pairs/tokens; `.clear()`d per pair below.
+        let mut selected: Vec<usize> = Vec::new();
         for pair in pair_start..pair_end {
             let a = pair * 2;
             let b = a + 1;
+
+            // ---- LSA: compute this pair's top-k selection (owner sub-block
+            // only). Falls back to dense (None) when the GGUF has no indexer
+            // tensors for this pair, the cache wasn't allocated, or
+            // `OXIDIZE_LONGCAT_DENSE=1` forces dense attention.
+            let lsa_active = !longcat_dense_forced()
+                && !self.layers[a].indexer_wk.is_empty()
+                && self
+                    .indexer_k_cache
+                    .get(pair)
+                    .is_some_and(|c| !c.is_empty());
+            if lsa_active {
+                let layer_a = &self.layers[a];
+                let indexer_cache = &mut self.indexer_k_cache[pair];
+                longcat_indexer_select(
+                    layer_a,
+                    &cfg,
+                    pos,
+                    &mut self.workspace,
+                    indexer_cache,
+                    &mut selected,
+                )?;
+            }
+            let restrict = lsa_active.then_some(selected.as_slice());
 
             // ---- sub-block 0: MLA attention, residual add ----
             {
@@ -1721,6 +1937,7 @@ impl InferenceModel {
                     kv_layer_idx,
                     pos,
                     &mut self.workspace,
+                    restrict,
                 )?;
             }
             for i in 0..h {
@@ -1785,6 +2002,7 @@ impl InferenceModel {
                     kv_layer_idx,
                     pos,
                     &mut self.workspace,
+                    restrict,
                 )?;
             }
             for i in 0..h {
@@ -1851,6 +2069,11 @@ impl InferenceModel {
         Ok(())
     }
 
+    /// `restrict`: when `Some`, attention only considers these physical KV
+    /// positions (LongCat LSA top-k selection) instead of the full causal
+    /// `0..=pos` range. `None` (every non-LongCat MLA caller, and LongCat
+    /// callers with no indexer / `OXIDIZE_LONGCAT_DENSE=1`) is the original
+    /// dense behavior, unchanged.
     #[allow(clippy::too_many_lines)]
     fn deepseek_mla_layer(
         kv_cache: &mut KvCache,
@@ -1859,6 +2082,7 @@ impl InferenceModel {
         kv_layer_idx: usize,
         pos: usize,
         ws: &mut Workspace,
+        restrict: Option<&[usize]>,
     ) -> Result<(), ModelError> {
         let h = cfg.hidden_size;
         let x = &ws.x[..h];
@@ -1978,23 +2202,28 @@ impl InferenceModel {
         let attn_result = &mut ws.attn_result[..total_k];
         attn_result.fill(0.0_f32);
         let scale = 1.0_f32 / (k_head_dim as f32).sqrt();
+        // LSA: iterate only the selected positions when `restrict` is set;
+        // `pos_at` maps a dense loop index back to the physical KV position.
+        let n_positions = restrict.map_or(seq_len, <[usize]>::len);
+        let pos_at = |i: usize| restrict.map_or(i, |r| r[i]);
 
         for head in 0..n_heads {
             let q_off = head * k_head_dim;
             let k_off = head * k_head_dim;
             let _v_off = head * v_head_dim;
             let q_h = &q[q_off..q_off + k_head_dim];
-            let mut scores = vec![0.0_f32; seq_len];
-            for t in 0..seq_len {
+            let mut scores = vec![0.0_f32; n_positions];
+            for i in 0..n_positions {
+                let t = pos_at(i);
                 let mut k_t = vec![0.0_f32; total_k];
                 kv_cache
                     .get_key(kv_layer_idx, t, &mut k_t)
                     .map_err(|e| ModelError::InferenceFailed(format!("mla get_k: {:?}", e)))?;
                 let mut dot = 0.0_f32;
-                for i in 0..k_head_dim {
-                    dot += q_h[i] * k_t[q_off + i];
+                for d in 0..k_head_dim {
+                    dot += q_h[d] * k_t[q_off + d];
                 }
-                scores[t] = dot * scale;
+                scores[i] = dot * scale;
             }
             let max_s = scores.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
             let mut sum = 0.0_f32;
@@ -2007,16 +2236,17 @@ impl InferenceModel {
                     *s /= sum;
                 }
             }
-            for i in 0..v_head_dim {
+            for d in 0..v_head_dim {
                 let mut acc = 0.0_f32;
-                for t in 0..seq_len {
+                for i in 0..n_positions {
+                    let t = pos_at(i);
                     let mut v_t = vec![0.0_f32; total_k];
                     kv_cache
                         .get_value(kv_layer_idx, t, &mut v_t)
                         .map_err(|e| ModelError::InferenceFailed(format!("mla get_v: {:?}", e)))?;
-                    acc += scores[t] * v_t[k_off + i];
+                    acc += scores[i] * v_t[k_off + d];
                 }
-                attn_result[q_off + i] = acc;
+                attn_result[q_off + d] = acc;
             }
         }
 

@@ -2306,7 +2306,9 @@ mod tests {
             ("model.layers.0.self_attn.0.indexer.wk.weight", Dtype::F32, vec![2, 4], f32s(&[0.0; 8])),
             ("model.layers.0.self_attn.0.indexer.wq_b.weight", Dtype::F32, vec![4, 2], f32s(&[0.0; 8])),
             ("model.layers.0.self_attn.0.indexer.k_norm.weight", Dtype::F32, vec![2], f32s(&[1.0, 1.0])),
-            ("model.layers.0.self_attn.0.indexer.weights_proj.weight", Dtype::F32, vec![2, 2], f32s(&[0.0; 4])),
+            // [n_heads, hidden_size] -- real LongCat-2.0 checkpoint shard headers
+            // confirm weights_proj takes `normed` (hidden), not the q_lora activation.
+            ("model.layers.0.self_attn.0.indexer.weights_proj.weight", Dtype::F32, vec![2, 4], f32s(&[0.0; 8])),
             ("model.layers.0.self_attn.1.q_a_proj.weight", Dtype::F32, vec![2, 4], f32s(&[0.0; 8])),
             ("model.layers.0.self_attn.1.q_a_layernorm.weight", Dtype::F32, vec![2], f32s(&[1.0, 1.0])),
             ("model.layers.0.self_attn.1.q_b_proj.weight", Dtype::F32, vec![8, 2], f32s(&[0.0; 16])),

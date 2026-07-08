@@ -430,6 +430,7 @@ fn inference_config_from_dflash(
         expert_weights_scale: 1.0,
         expert_group_count: 0,
         expert_group_used_count: 0,
+        ..Default::default()
     }
 }
 

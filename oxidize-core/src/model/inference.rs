@@ -228,14 +228,23 @@ pub struct InferenceConfig {
     /// `expert_weights_scale`, unlike the routed-expert sum. 0 = no zero experts
     /// (every other MoE architecture).
     pub zero_expert_count: usize,
-    /// LongCat-2.0 LSA sparse-attention indexer hyperparameters. Parsed but
-    /// unused until the indexer itself is implemented (attention is dense MLA
-    /// over the full KV cache for now).
+    /// LongCat-2.0 LSA sparse-attention indexer hyperparameters. Drives
+    /// `run_longcat_layer_range`'s top-k token selection; falls back to dense
+    /// MLA when the GGUF has no indexer tensors (or `OXIDIZE_LONGCAT_DENSE=1`
+    /// forces it).
     pub indexer_head_count: usize,
     pub indexer_head_dim: usize,
     pub indexer_topk: usize,
     pub indexer_local_tokens: usize,
     pub indexer_init_tokens: usize,
+    /// LongCat-2.0 LSA index-sharing factor: the indexer's top-k selection is
+    /// computed once every `indexer_cli_factor` MLA attention sub-blocks and
+    /// reused by the rest (LongCat's ScMoE pairing uses 2: sub-block 0 of each
+    /// pair computes, sub-block 1 reuses). 0/1 = every attention layer would
+    /// compute its own (not used by LongCat, whose GGUF only ever attaches
+    /// indexer tensors to the even sub-block, so the runtime derives reuse
+    /// from tensor presence rather than branching on this value directly).
+    pub indexer_cli_factor: usize,
     /// LongCat-2.0 n-gram embedding hyperparameters. Parsed but unused until the
     /// n-gram embedding replaces the plain `tok_embeddings` lookup.
     pub ngram_neighbor_num: usize,
@@ -285,6 +294,7 @@ impl Default for InferenceConfig {
             indexer_topk: 0,
             indexer_local_tokens: 0,
             indexer_init_tokens: 0,
+            indexer_cli_factor: 0,
             ngram_neighbor_num: 0,
             ngram_split_num: 0,
         }
@@ -700,6 +710,7 @@ impl InferenceConfig {
         let indexer_topk = arch_u32("indexer.topk").unwrap_or(0) as usize;
         let indexer_local_tokens = arch_u32("indexer.local_tokens").unwrap_or(0) as usize;
         let indexer_init_tokens = arch_u32("indexer.init_tokens").unwrap_or(0) as usize;
+        let indexer_cli_factor = arch_u32("indexer.cli_factor").unwrap_or(0) as usize;
         let ngram_neighbor_num = arch_u32("ngram.neighbor_num").unwrap_or(0) as usize;
         let ngram_split_num = arch_u32("ngram.split_num").unwrap_or(0) as usize;
 
@@ -755,6 +766,7 @@ impl InferenceConfig {
             indexer_topk,
             indexer_local_tokens,
             indexer_init_tokens,
+            indexer_cli_factor,
             ngram_neighbor_num,
             ngram_split_num,
         }
@@ -968,6 +980,16 @@ pub struct Workspace {
     // residual only after sub-block 1's dense FFN). Unused (h floats, cheap)
     // by every other architecture.
     pub moe_stash: Vec<f32>,
+    // LongCat-2.0 LSA indexer scratch (all zero-length when `indexer_head_dim`
+    // is 0, i.e. every non-LongCat architecture and LongCat GGUFs without
+    // indexer tensors — see `longcat_indexer_select`).
+    pub indexer_normed: Vec<f32>,
+    pub indexer_c_q: Vec<f32>,
+    pub indexer_k: Vec<f32>,
+    pub indexer_q_all: Vec<f32>,
+    pub indexer_weights: Vec<f32>,
+    pub indexer_scores: Vec<f32>,
+    pub indexer_scratch_idx: Vec<usize>,
 }
 
 impl Workspace {
@@ -990,6 +1012,10 @@ impl Workspace {
         // LongCat-2.0 router logits/scores span routed + zero experts; every
         // other architecture has zero_expert_count == 0 (no size change).
         let total_expert_slots = config.num_experts + config.zero_expert_count;
+        // LongCat-2.0 LSA indexer scratch: zero-sized for every architecture
+        // (or LongCat GGUF) that doesn't set these fields.
+        let indexer_active = config.indexer_head_count > 0 && config.indexer_head_dim > 0;
+        let indexer_ctx = if indexer_active { config.context_size } else { 0 };
 
         Self {
             x: vec![0.0_f32; h],
@@ -1017,6 +1043,13 @@ impl Workspace {
             moe_up_all: vec![0.0_f32; n_experts_per_tok * expert_inter],
             moe_down_all: vec![0.0_f32; n_experts_per_tok * h],
             moe_stash: vec![0.0_f32; h],
+            indexer_normed: vec![0.0_f32; if indexer_active { h } else { 0 }],
+            indexer_c_q: vec![0.0_f32; if indexer_active { h } else { 0 }],
+            indexer_k: vec![0.0_f32; config.indexer_head_dim],
+            indexer_q_all: vec![0.0_f32; config.indexer_head_count * config.indexer_head_dim],
+            indexer_weights: vec![0.0_f32; config.indexer_head_count],
+            indexer_scores: vec![0.0_f32; indexer_ctx],
+            indexer_scratch_idx: vec![0usize; indexer_ctx],
         }
     }
 }
@@ -1382,6 +1415,12 @@ pub(crate) struct LayerWeights {
     pub(super) mla_kv_a_norm: Vec<f32>,
     pub(super) mla_k_b: WeightStorage,
     pub(super) mla_v_b: WeightStorage,
+    // LongCat-2.0 LSA sparse-attention indexer (attaches only to the even
+    // sub-block of each ScMoE pair; empty on every other layer/architecture).
+    pub(super) indexer_wk: WeightStorage,
+    pub(super) indexer_wq_b: WeightStorage,
+    pub(super) indexer_k_norm: Vec<f32>,
+    pub(super) indexer_weights_proj: WeightStorage,
     // DeepSeek MoE shared expert (shexp) branch.
     pub(super) ffn_gate_shexp: WeightStorage,
     // Optional DeepSeek shared-expert gate. Some DeepSeek-family checkpoints
@@ -1443,6 +1482,13 @@ pub struct InferenceModel {
     /// Allows KV cache to be sized to only the attention-layer count instead of
     /// all layers (e.g. 6 instead of 24 for LFM2MoE), saving several GB.
     pub(super) kv_layer_map: Vec<Option<usize>>,
+    /// LongCat-2.0 LSA indexer key cache: one flat `[context_size *
+    /// indexer_head_dim]` buffer per ScMoE pair, indexed `[pair][pos * dim..]`.
+    /// Empty `Vec` overall for non-LongCat models; an individual pair's inner
+    /// `Vec` is also empty when that pair's GGUF has no indexer tensors
+    /// (dense-attention fallback for that pair). Tiny vs. the MLA KV cache
+    /// (one `head_dim`-wide row per token vs. per-head K+V).
+    pub(super) indexer_k_cache: Vec<Vec<f32>>,
     // Mamba/SSM persistent state
     pub(super) ssm_states: Vec<Vec<f32>>, // [layer][state_dim]
     pub(super) ssm_conv_buffers: Vec<ConvHistoryRing>,
@@ -2892,6 +2938,468 @@ mod tests {
         let _ = std::fs::remove_file(&output);
     }
 
+    /// Builds a tiny LongCat GGUF (1 ScMoE pair, hidden=4, 4 distinct-embedding
+    /// tokens) with `post_attention_layernorm` (ffn_norm) ALL-ZERO so the dense
+    /// FFN and MoE branches contribute exactly 0 to every token (mirrors
+    /// `longcat_scmoe_forward_pass_exercises_zero_expert_routing`'s isolation
+    /// trick, inverted: here `attn_norm` is REAL and `ffn_norm` is zeroed,
+    /// isolating the MLA attention branch instead). `attn`/`kv` projections are
+    /// simple identity/selection matrices (deterministic, not hand-verified
+    /// numerically — the tests below only need attention to be *some*
+    /// nontrivial, position-sensitive function of the KV cache). When
+    /// `with_indexer` is `true`, LSA indexer tensors + `index_*` metadata are
+    /// added with the given `index_topk`/`index_local_tokens`/`index_init_tokens`.
+    fn build_longcat_lsa_gguf(
+        output: &std::path::Path,
+        index_topk: u32,
+        index_local_tokens: u32,
+        index_init_tokens: u32,
+        with_indexer: bool,
+    ) {
+        use safetensors::tensor::{Dtype as StDtype, TensorView};
+        use std::collections::HashMap;
+
+        fn f32s(vals: &[f32]) -> Vec<u8> {
+            vals.iter().flat_map(|v| v.to_le_bytes()).collect()
+        }
+        fn write_test_safetensors(
+            path: &std::path::Path,
+            tensors: &[(&str, StDtype, Vec<usize>, Vec<u8>)],
+        ) {
+            let views: HashMap<String, TensorView> = tensors
+                .iter()
+                .map(|(name, dtype, shape, data)| {
+                    (
+                        (*name).to_owned(),
+                        TensorView::new(*dtype, shape.clone(), data).unwrap(),
+                    )
+                })
+                .collect();
+            let bytes = safetensors::tensor::serialize(&views, &None).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        }
+
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("oxidize-longcat-lsa-{nanos}"));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let indexer_cfg = if with_indexer {
+            format!(
+                r#","index_n_heads": 2, "index_head_dim": 2, "index_topk": {index_topk},
+                "cli_factor": 2, "index_local_tokens": {index_local_tokens},
+                "index_init_tokens": {index_init_tokens}"#
+            )
+        } else {
+            String::new()
+        };
+        std::fs::write(
+            dir.join("config.json"),
+            format!(
+                r#"{{
+                "architectures": ["LongcatCausalLM"],
+                "hidden_size": 4, "num_layers": 1, "vocab_size": 8,
+                "num_attention_heads": 2,
+                "q_lora_rank": 2, "kv_lora_rank": 2,
+                "qk_nope_head_dim": 2, "qk_rope_head_dim": 2, "v_head_dim": 2,
+                "mla_scale_q_lora": false, "mla_scale_kv_lora": false,
+                "ffn_hidden_size": 4, "expert_ffn_hidden_size": 2,
+                "n_routed_experts": 2, "moe_topk": 2,
+                "zero_expert_num": 1, "zero_expert_type": "identity",
+                "routed_scaling_factor": 9,
+                "rms_norm_eps": 1e-5, "rope_theta": 1000000.0,
+                "max_position_embeddings": 64,
+                "rope_scaling": {{"rope_type": "deepseek_yarn", "factor": 120,
+                                  "original_max_position_embeddings": 8}}
+                {indexer_cfg}
+            }}"#
+            ),
+        )
+        .unwrap();
+
+        // 4 distinct one-hot-ish token embeddings (tokens 0..3); rows 4..7 unused.
+        let mut embed = vec![0.0_f32; 32];
+        embed[0..4].copy_from_slice(&[2.0, 0.0, 0.0, 0.0]);
+        embed[4..8].copy_from_slice(&[0.0, 2.0, 0.0, 0.0]);
+        embed[8..12].copy_from_slice(&[0.0, 0.0, 2.0, 0.0]);
+        embed[12..16].copy_from_slice(&[0.0, 0.0, 0.0, 2.0]);
+        let shard = "model-00001-of-00001.safetensors";
+        let kv_b: Vec<f32> = (0..16).map(|i| (i / 2) as f32).collect();
+        // q_b_proj: nope half = identity on c_q, rope half = 0 (keeps MLA's own
+        // RoPE out of play; the indexer below exercises RoPE separately).
+        let q_b: Vec<f32> = vec![
+            1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0,
+        ];
+        let identity4: Vec<f32> = vec![
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ];
+        let mut tensors: Vec<(&str, StDtype, Vec<usize>, Vec<u8>)> = vec![
+            ("model.embed_tokens.weight", StDtype::F32, vec![8, 4], f32s(&embed)),
+            ("model.norm.weight", StDtype::F32, vec![4], f32s(&[1.0; 4])),
+            (
+                // Identity on the first 4 vocab rows so logits[0..4] directly
+                // expose the (final-normed) hidden state -- lets the tests
+                // below detect attention-output differences through logits.
+                "lm_head.weight",
+                StDtype::F32,
+                vec![8, 4],
+                f32s(&[identity4.as_slice(), &[0.0; 16]].concat()),
+            ),
+            (
+                "model.layers.0.input_layernorm.0.weight",
+                StDtype::F32,
+                vec![4],
+                f32s(&[1.0; 4]),
+            ),
+            (
+                "model.layers.0.input_layernorm.1.weight",
+                StDtype::F32,
+                vec![4],
+                f32s(&[1.0; 4]),
+            ),
+            // ffn_norm ALL-ZERO -> dense FFN + MoE contribute 0 for both
+            // sub-blocks, isolating MLA attention.
+            (
+                "model.layers.0.post_attention_layernorm.0.weight",
+                StDtype::F32,
+                vec![4],
+                f32s(&[0.0; 4]),
+            ),
+            (
+                "model.layers.0.post_attention_layernorm.1.weight",
+                StDtype::F32,
+                vec![4],
+                f32s(&[0.0; 4]),
+            ),
+            (
+                "model.layers.0.self_attn.0.q_a_proj.weight",
+                StDtype::F32,
+                vec![2, 4],
+                f32s(&[1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0]),
+            ),
+            (
+                "model.layers.0.self_attn.0.q_a_layernorm.weight",
+                StDtype::F32,
+                vec![2],
+                f32s(&[1.0, 1.0]),
+            ),
+            (
+                "model.layers.0.self_attn.0.q_b_proj.weight",
+                StDtype::F32,
+                vec![8, 2],
+                f32s(&q_b),
+            ),
+            (
+                "model.layers.0.self_attn.0.kv_a_proj_with_mqa.weight",
+                StDtype::F32,
+                vec![4, 4],
+                f32s(&identity4),
+            ),
+            (
+                "model.layers.0.self_attn.0.kv_a_layernorm.weight",
+                StDtype::F32,
+                vec![2],
+                f32s(&[1.0, 1.0]),
+            ),
+            (
+                "model.layers.0.self_attn.0.kv_b_proj.weight",
+                StDtype::F32,
+                vec![8, 2],
+                f32s(&kv_b),
+            ),
+            (
+                "model.layers.0.self_attn.0.o_proj.weight",
+                StDtype::F32,
+                vec![4, 4],
+                f32s(&identity4),
+            ),
+            (
+                "model.layers.0.self_attn.1.q_a_proj.weight",
+                StDtype::F32,
+                vec![2, 4],
+                f32s(&[1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0]),
+            ),
+            (
+                "model.layers.0.self_attn.1.q_a_layernorm.weight",
+                StDtype::F32,
+                vec![2],
+                f32s(&[1.0, 1.0]),
+            ),
+            (
+                "model.layers.0.self_attn.1.q_b_proj.weight",
+                StDtype::F32,
+                vec![8, 2],
+                f32s(&q_b),
+            ),
+            (
+                "model.layers.0.self_attn.1.kv_a_proj_with_mqa.weight",
+                StDtype::F32,
+                vec![4, 4],
+                f32s(&identity4),
+            ),
+            (
+                "model.layers.0.self_attn.1.kv_a_layernorm.weight",
+                StDtype::F32,
+                vec![2],
+                f32s(&[1.0, 1.0]),
+            ),
+            (
+                "model.layers.0.self_attn.1.kv_b_proj.weight",
+                StDtype::F32,
+                vec![8, 2],
+                f32s(&kv_b),
+            ),
+            (
+                "model.layers.0.self_attn.1.o_proj.weight",
+                StDtype::F32,
+                vec![4, 4],
+                f32s(&identity4),
+            ),
+            (
+                "model.layers.0.mlps.0.gate_proj.weight",
+                StDtype::F32,
+                vec![4, 4],
+                f32s(&[0.0; 16]),
+            ),
+            (
+                "model.layers.0.mlps.0.up_proj.weight",
+                StDtype::F32,
+                vec![4, 4],
+                f32s(&[0.0; 16]),
+            ),
+            (
+                "model.layers.0.mlps.0.down_proj.weight",
+                StDtype::F32,
+                vec![4, 4],
+                f32s(&[0.0; 16]),
+            ),
+            (
+                "model.layers.0.mlps.1.gate_proj.weight",
+                StDtype::F32,
+                vec![4, 4],
+                f32s(&[0.0; 16]),
+            ),
+            (
+                "model.layers.0.mlps.1.up_proj.weight",
+                StDtype::F32,
+                vec![4, 4],
+                f32s(&[0.0; 16]),
+            ),
+            (
+                "model.layers.0.mlps.1.down_proj.weight",
+                StDtype::F32,
+                vec![4, 4],
+                f32s(&[0.0; 16]),
+            ),
+            (
+                "model.layers.0.mlp.router.classifier.weight",
+                StDtype::F32,
+                vec![3, 4],
+                f32s(&[0.0; 12]),
+            ),
+            (
+                "model.layers.0.mlp.router.e_score_correction_bias",
+                StDtype::F32,
+                vec![3],
+                f32s(&[0.0; 3]),
+            ),
+            (
+                "model.layers.0.mlp.experts.0.gate_proj.weight",
+                StDtype::F32,
+                vec![2, 4],
+                f32s(&[0.0; 8]),
+            ),
+            (
+                "model.layers.0.mlp.experts.0.up_proj.weight",
+                StDtype::F32,
+                vec![2, 4],
+                f32s(&[0.0; 8]),
+            ),
+            (
+                "model.layers.0.mlp.experts.0.down_proj.weight",
+                StDtype::F32,
+                vec![4, 2],
+                f32s(&[0.0; 8]),
+            ),
+            (
+                "model.layers.0.mlp.experts.1.gate_proj.weight",
+                StDtype::F32,
+                vec![2, 4],
+                f32s(&[0.0; 8]),
+            ),
+            (
+                "model.layers.0.mlp.experts.1.up_proj.weight",
+                StDtype::F32,
+                vec![2, 4],
+                f32s(&[0.0; 8]),
+            ),
+            (
+                "model.layers.0.mlp.experts.1.down_proj.weight",
+                StDtype::F32,
+                vec![4, 2],
+                f32s(&[0.0; 8]),
+            ),
+        ];
+        if with_indexer {
+            tensors.push((
+                "model.layers.0.self_attn.0.indexer.wk.weight",
+                StDtype::F32,
+                vec![2, 4],
+                f32s(&[0.3, 0.1, -0.2, 0.4, 0.1, -0.3, 0.2, 0.05]),
+            ));
+            tensors.push((
+                "model.layers.0.self_attn.0.indexer.wq_b.weight",
+                StDtype::F32,
+                vec![4, 2],
+                f32s(&[0.5, -0.1, 0.2, 0.3, -0.4, 0.15, 0.05, 0.25]),
+            ));
+            tensors.push((
+                "model.layers.0.self_attn.0.indexer.k_norm.weight",
+                StDtype::F32,
+                vec![2],
+                f32s(&[1.0, 1.0]),
+            ));
+            tensors.push((
+                // [n_heads, hidden_size] -- confirmed against real LongCat-2.0
+                // checkpoint shard headers (weights_proj takes `normed`, not c_q).
+                "model.layers.0.self_attn.0.indexer.weights_proj.weight",
+                StDtype::F32,
+                vec![2, 4],
+                f32s(&[0.6, -0.3, 0.2, 0.5, -0.1, 0.4, 0.15, -0.25]),
+            ));
+        }
+
+        write_test_safetensors(&dir.join(shard), &tensors);
+        let weight_map: BTreeMap<&str, &str> = tensors.iter().map(|(n, ..)| (*n, shard)).collect();
+        std::fs::write(
+            dir.join("model.safetensors.index.json"),
+            serde_json::to_string(&serde_json::json!({"weight_map": weight_map})).unwrap(),
+        )
+        .unwrap();
+
+        use crate::safetensors_to_gguf::{SafetensorsToGgufConfig, convert_safetensors_to_gguf};
+        convert_safetensors_to_gguf(&dir, output, &SafetensorsToGgufConfig::default()).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// LSA must reduce to EXACTLY dense attention when every cached position
+    /// fits within the top-k budget: compares logits from a GGUF with no
+    /// indexer tensors (dense fallback) against an otherwise-identical GGUF
+    /// whose indexer has `index_topk` >= the max sequence length (so LSA's
+    /// selection is `0..seq_len`, the same order dense iterates) — the two
+    /// runs must match to tight tolerance.
+    #[test]
+    fn longcat_lsa_matches_dense_when_topk_covers_full_sequence() {
+        use crate::model::{Model, Session};
+        use crate::model_loader::{GgufModelLoader, ModelLoader};
+
+        fn tmp_gguf(tag: &str) -> std::path::PathBuf {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            std::env::temp_dir().join(format!("oxidize-longcat-lsa-{tag}-{nanos}.gguf"))
+        }
+
+        let dense_out = tmp_gguf("dense");
+        build_longcat_lsa_gguf(&dense_out, 0, 0, 0, false);
+        let lsa_out = tmp_gguf("full");
+        // 4 tokens -> max seq_len 4; topk=8 covers it entirely.
+        build_longcat_lsa_gguf(&lsa_out, 8, 1, 1, true);
+
+        let run = |path: &std::path::Path| -> Vec<Logits> {
+            let loader = GgufModelLoader;
+            let mapped = loader.load(path).unwrap();
+            let cfg = InferenceConfig::from_gguf(&mapped);
+            let mut model = InferenceModel::load_from_gguf(&mapped, cfg, false).unwrap();
+            let mut session = Session::new();
+            let mut out = Vec::new();
+            for &tok in &[0u32, 1, 2, 3] {
+                out.push(model.forward(&[tok], &mut session).unwrap());
+            }
+            out
+        };
+
+        let dense_logits = run(&dense_out);
+        let lsa_logits = run(&lsa_out);
+        assert_eq!(dense_logits.len(), lsa_logits.len());
+        for (t, (dense, lsa)) in dense_logits.iter().zip(lsa_logits.iter()).enumerate() {
+            assert_eq!(dense.len(), lsa.len());
+            for (i, (&d, &l)) in dense.iter().zip(lsa.iter()).enumerate() {
+                assert!(
+                    (d - l).abs() < 1e-4,
+                    "token {t} logit {i}: dense={d} lsa(full-selection)={l}"
+                );
+            }
+        }
+
+        let _ = std::fs::remove_file(&dense_out);
+        let _ = std::fs::remove_file(&lsa_out);
+    }
+
+    /// LSA selection must actually restrict attention: with `index_topk=2`
+    /// and forced sets (`init=1`, `local=1`) that exactly consume the budget,
+    /// only positions 0 and `seq_len-1` are ever attended — positions 1 and 2
+    /// (which carry distinct, nonzero embeddings) are dropped entirely. That
+    /// must produce different logits than the same model with a large
+    /// `index_topk` (every position included, same as the dense-parity test).
+    #[test]
+    fn longcat_lsa_restricted_topk_diverges_from_full_selection() {
+        use crate::model::{Model, Session};
+        use crate::model_loader::{GgufModelLoader, ModelLoader};
+
+        fn tmp_gguf(tag: &str) -> std::path::PathBuf {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            std::env::temp_dir().join(format!("oxidize-longcat-lsa-{tag}-{nanos}.gguf"))
+        }
+
+        let small_out = tmp_gguf("small");
+        // budget=2, fully consumed by init(1) + local(1) -> positions 1,2 never selected.
+        build_longcat_lsa_gguf(&small_out, 2, 1, 1, true);
+        let full_out = tmp_gguf("large");
+        build_longcat_lsa_gguf(&full_out, 8, 1, 1, true);
+
+        let run = |path: &std::path::Path| -> Vec<Logits> {
+            let loader = GgufModelLoader;
+            let mapped = loader.load(path).unwrap();
+            let cfg = InferenceConfig::from_gguf(&mapped);
+            let mut model = InferenceModel::load_from_gguf(&mapped, cfg, false).unwrap();
+            let mut session = Session::new();
+            let mut out = Vec::new();
+            for &tok in &[0u32, 1, 2, 3] {
+                out.push(model.forward(&[tok], &mut session).unwrap());
+            }
+            out
+        };
+
+        let small_logits = run(&small_out);
+        let full_logits = run(&full_out);
+        // Tokens 0 and 1 can't diverge yet: seq_len 1 (init+local already
+        // cover position 0) and seq_len 2 (positions 0,1 both forced) fit the
+        // budget exactly either way. Token 3 (seq_len=4) is where position 1
+        // and 2 fall out of the small-topk budget -- that's where the two
+        // runs must disagree.
+        let last_small = small_logits.last().unwrap();
+        let last_full = full_logits.last().unwrap();
+        let max_diff = last_small
+            .iter()
+            .zip(last_full.iter())
+            .map(|(&a, &b)| (a - b).abs())
+            .fold(0.0_f32, f32::max);
+        assert!(
+            max_diff > 1e-3,
+            "expected restricted top-k to diverge from full selection, max_diff={max_diff}"
+        );
+
+        let _ = std::fs::remove_file(&small_out);
+        let _ = std::fs::remove_file(&full_out);
+    }
+
     #[test]
     fn gemma_sliding_window_pattern_selects_global_layers() {
         // Gemma 3/4: every 6th layer (1-indexed) is global, the rest local SWA.
@@ -3023,6 +3531,7 @@ mod tests {
             mtp: None,
             kv_cache: KvCache::new(kv_cache_config).expect("tiny kv cache should be valid"),
             kv_layer_map: Vec::new(),
+            indexer_k_cache: Vec::new(),
             ssm_states: Vec::new(),
             ssm_conv_buffers: Vec::new(),
             workspace: Workspace::for_config(&config),

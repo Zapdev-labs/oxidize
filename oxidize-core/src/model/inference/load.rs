@@ -430,6 +430,24 @@ impl InferenceModel {
                             layers[layer_idx].mla_v_b =
                                 load_tensor(name, qtype, qdata, value_count)?
                         }
+                        // LongCat-2.0 LSA indexer (attaches to the even
+                        // sub-block only; see `is_longcat` layer-index remap above).
+                        ("indexer_wk", Some("weight")) => {
+                            layers[layer_idx].indexer_wk =
+                                load_tensor(name, qtype, qdata, value_count)?
+                        }
+                        ("indexer_wq_b", Some("weight")) => {
+                            layers[layer_idx].indexer_wq_b =
+                                load_tensor(name, qtype, qdata, value_count)?
+                        }
+                        ("indexer_k_norm", _) => {
+                            layers[layer_idx].indexer_k_norm =
+                                load_bias(qtype, qdata, value_count)?
+                        }
+                        ("indexer_weights_proj", Some("weight")) => {
+                            layers[layer_idx].indexer_weights_proj =
+                                load_tensor(name, qtype, qdata, value_count)?
+                        }
                         ("ffn_gate_shexp", _) => {
                             layers[layer_idx].ffn_gate_shexp =
                                 load_tensor(name, qtype, qdata, value_count)?
@@ -536,6 +554,26 @@ impl InferenceModel {
             ssm_conv_buffers.push(ConvHistoryRing::new(cap, hist_dim));
         }
 
+        // LongCat-2.0 LSA indexer key cache: one buffer per ScMoE pair, only
+        // when that pair's even sub-block actually has indexer tensors (older
+        // conversions without them fall back to dense MLA for that pair).
+        let indexer_k_cache: Vec<Vec<f32>> = if config.architecture == ModelArchitecture::LongCat
+            && config.indexer_head_dim > 0
+            && config.indexer_head_count > 0
+        {
+            (0..config.layer_count / 2)
+                .map(|pair| {
+                    if layers.get(pair * 2).is_some_and(|l| !l.indexer_wk.is_empty()) {
+                        vec![0.0_f32; config.context_size * config.indexer_head_dim]
+                    } else {
+                        Vec::new()
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         let workspace = Workspace::for_config(&config);
         let last_output_hidden = vec![0.0_f32; config.hidden_size];
         // Bind before the struct literal: `config` is moved into the `config`
@@ -554,6 +592,7 @@ impl InferenceModel {
             mtp,
             kv_cache,
             kv_layer_map,
+            indexer_k_cache,
             ssm_states,
             ssm_conv_buffers,
             workspace,
