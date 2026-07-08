@@ -1805,4 +1805,49 @@ impl InferenceModel {
         self.last_output_hidden = last_hidden;
         Ok(logits_out)
     }
+
+    /// Final-normed hidden states for a token window (LoRA / SFT training).
+    pub fn forward_normed_hidden_train(
+        &mut self,
+        tokens: &[Token],
+        start_pos: usize,
+    ) -> Result<Vec<f32>, ModelError> {
+        if tokens.is_empty() {
+            return Err(ModelError::EmptyInput);
+        }
+        let h = self.config.hidden_size;
+        let mut normed_all = vec![0.0_f32; tokens.len() * h];
+        for (i, &token) in tokens.iter().enumerate() {
+            self.forward_single(token, start_pos + i, false)?;
+            self.apply_final_norm(self.hidden_state(), &mut normed_all[i * h..(i + 1) * h])?;
+        }
+        Ok(normed_all)
+    }
+
+    /// LM-head logits for `count` rows of final-normed hidden states.
+    pub fn lm_head_logits_batch_from_normed(
+        &self,
+        normed_all: &[f32],
+        count: usize,
+        logits_out: &mut [f32],
+    ) -> Result<(), ModelError> {
+        let h = self.config.hidden_size;
+        let vocab = self.config.vocab_size;
+        if normed_all.len() != count * h || logits_out.len() != count * vocab {
+            return Err(ModelError::InferenceFailed(format!(
+                "lm_head_logits_batch_from_normed: normed={} logits={} expected {}x{h} and {}x{vocab}",
+                normed_all.len(),
+                logits_out.len(),
+                count,
+                count
+            )));
+        }
+        for t in 0..count {
+            self.lm_head_logits_from_normed(
+                &normed_all[t * h..(t + 1) * h],
+                &mut logits_out[t * vocab..(t + 1) * vocab],
+            )?;
+        }
+        Ok(())
+    }
 }

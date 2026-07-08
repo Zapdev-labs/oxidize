@@ -103,9 +103,32 @@ impl InferenceModel {
                     if parts.len() < 4 {
                         continue;
                     }
-                    let layer_idx: usize = parts[1]
+                    let raw_idx: usize = parts[1]
                         .parse()
                         .map_err(|_| format!("bad layer index in tensor name: {}", name))?;
+                    // LongCat-2.0 ScMoE: `blk.N` is a PAIR (N = raw_idx), not a
+                    // decoder layer. Sub-block-suffixed tensors (`attn_norm_0`,
+                    // `ffn_gate_1`, ...) map to internal layer `2N+i`; per-pair
+                    // tensors with no suffix (`ffn_gate_inp`, `exp_probs_b`,
+                    // `ffn_*_exps`, `indexer_*`) attach to the even sub-block `2N`
+                    // (matching the loader's expectation that layer `2N` "owns"
+                    // the pair's MoE router/experts). `config.layer_count` is
+                    // already doubled to 76 for LongCat (see
+                    // `InferenceConfig::from_gguf`), so the bounds check below
+                    // and every other consumer see the internal layer space.
+                    let is_longcat = config.architecture == ModelArchitecture::LongCat;
+                    let (layer_idx, weight_name): (usize, &str) = if is_longcat {
+                        let base = parts[2];
+                        if let Some(stripped) = base.strip_suffix("_0") {
+                            (raw_idx * 2, stripped)
+                        } else if let Some(stripped) = base.strip_suffix("_1") {
+                            (raw_idx * 2 + 1, stripped)
+                        } else {
+                            (raw_idx * 2, base)
+                        }
+                    } else {
+                        (raw_idx, parts[2])
+                    };
                     if layer_idx >= config.layer_count {
                         if let Some(mtp) = mtp.as_mut()
                             && layer_idx == config.layer_count
@@ -212,7 +235,6 @@ impl InferenceModel {
                         }
                         continue;
                     }
-                    let weight_name = parts[2];
                     let suffix = parts.get(3).copied();
                     match (weight_name, suffix) {
                         ("attn_norm", _) => {

@@ -54,6 +54,12 @@ pub enum ModelArchitecture {
     /// Tencent Hunyuan (hy_v3): GQA + qk_norm attention, sigmoid-routed MoE
     /// with a shared expert and leading dense blocks. Standard attention (no MLA).
     HunyuanMoe,
+    /// Meituan LongCat-2.0: ScMoE (dense-MLP + sparse-MoE dual branch) paired
+    /// decoder blocks with DeepSeek-style MLA attention. Each GGUF `blk.N` is a
+    /// pair of internal sub-blocks (`_0`/`_1`); the LSA sparse-attention indexer
+    /// and n-gram embedding are separate follow-up work (dense MLA + plain
+    /// token embedding for now).
+    LongCat,
 }
 
 impl ModelArchitecture {
@@ -87,6 +93,9 @@ impl ModelArchitecture {
                 "hunyuan" | "hunyuan_moe" | "hunyuanmoe" | "hy_v3" | "hyv3" | "hunyuan_v3" => {
                     Self::HunyuanMoe
                 }
+                "longcat" | "longcat_flash" | "longcatcausallm" | "longcatflashforcausallm" => {
+                    Self::LongCat
+                }
                 _ => Self::Llama,
             }
         } else {
@@ -114,6 +123,7 @@ impl ModelArchitecture {
                 | Self::DeepSeek
                 | Self::GlmMoeDsa
                 | Self::HunyuanMoe
+                | Self::LongCat
         )
     }
 
@@ -130,7 +140,7 @@ impl ModelArchitecture {
 
     /// Whether this architecture uses MLA compressed attention.
     pub fn uses_mla(&self) -> bool {
-        matches!(self, Self::DeepSeek | Self::GlmMoeDsa)
+        matches!(self, Self::DeepSeek | Self::GlmMoeDsa | Self::LongCat)
     }
 }
 
@@ -211,6 +221,25 @@ pub struct InferenceConfig {
     /// Training context length before YaRN extension. GGUF
     /// `rope.scaling.original_context_length`.
     pub yarn_orig_ctx: f32,
+    /// LongCat-2.0 ScMoE: number of "zero" (identity) experts appended after the
+    /// `num_experts` routed experts in the router's output width (router width =
+    /// `num_experts + zero_expert_count`). A selected zero-expert contributes
+    /// `weight * input` directly (no FFN) and is NOT scaled by
+    /// `expert_weights_scale`, unlike the routed-expert sum. 0 = no zero experts
+    /// (every other MoE architecture).
+    pub zero_expert_count: usize,
+    /// LongCat-2.0 LSA sparse-attention indexer hyperparameters. Parsed but
+    /// unused until the indexer itself is implemented (attention is dense MLA
+    /// over the full KV cache for now).
+    pub indexer_head_count: usize,
+    pub indexer_head_dim: usize,
+    pub indexer_topk: usize,
+    pub indexer_local_tokens: usize,
+    pub indexer_init_tokens: usize,
+    /// LongCat-2.0 n-gram embedding hyperparameters. Parsed but unused until the
+    /// n-gram embedding replaces the plain `tok_embeddings` lookup.
+    pub ngram_neighbor_num: usize,
+    pub ngram_split_num: usize,
 }
 
 impl Default for InferenceConfig {
@@ -250,6 +279,14 @@ impl Default for InferenceConfig {
             expert_group_used_count: 0,
             yarn_factor: 0.0,
             yarn_orig_ctx: 0.0,
+            zero_expert_count: 0,
+            indexer_head_count: 0,
+            indexer_head_dim: 0,
+            indexer_topk: 0,
+            indexer_local_tokens: 0,
+            indexer_init_tokens: 0,
+            ngram_neighbor_num: 0,
+            ngram_split_num: 0,
         }
     }
 }
@@ -409,7 +446,9 @@ impl InferenceConfig {
                 token_embd_dims.as_ref().and_then(|d| match d.len() {
                     0 => None,
                     1 => d.first().copied().map(|v| v as u32),
-                    _ => d.get(1).copied().map(|v| v as u32),
+                    // Embedding rows may be [hidden, vocab] (ggml) or [vocab, hidden]
+                    // (llama.cpp); hidden is always the smaller axis.
+                    _ => d.iter().copied().min().map(|v| v as u32),
                 })
             })
             .map(|v| v as usize)
@@ -438,8 +477,15 @@ impl InferenceConfig {
         // stack (e.g. qwen35 blk.64 with nextn.* tensors); they are draft heads,
         // not part of the causal backbone, so exclude them from layer_count.
         let nextn_layers = arch_u32("nextn_predict_layers").unwrap_or(0) as usize;
-        let layer_count =
+        let mut layer_count =
             (arch_u32("block_count").unwrap_or(32) as usize).saturating_sub(nextn_layers);
+        if architecture == ModelArchitecture::LongCat {
+            // GGUF `block_count` counts ScMoE PAIRS (`blk.N`, N in 0..block_count);
+            // each pair is two internal decoder sub-blocks (`_0`/`_1`). The loader
+            // remaps `blk.N.<tensor>_{i}` to internal layer `2N+i`, so every other
+            // consumer (KV cache sizing, per-layer loops) needs the doubled count.
+            layer_count = layer_count.saturating_mul(2);
+        }
 
         let intermediate_size = arch_u32("feed_forward_length")
             .map(|v| v as usize)
@@ -646,6 +692,17 @@ impl InferenceConfig {
             rms_norm_weight_plus_one = v != "0";
         }
 
+        // LongCat-2.0 ScMoE zero (identity) experts + LSA indexer / n-gram
+        // embedding hyperparameters. All 0 for every non-LongCat architecture.
+        let zero_expert_count = arch_u32("zero_expert_count").unwrap_or(0) as usize;
+        let indexer_head_count = arch_u32("indexer.head_count").unwrap_or(0) as usize;
+        let indexer_head_dim = arch_u32("indexer.head_dim").unwrap_or(0) as usize;
+        let indexer_topk = arch_u32("indexer.topk").unwrap_or(0) as usize;
+        let indexer_local_tokens = arch_u32("indexer.local_tokens").unwrap_or(0) as usize;
+        let indexer_init_tokens = arch_u32("indexer.init_tokens").unwrap_or(0) as usize;
+        let ngram_neighbor_num = arch_u32("ngram.neighbor_num").unwrap_or(0) as usize;
+        let ngram_split_num = arch_u32("ngram.split_num").unwrap_or(0) as usize;
+
         let (yarn_factor, yarn_orig_ctx) =
             if arch_str("rope.scaling.type").as_deref() == Some("yarn") {
                 let factor = arch_f32("rope.scaling.factor").unwrap_or(0.0);
@@ -692,6 +749,14 @@ impl InferenceConfig {
             expert_group_used_count,
             yarn_factor,
             yarn_orig_ctx,
+            zero_expert_count,
+            indexer_head_count,
+            indexer_head_dim,
+            indexer_topk,
+            indexer_local_tokens,
+            indexer_init_tokens,
+            ngram_neighbor_num,
+            ngram_split_num,
         }
     }
 }
@@ -898,6 +963,11 @@ pub struct Workspace {
     pub moe_gate_all: Vec<f32>,
     pub moe_up_all: Vec<f32>,
     pub moe_down_all: Vec<f32>,
+    // LongCat-2.0 ScMoE: holds the MoE branch output across the pair boundary
+    // (computed from sub-block 0's post-attention hidden state, added to the
+    // residual only after sub-block 1's dense FFN). Unused (h floats, cheap)
+    // by every other architecture.
+    pub moe_stash: Vec<f32>,
 }
 
 impl Workspace {
@@ -917,6 +987,9 @@ impl Workspace {
         let head_dim = config.head_dim().max(config.kv_head_dim()).max(192);
         let kv_copy_size = config.context_size * max_kv_len;
         let n_experts_per_tok = config.num_experts_per_tok.max(1);
+        // LongCat-2.0 router logits/scores span routed + zero experts; every
+        // other architecture has zero_expert_count == 0 (no size change).
+        let total_expert_slots = config.num_experts + config.zero_expert_count;
 
         Self {
             x: vec![0.0_f32; h],
@@ -934,8 +1007,8 @@ impl Workspace {
             kv_keys_copy: vec![0.0_f32; kv_copy_size],
             kv_values_copy: vec![0.0_f32; kv_copy_size],
             logits: vec![0.0_f32; config.vocab_size],
-            moe_router_logits: vec![0.0_f32; config.num_experts.max(1)],
-            moe_expert_scores: vec![(0, 0.0_f32); config.num_experts.max(1)],
+            moe_router_logits: vec![0.0_f32; total_expert_slots.max(1)],
+            moe_expert_scores: vec![(0, 0.0_f32); total_expert_slots.max(1)],
             mamba_scratch: vec![0.0_f32; h.max(576)],
             conv_out: vec![0.0_f32; max_qkv],
             shortconv_bcx: vec![0.0_f32; h * 3],
@@ -943,6 +1016,7 @@ impl Workspace {
             moe_gate_all: vec![0.0_f32; n_experts_per_tok * expert_inter],
             moe_up_all: vec![0.0_f32; n_experts_per_tok * expert_inter],
             moe_down_all: vec![0.0_f32; n_experts_per_tok * h],
+            moe_stash: vec![0.0_f32; h],
         }
     }
 }
@@ -2368,6 +2442,454 @@ mod tests {
         assert_eq!(cfg.kv_head_dim(), 128);
         assert_eq!(cfg.vocab_size, 120832);
         assert!((cfg.rope_theta - 11_158_840.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn longcat_scmoe_metadata_doubles_layer_count_and_parses_zero_experts() {
+        // GGUF `block_count` counts ScMoE PAIRS; the loader remaps `blk.N.*_{i}`
+        // tensors to internal layer `2N+i`, so `layer_count` must double.
+        let mapped = MappedGgufFile::from_parsed_for_test(GgufFile {
+            version: 3,
+            tensor_count: 1,
+            metadata: BTreeMap::from([
+                (
+                    "general.architecture".to_owned(),
+                    GgufMetadataValue::String("longcat".to_owned()),
+                ),
+                (
+                    "longcat.block_count".to_owned(),
+                    GgufMetadataValue::Uint32(38),
+                ),
+                (
+                    "longcat.embedding_length".to_owned(),
+                    GgufMetadataValue::Uint32(8192),
+                ),
+                (
+                    "longcat.expert_count".to_owned(),
+                    GgufMetadataValue::Uint32(768),
+                ),
+                (
+                    "longcat.expert_used_count".to_owned(),
+                    GgufMetadataValue::Uint32(12),
+                ),
+                (
+                    "longcat.zero_expert_count".to_owned(),
+                    GgufMetadataValue::Uint32(128),
+                ),
+                (
+                    "longcat.attention.key_length".to_owned(),
+                    GgufMetadataValue::Uint32(192),
+                ),
+                (
+                    "longcat.attention.head_count".to_owned(),
+                    GgufMetadataValue::Uint32(64),
+                ),
+                (
+                    "longcat.indexer.topk".to_owned(),
+                    GgufMetadataValue::Uint32(2048),
+                ),
+                (
+                    "longcat.ngram.neighbor_num".to_owned(),
+                    GgufMetadataValue::Uint32(5),
+                ),
+                (
+                    "longcat.rope.scaling.type".to_owned(),
+                    GgufMetadataValue::String("yarn".to_owned()),
+                ),
+                (
+                    "longcat.rope.scaling.factor".to_owned(),
+                    GgufMetadataValue::Float32(120.0),
+                ),
+                (
+                    "longcat.rope.scaling.original_context_length".to_owned(),
+                    GgufMetadataValue::Uint32(8192),
+                ),
+            ]),
+            tensor_infos: vec![GgufTensorInfo {
+                name: "tok_embeddings.weight".to_owned(),
+                dimensions: vec![8192, 163840],
+                ggml_type: 0,
+                relative_offset: 0,
+                absolute_offset: 0,
+                mmap_index: 0,
+            }],
+            alignment: 32,
+            data_section_start: 0,
+        });
+
+        let cfg = InferenceConfig::from_gguf(&mapped);
+
+        assert_eq!(cfg.architecture, ModelArchitecture::LongCat);
+        assert!(cfg.architecture.uses_moe());
+        assert!(cfg.architecture.uses_mla());
+        // 38 ScMoE pairs -> 76 internal decoder layers.
+        assert_eq!(cfg.layer_count, 76);
+        assert_eq!(cfg.num_experts, 768);
+        assert_eq!(cfg.num_experts_per_tok, 12);
+        assert_eq!(cfg.zero_expert_count, 128);
+        assert_eq!(cfg.kv_head_dim(), 192);
+        assert_eq!(cfg.indexer_topk, 2048);
+        assert_eq!(cfg.ngram_neighbor_num, 5);
+        assert_eq!(cfg.yarn_factor, 120.0);
+        assert_eq!(cfg.yarn_orig_ctx, 8192.0);
+    }
+
+    /// Builds a tiny end-to-end LongCat-2.0 GGUF (1 ScMoE pair, hidden=4, 2
+    /// routed + 1 zero expert) via the real converter, loads it, and runs a
+    /// forward pass. Weights are crafted so:
+    ///   - `attn_norm_{0,1}` (input_layernorm) are ALL-ZERO, so both MLA
+    ///     attention sub-blocks contribute exactly 0 to the residual for any
+    ///     token/position (RMSNorm of anything against a zero weight is 0,
+    ///     which zeroes Q/K/V and therefore the attention output too) —
+    ///     isolating the ScMoE branch from attention for a clean numeric check.
+    ///   - `ffn_gate/up_{0,1}` (dense MLPs) are ALL-ZERO, so both dense FFN
+    ///     branches contribute exactly 0 too.
+    ///   - The router classifier (`ffn_gate_inp`) is crafted so the single
+    ///     zero-expert slot (index 2, i.e. `num_experts..num_experts+zero_count`)
+    ///     gets an overwhelmingly larger logit than either routed expert, so
+    ///     it is always in the top-`moe_topk=2` selection with softmax weight
+    ///     rounding to 1.0 in f32.
+    ///   - Both routed experts' FFN weights are ALL-ZERO, so even if one is
+    ///     selected (alongside the zero expert) its contribution is exactly 0.
+    /// With every other branch zeroed, the residual after the one ScMoE pair
+    /// must equal `embedding + zero_expert_weight * rms_norm(embedding,
+    /// ffn_norm_0)` — i.e. purely the identity zero-expert contribution.
+    #[test]
+    fn longcat_scmoe_forward_pass_exercises_zero_expert_routing() {
+        use crate::model::{Model, Session};
+        use crate::model_loader::{GgufModelLoader, ModelLoader};
+        use crate::safetensors_to_gguf::{SafetensorsToGgufConfig, convert_safetensors_to_gguf};
+        use safetensors::tensor::{Dtype as StDtype, TensorView};
+        use std::collections::HashMap;
+
+        fn f32s(vals: &[f32]) -> Vec<u8> {
+            vals.iter().flat_map(|v| v.to_le_bytes()).collect()
+        }
+        fn write_test_safetensors(
+            path: &std::path::Path,
+            tensors: &[(&str, StDtype, Vec<usize>, Vec<u8>)],
+        ) {
+            let views: HashMap<String, TensorView> = tensors
+                .iter()
+                .map(|(name, dtype, shape, data)| {
+                    (
+                        (*name).to_owned(),
+                        TensorView::new(*dtype, shape.clone(), data).unwrap(),
+                    )
+                })
+                .collect();
+            let bytes = safetensors::tensor::serialize(&views, &None).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        }
+        fn tmp_path(suffix: &str) -> std::path::PathBuf {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            std::env::temp_dir().join(format!("oxidize-longcat-fwd-{nanos}{suffix}"))
+        }
+
+        let dir = tmp_path("");
+        std::fs::create_dir_all(&dir).unwrap();
+        let output = tmp_path(".gguf");
+
+        // Tiny LongCat: hidden=4, q_lora=2, kv_lora=2, 2 heads, nope=2, rope=2,
+        // v=2 (k_head_dim=4); 2 routed experts + 1 zero expert, moe_topk=2.
+        std::fs::write(
+            dir.join("config.json"),
+            r#"{
+                "architectures": ["LongcatCausalLM"],
+                "hidden_size": 4, "num_layers": 1, "vocab_size": 8,
+                "num_attention_heads": 2,
+                "q_lora_rank": 2, "kv_lora_rank": 2,
+                "qk_nope_head_dim": 2, "qk_rope_head_dim": 2, "v_head_dim": 2,
+                "mla_scale_q_lora": false, "mla_scale_kv_lora": false,
+                "ffn_hidden_size": 4, "expert_ffn_hidden_size": 2,
+                "n_routed_experts": 2, "moe_topk": 2,
+                "zero_expert_num": 1, "zero_expert_type": "identity",
+                "routed_scaling_factor": 9,
+                "rms_norm_eps": 1e-5, "rope_theta": 1000000.0,
+                "max_position_embeddings": 64,
+                "rope_scaling": {"rope_type": "deepseek_yarn", "factor": 120,
+                                  "original_max_position_embeddings": 8}
+            }"#,
+        )
+        .unwrap();
+
+        // token id 0 embeds to [2,2,2,2]; every other row (1..8) stays zero.
+        let mut embed = vec![0.0_f32; 32];
+        embed[0..4].copy_from_slice(&[2.0, 2.0, 2.0, 2.0]);
+        let shard = "model-00001-of-00001.safetensors";
+        let tensors: Vec<(&str, StDtype, Vec<usize>, Vec<u8>)> = vec![
+            (
+                "model.embed_tokens.weight",
+                StDtype::F32,
+                vec![8, 4],
+                f32s(&embed),
+            ),
+            ("model.norm.weight", StDtype::F32, vec![4], f32s(&[1.0; 4])),
+            ("lm_head.weight", StDtype::F32, vec![8, 4], f32s(&[0.0; 32])),
+            // input_layernorm ALL-ZERO -> both MLA sub-blocks contribute 0.
+            (
+                "model.layers.0.input_layernorm.0.weight",
+                StDtype::F32,
+                vec![4],
+                f32s(&[0.0; 4]),
+            ),
+            (
+                "model.layers.0.input_layernorm.1.weight",
+                StDtype::F32,
+                vec![4],
+                f32s(&[0.0; 4]),
+            ),
+            // post_attention_layernorm (ffn_norm) is REAL: feeds both the dense
+            // MLP (zeroed below) and the MoE router/experts (the branch under
+            // test).
+            (
+                "model.layers.0.post_attention_layernorm.0.weight",
+                StDtype::F32,
+                vec![4],
+                f32s(&[1.0; 4]),
+            ),
+            (
+                "model.layers.0.post_attention_layernorm.1.weight",
+                StDtype::F32,
+                vec![4],
+                f32s(&[1.0; 4]),
+            ),
+            // MLA attention weights: values irrelevant since input_layernorm=0
+            // makes their input exactly zero regardless.
+            (
+                "model.layers.0.self_attn.0.q_a_proj.weight",
+                StDtype::F32,
+                vec![2, 4],
+                f32s(&[0.0; 8]),
+            ),
+            (
+                "model.layers.0.self_attn.0.q_a_layernorm.weight",
+                StDtype::F32,
+                vec![2],
+                f32s(&[1.0, 1.0]),
+            ),
+            (
+                "model.layers.0.self_attn.0.q_b_proj.weight",
+                StDtype::F32,
+                vec![8, 2],
+                f32s(&[0.0; 16]),
+            ),
+            (
+                "model.layers.0.self_attn.0.kv_a_proj_with_mqa.weight",
+                StDtype::F32,
+                vec![4, 4],
+                f32s(&[0.0; 16]),
+            ),
+            (
+                "model.layers.0.self_attn.0.kv_a_layernorm.weight",
+                StDtype::F32,
+                vec![2],
+                f32s(&[1.0, 1.0]),
+            ),
+            (
+                "model.layers.0.self_attn.0.kv_b_proj.weight",
+                StDtype::F32,
+                vec![8, 2],
+                f32s(&[0.0; 16]),
+            ),
+            (
+                "model.layers.0.self_attn.0.o_proj.weight",
+                StDtype::F32,
+                vec![4, 4],
+                f32s(&[0.0; 16]),
+            ),
+            (
+                "model.layers.0.self_attn.1.q_a_proj.weight",
+                StDtype::F32,
+                vec![2, 4],
+                f32s(&[0.0; 8]),
+            ),
+            (
+                "model.layers.0.self_attn.1.q_a_layernorm.weight",
+                StDtype::F32,
+                vec![2],
+                f32s(&[1.0, 1.0]),
+            ),
+            (
+                "model.layers.0.self_attn.1.q_b_proj.weight",
+                StDtype::F32,
+                vec![8, 2],
+                f32s(&[0.0; 16]),
+            ),
+            (
+                "model.layers.0.self_attn.1.kv_a_proj_with_mqa.weight",
+                StDtype::F32,
+                vec![4, 4],
+                f32s(&[0.0; 16]),
+            ),
+            (
+                "model.layers.0.self_attn.1.kv_a_layernorm.weight",
+                StDtype::F32,
+                vec![2],
+                f32s(&[1.0, 1.0]),
+            ),
+            (
+                "model.layers.0.self_attn.1.kv_b_proj.weight",
+                StDtype::F32,
+                vec![8, 2],
+                f32s(&[0.0; 16]),
+            ),
+            (
+                "model.layers.0.self_attn.1.o_proj.weight",
+                StDtype::F32,
+                vec![4, 4],
+                f32s(&[0.0; 16]),
+            ),
+            // Dense MLPs ALL-ZERO -> ffn0/ffn1 contribute 0.
+            (
+                "model.layers.0.mlps.0.gate_proj.weight",
+                StDtype::F32,
+                vec![4, 4],
+                f32s(&[0.0; 16]),
+            ),
+            (
+                "model.layers.0.mlps.0.up_proj.weight",
+                StDtype::F32,
+                vec![4, 4],
+                f32s(&[0.0; 16]),
+            ),
+            (
+                "model.layers.0.mlps.0.down_proj.weight",
+                StDtype::F32,
+                vec![4, 4],
+                f32s(&[0.0; 16]),
+            ),
+            (
+                "model.layers.0.mlps.1.gate_proj.weight",
+                StDtype::F32,
+                vec![4, 4],
+                f32s(&[0.0; 16]),
+            ),
+            (
+                "model.layers.0.mlps.1.up_proj.weight",
+                StDtype::F32,
+                vec![4, 4],
+                f32s(&[0.0; 16]),
+            ),
+            (
+                "model.layers.0.mlps.1.down_proj.weight",
+                StDtype::F32,
+                vec![4, 4],
+                f32s(&[0.0; 16]),
+            ),
+            // Router: expert0/expert1 logits stay at 0; the zero-expert slot
+            // (row 2 of 3) gets a huge logit so softmax(zero-expert) rounds to
+            // 1.0f32 and it always wins top-2 selection.
+            (
+                "model.layers.0.mlp.router.classifier.weight",
+                StDtype::F32,
+                vec![3, 4],
+                f32s(&[
+                    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 10.0, 10.0, 10.0, 10.0,
+                ]),
+            ),
+            (
+                "model.layers.0.mlp.router.e_score_correction_bias",
+                StDtype::F32,
+                vec![3],
+                f32s(&[0.0; 3]),
+            ),
+            // Routed experts ALL-ZERO -> even if selected, contribute 0.
+            (
+                "model.layers.0.mlp.experts.0.gate_proj.weight",
+                StDtype::F32,
+                vec![2, 4],
+                f32s(&[0.0; 8]),
+            ),
+            (
+                "model.layers.0.mlp.experts.0.up_proj.weight",
+                StDtype::F32,
+                vec![2, 4],
+                f32s(&[0.0; 8]),
+            ),
+            (
+                "model.layers.0.mlp.experts.0.down_proj.weight",
+                StDtype::F32,
+                vec![4, 2],
+                f32s(&[0.0; 8]),
+            ),
+            (
+                "model.layers.0.mlp.experts.1.gate_proj.weight",
+                StDtype::F32,
+                vec![2, 4],
+                f32s(&[0.0; 8]),
+            ),
+            (
+                "model.layers.0.mlp.experts.1.up_proj.weight",
+                StDtype::F32,
+                vec![2, 4],
+                f32s(&[0.0; 8]),
+            ),
+            (
+                "model.layers.0.mlp.experts.1.down_proj.weight",
+                StDtype::F32,
+                vec![4, 2],
+                f32s(&[0.0; 8]),
+            ),
+        ];
+        write_test_safetensors(&dir.join(shard), &tensors);
+        let weight_map: BTreeMap<&str, &str> = tensors.iter().map(|(n, ..)| (*n, shard)).collect();
+        std::fs::write(
+            dir.join("model.safetensors.index.json"),
+            serde_json::to_string(&serde_json::json!({"weight_map": weight_map})).unwrap(),
+        )
+        .unwrap();
+
+        let count = convert_safetensors_to_gguf(&dir, &output, &SafetensorsToGgufConfig::default())
+            .unwrap();
+        assert!(count > 0);
+
+        // ---- 1. End-to-end: a few tokens, finite logits. ----
+        {
+            let loader = GgufModelLoader;
+            let mapped = loader.load(&output).unwrap();
+            let cfg = InferenceConfig::from_gguf(&mapped);
+            assert_eq!(cfg.architecture, ModelArchitecture::LongCat);
+            assert_eq!(cfg.layer_count, 2); // 1 pair -> 2 internal layers
+            let mut model = InferenceModel::load_from_gguf(&mapped, cfg, false).unwrap();
+            let mut session = Session::new();
+            let logits = model.forward(&[0, 1, 2], &mut session).unwrap();
+            assert!(!logits.is_empty());
+            assert!(
+                logits.iter().all(|v| v.is_finite()),
+                "non-finite logit: {logits:?}"
+            );
+        }
+
+        // ---- 2. Zero-expert identity check: drive one token directly and
+        // inspect the post-pair residual. With attention/dense-FFN/routed
+        // experts all zeroed, `x` after the pair must equal
+        // `embedding + rms_norm(embedding, ffn_norm_0=[1,1,1,1], eps)`.
+        {
+            let loader = GgufModelLoader;
+            let mapped = loader.load(&output).unwrap();
+            let cfg = InferenceConfig::from_gguf(&mapped);
+            let mut model = InferenceModel::load_from_gguf(&mapped, cfg, false).unwrap();
+            model.embed_token_into_workspace(0);
+            model
+                .run_layer_range_in_workspace(0, 0..model.config.layer_count)
+                .unwrap();
+            let x = &model.workspace.x;
+            assert!(x.iter().all(|v| v.is_finite()), "non-finite x: {x:?}");
+            // rms_norm([2,2,2,2], [1,1,1,1], eps) ~= [1,1,1,1] (mean_sq=4).
+            for &v in x {
+                assert!(
+                    (v - 3.0).abs() < 1e-3,
+                    "expected ~3.0 (2 + zero-expert*1), got {x:?}"
+                );
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_file(&output);
     }
 
     #[test]

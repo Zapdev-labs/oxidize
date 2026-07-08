@@ -176,6 +176,14 @@ impl InferenceModel {
         pos: usize,
         range: std::ops::Range<usize>,
     ) -> Result<(), ModelError> {
+        // LongCat-2.0 ScMoE decoder pairs couple state (attn0's post-norm hidden
+        // feeds both the dense MLP and the MoE branch; the MoE output is added
+        // to the residual only at the END of the pair) in a way the generic
+        // per-layer loop below cannot express — dispatch to a dedicated
+        // pair-oriented forward instead. See `run_longcat_layer_range`.
+        if self.config.architecture == ModelArchitecture::LongCat {
+            return self.run_longcat_layer_range(pos, range);
+        }
         let cfg = &self.config;
         let h = cfg.hidden_size;
         let n = cfg.num_attention_heads;
@@ -1653,6 +1661,193 @@ impl InferenceModel {
             }
             out[v] = sum;
         }
+        Ok(())
+    }
+
+    /// LongCat-2.0 ScMoE decoder-PAIR forward. `range` is internal-layer-index
+    /// space (0..76 for the full 38-pair model) and must be pair-aligned (even
+    /// start/end) — always true for the whole-model forward path used here.
+    /// Mesh pipeline-parallel splits that land mid-pair are not supported for
+    /// LongCat yet (ponytail: no mesh caller exercises LongCat today; revisit
+    /// if that changes).
+    ///
+    /// Mirrors `LongcatFlashDecoderLayer.forward`/`forward_mlp` in SGLang's
+    /// `longcat_flash.py`:
+    /// ```text
+    /// x += attn0(rms(x, attn_norm_0))       # sub-block 0 attention
+    /// m  = rms(x, ffn_norm_0)
+    /// moe = MoE(m)                          # stashed — added at the very end
+    /// x += ffn0(m)                          # dense MLP 0 on the SAME m
+    /// x += attn1(rms(x, attn_norm_1))        # sub-block 1 attention
+    /// x += ffn1(rms(x, ffn_norm_1))          # dense MLP 1
+    /// x += moe                               # ScMoE shortcut add
+    /// ```
+    /// Reuses [`Self::deepseek_mla_layer`] for both sub-blocks' MLA attention
+    /// (identical DeepSeek-style compressed attention; the converter already
+    /// bakes `mla_scale_q_lora`/`mla_scale_kv_lora` into the lora norms) and
+    /// [`super::moe::longcat_moe_forward`] for the ScMoE router + expert branch.
+    fn run_longcat_layer_range(
+        &mut self,
+        pos: usize,
+        range: std::ops::Range<usize>,
+    ) -> Result<(), ModelError> {
+        let cfg = self.config.clone();
+        let h = cfg.hidden_size;
+        let i_size = cfg.intermediate_size;
+        let moe_i = if cfg.expert_intermediate_size > 0 {
+            cfg.expert_intermediate_size
+        } else {
+            cfg.intermediate_size
+        };
+        let total_slots = (cfg.num_experts + cfg.zero_expert_count).max(1);
+        let n_sel = cfg.num_experts_per_tok.max(1).min(total_slots);
+
+        let pair_start = range.start / 2;
+        let pair_end = range.end / 2;
+        for pair in pair_start..pair_end {
+            let a = pair * 2;
+            let b = a + 1;
+
+            // ---- sub-block 0: MLA attention, residual add ----
+            {
+                let kv_layer_idx = self.kv_layer_map.get(a).copied().flatten().unwrap_or(a);
+                self.workspace.hidden_a[..h].fill(0.0_f32);
+                let kv_cache = &mut self.kv_cache;
+                let layer_a = &self.layers[a];
+                Self::deepseek_mla_layer(
+                    kv_cache,
+                    layer_a,
+                    &cfg,
+                    kv_layer_idx,
+                    pos,
+                    &mut self.workspace,
+                )?;
+            }
+            for i in 0..h {
+                self.workspace.x[i] += self.workspace.hidden_a[i];
+            }
+
+            // ---- m = rms(x, ffn_norm_0) ----
+            {
+                let layer_a = &self.layers[a];
+                let ws = &mut self.workspace;
+                rms_norm_f32(
+                    &ws.x[..h],
+                    &layer_a.ffn_norm,
+                    cfg.rms_norm_eps,
+                    &mut ws.hidden_b[..h],
+                )
+                .map_err(|e| ModelError::InferenceFailed(format!("longcat ffn_norm_0: {:?}", e)))?;
+            }
+
+            // ---- MoE(m): stashed, added to x only at the end of the pair ----
+            {
+                let layer_a = &self.layers[a];
+                let moe_weights = MoeFfnWeights::from_layer(layer_a);
+                let ws = &mut self.workspace;
+                super::moe::longcat_moe_forward(
+                    &moe_weights,
+                    &cfg,
+                    &ws.hidden_b[..h],
+                    &mut ws.moe_stash[..h],
+                    &mut ws.moe_gate_all[..n_sel * moe_i],
+                    &mut ws.moe_up_all[..n_sel * moe_i],
+                    &mut ws.moe_down_all[..n_sel * h],
+                    &mut ws.moe_router_logits[..total_slots],
+                    &mut ws.moe_expert_scores[..total_slots],
+                )?;
+            }
+
+            // ---- ffn0(m): dense MLP on the SAME m, added immediately ----
+            {
+                let layer_a = &self.layers[a];
+                let ws = &mut self.workspace;
+                let gate = &mut ws.intermediate_a[..i_size];
+                let up = &mut ws.intermediate_b[..i_size];
+                let ffn_out = &mut ws.hidden_a[..h];
+                ffn_out.fill(0.0_f32);
+                Self::longcat_dense_ffn(layer_a, &cfg, &ws.hidden_b[..h], gate, up, ffn_out)?;
+            }
+            for i in 0..h {
+                self.workspace.x[i] += self.workspace.hidden_a[i];
+            }
+
+            // ---- sub-block 1: MLA attention, residual add ----
+            {
+                let kv_layer_idx = self.kv_layer_map.get(b).copied().flatten().unwrap_or(b);
+                self.workspace.hidden_a[..h].fill(0.0_f32);
+                let kv_cache = &mut self.kv_cache;
+                let layer_b = &self.layers[b];
+                Self::deepseek_mla_layer(
+                    kv_cache,
+                    layer_b,
+                    &cfg,
+                    kv_layer_idx,
+                    pos,
+                    &mut self.workspace,
+                )?;
+            }
+            for i in 0..h {
+                self.workspace.x[i] += self.workspace.hidden_a[i];
+            }
+
+            // ---- ffn1: rms(x, ffn_norm_1) -> dense MLP -> residual add ----
+            {
+                let layer_b = &self.layers[b];
+                let ws = &mut self.workspace;
+                rms_norm_f32(
+                    &ws.x[..h],
+                    &layer_b.ffn_norm,
+                    cfg.rms_norm_eps,
+                    &mut ws.hidden_b[..h],
+                )
+                .map_err(|e| ModelError::InferenceFailed(format!("longcat ffn_norm_1: {:?}", e)))?;
+            }
+            {
+                let layer_b = &self.layers[b];
+                let ws = &mut self.workspace;
+                let gate = &mut ws.intermediate_a[..i_size];
+                let up = &mut ws.intermediate_b[..i_size];
+                let ffn_out = &mut ws.hidden_a[..h];
+                ffn_out.fill(0.0_f32);
+                Self::longcat_dense_ffn(layer_b, &cfg, &ws.hidden_b[..h], gate, up, ffn_out)?;
+            }
+            for i in 0..h {
+                self.workspace.x[i] += self.workspace.hidden_a[i];
+            }
+
+            // ---- ScMoE shortcut: add the stashed MoE branch output ----
+            for i in 0..h {
+                self.workspace.x[i] += self.workspace.moe_stash[i];
+            }
+        }
+        Ok(())
+    }
+
+    /// Plain SwiGLU dense FFN (`gate`/`up`/`down`, no bias/GeGLU/sandwich-norm —
+    /// LongCat never uses those). Shared by both ScMoE sub-blocks' `mlps.{i}`.
+    fn longcat_dense_ffn(
+        layer: &LayerWeights,
+        cfg: &InferenceConfig,
+        normed: &[f32],
+        gate: &mut [f32],
+        up: &mut [f32],
+        ffn_out: &mut [f32],
+    ) -> Result<(), ModelError> {
+        let h = cfg.hidden_size;
+        let i_size = cfg.intermediate_size;
+        gemv_weight_fused(
+            vec![
+                (&layer.ffn_gate, i_size, &mut *gate),
+                (&layer.ffn_up, i_size, &mut *up),
+            ],
+            h,
+            normed,
+        )
+        .map_err(|e| ModelError::InferenceFailed(format!("longcat ffn_gate_up: {:?}", e)))?;
+        apply_swiglu_inplace_f32(gate, up);
+        gemv_weight(&layer.ffn_down, h, i_size, gate, ffn_out)
+            .map_err(|e| ModelError::InferenceFailed(format!("longcat ffn_down: {:?}", e)))?;
         Ok(())
     }
 
