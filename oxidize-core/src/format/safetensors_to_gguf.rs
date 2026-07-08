@@ -257,6 +257,15 @@ fn read_arch_from_hf_config(path: &Path) -> Result<String> {
         .or_else(|| json.pointer("/text_config/model_type"))
         .and_then(|v| v.as_str())
         .map(|s| s.to_owned())
+        // Some repos (e.g. meituan-longcat/LongCat-2.0) ship no model_type;
+        // fall back to the class name in `architectures`.
+        .or_else(|| {
+            json.get("architectures")
+                .and_then(|v| v.as_array())
+                .and_then(|a| a.first())
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_owned())
+        })
         .ok_or_else(|| anyhow!("config.json missing model_type"))?;
     Ok(normalize_hf_arch(&arch))
 }
@@ -271,6 +280,9 @@ fn normalize_hf_arch(model_type: &str) -> String {
         "llama" | "mistral" | "gemma" | "phi" | "phi3" | "mixtral" => model_type.to_owned(),
         "hy_v3" | "hyv3" | "hunyuan_v3" | "hunyuan" | "hunyuan_moe" | "hunyuanmoe" => {
             "hunyuan-moe".to_owned()
+        }
+        "longcat" | "longcat_flash" | "longcatcausallm" | "longcatflashforcausallm" => {
+            "longcat".to_owned()
         }
         other => other.to_owned(),
     }
@@ -628,6 +640,86 @@ fn merge_hf_config_metadata(
     Ok(())
 }
 
+/// LongCat-2.0 metadata. Its config.json uses names the generic path misses
+/// (`num_layers`, `ffn_hidden_size`, `n_routed_experts`, `moe_topk`, ...), and
+/// MLA/LSA/n-gram hyperparameters have no generic equivalent at all.
+fn merge_longcat_config_metadata(
+    meta: &mut BTreeMap<String, GgufMetadataValue>,
+    config_path: &Path,
+) -> Result<()> {
+    let raw = std::fs::read_to_string(config_path)
+        .with_context(|| format!("failed to read {}", config_path.display()))?;
+    let json: Value = serde_json::from_str(&raw).context("invalid config.json")?;
+
+    let mut put_u32 = |key: &str, field: &str| {
+        if let Some(v) = json.get(field).and_then(json_u32) {
+            meta.insert(format!("longcat.{key}"), GgufMetadataValue::Uint32(v));
+        }
+    };
+    put_u32("block_count", "num_layers");
+    put_u32("feed_forward_length", "ffn_hidden_size");
+    put_u32("expert_feed_forward_length", "expert_ffn_hidden_size");
+    put_u32("expert_count", "n_routed_experts");
+    put_u32("expert_used_count", "moe_topk");
+    put_u32("zero_expert_count", "zero_expert_num");
+    put_u32("attention.q_lora_rank", "q_lora_rank");
+    put_u32("attention.kv_lora_rank", "kv_lora_rank");
+    put_u32("rope.dimension_count", "qk_rope_head_dim");
+    put_u32("attention.value_length", "v_head_dim");
+    put_u32("indexer.head_count", "index_n_heads");
+    put_u32("indexer.head_dim", "index_head_dim");
+    put_u32("indexer.topk", "index_topk");
+    put_u32("indexer.cli_factor", "cli_factor");
+    put_u32("indexer.local_tokens", "index_local_tokens");
+    put_u32("indexer.init_tokens", "index_init_tokens");
+    put_u32("ngram.neighbor_num", "oe_neighbor_num");
+    put_u32("ngram.split_num", "oe_split_num");
+
+    // MLA K = nope + rope parts.
+    if let (Some(nope), Some(rope)) = (
+        json.get("qk_nope_head_dim").and_then(json_u32),
+        json.get("qk_rope_head_dim").and_then(json_u32),
+    ) {
+        meta.insert(
+            "longcat.attention.key_length".to_owned(),
+            GgufMetadataValue::Uint32(nope + rope),
+        );
+    }
+    // MLA has a single latent KV stream.
+    meta.insert(
+        "longcat.attention.head_count_kv".to_owned(),
+        GgufMetadataValue::Uint32(1),
+    );
+    if let Some(ratio) = json.get("oe_vocab_size_ratio").and_then(json_f32) {
+        meta.insert(
+            "longcat.ngram.vocab_size_ratio".to_owned(),
+            GgufMetadataValue::Float32(ratio),
+        );
+    }
+    if let Some(scaling) = json.get("rope_scaling").and_then(|v| v.as_object()) {
+        meta.insert(
+            "longcat.rope.scaling.type".to_owned(),
+            GgufMetadataValue::String("yarn".to_owned()),
+        );
+        if let Some(factor) = scaling.get("factor").and_then(json_f32) {
+            meta.insert(
+                "longcat.rope.scaling.factor".to_owned(),
+                GgufMetadataValue::Float32(factor),
+            );
+        }
+        if let Some(orig) = scaling
+            .get("original_max_position_embeddings")
+            .and_then(json_u32)
+        {
+            meta.insert(
+                "longcat.rope.scaling.original_context_length".to_owned(),
+                GgufMetadataValue::Uint32(orig),
+            );
+        }
+    }
+    Ok(())
+}
+
 fn json_u32(v: &Value) -> Option<u32> {
     v.as_u64()
         .and_then(|n| u32::try_from(n).ok())
@@ -908,6 +1000,19 @@ enum StreamTransform {
     /// Concatenate `stack_sources` (one unfused per-expert 2D weight each, in
     /// expert-index order) into a single expert-major 3D `_exps` tensor.
     StackExperts,
+    /// Dequantize to F32 and multiply by a constant. Used to bake LongCat's
+    /// `mla_scale_q_lora`/`mla_scale_kv_lora` factors into the MLA lora
+    /// layernorm weights at conversion time (mirrors SGLang's
+    /// `post_load_weights`), so the runtime runs vanilla DeepSeek-style MLA.
+    ScaleF32 { factor: f32 },
+    /// Split a fused DeepSeek-style `kv_b_proj` weight of shape
+    /// `[heads * (nope + v_dim), kv_lora]` into its K part (first `nope` rows
+    /// of each per-head block) or V part (last `v_dim` rows).
+    SplitKvB {
+        take_v: bool,
+        nope: usize,
+        v_dim: usize,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -953,6 +1058,232 @@ fn tensor_byte_len(ggml_type: u32, dimensions: &[u64]) -> Result<usize> {
         .ok_or_else(|| anyhow!("tensor byte length overflow"))
 }
 
+/// LongCat conversion parameters read once from config.json.
+#[derive(Debug, Clone, Copy)]
+struct LongcatPlanCtx {
+    /// sqrt(hidden_size / q_lora_rank) if `mla_scale_q_lora`, else 1.0.
+    q_norm_scale: f32,
+    /// sqrt(hidden_size / kv_lora_rank) if `mla_scale_kv_lora`, else 1.0.
+    kv_norm_scale: f32,
+    qk_nope_head_dim: usize,
+    v_head_dim: usize,
+}
+
+impl LongcatPlanCtx {
+    fn from_config(config_path: &Path) -> Result<Self> {
+        let raw = std::fs::read_to_string(config_path)
+            .with_context(|| format!("failed to read {}", config_path.display()))?;
+        let json: Value = serde_json::from_str(&raw).context("invalid config.json")?;
+        let get_f = |k: &str| json.get(k).and_then(|v| v.as_f64());
+        let get_u = |k: &str| json.get(k).and_then(|v| v.as_u64());
+        let hidden = get_f("hidden_size").ok_or_else(|| anyhow!("longcat: missing hidden_size"))?;
+        let q_lora = get_f("q_lora_rank").ok_or_else(|| anyhow!("longcat: missing q_lora_rank"))?;
+        let kv_lora =
+            get_f("kv_lora_rank").ok_or_else(|| anyhow!("longcat: missing kv_lora_rank"))?;
+        let scale_q = json
+            .get("mla_scale_q_lora")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let scale_kv = json
+            .get("mla_scale_kv_lora")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        Ok(Self {
+            q_norm_scale: if scale_q { (hidden / q_lora).sqrt() as f32 } else { 1.0 },
+            kv_norm_scale: if scale_kv { (hidden / kv_lora).sqrt() as f32 } else { 1.0 },
+            qk_nope_head_dim: get_u("qk_nope_head_dim")
+                .ok_or_else(|| anyhow!("longcat: missing qk_nope_head_dim"))?
+                as usize,
+            v_head_dim: get_u("v_head_dim")
+                .ok_or_else(|| anyhow!("longcat: missing v_head_dim"))?
+                as usize,
+        })
+    }
+}
+
+/// Plan GGUF outputs for one LongCat (ScMoE) SafeTensors tensor.
+///
+/// GGUF layout: `block_count` = 38 ScMoE layers. Each `blk.L` holds two
+/// attention/dense sub-blocks (suffix `_0`/`_1`), one 768-expert MoE
+/// (`ffn_*_exps` via the shared unfused-expert stacking path), the router
+/// (`ffn_gate_inp` + `exp_probs_b`), and one LSA indexer (sub-block 0 only).
+/// `model.mtp.*` draft-head tensors are skipped (main-head decoding only).
+fn plan_longcat_outputs(
+    name: &str,
+    dtype: Dtype,
+    shape: &[usize],
+    shard_path: &Path,
+    ctx: &LongcatPlanCtx,
+) -> Result<Vec<PlannedTensor>> {
+    let ggml_type = dtype_to_ggml_type(dtype)?;
+    let shard = shard_path.to_path_buf();
+    let rev_dims = |shape: &[usize]| -> Vec<u64> {
+        let mut d: Vec<u64> = shape.iter().map(|&x| x as u64).collect();
+        if d.len() == 2 {
+            d.reverse();
+        }
+        d
+    };
+    let simple = |out_name: String| -> Vec<PlannedTensor> {
+        vec![PlannedTensor {
+            name: out_name,
+            dimensions: rev_dims(shape),
+            ggml_type,
+            source_name: name.to_owned(),
+            source_shard: shard.clone(),
+            transform: StreamTransform::Passthrough,
+            stack_sources: Vec::new(),
+        }]
+    };
+
+    // MTP draft module: unused by the runtime (main LM head only); skipping
+    // also avoids duplicating its private copy of the n-gram tables.
+    if name.starts_with("model.mtp.") {
+        return Ok(Vec::new());
+    }
+
+    match name {
+        "model.embed_tokens.weight" => return Ok(simple("tok_embeddings.weight".to_owned())),
+        "model.norm.weight" => return Ok(simple("norm.weight".to_owned())),
+        "lm_head.weight" => return Ok(simple("output.weight".to_owned())),
+        _ => {}
+    }
+
+    // N-gram (over-)embedding hash tables + projections: model.oe_embed_tokens{J} / oe_embed_proj{J}.
+    for (hf_prefix, gguf_prefix) in [
+        ("model.oe_embed_tokens", "ngram_embd_"),
+        ("model.oe_embed_proj", "ngram_proj_"),
+    ] {
+        if let Some(rest) = name.strip_prefix(hf_prefix)
+            && let Some(idx) = rest.strip_suffix(".weight")
+            && idx.parse::<usize>().is_ok()
+        {
+            return Ok(simple(format!("{gguf_prefix}{idx}.weight")));
+        }
+    }
+
+    let Some(rest) = name.strip_prefix("model.layers.") else {
+        bail!("longcat: unrecognized tensor name {name}");
+    };
+    let Some((layer, rest)) = rest.split_once('.') else {
+        bail!("longcat: unrecognized tensor name {name}");
+    };
+    let layer: usize = layer
+        .parse()
+        .map_err(|_| anyhow!("longcat: bad layer index in {name}"))?;
+
+    // Per-pair tensors (no sub-block index).
+    match rest {
+        "mlp.router.classifier.weight" => {
+            return Ok(simple(format!("blk.{layer}.ffn_gate_inp.weight")));
+        }
+        "mlp.router.e_score_correction_bias" => {
+            return Ok(simple(format!("blk.{layer}.exp_probs_b.bias")));
+        }
+        _ => {}
+    }
+
+    // Sub-block-indexed tensors: input_layernorm.{i}, post_attention_layernorm.{i},
+    // mlps.{i}.*, self_attn.{i}.*
+    let (module, sub, tail) = {
+        let Some((module, r)) = rest.split_once('.') else {
+            bail!("longcat: unrecognized tensor name {name}");
+        };
+        let Some((sub, tail)) = r.split_once('.').map(|(s, t)| (s, Some(t))).or_else(|| {
+            r.parse::<usize>().ok().map(|_| (r, None))
+        }) else {
+            bail!("longcat: unrecognized tensor name {name}");
+        };
+        (module, sub, tail)
+    };
+    let sub: usize = sub
+        .parse()
+        .map_err(|_| anyhow!("longcat: bad sub-block index in {name}"))?;
+    if sub > 1 {
+        bail!("longcat: sub-block index >1 in {name}");
+    }
+
+    let out = match (module, tail) {
+        ("input_layernorm", Some("weight")) => simple(format!("blk.{layer}.attn_norm_{sub}.weight")),
+        ("post_attention_layernorm", Some("weight")) => {
+            simple(format!("blk.{layer}.ffn_norm_{sub}.weight"))
+        }
+        ("mlps", Some("gate_proj.weight")) => simple(format!("blk.{layer}.ffn_gate_{sub}.weight")),
+        ("mlps", Some("up_proj.weight")) => simple(format!("blk.{layer}.ffn_up_{sub}.weight")),
+        ("mlps", Some("down_proj.weight")) => simple(format!("blk.{layer}.ffn_down_{sub}.weight")),
+        ("self_attn", Some(attn_tail)) => match attn_tail {
+            "q_a_proj.weight" => simple(format!("blk.{layer}.attn_q_a_{sub}.weight")),
+            "q_b_proj.weight" => simple(format!("blk.{layer}.attn_q_b_{sub}.weight")),
+            "o_proj.weight" => simple(format!("blk.{layer}.attn_output_{sub}.weight")),
+            "kv_a_proj_with_mqa.weight" => {
+                simple(format!("blk.{layer}.attn_kv_a_mqa_{sub}.weight"))
+            }
+            "q_a_layernorm.weight" => vec![PlannedTensor {
+                name: format!("blk.{layer}.attn_q_a_norm_{sub}.weight"),
+                dimensions: rev_dims(shape),
+                ggml_type: 0, // baked norm is re-encoded as F32
+                source_name: name.to_owned(),
+                source_shard: shard.clone(),
+                transform: StreamTransform::ScaleF32 {
+                    factor: ctx.q_norm_scale,
+                },
+                stack_sources: Vec::new(),
+            }],
+            "kv_a_layernorm.weight" => vec![PlannedTensor {
+                name: format!("blk.{layer}.attn_kv_a_norm_{sub}.weight"),
+                dimensions: rev_dims(shape),
+                ggml_type: 0,
+                source_name: name.to_owned(),
+                source_shard: shard.clone(),
+                transform: StreamTransform::ScaleF32 {
+                    factor: ctx.kv_norm_scale,
+                },
+                stack_sources: Vec::new(),
+            }],
+            "kv_b_proj.weight" => {
+                if shape.len() != 2 {
+                    bail!("longcat: kv_b_proj {name} is not 2D: {shape:?}");
+                }
+                let block = ctx.qk_nope_head_dim + ctx.v_head_dim;
+                if block == 0 || !shape[0].is_multiple_of(block) {
+                    bail!(
+                        "longcat: kv_b_proj rows {} not divisible by nope+v ({block})",
+                        shape[0]
+                    );
+                }
+                let heads = shape[0] / block;
+                let kv_lora = shape[1];
+                let mk = |take_v: bool, out_rows: usize, gguf: &str| PlannedTensor {
+                    name: format!("blk.{layer}.{gguf}_{sub}.weight"),
+                    dimensions: vec![kv_lora as u64, (heads * out_rows) as u64],
+                    ggml_type,
+                    source_name: name.to_owned(),
+                    source_shard: shard.clone(),
+                    transform: StreamTransform::SplitKvB {
+                        take_v,
+                        nope: ctx.qk_nope_head_dim,
+                        v_dim: ctx.v_head_dim,
+                    },
+                    stack_sources: Vec::new(),
+                };
+                vec![
+                    mk(false, ctx.qk_nope_head_dim, "attn_k_b"),
+                    mk(true, ctx.v_head_dim, "attn_v_b"),
+                ]
+            }
+            "indexer.wk.weight" => simple(format!("blk.{layer}.indexer_wk.weight")),
+            "indexer.wq_b.weight" => simple(format!("blk.{layer}.indexer_wq_b.weight")),
+            "indexer.k_norm.weight" => simple(format!("blk.{layer}.indexer_k_norm.weight")),
+            "indexer.weights_proj.weight" => {
+                simple(format!("blk.{layer}.indexer_weights_proj.weight"))
+            }
+            other => bail!("longcat: unrecognized self_attn tensor {other} in {name}"),
+        },
+        _ => bail!("longcat: unrecognized tensor name {name}"),
+    };
+    Ok(out)
+}
+
 fn plan_stream_outputs(
     name: &str,
     dtype: Dtype,
@@ -982,7 +1313,7 @@ fn plan_stream_outputs(
         return Ok(vec![
             PlannedTensor {
                 name: format!("blk.{layer}.ffn_gate_exps.weight"),
-                dimensions: vec![experts as u64, half as u64, hidden as u64],
+                dimensions: vec![experts as u64, hidden as u64, half as u64],
                 ggml_type,
                 source_name: source_name.clone(),
                 source_shard: shard.clone(),
@@ -991,7 +1322,7 @@ fn plan_stream_outputs(
             },
             PlannedTensor {
                 name: format!("blk.{layer}.ffn_up_exps.weight"),
-                dimensions: vec![experts as u64, half as u64, hidden as u64],
+                dimensions: vec![experts as u64, hidden as u64, half as u64],
                 ggml_type,
                 source_name,
                 source_shard: shard,
@@ -1051,7 +1382,13 @@ fn plan_stream_outputs(
 
     Ok(vec![PlannedTensor {
         name: output_name,
-        dimensions: shape.iter().map(|&d| d as u64).collect(),
+        dimensions: {
+            let mut dimensions: Vec<u64> = shape.iter().map(|&d| d as u64).collect();
+            if dimensions.len() == 2 {
+                dimensions.reverse();
+            }
+            dimensions
+        },
         ggml_type,
         source_name,
         source_shard: shard,
@@ -1126,6 +1463,48 @@ fn materialize_planned_tensor(plan: &PlannedTensor) -> Result<Vec<u8>> {
                 .ok_or_else(|| anyhow!("failed to flatten conv1d {}", plan.source_name))?;
             Ok(flat)
         }
+        StreamTransform::ScaleF32 { factor } => {
+            let source = match dtype {
+                Dtype::F32 => GgufQuantizationType::F32,
+                Dtype::F16 => GgufQuantizationType::F16,
+                Dtype::BF16 => GgufQuantizationType::BF16,
+                other => bail!(
+                    "ScaleF32: unsupported dtype {other:?} for {}",
+                    plan.source_name
+                ),
+            };
+            let count: usize = shape.iter().product();
+            let mut values = vec![0.0_f32; count];
+            crate::quantization::dequantize_scalar(source, &raw, &mut values)
+                .map_err(|e| anyhow!("ScaleF32 dequantize {}: {e:?}", plan.source_name))?;
+            for v in &mut values {
+                *v *= factor;
+            }
+            Ok(values.iter().flat_map(|v| v.to_le_bytes()).collect())
+        }
+        StreamTransform::SplitKvB { take_v, nope, v_dim } => {
+            if shape.len() != 2 {
+                bail!("SplitKvB: {} is not 2D: {shape:?}", plan.source_name);
+            }
+            let elem = match dtype {
+                Dtype::F32 => 4,
+                Dtype::F16 | Dtype::BF16 => 2,
+                other => bail!(
+                    "SplitKvB: unsupported dtype {other:?} for {}",
+                    plan.source_name
+                ),
+            };
+            let block = nope + v_dim;
+            let heads = shape[0] / block;
+            let row = shape[1] * elem;
+            let (start, rows) = if take_v { (nope, v_dim) } else { (0, nope) };
+            let mut out = Vec::with_capacity(heads * rows * row);
+            for h in 0..heads {
+                let base = (h * block + start) * row;
+                out.extend_from_slice(&raw[base..base + rows * row]);
+            }
+            Ok(out)
+        }
         StreamTransform::StackExperts => {
             // Concatenate each per-expert 2D weight (expert-index order) into a
             // single expert-major blob matching dims [n_expert, rows, cols].
@@ -1189,6 +1568,15 @@ fn convert_safetensors_dir_streaming(
     let auto_config = input.join("config.json");
     let cfg_path = config.config_path.as_ref().unwrap_or(&auto_config);
     let mtp_base_layer = mtp_base_layer_from_config(Some(cfg_path));
+    // Architecture is resolved before the scan so arch-specific planners
+    // (LongCat) can take over tensor-name mapping. config.json wins, so the
+    // not-yet-populated shard metadata in st_meta is irrelevant here.
+    let arch = resolve_architecture(config, &st_meta, Some(input), input)?;
+    let longcat_ctx = if arch == "longcat" {
+        Some(LongcatPlanCtx::from_config(cfg_path)?)
+    } else {
+        None
+    };
 
     for (tensor_name, shard_name_val) in weight_map {
         let shard_name = shard_name_val
@@ -1222,14 +1610,17 @@ fn convert_safetensors_dir_streaming(
             );
             continue;
         }
-        planned.extend(plan_stream_outputs(
-            tensor_name,
-            dtype,
-            &shape,
-            &shard_path,
-            config.map_hf_tensor_names,
-            mtp_base_layer,
-        )?);
+        planned.extend(match &longcat_ctx {
+            Some(ctx) => plan_longcat_outputs(tensor_name, dtype, &shape, &shard_path, ctx)?,
+            None => plan_stream_outputs(
+                tensor_name,
+                dtype,
+                &shape,
+                &shard_path,
+                config.map_hf_tensor_names,
+                mtp_base_layer,
+            )?,
+        });
     }
 
     // Emit one stacked `_exps` PlannedTensor per (layer, projection).
@@ -1252,7 +1643,7 @@ fn convert_safetensors_dir_streaming(
             bail!("blk.{layer}.{exps}: expected 2D expert weights, got {shape0:?}");
         }
         let ggml_type = dtype_to_ggml_type(*dtype0)?;
-        let dimensions = vec![n_expert as u64, shape0[0] as u64, shape0[1] as u64];
+        let dimensions = vec![n_expert as u64, shape0[1] as u64, shape0[0] as u64];
         let mut sources = experts.into_values();
         let (first_name, first_shard, _, _) = sources.next().expect("non-empty");
         // stack_sources holds every expert (including the first) in order so the
@@ -1279,10 +1670,12 @@ fn convert_safetensors_dir_streaming(
         planned.len()
     );
 
-    let arch = resolve_architecture(config, &st_meta, Some(input), input)?;
     let mut metadata = build_base_metadata(&st_meta, &arch, input);
     if cfg_path.is_file() {
         merge_hf_config_metadata(&mut metadata, &arch, cfg_path)?;
+        if arch == "longcat" {
+            merge_longcat_config_metadata(&mut metadata, cfg_path)?;
+        }
     }
     if let Err(error) = merge_hf_tokenizer_metadata(&mut metadata, input) {
         eprintln!(
@@ -1319,6 +1712,7 @@ fn gguf_file_type_id(target: GgufQuantizationType) -> Option<u32> {
         GgufQuantizationType::Q4_K_M => Some(15),
         GgufQuantizationType::Q4_K_S => Some(14),
         GgufQuantizationType::Q6_K => Some(18),
+        GgufQuantizationType::IQ4_XS => Some(30),
         // AL-family custom quant IDs are stored in ggml_type; file_type falls back to Unknown.
         _ => None,
     }
@@ -1342,6 +1736,8 @@ fn ggml_type_id(target: GgufQuantizationType) -> Result<u32> {
         GgufQuantizationType::Q5_K_S => 16,
         GgufQuantizationType::Q5_K_M => 17,
         GgufQuantizationType::Q6_K => 18,
+        GgufQuantizationType::IQ4_NL => 20,
+        GgufQuantizationType::IQ4_XS => 23,
         GgufQuantizationType::AL5 => 240,
         GgufQuantizationType::AL8 => 241,
         GgufQuantizationType::AL6 => 242,
@@ -1350,9 +1746,20 @@ fn ggml_type_id(target: GgufQuantizationType) -> Result<u32> {
     })
 }
 
+/// Tensors that must stay in full precision even under a quantization target:
+/// MoE router weights (expert selection is precision-sensitive) and LSA
+/// indexer weights (top-k token selection).
+fn keep_full_precision(name: &str) -> bool {
+    let base = name.rsplit('/').next().unwrap_or(name);
+    let suffix = base.strip_prefix("blk.").map_or(base, |rest| {
+        rest.split_once('.').map_or(rest, |(_, s)| s)
+    });
+    suffix.starts_with("ffn_gate_inp") || suffix.starts_with("indexer_")
+}
+
 fn planned_data_len(plan: &PlannedTensor, target: Option<GgufQuantizationType>) -> Result<usize> {
     let raw = tensor_byte_len(plan.ggml_type, &plan.dimensions)?;
-    if plan.dimensions.len() < 2 {
+    if plan.dimensions.len() < 2 || keep_full_precision(&plan.name) {
         return Ok(raw);
     }
     let Some(target) = target else {
@@ -1371,11 +1778,12 @@ fn planned_data_len(plan: &PlannedTensor, target: Option<GgufQuantizationType>) 
 
 fn maybe_quantize_tensor_data(
     target: Option<GgufQuantizationType>,
+    name: &str,
     ggml_type: u32,
     dimensions: &[u64],
     data: Vec<u8>,
 ) -> Result<(u32, Vec<u8>)> {
-    if dimensions.len() < 2 {
+    if dimensions.len() < 2 || keep_full_precision(name) {
         return Ok((ggml_type, data));
     }
     let Some(target) = target else {
@@ -1415,6 +1823,7 @@ fn write_gguf_streaming(
             if let Some(t) = target
                 && plan.dimensions.len() >= 2
                 && matches!(plan.ggml_type, 0 | 1 | 30)
+                && !keep_full_precision(&plan.name)
             {
                 ggml_type_id(t)?
             } else {
@@ -1478,7 +1887,7 @@ fn write_gguf_streaming(
         out.seek(SeekFrom::Start(file_offset))?;
         let raw = materialize_planned_tensor(plan)?;
         let (_ggml_type, data) =
-            maybe_quantize_tensor_data(target, plan.ggml_type, &plan.dimensions, raw)?;
+            maybe_quantize_tensor_data(target, &plan.name, plan.ggml_type, &plan.dimensions, raw)?;
         if data.len() != data_lens[idx] {
             bail!(
                 "tensor {} byte length mismatch: expected {}, got {}",
@@ -1828,6 +2237,192 @@ mod tests {
                 .any(|t| t.name == "blk.0.ffn_gate.0.weight"),
             "per-expert tensors must not be emitted"
         );
+
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_file(output);
+    }
+
+    #[test]
+    fn converts_longcat_scmoe_layout() {
+        let dir = std::env::temp_dir().join(format!(
+            "oxidize-st2gguf-longcat-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let output = tmp_path(".gguf");
+
+        // Tiny LongCat: hidden=4, q_lora=2, kv_lora=2, heads=2, nope=2, v=2,
+        // 2 routed experts + 1 zero expert, 1 ScMoE layer.
+        std::fs::write(
+            dir.join("config.json"),
+            r#"{
+                "architectures": ["LongcatCausalLM"],
+                "hidden_size": 4, "num_layers": 1, "vocab_size": 8,
+                "num_attention_heads": 2,
+                "q_lora_rank": 2, "kv_lora_rank": 2,
+                "qk_nope_head_dim": 2, "qk_rope_head_dim": 2, "v_head_dim": 2,
+                "mla_scale_q_lora": true, "mla_scale_kv_lora": true,
+                "ffn_hidden_size": 6, "expert_ffn_hidden_size": 2,
+                "n_routed_experts": 2, "moe_topk": 2,
+                "zero_expert_num": 1, "zero_expert_type": "identity",
+                "routed_scaling_factor": 9,
+                "rms_norm_eps": 1e-5, "rope_theta": 1000000.0,
+                "max_position_embeddings": 64,
+                "rope_scaling": {"rope_type": "deepseek_yarn", "factor": 120,
+                                  "original_max_position_embeddings": 8},
+                "index_n_heads": 2, "index_head_dim": 2, "index_topk": 4,
+                "cli_factor": 2, "index_local_tokens": 2, "index_init_tokens": 1,
+                "oe_vocab_size_ratio": 2.5, "oe_neighbor_num": 5, "oe_split_num": 4
+            }"#,
+        )
+        .unwrap();
+
+        let f32s = |vals: &[f32]| -> Vec<u8> { vals.iter().flat_map(|v| v.to_le_bytes()).collect() };
+        // kv_b_proj [heads*(nope+v)=8, kv_lora=2]: rows 0..8 hold value = row index.
+        let kv_b: Vec<f32> = (0..16).map(|i| (i / 2) as f32).collect();
+        let shard = "model-00001-of-00001.safetensors";
+        let tensors: Vec<(&str, Dtype, Vec<usize>, Vec<u8>)> = vec![
+            ("model.embed_tokens.weight", Dtype::F32, vec![8, 4], f32s(&[0.0; 32])),
+            ("model.norm.weight", Dtype::F32, vec![4], f32s(&[1.0; 4])),
+            ("lm_head.weight", Dtype::F32, vec![8, 4], f32s(&[0.0; 32])),
+            ("model.oe_embed_tokens0.weight", Dtype::F32, vec![4, 4], f32s(&[0.0; 16])),
+            ("model.oe_embed_proj0.weight", Dtype::F32, vec![4, 4], f32s(&[0.0; 16])),
+            // MTP module must be skipped.
+            ("model.mtp.norm.weight", Dtype::F32, vec![4], f32s(&[1.0; 4])),
+            ("model.layers.0.input_layernorm.0.weight", Dtype::F32, vec![4], f32s(&[1.0; 4])),
+            ("model.layers.0.input_layernorm.1.weight", Dtype::F32, vec![4], f32s(&[1.0; 4])),
+            ("model.layers.0.post_attention_layernorm.0.weight", Dtype::F32, vec![4], f32s(&[1.0; 4])),
+            ("model.layers.0.post_attention_layernorm.1.weight", Dtype::F32, vec![4], f32s(&[1.0; 4])),
+            ("model.layers.0.self_attn.0.q_a_proj.weight", Dtype::F32, vec![2, 4], f32s(&[0.0; 8])),
+            ("model.layers.0.self_attn.0.q_a_layernorm.weight", Dtype::F32, vec![2], f32s(&[1.0, 1.0])),
+            ("model.layers.0.self_attn.0.q_b_proj.weight", Dtype::F32, vec![8, 2], f32s(&[0.0; 16])),
+            ("model.layers.0.self_attn.0.kv_a_proj_with_mqa.weight", Dtype::F32, vec![4, 4], f32s(&[0.0; 16])),
+            ("model.layers.0.self_attn.0.kv_a_layernorm.weight", Dtype::F32, vec![2], f32s(&[1.0, 1.0])),
+            ("model.layers.0.self_attn.0.kv_b_proj.weight", Dtype::F32, vec![8, 2], f32s(&kv_b)),
+            ("model.layers.0.self_attn.0.o_proj.weight", Dtype::F32, vec![4, 4], f32s(&[0.0; 16])),
+            ("model.layers.0.self_attn.0.indexer.wk.weight", Dtype::F32, vec![2, 4], f32s(&[0.0; 8])),
+            ("model.layers.0.self_attn.0.indexer.wq_b.weight", Dtype::F32, vec![4, 2], f32s(&[0.0; 8])),
+            ("model.layers.0.self_attn.0.indexer.k_norm.weight", Dtype::F32, vec![2], f32s(&[1.0, 1.0])),
+            ("model.layers.0.self_attn.0.indexer.weights_proj.weight", Dtype::F32, vec![2, 2], f32s(&[0.0; 4])),
+            ("model.layers.0.self_attn.1.q_a_proj.weight", Dtype::F32, vec![2, 4], f32s(&[0.0; 8])),
+            ("model.layers.0.self_attn.1.q_a_layernorm.weight", Dtype::F32, vec![2], f32s(&[1.0, 1.0])),
+            ("model.layers.0.self_attn.1.q_b_proj.weight", Dtype::F32, vec![8, 2], f32s(&[0.0; 16])),
+            ("model.layers.0.self_attn.1.kv_a_proj_with_mqa.weight", Dtype::F32, vec![4, 4], f32s(&[0.0; 16])),
+            ("model.layers.0.self_attn.1.kv_a_layernorm.weight", Dtype::F32, vec![2], f32s(&[1.0, 1.0])),
+            ("model.layers.0.self_attn.1.kv_b_proj.weight", Dtype::F32, vec![8, 2], f32s(&kv_b)),
+            ("model.layers.0.self_attn.1.o_proj.weight", Dtype::F32, vec![4, 4], f32s(&[0.0; 16])),
+            ("model.layers.0.mlps.0.gate_proj.weight", Dtype::F32, vec![6, 4], f32s(&[0.0; 24])),
+            ("model.layers.0.mlps.0.up_proj.weight", Dtype::F32, vec![6, 4], f32s(&[0.0; 24])),
+            ("model.layers.0.mlps.0.down_proj.weight", Dtype::F32, vec![4, 6], f32s(&[0.0; 24])),
+            ("model.layers.0.mlps.1.gate_proj.weight", Dtype::F32, vec![6, 4], f32s(&[0.0; 24])),
+            ("model.layers.0.mlps.1.up_proj.weight", Dtype::F32, vec![6, 4], f32s(&[0.0; 24])),
+            ("model.layers.0.mlps.1.down_proj.weight", Dtype::F32, vec![4, 6], f32s(&[0.0; 24])),
+            ("model.layers.0.mlp.router.classifier.weight", Dtype::F32, vec![3, 4], f32s(&[0.0; 12])),
+            ("model.layers.0.mlp.router.e_score_correction_bias", Dtype::F32, vec![3], f32s(&[0.0; 3])),
+            ("model.layers.0.mlp.experts.0.gate_proj.weight", Dtype::F32, vec![2, 4], f32s(&[0.0; 8])),
+            ("model.layers.0.mlp.experts.0.up_proj.weight", Dtype::F32, vec![2, 4], f32s(&[0.0; 8])),
+            ("model.layers.0.mlp.experts.0.down_proj.weight", Dtype::F32, vec![4, 2], f32s(&[0.0; 8])),
+            ("model.layers.0.mlp.experts.1.gate_proj.weight", Dtype::F32, vec![2, 4], f32s(&[0.0; 8])),
+            ("model.layers.0.mlp.experts.1.up_proj.weight", Dtype::F32, vec![2, 4], f32s(&[0.0; 8])),
+            ("model.layers.0.mlp.experts.1.down_proj.weight", Dtype::F32, vec![4, 2], f32s(&[0.0; 8])),
+        ];
+        write_test_safetensors(&dir.join(shard), &tensors);
+        let weight_map: BTreeMap<&str, &str> =
+            tensors.iter().map(|(n, ..)| (*n, shard)).collect();
+        std::fs::write(
+            dir.join("model.safetensors.index.json"),
+            serde_json::to_string(&serde_json::json!({"weight_map": weight_map})).unwrap(),
+        )
+        .unwrap();
+
+        let count =
+            convert_safetensors_to_gguf(&dir, &output, &SafetensorsToGgufConfig::default())
+                .unwrap();
+        assert!(count > 0);
+        let bytes = std::fs::read(&output).unwrap();
+        let parsed = parse_gguf(&bytes).unwrap();
+        let names: Vec<&str> = parsed.tensor_infos.iter().map(|t| t.name.as_str()).collect();
+
+        for expected in [
+            "tok_embeddings.weight",
+            "norm.weight",
+            "output.weight",
+            "ngram_embd_0.weight",
+            "ngram_proj_0.weight",
+            "blk.0.attn_norm_0.weight",
+            "blk.0.attn_norm_1.weight",
+            "blk.0.ffn_norm_0.weight",
+            "blk.0.attn_q_a_0.weight",
+            "blk.0.attn_q_a_norm_0.weight",
+            "blk.0.attn_q_b_1.weight",
+            "blk.0.attn_kv_a_mqa_0.weight",
+            "blk.0.attn_kv_a_norm_1.weight",
+            "blk.0.attn_k_b_0.weight",
+            "blk.0.attn_v_b_1.weight",
+            "blk.0.attn_output_0.weight",
+            "blk.0.indexer_wk.weight",
+            "blk.0.indexer_wq_b.weight",
+            "blk.0.indexer_k_norm.weight",
+            "blk.0.indexer_weights_proj.weight",
+            "blk.0.ffn_gate_0.weight",
+            "blk.0.ffn_down_1.weight",
+            "blk.0.ffn_gate_inp.weight",
+            "blk.0.exp_probs_b.bias",
+            "blk.0.ffn_gate_exps.weight",
+            "blk.0.ffn_up_exps.weight",
+            "blk.0.ffn_down_exps.weight",
+        ] {
+            assert!(names.contains(&expected), "missing {expected}: {names:?}");
+        }
+        assert!(
+            !names.iter().any(|n| n.contains("mtp")),
+            "mtp tensors must be skipped: {names:?}"
+        );
+
+        // kv_b split: k_b takes rows 0,1 (head 0) + 4,5 (head 1); v_b rows 2,3,6,7.
+        let tensor_f32 = |name: &str| -> Vec<f32> {
+            let info = parsed
+                .tensor_infos
+                .iter()
+                .find(|t| t.name == name)
+                .unwrap_or_else(|| panic!("missing {name}"));
+            let count: usize = info.dimensions.iter().map(|&d| d as usize).product();
+            let start = info.absolute_offset as usize;
+            bytes[start..start + count * 4]
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+                .collect()
+        };
+        assert_eq!(
+            tensor_f32("blk.0.attn_k_b_0.weight"),
+            vec![0.0, 0.0, 1.0, 1.0, 4.0, 4.0, 5.0, 5.0]
+        );
+        assert_eq!(
+            tensor_f32("blk.0.attn_v_b_0.weight"),
+            vec![2.0, 2.0, 3.0, 3.0, 6.0, 6.0, 7.0, 7.0]
+        );
+        // Baked lora-norm scaling: sqrt(hidden/q_lora) = sqrt(2).
+        let q_norm = tensor_f32("blk.0.attn_q_a_norm_0.weight");
+        assert!((q_norm[0] - (4.0_f32 / 2.0).sqrt()).abs() < 1e-6, "{q_norm:?}");
+
+        // Metadata.
+        let meta_u32 = |key: &str| match parsed.metadata.get(key) {
+            Some(GgufMetadataValue::Uint32(v)) => *v,
+            other => panic!("bad metadata {key}: {other:?}"),
+        };
+        assert_eq!(meta_u32("longcat.block_count"), 1);
+        assert_eq!(meta_u32("longcat.expert_count"), 2);
+        assert_eq!(meta_u32("longcat.zero_expert_count"), 1);
+        assert_eq!(meta_u32("longcat.attention.key_length"), 4);
+        assert_eq!(meta_u32("longcat.attention.q_lora_rank"), 2);
+        assert_eq!(meta_u32("longcat.indexer.topk"), 4);
+        match parsed.metadata.get("general.architecture") {
+            Some(GgufMetadataValue::String(s)) => assert_eq!(s, "longcat"),
+            other => panic!("bad architecture: {other:?}"),
+        }
 
         let _ = std::fs::remove_dir_all(dir);
         let _ = std::fs::remove_file(output);
