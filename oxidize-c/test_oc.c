@@ -2,6 +2,7 @@
  * within int8-activation-quantization tolerance, and the GGUF fixture parses.
  * Run via `make test`. */
 #include "oc.h"
+#include "batch.h"
 
 #include <assert.h>
 #include <math.h>
@@ -13,6 +14,24 @@ static uint32_t rstate = 12345;
 static uint32_t rnd(void) {
   rstate = rstate * 1664525u + 1013904223u;
   return rstate;
+}
+
+static void check_gemma4_projection_metadata(void) {
+  const size_t hidden = 5376, q_dim = 16384, intermediate = 21504;
+  oc_weight q = {.rows = q_dim, .cols = hidden};
+  oc_weight wo = {.rows = q_dim, .cols = hidden};
+  oc_weight down = {.rows = intermediate, .cols = hidden};
+  oc_weight canonical_wo = {.rows = hidden, .cols = q_dim};
+
+  oc_gemma4_canonicalize_projection_metadata(&q, hidden, false);
+  assert(q.rows == q_dim && q.cols == hidden);
+  oc_gemma4_canonicalize_projection_metadata(&wo, hidden, true);
+  assert(wo.rows == hidden && wo.cols == q_dim);
+  oc_gemma4_canonicalize_projection_metadata(&down, hidden, true);
+  assert(down.rows == hidden && down.cols == intermediate);
+  oc_gemma4_canonicalize_projection_metadata(&canonical_wo, hidden, true);
+  assert(canonical_wo.rows == hidden && canonical_wo.cols == q_dim);
+  printf("ok gemma4 projection metadata canonicalization\n");
 }
 
 /* reference: dequant row and f32-dot against raw x (not the q8 blocks), so the
@@ -344,6 +363,416 @@ static void check_kv_int8(void) {
   free(ks); free(vs); free(o_ref); free(o_q8);
 }
 
+static void check_batch_queue_capacity_and_slot_reclaim(void) {
+  /* Given: two slots and a FIFO that can retain two pending tokens. */
+  const int gpu_ids[] = {0, 1};
+  const oc_batch_config config = {
+      .capacity = 2, .queue_capacity = 2, .gpu_ids = gpu_ids, .gpu_count = 2};
+  oc_batch_scheduler *scheduler = oc_batch_scheduler_new(&config);
+  size_t first_slot = 0, second_slot = 0, reclaimed_slot = 0;
+  uint64_t sequence_id = 0;
+  uint32_t token = 0;
+  assert(scheduler);
+
+  /* When: capacity is filled, one sequence is completed, then another arrives. */
+  assert(oc_batch_scheduler_admit(scheduler, 11, &first_slot));
+  assert(oc_batch_scheduler_admit(scheduler, 22, &second_slot));
+  assert(!oc_batch_scheduler_admit(scheduler, 33, &reclaimed_slot));
+  assert(oc_batch_scheduler_enqueue_token(scheduler, first_slot, 101));
+  assert(oc_batch_scheduler_enqueue_token(scheduler, second_slot, 202));
+  assert(oc_batch_scheduler_next(scheduler, &sequence_id, &token));
+  assert(sequence_id == 11 && token == 101);
+  assert(oc_batch_scheduler_complete(scheduler, first_slot));
+  assert(oc_batch_scheduler_admit(scheduler, 33, &reclaimed_slot));
+
+  /* Then: rejection does not corrupt FIFO work and the freed slot is reused. */
+  assert(reclaimed_slot == first_slot);
+  assert(oc_batch_scheduler_next(scheduler, &sequence_id, &token));
+  assert(sequence_id == 22 && token == 202);
+  assert(!oc_batch_scheduler_next(scheduler, &sequence_id, &token));
+  oc_batch_scheduler_free(scheduler);
+  printf("ok batch queue capacity and slot reclaim\n");
+}
+
+static void check_single_sequence_scheduler_order(void) {
+  /* Given: one sequence in a single-slot scheduler. */
+  const int gpu_ids[] = {0};
+  const oc_batch_config config = {
+      .capacity = 1, .queue_capacity = 3, .gpu_ids = gpu_ids, .gpu_count = 1};
+  oc_batch_scheduler *scheduler = oc_batch_scheduler_new(&config);
+  size_t slot = 0;
+  uint64_t sequence_id = 0;
+  uint32_t token = 0;
+  assert(scheduler);
+  assert(oc_batch_scheduler_admit(scheduler, 77, &slot));
+
+  /* When: token work is added in generation order. */
+  assert(oc_batch_scheduler_enqueue_token(scheduler, slot, 7));
+  assert(oc_batch_scheduler_enqueue_token(scheduler, slot, 8));
+  assert(oc_batch_scheduler_enqueue_token(scheduler, slot, 9));
+
+  /* Then: the scheduler emits the sequence's tokens in FIFO order. */
+  assert(oc_batch_scheduler_next(scheduler, &sequence_id, &token));
+  assert(sequence_id == 77 && token == 7);
+  assert(oc_batch_scheduler_next(scheduler, &sequence_id, &token));
+  assert(sequence_id == 77 && token == 8);
+  assert(oc_batch_scheduler_next(scheduler, &sequence_id, &token));
+  assert(sequence_id == 77 && token == 9);
+  assert(!oc_batch_scheduler_next(scheduler, &sequence_id, &token));
+  oc_batch_scheduler_free(scheduler);
+  printf("ok batch single-sequence FIFO order\n");
+}
+
+static void check_worker_configuration_validation(void) {
+  /* Given: configurations at each scheduler setup boundary. */
+  const int duplicate_gpu_ids[] = {0, 0};
+  const int unique_gpu_ids[] = {0, 1};
+  const oc_batch_config duplicate = {
+      .capacity = 2, .queue_capacity = 2, .gpu_ids = duplicate_gpu_ids, .gpu_count = 2};
+  const oc_batch_config zero_capacity = {
+      .capacity = 0, .queue_capacity = 1, .gpu_ids = unique_gpu_ids, .gpu_count = 2};
+  const oc_batch_config short_queue = {
+      .capacity = 2, .queue_capacity = 1, .gpu_ids = unique_gpu_ids, .gpu_count = 2};
+  const oc_batch_config valid = {
+      .capacity = 2, .queue_capacity = 2, .gpu_ids = unique_gpu_ids, .gpu_count = 2};
+
+  /* When: each configuration is validated before worker startup. */
+  const bool duplicate_ok = oc_batch_config_valid(&duplicate);
+  const bool zero_capacity_ok = oc_batch_config_valid(&zero_capacity);
+  const bool short_queue_ok = oc_batch_config_valid(&short_queue);
+  const bool valid_ok = oc_batch_config_valid(&valid);
+
+  /* Then: malformed worker topology and impossible queue sizing are rejected. */
+  assert(!duplicate_ok);
+  assert(!zero_capacity_ok);
+  assert(!short_queue_ok);
+  assert(valid_ok);
+  printf("ok batch worker configuration validation\n");
+}
+
+static void check_sequence_scheduler_mixed_prefill_decode(void) {
+  /* Given: one sequence ready to decode and another with prompt work remaining. */
+  const int gpu_ids[] = {0};
+  const uint32_t decode_prompt[] = {41};
+  const uint32_t prefill_prompt[] = {51, 52};
+  const oc_batch_config config = {
+      .capacity = 2, .queue_capacity = 2, .gpu_ids = gpu_ids, .gpu_count = 1};
+  const oc_sequence_request decode_request = {
+      .request_id = 1001, .prompt_tokens = decode_prompt, .prompt_count = 1,
+      .max_tokens = 4, .rng_seed = 7};
+  const oc_sequence_request prefill_request = {
+      .request_id = 1002, .prompt_tokens = prefill_prompt, .prompt_count = 2,
+      .max_tokens = 4, .rng_seed = 9};
+  oc_batch_scheduler *scheduler = oc_batch_scheduler_new(&config);
+  oc_batch_lane lanes[2];
+  size_t decode_slot = 0, prefill_slot = 0, lane_count = 0;
+  assert(scheduler);
+  assert(oc_batch_scheduler_admit_sequence(scheduler, &decode_request, &decode_slot));
+  assert(oc_batch_scheduler_admit_sequence(scheduler, &prefill_request, &prefill_slot));
+
+  /* When: the final prompt token is processed, then both sequences are scheduled. */
+  assert(oc_batch_scheduler_next_lanes(scheduler, lanes, 2, &lane_count));
+  assert(lane_count == 2);
+  assert(lanes[0].slot == decode_slot);
+  assert(lanes[0].phase == OC_SEQUENCE_PREFILL);
+  assert(lanes[0].position == 0 && lanes[0].token == 41);
+  assert(oc_batch_scheduler_finish_lane(scheduler, &lanes[1]));
+  assert(oc_batch_scheduler_finish_lane(scheduler, &lanes[0]));
+
+  assert(oc_batch_scheduler_next_lanes(scheduler, lanes, 2, &lane_count));
+
+  /* Then: one lane is decode and one is prefill, each retaining its own position. */
+  assert(lane_count == 2);
+  assert(lanes[0].slot == decode_slot);
+  assert(lanes[0].phase == OC_SEQUENCE_DECODE);
+  assert(lanes[0].position == 1 && lanes[0].token == 41);
+  assert(lanes[1].slot == prefill_slot);
+  assert(lanes[1].phase == OC_SEQUENCE_PREFILL);
+  assert(lanes[1].position == 1 && lanes[1].token == 52);
+  oc_batch_scheduler_free(scheduler);
+  printf("ok sequence scheduler mixed prefill and decode\n");
+}
+
+static void check_sequence_scheduler_final_prompt_output_contract(void) {
+  /* Given: a two-token prompt whose final token must sample its first completion. */
+  const int gpu_ids[] = {0};
+  const uint32_t prompt[] = {91, 92};
+  const oc_batch_config config = {
+      .capacity = 1, .queue_capacity = 3, .gpu_ids = gpu_ids, .gpu_count = 1};
+  const oc_sequence_request request = {
+      .request_id = 4001, .prompt_tokens = prompt, .prompt_count = 2,
+      .max_tokens = 3, .rng_seed = 17};
+  oc_batch_scheduler *scheduler = oc_batch_scheduler_new(&config);
+  oc_batch_lane lane;
+  size_t slot = 0, lane_count = 0;
+  uint64_t request_id = 0;
+  uint32_t token = 0;
+  assert(scheduler);
+  assert(oc_batch_scheduler_admit_sequence(scheduler, &request, &slot));
+
+  /* When: the non-final and final prompt tokens are dispatched. */
+  assert(oc_batch_scheduler_next_lanes(scheduler, &lane, 1, &lane_count));
+  assert(lane_count == 1 && lane.phase == OC_SEQUENCE_PREFILL);
+  assert(lane.token == 91 && lane.position == 0 && !lane.produces_output);
+  assert(!oc_batch_scheduler_record_output(scheduler, &lane, 999, false));
+  assert(oc_batch_scheduler_finish_lane(scheduler, &lane));
+
+  assert(oc_batch_scheduler_next_lanes(scheduler, &lane, 1, &lane_count));
+  assert(lane_count == 1 && lane.phase == OC_SEQUENCE_PREFILL);
+  assert(lane.token == 92 && lane.position == 1 && lane.produces_output);
+  assert(oc_batch_scheduler_record_output(scheduler, &lane, 93, false));
+
+  /* Then: exactly the sampled completion is visible; no prompt token leaks as output. */
+  assert(oc_batch_scheduler_output_next(scheduler, &request_id, &token));
+  assert(request_id == 4001 && token == 93);
+  assert(!oc_batch_scheduler_output_next(scheduler, &request_id, &token));
+
+  assert(oc_batch_scheduler_next_lanes(scheduler, &lane, 1, &lane_count));
+  assert(lane_count == 1 && lane.phase == OC_SEQUENCE_DECODE);
+  assert(lane.token == 93 && lane.position == 2 && lane.produces_output);
+  assert(oc_batch_scheduler_record_output(scheduler, &lane, 94, false));
+  assert(oc_batch_scheduler_output_next(scheduler, &request_id, &token));
+  assert(request_id == 4001 && token == 94);
+  assert(!oc_batch_scheduler_output_next(scheduler, &request_id, &token));
+  oc_batch_scheduler_free(scheduler);
+  printf("ok sequence scheduler final prompt output contract\n");
+}
+
+static void check_sequence_scheduler_eog_is_terminal_not_output(void) {
+  /* Given: a final prompt lane whose sampled token is an end-of-generation marker. */
+  const int gpu_ids[] = {0};
+  const uint32_t prompt[] = {95};
+  const oc_batch_config config = {
+      .capacity = 1, .queue_capacity = 2, .gpu_ids = gpu_ids, .gpu_count = 1};
+  const oc_sequence_request request = {
+      .request_id = 4002, .prompt_tokens = prompt, .prompt_count = 1,
+      .max_tokens = 3, .rng_seed = 18};
+  oc_batch_scheduler *scheduler = oc_batch_scheduler_new(&config);
+  oc_batch_lane lane;
+  size_t slot = 0, lane_count = 0;
+  uint64_t request_id = 0;
+  uint32_t token = 0;
+  assert(scheduler);
+  assert(oc_batch_scheduler_admit_sequence(scheduler, &request, &slot));
+  assert(oc_batch_scheduler_next_lanes(scheduler, &lane, 1, &lane_count));
+  assert(lane_count == 1 && lane.produces_output);
+
+  /* When: the final-prompt forward samples EOG. */
+  assert(oc_batch_scheduler_record_output(scheduler, &lane, 96, true));
+
+  /* Then: it terminates and reclaims without exposing EOG as completion text. */
+  assert(!oc_batch_scheduler_output_next(scheduler, &request_id, &token));
+  assert(oc_batch_scheduler_reclaim(scheduler, slot));
+  oc_batch_scheduler_free(scheduler);
+  printf("ok sequence scheduler EOG terminal exclusion\n");
+}
+
+static void check_sequence_scheduler_mixed_output_lanes(void) {
+  /* Given: one sequence decoding while another dispatches its final prompt token. */
+  const int gpu_ids[] = {0};
+  const uint32_t one_token_prompt[] = {101};
+  const uint32_t two_token_prompt[] = {201, 202};
+  const oc_batch_config config = {
+      .capacity = 2, .queue_capacity = 3, .gpu_ids = gpu_ids, .gpu_count = 1};
+  const oc_sequence_request decode_request = {
+      .request_id = 4101, .prompt_tokens = one_token_prompt, .prompt_count = 1,
+      .max_tokens = 3, .rng_seed = 19};
+  const oc_sequence_request prefill_request = {
+      .request_id = 4102, .prompt_tokens = two_token_prompt, .prompt_count = 2,
+      .max_tokens = 3, .rng_seed = 23};
+  oc_batch_scheduler *scheduler = oc_batch_scheduler_new(&config);
+  oc_batch_lane lanes[2];
+  size_t decode_slot = 0, prefill_slot = 0, lane_count = 0;
+  assert(scheduler);
+  assert(oc_batch_scheduler_admit_sequence(scheduler, &decode_request, &decode_slot));
+  assert(oc_batch_scheduler_admit_sequence(scheduler, &prefill_request, &prefill_slot));
+
+  /* When: the first round samples request 4101 and forwards request 4102's first prompt token. */
+  assert(oc_batch_scheduler_next_lanes(scheduler, lanes, 2, &lane_count));
+  assert(lane_count == 2);
+  assert(lanes[0].slot == decode_slot && lanes[0].phase == OC_SEQUENCE_PREFILL &&
+         lanes[0].produces_output);
+  assert(lanes[1].slot == prefill_slot && lanes[1].phase == OC_SEQUENCE_PREFILL &&
+         !lanes[1].produces_output);
+  assert(oc_batch_scheduler_record_output(scheduler, &lanes[0], 102, false));
+  assert(oc_batch_scheduler_finish_lane(scheduler, &lanes[1]));
+
+  assert(oc_batch_scheduler_next_lanes(scheduler, lanes, 2, &lane_count));
+
+  /* Then: decode and final-prefill lanes are both response-producing, but distinguishable. */
+  assert(lane_count == 2);
+  assert(lanes[0].slot == decode_slot && lanes[0].phase == OC_SEQUENCE_DECODE &&
+         lanes[0].token == 102 && lanes[0].produces_output);
+  assert(lanes[1].slot == prefill_slot && lanes[1].phase == OC_SEQUENCE_PREFILL &&
+         lanes[1].token == 202 && lanes[1].produces_output);
+  oc_batch_scheduler_free(scheduler);
+  printf("ok sequence scheduler mixed response-producing lanes\n");
+}
+
+static void check_sequence_scheduler_cancel_final_prompt_slot_reuse(void) {
+  /* Given: a final-prompt lane whose model result has not returned yet. */
+  const int gpu_ids[] = {0};
+  const uint32_t prompt[] = {301};
+  const oc_batch_config config = {
+      .capacity = 1, .queue_capacity = 2, .gpu_ids = gpu_ids, .gpu_count = 1};
+  const oc_sequence_request request = {
+      .request_id = 4201, .prompt_tokens = prompt, .prompt_count = 1,
+      .max_tokens = 3, .rng_seed = 29};
+  const oc_sequence_request replacement = {
+      .request_id = 4202, .prompt_tokens = prompt, .prompt_count = 1,
+      .max_tokens = 3, .rng_seed = 31};
+  oc_batch_scheduler *scheduler = oc_batch_scheduler_new(&config);
+  oc_batch_lane lane;
+  size_t slot = 0, replacement_slot = 0, lane_count = 0;
+  uint64_t request_id = 0;
+  uint32_t token = 0;
+  assert(scheduler);
+  assert(oc_batch_scheduler_admit_sequence(scheduler, &request, &slot));
+  assert(oc_batch_scheduler_next_lanes(scheduler, &lane, 1, &lane_count));
+  assert(lane_count == 1 && lane.phase == OC_SEQUENCE_PREFILL && lane.produces_output);
+
+  /* When: cancellation races the returned final-prompt result and the slot is reused. */
+  assert(oc_batch_scheduler_cancel(scheduler, slot));
+  assert(oc_batch_scheduler_reclaim(scheduler, slot));
+  assert(oc_batch_scheduler_admit_sequence(scheduler, &replacement, &replacement_slot));
+
+  /* Then: the stale response cannot leak into the replacement request. */
+  assert(replacement_slot == slot);
+  assert(!oc_batch_scheduler_record_output(scheduler, &lane, 302, false));
+  assert(!oc_batch_scheduler_output_next(scheduler, &request_id, &token));
+  oc_batch_scheduler_free(scheduler);
+  printf("ok sequence scheduler cancel final prompt slot reuse\n");
+}
+
+static void check_sequence_scheduler_cancel_and_slot_reuse(void) {
+  /* Given: a sequence with a buffered generated token in a single-slot scheduler. */
+  const int gpu_ids[] = {0};
+  const uint32_t prompt[] = {71};
+  const oc_batch_config config = {
+      .capacity = 1, .queue_capacity = 2, .gpu_ids = gpu_ids, .gpu_count = 1};
+  const oc_sequence_request request = {
+      .request_id = 2001, .prompt_tokens = prompt, .prompt_count = 1,
+      .max_tokens = 4, .rng_seed = 11};
+  const oc_sequence_request replacement = {
+      .request_id = 2002, .prompt_tokens = prompt, .prompt_count = 1,
+      .max_tokens = 4, .rng_seed = 12};
+  oc_batch_scheduler *scheduler = oc_batch_scheduler_new(&config);
+  oc_batch_lane lane;
+  size_t slot = 0, replacement_slot = 0, lane_count = 0;
+  uint64_t request_id = 0;
+  uint32_t token = 0;
+  assert(scheduler);
+  assert(oc_batch_scheduler_admit_sequence(scheduler, &request, &slot));
+  assert(oc_batch_scheduler_next_lanes(scheduler, &lane, 1, &lane_count));
+  assert(lane_count == 1);
+  assert(oc_batch_scheduler_record_output(scheduler, &lane, 72, false));
+
+  /* When: the request is cancelled before the client drains its output. */
+  assert(oc_batch_scheduler_cancel(scheduler, slot));
+  assert(!oc_batch_scheduler_output_next(scheduler, &request_id, &token));
+  assert(oc_batch_scheduler_reclaim(scheduler, slot));
+  assert(oc_batch_scheduler_admit_sequence(scheduler, &replacement, &replacement_slot));
+
+  /* Then: cancellation emits nothing later and permits safe slot reuse. */
+  assert(replacement_slot == slot);
+  assert(!oc_batch_scheduler_record_output(scheduler, &lane, 73, false));
+  oc_batch_scheduler_free(scheduler);
+  printf("ok sequence scheduler cancel and slot reuse\n");
+}
+
+static void check_sequence_scheduler_rng_isolation(void) {
+  /* Given: matching sequence seeds in two schedulers with different lane interleavings. */
+  const int gpu_ids[] = {0};
+  const uint32_t prompt[] = {81};
+  const oc_batch_config config = {
+      .capacity = 2, .queue_capacity = 2, .gpu_ids = gpu_ids, .gpu_count = 1};
+  const oc_sequence_request request = {
+      .request_id = 3001, .prompt_tokens = prompt, .prompt_count = 1,
+      .max_tokens = 4, .rng_seed = 0x12345678u};
+  const oc_sequence_request interleaved = {
+      .request_id = 3002, .prompt_tokens = prompt, .prompt_count = 1,
+      .max_tokens = 4, .rng_seed = 0x87654321u};
+  oc_batch_scheduler *serial = oc_batch_scheduler_new(&config);
+  oc_batch_scheduler *mixed = oc_batch_scheduler_new(&config);
+  oc_batch_lane lanes[2];
+  size_t serial_slot = 0, mixed_slot = 0, other_slot = 0, lane_count = 0;
+  uint64_t serial_values[3], mixed_values[3];
+  assert(serial && mixed);
+  assert(oc_batch_scheduler_admit_sequence(serial, &request, &serial_slot));
+  assert(oc_batch_scheduler_admit_sequence(mixed, &request, &mixed_slot));
+  assert(oc_batch_scheduler_admit_sequence(mixed, &interleaved, &other_slot));
+
+  /* When: random draws for the matching request are separated by other lane work. */
+  for (size_t i = 0; i < 3; ++i) {
+    assert(oc_batch_scheduler_next_random(serial, serial_slot, &serial_values[i]));
+    assert(oc_batch_scheduler_next_lanes(mixed, lanes, 2, &lane_count));
+    for (size_t lane_index = 0; lane_index < lane_count; ++lane_index)
+      assert(oc_batch_scheduler_finish_lane(mixed, &lanes[lane_index]));
+    assert(oc_batch_scheduler_next_random(mixed, mixed_slot, &mixed_values[i]));
+    uint64_t ignored = 0;
+    assert(oc_batch_scheduler_next_random(mixed, other_slot, &ignored));
+  }
+
+  /* Then: each request's deterministic stream is unaffected by the interleaving. */
+  assert(memcmp(serial_values, mixed_values, sizeof(serial_values)) == 0);
+  oc_batch_scheduler_free(mixed);
+  oc_batch_scheduler_free(serial);
+  printf("ok sequence scheduler RNG isolation\n");
+}
+
+static char *read_source_file(const char *path) {
+  FILE *file = fopen(path, "rb");
+  if (!file) return NULL;
+  if (fseek(file, 0, SEEK_END) != 0) {
+    fclose(file);
+    return NULL;
+  }
+  long length = ftell(file);
+  if (length < 0 || fseek(file, 0, SEEK_SET) != 0) {
+    fclose(file);
+    return NULL;
+  }
+  char *text = malloc((size_t)length + 1);
+  if (!text || fread(text, 1, (size_t)length, file) != (size_t)length) {
+    free(text);
+    fclose(file);
+    return NULL;
+  }
+  text[length] = '\0';
+  fclose(file);
+  return text;
+}
+
+static void check_batch_startup_releases_scalar_cuda_before_reconfigure(void) {
+  char *server = read_source_file("server.c");
+  char *cli = read_source_file("main.c");
+  if (!server || !cli) {
+    fprintf(stderr, "FAIL batch startup sequencing: cannot read server.c/main.c\n");
+    exit(1);
+  }
+
+  const char *start = strstr(server, "static batch_runtime *batch_runtime_start");
+  const char *validation = start ? strstr(start, "model->cfg.kv_int8") : NULL;
+  const char *release = validation ? strstr(validation, "oc_cuda_release(model);") : NULL;
+  const char *configure = validation ? strstr(validation, "oc_cuda_configure_batch(model") : NULL;
+  const char *worker = configure ? strstr(configure, "pthread_create(&runtime->worker") : NULL;
+  const char *preload_reject = strstr(cli, "if (serve && max_seqs > 1 && kv_int8)");
+  const char *model_load = strstr(cli, "oc_model_load(model_path, ctx, kv_int8)");
+  if (!validation || !release || !configure || !worker ||
+      !(validation < release && release < configure && configure < worker) ||
+      !preload_reject || !model_load || !(preload_reject < model_load)) {
+    fprintf(stderr,
+            "FAIL batch startup sequencing: require validate -> release -> configure -> "
+            "worker and pre-load kv-int8 rejection\n");
+    free(cli);
+    free(server);
+    exit(1);
+  }
+  free(cli);
+  free(server);
+  printf("ok batch startup releases scalar CUDA before reconfigure\n");
+}
+
 int main(void) {
   size_t cols = 512;
   oc_quant types[] = {OC_F16, OC_BF16, OC_Q4_0, OC_Q4_1, OC_Q5_0, OC_Q5_1,
@@ -355,6 +784,7 @@ int main(void) {
   check_quant(OC_IQ4_NL, 256);
 
   check_iq_reference_dequant();
+  check_gemma4_projection_metadata();
 
   /* GGUF fixture parse */
   oc_gguf *g = oc_gguf_load(
@@ -369,6 +799,17 @@ int main(void) {
   check_lora_gradients();
   check_ce_grad();
   check_kv_int8();
+  check_batch_queue_capacity_and_slot_reclaim();
+  check_single_sequence_scheduler_order();
+  check_worker_configuration_validation();
+  check_sequence_scheduler_mixed_prefill_decode();
+  check_sequence_scheduler_final_prompt_output_contract();
+  check_sequence_scheduler_eog_is_terminal_not_output();
+  check_sequence_scheduler_mixed_output_lanes();
+  check_sequence_scheduler_cancel_final_prompt_slot_reuse();
+  check_sequence_scheduler_cancel_and_slot_reuse();
+  check_sequence_scheduler_rng_isolation();
+  check_batch_startup_releases_scalar_cuda_before_reconfigure();
 
   printf("all checks passed\n");
   return 0;

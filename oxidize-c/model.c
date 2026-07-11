@@ -44,12 +44,11 @@ static float *load_vec_n(const oc_gguf *g, const char *name, size_t *n) {
 /* Quant types kept quantized in RAM (weights dequantized per-row inside the
    GEMV) instead of expanded to F32 at load. The AL family sits after IQ4_NL in
    the enum, so the old `q <= OC_IQ4_NL` expanded AL5 to F32 — 7x the RAM and 7x
-   the decode traffic (a 31B AL5 model ballooned to ~124GB F32 and ran ~4x too
-   slow). Keep AL5 quantized (fused dot_q4_0 kernel: fast + 17GB not 124GB).
-   AL8's kept-quantized dot_q8_0 path currently segfaults, and AL6/AL5_XS have
-   no fused kernel (slow per-row dequant), so leave those three on the F32 load
-   path (correct, just larger/slower) until they get vetted fast kernels. */
-static bool keepq_ok(oc_quant q) { return q <= OC_IQ4_NL || q == OC_AL5; }
+   the decode traffic. AL5/AL8/AL6/AL5_XS all have fused int8 dots now. */
+static bool keepq_ok(oc_quant q) {
+  return q <= OC_IQ4_NL || q == OC_AL5 || q == OC_AL8 || q == OC_AL6 ||
+         q == OC_AL5_XS;
+}
 
 static oc_weight load_weight(const oc_gguf *g, const char *name,
                              const oc_config *c) {
@@ -87,6 +86,14 @@ static oc_weight load_weight(const oc_gguf *g, const char *name,
     oc_dequant_row(ti->quant, g->base + ti->offset, w.f32, count);
   }
   return w;
+}
+
+void oc_gemma4_canonicalize_projection_metadata(oc_weight *w, size_t hidden,
+                                                bool output_projection) {
+  if (!w || !output_projection || w->cols != hidden || w->rows == hidden) return;
+  size_t input_dim = w->rows;
+  w->rows = hidden;
+  w->cols = input_dim;
 }
 
 static bool weight_empty(const oc_weight *w) { return !w->quantized && !w->f32; }
@@ -370,6 +377,10 @@ oc_model *oc_model_load(const char *path, size_t max_ctx, int kv_int8) {
     char nm[160];
     for (size_t l = 0; l < c->layer_count; ++l) {
       oc_layer *L = &m->layers[l];
+      if (!L->is_gdn) {
+        oc_gemma4_canonicalize_projection_metadata(&L->wo, c->hidden_size, true);
+        oc_gemma4_canonicalize_projection_metadata(&L->down, c->hidden_size, true);
+      }
       bool is_swa = (swa && swa->kind == 2 && l < swa->count)
                         ? swa->nums[l] != 0
                         : ((l + 1) % 6 != 0);
@@ -570,8 +581,52 @@ static void free_block(oc_layer *L) {
   free(L->state); free(L->conv_ring);
 }
 
+static void replicate_plane(const uint8_t *primary, size_t nbytes, int node) {
+  if (!primary || nbytes == 0) return;
+  void *rep = oc_numa_alloc_bound(nbytes, node);
+  if (!rep) return;
+  memcpy(rep, primary, nbytes);
+  oc_numa_register_replica(primary, nbytes, rep);
+}
+
+void oc_model_numa_replicate(oc_model *m) {
+  const int node = 1;
+  size_t copied = 0;
+  size_t add = 0;
+#define REP(W) do { size_t b = weight_plane_bytes(&(W)); if ((W).quantized && (W).data) { replicate_plane((W).data, b, node); copied += b; } } while (0)
+  REP(m->tok_emb);
+  if (!m->tied) REP(m->lm_head);
+  for (size_t l = 0; l < m->cfg.layer_count; ++l) {
+    oc_layer *L = &m->layers[l];
+    if (L->is_gdn) {
+      REP(L->qkv); REP(L->gdn_gate); REP(L->ssm_alpha); REP(L->ssm_beta); REP(L->ssm_out);
+    } else {
+      REP(L->wq); REP(L->wk); REP(L->wv); REP(L->wo);
+    }
+    if (L->is_moe) {
+      REP(L->router); REP(L->e_gate); REP(L->e_up); REP(L->e_down);
+      REP(L->sh_gate); REP(L->sh_up); REP(L->sh_down);
+    } else {
+      REP(L->gate); REP(L->up); REP(L->down);
+    }
+  }
+  if (m->mtp) {
+    oc_layer *L = &m->mtp->layer;
+    REP(L->wq); REP(L->wk); REP(L->wv); REP(L->wo);
+    REP(m->mtp->eh_proj);
+  }
+#undef REP
+  add = copied;
+  (void)add;
+  fprintf(stderr, "oxidize-c: NUMA replicate copied %.2f GB to node %d\n",
+          copied / (1024.0 * 1024.0 * 1024.0), node);
+}
+
 void oc_model_free(oc_model *m) {
   if (!m) return;
+#ifdef OC_CUDA
+  oc_cuda_release(m);
+#endif
   for (size_t l = 0; l < m->cfg.layer_count; ++l) free_block(&m->layers[l]);
   free(m->layers);
   if (m->mtp) {
@@ -648,7 +703,8 @@ static void embed_token(const oc_model *m, uint32_t tok, float *x) {
   size_t idx = tok < m->cfg.vocab_size ? tok : m->cfg.vocab_size - 1;
   if (m->tok_emb.quantized) {
     size_t rb = oc_row_bytes(m->tok_emb.quant, h);
-    oc_dequant_row(m->tok_emb.quant, m->tok_emb.data + idx * rb, x, h);
+    const uint8_t *emb = oc_numa_local_data(m->tok_emb.data);
+    oc_dequant_row(m->tok_emb.quant, emb + idx * rb, x, h);
   } else {
     memcpy(x, m->tok_emb.f32 + idx * h, h * sizeof(float));
   }
@@ -794,8 +850,11 @@ static const oc_q8blk *quant_acts(scratch_t *s, const float *src, size_t cols,
 
 static bool w_needs_q8(const oc_weight *w) {
   return w->quantized && (w->quant == OC_Q4_0 || w->quant == OC_AL5 ||
-                          w->quant == OC_Q8_0 || w->quant == OC_Q4_K ||
-                          w->quant == OC_Q6_K);
+                          w->quant == OC_Q8_0 || w->quant == OC_AL8 ||
+                          w->quant == OC_Q5_0 || w->quant == OC_AL6 ||
+                          w->quant == OC_AL5_XS || w->quant == OC_Q4_K ||
+                          w->quant == OC_Q5_K || w->quant == OC_Q6_K ||
+                          w->quant == OC_IQ4_XS || w->quant == OC_IQ4_NL);
 }
 
 /* ---- gated-DeltaNet layer (batch: projections batched, recurrence
@@ -918,7 +977,7 @@ static void attn_layer_token(const oc_model *m, const oc_layer *L,
   size_t hd = L->hd ? L->hd : c->head_dim;
   size_t n_kv = L->n_kv ? L->n_kv : c->kv_heads;
   size_t qg_len = L->wq.rows;
-  size_t q_len = L->wo.rows;
+  size_t q_len = L->wo.cols;
   size_t kvn = n_kv * hd;
   float *qg = s->q, *k = s->k, *v = s->v;
 

@@ -19,13 +19,67 @@
 #include <immintrin.h>
 #endif
 
+#if defined(__AVX512F__) && defined(__AVX512BW__)
+#define OC_AVX512 1
+#endif
+#if defined(__AVX512VNNI__)
+#define OC_AVX512VNNI 1
+#endif
+#if defined(__AVX512VNNI__) && defined(__AVX512VL__)
+#define OC_AVX512VNNI_VL 1
+#endif
+
+#ifdef OC_AVX2
+static inline float hsum8(__m256 v) {
+  __m128 s = _mm_add_ps(_mm256_castps256_ps128(v), _mm256_extractf128_ps(v, 1));
+  s = _mm_hadd_ps(s, s);
+  s = _mm_hadd_ps(s, s);
+  return _mm_cvtss_f32(s);
+}
+static inline __m256i i8dot(__m256i x, __m256i y) {
+  __m256i ax = _mm256_sign_epi8(x, x);
+  __m256i sy = _mm256_sign_epi8(y, x);
+  __m256i p16 = _mm256_maddubs_epi16(ax, sy);
+  return _mm256_madd_epi16(p16, _mm256_set1_epi16(1));
+}
+static inline __m256i u8dot(__m256i x, __m256i y) {
+#ifdef OC_AVX512VNNI_VL
+  return _mm256_dpbusd_epi32(_mm256_setzero_si256(), x, y);
+#else
+  __m256i p16 = _mm256_maddubs_epi16(x, y);
+  return _mm256_madd_epi16(p16, _mm256_set1_epi16(1));
+#endif
+}
+#endif
+
 /* ---- basic vector ops ---- */
 
 void oc_rms_norm(float *out, const float *x, const float *w, size_t n, float eps) {
+#ifdef OC_AVX2
+  __m256 a0 = _mm256_setzero_ps(), a1 = _mm256_setzero_ps();
+  size_t i = 0;
+  for (; i + 16 <= n; i += 16) {
+    __m256 v0 = _mm256_loadu_ps(x + i), v1 = _mm256_loadu_ps(x + i + 8);
+    a0 = _mm256_fmadd_ps(v0, v0, a0);
+    a1 = _mm256_fmadd_ps(v1, v1, a1);
+  }
+  float ss = hsum8(_mm256_add_ps(a0, a1));
+  for (; i < n; ++i) ss += x[i] * x[i];
+  float inv = 1.0f / sqrtf(ss / (float)n + eps);
+  __m256 vinv = _mm256_set1_ps(inv);
+  i = 0;
+  for (; i + 8 <= n; i += 8) {
+    __m256 xv = _mm256_loadu_ps(x + i);
+    __m256 wv = _mm256_loadu_ps(w + i);
+    _mm256_storeu_ps(out + i, _mm256_mul_ps(_mm256_mul_ps(xv, vinv), wv));
+  }
+  for (; i < n; ++i) out[i] = x[i] * inv * w[i];
+#else
   float ss = 0.0f;
   for (size_t i = 0; i < n; ++i) ss += x[i] * x[i];
   float inv = 1.0f / sqrtf(ss / (float)n + eps);
   for (size_t i = 0; i < n; ++i) out[i] = x[i] * inv * w[i];
+#endif
 }
 
 /* YaRN (ggml rope_yarn): NTK-by-parts frequency interpolation + magnitude
@@ -83,7 +137,23 @@ void oc_rope(float *vec, size_t head_dim, size_t n_heads, size_t pos,
 }
 
 void oc_swiglu(float *gate, const float *up, size_t n) {
-  for (size_t i = 0; i < n; ++i) {
+  size_t i = 0;
+#ifdef OC_AVX2
+  for (; i + 8 <= n; i += 8) {
+    __m256 g = _mm256_loadu_ps(gate + i);
+    __m256 u = _mm256_loadu_ps(up + i);
+    __m256 neg = _mm256_sub_ps(_mm256_setzero_ps(), g);
+    /* silu(g) ≈ g / (1 + exp(-g)); use scalar expf via store for accuracy */
+    float gt[8], ut[8], ot[8];
+    _mm256_storeu_ps(gt, g);
+    _mm256_storeu_ps(ut, u);
+    (void)neg;
+    for (int k = 0; k < 8; ++k)
+      ot[k] = gt[k] / (1.0f + expf(-gt[k])) * ut[k];
+    _mm256_storeu_ps(gate + i, _mm256_loadu_ps(ot));
+  }
+#endif
+  for (; i < n; ++i) {
     float g = gate[i];
     gate[i] = g / (1.0f + expf(-g)) * up[i];
   }
@@ -111,8 +181,6 @@ void oc_softmax(float *x, size_t n) {
   for (size_t i = 0; i < n; ++i) x[i] *= inv;
 }
 
-/* fast inline f16 scale load for the per-block hot path (one per 18-34 bytes
- * of weights; the cross-TU oc_f16_to_f32 call cost ~15% of decode) */
 #ifdef OC_AVX2
 static inline float f16s(const uint8_t *p) {
   uint16_t bits;
@@ -121,27 +189,6 @@ static inline float f16s(const uint8_t *p) {
 }
 #else
 #define f16s oc_f16_to_f32
-#endif
-
-#ifdef OC_AVX2
-static inline float hsum8(__m256 v) {
-  __m128 s = _mm_add_ps(_mm256_castps256_ps128(v), _mm256_extractf128_ps(v, 1));
-  s = _mm_hadd_ps(s, s);
-  s = _mm_hadd_ps(s, s);
-  return _mm_cvtss_f32(s);
-}
-/* sum of 32 signed-int8 pairwise products as 8 x i32 */
-static inline __m256i i8dot(__m256i x, __m256i y) {
-  __m256i ax = _mm256_sign_epi8(x, x);          /* |x| */
-  __m256i sy = _mm256_sign_epi8(y, x);          /* y * sign(x) */
-  __m256i p16 = _mm256_maddubs_epi16(ax, sy);   /* u8*i8 -> i16 pairs */
-  return _mm256_madd_epi16(p16, _mm256_set1_epi16(1));
-}
-/* unsigned x (0..15 nibbles) times signed y */
-static inline __m256i u8dot(__m256i x, __m256i y) {
-  __m256i p16 = _mm256_maddubs_epi16(x, y);
-  return _mm256_madd_epi16(p16, _mm256_set1_epi16(1));
-}
 #endif
 
 float oc_dot_f32(const float *a, const float *b, size_t n) {
@@ -180,11 +227,23 @@ float oc_dot_f32(const float *a, const float *b, size_t n) {
 void oc_quantize_act(const float *x, oc_q8blk *out, size_t n) {
   for (size_t b = 0; b < n / QK; ++b) {
     const float *xb = x + b * QK;
+#ifdef OC_AVX2
+    __m256 a0 = _mm256_and_ps(_mm256_loadu_ps(xb), _mm256_castsi256_ps(_mm256_set1_epi32(0x7fffffff)));
+    __m256 a1 = _mm256_and_ps(_mm256_loadu_ps(xb + 8), _mm256_castsi256_ps(_mm256_set1_epi32(0x7fffffff)));
+    __m256 a2 = _mm256_and_ps(_mm256_loadu_ps(xb + 16), _mm256_castsi256_ps(_mm256_set1_epi32(0x7fffffff)));
+    __m256 a3 = _mm256_and_ps(_mm256_loadu_ps(xb + 24), _mm256_castsi256_ps(_mm256_set1_epi32(0x7fffffff)));
+    __m256 m = _mm256_max_ps(_mm256_max_ps(a0, a1), _mm256_max_ps(a2, a3));
+    __m128 m128 = _mm_max_ps(_mm256_castps256_ps128(m), _mm256_extractf128_ps(m, 1));
+    m128 = _mm_max_ps(m128, _mm_movehl_ps(m128, m128));
+    m128 = _mm_max_ss(m128, _mm_shuffle_ps(m128, m128, 1));
+    float amax = _mm_cvtss_f32(m128);
+#else
     float amax = 0.0f;
     for (size_t i = 0; i < QK; ++i) {
       float a = fabsf(xb[i]);
       if (a > amax) amax = a;
     }
+#endif
     float d = amax / 127.0f;
     float id = d != 0.0f ? 1.0f / d : 0.0f;
     int sum = 0;
@@ -303,6 +362,71 @@ static float dot_q8_0(const uint8_t *row, const oc_q8blk *xq, size_t cols) {
 #endif
 }
 
+/* Q5_0 / AL6: 22-byte blocks; value = ((nibble|(qh_bit<<4))-16)*d */
+static float dot_q5_0(const uint8_t *row, const oc_q8blk *xq, size_t cols) {
+  size_t nb = cols / QK;
+#ifdef OC_AVX2
+  __m256 acc = _mm256_setzero_ps();
+  for (size_t b = 0; b < nb; ++b) {
+    const uint8_t *blk = row + b * 22;
+    float d = f16s(blk) * xq[b].d;
+    uint32_t qh;
+    memcpy(&qh, blk + 2, 4);
+    const uint8_t *qs = blk + 6;
+    int8_t wq[32];
+    for (int j = 0; j < 16; ++j) {
+      wq[j] = (int8_t)(((qs[j] & 0xF) | (((qh >> j) & 1) << 4)) - 16);
+      wq[j + 16] = (int8_t)(((qs[j] >> 4) | (((qh >> (j + 16)) & 1) << 4)) - 16);
+    }
+    __m256i w = _mm256_loadu_si256((const __m256i *)wq);
+    __m256i y = _mm256_loadu_si256((const __m256i *)xq[b].q);
+    acc = _mm256_fmadd_ps(_mm256_cvtepi32_ps(i8dot(w, y)), _mm256_set1_ps(d), acc);
+  }
+  return hsum8(acc);
+#else
+  float sum = 0.0f;
+  for (size_t b = 0; b < nb; ++b) {
+    const uint8_t *blk = row + b * 22;
+    float d = f16s(blk) * xq[b].d;
+    uint32_t qh;
+    memcpy(&qh, blk + 2, 4);
+    const uint8_t *qs = blk + 6;
+    int isum = 0;
+    for (int j = 0; j < 16; ++j) {
+      int q0 = (int)((qs[j] & 0xF) | (((qh >> j) & 1) << 4)) - 16;
+      int q1 = (int)((qs[j] >> 4) | (((qh >> (j + 16)) & 1) << 4)) - 16;
+      isum += q0 * xq[b].q[j] + q1 * xq[b].q[j + 16];
+    }
+    sum += d * (float)isum;
+  }
+  return sum;
+#endif
+}
+
+/* AL5_XS: 14-byte blocks; 32×3-bit packed values: (lvl-4)*d */
+static float dot_al5_xs(const uint8_t *row, const oc_q8blk *xq, size_t cols) {
+  size_t nb = cols / QK;
+  float sum = 0.0f;
+  for (size_t b = 0; b < nb; ++b) {
+    const uint8_t *blk = row + b * 14;
+    float d = f16s(blk) * xq[b].d;
+    int isum = 0;
+    uint32_t bitpos = 0;
+    for (int i = 0; i < QK; ++i) {
+      uint8_t lvl = 0;
+      for (int bit = 0; bit < 3; ++bit) {
+        size_t byte_idx = (size_t)(bitpos / 8);
+        size_t bit_idx = (size_t)(bitpos % 8);
+        if ((blk[2 + byte_idx] >> bit_idx) & 1) lvl |= (uint8_t)(1u << bit);
+        ++bitpos;
+      }
+      isum += ((int)lvl - 4) * xq[b].q[i];
+    }
+    sum += d * (float)isum;
+  }
+  return sum;
+}
+
 static void scale_min_k4(size_t j, const uint8_t *s, uint8_t *sc, uint8_t *m) {
   if (j < 4) {
     *sc = s[j] & 63;
@@ -363,6 +487,40 @@ static float dot_q4_k(const uint8_t *row, const oc_q8blk *xq, size_t cols) {
   return sum;
 }
 
+/* Q5_K: 176B superblocks; value = d*sc*((nibble|qh_bit<<4)) - min*m */
+static float dot_q5_k(const uint8_t *row, const oc_q8blk *xq, size_t cols) {
+  size_t nsb = cols / QK_K;
+  float sum = 0.0f;
+  for (size_t sb = 0; sb < nsb; ++sb) {
+    const uint8_t *blk = row + sb * 176;
+    float d = f16s(blk), min = f16s(blk + 2);
+    const uint8_t *scales = blk + 4, *qh = blk + 16, *qs = blk + 48;
+    const oc_q8blk *x8 = xq + sb * (QK_K / QK);
+    size_t is = 0;
+    uint8_t u1 = 1, u2 = 2;
+    for (int g = 0; g < 4; ++g) {
+      uint8_t sc1, m1, sc2, m2;
+      scale_min_k4(is, scales, &sc1, &m1);
+      scale_min_k4(is + 1, scales, &sc2, &m2);
+      const oc_q8blk *b1 = &x8[g * 2], *b2 = &x8[g * 2 + 1];
+      int i1 = 0, i2 = 0;
+      for (int l = 0; l < 32; ++l) {
+        int q1 = (qs[l] & 0xF) + ((qh[l] & u1) ? 16 : 0);
+        int q2 = (qs[l] >> 4) + ((qh[l] & u2) ? 16 : 0);
+        i1 += q1 * b1->q[l];
+        i2 += q2 * b2->q[l];
+      }
+      sum += d * (float)sc1 * b1->d * (float)i1 - min * (float)m1 * b1->s;
+      sum += d * (float)sc2 * b2->d * (float)i2 - min * (float)m2 * b2->s;
+      is += 2;
+      u1 <<= 2;
+      u2 <<= 2;
+      qs += 32;
+    }
+  }
+  return sum;
+}
+
 /* Q6_K: 210-byte superblocks; value = d*sc[g16]* (6-bit q - 32) where the -32
  * folds into xq.s like a min. Group granularity is 16, so pair two 16-groups
  * per 32-value x block. */
@@ -375,13 +533,55 @@ static float dot_q6_k(const uint8_t *row, const oc_q8blk *xq, size_t cols) {
     const uint8_t *ql = blk, *qh = blk + 128;
     const int8_t *sc = (const int8_t *)(blk + 192);
     const oc_q8blk *x8 = xq + sb * (QK_K / QK);
-    /* scalar int path (Q6_K rows are rare in decode-heavy tensors; keep simple) */
+#ifdef OC_AVX2
+    __m256 acc = _mm256_setzero_ps();
+    const __m256i nibble = _mm256_set1_epi8(0x0F);
+    const __m256i high2 = _mm256_set1_epi8(0x03);
+    const __m256i offset = _mm256_set1_epi8(32);
     for (int g = 0; g < 2; ++g) {
       size_t qlo = (size_t)g * 64, qho = (size_t)g * 32, sco = (size_t)g * 8;
       for (int half = 0; half < 4; ++half) {
-        /* halves map to the 4 interleaved 32-value output ranges */
         const oc_q8blk *xb = &x8[g * 4 + half];
-        int isum0 = 0, isum1 = 0; /* two 16-value scale groups per 32 values */
+        const __m256i low = _mm256_loadu_si256((const __m256i *)(ql + qlo +
+            ((half & 1) ? 32 : 0)));
+        const __m256i high = _mm256_loadu_si256((const __m256i *)(qh + qho));
+        __m256i q;
+        switch (half) {
+          case 0:
+            q = _mm256_or_si256(_mm256_and_si256(low, nibble),
+                                _mm256_slli_epi16(_mm256_and_si256(high, high2), 4));
+            break;
+          case 1:
+            q = _mm256_or_si256(_mm256_and_si256(low, nibble),
+                                _mm256_slli_epi16(_mm256_and_si256(_mm256_srli_epi16(high, 2), high2), 4));
+            break;
+          case 2:
+            q = _mm256_or_si256(_mm256_and_si256(_mm256_srli_epi16(low, 4), nibble),
+                                _mm256_slli_epi16(_mm256_and_si256(_mm256_srli_epi16(high, 4), high2), 4));
+            break;
+          default:
+            q = _mm256_or_si256(_mm256_and_si256(_mm256_srli_epi16(low, 4), nibble),
+                                _mm256_slli_epi16(_mm256_and_si256(_mm256_srli_epi16(high, 6), high2), 4));
+            break;
+        }
+        q = _mm256_sub_epi8(q, offset);
+        const int s0 = sc[sco + (size_t)half * 2];
+        const int s1 = sc[sco + (size_t)half * 2 + 1];
+        const __m256 scales = _mm256_setr_ps((float)s0, (float)s0, (float)s0,
+                                               (float)s0, (float)s1, (float)s1,
+                                               (float)s1, (float)s1);
+        const __m256 factor = _mm256_mul_ps(_mm256_set1_ps(d * xb->d), scales);
+        const __m256i x = _mm256_loadu_si256((const __m256i *)xb->q);
+        acc = _mm256_fmadd_ps(_mm256_cvtepi32_ps(i8dot(q, x)), factor, acc);
+      }
+    }
+    sum += hsum8(acc);
+#else
+    for (int g = 0; g < 2; ++g) {
+      size_t qlo = (size_t)g * 64, qho = (size_t)g * 32, sco = (size_t)g * 8;
+      for (int half = 0; half < 4; ++half) {
+        const oc_q8blk *xb = &x8[g * 4 + half];
+        int isum0 = 0, isum1 = 0;
         for (int l = 0; l < 32; ++l) {
           int q;
           switch (half) {
@@ -397,6 +597,7 @@ static float dot_q6_k(const uint8_t *row, const oc_q8blk *xq, size_t cols) {
         sum += d * xb->d * ((float)s0 * (float)isum0 + (float)s1 * (float)isum1);
       }
     }
+#endif
   }
   return sum;
 }
@@ -568,14 +769,18 @@ static float row_dot(const oc_weight *w, size_t r, size_t cols, const float *x,
                      const oc_q8blk *xq, float *scratch) {
   if (!w->quantized) return oc_dot_f32(w->f32 + r * cols, x, cols);
   size_t rb = oc_row_bytes(w->quant, cols);
-  const uint8_t *row = w->data + r * rb;
+  const uint8_t *base = oc_numa_local_data(w->data);
+  const uint8_t *row = base + r * rb;
   switch (w->quant) {
     case OC_F32: return oc_dot_f32((const float *)row, x, cols);
     case OC_F16: return dot_f16(row, x, cols);
     case OC_BF16: return dot_bf16(row, x, cols);
     case OC_Q4_0: case OC_AL5: return dot_q4_0(row, xq, cols);
     case OC_Q8_0: case OC_AL8: return dot_q8_0(row, xq, cols);
+    case OC_Q5_0: case OC_AL6: return dot_q5_0(row, xq, cols);
+    case OC_AL5_XS: return dot_al5_xs(row, xq, cols);
     case OC_Q4_K: return dot_q4_k(row, xq, cols);
+    case OC_Q5_K: return dot_q5_k(row, xq, cols);
     case OC_Q6_K: return dot_q6_k(row, xq, cols);
     case OC_IQ4_XS: return dot_iq4_xs(row, xq, cols);
     case OC_IQ4_NL: return dot_iq4_nl(row, xq, cols);
@@ -591,7 +796,9 @@ static float row_dot(const oc_weight *w, size_t r, size_t cols, const float *x,
 static bool needs_q8(const oc_weight *w) {
   return w->quantized && (w->quant == OC_Q4_0 || w->quant == OC_AL5 ||
                           w->quant == OC_Q8_0 || w->quant == OC_AL8 ||
-                          w->quant == OC_Q4_K || w->quant == OC_Q6_K ||
+                          w->quant == OC_Q5_0 || w->quant == OC_AL6 ||
+                          w->quant == OC_AL5_XS || w->quant == OC_Q4_K ||
+                          w->quant == OC_Q5_K || w->quant == OC_Q6_K ||
                           w->quant == OC_IQ4_XS || w->quant == OC_IQ4_NL);
 }
 
@@ -672,11 +879,42 @@ void oc_quantize_kv(const float *x, int8_t *q, float *scale, size_t n_kv,
   }
 }
 
-/* int8 KV attention. Mirrors oc_attention but dequantizes each cached K/V row
- * (int8, one scale per head) on read. Query stays f32.
- * ponytail: K row expanded to a stack f32 buffer to reuse the SIMD dot; the
- * cache traffic (the long-context bottleneck) is int8, which is the win.
- * Upgrade path: fused int8xf32 SIMD dot to drop the expand copy. */
+/* int8 KV attention with fused int8×f32 Q·K / V accumulate (no expand copy). */
+static float dot_f32_i8(const float *a, const int8_t *b, size_t n) {
+#ifdef OC_AVX2
+  __m256 a0 = _mm256_setzero_ps(), a1 = _mm256_setzero_ps();
+  size_t i = 0;
+  for (; i + 16 <= n; i += 16) {
+    __m128i b16 = _mm_loadu_si128((const __m128i *)(b + i));
+    __m256i b0 = _mm256_cvtepi8_epi32(b16);
+    __m256i b1 = _mm256_cvtepi8_epi32(_mm_srli_si128(b16, 8));
+    a0 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i), _mm256_cvtepi32_ps(b0), a0);
+    a1 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i + 8), _mm256_cvtepi32_ps(b1), a1);
+  }
+  float sum = hsum8(_mm256_add_ps(a0, a1));
+  for (; i < n; ++i) sum += a[i] * (float)b[i];
+  return sum;
+#else
+  float sum = 0.0f;
+  for (size_t i = 0; i < n; ++i) sum += a[i] * (float)b[i];
+  return sum;
+#endif
+}
+
+static void axpy_i8(float *y, const int8_t *x, float a, size_t n) {
+  size_t i = 0;
+#ifdef OC_AVX2
+  __m256 va = _mm256_set1_ps(a);
+  for (; i + 8 <= n; i += 8) {
+    __m128i x8 = _mm_loadl_epi64((const __m128i *)(x + i));
+    __m256i xi = _mm256_cvtepi8_epi32(x8);
+    __m256 yv = _mm256_loadu_ps(y + i);
+    _mm256_storeu_ps(y + i, _mm256_fmadd_ps(va, _mm256_cvtepi32_ps(xi), yv));
+  }
+#endif
+  for (; i < n; ++i) y[i] += a * (float)x[i];
+}
+
 void oc_attention_q8(float *out, const float *q, const int8_t *k8,
                      const float *ks, const int8_t *v8, const float *vs,
                      size_t seq_len, size_t n_heads, size_t kv_heads,
@@ -691,27 +929,38 @@ void oc_attention_q8(float *out, const float *q, const int8_t *k8,
     size_t kv_off = kh * head_dim;
     const float *qh = q + h * head_dim;
     float *oh = out + h * head_dim;
-    float kf[512]; /* head_dim bound; asserted at model load */
     float rmax = -INFINITY, rsum = 0.0f;
     memset(oh, 0, head_dim * sizeof(float));
     for (size_t t = 0; t < seq_len; ++t) {
       const int8_t *kr = k8 + t * kv_len + kv_off;
-      for (size_t d = 0; d < head_dim; ++d) kf[d] = (float)kr[d];
       float sk = ks[t * kv_heads + kh];
-      float score = oc_dot_f32(qh, kf, head_dim) * sk * scale;
+      float score = dot_f32_i8(qh, kr, head_dim) * sk * scale;
       float nmax = rmax > score ? rmax : score;
       float ef = expf(rmax - nmax), es = expf(score - nmax);
-      if (ef != 1.0f)
-        for (size_t d = 0; d < head_dim; ++d) oh[d] *= ef;
+      if (ef != 1.0f) {
+        size_t d = 0;
+#ifdef OC_AVX2
+        __m256 vef = _mm256_set1_ps(ef);
+        for (; d + 8 <= head_dim; d += 8)
+          _mm256_storeu_ps(oh + d, _mm256_mul_ps(_mm256_loadu_ps(oh + d), vef));
+#endif
+        for (; d < head_dim; ++d) oh[d] *= ef;
+      }
       const int8_t *vr = v8 + t * kv_len + kv_off;
       float sv = vs[t * kv_heads + kh] * es;
-      for (size_t d = 0; d < head_dim; ++d) oh[d] += sv * (float)vr[d];
+      axpy_i8(oh, vr, sv, head_dim);
       rsum = rsum * ef + es;
       rmax = nmax;
     }
     if (rsum > 0.0f) {
       float inv = 1.0f / rsum;
-      for (size_t d = 0; d < head_dim; ++d) oh[d] *= inv;
+      size_t d = 0;
+#ifdef OC_AVX2
+      __m256 vinv = _mm256_set1_ps(inv);
+      for (; d + 8 <= head_dim; d += 8)
+        _mm256_storeu_ps(oh + d, _mm256_mul_ps(_mm256_loadu_ps(oh + d), vinv));
+#endif
+      for (; d < head_dim; ++d) oh[d] *= inv;
     }
   }
 }
@@ -734,16 +983,37 @@ void oc_attention(float *out, const float *q, const float *k_cache,
       float score = oc_dot_f32(qh, k_cache + t * kv_len + kv_off, head_dim) * scale;
       float nmax = rmax > score ? rmax : score;
       float ef = expf(rmax - nmax), es = expf(score - nmax);
-      if (ef != 1.0f)
-        for (size_t d = 0; d < head_dim; ++d) oh[d] *= ef;
+      if (ef != 1.0f) {
+        size_t d = 0;
+#ifdef OC_AVX2
+        __m256 vef = _mm256_set1_ps(ef);
+        for (; d + 8 <= head_dim; d += 8)
+          _mm256_storeu_ps(oh + d, _mm256_mul_ps(_mm256_loadu_ps(oh + d), vef));
+#endif
+        for (; d < head_dim; ++d) oh[d] *= ef;
+      }
       const float *vr = v_cache + t * kv_len + kv_off;
-      for (size_t d = 0; d < head_dim; ++d) oh[d] += es * vr[d];
+      size_t d = 0;
+#ifdef OC_AVX2
+      __m256 ves = _mm256_set1_ps(es);
+      for (; d + 8 <= head_dim; d += 8) {
+        __m256 y = _mm256_loadu_ps(oh + d);
+        _mm256_storeu_ps(oh + d, _mm256_fmadd_ps(ves, _mm256_loadu_ps(vr + d), y));
+      }
+#endif
+      for (; d < head_dim; ++d) oh[d] += es * vr[d];
       rsum = rsum * ef + es;
       rmax = nmax;
     }
     if (rsum > 0.0f) {
       float inv = 1.0f / rsum;
-      for (size_t d = 0; d < head_dim; ++d) oh[d] *= inv;
+      size_t d = 0;
+#ifdef OC_AVX2
+      __m256 vinv = _mm256_set1_ps(inv);
+      for (; d + 8 <= head_dim; d += 8)
+        _mm256_storeu_ps(oh + d, _mm256_mul_ps(_mm256_loadu_ps(oh + d), vinv));
+#endif
+      for (; d < head_dim; ++d) oh[d] *= inv;
     }
   }
 }

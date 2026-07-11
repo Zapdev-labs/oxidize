@@ -67,6 +67,20 @@ typedef struct {
   float *f32;            /* dense rows (owned) */
   size_t rows, cols;
 } oc_weight;
+
+void oc_gemma4_canonicalize_projection_metadata(oc_weight *w, size_t hidden,
+                                                bool output_projection);
+
+/* Dual-socket weight replication: each GEMV thread reads the copy resident on
+ * its NUMA node (~2x decode bandwidth). Identity when inactive. */
+void oc_numa_set_cpu_node_map(const int *cpu_to_node, int ncpus);
+void *oc_numa_alloc_bound(size_t bytes, int node);
+void oc_numa_register_replica(const uint8_t *primary, size_t size,
+                              const uint8_t *replica);
+const uint8_t *oc_numa_local_data(const uint8_t *p);
+int oc_numa_replicate_active(void);
+void oc_numa_set_replica_node(int node);
+void oc_numa_bind_alloc_node(int node);
 void oc_gemv(const oc_weight *w, size_t rows, size_t cols, const float *x,
              const oc_q8blk *xq, float *y);
 /* batched: inputs [batch x cols] (+ per-row quantized blocks), outputs [batch x rows] */
@@ -197,6 +211,10 @@ typedef struct {
   size_t draft_max;
 } oc_mtp;
 
+/* CUDA resident state is owned by one model. Its representation stays private
+ * to cuda.cu so callers cannot accidentally share per-request GPU state. */
+typedef struct oc_cuda_context oc_cuda_context;
+
 typedef struct {
   oc_gguf *g;
   oc_config cfg;
@@ -214,6 +232,7 @@ typedef struct {
   float *x;               /* hidden state [hidden] */
   oc_mtp *mtp;            /* NULL if the GGUF has no nextn block */
   bool gpu_active;        /* resident CUDA forward built (OC_CUDA builds only) */
+  oc_cuda_context *cuda_ctx; /* model-owned resident CUDA state, NULL on CPU */
   /* gemma4 */
   bool gemma;             /* GELU FFN, post-norms, per-layer KV, emb scaling */
   float emb_scale;        /* sqrt(hidden) for gemma, else 1.0 */
@@ -224,6 +243,8 @@ typedef struct {
 /* max_ctx: 0 = model default. kv_int8: 1 = int8 KV cache (4x smaller). */
 oc_model *oc_model_load(const char *path, size_t max_ctx, int kv_int8);
 void oc_model_free(oc_model *m);
+/* Copy every weight plane onto NUMA node 1 and register replicas for gemv. */
+void oc_model_numa_replicate(oc_model *m);
 /* Run tokens[0..n) starting at absolute position start_pos; returns logits for
  * the last token in caller-provided buf [vocab]. */
 void oc_forward(oc_model *m, const uint32_t *tokens, size_t n, size_t start_pos,
@@ -268,9 +289,60 @@ bool oc_is_eog(const oc_tokenizer *t, uint32_t id);
  * input, `hidden_size` floats) is also copied back — used by the training
  * path so the frozen base forward runs on-device. */
 int oc_cuda_build(oc_model *m);            /* 0 ok, -1 no GPU / disabled */
+/* Reserve independently owned CUDA slot metadata and KV capacity before a
+ * resident build. max_slots and max_ctx must both be nonzero. */
+int oc_cuda_configure_batch(oc_model *m, int device_id, size_t max_slots,
+                            size_t max_ctx);
+/* Conservative resident-batch allocation report.  All matrix weights are
+ * counted as FP16, even when the scalar path keeps them quantized; a tied
+ * output head is deliberately counted only once.  `free_bytes` is sampled
+ * from device_id and `required_bytes` includes the bucket-64 scratch and all
+ * per-slot KV state.  Returns -1 when the requested batch contract is not
+ * supported or CUDA cannot provide a free-memory sample. */
+typedef struct {
+  size_t fp16_weight_bytes;
+  size_t auxiliary_bytes;
+  size_t scratch_bytes;
+  size_t slot_kv_bytes;
+  size_t required_bytes;
+  size_t free_bytes;
+} oc_cuda_memory_report;
+int oc_cuda_batch_memory_preflight(const oc_model *m, int device_id,
+                                   size_t max_slots, size_t max_ctx,
+                                   oc_cuda_memory_report *report);
+/* Release every CUDA allocation owned by m; safe to call on an unconfigured
+ * model. Model destruction should call this before freeing host weights. */
+void oc_cuda_release(oc_model *m);
+/* Introspection for launchers/tests; no slot storage is exposed. */
+size_t oc_cuda_slot_count(const oc_model *m);
+size_t oc_cuda_slot_max_ctx(const oc_model *m);
+/* One independent Gemma decode lane. `slot` owns its own [slot][pos][kv]
+ * state; position is absolute within that slot. want_token must be nonzero
+ * for a live lane. */
+typedef struct {
+  uint32_t token;
+  uint32_t position;
+  uint32_t slot;
+  uint8_t want_token;
+} oc_cuda_decode_lane;
+/* Decode 1..64 live Gemma attention lanes. The implementation compacts to a
+ * tensor-core bucket (1/2/4/8/16/32/64), returns greedy IDs in input order,
+ * and copies no logits to host. Returns -1 for unsupported or invalid models,
+ * lanes, slots, positions, or CUDA failures. */
+int oc_cuda_decode_batch(oc_model *m, const oc_cuda_decode_lane *lanes,
+                         size_t count, uint32_t *next_ids);
 void oc_cuda_forward(oc_model *m, const float *embed_host, size_t pos,
                      int want_logits, float *logits_host, float *normed_host);
 void oc_cuda_reset(oc_model *m);           /* zero device SSM state + conv rings */
+
+/* Batched dense decode head: weights are row-major FP16 [rows, cols], inputs
+ * are row-major FP32 [batch, cols], and active marks live request slots.
+ * Greedy token IDs are reduced on-device; inactive slots receive UINT32_MAX.
+ * Returns 0 on success and -1 for invalid input or CUDA/cuBLAS failure. */
+int oc_cuda_batch_gemm_argmax(const uint16_t *weights_f16, size_t rows,
+                              size_t cols, const float *inputs_f32,
+                              size_t batch, const uint8_t *active,
+                              uint32_t *token_ids);
 
 /* ---- tools (prune.c / finetune.c): CLI subcommand entry points ---- */
 int oc_prune_main(int argc, char **argv);

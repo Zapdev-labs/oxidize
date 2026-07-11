@@ -13,12 +13,14 @@
 #endif
 #include "oc.h"
 #include "gen.h"
+#include "batch.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <math.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -28,6 +30,182 @@
 #include <unistd.h>
 
 static int g_spec_mode; /* drafting mode for all requests */
+static volatile sig_atomic_t g_stop = 0;
+
+typedef struct batch_runtime batch_runtime;
+
+typedef struct {
+  pthread_mutex_t mutex;
+  pthread_cond_t ready;
+  size_t active;
+  size_t waiting;
+  size_t max_seqs;
+  size_t max_queue;
+} admission_gate;
+
+typedef struct {
+  oc_model *model;
+  oc_tokenizer *tokenizer;
+  float temperature;
+  size_t draft_k;
+  const char *worker_id;
+  batch_runtime *batch;
+  admission_gate gate;
+} serve_context;
+
+typedef struct {
+  int fd;
+  serve_context *server;
+} client_context;
+
+typedef struct batch_request {
+  uint64_t request_id;
+  uint32_t *prompt_tokens;
+  uint32_t *output_tokens;
+  size_t prompt_count;
+  size_t max_tokens;
+  size_t output_count;
+  size_t output_capacity;
+  size_t generated;
+  bool done;
+  bool failed;
+  pthread_mutex_t mutex;
+  pthread_cond_t completed;
+  struct batch_request *next;
+} batch_request;
+
+struct batch_runtime {
+  pthread_mutex_t mutex;
+  pthread_cond_t work;
+  batch_request *head;
+  batch_request *tail;
+  size_t admitted;
+  size_t capacity;
+  size_t queue_capacity;
+  uint64_t next_request_id;
+  oc_batch_scheduler *scheduler;
+  oc_model *model;
+  oc_tokenizer *tokenizer;
+  pthread_t worker;
+};
+
+static bool admission_acquire(admission_gate *gate) {
+  bool admitted = true;
+  pthread_mutex_lock(&gate->mutex);
+  if (gate->active == gate->max_seqs) {
+    if (gate->waiting == gate->max_queue) {
+      admitted = false;
+    } else {
+      ++gate->waiting;
+      while (gate->active == gate->max_seqs)
+        pthread_cond_wait(&gate->ready, &gate->mutex);
+      --gate->waiting;
+      ++gate->active;
+    }
+  } else {
+    ++gate->active;
+  }
+  pthread_mutex_unlock(&gate->mutex);
+  return admitted;
+}
+
+static void admission_release(admission_gate *gate) {
+  pthread_mutex_lock(&gate->mutex);
+  --gate->active;
+  pthread_cond_signal(&gate->ready);
+  pthread_mutex_unlock(&gate->mutex);
+}
+
+#ifdef OC_CUDA
+static void batch_request_free(batch_request *request) {
+  if (!request) return;
+  pthread_cond_destroy(&request->completed);
+  pthread_mutex_destroy(&request->mutex);
+  free(request->output_tokens);
+  free(request->prompt_tokens);
+  free(request);
+}
+
+static bool batch_request_append(batch_request *request, uint32_t token) {
+  bool appended = false;
+  pthread_mutex_lock(&request->mutex);
+  if (!request->done) {
+    if (request->output_count == request->output_capacity) {
+      size_t capacity = request->output_capacity ? request->output_capacity * 2 : 64;
+      uint32_t *tokens = realloc(request->output_tokens, capacity * sizeof(*tokens));
+      if (tokens) {
+        request->output_tokens = tokens;
+        request->output_capacity = capacity;
+      }
+    }
+    if (request->output_count < request->output_capacity) {
+      request->output_tokens[request->output_count++] = token;
+      appended = true;
+    }
+  }
+  pthread_mutex_unlock(&request->mutex);
+  return appended;
+}
+
+static void batch_request_finish(batch_request *request, bool failed) {
+  pthread_mutex_lock(&request->mutex);
+  request->failed = failed;
+  request->done = true;
+  pthread_cond_signal(&request->completed);
+  pthread_mutex_unlock(&request->mutex);
+}
+
+static bool batch_request_wait(batch_request *request) {
+  pthread_mutex_lock(&request->mutex);
+  while (!request->done) pthread_cond_wait(&request->completed, &request->mutex);
+  bool failed = request->failed;
+  pthread_mutex_unlock(&request->mutex);
+  return !failed;
+}
+
+static void batch_release_admission(batch_runtime *runtime) {
+  pthread_mutex_lock(&runtime->mutex);
+  --runtime->admitted;
+  pthread_cond_signal(&runtime->work);
+  pthread_mutex_unlock(&runtime->mutex);
+}
+
+static bool batch_enqueue(batch_runtime *runtime, batch_request *request) {
+  bool accepted = false;
+  pthread_mutex_lock(&runtime->mutex);
+  if (runtime->admitted < runtime->capacity ||
+      runtime->admitted - runtime->capacity < runtime->queue_capacity) {
+    request->request_id = ++runtime->next_request_id;
+    if (!request->request_id) request->request_id = ++runtime->next_request_id;
+    if (runtime->tail) runtime->tail->next = request;
+    else runtime->head = request;
+    runtime->tail = request;
+    ++runtime->admitted;
+    pthread_cond_signal(&runtime->work);
+    accepted = true;
+  }
+  pthread_mutex_unlock(&runtime->mutex);
+  return accepted;
+}
+
+static batch_request *batch_take(batch_runtime *runtime) {
+  pthread_mutex_lock(&runtime->mutex);
+  batch_request *request = runtime->head;
+  if (request) {
+    runtime->head = request->next;
+    if (!runtime->head) runtime->tail = NULL;
+    request->next = NULL;
+  }
+  pthread_mutex_unlock(&runtime->mutex);
+  return request;
+}
+
+static void batch_wait_for_work(batch_runtime *runtime) {
+  pthread_mutex_lock(&runtime->mutex);
+  while (!runtime->head && !g_stop) pthread_cond_wait(&runtime->work, &runtime->mutex);
+  pthread_mutex_unlock(&runtime->mutex);
+}
+#endif
 
 /* ---- tiny tolerant JSON helpers ---- */
 
@@ -187,11 +365,40 @@ static void send_all(int fd, const char *data, size_t n) {
 
 static void send_simple(int fd, int code, const char *ctype, const char *body) {
   char hdr[256];
+  const char *reason = code == 200 ? "OK" :
+                       code == 400 ? "Bad Request" :
+                       code == 404 ? "Not Found" :
+                       code == 429 ? "Too Many Requests" : "Error";
   int hn = snprintf(hdr, sizeof hdr,
                     "HTTP/1.1 %d %s\r\nContent-Type: %s\r\n"
                     "Content-Length: %zu\r\nConnection: close\r\n\r\n",
-                    code, code == 200 ? "OK" : "Bad Request", ctype,
+                    code, reason, ctype,
                     strlen(body));
+  send_all(fd, hdr, (size_t)hn);
+  send_all(fd, body, strlen(body));
+}
+
+static void send_completion(int fd, const char *body, const char *worker_id) {
+  char hdr[512];
+  int hn = snprintf(hdr, sizeof hdr,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                    "X-Oxidize-Engine: oxidize-c\r\n"
+                    "X-Oxidize-Benchmark-Worker: %s\r\n"
+                    "Content-Length: %zu\r\nConnection: close\r\n\r\n",
+                    worker_id, strlen(body));
+  send_all(fd, hdr, (size_t)hn);
+  send_all(fd, body, strlen(body));
+}
+
+static void send_health(int fd, const char *worker_id) {
+  const char *body = "{\"status\":\"ok\"}";
+  char hdr[512];
+  int hn = snprintf(hdr, sizeof hdr,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                    "X-Oxidize-Engine: oxidize-c\r\n"
+                    "X-Oxidize-Benchmark-Worker: %s\r\n"
+                    "Content-Length: %zu\r\nConnection: close\r\n\r\n",
+                    worker_id, strlen(body));
   send_all(fd, hdr, (size_t)hn);
   send_all(fd, body, strlen(body));
 }
@@ -220,7 +427,6 @@ static void stream_token(uint32_t id, void *ud) {
   free(ep);
 }
 
-static volatile sig_atomic_t g_stop = 0;
 static void on_sigint(int sig) { (void)sig; g_stop = 1; }
 
 /* ---- WebSocket (RFC 6455): ws://HOST:PORT/v1/realtime ---- */
@@ -470,11 +676,443 @@ static void ws_session(int fd, const char *req_headers, oc_model *m,
   close(fd);
 }
 
+#ifdef OC_CUDA
+static batch_request *batch_request_for_id(batch_request *const *requests, size_t count,
+                                           uint64_t request_id) {
+  for (size_t i = 0; i < count; ++i)
+    if (requests[i] && requests[i]->request_id == request_id) return requests[i];
+  return NULL;
+}
+
+static void batch_fail_slot(batch_runtime *runtime, batch_request **requests,
+                            size_t slot, size_t *active) {
+  batch_request *request = requests[slot];
+  if (!request) return;
+  oc_batch_scheduler_cancel(runtime->scheduler, slot);
+  oc_batch_scheduler_reclaim(runtime->scheduler, slot);
+  requests[slot] = NULL;
+  --*active;
+  batch_request_finish(request, true);
+  batch_release_admission(runtime);
+}
+
+static void *batch_worker(void *opaque) {
+  batch_runtime *runtime = opaque;
+  batch_request **requests = calloc(runtime->capacity, sizeof(*requests));
+  oc_batch_lane lanes[64];
+  oc_cuda_decode_lane cuda_lanes[64];
+  uint32_t next_ids[64];
+  size_t active = 0;
+  if (!requests) return NULL;
+  while (!g_stop) {
+    while (active < runtime->capacity) {
+      batch_request *request = batch_take(runtime);
+      if (!request) break;
+      oc_sequence_request sequence = {
+          .request_id = request->request_id,
+          .prompt_tokens = request->prompt_tokens,
+          .prompt_count = request->prompt_count,
+          .max_tokens = request->max_tokens,
+          .rng_seed = request->request_id,
+      };
+      size_t slot = SIZE_MAX;
+      if (!oc_batch_scheduler_admit_sequence(runtime->scheduler, &sequence, &slot) ||
+          slot == SIZE_MAX || slot >= runtime->capacity) {
+        batch_request_finish(request, true);
+        batch_release_admission(runtime);
+        continue;
+      }
+      requests[slot] = request;
+      ++active;
+    }
+    if (!active) {
+      batch_wait_for_work(runtime);
+      continue;
+    }
+    size_t lane_count = 0;
+    if (!oc_batch_scheduler_next_lanes(runtime->scheduler, lanes, runtime->capacity,
+                                       &lane_count) || !lane_count) continue;
+    for (size_t i = 0; i < lane_count; ++i) {
+      cuda_lanes[i] = (oc_cuda_decode_lane){
+          .token = lanes[i].token,
+          .position = (uint32_t)lanes[i].position,
+          .slot = (uint32_t)lanes[i].slot,
+          .want_token = 1,
+      };
+    }
+    if (oc_cuda_decode_batch(runtime->model, cuda_lanes, lane_count, next_ids) != 0) {
+      for (size_t i = 0; i < lane_count; ++i)
+        batch_fail_slot(runtime, requests, lanes[i].slot, &active);
+      continue;
+    }
+    bool terminal[64] = {0};
+    bool failed[64] = {0};
+    for (size_t i = 0; i < lane_count; ++i) {
+      batch_request *request = requests[lanes[i].slot];
+      if (!request || next_ids[i] == UINT32_MAX) { failed[i] = true; continue; }
+      if (!lanes[i].produces_output) {
+        if (!oc_batch_scheduler_finish_lane(runtime->scheduler, &lanes[i])) failed[i] = true;
+        continue;
+      }
+      bool eog = oc_is_eog(runtime->tokenizer, next_ids[i]);
+      if (!oc_batch_scheduler_record_output(runtime->scheduler, &lanes[i], next_ids[i], eog)) {
+        failed[i] = true;
+        continue;
+      }
+      if (!eog) ++request->generated;
+      terminal[i] = eog || request->generated == request->max_tokens;
+    }
+    uint64_t request_id = 0;
+    uint32_t token = 0;
+    while (oc_batch_scheduler_output_next(runtime->scheduler, &request_id, &token)) {
+      batch_request *request = batch_request_for_id(requests, runtime->capacity, request_id);
+      if (!request || !batch_request_append(request, token)) {
+        for (size_t i = 0; i < lane_count; ++i)
+          if (lanes[i].request_id == request_id) failed[i] = true;
+      }
+    }
+    for (size_t i = 0; i < lane_count; ++i) {
+      if (!terminal[i] && !failed[i]) continue;
+      size_t slot = lanes[i].slot;
+      batch_request *request = requests[slot];
+      if (!request) continue;
+      if (failed[i]) {
+        batch_fail_slot(runtime, requests, slot, &active);
+        continue;
+      }
+      if (!oc_batch_scheduler_reclaim(runtime->scheduler, slot)) {
+        batch_fail_slot(runtime, requests, slot, &active);
+        continue;
+      }
+      requests[slot] = NULL;
+      --active;
+      batch_request_finish(request, false);
+      batch_release_admission(runtime);
+    }
+  }
+  free(requests);
+  return NULL;
+}
+
+static batch_runtime *batch_runtime_start(oc_model *model, oc_tokenizer *tokenizer,
+                                          size_t capacity, size_t queue_capacity,
+                                          int device_id) {
+  if (!model || !model->gemma || model->cfg.kv_int8 || !capacity || capacity > 64 ||
+      !model->kv_ctx) return NULL;
+  const oc_batch_config config = {
+      .capacity = capacity, .queue_capacity = capacity,
+      .gpu_ids = &device_id, .gpu_count = 1,
+  };
+  batch_runtime *runtime = calloc(1, sizeof(*runtime));
+  if (!runtime || pthread_mutex_init(&runtime->mutex, NULL) ||
+      pthread_cond_init(&runtime->work, NULL)) {
+    free(runtime);
+    return NULL;
+  }
+  runtime->scheduler = oc_batch_scheduler_new(&config);
+  runtime->model = model;
+  runtime->tokenizer = tokenizer;
+  runtime->capacity = capacity;
+  runtime->queue_capacity = queue_capacity;
+  if (!runtime->scheduler) goto fail;
+  oc_cuda_release(model);
+  if (oc_cuda_configure_batch(model, device_id, capacity, model->kv_ctx) ||
+      oc_cuda_build(model) || pthread_create(&runtime->worker, NULL, batch_worker, runtime))
+    goto fail;
+  pthread_detach(runtime->worker);
+  return runtime;
+
+fail:
+  oc_batch_scheduler_free(runtime->scheduler);
+  pthread_cond_destroy(&runtime->work);
+  pthread_mutex_destroy(&runtime->mutex);
+  free(runtime);
+  return NULL;
+}
+#endif
+
+static void serve_batch_completion(int fd, serve_context *server, const char *body,
+                                   bool completion_endpoint) {
+#ifdef OC_CUDA
+  char *prompt = build_prompt(body);
+  if (!prompt) {
+    send_simple(fd, 400, "application/json", "{\"error\":\"missing messages/prompt\"}");
+    return;
+  }
+  size_t max_tokens = 0;
+  bool stream = json_bool(body, "stream", false);
+  double temperature = json_number(body, "temperature", 0.0);
+  if (stream || temperature != 0.0 ||
+      !json_size_t_bounded(body, "max_tokens", 512, 1, server->model->kv_ctx, &max_tokens)) {
+    free(prompt);
+    send_simple(fd, 400, "application/json", "{\"error\":\"batch requires stream=false, temperature=0, and valid max_tokens\"}");
+    return;
+  }
+  size_t prompt_count = 0;
+  uint32_t *prompt_tokens = oc_tokenize(server->tokenizer, prompt, false, &prompt_count);
+  free(prompt);
+  if (!prompt_tokens || !prompt_count || prompt_count + max_tokens > server->model->kv_ctx) {
+    free(prompt_tokens);
+    send_simple(fd, 400, "application/json", "{\"error\":\"prompt plus completion exceeds context\"}");
+    return;
+  }
+  batch_request *request = calloc(1, sizeof(*request));
+  if (!request || pthread_mutex_init(&request->mutex, NULL) ||
+      pthread_cond_init(&request->completed, NULL)) {
+    free(prompt_tokens);
+    free(request);
+    send_simple(fd, 500, "application/json", "{\"error\":\"allocation failed\"}");
+    return;
+  }
+  request->prompt_tokens = prompt_tokens;
+  request->prompt_count = prompt_count;
+  request->max_tokens = max_tokens;
+  if (!batch_enqueue(server->batch, request)) {
+    batch_request_free(request);
+    send_simple(fd, 429, "application/json", "{\"error\":\"server at capacity\"}");
+    return;
+  }
+  if (!batch_request_wait(request)) {
+    batch_request_free(request);
+    send_simple(fd, 500, "application/json", "{\"error\":\"batched decode failed\"}");
+    return;
+  }
+  size_t capacity = request->output_count * 6 + 512;
+  char *text = calloc(capacity, 1);
+  size_t text_size = 0;
+  char fragment[512];
+  for (size_t i = 0; text && i < request->output_count; ++i) {
+    size_t size = oc_detokenize(server->tokenizer, request->output_tokens[i], fragment,
+                                sizeof(fragment));
+    buf_append_json(&text, &text_size, &capacity, fragment, size);
+  }
+  if (!text) {
+    batch_request_free(request);
+    send_simple(fd, 500, "application/json", "{\"error\":\"allocation failed\"}");
+    return;
+  }
+  text[text_size] = 0;
+  size_t response_capacity = text_size + 512;
+  char *response = malloc(response_capacity);
+  if (response) {
+    if (completion_endpoint) {
+      snprintf(response, response_capacity,
+               "{\"id\":\"cmpl-oc\",\"object\":\"text_completion\","
+               "\"choices\":[{\"index\":0,\"text\":\"%s\",\"finish_reason\":\"stop\"}],"
+               "\"usage\":{\"prompt_tokens\":%zu,\"completion_tokens\":%zu}}",
+               text, request->prompt_count, request->output_count);
+    } else {
+      snprintf(response, response_capacity,
+               "{\"id\":\"chatcmpl-oc\",\"object\":\"chat.completion\","
+               "\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\","
+               "\"content\":\"%s\"},\"finish_reason\":\"stop\"}],"
+               "\"usage\":{\"prompt_tokens\":%zu,\"completion_tokens\":%zu}}",
+               text, request->prompt_count, request->output_count);
+    }
+    send_completion(fd, response, server->worker_id);
+  } else {
+    send_simple(fd, 500, "application/json", "{\"error\":\"allocation failed\"}");
+  }
+  free(response);
+  free(text);
+  batch_request_free(request);
+#else
+  (void)server;
+  (void)body;
+  (void)completion_endpoint;
+  send_simple(fd, 400, "application/json", "{\"error\":\"batch CUDA support unavailable\"}");
+#endif
+}
+
+static void *serve_client(void *arg) {
+  client_context *client = arg;
+  int fd = client->fd;
+  serve_context *server = client->server;
+  oc_model *m = server->model;
+  oc_tokenizer *tok = server->tokenizer;
+  free(client);
+
+  size_t req_cap = 8 << 20;
+  char *req = malloc(req_cap);
+  char *prompt = NULL;
+  uint32_t *ids = NULL;
+  uint32_t *outids = NULL;
+  bool admitted = false;
+  if (!req) goto done;
+
+  size_t n = 0;
+  char *body = NULL;
+  size_t content_len = 0;
+  while (n + 1 < req_cap) {
+    ssize_t r = read(fd, req + n, req_cap - n - 1);
+    if (r <= 0) break;
+    n += (size_t)r;
+    req[n] = 0;
+    if (!body) {
+      char *sep = strstr(req, "\r\n\r\n");
+      if (sep) {
+        body = sep + 4;
+        char *cl = strcasestr(req, "Content-Length:");
+        content_len = cl ? strtoul(cl + 15, NULL, 10) : 0;
+      }
+    }
+    if (body && n - (size_t)(body - req) >= content_len) break;
+  }
+  if (!body) goto done;
+
+  if (strncmp(req, "GET /v1/realtime", 16) == 0 &&
+      strcasestr(req, "Upgrade: websocket")) {
+    if (server->batch) {
+      send_simple(fd, 400, "application/json", "{\"error\":\"websocket unavailable in batch mode\"}");
+      goto done;
+    }
+    if (!admission_acquire(&server->gate)) {
+      send_simple(fd, 429, "application/json",
+                  "{\"error\":\"server at capacity\"}");
+      goto done;
+    }
+    admitted = true;
+    ws_session(fd, req, m, tok, server->temperature, server->draft_k);
+    fd = -1;
+    goto done;
+  }
+  if (strncmp(req, "GET /health", 11) == 0) {
+    send_health(fd, server->worker_id);
+    goto done;
+  }
+  if (strncmp(req, "POST /v1/chat/completions", 25) != 0 &&
+      strncmp(req, "POST /v1/completions", 20) != 0) {
+    send_simple(fd, 404, "application/json", "{\"error\":\"not found\"}");
+    goto done;
+  }
+
+  if (server->batch) {
+    serve_batch_completion(fd, server, body,
+                           strncmp(req, "POST /v1/completions", 20) == 0);
+    goto done;
+  }
+
+  prompt = build_prompt(body);
+  if (!prompt) {
+    send_simple(fd, 400, "application/json", "{\"error\":\"missing messages/prompt\"}");
+    goto done;
+  }
+  size_t max_new = 512;
+  if (!json_size_t_bounded(body, "max_tokens", 512, 1, m->kv_ctx, &max_new)) {
+    send_simple(fd, 400, "application/json", "{\"error\":\"bad max_tokens\"}");
+    goto done;
+  }
+  float temp = (float)json_number(body, "temperature", (double)server->temperature);
+  bool stream = json_bool(body, "stream", false);
+  if (max_new > m->kv_ctx - 64) max_new = m->kv_ctx - 64;
+
+  size_t n_prompt;
+  ids = oc_tokenize(tok, prompt, false, &n_prompt);
+  free(prompt);
+  prompt = NULL;
+  if (n_prompt == 0 || n_prompt + 8 >= m->kv_ctx) {
+    send_simple(fd, 400, "application/json", "{\"error\":\"prompt empty or too long\"}");
+    goto done;
+  }
+  if (!admission_acquire(&server->gate)) {
+    send_simple(fd, 429, "application/json", "{\"error\":\"server at capacity\"}");
+    goto done;
+  }
+  admitted = true;
+
+  oc_gen g = {0};
+  g.m = m;
+  g.tok = tok;
+  g.temperature = temp;
+  g.top_k = 40;
+  g.top_p = 0.95f;
+  g.draft_k = server->draft_k;
+  g.spec_mode = g_spec_mode;
+  stream_ctx sctx = {fd, tok, false};
+  if (stream) {
+    const char *hdr = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
+                      "Cache-Control: no-cache\r\nConnection: close\r\n\r\n";
+    send_all(fd, hdr, strlen(hdr));
+    g.on_token = stream_token;
+    g.ud = &sctx;
+  }
+
+  outids = malloc(max_new * sizeof(uint32_t));
+  if (!outids) goto done;
+  struct timespec t0, t1;
+  clock_gettime(CLOCK_MONOTONIC, &t0);
+  size_t n_out = oc_generate(&g, ids, n_prompt, max_new, outids);
+  clock_gettime(CLOCK_MONOTONIC, &t1);
+  double secs = (double)(t1.tv_sec - t0.tv_sec) + (double)(t1.tv_nsec - t0.tv_nsec) * 1e-9;
+  fprintf(stderr, "req: %zu prompt + %zu gen tokens in %.2fs (%.2f tok/s)%s",
+          n_prompt, n_out, secs, secs > 0 ? (double)n_out / secs : 0.0, "");
+  if (g.drafted)
+    fprintf(stderr, "  [mtp accept %.0f%%]", 100.0 * (double)g.accepted / (double)g.drafted);
+  fprintf(stderr, "\n");
+
+  if (stream) {
+    send_all(fd, "data: [DONE]\n\n", 14);
+  } else {
+    size_t cap = 16384, bn = 0;
+    char *text = malloc(cap);
+    char frag[512];
+    for (size_t i = 0; i < n_out; ++i) {
+      size_t fn = oc_detokenize(tok, outids[i], frag, sizeof frag);
+      buf_append_json(&text, &bn, &cap, frag, fn);
+    }
+    text[bn] = 0;
+    size_t rcap = bn + 512;
+    char *resp = malloc(rcap);
+    snprintf(resp, rcap,
+        "{\"id\":\"chatcmpl-oc\",\"object\":\"chat.completion\","
+        "\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\","
+        "\"content\":\"%s\"},\"finish_reason\":\"stop\"}],"
+        "\"usage\":{\"prompt_tokens\":%zu,\"completion_tokens\":%zu}}",
+        text, n_prompt, n_out);
+    send_completion(fd, resp, server->worker_id);
+    free(resp);
+    free(text);
+  }
+
+done:
+  if (admitted) admission_release(&server->gate);
+  free(outids);
+  free(ids);
+  free(prompt);
+  free(req);
+  if (fd >= 0) close(fd);
+  return NULL;
+}
+
 int oc_serve(oc_model *m, oc_tokenizer *tok, const char *host, int port,
-             float temperature, size_t draft_k, int spec_mode) {
+             float temperature, size_t draft_k, int spec_mode,
+             size_t max_seqs, size_t max_queue, const char *worker_id, int device_id) {
   g_spec_mode = spec_mode;
   signal(SIGPIPE, SIG_IGN);
   signal(SIGINT, on_sigint);
+  serve_context server = {
+    .model = m,
+    .tokenizer = tok,
+    .temperature = temperature,
+    .draft_k = draft_k,
+    .worker_id = worker_id,
+    .gate = {
+      .mutex = PTHREAD_MUTEX_INITIALIZER,
+      .ready = PTHREAD_COND_INITIALIZER,
+      .max_seqs = max_seqs,
+      .max_queue = max_queue,
+    },
+  };
+  if (max_seqs > 1) {
+#ifdef OC_CUDA
+    server.batch = batch_runtime_start(m, tok, max_seqs, max_queue, device_id);
+    if (!server.batch)
+      oc_die("serve: batched mode requires a CUDA Gemma model with available slot KV memory");
+#else
+    (void)device_id;
+    oc_die("serve: --max-seqs > 1 requires an OC_CUDA build");
+#endif
+  }
   int lfd = socket(AF_INET, SOCK_STREAM, 0);
   int one = 1;
   setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
@@ -490,138 +1128,29 @@ int oc_serve(oc_model *m, oc_tokenizer *tok, const char *host, int port,
           "oxidize-c: serving on http://%s:%d\n"
           "  POST /v1/chat/completions  (OpenAI-compatible, stream=SSE)\n"
           "  ws://%s:%d/v1/realtime  (WebSocket: send text or JSON, "
-          "token frames back)\n",
-          host, port, host, port);
+          "token frames back)\n"
+          "  %s admission: max-seqs=%zu max-queue=%zu worker=%s\n",
+          host, port, host, port, server.batch ? "batched CUDA" : "scalar",
+          max_seqs, max_queue, worker_id);
 
-  size_t req_cap = 8 << 20;
-  char *req = malloc(req_cap);
   while (!g_stop) {
     int fd = accept(lfd, NULL, NULL);
     if (fd < 0) continue;
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
-
-    /* read headers + body (Content-Length) */
-    size_t n = 0;
-    char *body = NULL;
-    size_t content_len = 0;
-    while (n + 1 < req_cap) {
-      ssize_t r = read(fd, req + n, req_cap - n - 1);
-      if (r <= 0) break;
-      n += (size_t)r;
-      req[n] = 0;
-      if (!body) {
-        char *sep = strstr(req, "\r\n\r\n");
-        if (sep) {
-          body = sep + 4;
-          char *cl = strcasestr(req, "Content-Length:");
-          content_len = cl ? strtoul(cl + 15, NULL, 10) : 0;
-        }
-      }
-      if (body && n - (size_t)(body - req) >= content_len) break;
-    }
-    if (!body) { close(fd); continue; }
-
-    if (strncmp(req, "GET /v1/realtime", 16) == 0 &&
-        strcasestr(req, "Upgrade: websocket")) {
-      ws_session(fd, req, m, tok, temperature, draft_k);
-      continue;
-    }
-    if (strncmp(req, "GET /health", 11) == 0) {
-      send_simple(fd, 200, "application/json", "{\"status\":\"ok\"}");
+    client_context *client = malloc(sizeof(*client));
+    if (!client) {
       close(fd);
       continue;
     }
-    if (strncmp(req, "POST /v1/chat/completions", 25) != 0 &&
-        strncmp(req, "POST /v1/completions", 20) != 0) {
-      send_simple(fd, 404, "application/json", "{\"error\":\"not found\"}");
+    *client = (client_context){.fd = fd, .server = &server};
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, serve_client, client) != 0) {
       close(fd);
+      free(client);
       continue;
     }
-
-    char *prompt = build_prompt(body);
-    if (!prompt) {
-      send_simple(fd, 400, "application/json",
-                  "{\"error\":\"missing messages/prompt\"}");
-      close(fd);
-      continue;
-    }
-    size_t max_new = 512;
-    if (!json_size_t_bounded(body, "max_tokens", 512, 1, m->kv_ctx, &max_new)) {
-      send_simple(fd, 400, "application/json", "{\"error\":\"bad max_tokens\"}");
-      close(fd);
-      continue;
-    }
-    float temp = (float)json_number(body, "temperature", (double)temperature);
-    bool stream = json_bool(body, "stream", false);
-    if (max_new > m->kv_ctx - 64) max_new = m->kv_ctx - 64;
-
-    size_t n_prompt;
-    uint32_t *ids = oc_tokenize(tok, prompt, false, &n_prompt);
-    free(prompt);
-    if (n_prompt == 0 || n_prompt + 8 >= m->kv_ctx) {
-      send_simple(fd, 400, "application/json", "{\"error\":\"prompt empty or too long\"}");
-      free(ids);
-      close(fd);
-      continue;
-    }
-
-    oc_gen g = {0};
-    g.m = m;
-    g.tok = tok;
-    g.temperature = temp;
-    g.top_k = 40;
-    g.top_p = 0.95f;
-    g.draft_k = draft_k;
-    g.spec_mode = g_spec_mode;
-    stream_ctx sctx = {fd, tok, false};
-    if (stream) {
-      const char *hdr = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
-                        "Cache-Control: no-cache\r\nConnection: close\r\n\r\n";
-      send_all(fd, hdr, strlen(hdr));
-      g.on_token = stream_token;
-      g.ud = &sctx;
-    }
-
-    uint32_t *outids = malloc(max_new * sizeof(uint32_t));
-    struct timespec t0, t1;
-    clock_gettime(CLOCK_MONOTONIC, &t0);
-    size_t n_out = oc_generate(&g, ids, n_prompt, max_new, outids);
-    clock_gettime(CLOCK_MONOTONIC, &t1);
-    double secs = (double)(t1.tv_sec - t0.tv_sec) + (double)(t1.tv_nsec - t0.tv_nsec) * 1e-9;
-    fprintf(stderr, "req: %zu prompt + %zu gen tokens in %.2fs (%.2f tok/s)%s",
-            n_prompt, n_out, secs, secs > 0 ? (double)n_out / secs : 0.0, "");
-    if (g.drafted)
-      fprintf(stderr, "  [mtp accept %.0f%%]", 100.0 * (double)g.accepted / (double)g.drafted);
-    fprintf(stderr, "\n");
-
-    if (stream) {
-      send_all(fd, "data: [DONE]\n\n", 14);
-    } else {
-      size_t cap = 16384, bn = 0;
-      char *text = malloc(cap);
-      char frag[512];
-      for (size_t i = 0; i < n_out; ++i) {
-        size_t fn = oc_detokenize(tok, outids[i], frag, sizeof frag);
-        buf_append_json(&text, &bn, &cap, frag, fn);
-      }
-      text[bn] = 0;
-      size_t rcap = bn + 512;
-      char *resp = malloc(rcap);
-      snprintf(resp, rcap,
-          "{\"id\":\"chatcmpl-oc\",\"object\":\"chat.completion\","
-          "\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\","
-          "\"content\":\"%s\"},\"finish_reason\":\"stop\"}],"
-          "\"usage\":{\"prompt_tokens\":%zu,\"completion_tokens\":%zu}}",
-          text, n_prompt, n_out);
-      send_simple(fd, 200, "application/json", resp);
-      free(resp);
-      free(text);
-    }
-    free(outids);
-    free(ids);
-    close(fd);
+    pthread_detach(thread);
   }
   close(lfd);
-  free(req);
   return 0;
 }

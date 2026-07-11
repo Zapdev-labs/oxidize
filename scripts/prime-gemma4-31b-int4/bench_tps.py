@@ -1,152 +1,120 @@
-#!/usr/bin/env python3
-"""Async throughput benchmark for OpenAI-compatible Gemma 4 endpoints."""
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.13"
+# dependencies = [
+#     "httpx2[http2,brotli,zstd]",
+# ]
+# ///
+
+# ─── How to run ───
+# 1. Install uv (if not installed):
+#      curl -LsSf https://astral.sh/uv/install.sh | sh
+# 2. Run directly (no venv, no pip install needed):
+#      uv run bench_tps.py [ARGS]
+# 3. Or make executable and run:
+#      chmod +x bench_tps.py && ./bench_tps.py
+# ─────────────────
+
+"""Fail-closed process-per-GPU TPS benchmark for oxidize-c."""
 
 from __future__ import annotations
 
 import argparse
-import asyncio
 import json
-import statistics
-import time
-from dataclasses import dataclass
+from pathlib import Path
+import sys
+from typing import Sequence
+from urllib.parse import urlsplit
 
-import aiohttp
-
-
-@dataclass
-class StreamResult:
-    ttft_ms: float
-    output_tokens: int
-    total_ms: float
+import bench_tps_core as core
 
 
-async def stream_one(
-    session: aiohttp.ClientSession,
-    url: str,
-    model: str,
-    prompt: str,
-    max_tokens: int,
-) -> StreamResult:
-    payload = {
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": max_tokens,
-        "temperature": 0.0,
-        "stream": True,
-        "stream_options": {"include_usage": True},
-    }
-    t0 = time.perf_counter()
-    ttft_ms = 0.0
-    output_tokens = 0
-
-    async with session.post(f"{url}/chat/completions", json=payload) as resp:
-        resp.raise_for_status()
-        async for raw in resp.content:
-            line = raw.decode("utf-8", errors="ignore").strip()
-            if not line.startswith("data: "):
-                continue
-            data = line[6:]
-            if data == "[DONE]":
-                break
-            chunk = json.loads(data)
-            if ttft_ms == 0.0 and chunk.get("choices"):
-                delta = chunk["choices"][0].get("delta", {})
-                if delta.get("content"):
-                    ttft_ms = (time.perf_counter() - t0) * 1000.0
-            usage = chunk.get("usage")
-            if usage and usage.get("completion_tokens"):
-                output_tokens = usage["completion_tokens"]
-
-    total_ms = (time.perf_counter() - t0) * 1000.0
-    if output_tokens == 0:
-        output_tokens = max_tokens
-    return StreamResult(ttft_ms=ttft_ms, output_tokens=output_tokens, total_ms=total_ms)
+BenchmarkSummary = core.BenchmarkSummary
+RequestRecord = core.RequestRecord
+WorkerSpec = core.WorkerSpec
+run_phase = core.run_phase
+summarize_window = core.summarize_window
+verify_completion = core.verify_completion
+worker_specs = core.worker_specs
 
 
-async def run_sweep(
-    url: str,
-    model: str,
-    concurrency: int,
-    max_tokens: int,
-    prompt: str,
-    warmup: int,
-) -> dict[str, float]:
-    timeout = aiohttp.ClientTimeout(total=600)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        for _ in range(warmup):
-            await stream_one(session, url, model, prompt, min(32, max_tokens))
-
-        t0 = time.perf_counter()
-        tasks = [
-            stream_one(session, url, model, prompt, max_tokens)
-            for _ in range(concurrency)
-        ]
-        results = await asyncio.gather(*tasks)
-        elapsed = time.perf_counter() - t0
-
-    total_out = sum(r.output_tokens for r in results)
-    tps = total_out / elapsed if elapsed > 0 else 0.0
-    ttfts = [r.ttft_ms for r in results if r.ttft_ms > 0]
-    decode_ms = [
-        (r.total_ms - r.ttft_ms) / max(r.output_tokens, 1) for r in results
-    ]
-
-    return {
-        "concurrency": float(concurrency),
-        "output_tps": tps,
-        "total_output_tokens": float(total_out),
-        "elapsed_s": elapsed,
-        "ttft_p50_ms": statistics.median(ttfts) if ttfts else 0.0,
-        "tpot_p50_ms": statistics.median(decode_ms) if decode_ms else 0.0,
-    }
-
-
-async def main() -> None:
-    parser = argparse.ArgumentParser(description="Gemma 4 TPS benchmark")
-    parser.add_argument("--url", default="http://localhost:8080/v1")
+def parse_config(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Verified oxidize-c Gemma 4 TPS benchmark")
+    urls = parser.add_mutually_exclusive_group()
+    urls.add_argument("--urls")
+    urls.add_argument("--url")
     parser.add_argument("--model", default="google/gemma-4-31B-it-qat-w4a16-ct")
-    parser.add_argument(
-        "--concurrency",
-        default="1,4,8,16,32,48,64,80,96",
-        help="Comma-separated concurrency levels",
-    )
-    parser.add_argument("--max-tokens", type=int, default=256)
+    parser.add_argument("--concurrency-per-gpu", type=int)
+    parser.add_argument("--concurrency", type=int)
+    parser.add_argument("--max-tokens", type=int, default=64)
+    parser.add_argument("--warmup-seconds", type=float, default=15.0)
+    parser.add_argument("--duration-seconds", type=float, default=60.0)
+    parser.add_argument("--timeout-seconds", type=float, default=120.0)
     parser.add_argument("--target-tps", type=float, default=1000.0)
-    parser.add_argument(
-        "--prompt",
-        default=(
-            "Summarize the key tradeoffs between tensor parallelism and "
-            "data parallelism for LLM inference on dual H100 GPUs."
-        ),
+    parser.add_argument("--required-identity", default="oxidize-c")
+    parser.add_argument("--ledger", type=Path, default=Path("bench_tps.jsonl"))
+    parser.add_argument("--summary", type=Path, default=Path("bench_tps_summary.json"))
+    parser.add_argument("--prompt", default="Write a concise explanation of GPU inference batching.")
+    args = parser.parse_args(argv)
+    raw_urls = args.urls or args.url or "http://localhost:8080/v1"
+    args.endpoints = tuple(part.strip() for part in raw_urls.split(","))
+    args.concurrency_value = (
+        args.concurrency_per_gpu
+        if args.concurrency_per_gpu is not None
+        else args.concurrency if args.concurrency is not None else 64
     )
-    args = parser.parse_args()
+    positive = (
+        args.concurrency_value, args.max_tokens, args.warmup_seconds,
+        args.duration_seconds, args.timeout_seconds, args.target_tps,
+    )
+    if args.concurrency_per_gpu is not None and args.concurrency is not None:
+        parser.error("use only one of --concurrency-per-gpu or --concurrency")
+    if not args.endpoints or any(not endpoint for endpoint in args.endpoints):
+        parser.error("--urls must contain nonempty comma-separated endpoints")
+    if len(set(args.endpoints)) != len(args.endpoints):
+        parser.error("--urls endpoints must be unique")
+    if any(
+        urlsplit(endpoint).scheme not in {"http", "https"}
+        or not urlsplit(endpoint).netloc
+        for endpoint in args.endpoints
+    ):
+        parser.error("--urls endpoints must be absolute HTTP(S) URLs")
+    if any(value <= 0 for value in positive):
+        parser.error("concurrency, token, duration, timeout, and target arguments must be positive")
+    return args
 
-    levels = [int(x.strip()) for x in args.concurrency.split(",") if x.strip()]
-    best = 0.0
-    print(f"url={args.url} model={args.model} max_tokens={args.max_tokens}")
-    print(f"{'conc':>6} {'out_tps':>10} {'ttft_p50':>10} {'tpot_p50':>10}")
-    print("-" * 42)
 
-    for c in levels:
-        row = await run_sweep(
-            args.url, args.model, c, args.max_tokens, args.prompt, warmup=1
+def main(argv: Sequence[str] | None = None) -> int:
+    args = parse_config(argv)
+    total_loops = len(args.endpoints) * args.concurrency_value
+    common = {
+        "endpoints": args.endpoints,
+        "model": args.model,
+        "prompt": args.prompt,
+        "max_tokens": args.max_tokens,
+        "concurrency_per_gpu": args.concurrency_value,
+        "required_identity": args.required_identity,
+    }
+    with core.create_client(total_loops, args.timeout_seconds) as client:
+        warmup, _, _ = run_phase(
+            client=client, **common, duration_s=args.warmup_seconds, phase="warmup",
         )
-        best = max(best, row["output_tps"])
-        print(
-            f"{int(row['concurrency']):>6} "
-            f"{row['output_tps']:>10.1f} "
-            f"{row['ttft_p50_ms']:>10.1f} "
-            f"{row['tpot_p50_ms']:>10.1f}"
+        measured, started_at, ended_at = run_phase(
+            client=client, **common, duration_s=args.duration_seconds, phase="measure",
         )
-
-    print("-" * 42)
-    print(f"peak_output_tps={best:.1f} target={args.target_tps:.0f}")
-    if best >= args.target_tps:
-        print("PASS: target TPS reached")
-    else:
-        gap = args.target_tps - best
-        print(f"GAP: {gap:.1f} tok/s below target — try TIER=alpha or TIER=charlie")
+    summary = summarize_window(
+        records=measured,
+        expected_workers=tuple(str(index) for index in range(len(args.endpoints))),
+        started_at=started_at,
+        ended_at=ended_at,
+        target_tps=args.target_tps,
+    )
+    core.write_ledger(args.ledger, [*warmup, *measured])
+    args.summary.parent.mkdir(parents=True, exist_ok=True)
+    args.summary.write_text(f"{json.dumps(summary, indent=2, sort_keys=True)}\n")
+    print(json.dumps(summary, sort_keys=True))
+    return 0 if summary["passed"] else 1
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    sys.exit(main())
