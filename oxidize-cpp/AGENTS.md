@@ -46,6 +46,9 @@ oxidize-cpp --model <gguf> [--prompt --tokens "1,2,3" --max-tokens
 oxidize-cpp-train --model <gguf> --data <jsonl> [--mode lora|full --lr --steps
             --rank --alpha --seq-len --grad-accum --warmup --grad-clip --seed --overfit-one-batch]
 oxidize-cpp-server --model <gguf>   # GET /health, GET /v1/models, POST /v1/chat/completions
+oxidize-cpp-merge --a <model> --b <model> --output <path>   # SafeTensors merger
+            [--method linear|slerp --t --preset kimi-k275 --attention-t --mlp-t
+             --other-t --missing error|a|b --max-shard-gib --dry-run --self-test]
 ```
 
 ## BUILD / TEST / RUN

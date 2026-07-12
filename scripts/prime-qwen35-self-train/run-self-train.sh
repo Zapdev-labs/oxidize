@@ -5,7 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="${OXIDIZE_REPO:-$HOME/oxidize}"
 OUT_DIR="${OUT_DIR:-$HOME/models/qwen35-9b-agent}"
-MODEL="${TRAIN_MODEL:-$OUT_DIR/qwen35-9b-instruct-q8_0.gguf}"
+MODEL="${TRAIN_MODEL:-$OUT_DIR/qwen35-9b-instruct-q4_k_m.gguf}"
 DATASET="${TRAIN_DATASET:-$OUT_DIR/seed_coding_agent.jsonl}"
 TRAIN_OUT="${TRAIN_OUT:-$OUT_DIR/self-train-out}"
 LOG="${TRAIN_LOG:-$OUT_DIR/self-train.log}"
@@ -43,7 +43,7 @@ echo "    dataset=$DATASET ($(wc -l < "$DATASET") rows)"
 echo "    threads=$THREADS window=$WINDOW tokens/step=$TOKENS_STEP"
 echo "    rounds=$ROUNDS log=$LOG"
 
-setsid "$FINETUNE" --threads "$THREADS" self-train \
+setsid "$FINETUNE" --cuda --threads "$THREADS" self-train \
   --model "$MODEL" \
   --dataset "$DATASET" \
   --output "$TRAIN_OUT" \

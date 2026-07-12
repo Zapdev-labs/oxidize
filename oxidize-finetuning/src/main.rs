@@ -4,11 +4,10 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use oxidize_core::gguf::load_mapped_gguf;
 use oxidize_core::inference::InferenceConfig;
-use oxidize_core::layer_wise::LayerWiseModel;
 use oxidize_core::tokenizer::load_tokenizer_from_gguf_metadata;
 use oxidize_finetuning::{
     AdapterMerger, FinetuneConfig, LoRAAdapter, MergeStrategy, SelfTrainConfig, SelfTrainLoop,
-    SftTrainer, export_lora_gguf, load_adapter_manifest, load_jsonl_dpo, load_jsonl_sft,
+    SftTrainer, TrainModel, export_lora_gguf, load_adapter_manifest, load_jsonl_dpo, load_jsonl_sft,
     manifest_to_lora_adapters, pack_chunks,
 };
 use tracing_subscriber::EnvFilter;
@@ -19,9 +18,13 @@ use tracing_subscriber::EnvFilter;
     about = "Fast LoRA / SFT / DPO / PPO / self-regressing fine-tuning for oxidize GGUF models"
 )]
 struct Cli {
-    /// Rayon worker threads (0 = rayon default).
+    /// Rayon worker threads (0 = all logical cores).
     #[arg(long, global = true, default_value_t = 0)]
     threads: usize,
+
+    /// Use CUDA inference engine for forward passes (requires `--features cuda` build).
+    #[arg(long, global = true)]
+    cuda: bool,
 
     #[command(subcommand)]
     command: Command,
@@ -280,19 +283,38 @@ fn main() -> Result<()> {
     }
 
     match cli.command {
-        Command::Sft(args) => run_sft(args),
+        Command::Sft(args) => run_sft(args, cli.cuda),
         Command::Dpo(args) => run_dpo(args),
         Command::Ppo(args) => run_ppo(args),
-        Command::SelfTrain(args) => run_self_train(args),
+        Command::SelfTrain(args) => run_self_train(args, cli.cuda),
         Command::Merge(args) => run_merge(args),
     }
+}
+
+fn load_train_model(
+    mapped: &oxidize_core::gguf::MappedGgufFile,
+    inference_config: InferenceConfig,
+    use_cuda: bool,
+) -> Result<TrainModel> {
+    #[cfg(feature = "cuda")]
+    {
+        if use_cuda {
+            println!("oxidize-finetuning: using CUDA inference backend (gpu_native forward)");
+            return TrainModel::load_gpu(mapped, inference_config).map_err(|e| anyhow::anyhow!("{e}"));
+        }
+    }
+    #[cfg(not(feature = "cuda"))]
+    if use_cuda {
+        anyhow::bail!("--cuda requested but oxidize-finetuning was built without the cuda feature");
+    }
+    TrainModel::load_cpu(mapped, inference_config, 0).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 // ---------------------------------------------------------------------------
 // SFT implementation (original logic preserved)
 // ---------------------------------------------------------------------------
 
-fn run_sft(args: SftArgs) -> Result<()> {
+fn run_sft(args: SftArgs, use_cuda: bool) -> Result<()> {
     let config = FinetuneConfig {
         rank: args.lora_rank,
         alpha: args.lora_alpha,
@@ -311,11 +333,8 @@ fn run_sft(args: SftArgs) -> Result<()> {
     inference_config.context_size = inference_config
         .context_size
         .min(args.max_seq_len.max(args.window) + 8);
-    let mut model = LayerWiseModel::load_from_gguf(&mapped, inference_config, 0)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
-    model
-        .warm_layer_cache()
-        .map_err(|e| anyhow::anyhow!("warm layer cache: {e}"))?;
+    let mut model = load_train_model(&mapped, inference_config, use_cuda)?;
+    model.warm_layer_cache()?;
     let tokenizer = load_tokenizer_from_gguf_metadata(&mapped.parsed().metadata)
         .map_err(|e| anyhow::anyhow!("load tokenizer: {e:?}"))?;
     let eos = tokenizer.special_tokens().eos.unwrap_or(0);
@@ -465,7 +484,7 @@ fn run_ppo(args: PpoArgs) -> Result<()> {
 // Self-train implementation
 // ---------------------------------------------------------------------------
 
-fn run_self_train(args: SelfTrainArgs) -> Result<()> {
+fn run_self_train(args: SelfTrainArgs, use_cuda: bool) -> Result<()> {
     let finetune = FinetuneConfig {
         rank: args.lora_rank,
         learning_rate: args.learning_rate,
@@ -492,11 +511,8 @@ fn run_self_train(args: SelfTrainArgs) -> Result<()> {
     inference_config.context_size = inference_config
         .context_size
         .min(args.max_seq_len.max(args.window) + args.max_new_tokens + 8);
-    let mut model = LayerWiseModel::load_from_gguf(&mapped, inference_config, 0)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
-    model
-        .warm_layer_cache()
-        .map_err(|e| anyhow::anyhow!("warm layer cache: {e}"))?;
+    let mut model = load_train_model(&mapped, inference_config, use_cuda)?;
+    model.warm_layer_cache()?;
     let tokenizer = load_tokenizer_from_gguf_metadata(&mapped.parsed().metadata)
         .map_err(|e| anyhow::anyhow!("load tokenizer: {e:?}"))?;
     let eos = tokenizer.special_tokens().eos.unwrap_or(0);

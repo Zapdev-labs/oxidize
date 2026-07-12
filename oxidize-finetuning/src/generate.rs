@@ -1,6 +1,6 @@
 //! Autoregressive generation with a trainable LoRA adapter on the LM head.
 
-use oxidize_core::layer_wise::LayerWiseModel;
+use crate::train_model::TrainModel;
 use oxidize_core::model::Model;
 use oxidize_core::sampling::{SamplingConfig, greedy, sample};
 
@@ -48,7 +48,7 @@ fn sampling_config(generate_cfg: &GenerateConfig) -> SamplingConfig {
 }
 
 fn logits_for_position(
-    model: &LayerWiseModel,
+    model: &TrainModel,
     lora: &LoRAAdapter,
     normed: &[f32],
     logits: &mut [f32],
@@ -63,7 +63,7 @@ fn logits_for_position(
 
 /// Generate continuation tokens for `prompt` using base weights + LoRA residual.
 pub fn generate_with_lora(
-    model: &mut LayerWiseModel,
+    model: &mut TrainModel,
     lora: &LoRAAdapter,
     prompt: &[u32],
     config: &GenerateConfig,

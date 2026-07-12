@@ -8,7 +8,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use oxidize_core::layer_wise::LayerWiseModel;
+use crate::train_model::TrainModel;
 use serde::{Deserialize, Serialize};
 
 use crate::config::FinetuneConfig;
@@ -99,7 +99,7 @@ impl SelfTrainLoop {
 
     pub fn run(
         &self,
-        model: &mut LayerWiseModel,
+        model: &mut TrainModel,
         seed_dataset: &[SftExample],
         eval_chunks: &[Vec<u32>],
         encode: impl Fn(&str) -> Vec<u32> + Sync,
@@ -245,7 +245,7 @@ impl SelfTrainLoop {
 
     fn generate_self_dialogues(
         &self,
-        model: &mut LayerWiseModel,
+        model: &mut TrainModel,
         lora: &LoRAAdapter,
         prompts: &[String],
         encode: &impl Fn(&str) -> Vec<u32>,

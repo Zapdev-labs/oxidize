@@ -18,6 +18,9 @@ pub mod rlhf;
 pub mod self_train;
 pub mod telemetry;
 mod trainer;
+mod train_model;
+
+pub use train_model::TrainModel;
 
 pub use config::FinetuneConfig;
 pub use dataset::{SftExample, load_jsonl_sft, pack_chunks};

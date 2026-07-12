@@ -20,6 +20,7 @@ oxidize-c/
 ├── server.c           # POSIX-socket OpenAI-compatible HTTP + WebSocket server
 ├── prune.c            # oc_prune_main (magnitude/Wanda/N:M masks)
 ├── finetune.c         # oc_finetune_main (LoRA + AdamW + CE-grad)
+├── merge.c            # standalone SafeTensors merger (oc-merge; port of oxidize-merge)
 ├── cuda.cu            # optional resident-CUDA forward path (OC_CUDA)
 ├── oc_iq_grids.h      # IQ dequant grids
 └── test_oc.c          # unit test harness
@@ -43,6 +44,9 @@ oxidize-c --model <path.gguf> [--prompt --chat --max-tokens --ctx --kv-int8
           --seed --no-bos --stream --serve --port --host]
 oxidize-c prune ...
 oxidize-c finetune ...
+oc-merge --a <model> --b <model> --output <path> [--method linear|slerp --t
+          --preset kimi-k275 --attention-t --mlp-t --other-t --missing error|a|b
+          --max-shard-gib --dry-run --self-test]   # SafeTensors merger (merge.c)
 ```
 Server: `POST /v1/chat/completions`, `POST /v1/completions`, `GET /health`, WebSocket `ws://HOST:PORT/v1/realtime` (SSE streaming; auth via `OXIDIZE_API_KEY`/`OXIDIZE_API_KEYS`).
 
@@ -50,6 +54,7 @@ Server: `POST /v1/chat/completions`, `POST /v1/completions`, `GET /health`, WebS
 ```bash
 make            # -> ./oxidize-c (CFLAGS default: -O3 -march=native -flto -fopenmp)
 make cuda       # -> ./oxidize-c-cuda (nvcc, -DOC_CUDA, cuBLAS/cudart)
+make merge      # -> ./oc-merge (standalone SafeTensors merger; ./oc-merge --self-test)
 make test       # compiles + runs ./test_oc
 make clean
 ./oxidize-c --model model.gguf --prompt "hi" --stream

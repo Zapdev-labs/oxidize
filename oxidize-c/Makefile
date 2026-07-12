@@ -14,7 +14,7 @@ merge: oc-merge
 
 TEST_OUTPUT = $(if $(TEST_BIN),$(TEST_BIN),test_oc)
 TEST_RUN = $(if $(TEST_BIN),$(TEST_BIN),./test_oc)
-TEST_SRC = quant.c kernels.c numa.c gguf.c tokenizer.c model.c prune.c finetune.c batch.c test_oc.c
+TEST_SRC = quant.c kernels.c numa.c gguf.c tokenizer.c model.c gen.c prune.c finetune.c batch.c test_oc.c
 
 RAW_TPS_SRC = quant.c kernels.c numa.c gguf.c tokenizer.c model.c raw_tps_bench.c
 RAW_TPS_TEST_BIN = $(if $(TEST_BIN),$(TEST_BIN),raw-tps-bench-test)

@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use oxidize_core::layer_wise::LayerWiseModel;
+use crate::train_model::TrainModel;
 use oxidize_core::model::Model;
 
 use crate::config::FinetuneConfig;
@@ -38,7 +38,7 @@ pub struct SftTrainer {
 }
 
 impl SftTrainer {
-    pub fn for_model(model: &LayerWiseModel, config: FinetuneConfig) -> Self {
+    pub fn for_model(model: &TrainModel, config: FinetuneConfig) -> Self {
         let h = model.config().hidden_size;
         let vocab = model.config().vocab_size;
         Self {
@@ -88,7 +88,7 @@ impl SftTrainer {
     /// Train over pre-packed chunks (see `dataset::pack_chunks`).
     pub fn train(
         &mut self,
-        model: &mut LayerWiseModel,
+        model: &mut TrainModel,
         chunks: &[Vec<u32>],
     ) -> Result<FinetuneReport> {
         if chunks.is_empty() {
@@ -233,7 +233,7 @@ impl SftTrainer {
     }
 
     /// Mean loss over pre-packed chunks, no gradient work.
-    pub fn eval_loss(&self, model: &mut LayerWiseModel, chunks: &[Vec<u32>]) -> Result<f32> {
+    pub fn eval_loss(&self, model: &mut TrainModel, chunks: &[Vec<u32>]) -> Result<f32> {
         let vocab = model.config().vocab_size;
         let window = self.config.window.max(2);
         let mut logits = vec![0.0_f32; window * vocab];

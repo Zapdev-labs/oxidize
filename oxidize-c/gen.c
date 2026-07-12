@@ -38,29 +38,70 @@ static int cmp_desc(const void *a, const void *b) {
   return d > 0 ? 1 : d < 0 ? -1 : 0;
 }
 
-static uint32_t sample_pick(const float *logits, size_t n, float temp,
-                            size_t top_k, float top_p) {
-  if (temp <= 0.0f) return argmax_(logits, n);
-  float inv_t = 1.0f / temp;
+uint32_t oc_sample_token(const oc_gen *g, const float *logits, size_t n,
+                         const uint32_t *history, size_t history_count) {
+  if (!g || !logits || n == 0) return 0;
+  bool penalize = g->penalty_last_n > 0 && history && history_count > 0 &&
+                  (g->frequency_penalty > 0.0f || g->presence_penalty > 0.0f);
+  if (g->temperature <= 0.0f && !penalize) return argmax_(logits, n);
+
+  float *adjusted = NULL;
+  const float *source = logits;
+  if (penalize) {
+    if (n > SIZE_MAX / sizeof(*adjusted)) oc_die("sampling vocabulary too large");
+    adjusted = malloc(n * sizeof(*adjusted));
+    if (!adjusted) oc_die("sampling penalty allocation failed");
+    memcpy(adjusted, logits, n * sizeof(*adjusted));
+    size_t start = history_count > g->penalty_last_n
+                     ? history_count - g->penalty_last_n : 0;
+    for (size_t i = start; i < history_count; ++i) {
+      uint32_t token = history[i];
+      if (token >= n) continue;
+      bool seen = false;
+      for (size_t j = start; j < i; ++j)
+        if (history[j] == token) { seen = true; break; }
+      adjusted[token] -= g->frequency_penalty;
+      if (!seen) adjusted[token] -= g->presence_penalty;
+    }
+    source = adjusted;
+  }
+  if (g->temperature <= 0.0f) {
+    uint32_t token = argmax_(source, n);
+    free(adjusted);
+    return token;
+  }
+
+  float inv_t = 1.0f / g->temperature;
+  if (n > SIZE_MAX / sizeof(float[2])) oc_die("sampling vocabulary too large");
   float (*pairs)[2] = malloc(n * sizeof(*pairs));
+  if (!pairs) {
+    free(adjusted);
+    oc_die("sampling candidate allocation failed");
+  }
   for (size_t i = 0; i < n; ++i) {
     pairs[i][0] = (float)i;
-    pairs[i][1] = logits[i] * inv_t;
+    pairs[i][1] = source[i] * inv_t;
   }
   qsort(pairs, n, sizeof(*pairs), cmp_desc);
-  size_t keep = top_k > 0 && top_k < n ? top_k : n;
+  size_t keep = g->top_k > 0 && g->top_k < n ? g->top_k : n;
   float mx = pairs[0][1];
   double sum = 0;
   for (size_t i = 0; i < keep; ++i) {
     pairs[i][1] = expf(pairs[i][1] - mx);
     sum += pairs[i][1];
   }
-  if (top_p < 1.0f) {
+  if (g->top_p < 1.0f) {
     double acc = 0;
     for (size_t i = 0; i < keep; ++i) {
       acc += pairs[i][1] / sum;
-      if (acc >= top_p) { keep = i + 1; break; }
+      if (acc >= g->top_p) { keep = i + 1; break; }
     }
+    sum = 0;
+    for (size_t i = 0; i < keep; ++i) sum += pairs[i][1];
+  }
+  if (g->min_p > 0.0f && g->min_p <= 1.0f) {
+    float threshold = pairs[0][1] * g->min_p;
+    while (keep > 1 && pairs[keep - 1][1] < threshold) --keep;
     sum = 0;
     for (size_t i = 0; i < keep; ++i) sum += pairs[i][1];
   }
@@ -73,6 +114,7 @@ static uint32_t sample_pick(const float *logits, size_t n, float temp,
   }
   uint32_t id = (uint32_t)pairs[pick][0];
   free(pairs);
+  free(adjusted);
   return id;
 }
 
@@ -129,7 +171,12 @@ size_t oc_generate(oc_gen *g, const uint32_t *prompt, size_t n_prompt,
   uint32_t last = prompt[n_prompt - 1];
 
   /* token history for n-gram lookup drafting */
-  uint32_t *hist = malloc((n_prompt + max_new + 8) * sizeof(uint32_t));
+  if (max_new > SIZE_MAX - 72 ||
+      n_prompt > SIZE_MAX - (max_new + 72) ||
+      n_prompt + max_new + 72 > SIZE_MAX / sizeof(uint32_t))
+    oc_die("generation history too large");
+  uint32_t *hist = malloc((n_prompt + max_new + 72) * sizeof(uint32_t));
+  if (!hist) oc_die("generation history allocation failed");
   memcpy(hist, prompt, n_prompt * sizeof(uint32_t));
   size_t n_hist = n_prompt;
 
@@ -154,8 +201,9 @@ size_t oc_generate(oc_gen *g, const uint32_t *prompt, size_t n_prompt,
       size_t total = 0;
       bool full = true;
       for (size_t i = 0; i < nd; ++i) {
-        uint32_t want = sample_pick(verify + i * vocab, vocab, g->temperature,
-                                    g->top_k, g->top_p);
+        uint32_t want = oc_sample_token(g, verify + i * vocab, vocab,
+                                        hist, n_hist + total);
+        hist[n_hist + total] = want;
         if (want == draft[i]) {
           tokens[total++] = want;
         } else {
@@ -164,9 +212,12 @@ size_t oc_generate(oc_gen *g, const uint32_t *prompt, size_t n_prompt,
           break;
         }
       }
-      if (full && total < 64)
-        tokens[total++] = sample_pick(verify + nd * vocab, vocab, g->temperature,
-                                      g->top_k, g->top_p);
+      if (full && total < 64) {
+        tokens[total] = oc_sample_token(g, verify + nd * vocab, vocab,
+                                        hist, n_hist + total);
+        hist[n_hist + total] = tokens[total];
+        total++;
+      }
       g->drafted += nd;
       g->accepted += full ? nd : total - 1;
 
@@ -196,7 +247,7 @@ size_t oc_generate(oc_gen *g, const uint32_t *prompt, size_t n_prompt,
         k = 0;
     } else {
       /* ---- plain decode ---- */
-      uint32_t t = sample_pick(pending, vocab, g->temperature, g->top_k, g->top_p);
+      uint32_t t = oc_sample_token(g, pending, vocab, hist, n_hist);
       if (g->tok && oc_is_eog(g->tok, t)) break;
       out[emitted++] = t;
       hist[n_hist++] = t;

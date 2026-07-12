@@ -11,6 +11,7 @@
 #include <sys/syscall.h>
 #include <dirent.h>
 #include <errno.h>
+#include <math.h>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -238,6 +239,10 @@ static void usage(const char *prog) {
           "  --numa MODE         single (default) | interleave | all | replicate | <node-id>\n"
           "  --temperature F     sampling temperature (default 0 = greedy)\n"
           "  --top-k N --top-p F sampling filters\n"
+          "  --min-p F           minimum relative token probability (0..1)\n"
+          "  --frequency-penalty F  penalty per recent token occurrence\n"
+          "  --presence-penalty F   penalty applied once to seen tokens\n"
+          "  --penalty-last-n N  recent-token penalty window (default 256)\n"
           "  --seed N            RNG seed\n"
           "  --no-bos            don't prepend BOS\n"
           "  --stream            stream text to stdout\n"
@@ -256,10 +261,22 @@ static size_t parse_size_option(const char *option, const char *value,
   char *end = NULL;
   errno = 0;
   unsigned long long parsed = strtoull(value, &end, 10);
-  if (!value[0] || errno || !end || *end || parsed < minimum ||
+  if (!value[0] || value[0] == '-' || value[0] == '+' || errno || !end ||
+      *end || parsed < minimum ||
       parsed > (unsigned long long)SIZE_MAX)
     oc_die("bad %s %s", option, value);
   return (size_t)parsed;
+}
+
+static float parse_float_option(const char *option, const char *value,
+                                float minimum, float maximum) {
+  char *end = NULL;
+  errno = 0;
+  float parsed = strtof(value, &end);
+  if (!value[0] || errno || !end || *end || !isfinite(parsed) ||
+      parsed < minimum || parsed > maximum)
+    oc_die("bad %s %s", option, value);
+  return parsed;
 }
 
 static void validate_gpu_list(const char *value) {
@@ -293,10 +310,11 @@ int main(int argc, char **argv) {
     return oc_finetune_main(argc - 2, argv + 2);
 
   const char *model_path = NULL, *prompt = "Hello", *host = "127.0.0.1";
-  size_t max_tokens = 64, top_k = 0, ctx = 8192, draft = 4;
+  size_t max_tokens = 64, top_k = 0, ctx = 8192, draft = 4, penalty_last_n = 256;
   int kv_int8 = 0;
   int spec_mode = OC_SPEC_NGRAM;
-  float temperature = 0.0f, top_p = 1.0f;
+  float temperature = 0.0f, top_p = 1.0f, min_p = 0.0f;
+  float frequency_penalty = 0.0f, presence_penalty = 0.0f;
   int threads = 0, port = 8090;
   size_t max_seqs = 1, max_queue = 0;
   bool no_bos = false, stream = false, serve = false, chat = false;
@@ -329,9 +347,21 @@ int main(int argc, char **argv) {
       validate_gpu_list(gpu_list);
     }
     else if (!strcmp(argv[i], "--numa")) numa_mode = VAL();
-    else if (!strcmp(argv[i], "--temperature")) temperature = strtof(VAL(), 0);
+    else if (!strcmp(argv[i], "--temperature"))
+      temperature = parse_float_option("--temperature", VAL(), 0.0f, INFINITY);
     else if (!strcmp(argv[i], "--top-k")) top_k = strtoull(VAL(), 0, 10);
-    else if (!strcmp(argv[i], "--top-p")) top_p = strtof(VAL(), 0);
+    else if (!strcmp(argv[i], "--top-p"))
+      top_p = parse_float_option("--top-p", VAL(), 0.0f, 1.0f);
+    else if (!strcmp(argv[i], "--min-p"))
+      min_p = parse_float_option("--min-p", VAL(), 0.0f, 1.0f);
+    else if (!strcmp(argv[i], "--frequency-penalty"))
+      frequency_penalty =
+          parse_float_option("--frequency-penalty", VAL(), 0.0f, INFINITY);
+    else if (!strcmp(argv[i], "--presence-penalty"))
+      presence_penalty =
+          parse_float_option("--presence-penalty", VAL(), 0.0f, INFINITY);
+    else if (!strcmp(argv[i], "--penalty-last-n"))
+      penalty_last_n = parse_size_option("--penalty-last-n", VAL(), 0);
     else if (!strcmp(argv[i], "--seed")) seed = strtoull(VAL(), 0, 10);
     else if (!strcmp(argv[i], "--kv-int8")) kv_int8 = 1;
     else if (!strcmp(argv[i], "--no-bos")) no_bos = true;
@@ -421,6 +451,10 @@ int main(int argc, char **argv) {
   g.temperature = temperature;
   g.top_k = top_k;
   g.top_p = top_p;
+  g.min_p = min_p;
+  g.frequency_penalty = frequency_penalty;
+  g.presence_penalty = presence_penalty;
+  g.penalty_last_n = penalty_last_n;
   g.draft_k = draft;
   g.spec_mode = spec_mode;
   stream_ud sud = {tok};

@@ -186,25 +186,25 @@ make wasm     # outputs to dist/wasm
 - When adding `oxidize-python` or expanding `oxidize-golang`, keep all Rust crates and features; do not delete or replace the Rust workspace.
 - Parallel Go/Python ports should reach `oxidize-core` feature parity (Python targeting similar CLOC to Rust); implement in `oxidize-golang` first, mirror to `oxidize-python`, and sync new `master` Rust features.
 - Keep `oxidize-py` (PyO3/maturin bindings) alongside the pure-Python `oxidize-python` package.
-- Prioritize oxidize-cpp speed and llama.cpp feature parity for large-model inference; benchmark CPU deployments on the remote NUMA box `ai@192.168.1.132` when tuning.
+- Prioritize oxidize-c/oxidize-cpp CPU inference speed; use `oxidize-c` for Qwen 3.5/GDN hybrid models (`oxidize-cpp` cannot load them); benchmark C/C++ tuning on `ai@192.168.1.122` or `ai@192.168.1.132`.
 - For Go/Python GPU backends, use pure native implementations (no Rust FFI at runtime; CGO permitted for native GPU bindings); CUDA first, then Vulkan/Metal/WebGPU.
 - Avoid creating extra markdown documentation files unless asked; update README when needed.
 - On feature branches, stage and commit only files related to the task; exclude unrelated workspace changes.
-- `oxidize run <model>` should start the OpenAI-compatible HTTP/WebSocket server by default; use `--no-api` for local inference only.
+- Running a model means running it with oxidize; `oxidize run <model>` starts the OpenAI-compatible HTTP/WebSocket server by default (`--no-api` for local inference only), otherwise prefer building/testing over starting dev servers unless explicitly asked to run/serve.
 - Contributions should keep tests passing and use clear, ethical PR/markdown descriptions; include benchmarks when claiming performance changes.
-- When a user asks to run a model. It means run it using oxidize 
-- Prefer building and testing over starting development servers unless the user explicitly asks to run or serve.
-- Custom Hugging Face repos for quant/model publishing should be private unless the user explicitly requests public.
+- Publish quant/finetuned models to private HF repos unless the user requests public; strip all branding from produced GGUFs, and for finetuning convert from the original SafeTensors rather than reusing a published GGUF.
+- Run GPU finetuning via the Prime Intellect CLI on a cheap but powerful rented GPU (not CPU); SSH in and commit changes as needed (`scripts/prime-qwen35-self-train`).
+- Provide quick-running Google Colab notebooks for quant/finetuning workflows; ensure notebooks/README use the correct oxidize GitHub URL and that changes land on `master`.
 
 ## Learned Workspace Facts
 - `oxidize-golang/` is the active Go port of `oxidize-core`; CLI lives in `internal/cli/` (`run`, `chat`, `bench`, `inspect`, `list`, `serve`); HF GGUF resolver in `hf/`.
 - `oxidize-python/` is a pure-Python implementation (`oxidize_python`, `pyproject.toml`, uv/pytest); CLI mirrors Go subcommands; HF resolver in `oxidize_python/hf/hub.py` with cache `~/.cache/oxidize/hf`; `oxidize-py/` is the separate PyO3/maturin bindings crate.
 - Do not modify Rust crates when extending `oxidize-python`; port from `oxidize-golang` or Rust sources.
-- `oxidize-cpp/` is the C++ Llama-family inference port (CPU + optional `OXIDIZE_CUDA` or `OXIDIZE_ROCM`); CLI `--auto`/`--print-plan` autotune NUMA/threads from model file size; CUDA fast path is `resident_forward` (~1 sync/token); llama.cpp parity is an active focus.
-- `oxidize-c/` is a dependency-free C11 port with optional `OC_CUDA` fast path; shares AL-family quant types with Rust/C++.
-- Remote hosts: `ai@192.168.1.132` (primary NUMA bench: 2× Xeon Gold 5220R, 96 logical, 376 GB RAM); `ai@192.168.1.121` (~20 TB storage for large-model quant + HF publish); legacy `ai@192.168.1.68`; `scripts/bench-ai-box.sh` defaults to `.132`; `oxidize-cpp-glm/` is a separate GLM fork (MLA/IQ1/MoE).
-- Custom AL-family quants (`AL5`, `AL5_XS`, `AL6`, `AL8`; ggml types 240–243) live in `oxidize-core`, `oxidize-cpp`, and `oxidize-c`; AL5 is MSE-optimized 4-bit; prioritize speed without quality loss when tuning them.
-- `oxidize-finetuning` exposes `self-train` CLI (`cargo run -p oxidize-finetuning -- self-train`): iterative LoRA SFT with per-round checkpoints, self-dialogue synthetic data (`synthetic.jsonl`), and optional self-critique; resume via `--resume-from`.
+- `oxidize-cpp/` is the C++ Llama-family inference port (CPU + optional `OXIDIZE_CUDA` or `OXIDIZE_ROCM`); CLI `--auto`/`--print-plan` autotune NUMA/threads from model file size; CUDA fast path is `resident_forward` (~1 sync/token); llama.cpp parity is an active focus; cannot load Qwen 3.5/GDN hybrids.
+- `oxidize-c/` is a dependency-free C11 port with optional `OC_CUDA` fast path; shares AL-family quant types with Rust/C++; supports Qwen 3.5 Gated-DeltaNet hybrids and is the fastest CPU serve path for self-train GDN GGUFs.
+- Remote hosts: `ai@192.168.1.132` (primary NUMA bench: 2× Xeon Gold 5220R, 96 logical, 376 GB RAM); `ai@192.168.1.122` (dual-Xeon CPU, no GPU, ~376 GB RAM — C/C++ inference benchmarks, self-train serve, model merge staging; hosts `oxidize-tps` with `--numa replicate` for peak CPU TPS); `ai@192.168.1.121` (~20 TB storage for large-model quant + HF publish); legacy `ai@192.168.1.68`; `scripts/bench-ai-box.sh` defaults to `.132`; `oxidize-cpp-glm/` is a separate GLM fork (MLA/IQ1/MoE).
+- Custom AL-family quants (`AL5`, `AL5_XS`, `AL6`, `AL8`; ggml types 240–243) live in `oxidize-core`, `oxidize-cpp`, and `oxidize-c`; AL5 is MSE-optimized 4-bit; prioritize speed without quality loss when tuning them; validated against Gemma 4 31B and Qwen 35 base models via the `oxidize-c` runner.
+- `oxidize-finetuning` exposes `self-train` CLI (`cargo run -p oxidize-finetuning -- self-train`): iterative LoRA SFT with per-round checkpoints, self-dialogue synthetic data (`synthetic.jsonl`), and optional self-critique; resume via `--resume-from`; GPU self-train on rented Prime Intellect boxes uses `scripts/prime-qwen35-self-train/` (run-gpu-finetune / unsloth-gpu, merge-and-upload, HF upload).
 - DFlash speculative decoding in `oxidize-core/src/model/dflash.rs` is an active port target for `oxidize-golang` (and downstream Python); inference needs a compatible target GGUF paired with the draft (hidden-size mismatch falls back to target-only).
 - Rust `oxidize run` rewrites to `--serve-api` by default (background in-process server on `--api-host`/`--api-port`); realtime WebSocket at `ws://HOST:PORT/v1/realtime` (`oxidize-server/tests/realtime_ws.rs`).
 - `oxidize-convert` converts HuggingFace SafeTensors (file or model directory with `config.json`) to GGUF; core logic in `oxidize-core/src/format/safetensors_to_gguf.rs`.

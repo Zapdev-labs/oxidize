@@ -328,6 +328,13 @@ impl LayerWiseModel {
                 &mut normed,
                 cfg,
             )?;
+            if layer_idx == 0 && t == 0 && crate::inference::trace_vals_enabled() {
+                let sum_sq: f32 = xs[t * h..(t + 1) * h].iter().map(|v| v * v).sum();
+                let inv_rms = 1.0_f32 / (sum_sq / h as f32 + cfg.rms_norm_eps).sqrt();
+                eprintln!("GDN L0 x sum_sq={:.6} inv_rms={:.6}", sum_sq, inv_rms);
+                eprintln!("GDN L0 x[0..4]={:.6} {:.6} {:.6} {:.6}", xs[t * h], xs[t * h + 1], xs[t * h + 2], xs[t * h + 3]);
+                eprintln!("GDN L0 attn_norm[0..4]={:.6} {:.6} {:.6} {:.6}", layer.attn_norm[0], layer.attn_norm[1], layer.attn_norm[2], layer.attn_norm[3]);
+            }
             normed_all[t * h..(t + 1) * h].copy_from_slice(&normed);
         }
 
@@ -371,6 +378,10 @@ impl LayerWiseModel {
             kk,
         )
         .map_err(|e| ModelError::InferenceFailed(format!("attn_qkv: {:?}", e)))?;
+        if layer_idx == 0 && crate::inference::trace_vals_enabled() {
+            eprintln!("GDN L0 normed_all[0..4]={:.6} {:.6} {:.6} {:.6}", normed_all[0], normed_all[1], normed_all[2], normed_all[3]);
+            eprintln!("GDN L0 mixed_all[0..4]={:.6} {:.6} {:.6} {:.6}", mixed_all[0], mixed_all[1], mixed_all[2], mixed_all[3]);
+        }
         let mut b_all = vec![0.0_f32; kk * num_v_heads];
         if !weight_is_empty(&layer.ssm_beta) {
             gemm_weight(&layer.ssm_beta, num_v_heads, h, &normed_all, &mut b_all, kk)

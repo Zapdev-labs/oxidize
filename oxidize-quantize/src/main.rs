@@ -277,6 +277,7 @@ struct TensorPlan {
     name: String,
     dimensions: Vec<u64>,
     output_ggml_type: u32,
+    shard_index: usize,
     absolute_offset: usize,
     input_size: usize,
     output_size: usize,
@@ -327,7 +328,7 @@ fn quantize_gguf_stream(
         .map_err(|err| anyhow!(err))
         .with_context(|| format!("failed to mmap GGUF input: {}", input_path.display()))?;
     let parsed = mapped.parsed();
-    let input = mapped.bytes();
+    let shard_bytes = mapped.shard_bytes();
 
     let mut metadata = parsed.metadata.clone();
     metadata.insert(
@@ -351,7 +352,14 @@ fn quantize_gguf_stream(
             new_ctx as f32 / orig.max(1) as f32
         );
     }
-    let plans = build_tensor_plans(parsed, input.len(), target, imatrix)?;
+    let plans = build_tensor_plans(parsed, target, imatrix)?;
+    if shard_bytes.len() > 1 {
+        eprintln!(
+            "loaded {} GGUF shard(s), {} tensors",
+            shard_bytes.len(),
+            plans.len()
+        );
+    }
 
     let mut output = File::create(output_path)
         .with_context(|| format!("failed to create output file: {}", output_path.display()))?;
@@ -360,27 +368,25 @@ fn quantize_gguf_stream(
         &metadata,
         &plans,
         parsed.alignment,
-        input,
+        &shard_bytes,
         &mut output,
     )
 }
 
 fn build_tensor_plans(
     parsed: &GgufFile,
-    input_len: usize,
     target: GgufQuantizationType,
     imatrix: Option<&Imatrix>,
 ) -> Result<Vec<TensorPlan>> {
     parsed
         .tensor_infos
         .iter()
-        .map(|tensor| build_tensor_plan(tensor, input_len, target, imatrix))
+        .map(|tensor| build_tensor_plan(tensor, target, imatrix))
         .collect()
 }
 
 fn build_tensor_plan(
     tensor: &GgufTensorInfo,
-    input_len: usize,
     target: GgufQuantizationType,
     imatrix: Option<&Imatrix>,
 ) -> Result<TensorPlan> {
@@ -391,12 +397,6 @@ fn build_tensor_plan(
         .with_context(|| format!("unsupported input tensor type for {}", tensor.name))?;
     let absolute_offset = usize::try_from(tensor.absolute_offset)
         .with_context(|| format!("tensor {} offset overflows usize", tensor.name))?;
-    let end = absolute_offset
-        .checked_add(input_size)
-        .ok_or_else(|| anyhow!("tensor {} byte range overflows", tensor.name))?;
-    if end > input_len {
-        bail!("tensor {} extends past end of input GGUF", tensor.name);
-    }
 
     let output_quantization = select_output_quantization(tensor, source, target)?;
     let quantize = output_quantization != source;
@@ -417,6 +417,7 @@ fn build_tensor_plan(
         name: tensor.name.clone(),
         dimensions: tensor.dimensions.clone(),
         output_ggml_type,
+        shard_index: tensor.mmap_index,
         absolute_offset,
         input_size,
         output_size,
@@ -792,7 +793,7 @@ fn write_gguf_stream(
     metadata: &BTreeMap<String, GgufMetadataValue>,
     tensors: &[TensorPlan],
     alignment: u64,
-    input: &[u8],
+    shard_bytes: &[&[u8]],
     output: &mut File,
 ) -> Result<()> {
     if alignment == 0 || !alignment.is_power_of_two() {
@@ -838,7 +839,7 @@ fn write_gguf_stream(
             tensor.input_size,
             tensor.output_size
         );
-        write_tensor_data_stream(tensor, input, output)?;
+        write_tensor_data_stream(tensor, shard_bytes, output)?;
         let aligned = align_up_u64(
             expected_pos
                 .checked_add(tensor.output_size as u64)
@@ -878,11 +879,30 @@ fn pad_file_to(output: &mut File, target_len: u64) -> Result<()> {
     Ok(())
 }
 
-fn write_tensor_data_stream(tensor: &TensorPlan, input: &[u8], output: &mut File) -> Result<()> {
+fn write_tensor_data_stream(
+    tensor: &TensorPlan,
+    shard_bytes: &[&[u8]],
+    output: &mut File,
+) -> Result<()> {
+    let input = shard_bytes.get(tensor.shard_index).ok_or_else(|| {
+        anyhow!(
+            "tensor {} references shard {} but only {} shard(s) loaded",
+            tensor.name,
+            tensor.shard_index,
+            shard_bytes.len()
+        )
+    })?;
     let start = tensor.absolute_offset;
     let end = start
         .checked_add(tensor.input_size)
         .ok_or_else(|| anyhow!("tensor {} byte range overflows", tensor.name))?;
+    if end > input.len() {
+        bail!(
+            "tensor {} extends past end of GGUF shard {}",
+            tensor.name,
+            tensor.shard_index
+        );
+    }
     let input_bytes = &input[start..end];
 
     if !tensor.quantize {

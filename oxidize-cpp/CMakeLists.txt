@@ -95,6 +95,10 @@ target_link_libraries(oxidize-cpp PRIVATE oxidize_core)
 add_executable(oxidize-cpp-server src/server/main.cpp src/server/json.cpp)
 target_link_libraries(oxidize-cpp-server PRIVATE oxidize_core)
 
+# ---- SafeTensors checkpoint merger ----------------------------------------
+add_executable(oxidize-cpp-merge src/cli/merge_main.cpp src/server/json.cpp)
+target_link_libraries(oxidize-cpp-merge PRIVATE oxidize_core)
+
 # ---- training library (fp32, no CUDA dep) ---------------------------------
 file(GLOB TRAIN_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/train/*.cpp")
 # Exclude grad_check.cpp (it has its own main()).

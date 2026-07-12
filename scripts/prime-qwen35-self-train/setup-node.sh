@@ -8,7 +8,7 @@ HF_ID="${HF_MODEL:-empero-ai/Qwythos-9B-Claude-Mythos-5-1M}"
 OUT_DIR="${OUT_DIR:-$HOME/models/qwen35-9b-agent}"
 HF_DIR="$OUT_DIR/hf"
 F16="$OUT_DIR/qwen35-9b-instruct-f16.gguf"
-Q8="$OUT_DIR/qwen35-9b-instruct-q8_0.gguf"
+Q4="$OUT_DIR/qwen35-9b-instruct-q4_k_m.gguf"
 DATASET="$OUT_DIR/seed_coding_agent.jsonl"
 THREADS="${TRAIN_THREADS:-$(nproc)}"
 
@@ -40,8 +40,8 @@ if [[ ! -d "$REPO/.git" ]]; then
 fi
 
 cd "$REPO"
-echo "==> building oxidize-convert + oxidize-quantize + oxidize-finetuning (release)"
-cargo build --release -p oxidize-convert -p oxidize-quantize -p oxidize-finetuning
+echo "==> building oxidize-convert + oxidize-quantize + oxidize-finetuning (release, cuda)"
+cargo build --release -p oxidize-convert -p oxidize-quantize -p oxidize-finetuning --features cuda
 
 CONVERT="$REPO/target/release/oxidize-convert"
 QUANTIZE="$REPO/target/release/oxidize-quantize"
@@ -63,13 +63,13 @@ if [[ ! -f "$F16" ]]; then
     "$CONVERT" --input "$HF_DIR" --output "$F16" --arch qwen3_5
 fi
 
-if [[ ! -f "$Q8" ]]; then
-  echo "==> quantize F16 -> Q8_0 (faster CPU SFT, minimal quality loss)"
-  /usr/bin/time -f "q8 quant wall=%e s" \
-    "$QUANTIZE" --input "$F16" --output "$Q8" --target Q8_0 --threads "$THREADS"
+if [[ ! -f "$Q4" ]]; then
+  echo "==> quantize F16 -> Q4_K_M (GPU-native kernels require Q4K family)"
+  /usr/bin/time -f "q4_k_m quant wall=%e s" \
+    "$QUANTIZE" --input "$F16" --output "$Q4" --target Q4_K_M --threads "$THREADS"
 fi
 
-python3 "$SCRIPT_DIR/strip_branding.py" --gguf "$F16" "$Q8"
+python3 "$SCRIPT_DIR/strip_branding.py" --gguf "$F16" "$Q4"
 
 if [[ ! -f "$DATASET" ]] || [[ "$(wc -l < "$DATASET")" -lt 100 ]]; then
   echo "==> building seed coding-agent JSONL"
@@ -78,7 +78,7 @@ fi
 
 echo ""
 echo "Setup complete."
-echo "  base (train): $Q8"
+echo "  base (train): $Q4"
 echo "  dataset:      $DATASET ($(wc -l < "$DATASET") rows)"
 echo "  finetune:     $REPO/target/release/oxidize-finetuning"
 echo ""

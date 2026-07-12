@@ -31,3 +31,5 @@ oxidize-golang/oxidize
 .cursor/hooks/state/
 .omo/
 modal_app.py.tmp.*
+
+.hf-staging

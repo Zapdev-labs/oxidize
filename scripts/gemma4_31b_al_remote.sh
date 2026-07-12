@@ -56,11 +56,11 @@ SRC="$BF16_DIR/BF16/gemma-4-31B-it-BF16-00001-of-00002.gguf"
 quant_one() {
   local target=$1
   local out="$OUT_DIR/gemma-4-31B-it-${target}.gguf"
-  if [[ -f "$out" ]]; then
-    echo "==> skip $target (exists)"
+  if [[ -f "$out" && "${FORCE:-0}" != "1" ]]; then
+    echo "==> skip $target (exists; set FORCE=1 to rebuild)"
     return 0
   fi
-  echo "==> quant BF16 -> $target"
+  echo "==> quant BF16 -> $target (auto-loads both shards when present)"
   /usr/bin/time -f "${target} wall=%e s cpu=%P" \
     "$QZ" --input "$SRC" --output "$out" --target "$target" --threads "$THREADS"
   ls -lh "$out"

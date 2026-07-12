@@ -3,6 +3,7 @@
  * Run via `make test`. */
 #include "oc.h"
 #include "batch.h"
+#include "gen.h"
 
 #include <assert.h>
 #include <math.h>
@@ -14,6 +15,79 @@ static uint32_t rstate = 12345;
 static uint32_t rnd(void) {
   rstate = rstate * 1664525u + 1013904223u;
   return rstate;
+}
+
+static void check_sampling_controls(void) {
+  /* Given: token 0 repeats twice and only narrowly leads unseen token 1. */
+  const float logits[] = {2.0f, 1.5f, 0.0f};
+  const uint32_t history[] = {0, 2, 0};
+  oc_gen generation = {.temperature = 0.0f, .top_p = 1.0f,
+                       .frequency_penalty = 0.3f,
+                       .presence_penalty = 0.2f, .penalty_last_n = 3};
+
+  /* When: frequency and presence penalties are applied to recent history. */
+  uint32_t token = oc_sample_token(&generation, logits, 3, history, 3);
+
+  /* Then: unseen token 1 wins, while a one-token window leaves token 0 ahead. */
+  if (token != 1) {
+    fprintf(stderr, "FAIL sampling penalties: got %u want 1\n", token);
+    exit(1);
+  }
+  generation.penalty_last_n = 1;
+  token = oc_sample_token(&generation, logits, 3, history, 3);
+  if (token != 0) {
+    fprintf(stderr, "FAIL sampling penalty window: got %u want 0\n", token);
+    exit(1);
+  }
+  generation = (oc_gen){.temperature = 0.0f, .top_p = 1.0f,
+                        .frequency_penalty = 0.3f, .penalty_last_n = 3};
+  if (oc_sample_token(&generation, logits, 3, history, 3) != 1) {
+    fprintf(stderr, "FAIL standalone frequency penalty\n");
+    exit(1);
+  }
+  const uint32_t seen_once[] = {0};
+  generation = (oc_gen){.temperature = 0.0f, .top_p = 1.0f,
+                        .presence_penalty = 0.6f, .penalty_last_n = 1};
+  if (oc_sample_token(&generation, logits, 3, seen_once, 1) != 1) {
+    fprintf(stderr, "FAIL standalone presence penalty\n");
+    exit(1);
+  }
+  generation = (oc_gen){.temperature = 0.0f, .top_p = 1.0f};
+  if (oc_sample_token(&generation, logits, 3, history, 3) != 0) {
+    fprintf(stderr, "FAIL disabled penalty default\n");
+    exit(1);
+  }
+
+  /* Given: a low-probability tail and deterministic seeded sampling. */
+  const float tail_logits[] = {4.0f, 3.0f, 0.0f};
+  generation = (oc_gen){.temperature = 1.0f, .top_p = 1.0f, .min_p = 0.9f};
+  oc_gen_seed(7);
+
+  /* When/Then: min-p retains only token 0. */
+  token = oc_sample_token(&generation, tail_logits, 3, NULL, 0);
+  if (token != 0) {
+    fprintf(stderr, "FAIL min-p sampling: got %u want 0\n", token);
+    exit(1);
+  }
+
+  /* Given: top-p admits two tokens before min-p removes the low tail. */
+  const float combined_logits[] = {logf(0.7f), logf(0.2f), logf(0.1f)};
+  generation = (oc_gen){.temperature = 1.0f, .top_p = 0.75f, .min_p = 0.2f};
+  bool sampled_second = false;
+
+  /* When: multiple deterministic seeds sample the combined filter. */
+  for (uint64_t seed = 1; seed <= 64; ++seed) {
+    oc_gen_seed(0x9e3779b97f4a7c15ull ^ seed);
+    if (oc_sample_token(&generation, combined_logits, 3, NULL, 0) == 1)
+      sampled_second = true;
+  }
+
+  /* Then: token 1 remains eligible, matching oxidize-core filter order. */
+  if (!sampled_second) {
+    fprintf(stderr, "FAIL top-p then min-p ordering removed token 1\n");
+    exit(1);
+  }
+  printf("ok min-p and repetition sampling controls\n");
 }
 
 static void check_gemma4_projection_metadata(void) {
@@ -810,6 +884,7 @@ int main(void) {
   check_sequence_scheduler_cancel_and_slot_reuse();
   check_sequence_scheduler_rng_isolation();
   check_batch_startup_releases_scalar_cuda_before_reconfigure();
+  check_sampling_controls();
 
   printf("all checks passed\n");
   return 0;

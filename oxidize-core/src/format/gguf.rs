@@ -83,6 +83,14 @@ impl MappedGgufFile {
         &mmap[start..start + size]
     }
 
+    /// All shard byte slices in order (split GGUF downloads).
+    pub fn shard_bytes(&self) -> Vec<&[u8]> {
+        self.mmaps
+            .iter()
+            .map(|mmap| mmap.as_ref().as_ref())
+            .collect()
+    }
+
     #[cfg(test)]
     pub fn from_parsed_for_test(parsed: GgufFile) -> Self {
         Self {
