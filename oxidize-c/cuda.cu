@@ -892,6 +892,7 @@ void oc_cuda_forward(oc_model *m, const float *embed_host, size_t pos,
   CDIE(cudaStreamSynchronize(c->stream)); /* &posi is stack memory */
   bool use_graph = c->gemma && !g_prof_on && !getenv("OC_TRACE") &&
                    !getenv("OC_NO_GRAPH") && !normed_host;
+  const int gate_after = getenv("OC_GDN_GATE_AFTER") != NULL;
   int gi = want_logits ? 1 : 0;
   if (use_graph && c->graph[gi]) {
     CDIE(cudaGraphLaunch(c->graph[gi], c->stream));
@@ -983,7 +984,6 @@ void oc_cuda_forward(oc_model *m, const float *embed_host, size_t pos,
                                        c->d_b, g->ssm_a, g->ssm_dt_bias, qo, kd,
                                        vd, g->n_k_heads, hk, hv, g->a_baked,
                                        out_scale);
-      int gate_after = getenv("OC_GDN_GATE_AFTER") != NULL;
       k_gated_rms_norm<<<nvh, 128, 0, c->stream>>>(c->d_core, g->ssm_norm, c->d_z, hv,
                                      c->rms_eps, gate_after);
       gemv(c, g->ssm_out, c->d_core, c->d_tmp);

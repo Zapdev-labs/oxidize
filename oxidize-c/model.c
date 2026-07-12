@@ -776,6 +776,7 @@ static scratch_t scratch_alloc(const oc_model *m, size_t batch) {
       if (needed > max_head_scratch) max_head_scratch = needed;
     }
     s.gdn_heads = malloc((max_head_scratch ? max_head_scratch : 1) * sizeof(float));
+    if (!s.gdn_heads) oc_die("model: GDN head scratch allocation failed");
   }
   size_t ff = c->expert_ff;
   if (c->n_expert) {
