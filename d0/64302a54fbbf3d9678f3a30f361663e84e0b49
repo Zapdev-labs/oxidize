@@ -1,0 +1,21 @@
+oxidize-c/model.c
+  s_6a9f35c65e1740::t_13beb829b94ad3 779
+oxidize-c/cuda.cu
+  s_6a9f35c65e1740::t_13beb829b94ad3 895
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.12",
+  "base_commit_sha": "d064302a54fbbf3d9678f3a30f361663e84e0b49",
+  "prompts": {},
+  "sessions": {
+    "s_6a9f35c65e1740": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5788-2550-7560-885a-80686bfe0365",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
