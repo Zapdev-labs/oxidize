@@ -6,6 +6,9 @@ fn iq_block_sizes_match_ggml_layout() {
     // offset deltas: IQ4_XS = 136 B / 256 vals, IQ3_S = 110 B / 256 vals.
     assert_eq!(BLOCK_IQ4_XS_SIZE, 136);
     assert_eq!(BLOCK_IQ3_S_SIZE, 110);
+    assert_eq!(BLOCK_IQ2_XS_SIZE, 74);
+    assert_eq!(BLOCK_IQ2_S_SIZE, 82);
+    assert_eq!(BLOCK_IQ4_NL_SIZE, 18);
     assert_eq!(IQ3S_GRID.len(), 512);
     assert_eq!(
         quantized_size(GgufQuantizationType::IQ4_XS, 256).unwrap(),
@@ -14,6 +17,14 @@ fn iq_block_sizes_match_ggml_layout() {
     assert_eq!(
         quantized_size(GgufQuantizationType::IQ3_S, 256).unwrap(),
         110
+    );
+    assert_eq!(
+        quantized_size(GgufQuantizationType::IQ4_NL, 32).unwrap(),
+        18
+    );
+    assert_eq!(
+        quantized_size(GgufQuantizationType::IQ2_S, 256).unwrap(),
+        82
     );
 }
 
@@ -106,6 +117,30 @@ fn iq4_xs_beats_q4_0_on_gaussian_weights() {
 }
 
 #[test]
+fn al5_beats_q4_0_mse_on_gaussian_weights() {
+    let values = gaussian_sample(QK4_0 * 64);
+
+    let mut q40 = vec![0u8; (values.len() / QK4_0) * BLOCK_Q4_0_SIZE];
+    quantize_q4_0_scalar(&values, &mut q40).expect("q4_0 encode");
+    let mut q40_dec = vec![0f32; values.len()];
+    dequantize_q4_0_scalar(&q40, &mut q40_dec).expect("q4_0 decode");
+
+    let mut al5 = vec![0u8; (values.len() / QK4_0) * BLOCK_Q4_0_SIZE];
+    quantize_al5_scalar(&values, &mut al5).expect("al5 encode");
+    let mut al5_dec = vec![0f32; values.len()];
+    dequantize_al5_scalar(&al5, &mut al5_dec).expect("al5 decode");
+
+    let q40_err = mse(&values, &q40_dec);
+    let al5_err = mse(&values, &al5_dec);
+    let pct = (1.0 - al5_err / q40_err) * 100.0;
+    eprintln!("AL5 MSE {al5_err:.6} vs Q4_0 {q40_err:.6} ({pct:.1}% lower)");
+    assert!(
+        al5_err < q40_err,
+        "AL5 MSE {al5_err} should beat Q4_0 MSE {q40_err}"
+    );
+}
+
+#[test]
 fn iq4_xs_imatrix_lowers_error_on_weighted_columns() {
     let values = gaussian_sample(QK_K * 4);
     // Importance heavily favors the first half of every 32-wide sub-block.
@@ -141,6 +176,97 @@ fn iq4_xs_imatrix_lowers_error_on_weighted_columns() {
         "imatrix should not increase error on important columns"
     );
     assert!(weighted_dec.iter().all(|v| v.is_finite()));
+}
+
+#[test]
+fn al5_imatrix_lowers_error_on_weighted_columns() {
+    let values = gaussian_sample(QK4_0 * 64);
+    // Importance heavily favors the first half of every 32-wide block.
+    let weights = (0..values.len())
+        .map(|i| if i % 32 < 16 { 8.0 } else { 1.0 })
+        .collect::<Vec<_>>();
+
+    let mut plain = vec![0u8; (values.len() / QK4_0) * BLOCK_Q4_0_SIZE];
+    quantize_al5_scalar(&values, &mut plain).expect("plain encode");
+    let mut plain_dec = vec![0f32; values.len()];
+    dequantize_al5_scalar(&plain, &mut plain_dec).expect("plain decode");
+
+    let mut weighted = vec![0u8; plain.len()];
+    quantize_al5_scalar_weighted(&values, &weights, &mut weighted).expect("weighted encode");
+    let mut weighted_dec = vec![0f32; values.len()];
+    dequantize_al5_scalar(&weighted, &mut weighted_dec).expect("weighted decode");
+
+    let important_err = |dec: &[f32]| -> f64 {
+        values
+            .iter()
+            .zip(dec)
+            .enumerate()
+            .filter(|(i, _)| i % 32 < 16)
+            .map(|(_, (x, y))| {
+                let d = (*x - *y) as f64;
+                d * d
+            })
+            .sum()
+    };
+    let w = important_err(&weighted_dec);
+    let p = important_err(&plain_dec);
+    eprintln!("AL5 imatrix important-col err: weighted {w:.4} vs plain {p:.4}");
+    assert!(
+        w < p,
+        "imatrix should lower error on important columns: {w} !< {p}"
+    );
+    assert!(weighted_dec.iter().all(|v| v.is_finite()));
+}
+
+#[test]
+fn iq4_nl_dequant_and_round_trip() {
+    let mut block = vec![0u8; BLOCK_IQ4_NL_SIZE];
+    block[0] = 0x00;
+    block[1] = 0x3c; // f16 1.0
+    block[2] = 0x10; // nibbles 0 and 1
+    let mut out = vec![0f32; QK4_NL];
+    dequantize_iq4_nl_scalar(&block, &mut out).unwrap();
+    assert_eq!(out[0], KVALUES_IQ4NL[0] as f32);
+    assert_eq!(out[16], KVALUES_IQ4NL[1] as f32);
+
+    let values = gaussian_sample(QK4_NL * 8);
+    let mut encoded = vec![0u8; (values.len() / QK4_NL) * BLOCK_IQ4_NL_SIZE];
+    quantize_iq4_nl(&values, &mut encoded).expect("encode");
+    let mut decoded = vec![0f32; values.len()];
+    dequantize_iq4_nl_scalar(&encoded, &mut decoded).expect("decode");
+    assert!(decoded.iter().all(|v| v.is_finite()));
+
+    let mut q4 = vec![0u8; (values.len() / QK4_NL) * BLOCK_Q4_0_SIZE];
+    quantize_q4_0_scalar(&values, &mut q4).expect("q4_0");
+    let mut q4_dec = vec![0f32; values.len()];
+    dequantize_q4_0_scalar(&q4, &mut q4_dec).expect("q4_0 dequant");
+    assert!(
+        mse(&values, &decoded) <= mse(&values, &q4_dec),
+        "IQ4_NL should beat Q4_0 MSE on Gaussian weights"
+    );
+}
+
+#[test]
+fn iq2_xs_and_iq2_s_dequant_are_finite() {
+    let mut xs = vec![0u8; BLOCK_IQ2_XS_SIZE];
+    xs[0] = 0x00;
+    xs[1] = 0x3c;
+    for (i, b) in xs[2..].iter_mut().enumerate() {
+        *b = (i % 251) as u8;
+    }
+    let mut out_xs = vec![0f32; QK_K];
+    dequantize_iq2_xs_scalar(&xs, &mut out_xs).unwrap();
+    assert!(out_xs.iter().all(|v| v.is_finite()));
+
+    let mut s = vec![0u8; BLOCK_IQ2_S_SIZE];
+    s[0] = 0x00;
+    s[1] = 0x3c;
+    for (i, b) in s[2..].iter_mut().enumerate() {
+        *b = (i % 251) as u8;
+    }
+    let mut out_s = vec![0f32; QK_K];
+    dequantize_iq2_s_scalar(&s, &mut out_s).unwrap();
+    assert!(out_s.iter().all(|v| v.is_finite()));
 }
 
 #[test]
@@ -241,13 +367,8 @@ fn dequantizes_q4_0_scalar_block() {
     let mut out = vec![0.0_f32; 32];
     dequantize_q4_0_scalar(&input, &mut out).expect("q4_0 dequant succeeds");
 
-    assert!(out.iter().step_by(2).all(|v| (*v - 0.0).abs() < 1e-6));
-    assert!(
-        out.iter()
-            .skip(1)
-            .step_by(2)
-            .all(|v| (*v - 1.0).abs() < 1e-6)
-    );
+    assert!(out[..16].iter().all(|v| (*v - 0.0).abs() < 1e-6));
+    assert!(out[16..].iter().all(|v| (*v - 1.0).abs() < 1e-6));
 }
 
 #[test]
@@ -532,6 +653,27 @@ fn imatrix_quantization_requires_matching_value_count() {
         err,
         QuantizationError::InvalidImportanceMatrix { .. }
     ));
+}
+
+#[test]
+fn raw_weight_quantization_rejects_invalid_importance_values() {
+    let input = vec![0_u8; QK4_0 * 4];
+    let mut output = vec![0_u8; BLOCK_Q4_0_SIZE];
+    for invalid in [f32::NAN, -1.0] {
+        let weights = vec![invalid; QK4_0];
+        let error = quantize_scalar_weighted(
+            GgufQuantizationType::F32,
+            GgufQuantizationType::AL5,
+            &input,
+            &mut output,
+            &weights,
+        )
+        .expect_err("invalid weights must fail");
+        assert!(matches!(
+            error,
+            QuantizationError::InvalidImportanceMatrix { .. }
+        ));
+    }
 }
 
 #[test]

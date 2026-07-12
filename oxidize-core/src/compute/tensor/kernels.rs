@@ -1,7 +1,8 @@
 use crate::gguf::GgufQuantizationType;
 use crate::quantization::{
-    BLOCK_IQ4_XS_SIZE, BLOCK_NVFP4_SIZE, BLOCK_Q2_K_SIZE, BLOCK_Q4_K_SIZE, BLOCK_Q6_K_SIZE,
-    BLOCK_Q8_0_SIZE, QK_K, QK_NVFP4, QK_NVFP4_SUB, QK8_0, dequantize_iq4_xs_scalar,
+    BLOCK_IQ4_NL_SIZE, BLOCK_IQ4_XS_SIZE, BLOCK_NVFP4_SIZE, BLOCK_Q2_K_SIZE, BLOCK_Q4_K_SIZE,
+    BLOCK_Q6_K_SIZE, BLOCK_Q8_0_SIZE, KVALUES_IQ4NL, QK4_NL, QK_K, QK_NVFP4, QK_NVFP4_SUB, QK8_0,
+    dequantize_iq4_xs_scalar,
 };
 use rayon::prelude::*;
 #[cfg(target_arch = "x86")]

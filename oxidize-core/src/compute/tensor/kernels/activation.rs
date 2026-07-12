@@ -101,12 +101,29 @@ pub fn scaled_dot_product_attention_f32(
 /// Phi and most other modern decoder-only transformers. Pairs index `i` with
 /// index `head_dim/2 + i` rather than `2i` with `2i+1` (which is the GPT-J /
 /// "norm" mode and produces garbage on NeoX-trained weights).
+fn yarn_corr_dim(n_dims: f32, orig_ctx: f32, n_rot: f32, base: f32) -> f32 {
+    n_dims * (orig_ctx / (n_rot * 2.0 * std::f32::consts::PI)).ln() / (2.0 * base.ln())
+}
+
 pub fn apply_rope_f32(
     input: &[f32],
     position: usize,
     head_dim: usize,
     theta: f32,
     output: &mut [f32],
+) -> Result<(), RopeError> {
+    apply_rope_f32_yarn(input, position, head_dim, theta, output, 0.0, 0.0)
+}
+
+/// NeoX split-half RoPE with optional YaRN scaling (`yarn_factor` > 1 enables).
+pub fn apply_rope_f32_yarn(
+    input: &[f32],
+    position: usize,
+    head_dim: usize,
+    theta: f32,
+    output: &mut [f32],
+    yarn_factor: f32,
+    yarn_orig_ctx: f32,
 ) -> Result<(), RopeError> {
     if input.len() != head_dim {
         return Err(RopeError::InvalidInputLength {
@@ -124,7 +141,8 @@ pub fn apply_rope_f32(
         return Err(RopeError::OddHeadDim { head_dim });
     }
 
-    if position == 0 {
+    let yarn = yarn_factor > 1.0 && yarn_orig_ctx > 0.0;
+    if position == 0 && !yarn {
         output.copy_from_slice(input);
         return Ok(());
     }
@@ -132,18 +150,41 @@ pub fn apply_rope_f32(
     let position_f = position as f32;
     let half_dim = head_dim / 2;
     let inv_head_dim = 1.0_f32 / head_dim as f32;
-    // freq_i = theta^(-(2*i)/head_dim). Computing `powf` for every pair is
-    // surprisingly expensive in prompt processing (tokens × heads × layers).
-    // Use the geometric recurrence instead: freq_{i+1} = freq_i * base.
     let freq_multiplier = theta.powf(-2.0 * inv_head_dim);
     let mut freq = 1.0_f32;
+
+    let (freq_scale, mscale, corr_lo, corr_hi) = if yarn {
+        let freq_scale = 1.0 / yarn_factor;
+        let mscale = 1.0 + 0.1 * yarn_factor.ln();
+        let mut corr_lo = yarn_corr_dim(head_dim as f32, yarn_orig_ctx, 32.0, theta).floor();
+        let mut corr_hi = yarn_corr_dim(head_dim as f32, yarn_orig_ctx, 1.0, theta).ceil();
+        if corr_lo < 0.0 {
+            corr_lo = 0.0;
+        }
+        if corr_hi > head_dim as f32 - 1.0 {
+            corr_hi = head_dim as f32 - 1.0;
+        }
+        (freq_scale, mscale, corr_lo, corr_hi)
+    } else {
+        (1.0, 1.0, 0.0, 0.0)
+    };
 
     for i in 0..half_dim {
         let x0 = input[i];
         let x1 = input[half_dim + i];
-        let angle = position_f * freq;
-        let cos_angle = angle.cos();
-        let sin_angle = angle.sin();
+        let (cos_angle, sin_angle) = if yarn {
+            let theta_extrap = position_f * freq;
+            let theta_interp = theta_extrap * freq_scale;
+            let denom = corr_hi - corr_lo;
+            let ramp = 1.0
+                - (i as f32 - corr_lo) / if denom > 0.001 { denom } else { 0.001 };
+            let ramp = ramp.clamp(0.0, 1.0);
+            let angle = theta_interp * (1.0 - ramp) + theta_extrap * ramp;
+            (angle.cos() * mscale, angle.sin() * mscale)
+        } else {
+            let angle = position_f * freq;
+            (angle.cos(), angle.sin())
+        };
 
         output[i] = x0 * cos_angle - x1 * sin_angle;
         output[half_dim + i] = x0 * sin_angle + x1 * cos_angle;

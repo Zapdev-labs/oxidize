@@ -31,13 +31,17 @@ enum class QuantType : uint16_t {
   Q2_K, Q3_K_S, Q3_K_M, Q3_K_L, Q4_K_S, Q4_K_M, Q5_K_S, Q5_K_M, Q6_K,
   IQ2_XXS, IQ2_XS, IQ3_XXS, IQ1_S, IQ4_NL, IQ3_S, IQ2_S, IQ4_XS, IQ1_M,
   I8, I16, I32, I64, F64, BF16, NVFP4,
+  AL5,   /* oxidize custom: Q4_0 layout, MSE-optimal scale (ggml type 240) */
+  AL8,   /* Q8_0 layout, MSE-optimal scale (241) */
+  AL6,   /* Q5_0 layout ~5.5-bit, MSE-optimal scale (242) */
+  AL5_XS, /* 3-bit symmetric 14B/block (243) */
   Unknown,
 };
 
 // Mirror of oxidize-core/src/model/inference.rs::ModelArchitecture
 enum class Architecture : uint8_t {
   Llama, Mistral, Mixtral, DeepSeek, Qwen, Gemma, Phi, Falcon,
-  Gpt2, GptJ, GptNeoX, MiniMax, Lfm2, Lfm2Moe, GlmDsa,
+  Gpt2, GptJ, GptNeoX, MiniMax, Lfm2, Lfm2Moe, GlmDsa, HunyuanMoe,
 };
 
 Architecture architecture_from_name(const std::string& name);
@@ -75,6 +79,8 @@ struct InferenceConfig {
   float  expert_weights_scale = 1.0f;
   size_t expert_group_count = 0;
   size_t expert_group_used_count = 0;
+  float yarn_factor = 0.0f;
+  float yarn_orig_ctx = 0.0f;
 
   // MLA (GLM-5.2 glm-dsa / DeepSeek-V2 style compressed attention).
   size_t q_lora_rank = 0;        // q down-projection rank (glm-dsa.attention.q_lora_rank)

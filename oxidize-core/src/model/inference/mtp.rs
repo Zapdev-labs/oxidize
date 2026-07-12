@@ -274,7 +274,7 @@ impl InferenceModel {
                 break;
             }
             let rotated = &mut rope_scratch[..q_rope_len];
-            apply_rope_f32(
+            cfg.apply_rope_head(
                 &q[off..off + q_rope_len],
                 pos,
                 q_rope_len,
@@ -291,7 +291,7 @@ impl InferenceModel {
                 break;
             }
             let rotated = &mut rope_scratch[..k_rope_len];
-            apply_rope_f32(
+            cfg.apply_rope_head(
                 &k_vec[off..off + k_rope_len],
                 pos,
                 k_rope_len,

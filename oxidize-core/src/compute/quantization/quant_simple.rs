@@ -96,23 +96,254 @@ pub(super) fn quantize_q4_0_scalar(
         .chunks_exact(QK4_0)
         .zip(output.chunks_exact_mut(BLOCK_Q4_0_SIZE))
     {
-        let max_abs = in_block.iter().fold(0.0_f32, |acc, v| acc.max(v.abs()));
-        let d = if max_abs == 0.0 { 0.0 } else { max_abs / 8.0 };
+        let mut amax = 0.0_f32;
+        let mut mx = 0.0_f32;
+        for &v in in_block {
+            let a = v.abs();
+            if a > amax {
+                amax = a;
+                mx = v;
+            }
+        }
+        let d = if mx != 0.0 { mx / -8.0 } else { 0.0 };
+        let inv_d = if d != 0.0 { 1.0 / d } else { 0.0 };
         out_block[0..2].copy_from_slice(&f32_to_f16_bits(d).to_le_bytes());
         for i in 0..16 {
-            let q_low = if d == 0.0 {
+            let lo = if d == 0.0 {
                 8_u8
             } else {
-                ((in_block[2 * i] / d).round() as i32 + 8).clamp(0, 15) as u8
+                (in_block[i] * inv_d + 8.5).trunc().clamp(0.0, 15.0) as u8
             };
-            let q_high = if d == 0.0 {
+            let hi = if d == 0.0 {
                 8_u8
             } else {
-                ((in_block[2 * i + 1] / d).round() as i32 + 8).clamp(0, 15) as u8
+                (in_block[i + 16] * inv_d + 8.5).trunc().clamp(0.0, 15.0) as u8
             };
-            out_block[2 + i] = q_low | (q_high << 4);
+            out_block[2 + i] = lo | (hi << 4);
         }
     }
+
+    Ok(())
+}
+
+#[inline(always)]
+fn al5_pack_levels(out_block: &mut [u8], d: f32, levels: &[i32; QK4_0]) {
+    out_block[0..2].copy_from_slice(&f32_to_f16_bits(d).to_le_bytes());
+    for i in 0..16 {
+        let lo = (levels[i] + 8) as u8;
+        let hi = (levels[i + 16] + 8) as u8;
+        out_block[2 + i] = lo | (hi << 4);
+    }
+}
+
+/// Optimized AL5 block quant: `make_qx_quants`-style search (llama.cpp).
+/// Grid-searches 19 candidate scales around absmax; for each, takes the
+/// least-squares-optimal `d` that minimizes the importance-weighted block error
+/// `sum_i w_i (x_i - d*l_i)^2`. `imp` supplies per-column importance (imatrix);
+/// when `None` the weight defaults to `x_i^2` — llama.cpp's imatrix-less default,
+/// which tracks model quality far better than plain RMSE. Same 18-byte Q4_0
+/// bitstream + `dot_q4_0` kernel => zero runtime cost.
+#[inline]
+fn quantize_block_al5(in_block: &[f32], imp: Option<&[f32]>, out_block: &mut [u8]) {
+    let mut amax = 0.0_f32;
+    let mut mx = 0.0_f32;
+    for &v in in_block {
+        let a = v.abs();
+        if a > amax {
+            amax = a;
+            mx = v;
+        }
+    }
+    if amax == 0.0 {
+        out_block[0..2].copy_from_slice(&f32_to_f16_bits(0.0).to_le_bytes());
+        out_block[2..].fill(0x88);
+        return;
+    }
+
+    let mut best_d = mx / -8.0;
+    let mut best_levels = [0_i32; QK4_0];
+    let mut best_obj = -1.0_f32;
+    let mut levels = [0_i32; QK4_0];
+    for is in -9..=9 {
+        let iscale = -(8.0 + 0.1 * is as f32) / mx;
+        let mut sumlx = 0.0_f32;
+        let mut suml2 = 0.0_f32;
+        for (i, &v) in in_block.iter().enumerate() {
+            let l = ((v * iscale).round() as i32).clamp(-8, 7);
+            levels[i] = l;
+            let w = imp.map_or(v * v, |m| m[i]);
+            let lf = l as f32;
+            sumlx += w * v * lf;
+            suml2 += w * lf * lf;
+        }
+        if suml2 > 0.0 {
+            let obj = sumlx * sumlx / suml2; // weighted error reduction; larger = better
+            if obj > best_obj {
+                best_obj = obj;
+                best_d = sumlx / suml2;
+                best_levels = levels;
+            }
+        }
+    }
+
+    al5_pack_levels(out_block, best_d, &best_levels);
+}
+
+/// ggml split-halves AL5: same 18-byte block as Q4_0, MSE-optimal per-block scale.
+pub(super) fn quantize_al5_scalar(
+    input: &[f32],
+    output: &mut [u8],
+) -> Result<(), QuantizationError> {
+    if !input.len().is_multiple_of(QK4_0) {
+        return Err(QuantizationError::InvalidInputLength {
+            quantization: GgufQuantizationType::AL5,
+            expected_multiple: QK4_0,
+            actual: input.len(),
+        });
+    }
+    if output.len() != (input.len() / QK4_0) * BLOCK_Q4_0_SIZE {
+        return Err(QuantizationError::InvalidOutputLength {
+            quantization: GgufQuantizationType::AL5,
+            expected: (input.len() / QK4_0) * BLOCK_Q4_0_SIZE,
+            actual: output.len(),
+        });
+    }
+
+    use rayon::prelude::*;
+
+    input
+        .par_chunks_exact(QK4_0)
+        .zip(output.par_chunks_exact_mut(BLOCK_Q4_0_SIZE))
+        .for_each(|(in_block, out_block)| quantize_block_al5(in_block, None, out_block));
+
+    Ok(())
+}
+
+/// Importance-weighted AL5 quantize. Each 32-weight block minimizes the
+/// imatrix-weighted error using its per-column importance slice, so weights that
+/// multiply high-activation inputs are quantized more faithfully. Same 18-byte
+/// output as `quantize_al5_scalar`. `imatrix` is per-element (one importance per
+/// input value, tiled across rows by the caller).
+pub(super) fn quantize_al5_scalar_weighted(
+    input: &[f32],
+    imatrix: &[f32],
+    output: &mut [u8],
+) -> Result<(), QuantizationError> {
+    if !input.len().is_multiple_of(QK4_0) {
+        return Err(QuantizationError::InvalidInputLength {
+            quantization: GgufQuantizationType::AL5,
+            expected_multiple: QK4_0,
+            actual: input.len(),
+        });
+    }
+    if imatrix.len() != input.len() {
+        return Err(QuantizationError::InvalidImportanceMatrix {
+            reason: "matrix length must match input value count",
+        });
+    }
+    if imatrix.iter().any(|weight| !weight.is_finite()) {
+        return Err(QuantizationError::InvalidImportanceMatrix {
+            reason: "matrix values must be finite",
+        });
+    }
+    if imatrix.iter().any(|weight| *weight < 0.0) {
+        return Err(QuantizationError::InvalidImportanceMatrix {
+            reason: "matrix values must be non-negative",
+        });
+    }
+    if output.len() != (input.len() / QK4_0) * BLOCK_Q4_0_SIZE {
+        return Err(QuantizationError::InvalidOutputLength {
+            quantization: GgufQuantizationType::AL5,
+            expected: (input.len() / QK4_0) * BLOCK_Q4_0_SIZE,
+            actual: output.len(),
+        });
+    }
+
+    use rayon::prelude::*;
+
+    input
+        .par_chunks_exact(QK4_0)
+        .zip(imatrix.par_chunks_exact(QK4_0))
+        .zip(output.par_chunks_exact_mut(BLOCK_Q4_0_SIZE))
+        .for_each(|((in_block, imp_block), out_block)| {
+            quantize_block_al5(in_block, Some(imp_block), out_block);
+        });
+
+    Ok(())
+}
+
+/// F16 → AL5 without materializing a full intermediate f32 tensor.
+pub(super) fn quantize_f16_to_al5_scalar(
+    input: &[u8],
+    output: &mut [u8],
+) -> Result<(), QuantizationError> {
+    if !input.len().is_multiple_of(QK4_0 * 2) {
+        return Err(QuantizationError::InvalidInputLength {
+            quantization: GgufQuantizationType::F16,
+            expected_multiple: QK4_0 * 2,
+            actual: input.len(),
+        });
+    }
+    if output.len() != (input.len() / (QK4_0 * 2)) * BLOCK_Q4_0_SIZE {
+        return Err(QuantizationError::InvalidOutputLength {
+            quantization: GgufQuantizationType::AL5,
+            expected: (input.len() / (QK4_0 * 2)) * BLOCK_Q4_0_SIZE,
+            actual: output.len(),
+        });
+    }
+
+    use rayon::prelude::*;
+
+    input
+        .par_chunks_exact(QK4_0 * 2)
+        .zip(output.par_chunks_exact_mut(BLOCK_Q4_0_SIZE))
+        .for_each(|(f16_block, out_block)| {
+            let mut block = [0.0_f32; QK4_0];
+            for i in 0..QK4_0 {
+                block[i] = f16_le_to_f32(&f16_block[2 * i..2 * i + 2]);
+            }
+            quantize_block_al5(&block, None, out_block);
+        });
+
+    Ok(())
+}
+
+/// BF16 → AL5 without materializing a full intermediate f32 tensor.
+pub(super) fn quantize_bf16_to_al5_scalar(
+    input: &[u8],
+    output: &mut [u8],
+) -> Result<(), QuantizationError> {
+    if !input.len().is_multiple_of(QK4_0 * 2) {
+        return Err(QuantizationError::InvalidInputLength {
+            quantization: GgufQuantizationType::BF16,
+            expected_multiple: QK4_0 * 2,
+            actual: input.len(),
+        });
+    }
+    if output.len() != (input.len() / (QK4_0 * 2)) * BLOCK_Q4_0_SIZE {
+        return Err(QuantizationError::InvalidOutputLength {
+            quantization: GgufQuantizationType::AL5,
+            expected: (input.len() / (QK4_0 * 2)) * BLOCK_Q4_0_SIZE,
+            actual: output.len(),
+        });
+    }
+
+    use rayon::prelude::*;
+
+    input
+        .par_chunks_exact(QK4_0 * 2)
+        .zip(output.par_chunks_exact_mut(BLOCK_Q4_0_SIZE))
+        .for_each(|(bf16_block, out_block)| {
+            let mut block = [0.0_f32; QK4_0];
+            for i in 0..QK4_0 {
+                let bits = u32::from(u16::from_le_bytes([
+                    bf16_block[2 * i],
+                    bf16_block[2 * i + 1],
+                ])) << 16;
+                block[i] = f32::from_bits(bits);
+            }
+            quantize_block_al5(&block, None, out_block);
+        });
 
     Ok(())
 }
@@ -345,12 +576,16 @@ pub fn dequantize_q4_0_scalar(input: &[u8], output: &mut [f32]) -> Result<(), Qu
         let d = f16_le_to_f32(&block[0..2]);
         for i in 0..16 {
             let packed = block[2 + i];
-            out[2 * i] = ((packed & 0x0F) as i8 - 8) as f32 * d;
-            out[2 * i + 1] = (((packed >> 4) & 0x0F) as i8 - 8) as f32 * d;
+            out[i] = ((packed & 0x0F) as i32 - 8) as f32 * d;
+            out[i + 16] = (((packed >> 4) & 0x0F) as i32 - 8) as f32 * d;
         }
     }
 
     Ok(())
+}
+
+pub fn dequantize_al5_scalar(input: &[u8], output: &mut [f32]) -> Result<(), QuantizationError> {
+    dequantize_q4_0_scalar(input, output)
 }
 
 pub fn dequantize_q4_1_scalar(input: &[u8], output: &mut [f32]) -> Result<(), QuantizationError> {

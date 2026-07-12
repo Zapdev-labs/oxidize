@@ -17,6 +17,8 @@
 #include <cstring>
 #include <fstream>
 #include <sstream>
+#include <set>
+#include <utility>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -193,6 +195,51 @@ static bool pin_thread_to_cpuset(const cpu_set_t& cpuset) {
 // Core init
 // ---------------------------------------------------------------------------
 
+// Count unique physical cores among `cpus` via sysfs core_id (SMT siblings
+// share a core_id). Returns 0 on any sysfs read failure.
+static int count_physical_cores(const std::vector<int>& cpus) {
+    std::set<std::pair<int, int>> cores;  // (package_id, core_id)
+    for (int cpu : cpus) {
+        char path[128];
+        std::snprintf(path, sizeof(path),
+                      "/sys/devices/system/cpu/cpu%d/topology/core_id", cpu);
+        std::ifstream f(path);
+        int core = -1;
+        if (!(f >> core)) return 0;
+        std::snprintf(path, sizeof(path),
+                      "/sys/devices/system/cpu/cpu%d/topology/physical_package_id",
+                      cpu);
+        std::ifstream g(path);
+        int pkg = 0;
+        g >> pkg;
+        cores.insert({pkg, core});
+    }
+    return static_cast<int>(cores.size());
+}
+
+static std::vector<int> unique_physical_cpus(const std::vector<int>& cpus) {
+    std::set<std::pair<int, int>> seen;
+    std::vector<int> out;
+    out.reserve(cpus.size());
+    for (int cpu : cpus) {
+        char path[128];
+        std::snprintf(path, sizeof(path),
+                      "/sys/devices/system/cpu/cpu%d/topology/core_id", cpu);
+        std::ifstream f(path);
+        int core = -1;
+        if (!(f >> core)) return cpus;
+        std::snprintf(path, sizeof(path),
+                      "/sys/devices/system/cpu/cpu%d/topology/physical_package_id",
+                      cpu);
+        std::ifstream g(path);
+        int pkg = 0;
+        if (!(g >> pkg)) return cpus;
+        auto key = std::make_pair(pkg, core);
+        if (seen.insert(key).second) out.push_back(cpu);
+    }
+    return out.empty() ? cpus : out;
+}
+
 int init_numa(const NumaConfig& cfg, const std::vector<NumaNode>& nodes) {
     if (nodes.empty()) {
         // No sysfs NUMA info — skip binding, just set threads.
@@ -224,6 +271,7 @@ int init_numa(const NumaConfig& cfg, const std::vector<NumaNode>& nodes) {
 
     // ---- Determine thread count ----
     int n_threads = cfg.threads;
+    bool cap_single_node_physical = false;
     if (n_threads <= 0) {
         if (bound_node) {
             // For memory-bandwidth-bound LLM decode, ALL logical CPUs on one
@@ -232,6 +280,16 @@ int init_numa(const NumaConfig& cfg, const std::vector<NumaNode>& nodes) {
             // Measured on Xeon Silver 4110: 16 logical/node -> 16 threads = 44
             // tok/s vs 8 threads = 27 tok/s. Use all logical CPUs on the node.
             n_threads = static_cast<int>(bound_node->cpus.size());
+            // EXCEPT on single-node (desktop) machines: SMT siblings thrash the
+            // int8 gemv there (measured Ryzen 16 SMT = 12 tok/s vs 8 physical =
+            // 58 tok/s). Multi-node servers keep the all-logical behavior above.
+            if (nodes.size() == 1) {
+                int phys = count_physical_cores(bound_node->cpus);
+                if (phys > 0 && phys < n_threads) {
+                    n_threads = phys;
+                    cap_single_node_physical = true;
+                }
+            }
         } else {
             // All / Interleave mode: total logical cores across all nodes.
             int total_logical = 0;
@@ -294,6 +352,9 @@ int init_numa(const NumaConfig& cfg, const std::vector<NumaNode>& nodes) {
         cfg.mode == NumaMode::Replicate) {
         if (bound_node) {
             target_cpus = bound_node->cpus;
+            if (cap_single_node_physical) {
+                target_cpus = unique_physical_cpus(target_cpus);
+            }
         }
     } else {
         // All / Interleave: gather all cpus across nodes (already sorted by node id).

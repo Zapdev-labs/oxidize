@@ -180,6 +180,58 @@ fn best_index_iq4nl(value: f32) -> usize {
     best
 }
 
+/// IQ4_NL encoder (inverse of [`dequantize_iq4_nl_scalar`]).
+///
+/// 32-element blocks with a single f16 scale and nonlinear 4-bit codebook
+/// (`KVALUES_IQ4NL`). Matches llama.cpp `quantize_row_iq4_nl_ref`.
+pub fn quantize_iq4_nl(input: &[f32], output: &mut [u8]) -> Result<(), QuantizationError> {
+    if !input.len().is_multiple_of(QK4_NL) {
+        return Err(QuantizationError::InvalidInputLength {
+            quantization: GgufQuantizationType::IQ4_NL,
+            expected_multiple: QK4_NL,
+            actual: input.len(),
+        });
+    }
+    if output.len() != (input.len() / QK4_NL) * BLOCK_IQ4_NL_SIZE {
+        return Err(QuantizationError::InvalidOutputLength {
+            quantization: GgufQuantizationType::IQ4_NL,
+            expected: (input.len() / QK4_NL) * BLOCK_IQ4_NL_SIZE,
+            actual: output.len(),
+        });
+    }
+
+    let max_codebook = KVALUES_IQ4NL
+        .iter()
+        .map(|v| v.unsigned_abs() as f32)
+        .fold(0.0_f32, f32::max);
+
+    for (in_block, out_block) in input
+        .chunks_exact(QK4_NL)
+        .zip(output.chunks_exact_mut(BLOCK_IQ4_NL_SIZE))
+    {
+        let mut amax = 0.0_f32;
+        for &v in in_block {
+            amax = amax.max(v.abs());
+        }
+        let d = if amax < 1.0e-8 {
+            0.0
+        } else {
+            amax / max_codebook
+        };
+        out_block[0..2].copy_from_slice(&f32_to_f16_bits(d).to_le_bytes());
+        out_block[2..].fill(0);
+        if d == 0.0 {
+            continue;
+        }
+        for j in 0..(QK4_NL / 2) {
+            let lo = best_index_iq4nl(in_block[j] / d);
+            let hi = best_index_iq4nl(in_block[j + QK4_NL / 2] / d);
+            out_block[2 + j] = (lo as u8) | ((hi as u8) << 4);
+        }
+    }
+    Ok(())
+}
+
 /// IQ4_XS encoder (inverse of [`dequantize_iq4_xs_scalar`]).
 ///
 /// Non-linear 4-bit at ~4.25 bpw: super-block of 256 = 8 sub-blocks of 32, each

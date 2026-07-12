@@ -46,12 +46,14 @@ struct LlamaWeight {
   QuantType quant = QuantType::F32;
   const uint8_t* data = nullptr;   // valid when quantized + mmap-backed
   std::vector<uint8_t> owned;      // valid when quantized + on-the-fly quantized
+  size_t quant_nbytes = 0;         // byte size of quantized payload (owned or mmap)
   std::vector<float> f32;          // valid when !quantized
   size_t rows = 0;                 // output features
   size_t cols = 0;                 // input features
 
   // Quantized block bytes (owned takes precedence over the borrowed mmap ptr).
   const uint8_t* qbytes() const { return owned.empty() ? data : owned.data(); }
+  size_t qbytes_size() const { return owned.empty() ? quant_nbytes : owned.size(); }
   bool empty() const {
     return quantized ? (data == nullptr && owned.empty()) : f32.empty();
   }
@@ -86,6 +88,9 @@ struct LlamaLayer {
   LlamaWeight ffn_gate_exps;  // [n_experts, expert_inter, hidden]
   LlamaWeight ffn_up_exps;    // [n_experts, expert_inter, hidden]
   LlamaWeight ffn_down_exps;  // [n_experts, hidden, expert_inter]
+  std::vector<LlamaWeight> ffn_gate_expert_list;  // split expert tensors ffn_gate.{i}.weight
+  std::vector<LlamaWeight> ffn_up_expert_list;    // split expert tensors ffn_up.{i}.weight
+  std::vector<LlamaWeight> ffn_down_expert_list;  // split expert tensors ffn_down.{i}.weight
   LlamaWeight ffn_gate_inp;   // router [n_experts, hidden]
   std::vector<float> ffn_exp_probs_b;  // sigmoid-gating per-expert bias (LFM2MoE)
 
@@ -113,7 +118,14 @@ struct LlamaLayer {
   LlamaWeight attn_k_b;
   LlamaWeight attn_v_b;
 
-  bool is_moe() const { return !ffn_gate_exps.empty() || !ffn_gate_inp.empty(); }
+  bool is_moe() const {
+    const bool packed = !ffn_gate_exps.empty() && !ffn_up_exps.empty() &&
+                        !ffn_down_exps.empty();
+    const bool split = !ffn_gate_expert_list.empty() &&
+                       !ffn_up_expert_list.empty() &&
+                       !ffn_down_expert_list.empty();
+    return !ffn_gate_inp.empty() && (packed || split);
+  }
   // MLA layer: uses compressed q/kv projections instead of dense attn_q/k/v.
   bool is_mla() const { return !attn_q_a.empty() || !attn_kv_a_mqa.empty(); }
   bool has_shared_expert() const {

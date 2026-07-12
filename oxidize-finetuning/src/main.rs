@@ -7,15 +7,16 @@ use oxidize_core::inference::InferenceConfig;
 use oxidize_core::layer_wise::LayerWiseModel;
 use oxidize_core::tokenizer::load_tokenizer_from_gguf_metadata;
 use oxidize_finetuning::{
-    AdapterMerger, FinetuneConfig, LoRAAdapter, LoRATarget, MergeStrategy, SftTrainer,
-    export_lora_gguf, load_jsonl_dpo, load_jsonl_sft, pack_chunks,
+    AdapterMerger, FinetuneConfig, FinetuneError, LoRAAdapter, MergeStrategy, SelfTrainConfig,
+    SelfTrainLoop, SftTrainer, export_lora_gguf, load_adapter_manifest, load_jsonl_dpo,
+    load_jsonl_sft, manifest_to_lora_adapters, pack_chunks,
 };
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
 #[command(
     name = "oxidize-finetuning",
-    about = "Fast LoRA / SFT / DPO / PPO fine-tuning for oxidize GGUF models"
+    about = "Fast LoRA / SFT / DPO / PPO / self-regressing fine-tuning for oxidize GGUF models"
 )]
 struct Cli {
     /// Rayon worker threads (0 = rayon default).
@@ -34,6 +35,8 @@ enum Command {
     Dpo(DpoArgs),
     /// Proximal Policy Optimisation (PPO / RLHF) stub.
     Ppo(PpoArgs),
+    /// Iterative self-regressing SFT: train, checkpoint, self-dialogue, repeat.
+    SelfTrain(SelfTrainArgs),
     /// Merge multiple LoRA adapter GGUF files.
     Merge(MergeArgs),
 }
@@ -170,6 +173,67 @@ struct PpoArgs {
 }
 
 // ---------------------------------------------------------------------------
+// Self-train (iterative SFT + self-dialogue)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Parser)]
+struct SelfTrainArgs {
+    #[arg(long)]
+    model: PathBuf,
+
+    #[arg(long)]
+    dataset: PathBuf,
+
+    #[arg(long, default_value = "self-train-out")]
+    output: PathBuf,
+
+    #[arg(long, default_value_t = 3)]
+    rounds: usize,
+
+    #[arg(long, default_value_t = 8)]
+    prompts_per_round: usize,
+
+    #[arg(long, default_value_t = 128)]
+    max_new_tokens: usize,
+
+    #[arg(long, default_value_t = 0.7)]
+    temperature: f32,
+
+    #[arg(long, default_value_t = true)]
+    self_critique: bool,
+
+    #[arg(long, default_value_t = 50)]
+    checkpoint_every: usize,
+
+    #[arg(long, default_value_t = 16)]
+    lora_rank: usize,
+
+    #[arg(long, default_value_t = 2e-4)]
+    learning_rate: f32,
+
+    #[arg(long, default_value_t = 1)]
+    epochs_per_round: usize,
+
+    #[arg(long, default_value_t = 512)]
+    max_seq_len: usize,
+
+    #[arg(long, default_value_t = 64)]
+    window: usize,
+
+    #[arg(long, default_value_t = 256)]
+    tokens_per_step: usize,
+
+    #[arg(long, default_value_t = 42)]
+    seed: u64,
+
+    #[arg(long)]
+    eval_split: Option<f32>,
+
+    #[arg(long)]
+    resume_from: Option<PathBuf>,
+}
+
+// ---------------------------------------------------------------------------
 // Merge
 // ---------------------------------------------------------------------------
 
@@ -208,12 +272,18 @@ fn main() -> Result<()> {
             .num_threads(cli.threads)
             .build_global()
             .context("build rayon pool")?;
+    } else if let Ok(n) = std::thread::available_parallelism() {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(n.get())
+            .build_global()
+            .context("build rayon pool")?;
     }
 
     match cli.command {
         Command::Sft(args) => run_sft(args),
         Command::Dpo(args) => run_dpo(args),
         Command::Ppo(args) => run_ppo(args),
+        Command::SelfTrain(args) => run_self_train(args),
         Command::Merge(args) => run_merge(args),
     }
 }
@@ -392,70 +462,124 @@ fn run_ppo(args: PpoArgs) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Merge implementation
+// Self-train implementation
 // ---------------------------------------------------------------------------
 
-/// Minimal mirror of the JSON manifest written by `export_lora_gguf`.
-#[derive(serde::Deserialize)]
-struct AdapterManifest {
-    rank: usize,
-    alpha_scale: f32,
-    adapters: Vec<AdapterEntry>,
-}
-
-#[derive(serde::Deserialize)]
-struct AdapterEntry {
-    target: String,
-    in_dim: usize,
-    out_dim: usize,
-    lora_a: Vec<f32>,
-    lora_b: Vec<f32>,
-}
-
-fn load_adapter_manifest(path: &std::path::Path) -> Result<AdapterManifest> {
-    // Accept either a directory (containing adapter_manifest.json) or the
-    // JSON file itself.
-    let json_path = if path.is_dir() {
-        path.join("adapter_manifest.json")
-    } else {
-        path.to_path_buf()
-    };
-    let text = std::fs::read_to_string(&json_path)
-        .with_context(|| format!("read {}", json_path.display()))?;
-    serde_json::from_str(&text)
-        .with_context(|| format!("parse adapter manifest {}", json_path.display()))
-}
-
-fn manifest_to_lora_adapters(manifest: AdapterManifest) -> Result<Vec<LoRAAdapter>> {
-    let target_for = |s: &str| -> Result<LoRATarget> {
-        match s {
-            "OutputHead" => Ok(LoRATarget::OutputHead),
-            "AttentionQ" => Ok(LoRATarget::AttentionQ),
-            "AttentionV" => Ok(LoRATarget::AttentionV),
-            "FfnGate" => Ok(LoRATarget::FfnGate),
-            "FfnUp" => Ok(LoRATarget::FfnUp),
-            other => anyhow::bail!("unknown LoRA target in manifest: {:?}", other),
-        }
-    };
-
-    let cfg = FinetuneConfig {
-        rank: manifest.rank,
-        alpha: manifest.alpha_scale * manifest.rank as f32,
+fn run_self_train(args: SelfTrainArgs) -> Result<()> {
+    let finetune = FinetuneConfig {
+        rank: args.lora_rank,
+        learning_rate: args.learning_rate,
+        epochs: args.epochs_per_round,
+        max_seq_len: args.max_seq_len,
+        window: args.window,
+        tokens_per_step: args.tokens_per_step.max(1),
+        seed: args.seed,
         ..FinetuneConfig::default()
     };
+    let self_cfg = SelfTrainConfig {
+        rounds: args.rounds,
+        prompts_per_round: args.prompts_per_round,
+        max_new_tokens: args.max_new_tokens,
+        temperature: args.temperature,
+        self_critique: args.self_critique,
+        checkpoint_every_steps: args.checkpoint_every,
+        seed: args.seed,
+        ..SelfTrainConfig::default()
+    };
 
-    manifest
-        .adapters
-        .into_iter()
-        .map(|e| {
-            let target = target_for(&e.target)?;
-            let mut ad = LoRAAdapter::new(target, e.in_dim, e.out_dim, &cfg);
-            ad.a = e.lora_a;
-            ad.b = e.lora_b;
-            Ok(ad)
-        })
-        .collect()
+    let mapped = load_mapped_gguf(&args.model).context("load GGUF")?;
+    let mut inference_config = InferenceConfig::from_gguf(&mapped);
+    inference_config.context_size = inference_config
+        .context_size
+        .min(args.max_seq_len.max(args.window) + args.max_new_tokens + 8);
+    let mut model = LayerWiseModel::load_from_gguf(&mapped, inference_config, 0)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    model
+        .warm_layer_cache()
+        .map_err(|e| anyhow::anyhow!("warm layer cache: {e}"))?;
+    let tokenizer = load_tokenizer_from_gguf_metadata(&mapped.parsed().metadata)
+        .map_err(|e| anyhow::anyhow!("load tokenizer: {e:?}"))?;
+    let eos = tokenizer.special_tokens().eos.unwrap_or(0);
+
+    let examples = load_jsonl_sft(&args.dataset).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let encode = |text: &str| -> Vec<u32> { tokenizer.encode(text) };
+    let decode = |ids: &[u32]| -> std::result::Result<String, FinetuneError> {
+        tokenizer
+            .decode(ids)
+            .map_err(|error| FinetuneError::Model(format!("tokenizer decode failed: {error:?}")))
+    };
+
+    let split = args.eval_split.unwrap_or(0.0).clamp(0.0, 0.5);
+    let eval_count = ((examples.len() as f32) * split).round() as usize;
+    let (train_examples, eval_examples) = if eval_count > 0 && examples.len() > eval_count {
+        let (a, b) = examples.split_at(examples.len() - eval_count);
+        (a.to_vec(), b.to_vec())
+    } else {
+        (examples, Vec::new())
+    };
+
+    let mut eval_chunks = Vec::new();
+    if !eval_examples.is_empty() {
+        let mut eval_copy = eval_examples.clone();
+        SftTrainer::tokenize_examples(&mut eval_copy, encode, finetune.max_seq_len)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        eval_chunks = pack_chunks(&eval_copy, finetune.max_seq_len, eos, finetune.pack);
+    }
+
+    if let Some(resume) = &args.resume_from {
+        println!(
+            "oxidize-finetuning self-train: resuming adapter from {}",
+            resume.display()
+        );
+    }
+
+    println!(
+        "oxidize-finetuning self-train: model={} seed_examples={} rounds={} prompts/round={} critique={} output={}",
+        args.model.display(),
+        train_examples.len(),
+        args.rounds,
+        args.prompts_per_round,
+        args.self_critique,
+        args.output.display(),
+    );
+
+    let loop_ = SelfTrainLoop::new(finetune, self_cfg, &args.output);
+    let report = loop_
+        .run(
+            &mut model,
+            &train_examples,
+            &eval_chunks,
+            encode,
+            decode,
+            eos,
+            args.resume_from.as_deref(),
+        )
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    println!(
+        "oxidize-finetuning self-train: finished {} rounds; final checkpoint={} synthetic={}",
+        report.rounds.len(),
+        report.final_checkpoint.display(),
+        report.synthetic_dataset.display(),
+    );
+    for r in &report.rounds {
+        println!(
+            "  round {}: loss={:.4} eval={} synthetic=+{} ({:.1}s)",
+            r.round,
+            r.train_loss,
+            r.eval_loss
+                .map(|v| format!("{v:.4}"))
+                .unwrap_or_else(|| "n/a".into()),
+            r.synthetic_added,
+            r.elapsed_seconds,
+        );
+    }
+    Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Merge implementation
+// ---------------------------------------------------------------------------
 
 fn run_merge(args: MergeArgs) -> Result<()> {
     let strategy = match args.strategy.to_lowercase().as_str() {
@@ -493,11 +617,11 @@ fn run_merge(args: MergeArgs) -> Result<()> {
     );
 
     // Load and validate all manifests upfront so we fail fast before merging.
-    let mut manifests: Vec<AdapterManifest> = Vec::with_capacity(args.adapters.len());
+    let mut manifests = Vec::with_capacity(args.adapters.len());
     for path in &args.adapters {
         manifests.push(
             load_adapter_manifest(path)
-                .with_context(|| format!("load adapter manifest {}", path.display()))?,
+                .map_err(|e| anyhow::anyhow!("load adapter manifest {}: {e}", path.display()))?,
         );
     }
 
@@ -511,7 +635,8 @@ fn run_merge(args: MergeArgs) -> Result<()> {
     let all_adapters: Vec<Vec<LoRAAdapter>> = manifests
         .into_iter()
         .map(manifest_to_lora_adapters)
-        .collect::<Result<_>>()?;
+        .collect::<std::result::Result<_, _>>()
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let n_entries = all_adapters[0].len();
     anyhow::ensure!(

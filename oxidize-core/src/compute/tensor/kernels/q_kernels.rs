@@ -1339,21 +1339,8 @@ pub(super) fn accumulate_q6_k_block(block: &[u8], factor: f32, output: &mut [f32
 // lookup table and is correct.
 
 #[inline]
-#[allow(clippy::needless_range_loop)]
 pub(super) fn iq1s_grid_decode(index: u16, out: &mut [i8; 8]) {
-    let mut idx = index;
-    for i in 0..8 {
-        let bits = (idx & 3) as i8;
-        out[i] = match bits {
-            0 => -1,
-            1 => 0,
-            _ => 1,
-        };
-        idx >>= 2;
-        if i == 3 {
-            idx = index >> 8;
-        }
-    }
+    crate::quantization::iq1s_grid_decode(index, out);
 }
 
 #[inline]
@@ -1712,6 +1699,109 @@ pub(super) fn gemv_iq4_xs_f32(
         for (block_idx, block) in row.chunks_exact(BLOCK_IQ4_XS_SIZE).enumerate() {
             let v_off = block_idx * QK_K;
             sum += iq4_xs_dot(block, &vector[v_off..v_off + QK_K]);
+        }
+        sum
+    };
+
+    if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
+        output
+            .par_iter_mut()
+            .with_min_len(32)
+            .enumerate()
+            .for_each(|(row_idx, out)| *out = compute_row(row_idx));
+    } else {
+        for (row_idx, out) in output.iter_mut().enumerate() {
+            *out = compute_row(row_idx);
+        }
+    }
+    Ok(())
+}
+
+/// Quantize `vector` (length `n_blocks * QK4_NL`) into Q8_0 blocks for fused IQ4_NL GEMV.
+pub(crate) fn quantize_vector_q8_0_into(vector: &[f32], n_blocks: usize, out: &mut [u8]) {
+    debug_assert_eq!(vector.len(), n_blocks * QK4_NL);
+    debug_assert_eq!(out.len(), n_blocks * BLOCK_Q8_0_SIZE);
+    for (block_in, block_out) in vector
+        .chunks_exact(QK4_NL)
+        .zip(out.chunks_exact_mut(BLOCK_Q8_0_SIZE))
+    {
+        let max_abs = block_in.iter().fold(0.0_f32, |acc, v| acc.max(v.abs()));
+        let d = if max_abs == 0.0 { 0.0 } else { max_abs / 127.0 };
+        block_out[0..2].copy_from_slice(&crate::kv_cache::f32_to_f16_bits(d).to_le_bytes());
+        for (value, dst) in block_in.iter().zip(block_out[2..].iter_mut()) {
+            let q = if d == 0.0 {
+                0
+            } else {
+                (value / d).round().clamp(-128.0, 127.0) as i32
+            };
+            *dst = q as i8 as u8;
+        }
+    }
+}
+
+/// Integer dot between one IQ4_NL weight block and one Q8_0 activation block (32 elements).
+#[inline]
+pub(super) fn iq4_nl_q8_dot(iq_block: &[u8], q8_block: &[u8]) -> f32 {
+    debug_assert_eq!(iq_block.len(), BLOCK_IQ4_NL_SIZE);
+    debug_assert_eq!(q8_block.len(), BLOCK_Q8_0_SIZE);
+    let d_w = f16_le_to_f32([iq_block[0], iq_block[1]]);
+    let d_a = f16_le_to_f32([q8_block[0], q8_block[1]]);
+    if d_w == 0.0 || d_a == 0.0 {
+        return 0.0;
+    }
+    let mut isum = 0_i32;
+    for i in 0..16 {
+        let packed = iq_block[2 + i];
+        let w_lo = KVALUES_IQ4NL[(packed & 0xf) as usize] as i32;
+        let w_hi = KVALUES_IQ4NL[(packed >> 4) as usize] as i32;
+        let q_lo = q8_block[2 + 2 * i] as i8 as i32;
+        let q_hi = q8_block[2 + 2 * i + 1] as i8 as i32;
+        isum += w_lo * q_lo + w_hi * q_hi;
+    }
+    d_w * d_a * isum as f32
+}
+
+/// IQ4_NL × Q8_0 fused GEMV: quantize activations once, LUT lookup + int dot per block.
+pub(super) fn gemv_iq4_nl_q8_fused(
+    quantized_matrix: &[u8],
+    rows: usize,
+    cols: usize,
+    vector: &[f32],
+    output: &mut [f32],
+) -> Result<(), GemvError> {
+    let blocks_per_row = cols / QK4_NL;
+    let expected_matrix_len = rows * blocks_per_row * BLOCK_IQ4_NL_SIZE;
+    if quantized_matrix.len() != expected_matrix_len {
+        return Err(GemvError::InvalidMatrixLength {
+            expected: expected_matrix_len,
+            actual: quantized_matrix.len(),
+        });
+    }
+    if vector.len() != cols {
+        return Err(GemvError::InvalidVectorLength {
+            expected: cols,
+            actual: vector.len(),
+        });
+    }
+    if output.len() != rows {
+        return Err(GemvError::InvalidOutputLength {
+            expected: rows,
+            actual: output.len(),
+        });
+    }
+
+    let mut q8 = vec![0_u8; blocks_per_row * BLOCK_Q8_0_SIZE];
+    quantize_vector_q8_0_into(vector, blocks_per_row, &mut q8);
+
+    let row_bytes = blocks_per_row * BLOCK_IQ4_NL_SIZE;
+    let compute_row = |row_idx: usize| -> f32 {
+        let row_start = row_idx * row_bytes;
+        let row = &quantized_matrix[row_start..row_start + row_bytes];
+        let mut sum = 0.0_f32;
+        for (block_idx, iq_block) in row.chunks_exact(BLOCK_IQ4_NL_SIZE).enumerate() {
+            let q8_off = block_idx * BLOCK_Q8_0_SIZE;
+            let q8_block = &q8[q8_off..q8_off + BLOCK_Q8_0_SIZE];
+            sum += iq4_nl_q8_dot(iq_block, q8_block);
         }
         sum
     };

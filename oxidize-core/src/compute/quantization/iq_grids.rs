@@ -305,3 +305,31 @@ pub(super) const IQ3XXS_GRID: [u32; 256] = [
     0x3e042c14, 0x3e0c1434, 0x3e0c2404, 0x3e140c14, 0x3e14242c, 0x3e142c14, 0x3e1c0404, 0x3e1c0c2c,
     0x3e1c1c1c, 0x3e1c3404, 0x3e24140c, 0x3e24240c, 0x3e2c0404, 0x3e2c0414, 0x3e2c1424, 0x3e341c04,
 ];
+
+include!("iq2xs_grid_fragment.rs");
+include!("iq2s_grid_fragment.rs");
+include!("iq1s_grid_fragment.rs");
+
+/// Decode an 11-bit iq1s_grid index into 8 ternary values {-1, 0, +1}.
+/// Shared by IQ1_S and IQ1_M; table is verbatim from ggml-common.h.
+#[inline]
+pub(crate) fn iq1s_grid_decode(index: u16, out: &mut [i8; 8]) {
+    let packed = IQ1S_GRID[index as usize].to_le_bytes();
+    for (dst, &src) in out.iter_mut().zip(packed.iter()) {
+        *dst = src as i8;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::iq1s_grid_decode;
+
+    #[test]
+    fn iq1s_grid_decode_uses_real_table() {
+        let mut out = [0_i8; 8];
+        iq1s_grid_decode(0, &mut out);
+        assert_eq!(out, [-1, -1, -1, -1, -1, -1, -1, -1]);
+        iq1s_grid_decode(1, &mut out);
+        assert_eq!(out, [1, -1, -1, -1, -1, -1, -1, -1]);
+    }
+}

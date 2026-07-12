@@ -270,7 +270,9 @@ std::string detect_architecture_from_metadata_keys(
   static const char* kKnown[] = {
       "llama",       "mistral",      "mixtral",     "qwen",     "qwen2",
       "qwen2moe",    "qwen35",       "deepseek",    "deepseek2", "deepseek_v2",
-      "deepseek_v3", "deepseek_moe", "gemma",       "phi",      "falcon",
+      "deepseek_v3", "deepseek_moe", "hunyuan",     "hunyuan-moe",
+      "hunyuan_moe", "hunyuanmoe",   "hy_v3",       "hyv3",     "hunyuan_v3",
+      "gemma",       "phi",           "falcon",
       "gpt2",        "gptj",         "gptneox",     "dflash",   "dflash-draft"};
   for (const auto& kv : metadata) {
     auto dot = kv.first.find('.');
@@ -352,6 +354,12 @@ std::optional<std::string> map_hf_decoder_name(const std::string& name) {
   else if (suffix == "mlp.shared_expert.down_proj.weight") mapped_suffix = "ffn_down_shexp.weight";
   else if (suffix == "mlp.shared_expert_gate.weight") mapped_suffix = "ffn_gate_inp_shexp.weight";
   else if (suffix == "block_sparse_moe.gate.weight") mapped_suffix = "ffn_gate_inp.weight";
+  // Hunyuan (hy_v3): sigmoid router, per-expert selection bias, shared expert.
+  else if (suffix == "mlp.router.gate.weight") mapped_suffix = "ffn_gate_inp.weight";
+  else if (suffix == "mlp.expert_bias") mapped_suffix = "exp_probs_b.bias";
+  else if (suffix == "mlp.shared_mlp.gate_proj.weight") mapped_suffix = "ffn_gate_shexp.weight";
+  else if (suffix == "mlp.shared_mlp.up_proj.weight") mapped_suffix = "ffn_up_shexp.weight";
+  else if (suffix == "mlp.shared_mlp.down_proj.weight") mapped_suffix = "ffn_down_shexp.weight";
   else return std::nullopt;
 
   return "blk." + layer + "." + mapped_suffix;
@@ -440,6 +448,9 @@ Architecture architecture_from_name(const std::string& name) {
   if (a == "lfm2") return Architecture::Lfm2;
   if (a == "lfm2moe") return Architecture::Lfm2Moe;
   if (a == "glm-dsa" || a == "glm_dsa" || a == "glmdsa") return Architecture::GlmDsa;
+  if (a == "hunyuan" || a == "hunyuan-moe" || a == "hunyuan_moe" || a == "hunyuanmoe" ||
+      a == "hy_v3" || a == "hyv3" || a == "hunyuan_v3")
+    return Architecture::HunyuanMoe;
   return Architecture::Llama;  // gguf.rs default
 }
 
@@ -831,6 +842,12 @@ InferenceConfig build_inference_config(const GgufModel& model) {
     if (metadata_prefix == arch) return std::nullopt;
     return model.get_f32(arch + "." + suffix);
   };
+  auto arch_str = [&](const std::string& suffix) -> std::optional<std::string> {
+    auto v = model.get_string(metadata_prefix + "." + suffix);
+    if (v) return v;
+    if (metadata_prefix == arch) return std::nullopt;
+    return model.get_string(arch + "." + suffix);
+  };
 
   bool uses_mla = (architecture == Architecture::DeepSeek ||
                    architecture == Architecture::GlmDsa);
@@ -1102,6 +1119,14 @@ InferenceConfig build_inference_config(const GgufModel& model) {
       (arch == "qwen35" || arch == "qwen35moe" || arch == "qwen3_5_moe" ||
        arch == "qwen3_5_moe_text");
 
+  float yarn_factor = 0.0f;
+  float yarn_orig_ctx = 0.0f;
+  if (arch_str("rope.scaling.type") == "yarn") {
+    yarn_factor = arch_f32("rope.scaling.factor").value_or(0.0f);
+    yarn_orig_ctx = static_cast<float>(
+        arch_u32("rope.scaling.original_context_length").value_or(0));
+  }
+
   InferenceConfig cfg;
   cfg.vocab_size = vocab_size;
   cfg.context_size = context_size;
@@ -1134,6 +1159,8 @@ InferenceConfig build_inference_config(const GgufModel& model) {
   cfg.expert_weights_scale = expert_weights_scale;
   cfg.expert_group_count = expert_group_count;
   cfg.expert_group_used_count = expert_group_used_count;
+  cfg.yarn_factor = yarn_factor;
+  cfg.yarn_orig_ctx = yarn_orig_ctx;
   cfg.q_lora_rank = q_lora_rank;
   cfg.kv_lora_rank = kv_lora_rank;
   cfg.mla_key_dim = mla_key_dim;

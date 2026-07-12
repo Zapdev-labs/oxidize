@@ -36,7 +36,8 @@ void rms_norm(float* out, const float* x, const float* weight, size_t n,
 // `rope_dim == 0` => rotate the full head_dim. Matches apply_rope_f32 +
 // layer_wise.rs per-head application. Throws on odd effective rope width.
 void apply_rope(float* vec, size_t head_dim, size_t num_heads, size_t pos,
-                float theta, size_t rope_dim);
+                float theta, size_t rope_dim, float yarn_factor = 0.0f,
+                float yarn_orig_ctx = 0.0f);
 
 // In-place adjacent-pair rotary position embedding (LLAMA_ROPE_TYPE_NORM).
 // Used by GLM-DSA / DeepSeek-V2 MLA. Rotates pairs (h[2i], h[2i+1]) with

@@ -21,11 +21,6 @@ namespace {
 // anonymous namespace per the file's contract.
 #include "iq_grids.inc"
 
-// IQ4_NL nonlinear codebook (shared by IQ4_NL and IQ4_XS).
-constexpr std::array<int8_t, 16> KVALUES_IQ4NL = {
-    -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113,
-};
-
 // sign mask used by IQ2/IQ3 dequant (kmask_iq2xs).
 constexpr std::array<uint8_t, 8> KMASK_IQ2XS = {1, 2, 4, 8, 16, 32, 64, 128};
 
@@ -378,11 +373,13 @@ void dequant_q3_k(const uint8_t* in, float* out, size_t n) {
     size_t q_ptr = 0;
     size_t is = 0;
     uint8_t m = 1;
+    // ggml dequantize_row_q3_K: shift cycles 0,2,4,6 within each 128-value
+    // half, qs advances 32 bytes per half, hmask stays fixed (m covers 8 bits).
     for (int g = 0; g < 2; ++g) {
       for (int k = 0; k < 4; ++k) {
         float dl = d_all * static_cast<float>(static_cast<int>(scales[is]) - 32);
         ++is;
-        size_t shift = ((is - 1) % 4) * 2;
+        size_t shift = static_cast<size_t>(k) * 2;
         for (size_t l = 0; l < 16; ++l) {
           int qv = (qs[l] >> shift) & 3;
           int hbit = (hmask[l] & m) != 0 ? 0 : 4;
@@ -398,6 +395,7 @@ void dequant_q3_k(const uint8_t* in, float* out, size_t n) {
         q_ptr += 32;
         m <<= 1;
       }
+      qs += 32;
     }
   }
 }
@@ -470,6 +468,8 @@ void dequant_q5_k(const uint8_t* in, float* out, size_t n) {
       is += 2;
       u1 <<= 2;
       u2 <<= 2;
+      // ggml dequantize_row_q5_K: ql advances 32 bytes per 64 values (qh fixed).
+      qs += 32;
     }
   }
 }
@@ -649,6 +649,94 @@ void dequant_iq3_xxs(const uint8_t* in, float* out, size_t n) {
   }
 }
 
+// IQ2_XS: block = { f16 d; uint16_t qs[QK_K/8]; uint8_t scales[QK_K/32]; } (74 bytes).
+void dequant_iq2_xs(const uint8_t* in, float* out, size_t n) {
+  validate_layout(QuantType::IQ2_XS, n / QK_K * BLOCK_IQ2_XS_SIZE, n, BLOCK_IQ2_XS_SIZE, QK_K);
+  size_t nb = n / QK_K;
+  for (size_t b = 0; b < nb; ++b) {
+    const uint8_t* block = in + b * BLOCK_IQ2_XS_SIZE;
+    float* y = out + b * QK_K;
+    float d = f16_le_to_f32(block);
+    const uint8_t* scales = block + 2 + QK_K / 4;
+    for (size_t ib32 = 0; ib32 < QK_K / 32; ++ib32) {
+      uint8_t sc = scales[ib32];
+      float db[2] = {
+          d * (0.5f + static_cast<float>(sc & 0xf)) * 0.25f,
+          d * (0.5f + static_cast<float>(sc >> 4)) * 0.25f,
+      };
+      for (size_t l = 0; l < 4; ++l) {
+        size_t qs_off = 2 + 2 * (4 * ib32 + l);
+        uint16_t qs_val = read_u16_le(block + qs_off);
+        const uint8_t* grid =
+            reinterpret_cast<const uint8_t*>(&iq2xs_grid[qs_val & 511]);
+        uint8_t signs = ksigns_iq2xs[qs_val >> 9];
+        float dl = db[l / 2];
+        for (size_t j = 0; j < 8; ++j) {
+          y[j] = dl * static_cast<float>(grid[j]) *
+                 ((signs & kmask_iq2xs[j]) != 0 ? -1.0f : 1.0f);
+        }
+        y += 8;
+      }
+    }
+  }
+}
+
+// IQ2_S: block = { f16 d; uint8_t qs[QK_K/4]; uint8_t qh[QK_K/32];
+//                   uint8_t scales[QK_K/32]; } (82 bytes). Signs live in qs+32.
+void dequant_iq2_s(const uint8_t* in, float* out, size_t n) {
+  validate_layout(QuantType::IQ2_S, n / QK_K * BLOCK_IQ2_S_SIZE, n, BLOCK_IQ2_S_SIZE, QK_K);
+  size_t nb = n / QK_K;
+  for (size_t b = 0; b < nb; ++b) {
+    const uint8_t* block = in + b * BLOCK_IQ2_S_SIZE;
+    float* y = out + b * QK_K;
+    float d = f16_le_to_f32(block);
+    const uint8_t* qs = block + 2;
+    const uint8_t* qh = block + 2 + QK_K / 4;
+    const uint8_t* scales = block + 2 + QK_K / 4 + QK_K / 32;
+    size_t qs_ptr = 0;
+    size_t signs_ptr = QK_K / 8;
+    for (size_t ib32 = 0; ib32 < QK_K / 32; ++ib32) {
+      uint8_t sc = scales[ib32];
+      float db[2] = {
+          d * (0.5f + static_cast<float>(sc & 0xf)) * 0.25f,
+          d * (0.5f + static_cast<float>(sc >> 4)) * 0.25f,
+      };
+      for (size_t l = 0; l < 4; ++l) {
+        float dl = db[l / 2];
+        size_t grid_idx = static_cast<size_t>(qs[qs_ptr + l]) |
+                          ((static_cast<size_t>(qh[ib32]) << (8 - 2 * l)) & 0x300);
+        const uint8_t* grid = reinterpret_cast<const uint8_t*>(&iq2s_grid[grid_idx]);
+        uint8_t signs = qs[signs_ptr + l];
+        for (size_t j = 0; j < 8; ++j) {
+          y[j] = dl * static_cast<float>(grid[j]) *
+                 ((signs & kmask_iq2xs[j]) != 0 ? -1.0f : 1.0f);
+        }
+        y += 8;
+      }
+      qs_ptr += 4;
+      signs_ptr += 4;
+    }
+  }
+}
+
+// IQ4_NL: block = { f16 d; uint8_t qs[QK4_NL/2]; } (18 bytes).
+void dequant_iq4_nl(const uint8_t* in, float* out, size_t n) {
+  validate_layout(QuantType::IQ4_NL, n / QK4_NL * BLOCK_IQ4_NL_SIZE, n, BLOCK_IQ4_NL_SIZE,
+                  QK4_NL);
+  size_t nb = n / QK4_NL;
+  for (size_t b = 0; b < nb; ++b) {
+    const uint8_t* block = in + b * BLOCK_IQ4_NL_SIZE;
+    float* o = out + b * QK4_NL;
+    float d = f16_le_to_f32(block);
+    const uint8_t* qs = block + 2;
+    for (size_t j = 0; j < QK4_NL / 2; ++j) {
+      uint8_t packed = qs[j];
+      o[j] = d * static_cast<float>(KVALUES_IQ4NL[packed & 0xf]);
+      o[j + QK4_NL / 2] = d * static_cast<float>(KVALUES_IQ4NL[packed >> 4]);
+    }
+  }
+}
+
 void dequant_iq1_s(const uint8_t* in, float* out, size_t n) {
   validate_layout(QuantType::IQ1_S, n / QK_K * BLOCK_IQ1_S_SIZE, n, BLOCK_IQ1_S_SIZE, QK_K);
   size_t nb = n / QK_K;
@@ -763,6 +851,99 @@ void dequant_nvfp4(const uint8_t* in, float* out, size_t n) {
 
 }  // namespace
 
+static inline int clamp_i(int v, int lo, int hi) {
+  return v < lo ? lo : (v > hi ? hi : v);
+}
+
+static void quantize_block_q4_0(const float* x, uint8_t* o) {
+  float amax = 0.0f;
+  float mx = 0.0f;
+  for (size_t i = 0; i < QK4_0; ++i) {
+    float a = std::fabs(x[i]);
+    if (a > amax) {
+      amax = a;
+      mx = x[i];
+    }
+  }
+  float d = mx / -8.0f;
+  float id = d != 0.0f ? 1.0f / d : 0.0f;
+  uint16_t dh = f32_to_f16_bits(d);
+  o[0] = static_cast<uint8_t>(dh & 0xff);
+  o[1] = static_cast<uint8_t>(dh >> 8);
+  for (size_t i = 0; i < QK4_0 / 2; ++i) {
+    int lo = static_cast<int>(x[i] * id + 8.5f);
+    int hi = static_cast<int>(x[i + QK4_0 / 2] * id + 8.5f);
+    lo = clamp_i(lo, 0, 15);
+    hi = clamp_i(hi, 0, 15);
+    o[2 + i] = static_cast<uint8_t>((hi << 4) | lo);
+  }
+}
+
+static void quantize_block_al5(const float* x, uint8_t* o) {
+  float amax = 0.0f;
+  float mx = 0.0f;
+  for (size_t i = 0; i < QK4_0; ++i) {
+    float a = std::fabs(x[i]);
+    if (a > amax) {
+      amax = a;
+      mx = x[i];
+    }
+  }
+  if (amax == 0.0f) {
+    uint16_t dh = f32_to_f16_bits(0.0f);
+    o[0] = static_cast<uint8_t>(dh & 0xff);
+    o[1] = static_cast<uint8_t>(dh >> 8);
+    std::memset(o + 2, 0x88, 16);
+    return;
+  }
+
+  float best_d = mx / -8.0f;
+  float best_obj = -1.0f;
+  int best_levels[QK4_0] = {};
+  for (int is = -9; is <= 9; ++is) {
+    float iscale = -(8.0f + 0.1f * static_cast<float>(is)) / mx;
+    float sumlx = 0.0f;
+    float suml2 = 0.0f;
+    int levels[QK4_0];
+    for (size_t i = 0; i < QK4_0; ++i) {
+      levels[i] = clamp_i(static_cast<int>(std::lrint(iscale * x[i])), -8, 7);
+      float weight = x[i] * x[i];
+      float level = static_cast<float>(levels[i]);
+      sumlx += weight * x[i] * level;
+      suml2 += weight * level * level;
+    }
+    if (suml2 > 0.0f) {
+      float objective = sumlx * sumlx / suml2;
+      if (objective > best_obj) {
+        best_obj = objective;
+        best_d = sumlx / suml2;
+        for (size_t i = 0; i < QK4_0; ++i) best_levels[i] = levels[i];
+      }
+    }
+  }
+
+  uint16_t dh = f32_to_f16_bits(best_d);
+  o[0] = static_cast<uint8_t>(dh & 0xff);
+  o[1] = static_cast<uint8_t>(dh >> 8);
+  for (size_t i = 0; i < QK4_0 / 2; ++i) {
+    int lo = best_levels[i] + 8;
+    int hi = best_levels[i + QK4_0 / 2] + 8;
+    o[2 + i] = static_cast<uint8_t>((hi << 4) | lo);
+  }
+}
+
+void quantize_row_q4_0(const float* x, uint8_t* out, size_t n) {
+  size_t nb = n / QK4_0;
+  for (size_t b = 0; b < nb; ++b)
+    quantize_block_q4_0(x + b * QK4_0, out + b * BLOCK_Q4_0_SIZE);
+}
+
+void quantize_row_al5(const float* x, uint8_t* out, size_t n) {
+  size_t nb = n / QK4_0;
+  for (size_t b = 0; b < nb; ++b)
+    quantize_block_al5(x + b * QK4_0, out + b * BLOCK_Q4_0_SIZE);
+}
+
 void quantize_row_q8_0(const float* x, uint8_t* out, size_t n) {
   size_t nb = n / QK8_0;
   for (size_t b = 0; b < nb; ++b) {
@@ -831,14 +1012,19 @@ size_t quant_block_values(QuantType q) {
     case QuantType::F64:
       return 1;
     case QuantType::Q4_0:
+    case QuantType::AL5:
+      return QK4_0;
+    case QuantType::AL5_XS:
       return QK4_0;
     case QuantType::Q4_1:
       return QK4_1;
     case QuantType::Q5_0:
+    case QuantType::AL6:
       return QK5_0;
     case QuantType::Q5_1:
       return QK5_1;
     case QuantType::Q8_0:
+    case QuantType::AL8:
       return QK8_0;
     case QuantType::Q2_K:
     case QuantType::Q3_K_S:
@@ -854,8 +1040,12 @@ size_t quant_block_values(QuantType q) {
     case QuantType::IQ4_XS:
     case QuantType::IQ3_S:
     case QuantType::IQ2_XXS:
+    case QuantType::IQ2_XS:
+    case QuantType::IQ2_S:
     case QuantType::IQ3_XXS:
       return QK_K;
+    case QuantType::IQ4_NL:
+      return QK4_NL;
     case QuantType::NVFP4:
       return QK_NVFP4;
     default:
@@ -880,14 +1070,19 @@ size_t quant_block_bytes(QuantType q) {
     case QuantType::F64:
       return 8;
     case QuantType::Q4_0:
+    case QuantType::AL5:
       return BLOCK_Q4_0_SIZE;
+    case QuantType::AL5_XS:
+      return 14;
     case QuantType::Q4_1:
       return BLOCK_Q4_1_SIZE;
     case QuantType::Q5_0:
+    case QuantType::AL6:
       return BLOCK_Q5_0_SIZE;
     case QuantType::Q5_1:
       return BLOCK_Q5_1_SIZE;
     case QuantType::Q8_0:
+    case QuantType::AL8:
       return BLOCK_Q8_0_SIZE;
     case QuantType::Q2_K:
       return BLOCK_Q2_K_SIZE;
@@ -913,6 +1108,12 @@ size_t quant_block_bytes(QuantType q) {
       return BLOCK_IQ3_S_SIZE;
     case QuantType::IQ2_XXS:
       return BLOCK_IQ2_XXS_SIZE;
+    case QuantType::IQ2_XS:
+      return BLOCK_IQ2_XS_SIZE;
+    case QuantType::IQ2_S:
+      return BLOCK_IQ2_S_SIZE;
+    case QuantType::IQ4_NL:
+      return BLOCK_IQ4_NL_SIZE;
     case QuantType::IQ3_XXS:
       return BLOCK_IQ3_XXS_SIZE;
     case QuantType::NVFP4:
@@ -964,7 +1165,33 @@ QuantType from_ggml_type(uint32_t ggml_type) {
     case 29: return QuantType::IQ1_M;
     case 30: return QuantType::BF16;
     case 40: return QuantType::NVFP4;
+    case 240: return QuantType::AL5;
+    case 241: return QuantType::AL8;
+    case 242: return QuantType::AL6;
+    case 243: return QuantType::AL5_XS;
     default: return QuantType::Unknown;
+  }
+}
+
+static void dequant_al5_xs(const uint8_t* src, float* dst, size_t n) {
+  constexpr size_t QK = 32;
+  constexpr size_t BS = 14;
+  validate_layout(QuantType::AL5_XS, n / QK * BS, n, BS, QK);
+  size_t nb = n / QK;
+  for (size_t b = 0; b < nb; ++b) {
+    const uint8_t* block = src + b * BS;
+    float d = f16_le_to_f32(block);
+    uint32_t bitpos = 0;
+    for (size_t i = 0; i < QK; ++i) {
+      uint8_t lvl = 0;
+      for (int bit = 0; bit < 3; ++bit) {
+        size_t byte_idx = bitpos / 8;
+        size_t bit_idx = bitpos % 8;
+        if ((block[2 + byte_idx] >> bit_idx) & 1) lvl |= (1u << bit);
+        ++bitpos;
+      }
+      dst[b * QK + i] = (static_cast<float>(static_cast<int>(lvl) - 4)) * d;
+    }
   }
 }
 
@@ -973,11 +1200,23 @@ void dequantize_row(QuantType q, const uint8_t* src, float* dst, size_t n) {
     case QuantType::F32: dequant_f32(src, dst, n); return;
     case QuantType::F16: dequant_f16(src, dst, n); return;
     case QuantType::BF16: dequant_bf16(src, dst, n); return;
-    case QuantType::Q4_0: dequant_q4_0(src, dst, n); return;
+    case QuantType::Q4_0:
+    case QuantType::AL5:
+      dequant_q4_0(src, dst, n);
+      return;
+    case QuantType::AL5_XS:
+      dequant_al5_xs(src, dst, n);
+      return;
     case QuantType::Q4_1: dequant_q4_1(src, dst, n); return;
-    case QuantType::Q5_0: dequant_q5_0(src, dst, n); return;
+    case QuantType::Q5_0:
+    case QuantType::AL6:
+      dequant_q5_0(src, dst, n);
+      return;
     case QuantType::Q5_1: dequant_q5_1(src, dst, n); return;
-    case QuantType::Q8_0: dequant_q8_0(src, dst, n); return;
+    case QuantType::Q8_0:
+    case QuantType::AL8:
+      dequant_q8_0(src, dst, n);
+      return;
     case QuantType::Q2_K: dequant_q2_k(src, dst, n); return;
     case QuantType::Q3_K_S:
     case QuantType::Q3_K_M:
@@ -992,6 +1231,9 @@ void dequantize_row(QuantType q, const uint8_t* src, float* dst, size_t n) {
     case QuantType::IQ4_XS: dequant_iq4_xs(src, dst, n); return;
     case QuantType::IQ3_S: dequant_iq3_s(src, dst, n); return;
     case QuantType::IQ2_XXS: dequant_iq2_xxs(src, dst, n); return;
+    case QuantType::IQ2_XS: dequant_iq2_xs(src, dst, n); return;
+    case QuantType::IQ2_S: dequant_iq2_s(src, dst, n); return;
+    case QuantType::IQ4_NL: dequant_iq4_nl(src, dst, n); return;
     case QuantType::IQ3_XXS: dequant_iq3_xxs(src, dst, n); return;
     case QuantType::NVFP4: dequant_nvfp4(src, dst, n); return;
     default:

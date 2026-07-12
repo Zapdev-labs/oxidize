@@ -7,6 +7,7 @@ pub const QK4_1: usize = 32;
 pub const QK5_0: usize = 32;
 pub const QK5_1: usize = 32;
 pub const QK8_0: usize = 32;
+pub const QK4_NL: usize = 32;
 pub const QK_K: usize = 256;
 pub const QK_NVFP4: usize = 64;
 pub const QK_NVFP4_SUB: usize = 16;
@@ -46,8 +47,10 @@ pub const BLOCK_IQ4_XS_SIZE: usize = sizeof_of_f16() + 2 + QK_K / 64 + QK_K / 2;
 // block_iq3_s: ggml_half d + uint8_t qs[QK_K/4] + uint8_t qh[QK_K/32] + uint8_t signs[QK_K/8] + uint8_t scales[QK_K/64]
 const BLOCK_IQ3_S_SIZE: usize = sizeof_of_f16() + QK_K / 4 + QK_K / 32 + QK_K / 8 + QK_K / 64;
 const BLOCK_IQ2_XXS_SIZE: usize = sizeof_of_f16() + QK_K / 4;
-const BLOCK_IQ2_XS_SIZE: usize = sizeof_of_f16() + QK_K / 32 + QK_K / 4;
+const BLOCK_IQ2_XS_SIZE: usize = sizeof_of_f16() + QK_K / 8 * sizeof_of_i16() + QK_K / 32;
+const BLOCK_IQ2_S_SIZE: usize = sizeof_of_f16() + QK_K / 4 + QK_K / 32 + QK_K / 32;
 const BLOCK_IQ3_XXS_SIZE: usize = sizeof_of_f16() + 3 * (QK_K / 8);
+pub const BLOCK_IQ4_NL_SIZE: usize = sizeof_of_f16() + QK4_NL / 2;
 // IQ4_NL nonlinear codebook (shared by IQ4_NL and IQ4_XS)
 pub(crate) const KVALUES_IQ4NL: [i8; 16] = [
     -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113,
@@ -248,6 +251,10 @@ pub fn quant_block_layout(
         GgufQuantizationType::F64 => Ok((1, 8)),
         GgufQuantizationType::BF16 => Ok((1, 2)),
         GgufQuantizationType::Q4_0 => Ok((QK4_0, BLOCK_Q4_0_SIZE)),
+        GgufQuantizationType::AL5 => Ok((QK4_0, BLOCK_Q4_0_SIZE)),
+        GgufQuantizationType::AL8 => Ok((QK8_0, BLOCK_Q8_0_SIZE)),
+        GgufQuantizationType::AL6 => Ok((QK5_0, BLOCK_Q5_0_SIZE)),
+        GgufQuantizationType::AL5_XS => Ok((QK_AL, BLOCK_AL5_XS_SIZE)),
         GgufQuantizationType::Q4_1 => Ok((QK4_1, BLOCK_Q4_1_SIZE)),
         GgufQuantizationType::Q5_0 => Ok((QK5_0, BLOCK_Q5_0_SIZE)),
         GgufQuantizationType::Q5_1 => Ok((QK5_1, BLOCK_Q5_1_SIZE)),
@@ -264,11 +271,11 @@ pub fn quant_block_layout(
         GgufQuantizationType::NVFP4 => Ok((QK_NVFP4, BLOCK_NVFP4_SIZE)),
         GgufQuantizationType::IQ2_XXS => Ok((QK_K, BLOCK_IQ2_XXS_SIZE)),
         GgufQuantizationType::IQ2_XS => Ok((QK_K, BLOCK_IQ2_XS_SIZE)),
-        GgufQuantizationType::IQ2_S => Ok((QK_K, BLOCK_Q2_K_SIZE)),
+        GgufQuantizationType::IQ2_S => Ok((QK_K, BLOCK_IQ2_S_SIZE)),
         GgufQuantizationType::IQ3_S => Ok((QK_K, BLOCK_IQ3_S_SIZE)),
         GgufQuantizationType::IQ4_XS => Ok((QK_K, BLOCK_IQ4_XS_SIZE)),
         GgufQuantizationType::IQ3_XXS => Ok((QK_K, BLOCK_IQ3_XXS_SIZE)),
-        GgufQuantizationType::IQ4_NL => Ok((QK_K, BLOCK_Q4_K_SIZE)),
+        GgufQuantizationType::IQ4_NL => Ok((QK4_NL, BLOCK_IQ4_NL_SIZE)),
         other => Err(QuantizationError::UnsupportedQuantizationType(other)),
     }
 }
@@ -288,6 +295,21 @@ pub fn quantized_size(
     }
 
     Ok((value_count / values_per_block) * bytes_per_block)
+}
+
+pub fn value_count_from_quantized_bytes(
+    quantization: GgufQuantizationType,
+    byte_len: usize,
+) -> Result<usize, QuantizationError> {
+    let (values_per_block, bytes_per_block) = quant_block_layout(quantization)?;
+    if !byte_len.is_multiple_of(bytes_per_block) {
+        return Err(QuantizationError::InvalidInputLength {
+            quantization,
+            expected_multiple: bytes_per_block,
+            actual: byte_len,
+        });
+    }
+    Ok(byte_len / bytes_per_block * values_per_block)
 }
 
 pub fn quantize_scalar(
@@ -317,7 +339,7 @@ pub fn quantize_scalar(
             }
             input.len() / 2
         }
-        other => return Err(QuantizationError::UnsupportedQuantizationType(other)),
+        other => value_count_from_quantized_bytes(other, input.len())?,
     };
 
     let expected_output = quantized_size(target, value_count)?;
@@ -327,6 +349,22 @@ pub fn quantize_scalar(
             expected: expected_output,
             actual: output.len(),
         });
+    }
+
+    if source == GgufQuantizationType::F16 && target == GgufQuantizationType::AL5 {
+        return quantize_f16_to_al5_scalar(input, output);
+    }
+    if source == GgufQuantizationType::BF16 && target == GgufQuantizationType::AL5 {
+        return quantize_bf16_to_al5_scalar(input, output);
+    }
+    if source == GgufQuantizationType::BF16 && target == GgufQuantizationType::AL8 {
+        return quantize_bf16_to_al8_scalar(input, output);
+    }
+    if source == GgufQuantizationType::BF16 && target == GgufQuantizationType::AL6 {
+        return quantize_bf16_to_al6_scalar(input, output);
+    }
+    if source == GgufQuantizationType::BF16 && target == GgufQuantizationType::AL5_XS {
+        return quantize_bf16_to_al5_xs_scalar(input, output);
     }
 
     let mut values = vec![0.0_f32; value_count];
@@ -382,12 +420,15 @@ pub fn quantize_scalar_with_imatrix(
     let mut values = vec![0.0_f32; value_count];
     dequantize_scalar(source, input, &mut values)?;
 
-    // IQ4_XS minimizes a properly importance-weighted error in the encoder, so
-    // the raw values and the importance weights are passed through untouched.
-    // Other targets keep the legacy behaviour of pre-scaling values by
-    // importance before a plain encode.
+    // IQ4_XS and AL5 minimize a properly importance-weighted error in the
+    // encoder, so the raw values and the importance weights are passed through
+    // untouched. Other targets keep the legacy behaviour of pre-scaling values
+    // by importance before a plain encode.
     if target == GgufQuantizationType::IQ4_XS {
         return quantize_iq4_xs(&values, Some(imatrix.values()), output);
+    }
+    if target == GgufQuantizationType::AL5 {
+        return quantize_al5_scalar_weighted(&values, imatrix.values(), output);
     }
 
     let weighted_values = values
@@ -401,7 +442,7 @@ pub fn quantize_scalar_with_imatrix(
 /// Quantize one F16/F32 byte chunk with per-value importance weights.
 ///
 /// `weights` must hold one non-negative value per source element. Only targets
-/// with an importance-aware encoder (currently IQ4_XS) consume the weights;
+/// with an importance-aware encoder (currently IQ4_XS and AL5) consume the weights;
 /// other targets fall back to the unweighted encode so callers can use a single
 /// streaming path regardless of target.
 pub fn quantize_scalar_weighted(
@@ -439,6 +480,16 @@ pub fn quantize_scalar_weighted(
             reason: "matrix length must match input value count",
         });
     }
+    if weights.iter().any(|weight| !weight.is_finite()) {
+        return Err(QuantizationError::InvalidImportanceMatrix {
+            reason: "matrix values must be finite",
+        });
+    }
+    if weights.iter().any(|weight| *weight < 0.0) {
+        return Err(QuantizationError::InvalidImportanceMatrix {
+            reason: "matrix values must be non-negative",
+        });
+    }
     let expected_output = quantized_size(target, value_count)?;
     if output.len() != expected_output {
         return Err(QuantizationError::InvalidOutputLength {
@@ -452,6 +503,7 @@ pub fn quantize_scalar_weighted(
     dequantize_scalar(source, input, &mut values)?;
     match target {
         GgufQuantizationType::IQ4_XS => quantize_iq4_xs(&values, Some(weights), output),
+        GgufQuantizationType::AL5 => quantize_al5_scalar_weighted(&values, weights, output),
         other => quantize_from_f32_scalar(other, &values, output),
     }
 }
@@ -460,9 +512,15 @@ pub fn quantize_scalar_weighted(
 mod quant_utils;
 use quant_utils::*;
 
+#[path = "quantization/al_family.rs"]
+mod al_family;
+pub use al_family::*;
+
 #[path = "quantization/quant_simple.rs"]
 mod quant_simple;
 pub use quant_simple::*;
+
+pub(crate) use al_family::{BLOCK_AL5_XS_SIZE, QK_AL};
 
 #[path = "quantization/quant_k_blocks.rs"]
 mod quant_k_blocks;
@@ -471,6 +529,10 @@ pub use quant_k_blocks::*;
 #[path = "quantization/quant_nvfp4.rs"]
 mod quant_nvfp4;
 pub use quant_nvfp4::*;
+
+#[path = "quantization/iq_grids.rs"]
+pub(crate) mod iq_grids;
+pub(crate) use iq_grids::iq1s_grid_decode;
 
 #[path = "quantization/quant_iq_series.rs"]
 mod quant_iq_series;
