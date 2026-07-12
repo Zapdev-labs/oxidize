@@ -10,7 +10,7 @@ from pathlib import Path
 IM_END = "<|im_end|>"
 ALLOWED_ROLES = {"user", "assistant", "system", "tool"}
 ROLE_ALIASES = {"human": "user", "gpt": "assistant"}
-CONTROL_TOKENS = ("<|im_start|>", "<|im_end|>", "もしも")
+CONTROL_TOKENS = ("<|im_start|>", "<|im_end|>")
 
 
 def clean_content(value: str) -> str:

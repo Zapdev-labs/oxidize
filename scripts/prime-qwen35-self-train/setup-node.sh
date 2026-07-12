@@ -32,8 +32,14 @@ fi
 if ! command -v uv >/dev/null 2>&1; then
   curl -LsSf https://astral.sh/uv/install.sh | sh
 fi
+UV="${UV:-$HOME/.local/bin/uv}"
+VENV="${OXIDIZE_SETUP_VENV:-$HOME/.venvs/oxidize-setup}"
+if [[ ! -x "$VENV/bin/python3" ]]; then
+  "$UV" venv "$VENV"
+fi
+export PATH="$VENV/bin:$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
 if ! python3 -c 'import huggingface_hub, datasets' 2>/dev/null; then
-  uv pip install --system huggingface_hub hf_transfer datasets
+  "$UV" pip install --python "$VENV/bin/python3" huggingface_hub hf_transfer datasets
 fi
 
 if [[ ! -d "$REPO/.git" ]]; then

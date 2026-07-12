@@ -15,11 +15,15 @@ trap 'rm -rf "$STAGING"' EXIT
 mapfile -t REMOTE_FILES < <(ssh "$HOST" bash -s -- "$REMOTE_GLOB" <<'REMOTE_LIST'
 set -euo pipefail
 pattern=${1/#\~/$HOME}
-compgen -G "$pattern" | while IFS= read -r file; do
+(compgen -G "$pattern" || true) | while IFS= read -r file; do
   stat -c '%s\t%n' -- "$file"
 done | sort -n | cut -f2-
 REMOTE_LIST
 )
+if [[ ${#REMOTE_FILES[@]} -eq 0 ]]; then
+  echo "no remote files matched: $REMOTE_GLOB" >&2
+  exit 1
+fi
 
 echo "==> creating private repo $HF_REPO"
 python3 scripts/publish_gguf_hf.py --repo "$HF_REPO" --private --files /dev/null 2>/dev/null || true

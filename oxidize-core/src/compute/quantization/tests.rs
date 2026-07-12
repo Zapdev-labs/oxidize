@@ -656,6 +656,27 @@ fn imatrix_quantization_requires_matching_value_count() {
 }
 
 #[test]
+fn raw_weight_quantization_rejects_invalid_importance_values() {
+    let input = vec![0_u8; QK4_0 * 4];
+    let mut output = vec![0_u8; BLOCK_Q4_0_SIZE];
+    for invalid in [f32::NAN, -1.0] {
+        let weights = vec![invalid; QK4_0];
+        let error = quantize_scalar_weighted(
+            GgufQuantizationType::F32,
+            GgufQuantizationType::AL5,
+            &input,
+            &mut output,
+            &weights,
+        )
+        .expect_err("invalid weights must fail");
+        assert!(matches!(
+            error,
+            QuantizationError::InvalidImportanceMatrix { .. }
+        ));
+    }
+}
+
+#[test]
 fn imatrix_quantization_biases_encoded_output() {
     let values = [1.0_f32, 2.0_f32];
     let mut input = Vec::new();

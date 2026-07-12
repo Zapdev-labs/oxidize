@@ -271,7 +271,8 @@ std::string detect_architecture_from_metadata_keys(
       "llama",       "mistral",      "mixtral",     "qwen",     "qwen2",
       "qwen2moe",    "qwen35",       "deepseek",    "deepseek2", "deepseek_v2",
       "deepseek_v3", "deepseek_moe", "hunyuan",     "hunyuan-moe",
-      "hunyuan_moe", "hy_v3",        "gemma",       "phi",      "falcon",
+      "hunyuan_moe", "hunyuanmoe",   "hy_v3",       "hyv3",     "hunyuan_v3",
+      "gemma",       "phi",           "falcon",
       "gpt2",        "gptj",         "gptneox",     "dflash",   "dflash-draft"};
   for (const auto& kv : metadata) {
     auto dot = kv.first.find('.');

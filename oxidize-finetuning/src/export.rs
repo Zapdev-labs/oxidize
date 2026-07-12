@@ -71,6 +71,11 @@ pub fn load_adapter_manifest(path: impl AsRef<Path>) -> Result<LoRAExportManifes
 
 pub fn manifest_to_lora_adapters(manifest: LoRAExportManifest) -> Result<Vec<LoRAAdapter>> {
     let rank = manifest.rank;
+    if rank == 0 {
+        return Err(FinetuneError::Adapter(
+            "LoRA manifest rank must be greater than zero".into(),
+        ));
+    }
     let cfg = FinetuneConfig {
         rank,
         alpha: manifest.alpha_scale * rank as f32,
@@ -152,5 +157,16 @@ mod tests {
         for target in targets {
             assert_eq!(LoRATarget::from_name(target.name()), Some(target));
         }
+    }
+
+    #[test]
+    fn manifest_rejects_zero_rank() {
+        let manifest = LoRAExportManifest {
+            rank: 0,
+            alpha_scale: 1.0,
+            adapters: Vec::new(),
+        };
+        let error = manifest_to_lora_adapters(manifest).expect_err("zero rank must fail");
+        assert!(error.to_string().contains("rank must be greater than zero"));
     }
 }

@@ -117,9 +117,7 @@ pub(super) fn quantize_q4_0_scalar(
             let hi = if d == 0.0 {
                 8_u8
             } else {
-                (in_block[i + 16] * inv_d + 8.5)
-                    .trunc()
-                    .clamp(0.0, 15.0) as u8
+                (in_block[i + 16] * inv_d + 8.5).trunc().clamp(0.0, 15.0) as u8
             };
             out_block[2 + i] = lo | (hi << 4);
         }
@@ -241,6 +239,16 @@ pub(super) fn quantize_al5_scalar_weighted(
     if imatrix.len() != input.len() {
         return Err(QuantizationError::InvalidImportanceMatrix {
             reason: "matrix length must match input value count",
+        });
+    }
+    if imatrix.iter().any(|weight| !weight.is_finite()) {
+        return Err(QuantizationError::InvalidImportanceMatrix {
+            reason: "matrix values must be finite",
+        });
+    }
+    if imatrix.iter().any(|weight| *weight < 0.0) {
+        return Err(QuantizationError::InvalidImportanceMatrix {
+            reason: "matrix values must be non-negative",
         });
     }
     if output.len() != (input.len() / QK4_0) * BLOCK_Q4_0_SIZE {

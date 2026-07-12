@@ -88,6 +88,7 @@ if [[ "$PUBLISH" == "1" ]]; then
     echo "HF_TOKEN required for publish" >&2
     exit 1
   fi
+  printf -v TOKEN_Q '%q' "$TOKEN"
   REMOTE_REPO=$(ssh "$HOST" bash -s -- "$REPO" <<'REMOTE_PATH'
 repo=${1/#\~/$HOME}
 mkdir -p "$repo/bin"
@@ -95,17 +96,17 @@ printf '%s\n' "$repo"
 REMOTE_PATH
 )
   scp "$SCRIPT_DIR/publish_gguf_hf.py" "$HOST:$REMOTE_REPO/bin/publish_gguf_hf.py"
-  ssh "$HOST" bash -s -- "$HF_REPO" "$OUT_DIR" "$TOKEN" "$REMOTE_REPO" <<'REMOTE_PUB'
+  ssh "$HOST" bash -s -- "$HF_REPO" "$OUT_DIR" "$REMOTE_REPO" <<REMOTE_PUB
 set -euo pipefail
-HF_REPO=$1
-OUT_DIR=${2/#\~/$HOME}
-export HF_TOKEN=$3
-REMOTE_REPO=$4
-python3 "$REMOTE_REPO/bin/publish_gguf_hf.py" --repo "$HF_REPO" --private \
-  --files "$OUT_DIR/gemma-4-31B-it-AL5.gguf" \
-          "$OUT_DIR/gemma-4-31B-it-AL6.gguf" \
-          "$OUT_DIR/gemma-4-31B-it-AL8.gguf" \
-          "$OUT_DIR/gemma-4-31B-it-AL5_XS.gguf"
+HF_REPO=\$1
+OUT_DIR=\${2/#\\~/\$HOME}
+export HF_TOKEN=$TOKEN_Q
+REMOTE_REPO=\$3
+python3 "\$REMOTE_REPO/bin/publish_gguf_hf.py" --repo "\$HF_REPO" --private \
+  --files "\$OUT_DIR/gemma-4-31B-it-AL5.gguf" \
+          "\$OUT_DIR/gemma-4-31B-it-AL6.gguf" \
+          "\$OUT_DIR/gemma-4-31B-it-AL8.gguf" \
+          "\$OUT_DIR/gemma-4-31B-it-AL5_XS.gguf"
 REMOTE_PUB
 fi
 

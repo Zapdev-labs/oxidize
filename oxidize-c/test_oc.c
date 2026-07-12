@@ -348,7 +348,7 @@ int main(void) {
   size_t cols = 512;
   oc_quant types[] = {OC_F16, OC_BF16, OC_Q4_0, OC_Q4_1, OC_Q5_0, OC_Q5_1,
                       OC_Q8_0, OC_Q2_K, OC_Q3_K, OC_Q4_K, OC_Q5_K, OC_Q6_K,
-                      OC_AL5, OC_IQ4_XS, OC_IQ2_XXS, OC_IQ2_XS, OC_IQ2_S,
+                      OC_AL5, OC_AL8, OC_IQ4_XS, OC_IQ2_XXS, OC_IQ2_XS, OC_IQ2_S,
                       OC_IQ3_XXS, OC_IQ3_S};
   for (size_t i = 0; i < sizeof(types) / sizeof(*types); ++i)
     check_quant(types[i], cols);

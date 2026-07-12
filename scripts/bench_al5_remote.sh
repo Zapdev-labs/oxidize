@@ -66,9 +66,14 @@ bench_decode() {
   local label=$1
   local gguf=$2
   echo "==> decode bench $label"
-  /usr/bin/time -f "${label} wall=%e s" \
+  local output
+  if ! output=$(/usr/bin/time -f "${label} wall=%e s" \
     "$OX" --model "$gguf" --prompt "The speed of light is" --max-tokens "$DECODE_TOKENS" \
-    --threads 16 --no-auto 2>&1 | grep -iE "tok/s|tokens|benchmark|error|light|text:"
+    --threads 16 --no-auto 2>&1); then
+    printf '%s\n' "$output" >&2
+    return 1
+  fi
+  printf '%s\n' "$output" | grep -iE "tok/s|tokens|benchmark|error|light|text:" || true
 }
 
 bench_decode q40 "$OUT/q40.gguf"

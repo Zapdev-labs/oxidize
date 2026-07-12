@@ -137,7 +137,7 @@ def main() -> None:
     files = [Path(file) for file in args.files]
     if not args.readme_only and not files:
         raise SystemExit("no --files given (use --readme-only to update README only)")
-    missing = [path for path in files if not path.is_file()]
+    missing = [] if args.readme_only else [path for path in files if not path.is_file()]
     if missing:
         raise SystemExit(f"missing: {missing[0]}")
 

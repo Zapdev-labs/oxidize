@@ -11,9 +11,11 @@ DECODE_TOKENS="${BENCH_DECODE_TOKENS:-64}"
 PROMPT_TOKENS="${BENCH_PROMPT_TOKENS:-1,2,3,4,5,6,7,8,9,10}"
 
 echo "==> sync workspace -> ${HOST}:${REMOTE_REPO}"
-REMOTE_REPO="$(ssh "$HOST" bash -s -- "$REMOTE_REPO" <<'REMOTE_PATH'
+REMOTE_REPO_B64="$(printf '%s' "$REMOTE_REPO" | base64 | tr -d '\n')"
+REMOTE_REPO="$(ssh "$HOST" bash -s -- "$REMOTE_REPO_B64" <<'REMOTE_PATH'
 set -euo pipefail
-repo=${1/#\~/$HOME}
+repo=$(printf '%s' "$1" | base64 -d)
+repo=${repo/#\~/$HOME}
 mkdir -p "$repo"
 printf '%s\n' "$repo"
 REMOTE_PATH
@@ -28,9 +30,10 @@ rsync -azs \
   "$ROOT/" "$HOST:${REMOTE_REPO}/"
 
 echo "==> remote build + benchmark (threads=${THREADS}, decode=${DECODE_TOKENS})"
-ssh "$HOST" bash -s -- "$REMOTE_REPO" "$THREADS" "$DECODE_TOKENS" "$PROMPT_TOKENS" <<'REMOTE'
+REMOTE_REPO_B64="$(printf '%s' "$REMOTE_REPO" | base64 | tr -d '\n')"
+ssh "$HOST" bash -s -- "$REMOTE_REPO_B64" "$THREADS" "$DECODE_TOKENS" "$PROMPT_TOKENS" <<'REMOTE'
 set -euo pipefail
-REPO=$1
+REPO=$(printf '%s' "$1" | base64 -d)
 THREADS=$2
 DECODE_TOKENS=$3
 PROMPT_TOKENS=$4

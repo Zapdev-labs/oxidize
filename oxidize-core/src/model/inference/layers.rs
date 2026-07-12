@@ -487,14 +487,11 @@ impl InferenceModel {
                             }
                         }
 
+                        let ssm_a_direct = std::env::var_os("OXIDIZE_SSM_A_DIRECT").is_some();
                         // Update state: h = h * exp(A * delta) + Bx * delta
                         for (i, &bx_value) in bx.iter().enumerate().take(state_dim) {
                             let a = layer.ssm_a[i % layer.ssm_a.len()];
-                            let a = if std::env::var_os("OXIDIZE_SSM_A_DIRECT").is_some() {
-                                a
-                            } else {
-                                -a.exp()
-                            };
+                            let a = if ssm_a_direct { a } else { -a.exp() };
                             let dt = if !layer.ssm_dt_bias.is_empty() {
                                 let b = layer.ssm_dt_bias[i % layer.ssm_dt_bias.len()];
                                 (1.0_f32 + b.exp()).ln() // softplus

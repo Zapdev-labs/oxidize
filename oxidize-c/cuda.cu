@@ -405,15 +405,21 @@ __global__ void k_delta_rule(const float *conv, float *state, float *core,
   core[vh * hv + j] = outj * out_scale;
 }
 
-/* gated RMS norm per v_head (gate-after): core = xhat * w * silu(z) */
 __global__ void k_gated_rms_norm(float *core, const float *w, const float *z,
-                                 int hv, float eps) {
+                                 int hv, float eps, int gate_after) {
   __shared__ float red[256];
   float *cp = core + blockIdx.x * hv;
   const float *zp = z + blockIdx.x * hv;
   int j = threadIdx.x;
   float s = 0.0f;
-  for (int i = j; i < hv; i += blockDim.x) s += cp[i] * cp[i];
+  for (int i = j; i < hv; i += blockDim.x) {
+    float value = cp[i];
+    if (!gate_after) {
+      float zg = zp[i];
+      value *= zg / (1.0f + expf(-zg));
+    }
+    s += value * value;
+  }
   red[j] = s;
   __syncthreads();
   for (int st = blockDim.x / 2; st > 0; st >>= 1) {
@@ -423,7 +429,8 @@ __global__ void k_gated_rms_norm(float *core, const float *w, const float *z,
   float inv = rsqrtf(red[0] / (float)hv + eps);
   for (int i = j; i < hv; i += blockDim.x) {
     float zg = zp[i];
-    cp[i] = cp[i] * inv * w[i] * (zg / (1.0f + expf(-zg)));
+    float gate = zg / (1.0f + expf(-zg));
+    cp[i] = cp[i] * (gate_after ? gate : 1.0f) * inv * w[i];
   }
 }
 
@@ -976,8 +983,9 @@ void oc_cuda_forward(oc_model *m, const float *embed_host, size_t pos,
                                        c->d_b, g->ssm_a, g->ssm_dt_bias, qo, kd,
                                        vd, g->n_k_heads, hk, hv, g->a_baked,
                                        out_scale);
+      int gate_after = getenv("OC_GDN_GATE_AFTER") != NULL;
       k_gated_rms_norm<<<nvh, 128, 0, c->stream>>>(c->d_core, g->ssm_norm, c->d_z, hv,
-                                     c->rms_eps);
+                                     c->rms_eps, gate_after);
       gemv(c, g->ssm_out, c->d_core, c->d_tmp);
       k_add<<<G(h), B, 0, c->stream>>>(c->d_x, c->d_tmp, h);
     }

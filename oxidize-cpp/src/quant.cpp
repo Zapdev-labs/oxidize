@@ -931,41 +931,6 @@ static float al_best_initial_scale(const float* x, size_t n, float mx, float ama
   return best_d;
 }
 
-static float al5_try_seed(const float* x, float seed, float* best_d, int* levels,
-                          float* best_mse) {
-  if (!std::isfinite(seed) || seed == 0.0f) return *best_mse;
-  int lv[QK4_0];
-  float id = 1.0f / seed;
-  for (size_t i = 0; i < QK4_0; ++i) {
-    lv[i] = clamp_i(static_cast<int>(std::lrint(x[i] * id)), -8, 7);
-  }
-  float sumlx = 0.0f, suml2 = 0.0f;
-  for (size_t i = 0; i < QK4_0; ++i) {
-    float l = static_cast<float>(lv[i]);
-    sumlx += x[i] * l;
-    suml2 += l * l;
-  }
-  float d = suml2 > 0.0f ? sumlx / suml2 : seed;
-  if (std::fabs(d - seed) > FLT_EPSILON * std::fmax(std::fabs(d), 1.0f)) {
-    id = 1.0f / d;
-    for (size_t i = 0; i < QK4_0; ++i) {
-      lv[i] = clamp_i(static_cast<int>(std::lrint(x[i] * id)), -8, 7);
-    }
-  }
-  float mse = 0.0f;
-  for (size_t i = 0; i < QK4_0; ++i) {
-    float err = x[i] - static_cast<float>(lv[i]) * d;
-    mse += err * err;
-  }
-  mse /= static_cast<float>(QK4_0);
-  if (mse < *best_mse) {
-    *best_mse = mse;
-    *best_d = d;
-    for (size_t i = 0; i < QK4_0; ++i) levels[i] = lv[i];
-  }
-  return *best_mse;
-}
-
 static void quantize_block_al5(const float* x, uint8_t* o) {
   float amax = 0.0f;
   float mx = 0.0f;
@@ -985,24 +950,36 @@ static void quantize_block_al5(const float* x, uint8_t* o) {
   }
 
   float best_d = mx / -8.0f;
-  float best_mse = FLT_MAX;
-  int levels[QK4_0] = {};
-  al5_try_seed(x, mx / -8.0f, &best_d, levels, &best_mse);
-  bool saturated = false;
-  for (size_t i = 0; i < QK4_0; ++i) {
-    if (levels[i] == -8 || levels[i] == 7) {
-      saturated = true;
-      break;
+  float best_obj = -1.0f;
+  int best_levels[QK4_0] = {};
+  for (int is = -9; is <= 9; ++is) {
+    float iscale = -(8.0f + 0.1f * static_cast<float>(is)) / mx;
+    float sumlx = 0.0f;
+    float suml2 = 0.0f;
+    int levels[QK4_0];
+    for (size_t i = 0; i < QK4_0; ++i) {
+      levels[i] = clamp_i(static_cast<int>(std::lrint(iscale * x[i])), -8, 7);
+      float weight = x[i] * x[i];
+      float level = static_cast<float>(levels[i]);
+      sumlx += weight * x[i] * level;
+      suml2 += weight * level * level;
+    }
+    if (suml2 > 0.0f) {
+      float objective = sumlx * sumlx / suml2;
+      if (objective > best_obj) {
+        best_obj = objective;
+        best_d = sumlx / suml2;
+        for (size_t i = 0; i < QK4_0; ++i) best_levels[i] = levels[i];
+      }
     }
   }
-  if (saturated) al5_try_seed(x, amax / 7.0f, &best_d, levels, &best_mse);
 
   uint16_t dh = f32_to_f16_bits(best_d);
   o[0] = static_cast<uint8_t>(dh & 0xff);
   o[1] = static_cast<uint8_t>(dh >> 8);
   for (size_t i = 0; i < QK4_0 / 2; ++i) {
-    int lo = levels[i] + 8;
-    int hi = levels[i + QK4_0 / 2] + 8;
+    int lo = best_levels[i] + 8;
+    int hi = best_levels[i + QK4_0 / 2] + 8;
     o[2 + i] = static_cast<uint8_t>((hi << 4) | lo);
   }
 }

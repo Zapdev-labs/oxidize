@@ -442,7 +442,7 @@ pub fn quantize_scalar_with_imatrix(
 /// Quantize one F16/F32 byte chunk with per-value importance weights.
 ///
 /// `weights` must hold one non-negative value per source element. Only targets
-/// with an importance-aware encoder (currently IQ4_XS) consume the weights;
+/// with an importance-aware encoder (currently IQ4_XS and AL5) consume the weights;
 /// other targets fall back to the unweighted encode so callers can use a single
 /// streaming path regardless of target.
 pub fn quantize_scalar_weighted(
@@ -478,6 +478,16 @@ pub fn quantize_scalar_weighted(
     if weights.len() != value_count {
         return Err(QuantizationError::InvalidImportanceMatrix {
             reason: "matrix length must match input value count",
+        });
+    }
+    if weights.iter().any(|weight| !weight.is_finite()) {
+        return Err(QuantizationError::InvalidImportanceMatrix {
+            reason: "matrix values must be finite",
+        });
+    }
+    if weights.iter().any(|weight| *weight < 0.0) {
+        return Err(QuantizationError::InvalidImportanceMatrix {
+            reason: "matrix values must be non-negative",
         });
     }
     let expected_output = quantized_size(target, value_count)?;

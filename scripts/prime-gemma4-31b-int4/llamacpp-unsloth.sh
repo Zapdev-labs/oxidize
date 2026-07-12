@@ -28,8 +28,11 @@ CUDA_VISIBLE_DEVICES=0 "$LLAMA_BIN" \
 server_pid=$!
 sleep 2
 if ! kill -0 "$server_pid" 2>/dev/null; then
+  set +e
   wait "$server_pid"
-  exit 1
+  status=$?
+  set -e
+  exit "$status"
 fi
 
 echo "llama.cpp Unsloth QAT on :8081 (GPU 0)"

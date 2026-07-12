@@ -722,6 +722,7 @@ static void gated_rms_norm(float *x, const float *w, const float *gate, size_t n
 typedef struct {
   float *normed, *q, *k, *v, *attn, *attn_out, *gate, *up, *ffn_out;
   float *mixed, *conv, *ab, *z, *core;   /* GDN scratch (batch-sized) */
+  float *gdn_heads;
   float *e_logits, *e_g, *e_u, *e_out;   /* MoE scratch (single token) */
   oc_q8blk *xq;
   size_t batch;
@@ -767,6 +768,14 @@ static scratch_t scratch_alloc(const oc_model *m, size_t batch) {
     s.ab = malloc(batch * 2 * 4096 * sizeof(float));
     s.z = malloc(batch * max_qkv * sizeof(float));
     s.core = malloc(batch * max_qkv * sizeof(float));
+    size_t max_head_scratch = 0;
+    for (size_t l = 0; l < c->layer_count; ++l) {
+      const oc_layer *L = &m->layers[l];
+      if (!L->is_gdn) continue;
+      size_t needed = L->n_v_heads * (2 * L->head_k + 2 * L->head_v);
+      if (needed > max_head_scratch) max_head_scratch = needed;
+    }
+    s.gdn_heads = malloc((max_head_scratch ? max_head_scratch : 1) * sizeof(float));
   }
   size_t ff = c->expert_ff;
   if (c->n_expert) {
@@ -787,6 +796,7 @@ static void scratch_free(scratch_t *s) {
   free(s->normed); free(s->q); free(s->k); free(s->v); free(s->attn);
   free(s->attn_out); free(s->gate); free(s->up); free(s->ffn_out);
   free(s->mixed); free(s->conv); free(s->ab); free(s->z); free(s->core);
+  free(s->gdn_heads);
   free(s->e_logits); free(s->e_g); free(s->e_u); free(s->e_out);
   free(s->xq);
 }
@@ -869,8 +879,7 @@ static void gdn_layer(oc_model *m, oc_layer *L, const float *normed_all,
     size_t k_head = (nkh > 0 && nvh >= nkh) ? (vh / (nvh / nkh)) : (vh % nkh);
     size_t q_off = k_head * hk, k_off = kd + k_head * hk;
     size_t v_off = kd * 2 + vh * hv;
-    float *head_scratch = malloc((2 * hk + 2 * hv) * sizeof(float));
-    if (!head_scratch) oc_die("model: GDN head scratch allocation failed");
+    float *head_scratch = s->gdn_heads + vh * (2 * hk + 2 * hv);
     float *qbuf = head_scratch;
     float *kbuf = qbuf + hk;
     float *kv_mem = kbuf + hk;
@@ -906,7 +915,6 @@ static void gdn_layer(oc_model *m, oc_layer *L, const float *normed_all,
         out[j] = sum * out_scale;
       }
     }
-    free(head_scratch);
   }
 
   /* per-head gated RMS norm, then output projection */
