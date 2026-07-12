@@ -3,7 +3,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO="${OXIDIZE_REPO:-$HOME/oxidize}"
+DETECTED_REPO="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || true)"
+REPO="${OXIDIZE_REPO:-${DETECTED_REPO:-$HOME/oxidize}}"
 HF_ID="${HF_MODEL:-empero-ai/Qwythos-9B-Claude-Mythos-5-1M}"
 OUT_DIR="${OUT_DIR:-$HOME/models/qwen35-9b-agent}"
 HF_DIR="$OUT_DIR/hf"
@@ -28,8 +29,11 @@ if ! command -v cargo >/dev/null 2>&1; then
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
 fi
 
+if ! command -v uv >/dev/null 2>&1; then
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+fi
 if ! python3 -c 'import huggingface_hub, datasets' 2>/dev/null; then
-  python3 -m pip install --user -q huggingface_hub hf_transfer datasets
+  uv pip install --system huggingface_hub hf_transfer datasets
 fi
 
 if [[ ! -d "$REPO/.git" ]]; then

@@ -3,7 +3,7 @@
 **Domain:** SafeTensors → GGUF conversion with optional pruning
 
 ## OVERVIEW
-Rust CLI that converts HuggingFace SafeTensors (single file or model directory with `config.json`) to GGUF, with optional in-pass Wanda/magnitude pruning and joint quantization. Thin frontend over `oxidize_core::safetensors_to_gguf` and `oxidize-prune`.
+Rust CLI that converts HuggingFace SafeTensors (single file or model directory with `config.json`) to GGUF, with optional Wanda/magnitude pruning and joint quantization in a second phase. Thin frontend over `oxidize_core::safetensors_to_gguf` and `oxidize-prune`.
 
 ## STRUCTURE
 ```
@@ -32,7 +32,7 @@ oxidize-convert --input <safetensors|hf-dir> --output <out.gguf>
                 [--prune-sparsity 0.5] [--prune-pattern unstructured|n2of4|n4of8]
                 [--prune-joint-quantize <QTYPE>]
 ```
-Phase 1 writes SafeTensors→GGUF. If `--prune` is set, Phase 2 writes an intermediate `<output>.prerun.gguf`, prunes to the final output, then removes the intermediate. Wanda requires `--prune-calibration`.
+Without pruning, Phase 1 writes the final GGUF. With `--prune`, Phase 1 writes `<output>.prerun.gguf`; Phase 2 prunes that intermediate into the final output and then removes the intermediate. Wanda requires `--prune-calibration`.
 
 ## BUILD / TEST / RUN
 ```bash

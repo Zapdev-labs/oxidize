@@ -16,11 +16,7 @@ fn al_refine_scale(block: &[f32], d: f32, lo: i32, hi: i32) -> f32 {
         sumlx += v * l;
         suml2 += l * l;
     }
-    if suml2 > 0.0 {
-        sumlx / suml2
-    } else {
-        d
-    }
+    if suml2 > 0.0 { sumlx / suml2 } else { d }
 }
 
 #[inline]
@@ -233,14 +229,28 @@ pub(super) fn quantize_bf16_to_al8_scalar(
     input: &[u8],
     output: &mut [u8],
 ) -> Result<(), QuantizationError> {
-    bf16_to_al_scalar(input, output, quantize_block_al8, QK8_0, BLOCK_Q8_0_SIZE, GgufQuantizationType::AL8)
+    bf16_to_al_scalar(
+        input,
+        output,
+        quantize_block_al8,
+        QK8_0,
+        BLOCK_Q8_0_SIZE,
+        GgufQuantizationType::AL8,
+    )
 }
 
 pub(super) fn quantize_bf16_to_al6_scalar(
     input: &[u8],
     output: &mut [u8],
 ) -> Result<(), QuantizationError> {
-    bf16_to_al_scalar(input, output, quantize_block_al6, QK5_0, BLOCK_Q5_0_SIZE, GgufQuantizationType::AL6)
+    bf16_to_al_scalar(
+        input,
+        output,
+        quantize_block_al6,
+        QK5_0,
+        BLOCK_Q5_0_SIZE,
+        GgufQuantizationType::AL6,
+    )
 }
 
 pub(super) fn quantize_bf16_to_al5_xs_scalar(
@@ -296,4 +306,52 @@ fn bf16_to_al_scalar(
             block_fn(&block[..qk], out_block);
         });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn al_family_round_trips_finite_blocks() {
+        let input = (0..QK_AL)
+            .map(|index| index as f32 / 8.0 - 2.0)
+            .collect::<Vec<_>>();
+
+        let cases = [
+            (GgufQuantizationType::AL8, BLOCK_Q8_0_SIZE),
+            (GgufQuantizationType::AL6, BLOCK_Q5_0_SIZE),
+            (GgufQuantizationType::AL5_XS, BLOCK_AL5_XS_SIZE),
+        ];
+        for (quantization, block_size) in cases {
+            let mut encoded = vec![0_u8; block_size];
+            let mut decoded = vec![0.0_f32; QK_AL];
+            match quantization {
+                GgufQuantizationType::AL8 => {
+                    quantize_al8_scalar(&input, &mut encoded).expect("encode AL8");
+                    dequantize_al8_scalar(&encoded, &mut decoded).expect("decode AL8");
+                }
+                GgufQuantizationType::AL6 => {
+                    quantize_al6_scalar(&input, &mut encoded).expect("encode AL6");
+                    dequantize_al6_scalar(&encoded, &mut decoded).expect("decode AL6");
+                }
+                GgufQuantizationType::AL5_XS => {
+                    quantize_al5_xs_scalar(&input, &mut encoded).expect("encode AL5_XS");
+                    dequantize_al5_xs_scalar(&encoded, &mut decoded).expect("decode AL5_XS");
+                }
+                _ => unreachable!(),
+            }
+            assert!(decoded.iter().all(|value| value.is_finite()));
+        }
+    }
+
+    #[test]
+    fn al5_xs_rejects_partial_blocks() {
+        let error = dequantize_al5_xs_scalar(&[0_u8; BLOCK_AL5_XS_SIZE - 1], &mut [0.0; QK_AL])
+            .expect_err("partial AL5_XS block must fail");
+        assert!(matches!(
+            error,
+            QuantizationError::InvalidInputLength { .. }
+        ));
+    }
 }

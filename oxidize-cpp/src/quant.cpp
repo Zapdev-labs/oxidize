@@ -22,11 +22,6 @@ namespace {
 // anonymous namespace per the file's contract.
 #include "iq_grids.inc"
 
-// IQ4_NL nonlinear codebook (shared by IQ4_NL and IQ4_XS).
-constexpr std::array<int8_t, 16> KVALUES_IQ4NL = {
-    -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113,
-};
-
 // sign mask used by IQ2/IQ3 dequant (kmask_iq2xs).
 constexpr std::array<uint8_t, 8> KMASK_IQ2XS = {1, 2, 4, 8, 16, 32, 64, 128};
 
@@ -991,7 +986,7 @@ static void quantize_block_al5(const float* x, uint8_t* o) {
 
   float best_d = mx / -8.0f;
   float best_mse = FLT_MAX;
-  int levels[QK4_0];
+  int levels[QK4_0] = {};
   al5_try_seed(x, mx / -8.0f, &best_d, levels, &best_mse);
   bool saturated = false;
   for (size_t i = 0; i < QK4_0; ++i) {
@@ -1256,6 +1251,7 @@ QuantType from_ggml_type(uint32_t ggml_type) {
 static void dequant_al5_xs(const uint8_t* src, float* dst, size_t n) {
   constexpr size_t QK = 32;
   constexpr size_t BS = 14;
+  validate_layout(QuantType::AL5_XS, n / QK * BS, n, BS, QK);
   size_t nb = n / QK;
   for (size_t b = 0; b < nb; ++b) {
     const uint8_t* block = src + b * BS;

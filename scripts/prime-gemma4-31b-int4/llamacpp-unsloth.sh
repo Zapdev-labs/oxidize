@@ -11,6 +11,9 @@ if [[ ! -x "$LLAMA_BIN" ]]; then
   echo "Build llama.cpp first or set LLAMA_BIN" >&2
   exit 1
 fi
+for model in "${GGUF_DIR}/UD-Q4_K_XL.gguf" "${GGUF_DIR}/UD-Q4_K_XL-assistant.gguf"; do
+  [[ -f "$model" ]] || { echo "missing model: $model" >&2; exit 1; }
+done
 
 CUDA_VISIBLE_DEVICES=0 "$LLAMA_BIN" \
   -m "${GGUF_DIR}/UD-Q4_K_XL.gguf" \
@@ -22,6 +25,12 @@ CUDA_VISIBLE_DEVICES=0 "$LLAMA_BIN" \
   -b 512 \
   --host 0.0.0.0 \
   --port 8081 &
+server_pid=$!
+sleep 2
+if ! kill -0 "$server_pid" 2>/dev/null; then
+  wait "$server_pid"
+  exit 1
+fi
 
 echo "llama.cpp Unsloth QAT on :8081 (GPU 0)"
 echo "Pair with vLLM on GPU 1: CUDA_VISIBLE_DEVICES=1 TIER=alpha ..."

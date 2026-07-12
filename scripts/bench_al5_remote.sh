@@ -3,7 +3,7 @@
 # Usage: scripts/bench_al5_remote.sh [ssh-host] [f16-gguf-path]
 set -euo pipefail
 
-HOST="${1:-ai@192.168.1.121}"
+HOST="${1:-ai@192.168.1.132}"
 MODEL="${2:-~/models/qwen25-3b/Qwen2.5-3B-Instruct-f16.gguf}"
 REPO="${3:-~/oxidize}"
 OUT="/tmp/al5-bench-$$"
@@ -25,7 +25,7 @@ REPO="${REPO/#\~/$HOME}"
 mkdir -p "$OUT"
 
 cd "$REPO"
-QZ="${QZ:-$REPO/bin/oxidize-quantize}"
+QZ="${QZ:-$REPO/target/release/oxidize-quantize}"
 OX="${OX:-$REPO/oxidize-cpp/build/oxidize-cpp}"
 
 if [[ ! -x "$QZ" ]]; then
@@ -68,7 +68,7 @@ bench_decode() {
   echo "==> decode bench $label"
   /usr/bin/time -f "${label} wall=%e s" \
     "$OX" --model "$gguf" --prompt "The speed of light is" --max-tokens "$DECODE_TOKENS" \
-    --threads 16 --no-auto 2>&1 | grep -iE "tok/s|tokens|benchmark|error|light|text:" || true
+    --threads 16 --no-auto 2>&1 | grep -iE "tok/s|tokens|benchmark|error|light|text:"
 }
 
 bench_decode q40 "$OUT/q40.gguf"

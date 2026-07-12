@@ -125,6 +125,12 @@ int main(int argc, char **argv) {
 #undef VAL
   }
   if (!model_path) usage(argv[0]);
+  if (serve) {
+    const char *single_key = getenv("OXIDIZE_API_KEY");
+    const char *key_list = getenv("OXIDIZE_API_KEYS");
+    if ((!single_key || !single_key[0]) && (!key_list || !key_list[0]))
+      oc_die("serve: set a non-empty OXIDIZE_API_KEY or OXIDIZE_API_KEYS");
+  }
   oc_gen_seed(seed);
 #ifdef _OPENMP
   if (threads <= 0 && !getenv("OMP_NUM_THREADS")) {
@@ -155,8 +161,6 @@ int main(int argc, char **argv) {
   if (!tok) oc_die("no usable tokenizer in GGUF");
 
   if (serve) {
-    if (!getenv("OXIDIZE_API_KEY") && !getenv("OXIDIZE_API_KEYS"))
-      oc_die("serve: set OXIDIZE_API_KEY or OXIDIZE_API_KEYS");
     return oc_serve(m, tok, host, port, temperature, draft, spec_mode);
   }
 

@@ -72,7 +72,8 @@ async def run_sweep(
     warmup: int,
 ) -> dict[str, float]:
     timeout = aiohttp.ClientTimeout(total=600)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
+    connector = aiohttp.TCPConnector(limit=0)
+    async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
         for _ in range(warmup):
             await stream_one(session, url, model, prompt, min(32, max_tokens))
 
@@ -87,9 +88,7 @@ async def run_sweep(
     total_out = sum(r.output_tokens for r in results)
     tps = total_out / elapsed if elapsed > 0 else 0.0
     ttfts = [r.ttft_ms for r in results if r.ttft_ms > 0]
-    decode_ms = [
-        (r.total_ms - r.ttft_ms) / max(r.output_tokens, 1) for r in results
-    ]
+    decode_ms = [(r.total_ms - r.ttft_ms) / max(r.output_tokens, 1) for r in results]
 
     return {
         "concurrency": float(concurrency),

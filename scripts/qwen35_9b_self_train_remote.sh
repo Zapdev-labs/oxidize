@@ -4,8 +4,12 @@
 set -euo pipefail
 
 HOST="${1:-ai@192.168.1.121}"
+THREADS="${TRAIN_THREADS:-48}"
+ROUNDS="${SELF_TRAIN_ROUNDS:-5}"
+PROMPTS="${PROMPTS_PER_ROUND:-12}"
+EPOCHS="${EPOCHS_PER_ROUND:-2}"
 
-ssh "$HOST" bash -s <<'REMOTE'
+ssh "$HOST" bash -s -- "$THREADS" "$ROUNDS" "$PROMPTS" "$EPOCHS" <<'REMOTE'
 set -euo pipefail
 
 REPO="$HOME/oxidize"
@@ -16,10 +20,10 @@ F16="$OUT_DIR/qwen35-9b-instruct-f16.gguf"
 DATASET="$OUT_DIR/seed_coding_agent.jsonl"
 TRAIN_OUT="$OUT_DIR/self-train-out"
 LOG="$OUT_DIR/self-train.log"
-THREADS="${TRAIN_THREADS:-48}"
-ROUNDS="${SELF_TRAIN_ROUNDS:-5}"
-PROMPTS="${PROMPTS_PER_ROUND:-12}"
-EPOCHS="${EPOCHS_PER_ROUND:-2}"
+THREADS=$1
+ROUNDS=$2
+PROMPTS=$3
+EPOCHS=$4
 
 export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
 export HF_HUB_ENABLE_HF_TRANSFER=1
@@ -110,38 +114,7 @@ else
 fi
 
 echo "==> scrub GGUF metadata branding"
-python3 - <<'PY'
-import re, struct, sys
-from pathlib import Path
-
-path = Path.home() / "models/qwen35-9b-agent/qwen35-9b-instruct-f16.gguf"
-data = bytearray(path.read_bytes())
-
-BRANDS = re.compile(
-    rb"Qwythos|Empero[\x00-\xff]{0,4}AI|empero\.org|Claude-Mythos",
-    re.IGNORECASE,
-)
-NEUTRAL = {
-    b"Qwythos-9B-Claude-Mythos-5-1M": b"qwen3.5-9b-instruct",
-    b"Qwythos-9B": b"qwen3.5-9b-instruct",
-    b"empero-ai/Qwythos-9B-Claude-Mythos-5-1M": b"qwen3.5-9b-instruct",
-}
-
-changed = 0
-for old, new in NEUTRAL.items():
-    if old in data:
-        data = data.replace(old, new.ljust(len(old), b"\x00")[: len(old)])
-        changed += 1
-
-# Best-effort: zero-out remaining brand tokens inside string payloads only.
-for m in BRANDS.finditer(bytes(data)):
-    span = slice(m.start(), m.end())
-    data[span] = b" " * (m.end() - m.start())
-    changed += 1
-
-path.write_bytes(data)
-print(f"gguf metadata scrub: {changed} replacements")
-PY
+python3 "$REPO/scripts/prime-qwen35-self-train/strip_branding.py" --gguf "$F16"
 
 if [[ ! -f "$DATASET" ]] || [[ "$(wc -l < "$DATASET")" -lt 100 ]]; then
   echo "==> building seed coding-agent JSONL (Nexlab/fable5 + SWE trajectories)"

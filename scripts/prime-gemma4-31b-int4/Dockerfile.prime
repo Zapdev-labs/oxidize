@@ -7,8 +7,7 @@ RUN apt-get update && \
     apt-get install -y openssh-server nginx curl && \
     apt-get clean && rm -rf /var/lib/apt/lists/* && \
     mkdir -p /var/run/sshd /root/.ssh && chmod 700 /root/.ssh && \
-    sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config && \
-    ssh-keygen -A
+    sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
 
 COPY launch.sh setup-node.sh nginx-dual.conf bench_tps.py /opt/gemma4/
 RUN chmod +x /opt/gemma4/*.sh /opt/gemma4/bench_tps.py
@@ -17,4 +16,4 @@ ENV HF_HOME=/data/hf-cache
 VOLUME ["/data/hf-cache"]
 
 # Prime template startup script (set PUBLIC_KEY + SSH_PORT in template env):
-#   /opt/gemma4/setup-node.sh && TIER=alpha /opt/gemma4/launch.sh && exec /usr/sbin/sshd -D
+#   ssh-keygen -A && /opt/gemma4/setup-node.sh && TIER=alpha /opt/gemma4/launch.sh && exec /usr/sbin/sshd -D

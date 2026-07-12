@@ -4,6 +4,7 @@
 #include "oc.h"
 
 #include <fcntl.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -40,6 +41,7 @@ static uint64_t r64(rdr *r) {
 }
 static char *rstr(rdr *r) {
   uint64_t n = r64(r);
+  if (n > SIZE_MAX - 1) oc_die("gguf: string length exceeds address space");
   const uint8_t *p = take(r, (size_t)n);
   char *s = malloc((size_t)n + 1);
   memcpy(s, p, (size_t)n);
@@ -66,19 +68,25 @@ static double rnum(rdr *r, uint32_t t) {
   return 0;
 }
 
-static void skip_meta_value(rdr *r, uint32_t t) {
+static void skip_meta_value_depth(rdr *r, uint32_t t, unsigned depth) {
+  if (depth > 32) oc_die("gguf: metadata nesting exceeds 32 levels");
   if (t == 8) {
     uint64_t n = r64(r);
+    if (n > SIZE_MAX) oc_die("gguf: string length exceeds address space");
     (void)take(r, (size_t)n);
     return;
   }
   if (t == 9) {
     uint32_t et = r32(r);
     uint64_t n = r64(r);
-    for (uint64_t i = 0; i < n; ++i) skip_meta_value(r, et);
+    for (uint64_t i = 0; i < n; ++i) skip_meta_value_depth(r, et, depth + 1);
     return;
   }
   (void)rnum(r, t);
+}
+
+static void skip_meta_value(rdr *r, uint32_t t) {
+  skip_meta_value_depth(r, t, 0);
 }
 
 oc_gguf *oc_gguf_load(const char *path) {

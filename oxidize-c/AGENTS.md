@@ -44,7 +44,7 @@ oxidize-c --model <path.gguf> [--prompt --chat --max-tokens --ctx --kv-int8
 oxidize-c prune ...
 oxidize-c finetune ...
 ```
-Server: `POST /v1/chat/completions`, `POST /v1/completions`, `GET /health`, WebSocket `ws://HOST:PORT/v1/realtime` (SSE streaming; auth via `OXIDIZE_API_KEY`/`OXIDIZE_API_KEYS`).
+Server: `POST /v1/chat/completions` and `POST /v1/completions` support SSE streaming; `GET /health` reports readiness; `ws://HOST:PORT/v1/realtime` is a WebSocket token-stream endpoint. Auth uses `OXIDIZE_API_KEY`/`OXIDIZE_API_KEYS`.
 
 ## BUILD / TEST / RUN
 ```bash

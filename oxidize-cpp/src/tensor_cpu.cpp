@@ -518,11 +518,9 @@ inline float dot_q4_0_i8(const uint8_t* row, const Q8Act* xq, size_t cols) {
 
 inline float dot_iq4_nl_i8(const uint8_t* row, const Q8Act* xq, size_t cols) {
   const size_t nb = cols / 32;
-  static constexpr int8_t kIq4Nl[16] = {
-      -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113};
 #ifdef OXIDIZE_HAVE_F16C
   __m256 acc0 = _mm256_setzero_ps(), acc1 = _mm256_setzero_ps();
-  const __m128i lut = _mm_loadu_si128(reinterpret_cast<const __m128i*>(kIq4Nl));
+  const __m128i lut = _mm_loadu_si128(reinterpret_cast<const __m128i*>(KVALUES_IQ4NL));
   size_t b = 0;
   for (; b + 2 <= nb; b += 2) {
     const uint8_t* blk0 = row + b * BLOCK_IQ4_NL_SIZE;
@@ -562,8 +560,8 @@ inline float dot_iq4_nl_i8(const uint8_t* row, const Q8Act* xq, size_t cols) {
     const uint8_t* blk = row + b * BLOCK_IQ4_NL_SIZE;
     int isum = 0;
     for (int j = 0; j < 16; ++j) {
-      isum += kIq4Nl[blk[2 + j] & 0x0F] * xq[b].q[j];
-      isum += kIq4Nl[blk[2 + j] >> 4] * xq[b].q[j + 16];
+      isum += KVALUES_IQ4NL[blk[2 + j] & 0x0F] * xq[b].q[j];
+      isum += KVALUES_IQ4NL[blk[2 + j] >> 4] * xq[b].q[j + 16];
     }
     sum += f16s(blk) * xq[b].d * static_cast<float>(isum);
   }
@@ -979,14 +977,6 @@ void gemv_quantized(float* y, QuantType quant, const uint8_t* W, size_t rows,
       y[r] = dot_q4_k(W + static_cast<size_t>(r) * rb, x, cols);
     return;
   }
-  if ((quant == QuantType::Q8_0 || quant == QuantType::AL8) && cols % QK8_0 == 0) {
-    const size_t rb = (cols / QK8_0) * BLOCK_Q8_0_SIZE;
-#pragma omp parallel for schedule(static)
-    for (long long r = 0; r < static_cast<long long>(rows); ++r)
-      y[r] = dot_q8_0(W + static_cast<size_t>(r) * rb, x, cols);
-    return;
-  }
-
   // Per-row dequant then dot: y[r] = dot(dequant(W_row_r), x). This matches the
   // semantics of gemv_quantized_f32 (the Rust fused kernels are a perf
   // specialization of exactly this). dequantize_row enforces block layout.
@@ -1104,31 +1094,6 @@ void gemm_quantized(float* outputs, QuantType quant, const uint8_t* W,
     }
     return;
   }
-  if ((quant == QuantType::Q8_0 || quant == QuantType::AL8) && cols % QK8_0 == 0) {
-    const size_t blocks_per_row = cols / QK8_0;
-    const size_t rb = blocks_per_row * BLOCK_Q8_0_SIZE;
-#pragma omp parallel
-    {
-      float scratch[QK8_0];
-#pragma omp for schedule(static)
-      for (long long r = 0; r < static_cast<long long>(rows); ++r) {
-        const uint8_t* row = W + static_cast<size_t>(r) * rb;
-        for (size_t b = 0; b < batch; ++b) {
-          outputs[b * rows + static_cast<size_t>(r)] = 0.0f;
-        }
-        for (size_t bi = 0; bi < blocks_per_row; ++bi) {
-          decode_q8_0_block(row + bi * BLOCK_Q8_0_SIZE, scratch);
-          const size_t in_off = bi * QK8_0;
-          for (size_t b = 0; b < batch; ++b) {
-            outputs[b * rows + static_cast<size_t>(r)] +=
-                dot_f32(scratch, inputs + b * cols + in_off, QK8_0);
-          }
-        }
-      }
-    }
-    return;
-  }
-
   // Decode-once path: dequantize each row once, dot all batch positions.
 #pragma omp parallel
   {

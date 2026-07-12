@@ -7,9 +7,9 @@ use oxidize_core::inference::InferenceConfig;
 use oxidize_core::layer_wise::LayerWiseModel;
 use oxidize_core::tokenizer::load_tokenizer_from_gguf_metadata;
 use oxidize_finetuning::{
-    AdapterMerger, FinetuneConfig, LoRAAdapter, MergeStrategy, SelfTrainConfig, SelfTrainLoop,
-    SftTrainer, export_lora_gguf, load_adapter_manifest, load_jsonl_dpo, load_jsonl_sft,
-    manifest_to_lora_adapters, pack_chunks,
+    AdapterMerger, FinetuneConfig, FinetuneError, LoRAAdapter, MergeStrategy, SelfTrainConfig,
+    SelfTrainLoop, SftTrainer, export_lora_gguf, load_adapter_manifest, load_jsonl_dpo,
+    load_jsonl_sft, manifest_to_lora_adapters, pack_chunks,
 };
 use tracing_subscriber::EnvFilter;
 
@@ -503,10 +503,10 @@ fn run_self_train(args: SelfTrainArgs) -> Result<()> {
 
     let examples = load_jsonl_sft(&args.dataset).map_err(|e| anyhow::anyhow!("{e}"))?;
     let encode = |text: &str| -> Vec<u32> { tokenizer.encode(text) };
-    let decode = |ids: &[u32]| -> String {
+    let decode = |ids: &[u32]| -> std::result::Result<String, FinetuneError> {
         tokenizer
             .decode(ids)
-            .unwrap_or_else(|_| String::from_utf8_lossy(&ids.iter().map(|&t| t as u8).collect::<Vec<_>>()).into_owned())
+            .map_err(|error| FinetuneError::Model(format!("tokenizer decode failed: {error:?}")))
     };
 
     let split = args.eval_split.unwrap_or(0.0).clamp(0.0, 0.5);

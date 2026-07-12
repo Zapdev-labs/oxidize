@@ -88,7 +88,8 @@ def _bench(max_tokens: int, ctx: int) -> None:
     import os
     import subprocess
 
-    if not (os.path.exists(GGUF) and os.path.getsize(GGUF) > 16_000_000_000):
+    if not (os.path.exists(GGUF) and os.path.getsize(GGUF) > 16_000_000_000
+            and not os.path.exists(GGUF + ".aria2")):
         subprocess.run(
             ["aria2c", "-x16", "-s16", "-c", "--console-log-level=warn",
              "--summary-interval=15", "-d", "/vol", "-o", GGUF.split("/")[-1], GGUF_URL],

@@ -9,7 +9,7 @@ Video analogue of `vision/`: samples frames from video, preprocesses/encodes eac
 ```
 video/
 ├── mod.rs
-├── config.rs         # FrameConfig, VideoTrainingConfig, GenTrainingConfig
+├── config.rs         # VideoConfig, TemporalConfig, FrameSamplingStrategy, TemporalPool
 ├── decoder.rs        # video decode (ffmpeg)
 ├── encoder.rs        # per-frame encoding
 ├── frame_sampler.rs  # temporal frame sampling

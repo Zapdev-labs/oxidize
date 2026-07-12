@@ -37,7 +37,7 @@ pub fn export_lora_gguf(
         adapters: adapters
             .iter()
             .map(|a| LoRAExportEntry {
-                target: format!("{:?}", a.target),
+                target: a.target.name().to_owned(),
                 in_dim: a.in_dim,
                 out_dim: a.out_dim,
                 lora_a: a.a.clone(),
@@ -69,28 +69,37 @@ pub fn load_adapter_manifest(path: impl AsRef<Path>) -> Result<LoRAExportManifes
         .map_err(|e| FinetuneError::Model(format!("parse {}: {e}", json_path.display())))
 }
 
-fn target_from_name(s: &str) -> Result<LoRATarget> {
-    match s {
-        "OutputHead" => Ok(LoRATarget::OutputHead),
-        "AttentionQ" => Ok(LoRATarget::AttentionQ),
-        "AttentionV" => Ok(LoRATarget::AttentionV),
-        "FfnGate" => Ok(LoRATarget::FfnGate),
-        "FfnUp" => Ok(LoRATarget::FfnUp),
-        other => Err(FinetuneError::Adapter(format!("unknown LoRA target: {other:?}"))),
-    }
-}
-
 pub fn manifest_to_lora_adapters(manifest: LoRAExportManifest) -> Result<Vec<LoRAAdapter>> {
+    let rank = manifest.rank;
     let cfg = FinetuneConfig {
-        rank: manifest.rank,
-        alpha: manifest.alpha_scale * manifest.rank as f32,
+        rank,
+        alpha: manifest.alpha_scale * rank as f32,
         ..FinetuneConfig::default()
     };
     manifest
         .adapters
         .into_iter()
         .map(|e| {
-            let target = target_from_name(&e.target)?;
+            let target = LoRATarget::from_name(&e.target).ok_or_else(|| {
+                FinetuneError::Adapter(format!("unknown LoRA target: {:?}", e.target))
+            })?;
+            let expected_a = rank
+                .checked_mul(e.in_dim)
+                .ok_or_else(|| FinetuneError::Adapter("LoRA A shape overflows usize".into()))?;
+            let expected_b = e
+                .out_dim
+                .checked_mul(rank)
+                .ok_or_else(|| FinetuneError::Adapter("LoRA B shape overflows usize".into()))?;
+            if e.lora_a.len() != expected_a || e.lora_b.len() != expected_b {
+                return Err(FinetuneError::Adapter(format!(
+                    "invalid LoRA tensor lengths for {}: A={} expected {}, B={} expected {}",
+                    e.target,
+                    e.lora_a.len(),
+                    expected_a,
+                    e.lora_b.len(),
+                    expected_b
+                )));
+            }
             let mut ad = LoRAAdapter::new(target, e.in_dim, e.out_dim, &cfg);
             ad.a = e.lora_a;
             ad.b = e.lora_b;
@@ -107,4 +116,41 @@ pub fn load_output_head_lora(path: impl AsRef<Path>) -> Result<LoRAAdapter> {
         .into_iter()
         .find(|a| a.target == LoRATarget::OutputHead)
         .ok_or_else(|| FinetuneError::Adapter("checkpoint has no OutputHead adapter".into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manifest_rejects_mismatched_adapter_shapes() {
+        let manifest = LoRAExportManifest {
+            rank: 2,
+            alpha_scale: 1.0,
+            adapters: vec![LoRAExportEntry {
+                target: LoRATarget::OutputHead.name().to_owned(),
+                in_dim: 3,
+                out_dim: 4,
+                lora_a: vec![0.0; 5],
+                lora_b: vec![0.0; 8],
+            }],
+        };
+
+        let error = manifest_to_lora_adapters(manifest).expect_err("invalid A shape must fail");
+        assert!(error.to_string().contains("invalid LoRA tensor lengths"));
+    }
+
+    #[test]
+    fn target_names_round_trip() {
+        let targets = [
+            LoRATarget::OutputHead,
+            LoRATarget::AttentionQ,
+            LoRATarget::AttentionV,
+            LoRATarget::FfnGate,
+            LoRATarget::FfnUp,
+        ];
+        for target in targets {
+            assert_eq!(LoRATarget::from_name(target.name()), Some(target));
+        }
+    }
 }

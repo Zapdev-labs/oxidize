@@ -35,7 +35,7 @@ fn next_rand(state: &mut u64) -> f32 {
     *state ^= *state << 13;
     *state ^= *state >> 7;
     *state ^= *state << 17;
-    ((*state >> 32) as u32 as f32) / (u32::MAX as f32)
+    ((*state >> 32) as u32 as f32) * (1.0_f32 / 4_294_967_296.0_f32)
 }
 
 fn sampling_config(generate_cfg: &GenerateConfig) -> SamplingConfig {
@@ -53,7 +53,6 @@ fn logits_for_position(
     normed: &[f32],
     logits: &mut [f32],
 ) -> Result<()> {
-    let vocab = model.config().vocab_size;
     model
         .lm_head_logits_batch(normed, 1, logits)
         .map_err(|e| FinetuneError::Model(format!("{e:?}")))?;
@@ -68,8 +67,13 @@ pub fn generate_with_lora(
     prompt: &[u32],
     config: &GenerateConfig,
 ) -> Result<Vec<u32>> {
-    if prompt.is_empty() && config.max_new_tokens == 0 {
-        return Ok(Vec::new());
+    if prompt.is_empty() {
+        if config.max_new_tokens == 0 {
+            return Ok(Vec::new());
+        }
+        return Err(FinetuneError::Model(
+            "generation requires a non-empty prompt".into(),
+        ));
     }
 
     model
@@ -79,7 +83,7 @@ pub fn generate_with_lora(
     let vocab = model.config().vocab_size;
     let hidden = model.config().hidden_size;
     let mut logits = vec![0.0_f32; vocab];
-    let mut rng = config.seed.wrapping_add(1);
+    let mut rng = config.seed.wrapping_add(1).max(1);
     let samp = sampling_config(config);
 
     if !prompt.is_empty() {
@@ -133,6 +137,15 @@ mod tests {
         let mut b = 42u64;
         for _ in 0..10 {
             assert_eq!(next_rand(&mut a), next_rand(&mut b));
+        }
+    }
+
+    #[test]
+    fn prng_stays_in_half_open_unit_interval() {
+        let mut state = u64::MAX;
+        for _ in 0..10_000 {
+            let value = next_rand(&mut state);
+            assert!((0.0..1.0).contains(&value));
         }
     }
 }

@@ -91,6 +91,17 @@ static oc_weight load_weight(const oc_gguf *g, const char *name,
 
 static bool weight_empty(const oc_weight *w) { return !w->quantized && !w->f32; }
 
+static oc_weight load_weight_shape(const oc_gguf *g, const char *name,
+                                   const oc_config *c, size_t rows,
+                                   size_t cols) {
+  oc_weight w = load_weight(g, name, c);
+  if (!weight_empty(&w) && w.rows * w.cols == rows * cols) {
+    w.rows = rows;
+    w.cols = cols;
+  }
+  return w;
+}
+
 static size_t weight_plane_bytes(const oc_weight *w) {
   return w->quantized ? w->rows * oc_row_bytes(w->quant, w->cols)
                       : w->rows * w->cols * sizeof(float);
@@ -120,7 +131,7 @@ static oc_weight stack_split_experts(const oc_gguf *g, const char *prefix,
       memcpy(buf + e * plane, ew.data, plane);
     else
       memcpy(buf + e * plane, ew.f32, plane);
-    if (e > 0) free(ew.f32);
+    free(ew.f32);
   }
   if (!e0.quantized) free(e0.f32);
 
@@ -214,9 +225,12 @@ static void load_block(const oc_gguf *g, const char *prefix, oc_layer *L,
   L->attn_norm = load_vec(g, T("attn_norm.weight"));
   L->ffn_norm = load_vec(g, T("ffn_norm.weight"));
   if (!L->ffn_norm) L->ffn_norm = load_vec(g, T("post_attention_norm.weight"));
-  L->gate = load_weight(g, T("ffn_gate.weight"), c);
-  L->up = load_weight(g, T("ffn_up.weight"), c);
-  L->down = load_weight(g, T("ffn_down.weight"), c);
+  L->gate = load_weight_shape(g, T("ffn_gate.weight"), c,
+                              c->intermediate_size, c->hidden_size);
+  L->up = load_weight_shape(g, T("ffn_up.weight"), c,
+                            c->intermediate_size, c->hidden_size);
+  L->down = load_weight_shape(g, T("ffn_down.weight"), c,
+                              c->hidden_size, c->intermediate_size);
 
   /* MoE: router present -> expert-stacked FFN (dense gate/up/down are empty). */
   L->router = load_weight(g, T("ffn_gate_inp.weight"), c);
@@ -241,6 +255,9 @@ static void load_block(const oc_gguf *g, const char *prefix, oc_layer *L,
     L->sh_gate = load_weight(g, T("ffn_gate_shexp.weight"), c);
     L->sh_up = load_weight(g, T("ffn_up_shexp.weight"), c);
     L->sh_down = load_weight(g, T("ffn_down_shexp.weight"), c);
+    if (!weight_empty(&L->sh_gate) &&
+        (weight_empty(&L->sh_up) || weight_empty(&L->sh_down)))
+      oc_die("model: MoE layer %s missing shared-expert tensors", prefix);
   }
 
   size_t na;
@@ -260,7 +277,8 @@ static void load_block(const oc_gguf *g, const char *prefix, oc_layer *L,
     L->ssm_norm = load_vec_n(g, T("ssm_norm.weight"), &nn);
     L->ssm_dt_bias = load_vec_n(g, T("ssm_dt.bias"), &nd);
     if (weight_empty(&L->qkv) || weight_empty(&L->gdn_gate) ||
-        weight_empty(&L->ssm_alpha) || !L->ssm_norm)
+        weight_empty(&L->ssm_alpha) || weight_empty(&L->ssm_out) ||
+        !L->ssm_norm)
       oc_die("model: GDN layer %s missing tensors", prefix);
     L->qkv_out = L->qkv.rows;
     L->value_dim = L->gdn_gate.rows;
@@ -297,7 +315,8 @@ static void load_block(const oc_gguf *g, const char *prefix, oc_layer *L,
     L->v_bias = load_vec_n(g, T("attn_v.bias"), &L->v_bias_n);
     L->q_norm = load_vec(g, T("attn_q_norm.weight"));
     L->k_norm = load_vec(g, T("attn_k_norm.weight"));
-    if (!L->attn_norm || weight_empty(&L->wq) ||
+    if (!L->attn_norm || weight_empty(&L->wq) || weight_empty(&L->wk) ||
+        weight_empty(&L->wo) ||
         (weight_empty(&L->gate) && !L->is_moe))
       oc_die("model: layer %s missing dense weights (unsupported arch?)", prefix);
   }
@@ -674,13 +693,13 @@ static void l2norm(float *v, size_t n) {
   for (size_t i = 0; i < n; ++i) v[i] *= inv;
 }
 
-/* gated RMS norm, HF Qwen3NextRMSNormGated order: gate FIRST (variance over
- * the gated values), then normalize and scale. Set OC_GDN_GATE_FIRST=0 to use
- * the alternative order (norm of raw x, then gate). */
+/* gated RMS norm, HF Qwen3NextRMSNormGated order: gate first (variance over
+ * gated values), then normalize and scale. OC_GDN_GATE_AFTER opts into the
+ * alternative order (normalize raw x, then gate). */
 static void gated_rms_norm(float *x, const float *w, const float *gate, size_t n,
                            float eps) {
   static int gate_after = -1;
-  if (gate_after < 0) gate_after = getenv("OC_GDN_GATE_FIRST") == NULL;
+  if (gate_after < 0) gate_after = getenv("OC_GDN_GATE_AFTER") != NULL;
   if (!gate_after)
     for (size_t i = 0; i < n; ++i) {
       float g = gate[i];
@@ -850,7 +869,12 @@ static void gdn_layer(oc_model *m, oc_layer *L, const float *normed_all,
     size_t k_head = (nkh > 0 && nvh >= nkh) ? (vh / (nvh / nkh)) : (vh % nkh);
     size_t q_off = k_head * hk, k_off = kd + k_head * hk;
     size_t v_off = kd * 2 + vh * hv;
-    float qbuf[512], kbuf[512], kv_mem[512], delta[512];
+    float *head_scratch = malloc((2 * hk + 2 * hv) * sizeof(float));
+    if (!head_scratch) oc_die("model: GDN head scratch allocation failed");
+    float *qbuf = head_scratch;
+    float *kbuf = qbuf + hk;
+    float *kv_mem = kbuf + hk;
+    float *delta = kv_mem + hv;
     for (size_t t = 0; t < batch; ++t) {
       const float *conv = conv_all + t * qo;
       memcpy(qbuf, conv + q_off, hk * sizeof(float));
@@ -882,6 +906,7 @@ static void gdn_layer(oc_model *m, oc_layer *L, const float *normed_all,
         out[j] = sum * out_scale;
       }
     }
+    free(head_scratch);
   }
 
   /* per-head gated RMS norm, then output projection */

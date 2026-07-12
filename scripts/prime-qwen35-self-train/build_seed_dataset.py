@@ -7,21 +7,41 @@ import json
 import sys
 from pathlib import Path
 
-from datasets import load_dataset
-
 IM_END = "<|im_end|>"
+ALLOWED_ROLES = {"user", "assistant", "system", "tool"}
+ROLE_ALIASES = {"human": "user", "gpt": "assistant"}
+CONTROL_TOKENS = ("<|im_start|>", "<|im_end|>", "もしも")
+
+
+def clean_content(value: str) -> str:
+    content = value.strip()
+    for token in CONTROL_TOKENS:
+        content = content.replace(token, "")
+    return content
 
 
 def messages_to_text(msgs: list[dict]) -> str:
     parts: list[str] = []
     for m in msgs:
-        role = m.get("role", "user")
-        content = m.get("content", "")
+        if not isinstance(m, dict):
+            continue
+        raw_role = m.get("role", m.get("from", "user"))
+        role = ROLE_ALIASES.get(
+            str(raw_role).strip().lower(), str(raw_role).strip().lower()
+        )
+        if role not in ALLOWED_ROLES:
+            continue
+        content = m.get(
+            "content",
+            m.get("value", m.get("text", m.get("action", m.get("observation", "")))),
+        )
         if isinstance(content, list):
             content = " ".join(
                 x.get("text", "") if isinstance(x, dict) else str(x) for x in content
             )
-        parts.append(f"<|im_start|>{role}\n{content}{IM_END}\n")
+        content = clean_content(str(content))
+        if content:
+            parts.append(f"<|im_start|>{role}\n{content}{IM_END}\n")
     return "".join(parts)
 
 
@@ -29,19 +49,25 @@ def normalize(row: dict) -> dict | None:
     for key in ("messages", "conversations", "trajectory"):
         val = row.get(key)
         if isinstance(val, list) and val:
-            return {"text": messages_to_text(val)}
+            text = messages_to_text(val)
+            if text:
+                return {"text": text}
     instruction = row.get("instruction", "")
     inp = row.get("input", "")
     out = row.get("output", "")
     if instruction or out:
         user = instruction if not inp else f"{instruction}\n{inp}"
+        user = clean_content(str(user))
+        assistant = clean_content(str(out))
         return {
-            "text": f"<|im_start|>user\n{user}{IM_END}\n<|im_start|>assistant\n{out}{IM_END}\n"
+            "text": f"<|im_start|>user\n{user}{IM_END}\n<|im_start|>assistant\n{assistant}{IM_END}\n"
         }
     return None
 
 
 def main() -> None:
+    from datasets import load_dataset
+
     out = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("seed_coding_agent.jsonl")
     out.parent.mkdir(parents=True, exist_ok=True)
 
@@ -74,24 +100,10 @@ def main() -> None:
             print(f"{ds_id}/{split}: +{n} (total {written})")
 
     if written < 50:
-        fallback = [
-            "Implement a Rust function that finds the longest palindromic substring.",
-            "Debug a race condition in an async Tokio service with shared state.",
-            "Write pytest tests for a FastAPI endpoint that uploads files.",
-        ]
-        with out.open("a", encoding="utf-8") as f:
-            for p in fallback:
-                f.write(
-                    json.dumps(
-                        {
-                            "text": f"<|im_start|>user\n{p}{IM_END}\n"
-                            f"<|im_start|>assistant\nHere is a careful answer to: {p}{IM_END}\n"
-                        },
-                        ensure_ascii=False,
-                    )
-                    + "\n"
-                )
-                written += 1
+        out.unlink(missing_ok=True)
+        raise SystemExit(
+            f"only collected {written} rows; refusing to create a training dataset"
+        )
 
     print(f"wrote {written} rows -> {out}")
 

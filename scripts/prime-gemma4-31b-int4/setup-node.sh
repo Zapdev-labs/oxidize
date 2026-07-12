@@ -4,6 +4,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+if [[ -z "${HF_TOKEN:-}" ]]; then
+  echo "HF_TOKEN with access to the gated Gemma repositories is required" >&2
+  exit 1
+fi
+
 export HF_HOME="${HF_HOME:-/data/hf-cache}"
 export HF_HUB_ENABLE_HF_TRANSFER=1
 

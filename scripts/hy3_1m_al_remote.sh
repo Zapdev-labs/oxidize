@@ -15,14 +15,16 @@ THREADS="${QUANT_THREADS:-96}"
 CTX="${CTX:-1048576}"
 ORIG_CTX="${ORIG_CTX:-262144}"
 HF_MODEL="${HF_MODEL:-tencent/Hy3}"
+HF_TOKEN="${HF_TOKEN:-}"
 LLAMA_BRANCH="${LLAMA_BRANCH:-hy3-mtp}"
 LLAMA_REPO="${LLAMA_REPO:-https://github.com/satindergrewal/llama.cpp.git}"
 
 echo "==> host=$HOST ctx=$CTX orig=$ORIG_CTX threads=$THREADS"
 
-ssh "$HOST" bash -s -- "$REPO" "$OUT_DIR" "$THREADS" "$CTX" "$ORIG_CTX" "$HF_MODEL" "$LLAMA_BRANCH" "$LLAMA_REPO" <<'REMOTE'
+ssh "$HOST" bash -s -- "$REPO" "$OUT_DIR" "$THREADS" "$CTX" "$ORIG_CTX" "$HF_MODEL" "$LLAMA_BRANCH" "$LLAMA_REPO" "$HF_TOKEN" <<'REMOTE'
 set -euo pipefail
 REPO=$1 OUT_DIR=$2 THREADS=$3 CTX=$4 ORIG_CTX=$5 HF_MODEL=$6 LLAMA_BRANCH=$7 LLAMA_REPO=$8
+export HF_TOKEN=$9
 REPO="${REPO/#\~/$HOME}"
 OUT_DIR="${OUT_DIR/#\~/$HOME}"
 mkdir -p "$OUT_DIR"

@@ -83,6 +83,7 @@ bool is_supported_quant_gemv(QuantType q) {
     case QuantType::Q6_K:
     case QuantType::IQ1_S:
     case QuantType::IQ1_M:
+    case QuantType::IQ4_NL:
     case QuantType::NVFP4:
       return true;
     default:
@@ -478,6 +479,9 @@ LlamaModel::LlamaModel(GgufModel gguf, QuantType quantize_to)
             load_weight(g, up_name, /*keep_quantized=*/true, /*allow_quant=*/false));
         layer.ffn_down_expert_list.push_back(
             load_weight(g, down_name, /*keep_quantized=*/true, /*allow_quant=*/false));
+      }
+      if (layer.ffn_gate_expert_list.size() != config_.num_experts) {
+        throw std::runtime_error("incomplete split-expert tensor set for " + p);
       }
     }
     opt_w_raw("ffn_gate_inp.weight", layer.ffn_gate_inp);

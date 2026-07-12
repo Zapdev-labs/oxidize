@@ -10,6 +10,7 @@ DATASET="${TRAIN_DATASET:-$OUT_DIR/seed_coding_agent.jsonl}"
 TRAIN_OUT="${TRAIN_OUT:-$OUT_DIR/self-train-out}"
 LOG="${TRAIN_LOG:-$OUT_DIR/self-train.log}"
 PIDFILE="${TRAIN_PIDFILE:-$OUT_DIR/self-train.pid}"
+UPLOAD_PIDFILE="${UPLOAD_PIDFILE:-$OUT_DIR/upload-hf.pid}"
 FINETUNE="$REPO/target/release/oxidize-finetuning"
 
 THREADS="${TRAIN_THREADS:-$(nproc)}"
@@ -26,6 +27,11 @@ export PATH="$HOME/.cargo/bin:$PATH"
 export RAYON_NUM_THREADS="$THREADS"
 
 mkdir -p "$OUT_DIR" "$(dirname "$LOG")"
+exec 9>"$PIDFILE.lock"
+if ! flock -n 9; then
+  echo "another self-train launcher is active" >&2
+  exit 1
+fi
 
 if [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
   echo "self-train already running pid=$(cat "$PIDFILE")"
@@ -66,10 +72,30 @@ echo $! > "$PIDFILE"
 disown || true
 
 sleep 2
+if ! kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+  rm -f "$PIDFILE"
+  echo "self-train exited during startup; see $LOG" >&2
+  exit 1
+fi
 echo "self-train pid=$(cat "$PIDFILE")"
 tail -20 "$LOG" || true
 
 if [[ -n "${HF_TOKEN:-}" ]] && [[ -n "${HF_REPO:-}" ]]; then
+  [[ -f "$SCRIPT_DIR/upload-hf.sh" ]] || {
+    echo "missing upload watcher: $SCRIPT_DIR/upload-hf.sh" >&2
+    exit 1
+  }
+  if [[ -f "$UPLOAD_PIDFILE" ]] && kill -0 "$(cat "$UPLOAD_PIDFILE")" 2>/dev/null; then
+    echo "HF upload watcher already running pid=$(cat "$UPLOAD_PIDFILE")"
+    exit 0
+  fi
   echo "==> scheduling HF upload watcher"
   nohup bash "$SCRIPT_DIR/upload-hf.sh" >> "$OUT_DIR/upload-hf.log" 2>&1 &
+  echo $! > "$UPLOAD_PIDFILE"
+  sleep 1
+  if ! kill -0 "$(cat "$UPLOAD_PIDFILE")" 2>/dev/null; then
+    rm -f "$UPLOAD_PIDFILE"
+    echo "HF upload watcher exited during startup" >&2
+    exit 1
+  fi
 fi

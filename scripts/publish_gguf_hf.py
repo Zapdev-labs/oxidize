@@ -7,8 +7,6 @@ import argparse
 import os
 from pathlib import Path
 
-from huggingface_hub import HfApi, create_repo
-
 OXIDIZE_GH = "https://github.com/Zapdev-labs/oxidize"
 
 
@@ -54,7 +52,10 @@ AL5 decodes identically to Q4_0 bitstream layout but encodes with lower
 reconstruction error. Implementation:
 [`al_family.rs`]({OXIDIZE_GH}/blob/master/oxidize-core/src/compute/quantization/al_family.rs).
 
-## Quick start — llama.cpp
+## Quick start — Oxidize-patched llama.cpp
+
+AL quant IDs 240–243 are not supported by upstream llama.cpp. This command
+requires a fork patched with Oxidize's custom AL formats.
 
 ```bash
 huggingface-cli download {repo} gemma-4-31B-it-AL5.gguf --local-dir .
@@ -111,7 +112,9 @@ Apache 2.0 (per [Gemma 4 license](https://ai.google.dev/gemma/docs/gemma_4_licen
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Publish GGUF files to Hugging Face")
-    parser.add_argument("--repo", required=True, help="HF repo id, e.g. user/gemma-4-31B-it-AL-GGUF")
+    parser.add_argument(
+        "--repo", required=True, help="HF repo id, e.g. user/gemma-4-31B-it-AL-GGUF"
+    )
     parser.add_argument("--files", nargs="*", default=[], help="GGUF paths to upload")
     parser.add_argument(
         "--readme-only",
@@ -131,6 +134,15 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    files = [Path(file) for file in args.files]
+    if not args.readme_only and not files:
+        raise SystemExit("no --files given (use --readme-only to update README only)")
+    missing = [path for path in files if not path.is_file()]
+    if missing:
+        raise SystemExit(f"missing: {missing[0]}")
+
+    from huggingface_hub import HfApi, create_repo
+
     token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")
     api = HfApi(token=token)
 
@@ -142,7 +154,9 @@ def main() -> None:
         token=token,
     )
     if args.private:
-        api.update_repo_settings(args.repo, private=True, repo_type="model", token=token)
+        api.update_repo_settings(
+            args.repo, private=True, repo_type="model", token=token
+        )
 
     readme = build_readme(args.repo, args.base_model)
     api.upload_file(
@@ -155,16 +169,12 @@ def main() -> None:
     )
 
     if args.readme_only:
-        print(f"readme updated ({'private' if args.private else 'public'}): https://huggingface.co/{args.repo}")
+        print(
+            f"readme updated ({'private' if args.private else 'public'}): https://huggingface.co/{args.repo}"
+        )
         return
 
-    if not args.files:
-        raise SystemExit("no --files given (use --readme-only to update README only)")
-
-    for f in args.files:
-        path = Path(f)
-        if not path.is_file():
-            raise SystemExit(f"missing: {path}")
+    for path in files:
         print(f"uploading {path.name} ({path.stat().st_size / 1e9:.2f} GB)...")
         api.upload_file(
             path_or_fileobj=str(path),
@@ -176,7 +186,9 @@ def main() -> None:
         )
         print(f"  done: https://huggingface.co/{args.repo}/blob/main/{path.name}")
 
-    print(f"published ({'private' if args.private else 'public'}): https://huggingface.co/{args.repo}")
+    print(
+        f"published ({'private' if args.private else 'public'}): https://huggingface.co/{args.repo}"
+    )
 
 
 if __name__ == "__main__":

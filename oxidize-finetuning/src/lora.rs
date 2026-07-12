@@ -12,6 +12,29 @@ pub enum LoRATarget {
     FfnUp,
 }
 
+impl LoRATarget {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::OutputHead => "OutputHead",
+            Self::AttentionQ => "AttentionQ",
+            Self::AttentionV => "AttentionV",
+            Self::FfnGate => "FfnGate",
+            Self::FfnUp => "FfnUp",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "OutputHead" => Some(Self::OutputHead),
+            "AttentionQ" => Some(Self::AttentionQ),
+            "AttentionV" => Some(Self::AttentionV),
+            "FfnGate" => Some(Self::FfnGate),
+            "FfnUp" => Some(Self::FfnUp),
+            _ => None,
+        }
+    }
+}
+
 /// LoRA adapter trained over a frozen base projection (out = W x + scale * B A x).
 ///
 /// All hot paths are batched: callers pass `count` activation rows at once so

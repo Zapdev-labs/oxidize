@@ -590,7 +590,7 @@ static float row_dot(const oc_weight *w, size_t r, size_t cols, const float *x,
 
 static bool needs_q8(const oc_weight *w) {
   return w->quantized && (w->quant == OC_Q4_0 || w->quant == OC_AL5 ||
-                          w->quant == OC_Q8_0 || w->quant == OC_AL8 ||
+                          w->quant == OC_Q8_0 ||
                           w->quant == OC_Q4_K || w->quant == OC_Q6_K ||
                           w->quant == OC_IQ4_XS || w->quant == OC_IQ4_NL);
 }
@@ -674,9 +674,7 @@ void oc_quantize_kv(const float *x, int8_t *q, float *scale, size_t n_kv,
 
 /* int8 KV attention. Mirrors oc_attention but dequantizes each cached K/V row
  * (int8, one scale per head) on read. Query stays f32.
- * ponytail: K row expanded to a stack f32 buffer to reuse the SIMD dot; the
- * cache traffic (the long-context bottleneck) is int8, which is the win.
- * Upgrade path: fused int8xf32 SIMD dot to drop the expand copy. */
+ * K is dotted directly against the f32 query, avoiding fixed-size scratch. */
 void oc_attention_q8(float *out, const float *q, const int8_t *k8,
                      const float *ks, const int8_t *v8, const float *vs,
                      size_t seq_len, size_t n_heads, size_t kv_heads,
@@ -691,14 +689,14 @@ void oc_attention_q8(float *out, const float *q, const int8_t *k8,
     size_t kv_off = kh * head_dim;
     const float *qh = q + h * head_dim;
     float *oh = out + h * head_dim;
-    float kf[512]; /* head_dim bound; asserted at model load */
     float rmax = -INFINITY, rsum = 0.0f;
     memset(oh, 0, head_dim * sizeof(float));
     for (size_t t = 0; t < seq_len; ++t) {
       const int8_t *kr = k8 + t * kv_len + kv_off;
-      for (size_t d = 0; d < head_dim; ++d) kf[d] = (float)kr[d];
       float sk = ks[t * kv_heads + kh];
-      float score = oc_dot_f32(qh, kf, head_dim) * sk * scale;
+      float dot = 0.0f;
+      for (size_t d = 0; d < head_dim; ++d) dot += qh[d] * (float)kr[d];
+      float score = dot * sk * scale;
       float nmax = rmax > score ? rmax : score;
       float ef = expf(rmax - nmax), es = expf(score - nmax);
       if (ef != 1.0f)

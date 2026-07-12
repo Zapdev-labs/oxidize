@@ -11,8 +11,14 @@ DECODE_TOKENS="${BENCH_DECODE_TOKENS:-64}"
 PROMPT_TOKENS="${BENCH_PROMPT_TOKENS:-1,2,3,4,5,6,7,8,9,10}"
 
 echo "==> sync workspace -> ${HOST}:${REMOTE_REPO}"
-ssh "$HOST" "mkdir -p $REMOTE_REPO"
-rsync -az \
+REMOTE_REPO="$(ssh "$HOST" bash -s -- "$REMOTE_REPO" <<'REMOTE_PATH'
+set -euo pipefail
+repo=${1/#\~/$HOME}
+mkdir -p "$repo"
+printf '%s\n' "$repo"
+REMOTE_PATH
+)"
+rsync -azs \
   --exclude 'target' \
   --exclude 'oxidize-cpp/build' \
   --exclude 'oxidize-c/oxidize-c' \
@@ -103,17 +109,24 @@ def gguf_has_iq(path: str) -> bool:
         _, off = read_str(off)
         vtype = struct.unpack_from("<I", mm, off)[0]
         off += 4
-        if vtype == 8:
-            n = struct.unpack_from("<Q", mm, off)[0]
-            off += 8
-            for _ in range(n):
-                _, off = read_str(off)
-        elif vtype in (0, 1, 2, 3, 4, 5, 6, 7):
-            off += {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1}[vtype]
-        elif vtype in (10, 11):
-            off += 8
-        else:
-            off += 8
+        def skip_value(value_type, value_offset, depth=0):
+            if depth > 32:
+                raise ValueError("metadata nesting too deep")
+            if value_type == 8:
+                _, value_offset = read_str(value_offset)
+                return value_offset
+            if value_type == 9:
+                element_type = struct.unpack_from("<I", mm, value_offset)[0]
+                count = struct.unpack_from("<Q", mm, value_offset + 4)[0]
+                value_offset += 12
+                for _ in range(count):
+                    value_offset = skip_value(element_type, value_offset, depth + 1)
+                return value_offset
+            sizes = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1,
+                     10: 8, 11: 8, 12: 8}
+            return value_offset + sizes[value_type]
+
+        off = skip_value(vtype, off)
 
     for _ in range(tensor_count):
         _, off = read_str(off)
@@ -182,8 +195,8 @@ bench_oc() {
 
 echo "==> oxidize (Rust) decode bench"
 RUST_OUT=$(bench_rust | tee "$OUT/rust.log")
-RUST_TPS=$(echo "$RUST_OUT" | grep -oE 'Throughput: [0-9.]+ tok/s' | tail -1 | awk '{print $2}')
-RUST_TPS=${RUST_TPS:-$(echo "$RUST_OUT" | grep -oE 'speed=[0-9.]+' | tail -1 | cut -d= -f2)}
+RUST_TPS=$(echo "$RUST_OUT" | grep -oE 'Throughput: [0-9.]+ tok/s' | tail -1 | awk '{print $2}' || true)
+RUST_TPS=${RUST_TPS:-$(echo "$RUST_OUT" | grep -oE 'speed=[0-9.]+' | tail -1 | cut -d= -f2 || true)}
 
 echo "==> oxidize-cpp decode bench"
 CPP_JSON=$(bench_cpp | tee "$OUT/cpp.json")
@@ -191,7 +204,7 @@ CPP_TPS=$(python3 -c "import json,sys; print(json.load(sys.stdin)['decode_tps'])
 
 echo "==> oxidize-c decode bench"
 OC_OUT=$(bench_oc | tee "$OUT/oc.log")
-OC_TPS=$(echo "$OC_OUT" | grep -oE '[0-9]+\.[0-9]+ tok/s' | tail -1 | awk '{print $1}')
+OC_TPS=$(echo "$OC_OUT" | grep -oE '[0-9]+\.[0-9]+ tok/s' | tail -1 | awk '{print $1}' || true)
 OC_TPS=${OC_TPS:-0}
 
 RUST_TPS=${RUST_TPS:-0}

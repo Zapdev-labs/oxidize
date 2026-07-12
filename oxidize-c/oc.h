@@ -37,8 +37,9 @@ oc_quant oc_quant_parse(const char *name); /* OC_UNKNOWN if unrecognized */
 float oc_f16_to_f32(const uint8_t *le2);
 uint16_t oc_f32_to_f16(float f);
 void oc_dequant_row(oc_quant q, const uint8_t *src, float *dst, size_t n);
-/* Quantize one row of n f32 values into dst. Supported targets: F32, F16,
- * Q8_0, Q4_0 (the set the prune/finetune tools re-emit). n % block == 0. */
+/* Quantize one row of n f32 values into dst. Supported targets include the
+ * scalar GGUF formats handled by quant.c plus AL5, AL6, and AL8. AL5_XS is
+ * decode-only here. n % block == 0. */
 bool oc_quantize_row(oc_quant q, const float *src, uint8_t *dst, size_t n);
 
 /* ---- activation int8 blocks (for fused integer gemv) ----

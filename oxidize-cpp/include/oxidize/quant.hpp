@@ -44,6 +44,10 @@ constexpr size_t BLOCK_IQ2_XS_SIZE = 2 + QK_K / 8 * 2 + QK_K / 32;              
 constexpr size_t BLOCK_IQ2_S_SIZE = 2 + QK_K / 4 + QK_K / 32 + QK_K / 32;      // 82
 constexpr size_t BLOCK_IQ4_NL_SIZE = 2 + QK4_NL / 2;                             // 18
 
+constexpr int8_t KVALUES_IQ4NL[16] = {
+    -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113,
+};
+
 // Number of scalar values represented by one block of the given type.
 // Returns 1 for the per-element (non-blocked) types.
 size_t quant_block_values(QuantType q);

@@ -415,6 +415,11 @@ uint32_t *oc_tokenize(const oc_tokenizer *t, const char *text, bool add_bos,
   const char *p = text;
   size_t scap = 4096, sn = 0;
   char *span = malloc(scap);
+  if (!span) {
+    *n_out = 0;
+    free(out.v);
+    return NULL;
+  }
   while (*p) {
     if (p[0] == '<') {
       const char *end = NULL;
@@ -435,7 +440,14 @@ uint32_t *oc_tokenize(const oc_tokenizer *t, const char *text, bool add_bos,
     size_t ulen = utf8_len(c);
     if (sn + ulen + 1 >= scap) {
       while (sn + ulen + 1 >= scap) scap *= 2;
-      span = realloc(span, scap);
+      char *grown = realloc(span, scap);
+      if (!grown) {
+        free(span);
+        free(out.v);
+        *n_out = 0;
+        return NULL;
+      }
+      span = grown;
     }
     span[sn++] = *p++;
     for (size_t i = 1; i < ulen && *p; ++i) span[sn++] = *p++;

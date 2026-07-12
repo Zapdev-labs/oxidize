@@ -180,6 +180,12 @@ fn run(args: Args) -> Result<()> {
             .map_err(|err| anyhow!(err))
             .context("failed to initialize quantization thread pool")?;
     }
+    if args.context_length == Some(0) {
+        bail!("--context-length must be greater than zero");
+    }
+    if args.yarn_orig_ctx == Some(0) {
+        bail!("--yarn-orig-ctx must be greater than zero");
+    }
     let imatrix = match &args.imatrix {
         Some(path) => {
             let loaded = load_imatrix(path)?;
@@ -336,15 +342,17 @@ fn quantize_gguf_stream(
     );
     if let Some(new_ctx) = context_length {
         let arch = parsed.architecture().unwrap_or("llama");
-        let orig = yarn_orig_ctx.or_else(|| {
-            metadata
-                .get(&format!("{arch}.context_length"))
-                .and_then(|v| match v {
-                    GgufMetadataValue::Uint32(n) => Some(*n),
-                    GgufMetadataValue::Uint64(n) => (*n).try_into().ok(),
-                    _ => None,
-                })
-        }).unwrap_or(262144);
+        let orig = yarn_orig_ctx
+            .or_else(|| {
+                metadata
+                    .get(&format!("{arch}.context_length"))
+                    .and_then(|v| match v {
+                        GgufMetadataValue::Uint32(n) => Some(*n),
+                        GgufMetadataValue::Uint64(n) => (*n).try_into().ok(),
+                        _ => None,
+                    })
+            })
+            .unwrap_or(262144);
         patch_yarn_context(&mut metadata, arch, new_ctx, orig);
         eprintln!(
             "context: YaRN {orig} -> {new_ctx} (factor {:.3})",
@@ -468,15 +476,9 @@ fn select_output_quantization(
         requested,
         GgufQuantizationType::Q4_0
             | GgufQuantizationType::AL5
-        | GgufQuantizationType::AL8
-        | GgufQuantizationType::AL6
-        | GgufQuantizationType::AL5_XS
             | GgufQuantizationType::AL8
             | GgufQuantizationType::AL6
-            | GgufQuantizationType::AL5
-        | GgufQuantizationType::AL8
-        | GgufQuantizationType::AL6
-        | GgufQuantizationType::AL5_XS
+            | GgufQuantizationType::AL5_XS
             | GgufQuantizationType::Q4_1
             | GgufQuantizationType::Q5_0
             | GgufQuantizationType::Q5_1
@@ -556,7 +558,6 @@ fn uses_k_quant_blocks(quantization: GgufQuantizationType) -> bool {
             | GgufQuantizationType::Q5_K_M
             | GgufQuantizationType::Q6_K
             | GgufQuantizationType::IQ4_XS
-            | GgufQuantizationType::IQ4_NL
     )
 }
 
@@ -891,8 +892,7 @@ fn write_tensor_data_stream(tensor: &TensorPlan, input: &[u8], output: &mut File
     }
 
     let value_count = tensor_value_count_from_dimensions(&tensor.name, &tensor.dimensions)?;
-    let chunk_values =
-        stream_chunk_values(tensor.source_quantization, tensor.output_quantization);
+    let chunk_values = stream_chunk_values(tensor.source_quantization, tensor.output_quantization);
     let al5_blocks_parallel = matches!(
         tensor.output_quantization,
         GgufQuantizationType::AL5
@@ -1012,19 +1012,16 @@ fn scalar_source_width(source: GgufQuantizationType) -> Result<usize> {
     }
 }
 
-fn stream_chunk_values(
-    source: GgufQuantizationType,
-    target: GgufQuantizationType,
-) -> usize {
+fn stream_chunk_values(source: GgufQuantizationType, target: GgufQuantizationType) -> usize {
     let source_block = if uses_k_quant_blocks(source) {
         256
     } else if matches!(
         source,
         GgufQuantizationType::Q4_0
             | GgufQuantizationType::AL5
-        | GgufQuantizationType::AL8
-        | GgufQuantizationType::AL6
-        | GgufQuantizationType::AL5_XS
+            | GgufQuantizationType::AL8
+            | GgufQuantizationType::AL6
+            | GgufQuantizationType::AL5_XS
             | GgufQuantizationType::Q4_1
             | GgufQuantizationType::Q5_0
             | GgufQuantizationType::Q5_1
@@ -1040,9 +1037,9 @@ fn stream_chunk_values(
         target,
         GgufQuantizationType::Q4_0
             | GgufQuantizationType::AL5
-        | GgufQuantizationType::AL8
-        | GgufQuantizationType::AL6
-        | GgufQuantizationType::AL5_XS
+            | GgufQuantizationType::AL8
+            | GgufQuantizationType::AL6
+            | GgufQuantizationType::AL5_XS
             | GgufQuantizationType::Q4_1
             | GgufQuantizationType::Q5_0
             | GgufQuantizationType::Q5_1
@@ -1058,11 +1055,7 @@ fn stream_chunk_values(
 
 fn quant_block_lcm(a: usize, b: usize) -> usize {
     let (lo, hi) = if a < b { (a, b) } else { (b, a) };
-    if hi.is_multiple_of(lo) {
-        hi
-    } else {
-        hi * lo
-    }
+    if hi.is_multiple_of(lo) { hi } else { hi * lo }
 }
 
 fn tensor_value_count_from_dimensions(name: &str, dimensions: &[u64]) -> Result<usize> {

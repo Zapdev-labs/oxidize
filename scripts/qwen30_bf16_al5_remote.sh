@@ -27,16 +27,10 @@ fi
 export PATH="$HOME/.local/bin:$PATH"
 export HF_HUB_ENABLE_HF_TRANSFER=1
 
-if [[ ! -f "$HF_DIR/config.json" ]] || [[ -z "$(ls "$HF_DIR"/model-*.safetensors 2>/dev/null)" ]]; then
-  echo "==> downloading Qwen/Qwen3-Coder-30B-A3B-Instruct safetensors (~61GB)"
-  hf download Qwen/Qwen3-Coder-30B-A3B-Instruct \
-    --local-dir "$HF_DIR" \
-    --include "config.json" "*.safetensors" "*.json" "tokenizer*" "*.txt" "merges.txt" "vocab.json"
-else
-  echo "==> safetensors already present in $HF_DIR"
-  ls -lh "$HF_DIR"/model-*.safetensors | head -3
-  echo "..."
-fi
+echo "==> ensuring Qwen/Qwen3-Coder-30B-A3B-Instruct safetensors are complete (~61GB)"
+hf download Qwen/Qwen3-Coder-30B-A3B-Instruct \
+  --local-dir "$HF_DIR" \
+  --include "config.json" "*.safetensors" "*.json" "tokenizer*" "*.txt" "merges.txt" "vocab.json"
 
 if [[ ! -f "$BF16" ]]; then
   echo "==> oxidize-convert safetensors -> BF16 GGUF"

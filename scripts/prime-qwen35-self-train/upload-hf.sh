@@ -33,7 +33,8 @@ wait_for_done() {
       pid=$(cat "$OUT_DIR/self-train.pid")
       if ! kill -0 "$pid" 2>/dev/null; then
         if ! grep -q "finished" "$log" 2>/dev/null; then
-          echo "training process exited without finish marker — uploading latest checkpoint anyway"
+          echo "training process exited without finish marker" >&2
+          return 1
         fi
         return 0
       fi

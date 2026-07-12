@@ -20,8 +20,7 @@ use crate::lora::LoRAAdapter;
 use crate::telemetry::{MetricsLog, TrainingMetrics};
 use crate::trainer::{FinetuneReport, SftTrainer};
 
-const CRITIQUE_USER: &str =
-    "Review your previous answer. What could be clearer or more accurate? Then give an improved reply.";
+const CRITIQUE_USER: &str = "Review your previous answer. What could be clearer or more accurate? Then give an improved reply.";
 const IM_END: &str = concat!("<|", "im_end", "|>");
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,7 +102,7 @@ impl SelfTrainLoop {
         seed_dataset: &[SftExample],
         eval_chunks: &[Vec<u32>],
         encode: impl Fn(&str) -> Vec<u32> + Sync,
-        decode: impl Fn(&[u32]) -> String,
+        decode: impl Fn(&[u32]) -> Result<String>,
         eos: u32,
         resume_adapter: Option<&Path>,
     ) -> Result<SelfTrainReport> {
@@ -127,7 +126,10 @@ impl SelfTrainLoop {
 
         let start_round = state.completed_rounds;
         let mut trainer = SftTrainer::for_model(model, self.finetune.clone());
-        if let Some(path) = resume_adapter {
+        let automatic_adapter = self.output_dir.join("adapter");
+        let adapter_to_load = resume_adapter
+            .or_else(|| (state.completed_rounds > 0).then_some(automatic_adapter.as_path()));
+        if let Some(path) = adapter_to_load {
             trainer.output_lora = load_output_head_lora(path)?;
             println!("  loaded adapter checkpoint from {}", path.display());
         }
@@ -153,7 +155,12 @@ impl SelfTrainLoop {
 
             let mut examples = pool.clone();
             SftTrainer::tokenize_examples(&mut examples, &encode, self.finetune.max_seq_len)?;
-            let train_chunks = pack_chunks(&examples, self.finetune.max_seq_len, eos, self.finetune.pack);
+            let train_chunks = pack_chunks(
+                &examples,
+                self.finetune.max_seq_len,
+                eos,
+                self.finetune.pack,
+            );
 
             let report = trainer.train(model, &train_chunks)?;
             log_training_round(&mut metrics_log, round_no, &report);
@@ -164,9 +171,7 @@ impl SelfTrainLoop {
                 Some(trainer.eval_loss(model, eval_chunks)?)
             };
 
-            let ckpt_dir = self
-                .output_dir
-                .join(format!("round_{round_no:03}"));
+            let ckpt_dir = self.output_dir.join(format!("round_{round_no:03}"));
             export_lora_gguf(
                 &ckpt_dir,
                 std::slice::from_ref(&trainer.output_lora),
@@ -181,7 +186,11 @@ impl SelfTrainLoop {
             )?;
             last_checkpoint = ckpt_dir.clone();
 
-            let prompts = sample_prompts(&pool, self.self_config.prompts_per_round, self.self_config.seed + round as u64);
+            let prompts = sample_prompts(
+                &pool,
+                self.self_config.prompts_per_round,
+                self.self_config.seed + round as u64,
+            );
             let synthetic = self.generate_self_dialogues(
                 model,
                 &trainer.output_lora,
@@ -249,7 +258,7 @@ impl SelfTrainLoop {
         lora: &LoRAAdapter,
         prompts: &[String],
         encode: &impl Fn(&str) -> Vec<u32>,
-        decode: &impl Fn(&[u32]) -> String,
+        decode: &impl Fn(&[u32]) -> Result<String>,
         eos: u32,
         round: usize,
     ) -> Result<Vec<SftExample>> {
@@ -274,7 +283,7 @@ impl SelfTrainLoop {
             let prompt_ids = encode(&prompt_text);
 
             let response_ids = generate_with_lora(model, lora, &prompt_ids, &generate_cfg)?;
-            let first_reply = decode(&response_ids);
+            let first_reply = decode(&response_ids)?;
 
             let mut messages = vec![
                 serde_json::json!({"role": "user", "content": prompt}),
@@ -295,7 +304,7 @@ impl SelfTrainLoop {
                         ..generate_cfg.clone()
                     },
                 )?;
-                let revised = decode(&revised_ids);
+                let revised = decode(&revised_ids)?;
                 messages.push(serde_json::json!({"role": "user", "content": CRITIQUE_USER}));
                 messages.push(serde_json::json!({"role": "assistant", "content": revised}));
             }
@@ -392,8 +401,8 @@ fn append_synthetic_jsonl(path: &Path, examples: &[SftExample]) -> Result<usize>
 }
 
 fn load_state(path: &Path) -> Result<PersistedState> {
-    let text = fs::read_to_string(path)
-        .map_err(|e| FinetuneError::Model(format!("read state: {e}")))?;
+    let text =
+        fs::read_to_string(path).map_err(|e| FinetuneError::Model(format!("read state: {e}")))?;
     serde_json::from_str(&text).map_err(|e| FinetuneError::Model(format!("parse state: {e}")))
 }
 
@@ -443,10 +452,7 @@ mod tests {
     #[test]
     fn extract_user_from_chat_template() {
         let text = format!("<|im_start|>user\nhello world\n{IM_END}\n<|im_start|>assistant\n");
-        assert_eq!(
-            extract_user_prompt(&text),
-            Some("hello world".to_string())
-        );
+        assert_eq!(extract_user_prompt(&text), Some("hello world".to_string()));
     }
 
     #[test]

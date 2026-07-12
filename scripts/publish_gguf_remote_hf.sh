@@ -12,7 +12,14 @@ mkdir -p "$STAGING"
 trap 'rm -rf "$STAGING"' EXIT
 
 # Smallest first so we validate the pipeline early
-mapfile -t REMOTE_FILES < <(ssh "$HOST" "ls -1S ${REMOTE_GLOB}" | tac)
+mapfile -t REMOTE_FILES < <(ssh "$HOST" bash -s -- "$REMOTE_GLOB" <<'REMOTE_LIST'
+set -euo pipefail
+pattern=${1/#\~/$HOME}
+compgen -G "$pattern" | while IFS= read -r file; do
+  stat -c '%s\t%n' -- "$file"
+done | sort -n | cut -f2-
+REMOTE_LIST
+)
 
 echo "==> creating private repo $HF_REPO"
 python3 scripts/publish_gguf_hf.py --repo "$HF_REPO" --private --files /dev/null 2>/dev/null || true

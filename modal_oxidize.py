@@ -28,14 +28,18 @@ image = (
 
 def ensure_model() -> None:
     import os
+    import uuid
 
     if os.path.exists(MODEL_PATH):
         return
-    subprocess.run(
-        ["wget", "-q", "-O", MODEL_PATH + ".part", MODEL_URL], check=True
-    )
-    os.rename(MODEL_PATH + ".part", MODEL_PATH)
-    vol.commit()
+    partial_path = f"{MODEL_PATH}.{uuid.uuid4().hex}.part"
+    try:
+        subprocess.run(["wget", "-q", "-O", partial_path, MODEL_URL], check=True)
+        os.replace(partial_path, MODEL_PATH)
+        vol.commit()
+    finally:
+        if os.path.exists(partial_path):
+            os.unlink(partial_path)
 
 
 @app.function(
