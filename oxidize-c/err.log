@@ -1,0 +1,3 @@
+gemma4: SWA layer geometry: kv_heads=16 head_dim=256 v_head_dim=256 rope_theta=10000 rope_dim=256 cache=1024
+gemma4: global layer geometry: kv_heads=4 head_dim=512 v_head_dim=512 rope_theta=1000000 rope_dim=512 cache=4096
+[prefill 20 tok 0.14 tok/s | decode 24 tok 0.17 tok/s | ctx 44/4096]

@@ -1,0 +1,81 @@
+gemma4: SWA layer geometry: kv_heads=16 head_dim=256 v_head_dim=256 rope_theta=10000 rope_dim=256 cache=1024
+gemma4: global layer geometry: kv_heads=4 head_dim=512 v_head_dim=512 rope_theta=1000000 rope_dim=512 cache=4096
+chat template found (16934 chars): {%- macro format_parameters(properties, required, filter_keys=false) -%}
+    {%- set standard_keys = ['description', 'ty...
+prompt: 6 tokens
+  tok[0] = 2 '<bos>'
+  tok[1] = 50429 'Paris'
+  tok[2] = 563 ' is'
+  tok[3] = 506 ' the'
+  tok[4] = 5279 ' capital'
+  tok[5] = 529 ' of'
+dbg l=0 embed     nan/inf=0 absmax=14.35 first=[1.971 0.9857 1.971 1.971]
+dbg l=0 attn_res  nan/inf=0 absmax=15.85 first=[0.05824 0.5171 0.08292 0.3925]
+dbg l=0 post-attn nan/inf=0 absmax=254.4 first=[1.968 0.6611 1.976 1.977]
+dbg l=0 post-ffn  nan/inf=0 absmax=19.42 first=[0.2166 0.08382 0.221 0.1637]
+dbg l=1 attn_res  nan/inf=0 absmax=15.81 first=[-0.08819 -0.8285 -0.08191 -0.04462]
+dbg l=1 post-attn nan/inf=0 absmax=94.85 first=[0.2153 0.0767 0.221 0.1621]
+dbg l=1 post-ffn  nan/inf=0 absmax=106.3 first=[0.01415 0.005234 0.01451 0.01064]
+dbg l=2 post-ffn  nan/inf=0 absmax=104.2 first=[0.01437 0.006314 0.01483 0.008854]
+dbg l=3 post-ffn  nan/inf=0 absmax=99.41 first=[0.01538 0.007336 0.01658 0.00882]
+dbg l=4 post-ffn  nan/inf=0 absmax=98.27 first=[0.02239 -0.002668 0.01437 0.01179]
+dbg l=5 post-ffn  nan/inf=0 absmax=0.9551 first=[-0.0001963 0.0001662 -4.643e-05 -0.0002946]
+dbg l=6 post-ffn  nan/inf=0 absmax=25.08 first=[0.0007819 -5.431e-07 -0.0004564 0.0001407]
+dbg l=7 post-ffn  nan/inf=0 absmax=23.71 first=[0.0009584 -0.001641 -0.0005952 0.003514]
+dbg l=8 post-ffn  nan/inf=0 absmax=13.92 first=[0.01556 -0.008122 -0.00146 0.006064]
+dbg l=9 post-ffn  nan/inf=0 absmax=5.821 first=[0.01456 0.008081 -0.01458 0.000587]
+dbg l=10 post-ffn  nan/inf=0 absmax=28.55 first=[0.006829 -0.001437 -0.01806 0.003918]
+dbg l=11 post-ffn  nan/inf=0 absmax=70.07 first=[0.007064 0.006578 -0.00945 0.002819]
+dbg l=12 post-ffn  nan/inf=0 absmax=95.09 first=[-0.0001755 0.00521 -0.009992 0.006374]
+dbg l=13 post-ffn  nan/inf=0 absmax=100.6 first=[0.001284 0.005429 0.009603 0.01086]
+dbg l=14 post-ffn  nan/inf=0 absmax=107.5 first=[0.075 0.009172 -0.04209 0.004305]
+dbg l=15 post-ffn  nan/inf=0 absmax=134.6 first=[-0.1142 0.007034 0.1146 -0.008435]
+dbg l=16 post-ffn  nan/inf=0 absmax=131.9 first=[-0.07803 0.008115 0.13 0.001101]
+dbg l=17 post-ffn  nan/inf=0 absmax=1.784 first=[0.001106 -0.0001428 -0.001638 -0.0001167]
+dbg l=18 post-ffn  nan/inf=0 absmax=1.572 first=[-0.1488 -0.000971 -0.3595 0.01301]
+dbg l=19 post-ffn  nan/inf=0 absmax=5.497 first=[-0.3112 0.004726 -0.5184 0.005607]
+dbg l=20 post-ffn  nan/inf=0 absmax=5.318 first=[-0.1838 0.003397 -0.1723 0.01544]
+dbg l=21 post-ffn  nan/inf=0 absmax=8.817 first=[0.4949 -0.00783 0.2117 0.03519]
+dbg l=22 post-ffn  nan/inf=0 absmax=7.962 first=[0.4535 -0.006628 0.1823 -0.007086]
+dbg l=23 post-ffn  nan/inf=0 absmax=0.01575 first=[-0.0008806 4.47e-05 -0.0003711 -2.609e-05]
+dbg l=24 post-ffn  nan/inf=0 absmax=19.64 first=[1.578 0.08004 -0.1315 0.07819]
+dbg l=25 post-ffn  nan/inf=0 absmax=26.21 first=[2.032 0.1043 -0.2107 0.1982]
+dbg l=26 post-ffn  nan/inf=0 absmax=15.14 first=[1.343 0.1177 2.157 0.1813]
+dbg l=27 post-ffn  nan/inf=0 absmax=10.39 first=[1.317 0.126 -0.8046 0.03868]
+dbg l=28 post-ffn  nan/inf=0 absmax=4.52 first=[0.575 0.05422 -0.3502 0.03234]
+dbg l=29 post-ffn  nan/inf=0 absmax=0.05976 first=[0.007707 0.0009291 -0.004604 0.0004299]
+dbg l=30 post-ffn  nan/inf=0 absmax=36.2 first=[0.8138 -0.3636 -1.77 -0.03474]
+dbg l=31 post-ffn  nan/inf=0 absmax=61.57 first=[0.7763 -0.1956 -2.608 0.01777]
+dbg l=32 post-ffn  nan/inf=0 absmax=91.32 first=[1.559 -0.06984 -1.551 -0.6657]
+dbg l=33 post-ffn  nan/inf=0 absmax=90.22 first=[1.335 -0.7899 -0.4766 -0.6724]
+dbg l=34 post-ffn  nan/inf=0 absmax=69.28 first=[1.023 -0.6223 -0.3665 -0.514]
+dbg l=35 post-ffn  nan/inf=0 absmax=0.6671 first=[-0.009843 0.006108 0.003276 0.005859]
+dbg l=36 post-ffn  nan/inf=0 absmax=14.36 first=[-0.8468 1.615 -0.4051 0.4615]
+dbg l=37 post-ffn  nan/inf=0 absmax=33.35 first=[-1.153 0.9032 0.3895 1.133]
+dbg l=38 post-ffn  nan/inf=0 absmax=32.82 first=[-0.4717 1.915 -0.9109 2.671]
+dbg l=39 post-ffn  nan/inf=0 absmax=37.84 first=[-1.839 2.761 -0.2619 1.379]
+dbg l=40 post-ffn  nan/inf=0 absmax=23.22 first=[-1.112 1.691 -0.1618 0.8432]
+dbg l=41 post-ffn  nan/inf=0 absmax=0.5863 first=[-0.02844 0.04264 -0.003657 0.02087]
+dbg l=42 post-ffn  nan/inf=0 absmax=12.11 first=[-0.009527 -0.7458 -0.8896 -1.096]
+dbg l=43 post-ffn  nan/inf=0 absmax=15.42 first=[-1.015 -1.007 -1.882 -0.884]
+dbg l=44 post-ffn  nan/inf=0 absmax=11.63 first=[0.2395 0.3828 -3.116 -0.2324]
+dbg l=45 post-ffn  nan/inf=0 absmax=11.97 first=[0.6561 -0.2222 -2.892 -2.565]
+dbg l=46 post-ffn  nan/inf=0 absmax=10.73 first=[0.6046 -0.2264 -2.575 -2.285]
+dbg l=47 post-ffn  nan/inf=0 absmax=0.02098 first=[0.001192 -0.0004478 -0.005047 -0.004467]
+dbg l=48 post-ffn  nan/inf=0 absmax=4.145 first=[-0.3535 -0.9524 -0.8309 2.031]
+dbg l=49 post-ffn  nan/inf=0 absmax=17.92 first=[-0.06167 -0.4473 -0.00326 2.091]
+dbg l=50 post-ffn  nan/inf=0 absmax=16.69 first=[0.6067 -0.191 0.9405 1.157]
+dbg l=51 post-ffn  nan/inf=0 absmax=21.29 first=[1.128 0.1606 1.379 1.895]
+dbg l=52 post-ffn  nan/inf=0 absmax=16.92 first=[0.9035 0.1233 1.106 1.514]
+dbg l=53 post-ffn  nan/inf=0 absmax=0.1755 first=[0.009303 0.0006848 0.01164 0.01583]
+dbg l=54 post-ffn  nan/inf=0 absmax=3.452 first=[-1.029 0.2283 -1.578 0.2858]
+dbg l=55 post-ffn  nan/inf=0 absmax=5.056 first=[-0.7518 -1.511 -0.9368 -0.4156]
+dbg l=56 post-ffn  nan/inf=0 absmax=5.791 first=[-1.337 -1.052 -0.3034 -0.06258]
+dbg l=57 post-ffn  nan/inf=0 absmax=5.948 first=[-1.833 -2.221 2.313 -0.1308]
+dbg l=58 post-ffn  nan/inf=0 absmax=4.485 first=[-1.383 -1.664 1.746 -0.1064]
+dbg l=59 post-ffn  nan/inf=0 absmax=0.03254 first=[-0.01007 -0.0122 0.01272 -0.0007527]
+top1: id=569 logit=29.8389 piece=' de'
+top2: id=236780 logit=25.3914 piece='C'
+top3: id=178528 logit=25.3366 piece=' kendini'
+top4: id=255972 logit=24.1635 piece='					'
+top5: id=73003 logit=23.4101 piece='<''

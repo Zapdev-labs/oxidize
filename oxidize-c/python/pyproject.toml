@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "oxidize-c"
+version = "0.1.0"
+description = "Pure-ctypes Python bindings for the oxidize-c inference runtime (liboxidize.so)"
+requires-python = ">=3.8"
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[tool.setuptools]
+packages = ["oxidize_c"]
