@@ -1,0 +1,85 @@
+oxidize-c/cuda.cu
+  s_d2add3ac9f912a::t_3ee4ea6b2fcd24 866
+  s_d2add3ac9f912a::t_bee1dabd7dc341 887
+  s_d2add3ac9f912a::t_77d6db0b611ca6 828
+  s_d2add3ac9f912a::t_a94e6e7d33df44 1044-1045,1047
+  s_d2add3ac9f912a::t_955e2f6afd7404 1019,1026-1033
+  s_d2add3ac9f912a::t_246b746c166916 1022-1025,1034
+oxidize-c/quant.c
+  s_f98fb3b5c0a1ac::t_ed4e6f675588ee 822,826
+  h_cf4e3af6880df2 802,820-821
+oxidize-c/oc.h
+  s_f98fb3b5c0a1ac::t_1d95c54af04aa5 151
+  s_d2add3ac9f912a::t_2031131965d180 266-269,272
+oxidize-c/model.c
+  s_f98fb3b5c0a1ac::t_1f1b493d921502 452-454
+  s_f98fb3b5c0a1ac::t_c5faa848db5269 283-286
+  s_0390e6dafe61ec::t_13ff4b8991e054 138-142
+  s_f98fb3b5c0a1ac::t_7738908c40480d 61-63
+  s_f98fb3b5c0a1ac::t_a9c8a74230362d 86-125
+  s_d2add3ac9f912a::t_fd2176dde3d8ba 240
+  s_f98fb3b5c0a1ac::t_8fb90d9f96d18c 322
+  s_f98fb3b5c0a1ac::t_3744c42d366300 146
+  s_f98fb3b5c0a1ac::t_2576a56d090fa3 350,368-379
+  s_f98fb3b5c0a1ac::t_201fb626931530 315
+  s_f98fb3b5c0a1ac::t_81221d96752d5b 143-145,147-154
+  s_f98fb3b5c0a1ac::t_ee0b1317444444 528-540
+  s_f98fb3b5c0a1ac::t_3d5b1933ebe8df 246-250
+  s_f98fb3b5c0a1ac::t_84c2b323da66f1 902
+  s_d2add3ac9f912a::t_0d151ad6e394b9 1207-1208,1216-1220,1222-1223,1229,1231,1237-1240
+  s_d2add3ac9f912a::t_bd028537bfea0b 1221,1224-1228,1230,1232-1236
+  s_f98fb3b5c0a1ac::t_1fc1059de1ef3d 233-235
+  s_d98862b624f754::t_dc8ebf61858f97 841-842
+  s_f98fb3b5c0a1ac::t_49e94c8a8b6916 56-60,64-67
+  s_f98fb3b5c0a1ac::t_3ae885610b0369 435,441-446
+  s_d2add3ac9f912a::t_1161ae403304ac 1177
+  s_f98fb3b5c0a1ac::t_6d2247c1eeea2a 209-211,214,217-226
+  s_f98fb3b5c0a1ac::t_ffdc8c7c480425 46-47,53-55,68-71
+  s_f98fb3b5c0a1ac::t_c85554bf57411a 406
+  s_d98862b624f754::t_4a9e96659cff49 126
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "3e4ea82c8c06cd60585665b25dba4b701a779159",
+  "prompts": {},
+  "humans": {
+    "h_cf4e3af6880df2": {
+      "author": "Jackson57279 <otdoges@proton.me>"
+    }
+  },
+  "sessions": {
+    "s_0390e6dafe61ec": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "96133f43-662e-4ded-bb13-a5bbf37ccf70",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_d2add3ac9f912a": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "4e8f36e6-bed9-4b23-9800-52e5fa6e2e79",
+        "model": "default"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_d98862b624f754": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0c2437573ffe3I15ErplR7nvM9",
+        "model": "k2p7"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_f98fb3b5c0a1ac": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "4d6ff7f8-80ac-4cb6-9488-4a4254e92276",
+        "model": "default"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

@@ -1,0 +1,54 @@
+oxidize-finetuning/AGENTS.md
+  s_b715ac0bf4c043::t_32a1f8946c27be 1-53
+oxidize-kernels/AGENTS.md
+  s_b715ac0bf4c043::t_7049da3f8b6645 1-47
+oxidize-train/AGENTS.md
+  s_b715ac0bf4c043::t_8193aacaa275fc 1-44
+scripts/AGENTS.md
+  s_b715ac0bf4c043::t_003eeabd4e1680 1-35
+oxidize-ffi/AGENTS.md
+  s_b715ac0bf4c043::t_900714c11edf03 1-43
+oxidize-cpp/AGENTS.md
+  s_b715ac0bf4c043::t_67427edf05c528 1-64
+oxidize-convert/AGENTS.md
+  s_b715ac0bf4c043::t_8fc252730ccde2 1-42
+AGENTS.md
+  s_f021e94fcc4674::t_c9b1cbcf1d322e 197,205-207,211
+  s_b715ac0bf4c043::t_e6e0a584defbc3 3-5,8,13-18,20-39,45,52-56,58,60-67,71-74,86-89,103-105,109-115,117-118,121,127-128,135-137,142-143,147-150,160-169,183,198,204
+oxidize-core/src/vision/AGENTS.md
+  s_b715ac0bf4c043::t_6ef182635df57c 1-39
+oxidize-core/src/autotune/AGENTS.md
+  s_b715ac0bf4c043::t_ffe7c2429a367b 1-41
+oxidize-core/src/util/AGENTS.md
+  s_b715ac0bf4c043::t_aaaa74d49bceac 1-35
+oxidize-merge/AGENTS.md
+  s_b715ac0bf4c043::t_46472f984479bd 1-44
+oxidize-c/AGENTS.md
+  s_b715ac0bf4c043::t_c0abce6232d902 1-60
+oxidize-core/src/video/AGENTS.md
+  s_b715ac0bf4c043::t_5ba5fa9d0ea428 1-33
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "ac7d2619e7bc4fbab7aaedb20ee645775fb07f72",
+  "prompts": {},
+  "sessions": {
+    "s_b715ac0bf4c043": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "b41939fa-9e85-4e86-b2e4-fe2fa7f6cff0",
+        "model": "default"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_f021e94fcc4674": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "6a2f14f2-520b-4da9-9a74-c2b517191398",
+        "model": "default"
+      },
+      "human_author": null
+    }
+  }
+}

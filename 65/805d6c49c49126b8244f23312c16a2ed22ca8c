@@ -1,0 +1,145 @@
+oxidize-core/src/compute/quantization/al_family.rs
+  s_6a9f35c65e1740::t_5e3183f3c1c823 310-351,356-357
+  s_6a9f35c65e1740::t_667c57d5025218 19,232-239,246-253,352-355
+oxidize-convert/AGENTS.md
+  s_6a9f35c65e1740::t_3a403fc7f8df22 6,35
+oxidize-finetuning/src/generate.rs
+  s_6a9f35c65e1740::t_0a897f6e628fbc 38,70-76,86,142-149
+  s_217882f40a7089::t_2220edeb2140e3 150
+scripts/prime-gemma4-31b-int4/nginx-dual.conf
+  s_6a9f35c65e1740::t_75ce05f417bb3d 8-12,26-27
+oxidize-c/tokenizer.c
+  s_6a9f35c65e1740::t_9d7b483418b6e5 418-422,443-450
+oxidize-cpp/src/model_llama.cpp
+  s_6a9f35c65e1740::t_d67593a33c020f 86,483-484
+  s_bd5a09b0174c52::t_92103d6698d4f5 485
+oxidize-core/src/compute/quantization/iq_grids.rs
+  s_6a9f35c65e1740::t_667c57d5025218 306
+  s_6a9f35c65e1740::t_5e3183f3c1c823 322-335
+scripts/qwen30_bf16_al5_remote.sh
+  s_6a9f35c65e1740::t_908fe67176ffbf 30-33
+scripts/prime-gemma4-31b-int4/Dockerfile.prime
+  s_6a9f35c65e1740::t_75ce05f417bb3d 10,19
+scripts/prime-qwen35-self-train/strip_branding.py
+  s_6a9f35c65e1740::t_8a7c8ac9050df7 7,9,52-54,58-76,78-88,91-107,109
+  s_6a9f35c65e1740::t_5f2446571d4e04 55-57,89-90
+  s_6a9f35c65e1740::t_b69079cd961296 13-15,77,120-124
+scripts/prime-qwen35-self-train/run-self-train.sh
+  s_6a9f35c65e1740::t_ce051b2dc59adb 13,30-34,75-79,84-91,94-100
+oxidize-quantize/src/main.rs
+  s_6a9f35c65e1740::t_667c57d5025218 345-355,481,895,1015,1022-1024,1040-1042,1058
+  s_6a9f35c65e1740::t_0a897f6e628fbc 183-188
+oxidize-c/main.c
+  s_6a9f35c65e1740::t_92b6594574fa30 128-133
+oxidize-cpp/include/oxidize/quant.hpp
+  s_6a9f35c65e1740::t_d67593a33c020f 47-50
+scripts/gemma4_31b_al_remote.sh
+  s_6a9f35c65e1740::t_75ce05f417bb3d 79,91-98,100-108
+scripts/publish_gguf_hf.py
+  s_6a9f35c65e1740::t_2722934ebd54c6 55-58,137-142,177
+  s_6a9f35c65e1740::t_b69079cd961296 115-117,157-159,172-174,189-191
+  s_6a9f35c65e1740::t_10cb93165b2558 143-144
+  s_6a9f35c65e1740::t_45b0b4fe1a09af 145
+scripts/publish_gguf_remote_hf.sh
+  s_6a9f35c65e1740::t_908fe67176ffbf 15-22
+oxidize-cpp/src/gguf.cpp
+  s_6a9f35c65e1740::t_d67593a33c020f 273-274
+scripts/prime-qwen35-self-train/provision.sh
+  s_6a9f35c65e1740::t_ce051b2dc59adb 35-36
+modal_gemma4_bench.py
+  s_6a9f35c65e1740::t_c2b81720db78f6 91-92
+scripts/prime-gemma4-31b-int4/bench_tps.py
+  s_6a9f35c65e1740::t_90c18457ab82bd 75-76
+  s_6a9f35c65e1740::t_b69079cd961296 91
+scripts/bench_al5_remote.sh
+  s_6a9f35c65e1740::t_908fe67176ffbf 6,28,71
+oxidize-cpp/src/tensor_cpu.cpp
+  s_6a9f35c65e1740::t_d67593a33c020f 523,563-564,1183
+modal_oxidize.py
+  s_6a9f35c65e1740::t_c2b81720db78f6 31,35-42
+scripts/prime-gemma4-31b-int4/setup-node.sh
+  s_6a9f35c65e1740::t_75ce05f417bb3d 7-11
+oxidize-core/src/video/AGENTS.md
+  s_6a9f35c65e1740::t_3a403fc7f8df22 12
+oxidize-finetuning/src/lora.rs
+  s_6a9f35c65e1740::t_0a897f6e628fbc 15-37
+oxidize-c/AGENTS.md
+  s_6a9f35c65e1740::t_3a403fc7f8df22 47
+scripts/hy3_1m_al_remote.sh
+  s_6a9f35c65e1740::t_908fe67176ffbf 18,24,27
+oxidize-c/model.c
+  s_6a9f35c65e1740::t_9d7b483418b6e5 872-877,909
+  s_6a9f35c65e1740::t_f515d4aacf28d6 94-104,134,228-233,258-260,280-281,318-319,696-698,702
+oxidize-cpp/src/quant.cpp
+  s_6a9f35c65e1740::t_d67593a33c020f 989,1254
+oxidize-c/gguf.c
+  s_6a9f35c65e1740::t_92b6594574fa30 7,44,71-72,75,82,88-89
+  s_6a9f35c65e1740::t_ded648a34b9df3 90-91
+scripts/qwen35_9b_self_train_remote.sh
+  s_6a9f35c65e1740::t_75ce05f417bb3d 7-10,12,23-26,117
+oxidize-finetuning/src/self_train.rs
+  s_6a9f35c65e1740::t_667c57d5025218 23,130-131,158-163,174,189-193,404-405,455
+  s_6a9f35c65e1740::t_0a897f6e628fbc 105,129,132,261,286,307
+oxidize-c/oc.h
+  s_6a9f35c65e1740::t_92b6594574fa30 40-42
+scripts/prime-qwen35-self-train/setup-node.sh
+  s_6a9f35c65e1740::t_ce051b2dc59adb 6-7
+  s_6a9f35c65e1740::t_1ed957f9d3b355 32-34,36
+scripts/prime-qwen35-self-train/build_seed_dataset.py
+  s_6a9f35c65e1740::t_7fbbde795df4df 69-70
+  s_6a9f35c65e1740::t_5f2446571d4e04 16-20,42,60-61,63
+  s_6a9f35c65e1740::t_081d419769d54d 11-13,26-28,32-37,43-44,52-54,103
+  s_6a9f35c65e1740::t_b69079cd961296 29-31,104-106
+  s_6a9f35c65e1740::t_a5d24284d3f0f6 14-15
+oxidize-c/kernels.c
+  s_6a9f35c65e1740::t_9d7b483418b6e5 593,677,697-699
+oxidize-core/src/model/inference/layers.rs
+  s_6a9f35c65e1740::t_0a897f6e628fbc 493-497
+scripts/prime-gemma4-31b-int4/llamacpp-unsloth.sh
+  s_6a9f35c65e1740::t_75ce05f417bb3d 14-16,28-33
+scripts/prime-qwen35-self-train/upload-hf.sh
+  s_6a9f35c65e1740::t_ce051b2dc59adb 36-37
+oxidize-finetuning/src/main.rs
+  s_6a9f35c65e1740::t_0a897f6e628fbc 509
+  s_6a9f35c65e1740::t_5e3183f3c1c823 506
+  s_6a9f35c65e1740::t_667c57d5025218 10-12
+scripts/bench_iq_remote.sh
+  s_6a9f35c65e1740::t_908fe67176ffbf 14-21,112-129,198-199,207
+oxidize-finetuning/src/export.rs
+  s_6a9f35c65e1740::t_5e3183f3c1c823 73,75-76
+  s_6a9f35c65e1740::t_667c57d5025218 86-92
+  s_6a9f35c65e1740::t_0a897f6e628fbc 40,83-85,93-102
+  s_6a9f35c65e1740::t_837c720ac79205 120-156
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.12",
+  "base_commit_sha": "65805d6c49c49126b8244f23312c16a2ed22ca8c",
+  "prompts": {},
+  "sessions": {
+    "s_217882f40a7089": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5785-8d20-75e2-a98b-2efe38a5a07b",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_6a9f35c65e1740": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5788-2550-7560-885a-80686bfe0365",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_bd5a09b0174c52": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5784-4c75-7122-b249-0e5b8a582b80",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

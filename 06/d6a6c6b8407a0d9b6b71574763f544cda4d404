@@ -1,0 +1,32 @@
+scripts/prime-qwen35-self-train/upload-hf.sh
+  s_d2add3ac9f912a::t_ab361bcf36c30b 1-82
+scripts/prime-qwen35-self-train/setup-node.sh
+  s_d2add3ac9f912a::t_a0d8f1ae746828 1-86
+scripts/prime-qwen35-self-train/build_seed_dataset.py
+  s_d2add3ac9f912a::t_78b6d04c2a9fa4 1-100
+oxidize-finetuning/src/main.rs
+  s_d2add3ac9f912a::t_dc437d2cf63161 275-279
+scripts/prime-qwen35-self-train/run-self-train.sh
+  s_d2add3ac9f912a::t_00b7dd5e6dd181 1-75
+scripts/prime-qwen35-self-train/provision.sh
+  s_d2add3ac9f912a::t_8520a6e4bf6899 1-35
+scripts/prime-qwen35-self-train/strip_branding.py
+  s_d2add3ac9f912a::t_6b91a432a98088 1-47,62,66-82
+  s_d2add3ac9f912a::t_0cdcc83ba79305 48-61,63-65
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "06d6a6c6b8407a0d9b6b71574763f544cda4d404",
+  "prompts": {},
+  "sessions": {
+    "s_d2add3ac9f912a": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "4e8f36e6-bed9-4b23-9800-52e5fa6e2e79",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
