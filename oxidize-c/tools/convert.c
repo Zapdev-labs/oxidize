@@ -1122,7 +1122,7 @@ int tool_convert(const char* input, const char* output, const ConvertOpts* opts,
     if (outtype == UINT32_MAX || !gw_encodable(outtype)) {
       fprintf(stderr,
               "convert: unsupported --outtype '%s' "
-              "(F32 F16 Q8_0 Q4_0 Q2_K Q3_K Q4_K Q5_K Q6_K AL5_XS)\n",
+              "(F32 F16 Q8_0 Q4_0 Q2_K Q3_K Q4_K Q5_K Q6_K IQ4_XS AL5_XS)\n",
               opts->outtype);
       return 1;
     }
@@ -1411,7 +1411,7 @@ static void usage(void) {
   fprintf(stderr,
           "usage: oxidize-c-convert --input <dir|file.safetensors> --output out.gguf\n"
           "                         [--arch llama|mistral|yi|qwen2|qwen3|gemma2|gemma3|gemma4]\n"
-          "                         [--outtype f16|f32|q8_0|q4_0|q2_k|q3_k|q4_k|q5_k|q6_k]\n"
+          "                         [--outtype f16|f32|q8_0|q4_0|q2_k|q3_k|q4_k|q5_k|q6_k|iq4_xs]\n"
           "Converts a dense HuggingFace SafeTensors model to GGUF v3.\n"
           "Supported: llama/mistral/yi (q/k permute), qwen2/qwen3, gemma2/3/4 (sandwich).\n"
           "MoE, gemma-v1, phi3, deepseek, vision/audio and non-BPE/Unigram tokenizers are rejected.\n");
