@@ -1,6 +1,6 @@
 /* oxidize-c-quantize: GGUF -> GGUF re-quantization.
  *   --input in.gguf --output out.gguf
- *     [--target F32|F16|Q8_0|Q4_0|Q4_K|Q5_K|Q6_K|AL5_XS]
+ *     [--target F32|F16|Q8_0|Q4_0|Q2_K|Q3_K|Q4_K|Q5_K|Q6_K|AL5_XS]
  * Source tensors are dequantized (any of the 22 readable types) and re-encoded.
  * Only 2-D tensors whose row length is encodable for the target are converted;
  * 1-D tensors (norms, rope_freqs) and anything else are copied verbatim.
@@ -26,7 +26,7 @@ int tool_quantize(const char* in, const char* out, const char* target, int verbo
   if (tt == UINT32_MAX || !gw_encodable(tt)) {
     fprintf(stderr,
             "quantize: unsupported target '%s' "
-            "(F32 F16 Q8_0 Q4_0 Q4_K Q5_K Q6_K AL5_XS)\n",
+            "(F32 F16 Q8_0 Q4_0 Q2_K Q3_K Q4_K Q5_K Q6_K AL5_XS)\n",
             target);
     return 1;
   }
@@ -124,7 +124,7 @@ int main(int argc, char** argv) {
   if (!in || !out) {
     fprintf(stderr,
             "usage: oxidize-c-quantize --input in.gguf --output out.gguf "
-            "[--target F32|F16|Q8_0|Q4_0|Q4_K|Q5_K|Q6_K|AL5_XS]\n");
+            "[--target F32|F16|Q8_0|Q4_0|Q2_K|Q3_K|Q4_K|Q5_K|Q6_K|AL5_XS]\n");
     return 1;
   }
   int rc = tool_quantize(in, out, target, 1);
