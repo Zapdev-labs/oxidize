@@ -793,6 +793,114 @@ static void test_convert_gemma4(void) {
   printf("ok tools convert gemma4 (sandwich map, +1 bake, loads)\n");
 }
 
+/* Phi-3: fused qkv_proj + gate_up_proj must split into separate llama-shaped
+ * tensors so model_llama.c (NeoX, arch=phi3) can load them. */
+static size_t build_hf_phi3(StT* ts) {
+  size_t n = 0;
+  unsigned seed = 11;
+#define ADD(NM, ND, D0, D1)                                        \
+  do {                                                             \
+    StT* t = &ts[n++];                                             \
+    snprintf(t->name, sizeof t->name, "%s", (NM));                 \
+    t->ndim = (ND);                                                \
+    t->d[0] = (D0);                                                \
+    t->d[1] = (D1);                                                \
+    t->d[2] = 0;                                                   \
+    size_t ne = st_nelem(t);                                       \
+    t->data = malloc(ne * sizeof(float));                          \
+    CHECK(t->data != NULL);                                        \
+    fill(t->data, ne, seed++, 0.5f);                               \
+  } while (0)
+
+  ADD("model.embed_tokens.weight", 2, CV, CH);
+  ADD("model.norm.weight", 1, CH, 0);
+  ADD("lm_head.weight", 2, CV, CH);
+  for (int l = 0; l < CLY; ++l) {
+    char nm[80];
+#define LADD(SUF, ND, D0, D1)                                      \
+  do {                                                             \
+    snprintf(nm, sizeof nm, "model.layers.%d.%s", l, (SUF));       \
+    ADD(nm, ND, D0, D1);                                           \
+  } while (0)
+    LADD("input_layernorm.weight", 1, CH, 0);
+    LADD("post_attention_layernorm.weight", 1, CH, 0);
+    LADD("self_attn.qkv_proj.weight", 2, CNH * CHD + 2 * CNKV * CHD, CH);
+    LADD("self_attn.o_proj.weight", 2, CH, CNH * CHD);
+    LADD("mlp.gate_up_proj.weight", 2, 2 * CFF, CH);
+    LADD("mlp.down_proj.weight", 2, CH, CFF);
+#undef LADD
+  }
+#undef ADD
+  return n;
+}
+
+static void test_convert_phi3(void) {
+  char dir[] = "/tmp/oc-convert-phi3-XXXXXX";
+  CHECK(mkdtemp(dir) != NULL);
+  char cfgp[256], tokp[256], stp[256], gout[256];
+  snprintf(cfgp, sizeof cfgp, "%s/config.json", dir);
+  snprintf(tokp, sizeof tokp, "%s/tokenizer.json", dir);
+  snprintf(stp, sizeof stp, "%s/model.safetensors", dir);
+  snprintf(gout, sizeof gout, "%s/out-phi3.gguf", dir);
+
+  write_text(cfgp,
+             "{\"model_type\":\"phi3\",\"hidden_size\":8,\"num_hidden_layers\":2,"
+             "\"num_attention_heads\":2,\"num_key_value_heads\":1,"
+             "\"intermediate_size\":16,\"rms_norm_eps\":1e-05,\"rope_theta\":10000.0,"
+             "\"vocab_size\":16,\"max_position_embeddings\":64,\"head_dim\":4,"
+             "\"bos_token_id\":1,\"eos_token_id\":2}");
+  write_text(tokp,
+             "{\"model\":{\"type\":\"BPE\",\"vocab\":{\"<unk>\":0,\"<s>\":1,\"</s>\":2,"
+             "\"a\":3,\"b\":4,\"ab\":5,\"c\":6},\"merges\":[\"a b\"]},"
+             "\"added_tokens\":[{\"id\":1,\"content\":\"<s>\",\"special\":true},"
+             "{\"id\":2,\"content\":\"</s>\",\"special\":true}]}");
+
+  StT ts[64];
+  size_t nt = build_hf_phi3(ts);
+  write_safetensors(stp, ts, nt);
+
+  ConvertOpts o = {.arch_override = NULL, .outtype = "F32"};
+  CHECK(tool_convert(dir, gout, &o, 0) == 0);
+
+  GgufFile g;
+  char err[256];
+  CHECK(gguf_open(&g, gout, err, sizeof err) == 0);
+  char* arch = gguf_architecture(&g);
+  CHECK(arch && strcmp(arch, "phi3") == 0);
+  free(arch);
+
+  CHECK(gguf_tensor(&g, "blk.0.attn_q.weight") != NULL);
+  CHECK(gguf_tensor(&g, "blk.0.attn_k.weight") != NULL);
+  CHECK(gguf_tensor(&g, "blk.0.attn_v.weight") != NULL);
+  CHECK(gguf_tensor(&g, "blk.0.ffn_gate.weight") != NULL);
+  CHECK(gguf_tensor(&g, "blk.0.ffn_up.weight") != NULL);
+  CHECK(gguf_tensor(&g, "blk.0.attn_qkv.weight") == NULL);
+
+  const GgufTensorInfo* q = gguf_tensor(&g, "blk.0.attn_q.weight");
+  const GgufTensorInfo* k = gguf_tensor(&g, "blk.0.attn_k.weight");
+  CHECK(q && q->dims[0] == CH && q->dims[1] == CNH * CHD);
+  CHECK(k && k->dims[0] == CH && k->dims[1] == CNKV * CHD);
+
+  Model m;
+  CHECK(model_load(&m, &g, 0, false, err, sizeof err) == 0);
+  CHECK(m.family == MODEL_LLAMA);
+  float* logits = m.forward(m.handle, 3, 0, true);
+  CHECK(logits != NULL);
+  int nonzero = 0;
+  for (size_t i = 0; i < CV; ++i)
+    if (fabsf(logits[i]) > 1e-8f) nonzero = 1;
+  CHECK(nonzero);
+  model_free(&m);
+
+  for (size_t i = 0; i < nt; ++i) free(ts[i].data);
+  unlink(cfgp);
+  unlink(tokp);
+  unlink(stp);
+  unlink(gout);
+  rmdir(dir);
+  printf("ok tools convert phi3 (fused qkv/gate_up split, loads)\n");
+}
+
 /* The JSON parser reads untrusted files (safetensors headers, config.json,
  * tokenizer.json), so it must reject malformed input without crashing (ASAN). */
 static void test_convert_json(void) {
@@ -832,4 +940,5 @@ void test_tools(void) {
   test_convert_json();
   test_convert();
   test_convert_gemma4();
+  test_convert_phi3();
 }

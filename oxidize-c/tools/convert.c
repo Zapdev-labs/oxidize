@@ -8,13 +8,17 @@
  *
  * SCOPE (honest): dense decoder-only.
  *   permuted-q/k archs (ggml NORMAL rope): llama, mistral, yi
- *   NeoX-rope archs (unpermuted q/k):       qwen2, qwen3
+ *   NeoX-rope archs (unpermuted q/k):       qwen2, qwen3, phi3/phi
  *   Gemma sandwich (GeGLU + 4 norms):      gemma2/gemma3/gemma4 (written as
  *     GGUF arch "gemma4" for the C loader; RMSNorm weights get +1 baked in)
- * Everything else -- MoE, gemma-v1 without sandwich norms, phi3 (fused QKV),
- * deepseek (MLA), wordpiece tokenizers, non-F32/F16/BF16 safetensors -- is
- * REJECTED LOUDLY. A slower/rejecting correct converter beats a fast wrong one:
- * a subtly-wrong GGUF (esp. a bad q/k permute) is silent fluent garbage.
+ * Phi-3 ships fused HF tensors (self_attn.qkv_proj, mlp.gate_up_proj); this
+ * converter SPLITS them into the separate attn_q/k/v + ffn_gate/up that
+ * model_llama.c already loads. SuRoPE / sliding-window 128k factors are not
+ * written — fine for 4k Phi-3-mini; long-context SuRoPE GGUFs need more work.
+ * Everything else -- MoE, gemma-v1 without sandwich norms, deepseek (MLA),
+ * wordpiece tokenizers, non-F32/F16/BF16 safetensors -- is REJECTED LOUDLY.
+ * A slower/rejecting correct converter beats a fast wrong one: a subtly-wrong
+ * GGUF (esp. a bad q/k permute) is silent fluent garbage.
  *
  * THE PERMUTE (highest-risk part). llama.cpp permutes q/k so that ggml NORMAL
  * (adjacent-pair) rope on the permuted weights reproduces HF/NeoX rope on the
@@ -638,6 +642,11 @@ static const char* arch_map(const char* mt, int* permute, int* sandwich) {
   }
   if (!strcmp(lc, "qwen2")) { *permute = 0; return "qwen2"; }
   if (!strcmp(lc, "qwen3")) { *permute = 0; return "qwen3"; }
+  /* phi / phi3: NeoX rope, unpermuted; fused HF weights are split below. */
+  if (!strcmp(lc, "phi") || !strcmp(lc, "phi3")) {
+    *permute = 0;
+    return "phi3";
+  }
   /* gemma2/3/4 share the sandwich layout the C gemma4 loader expects. Plain
    * "gemma" (v1) is 2-norm Llama-like and is rejected — no silently-wrong map. */
   if (!strcmp(lc, "gemma2") || !strcmp(lc, "gemma3") || !strcmp(lc, "gemma4")) {
@@ -658,17 +667,22 @@ static void normalize_hf_name(const char* hf, char* out, size_t outlen) {
 
 /* HF tensor name -> ggml/llama.cpp name. `sandwich` selects Gemma2+ norm map.
  * Returns 1 and fills `out` (>= 160 bytes) if emitted; 0 if dropped; -1 if the
- * name is an unsupported structure (MoE / fused qkv) so the convert fails. */
+ * name is an unsupported structure (MoE / vision) so the convert fails.
+ * Fused phi3 qkv_proj / gate_up_proj are NOT rejected here — the plan loop
+ * splits them into separate OutTs before calling map_name. */
 static int map_name(const char* hf_raw, char* out, size_t outlen, int sandwich) {
   char hf[256];
   normalize_hf_name(hf_raw, hf, sizeof hf);
 
   if (strstr(hf, ".experts.") || strstr(hf, "block_sparse_moe") ||
-      strstr(hf, "gate_up_proj") || strstr(hf, ".mtp.") ||
-      strstr(hf, "self_attn.qkv_proj") || strstr(hf, "linear_attn") ||
+      strstr(hf, ".mtp.") || strstr(hf, "linear_attn") ||
       strstr(hf, "vision_tower") || strstr(hf, "multi_modal") ||
       strstr(hf, "audio_tower"))
     return -1;
+
+  /* Fused tensors handled by the plan loop; ignore here if seen. */
+  if (strstr(hf, "self_attn.qkv_proj") || strstr(hf, "gate_up_proj"))
+    return 0;
 
   if (!strcmp(hf, "model.embed_tokens.weight")) {
     snprintf(out, outlen, "token_embd.weight");
@@ -1057,6 +1071,7 @@ typedef struct {
   int permute;        /* 1 for q/k on permuted archs */
   int norm_plus1;     /* 1 => bake +1 into RMSNorm weights (gemma GGUF contract) */
   uint64_t head_dim;  /* per-head size when permuting */
+  uint64_t src_row0;  /* row offset into fused HF source (0 for normal tensors) */
 } OutT;
 
 /* choose ggml output type: 1-D tensors stay F32; 2-D uses outtype when the
@@ -1079,12 +1094,12 @@ static int emit_payload(const OutT* o, uint8_t* dst, char* err, size_t errlen) {
   if (!row) { snprintf(err, errlen, "convert: oom"); return -1; }
   int rc = -1;
   for (uint64_t d = 0; d < o->rows; ++d) {
-    uint64_t s = d;
+    uint64_t s = o->src_row0 + d;
     if (o->permute) {
       uint64_t hd = o->head_dim, half = hd / 2;
       uint64_t head = d / hd, dl = d % hd;
       uint64_t sl = (dl & 1) ? half + dl / 2 : dl / 2;
-      s = head * hd + sl;
+      s = o->src_row0 + head * hd + sl;
     }
     if (oc_dequant_row(st, o->src->data + s * src_rb, row, o->cols) != 0) {
       snprintf(err, errlen, "convert: %s dequant failed", o->gg);
@@ -1161,8 +1176,8 @@ int tool_convert(const char* input, const char* output, const ConvertOpts* opts,
   if (!arch) {
     fprintf(stderr,
             "convert: architecture '%s' is not supported.\n"
-            "  Supported (dense): llama, mistral, yi, qwen2, qwen3, gemma2, gemma3, gemma4.\n"
-            "  Rejected: MoE, gemma-v1, phi3, deepseek(MLA), vision/audio towers, etc.\n"
+            "  Supported (dense): llama, mistral, yi, qwen2, qwen3, phi3, gemma2, gemma3, gemma4.\n"
+            "  Rejected: MoE, gemma-v1, deepseek(MLA), vision/audio towers, etc.\n"
             "  Use llama.cpp's convert_hf_to_gguf.py for those.\n",
             model_type);
     goto done;
@@ -1294,20 +1309,147 @@ int tool_convert(const char* input, const char* output, const ConvertOpts* opts,
   /* ---- tokenizer ---- */
   if (embed_tokenizer(&kb, cfgdir, cfg_root, err, sizeof err) != 0) { fprintf(stderr, "%s\n", err); goto done; }
 
-  /* ---- plan output tensors ---- */
-  outs = calloc(st.n, sizeof(OutT));
+  /* ---- plan output tensors ----
+   * Phi3 fused weights expand 1->3 (qkv) or 1->2 (gate_up), so allocate headroom. */
+  size_t ocap = st.n * 3 + 8;
+  outs = calloc(ocap, sizeof(OutT));
   if (!outs) { fprintf(stderr, "convert: oom\n"); goto done; }
   size_t no = 0;
+
+  uint32_t head_dim_cfg = 0, hidden_cfg = 0, ff_cfg = 0;
+  jget_u32(cfg, "intermediate_size", &ff_cfg);
+  if (!jget_u32(cfg, "head_dim", &head_dim_cfg) &&
+      jget_u32(cfg, "hidden_size", &hidden_cfg) && n_head)
+    head_dim_cfg = hidden_cfg / n_head;
+
   for (size_t i = 0; i < st.n; ++i) {
     const StTensor* t = &st.t[i];
+    char hf[256];
+    normalize_hf_name(t->name, hf, sizeof hf);
+
+    /* ---- fused phi3 splits (before map_name) ---- */
+    const char* rest = NULL;
+    if (strncmp(hf, "model.layers.", 13) == 0) rest = hf + 13;
+    if (rest) {
+      char* dot = strchr(rest, '.');
+      if (dot) {
+        char layer[16];
+        size_t ll = (size_t)(dot - rest);
+        if (ll > 0 && ll < sizeof layer) {
+          memcpy(layer, rest, ll);
+          layer[ll] = 0;
+          int layer_ok = 1;
+          for (size_t k = 0; k < ll; ++k)
+            if (!isdigit((unsigned char)layer[k])) layer_ok = 0;
+          const char* suf = dot + 1;
+          if (layer_ok && t->ndim == 2) {
+            uint64_t cols = t->shape[t->ndim - 1]; /* HF [out, in] -> in */
+            uint64_t rows_tot = t->shape[0];
+
+            if (!strcmp(suf, "self_attn.qkv_proj.weight")) {
+              if (n_head == 0 || n_kv == 0 || head_dim_cfg == 0) {
+                fprintf(stderr,
+                        "convert: %s needs num_attention_heads / "
+                        "num_key_value_heads / head_dim (or hidden_size) to split qkv\n",
+                        t->name);
+                goto done;
+              }
+              uint64_t q_rows = (uint64_t)n_head * head_dim_cfg;
+              uint64_t kv_rows = (uint64_t)n_kv * head_dim_cfg;
+              if (rows_tot != q_rows + 2 * kv_rows) {
+                fprintf(stderr,
+                        "convert: %s rows %" PRIu64 " != q(%" PRIu64 ")+2*kv(%" PRIu64 ")\n",
+                        t->name, rows_tot, q_rows, kv_rows);
+                goto done;
+              }
+              const char* names[3] = {"attn_q.weight", "attn_k.weight", "attn_v.weight"};
+              uint64_t bases[3] = {0, q_rows, q_rows + kv_rows};
+              uint64_t rs[3] = {q_rows, kv_rows, kv_rows};
+              for (int p = 0; p < 3; ++p) {
+                if (no >= ocap) {
+                  fprintf(stderr, "convert: output plan overflow\n");
+                  goto done;
+                }
+                OutT* o = &outs[no++];
+                memset(o, 0, sizeof *o);
+                o->src = t;
+                snprintf(o->gg, sizeof o->gg, "blk.%s.%s", layer, names[p]);
+                o->ndim = 2;
+                o->cols = cols;
+                o->rows = rs[p];
+                o->src_row0 = bases[p];
+                o->dims[0] = cols;
+                o->dims[1] = rs[p];
+                o->out_type = pick_type(outtype, 2, o->cols);
+                size_t rb = oc_row_bytes(o->out_type, o->cols);
+                if (rb == 0) {
+                  fprintf(stderr, "convert: %s: cannot encode row of %" PRIu64 "\n", o->gg,
+                          o->cols);
+                  goto done;
+                }
+                o->out_bytes = o->rows * rb;
+              }
+              continue;
+            }
+            if (!strcmp(suf, "self_attn.qkv_proj.bias")) {
+              fprintf(stderr, "convert: fused qkv bias not supported (%s)\n", t->name);
+              goto done;
+            }
+
+            if (!strcmp(suf, "mlp.gate_up_proj.weight")) {
+              uint64_t half = rows_tot / 2;
+              if (rows_tot % 2 != 0 || (ff_cfg && half != ff_cfg)) {
+                fprintf(stderr,
+                        "convert: %s rows %" PRIu64 " not 2*intermediate_size",
+                        t->name, rows_tot);
+                if (ff_cfg) fprintf(stderr, " (%u)", ff_cfg);
+                fprintf(stderr, "\n");
+                goto done;
+              }
+              const char* names[2] = {"ffn_gate.weight", "ffn_up.weight"};
+              for (int p = 0; p < 2; ++p) {
+                if (no >= ocap) {
+                  fprintf(stderr, "convert: output plan overflow\n");
+                  goto done;
+                }
+                OutT* o = &outs[no++];
+                memset(o, 0, sizeof *o);
+                o->src = t;
+                snprintf(o->gg, sizeof o->gg, "blk.%s.%s", layer, names[p]);
+                o->ndim = 2;
+                o->cols = cols;
+                o->rows = half;
+                o->src_row0 = (uint64_t)p * half;
+                o->dims[0] = cols;
+                o->dims[1] = half;
+                o->out_type = pick_type(outtype, 2, o->cols);
+                size_t rb = oc_row_bytes(o->out_type, o->cols);
+                if (rb == 0) {
+                  fprintf(stderr, "convert: %s: cannot encode row of %" PRIu64 "\n", o->gg,
+                          o->cols);
+                  goto done;
+                }
+                o->out_bytes = o->rows * rb;
+              }
+              continue;
+            }
+          }
+        }
+      }
+    }
+
     char gg[160];
     int m = map_name(t->name, gg, sizeof gg, sandwich);
     if (m < 0) {
       fprintf(stderr, "convert: tensor '%s' is part of an unsupported structure "
-                      "(MoE/fused-qkv/MTP/vision); this converter handles dense text only\n", t->name);
+                      "(MoE/MTP/vision); this converter handles dense text only\n", t->name);
       goto done;
     }
     if (m == 0) continue; /* dropped */
+    if (no >= ocap) {
+      fprintf(stderr, "convert: output plan overflow\n");
+      goto done;
+    }
     OutT* o = &outs[no];
     o->src = t;
     memcpy(o->gg, gg, sizeof o->gg);
@@ -1317,6 +1459,7 @@ int tool_convert(const char* input, const char* output, const ConvertOpts* opts,
     o->cols = o->dims[0];
     o->rows = 1;
     for (uint32_t d = 1; d < t->ndim; ++d) o->rows *= o->dims[d];
+    o->src_row0 = 0;
     o->out_type = pick_type(outtype, t->ndim, o->cols);
     o->norm_plus1 = sandwich && is_norm_weight(gg);
     o->permute = 0;
@@ -1410,11 +1553,12 @@ done:
 static void usage(void) {
   fprintf(stderr,
           "usage: oxidize-c-convert --input <dir|file.safetensors> --output out.gguf\n"
-          "                         [--arch llama|mistral|yi|qwen2|qwen3|gemma2|gemma3|gemma4]\n"
+          "                         [--arch llama|mistral|yi|qwen2|qwen3|phi3|gemma2|gemma3|gemma4]\n"
           "                         [--outtype f16|f32|q8_0|q4_0|q2_k|q3_k|q4_k|q5_k|q6_k|iq4_xs]\n"
           "Converts a dense HuggingFace SafeTensors model to GGUF v3.\n"
-          "Supported: llama/mistral/yi (q/k permute), qwen2/qwen3, gemma2/3/4 (sandwich).\n"
-          "MoE, gemma-v1, phi3, deepseek, vision/audio and non-BPE/Unigram tokenizers are rejected.\n");
+          "Supported: llama/mistral/yi (q/k permute), qwen2/qwen3, phi3 (fused qkv split),\n"
+          "           gemma2/3/4 (sandwich).\n"
+          "MoE, gemma-v1, deepseek, vision/audio and non-BPE/Unigram tokenizers are rejected.\n");
 }
 
 int main(int argc, char** argv) {
