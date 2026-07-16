@@ -111,7 +111,7 @@ static float* load_dequant(const GgufFile* g, const char* name, size_t* n_out,
 
 /* ---- fixtures -------------------------------------------------------------- */
 
-#define QCOLS 64
+#define QCOLS 256 /* K-quants need cols % 256 == 0; also fine for Q4_0/AL5_XS */
 #define QROWS 4
 #define NCOLS 8
 
@@ -139,7 +139,10 @@ static void test_tool_quantize(const char* in) {
       {"F32", OC_F32, 1e-6f},
       {"F16", OC_F16, 1e-3f},
       {"Q8_0", OC_Q8_0, 0.01f},
-      {"Q4_0", OC_Q4_0, 0.15f}, /* step = amax/8; half-step + f16 scale slop */
+      {"Q4_0", OC_Q4_0, 0.15f},
+      {"Q4_K", OC_Q4_K, 0.25f},
+      {"Q5_K", OC_Q5_K, 0.15f},
+      {"Q6_K", OC_Q6_K, 0.10f},
       {"AL5_XS", OC_AL5_XS, 0.30f},
   };
   for (size_t k = 0; k < sizeof targets / sizeof *targets; ++k) {
@@ -180,9 +183,9 @@ static void test_tool_quantize(const char* in) {
   /* unknown / dequant-only target refused, not silently mis-encoded */
   char out[64];
   snprintf(out, sizeof out, "%s.bad", in);
-  CHECK(tool_quantize(in, out, "Q4_K", 0) != 0);
+  CHECK(tool_quantize(in, out, "Q2_K", 0) != 0);
   unlink(out);
-  printf("ok tools quantize (F32/F16/Q8_0/Q4_0/AL5_XS round-trip)\n");
+  printf("ok tools quantize (F32/F16/Q8_0/Q4_0/Q4_K/Q5_K/Q6_K/AL5_XS round-trip)\n");
 }
 
 /* ---- prune ----------------------------------------------------------------- */
@@ -214,6 +217,95 @@ static void test_tool_prune(const char* in) {
   gguf_close(&g);
   unlink(out);
   printf("ok tools prune (--keep / --drop)\n");
+}
+
+/* ---- sparse prune (magnitude / Wanda) -------------------------------------- */
+#define SCOLS 8
+#define SROWS 2
+
+static void test_tool_prune_sparse(void) {
+  /* Row 0: 0..7 (keep top half → cols 4..7). Row 1: 7..0 (keep cols 0..3). */
+  static float sw[SCOLS * SROWS];
+  static float snorm[NCOLS];
+  for (int c = 0; c < SCOLS; ++c) {
+    sw[c] = (float)c;
+    sw[SCOLS + c] = (float)(SCOLS - 1 - c);
+  }
+  fill(snorm, NCOLS, 33, 1.0f);
+  Tsp ts[] = {
+      {"blk.0.attn_q.weight", 2, {SCOLS, SROWS}, sw},
+      {"blk.0.attn_norm.weight", 1, {NCOLS, 0}, snorm},
+  };
+  char* in = build_gguf(ts, 2);
+  char out[64];
+  snprintf(out, sizeof out, "%s.sparse", in);
+
+  CHECK(tool_prune_sparse(in, out, 0.5f, NULL, NULL, 0, NULL, 0, 0) == 0);
+  GgufFile g;
+  char err[256];
+  CHECK(gguf_open(&g, out, err, sizeof err) == 0);
+  CHECK(g.n_tensors == 2);
+  size_t n = 0;
+  uint32_t ty = 0;
+  float* w = load_dequant(&g, "blk.0.attn_q.weight", &n, &ty);
+  CHECK(ty == OC_F32 && n == SCOLS * SROWS);
+  size_t zeros0 = 0, zeros1 = 0;
+  for (size_t c = 0; c < SCOLS; ++c) {
+    if (w[c] == 0.0f) zeros0++;
+    else CHECK(w[c] == sw[c]);
+    if (w[SCOLS + c] == 0.0f) zeros1++;
+    else CHECK(w[SCOLS + c] == sw[SCOLS + c]);
+  }
+  CHECK(zeros0 == SCOLS / 2);
+  CHECK(zeros1 == SCOLS / 2);
+  for (size_t c = 0; c < 4; ++c) CHECK(w[c] == 0.0f);
+  for (size_t c = 4; c < 8; ++c) CHECK(w[c] == sw[c]);
+  /* 1-D norm copied verbatim */
+  float* nm = load_dequant(&g, "blk.0.attn_norm.weight", &n, &ty);
+  CHECK(ty == OC_F32 && n == NCOLS);
+  for (size_t i = 0; i < n; ++i) CHECK(nm[i] == snorm[i]);
+  free(nm);
+  free(w);
+  gguf_close(&g);
+  unlink(out);
+
+  /* Wanda: amplify right half so low-norm (left) cols are preferred for zeroing
+   * even when |W| is larger on the left (row 1). */
+  for (int c = 0; c < SCOLS; ++c) {
+    sw[c] = 1.0f; /* uniform magnitudes */
+    sw[SCOLS + c] = (c < 4) ? 10.0f : 1.0f; /* left half larger in |W| */
+  }
+  free(in);
+  in = build_gguf(ts, 2);
+
+  char* npath = strdup("/tmp/oc-norms-XXXXXX");
+  CHECK(npath != NULL);
+  int nfd = mkstemp(npath);
+  CHECK(nfd >= 0);
+  const char* ntxt =
+      "# blk.0.attn_q.weight 8\n"
+      "0.0 0.0 0.0 0.0 10.0 10.0 10.0 10.0\n";
+  CHECK(write(nfd, ntxt, strlen(ntxt)) == (ssize_t)strlen(ntxt));
+  CHECK(close(nfd) == 0);
+
+  snprintf(out, sizeof out, "%s.wanda", in);
+  CHECK(tool_prune_sparse(in, out, 0.5f, npath, NULL, 0, NULL, 0, 0) == 0);
+  CHECK(gguf_open(&g, out, err, sizeof err) == 0);
+  w = load_dequant(&g, "blk.0.attn_q.weight", &n, NULL);
+  CHECK(n == SCOLS * SROWS);
+  /* Both rows: Wanda zeros low-norm cols 0..3, keeps 4..7. */
+  for (size_t r = 0; r < SROWS; ++r) {
+    for (size_t c = 0; c < 4; ++c) CHECK(w[r * SCOLS + c] == 0.0f);
+    for (size_t c = 4; c < 8; ++c) CHECK(w[r * SCOLS + c] != 0.0f);
+  }
+  free(w);
+  gguf_close(&g);
+  unlink(out);
+  unlink(npath);
+  free(npath);
+  unlink(in);
+  free(in);
+  printf("ok tools prune sparse (magnitude 0.5 / Wanda norms)\n");
 }
 
 /* ---- merge ----------------------------------------------------------------- */
@@ -517,13 +609,13 @@ static void test_convert(void) {
   model_free(&mb); /* frees gb's mmap + arrays */
 
   /* ---- loud rejections (never a silently-wrong GGUF) ---- */
-  ConvertOpts o_gemma = {.arch_override = "gemma", .outtype = "F32"};
+  ConvertOpts o_gemma_v1 = {.arch_override = "gemma", .outtype = "F32"};
   fprintf(stderr, "-- expect one 'architecture ... not supported' block below --\n");
-  CHECK(tool_convert(dir, g_file, &o_gemma, 0) != 0); /* unsupported arch */
+  CHECK(tool_convert(dir, g_file, &o_gemma_v1, 0) != 0); /* gemma-v1 unsupported */
   ConvertOpts o_moe_arch = {.arch_override = "mixtral", .outtype = "F32"};
   CHECK(tool_convert(dir, g_file, &o_moe_arch, 0) != 0); /* MoE arch */
-  ConvertOpts o_bad_type = {.arch_override = "llama", .outtype = "Q4_K"};
-  CHECK(tool_convert(dir, g_file, &o_bad_type, 0) != 0); /* dequant-only target */
+  ConvertOpts o_bad_type = {.arch_override = "llama", .outtype = "Q2_K"};
+  CHECK(tool_convert(dir, g_file, &o_bad_type, 0) != 0); /* no encoder yet */
 
   /* MoE/expert tensors rejected even under a supported arch (map_name < 0). */
   char dir2[] = "/tmp/oc-convert-moe-XXXXXX";
@@ -564,6 +656,135 @@ static void test_convert(void) {
   printf("ok tools convert (q/k permute proven; tokenizer; loud rejections)\n");
 }
 
+/* Gemma2+ sandwich: HF pre/post_feedforward norms map correctly, +1 is baked
+ * into RMSNorm weights, and the resulting GGUF loads as MODEL_GEMMA4. */
+static size_t build_hf_gemma(StT* ts) {
+  size_t n = 0;
+  unsigned seed = 11;
+#define ADD(NM, ND, D0, D1)                                        \
+  do {                                                             \
+    StT* t = &ts[n++];                                             \
+    snprintf(t->name, sizeof t->name, "%s", (NM));                 \
+    t->ndim = (ND);                                                \
+    t->d[0] = (D0);                                                \
+    t->d[1] = (D1);                                                \
+    t->d[2] = 0;                                                   \
+    size_t ne = st_nelem(t);                                       \
+    t->data = malloc(ne * sizeof(float));                          \
+    CHECK(t->data != NULL);                                        \
+    fill(t->data, ne, seed++, 0.5f);                               \
+  } while (0)
+
+  ADD("model.embed_tokens.weight", 2, CV, CH);
+  ADD("model.norm.weight", 1, CH, 0);
+  for (int l = 0; l < CLY; ++l) {
+    char nm[96];
+#define LADD(SUF, ND, D0, D1)                                      \
+  do {                                                             \
+    snprintf(nm, sizeof nm, "model.layers.%d.%s", l, (SUF));       \
+    ADD(nm, ND, D0, D1);                                           \
+  } while (0)
+    LADD("input_layernorm.weight", 1, CH, 0);
+    LADD("post_attention_layernorm.weight", 1, CH, 0);
+    LADD("pre_feedforward_layernorm.weight", 1, CH, 0);
+    LADD("post_feedforward_layernorm.weight", 1, CH, 0);
+    LADD("self_attn.q_proj.weight", 2, CNH * CHD, CH);
+    LADD("self_attn.k_proj.weight", 2, CNKV * CHD, CH);
+    LADD("self_attn.v_proj.weight", 2, CNKV * CHD, CH);
+    LADD("self_attn.o_proj.weight", 2, CH, CNH * CHD);
+    LADD("self_attn.q_norm.weight", 1, CHD, 0);
+    LADD("self_attn.k_norm.weight", 1, CHD, 0);
+    LADD("mlp.gate_proj.weight", 2, CFF, CH);
+    LADD("mlp.up_proj.weight", 2, CFF, CH);
+    LADD("mlp.down_proj.weight", 2, CH, CFF);
+#undef LADD
+  }
+#undef ADD
+  return n;
+}
+
+static void test_convert_gemma4(void) {
+  char dir[] = "/tmp/oc-convert-gemma-XXXXXX";
+  CHECK(mkdtemp(dir) != NULL);
+  char cfgp[256], tokp[256], stp[256], gout[256];
+  snprintf(cfgp, sizeof cfgp, "%s/config.json", dir);
+  snprintf(tokp, sizeof tokp, "%s/tokenizer.json", dir);
+  snprintf(stp, sizeof stp, "%s/model.safetensors", dir);
+  snprintf(gout, sizeof gout, "%s/out-gemma4.gguf", dir);
+
+  write_text(cfgp,
+             "{\"model_type\":\"gemma4\",\"hidden_size\":8,\"num_hidden_layers\":2,"
+             "\"num_attention_heads\":2,\"num_key_value_heads\":1,"
+             "\"intermediate_size\":16,\"rms_norm_eps\":1e-06,\"rope_theta\":1000000.0,"
+             "\"vocab_size\":16,\"max_position_embeddings\":64,"
+             "\"sliding_window\":32,\"sliding_window_pattern\":2,"
+             "\"final_logit_softcapping\":30.0,\"head_dim\":4,"
+             "\"bos_token_id\":1,\"eos_token_id\":2,"
+             "\"layer_types\":[\"sliding_attention\",\"full_attention\"]}");
+  write_text(tokp,
+             "{\"model\":{\"type\":\"BPE\",\"vocab\":{\"<unk>\":0,\"<s>\":1,\"</s>\":2,"
+             "\"a\":3,\"b\":4,\"ab\":5,\"c\":6},\"merges\":[\"a b\"]},"
+             "\"added_tokens\":[{\"id\":1,\"content\":\"<s>\",\"special\":true},"
+             "{\"id\":2,\"content\":\"</s>\",\"special\":true}]}");
+
+  StT ts[64];
+  size_t nt = build_hf_gemma(ts);
+  write_safetensors(stp, ts, nt);
+
+  ConvertOpts o = {.arch_override = NULL, .outtype = "F32"};
+  CHECK(tool_convert(dir, gout, &o, 0) == 0);
+
+  GgufFile g;
+  char err[256];
+  CHECK(gguf_open(&g, gout, err, sizeof err) == 0);
+  char* arch = gguf_architecture(&g);
+  CHECK(arch && strcmp(arch, "gemma4") == 0);
+  free(arch);
+
+  /* Sandwich mapping: post_attention != ffn_norm; pre_feedforward is ffn_norm. */
+  CHECK(gguf_tensor(&g, "blk.0.post_attention_norm.weight") != NULL);
+  CHECK(gguf_tensor(&g, "blk.0.ffn_norm.weight") != NULL);
+  CHECK(gguf_tensor(&g, "blk.0.post_ffw_norm.weight") != NULL);
+  CHECK(gguf_tensor(&g, "output.weight") == NULL); /* tied head dropped */
+
+  /* +1 bake on RMSNorm weights (HF fill was ~[-0.5,0.5] centered; post-bake mean > 0.4). */
+  const GgufTensorInfo* an = gguf_tensor(&g, "blk.0.attn_norm.weight");
+  CHECK(an && an->ggml_type == OC_F32 && an->dims[0] == CH);
+  const float* aw = (const float*)an->data;
+  float mean = 0.0f;
+  for (size_t i = 0; i < CH; ++i) mean += aw[i];
+  mean /= (float)CH;
+  CHECK(mean > 0.4f);
+
+  uint32_t sw = 0, softcap_ok = 0;
+  CHECK(gguf_get_u32(&g, "gemma4.attention.sliding_window", &sw) && sw == 32);
+  float softcap = 0.0f;
+  softcap_ok = gguf_get_f32(&g, "gemma4.final_logit_softcapping", &softcap);
+  CHECK(softcap_ok && fabsf(softcap - 30.0f) < 1e-5f);
+  const GgufValue* pat = gguf_get_arr(&g, "gemma4.attention.sliding_window_pattern");
+  CHECK(pat && pat->v.arr.n == 2);
+  CHECK(pat->v.arr.items[0].v.u == 1 && pat->v.arr.items[1].v.u == 0);
+
+  Model m;
+  CHECK(model_load(&m, &g, 0, false, err, sizeof err) == 0);
+  CHECK(m.family == MODEL_GEMMA4);
+  float* logits = m.forward(m.handle, 3, 0, true);
+  CHECK(logits != NULL);
+  int nonzero = 0;
+  for (size_t i = 0; i < CV; ++i)
+    if (fabsf(logits[i]) > 1e-8f) nonzero = 1;
+  CHECK(nonzero);
+  model_free(&m);
+
+  for (size_t i = 0; i < nt; ++i) free(ts[i].data);
+  unlink(cfgp);
+  unlink(tokp);
+  unlink(stp);
+  unlink(gout);
+  rmdir(dir);
+  printf("ok tools convert gemma4 (sandwich map, +1 bake, loads)\n");
+}
+
 /* The JSON parser reads untrusted files (safetensors headers, config.json,
  * tokenizer.json), so it must reject malformed input without crashing (ASAN). */
 static void test_convert_json(void) {
@@ -596,9 +817,11 @@ void test_tools(void) {
   char* a = fixture_a();
   test_tool_quantize(a);
   test_tool_prune(a);
+  test_tool_prune_sparse();
   test_tool_merge(a);
   unlink(a);
   free(a);
   test_convert_json();
   test_convert();
+  test_convert_gemma4();
 }

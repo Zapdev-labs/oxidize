@@ -143,6 +143,13 @@ equivalence gate. `--ngl` defaults to every layer.
    errors in kernels.
 3. `--bench` for tok/s; nsys profile if under target.
 
+## Experimental backends (UNVERIFIED)
+
+MLX, Metal, Vulkan, and WebGPU ports live under `src/{mlx,metal,vulkan,webgpu}/`
+with their own Makefiles. They are **opt-in**, never part of `make` / `make test`,
+and have **never been compiled or run** here. See `src/backends-experimental.md`.
+CUDA remains the only verified GPU backend.
+
 ## Known risks / TODOs
 
 - Launch overhead (see above) — CUDA graphs TODO if needed.
