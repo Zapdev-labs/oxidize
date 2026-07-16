@@ -1,0 +1,19 @@
+oxidize-c/tests/test_tools.c
+  s_5b696168252f15::t_b560225c673215 154,198
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "50ec265e26c00babd394421601e79e770d74040b",
+  "prompts": {},
+  "sessions": {
+    "s_5b696168252f15": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "agent-2ccec5d5-fde2-42ce-937a-9192ad7d23f7",
+        "model": "unknown"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
