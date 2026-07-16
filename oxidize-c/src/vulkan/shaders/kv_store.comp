@@ -1,0 +1,27 @@
+#version 450
+/* UNVERIFIED — never compiled or run. Blind port of lk_kv_store/k_kv_store
+ * (src/cuda/*.cu). Requires Vulkan SDK + GPU.
+ *
+ * Store one token's K/V rows into the caches at `slot`.
+ * DIVERGENCE FROM CUDA (documented in README): the CUDA caches are f16; this
+ * port keeps them FP32 to avoid blind 16-bit pack/unpack. Same math, 2x the
+ * KV VRAM. The gemma4 rotoquant (int4) KV path is NOT ported — kv_quant
+ * models are refused at init. */
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) writeonly buffer KC { float kc[]; } Kc;
+layout(std430, binding = 1) writeonly buffer VC { float vc[]; } Vc;
+layout(std430, binding = 2) readonly  buffer KB { float k[]; } Kb;
+layout(std430, binding = 3) readonly  buffer VB { float v[]; } Vb;
+
+layout(push_constant) uniform PC {
+  int k_len;
+  int v_len;
+  uint slot;
+} pc;
+
+void main() {
+  int i = int(gl_GlobalInvocationID.x);
+  if (i < pc.k_len) Kc.kc[pc.slot * uint(pc.k_len) + uint(i)] = Kb.k[i];
+  if (i < pc.v_len) Vc.vc[pc.slot * uint(pc.v_len) + uint(i)] = Vb.v[i];
+}
