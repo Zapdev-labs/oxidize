@@ -53,7 +53,7 @@ func main() {
 		m.ID(), md.Arch, md.Vocab, md.Ctx, md.NTensors)
 
 	addr := net.JoinHostPort(*host, strconv.Itoa(*port))
-	log.Printf("oxidize-serve: listening on http://%s (POST /v1/chat/completions, /v1/completions; conversation KV via conversation=)", addr)
+	log.Printf("oxidize-serve: listening on http://%s (POST /v1/chat/completions, /v1/completions; conversation KV via conversation= or conversation_auto)", addr)
 	if err := http.ListenAndServe(addr, NewServer(m).Handler()); err != nil {
 		log.Fatalf("oxidize-serve: %v", err)
 	}
