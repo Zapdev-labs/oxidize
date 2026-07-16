@@ -185,6 +185,7 @@ uint32_t gw_type_id(const char* name) {
   if (!strcmp(name, "Q4_K")) return OC_Q4_K;
   if (!strcmp(name, "Q5_K")) return OC_Q5_K;
   if (!strcmp(name, "Q6_K")) return OC_Q6_K;
+  if (!strcmp(name, "IQ4_XS")) return OC_IQ4_XS;
   if (!strcmp(name, "AL5_XS")) return OC_AL5_XS;
   return UINT32_MAX;
 }
@@ -193,7 +194,7 @@ int gw_encodable(uint32_t type) {
   return type == OC_F32 || type == OC_F16 || type == OC_Q8_0 ||
          type == OC_Q4_0 || type == OC_Q2_K || type == OC_Q3_K ||
          type == OC_Q4_K || type == OC_Q5_K || type == OC_Q6_K ||
-         type == OC_AL5_XS;
+         type == OC_IQ4_XS || type == OC_AL5_XS;
 }
 
 static int gw_nearest_int(float fval) {
@@ -654,6 +655,109 @@ static void encode_q6_k(const float* x, uint8_t* dst, size_t n) {
   }
 }
 
+/* IQ4_NL codebook (ggml kvalues_iq4nl). */
+static const int8_t gw_kvalues_iq4nl[16] = {
+    -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113};
+
+static int best_iq4nl(float x) {
+  int best = 0;
+  float bestd = fabsf(x - (float)gw_kvalues_iq4nl[0]);
+  for (int i = 1; i < 16; ++i) {
+    float d = fabsf(x - (float)gw_kvalues_iq4nl[i]);
+    if (d < bestd) {
+      bestd = d;
+      best = i;
+    }
+  }
+  return best;
+}
+
+static void encode_iq4_xs(const float* x, uint8_t* dst, size_t n) {
+  uint8_t L[OC_QK_K];
+  float scales[8], weight[32];
+  for (size_t b = 0; b < n / OC_QK_K; ++b) {
+    const float* xb = x + b * OC_QK_K;
+    uint8_t* blk = dst + b * OC_BLK_IQ4_XS;
+    memset(blk, 0, OC_BLK_IQ4_XS);
+    float max_scale = 0.0f, amax_scale = 0.0f;
+    for (int ib = 0; ib < 8; ++ib) {
+      const float* xg = xb + ib * 32;
+      float amax = 0.0f, maxv = 0.0f;
+      for (int j = 0; j < 32; ++j) {
+        weight[j] = xg[j] * xg[j];
+        float ax = fabsf(xg[j]);
+        if (ax > amax) {
+          amax = ax;
+          maxv = xg[j];
+        }
+      }
+      if (amax < 1e-15f) {
+        scales[ib] = 0.0f;
+        continue;
+      }
+      float d = -maxv / (float)gw_kvalues_iq4nl[0];
+      float id = 1.0f / d;
+      float sumqx = 0.0f, sumq2 = 0.0f;
+      for (int j = 0; j < 32; ++j) {
+        int l = best_iq4nl(id * xg[j]);
+        L[ib * 32 + j] = (uint8_t)l;
+        float q = (float)gw_kvalues_iq4nl[l];
+        sumqx += weight[j] * q * xg[j];
+        sumq2 += weight[j] * q * q;
+      }
+      d = sumq2 > 0.0f ? sumqx / sumq2 : 0.0f;
+      float best = d * sumqx;
+      for (int itry = -7; itry <= 7; ++itry) {
+        id = ((float)itry + (float)gw_kvalues_iq4nl[0]) / maxv;
+        sumqx = sumq2 = 0.0f;
+        for (int j = 0; j < 32; ++j) {
+          int l = best_iq4nl(id * xg[j]);
+          float q = (float)gw_kvalues_iq4nl[l];
+          sumqx += weight[j] * q * xg[j];
+          sumq2 += weight[j] * q * q;
+        }
+        if (sumq2 > 0.0f && sumqx * sumqx > best * sumq2) {
+          d = sumqx / sumq2;
+          best = d * sumqx;
+        }
+      }
+      scales[ib] = d;
+      float ad = fabsf(d);
+      if (ad > amax_scale) {
+        amax_scale = ad;
+        max_scale = d;
+      }
+    }
+    float dsuper = amax_scale > 0.0f ? -max_scale / 32.0f : 0.0f;
+    wr16(blk, oc_f32_to_f16(dsuper));
+    float idsuper = dsuper != 0.0f ? 1.0f / dsuper : 0.0f;
+    uint16_t scales_h = 0;
+    uint8_t* scales_l = blk + 4;
+    for (int ib = 0; ib < 8; ++ib) {
+      int l = gw_nearest_int(idsuper * scales[ib]);
+      if (l < -32) l = -32;
+      if (l > 31) l = 31;
+      float dl = dsuper * (float)l;
+      float idl = dl != 0.0f ? 1.0f / dl : 0.0f;
+      const float* xg = xb + ib * 32;
+      for (int j = 0; j < 32; ++j) L[ib * 32 + j] = (uint8_t)best_iq4nl(idl * xg[j]);
+      l += 32;
+      uint8_t ll = (uint8_t)(l & 0xf), lh = (uint8_t)(l >> 4);
+      if ((ib & 1) == 0)
+        scales_l[ib / 2] = ll;
+      else
+        scales_l[ib / 2] = (uint8_t)(scales_l[ib / 2] | (ll << 4));
+      scales_h = (uint16_t)(scales_h | (lh << (2 * (ib % 8))));
+    }
+    wr16(blk + 2, scales_h);
+    uint8_t* qs = blk + 8;
+    for (int i = 0; i < 8; ++i)
+      for (int j = 0; j < 16; ++j)
+        qs[16 * i + j] =
+            (uint8_t)(L[32 * i + j] | (L[32 * i + 16 + j] << 4));
+  }
+}
+
 static void encode_q8_0(const float* x, uint8_t* dst, size_t n) {
   for (size_t b = 0; b < n / 32; ++b) {
     const float* v = x + b * 32;
@@ -712,6 +816,10 @@ int gw_encode_row(uint32_t type, const float* x, uint8_t* dst, size_t n) {
     case OC_Q6_K:
       if (n % OC_QK_K) return -1;
       encode_q6_k(x, dst, n);
+      return 0;
+    case OC_IQ4_XS:
+      if (n % OC_QK_K) return -1;
+      encode_iq4_xs(x, dst, n);
       return 0;
     case OC_AL5_XS:
       if (n % 32) return -1;
