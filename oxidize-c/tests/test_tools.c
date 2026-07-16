@@ -155,7 +155,7 @@ static void test_tool_quantize(const char* in) {
       {"IQ2_S", OC_IQ2_S, 0.70f},
       {"IQ3_XXS", OC_IQ3_XXS, 1.05f},
       {"IQ3_S", OC_IQ3_S, 0.55f},
-      {"IQ1_S", OC_IQ1_S, 1.20f},
+      {"IQ1_S", OC_IQ1_S, 0.90f},
       {"AL5_XS", OC_AL5_XS, 0.30f},
   };
   for (size_t k = 0; k < sizeof targets / sizeof *targets; ++k) {
@@ -629,7 +629,7 @@ static void test_convert(void) {
   ConvertOpts o_moe_arch = {.arch_override = "mixtral", .outtype = "F32"};
   CHECK(tool_convert(dir, g_file, &o_moe_arch, 0) != 0); /* MoE arch */
   ConvertOpts o_bad_type = {.arch_override = "llama", .outtype = "IQ1_M"};
-  CHECK(tool_convert(dir, g_file, &o_bad_type, 0) != 0); /* no encoder yet */
+  CHECK(tool_convert(dir, g_file, &o_bad_type, 0) != 0); /* no IQ1_M encoder yet */
 
   /* MoE/expert tensors rejected even under a supported arch (map_name < 0). */
   char dir2[] = "/tmp/oc-convert-moe-XXXXXX";
