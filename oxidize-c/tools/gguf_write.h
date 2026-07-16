@@ -36,11 +36,11 @@ int gw_close(GwWriter* w);
  * gguf.c does not bounds-check declared tensor sizes against the file length. */
 int gw_data_ok(const GgufFile* f, const GgufTensorInfo* t, uint64_t bytes);
 
-/* Encodable target types only: F32, F16, Q8_0, Q4_0, AL5_XS.
- * UINT32_MAX if the name is unknown / has no encoder. */
+/* Encodable targets: F32, F16, Q8_0, Q4_0, Q4_K, Q5_K, Q6_K, AL5_XS.
+ * K-quants need n % 256 == 0. UINT32_MAX if the name is unknown. */
 uint32_t gw_type_id(const char* name);
 int gw_encodable(uint32_t type);
-/* Encode n floats (n % 32 == 0 for the block types) into a row of `type`. */
+/* Encode n floats into a row of `type` (block alignment enforced per type). */
 int gw_encode_row(uint32_t type, const float* x, uint8_t* dst, size_t n);
 /* rows x cols: dequant(src, src_type) -> encode(dst, dst_type), threaded. */
 void gw_requant(const uint8_t* src, uint32_t src_type, uint32_t dst_type,
@@ -51,6 +51,12 @@ void gw_requant(const uint8_t* src, uint32_t src_type, uint32_t dst_type,
 int tool_quantize(const char* in, const char* out, const char* target, int verbose);
 int tool_prune(const char* in, const char* out, const char* const* keep,
                size_t nkeep, const char* const* drop, size_t ndrop, int verbose);
+/* Per-row unstructured prune: keep top (1-sparsity)*cols by |W| (magnitude)
+ * or |W|*||X_j||_2 (Wanda when norms_path is set). sparsity in (0,1). */
+int tool_prune_sparse(const char* in, const char* out, float sparsity,
+                      const char* norms_path, const char* const* keep,
+                      size_t nkeep, const char* const* drop, size_t ndrop,
+                      int verbose);
 int tool_merge(const char* a, const char* b, const char* out, float alpha,
                int verbose);
 
