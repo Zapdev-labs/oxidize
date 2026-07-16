@@ -877,3 +877,84 @@ float* deepseek_forward_batch(DeepseekModel* m, const int32_t* tokens, size_t n,
 void deepseek_kv_rewind(DeepseekModel* m, size_t pos) {
   if (pos < m->kv_len) m->kv_len = pos;
 }
+
+typedef struct {
+  float *kv_lat_cache, *k_pe_cache;
+  float *prev_lat, *prev_pe;
+} DeepseekKvLayer;
+
+struct DeepseekKv {
+  size_t kv_len, n_layers;
+  size_t lat_elems, pe_elems; /* per-layer sizes */
+  DeepseekKvLayer* layers;
+};
+
+DeepseekKv* deepseek_kv_new(const DeepseekModel* m) {
+  if (!m || !m->layers || m->n_layers == 0) return NULL;
+  DeepseekKv* kv = calloc(1, sizeof(*kv));
+  if (!kv) return NULL;
+  kv->n_layers = m->n_layers;
+  kv->lat_elems = m->ctx * m->kv_lora;
+  kv->pe_elems = m->ctx * m->qk_rope;
+  kv->layers = calloc(m->n_layers, sizeof(DeepseekKvLayer));
+  if (!kv->layers) {
+    free(kv);
+    return NULL;
+  }
+  for (size_t l = 0; l < m->n_layers; ++l) {
+    DeepseekKvLayer* L = &kv->layers[l];
+    L->kv_lat_cache = calloc(kv->lat_elems, sizeof(float));
+    L->k_pe_cache = calloc(kv->pe_elems, sizeof(float));
+    if (!L->kv_lat_cache || !L->k_pe_cache) {
+      deepseek_kv_free(kv);
+      return NULL;
+    }
+  }
+  return kv;
+}
+
+void deepseek_kv_free(DeepseekKv* kv) {
+  if (!kv) return;
+  for (size_t l = 0; kv->layers && l < kv->n_layers; ++l) {
+    free(kv->layers[l].kv_lat_cache);
+    free(kv->layers[l].k_pe_cache);
+  }
+  free(kv->layers);
+  free(kv);
+}
+
+void deepseek_kv_clear(DeepseekKv* kv) {
+  if (!kv) return;
+  kv->kv_len = 0;
+  for (size_t l = 0; kv->layers && l < kv->n_layers; ++l) {
+    DeepseekKvLayer* L = &kv->layers[l];
+    if (L->kv_lat_cache) memset(L->kv_lat_cache, 0, kv->lat_elems * sizeof(float));
+    if (L->k_pe_cache) memset(L->k_pe_cache, 0, kv->pe_elems * sizeof(float));
+  }
+}
+
+void deepseek_kv_install(DeepseekModel* m, DeepseekKv* kv) {
+  if (!m || !kv || !m->layers || !kv->layers) return;
+  size_t n = m->n_layers < kv->n_layers ? m->n_layers : kv->n_layers;
+  for (size_t l = 0; l < n; ++l) {
+    DeepseekLayer* L = &m->layers[l];
+    DeepseekKvLayer* K = &kv->layers[l];
+    K->prev_lat = L->kv_lat_cache;
+    K->prev_pe = L->k_pe_cache;
+    L->kv_lat_cache = K->kv_lat_cache;
+    L->k_pe_cache = K->k_pe_cache;
+  }
+  m->kv_len = kv->kv_len;
+}
+
+void deepseek_kv_release(DeepseekModel* m, DeepseekKv* kv) {
+  if (!m || !kv || !m->layers || !kv->layers) return;
+  kv->kv_len = m->kv_len;
+  size_t n = m->n_layers < kv->n_layers ? m->n_layers : kv->n_layers;
+  for (size_t l = 0; l < n; ++l) {
+    DeepseekLayer* L = &m->layers[l];
+    DeepseekKvLayer* K = &kv->layers[l];
+    L->kv_lat_cache = K->prev_lat;
+    L->k_pe_cache = K->prev_pe;
+  }
+}

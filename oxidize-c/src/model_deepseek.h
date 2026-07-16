@@ -153,6 +153,17 @@ float* deepseek_forward_batch(DeepseekModel* m, const int32_t* tokens, size_t n_
  * kv_len = pos (clamped). */
 void deepseek_kv_rewind(DeepseekModel* m, size_t pos);
 
+/* Per-session MLA caches (same sizing as deepseek_load): kv_lat_cache and
+ * k_pe_cache per layer, plus kv_len. Session-owned; never freed by
+ * deepseek_free. install swaps layer pointers onto kv (stashing the
+ * previous/primary ones); release restores them and copies m->kv_len back. */
+typedef struct DeepseekKv DeepseekKv;
+DeepseekKv* deepseek_kv_new(const DeepseekModel* m);
+void deepseek_kv_free(DeepseekKv* kv);
+void deepseek_kv_clear(DeepseekKv* kv);
+void deepseek_kv_install(DeepseekModel* m, DeepseekKv* kv);
+void deepseek_kv_release(DeepseekModel* m, DeepseekKv* kv);
+
 /* DeepSeek group-limited router — exposed so the routing can be checked against
  * an independent hand reference (the batched==sequential test cannot see a
  * routing bug because both forward paths call this same code). Given raw router
