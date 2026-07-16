@@ -1,0 +1,49 @@
+#version 450
+/* UNVERIFIED — never compiled or run. Blind port of lk_matvec/k_matvec
+ * (src/cuda/llama_cuda.cu, gemma4_cuda.cu). Requires Vulkan SDK + GPU.
+ *
+ * Fused dequant matvec, ONE WORKGROUP PER OUTPUT ROW (the CUDA code used one
+ * warp per row; here local_size_x = 32 invocations cooperate on a row and
+ * reduce in shared memory). y[r] = dot(dequant(W row r), x).
+ *
+ * qtype (spec constant 0) selects the decoder in dequant.glsl; the host makes
+ * one specialized pipeline per weight quant type, mirroring the CUDA template
+ * instantiations. nb (batch) is not ported: decode is nb == 1. */
+#extension GL_GOOGLE_include_directive : require
+
+layout(local_size_x = 32) in;
+
+layout(constant_id = 0) const int qtype = 0;
+
+layout(std430, binding = 0) readonly buffer WB { uint data[]; } Wbuf;
+layout(std430, binding = 1) readonly buffer XB { float x[]; } Xb;
+layout(std430, binding = 2) writeonly buffer YB { float y[]; } Yb;
+
+layout(push_constant) uniform PC {
+  int rows;
+  int cols;
+  uint rowbytes; /* oc_row_bytes(qtype, cols) */
+} pc;
+
+#include "dequant.glsl"
+
+shared float red[32];
+
+void main() {
+  uint row = gl_WorkGroupID.x;
+  if (row >= uint(pc.rows)) return;
+  uint lane = gl_LocalInvocationID.x; /* 0..31 */
+  uint base = row * pc.rowbytes;
+
+  float acc = 0.0;
+  for (int i = int(lane); i < pc.cols; i += 32)
+    acc += oc_dqv(qtype, base, i) * Xb.x[i];
+
+  red[lane] = acc;
+  barrier();
+  for (uint o = 16u; o > 0u; o >>= 1u) {
+    if (lane < o) red[lane] += red[lane + o];
+    barrier();
+  }
+  if (lane == 0u) Yb.y[row] = red[0];
+}
