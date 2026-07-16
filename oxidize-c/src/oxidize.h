@@ -17,14 +17,11 @@
  *     safe from any thread.
  *   - Each OxSession is single-threaded: never call ox_generate on one session
  *     from two threads at once.
- *   - The generation runtime (thread pool + the model's KV cache) is process /
- *     model -wide and serves ONE forward pass at a time. Sessions that share a
- *     model therefore serialize: run one session's generation to a stopping
- *     point before driving another against the same model. Interleaving two
- *     live generations on one model corrupts the shared KV cache.
- *     (ponytail: per-session KV cache is the upgrade path; it needs the model
- *      loaders to allocate the cache per session, which this ABI cannot do
- *      without touching them.)
+ *   - Sessions that share a model may interleave multi-turn conversations:
+ *     each session owns its own KV cache (all families). Forwards still
+ *     serialize on a per-model mutex because scratch buffers (x/q/k/...) are
+ *     shared. Concurrent ox_generate calls on different sessions of one model
+ *     are safe; they queue on that mutex rather than corrupting KV.
  *
  * Errors: functions that can fail take (char* err, size_t errlen) and return
  * 0 on success / -1 on failure, writing a NUL-terminated message into err.
@@ -90,6 +87,10 @@ int ox_metadata(const OxModel* m, OxMetadata* out);
  * greedy sampling; tune it with the setters below. NULL on allocation failure. */
 OxSession* ox_session_new(OxModel* m);
 void ox_session_free(OxSession* s); /* safe on NULL */
+
+/* Reset conversation state for reuse / chat editing: pos=0, clear recent[], and
+ * if the session owns a KV cache, zero its buffers and kv_len. Safe on NULL. */
+void ox_session_reset(OxSession* s);
 
 /* Sampler configuration (per session, applied to every subsequent ox_generate).
  * Mirrors the CLI flags: temperature <= 0 is greedy argmax; top_k <= 0, top_p

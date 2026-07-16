@@ -4,6 +4,7 @@
  * and deliberately not shared. */
 #include "oxidize.h"
 
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,6 +32,7 @@ struct OxModel {
   char* arch;      /* malloc'd; OxMetadata.arch points at it */
   size_t n_tensors, n_kv;
   uint64_t default_seed;
+  pthread_mutex_t fwd_mu; /* serializes forwards (shared scratch); KV is per-session */
   /* Chat template: detected once at open. Marker strings are literals (no free).
    * has_template == 0 => prompts are passed raw. */
   int has_template;
@@ -44,6 +46,7 @@ struct OxModel {
 struct OxSession {
   OxModel* m;             /* borrowed; must outlive the session */
   SamplerConfig sampler;  /* owns a lazily-grown scratch buffer */
+  ModelKv* kv;            /* per-session KV; NULL => shared model primary */
   size_t pos;             /* next KV position (persists across turns) */
   int32_t recent[OX_RECENT_CAP];
   size_t n_recent;
@@ -148,6 +151,14 @@ int ox_model_open(OxModel** out, const char* path, const OxModelOptions* opts,
   m->n_kv = owned->n_kv;
   m->default_seed = seed;
   detect_template(m);
+  if (pthread_mutex_init(&m->fwd_mu, NULL) != 0) {
+    if (err && errlen) snprintf(err, errlen, "ox_model_open: mutex init failed");
+    tokenizer_free(&m->tok);
+    model_free(&m->model);
+    free(m->arch);
+    free(m);
+    goto fail_pool;
+  }
 
   g_open_models++;
   *out = m;
@@ -162,6 +173,7 @@ void ox_model_close(OxModel* m) {
   if (!m) return;
   tokenizer_free(&m->tok);
   model_free(&m->model);
+  pthread_mutex_destroy(&m->fwd_mu);
   free(m->arch);
   free(m);
   if (--g_open_models == 0) oc_pool_free();
@@ -185,6 +197,7 @@ OxSession* ox_session_new(OxModel* m) {
   OxSession* s = calloc(1, sizeof(*s));
   if (!s) return NULL;
   s->m = m;
+  s->kv = model_kv_new(&m->model); /* NULL ok: unsupported family or OOM */
   /* greedy by default, mirroring the CLI's zero-initialised sampler. */
   s->sampler.temperature = 0.0f;
   s->sampler.top_p = 1.0f;
@@ -194,8 +207,17 @@ OxSession* ox_session_new(OxModel* m) {
 
 void ox_session_free(OxSession* s) {
   if (!s) return;
+  model_kv_free(s->kv);
   sampler_free(&s->sampler);
   free(s);
+}
+
+void ox_session_reset(OxSession* s) {
+  if (!s) return;
+  s->pos = 0;
+  s->n_recent = 0;
+  memset(s->recent, 0, sizeof(s->recent));
+  if (s->kv) model_kv_clear(s->kv);
 }
 
 void ox_session_set_temperature(OxSession* s, float v) { if (s) s->sampler.temperature = v; }
@@ -261,6 +283,9 @@ int ox_generate(OxSession* s, const char* prompt, int max_tokens, OxTokenCb cb,
     return -1;
   }
 
+  pthread_mutex_lock(&m->fwd_mu);
+  if (s->kv) model_kv_install(&m->model, s->kv);
+
   /* Prefill the whole prompt in one batched pass (weights read once per batch,
    * not once per token), then decode. */
   float* logits = m->model.forward_batch(m->model.handle, ids, n_ids, s->pos, true);
@@ -268,6 +293,8 @@ int ox_generate(OxSession* s, const char* prompt, int max_tokens, OxTokenCb cb,
   s->pos += n_ids;
   free(ids);
   if (!logits) {
+    if (s->kv) model_kv_release(&m->model, s->kv);
+    pthread_mutex_unlock(&m->fwd_mu);
     if (err && errlen) snprintf(err, errlen, "ox_generate: forward failed");
     return -1;
   }
@@ -283,6 +310,9 @@ int ox_generate(OxSession* s, const char* prompt, int max_tokens, OxTokenCb cb,
     logits = m->model.forward(m->model.handle, next, s->pos++, true);
     if (!logits) break; /* clean end of stream */
   }
+
+  if (s->kv) model_kv_release(&m->model, s->kv);
+  pthread_mutex_unlock(&m->fwd_mu);
   return 0;
 }
 
