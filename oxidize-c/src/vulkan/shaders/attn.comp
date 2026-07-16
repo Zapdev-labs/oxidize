@@ -1,0 +1,96 @@
+#version 450
+/* UNVERIFIED — never compiled or run. Blind port of lk_attn/k_attn
+ * (src/cuda/*.cu). Requires Vulkan SDK + GPU.
+ *
+ * Fused decode attention: ONE WORKGROUP PER Q HEAD, full causal over [t0, t1).
+ * GQA: kv head = h / group. Mirrors attn_heads() in model_llama.c /
+ * model_gemma4.c, including the ring index (t % cache_cap).
+ *
+ * DIVERGENCE FROM CUDA (documented in README): CUDA held scores in DYNAMIC
+ * shared memory (extern smem sized per-token at launch). GLSL shared arrays
+ * are fixed-size, so scores live in a global scratch SSBO (binding 4), one
+ * `cache_cap`-stride region per head: scratch[h*cache_cap + (t-t0)]. q is
+ * cached in a fixed 256-float shared array (head_dim MUST be <= 256; the host
+ * refuses larger). KV caches are FP32 here (see kv_store.comp). */
+layout(local_size_x = 128) in;
+
+layout(std430, binding = 0) writeonly buffer OB { float o[]; } Ob;
+layout(std430, binding = 1) readonly  buffer QB { float q[]; } Qb;
+layout(std430, binding = 2) readonly  buffer KC { float kc[]; } Kc;
+layout(std430, binding = 3) readonly  buffer VC { float vc[]; } Vc;
+layout(std430, binding = 4)           buffer SC { float sp[]; } Sc; /* scratch scores */
+
+layout(push_constant) uniform PC {
+  int hd;
+  int vd;
+  int group;
+  int cache_cap;
+  int t0;
+  int t1;
+  float scale;
+} pc;
+
+shared float sq[256];
+shared float red[128];
+
+void main() {
+  uint h = gl_WorkGroupID.x;
+  uint tt = gl_LocalInvocationID.x;
+  int group = pc.group;
+  int n_kv = int(gl_NumWorkGroups.x) / group;
+  uint kvh = h / uint(group);
+  int k_row = n_kv * pc.hd;
+  int v_row = n_kv * pc.vd;
+  int count = pc.t1 - pc.t0;
+  uint sbase = h * uint(pc.cache_cap); /* this head's scratch region */
+
+  for (int i = int(tt); i < pc.hd; i += 128) sq[i] = Qb.q[h * uint(pc.hd) + uint(i)];
+  barrier();
+
+  /* scores */
+  for (int t = pc.t0 + int(tt); t < pc.t1; t += 128) {
+    uint krow = uint(t % pc.cache_cap) * uint(k_row) + kvh * uint(pc.hd);
+    float dot = 0.0;
+    for (int d = 0; d < pc.hd; ++d) dot += sq[d] * Kc.kc[krow + uint(d)];
+    Sc.sp[sbase + uint(t - pc.t0)] = dot * pc.scale;
+  }
+  barrier();
+
+  /* max */
+  float mx = -1.0 / 0.0;
+  for (int i = int(tt); i < count; i += 128) mx = max(mx, Sc.sp[sbase + uint(i)]);
+  red[tt] = mx;
+  barrier();
+  for (uint o = 64u; o > 0u; o >>= 1u) {
+    if (tt < o) red[tt] = max(red[tt], red[tt + o]);
+    barrier();
+  }
+  mx = red[0];
+  barrier();
+
+  /* exp + sum */
+  float s = 0.0;
+  for (int i = int(tt); i < count; i += 128) {
+    float e = exp(Sc.sp[sbase + uint(i)] - mx);
+    Sc.sp[sbase + uint(i)] = e;
+    s += e;
+  }
+  red[tt] = s;
+  barrier();
+  for (uint o = 64u; o > 0u; o >>= 1u) {
+    if (tt < o) red[tt] += red[tt + o];
+    barrier();
+  }
+  float inv = red[0] > 0.0 ? 1.0 / red[0] : 0.0;
+  barrier();
+
+  /* weighted V */
+  for (int d = int(tt); d < pc.vd; d += 128) {
+    float acc = 0.0;
+    for (int t = pc.t0; t < pc.t1; ++t) {
+      uint vrow = uint(t % pc.cache_cap) * uint(v_row) + kvh * uint(pc.vd);
+      acc += Sc.sp[sbase + uint(t - pc.t0)] * Vc.vc[vrow + uint(d)];
+    }
+    Ob.o[h * uint(pc.vd) + uint(d)] = acc * inv;
+  }
+}

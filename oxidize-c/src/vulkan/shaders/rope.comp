@@ -1,0 +1,48 @@
+#version 450
+/* UNVERIFIED — never compiled or run. Blind port of lk_rope_neox /
+ * lk_rope_normal (llama_cuda.cu) and k_rope (gemma4_cuda.cu). Requires
+ * Vulkan SDK + GPU.
+ *
+ * gl_WorkGroupID.x = head. mode (spec constant 0): 0 = NeoX split-half
+ * (pairs p[i], p[half+i]) — qwen2/qwen3/phi3 and gemma4; 1 = ggml NORMAL
+ * adjacent-pair (p[2i], p[2i+1]) — llama/mistral/yi. has_freqs != 0 divides
+ * the angle by freqs[i] (gemma4 rope_freqs.weight on GLOBAL/non-SWA layers).
+ * Host skips the dispatch at pos 0 (identity). Partial rotary: dims
+ * [rope_len, head_dim) pass through untouched. */
+layout(local_size_x = 64) in;
+
+layout(constant_id = 0) const int mode = 0; /* 0 = NeoX, 1 = NORMAL */
+
+layout(std430, binding = 0) buffer VB { float v[]; } Vb;
+layout(std430, binding = 1) readonly buffer FB { float f[]; } Fb; /* freqs (opt) */
+
+layout(push_constant) uniform PC {
+  int head_dim;
+  int pos;
+  int rope_len;
+  float theta;
+  int has_freqs;
+} pc;
+
+void main() {
+  uint head = gl_WorkGroupID.x;
+  uint base = head * uint(pc.head_dim);
+  int half = pc.rope_len / 2;
+  for (int i = int(gl_LocalInvocationID.x); i < half; i += 64) {
+    float freq = pow(pc.theta, -2.0 * float(i) / float(pc.rope_len));
+    float angle = float(pc.pos) * freq;
+    if (pc.has_freqs != 0) angle /= Fb.f[i];
+    float c = cos(angle), s = sin(angle);
+    if (mode == 0) {
+      float x0 = Vb.v[base + uint(i)];
+      float x1 = Vb.v[base + uint(half + i)];
+      Vb.v[base + uint(i)]        = x0 * c - x1 * s;
+      Vb.v[base + uint(half + i)] = x0 * s + x1 * c;
+    } else {
+      float x0 = Vb.v[base + uint(2 * i)];
+      float x1 = Vb.v[base + uint(2 * i + 1)];
+      Vb.v[base + uint(2 * i)]     = x0 * c - x1 * s;
+      Vb.v[base + uint(2 * i + 1)] = x0 * s + x1 * c;
+    }
+  }
+}
