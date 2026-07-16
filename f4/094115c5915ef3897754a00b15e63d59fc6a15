@@ -1,0 +1,19 @@
+oxidize-c/server/main.go
+  s_64546e8c0f94b6::t_f07294a99d494e 56
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "f4094115c5915ef3897754a00b15e63d59fc6a15",
+  "prompts": {},
+  "sessions": {
+    "s_64546e8c0f94b6": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "42a286d9-1c74-4405-9ad5-0e3e53c8f92f",
+        "model": "grok-4.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
