@@ -1,0 +1,19 @@
+oxidize-c/src/metal/llama.metal
+  s_1485afe700cb15::t_68b5af4eaa1689 1-246
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "4e255d10a5b0ded911a19730476d493593a3b72a",
+  "prompts": {},
+  "sessions": {
+    "s_1485afe700cb15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f08997b4-ac01-46a6-ab7a-a6ac459a0d39",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
