@@ -4,6 +4,9 @@
 // (SSE) or not. Optional `conversation` on chat requests reuses a per-id
 // OxSession KV when the generator is a *Model. Concurrency: Generate still
 // serializes compute scratch on the shared model.
+//
+// Sticky conversations are capped: maxConversations and conversationTTL bound
+// memory when conversation_auto / auto-mint with a real *Model accumulates ids.
 package main
 
 import (
@@ -18,6 +21,11 @@ import (
 	"strings"
 	"sync"
 	"time"
+)
+
+const (
+	maxConversations = 256
+	conversationTTL  = 30 * time.Minute
 )
 
 // Generator is the seam the HTTP layer drives; *Model is the real one, and tests
@@ -38,8 +46,9 @@ type Server struct {
 }
 
 type convSession struct {
-	s     *Session
-	turns int
+	s        *Session
+	turns    int
+	lastUsed time.Time
 }
 
 func NewServer(gen Generator) *Server {
@@ -287,13 +296,53 @@ func (s *Server) deleteConversation(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"id": id, "deleted": true})
 }
 
+// reapConversationsLocked drops TTL-expired sessions and, if still over cap,
+// the least-recently-used ones. Caller must hold sessMu.
+func (s *Server) reapConversationsLocked(now time.Time) {
+	var expired []string
+	for id, cs := range s.sessions {
+		if now.Sub(cs.lastUsed) > conversationTTL {
+			expired = append(expired, id)
+		}
+	}
+	for _, id := range expired {
+		cs := s.sessions[id]
+		delete(s.sessions, id)
+		if cs != nil && cs.s != nil {
+			cs.s.Close()
+		}
+	}
+	for len(s.sessions) >= maxConversations {
+		oldestID := ""
+		var oldest time.Time
+		first := true
+		for id, cs := range s.sessions {
+			if first || cs.lastUsed.Before(oldest) {
+				oldestID = id
+				oldest = cs.lastUsed
+				first = false
+			}
+		}
+		if oldestID == "" {
+			break
+		}
+		cs := s.sessions[oldestID]
+		delete(s.sessions, oldestID)
+		if cs != nil && cs.s != nil {
+			cs.s.Close()
+		}
+	}
+}
+
 // resolveChatGen picks ephemeral Generate vs a sticky Session for conversation.
 func (s *Server) resolveChatGen(conv string, reset bool, msgs []chatMessage) (
 	func(string, SampleParams, func([]byte) bool) error, string, error) {
 	if conv == "" || s.model == nil {
 		return s.gen.Generate, flattenMessages(msgs), nil
 	}
+	now := time.Now()
 	s.sessMu.Lock()
+	s.reapConversationsLocked(now)
 	cs, ok := s.sessions[conv]
 	if !ok {
 		sess, err := s.model.NewSession()
@@ -301,13 +350,14 @@ func (s *Server) resolveChatGen(conv string, reset bool, msgs []chatMessage) (
 			s.sessMu.Unlock()
 			return nil, "", err
 		}
-		cs = &convSession{s: sess}
+		cs = &convSession{s: sess, lastUsed: now}
 		s.sessions[conv] = cs
 	}
 	if reset {
 		cs.s.Reset()
 		cs.turns = 0
 	}
+	cs.lastUsed = now
 	turns := cs.turns
 	sess := cs.s
 	cs.turns++

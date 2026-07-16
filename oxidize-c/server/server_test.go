@@ -3,12 +3,14 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 // stubGen substitutes for *Model so the HTTP/JSON/SSE layer is tested without a
@@ -163,6 +165,40 @@ func TestChatConversationAuto(t *testing.T) {
 	decodeBody(t, resp2, &out2)
 	if out2.Conversation != "" {
 		t.Fatalf("expected no conversation, got %q", out2.Conversation)
+	}
+}
+
+func TestConversationReapTTL(t *testing.T) {
+	s := NewServer(&stubGen{id: "m", pieces: words("ok")})
+	now := time.Now()
+	s.sessions["old"] = &convSession{lastUsed: now.Add(-conversationTTL - time.Second)}
+	s.sessions["fresh"] = &convSession{lastUsed: now}
+	s.reapConversationsLocked(now)
+	if _, ok := s.sessions["old"]; ok {
+		t.Fatal("expected TTL-expired conversation to be reaped")
+	}
+	if _, ok := s.sessions["fresh"]; !ok {
+		t.Fatal("expected fresh conversation to remain")
+	}
+}
+
+func TestConversationReapMax(t *testing.T) {
+	s := NewServer(&stubGen{id: "m", pieces: words("ok")})
+	now := time.Now()
+	for i := 0; i < maxConversations; i++ {
+		id := fmt.Sprintf("c-%d", i)
+		s.sessions[id] = &convSession{lastUsed: now.Add(time.Duration(i) * time.Second)}
+	}
+	s.sessions["newest"] = &convSession{lastUsed: now.Add(time.Duration(maxConversations+1) * time.Second)}
+	s.reapConversationsLocked(now.Add(time.Duration(maxConversations+2) * time.Second))
+	if len(s.sessions) >= maxConversations {
+		t.Fatalf("expected under maxConversations after reap, got %d", len(s.sessions))
+	}
+	if _, ok := s.sessions["c-0"]; ok {
+		t.Fatal("expected oldest conversation to be evicted")
+	}
+	if _, ok := s.sessions["newest"]; !ok {
+		t.Fatal("expected newest conversation to remain")
 	}
 }
 
