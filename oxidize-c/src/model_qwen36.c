@@ -1103,6 +1103,122 @@ void qwen36_state_restore(Qwen36Model* m) {
   }
 }
 
+/* Per-session caches. Full layers: k_cache/v_cache. Linear (DeltaNet) layers:
+ * conv_state + S (written every token, read on the next). MTP mini-KV and
+ * conv_snap/S_snap are speculative scratch on the model — not cloned. */
+typedef struct {
+  bool is_linear;
+  float *k_cache, *v_cache;
+  float *conv_state, *S;
+  size_t kv_elems, conv_elems, s_elems;
+  float *prev_k, *prev_v, *prev_conv, *prev_S;
+} Qwen36KvLayer;
+
+struct Qwen36Kv {
+  size_t kv_len, n_layers;
+  Qwen36KvLayer* layers;
+};
+
+Qwen36Kv* qwen36_kv_new(const Qwen36Model* m) {
+  if (!m || !m->layers || m->n_layers == 0) return NULL;
+  Qwen36Kv* kv = calloc(1, sizeof(*kv));
+  if (!kv) return NULL;
+  kv->n_layers = m->n_layers;
+  kv->layers = calloc(m->n_layers, sizeof(Qwen36KvLayer));
+  if (!kv->layers) {
+    free(kv);
+    return NULL;
+  }
+  size_t kv_elems = m->ctx * m->n_kv_heads * m->head_dim;
+  size_t conv_elems = (m->d_conv > 0 ? m->d_conv - 1 : 0) * m->conv_dim;
+  size_t s_elems = m->n_v_heads * m->head_v_dim * m->d_state;
+  for (size_t l = 0; l < m->n_layers; ++l) {
+    const Qwen36Layer* src = &m->layers[l];
+    Qwen36KvLayer* L = &kv->layers[l];
+    L->is_linear = src->is_linear;
+    if (src->is_linear) {
+      L->conv_elems = conv_elems;
+      L->s_elems = s_elems;
+      L->conv_state = calloc(conv_elems, sizeof(float));
+      L->S = calloc(s_elems, sizeof(float));
+      if (!L->conv_state || !L->S) {
+        qwen36_kv_free(kv);
+        return NULL;
+      }
+    } else {
+      L->kv_elems = kv_elems;
+      L->k_cache = calloc(kv_elems, sizeof(float));
+      L->v_cache = calloc(kv_elems, sizeof(float));
+      if (!L->k_cache || !L->v_cache) {
+        qwen36_kv_free(kv);
+        return NULL;
+      }
+    }
+  }
+  return kv;
+}
+
+void qwen36_kv_free(Qwen36Kv* kv) {
+  if (!kv) return;
+  for (size_t l = 0; kv->layers && l < kv->n_layers; ++l) {
+    free(kv->layers[l].k_cache);
+    free(kv->layers[l].v_cache);
+    free(kv->layers[l].conv_state);
+    free(kv->layers[l].S);
+  }
+  free(kv->layers);
+  free(kv);
+}
+
+void qwen36_kv_clear(Qwen36Kv* kv) {
+  if (!kv) return;
+  kv->kv_len = 0;
+  for (size_t l = 0; kv->layers && l < kv->n_layers; ++l) {
+    Qwen36KvLayer* L = &kv->layers[l];
+    if (L->k_cache) memset(L->k_cache, 0, L->kv_elems * sizeof(float));
+    if (L->v_cache) memset(L->v_cache, 0, L->kv_elems * sizeof(float));
+    if (L->conv_state) memset(L->conv_state, 0, L->conv_elems * sizeof(float));
+    if (L->S) memset(L->S, 0, L->s_elems * sizeof(float));
+  }
+}
+
+void qwen36_kv_install(Qwen36Model* m, Qwen36Kv* kv) {
+  if (!m || !kv || !m->layers || !kv->layers) return;
+  size_t n = m->n_layers < kv->n_layers ? m->n_layers : kv->n_layers;
+  for (size_t l = 0; l < n; ++l) {
+    Qwen36Layer* L = &m->layers[l];
+    Qwen36KvLayer* K = &kv->layers[l];
+    if (K->is_linear) {
+      K->prev_conv = L->conv_state;
+      K->prev_S = L->S;
+      L->conv_state = K->conv_state;
+      L->S = K->S;
+    } else {
+      K->prev_k = L->k_cache;
+      K->prev_v = L->v_cache;
+      L->k_cache = K->k_cache;
+      L->v_cache = K->v_cache;
+    }
+  }
+  /* qwen36 has no m->kv_len; attention uses the caller's pos. */
+}
+
+void qwen36_kv_release(Qwen36Model* m, Qwen36Kv* kv) {
+  if (!m || !kv || !m->layers || !kv->layers) return;
+  size_t n = m->n_layers < kv->n_layers ? m->n_layers : kv->n_layers;
+  for (size_t l = 0; l < n; ++l) {
+    Qwen36Layer* L = &m->layers[l];
+    Qwen36KvLayer* K = &kv->layers[l];
+    if (K->is_linear) {
+      L->conv_state = K->prev_conv;
+      L->S = K->prev_S;
+    } else {
+      L->k_cache = K->prev_k;
+      L->v_cache = K->prev_v;
+    }
+  }
+}
+
 /* Run the layer stack over the drafts and emit per-row logits (dist for the
  * token AFTER each fed position) into out_logits[row * vocab]. Clobbers
  * m->bx/m->normed — the caller recomputes committed state afterwards. */

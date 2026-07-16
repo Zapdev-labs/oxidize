@@ -151,4 +151,17 @@ size_t qwen36_spec_step(Qwen36Model* m, const int32_t* draft, size_t k, size_t p
 void qwen36_state_snapshot(Qwen36Model* m);
 void qwen36_state_restore(Qwen36Model* m);
 
+/* Per-session position-dependent state (same sizing as qwen36_load). Clones
+ * full-attn k/v caches and DeltaNet conv_state + S. MTP mini-KV and
+ * conv_snap/S_snap stay on the model (ephemeral speculative scratch). The
+ * model has no kv_len field — attention uses the caller's pos; Qwen36Kv.kv_len
+ * is bookkeeping for clear/reset only. install swaps layer pointers onto kv;
+ * release restores the primary ones. */
+typedef struct Qwen36Kv Qwen36Kv;
+Qwen36Kv* qwen36_kv_new(const Qwen36Model* m);
+void qwen36_kv_free(Qwen36Kv* kv);
+void qwen36_kv_clear(Qwen36Kv* kv);
+void qwen36_kv_install(Qwen36Model* m, Qwen36Kv* kv);
+void qwen36_kv_release(Qwen36Model* m, Qwen36Kv* kv);
+
 #endif
