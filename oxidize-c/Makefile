@@ -53,7 +53,7 @@ BACKEND_OBJS_cpu  := $(BUILD)/tensor.o
 COMMON_SRCS := src/gguf.c src/quant.c $(ISA_SRCS) src/tokenizer.c \
                src/model_gemma4.c src/model_qwen36.c src/model_llama.c \
                src/model_deepseek.c src/model.c src/sampler.c src/oxidize.c \
-               src/vision.c
+               src/vision.c src/distributed.c
 COMMON_OBJS := $(COMMON_SRCS:src/%.c=$(BUILD)/%.o)
 OBJS        := $(COMMON_OBJS) $(BACKEND_OBJS_$(BACKEND))
 
@@ -139,16 +139,25 @@ oxidize-c-requant: $(TOOL_RT) $(BUILD)/tool_quantize.o
 oxidize-c-convert: $(TOOL_RT) $(BUILD)/tool_convert.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
+# CPU trainer: linear softmax classifier (CSV) + a LoRA adapter over a frozen
+# weight. Links the tensor ops it calls (oc_dot_f32) and the shared GGUF writer
+# for --lora-out. The math is gradient-checked in tests/test_train.c.
+oxidize-c-train: $(BUILD)/tool_train_main.o $(BUILD)/train.o $(BUILD)/tensor.o \
+                 $(BUILD)/quant.o $(ISA_OBJS) $(BUILD)/tool_gguf_write.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
 quantize: oxidize-c-quantize
 prune: oxidize-c-prune
 merge: oxidize-c-merge
 requant: oxidize-c-requant
 convert: oxidize-c-convert
+train: oxidize-c-train
 tools: quantize prune merge requant convert
 
 TEST_OBJS := $(BUILD)/test_main.o $(BUILD)/test_quant.o $(BUILD)/test_model.o \
              $(BUILD)/test_sampler.o $(BUILD)/fuzz_gguf.o $(BUILD)/test_tools.o \
-             $(BUILD)/test_vision.o $(TOOL_LIB_OBJS)
+             $(BUILD)/test_vision.o $(BUILD)/test_train.o $(BUILD)/train.o \
+             $(BUILD)/test_distributed.o $(TOOL_LIB_OBJS)
 
 $(BUILD)/%.o: tests/%.c $(wildcard src/*.h) $(wildcard tests/*.h) | $(BUILD)
 	$(CC) $(CFLAGS) -c -o $@ $<
