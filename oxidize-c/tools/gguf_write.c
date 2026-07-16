@@ -172,15 +172,16 @@ int gw_data_ok(const GgufFile* f, const GgufTensorInfo* t, uint64_t bytes) {
 }
 
 /* ---- encoders -------------------------------------------------------------
- * F32/F16/Q8_0/Q4_0/AL5_XS plus ggml-compatible K-quants (Q4_K/Q5_K/Q6_K).
- * Q4_K/Q5_K use make_qkx1 (same as oxidize-core quantize_q4_k_scalar); Q6_K
- * uses make_qx_quants. Layout matches oc_dequant_row. */
+ * F32/F16/Q8_0/Q4_0/AL5_XS plus ggml-compatible K-quants
+ * (Q2_K/Q3_K/Q4_K/Q5_K/Q6_K). Layout matches oc_dequant_row. */
 
 uint32_t gw_type_id(const char* name) {
   if (!strcmp(name, "F32")) return OC_F32;
   if (!strcmp(name, "F16")) return OC_F16;
   if (!strcmp(name, "Q8_0")) return OC_Q8_0;
   if (!strcmp(name, "Q4_0")) return OC_Q4_0;
+  if (!strcmp(name, "Q2_K")) return OC_Q2_K;
+  if (!strcmp(name, "Q3_K")) return OC_Q3_K;
   if (!strcmp(name, "Q4_K")) return OC_Q4_K;
   if (!strcmp(name, "Q5_K")) return OC_Q5_K;
   if (!strcmp(name, "Q6_K")) return OC_Q6_K;
@@ -190,8 +191,9 @@ uint32_t gw_type_id(const char* name) {
 
 int gw_encodable(uint32_t type) {
   return type == OC_F32 || type == OC_F16 || type == OC_Q8_0 ||
-         type == OC_Q4_0 || type == OC_Q4_K || type == OC_Q5_K ||
-         type == OC_Q6_K || type == OC_AL5_XS;
+         type == OC_Q4_0 || type == OC_Q2_K || type == OC_Q3_K ||
+         type == OC_Q4_K || type == OC_Q5_K || type == OC_Q6_K ||
+         type == OC_AL5_XS;
 }
 
 static int gw_nearest_int(float fval) {
@@ -394,6 +396,204 @@ static void encode_qkx_minmax(const float* x, uint8_t* dst, size_t n, int nmax,
   }
 }
 
+/* ggml make_qkx2_quants (weights = |x|), used by Q2_K. */
+static float make_qkx2(int n, int nmax, const float* x, uint8_t* L, float* the_min,
+                       uint8_t* Laux, float rmin, float rdelta, int nstep) {
+  float min = x[0], max = x[0], sum_w = fabsf(x[0]), sum_x = sum_w * x[0];
+  for (int i = 1; i < n; ++i) {
+    if (x[i] < min) min = x[i];
+    if (x[i] > max) max = x[i];
+    float w = fabsf(x[i]);
+    sum_w += w;
+    sum_x += w * x[i];
+  }
+  if (min > 0.0f) min = 0.0f;
+  if (max == min) {
+    memset(L, 0, (size_t)n);
+    *the_min = -min;
+    return 0.0f;
+  }
+  float iscale = (float)nmax / (max - min);
+  float scale = 1.0f / iscale;
+  float best_err = 0.0f;
+  for (int i = 0; i < n; ++i) {
+    int l = gw_nearest_int(iscale * (x[i] - min));
+    if (l < 0) l = 0;
+    if (l > nmax) l = nmax;
+    L[i] = (uint8_t)l;
+    float diff = scale * (float)L[i] + min - x[i];
+    best_err += fabsf(x[i]) * fabsf(diff);
+  }
+  for (int is = 0; is <= nstep; ++is) {
+    iscale = (rmin + rdelta * (float)is + (float)nmax) / (max - min);
+    float sum_l = 0.0f, sum_l2 = 0.0f, sum_xl = 0.0f;
+    for (int i = 0; i < n; ++i) {
+      int l = gw_nearest_int(iscale * (x[i] - min));
+      if (l < 0) l = 0;
+      if (l > nmax) l = nmax;
+      Laux[i] = (uint8_t)l;
+      float w = fabsf(x[i]);
+      sum_l += w * (float)l;
+      sum_l2 += w * (float)(l * l);
+      sum_xl += w * (float)l * x[i];
+    }
+    float D = sum_w * sum_l2 - sum_l * sum_l;
+    if (D > 0.0f) {
+      float this_scale = (sum_w * sum_xl - sum_x * sum_l) / D;
+      float this_min = (sum_l2 * sum_x - sum_l * sum_xl) / D;
+      if (this_min > 0.0f) {
+        this_min = 0.0f;
+        this_scale = sum_l2 > 0.0f ? sum_xl / sum_l2 : 0.0f;
+      }
+      float cur = 0.0f;
+      for (int i = 0; i < n; ++i) {
+        float diff = this_scale * (float)Laux[i] + this_min - x[i];
+        cur += fabsf(x[i]) * fabsf(diff);
+      }
+      if (cur < best_err) {
+        memcpy(L, Laux, (size_t)n);
+        best_err = cur;
+        scale = this_scale;
+        min = this_min;
+      }
+    }
+  }
+  *the_min = -min;
+  return scale;
+}
+
+static void encode_q2_k(const float* x, uint8_t* dst, size_t n) {
+  uint8_t L[OC_QK_K], Laux[16];
+  float mins[OC_QK_K / 16], scales[OC_QK_K / 16];
+  for (size_t b = 0; b < n / OC_QK_K; ++b) {
+    const float* xb = x + b * OC_QK_K;
+    uint8_t* blk = dst + b * OC_BLK_Q2_K;
+    memset(blk, 0, OC_BLK_Q2_K);
+    float max_scale = 0.0f, max_min = 0.0f;
+    for (int j = 0; j < OC_QK_K / 16; ++j) {
+      scales[j] = make_qkx2(16, 3, xb + 16 * j, L + 16 * j, &mins[j], Laux,
+                            -0.5f, 0.1f, 15);
+      if (scales[j] > max_scale) max_scale = scales[j];
+      if (mins[j] > max_min) max_min = mins[j];
+    }
+    uint8_t* scb = blk;
+    if (max_scale > 0.0f) {
+      float iscale = 15.0f / max_scale;
+      for (int j = 0; j < OC_QK_K / 16; ++j) {
+        int l = gw_nearest_int(iscale * scales[j]);
+        if (l < 0) l = 0;
+        if (l > 15) l = 15;
+        scb[j] = (uint8_t)l;
+      }
+      wr16(blk + 80, oc_f32_to_f16(max_scale / 15.0f));
+    } else {
+      wr16(blk + 80, oc_f32_to_f16(0.0f));
+    }
+    if (max_min > 0.0f) {
+      float iscale = 15.0f / max_min;
+      for (int j = 0; j < OC_QK_K / 16; ++j) {
+        int l = gw_nearest_int(iscale * mins[j]);
+        if (l < 0) l = 0;
+        if (l > 15) l = 15;
+        scb[j] = (uint8_t)(scb[j] | (l << 4));
+      }
+      wr16(blk + 82, oc_f32_to_f16(max_min / 15.0f));
+    } else {
+      wr16(blk + 82, oc_f32_to_f16(0.0f));
+    }
+    float d0 = oc_f16_to_f32((uint16_t)(blk[80] | (blk[81] << 8)));
+    float m0 = oc_f16_to_f32((uint16_t)(blk[82] | (blk[83] << 8)));
+    for (int j = 0; j < OC_QK_K / 16; ++j) {
+      float d = d0 * (float)(scb[j] & 0xF);
+      if (d == 0.0f) continue;
+      float dm = m0 * (float)(scb[j] >> 4);
+      for (int ii = 0; ii < 16; ++ii) {
+        int l = gw_nearest_int((xb[16 * j + ii] + dm) / d);
+        if (l < 0) l = 0;
+        if (l > 3) l = 3;
+        L[16 * j + ii] = (uint8_t)l;
+      }
+    }
+    uint8_t* qs = blk + 16;
+    for (int j = 0; j < OC_QK_K; j += 128) {
+      for (int l = 0; l < 32; ++l)
+        qs[j / 4 + l] = (uint8_t)(L[j + l] | (L[j + l + 32] << 2) |
+                                  (L[j + l + 64] << 4) | (L[j + l + 96] << 6));
+    }
+  }
+}
+
+static void encode_q3_k(const float* x, uint8_t* dst, size_t n) {
+  int8_t L[OC_QK_K];
+  float scales[OC_QK_K / 16];
+  for (size_t b = 0; b < n / OC_QK_K; ++b) {
+    const float* xb = x + b * OC_QK_K;
+    uint8_t* blk = dst + b * OC_BLK_Q3_K;
+    memset(blk, 0, OC_BLK_Q3_K);
+    float max_scale = 0.0f, amax = 0.0f;
+    for (int j = 0; j < OC_QK_K / 16; ++j) {
+      scales[j] = make_qx(16, 4, xb + 16 * j, L + 16 * j);
+      float a = fabsf(scales[j]);
+      if (a > amax) {
+        amax = a;
+        max_scale = scales[j];
+      }
+    }
+    uint8_t* scb = blk + 96;
+    if (max_scale != 0.0f) {
+      float iscale = -32.0f / max_scale;
+      for (int j = 0; j < OC_QK_K / 16; ++j) {
+        int l = gw_nearest_int(iscale * scales[j]);
+        if (l < -32) l = -32;
+        if (l > 31) l = 31;
+        l += 32;
+        if (j < 8)
+          scb[j] = (uint8_t)(l & 0xF);
+        else
+          scb[j - 8] = (uint8_t)(scb[j - 8] | ((l & 0xF) << 4));
+        scb[j % 4 + 8] =
+            (uint8_t)(scb[j % 4 + 8] | ((l >> 4) << (2 * (j / 4))));
+      }
+      wr16(blk + 108, oc_f32_to_f16(1.0f / iscale));
+    } else {
+      wr16(blk + 108, oc_f32_to_f16(0.0f));
+    }
+    float d0 = oc_f16_to_f32((uint16_t)(blk[108] | (blk[109] << 8)));
+    for (int j = 0; j < OC_QK_K / 16; ++j) {
+      int sc = j < 8 ? scb[j] & 0xF : scb[j - 8] >> 4;
+      sc = (sc | (((scb[8 + j % 4] >> (2 * (j / 4))) & 3) << 4)) - 32;
+      float d = d0 * (float)sc;
+      if (d == 0.0f) continue;
+      for (int ii = 0; ii < 16; ++ii) {
+        int l = gw_nearest_int(xb[16 * j + ii] / d);
+        if (l < -4) l = -4;
+        if (l > 3) l = 3;
+        L[16 * j + ii] = (int8_t)(l + 4);
+      }
+    }
+    uint8_t* hm = blk;
+    int m = 0;
+    uint8_t bit = 1;
+    for (int j = 0; j < OC_QK_K; ++j) {
+      if (L[j] > 3) {
+        hm[m] |= bit;
+        L[j] = (int8_t)(L[j] - 4);
+      }
+      if (++m == OC_QK_K / 8) {
+        m = 0;
+        bit = (uint8_t)(bit << 1);
+      }
+    }
+    uint8_t* qs = blk + 32;
+    for (int j = 0; j < OC_QK_K; j += 128) {
+      for (int l = 0; l < 32; ++l)
+        qs[j / 4 + l] = (uint8_t)((uint8_t)L[j + l] | ((uint8_t)L[j + l + 32] << 2) |
+                                  ((uint8_t)L[j + l + 64] << 4) |
+                                  ((uint8_t)L[j + l + 96] << 6));
+    }
+  }
+}
+
 static void encode_q6_k(const float* x, uint8_t* dst, size_t n) {
   int8_t L[OC_QK_K];
   float scales[OC_QK_K / 16];
@@ -492,6 +692,14 @@ int gw_encode_row(uint32_t type, const float* x, uint8_t* dst, size_t n) {
     case OC_Q4_0:
       if (n % 32) return -1;
       oc_quantize_row_q4_0(x, dst, n);
+      return 0;
+    case OC_Q2_K:
+      if (n % OC_QK_K) return -1;
+      encode_q2_k(x, dst, n);
+      return 0;
+    case OC_Q3_K:
+      if (n % OC_QK_K) return -1;
+      encode_q3_k(x, dst, n);
       return 0;
     case OC_Q4_K:
       if (n % OC_QK_K) return -1;

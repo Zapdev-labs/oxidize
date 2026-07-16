@@ -36,7 +36,7 @@ int gw_close(GwWriter* w);
  * gguf.c does not bounds-check declared tensor sizes against the file length. */
 int gw_data_ok(const GgufFile* f, const GgufTensorInfo* t, uint64_t bytes);
 
-/* Encodable targets: F32, F16, Q8_0, Q4_0, Q4_K, Q5_K, Q6_K, AL5_XS.
+/* Encodable targets: F32, F16, Q8_0, Q4_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, AL5_XS.
  * K-quants need n % 256 == 0. UINT32_MAX if the name is unknown. */
 uint32_t gw_type_id(const char* name);
 int gw_encodable(uint32_t type);
