@@ -180,21 +180,26 @@ uint32_t gw_type_id(const char* name) {
   if (!strcmp(name, "F16")) return OC_F16;
   if (!strcmp(name, "Q8_0")) return OC_Q8_0;
   if (!strcmp(name, "Q4_0")) return OC_Q4_0;
+  if (!strcmp(name, "Q4_1")) return OC_Q4_1;
+  if (!strcmp(name, "Q5_0")) return OC_Q5_0;
+  if (!strcmp(name, "Q5_1")) return OC_Q5_1;
   if (!strcmp(name, "Q2_K")) return OC_Q2_K;
   if (!strcmp(name, "Q3_K")) return OC_Q3_K;
   if (!strcmp(name, "Q4_K")) return OC_Q4_K;
   if (!strcmp(name, "Q5_K")) return OC_Q5_K;
   if (!strcmp(name, "Q6_K")) return OC_Q6_K;
   if (!strcmp(name, "IQ4_XS")) return OC_IQ4_XS;
+  if (!strcmp(name, "BF16")) return OC_BF16;
   if (!strcmp(name, "AL5_XS")) return OC_AL5_XS;
   return UINT32_MAX;
 }
 
 int gw_encodable(uint32_t type) {
-  return type == OC_F32 || type == OC_F16 || type == OC_Q8_0 ||
-         type == OC_Q4_0 || type == OC_Q2_K || type == OC_Q3_K ||
-         type == OC_Q4_K || type == OC_Q5_K || type == OC_Q6_K ||
-         type == OC_IQ4_XS || type == OC_AL5_XS;
+  return type == OC_F32 || type == OC_F16 || type == OC_BF16 ||
+         type == OC_Q8_0 || type == OC_Q4_0 || type == OC_Q4_1 ||
+         type == OC_Q5_0 || type == OC_Q5_1 || type == OC_Q2_K ||
+         type == OC_Q3_K || type == OC_Q4_K || type == OC_Q5_K ||
+         type == OC_Q6_K || type == OC_IQ4_XS || type == OC_AL5_XS;
 }
 
 static int gw_nearest_int(float fval) {
@@ -758,6 +763,97 @@ static void encode_iq4_xs(const float* x, uint8_t* dst, size_t n) {
   }
 }
 
+static void encode_q4_1(const float* x, uint8_t* dst, size_t n) {
+  for (size_t b = 0; b < n / OC_QK; ++b) {
+    const float* v = x + b * OC_QK;
+    uint8_t* o = dst + b * OC_BLK_Q4_1;
+    float min = v[0], max = v[0];
+    for (int j = 1; j < OC_QK; ++j) {
+      if (v[j] < min) min = v[j];
+      if (v[j] > max) max = v[j];
+    }
+    float d = (max - min) / 15.0f;
+    float id = d > 0.0f ? 1.0f / d : 0.0f;
+    wr16(o, oc_f32_to_f16(d));
+    wr16(o + 2, oc_f32_to_f16(min));
+    for (int j = 0; j < 16; ++j) {
+      int xi0 = (int)((v[j] - min) * id + 0.5f);
+      int xi1 = (int)((v[j + 16] - min) * id + 0.5f);
+      if (xi0 < 0) xi0 = 0;
+      if (xi0 > 15) xi0 = 15;
+      if (xi1 < 0) xi1 = 0;
+      if (xi1 > 15) xi1 = 15;
+      o[4 + j] = (uint8_t)(xi0 | (xi1 << 4));
+    }
+  }
+}
+
+static void encode_q5_0(const float* x, uint8_t* dst, size_t n) {
+  for (size_t b = 0; b < n / OC_QK; ++b) {
+    const float* v = x + b * OC_QK;
+    uint8_t* o = dst + b * OC_BLK_Q5_0;
+    float amax = 0.0f, maxv = 0.0f;
+    for (int j = 0; j < OC_QK; ++j) {
+      float ax = fabsf(v[j]);
+      if (ax > amax) {
+        amax = ax;
+        maxv = v[j];
+      }
+    }
+    float d = maxv / -16.0f;
+    float id = d != 0.0f ? 1.0f / d : 0.0f;
+    wr16(o, oc_f32_to_f16(d));
+    uint32_t qh = 0;
+    for (int j = 0; j < 16; ++j) {
+      int xi0 = (int)(v[j] * id + 16.5f);
+      int xi1 = (int)(v[j + 16] * id + 16.5f);
+      if (xi0 < 0) xi0 = 0;
+      if (xi0 > 31) xi0 = 31;
+      if (xi1 < 0) xi1 = 0;
+      if (xi1 > 31) xi1 = 31;
+      o[6 + j] = (uint8_t)((xi0 & 0xF) | ((xi1 & 0xF) << 4));
+      qh |= (uint32_t)((xi0 & 0x10) >> 4) << (uint32_t)j;
+      qh |= (uint32_t)((xi1 & 0x10) >> 4) << (uint32_t)(j + 16);
+    }
+    o[2] = (uint8_t)(qh & 0xff);
+    o[3] = (uint8_t)((qh >> 8) & 0xff);
+    o[4] = (uint8_t)((qh >> 16) & 0xff);
+    o[5] = (uint8_t)((qh >> 24) & 0xff);
+  }
+}
+
+static void encode_q5_1(const float* x, uint8_t* dst, size_t n) {
+  for (size_t b = 0; b < n / OC_QK; ++b) {
+    const float* v = x + b * OC_QK;
+    uint8_t* o = dst + b * OC_BLK_Q5_1;
+    float min = v[0], max = v[0];
+    for (int j = 1; j < OC_QK; ++j) {
+      if (v[j] < min) min = v[j];
+      if (v[j] > max) max = v[j];
+    }
+    float d = (max - min) / 31.0f;
+    float id = d > 0.0f ? 1.0f / d : 0.0f;
+    wr16(o, oc_f32_to_f16(d));
+    wr16(o + 2, oc_f32_to_f16(min));
+    uint32_t qh = 0;
+    for (int j = 0; j < 16; ++j) {
+      int xi0 = (int)((v[j] - min) * id + 0.5f);
+      int xi1 = (int)((v[j + 16] - min) * id + 0.5f);
+      if (xi0 < 0) xi0 = 0;
+      if (xi0 > 31) xi0 = 31;
+      if (xi1 < 0) xi1 = 0;
+      if (xi1 > 31) xi1 = 31;
+      o[8 + j] = (uint8_t)((xi0 & 0xF) | ((xi1 & 0xF) << 4));
+      qh |= (uint32_t)((xi0 & 0x10) >> 4) << (uint32_t)j;
+      qh |= (uint32_t)((xi1 & 0x10) >> 4) << (uint32_t)(j + 16);
+    }
+    o[4] = (uint8_t)(qh & 0xff);
+    o[5] = (uint8_t)((qh >> 8) & 0xff);
+    o[6] = (uint8_t)((qh >> 16) & 0xff);
+    o[7] = (uint8_t)((qh >> 24) & 0xff);
+  }
+}
+
 static void encode_q8_0(const float* x, uint8_t* dst, size_t n) {
   for (size_t b = 0; b < n / 32; ++b) {
     const float* v = x + b * 32;
@@ -789,6 +885,15 @@ int gw_encode_row(uint32_t type, const float* x, uint8_t* dst, size_t n) {
         dst[2 * i + 1] = (uint8_t)(h >> 8);
       }
       return 0;
+    case OC_BF16:
+      for (size_t i = 0; i < n; ++i) {
+        uint32_t u;
+        memcpy(&u, &x[i], 4);
+        uint16_t h = (uint16_t)(u >> 16);
+        dst[2 * i] = (uint8_t)(h & 0xff);
+        dst[2 * i + 1] = (uint8_t)(h >> 8);
+      }
+      return 0;
     case OC_Q8_0:
       if (n % 32) return -1;
       encode_q8_0(x, dst, n);
@@ -796,6 +901,18 @@ int gw_encode_row(uint32_t type, const float* x, uint8_t* dst, size_t n) {
     case OC_Q4_0:
       if (n % 32) return -1;
       oc_quantize_row_q4_0(x, dst, n);
+      return 0;
+    case OC_Q4_1:
+      if (n % OC_QK) return -1;
+      encode_q4_1(x, dst, n);
+      return 0;
+    case OC_Q5_0:
+      if (n % OC_QK) return -1;
+      encode_q5_0(x, dst, n);
+      return 0;
+    case OC_Q5_1:
+      if (n % OC_QK) return -1;
+      encode_q5_1(x, dst, n);
       return 0;
     case OC_Q2_K:
       if (n % OC_QK_K) return -1;
