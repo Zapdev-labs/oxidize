@@ -46,4 +46,17 @@ int model_load(Model* m, GgufFile* g, size_t max_ctx, bool kv_quant, char* err,
                size_t errlen);
 void model_free(Model* m);
 
+/* Per-session KV cache. Scratch (x/q/k/...) stays on the model; only the layer
+ * K/V (and family-specific recurrent) buffers move. model_kv_new returns NULL
+ * for OOM — the session then shares the model's primary KV.
+ * install points the live layer caches at kv and loads kv_len; release writes
+ * the model's kv_len back and restores the primary layer pointers.
+ * model_kv_clear zeros the session buffers and sets kv_len=0 (chat edit/reuse). */
+typedef struct ModelKv ModelKv;
+ModelKv* model_kv_new(const Model* m);
+void model_kv_free(ModelKv* kv);
+void model_kv_clear(ModelKv* kv);
+void model_kv_install(Model* m, ModelKv* kv);
+void model_kv_release(Model* m, ModelKv* kv);
+
 #endif

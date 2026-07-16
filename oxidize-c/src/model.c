@@ -165,3 +165,92 @@ void model_free(Model* m) {
   free(m->handle);
   memset(m, 0, sizeof(*m));
 }
+
+struct ModelKv {
+  ModelFamily family;
+  union {
+    LlamaKv* llama;
+    Gemma4Kv* gemma4;
+    Qwen36Kv* qwen36;
+    DeepseekKv* deepseek;
+  } u;
+};
+
+ModelKv* model_kv_new(const Model* m) {
+  if (!m || !m->handle) return NULL;
+  ModelKv* kv = calloc(1, sizeof(*kv));
+  if (!kv) return NULL;
+  kv->family = m->family;
+  switch (m->family) {
+    case MODEL_LLAMA:
+      kv->u.llama = llama_kv_new((const LlamaModel*)m->handle);
+      if (!kv->u.llama) {
+        free(kv);
+        return NULL;
+      }
+      return kv;
+    case MODEL_GEMMA4:
+      kv->u.gemma4 = gemma4_kv_new((const Gemma4Model*)m->handle);
+      if (!kv->u.gemma4) {
+        free(kv);
+        return NULL;
+      }
+      return kv;
+    case MODEL_QWEN36:
+      kv->u.qwen36 = qwen36_kv_new((const Qwen36Model*)m->handle);
+      if (!kv->u.qwen36) {
+        free(kv);
+        return NULL;
+      }
+      return kv;
+    case MODEL_DEEPSEEK:
+      kv->u.deepseek = deepseek_kv_new((const DeepseekModel*)m->handle);
+      if (!kv->u.deepseek) {
+        free(kv);
+        return NULL;
+      }
+      return kv;
+  }
+  return NULL; /* unreachable */
+}
+
+void model_kv_free(ModelKv* kv) {
+  if (!kv) return;
+  switch (kv->family) {
+    case MODEL_LLAMA: llama_kv_free(kv->u.llama); break;
+    case MODEL_GEMMA4: gemma4_kv_free(kv->u.gemma4); break;
+    case MODEL_QWEN36: qwen36_kv_free(kv->u.qwen36); break;
+    case MODEL_DEEPSEEK: deepseek_kv_free(kv->u.deepseek); break;
+  }
+  free(kv);
+}
+
+void model_kv_clear(ModelKv* kv) {
+  if (!kv) return;
+  switch (kv->family) {
+    case MODEL_LLAMA: llama_kv_clear(kv->u.llama); break;
+    case MODEL_GEMMA4: gemma4_kv_clear(kv->u.gemma4); break;
+    case MODEL_QWEN36: qwen36_kv_clear(kv->u.qwen36); break;
+    case MODEL_DEEPSEEK: deepseek_kv_clear(kv->u.deepseek); break;
+  }
+}
+
+void model_kv_install(Model* m, ModelKv* kv) {
+  if (!m || !kv || !m->handle) return;
+  switch (kv->family) {
+    case MODEL_LLAMA: llama_kv_install((LlamaModel*)m->handle, kv->u.llama); break;
+    case MODEL_GEMMA4: gemma4_kv_install((Gemma4Model*)m->handle, kv->u.gemma4); break;
+    case MODEL_QWEN36: qwen36_kv_install((Qwen36Model*)m->handle, kv->u.qwen36); break;
+    case MODEL_DEEPSEEK: deepseek_kv_install((DeepseekModel*)m->handle, kv->u.deepseek); break;
+  }
+}
+
+void model_kv_release(Model* m, ModelKv* kv) {
+  if (!m || !kv || !m->handle) return;
+  switch (kv->family) {
+    case MODEL_LLAMA: llama_kv_release((LlamaModel*)m->handle, kv->u.llama); break;
+    case MODEL_GEMMA4: gemma4_kv_release((Gemma4Model*)m->handle, kv->u.gemma4); break;
+    case MODEL_QWEN36: qwen36_kv_release((Qwen36Model*)m->handle, kv->u.qwen36); break;
+    case MODEL_DEEPSEEK: deepseek_kv_release((DeepseekModel*)m->handle, kv->u.deepseek); break;
+  }
+}
