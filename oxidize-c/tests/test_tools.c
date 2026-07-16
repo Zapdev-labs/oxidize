@@ -151,6 +151,7 @@ static void test_tool_quantize(const char* in) {
       {"Q6_K", OC_Q6_K, 0.10f},
       {"IQ4_XS", OC_IQ4_XS, 0.30f},
       {"IQ2_XXS", OC_IQ2_XXS, 0.90f},
+      {"IQ3_XXS", OC_IQ3_XXS, 1.05f},
       {"AL5_XS", OC_AL5_XS, 0.30f},
   };
   for (size_t k = 0; k < sizeof targets / sizeof *targets; ++k) {
@@ -194,7 +195,7 @@ static void test_tool_quantize(const char* in) {
   CHECK(tool_quantize(in, out, "IQ1_S", 0) != 0);
   unlink(out);
   printf("ok tools quantize (F32/F16/BF16/Q8_0/Q4_0/Q4_1/Q5_0/Q5_1/Q2_K/Q3_K/"
-         "Q4_K/Q5_K/Q6_K/IQ4_XS/IQ2_XXS/AL5_XS round-trip)\n");
+         "Q4_K/Q5_K/Q6_K/IQ4_XS/IQ2_XXS/IQ3_XXS/AL5_XS round-trip)\n");
 }
 
 /* ---- prune ----------------------------------------------------------------- */
