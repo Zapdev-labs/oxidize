@@ -15,6 +15,7 @@
 #include "tensor.h"
 #include "tokenizer.h"
 #include "vision.h" /* --image: CLIP/SigLIP mmproj encoder */
+#include "distributed.h" /* --shard/--peer: pipeline parallelism over TCP */
 
 #define RECENT_CAP 64 /* repeat-penalty window */
 
@@ -35,6 +36,9 @@ static void usage(const char* argv0) {
           "          [--kv-quant | --no-kv-quant]  alias for --kv-type q4|f32\n"
           "          [--spec] [--draft-tokens N]  speculative decode via the\n"
           "              qwen36 MTP head (greedy only; default N=4)\n"
+          "          [--shard RANK/NRANKS --peer host:port ...]  pipeline the\n"
+          "              model across NRANKS processes over TCP; --peer names\n"
+          "              rank 1..NRANKS-1 listeners (llama/gemma4 only)\n"
           "          --mmproj vision.gguf --image raw.f32  encode an image with a\n"
           "              CLIP/SigLIP mmproj tower; --image is a raw f32 CHW file of\n"
           "              3*S*S values (S = clip.vision.image_size), pre-normalized\n",
@@ -210,6 +214,11 @@ typedef struct {
   int spec;
   size_t draft_tokens;
   size_t spec_steps, spec_accept; /* per-generate stats, filled by decode_spec */
+  /* Pipeline parallelism (rank 0 / head only). When pipe is non-NULL, prefill
+   * and decode route each token through the ranks instead of gs->forward, and
+   * the logits land in pipe_logits (vocab floats, head-owned). */
+  OcPipe* pipe;
+  float* pipe_logits;
 } GenState;
 
 static void push_recent(GenState* gs, int32_t id) {
@@ -274,6 +283,17 @@ static int decode_spec(GenState* gs, int32_t seed, int max_tokens, char* buf,
   return produced;
 }
 
+/* One forward step through the pipeline: run the head's slice, push the hidden
+ * state up the ranks, get the logits back. Returns gs->pipe_logits or NULL. */
+static float* pipe_forward(GenState* gs, int32_t token, size_t pos) {
+  char err[256];
+  if (oc_pipe_head_step(gs->pipe, token, pos, gs->pipe_logits, err, sizeof err) != 0) {
+    fprintf(stderr, "\nerror: pipeline forward: %s\n", err);
+    return NULL;
+  }
+  return gs->pipe_logits;
+}
+
 /* Prefill ids then decode up to max_tokens, streaming to stdout.
  * Returns generated count, or -1 on error. */
 static int generate(GenState* gs, const int32_t* ids, size_t n_ids,
@@ -287,9 +307,22 @@ static int generate(GenState* gs, const int32_t* ids, size_t n_ids,
    * made a prompt cost exactly as much as generating it: every weight was read
    * from DRAM once per prompt token instead of once per batch. */
   double t0 = now_sec();
-  float* logits = gs->forward_batch(gs->model, ids, n_ids, gs->pos, true);
-  for (size_t i = 0; i < n_ids; ++i) push_recent(gs, ids[i]);
-  gs->pos += n_ids;
+  float* logits;
+  if (gs->pipe) {
+    /* No batched hook crosses the ranks, so prefill one token at a time (this
+     * is capacity, not speed — the ranks serialize per token regardless). */
+    logits = NULL;
+    for (size_t i = 0; i < n_ids; ++i) {
+      logits = pipe_forward(gs, ids[i], gs->pos);
+      if (!logits) return -1;
+      push_recent(gs, ids[i]);
+      gs->pos++;
+    }
+  } else {
+    logits = gs->forward_batch(gs->model, ids, n_ids, gs->pos, true);
+    for (size_t i = 0; i < n_ids; ++i) push_recent(gs, ids[i]);
+    gs->pos += n_ids;
+  }
   *prefill_s = now_sec() - t0;
   if (!logits) { fprintf(stderr, "error: forward failed\n"); return -1; }
 
@@ -309,7 +342,8 @@ static int generate(GenState* gs, const int32_t* ids, size_t n_ids,
     fwrite(buf, 1, w, stdout);
     fflush(stdout);
     push_recent(gs, next);
-    logits = gs->forward(gs->model, next, gs->pos++, true);
+    logits = gs->pipe ? pipe_forward(gs, next, gs->pos++)
+                      : gs->forward(gs->model, next, gs->pos++, true);
     if (!logits) break;
   }
   *decode_s = now_sec() - t1;

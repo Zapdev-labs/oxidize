@@ -484,6 +484,8 @@ int main(int argc, char** argv) {
   test_tokenizer_bpe();
   test_tools();
   test_vision();
+  test_train();
+  test_distributed();
   oc_pool_free();
   printf("all tests passed\n");
   return 0;
