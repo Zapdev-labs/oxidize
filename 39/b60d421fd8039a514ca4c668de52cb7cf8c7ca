@@ -1,0 +1,23 @@
+oxidize-c/Makefile
+  s_1485afe700cb15::t_f93045b78bf02d 56
+  s_1485afe700cb15::t_bd0fa49b3a990f 159
+  s_1485afe700cb15::t_f5168e99186012 142-148,154,160
+oxidize-c/tests/test_distributed.c
+  s_1485afe700cb15::t_a346a78ff4ea51 1-192
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "39b60d421fd8039a514ca4c668de52cb7cf8c7ca",
+  "prompts": {},
+  "sessions": {
+    "s_1485afe700cb15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f08997b4-ac01-46a6-ab7a-a6ac459a0d39",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
