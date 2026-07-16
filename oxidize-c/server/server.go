@@ -1,9 +1,9 @@
 // OpenAI-compatible HTTP layer over a Generator (implemented by *Model). Kept
 // stdlib-only (net/http + encoding/json). Endpoints: GET /healthz, GET
 // /v1/models, POST /v1/chat/completions, POST /v1/completions — each streaming
-// (SSE) or not. Concurrency: Generator.Generate serializes compute scratch on
-// the shared model; each C session has its own KV, so multi-turn conversations
-// can interleave without cache corruption (requests still queue on genMu).
+// (SSE) or not. Optional `conversation` on chat requests reuses a per-id
+// OxSession KV when the generator is a *Model. Concurrency: Generate still
+// serializes compute scratch on the shared model.
 package main
 
 import (
@@ -16,6 +16,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -27,10 +28,27 @@ type Generator interface {
 	Meta() Metadata
 }
 
-// Server wires the endpoints to a Generator.
-type Server struct{ gen Generator }
+// Server wires the endpoints to a Generator. When gen is a *Model, chat
+// requests may pass `conversation` to keep KV across turns.
+type Server struct {
+	gen      Generator
+	model    *Model
+	sessMu   sync.Mutex
+	sessions map[string]*convSession
+}
 
-func NewServer(gen Generator) *Server { return &Server{gen: gen} }
+type convSession struct {
+	s     *Session
+	turns int
+}
+
+func NewServer(gen Generator) *Server {
+	s := &Server{gen: gen, sessions: make(map[string]*convSession)}
+	if m, ok := gen.(*Model); ok {
+		s.model = m
+	}
+	return s
+}
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -38,6 +56,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/models", s.models)
 	mux.HandleFunc("POST /v1/chat/completions", s.chatCompletions)
 	mux.HandleFunc("POST /v1/completions", s.completions)
+	mux.HandleFunc("DELETE /v1/conversations/{id}", s.deleteConversation)
 	return mux
 }
 
@@ -88,9 +107,20 @@ type sampleFields struct {
 }
 
 type chatRequest struct {
-	Model    string        `json:"model"`
-	Messages []chatMessage `json:"messages"`
+	Model        string        `json:"model"`
+	Messages     []chatMessage `json:"messages"`
+	Conversation string        `json:"conversation"`
+	// ConversationID is an alias for Conversation (OpenAI-style naming).
+	ConversationID string `json:"conversation_id"`
+	Reset          bool   `json:"conversation_reset"`
 	sampleFields
+}
+
+func (r chatRequest) conversationKey() string {
+	if r.Conversation != "" {
+		return r.Conversation
+	}
+	return r.ConversationID
 }
 
 type completionRequest struct {
@@ -162,22 +192,28 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "messages: at least one message required")
 		return
 	}
-	prompt := flattenMessages(req.Messages)
+	conv := req.conversationKey()
 	p := req.params()
 	id := newID("chatcmpl-")
 	model := s.gen.ID()
 
+	genFn, prompt, err := s.resolveChatGen(conv, req.Reset, req.Messages)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
 	if req.Stream {
-		s.stream(w, r, id, model, "chat.completion.chunk", p, prompt, req.Stop, true)
+		s.stream(w, r, id, model, "chat.completion.chunk", p, prompt, req.Stop, true, genFn, conv)
 		return
 	}
 	var sb strings.Builder
-	finish, nTok, err := runGen(r.Context(), s.gen, prompt, p, req.Stop, func(b []byte) { sb.Write(b) })
+	finish, nTok, err := runGen(r.Context(), genFn, prompt, p, req.Stop, func(b []byte) { sb.Write(b) })
 	if err != nil && nTok == 0 {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	out := map[string]any{
 		"id": id, "object": "chat.completion", "created": time.Now().Unix(), "model": model,
 		"choices": []map[string]any{{
 			"index":         0,
@@ -185,7 +221,11 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			"finish_reason": finish,
 		}},
 		"usage": usage{CompletionTokens: nTok, TotalTokens: nTok},
-	})
+	}
+	if conv != "" {
+		out["conversation"] = conv
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) completions(w http.ResponseWriter, r *http.Request) {
@@ -202,13 +242,14 @@ func (s *Server) completions(w http.ResponseWriter, r *http.Request) {
 	p := req.params()
 	id := newID("cmpl-")
 	model := s.gen.ID()
+	genFn := s.gen.Generate
 
 	if req.Stream {
-		s.stream(w, r, id, model, "text_completion", p, prompt, req.Stop, false)
+		s.stream(w, r, id, model, "text_completion", p, prompt, req.Stop, false, genFn, "")
 		return
 	}
 	var sb strings.Builder
-	finish, nTok, err := runGen(r.Context(), s.gen, prompt, p, req.Stop, func(b []byte) { sb.Write(b) })
+	finish, nTok, err := runGen(r.Context(), genFn, prompt, p, req.Stop, func(b []byte) { sb.Write(b) })
 	if err != nil && nTok == 0 {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -220,9 +261,61 @@ func (s *Server) completions(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) deleteConversation(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeErr(w, http.StatusBadRequest, "conversation id required")
+		return
+	}
+	s.sessMu.Lock()
+	cs, ok := s.sessions[id]
+	if ok {
+		delete(s.sessions, id)
+	}
+	s.sessMu.Unlock()
+	if ok && cs != nil {
+		cs.s.Close()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"id": id, "deleted": true})
+}
+
+// resolveChatGen picks ephemeral Generate vs a sticky Session for conversation.
+func (s *Server) resolveChatGen(conv string, reset bool, msgs []chatMessage) (
+	func(string, SampleParams, func([]byte) bool) error, string, error) {
+	if conv == "" || s.model == nil {
+		return s.gen.Generate, flattenMessages(msgs), nil
+	}
+	s.sessMu.Lock()
+	cs, ok := s.sessions[conv]
+	if !ok {
+		sess, err := s.model.NewSession()
+		if err != nil {
+			s.sessMu.Unlock()
+			return nil, "", err
+		}
+		cs = &convSession{s: sess}
+		s.sessions[conv] = cs
+	}
+	if reset {
+		cs.s.Reset()
+		cs.turns = 0
+	}
+	turns := cs.turns
+	sess := cs.s
+	cs.turns++
+	s.sessMu.Unlock()
+
+	prompt := flattenMessages(msgs)
+	if turns > 0 {
+		prompt = lastUserContent(msgs)
+	}
+	return sess.Generate, prompt, nil
+}
+
 // stream serves an SSE response for either chat (chatMode) or completions.
 func (s *Server) stream(w http.ResponseWriter, r *http.Request, id, model, object string,
-	p SampleParams, prompt string, stop flexString, chatMode bool) {
+	p SampleParams, prompt string, stop flexString, chatMode bool,
+	genFn func(string, SampleParams, func([]byte) bool) error, conv string) {
 	fl, ok := w.(http.Flusher)
 	if !ok {
 		writeErr(w, http.StatusInternalServerError, "streaming unsupported by this server")
@@ -244,16 +337,20 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, id, model, objec
 		} else {
 			choice["text"] = "" // text_completion requires a string; the terminal chunk's delta is empty (never JSON null)
 		}
-		writeSSE(w, fl, map[string]any{
+		payload := map[string]any{
 			"id": id, "object": object, "created": created, "model": model,
 			"choices": []map[string]any{choice},
-		})
+		}
+		if conv != "" {
+			payload["conversation"] = conv
+		}
+		writeSSE(w, fl, payload)
 	}
 
 	if chatMode {
 		chunk(map[string]any{"role": "assistant"}, nil) // first chunk announces the role
 	}
-	finish, _, _ := runGen(r.Context(), s.gen, prompt, p, stop, func(b []byte) {
+	finish, _, _ := runGen(r.Context(), genFn, prompt, p, stop, func(b []byte) {
 		chunk(map[string]any{"content": string(b)}, nil)
 	})
 	chunk(map[string]any{}, finish)
@@ -266,11 +363,11 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, id, model, objec
 // runGen drives one generation, funnelling model output through an outputFilter
 // (stop-sequence + UTF-8 boundary handling) into onEmit. It returns the OpenAI
 // finish_reason and the number of tokens produced.
-func runGen(ctx context.Context, gen Generator, prompt string, p SampleParams,
-	stops flexString, onEmit func([]byte)) (finish string, nTok int, err error) {
+func runGen(ctx context.Context, genFn func(string, SampleParams, func([]byte) bool) error,
+	prompt string, p SampleParams, stops flexString, onEmit func([]byte)) (finish string, nTok int, err error) {
 	f := &outputFilter{stops: stops, maxLen: maxStopLen(stops)}
 	stopHit := false
-	err = gen.Generate(prompt, p, func(piece []byte) bool {
+	err = genFn(prompt, p, func(piece []byte) bool {
 		if ctx != nil && ctx.Err() != nil {
 			return true // client hung up
 		}
@@ -303,9 +400,8 @@ func runGen(ctx context.Context, gen Generator, prompt string, p SampleParams,
 
 // flattenMessages renders OpenAI messages[] into a single prompt string. The C
 // runtime then wraps the whole thing in the model's user-turn template.
-// ponytail: single-turn faithful; multi-turn history is best-effort plain text,
-// because the ABI templates one turn and cannot inject prior assistant text into
-// the KV cache. Add a raw multi-turn path to the C ABI if that ceiling matters.
+// First turn of a sticky conversation uses the full flatten; later turns use
+// lastUserContent so prior KV context is not re-prompted.
 func flattenMessages(msgs []chatMessage) string {
 	var b strings.Builder
 	for _, m := range msgs {
@@ -326,6 +422,17 @@ func flattenMessages(msgs []chatMessage) string {
 		}
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+func lastUserContent(msgs []chatMessage) string {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == "user" || msgs[i].Role == "tool" || msgs[i].Role == "" {
+			if c := strings.TrimSpace(msgs[i].Content); c != "" {
+				return c
+			}
+		}
+	}
+	return flattenMessages(msgs)
 }
 
 // ---- output filter: stop sequences + UTF-8 stream safety --------------------

@@ -105,6 +105,38 @@ func TestChatNonStreaming(t *testing.T) {
 	}
 }
 
+func TestChatConversationEcho(t *testing.T) {
+	ts := srv(&stubGen{id: "m", pieces: words("ok")})
+	defer ts.Close()
+	resp := post(t, ts, "/v1/chat/completions",
+		`{"model":"m","conversation":"c-1","messages":[{"role":"user","content":"hi"}]}`)
+	var out struct {
+		Conversation string `json:"conversation"`
+		Choices      []struct {
+			Message chatMessage `json:"message"`
+		} `json:"choices"`
+	}
+	decodeBody(t, resp, &out)
+	if out.Conversation != "c-1" {
+		t.Fatalf("conversation = %q", out.Conversation)
+	}
+	if len(out.Choices) != 1 || out.Choices[0].Message.Content != "ok" {
+		t.Fatalf("choices = %+v", out.Choices)
+	}
+	del, err := http.NewRequest(http.MethodDelete, ts.URL+"/v1/conversations/c-1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dresp, err := http.DefaultClient.Do(del)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dresp.Body.Close()
+	if dresp.StatusCode != 200 {
+		t.Fatalf("delete status = %d", dresp.StatusCode)
+	}
+}
+
 func TestChatStreamingSSE(t *testing.T) {
 	ts := srv(&stubGen{id: "m", pieces: words("Hello", " ", "world")})
 	defer ts.Close()
