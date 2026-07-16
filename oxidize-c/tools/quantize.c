@@ -1,11 +1,10 @@
 /* oxidize-c-quantize: GGUF -> GGUF re-quantization.
- *   --input in.gguf --output out.gguf [--target F32|F16|Q8_0|Q4_0|AL5_XS]
+ *   --input in.gguf --output out.gguf
+ *     [--target F32|F16|Q8_0|Q4_0|Q4_K|Q5_K|Q6_K|AL5_XS]
  * Source tensors are dequantized (any of the 22 readable types) and re-encoded.
- * Only 2-D tensors whose row length is a multiple of 32 are converted; 1-D
- * tensors (norms, rope_freqs) and anything else are copied verbatim, which is
- * the llama.cpp convention. Default target is AL5_XS, so the old `requant` CLI
- * still works — oxidize-c-requant is the same binary.
- * K-quant targets (Q4_K/Q6_K/...) are NOT implemented: dequant-only here.
+ * Only 2-D tensors whose row length is encodable for the target are converted;
+ * 1-D tensors (norms, rope_freqs) and anything else are copied verbatim.
+ * Default target is AL5_XS (oxidize-c-requant is the same binary).
  */
 #include <inttypes.h>
 #include <stdio.h>
@@ -24,8 +23,10 @@ static uint64_t n_rows(const GgufTensorInfo* t) {
 
 int tool_quantize(const char* in, const char* out, const char* target, int verbose) {
   uint32_t tt = gw_type_id(target);
-  if (tt == UINT32_MAX) {
-    fprintf(stderr, "quantize: unsupported target '%s' (F32 F16 Q8_0 Q4_0 AL5_XS)\n",
+  if (tt == UINT32_MAX || !gw_encodable(tt)) {
+    fprintf(stderr,
+            "quantize: unsupported target '%s' "
+            "(F32 F16 Q8_0 Q4_0 Q4_K Q5_K Q6_K AL5_XS)\n",
             target);
     return 1;
   }
@@ -49,9 +50,10 @@ int tool_quantize(const char* in, const char* out, const char* target, int verbo
   for (size_t i = 0; i < nt; ++i) {
     const GgufTensorInfo* t = &f.tensors[i];
     uint64_t rows = n_rows(t);
-    /* Convertible: 2-D, block-aligned rows, source readable, and not already
-     * the target type. */
-    conv[i] = t->n_dims == 2 && t->dims[0] % 32 == 0 && t->ggml_type != tt &&
+    /* Convertible: 2-D, target-encodable row length, source readable, and not
+     * already the target type. oc_row_bytes gates K-quant (cols % 256) etc. */
+    conv[i] = t->n_dims == 2 && t->ggml_type != tt &&
+              oc_row_bytes(tt, t->dims[0]) != 0 &&
               oc_row_bytes(t->ggml_type, t->dims[0]) != 0;
     uint32_t ot = conv[i] ? tt : t->ggml_type;
     size_t rb = oc_row_bytes(ot, t->dims[0]);
@@ -122,7 +124,7 @@ int main(int argc, char** argv) {
   if (!in || !out) {
     fprintf(stderr,
             "usage: oxidize-c-quantize --input in.gguf --output out.gguf "
-            "[--target F32|F16|Q8_0|Q4_0|AL5_XS]\n");
+            "[--target F32|F16|Q8_0|Q4_0|Q4_K|Q5_K|Q6_K|AL5_XS]\n");
     return 1;
   }
   int rc = tool_quantize(in, out, target, 1);
