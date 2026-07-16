@@ -1,0 +1,37 @@
+#version 450
+/* UNVERIFIED — never compiled or run. Blind port of k_argmax_stage1/2
+ * (src/cuda/gemma4_cuda.cu). Requires Vulkan SDK + GPU.
+ *
+ * Single-pass greedy argmax: one workgroup of 256 scans the whole float
+ * vector, reduces in shared memory, writes the winning index to out[0].
+ * Softcap is skipped for argmax (tanh is monotonic; argmax unchanged). */
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly  buffer VB { float v[]; } Vb;
+layout(std430, binding = 1) writeonly buffer OB { int o[]; } Ob;
+
+layout(push_constant) uniform PC { int n; } pc;
+
+shared float rmax[256];
+shared int ridx[256];
+
+void main() {
+  uint t = gl_LocalInvocationID.x;
+  float mx = -1.0 / 0.0;
+  int mi = 0;
+  for (int i = int(t); i < pc.n; i += 256) {
+    float v = Vb.v[i];
+    if (v > mx) { mx = v; mi = i; }
+  }
+  rmax[t] = mx;
+  ridx[t] = mi;
+  barrier();
+  for (uint o = 128u; o > 0u; o >>= 1u) {
+    if (t < o && rmax[t + o] > rmax[t]) {
+      rmax[t] = rmax[t + o];
+      ridx[t] = ridx[t + o];
+    }
+    barrier();
+  }
+  if (t == 0u) Ob.o[0] = ridx[0];
+}
