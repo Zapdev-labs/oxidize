@@ -1,8 +1,9 @@
 // OpenAI-compatible HTTP layer over a Generator (implemented by *Model). Kept
 // stdlib-only (net/http + encoding/json). Endpoints: GET /healthz, GET
 // /v1/models, POST /v1/chat/completions, POST /v1/completions — each streaming
-// (SSE) or not. Concurrency: Generator.Generate serializes on the shared model,
-// so overlapping requests queue rather than corrupt the KV cache.
+// (SSE) or not. Concurrency: Generator.Generate serializes compute scratch on
+// the shared model; each C session has its own KV, so multi-turn conversations
+// can interleave without cache corruption (requests still queue on genMu).
 package main
 
 import (

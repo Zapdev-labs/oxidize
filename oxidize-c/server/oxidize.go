@@ -1,8 +1,8 @@
 // cgo bindings to the oxidize-c stable C ABI (../src/oxidize.h). One OxModel is
-// loaded read-only and shared across requests; generation serializes on a mutex
-// because the C runtime's KV cache serves ONE forward pass at a time (documented
-// ABI constraint). The library is linked statically from ../liboxidize.a, so the
-// resulting binary has no runtime .so dependency (build it with `make lib` first).
+// loaded read-only and shared across requests. Each OxSession owns its KV cache;
+// Generate still serializes on genMu because forward scratch (x/q/k/...) is
+// model-wide. The library is linked statically from ../liboxidize.a (build with
+// `make lib` first).
 package main
 
 /*
@@ -52,9 +52,10 @@ type SampleParams struct {
 // serializes internally.
 type Model struct {
 	c *C.OxModel
-	// ponytail: one global gen lock == the request queue. The ABI shares a single
-	// KV cache across sessions, so generations must not overlap. Upgrade path:
-	// per-session KV cache in the C runtime, then drop this lock.
+	// ponytail: genMu serializes scratch/compute on the shared model. Per-session
+	// KV is owned in C now, so overlapping multi-turn conversations no longer
+	// corrupt caches; this lock remains so two Generate calls do not race on
+	// the model's forward scratch (x/q/k/...).
 	genMu sync.Mutex
 	id    string
 	meta  Metadata
@@ -111,49 +112,88 @@ func (m *Model) Close() {
 func (m *Model) ID() string     { return m.id }
 func (m *Model) Meta() Metadata { return m.meta }
 
-// Generate runs one completion for prompt. The C runtime wraps prompt in the
-// model's chat template. sink receives decoded UTF-8 fragments; returning true
-// stops generation early. Serialized against other Generate calls on this model.
-func (m *Model) Generate(prompt string, p SampleParams, sink func([]byte) bool) error {
-	m.genMu.Lock()
-	defer m.genMu.Unlock()
+// Session is one multi-turn conversation with its own KV cache. Create with
+// Model.NewSession; free with Close. Generate on a Session is serialized with
+// other Generates on the same Model (shared scratch), but KV is not shared.
+type Session struct {
+	m *Model
+	c *C.OxSession
+}
 
+// NewSession allocates a conversation against m. Caller must Close it.
+func (m *Model) NewSession() (*Session, error) {
+	if m == nil || m.c == nil {
+		return nil, fmt.Errorf("ox_session_new: model is closed")
+	}
 	s := C.ox_session_new(m.c)
 	if s == nil {
-		return fmt.Errorf("ox_session_new: out of memory")
+		return nil, fmt.Errorf("ox_session_new: out of memory")
 	}
-	defer C.ox_session_free(s)
+	return &Session{m: m, c: s}, nil
+}
 
-	C.ox_session_set_temperature(s, C.float(p.Temperature))
-	C.ox_session_set_top_p(s, C.float(p.TopP))
-	C.ox_session_set_top_k(s, C.int(p.TopK))
-	C.ox_session_set_min_p(s, C.float(p.MinP))
-	C.ox_session_set_repeat_penalty(s, C.float(p.RepeatPenalty))
-	C.ox_session_set_frequency_penalty(s, C.float(p.FreqPenalty))
-	C.ox_session_set_presence_penalty(s, C.float(p.PresPenalty))
+// Close frees the session and its KV. Safe on nil / double-close.
+func (s *Session) Close() {
+	if s != nil && s.c != nil {
+		C.ox_session_free(s.c)
+		s.c = nil
+	}
+}
+
+// Reset clears KV position and the repeat-penalty window (ox_session_reset).
+func (s *Session) Reset() {
+	if s != nil && s.c != nil {
+		C.ox_session_reset(s.c)
+	}
+}
+
+func (s *Session) applySample(p SampleParams) {
+	C.ox_session_set_temperature(s.c, C.float(p.Temperature))
+	C.ox_session_set_top_p(s.c, C.float(p.TopP))
+	C.ox_session_set_top_k(s.c, C.int(p.TopK))
+	C.ox_session_set_min_p(s.c, C.float(p.MinP))
+	C.ox_session_set_repeat_penalty(s.c, C.float(p.RepeatPenalty))
+	C.ox_session_set_frequency_penalty(s.c, C.float(p.FreqPenalty))
+	C.ox_session_set_presence_penalty(s.c, C.float(p.PresPenalty))
 	if p.HasSeed {
-		C.ox_session_set_seed(s, C.uint64_t(p.Seed))
+		C.ox_session_set_seed(s.c, C.uint64_t(p.Seed))
 	}
+}
 
+// Generate continues this conversation. Serialized against other Generates on
+// the parent Model; this session's KV persists across calls until Reset/Close.
+func (s *Session) Generate(prompt string, p SampleParams, sink func([]byte) bool) error {
+	if s == nil || s.c == nil || s.m == nil {
+		return fmt.Errorf("ox_generate: session is closed")
+	}
+	s.m.genMu.Lock()
+	defer s.m.genMu.Unlock()
+
+	s.applySample(p)
 	maxTok := p.MaxTokens
 	if maxTok <= 0 {
 		maxTok = 256
 	}
-
-	// The handle lets the C callback find `sink` without passing a Go pointer
-	// into C (which cgo forbids). It runs on this same goroutine, synchronously
-	// inside ox_generate, so writing to an http.ResponseWriter from sink is safe.
 	h := cgo.NewHandle(sink)
 	defer h.Delete()
-
 	cprompt := C.CString(prompt)
 	defer C.free(unsafe.Pointer(cprompt))
-
 	errbuf := make([]byte, errBufLen)
-	if C.oxGenerate(s, cprompt, C.int(maxTok), C.uintptr_t(h), cerr(errbuf), errBufLen) != 0 {
+	if C.oxGenerate(s.c, cprompt, C.int(maxTok), C.uintptr_t(h), cerr(errbuf), errBufLen) != 0 {
 		return fmt.Errorf("ox_generate: %s", cstr(errbuf))
 	}
 	return nil
+}
+
+// Generate runs one completion for prompt on a fresh session (stateless).
+// Prefer NewSession for multi-turn. sink returning true stops early.
+func (m *Model) Generate(prompt string, p SampleParams, sink func([]byte) bool) error {
+	s, err := m.NewSession()
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	return s.Generate(prompt, p, sink)
 }
 
 //export oxGoSink
