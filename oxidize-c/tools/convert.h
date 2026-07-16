@@ -8,7 +8,7 @@
 
 typedef struct {
   const char* arch_override; /* NULL => read config.json model_type */
-  const char* outtype;       /* "F32"/"F16"/"Q8_0"/"Q4_0"/"AL5_XS"; NULL => F16 */
+  const char* outtype;       /* "F32"/"F16"/"Q8_0"/"Q4_0"/"Q4_K"/"Q5_K"/"Q6_K"/"AL5_XS"; NULL => F16 */
 } ConvertOpts;
 
 /* 0 on success, nonzero on failure (message on stderr). */

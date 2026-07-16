@@ -6,11 +6,13 @@
  * blk.N.attn_q.weight, ...), copies the config.json geometry into {arch}.* GGUF
  * KVs, embeds the tokenizer, and re-encodes every weight to --outtype.
  *
- * SCOPE (honest): dense Llama-family only.
+ * SCOPE (honest): dense decoder-only.
  *   permuted-q/k archs (ggml NORMAL rope): llama, mistral, yi
  *   NeoX-rope archs (unpermuted q/k):       qwen2, qwen3
- * Everything else -- MoE (mixtral/qwen*_moe), gemma, phi3 (fused QKV), deepseek
- * (MLA), wordpiece tokenizers, safetensors dtypes other than F32/F16/BF16 -- is
+ *   Gemma sandwich (GeGLU + 4 norms):      gemma2/gemma3/gemma4 (written as
+ *     GGUF arch "gemma4" for the C loader; RMSNorm weights get +1 baked in)
+ * Everything else -- MoE, gemma-v1 without sandwich norms, phi3 (fused QKV),
+ * deepseek (MLA), wordpiece tokenizers, non-F32/F16/BF16 safetensors -- is
  * REJECTED LOUDLY. A slower/rejecting correct converter beats a fast wrong one:
  * a subtly-wrong GGUF (esp. a bad q/k permute) is silent fluent garbage.
  *
@@ -31,6 +33,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -620,40 +623,73 @@ static int st_load(StModel* s, const char* input, char* err, size_t errlen) {
  * ======================================================================== */
 
 /* Normalize an HF model_type to a supported ggml arch string, or NULL if the
- * arch is out of scope. `*permute` is set for the ggml-NORMAL-rope families. */
-static const char* arch_map(const char* mt, int* permute) {
+ * arch is out of scope. `*permute` is set for the ggml-NORMAL-rope families.
+ * `*sandwich` is set for Gemma2+ (4 RMSNorms per layer); those are always
+ * written as GGUF arch "gemma4" so model_gemma4.c can load them. */
+static const char* arch_map(const char* mt, int* permute, int* sandwich) {
   char lc[64];
   size_t i = 0;
   for (; mt[i] && i < sizeof lc - 1; ++i) lc[i] = (char)tolower((unsigned char)mt[i]);
   lc[i] = 0;
-  if (!strcmp(lc, "llama") || !strcmp(lc, "mistral") || !strcmp(lc, "yi")) { *permute = 1; return strcmp(lc, "yi") == 0 ? "yi" : (strcmp(lc, "mistral") == 0 ? "mistral" : "llama"); }
+  *sandwich = 0;
+  if (!strcmp(lc, "llama") || !strcmp(lc, "mistral") || !strcmp(lc, "yi")) {
+    *permute = 1;
+    return strcmp(lc, "yi") == 0 ? "yi" : (strcmp(lc, "mistral") == 0 ? "mistral" : "llama");
+  }
   if (!strcmp(lc, "qwen2")) { *permute = 0; return "qwen2"; }
   if (!strcmp(lc, "qwen3")) { *permute = 0; return "qwen3"; }
+  /* gemma2/3/4 share the sandwich layout the C gemma4 loader expects. Plain
+   * "gemma" (v1) is 2-norm Llama-like and is rejected — no silently-wrong map. */
+  if (!strcmp(lc, "gemma2") || !strcmp(lc, "gemma3") || !strcmp(lc, "gemma4")) {
+    *permute = 0;
+    *sandwich = 1;
+    return "gemma4";
+  }
   return NULL;
 }
 
-/* HF tensor name -> ggml/llama.cpp name. Returns 1 and fills `out` (>= 160
- * bytes) if this tensor should be emitted; 0 if it should be dropped (e.g.
- * rotary_emb.inv_freq); -1 if the name looks like an UNSUPPORTED structure
- * (MoE experts, fused qkv) so the caller can reject the whole model loudly. */
-static int map_name(const char* hf, char* out, size_t outlen) {
-  /* structures this converter does not handle -> loud rejection upstream */
+/* Multimodal HF checkpoints nest text weights under model.language_model.*. */
+static void normalize_hf_name(const char* hf, char* out, size_t outlen) {
+  if (strncmp(hf, "model.language_model.", 21) == 0)
+    snprintf(out, outlen, "model.%s", hf + 21);
+  else
+    snprintf(out, outlen, "%s", hf);
+}
+
+/* HF tensor name -> ggml/llama.cpp name. `sandwich` selects Gemma2+ norm map.
+ * Returns 1 and fills `out` (>= 160 bytes) if emitted; 0 if dropped; -1 if the
+ * name is an unsupported structure (MoE / fused qkv) so the convert fails. */
+static int map_name(const char* hf_raw, char* out, size_t outlen, int sandwich) {
+  char hf[256];
+  normalize_hf_name(hf_raw, hf, sizeof hf);
+
   if (strstr(hf, ".experts.") || strstr(hf, "block_sparse_moe") ||
       strstr(hf, "gate_up_proj") || strstr(hf, ".mtp.") ||
-      strstr(hf, "self_attn.qkv_proj") || strstr(hf, "linear_attn"))
+      strstr(hf, "self_attn.qkv_proj") || strstr(hf, "linear_attn") ||
+      strstr(hf, "vision_tower") || strstr(hf, "multi_modal") ||
+      strstr(hf, "audio_tower"))
     return -1;
 
-  if (!strcmp(hf, "model.embed_tokens.weight")) { snprintf(out, outlen, "token_embd.weight"); return 1; }
-  if (!strcmp(hf, "lm_head.weight")) { snprintf(out, outlen, "output.weight"); return 1; }
-  if (!strcmp(hf, "model.norm.weight")) { snprintf(out, outlen, "output_norm.weight"); return 1; }
-  /* things we intentionally skip (recomputed at runtime / unused by C loaders) */
+  if (!strcmp(hf, "model.embed_tokens.weight")) {
+    snprintf(out, outlen, "token_embd.weight");
+    return 1;
+  }
+  /* Gemma ties the head to the embedding; emitting output.weight is redundant. */
+  if (!strcmp(hf, "lm_head.weight")) {
+    if (sandwich) return 0;
+    snprintf(out, outlen, "output.weight");
+    return 1;
+  }
+  if (!strcmp(hf, "model.norm.weight")) {
+    snprintf(out, outlen, "output_norm.weight");
+    return 1;
+  }
   if (strstr(hf, "rotary_emb.inv_freq")) return 0;
 
   const char* rest = NULL;
   if (strncmp(hf, "model.layers.", 13) == 0) rest = hf + 13;
-  else return 0; /* unknown top-level tensor: drop rather than mis-place */
+  else return 0;
 
-  /* rest = "<L>.<suffix>" */
   char* dot = strchr(rest, '.');
   if (!dot) return 0;
   char layer[16];
@@ -664,7 +700,10 @@ static int map_name(const char* hf, char* out, size_t outlen) {
   for (size_t i = 0; i < ll; ++i) if (!isdigit((unsigned char)layer[i])) return 0;
   const char* suf = dot + 1;
 
-  static const struct { const char* hf; const char* gg; } M[] = {
+  /* Llama-style: post_attention_layernorm is the FFN pre-norm.
+   * Gemma sandwich: that tensor is post-attn residual norm; FFN pre-norm is
+   * pre_feedforward_layernorm; post_feedforward is the residual FFN norm. */
+  static const struct { const char* hf; const char* gg; } M_LLAMA[] = {
       {"input_layernorm.weight", "attn_norm.weight"},
       {"post_attention_layernorm.weight", "ffn_norm.weight"},
       {"self_attn.q_proj.weight", "attn_q.weight"},
@@ -681,9 +720,41 @@ static int map_name(const char* hf, char* out, size_t outlen) {
       {"mlp.up_proj.weight", "ffn_up.weight"},
       {"mlp.down_proj.weight", "ffn_down.weight"},
   };
-  for (size_t i = 0; i < sizeof M / sizeof *M; ++i)
-    if (!strcmp(suf, M[i].hf)) { snprintf(out, outlen, "blk.%s.%s", layer, M[i].gg); return 1; }
-  return 0; /* unmapped layer tensor: drop */
+  static const struct { const char* hf; const char* gg; } M_GEMMA[] = {
+      {"input_layernorm.weight", "attn_norm.weight"},
+      {"post_attention_layernorm.weight", "post_attention_norm.weight"},
+      {"pre_feedforward_layernorm.weight", "ffn_norm.weight"},
+      {"post_feedforward_layernorm.weight", "post_ffw_norm.weight"},
+      {"layer_scalar", "layer_output_scale.weight"},
+      {"layer_scalar.weight", "layer_output_scale.weight"},
+      {"self_attn.q_proj.weight", "attn_q.weight"},
+      {"self_attn.k_proj.weight", "attn_k.weight"},
+      {"self_attn.v_proj.weight", "attn_v.weight"},
+      {"self_attn.o_proj.weight", "attn_output.weight"},
+      {"self_attn.q_norm.weight", "attn_q_norm.weight"},
+      {"self_attn.k_norm.weight", "attn_k_norm.weight"},
+      {"mlp.gate_proj.weight", "ffn_gate.weight"},
+      {"mlp.up_proj.weight", "ffn_up.weight"},
+      {"mlp.down_proj.weight", "ffn_down.weight"},
+  };
+  if (sandwich) {
+    for (size_t i = 0; i < sizeof M_GEMMA / sizeof *M_GEMMA; ++i)
+      if (!strcmp(suf, M_GEMMA[i].hf)) {
+        snprintf(out, outlen, "blk.%s.%s", layer, M_GEMMA[i].gg);
+        return 1;
+      }
+  } else {
+    for (size_t i = 0; i < sizeof M_LLAMA / sizeof *M_LLAMA; ++i)
+      if (!strcmp(suf, M_LLAMA[i].hf)) {
+        snprintf(out, outlen, "blk.%s.%s", layer, M_LLAMA[i].gg);
+        return 1;
+      }
+  }
+  return 0;
+}
+
+static int is_norm_weight(const char* gg) {
+  return strstr(gg, "_norm.weight") != NULL || !strcmp(gg, "output_norm.weight");
 }
 
 /* Is this ggml name a q/k projection weight that needs the permute? */
@@ -984,6 +1055,7 @@ typedef struct {
   uint64_t cols, rows;
   uint64_t out_bytes;
   int permute;        /* 1 for q/k on permuted archs */
+  int norm_plus1;     /* 1 => bake +1 into RMSNorm weights (gemma GGUF contract) */
   uint64_t head_dim;  /* per-head size when permuting */
 } OutT;
 
@@ -1018,6 +1090,9 @@ static int emit_payload(const OutT* o, uint8_t* dst, char* err, size_t errlen) {
       snprintf(err, errlen, "convert: %s dequant failed", o->gg);
       goto out;
     }
+    if (o->norm_plus1) {
+      for (uint64_t c = 0; c < o->cols; ++c) row[c] += 1.0f;
+    }
     if (gw_encode_row(o->out_type, row, dst + d * dst_rb, o->cols) != 0) {
       snprintf(err, errlen, "convert: %s encode failed", o->gg);
       goto out;
@@ -1045,7 +1120,10 @@ int tool_convert(const char* input, const char* output, const ConvertOpts* opts,
   if (opts->outtype) {
     outtype = gw_type_id(opts->outtype); /* case-sensitive: caller upper-cases */
     if (outtype == UINT32_MAX || !gw_encodable(outtype)) {
-      fprintf(stderr, "convert: unsupported --outtype '%s' (F32 F16 Q8_0 Q4_0 AL5_XS)\n", opts->outtype);
+      fprintf(stderr,
+              "convert: unsupported --outtype '%s' "
+              "(F32 F16 Q8_0 Q4_0 Q4_K Q5_K Q6_K AL5_XS)\n",
+              opts->outtype);
       return 1;
     }
   }
@@ -1078,17 +1156,20 @@ int tool_convert(const char* input, const char* output, const ConvertOpts* opts,
   if (!model_type) model_type = jget_str(cfg, "model_type");
   if (!model_type && cfg_root) model_type = jget_str(cfg_root, "model_type");
   if (!model_type) { fprintf(stderr, "convert: no arch (need config.json model_type or --arch)\n"); goto done; }
-  int permute = 0;
-  const char* arch = arch_map(model_type, &permute);
+  int permute = 0, sandwich = 0;
+  const char* arch = arch_map(model_type, &permute, &sandwich);
   if (!arch) {
     fprintf(stderr,
             "convert: architecture '%s' is not supported.\n"
-            "  Supported (dense only): llama, mistral, yi, qwen2, qwen3.\n"
-            "  Rejected: MoE (mixtral/qwen*-moe), gemma, phi3, deepseek(MLA), etc.\n"
+            "  Supported (dense): llama, mistral, yi, qwen2, qwen3, gemma2, gemma3, gemma4.\n"
+            "  Rejected: MoE, gemma-v1, phi3, deepseek(MLA), vision/audio towers, etc.\n"
             "  Use llama.cpp's convert_hf_to_gguf.py for those.\n",
             model_type);
     goto done;
   }
+  if (sandwich && strcmp(model_type, "gemma4") != 0 && verbose)
+    fprintf(stderr, "convert: HF model_type=%s -> GGUF arch gemma4 (C loader family)\n",
+            model_type);
 
   /* head counts (needed for the permute, and emitted as metadata) */
   uint32_t n_head = 0, n_kv = 0;
@@ -1115,16 +1196,96 @@ int tool_convert(const char* input, const char* output, const ConvertOpts* opts,
     PU("context_length", "max_position_embeddings");
     PU("vocab_size", "vocab_size");
     if (n_head) { snprintf(pk, sizeof pk, "%s.attention.head_count", arch); kv_u32(&kb, pk, n_head); }
-    { snprintf(pk, sizeof pk, "%s.attention.head_count_kv", arch); kv_u32(&kb, pk, n_kv); }
+    /* Prefer explicit global kv heads when present (gemma4 dual GQA). */
+    uint32_t n_kv_emit = n_kv;
+    if (sandwich) {
+      uint32_t ng = 0;
+      if (jget_u32(cfg, "num_global_key_value_heads", &ng) && ng) n_kv_emit = ng;
+    }
+    { snprintf(pk, sizeof pk, "%s.attention.head_count_kv", arch); kv_u32(&kb, pk, n_kv_emit); }
     PF("attention.layer_norm_rms_epsilon", "rms_norm_eps");
     PF("rope.freq_base", "rope_theta");
-    /* head_dim: explicit or derived; lets the loader size KV from metadata */
     uint32_t hd = 0, hidden = 0;
-    if (!jget_u32(cfg, "head_dim", &hd) && jget_u32(cfg, "hidden_size", &hidden) && n_head)
+    if (!jget_u32(cfg, "head_dim", &hd) && !jget_u32(cfg, "global_head_dim", &hd) &&
+        jget_u32(cfg, "hidden_size", &hidden) && n_head)
       hd = hidden / n_head;
     if (hd) {
       snprintf(pk, sizeof pk, "%s.attention.key_length", arch); kv_u32(&kb, pk, hd);
       snprintf(pk, sizeof pk, "%s.attention.value_length", arch); kv_u32(&kb, pk, hd);
+      if (sandwich) {
+        snprintf(pk, sizeof pk, "%s.rope.dimension_count", arch); kv_u32(&kb, pk, hd);
+      }
+    }
+    if (sandwich) {
+      uint32_t sw = 0;
+      if (jget_u32(cfg, "sliding_window", &sw)) {
+        snprintf(pk, sizeof pk, "%s.attention.sliding_window", arch);
+        kv_u32(&kb, pk, sw);
+      }
+      float softcap = 0.0f;
+      if (jget_f32(cfg, "final_logit_softcapping", &softcap)) {
+        snprintf(pk, sizeof pk, "%s.final_logit_softcapping", arch);
+        kv_f32(&kb, pk, softcap);
+      }
+      float attn_scale = 0.0f;
+      if (jget_f32(cfg, "query_pre_attn_scalar", &attn_scale) && attn_scale > 0.0f) {
+        /* HF stores the pre-attn scalar; ggml wants 1/sqrt(scale) style — store as-is
+         * when present under attention.scale (loader default is 1.0). */
+        snprintf(pk, sizeof pk, "%s.attention.scale", arch);
+        kv_f32(&kb, pk, 1.0f / sqrtf(attn_scale));
+      }
+      float prf = 0.0f;
+      if (jget_f32(cfg, "partial_rotary_factor", &prf) && prf > 0.0f) {
+        snprintf(pk, sizeof pk, "%s.rope.partial_rotary_factor", arch);
+        kv_f32(&kb, pk, prf);
+      }
+      float swa_theta = 0.0f;
+      if (jget_f32(cfg, "rope_local_base_freq", &swa_theta) ||
+          jget_f32(cfg, "rope_theta_local", &swa_theta)) {
+        snprintf(pk, sizeof pk, "%s.rope.freq_base_swa", arch);
+        kv_f32(&kb, pk, swa_theta);
+      }
+      JNode* rope = jobj_get(cfg, "rope_parameters");
+      if (rope && rope->kind == J_OBJ) {
+        float rb = 0.0f;
+        if (jget_f32(rope, "rope_theta", &rb) || jget_f32(rope, "theta", &rb)) {
+          snprintf(pk, sizeof pk, "%s.rope.freq_base", arch);
+          kv_f32(&kb, pk, rb);
+        }
+        if (jget_f32(rope, "local_base", &swa_theta) ||
+            jget_f32(rope, "rope_theta_local", &swa_theta)) {
+          snprintf(pk, sizeof pk, "%s.rope.freq_base_swa", arch);
+          kv_f32(&kb, pk, swa_theta);
+        }
+      }
+      /* layer_types: ["sliding_attention","full_attention",...] -> u32 pattern */
+      JNode* lt = jobj_get(cfg, "layer_types");
+      if (lt && lt->kind == J_ARR && lt->n > 0) {
+        GgufValue* items = calloc(lt->n, sizeof(GgufValue));
+        if (items) {
+          for (size_t i = 0; i < lt->n; ++i) {
+            items[i].kind = GGUF_T_U32;
+            const char* s = (lt->items[i] && lt->items[i]->kind == J_STR)
+                                ? lt->items[i]->str
+                                : NULL;
+            items[i].v.u = (s && strstr(s, "sliding")) ? 1u : 0u;
+          }
+          snprintf(pk, sizeof pk, "%s.attention.sliding_window_pattern", arch);
+          kv_arr(&kb, pk, GGUF_T_U32, items, lt->n);
+        }
+      } else {
+        uint32_t pat = 0;
+        if (jget_u32(cfg, "sliding_window_pattern", &pat)) {
+          snprintf(pk, sizeof pk, "%s.attention.sliding_window_pattern", arch);
+          kv_u32(&kb, pk, pat);
+        }
+      }
+      uint32_t hd_swa = 0;
+      if (jget_u32(cfg, "head_dim_sliding", &hd_swa) ||
+          jget_u32(cfg, "sliding_window_head_dim", &hd_swa)) {
+        snprintf(pk, sizeof pk, "%s.rope.dimension_count_swa", arch);
+        kv_u32(&kb, pk, hd_swa);
+      }
     }
 #undef PU
 #undef PF
@@ -1140,10 +1301,10 @@ int tool_convert(const char* input, const char* output, const ConvertOpts* opts,
   for (size_t i = 0; i < st.n; ++i) {
     const StTensor* t = &st.t[i];
     char gg[160];
-    int m = map_name(t->name, gg, sizeof gg);
+    int m = map_name(t->name, gg, sizeof gg, sandwich);
     if (m < 0) {
       fprintf(stderr, "convert: tensor '%s' is part of an unsupported structure "
-                      "(MoE/fused-qkv/MTP); this converter handles dense models only\n", t->name);
+                      "(MoE/fused-qkv/MTP/vision); this converter handles dense text only\n", t->name);
       goto done;
     }
     if (m == 0) continue; /* dropped */
@@ -1157,6 +1318,9 @@ int tool_convert(const char* input, const char* output, const ConvertOpts* opts,
     o->rows = 1;
     for (uint32_t d = 1; d < t->ndim; ++d) o->rows *= o->dims[d];
     o->out_type = pick_type(outtype, t->ndim, o->cols);
+    o->norm_plus1 = sandwich && is_norm_weight(gg);
+    o->permute = 0;
+    o->head_dim = 0;
     size_t rb = oc_row_bytes(o->out_type, o->cols);
     if (rb == 0) { fprintf(stderr, "convert: %s: cannot encode row of %" PRIu64 "\n", gg, o->cols); goto done; }
     o->out_bytes = o->rows * rb;
@@ -1178,6 +1342,23 @@ int tool_convert(const char* input, const char* output, const ConvertOpts* opts,
     no++;
   }
   if (no == 0) { fprintf(stderr, "convert: no recognizable tensors produced\n"); goto done; }
+
+  /* Gemma sandwich: every layer that has attn_norm must also have ffn_norm
+   * (pre_feedforward). Plain gemma-v1 checkpoints fail here instead of loading
+   * with a silently-wrong ffn_norm. */
+  if (sandwich) {
+    int have_attn_norm = 0, have_ffn_norm = 0;
+    for (size_t i = 0; i < no; ++i) {
+      if (strstr(outs[i].gg, ".attn_norm.weight")) have_attn_norm = 1;
+      if (strstr(outs[i].gg, ".ffn_norm.weight")) have_ffn_norm = 1;
+    }
+    if (have_attn_norm && !have_ffn_norm) {
+      fprintf(stderr,
+              "convert: gemma sandwich norms missing (need pre_feedforward_layernorm).\n"
+              "  gemma-v1 (2-norm) is not supported; use gemma2/3/4 or llama.cpp.\n");
+      goto done;
+    }
+  }
 
   /* sort by name for a deterministic file (loader is order-independent) */
   for (size_t i = 0; i + 1 < no; ++i)
@@ -1229,10 +1410,11 @@ done:
 static void usage(void) {
   fprintf(stderr,
           "usage: oxidize-c-convert --input <dir|file.safetensors> --output out.gguf\n"
-          "                         [--arch llama|mistral|yi|qwen2|qwen3] [--outtype f16|f32|q8_0|q4_0]\n"
+          "                         [--arch llama|mistral|yi|qwen2|qwen3|gemma2|gemma3|gemma4]\n"
+          "                         [--outtype f16|f32|q8_0|q4_0|q4_k|q5_k|q6_k]\n"
           "Converts a dense HuggingFace SafeTensors model to GGUF v3.\n"
-          "Supported archs: llama, mistral, yi (q/k permuted for NORMAL rope), qwen2, qwen3.\n"
-          "MoE, gemma, phi3, deepseek and non-BPE/Unigram tokenizers are rejected.\n");
+          "Supported: llama/mistral/yi (q/k permute), qwen2/qwen3, gemma2/3/4 (sandwich).\n"
+          "MoE, gemma-v1, phi3, deepseek, vision/audio and non-BPE/Unigram tokenizers are rejected.\n");
 }
 
 int main(int argc, char** argv) {
