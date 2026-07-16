@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>oxidize-c WebGPU — UNVERIFIED harness</title>
+  <style>
+    body { font-family: ui-monospace, monospace; margin: 2rem; max-width: 40rem; }
+    #log { white-space: pre-wrap; background: #111; color: #ddd; padding: 1rem; }
+    .warn { color: #c80; }
+  </style>
+</head>
+<body>
+  <h1>oxidize-c WebGPU</h1>
+  <p class="warn">UNVERIFIED backend — never proven against CPU/CUDA. This page
+    only loads the <code>make wasm</code> smoke module and calls
+    <code>_wgpu_smoke_main</code>.</p>
+  <div id="log">waiting…</div>
+  <script>
+    const log = (s) => {
+      document.getElementById("log").textContent += s + "\n";
+    };
+    if (!navigator.gpu) {
+      log("navigator.gpu missing — use a WebGPU browser.");
+    } else {
+      log("navigator.gpu present.");
+    }
+    var Module = {
+      print: (t) => log(t),
+      printErr: (t) => log("[err] " + t),
+      onRuntimeInitialized: () => {
+        log("runtime ready; calling _wgpu_smoke_main…");
+        const rc = Module._wgpu_smoke_main();
+        log("wgpu_smoke_main -> " + rc);
+      },
+    };
+  </script>
+  <!-- Produced by: make -C src/webgpu wasm  (requires EMSDK) -->
+  <script src="build/oxidize_webgpu.js"></script>
+</body>
+</html>
