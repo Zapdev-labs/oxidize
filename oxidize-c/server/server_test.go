@@ -111,14 +111,15 @@ func TestChatConversationEcho(t *testing.T) {
 	resp := post(t, ts, "/v1/chat/completions",
 		`{"model":"m","conversation":"c-1","messages":[{"role":"user","content":"hi"}]}`)
 	var out struct {
-		Conversation string `json:"conversation"`
-		Choices      []struct {
+		Conversation   string `json:"conversation"`
+		ConversationID string `json:"conversation_id"`
+		Choices        []struct {
 			Message chatMessage `json:"message"`
 		} `json:"choices"`
 	}
 	decodeBody(t, resp, &out)
-	if out.Conversation != "c-1" {
-		t.Fatalf("conversation = %q", out.Conversation)
+	if out.Conversation != "c-1" || out.ConversationID != "c-1" {
+		t.Fatalf("conversation = %q id = %q", out.Conversation, out.ConversationID)
 	}
 	if len(out.Choices) != 1 || out.Choices[0].Message.Content != "ok" {
 		t.Fatalf("choices = %+v", out.Choices)
@@ -134,6 +135,34 @@ func TestChatConversationEcho(t *testing.T) {
 	defer dresp.Body.Close()
 	if dresp.StatusCode != 200 {
 		t.Fatalf("delete status = %d", dresp.StatusCode)
+	}
+}
+
+func TestChatConversationAuto(t *testing.T) {
+	ts := srv(&stubGen{id: "m", pieces: words("ok")})
+	defer ts.Close()
+	resp := post(t, ts, "/v1/chat/completions",
+		`{"model":"m","conversation_auto":true,"messages":[{"role":"user","content":"hi"}]}`)
+	var out struct {
+		Conversation   string `json:"conversation"`
+		ConversationID string `json:"conversation_id"`
+	}
+	decodeBody(t, resp, &out)
+	if !strings.HasPrefix(out.Conversation, "conv-") {
+		t.Fatalf("auto conversation = %q", out.Conversation)
+	}
+	if out.ConversationID != out.Conversation {
+		t.Fatalf("conversation_id = %q want %q", out.ConversationID, out.Conversation)
+	}
+	/* Without conversation_auto (and no *Model), omit stays ephemeral. */
+	resp2 := post(t, ts, "/v1/chat/completions",
+		`{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
+	var out2 struct {
+		Conversation string `json:"conversation"`
+	}
+	decodeBody(t, resp2, &out2)
+	if out2.Conversation != "" {
+		t.Fatalf("expected no conversation, got %q", out2.Conversation)
 	}
 }
 

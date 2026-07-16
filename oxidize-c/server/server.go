@@ -112,7 +112,11 @@ type chatRequest struct {
 	Conversation string        `json:"conversation"`
 	// ConversationID is an alias for Conversation (OpenAI-style naming).
 	ConversationID string `json:"conversation_id"`
-	Reset          bool   `json:"conversation_reset"`
+	// ConversationAuto mints a sticky id when neither Conversation nor
+	// ConversationID is set. With a real *Model this creates per-session KV;
+	// with a stub Generator the id is still echoed for client bookkeeping.
+	ConversationAuto bool `json:"conversation_auto"`
+	Reset            bool `json:"conversation_reset"`
 	sampleFields
 }
 
@@ -193,6 +197,9 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	conv := req.conversationKey()
+	if conv == "" && (req.ConversationAuto || s.model != nil) {
+		conv = newID("conv-")
+	}
 	p := req.params()
 	id := newID("chatcmpl-")
 	model := s.gen.ID()
@@ -224,6 +231,7 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	if conv != "" {
 		out["conversation"] = conv
+		out["conversation_id"] = conv
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -343,6 +351,7 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, id, model, objec
 		}
 		if conv != "" {
 			payload["conversation"] = conv
+			payload["conversation_id"] = conv
 		}
 		writeSSE(w, fl, payload)
 	}
