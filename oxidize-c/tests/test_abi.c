@@ -284,6 +284,53 @@ int main(int argc, char** argv) {
   CHECK(acc2.calls > 0);
   printf("ok abi multi-turn continue: %d tokens\n", acc2.calls);
 
+  /* (6) interleaved sessions: A then B then A again. Without per-session KV,
+   * B would overwrite A's cache and A's continuation would be corrupt / fail.
+   * With it, A's pos and KV stay intact across B's turn. */
+  OxSession* a = ox_session_new(m);
+  OxSession* b = ox_session_new(m);
+  CHECK(a != NULL && b != NULL);
+  ox_session_set_temperature(a, 0.0f);
+  ox_session_set_temperature(b, 0.0f);
+  Acc aa = {0}, bb = {0}, aa2 = {0};
+  err[0] = 0;
+  CHECK(ox_generate(a, "hello", 4, on_tok, &aa, err, sizeof err) == 0);
+  CHECK(aa.calls > 0);
+  err[0] = 0;
+  CHECK(ox_generate(b, "abcd", 4, on_tok, &bb, err, sizeof err) == 0);
+  CHECK(bb.calls > 0);
+  err[0] = 0;
+  CHECK(ox_generate(a, "hi", 4, on_tok, &aa2, err, sizeof err) == 0);
+  CHECK(aa2.calls > 0);
+  printf("ok abi interleaved sessions: A=%d B=%d A2=%d tokens\n", aa.calls,
+         bb.calls, aa2.calls);
+  ox_session_free(a);
+  ox_session_free(b);
+
+  /* ox_session_reset: after a multi-turn generate, reset must allow a fresh
+   * first-turn generate (pos==0 + cleared recent/KV) without context-full. */
+  {
+    OxSession* r = ox_session_new(m);
+    CHECK(r != NULL);
+    ox_session_set_temperature(r, 0.0f);
+    Acc ar = {0};
+    err[0] = 0;
+    CHECK(ox_generate(r, "hello", 8, on_tok, &ar, err, sizeof err) == 0);
+    CHECK(ar.calls > 0);
+    Acc ar2 = {0};
+    err[0] = 0;
+    CHECK(ox_generate(r, "more", 8, on_tok, &ar2, err, sizeof err) == 0);
+    ox_session_reset(r);
+    ox_session_reset(NULL); /* safe on NULL */
+    Acc ar3 = {0};
+    err[0] = 0;
+    CHECK(ox_generate(r, "hello", 8, on_tok, &ar3, err, sizeof err) == 0);
+    CHECK(ar3.calls > 0);
+    printf("ok abi session_reset: before=%d+%d after=%d tokens\n", ar.calls,
+           ar2.calls, ar3.calls);
+    ox_session_free(r);
+  }
+
   /* NULL prompt is a clean error, not a crash. */
   err[0] = 0;
   CHECK(ox_generate(s, NULL, 4, on_tok, &acc2, err, sizeof err) == -1);

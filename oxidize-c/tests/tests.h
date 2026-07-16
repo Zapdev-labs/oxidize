@@ -34,10 +34,20 @@ void test_forward_batch(void);
  * re-opened with gguf_open, so the tools' writer is proven valid. */
 void test_tools(void);
 
+/* tests/test_distributed.c — pipeline parallelism: a model split across ranks
+ * over a socket must produce logits BIT-IDENTICAL to the single-process run.
+ * A wrong layer-range split or a dropped framing byte shows as a mismatch. */
+void test_distributed(void);
+
 /* tests/test_vision.c — the CLIP/SigLIP vision tower forward must equal an
  * independent naive reference (own matmul/softmax/gelu/layernorm), over a full
  * CLIP config and a minimal SigLIP one. */
 void test_vision(void);
+
+/* tests/test_train.c — gradient checks (analytic vs central finite differences
+ * of an independent double reference) for the linear softmax classifier and the
+ * LoRA adapter, two convergence runs, and a LoRA GGUF export round-trip. */
+void test_train(void);
 
 /* tests/fuzz_gguf.c — one parse attempt; 1 if the blob was accepted. Also the
  * libFuzzer entry point's body, so the corpus runner and the fuzzer exercise
