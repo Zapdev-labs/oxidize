@@ -1,0 +1,21 @@
+oxidize-c/tools/convert.c
+  s_0ffa7a83065430::t_eca479a74bf8be 1140
+oxidize-c/tools/quantize.c
+  s_0ffa7a83065430::t_5247b209c70f5d 3,29,127
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "36e6b5088f93bd2587724825d091d1789ad8445e",
+  "prompts": {},
+  "sessions": {
+    "s_0ffa7a83065430": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "3167aaaf-544f-4141-abd8-e2ca44ced010",
+        "model": "unknown"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
