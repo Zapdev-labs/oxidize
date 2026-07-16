@@ -115,6 +115,16 @@ float* llama_forward_from(LlamaModel* m, size_t pos, size_t l0, bool need_logits
  * reproduces the original logits bit-for-bit. */
 void llama_kv_rewind(LlamaModel* m, size_t pos);
 
+/* Per-session KV buffers (same sizing as llama_load). Session-owned; never
+ * freed by llama_free. install swaps layer pointers onto kv (stashing the
+ * previous/primary ones); release restores them and copies m->kv_len back. */
+typedef struct LlamaKv LlamaKv;
+LlamaKv* llama_kv_new(const LlamaModel* m);
+void llama_kv_free(LlamaKv* kv);
+void llama_kv_clear(LlamaKv* kv); /* zero buffers, kv_len=0 */
+void llama_kv_install(LlamaModel* m, LlamaKv* kv);
+void llama_kv_release(LlamaModel* m, LlamaKv* kv);
+
 /* MoE router: softmax(logits[0..n]) into probs[n] (caller scratch, may alias
  * logits), pick the top-k by probability into sel[0..k] (descending), and write
  * each selected expert's routing weight into w[0..k] — renormalized over the k

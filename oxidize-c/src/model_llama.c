@@ -920,3 +920,107 @@ float* llama_forward_batch(LlamaModel* m, const int32_t* tokens, size_t n,
 void llama_kv_rewind(LlamaModel* m, size_t pos) {
   if (pos < m->kv_len) m->kv_len = pos;
 }
+
+typedef struct {
+  uint8_t *k_cache, *v_cache;
+  float *k_scale, *v_scale;
+  uint8_t *prev_k, *prev_v;
+  float *prev_ks, *prev_vs;
+} LlamaKvLayer;
+
+struct LlamaKv {
+  size_t kv_len, n_layers;
+  size_t cache_bytes; /* ctx * kv_row * elem */
+  size_t scale_n;     /* ctx * n_kv_heads when Q8, else 0 */
+  LlamaKvLayer* layers;
+};
+
+LlamaKv* llama_kv_new(const LlamaModel* m) {
+  if (!m || !m->layers || m->n_layers == 0) return NULL;
+  LlamaKv* kv = calloc(1, sizeof(*kv));
+  if (!kv) return NULL;
+  kv->n_layers = m->n_layers;
+  size_t kv_row = m->n_kv_heads * m->head_dim;
+  size_t elem = oc_kv_elem_bytes(m->kv_type);
+  kv->cache_bytes = m->ctx * kv_row * elem;
+  kv->scale_n = m->kv_type == OC_KV_Q8 ? m->ctx * m->n_kv_heads : 0;
+  kv->layers = calloc(m->n_layers, sizeof(LlamaKvLayer));
+  if (!kv->layers) {
+    free(kv);
+    return NULL;
+  }
+  for (size_t l = 0; l < m->n_layers; ++l) {
+    LlamaKvLayer* L = &kv->layers[l];
+    L->k_cache = calloc(kv->cache_bytes, 1);
+    L->v_cache = calloc(kv->cache_bytes, 1);
+    if (!L->k_cache || !L->v_cache) {
+      llama_kv_free(kv);
+      return NULL;
+    }
+    if (kv->scale_n) {
+      L->k_scale = calloc(kv->scale_n, sizeof(float));
+      L->v_scale = calloc(kv->scale_n, sizeof(float));
+      if (!L->k_scale || !L->v_scale) {
+        llama_kv_free(kv);
+        return NULL;
+      }
+    }
+  }
+  return kv;
+}
+
+void llama_kv_free(LlamaKv* kv) {
+  if (!kv) return;
+  for (size_t l = 0; kv->layers && l < kv->n_layers; ++l) {
+    free(kv->layers[l].k_cache);
+    free(kv->layers[l].v_cache);
+    free(kv->layers[l].k_scale);
+    free(kv->layers[l].v_scale);
+  }
+  free(kv->layers);
+  free(kv);
+}
+
+void llama_kv_clear(LlamaKv* kv) {
+  if (!kv) return;
+  kv->kv_len = 0;
+  for (size_t l = 0; kv->layers && l < kv->n_layers; ++l) {
+    LlamaKvLayer* L = &kv->layers[l];
+    if (L->k_cache) memset(L->k_cache, 0, kv->cache_bytes);
+    if (L->v_cache) memset(L->v_cache, 0, kv->cache_bytes);
+    if (L->k_scale) memset(L->k_scale, 0, kv->scale_n * sizeof(float));
+    if (L->v_scale) memset(L->v_scale, 0, kv->scale_n * sizeof(float));
+  }
+}
+
+void llama_kv_install(LlamaModel* m, LlamaKv* kv) {
+  if (!m || !kv || !m->layers || !kv->layers) return;
+  size_t n = m->n_layers < kv->n_layers ? m->n_layers : kv->n_layers;
+  for (size_t l = 0; l < n; ++l) {
+    LlamaLayer* L = &m->layers[l];
+    LlamaKvLayer* K = &kv->layers[l];
+    K->prev_k = L->k_cache;
+    K->prev_v = L->v_cache;
+    K->prev_ks = L->k_scale;
+    K->prev_vs = L->v_scale;
+    L->k_cache = K->k_cache;
+    L->v_cache = K->v_cache;
+    L->k_scale = K->k_scale;
+    L->v_scale = K->v_scale;
+  }
+  m->kv_len = kv->kv_len;
+}
+
+void llama_kv_release(LlamaModel* m, LlamaKv* kv) {
+  if (!m || !kv || !m->layers || !kv->layers) return;
+  kv->kv_len = m->kv_len;
+  size_t n = m->n_layers < kv->n_layers ? m->n_layers : kv->n_layers;
+  for (size_t l = 0; l < n; ++l) {
+    LlamaLayer* L = &m->layers[l];
+    LlamaKvLayer* K = &kv->layers[l];
+    L->k_cache = K->prev_k;
+    L->v_cache = K->prev_v;
+    L->k_scale = K->prev_ks;
+    L->v_scale = K->prev_vs;
+  }
+}
