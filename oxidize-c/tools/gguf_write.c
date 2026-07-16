@@ -194,6 +194,7 @@ uint32_t gw_type_id(const char* name) {
   if (!strcmp(name, "IQ2_XS")) return OC_IQ2_XS;
   if (!strcmp(name, "IQ2_S")) return OC_IQ2_S;
   if (!strcmp(name, "IQ3_XXS")) return OC_IQ3_XXS;
+  if (!strcmp(name, "IQ3_S")) return OC_IQ3_S;
   if (!strcmp(name, "BF16")) return OC_BF16;
   if (!strcmp(name, "AL5_XS")) return OC_AL5_XS;
   return UINT32_MAX;
@@ -206,7 +207,7 @@ int gw_encodable(uint32_t type) {
          type == OC_Q3_K || type == OC_Q4_K || type == OC_Q5_K ||
          type == OC_Q6_K || type == OC_IQ4_XS || type == OC_IQ2_XXS ||
          type == OC_IQ2_XS || type == OC_IQ2_S || type == OC_IQ3_XXS ||
-         type == OC_AL5_XS;
+         type == OC_IQ3_S || type == OC_AL5_XS;
 }
 
 static int gw_nearest_int(float fval) {
@@ -1067,6 +1068,188 @@ static void encode_iq3_xxs(const float* x, uint8_t* dst, size_t n) {
   }
 }
 
+/* IQ3_S: f16 d + 64 qs + 8 qh + 32 signs + 4 dual-nibble scales.
+ * Grid is 512×4 odd levels {1..15}; scale = d*(1+2*nibble). */
+static void encode_iq3_s(const float* x, uint8_t* dst, size_t n) {
+  for (size_t b = 0; b < n / OC_QK_K; ++b) {
+    const float* xb = x + b * OC_QK_K;
+    uint8_t* blk = dst + b * OC_BLK_IQ3_S;
+    memset(blk, 0, OC_BLK_IQ3_S);
+    float amax = 0.0f;
+    for (int i = 0; i < OC_QK_K; ++i) {
+      float ax = fabsf(xb[i]);
+      if (ax > amax) amax = ax;
+    }
+    float d = amax > 0.0f ? amax / (15.0f * 31.0f) : 0.0f;
+    wr16(blk, oc_f32_to_f16(d));
+    uint8_t* qs = blk + 2;
+    uint8_t* qh = blk + 2 + 64;
+    uint8_t* signs = blk + 2 + 72;
+    uint8_t* scales = blk + 2 + 104;
+    for (int ib32 = 0; ib32 < 8; ++ib32) {
+      const float* xg = xb + ib32 * 32;
+      float best_mse = 1e30f;
+      uint8_t best_q[8], best_s[4];
+      unsigned best_hi[8];
+      int best_sc = 0;
+      memset(best_q, 0, sizeof best_q);
+      memset(best_s, 0, sizeof best_s);
+      memset(best_hi, 0, sizeof best_hi);
+      for (int sc = 0; sc < 16; ++sc) {
+        float db = d * (float)(1 + 2 * sc);
+        float mse = 0.0f;
+        uint8_t q[8], sb[4];
+        unsigned hi[8];
+        for (int l = 0; l < 4; ++l) {
+          const float* xo = xg + l * 8;
+          uint8_t want = 0;
+          for (int j = 0; j < 8; ++j)
+            if (xo[j] < 0.0f) want = (uint8_t)(want | oc_kmask_iq2xs[j]);
+          float best_pair = 1e30f;
+          int best_g1 = 0, best_g2 = 0;
+          uint8_t best_sign = want;
+          for (int g1 = 0; g1 < 512; ++g1) {
+            const uint8_t* ga = (const uint8_t*)&oc_iq3s_grid[g1];
+            float e2 = 0.0f;
+            for (int j = 0; j < 4; ++j) {
+              float s0 = (want & oc_kmask_iq2xs[j]) ? -1.f : 1.f;
+              float e0 = xo[j] - db * (float)ga[j] * s0;
+              e2 += e0 * e0;
+            }
+            if (e2 < best_pair) {
+              best_pair = e2;
+              best_g1 = g1;
+            }
+          }
+          float best_hi_mse = 1e30f;
+          for (int g2 = 0; g2 < 512; ++g2) {
+            const uint8_t* gb = (const uint8_t*)&oc_iq3s_grid[g2];
+            float e2 = 0.0f;
+            for (int j = 0; j < 4; ++j) {
+              float s1 = (want & oc_kmask_iq2xs[j + 4]) ? -1.f : 1.f;
+              float e1 = xo[j + 4] - db * (float)gb[j] * s1;
+              e2 += e1 * e1;
+            }
+            if (e2 < best_hi_mse) {
+              best_hi_mse = e2;
+              best_g2 = g2;
+            }
+          }
+          best_pair += best_hi_mse;
+          {
+            const uint8_t* ga = (const uint8_t*)&oc_iq3s_grid[best_g1];
+            const uint8_t* gb = (const uint8_t*)&oc_iq3s_grid[best_g2];
+            for (int s2 = 0; s2 < 256; ++s2) {
+              uint8_t sm = (uint8_t)s2;
+              float e2 = 0.0f;
+              for (int j = 0; j < 4; ++j) {
+                float s0 = (sm & oc_kmask_iq2xs[j]) ? -1.f : 1.f;
+                float s1 = (sm & oc_kmask_iq2xs[j + 4]) ? -1.f : 1.f;
+                float e0 = xo[j] - db * (float)ga[j] * s0;
+                float e1 = xo[j + 4] - db * (float)gb[j] * s1;
+                e2 += e0 * e0 + e1 * e1;
+              }
+              if (e2 < best_pair) {
+                best_pair = e2;
+                best_sign = sm;
+              }
+            }
+            for (int g1 = 0; g1 < 512; ++g1) {
+              const uint8_t* ga2 = (const uint8_t*)&oc_iq3s_grid[g1];
+              float e2 = 0.0f;
+              for (int j = 0; j < 4; ++j) {
+                float s0 = (best_sign & oc_kmask_iq2xs[j]) ? -1.f : 1.f;
+                float e0 = xo[j] - db * (float)ga2[j] * s0;
+                e2 += e0 * e0;
+              }
+              if (e2 < best_pair) {
+                /* only lo half — keep full pair mse via re-eval with gb */
+                float e2full = e2;
+                for (int j = 0; j < 4; ++j) {
+                  float s1 = (best_sign & oc_kmask_iq2xs[j + 4]) ? -1.f : 1.f;
+                  float e1 = xo[j + 4] - db * (float)gb[j] * s1;
+                  e2full += e1 * e1;
+                }
+                if (e2full < best_pair) {
+                  best_pair = e2full;
+                  best_g1 = g1;
+                }
+              }
+            }
+            for (int g2 = 0; g2 < 512; ++g2) {
+              const uint8_t* gb2 = (const uint8_t*)&oc_iq3s_grid[g2];
+              const uint8_t* ga2 = (const uint8_t*)&oc_iq3s_grid[best_g1];
+              float e2 = 0.0f;
+              for (int j = 0; j < 4; ++j) {
+                float s0 = (best_sign & oc_kmask_iq2xs[j]) ? -1.f : 1.f;
+                float s1 = (best_sign & oc_kmask_iq2xs[j + 4]) ? -1.f : 1.f;
+                float e0 = xo[j] - db * (float)ga2[j] * s0;
+                float e1 = xo[j + 4] - db * (float)gb2[j] * s1;
+                e2 += e0 * e0 + e1 * e1;
+              }
+              if (e2 < best_pair) {
+                best_pair = e2;
+                best_g2 = g2;
+              }
+            }
+          }
+          q[2 * l + 0] = (uint8_t)(best_g1 & 0xff);
+          q[2 * l + 1] = (uint8_t)(best_g2 & 0xff);
+          hi[2 * l + 0] = (unsigned)((best_g1 >> 8) & 1);
+          hi[2 * l + 1] = (unsigned)((best_g2 >> 8) & 1);
+          sb[l] = best_sign;
+          mse += best_pair;
+        }
+        if (mse < best_mse) {
+          best_mse = mse;
+          memcpy(best_q, q, 8);
+          memcpy(best_s, sb, 4);
+          memcpy(best_hi, hi, sizeof hi);
+          best_sc = sc;
+        }
+      }
+      memcpy(qs + 8 * ib32, best_q, 8);
+      memcpy(signs + 4 * ib32, best_s, 4);
+      uint8_t qhb = 0;
+      for (int l = 0; l < 4; ++l) {
+        qhb = (uint8_t)(qhb | (best_hi[2 * l + 0] << (2 * l)));
+        qhb = (uint8_t)(qhb | (best_hi[2 * l + 1] << (2 * l + 1)));
+      }
+      qh[ib32] = qhb;
+      if ((ib32 & 1) == 0)
+        scales[ib32 / 2] = (uint8_t)best_sc;
+      else
+        scales[ib32 / 2] = (uint8_t)((scales[ib32 / 2] & 0xf) | (best_sc << 4));
+    }
+    if (amax > 0.0f) {
+      float sumqx = 0.0f, sumq2 = 0.0f;
+      for (int ib32 = 0; ib32 < 8; ++ib32) {
+        const float* xg = xb + ib32 * 32;
+        int sc = (ib32 & 1) ? (scales[ib32 / 2] >> 4) : (scales[ib32 / 2] & 0xf);
+        float mul = (float)(1 + 2 * sc);
+        for (int l = 0; l < 4; ++l) {
+          unsigned i1 =
+              qs[8 * ib32 + 2 * l + 0] | (((unsigned)qh[ib32] << (8 - 2 * l)) & 256);
+          unsigned i2 =
+              qs[8 * ib32 + 2 * l + 1] | (((unsigned)qh[ib32] << (7 - 2 * l)) & 256);
+          const uint8_t* g1 = (const uint8_t*)&oc_iq3s_grid[i1];
+          const uint8_t* g2 = (const uint8_t*)&oc_iq3s_grid[i2];
+          uint8_t sm = signs[4 * ib32 + l];
+          for (int j = 0; j < 4; ++j) {
+            float s0 = (sm & oc_kmask_iq2xs[j]) ? -1.f : 1.f;
+            float s1 = (sm & oc_kmask_iq2xs[j + 4]) ? -1.f : 1.f;
+            float q0 = mul * (float)g1[j] * s0;
+            float q1 = mul * (float)g2[j] * s1;
+            sumqx += xg[l * 8 + j] * q0 + xg[l * 8 + j + 4] * q1;
+            sumq2 += q0 * q0 + q1 * q1;
+          }
+        }
+      }
+      if (sumq2 > 0.0f) wr16(blk, oc_f32_to_f16(sumqx / sumq2));
+    }
+  }
+}
+
 /* IQ2_XS: f16 d + 32 u16 (9-bit grid | 7-bit sign) + 8 dual-nibble scales. */
 static void encode_iq2_xs(const float* x, uint8_t* dst, size_t n) {
   for (size_t b = 0; b < n / OC_QK_K; ++b) {
@@ -1525,6 +1708,10 @@ int gw_encode_row(uint32_t type, const float* x, uint8_t* dst, size_t n) {
     case OC_IQ3_XXS:
       if (n % OC_QK_K) return -1;
       encode_iq3_xxs(x, dst, n);
+      return 0;
+    case OC_IQ3_S:
+      if (n % OC_QK_K) return -1;
+      encode_iq3_s(x, dst, n);
       return 0;
     case OC_AL5_XS:
       if (n % 32) return -1;
