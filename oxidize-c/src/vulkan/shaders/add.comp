@@ -1,0 +1,12 @@
+#version 450
+/* UNVERIFIED — never compiled or run. Blind port of lk_add/k_add
+ * (src/cuda/*.cu). c[i] += x[i]: residual adds and optional bias adds.
+ * Requires Vulkan SDK + GPU. */
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer CB { float c[]; } Cb;
+layout(std430, binding = 1) readonly buffer XB { float x[]; } Xb;
+layout(push_constant) uniform PC { int n; } pc;
+void main() {
+  int i = int(gl_GlobalInvocationID.x);
+  if (i < pc.n) Cb.c[i] += Xb.x[i];
+}
