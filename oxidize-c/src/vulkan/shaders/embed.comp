@@ -1,0 +1,29 @@
+#version 450
+/* UNVERIFIED — never compiled or run. Blind port of lk_embed/k_embed
+ * (src/cuda/*.cu). Requires Vulkan SDK + GPU.
+ *
+ * Embedding row dequant into x, optionally scaled. llama passes scale = 1;
+ * gemma4 passes m->emb_scale (= sqrt(hidden)). The host pushes `row_off`, the
+ * byte offset of token row `tk` into the token_embd blob (CUDA advanced the
+ * pointer instead). qtype is spec constant 0. */
+#extension GL_GOOGLE_include_directive : require
+
+layout(local_size_x = 256) in;
+
+layout(constant_id = 0) const int qtype = 0;
+
+layout(std430, binding = 0) readonly buffer WB { uint data[]; } Wbuf;
+layout(std430, binding = 1) writeonly buffer XB { float x[]; } Xb;
+
+layout(push_constant) uniform PC {
+  int n;
+  uint row_off;
+  float scale;
+} pc;
+
+#include "dequant.glsl"
+
+void main() {
+  int i = int(gl_GlobalInvocationID.x);
+  if (i < pc.n) Xb.x[i] = oc_dqv(qtype, pc.row_off, i) * pc.scale;
+}

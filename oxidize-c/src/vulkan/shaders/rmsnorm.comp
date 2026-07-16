@@ -1,0 +1,44 @@
+#version 450
+/* UNVERIFIED — never compiled or run. Blind port of lk_rmsnorm/k_rmsnorm
+ * (src/cuda/*.cu). Requires Vulkan SDK + GPU.
+ *
+ * RMSNorm: gl_WorkGroupID.x indexes one independent vector of length `per`.
+ * out may alias x. The Gemma/llama norm weight already carries the +1 (baked
+ * at conversion). has_w == 0 is the scale-less form the gemma4 V heads use
+ * (still binds the w buffer so the descriptor is valid; just never reads it). */
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) writeonly buffer OB { float o[]; } Ob;
+layout(std430, binding = 1) readonly  buffer XB { float x[]; } Xb;
+layout(std430, binding = 2) readonly  buffer WB { float w[]; } Wb;
+
+layout(push_constant) uniform PC {
+  int per;
+  float eps;
+  int has_w;
+} pc;
+
+shared float red[256];
+
+void main() {
+  uint vec = gl_WorkGroupID.x;
+  uint t = gl_LocalInvocationID.x;
+  uint off = vec * uint(pc.per);
+
+  float s = 0.0;
+  for (int i = int(t); i < pc.per; i += 256) {
+    float v = Xb.x[off + uint(i)];
+    s += v * v;
+  }
+  red[t] = s;
+  barrier();
+  for (uint o = 128u; o > 0u; o >>= 1u) {
+    if (t < o) red[t] += red[t + o];
+    barrier();
+  }
+  float inv = inversesqrt(red[0] / float(pc.per) + pc.eps);
+  for (int i = int(t); i < pc.per; i += 256) {
+    float wv = (pc.has_w != 0) ? Wb.w[i] : 1.0;
+    Ob.o[off + uint(i)] = Xb.x[off + uint(i)] * inv * wv;
+  }
+}
