@@ -1,0 +1,29 @@
+oxidize-c/tests/tests.h
+  s_1485afe700cb15::t_1f3d94a9a1eaef 37-41
+  s_1485afe700cb15::t_c344aade951a9b 47-50
+  s_6f41ca18ed03dc::t_a7da37baaba742 51
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "3b2804d29a0f42586862c94be3c0dc53d51d4850",
+  "prompts": {},
+  "sessions": {
+    "s_1485afe700cb15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f08997b4-ac01-46a6-ab7a-a6ac459a0d39",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_6f41ca18ed03dc": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f62f8-3559-7ab3-9942-d88c60a2f5cc",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
