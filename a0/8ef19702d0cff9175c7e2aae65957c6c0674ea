@@ -1,0 +1,21 @@
+oxidize-c/src/vulkan/shaders/add.comp
+  s_1485afe700cb15::t_812d41e92e4c85 1-12
+oxidize-c/src/vulkan/shaders/softcap.comp
+  s_1485afe700cb15::t_9b1d59119d0578 1-11
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "a08ef19702d0cff9175c7e2aae65957c6c0674ea",
+  "prompts": {},
+  "sessions": {
+    "s_1485afe700cb15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f08997b4-ac01-46a6-ab7a-a6ac459a0d39",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
