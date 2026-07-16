@@ -37,7 +37,7 @@ int gw_close(GwWriter* w);
 int gw_data_ok(const GgufFile* f, const GgufTensorInfo* t, uint64_t bytes);
 
 /* Encodable targets: F32, F16, BF16, Q8_0, Q4_0, Q4_1, Q5_0, Q5_1,
- * Q2_K..Q6_K, IQ4_XS, IQ2_XXS, AL5_XS. K-quants need n % 256 == 0. */
+ * Q2_K..Q6_K, IQ4_XS, IQ2_XXS, IQ3_XXS, AL5_XS. K-quants need n % 256 == 0. */
 uint32_t gw_type_id(const char* name);
 int gw_encodable(uint32_t type);
 /* Encode n floats into a row of `type` (block alignment enforced per type). */
