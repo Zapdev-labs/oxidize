@@ -1,0 +1,14 @@
+#version 450
+/* UNVERIFIED — never compiled or run. Blind port of k_resid_out
+ * (src/cuda/gemma4_cuda.cu). x[i] = (ffn[i] + attn[i]) * s
+ * (blk.N.layer_output_scale — the fused gemma4 residual). Requires Vulkan
+ * SDK + GPU. */
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) writeonly buffer XB { float x[]; } Xb;
+layout(std430, binding = 1) readonly buffer FB { float f[]; } Fb;
+layout(std430, binding = 2) readonly buffer AB { float a[]; } Ab;
+layout(push_constant) uniform PC { int n; float s; } pc;
+void main() {
+  int i = int(gl_GlobalInvocationID.x);
+  if (i < pc.n) Xb.x[i] = (Fb.f[i] + Ab.a[i]) * pc.s;
+}

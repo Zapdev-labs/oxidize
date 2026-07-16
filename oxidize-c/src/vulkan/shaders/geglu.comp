@@ -1,0 +1,16 @@
+#version 450
+/* UNVERIFIED — never compiled or run. Blind port of k_geglu
+ * (src/cuda/gemma4_cuda.cu). GeGLU: gate = gelu_tanh(gate) * up. Requires
+ * Vulkan SDK + GPU. */
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer GB { float g[]; } Gb;
+layout(std430, binding = 1) readonly buffer UB { float u[]; } Ub;
+layout(push_constant) uniform PC { int n; } pc;
+void main() {
+  int i = int(gl_GlobalInvocationID.x);
+  if (i >= pc.n) return;
+  const float K = 0.797884560; /* sqrt(2/pi) */
+  float g = Gb.g[i];
+  float gelu = 0.5 * g * (1.0 + tanh(K * (g + 0.044715 * g * g * g)));
+  Gb.g[i] = gelu * Ub.u[i];
+}
