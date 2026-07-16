@@ -1,0 +1,21 @@
+oxidize-c/src/distributed.c
+  s_1485afe700cb15::t_21111c111cba36 1-436
+oxidize-c/src/distributed.h
+  s_1485afe700cb15::t_f2a41d28ed38ac 1-81
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "caf9f8eabb422855297fbdee684e8dceb7161d2f",
+  "prompts": {},
+  "sessions": {
+    "s_1485afe700cb15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f08997b4-ac01-46a6-ab7a-a6ac459a0d39",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
