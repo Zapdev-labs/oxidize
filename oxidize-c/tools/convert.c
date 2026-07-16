@@ -1137,7 +1137,7 @@ int tool_convert(const char* input, const char* output, const ConvertOpts* opts,
     if (outtype == UINT32_MAX || !gw_encodable(outtype)) {
       fprintf(stderr,
               "convert: unsupported --outtype '%s' "
-              "(F32 F16 BF16 Q8_0 Q4_0 Q4_1 Q5_0 Q5_1 Q2_K Q3_K Q4_K Q5_K Q6_K IQ4_XS IQ2_XXS IQ2_XS IQ2_S IQ3_XXS IQ3_S AL5_XS)\n",
+              "(F32 F16 BF16 Q8_0 Q4_0 Q4_1 Q5_0 Q5_1 Q2_K Q3_K Q4_K Q5_K Q6_K IQ4_XS IQ2_XXS IQ2_XS IQ2_S IQ3_XXS IQ3_S IQ1_S AL5_XS)\n",
               opts->outtype);
       return 1;
     }
