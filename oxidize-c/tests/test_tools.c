@@ -156,6 +156,7 @@ static void test_tool_quantize(const char* in) {
       {"IQ3_XXS", OC_IQ3_XXS, 1.05f},
       {"IQ3_S", OC_IQ3_S, 0.55f},
       {"IQ1_S", OC_IQ1_S, 0.90f},
+      {"IQ1_M", OC_IQ1_M, 0.85f},
       {"AL5_XS", OC_AL5_XS, 0.30f},
   };
   for (size_t k = 0; k < sizeof targets / sizeof *targets; ++k) {
@@ -196,10 +197,10 @@ static void test_tool_quantize(const char* in) {
   /* unknown / dequant-only target refused, not silently mis-encoded */
   char out[64];
   snprintf(out, sizeof out, "%s.bad", in);
-  CHECK(tool_quantize(in, out, "IQ1_M", 0) != 0);
+  CHECK(tool_quantize(in, out, "Q9_K", 0) != 0);
   unlink(out);
   printf("ok tools quantize (F32/F16/BF16/Q8_0/Q4_0/Q4_1/Q5_0/Q5_1/Q2_K/Q3_K/"
-         "Q4_K/Q5_K/Q6_K/IQ4_XS/IQ2_XXS/IQ2_XS/IQ2_S/IQ3_XXS/IQ3_S/IQ1_S/AL5_XS round-trip)\n");
+         "Q4_K/Q5_K/Q6_K/IQ4_XS/IQ2_XXS/IQ2_XS/IQ2_S/IQ3_XXS/IQ3_S/IQ1_S/IQ1_M/AL5_XS round-trip)\n");
 }
 
 /* ---- prune ----------------------------------------------------------------- */
@@ -628,8 +629,8 @@ static void test_convert(void) {
   CHECK(tool_convert(dir, g_file, &o_gemma_v1, 0) != 0); /* gemma-v1 unsupported */
   ConvertOpts o_moe_arch = {.arch_override = "mixtral", .outtype = "F32"};
   CHECK(tool_convert(dir, g_file, &o_moe_arch, 0) != 0); /* MoE arch */
-  ConvertOpts o_bad_type = {.arch_override = "llama", .outtype = "IQ1_M"};
-  CHECK(tool_convert(dir, g_file, &o_bad_type, 0) != 0); /* no IQ1_M encoder yet */
+  ConvertOpts o_bad_type = {.arch_override = "llama", .outtype = "Q9_K"};
+  CHECK(tool_convert(dir, g_file, &o_bad_type, 0) != 0); /* unknown outtype */
 
   /* MoE/expert tensors rejected even under a supported arch (map_name < 0). */
   char dir2[] = "/tmp/oc-convert-moe-XXXXXX";
