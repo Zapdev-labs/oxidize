@@ -102,6 +102,16 @@ float* gemma4_forward_from(Gemma4Model* m, size_t pos, size_t l0, bool need_logi
  * matching the full-cache llama behaviour. Rewinding forward is a no-op (true). */
 bool gemma4_kv_rewind(Gemma4Model* m, size_t pos);
 
+/* Per-session KV buffers (same sizing as gemma4_load). Session-owned; never
+ * freed by gemma4_free. install swaps layer pointers onto kv; release restores
+ * the primary pointers and copies m->kv_len back. */
+typedef struct Gemma4Kv Gemma4Kv;
+Gemma4Kv* gemma4_kv_new(const Gemma4Model* m);
+void gemma4_kv_free(Gemma4Kv* kv);
+void gemma4_kv_clear(Gemma4Kv* kv); /* zero buffers, kv_len=0 */
+void gemma4_kv_install(Gemma4Model* m, Gemma4Kv* kv);
+void gemma4_kv_release(Gemma4Model* m, Gemma4Kv* kv);
+
 /* Prefill: n_tokens at positions pos0 .. pos0+n_tokens-1 in ONE pass.
  * Numerically equivalent to that many sequential gemma4_forward calls (the
  * batched==sequential test is the acceptance criterion for it), but each weight

@@ -922,3 +922,128 @@ bool gemma4_kv_rewind(Gemma4Model* m, size_t pos) {
   m->kv_len = pos;
   return true;
 }
+
+typedef struct {
+  float *k_cache, *v_cache;
+  uint8_t *k_qcache, *v_qcache;
+  float *k_qmeta, *v_qmeta;
+  size_t k_bytes, v_bytes, meta_n; /* for clear; meta_n = cap*n_kv*meta_per */
+  float *prev_k, *prev_v;
+  uint8_t *prev_kq, *prev_vq;
+  float *prev_km, *prev_vm;
+} Gemma4KvLayer;
+
+struct Gemma4Kv {
+  size_t kv_len, n_layers;
+  Gemma4KvLayer* layers;
+};
+
+Gemma4Kv* gemma4_kv_new(const Gemma4Model* m) {
+  if (!m || !m->layers || m->n_layers == 0) return NULL;
+  Gemma4Kv* kv = calloc(1, sizeof(*kv));
+  if (!kv) return NULL;
+  kv->n_layers = m->n_layers;
+  kv->layers = calloc(m->n_layers, sizeof(Gemma4KvLayer));
+  if (!kv->layers) {
+    free(kv);
+    return NULL;
+  }
+  size_t meta_per = m->kv_type == OC_KV_Q8 || m->kv_type == OC_KV_Q4 ? 2 : 0;
+  for (size_t l = 0; l < m->n_layers; ++l) {
+    const Gemma4Layer* src = &m->layers[l];
+    Gemma4KvLayer* L = &kv->layers[l];
+    size_t kn = src->cache_cap * src->n_kv_heads * src->head_dim;
+    size_t vn = src->cache_cap * src->n_kv_heads * src->v_head_dim;
+    L->meta_n = src->cache_cap * src->n_kv_heads * meta_per;
+    if (m->kv_type == OC_KV_F32) {
+      L->k_bytes = kn * sizeof(float);
+      L->v_bytes = vn * sizeof(float);
+      L->k_cache = calloc(kn, sizeof(float));
+      L->v_cache = calloc(vn, sizeof(float));
+      if (!L->k_cache || !L->v_cache) {
+        gemma4_kv_free(kv);
+        return NULL;
+      }
+      continue;
+    }
+    L->k_bytes = m->kv_type == OC_KV_Q4 ? kn / 2 : kn * oc_kv_elem_bytes(m->kv_type);
+    L->v_bytes = m->kv_type == OC_KV_Q4 ? vn / 2 : vn * oc_kv_elem_bytes(m->kv_type);
+    L->k_qcache = calloc(L->k_bytes, 1);
+    L->v_qcache = calloc(L->v_bytes, 1);
+    if (meta_per) {
+      L->k_qmeta = calloc(L->meta_n, sizeof(float));
+      L->v_qmeta = calloc(L->meta_n, sizeof(float));
+    }
+    if (!L->k_qcache || !L->v_qcache || (meta_per && (!L->k_qmeta || !L->v_qmeta))) {
+      gemma4_kv_free(kv);
+      return NULL;
+    }
+  }
+  return kv;
+}
+
+void gemma4_kv_free(Gemma4Kv* kv) {
+  if (!kv) return;
+  for (size_t l = 0; kv->layers && l < kv->n_layers; ++l) {
+    free(kv->layers[l].k_cache);
+    free(kv->layers[l].v_cache);
+    free(kv->layers[l].k_qcache);
+    free(kv->layers[l].v_qcache);
+    free(kv->layers[l].k_qmeta);
+    free(kv->layers[l].v_qmeta);
+  }
+  free(kv->layers);
+  free(kv);
+}
+
+void gemma4_kv_clear(Gemma4Kv* kv) {
+  if (!kv) return;
+  kv->kv_len = 0;
+  for (size_t l = 0; kv->layers && l < kv->n_layers; ++l) {
+    Gemma4KvLayer* L = &kv->layers[l];
+    if (L->k_cache) memset(L->k_cache, 0, L->k_bytes);
+    if (L->v_cache) memset(L->v_cache, 0, L->v_bytes);
+    if (L->k_qcache) memset(L->k_qcache, 0, L->k_bytes);
+    if (L->v_qcache) memset(L->v_qcache, 0, L->v_bytes);
+    if (L->k_qmeta) memset(L->k_qmeta, 0, L->meta_n * sizeof(float));
+    if (L->v_qmeta) memset(L->v_qmeta, 0, L->meta_n * sizeof(float));
+  }
+}
+
+void gemma4_kv_install(Gemma4Model* m, Gemma4Kv* kv) {
+  if (!m || !kv || !m->layers || !kv->layers) return;
+  size_t n = m->n_layers < kv->n_layers ? m->n_layers : kv->n_layers;
+  for (size_t l = 0; l < n; ++l) {
+    Gemma4Layer* L = &m->layers[l];
+    Gemma4KvLayer* K = &kv->layers[l];
+    K->prev_k = L->k_cache;
+    K->prev_v = L->v_cache;
+    K->prev_kq = L->k_qcache;
+    K->prev_vq = L->v_qcache;
+    K->prev_km = L->k_qmeta;
+    K->prev_vm = L->v_qmeta;
+    L->k_cache = K->k_cache;
+    L->v_cache = K->v_cache;
+    L->k_qcache = K->k_qcache;
+    L->v_qcache = K->v_qcache;
+    L->k_qmeta = K->k_qmeta;
+    L->v_qmeta = K->v_qmeta;
+  }
+  m->kv_len = kv->kv_len;
+}
+
+void gemma4_kv_release(Gemma4Model* m, Gemma4Kv* kv) {
+  if (!m || !kv || !m->layers || !kv->layers) return;
+  kv->kv_len = m->kv_len;
+  size_t n = m->n_layers < kv->n_layers ? m->n_layers : kv->n_layers;
+  for (size_t l = 0; l < n; ++l) {
+    Gemma4Layer* L = &m->layers[l];
+    Gemma4KvLayer* K = &kv->layers[l];
+    L->k_cache = K->prev_k;
+    L->v_cache = K->prev_v;
+    L->k_qcache = K->prev_kq;
+    L->v_qcache = K->prev_vq;
+    L->k_qmeta = K->prev_km;
+    L->v_qmeta = K->prev_vm;
+  }
+}
