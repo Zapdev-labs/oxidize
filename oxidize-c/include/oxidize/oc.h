@@ -19,5 +19,6 @@
 #include "log.h"
 #include "model.h"
 #include "gguf.h"
+#include "tokenizer.h"
 
 #endif /* OXIDIZE_OC_H */
