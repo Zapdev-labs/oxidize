@@ -1,5 +1,5 @@
 /* test_vector.c — OcVector dynamic array tests. */
-#include "oc_min_test.h"
+#include <criterion/criterion.h>
 #include "oxidize/vector.h"
 
 #include <string.h>
@@ -104,13 +104,3 @@ Test(vector, thousand_push_pop_cycles)
     }
 }
 
-OC_TEST_SUITE_DEF(vector)
-OC_TEST_ENTRY(vector, init_free)
-OC_TEST_ENTRY(vector, push_get)
-OC_TEST_ENTRY(vector, push_n)
-OC_TEST_ENTRY(vector, pop)
-OC_TEST_ENTRY(vector, clear)
-OC_TEST_ENTRY(vector, reserve)
-OC_TEST_ENTRY(vector, invalid_args)
-OC_TEST_ENTRY(vector, thousand_push_pop_cycles)
-OC_TEST_SUITE_END(vector)

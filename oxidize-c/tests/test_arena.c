@@ -4,7 +4,7 @@
  * 1000 alloc/free cycles (ASan-clean substitutes for valgrind which is not
  * installed locally).
  */
-#include "oc_min_test.h"
+#include <criterion/criterion.h>
 #include "oxidize/arena.h"
 
 #include <stdint.h>
@@ -113,14 +113,3 @@ Test(arena, null_arena_returns_null)
     oc_arena_free(NULL);  /* must not crash */
 }
 
-OC_TEST_SUITE_DEF(arena)
-OC_TEST_ENTRY(arena, new_and_free)
-OC_TEST_ENTRY(arena, alloc_returns_aligned)
-OC_TEST_ENTRY(arena, alloc_writes_dont_crash)
-OC_TEST_ENTRY(arena, grows_past_initial_cap)
-OC_TEST_ENTRY(arena, dup_and_dup_n)
-OC_TEST_ENTRY(arena, printf)
-OC_TEST_ENTRY(arena, reset_reuses_buffer)
-OC_TEST_ENTRY(arena, thousand_alloc_free_cycles)
-OC_TEST_ENTRY(arena, null_arena_returns_null)
-OC_TEST_SUITE_END(arena)

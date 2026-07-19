@@ -1,5 +1,5 @@
 /* test_hashtable.c — OcHashtable (FNV-1a, open-addressing) tests. */
-#include "oc_min_test.h"
+#include <criterion/criterion.h>
 #include "oxidize/hashtable.h"
 
 #include <stdint.h>
@@ -132,11 +132,3 @@ Test(hashtable, iterator_visits_all)
     oc_hashtable_free(ht);
 }
 
-OC_TEST_SUITE_DEF(hashtable)
-OC_TEST_ENTRY(hashtable, fnv1a_known_values)
-OC_TEST_ENTRY(hashtable, put_get_basic)
-OC_TEST_ENTRY(hashtable, put_replaces)
-OC_TEST_ENTRY(hashtable, remove)
-OC_TEST_ENTRY(hashtable, grows_dynamically)
-OC_TEST_ENTRY(hashtable, iterator_visits_all)
-OC_TEST_SUITE_END(hashtable)

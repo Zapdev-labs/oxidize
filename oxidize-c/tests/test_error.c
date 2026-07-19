@@ -1,5 +1,5 @@
 /* test_error.c — OcError enum + OcErrorCtx tests. */
-#include "oc_min_test.h"
+#include <criterion/criterion.h>
 #include "oxidize/error.h"
 
 Test(error, msg_returns_ok)
@@ -64,10 +64,3 @@ Test(error, ctx_format)
     oc_error_ctx_free(top);
 }
 
-OC_TEST_SUITE_DEF(error)
-OC_TEST_ENTRY(error, msg_returns_ok)
-OC_TEST_ENTRY(error, msg_all_codes_nonempty)
-OC_TEST_ENTRY(error, msg_unknown_code)
-OC_TEST_ENTRY(error, ctx_chain_construct_and_free)
-OC_TEST_ENTRY(error, ctx_format)
-OC_TEST_SUITE_END(error)

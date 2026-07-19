@@ -1,5 +1,5 @@
 /* test_bytes.c — byte-level read primitive tests. */
-#include "oc_min_test.h"
+#include <criterion/criterion.h>
 #include "oxidize/util/bytes.h"
 
 #include <string.h>
@@ -59,11 +59,3 @@ Test(bytes, volatile_read)
     cr_assert_eq(oc_read_volatile_byte(NULL, 0, 0), 0, "NULL");
 }
 
-OC_TEST_SUITE_DEF(bytes)
-OC_TEST_ENTRY(bytes, read_u16_u32_u64_le)
-OC_TEST_ENTRY(bytes, read_signed)
-OC_TEST_ENTRY(bytes, read_float)
-OC_TEST_ENTRY(bytes, out_of_bounds_returns_zero)
-OC_TEST_ENTRY(bytes, write_and_read_back)
-OC_TEST_ENTRY(bytes, volatile_read)
-OC_TEST_SUITE_END(bytes)

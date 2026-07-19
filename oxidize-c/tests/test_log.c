@@ -1,7 +1,7 @@
 /* test_log.c — oc_log leveled logging + OX_LOG_LEVEL tests. */
 #define _POSIX_C_SOURCE 200809L  /* setenv/unsetenv */
 
-#include "oc_min_test.h"
+#include <criterion/criterion.h>
 #include "oxidize/log.h"
 
 #include <stdlib.h>
@@ -54,9 +54,3 @@ Test(log, emits_at_or_above)
     oc_log_set_level(OC_LOG_INFO);
 }
 
-OC_TEST_SUITE_DEF(log)
-OC_TEST_ENTRY(log, level_name_round_trip)
-OC_TEST_ENTRY(log, set_level_filters)
-OC_TEST_ENTRY(log, env_filter_debug)
-OC_TEST_ENTRY(log, emits_at_or_above)
-OC_TEST_SUITE_END(log)

@@ -1,5 +1,5 @@
 /* test_string.c — string util helpers tests. */
-#include "oc_min_test.h"
+#include <criterion/criterion.h>
 #include "oxidize/util/string.h"
 
 #include <stdlib.h>
@@ -78,11 +78,3 @@ Test(string, parse_i64_f64)
     cr_assert(!oc_parse_f64("not-a-num", &d), "");
 }
 
-OC_TEST_SUITE_DEF(string)
-OC_TEST_ENTRY(string, strdup_and_strndup)
-OC_TEST_ENTRY(string, strcmp_null_safe)
-OC_TEST_ENTRY(string, starts_ends_with)
-OC_TEST_ENTRY(string, split_once)
-OC_TEST_ENTRY(string, trim)
-OC_TEST_ENTRY(string, parse_i64_f64)
-OC_TEST_SUITE_END(string)

@@ -1,5 +1,5 @@
 /* test_dtype.c — OcDType tests. */
-#include "oc_min_test.h"
+#include <criterion/criterion.h>
 #include "oxidize/dtype.h"
 
 Test(dtype, sizes)
@@ -40,9 +40,3 @@ Test(dtype, unknown)
     cr_assert_eq(oc_dtype_from_str(NULL),  OC_DTYPE_UNKNOWN, "NULL parse");
 }
 
-OC_TEST_SUITE_DEF(dtype)
-OC_TEST_ENTRY(dtype, sizes)
-OC_TEST_ENTRY(dtype, names)
-OC_TEST_ENTRY(dtype, round_trip)
-OC_TEST_ENTRY(dtype, unknown)
-OC_TEST_SUITE_END(dtype)

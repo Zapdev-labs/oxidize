@@ -3,8 +3,8 @@
 # Targets:
 #   make / make build   — default CPU-only, dependency-free binary
 #   make lib           — static library liboxidize-c.a
-#   make test          — build + run Criterion-style test_runner (ASan-instrumented)
-#   make lint          — clang-tidy on changed files
+#   make test          — build + run vendored Criterion test_runner (ASan)
+#   make lint          — clang-tidy on library sources
 #   make clean         — remove build artifacts
 #   make avx512        — AVX-512 build (for .121 Cascade Lake)
 #   make cuda          — CUDA backend build (OC_CUDA, for Modal L40S)
@@ -36,22 +36,29 @@ lib: liboxidize-c.a
 liboxidize-c.a: $(LIB_OBJS)
 	ar rcs $@ $^
 
-# Tests: minimal Criterion-style harness (tests/oc_min_test.h).
-# The criterion-test-infra feature will replace this with real Criterion.
+# Vendored Criterion (MIT) test framework — see tests/criterion/README.md.
+# Each tests/test_<module>.c uses Criterion's Test(Suite, Case) macro for
+# auto-registration; Criterion provides main(), so no separate runner.c is
+# needed. One test_<module>.c per src/<module>.c (see CONTRIBUTING.md).
+CRITERION_DIR      := tests/criterion
+CRITERION_INCLUDE  := $(CRITERION_DIR)/include
+CRITERION_LIB      := $(CRITERION_DIR)/lib/libcriterion.a
+
 TEST_SRCS := $(wildcard tests/test_*.c)
 TEST_OBJS := $(TEST_SRCS:.c=.o)
-RUNNER_SRC := tests/runner.c
-RUNNER_OBJ := tests/runner.o
 
 # ASan + UBSan for leak/UB detection in tests (valgrind not installed locally).
-TEST_CFLAGS := -std=c11 -Wall -Wextra -Wno-format-zero-length -fsanitize=address,undefined -fno-omit-frame-pointer -g -O0 -Iinclude -Itests
-TEST_LDFLAGS := -lm -lpthread -fsanitize=address,undefined
+# Criterion needs -lpthread (threads), -lrt (shm), -ldl (dlopen), -lm (math).
+TEST_CFLAGS := -std=c11 -Wall -Wextra -Wno-format-zero-length \
+               -fsanitize=address,undefined -fno-omit-frame-pointer -g -O0 \
+               -Iinclude -I$(CRITERION_INCLUDE)
+TEST_LDFLAGS := -lm -lpthread -lrt -ldl -fsanitize=address,undefined
 
 # ASan-instrumented library objects (stems: src/core/error.c -> src/core/error.asan.o).
 LIB_ASAN_OBJS := $(LIB_SRCS:.c=.asan.o)
 
-test_runner: $(RUNNER_OBJ) $(TEST_OBJS) $(LIB_ASAN_OBJS)
-	$(CC) $(TEST_CFLAGS) -o $@ $^ $(TEST_LDFLAGS)
+test_runner: $(TEST_OBJS) $(LIB_ASAN_OBJS) $(CRITERION_LIB)
+	$(CC) $(TEST_CFLAGS) -o $@ $(TEST_OBJS) $(LIB_ASAN_OBJS) $(CRITERION_LIB) $(TEST_LDFLAGS)
 
 # Build library objects with ASan for the test_runner.
 src/%.asan.o: src/%.c
@@ -92,7 +99,7 @@ cuda: CFLAGS = -O2 -Iinclude -DOC_CUDA -Xcompiler -std=c11
 cuda: oxidize-c
 
 clean:
-	rm -f $(LIB_OBJS) $(BIN_OBJS) $(TEST_OBJS) $(RUNNER_OBJ) \
+	rm -f $(LIB_OBJS) $(BIN_OBJS) $(TEST_OBJS) \
 	      $(LIB_ASAN_OBJS) \
 	      oxidize-c test_runner liboxidize-c.a
 
