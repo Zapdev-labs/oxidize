@@ -1,0 +1,19 @@
+oxidize-c/src/webgpu/wgsl/rope.wgsl
+  s_1485afe700cb15::t_ce99b3c8f8d21a 1-55
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "6fef68084052ec7009d7f7d1d67cfd3cc947c209",
+  "prompts": {},
+  "sessions": {
+    "s_1485afe700cb15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f08997b4-ac01-46a6-ab7a-a6ac459a0d39",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

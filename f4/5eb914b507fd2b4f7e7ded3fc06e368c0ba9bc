@@ -1,0 +1,21 @@
+oxidize-c/server/server.go
+  s_0bf5ad2d096c1a::t_444ee1a9361268 4-6,19,31-43,45-51,59,110-115,119-125,195,200-205,207,211,216,224-228,245,248,252,264-314,317-318,340,343-347,353,366-367,370,403-404,427-437
+oxidize-c/server/server_test.go
+  s_0bf5ad2d096c1a::t_30d966b8ed3058 108-139
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "f45eb914b507fd2b4f7e7ded3fc06e368c0ba9bc",
+  "prompts": {},
+  "sessions": {
+    "s_0bf5ad2d096c1a": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "8ca5d18f-51f6-4d18-b1fd-0174f44c2aef",
+        "model": "unknown"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

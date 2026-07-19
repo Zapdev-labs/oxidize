@@ -1,0 +1,21 @@
+oxidize-c/server/main.go
+  s_3c29250fec1e22::t_4523fc089dde09 56
+oxidize-c/tools/convert.c
+  s_3c29250fec1e22::t_a2e4d2f48d0ab4 1125,1414
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "4bc540ab6aaaf45379a3c5c01bff83792c99221b",
+  "prompts": {},
+  "sessions": {
+    "s_3c29250fec1e22": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "9245b83b-86c8-4bad-a528-50fca20b7865",
+        "model": "unknown"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

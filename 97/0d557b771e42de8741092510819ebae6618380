@@ -1,0 +1,22 @@
+oxidize-c/src/webgpu/wgsl/rmsnorm.wgsl
+  s_1485afe700cb15::t_024a32f5f502e5 1-56
+oxidize-c/src/webgpu/wgsl/embed.wgsl
+  s_1485afe700cb15::t_9901a5c825a2b3 7-10,16,26
+  s_1485afe700cb15::t_8fa411ff59fbde 1-6,11-15,17-25,27
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "970d557b771e42de8741092510819ebae6618380",
+  "prompts": {},
+  "sessions": {
+    "s_1485afe700cb15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f08997b4-ac01-46a6-ab7a-a6ac459a0d39",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

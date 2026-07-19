@@ -1,0 +1,21 @@
+oxidize-c/src/train.c
+  s_1485afe700cb15::t_fc75f9cf248e3c 1-385
+oxidize-c/src/train.h
+  s_1485afe700cb15::t_9efd66b5451def 1-133
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "2f3fdb1dcd8e52fde00df2e283e94211995542a5",
+  "prompts": {},
+  "sessions": {
+    "s_1485afe700cb15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f08997b4-ac01-46a6-ab7a-a6ac459a0d39",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

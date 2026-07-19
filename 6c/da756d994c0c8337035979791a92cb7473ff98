@@ -1,0 +1,21 @@
+oxidize-c/src/vulkan/shaders/geglu.comp
+  s_1485afe700cb15::t_2864983398640b 1-16
+oxidize-c/src/vulkan/shaders/resid_out.comp
+  s_1485afe700cb15::t_728b563c5d50d8 1-14
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "6cda756d994c0c8337035979791a92cb7473ff98",
+  "prompts": {},
+  "sessions": {
+    "s_1485afe700cb15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f08997b4-ac01-46a6-ab7a-a6ac459a0d39",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

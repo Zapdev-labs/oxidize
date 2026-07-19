@@ -1,0 +1,22 @@
+oxidize-c/src/mlx/mlx_common.c
+  s_1485afe700cb15::t_a58a292e14938a 1-295
+oxidize-c/src/mlx/mlx_common.h
+  s_1485afe700cb15::t_2be1a275369b4d 1-105,115-128
+  s_1485afe700cb15::t_41d6d0ac29372b 106-114
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "3352340ffbd67808e982e082caed8bb4f8c57d3a",
+  "prompts": {},
+  "sessions": {
+    "s_1485afe700cb15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f08997b4-ac01-46a6-ab7a-a6ac459a0d39",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

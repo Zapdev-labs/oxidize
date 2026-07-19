@@ -1,0 +1,21 @@
+oxidize-c/tools/gguf_write.c
+  s_7c0c8631703a40::t_e99d95b695deaa 183-185,192,198-202,766-856,888-896,905-916
+oxidize-c/tools/gguf_write.h
+  s_7c0c8631703a40::t_5a8025bdba6e6a 39-40
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "c80e0b5623fd50332d333fb54316c4f4f4d53fa0",
+  "prompts": {},
+  "sessions": {
+    "s_7c0c8631703a40": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "agent-e8d42bb0-2cee-46a8-aff5-89b960515ae5",
+        "model": "unknown"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
