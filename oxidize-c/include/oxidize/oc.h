@@ -17,6 +17,7 @@
 #include "hashtable.h"
 #include "vector.h"
 #include "log.h"
+#include "model.h"
 #include "gguf.h"
 
 #endif /* OXIDIZE_OC_H */

@@ -30,8 +30,11 @@
 #include "oxidize/arena.h"
 #include "oxidize/error.h"
 #include "oxidize/log.h"
+#include "oxidize/model.h"
 #include "oxidize/util/bytes.h"
 #include "oxidize/util/file.h"
+#include "oxidize/util/mmap.h"
+#include "oxidize/util/string.h"
 
 /* ─── ByteReader: bounds-checked sequential cursor over a byte buffer ────────
  *
@@ -668,3 +671,731 @@ void oc_gguf_dump(const OcGgufFile *f)
                 (unsigned long long)t->absolute_offset);
     }
 }
+
+/* ─── Architecture detection (VAL-FOUND-012) ────────────────────────────────
+ *
+ * Mirrors Rust `GgufFile::architecture()`:
+ *   1. Read `general.architecture` from metadata (STRING). If present, pass
+ *      the value through `oc_model_arch_from_str()`.
+ *   2. Otherwise, scan metadata keys for an `<arch>.*` namespace recognized
+ *      by `oc_model_arch_from_str()` (mirrors Rust
+ *      `detect_architecture_from_metadata_keys`).
+ *   3. Return OC_ARCH_UNKNOWN if neither path yields a recognized arch. */
+OcModelArchitecture oc_gguf_arch_from_file(const OcGgufFile *f)
+{
+    if (!f) return OC_ARCH_UNKNOWN;
+
+    /* Path 1: general.architecture STRING. */
+    const char *arch_str = NULL;
+    size_t      arch_len = 0;
+    if (oc_gguf_metadata_get_str(f, "general.architecture", &arch_str, &arch_len)
+        && arch_str && arch_len > 0) {
+        OcModelArchitecture a = oc_model_arch_from_str(arch_str);
+        if (a != OC_ARCH_UNKNOWN) return a;
+    }
+
+    /* Path 2: scan metadata keys for an `<arch>.*` namespace. */
+    for (uint64_t i = 0; i < f->metadata_kv_count; i++) {
+        const char *key = f->metadata[i].key;
+        if (!key) continue;
+        const char *dot = strchr(key, '.');
+        if (!dot || dot == key) continue;
+        /* Extract the namespace (substring before the first '.'). */
+        size_t ns_len = (size_t)(dot - key);
+        if (ns_len >= 64) continue;   /* skip absurdly long namespaces */
+        char ns[64];
+        memcpy(ns, key, ns_len);
+        ns[ns_len] = '\0';
+        OcModelArchitecture a = oc_model_arch_from_str(ns);
+        if (a != OC_ARCH_UNKNOWN) return a;
+    }
+
+    return OC_ARCH_UNKNOWN;
+}
+
+/* ─── Multi-shard mmap-backed GGUF loading ──────────────────────────────────
+ *
+ * Port of oxidize-core::load_mapped_gguf + load_mapped_gguf_shards +
+ * collect_split_shards. Detects the split-GGUF pattern
+ * `<base>-NNNNN-of-MMMMM.gguf`, opens all sibling shards, mmaps each, parses
+ * each, and merges their tensor tables into a single unified OcGgufFile view.
+ *
+ * For single-file GGUFs (no `-NNNNN-of-MMMMM.gguf` suffix, or suffix present
+ * but siblings missing), falls back to a single-shard load. */
+
+/* Check whether `filename` matches the split-GGUF pattern
+ * `<base>-NNNNN-of-MMMMM.gguf` and, if so, populate `out_total` with the
+ * parsed MMMMM value. Returns true on match. */
+static bool parse_split_pattern(const char *filename, uint64_t *out_total)
+{
+    if (!filename || !*filename) return false;
+
+    /* Must end in ".gguf". */
+    const char *gguf_suffix = ".gguf";
+    size_t fn_len = strlen(filename);
+    size_t suf_len = strlen(gguf_suffix);
+    if (fn_len <= suf_len) return false;
+    if (strcmp(filename + fn_len - suf_len, gguf_suffix) != 0) return false;
+
+    /* Strip the suffix → stem. */
+    size_t stem_len = fn_len - suf_len;
+    /* Find the last "-of-" in the stem. The "-of-" is 4 chars; we scan
+     * the stem for the substring. */
+    const char *of_tok = NULL;
+    /* i is the index of the 'o' in "-of-" (so filename[i-1]='-'). We scan
+     * from the end of the stem backward. */
+    if (stem_len < 4) return false;
+    for (size_t i = stem_len; i >= 4; i--) {
+        /* filename[i-1] is '-' (checked below); need filename[i]='o',
+         * filename[i+1]='f', filename[i+2]='-'. All within the stem
+         * (i+2 <= stem_len-1, i.e. i <= stem_len-3). */
+        if (i + 2 >= stem_len) continue;   /* "-of-" would cross into ".gguf" */
+        if (filename[i - 1] == '-'
+            && filename[i] == 'o'
+            && filename[i + 1] == 'f'
+            && filename[i + 2] == '-') {
+            of_tok = filename + i - 1;
+            break;
+        }
+    }
+    if (!of_tok) return false;
+
+    /* After "-of-" comes MMMMM (within the stem). total_str points at the
+     * first digit; it ends at filename + stem_len. */
+    const char *total_str = of_tok + 4;   /* skip "-of-" */
+    const char *total_end = filename + stem_len;
+    if (total_str >= total_end) return false;
+    for (const char *p = total_str; p < total_end; p++) {
+        if (*p < '0' || *p > '9') return false;
+    }
+    /* Parse total (must be >= 2 for a real split). */
+    uint64_t total = 0;
+    for (const char *p = total_str; p < total_end; p++) {
+        total = total * 10 + (uint64_t)(*p - '0');
+        if (total > 1000000) return false;   /* sanity cap */
+    }
+    if (total < 2) return false;
+
+    /* Find the shard-number token before "-of-": "-NNNNN-". The shard number
+     * must be all digits. */
+    if (of_tok == filename) return false;
+    const char *prev_dash = NULL;
+    for (const char *p = of_tok - 1; p >= filename; p--) {
+        if (*p == '-') { prev_dash = p; break; }
+    }
+    if (!prev_dash) return false;
+    /* Shard number is prev_dash+1 .. of_tok. Must be all digits, >= 1. */
+    if (prev_dash + 1 >= of_tok) return false;
+    for (const char *p = prev_dash + 1; p < of_tok; p++) {
+        if (*p < '0' || *p > '9') return false;
+    }
+
+    if (out_total) *out_total = total;
+    return true;
+}
+
+/* Build the i-th shard path: `<dir>/<base>-<i:05>-of-<total:05>.gguf`.
+ * Returns a malloc'd string (caller frees) or NULL on OOM. */
+static char *build_shard_path(const char *dir, const char *base,
+                              uint64_t i, uint64_t total)
+{
+    /* Output layout: dir + "/" + base + "-" + NNNNN + "-of-" + MMMMM + ".gguf" + NUL.
+   The literal parts sum to 1+1+5+4+5+5 = 21 chars. */
+    size_t cap = strlen(dir) + 1 + strlen(base) + 21 + 1;   /* +1 for NUL */
+    char *buf = (char *)malloc(cap);
+    if (!buf) return NULL;
+    int n = snprintf(buf, cap, "%s/%s-%05llu-of-%05llu.gguf",
+                     dir, base,
+                     (unsigned long long)i, (unsigned long long)total);
+    if (n < 0 || (size_t)n >= cap) { free(buf); return NULL; }
+    return buf;
+}
+
+/* Extract `<dir>/<base>` (without the `-NNNNN-of-MMMMM.gguf` suffix) from
+ * `path`. Returns a malloc'd "<dir>/<base>" string (caller frees) or NULL on
+ * OOM / no match. `out_total` receives MMMMM. */
+static char *extract_split_base_and_dir(const char *path, uint64_t *out_total)
+{
+    if (!path) return NULL;
+    /* Find the last '/' to split dir / filename. */
+    const char *slash = strrchr(path, '/');
+    const char *dir;
+    const char *filename;
+    size_t dir_len;
+    if (slash) {
+        dir = path;
+        dir_len = (size_t)(slash - path) + 1;   /* include trailing '/' */
+        filename = slash + 1;
+    } else {
+        dir = "";
+        dir_len = 0;
+        filename = path;
+    }
+
+    uint64_t total = 0;
+    if (!parse_split_pattern(filename, &total)) return NULL;
+
+    /* filename = <base>-NNNNN-of-MMMMM.gguf. Find the last "-of-". */
+    size_t fn_len = strlen(filename);
+    const char *gguf_suffix = ".gguf";
+    size_t suf_len = strlen(gguf_suffix);
+    size_t stem_len = fn_len - suf_len;
+
+    const char *of_tok = NULL;
+    for (size_t i = stem_len; i >= 3; i--) {
+        if (filename[i - 1] == '-'
+            && filename[i] == 'o'
+            && filename[i + 1] == 'f'
+            && filename[i + 2] == '-') {
+            of_tok = filename + i - 1;
+            break;
+        }
+    }
+    if (!of_tok) return NULL;
+
+    /* Find the '-' before NNNNN (the shard number). */
+    const char *prev_dash = NULL;
+    for (const char *p = of_tok - 1; p >= filename; p--) {
+        if (*p == '-') { prev_dash = p; break; }
+    }
+    if (!prev_dash) return NULL;
+
+    /* base = filename[0 .. prev_dash). */
+    size_t base_len = (size_t)(prev_dash - filename);
+
+    /* Compose <dir>/<base>. */
+    size_t cap = dir_len + base_len + 1;
+    char *base_path = (char *)malloc(cap);
+    if (!base_path) return NULL;
+    memcpy(base_path, dir, dir_len);
+    memcpy(base_path + dir_len, filename, base_len);
+    base_path[dir_len + base_len] = '\0';
+
+    if (out_total) *out_total = total;
+    return base_path;
+}
+
+/* Open + mmap a single shard. On success, `shard->mmap` is set (owned),
+ * `shard->bytes` and `shard->len` are populated, and `shard->parsed` is
+ * parsed from the mmap'd bytes. Returns OC_OK or an error; on error, the
+ * shard is left zeroed. */
+static OcError open_shard(const char *path, OcGgufShard *shard)
+{
+    memset(shard, 0, sizeof(*shard));
+    OcMmap *m = NULL;
+    OcError e = oc_mmap_open_readonly(path, &m);
+    if (e != OC_OK) return e;
+
+    /* Parse the mmap'd bytes. oc_gguf_parse dups the bytes it needs into the
+     * arena, so we can pass mmap'd bytes directly (the parse doesn't hold
+     * a reference to the buffer after return — strings/tensor names are
+     * arena-owned copies). */
+    OcGgufFile parsed;
+    e = oc_gguf_parse(oc_mmap_bytes(m), oc_mmap_len(m), &parsed);
+    if (e != OC_OK) {
+        oc_mmap_close(m);
+        return e;
+    }
+
+    shard->mmap  = m;
+    shard->bytes = (uint8_t *)oc_mmap_bytes(m);
+    shard->len   = oc_mmap_len(m);
+    shard->parsed = parsed;
+    return OC_OK;
+}
+
+/* Close a single shard (free mmap + parsed arena). */
+static void close_shard(OcGgufShard *shard)
+{
+    if (!shard) return;
+    if (shard->mmap) {
+        oc_mmap_close(shard->mmap);
+        shard->mmap = NULL;
+    }
+    /* parsed.arena is owned by the shard; free it. (parsed.backing_buf is
+     * NULL because oc_gguf_parse doesn't take ownership.) */
+    if (shard->parsed.arena) {
+        oc_arena_free(shard->parsed.arena);
+        shard->parsed.arena = NULL;
+    }
+    memset(shard, 0, sizeof(*shard));
+}
+
+OcError oc_gguf_map_open(const char *path, OcGgufMmappedFile *out)
+{
+    if (!path || !out) return OC_ERR_INVALID_ARG;
+    memset(out, 0, sizeof(*out));
+
+    /* Detect split pattern. */
+    uint64_t total = 0;
+    char *base_path = extract_split_base_and_dir(path, &total);
+
+    if (base_path) {
+        /* Split: split base_path into dir + base. */
+        const char *slash = strrchr(base_path, '/');
+        const char *dir;
+        const char *base;
+        char dir_buf[4096];
+        if (slash) {
+            size_t dir_len = (size_t)(slash - base_path) + 1;
+            if (dir_len >= sizeof(dir_buf)) dir_len = sizeof(dir_buf) - 1;
+            memcpy(dir_buf, base_path, dir_len);
+            dir_buf[dir_len] = '\0';
+            dir = dir_buf;
+            base = slash + 1;
+        } else {
+            dir = "./";
+            base = base_path;
+        }
+
+        /* Check all shards exist. */
+        bool all_exist = true;
+        for (uint64_t i = 1; i <= total; i++) {
+            char *shard_path = build_shard_path(dir, base, i, total);
+            if (!shard_path) { all_exist = false; break; }
+            if (!oc_file_exists(shard_path)) {
+                free(shard_path);
+                all_exist = false;
+                break;
+            }
+            free(shard_path);
+        }
+
+        if (all_exist && total >= 2) {
+            /* Allocate shards array. */
+            OcGgufShard *shards = (OcGgufShard *)calloc((size_t)total, sizeof(OcGgufShard));
+            if (!shards) { free(base_path); return OC_ERR_OOM; }
+
+            /* Open each shard. */
+            for (uint64_t i = 0; i < total; i++) {
+                char *shard_path = build_shard_path(dir, base, i + 1, total);
+                if (!shard_path) {
+                    for (uint64_t j = 0; j < i; j++) close_shard(&shards[j]);
+                    free(shards);
+                    free(base_path);
+                    return OC_ERR_OOM;
+                }
+                OcError e = open_shard(shard_path, &shards[i]);
+                free(shard_path);
+                if (e != OC_OK) {
+                    uint64_t shard_num = i + 1;
+                    oc_log(OC_LOG_ERROR, "gguf: failed to open shard %llu: %s",
+                            (unsigned long long)shard_num, oc_error_msg(e));
+                    for (uint64_t j = 0; j < i; j++) close_shard(&shards[j]);
+                    free(shards);
+                    free(base_path);
+                    return e;
+                }
+            }
+
+            /* Build the unified view: take shard 0's parsed file as the
+             * base, then append tensors from shards 1..N with shard_index
+             * set per-tensor. */
+            OcArena *unified_arena = oc_arena_new(0);
+            if (!unified_arena) {
+                for (uint64_t i = 0; i < total; i++) close_shard(&shards[i]);
+                free(shards);
+                free(base_path);
+                return OC_ERR_OOM;
+            }
+
+            /* Total tensor count. */
+            uint64_t total_tensors = 0;
+            for (uint64_t i = 0; i < total; i++) {
+                total_tensors += shards[i].parsed.tensor_count;
+            }
+
+            /* Allocate the merged tensor table in the unified arena. */
+            OcGgufTensorInfo *merged = NULL;
+            if (total_tensors > 0) {
+                merged = (OcGgufTensorInfo *)oc_arena_alloc(unified_arena,
+                    (size_t)total_tensors * sizeof(OcGgufTensorInfo), 16);
+                if (!merged) {
+                    oc_arena_free(unified_arena);
+                    for (uint64_t i = 0; i < total; i++) close_shard(&shards[i]);
+                    free(shards);
+                    free(base_path);
+                    return OC_ERR_OOM;
+                }
+                memset(merged, 0, (size_t)total_tensors * sizeof(*merged));
+            }
+
+            /* Copy shard 0's tensors (deep-copy names into the unified arena
+             * so they outlive the per-shard arena). Stamp shard_index=0.
+             *
+             * Invariant: if total_tensors == 0 then every shard's
+             * tensor_count == 0, so the inner loop body never executes and
+             * `merged` (which would be NULL) is never dereferenced. The
+             * clang-analyzer can't prove this invariant, so we add an
+             * explicit assert to document it. */
+            uint64_t out_idx = 0;
+            for (uint64_t s = 0; s < total; s++) {
+                OcGgufFile *src = &shards[s].parsed;
+                for (uint64_t i = 0; i < src->tensor_count; i++) {
+                    /* total_tensors > 0 here (invariant above), so merged != NULL. */
+                    OcGgufTensorInfo *dst = &merged[out_idx++];
+                    const OcGgufTensorInfo *src_t = &src->tensors[i];
+                    /* Deep-copy the name into the unified arena. */
+                    dst->name = oc_arena_dup(unified_arena, src_t->name ? src_t->name : "");
+                    dst->n_dims           = src_t->n_dims;
+                    memcpy(dst->dims, src_t->dims, sizeof(dst->dims));
+                    dst->ggml_type        = src_t->ggml_type;
+                    dst->relative_offset  = src_t->relative_offset;
+                    /* absolute_offset is per-shard: it's the offset within
+                     * shard s's mmap'd bytes. shard_index selects the shard. */
+                    dst->absolute_offset  = src_t->absolute_offset;
+                    dst->shard_index     = (uint32_t)s;
+                }
+            }
+
+            /* Unified OcGgufFile: copy shard 0's metadata into the unified
+             * arena. The KV array + keys + values must outlive the per-shard
+             * arena, so we deep-copy them. */
+            OcGgufFile *unified = &out->unified;
+            unified->magic              = shards[0].parsed.magic;
+            unified->version            = shards[0].parsed.version;
+            unified->tensor_count       = total_tensors;
+            unified->metadata_kv_count  = shards[0].parsed.metadata_kv_count;
+            unified->alignment          = shards[0].parsed.alignment;
+            unified->data_section_start = shards[0].parsed.data_section_start;
+            unified->arena             = unified_arena;
+            unified->backing_buf        = shards[0].bytes;   /* shard 0's bytes */
+            unified->backing_len       = shards[0].len;
+            unified->tensors            = merged;
+
+            /* Deep-copy the metadata KV array + keys + values into the
+             * unified arena. */
+            if (shards[0].parsed.metadata_kv_count > 0) {
+                size_t n_kv = (size_t)shards[0].parsed.metadata_kv_count;
+                OcGgufMetadataKV *kv = (OcGgufMetadataKV *)oc_arena_alloc(
+                    unified_arena, n_kv * sizeof(OcGgufMetadataKV), 16);
+                if (!kv) {
+                    oc_arena_free(unified_arena);
+                    for (uint64_t i = 0; i < total; i++) close_shard(&shards[i]);
+                    free(shards);
+                    free(base_path);
+                    return OC_ERR_OOM;
+                }
+                for (size_t i = 0; i < n_kv; i++) {
+                    kv[i].key = oc_arena_dup(unified_arena, shards[0].parsed.metadata[i].key);
+                    /* Deep-copy the value (handles strings + arrays). */
+                    const OcGgufMetadataValue *sv = &shards[0].parsed.metadata[i].value;
+                    OcGgufMetadataValue *dv = &kv[i].value;
+                    dv->type = sv->type;
+                    switch (sv->type) {
+                    case OC_GGUF_MT_STRING:
+                        dv->v.str.data = oc_arena_dup_n(unified_arena,
+                            sv->v.str.data ? sv->v.str.data : "", sv->v.str.len);
+                        dv->v.str.len = sv->v.str.len;
+                        break;
+                    case OC_GGUF_MT_ARRAY: {
+                        /* Copy element values recursively (simple: just copy
+                         * the union; for STRING elements we deep-copy). */
+                        size_t alen = sv->v.arr.len;
+                        dv->v.arr.elem_type = sv->v.arr.elem_type;
+                        dv->v.arr.len       = alen;
+                        if (alen > 0) {
+                            dv->v.arr.values = (OcGgufMetadataValue *)oc_arena_alloc(
+                                unified_arena, alen * sizeof(OcGgufMetadataValue), 16);
+                            if (!dv->v.arr.values) {
+                                oc_arena_free(unified_arena);
+                                for (uint64_t k = 0; k < total; k++) close_shard(&shards[k]);
+                                free(shards);
+                                free(base_path);
+                                return OC_ERR_OOM;
+                            }
+                            for (size_t j = 0; j < alen; j++) {
+                                dv->v.arr.values[j].type = sv->v.arr.values[j].type;
+                                if (sv->v.arr.elem_type == OC_GGUF_MT_STRING) {
+                                    dv->v.arr.values[j].v.str.data = oc_arena_dup_n(
+                                        unified_arena,
+                                        sv->v.arr.values[j].v.str.data ? sv->v.arr.values[j].v.str.data : "",
+                                        sv->v.arr.values[j].v.str.len);
+                                    dv->v.arr.values[j].v.str.len = sv->v.arr.values[j].v.str.len;
+                                } else {
+                                    /* Numeric/bool: copy the union by value. */
+                                    dv->v.arr.values[j].v = sv->v.arr.values[j].v;
+                                }
+                            }
+                        } else {
+                            dv->v.arr.values = NULL;
+                        }
+                        break;
+                    }
+                    default:
+                        /* Numeric/bool: copy the union by value. */
+                        dv->v = sv->v;
+                        break;
+                    }
+                }
+                unified->metadata = kv;
+            } else {
+                unified->metadata = NULL;
+            }
+
+            out->shards    = shards;
+            out->n_shards  = (size_t)total;
+            free(base_path);
+            return OC_OK;
+        }
+
+        /* Split pattern matched but siblings missing: fall through to
+         * single-file open. */
+        free(base_path);
+        base_path = NULL;
+    }
+
+    /* Single-file: open the path as a single shard. */
+    {
+        OcGgufShard *shards = (OcGgufShard *)calloc(1, sizeof(OcGgufShard));
+        if (!shards) return OC_ERR_OOM;
+
+        OcError e = open_shard(path, &shards[0]);
+        if (e != OC_OK) {
+            free(shards);
+            return e;
+        }
+
+        /* Unified view = shard 0's parsed file, but with the tensor table
+         * deep-copied into a fresh unified arena (so the caller can free
+         * via oc_gguf_map_free() which frees the unified arena + each
+         * shard's per-shard arena). */
+        OcArena *unified_arena = oc_arena_new(0);
+        if (!unified_arena) {
+            close_shard(&shards[0]);
+            free(shards);
+            return OC_ERR_OOM;
+        }
+
+        uint64_t total_tensors = shards[0].parsed.tensor_count;
+        OcGgufTensorInfo *merged = NULL;
+        if (total_tensors > 0) {
+            merged = (OcGgufTensorInfo *)oc_arena_alloc(unified_arena,
+                (size_t)total_tensors * sizeof(OcGgufTensorInfo), 16);
+            if (!merged) {
+                oc_arena_free(unified_arena);
+                close_shard(&shards[0]);
+                free(shards);
+                return OC_ERR_OOM;
+            }
+            memset(merged, 0, (size_t)total_tensors * sizeof(*merged));
+            for (uint64_t i = 0; i < total_tensors; i++) {
+                const OcGgufTensorInfo *src = &shards[0].parsed.tensors[i];
+                merged[i].name = oc_arena_dup(unified_arena, src->name ? src->name : "");
+                merged[i].n_dims           = src->n_dims;
+                memcpy(merged[i].dims, src->dims, sizeof(merged[i].dims));
+                merged[i].ggml_type        = src->ggml_type;
+                merged[i].relative_offset  = src->relative_offset;
+                merged[i].absolute_offset  = src->absolute_offset;
+                merged[i].shard_index     = 0;
+            }
+        }
+
+        OcGgufFile *unified = &out->unified;
+        unified->magic              = shards[0].parsed.magic;
+        unified->version            = shards[0].parsed.version;
+        unified->tensor_count       = total_tensors;
+        unified->metadata_kv_count  = shards[0].parsed.metadata_kv_count;
+        unified->alignment          = shards[0].parsed.alignment;
+        unified->data_section_start = shards[0].parsed.data_section_start;
+        unified->arena             = unified_arena;
+        unified->backing_buf        = shards[0].bytes;
+        unified->backing_len       = shards[0].len;
+        unified->tensors            = merged;
+
+        /* Deep-copy metadata KV (same as multi-shard path). */
+        if (shards[0].parsed.metadata_kv_count > 0) {
+            size_t n_kv = (size_t)shards[0].parsed.metadata_kv_count;
+            OcGgufMetadataKV *kv = (OcGgufMetadataKV *)oc_arena_alloc(
+                unified_arena, n_kv * sizeof(OcGgufMetadataKV), 16);
+            if (!kv) {
+                oc_arena_free(unified_arena);
+                close_shard(&shards[0]);
+                free(shards);
+                return OC_ERR_OOM;
+            }
+            for (size_t i = 0; i < n_kv; i++) {
+                kv[i].key = oc_arena_dup(unified_arena, shards[0].parsed.metadata[i].key);
+                const OcGgufMetadataValue *sv = &shards[0].parsed.metadata[i].value;
+                OcGgufMetadataValue *dv = &kv[i].value;
+                dv->type = sv->type;
+                switch (sv->type) {
+                case OC_GGUF_MT_STRING:
+                    dv->v.str.data = oc_arena_dup_n(unified_arena,
+                        sv->v.str.data ? sv->v.str.data : "", sv->v.str.len);
+                    dv->v.str.len = sv->v.str.len;
+                    break;
+                case OC_GGUF_MT_ARRAY: {
+                    size_t alen = sv->v.arr.len;
+                    dv->v.arr.elem_type = sv->v.arr.elem_type;
+                    dv->v.arr.len       = alen;
+                    if (alen > 0) {
+                        dv->v.arr.values = (OcGgufMetadataValue *)oc_arena_alloc(
+                            unified_arena, alen * sizeof(OcGgufMetadataValue), 16);
+                        if (!dv->v.arr.values) {
+                            oc_arena_free(unified_arena);
+                            close_shard(&shards[0]);
+                            free(shards);
+                            return OC_ERR_OOM;
+                        }
+                        for (size_t j = 0; j < alen; j++) {
+                            dv->v.arr.values[j].type = sv->v.arr.values[j].type;
+                            if (sv->v.arr.elem_type == OC_GGUF_MT_STRING) {
+                                dv->v.arr.values[j].v.str.data = oc_arena_dup_n(
+                                    unified_arena,
+                                    sv->v.arr.values[j].v.str.data ? sv->v.arr.values[j].v.str.data : "",
+                                    sv->v.arr.values[j].v.str.len);
+                                dv->v.arr.values[j].v.str.len = sv->v.arr.values[j].v.str.len;
+                            } else {
+                                dv->v.arr.values[j].v = sv->v.arr.values[j].v;
+                            }
+                        }
+                    } else {
+                        dv->v.arr.values = NULL;
+                    }
+                    break;
+                }
+                default:
+                    dv->v = sv->v;
+                    break;
+                }
+            }
+            unified->metadata = kv;
+        } else {
+            unified->metadata = NULL;
+        }
+
+        out->shards    = shards;
+        out->n_shards  = 1;
+        return OC_OK;
+    }
+}
+
+OcError oc_gguf_map_advise_hugepage(OcGgufMmappedFile *m)
+{
+    if (!m || !m->shards) return OC_ERR_INVALID_ARG;
+    bool all_ok = true;
+    for (size_t i = 0; i < m->n_shards; i++) {
+        if (oc_mmap_advise_hugepage(m->shards[i].mmap) != OC_OK) {
+            all_ok = false;
+        }
+    }
+    m->hugepage_advised = all_ok;
+    return OC_OK;
+}
+
+bool oc_gguf_map_mlock_with_headroom(OcGgufMmappedFile *m)
+{
+    if (!m || !m->shards) return false;
+    bool all_locked = true;
+    for (size_t i = 0; i < m->n_shards; i++) {
+        if (!oc_mmap_mlock_with_headroom(m->shards[i].mmap)) {
+            all_locked = false;
+        }
+    }
+    m->mlocked = all_locked;
+    return all_locked;
+}
+
+uint8_t oc_gguf_map_prefault(const OcGgufMmappedFile *m)
+{
+    if (!m || !m->shards) return 0;
+    uint8_t checksum = 0;
+    for (size_t i = 0; i < m->n_shards; i++) {
+        checksum ^= oc_mmap_prefault(m->shards[i].mmap);
+    }
+    return checksum;
+}
+
+uint8_t oc_gguf_map_prefault_parallel(const OcGgufMmappedFile *m, size_t n_threads)
+{
+    if (!m || !m->shards) return 0;
+    uint8_t checksum = 0;
+    for (size_t i = 0; i < m->n_shards; i++) {
+        checksum ^= oc_mmap_prefault_parallel(m->shards[i].mmap, n_threads);
+    }
+    return checksum;
+}
+
+uint64_t oc_gguf_map_total_bytes(const OcGgufMmappedFile *m)
+{
+    if (!m || !m->shards) return 0;
+    uint64_t total = 0;
+    for (size_t i = 0; i < m->n_shards; i++) {
+        total += (uint64_t)m->shards[i].len;
+    }
+    return total;
+}
+
+const uint8_t *oc_gguf_map_tensor_data(const OcGgufMmappedFile *m,
+                                       const OcGgufTensorInfo *info)
+{
+    if (!m || !info || !m->shards) return NULL;
+    if (info->shard_index >= m->n_shards) return NULL;
+    const OcGgufShard *s = &m->shards[info->shard_index];
+    if (!s->bytes || info->absolute_offset > s->len) return NULL;
+    return s->bytes + info->absolute_offset;
+}
+
+const OcGgufTensorInfo *oc_gguf_map_tensor_get(const OcGgufMmappedFile *m,
+                                               const char *name)
+{
+    if (!m || !name) return NULL;
+    return oc_gguf_tensor_get(&m->unified, name);
+}
+
+OcError oc_gguf_map_mapped_tensor_infos(const OcGgufMmappedFile *m,
+                                        OcArena *arena,
+                                        OcGgufTensorInfo **out_infos,
+                                        size_t *out_count)
+{
+    if (!m || !arena || !out_infos || !out_count) return OC_ERR_INVALID_ARG;
+    *out_infos = NULL;
+    *out_count = 0;
+
+    OcModelArchitecture arch = oc_gguf_arch_from_file(&m->unified);
+
+    size_t n = (size_t)m->unified.tensor_count;
+    if (n == 0) {
+        return OC_OK;
+    }
+
+    OcGgufTensorInfo *infos = (OcGgufTensorInfo *)oc_arena_alloc(
+        arena, n * sizeof(OcGgufTensorInfo), 16);
+    if (!infos) return OC_ERR_OOM;
+    memset(infos, 0, n * sizeof(*infos));
+
+    for (size_t i = 0; i < n; i++) {
+        const OcGgufTensorInfo *src = &m->unified.tensors[i];
+        infos[i].name = oc_gguf_map_tensor_name(arch, src->name ? src->name : "", arena);
+        if (!infos[i].name) return OC_ERR_OOM;
+        infos[i].n_dims          = src->n_dims;
+        memcpy(infos[i].dims, src->dims, sizeof(infos[i].dims));
+        infos[i].ggml_type       = src->ggml_type;
+        infos[i].relative_offset = src->relative_offset;
+        infos[i].absolute_offset = src->absolute_offset;
+        infos[i].shard_index    = src->shard_index;
+    }
+
+    *out_infos = infos;
+    *out_count = n;
+    return OC_OK;
+}
+
+void oc_gguf_map_free(OcGgufMmappedFile *out)
+{
+    if (!out) return;
+    /* Free the unified arena (owns merged tensors + deep-copied metadata). */
+    if (out->unified.arena) {
+        oc_arena_free(out->unified.arena);
+    }
+    /* Free each shard (mmap + per-shard parsed arena). */
+    if (out->shards) {
+        for (size_t i = 0; i < out->n_shards; i++) {
+            close_shard(&out->shards[i]);
+        }
+        free(out->shards);
+    }
+    memset(out, 0, sizeof(*out));
+}
+

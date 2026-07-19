@@ -16,9 +16,9 @@ CC      ?= gcc
 CFLAGS  ?= -std=c11 -Wall -Wextra -Werror -O2 -Iinclude
 LDFLAGS ?= -lm -lpthread
 
-# Library sources (core + util + format). Compute/model/server/cli are added
-# by their respective feature workers.
-LIB_SRCS := $(wildcard src/core/*.c src/util/*.c src/format/*.c)
+# Library sources (core + util + format + model). Compute/model/server/cli
+# are added by their respective feature workers.
+LIB_SRCS := $(wildcard src/core/*.c src/util/*.c src/format/*.c src/model/*.c)
 LIB_OBJS := $(LIB_SRCS:.c=.o)
 
 # Binary sources (CLI main). Added by cli-flags-modes feature; for now a stub.

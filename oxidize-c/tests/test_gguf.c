@@ -4,7 +4,9 @@
  * VAL-FOUND-003 (all 11 metadata KV value types round-trip),
  * VAL-FOUND-004 (tensor table extraction), VAL-FOUND-013 (malformed →
  * OC_ERR_FORMAT, no crash), VAL-FOUND-014 (bit-exact tensor inventory vs
- * Rust on valid-v3.gguf).
+ * Rust on valid-v3.gguf), VAL-FOUND-005 (multi-shard unified view),
+ * VAL-FOUND-006 (mmap with MADV_HUGEPAGE), VAL-FOUND-015 (mmap/arena
+ * lifecycle valgrind-clean — ASan substitutes locally).
  *
  * Fixtures live in oxidize-core/tests/fixtures/ (shared with the Rust
  * reference). The fixtures are tiny (132 bytes each) so they live in the
@@ -14,6 +16,12 @@
  * captured expectations in its `#[cfg(test)] mod tests` (see the
  * `parses_v3_header_tensor_info_and_alignment` test for the exact values).
  */
+
+/* Expose POSIX helpers used by the multi-shard test (mkdtemp, rmdir, remove). */
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include <criterion/criterion.h>
 #include <criterion/redirect.h>
 
@@ -23,6 +31,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>   /* for mkdtemp, rmdir */
 
 /* Fixture path: oxidize-core/tests/fixtures/<name>.gguf, relative to the
  * oxidize-c/ directory where `make test` runs. */
@@ -569,3 +578,299 @@ Test(gguf, parse_from_caller_buffer_does_not_own_it)
     oc_gguf_free(&f2);
     oc_gguf_free(&f);
 }
+
+/* ─── Multi-shard unified view (VAL-FOUND-005) ────────────────────────── */
+
+/* Helper: build a minimal valid GGUF buffer with the given tensor name +
+ * 4-byte data payload. Used to synthesize shard fixtures in a temp dir. */
+static uint8_t *build_minimal_shard(const char *tensor_name,
+                                    const uint8_t data[4],
+                                    size_t *out_len)
+{
+    /* Layout:
+     *   header: magic(4) | version(4) | tensor_count(8) | kv_count(8)  = 24 bytes
+     *   tensor: name_len(8) | name(N) | n_dims(4) | dims[2](16) | type(4) | offset(8) = 40+N
+     *   data_section_start = align_up(24 + 40 + N, 32)
+     *   data: 4 bytes
+     */
+    size_t name_len = strlen(tensor_name);
+    size_t header = 24;
+    size_t tensor_info = 8 + name_len + 4 + 16 + 4 + 8;
+    size_t pre_data = header + tensor_info;
+    /* align to 32 */
+    size_t data_start = (pre_data + 31) & ~(size_t)31;
+    size_t total = data_start + 4;
+
+    uint8_t *buf = calloc(total, 1);
+    cr_assert_not_null(buf, "calloc");
+
+    size_t off = 0;
+    uint32_t magic = OC_GGUF_MAGIC, ver = 3;
+    uint64_t tc = 1, kvc = 0;
+    memcpy(buf + off, &magic, 4); off += 4;
+    memcpy(buf + off, &ver,   4); off += 4;
+    memcpy(buf + off, &tc,    8); off += 8;
+    memcpy(buf + off, &kvc,   8); off += 8;
+    /* tensor name */
+    uint64_t nl = name_len;
+    memcpy(buf + off, &nl, 8); off += 8;
+    memcpy(buf + off, tensor_name, name_len); off += name_len;
+    /* n_dims = 2 */
+    uint32_t nd = 2;
+    memcpy(buf + off, &nd, 4); off += 4;
+    /* dims = [1, 1] (1 element, 1 row) */
+    uint64_t d0 = 1, d1 = 1;
+    memcpy(buf + off, &d0, 8); off += 8;
+    memcpy(buf + off, &d1, 8); off += 8;
+    /* ggml_type = 0 (F32) */
+    uint32_t gt = 0;
+    memcpy(buf + off, &gt, 4); off += 4;
+    /* relative_offset = 0 (data starts at data_section_start) */
+    uint64_t ro = 0;
+    memcpy(buf + off, &ro, 8); off += 8;
+    /* pad to data_start */
+    while (off < data_start) {
+        buf[off++] = 0;
+    }
+    /* data */
+    memcpy(buf + data_start, data, 4);
+
+    *out_len = total;
+    return buf;
+}
+
+Test(gguf, multishard_unified_view)
+{
+    /* VAL-FOUND-005: open model-00001-of-00003.gguf and the parser exposes
+     * a single unified tensor view across all 3 shards. */
+    char tmpl[] = "/tmp/oxidize-c-multishard-XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    cr_assert_not_null(dir, "mkdtemp");
+
+    /* Build 3 shards, each containing one uniquely-named tensor. */
+    const char *names[3] = {
+        "tok_embeddings.weight",
+        "blk.0.attn_q.weight",
+        "output.weight",
+    };
+    uint8_t data[3][4] = {
+        {10, 20, 30, 40},
+        {50, 60, 70, 80},
+        {90, 100, 110, 120},
+    };
+
+    char paths[3][512];
+    for (int i = 0; i < 3; i++) {
+        snprintf(paths[i], sizeof(paths[i]), "%s/model-%05d-of-%05d.gguf",
+                 dir, i + 1, 3);
+        size_t len = 0;
+        uint8_t *buf = build_minimal_shard(names[i], data[i], &len);
+        cr_assert_not_null(buf, "build shard %d", i);
+        FILE *f = fopen(paths[i], "wb");
+        cr_assert_not_null(f, "fopen shard %d", i);
+        cr_assert_eq(fwrite(buf, 1, len, f), len, "fwrite shard %d", i);
+        fclose(f);
+        free(buf);
+    }
+
+    /* Open shard 1 via oc_gguf_map_open — should detect the multi-shard
+     * pattern and load all 3 shards. */
+    OcGgufMmappedFile m;
+    OcError e = oc_gguf_map_open(paths[0], &m);
+    cr_assert_eq(e, OC_OK, "map_open: %s", oc_error_msg(e));
+    cr_assert_eq(m.n_shards, 3, "expected 3 shards");
+    cr_assert_eq(m.unified.tensor_count, 3, "expected 3 tensors in unified view");
+
+    /* Verify each tensor is accessible with the right name + data. */
+    for (int i = 0; i < 3; i++) {
+        const OcGgufTensorInfo *t = &m.unified.tensors[i];
+        cr_assert_str_eq(t->name, names[i], "tensor %d name", i);
+        cr_assert_eq(t->shard_index, (uint32_t)i, "tensor %d shard_index", i);
+        const uint8_t *d = oc_gguf_map_tensor_data(&m, t);
+        cr_assert_not_null(d, "tensor %d data", i);
+        cr_assert_eq(d[0], data[i][0], "tensor %d data[0]", i);
+        cr_assert_eq(d[1], data[i][1], "tensor %d data[1]", i);
+        cr_assert_eq(d[2], data[i][2], "tensor %d data[2]", i);
+        cr_assert_eq(d[3], data[i][3], "tensor %d data[3]", i);
+    }
+
+    /* Look up a tensor by name via oc_gguf_map_tensor_get. */
+    const OcGgufTensorInfo *t = oc_gguf_map_tensor_get(&m, "blk.0.attn_q.weight");
+    cr_assert_not_null(t, "tensor_get should find blk.0.attn_q.weight");
+    cr_assert_str_eq(t->name, "blk.0.attn_q.weight", "name");
+
+    oc_gguf_map_free(&m);
+
+    /* Cleanup temp dir. */
+    for (int i = 0; i < 3; i++) {
+        remove(paths[i]);
+    }
+    rmdir(dir);
+}
+
+Test(gguf, multishard_falls_back_to_single_when_siblings_missing)
+{
+    /* If the path matches the pattern but sibling shards don't exist, fall
+     * back to a single-shard load. */
+    char tmpl[] = "/tmp/oxidize-c-single-XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    cr_assert_not_null(dir, "mkdtemp");
+
+    /* Write only shard 1 (shards 2 and 3 don't exist). */
+    char path[512];
+    snprintf(path, sizeof(path), "%s/model-%05d-of-%05d.gguf", dir, 1, 3);
+    uint8_t data[4] = {1, 2, 3, 4};
+    size_t len = 0;
+    uint8_t *buf = build_minimal_shard("tok_embeddings.weight", data, &len);
+    FILE *f = fopen(path, "wb");
+    cr_assert_not_null(f, "fopen");
+    cr_assert_eq(fwrite(buf, 1, len, f), len, "fwrite");
+    fclose(f);
+    free(buf);
+
+    /* Should load as single shard (siblings missing). */
+    OcGgufMmappedFile m;
+    OcError e = oc_gguf_map_open(path, &m);
+    cr_assert_eq(e, OC_OK, "map_open: %s", oc_error_msg(e));
+    cr_assert_eq(m.n_shards, 1, "should fall back to single shard");
+    cr_assert_eq(m.unified.tensor_count, 1, "tensor_count");
+
+    oc_gguf_map_free(&m);
+    remove(path);
+    rmdir(dir);
+}
+
+Test(gguf, mapped_tensor_infos_returns_mapped_names)
+{
+    /* oc_gguf_map_mapped_tensor_infos() returns a fresh array with mapped
+     * tensor names. The fixture has no architecture metadata, so the arch
+     * defaults to UNKNOWN and names pass through unchanged. We verify the
+     * function works end-to-end (allocates from the caller's arena, returns
+     * the right count). */
+    OcGgufMmappedFile m;
+    OcError e = oc_gguf_map_open(FIXTURE("valid-v3.gguf"), &m);
+    cr_assert_eq(e, OC_OK, "map_open: %s", oc_error_msg(e));
+
+    OcArena *arena = oc_arena_new(0);
+    cr_assert_not_null(arena, "arena");
+
+    OcGgufTensorInfo *infos = NULL;
+    size_t count = 0;
+    e = oc_gguf_map_mapped_tensor_infos(&m, arena, &infos, &count);
+    cr_assert_eq(e, OC_OK, "mapped_tensor_infos: %s", oc_error_msg(e));
+    cr_assert_eq(count, 1, "count should be 1");
+    cr_assert_not_null(infos, "infos should be non-NULL");
+    /* Unknown arch → name passes through unchanged. */
+    cr_assert_str_eq(infos[0].name, "tok_embeddings.weight", "name");
+    cr_assert_eq(infos[0].shard_index, 0, "shard_index");
+    cr_assert_eq(infos[0].absolute_offset, 128, "absolute_offset");
+
+    oc_arena_free(arena);
+    oc_gguf_map_free(&m);
+}
+
+Test(gguf, arch_from_file_detects_general_architecture_key)
+{
+    /* Build a synthetic GGUF with `general.architecture = "llama"` and verify
+     * oc_gguf_arch_from_file() returns OC_ARCH_LLAMA. */
+    size_t cap = 256;
+    uint8_t *buf = calloc(cap, 1);
+    cr_assert_not_null(buf);
+    size_t off = 0;
+    uint32_t magic = OC_GGUF_MAGIC, ver = 3, vt = OC_GGUF_MT_STRING;
+    uint64_t tc = 0, kvc = 1;
+    const char *key = "general.architecture";   /* 20 chars */
+    size_t kl = strlen(key);
+    uint64_t kl64 = kl;
+    const char *val = "llama";                    /* 5 chars */
+    size_t sl = strlen(val);
+    uint64_t sl64 = sl;
+
+    memcpy(buf + off, &magic, 4); off += 4;
+    memcpy(buf + off, &ver,   4); off += 4;
+    memcpy(buf + off, &tc,    8); off += 8;
+    memcpy(buf + off, &kvc,   8); off += 8;
+    memcpy(buf + off, &kl64,  8); off += 8;
+    memcpy(buf + off, key,   kl); off += kl;
+    memcpy(buf + off, &vt,    4); off += 4;
+    memcpy(buf + off, &sl64,  8); off += 8;
+    memcpy(buf + off, val,    sl); off += sl;
+
+    OcGgufFile f;
+    OcError e = oc_gguf_parse(buf, cap, &f);
+    cr_assert_eq(e, OC_OK, "parse: %s", oc_error_msg(e));
+    cr_assert_eq(oc_gguf_arch_from_file(&f), OC_ARCH_LLAMA, "arch should be Llama");
+
+    oc_gguf_free(&f);
+    free(buf);
+}
+
+Test(gguf, arch_from_file_detects_namespace_fallback)
+{
+    /* If `general.architecture` is absent, scan metadata keys for an
+     * `<arch>.*` namespace. Build a GGUF with `qwen2.block_count = 32`. */
+    size_t cap = 256;
+    uint8_t *buf = calloc(cap, 1);
+    cr_assert_not_null(buf);
+    size_t off = 0;
+    uint32_t magic = OC_GGUF_MAGIC, ver = 3, vt = OC_GGUF_MT_UINT32;
+    uint64_t tc = 0, kvc = 1;
+    const char *key = "qwen2.block_count";
+    size_t kl = strlen(key);
+    uint64_t kl64 = kl;
+    uint32_t val = 32;
+
+    memcpy(buf + off, &magic, 4); off += 4;
+    memcpy(buf + off, &ver,   4); off += 4;
+    memcpy(buf + off, &tc,    8); off += 8;
+    memcpy(buf + off, &kvc,   8); off += 8;
+    memcpy(buf + off, &kl64,  8); off += 8;
+    memcpy(buf + off, key,   kl); off += kl;
+    memcpy(buf + off, &vt,    4); off += 4;
+    memcpy(buf + off, &val,   4); off += 4;
+
+    OcGgufFile f;
+    OcError e = oc_gguf_parse(buf, cap, &f);
+    cr_assert_eq(e, OC_OK, "parse: %s", oc_error_msg(e));
+    cr_assert_eq(oc_gguf_arch_from_file(&f), OC_ARCH_QWEN, "arch should be Qwen");
+
+    oc_gguf_free(&f);
+    free(buf);
+}
+
+Test(gguf, arch_from_file_returns_unknown_when_no_metadata)
+{
+    /* A GGUF with no architecture-relevant metadata returns OC_ARCH_UNKNOWN. */
+    size_t cap = 256;
+    uint8_t *buf = calloc(cap, 1);
+    cr_assert_not_null(buf);
+    size_t off = 0;
+    uint32_t magic = OC_GGUF_MAGIC, ver = 3, vt = OC_GGUF_MT_STRING;
+    uint64_t tc = 0, kvc = 1;
+    const char *key = "general.name";
+    size_t kl = strlen(key);
+    uint64_t kl64 = kl;
+    const char *val = "test";
+    size_t sl = strlen(val);
+    uint64_t sl64 = sl;
+
+    memcpy(buf + off, &magic, 4); off += 4;
+    memcpy(buf + off, &ver,   4); off += 4;
+    memcpy(buf + off, &tc,    8); off += 8;
+    memcpy(buf + off, &kvc,   8); off += 8;
+    memcpy(buf + off, &kl64,  8); off += 8;
+    memcpy(buf + off, key,   kl); off += kl;
+    memcpy(buf + off, &vt,    4); off += 4;
+    memcpy(buf + off, &sl64,  8); off += 8;
+    memcpy(buf + off, val,    sl); off += sl;
+
+    OcGgufFile f;
+    OcError e = oc_gguf_parse(buf, cap, &f);
+    cr_assert_eq(e, OC_OK, "parse: %s", oc_error_msg(e));
+    cr_assert_eq(oc_gguf_arch_from_file(&f), OC_ARCH_UNKNOWN,
+        "arch should be UNKNOWN for non-arch metadata");
+
+    oc_gguf_free(&f);
+    free(buf);
+}
+
