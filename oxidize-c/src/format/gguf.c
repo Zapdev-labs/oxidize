@@ -187,6 +187,17 @@ static OcError read_array(ByteReader *r, OcArena *arena,
     if (e != OC_OK) return e;
     OcGgufMetadataType elem_type = oc_gguf_metadata_type_from_u32(et_raw);
     if (elem_type == OC_GGUF_MT_UNKNOWN) return OC_ERR_FORMAT;
+    /* Reject nested ARRAY (ARRAY-of-ARRAY) — non-spec: the GGUF format only
+     * permits arrays of scalar/string types. Permitting nested arrays would
+     * also leave the OcGgufMetadataArray recursion with no terminator and
+     * complicate the multi-shard deep-copy (dangling pointer risk on the
+     * shared-by-reference value storage). Mirrors Rust oxidize-core which
+     * returns Format error on recursive ARRAY. */
+    if (elem_type == OC_GGUF_MT_ARRAY) {
+        oc_log(OC_LOG_ERROR, "gguf: nested ARRAY metadata type rejected "
+                "(non-spec, element_type=%u)", et_raw);
+        return OC_ERR_FORMAT;
+    }
 
     uint64_t len64 = 0;
     e = reader_read_u64(r, &len64);

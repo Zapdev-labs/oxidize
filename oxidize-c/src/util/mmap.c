@@ -170,10 +170,15 @@ OcError oc_mmap_open_fd(int fd, size_t len, OcMmap **out)
     if (!m) return OC_ERR_OOM;
 
 #ifdef __linux__
+    /* Note: oc_mmap_open_fd takes ownership of `fd` (m->fd = fd on success,
+     * and oc_mmap_close() will close it). Every error path must therefore
+     * close(fd) here — mirroring oc_mmap_open_readonly's cleanup — otherwise
+     * the caller has no way to reclaim the fd and it leaks. */
     void *addr = mmap(NULL, len, PROT_READ, MAP_PRIVATE, fd, 0);
     if (addr == MAP_FAILED) {
         oc_log(OC_LOG_ERROR, "mmap: mmap(fd=%d, %zu) failed: %s", fd, len,
                 strerror(errno));
+        close(fd);
         free(m);
         return OC_ERR_OOM;
     }
@@ -185,8 +190,9 @@ OcError oc_mmap_open_fd(int fd, size_t len, OcMmap **out)
     *out = m;
     return OC_OK;
 #else
-    (void)fd;
-    (void)len;
+    /* Non-Linux: oc_mmap_open_fd is unsupported (no mmap syscall). Close the
+     * caller-provided fd so it doesn't leak, then return OC_ERR_INVALID_ARG. */
+    (void)close(fd);
     free(m);
     return OC_ERR_INVALID_ARG;
 #endif

@@ -512,6 +512,37 @@ Test(gguf, unknown_metadata_value_type_rejected)
     cr_assert_eq(e, OC_ERR_FORMAT, "unknown metadata type must return OC_ERR_FORMAT");
 }
 
+Test(gguf, nested_array_metadata_rejected)
+{
+    /* GGUF spec forbids arrays-of-arrays (ARRAY element_type must be a scalar
+     * or STRING). Verify the parser rejects a KV whose value_type=ARRAY and
+     * whose array's element_type is also ARRAY — returns OC_ERR_FORMAT, no
+     * crash, no infinite recursion. */
+    uint8_t buf[64];
+    size_t off = 0;
+    uint32_t magic = OC_GGUF_MAGIC, ver = 3;
+    uint32_t kv_vt = OC_GGUF_MT_ARRAY;     /* top-level value is ARRAY */
+    uint32_t arr_elem_type = OC_GGUF_MT_ARRAY;  /* nested ARRAY (non-spec) */
+    uint64_t arr_len = 0;                  /* 0 elements — still rejected */
+    uint64_t tc = 0, kvc = 1, kl = 5;
+    const char *key = "k.a2";
+    memcpy(buf + off, &magic, 4); off += 4;
+    memcpy(buf + off, &ver,   4); off += 4;
+    memcpy(buf + off, &tc,    8); off += 8;
+    memcpy(buf + off, &kvc,   8); off += 8;
+    memcpy(buf + off, &kl,    8); off += 8;
+    memcpy(buf + off, key,   5); off += 5;
+    memcpy(buf + off, &kv_vt,        4); off += 4;  /* KV value_type = ARRAY */
+    memcpy(buf + off, &arr_elem_type, 4); off += 4; /* array element_type = ARRAY */
+    memcpy(buf + off, &arr_len,       8); off += 8; /* array length = 0 */
+
+    OcGgufFile f;
+    OcError e = oc_gguf_parse(buf, off, &f);
+    cr_assert_eq(e, OC_ERR_FORMAT,
+        "nested ARRAY element_type must return OC_ERR_FORMAT, got %s",
+        oc_error_msg(e));
+}
+
 Test(gguf, missing_file_returns_io_error)
 {
     OcGgufFile f;

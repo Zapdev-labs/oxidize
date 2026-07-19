@@ -71,8 +71,30 @@ tests/%.o: tests/%.c
 src/%.o: src/%.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
+# Test filtering: `make test TEST_FILTER=<pattern>` runs only matching tests.
+# Pattern conventions (validated by scrutiny + the validation contract):
+#   * test_<suite>_<case_prefix>   → criterion filter `<suite>/<case_prefix>*`
+#     e.g. TEST_FILTER=test_gguf_v3_header → --filter 'gguf/v3_header*'
+#   * <suite>/<case> or <suite>/<case>*  → passed through to criterion verbatim
+#   * any other pattern                  → passed through to criterion verbatim
+# When TEST_FILTER is empty (default), all tests run.
+TEST_FILTER ?=
+
 test: test_runner
-	./test_runner
+	@if [ -z "$(TEST_FILTER)" ]; then \
+		./test_runner; \
+	else \
+		f="$(TEST_FILTER)"; \
+		case "$$f" in \
+			test_*_*) \
+				s="$${f#test_}"; \
+				suite="$${s%%_*}"; \
+				case_prefix="$${s#*_}"; \
+				./test_runner --filter "$$suite/$$case_prefix*" ;; \
+			*) \
+				./test_runner --filter "$$f" ;; \
+		esac; \
+	fi
 
 # Lint: clang-tidy on library sources. Focused on bug-finding checks;
 # stylistic checks (short names, braces-around-statements, etc.) are excluded
