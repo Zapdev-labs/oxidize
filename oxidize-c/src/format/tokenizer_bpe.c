@@ -1198,26 +1198,54 @@ OcError oc_tokenizer_encode(const OcTokenizer *t, const char *text,
     *out_ids = NULL;
     *out_count = 0;
 
-    if (t->kind != OC_TOK_KIND_BPE || !t->bpe) {
+    /* Determine whether BOS should be prepended after the kind-specific
+     * encode runs. OC_TOK_ADD_BOS mirrors Rust `EncodeOptions { add_bos:
+     * true }` — the BOS id is prepended only when the tokenizer has one. */
+    bool prepend_bos = (policy == OC_TOK_ADD_BOS) && t->has_bos;
+
+    /* For BPE, OC_TOK_DISALLOW_SPECIAL suppresses special-piece matching;
+     * for the other kinds (SP/WP/Tiktoken) there is no special-piece
+     * pre-split, so DISALLOW_SPECIAL behaves the same as ALLOW_SPECIAL. */
+    OcError e;
+    if (t->kind == OC_TOK_KIND_BPE && t->bpe) {
+        const OcBpeTokenizer *bpe = t->bpe;
+        if (policy == OC_TOK_DISALLOW_SPECIAL) {
+            OcBpeTokenizer tmp = *bpe;
+            tmp.n_special_pieces = 0;
+            e = oc_bpe_encode(&tmp, text, out_ids, out_count);
+        } else {
+            e = oc_bpe_encode(bpe, text, out_ids, out_count);
+        }
+    } else if (t->kind == OC_TOK_KIND_SENTENCEPIECE && t->sp) {
+        e = oc_sp_encode(t->sp, text, out_ids, out_count);
+    } else if (t->kind == OC_TOK_KIND_WORDPIECE && t->wp) {
+        e = oc_wp_encode(t->wp, text, out_ids, out_count);
+    } else if (t->kind == OC_TOK_KIND_TIKTOKEN && t->tiktoken) {
+        e = oc_tiktoken_encode(t->tiktoken, text, out_ids, out_count);
+    } else {
         return OC_ERR_TOKENIZER;
     }
+    if (e != OC_OK) return e;
 
-    const OcBpeTokenizer *bpe = t->bpe;
-
-    /* Policy dispatch:
-     *   OC_TOK_DISALLOW_SPECIAL — temporarily ignore special_pieces so
-     *     special-token strings are treated as literal text (injection
-     *     prevention, VAL-TOK-004).
-     *   OC_TOK_ALLOW_SPECIAL / OC_TOK_DEFAULT — honor special_pieces. */
-    if (policy == OC_TOK_DISALLOW_SPECIAL) {
-        /* Construct a temporary view with n_special_pieces = 0. This is
-         * safe because we don't modify the tokenizer — we just pass a
-         * stack-local copy with the field zeroed. */
-        OcBpeTokenizer tmp = *bpe;
-        tmp.n_special_pieces = 0;
-        return oc_bpe_encode(&tmp, text, out_ids, out_count);
+    /* Prepend BOS if requested and the tokenizer has one (VAL-TOK-007). */
+    if (prepend_bos && out_ids) {
+        size_t n = *out_count;
+        uint32_t *with_bos = (uint32_t *)malloc((n + 1) * sizeof(uint32_t));
+        if (!with_bos) {
+            free(*out_ids);
+            *out_ids = NULL;
+            *out_count = 0;
+            return OC_ERR_OOM;
+        }
+        with_bos[0] = t->bos_id;
+        if (n > 0) {
+            memcpy(with_bos + 1, *out_ids, n * sizeof(uint32_t));
+        }
+        free(*out_ids);
+        *out_ids = with_bos;
+        *out_count = n + 1;
     }
-    return oc_bpe_encode(bpe, text, out_ids, out_count);
+    return OC_OK;
 }
 
 OcError oc_tokenizer_decode(const OcTokenizer *t, const uint32_t *ids,
@@ -1225,9 +1253,6 @@ OcError oc_tokenizer_decode(const OcTokenizer *t, const uint32_t *ids,
 {
     if (!t || !out_text) return OC_ERR_INVALID_ARG;
     *out_text = NULL;
-    if (t->kind != OC_TOK_KIND_BPE || !t->bpe) {
-        return OC_ERR_TOKENIZER;
-    }
     if (count == 0 || !ids) {
         char *empty = (char *)malloc(1);
         if (!empty) return OC_ERR_OOM;
@@ -1235,7 +1260,19 @@ OcError oc_tokenizer_decode(const OcTokenizer *t, const uint32_t *ids,
         *out_text = empty;
         return OC_OK;
     }
-    return oc_bpe_decode(t->bpe, ids, count, out_text);
+    if (t->kind == OC_TOK_KIND_BPE && t->bpe) {
+        return oc_bpe_decode(t->bpe, ids, count, out_text);
+    }
+    if (t->kind == OC_TOK_KIND_SENTENCEPIECE && t->sp) {
+        return oc_sp_decode(t->sp, ids, count, out_text);
+    }
+    if (t->kind == OC_TOK_KIND_WORDPIECE && t->wp) {
+        return oc_wp_decode(t->wp, ids, count, out_text);
+    }
+    if (t->kind == OC_TOK_KIND_TIKTOKEN && t->tiktoken) {
+        return oc_tiktoken_decode(t->tiktoken, ids, count, out_text);
+    }
+    return OC_ERR_TOKENIZER;
 }
 
 bool oc_tokenizer_is_special(const OcTokenizer *t, uint32_t id)
@@ -1279,8 +1316,19 @@ void oc_bpe_free(OcBpeTokenizer *bpe)
 void oc_tokenizer_free(OcTokenizer *t)
 {
     if (!t) return;
+    /* Free the per-kind malloc'd internals. The arena owns all other
+     * allocations (token strings, id_to_token arrays, scores, etc.). */
     if (t->bpe) {
         oc_bpe_free(t->bpe);
+    }
+    if (t->sp) {
+        oc_sp_free(t->sp);
+    }
+    if (t->wp) {
+        oc_wp_free(t->wp);
+    }
+    if (t->tiktoken) {
+        oc_tiktoken_free(t->tiktoken);
     }
     if (t->arena) {
         oc_arena_free(t->arena);

@@ -6,18 +6,17 @@
  * Dispatch: `oc_tokenizer_load_from_gguf()` reads `tokenizer.ggml.model`
  * from GGUF metadata and dispatches to the format-specific loader:
  *   - "gpt2" | "lfm2" | "lfm2moe"  → BPE (byte-level, tiktoken-style)
- *   - "llama" | "gemma" | "gemma4" → SentencePiece (future feature)
- *   - "bert"                       → WordPiece (future feature)
- *   - "tiktoken"                   → Tiktoken (future feature)
+ *   - "llama" | "gemma" | "gemma4" → SentencePiece (unigram, Viterbi)
+ *   - "bert"                       → WordPiece (## continuation)
+ *   - "tiktoken"                   → Tiktoken (raw byte-level)
  *   - <other>                      → OC_ERR_TOKENIZER
  *
- * The BPE path (the only one implemented by the `tokenizer-bpe-qwen`
- * feature) is a faithful port of the Rust `BpeTokenizer`: byte-level
- * encoding via the GPT-2 `bytes_to_unicode` table, merge-rank hash lookup,
- * special-piece pre-split (CONTROL/USER_DEFINED tokens like `<|im_start|>`),
- * and ChatML template rendering. No regex pre-tokenization is performed —
- * matching the Rust reference exactly (VAL-TOK-001, VAL-TOK-011 require
- * bit-exact parity with Rust `LoadedTokenizer::Bpe`).
+ * All four paths are faithful ports of the Rust `LoadedTokenizer` variants.
+ * Round-trip parity with Rust is a hard invariant (VAL-TOK-006..011):
+ *   - SentencePiece unigram Viterbi segmentation (Llama/Gemma)
+ *   - WordPiece greedy longest-match with `##` continuation (BERT)
+ *   - Tiktoken raw byte-level merge ranks (no GPT-2 byte_to_unicode mapping)
+ *   - BPE byte-level with GPT-2 byte_to_unicode mapping (Qwen/GPT2/LFM2)
  */
 #ifndef OXIDIZE_TOKENIZER_H
 #define OXIDIZE_TOKENIZER_H
@@ -60,11 +59,18 @@ typedef enum {
  *     `encode` path always honors `special_pieces` when present). Kept as a
  *     distinct value so callers can request "the tokenizer's default
  *     behavior" without having to know which kind is loaded.
+ *
+ *   OC_TOK_ADD_BOS          — like `OC_TOK_ALLOW_SPECIAL`, but additionally
+ *     prepends the BOS token id when the tokenizer has one configured
+ *     (`has_bos == true`). Mirrors Rust `EncodeOptions { add_bos: true, .. }`
+ *     (VAL-TOK-007). Used by Llama/Gemma callers that need the leading BOS
+ *     per arch convention.
  */
 typedef enum {
-    OC_TOK_DEFAULT         = 0,
-    OC_TOK_ALLOW_SPECIAL   = 1,
+    OC_TOK_DEFAULT          = 0,
+    OC_TOK_ALLOW_SPECIAL    = 1,
     OC_TOK_DISALLOW_SPECIAL = 2,
+    OC_TOK_ADD_BOS          = 3,
 } OcSpecialTokenPolicy;
 
 /* Chat template kinds. `OC_TEMPLATE_CHATML` is the fast-path ChatML renderer
@@ -81,17 +87,49 @@ typedef struct OcChatMessage {
     const char *content;
 } OcChatMessage;
 
+/* ─── Helper types for tokenizer constructors (test/advanced use) ────── */
+
+/* A (piece, score) pair for constructing a SentencePiece unigram tokenizer.
+ * Mirrors the Rust `(&str, f32)` tuple passed to
+ * `SentencePieceUnigramTokenizer::new`. `score` is the log-probability of
+ * the piece (higher = more probable); the Viterbi best-path search
+ * maximizes the summed score. */
+typedef struct OcSpPiece {
+    const char *piece;
+    float       score;
+} OcSpPiece;
+
+/* A non-NUL-terminated byte slice (pointer + length). Used by the Tiktoken
+ * constructor because raw tiktoken vocab tokens are arbitrary byte
+ * sequences (they may contain NUL bytes or invalid UTF-8). */
+typedef struct OcByteSlice {
+    const uint8_t *data;
+    size_t         len;
+} OcByteSlice;
+
+/* A (left, right) pair of byte slices, used to declare Tiktoken merge rules. */
+typedef struct OcByteSlicePair {
+    OcByteSlice left;
+    OcByteSlice right;
+} OcByteSlicePair;
+
 /* ─── Loaded tokenizer ─────────────────────────────────────────────────── */
 
-/* Opaque BPE tokenizer state (defined in tokenizer_bpe.c). */
-typedef struct OcBpeTokenizer OcBpeTokenizer;
+/* Opaque per-kind tokenizer states (defined in their respective .c files). */
+typedef struct OcBpeTokenizer           OcBpeTokenizer;
+typedef struct OcSentencePieceTokenizer OcSentencePieceTokenizer;
+typedef struct OcWordPieceTokenizer     OcWordPieceTokenizer;
+typedef struct OcTiktokenTokenizer       OcTiktokenTokenizer;
 
-/* A loaded tokenizer. `kind` selects the implementation; `bpe` points to the
- * BPE state when `kind == OC_TOK_KIND_BPE` (NULL otherwise). The struct owns
+/* A loaded tokenizer. `kind` selects the implementation; the corresponding
+ * pointer field is set (`bpe`, `sp`, `wp`, or `tiktoken`). The struct owns
  * its arena; `oc_tokenizer_free()` releases all memory. */
 typedef struct OcTokenizer {
     OcTokenizerKind  kind;
-    OcBpeTokenizer  *bpe;     /* valid iff kind == OC_TOK_KIND_BPE        */
+    OcBpeTokenizer           *bpe;       /* valid iff kind == OC_TOK_KIND_BPE            */
+    OcSentencePieceTokenizer *sp;         /* valid iff kind == OC_TOK_KIND_SENTENCEPIECE  */
+    OcWordPieceTokenizer     *wp;         /* valid iff kind == OC_TOK_KIND_WORDPIECE      */
+    OcTiktokenTokenizer      *tiktoken;   /* valid iff kind == OC_TOK_KIND_TIKTOKEN       */
     OcArena          *arena;   /* owns all tokenizer-lifetime allocations  */
     /* Special-token ids loaded from `tokenizer.ggml.*_token_id` metadata. */
     uint32_t unknown_id;  bool has_unknown;
@@ -102,7 +140,7 @@ typedef struct OcTokenizer {
     uint32_t cls_id;      bool has_cls;
     uint32_t mask_id;     bool has_mask;
     /* `tokenizer.ggml.add_bos_token` (false when metadata absent; BPE
-     * models do not add BOS by default). */
+     * models do not add BOS by default; SP models do). */
     bool add_bos_token;
     bool has_add_bos_token;
 } OcTokenizer;
@@ -202,6 +240,118 @@ OcError oc_bpe_decode(const OcBpeTokenizer *bpe, const uint32_t *ids,
  * oc_bpe_train(). When the tokenizer was loaded via oc_tokenizer_load_from_gguf(),
  * oc_tokenizer_free() already calls this. */
 void oc_bpe_free(OcBpeTokenizer *bpe);
+
+/* ─── SentencePiece direct API (for testing / advanced callers) ──────── */
+
+/* Load a SentencePiece unigram tokenizer from GGUF metadata. Reads
+ * `tokenizer.ggml.tokens` and `tokenizer.ggml.scores` (both required).
+ * `scores` is the per-token log-probability used by the Viterbi best-path
+ * search. All allocations live in `arena`. Mirrors Rust `load_sentencepiece`. */
+OcError oc_sp_load_from_gguf(const OcGgufFile *gguf, OcArena *arena,
+                             OcSentencePieceTokenizer **out);
+
+/* Copy the SentencePiece tokenizer's special-token ids into the wrapper. */
+void oc_sp_fill_special_tokens(const OcSentencePieceTokenizer *sp, OcTokenizer *out);
+
+/* Construct a SentencePiece tokenizer from an explicit (piece, score) list.
+ * Mirrors Rust `SentencePieceUnigramTokenizer::new`. Used by the test
+ * suite. `pieces` is an array of `n_pieces` (const char *piece, float score)
+ * pairs. The returned tokenizer is arena-owned. */
+OcError oc_sp_new(const OcSpPiece *pieces, size_t n_pieces,
+                  OcArena *arena, OcSentencePieceTokenizer **out);
+
+/* Set the unknown token on a SentencePiece tokenizer (mirrors Rust
+ * `SentencePieceUnigramTokenizer::with_unknown_token`). */
+OcError oc_sp_with_unknown_token(OcSentencePieceTokenizer *sp, OcArena *arena,
+                                 const char *token);
+
+/* Encode via SentencePiece unigram Viterbi segmentation. Mirrors Rust
+ * `SentencePieceUnigramTokenizer::encode`. Returns a malloc'd id array. */
+OcError oc_sp_encode(const OcSentencePieceTokenizer *sp, const char *text,
+                     uint32_t **out_ids, size_t *out_count);
+
+/* Decode via SentencePiece: concatenate token strings. Mirrors Rust
+ * `SentencePieceUnigramTokenizer::decode`. */
+OcError oc_sp_decode(const OcSentencePieceTokenizer *sp, const uint32_t *ids,
+                     size_t count, char **out_text);
+
+/* Free the malloc'd internals of a SentencePiece tokenizer (vocab
+ * hashtable, score array). Does NOT free the struct itself (arena-owned). */
+void oc_sp_free(OcSentencePieceTokenizer *sp);
+
+/* ─── WordPiece direct API (for testing / advanced callers) ──────────── */
+
+/* Load a WordPiece tokenizer from GGUF metadata. Reads
+ * `tokenizer.ggml.tokens` (required). All allocations live in `arena`.
+ * Mirrors Rust `load_wordpiece`. */
+OcError oc_wp_load_from_gguf(const OcGgufFile *gguf, OcArena *arena,
+                             OcWordPieceTokenizer **out);
+
+/* Copy the WordPiece tokenizer's special-token ids into the wrapper. */
+void oc_wp_fill_special_tokens(const OcWordPieceTokenizer *wp, OcTokenizer *out);
+
+/* Construct a WordPiece tokenizer from an explicit vocab list. Mirrors
+ * Rust `WordPieceTokenizer::new`. Used by the test suite. */
+OcError oc_wp_new(const char *const *vocab_tokens, size_t n_tokens,
+                  OcArena *arena, OcWordPieceTokenizer **out);
+
+/* Set the unknown token on a WordPiece tokenizer (mirrors Rust
+ * `WordPieceTokenizer::with_unknown_token`). */
+OcError oc_wp_with_unknown_token(OcWordPieceTokenizer *wp, OcArena *arena,
+                                 const char *token);
+
+/* Encode via WordPiece greedy longest-match with `##` continuation.
+ * Mirrors Rust `WordPieceTokenizer::encode`. */
+OcError oc_wp_encode(const OcWordPieceTokenizer *wp, const char *text,
+                     uint32_t **out_ids, size_t *out_count);
+
+/* Decode via WordPiece: concatenate pieces, stripping `##` prefixes on
+ * continuation tokens. Mirrors Rust `WordPieceTokenizer::decode`. */
+OcError oc_wp_decode(const OcWordPieceTokenizer *wp, const uint32_t *ids,
+                     size_t count, char **out_text);
+
+/* Free the malloc'd internals of a WordPiece tokenizer. */
+void oc_wp_free(OcWordPieceTokenizer *wp);
+
+/* ─── Tiktoken direct API (for testing / advanced callers) ──────────── */
+
+/* Load a raw Tiktoken tokenizer from GGUF metadata. Reads
+ * `tokenizer.ggml.tokens` and `tokenizer.ggml.merges` (optional). The vocab
+ * is keyed by raw byte sequences (no GPT-2 byte_to_unicode mapping).
+ * Mirrors Rust `load_tiktoken`. */
+OcError oc_tiktoken_load_from_gguf(const OcGgufFile *gguf, OcArena *arena,
+                                  OcTiktokenTokenizer **out);
+
+/* Copy the Tiktoken tokenizer's special-token ids into the wrapper. */
+void oc_tiktoken_fill_special_tokens(const OcTiktokenTokenizer *t, OcTokenizer *out);
+
+/* Construct a Tiktoken tokenizer from explicit vocab + merge-pair lists.
+ * Mirrors Rust `TiktokenTokenizer::new`. Used by the test suite.
+ * `vocab_tokens` is an array of `n_vocab` byte slices; `merge_pairs` is an
+ * array of `n_merges` (left, right) byte-slice pairs. */
+OcError oc_tiktoken_new(const OcByteSlice *vocab_tokens, size_t n_vocab,
+                        const OcByteSlicePair *merge_pairs, size_t n_merges,
+                        OcArena *arena, OcTiktokenTokenizer **out);
+
+/* Set the unknown token on a Tiktoken tokenizer (mirrors Rust
+ * `TiktokenTokenizer::with_unknown_token`). */
+OcError oc_tiktoken_with_unknown_token(OcTiktokenTokenizer *t, OcArena *arena,
+                                       const char *token);
+
+/* Encode via Tiktoken byte-level BPE (no GPT-2 mapping). Mirrors Rust
+ * `TiktokenTokenizer::encode`. */
+OcError oc_tiktoken_encode(const OcTiktokenTokenizer *t, const char *text,
+                           uint32_t **out_ids, size_t *out_count);
+
+/* Decode via Tiktoken: concatenate byte sequences, lossy UTF-8. Mirrors
+ * Rust `TiktokenTokenizer::decode`. */
+OcError oc_tiktoken_decode(const OcTiktokenTokenizer *t, const uint32_t *ids,
+                           size_t count, char **out_text);
+
+/* Free the malloc'd internals of a Tiktoken tokenizer. */
+void oc_tiktoken_free(OcTiktokenTokenizer *t);
+
+/* ─── Shared helpers ──────────────────────────────────────────────────── */
 
 /* Whether a token id is a special token (bos/eos/pad/unk/sep/cls/mask). */
 bool oc_tokenizer_is_special(const OcTokenizer *t, uint32_t id);

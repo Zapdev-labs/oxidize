@@ -3,14 +3,16 @@
  * Port of oxidize-core/src/format/tokenizer.rs::load_tokenizer_from_gguf_metadata.
  *
  *   "gpt2" | "lfm2" | "lfm2moe"  → BPE (byte-level, tiktoken-style)
- *   "llama" | "gemma" | "gemma4" → SentencePiece (not yet implemented)
- *   "bert"                       → WordPiece (not yet implemented)
- *   "tiktoken"                   → Tiktoken (not yet implemented)
+ *   "llama" | "gemma" | "gemma4" → SentencePiece (unigram, Viterbi)
+ *   "bert"                       → WordPiece (## continuation)
+ *   "tiktoken"                   → Tiktoken (raw byte-level)
  *   <other>                      → OC_ERR_TOKENIZER
  *
- * Only the BPE path is implemented by the `tokenizer-bpe-qwen` feature;
- * the other branches return OC_ERR_TOKENIZER with a clear message so callers
- * can detect the missing implementation without a crash.
+ * After loading the kind-specific implementation, special-token ids are
+ * copied into the `OcTokenizer` wrapper and the optional
+ * `tokenizer.ggml.add_bos_token` bool is read (defaults to false when
+ * absent; SentencePiece models default to adding BOS per Rust
+ * `add_bos_default()`).
  */
 
 #include "oxidize/tokenizer.h"
@@ -54,6 +56,18 @@ static OcTokenizerKind resolve_kind(const char *model)
     return OC_TOK_KIND_NONE;
 }
 
+/* Read `tokenizer.ggml.add_bos_token` (optional bool). When absent, leaves
+ * `has_add_bos_token = false` so `oc_tokenizer_add_bos_default()` falls back
+ * to the kind-specific default (true for SentencePiece, false otherwise). */
+static void load_add_bos_flag(const OcGgufFile *gguf, OcTokenizer *out)
+{
+    bool add_bos = false;
+    if (oc_gguf_metadata_get_bool(gguf, "tokenizer.ggml.add_bos_token", &add_bos)) {
+        out->has_add_bos_token = true;
+        out->add_bos_token = add_bos;
+    }
+}
+
 OcError oc_tokenizer_load_from_gguf(const OcGgufFile *gguf, OcTokenizer *out)
 {
     if (!gguf || !out) return OC_ERR_INVALID_ARG;
@@ -88,21 +102,59 @@ OcError oc_tokenizer_load_from_gguf(const OcGgufFile *gguf, OcTokenizer *out)
         }
         out->kind = OC_TOK_KIND_BPE;
         out->bpe = bpe;
-        /* Copy special-token ids into the wrapper. */
         oc_bpe_fill_special_tokens(bpe, out);
-        /* BPE models do not add BOS by default (Rust `add_bos_default()`
-         * returns false for BPE unless `tokenizer.ggml.add_bos_token` is
-         * explicitly set). */
-        bool add_bos = false;
-        if (oc_gguf_metadata_get_bool(gguf, "tokenizer.ggml.add_bos_token", &add_bos)) {
-            out->has_add_bos_token = true;
-            out->add_bos_token = add_bos;
-        }
+        load_add_bos_flag(gguf, out);
         return OC_OK;
     }
 
-    /* SentencePiece / WordPiece / Tiktoken are not yet implemented. */
-    oc_log_error("tokenizer: kind %d (model=\"%s\") not yet implemented",
+    if (kind == OC_TOK_KIND_SENTENCEPIECE) {
+        OcSentencePieceTokenizer *sp = NULL;
+        OcError e = oc_sp_load_from_gguf(gguf, arena, &sp);
+        if (e != OC_OK) {
+            oc_arena_free(arena);
+            out->arena = NULL;
+            return e;
+        }
+        out->kind = OC_TOK_KIND_SENTENCEPIECE;
+        out->sp = sp;
+        oc_sp_fill_special_tokens(sp, out);
+        load_add_bos_flag(gguf, out);
+        return OC_OK;
+    }
+
+    if (kind == OC_TOK_KIND_WORDPIECE) {
+        OcWordPieceTokenizer *wp = NULL;
+        OcError e = oc_wp_load_from_gguf(gguf, arena, &wp);
+        if (e != OC_OK) {
+            oc_arena_free(arena);
+            out->arena = NULL;
+            return e;
+        }
+        out->kind = OC_TOK_KIND_WORDPIECE;
+        out->wp = wp;
+        oc_wp_fill_special_tokens(wp, out);
+        load_add_bos_flag(gguf, out);
+        return OC_OK;
+    }
+
+    if (kind == OC_TOK_KIND_TIKTOKEN) {
+        OcTiktokenTokenizer *t = NULL;
+        OcError e = oc_tiktoken_load_from_gguf(gguf, arena, &t);
+        if (e != OC_OK) {
+            oc_arena_free(arena);
+            out->arena = NULL;
+            return e;
+        }
+        out->kind = OC_TOK_KIND_TIKTOKEN;
+        out->tiktoken = t;
+        oc_tiktoken_fill_special_tokens(t, out);
+        load_add_bos_flag(gguf, out);
+        return OC_OK;
+    }
+
+    /* Unreachable: resolve_kind returns NONE for unknown strings and we
+     * already returned OC_ERR_TOKENIZER above. */
+    oc_log_error("tokenizer: kind %d (model=\"%s\") not handled",
                  (int)kind, model);
     oc_arena_free(arena);
     out->arena = NULL;
@@ -110,5 +162,5 @@ OcError oc_tokenizer_load_from_gguf(const OcGgufFile *gguf, OcTokenizer *out)
 }
 
 /* oc_tokenizer_free() is implemented in tokenizer_bpe.c (it needs access to
- * the BPE internals to free the u64 maps). */
+ * the per-kind free functions). */
 
