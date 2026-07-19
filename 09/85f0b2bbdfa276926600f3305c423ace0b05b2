@@ -1,0 +1,135 @@
+oxidize-c/.gitignore
+  s_8a3ef18e174fca::t_1fd7e8cda3bc23 8-10
+oxidize-c/tests/test_smoke.c
+  s_8a3ef18e174fca::t_6a101c6489e20b 1-44
+oxidize-c/Makefile
+  s_8a3ef18e174fca::t_8af9fb5545dd91 6-7
+  s_8a3ef18e174fca::t_e934adcb330d49 39-46,51-55,60-61
+  s_8a3ef18e174fca::t_3c6782fff4ab0b 102
+oxidize-c/CONTRIBUTING.md
+  s_8a3ef18e174fca::t_cc3dc73bf4d008 1-171
+oxidize-c/tests/criterion/README.md
+  s_8a3ef18e174fca::t_7f2dcec89d7d88 1-96
+oxidize-c/tests/criterion/LICENSE
+  s_8a3ef18e174fca::t_73fd1b9013d543 1-21
+oxidize-c/tests/criterion/include/criterion/abort.h
+  s_8a3ef18e174fca::t_ec79b5494bc12b 1-66
+oxidize-c/tests/criterion/include/criterion/alloc.h
+  s_8a3ef18e174fca::t_4ff84f7ae3f29b 1-307
+oxidize-c/tests/criterion/include/criterion/assert.h
+  s_8a3ef18e174fca::t_d891a1d4f2b2db 1-1683
+oxidize-c/tests/criterion/include/criterion/criterion.h
+  s_8a3ef18e174fca::t_9fe931f778aa34 1-121
+oxidize-c/tests/criterion/include/criterion/embedded.h
+  s_8a3ef18e174fca::t_fc6c00d24f309d 1-48
+oxidize-c/tests/criterion/include/criterion/event.h
+  s_8a3ef18e174fca::t_e4e7faf6dafd6a 1-41
+oxidize-c/tests/criterion/include/criterion/hooks.h
+  s_8a3ef18e174fca::t_5e84a45ab851fd 1-72
+oxidize-c/tests/criterion/include/criterion/internal/asprintf-compat.h
+  s_8a3ef18e174fca::t_0273f0ae4c6f8c 1-66
+oxidize-c/tests/criterion/include/criterion/internal/assert.h
+  s_8a3ef18e174fca::t_ae79d8192e96d7 1-728
+oxidize-c/tests/criterion/include/criterion/internal/assert/complex.h
+  s_8a3ef18e174fca::t_128a931cd2de60 2,4,6-22,24-25,27-28,30-33,35-38,40-43,45-46,48-51,53-56,58-65,67-75,77-79,82-93
+oxidize-c/tests/criterion/include/criterion/internal/assert/exceptions.h
+  s_8a3ef18e174fca::t_0b48bde53028a2 1-107
+oxidize-c/tests/criterion/include/criterion/internal/assert/ieee.h
+  s_8a3ef18e174fca::t_daf0c6349e9fc9 1-147
+oxidize-c/tests/criterion/include/criterion/internal/assert/memory.h
+  s_8a3ef18e174fca::t_c5f67c514a8950 1-56
+oxidize-c/tests/criterion/include/criterion/internal/assert/op.h
+  s_8a3ef18e174fca::t_d7a4b9b1244840 1-426
+oxidize-c/tests/criterion/include/criterion/internal/assert/op.hxx
+  s_8a3ef18e174fca::t_9bebcc3e1a15b4 1-59
+oxidize-c/tests/criterion/include/criterion/internal/assert/stream.h
+  s_8a3ef18e174fca::t_b12982cb40544d 1-56
+oxidize-c/tests/criterion/include/criterion/internal/assert/tag.h
+  s_8a3ef18e174fca::t_6c373474c28a1c 1-374
+oxidize-c/tests/criterion/include/criterion/internal/assert/tostr.h
+  s_8a3ef18e174fca::t_2f06d1c0f78491 1-320
+oxidize-c/tests/criterion/include/criterion/internal/assert/types.h
+  s_8a3ef18e174fca::t_0151c24d7ab070 1-65
+oxidize-c/tests/criterion/include/criterion/internal/capabilities.h
+  s_8a3ef18e174fca::t_5e7458958f81b5 1-84
+oxidize-c/tests/criterion/include/criterion/internal/common.h
+  s_8a3ef18e174fca::t_b701c2d46cd413 1-139
+oxidize-c/tests/criterion/include/criterion/internal/deprecation.h
+  s_8a3ef18e174fca::t_1d790e0dd1daaf 1-64
+oxidize-c/tests/criterion/include/criterion/internal/designated-initializer-compat.h
+  s_8a3ef18e174fca::t_2cd3bccd512b0e 1-127
+oxidize-c/tests/criterion/include/criterion/internal/hooks.h
+  s_8a3ef18e174fca::t_418719b72b0ab8 1-83
+oxidize-c/tests/criterion/include/criterion/internal/new_asserts.h
+  s_8a3ef18e174fca::t_b37b74b031466d 1-195
+oxidize-c/tests/criterion/include/criterion/internal/ordered-set.h
+  s_8a3ef18e174fca::t_fcd5316f7ac204 1-58
+oxidize-c/tests/criterion/include/criterion/internal/parameterized.h
+  s_8a3ef18e174fca::t_1f3b510bcd4008 1-125
+oxidize-c/tests/criterion/include/criterion/internal/preprocess.h
+  s_8a3ef18e174fca::t_f52ece42b6dd6d 1-111
+oxidize-c/tests/criterion/include/criterion/internal/redirect.h
+  s_8a3ef18e174fca::t_447a3991eb4d57 1-169
+oxidize-c/tests/criterion/include/criterion/internal/stdio_filebuf.hxx
+  s_8a3ef18e174fca::t_dc1d6065c4f01f 1-183
+oxidize-c/tests/criterion/include/criterion/internal/stream.hxx
+  s_8a3ef18e174fca::t_be20dbad47477d 1-141
+oxidize-c/tests/criterion/include/criterion/internal/test.h
+  s_8a3ef18e174fca::t_da28e1e1105699 1-203
+oxidize-c/tests/criterion/include/criterion/internal/theories.h
+  s_8a3ef18e174fca::t_3be2b0ca4fb6a8 1-104
+oxidize-c/tests/criterion/include/criterion/logging.h
+  s_8a3ef18e174fca::t_4f1fde56c8c164 1-197
+oxidize-c/tests/criterion/include/criterion/new/assert.h
+  s_8a3ef18e174fca::t_6031f881bb631b 1-466
+oxidize-c/tests/criterion/include/criterion/new/memory.h
+  s_8a3ef18e174fca::t_af678ce60222c2 1-66
+oxidize-c/tests/criterion/include/criterion/new/stream.h
+  s_8a3ef18e174fca::t_c78ace61474345 1-109
+oxidize-c/tests/criterion/include/criterion/options.h
+  s_8a3ef18e174fca::t_1b1a915b4f0d8b 1-234
+oxidize-c/tests/criterion/include/criterion/output.h
+  s_8a3ef18e174fca::t_66dcf42e089d34 1-54
+oxidize-c/tests/criterion/include/criterion/parameterized.h
+  s_8a3ef18e174fca::t_145c8063c9ed31 1-103
+oxidize-c/tests/criterion/include/criterion/redirect.h
+  s_8a3ef18e174fca::t_416266f5f38839 1-574
+oxidize-c/tests/criterion/include/criterion/stats.h
+  s_8a3ef18e174fca::t_0e23bf54b51f95 1-103
+oxidize-c/tests/criterion/include/criterion/theories.h
+  s_8a3ef18e174fca::t_f8799dec09f832 1-401
+oxidize-c/tests/criterion/include/criterion/types.h
+  s_8a3ef18e174fca::t_5d162256e328b5 1-202
+oxidize-c/tests/test_arena.c
+  s_8a3ef18e174fca::t_96061d9b7c7172 7
+oxidize-c/tests/test_bytes.c
+  s_8a3ef18e174fca::t_4e7ca17a223734 2
+oxidize-c/tests/test_dtype.c
+  s_8a3ef18e174fca::t_2b67acca716f8b 2
+oxidize-c/tests/test_error.c
+  s_8a3ef18e174fca::t_8b2068479e44c2 2
+oxidize-c/tests/test_hashtable.c
+  s_8a3ef18e174fca::t_f1d3fd24d87bee 2
+oxidize-c/tests/test_log.c
+  s_8a3ef18e174fca::t_20b5c032b59977 4
+oxidize-c/tests/test_string.c
+  s_8a3ef18e174fca::t_736d06a81c87f8 2
+oxidize-c/tests/test_vector.c
+  s_8a3ef18e174fca::t_f9650146f02208 2
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "0985f0b2bbdfa276926600f3305c423ace0b05b2",
+  "prompts": {},
+  "sessions": {
+    "s_8a3ef18e174fca": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "02093cd8-59eb-4b98-a1b1-0e445245fcd8",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
