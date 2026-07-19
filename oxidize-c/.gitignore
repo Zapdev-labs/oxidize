@@ -1,0 +1,11 @@
+# Build artifacts
+*.o
+*.asan.o
+*.a
+oxidize-c
+test_runner
+
+# Editor / OS
+*.swp
+*~
+.DS_Store
