@@ -21,5 +21,10 @@
 #include "gguf.h"
 #include "tokenizer.h"
 #include "quant.h"
+#include "simd.h"
+#include "activation.h"
+#include "matvec.h"
+#include "llama.h"
+#include "sampling.h"
 
 #endif /* OXIDIZE_OC_H */
