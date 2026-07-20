@@ -87,14 +87,14 @@ static void test_handler(const OcHttpRequest *req,
         *out_status = 200;
         *out_content_type = "application/json";
         const char *body = "{\"data\":[{\"id\":\"test-model\"}]}";
-        *out_body = body;
+        *out_body = strdup(body);
         *out_body_len = strlen(body);
         st->last_status = 200;
     } else if (strcmp(req->path, "/v1/echo") == 0 && req->method == OC_HTTP_POST) {
         *out_status = 200;
         *out_content_type = "application/json";
         /* Echo the body back (NUL-terminated by the parser). */
-        *out_body = req->body;
+        *out_body = strdup(req->body);
         *out_body_len = req->content_length;
         st->last_status = 200;
         size_t cpy = req->content_length < sizeof(st->last_body) - 1
@@ -105,7 +105,7 @@ static void test_handler(const OcHttpRequest *req,
         *out_status = 404;
         *out_content_type = "application/json";
         const char *body = "{\"error\":\"not found\"}";
-        *out_body = body;
+        *out_body = strdup(body);
         *out_body_len = strlen(body);
         st->last_status = 404;
     }

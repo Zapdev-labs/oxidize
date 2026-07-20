@@ -1,3 +1,7 @@
+/* strdup is POSIX.1-2008; needs _POSIX_C_SOURCE to be declared. Must be
+ * the first non-comment thing in the file, before any system header. */
+#define _POSIX_C_SOURCE 200809L
+
 /*
  * main.c — oxidize-c CLI entry point.
  *
@@ -17,9 +21,11 @@
 #include "oxidize/autotune.h"
 #include "oxidize/error.h"
 #include "oxidize/gguf.h"
+#include "oxidize/http.h"
 #include "oxidize/llama.h"
 #include "oxidize/log.h"
 #include "oxidize/oc.h"
+#include "oxidize/openai.h"
 #include "oxidize/sampling.h"
 #include "oxidize/tokenizer.h"
 
@@ -285,9 +291,57 @@ int main(int argc, char **argv)
     }
 
     if (args.serve_api) {
-        fprintf(stderr, "error: --serve-api is implemented by the "
-                "server-http-core feature (not yet linked into this build)\n");
-        return 1;
+        /* Start the OpenAI-compatible HTTP server. If --model is given,
+         * load it; otherwise serve placeholder responses. */
+        OcOpenaiState st;
+        memset(&st, 0, sizeof(st));
+        st.model_loaded = false;
+        if (args.model_path) {
+            OcLlamaModel *model = calloc(1, sizeof(OcLlamaModel));
+            OcTokenizer *tok = calloc(1, sizeof(OcTokenizer));
+            if (model && tok &&
+                oc_llama_load(args.model_path, model) == OC_OK &&
+                oc_tokenizer_load_from_gguf(&model->gguf.unified, tok) == OC_OK) {
+                st.model = model;
+                st.tokenizer = tok;
+                st.model_loaded = true;
+                /* Derive a model id from the filename. */
+                const char *slash = strrchr(args.model_path, '/');
+                st.model_id = strdup(slash ? slash + 1 : args.model_path);
+                oc_log(OC_LOG_INFO, "serve: model loaded, starting server on %s:%d",
+                       args.host, args.port);
+            } else {
+                fprintf(stderr, "error: failed to load model for serve mode\n");
+                free(model); free(tok);
+                return 1;
+            }
+        } else {
+            oc_log(OC_LOG_INFO, "serve: no model — starting placeholder server on %s:%d",
+                   args.host, args.port);
+        }
+        OcHttpServer srv;
+        OcError e = oc_http_server_start(args.host, (uint16_t)args.port, 4,
+                                         oc_openai_handler, &st, &srv);
+        if (e != OC_OK) {
+            fprintf(stderr, "error: server start failed (%s)\n", oc_error_msg(e));
+            return 1;
+        }
+        printf("oxidize-c server listening on http://%s:%u\n"
+               "  GET  /v1/models\n"
+               "  POST /v1/completions\n"
+               "  POST /v1/chat/completions\n"
+               "(Ctrl+C to stop)\n", args.host, srv.port);
+        fflush(stdout);
+        oc_http_server_join(&srv);
+        /* Cleanup (only reached after stop). */
+        if (st.model_loaded) {
+            free(st.model_id);
+            oc_tokenizer_free(st.tokenizer);
+            oc_llama_free(st.model);
+            free(st.tokenizer);
+            free(st.model);
+        }
+        return 0;
     }
 
     if (args.model_path == NULL) {

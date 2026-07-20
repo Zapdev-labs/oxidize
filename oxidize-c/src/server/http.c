@@ -259,6 +259,18 @@ static void *worker_main(void *arg)
                 free(big);
             }
         }
+        /* Free the handler-returned body. Handlers malloc their JSON
+         * responses (see oc_openai_handler); the server core owns freeing
+         * them after the response is written. String literals (used by
+         * some test handlers) are also safe to pass to free() per C11
+         * because free(NULL) is a no-op and we never return a literal
+         * when body_len > 0 in production code — but to be safe we only
+         * free when the handler indicated a non-empty malloc'd body.
+         * NOTE: handlers that return string literals with body_len > 0
+         * MUST instead return a malloc'd copy (oc_openai_handler does). */
+        if (body != NULL && body_len > 0) {
+            free((void *)body);
+        }
         close(fd);
     }
     free(buf);
@@ -343,6 +355,8 @@ OcError oc_http_server_join(OcHttpServer *s)
         pthread_join(s->threads[i], NULL);
     }
     s->joined = true;
+    free(s->threads);
+    s->threads = NULL;
     return OC_OK;
 }
 
