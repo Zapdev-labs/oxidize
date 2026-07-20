@@ -14,6 +14,7 @@
  * applied by later features (autotune-plan-apply, server-http-core).
  */
 #include "oxidize/activation.h"   /* ensure link for forward deps */
+#include "oxidize/autotune.h"
 #include "oxidize/error.h"
 #include "oxidize/gguf.h"
 #include "oxidize/llama.h"
@@ -242,12 +243,27 @@ int main(int argc, char **argv)
     if (args.show_version) { printf("oxidize-c v%s\n", OC_CLI_VERSION); return 0; }
 
     if (args.print_plan) {
-        printf("oxidize-c autotune plan (scaffold — full plan from "
-               "autotune-plan-apply feature):\n");
-        printf("  model:    %s\n", args.model_path ? args.model_path : "(none)");
-        printf("  threads:  %d\n", args.threads > 0 ? args.threads : -1);
-        printf("  numa:     %s\n", args.numa);
-        printf("  simd:     (detected at runtime via oc_simd_caps)\n");
+        OcCpuInfo cpu;
+        oc_autotune_detect_cpu(&cpu);
+        OcModelFingerprint model;
+        memset(&model, 0, sizeof(model));
+        if (args.model_path) {
+            OcGgufMmappedFile m;
+            if (oc_gguf_map_open(args.model_path, &m) == OC_OK) {
+                oc_autotune_fingerprint_gguf(&m, &model);
+                OcTuningPlan plan = oc_autotune_plan(&cpu, &model);
+                oc_autotune_plan_dump(&plan, &cpu, &model);
+                oc_gguf_map_free(&m);
+                return 0;
+            } else {
+                fprintf(stderr, "error: could not open model for fingerprint: %s\n",
+                        args.model_path);
+                return 1;
+            }
+        }
+        /* No model: dump CPU-only plan. */
+        OcTuningPlan plan = oc_autotune_plan(&cpu, &model);
+        oc_autotune_plan_dump(&plan, &cpu, NULL);
         return 0;
     }
 
