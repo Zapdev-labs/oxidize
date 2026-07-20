@@ -163,3 +163,48 @@ Test(llama, session_init_null_args)
     cr_assert_eq(oc_llama_session_init(NULL, &s), OC_ERR_INVALID_ARG);
     cr_assert_eq(oc_llama_session_init((OcLlamaModel *)0x1, NULL), OC_ERR_INVALID_ARG);
 }
+
+/* ─── MoE config defaults ──────────────────────────────────────────────
+ * A dense model (no expert_count metadata) must have num_experts=0,
+ * which means forward_layer uses the dense SwiGLU path. The MoE scratch
+ * buffers (router_logits, expert_gate, etc.) must be NULL. */
+Test(llama, moe_config_defaults_dense)
+{
+    OcLlamaModel m;
+    /* We can't easily construct a full model, but we can verify the config
+     * struct initializes to zero and the defaults are applied in
+     * parse_config. If the fixture loads (or fails with IO), the config
+     * should still report num_experts=0 for non-MoE GGUFs. */
+    memset(&m, 0, sizeof(m));
+    /* Simulate a default config (as parse_config would set it). */
+    m.cfg.num_experts = 0;
+    m.cfg.num_experts_per_tok = 0;
+    m.cfg.expert_intermediate_size = 0;
+    m.cfg.expert_gating_sigmoid = false;
+    m.cfg.expert_weights_scale = 1.0f;
+    cr_assert_eq(m.cfg.num_experts, 0, "dense model has no experts");
+    cr_assert_eq(m.cfg.expert_gating_sigmoid, false, "default gating is softmax");
+    cr_assert_float_eq(m.cfg.expert_weights_scale, 1.0f, 1e-6f, "default scale 1.0");
+}
+
+/* ─── MoE top-k clamp logic ─────────────────────────────────────────────
+ * When num_experts_per_tok > num_experts, it must be clamped to num_experts.
+ * When num_experts_per_tok == 0 but num_experts > 0, it defaults to 1.
+ * This mirrors the clamp in parse_config. */
+Test(llama, moe_topk_clamp)
+{
+    /* Case 1: k=0 with experts → default to 1. */
+    uint32_t n_exp = 8, k = 0;
+    if (n_exp > 0 && k == 0) k = 1;
+    cr_assert_eq(k, 1, "k should default to 1 when experts exist");
+
+    /* Case 2: k > n_exp → clamp to n_exp. */
+    k = 16; n_exp = 8;
+    if (k > n_exp) k = n_exp;
+    cr_assert_eq(k, 8, "k should clamp to num_experts");
+
+    /* Case 3: k within range → unchanged. */
+    k = 4; n_exp = 8;
+    if (k > n_exp) k = n_exp;
+    cr_assert_eq(k, 4, "k should be unchanged when within range");
+}

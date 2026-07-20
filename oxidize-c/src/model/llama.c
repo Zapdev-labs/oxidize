@@ -122,6 +122,28 @@ static OcError parse_config(const OcGgufFile *f, const char *arch_str,
     snprintf(key, sizeof(key), "%sattention.layer_norm_rms_epsilon", prefix);
     cfg->rms_norm_eps = cfg_f32(f, key, 1e-5f);
 
+    /* MoE config (Qwen3-MoE / Mixtral). Defaults: no MoE, softmax gating,
+     * no routed scaling. The bare-name fallback matches Mixtral which uses
+     * unprefixed `expert_count` etc. */
+    snprintf(key, sizeof(key), "%sexpert_count", prefix);
+    cfg->num_experts = cfg_u32(f, key, 0);
+    if (cfg->num_experts == 0) {
+        cfg->num_experts = cfg_u32(f, "expert_count", 0);
+    }
+    snprintf(key, sizeof(key), "%sexpert_used_count", prefix);
+    cfg->num_experts_per_tok = cfg_u32(f, key, 0);
+    if (cfg->num_experts_per_tok == 0) {
+        cfg->num_experts_per_tok = cfg_u32(f, "expert_used_count", 0);
+    }
+    snprintf(key, sizeof(key), "%sexpert_feed_forward_length", prefix);
+    cfg->expert_intermediate_size = cfg_u32(f, key, 0);
+    snprintf(key, sizeof(key), "%sexpert_gating_func", prefix);
+    uint32_t gating = cfg_u32(f, key, 1);
+    cfg->expert_gating_sigmoid = (gating == 2);
+    snprintf(key, sizeof(key), "%sexpert_weights_scale", prefix);
+    float scale = cfg_f32(f, key, 1.0f);
+    cfg->expert_weights_scale = (scale > 0.0f) ? scale : 1.0f;
+
     /* Also accept general.vocab_size as a fallback. */
     if (cfg->vocab_size == 32000) {
         uint32_t gv;
@@ -138,6 +160,14 @@ static OcError parse_config(const OcGgufFile *f, const char *arch_str,
     cfg->tied_embeddings = false;
     if (cfg->n_head == 0) cfg->n_head = 32;
     if (cfg->n_head_kv == 0) cfg->n_head_kv = cfg->n_head;
+    /* MoE per-token top-k: default to 1 when experts exist but no top-k set. */
+    if (cfg->num_experts > 0) {
+        if (cfg->num_experts_per_tok == 0) cfg->num_experts_per_tok = 1;
+        if (cfg->num_experts_per_tok > cfg->num_experts) {
+            cfg->num_experts_per_tok = cfg->num_experts;
+        }
+        if (cfg->expert_intermediate_size == 0) cfg->expert_intermediate_size = cfg->n_ff;
+    }
     return OC_OK;
 }
 
@@ -191,6 +221,22 @@ static bool assign_tensor(OcLlamaModel *m, const char *cname,
             L->ffn_up = view_from_info(mm, info);
         } else if (strcmp(suf, "ffn_down.weight") == 0) {
             L->ffn_down = view_from_info(mm, info);
+        } else if (strcmp(suf, "ffn_gate_inp.weight") == 0) {
+            L->ffn_gate_inp = view_from_info(mm, info);
+        } else if (strcmp(suf, "ffn_gate_exps.weight") == 0) {
+            L->ffn_gate_exps = view_from_info(mm, info);
+        } else if (strcmp(suf, "ffn_up_exps.weight") == 0) {
+            L->ffn_up_exps = view_from_info(mm, info);
+        } else if (strcmp(suf, "ffn_down_exps.weight") == 0) {
+            L->ffn_down_exps = view_from_info(mm, info);
+        } else if (strcmp(suf, "ffn_gate_shexp.weight") == 0) {
+            L->ffn_gate_shexp = view_from_info(mm, info);
+        } else if (strcmp(suf, "ffn_up_shexp.weight") == 0) {
+            L->ffn_up_shexp = view_from_info(mm, info);
+        } else if (strcmp(suf, "ffn_down_shexp.weight") == 0) {
+            L->ffn_down_shexp = view_from_info(mm, info);
+        } else if (strcmp(suf, "ffn_gate_inp_shexp.weight") == 0) {
+            L->ffn_gate_inp_shexp = view_from_info(mm, info);
         } else {
             return false;   /* unrecognized suffix; not an error */
         }
@@ -300,6 +346,9 @@ OcError oc_llama_session_init(OcLlamaModel *model, OcLlamaSession *out)
     out->kv_v = xcalloc(total, sizeof(float));
     size_t maxw = model->cfg.n_embd > model->cfg.n_ff ? model->cfg.n_embd
                                                      : model->cfg.n_ff;
+    if (model->cfg.expert_intermediate_size > maxw) {
+        maxw = model->cfg.expert_intermediate_size;
+    }
     out->x = xcalloc(model->cfg.n_embd, sizeof(float));
     out->normed = xcalloc(model->cfg.n_embd, sizeof(float));
     out->q = xcalloc((size_t)model->cfg.n_head * model->cfg.head_dim, sizeof(float));
@@ -310,9 +359,25 @@ OcError oc_llama_session_init(OcLlamaModel *model, OcLlamaSession *out)
     out->ffn_up = xcalloc(model->cfg.n_ff, sizeof(float));
     out->dequant_temp = xcalloc(maxw, sizeof(float));
     out->logits = xcalloc(model->cfg.vocab_size, sizeof(float));
+    /* MoE temporaries (only allocated when num_experts > 0). */
+    if (model->cfg.num_experts > 0) {
+        out->router_logits = xcalloc(model->cfg.num_experts, sizeof(float));
+        out->expert_gate = xcalloc(model->cfg.expert_intermediate_size, sizeof(float));
+        out->expert_up   = xcalloc(model->cfg.expert_intermediate_size, sizeof(float));
+        out->expert_out  = xcalloc(model->cfg.n_embd, sizeof(float));
+        out->shexp_gate  = xcalloc(model->cfg.expert_intermediate_size, sizeof(float));
+        out->shexp_up    = xcalloc(model->cfg.expert_intermediate_size, sizeof(float));
+        out->shexp_out   = xcalloc(model->cfg.n_embd, sizeof(float));
+    }
     if (!out->kv_k || !out->kv_v || !out->x || !out->normed || !out->q ||
         !out->k || !out->v || !out->attn_out || !out->ffn_gate ||
         !out->ffn_up || !out->dequant_temp || !out->logits) {
+        oc_llama_session_free(out);
+        return OC_ERR_OOM;
+    }
+    if (model->cfg.num_experts > 0 &&
+        (!out->router_logits || !out->expert_gate || !out->expert_up ||
+         !out->expert_out || !out->shexp_gate || !out->shexp_up || !out->shexp_out)) {
         oc_llama_session_free(out);
         return OC_ERR_OOM;
     }
@@ -335,6 +400,9 @@ void oc_llama_session_free(OcLlamaSession *sess)
     free(sess->ffn_gate); free(sess->ffn_up);
     free(sess->dequant_temp);
     free(sess->logits);
+    free(sess->router_logits);
+    free(sess->expert_gate); free(sess->expert_up); free(sess->expert_out);
+    free(sess->shexp_gate); free(sess->shexp_up); free(sess->shexp_out);
     memset(sess, 0, sizeof(*sess));
 }
 
@@ -384,6 +452,8 @@ static void matvec(const OcWeightView *w, const float *in, float *out,
 
 /* Online-softmax attention for one Q head against all cached K/V up to `pos`.
  * GQA: Q head h attends to KV head (h / group_size). */
+static void forward_layer(OcLlamaSession *s, uint32_t layer);
+static void forward_dense_ffn(OcLlamaSession *s, const OcLlamaLayer *L);
 static void attention_head(const OcLlamaSession *s, uint32_t head,
                            uint32_t layer, const float *q_vec, float *out_vec)
 {
@@ -419,6 +489,142 @@ static void attention_head(const OcLlamaSession *s, uint32_t head,
     }
     float inv = 1.0f / run_sum;
     for (size_t i = 0; i < hd; i++) out_vec[i] *= inv;
+}
+
+/* ─── Dense FFN (Llama/Mistral/Qwen2-dense path) ──────────────────────── */
+
+static void forward_dense_ffn(OcLlamaSession *s, const OcLlamaLayer *L)
+{
+    const OcLlamaConfig *c = &s->model->cfg;
+    /* SwiGLU: gate = silu(W_gate·x) * (W_up·x); out = W_down·gate. */
+    matvec(&L->ffn_gate, s->normed, s->ffn_gate, s->dequant_temp);
+    matvec(&L->ffn_up,   s->normed, s->ffn_up,   s->dequant_temp);
+    oc_swiglu_inplace_f32(s->ffn_gate, s->ffn_up, c->n_ff);
+    matvec(&L->ffn_down, s->ffn_gate, s->normed, s->dequant_temp);
+    /* Residual add. */
+    for (size_t i = 0; i < c->n_embd; i++) s->x[i] += s->normed[i];
+}
+
+/* ─── MoE FFN (Qwen3-MoE / Mixtral path) ────────────────────────────────
+ *
+ * Port of oxidize-core inference.rs::moe_ffn_forward_weights +
+ * layers.rs MoE branch. For Qwen3-MoE: softmax gating over all experts,
+ * top-k selection, renormalize top-k weights, per-expert SwiGLU FFN,
+ * weighted sum, then add the shared expert (optionally sigmoid-gated).
+ *
+ * Expert weights are STACKED in ffn_gate_exps/ffn_up_exps/ffn_down_exps.
+ * Expert i occupies rows [i*exp_i_size, (i+1)*exp_i_size) in gate/up and
+ * [i*n_embd, (i+1)*n_embd) in down. We synthesize a per-expert OcWeightView
+ * by slicing the stacked tensor's data pointer + per-expert row count.
+ *
+ * Each expert's down-projection output goes into s->shexp_out as a temp
+ * (n_embd-sized), then is scaled by w and accumulated into s->expert_out.
+ */
+static void forward_moe_ffn(OcLlamaSession *s, const OcLlamaLayer *L)
+{
+    const OcLlamaConfig *c = &s->model->cfg;
+    uint32_t n_exp = c->num_experts;
+    uint32_t k = c->num_experts_per_tok;
+    uint32_t i_size = c->expert_intermediate_size;
+    if (i_size == 0) i_size = c->n_ff;
+
+    /* 1. Router logits: ffn_gate_inp @ normed → [num_experts]. */
+    matvec(&L->ffn_gate_inp, s->normed, s->router_logits, s->dequant_temp);
+
+    /* 2. Gating: softmax (Qwen3-MoE) or sigmoid (DeepSeek). */
+    if (!c->expert_gating_sigmoid) {
+        float mx = s->router_logits[0];
+        for (uint32_t i = 1; i < n_exp; i++) {
+            if (s->router_logits[i] > mx) mx = s->router_logits[i];
+        }
+        double sum = 0.0;
+        for (uint32_t i = 0; i < n_exp; i++) {
+            s->router_logits[i] = expf(s->router_logits[i] - mx);
+            sum += (double)s->router_logits[i];
+        }
+        if (sum > 0.0) {
+            float inv = (float)(1.0 / sum);
+            for (uint32_t i = 0; i < n_exp; i++) s->router_logits[i] *= inv;
+        }
+    } else {
+        for (uint32_t i = 0; i < n_exp; i++) {
+            s->router_logits[i] = 1.0f / (1.0f + expf(-s->router_logits[i]));
+        }
+    }
+
+    /* 3. Top-k selection by descending weight (partial selection sort). */
+    uint32_t sel_buf[256];
+    uint32_t *sel = (n_exp <= 256) ? sel_buf
+                                   : (uint32_t *)malloc(n_exp * sizeof(uint32_t));
+    if (sel == NULL) { forward_dense_ffn(s, L); return; }
+    for (uint32_t i = 0; i < n_exp; i++) sel[i] = i;
+    for (uint32_t i = 0; i < k; i++) {
+        uint32_t best = i;
+        for (uint32_t j = i + 1; j < n_exp; j++) {
+            if (s->router_logits[sel[j]] > s->router_logits[sel[best]]) best = j;
+        }
+        uint32_t tmp = sel[i]; sel[i] = sel[best]; sel[best] = tmp;
+    }
+
+    /* 4. Renormalize top-k weights (norm_topk_prob). */
+    double weight_norm = 0.0;
+    for (uint32_t i = 0; i < k; i++) weight_norm += (double)s->router_logits[sel[i]];
+    if (weight_norm <= 0.0) weight_norm = 1.0;
+    float routed_scale = c->expert_weights_scale;
+
+    /* 5. Per-expert SwiGLU FFN, accumulated into s->expert_out (zeroed).
+     *    Each expert's down output goes into s->shexp_out (temp, n_embd),
+     *    then is scaled by w and added to s->expert_out. */
+    memset(s->expert_out, 0, c->n_embd * sizeof(float));
+    size_t gate_row_bytes = L->ffn_gate_exps.row_bytes;
+    size_t up_row_bytes   = L->ffn_up_exps.row_bytes;
+    size_t down_row_bytes = L->ffn_down_exps.row_bytes;
+
+    for (uint32_t ei = 0; ei < k; ei++) {
+        uint32_t idx = sel[ei];
+        float w = routed_scale * (float)(s->router_logits[idx] / weight_norm);
+
+        OcWeightView gate_v = L->ffn_gate_exps;
+        gate_v.data = L->ffn_gate_exps.data + (size_t)idx * i_size * gate_row_bytes;
+        gate_v.rows = i_size;
+        OcWeightView up_v = L->ffn_up_exps;
+        up_v.data = L->ffn_up_exps.data + (size_t)idx * i_size * up_row_bytes;
+        up_v.rows = i_size;
+        OcWeightView down_v = L->ffn_down_exps;
+        down_v.data = L->ffn_down_exps.data + (size_t)idx * c->n_embd * down_row_bytes;
+        down_v.rows = c->n_embd;
+
+        matvec(&gate_v, s->normed, s->expert_gate, s->dequant_temp);
+        matvec(&up_v,   s->normed, s->expert_up,   s->dequant_temp);
+        oc_swiglu_inplace_f32(s->expert_gate, s->expert_up, i_size);
+        /* down → temp (shexp_out), then accumulate w*temp into expert_out. */
+        matvec(&down_v, s->expert_gate, s->shexp_out, s->dequant_temp);
+        for (size_t i = 0; i < c->n_embd; i++) {
+            s->expert_out[i] += w * s->shexp_out[i];
+        }
+    }
+    if (sel != sel_buf) free(sel);
+
+    /* 6. Shared expert (always active, added with weight 1.0). Optional
+     *    sigmoid gate via ffn_gate_inp_shexp (Qwen2-MoE shared_expert_gate). */
+    if (L->ffn_gate_shexp.data != NULL && L->ffn_up_shexp.data != NULL &&
+        L->ffn_down_shexp.data != NULL) {
+        matvec(&L->ffn_gate_shexp, s->normed, s->shexp_gate, s->dequant_temp);
+        matvec(&L->ffn_up_shexp,   s->normed, s->shexp_up,   s->dequant_temp);
+        oc_swiglu_inplace_f32(s->shexp_gate, s->shexp_up, i_size);
+        matvec(&L->ffn_down_shexp, s->shexp_gate, s->shexp_out, s->dequant_temp);
+        /* Optional sigmoid gate. */
+        if (L->ffn_gate_inp_shexp.data != NULL) {
+            float gate_logit = 0.0f;
+            matvec(&L->ffn_gate_inp_shexp, s->normed, &gate_logit, s->dequant_temp);
+            float scale = 1.0f / (1.0f + expf(-gate_logit));
+            for (size_t i = 0; i < c->n_embd; i++) s->shexp_out[i] *= scale;
+        }
+        for (size_t i = 0; i < c->n_embd; i++) s->expert_out[i] += s->shexp_out[i];
+    }
+
+    /* 7. Residual add: x += ffn_out. */
+    for (size_t i = 0; i < c->n_embd; i++) s->x[i] += s->expert_out[i];
 }
 
 static void forward_layer(OcLlamaSession *s, uint32_t layer)
@@ -463,14 +669,13 @@ static void forward_layer(OcLlamaSession *s, uint32_t layer)
     /* Pre-FFN RMSNorm. */
     oc_rms_norm_f32(s->x, L->ffn_norm, s->normed, c->n_embd, c->rms_norm_eps);
 
-    /* SwiGLU FFN: gate = silu(W_gate·x) * (W_up·x); out = W_down·gate. */
-    matvec(&L->ffn_gate, s->normed, s->ffn_gate, s->dequant_temp);
-    matvec(&L->ffn_up, s->normed, s->ffn_up, s->dequant_temp);
-    oc_swiglu_inplace_f32(s->ffn_gate, s->ffn_up, c->n_ff);
-    matvec(&L->ffn_down, s->ffn_gate, s->normed, s->dequant_temp);
-
-    /* Residual add. */
-    for (size_t i = 0; i < c->n_embd; i++) s->x[i] += s->normed[i];
+    /* FFN branch: MoE when the layer has a router, dense otherwise. */
+    if (c->num_experts > 0 && L->ffn_gate_inp.data != NULL &&
+        L->ffn_gate_exps.data != NULL) {
+        forward_moe_ffn(s, L);
+    } else {
+        forward_dense_ffn(s, L);
+    }
 }
 
 OcError oc_llama_forward(OcLlamaSession *sess, uint32_t token, float *logits_out)

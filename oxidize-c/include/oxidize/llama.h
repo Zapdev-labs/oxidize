@@ -35,7 +35,7 @@ typedef struct OcLlamaConfig {
     uint32_t n_layer;      /* layer_count                          */
     uint32_t n_head;       /* num_attention_heads                  */
     uint32_t n_head_kv;    /* num_key_value_heads (GQA)            */
-    uint32_t n_ff;         /* intermediate_size                    */
+    uint32_t n_ff;         /* intermediate_size (dense FFN)        */
     uint32_t n_ctx;        /* context_size                         */
     uint32_t head_dim;     /* n_embd / n_head (or attention.key_length) */
     uint32_t kv_head_dim;  /* usually == head_dim                  */
@@ -43,6 +43,13 @@ typedef struct OcLlamaConfig {
     float    rope_theta;
     float    rms_norm_eps;
     bool     tied_embeddings;  /* output.weight absent → tok_embeddings */
+    /* MoE (Qwen3-MoE / Mixtral). When num_experts > 0, the FFN branch uses
+     * the MoE path (router + top-k experts + optional shared expert). */
+    uint32_t num_experts;          /* 0 = dense FFN                       */
+    uint32_t num_experts_per_tok;  /* top-k (0 → 1 when num_experts>0)    */
+    uint32_t expert_intermediate_size;  /* 0 → falls back to n_ff          */
+    bool     expert_gating_sigmoid;     /* false = softmax (Qwen3-MoE)     */
+    float    expert_weights_scale;      /* 1.0 = no routed scaling          */
 } OcLlamaConfig;
 
 /* Non-owning view over a mmap'd GGUF tensor. */
@@ -56,7 +63,17 @@ typedef struct OcWeightView {
 
 typedef struct OcLlamaLayer {
     OcWeightView attn_q, attn_k, attn_v, attn_output;
-    OcWeightView ffn_gate, ffn_up, ffn_down;
+    OcWeightView ffn_gate, ffn_up, ffn_down;     /* dense FFN (when num_experts==0) */
+    /* MoE (Qwen3-MoE / Mixtral). Stacked expert tensors: expert i occupies
+     * bytes [i * per_expert_row_bytes, (i+1) * per_expert_row_bytes) per row.
+     * `ffn_gate_exps.rows` = num_experts * expert_intermediate_size. */
+    OcWeightView ffn_gate_inp;            /* router: [num_experts, n_embd]        */
+    OcWeightView ffn_gate_exps;           /* [num_experts*exp_i_size, n_embd]    */
+    OcWeightView ffn_up_exps;             /* [num_experts*exp_i_size, n_embd]    */
+    OcWeightView ffn_down_exps;           /* [num_experts*n_embd, exp_i_size]    */
+    /* Shared expert (always active, added with weight 1.0). */
+    OcWeightView ffn_gate_shexp, ffn_up_shexp, ffn_down_shexp;
+    OcWeightView ffn_gate_inp_shexp;     /* optional sigmoid gate for shared    */
     float *attn_norm;       /* owned f32, length n_embd              */
     float *ffn_norm;       /* owned f32, length n_embd              */
 } OcLlamaLayer;
@@ -86,10 +103,18 @@ typedef struct OcLlamaSession {
     float *k;                /* n_head_kv * kv_head_dim              */
     float *v;                /* n_head_kv * kv_head_dim             */
     float *attn_out;         /* n_head * head_dim                   */
-    float *ffn_gate;         /* n_ff                                */
-    float *ffn_up;           /* n_ff                                */
-    float *dequant_temp;     /* max(n_embd, n_ff)                    */
+    float *ffn_gate;         /* n_ff (dense) or exp_i_size (MoE per-expert) */
+    float *ffn_up;           /* n_ff or exp_i_size                          */
+    float *dequant_temp;     /* max(n_embd, n_ff, exp_i_size)               */
     float *logits;           /* vocab_size                          */
+    /* MoE temporaries. */
+    float *router_logits;    /* num_experts                         */
+    float *expert_gate;      /* expert_intermediate_size            */
+    float *expert_up;        /* expert_intermediate_size            */
+    float *expert_out;       /* n_embd                              */
+    float *shexp_gate;       /* expert_intermediate_size (shared)   */
+    float *shexp_up;         /* expert_intermediate_size (shared)   */
+    float *shexp_out;        /* n_embd                             */
 } OcLlamaSession;
 
 /* Load a Llama-family GGUF (mmap, zero-copy weights). Returns OC_OK,
