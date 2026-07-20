@@ -162,6 +162,16 @@ OcError oc_quant_dequant_row(OcGgufQuantizationType qtype,
                              const uint8_t *src, size_t src_len,
                              float *dst, size_t value_count);
 
+/* Scalar-only dequant (skips the SIMD dispatch). Same semantics as
+ * oc_quant_dequant_row otherwise. Used by the SIMD parity tests
+ * (tests/test_simd.c) as the reference, and by callers that need
+ * bit-deterministic scalar output (e.g. golden-fixture generation). The
+ * SIMD path in oc_quant_dequant_row is bit-exact with this scalar
+ * reference by contract (VAL-SIMD-001..004). */
+OcError oc_quant_dequant_row_scalar(OcGgufQuantizationType qtype,
+                                    const uint8_t *src, size_t src_len,
+                                    float *dst, size_t value_count);
+
 /* Quantize `src` (an f32 array of length `value_count`) into `dst` (a packed
  * quant buffer). `dst_len` must equal `oc_quantized_size(qtype, value_count)`.
  * Returns OC_OK, OC_ERR_QUANT (unknown type), OC_ERR_INVALID_ARG (length

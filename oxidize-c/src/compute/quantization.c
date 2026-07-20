@@ -21,6 +21,7 @@
  */
 #include "oxidize/quant.h"
 #include "oxidize/log.h"
+#include "oxidize/simd.h"
 
 /* Bit-exact lookup tables for AL/IQ/NVFP4 dequant (port of
  * oxidize-core/src/compute/quantization{.rs,/iq_grids.rs,
@@ -2019,6 +2020,22 @@ size_t oc_quantized_size(OcGgufQuantizationType qtype, size_t value_count)
 OcError oc_quant_dequant_row(OcGgufQuantizationType qtype,
                              const uint8_t *src, size_t src_len,
                              float *dst, size_t value_count)
+{
+    if (src == NULL || dst == NULL) return OC_ERR_INVALID_ARG;
+    /* SIMD fast path: if a kernel is available for this (qtype, host), it
+     * produces output byte-identical to the scalar reference (VAL-SIMD-001..
+     * 004). On false, fall through to the scalar switch. Layout errors are
+     * also reported as false here so the scalar path returns the canonical
+     * OC_ERR_INVALID_ARG. */
+    if (oc_simd_try_dequant(qtype, src, src_len, dst, value_count)) {
+        return OC_OK;
+    }
+    return oc_quant_dequant_row_scalar(qtype, src, src_len, dst, value_count);
+}
+
+OcError oc_quant_dequant_row_scalar(OcGgufQuantizationType qtype,
+                                    const uint8_t *src, size_t src_len,
+                                    float *dst, size_t value_count)
 {
     if (src == NULL || dst == NULL) return OC_ERR_INVALID_ARG;
     switch (qtype) {
