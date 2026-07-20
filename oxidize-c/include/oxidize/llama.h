@@ -135,6 +135,11 @@ OcError oc_llama_forward(OcLlamaSession *sess, uint32_t token, float *logits_out
  * subsequent forwards). Does NOT zero the cache. */
 void oc_llama_session_reset(OcLlamaSession *sess);
 
+/* Rewind position to `pos` (for speculative decoding cache rollback).
+ * KV cache entries at positions >= pos will be overwritten on subsequent
+ * forwards. Does NOT zero the cache. */
+void oc_llama_session_rewind(OcLlamaSession *sess, uint32_t pos);
+
 void oc_llama_session_free(OcLlamaSession *sess);
 void oc_llama_free(OcLlamaModel *model);
 

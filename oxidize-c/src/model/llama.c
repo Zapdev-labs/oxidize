@@ -390,6 +390,11 @@ void oc_llama_session_reset(OcLlamaSession *sess)
     if (sess) sess->pos = 0;
 }
 
+void oc_llama_session_rewind(OcLlamaSession *sess, uint32_t pos)
+{
+    if (sess) sess->pos = pos;
+}
+
 void oc_llama_session_free(OcLlamaSession *sess)
 {
     if (sess == NULL) return;
