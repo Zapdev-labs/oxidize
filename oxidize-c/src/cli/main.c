@@ -105,6 +105,23 @@ static OcError run_generation(const OcCliArgs *args)
         return e;
     }
 
+    /* If --auto: detect CPU, fingerprint the model, plan, and apply the
+     * memory-side policy (hugepages/mlock) to the mmap'd weights. Thread
+     * and NUMA policy are read from the plan by the caller's worker pool
+     * (not yet wired — single-threaded forward for now). */
+    if (args->auto_tune) {
+        OcCpuInfo cpu;
+        OcModelFingerprint fp;
+        if (oc_autotune_detect_cpu(&cpu) == OC_OK &&
+            oc_autotune_fingerprint_gguf(&model.gguf, &fp) == OC_OK) {
+            OcTuningPlan plan = oc_autotune_plan(&cpu, &fp);
+            oc_log(OC_LOG_INFO, "autotune: %u threads, numa=%s, simd=%s",
+                   plan.threads, oc_autotune_numa_name(plan.numa),
+                   cpu.simd.name);
+            oc_autotune_apply(&plan, &model.gguf);
+        }
+    }
+
     /* Tokenizer (loaded from the same GGUF metadata). */
     OcTokenizer tok;
     e = oc_tokenizer_load_from_gguf(&model.gguf.unified, &tok);

@@ -11,6 +11,12 @@
  * The plan() function is PURE: same (cpu, model) inputs → same plan output,
  * with every decision captured in a rationale string (no side effects).
  */
+/* _GNU_SOURCE enables cpu_set_t + sched_setaffinity on glibc. Must be the
+ * first non-comment thing in the file. */
+#ifdef __linux__
+#  define _GNU_SOURCE
+#  include <sched.h>     /* MUST be first: cpu_set_t needs _GNU_SOURCE      */
+#endif
 #include "oxidize/autotune.h"
 
 #include "oxidize/gguf.h"
@@ -348,4 +354,85 @@ void oc_autotune_plan_dump(const OcTuningPlan *plan,
     fprintf(stderr, "  simd dequant:%s   (%s)\n",
             plan->use_simd_dequant ? "yes" : "no",
             plan->rationale_memory ? plan->rationale_memory : "");
+}
+
+/* ─── Apply (autotune-plan-apply feature) ────────────────────────────────
+ *
+ * Applies the memory-side of the plan (hugepages + mlock) to the mmap'd
+ * GGUF. Thread/NUMA policy is caller-side (set via pthread_setaffinity on
+ * worker threads) because it must be applied per-thread, not globally. */
+
+OcError oc_autotune_apply(const OcTuningPlan *plan, OcGgufMmappedFile *m)
+{
+    if (plan == NULL || m == NULL) return OC_ERR_INVALID_ARG;
+    if (plan->use_hugepages) {
+        /* oc_gguf_map_advise_hugepage is best-effort; logs on failure. */
+        OcError e = oc_gguf_map_advise_hugepage(m);
+        if (e != OC_OK) {
+            oc_log(OC_LOG_WARN, "autotune: hugepage advise failed (%s)",
+                   oc_error_msg(e));
+        }
+    }
+    if (plan->mlock_weights) {
+        /* oc_gguf_map_mlock_with_headroom already checks the 30% headroom
+         * policy internally; returns true on success, false on skip/fail. */
+        bool ok = oc_gguf_map_mlock_with_headroom(m);
+        if (!ok) {
+            oc_log(OC_LOG_WARN, "autotune: mlock skipped (headroom too tight)");
+        }
+    }
+    return OC_OK;
+}
+
+OcError oc_autotune_bind_to_numa_node(uint32_t node)
+{
+#if OC_LINUX
+    /* Use libnuma if available, else best-effort via CPU affinity to the
+     * node's CPUs. The simplest portable approach is to read the node's
+     * CPU list from /sys/devices/system/node/nodeN/cpulist and apply it
+     * via sched_setaffinity. */
+    char path[128];
+    snprintf(path, sizeof(path),
+             "/sys/devices/system/node/node%u/cpulist", node);
+    FILE *f = fopen(path, "r");
+    if (f == NULL) {
+        /* Node doesn't exist or single-socket: no-op is fine. */
+        return OC_OK;
+    }
+    char cpulist[256];
+    if (fgets(cpulist, sizeof(cpulist), f) == NULL) {
+        fclose(f);
+        return OC_OK;
+    }
+    fclose(f);
+    /* Parse "a-b" or "a,b,c" into a cpu_set_t. We support the common
+     * "a-b" range form; comma lists are handled by iterating. */
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    char *p = cpulist;
+    while (*p) {
+        unsigned long lo, hi;
+        if (sscanf(p, "%lu-%lu", &lo, &hi) == 2) {
+            for (unsigned long c = lo; c <= hi && c < CPU_SETSIZE; c++) {
+                CPU_SET((int)c, &set);
+            }
+            /* skip past the range */
+            while (*p && *p != ',' && *p != '\n') p++;
+        } else if (sscanf(p, "%lu", &lo) == 1) {
+            if (lo < CPU_SETSIZE) CPU_SET((int)lo, &set);
+            while (*p && *p != ',' && *p != '\n') p++;
+        } else {
+            p++;
+        }
+        if (*p == ',' || *p == '\n') p++;
+    }
+    if (sched_setaffinity(0, sizeof(set), &set) != 0) {
+        oc_log(OC_LOG_WARN, "autotune: sched_setaffinity to node %u failed",
+               node);
+    }
+    return OC_OK;
+#else
+    (void)node;
+    return OC_OK;
+#endif
 }

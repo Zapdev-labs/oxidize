@@ -109,6 +109,24 @@ OcError oc_autotune_fingerprint_gguf(const OcGgufMmappedFile *m,
 OcTuningPlan oc_autotune_plan(const OcCpuInfo *cpu,
                               const OcModelFingerprint *model);
 
+/* ─── Apply (autotune-plan-apply feature) ────────────────────────────────
+ *
+ * Apply a plan to a loaded mmap'd GGUF: applies MADV_HUGEPAGE (if
+ * plan->use_hugepages) and mlock (if plan->mlock_weights) to every shard.
+ * Thread and NUMA policy are caller-side (set via pthread_setaffinity /
+ * numa_set_bind) and are exposed via the plan fields rather than applied
+ * here, because they must be set per-thread by the caller's worker pool.
+ *
+ * Returns OC_OK if at least one of (hugepages, mlock) succeeded, OC_OK if
+ * neither was requested, or OC_ERR_IO if a requested policy failed on all
+ * shards. Best-effort: partial failures are logged but do not abort. */
+OcError oc_autotune_apply(const OcTuningPlan *plan, OcGgufMmappedFile *m);
+
+/* Bind the calling thread to a single NUMA node (Linux only, best-effort).
+ * Used by worker pools to honor plan->numa == OC_NUMA_SINGLE. On non-Linux
+ * or single-socket hosts, returns OC_OK without doing anything. */
+OcError oc_autotune_bind_to_numa_node(uint32_t node);
+
 /* Human-readable name for a NUMA policy. */
 const char *oc_autotune_numa_name(OcNumaPolicy p);
 

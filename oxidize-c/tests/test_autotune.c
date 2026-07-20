@@ -165,3 +165,59 @@ Test(autotune, plan_dump_does_not_crash)
     oc_autotune_plan_dump(&p, &cpu, &model);
     cr_assert(true, "plan_dump ran without crashing");
 }
+
+/* ─── Apply (autotune-plan-apply) ──────────────────────────────────────── */
+
+Test(autotune, apply_null_args_rejected)
+{
+    OcGgufMmappedFile m;
+    cr_assert_eq(oc_autotune_apply(NULL, &m), OC_ERR_INVALID_ARG);
+    OcTuningPlan p;
+    memset(&p, 0, sizeof(p));
+    cr_assert_eq(oc_autotune_apply(&p, NULL), OC_ERR_INVALID_ARG);
+}
+
+Test(autotune, apply_noop_plan_does_not_crash)
+{
+    /* A plan that requests no hugepages and no mlock should be a no-op. */
+    OcGgufMmappedFile m;
+    if (oc_gguf_map_open("../oxidize-core/tests/fixtures/valid-v3.gguf", &m) != OC_OK) {
+        cr_skip_test("fixture not available at this CWD");
+    }
+    OcTuningPlan p;
+    memset(&p, 0, sizeof(p));
+    p.use_hugepages = false;
+    p.mlock_weights = false;
+    OcError e = oc_autotune_apply(&p, &m);
+    cr_assert_eq(e, OC_OK, "noop plan must succeed");
+    oc_gguf_map_free(&m);
+}
+
+Test(autotune, apply_hugepages_best_effort_on_small_file)
+{
+    /* Even if the plan requests hugepages, applying to a tiny fixture must
+     * not crash; the underlying advise is best-effort. */
+    OcGgufMmappedFile m;
+    if (oc_gguf_map_open("../oxidize-core/tests/fixtures/valid-v3.gguf", &m) != OC_OK) {
+        cr_skip_test("fixture not available");
+    }
+    OcCpuInfo cpu;
+    oc_autotune_detect_cpu(&cpu);
+    OcTuningPlan p;
+    memset(&p, 0, sizeof(p));
+    p.use_hugepages = true;
+    p.mlock_weights = false;   /* don't mlock the fixture */
+    OcError e = oc_autotune_apply(&p, &m);
+    cr_assert_eq(e, OC_OK, "hugepages apply is best-effort, must return OK");
+    oc_gguf_map_free(&m);
+}
+
+Test(autotune, bind_to_numa_node_does_not_crash)
+{
+    /* Binding to node 0 should always succeed (or no-op on non-Linux). */
+    OcError e = oc_autotune_bind_to_numa_node(0);
+    cr_assert_eq(e, OC_OK, "bind_to_numa_node(0) must succeed or no-op");
+    /* Binding to a non-existent node must also not crash (best-effort). */
+    e = oc_autotune_bind_to_numa_node(999);
+    cr_assert_eq(e, OC_OK, "bind to non-existent node is a no-op");
+}
