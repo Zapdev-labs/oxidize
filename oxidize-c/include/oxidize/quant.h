@@ -58,18 +58,32 @@ extern "C" {
 #define OC_BLOCK_Q5_K_SIZE   176u  /* 2*f16 + 12 + QK_K/2 + QK_K/8 = 4+12+128+32 */
 #define OC_BLOCK_Q6_K_SIZE   210u  /* f16 + QK_K/16 + 3*QK_K/4  = 2+16+192    */
 #define OC_BLOCK_Q8_K_SIZE   292u  /* f32 + QK_K + QK_K/16*i16  = 4+256+32    */
-/* AL-family + IQ-family + NVFP4 block sizes (added by al-iq-nvfp4 feature). */
-#define OC_BLOCK_AL5_XS_SIZE 14u
-#define OC_BLOCK_IQ1_S_SIZE  20u
-#define OC_BLOCK_IQ1_M_SIZE  20u
-#define OC_BLOCK_NVFP4_SIZE  18u
-#define OC_BLOCK_IQ4_XS_SIZE 22u
-#define OC_BLOCK_IQ3_S_SIZE  22u
-#define OC_BLOCK_IQ2_XXS_SIZE 18u
-#define OC_BLOCK_IQ2_XS_SIZE 22u
-#define OC_BLOCK_IQ2_S_SIZE  24u
-#define OC_BLOCK_IQ3_XXS_SIZE 20u
-#define OC_BLOCK_IQ4_NL_SIZE 18u
+/* AL-family + IQ-family + NVFP4 block sizes (added by al-iq-nvfp4 feature).
+ * Ported bit-exact from oxidize-core/src/compute/quantization.rs:
+ *   BLOCK_AL5_XS_SIZE = 2 + QK_AL*3/8 = 2 + 12 = 14
+ *   BLOCK_IQ1_S_SIZE  = sizeof_of_f16() + QK_K/8  + QK_K/16  = 2 + 32 + 16 = 50
+ *   BLOCK_IQ1_M_SIZE  = QK_K/8 + QK_K/16 + QK_K/32           = 32 + 16 + 8 = 56
+ *   BLOCK_IQ2_XXS_SIZE= sizeof_of_f16() + QK_K/4             = 2 + 64      = 66
+ *   BLOCK_IQ2_XS_SIZE = sizeof_of_f16() + QK_K/8*2 + QK_K/32 = 2 + 64 + 8  = 74
+ *   BLOCK_IQ2_S_SIZE  = sizeof_of_f16() + QK_K/4 + QK_K/32 + QK_K/32 = 2+64+8+8 = 82
+ *   BLOCK_IQ3_XXS_SIZE= sizeof_of_f16() + 3*(QK_K/8)         = 2 + 96      = 98
+ *   BLOCK_IQ3_S_SIZE  = sizeof_of_f16() + QK_K/4 + QK_K/32 + QK_K/8 + QK_K/64
+ *                                                                  = 2+64+8+32+4 = 110
+ *   BLOCK_IQ4_NL_SIZE = sizeof_of_f16() + QK4_NL/2            = 2 + 16      = 18
+ *   BLOCK_IQ4_XS_SIZE = sizeof_of_f16() + 2 + QK_K/64 + QK_K/2 = 2+2+4+128 = 136
+ *   BLOCK_NVFP4_SIZE  = QK_NVFP4/QK_NVFP4_SUB + QK_NVFP4/2    = 4 + 32      = 36
+ */
+#define OC_BLOCK_AL5_XS_SIZE   14u
+#define OC_BLOCK_IQ1_S_SIZE   50u
+#define OC_BLOCK_IQ1_M_SIZE   56u
+#define OC_BLOCK_IQ2_XXS_SIZE 66u
+#define OC_BLOCK_IQ2_XS_SIZE  74u
+#define OC_BLOCK_IQ2_S_SIZE   82u
+#define OC_BLOCK_IQ3_XXS_SIZE 98u
+#define OC_BLOCK_IQ3_S_SIZE  110u
+#define OC_BLOCK_IQ4_NL_SIZE  18u
+#define OC_BLOCK_IQ4_XS_SIZE 136u
+#define OC_BLOCK_NVFP4_SIZE   36u
 
 /* ─── Quantization type enum (port of GgufQuantizationType) ──────────────
  *

@@ -27,6 +27,9 @@
 
 #include "oxidize/quant.h"
 #include "oxidize/error.h"
+/* Pull in the AL/IQ/NVFP4 constant tables (KVALUES_IQ4NL, IQ3S_GRID, etc.)
+ * so the SHA256 parity test (VAL-QUANT-016) can hash their bytes directly. */
+#include "../src/compute/quant_tables.h"
 
 #include <math.h>
 #include <stdint.h>
@@ -615,3 +618,410 @@ Test(quant, q4_k_m_pack_is_stable, .description = "Q4_K_M pack produces finite, 
     /* d field (f16 bits at [0..2]) should be non-zero for non-zero input. */
     cr_assert_neq(buf[0] | buf[1], 0, "Q4_K_M d field should be non-zero");
 }
+
+/* ─── VAL-QUANT-001: AL/IQ/NVFP4 block sizes ────────────────────────── */
+
+Test(quant, al_iq_nvfp4_block_sizes, .description = "VAL-QUANT-001: AL/IQ/NVFP4 block-size constants match Rust") {
+    struct { OcGgufQuantizationType t; size_t els; size_t bytes; } cases[] = {
+        { OC_QUANT_AL5,      32,  18  },   /* == Q4_0 layout */
+        { OC_QUANT_AL5_XS,   32,  14  },   /* 2 + 12 (3-bit packed) */
+        { OC_QUANT_AL6,      32,  22  },   /* == Q5_0 layout */
+        { OC_QUANT_AL8,      32,  34  },   /* == Q8_0 layout */
+        { OC_QUANT_IQ1_S,    256, 50  },
+        { OC_QUANT_IQ1_M,    256, 56  },
+        { OC_QUANT_IQ2_XXS,  256, 66  },
+        { OC_QUANT_IQ2_XS,   256, 74  },
+        { OC_QUANT_IQ2_S,    256, 82  },
+        { OC_QUANT_IQ3_XXS,  256, 98  },
+        { OC_QUANT_IQ3_S,    256, 110 },
+        { OC_QUANT_IQ4_NL,   32,  18  },
+        { OC_QUANT_IQ4_XS,   256, 136 },
+        { OC_QUANT_NVFP4,    64,  36  },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        OcQuantBlockLayout bs = oc_quant_block_size(cases[i].t);
+        cr_assert_eq(bs.elements_per_block, cases[i].els,
+            "AL/IQ/NVFP4 elements mismatch for %s: got %zu, want %zu",
+            oc_quant_type_name(cases[i].t), bs.elements_per_block, cases[i].els);
+        cr_assert_eq(bs.bytes_per_block, cases[i].bytes,
+            "AL/IQ/NVFP4 bytes mismatch for %s: got %zu, want %zu",
+            oc_quant_type_name(cases[i].t), bs.bytes_per_block, cases[i].bytes);
+    }
+}
+
+/* ─── VAL-QUANT-006: AL-family dequant (pack-then-dequant round-trip) ─ */
+
+Test(quant, al_family_pack_dequant_roundtrip, .description = "VAL-QUANT-006: AL5/AL5_XS/AL6/AL8 pack-then-dequant round-trip") {
+    /* AL5: 32-elem block, 18 bytes. Tolerance 0.5 (4-bit, range -8..7 * d). */
+    {
+        float src[32];
+        for (int i = 0; i < 32; i++) src[i] = next_float(-2.0f, 2.0f);
+        uint8_t buf[18];
+        cr_assert_eq(oc_quant_pack_block(OC_QUANT_AL5, src, buf), OC_OK, "AL5 pack");
+        float dst[32];
+        cr_assert_eq(oc_quant_dequant_row(OC_QUANT_AL5, buf, sizeof(buf), dst, 32), OC_OK, "AL5 dequant");
+        for (int i = 0; i < 32; i++) {
+            cr_assert(isfinite(dst[i]), "AL5 non-finite at %d", i);
+            cr_assert_leq(fabsf(dst[i] - src[i]), 0.5f, "AL5 RT error at %d", i);
+        }
+    }
+    /* AL5_XS: 32-elem block, 14 bytes. 3-bit levels, range -4..3 * d. */
+    {
+        float src[32];
+        for (int i = 0; i < 32; i++) src[i] = next_float(-1.0f, 1.0f);
+        uint8_t buf[14];
+        cr_assert_eq(oc_quant_pack_block(OC_QUANT_AL5_XS, src, buf), OC_OK, "AL5_XS pack");
+        float dst[32];
+        cr_assert_eq(oc_quant_dequant_row(OC_QUANT_AL5_XS, buf, sizeof(buf), dst, 32), OC_OK, "AL5_XS dequant");
+        for (int i = 0; i < 32; i++) {
+            cr_assert(isfinite(dst[i]), "AL5_XS non-finite at %d", i);
+            cr_assert_leq(fabsf(dst[i] - src[i]), 0.6f, "AL5_XS RT error at %d", i);
+        }
+    }
+    /* AL6: 32-elem block, 22 bytes. 5-bit, range -16..15 * d. */
+    {
+        float src[32];
+        for (int i = 0; i < 32; i++) src[i] = next_float(-2.0f, 2.0f);
+        uint8_t buf[22];
+        cr_assert_eq(oc_quant_pack_block(OC_QUANT_AL6, src, buf), OC_OK, "AL6 pack");
+        float dst[32];
+        cr_assert_eq(oc_quant_dequant_row(OC_QUANT_AL6, buf, sizeof(buf), dst, 32), OC_OK, "AL6 dequant");
+        for (int i = 0; i < 32; i++) {
+            cr_assert(isfinite(dst[i]), "AL6 non-finite at %d", i);
+            cr_assert_leq(fabsf(dst[i] - src[i]), 0.2f, "AL6 RT error at %d", i);
+        }
+    }
+    /* AL8: 32-elem block, 34 bytes. 8-bit, range -127..127 * d. */
+    {
+        float src[32];
+        for (int i = 0; i < 32; i++) src[i] = next_float(-2.0f, 2.0f);
+        uint8_t buf[34];
+        cr_assert_eq(oc_quant_pack_block(OC_QUANT_AL8, src, buf), OC_OK, "AL8 pack");
+        float dst[32];
+        cr_assert_eq(oc_quant_dequant_row(OC_QUANT_AL8, buf, sizeof(buf), dst, 32), OC_OK, "AL8 dequant");
+        for (int i = 0; i < 32; i++) {
+            cr_assert(isfinite(dst[i]), "AL8 non-finite at %d", i);
+            cr_assert_leq(fabsf(dst[i] - src[i]), 0.05f, "AL8 RT error at %d", i);
+        }
+    }
+}
+
+Test(quant, al5_xs_handcrafted_dequant, .description = "VAL-QUANT-006: AL5_XS hand-crafted block dequant") {
+    /* d=1.0 (f16 0x3C00), 3-bit levels 0..7 packed in the 12-byte bitstream.
+     * Each level l decodes to (l - 4) * 1.0 = (l-4). Construct levels 4,5,6,7
+     * repeating so output is 0,1,2,3,0,1,2,3,... */
+    uint8_t buf[14];
+    buf[0] = 0x00; buf[1] = 0x3C;  /* f16 1.0 LE */
+    /* Pack 32 levels: level = 4 + (i % 4) → output = (4 + (i%4)) - 4 = i%4.
+     * Bits are written LSB-first per level: level 4 = 0b100, level 5 = 0b101, etc. */
+    uint8_t levels[32];
+    for (int i = 0; i < 32; i++) levels[i] = (uint8_t)(4 + (i % 4));
+    memset(&buf[2], 0, 12);
+    uint32_t bitpos = 0;
+    for (int i = 0; i < 32; i++) {
+        for (int b = 0; b < 3; b++) {
+            if ((levels[i] >> b) & 1) {
+                buf[2 + bitpos / 8] |= (uint8_t)(1u << (bitpos % 8));
+            }
+            bitpos++;
+        }
+    }
+    float dst[32];
+    OcError e = oc_quant_dequant_row(OC_QUANT_AL5_XS, buf, sizeof(buf), dst, 32);
+    cr_assert_eq(e, OC_OK, "AL5_XS dequant");
+    for (int i = 0; i < 32; i++) {
+        float expected = (float)(i % 4);
+        cr_assert_float_eq(dst[i], expected, 0.0f, "AL5_XS[%d]: got %f, want %f", i, dst[i], expected);
+    }
+}
+
+Test(quant, al_family_zero_block, .description = "AL-family zero-block dequant produces all zeros") {
+    uint8_t buf[34];
+    float dst[32];
+    memset(buf, 0, sizeof(buf));
+    /* AL5 zero block: d=0, packed bytes 0x88 (nibbles = 8, so (8-8)*0 = 0). */
+    for (int i = 2; i < 18; i++) buf[i] = 0x88;
+    cr_assert_eq(oc_quant_dequant_row(OC_QUANT_AL5, buf, 18, dst, 32), OC_OK);
+    for (int i = 0; i < 32; i++) cr_assert_float_eq(dst[i], 0.0f, 0.0f, "AL5 zero[%d]", i);
+    /* AL8 zero block: d=0, qs all 0. */
+    memset(buf, 0, sizeof(buf));
+    cr_assert_eq(oc_quant_dequant_row(OC_QUANT_AL8, buf, 34, dst, 32), OC_OK);
+    for (int i = 0; i < 32; i++) cr_assert_float_eq(dst[i], 0.0f, 0.0f, "AL8 zero[%d]", i);
+    /* AL6 zero block: d=0, qs=0x10 (so q=16 → (16-16)*0 = 0). */
+    memset(buf, 0, sizeof(buf));
+    for (int i = 6; i < 22; i++) buf[i] = 0x10;
+    cr_assert_eq(oc_quant_dequant_row(OC_QUANT_AL6, buf, 22, dst, 32), OC_OK);
+    for (int i = 0; i < 32; i++) cr_assert_float_eq(dst[i], 0.0f, 0.0f, "AL6 zero[%d]", i);
+    /* AL5_XS zero block: d=0, packed all 0. */
+    memset(buf, 0, sizeof(buf));
+    cr_assert_eq(oc_quant_dequant_row(OC_QUANT_AL5_XS, buf, 14, dst, 32), OC_OK);
+    for (int i = 0; i < 32; i++) cr_assert_float_eq(dst[i], 0.0f, 0.0f, "AL5_XS zero[%d]", i);
+}
+
+/* ─── VAL-QUANT-007: IQ-family dequant (zero-block + hand-crafted) ──── */
+
+Test(quant, iq_family_zero_blocks, .description = "VAL-QUANT-007: IQ-family zero-block dequant produces all zeros") {
+    /* For every IQ type, an all-zero block has d=0 (or scale_u16=0 for IQ1_M),
+     * so every output is 0 * (grid + delta) = 0. Validates the dequant runs
+     * without crash and produces finite zero output. */
+    uint8_t buf[256];  /* large enough for all IQ block sizes */
+    float dst[256];
+    struct { OcGgufQuantizationType t; size_t bytes; size_t els; } cases[] = {
+        { OC_QUANT_IQ1_S,   50,  256 },
+        { OC_QUANT_IQ1_M,   56,  256 },
+        { OC_QUANT_IQ2_XXS, 66,  256 },
+        { OC_QUANT_IQ2_XS,  74,  256 },
+        { OC_QUANT_IQ2_S,   82,  256 },
+        { OC_QUANT_IQ3_XXS, 98,  256 },
+        { OC_QUANT_IQ3_S,   110, 256 },
+        { OC_QUANT_IQ4_NL,  18,  32  },
+        { OC_QUANT_IQ4_XS,  136, 256 },
+    };
+    for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+        memset(buf, 0, cases[c].bytes);
+        OcError e = oc_quant_dequant_row(cases[c].t, buf, cases[c].bytes, dst, cases[c].els);
+        cr_assert_eq(e, OC_OK, "%s zero-block dequant failed",
+            oc_quant_type_name(cases[c].t));
+        for (size_t i = 0; i < cases[c].els; i++) {
+            cr_assert(isfinite(dst[i]), "%s zero-block non-finite at %zu",
+                oc_quant_type_name(cases[c].t), i);
+            cr_assert_float_eq(dst[i], 0.0f, 0.0f, "%s zero-block[%zu]: got %f",
+                oc_quant_type_name(cases[c].t), i, dst[i]);
+        }
+    }
+}
+
+Test(quant, iq4_nl_handcrafted, .description = "VAL-QUANT-007: IQ4_NL dequant with d=1.0 matches KVALUES_IQ4NL codebook") {
+    /* d=1.0 (f16 0x3C00). Pack 16 bytes with nibbles 0,1,2,...,15 repeating:
+     * out[j] = KVALUES_IQ4NL[nibble], out[j+16] = KVALUES_IQ4NL[nibble>>4]. */
+    uint8_t buf[18];
+    buf[0] = 0x00; buf[1] = 0x3C;  /* f16 1.0 LE */
+    for (int j = 0; j < 16; j++) {
+        buf[2 + j] = (uint8_t)((j & 0x0F) | (((j + 1) & 0x0F) << 4));
+    }
+    float dst[32];
+    OcError e = oc_quant_dequant_row(OC_QUANT_IQ4_NL, buf, sizeof(buf), dst, 32);
+    cr_assert_eq(e, OC_OK, "IQ4_NL dequant");
+    for (int j = 0; j < 16; j++) {
+        float lo_expected = (float)KVALUES_IQ4NL[j & 0x0F];
+        float hi_expected = (float)KVALUES_IQ4NL[(j + 1) & 0x0F];
+        cr_assert_float_eq(dst[j], lo_expected, 0.0f,
+            "IQ4_NL low[%d]: got %f, want %f", j, dst[j], lo_expected);
+        cr_assert_float_eq(dst[j + 16], hi_expected, 0.0f,
+            "IQ4_NL high[%d]: got %f, want %f", j, dst[j + 16], hi_expected);
+    }
+}
+
+Test(quant, iq4_xs_zero_d_handcrafted, .description = "VAL-QUANT-007: IQ4_XS with d=0 produces all zeros") {
+    /* IQ4_XS block: d=0, scales_h=0, scales_l=0, qs=0. With d=0, dl=0, so all
+     * outputs are 0 * KVALUES_IQ4NL[0] = 0. Validates the 136-byte block
+     * layout is parsed without crash. */
+    uint8_t buf[136];
+    memset(buf, 0, sizeof(buf));
+    float dst[256];
+    OcError e = oc_quant_dequant_row(OC_QUANT_IQ4_XS, buf, sizeof(buf), dst, 256);
+    cr_assert_eq(e, OC_OK, "IQ4_XS dequant");
+    for (int i = 0; i < 256; i++) {
+        cr_assert_float_eq(dst[i], 0.0f, 0.0f, "IQ4_XS zero-d[%d]: got %f", i, dst[i]);
+    }
+}
+
+/* ─── VAL-QUANT-009: NVFP4 dequant ──────────────────────────────────── */
+
+Test(quant, nvfp4_zero_block, .description = "VAL-QUANT-009: NVFP4 zero-block (all scales=0) dequant produces all zeros") {
+    /* NVFP4 block: scales[4] (UE4M3) all 0 → scale=0; qs all 0 → E2M1[0]=0.
+     * out = 0 * 0 = 0 for all 64 values. */
+    uint8_t buf[36];
+    memset(buf, 0, sizeof(buf));
+    float dst[64];
+    OcError e = oc_quant_dequant_row(OC_QUANT_NVFP4, buf, sizeof(buf), dst, 64);
+    cr_assert_eq(e, OC_OK, "NVFP4 dequant");
+    for (int i = 0; i < 64; i++) {
+        cr_assert_float_eq(dst[i], 0.0f, 0.0f, "NVFP4 zero[%d]: got %f", i, dst[i]);
+    }
+}
+
+Test(quant, nvfp4_handcrafted, .description = "VAL-QUANT-009: NVFP4 dequant with known scales + nibbles") {
+    /* Construct a block where:
+     *   - scales[0] = UE4M3 for 1.0 (exp=8, mant=0 → (1+0)*2^(8-7) = 2.0...
+     *     wait, UE4M3: exp=(byte>>3)&0xf, mant=byte&7. For exp=8 (byte=0x40):
+     *       (1 + 0/8) * 2^(8-7) = 2.0. Not 1.0.
+     *     For scale=1.0: need (1 + mant/8) * 2^(exp-7) = 1.0 → exp=7, mant=0
+     *       → byte = (7<<3) | 0 = 0x38. Check: (1+0)*2^(7-7) = 1.0. ✓
+     *   - qs: pack nibbles 0,1,2,3 repeating. E2M1_DOUBLED_VALUES[0]=0, [1]=1,
+     *     [2]=2, [3]=3.
+     * Expected: out[0..15] = 1.0 * {0,1,2,3,0,1,2,3,...} for sub-block 0. */
+    uint8_t buf[36];
+    memset(buf, 0, sizeof(buf));
+    buf[0] = 0x38;  /* scale[0] = UE4M3(1.0) */
+    /* qs starts at offset 4. Pack nibbles: low=0, high=1 → byte=0x10.
+     *                         low=2, high=3 → byte=0x32. */
+    for (int j = 0; j < 8; j++) {
+        buf[4 + 2 * j]     = 0x10;  /* low=0, high=1 */
+        buf[4 + 2 * j + 1] = 0x32;  /* low=2, high=3 */
+    }
+    float dst[64];
+    OcError e = oc_quant_dequant_row(OC_QUANT_NVFP4, buf, sizeof(buf), dst, 64);
+    cr_assert_eq(e, OC_OK, "NVFP4 dequant");
+    /* Sub-block 0 (16 values): scale=1.0. For each qs byte j (0..7):
+     *   out[j]     = scale * E2M1[low]   (low nibble)
+     *   out[j + 8] = scale * E2M1[high]  (high nibble)
+     * qs bytes alternate: 0x10 (low=0,high=1), 0x32 (low=2,high=3).
+     * E2M1 table: [0]=0, [1]=1, [2]=2, [3]=3.
+     * So out[0..7] (low nibbles) = {0,2,0,2,0,2,0,2}
+     *    out[8..15] (high nibbles) = {1,3,1,3,1,3,1,3} */
+    for (int j = 0; j < 8; j++) {
+        float lo_exp = (j % 2 == 0) ? 0.0f : 2.0f;
+        float hi_exp = (j % 2 == 0) ? 1.0f : 3.0f;
+        cr_assert_float_eq(dst[j],      lo_exp, 0.0f,
+            "NVFP4 sub0 low[%d]: got %f, want %f", j, dst[j], lo_exp);
+        cr_assert_float_eq(dst[j + 8],  hi_exp, 0.0f,
+            "NVFP4 sub0 hi[%d]: got %f, want %f", j, dst[j + 8], hi_exp);
+    }
+    /* Sub-blocks 1..3: scale=0 → all 0. */
+    for (int j = 16; j < 64; j++) {
+        cr_assert_float_eq(dst[j], 0.0f, 0.0f, "NVFP4 zero sub[%d]: got %f", j, dst[j]);
+    }
+}
+
+/* ─── VAL-QUANT-016: AL/IQ constant table SHA256 matches Rust ───────── */
+
+/* Minimal SHA-256 implementation for table-parity verification. FIPS 180-4. */
+typedef struct {
+    uint32_t state[8];
+    uint64_t bitlen;
+    uint8_t  data[64];
+    size_t   datalen;
+} Sha256Ctx;
+
+static const uint32_t SHA256_K[64] = {
+    0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+    0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+    0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+    0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+    0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+    0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+    0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+    0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2,
+};
+
+static uint32_t sha_rotr(uint32_t x, int n) { return (x >> n) | (x << (32 - n)); }
+
+static void sha256_transform(Sha256Ctx *c, const uint8_t *data)
+{
+    uint32_t m[64];
+    for (int i = 0; i < 16; i++) {
+        m[i] = ((uint32_t)data[i*4] << 24) | ((uint32_t)data[i*4+1] << 16)
+             | ((uint32_t)data[i*4+2] << 8) | ((uint32_t)data[i*4+3]);
+    }
+    for (int i = 16; i < 64; i++) {
+        uint32_t s0 = sha_rotr(m[i-15],7) ^ sha_rotr(m[i-15],18) ^ (m[i-15] >> 3);
+        uint32_t s1 = sha_rotr(m[i-2],17) ^ sha_rotr(m[i-2],19)  ^ (m[i-2] >> 10);
+        m[i] = m[i-16] + s0 + m[i-7] + s1;
+    }
+    uint32_t a=c->state[0],b=c->state[1],cc=c->state[2],d=c->state[3];
+    uint32_t e=c->state[4],f=c->state[5],g=c->state[6],h=c->state[7];
+    for (int i = 0; i < 64; i++) {
+        uint32_t S1 = sha_rotr(e,6) ^ sha_rotr(e,11) ^ sha_rotr(e,25);
+        uint32_t ch = (e & f) ^ (~e & g);
+        uint32_t t1 = h + S1 + ch + SHA256_K[i] + m[i];
+        uint32_t S0 = sha_rotr(a,2) ^ sha_rotr(a,13) ^ sha_rotr(a,22);
+        uint32_t mj = (a & b) ^ (a & cc) ^ (b & cc);
+        h = g; g = f; f = e; e = d + t1;
+        d = cc; cc = b; b = a; a = t1 + S0 + mj;
+    }
+    c->state[0]+=a; c->state[1]+=b; c->state[2]+=cc; c->state[3]+=d;
+    c->state[4]+=e; c->state[5]+=f; c->state[6]+=g; c->state[7]+=h;
+}
+
+static void sha256_init(Sha256Ctx *c)
+{
+    c->state[0]=0x6a09e667; c->state[1]=0xbb67ae85; c->state[2]=0x3c6ef372;
+    c->state[3]=0xa54ff53a; c->state[4]=0x510e527f; c->state[5]=0x9b05688c;
+    c->state[6]=0x1f83d9ab; c->state[7]=0x5be0cd19;
+    c->bitlen = 0; c->datalen = 0;
+}
+
+static void sha256_update(Sha256Ctx *c, const uint8_t *data, size_t len)
+{
+    for (size_t i = 0; i < len; i++) {
+        c->data[c->datalen++] = data[i];
+        if (c->datalen == 64) {
+            sha256_transform(c, c->data);
+            c->bitlen += 512;
+            c->datalen = 0;
+        }
+    }
+}
+
+static void sha256_final(Sha256Ctx *c, uint8_t out[32])
+{
+    uint64_t bitlen = c->bitlen + (uint64_t)c->datalen * 8;
+    c->data[c->datalen++] = 0x80;
+    if (c->datalen > 56) {
+        while (c->datalen < 64) c->data[c->datalen++] = 0;
+        sha256_transform(c, c->data);
+        c->datalen = 0;
+    }
+    while (c->datalen < 56) c->data[c->datalen++] = 0;
+    for (int i = 7; i >= 0; i--) c->data[c->datalen++] = (uint8_t)((bitlen >> (8*i)) & 0xFF);
+    sha256_transform(c, c->data);
+    for (int i = 0; i < 8; i++) {
+        out[i*4]   = (uint8_t)((c->state[i] >> 24) & 0xFF);
+        out[i*4+1] = (uint8_t)((c->state[i] >> 16) & 0xFF);
+        out[i*4+2] = (uint8_t)((c->state[i] >> 8) & 0xFF);
+        out[i*4+3] = (uint8_t)(c->state[i] & 0xFF);
+    }
+}
+
+/* Hex-encode 32-byte hash → 64-char string. */
+static void sha256_hex(const uint8_t hash[32], char out[65])
+{
+    static const char hex[] = "0123456789abcdef";
+    for (int i = 0; i < 32; i++) {
+        out[i*2]   = hex[(hash[i] >> 4) & 0xF];
+        out[i*2+1] = hex[hash[i] & 0xF];
+    }
+    out[64] = '\0';
+}
+
+Test(quant, al_iq_constant_table_sha256, .description = "VAL-QUANT-016: AL/IQ/NVFP4 constant table SHA256 matches Rust") {
+    /* Expected SHA256 hashes computed from oxidize-core Rust sources via
+     * scripts/gen_quant_tables.py (one-time Python computation). The Rust
+     * tables are themselves transcribed verbatim from ggml-common.h, so a
+     * matching hash proves bit-exact parity with both. */
+    struct { const char *name; const void *data; size_t len; const char *expected_sha; } tables[] = {
+        { "KVALUES_IQ4NL",       KVALUES_IQ4NL,       sizeof(KVALUES_IQ4NL),
+          "61aa47540aa024b5d6ddaa839b84ffe59f3d5a349af5c6c7ffcb5e0474b46163" },
+        { "E2M1_DOUBLED_VALUES", E2M1_DOUBLED_VALUES, sizeof(E2M1_DOUBLED_VALUES),
+          "702a9d6654a1e5c00ba5fdc869ac828ddc37b102d1035ada5215c8e21c8b2006" },
+        { "IQ3S_GRID",           IQ3S_GRID,           sizeof(IQ3S_GRID),
+          "bd1af4945a1717c65610b0284e4628b9a1ba3b306fae3a06f6e5f597356e349f" },
+        { "KMASK_IQ2XS",         KMASK_IQ2XS,         sizeof(KMASK_IQ2XS),
+          "5ac9831b2e30eb285ef34f8501620f878432d5c04331ad1ae47f977a83ba41a5" },
+        { "KSIGNS_IQ2XS",        KSIGNS_IQ2XS,        sizeof(KSIGNS_IQ2XS),
+          "a76742a603f8beca5212ecce0f1f02f11a4887fd2f7c8b15aca0ea3eb3380c31" },
+        { "IQ2XXS_GRID",         IQ2XXS_GRID,         sizeof(IQ2XXS_GRID),
+          "05826b5d3e472a3a78f196be62ac78acf81df0f909626e12ab9fa2a5d490dd54" },
+        { "IQ3XXS_GRID",         IQ3XXS_GRID,         sizeof(IQ3XXS_GRID),
+          "46e35f5a997efdee6c99ce57854c8a0d4f0ff8ca57e5e8a60c0793ea580acf5d" },
+        { "IQ2XS_GRID",          IQ2XS_GRID,          sizeof(IQ2XS_GRID),
+          "06e47aaca60b4dc1d9b5a3f34540437058a6b142b4d7a59d5ded769b4d1bf1de" },
+        { "IQ2S_GRID",           IQ2S_GRID,           sizeof(IQ2S_GRID),
+          "e1aa1473412b0552c2174c30ef22ab4073f6a181b85a17056e8249bd2932fd88" },
+        { "IQ1S_GRID",           IQ1S_GRID,           sizeof(IQ1S_GRID),
+          "07540ffc1aeaf6ad4d97e96b0fcc765aae39671d4ae4a27bbd0e796fde167c6a" },
+    };
+    for (size_t i = 0; i < sizeof(tables) / sizeof(tables[0]); i++) {
+        Sha256Ctx c;
+        sha256_init(&c);
+        sha256_update(&c, (const uint8_t *)tables[i].data, tables[i].len);
+        uint8_t hash[32];
+        sha256_final(&c, hash);
+        char hex[65];
+        sha256_hex(hash, hex);
+        cr_assert_str_eq(hex, tables[i].expected_sha,
+            "%s SHA256 mismatch: got %s, want %s", tables[i].name, hex, tables[i].expected_sha);
+    }
+}
+
