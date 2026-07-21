@@ -189,7 +189,11 @@ void    oc_scheduler_invalidate_prefix_cache(OcScheduler *sched);
  * from physical blocks via the block table. Online softmax (numerically
  * stable, single pass).
  *
- *   kv_cache    : flat array [num_blocks][block_size][num_kv_heads][head_dim] of f32
+ *   kv_cache    : flat array containing a complete K region followed by a
+ *                 complete V region; each region is
+ *                 [num_blocks][block_size][num_kv_heads][head_dim] of f32,
+ *                 so allocate 2 * num_blocks * block_size * num_kv_heads *
+ *                 head_dim floats
  *   block_table : maps logical → physical blocks
  *   q           : query vector [head_dim]
  *   n_kv_heads  : number of KV heads (for GQA, q_head maps to kv_head = q_head / group_size)
@@ -199,7 +203,7 @@ void    oc_scheduler_invalidate_prefix_cache(OcScheduler *sched);
  *   out         : output [head_dim]
  */
 void oc_paged_attention_head(
-    const float *kv_cache,        /* [num_blocks * block_size * n_kv_heads * head_dim] */
+    const float *kv_cache,
     const OcBlockId *block_table, /* logical → physical                       */
     size_t n_blocks,
     const float *q,               /* [head_dim]                              */

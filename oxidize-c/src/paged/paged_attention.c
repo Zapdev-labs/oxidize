@@ -87,6 +87,14 @@ OcError oc_block_pool_allocate(OcBlockPool *pool, OcBlockId *out)
     if (pool->free_count == 0) return OC_ERR_OOM;
     pool->free_count--;
     OcBlockId id = pool->free_list[pool->free_count];
+    if (pool->blocks[id].has_hash) {
+        for (size_t i = 0; i < pool->cache_cap; i++) {
+            if (pool->cache_keys[i] != 0 && pool->cache_vals[i] == id) {
+                pool->cache_keys[i] = 0;
+                pool->cache_count--;
+            }
+        }
+    }
     pool->blocks[id].ref_count = 1;
     pool->blocks[id].has_hash = false;
     pool->blocks[id].block_hash = 0;
@@ -178,7 +186,7 @@ OcBlockId oc_block_pool_lookup_prefix(OcBlockPool *pool, OcBlockHash hash)
     size_t start = cache_slot(pool, hash);
     for (size_t i = 0; i < pool->cache_cap; i++) {
         size_t idx = (start + i) & (pool->cache_cap - 1);
-        if (pool->cache_keys[idx] == 0) return (OcBlockId)-1; /* empty */
+        if (pool->cache_keys[idx] == 0) continue;
         if (pool->cache_keys[idx] == hash) {
             OcBlockId bid = pool->cache_vals[idx];
             if (pool->blocks[bid].ref_count > 0) {
@@ -384,7 +392,6 @@ OcError oc_seq_append_token(OcPagedSequence *seq, uint32_t token)
         seq->generated_cap = nc;
     }
     seq->generated_tokens[seq->generated_len++] = token;
-    oc_block_table_append_token(&seq->block_table);
     return OC_OK;
 }
 
@@ -434,6 +441,8 @@ void oc_scheduler_free(OcScheduler *sched)
 OcError oc_scheduler_add_sequence(OcScheduler *sched, OcPagedSequence *seq)
 {
     if (!sched || !seq) return OC_ERR_INVALID_ARG;
+    if (seq->block_table.num_tokens != 0) return OC_ERR_INVALID_ARG;
+    seq->block_table.block_size = sched->block_pool.config.block_size;
     /* Store in the sequence table. */
     size_t slot = (size_t)(seq->seq_id % sched->seq_cap);
     /* Linear probe for empty slot. */
@@ -449,6 +458,42 @@ OcError oc_scheduler_add_sequence(OcScheduler *sched, OcPagedSequence *seq)
     sched->waiting[sched->waiting_tail] = seq->seq_id;
     sched->waiting_tail = (sched->waiting_tail + 1) % sched->waiting_cap;
     return OC_OK;
+}
+
+static OcError reserve_blocks(OcScheduler *sched, OcPagedSequence *seq,
+                              size_t n_tokens)
+{
+    size_t needed = oc_block_table_blocks_needed(&seq->block_table, n_tokens);
+    if (needed == 0) return OC_OK;
+    if (needed > sched->block_pool.free_count) return OC_ERR_OOM;
+    size_t required = seq->block_table.num_blocks + needed;
+    if (required > seq->block_table.capacity) {
+        size_t new_cap = seq->block_table.capacity;
+        while (new_cap < required) new_cap *= 2;
+        OcBlockId *blocks = xrealloc(seq->block_table.logical_to_physical,
+                                     new_cap, sizeof(OcBlockId));
+        if (!blocks) return OC_ERR_OOM;
+        seq->block_table.logical_to_physical = blocks;
+        seq->block_table.capacity = new_cap;
+    }
+    OcBlockId *dst = seq->block_table.logical_to_physical
+                   + seq->block_table.num_blocks;
+    OcError e = oc_block_pool_allocate_n(&sched->block_pool, needed, dst);
+    if (e != OC_OK) return e;
+    seq->block_table.num_blocks += needed;
+    return OC_OK;
+}
+
+static size_t schedulable_tokens(const OcScheduler *sched,
+                                 const OcPagedSequence *seq, size_t requested)
+{
+    size_t mapped = seq->block_table.num_blocks * seq->block_table.block_size;
+    size_t available = mapped > seq->block_table.num_tokens
+        ? mapped - seq->block_table.num_tokens : 0;
+    size_t free_capacity = sched->block_pool.free_count
+                         * seq->block_table.block_size;
+    size_t capacity = available + free_capacity;
+    return requested < capacity ? requested : capacity;
 }
 
 OcError oc_scheduler_step(OcScheduler *sched, OcSchedulerStepResult *out)
@@ -478,33 +523,22 @@ OcError oc_scheduler_step(OcScheduler *sched, OcSchedulerStepResult *out)
         if (!seq || seq->status != OC_SEQ_RUNNING) continue;
         if (seq->num_prefilled_tokens < seq->prompt_len) continue; /* still prefilling */
 
-        /* Decode: append 1 token position. If block table needs a new block,
-         * allocate it (or COW if the last block is shared). */
-        bool needs_block = oc_block_table_append_token(&seq->block_table);
-        if (needs_block) {
-            /* Check if last block is shared (ref_count > 1) → COW. */
-            size_t last = seq->block_table.num_blocks - 1;
-            if (last < seq->block_table.num_blocks) {
-                OcBlockId last_phys = seq->block_table.logical_to_physical[last];
-                if (sched->block_pool.blocks[last_phys].ref_count > 1) {
-                    OcBlockId new_id;
-                    bool did_copy;
-                    oc_block_pool_cow(&sched->block_pool, last_phys, &new_id, &did_copy);
-                    if (did_copy) {
-                        seq->block_table.logical_to_physical[last] = new_id;
-                    }
-                }
+        size_t logical = seq->block_table.num_tokens / seq->block_table.block_size;
+        if (logical < seq->block_table.num_blocks) {
+            OcBlockId old_id = seq->block_table.logical_to_physical[logical];
+            if (sched->block_pool.blocks[old_id].ref_count > 1) {
+                OcBlockId new_id;
+                bool did_copy;
+                if (oc_block_pool_cow(&sched->block_pool, old_id,
+                                      &new_id, &did_copy) != OC_OK)
+                    break;
+                if (did_copy)
+                    seq->block_table.logical_to_physical[logical] = new_id;
             }
-            /* Allocate a new block. */
-            OcBlockId bid;
-            if (oc_block_pool_allocate(&sched->block_pool, &bid) == OC_OK) {
-                oc_block_table_append_block(&seq->block_table, bid);
-            } else {
-                /* OOM: preempt last sequence. */
-                seq->block_table.num_tokens--; /* undo append */
-                break;
-            }
+        } else if (reserve_blocks(sched, seq, 1) != OC_OK) {
+            break;
         }
+        (void)oc_block_table_append_token(&seq->block_table);
         out->scheduled_ids[out->n_scheduled] = sid;
         out->decode_counts[out->n_scheduled] = 1;
         out->n_scheduled++;
@@ -531,13 +565,8 @@ OcError oc_scheduler_step(OcScheduler *sched, OcSchedulerStepResult *out)
             chunk = sched->config.prefill_chunk_size;
         if (chunk > budget) chunk = budget;
 
-        /* Allocate blocks for the chunk. */
-        size_t needed = oc_block_table_blocks_needed(&seq->block_table, chunk);
-        for (size_t b = 0; b < needed; b++) {
-            OcBlockId bid;
-            if (oc_block_pool_allocate(&sched->block_pool, &bid) != OC_OK) break;
-            oc_block_table_append_block(&seq->block_table, bid);
-        }
+        chunk = schedulable_tokens(sched, seq, chunk);
+        if (chunk == 0 || reserve_blocks(sched, seq, chunk) != OC_OK) continue;
         /* Advance token cursor. */
         seq->num_prefilled_tokens += chunk;
         for (size_t t = 0; t < chunk; t++)
@@ -571,18 +600,8 @@ OcError oc_scheduler_step(OcScheduler *sched, OcSchedulerStepResult *out)
             chunk = sched->config.prefill_chunk_size;
         if (chunk > budget) chunk = budget;
 
-        /* Allocate blocks. */
-        size_t needed = oc_block_table_blocks_needed(&seq->block_table, chunk);
-        bool oom = false;
-        for (size_t b = 0; b < needed; b++) {
-            OcBlockId bid;
-            if (oc_block_pool_allocate(&sched->block_pool, &bid) != OC_OK) {
-                oom = true;
-                break;
-            }
-            oc_block_table_append_block(&seq->block_table, bid);
-        }
-        if (oom) {
+        chunk = schedulable_tokens(sched, seq, chunk);
+        if (chunk == 0 || reserve_blocks(sched, seq, chunk) != OC_OK) {
             /* Put back in waiting. */
             sched->waiting_head = (sched->waiting_head - 1 + sched->waiting_cap) % sched->waiting_cap;
             sched->waiting[sched->waiting_head] = sid;
@@ -628,6 +647,12 @@ OcError oc_scheduler_postprocess(OcScheduler *sched,
             for (size_t b = 0; b < seq->block_table.num_blocks; b++) {
                 oc_block_pool_dec_ref(&sched->block_pool,
                     seq->block_table.logical_to_physical[b]);
+            }
+            for (size_t r = 0; r < sched->running_count; r++) {
+                if (sched->running[r] == seq->seq_id) {
+                    sched->running[r] = sched->running[--sched->running_count];
+                    break;
+                }
             }
         }
     }
@@ -703,6 +728,7 @@ void oc_paged_attention_head(
     size_t block_stride = (size_t)block_size * n_kv_heads * head_dim;
     size_t slot_stride  = (size_t)n_kv_heads * head_dim;
     float inv_sqrt_d = 1.0f / sqrtf((float)head_dim);
+    memset(out, 0, (size_t)head_dim * sizeof(*out));
 
     float max_score = -INFINITY;
     float sum_exp = 0.0f;

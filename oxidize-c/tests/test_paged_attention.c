@@ -113,6 +113,24 @@ Test(paged, block_pool_prefix_cache)
     oc_block_pool_free(&pool);
 }
 
+Test(paged, allocating_cached_free_block_invalidates_hash)
+{
+    OcBlockPool pool;
+    OcBlockPoolConfig cfg = { .block_size = 4, .num_blocks = 2,
+        .num_layers = 1, .num_kv_heads = 1, .head_dim = 2, .dtype_size = 4 };
+    cr_assert_eq(oc_block_pool_init(&pool, &cfg), OC_OK);
+    OcBlockId id;
+    cr_assert_eq(oc_block_pool_allocate(&pool, &id), OC_OK);
+    OcBlockHash hash = oc_compute_block_hash((uint32_t[]){1, 2, 3, 4}, 4);
+    oc_block_pool_insert_prefix(&pool, hash, id);
+    cr_assert_eq(oc_block_pool_dec_ref(&pool, id), OC_OK);
+    OcBlockId reused;
+    cr_assert_eq(oc_block_pool_allocate(&pool, &reused), OC_OK);
+    cr_assert_eq(reused, id);
+    cr_assert_eq(oc_block_pool_lookup_prefix(&pool, hash), (OcBlockId)-1);
+    oc_block_pool_free(&pool);
+}
+
 /* ─── BlockTable ────────────────────────────────────────────────────────── */
 
 Test(paged, block_table_basic)
@@ -271,6 +289,88 @@ Test(paged, scheduler_preemption)
     cr_assert_eq(seq->status, OC_SEQ_WAITING);
     cr_assert_eq(seq->num_prefilled_tokens, 0);
 
+    oc_scheduler_free(&sched);
+}
+
+Test(paged, scheduler_uses_pool_block_size_and_limits_partial_prefill)
+{
+    OcScheduler sched;
+    OcSchedulerConfig scfg = OC_SCHEDULER_DEFAULT;
+    OcBlockPoolConfig bcfg = { .block_size = 4, .num_blocks = 1,
+        .num_layers = 1, .num_kv_heads = 1, .head_dim = 2, .dtype_size = 4 };
+    cr_assert_eq(oc_scheduler_init(&sched, &scfg, &bcfg), OC_OK);
+    uint32_t prompt[] = {1, 2, 3, 4, 5, 6, 7, 8};
+    OcPagedSequence *seq = malloc(sizeof(*seq));
+    cr_assert_eq(oc_seq_init(seq, 1, prompt, 8, 4, UINT32_MAX,
+                             OC_SAMPLER_DEFAULT, 0), OC_OK);
+    cr_assert_eq(oc_scheduler_add_sequence(&sched, seq), OC_OK);
+    cr_assert_eq(seq->block_table.block_size, 4);
+    OcSchedulerStepResult res;
+    cr_assert_eq(oc_scheduler_step(&sched, &res), OC_OK);
+    cr_assert_eq(res.prefill_counts[0], 4);
+    cr_assert_eq(seq->num_prefilled_tokens, 4);
+    cr_assert_eq(seq->block_table.num_tokens, 4);
+    cr_assert_eq(seq->block_table.num_blocks, 1);
+    free(res.scheduled_ids); free(res.prefill_counts); free(res.decode_counts);
+    oc_scheduler_free(&sched);
+}
+
+Test(paged, finished_sequence_releases_running_slot)
+{
+    OcScheduler sched;
+    OcSchedulerConfig scfg = OC_SCHEDULER_DEFAULT;
+    scfg.max_num_running_seqs = 1;
+    OcBlockPoolConfig bcfg = { .block_size = 4, .num_blocks = 4,
+        .num_layers = 1, .num_kv_heads = 1, .head_dim = 2, .dtype_size = 4 };
+    cr_assert_eq(oc_scheduler_init(&sched, &scfg, &bcfg), OC_OK);
+    uint32_t prompt[] = {1};
+    for (OcSeqId id = 1; id <= 2; id++) {
+        OcPagedSequence *seq = malloc(sizeof(*seq));
+        cr_assert_eq(oc_seq_init(seq, id, prompt, 1, 1, UINT32_MAX,
+                                 OC_SAMPLER_DEFAULT, (size_t)id), OC_OK);
+        cr_assert_eq(oc_scheduler_add_sequence(&sched, seq), OC_OK);
+    }
+    OcSchedulerStepResult res;
+    cr_assert_eq(oc_scheduler_step(&sched, &res), OC_OK);
+    free(res.scheduled_ids); free(res.prefill_counts); free(res.decode_counts);
+    cr_assert_eq(oc_scheduler_postprocess(&sched, (OcSeqId[]){1},
+                                          (uint32_t[]){10}, 1), OC_OK);
+    cr_assert_eq(sched.running_count, 0);
+    cr_assert_eq(oc_scheduler_step(&sched, &res), OC_OK);
+    cr_assert_eq(res.scheduled_ids[0], 2);
+    free(res.scheduled_ids); free(res.prefill_counts); free(res.decode_counts);
+    oc_scheduler_free(&sched);
+}
+
+Test(paged, decode_reserves_one_position_and_preserves_boundary_page)
+{
+    OcScheduler sched;
+    OcSchedulerConfig scfg = OC_SCHEDULER_DEFAULT;
+    OcBlockPoolConfig bcfg = { .block_size = 4, .num_blocks = 4,
+        .num_layers = 1, .num_kv_heads = 1, .head_dim = 2, .dtype_size = 4 };
+    cr_assert_eq(oc_scheduler_init(&sched, &scfg, &bcfg), OC_OK);
+    uint32_t prompt[] = {1, 2, 3, 4};
+    OcPagedSequence *seq = malloc(sizeof(*seq));
+    cr_assert_eq(oc_seq_init(seq, 1, prompt, 4, 4, UINT32_MAX,
+                             OC_SAMPLER_DEFAULT, 0), OC_OK);
+    cr_assert_eq(oc_scheduler_add_sequence(&sched, seq), OC_OK);
+    OcSchedulerStepResult res;
+    cr_assert_eq(oc_scheduler_step(&sched, &res), OC_OK);
+    free(res.scheduled_ids); free(res.prefill_counts); free(res.decode_counts);
+    OcBlockId first = seq->block_table.logical_to_physical[0];
+    cr_assert_eq(oc_block_pool_inc_ref(&sched.block_pool, first), OC_OK);
+    cr_assert_eq(oc_scheduler_postprocess(&sched, (OcSeqId[]){1},
+                                          (uint32_t[]){10}, 1), OC_OK);
+    cr_assert_eq(oc_scheduler_step(&sched, &res), OC_OK);
+    cr_assert_eq(seq->block_table.num_tokens, 5);
+    cr_assert_eq(seq->block_table.num_blocks, 2);
+    cr_assert_eq(seq->block_table.logical_to_physical[0], first);
+    cr_assert_eq(sched.block_pool.blocks[first].ref_count, 2);
+    free(res.scheduled_ids); free(res.prefill_counts); free(res.decode_counts);
+    cr_assert_eq(oc_scheduler_postprocess(&sched, (OcSeqId[]){1},
+                                          (uint32_t[]){11}, 1), OC_OK);
+    cr_assert_eq(seq->block_table.num_tokens, 5);
+    cr_assert_eq(oc_block_pool_dec_ref(&sched.block_pool, first), OC_OK);
     oc_scheduler_free(&sched);
 }
 
