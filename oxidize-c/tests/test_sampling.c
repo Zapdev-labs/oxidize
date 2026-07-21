@@ -44,6 +44,15 @@ Test(sampling, null_config_is_greedy)
     cr_assert_eq(oc_sample(logits, 3, NULL, NULL, 0), 1u);
 }
 
+Test(sampling, empty_vocabulary_returns_sentinel)
+{
+    OcSamplerConfig cfg = OC_SAMPLER_DEFAULT;
+    cr_assert_eq(oc_sample(NULL, 0, &cfg, NULL, 0), UINT32_MAX);
+    float mu = cfg.mu;
+    uint64_t rng = 1;
+    cr_assert_eq(oc_mirostat_v2_sample(NULL, 0, &cfg, &mu, &rng), UINT32_MAX);
+}
+
 Test(sampling, argmax_handles_ties_deterministically)
 {
     /* Two equal maxima — argmax must pick the FIRST (lowest index). */
@@ -162,24 +171,44 @@ Test(sampling, mirostat_v2_updates_mu)
     cfg.type = OC_SAMPLER_MIROSTAT_V2;
     cfg.tau = 3.0f;
     cfg.eta = 0.1f;
-    cfg.mu = 2.0f * cfg.tau;        /* start at the clamp ceiling */
+    cfg.mu = 2.0f;
 
     float mu = cfg.mu;
     uint64_t rng = 42ull;
     float mu_prev = mu;
     uint32_t t = oc_mirostat_v2_sample(logits, 6, &cfg, &mu, &rng);
     cr_assert(t < 6u, "mirostat v2 sampled out-of-range token %u", t);
-    /* Surprise of a 6-token vocab is ~log2(6) ≈ 2.58 > tau=3? No, 2.58 < 3,
-     * so (surprise - tau) < 0 → mu should INCREASE. Either way mu must have
-     * changed (or be clamped at the ceiling, which still counts as a valid
-     * update). Assert it stays within [0, 2*tau]. */
     cr_assert(mu >= 0.0f, "mu must be non-negative after update (got %f)", mu);
     cr_assert(mu <= 2.0f * cfg.tau + 1e-5f,
               "mu must be <= 2*tau (got %f, tau=%f)", mu, cfg.tau);
-    /* At least one of (changed) or (clamped at ceiling) holds. If the
-     * surprise happened to equal tau exactly, mu would be unchanged; allow
-     * that but still verify the rng advanced. */
-    (void)mu_prev;
+    cr_assert_neq(mu, mu_prev, "Mirostat must update mu");
+    cr_assert_neq(rng, 42ull, "Mirostat must advance the RNG state");
+}
+
+Test(sampling, oc_sample_persists_mirostat_mu)
+{
+    float logits[] = { 3.0f, 2.0f, 1.0f, 0.0f };
+    OcSamplerConfig cfg = OC_SAMPLER_DEFAULT;
+    cfg.type = OC_SAMPLER_MIROSTAT_V2;
+    cfg.tau = 2.0f;
+    cfg.eta = 0.2f;
+    cfg.mu = 1.5f;
+    float before = cfg.mu;
+    cr_assert_lt(oc_sample(logits, 4, &cfg, NULL, 0), 4);
+    cr_assert_neq(cfg.mu, before);
+}
+
+Test(sampling, typical_zero_uses_unfiltered_distribution)
+{
+    float logits[] = { 0.0f, 1.0f, 2.0f, 3.0f };
+    OcSamplerConfig typical = OC_SAMPLER_DEFAULT;
+    typical.type = OC_SAMPLER_TYPICAL_P;
+    typical.typical_p = 0.0f;
+    typical.seed = 123;
+    OcSamplerConfig temperature = typical;
+    temperature.type = OC_SAMPLER_TEMPERATURE;
+    cr_assert_eq(oc_sample(logits, 4, &typical, NULL, 0),
+                 oc_sample(logits, 4, &temperature, NULL, 0));
 }
 
 Test(sampling, mirostat_v2_clamps_mu_to_zero)

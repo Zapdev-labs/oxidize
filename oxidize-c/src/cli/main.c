@@ -199,12 +199,20 @@ static OcError run_generation(const OcCliArgs *args)
            n_ids, args->n_predict);
 
     /* Build sampler config. */
-    OcSamplerConfig scfg;
+    OcSamplerConfig scfg = OC_SAMPLER_DEFAULT;
     scfg.temperature    = args->temperature;
     scfg.repeat_penalty = args->repeat_penalty;
     scfg.seed           = args->seed;
+    scfg.min_p = args->min_p;
+    scfg.tau = args->mirostat_tau;
+    scfg.eta = args->mirostat_eta;
+    scfg.mu = 2.0f * args->mirostat_tau;
     if (args->temperature <= 0.0f) {
         scfg.type = OC_SAMPLER_GREEDY;
+    } else if (args->mirostat_tau > 0.0f) {
+        scfg.type = OC_SAMPLER_MIROSTAT_V2;
+    } else if (args->min_p > 0.0f) {
+        scfg.type = OC_SAMPLER_MIN_P;
     } else if (args->top_k > 0) {
         scfg.type   = OC_SAMPLER_TOP_K;
         scfg.top_k  = args->top_k;

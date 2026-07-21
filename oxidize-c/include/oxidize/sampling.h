@@ -38,7 +38,7 @@ typedef struct OcSamplerConfig {
     uint32_t top_k;          /* 0 = disabled (all vocab).                     */
     float  top_p;            /* (0,1]; 1.0 = disabled.                       */
     float  repeat_penalty;   /* 1.0 = no penalty; >1 penalizes recent tokens. */
-    uint64_t seed;           /* RNG seed (xorshift64). 0 = greedy always.     */
+    uint64_t seed;           /* RNG seed; 0 selects a fixed nonzero seed.      */
     /* ── Mirostat v2 parameters ────────────────────────────────────────
      * `mu` is the running target surprise estimate; it is mutated between
      * calls by oc_mirostat_v2_sample. `tau` is the target surprise (entropy
@@ -55,9 +55,8 @@ typedef struct OcSamplerConfig {
 } OcSamplerConfig;
 
 /* Default config: greedy, no penalty. Mirostat fields default to the
- * canonical v2 values (mu=10.0, tau=5.0, eta=0.1) so a config built from
- * OC_SAMPLER_DEFAULT can be switched to OC_SAMPLER_MIROSTAT_V2 by simply
- * changing `type`. */
+ * canonical v2 values (mu=10.0, tau=5.0, eta=0.1). Stateful Mirostat callers
+ * must use oc_mirostat_v2_sample and retain `mu` and the RNG state. */
 #define OC_SAMPLER_DEFAULT ((OcSamplerConfig){ \
     OC_SAMPLER_GREEDY, 1.0f, 0u, 1.0f, 1.0f, 0ull, \
     10.0f, 5.0f, 0.1f, 0.0f, 0.0f, 0.0f, 0.0f })
@@ -71,18 +70,17 @@ typedef struct OcSamplerConfig {
  *   - For stochastic samplers: uses xorshift64 seeded by cfg->seed (caller
  *     should advance the seed between calls for non-repeated sequences).
  *
- * Returns the sampled token id (< vocab_size). Never returns an out-of-range
- * id even on degenerate input (all -inf logits → argmax of finite). */
+ * Returns the sampled token id (< vocab_size), or UINT32_MAX when vocab_size
+ * is zero. */
 uint32_t oc_sample(const float *logits, size_t vocab_size,
-                   const OcSamplerConfig *cfg,
+                   OcSamplerConfig *cfg,
                    const uint32_t *recent_tokens, size_t n_recent);
 
 /* Convenience: argmax over logits. */
 uint32_t oc_argmax(const float *logits, size_t vocab_size);
 
-/* Apply repeat-penalty in place: for each token in `recent`, divide its logit
- * by `penalty` (if >0). Mirrors the Rust reference (penalty is a divisor, not
- * a subtractor). */
+/* Apply repeat-penalty in place: positive logits are divided by `penalty` and
+ * non-positive logits are multiplied by it. */
 void oc_apply_repeat_penalty(float *logits, size_t vocab_size,
                              const uint32_t *recent, size_t n_recent,
                              float penalty);
@@ -95,8 +93,8 @@ void oc_apply_repeat_penalty(float *logits, size_t vocab_size,
  *   1. Compute softmax probabilities from `logits` (length vocab_size).
  *      No temperature scaling is applied here; the caller should pre-scale
  *      logits if desired.
- *   2. Sample one token from the resulting categorical distribution using
- *      `*rng_state` (xorshift64); the state is advanced in place.
+ *   2. Keep tokens whose surprise is no greater than `*mu`, then sample from
+ *      that renormalized distribution using `*rng_state`.
  *   3. Compute the observed surprise s = -log2(p_sampled).
  *   4. Update the running estimate: *mu = *mu - eta * (s - tau), where
  *      `eta` is taken from cfg->learning_rate when it is > 0, else
@@ -106,8 +104,7 @@ void oc_apply_repeat_penalty(float *logits, size_t vocab_size,
  *
  * `mu` is read AND written (state is carried across calls by the caller).
  * `cfg` supplies tau, eta, and learning_rate. Returns the sampled token;
- * never returns an out-of-range id (degenerate all-equal-logits input
- * falls back to argmax). */
+ * returns UINT32_MAX for an empty vocabulary. */
 uint32_t oc_mirostat_v2_sample(const float *logits, size_t vocab_size,
                                const OcSamplerConfig *cfg,
                                float *mu, uint64_t *rng_state);
