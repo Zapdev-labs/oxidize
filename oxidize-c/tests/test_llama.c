@@ -1,7 +1,7 @@
 /*
  * test_llama.c — Llama forward-pass component tests.
  *
- * The oxidize-core tests/fixtures/*.gguf are tiny parser fixtures (no
+ * The oxidize-core GGUF test fixtures are tiny parser fixtures (no
  * weights), so there is no end-to-end runnable model to test against.
  * Instead this file asserts:
  *   1. The math primitives (RMSNorm, RoPE, SwiGLU, matvec) match hand-
@@ -159,6 +159,46 @@ Test(llama, session_init_null_args)
     OcLlamaSession s;
     cr_assert_eq(oc_llama_session_init(NULL, &s), OC_ERR_INVALID_ARG);
     cr_assert_eq(oc_llama_session_init((OcLlamaModel *)0x1, NULL), OC_ERR_INVALID_ARG);
+}
+
+Test(llama, sessions_reject_unsupported_architecture_paths)
+{
+    OcLlamaModel model;
+    memset(&model, 0, sizeof(model));
+    OcLlamaSession session;
+    OcBatchSession batch;
+    model.cfg.uses_mla = true;
+    cr_assert_eq(oc_llama_session_init(&model, &session), OC_ERR_MODEL);
+    cr_assert_eq(oc_batch_session_init(&model, 2, &batch), OC_ERR_MODEL);
+    model.cfg.uses_mla = false;
+    model.cfg.uses_geglu = true;
+    cr_assert_eq(oc_llama_session_init(&model, &session), OC_ERR_MODEL);
+    cr_assert_eq(oc_batch_session_init(&model, 2, &batch), OC_ERR_MODEL);
+}
+
+Test(llama, batch_validates_context_and_moe_workspace)
+{
+    OcLlamaModel model;
+    memset(&model, 0, sizeof(model));
+    model.cfg.n_ctx = 2;
+    model.cfg.n_layer = 1;
+    model.cfg.n_embd = 4;
+    model.cfg.n_ff = 8;
+    model.cfg.n_head = 1;
+    model.cfg.n_head_kv = 1;
+    model.cfg.head_dim = 4;
+    model.cfg.kv_head_dim = 4;
+    model.cfg.vocab_size = 4;
+    model.cfg.num_experts = 2;
+    OcBatchSession batch;
+    cr_assert_eq(oc_batch_session_init(&model, 2, &batch), OC_OK);
+    cr_assert_eq(model.cfg.expert_intermediate_size, model.cfg.n_ff);
+    cr_assert_not_null(batch.expert_gate);
+    OcBatchSeq seqs[2] = {0};
+    seqs[0].active = true;
+    seqs[0].pos = 2;
+    cr_assert_eq(oc_batch_forward(&batch, seqs), OC_ERR_INVALID_ARG);
+    oc_batch_session_free(&batch);
 }
 
 /* ─── MoE config defaults ──────────────────────────────────────────────

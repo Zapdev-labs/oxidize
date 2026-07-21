@@ -424,6 +424,11 @@ OcError oc_llama_load(const char *path, OcLlamaModel *out)
 OcError oc_llama_session_init(OcLlamaModel *model, OcLlamaSession *out)
 {
     if (model == NULL || out == NULL) return OC_ERR_INVALID_ARG;
+    if (model->cfg.uses_mla || model->cfg.uses_geglu) return OC_ERR_MODEL;
+    if (model->cfg.num_experts > 0 && model->cfg.expert_intermediate_size == 0) {
+        if (model->cfg.n_ff == 0) return OC_ERR_MODEL;
+        model->cfg.expert_intermediate_size = model->cfg.n_ff;
+    }
     memset(out, 0, sizeof(*out));
     out->model = model;
     /* For MLA, each head has its own K/V (no GQA sharing). */
@@ -973,6 +978,11 @@ OcError oc_batch_session_init(OcLlamaModel *model, size_t max_seqs,
                                OcBatchSession *out)
 {
     if (model == NULL || out == NULL) return OC_ERR_INVALID_ARG;
+    if (model->cfg.uses_mla || model->cfg.uses_geglu) return OC_ERR_MODEL;
+    if (model->cfg.num_experts > 0 && model->cfg.expert_intermediate_size == 0) {
+        if (model->cfg.n_ff == 0) return OC_ERR_MODEL;
+        model->cfg.expert_intermediate_size = model->cfg.n_ff;
+    }
     if (max_seqs == 0) max_seqs = 1;
     if (max_seqs > OC_MAX_BATCH_SEQ) max_seqs = OC_MAX_BATCH_SEQ;
     memset(out, 0, sizeof(*out));
@@ -999,7 +1009,6 @@ OcError oc_batch_session_init(OcLlamaModel *model, size_t max_seqs,
     out->ffn_gate = xcalloc(model->cfg.n_ff, sizeof(float));
     out->ffn_up = xcalloc(model->cfg.n_ff, sizeof(float));
     out->dequant_temp = xcalloc(maxw, sizeof(float));
-    out->logits = xcalloc(max_seqs * model->cfg.vocab_size, sizeof(float));
     if (model->cfg.num_experts > 0) {
         out->router_logits = xcalloc(model->cfg.num_experts, sizeof(float));
         out->expert_gate = xcalloc(model->cfg.expert_intermediate_size, sizeof(float));
@@ -1011,7 +1020,11 @@ OcError oc_batch_session_init(OcLlamaModel *model, size_t max_seqs,
     }
     if (!out->kv_k || !out->kv_v || !out->x || !out->normed || !out->q ||
         !out->k || !out->v || !out->attn_out || !out->ffn_gate ||
-        !out->ffn_up || !out->dequant_temp || !out->logits) {
+        !out->ffn_up || !out->dequant_temp ||
+        (model->cfg.num_experts > 0 &&
+         (!out->router_logits || !out->expert_gate || !out->expert_up ||
+          !out->expert_out || !out->shexp_gate || !out->shexp_up ||
+          !out->shexp_out))) {
         oc_batch_session_free(out);
         return OC_ERR_OOM;
     }
@@ -1027,11 +1040,15 @@ OcError oc_batch_forward(OcBatchSession *bs, OcBatchSeq *seqs)
      * sequences through the same matvec) requires a batched matvec. */
     for (size_t s = 0; s < bs->max_seqs; s++) {
         if (!seqs[s].active) continue;
+        if (seqs[s].pos < 0 || (uint64_t)seqs[s].pos >= m->cfg.n_ctx)
+            return OC_ERR_INVALID_ARG;
         /* Set up a temporary session view sharing the workspace. */
         OcLlamaSession tmp;
         tmp.model = m;
-        tmp.kv_k = bs->kv_k;
-        tmp.kv_v = bs->kv_v;
+        size_t sequence_stride = (size_t)m->cfg.n_layer * m->cfg.n_ctx *
+                                 bs->kv_row_floats;
+        tmp.kv_k = bs->kv_k + s * sequence_stride;
+        tmp.kv_v = bs->kv_v + s * sequence_stride;
         tmp.kv_row_floats = bs->kv_row_floats;
         tmp.pos = seqs[s].pos;
         tmp.x = bs->x;
@@ -1043,7 +1060,7 @@ OcError oc_batch_forward(OcBatchSession *bs, OcBatchSeq *seqs)
         tmp.ffn_gate = bs->ffn_gate;
         tmp.ffn_up = bs->ffn_up;
         tmp.dequant_temp = bs->dequant_temp;
-        tmp.logits = bs->logits + s * m->cfg.vocab_size;
+        tmp.logits = NULL;
         tmp.router_logits = bs->router_logits;
         tmp.expert_gate = bs->expert_gate;
         tmp.expert_up = bs->expert_up;
@@ -1092,7 +1109,6 @@ void oc_batch_session_free(OcBatchSession *bs)
     free(bs->attn_out);
     free(bs->ffn_gate); free(bs->ffn_up);
     free(bs->dequant_temp);
-    free(bs->logits);
     free(bs->router_logits);
     free(bs->expert_gate); free(bs->expert_up); free(bs->expert_out);
     free(bs->shexp_gate); free(bs->shexp_up); free(bs->shexp_out);

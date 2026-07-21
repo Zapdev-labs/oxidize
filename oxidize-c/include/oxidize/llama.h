@@ -97,8 +97,8 @@ typedef struct OcLlamaLayer {
     OcWeightView mla_kv_a_mqa;         /* kv_a_proj_with_mqa: [kv_lora+kv_pe, n_embd] */
     OcWeightView mla_k_b;               /* k_b_proj: [n_heads*k_nope_dim, kv_lora_dim] */
     OcWeightView mla_v_b;               /* v_b_proj: [n_heads*v_head_dim, kv_lora_dim] */
-    float *mla_q_a_norm;                /* RMSNorm weight for q_a (len q_lora_dim) */
-    float *mla_kv_a_norm;               /* RMSNorm weight for kv_a (len kv_lora_dim) */
+    float *mla_q_a_norm;                /* owned f32, length q_lora_dim */
+    float *mla_kv_a_norm;               /* owned f32, length kv_lora_dim */
     float *attn_norm;       /* owned f32, length n_embd              */
     float *ffn_norm;       /* owned f32, length n_embd              */
 } OcLlamaLayer;
@@ -183,8 +183,6 @@ typedef struct OcBatchSession {
     float *ffn_gate;
     float *ffn_up;
     float *dequant_temp;
-    /* Per-sequence logits output. */
-    float *logits;   /* [max_seqs * vocab_size] */
     /* MoE temporaries (shared). */
     float *router_logits;
     float *expert_gate;
