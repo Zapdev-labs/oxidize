@@ -25,6 +25,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* Case-sensitive string equals. The GGUF metadata values for
@@ -163,4 +164,120 @@ OcError oc_tokenizer_load_from_gguf(const OcGgufFile *gguf, OcTokenizer *out)
 
 /* oc_tokenizer_free() is implemented in tokenizer_bpe.c (it needs access to
  * the per-kind free functions). */
+
+/* ─── Streaming detokenizer ────────────────────────────────────────────── */
+
+void oc_streaming_detok_init(OcStreamingDetokenizer *sd,
+                             const OcTokenizer *tok)
+{
+    if (!sd) return;
+    memset(sd, 0, sizeof(*sd));
+    sd->tokenizer = tok;
+}
+
+/* Count UTF-8 continuation bytes needed after `first_byte`.
+ * Returns the total expected sequence length (1-4), or 1 if not a lead byte. */
+static int utf8_seq_len(uint8_t first_byte)
+{
+    if ((first_byte & 0x80) == 0) return 1;       /* 0xxxxxxx */
+    if ((first_byte & 0xE0) == 0xC0) return 2;    /* 110xxxxx */
+    if ((first_byte & 0xF0) == 0xE0) return 3;    /* 1110xxxx */
+    if ((first_byte & 0xF8) == 0xF0) return 4;    /* 11110xxx */
+    return 1; /* invalid lead byte, treat as single */
+}
+
+/* Check if a byte sequence is valid UTF-8. Returns true if complete. */
+static bool utf8_is_complete(const uint8_t *bytes, size_t len)
+{
+    if (len == 0) return true;
+    int need = utf8_seq_len(bytes[0]);
+    return len >= (size_t)need;
+}
+
+OcError oc_streaming_detok_push(OcStreamingDetokenizer *sd, uint32_t token,
+                                const char **out_delta, size_t *out_len)
+{
+    if (!sd || !out_delta || !out_len) return OC_ERR_INVALID_ARG;
+    *out_delta = NULL;
+    *out_len = 0;
+
+    /* Decode the token to text. */
+    char *text = NULL;
+    OcError e = oc_tokenizer_decode(sd->tokenizer, &token, 1, &text);
+    if (e != OC_OK || text == NULL) return e;
+
+    size_t text_len = strlen(text);
+
+    /* Combine pending bytes with new text. */
+    static _Thread_local uint8_t combined[4096];
+    size_t combined_len = sd->pending_len;
+    if (combined_len > 0) {
+        memcpy(combined, sd->pending, combined_len);
+    }
+    size_t copy_len = text_len;
+    if (combined_len + copy_len > sizeof(combined)) {
+        copy_len = sizeof(combined) - combined_len;
+    }
+    memcpy(combined + combined_len, text, copy_len);
+    combined_len += copy_len;
+    free(text);
+
+    /* Find the longest complete UTF-8 prefix. */
+    size_t emit_len = 0;
+    size_t pos = 0;
+    while (pos < combined_len) {
+        int seq_len = utf8_seq_len(combined[pos]);
+        if (pos + (size_t)seq_len > combined_len) break;
+        /* Validate continuation bytes. */
+        bool valid = true;
+        for (int i = 1; i < seq_len; i++) {
+            if ((combined[pos + i] & 0xC0) != 0x80) { valid = false; break; }
+        }
+        if (!valid) {
+            /* Invalid byte, skip it. */
+            pos++;
+            continue;
+        }
+        pos += (size_t)seq_len;
+        emit_len = pos;
+    }
+
+    /* Store incomplete tail as pending. */
+    sd->pending_len = combined_len - emit_len;
+    if (sd->pending_len > 0 && sd->pending_len <= sizeof(sd->pending)) {
+        memcpy(sd->pending, combined + emit_len, sd->pending_len);
+    } else {
+        sd->pending_len = 0;
+    }
+
+    /* Emit the complete prefix. */
+    if (emit_len > 0) {
+        /* Point into combined buffer (caller must use before next push). */
+        *out_delta = (const char *)combined;
+        *out_len = emit_len;
+    }
+    return OC_OK;
+}
+
+OcError oc_streaming_detok_flush(OcStreamingDetokenizer *sd,
+                                 const char **out_delta, size_t *out_len)
+{
+    if (!sd || !out_delta || !out_len) return OC_ERR_INVALID_ARG;
+    *out_delta = NULL;
+    *out_len = 0;
+    if (sd->pending_len == 0) return OC_OK;
+    /* Emit whatever is left, even if incomplete. */
+    static _Thread_local uint8_t flush_buf[8];
+    memcpy(flush_buf, sd->pending, sd->pending_len);
+    *out_delta = (const char *)flush_buf;
+    *out_len = sd->pending_len;
+    sd->pending_len = 0;
+    return OC_OK;
+}
+
+void oc_streaming_detok_reset(OcStreamingDetokenizer *sd)
+{
+    if (!sd) return;
+    sd->pending_len = 0;
+}
 

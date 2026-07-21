@@ -198,6 +198,37 @@ OcError oc_tokenizer_apply_chat_template(const OcChatMessage *messages,
                                          bool add_generation_prompt,
                                          char **out_text);
 
+/* ─── Streaming detokenizer ──────────────────────────────────────────────
+ *
+ * Handles incremental token-by-token decoding where tokens may split UTF-8
+ * characters across boundaries. Maintains a pending-byte buffer so that
+ * partial UTF-8 sequences are held until completed by the next token.
+ */
+typedef struct OcStreamingDetokenizer {
+    const OcTokenizer *tokenizer;
+    /* Pending bytes from previous tokens that form incomplete UTF-8. */
+    uint8_t pending[8];
+    size_t  pending_len;
+} OcStreamingDetokenizer;
+
+/* Initialize a streaming detokenizer bound to `tok`. */
+void oc_streaming_detok_init(OcStreamingDetokenizer *sd,
+                             const OcTokenizer *tok);
+
+/* Push a single token id and get back the printable text delta.
+ * `*out_delta` points into `sd`'s internal buffer (valid until next call).
+ * If the token produces partial UTF-8, the delta may be empty (bytes are
+ * buffered). Returns OC_OK or OC_ERR_INVALID_ARG. */
+OcError oc_streaming_detok_push(OcStreamingDetokenizer *sd, uint32_t token,
+                                const char **out_delta, size_t *out_len);
+
+/* Flush any pending bytes as a final delta (call at end of stream). */
+OcError oc_streaming_detok_flush(OcStreamingDetokenizer *sd,
+                                 const char **out_delta, size_t *out_len);
+
+/* Reset the streaming detokenizer (clear pending buffer). */
+void oc_streaming_detok_reset(OcStreamingDetokenizer *sd);
+
 /* ─── BPE direct API (for testing / advanced callers) ─────────────────── */
 
 /* Load a BPE tokenizer from parsed GGUF metadata. Reads
