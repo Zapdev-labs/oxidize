@@ -165,7 +165,7 @@ typedef struct OcScheduler {
     size_t seq_cap;
     size_t seq_count;
     OcSeqId *waiting;             /* FCFS queue                             */
-    size_t waiting_head, waiting_tail, waiting_cap;
+    size_t waiting_head, waiting_tail, waiting_count, waiting_cap;
     OcSeqId *running;
     size_t running_count, running_cap;
     size_t next_arrival_order;

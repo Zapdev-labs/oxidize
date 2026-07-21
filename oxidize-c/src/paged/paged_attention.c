@@ -204,7 +204,7 @@ OcBlockId oc_block_pool_lookup_prefix(OcBlockPool *pool, OcBlockHash hash)
 
 void oc_block_pool_insert_prefix(OcBlockPool *pool, OcBlockHash hash, OcBlockId id)
 {
-    if (!pool || hash == 0) return;
+    if (!pool || hash == 0 || id >= pool->config.num_blocks) return;
     if (pool->blocks[id].ref_count == 0) return;
     /* Evict if > 75% full. */
     if (pool->cache_count * 4 > pool->cache_cap * 3) {
@@ -417,7 +417,7 @@ OcError oc_scheduler_init(OcScheduler *sched,
         free(sched->sequences); free(sched->waiting); free(sched->running);
         return OC_ERR_OOM;
     }
-    sched->waiting_head = sched->waiting_tail = 0;
+    sched->waiting_head = sched->waiting_tail = sched->waiting_count = 0;
     sched->running_count = 0;
     sched->next_arrival_order = 0;
     return OC_OK;
@@ -443,20 +443,37 @@ OcError oc_scheduler_add_sequence(OcScheduler *sched, OcPagedSequence *seq)
     if (!sched || !seq) return OC_ERR_INVALID_ARG;
     if (seq->block_table.num_tokens != 0) return OC_ERR_INVALID_ARG;
     seq->block_table.block_size = sched->block_pool.config.block_size;
-    /* Store in the sequence table. */
+    if (sched->waiting_count == sched->waiting_cap) {
+        size_t new_cap = sched->waiting_cap * 2;
+        OcSeqId *waiting = xcalloc(new_cap, sizeof(OcSeqId));
+        if (!waiting) return OC_ERR_OOM;
+        for (size_t i = 0; i < sched->waiting_count; i++)
+            waiting[i] = sched->waiting[(sched->waiting_head + i)
+                                      % sched->waiting_cap];
+        free(sched->waiting);
+        sched->waiting = waiting;
+        sched->waiting_cap = new_cap;
+        sched->waiting_head = 0;
+        sched->waiting_tail = sched->waiting_count;
+    }
+    bool stored = false;
     size_t slot = (size_t)(seq->seq_id % sched->seq_cap);
-    /* Linear probe for empty slot. */
     for (size_t i = 0; i < sched->seq_cap; i++) {
         size_t idx = (slot + i) % sched->seq_cap;
+        if (sched->sequences[idx] &&
+            sched->sequences[idx]->seq_id == seq->seq_id)
+            return OC_ERR_INVALID_ARG;
         if (sched->sequences[idx] == NULL) {
             sched->sequences[idx] = seq;
             sched->seq_count++;
+            stored = true;
             break;
         }
     }
-    /* Add to waiting queue. */
+    if (!stored) return OC_ERR_OOM;
     sched->waiting[sched->waiting_tail] = seq->seq_id;
     sched->waiting_tail = (sched->waiting_tail + 1) % sched->waiting_cap;
+    sched->waiting_count++;
     return OC_OK;
 }
 
@@ -580,10 +597,11 @@ OcError oc_scheduler_step(OcScheduler *sched, OcSchedulerStepResult *out)
     }
 
     /* Phase 3: Pull from waiting queue (FCFS). */
-    while (budget > 0 && sched->waiting_head != sched->waiting_tail &&
+    while (budget > 0 && sched->waiting_count > 0 &&
            sched->running_count < sched->config.max_num_running_seqs) {
         OcSeqId sid = sched->waiting[sched->waiting_head];
         sched->waiting_head = (sched->waiting_head + 1) % sched->waiting_cap;
+        sched->waiting_count--;
 
         OcPagedSequence *seq = NULL;
         for (size_t j = 0; j < sched->seq_cap; j++) {
@@ -605,6 +623,7 @@ OcError oc_scheduler_step(OcScheduler *sched, OcSchedulerStepResult *out)
             /* Put back in waiting. */
             sched->waiting_head = (sched->waiting_head - 1 + sched->waiting_cap) % sched->waiting_cap;
             sched->waiting[sched->waiting_head] = sid;
+            sched->waiting_count++;
             break;
         }
 
@@ -691,6 +710,7 @@ OcError oc_scheduler_preempt(OcScheduler *sched, OcSeqId id)
     }
     sched->waiting_head = (sched->waiting_head - 1 + sched->waiting_cap) % sched->waiting_cap;
     sched->waiting[sched->waiting_head] = id;
+    sched->waiting_count++;
     return OC_OK;
 }
 
