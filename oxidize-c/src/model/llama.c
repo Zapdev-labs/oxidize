@@ -119,6 +119,9 @@ static OcError parse_config(const OcGgufFile *f, const char *arch_str,
     cfg->n_head      = cfg_u32(f, key, 32);
     snprintf(key, sizeof(key), "%sattention.head_count_kv", prefix);
     cfg->n_head_kv   = cfg_u32(f, key, cfg->n_head);
+    if (cfg->n_head == 0 || cfg->n_head_kv == 0 || cfg->n_embd == 0 ||
+        cfg->n_embd % cfg->n_head != 0)
+        return OC_ERR_MODEL;
     snprintf(key, sizeof(key), "%sattention.key_length", prefix);
     uint32_t key_len = cfg_u32(f, key, 0);
     snprintf(key, sizeof(key), "%srope.dimension_count", prefix);
@@ -178,7 +181,9 @@ static OcError parse_config(const OcGgufFile *f, const char *arch_str,
         if (strcmp(scale_type, "yarn") == 0) {
             snprintf(key, sizeof(key), "%srope.scaling.factor", prefix);
             cfg->yarn_factor = cfg_f32(f, key, 1.0f);
-            cfg->yarn_orig_ctx = cfg->n_ctx;
+            snprintf(key, sizeof(key),
+                     "%srope.scaling.original_context_length", prefix);
+            cfg->yarn_orig_ctx = cfg_u32(f, key, cfg->n_ctx);
         }
     }
 
@@ -223,8 +228,6 @@ static OcError parse_config(const OcGgufFile *f, const char *arch_str,
     cfg->rope_dim   = (rope_dim > 0) ? rope_dim : cfg->kv_head_dim;
     if (cfg->rope_dim > cfg->kv_head_dim) cfg->rope_dim = cfg->kv_head_dim;
     cfg->tied_embeddings = false;
-    if (cfg->n_head == 0) cfg->n_head = 32;
-    if (cfg->n_head_kv == 0) cfg->n_head_kv = cfg->n_head;
     /* MoE per-token top-k: default to 1 when experts exist but no top-k set. */
     if (cfg->num_experts > 0) {
         if (cfg->num_experts_per_tok == 0) cfg->num_experts_per_tok = 1;
@@ -357,11 +360,12 @@ static OcError resolve_weights(OcLlamaModel *m)
     if (m->cfg.n_ff == 0 && m->layers[0].ffn_gate.rows > 0) {
         m->cfg.n_ff = (uint32_t)m->layers[0].ffn_gate.rows;
     }
-    /* Infer vocab_size from tok_embeddings rows if still default. */
-    if (m->tok_embeddings.rows > 0 && (m->cfg.vocab_size == 32000 ||
-        m->cfg.vocab_size != m->tok_embeddings.rows)) {
-        /* Trust the actual tensor shape over metadata default. */
-    }
+    if (m->tok_embeddings.rows == 0 || m->tok_embeddings.rows > UINT32_MAX ||
+        m->tok_embeddings.cols != m->cfg.n_embd ||
+        m->output.rows != m->tok_embeddings.rows ||
+        m->output.cols != m->cfg.n_embd)
+        return OC_ERR_MODEL;
+    m->cfg.vocab_size = (uint32_t)m->tok_embeddings.rows;
     return OC_OK;
 }
 
@@ -387,6 +391,10 @@ OcError oc_llama_load(const char *path, OcLlamaModel *out)
         arch_str = oc_model_arch_name(out->arch);
     }
     if (arch_str == NULL) arch_str = "llama";
+    if (strcmp(arch_str, "llama") != 0 && strcmp(arch_str, "mistral") != 0) {
+        oc_gguf_map_free(&out->gguf);
+        return OC_ERR_MODEL;
+    }
 
     OcError e2 = parse_config(&out->gguf.unified, arch_str, &out->cfg);
     if (e2 != OC_OK) { oc_gguf_map_free(&out->gguf); return e2; }
