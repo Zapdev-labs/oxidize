@@ -338,19 +338,15 @@ uint32_t oc_sample(const float *logits_in, size_t vocab_size,
         if (!(mu > 0.0f)) mu = 2.0f * cfg->tau;
         result = oc_mirostat_v2_sample(logits, vocab_size, cfg, &mu, &rng);
     } else if (cfg->type == OC_SAMPLER_MIN_P) {
-        /* min-p: keep only tokens with p >= min_p * max_p.
-         * Equivalent to filtering out low-probability tokens while keeping
-         * the tail of the distribution above a dynamic threshold. */
+        /* min-p: keep only tokens with p >= min_p * max_p. */
         float *probs = malloc(vocab_size * sizeof(float));
         if (probs != NULL) {
             softmax_inplace(logits, vocab_size);
-            /* Find max probability. */
             float max_p = 0.0f;
             for (size_t i = 0; i < vocab_size; i++) {
                 if (logits[i] > max_p) max_p = logits[i];
             }
             float threshold = max_p * cfg->min_p;
-            /* Collect tokens above threshold. */
             size_t keep = 0;
             for (size_t i = 0; i < vocab_size; i++) {
                 if (logits[i] >= threshold) {
@@ -362,7 +358,6 @@ uint32_t oc_sample(const float *logits_in, size_t vocab_size,
             if (keep == 0) {
                 result = oc_argmax(logits, vocab_size);
             } else {
-                /* Renormalize. */
                 double sum = 0.0;
                 for (size_t i = 0; i < keep; i++) sum += (double)probs[i];
                 if (sum > 0.0) {
@@ -370,6 +365,124 @@ uint32_t oc_sample(const float *logits_in, size_t vocab_size,
                     for (size_t i = 0; i < keep; i++) probs[i] *= inv;
                 }
                 result = sample_categorical(idx, probs, keep, &rng);
+            }
+            free(probs);
+        } else {
+            result = oc_argmax(logits, vocab_size);
+        }
+    } else if (cfg->type == OC_SAMPLER_TYPICAL_P) {
+        /* Locally typical sampling: compute the negative entropy of each
+         * token's information content, then filter by the typical_p
+         * cumulative threshold. Tokens with "typical" surprise (close to
+         * the entropy) are preferred. */
+        float *probs = malloc(vocab_size * sizeof(float));
+        if (probs != NULL) {
+            softmax_inplace(logits, vocab_size);
+            /* Compute entropy H = -sum(p * log2(p)). */
+            double entropy = 0.0;
+            for (size_t i = 0; i < vocab_size; i++) {
+                if (probs[i] > 0.0f) {
+                    entropy -= (double)probs[i] * log2((double)probs[i]);
+                }
+            }
+            /* Score = |(-log2(p)) - H| (surprise deviation from entropy). */
+            for (size_t i = 0; i < vocab_size; i++) {
+                float surprise = probs[i] > 0.0f ? -log2f(probs[i]) : 999.0f;
+                logits[i] = fabsf(surprise - (float)entropy);
+            }
+            /* Sort ascending by score (lowest deviation = most typical). */
+            /* Simple insertion sort for small vocab; use argsort for large. */
+            for (size_t i = 0; i < vocab_size; i++) idx[i] = i;
+            /* Partial sort: find the cumulative probability threshold. */
+            /* Bubble sort (vocab is small enough in practice). */
+            for (size_t i = 0; i < vocab_size - 1; i++) {
+                for (size_t j = i + 1; j < vocab_size; j++) {
+                    if (logits[idx[j]] < logits[idx[i]]) {
+                        uint32_t tmp = idx[i]; idx[i] = idx[j]; idx[j] = tmp;
+                    }
+                }
+            }
+            /* Accumulate until typical_p threshold. */
+            double cum = 0.0;
+            size_t keep = 0;
+            for (size_t i = 0; i < vocab_size && cum < (double)cfg->typical_p; i++) {
+                probs[keep] = probs[idx[i]];
+                idx[keep] = idx[i];
+                cum += (double)probs[keep];
+                keep++;
+            }
+            if (keep == 0) {
+                result = oc_argmax(logits, vocab_size);
+            } else {
+                /* Renormalize and sample. */
+                double sum = 0.0;
+                for (size_t i = 0; i < keep; i++) sum += (double)probs[i];
+                if (sum > 0.0) {
+                    float inv = (float)(1.0 / sum);
+                    for (size_t i = 0; i < keep; i++) probs[i] *= inv;
+                }
+                result = sample_categorical(idx, probs, keep, &rng);
+            }
+            free(probs);
+        } else {
+            result = oc_argmax(logits, vocab_size);
+        }
+    } else if (cfg->type == OC_SAMPLER_TAIL_FREE) {
+        /* Tail-free sampling: compute |d2(p)| (second derivative of sorted
+         * probabilities), then filter by the z-threshold. */
+        float *probs = malloc(vocab_size * sizeof(float));
+        if (probs != NULL) {
+            softmax_inplace(logits, vocab_size);
+            /* Sort by descending probability. */
+            for (size_t i = 0; i < vocab_size; i++) idx[i] = i;
+            for (size_t i = 0; i < vocab_size - 1; i++) {
+                for (size_t j = i + 1; j < vocab_size; j++) {
+                    if (probs[idx[j]] > probs[idx[i]]) {
+                        uint32_t tmp = idx[i]; idx[i] = idx[j]; idx[j] = tmp;
+                    }
+                }
+            }
+            /* First derivative: d1[i] = p[i] - p[i+1]. */
+            /* Second derivative: d2[i] = |d1[i] - d1[i+1]|. */
+            if (vocab_size < 3) {
+                result = oc_argmax(logits, vocab_size);
+                free(probs);
+            } else {
+                /* Compute d2 and normalize. */
+                float *d2 = malloc((vocab_size - 2) * sizeof(float));
+                if (d2 != NULL) {
+                    for (size_t i = 0; i < vocab_size - 2; i++) {
+                        float d1_a = probs[idx[i]] - probs[idx[i+1]];
+                        float d1_b = probs[idx[i+1]] - probs[idx[i+2]];
+                        d2[i] = fabsf(d1_a - d1_b);
+                    }
+                    /* Normalize d2 to sum=1. */
+                    float d2_sum = 0.0f;
+                    for (size_t i = 0; i < vocab_size - 2; i++) d2_sum += d2[i];
+                    if (d2_sum > 0.0f) {
+                        for (size_t i = 0; i < vocab_size - 2; i++) d2[i] /= d2_sum;
+                    }
+                    /* Accumulate until z-threshold. */
+                    float cum = 0.0f;
+                    size_t keep = 0;
+                    for (size_t i = 0; i < vocab_size - 2 && cum < cfg->tail_free_z; i++) {
+                        cum += d2[i];
+                        keep++;
+                    }
+                    keep++; /* Keep at least one token. */
+                    if (keep > vocab_size) keep = vocab_size;
+                    /* Renormalize and sample from the kept set. */
+                    double sum = 0.0;
+                    for (size_t i = 0; i < keep; i++) sum += (double)probs[idx[i]];
+                    if (sum > 0.0) {
+                        float inv = (float)(1.0 / sum);
+                        for (size_t i = 0; i < keep; i++) probs[i] = probs[idx[i]] * inv;
+                    }
+                    result = sample_categorical(idx, probs, keep, &rng);
+                    free(d2);
+                } else {
+                    result = oc_argmax(logits, vocab_size);
+                }
             }
             free(probs);
         } else {

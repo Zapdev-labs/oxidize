@@ -28,6 +28,8 @@ typedef enum {
     OC_SAMPLER_TOP_P         = 3,   /* nucleus: smallest set with cum >= p */
     OC_SAMPLER_MIROSTAT_V2   = 4,   /* Mirostat v2 (surprise-based)        */
     OC_SAMPLER_MIN_P         = 5,   /* min-p: filter by min probability ratio */
+    OC_SAMPLER_TYPICAL_P     = 6,   /* locally typical sampling             */
+    OC_SAMPLER_TAIL_FREE     = 7,   /* tail-free sampling (TFS)             */
 } OcSamplerType;
 
 typedef struct OcSamplerConfig {
@@ -48,6 +50,8 @@ typedef struct OcSamplerConfig {
     float  eta;              /* learning rate for mu updates (default 0.1).   */
     float  learning_rate;    /* optional override; 0 = use `eta`.             */
     float  min_p;            /* min-p ratio (0=disabled, 0.05=keep tokens with p >= 0.05*max_p) */
+    float  typical_p;         /* typical-p threshold (0=disabled, 0.95=keep top 95% of typical mass) */
+    float  tail_free_z;       /* TFS z-threshold (0=disabled, 0.95=keep tokens above z cutoff) */
 } OcSamplerConfig;
 
 /* Default config: greedy, no penalty. Mirostat fields default to the
@@ -56,7 +60,7 @@ typedef struct OcSamplerConfig {
  * changing `type`. */
 #define OC_SAMPLER_DEFAULT ((OcSamplerConfig){ \
     OC_SAMPLER_GREEDY, 1.0f, 0u, 1.0f, 1.0f, 0ull, \
-    10.0f, 5.0f, 0.1f, 0.0f, 0.0f })
+    10.0f, 5.0f, 0.1f, 0.0f, 0.0f, 0.0f, 0.0f })
 
 /* Sample one token from `logits` (length vocab_size).
  *
