@@ -1201,6 +1201,8 @@ mod tests {
             Some(GgufQuantizationType::F16),
             &[],
             None,
+            None,
+            None,
         )
         .expect("quantization should succeed");
 
@@ -1269,6 +1271,8 @@ mod tests {
             None,
             Some(GgufQuantizationType::Q8_0),
             &[],
+            None,
+            None,
             None,
         )
         .expect("GGUF quantization should succeed");
@@ -1372,6 +1376,8 @@ mod tests {
             Some(GgufQuantizationType::Q4_K_M),
             &[],
             None,
+            None,
+            None,
         )
         .expect("GGUF Q4_K_M quantization should succeed");
 
@@ -1405,6 +1411,8 @@ mod tests {
             None,
             Some(GgufQuantizationType::F16),
             &[],
+            None,
+            None,
             None,
         )
         .expect_err("raw input without source should fail");
