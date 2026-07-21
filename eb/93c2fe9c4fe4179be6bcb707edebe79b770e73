@@ -1,0 +1,23 @@
+oxidize-c/src/backends/cuda.cu
+  s_96ddc277ba047e::t_761a52dea9e01a 1-505
+oxidize-c/Makefile
+  s_96ddc277ba047e::t_aa094aaad4ff73 122-132
+oxidize-c/include/oxidize/cuda.h
+  s_96ddc277ba047e::t_2c01c8c8efeec3 1-77
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "eb93c2fe9c4fe4179be6bcb707edebe79b770e73",
+  "prompts": {},
+  "sessions": {
+    "s_96ddc277ba047e": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "ea8ad242-b091-46af-96e0-114c0c67fea4",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
