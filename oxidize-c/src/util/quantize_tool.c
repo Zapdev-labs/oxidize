@@ -13,8 +13,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "oxidize/quant.h"
 #include "oxidize/log.h"
+#include "oxidize/quant.h"
 
 /* ─── Type parsing ────────────────────────────────────────────────────── */
 
@@ -32,9 +32,31 @@ OcError oc_quantize_parse_type(const char *str, OcGgufQuantizationType *out)
     return OC_ERR_INVALID_ARG;
 }
 
-size_t oc_quantize_block_size(OcGgufQuantizationType type, size_t n_elements)
+static bool target_type_supported(OcGgufQuantizationType type)
 {
-    return oc_quantized_size(type, n_elements);
+    switch (type) {
+    case OC_QUANT_F32:
+    case OC_QUANT_F16:
+    case OC_QUANT_I8:
+    case OC_QUANT_I16:
+    case OC_QUANT_I32:
+    case OC_QUANT_I64:
+    case OC_QUANT_F64:
+    case OC_QUANT_Q4_0:
+    case OC_QUANT_Q4_1:
+    case OC_QUANT_Q5_0:
+    case OC_QUANT_Q5_1:
+    case OC_QUANT_Q8_0:
+    case OC_QUANT_Q4_K_S:
+    case OC_QUANT_Q4_K_M:
+    case OC_QUANT_AL5:
+    case OC_QUANT_AL5_XS:
+    case OC_QUANT_AL6:
+    case OC_QUANT_AL8:
+        return true;
+    default:
+        return false;
+    }
 }
 
 /* ─── Minimal GGUF writer ───────────────────────────────────────────────
@@ -50,7 +72,8 @@ size_t oc_quantize_block_size(OcGgufQuantizationType type, size_t n_elements)
 
 static void write_u32(FILE *f, uint32_t v) { fwrite(&v, 4, 1, f); }
 static void write_u64(FILE *f, uint64_t v) { fwrite(&v, 8, 1, f); }
-static void write_f32(FILE *f, float v)    { fwrite(&v, 4, 1, f); }
+static void write_f32(FILE *f, float v) { fwrite(&v, 4, 1, f); }
+static void write_f64(FILE *f, double v) { fwrite(&v, 8, 1, f); }
 
 static void write_str(FILE *f, const char *s, size_t len)
 {
@@ -58,49 +81,89 @@ static void write_str(FILE *f, const char *s, size_t len)
     fwrite(s, 1, len, f);
 }
 
-/* Write a metadata value. Only handles common types used in GGUF model files. */
-static void write_metadata_value(FILE *f, const OcGgufMetadataValue *v)
+static void write_metadata_payload(FILE *f, const OcGgufMetadataValue *v, OcGgufMetadataType type)
 {
-    switch (v->type) {
-    case OC_GGUF_MT_UINT8:   write_u32(f, 0); write_u32(f, v->v.u8); break;
-    case OC_GGUF_MT_INT8:   write_u32(f, 1); write_u32(f, (uint32_t)v->v.i8); break;
-    case OC_GGUF_MT_UINT16: write_u32(f, 2); write_u32(f, v->v.u16); break;
-    case OC_GGUF_MT_INT16:  write_u32(f, 3); write_u32(f, (uint32_t)v->v.i16); break;
-    case OC_GGUF_MT_UINT32: write_u32(f, 4); write_u32(f, v->v.u32); break;
-    case OC_GGUF_MT_INT32:  write_u32(f, 5); write_u32(f, (uint32_t)v->v.i32); break;
-    case OC_GGUF_MT_FLOAT32: write_u32(f, 6); write_f32(f, v->v.f32); break;
-    case OC_GGUF_MT_BOOL:   write_u32(f, 7); write_u32(f, v->v.b ? 1 : 0); break;
+    switch (type) {
+    case OC_GGUF_MT_UINT8:
+        fwrite(&v->v.u8, 1, 1, f);
+        break;
+    case OC_GGUF_MT_INT8:
+        fwrite(&v->v.i8, 1, 1, f);
+        break;
+    case OC_GGUF_MT_UINT16:
+        fwrite(&v->v.u16, 2, 1, f);
+        break;
+    case OC_GGUF_MT_INT16:
+        fwrite(&v->v.i16, 2, 1, f);
+        break;
+    case OC_GGUF_MT_UINT32:
+        write_u32(f, v->v.u32);
+        break;
+    case OC_GGUF_MT_INT32:
+        fwrite(&v->v.i32, 4, 1, f);
+        break;
+    case OC_GGUF_MT_FLOAT32:
+        write_f32(f, v->v.f32);
+        break;
+    case OC_GGUF_MT_BOOL: {
+        uint8_t value = v->v.b ? 1 : 0;
+        fwrite(&value, 1, 1, f);
+        break;
+    }
     case OC_GGUF_MT_STRING:
-        write_u32(f, 8);
         write_str(f, v->v.str.data, v->v.str.len);
         break;
     case OC_GGUF_MT_ARRAY:
-        write_u32(f, 9);
         write_u32(f, v->v.arr.elem_type);
         write_u64(f, v->v.arr.len);
         for (size_t i = 0; i < v->v.arr.len; i++) {
-            write_metadata_value(f, &v->v.arr.values[i]);
+            write_metadata_payload(f, &v->v.arr.values[i], v->v.arr.elem_type);
         }
         break;
-    case OC_GGUF_MT_UINT64: write_u32(f, 10); write_u64(f, v->v.u64); break;
-    case OC_GGUF_MT_INT64:  write_u32(f, 11); write_u64(f, (uint64_t)v->v.i64); break;
-    case OC_GGUF_MT_FLOAT64: write_u32(f, 12); { uint64_t bits; memcpy(&bits, &v->v.f64, 8); write_u64(f, bits); } break;
+    case OC_GGUF_MT_UINT64:
+        write_u64(f, v->v.u64);
+        break;
+    case OC_GGUF_MT_INT64:
+        fwrite(&v->v.i64, 8, 1, f);
+        break;
+    case OC_GGUF_MT_FLOAT64:
+        write_f64(f, v->v.f64);
+        break;
     default:
-        write_u32(f, 0); write_u32(f, 0); break;
+        break;
     }
+}
+
+static void write_metadata_value(FILE *f, const OcGgufMetadataValue *v)
+{
+    write_u32(f, v->type);
+    write_metadata_payload(f, v, v->type);
+}
+
+static void discard_output(FILE *out, const char *path)
+{
+    if (out) fclose(out);
+    remove(path);
 }
 
 /* ─── Main quantize function ──────────────────────────────────────────── */
 
 OcError oc_quantize_model(const OcQuantizeConfig *cfg)
 {
-    if (!cfg || !cfg->input_path || !cfg->output_path || !cfg->target_type)
-        return OC_ERR_INVALID_ARG;
+    if (!cfg || !cfg->input_path || !cfg->output_path || !cfg->target_type) return OC_ERR_INVALID_ARG;
 
     OcGgufQuantizationType target_qtype;
     OcError e = oc_quantize_parse_type(cfg->target_type, &target_qtype);
     if (e != OC_OK) {
         fprintf(stderr, "error: unknown quantization type '%s'\n", cfg->target_type);
+        return OC_ERR_INVALID_ARG;
+    }
+    if (!target_type_supported(target_qtype)) {
+        fprintf(stderr, "error: quantization encoder for '%s' is not implemented\n", cfg->target_type);
+        return OC_ERR_QUANT;
+    }
+    if (strcmp(cfg->input_path, cfg->output_path) == 0) {
+        fprintf(stderr, "error: input and output paths must differ\n");
         return OC_ERR_INVALID_ARG;
     }
 
@@ -129,8 +192,8 @@ OcError oc_quantize_model(const OcQuantizeConfig *cfg)
     }
 
     /* Write GGUF header. */
-    write_u32(out, 0x46554747);  /* "GGUF" */
-    write_u32(out, 3);           /* version 3 */
+    write_u32(out, 0x46554747); /* "GGUF" */
+    write_u32(out, 3);          /* version 3 */
     write_u64(out, gf->tensor_count);
     write_u64(out, gf->metadata_kv_count);
 
@@ -143,43 +206,37 @@ OcError oc_quantize_model(const OcQuantizeConfig *cfg)
 
     /* Write tensor info (patching ggml_type for weight tensors). */
     uint64_t data_offset = 0;
-    uint64_t *tensor_offsets = calloc(gf->tensor_count, sizeof(uint64_t));
-    if (!tensor_offsets) { fclose(out); oc_gguf_map_free(&mf); return OC_ERR_OOM; }
-
     for (uint64_t i = 0; i < gf->tensor_count; i++) {
         const OcGgufTensorInfo *t = &gf->tensors[i];
         write_str(out, t->name, strlen(t->name));
         write_u32(out, t->n_dims);
-        for (uint32_t d = 0; d < t->n_dims; d++)
-            write_u64(out, t->dims[d]);
+        for (uint32_t d = 0; d < t->n_dims; d++) write_u64(out, t->dims[d]);
 
-        /* Determine if this is a weight tensor (quantizable) or a
-         * non-quantizable tensor (e.g. token embeddings for some types).
-         * For simplicity, we re-quantize all tensors that have a recognized
-         * quant type. */
         OcGgufQuantizationType src_qtype = oc_quant_type_from_ggml_id(t->ggml_type);
+        if (src_qtype == OC_QUANT_UNKNOWN) {
+            fprintf(stderr, "error: unsupported source type %u for tensor %s\n", t->ggml_type, t->name);
+            discard_output(out, cfg->output_path);
+            oc_gguf_map_free(&mf);
+            return OC_ERR_QUANT;
+        }
+        size_t n_elements = 1;
+        for (uint32_t d = 0; d < t->n_dims; d++) n_elements *= t->dims[d];
+        size_t target_size = oc_quantized_size(target_qtype, n_elements);
+        bool quantize = target_size != 0;
         uint32_t out_ggml_type = t->ggml_type;
-        if (src_qtype != OC_QUANT_UNKNOWN && src_qtype != OC_QUANT_F32 && src_qtype != OC_QUANT_F16) {
+        if (quantize) {
             out_ggml_type = oc_quant_type_to_ggml_id(target_qtype);
         }
         write_u32(out, out_ggml_type);
 
-        tensor_offsets[i] = data_offset;
         write_u64(out, data_offset);
 
-        /* Compute data size for this tensor. */
-        size_t n_elements = 1;
-        for (uint32_t d = 0; d < t->n_dims; d++) n_elements *= t->dims[d];
-        size_t data_size;
-        if (src_qtype != OC_QUANT_UNKNOWN && src_qtype != OC_QUANT_F32 && src_qtype != OC_QUANT_F16) {
-            data_size = oc_quantized_size(target_qtype, n_elements);
-        } else if (src_qtype == OC_QUANT_F32) {
-            data_size = n_elements * sizeof(float);
-        } else if (src_qtype == OC_QUANT_F16) {
-            data_size = n_elements * 2;
-        } else {
-            /* Unknown: copy raw bytes. */
-            data_size = n_elements * sizeof(float);
+        size_t data_size = quantize ? target_size : oc_quantized_size(src_qtype, n_elements);
+        if (data_size == 0) {
+            fprintf(stderr, "error: invalid block length for tensor %s\n", t->name);
+            discard_output(out, cfg->output_path);
+            oc_gguf_map_free(&mf);
+            return OC_ERR_QUANT;
         }
         data_offset += data_size;
         /* Align to GGUF_ALIGNMENT (default 32). */
@@ -191,80 +248,87 @@ OcError oc_quantize_model(const OcQuantizeConfig *cfg)
     uint64_t align = gf->alignment ? gf->alignment : 32;
     long pos = ftell(out);
     uint64_t padded = (pos + align - 1) & ~(align - 1);
-    while (pos < (long)padded) { fputc(0, out); pos++; }
+    while (pos < (long)padded) {
+        fputc(0, out);
+        pos++;
+    }
 
     /* Second pass: write tensor data. */
     for (uint64_t i = 0; i < gf->tensor_count; i++) {
         const OcGgufTensorInfo *t = &gf->tensors[i];
         const uint8_t *src_data = oc_gguf_map_tensor_data(&mf, t);
         if (!src_data) {
-            fprintf(stderr, "warning: tensor %s has no data, skipping\n", t->name);
-            continue;
+            fprintf(stderr, "error: tensor %s has no data\n", t->name);
+            discard_output(out, cfg->output_path);
+            oc_gguf_map_free(&mf);
+            return OC_ERR_FORMAT;
         }
 
         size_t n_elements = 1;
         for (uint32_t d = 0; d < t->n_dims; d++) n_elements *= t->dims[d];
         OcGgufQuantizationType src_qtype = oc_quant_type_from_ggml_id(t->ggml_type);
 
-        if (src_qtype != OC_QUANT_UNKNOWN && src_qtype != OC_QUANT_F32 && src_qtype != OC_QUANT_F16) {
-            /* Dequantize → re-quantize. */
+        size_t dst_size = oc_quantized_size(target_qtype, n_elements);
+        if (dst_size != 0) {
             float *f32_buf = malloc(n_elements * sizeof(float));
-            if (!f32_buf) { fclose(out); free(tensor_offsets); oc_gguf_map_free(&mf); return OC_ERR_OOM; }
+            if (!f32_buf) {
+                discard_output(out, cfg->output_path);
+                oc_gguf_map_free(&mf);
+                return OC_ERR_OOM;
+            }
 
-            e = oc_quant_dequant_row(src_qtype, src_data,
-                                     oc_quantized_size(src_qtype, n_elements),
-                                     f32_buf, n_elements);
+            e = oc_quant_dequant_row(src_qtype, src_data, oc_quantized_size(src_qtype, n_elements), f32_buf,
+                                     n_elements);
             if (e != OC_OK) {
-                fprintf(stderr, "warning: dequant failed for %s, copying raw\n", t->name);
+                fprintf(stderr, "error: dequantization failed for %s (%s)\n", t->name, oc_error_msg(e));
                 free(f32_buf);
-                fwrite(src_data, 1, oc_quantized_size(src_qtype, n_elements), out);
-            } else {
-                size_t dst_size = oc_quantized_size(target_qtype, n_elements);
-                uint8_t *dst_buf = malloc(dst_size);
-                if (!dst_buf) {
-                    free(f32_buf);
-                    fclose(out); free(tensor_offsets); oc_gguf_map_free(&mf);
-                    return OC_ERR_OOM;
-                }
-                e = oc_quant_pack_row(target_qtype, f32_buf, n_elements,
-                                      dst_buf, dst_size);
-                if (e != OC_OK) {
-                    fprintf(stderr, "warning: pack failed for %s, writing f32\n", t->name);
-                    fwrite(f32_buf, sizeof(float), n_elements, out);
-                } else {
-                    fwrite(dst_buf, 1, dst_size, out);
-                }
+                discard_output(out, cfg->output_path);
+                oc_gguf_map_free(&mf);
+                return e;
+            }
+
+            uint8_t *dst_buf = malloc(dst_size);
+            if (!dst_buf) {
+                free(f32_buf);
+                discard_output(out, cfg->output_path);
+                oc_gguf_map_free(&mf);
+                return OC_ERR_OOM;
+            }
+            e = oc_quant_pack_row(target_qtype, f32_buf, n_elements, dst_buf, dst_size);
+            free(f32_buf);
+            if (e != OC_OK) {
+                fprintf(stderr, "error: quantization failed for %s (%s)\n", t->name, oc_error_msg(e));
                 free(dst_buf);
-                free(f32_buf);
+                discard_output(out, cfg->output_path);
+                oc_gguf_map_free(&mf);
+                return e;
             }
-        } else if (src_qtype == OC_QUANT_F32) {
-            /* F32: optionally quantize to target if target is F16. */
-            if (target_qtype == OC_QUANT_F16) {
-                /* Convert f32 → f16 (simplified: just write f32 for now). */
-                fwrite(src_data, sizeof(float), n_elements, out);
-            } else {
-                fwrite(src_data, sizeof(float), n_elements, out);
-            }
+            fwrite(dst_buf, 1, dst_size, out);
+            free(dst_buf);
         } else {
-            /* F16 or unknown: copy raw. */
-            size_t raw_size = n_elements * (t->ggml_type == 1 ? 2 : 4);
+            size_t raw_size = oc_quantized_size(src_qtype, n_elements);
             fwrite(src_data, 1, raw_size, out);
         }
 
         /* Pad to alignment. */
         pos = ftell(out);
         padded = (pos + align - 1) & ~(align - 1);
-        while (pos < (long)padded) { fputc(0, out); pos++; }
+        while (pos < (long)padded) {
+            fputc(0, out);
+            pos++;
+        }
 
         if (cfg->verbose && (i % 10 == 0 || i == gf->tensor_count - 1)) {
-            fprintf(stderr, "  tensor %llu/%llu: %s (%u dims, %zu elements)\n",
-                    (unsigned long long)(i + 1), (unsigned long long)gf->tensor_count,
-                    t->name, t->n_dims, n_elements);
+            fprintf(stderr, "  tensor %llu/%llu: %s (%u dims, %zu elements)\n", (unsigned long long)(i + 1),
+                    (unsigned long long)gf->tensor_count, t->name, t->n_dims, n_elements);
         }
     }
 
-    free(tensor_offsets);
-    fclose(out);
+    if (ferror(out) || fclose(out) != 0) {
+        remove(cfg->output_path);
+        oc_gguf_map_free(&mf);
+        return OC_ERR_IO;
+    }
     oc_gguf_map_free(&mf);
 
     if (cfg->verbose) {
