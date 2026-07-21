@@ -1,0 +1,19 @@
+oxidize-c/src/util/mmap.c
+  s_5bec56e69286b9::t_ddc6ed1f6c2c1e 391,410
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "51f095cb1768268a6c5e4e462cf5eb04ca74f3b2",
+  "prompts": {},
+  "sessions": {
+    "s_5bec56e69286b9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f86ae-2366-7b80-8a79-8d8524df27c3",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
