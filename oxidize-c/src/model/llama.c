@@ -153,6 +153,8 @@ static OcError parse_config(const OcGgufFile *f, const char *arch_str,
     /* Gemma-specific: GeGLU FFN + norm scaling. */
     cfg->uses_geglu = false;
     cfg->norm_scale = 1.0f;
+    cfg->sliding_window = 0;
+    cfg->sliding_window_pattern = 1;
     /* YaRN long-context scaling. */
     cfg->yarn_factor = 0.0f;
     cfg->yarn_orig_ctx = 0;
@@ -160,6 +162,13 @@ static OcError parse_config(const OcGgufFile *f, const char *arch_str,
         if (strncmp(arch_str, "gemma", 5) == 0) {
             cfg->uses_geglu = true;
             cfg->norm_scale = sqrtf((float)cfg->n_embd);
+            /* Gemma2 sliding window: alternating global/sliding layers. */
+            snprintf(key, sizeof(key), "%sattention.sliding_window", prefix);
+            uint32_t sw = cfg_u32(f, key, 0);
+            if (sw > 0) {
+                cfg->sliding_window = sw;
+                cfg->sliding_window_pattern = 2; /* alternating */
+            }
         }
     }
     /* YaRN: read from GGUF metadata if present. */
@@ -620,8 +629,20 @@ static void attention_head(const OcLlamaSession *s, uint32_t head,
     float run_sum = 0.0f;
     for (size_t i = 0; i < hd; i++) out_vec[i] = 0.0f;
 
+    /* Sliding window: only attend to the last `sliding_window` tokens
+     * for layers matching the alternating pattern. Layer L uses sliding
+     * window when (L % pattern) == 1 (i.e., every other layer for pattern=2). */
     int64_t seq_len = s->pos + 1;
-    for (int64_t t = 0; t < seq_len; t++) {
+    int64_t start = 0;
+    if (c->sliding_window > 0 && c->sliding_window_pattern > 1) {
+        if (layer % c->sliding_window_pattern == 1) {
+            /* Sliding window layer: only attend to recent tokens. */
+            int64_t sw = (int64_t)c->sliding_window;
+            start = (seq_len > sw) ? (seq_len - sw) : 0;
+        }
+    }
+
+    for (int64_t t = start; t < seq_len; t++) {
         const float *k_t = k_layer + kv_off + (size_t)t * s->kv_row_floats;
         float dot = 0.0f;
         for (size_t i = 0; i < hd; i++) dot += q_vec[i] * k_t[i];

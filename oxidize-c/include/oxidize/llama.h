@@ -52,6 +52,11 @@ typedef struct OcLlamaConfig {
     float    expert_weights_scale;      /* 1.0 = no routed scaling          */
     bool     uses_geglu;                /* true = Gemma GeGLU FFN (vs SwiGLU) */
     float    norm_scale;               /* RMSNorm scale factor (Gemma: sqrt(n_embd)) */
+    /* Sliding window attention (Gemma2/Phi). Layers alternate between
+     * global (full) and sliding-window attention. `sliding_window` is the
+     * window size in tokens (0 = no sliding window). */
+    uint32_t sliding_window;            /* 0 = disabled                         */
+    uint32_t sliding_window_pattern;   /* 1 = all global, 2 = alternating     */
     /* YaRN long-context RoPE scaling. */
     float    yarn_factor;               /* scaling factor (0 = no YaRN)            */
     uint32_t yarn_orig_ctx;             /* original context length (for YaRN)      */
