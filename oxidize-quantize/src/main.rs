@@ -210,6 +210,7 @@ fn run(args: Args) -> Result<()> {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn quantize_file(
     input_path: &Path,
     output_path: &Path,
@@ -1002,14 +1003,6 @@ fn source_byte_range(
         other => quantized_size(other, values).map_err(|err| anyhow!(err))?,
     };
     Ok((input_start, input_len))
-}
-
-fn scalar_source_width(source: GgufQuantizationType) -> Result<usize> {
-    match source {
-        GgufQuantizationType::F32 => Ok(4),
-        GgufQuantizationType::F16 | GgufQuantizationType::BF16 => Ok(2),
-        other => bail!("cannot stream-quantize from source type {other:?}"),
-    }
 }
 
 fn stream_chunk_values(source: GgufQuantizationType, target: GgufQuantizationType) -> usize {
