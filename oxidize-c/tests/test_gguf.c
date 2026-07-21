@@ -21,6 +21,9 @@
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
+#ifndef _XOPEN_SOURCE
+#define _XOPEN_SOURCE 700
+#endif
 
 #include <criterion/criterion.h>
 #include <criterion/redirect.h>
@@ -904,4 +907,3 @@ Test(gguf, arch_from_file_returns_unknown_when_no_metadata)
     oc_gguf_free(&f);
     free(buf);
 }
-
