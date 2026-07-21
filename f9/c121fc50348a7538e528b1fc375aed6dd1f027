@@ -1,0 +1,24 @@
+oxidize-c/include/oxidize/prefix_cache.h
+  s_96ddc277ba047e::t_cfc0e7bc2c5d5a 1-82
+oxidize-c/src/paged/prefix_cache.c
+  s_96ddc277ba047e::t_13d66aab858f72 1-129
+oxidize-c/tests/test_prefix_cache.c
+  s_96ddc277ba047e::t_84fa38926bc0a9 1,3-80
+  s_96ddc277ba047e::t_7e259c6258636b 2
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "f9c121fc50348a7538e528b1fc375aed6dd1f027",
+  "prompts": {},
+  "sessions": {
+    "s_96ddc277ba047e": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "ea8ad242-b091-46af-96e0-114c0c67fea4",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
