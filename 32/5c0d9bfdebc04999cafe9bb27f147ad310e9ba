@@ -1,0 +1,31 @@
+oxidize-c/tests/test_llama.c
+  s_5bec56e69286b9::t_3c021df085a96f 297-305
+oxidize-c/src/format/tokenizer_wp.c
+  s_5bec56e69286b9::t_3c021df085a96f 163-164
+oxidize-c/tests/test_qwen.c
+  s_5bec56e69286b9::t_00612a0b5e3dd4 2
+oxidize-c/src/format/tokenizer_bpe.c
+  s_5bec56e69286b9::t_3c021df085a96f 493,496,721,724
+oxidize-c/src/compute/activation.c
+  s_5bec56e69286b9::t_3c021df085a96f 123
+oxidize-c/tests/test_vector.c
+  s_5bec56e69286b9::t_3c021df085a96f 48-61
+oxidize-c/src/core/vector.c
+  s_5bec56e69286b9::t_3c021df085a96f 83
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "325c0d9bfdebc04999cafe9bb27f147ad310e9ba",
+  "prompts": {},
+  "sessions": {
+    "s_5bec56e69286b9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f86ae-2366-7b80-8a79-8d8524df27c3",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
