@@ -576,16 +576,18 @@ OcError oc_tiktoken_encode(const OcTiktokenTokenizer *t, const char *text,
  * Rust `String::from_utf8_lossy`: one U+FFFD per maximal invalid
  * subsequence (a lead byte plus its longest valid continuation prefix). */
 
-OcError oc_tiktoken_decode(const OcTiktokenTokenizer *t, const uint32_t *ids,
-                           size_t count, char **out_text)
+OcError oc_tiktoken_decode_raw(const OcTiktokenTokenizer *t,
+                               const uint32_t *ids, size_t count,
+                               uint8_t **out_bytes, size_t *out_len)
 {
-    if (!t || !out_text) return OC_ERR_INVALID_ARG;
-    *out_text = NULL;
+    if (!t || !out_bytes || !out_len) return OC_ERR_INVALID_ARG;
+    *out_bytes = NULL;
+    *out_len = 0;
     if (count == 0 || !ids) {
-        char *empty = (char *)malloc(1);
+        uint8_t *empty = malloc(1);
         if (!empty) return OC_ERR_OOM;
         empty[0] = '\0';
-        *out_text = empty;
+        *out_bytes = empty;
         return OC_OK;
     }
 
@@ -609,8 +611,21 @@ OcError oc_tiktoken_decode(const OcTiktokenTokenizer *t, const uint32_t *ids,
         off += len;
     }
 
-    /* Apply lossy UTF-8 conversion (mirrors Rust `from_utf8_lossy`). Worst
-     * case: every byte expands to the 3-byte U+FFFD replacement. */
+    *out_bytes = bytes;
+    *out_len = total;
+    return OC_OK;
+}
+
+OcError oc_tiktoken_decode(const OcTiktokenTokenizer *t, const uint32_t *ids,
+                           size_t count, char **out_text)
+{
+    if (!out_text) return OC_ERR_INVALID_ARG;
+    *out_text = NULL;
+    uint8_t *bytes = NULL;
+    size_t total = 0;
+    OcError e = oc_tiktoken_decode_raw(t, ids, count, &bytes, &total);
+    if (e != OC_OK) return e;
+
     size_t out_cap = total * 3 + 1;
     uint8_t *out = (uint8_t *)malloc(out_cap);
     if (!out) { free(bytes); return OC_ERR_OOM; }

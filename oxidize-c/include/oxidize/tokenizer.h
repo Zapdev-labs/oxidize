@@ -209,6 +209,8 @@ typedef struct OcStreamingDetokenizer {
     /* Pending bytes from previous tokens that form incomplete UTF-8. */
     uint8_t pending[8];
     size_t  pending_len;
+    uint8_t *output;
+    size_t output_cap;
 } OcStreamingDetokenizer;
 
 /* Initialize a streaming detokenizer bound to `tok`. */
@@ -228,6 +230,7 @@ OcError oc_streaming_detok_flush(OcStreamingDetokenizer *sd,
 
 /* Reset the streaming detokenizer (clear pending buffer). */
 void oc_streaming_detok_reset(OcStreamingDetokenizer *sd);
+void oc_streaming_detok_free(OcStreamingDetokenizer *sd);
 
 /* ─── BPE direct API (for testing / advanced callers) ─────────────────── */
 
@@ -265,6 +268,8 @@ OcError oc_bpe_encode(const OcBpeTokenizer *bpe, const char *text,
 /* Decode via BPE without going through the OcTokenizer wrapper. */
 OcError oc_bpe_decode(const OcBpeTokenizer *bpe, const uint32_t *ids,
                       size_t count, char **out_text);
+OcError oc_bpe_decode_raw(const OcBpeTokenizer *bpe, const uint32_t *ids,
+                          size_t count, uint8_t **out_bytes, size_t *out_len);
 
 /* Free the malloc'd internals of a BPE tokenizer (vocab hashtable, u64
  * maps). Does NOT free the OcBpeTokenizer struct itself (arena-owned) nor
@@ -379,6 +384,9 @@ OcError oc_tiktoken_encode(const OcTiktokenTokenizer *t, const char *text,
  * Rust `TiktokenTokenizer::decode`. */
 OcError oc_tiktoken_decode(const OcTiktokenTokenizer *t, const uint32_t *ids,
                            size_t count, char **out_text);
+OcError oc_tiktoken_decode_raw(const OcTiktokenTokenizer *t,
+                               const uint32_t *ids, size_t count,
+                               uint8_t **out_bytes, size_t *out_len);
 
 /* Free the malloc'd internals of a Tiktoken tokenizer. */
 void oc_tiktoken_free(OcTiktokenTokenizer *t);

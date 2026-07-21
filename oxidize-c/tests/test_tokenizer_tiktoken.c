@@ -151,6 +151,48 @@ Test(tokenizer_tiktoken, supports_utf8_bytes)
     oc_arena_free(arena);
 }
 
+Test(tokenizer_tiktoken, streaming_preserves_split_and_long_tokens)
+{
+    OcArena *arena = oc_arena_new(0);
+    static const uint8_t lead[] = { 0xc3 };
+    static const uint8_t continuation[] = { 0xa9 };
+    uint8_t *long_token = malloc(5000);
+    cr_assert_not_null(long_token);
+    memset(long_token, 'x', 5000);
+    OcByteSlice vocab[] = {
+        bs(lead, sizeof(lead)),
+        bs(continuation, sizeof(continuation)),
+        bs(long_token, 5000),
+    };
+    OcTiktokenTokenizer *t = NULL;
+    cr_assert_eq(oc_tiktoken_new(vocab, 3, NULL, 0, arena, &t), OC_OK);
+    free(long_token);
+    OcTokenizer tokenizer = { .kind = OC_TOK_KIND_TIKTOKEN, .tiktoken = t };
+    OcStreamingDetokenizer first, second;
+    oc_streaming_detok_init(&first, &tokenizer);
+    oc_streaming_detok_init(&second, &tokenizer);
+
+    const char *delta = NULL;
+    size_t len = 0;
+    cr_assert_eq(oc_streaming_detok_push(&first, 0, &delta, &len), OC_OK);
+    cr_assert_eq(len, 0);
+    cr_assert_eq(oc_streaming_detok_push(&first, 1, &delta, &len), OC_OK);
+    cr_assert_eq(len, 2);
+    cr_assert_arr_eq(delta, "\xc3\xa9", 2);
+    const char *first_delta = delta;
+
+    cr_assert_eq(oc_streaming_detok_push(&second, 2, &delta, &len), OC_OK);
+    cr_assert_eq(len, 5000);
+    cr_assert_eq(delta[0], 'x');
+    cr_assert_eq(delta[4999], 'x');
+    cr_assert_arr_eq(first_delta, "\xc3\xa9", 2);
+
+    oc_streaming_detok_free(&first);
+    oc_streaming_detok_free(&second);
+    oc_tiktoken_free(t);
+    oc_arena_free(arena);
+}
+
 /* ─── Unknown token fallback for missing bytes (VAL-TOK-009 OOV) ────────
  * Mirrors Rust `tiktoken_uses_unknown_token_for_missing_bytes`:
  *   vocab = [b"a"] + unk(b"<unk>")

@@ -849,11 +849,12 @@ OcError oc_bpe_encode(const OcBpeTokenizer *bpe, const char *text,
 
 /* ─── Decode ──────────────────────────────────────────────────────────── */
 
-OcError oc_bpe_decode(const OcBpeTokenizer *bpe, const uint32_t *ids,
-                      size_t count, char **out_text)
+OcError oc_bpe_decode_raw(const OcBpeTokenizer *bpe, const uint32_t *ids,
+                          size_t count, uint8_t **out_bytes, size_t *out_len)
 {
-    if (!bpe || !ids || !out_text) return OC_ERR_INVALID_ARG;
-    *out_text = NULL;
+    if (!bpe || !ids || !out_bytes || !out_len) return OC_ERR_INVALID_ARG;
+    *out_bytes = NULL;
+    *out_len = 0;
 
     /* First pass: compute the total byte length of the concatenated token
      * strings. */
@@ -879,7 +880,8 @@ OcError oc_bpe_decode(const OcBpeTokenizer *bpe, const uint32_t *ids,
     concat[off] = '\0';
 
     if (!bpe->use_byte_fallback) {
-        *out_text = concat;
+        *out_bytes = (uint8_t *)concat;
+        *out_len = off;
         return OC_OK;
     }
 
@@ -908,6 +910,21 @@ OcError oc_bpe_decode(const OcBpeTokenizer *bpe, const uint32_t *ids,
         p += adv;
     }
     free(concat);
+
+    *out_bytes = bytes;
+    *out_len = byte_len;
+    return OC_OK;
+}
+
+OcError oc_bpe_decode(const OcBpeTokenizer *bpe, const uint32_t *ids,
+                      size_t count, char **out_text)
+{
+    if (!out_text) return OC_ERR_INVALID_ARG;
+    *out_text = NULL;
+    uint8_t *bytes = NULL;
+    size_t byte_len = 0;
+    OcError e = oc_bpe_decode_raw(bpe, ids, count, &bytes, &byte_len);
+    if (e != OC_OK) return e;
 
     /* The bytes may not be valid UTF-8 (e.g. mid-multibyte sequences split
      * across tokens, or placeholder tokens mapping to lone invalid bytes).

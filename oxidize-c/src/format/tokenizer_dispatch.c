@@ -186,6 +186,22 @@ static int utf8_seq_len(uint8_t first_byte)
     return 1; /* invalid lead byte, treat as single */
 }
 
+static OcError decode_token_raw(const OcTokenizer *tokenizer, uint32_t token,
+                                uint8_t **out_bytes, size_t *out_len)
+{
+    if (tokenizer->kind == OC_TOK_KIND_BPE)
+        return oc_bpe_decode_raw(tokenizer->bpe, &token, 1, out_bytes, out_len);
+    if (tokenizer->kind == OC_TOK_KIND_TIKTOKEN)
+        return oc_tiktoken_decode_raw(tokenizer->tiktoken, &token, 1,
+                                      out_bytes, out_len);
+    char *text = NULL;
+    OcError e = oc_tokenizer_decode(tokenizer, &token, 1, &text);
+    if (e != OC_OK) return e;
+    *out_bytes = (uint8_t *)text;
+    *out_len = strlen(text);
+    return OC_OK;
+}
+
 OcError oc_streaming_detok_push(OcStreamingDetokenizer *sd, uint32_t token,
                                 const char **out_delta, size_t *out_len)
 {
@@ -193,37 +209,41 @@ OcError oc_streaming_detok_push(OcStreamingDetokenizer *sd, uint32_t token,
     *out_delta = NULL;
     *out_len = 0;
 
-    /* Decode the token to text. */
-    char *text = NULL;
-    OcError e = oc_tokenizer_decode(sd->tokenizer, &token, 1, &text);
+    uint8_t *text = NULL;
+    size_t text_len = 0;
+    OcError e = decode_token_raw(sd->tokenizer, token, &text, &text_len);
     if (e != OC_OK || text == NULL) return e;
 
-    size_t text_len = strlen(text);
-
-    /* Combine pending bytes with new text. */
-    static _Thread_local uint8_t combined[4096];
     size_t combined_len = sd->pending_len;
-    if (combined_len > 0) {
-        memcpy(combined, sd->pending, combined_len);
+    if (text_len > SIZE_MAX - combined_len) {
+        free(text);
+        return OC_ERR_OOM;
     }
-    size_t copy_len = text_len;
-    if (combined_len + copy_len > sizeof(combined)) {
-        copy_len = sizeof(combined) - combined_len;
+    size_t required = combined_len + text_len;
+    if (required > sd->output_cap) {
+        uint8_t *grown = realloc(sd->output, required);
+        if (!grown) {
+            free(text);
+            return OC_ERR_OOM;
+        }
+        sd->output = grown;
+        sd->output_cap = required;
     }
-    memcpy(combined + combined_len, text, copy_len);
-    combined_len += copy_len;
+    if (combined_len > 0) memmove(sd->output, sd->pending, combined_len);
+    memcpy(sd->output + combined_len, text, text_len);
+    combined_len += text_len;
     free(text);
 
     /* Find the longest complete UTF-8 prefix. */
     size_t emit_len = 0;
     size_t pos = 0;
     while (pos < combined_len) {
-        int seq_len = utf8_seq_len(combined[pos]);
+        int seq_len = utf8_seq_len(sd->output[pos]);
         if (pos + (size_t)seq_len > combined_len) break;
         /* Validate continuation bytes. */
         bool valid = true;
         for (int i = 1; i < seq_len; i++) {
-            if ((combined[pos + i] & 0xC0) != 0x80) { valid = false; break; }
+            if ((sd->output[pos + i] & 0xC0) != 0x80) { valid = false; break; }
         }
         if (!valid) {
             /* Invalid byte, skip it. */
@@ -237,15 +257,14 @@ OcError oc_streaming_detok_push(OcStreamingDetokenizer *sd, uint32_t token,
     /* Store incomplete tail as pending. */
     sd->pending_len = combined_len - emit_len;
     if (sd->pending_len > 0 && sd->pending_len <= sizeof(sd->pending)) {
-        memcpy(sd->pending, combined + emit_len, sd->pending_len);
+        memcpy(sd->pending, sd->output + emit_len, sd->pending_len);
     } else {
         sd->pending_len = 0;
     }
 
     /* Emit the complete prefix. */
     if (emit_len > 0) {
-        /* Point into combined buffer (caller must use before next push). */
-        *out_delta = (const char *)combined;
+        *out_delta = (const char *)sd->output;
         *out_len = emit_len;
     }
     return OC_OK;
@@ -258,10 +277,14 @@ OcError oc_streaming_detok_flush(OcStreamingDetokenizer *sd,
     *out_delta = NULL;
     *out_len = 0;
     if (sd->pending_len == 0) return OC_OK;
-    /* Emit whatever is left, even if incomplete. */
-    static _Thread_local uint8_t flush_buf[8];
-    memcpy(flush_buf, sd->pending, sd->pending_len);
-    *out_delta = (const char *)flush_buf;
+    if (sd->pending_len > sd->output_cap) {
+        uint8_t *grown = realloc(sd->output, sd->pending_len);
+        if (!grown) return OC_ERR_OOM;
+        sd->output = grown;
+        sd->output_cap = sd->pending_len;
+    }
+    memcpy(sd->output, sd->pending, sd->pending_len);
+    *out_delta = (const char *)sd->output;
     *out_len = sd->pending_len;
     sd->pending_len = 0;
     return OC_OK;
@@ -273,3 +296,9 @@ void oc_streaming_detok_reset(OcStreamingDetokenizer *sd)
     sd->pending_len = 0;
 }
 
+void oc_streaming_detok_free(OcStreamingDetokenizer *sd)
+{
+    if (!sd) return;
+    free(sd->output);
+    memset(sd, 0, sizeof(*sd));
+}
