@@ -54,11 +54,17 @@ TEST_SRCS := $(wildcard tests/test_*.c)
 TEST_OBJS := $(TEST_SRCS:.c=.o)
 
 # ASan + UBSan for leak/UB detection in tests (valgrind not installed locally).
-# Criterion needs -lpthread (threads), -lrt (shm), -ldl (dlopen), -lm (math).
+# Criterion needs pthreads, dynamic loading, and math.  Linux additionally
+# needs librt for its POSIX shared-memory implementation; macOS provides the
+# same APIs through libSystem and has no separate librt.
 TEST_CFLAGS := -std=c11 -Wall -Wextra -Wno-format-zero-length \
                -fsanitize=address,undefined -fno-omit-frame-pointer -g -O0 \
                -I$(CRITERION_INCLUDE)
-TEST_LDFLAGS := -lm -lpthread -lrt -ldl -fsanitize=address,undefined
+TEST_SYSTEM_LIBS := -lm -lpthread -ldl
+ifneq ($(shell uname -s),Darwin)
+TEST_SYSTEM_LIBS += -lrt
+endif
+TEST_LDFLAGS := $(TEST_SYSTEM_LIBS) -fsanitize=address,undefined
 
 # ASan-instrumented library objects (stems: src/core/error.c -> src/core/error.asan.o).
 LIB_ASAN_OBJS := $(LIB_SRCS:.c=.asan.o)
