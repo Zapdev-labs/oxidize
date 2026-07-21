@@ -55,6 +55,13 @@ typedef struct OcLlamaConfig {
     /* YaRN long-context RoPE scaling. */
     float    yarn_factor;               /* scaling factor (0 = no YaRN)            */
     uint32_t yarn_orig_ctx;             /* original context length (for YaRN)      */
+    /* DeepSeek MLA (Multi-head Latent Attention). */
+    bool     uses_mla;                  /* true = DeepSeek-V2/V3 MLA attention      */
+    uint32_t mla_q_lora_dim;           /* q_a_proj output dim (latent dim)         */
+    uint32_t mla_kv_lora_dim;          /* kv_a_proj latent dim (without kv_pe)     */
+    uint32_t mla_q_rope_dim;           /* RoPE dim for q_pe                        */
+    uint32_t mla_kv_nope_head_dim;     /* per-head nope dim (k_b output / n_heads) */
+    uint32_t mla_v_head_dim;           /* per-head v dim (v_b output / n_heads)    */
 } OcLlamaConfig;
 
 /* Non-owning view over a mmap'd GGUF tensor. */
@@ -79,6 +86,14 @@ typedef struct OcLlamaLayer {
     /* Shared expert (always active, added with weight 1.0). */
     OcWeightView ffn_gate_shexp, ffn_up_shexp, ffn_down_shexp;
     OcWeightView ffn_gate_inp_shexp;     /* optional sigmoid gate for shared    */
+    /* DeepSeek MLA weights (used when cfg.uses_mla is true). */
+    OcWeightView mla_q_a;               /* q_a_proj: [q_lora_dim, n_embd]        */
+    OcWeightView mla_q_b;               /* q_b_proj: [n_heads*q_head_dim, q_lora_dim] */
+    OcWeightView mla_kv_a_mqa;         /* kv_a_proj_with_mqa: [kv_lora+kv_pe, n_embd] */
+    OcWeightView mla_k_b;               /* k_b_proj: [n_heads*k_nope_dim, kv_lora_dim] */
+    OcWeightView mla_v_b;               /* v_b_proj: [n_heads*v_head_dim, kv_lora_dim] */
+    float *mla_q_a_norm;                /* RMSNorm weight for q_a (len q_lora_dim) */
+    float *mla_kv_a_norm;               /* RMSNorm weight for kv_a (len kv_lora_dim) */
     float *attn_norm;       /* owned f32, length n_embd              */
     float *ffn_norm;       /* owned f32, length n_embd              */
 } OcLlamaLayer;
@@ -120,6 +135,11 @@ typedef struct OcLlamaSession {
     float *shexp_gate;       /* expert_intermediate_size (shared)   */
     float *shexp_up;         /* expert_intermediate_size (shared)   */
     float *shexp_out;        /* n_embd                             */
+    /* MLA temporaries. */
+    float *mla_c_q;          /* q_lora_dim                          */
+    float *mla_c_kv;         /* kv_lora_dim                          */
+    float *mla_q_full;       /* n_heads * q_head_dim                */
+    float *mla_kv_compressed; /* kv_lora + kv_pe                     */
 } OcLlamaSession;
 
 /* Load a Llama-family GGUF (mmap, zero-copy weights). Returns OC_OK,

@@ -181,6 +181,33 @@ static OcError parse_config(const OcGgufFile *f, const char *arch_str,
         }
     }
 
+    /* DeepSeek MLA config. */
+    cfg->uses_mla = false;
+    cfg->mla_q_lora_dim = 0;
+    cfg->mla_kv_lora_dim = 0;
+    cfg->mla_q_rope_dim = 0;
+    cfg->mla_kv_nope_head_dim = 0;
+    cfg->mla_v_head_dim = 0;
+    if (arch_str && (strncmp(arch_str, "deepseek", 8) == 0)) {
+        snprintf(key, sizeof(key), "%sattention.key_length_mla", prefix);
+        uint32_t mla_key_len = cfg_u32(f, key, 0);
+        if (mla_key_len > 0) {
+            cfg->uses_mla = true;
+            snprintf(key, sizeof(key), "%sattention.lora_q", prefix);
+            cfg->mla_q_lora_dim = cfg_u32(f, key, 512);
+            snprintf(key, sizeof(key), "%sattention.lora_kv", prefix);
+            cfg->mla_kv_lora_dim = cfg_u32(f, key, 512);
+            snprintf(key, sizeof(key), "%sattention.key_length_rope", prefix);
+            cfg->mla_q_rope_dim = cfg_u32(f, key, 64);
+            cfg->mla_kv_nope_head_dim = mla_key_len - cfg->mla_q_rope_dim;
+            cfg->mla_v_head_dim = cfg->mla_kv_nope_head_dim;
+            /* For MLA, head_dim is the full per-head dim. */
+            cfg->head_dim = mla_key_len;
+            cfg->kv_head_dim = mla_key_len;
+            cfg->n_head_kv = 1; /* MLA uses MQA (single KV head) */
+        }
+    }
+
     cfg->head_dim   = (key_len > 0) ? key_len : (cfg->n_embd / cfg->n_head);
     cfg->kv_head_dim = cfg->head_dim;   /* Llama: same; attention.key_length
                                          * applies to both. */
@@ -266,6 +293,20 @@ static bool assign_tensor(OcLlamaModel *m, const char *cname,
             L->ffn_down_shexp = view_from_info(mm, info);
         } else if (strcmp(suf, "ffn_gate_inp_shexp.weight") == 0) {
             L->ffn_gate_inp_shexp = view_from_info(mm, info);
+        } else if (strcmp(suf, "attn_q_a.weight") == 0) {
+            L->mla_q_a = view_from_info(mm, info);
+        } else if (strcmp(suf, "attn_q_a_norm.weight") == 0) {
+            L->mla_q_a_norm = load_norm(mm, info, m->cfg.mla_q_lora_dim);
+        } else if (strcmp(suf, "attn_q_b.weight") == 0) {
+            L->mla_q_b = view_from_info(mm, info);
+        } else if (strcmp(suf, "attn_kv_a_mqa.weight") == 0) {
+            L->mla_kv_a_mqa = view_from_info(mm, info);
+        } else if (strcmp(suf, "attn_kv_a_norm.weight") == 0) {
+            L->mla_kv_a_norm = load_norm(mm, info, m->cfg.mla_kv_lora_dim);
+        } else if (strcmp(suf, "attn_k_b.weight") == 0) {
+            L->mla_k_b = view_from_info(mm, info);
+        } else if (strcmp(suf, "attn_v_b.weight") == 0) {
+            L->mla_v_b = view_from_info(mm, info);
         } else {
             return false;   /* unrecognized suffix; not an error */
         }
@@ -368,7 +409,12 @@ OcError oc_llama_session_init(OcLlamaModel *model, OcLlamaSession *out)
     if (model == NULL || out == NULL) return OC_ERR_INVALID_ARG;
     memset(out, 0, sizeof(*out));
     out->model = model;
-    out->kv_row_floats = (size_t)model->cfg.n_head_kv * model->cfg.kv_head_dim;
+    /* For MLA, each head has its own K/V (no GQA sharing). */
+    if (model->cfg.uses_mla) {
+        out->kv_row_floats = (size_t)model->cfg.n_head * model->cfg.head_dim;
+    } else {
+        out->kv_row_floats = (size_t)model->cfg.n_head_kv * model->cfg.kv_head_dim;
+    }
     size_t per_layer = (size_t)model->cfg.n_ctx * out->kv_row_floats;
     size_t total = (size_t)model->cfg.n_layer * per_layer;
     out->kv_k = xcalloc(total, sizeof(float));
@@ -410,6 +456,17 @@ OcError oc_llama_session_init(OcLlamaModel *model, OcLlamaSession *out)
         oc_llama_session_free(out);
         return OC_ERR_OOM;
     }
+    /* MLA temporaries. */
+    if (model->cfg.uses_mla) {
+        out->mla_c_q = xcalloc(model->cfg.mla_q_lora_dim, sizeof(float));
+        out->mla_c_kv = xcalloc(model->cfg.mla_kv_lora_dim, sizeof(float));
+        out->mla_q_full = xcalloc((size_t)model->cfg.n_head * model->cfg.head_dim, sizeof(float));
+        out->mla_kv_compressed = xcalloc(model->cfg.mla_kv_lora_dim + model->cfg.mla_q_rope_dim, sizeof(float));
+        if (!out->mla_c_q || !out->mla_c_kv || !out->mla_q_full || !out->mla_kv_compressed) {
+            oc_llama_session_free(out);
+            return OC_ERR_OOM;
+        }
+    }
     out->pos = 0;
     return OC_OK;
 }
@@ -437,6 +494,8 @@ void oc_llama_session_free(OcLlamaSession *sess)
     free(sess->router_logits);
     free(sess->expert_gate); free(sess->expert_up); free(sess->expert_out);
     free(sess->shexp_gate); free(sess->shexp_up); free(sess->shexp_out);
+    free(sess->mla_c_q); free(sess->mla_c_kv);
+    free(sess->mla_q_full); free(sess->mla_kv_compressed);
     memset(sess, 0, sizeof(*sess));
 }
 
@@ -447,6 +506,8 @@ void oc_llama_free(OcLlamaModel *model)
         for (uint32_t i = 0; i < model->cfg.n_layer; i++) {
             free(model->layers[i].attn_norm);
             free(model->layers[i].ffn_norm);
+            free(model->layers[i].mla_q_a_norm);
+            free(model->layers[i].mla_kv_a_norm);
         }
         free(model->layers);
     }
@@ -666,6 +727,112 @@ static void forward_moe_ffn(OcLlamaSession *s, const OcLlamaLayer *L)
     for (size_t i = 0; i < c->n_embd; i++) s->x[i] += s->expert_out[i];
 }
 
+/* ─── DeepSeek MLA (Multi-head Latent Attention) forward ────────────────
+ *
+ * Port of oxidize-core inference/layers.rs::deepseek_mla_layer.
+ *
+ * Q path:  x → q_a_proj → q_a_norm → q_b_proj → split (q_nope | q_pe)
+ * KV path: x → kv_a_proj_with_mqa → [kv_a_norm'd latent | k_pe]
+ *          per-head: k_b_proj (k_nope), v_b_proj (v)
+ * RoPE on q_pe and k_pe (decoupled), then standard attention.
+ */
+static void forward_mla_attention(OcLlamaSession *s, uint32_t layer)
+{
+    const OcLlamaConfig *c = &s->model->cfg;
+    OcLlamaLayer *L = &s->model->layers[layer];
+    uint32_t n_embd = c->n_embd;
+    uint32_t n_head = c->n_head;
+    uint32_t q_lora = c->mla_q_lora_dim;
+    uint32_t kv_lora = c->mla_kv_lora_dim;
+    uint32_t q_rope = c->mla_q_rope_dim;
+    uint32_t k_nope_hd = c->mla_kv_nope_head_dim;
+    uint32_t v_hd = c->mla_v_head_dim;
+    uint32_t q_hd = c->head_dim;
+
+    /* 1. Q down-projection: q_a_proj @ normed → c_q [q_lora] */
+    matvec(&L->mla_q_a, s->normed, s->mla_c_q, s->dequant_temp);
+
+    /* 2. RMSNorm c_q with q_a_norm. */
+    oc_rms_norm_f32(s->mla_c_q, L->mla_q_a_norm, s->mla_c_q,
+                    q_lora, c->rms_norm_eps);
+
+    /* 3. Q up-projection: q_b_proj @ c_q → q_full [n_head * q_hd] */
+    matvec(&L->mla_q_b, s->mla_c_q, s->mla_q_full, s->dequant_temp);
+
+    /* 4. KV down-projection: kv_a_proj_with_mqa @ normed → kv_compressed */
+    matvec(&L->mla_kv_a_mqa, s->normed, s->mla_kv_compressed, s->dequant_temp);
+
+    /* 5. RMSNorm the kv_lora portion of kv_compressed. */
+    oc_rms_norm_f32(s->mla_kv_compressed, L->mla_kv_a_norm,
+                    s->mla_c_kv, kv_lora, c->rms_norm_eps);
+    memcpy(s->mla_kv_compressed, s->mla_c_kv, kv_lora * sizeof(float));
+
+    /* 6. RoPE on k_pe (the trailing q_rope slots of kv_compressed). */
+    float *k_pe = s->mla_kv_compressed + kv_lora;
+    oc_apply_rope_f32(k_pe, k_pe, q_rope, q_rope, s->pos, c->rope_theta);
+
+    /* 7. Per-head K and V up-projection. */
+    size_t kv_off = ((size_t)layer * c->n_ctx + (size_t)s->pos) * s->kv_row_floats;
+    float *k_cache = s->kv_k + kv_off;
+    float *v_cache = s->kv_v + kv_off;
+
+    for (uint32_t h = 0; h < n_head; h++) {
+        OcWeightView k_b_h = L->mla_k_b;
+        k_b_h.data = L->mla_k_b.data + (size_t)h * k_nope_hd * L->mla_k_b.row_bytes;
+        k_b_h.rows = k_nope_hd;
+        float *k_nope = k_cache + (size_t)h * q_hd;
+        matvec(&k_b_h, s->mla_c_kv, k_nope, s->dequant_temp);
+        memcpy(k_nope + k_nope_hd, k_pe, q_rope * sizeof(float));
+
+        OcWeightView v_b_h = L->mla_v_b;
+        v_b_h.data = L->mla_v_b.data + (size_t)h * v_hd * L->mla_v_b.row_bytes;
+        v_b_h.rows = v_hd;
+        float *v_out = v_cache + (size_t)h * q_hd;
+        matvec(&v_b_h, s->mla_c_kv, v_out, s->dequant_temp);
+    }
+
+    /* 8. RoPE on q_pe (the trailing q_rope slots of each q head). */
+    for (uint32_t h = 0; h < n_head; h++) {
+        float *q_pe = s->mla_q_full + h * q_hd + k_nope_hd;
+        oc_apply_rope_f32(q_pe, q_pe, q_rope, q_rope, s->pos, c->rope_theta);
+    }
+
+    /* 9. Attention per head (MLA: each head has own K/V, group=1). */
+    float scale = 1.0f / sqrtf((float)q_hd);
+    for (uint32_t h = 0; h < n_head; h++) {
+        float *q_vec = s->mla_q_full + h * q_hd;
+        float *out_vec = s->attn_out + h * q_hd;
+        const float *k_head = k_cache + (size_t)h * q_hd;
+        const float *v_head = v_cache + (size_t)h * q_hd;
+
+        float run_max = -INFINITY;
+        float run_sum = 0.0f;
+        for (size_t i = 0; i < q_hd; i++) out_vec[i] = 0.0f;
+
+        int64_t seq_len = s->pos + 1;
+        for (int64_t t = 0; t < seq_len; t++) {
+            const float *k_t = k_head + (size_t)t * s->kv_row_floats;
+            float dot = 0.0f;
+            for (size_t i = 0; i < q_hd; i++) dot += q_vec[i] * k_t[i];
+            float score = dot * scale;
+            float new_max = (score > run_max) ? score : run_max;
+            float exp_factor = expf(run_max - new_max);
+            float exp_score = expf(score - new_max);
+            for (size_t i = 0; i < q_hd; i++) out_vec[i] *= exp_factor;
+            const float *v_t = v_head + (size_t)t * s->kv_row_floats;
+            for (size_t i = 0; i < q_hd; i++) out_vec[i] += exp_score * v_t[i];
+            run_sum = run_sum * exp_factor + exp_score;
+            run_max = new_max;
+        }
+        float inv = 1.0f / run_sum;
+        for (size_t i = 0; i < q_hd; i++) out_vec[i] *= inv;
+    }
+
+    /* 10. Output projection. */
+    matvec(&L->attn_output, s->attn_out, s->normed, s->dequant_temp);
+    for (size_t i = 0; i < n_embd; i++) s->x[i] += s->normed[i];
+}
+
 static void forward_layer(OcLlamaSession *s, uint32_t layer)
 {
     const OcLlamaConfig *c = &s->model->cfg;
@@ -678,47 +845,52 @@ static void forward_layer(OcLlamaSession *s, uint32_t layer)
         for (size_t i = 0; i < c->n_embd; i++) s->normed[i] *= c->norm_scale;
     }
 
-    /* Q/K/V projections. */
-    matvec(&L->attn_q, s->normed, s->q, s->dequant_temp);
-    matvec(&L->attn_k, s->normed, s->k, s->dequant_temp);
-    matvec(&L->attn_v, s->normed, s->v, s->dequant_temp);
+    /* Attention: MLA or standard GQA. */
+    if (c->uses_mla && L->mla_kv_a_mqa.data != NULL) {
+        forward_mla_attention(s, layer);
+    } else {
+        /* Q/K/V projections. */
+        matvec(&L->attn_q, s->normed, s->q, s->dequant_temp);
+        matvec(&L->attn_k, s->normed, s->k, s->dequant_temp);
+        matvec(&L->attn_v, s->normed, s->v, s->dequant_temp);
 
-    /* RoPE on Q (per head) and K (per kv head). YaRN when configured. */
-    for (uint32_t h = 0; h < c->n_head; h++) {
-        if (c->yarn_factor > 0.0f) {
-            oc_apply_rope_yarn_f32(s->q + h * hd, s->q + h * hd, hd,
-                                   c->rope_dim, s->pos, c->rope_theta,
-                                   c->yarn_factor, c->yarn_orig_ctx);
-        } else {
-            oc_apply_rope_f32(s->q + h * hd, s->q + h * hd, hd, c->rope_dim,
-                              s->pos, c->rope_theta);
+        /* RoPE on Q (per head) and K (per kv head). YaRN when configured. */
+        for (uint32_t h = 0; h < c->n_head; h++) {
+            if (c->yarn_factor > 0.0f) {
+                oc_apply_rope_yarn_f32(s->q + h * hd, s->q + h * hd, hd,
+                                       c->rope_dim, s->pos, c->rope_theta,
+                                       c->yarn_factor, c->yarn_orig_ctx);
+            } else {
+                oc_apply_rope_f32(s->q + h * hd, s->q + h * hd, hd, c->rope_dim,
+                                  s->pos, c->rope_theta);
+            }
         }
-    }
-    for (uint32_t h = 0; h < c->n_head_kv; h++) {
-        if (c->yarn_factor > 0.0f) {
-            oc_apply_rope_yarn_f32(s->k + h * hd, s->k + h * hd, hd,
-                                   c->rope_dim, s->pos, c->rope_theta,
-                                   c->yarn_factor, c->yarn_orig_ctx);
-        } else {
-            oc_apply_rope_f32(s->k + h * hd, s->k + h * hd, hd, c->rope_dim,
-                              s->pos, c->rope_theta);
+        for (uint32_t h = 0; h < c->n_head_kv; h++) {
+            if (c->yarn_factor > 0.0f) {
+                oc_apply_rope_yarn_f32(s->k + h * hd, s->k + h * hd, hd,
+                                       c->rope_dim, s->pos, c->rope_theta,
+                                       c->yarn_factor, c->yarn_orig_ctx);
+            } else {
+                oc_apply_rope_f32(s->k + h * hd, s->k + h * hd, hd, c->rope_dim,
+                                  s->pos, c->rope_theta);
+            }
         }
+
+        /* KV cache write at position `pos`. */
+        size_t kv_off = ((size_t)layer * c->n_ctx + (size_t)s->pos) * s->kv_row_floats;
+        memcpy(s->kv_k + kv_off, s->k, s->kv_row_floats * sizeof(float));
+        memcpy(s->kv_v + kv_off, s->v, s->kv_row_floats * sizeof(float));
+
+        /* Attention per head → s->attn_out. */
+        for (uint32_t h = 0; h < c->n_head; h++) {
+            attention_head(s, h, layer, s->q + h * hd, s->attn_out + h * hd);
+        }
+
+        /* Output projection. */
+        matvec(&L->attn_output, s->attn_out, s->normed, s->dequant_temp);
+        /* Residual add (reusing normed as the projection output buffer). */
+        for (size_t i = 0; i < c->n_embd; i++) s->x[i] += s->normed[i];
     }
-
-    /* KV cache write at position `pos`. */
-    size_t kv_off = ((size_t)layer * c->n_ctx + (size_t)s->pos) * s->kv_row_floats;
-    memcpy(s->kv_k + kv_off, s->k, s->kv_row_floats * sizeof(float));
-    memcpy(s->kv_v + kv_off, s->v, s->kv_row_floats * sizeof(float));
-
-    /* Attention per head → s->attn_out. */
-    for (uint32_t h = 0; h < c->n_head; h++) {
-        attention_head(s, h, layer, s->q + h * hd, s->attn_out + h * hd);
-    }
-
-    /* Output projection. */
-    matvec(&L->attn_output, s->attn_out, s->normed, s->dequant_temp);
-    /* Residual add (reusing normed as the projection output buffer). */
-    for (size_t i = 0; i < c->n_embd; i++) s->x[i] += s->normed[i];
 
     /* Pre-FFN RMSNorm (+ Gemma scaling). */
     oc_rms_norm_f32(s->x, L->ffn_norm, s->normed, c->n_embd, c->rms_norm_eps);

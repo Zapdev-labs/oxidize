@@ -388,8 +388,59 @@ int main(int argc, char **argv)
         return 0;
     }
 
+    if (args.inspect && args.model_path) {
+        /* Inspect mode: print model info and exit. */
+        OcGgufMmappedFile mf;
+        OcError ie = oc_gguf_map_open(args.model_path, &mf);
+        if (ie != OC_OK) {
+            fprintf(stderr, "error: cannot open GGUF (%s)\n", oc_error_msg(ie));
+            return 1;
+        }
+        const OcGgufFile *gf = &mf.unified;
+        OcModelArchitecture arch = oc_gguf_arch_from_file(gf);
+        printf("=== oxidize-c model inspection ===\n");
+        printf("File: %s\n", args.model_path);
+        printf("GGUF version: %u\n", gf->version);
+        printf("Tensors: %llu\n", (unsigned long long)gf->tensor_count);
+        printf("Metadata KV pairs: %llu\n", (unsigned long long)gf->metadata_kv_count);
+        printf("Architecture: %u\n", arch);
+        printf("Alignment: %llu\n", (unsigned long long)gf->alignment);
+        printf("\n--- Metadata ---\n");
+        for (uint64_t i = 0; i < gf->metadata_kv_count && i < 50; i++) {
+            const OcGgufMetadataKV *kv = &gf->metadata[i];
+            printf("  %s = ", kv->key);
+            switch (kv->value.type) {
+            case OC_GGUF_MT_STRING:
+                printf("\"%.*s\"\n", (int)(kv->value.v.str.len > 80 ? 80 : kv->value.v.str.len),
+                       kv->value.v.str.data);
+                break;
+            case OC_GGUF_MT_UINT32: printf("%u\n", kv->value.v.u32); break;
+            case OC_GGUF_MT_INT32:  printf("%d\n", kv->value.v.i32); break;
+            case OC_GGUF_MT_FLOAT32: printf("%f\n", kv->value.v.f32); break;
+            case OC_GGUF_MT_UINT64: printf("%llu\n", (unsigned long long)kv->value.v.u64); break;
+            case OC_GGUF_MT_BOOL:   printf("%s\n", kv->value.v.b ? "true" : "false"); break;
+            default: printf("(%u)\n", kv->value.type); break;
+            }
+        }
+        printf("\n--- Tensors (first 20) ---\n");
+        for (uint64_t i = 0; i < gf->tensor_count && i < 20; i++) {
+            const OcGgufTensorInfo *t = &gf->tensors[i];
+            printf("  %-40s type=%-3u dims=[", t->name, t->ggml_type);
+            for (uint32_t d = 0; d < t->n_dims; d++) {
+                printf("%llu%s", (unsigned long long)t->dims[d],
+                       d + 1 < t->n_dims ? "," : "");
+            }
+            printf("]\n");
+        }
+        if (gf->tensor_count > 20)
+            printf("  ... (%llu more tensors)\n", (unsigned long long)(gf->tensor_count - 20));
+        printf("\n=== Total file size: %llu bytes ===\n",
+               (unsigned long long)oc_gguf_map_total_bytes(&mf));
+        oc_gguf_map_free(&mf);
+        return 0;
+    }
+
     if (args.quantize_input) {
-        /* Quantize mode: re-quantize the input model to the target type. */
         const char *target = args.quantize_type ? args.quantize_type : "Q4_K_M";
         OcQuantizeConfig qcfg = {
             .input_path  = args.quantize_input,

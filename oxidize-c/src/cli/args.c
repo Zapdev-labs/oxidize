@@ -75,6 +75,7 @@ void oc_cli_parse_args(int argc, char **argv, OcCliArgs *a)
         if (match(arg, "--serve-api"))       { a->serve_api = true; continue; }
         if (match(arg, "--stream"))          { a->stream = true; continue; }
         if (match(arg, "--bench"))           { a->bench = true; continue; }
+        if (match(arg, "--inspect"))         { a->inspect = true; continue; }
         if (match(arg, "--verbose") || match(arg, "-v")) { a->verbose = true; continue; }
         if (match(arg, "--help") || match(arg, "-h"))    { a->show_help = true; continue; }
         if (match(arg, "--version"))         { a->show_version = true; continue; }

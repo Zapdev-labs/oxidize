@@ -48,6 +48,7 @@ typedef struct OcCliArgs {
     float      mirostat_tau;     /* 0 = disabled; target surprise         */
     float      mirostat_eta;     /* learning rate (default 0.1)           */
     bool       verbose;
+    bool       inspect;           /* print model info and exit             */
     bool       show_help;
     bool       show_version;
 } OcCliArgs;
