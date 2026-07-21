@@ -152,6 +152,9 @@ Test(mmap, lifecycle_1000_open_close_cycles_no_leak)
 
 Test(mmap, open_fd_succeeds_and_takes_ownership_of_fd)
 {
+#ifndef __linux__
+    cr_skip_test("oc_mmap_open_fd is only supported on Linux");
+#endif
     /* oc_mmap_open_fd takes ownership of the caller-provided fd: on success
      * it stores fd in the OcMmap struct and oc_mmap_close() will close it.
      * This test verifies the success path produces a usable mapping and
@@ -209,6 +212,9 @@ Test(mmap, open_fd_invalid_args_rejected_without_closing_caller_fd)
 
 Test(mmap, open_fd_map_failure_closes_fd_no_leak)
 {
+#ifndef __linux__
+    cr_skip_test("fd ownership and /proc fdinfo checks are Linux-specific");
+#endif
     /* Scrutiny fix: when mmap() fails inside oc_mmap_open_fd (MAP_FAILED),
      * the function must close(fd) before free(m) — otherwise the caller-
      * provided fd leaks (the caller has no way to reclaim it once ownership

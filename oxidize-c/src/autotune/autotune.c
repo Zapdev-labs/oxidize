@@ -30,6 +30,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef __APPLE__
+#  include <sys/sysctl.h>
+#endif
+
 /* Local shim: read a u32 metadata value, return 0 if absent (used by
  * fingerprint to read arch-prefixed config keys with 0 defaults). */
 static uint32_t meta_u32_or_zero(const OcGgufFile *f, const char *key)
@@ -108,6 +112,13 @@ static uint32_t count_logical_cores(void)
         return 1;
     }
     return 1;
+#elif defined(__APPLE__)
+    uint32_t cores = 0;
+    size_t size = sizeof(cores);
+    if (sysctlbyname("hw.logicalcpu", &cores, &size, NULL, 0) == 0 && cores > 0) {
+        return cores;
+    }
+    return 1;
 #else
     return 1;
 #endif
@@ -130,6 +141,13 @@ static uint64_t read_meminfo_field(const char *key)
     }
     fclose(f);
     return val;
+#elif defined(__APPLE__)
+    if (strcmp(key, "MemTotal") == 0) {
+        uint64_t bytes = 0;
+        size_t size = sizeof(bytes);
+        if (sysctlbyname("hw.memsize", &bytes, &size, NULL, 0) == 0) return bytes;
+    }
+    return 0;
 #else
     (void)key;
     return 0;
@@ -159,6 +177,14 @@ static void read_model_name(char *buf, size_t cap)
         }
     }
     fclose(f);
+#elif defined(__APPLE__)
+    if (cap == 0) return;
+    size_t size = cap;
+    if (sysctlbyname("machdep.cpu.brand_string", buf, &size, NULL, 0) != 0) {
+        buf[0] = '\0';
+    } else {
+        buf[cap - 1] = '\0';
+    }
 #else
     if (cap > 0) buf[0] = '\0';
 #endif
