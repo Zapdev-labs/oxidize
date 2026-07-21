@@ -46,7 +46,9 @@ typedef struct OcCudaContext {
     float *d_ffn_gate_buf, *d_ffn_up_buf, *d_logits;
     /* Model dimensions. */
     uint32_t n_embd, n_head, n_head_kv, n_ff, head_dim, n_layer, vocab_size;
-    uint32_t n_ctx;
+    uint32_t n_ctx, rope_dim;
+    float rope_theta, rms_norm_eps, norm_scale;
+    bool uses_geglu;
     bool initialized;
 } OcCudaContext;
 

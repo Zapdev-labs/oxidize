@@ -54,11 +54,10 @@ __global__ void k_rms_norm(const float *x, const float *weight, float *out,
     /* Shared memory for reduction. */
     extern __shared__ float sdata[];
     size_t tid = threadIdx.x;
-    size_t i = blockIdx.x * blockDim.x + tid;
     size_t blockSize = blockDim.x;
 
     float val = 0.0f;
-    if (i < n) val = x[i] * x[i];
+    for (size_t i = tid; i < n; i += blockSize) val += x[i] * x[i];
     sdata[tid] = val;
     __syncthreads();
 
@@ -69,7 +68,8 @@ __global__ void k_rms_norm(const float *x, const float *weight, float *out,
     }
 
     float inv_rms = 1.0f / sqrtf(sdata[0] / (float)n + eps);
-    if (i < n) out[i] = x[i] * inv_rms * weight[i] * norm_scale;
+    for (size_t i = tid; i < n; i += blockSize)
+        out[i] = x[i] * inv_rms * weight[i] * norm_scale;
 }
 
 /* Matvec: out[row] = sum(W[row, col] * x[col]) for col in [0, cols).
@@ -109,9 +109,9 @@ __global__ void k_apply_rope(float *q, size_t head_dim, size_t rope_dim,
     float *hq = q + head * head_dim;
     size_t half = rope_dim / 2;
     float freq_mul = powf(theta, -2.0f / (float)rope_dim);
-    float freq = 1.0f;
 
     for (size_t i = threadIdx.x; i < half; i += blockDim.x) {
+        float freq = powf(freq_mul, (float)i);
         float angle = (float)pos * freq;
         float c = cosf(angle);
         float s = sinf(angle);
@@ -119,7 +119,6 @@ __global__ void k_apply_rope(float *q, size_t head_dim, size_t rope_dim,
         float x1 = hq[half + i];
         hq[i] = x0 * c - x1 * s;
         hq[half + i] = x0 * s + x1 * c;
-        freq *= freq_mul;
     }
 }
 
@@ -250,18 +249,19 @@ static OcError upload_weight_view(const OcWeightView *view, float **d_out,
     for (size_t r = 0; r < rows; r++) {
         if (view->qtype == OC_QUANT_F32) {
             const float *src = (const float *)view->data + r * cols;
-            cudaMemcpyAsync(*d_out + r * cols, src, cols * sizeof(float),
-                           cudaMemcpyHostToDevice, 0);
+            OC_CUDA_CHECK(cudaMemcpyAsync(*d_out + r * cols, src,
+                cols * sizeof(float), cudaMemcpyHostToDevice, 0));
         } else {
             /* Dequantize on host then upload. */
             const uint8_t *src = view->data + r * view->row_bytes;
-            oc_quant_dequant_row(view->qtype, src, view->row_bytes,
-                                 host_temp, cols);
-            cudaMemcpyAsync(*d_out + r * cols, host_temp, cols * sizeof(float),
-                           cudaMemcpyHostToDevice, 0);
+            OcError e = oc_quant_dequant_row(view->qtype, src, view->row_bytes,
+                                             host_temp, cols);
+            if (e != OC_OK) return e;
+            OC_CUDA_CHECK(cudaMemcpyAsync(*d_out + r * cols, host_temp,
+                cols * sizeof(float), cudaMemcpyHostToDevice, 0));
         }
     }
-    cudaDeviceSynchronize();
+    OC_CUDA_CHECK(cudaDeviceSynchronize());
     return OC_OK;
 }
 
@@ -290,6 +290,11 @@ OcError oc_cuda_init(OcCudaContext *ctx, const OcLlamaModel *model)
     ctx->n_layer = c->n_layer;
     ctx->vocab_size = c->vocab_size;
     ctx->n_ctx = c->n_ctx;
+    ctx->rope_dim = c->rope_dim;
+    ctx->rope_theta = c->rope_theta;
+    ctx->rms_norm_eps = c->rms_norm_eps;
+    ctx->norm_scale = c->norm_scale;
+    ctx->uses_geglu = c->uses_geglu;
 
     /* Allocate workspace. */
     size_t embd = c->n_embd;
@@ -347,6 +352,12 @@ OcError oc_cuda_init(OcCudaContext *ctx, const OcLlamaModel *model)
     ctx->d_ffn_down = (float **)calloc(c->n_layer, sizeof(float *));
     ctx->d_attn_norm = (float **)calloc(c->n_layer, sizeof(float *));
     ctx->d_ffn_norm = (float **)calloc(c->n_layer, sizeof(float *));
+    if (!ctx->d_attn_q || !ctx->d_attn_k || !ctx->d_attn_v ||
+        !ctx->d_attn_output || !ctx->d_ffn_gate || !ctx->d_ffn_up ||
+        !ctx->d_ffn_down || !ctx->d_attn_norm || !ctx->d_ffn_norm) {
+        free(host_temp);
+        return OC_ERR_OOM;
+    }
 
     for (uint32_t l = 0; l < c->n_layer; l++) {
         const OcLlamaLayer *L = &model->layers[l];
@@ -383,7 +394,9 @@ OcError oc_cuda_init(OcCudaContext *ctx, const OcLlamaModel *model)
 OcError oc_cuda_forward(OcCudaContext *ctx, uint32_t token, uint32_t pos,
                         float *logits_out)
 {
-    if (!ctx || !ctx->initialized) return OC_ERR_INVALID_ARG;
+    if (!ctx || !ctx->initialized || pos >= ctx->n_ctx ||
+        token >= ctx->vocab_size)
+        return OC_ERR_INVALID_ARG;
 
     const uint32_t embd = ctx->n_embd;
     const uint32_t head_dim = ctx->head_dim;
@@ -391,7 +404,7 @@ OcError oc_cuda_forward(OcCudaContext *ctx, uint32_t token, uint32_t pos,
     const uint32_t n_head_kv = ctx->n_head_kv;
     const uint32_t n_ff = ctx->n_ff;
     const uint32_t group = n_head / n_head_kv;
-    const float eps = 1e-5f; /* TODO: get from config */
+    const float eps = ctx->rms_norm_eps;
 
     int block = 256;
 
@@ -404,7 +417,8 @@ OcError oc_cuda_forward(OcCudaContext *ctx, uint32_t token, uint32_t pos,
     for (uint32_t l = 0; l < ctx->n_layer; l++) {
         /* Pre-attention RMSNorm. */
         k_rms_norm<<<1, block, block * sizeof(float)>>>(
-            ctx->d_x, ctx->d_attn_norm[l], ctx->d_normed, embd, eps, 1.0f);
+            ctx->d_x, ctx->d_attn_norm[l], ctx->d_normed, embd,
+            eps, ctx->norm_scale);
         OC_CUDA_CHECK(cudaGetLastError());
 
         /* Q/K/V projections. */
@@ -423,11 +437,11 @@ OcError oc_cuda_forward(OcCudaContext *ctx, uint32_t token, uint32_t pos,
 
         /* RoPE on Q. */
         k_apply_rope<<<n_head, block>>>(
-            ctx->d_q, head_dim, head_dim, pos, 10000.0f, n_head);
+            ctx->d_q, head_dim, ctx->rope_dim, pos, ctx->rope_theta, n_head);
         OC_CUDA_CHECK(cudaGetLastError());
         /* RoPE on K. */
         k_apply_rope<<<n_head_kv, block>>>(
-            ctx->d_k, head_dim, head_dim, pos, 10000.0f, n_head_kv);
+            ctx->d_k, head_dim, ctx->rope_dim, pos, ctx->rope_theta, n_head_kv);
         OC_CUDA_CHECK(cudaGetLastError());
 
         /* KV cache write. */
@@ -464,7 +478,8 @@ OcError oc_cuda_forward(OcCudaContext *ctx, uint32_t token, uint32_t pos,
 
         /* Pre-FFN RMSNorm. */
         k_rms_norm<<<1, block, block * sizeof(float)>>>(
-            ctx->d_x, ctx->d_ffn_norm[l], ctx->d_normed, embd, eps, 1.0f);
+            ctx->d_x, ctx->d_ffn_norm[l], ctx->d_normed, embd,
+            eps, ctx->norm_scale);
         OC_CUDA_CHECK(cudaGetLastError());
 
         /* FFN: gate, up, SwiGLU, down. */
@@ -474,8 +489,13 @@ OcError oc_cuda_forward(OcCudaContext *ctx, uint32_t token, uint32_t pos,
         k_matvec_f32<<<n_ff, block, block * sizeof(float)>>>(
             ctx->d_ffn_up[l], n_ff, embd, ctx->d_normed, ctx->d_ffn_up_buf);
         OC_CUDA_CHECK(cudaGetLastError());
-        k_swiglu<<<(n_ff + block - 1) / block, block>>>(
-            ctx->d_ffn_gate_buf, ctx->d_ffn_up_buf, n_ff);
+        if (ctx->uses_geglu) {
+            k_geglu<<<(n_ff + block - 1) / block, block>>>(
+                ctx->d_ffn_gate_buf, ctx->d_ffn_up_buf, n_ff);
+        } else {
+            k_swiglu<<<(n_ff + block - 1) / block, block>>>(
+                ctx->d_ffn_gate_buf, ctx->d_ffn_up_buf, n_ff);
+        }
         OC_CUDA_CHECK(cudaGetLastError());
         k_matvec_f32<<<embd, block, block * sizeof(float)>>>(
             ctx->d_ffn_down[l], embd, n_ff, ctx->d_ffn_gate_buf, ctx->d_normed);
@@ -487,7 +507,8 @@ OcError oc_cuda_forward(OcCudaContext *ctx, uint32_t token, uint32_t pos,
 
     /* 3. Final norm + lm_head. */
     k_rms_norm<<<1, block, block * sizeof(float)>>>(
-        ctx->d_x, ctx->d_final_norm, ctx->d_normed, embd, eps, 1.0f);
+        ctx->d_x, ctx->d_final_norm, ctx->d_normed, embd,
+        eps, ctx->norm_scale);
     OC_CUDA_CHECK(cudaGetLastError());
 
     if (logits_out != NULL) {
@@ -495,12 +516,11 @@ OcError oc_cuda_forward(OcCudaContext *ctx, uint32_t token, uint32_t pos,
             ctx->d_output, ctx->vocab_size, embd,
             ctx->d_normed, ctx->d_logits);
         OC_CUDA_CHECK(cudaGetLastError());
-        cudaDeviceSynchronize();
-        cudaMemcpy(logits_out, ctx->d_logits,
-                  ctx->vocab_size * sizeof(float),
-                  cudaMemcpyDeviceToHost);
+        OC_CUDA_CHECK(cudaDeviceSynchronize());
+        OC_CUDA_CHECK(cudaMemcpy(logits_out, ctx->d_logits,
+            ctx->vocab_size * sizeof(float), cudaMemcpyDeviceToHost));
     } else {
-        cudaDeviceSynchronize();
+        OC_CUDA_CHECK(cudaDeviceSynchronize());
     }
 
     return OC_OK;
