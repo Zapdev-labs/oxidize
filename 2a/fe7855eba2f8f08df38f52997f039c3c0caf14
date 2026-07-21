@@ -1,0 +1,25 @@
+oxidize-core/src/compute/tensor/kernels.rs
+  s_5bec56e69286b9::t_8e71e06086227f 4
+oxidize-core/src/compute/quantization/quant_iq_series.rs
+  s_5bec56e69286b9::t_8e71e06086227f 4,251-252
+oxidize-core/src/compute/tensor/kernels/activation.rs
+  s_5bec56e69286b9::t_8e71e06086227f 179
+oxidize-core/src/format/safetensors_to_gguf.rs
+  s_5bec56e69286b9::t_8e71e06086227f 597-601,1225-1230,1256,1785-1789,1793-1804
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "2afe7855eba2f8f08df38f52997f039c3c0caf14",
+  "prompts": {},
+  "sessions": {
+    "s_5bec56e69286b9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f86ae-2366-7b80-8a79-8d8524df27c3",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
