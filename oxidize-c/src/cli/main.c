@@ -27,6 +27,7 @@
 #include "oxidize/log.h"
 #include "oxidize/oc.h"
 #include "oxidize/openai.h"
+#include "oxidize/perplexity.h"
 #include "oxidize/quantize_tool.h"
 #include "oxidize/sampling.h"
 #include "oxidize/tokenizer.h"
@@ -41,6 +42,14 @@
 #include <time.h>
 
 #define OC_CLI_VERSION "0.2.0"
+
+/* Wall-clock timer using CLOCK_MONOTONIC (not CPU time). */
+static double wall_now(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+}
 
 /* Flag parsing + OcCliArgs live in args.c (extracted for testability). */
 
@@ -245,7 +254,7 @@ static OcError run_generation(const OcCliArgs *args)
         /* Decode + print the prompt's last token context implicitly; generate. */
         size_t emitted = 0;
         bool eos_reached = false;
-        clock_t decode_start = clock();
+        double decode_start = wall_now();
         while (emitted < (size_t)args->n_predict && !eos_reached && e == OC_OK) {
             uint32_t sampled = oc_sample(logits, model.cfg.vocab_size, &scfg,
                                         recent, recent_len);
@@ -281,7 +290,7 @@ static OcError run_generation(const OcCliArgs *args)
         if (emitted > 0) fputs("\n", stdout);
         oc_log(OC_LOG_INFO, "generated %zu tokens", emitted);
         if (decode_start > 0 && emitted > 0) {
-            double elapsed = (double)(clock() - decode_start) / CLOCKS_PER_SEC;
+            double elapsed = wall_now() - decode_start;
             if (elapsed > 0) {
                 oc_log(OC_LOG_INFO, "speed: %.2f tok/s", (double)emitted / elapsed);
             }
@@ -466,6 +475,54 @@ int main(int argc, char **argv)
         return 0;
     }
 
+    if (args.perplexity && args.model_path) {
+        /* Perplexity evaluation mode. */
+        OcLlamaModel model;
+        OcError e = oc_llama_load(args.model_path, &model);
+        if (e != OC_OK) {
+            fprintf(stderr, "error: failed to load model (%s)\n", oc_error_msg(e));
+            return 1;
+        }
+        OcTokenizer tok;
+        e = oc_tokenizer_load_from_gguf(&model.gguf.unified, &tok);
+        if (e != OC_OK) {
+            fprintf(stderr, "error: tokenizer load failed (%s)\n", oc_error_msg(e));
+            oc_llama_free(&model);
+            return 1;
+        }
+        const char *text = args.prompt;
+        if (!text && args.prompt_file) {
+            /* Read prompt file. */
+            FILE *pf = fopen(args.prompt_file, "rb");
+            if (pf) {
+                fseek(pf, 0, SEEK_END);
+                long sz = ftell(pf);
+                fseek(pf, 0, SEEK_SET);
+                char *buf = malloc(sz + 1);
+                if (buf) {
+                    size_t rd = fread(buf, 1, sz, pf);
+                    buf[rd] = '\0';
+                    text = buf;
+                }
+                fclose(pf);
+            }
+        }
+        if (!text) text = "The quick brown fox jumps over the lazy dog.";
+
+        OcPerplexityResult result;
+        e = oc_perplexity_evaluate(&model, &tok, text, 0, &result);
+        if (e != OC_OK) {
+            fprintf(stderr, "error: perplexity evaluation failed (%s)\n", oc_error_msg(e));
+        } else {
+            char fmt[256];
+            oc_perplexity_format(&result, fmt, sizeof(fmt));
+            printf("%s\n", fmt);
+        }
+        oc_tokenizer_free(&tok);
+        oc_llama_free(&model);
+        return (e == OC_OK) ? 0 : 1;
+    }
+
     if (args.bench) {
         /* Benchmark mode: run N iterations and report tok/s. */
         OcLlamaModel model;
@@ -499,7 +556,7 @@ int main(int argc, char **argv)
             for (size_t i = 0; i + 1 < n_ids; i++)
                 oc_llama_forward(&sess, ids[i], NULL);
             oc_llama_forward(&sess, ids[n_ids - 1], logits);
-            clock_t start = clock();
+            double start = wall_now();
             size_t emitted = 0;
             while (emitted < (size_t)args.n_predict) {
                 uint32_t sampled = oc_argmax(logits, model.cfg.vocab_size);
@@ -507,10 +564,20 @@ int main(int argc, char **argv)
                 emitted++;
                 if (oc_llama_forward(&sess, sampled, logits) != OC_OK) break;
             }
-            double elapsed = (double)(clock() - start) / CLOCKS_PER_SEC;
+            double elapsed = wall_now() - start;
             double tps = (elapsed > 0) ? (double)emitted / elapsed : 0.0;
-            printf("  iter %d: %zu tokens in %.3fs = %.2f tok/s\n",
-                   iter + 1, emitted, elapsed, tps);
+            /* Also measure prompt processing (prefill) speed. */
+            double pf_start = wall_now();
+            OcLlamaSession pf_sess;
+            if (oc_llama_session_init(&model, &pf_sess) == OC_OK) {
+                for (size_t i = 0; i < n_ids; i++)
+                    oc_llama_forward(&pf_sess, ids[i], NULL);
+            }
+            double pf_elapsed = wall_now() - pf_start;
+            double pf_tps = (pf_elapsed > 0) ? (double)n_ids / pf_elapsed : 0.0;
+            oc_llama_session_free(&pf_sess);
+            printf("  iter %d: %zu tokens in %.3fs = %.2f tok/s (prefill: %.2f tok/s)\n",
+                   iter + 1, emitted, elapsed, tps, pf_tps);
             if (tps > best_tps) best_tps = tps;
             sum_tps += tps;
             oc_llama_session_free(&sess);

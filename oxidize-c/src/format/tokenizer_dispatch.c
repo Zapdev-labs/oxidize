@@ -186,14 +186,6 @@ static int utf8_seq_len(uint8_t first_byte)
     return 1; /* invalid lead byte, treat as single */
 }
 
-/* Check if a byte sequence is valid UTF-8. Returns true if complete. */
-static bool utf8_is_complete(const uint8_t *bytes, size_t len)
-{
-    if (len == 0) return true;
-    int need = utf8_seq_len(bytes[0]);
-    return len >= (size_t)need;
-}
-
 OcError oc_streaming_detok_push(OcStreamingDetokenizer *sd, uint32_t token,
                                 const char **out_delta, size_t *out_len)
 {

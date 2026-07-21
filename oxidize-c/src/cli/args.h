@@ -49,6 +49,7 @@ typedef struct OcCliArgs {
     float      mirostat_eta;     /* learning rate (default 0.1)           */
     bool       verbose;
     bool       inspect;           /* print model info and exit             */
+    bool       perplexity;        /* compute perplexity on input text       */
     bool       show_help;
     bool       show_version;
 } OcCliArgs;
