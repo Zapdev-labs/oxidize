@@ -25,7 +25,6 @@ typedef struct OcQuantizeConfig {
     const char *output_path;
     const char *target_type; /* "Q4_0", "Q4_K_M", "Q4_K_S", "Q8_0", "F16" */
     bool verbose;
-    size_t n_threads;
 } OcQuantizeConfig;
 
 /* Quantize a GGUF model from one type to another.

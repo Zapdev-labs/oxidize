@@ -77,7 +77,7 @@ static void print_help(void)
 "  --top-k K              Top-K sampling (default 40, 0 = disabled)\n"
 "  --top-p P              Top-P / nucleus (default 0.95)\n"
 "  --repeat-penalty P     Repeat penalty (default 1.1)\n"
-"  --seed N               RNG seed (0 = greedy always)\n"
+"  --seed N               RNG seed (0 = deterministic default)\n"
 "  --backend cpu|cuda     Compute backend (default cpu)\n"
 "  -v, --verbose          Verbose logging\n"
 "  -h, --help             Show this help\n"
@@ -316,6 +316,36 @@ static OcError run_generation(const OcCliArgs *args)
     return e;
 }
 
+static void print_metadata_value(const OcGgufMetadataValue *value)
+{
+    switch (value->type) {
+    case OC_GGUF_MT_UINT8: printf("%u", value->v.u8); break;
+    case OC_GGUF_MT_INT8: printf("%d", value->v.i8); break;
+    case OC_GGUF_MT_UINT16: printf("%u", value->v.u16); break;
+    case OC_GGUF_MT_INT16: printf("%d", value->v.i16); break;
+    case OC_GGUF_MT_UINT32: printf("%u", value->v.u32); break;
+    case OC_GGUF_MT_INT32: printf("%d", value->v.i32); break;
+    case OC_GGUF_MT_FLOAT32: printf("%g", value->v.f32); break;
+    case OC_GGUF_MT_BOOL: printf("%s", value->v.b ? "true" : "false"); break;
+    case OC_GGUF_MT_STRING:
+        printf("\"%.*s\"", (int)(value->v.str.len > 80 ? 80 : value->v.str.len),
+               value->v.str.data);
+        break;
+    case OC_GGUF_MT_ARRAY:
+        putchar('[');
+        for (size_t i = 0; i < value->v.arr.len; i++) {
+            if (i > 0) printf(", ");
+            print_metadata_value(&value->v.arr.values[i]);
+        }
+        putchar(']');
+        break;
+    case OC_GGUF_MT_UINT64: printf("%llu", (unsigned long long)value->v.u64); break;
+    case OC_GGUF_MT_INT64: printf("%lld", (long long)value->v.i64); break;
+    case OC_GGUF_MT_FLOAT64: printf("%.17g", value->v.f64); break;
+    default: printf("(%u)", value->type); break;
+    }
+}
+
 /* ─── Entrypoint ──────────────────────────────────────────────────────── */
 
 int main(int argc, char **argv)
@@ -422,24 +452,14 @@ int main(int argc, char **argv)
         printf("GGUF version: %u\n", gf->version);
         printf("Tensors: %llu\n", (unsigned long long)gf->tensor_count);
         printf("Metadata KV pairs: %llu\n", (unsigned long long)gf->metadata_kv_count);
-        printf("Architecture: %u\n", arch);
+        printf("Architecture: %s\n", oc_model_arch_name(arch));
         printf("Alignment: %llu\n", (unsigned long long)gf->alignment);
         printf("\n--- Metadata ---\n");
         for (uint64_t i = 0; i < gf->metadata_kv_count && i < 50; i++) {
             const OcGgufMetadataKV *kv = &gf->metadata[i];
             printf("  %s = ", kv->key);
-            switch (kv->value.type) {
-            case OC_GGUF_MT_STRING:
-                printf("\"%.*s\"\n", (int)(kv->value.v.str.len > 80 ? 80 : kv->value.v.str.len),
-                       kv->value.v.str.data);
-                break;
-            case OC_GGUF_MT_UINT32: printf("%u\n", kv->value.v.u32); break;
-            case OC_GGUF_MT_INT32:  printf("%d\n", kv->value.v.i32); break;
-            case OC_GGUF_MT_FLOAT32: printf("%f\n", kv->value.v.f32); break;
-            case OC_GGUF_MT_UINT64: printf("%llu\n", (unsigned long long)kv->value.v.u64); break;
-            case OC_GGUF_MT_BOOL:   printf("%s\n", kv->value.v.b ? "true" : "false"); break;
-            default: printf("(%u)\n", kv->value.type); break;
-            }
+            print_metadata_value(&kv->value);
+            putchar('\n');
         }
         printf("\n--- Tensors (first 20) ---\n");
         for (uint64_t i = 0; i < gf->tensor_count && i < 20; i++) {
@@ -466,7 +486,6 @@ int main(int argc, char **argv)
             .output_path = args.quantize_output ? args.quantize_output : "quantized.gguf",
             .target_type = target,
             .verbose     = args.verbose,
-            .n_threads   = (size_t)args.threads,
         };
         OcError qe = oc_quantize_model(&qcfg);
         if (qe != OC_OK) {
@@ -534,6 +553,10 @@ int main(int argc, char **argv)
     }
 
     if (args.bench) {
+        if (args.bench_iterations <= 0) {
+            fprintf(stderr, "error: --bench-iters must be greater than zero\n");
+            return 1;
+        }
         /* Benchmark mode: run N iterations and report tok/s. */
         OcLlamaModel model;
         OcError e = oc_llama_load(args.model_path, &model);
@@ -548,24 +571,64 @@ int main(int argc, char **argv)
             oc_llama_free(&model);
             return 1;
         }
-        const char *prompt = args.prompt ? args.prompt : "The quick brown fox jumps over the lazy dog.";
+        char *bench_file_prompt = NULL;
+        const char *prompt = args.prompt;
+        if (!prompt && args.prompt_file) {
+            FILE *f = fopen(args.prompt_file, "rb");
+            if (!f || fseek(f, 0, SEEK_END) != 0) {
+                if (f) fclose(f);
+                oc_tokenizer_free(&tok);
+                oc_llama_free(&model);
+                return 1;
+            }
+            long size = ftell(f);
+            if (size < 0 || fseek(f, 0, SEEK_SET) != 0) {
+                fclose(f);
+                oc_tokenizer_free(&tok);
+                oc_llama_free(&model);
+                return 1;
+            }
+            bench_file_prompt = malloc((size_t)size + 1);
+            if (!bench_file_prompt) {
+                fclose(f);
+                oc_tokenizer_free(&tok);
+                oc_llama_free(&model);
+                return 1;
+            }
+            size_t read = fread(bench_file_prompt, 1, (size_t)size, f);
+            bench_file_prompt[read] = '\0';
+            fclose(f);
+            prompt = bench_file_prompt;
+        }
+        if (!prompt) prompt = "The quick brown fox jumps over the lazy dog.";
         uint32_t *ids = NULL;
         size_t n_ids = 0;
         OcSpecialTokenPolicy pol = tok.has_add_bos_token && tok.add_bos_token
             ? OC_TOK_ADD_BOS : OC_TOK_DEFAULT;
-        oc_tokenizer_encode(&tok, prompt, pol, &ids, &n_ids);
-        if (n_ids == 0) { oc_tokenizer_free(&tok); oc_llama_free(&model); return 1; }
+        e = oc_tokenizer_encode(&tok, prompt, pol, &ids, &n_ids);
+        if (e != OC_OK || n_ids == 0) {
+            free(bench_file_prompt);
+            oc_tokenizer_free(&tok);
+            oc_llama_free(&model);
+            return 1;
+        }
 
         printf("benchmark: %zu prompt tokens, %d iterations, %d max tokens\n",
                n_ids, args.bench_iterations, args.n_predict);
         double best_tps = 0.0, sum_tps = 0.0;
+        int completed_iterations = 0;
         for (int iter = 0; iter < args.bench_iterations; iter++) {
             OcLlamaSession sess;
             if (oc_llama_session_init(&model, &sess) != OC_OK) break;
             float *logits = sess.logits;
-            for (size_t i = 0; i + 1 < n_ids; i++)
-                oc_llama_forward(&sess, ids[i], NULL);
-            oc_llama_forward(&sess, ids[n_ids - 1], logits);
+            for (size_t i = 0; i + 1 < n_ids && e == OC_OK; i++)
+                e = oc_llama_forward(&sess, ids[i], NULL);
+            if (e == OC_OK) e = oc_llama_forward(&sess, ids[n_ids - 1], logits);
+            if (e != OC_OK) {
+                fprintf(stderr, "error: benchmark prefill failed (%s)\n", oc_error_msg(e));
+                oc_llama_session_free(&sess);
+                break;
+            }
             double start = wall_now();
             size_t emitted = 0;
             while (emitted < (size_t)args.n_predict) {
@@ -579,6 +642,7 @@ int main(int argc, char **argv)
             /* Also measure prompt processing (prefill) speed. */
             double pf_start = wall_now();
             OcLlamaSession pf_sess;
+            memset(&pf_sess, 0, sizeof(pf_sess));
             if (oc_llama_session_init(&model, &pf_sess) == OC_OK) {
                 for (size_t i = 0; i < n_ids; i++)
                     oc_llama_forward(&pf_sess, ids[i], NULL);
@@ -590,13 +654,16 @@ int main(int argc, char **argv)
                    iter + 1, emitted, elapsed, tps, pf_tps);
             if (tps > best_tps) best_tps = tps;
             sum_tps += tps;
+            completed_iterations++;
             oc_llama_session_free(&sess);
         }
         free(ids);
+        free(bench_file_prompt);
         oc_tokenizer_free(&tok);
         oc_llama_free(&model);
+        if (completed_iterations == 0) return 1;
         printf("benchmark: best=%.2f tok/s, avg=%.2f tok/s\n",
-               best_tps, sum_tps / args.bench_iterations);
+               best_tps, sum_tps / completed_iterations);
         return 0;
     }
 
