@@ -1,0 +1,23 @@
+oxidize-c/src/autotune/autotune.c
+  s_5bec56e69286b9::t_813feb876cde14 33-36,115-121,144-150,180-187
+oxidize-c/tests/test_mmap.c
+  s_5bec56e69286b9::t_813feb876cde14 155-157,215-217
+.github/workflows/oxidize-c.yml
+  s_5bec56e69286b9::t_9c234eee09d4b8 119,121
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "07c00349d6a7541e1aa0695c57362789f5fe3f71",
+  "prompts": {},
+  "sessions": {
+    "s_5bec56e69286b9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f86ae-2366-7b80-8a79-8d8524df27c3",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
