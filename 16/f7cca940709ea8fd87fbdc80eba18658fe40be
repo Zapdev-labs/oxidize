@@ -1,0 +1,19 @@
+oxidize-core/src/compute/tensor/kernels/tests.rs
+  s_5bec56e69286b9::t_5fb2ba7177a2ee 1061,1069
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "16f7cca940709ea8fd87fbdc80eba18658fe40be",
+  "prompts": {},
+  "sessions": {
+    "s_5bec56e69286b9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f86ae-2366-7b80-8a79-8d8524df27c3",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
