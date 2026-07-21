@@ -28,6 +28,15 @@ typedef struct OcCliArgs {
     float      top_p;
     float      repeat_penalty;
     uint64_t   seed;
+    /* Speculative decoding. */
+    const char *draft_model;       /* path to draft model GGUF            */
+    int        draft_tokens;       /* K draft tokens per step (0=default 4) */
+    /* Quantization mode. */
+    const char *quantize_input;   /* input GGUF path                      */
+    const char *quantize_output;  /* output GGUF path                     */
+    const char *quantize_type;   /* target quant type string (Q4_0, etc.) */
+    /* Streaming. */
+    bool       stream;
     bool       verbose;
     bool       show_help;
     bool       show_version;
