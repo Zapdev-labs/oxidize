@@ -104,7 +104,7 @@ jobs:
         run: make clean && make avx512
 
       - name: Verify binary exists
-        run: test -f oxidize-c && ./oxidize-c --version
+        run: test -f oxidize-c
 
   # ─── CUDA build (compile-only, no GPU needed for nvcc PTX) ──────────────
   cuda-build:

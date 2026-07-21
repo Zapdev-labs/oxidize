@@ -48,19 +48,16 @@ static uint32_t meta_u32_or_zero(const OcGgufFile *f, const char *key)
 
 /* Read the first integer from the first line of `path`. Returns false if the
  * file cannot be opened or no integer is found. */
+#if OC_LINUX
 static bool read_first_int(const char *path, long *out)
 {
-#if OC_LINUX
     FILE *f = fopen(path, "r");
     if (f == NULL) return false;
     bool ok = (fscanf(f, "%ld", out) == 1);
     fclose(f);
     return ok;
-#else
-    (void)path; (void)out;
-    return false;
-#endif
 }
+#endif
 
 /* Count entries (dirs matching "node[0-9]+") under /sys/devices/system/node/. */
 static uint32_t count_numa_nodes(void)
