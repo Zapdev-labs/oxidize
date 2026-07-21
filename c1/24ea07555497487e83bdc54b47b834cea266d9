@@ -1,0 +1,33 @@
+oxidize-c/src/mesh/mesh.c
+  s_5bec56e69286b9::t_42acfb3f66daba 35-36,51-52,59-60,86
+oxidize-c/include/oxidize/vision.h
+  s_5bec56e69286b9::t_42acfb3f66daba 58
+oxidize-c/include/oxidize/http.h
+  s_5bec56e69286b9::t_42acfb3f66daba 26,43,77
+oxidize-c/tests/test_http.c
+  s_5bec56e69286b9::t_42acfb3f66daba 140
+oxidize-c/tests/test_vision.c
+  s_5bec56e69286b9::t_42acfb3f66daba 4,16-17,24
+oxidize-c/src/server/http.c
+  s_5bec56e69286b9::t_42acfb3f66daba 32,118,131-138,171,190,195,200-202,241,379
+oxidize-c/tests/test_mesh.c
+  s_5bec56e69286b9::t_42acfb3f66daba 30,38,44,52,59,67,69,71,73,80,86
+oxidize-c/src/vision/vision.c
+  s_5bec56e69286b9::t_42acfb3f66daba 30-31,43-45,58-61,66,76-78
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "c124ea07555497487e83bdc54b47b834cea266d9",
+  "prompts": {},
+  "sessions": {
+    "s_5bec56e69286b9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f86ae-2366-7b80-8a79-8d8524df27c3",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
