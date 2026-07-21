@@ -51,6 +51,7 @@ static bool parse_value_flag(OcCliArgs *a, const char *arg, const char *val,
     else if (match(arg, "--quantize"))     { a->quantize_input = val; *consumed_val = true; }
     else if (match(arg, "--output"))       { a->quantize_output = val; *consumed_val = true; }
     else if (match(arg, "--quant-type"))   { a->quantize_type = val; *consumed_val = true; }
+    else if (match(arg, "--backend"))       { a->backend = val; *consumed_val = true; }
     else return false;
     return true;
 }

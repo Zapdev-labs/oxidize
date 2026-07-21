@@ -21,7 +21,7 @@ LDFLAGS ?= -lm -lpthread
 # by their respective feature workers.
 LIB_SRCS := $(wildcard src/core/*.c src/util/*.c src/format/*.c src/model/*.c \
                        src/compute/*.c src/autotune/*.c src/server/*.c \
-                       src/paged/*.c) src/cli/args.c
+                       src/paged/*.c src/backends/cuda_stub.c) src/cli/args.c
 LIB_OBJS := $(LIB_SRCS:.c=.o)
 
 # Binary sources (CLI main). Added by cli-flags-modes feature; for now a stub.
@@ -118,15 +118,17 @@ lint:
 avx512: CFLAGS += -DOC_AVX512 -mavx512f -mavx512bw -mavx512dq -mavx512vl -mavx512vnni
 avx512: clean oxidize-c
 
-# CUDA build (for Modal L40S). NVCC compiles .cu files.
+# CUDA build (for Modal L40S). NVCC compiles .cu files; cuda_stub.c excluded.
+CUDA_LIB_SRCS := $(filter-out src/backends/cuda_stub.c,$(LIB_SRCS))
+CUDA_LIB_OBJS := $(CUDA_LIB_SRCS:.c=.o)
 CUDA_SRCS := $(wildcard src/backends/*.cu)
 CUDA_OBJS := $(CUDA_SRCS:.cu=.cu.o)
 
 cuda: CFLAGS := -std=c11 -Wall -Wextra -Werror -O2 -Iinclude -DOC_CUDA
 cuda: NVCC_FLAGS := -O2 -Iinclude -DOC_CUDA -Xcompiler -std=c11,-Wall,-Wextra
 cuda: LDFLAGS := -lm -lpthread -lcudart
-cuda: $(LIB_OBJS) $(CUDA_OBJS) $(BIN_OBJS)
-	gcc $(CFLAGS) -o oxidize-c $(LIB_OBJS) $(CUDA_OBJS) $(BIN_OBJS) $(LDFLAGS)
+cuda: $(CUDA_LIB_OBJS) $(CUDA_OBJS) $(BIN_OBJS)
+	gcc $(CFLAGS) -o oxidize-c $(CUDA_LIB_OBJS) $(CUDA_OBJS) $(BIN_OBJS) $(LDFLAGS)
 
 %.cu.o: %.cu
 	nvcc $(NVCC_FLAGS) -c -o $@ $<

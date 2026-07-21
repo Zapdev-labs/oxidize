@@ -37,6 +37,8 @@ typedef struct OcCliArgs {
     const char *quantize_type;   /* target quant type string (Q4_0, etc.) */
     /* Streaming. */
     bool       stream;
+    /* Backend selection. */
+    const char *backend;         /* "cpu" (default) or "cuda"             */
     bool       verbose;
     bool       show_help;
     bool       show_version;

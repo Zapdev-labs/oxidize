@@ -18,6 +18,7 @@
 #include "oxidize/cuda.h"
 #include "oxidize/activation.h"
 #include "oxidize/llama.h"
+#include "oxidize/quantization.h"
 
 #include <cuda_runtime.h>
 #include <stdlib.h>
@@ -29,7 +30,7 @@
     do { \
         cudaError_t _e = (call); \
         if (_e != cudaSuccess) { \
-            return OC_ERR_UNSUPPORTED; \
+            return OC_ERR_BACKEND; \
         } \
     } while (0)
 
@@ -257,7 +258,7 @@ static OcError upload_weight_view(const OcWeightView *view, float **d_out,
     cudaDeviceSynchronize();
     return OC_OK;
 err:
-    return OC_ERR_UNSUPPORTED;
+    return OC_ERR_BACKEND;
 }
 
 /* ─── Public API ────────────────────────────────────────────────────────── */
@@ -274,7 +275,7 @@ OcError oc_cuda_init(OcCudaContext *ctx, const OcLlamaModel *model)
     if (!ctx || !model) return OC_ERR_INVALID_ARG;
     memset(ctx, 0, sizeof(*ctx));
 
-    if (!oc_cuda_available()) return OC_ERR_UNSUPPORTED;
+    if (!oc_cuda_available()) return OC_ERR_BACKEND;
 
     const OcLlamaConfig *c = &model->cfg;
     ctx->n_embd = c->n_embd;
@@ -360,7 +361,7 @@ OcError oc_cuda_init(OcCudaContext *ctx, const OcLlamaModel *model)
 err:
     free(host_temp);
     oc_cuda_free(ctx);
-    return OC_ERR_UNSUPPORTED;
+    return OC_ERR_BACKEND;
 }
 
 OcError oc_cuda_forward(OcCudaContext *ctx, uint32_t token, uint32_t pos,

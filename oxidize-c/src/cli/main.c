@@ -19,6 +19,7 @@
  */
 #include "oxidize/activation.h"   /* ensure link for forward deps */
 #include "oxidize/autotune.h"
+#include "oxidize/cuda.h"
 #include "oxidize/error.h"
 #include "oxidize/gguf.h"
 #include "oxidize/http.h"
@@ -67,6 +68,7 @@ static void print_help(void)
 "  --top-p P              Top-P / nucleus (default 0.95)\n"
 "  --repeat-penalty P     Repeat penalty (default 1.1)\n"
 "  --seed N               RNG seed (0 = greedy always)\n"
+"  --backend cpu|cuda     Compute backend (default cpu)\n"
 "  -v, --verbose          Verbose logging\n"
 "  -h, --help             Show this help\n"
 "  --version              Print version and exit\n",
@@ -109,6 +111,26 @@ static OcError run_generation(const OcCliArgs *args)
         fprintf(stderr, "error: failed to load model (%s)\n", oc_error_msg(e));
         free(file_prompt);
         return e;
+    }
+
+    /* CUDA backend: upload weights to GPU and use GPU forward path. */
+    bool use_cuda = (args->backend && strcmp(args->backend, "cuda") == 0);
+    OcCudaContext cuda_ctx;
+    if (use_cuda) {
+        if (!oc_cuda_available()) {
+            fprintf(stderr, "error: CUDA not available (compiled without OC_CUDA or no GPU)\n");
+            oc_llama_free(&model);
+            free(file_prompt);
+            return OC_ERR_BACKEND;
+        }
+        e = oc_cuda_init(&cuda_ctx, &model);
+        if (e != OC_OK) {
+            fprintf(stderr, "error: CUDA init failed (%s), falling back to CPU\n",
+                    oc_error_msg(e));
+            use_cuda = false;
+        } else {
+            oc_log(OC_LOG_INFO, "cuda: model uploaded to GPU, using CUDA forward");
+        }
     }
 
     /* If --auto: detect CPU, fingerprint the model, plan, and apply the
@@ -192,12 +214,16 @@ static OcError run_generation(const OcCliArgs *args)
      * those). The last prompt token's logits seed the generation loop. */
     float *logits = sess.logits;
     for (size_t i = 0; i + 1 < n_ids; i++) {
-        e = oc_llama_forward(&sess, ids[i], NULL);   /* KV cache only */
+        if (use_cuda)
+            e = oc_cuda_forward(&cuda_ctx, ids[i], sess.pos, NULL);
+        else
+            e = oc_llama_forward(&sess, ids[i], NULL);   /* KV cache only */
         if (e != OC_OK) {
             fprintf(stderr, "error: prefill forward failed at token %zu (%s)\n",
                     i, oc_error_msg(e));
             break;
         }
+        sess.pos++;
         if (recent_len < RECENT_CAP) recent[recent_len++] = ids[i];
         else recent[i % RECENT_CAP] = ids[i];
     }
@@ -205,7 +231,11 @@ static OcError run_generation(const OcCliArgs *args)
     /* Forward the last prompt token WITH logits to start generation. */
     uint32_t next_tok = ids[n_ids - 1];
     if (e == OC_OK) {
-        e = oc_llama_forward(&sess, next_tok, logits);
+        if (use_cuda)
+            e = oc_cuda_forward(&cuda_ctx, next_tok, sess.pos, logits);
+        else
+            e = oc_llama_forward(&sess, next_tok, logits);
+        sess.pos++;
     }
     if (e != OC_OK) {
         fprintf(stderr, "error: seed forward failed (%s)\n", oc_error_msg(e));
@@ -232,7 +262,11 @@ static OcError run_generation(const OcCliArgs *args)
             else recent[emitted % RECENT_CAP] = sampled;
 
             /* Forward the sampled token to get next logits. */
-            e = oc_llama_forward(&sess, sampled, logits);
+            if (use_cuda)
+                e = oc_cuda_forward(&cuda_ctx, sampled, sess.pos, logits);
+            else
+                e = oc_llama_forward(&sess, sampled, logits);
+            sess.pos++;
             if (e == OC_ERR_INVALID_ARG) {
                 /* Context window exhausted. */
                 oc_log(OC_LOG_WARN, "context window full at position %lld",
@@ -246,6 +280,7 @@ static OcError run_generation(const OcCliArgs *args)
     }
 
     free(ids);
+    if (use_cuda) oc_cuda_free(&cuda_ctx);
     oc_llama_session_free(&sess);
     oc_tokenizer_free(&tok);
     oc_llama_free(&model);

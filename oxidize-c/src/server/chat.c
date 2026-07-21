@@ -50,6 +50,7 @@ size_t oc_chat_render_message(OcChatTemplate template,
                               char *out, size_t out_cap,
                               bool is_first, bool is_last)
 {
+    (void)is_first;
     size_t pos = 0;
     out[0] = '\0';
 
