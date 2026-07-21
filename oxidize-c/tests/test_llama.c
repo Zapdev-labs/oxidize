@@ -208,3 +208,45 @@ Test(llama, moe_topk_clamp)
     if (k > n_exp) k = n_exp;
     cr_assert_eq(k, 4, "k should be unchanged when within range");
 }
+
+/* ─── GeGLU activation (Gemma FFN) ────────────────────────────────────
+ * GeGLU: gate[i] = gelu(gate[i]) * up[i].
+ * gelu(0) = 0; gelu(1) = 0.841345 (erf-based).
+ * gate=[0,1], up=[1,2] → [0*1, 0.841345*2] = [0, 1.682690]. */
+Test(llama, geglu_basic)
+{
+    float gate[] = {0.0f, 1.0f};
+    float up[]   = {1.0f, 2.0f};
+    oc_geglu_inplace_f32(gate, up, 2);
+    cr_assert_float_eq(gate[0], 0.0f, 1e-6f, "gelu(0)*1 = 0");
+    cr_assert_float_eq(gate[1], 0.84134474f * 2.0f, 1e-4f, "gelu(1)*2");
+}
+
+/* ─── GeLU vs SwiGLU differ ───────────────────────────────────────────
+ * For the same input, GeGLU and SwiGLU must produce different outputs
+ * (gelu(1) ≠ silu(1)). silu(1) = 0.731059, gelu(1) = 0.841345. */
+Test(llama, geglu_differs_from_swiglu)
+{
+    float g1[] = {1.0f, 1.0f};
+    float g2[] = {1.0f, 1.0f};
+    float up[] = {1.0f, 1.0f};
+    oc_swiglu_inplace_f32(g1, up, 2);
+    oc_geglu_inplace_f32(g2, up, 2);
+    cr_assert_neq(g1[0], g2[0], "silu(1) ≠ gelu(1)");
+    cr_assert_float_eq(g1[0], 0.73105858f, 1e-5f, "silu(1)");
+    cr_assert_float_eq(g2[0], 0.84134474f, 1e-4f, "gelu(1)");
+}
+
+/* ─── Gemma config defaults ──────────────────────────────────────────── */
+Test(llama, gemma_config_defaults)
+{
+    OcLlamaConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.n_embd = 3072;  /* Gemma-2B hidden_size */
+    cfg.uses_geglu = true;
+    cfg.norm_scale = sqrtf((float)cfg.n_embd);
+    cr_assert(cfg.uses_geglu, "Gemma uses GeGLU");
+    cr_assert_float_eq(cfg.norm_scale, sqrtf(3072.0f), 1e-3f,
+                       "Gemma norm_scale = sqrt(n_embd)");
+    cr_assert(cfg.norm_scale > 1.0f, "norm_scale > 1 for Gemma");
+}

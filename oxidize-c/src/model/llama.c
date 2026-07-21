@@ -144,6 +144,16 @@ static OcError parse_config(const OcGgufFile *f, const char *arch_str,
     float scale = cfg_f32(f, key, 1.0f);
     cfg->expert_weights_scale = (scale > 0.0f) ? scale : 1.0f;
 
+    /* Gemma-specific: GeGLU FFN + norm scaling. */
+    cfg->uses_geglu = false;
+    cfg->norm_scale = 1.0f;
+    if (arch_str) {
+        if (strncmp(arch_str, "gemma", 5) == 0) {
+            cfg->uses_geglu = true;
+            cfg->norm_scale = sqrtf((float)cfg->n_embd);
+        }
+    }
+
     /* Also accept general.vocab_size as a fallback. */
     if (cfg->vocab_size == 32000) {
         uint32_t gv;
@@ -501,10 +511,15 @@ static void attention_head(const OcLlamaSession *s, uint32_t head,
 static void forward_dense_ffn(OcLlamaSession *s, const OcLlamaLayer *L)
 {
     const OcLlamaConfig *c = &s->model->cfg;
-    /* SwiGLU: gate = silu(W_gate·x) * (W_up·x); out = W_down·gate. */
+    /* FFN: gate = act(W_gate·x) * (W_up·x); out = W_down·gate.
+     * Llama/Mistral/Qwen use SwiGLU (silu). Gemma uses GeGLU (gelu). */
     matvec(&L->ffn_gate, s->normed, s->ffn_gate, s->dequant_temp);
     matvec(&L->ffn_up,   s->normed, s->ffn_up,   s->dequant_temp);
-    oc_swiglu_inplace_f32(s->ffn_gate, s->ffn_up, c->n_ff);
+    if (c->uses_geglu) {
+        oc_geglu_inplace_f32(s->ffn_gate, s->ffn_up, c->n_ff);
+    } else {
+        oc_swiglu_inplace_f32(s->ffn_gate, s->ffn_up, c->n_ff);
+    }
     matvec(&L->ffn_down, s->ffn_gate, s->normed, s->dequant_temp);
     /* Residual add. */
     for (size_t i = 0; i < c->n_embd; i++) s->x[i] += s->normed[i];
@@ -638,8 +653,11 @@ static void forward_layer(OcLlamaSession *s, uint32_t layer)
     OcLlamaLayer *L = &s->model->layers[layer];
     size_t hd = c->head_dim;
 
-    /* Pre-attention RMSNorm. */
+    /* Pre-attention RMSNorm (+ Gemma scaling). */
     oc_rms_norm_f32(s->x, L->attn_norm, s->normed, c->n_embd, c->rms_norm_eps);
+    if (c->norm_scale != 1.0f) {
+        for (size_t i = 0; i < c->n_embd; i++) s->normed[i] *= c->norm_scale;
+    }
 
     /* Q/K/V projections. */
     matvec(&L->attn_q, s->normed, s->q, s->dequant_temp);
@@ -671,8 +689,11 @@ static void forward_layer(OcLlamaSession *s, uint32_t layer)
     /* Residual add (reusing normed as the projection output buffer). */
     for (size_t i = 0; i < c->n_embd; i++) s->x[i] += s->normed[i];
 
-    /* Pre-FFN RMSNorm. */
+    /* Pre-FFN RMSNorm (+ Gemma scaling). */
     oc_rms_norm_f32(s->x, L->ffn_norm, s->normed, c->n_embd, c->rms_norm_eps);
+    if (c->norm_scale != 1.0f) {
+        for (size_t i = 0; i < c->n_embd; i++) s->normed[i] *= c->norm_scale;
+    }
 
     /* FFN branch: MoE when the layer has a router, dense otherwise. */
     if (c->num_experts > 0 && L->ffn_gate_inp.data != NULL &&
@@ -696,6 +717,9 @@ OcError oc_llama_forward(OcLlamaSession *sess, uint32_t token, float *logits_out
     OcLlamaModel *m = sess->model;
     oc_rms_norm_f32(sess->x, m->final_norm, sess->normed, m->cfg.n_embd,
                     m->cfg.rms_norm_eps);
+    if (m->cfg.norm_scale != 1.0f) {
+        for (size_t i = 0; i < m->cfg.n_embd; i++) sess->normed[i] *= m->cfg.norm_scale;
+    }
     if (logits_out != NULL) {
         if (m->output.qtype == OC_QUANT_F32) {
             oc_matvec_f32((const float *)m->output.data, m->output.rows,

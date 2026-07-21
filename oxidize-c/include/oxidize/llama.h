@@ -50,6 +50,8 @@ typedef struct OcLlamaConfig {
     uint32_t expert_intermediate_size;  /* 0 → falls back to n_ff          */
     bool     expert_gating_sigmoid;     /* false = softmax (Qwen3-MoE)     */
     float    expert_weights_scale;      /* 1.0 = no routed scaling          */
+    bool     uses_geglu;                /* true = Gemma GeGLU FFN (vs SwiGLU) */
+    float    norm_scale;               /* RMSNorm scale factor (Gemma: sqrt(n_embd)) */
 } OcLlamaConfig;
 
 /* Non-owning view over a mmap'd GGUF tensor. */

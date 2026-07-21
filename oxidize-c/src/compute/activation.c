@@ -41,6 +41,25 @@ void oc_swiglu_inplace_f32(float *gate, const float *up, size_t n)
     }
 }
 
+float oc_gelu_exact_f32(float x)
+{
+    return 0.5f * x * (1.0f + erff(x / 1.41421356f));
+}
+
+float oc_gelu_approx_f32(float x)
+{
+    const float c = 0.7978845608f; /* sqrt(2/pi) */
+    float inner = c * (x + 0.044715f * x * x * x);
+    return 0.5f * x * (1.0f + tanhf(inner));
+}
+
+void oc_geglu_inplace_f32(float *gate, const float *up, size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        gate[i] = oc_gelu_exact_f32(gate[i]) * up[i];
+    }
+}
+
 void oc_apply_rope_f32(const float *in, float *out, size_t head_dim,
                       size_t rope_len, int64_t position, float theta)
 {

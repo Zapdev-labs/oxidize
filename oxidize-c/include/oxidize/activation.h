@@ -32,6 +32,18 @@ void oc_rms_norm_f32(const float *x, const float *weight, float *out,
  * (exact sigmoid; no fast-approx here — parity-first). */
 void oc_swiglu_inplace_f32(float *gate, const float *up, size_t n);
 
+/* GeGLU in-place: gate[i] = gelu(gate[i]) * up[i].
+ * Uses the exact (erf-based) GeLU, matching the Rust reference.
+ * Used by Gemma's FFN (instead of SwiGLU). */
+void oc_geglu_inplace_f32(float *gate, const float *up, size_t n);
+
+/* Approximate GeLU: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3))).
+ * Used by Gemma2/Gemma3 attention output and FFN gate when configured. */
+float oc_gelu_approx_f32(float x);
+
+/* Exact GeLU: 0.5 * x * (1 + erf(x / sqrt(2))). */
+float oc_gelu_exact_f32(float x);
+
 /* Apply RoPE (Rotary Positional Embedding) to one head of length `head_dim`
  * at absolute `position`. Split-halves (NeoX-style) layout:
  *   half = head_dim / 2
