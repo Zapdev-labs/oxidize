@@ -936,3 +936,135 @@ OcError oc_llama_forward(OcLlamaSession *sess, uint32_t token, float *logits_out
     sess->pos++;
     return OC_OK;
 }
+
+/* ─── Batched decode ─────────────────────────────────────────────────── */
+
+OcError oc_batch_session_init(OcLlamaModel *model, size_t max_seqs,
+                               OcBatchSession *out)
+{
+    if (model == NULL || out == NULL) return OC_ERR_INVALID_ARG;
+    if (max_seqs == 0) max_seqs = 1;
+    if (max_seqs > OC_MAX_BATCH_SEQ) max_seqs = OC_MAX_BATCH_SEQ;
+    memset(out, 0, sizeof(*out));
+    out->model = model;
+    out->max_seqs = max_seqs;
+    if (model->cfg.uses_mla) {
+        out->kv_row_floats = (size_t)model->cfg.n_head * model->cfg.head_dim;
+    } else {
+        out->kv_row_floats = (size_t)model->cfg.n_head_kv * model->cfg.kv_head_dim;
+    }
+    size_t per_layer = (size_t)model->cfg.n_ctx * out->kv_row_floats * max_seqs;
+    size_t total = (size_t)model->cfg.n_layer * per_layer;
+    out->kv_k = xcalloc(total, sizeof(float));
+    out->kv_v = xcalloc(total, sizeof(float));
+    size_t maxw = model->cfg.n_embd > model->cfg.n_ff ? model->cfg.n_embd : model->cfg.n_ff;
+    if (model->cfg.expert_intermediate_size > maxw)
+        maxw = model->cfg.expert_intermediate_size;
+    out->x = xcalloc(model->cfg.n_embd, sizeof(float));
+    out->normed = xcalloc(model->cfg.n_embd, sizeof(float));
+    out->q = xcalloc((size_t)model->cfg.n_head * model->cfg.head_dim, sizeof(float));
+    out->k = xcalloc(out->kv_row_floats, sizeof(float));
+    out->v = xcalloc(out->kv_row_floats, sizeof(float));
+    out->attn_out = xcalloc((size_t)model->cfg.n_head * model->cfg.head_dim, sizeof(float));
+    out->ffn_gate = xcalloc(model->cfg.n_ff, sizeof(float));
+    out->ffn_up = xcalloc(model->cfg.n_ff, sizeof(float));
+    out->dequant_temp = xcalloc(maxw, sizeof(float));
+    out->logits = xcalloc(max_seqs * model->cfg.vocab_size, sizeof(float));
+    if (model->cfg.num_experts > 0) {
+        out->router_logits = xcalloc(model->cfg.num_experts, sizeof(float));
+        out->expert_gate = xcalloc(model->cfg.expert_intermediate_size, sizeof(float));
+        out->expert_up = xcalloc(model->cfg.expert_intermediate_size, sizeof(float));
+        out->expert_out = xcalloc(model->cfg.n_embd, sizeof(float));
+        out->shexp_gate = xcalloc(model->cfg.expert_intermediate_size, sizeof(float));
+        out->shexp_up = xcalloc(model->cfg.expert_intermediate_size, sizeof(float));
+        out->shexp_out = xcalloc(model->cfg.n_embd, sizeof(float));
+    }
+    if (!out->kv_k || !out->kv_v || !out->x || !out->normed || !out->q ||
+        !out->k || !out->v || !out->attn_out || !out->ffn_gate ||
+        !out->ffn_up || !out->dequant_temp || !out->logits) {
+        oc_batch_session_free(out);
+        return OC_ERR_OOM;
+    }
+    return OC_OK;
+}
+
+OcError oc_batch_forward(OcBatchSession *bs, OcBatchSeq *seqs)
+{
+    if (bs == NULL || seqs == NULL) return OC_ERR_INVALID_ARG;
+    OcLlamaModel *m = bs->model;
+    /* Process each active sequence sequentially through the same weights.
+     * This is a simple batch implementation - true parallel batch (multiple
+     * sequences through the same matvec) requires a batched matvec. */
+    for (size_t s = 0; s < bs->max_seqs; s++) {
+        if (!seqs[s].active) continue;
+        /* Set up a temporary session view sharing the workspace. */
+        OcLlamaSession tmp;
+        tmp.model = m;
+        tmp.kv_k = bs->kv_k;
+        tmp.kv_v = bs->kv_v;
+        tmp.kv_row_floats = bs->kv_row_floats;
+        tmp.pos = seqs[s].pos;
+        tmp.x = bs->x;
+        tmp.normed = bs->normed;
+        tmp.q = bs->q;
+        tmp.k = bs->k;
+        tmp.v = bs->v;
+        tmp.attn_out = bs->attn_out;
+        tmp.ffn_gate = bs->ffn_gate;
+        tmp.ffn_up = bs->ffn_up;
+        tmp.dequant_temp = bs->dequant_temp;
+        tmp.logits = bs->logits + s * m->cfg.vocab_size;
+        tmp.router_logits = bs->router_logits;
+        tmp.expert_gate = bs->expert_gate;
+        tmp.expert_up = bs->expert_up;
+        tmp.expert_out = bs->expert_out;
+        tmp.shexp_gate = bs->shexp_gate;
+        tmp.shexp_up = bs->shexp_up;
+        tmp.shexp_out = bs->shexp_out;
+        tmp.mla_c_q = NULL; /* MLA not supported in batch mode yet */
+        tmp.mla_c_kv = NULL;
+        tmp.mla_q_full = NULL;
+        tmp.mla_kv_compressed = NULL;
+
+        /* Embed and forward. */
+        embed_token(&tmp, seqs[s].token);
+        for (uint32_t l = 0; l < m->cfg.n_layer; l++) {
+            forward_layer(&tmp, l);
+        }
+        /* Final RMSNorm + lm_head. */
+        oc_rms_norm_f32(tmp.x, m->final_norm, tmp.normed, m->cfg.n_embd,
+                        m->cfg.rms_norm_eps);
+        if (m->cfg.norm_scale != 1.0f) {
+            for (size_t i = 0; i < m->cfg.n_embd; i++) tmp.normed[i] *= m->cfg.norm_scale;
+        }
+        if (seqs[s].logits != NULL) {
+            if (m->output.qtype == OC_QUANT_F32) {
+                oc_matvec_f32((const float *)m->output.data, m->output.rows,
+                              m->output.cols, tmp.normed, seqs[s].logits);
+            } else {
+                oc_matvec_quantized(m->output.qtype, m->output.data, m->output.rows,
+                                     m->output.cols, m->output.row_bytes,
+                                     tmp.normed, seqs[s].logits, tmp.dequant_temp);
+            }
+        }
+        seqs[s].pos++;
+        bs->pos[s] = seqs[s].pos;
+    }
+    return OC_OK;
+}
+
+void oc_batch_session_free(OcBatchSession *bs)
+{
+    if (bs == NULL) return;
+    free(bs->kv_k); free(bs->kv_v);
+    free(bs->x); free(bs->normed);
+    free(bs->q); free(bs->k); free(bs->v);
+    free(bs->attn_out);
+    free(bs->ffn_gate); free(bs->ffn_up);
+    free(bs->dequant_temp);
+    free(bs->logits);
+    free(bs->router_logits);
+    free(bs->expert_gate); free(bs->expert_up); free(bs->expert_out);
+    free(bs->shexp_gate); free(bs->shexp_up); free(bs->shexp_out);
+    memset(bs, 0, sizeof(*bs));
+}

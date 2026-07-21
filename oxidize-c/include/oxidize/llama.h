@@ -142,6 +142,64 @@ typedef struct OcLlamaSession {
     float *mla_kv_compressed; /* kv_lora + kv_pe                     */
 } OcLlamaSession;
 
+/* ─── Batched decode ─────────────────────────────────────────────────────
+ *
+ * Processes multiple sequences in a single forward pass. Each sequence has
+ * its own KV cache view and position, but they share the weight matrices
+ * (better cache locality than sequential processing).
+ */
+
+#define OC_MAX_BATCH_SEQ 16
+
+typedef struct OcBatchSeq {
+    uint32_t token;       /* input token for this step             */
+    int64_t  pos;        /* current position in sequence          */
+    float   *logits;     /* output logits (vocab_size per seq)    */
+    bool     active;     /* true if this sequence needs forward   */
+} OcBatchSeq;
+
+typedef struct OcBatchSession {
+    OcLlamaModel *model;
+    /* KV cache: [n_layer][n_ctx][n_head_kv * kv_head_dim * OC_MAX_BATCH_SEQ]. */
+    float *kv_k;
+    float *kv_v;
+    size_t kv_row_floats;
+    size_t max_seqs;
+    /* Per-sequence positions. */
+    int64_t pos[OC_MAX_BATCH_SEQ];
+    bool active[OC_MAX_BATCH_SEQ];
+    /* Shared workspace (reused across sequences in the batch). */
+    float *x;
+    float *normed;
+    float *q;
+    float *k;
+    float *v;
+    float *attn_out;
+    float *ffn_gate;
+    float *ffn_up;
+    float *dequant_temp;
+    /* Per-sequence logits output. */
+    float *logits;   /* [max_seqs * vocab_size] */
+    /* MoE temporaries (shared). */
+    float *router_logits;
+    float *expert_gate;
+    float *expert_up;
+    float *expert_out;
+    float *shexp_gate;
+    float *shexp_up;
+    float *shexp_out;
+} OcBatchSession;
+
+OcError oc_batch_session_init(OcLlamaModel *model, size_t max_seqs,
+                               OcBatchSession *out);
+
+/* Run one forward step for each active sequence in the batch.
+ * `seqs` is an array of `max_seqs` entries. Only sequences with
+ * `active=true` are processed; their `logits` will be filled. */
+OcError oc_batch_forward(OcBatchSession *bs, OcBatchSeq *seqs);
+
+void oc_batch_session_free(OcBatchSession *bs);
+
 /* Load a Llama-family GGUF (mmap, zero-copy weights). Returns OC_OK,
  * OC_ERR_IO, OC_ERR_FORMAT, OC_ERR_MODEL (unsupported arch / missing
  * tensors), or OC_ERR_OOM. */
