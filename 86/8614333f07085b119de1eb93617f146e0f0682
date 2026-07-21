@@ -1,0 +1,21 @@
+oxidize-core/src/compute/quantization/tests.rs
+  s_5bec56e69286b9::t_0a1ce2f6e5a169 852-853
+oxidize-core/src/compute/quantization/quant_k_blocks.rs
+  s_5bec56e69286b9::t_0a1ce2f6e5a169 216,223,226-242
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "868614333f07085b119de1eb93617f146e0f0682",
+  "prompts": {},
+  "sessions": {
+    "s_5bec56e69286b9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f86ae-2366-7b80-8a79-8d8524df27c3",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
