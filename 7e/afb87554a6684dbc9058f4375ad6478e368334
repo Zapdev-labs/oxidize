@@ -1,0 +1,57 @@
+oxidize-c/src/cli/args.c
+  s_96ddc277ba047e::t_5ffeb5653dc147 25-28
+  s_96ddc277ba047e::t_31a173a5eda1b1 59-62
+  s_96ddc277ba047e::t_728f17b57b1686 77
+oxidize-c/tests/test_mesh.c
+  s_96ddc277ba047e::t_2acf93941185ac 1-83
+oxidize-c/src/model/sampling.c
+  s_b88b57ac040f51::t_584c2822350040 169-253
+  s_b88b57ac040f51::t_99019bce76b96f 331-339
+  s_96ddc277ba047e::t_ce5eeb03fcfe61 340-377
+oxidize-c/include/oxidize/vision.h
+  s_96ddc277ba047e::t_44a7807f648652 1-95
+oxidize-c/src/cli/args.h
+  s_96ddc277ba047e::t_249b5a153dbf7c 42-49
+oxidize-c/src/mesh/mesh.c
+  s_96ddc277ba047e::t_0ea82986818850 6
+  s_96ddc277ba047e::t_74a22e16838333 1-5,7-94
+oxidize-c/Makefile
+  s_96ddc277ba047e::t_78b07d46536c5d 27-28
+oxidize-c/tests/test_vision.c
+  s_96ddc277ba047e::t_8c0f7ec8ad062a 13
+  s_96ddc277ba047e::t_81d1a57153eb97 1-12,14-65
+oxidize-c/src/vision/vision.c
+  s_96ddc277ba047e::t_cf966e5b143a75 1-108
+oxidize-c/include/oxidize/sampling.h
+  s_96ddc277ba047e::t_7ed1f8e91ab97b 50
+  s_96ddc277ba047e::t_d3b44a8b407c6b 59
+  s_96ddc277ba047e::t_0e33be509dfef6 30
+  s_b88b57ac040f51::t_e023a6cb89747b 86-110
+  s_b88b57ac040f51::t_a6b02534fc7e51 9-11,25-29,40-49,53-56,58
+oxidize-c/include/oxidize/mesh.h
+  s_96ddc277ba047e::t_b5f1e6c1ea2639 1-99
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "7eafb87554a6684dbc9058f4375ad6478e368334",
+  "prompts": {},
+  "sessions": {
+    "s_96ddc277ba047e": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "ea8ad242-b091-46af-96e0-114c0c67fea4",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_b88b57ac040f51": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "85d983ad-396f-4fee-963a-ed8e1ab421ee",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
