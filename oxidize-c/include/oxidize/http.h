@@ -23,6 +23,7 @@
 #include <pthread.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdatomic.h>
 #include <stdint.h>
 
 #include "oxidize/error.h"
@@ -39,6 +40,7 @@ extern "C" {
 typedef enum {
     OC_HTTP_GET,
     OC_HTTP_POST,
+    OC_HTTP_OPTIONS,
     OC_HTTP_OTHER,
 } OcHttpMethod;
 
@@ -72,7 +74,7 @@ typedef struct OcHttpServer {
     pthread_t   *threads;       /* worker pool                            */
     OcHttpHandler handler;
     void        *user_data;
-    volatile bool stop;          /* set by oc_http_server_stop              */
+    _Atomic bool stop;           /* set by oc_http_server_stop              */
     bool         joined;        /* true after oc_http_server_join          */
 } OcHttpServer;
 

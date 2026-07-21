@@ -1,6 +1,7 @@
 /* test_vision.c — vision encoder stub tests. */
 #include <criterion/criterion.h>
 #include "oxidize/vision.h"
+#include <stdlib.h>
 #include <string.h>
 
 Test(vision, init_and_encode)
@@ -12,13 +13,15 @@ Test(vision, init_and_encode)
     cr_assert(enc.initialized);
     cr_assert_eq(enc.config.n_patches, 256); /* (224/14)^2 = 256 */
 
-    float emb[256 * 768];
+    float *emb = malloc(256 * 768 * sizeof(*emb));
+    cr_assert_not_null(emb);
     size_t out_len = 0;
     OcImage img = { .data=(const uint8_t*)"dummy", .width=224, .height=224,
                     .channels=3, .format=OC_IMAGE_RGB };
     cr_assert_eq(oc_vision_encode(&enc, &img, emb, &out_len), OC_OK);
     cr_assert_eq(out_len, 256 * 768);
 
+    free(emb);
     oc_vision_free(&enc);
     cr_assert(!enc.initialized);
 }

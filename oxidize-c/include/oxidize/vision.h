@@ -55,7 +55,7 @@ typedef struct OcVisionEncoder {
 OcError oc_vision_init(OcVisionEncoder *enc, const OcVisionConfig *cfg);
 
 /* Encode an image into a flat embedding vector.
- * `out_embeddings` receives `hidden_size` floats.
+ * `out_embeddings` receives `n_patches * hidden_size` floats.
  * `out_len` receives the number of floats written. */
 OcError oc_vision_encode(OcVisionEncoder *enc, const OcImage *img,
                          float *out_embeddings, size_t *out_len);

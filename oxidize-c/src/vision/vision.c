@@ -27,7 +27,8 @@ OcError oc_vision_init(OcVisionEncoder *enc, const OcVisionConfig *cfg)
 OcError oc_vision_encode(OcVisionEncoder *enc, const OcImage *img,
                          float *out_embeddings, size_t *out_len)
 {
-    if (!enc || !enc->initialized || !img || !out_embeddings || !out_len)
+    if (!enc || !enc->initialized || !img || !img->data || img->width == 0 ||
+        img->height == 0 || img->channels == 0 || !out_embeddings || !out_len)
         return OC_ERR_INVALID_ARG;
     size_t total = (size_t)enc->config.n_patches * enc->config.hidden_size;
     /* Stub: return zeros. Real implementation would run CLIP ViT forward. */
@@ -39,7 +40,9 @@ OcError oc_vision_encode(OcVisionEncoder *enc, const OcImage *img,
 OcError oc_vision_resize(const OcImage *src, uint32_t target_w,
                           uint32_t target_h, uint8_t *out)
 {
-    if (!src || !out) return OC_ERR_INVALID_ARG;
+    if (!src || !src->data || src->width == 0 || src->height == 0 ||
+        src->channels == 0 || target_w == 0 || target_h == 0 || !out)
+        return OC_ERR_INVALID_ARG;
     /* Bilinear resize. */
     for (uint32_t y = 0; y < target_h; y++) {
         float src_y = (float)y * src->height / target_h;
@@ -52,15 +55,15 @@ OcError oc_vision_resize(const OcImage *src, uint32_t target_w,
             uint32_t x1 = (x0 + 1 < src->width) ? x0 + 1 : x0;
             float wx = src_x - x0;
             for (uint32_t c = 0; c < src->channels; c++) {
-                size_t i00 = (size_t)(y0 * src->width + x0) * src->channels + c;
-                size_t i01 = (size_t)(y0 * src->width + x1) * src->channels + c;
-                size_t i10 = (size_t)(y1 * src->width + x0) * src->channels + c;
-                size_t i11 = (size_t)(y1 * src->width + x1) * src->channels + c;
+                size_t i00 = ((size_t)y0 * src->width + x0) * src->channels + c;
+                size_t i01 = ((size_t)y0 * src->width + x1) * src->channels + c;
+                size_t i10 = ((size_t)y1 * src->width + x0) * src->channels + c;
+                size_t i11 = ((size_t)y1 * src->width + x1) * src->channels + c;
                 float v = (1 - wx) * (1 - wy) * src->data[i00]
                        + wx * (1 - wy) * src->data[i01]
                        + (1 - wx) * wy * src->data[i10]
                        + wx * wy * src->data[i11];
-                size_t out_idx = (size_t)(y * target_w + x) * src->channels + c;
+                size_t out_idx = ((size_t)y * target_w + x) * src->channels + c;
                 out[out_idx] = (uint8_t)(v + 0.5f);
             }
         }
@@ -70,7 +73,9 @@ OcError oc_vision_resize(const OcImage *src, uint32_t target_w,
 
 OcError oc_vision_normalize(const OcImage *img, float *out)
 {
-    if (!img || !out) return OC_ERR_INVALID_ARG;
+    if (!img || !img->data || img->width == 0 || img->height == 0 ||
+        img->channels == 0 || !out)
+        return OC_ERR_INVALID_ARG;
     size_t n = (size_t)img->width * img->height * img->channels;
     for (size_t i = 0; i < n; i++) {
         out[i] = ((float)img->data[i] / 127.5f) - 1.0f;

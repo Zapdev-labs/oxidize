@@ -32,7 +32,8 @@ OcError oc_mesh_listen(OcMesh *mesh)
 
 OcError oc_mesh_connect(OcMesh *mesh, const char *addr)
 {
-    if (!mesh || !addr) return OC_ERR_INVALID_ARG;
+    if (!mesh || !mesh->initialized || !addr || addr[0] == '\0')
+        return OC_ERR_INVALID_ARG;
     if (mesh->n_peers >= OC_MESH_MAX_PEERS) return OC_ERR_OOM;
     OcPeer *p = &mesh->peers[mesh->n_peers];
     p->id = (uint32_t)mesh->n_peers;
@@ -47,14 +48,16 @@ OcError oc_mesh_broadcast(OcMesh *mesh, const void *data, size_t len,
                           uint32_t layer_idx)
 {
     (void)data; (void)len; (void)layer_idx;
-    if (!mesh) return OC_ERR_INVALID_ARG;
+    if (!mesh || !mesh->initialized || (!data && len > 0))
+        return OC_ERR_INVALID_ARG;
     return OC_OK;
 }
 
 OcError oc_mesh_allreduce(OcMesh *mesh, float *data, size_t len)
 {
     (void)data; (void)len;
-    if (!mesh) return OC_ERR_INVALID_ARG;
+    if (!mesh || !mesh->initialized || (!data && len > 0))
+        return OC_ERR_INVALID_ARG;
     /* Single-node: no-op (data is already the full result). */
     return OC_OK;
 }
@@ -80,7 +83,7 @@ OcError oc_mesh_shard_for_layer(const OcMesh *mesh, uint32_t layer_idx,
                                  uint32_t n_rows, OcShardLayout *out)
 {
     (void)layer_idx;
-    if (!mesh || !out) return OC_ERR_INVALID_ARG;
+    if (!mesh || !mesh->initialized || !out) return OC_ERR_INVALID_ARG;
     uint32_t world = mesh->config.tensor_parallel;
     if (world == 0) world = 1;
     uint32_t rank = mesh->self_id % world;

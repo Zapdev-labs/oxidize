@@ -137,7 +137,7 @@ static char *send_request(uint16_t port, const char *raw, size_t raw_len,
     shutdown(fd, SHUT_WR);
     char *resp = malloc(8192);
     cr_assert_not_null(resp, "OOM");
-    ssize_t rd = read(fd, resp, 8192);
+    ssize_t rd = read(fd, resp, 8191);
     close(fd);
     cr_assert_geq(rd, 1, "read failed");
     *out_resp_len = (size_t)rd;

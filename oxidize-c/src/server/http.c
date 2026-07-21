@@ -29,6 +29,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -114,6 +115,7 @@ static bool parse_request(char *buf, size_t buf_len, OcHttpRequest *req,
 
     if (strcmp(method, "GET") == 0)       req->method = OC_HTTP_GET;
     else if (strcmp(method, "POST") == 0) req->method = OC_HTTP_POST;
+    else if (strcmp(method, "OPTIONS") == 0) req->method = OC_HTTP_OPTIONS;
     else                                   req->method = OC_HTTP_OTHER;
 
     /* Split path / query. */
@@ -125,6 +127,14 @@ static bool parse_request(char *buf, size_t buf_len, OcHttpRequest *req,
         req->query = NULL;
     }
     req->path = path;
+
+    char *te = strstr(line_end + 2, "Transfer-Encoding:");
+    if (te == NULL) te = strstr(line_end + 2, "transfer-encoding:");
+    if (te != NULL && (strstr(te, "chunked") != NULL ||
+                       strstr(te, "Chunked") != NULL)) {
+        *out_status = 411;
+        return false;
+    }
 
     /* Find Content-Length. */
     char *cl = strstr(line_end + 2, "Content-Length:");
@@ -158,7 +168,7 @@ typedef struct OcWorkerCtx {
 
 static void send_simple_response(int fd, int status, const char *body)
 {
-    char hdr[256];
+    char hdr[512];
     size_t body_len = body ? strlen(body) : 0;
     size_t n = oc_http_format_response(hdr, sizeof(hdr), status,
                                        "application/json", body, body_len);
@@ -177,16 +187,19 @@ static void *worker_main(void *arg)
         oc_log(OC_LOG_ERROR, "http: worker OOM, exiting");
         return NULL;
     }
-    while (!atomic_load_explicit((_Atomic bool *)&srv->stop,
+    while (!atomic_load_explicit(&srv->stop,
                                 memory_order_acquire)) {
         int fd = accept(srv->listen_fd, NULL, NULL);
         if (fd < 0) {
             if (errno == EINTR) continue;
-            if (atomic_load_explicit((_Atomic bool *)&srv->stop,
+            if (atomic_load_explicit(&srv->stop,
                                      memory_order_acquire)) break;
             oc_log(OC_LOG_WARN, "http: accept failed: %s", strerror(errno));
             continue;
         }
+        struct timeval read_timeout = { .tv_sec = 5, .tv_usec = 0 };
+        (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO,
+                         &read_timeout, sizeof(read_timeout));
         /* Read until we have the full request or hit the cap. */
         size_t total = 0;
         ssize_t rd;
@@ -225,7 +238,7 @@ static void *worker_main(void *arg)
         }
 
         /* Handle CORS preflight (OPTIONS) inline. */
-        if (req.method == OC_HTTP_OTHER && strncmp(req.path, "OPTIONS", 7) == 0) {
+        if (req.method == OC_HTTP_OPTIONS) {
             send_simple_response(fd, 204, "");
             close(fd);
             continue;
@@ -363,7 +376,7 @@ OcError oc_http_server_join(OcHttpServer *s)
 OcError oc_http_server_stop(OcHttpServer *s)
 {
     if (s == NULL) return OC_ERR_INVALID_ARG;
-    atomic_store_explicit((_Atomic bool *)&s->stop, true, memory_order_release);
+    atomic_store_explicit(&s->stop, true, memory_order_release);
     if (s->listen_fd >= 0) {
         shutdown(s->listen_fd, SHUT_RDWR);
         close(s->listen_fd);
