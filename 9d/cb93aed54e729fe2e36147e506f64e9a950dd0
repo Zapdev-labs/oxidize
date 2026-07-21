@@ -1,0 +1,32 @@
+oxidize-c/tests/test_prefix_cache.c
+  s_5bec56e69286b9::t_5d6938ed94d202 30,37,39-40,53-54,67-69,72,79-85,89-90,94-103
+  s_5bec56e69286b9::t_e58a0afca3f5fd 104-105
+oxidize-c/src/model/grammar.c
+  s_5bec56e69286b9::t_5d6938ed94d202 118,138
+  s_5bec56e69286b9::t_4587efccf950b4 85-89,143-154,159-167,191-192,200
+oxidize-c/tests/test_grammar.c
+  s_5bec56e69286b9::t_5d6938ed94d202 69-73,97-100
+oxidize-c/src/paged/prefix_cache.c
+  s_5bec56e69286b9::t_4587efccf950b4 39-41,45-48,50,54,59-60,62,65-71,74-77,79,81,101,108,123,126,138,148-149,152
+oxidize-c/include/oxidize/grammar.h
+  s_5bec56e69286b9::t_4587efccf950b4 28,44-45
+oxidize-c/include/oxidize/prefix_cache.h
+  s_5bec56e69286b9::t_eeed426b085a2e 37
+  s_5bec56e69286b9::t_4587efccf950b4 49-50,58-60,65-66
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "9dcb93aed54e729fe2e36147e506f64e9a950dd0",
+  "prompts": {},
+  "sessions": {
+    "s_5bec56e69286b9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f86ae-2366-7b80-8a79-8d8524df27c3",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
