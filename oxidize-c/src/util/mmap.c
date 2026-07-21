@@ -388,6 +388,7 @@ uint8_t oc_mmap_prefault(const OcMmap *m)
  * chunks, spawn pthreads, each XORs its chunk. Reduces wall-clock when the
  * mapping is multi-GB and memory channels saturate single-threaded reads. */
 
+#ifdef __linux__
 typedef struct {
     const uint8_t *bytes;
     size_t         len;
@@ -406,6 +407,7 @@ static void *prefault_worker(void *arg)
     c->checksum = checksum;
     return NULL;
 }
+#endif
 
 uint8_t oc_mmap_prefault_parallel(const OcMmap *m, size_t n_threads)
 {
