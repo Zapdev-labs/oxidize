@@ -120,7 +120,7 @@ void oc_apply_rope_yarn_f32(const float *in, float *out, size_t head_dim,
     if (pos_f > orig_f * 0.8f) {
         float ramp = (pos_f - orig_f * 0.8f) / (orig_f * 0.4f);
         if (ramp > 1.0f) ramp = 1.0f;
-        scale = 1.0f - ramp + ramp * (orig_f / pos_f);
+        scale = 1.0f - ramp + ramp * (yarn_factor * orig_f / pos_f);
     }
 
     for (size_t i = 0; i < half; i++) {

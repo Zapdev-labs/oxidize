@@ -152,7 +152,6 @@ OcError oc_wp_with_unknown_token(OcWordPieceTokenizer *wp, OcArena *arena,
         id = (uint32_t)wp->vocab_size;
         char *dup = oc_arena_dup(arena, token);
         if (!dup) return OC_ERR_OOM;
-        oc_hashtable_put(wp->vocab, dup, (void *)(uintptr_t)id, NULL);
         char **new_tokens = oc_arena_alloc(arena,
                                             (wp->vocab_size + 1) * sizeof(char *),
                                             sizeof(void *));
@@ -161,6 +160,8 @@ OcError oc_wp_with_unknown_token(OcWordPieceTokenizer *wp, OcArena *arena,
             new_tokens[i] = wp->id_to_token[i];
         }
         new_tokens[id] = dup;
+        OcError e = oc_hashtable_put(wp->vocab, dup, (void *)(uintptr_t)id, NULL);
+        if (e != OC_OK) return e;
         wp->id_to_token = new_tokens;
         wp->vocab_size = id + 1;
     }

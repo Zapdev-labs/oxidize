@@ -490,9 +490,10 @@ OcError oc_bpe_train(const char *const *corpus, size_t n_corpus,
         e = oc_vector_init(&seq, sizeof(uint32_t));
         if (e != OC_OK) goto fail;
         const char *p = sample;
+        const char *sample_end = sample + strlen(sample);
         while (*p) {
             uint32_t cp;
-            size_t adv = oc_utf8_decode_cp(p, SIZE_MAX, &cp);
+            size_t adv = oc_utf8_decode_cp(p, (size_t)(sample_end - p), &cp);
             if (adv == 0) adv = 1;
             char buf[5];
             size_t n = oc_utf8_encode_cp(cp, buf);
@@ -717,9 +718,10 @@ static OcError bpe_encode_segment(const OcBpeTokenizer *bpe, const char *text,
         }
     } else {
         const char *p = text;
+        const char *text_end = text + text_len;
         while (*p) {
             uint32_t cp;
-            size_t adv = oc_utf8_decode_cp(p, SIZE_MAX, &cp);
+            size_t adv = oc_utf8_decode_cp(p, (size_t)(text_end - p), &cp);
             if (adv == 0) adv = 1;
             char buf[5];
             size_t bn = oc_utf8_encode_cp(cp, buf);

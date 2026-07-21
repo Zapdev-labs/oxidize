@@ -294,3 +294,12 @@ Test(llama, yarn_no_scaling_when_factor_zero)
                            "factor=0 → normal RoPE at %d", i);
     }
 }
+
+Test(llama, yarn_factor_changes_angles)
+{
+    float in[] = {1.0f, 2.0f, 3.0f, 4.0f};
+    float factor_one[4], factor_two[4];
+    oc_apply_rope_yarn_f32(in, factor_one, 4, 4, 8192, 10000.0f, 1.0f, 4096);
+    oc_apply_rope_yarn_f32(in, factor_two, 4, 4, 8192, 10000.0f, 2.0f, 4096);
+    cr_assert_arr_neq(factor_one, factor_two, sizeof(factor_one));
+}

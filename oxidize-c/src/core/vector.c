@@ -80,7 +80,7 @@ OcError oc_vector_push_n(OcVector *v, const void *elems, size_t n)
         if (e != OC_OK) return e;
         if (elems_off != SIZE_MAX) elems = (uint8_t *)v->data + elems_off;
     }
-    memcpy((uint8_t *)v->data + v->len * v->elem_size, elems, n * v->elem_size);
+    memmove((uint8_t *)v->data + v->len * v->elem_size, elems, n * v->elem_size);
     v->len += n;
     return OC_OK;
 }

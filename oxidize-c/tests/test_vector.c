@@ -45,6 +45,20 @@ Test(vector, push_n)
     oc_vector_free(&v);
 }
 
+Test(vector, push_n_overlapping_without_growth)
+{
+    OcVector v;
+    cr_assert_eq(oc_vector_init(&v, sizeof(int)), OC_OK);
+    cr_assert_eq(oc_vector_reserve(&v, 8), OC_OK);
+    int values[] = { 1, 2, 3, 4 };
+    cr_assert_eq(oc_vector_push_n(&v, values, 4), OC_OK);
+    const int *overlap = oc_vector_get(&v, 1);
+    cr_assert_eq(oc_vector_push_n(&v, overlap, 3), OC_OK);
+    const int expected[] = { 1, 2, 3, 4, 2, 3, 4 };
+    cr_assert_arr_eq(v.data, expected, sizeof(expected));
+    oc_vector_free(&v);
+}
+
 Test(vector, pop)
 {
     OcVector v;
@@ -103,4 +117,3 @@ Test(vector, thousand_push_pop_cycles)
         oc_vector_free(&v);
     }
 }
-
