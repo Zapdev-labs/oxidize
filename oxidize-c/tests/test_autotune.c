@@ -145,7 +145,7 @@ Test(autotune, fingerprint_null_args_rejected)
 {
     OcModelFingerprint fp;
     cr_assert_eq(oc_autotune_fingerprint_gguf(NULL, &fp), OC_ERR_INVALID_ARG);
-    OcGgufMmappedFile m;
+    OcGgufMmappedFile m = {0};
     cr_assert_eq(oc_autotune_fingerprint_gguf(&m, NULL), OC_ERR_INVALID_ARG);
 }
 
