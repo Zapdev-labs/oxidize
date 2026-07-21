@@ -120,7 +120,7 @@ jobs:
         with:
           cuda: "12.9.1"
           method: network
-          sub-packages: '["nvcc", "cuda-cudart-dev"]'
+          sub-packages: '["nvcc", "cudart-dev"]'
 
       - name: Build with CUDA
         run: |
