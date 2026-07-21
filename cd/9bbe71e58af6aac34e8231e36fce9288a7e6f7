@@ -1,0 +1,44 @@
+oxidize-c/src/backends/cuda_stub.c
+  s_96ddc277ba047e::t_de5f6f0836f434 10-11
+  s_96ddc277ba047e::t_09d8df9e27ac6c 18,25
+  s_96ddc277ba047e::t_2f5cad6e453a60 1-9,12-17,19-24,26-30
+oxidize-c/src/backends/cuda.cu
+  s_96ddc277ba047e::t_fcad4281a0d5c3 278
+  s_96ddc277ba047e::t_8025e452742773 21
+  s_96ddc277ba047e::t_59bcebaf41babd 261
+  s_96ddc277ba047e::t_e5cd23749d4b74 364
+  s_96ddc277ba047e::t_9fcbba973fb1b3 33
+oxidize-c/src/cli/main.c
+  s_96ddc277ba047e::t_f4dd287c083bc6 22
+  s_96ddc277ba047e::t_faf8492e348a19 124
+  s_96ddc277ba047e::t_3c32d6a33f6adc 265-269
+  s_96ddc277ba047e::t_5e95834b7a11ae 116-123,125-135
+  s_96ddc277ba047e::t_d6c5afd7b6d1fc 217-220,226,234-238
+  s_96ddc277ba047e::t_d8fa8e041a7aea 283
+  s_96ddc277ba047e::t_73b1abedcbd2f0 71
+oxidize-c/src/cli/args.c
+  s_96ddc277ba047e::t_65f241c5a42fee 54
+oxidize-c/Makefile
+  s_96ddc277ba047e::t_25231891408c98 24
+  s_96ddc277ba047e::t_5633ebe84c28c7 121-123,130-131
+oxidize-c/src/server/chat.c
+  s_96ddc277ba047e::t_d05e37646a1094 53
+oxidize-c/src/cli/args.h
+  s_96ddc277ba047e::t_87a521c7fd55d1 40-41
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "cd9bbe71e58af6aac34e8231e36fce9288a7e6f7",
+  "prompts": {},
+  "sessions": {
+    "s_96ddc277ba047e": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "ea8ad242-b091-46af-96e0-114c0c67fea4",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
