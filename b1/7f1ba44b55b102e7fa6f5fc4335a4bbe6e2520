@@ -1,0 +1,23 @@
+oxidize-c/src/model/llama.c
+  s_96ddc277ba047e::t_82d3191b5750d5 527-573
+  s_96ddc277ba047e::t_9e23c655ae7986 470-473
+  s_96ddc277ba047e::t_e0f9d4118c9d16 503-504
+oxidize-c/include/oxidize/llama.h
+  s_96ddc277ba047e::t_e52c2a0865c459 143-150
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "b17f1ba44b55b102e7fa6f5fc4335a4bbe6e2520",
+  "prompts": {},
+  "sessions": {
+    "s_96ddc277ba047e": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "ea8ad242-b091-46af-96e0-114c0c67fea4",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
