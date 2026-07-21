@@ -119,9 +119,17 @@ avx512: CFLAGS += -DOC_AVX512 -mavx512f -mavx512bw -mavx512dq -mavx512vl -mavx51
 avx512: clean oxidize-c
 
 # CUDA build (for Modal L40S). NVCC compiles .cu files.
-cuda: CC = nvcc
-cuda: CFLAGS = -O2 -Iinclude -DOC_CUDA -Xcompiler -std=c11
-cuda: oxidize-c
+CUDA_SRCS := $(wildcard src/backends/*.cu)
+CUDA_OBJS := $(CUDA_SRCS:.cu=.cu.o)
+
+cuda: CFLAGS := -std=c11 -Wall -Wextra -Werror -O2 -Iinclude -DOC_CUDA
+cuda: NVCC_FLAGS := -O2 -Iinclude -DOC_CUDA -Xcompiler -std=c11,-Wall,-Wextra
+cuda: LDFLAGS := -lm -lpthread -lcudart
+cuda: $(LIB_OBJS) $(CUDA_OBJS) $(BIN_OBJS)
+	gcc $(CFLAGS) -o oxidize-c $(LIB_OBJS) $(CUDA_OBJS) $(BIN_OBJS) $(LDFLAGS)
+
+%.cu.o: %.cu
+	nvcc $(NVCC_FLAGS) -c -o $@ $<
 
 clean:
 	rm -f $(LIB_OBJS) $(BIN_OBJS) $(TEST_OBJS) \
