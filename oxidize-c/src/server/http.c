@@ -172,10 +172,60 @@ static void send_simple_response(int fd, int status, const char *body)
     size_t body_len = body ? strlen(body) : 0;
     size_t n = oc_http_format_response(hdr, sizeof(hdr), status,
                                        "application/json", body, body_len);
-    if (n > 0) {
-        ssize_t wr = write(fd, hdr, n);
-        (void)wr;
+    if (n == 0) return;
+    size_t sent = 0;
+    while (sent < n) {
+#ifdef MSG_NOSIGNAL
+        ssize_t wr = send(fd, hdr + sent, n - sent, MSG_NOSIGNAL);
+#else
+        ssize_t wr = send(fd, hdr + sent, n - sent, 0);
+#endif
+        if (wr > 0) {
+            sent += (size_t)wr;
+        } else if (wr < 0 && errno == EINTR) {
+            continue;
+        } else {
+            break;
+        }
     }
+}
+
+static size_t expected_request_size(char *buf, size_t len)
+{
+    char *sep = memmem(buf, len, "\r\n\r\n", 4);
+    if (sep == NULL) return 0;
+    size_t header_bytes = (size_t)(sep - buf) + 4;
+    char saved = *sep;
+    *sep = '\0';
+    char *cl = strstr(buf, "Content-Length:");
+    if (cl == NULL) cl = strstr(buf, "content-length:");
+    unsigned long long body_bytes = 0;
+    errno = 0;
+    if (cl != NULL) {
+        cl += strlen("Content-Length:");
+        while (*cl == ' ' || *cl == '\t') cl++;
+        body_bytes = strtoull(cl, NULL, 10);
+    }
+    *sep = saved;
+    if (errno == ERANGE || body_bytes > OC_HTTP_MAX_REQUEST_BYTES - header_bytes)
+        return SIZE_MAX;
+    return header_bytes + (size_t)body_bytes;
+}
+
+static bool send_all(int fd, const char *buf, size_t len)
+{
+    size_t sent = 0;
+    while (sent < len) {
+#ifdef MSG_NOSIGNAL
+        ssize_t wr = send(fd, buf + sent, len - sent, MSG_NOSIGNAL);
+#else
+        ssize_t wr = send(fd, buf + sent, len - sent, 0);
+#endif
+        if (wr > 0) sent += (size_t)wr;
+        else if (wr < 0 && errno == EINTR) continue;
+        else return false;
+    }
+    return true;
 }
 
 static void *worker_main(void *arg)
@@ -200,29 +250,39 @@ static void *worker_main(void *arg)
         struct timeval read_timeout = { .tv_sec = 5, .tv_usec = 0 };
         (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO,
                          &read_timeout, sizeof(read_timeout));
+#ifdef SO_NOSIGPIPE
+        int no_sigpipe = 1;
+        (void)setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE,
+                         &no_sigpipe, sizeof(no_sigpipe));
+#endif
         /* Read until we have the full request or hit the cap. */
         size_t total = 0;
         ssize_t rd;
+        bool too_large = false;
+        bool timed_out = false;
         while (total < OC_HTTP_MAX_REQUEST_BYTES) {
             rd = read(fd, buf + total, OC_HTTP_MAX_REQUEST_BYTES - total);
-            if (rd <= 0) break;
-            total += (size_t)rd;
-            /* Stop once we've seen the header/body separator AND have at
-             * least Content-Length bytes of body. For simplicity, also stop
-             * if we see "\r\n\r\n". */
-            if (memmem(buf, total, "\r\n\r\n", 4) != NULL) {
-                /* We have the headers; could check Content-Length to decide
-                 * if we need more body, but for typical OpenAI requests the
-                 * full body arrives in one packet. Good enough for dev. */
+            if (rd <= 0) {
+                timed_out = rd < 0 && (errno == EAGAIN || errno == EWOULDBLOCK);
                 break;
             }
+            total += (size_t)rd;
+            buf[total] = '\0';
+            size_t expected = expected_request_size(buf, total);
+            if (expected == SIZE_MAX) { too_large = true; break; }
+            if (expected > 0 && total >= expected) break;
         }
         if (total == 0) {
             close(fd);
             continue;
         }
-        if (total >= OC_HTTP_MAX_REQUEST_BYTES) {
+        if (too_large || total >= OC_HTTP_MAX_REQUEST_BYTES) {
             send_simple_response(fd, 413, "{\"error\":\"payload too large\"}");
+            close(fd);
+            continue;
+        }
+        if (timed_out) {
+            send_simple_response(fd, 408, "{\"error\":\"request timeout\"}");
             close(fd);
             continue;
         }
@@ -255,8 +315,7 @@ static void *worker_main(void *arg)
         size_t resp_len = oc_http_format_response(resp, sizeof(resp), status,
                                                   ctype, body, body_len);
         if (resp_len > 0) {
-            ssize_t wr = write(fd, resp, resp_len);
-            (void)wr;
+            (void)send_all(fd, resp, resp_len);
         } else if (body_len > 0) {
             /* Body too big for the inline buffer — fall back to a malloc'd
              * response. */
@@ -266,8 +325,7 @@ static void *worker_main(void *arg)
                 size_t n = oc_http_format_response(big, cap, status, ctype,
                                                   body, body_len);
                 if (n > 0) {
-                    ssize_t wr = write(fd, big, n);
-                    (void)wr;
+                    (void)send_all(fd, big, n);
                 }
                 free(big);
             }

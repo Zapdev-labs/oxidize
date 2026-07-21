@@ -107,15 +107,66 @@ static void extract_messages_content(const char *json, char *out, size_t out_cap
 
 /* ─── Helpers ──────────────────────────────────────────────────────────── */
 
+static char *json_escape(const char *src)
+{
+    if (src == NULL) src = "";
+    size_t cap = 1;
+    for (const unsigned char *p = (const unsigned char *)src; *p; p++) {
+        if (*p == '"' || *p == '\\' || *p == '\b' || *p == '\f' ||
+            *p == '\n' || *p == '\r' || *p == '\t')
+            cap += 2;
+        else if (*p < 0x20)
+            cap += 6;
+        else
+            cap++;
+    }
+    char *out = malloc(cap);
+    if (out == NULL) return NULL;
+    char *dst = out;
+    static const char hex[] = "0123456789abcdef";
+    for (const unsigned char *p = (const unsigned char *)src; *p; p++) {
+        switch (*p) {
+        case '"': *dst++ = '\\'; *dst++ = '"'; break;
+        case '\\': *dst++ = '\\'; *dst++ = '\\'; break;
+        case '\b': *dst++ = '\\'; *dst++ = 'b'; break;
+        case '\f': *dst++ = '\\'; *dst++ = 'f'; break;
+        case '\n': *dst++ = '\\'; *dst++ = 'n'; break;
+        case '\r': *dst++ = '\\'; *dst++ = 'r'; break;
+        case '\t': *dst++ = '\\'; *dst++ = 't'; break;
+        default:
+            if (*p < 0x20) {
+                *dst++ = '\\'; *dst++ = 'u'; *dst++ = '0'; *dst++ = '0';
+                *dst++ = hex[*p >> 4]; *dst++ = hex[*p & 0x0f];
+            } else {
+                *dst++ = (char)*p;
+            }
+        }
+    }
+    *dst = '\0';
+    return out;
+}
+
 char *oc_openai_error_json(const char *message, const char *type)
 {
     if (type == NULL) type = "invalid_request_error";
-    /* Minimal JSON; assume message has no unescaped quotes (caller-controlled). */
-    size_t cap = strlen(message) + strlen(type) + 64;
+    char *escaped_message = json_escape(message);
+    char *escaped_type = json_escape(type);
+    if (escaped_message == NULL || escaped_type == NULL) {
+        free(escaped_message);
+        free(escaped_type);
+        return NULL;
+    }
+    size_t cap = strlen(escaped_message) + strlen(escaped_type) + 64;
     char *buf = malloc(cap);
-    if (buf == NULL) return NULL;
+    if (buf == NULL) {
+        free(escaped_message);
+        free(escaped_type);
+        return NULL;
+    }
     snprintf(buf, cap, "{\"error\":{\"message\":\"%s\",\"type\":\"%s\"}}",
-             message, type);
+             escaped_message, escaped_type);
+    free(escaped_message);
+    free(escaped_type);
     return buf;
 }
 
@@ -195,16 +246,17 @@ static char *generate_completion(OcOpenaiState *st, const char *prompt,
 static void handle_list_models(OcOpenaiState *st, int *out_status,
                                const char **out_body)
 {
-    char *buf = malloc(1024);
-    if (buf == NULL) { *out_status = 500; return; }
-    if (st->model_loaded && st->model_id) {
-        snprintf(buf, 1024,
-            "{\"object\":\"list\",\"data\":[{\"id\":\"%s\",\"object\":\"model\",\"owned_by\":\"oxidize\"}]}",
-            st->model_id);
-    } else {
-        snprintf(buf, 1024,
-            "{\"object\":\"list\",\"data\":[{\"id\":\"placeholder\",\"object\":\"model\",\"owned_by\":\"oxidize\"}]}");
-    }
+    const char *model_id = st->model_loaded && st->model_id
+        ? st->model_id : "placeholder";
+    char *escaped_model_id = json_escape(model_id);
+    if (escaped_model_id == NULL) { *out_status = 500; return; }
+    size_t cap = strlen(escaped_model_id) + 96;
+    char *buf = malloc(cap);
+    if (buf == NULL) { free(escaped_model_id); *out_status = 500; return; }
+    snprintf(buf, cap,
+        "{\"object\":\"list\",\"data\":[{\"id\":\"%s\",\"object\":\"model\",\"owned_by\":\"oxidize\"}]}",
+        escaped_model_id);
+    free(escaped_model_id);
     *out_status = 200;
     *out_body = buf;
 }
@@ -235,15 +287,18 @@ static void handle_completion(OcOpenaiState *st, const OcHttpRequest *req,
     if (stream) {
         char *text = generate_completion(st, prompt, max_tokens, (float)temp);
         if (!text) { *out_body=oc_openai_error_json("gen failed","server_error"); *out_status=500; return; }
-        size_t cap = strlen(text) + 1024;
+        char *escaped_text = json_escape(text);
+        free(text);
+        if (!escaped_text) { *out_status=500; return; }
+        size_t cap = strlen(escaped_text) + 1024;
         char *buf = malloc(cap);
         if (buf) {
             snprintf(buf, cap,
-                "data: {\"id\":\"cmpl-oxidize\",\"object\":\"text_completion\",\"choices\":[{\"text\":\"%s\",\"index\":0}]}\n\ndata: [DONE]\n\n", text);
-            free(text);
+                "data: {\"id\":\"cmpl-oxidize\",\"object\":\"text_completion\",\"choices\":[{\"text\":\"%s\",\"index\":0}]}\n\ndata: [DONE]\n\n", escaped_text);
+            free(escaped_text);
             *out_body = buf; *out_status = 200; return;
         }
-        free(text);
+        free(escaped_text);
     }
 
     char *text = generate_completion(st, prompt, max_tokens, (float)temp);
@@ -253,18 +308,22 @@ static void handle_completion(OcOpenaiState *st, const OcHttpRequest *req,
         return;
     }
     /* Build the OpenAI completion response JSON. */
-    size_t cap = strlen(text) + 512;
+    char *escaped_text = json_escape(text);
+    char *escaped_model = json_escape(st->model_id ? st->model_id : "unknown");
+    free(text);
+    if (escaped_text == NULL || escaped_model == NULL) {
+        free(escaped_text); free(escaped_model); *out_status = 500; return;
+    }
+    size_t cap = strlen(escaped_text) + strlen(escaped_model) + 512;
     char *buf = malloc(cap);
-    if (buf == NULL) { free(text); *out_status = 500; return; }
-    /* Escape any quotes/newlines in the generated text for JSON safety. */
-    /* (For brevity we trust the tokenizer output is mostly printable; a
-     * full escaper is a TODO.) */
+    if (buf == NULL) { free(escaped_text); free(escaped_model); *out_status = 500; return; }
     snprintf(buf, cap,
         "{\"id\":\"cmpl-oxidize\",\"object\":\"text_completion\",\"created\":0,"
         "\"model\":\"%s\",\"choices\":[{\"text\":\"%s\",\"index\":0,\"finish_reason\":\"stop\"}],"
         "\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":0,\"total_tokens\":0}}",
-        st->model_id ? st->model_id : "unknown", text);
-    free(text);
+        escaped_model, escaped_text);
+    free(escaped_text);
+    free(escaped_model);
     *out_status = 200;
     *out_body = buf;
 }
@@ -292,16 +351,23 @@ static void handle_chat_completion(OcOpenaiState *st, const OcHttpRequest *req,
         *out_status = 500;
         return;
     }
-    size_t cap = strlen(text) + 640;
+    char *escaped_text = json_escape(text);
+    char *escaped_model = json_escape(st->model_id ? st->model_id : "unknown");
+    free(text);
+    if (escaped_text == NULL || escaped_model == NULL) {
+        free(escaped_text); free(escaped_model); *out_status = 500; return;
+    }
+    size_t cap = strlen(escaped_text) + strlen(escaped_model) + 640;
     char *buf = malloc(cap);
-    if (buf == NULL) { free(text); *out_status = 500; return; }
+    if (buf == NULL) { free(escaped_text); free(escaped_model); *out_status = 500; return; }
     snprintf(buf, cap,
         "{\"id\":\"chatcmpl-oxidize\",\"object\":\"chat.completion\",\"created\":0,"
         "\"model\":\"%s\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\","
         "\"content\":\"%s\"},\"finish_reason\":\"stop\"}],"
         "\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":0,\"total_tokens\":0}}",
-        st->model_id ? st->model_id : "unknown", text);
-    free(text);
+        escaped_model, escaped_text);
+    free(escaped_text);
+    free(escaped_model);
     *out_status = 200;
     *out_body = buf;
 }

@@ -48,7 +48,7 @@ static char *send_raw(uint16_t port, const char *raw, size_t raw_len,
     write(fd, raw, raw_len);
     shutdown(fd, SHUT_WR);
     char *resp = malloc(8192);
-    ssize_t rd = read(fd, resp, 8192);
+    ssize_t rd = read(fd, resp, 8191);
     close(fd);
     cr_assert_geq(rd, 1);
     *out_len = (size_t)rd;
@@ -75,6 +75,15 @@ Test(openai, error_json_default_type)
     free(e);
 }
 
+Test(openai, error_json_escapes_control_characters)
+{
+    char *e = oc_openai_error_json("bad \"path\"\\name\n", "bad\ttype");
+    cr_assert_not_null(e);
+    cr_assert(strstr(e, "bad \\\"path\\\"\\\\name\\n") != NULL);
+    cr_assert(strstr(e, "bad\\ttype") != NULL);
+    free(e);
+}
+
 /* ─── Routing with no model loaded ─────────────────────────────────────── */
 
 static OcOpenaiState g_state = {0};
@@ -98,6 +107,22 @@ Test(openai, list_models_returns_placeholder_when_no_model)
     char *resp = send_raw(srv.port, req, strlen(req), &len);
     cr_assert(strstr(resp, "200 OK") != NULL, "should be 200");
     cr_assert(strstr(resp, "placeholder") != NULL, "should list placeholder model");
+    free(resp);
+    oc_http_server_stop(&srv);
+    oc_http_server_join(&srv);
+}
+
+Test(openai, list_models_escapes_model_id)
+{
+    OcHttpServer srv;
+    memset(&g_state, 0, sizeof(g_state));
+    g_state.model_loaded = true;
+    g_state.model_id = "model\"\\line\n";
+    start_server(&srv);
+    const char *req = "GET /v1/models HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    size_t len;
+    char *resp = send_raw(srv.port, req, strlen(req), &len);
+    cr_assert(strstr(resp, "model\\\"\\\\line\\n") != NULL);
     free(resp);
     oc_http_server_stop(&srv);
     oc_http_server_join(&srv);

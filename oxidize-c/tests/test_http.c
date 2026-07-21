@@ -186,6 +186,68 @@ Test(http, end_to_end_post_body_reaches_handler)
     oc_http_server_join(&srv);
 }
 
+Test(http, reads_body_split_across_packets)
+{
+    TestState st = {0};
+    OcHttpServer srv;
+    cr_assert_eq(oc_http_server_start("127.0.0.1", 0, 1,
+                                      test_handler, &st, &srv), OC_OK);
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    cr_assert_geq(fd, 0);
+    struct sockaddr_in addr = {0};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(srv.port);
+    inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+    cr_assert_eq(connect(fd, (struct sockaddr *)&addr, sizeof(addr)), 0);
+    const char *headers =
+        "POST /v1/echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\n";
+    cr_assert_eq(write(fd, headers, strlen(headers)), (ssize_t)strlen(headers));
+    usleep(20 * 1000);
+    cr_assert_eq(write(fd, "hello", 5), 5);
+    shutdown(fd, SHUT_WR);
+    char response[1024] = {0};
+    cr_assert_gt(read(fd, response, sizeof(response) - 1), 0);
+    cr_assert(strstr(response, "200 OK") != NULL);
+    cr_assert_str_eq(st.last_body, "hello");
+    close(fd);
+    oc_http_server_stop(&srv);
+    oc_http_server_join(&srv);
+}
+
+Test(http, options_is_handled_without_dispatch)
+{
+    TestState st = {0};
+    OcHttpServer srv;
+    cr_assert_eq(oc_http_server_start("127.0.0.1", 0, 1,
+                                      test_handler, &st, &srv), OC_OK);
+    const char *request = "OPTIONS /v1/models HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    size_t response_len;
+    char *response = send_request(srv.port, request, strlen(request), &response_len);
+    cr_assert(strstr(response, "204 No Content") != NULL);
+    cr_assert_eq(st.call_count, 0);
+    free(response);
+    oc_http_server_stop(&srv);
+    oc_http_server_join(&srv);
+}
+
+Test(http, chunked_requests_are_rejected)
+{
+    TestState st = {0};
+    OcHttpServer srv;
+    cr_assert_eq(oc_http_server_start("127.0.0.1", 0, 1,
+                                      test_handler, &st, &srv), OC_OK);
+    const char *request =
+        "POST /v1/echo HTTP/1.1\r\nHost: localhost\r\n"
+        "Transfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
+    size_t response_len;
+    char *response = send_request(srv.port, request, strlen(request), &response_len);
+    cr_assert(strstr(response, "411 Length Required") != NULL);
+    cr_assert_eq(st.call_count, 0);
+    free(response);
+    oc_http_server_stop(&srv);
+    oc_http_server_join(&srv);
+}
+
 Test(http, start_rejects_bad_args)
 {
     OcHttpServer srv;
@@ -216,7 +278,7 @@ Test(http, unknown_path_returns_404)
     OcHttpServer srv;
     oc_http_server_start("127.0.0.1", 0, 1, test_handler, &st, &srv);
     size_t resp_len;
-    const char *resp = send_request(srv.port,
+    char *resp = send_request(srv.port,
         "GET /nonexistent HTTP/1.1\r\nHost: localhost\r\n\r\n",
         strlen("GET /nonexistent HTTP/1.1\r\nHost: localhost\r\n\r\n"), &resp_len);
     cr_assert(strstr(resp, "404 Not Found") != NULL, "should be 404");
