@@ -1,0 +1,21 @@
+oxidize-c/include/oxidize/cuda.h
+  s_5bec56e69286b9::t_6daa8003d4a4e2 49-51
+oxidize-c/src/backends/cuda.cu
+  s_5bec56e69286b9::t_6daa8003d4a4e2 60,71-72,114,252-253,257-261,264,293-297,355-360,397-399,407,420-421,440,444,481-482,492-498,510-511,519-521,523
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "4ab1417f30982f7056b23939b19ade0633a2c4fa",
+  "prompts": {},
+  "sessions": {
+    "s_5bec56e69286b9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f86ae-2366-7b80-8a79-8d8524df27c3",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
