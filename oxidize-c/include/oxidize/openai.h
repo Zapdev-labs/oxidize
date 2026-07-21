@@ -7,10 +7,8 @@
  *   POST /v1/completions           → text completion
  *   POST /v1/chat/completions      → chat with message array
  *
- * JSON parsing is intentionally minimal (no full JSON parser): the handlers
- * extract the fields they need (model, prompt, messages, max_tokens,
- * temperature) via simple substring search. This is robust enough for the
- * OpenAI request shape and avoids pulling in a JSON dependency.
+ * JSON parsing is dependency-free and tracks structural depth so nested
+ * message content cannot be mistaken for top-level request fields.
  *
  * The handler drives oc_llama_forward + oc_sample for generation, so a real
  * loaded model is required. When no model is loaded, /v1/models returns a

@@ -204,3 +204,46 @@ Test(openai, completions_missing_prompt_returns_400)
     oc_http_server_stop(&srv);
     oc_http_server_join(&srv);
 }
+
+Test(openai, nested_stream_text_does_not_enable_streaming)
+{
+    OcHttpServer srv;
+    memset(&g_state, 0, sizeof(g_state));
+    g_state.model_loaded = true;
+    g_state.model_id = "test";
+    start_server(&srv);
+    const char *body = "{\"prompt\":\"say \\\"stream\\\": true\"}";
+    char req[512];
+    int n = snprintf(req, sizeof(req),
+        "POST /v1/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: %zu\r\n\r\n%s",
+        strlen(body), body);
+    size_t len;
+    char *resp = send_raw(srv.port, req, (size_t)n, &len);
+    cr_assert(strstr(resp, "200 OK") != NULL);
+    cr_assert(strstr(resp, "text/event-stream") == NULL);
+    free(resp);
+    oc_http_server_stop(&srv);
+    oc_http_server_join(&srv);
+}
+
+Test(openai, stream_request_is_rejected_honestly)
+{
+    OcHttpServer srv;
+    memset(&g_state, 0, sizeof(g_state));
+    g_state.model_loaded = true;
+    g_state.model_id = "test";
+    start_server(&srv);
+    const char *body = "{\"prompt\":\"hello\",\"stream\":true}";
+    char req[512];
+    int n = snprintf(req, sizeof(req),
+        "POST /v1/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: %zu\r\n\r\n%s",
+        strlen(body), body);
+    size_t len;
+    char *resp = send_raw(srv.port, req, (size_t)n, &len);
+    cr_assert(strstr(resp, "400 Bad Request") != NULL);
+    cr_assert(strstr(resp, "streaming is not supported") != NULL);
+    cr_assert(strstr(resp, "Content-Type: application/json") != NULL);
+    free(resp);
+    oc_http_server_stop(&srv);
+    oc_http_server_join(&srv);
+}

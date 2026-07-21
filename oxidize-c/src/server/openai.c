@@ -81,6 +81,37 @@ static double find_json_double_field(const char *json, const char *key, double d
     return strtod(p, NULL);
 }
 
+static bool find_json_bool_field(const char *json, const char *key, bool def)
+{
+    size_t key_len = strlen(key);
+    size_t depth = 0;
+    bool in_string = false;
+    bool escaped = false;
+    for (const char *p = json; *p; p++) {
+        if (in_string) {
+            if (escaped) escaped = false;
+            else if (*p == '\\') escaped = true;
+            else if (*p == '"') in_string = false;
+            continue;
+        }
+        if (*p == '{' || *p == '[') { depth++; continue; }
+        if (*p == '}' || *p == ']') { if (depth > 0) depth--; continue; }
+        if (*p != '"') continue;
+        if (depth == 1 && strncmp(p + 1, key, key_len) == 0 &&
+            p[1 + key_len] == '"') {
+            const char *value = p + key_len + 2;
+            while (*value == ' ' || *value == '\t') value++;
+            if (*value++ != ':') return def;
+            while (*value == ' ' || *value == '\t') value++;
+            if (strncmp(value, "true", 4) == 0) return true;
+            if (strncmp(value, "false", 5) == 0) return false;
+            return def;
+        }
+        in_string = true;
+    }
+    return def;
+}
+
 /* Extract the content of the LAST "assistant"/"user"/"system" message's
  * "content" field. For chat completions we render the full message array
  * as plain text (a real chat-template renderer is wired by the tokenizer
@@ -89,18 +120,31 @@ static void extract_messages_content(const char *json, char *out, size_t out_cap
 {
     size_t out_i = 0;
     const char *p = json;
-    while ((p = strstr(p, "\"content\"")) != NULL) {
-        p += strlen("\"content\"");
-        while (*p == ' ' || *p == '\t' || *p == ':') p++;
-        if (*p != '"') continue;
-        p++;
-        while (*p && *p != '"' && out_i + 1 < out_cap) {
-            if (*p == '\\' && *(p+1) == 'n') { out[out_i++] = '\n'; p += 2; }
-            else if (*p == '\\' && *(p+1) == '"') { out[out_i++] = '"'; p += 2; }
-            else out[out_i++] = *p++;
+    char role[64];
+    char content[8192];
+    while ((p = strstr(p, "\"role\"")) != NULL) {
+        if (!find_json_string_field(p, "role", role, sizeof(role))) break;
+        const char *content_key = strstr(p, "\"content\"");
+        const char *next_role = strstr(p + 6, "\"role\"");
+        if (!content_key || (next_role && next_role < content_key)) {
+            p += 6;
+            continue;
         }
-        if (*p == '"') p++;
-        if (out_i + 1 < out_cap) out[out_i++] = '\n';
+        if (!find_json_string_field(content_key, "content", content, sizeof(content))) break;
+        int written = snprintf(out + out_i, out_cap - out_i,
+                               "<|im_start|>%s\n%s<|im_end|>\n", role, content);
+        if (written < 0 || (size_t)written >= out_cap - out_i) {
+            out_i = out_cap - 1;
+            break;
+        }
+        out_i += (size_t)written;
+        p = content_key + strlen("\"content\"");
+    }
+    const char assistant[] = "<|im_start|>assistant\n";
+    size_t assistant_len = sizeof(assistant) - 1;
+    if (out_i > 0 && assistant_len < out_cap - out_i) {
+        memcpy(out + out_i, assistant, assistant_len);
+        out_i += assistant_len;
     }
     out[out_i] = '\0';
 }
@@ -277,28 +321,13 @@ static void handle_completion(OcOpenaiState *st, const OcHttpRequest *req,
     }
     int max_tokens = find_json_int_field(req->body, "max_tokens", 128);
     double temp = find_json_double_field(req->body, "temperature", 0.0);
-    bool stream = false;
-    if (strstr(req->body, "\"stream\"")) {
-        const char *p = strstr(req->body, "\"stream\"");
-        p = strchr(p + 8, ':');
-        if (p) { p++; while (*p==' '||*p=='\t') p++; if (*p=='t') stream=true; }
-    }
+    bool stream = find_json_bool_field(req->body, "stream", false);
 
     if (stream) {
-        char *text = generate_completion(st, prompt, max_tokens, (float)temp);
-        if (!text) { *out_body=oc_openai_error_json("gen failed","server_error"); *out_status=500; return; }
-        char *escaped_text = json_escape(text);
-        free(text);
-        if (!escaped_text) { *out_status=500; return; }
-        size_t cap = strlen(escaped_text) + 1024;
-        char *buf = malloc(cap);
-        if (buf) {
-            snprintf(buf, cap,
-                "data: {\"id\":\"cmpl-oxidize\",\"object\":\"text_completion\",\"choices\":[{\"text\":\"%s\",\"index\":0}]}\n\ndata: [DONE]\n\n", escaped_text);
-            free(escaped_text);
-            *out_body = buf; *out_status = 200; return;
-        }
-        free(escaped_text);
+        *out_body = oc_openai_error_json("streaming is not supported by this server",
+                                         "invalid_request_error");
+        *out_status = 400;
+        return;
     }
 
     char *text = generate_completion(st, prompt, max_tokens, (float)temp);
@@ -334,6 +363,12 @@ static void handle_chat_completion(OcOpenaiState *st, const OcHttpRequest *req,
     if (!st->model_loaded) {
         *out_body = oc_openai_error_json("no model loaded", "server_error");
         *out_status = 503;
+        return;
+    }
+    if (find_json_bool_field(req->body, "stream", false)) {
+        *out_body = oc_openai_error_json("streaming is not supported by this server",
+                                         "invalid_request_error");
+        *out_status = 400;
         return;
     }
     char prompt[16384] = {0};
