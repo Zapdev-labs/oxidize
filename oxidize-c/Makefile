@@ -48,7 +48,17 @@ liboxidize-c.a: $(LIB_OBJS)
 # needed. One test_<module>.c per src/<module>.c (see CONTRIBUTING.md).
 CRITERION_DIR      := tests/criterion
 CRITERION_INCLUDE  := $(CRITERION_DIR)/include
-CRITERION_LIB      := $(CRITERION_DIR)/lib/libcriterion.a
+CRITERION_ARCHIVE  := $(CRITERION_DIR)/lib/libcriterion.a
+
+# The checked-in archive is built for Linux.  macOS CI links Homebrew's native
+# Criterion build while continuing to compile against the vendored headers.
+ifeq ($(shell uname -s),Darwin)
+CRITERION_DEPS :=
+CRITERION_LINK := $(shell pkg-config --libs criterion)
+else
+CRITERION_DEPS := $(CRITERION_ARCHIVE)
+CRITERION_LINK := $(CRITERION_ARCHIVE)
+endif
 
 TEST_SRCS := $(wildcard tests/test_*.c)
 TEST_OBJS := $(TEST_SRCS:.c=.o)
@@ -69,8 +79,8 @@ TEST_LDFLAGS := $(TEST_SYSTEM_LIBS) -fsanitize=address,undefined
 # ASan-instrumented library objects (stems: src/core/error.c -> src/core/error.asan.o).
 LIB_ASAN_OBJS := $(LIB_SRCS:.c=.asan.o)
 
-test_runner: $(TEST_OBJS) $(LIB_ASAN_OBJS) $(CRITERION_LIB)
-	$(CC) $(CPPFLAGS) $(TEST_CFLAGS) -o $@ $(TEST_OBJS) $(LIB_ASAN_OBJS) $(CRITERION_LIB) $(TEST_LDFLAGS)
+test_runner: $(TEST_OBJS) $(LIB_ASAN_OBJS) $(CRITERION_DEPS)
+	$(CC) $(CPPFLAGS) $(TEST_CFLAGS) -o $@ $(TEST_OBJS) $(LIB_ASAN_OBJS) $(CRITERION_LINK) $(TEST_LDFLAGS)
 
 # Build library objects with ASan for the test_runner.
 src/%.asan.o: src/%.c
