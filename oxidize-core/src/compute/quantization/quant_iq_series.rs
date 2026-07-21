@@ -1,7 +1,7 @@
 use super::*;
 
 use super::iq_grids::{
-    iq1s_grid_decode, IQ2S_GRID, IQ2XXS_GRID, IQ2XS_GRID, IQ3XXS_GRID, KMASK_IQ2XS, KSIGNS_IQ2XS,
+    IQ2S_GRID, IQ2XS_GRID, IQ2XXS_GRID, IQ3XXS_GRID, KMASK_IQ2XS, KSIGNS_IQ2XS, iq1s_grid_decode,
 };
 
 const IQ1S_DELTA: f32 = 0.125;
@@ -248,8 +248,8 @@ pub fn dequantize_iq2_s_scalar(input: &[u8], output: &mut [f32]) -> Result<(), Q
             ];
             for l in 0..4 {
                 let dl = db[l / 2];
-                let grid_idx = qs[qs_ptr + l] as usize
-                    | ((qh[ib32] as usize) << (8 - 2 * l) & 0x300);
+                let grid_idx =
+                    qs[qs_ptr + l] as usize | ((qh[ib32] as usize) << (8 - 2 * l) & 0x300);
                 let grid = IQ2S_GRID[grid_idx].to_le_bytes();
                 let signs = qs[signs_ptr + l];
                 for j in 0..8 {

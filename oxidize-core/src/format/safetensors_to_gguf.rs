@@ -594,7 +594,11 @@ fn merge_hf_config_metadata(
     );
     // Routed-expert output scale (Hunyuan `router_scaling_factor`,
     // DeepSeek `routed_scaling_factor`).
-    if !insert_f32(meta, &prefix("expert_weights_scale"), "router_scaling_factor") {
+    if !insert_f32(
+        meta,
+        &prefix("expert_weights_scale"),
+        "router_scaling_factor",
+    ) {
         insert_f32(
             meta,
             &prefix("expert_weights_scale"),
@@ -1218,7 +1222,12 @@ fn convert_safetensors_dir_streaming(
         {
             expert_groups.entry((layer, exps)).or_default().insert(
                 expert,
-                (tensor_name.clone(), shard_path.clone(), dtype, shape.clone()),
+                (
+                    tensor_name.clone(),
+                    shard_path.clone(),
+                    dtype,
+                    shape.clone(),
+                ),
             );
             continue;
         }
@@ -1244,10 +1253,7 @@ fn convert_safetensors_dir_streaming(
                 );
             }
         }
-        let (_, _, dtype0, shape0) = experts
-            .values()
-            .next()
-            .expect("expert group is non-empty");
+        let (_, _, dtype0, shape0) = experts.values().next().expect("expert group is non-empty");
         if shape0.len() != 2 {
             bail!("blk.{layer}.{exps}: expected 2D expert weights, got {shape0:?}");
         }
@@ -1776,12 +1782,26 @@ mod tests {
 
         // 3 experts, each gate_proj shape [ff=2, hidden=2], distinct bytes so we
         // can assert expert-major ordering in the stacked output.
-        let f32v = |vals: [f32; 4]| vals.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>();
+        let f32v = |vals: [f32; 4]| {
+            vals.iter()
+                .flat_map(|v| v.to_le_bytes())
+                .collect::<Vec<u8>>()
+        };
         write_test_safetensors(
             &dir.join("shard-0.safetensors"),
             &[
-                ("model.layers.0.mlp.experts.0.gate_proj.weight", Dtype::F32, vec![2, 2], f32v([0.0, 0.0, 0.0, 0.0])),
-                ("model.layers.0.mlp.experts.1.gate_proj.weight", Dtype::F32, vec![2, 2], f32v([1.0, 1.0, 1.0, 1.0])),
+                (
+                    "model.layers.0.mlp.experts.0.gate_proj.weight",
+                    Dtype::F32,
+                    vec![2, 2],
+                    f32v([0.0, 0.0, 0.0, 0.0]),
+                ),
+                (
+                    "model.layers.0.mlp.experts.1.gate_proj.weight",
+                    Dtype::F32,
+                    vec![2, 2],
+                    f32v([1.0, 1.0, 1.0, 1.0]),
+                ),
             ],
         );
         write_test_safetensors(
