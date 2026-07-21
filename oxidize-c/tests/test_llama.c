@@ -250,3 +250,50 @@ Test(llama, gemma_config_defaults)
                        "Gemma norm_scale = sqrt(n_embd)");
     cr_assert(cfg.norm_scale > 1.0f, "norm_scale > 1 for Gemma");
 }
+
+/* ─── YaRN RoPE scaling ─────────────────────────────────────────────────
+ * YaRN should be identity when yarn_factor=0 or position <= orig_ctx.
+ * Beyond orig_ctx, YaRN should produce different output than standard RoPE. */
+Test(llama, yarn_identity_within_ctx)
+{
+    float in[] = {1.0f, 2.0f, 3.0f, 4.0f};
+    float out_yarn[4], out_normal[4];
+    /* position=10, orig_ctx=4096 → within ctx, YaRN = normal RoPE. */
+    oc_apply_rope_yarn_f32(in, out_yarn, 4, 4, 10, 10000.0f, 1.0f, 4096);
+    oc_apply_rope_f32(in, out_normal, 4, 4, 10, 10000.0f);
+    for (int i = 0; i < 4; i++) {
+        cr_assert_float_eq(out_yarn[i], out_normal[i], 1e-6f,
+                           "YaRN == RoPE within ctx at %d", i);
+    }
+}
+
+Test(llama, yarn_scales_beyond_ctx)
+{
+    float in[] = {1.0f, 2.0f, 3.0f, 4.0f};
+    float out_yarn[4], out_normal[4];
+    /* position=8192, orig_ctx=4096 → beyond ctx, YaRN should differ. */
+    oc_apply_rope_yarn_f32(in, out_yarn, 4, 4, 8192, 10000.0f, 1.0f, 4096);
+    oc_apply_rope_f32(in, out_normal, 4, 4, 8192, 10000.0f);
+    bool differs = false;
+    for (int i = 0; i < 4; i++) {
+        if (fabsf(out_yarn[i] - out_normal[i]) > 1e-4f) {
+            differs = true;
+            break;
+        }
+    }
+    cr_assert(differs, "YaRN should differ from RoPE beyond orig_ctx");
+}
+
+Test(llama, yarn_no_scaling_when_factor_zero)
+{
+    float in[] = {1.0f, 2.0f, 3.0f, 4.0f};
+    float out[4];
+    /* factor=0 → should behave as normal RoPE. */
+    oc_apply_rope_yarn_f32(in, out, 4, 4, 8192, 10000.0f, 0.0f, 4096);
+    float expected[4];
+    oc_apply_rope_f32(in, expected, 4, 4, 8192, 10000.0f);
+    for (int i = 0; i < 4; i++) {
+        cr_assert_float_eq(out[i], expected[i], 1e-6f,
+                           "factor=0 → normal RoPE at %d", i);
+    }
+}

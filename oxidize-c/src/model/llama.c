@@ -48,6 +48,12 @@ static float cfg_f32(const OcGgufFile *f, const char *key, float def)
     return oc_gguf_metadata_get_f32(f, key, &v) ? v : def;
 }
 
+static const char *cfg_str(const OcGgufFile *f, const char *key, const char *def)
+{
+    const char *v;
+    return oc_gguf_metadata_get_str(f, key, &v, NULL) ? v : def;
+}
+
 /* Build a weight view from a resolved tensor info. dims[0]=cols, dims[1]=rows
  * for 2-D; for 1-D (norms) dims[0]=n. */
 static OcWeightView view_from_info(const OcGgufMmappedFile *m,
@@ -147,10 +153,23 @@ static OcError parse_config(const OcGgufFile *f, const char *arch_str,
     /* Gemma-specific: GeGLU FFN + norm scaling. */
     cfg->uses_geglu = false;
     cfg->norm_scale = 1.0f;
+    /* YaRN long-context scaling. */
+    cfg->yarn_factor = 0.0f;
+    cfg->yarn_orig_ctx = 0;
     if (arch_str) {
         if (strncmp(arch_str, "gemma", 5) == 0) {
             cfg->uses_geglu = true;
             cfg->norm_scale = sqrtf((float)cfg->n_embd);
+        }
+    }
+    /* YaRN: read from GGUF metadata if present. */
+    snprintf(key, sizeof(key), "%srope.scaling.type", prefix);
+    const char *scale_type = cfg_str(f, key, NULL);
+    if (scale_type) {
+        if (strcmp(scale_type, "yarn") == 0) {
+            snprintf(key, sizeof(key), "%srope.scaling.factor", prefix);
+            cfg->yarn_factor = cfg_f32(f, key, 1.0f);
+            cfg->yarn_orig_ctx = cfg->n_ctx;
         }
     }
 
@@ -664,14 +683,26 @@ static void forward_layer(OcLlamaSession *s, uint32_t layer)
     matvec(&L->attn_k, s->normed, s->k, s->dequant_temp);
     matvec(&L->attn_v, s->normed, s->v, s->dequant_temp);
 
-    /* RoPE on Q (per head) and K (per kv head). */
+    /* RoPE on Q (per head) and K (per kv head). YaRN when configured. */
     for (uint32_t h = 0; h < c->n_head; h++) {
-        oc_apply_rope_f32(s->q + h * hd, s->q + h * hd, hd, c->rope_dim,
-                          s->pos, c->rope_theta);
+        if (c->yarn_factor > 0.0f) {
+            oc_apply_rope_yarn_f32(s->q + h * hd, s->q + h * hd, hd,
+                                   c->rope_dim, s->pos, c->rope_theta,
+                                   c->yarn_factor, c->yarn_orig_ctx);
+        } else {
+            oc_apply_rope_f32(s->q + h * hd, s->q + h * hd, hd, c->rope_dim,
+                              s->pos, c->rope_theta);
+        }
     }
     for (uint32_t h = 0; h < c->n_head_kv; h++) {
-        oc_apply_rope_f32(s->k + h * hd, s->k + h * hd, hd, c->rope_dim,
-                          s->pos, c->rope_theta);
+        if (c->yarn_factor > 0.0f) {
+            oc_apply_rope_yarn_f32(s->k + h * hd, s->k + h * hd, hd,
+                                   c->rope_dim, s->pos, c->rope_theta,
+                                   c->yarn_factor, c->yarn_orig_ctx);
+        } else {
+            oc_apply_rope_f32(s->k + h * hd, s->k + h * hd, hd, c->rope_dim,
+                              s->pos, c->rope_theta);
+        }
     }
 
     /* KV cache write at position `pos`. */
