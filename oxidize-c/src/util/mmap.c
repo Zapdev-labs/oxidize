@@ -31,6 +31,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #ifdef __linux__
 #include <fcntl.h>
@@ -38,7 +39,6 @@
 #include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
-#include <unistd.h>
 #endif
 
 #include "oxidize/log.h"
