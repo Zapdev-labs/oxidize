@@ -45,9 +45,11 @@ OcError oc_vector_push(OcVector *v, const void *elem);
 /* Append `n` elements from `elems`. Returns OC_OK or an error. */
 OcError oc_vector_push_n(OcVector *v, const void *elems, size_t n);
 
-/* Pointer to element at `i` (mutable; the const applies to the vector
- * structure, not the element storage). Returns NULL if out of range. */
-void *oc_vector_get(const OcVector *v, size_t i);
+/* Read-only pointer to element at `i`. Returns NULL if out of range. */
+const void *oc_vector_get(const OcVector *v, size_t i);
+
+/* Mutable pointer to element at `i`. Returns NULL if out of range. */
+void *oc_vector_get_mut(OcVector *v, size_t i);
 
 /* Current length. */
 static inline size_t oc_vector_len(const OcVector *v)

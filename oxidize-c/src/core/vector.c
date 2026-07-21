@@ -85,7 +85,13 @@ OcError oc_vector_push_n(OcVector *v, const void *elems, size_t n)
     return OC_OK;
 }
 
-void *oc_vector_get(const OcVector *v, size_t i)
+const void *oc_vector_get(const OcVector *v, size_t i)
+{
+    if (!v || i >= v->len) return NULL;
+    return (uint8_t *)v->data + i * v->elem_size;
+}
+
+void *oc_vector_get_mut(OcVector *v, size_t i)
 {
     if (!v || i >= v->len) return NULL;
     return (uint8_t *)v->data + i * v->elem_size;

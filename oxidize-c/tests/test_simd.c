@@ -43,7 +43,7 @@ Test(simd, caps_reports_known_level)
 
 static uint64_t g_rng_state = 0x0123456789abcdefULL;
 
-static uint32_t xorshift32(void)
+static uint32_t xorshift64(void)
 {
     uint64_t x = g_rng_state;
     x ^= x << 13;
@@ -56,7 +56,7 @@ static uint32_t xorshift32(void)
 static float rand_f32_in_range(float lo, float hi)
 {
     /* 24-bit mantissa random in [lo, hi). */
-    uint32_t u = xorshift32() & 0x00ffffffu;
+    uint32_t u = xorshift64() & 0x00ffffffu;
     float t = (float)u / (float)0x01000000u;   /* [0, 1) */
     return lo + t * (hi - lo);
 }
@@ -126,15 +126,13 @@ Test(simd, parity_q4_k_m) { assert_parity(OC_QUANT_Q4_K_M, 3); }
 Test(simd, kernel_q4_0_avx2_present_when_caps_say_so)
 {
     const OcSimdCaps *c = oc_simd_caps();
+    if (c->level < OC_SIMD_AVX2) cr_skip_test("AVX2 unavailable");
     /* Build a tiny 1-block Q4_0 buffer of zeros and ensure the kernel runs
      * without crashing; the parity test above already proves correctness. */
     uint8_t packed[OC_BLOCK_Q4_0_SIZE] = {0};
     float out[OC_QK4_0] = {0};
     bool ran = oc_simd_dequant_q4_0_avx2(packed, sizeof(packed), out, OC_QK4_0);
-    /* If the host supports AVX2, the kernel must run; otherwise it may still
-     * run (compiled in) but we don't require it. We only require no crash. */
-    (void)c; (void)ran;
-    cr_assert(true, "kernel executed without crashing");
+    cr_assert(ran, "AVX2 kernel should accept a valid block");
 }
 
 Test(simd, dispatch_returns_false_for_unsupported_type)

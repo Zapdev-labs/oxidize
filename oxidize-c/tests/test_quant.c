@@ -397,7 +397,6 @@ Test(quant, dequant_q4_k_handcrafted, .description = "VAL-QUANT-003: Q4_K dequan
     put_f16(buf, 0, 0x3C00);  /* d = 1.0 */
     put_f16(buf, 2, 0x0000);  /* min = 0 */
     buf[4] = 1u;  /* scales[0] (j<4): sc1 = 1 & 63 = 1, m1 = scales[4] & 63 = 0. Wait, scales[4+0]=scales[4] is for m1 of j=0. */
-    buf[8] = 1u;  /* scales[4+0]=scales[4] for m1 of j=0 → set to 1 so m1=1? No — we want m1=0. */
     /* Actually for j=0: sc1 = scales[0] & 63, m1 = scales[0+4] & 63 = scales[4] & 63.
      * sc2 = scales[1] & 63, m2 = scales[1+4] & 63 = scales[5] & 63.
      * We want sc1=1, m1=0, sc2=1, m2=0. So scales[0]=1, scales[1]=1, scales[4]=0, scales[5]=0. */
@@ -1024,4 +1023,3 @@ Test(quant, al_iq_constant_table_sha256, .description = "VAL-QUANT-016: AL/IQ/NV
             "%s SHA256 mismatch: got %s, want %s", tables[i].name, hex, tables[i].expected_sha);
     }
 }
-

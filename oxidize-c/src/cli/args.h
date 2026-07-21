@@ -14,7 +14,7 @@ typedef struct OcCliArgs {
     const char *model_path;
     const char *prompt;
     const char *prompt_file;
-    int        n_predict;
+    uint32_t   n_predict;
     int        threads;
     const char *numa;
     bool       auto_tune;
@@ -24,7 +24,7 @@ typedef struct OcCliArgs {
     const char *host;
     int        port;
     float      temperature;
-    int        top_k;
+    uint32_t   top_k;
     float      top_p;
     float      repeat_penalty;
     uint64_t   seed;

@@ -556,7 +556,7 @@ OcError oc_bpe_train(const char *const *corpus, size_t n_corpus,
         if (e != OC_OK) goto fail;
 
         for (size_t s = 0; s < oc_vector_len(&sequences); ++s) {
-            OcVector *seq = (OcVector *)oc_vector_get(&sequences, s);
+            OcVector *seq = (OcVector *)oc_vector_get_mut(&sequences, s);
             e = apply_merge_to_vec(seq, left, right, merged_id);
             if (e != OC_OK) goto fail;
         }
@@ -576,7 +576,7 @@ OcError oc_bpe_train(const char *const *corpus, size_t n_corpus,
 
     /* Free per-sample sequences. */
     for (size_t s = 0; s < oc_vector_len(&sequences); ++s) {
-        OcVector *seq = (OcVector *)oc_vector_get(&sequences, s);
+        OcVector *seq = (OcVector *)oc_vector_get_mut(&sequences, s);
         oc_vector_free(seq);
     }
     oc_vector_free(&sequences);
@@ -587,7 +587,7 @@ OcError oc_bpe_train(const char *const *corpus, size_t n_corpus,
 fail:
     oc_vector_free(&id_to_token);
     for (size_t s = 0; s < oc_vector_len(&sequences); ++s) {
-        OcVector *seq = (OcVector *)oc_vector_get(&sequences, s);
+        OcVector *seq = (OcVector *)oc_vector_get_mut(&sequences, s);
         oc_vector_free(seq);
     }
     oc_vector_free(&sequences);

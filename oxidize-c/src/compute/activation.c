@@ -11,10 +11,6 @@
 void oc_rms_norm_f32(const float *x, const float *weight, float *out,
                     size_t n, float eps)
 {
-    double sum_sq = 0.0;
-    for (size_t i = 0; i < n; i++) {
-        sum_sq += (double)x[i] * (double)x[i];
-    }
     /* Rust computes mean over n as f32 accumulate (the reference uses
      * `x.iter().map(|v| v*v).sum::<f32>()` then `/ n as f32`). To stay
      * bit-exact we mirror that: accumulate in f32, not f64. */
@@ -22,7 +18,6 @@ void oc_rms_norm_f32(const float *x, const float *weight, float *out,
     for (size_t i = 0; i < n; i++) {
         ss += x[i] * x[i];
     }
-    (void)sum_sq;
     float inv_rms = 1.0f / sqrtf(ss / (float)n + eps);
     for (size_t i = 0; i < n; i++) {
         out[i] = x[i] * inv_rms * weight[i];
@@ -78,7 +73,7 @@ void oc_apply_rope_f32(const float *in, float *out, size_t head_dim,
     size_t half = rope_len / 2;
     /* freq starts at 1.0 (= theta^0) and is multiplied by theta^(-2/head_dim)
      * each step. Pair i uses freq = theta^(-2*i/head_dim). */
-    float freq_mul = powf(theta, -2.0f / (float)rope_len);
+    float freq_mul = powf(theta, -2.0f / (float)head_dim);
     float freq = 1.0f;
     /* If in/out alias, we must read both halves before writing. Use a local
      * copy of the low half to avoid clobbering reads of the high half. */

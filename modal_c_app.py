@@ -9,7 +9,6 @@ Usage:
 """
 import modal
 import subprocess
-import sys
 
 REPO_ROOT = "/workspace"
 CUDA_TAG = "12.8.1-devel-ubuntu22.04"
@@ -130,7 +129,6 @@ def gpu_test(model: str = "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
     subprocess.run("pip install -q huggingface_hub", shell=True, check=True)
     from huggingface_hub import hf_hub_download
 
-    safe = re.sub(r"[^A-Za-z0-9]", "-", model)
     gguf = hf_hub_download(model, hf_file,
                            cache_dir="/root/.cache/oxidize/hf")
     print(f"Model: {gguf}", flush=True)

@@ -37,14 +37,15 @@ static bool parse_value_flag(OcCliArgs *a, const char *arg, const char *val,
                              bool *consumed_val)
 {
     *consumed_val = false;
+    if (val == NULL) return false;
     if (match(arg, "--model"))          { a->model_path = val; *consumed_val = true; }
     else if (match(arg, "--prompt"))     { a->prompt = val; *consumed_val = true; }
     else if (match(arg, "--prompt-file")){ a->prompt_file = val; *consumed_val = true; }
-    else if (match(arg, "--n-predict"))  { a->n_predict = atoi(val); *consumed_val = true; }
+    else if (match(arg, "--n-predict"))  { a->n_predict = val[0] == '-' ? 0u : (uint32_t)strtoul(val, NULL, 10); *consumed_val = true; }
     else if (match(arg, "--threads"))    { a->threads = atoi(val); *consumed_val = true; }
     else if (match(arg, "--numa"))       { a->numa = val; *consumed_val = true; }
     else if (match(arg, "--temperature")||match(arg,"--temp")){a->temperature=(float)atof(val);*consumed_val=true; }
-    else if (match(arg, "--top-k"))       { a->top_k = atoi(val); *consumed_val = true; }
+    else if (match(arg, "--top-k"))       { a->top_k = val[0] == '-' ? 0u : (uint32_t)strtoul(val, NULL, 10); *consumed_val = true; }
     else if (match(arg, "--top-p"))       { a->top_p = (float)atof(val); *consumed_val = true; }
     else if (match(arg, "--repeat-penalty")) { a->repeat_penalty = (float)atof(val); *consumed_val = true; }
     else if (match(arg, "--seed"))        { a->seed = strtoull(val, NULL, 10); *consumed_val = true; }

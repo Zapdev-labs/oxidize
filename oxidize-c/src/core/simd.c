@@ -64,15 +64,17 @@ static OcSimdCaps detect_caps(void)
 
 const OcSimdCaps *oc_simd_caps(void)
 {
-    static _Atomic int s_inited = 0;
+    static _Atomic int s_state = 0;
     static OcSimdCaps s_caps;
     int expected = 0;
-    if (atomic_compare_exchange_strong(&s_inited, &expected, 1)) {
+    if (atomic_compare_exchange_strong_explicit(&s_state, &expected, 1,
+                                                memory_order_acquire,
+                                                memory_order_relaxed)) {
         s_caps = detect_caps();
+        atomic_store_explicit(&s_state, 2, memory_order_release);
+    } else {
+        while (atomic_load_explicit(&s_state, memory_order_acquire) != 2) {}
     }
-    /* Subsequent callers see the fully-written struct. atomic_compare_exchange
-     * with seq_cst (default) provides the needed release/acquire fence; the
-     * `expected == 1` path below only reads a stable pointer. */
     return &s_caps;
 }
 

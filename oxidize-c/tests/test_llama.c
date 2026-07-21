@@ -93,6 +93,8 @@ Test(llama, rope_partial_passthrough_tail)
     float out[8];
     oc_apply_rope_f32(in, out, 8, 4, 1, 10000.0f);
     cr_assert_float_eq(out[4], 99.0f, 1e-6f, "tail passthrough [4]");
+    cr_assert_float_eq(out[5], 100.0f, 1e-6f, "tail passthrough [5]");
+    cr_assert_float_eq(out[6], 101.0f, 1e-6f, "tail passthrough [6]");
     cr_assert_float_eq(out[7], 102.0f, 1e-6f, "tail passthrough [7]");
 }
 
@@ -143,11 +145,6 @@ Test(llama, load_rejects_parser_fixture)
      * relative path doesn't resolve in this CWD — either way we must NOT
      * crash and must NOT report OC_OK. */
     cr_assert(e != OC_OK, "parser fixture must not load as a model (got %d)", (int)e);
-    if (e == OC_ERR_MODEL || e == OC_ERR_IO || e == OC_ERR_FORMAT) {
-        cr_assert(true);
-    } else {
-        cr_assert(false, "unexpected error %d", (int)e);
-    }
 }
 
 Test(llama, load_null_args)

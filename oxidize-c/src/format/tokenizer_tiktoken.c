@@ -700,7 +700,7 @@ OcError oc_tiktoken_load_from_gguf(const OcGgufFile *gguf, OcArena *arena,
      * they outlive the GGUF parse (the GGUF arena may be freed before the
      * tokenizer is). */
     for (size_t id = 0; id < vocab_size; ++id) {
-        OcByteSlice *slice = (OcByteSlice *)oc_vector_get(&tokens, id);
+        OcByteSlice *slice = (OcByteSlice *)oc_vector_get_mut(&tokens, id);
         uint8_t *copy = oc_arena_alloc(arena, slice->len ? slice->len : 1, 1);
         if (!copy) {
             oc_vector_free(&tokens); oc_vector_free(&merges);
@@ -723,7 +723,7 @@ OcError oc_tiktoken_load_from_gguf(const OcGgufFile *gguf, OcArena *arena,
 
     /* Build merge ranks + merged ids. */
     for (size_t rank = 0; rank < n_merges; ++rank) {
-        OcByteSlice *merge = (OcByteSlice *)oc_vector_get(&merges, rank);
+        OcByteSlice *merge = (OcByteSlice *)oc_vector_get_mut(&merges, rank);
         /* Split on first space byte. */
         const uint8_t *mb = merge->data;
         size_t mlen = merge->len;

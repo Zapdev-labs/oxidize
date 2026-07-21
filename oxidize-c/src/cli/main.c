@@ -102,9 +102,9 @@ static OcError run_generation(const OcCliArgs *args)
             fprintf(stderr, "error: cannot open prompt-file: %s\n", args->prompt_file);
             return OC_ERR_IO;
         }
-        fseek(f, 0, SEEK_END);
+        if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return OC_ERR_IO; }
         long sz = ftell(f);
-        fseek(f, 0, SEEK_SET);
+        if (sz < 0 || fseek(f, 0, SEEK_SET) != 0) { fclose(f); return OC_ERR_IO; }
         file_prompt = malloc((size_t)sz + 1);
         if (file_prompt == NULL) { fclose(f); return OC_ERR_OOM; }
         size_t rd = fread(file_prompt, 1, (size_t)sz, f);
@@ -207,7 +207,7 @@ static OcError run_generation(const OcCliArgs *args)
         scfg.type = OC_SAMPLER_GREEDY;
     } else if (args->top_k > 0) {
         scfg.type   = OC_SAMPLER_TOP_K;
-        scfg.top_k  = (uint32_t)args->top_k;
+        scfg.top_k  = args->top_k;
         scfg.top_p  = args->top_p;
     } else {
         scfg.type   = OC_SAMPLER_TOP_P;
@@ -233,7 +233,7 @@ static OcError run_generation(const OcCliArgs *args)
                     i, oc_error_msg(e));
             break;
         }
-        sess.pos++;
+        if (use_cuda) sess.pos++;
         if (recent_len < RECENT_CAP) recent[recent_len++] = ids[i];
         else recent[i % RECENT_CAP] = ids[i];
     }
@@ -245,11 +245,13 @@ static OcError run_generation(const OcCliArgs *args)
             e = oc_cuda_forward(&cuda_ctx, next_tok, sess.pos, logits);
         else
             e = oc_llama_forward(&sess, next_tok, logits);
-        sess.pos++;
+        if (use_cuda) sess.pos++;
     }
     if (e != OC_OK) {
         fprintf(stderr, "error: seed forward failed (%s)\n", oc_error_msg(e));
     } else {
+        if (recent_len < RECENT_CAP) recent[recent_len++] = next_tok;
+        else recent[sess.pos % RECENT_CAP] = next_tok;
         /* Decode + print the prompt's last token context implicitly; generate. */
         size_t emitted = 0;
         bool eos_reached = false;
@@ -257,6 +259,7 @@ static OcError run_generation(const OcCliArgs *args)
         while (emitted < (size_t)args->n_predict && !eos_reached && e == OC_OK) {
             uint32_t sampled = oc_sample(logits, model.cfg.vocab_size, &scfg,
                                         recent, recent_len);
+            scfg.seed++;
             if (tok.has_eos && sampled == tok.eos_id) { eos_reached = true; break; }
 
             /* Decode + print the sampled token. */
