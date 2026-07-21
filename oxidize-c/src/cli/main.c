@@ -394,6 +394,63 @@ int main(int argc, char **argv)
         return 0;
     }
 
+    if (args.bench) {
+        /* Benchmark mode: run N iterations and report tok/s. */
+        OcLlamaModel model;
+        OcError e = oc_llama_load(args.model_path, &model);
+        if (e != OC_OK) {
+            fprintf(stderr, "error: failed to load model (%s)\n", oc_error_msg(e));
+            return 1;
+        }
+        OcTokenizer tok;
+        e = oc_tokenizer_load_from_gguf(&model.gguf.unified, &tok);
+        if (e != OC_OK) {
+            fprintf(stderr, "error: tokenizer load failed (%s)\n", oc_error_msg(e));
+            oc_llama_free(&model);
+            return 1;
+        }
+        const char *prompt = args.prompt ? args.prompt : "The quick brown fox jumps over the lazy dog.";
+        uint32_t *ids = NULL;
+        size_t n_ids = 0;
+        OcSpecialTokenPolicy pol = tok.has_add_bos_token && tok.add_bos_token
+            ? OC_TOK_ADD_BOS : OC_TOK_DEFAULT;
+        oc_tokenizer_encode(&tok, prompt, pol, &ids, &n_ids);
+        if (n_ids == 0) { oc_tokenizer_free(&tok); oc_llama_free(&model); return 1; }
+
+        printf("benchmark: %zu prompt tokens, %d iterations, %d max tokens\n",
+               n_ids, args.bench_iterations, args.n_predict);
+        double best_tps = 0.0, sum_tps = 0.0;
+        for (int iter = 0; iter < args.bench_iterations; iter++) {
+            OcLlamaSession sess;
+            if (oc_llama_session_init(&model, &sess) != OC_OK) break;
+            float *logits = sess.logits;
+            for (size_t i = 0; i + 1 < n_ids; i++)
+                oc_llama_forward(&sess, ids[i], NULL);
+            oc_llama_forward(&sess, ids[n_ids - 1], logits);
+            clock_t start = clock();
+            size_t emitted = 0;
+            while (emitted < (size_t)args.n_predict) {
+                uint32_t sampled = oc_argmax(logits, model.cfg.vocab_size);
+                if (tok.has_eos && sampled == tok.eos_id) break;
+                emitted++;
+                if (oc_llama_forward(&sess, sampled, logits) != OC_OK) break;
+            }
+            double elapsed = (double)(clock() - start) / CLOCKS_PER_SEC;
+            double tps = (elapsed > 0) ? (double)emitted / elapsed : 0.0;
+            printf("  iter %d: %zu tokens in %.3fs = %.2f tok/s\n",
+                   iter + 1, emitted, elapsed, tps);
+            if (tps > best_tps) best_tps = tps;
+            sum_tps += tps;
+            oc_llama_session_free(&sess);
+        }
+        free(ids);
+        oc_tokenizer_free(&tok);
+        oc_llama_free(&model);
+        printf("benchmark: best=%.2f tok/s, avg=%.2f tok/s\n",
+               best_tps, sum_tps / args.bench_iterations);
+        return 0;
+    }
+
     OcError e = run_generation(&args);
     return (e == OC_OK) ? 0 : 1;
 }

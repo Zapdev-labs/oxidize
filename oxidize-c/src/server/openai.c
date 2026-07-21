@@ -225,6 +225,27 @@ static void handle_completion(OcOpenaiState *st, const OcHttpRequest *req,
     }
     int max_tokens = find_json_int_field(req->body, "max_tokens", 128);
     double temp = find_json_double_field(req->body, "temperature", 0.0);
+    bool stream = false;
+    if (strstr(req->body, "\"stream\"")) {
+        const char *p = strstr(req->body, "\"stream\"");
+        p = strchr(p + 8, ':');
+        if (p) { p++; while (*p==' '||*p=='\t') p++; if (*p=='t') stream=true; }
+    }
+
+    if (stream) {
+        char *text = generate_completion(st, prompt, max_tokens, (float)temp);
+        if (!text) { *out_body=oc_openai_error_json("gen failed","server_error"); *out_status=500; return; }
+        size_t cap = strlen(text) + 1024;
+        char *buf = malloc(cap);
+        if (buf) {
+            snprintf(buf, cap,
+                "data: {\"id\":\"cmpl-oxidize\",\"object\":\"text_completion\",\"choices\":[{\"text\":\"%s\",\"index\":0}]}\n\ndata: [DONE]\n\n", text);
+            free(text);
+            *out_body = buf; *out_status = 200; return;
+        }
+        free(text);
+    }
+
     char *text = generate_completion(st, prompt, max_tokens, (float)temp);
     if (text == NULL) {
         *out_body = oc_openai_error_json("generation failed", "server_error");
