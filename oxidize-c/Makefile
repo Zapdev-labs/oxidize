@@ -19,16 +19,15 @@ CPPFLAGS += -Iinclude
 CFLAGS   ?= -std=c11 -Wall -Wextra -Werror -O2
 LDFLAGS  ?= -lm -lpthread
 
-# Library sources (core + util + format + model + compute). Compute (quant +
-# SIMD dispatch) is added by the compute-worker feature; server/cli are added
-# by their respective feature workers.
+# Library sources for the core, utilities, formats, model, compute, server,
+# paged attention, backends, vision, mesh, and testable CLI arguments.
 LIB_SRCS := $(wildcard src/core/*.c src/util/*.c src/format/*.c src/model/*.c \
                        src/compute/*.c src/autotune/*.c src/server/*.c \
                        src/paged/*.c src/backends/cuda_stub.c \
                        src/vision/*.c src/mesh/*.c) src/cli/args.c
 LIB_OBJS := $(LIB_SRCS:.c=.o)
 
-# Binary sources (CLI main). Added by cli-flags-modes feature; for now a stub.
+# Binary source for the CLI entrypoint.
 BIN_SRCS := src/cli/main.c
 BIN_OBJS := $(BIN_SRCS:.c=.o)
 

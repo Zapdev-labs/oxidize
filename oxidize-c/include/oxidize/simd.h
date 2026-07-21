@@ -90,8 +90,8 @@ bool oc_simd_try_dequant(OcGgufQuantizationType qtype,
  * `__attribute__((target("avx2,f16c")))` and are present in every build;
  * the AVX-512 kernels are guarded by `target("avx512bw,avx512dq,avx512vnni")`
  * and likewise present in every build (the dispatcher selects them only on
- * capable hosts). These MUST NOT be called outside src/core/simd*.c — callers
- * go through oc_simd_try_dequant.
+ * capable hosts). Tests and benchmarks must check oc_simd_caps before calling
+ * them directly; production callers go through oc_simd_try_dequant.
  */
 bool oc_simd_dequant_q4_0_avx2(const uint8_t *src, size_t src_len,
                                float *dst, size_t value_count);

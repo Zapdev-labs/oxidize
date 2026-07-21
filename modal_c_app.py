@@ -9,9 +9,11 @@ Usage:
 """
 import modal
 import subprocess
+from typing import Final, Literal, assert_never
 
-REPO_ROOT = "/workspace"
-CUDA_TAG = "12.8.1-devel-ubuntu22.04"
+REPO_ROOT: Final = "/workspace"
+CUDA_TAG: Final = "12.8.1-devel-ubuntu22.04"
+Action = Literal["build", "test", "gpu_test", "bench"]
 
 IGNORE = [
     "target/**", ".git/**", "models/**", "dist/**", "node_modules/**",
@@ -250,3 +252,19 @@ def all_bench() -> str:
     """Run CUDA build + GPU benchmark sequentially."""
     cuda_build.remote()
     return gpu_bench.remote()
+
+
+@app.local_entrypoint()
+def main(action: Action = "test") -> None:
+    match action:
+        case "build":
+            print(cpu_build.remote())
+            print(cuda_build.remote())
+        case "test":
+            print(cpu_test.remote())
+        case "gpu_test":
+            print(gpu_test.remote())
+        case "bench":
+            print(gpu_bench.remote())
+        case unreachable:
+            assert_never(unreachable)

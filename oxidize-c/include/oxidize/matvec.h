@@ -43,9 +43,8 @@ void oc_matvec_quantized(OcGgufQuantizationType qtype, const uint8_t *data,
  * SAME input vector in one call (so the input is read once from cache).
  * Used for the fused Q/K/V (or gate/up) projections. `n_outs` is the number
  * of outputs; `datas[i]`, `rows[i]`, `row_bytes[i]` describe each weight
- * matrix; results are written to `outs[i]`. `temp` must hold `max_cols` f32
- * where `max_cols` is the largest `cols[i]`. All matrices share `cols[0]`
- * (the input dimension) in the Llama case; callers pass a single `cols`. */
+ * matrix; results are written to `outs[i]`. `temp` must hold `cols` f32.
+ * All matrices share that input dimension. */
 void oc_matvec_quantized_fused(OcGgufQuantizationType qtype,
                                const uint8_t *const *datas, const size_t *rows,
                                size_t cols, const size_t *row_bytes,

@@ -81,7 +81,10 @@ static void assert_parity(OcGgufQuantizationType qtype, size_t n_blocks)
     float *out_scalar = calloc(value_count, sizeof(float));
     float *out_simd = calloc(value_count, sizeof(float));
     uint8_t *packed = calloc(packed_len, 1);
-    cr_assert_not_null(src && out_scalar && out_simd && packed, "OOM");
+    cr_assert_not_null(src, "OOM");
+    cr_assert_not_null(out_scalar, "OOM");
+    cr_assert_not_null(out_simd, "OOM");
+    cr_assert_not_null(packed, "OOM");
 
     /* Random source in a modest range that survives quantization round-trip
      * without denormal/overflow; [-1, 1) covers the active range of weights. */
@@ -111,6 +114,34 @@ static void assert_parity(OcGgufQuantizationType qtype, size_t n_blocks)
     cr_assert_eq(memcmp(out_scalar, out_simd, value_count * sizeof(float)), 0,
                 "SIMD dequant disagrees with scalar for type %u",
                 (unsigned)qtype);
+
+    const OcSimdCaps *caps = oc_simd_caps();
+    if (caps->level >= OC_SIMD_AVX2) {
+        bool ran = false;
+        switch (qtype) {
+        case OC_QUANT_Q4_0: ran = oc_simd_dequant_q4_0_avx2(packed, packed_len, out_simd, value_count); break;
+        case OC_QUANT_Q4_1: ran = oc_simd_dequant_q4_1_avx2(packed, packed_len, out_simd, value_count); break;
+        case OC_QUANT_Q8_0: ran = oc_simd_dequant_q8_0_avx2(packed, packed_len, out_simd, value_count); break;
+        case OC_QUANT_Q4_K_S:
+        case OC_QUANT_Q4_K_M: ran = oc_simd_dequant_q4_k_avx2(packed, packed_len, out_simd, value_count); break;
+        default: break;
+        }
+        cr_assert(ran);
+        cr_assert_eq(memcmp(out_scalar, out_simd, value_count * sizeof(float)), 0);
+    }
+    if (caps->level >= OC_SIMD_AVX512) {
+        bool ran = false;
+        switch (qtype) {
+        case OC_QUANT_Q4_0: ran = oc_simd_dequant_q4_0_avx512(packed, packed_len, out_simd, value_count); break;
+        case OC_QUANT_Q4_1: ran = oc_simd_dequant_q4_1_avx512(packed, packed_len, out_simd, value_count); break;
+        case OC_QUANT_Q8_0: ran = oc_simd_dequant_q8_0_avx512(packed, packed_len, out_simd, value_count); break;
+        case OC_QUANT_Q4_K_S:
+        case OC_QUANT_Q4_K_M: ran = oc_simd_dequant_q4_k_avx512(packed, packed_len, out_simd, value_count); break;
+        default: break;
+        }
+        cr_assert(ran);
+        cr_assert_eq(memcmp(out_scalar, out_simd, value_count * sizeof(float)), 0);
+    }
 
     free(src); free(out_scalar); free(out_simd); free(packed);
 }

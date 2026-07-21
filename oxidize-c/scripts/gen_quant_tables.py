@@ -37,10 +37,12 @@ def extract_array(text: str, name: str, ty: str) -> str:
 
 
 def normalize_nums(body: str) -> list[str]:
-    # Strip Rust suffixes (_i64 etc. not present here) and comments.
-    # Numbers look like 0x..., decimals, with optional trailing f32/f64.
-    tokens = re.findall(r"0x[0-9a-fA-F]+|-?\d+\.?\d*(?:e[+-]?\d+)?", body)
-    return tokens
+    without_comments = re.sub(r"//.*?$|/\*.*?\*/", "", body, flags=re.MULTILINE | re.DOTALL)
+    number = re.compile(
+        r"(?<![\w.])(-?(?:0x[0-9a-fA-F]+|\d+(?:\.\d*)?(?:[eE][+-]?\d+)?))"
+        r"(?:_[iuf]\d+|[iuf]\d+)?(?![\w.])"
+    )
+    return [match.group(1) for match in number.finditer(without_comments)]
 
 
 def fmt_c_array(name: str, ctype: str, tokens: list[str], per_line: int = 8) -> str:
