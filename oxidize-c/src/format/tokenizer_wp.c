@@ -41,6 +41,8 @@
 #include "oxidize/log.h"
 #include "oxidize/vector.h"
 
+#include "utf8_utils.h"
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -67,46 +69,7 @@ struct OcWordPieceTokenizer {
 
 /* ─── UTF-8 + Unicode helpers ────────────────────────────────────────── */
 
-/* Decode 1..4 bytes of UTF-8 starting at `s` (up to `len` bytes available).
- * Writes the codepoint to `*cp` and returns the number of bytes consumed.
- * Returns 1 for invalid UTF-8 (treats the lead byte as a lone codepoint). */
-static size_t wp_utf8_decode(const char *s, size_t len, uint32_t *cp)
-{
-    if (len == 0) { *cp = 0; return 0; }
-    unsigned char c0 = (unsigned char)s[0];
-    if (c0 < 0x80) { *cp = c0; return 1; }
-    if ((c0 & 0xE0) == 0xC0 && len >= 2) {
-        unsigned char c1 = (unsigned char)s[1];
-        if ((c1 & 0xC0) == 0x80) {
-            *cp = ((uint32_t)(c0 & 0x1F) << 6) | (c1 & 0x3F);
-            return 2;
-        }
-    }
-    if ((c0 & 0xF0) == 0xE0 && len >= 3) {
-        unsigned char c1 = (unsigned char)s[1];
-        unsigned char c2 = (unsigned char)s[2];
-        if ((c1 & 0xC0) == 0x80 && (c2 & 0xC0) == 0x80) {
-            *cp = ((uint32_t)(c0 & 0x0F) << 12)
-                | ((uint32_t)(c1 & 0x3F) << 6)
-                | (c2 & 0x3F);
-            return 3;
-        }
-    }
-    if ((c0 & 0xF8) == 0xF0 && len >= 4) {
-        unsigned char c1 = (unsigned char)s[1];
-        unsigned char c2 = (unsigned char)s[2];
-        unsigned char c3 = (unsigned char)s[3];
-        if ((c1 & 0xC0) == 0x80 && (c2 & 0xC0) == 0x80 && (c3 & 0xC0) == 0x80) {
-            *cp = ((uint32_t)(c0 & 0x07) << 18)
-                | ((uint32_t)(c1 & 0x3F) << 12)
-                | ((uint32_t)(c2 & 0x3F) << 6)
-                | (c3 & 0x3F);
-            return 4;
-        }
-    }
-    *cp = c0;
-    return 1;
-}
+/* UTF-8 codepoint decode/encode are shared (utf8_utils.h). */
 
 /* Whether a Unicode codepoint has the White_Space property (mirrors Rust's
  * `char::is_whitespace`). The set is drawn from the Unicode White_Space
@@ -138,35 +101,12 @@ static size_t wp_char_boundaries(const char *text, size_t text_len, size_t *out)
     while (i < text_len) {
         out[n++] = i;
         uint32_t cp;
-        size_t adv = wp_utf8_decode(text + i, text_len - i, &cp);
+        size_t adv = oc_utf8_decode_cp(text + i, text_len - i, &cp);
         if (adv == 0) adv = 1;
         i += adv;
     }
     out[n++] = text_len;
     return n;
-}
-
-/* Encode a single codepoint as UTF-8 into `buf` (>= 5 bytes). Returns the
- * number of bytes written. */
-static size_t wp_utf8_encode(uint32_t cp, char *buf)
-{
-    if (cp <= 0x7F) { buf[0] = (char)cp; return 1; }
-    if (cp <= 0x7FF) {
-        buf[0] = (char)(0xC0 | (cp >> 6));
-        buf[1] = (char)(0x80 | (cp & 0x3F));
-        return 2;
-    }
-    if (cp <= 0xFFFF) {
-        buf[0] = (char)(0xE0 | (cp >> 12));
-        buf[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
-        buf[2] = (char)(0x80 | (cp & 0x3F));
-        return 3;
-    }
-    buf[0] = (char)(0xF0 | (cp >> 18));
-    buf[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
-    buf[2] = (char)(0x80 | ((cp >> 6) & 0x3F));
-    buf[3] = (char)(0x80 | (cp & 0x3F));
-    return 4;
 }
 
 /* ─── Constructor (mirrors Rust `WordPieceTokenizer::new`) ──────────── */
@@ -327,7 +267,7 @@ OcError oc_wp_encode(const OcWordPieceTokenizer *wp, const char *text,
     const char *end = text + text_len;
     while (p < end) {
         uint32_t cp;
-        size_t adv = wp_utf8_decode(p, (size_t)(end - p), &cp);
+        size_t adv = oc_utf8_decode_cp(p, (size_t)(end - p), &cp);
         if (adv == 0) adv = 1;
 
         if (wp_is_whitespace(cp)) {
@@ -355,7 +295,7 @@ OcError oc_wp_encode(const OcWordPieceTokenizer *wp, const char *text,
 
             /* Emit the whitespace char's id (or unk). */
             char ws_buf[5];
-            size_t ws_len = wp_utf8_encode(cp, ws_buf);
+            size_t ws_len = oc_utf8_encode_cp(cp, ws_buf);
             ws_buf[ws_len] = '\0';
             void *vp;
             if (oc_hashtable_get(wp->vocab, ws_buf, &vp)) {
@@ -515,6 +455,7 @@ OcError oc_wp_load_from_gguf(const OcGgufFile *gguf, OcArena *arena,
     wp->id_to_token = oc_arena_alloc(arena, vocab_size * sizeof(char *), sizeof(void *));
     if (!wp->vocab || !wp->id_to_token) {
         oc_vector_free(&tokens);
+        oc_wp_free(wp);
         return OC_ERR_OOM;
     }
 

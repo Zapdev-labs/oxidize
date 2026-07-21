@@ -45,10 +45,11 @@ typedef enum {
 
 /* Policy for handling special-token strings in user input.
  *
- *   OC_TOK_DISALLOW_SPECIAL — every byte of the input (including any text
- *     that happens to look like a special-token marker such as `<|im_start|>`)
- *     is tokenized via the byte-level BPE path; no special-token id is ever
- *     emitted. This is the injection-prevention mode (VAL-TOK-004).
+ *   OC_TOK_DISALLOW_SPECIAL — no special-token id is ever emitted. This is
+ *     the injection-prevention mode (VAL-TOK-004). For BPE, marker text such
+ *     as `<|im_start|>` is tokenized via the byte-level BPE path instead;
+ *     for SentencePiece/WordPiece/Tiktoken, any special-token id produced by
+ *     ordinary vocab lookups is filtered from the output.
  *
  *   OC_TOK_ALLOW_SPECIAL    — control / user-defined pieces (e.g. `<|im_start|>`,
  *     `<|im_end|>`) are matched verbatim and emitted as their single id before

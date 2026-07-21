@@ -18,15 +18,16 @@
 #include "oxidize/cuda.h"
 #include "oxidize/activation.h"
 #include "oxidize/llama.h"
-#include "oxidize/quantization.h"
+#include "oxidize/quant.h"
 
 #include <cuda_runtime.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 /* ─── CUDA error checking ──────────────────────────────────────────────── */
 
-#define OC_CUDA_CHECK(call, label) \
+#define OC_CUDA_CHECK(call) \
     do { \
         cudaError_t _e = (call); \
         if (_e != cudaSuccess) { \
@@ -161,6 +162,11 @@ __global__ void k_attention_head(
 
     float inv_sqrt_d = 1.0f / sqrtf((float)head_dim);
 
+    /* Zero output. */
+    for (uint32_t d = threadIdx.x; d < head_dim; d += blockDim.x)
+        out[d] = 0.0f;
+    __syncthreads();
+
     /* Thread-local max for online softmax. */
     float max_score = -INFINITY;
 
@@ -239,26 +245,24 @@ static OcError upload_weight_view(const OcWeightView *view, float **d_out,
     size_t cols = view->cols;
     size_t total = rows * cols;
 
-    OC_CUDA_CHECK(cudaMalloc((void **)d_out, total * sizeof(float)), err);
+    OC_CUDA_CHECK(cudaMalloc((void **)d_out, total * sizeof(float)));
 
     for (size_t r = 0; r < rows; r++) {
         if (view->qtype == OC_QUANT_F32) {
-            const float *src = (const float *)view->data + r * view->cols;
+            const float *src = (const float *)view->data + r * cols;
             cudaMemcpyAsync(*d_out + r * cols, src, cols * sizeof(float),
                            cudaMemcpyHostToDevice, 0);
         } else {
             /* Dequantize on host then upload. */
-            oc_quant_dequant_row(view->qtype,
-                view->data + r * view->row_bytes,
-                view->row_bytes, host_temp, cols);
+            const uint8_t *src = view->data + r * view->row_bytes;
+            oc_quant_dequant_row(view->qtype, src, view->row_bytes,
+                                 host_temp, cols);
             cudaMemcpyAsync(*d_out + r * cols, host_temp, cols * sizeof(float),
                            cudaMemcpyHostToDevice, 0);
         }
     }
     cudaDeviceSynchronize();
     return OC_OK;
-err:
-    return OC_ERR_BACKEND;
 }
 
 /* ─── Public API ────────────────────────────────────────────────────────── */
@@ -293,28 +297,35 @@ OcError oc_cuda_init(OcCudaContext *ctx, const OcLlamaModel *model)
     size_t kv_row = (size_t)c->n_head_kv * c->head_dim;
     size_t kv_total = (size_t)c->n_layer * c->n_ctx * kv_row;
 
-    OC_CUDA_CHECK(cudaMalloc(&ctx->d_x, embd * sizeof(float)), err);
-    OC_CUDA_CHECK(cudaMalloc(&ctx->d_normed, embd * sizeof(float)), err);
-    OC_CUDA_CHECK(cudaMalloc(&ctx->d_q, q_size * sizeof(float)), err);
-    OC_CUDA_CHECK(cudaMalloc(&ctx->d_k, kv_row * sizeof(float)), err);
-    OC_CUDA_CHECK(cudaMalloc(&ctx->d_v, kv_row * sizeof(float)), err);
-    OC_CUDA_CHECK(cudaMalloc(&ctx->d_attn_out, q_size * sizeof(float)), err);
-    OC_CUDA_CHECK(cudaMalloc(&ctx->d_ffn_gate_buf, c->n_ff * sizeof(float)), err);
-    OC_CUDA_CHECK(cudaMalloc(&ctx->d_ffn_up_buf, c->n_ff * sizeof(float)), err);
-    OC_CUDA_CHECK(cudaMalloc(&ctx->d_logits, c->vocab_size * sizeof(float)), err);
-    OC_CUDA_CHECK(cudaMalloc(&ctx->d_kv_k, kv_total * sizeof(float)), err);
-    OC_CUDA_CHECK(cudaMalloc(&ctx->d_kv_v, kv_total * sizeof(float)), err);
+    OC_CUDA_CHECK(cudaMalloc(&ctx->d_x, embd * sizeof(float)));
+    OC_CUDA_CHECK(cudaMalloc(&ctx->d_normed, embd * sizeof(float)));
+    OC_CUDA_CHECK(cudaMalloc(&ctx->d_q, q_size * sizeof(float)));
+    OC_CUDA_CHECK(cudaMalloc(&ctx->d_k, kv_row * sizeof(float)));
+    OC_CUDA_CHECK(cudaMalloc(&ctx->d_v, kv_row * sizeof(float)));
+    OC_CUDA_CHECK(cudaMalloc(&ctx->d_attn_out, q_size * sizeof(float)));
+    OC_CUDA_CHECK(cudaMalloc(&ctx->d_ffn_gate_buf, c->n_ff * sizeof(float)));
+    OC_CUDA_CHECK(cudaMalloc(&ctx->d_ffn_up_buf, c->n_ff * sizeof(float)));
+    OC_CUDA_CHECK(cudaMalloc(&ctx->d_logits, c->vocab_size * sizeof(float)));
+    OC_CUDA_CHECK(cudaMalloc(&ctx->d_kv_k, kv_total * sizeof(float)));
+    OC_CUDA_CHECK(cudaMalloc(&ctx->d_kv_v, kv_total * sizeof(float)));
+    fprintf(stderr, "cuda: KV cache allocated %.1f MB each\n",
+            kv_total * sizeof(float) / 1e6);
 
     /* Upload embeddings. */
-    float *host_temp = (float *)malloc(embd * sizeof(float));
+    /* Allocate host temp large enough for the largest weight row. */
+    size_t max_cols = embd;
+    if (c->n_ff > max_cols) max_cols = c->n_ff;
+    if (c->vocab_size > max_cols) max_cols = c->vocab_size;
+    float *host_temp = (float *)malloc(max_cols * sizeof(float));
     if (!host_temp) return OC_ERR_OOM;
 
     OcError e = upload_weight_view(&model->tok_embeddings, &ctx->d_tok_embeddings,
                                    host_temp);
     if (e != OC_OK) { free(host_temp); return e; }
+    fprintf(stderr, "cuda: embeddings uploaded\n");
 
     /* Upload final norm. */
-    OC_CUDA_CHECK(cudaMalloc(&ctx->d_final_norm, embd * sizeof(float)), err);
+    OC_CUDA_CHECK(cudaMalloc(&ctx->d_final_norm, embd * sizeof(float)));
     cudaMemcpy(ctx->d_final_norm, model->final_norm, embd * sizeof(float),
               cudaMemcpyHostToDevice);
 
@@ -339,29 +350,34 @@ OcError oc_cuda_init(OcCudaContext *ctx, const OcLlamaModel *model)
 
     for (uint32_t l = 0; l < c->n_layer; l++) {
         const OcLlamaLayer *L = &model->layers[l];
-        upload_weight_view(&L->attn_q, &ctx->d_attn_q[l], host_temp);
-        upload_weight_view(&L->attn_k, &ctx->d_attn_k[l], host_temp);
-        upload_weight_view(&L->attn_v, &ctx->d_attn_v[l], host_temp);
-        upload_weight_view(&L->attn_output, &ctx->d_attn_output[l], host_temp);
-        upload_weight_view(&L->ffn_gate, &ctx->d_ffn_gate[l], host_temp);
-        upload_weight_view(&L->ffn_up, &ctx->d_ffn_up[l], host_temp);
-        upload_weight_view(&L->ffn_down, &ctx->d_ffn_down[l], host_temp);
-        OC_CUDA_CHECK(cudaMalloc(&ctx->d_attn_norm[l], embd * sizeof(float)), err);
+        fprintf(stderr, "cuda: uploading layer %u/%u (q rows=%zu cols=%zu qtype=%d)\n",
+                l, c->n_layer, L->attn_q.rows, L->attn_q.cols, (int)L->attn_q.qtype);
+        e = upload_weight_view(&L->attn_q, &ctx->d_attn_q[l], host_temp);
+        if (e != OC_OK) { free(host_temp); return e; }
+        e = upload_weight_view(&L->attn_k, &ctx->d_attn_k[l], host_temp);
+        if (e != OC_OK) { free(host_temp); return e; }
+        e = upload_weight_view(&L->attn_v, &ctx->d_attn_v[l], host_temp);
+        if (e != OC_OK) { free(host_temp); return e; }
+        e = upload_weight_view(&L->attn_output, &ctx->d_attn_output[l], host_temp);
+        if (e != OC_OK) { free(host_temp); return e; }
+        e = upload_weight_view(&L->ffn_gate, &ctx->d_ffn_gate[l], host_temp);
+        if (e != OC_OK) { free(host_temp); return e; }
+        e = upload_weight_view(&L->ffn_up, &ctx->d_ffn_up[l], host_temp);
+        if (e != OC_OK) { free(host_temp); return e; }
+        e = upload_weight_view(&L->ffn_down, &ctx->d_ffn_down[l], host_temp);
+        if (e != OC_OK) { free(host_temp); return e; }
+        OC_CUDA_CHECK(cudaMalloc(&ctx->d_attn_norm[l], embd * sizeof(float)));
         cudaMemcpy(ctx->d_attn_norm[l], L->attn_norm, embd * sizeof(float),
                   cudaMemcpyHostToDevice);
-        OC_CUDA_CHECK(cudaMalloc(&ctx->d_ffn_norm[l], embd * sizeof(float)), err);
+        OC_CUDA_CHECK(cudaMalloc(&ctx->d_ffn_norm[l], embd * sizeof(float)));
         cudaMemcpy(ctx->d_ffn_norm[l], L->ffn_norm, embd * sizeof(float),
                   cudaMemcpyHostToDevice);
     }
+    fprintf(stderr, "cuda: all layers uploaded\n");
 
     free(host_temp);
     ctx->initialized = true;
     return OC_OK;
-
-err:
-    free(host_temp);
-    oc_cuda_free(ctx);
-    return OC_ERR_BACKEND;
 }
 
 OcError oc_cuda_forward(OcCudaContext *ctx, uint32_t token, uint32_t pos,
@@ -382,30 +398,37 @@ OcError oc_cuda_forward(OcCudaContext *ctx, uint32_t token, uint32_t pos,
     /* 1. Embedding lookup. */
     k_embed_lookup<<<(embd + block - 1) / block, block>>>(
         ctx->d_tok_embeddings, token, embd, ctx->d_x);
+    OC_CUDA_CHECK(cudaGetLastError());
 
     /* 2. Per-layer forward. */
     for (uint32_t l = 0; l < ctx->n_layer; l++) {
         /* Pre-attention RMSNorm. */
         k_rms_norm<<<1, block, block * sizeof(float)>>>(
             ctx->d_x, ctx->d_attn_norm[l], ctx->d_normed, embd, eps, 1.0f);
+        OC_CUDA_CHECK(cudaGetLastError());
 
         /* Q/K/V projections. */
         k_matvec_f32<<<ctx->n_head * head_dim, block, block * sizeof(float)>>>(
             ctx->d_attn_q[l], (size_t)n_head * head_dim, embd,
             ctx->d_normed, ctx->d_q);
+        OC_CUDA_CHECK(cudaGetLastError());
         k_matvec_f32<<<n_head_kv * head_dim, block, block * sizeof(float)>>>(
             ctx->d_attn_k[l], (size_t)n_head_kv * head_dim, embd,
             ctx->d_normed, ctx->d_k);
+        OC_CUDA_CHECK(cudaGetLastError());
         k_matvec_f32<<<n_head_kv * head_dim, block, block * sizeof(float)>>>(
             ctx->d_attn_v[l], (size_t)n_head_kv * head_dim, embd,
             ctx->d_normed, ctx->d_v);
+        OC_CUDA_CHECK(cudaGetLastError());
 
         /* RoPE on Q. */
         k_apply_rope<<<n_head, block>>>(
             ctx->d_q, head_dim, head_dim, pos, 10000.0f, n_head);
+        OC_CUDA_CHECK(cudaGetLastError());
         /* RoPE on K. */
         k_apply_rope<<<n_head_kv, block>>>(
             ctx->d_k, head_dim, head_dim, pos, 10000.0f, n_head_kv);
+        OC_CUDA_CHECK(cudaGetLastError());
 
         /* KV cache write. */
         size_t kv_total = (size_t)n_head_kv * head_dim;
@@ -413,6 +436,10 @@ OcError oc_cuda_forward(OcCudaContext *ctx, uint32_t token, uint32_t pos,
             ctx->d_kv_k + (size_t)l * ctx->n_ctx * kv_total,
             ctx->d_kv_v + (size_t)l * ctx->n_ctx * kv_total,
             ctx->d_k, ctx->d_v, pos, n_head_kv, head_dim, ctx->n_ctx);
+        OC_CUDA_CHECK(cudaGetLastError());
+
+        /* Zero attention output before accumulation. */
+        cudaMemsetAsync(ctx->d_attn_out, 0, (size_t)n_head * head_dim * sizeof(float));
 
         /* Attention per head. */
         for (uint32_t h = 0; h < n_head; h++) {
@@ -423,43 +450,57 @@ OcError oc_cuda_forward(OcCudaContext *ctx, uint32_t token, uint32_t pos,
                 ctx->d_kv_v + (size_t)l * ctx->n_ctx * kv_total,
                 ctx->d_attn_out + h * head_dim,
                 kv_head, n_head_kv, head_dim, pos + 1);
+            OC_CUDA_CHECK(cudaGetLastError());
         }
 
         /* Output projection. */
         k_matvec_f32<<<embd, block, block * sizeof(float)>>>(
             ctx->d_attn_output[l], embd, (size_t)n_head * head_dim,
             ctx->d_attn_out, ctx->d_normed);
+        OC_CUDA_CHECK(cudaGetLastError());
         k_residual_add<<<(embd + block - 1) / block, block>>>(
             ctx->d_x, ctx->d_normed, embd);
+        OC_CUDA_CHECK(cudaGetLastError());
 
         /* Pre-FFN RMSNorm. */
         k_rms_norm<<<1, block, block * sizeof(float)>>>(
             ctx->d_x, ctx->d_ffn_norm[l], ctx->d_normed, embd, eps, 1.0f);
+        OC_CUDA_CHECK(cudaGetLastError());
 
         /* FFN: gate, up, SwiGLU, down. */
         k_matvec_f32<<<n_ff, block, block * sizeof(float)>>>(
             ctx->d_ffn_gate[l], n_ff, embd, ctx->d_normed, ctx->d_ffn_gate_buf);
+        OC_CUDA_CHECK(cudaGetLastError());
         k_matvec_f32<<<n_ff, block, block * sizeof(float)>>>(
             ctx->d_ffn_up[l], n_ff, embd, ctx->d_normed, ctx->d_ffn_up_buf);
+        OC_CUDA_CHECK(cudaGetLastError());
         k_swiglu<<<(n_ff + block - 1) / block, block>>>(
             ctx->d_ffn_gate_buf, ctx->d_ffn_up_buf, n_ff);
+        OC_CUDA_CHECK(cudaGetLastError());
         k_matvec_f32<<<embd, block, block * sizeof(float)>>>(
             ctx->d_ffn_down[l], embd, n_ff, ctx->d_ffn_gate_buf, ctx->d_normed);
+        OC_CUDA_CHECK(cudaGetLastError());
         k_residual_add<<<(embd + block - 1) / block, block>>>(
             ctx->d_x, ctx->d_normed, embd);
+        OC_CUDA_CHECK(cudaGetLastError());
     }
 
     /* 3. Final norm + lm_head. */
     k_rms_norm<<<1, block, block * sizeof(float)>>>(
         ctx->d_x, ctx->d_final_norm, ctx->d_normed, embd, eps, 1.0f);
+    OC_CUDA_CHECK(cudaGetLastError());
 
     if (logits_out != NULL) {
         k_matvec_f32<<<ctx->vocab_size, block, block * sizeof(float)>>>(
             ctx->d_output, ctx->vocab_size, embd,
             ctx->d_normed, ctx->d_logits);
+        OC_CUDA_CHECK(cudaGetLastError());
+        cudaDeviceSynchronize();
         cudaMemcpy(logits_out, ctx->d_logits,
                   ctx->vocab_size * sizeof(float),
                   cudaMemcpyDeviceToHost);
+    } else {
+        cudaDeviceSynchronize();
     }
 
     return OC_OK;

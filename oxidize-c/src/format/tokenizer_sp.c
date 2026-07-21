@@ -41,6 +41,8 @@
 #include "oxidize/log.h"
 #include "oxidize/vector.h"
 
+#include "utf8_utils.h"
+
 #include <math.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -70,46 +72,7 @@ struct OcSentencePieceTokenizer {
 
 /* ─── UTF-8 helpers ──────────────────────────────────────────────────── */
 
-/* Decode 1..4 bytes of UTF-8 starting at `s` (up to `len` bytes available).
- * Writes the codepoint to `*cp` and returns the number of bytes consumed.
- * Returns 1 for invalid UTF-8 (treats the lead byte as a lone codepoint). */
-static size_t sp_utf8_decode(const char *s, size_t len, uint32_t *cp)
-{
-    if (len == 0) { *cp = 0; return 0; }
-    unsigned char c0 = (unsigned char)s[0];
-    if (c0 < 0x80) { *cp = c0; return 1; }
-    if ((c0 & 0xE0) == 0xC0 && len >= 2) {
-        unsigned char c1 = (unsigned char)s[1];
-        if ((c1 & 0xC0) == 0x80) {
-            *cp = ((uint32_t)(c0 & 0x1F) << 6) | (c1 & 0x3F);
-            return 2;
-        }
-    }
-    if ((c0 & 0xF0) == 0xE0 && len >= 3) {
-        unsigned char c1 = (unsigned char)s[1];
-        unsigned char c2 = (unsigned char)s[2];
-        if ((c1 & 0xC0) == 0x80 && (c2 & 0xC0) == 0x80) {
-            *cp = ((uint32_t)(c0 & 0x0F) << 12)
-                | ((uint32_t)(c1 & 0x3F) << 6)
-                | (c2 & 0x3F);
-            return 3;
-        }
-    }
-    if ((c0 & 0xF8) == 0xF0 && len >= 4) {
-        unsigned char c1 = (unsigned char)s[1];
-        unsigned char c2 = (unsigned char)s[2];
-        unsigned char c3 = (unsigned char)s[3];
-        if ((c1 & 0xC0) == 0x80 && (c2 & 0xC0) == 0x80 && (c3 & 0xC0) == 0x80) {
-            *cp = ((uint32_t)(c0 & 0x07) << 18)
-                | ((uint32_t)(c1 & 0x3F) << 12)
-                | ((uint32_t)(c2 & 0x3F) << 6)
-                | (c3 & 0x3F);
-            return 4;
-        }
-    }
-    *cp = c0;
-    return 1;
-}
+/* UTF-8 codepoint decoding is shared (utf8_utils.h::oc_utf8_decode_cp). */
 
 /* Compute UTF-8 char boundaries (byte offsets of each codepoint start,
  * followed by `text_len`). Mirrors Rust `char_boundaries`. `out` must be
@@ -122,7 +85,7 @@ static size_t sp_char_boundaries(const char *text, size_t text_len, size_t *out)
     while (i < text_len) {
         out[n++] = i;
         uint32_t cp;
-        size_t adv = sp_utf8_decode(text + i, text_len - i, &cp);
+        size_t adv = oc_utf8_decode_cp(text + i, text_len - i, &cp);
         if (adv == 0) adv = 1;
         i += adv;
     }
@@ -214,8 +177,10 @@ OcError oc_sp_with_unknown_token(OcSentencePieceTokenizer *sp, OcArena *arena,
 
 /* Find the best-scoring segmentation of `text` (a UTF-8 string) and write
  * the resulting id sequence to `*out_ids` (malloc'd) and the number of
- * codepoints consumed to `*out_consumed`. Returns false if no piece
- * starting at index 0 can be segmented (caller should emit <unk>).
+ * codepoints consumed to `*out_consumed`. Sets `*out_found = false` when no
+ * piece starting at index 0 can be segmented (caller should emit <unk>).
+ * Returns OC_ERR_OOM on allocation failure — distinct from
+ * "no segmentation" so the caller never fabricates <unk> ids under OOM.
  *
  * Mirrors Rust `SentencePieceUnigramTokenizer::best_segmentation`.
  *
@@ -224,25 +189,27 @@ OcError oc_sp_with_unknown_token(OcSentencePieceTokenizer *sp, OcArena *arena,
  * pair that achieved `best_scores[j]`. After the forward pass, find the
  * largest `end` with a finite score; backtrack from there to emit ids.
  */
-static bool sp_best_segmentation(const OcSentencePieceTokenizer *sp,
-                                 const char *text, size_t text_len,
-                                 uint32_t **out_ids, size_t *out_count,
-                                 size_t *out_consumed)
+static OcError sp_best_segmentation(const OcSentencePieceTokenizer *sp,
+                                    const char *text, size_t text_len,
+                                    uint32_t **out_ids, size_t *out_count,
+                                    size_t *out_consumed, bool *out_found)
 {
     *out_ids = NULL;
     *out_count = 0;
     *out_consumed = 0;
+    *out_found = false;
 
     /* Compute char boundaries. Worst case: every byte is a boundary. */
     size_t *boundaries = (size_t *)malloc((text_len + 1) * sizeof(size_t));
-    if (!boundaries) return false;
+    if (!boundaries) return OC_ERR_OOM;
     size_t n_bounds = sp_char_boundaries(text, text_len, boundaries);
     /* token_count = number of codepoints = n_bounds - 1. */
     size_t token_count = (n_bounds == 0) ? 0 : (n_bounds - 1);
     if (token_count == 0) {
         free(boundaries);
         /* Empty input: no ids, consumed = 0. */
-        return true;
+        *out_found = true;
+        return OC_OK;
     }
 
     /* best_scores[0..=token_count], init to -INFINITY except [0]=0. */
@@ -253,7 +220,7 @@ static bool sp_best_segmentation(const OcSentencePieceTokenizer *sp,
     uint32_t *back_id  = (uint32_t *)malloc((token_count + 1) * sizeof(uint32_t));
     if (!best_scores || !back_prev || !back_id) {
         free(boundaries); free(best_scores); free(back_prev); free(back_id);
-        return false;
+        return OC_ERR_OOM;
     }
     for (size_t i = 0; i <= token_count; ++i) {
         best_scores[i] = -INFINITY;
@@ -281,7 +248,11 @@ static bool sp_best_segmentation(const OcSentencePieceTokenizer *sp,
                 key = stack_buf;
             } else {
                 key = (char *)malloc(len + 1);
-                if (!key) continue;
+                if (!key) {
+                    free(boundaries); free(best_scores);
+                    free(back_prev); free(back_id);
+                    return OC_ERR_OOM;
+                }
                 memcpy(key, text + start, len);
                 key[len] = '\0';
             }
@@ -312,7 +283,7 @@ static bool sp_best_segmentation(const OcSentencePieceTokenizer *sp,
     if (end == 0) {
         /* No reachable boundary beyond 0: no segmentation possible. */
         free(boundaries); free(best_scores); free(back_prev); free(back_id);
-        return false;
+        return OC_OK;
     }
 
     /* Backtrack from `end` to 0, collecting ids. */
@@ -320,16 +291,17 @@ static bool sp_best_segmentation(const OcSentencePieceTokenizer *sp,
     uint32_t *ids_rev = (uint32_t *)malloc(end * sizeof(uint32_t));
     if (!ids_rev) {
         free(boundaries); free(best_scores); free(back_prev); free(back_id);
-        return false;
+        return OC_ERR_OOM;
     }
     size_t n_ids = 0;
     size_t cursor = end;
     while (cursor > 0) {
         if (back_prev[cursor] == SIZE_MAX) {
-            /* Shouldn't happen if best_scores[end] is finite, but guard. */
+            /* Shouldn't happen if best_scores[end] is finite, but guard.
+             * Treated as "no segmentation" (not OOM). */
             free(ids_rev);
             free(boundaries); free(best_scores); free(back_prev); free(back_id);
-            return false;
+            return OC_OK;
         }
         ids_rev[n_ids++] = back_id[cursor];
         cursor = back_prev[cursor];
@@ -339,7 +311,7 @@ static bool sp_best_segmentation(const OcSentencePieceTokenizer *sp,
     if (!ids) {
         free(ids_rev);
         free(boundaries); free(best_scores); free(back_prev); free(back_id);
-        return false;
+        return OC_ERR_OOM;
     }
     for (size_t i = 0; i < n_ids; ++i) {
         ids[i] = ids_rev[n_ids - 1 - i];
@@ -350,7 +322,8 @@ static bool sp_best_segmentation(const OcSentencePieceTokenizer *sp,
     *out_ids = ids;
     *out_count = n_ids;
     *out_consumed = end;
-    return true;
+    *out_found = true;
+    return OC_OK;
 }
 
 OcError oc_sp_encode(const OcSentencePieceTokenizer *sp, const char *text,
@@ -381,8 +354,15 @@ OcError oc_sp_encode(const OcSentencePieceTokenizer *sp, const char *text,
         uint32_t *seg_ids = NULL;
         size_t seg_count = 0;
         size_t consumed = 0;
-        if (sp_best_segmentation(sp, segment, seg_len,
-                                  &seg_ids, &seg_count, &consumed)) {
+        bool found = false;
+        e = sp_best_segmentation(sp, segment, seg_len,
+                                 &seg_ids, &seg_count, &consumed, &found);
+        if (e != OC_OK) {
+            free(boundaries);
+            oc_vector_free(&result);
+            return e;
+        }
+        if (found) {
             if (seg_count > 0) {
                 e = oc_vector_push_n(&result, seg_ids, seg_count);
                 free(seg_ids);
@@ -409,7 +389,7 @@ OcError oc_sp_encode(const OcSentencePieceTokenizer *sp, const char *text,
             boundary_idx += consumed;
             continue;
         }
-        /* best_segmentation returned false: emit <unk> and advance by 1
+        /* No segmentation found: emit <unk> and advance by 1
          * char (mirrors Rust's `boundary_idx += 1`). */
         if (sp->has_unknown) {
             uint32_t unk = sp->unknown_id;
@@ -564,6 +544,7 @@ OcError oc_sp_load_from_gguf(const OcGgufFile *gguf, OcArena *arena,
     sp->piece_scores = oc_arena_alloc(arena, vocab_size * sizeof(float), sizeof(float));
     if (!sp->vocab || !sp->id_to_token || !sp->piece_scores) {
         oc_vector_free(&tokens); free(scores);
+        oc_sp_free(sp);
         return OC_ERR_OOM;
     }
 

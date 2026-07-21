@@ -44,6 +44,8 @@
 #include "oxidize/log.h"
 #include "oxidize/vector.h"
 
+#include "utf8_utils.h"
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -365,6 +367,7 @@ OcError oc_tiktoken_new(const OcByteSlice *vocab_tokens, size_t n_vocab,
                         OcArena *arena, OcTiktokenTokenizer **out)
 {
     if (!vocab_tokens || !arena || !out) return OC_ERR_INVALID_ARG;
+    if (n_merges > 0 && !merge_pairs) return OC_ERR_INVALID_ARG;
     *out = NULL;
 
     OcTiktokenTokenizer *t = (OcTiktokenTokenizer *)
@@ -569,62 +572,9 @@ OcError oc_tiktoken_encode(const OcTiktokenTokenizer *t, const char *text,
 
 /* ─── Decode ─────────────────────────────────────────────────────────── */
 
-/* Replace invalid UTF-8 byte sequences with U+FFFD (0xEF 0xBF 0xBD),
- * mirroring Rust's `String::from_utf8_lossy`. `out` must be a buffer of
- * at least `len + (len/3 + 1) * 2 + 1` bytes to accommodate worst-case
- * replacement expansion. Returns the final byte length. */
-static size_t tikt_utf8_lossy(const uint8_t *bytes, size_t len, uint8_t *out)
-{
-    size_t i = 0;
-    size_t j = 0;
-    static const uint8_t REPL[3] = { 0xEF, 0xBF, 0xBD };
-    while (i < len) {
-        uint8_t c0 = bytes[i];
-        if (c0 < 0x80) {
-            out[j++] = c0;
-            i += 1;
-            continue;
-        }
-        /* Determine expected sequence length. */
-        size_t need = 0;
-        uint32_t cp = 0;
-        if ((c0 & 0xE0) == 0xC0) { need = 2; cp = c0 & 0x1F; }
-        else if ((c0 & 0xF0) == 0xE0) { need = 3; cp = c0 & 0x0F; }
-        else if ((c0 & 0xF8) == 0xF0) { need = 4; cp = c0 & 0x07; }
-        else { out[j++] = REPL[0]; out[j++] = REPL[1]; out[j++] = REPL[2]; i += 1; continue; }
-
-        /* Check continuation bytes. */
-        bool valid = true;
-        if (i + need > len) {
-            valid = false;
-        } else {
-            for (size_t k = 1; k < need; ++k) {
-                if ((bytes[i + k] & 0xC0) != 0x80) { valid = false; break; }
-                cp = (cp << 6) | (bytes[i + k] & 0x3F);
-            }
-            /* Rust's from_utf8_lossy also rejects overlong encodings and
-             * codepoints above U+10FFFF / surrogates. We approximate by
-             * rejecting surrogates (U+D800..U+DFFF) and overlongs. */
-            if (valid) {
-                if (need == 2 && cp < 0x80) valid = false;
-                else if (need == 3 && cp < 0x800) valid = false;
-                else if (need == 4 && (cp < 0x10000 || cp > 0x10FFFF)) valid = false;
-                else if (cp >= 0xD800 && cp <= 0xDFFF) valid = false;
-            }
-        }
-        if (valid) {
-            for (size_t k = 0; k < need; ++k) out[j++] = bytes[i + k];
-            i += need;
-        } else {
-            /* Emit one replacement char for the invalid lead byte. Rust
-             * emits one U+FFFD per invalid byte (matching the
-             * `error_len`-driven loop in `consume_pending_utf8`). */
-            out[j++] = REPL[0]; out[j++] = REPL[1]; out[j++] = REPL[2];
-            i += 1;
-        }
-    }
-    return j;
-}
+/* Lossy UTF-8 conversion is shared (utf8_utils.h::oc_utf8_lossy) and matches
+ * Rust `String::from_utf8_lossy`: one U+FFFD per maximal invalid
+ * subsequence (a lead byte plus its longest valid continuation prefix). */
 
 OcError oc_tiktoken_decode(const OcTiktokenTokenizer *t, const uint32_t *ids,
                            size_t count, char **out_text)
@@ -664,7 +614,7 @@ OcError oc_tiktoken_decode(const OcTiktokenTokenizer *t, const uint32_t *ids,
     size_t out_cap = total * 3 + 1;
     uint8_t *out = (uint8_t *)malloc(out_cap);
     if (!out) { free(bytes); return OC_ERR_OOM; }
-    size_t out_len = tikt_utf8_lossy(bytes, total, out);
+    size_t out_len = oc_utf8_lossy(bytes, total, out);
     out[out_len] = '\0';
     free(bytes);
 
@@ -740,6 +690,7 @@ OcError oc_tiktoken_load_from_gguf(const OcGgufFile *gguf, OcArena *arena,
     if (!t->vocab || !t->merge_ranks || !t->merged_ids
         || !t->id_to_token_data || !t->id_to_token_len) {
         oc_vector_free(&tokens); oc_vector_free(&merges);
+        oc_tiktoken_free(t);
         return OC_ERR_OOM;
     }
 
@@ -751,11 +702,20 @@ OcError oc_tiktoken_load_from_gguf(const OcGgufFile *gguf, OcArena *arena,
     for (size_t id = 0; id < vocab_size; ++id) {
         OcByteSlice *slice = (OcByteSlice *)oc_vector_get(&tokens, id);
         uint8_t *copy = oc_arena_alloc(arena, slice->len ? slice->len : 1, 1);
-        if (!copy) { oc_vector_free(&tokens); oc_vector_free(&merges); return OC_ERR_OOM; }
+        if (!copy) {
+            oc_vector_free(&tokens); oc_vector_free(&merges);
+            oc_tiktoken_free(t);
+            return OC_ERR_OOM;
+        }
         if (slice->len) memcpy(copy, slice->data, slice->len);
         t->id_to_token_data[id] = copy;
         t->id_to_token_len[id] = slice->len;
-        tikt_bytemap_put(t->vocab, copy, slice->len, (uint32_t)id);
+        e = tikt_bytemap_put(t->vocab, copy, slice->len, (uint32_t)id);
+        if (e != OC_OK) {
+            oc_vector_free(&tokens); oc_vector_free(&merges);
+            oc_tiktoken_free(t);
+            return e;
+        }
         if (slice->len == 1) {
             t->single_byte_id[slice->data[0]] = (uint32_t)id;
         }
@@ -771,7 +731,15 @@ OcError oc_tiktoken_load_from_gguf(const OcGgufFile *gguf, OcArena *arena,
         for (size_t k = 0; k < mlen; ++k) {
             if (mb[k] == ' ') { sp = mb + k; break; }
         }
-        if (!sp) continue;
+        if (!sp) {
+            /* Invalid merge entry — mirrors Rust's `InvalidMergeEntry`
+             * error in `load_tiktoken`. */
+            oc_log_error("tokenizer_tiktoken: invalid merge entry at rank %zu "
+                         "(no space)", rank);
+            oc_vector_free(&tokens); oc_vector_free(&merges);
+            oc_tiktoken_free(t);
+            return OC_ERR_TOKENIZER;
+        }
         size_t llen = (size_t)(sp - mb);
         const uint8_t *rdata = sp + 1;
         size_t rlen = mlen - llen - 1;
@@ -782,7 +750,11 @@ OcError oc_tiktoken_load_from_gguf(const OcGgufFile *gguf, OcArena *arena,
         /* Build merged token. */
         size_t merged_len = llen + rlen;
         uint8_t *merged = (uint8_t *)malloc(merged_len ? merged_len : 1);
-        if (!merged) { oc_vector_free(&tokens); oc_vector_free(&merges); return OC_ERR_OOM; }
+        if (!merged) {
+            oc_vector_free(&tokens); oc_vector_free(&merges);
+            oc_tiktoken_free(t);
+            return OC_ERR_OOM;
+        }
         if (llen) memcpy(merged, mb, llen);
         if (rlen) memcpy(merged + llen, rdata, rlen);
         bool found = tikt_bytemap_get(t->vocab, merged, merged_len, &merged_id);

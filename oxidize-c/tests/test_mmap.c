@@ -230,13 +230,16 @@ Test(mmap, open_fd_map_failure_closes_fd_no_leak)
     cr_assert_not_null(fb, "fdinfo/%d should exist before open_fd", fd);
     fclose(fb);
 
-    /* mmap with len = 2^62 will fail with ENOMEM (MAP_FAILED). The fix
-     * ensures close(fd) runs in this branch. */
+    /* len = 2^62 far exceeds the fixture's size; oc_mmap_open_fd now
+     * validates len against fstat st_size and rejects with
+     * OC_ERR_INVALID_ARG before ever calling mmap. The fix under test
+     * ensures close(fd) runs on this error path. */
     OcMmap *m = NULL;
     OcError e = oc_mmap_open_fd(fd, (size_t)1 << 62, &m);
-    cr_assert_eq(e, OC_ERR_OOM, "MAP_FAILED should return OC_ERR_OOM, got %s",
+    cr_assert_eq(e, OC_ERR_INVALID_ARG,
+        "oversized len should return OC_ERR_INVALID_ARG, got %s",
         oc_error_msg(e));
-    cr_assert_null(m, "out should be NULL on MAP_FAILED");
+    cr_assert_null(m, "out should be NULL on failure");
 
     /* After the failed call, fd should have been closed by the error path
      * (the scrutiny fix). /proc/self/fdinfo/<fd> should now NOT exist. */

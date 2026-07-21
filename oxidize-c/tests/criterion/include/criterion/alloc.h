@@ -216,7 +216,8 @@ void delete_obj(T *ptr)
 template <typename T>
 void delete_arr(typename std::enable_if<std::is_fundamental<T>::value>::type *ptr)
 {
-    cr_free(ptr);
+    /* new_arr prepends a size_t length; free the original allocation. */
+    cr_free(reinterpret_cast<size_t *>(ptr) - 1);
 }
 
 /**
@@ -272,7 +273,11 @@ struct allocator {
 
     inline pointer allocate(size_type cnt, const std::allocator<void>::value_type * = 0)
     {
-        return reinterpret_cast<pointer>(cr_malloc(cnt * sizeof (T)));
+        pointer p = reinterpret_cast<pointer>(cr_malloc(cnt * sizeof (T)));
+        if (!p) {
+            throw std::bad_alloc();
+        }
+        return p;
     }
 
     inline void deallocate(pointer p, size_type) { cr_free(p); }

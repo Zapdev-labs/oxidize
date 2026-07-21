@@ -35,6 +35,7 @@ OcError oc_vector_reserve(OcVector *v, size_t n)
         if (new_cap > (SIZE_MAX / 2)) { new_cap = n; break; }
         new_cap *= 2;
     }
+    if (new_cap > SIZE_MAX / v->elem_size) return OC_ERR_OOM; /* byte size would wrap */
     void *nd = realloc(v->data, new_cap * v->elem_size);
     if (!nd) return OC_ERR_OOM;
     v->data = nd;
@@ -46,8 +47,16 @@ OcError oc_vector_push(OcVector *v, const void *elem)
 {
     if (!v || !elem) return OC_ERR_INVALID_ARG;
     if (v->len == v->cap) {
+        /* `elem` may alias an existing element; realloc would invalidate it.
+         * Remember its offset and rebase after growth. */
+        size_t elem_off = SIZE_MAX;
+        const uint8_t *e8 = (const uint8_t *)elem;
+        if (v->data && e8 >= (uint8_t *)v->data &&
+            e8 < (uint8_t *)v->data + v->cap * v->elem_size)
+            elem_off = (size_t)(e8 - (uint8_t *)v->data);
         OcError e = oc_vector_reserve(v, v->len + 1);
         if (e != OC_OK) return e;
+        if (elem_off != SIZE_MAX) elem = (uint8_t *)v->data + elem_off;
     }
     memcpy((uint8_t *)v->data + v->len * v->elem_size, elem, v->elem_size);
     v->len++;
@@ -59,9 +68,17 @@ OcError oc_vector_push_n(OcVector *v, const void *elems, size_t n)
     if (!v) return OC_ERR_INVALID_ARG;
     if (n == 0) return OC_OK;
     if (!elems) return OC_ERR_INVALID_ARG;
+    if (n > SIZE_MAX - v->len) return OC_ERR_OOM; /* len + n would wrap */
     if (v->len + n > v->cap) {
+        /* `elems` may alias the vector's own buffer; rebase across realloc. */
+        size_t elems_off = SIZE_MAX;
+        const uint8_t *e8 = (const uint8_t *)elems;
+        if (v->data && e8 >= (uint8_t *)v->data &&
+            e8 < (uint8_t *)v->data + v->cap * v->elem_size)
+            elems_off = (size_t)(e8 - (uint8_t *)v->data);
         OcError e = oc_vector_reserve(v, v->len + n);
         if (e != OC_OK) return e;
+        if (elems_off != SIZE_MAX) elems = (uint8_t *)v->data + elems_off;
     }
     memcpy((uint8_t *)v->data + v->len * v->elem_size, elems, n * v->elem_size);
     v->len += n;

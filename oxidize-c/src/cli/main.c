@@ -37,6 +37,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define OC_CLI_VERSION "0.2.0"
 
@@ -243,6 +244,7 @@ static OcError run_generation(const OcCliArgs *args)
         /* Decode + print the prompt's last token context implicitly; generate. */
         size_t emitted = 0;
         bool eos_reached = false;
+        clock_t decode_start = clock();
         while (emitted < (size_t)args->n_predict && !eos_reached && e == OC_OK) {
             uint32_t sampled = oc_sample(logits, model.cfg.vocab_size, &scfg,
                                         recent, recent_len);
@@ -277,6 +279,12 @@ static OcError run_generation(const OcCliArgs *args)
         }
         if (emitted > 0) fputs("\n", stdout);
         oc_log(OC_LOG_INFO, "generated %zu tokens", emitted);
+        if (decode_start > 0 && emitted > 0) {
+            double elapsed = (double)(clock() - decode_start) / CLOCKS_PER_SEC;
+            if (elapsed > 0) {
+                oc_log(OC_LOG_INFO, "speed: %.2f tok/s", (double)emitted / elapsed);
+            }
+        }
     }
 
     free(ids);

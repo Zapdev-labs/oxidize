@@ -791,8 +791,9 @@ static bool parse_split_pattern(const char *filename, uint64_t *out_total)
      * must be all digits. */
     if (of_tok == filename) return false;
     const char *prev_dash = NULL;
-    for (const char *p = of_tok - 1; p >= filename; p--) {
-        if (*p == '-') { prev_dash = p; break; }
+    /* Index-based backwards scan: never forms a pointer before `filename`. */
+    for (size_t k = (size_t)(of_tok - filename); k > 0; k--) {
+        if (filename[k - 1] == '-') { prev_dash = filename + k - 1; break; }
     }
     if (!prev_dash) return false;
     /* Shard number is prev_dash+1 .. of_tok. Must be all digits, >= 1. */
@@ -864,10 +865,11 @@ static char *extract_split_base_and_dir(const char *path, uint64_t *out_total)
     }
     if (!of_tok) return NULL;
 
-    /* Find the '-' before NNNNN (the shard number). */
+    /* Find the '-' before NNNNN (the shard number). Index-based backwards
+     * scan: never forms a pointer before `filename`. */
     const char *prev_dash = NULL;
-    for (const char *p = of_tok - 1; p >= filename; p--) {
-        if (*p == '-') { prev_dash = p; break; }
+    for (size_t k = (size_t)(of_tok - filename); k > 0; k--) {
+        if (filename[k - 1] == '-') { prev_dash = filename + k - 1; break; }
     }
     if (!prev_dash) return NULL;
 
@@ -1048,6 +1050,7 @@ OcError oc_gguf_map_open(const char *path, OcGgufMmappedFile *out)
                     const OcGgufTensorInfo *src_t = &src->tensors[i];
                     /* Deep-copy the name into the unified arena. */
                     dst->name = oc_arena_dup(unified_arena, src_t->name ? src_t->name : "");
+                    if (!dst->name) goto oom_split;
                     dst->n_dims           = src_t->n_dims;
                     memcpy(dst->dims, src_t->dims, sizeof(dst->dims));
                     dst->ggml_type        = src_t->ggml_type;
@@ -1070,8 +1073,11 @@ OcError oc_gguf_map_open(const char *path, OcGgufMmappedFile *out)
             unified->alignment          = shards[0].parsed.alignment;
             unified->data_section_start = shards[0].parsed.data_section_start;
             unified->arena             = unified_arena;
-            unified->backing_buf        = shards[0].bytes;   /* shard 0's bytes */
-            unified->backing_len       = shards[0].len;
+            /* backing_buf stays NULL: the bytes are mmap-backed and owned by
+             * the shards. Putting shard bytes here would make oc_gguf_free()
+             * call free() on mmap memory (invalid free). */
+            unified->backing_buf        = NULL;
+            unified->backing_len       = 0;
             unified->tensors            = merged;
 
             /* Deep-copy the metadata KV array + keys + values into the
@@ -1089,6 +1095,7 @@ OcError oc_gguf_map_open(const char *path, OcGgufMmappedFile *out)
                 }
                 for (size_t i = 0; i < n_kv; i++) {
                     kv[i].key = oc_arena_dup(unified_arena, shards[0].parsed.metadata[i].key);
+                    if (!kv[i].key) goto oom_split;
                     /* Deep-copy the value (handles strings + arrays). */
                     const OcGgufMetadataValue *sv = &shards[0].parsed.metadata[i].value;
                     OcGgufMetadataValue *dv = &kv[i].value;
@@ -1148,6 +1155,17 @@ OcError oc_gguf_map_open(const char *path, OcGgufMmappedFile *out)
             out->n_shards  = (size_t)total;
             free(base_path);
             return OC_OK;
+
+        oom_split:
+            /* OOM while deep-copying names/keys: unwind everything so the
+             * caller never sees a half-built unified view (NULL names would
+             * crash strcmp lookups later). */
+            memset(out, 0, sizeof(*out));
+            oc_arena_free(unified_arena);
+            for (uint64_t i = 0; i < total; i++) close_shard(&shards[i]);
+            free(shards);
+            free(base_path);
+            return OC_ERR_OOM;
         }
 
         /* Split pattern matched but siblings missing: fall through to
@@ -1193,6 +1211,7 @@ OcError oc_gguf_map_open(const char *path, OcGgufMmappedFile *out)
             for (uint64_t i = 0; i < total_tensors; i++) {
                 const OcGgufTensorInfo *src = &shards[0].parsed.tensors[i];
                 merged[i].name = oc_arena_dup(unified_arena, src->name ? src->name : "");
+                if (!merged[i].name) goto oom_single;
                 merged[i].n_dims           = src->n_dims;
                 memcpy(merged[i].dims, src->dims, sizeof(merged[i].dims));
                 merged[i].ggml_type        = src->ggml_type;
@@ -1210,8 +1229,10 @@ OcError oc_gguf_map_open(const char *path, OcGgufMmappedFile *out)
         unified->alignment          = shards[0].parsed.alignment;
         unified->data_section_start = shards[0].parsed.data_section_start;
         unified->arena             = unified_arena;
-        unified->backing_buf        = shards[0].bytes;
-        unified->backing_len       = shards[0].len;
+        /* backing_buf stays NULL: bytes are mmap-backed, owned by the shard
+         * (see multi-shard path). */
+        unified->backing_buf        = NULL;
+        unified->backing_len       = 0;
         unified->tensors            = merged;
 
         /* Deep-copy metadata KV (same as multi-shard path). */
@@ -1227,6 +1248,7 @@ OcError oc_gguf_map_open(const char *path, OcGgufMmappedFile *out)
             }
             for (size_t i = 0; i < n_kv; i++) {
                 kv[i].key = oc_arena_dup(unified_arena, shards[0].parsed.metadata[i].key);
+                if (!kv[i].key) goto oom_single;
                 const OcGgufMetadataValue *sv = &shards[0].parsed.metadata[i].value;
                 OcGgufMetadataValue *dv = &kv[i].value;
                 dv->type = sv->type;
@@ -1279,6 +1301,14 @@ OcError oc_gguf_map_open(const char *path, OcGgufMmappedFile *out)
         out->shards    = shards;
         out->n_shards  = 1;
         return OC_OK;
+
+    oom_single:
+        /* OOM while deep-copying names/keys (see oom_split above). */
+        memset(out, 0, sizeof(*out));
+        oc_arena_free(unified_arena);
+        close_shard(&shards[0]);
+        free(shards);
+        return OC_ERR_OOM;
     }
 }
 
@@ -1298,6 +1328,24 @@ OcError oc_gguf_map_advise_hugepage(OcGgufMmappedFile *m)
 bool oc_gguf_map_mlock_with_headroom(OcGgufMmappedFile *m)
 {
     if (!m || !m->shards) return false;
+    /* Check the AGGREGATE size against the headroom policy first: each shard's
+     * own check only sees its individual length, so several shards could
+     * collectively exceed MemAvailable. If the total doesn't fit with >= 30%
+     * headroom, skip locking entirely (readahead + prefault only). */
+    uint64_t available = 0;
+    if (oc_linux_mem_available_bytes(&available)
+        && oc_gguf_map_total_bytes(m) >= (available * 7ull) / 10ull) {
+        oc_log(OC_LOG_INFO,
+                "gguf: skipping mlock (total %llu bytes vs %llu avail)",
+                (unsigned long long)oc_gguf_map_total_bytes(m),
+                (unsigned long long)available);
+        for (size_t i = 0; i < m->n_shards; i++) {
+            oc_mmap_advise_willneed(m->shards[i].mmap);
+            oc_mmap_prefault(m->shards[i].mmap);
+        }
+        m->mlocked = false;
+        return false;
+    }
     bool all_locked = true;
     for (size_t i = 0; i < m->n_shards; i++) {
         if (!oc_mmap_mlock_with_headroom(m->shards[i].mmap)) {

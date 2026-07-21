@@ -73,11 +73,14 @@ Test(hashtable, grows_dynamically)
     OcHashtable *ht = oc_hashtable_new(4);
     cr_assert_not_null(ht, "");
     static int vals[1000];
+    /* Keys are NOT copied by the hashtable (caller-owned); give each
+     * insertion its own storage that outlives the table. */
+    static char keys[1000][16];
     char keybuf[32];
     for (int i = 0; i < 1000; i++) {
         vals[i] = i;
-        snprintf(keybuf, sizeof(keybuf), "key_%d", i);
-        OcError e = oc_hashtable_put(ht, keybuf, &vals[i], NULL);
+        snprintf(keys[i], sizeof(keys[i]), "key_%d", i);
+        OcError e = oc_hashtable_put(ht, keys[i], &vals[i], NULL);
         cr_assert_eq(e, OC_OK, "put %d", i);
     }
     cr_assert_eq(oc_hashtable_size(ht), 1000, "size");

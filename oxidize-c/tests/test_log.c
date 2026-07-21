@@ -34,12 +34,15 @@ Test(log, set_level_filters)
 
 Test(log, env_filter_debug)
 {
+    /* Criterion forks each test into its own process, so log.c's statics
+     * (g_level_set / g_env_checked) are fresh here: no set_level has run,
+     * and the env is read on first init. */
     setenv("OX_LOG_LEVEL", "DEBUG", 1);
-    /* Force re-read by setting level from env via the init function. */
-    oc_log_set_level(OC_LOG_INFO);  /* reset sticky */
-    /* Re-init from env: we have to clear the env_checked flag. Since the API
-     * doesn't expose a reset, we test via oc_log_level_from_str instead. */
-    cr_assert_eq(oc_log_level_from_str("DEBUG"), OC_LOG_DEBUG, "");
+    oc_log_init_from_env();
+    cr_assert_eq(oc_log_get_level(), OC_LOG_DEBUG, "env DEBUG applied");
+    /* Explicit set_level overrides the env-derived level. */
+    oc_log_set_level(OC_LOG_WARN);
+    cr_assert_eq(oc_log_get_level(), OC_LOG_WARN, "set_level overrides env");
     unsetenv("OX_LOG_LEVEL");
 }
 

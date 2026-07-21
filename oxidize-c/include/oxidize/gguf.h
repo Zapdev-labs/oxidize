@@ -253,6 +253,9 @@ typedef struct OcGgufShard {
  * array of per-shard mmaps + parsed files; `n_shards` is the count (1 for
  * single-file GGUFs). */
 typedef struct OcGgufMmappedFile {
+    /* `unified.backing_buf` is always NULL: the file bytes are mmap-backed
+     * and owned by `shards`. Free ONLY via oc_gguf_map_free(); never call
+     * oc_gguf_free(&m->unified) directly. */
     OcGgufFile   unified;       /* merged view (owns the unified arena)     */
     OcGgufShard *shards;        /* array of `n_shards` shards (owned)       */
     size_t       n_shards;

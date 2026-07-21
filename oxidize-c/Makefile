@@ -12,9 +12,12 @@
 # C standard: C11 (-std=c11). No GNU extensions unless gated behind #ifdef.
 # Baseline links only libc + libm + libpthread.
 
-CC      ?= gcc
-CFLAGS  ?= -std=c11 -Wall -Wextra -Werror -O2 -Iinclude
-LDFLAGS ?= -lm -lpthread
+CC       ?= gcc
+# Required public-header paths live in CPPFLAGS so a caller CFLAGS override
+# cannot break the build.
+CPPFLAGS += -Iinclude
+CFLAGS   ?= -std=c11 -Wall -Wextra -Werror -O2
+LDFLAGS  ?= -lm -lpthread
 
 # Library sources (core + util + format + model + compute). Compute (quant +
 # SIMD dispatch) is added by the compute-worker feature; server/cli are added
@@ -32,7 +35,7 @@ BIN_OBJS := $(BIN_SRCS:.c=.o)
 build: oxidize-c
 
 oxidize-c: $(LIB_OBJS) $(BIN_OBJS)
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 # Static library (useful for downstream linking + the CLI/server features).
 lib: liboxidize-c.a
@@ -54,25 +57,25 @@ TEST_OBJS := $(TEST_SRCS:.c=.o)
 # Criterion needs -lpthread (threads), -lrt (shm), -ldl (dlopen), -lm (math).
 TEST_CFLAGS := -std=c11 -Wall -Wextra -Wno-format-zero-length \
                -fsanitize=address,undefined -fno-omit-frame-pointer -g -O0 \
-               -Iinclude -I$(CRITERION_INCLUDE)
+               -I$(CRITERION_INCLUDE)
 TEST_LDFLAGS := -lm -lpthread -lrt -ldl -fsanitize=address,undefined
 
 # ASan-instrumented library objects (stems: src/core/error.c -> src/core/error.asan.o).
 LIB_ASAN_OBJS := $(LIB_SRCS:.c=.asan.o)
 
 test_runner: $(TEST_OBJS) $(LIB_ASAN_OBJS) $(CRITERION_LIB)
-	$(CC) $(TEST_CFLAGS) -o $@ $(TEST_OBJS) $(LIB_ASAN_OBJS) $(CRITERION_LIB) $(TEST_LDFLAGS)
+	$(CC) $(CPPFLAGS) $(TEST_CFLAGS) -o $@ $(TEST_OBJS) $(LIB_ASAN_OBJS) $(CRITERION_LIB) $(TEST_LDFLAGS)
 
 # Build library objects with ASan for the test_runner.
 src/%.asan.o: src/%.c
-	$(CC) $(TEST_CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(TEST_CFLAGS) -c -o $@ $<
 
 tests/%.o: tests/%.c
-	$(CC) $(TEST_CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(TEST_CFLAGS) -c -o $@ $<
 
 # Default object rule (no ASan).
 src/%.o: src/%.c
-	$(CC) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
 # Test filtering: `make test TEST_FILTER=<pattern>` runs only matching tests.
 # Pattern conventions (validated by scrutiny + the validation contract):
@@ -110,6 +113,7 @@ lint:
 		clang-tidy --checks=$(LINT_CHECKS) $(LINT_SOURCES) -- -std=c11 -Iinclude 2>&1; \
 		status=$$?; \
 		echo "=== clang-tidy exit: $$status ==="; \
+		exit $$status; \
 	else \
 		echo "clang-tidy not found; build with -Wall -Wextra -Werror is the primary gate"; \
 	fi
@@ -124,11 +128,13 @@ CUDA_LIB_OBJS := $(CUDA_LIB_SRCS:.c=.o)
 CUDA_SRCS := $(wildcard src/backends/*.cu)
 CUDA_OBJS := $(CUDA_SRCS:.cu=.cu.o)
 
-cuda: CFLAGS := -std=c11 -Wall -Wextra -Werror -O2 -Iinclude -DOC_CUDA
-cuda: NVCC_FLAGS := -O2 -Iinclude -DOC_CUDA -Xcompiler -std=c11,-Wall,-Wextra
-cuda: LDFLAGS := -lm -lpthread -lcudart
+CUDA_HOME ?= /usr/local/cuda
+
+cuda: CFLAGS := -std=c11 -Wall -Wextra -Werror -O2 -DOC_CUDA
+cuda: NVCC_FLAGS := -O2 -Iinclude -DOC_CUDA -Xcompiler -Wall,-Wextra,-std=c11
+cuda: LDFLAGS := -lm -lpthread -L$(CUDA_HOME)/lib64 -lcudart -lstdc++
 cuda: $(CUDA_LIB_OBJS) $(CUDA_OBJS) $(BIN_OBJS)
-	gcc $(CFLAGS) -o oxidize-c $(CUDA_LIB_OBJS) $(CUDA_OBJS) $(BIN_OBJS) $(LDFLAGS)
+	gcc $(CPPFLAGS) $(CFLAGS) -o oxidize-c $(CUDA_LIB_OBJS) $(CUDA_OBJS) $(BIN_OBJS) $(LDFLAGS)
 
 %.cu.o: %.cu
 	nvcc $(NVCC_FLAGS) -c -o $@ $<

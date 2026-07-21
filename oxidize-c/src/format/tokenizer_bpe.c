@@ -54,6 +54,9 @@
 #include "oxidize/log.h"
 #include "oxidize/vector.h"
 
+#include "utf8_utils.h"
+
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -97,96 +100,38 @@ static uint32_t byte_to_gpt2_codepoint(uint8_t b)
     return 0xFFFDu;  /* unreachable for b in 0..=255 */
 }
 
-/* Encode a Unicode codepoint as UTF-8 into `buf` (>= 5 bytes). Returns the
- * number of bytes written. Handles all valid codepoints up to U+10FFFF. */
-static size_t utf8_encode(uint32_t cp, char *buf)
-{
-    if (cp <= 0x7F) {
-        buf[0] = (char)cp;
-        return 1;
-    }
-    if (cp <= 0x7FF) {
-        buf[0] = (char)(0xC0 | (cp >> 6));
-        buf[1] = (char)(0x80 | (cp & 0x3F));
-        return 2;
-    }
-    if (cp <= 0xFFFF) {
-        buf[0] = (char)(0xE0 | (cp >> 12));
-        buf[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
-        buf[2] = (char)(0x80 | (cp & 0x3F));
-        return 3;
-    }
-    buf[0] = (char)(0xF0 | (cp >> 18));
-    buf[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
-    buf[2] = (char)(0x80 | ((cp >> 6) & 0x3F));
-    buf[3] = (char)(0x80 | (cp & 0x3F));
-    return 4;
-}
-
-/* Decode 1..4 bytes of UTF-8 starting at `s` (up to `len` bytes available).
- * Writes the codepoint to `*cp` and returns the number of bytes consumed.
- * Returns 0 on invalid UTF-8 (caller should treat the byte as a lone byte). */
-static size_t utf8_decode(const char *s, size_t len, uint32_t *cp)
-{
-    if (len == 0) { *cp = 0; return 0; }
-    unsigned char c0 = (unsigned char)s[0];
-    if (c0 < 0x80) {
-        *cp = c0;
-        return 1;
-    }
-    if ((c0 & 0xE0) == 0xC0 && len >= 2) {
-        unsigned char c1 = (unsigned char)s[1];
-        if ((c1 & 0xC0) == 0x80) {
-            *cp = ((uint32_t)(c0 & 0x1F) << 6) | (c1 & 0x3F);
-            return 2;
-        }
-    }
-    if ((c0 & 0xF0) == 0xE0 && len >= 3) {
-        unsigned char c1 = (unsigned char)s[1];
-        unsigned char c2 = (unsigned char)s[2];
-        if ((c1 & 0xC0) == 0x80 && (c2 & 0xC0) == 0x80) {
-            *cp = ((uint32_t)(c0 & 0x0F) << 12)
-                | ((uint32_t)(c1 & 0x3F) << 6)
-                | (c2 & 0x3F);
-            return 3;
-        }
-    }
-    if ((c0 & 0xF8) == 0xF0 && len >= 4) {
-        unsigned char c1 = (unsigned char)s[1];
-        unsigned char c2 = (unsigned char)s[2];
-        unsigned char c3 = (unsigned char)s[3];
-        if ((c1 & 0xC0) == 0x80 && (c2 & 0xC0) == 0x80 && (c3 & 0xC0) == 0x80) {
-            *cp = ((uint32_t)(c0 & 0x07) << 18)
-                | ((uint32_t)(c1 & 0x3F) << 12)
-                | ((uint32_t)(c2 & 0x3F) << 6)
-                | (c3 & 0x3F);
-            return 4;
-        }
-    }
-    /* Lone continuation byte — treat as a single byte codepoint. */
-    *cp = c0;
-    return 1;
-}
-
 /* Precomputed byte → GPT-2 UTF-8 string. `byte_to_gpt2_str[b]` is a
  * NUL-terminated UTF-8 string (up to 4 bytes + NUL). Initialized on first
- * use. */
+ * use, guarded by a C11 atomic state so concurrent construction is safe:
+ *   0 = uninitialized, 1 = one thread is initializing, 2 = done. */
 static char byte_to_gpt2_str[256][5];
-static bool byte_to_gpt2_str_inited = false;
+static atomic_int byte_to_gpt2_str_state;  /* zero-initialized */
 
 static void init_byte_to_gpt2_str(void)
 {
-    if (byte_to_gpt2_str_inited) {
+    int expected = 0;
+    if (atomic_load_explicit(&byte_to_gpt2_str_state, memory_order_acquire) == 2) {
         return;
     }
-    for (uint32_t b = 0; b < 256; ++b) {
-        uint32_t cp = byte_to_gpt2_codepoint((uint8_t)b);
-        char buf[5] = {0};
-        size_t n = utf8_encode(cp, buf);
-        memcpy(byte_to_gpt2_str[b], buf, n);
-        byte_to_gpt2_str[b][n] = '\0';
+    if (atomic_compare_exchange_strong_explicit(&byte_to_gpt2_str_state,
+                                                &expected, 1,
+                                                memory_order_acquire,
+                                                memory_order_acquire)) {
+        for (uint32_t b = 0; b < 256; ++b) {
+            uint32_t cp = byte_to_gpt2_codepoint((uint8_t)b);
+            char buf[5] = {0};
+            size_t n = oc_utf8_encode_cp(cp, buf);
+            memcpy(byte_to_gpt2_str[b], buf, n);
+            byte_to_gpt2_str[b][n] = '\0';
+        }
+        atomic_store_explicit(&byte_to_gpt2_str_state, 2, memory_order_release);
+        return;
     }
-    byte_to_gpt2_str_inited = true;
+    /* Another thread is initializing — spin until it publishes. The table
+     * build is a few microseconds, so a plain spin is fine. */
+    while (atomic_load_explicit(&byte_to_gpt2_str_state, memory_order_acquire) != 2) {
+        /* spin */
+    }
 }
 
 /* Reverse map: GPT-2 codepoint → original byte. Returns true and writes
@@ -400,14 +345,18 @@ struct OcBpeTokenizer {
 
 /* Count adjacent (left, right) id pairs across all sequences and return the
  * most frequent pair. Mirrors Rust `count_adjacent_pairs` + the max_by_key
- * selection in `train`. */
-static bool find_most_frequent_pair(const OcVector *sequences,
-                                    uint32_t *out_left,
-                                    uint32_t *out_right)
+ * selection in `train`. Writes `*out_found = false` when no pair exists.
+ * Returns OC_ERR_OOM on allocation failure (distinct from "no pair" so the
+ * caller can abort training instead of silently truncating the merge table). */
+static OcError find_most_frequent_pair(const OcVector *sequences,
+                                       uint32_t *out_left,
+                                       uint32_t *out_right,
+                                       bool *out_found)
 {
+    *out_found = false;
     /* Use a temporary u64→u32 map for pair counts. */
     OcU64Map *counts = u64map_new(64);
-    if (!counts) return false;
+    if (!counts) return OC_ERR_OOM;
 
     uint32_t best_count = 0;
     uint64_t best_key = 0;
@@ -425,7 +374,11 @@ static bool find_most_frequent_pair(const OcVector *sequences,
             uint32_t cnt = 0;
             u64map_get(counts, key, &cnt);
             cnt += 1;
-            u64map_put(counts, key, cnt);
+            OcError e = u64map_put(counts, key, cnt);
+            if (e != OC_OK) {
+                u64map_free(counts);
+                return e;
+            }
             if (cnt > best_count || (!any && cnt > 0)) {
                 best_count = cnt;
                 best_key = key;
@@ -434,10 +387,11 @@ static bool find_most_frequent_pair(const OcVector *sequences,
         }
     }
     u64map_free(counts);
-    if (!any) return false;
+    if (!any) return OC_OK;
     *out_left = (uint32_t)(best_key >> 32);
     *out_right = (uint32_t)(best_key & 0xFFFFFFFFu);
-    return true;
+    *out_found = true;
+    return OC_OK;
 }
 
 /* Apply a single merge to a sequence: replace every non-overlapping
@@ -491,6 +445,7 @@ OcError oc_bpe_train(const char *const *corpus, size_t n_corpus,
     bpe->merged_ids = u64map_new(64);
     bpe->use_byte_fallback = false;
     if (!bpe->vocab || !bpe->merge_ranks || !bpe->merged_ids) {
+        oc_bpe_free(bpe);
         return OC_ERR_OOM;
     }
 
@@ -498,9 +453,11 @@ OcError oc_bpe_train(const char *const *corpus, size_t n_corpus,
      * `sample.chars()` — Unicode codepoints. We iterate UTF-8 codepoints. */
     OcVector id_to_token;
     OcError e = oc_vector_init(&id_to_token, sizeof(char *));
-    if (e != OC_OK) return e;
+    if (e != OC_OK) { oc_bpe_free(bpe); return e; }
 
-    /* Helper: look up or insert a char-string token, returning its id. */
+    /* Helper: look up or insert a char-string token, returning its id.
+     * Sets `e` on allocation failure (caller must check `e` afterwards) so
+     * the hashtable and id_to_token never go out of sync. */
     #define INTERN_CHAR(str, len) do {                              \
         void *vp;                                                   \
         if (oc_hashtable_get(bpe->vocab, (str), &vp)) {            \
@@ -508,45 +465,56 @@ OcError oc_bpe_train(const char *const *corpus, size_t n_corpus,
         } else {                                                    \
             (id) = (uint32_t)oc_vector_len(&id_to_token);          \
             char *dup = oc_arena_dup_n(arena, (str), (len));      \
-            if (!dup) { oc_vector_free(&id_to_token); return OC_ERR_OOM; } \
-            oc_hashtable_put(bpe->vocab, dup, (void *)(uintptr_t)(id), NULL); \
-            oc_vector_push(&id_to_token, &dup);                    \
+            if (!dup) { e = OC_ERR_OOM; break; }                    \
+            e = oc_vector_push(&id_to_token, &dup);                \
+            if (e != OC_OK) break;                                  \
+            if (oc_hashtable_put(bpe->vocab, dup,                   \
+                                 (void *)(uintptr_t)(id), NULL) != OC_OK) { \
+                e = OC_ERR_OOM; break;                              \
+            }                                                       \
         }                                                           \
     } while (0)
 
     /* Build per-sample id sequences. */
     OcVector sequences;
     e = oc_vector_init(&sequences, sizeof(OcVector));
-    if (e != OC_OK) { oc_vector_free(&id_to_token); return e; }
+    if (e != OC_OK) {
+        oc_vector_free(&id_to_token);
+        oc_bpe_free(bpe);
+        return e;
+    }
 
     for (size_t s = 0; s < n_corpus; ++s) {
         const char *sample = corpus[s];
         OcVector seq;
         e = oc_vector_init(&seq, sizeof(uint32_t));
-        if (e != OC_OK) { oc_vector_free(&id_to_token); oc_vector_free(&sequences); return e; }
+        if (e != OC_OK) goto fail;
         const char *p = sample;
         while (*p) {
             uint32_t cp;
-            size_t adv = utf8_decode(p, SIZE_MAX, &cp);
+            size_t adv = oc_utf8_decode_cp(p, SIZE_MAX, &cp);
             if (adv == 0) adv = 1;
             char buf[5];
-            size_t n = utf8_encode(cp, buf);
+            size_t n = oc_utf8_encode_cp(cp, buf);
             buf[n] = '\0';
             uint32_t id;
             INTERN_CHAR(buf, n);
+            if (e != OC_OK) { oc_vector_free(&seq); goto fail; }
             e = oc_vector_push(&seq, &id);
-            if (e != OC_OK) { oc_vector_free(&seq); oc_vector_free(&id_to_token); oc_vector_free(&sequences); return e; }
+            if (e != OC_OK) { oc_vector_free(&seq); goto fail; }
             p += adv;
         }
-        oc_vector_push(&sequences, &seq);
+        e = oc_vector_push(&sequences, &seq);
+        if (e != OC_OK) { oc_vector_free(&seq); goto fail; }
     }
 
     /* Run up to `merge_limit` merge rounds. */
     for (size_t rank = 0; rank < merge_limit; ++rank) {
         uint32_t left, right;
-        if (!find_most_frequent_pair(&sequences, &left, &right)) {
-            break;
-        }
+        bool found = false;
+        e = find_most_frequent_pair(&sequences, &left, &right, &found);
+        if (e != OC_OK) goto fail;
+        if (!found) break;
         /* Build the merged token string: id_to_token[left] + id_to_token[right]. */
         const char *ls = bpe->id_to_token ? bpe->id_to_token[left] : NULL;
         const char *rs = bpe->id_to_token ? bpe->id_to_token[right] : NULL;
@@ -556,7 +524,7 @@ OcError oc_bpe_train(const char *const *corpus, size_t n_corpus,
         size_t ll = strlen(ls);
         size_t lr = strlen(rs);
         char *merged = oc_arena_alloc(arena, ll + lr + 1, 1);
-        if (!merged) { oc_vector_free(&id_to_token); oc_vector_free(&sequences); return OC_ERR_OOM; }
+        if (!merged) { e = OC_ERR_OOM; goto fail; }
         memcpy(merged, ls, ll);
         memcpy(merged + ll, rs, lr);
         merged[ll + lr] = '\0';
@@ -576,14 +544,21 @@ OcError oc_bpe_train(const char *const *corpus, size_t n_corpus,
         }
 
         uint32_t merged_id = (uint32_t)oc_vector_len(&id_to_token);
-        oc_hashtable_put(bpe->vocab, merged, (void *)(uintptr_t)merged_id, NULL);
-        oc_vector_push(&id_to_token, &merged);
-        u64map_put(bpe->merge_ranks, pair_key(left, right), (uint32_t)rank);
-        u64map_put(bpe->merged_ids, pair_key(left, right), merged_id);
+        e = oc_vector_push(&id_to_token, &merged);
+        if (e != OC_OK) goto fail;
+        if (oc_hashtable_put(bpe->vocab, merged, (void *)(uintptr_t)merged_id, NULL) != OC_OK) {
+            e = OC_ERR_OOM;
+            goto fail;
+        }
+        e = u64map_put(bpe->merge_ranks, pair_key(left, right), (uint32_t)rank);
+        if (e != OC_OK) goto fail;
+        e = u64map_put(bpe->merged_ids, pair_key(left, right), merged_id);
+        if (e != OC_OK) goto fail;
 
         for (size_t s = 0; s < oc_vector_len(&sequences); ++s) {
             OcVector *seq = (OcVector *)oc_vector_get(&sequences, s);
-            apply_merge_to_vec(seq, left, right, merged_id);
+            e = apply_merge_to_vec(seq, left, right, merged_id);
+            if (e != OC_OK) goto fail;
         }
     }
 
@@ -591,13 +566,8 @@ OcError oc_bpe_train(const char *const *corpus, size_t n_corpus,
     bpe->vocab_size = oc_vector_len(&id_to_token);
     bpe->id_to_token = oc_arena_alloc(arena, bpe->vocab_size * sizeof(char *), sizeof(void *));
     if (!bpe->id_to_token) {
-        oc_vector_free(&id_to_token);
-        for (size_t s = 0; s < oc_vector_len(&sequences); ++s) {
-            OcVector *seq = (OcVector *)oc_vector_get(&sequences, s);
-            oc_vector_free(seq);
-        }
-        oc_vector_free(&sequences);
-        return OC_ERR_OOM;
+        e = OC_ERR_OOM;
+        goto fail;
     }
     for (size_t i = 0; i < bpe->vocab_size; ++i) {
         bpe->id_to_token[i] = *(char *const *)oc_vector_get(&id_to_token, i);
@@ -613,6 +583,16 @@ OcError oc_bpe_train(const char *const *corpus, size_t n_corpus,
 
     *out = bpe;
     return OC_OK;
+
+fail:
+    oc_vector_free(&id_to_token);
+    for (size_t s = 0; s < oc_vector_len(&sequences); ++s) {
+        OcVector *seq = (OcVector *)oc_vector_get(&sequences, s);
+        oc_vector_free(seq);
+    }
+    oc_vector_free(&sequences);
+    oc_bpe_free(bpe);
+    return e;
 }
 
 OcError oc_bpe_with_unknown_token(OcBpeTokenizer *bpe, OcArena *arena,
@@ -739,10 +719,10 @@ static OcError bpe_encode_segment(const OcBpeTokenizer *bpe, const char *text,
         const char *p = text;
         while (*p) {
             uint32_t cp;
-            size_t adv = utf8_decode(p, SIZE_MAX, &cp);
+            size_t adv = oc_utf8_decode_cp(p, SIZE_MAX, &cp);
             if (adv == 0) adv = 1;
             char buf[5];
-            size_t bn = utf8_encode(cp, buf);
+            size_t bn = oc_utf8_encode_cp(cp, buf);
             buf[bn] = '\0';
             void *vp;
             uint32_t id;
@@ -822,9 +802,9 @@ OcError oc_bpe_encode(const OcBpeTokenizer *bpe, const char *text,
             if (e != OC_OK) { oc_vector_free(&result); return e; }
             if (seg_count > 0) {
                 e = oc_vector_push_n(&result, seg_ids, seg_count);
-                free(seg_ids);
-                if (e != OC_OK) { oc_vector_free(&result); return e; }
             }
+            free(seg_ids);
+            if (e != OC_OK) { oc_vector_free(&result); return e; }
             break;
         }
         /* Encode the text before the special piece. */
@@ -842,9 +822,9 @@ OcError oc_bpe_encode(const OcBpeTokenizer *bpe, const char *text,
             if (e != OC_OK) { oc_vector_free(&result); return e; }
             if (seg_count > 0) {
                 e = oc_vector_push_n(&result, seg_ids, seg_count);
-                free(seg_ids);
-                if (e != OC_OK) { oc_vector_free(&result); return e; }
             }
+            free(seg_ids);
+            if (e != OC_OK) { oc_vector_free(&result); return e; }
         }
         /* Emit the special piece id. */
         e = oc_vector_push(&result, &best_id);
@@ -911,7 +891,7 @@ OcError oc_bpe_decode(const OcBpeTokenizer *bpe, const uint32_t *ids,
     const char *end = concat + off;
     while (p < end) {
         uint32_t cp;
-        size_t adv = utf8_decode(p, (size_t)(end - p), &cp);
+        size_t adv = oc_utf8_decode_cp(p, (size_t)(end - p), &cp);
         if (adv == 0) { p += 1; continue; }
         uint8_t b;
         if (gpt2_codepoint_to_byte(cp, &b)) {
@@ -926,13 +906,18 @@ OcError oc_bpe_decode(const OcBpeTokenizer *bpe, const uint32_t *ids,
         p += adv;
     }
     free(concat);
-    bytes[byte_len] = '\0';
 
     /* The bytes may not be valid UTF-8 (e.g. mid-multibyte sequences split
-     * across tokens). Use lossy conversion like Rust's
-     * `String::from_utf8_lossy`. For simplicity, we copy the bytes and
-     * replace invalid sequences with U+FFFD. */
-    *out_text = (char *)bytes;
+     * across tokens, or placeholder tokens mapping to lone invalid bytes).
+     * Apply lossy conversion like Rust's `String::from_utf8_lossy`: each
+     * maximal invalid subsequence becomes one U+FFFD. */
+    uint8_t *lossy = (uint8_t *)malloc(byte_len * 3 + 1);
+    if (!lossy) { free(bytes); return OC_ERR_OOM; }
+    size_t lossy_len = oc_utf8_lossy(bytes, byte_len, lossy);
+    lossy[lossy_len] = '\0';
+    free(bytes);
+
+    *out_text = (char *)lossy;
     return OC_OK;
 }
 
@@ -953,6 +938,9 @@ OcError oc_tokenizer_apply_chat_template(const OcChatMessage *messages,
      * Plus optional "<|im_start|>assistant\n" (22). */
     size_t total = 0;
     for (size_t i = 0; i < n_messages; ++i) {
+        if (!messages[i].role || !messages[i].content) {
+            return OC_ERR_INVALID_ARG;
+        }
         total += 12 + strlen(messages[i].role) + 1
                + strlen(messages[i].content) + 11;
     }
@@ -1042,6 +1030,7 @@ OcError oc_bpe_load_from_gguf(const OcGgufFile *gguf, OcArena *arena,
     bpe->id_to_token = oc_arena_alloc(arena, vocab_size * sizeof(char *), sizeof(void *));
     if (!bpe->vocab || !bpe->merge_ranks || !bpe->merged_ids || !bpe->id_to_token) {
         oc_vector_free(&tokens); oc_vector_free(&merges);
+        oc_bpe_free(bpe);
         return OC_ERR_OOM;
     }
 
@@ -1059,22 +1048,34 @@ OcError oc_bpe_load_from_gguf(const OcGgufFile *gguf, OcArena *arena,
         const char *sp = strchr(merge, ' ');
         if (!sp) {
             /* Invalid merge entry — mirrors Rust's `InvalidMergeEntry`
-             * error, but Rust actually returns an error. We skip. */
-            continue;
+             * error in `load_bpe`. */
+            oc_log_error("tokenizer_bpe: invalid merge entry \"%s\" (no space)",
+                         merge);
+            oc_vector_free(&tokens); oc_vector_free(&merges);
+            oc_bpe_free(bpe);
+            return OC_ERR_TOKENIZER;
         }
         size_t left_len = (size_t)(sp - merge);
         const char *right = sp + 1;
         /* Look up left and right in vocab. We need NUL-terminated keys, so
          * we dup the left part. */
         char *left = oc_arena_dup_n(arena, merge, left_len);
-        if (!left) { oc_vector_free(&tokens); oc_vector_free(&merges); return OC_ERR_OOM; }
+        if (!left) {
+            oc_vector_free(&tokens); oc_vector_free(&merges);
+            oc_bpe_free(bpe);
+            return OC_ERR_OOM;
+        }
         void *lvp, *rvp, *mvp;
         if (!oc_hashtable_get(bpe->vocab, left, &lvp)) continue;
         if (!oc_hashtable_get(bpe->vocab, right, &rvp)) continue;
         /* Build merged token string: left + right. */
         size_t right_len = strlen(right);
         char *merged = oc_arena_alloc(arena, left_len + right_len + 1, 1);
-        if (!merged) { oc_vector_free(&tokens); oc_vector_free(&merges); return OC_ERR_OOM; }
+        if (!merged) {
+            oc_vector_free(&tokens); oc_vector_free(&merges);
+            oc_bpe_free(bpe);
+            return OC_ERR_OOM;
+        }
         memcpy(merged, left, left_len);
         memcpy(merged + left_len, right, right_len);
         merged[left_len + right_len] = '\0';
@@ -1110,6 +1111,7 @@ OcError oc_bpe_load_from_gguf(const OcGgufFile *gguf, OcArena *arena,
                                                  sizeof(void *));
             if (!bpe->special_pieces) {
                 oc_vector_free(&tokens); oc_vector_free(&merges);
+                oc_bpe_free(bpe);
                 return OC_ERR_OOM;
             }
             size_t idx = 0;
@@ -1203,9 +1205,11 @@ OcError oc_tokenizer_encode(const OcTokenizer *t, const char *text,
      * true }` — the BOS id is prepended only when the tokenizer has one. */
     bool prepend_bos = (policy == OC_TOK_ADD_BOS) && t->has_bos;
 
-    /* For BPE, OC_TOK_DISALLOW_SPECIAL suppresses special-piece matching;
-     * for the other kinds (SP/WP/Tiktoken) there is no special-piece
-     * pre-split, so DISALLOW_SPECIAL behaves the same as ALLOW_SPECIAL. */
+    /* For BPE, OC_TOK_DISALLOW_SPECIAL suppresses special-piece matching.
+     * The other kinds (SP/WP/Tiktoken) have no special-piece pre-split, but
+     * their vocab lookups can still resolve marker text (e.g. `</s>`) to a
+     * special-token id; those are filtered from the output below so the
+     * injection-prevention promise (VAL-TOK-004) holds for every kind. */
     OcError e;
     if (t->kind == OC_TOK_KIND_BPE && t->bpe) {
         const OcBpeTokenizer *bpe = t->bpe;
@@ -1226,6 +1230,22 @@ OcError oc_tokenizer_encode(const OcTokenizer *t, const char *text,
         return OC_ERR_TOKENIZER;
     }
     if (e != OC_OK) return e;
+
+    /* Enforce OC_TOK_DISALLOW_SPECIAL for the non-BPE kinds: drop any
+     * special-token id that surfaced from ordinary vocab lookups.
+     * ponytail: dropped rather than re-segmented as ordinary pieces; add
+     * per-kind byte-fallback segmentation if fidelity matters. */
+    if (policy == OC_TOK_DISALLOW_SPECIAL && t->kind != OC_TOK_KIND_BPE
+        && *out_ids) {
+        uint32_t *ids = *out_ids;
+        size_t kept = 0;
+        for (size_t i = 0; i < *out_count; ++i) {
+            if (!oc_tokenizer_is_special(t, ids[i])) {
+                ids[kept++] = ids[i];
+            }
+        }
+        *out_count = kept;
+    }
 
     /* Prepend BOS if requested and the tokenizer has one (VAL-TOK-007). */
     if (prepend_bos && out_ids) {

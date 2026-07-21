@@ -137,7 +137,7 @@ Test(<module>, <behavior>_parity)
 {
     /* load golden fixture from oxidize-core/tests/fixtures/<name>.bin */
     /* compute via C API */
-    /* cr_assert_eq / cr_assert_mem_eq against golden */
+    /* cr_assert_eq / cr_assert_arr_eq(actual, golden, size) against golden */
 }
 ```
 

@@ -77,19 +77,36 @@ size_t oc_error_ctx_format(const OcErrorCtx *ctx, char *buf, size_t cap)
         return total;
     }
 
-    size_t written = 0;
+    /* snprintf-style semantics: always return the full would-be length of the
+     * whole chain, even when the output is truncated. */
+    size_t total   = 0;  /* full untruncated length          */
+    size_t written = 0;  /* bytes actually placed in buf     */
     bool first = true;
     const OcErrorCtx *c = ctx;
-    while (c && written + 1 < cap) {
+    while (c) {
         const char *msg = c->msg ? c->msg : "";
-        int n = snprintf(buf + written, cap - written, "%s%s: %s",
+        int n;
+        if (written + 1 < cap) {
+            n = snprintf(buf + written, cap - written, "%s%s: %s",
                          first ? "" : " caused by: ",
                          oc_error_msg(c->code), msg);
-        if (n < 0) break;
-        written += (size_t)n;
+        } else {
+            /* No room left; keep measuring the rest of the chain. */
+            n = snprintf(NULL, 0, "%s%s: %s",
+                         first ? "" : " caused by: ",
+                         oc_error_msg(c->code), msg);
+        }
+        if (n < 0) n = 0;
+        total += (size_t)n;
+        /* Advance `written` only by what actually fit (snprintf returns the
+         * would-be length even when it truncated). */
+        if (written + 1 < cap) {
+            size_t room = cap - written - 1;
+            written += ((size_t)n < room) ? (size_t)n : room;
+        }
         first = false;
         c = c->cause;
     }
-    if (cap > 0) buf[written < cap ? written : cap - 1] = '\0';
-    return written;
+    buf[written] = '\0';
+    return total;
 }

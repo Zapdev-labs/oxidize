@@ -174,6 +174,17 @@ OcError oc_mmap_open_fd(int fd, size_t len, OcMmap **out)
      * and oc_mmap_close() will close it). Every error path must therefore
      * close(fd) here — mirroring oc_mmap_open_readonly's cleanup — otherwise
      * the caller has no way to reclaim the fd and it leaks. */
+    /* Reject len > file size: mmap would succeed but touching pages past EOF
+     * SIGBUSes. Only enforced for regular files (the only mappable case here). */
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)
+        || st.st_size < 0 || len > (size_t)st.st_size) {
+        oc_log(OC_LOG_ERROR, "mmap: fd=%d not a regular file of >= %zu bytes",
+                fd, len);
+        close(fd);
+        free(m);
+        return OC_ERR_INVALID_ARG;
+    }
     void *addr = mmap(NULL, len, PROT_READ, MAP_PRIVATE, fd, 0);
     if (addr == MAP_FAILED) {
         oc_log(OC_LOG_ERROR, "mmap: mmap(fd=%d, %zu) failed: %s", fd, len,

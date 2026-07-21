@@ -55,8 +55,11 @@ static uint8_t *chunk_data(OcArenaChunk *c)
 static size_t round_up_pow2(size_t n)
 {
     size_t r = 1;
-    while (r < n) r <<= 1;
-    return r ? r : n;
+    while (r < n) {
+        if (r > SIZE_MAX / 2) return 0; /* would overflow */
+        r <<= 1;
+    }
+    return r;
 }
 
 static size_t align_up(size_t v, size_t align)
@@ -68,6 +71,8 @@ static size_t align_up(size_t v, size_t align)
 static OcArenaChunk *chunk_new(size_t cap)
 {
     if (cap < OC_ARENA_MIN_CHUNK) cap = OC_ARENA_MIN_CHUNK;
+    /* Reject caps that would wrap the malloc size below. */
+    if (cap > SIZE_MAX - sizeof(OcArenaChunk) - OC_ARENA_ALIGN_MAX) return NULL;
     /* Allocate extra space for alignment slack (OC_ARENA_ALIGN_MAX bytes). */
     OcArenaChunk *c = (OcArenaChunk *)malloc(sizeof(OcArenaChunk) + cap + OC_ARENA_ALIGN_MAX);
     if (!c) return NULL;
@@ -81,6 +86,7 @@ OcArena *oc_arena_new(size_t initial_cap)
 {
     if (initial_cap == 0) initial_cap = OC_ARENA_DEFAULT_CAP;
     initial_cap = round_up_pow2(initial_cap);
+    if (initial_cap == 0) return NULL; /* requested cap too large */
     if (initial_cap < OC_ARENA_MIN_CHUNK) initial_cap = OC_ARENA_MIN_CHUNK;
 
     OcArena *a = (OcArena *)malloc(sizeof(OcArena));
@@ -102,16 +108,21 @@ void *oc_arena_alloc(OcArena *a, size_t n, size_t align)
     if (align == 0 || (align & (align - 1)) != 0) align = 1;
     if (align > OC_ARENA_ALIGN_MAX) align = OC_ARENA_ALIGN_MAX;
 
-    /* Try the current tail chunk. */
-    OcArenaChunk *c = a->tail;
-    if (c) {
+    if (n > SIZE_MAX - align) return NULL; /* n + align below would wrap */
+
+    /* Try the current tail chunk, then any already-allocated chunks after it
+     * (present after oc_arena_reset()). Overflow-safe fit check. */
+    while (a->tail) {
+        OcArenaChunk *c = a->tail;
         size_t aligned_off = align_up(c->off, align);
-        if (aligned_off + n <= c->cap) {
+        if (aligned_off <= c->cap && n <= c->cap - aligned_off) {
             void *p = chunk_data(c) + aligned_off;
             c->off = aligned_off + n;
             a->total_used += n;
             return p;
         }
+        if (!c->next) break;
+        a->tail = c->next;
     }
 
     /* Need a new chunk. Size it to fit the allocation with headroom. */
@@ -159,6 +170,7 @@ char *oc_arena_dup(OcArena *a, const char *s)
 char *oc_arena_dup_n(OcArena *a, const char *s, size_t n)
 {
     if (!s) return NULL;
+    if (n == SIZE_MAX) return NULL; /* n + 1 would wrap */
     char *dst = (char *)oc_arena_alloc(a, n + 1, 1);
     if (!dst) return NULL;
     memcpy(dst, s, n);
@@ -202,6 +214,7 @@ void oc_arena_reset(OcArena *a)
 {
     if (!a) return;
     for (OcArenaChunk *c = a->head; c; c = c->next) c->off = 0;
+    a->tail = a->head; /* reuse chunks from the start; alloc walks forward */
     a->total_used = 0;
 }
 
