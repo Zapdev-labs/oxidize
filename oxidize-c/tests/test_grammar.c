@@ -66,6 +66,11 @@ Test(grammar, choice_mode)
     /* Complete "yes". */
     oc_grammar_advance(&g, "es", 2);
     cr_assert(g.finished);
+
+    oc_grammar_reset(&g);
+    cr_assert(oc_grammar_allows_token(&g, "no", 2));
+    oc_grammar_advance(&g, "no", 2);
+    cr_assert(g.finished);
 }
 
 Test(grammar, reset)
@@ -89,10 +94,10 @@ Test(grammar, is_satisfied)
     
     oc_grammar_init(&g, OC_GRAMMAR_JSON);
     cr_assert(!oc_grammar_is_satisfied(&g));  /* not started */
-    g.started = true;
-    cr_assert(oc_grammar_is_satisfied(&g));  /* started, not in string */
-    g.in_string = true;
-    cr_assert(!oc_grammar_is_satisfied(&g));  /* inside string */
+    oc_grammar_advance(&g, "{", 1);
+    cr_assert(!oc_grammar_is_satisfied(&g));
+    oc_grammar_advance(&g, "}", 1);
+    cr_assert(oc_grammar_is_satisfied(&g));
 }
 
 Test(grammar, token_allows)

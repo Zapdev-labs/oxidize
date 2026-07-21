@@ -25,8 +25,7 @@ extern "C" {
 typedef enum {
     OC_GRAMMAR_NONE    = 0,  /* no constraint                          */
     OC_GRAMMAR_JSON    = 1,  /* valid JSON output                      */
-    OC_GRAMMAR_REGEX   = 2,  /* regex constraint (simplified)          */
-    OC_GRAMMAR_CHOICE  = 3,  /* one of a set of literal strings        */
+    OC_GRAMMAR_CHOICE  = 2,  /* one of a set of literal strings        */
 } OcGrammarType;
 
 typedef struct OcGrammarConstraint {
@@ -42,6 +41,8 @@ typedef struct OcGrammarConstraint {
     bool escaped;           /* for JSON: was the previous char \?     */
     bool started;           /* has any output been generated yet?     */
     bool finished;         /* has the grammar been satisfied?        */
+    char json_stack[64];
+    size_t json_depth;
 } OcGrammarConstraint;
 
 /* Initialize a grammar constraint. */

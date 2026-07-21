@@ -82,25 +82,20 @@ bool oc_grammar_allows_char(OcGrammarConstraint *g, char c)
         return json_structural_char(c);
 
     case OC_GRAMMAR_CHOICE: {
-        /* Check if c matches any choice at the current position. */
+        if (g->started) {
+            if (g->active_choice >= g->n_choices || !g->choices[g->active_choice]) return false;
+            const char *choice = g->choices[g->active_choice];
+            return g->matched_pos < strlen(choice) && choice[g->matched_pos] == c;
+        }
         for (size_t i = 0; i < g->n_choices; i++) {
             if (g->choices[i] == NULL) continue;
             size_t len = strlen(g->choices[i]);
             if (g->matched_pos < len && g->choices[i][g->matched_pos] == c) {
                 return true;
             }
-            /* Also allow matching from the start of any choice if we haven't
-             * started matching yet. */
-            if (!g->started && len > 0 && g->choices[i][0] == c) {
-                return true;
-            }
         }
         return false;
     }
-
-    case OC_GRAMMAR_REGEX:
-        /* Simplified: allow all characters (full regex not implemented). */
-        return true;
 
     default:
         return true;
@@ -120,30 +115,7 @@ bool oc_grammar_allows_token(OcGrammarConstraint *g,
         if (!oc_grammar_allows_char(&sim, token_bytes[i])) {
             return false;
         }
-        /* Update sim state. */
-        switch (sim.type) {
-        case OC_GRAMMAR_JSON:
-            if (sim.in_string) {
-                if (sim.escaped) {
-                    sim.escaped = false;
-                } else if (token_bytes[i] == '\\') {
-                    sim.escaped = true;
-                } else if (token_bytes[i] == '"') {
-                    sim.in_string = false;
-                }
-            } else {
-                if (token_bytes[i] == '"') {
-                    sim.in_string = true;
-                }
-            }
-            break;
-        case OC_GRAMMAR_CHOICE:
-            sim.matched_pos++;
-            sim.started = true;
-            break;
-        default:
-            break;
-        }
+        oc_grammar_advance(&sim, &token_bytes[i], 1);
     }
     return true;
 }
@@ -152,7 +124,6 @@ void oc_grammar_advance(OcGrammarConstraint *g,
                         const char *token_bytes, size_t token_len)
 {
     if (!g || !token_bytes) return;
-    g->started = true;
     for (size_t i = 0; i < token_len; i++) {
         char c = token_bytes[i];
         switch (g->type) {
@@ -164,14 +135,36 @@ void oc_grammar_advance(OcGrammarConstraint *g,
                     g->escaped = true;
                 } else if (c == '"') {
                     g->in_string = false;
+                    if (g->json_depth == 0) g->finished = true;
                 }
             } else {
                 if (c == '"') {
                     g->in_string = true;
+                    if (g->json_depth == 0) g->started = true;
+                } else if (c == '{' || c == '[') {
+                    if (g->json_depth < sizeof(g->json_stack)) {
+                        g->json_stack[g->json_depth++] = c;
+                        g->started = true;
+                    }
+                } else if ((c == '}' || c == ']') && g->json_depth > 0) {
+                    char open = g->json_stack[g->json_depth - 1];
+                    if ((open == '{' && c == '}') || (open == '[' && c == ']')) {
+                        g->json_depth--;
+                        if (g->json_depth == 0) g->finished = true;
+                    }
                 }
             }
             break;
         case OC_GRAMMAR_CHOICE:
+            if (!g->started) {
+                for (size_t choice = 0; choice < g->n_choices; choice++) {
+                    if (g->choices[choice] && g->choices[choice][0] == c) {
+                        g->active_choice = choice;
+                        break;
+                    }
+                }
+                g->started = true;
+            }
             g->matched_pos++;
             /* Check if we've completed a choice. */
             if (g->active_choice < g->n_choices && g->choices[g->active_choice]) {
@@ -195,6 +188,8 @@ void oc_grammar_reset(OcGrammarConstraint *g)
     g->escaped = false;
     g->started = false;
     g->finished = false;
+    g->json_depth = 0;
+    memset(g->json_stack, 0, sizeof(g->json_stack));
 }
 
 bool oc_grammar_is_satisfied(const OcGrammarConstraint *g)
@@ -202,8 +197,7 @@ bool oc_grammar_is_satisfied(const OcGrammarConstraint *g)
     if (!g) return true;
     if (g->type == OC_GRAMMAR_NONE) return true;
     if (g->type == OC_GRAMMAR_JSON) {
-        /* JSON is satisfied when we're not inside a string and not escaped. */
-        return !g->in_string && !g->escaped && g->started;
+        return g->finished && !g->in_string && !g->escaped && g->json_depth == 0;
     }
     return g->finished;
 }
