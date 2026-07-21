@@ -86,7 +86,11 @@ OcError oc_speculative_decode(
     if (draft_tokens == NULL || draft_logits == NULL || target_logits == NULL ||
         cfg == NULL || seed_state == NULL || out == NULL)
         return OC_ERR_INVALID_ARG;
-    if (k == 0 || k > OC_SPEC_MAX_DRAFT) return OC_ERR_INVALID_ARG;
+    if (k == 0 || k > OC_SPEC_MAX_DRAFT || vocab_size == 0)
+        return OC_ERR_INVALID_ARG;
+    for (uint32_t i = 0; i < k; i++) {
+        if (draft_tokens[i] >= vocab_size) return OC_ERR_INVALID_ARG;
+    }
 
     out->count = 0;
     out->accepted = 0;
@@ -176,6 +180,7 @@ OcError oc_speculative_generate(
         !cfg || !out_tokens || !out_len)
         return OC_ERR_INVALID_ARG;
     if (prompt_len == 0) return OC_ERR_INVALID_ARG;
+    if (out_cap == 0) return OC_ERR_INVALID_ARG;
     if (target->cfg.vocab_size != draft->cfg.vocab_size)
         return OC_ERR_INVALID_ARG;
 
@@ -211,18 +216,26 @@ OcError oc_speculative_generate(
 
     if (stats) memset(stats, 0, sizeof(*stats));
     *out_len = 0;
+    OcError status = OC_OK;
 
     /* 1. Prefill prompt on target. Forward all but last with NULL logits,
      *    then forward last token with logits → target_ptrs[0]. */
-    for (size_t i = 0; i < prompt_len - 1; i++)
-        oc_llama_forward(target_sess, prompt[i], NULL);
-    oc_llama_forward(target_sess, prompt[prompt_len - 1], target_ptrs[0]);
+    oc_llama_session_reset(target_sess);
+    for (size_t i = 0; i < prompt_len - 1; i++) {
+        status = oc_llama_forward(target_sess, prompt[i], NULL);
+        if (status != OC_OK) goto cleanup;
+    }
+    status = oc_llama_forward(target_sess, prompt[prompt_len - 1], target_ptrs[0]);
+    if (status != OC_OK) goto cleanup;
 
     /* Prefill prompt on draft, same pattern → draft_ptrs[0]. */
     oc_llama_session_reset(draft_sess);
-    for (size_t i = 0; i < prompt_len - 1; i++)
-        oc_llama_forward(draft_sess, prompt[i], NULL);
-    oc_llama_forward(draft_sess, prompt[prompt_len - 1], draft_ptrs[0]);
+    for (size_t i = 0; i < prompt_len - 1; i++) {
+        status = oc_llama_forward(draft_sess, prompt[i], NULL);
+        if (status != OC_OK) goto cleanup;
+    }
+    status = oc_llama_forward(draft_sess, prompt[prompt_len - 1], draft_ptrs[0]);
+    if (status != OC_OK) goto cleanup;
 
     /* Sample the first token from target seed logits. */
     uint32_t current_token;
@@ -238,6 +251,10 @@ OcError oc_speculative_generate(
 
     out_tokens[(*out_len)++] = current_token;
     if (stats) stats->emitted_tokens++;
+    status = oc_llama_forward(target_sess, current_token, target_ptrs[0]);
+    if (status != OC_OK) goto cleanup;
+    status = oc_llama_forward(draft_sess, current_token, draft_ptrs[0]);
+    if (status != OC_OK) goto cleanup;
 
     /* 2. Speculative loop. */
     while (*out_len < out_cap) {
@@ -245,12 +262,11 @@ OcError oc_speculative_generate(
         if (max_new > 0 && stats && stats->emitted_tokens >= max_new) break;
         if (max_new > 0 && !stats && *out_len >= max_new) break;
 
-        uint32_t start_token = current_token;
-
         /* --- Draft generation: K tokens autoregressively. ---
          * draft_ptrs[0] already holds logits from the start position.
          * Generate draft_tokens[0] from draft_ptrs[0], forward it to get
          * draft_ptrs[1], etc. */
+        uint32_t draft_ckpt = (uint32_t)draft_sess->pos;
         for (uint32_t i = 0; i < k; i++) {
             if (cfg->greedy) {
                 draft_tokens[i] = oc_argmax(draft_ptrs[i], vocab);
@@ -260,8 +276,9 @@ OcError oc_speculative_generate(
                 scfg.seed = xorshift64(&seed);
                 draft_tokens[i] = oc_sample(draft_ptrs[i], vocab, &scfg, NULL, 0);
             }
-            oc_llama_forward(draft_sess, draft_tokens[i],
-                              (i + 1 < k) ? draft_ptrs[i + 1] : NULL);
+            status = oc_llama_forward(draft_sess, draft_tokens[i],
+                                      (i + 1 < k) ? draft_ptrs[i + 1] : NULL);
+            if (status != OC_OK) goto cleanup;
         }
         if (stats) {
             stats->total_draft_tokens += k;
@@ -273,8 +290,9 @@ OcError oc_speculative_generate(
          *     previous step (or prefill). --- */
         uint32_t target_ckpt = target_sess->pos;
         for (uint32_t i = 0; i < k; i++) {
-            oc_llama_forward(target_sess, draft_tokens[i],
-                              target_ptrs[i + 1]);
+            status = oc_llama_forward(target_sess, draft_tokens[i],
+                                      target_ptrs[i + 1]);
+            if (status != OC_OK) goto cleanup;
         }
         if (stats) stats->target_forward_passes++;
 
@@ -284,59 +302,34 @@ OcError oc_speculative_generate(
         OcError e = oc_speculative_decode(
             draft_tokens, draft_ptrs, target_ptrs,
             k, vocab, cfg, &vs, &result);
-        if (e != OC_OK) goto cleanup;
+        if (e != OC_OK) { status = e; goto cleanup; }
         if (stats) stats->accepted_draft_tokens += result.accepted;
 
-        /* --- Target KV rewind + replay accepted tokens. ---
-         * Forward result.tokens[0..count-2] with NULL logits, then
-         * result.tokens[count-1] with logits → target_ptrs[0] for next step. */
+        size_t emit_count = result.count;
+        if (emit_count > out_cap - *out_len) emit_count = out_cap - *out_len;
+        if (cfg->max_new_tokens > 0 &&
+            emit_count > cfg->max_new_tokens - *out_len)
+            emit_count = cfg->max_new_tokens - *out_len;
+
         oc_llama_session_rewind(target_sess, target_ckpt);
-        for (uint32_t i = 0; i + 1 < result.count; i++)
-            oc_llama_forward(target_sess, result.tokens[i], NULL);
-        oc_llama_forward(target_sess, result.tokens[result.count - 1],
-                         target_ptrs[0]);
-
-        /* --- Draft KV rewind + replay. ---
-         * Rewind to the position before the K draft forwards. Then
-         * forward start_token + accepted draft tokens. The last forward
-         * produces draft_ptrs[0] for the next step. */
-        uint32_t draft_ckpt = draft_sess->pos - k;
         oc_llama_session_rewind(draft_sess, draft_ckpt);
-
-        /* Forward start_token (saves logits if we need them for next step). */
-        oc_llama_forward(draft_sess, start_token,
-                         (result.accepted == 0) ? draft_ptrs[0] : NULL);
-
-        /* Forward accepted draft tokens. */
-        for (uint32_t i = 0; i < result.accepted; i++) {
-            if (i + 1 == result.accepted && result.accepted < result.count - 1) {
-                /* Last accepted before rejection — forward with logits. */
-                oc_llama_forward(draft_sess, result.tokens[i], draft_ptrs[0]);
-            } else if (i + 1 == result.accepted && result.accepted == result.count - 1) {
-                /* All accepted, bonus token is last — forward it with logits. */
-                /* Actually, result.tokens[result.accepted] is the bonus. */
-                oc_llama_forward(draft_sess, result.tokens[i], NULL);
-                oc_llama_forward(draft_sess, result.tokens[result.count - 1],
-                                 draft_ptrs[0]);
-            } else {
-                oc_llama_forward(draft_sess, result.tokens[i], NULL);
-            }
+        for (size_t i = 0; i < emit_count; i++) {
+            float *target_logits = i + 1 == emit_count ? target_ptrs[0] : NULL;
+            float *draft_logits = i + 1 == emit_count ? draft_ptrs[0] : NULL;
+            status = oc_llama_forward(target_sess, result.tokens[i], target_logits);
+            if (status != OC_OK) goto cleanup;
+            status = oc_llama_forward(draft_sess, result.tokens[i], draft_logits);
+            if (status != OC_OK) goto cleanup;
         }
 
-        /* If no draft tokens were accepted, forward the residual token. */
-        if (result.accepted == 0 && result.count > 0) {
-            oc_llama_forward(draft_sess, result.tokens[0], draft_ptrs[0]);
-        }
-
-        /* --- Emit tokens. --- */
-        for (uint32_t i = 0; i < result.count; i++) {
-            if (*out_len >= out_cap) break;
+        for (size_t i = 0; i < emit_count; i++) {
             out_tokens[(*out_len)++] = result.tokens[i];
             if (stats) stats->emitted_tokens++;
             if (result.tokens[i] == cfg->stop_token) goto cleanup;
         }
-
-        current_token = result.tokens[result.count - 1];
+        if (emit_count == 0) break;
+        current_token = result.tokens[emit_count - 1];
+        if (cfg->max_new_tokens > 0 && *out_len >= cfg->max_new_tokens) break;
 
         /* --- Fallback if acceptance rate too low. --- */
         if (stats && cfg->min_acceptance_rate > 0.0f &&
@@ -360,8 +353,10 @@ OcError oc_speculative_generate(
                 }
                 if (fb == cfg->stop_token) goto cleanup;
                 /* Forward through both models. */
-                oc_llama_forward(target_sess, fb, target_ptrs[0]);
-                oc_llama_forward(draft_sess, fb, draft_ptrs[0]);
+                status = oc_llama_forward(target_sess, fb, target_ptrs[0]);
+                if (status != OC_OK) goto cleanup;
+                status = oc_llama_forward(draft_sess, fb, draft_ptrs[0]);
+                if (status != OC_OK) goto cleanup;
                 current_token = fb;
             }
         }
@@ -369,5 +364,5 @@ OcError oc_speculative_generate(
 
 cleanup:
     free(target_buf); free(draft_buf);
-    return OC_OK;
+    return status;
 }
