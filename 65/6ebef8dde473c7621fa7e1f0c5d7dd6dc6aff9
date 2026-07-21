@@ -1,0 +1,20 @@
+oxidize-c/src/cli/main.c
+  s_5bec56e69286b9::t_f505da9166f17e 319-348,455,461-462,556-559,574-603,610-614,624-631,661
+  s_5bec56e69286b9::t_cc9ad02be44fe1 80,608-609,619,645,657,664,666
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "656ebef8dde473c7621fa7e1f0c5d7dd6dc6aff9",
+  "prompts": {},
+  "sessions": {
+    "s_5bec56e69286b9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f86ae-2366-7b80-8a79-8d8524df27c3",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
