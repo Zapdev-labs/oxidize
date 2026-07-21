@@ -1,0 +1,22 @@
+oxidize-c/src/model/speculative.c
+  s_5bec56e69286b9::t_cef7c3375005a3 89-93,332
+  s_5bec56e69286b9::t_ba139349d9d2e3 183,219,223-229,233-238,254-257,269,279-281,293-295,305,308-313,316-322,325,330-331,356-359,367
+oxidize-c/tests/test_speculative.c
+  s_5bec56e69286b9::t_81095b1a87e63f 170-197
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "96864f930bf148d25aaae5b6484bbd8f1afff0ab",
+  "prompts": {},
+  "sessions": {
+    "s_5bec56e69286b9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f86ae-2366-7b80-8a79-8d8524df27c3",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
