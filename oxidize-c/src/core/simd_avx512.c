@@ -11,6 +11,8 @@
  */
 #include "oxidize/simd.h"
 
+#if defined(__x86_64__) || defined(__i386__)
+
 #include <immintrin.h>
 #include <stdint.h>
 
@@ -193,3 +195,35 @@ bool oc_simd_dequant_q4_k_avx512(const uint8_t *src, size_t src_len,
     }
     return true;
 }
+
+#else
+
+bool oc_simd_dequant_q4_0_avx512(const uint8_t *src, size_t src_len,
+                                 float *dst, size_t value_count)
+{
+    (void)src; (void)src_len; (void)dst; (void)value_count;
+    return false;
+}
+
+bool oc_simd_dequant_q4_1_avx512(const uint8_t *src, size_t src_len,
+                                 float *dst, size_t value_count)
+{
+    (void)src; (void)src_len; (void)dst; (void)value_count;
+    return false;
+}
+
+bool oc_simd_dequant_q8_0_avx512(const uint8_t *src, size_t src_len,
+                                 float *dst, size_t value_count)
+{
+    (void)src; (void)src_len; (void)dst; (void)value_count;
+    return false;
+}
+
+bool oc_simd_dequant_q4_k_avx512(const uint8_t *src, size_t src_len,
+                                 float *dst, size_t value_count)
+{
+    (void)src; (void)src_len; (void)dst; (void)value_count;
+    return false;
+}
+
+#endif

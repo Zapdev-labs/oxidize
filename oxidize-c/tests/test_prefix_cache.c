@@ -40,6 +40,7 @@ Test(prefix_cache, store_lookup)
     cr_assert_not_null(p);
     cr_assert_eq(p->n_tokens, 5);
     cr_assert_str_eq((char *)p->kv_data, "kv_snapshot");
+    oc_prefix_cache_clear(&c);
 }
 
 Test(prefix_cache, evict_lru)
@@ -54,6 +55,7 @@ Test(prefix_cache, evict_lru)
     size_t evicted = oc_prefix_cache_evict(&c, c.clock);
     /* The first 4 entries should be evicted (last entry was just stored). */
     cr_assert(evicted >= 4);
+    oc_prefix_cache_clear(&c);
 }
 
 Test(prefix_cache, clear)
@@ -77,4 +79,5 @@ Test(prefix_cache, stats)
     oc_prefix_cache_stats(&c, &stats);
     cr_assert_eq(stats.n_entries, 2);
     cr_assert_eq(stats.total_kv_bytes, 8);
+    oc_prefix_cache_clear(&c);
 }

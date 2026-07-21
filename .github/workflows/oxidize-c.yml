@@ -143,7 +143,7 @@ jobs:
 
       - name: Install Python + Modal
         run: |
-          pip install modal
+          python -m pip install modal
 
       - name: Run GPU build on Modal
         env:
@@ -154,7 +154,6 @@ jobs:
             echo "Modal secrets not configured, skipping GPU test"
             exit 0
           fi
-          modal token new --token-id "$MODAL_TOKEN_ID" --token-secret "$MODAL_TOKEN_SECRET"
           modal run modal_c_app.py::cuda_build
 
       - name: Run GPU inference test on Modal
@@ -224,10 +223,10 @@ jobs:
         run: |
           make clean
           CC=aarch64-linux-gnu-gcc CFLAGS="-std=c11 -Wall -Wextra -Werror -O2 -Iinclude" \
-            make -j4 build 2>&1 || echo "Cross-compile may fail due to missing libs (expected)"
+            make -j4 build
 
       - name: At least compile all .c files
         run: |
           for f in src/core/*.c src/util/*.c src/format/*.c src/model/*.c src/compute/*.c src/autotune/*.c src/server/*.c src/paged/*.c src/backends/cuda_stub.c src/cli/args.c; do
-            aarch64-linux-gnu-gcc -std=c11 -Wall -Wextra -Werror -O2 -Iinclude -c -o /dev/null "$f" 2>&1 || echo "FAILED: $f"
+            aarch64-linux-gnu-gcc -std=c11 -Wall -Wextra -Werror -O2 -Iinclude -c -o /dev/null "$f"
           done

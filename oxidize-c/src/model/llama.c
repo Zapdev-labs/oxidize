@@ -477,9 +477,6 @@ OcError oc_llama_session_init(OcLlamaModel *model, OcLlamaSession *out)
         }
     }
     /* KV cache quantization (Q8_0-style: 32-element blocks with f16 scale). */
-    out->kv_quantized = false;
-    out->kv_k_q8 = NULL; out->kv_v_q8 = NULL;
-    out->kv_k_scale = NULL; out->kv_v_scale = NULL;
     out->pos = 0;
     return OC_OK;
 }
@@ -509,8 +506,6 @@ void oc_llama_session_free(OcLlamaSession *sess)
     free(sess->shexp_gate); free(sess->shexp_up); free(sess->shexp_out);
     free(sess->mla_c_q); free(sess->mla_c_kv);
     free(sess->mla_q_full); free(sess->mla_kv_compressed);
-    free(sess->kv_k_q8); free(sess->kv_v_q8);
-    free(sess->kv_k_scale); free(sess->kv_v_scale);
     memset(sess, 0, sizeof(*sess));
 }
 
@@ -532,53 +527,6 @@ void oc_llama_free(OcLlamaModel *model)
 }
 
 /* ─── Forward pass ─────────────────────────────────────────────────────── */
-
-/* ─── KV cache quantization (Q8 asymmetric, 32-element blocks) ─────────── */
-
-#define KV_Q8_BLOCK_SIZE 32
-
-/* Quantize a row of floats to Q8 (asymmetric, per-block f16 scale).
- * `src` has `n` floats. `dst` receives n int8 values. `scale` receives
- * one f16-scale per block (as float). */
-static void kv_quantize_q8(const float *src, int8_t *dst, float *scale, size_t n)
-{
-    size_t n_blocks = (n + KV_Q8_BLOCK_SIZE - 1) / KV_Q8_BLOCK_SIZE;
-    for (size_t b = 0; b < n_blocks; b++) {
-        size_t off = b * KV_Q8_BLOCK_SIZE;
-        size_t len = (off + KV_Q8_BLOCK_SIZE <= n) ? KV_Q8_BLOCK_SIZE : (n - off);
-        float amax = 0.0f;
-        for (size_t i = 0; i < len; i++) {
-            float a = fabsf(src[off + i]);
-            if (a > amax) amax = a;
-        }
-        float s = amax / 127.0f;
-        if (s == 0.0f) s = 1.0f;
-        scale[b] = s;
-        float inv = 1.0f / s;
-        for (size_t i = 0; i < len; i++) {
-            float v = src[off + i] * inv;
-            int q = (int)(v + (v >= 0 ? 0.5f : -0.5f));
-            if (q > 127) q = 127;
-            if (q < -128) q = -128;
-            dst[off + i] = (int8_t)q;
-        }
-    }
-}
-
-/* Dequantize a Q8 row back to floats. */
-static void kv_dequantize_q8(const int8_t *src, const float *scale,
-                             float *dst, size_t n)
-{
-    size_t n_blocks = (n + KV_Q8_BLOCK_SIZE - 1) / KV_Q8_BLOCK_SIZE;
-    for (size_t b = 0; b < n_blocks; b++) {
-        size_t off = b * KV_Q8_BLOCK_SIZE;
-        size_t len = (off + KV_Q8_BLOCK_SIZE <= n) ? KV_Q8_BLOCK_SIZE : (n - off);
-        float s = scale[b];
-        for (size_t i = 0; i < len; i++) {
-            dst[off + i] = (float)src[off + i] * s;
-        }
-    }
-}
 
 /* Embed one token: dequantize row `token` of tok_embeddings into `dst`. */
 static void embed_token(OcLlamaSession *s, uint32_t token)

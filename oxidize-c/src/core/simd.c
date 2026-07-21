@@ -19,7 +19,8 @@
 
 /* ─── Capability detection ────────────────────────────────────────────── */
 
-#if defined(__GNUC__) || defined(__clang__)
+#if (defined(__x86_64__) || defined(__i386__)) && \
+    (defined(__GNUC__) || defined(__clang__))
 #  define OC_HAVE_BUILTIN_CPU 1
 #else
 #  define OC_HAVE_BUILTIN_CPU 0

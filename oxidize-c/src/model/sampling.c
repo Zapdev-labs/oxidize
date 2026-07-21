@@ -378,6 +378,7 @@ uint32_t oc_sample(const float *logits_in, size_t vocab_size,
         float *probs = malloc(vocab_size * sizeof(float));
         if (probs != NULL) {
             softmax_inplace(logits, vocab_size);
+            memcpy(probs, logits, vocab_size * sizeof(float));
             /* Compute entropy H = -sum(p * log2(p)). */
             double entropy = 0.0;
             for (size_t i = 0; i < vocab_size; i++) {
@@ -433,6 +434,7 @@ uint32_t oc_sample(const float *logits_in, size_t vocab_size,
         float *probs = malloc(vocab_size * sizeof(float));
         if (probs != NULL) {
             softmax_inplace(logits, vocab_size);
+            memcpy(probs, logits, vocab_size * sizeof(float));
             /* Sort by descending probability. */
             for (size_t i = 0; i < vocab_size; i++) idx[i] = i;
             for (size_t i = 0; i < vocab_size - 1; i++) {
@@ -446,7 +448,6 @@ uint32_t oc_sample(const float *logits_in, size_t vocab_size,
             /* Second derivative: d2[i] = |d1[i] - d1[i+1]|. */
             if (vocab_size < 3) {
                 result = oc_argmax(logits, vocab_size);
-                free(probs);
             } else {
                 /* Compute d2 and normalize. */
                 float *d2 = malloc((vocab_size - 2) * sizeof(float));
@@ -476,7 +477,7 @@ uint32_t oc_sample(const float *logits_in, size_t vocab_size,
                     for (size_t i = 0; i < keep; i++) sum += (double)probs[idx[i]];
                     if (sum > 0.0) {
                         float inv = (float)(1.0 / sum);
-                        for (size_t i = 0; i < keep; i++) probs[i] = probs[idx[i]] * inv;
+                        for (size_t i = 0; i < keep; i++) probs[i] = logits[idx[i]] * inv;
                     }
                     result = sample_categorical(idx, probs, keep, &rng);
                     free(d2);

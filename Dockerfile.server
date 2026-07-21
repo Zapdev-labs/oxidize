@@ -15,6 +15,9 @@ COPY oxidize-ffi/Cargo.toml oxidize-ffi/Cargo.toml
 COPY oxidize-kernels/Cargo.toml oxidize-kernels/Cargo.toml
 COPY oxidize-prune/Cargo.toml oxidize-prune/Cargo.toml
 COPY oxidize-merge/Cargo.toml oxidize-merge/Cargo.toml
+COPY vendor/libp2p-dns vendor/libp2p-dns
+COPY vendor/libp2p-mdns vendor/libp2p-mdns
+COPY vendor/libp2p-yamux vendor/libp2p-yamux
 COPY oxidize-core/src oxidize-core/src
 COPY oxidize-core/benches oxidize-core/benches
 COPY oxidize-core/kernels oxidize-core/kernels

@@ -43,11 +43,10 @@
 
 #define OC_CLI_VERSION "0.2.0"
 
-/* Wall-clock timer using CLOCK_MONOTONIC (not CPU time). */
 static double wall_now(void)
 {
     struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
+    if (timespec_get(&ts, TIME_UTC) != TIME_UTC) return 0.0;
     return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
 }
 

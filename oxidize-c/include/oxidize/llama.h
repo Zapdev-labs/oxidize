@@ -145,14 +145,6 @@ typedef struct OcLlamaSession {
     float *mla_c_kv;         /* kv_lora_dim                          */
     float *mla_q_full;       /* n_heads * q_head_dim                */
     float *mla_kv_compressed; /* kv_lora + kv_pe                     */
-    /* KV cache quantization (Q8 asymmetric). When enabled, K and V are
-     * stored as int8 with per-block f16 scales (same as Q8_0 block format).
-     * This halves KV memory at a small quality cost. */
-    bool   kv_quantized;
-    int8_t *kv_k_q8;         /* quantized K cache (when kv_quantized) */
-    int8_t *kv_v_q8;         /* quantized V cache (when kv_quantized) */
-    float  *kv_k_scale;     /* per-block f16 scales (as float)      */
-    float  *kv_v_scale;
 } OcLlamaSession;
 
 /* ─── Batched decode ─────────────────────────────────────────────────────
