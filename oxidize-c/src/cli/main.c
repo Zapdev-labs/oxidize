@@ -27,6 +27,7 @@
 #include "oxidize/log.h"
 #include "oxidize/oc.h"
 #include "oxidize/openai.h"
+#include "oxidize/quantize_tool.h"
 #include "oxidize/sampling.h"
 #include "oxidize/tokenizer.h"
 
@@ -384,6 +385,26 @@ int main(int argc, char **argv)
             free(st.tokenizer);
             free(st.model);
         }
+        return 0;
+    }
+
+    if (args.quantize_input) {
+        /* Quantize mode: re-quantize the input model to the target type. */
+        const char *target = args.quantize_type ? args.quantize_type : "Q4_K_M";
+        OcQuantizeConfig qcfg = {
+            .input_path  = args.quantize_input,
+            .output_path = args.quantize_output ? args.quantize_output : "quantized.gguf",
+            .target_type = target,
+            .verbose     = args.verbose,
+            .n_threads   = (size_t)args.threads,
+        };
+        OcError qe = oc_quantize_model(&qcfg);
+        if (qe != OC_OK) {
+            fprintf(stderr, "error: quantization failed (%s)\n", oc_error_msg(qe));
+            return 1;
+        }
+        printf("quantization complete: %s → %s (%s)\n",
+               args.quantize_input, qcfg.output_path, target);
         return 0;
     }
 
