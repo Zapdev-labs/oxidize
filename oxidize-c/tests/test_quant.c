@@ -451,14 +451,33 @@ Test(quant, ggml_id_round_trip, .description = "oc_quant_type_from_ggml_id round
     cr_assert_eq(oc_quant_type_from_ggml_id(1),  OC_QUANT_F16,  "ggml id 1");
     cr_assert_eq(oc_quant_type_from_ggml_id(2),  OC_QUANT_Q4_0, "ggml id 2");
     cr_assert_eq(oc_quant_type_from_ggml_id(8),  OC_QUANT_Q8_0, "ggml id 8");
-    cr_assert_eq(oc_quant_type_from_ggml_id(18), OC_QUANT_Q6_K, "ggml id 18");
+    cr_assert_eq(oc_quant_type_from_ggml_id(12), OC_QUANT_Q4_K_M, "ggml id 12");
+    cr_assert_eq(oc_quant_type_from_ggml_id(13), OC_QUANT_Q5_K_M, "ggml id 13");
+    cr_assert_eq(oc_quant_type_from_ggml_id(14), OC_QUANT_Q6_K, "ggml id 14");
+    cr_assert_eq(oc_quant_type_from_ggml_id(241), OC_QUANT_AL8, "ggml id 241");
+    cr_assert_eq(oc_quant_type_from_ggml_id(243), OC_QUANT_AL5_XS, "ggml id 243");
     cr_assert_eq(oc_quant_type_from_ggml_id(30), OC_QUANT_BF16, "ggml id 30");
     cr_assert_eq(oc_quant_type_from_ggml_id(0xff), OC_QUANT_UNKNOWN, "unknown ggml id");
 
     cr_assert_eq(oc_quant_type_to_ggml_id(OC_QUANT_F32),  0u,  "F32 ggml id");
-    cr_assert_eq(oc_quant_type_to_ggml_id(OC_QUANT_Q4_K_M), 15u, "Q4_K_M ggml id");
+    cr_assert_eq(oc_quant_type_to_ggml_id(OC_QUANT_Q4_K_M), 12u, "Q4_K_M ggml id");
     cr_assert_eq(oc_quant_type_to_ggml_id(OC_QUANT_Q8_0), 8u, "Q8_0 ggml id");
     cr_assert_eq(oc_quant_type_to_ggml_id(OC_QUANT_UNKNOWN), 0xffffffffu, "UNKNOWN ggml id");
+}
+
+Test(quant, unsupported_k_encoders_fail_without_writing) {
+    float src[256] = {0};
+    uint8_t dst[OC_BLOCK_Q6_K_SIZE];
+    memset(dst, 0xA5, sizeof(dst));
+    cr_assert_eq(oc_quant_pack_row(OC_QUANT_Q2_K, src, 256, dst,
+                                   OC_BLOCK_Q2_K_SIZE), OC_ERR_QUANT);
+    cr_assert_eq(oc_quant_pack_row(OC_QUANT_Q3_K_M, src, 256, dst,
+                                   OC_BLOCK_Q3_K_SIZE), OC_ERR_QUANT);
+    cr_assert_eq(oc_quant_pack_row(OC_QUANT_Q5_K_M, src, 256, dst,
+                                   OC_BLOCK_Q5_K_SIZE), OC_ERR_QUANT);
+    cr_assert_eq(oc_quant_pack_row(OC_QUANT_Q6_K, src, 256, dst,
+                                   OC_BLOCK_Q6_K_SIZE), OC_ERR_QUANT);
+    for (size_t i = 0; i < sizeof(dst); i++) cr_assert_eq(dst[i], 0xA5);
 }
 
 /* ─── VAL-QUANT-015: pack-then-dequant round-trip ──────────────────────── */

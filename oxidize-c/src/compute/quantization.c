@@ -128,25 +128,6 @@ static void f16_le_write(uint8_t *dst, float value)
     dst[1] = (uint8_t)((bits >> 8) & 0xFFu);
 }
 
-/* ─── Bit-packing helpers (port of quant_utils.rs::write_bits) ────────── */
-
-static void write_bits(uint8_t *bitstream, size_t index, size_t bits, uint32_t value)
-{
-    size_t bit_offset = index * bits;
-    size_t byte_index = bit_offset / 8;
-    size_t shift      = bit_offset % 8;
-    uint32_t mask = ((1u << (uint32_t)bits) - 1u) << (uint32_t)shift;
-
-    uint32_t acc = 0;
-    for (size_t i = 0; i < 4; i++) {
-        acc |= ((uint32_t)bitstream[byte_index + i]) << (8u * (uint32_t)i);
-    }
-    acc = (acc & ~mask) | ((value << (uint32_t)shift) & mask);
-    for (size_t i = 0; i < 4; i++) {
-        bitstream[byte_index + i] = (uint8_t)((acc >> (8u * (uint32_t)i)) & 0xFFu);
-    }
-}
-
 /* llama.cpp `nearest_int` — fast round-to-nearest for quant heuristics. */
 static int32_t nearest_int_f(float fval)
 {
@@ -800,7 +781,7 @@ static OcError dequant_al5_xs(const uint8_t *src, size_t src_len,
 
 /* IQ1_S dequant: 20-byte block, 256 values. Port of
  * quant_iq_series.rs::dequantize_iq1_s_scalar. Layout:
- *   d[0..2] (f16), qs[2..34] (32 u8), qh[34..50] (16 u16 LE).
+ *   d[0..2] (f16), qs[2..34] (32 u8), qh[34..50] (8 u16 LE).
  * Each 32-value sub-block has scale `d * (2*((qh>>12)&7)+1)` and a ±0.125
  * delta from the high bit (qh & 0x8000). 4 sub-blocks × 8 grid entries. */
 #define OC_IQ1S_DELTA 0.125f
@@ -830,8 +811,8 @@ static OcError dequant_iq1_s(const uint8_t *src, size_t src_len,
         float d = f16_le_to_f32(block[0], block[1]);
         const uint8_t *qs = &block[2];
         const uint8_t *qh = &block[34];
-        uint16_t qh_u16[16];
-        for (size_t i = 0; i < 16; i++) {
+        uint16_t qh_u16[8];
+        for (size_t i = 0; i < 8; i++) {
             qh_u16[i] = (uint16_t)((uint16_t)qh[2 * i]
                                    | ((uint16_t)qh[2 * i + 1] << 8));
         }
@@ -1707,45 +1688,6 @@ static OcError pack_q4_k(const float *src, size_t value_count,
     return OC_OK;
 }
 
-/* Generic K-packed encoder for symmetric-with-zero-point layouts (Q2_K, Q3_K,
- * Q5_K, Q6_K). Port of quant_k_blocks.rs::quantize_k_packed_scalar. */
-static OcError pack_k_packed(const float *src, size_t value_count,
-                             uint8_t *dst, size_t dst_len,
-                             size_t block_size, size_t bits, float zero_point)
-{
-    if (value_count % OC_QK_K != 0) return OC_ERR_INVALID_ARG;
-    if (dst_len != (value_count / OC_QK_K) * block_size) return OC_ERR_INVALID_ARG;
-
-    float max_q = (float)((1u << (uint32_t)bits) - 1u);
-    float positive_span = (zero_point > (max_q - zero_point)) ? zero_point : (max_q - zero_point);
-    size_t n_blocks = value_count / OC_QK_K;
-    for (size_t b = 0; b < n_blocks; b++) {
-        const float *in_block = src + b * OC_QK_K;
-        uint8_t *out_block = dst + b * block_size;
-        float max_abs = 0.0f;
-        for (size_t i = 0; i < OC_QK_K; i++) {
-            float a = fabsf(in_block[i]);
-            if (a > max_abs) max_abs = a;
-        }
-        float d = (max_abs == 0.0f) ? 0.0f : (max_abs / positive_span);
-        f16_le_write(&out_block[0], d);
-        for (size_t k = 2; k < block_size; k++) out_block[k] = 0u;
-        for (size_t i = 0; i < OC_QK_K; i++) {
-            uint32_t q;
-            if (d == 0.0f) {
-                q = (uint32_t)roundf(zero_point);
-            } else {
-                float v = (in_block[i] / d) + zero_point;
-                if (v < 0.0f) v = 0.0f;
-                if (v > max_q) v = max_q;
-                q = (uint32_t)roundf(v);
-            }
-            write_bits(&out_block[2], i, bits, q);
-        }
-    }
-    return OC_OK;
-}
-
 /* ─── AL-family pack (MSE-optimized encoders, port of al_family.rs) ──── */
 
 /* al_refine_scale: least-squares optimal d for fixed integer grid [lo,hi].
@@ -2105,20 +2047,13 @@ OcError oc_quant_pack_row(OcGgufQuantizationType qtype,
     case OC_QUANT_Q4_K_S:
     case OC_QUANT_Q4_K_M: return pack_q4_k(src, value_count, dst, dst_len);
     case OC_QUANT_Q2_K:
-        return pack_k_packed(src, value_count, dst, dst_len,
-                             OC_BLOCK_Q2_K_SIZE, 2, 1.5f);
     case OC_QUANT_Q3_K_S:
     case OC_QUANT_Q3_K_M:
     case OC_QUANT_Q3_K_L:
-        return pack_k_packed(src, value_count, dst, dst_len,
-                             OC_BLOCK_Q3_K_SIZE, 3, 3.5f);
     case OC_QUANT_Q5_K_S:
     case OC_QUANT_Q5_K_M:
-        return pack_k_packed(src, value_count, dst, dst_len,
-                             OC_BLOCK_Q5_K_SIZE, 5, 16.0f);
     case OC_QUANT_Q6_K:
-        return pack_k_packed(src, value_count, dst, dst_len,
-                             OC_BLOCK_Q6_K_SIZE, 6, 32.0f);
+        return OC_ERR_QUANT;
     /* AL-family (MSE-optimized encoders). */
     case OC_QUANT_AL5:    return pack_al5(src, value_count, dst, dst_len);
     case OC_QUANT_AL5_XS: return pack_al5_xs(src, value_count, dst, dst_len);
@@ -2160,37 +2095,34 @@ static const struct {
     { OC_QUANT_Q8_0,    "Q8_0",    8  },
     { OC_QUANT_Q2_K,    "Q2_K",    10 },
     { OC_QUANT_Q3_K_S,  "Q3_K_S",  11 },
-    { OC_QUANT_Q3_K_M,  "Q3_K_M",  12 },
-    { OC_QUANT_Q3_K_L,  "Q3_K_L",  13 },
-    { OC_QUANT_Q4_K_S,  "Q4_K_S",  14 },
-    { OC_QUANT_Q4_K_M,  "Q4_K_M",  15 },
-    { OC_QUANT_Q5_K_S,  "Q5_K_S",  16 },
-    { OC_QUANT_Q5_K_M,  "Q5_K_M",  17 },
-    { OC_QUANT_Q6_K,    "Q6_K",    18 },
+    { OC_QUANT_Q3_K_M,  "Q3_K_M",  11 },
+    { OC_QUANT_Q3_K_L,  "Q3_K_L",  11 },
+    { OC_QUANT_Q4_K_S,  "Q4_K_S",  12 },
+    { OC_QUANT_Q4_K_M,  "Q4_K_M",  12 },
+    { OC_QUANT_Q5_K_S,  "Q5_K_S",  13 },
+    { OC_QUANT_Q5_K_M,  "Q5_K_M",  13 },
+    { OC_QUANT_Q6_K,    "Q6_K",    14 },
     /* AL-family (ggml ids 240-243) — names match oxidize-core. */
     { OC_QUANT_AL5,     "AL5",     240 },
-    { OC_QUANT_AL5_XS,  "AL5_XS",  241 },
+    { OC_QUANT_AL5_XS,  "AL5_XS",  243 },
     { OC_QUANT_AL6,     "AL6",     242 },
-    { OC_QUANT_AL8,     "AL8",     243 },
+    { OC_QUANT_AL8,     "AL8",     241 },
     /* IQ-family (ggml ids 24-29, 32-37, etc.). */
-    { OC_QUANT_IQ2_XXS, "IQ2_XXS", 24 },
-    { OC_QUANT_IQ2_XS,  "IQ2_XS",  25 },
-    { OC_QUANT_IQ2_S,   "IQ2_S",   29 },
-    { OC_QUANT_IQ3_XXS, "IQ3_XXS", 27 },
-    { OC_QUANT_IQ3_S,   "IQ3_S",   35 },
-    { OC_QUANT_IQ4_NL,  "IQ4_NL",  28 },
-    { OC_QUANT_IQ4_XS,  "IQ4_XS",  32 },
-    { OC_QUANT_IQ1_S,   "IQ1_S",   33 },
-    { OC_QUANT_IQ1_M,   "IQ1_M",   36 },
-    { OC_QUANT_NVFP4,   "NVFP4",   38 },
-    /* Plain integer / wide-float storage. Use ggml id 0..7 mapping per the
-     * GGUF spec draft for I8/I16/I32/I64/F64 (these are oxidize-c internal
-     * extensions; values >= 64 are oxidize-c-local). */
-    { OC_QUANT_I8,      "I8",      64 },
-    { OC_QUANT_I16,     "I16",     65 },
-    { OC_QUANT_I32,     "I32",     66 },
-    { OC_QUANT_I64,     "I64",     67 },
-    { OC_QUANT_F64,     "F64",     68 },
+    { OC_QUANT_IQ2_XXS, "IQ2_XXS", 16 },
+    { OC_QUANT_IQ2_XS,  "IQ2_XS",  17 },
+    { OC_QUANT_IQ2_S,   "IQ2_S",   22 },
+    { OC_QUANT_IQ3_XXS, "IQ3_XXS", 18 },
+    { OC_QUANT_IQ3_S,   "IQ3_S",   21 },
+    { OC_QUANT_IQ4_NL,  "IQ4_NL",  20 },
+    { OC_QUANT_IQ4_XS,  "IQ4_XS",  23 },
+    { OC_QUANT_IQ1_S,   "IQ1_S",   19 },
+    { OC_QUANT_IQ1_M,   "IQ1_M",   29 },
+    { OC_QUANT_NVFP4,   "NVFP4",   40 },
+    { OC_QUANT_I8,      "I8",      24 },
+    { OC_QUANT_I16,     "I16",     25 },
+    { OC_QUANT_I32,     "I32",     26 },
+    { OC_QUANT_I64,     "I64",     27 },
+    { OC_QUANT_F64,     "F64",     28 },
 };
 
 #define K_QUANT_TABLE_LEN \
@@ -2206,6 +2138,8 @@ const char *oc_quant_type_name(OcGgufQuantizationType qtype)
 
 OcGgufQuantizationType oc_quant_type_from_ggml_id(uint32_t ggml_type)
 {
+    if (ggml_type == 12) return OC_QUANT_Q4_K_M;
+    if (ggml_type == 13) return OC_QUANT_Q5_K_M;
     for (size_t i = 0; i < K_QUANT_TABLE_LEN; i++) {
         if (k_quant_table[i].ggml_id == ggml_type) return k_quant_table[i].q;
     }
