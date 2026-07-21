@@ -22,6 +22,10 @@ void oc_cli_args_defaults(OcCliArgs *a)
     a->seed           = 0;
     a->host           = "127.0.0.1";
     a->port           = 8080;
+    a->bench_iterations = 3;
+    a->min_p          = 0.0f;
+    a->mirostat_tau   = 0.0f;
+    a->mirostat_eta   = 0.1f;
 }
 
 static bool match(const char *arg, const char *long_name)
@@ -52,6 +56,10 @@ static bool parse_value_flag(OcCliArgs *a, const char *arg, const char *val,
     else if (match(arg, "--output"))       { a->quantize_output = val; *consumed_val = true; }
     else if (match(arg, "--quant-type"))   { a->quantize_type = val; *consumed_val = true; }
     else if (match(arg, "--backend"))       { a->backend = val; *consumed_val = true; }
+    else if (match(arg, "--min-p"))         { a->min_p = (float)atof(val); *consumed_val = true; }
+    else if (match(arg, "--mirostat-tau"))  { a->mirostat_tau = (float)atof(val); *consumed_val = true; }
+    else if (match(arg, "--mirostat-eta"))  { a->mirostat_eta = (float)atof(val); *consumed_val = true; }
+    else if (match(arg, "--bench-iters"))   { a->bench_iterations = atoi(val); *consumed_val = true; }
     else return false;
     return true;
 }
@@ -66,6 +74,7 @@ void oc_cli_parse_args(int argc, char **argv, OcCliArgs *a)
         if (match(arg, "--print-plan"))     { a->print_plan = true; continue; }
         if (match(arg, "--serve-api"))       { a->serve_api = true; continue; }
         if (match(arg, "--stream"))          { a->stream = true; continue; }
+        if (match(arg, "--bench"))           { a->bench = true; continue; }
         if (match(arg, "--verbose") || match(arg, "-v")) { a->verbose = true; continue; }
         if (match(arg, "--help") || match(arg, "-h"))    { a->show_help = true; continue; }
         if (match(arg, "--version"))         { a->show_version = true; continue; }

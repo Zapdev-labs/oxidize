@@ -166,6 +166,91 @@ static uint32_t sample_categorical(const size_t *idx, const float *probs,
 
 /* ─── Top-level entry ─────────────────────────────────────────────────── */
 
+uint32_t oc_mirostat_v2_sample(const float *logits, size_t vocab_size,
+                               const OcSamplerConfig *cfg,
+                               float *mu, uint64_t *rng_state)
+{
+    if (vocab_size == 0) return 0;
+    if (cfg == NULL) {
+        /* No config → degenerate to argmax; leave mu untouched. */
+        return oc_argmax(logits, vocab_size);
+    }
+
+    float tau = cfg->tau;
+    if (!(tau > 0.0f)) tau = 5.0f;             /* sane default if unset     */
+
+    float eta = cfg->eta;
+    if (!(eta >= 0.0f)) eta = 0.1f;            /* sane default if unset     */
+    if (cfg->learning_rate > 0.0f) eta = cfg->learning_rate;
+
+    float m = (mu != NULL) ? *mu : 10.0f;
+    if (!(m > 0.0f)) m = 2.0f * tau;           /* init if caller passed 0    */
+
+    /* Step 1: softmax over the full vocabulary (max-subtraction, stable).
+     * We need the per-token probability of the sampled token, so compute the
+     * full normalized distribution. */
+    float mx = logits[0];
+    for (size_t i = 1; i < vocab_size; i++) {
+        if (logits[i] > mx) mx = logits[i];
+    }
+    /* Guard against a degenerate all-(-inf) vocabulary. */
+    if (!isfinite(mx)) {
+        if (mu != NULL) *mu = m;
+        return oc_argmax(logits, vocab_size);
+    }
+
+    float *probs = malloc(vocab_size * sizeof(float));
+    if (probs == NULL) {
+        /* OOM → fall back to argmax; do not corrupt mu. */
+        if (mu != NULL) *mu = m;
+        return oc_argmax(logits, vocab_size);
+    }
+
+    double sum = 0.0;
+    for (size_t i = 0; i < vocab_size; i++) {
+        probs[i] = expf(logits[i] - mx);
+        sum += (double)probs[i];
+    }
+    if (!(sum > 0.0)) {
+        free(probs);
+        if (mu != NULL) *mu = m;
+        return oc_argmax(logits, vocab_size);
+    }
+    float inv = (float)(1.0 / sum);
+    for (size_t i = 0; i < vocab_size; i++) probs[i] *= inv;
+
+    /* Step 2: categorical sample using xorshift64. */
+    uint64_t rng = (rng_state != NULL) ? *rng_state : cfg->seed;
+    if (rng == 0) rng = 0xdeadbeefcafef00dULL;
+    double u = rng_uniform(&rng);
+    if (rng_state != NULL) *rng_state = rng;
+
+    size_t chosen = 0;
+    double cum = 0.0;
+    for (size_t i = 0; i < vocab_size; i++) {
+        cum += (double)probs[i];
+        if (u < cum) { chosen = i; break; }
+        chosen = i;     /* last resort: last token (handles float tail) */
+    }
+
+    /* Step 3: observed surprise of the sampled token. */
+    float p_chosen = probs[chosen];
+    if (!(p_chosen > 0.0f)) p_chosen = 1e-38f;   /* avoid -inf on degenerate */
+    float surprise = -log2f(p_chosen);
+    if (!isfinite(surprise)) surprise = 0.0f;
+
+    free(probs);
+
+    /* Step 4 & 5: update + clamp the running surprise estimate. */
+    m = m - eta * (surprise - tau);
+    if (m < 0.0f) m = 0.0f;
+    if (m > 2.0f * tau) m = 2.0f * tau;
+    if (mu != NULL) *mu = m;
+
+    /* Step 6: return the sampled token. */
+    return (uint32_t)chosen;
+}
+
 uint32_t oc_sample(const float *logits_in, size_t vocab_size,
                    const OcSamplerConfig *cfg,
                    const uint32_t *recent_tokens, size_t n_recent)
@@ -239,6 +324,53 @@ uint32_t oc_sample(const float *logits_in, size_t vocab_size,
             size_t keep = top_p_select(logits, vocab_size, cfg->top_p,
                                        idx, probs);
             result = sample_categorical(idx, probs, keep, &rng);
+            free(probs);
+        } else {
+            result = oc_argmax(logits, vocab_size);
+        }
+    } else if (cfg->type == OC_SAMPLER_MIROSTAT_V2) {
+        /* Mirostat v2 is inherently stateful across calls (mu is the running
+         * surprise estimate). oc_sample is single-shot and takes a const
+         * config, so we run one step using cfg->mu as the starting estimate
+         * and discard the update. For stateful multi-step decoding, call
+         * oc_mirostat_v2_sample directly and persist mu between calls. */
+        float mu = cfg->mu;
+        if (!(mu > 0.0f)) mu = 2.0f * cfg->tau;
+        result = oc_mirostat_v2_sample(logits, vocab_size, cfg, &mu, &rng);
+    } else if (cfg->type == OC_SAMPLER_MIN_P) {
+        /* min-p: keep only tokens with p >= min_p * max_p.
+         * Equivalent to filtering out low-probability tokens while keeping
+         * the tail of the distribution above a dynamic threshold. */
+        float *probs = malloc(vocab_size * sizeof(float));
+        if (probs != NULL) {
+            softmax_inplace(logits, vocab_size);
+            /* Find max probability. */
+            float max_p = 0.0f;
+            for (size_t i = 0; i < vocab_size; i++) {
+                if (logits[i] > max_p) max_p = logits[i];
+            }
+            float threshold = max_p * cfg->min_p;
+            /* Collect tokens above threshold. */
+            size_t keep = 0;
+            for (size_t i = 0; i < vocab_size; i++) {
+                if (logits[i] >= threshold) {
+                    idx[keep] = i;
+                    probs[keep] = logits[i];
+                    keep++;
+                }
+            }
+            if (keep == 0) {
+                result = oc_argmax(logits, vocab_size);
+            } else {
+                /* Renormalize. */
+                double sum = 0.0;
+                for (size_t i = 0; i < keep; i++) sum += (double)probs[i];
+                if (sum > 0.0) {
+                    float inv = (float)(1.0 / sum);
+                    for (size_t i = 0; i < keep; i++) probs[i] *= inv;
+                }
+                result = sample_categorical(idx, probs, keep, &rng);
+            }
             free(probs);
         } else {
             result = oc_argmax(logits, vocab_size);

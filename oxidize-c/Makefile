@@ -24,7 +24,8 @@ LDFLAGS  ?= -lm -lpthread
 # by their respective feature workers.
 LIB_SRCS := $(wildcard src/core/*.c src/util/*.c src/format/*.c src/model/*.c \
                        src/compute/*.c src/autotune/*.c src/server/*.c \
-                       src/paged/*.c src/backends/cuda_stub.c) src/cli/args.c
+                       src/paged/*.c src/backends/cuda_stub.c \
+                       src/vision/*.c src/mesh/*.c) src/cli/args.c
 LIB_OBJS := $(LIB_SRCS:.c=.o)
 
 # Binary sources (CLI main). Added by cli-flags-modes feature; for now a stub.

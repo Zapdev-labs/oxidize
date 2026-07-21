@@ -39,6 +39,14 @@ typedef struct OcCliArgs {
     bool       stream;
     /* Backend selection. */
     const char *backend;         /* "cpu" (default) or "cuda"             */
+    /* Benchmark mode. */
+    bool       bench;            /* run benchmark instead of generation   */
+    int        bench_iterations;  /* number of benchmark iterations       */
+    /* Min-p sampler. */
+    float      min_p;            /* 0 = disabled; (0,1] filters low-prob  */
+    /* Mirostat. */
+    float      mirostat_tau;     /* 0 = disabled; target surprise         */
+    float      mirostat_eta;     /* learning rate (default 0.1)           */
     bool       verbose;
     bool       show_help;
     bool       show_version;

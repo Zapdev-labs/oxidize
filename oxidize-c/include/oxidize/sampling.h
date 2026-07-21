@@ -6,8 +6,9 @@
  * oc_llama_forward. Deterministic given the same (logits, config, seed,
  * recent_tokens).
  *
- * Scope of the `cpu-llama-sampling` feature: the standard samplers. Mirostat
- * and min-p are deferred (sampler framework is extensible via OcSamplerConfig).
+ * Scope of the `cpu-llama-sampling` feature: the standard samplers plus
+ * Mirostat v2. min-p is deferred (sampler framework is extensible via
+ * OcSamplerConfig).
  */
 #ifndef OXIDIZE_SAMPLING_H
 #define OXIDIZE_SAMPLING_H
@@ -21,10 +22,12 @@ extern "C" {
 #endif
 
 typedef enum {
-    OC_SAMPLER_GREEDY       = 0,   /* argmax                              */
-    OC_SAMPLER_TEMPERATURE  = 1,   /* softmax(logits/T) then sample       */
-    OC_SAMPLER_TOP_K        = 2,   /* keep top-K logits, then sample      */
-    OC_SAMPLER_TOP_P        = 3,   /* nucleus: smallest set with cum >= p */
+    OC_SAMPLER_GREEDY        = 0,   /* argmax                              */
+    OC_SAMPLER_TEMPERATURE   = 1,   /* softmax(logits/T) then sample       */
+    OC_SAMPLER_TOP_K         = 2,   /* keep top-K logits, then sample      */
+    OC_SAMPLER_TOP_P         = 3,   /* nucleus: smallest set with cum >= p */
+    OC_SAMPLER_MIROSTAT_V2   = 4,   /* Mirostat v2 (surprise-based)        */
+    OC_SAMPLER_MIN_P         = 5,   /* min-p: filter by min probability ratio */
 } OcSamplerType;
 
 typedef struct OcSamplerConfig {
@@ -34,11 +37,26 @@ typedef struct OcSamplerConfig {
     float  top_p;            /* (0,1]; 1.0 = disabled.                       */
     float  repeat_penalty;   /* 1.0 = no penalty; >1 penalizes recent tokens. */
     uint64_t seed;           /* RNG seed (xorshift64). 0 = greedy always.     */
+    /* ── Mirostat v2 parameters ────────────────────────────────────────
+     * `mu` is the running target surprise estimate; it is mutated between
+     * calls by oc_mirostat_v2_sample. `tau` is the target surprise (entropy
+     * ceiling). `eta` is the per-step learning rate applied to mu updates.
+     * `learning_rate` is reserved as an explicit override hook (when >0 it
+     * takes precedence over `eta`); 0.0 means use `eta`.              */
+    float  mu;               /* initial running surprise estimate (default 2*tau). */
+    float  tau;              /* target surprise (default 5.0).                */
+    float  eta;              /* learning rate for mu updates (default 0.1).   */
+    float  learning_rate;    /* optional override; 0 = use `eta`.             */
+    float  min_p;            /* min-p ratio (0=disabled, 0.05=keep tokens with p >= 0.05*max_p) */
 } OcSamplerConfig;
 
-/* Default config: greedy, no penalty. */
+/* Default config: greedy, no penalty. Mirostat fields default to the
+ * canonical v2 values (mu=10.0, tau=5.0, eta=0.1) so a config built from
+ * OC_SAMPLER_DEFAULT can be switched to OC_SAMPLER_MIROSTAT_V2 by simply
+ * changing `type`. */
 #define OC_SAMPLER_DEFAULT ((OcSamplerConfig){ \
-    OC_SAMPLER_GREEDY, 1.0f, 0u, 1.0f, 1.0f, 0ull })
+    OC_SAMPLER_GREEDY, 1.0f, 0u, 1.0f, 1.0f, 0ull, \
+    10.0f, 5.0f, 0.1f, 0.0f, 0.0f })
 
 /* Sample one token from `logits` (length vocab_size).
  *
@@ -64,6 +82,31 @@ uint32_t oc_argmax(const float *logits, size_t vocab_size);
 void oc_apply_repeat_penalty(float *logits, size_t vocab_size,
                              const uint32_t *recent, size_t n_recent,
                              float penalty);
+
+/* Mirostat v2 sampler (surprise-balanced truncation).
+ *
+ * Implements the algorithm from Basu et al. (2020), "Mirostat: a Neural
+ * Text Decoding Algorithm that Directly Controls Perplexity":
+ *
+ *   1. Compute softmax probabilities from `logits` (length vocab_size).
+ *      No temperature scaling is applied here; the caller should pre-scale
+ *      logits if desired.
+ *   2. Sample one token from the resulting categorical distribution using
+ *      `*rng_state` (xorshift64); the state is advanced in place.
+ *   3. Compute the observed surprise s = -log2(p_sampled).
+ *   4. Update the running estimate: *mu = *mu - eta * (s - tau), where
+ *      `eta` is taken from cfg->learning_rate when it is > 0, else
+ *      cfg->eta.
+ *   5. Clamp *mu to [0, 2*tau].
+ *   6. Return the sampled token id.
+ *
+ * `mu` is read AND written (state is carried across calls by the caller).
+ * `cfg` supplies tau, eta, and learning_rate. Returns the sampled token;
+ * never returns an out-of-range id (degenerate all-equal-logits input
+ * falls back to argmax). */
+uint32_t oc_mirostat_v2_sample(const float *logits, size_t vocab_size,
+                               const OcSamplerConfig *cfg,
+                               float *mu, uint64_t *rng_state);
 
 #ifdef __cplusplus
 }
