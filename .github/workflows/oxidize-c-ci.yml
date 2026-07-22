@@ -1,0 +1,96 @@
+name: oxidize-c CI (matrix)
+
+on:
+  push:
+    branches: ["oxidize-c-v2"]
+    paths:
+      - "oxidize-c/**"
+      - ".github/workflows/oxidize-c-ci.yml"
+  pull_request:
+    paths:
+      - "oxidize-c/**"
+      - ".github/workflows/oxidize-c-ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: Build + Test (${{ matrix.os }}, ${{ matrix.cc }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            cc: gcc
+            cxx: g++
+          - os: ubuntu-22.04
+            cc: clang
+            cxx: clang++
+    defaults:
+      run:
+        working-directory: oxidize-c
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential clang
+
+      - name: Verify vendored Criterion
+        run: |
+          echo "Criterion include dir:"
+          ls -la tests/criterion/include
+          echo "Criterion static lib:"
+          ls -la tests/criterion/lib/libcriterion.a
+          test -f tests/criterion/lib/libcriterion.a
+
+      - name: Build (CPU-only)
+        env:
+          CC: ${{ matrix.cc }}
+        run: make clean && make -j"$(nproc)" build
+
+      - name: Verify binary runs
+        run: ./oxidize-c --version
+
+      - name: Run tests (ASan + UBSan)
+        env:
+          CC: ${{ matrix.cc }}
+        run: make test
+
+      - name: Capture test results
+        if: always()
+        run: |
+          mkdir -p test-results
+          # Re-run tests with XML output if criterion supports it, else capture logs
+          if [ -x ./test_runner ]; then
+            ./test_runner --xml test-results/results.xml || true
+          fi
+          # Always capture a build/test log
+          {
+            echo "## Build & Test Results"
+            echo ""
+            echo "**OS:** ${{ matrix.os }}"
+            echo "**Compiler:** ${{ matrix.cc }}"
+            echo ""
+            echo "### Build log"
+            echo '```'"
+            make clean && make -j"$(nproc)" build 2>&1 || echo "build failed"
+            echo '```'
+            echo ""
+            echo "### Test log"
+            echo '```'"
+            make test 2>&1 || echo "tests failed"
+            echo '```'
+          } > test-results/summary.md || true
+
+      - name: Upload test results artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.os }}-${{ matrix.cc }}
+          path: oxidize-c/test-results/
+          retention-days: 14
