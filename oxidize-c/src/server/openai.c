@@ -20,6 +20,7 @@
 #include "oxidize/sampling.h"
 #include "oxidize/tokenizer.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -445,7 +446,128 @@ static void handle_chat_completion(OcOpenaiState *st, const OcHttpRequest *req,
     *out_body = buf;
 }
 
-/* ─── Dispatch ─────────────────────────────────────────────────────────── */
+/* ─── POST /v1/embeddings ────────────────────────────────────────────── */
+
+static void handle_embeddings(OcOpenaiState *st, const OcHttpRequest *req,
+                              int *out_status, const char **out_body)
+{
+    if (!st->model_loaded) {
+        *out_body = oc_openai_error_json("no model loaded", "server_error");
+        *out_status = 503;
+        return;
+    }
+    char input[8192];
+    if (!find_json_string_field(req->body, "input", input, sizeof(input))) {
+        *out_body = oc_openai_error_json("missing 'input' field", "invalid_request_error");
+        *out_status = 400;
+        return;
+    }
+
+    uint32_t *ids = NULL;
+    size_t n_ids = 0;
+    OcSpecialTokenPolicy pol = st->tokenizer->has_add_bos_token && st->tokenizer->add_bos_token
+        ? OC_TOK_ADD_BOS : OC_TOK_DEFAULT;
+    OcError e = oc_tokenizer_encode(st->tokenizer, input, pol, &ids, &n_ids);
+    if (e != OC_OK || n_ids == 0) {
+        free(ids);
+        *out_body = oc_openai_error_json("tokenization failed", "server_error");
+        *out_status = 500;
+        return;
+    }
+
+    OcLlamaSession sess;
+    e = oc_llama_session_init(st->model, &sess);
+    if (e != OC_OK) {
+        free(ids);
+        *out_body = oc_openai_error_json("session init failed", "server_error");
+        *out_status = 500;
+        return;
+    }
+
+    for (size_t i = 0; i < n_ids - 1; i++)
+        oc_llama_forward(&sess, ids[i], NULL);
+    oc_llama_forward(&sess, ids[n_ids - 1], NULL);
+
+    uint32_t n_embd = st->model->cfg.n_embd;
+    float *embedding = calloc(n_embd, sizeof(float));
+    if (!embedding) {
+        oc_llama_session_free(&sess); free(ids);
+        *out_body = oc_openai_error_json("allocation failed", "server_error");
+        *out_status = 500; return;
+    }
+    for (uint32_t i = 0; i < n_embd; i++) embedding[i] = sess.x[i];
+    oc_llama_session_free(&sess);
+    free(ids);
+
+    /* L2 normalize. */
+    float norm = 0.0f;
+    for (uint32_t i = 0; i < n_embd; i++) norm += embedding[i] * embedding[i];
+    norm = sqrtf(norm);
+    if (norm > 0.0f) {
+        float inv = 1.0f / norm;
+        for (uint32_t i = 0; i < n_embd; i++) embedding[i] *= inv;
+    }
+
+    size_t cap = (size_t)n_embd * 16 + 512;
+    char *buf = malloc(cap);
+    if (!buf) { free(embedding); *out_status = 500; return; }
+    size_t pos = 0;
+    pos += snprintf(buf + pos, cap - pos,
+        "{\"object\":\"list\",\"data\":[{\"object\":\"embedding\",\"index\":0,\"embedding\":[");
+    for (uint32_t i = 0; i < n_embd && pos + 24 < cap; i++) {
+        pos += snprintf(buf + pos, cap - pos, "%s%.7f", i > 0 ? "," : "", embedding[i]);
+    }
+    pos += snprintf(buf + pos, cap - pos,
+        "]}],\"model\":\"%s\",\"usage\":{\"prompt_tokens\":%zu,\"total_tokens\":%zu}}",
+        st->model_id ? st->model_id : "unknown", n_ids, n_ids);
+    free(embedding);
+    *out_status = 200;
+    *out_body = buf;
+}
+
+/* ─── POST /v1/responses ──────────────────────────────────────────────── */
+
+static void handle_responses(OcOpenaiState *st, const OcHttpRequest *req,
+                              int *out_status, const char **out_body)
+{
+    if (!st->model_loaded) {
+        *out_body = oc_openai_error_json("no model loaded", "server_error");
+        *out_status = 503;
+        return;
+    }
+    char prompt[8192];
+    if (!find_json_string_field(req->body, "input", prompt, sizeof(prompt))) {
+        if (!find_json_string_field(req->body, "prompt", prompt, sizeof(prompt))) {
+            *out_body = oc_openai_error_json("missing 'input' field", "invalid_request_error");
+            *out_status = 400;
+            return;
+        }
+    }
+    int max_tokens = find_json_int_field(req->body, "max_output_tokens", 128);
+    if (max_tokens == 128)
+        max_tokens = find_json_int_field(req->body, "max_tokens", 128);
+    double temp = find_json_double_field(req->body, "temperature", 0.0);
+    char *text = generate_completion(st, prompt, max_tokens, (float)temp);
+    if (!text) {
+        *out_body = oc_openai_error_json("generation failed", "server_error");
+        *out_status = 500; return;
+    }
+    char *escaped = json_escape(text);
+    free(text);
+    if (!escaped) { *out_status = 500; return; }
+    size_t cap = strlen(escaped) + 512;
+    char *buf = malloc(cap);
+    if (!buf) { free(escaped); *out_status = 500; return; }
+    snprintf(buf, cap,
+        "{\"id\":\"resp-oxidize\",\"object\":\"response\",\"created\":0,"
+        "\"model\":\"%s\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\","
+        "\"content\":[{\"type\":\"output_text\",\"text\":\"%s\"}]}],"
+        "\"status\":\"completed\",\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}",
+        st->model_id ? st->model_id : "unknown", escaped);
+    free(escaped);
+    *out_status = 200;
+    *out_body = buf;
+}
 
 void oc_openai_handler(const OcHttpRequest *req,
                        int *out_status,
@@ -468,6 +590,12 @@ void oc_openai_handler(const OcHttpRequest *req,
     } else if (req->method == OC_HTTP_POST &&
                strcmp(req->path, "/v1/chat/completions") == 0) {
         handle_chat_completion(st, req, out_status, out_body);
+    } else if (req->method == OC_HTTP_POST &&
+               strcmp(req->path, "/v1/embeddings") == 0) {
+        handle_embeddings(st, req, out_status, out_body);
+    } else if (req->method == OC_HTTP_POST &&
+               strcmp(req->path, "/v1/responses") == 0) {
+        handle_responses(st, req, out_status, out_body);
     } else {
         *out_body = oc_openai_error_json("not found", "invalid_request_error");
         *out_status = 404;
