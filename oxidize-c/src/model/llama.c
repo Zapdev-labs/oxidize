@@ -173,6 +173,10 @@ static OcError parse_config(const OcGgufFile *f, const char *arch_str,
                 cfg->sliding_window = sw;
                 cfg->sliding_window_pattern = 2; /* alternating */
             }
+        } else if (strncmp(arch_str, "phi", 3) == 0) {
+            /* Phi-3 uses GELU activation (same as GeGLU) but no norm scaling. */
+            cfg->uses_geglu = true;
+            cfg->norm_scale = 1.0f;
         }
     }
     /* YaRN: read from GGUF metadata if present. */

@@ -230,6 +230,26 @@ OcError oc_streaming_detok_flush(OcStreamingDetokenizer *sd,
 
 /* Reset the streaming detokenizer (clear pending buffer). */
 void oc_streaming_detok_reset(OcStreamingDetokenizer *sd);
+
+/* ─── Token healing ──────────────────────────────────────────────────────
+ *
+ * "Heals" a token sequence by finding a better token boundary at the end.
+ * Given a sequence ending with partial tokens, this function finds the
+ * set of alternative token sequences that end at a cleaner boundary,
+ * and returns the best alternative.
+ *
+ * This is useful when the last token in a prompt is a partial word;
+ * healing finds a longer token that extends the last few tokens into a
+ * complete word, reducing generation artifacts.
+ */
+
+/* Given a token sequence and the tokenizer, try to heal the last 1-3 tokens.
+ * If healing produces a different token sequence, writes it to `*out_ids`
+ * (caller frees) and returns OC_OK. If no healing is needed, `*out_ids`
+ * is NULL and `*out_count` is 0. */
+OcError oc_tokenizer_heal_tokens(const OcTokenizer *tok,
+                                 const uint32_t *ids, size_t n_ids,
+                                 uint32_t **out_ids, size_t *out_count);
 void oc_streaming_detok_free(OcStreamingDetokenizer *sd);
 
 /* ─── BPE direct API (for testing / advanced callers) ─────────────────── */

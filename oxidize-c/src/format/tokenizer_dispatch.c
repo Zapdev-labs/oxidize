@@ -331,3 +331,48 @@ void oc_streaming_detok_free(OcStreamingDetokenizer *sd)
     free(sd->output);
     memset(sd, 0, sizeof(*sd));
 }
+
+/* ─── Token healing ────────────────────────────────────────────────────── */
+
+OcError oc_tokenizer_heal_tokens(const OcTokenizer *tok,
+                                 const uint32_t *ids, size_t n_ids,
+                                 uint32_t **out_ids, size_t *out_count)
+{
+    if (!tok || !ids || !out_ids || !out_count)
+        return OC_ERR_INVALID_ARG;
+    *out_ids = NULL;
+    *out_count = 0;
+
+    if (n_ids < 2) return OC_OK;
+
+    /* Try healing windows of size 2 and 3 (last 2 or 3 tokens). */
+    for (size_t window = 2; window <= 3 && window <= n_ids; window++) {
+        char *text = NULL;
+        OcError e = oc_tokenizer_decode(tok, ids + (n_ids - window),
+                                        window, &text);
+        if (e != OC_OK || !text) continue;
+
+        uint32_t *healed = NULL;
+        size_t n_healed = 0;
+        e = oc_tokenizer_encode(tok, text, OC_TOK_DISALLOW_SPECIAL,
+                                &healed, &n_healed);
+        free(text);
+        if (e != OC_OK) continue;
+
+        if (n_healed > 0 && n_healed < window) {
+            size_t prefix_len = n_ids - window;
+            size_t total = prefix_len + n_healed;
+            uint32_t *result = malloc(total * sizeof(uint32_t));
+            if (!result) { free(healed); continue; }
+            memcpy(result, ids, prefix_len * sizeof(uint32_t));
+            memcpy(result + prefix_len, healed, n_healed * sizeof(uint32_t));
+            free(healed);
+            *out_ids = result;
+            *out_count = total;
+            return OC_OK;
+        }
+        free(healed);
+    }
+
+    return OC_OK;
+}
