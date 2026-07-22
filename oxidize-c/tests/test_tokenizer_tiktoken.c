@@ -192,6 +192,33 @@ Test(tokenizer_tiktoken, streaming_preserves_split_and_long_tokens)
     oc_arena_free(arena);
 }
 
+Test(tokenizer_tiktoken, streaming_replaces_malformed_utf8)
+{
+    OcArena *arena = oc_arena_new(0);
+    static const uint8_t invalid[] = {0xff};
+    static const uint8_t lead[] = {0xc3};
+    static const uint8_t ascii[] = {'a'};
+    OcByteSlice vocab[] = {bs(invalid, 1), bs(lead, 1), bs(ascii, 1)};
+    OcTiktokenTokenizer *t = NULL;
+    cr_assert_eq(oc_tiktoken_new(vocab, 3, NULL, 0, arena, &t), OC_OK);
+    OcTokenizer tokenizer = {.kind = OC_TOK_KIND_TIKTOKEN, .tiktoken = t};
+    OcStreamingDetokenizer sd;
+    oc_streaming_detok_init(&sd, &tokenizer);
+    const char *delta;
+    size_t len;
+    cr_assert_eq(oc_streaming_detok_push(&sd, 0, &delta, &len), OC_OK);
+    cr_assert_eq(len, 3);
+    cr_assert_arr_eq(delta, "\xef\xbf\xbd", 3);
+    cr_assert_eq(oc_streaming_detok_push(&sd, 1, &delta, &len), OC_OK);
+    cr_assert_eq(len, 0);
+    cr_assert_eq(oc_streaming_detok_push(&sd, 2, &delta, &len), OC_OK);
+    cr_assert_eq(len, 4);
+    cr_assert_arr_eq(delta, "\xef\xbf\xbd" "a", 4);
+    oc_streaming_detok_free(&sd);
+    oc_tiktoken_free(t);
+    oc_arena_free(arena);
+}
+
 /* ─── Unknown token fallback for missing bytes (VAL-TOK-009 OOV) ────────
  * Mirrors Rust `tiktoken_uses_unknown_token_for_missing_bytes`:
  *   vocab = [b"a"] + unk(b"<unk>")

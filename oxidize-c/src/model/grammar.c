@@ -123,7 +123,8 @@ static bool json_string_char(char c, bool escaped)
 bool oc_grammar_allows_char(OcGrammarConstraint *g, char c)
 {
     if (!g || g->type == OC_GRAMMAR_NONE) return true;
-    if (g->finished && g->type != OC_GRAMMAR_CHOICE)
+    if (g->finished && g->type != OC_GRAMMAR_CHOICE &&
+        !(g->type == OC_GRAMMAR_JSON && g->json_root_kind == JSON_ROOT_NUMBER))
         return g->type == OC_GRAMMAR_JSON &&
                (c == ' ' || c == '\t' || c == '\n' || c == '\r');
 
@@ -178,7 +179,9 @@ bool oc_grammar_allows_token(OcGrammarConstraint *g,
                              const char *token_bytes, size_t token_len)
 {
     if (!g || g->type == OC_GRAMMAR_NONE) return true;
-    if (g->finished && g->type != OC_GRAMMAR_CHOICE) return false;
+    if (g->finished && g->type != OC_GRAMMAR_CHOICE &&
+        !(g->type == OC_GRAMMAR_JSON && g->json_root_kind == JSON_ROOT_NUMBER))
+        return false;
     if (!token_bytes || token_len == 0) return true;
 
     /* Simulate advancing through the token to check if all chars are allowed. */
