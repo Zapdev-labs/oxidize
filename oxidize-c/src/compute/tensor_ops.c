@@ -387,7 +387,6 @@ void oc_tensor_attention_mha_f32(const float *Q, const float *K,
                                    size_t seq_len, size_t d_head)
 {
     float scale = 1.0f / sqrtf((float)d_head);
-    size_t kv_stride = (n_head_kv > 0) ? n_head_kv : 1;
 
     for (size_t h = 0; h < n_head_q; h++) {
         size_t kv_h = h * n_head_kv / n_head_q; /* GQA mapping */

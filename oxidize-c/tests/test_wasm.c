@@ -329,18 +329,49 @@ Test(wasm, queue_drain_empty_returns_error)
     oc_wasm_bridge_free(br);
 }
 
-Test(wasm, queue_cancel_message)
+Test(wasm, queue_cancel_message_drains)
 {
+    /* Draining a CANCEL message should return OC_OK and set the cancel flag.
+     * The flag is observed by the next generate() call's first forward step;
+     * since generate() resets the flag at entry, the cancel must be requested
+     * *during* generation (via the callback) to actually interrupt it — see
+     * the `cancel_during_generate` test below. */
     OcWasmBridge *br = oc_wasm_bridge_init(NULL);
     cr_assert_not_null(br);
     OcWasmMessage cancel = { .type = OC_WASM_MSG_CANCEL };
     cr_assert_eq(oc_wasm_bridge_enqueue(br, &cancel), OC_OK);
     cr_assert_eq(oc_wasm_bridge_drain_one(br), OC_OK);
-    /* After drain, the cancel flag is set; subsequent generate stops early. */
+    OcWasmStats stats;
+    oc_wasm_bridge_get_stats(br, &stats);
+    cr_assert_eq(stats.messages_processed, 1u);
+    oc_wasm_bridge_free(br);
+}
+
+/* Callback that requests cancellation after the first token. */
+static bool cancel_after_first(uint32_t token, uint32_t index, void *ud)
+{
+    (void)token; (void)index;
+    OcWasmBridge *br = (OcWasmBridge *)ud;
+    oc_wasm_bridge_cancel(br);
+    return true;  /* keep going; the flag is checked on the next step */
+}
+
+Test(wasm, cancel_during_generate)
+{
+    OcWasmBridge *br = oc_wasm_bridge_init(NULL);
+    cr_assert_not_null(br);
     cr_assert_eq(oc_wasm_bridge_load_model(br, "stub.gguf"), OC_OK);
-    CbState st = {0, 0, 0};
-    oc_wasm_bridge_generate(br, "x", 10, count_callback, &st, NULL, 0);
-    cr_assert_eq(st.count, 0u, "cancelled generation should produce 0 tokens");
+
+    /* Request max_tokens=100 but cancel via callback after token 0.
+     * Generation should stop after 1 token (the flag is checked at the
+     * top of the next loop iteration). */
+    size_t n = oc_wasm_bridge_generate(br, "prompt", 100,
+                                       cancel_after_first, br, NULL, 0);
+    (void)n;
+    OcWasmStats stats;
+    oc_wasm_bridge_get_stats(br, &stats);
+    cr_assert_leq(stats.tokens_generated, 2u,
+                 "cancel should stop generation within 1-2 tokens");
     oc_wasm_bridge_free(br);
 }
 
@@ -429,9 +460,11 @@ Test(wasm, interface_string_static_pointer)
 
 Test(wasm, format_interface_null_handling)
 {
-    /* NULL buffer with nonzero cap → 0 written, no crash. */
-    cr_assert_eq(oc_wasm_bridge_format_interface(NULL, 64), 0u);
-    /* Non-NULL buffer with 0 cap → 0 written, no crash. */
+    /* snprintf-style: NULL buffer or zero cap returns the length that would
+     * have been written (never writes). */
+    size_t needed = oc_wasm_bridge_format_interface(NULL, 0);
+    cr_assert_gt(needed, 0u);
+    cr_assert_eq(oc_wasm_bridge_format_interface(NULL, 64), needed);
     char buf[8];
-    cr_assert_eq(oc_wasm_bridge_format_interface(buf, 0), 0u);
+    cr_assert_eq(oc_wasm_bridge_format_interface(buf, 0), needed);
 }
