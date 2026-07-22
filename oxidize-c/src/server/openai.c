@@ -118,32 +118,70 @@ static bool find_json_bool_field(const char *json, const char *key, bool def)
  * "content" field. For chat completions we render the full message array
  * as plain text (a real chat-template renderer is wired by the tokenizer
  * feature — for now we concatenate contents). */
+static bool next_message_object(const char **cursor, const char **start,
+                                const char **end)
+{
+    const char *p = *cursor;
+    bool in_string = false;
+    bool escaped = false;
+    size_t depth = 0;
+    const char *object = NULL;
+    for (; *p; p++) {
+        if (in_string) {
+            if (escaped) escaped = false;
+            else if (*p == '\\') escaped = true;
+            else if (*p == '"') in_string = false;
+            continue;
+        }
+        if (*p == '"') { in_string = true; continue; }
+        if (*p == ']' && depth == 0) return false;
+        if (*p == '{') {
+            if (depth++ == 0) object = p;
+        } else if (*p == '}' && depth > 0 && --depth == 0) {
+            *start = object;
+            *end = p + 1;
+            *cursor = p + 1;
+            return true;
+        }
+    }
+    return false;
+}
+
 static bool extract_messages_content(const char *json, OcChatTemplate template,
                                      char *out, size_t out_cap)
 {
     size_t out_i = 0;
     size_t message_count = 0;
-    const char *p = json;
+    const char *messages = strstr(json, "\"messages\"");
+    const char *p = messages ? strchr(messages, '[') : NULL;
+    if (!p) return false;
+    p++;
     char role[64];
     char content[16384];
-    while ((p = strstr(p, "\"role\"")) != NULL) {
-        if (!find_json_string_field(p, "role", role, sizeof(role))) break;
-        const char *content_key = strstr(p, "\"content\"");
-        const char *next_role = strstr(p + 6, "\"role\"");
-        if (!content_key || (next_role && next_role < content_key)) {
-            p += 6;
-            continue;
-        }
-        if (!find_json_string_field(content_key, "content", content, sizeof(content)))
+    const char *object_start;
+    const char *object_end;
+    while (next_message_object(&p, &object_start, &object_end)) {
+        size_t object_len = (size_t)(object_end - object_start);
+        char *object = malloc(object_len + 1);
+        if (!object) return false;
+        memcpy(object, object_start, object_len);
+        object[object_len] = '\0';
+        bool parsed = find_json_string_field(object, "role", role, sizeof(role)) &&
+                      find_json_string_field(object, "content", content, sizeof(content));
+        free(object);
+        if (!parsed)
             return false;
+        const char *lookahead = p;
+        const char *next_start;
+        const char *next_end;
+        bool is_last = !next_message_object(&lookahead, &next_start, &next_end);
         size_t written = oc_chat_render_message(template, role, content,
                                                 out + out_i, out_cap - out_i,
                                                 message_count == 0,
-                                                next_role == NULL);
+                                                is_last);
         if (written == 0) return false;
         out_i += written;
         message_count++;
-        p = content_key + strlen("\"content\"");
     }
     out[out_i] = '\0';
     return message_count > 0;
@@ -308,7 +346,7 @@ static void handle_list_models(OcOpenaiState *st, int *out_status,
 static void handle_completion(OcOpenaiState *st, const OcHttpRequest *req,
                               int *out_status, const char **out_body)
 {
-    if (!st->model_loaded) {
+    if (!st || !st->model_loaded) {
         *out_body = oc_openai_error_json("no model loaded", "server_error");
         *out_status = 503;
         return;
@@ -360,7 +398,7 @@ static void handle_completion(OcOpenaiState *st, const OcHttpRequest *req,
 static void handle_chat_completion(OcOpenaiState *st, const OcHttpRequest *req,
                                    int *out_status, const char **out_body)
 {
-    if (!st->model_loaded) {
+    if (!st || !st->model_loaded || !st->model) {
         *out_body = oc_openai_error_json("no model loaded", "server_error");
         *out_status = 503;
         return;

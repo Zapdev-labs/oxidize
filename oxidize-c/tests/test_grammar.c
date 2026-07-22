@@ -18,8 +18,8 @@ Test(grammar, json_allows_structural)
     cr_assert(oc_grammar_allows_char(&g, '{'));
     cr_assert(oc_grammar_allows_char(&g, '"'));
     cr_assert(!oc_grammar_allows_char(&g, '}'));
-    cr_assert(oc_grammar_allows_char(&g, ':'));
-    cr_assert(oc_grammar_allows_char(&g, ','));
+    cr_assert(!oc_grammar_allows_char(&g, ':'));
+    cr_assert(!oc_grammar_allows_char(&g, ','));
     cr_assert(!oc_grammar_allows_char(&g, 'x'));  /* x is not structural outside string */
 }
 
@@ -108,4 +108,40 @@ Test(grammar, token_allows)
     cr_assert(oc_grammar_allows_token(&g, "{\"key\":", 7));
     /* Token with invalid char outside string should be rejected. */
     cr_assert(!oc_grammar_allows_token(&g, "xyz", 3));
+}
+
+Test(grammar, json_root_primitives_require_complete_valid_syntax)
+{
+    OcGrammarConstraint g;
+    oc_grammar_init(&g, OC_GRAMMAR_JSON);
+    cr_assert(oc_grammar_allows_token(&g, "true", 4));
+    oc_grammar_advance(&g, "tru", 3);
+    cr_assert(!oc_grammar_is_satisfied(&g));
+    cr_assert(oc_grammar_allows_char(&g, 'e'));
+    oc_grammar_advance(&g, "e", 1);
+    cr_assert(oc_grammar_is_satisfied(&g));
+
+    oc_grammar_reset(&g);
+    cr_assert(oc_grammar_allows_token(&g, "-12.5e+2", 8));
+    oc_grammar_advance(&g, "-12.", 4);
+    cr_assert(!oc_grammar_is_satisfied(&g));
+    oc_grammar_advance(&g, "5e+2", 4);
+    cr_assert(oc_grammar_is_satisfied(&g));
+    cr_assert(!oc_grammar_allows_token(&g, "x", 1));
+}
+
+Test(grammar, choice_supports_long_and_overlapping_literals)
+{
+    char long_choice[400];
+    memset(long_choice, 'a', sizeof(long_choice) - 1);
+    long_choice[sizeof(long_choice) - 1] = '\0';
+    const char *choices[] = {"a", "ab", long_choice};
+    OcGrammarConstraint g;
+    oc_grammar_init_choice(&g, choices, 3);
+    cr_assert(oc_grammar_allows_token(&g, "ab", 2));
+    oc_grammar_advance(&g, "a", 1);
+    cr_assert(oc_grammar_is_satisfied(&g));
+    cr_assert(oc_grammar_allows_token(&g, "b", 1));
+    oc_grammar_reset(&g);
+    cr_assert(oc_grammar_allows_token(&g, long_choice, strlen(long_choice)));
 }

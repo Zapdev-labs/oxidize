@@ -256,7 +256,7 @@ Test(paged, scheduler_single_seq)
     cr_assert_eq(res.prefill_counts[0], 8, "prefill all 8 prompt tokens");
     cr_assert_eq(res.decode_counts[0], 0);
     cr_assert_eq(res.total_tokens, 8);
-    free(res.scheduled_ids); free(res.prefill_counts); free(res.decode_counts);
+    oc_scheduler_step_result_free(&res);
 
     /* Postprocess: sampled token 10. */
     OcSeqId ids[] = {1};
@@ -268,7 +268,7 @@ Test(paged, scheduler_single_seq)
     cr_assert_eq(res.n_scheduled, 1);
     cr_assert_eq(res.decode_counts[0], 1, "decode 1 token");
     cr_assert_eq(res.prefill_counts[0], 0);
-    free(res.scheduled_ids); free(res.prefill_counts); free(res.decode_counts);
+    oc_scheduler_step_result_free(&res);
 
     oc_scheduler_free(&sched);
 }
@@ -292,7 +292,7 @@ Test(paged, scheduler_preemption)
     /* Prefill. */
     OcSchedulerStepResult res;
     oc_scheduler_step(&sched, &res);
-    free(res.scheduled_ids); free(res.prefill_counts); free(res.decode_counts);
+    oc_scheduler_step_result_free(&res);
 
     /* Preempt. */
     cr_assert_eq(oc_scheduler_preempt(&sched, 1), OC_OK);
@@ -322,7 +322,7 @@ Test(paged, scheduler_uses_pool_block_size_and_limits_partial_prefill)
     cr_assert_eq(seq->num_prefilled_tokens, 4);
     cr_assert_eq(seq->block_table.num_tokens, 4);
     cr_assert_eq(seq->block_table.num_blocks, 1);
-    free(res.scheduled_ids); free(res.prefill_counts); free(res.decode_counts);
+    oc_scheduler_step_result_free(&res);
     oc_scheduler_free(&sched);
 }
 
@@ -348,7 +348,7 @@ Test(paged, scheduler_grows_full_waiting_queue)
     cr_assert_eq(oc_scheduler_step(&sched, &res), OC_OK);
     cr_assert_eq(res.scheduled_ids[0], 1);
     cr_assert_eq(sched.waiting_count, initial_capacity);
-    free(res.scheduled_ids); free(res.prefill_counts); free(res.decode_counts);
+    oc_scheduler_step_result_free(&res);
     oc_scheduler_free(&sched);
 }
 
@@ -369,13 +369,13 @@ Test(paged, finished_sequence_releases_running_slot)
     }
     OcSchedulerStepResult res;
     cr_assert_eq(oc_scheduler_step(&sched, &res), OC_OK);
-    free(res.scheduled_ids); free(res.prefill_counts); free(res.decode_counts);
+    oc_scheduler_step_result_free(&res);
     cr_assert_eq(oc_scheduler_postprocess(&sched, (OcSeqId[]){1},
                                           (uint32_t[]){10}, 1), OC_OK);
     cr_assert_eq(sched.running_count, 0);
     cr_assert_eq(oc_scheduler_step(&sched, &res), OC_OK);
     cr_assert_eq(res.scheduled_ids[0], 2);
-    free(res.scheduled_ids); free(res.prefill_counts); free(res.decode_counts);
+    oc_scheduler_step_result_free(&res);
     oc_scheduler_free(&sched);
 }
 
@@ -393,7 +393,7 @@ Test(paged, decode_reserves_one_position_and_preserves_boundary_page)
     cr_assert_eq(oc_scheduler_add_sequence(&sched, seq), OC_OK);
     OcSchedulerStepResult res;
     cr_assert_eq(oc_scheduler_step(&sched, &res), OC_OK);
-    free(res.scheduled_ids); free(res.prefill_counts); free(res.decode_counts);
+    oc_scheduler_step_result_free(&res);
     OcBlockId first = seq->block_table.logical_to_physical[0];
     cr_assert_eq(oc_block_pool_inc_ref(&sched.block_pool, first), OC_OK);
     cr_assert_eq(oc_scheduler_postprocess(&sched, (OcSeqId[]){1},
@@ -403,11 +403,40 @@ Test(paged, decode_reserves_one_position_and_preserves_boundary_page)
     cr_assert_eq(seq->block_table.num_blocks, 2);
     cr_assert_eq(seq->block_table.logical_to_physical[0], first);
     cr_assert_eq(sched.block_pool.blocks[first].ref_count, 2);
-    free(res.scheduled_ids); free(res.prefill_counts); free(res.decode_counts);
+    oc_scheduler_step_result_free(&res);
     cr_assert_eq(oc_scheduler_postprocess(&sched, (OcSeqId[]){1},
                                           (uint32_t[]){11}, 1), OC_OK);
     cr_assert_eq(seq->block_table.num_tokens, 5);
     cr_assert_eq(oc_block_pool_dec_ref(&sched.block_pool, first), OC_OK);
+    oc_scheduler_free(&sched);
+}
+
+Test(paged, decode_reports_copy_on_write_for_shared_partial_page)
+{
+    OcScheduler sched;
+    OcSchedulerConfig scfg = OC_SCHEDULER_DEFAULT;
+    OcBlockPoolConfig bcfg = { .block_size = 4, .num_blocks = 4,
+        .num_layers = 1, .num_kv_heads = 1, .head_dim = 2, .dtype_size = 4 };
+    cr_assert_eq(oc_scheduler_init(&sched, &scfg, &bcfg), OC_OK);
+    uint32_t prompt[] = {1, 2, 3};
+    OcPagedSequence *seq = malloc(sizeof(*seq));
+    cr_assert_eq(oc_seq_init(seq, 1, prompt, 3, 4, UINT32_MAX,
+                             OC_SAMPLER_DEFAULT, 0), OC_OK);
+    cr_assert_eq(oc_scheduler_add_sequence(&sched, seq), OC_OK);
+    OcSchedulerStepResult res;
+    cr_assert_eq(oc_scheduler_step(&sched, &res), OC_OK);
+    oc_scheduler_step_result_free(&res);
+    OcBlockId shared = seq->block_table.logical_to_physical[0];
+    cr_assert_eq(oc_block_pool_inc_ref(&sched.block_pool, shared), OC_OK);
+    cr_assert_eq(oc_scheduler_postprocess(&sched, (OcSeqId[]){1},
+                                          (uint32_t[]){10}, 1), OC_OK);
+    cr_assert_eq(oc_scheduler_step(&sched, &res), OC_OK);
+    cr_assert_eq(res.n_cow_copies, 1);
+    cr_assert_eq(res.cow_src_blocks[0], shared);
+    cr_assert_neq(res.cow_dst_blocks[0], shared);
+    cr_assert_eq(seq->block_table.logical_to_physical[0], res.cow_dst_blocks[0]);
+    oc_scheduler_step_result_free(&res);
+    cr_assert_eq(oc_block_pool_dec_ref(&sched.block_pool, shared), OC_OK);
     oc_scheduler_free(&sched);
 }
 

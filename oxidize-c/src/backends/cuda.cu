@@ -295,7 +295,6 @@ OcError oc_cuda_init(OcCudaContext *ctx, const OcLlamaModel *model)
     ctx->rms_norm_eps = c->rms_norm_eps;
     ctx->norm_scale = c->norm_scale;
     ctx->uses_geglu = c->uses_geglu;
-    ctx->initialized = true;
 
     /* Allocate workspace. */
     size_t embd = c->n_embd;
@@ -303,17 +302,24 @@ OcError oc_cuda_init(OcCudaContext *ctx, const OcLlamaModel *model)
     size_t kv_row = (size_t)c->n_head_kv * c->head_dim;
     size_t kv_total = (size_t)c->n_layer * c->n_ctx * kv_row;
 
-    OC_CUDA_CHECK(cudaMalloc(&ctx->d_x, embd * sizeof(float)));
-    OC_CUDA_CHECK(cudaMalloc(&ctx->d_normed, embd * sizeof(float)));
-    OC_CUDA_CHECK(cudaMalloc(&ctx->d_q, q_size * sizeof(float)));
-    OC_CUDA_CHECK(cudaMalloc(&ctx->d_k, kv_row * sizeof(float)));
-    OC_CUDA_CHECK(cudaMalloc(&ctx->d_v, kv_row * sizeof(float)));
-    OC_CUDA_CHECK(cudaMalloc(&ctx->d_attn_out, q_size * sizeof(float)));
-    OC_CUDA_CHECK(cudaMalloc(&ctx->d_ffn_gate_buf, c->n_ff * sizeof(float)));
-    OC_CUDA_CHECK(cudaMalloc(&ctx->d_ffn_up_buf, c->n_ff * sizeof(float)));
-    OC_CUDA_CHECK(cudaMalloc(&ctx->d_logits, c->vocab_size * sizeof(float)));
-    OC_CUDA_CHECK(cudaMalloc(&ctx->d_kv_k, kv_total * sizeof(float)));
-    OC_CUDA_CHECK(cudaMalloc(&ctx->d_kv_v, kv_total * sizeof(float)));
+#define CUDA_INIT_ALLOC(ptr, bytes) \
+    do { \
+        if (cudaMalloc((void **)(ptr), (bytes)) != cudaSuccess) { \
+            oc_cuda_free(ctx); \
+            return OC_ERR_BACKEND; \
+        } \
+    } while (0)
+    CUDA_INIT_ALLOC(&ctx->d_x, embd * sizeof(float));
+    CUDA_INIT_ALLOC(&ctx->d_normed, embd * sizeof(float));
+    CUDA_INIT_ALLOC(&ctx->d_q, q_size * sizeof(float));
+    CUDA_INIT_ALLOC(&ctx->d_k, kv_row * sizeof(float));
+    CUDA_INIT_ALLOC(&ctx->d_v, kv_row * sizeof(float));
+    CUDA_INIT_ALLOC(&ctx->d_attn_out, q_size * sizeof(float));
+    CUDA_INIT_ALLOC(&ctx->d_ffn_gate_buf, c->n_ff * sizeof(float));
+    CUDA_INIT_ALLOC(&ctx->d_ffn_up_buf, c->n_ff * sizeof(float));
+    CUDA_INIT_ALLOC(&ctx->d_logits, c->vocab_size * sizeof(float));
+    CUDA_INIT_ALLOC(&ctx->d_kv_k, kv_total * sizeof(float));
+    CUDA_INIT_ALLOC(&ctx->d_kv_v, kv_total * sizeof(float));
     fprintf(stderr, "cuda: KV cache allocated %.1f MB each\n",
             kv_total * sizeof(float) / 1e6);
 
@@ -331,7 +337,9 @@ OcError oc_cuda_init(OcCudaContext *ctx, const OcLlamaModel *model)
     fprintf(stderr, "cuda: embeddings uploaded\n");
 
     /* Upload final norm. */
-    OC_CUDA_CHECK(cudaMalloc(&ctx->d_final_norm, embd * sizeof(float)));
+    if (cudaMalloc((void **)&ctx->d_final_norm, embd * sizeof(float)) != cudaSuccess) {
+        free(host_temp); oc_cuda_free(ctx); return OC_ERR_BACKEND;
+    }
     cudaMemcpy(ctx->d_final_norm, model->final_norm, embd * sizeof(float),
               cudaMemcpyHostToDevice);
 
@@ -379,16 +387,22 @@ OcError oc_cuda_init(OcCudaContext *ctx, const OcLlamaModel *model)
         if (e != OC_OK) { free(host_temp); oc_cuda_free(ctx); return e; }
         e = upload_weight_view(&L->ffn_down, &ctx->d_ffn_down[l], host_temp);
         if (e != OC_OK) { free(host_temp); oc_cuda_free(ctx); return e; }
-        OC_CUDA_CHECK(cudaMalloc(&ctx->d_attn_norm[l], embd * sizeof(float)));
+        if (cudaMalloc((void **)&ctx->d_attn_norm[l], embd * sizeof(float)) != cudaSuccess) {
+            free(host_temp); oc_cuda_free(ctx); return OC_ERR_BACKEND;
+        }
         cudaMemcpy(ctx->d_attn_norm[l], L->attn_norm, embd * sizeof(float),
                   cudaMemcpyHostToDevice);
-        OC_CUDA_CHECK(cudaMalloc(&ctx->d_ffn_norm[l], embd * sizeof(float)));
+        if (cudaMalloc((void **)&ctx->d_ffn_norm[l], embd * sizeof(float)) != cudaSuccess) {
+            free(host_temp); oc_cuda_free(ctx); return OC_ERR_BACKEND;
+        }
         cudaMemcpy(ctx->d_ffn_norm[l], L->ffn_norm, embd * sizeof(float),
                   cudaMemcpyHostToDevice);
     }
     fprintf(stderr, "cuda: all layers uploaded\n");
 
     free(host_temp);
+    ctx->initialized = true;
+#undef CUDA_INIT_ALLOC
     return OC_OK;
 }
 

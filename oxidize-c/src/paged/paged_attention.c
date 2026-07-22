@@ -525,8 +525,11 @@ OcError oc_scheduler_step(OcScheduler *sched, OcSchedulerStepResult *out)
     out->scheduled_ids = xcalloc(sched->running_cap + 4, sizeof(OcSeqId));
     out->prefill_counts = xcalloc(sched->running_cap + 4, sizeof(size_t));
     out->decode_counts = xcalloc(sched->running_cap + 4, sizeof(size_t));
-    if (!out->scheduled_ids || !out->prefill_counts || !out->decode_counts) {
-        free(out->scheduled_ids); free(out->prefill_counts); free(out->decode_counts);
+    out->cow_src_blocks = xcalloc(sched->running_cap + 4, sizeof(OcBlockId));
+    out->cow_dst_blocks = xcalloc(sched->running_cap + 4, sizeof(OcBlockId));
+    if (!out->scheduled_ids || !out->prefill_counts || !out->decode_counts ||
+        !out->cow_src_blocks || !out->cow_dst_blocks) {
+        oc_scheduler_step_result_free(out);
         return OC_ERR_OOM;
     }
 
@@ -548,7 +551,17 @@ OcError oc_scheduler_step(OcScheduler *sched, OcSchedulerStepResult *out)
         if (logical < seq->block_table.num_blocks) {
             OcBlockId old_id = seq->block_table.logical_to_physical[logical];
             if (sched->block_pool.blocks[old_id].ref_count > 1) {
-                return OC_ERR_INVALID_ARG;
+                OcBlockId new_id;
+                bool did_copy;
+                if (oc_block_pool_cow(&sched->block_pool, old_id, &new_id,
+                                      &did_copy) != OC_OK)
+                    continue;
+                if (did_copy) {
+                    seq->block_table.logical_to_physical[logical] = new_id;
+                    out->cow_src_blocks[out->n_cow_copies] = old_id;
+                    out->cow_dst_blocks[out->n_cow_copies] = new_id;
+                    out->n_cow_copies++;
+                }
             }
         } else if (reserve_blocks(sched, seq, 1) != OC_OK) {
             break;
@@ -641,6 +654,17 @@ OcError oc_scheduler_step(OcScheduler *sched, OcSchedulerStepResult *out)
     }
 
     return OC_OK;
+}
+
+void oc_scheduler_step_result_free(OcSchedulerStepResult *result)
+{
+    if (!result) return;
+    free(result->scheduled_ids);
+    free(result->prefill_counts);
+    free(result->decode_counts);
+    free(result->cow_src_blocks);
+    free(result->cow_dst_blocks);
+    memset(result, 0, sizeof(*result));
 }
 
 OcError oc_scheduler_postprocess(OcScheduler *sched,

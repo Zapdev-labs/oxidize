@@ -393,7 +393,7 @@ OcError oc_llama_load(const char *path, OcLlamaModel *out)
     }
     if (arch_str == NULL) arch_str = "llama";
     if (strcmp(arch_str, "llama") != 0 && strcmp(arch_str, "mistral") != 0 &&
-        strcmp(arch_str, "qwen2") != 0 && strcmp(arch_str, "qwen3") != 0) {
+        strcmp(arch_str, "qwen2") != 0) {
         oc_gguf_map_free(&out->gguf);
         return OC_ERR_MODEL;
     }

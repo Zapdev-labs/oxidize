@@ -51,58 +51,61 @@ size_t oc_chat_render_message(OcChatTemplate template,
                               bool is_first, bool is_last)
 {
     (void)is_first;
+    if (!out || out_cap == 0 || !role || !content) return 0;
     size_t pos = 0;
+    bool ok = true;
     out[0] = '\0';
 
     switch (template) {
     case OC_CHAT_CHATML:
         /* <|im_start|>role\ncontent<|im_end|>\n */
-        append_fmt(out, &pos, out_cap, "<|im_start|>%s\n%s<|im_end|>\n",
-                   role, content);
-        if (is_last) append_str(out, &pos, out_cap, "<|im_start|>assistant\n");
+        ok = append_fmt(out, &pos, out_cap, "<|im_start|>%s\n%s<|im_end|>\n",
+                        role, content) != 0;
+        if (ok && is_last)
+            ok = append_str(out, &pos, out_cap, "<|im_start|>assistant\n") != 0;
         break;
 
     case OC_CHAT_LLAMA3:
         /* <|start_header_id|>role<|end_header_id|>\n\ncontent<|eot_id|> */
-        append_fmt(out, &pos, out_cap,
-                   "<|start_header_id|>%s<|end_header_id|>\n\n%s<|eot_id|>",
-                   role, content);
-        if (is_last) {
-            append_str(out, &pos, out_cap,
-                       "<|start_header_id|>assistant<|end_header_id|>\n\n");
-        }
+        ok = append_fmt(out, &pos, out_cap,
+                        "<|start_header_id|>%s<|end_header_id|>\n\n%s<|eot_id|>",
+                        role, content) != 0;
+        if (ok && is_last)
+            ok = append_str(out, &pos, out_cap,
+                            "<|start_header_id|>assistant<|end_header_id|>\n\n") != 0;
         break;
 
     case OC_CHAT_LLAMA2:
         /* [INST] content [/INST] */
         if (strcmp(role, "user") == 0) {
-            append_fmt(out, &pos, out_cap, "[INST] %s [/INST]", content);
+            ok = append_fmt(out, &pos, out_cap, "[INST] %s [/INST]", content) != 0;
         } else if (strcmp(role, "system") == 0) {
-            append_fmt(out, &pos, out_cap, "<<SYS>>\n%s\n<</SYS>>\n\n", content);
+            ok = append_fmt(out, &pos, out_cap, "<<SYS>>\n%s\n<</SYS>>\n\n", content) != 0;
         } else {
-            append_str(out, &pos, out_cap, content);
+            ok = append_str(out, &pos, out_cap, content) != 0 || content[0] == '\0';
         }
-        if (is_last) append_str(out, &pos, out_cap, " ");
+        if (ok && is_last) ok = append_str(out, &pos, out_cap, " ") != 0;
         break;
 
     case OC_CHAT_GEMMA:
         /* <start_of_turn>role\ncontent<end_of_turn>\n */
-        append_fmt(out, &pos, out_cap, "<start_of_turn>%s\n%s<end_of_turn>\n",
-                   role, content);
-        if (is_last) append_str(out, &pos, out_cap, "<start_of_turn>model\n");
+        ok = append_fmt(out, &pos, out_cap, "<start_of_turn>%s\n%s<end_of_turn>\n",
+                        role, content) != 0;
+        if (ok && is_last)
+            ok = append_str(out, &pos, out_cap, "<start_of_turn>model\n") != 0;
         break;
 
     case OC_CHAT_PLAIN:
-        append_str(out, &pos, out_cap, content);
-        append_str(out, &pos, out_cap, "\n");
+        ok = append_str(out, &pos, out_cap, content) != 0 || content[0] == '\0';
+        if (ok) ok = append_str(out, &pos, out_cap, "\n") != 0;
         break;
 
     default:
-        append_str(out, &pos, out_cap, content);
+        ok = append_str(out, &pos, out_cap, content) != 0 || content[0] == '\0';
         break;
     }
 
-    return pos;
+    return ok ? pos : 0;
 }
 
 size_t oc_chat_render_messages(OcChatTemplate template,

@@ -23,6 +23,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <pthread.h>
+#include <poll.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -90,6 +91,29 @@ size_t oc_http_format_response(char *buf, size_t cap,
  * Returns true on success; fills `req`. On failure, returns false and sets
  * `*out_status` to the appropriate HTTP error code (400, 411, 413). */
 
+typedef struct HeaderValue {
+    char *data;
+    size_t len;
+} HeaderValue;
+
+static HeaderValue find_header(char *start, char *end, const char *name)
+{
+    size_t name_len = strlen(name);
+    char *line = start;
+    while (line < end) {
+        char *line_end = memmem(line, (size_t)(end - line), "\r\n", 2);
+        if (!line_end) line_end = end;
+        if ((size_t)(line_end - line) > name_len && line[name_len] == ':' &&
+            strncasecmp(line, name, name_len) == 0) {
+            char *value = line + name_len + 1;
+            while (value < line_end && (*value == ' ' || *value == '\t')) value++;
+            return (HeaderValue){value, (size_t)(line_end - value)};
+        }
+        line = line_end < end ? line_end + 2 : end;
+    }
+    return (HeaderValue){NULL, 0};
+}
+
 static bool parse_request(char *buf, size_t buf_len, OcHttpRequest *req,
                           int *out_status)
 {
@@ -130,22 +154,17 @@ static bool parse_request(char *buf, size_t buf_len, OcHttpRequest *req,
     }
     req->path = path;
 
-    char *te = strstr(line_end + 2, "Transfer-Encoding:");
-    if (te == NULL) te = strstr(line_end + 2, "transfer-encoding:");
-    if (te != NULL && (strstr(te, "chunked") != NULL ||
-                       strstr(te, "Chunked") != NULL)) {
+    HeaderValue te = find_header(line_end + 2, sep, "Transfer-Encoding");
+    if (te.data) {
         *out_status = 411;
         return false;
     }
 
     /* Find Content-Length. */
-    char *cl = strstr(line_end + 2, "Content-Length:");
-    if (cl == NULL) cl = strstr(line_end + 2, "content-length:");
+    HeaderValue cl = find_header(line_end + 2, sep, "Content-Length");
     size_t content_length = 0;
-    if (cl != NULL) {
-        cl += strlen("Content-Length:");
-        while (*cl == ' ' || *cl == '\t') cl++;
-        content_length = (size_t)strtoull(cl, NULL, 10);
+    if (cl.data != NULL) {
+        content_length = (size_t)strtoull(cl.data, NULL, 10);
     }
 
     /* Body starts after the "\r\n\r\n" separator. */
@@ -197,25 +216,14 @@ static size_t expected_request_size(char *buf, size_t len)
     char *sep = memmem(buf, len, "\r\n\r\n", 4);
     if (sep == NULL) return 0;
     size_t header_bytes = (size_t)(sep - buf) + 4;
-    char *cl = NULL;
     char *line = memmem(buf, (size_t)(sep - buf), "\r\n", 2);
     if (line != NULL) line += 2;
-    while (line != NULL && line < sep) {
-        char *end = memmem(line, (size_t)(sep - line), "\r\n", 2);
-        if (end == NULL) end = sep;
-        size_t name_len = strlen("Content-Length");
-        if ((size_t)(end - line) > name_len && line[name_len] == ':' &&
-            strncasecmp(line, "Content-Length", name_len) == 0) {
-            cl = line + name_len + 1;
-            break;
-        }
-        line = end < sep ? end + 2 : NULL;
-    }
+    HeaderValue cl = line ? find_header(line, sep, "Content-Length") :
+                            (HeaderValue){NULL, 0};
     unsigned long long body_bytes = 0;
     errno = 0;
-    if (cl != NULL) {
-        while (*cl == ' ' || *cl == '\t') cl++;
-        body_bytes = strtoull(cl, NULL, 10);
+    if (cl.data != NULL) {
+        body_bytes = strtoull(cl.data, NULL, 10);
     }
     if (errno == ERANGE || body_bytes > OC_HTTP_MAX_REQUEST_BYTES - header_bytes)
         return SIZE_MAX;
@@ -257,9 +265,6 @@ static void *worker_main(void *arg)
             oc_log(OC_LOG_WARN, "http: accept failed: %s", strerror(errno));
             continue;
         }
-        struct timeval read_timeout = { .tv_sec = 5, .tv_usec = 0 };
-        (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO,
-                         &read_timeout, sizeof(read_timeout));
 #ifdef SO_NOSIGPIPE
         int no_sigpipe = 1;
         (void)setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE,
@@ -274,13 +279,24 @@ static void *worker_main(void *arg)
         (void)clock_gettime(CLOCK_MONOTONIC, &deadline);
         deadline.tv_sec += 5;
         while (total < OC_HTTP_MAX_REQUEST_BYTES) {
+            struct timespec now;
+            (void)clock_gettime(CLOCK_MONOTONIC, &now);
+            int64_t remaining_ms = (int64_t)(deadline.tv_sec - now.tv_sec) * 1000 +
+                                   (deadline.tv_nsec - now.tv_nsec) / 1000000;
+            if (remaining_ms <= 0) { timed_out = true; break; }
+            struct pollfd pfd = { .fd = fd, .events = POLLIN };
+            int ready;
+            do {
+                ready = poll(&pfd, 1, remaining_ms > INT32_MAX ? INT32_MAX : (int)remaining_ms);
+            } while (ready < 0 && errno == EINTR);
+            if (ready == 0) { timed_out = true; break; }
+            if (ready < 0) break;
             rd = read(fd, buf + total, OC_HTTP_MAX_REQUEST_BYTES - total);
             if (rd <= 0) {
                 timed_out = rd < 0 && (errno == EAGAIN || errno == EWOULDBLOCK);
                 break;
             }
             total += (size_t)rd;
-            struct timespec now;
             (void)clock_gettime(CLOCK_MONOTONIC, &now);
             if (now.tv_sec > deadline.tv_sec ||
                 (now.tv_sec == deadline.tv_sec && now.tv_nsec >= deadline.tv_nsec)) {

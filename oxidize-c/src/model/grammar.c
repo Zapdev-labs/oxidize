@@ -8,6 +8,61 @@
 #include <stdlib.h>
 #include <string.h>
 
+enum {
+    JSON_ROOT_NONE,
+    JSON_ROOT_TRUE,
+    JSON_ROOT_FALSE,
+    JSON_ROOT_NULL,
+    JSON_ROOT_NUMBER,
+};
+
+enum {
+    JSON_NUM_SIGN,
+    JSON_NUM_ZERO,
+    JSON_NUM_INT,
+    JSON_NUM_DOT,
+    JSON_NUM_FRAC,
+    JSON_NUM_EXP,
+    JSON_NUM_EXP_SIGN,
+    JSON_NUM_EXP_DIGITS,
+};
+
+static bool json_space(char c)
+{
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+}
+
+static const char *json_root_literal(uint8_t kind)
+{
+    if (kind == JSON_ROOT_TRUE) return "true";
+    if (kind == JSON_ROOT_FALSE) return "false";
+    if (kind == JSON_ROOT_NULL) return "null";
+    return NULL;
+}
+
+static bool json_number_complete(uint8_t state)
+{
+    return state == JSON_NUM_ZERO || state == JSON_NUM_INT ||
+           state == JSON_NUM_FRAC || state == JSON_NUM_EXP_DIGITS;
+}
+
+static bool json_number_allows(uint8_t state, char c)
+{
+    switch (state) {
+    case JSON_NUM_SIGN: return c == '0' || (c >= '1' && c <= '9');
+    case JSON_NUM_ZERO: return c == '.' || c == 'e' || c == 'E' || json_space(c);
+    case JSON_NUM_INT: return (c >= '0' && c <= '9') || c == '.' ||
+                              c == 'e' || c == 'E' || json_space(c);
+    case JSON_NUM_DOT: return c >= '0' && c <= '9';
+    case JSON_NUM_FRAC: return (c >= '0' && c <= '9') || c == 'e' ||
+                               c == 'E' || json_space(c);
+    case JSON_NUM_EXP: return c == '+' || c == '-' || (c >= '0' && c <= '9');
+    case JSON_NUM_EXP_SIGN: return c >= '0' && c <= '9';
+    case JSON_NUM_EXP_DIGITS: return (c >= '0' && c <= '9') || json_space(c);
+    default: return false;
+    }
+}
+
 void oc_grammar_init(OcGrammarConstraint *g, OcGrammarType type)
 {
     if (!g) return;
@@ -23,6 +78,7 @@ void oc_grammar_init_choice(OcGrammarConstraint *g,
     g->type = OC_GRAMMAR_CHOICE;
     g->choices = choices;
     g->n_choices = n_choices;
+    g->viable_choices = n_choices >= 64 ? UINT64_MAX : (UINT64_C(1) << n_choices) - 1;
 }
 
 /* Check if a character is valid in JSON outside a string. */
@@ -67,7 +123,9 @@ static bool json_string_char(char c, bool escaped)
 bool oc_grammar_allows_char(OcGrammarConstraint *g, char c)
 {
     if (!g || g->type == OC_GRAMMAR_NONE) return true;
-    if (g->finished && g->type != OC_GRAMMAR_CHOICE) return false;
+    if (g->finished && g->type != OC_GRAMMAR_CHOICE)
+        return g->type == OC_GRAMMAR_JSON &&
+               (c == ' ' || c == '\t' || c == '\n' || c == '\r');
 
     switch (g->type) {
     case OC_GRAMMAR_JSON:
@@ -79,21 +137,32 @@ bool oc_grammar_allows_char(OcGrammarConstraint *g, char c)
             if (c == '"') return true;
             return json_string_char(c, false);
         }
+        if (g->json_depth == 0 && g->json_root_kind != JSON_ROOT_NONE) {
+            const char *literal = json_root_literal(g->json_root_kind);
+            if (literal) {
+                size_t len = strlen(literal);
+                return g->json_root_state < len
+                    ? c == literal[g->json_root_state] : json_space(c);
+            }
+            return json_number_allows(g->json_root_state, c);
+        }
         if (c == '{' || c == '[') return g->json_depth < sizeof(g->json_stack);
         if (c == '}' || c == ']') {
             if (g->json_depth == 0) return false;
             char open = g->json_stack[g->json_depth - 1];
             return (open == '{' && c == '}') || (open == '[' && c == ']');
         }
+        if (g->json_depth == 0 && !g->started)
+            return json_space(c) || c == '"' || c == 't' || c == 'f' ||
+                   c == 'n' || c == '-' || (c >= '0' && c <= '9');
         return json_structural_char(c);
 
     case OC_GRAMMAR_CHOICE: {
         for (size_t i = 0; i < g->n_choices; i++) {
-            if (g->choices[i] == NULL) continue;
+            if (i >= 64 || (g->viable_choices & (UINT64_C(1) << i)) == 0 ||
+                g->choices[i] == NULL) continue;
             size_t len = strlen(g->choices[i]);
-            if (g->matched_pos < len &&
-                memcmp(g->choices[i], g->choice_prefix, g->matched_pos) == 0 &&
-                g->choices[i][g->matched_pos] == c) {
+            if (g->matched_pos < len && g->choices[i][g->matched_pos] == c) {
                 return true;
             }
         }
@@ -109,7 +178,7 @@ bool oc_grammar_allows_token(OcGrammarConstraint *g,
                              const char *token_bytes, size_t token_len)
 {
     if (!g || g->type == OC_GRAMMAR_NONE) return true;
-    if (g->finished) return false;
+    if (g->finished && g->type != OC_GRAMMAR_CHOICE) return false;
     if (!token_bytes || token_len == 0) return true;
 
     /* Simulate advancing through the token to check if all chars are allowed. */
@@ -155,22 +224,59 @@ void oc_grammar_advance(OcGrammarConstraint *g,
                         g->json_depth--;
                         if (g->json_depth == 0) g->finished = true;
                     }
-                } else if (g->json_depth == 0 && c != ' ' && c != '\t' &&
-                           c != '\n' && c != '\r') {
+                } else if (g->json_depth == 0 && !g->started && !json_space(c)) {
                     g->started = true;
-                    g->root_primitive = true;
+                    if (c == 't') g->json_root_kind = JSON_ROOT_TRUE;
+                    else if (c == 'f') g->json_root_kind = JSON_ROOT_FALSE;
+                    else if (c == 'n') g->json_root_kind = JSON_ROOT_NULL;
+                    else {
+                        g->json_root_kind = JSON_ROOT_NUMBER;
+                        if (c == '-') g->json_root_state = JSON_NUM_SIGN;
+                        else if (c == '0') g->json_root_state = JSON_NUM_ZERO;
+                        else g->json_root_state = JSON_NUM_INT;
+                        g->finished = json_number_complete(g->json_root_state);
+                        break;
+                    }
+                    g->json_root_state = 1;
+                } else if (g->json_depth == 0 && g->json_root_kind != JSON_ROOT_NONE &&
+                           !json_space(c)) {
+                    const char *literal = json_root_literal(g->json_root_kind);
+                    if (literal) {
+                        g->json_root_state++;
+                        g->finished = g->json_root_state == strlen(literal);
+                    } else {
+                        switch (g->json_root_state) {
+                        case JSON_NUM_SIGN: g->json_root_state = c == '0' ? JSON_NUM_ZERO : JSON_NUM_INT; break;
+                        case JSON_NUM_ZERO:
+                        case JSON_NUM_INT:
+                            if (c == '.') g->json_root_state = JSON_NUM_DOT;
+                            else if (c == 'e' || c == 'E') g->json_root_state = JSON_NUM_EXP;
+                            break;
+                        case JSON_NUM_DOT: g->json_root_state = JSON_NUM_FRAC; break;
+                        case JSON_NUM_FRAC: if (c == 'e' || c == 'E') g->json_root_state = JSON_NUM_EXP; break;
+                        case JSON_NUM_EXP: g->json_root_state = (c == '+' || c == '-') ? JSON_NUM_EXP_SIGN : JSON_NUM_EXP_DIGITS; break;
+                        case JSON_NUM_EXP_SIGN: g->json_root_state = JSON_NUM_EXP_DIGITS; break;
+                        case JSON_NUM_EXP_DIGITS: break;
+                        }
+                        g->finished = json_number_complete(g->json_root_state);
+                    }
                 }
             }
             break;
         case OC_GRAMMAR_CHOICE:
-            if (g->matched_pos >= sizeof(g->choice_prefix)) break;
-            g->choice_prefix[g->matched_pos] = c;
             g->started = true;
+            for (size_t choice = 0; choice < g->n_choices && choice < 64; choice++) {
+                if ((g->viable_choices & (UINT64_C(1) << choice)) != 0 &&
+                    (!g->choices[choice] ||
+                     g->choices[choice][g->matched_pos] != c))
+                    g->viable_choices &= ~(UINT64_C(1) << choice);
+            }
             g->matched_pos++;
             g->finished = false;
-            for (size_t choice = 0; choice < g->n_choices; choice++) {
-                if (g->choices[choice] && strlen(g->choices[choice]) == g->matched_pos &&
-                    memcmp(g->choices[choice], g->choice_prefix, g->matched_pos) == 0) {
+            for (size_t choice = 0; choice < g->n_choices && choice < 64; choice++) {
+                if ((g->viable_choices & (UINT64_C(1) << choice)) != 0 &&
+                    g->choices[choice] &&
+                    strlen(g->choices[choice]) == g->matched_pos) {
                     g->active_choice = choice;
                     g->finished = true;
                     break;
@@ -192,10 +298,12 @@ void oc_grammar_reset(OcGrammarConstraint *g)
     g->escaped = false;
     g->started = false;
     g->finished = false;
-    g->root_primitive = false;
+    g->json_root_kind = 0;
+    g->json_root_state = 0;
     g->json_depth = 0;
     memset(g->json_stack, 0, sizeof(g->json_stack));
-    memset(g->choice_prefix, 0, sizeof(g->choice_prefix));
+    g->viable_choices = g->n_choices >= 64 ? UINT64_MAX :
+                        (UINT64_C(1) << g->n_choices) - 1;
 }
 
 bool oc_grammar_is_satisfied(const OcGrammarConstraint *g)
@@ -203,8 +311,7 @@ bool oc_grammar_is_satisfied(const OcGrammarConstraint *g)
     if (!g) return true;
     if (g->type == OC_GRAMMAR_NONE) return true;
     if (g->type == OC_GRAMMAR_JSON) {
-        return (g->finished || g->root_primitive) && !g->in_string &&
-               !g->escaped && g->json_depth == 0;
+        return g->finished && !g->in_string && !g->escaped && g->json_depth == 0;
     }
     return g->finished;
 }

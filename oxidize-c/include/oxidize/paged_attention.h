@@ -156,6 +156,9 @@ typedef struct OcSchedulerStepResult {
     size_t *prefill_counts;      /* per-seq prefill token counts           */
     size_t *decode_counts;       /* per-seq decode token counts (0 or 1)   */
     size_t total_tokens;
+    OcBlockId *cow_src_blocks;
+    OcBlockId *cow_dst_blocks;
+    size_t n_cow_copies;
 } OcSchedulerStepResult;
 
 typedef struct OcScheduler {
@@ -177,6 +180,7 @@ OcError oc_scheduler_init(OcScheduler *sched,
 void    oc_scheduler_free(OcScheduler *sched);
 OcError oc_scheduler_add_sequence(OcScheduler *sched, OcPagedSequence *seq);
 OcError oc_scheduler_step(OcScheduler *sched, OcSchedulerStepResult *out);
+void    oc_scheduler_step_result_free(OcSchedulerStepResult *result);
 OcError oc_scheduler_postprocess(OcScheduler *sched,
                                   const OcSeqId *ids, const uint32_t *tokens,
                                   size_t n);

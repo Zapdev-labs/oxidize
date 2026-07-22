@@ -78,3 +78,11 @@ Test(chat, auto_detect)
     cr_assert_eq(oc_chat_detect("llama"), OC_CHAT_LLAMA3);
     cr_assert_eq(oc_chat_detect(NULL), OC_CHAT_CHATML);
 }
+
+Test(chat, render_message_reports_overflow)
+{
+    char out[16];
+    cr_assert_eq(oc_chat_render_message(OC_CHAT_CHATML, "user",
+                                        "this does not fit", out, sizeof(out),
+                                        true, true), 0);
+}

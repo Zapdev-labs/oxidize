@@ -186,6 +186,25 @@ static int utf8_seq_len(uint8_t first_byte)
     return 0;
 }
 
+static OcError replace_invalid_utf8(OcStreamingDetokenizer *sd,
+                                    size_t *length, size_t pos)
+{
+    if (*length > SIZE_MAX - 2) return OC_ERR_OOM;
+    size_t needed = *length + 2;
+    if (needed > sd->output_cap) {
+        uint8_t *grown = realloc(sd->output, needed);
+        if (!grown) return OC_ERR_OOM;
+        sd->output = grown;
+        sd->output_cap = needed;
+    }
+    memmove(sd->output + pos + 3, sd->output + pos + 1, *length - pos - 1);
+    sd->output[pos] = 0xEF;
+    sd->output[pos + 1] = 0xBF;
+    sd->output[pos + 2] = 0xBD;
+    *length = needed;
+    return OC_OK;
+}
+
 static OcError decode_token_raw(const OcTokenizer *tokenizer, uint32_t token,
                                 uint8_t **out_bytes, size_t *out_len)
 {
@@ -241,9 +260,10 @@ OcError oc_streaming_detok_push(OcStreamingDetokenizer *sd, uint32_t token,
     while (pos < combined_len) {
         int seq_len = utf8_seq_len(sd->output[pos]);
         if (seq_len == 0) {
-            memmove(sd->output + pos, sd->output + pos + 1,
-                    combined_len - pos - 1);
-            combined_len--;
+            e = replace_invalid_utf8(sd, &combined_len, pos);
+            if (e != OC_OK) return e;
+            pos += 3;
+            emit_len = pos;
             continue;
         }
         if (pos + (size_t)seq_len > combined_len) break;
@@ -253,9 +273,10 @@ OcError oc_streaming_detok_push(OcStreamingDetokenizer *sd, uint32_t token,
             if ((sd->output[pos + i] & 0xC0) != 0x80) { valid = false; break; }
         }
         if (!valid) {
-            memmove(sd->output + pos, sd->output + pos + 1,
-                    combined_len - pos - 1);
-            combined_len--;
+            e = replace_invalid_utf8(sd, &combined_len, pos);
+            if (e != OC_OK) return e;
+            pos += 3;
+            emit_len = pos;
             continue;
         }
         pos += (size_t)seq_len;
