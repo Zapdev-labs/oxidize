@@ -55,8 +55,6 @@ OcError oc_quant_analyze(const float *f32_data, const uint8_t *quant_data,
     double sum_orig_sq = 0.0;
     double sum_dequant_sq = 0.0;
     double sum_dot = 0.0;
-    double sum_orig = 0.0;
-    double sum_dequant = 0.0;
 
     for (size_t i = 0; i < n; i++) {
         double diff = (double)f32_data[i] - (double)dequant[i];
@@ -67,8 +65,6 @@ OcError oc_quant_analyze(const float *f32_data, const uint8_t *quant_data,
         sum_orig_sq += (double)f32_data[i] * f32_data[i];
         sum_dequant_sq += (double)dequant[i] * dequant[i];
         sum_dot += (double)f32_data[i] * dequant[i];
-        sum_orig += f32_data[i];
-        sum_dequant += dequant[i];
     }
 
     out->mse = sum_sq_err / (double)n;
@@ -100,8 +96,7 @@ OcError oc_quant_analyze(const float *f32_data, const uint8_t *quant_data,
     /* Size comparison. */
     out->original_bytes = n * sizeof(float);
     OcQuantBlockLayout bl = oc_quant_block_size(qtype);
-    size_t block_size = bl.elements_per_block;
-    size_t n_blocks = (n + block_size - 1) / block_size;
+    (void)bl; /* block layout used for quantized_size computation */
     out->quantized_bytes = oc_quantized_size(qtype, n);
     if (out->quantized_bytes > 0)
         out->compression_ratio = (double)out->original_bytes / (double)out->quantized_bytes;
