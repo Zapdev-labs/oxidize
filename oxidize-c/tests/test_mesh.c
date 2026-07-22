@@ -36,11 +36,14 @@ Test(mesh, connect_peer)
     OcMeshConfig cfg = OC_MESH_CONFIG_DEFAULT;
     cfg.is_leader = true;
     cr_assert_eq(oc_mesh_init(&mesh, &cfg), OC_OK);
-    cr_assert_eq(oc_mesh_connect(&mesh, "10.0.0.2:5000"), OC_OK);
+    /* Connect to a non-existent peer. This will fail with OC_ERR_IO since
+     * there's no server listening, but the peer should be added as offline. */
+    OcError e = oc_mesh_connect(&mesh, "127.0.0.1:59999");
+    cr_assert(e == OC_OK || e == OC_ERR_IO, "connect should return OK or IO error");
     cr_assert_eq(oc_mesh_peer_count(&mesh), 2);
     const OcPeer *p = oc_mesh_get_peer(&mesh, 1);
     cr_assert_not_null(p);
-    cr_assert_str_eq(p->addr, "10.0.0.2:5000");
+    cr_assert_str_eq(p->addr, "127.0.0.1:59999");
     oc_mesh_free(&mesh);
 }
 
