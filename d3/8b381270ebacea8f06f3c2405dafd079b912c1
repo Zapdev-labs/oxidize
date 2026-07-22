@@ -1,0 +1,67 @@
+oxidize-c/include/oxidize/context_cache.h
+  s_c729a784e8338c::t_7895190e53fbaf 1-169
+oxidize-c/src/model/context_cache.c
+  s_c729a784e8338c::t_261f61d3a71e6f 251,262-263
+  s_c729a784e8338c::t_1f8242b4c26c18 1-208,215-224,226-227,229-250,252-261,264-822
+  s_c729a784e8338c::t_9c79d88d28b95a 228
+  s_c729a784e8338c::t_f949be1018fba7 209-214
+  s_c729a784e8338c::t_17c3d611c26f4c 225
+oxidize-c/include/oxidize/hf_hub.h
+  s_4e0662c1f9c94c::t_300a4ad6596a51 1-183
+oxidize-c/tests/test_glm_arch.c
+  s_d5b6e7df7a3e85::t_9195f7ae61a489 1-595
+oxidize-c/tests/test_profiler.c
+  s_96ddc277ba047e::t_29ce9d2b794f69 1-133
+oxidize-c/src/model/glm_arch.c
+  s_d5b6e7df7a3e85::t_d64886c2658cba 1-1187,1189-1240
+  s_d5b6e7df7a3e85::t_471edde24cba7d 1188
+oxidize-c/src/util/quant_analysis.c
+  s_96ddc277ba047e::t_1510140c9ff28e 99
+oxidize-c/src/util/profiler.c
+  s_96ddc277ba047e::t_b7194d13ef5755 1-8,10-186
+  s_96ddc277ba047e::t_e6a49c48f5c6fa 9
+oxidize-c/tests/test_context_cache.c
+  s_c729a784e8338c::t_3f9977290d58bd 1-560
+oxidize-c/include/oxidize/profiler.h
+  s_96ddc277ba047e::t_13d351b6b94220 1-127
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "d38b381270ebacea8f06f3c2405dafd079b912c1",
+  "prompts": {},
+  "sessions": {
+    "s_4e0662c1f9c94c": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "4537b97a-5970-4800-9eed-fa04cc6e0136",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_96ddc277ba047e": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "ea8ad242-b091-46af-96e0-114c0c67fea4",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_c729a784e8338c": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "3d215fb2-032a-4ea3-aa58-17cb8a4259b8",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_d5b6e7df7a3e85": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "f65fca7d-51e8-478f-9604-35e0316d20a2",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
