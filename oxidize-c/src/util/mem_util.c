@@ -1,7 +1,6 @@
 /*
  * mem_util.c — memory usage reporting implementation.
  */
-#define _POSIX_C_SOURCE 200809L
 #include "oxidize/mem_util.h"
 
 #include <stdio.h>
@@ -69,9 +68,11 @@ OcError oc_mem_usage_get(OcMemUsage *out)
     /* vm_statistics for available. */
     vm_statistics_data_t vm_stat;
     mach_msg_type_number_t count = HOST_VM_INFO_COUNT;
+    vm_size_t page_size = 0;
     if (host_statistics(mach_host_self(), HOST_VM_INFO,
-                        (host_info_t)&vm_stat, &count) == KERN_SUCCESS) {
-        out->available = (uint64_t)vm_stat.free_count * (uint64_t)getpagesize();
+                        (host_info_t)&vm_stat, &count) == KERN_SUCCESS &&
+        host_page_size(mach_host_self(), &page_size) == KERN_SUCCESS) {
+        out->available = (uint64_t)vm_stat.free_count * (uint64_t)page_size;
     }
 #else
     /* Fallback: not available. */
