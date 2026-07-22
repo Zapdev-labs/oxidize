@@ -1,0 +1,27 @@
+oxidize-c/tests/test_lora.c
+  s_96ddc277ba047e::t_33f9b3f1845163 1-102
+oxidize-c/include/oxidize/lora.h
+  s_96ddc277ba047e::t_b3b3a517478e6b 1-80
+oxidize-c/src/server/openai.c
+  s_96ddc277ba047e::t_afb93c644a083a 593-598
+  s_96ddc277ba047e::t_7fc788022e19c4 449-570
+  s_96ddc277ba047e::t_43da2bc1d83f31 23
+oxidize-c/src/model/lora.c
+  s_96ddc277ba047e::t_9ff5ff58961626 1-127
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "40b2a63b0595a06f64f141950da34f6108fdb522",
+  "prompts": {},
+  "sessions": {
+    "s_96ddc277ba047e": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "ea8ad242-b091-46af-96e0-114c0c67fea4",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
