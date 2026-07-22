@@ -342,53 +342,7 @@ void oc_oxk_matvec_q8_0_f32_scalar(const uint8_t *w, size_t n_rows,
     }
 }
 
-/* ─── AVX2 / AVX-512 stubs (forward to scalar for now) ─────────────────── */
-
-#define OXK_FORWARD_AVX2(suffix) \
-    float oc_oxk_dot_##suffix##_avx2(const uint8_t *row, size_t blocks, const uint8_t *q8) \
-    { return oc_oxk_dot_##suffix##_scalar(row, blocks, q8); }
-
-OXK_FORWARD_AVX2(q4_0_q8_0)
-OXK_FORWARD_AVX2(q4_1_q8_0)
-OXK_FORWARD_AVX2(q4_k_q8_k)
-OXK_FORWARD_AVX2(q5_k_q8_k)
-OXK_FORWARD_AVX2(q6_k_q8_k)
-OXK_FORWARD_AVX2(q8_0_q8_0)
-
-void oc_oxk_matvec_q4_0_f32_avx2(const uint8_t *w, size_t n_rows,
-                                  size_t row_bytes, const float *x, float *out)
-{ oc_oxk_matvec_q4_0_f32_scalar(w, n_rows, row_bytes, x, out); }
-
-void oc_oxk_matvec_q4_k_f32_avx2(const uint8_t *w, size_t n_rows,
-                                  size_t row_bytes, const float *x, float *out)
-{ oc_oxk_matvec_q4_k_f32_scalar(w, n_rows, row_bytes, x, out); }
-
-void oc_oxk_matvec_q8_0_f32_avx2(const uint8_t *w, size_t n_rows,
-                                  size_t row_bytes, const float *x, float *out)
-{ oc_oxk_matvec_q8_0_f32_scalar(w, n_rows, row_bytes, x, out); }
-
-#define OXK_FORWARD_AVX512(suffix) \
-    float oc_oxk_dot_##suffix##_avx512(const uint8_t *row, size_t blocks, const uint8_t *q8) \
-    { return oc_oxk_dot_##suffix##_scalar(row, blocks, q8); }
-
-OXK_FORWARD_AVX512(q4_0_q8_0)
-OXK_FORWARD_AVX512(q4_1_q8_0)
-OXK_FORWARD_AVX512(q4_k_q8_k)
-OXK_FORWARD_AVX512(q5_k_q8_k)
-OXK_FORWARD_AVX512(q6_k_q8_k)
-OXK_FORWARD_AVX512(q8_0_q8_0)
-
-void oc_oxk_matvec_q4_0_f32_avx512(const uint8_t *w, size_t n_rows,
-                                    size_t row_bytes, const float *x, float *out)
-{ oc_oxk_matvec_q4_0_f32_scalar(w, n_rows, row_bytes, x, out); }
-
-void oc_oxk_matvec_q4_k_f32_avx512(const uint8_t *w, size_t n_rows,
-                                    size_t row_bytes, const float *x, float *out)
-{ oc_oxk_matvec_q4_k_f32_scalar(w, n_rows, row_bytes, x, out); }
-
-void oc_oxk_matvec_q8_0_f32_avx512(const uint8_t *w, size_t n_rows,
-                                    size_t row_bytes, const float *x, float *out)
-{ oc_oxk_matvec_q8_0_f32_scalar(w, n_rows, row_bytes, x, out); }
+/* AVX2 / AVX-512 implementations are in oxk_avx2.c */
 
 /* ─── Capability detection + dispatcher ──────────────────────────────────── */
 
