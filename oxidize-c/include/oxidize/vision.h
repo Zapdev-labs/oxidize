@@ -1,10 +1,14 @@
 /*
- * vision.h — CLIP-style vision encoder stub for multimodal inference.
+ * vision.h — CLIP-style vision encoder for multimodal inference.
  *
- * When fully implemented, this will provide image encoding via a CLIP-style
- * vision transformer, producing image embeddings that can be injected into
- * the LLM's embedding space. Currently a stub that returns placeholder
- * embeddings.
+ * Provides image encoding via a simplified CLIP-style vision transformer
+ * (ViT): patch embedding via linear projection, positional embeddings,
+ * optional layer norm, and mean pooling. Produces image embeddings that
+ * can be injected into the LLM's embedding space.
+ *
+ * Weight matrices (patch_proj, pos_emb, ln_w, ln_b) are set from a GGUF
+ * vision model. When weights are absent, the encoder returns mean-pooled
+ * patch statistics as a fallback.
  */
 #ifndef OXIDIZE_VISION_H
 #define OXIDIZE_VISION_H
@@ -47,12 +51,25 @@ typedef struct OcVisionConfig {
 /* Vision encoder state. */
 typedef struct OcVisionEncoder {
     OcVisionConfig config;
-    void *weights;            /* opaque weight pointer (future)       */
+    /* Weight matrices (all optional; if NULL, uses fallback). */
+    const float *patch_proj;     /* [hidden_size, patch_size^2 * channels] */
+    const float *pos_emb;       /* [n_patches, hidden_size] (or NULL)      */
+    const float *ln_weight;     /* [hidden_size] (or NULL)                  */
+    const float *ln_bias;       /* [hidden_size] (or NULL)                  */
+    const float *cls_emb;       /* [hidden_size] (optional CLS token)       */
     bool initialized;
 } OcVisionEncoder;
 
 /* Initialize the vision encoder with a CLIP model from a GGUF. */
 OcError oc_vision_init(OcVisionEncoder *enc, const OcVisionConfig *cfg);
+
+/* Set weight matrices (non-owning; caller must keep them alive). */
+OcError oc_vision_set_weights(OcVisionEncoder *enc,
+                               const float *patch_proj,
+                               const float *pos_emb,
+                               const float *ln_weight,
+                               const float *ln_bias,
+                               const float *cls_emb);
 
 /* Encode an image into a flat embedding vector.
  * `out_embeddings` receives `n_patches * hidden_size` floats.

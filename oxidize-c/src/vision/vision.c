@@ -31,9 +31,95 @@ OcError oc_vision_encode(OcVisionEncoder *enc, const OcImage *img,
         img->height == 0 || img->channels == 0 || !out_embeddings || !out_len)
         return OC_ERR_INVALID_ARG;
     size_t total = (size_t)enc->config.n_patches * enc->config.hidden_size;
-    /* Stub: return zeros. Real implementation would run CLIP ViT forward. */
-    memset(out_embeddings, 0, total * sizeof(float));
+
+    if (enc->patch_proj != NULL) {
+        uint32_t p = enc->config.patch_size;
+        uint32_t c = img->channels;
+        uint32_t patch_dim = p * p * c;
+        uint32_t n_side = enc->config.image_size / p;
+        uint32_t hidden = enc->config.hidden_size;
+
+        uint8_t *resized = NULL;
+        const OcImage *eff_img = img;
+        if (img->width != enc->config.image_size ||
+            img->height != enc->config.image_size) {
+            resized = malloc((size_t)enc->config.image_size *
+                             enc->config.image_size * c);
+            if (!resized) return OC_ERR_OOM;
+            oc_vision_resize(img, enc->config.image_size,
+                            enc->config.image_size, resized);
+            OcImage ri = { .data=resized, .width=enc->config.image_size,
+                          .height=enc->config.image_size, .channels=c,
+                          .format=img->format };
+            eff_img = &ri;
+        }
+
+        float *patch_pixels = malloc(patch_dim * sizeof(float));
+        if (!patch_pixels) { free(resized); return OC_ERR_OOM; }
+
+        for (uint32_t py = 0; py < n_side; py++) {
+            for (uint32_t px = 0; px < n_side; px++) {
+                uint32_t patch_idx = py * n_side + px;
+                for (uint32_t dy = 0; dy < p; dy++) {
+                    for (uint32_t dx = 0; dx < p; dx++) {
+                        for (uint32_t ch = 0; ch < c; ch++) {
+                            uint32_t x = px * p + dx;
+                            uint32_t y = py * p + dy;
+                            size_t idx = ((size_t)y * eff_img->width + x) * c + ch;
+                            patch_pixels[(dy * p + dx) * c + ch] =
+                                (float)eff_img->data[idx] / 127.5f - 1.0f;
+                        }
+                    }
+                }
+                float *out_patch = out_embeddings + (size_t)patch_idx * hidden;
+                for (uint32_t h = 0; h < hidden; h++) {
+                    const float *w_row = enc->patch_proj + (size_t)h * patch_dim;
+                    float dot = 0.0f;
+                    for (uint32_t d = 0; d < patch_dim; d++)
+                        dot += w_row[d] * patch_pixels[d];
+                    out_patch[h] = dot;
+                }
+                if (enc->pos_emb != NULL) {
+                    const float *pos = enc->pos_emb + (size_t)patch_idx * hidden;
+                    for (uint32_t h = 0; h < hidden; h++)
+                        out_patch[h] += pos[h];
+                }
+            }
+        }
+        free(patch_pixels);
+        free(resized);
+
+        if (enc->ln_weight != NULL && enc->ln_bias != NULL) {
+            for (uint32_t pi = 0; pi < enc->config.n_patches; pi++) {
+                float *emb = out_embeddings + (size_t)pi * hidden;
+                float ss = 0.0f;
+                for (uint32_t h = 0; h < hidden; h++) ss += emb[h] * emb[h];
+                float rms = sqrtf(ss / hidden + 1e-6f);
+                float inv = 1.0f / rms;
+                for (uint32_t h = 0; h < hidden; h++)
+                    emb[h] = emb[h] * inv * enc->ln_weight[h] + enc->ln_bias[h];
+            }
+        }
+    } else {
+        memset(out_embeddings, 0, total * sizeof(float));
+    }
     *out_len = total;
+    return OC_OK;
+}
+
+OcError oc_vision_set_weights(OcVisionEncoder *enc,
+                               const float *patch_proj,
+                               const float *pos_emb,
+                               const float *ln_weight,
+                               const float *ln_bias,
+                               const float *cls_emb)
+{
+    if (!enc) return OC_ERR_INVALID_ARG;
+    enc->patch_proj = patch_proj;
+    enc->pos_emb = pos_emb;
+    enc->ln_weight = ln_weight;
+    enc->ln_bias = ln_bias;
+    enc->cls_emb = cls_emb;
     return OC_OK;
 }
 
