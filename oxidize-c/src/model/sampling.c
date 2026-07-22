@@ -115,6 +115,9 @@ static int compare_ranked_logit_desc(const void *left, const void *right)
 {
     const RankedLogit *a = left;
     const RankedLogit *b = right;
+    bool a_nan = isnan(a->value);
+    bool b_nan = isnan(b->value);
+    if (a_nan != b_nan) return a_nan ? 1 : -1;
     if (a->value < b->value) return 1;
     if (a->value > b->value) return -1;
     return (a->index > b->index) - (a->index < b->index);

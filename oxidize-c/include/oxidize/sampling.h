@@ -55,8 +55,8 @@ typedef struct OcSamplerConfig {
 } OcSamplerConfig;
 
 /* Default config: greedy, no penalty. Mirostat fields default to the
- * canonical v2 values (mu=10.0, tau=5.0, eta=0.1). Stateful Mirostat callers
- * must use oc_mirostat_v2_sample and retain `mu` and the RNG state. */
+ * canonical v2 values (mu=10.0, tau=5.0, eta=0.1). With Mirostat, oc_sample
+ * updates cfg->mu; callers must also advance cfg->seed between calls. */
 #define OC_SAMPLER_DEFAULT ((OcSamplerConfig){ \
     OC_SAMPLER_GREEDY, 1.0f, 0u, 1.0f, 1.0f, 0ull, \
     10.0f, 5.0f, 0.1f, 0.0f, 0.0f, 0.0f, 0.0f })

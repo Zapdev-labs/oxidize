@@ -17,7 +17,7 @@ Test(grammar, json_allows_structural)
     oc_grammar_init(&g, OC_GRAMMAR_JSON);
     cr_assert(oc_grammar_allows_char(&g, '{'));
     cr_assert(oc_grammar_allows_char(&g, '"'));
-    cr_assert(oc_grammar_allows_char(&g, '}'));
+    cr_assert(!oc_grammar_allows_char(&g, '}'));
     cr_assert(oc_grammar_allows_char(&g, ':'));
     cr_assert(oc_grammar_allows_char(&g, ','));
     cr_assert(!oc_grammar_allows_char(&g, 'x'));  /* x is not structural outside string */

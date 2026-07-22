@@ -288,7 +288,7 @@ static OcError run_generation(const OcCliArgs *args)
                 e = oc_cuda_forward(&cuda_ctx, sampled, sess.pos, logits);
             else
                 e = oc_llama_forward(&sess, sampled, logits);
-            sess.pos++;
+            if (use_cuda) sess.pos++;
             if (e == OC_ERR_INVALID_ARG) {
                 /* Context window exhausted. */
                 oc_log(OC_LOG_WARN, "context window full at position %lld",
@@ -520,21 +520,33 @@ int main(int argc, char **argv)
             return 1;
         }
         const char *text = args.prompt;
+        char *owned_text = NULL;
         if (!text && args.prompt_file) {
-            /* Read prompt file. */
             FILE *pf = fopen(args.prompt_file, "rb");
-            if (pf) {
-                fseek(pf, 0, SEEK_END);
-                long sz = ftell(pf);
-                fseek(pf, 0, SEEK_SET);
-                char *buf = malloc(sz + 1);
-                if (buf) {
-                    size_t rd = fread(buf, 1, sz, pf);
-                    buf[rd] = '\0';
-                    text = buf;
-                }
-                fclose(pf);
+            if (!pf || fseek(pf, 0, SEEK_END) != 0) {
+                if (pf) fclose(pf);
+                oc_tokenizer_free(&tok);
+                oc_llama_free(&model);
+                return 1;
             }
+            long sz = ftell(pf);
+            if (sz < 0 || fseek(pf, 0, SEEK_SET) != 0) {
+                fclose(pf);
+                oc_tokenizer_free(&tok);
+                oc_llama_free(&model);
+                return 1;
+            }
+            owned_text = malloc((size_t)sz + 1);
+            if (!owned_text || fread(owned_text, 1, (size_t)sz, pf) != (size_t)sz) {
+                free(owned_text);
+                fclose(pf);
+                oc_tokenizer_free(&tok);
+                oc_llama_free(&model);
+                return 1;
+            }
+            fclose(pf);
+            owned_text[sz] = '\0';
+            text = owned_text;
         }
         if (!text) text = "The quick brown fox jumps over the lazy dog.";
 
@@ -547,6 +559,7 @@ int main(int argc, char **argv)
             oc_perplexity_format(&result, fmt, sizeof(fmt));
             printf("%s\n", fmt);
         }
+        free(owned_text);
         oc_tokenizer_free(&tok);
         oc_llama_free(&model);
         return (e == OC_OK) ? 0 : 1;

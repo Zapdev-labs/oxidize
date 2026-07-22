@@ -40,7 +40,7 @@ const OcCachedPrefix *oc_prefix_cache_lookup(OcPrefixCache *c, uint64_t hash,
                                               const uint32_t *tokens,
                                               size_t n_tokens)
 {
-    if (!c) return NULL;
+    if (!c || (n_tokens > 0 && !tokens)) return NULL;
     for (size_t i = 0; i < c->n_entries; i++) {
         if (c->entries[i].active && c->entries[i].hash == hash &&
             c->entries[i].n_tokens == n_tokens &&

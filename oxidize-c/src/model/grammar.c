@@ -67,7 +67,7 @@ static bool json_string_char(char c, bool escaped)
 bool oc_grammar_allows_char(OcGrammarConstraint *g, char c)
 {
     if (!g || g->type == OC_GRAMMAR_NONE) return true;
-    if (g->finished) return false;
+    if (g->finished && g->type != OC_GRAMMAR_CHOICE) return false;
 
     switch (g->type) {
     case OC_GRAMMAR_JSON:
@@ -79,18 +79,21 @@ bool oc_grammar_allows_char(OcGrammarConstraint *g, char c)
             if (c == '"') return true;
             return json_string_char(c, false);
         }
+        if (c == '{' || c == '[') return g->json_depth < sizeof(g->json_stack);
+        if (c == '}' || c == ']') {
+            if (g->json_depth == 0) return false;
+            char open = g->json_stack[g->json_depth - 1];
+            return (open == '{' && c == '}') || (open == '[' && c == ']');
+        }
         return json_structural_char(c);
 
     case OC_GRAMMAR_CHOICE: {
-        if (g->started) {
-            if (g->active_choice >= g->n_choices || !g->choices[g->active_choice]) return false;
-            const char *choice = g->choices[g->active_choice];
-            return g->matched_pos < strlen(choice) && choice[g->matched_pos] == c;
-        }
         for (size_t i = 0; i < g->n_choices; i++) {
             if (g->choices[i] == NULL) continue;
             size_t len = strlen(g->choices[i]);
-            if (g->matched_pos < len && g->choices[i][g->matched_pos] == c) {
+            if (g->matched_pos < len &&
+                memcmp(g->choices[i], g->choice_prefix, g->matched_pos) == 0 &&
+                g->choices[i][g->matched_pos] == c) {
                 return true;
             }
         }
@@ -152,24 +155,25 @@ void oc_grammar_advance(OcGrammarConstraint *g,
                         g->json_depth--;
                         if (g->json_depth == 0) g->finished = true;
                     }
+                } else if (g->json_depth == 0 && c != ' ' && c != '\t' &&
+                           c != '\n' && c != '\r') {
+                    g->started = true;
+                    g->root_primitive = true;
                 }
             }
             break;
         case OC_GRAMMAR_CHOICE:
-            if (!g->started) {
-                for (size_t choice = 0; choice < g->n_choices; choice++) {
-                    if (g->choices[choice] && g->choices[choice][0] == c) {
-                        g->active_choice = choice;
-                        break;
-                    }
-                }
-                g->started = true;
-            }
+            if (g->matched_pos >= sizeof(g->choice_prefix)) break;
+            g->choice_prefix[g->matched_pos] = c;
+            g->started = true;
             g->matched_pos++;
-            /* Check if we've completed a choice. */
-            if (g->active_choice < g->n_choices && g->choices[g->active_choice]) {
-                if (g->matched_pos >= strlen(g->choices[g->active_choice])) {
+            g->finished = false;
+            for (size_t choice = 0; choice < g->n_choices; choice++) {
+                if (g->choices[choice] && strlen(g->choices[choice]) == g->matched_pos &&
+                    memcmp(g->choices[choice], g->choice_prefix, g->matched_pos) == 0) {
+                    g->active_choice = choice;
                     g->finished = true;
+                    break;
                 }
             }
             break;
@@ -188,8 +192,10 @@ void oc_grammar_reset(OcGrammarConstraint *g)
     g->escaped = false;
     g->started = false;
     g->finished = false;
+    g->root_primitive = false;
     g->json_depth = 0;
     memset(g->json_stack, 0, sizeof(g->json_stack));
+    memset(g->choice_prefix, 0, sizeof(g->choice_prefix));
 }
 
 bool oc_grammar_is_satisfied(const OcGrammarConstraint *g)
@@ -197,7 +203,8 @@ bool oc_grammar_is_satisfied(const OcGrammarConstraint *g)
     if (!g) return true;
     if (g->type == OC_GRAMMAR_NONE) return true;
     if (g->type == OC_GRAMMAR_JSON) {
-        return g->finished && !g->in_string && !g->escaped && g->json_depth == 0;
+        return (g->finished || g->root_primitive) && !g->in_string &&
+               !g->escaped && g->json_depth == 0;
     }
     return g->finished;
 }

@@ -7,8 +7,7 @@
  *   POST /v1/completions           → text completion
  *   POST /v1/chat/completions      → chat with message array
  *
- * JSON parsing is dependency-free and tracks structural depth so nested
- * message content cannot be mistaken for top-level request fields.
+ * JSON parsing is dependency-free and tailored to the OpenAI request shape.
  *
  * The handler drives oc_llama_forward + oc_sample for generation, so a real
  * loaded model is required. When no model is loaded, /v1/models returns a

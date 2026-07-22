@@ -120,6 +120,7 @@ static OcError parse_config(const OcGgufFile *f, const char *arch_str,
     snprintf(key, sizeof(key), "%sattention.head_count_kv", prefix);
     cfg->n_head_kv   = cfg_u32(f, key, cfg->n_head);
     if (cfg->n_head == 0 || cfg->n_head_kv == 0 || cfg->n_embd == 0 ||
+        cfg->n_head_kv > cfg->n_head || cfg->n_head % cfg->n_head_kv != 0 ||
         cfg->n_embd % cfg->n_head != 0)
         return OC_ERR_MODEL;
     snprintf(key, sizeof(key), "%sattention.key_length", prefix);
@@ -391,7 +392,8 @@ OcError oc_llama_load(const char *path, OcLlamaModel *out)
         arch_str = oc_model_arch_name(out->arch);
     }
     if (arch_str == NULL) arch_str = "llama";
-    if (strcmp(arch_str, "llama") != 0 && strcmp(arch_str, "mistral") != 0) {
+    if (strcmp(arch_str, "llama") != 0 && strcmp(arch_str, "mistral") != 0 &&
+        strcmp(arch_str, "qwen2") != 0 && strcmp(arch_str, "qwen3") != 0) {
         oc_gguf_map_free(&out->gguf);
         return OC_ERR_MODEL;
     }

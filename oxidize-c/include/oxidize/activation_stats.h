@@ -30,9 +30,6 @@ typedef struct OcLayerActivationStats {
 typedef struct OcActivationStats {
     OcLayerActivationStats *layers;
     size_t n_layers;
-    /* Track specific layers by name (optional, for selective calibration). */
-    const char *const *tracked_layer_names;
-    size_t n_tracked;
 } OcActivationStats;
 
 /* Initialize the stats collector for `n_layers` layers. */

@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include "oxidize/log.h"
 #include "oxidize/quant.h"
@@ -164,6 +165,15 @@ OcError oc_quantize_model(const OcQuantizeConfig *cfg)
     }
     if (strcmp(cfg->input_path, cfg->output_path) == 0) {
         fprintf(stderr, "error: input and output paths must differ\n");
+        return OC_ERR_INVALID_ARG;
+    }
+    struct stat input_stat;
+    struct stat output_stat;
+    if (stat(cfg->input_path, &input_stat) == 0 &&
+        stat(cfg->output_path, &output_stat) == 0 &&
+        input_stat.st_dev == output_stat.st_dev &&
+        input_stat.st_ino == output_stat.st_ino) {
+        fprintf(stderr, "error: input and output paths refer to the same file\n");
         return OC_ERR_INVALID_ARG;
     }
 
@@ -324,7 +334,9 @@ OcError oc_quantize_model(const OcQuantizeConfig *cfg)
         }
     }
 
-    if (ferror(out) || fclose(out) != 0) {
+    bool write_failed = ferror(out) != 0;
+    if (fclose(out) != 0) write_failed = true;
+    if (write_failed) {
         remove(cfg->output_path);
         oc_gguf_map_free(&mf);
         return OC_ERR_IO;

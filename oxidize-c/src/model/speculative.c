@@ -251,6 +251,9 @@ OcError oc_speculative_generate(
 
     out_tokens[(*out_len)++] = current_token;
     if (stats) stats->emitted_tokens++;
+    if (*out_len >= out_cap ||
+        (cfg->max_new_tokens > 0 && *out_len >= cfg->max_new_tokens))
+        goto cleanup;
     status = oc_llama_forward(target_sess, current_token, target_ptrs[0]);
     if (status != OC_OK) goto cleanup;
     status = oc_llama_forward(draft_sess, current_token, draft_ptrs[0]);
@@ -352,6 +355,9 @@ OcError oc_speculative_generate(
                     if (stats) stats->emitted_tokens++;
                 }
                 if (fb == cfg->stop_token) goto cleanup;
+                if (*out_len >= out_cap ||
+                    (cfg->max_new_tokens > 0 && *out_len >= cfg->max_new_tokens))
+                    goto cleanup;
                 /* Forward through both models. */
                 status = oc_llama_forward(target_sess, fb, target_ptrs[0]);
                 if (status != OC_OK) goto cleanup;

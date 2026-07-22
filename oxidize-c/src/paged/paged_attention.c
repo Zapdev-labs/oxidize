@@ -438,24 +438,28 @@ void oc_scheduler_free(OcScheduler *sched)
     memset(sched, 0, sizeof(*sched));
 }
 
+static OcError grow_waiting_queue(OcScheduler *sched)
+{
+    size_t new_cap = sched->waiting_cap * 2;
+    OcSeqId *waiting = xcalloc(new_cap, sizeof(OcSeqId));
+    if (!waiting) return OC_ERR_OOM;
+    for (size_t i = 0; i < sched->waiting_count; i++)
+        waiting[i] = sched->waiting[(sched->waiting_head + i) % sched->waiting_cap];
+    free(sched->waiting);
+    sched->waiting = waiting;
+    sched->waiting_cap = new_cap;
+    sched->waiting_head = 0;
+    sched->waiting_tail = sched->waiting_count;
+    return OC_OK;
+}
+
 OcError oc_scheduler_add_sequence(OcScheduler *sched, OcPagedSequence *seq)
 {
     if (!sched || !seq) return OC_ERR_INVALID_ARG;
     if (seq->block_table.num_tokens != 0) return OC_ERR_INVALID_ARG;
     seq->block_table.block_size = sched->block_pool.config.block_size;
-    if (sched->waiting_count == sched->waiting_cap) {
-        size_t new_cap = sched->waiting_cap * 2;
-        OcSeqId *waiting = xcalloc(new_cap, sizeof(OcSeqId));
-        if (!waiting) return OC_ERR_OOM;
-        for (size_t i = 0; i < sched->waiting_count; i++)
-            waiting[i] = sched->waiting[(sched->waiting_head + i)
-                                      % sched->waiting_cap];
-        free(sched->waiting);
-        sched->waiting = waiting;
-        sched->waiting_cap = new_cap;
-        sched->waiting_head = 0;
-        sched->waiting_tail = sched->waiting_count;
-    }
+    if (sched->waiting_count == sched->waiting_cap &&
+        grow_waiting_queue(sched) != OC_OK) return OC_ERR_OOM;
     bool stored = false;
     size_t slot = (size_t)(seq->seq_id % sched->seq_cap);
     for (size_t i = 0; i < sched->seq_cap; i++) {
@@ -544,13 +548,7 @@ OcError oc_scheduler_step(OcScheduler *sched, OcSchedulerStepResult *out)
         if (logical < seq->block_table.num_blocks) {
             OcBlockId old_id = seq->block_table.logical_to_physical[logical];
             if (sched->block_pool.blocks[old_id].ref_count > 1) {
-                OcBlockId new_id;
-                bool did_copy;
-                if (oc_block_pool_cow(&sched->block_pool, old_id,
-                                      &new_id, &did_copy) != OC_OK)
-                    break;
-                if (did_copy)
-                    seq->block_table.logical_to_physical[logical] = new_id;
+                return OC_ERR_INVALID_ARG;
             }
         } else if (reserve_blocks(sched, seq, 1) != OC_OK) {
             break;
@@ -693,6 +691,8 @@ OcError oc_scheduler_preempt(OcScheduler *sched, OcSeqId id)
         }
     }
     if (!seq) return OC_ERR_INVALID_ARG;
+    if (sched->waiting_count == sched->waiting_cap &&
+        grow_waiting_queue(sched) != OC_OK) return OC_ERR_OOM;
 
     /* Free all blocks. */
     for (size_t b = 0; b < seq->block_table.num_blocks; b++) {

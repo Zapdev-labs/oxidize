@@ -42,14 +42,14 @@ Test(act_stats, multiple_observations)
 
     /* Layer 0: observe twice. */
     float a1[] = {1.0f, 1.0f};
-    oc_activation_stats_observe(&stats, 0, a1, 1, 2);
+    cr_assert_eq(oc_activation_stats_observe(&stats, 0, a1, 1, 2), OC_OK);
     float a2[] = {1.0f, 1.0f};
-    oc_activation_stats_observe(&stats, 0, a2, 1, 2);
+    cr_assert_eq(oc_activation_stats_observe(&stats, 0, a2, 1, 2), OC_OK);
     /* sum_sq = [2, 2], n_samples = 2, L2 = [1, 1] */
 
     /* Layer 1: observe once. */
     float a3[] = {3.0f, 4.0f};
-    oc_activation_stats_observe(&stats, 1, a3, 1, 2);
+    cr_assert_eq(oc_activation_stats_observe(&stats, 1, a3, 1, 2), OC_OK);
     /* sum_sq = [9, 16], n_samples = 1, L2 = [3, 4] */
 
     float norms0[2], norms1[2];
@@ -67,7 +67,7 @@ Test(act_stats, summary)
     OcActivationStats stats;
     oc_activation_stats_init(&stats, 3);
     float a[] = {1.0f};
-    oc_activation_stats_observe(&stats, 1, a, 1, 1);
+    cr_assert_eq(oc_activation_stats_observe(&stats, 1, a, 1, 1), OC_OK);
 
     char buf[256];
     oc_activation_stats_summary(&stats, buf, sizeof(buf));

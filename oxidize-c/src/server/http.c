@@ -28,9 +28,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 
 /* ─── Status lines ────────────────────────────────────────────────────── */
@@ -195,18 +197,26 @@ static size_t expected_request_size(char *buf, size_t len)
     char *sep = memmem(buf, len, "\r\n\r\n", 4);
     if (sep == NULL) return 0;
     size_t header_bytes = (size_t)(sep - buf) + 4;
-    char saved = *sep;
-    *sep = '\0';
-    char *cl = strstr(buf, "Content-Length:");
-    if (cl == NULL) cl = strstr(buf, "content-length:");
+    char *cl = NULL;
+    char *line = memmem(buf, (size_t)(sep - buf), "\r\n", 2);
+    if (line != NULL) line += 2;
+    while (line != NULL && line < sep) {
+        char *end = memmem(line, (size_t)(sep - line), "\r\n", 2);
+        if (end == NULL) end = sep;
+        size_t name_len = strlen("Content-Length");
+        if ((size_t)(end - line) > name_len && line[name_len] == ':' &&
+            strncasecmp(line, "Content-Length", name_len) == 0) {
+            cl = line + name_len + 1;
+            break;
+        }
+        line = end < sep ? end + 2 : NULL;
+    }
     unsigned long long body_bytes = 0;
     errno = 0;
     if (cl != NULL) {
-        cl += strlen("Content-Length:");
         while (*cl == ' ' || *cl == '\t') cl++;
         body_bytes = strtoull(cl, NULL, 10);
     }
-    *sep = saved;
     if (errno == ERANGE || body_bytes > OC_HTTP_MAX_REQUEST_BYTES - header_bytes)
         return SIZE_MAX;
     return header_bytes + (size_t)body_bytes;
@@ -260,6 +270,9 @@ static void *worker_main(void *arg)
         ssize_t rd;
         bool too_large = false;
         bool timed_out = false;
+        struct timespec deadline;
+        (void)clock_gettime(CLOCK_MONOTONIC, &deadline);
+        deadline.tv_sec += 5;
         while (total < OC_HTTP_MAX_REQUEST_BYTES) {
             rd = read(fd, buf + total, OC_HTTP_MAX_REQUEST_BYTES - total);
             if (rd <= 0) {
@@ -267,6 +280,13 @@ static void *worker_main(void *arg)
                 break;
             }
             total += (size_t)rd;
+            struct timespec now;
+            (void)clock_gettime(CLOCK_MONOTONIC, &now);
+            if (now.tv_sec > deadline.tv_sec ||
+                (now.tv_sec == deadline.tv_sec && now.tv_nsec >= deadline.tv_nsec)) {
+                timed_out = true;
+                break;
+            }
             buf[total] = '\0';
             size_t expected = expected_request_size(buf, total);
             if (expected == SIZE_MAX) { too_large = true; break; }

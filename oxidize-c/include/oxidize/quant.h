@@ -174,8 +174,9 @@ OcError oc_quant_dequant_row_scalar(OcGgufQuantizationType qtype,
 
 /* Quantize `src` (an f32 array of length `value_count`) into `dst` (a packed
  * quant buffer). `dst_len` must equal `oc_quantized_size(qtype, value_count)`.
- * Returns OC_OK, OC_ERR_QUANT (unknown type), OC_ERR_INVALID_ARG (length
- * mismatch), or OC_ERR_OOM. Mirrors Rust `quantize_from_f32_scalar`. */
+ * Returns OC_OK, OC_ERR_QUANT (unknown or dequant-only type),
+ * OC_ERR_INVALID_ARG (length mismatch), or OC_ERR_OOM. Mirrors Rust
+ * `quantize_from_f32_scalar`. */
 OcError oc_quant_pack_row(OcGgufQuantizationType qtype,
                           const float *src, size_t value_count,
                           uint8_t *dst, size_t dst_len);

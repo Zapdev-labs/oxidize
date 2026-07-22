@@ -365,9 +365,8 @@ bool oc_mmap_mlock_with_headroom(OcMmap *m)
  * cache. Mirrors Rust `prefault_pages`. The XOR checksum is a sanity check
  * that the mapping is readable (and lets tests verify the sweep ran).
  *
- * Linux page size is virtually always 4 KiB on x86_64; we hard-code 4096
- * to avoid pulling in <unistd.h> sysconf() in the hot loop. (THP regions
- * still get touched at 4 KiB granularity — the kernel handles the rest.) */
+ * Linux page size is virtually always 4 KiB on x86_64. THP regions still get
+ * touched at 4 KiB granularity; the kernel handles the rest. */
 uint8_t oc_mmap_prefault(const OcMmap *m)
 {
     if (!m || !m->addr) return 0;

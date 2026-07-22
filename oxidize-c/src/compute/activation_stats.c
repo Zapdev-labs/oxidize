@@ -34,6 +34,7 @@ OcError oc_activation_stats_observe(OcActivationStats *stats, size_t layer_idx,
         if (!ls->sum_sq) return OC_ERR_OOM;
         ls->active = true;
     }
+    if (ls->input_dim != input_dim) return OC_ERR_INVALID_ARG;
 
     /* Accumulate sum of squares per column. */
     for (size_t b = 0; b < batch_size; b++) {

@@ -363,7 +363,7 @@ Test(paged, finished_sequence_releases_running_slot)
     uint32_t prompt[] = {1};
     for (OcSeqId id = 1; id <= 2; id++) {
         OcPagedSequence *seq = malloc(sizeof(*seq));
-        cr_assert_eq(oc_seq_init(seq, id, prompt, 1, 1, UINT32_MAX,
+        cr_assert_eq(oc_seq_init(seq, id, prompt, 1, 1, 10,
                                  OC_SAMPLER_DEFAULT, (size_t)id), OC_OK);
         cr_assert_eq(oc_scheduler_add_sequence(&sched, seq), OC_OK);
     }

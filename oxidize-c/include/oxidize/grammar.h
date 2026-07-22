@@ -37,10 +37,12 @@ typedef struct OcGrammarConstraint {
      * matched so far (for choice mode). */
     size_t matched_pos;
     size_t active_choice;   /* index into choices array              */
+    char choice_prefix[256];
     bool in_string;         /* for JSON: are we inside a string?      */
     bool escaped;           /* for JSON: was the previous char \?     */
     bool started;           /* has any output been generated yet?     */
     bool finished;         /* has the grammar been satisfied?        */
+    bool root_primitive;
     char json_stack[64];
     size_t json_depth;
 } OcGrammarConstraint;

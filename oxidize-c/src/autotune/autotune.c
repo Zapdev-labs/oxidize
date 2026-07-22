@@ -31,6 +31,7 @@
 #include <string.h>
 
 #ifdef __APPLE__
+#  include <mach/mach.h>
 #  include <sys/sysctl.h>
 #endif
 
@@ -146,6 +147,15 @@ static uint64_t read_meminfo_field(const char *key)
         uint64_t bytes = 0;
         size_t size = sizeof(bytes);
         if (sysctlbyname("hw.memsize", &bytes, &size, NULL, 0) == 0) return bytes;
+    }
+    if (strcmp(key, "MemAvailable") == 0) {
+        mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
+        vm_statistics64_data_t vm;
+        if (host_statistics64(mach_host_self(), HOST_VM_INFO64,
+                              (host_info64_t)&vm, &count) == KERN_SUCCESS) {
+            return (uint64_t)(vm.free_count + vm.inactive_count) *
+                   (uint64_t)vm_kernel_page_size;
+        }
     }
     return 0;
 #else

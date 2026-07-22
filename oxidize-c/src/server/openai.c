@@ -14,6 +14,7 @@
 #include "oxidize/openai.h"
 
 #include "oxidize/error.h"
+#include "oxidize/chat.h"
 #include "oxidize/llama.h"
 #include "oxidize/log.h"
 #include "oxidize/sampling.h"
@@ -55,6 +56,7 @@ static const char *find_json_string_field(const char *json, const char *key,
             out[i++] = *p++;
         }
     }
+    if (*p != '"') return NULL;
     out[i] = '\0';
     return out;
 }
@@ -116,12 +118,14 @@ static bool find_json_bool_field(const char *json, const char *key, bool def)
  * "content" field. For chat completions we render the full message array
  * as plain text (a real chat-template renderer is wired by the tokenizer
  * feature — for now we concatenate contents). */
-static void extract_messages_content(const char *json, char *out, size_t out_cap)
+static bool extract_messages_content(const char *json, OcChatTemplate template,
+                                     char *out, size_t out_cap)
 {
     size_t out_i = 0;
+    size_t message_count = 0;
     const char *p = json;
     char role[64];
-    char content[8192];
+    char content[16384];
     while ((p = strstr(p, "\"role\"")) != NULL) {
         if (!find_json_string_field(p, "role", role, sizeof(role))) break;
         const char *content_key = strstr(p, "\"content\"");
@@ -130,23 +134,19 @@ static void extract_messages_content(const char *json, char *out, size_t out_cap
             p += 6;
             continue;
         }
-        if (!find_json_string_field(content_key, "content", content, sizeof(content))) break;
-        int written = snprintf(out + out_i, out_cap - out_i,
-                               "<|im_start|>%s\n%s<|im_end|>\n", role, content);
-        if (written < 0 || (size_t)written >= out_cap - out_i) {
-            out_i = out_cap - 1;
-            break;
-        }
-        out_i += (size_t)written;
+        if (!find_json_string_field(content_key, "content", content, sizeof(content)))
+            return false;
+        size_t written = oc_chat_render_message(template, role, content,
+                                                out + out_i, out_cap - out_i,
+                                                message_count == 0,
+                                                next_role == NULL);
+        if (written == 0) return false;
+        out_i += written;
+        message_count++;
         p = content_key + strlen("\"content\"");
     }
-    const char assistant[] = "<|im_start|>assistant\n";
-    size_t assistant_len = sizeof(assistant) - 1;
-    if (out_i > 0 && assistant_len < out_cap - out_i) {
-        memcpy(out + out_i, assistant, assistant_len);
-        out_i += assistant_len;
-    }
     out[out_i] = '\0';
+    return message_count > 0;
 }
 
 /* ─── Helpers ──────────────────────────────────────────────────────────── */
@@ -372,9 +372,9 @@ static void handle_chat_completion(OcOpenaiState *st, const OcHttpRequest *req,
         return;
     }
     char prompt[16384] = {0};
-    extract_messages_content(req->body, prompt, sizeof(prompt));
-    if (prompt[0] == '\0') {
-        *out_body = oc_openai_error_json("no messages content found", "invalid_request_error");
+    OcChatTemplate template = oc_chat_detect(oc_model_arch_name(st->model->arch));
+    if (!extract_messages_content(req->body, template, prompt, sizeof(prompt))) {
+        *out_body = oc_openai_error_json("invalid or oversized messages", "invalid_request_error");
         *out_status = 400;
         return;
     }

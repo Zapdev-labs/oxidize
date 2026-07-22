@@ -198,7 +198,15 @@ Test(http, reads_body_split_across_packets)
     addr.sin_family = AF_INET;
     addr.sin_port = htons(srv.port);
     inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
-    cr_assert_eq(connect(fd, (struct sockaddr *)&addr, sizeof(addr)), 0);
+    int connected = 0;
+    for (int attempt = 0; attempt < 50; attempt++) {
+        if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
+            connected = 1;
+            break;
+        }
+        usleep(10 * 1000);
+    }
+    cr_assert(connected, "connect() failed after retries");
     const char *headers =
         "POST /v1/echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\n";
     cr_assert_eq(write(fd, headers, strlen(headers)), (ssize_t)strlen(headers));

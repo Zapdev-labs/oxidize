@@ -295,6 +295,7 @@ OcError oc_cuda_init(OcCudaContext *ctx, const OcLlamaModel *model)
     ctx->rms_norm_eps = c->rms_norm_eps;
     ctx->norm_scale = c->norm_scale;
     ctx->uses_geglu = c->uses_geglu;
+    ctx->initialized = true;
 
     /* Allocate workspace. */
     size_t embd = c->n_embd;
@@ -322,11 +323,11 @@ OcError oc_cuda_init(OcCudaContext *ctx, const OcLlamaModel *model)
     if (c->n_ff > max_cols) max_cols = c->n_ff;
     if (c->vocab_size > max_cols) max_cols = c->vocab_size;
     float *host_temp = (float *)malloc(max_cols * sizeof(float));
-    if (!host_temp) return OC_ERR_OOM;
+    if (!host_temp) { oc_cuda_free(ctx); return OC_ERR_OOM; }
 
     OcError e = upload_weight_view(&model->tok_embeddings, &ctx->d_tok_embeddings,
                                    host_temp);
-    if (e != OC_OK) { free(host_temp); return e; }
+    if (e != OC_OK) { free(host_temp); oc_cuda_free(ctx); return e; }
     fprintf(stderr, "cuda: embeddings uploaded\n");
 
     /* Upload final norm. */
@@ -339,7 +340,7 @@ OcError oc_cuda_init(OcCudaContext *ctx, const OcLlamaModel *model)
         ctx->d_output = ctx->d_tok_embeddings;
     } else {
         e = upload_weight_view(&model->output, &ctx->d_output, host_temp);
-        if (e != OC_OK) { free(host_temp); return e; }
+        if (e != OC_OK) { free(host_temp); oc_cuda_free(ctx); return e; }
     }
 
     /* Upload per-layer weights. */
@@ -356,6 +357,7 @@ OcError oc_cuda_init(OcCudaContext *ctx, const OcLlamaModel *model)
         !ctx->d_attn_output || !ctx->d_ffn_gate || !ctx->d_ffn_up ||
         !ctx->d_ffn_down || !ctx->d_attn_norm || !ctx->d_ffn_norm) {
         free(host_temp);
+        oc_cuda_free(ctx);
         return OC_ERR_OOM;
     }
 
@@ -364,19 +366,19 @@ OcError oc_cuda_init(OcCudaContext *ctx, const OcLlamaModel *model)
         fprintf(stderr, "cuda: uploading layer %u/%u (q rows=%zu cols=%zu qtype=%d)\n",
                 l, c->n_layer, L->attn_q.rows, L->attn_q.cols, (int)L->attn_q.qtype);
         e = upload_weight_view(&L->attn_q, &ctx->d_attn_q[l], host_temp);
-        if (e != OC_OK) { free(host_temp); return e; }
+        if (e != OC_OK) { free(host_temp); oc_cuda_free(ctx); return e; }
         e = upload_weight_view(&L->attn_k, &ctx->d_attn_k[l], host_temp);
-        if (e != OC_OK) { free(host_temp); return e; }
+        if (e != OC_OK) { free(host_temp); oc_cuda_free(ctx); return e; }
         e = upload_weight_view(&L->attn_v, &ctx->d_attn_v[l], host_temp);
-        if (e != OC_OK) { free(host_temp); return e; }
+        if (e != OC_OK) { free(host_temp); oc_cuda_free(ctx); return e; }
         e = upload_weight_view(&L->attn_output, &ctx->d_attn_output[l], host_temp);
-        if (e != OC_OK) { free(host_temp); return e; }
+        if (e != OC_OK) { free(host_temp); oc_cuda_free(ctx); return e; }
         e = upload_weight_view(&L->ffn_gate, &ctx->d_ffn_gate[l], host_temp);
-        if (e != OC_OK) { free(host_temp); return e; }
+        if (e != OC_OK) { free(host_temp); oc_cuda_free(ctx); return e; }
         e = upload_weight_view(&L->ffn_up, &ctx->d_ffn_up[l], host_temp);
-        if (e != OC_OK) { free(host_temp); return e; }
+        if (e != OC_OK) { free(host_temp); oc_cuda_free(ctx); return e; }
         e = upload_weight_view(&L->ffn_down, &ctx->d_ffn_down[l], host_temp);
-        if (e != OC_OK) { free(host_temp); return e; }
+        if (e != OC_OK) { free(host_temp); oc_cuda_free(ctx); return e; }
         OC_CUDA_CHECK(cudaMalloc(&ctx->d_attn_norm[l], embd * sizeof(float)));
         cudaMemcpy(ctx->d_attn_norm[l], L->attn_norm, embd * sizeof(float),
                   cudaMemcpyHostToDevice);
@@ -387,7 +389,6 @@ OcError oc_cuda_init(OcCudaContext *ctx, const OcLlamaModel *model)
     fprintf(stderr, "cuda: all layers uploaded\n");
 
     free(host_temp);
-    ctx->initialized = true;
     return OC_OK;
 }
 
@@ -534,7 +535,7 @@ void oc_cuda_reset(OcCudaContext *ctx)
 
 void oc_cuda_free(OcCudaContext *ctx)
 {
-    if (!ctx || !ctx->initialized) return;
+    if (!ctx) return;
 
     cudaFree(ctx->d_tok_embeddings);
     if (!ctx->d_output || ctx->d_output != ctx->d_tok_embeddings)
@@ -563,5 +564,5 @@ void oc_cuda_free(OcCudaContext *ctx)
     free(ctx->d_ffn_gate); free(ctx->d_ffn_up); free(ctx->d_ffn_down);
     free(ctx->d_attn_norm); free(ctx->d_ffn_norm);
 
-    ctx->initialized = false;
+    memset(ctx, 0, sizeof(*ctx));
 }

@@ -176,14 +176,14 @@ void oc_streaming_detok_init(OcStreamingDetokenizer *sd,
 }
 
 /* Count UTF-8 continuation bytes needed after `first_byte`.
- * Returns the total expected sequence length (1-4), or 1 if not a lead byte. */
+ * Returns the total expected sequence length (1-4), or 0 for an invalid lead. */
 static int utf8_seq_len(uint8_t first_byte)
 {
     if ((first_byte & 0x80) == 0) return 1;       /* 0xxxxxxx */
     if ((first_byte & 0xE0) == 0xC0) return 2;    /* 110xxxxx */
     if ((first_byte & 0xF0) == 0xE0) return 3;    /* 1110xxxx */
     if ((first_byte & 0xF8) == 0xF0) return 4;    /* 11110xxx */
-    return 1; /* invalid lead byte, treat as single */
+    return 0;
 }
 
 static OcError decode_token_raw(const OcTokenizer *tokenizer, uint32_t token,
@@ -205,7 +205,8 @@ static OcError decode_token_raw(const OcTokenizer *tokenizer, uint32_t token,
 OcError oc_streaming_detok_push(OcStreamingDetokenizer *sd, uint32_t token,
                                 const char **out_delta, size_t *out_len)
 {
-    if (!sd || !out_delta || !out_len) return OC_ERR_INVALID_ARG;
+    if (!sd || !sd->tokenizer || !out_delta || !out_len)
+        return OC_ERR_INVALID_ARG;
     *out_delta = NULL;
     *out_len = 0;
 
@@ -239,6 +240,12 @@ OcError oc_streaming_detok_push(OcStreamingDetokenizer *sd, uint32_t token,
     size_t pos = 0;
     while (pos < combined_len) {
         int seq_len = utf8_seq_len(sd->output[pos]);
+        if (seq_len == 0) {
+            memmove(sd->output + pos, sd->output + pos + 1,
+                    combined_len - pos - 1);
+            combined_len--;
+            continue;
+        }
         if (pos + (size_t)seq_len > combined_len) break;
         /* Validate continuation bytes. */
         bool valid = true;
@@ -246,8 +253,9 @@ OcError oc_streaming_detok_push(OcStreamingDetokenizer *sd, uint32_t token,
             if ((sd->output[pos + i] & 0xC0) != 0x80) { valid = false; break; }
         }
         if (!valid) {
-            /* Invalid byte, skip it. */
-            pos++;
+            memmove(sd->output + pos, sd->output + pos + 1,
+                    combined_len - pos - 1);
+            combined_len--;
             continue;
         }
         pos += (size_t)seq_len;

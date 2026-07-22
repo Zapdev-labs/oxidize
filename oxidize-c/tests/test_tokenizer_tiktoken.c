@@ -156,7 +156,7 @@ Test(tokenizer_tiktoken, streaming_preserves_split_and_long_tokens)
     OcArena *arena = oc_arena_new(0);
     static const uint8_t lead[] = { 0xc3 };
     static const uint8_t continuation[] = { 0xa9 };
-    uint8_t *long_token = malloc(5000);
+    uint8_t *long_token = oc_arena_alloc_bytes(arena, 5000);
     cr_assert_not_null(long_token);
     memset(long_token, 'x', 5000);
     OcByteSlice vocab[] = {
@@ -166,7 +166,6 @@ Test(tokenizer_tiktoken, streaming_preserves_split_and_long_tokens)
     };
     OcTiktokenTokenizer *t = NULL;
     cr_assert_eq(oc_tiktoken_new(vocab, 3, NULL, 0, arena, &t), OC_OK);
-    free(long_token);
     OcTokenizer tokenizer = { .kind = OC_TOK_KIND_TIKTOKEN, .tiktoken = t };
     OcStreamingDetokenizer first, second;
     oc_streaming_detok_init(&first, &tokenizer);

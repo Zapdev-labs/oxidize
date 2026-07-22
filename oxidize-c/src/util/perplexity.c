@@ -48,24 +48,23 @@ OcError oc_perplexity_evaluate(OcLlamaModel *model, OcTokenizer *tok,
     size_t n_evaluated = 0;
     double start = wall_now();
 
-    /* Forward the first token (no loss for position 0). */
-    if (n_ids > 0) {
-        e = oc_llama_forward(&sess, ids[0], NULL);
-        if (e != OC_OK) {
-            oc_llama_session_free(&sess);
-            free(ids);
-            return e;
-        }
+    if (ids[0] >= model->cfg.vocab_size) {
+        oc_llama_session_free(&sess);
+        free(ids);
+        return OC_ERR_INVALID_ARG;
+    }
+    e = oc_llama_forward(&sess, ids[0], sess.logits);
+    if (e != OC_OK) {
+        oc_llama_session_free(&sess);
+        free(ids);
+        return e;
     }
 
     for (size_t i = 1; i < n_ids; i++) {
-        /* Get logits for the current position (predicting token i). */
-        e = oc_llama_forward(&sess, ids[i], sess.logits);
-        if (e != OC_OK) {
-            if (e == OC_ERR_INVALID_ARG) break; /* context window full */
+        if (ids[i] >= model->cfg.vocab_size) {
             oc_llama_session_free(&sess);
             free(ids);
-            return e;
+            return OC_ERR_INVALID_ARG;
         }
 
         /* Compute softmax to get probabilities. */
@@ -86,8 +85,15 @@ OcError oc_perplexity_evaluate(OcLlamaModel *model, OcTokenizer *tok,
         total_nll += -log_prob / log(2.0);  /* convert to log2 */
         n_evaluated++;
 
-        /* Check context window. */
-        if ((uint64_t)sess.pos >= model->cfg.n_ctx) break;
+        if (i + 1 < n_ids) {
+            e = oc_llama_forward(&sess, ids[i], sess.logits);
+            if (e != OC_OK) {
+                if (e == OC_ERR_INVALID_ARG) break;
+                oc_llama_session_free(&sess);
+                free(ids);
+                return e;
+            }
+        }
     }
 
     double elapsed = wall_now() - start;
@@ -113,9 +119,9 @@ OcError oc_perplexity_evaluate_file(OcLlamaModel *model, OcTokenizer *tok,
     if (!f) return OC_ERR_IO;
 
     /* Read the entire file. */
-    fseek(f, 0, SEEK_END);
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return OC_ERR_IO; }
     long fsize = ftell(f);
-    fseek(f, 0, SEEK_SET);
+    if (fsize < 0 || fseek(f, 0, SEEK_SET) != 0) { fclose(f); return OC_ERR_IO; }
 
     if (fsize <= 0 || fsize > (1L << 28)) { /* 256 MB max */
         fclose(f);
@@ -125,6 +131,11 @@ OcError oc_perplexity_evaluate_file(OcLlamaModel *model, OcTokenizer *tok,
     char *text = malloc(fsize + 1);
     if (!text) { fclose(f); return OC_ERR_OOM; }
     size_t nread = fread(text, 1, fsize, f);
+    if (nread != (size_t)fsize) {
+        free(text);
+        fclose(f);
+        return OC_ERR_IO;
+    }
     fclose(f);
     text[nread] = '\0';
 
