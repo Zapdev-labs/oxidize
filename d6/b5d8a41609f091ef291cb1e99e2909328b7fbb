@@ -1,0 +1,33 @@
+oxidize-c/include/oxidize/model_registry.h
+  s_40c28f4a116188::t_64c478c3540138 1-161
+oxidize-c/tests/test_hf_hub.c
+  s_96ddc277ba047e::t_343f81513b35b7 1-142
+oxidize-c/include/oxidize/sse.h
+  s_40c28f4a116188::t_a996e069925d3f 1-160
+oxidize-c/src/util/hf_hub.c
+  s_96ddc277ba047e::t_54315f3dee0678 1-629
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "d6b5d8a41609f091ef291cb1e99e2909328b7fbb",
+  "prompts": {},
+  "sessions": {
+    "s_40c28f4a116188": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "248289df-664c-432c-9380-55da70507e1c",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_96ddc277ba047e": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "ea8ad242-b091-46af-96e0-114c0c67fea4",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
