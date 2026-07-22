@@ -42,10 +42,12 @@ static float *dequant_tensor(const OcGgufMmappedFile *mf,
 }
 
 /* Write a merged f32 tensor as f32 (simple, not re-quantized). */
+__attribute__((unused))
 static void write_tensor_f32(FILE *f, const char *name,
                              const float *data, size_t n,
                              uint32_t n_dims, const uint64_t *dims)
 {
+    (void)data; (void)n;
     /* name */
     uint64_t name_len = strlen(name);
     fwrite(&name_len, 8, 1, f);
@@ -184,7 +186,7 @@ OcError oc_merge_slerp(const char *path_a, const char *path_b,
     if (e != OC_OK) { oc_gguf_map_free(&mfa); return e; }
 
     const OcGgufFile *fa = &mfa.unified;
-    const OcGgufFile *fb = &mfb.unified;
+    /* fb not needed — we look up tensors from mfb directly. */
 
     FILE *out = fopen(output_path, "wb");
     if (!out) { oc_gguf_map_free(&mfa); oc_gguf_map_free(&mfb); return OC_ERR_IO; }
