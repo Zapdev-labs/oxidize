@@ -1,0 +1,41 @@
+oxidize-c/src/util/mem_util.c
+  s_96ddc277ba047e::t_1392b94f13b369 1-131
+oxidize-c/include/oxidize/mem_util.h
+  s_96ddc277ba047e::t_9ef1c08783d2cc 1-51
+oxidize-c/tests/test_mem_util.c
+  s_96ddc277ba047e::t_32c1467774ed50 1-61
+oxidize-c/src/vision/vision.c
+  s_96ddc277ba047e::t_682fc8150dece9 34-105,110-122
+  s_5bec56e69286b9::t_660ed21b70be50 123-125
+oxidize-c/tests/test_vision.c
+  s_96ddc277ba047e::t_bda6eb0b083cb5 69-121
+oxidize-c/include/oxidize/vision.h
+  s_96ddc277ba047e::t_4f54610f6cab0c 54-59
+  s_96ddc277ba047e::t_2b77e9286808b9 2,4-11
+  s_96ddc277ba047e::t_0913775439600b 66-72
+  s_5bec56e69286b9::t_eaa08f5f8efa46 73
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "af0ac30063f79ac8c210c4e65754f16097850664",
+  "prompts": {},
+  "sessions": {
+    "s_5bec56e69286b9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f86ae-2366-7b80-8a79-8d8524df27c3",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_96ddc277ba047e": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "ea8ad242-b091-46af-96e0-114c0c67fea4",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
