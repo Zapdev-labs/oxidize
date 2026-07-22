@@ -203,8 +203,8 @@ float oc_oxk_dot_q5_k_q8_k_scalar(const uint8_t *row, size_t blocks,
             int32_t sum1 = 0, sum2 = 0;
             for (int l = 0; l < 32; l++) {
                 uint8_t byte = qs[gp * 32 + l];
-                int lo = (byte & 0x0F) + (((qh[(gp * 64 + l)] >> (l % 8)) & 1) << 4);
-                int hi = (byte >> 4)   + (((qh[(gp * 64 + 32 + l)] >> (l % 8)) & 1) << 4);
+                int lo = (byte & 0x0F) + (((qh[(gp * 64 + l) / 8] >> ((gp * 64 + l) % 8)) & 1) << 4);
+                int hi = (byte >> 4)   + (((qh[(gp * 64 + 32 + l) / 8] >> ((gp * 64 + 32 + l) % 8)) & 1) << 4);
                 sum1 += lo * (int)q8v[gp * 64 + l];
                 sum2 += hi * (int)q8v[gp * 64 + 32 + l];
             }
