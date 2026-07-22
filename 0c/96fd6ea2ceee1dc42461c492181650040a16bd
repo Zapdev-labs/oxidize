@@ -1,0 +1,82 @@
+oxidize-c/tests/test_advanced_sampling.c
+  s_96ddc277ba047e::t_e186fb3fafe094 1-164
+oxidize-c/tests/test_inspect.c
+  s_7c26d91e840dd4::t_f44f552cda560c 1-258
+oxidize-c/tests/test_moe.c
+  s_96ddc277ba047e::t_4f5b62b0e254b1 539
+  s_da4932d1304163::t_178673b75b34d3 1-45,48-534,536-537,540-606
+  s_da4932d1304163::t_9eb1f52db2abb6 535,538
+  s_96ddc277ba047e::t_1181fa057daf5d 46-47
+oxidize-c/src/model/moe.c
+  s_96ddc277ba047e::t_6ace0cb512e441 14
+  s_da4932d1304163::t_e37b6ce692b353 1-13,15-518
+oxidize-c/src/model/advanced_sampling.c
+  s_96ddc277ba047e::t_40e1750d6d89d6 1-791
+oxidize-c/include/oxidize/moe.h
+  s_da4932d1304163::t_defabf994dfc7c 1-223
+oxidize-c/tests/test_distributed.c
+  s_6bda1d70429872::t_949904dd715634 1-572
+oxidize-c/include/oxidize/distributed.h
+  s_6bda1d70429872::t_6dd9966496416a 1-315
+oxidize-c/src/util/inspect.c
+  s_7c26d91e840dd4::t_13ff27dd07d565 1-22,24-197,199-295,301-303,307-819
+  s_7c26d91e840dd4::t_988710241d8aa1 198
+  s_7c26d91e840dd4::t_72012749e93562 296-300,304-306
+  s_7c26d91e840dd4::t_5ee5cae8746729 23
+oxidize-c/include/oxidize/advanced_sampling.h
+  s_96ddc277ba047e::t_e42ec62d098230 1-186
+oxidize-c/tests/test_wasm.c
+  s_740b57616e9b73::t_cd134911810212 463-467,469
+  s_740b57616e9b73::t_e48f7ba45a414b 332,334-338,344-362,364-372,374
+  s_740b57616e9b73::t_7f86de695684c8 373
+oxidize-c/src/mesh/distributed.c
+  s_6bda1d70429872::t_2cf16d38592da3 1-885
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "0c96fd6ea2ceee1dc42461c492181650040a16bd",
+  "prompts": {},
+  "sessions": {
+    "s_6bda1d70429872": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "a015eac7-48d2-456c-9909-3595df472872",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_740b57616e9b73": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "a51e850a-e0ae-42d0-83b3-a80f1bcac4e6",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_7c26d91e840dd4": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "16ca7f7c-b2c7-4da7-99fc-fb20eb4397a1",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_96ddc277ba047e": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "ea8ad242-b091-46af-96e0-114c0c67fea4",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_da4932d1304163": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "3b98c72f-deaa-4ffc-bc7a-39206509e017",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
