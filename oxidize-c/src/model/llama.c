@@ -177,6 +177,21 @@ static OcError parse_config(const OcGgufFile *f, const char *arch_str,
             /* Phi-3 uses GELU activation (same as GeGLU) but no norm scaling. */
             cfg->uses_geglu = true;
             cfg->norm_scale = 1.0f;
+        } else if (strncmp(arch_str, "gpt2", 4) == 0 ||
+                   strncmp(arch_str, "gptj", 4) == 0 ||
+                   strncmp(arch_str, "gpt-neox", 8) == 0) {
+            /* GPT-2/J/NeoX: GELU FFN, parallel attention (QKV fused),
+             * no RoPE (learned positional embeddings). */
+            cfg->uses_gpt2 = true;
+            cfg->uses_par_attn = true;
+            cfg->uses_geglu = true; /* GELU activation */
+            cfg->norm_scale = 1.0f;
+            cfg->rope_dim = 0; /* no RoPE */
+        } else if (strncmp(arch_str, "falcon", 6) == 0) {
+            /* Falcon: parallel QKV, GELU FFN, no RoPE (uses alibi). */
+            cfg->uses_par_attn = true;
+            cfg->uses_geglu = true;
+            cfg->rope_dim = 0;
         }
     }
     /* YaRN: read from GGUF metadata if present. */

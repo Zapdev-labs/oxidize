@@ -52,6 +52,9 @@ typedef struct OcLlamaConfig {
     float    expert_weights_scale;      /* 1.0 = no routed scaling          */
     bool     uses_geglu;                /* true = Gemma GeGLU FFN (vs SwiGLU) */
     float    norm_scale;               /* RMSNorm scale factor (Gemma: sqrt(n_embd)) */
+    /* GPT-2/Falcon specific flags. */
+    bool     uses_gpt2;                /* true = GPT-2 architecture            */
+    bool     uses_par_attn;           /* true = parallel QKV (GPT-2/J/NeoX)   */
     /* Sliding window attention (Gemma2/Phi). Layers alternate between
      * global (full) and sliding-window attention. `sliding_window` is the
      * window size in tokens (0 = no sliding window). */
