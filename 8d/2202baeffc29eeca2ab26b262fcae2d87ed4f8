@@ -1,0 +1,55 @@
+oxidize-c/src/util/benchmark_suite.c
+  s_96ddc277ba047e::t_9957986c3ed40b 1-155
+oxidize-c/include/oxidize/discovery.h
+  s_96ddc277ba047e::t_97644adb0473ac 1-66
+oxidize-c/include/oxidize/benchmark_suite.h
+  s_96ddc277ba047e::t_e99f8570bb7e43 1-72
+oxidize-c/tests/test_benchmark_suite.c
+  s_96ddc277ba047e::t_870d1d39d029f4 1-150
+oxidize-c/include/oxidize/gemma_arch.h
+  s_2dbfd223882bf7::t_ad8745d6ae6db1 1-111
+oxidize-c/src/model/gemma_arch.c
+  s_2dbfd223882bf7::t_69f8578536c9a3 1-108
+oxidize-c/include/oxidize/mistral_arch.h
+  s_2dbfd223882bf7::t_6b19ccd9c18d73 1-111
+oxidize-c/tests/test_mistral_arch.c
+  s_2dbfd223882bf7::t_98e9bcbe8d498a 1-176
+oxidize-c/tests/test_gemma_arch.c
+  s_2dbfd223882bf7::t_42650a1c9dea17 1-162
+oxidize-c/src/model/phi_arch.c
+  s_2dbfd223882bf7::t_d0e7600f46076a 1-99
+oxidize-c/tests/test_phi_arch.c
+  s_2dbfd223882bf7::t_3f59ff9cf6fd50 1-168
+oxidize-c/src/model/mistral_arch.c
+  s_2dbfd223882bf7::t_eaabdc05332d0b 1-104
+oxidize-c/tests/test_discovery.c
+  s_96ddc277ba047e::t_3d6945ee2cd672 1-198
+oxidize-c/src/mesh/discovery.c
+  s_96ddc277ba047e::t_bcdf4b3caa9039 1-173
+oxidize-c/include/oxidize/phi_arch.h
+  s_2dbfd223882bf7::t_69db31a03aedf4 1-106
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "8d2202baeffc29eeca2ab26b262fcae2d87ed4f8",
+  "prompts": {},
+  "sessions": {
+    "s_2dbfd223882bf7": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "95047a84-21ea-4bad-9fa4-adb529ce015e",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_96ddc277ba047e": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "ea8ad242-b091-46af-96e0-114c0c67fea4",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
