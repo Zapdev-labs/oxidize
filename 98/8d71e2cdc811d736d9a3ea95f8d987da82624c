@@ -1,0 +1,60 @@
+oxidize-c/src/model/diffusion_gemma.c
+  s_96ddc277ba047e::t_a217570e524d02 1-103
+oxidize-c/include/oxidize/strix.h
+  s_96ddc277ba047e::t_8a4ed7c163ed5a 1-82
+oxidize-c/include/oxidize/temporal.h
+  s_ce1ba9c1554598::t_059f66e8481ffa 1-89
+oxidize-c/tests/test_apply.c
+  s_ce1ba9c1554598::t_5b7b367b4f8ad9 1-138
+oxidize-c/src/vision/temporal.c
+  s_ce1ba9c1554598::t_c3dca6c89b4cd0 1-144
+oxidize-c/include/oxidize/apply.h
+  s_ce1ba9c1554598::t_1a72ce6e01c9e6 1-68
+oxidize-c/src/model/strix.c
+  s_96ddc277ba047e::t_5141cdf35f1efe 9
+  s_96ddc277ba047e::t_5a3e4c94d9783f 1-8,10-211
+oxidize-c/src/autotune/apply.c
+  s_ce1ba9c1554598::t_03395687f2a6d0 1-139
+oxidize-c/src/core/bytes.c
+  s_ce1ba9c1554598::t_f82d5671912df0 1-200
+oxidize-c/include/oxidize/bytes.h
+  s_ce1ba9c1554598::t_898a65b4fcc868 1-89
+oxidize-c/tests/test_bytes_buf.c
+  s_ce1ba9c1554598::t_808871b9e2a573 1-263
+oxidize-c/tests/test_strix.c
+  s_96ddc277ba047e::t_6c837c7e1a7f94 1-4,6-158,160-203
+  s_96ddc277ba047e::t_4215bdd3a2070d 159
+  s_96ddc277ba047e::t_bb7eab00b3f21b 5
+oxidize-c/include/oxidize/diffusion_gemma.h
+  s_96ddc277ba047e::t_a8e71fde86a766 1-60
+oxidize-c/tests/test_temporal.c
+  s_ce1ba9c1554598::t_0771fe831eb1ec 1-192
+oxidize-c/tests/test_diffusion_gemma.c
+  s_96ddc277ba047e::t_02862e47d02251 1-127
+oxidize-c/tests/test_model_loader.c
+  s_96ddc277ba047e::t_5e11e39a4fe019 7,16,22,31,39,47,54,63,68,79,84,92,97,107,118
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "988d71e2cdc811d736d9a3ea95f8d987da82624c",
+  "prompts": {},
+  "sessions": {
+    "s_96ddc277ba047e": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "ea8ad242-b091-46af-96e0-114c0c67fea4",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_ce1ba9c1554598": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "99fab106-af79-40eb-aed3-f9d9209ac78b",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
