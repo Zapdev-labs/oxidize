@@ -2,7 +2,10 @@
 #include <criterion/criterion.h>
 #include "oxidize/weight_ops.h"
 #include "oxidize/weight_storage.h"
+#include "oxidize/inference.h"
 #include <stdlib.h>
+#include <string.h>
+#include <math.h>
 #include <string.h>
 #include <math.h>
 
@@ -237,4 +240,194 @@ Test(wops, gemv_weight_q8_0)
     /* Row 1: sum(-16..15) * 2.0 = -16 * 2 = -32 */
     cr_assert_float_eq(output[1], -32.0f, 1.0f);
     oc_weight_storage_free(&ws);
+}
+
+/* ─── MoE FFN forward tests ───────────────────────────────────────────── */
+
+Test(wops, moe_softmax_gating)
+{
+    /* 2 experts, hidden=2, i_size=2, top-1.
+     * Router: [[1,0],[0,1]] -> expert 0 gets score from input[0], expert 1 from input[1].
+     * Input = [1, 0] -> expert 0 selected (score 1 >> 0). */
+    OcInferenceConfig cfg;
+    oc_inference_config_init(&cfg);
+    cfg.hidden_size = 2;
+    cfg.intermediate_size = 2;
+    cfg.num_experts = 2;
+    cfg.num_experts_per_tok = 1;
+    cfg.expert_gating_sigmoid = false;
+    cfg.expert_weights_scale = 1.0f;
+
+    /* Router weights: [2 experts, 2 hidden] = [[1,0],[0,1]] */
+    OcWeightStorage router;
+    oc_weight_storage_init(&router);
+    float *r_data = malloc(4 * sizeof(float));
+    r_data[0]=1; r_data[1]=0; r_data[2]=0; r_data[3]=1;
+    oc_weight_storage_f32(&router, r_data, 4);
+
+    /* Expert gate/up/down: each [2,2]. */
+    OcWeightStorage gate_exps, up_exps, down_exps;
+    oc_weight_storage_init(&gate_exps);
+    oc_weight_storage_init(&up_exps);
+    oc_weight_storage_init(&down_exps);
+
+    /* gate = identity for all experts, up = ones, down = identity. */
+    float *g = malloc(8 * sizeof(float));
+    g[0]=1; g[1]=0; g[2]=0; g[3]=1;  /* expert 0: identity */
+    g[4]=1; g[5]=0; g[6]=0; g[7]=1;  /* expert 1: identity */
+    oc_weight_storage_f32(&gate_exps, g, 8);
+
+    float *u = malloc(8 * sizeof(float));
+    for (int i = 0; i < 8; i++) u[i] = 1.0f;
+    oc_weight_storage_f32(&up_exps, u, 8);
+
+    float *d = malloc(8 * sizeof(float));
+    d[0]=1; d[1]=0; d[2]=0; d[3]=1;
+    d[4]=1; d[5]=0; d[6]=0; d[7]=1;
+    oc_weight_storage_f32(&down_exps, d, 8);
+
+    float normed[] = {1.0f, 0.0f};
+    float ffn_out[2] = {0, 0};
+    float gate_scratch[2], up_scratch[2], expert_out[2];
+    float router_logits[2];
+    OcExpertScore scores[2];
+
+    OcError e = oc_moe_ffn_forward(&router, &gate_exps, &up_exps, &down_exps,
+                                     NULL, &cfg, normed, ffn_out,
+                                     gate_scratch, up_scratch, expert_out,
+                                     router_logits, scores);
+    cr_assert_eq(e, OC_OK);
+    /* Expert 0 should be selected (higher score for input [1,0]). */
+    cr_assert_eq(scores[0].idx, 0);
+    /* Output should be non-zero (silu(1)*1 = 0.7311, then down(identity) = [0.7311, 0]). */
+    cr_assert_gt(fabsf(ffn_out[0]), 0.01f);
+
+    oc_weight_storage_free(&router);
+    oc_weight_storage_free(&gate_exps);
+    oc_weight_storage_free(&up_exps);
+    oc_weight_storage_free(&down_exps);
+}
+
+Test(wops, moe_sigmoid_gating)
+{
+    OcInferenceConfig cfg;
+    oc_inference_config_init(&cfg);
+    cfg.hidden_size = 2;
+    cfg.intermediate_size = 2;
+    cfg.num_experts = 2;
+    cfg.num_experts_per_tok = 2;  /* use both experts */
+    cfg.expert_gating_sigmoid = true;
+    cfg.expert_weights_scale = 1.0f;
+
+    OcWeightStorage router;
+    oc_weight_storage_init(&router);
+    float *r_data = malloc(4 * sizeof(float));
+    r_data[0]=1; r_data[1]=0; r_data[2]=0; r_data[3]=1;
+    oc_weight_storage_f32(&router, r_data, 4);
+
+    OcWeightStorage gate_exps, up_exps, down_exps;
+    oc_weight_storage_init(&gate_exps);
+    oc_weight_storage_init(&up_exps);
+    oc_weight_storage_init(&down_exps);
+
+    float *g = malloc(8 * sizeof(float));
+    g[0]=1; g[1]=0; g[2]=0; g[3]=1;
+    g[4]=1; g[5]=0; g[6]=0; g[7]=1;
+    oc_weight_storage_f32(&gate_exps, g, 8);
+
+    float *u = malloc(8 * sizeof(float));
+    for (int i = 0; i < 8; i++) u[i] = 1.0f;
+    oc_weight_storage_f32(&up_exps, u, 8);
+
+    float *d = malloc(8 * sizeof(float));
+    d[0]=1; d[1]=0; d[2]=0; d[3]=1;
+    d[4]=1; d[5]=0; d[6]=0; d[7]=1;
+    oc_weight_storage_f32(&down_exps, d, 8);
+
+    float normed[] = {1.0f, 0.0f};
+    float ffn_out[2] = {0, 0};
+    float gate_scratch[2], up_scratch[2], expert_out[2];
+    float router_logits[2];
+    OcExpertScore scores[2];
+
+    OcError e = oc_moe_ffn_forward(&router, &gate_exps, &up_exps, &down_exps,
+                                     NULL, &cfg, normed, ffn_out,
+                                     gate_scratch, up_scratch, expert_out,
+                                     router_logits, scores);
+    cr_assert_eq(e, OC_OK);
+    /* Both experts used (n_per_tok=2). Output should be non-zero. */
+    cr_assert_gt(fabsf(ffn_out[0]), 0.01f);
+
+    oc_weight_storage_free(&router);
+    oc_weight_storage_free(&gate_exps);
+    oc_weight_storage_free(&up_exps);
+    oc_weight_storage_free(&down_exps);
+}
+
+Test(wops, moe_null_args)
+{
+    OcInferenceConfig cfg;
+    oc_inference_config_init(&cfg);
+    float out[2];
+    cr_assert_neq(oc_moe_ffn_forward(NULL, NULL, NULL, NULL, NULL, &cfg,
+                                      NULL, out, NULL, NULL, NULL, NULL, NULL),
+                  OC_OK);
+}
+
+Test(wops, moe_expert_weights_scale)
+{
+    OcInferenceConfig cfg;
+    oc_inference_config_init(&cfg);
+    cfg.hidden_size = 2;
+    cfg.intermediate_size = 2;
+    cfg.num_experts = 2;
+    cfg.num_experts_per_tok = 1;
+    cfg.expert_gating_sigmoid = false;
+    cfg.expert_weights_scale = 2.0f;  /* double the output */
+
+    OcWeightStorage router;
+    oc_weight_storage_init(&router);
+    float *r_data = malloc(4 * sizeof(float));
+    r_data[0]=1; r_data[1]=0; r_data[2]=0; r_data[3]=1;
+    oc_weight_storage_f32(&router, r_data, 4);
+
+    OcWeightStorage gate_exps, up_exps, down_exps;
+    oc_weight_storage_init(&gate_exps);
+    oc_weight_storage_init(&up_exps);
+    oc_weight_storage_init(&down_exps);
+
+    float *g = malloc(8 * sizeof(float));
+    g[0]=1; g[1]=0; g[2]=0; g[3]=1; g[4]=1; g[5]=0; g[6]=0; g[7]=1;
+    oc_weight_storage_f32(&gate_exps, g, 8);
+    float *u = malloc(8 * sizeof(float));
+    for (int i = 0; i < 8; i++) u[i] = 1.0f;
+    oc_weight_storage_f32(&up_exps, u, 8);
+    float *d = malloc(8 * sizeof(float));
+    d[0]=1; d[1]=0; d[2]=0; d[3]=1; d[4]=1; d[5]=0; d[6]=0; d[7]=1;
+    oc_weight_storage_f32(&down_exps, d, 8);
+
+    float normed[] = {1.0f, 0.0f};
+    float ffn_out[2] = {0, 0};
+    float gate_scratch[2], up_scratch[2], expert_out[2];
+    float router_logits[2];
+    OcExpertScore scores[2];
+
+    oc_moe_ffn_forward(&router, &gate_exps, &up_exps, &down_exps,
+                       NULL, &cfg, normed, ffn_out,
+                       gate_scratch, up_scratch, expert_out,
+                       router_logits, scores);
+
+    /* With scale=2.0, output should be ~2x the scale=1.0 output. */
+    float ffn_out2[2] = {0, 0};
+    cfg.expert_weights_scale = 1.0f;
+    oc_moe_ffn_forward(&router, &gate_exps, &up_exps, &down_exps,
+                       NULL, &cfg, normed, ffn_out2,
+                       gate_scratch, up_scratch, expert_out,
+                       router_logits, scores);
+    cr_assert_float_eq(ffn_out[0], ffn_out2[0] * 2.0f, 0.01f);
+
+    oc_weight_storage_free(&router);
+    oc_weight_storage_free(&gate_exps);
+    oc_weight_storage_free(&up_exps);
+    oc_weight_storage_free(&down_exps);
 }

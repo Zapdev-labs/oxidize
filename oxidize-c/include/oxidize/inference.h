@@ -13,6 +13,7 @@
 
 #include "oxidize/error.h"
 #include "oxidize/generation.h"
+#include "oxidize/activation.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -103,6 +104,13 @@ float oc_inference_config_layer_rope_theta(const OcInferenceConfig *cfg, uint32_
 
 /* Effective sliding-window size for the given layer (0 = full attention). */
 uint32_t oc_inference_config_layer_sliding_window(const OcInferenceConfig *cfg, uint32_t layer_idx);
+
+/* Apply RoPE to one head using the config's YaRN parameters.
+ * Wraps oc_apply_rope_yarn_f32 with cfg->yarn_factor and cfg->yarn_orig_ctx. */
+void oc_inference_config_apply_rope_head(const OcInferenceConfig *cfg,
+                                          const float *input, float *output,
+                                          size_t head_dim, size_t rope_len,
+                                          int64_t position, float theta);
 
 /* ─── Legacy CLI config (still used by the CLI) ────────────────────────── */
 

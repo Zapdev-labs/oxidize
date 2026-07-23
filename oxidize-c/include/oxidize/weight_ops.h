@@ -16,6 +16,7 @@
 
 #include "oxidize/error.h"
 #include "oxidize/weight_storage.h"
+#include "oxidize/inference.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -62,6 +63,41 @@ void oc_add_repeating_bias(float *buf, size_t buf_len,
 /* Simple f32 GEMV: y[j] = sum_i W[j*cols + i] * x[i] for j in 0..rows. */
 OcError oc_gemv_f32(const float *weights, size_t rows, size_t cols,
                      const float *input, float *output);
+
+/* MoE routing result: expert index + weight. */
+typedef struct {
+    size_t idx;
+    float  weight;
+} OcExpertScore;
+
+/* MoE FFN forward: routes input through top-k experts and combines results.
+ *
+ * gate_inp:   router weight [n_experts, hidden]
+ * gate_exps:  expert gate weights [n_experts, i_size, hidden]
+ * up_exps:    expert up weights   [n_experts, i_size, hidden]
+ * down_exps:  expert down weights  [n_experts, hidden, i_size]
+ * exp_probs_b: per-layer expert bias (may be NULL, n_experts elements)
+ * normed:     input vector [hidden]
+ * ffn_out:    output vector [hidden] (zeroed before writing)
+ * gate_scratch: [i_size] scratch
+ * up_scratch:   [i_size] scratch
+ * expert_out:   [hidden] scratch
+ * router_logits: [n_experts] (filled with router logits/weights)
+ * expert_scores: [n_experts] (filled with (idx, score) pairs)
+ *
+ * Uses softmax (Mixtral) or sigmoid (LFM2MoE) gating based on cfg.
+ * Handles DeepSeek group-limited routing when expert_group_count > 1. */
+OcError oc_moe_ffn_forward(const OcWeightStorage *gate_inp,
+                             const OcWeightStorage *gate_exps,
+                             const OcWeightStorage *up_exps,
+                             const OcWeightStorage *down_exps,
+                             const float *exp_probs_b,
+                             const OcInferenceConfig *cfg,
+                             const float *normed, float *ffn_out,
+                             float *gate_scratch, float *up_scratch,
+                             float *expert_out,
+                             float *router_logits,
+                             OcExpertScore *expert_scores);
 
 #ifdef __cplusplus
 }

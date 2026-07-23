@@ -1,9 +1,11 @@
 #define _POSIX_C_SOURCE 200809L
 #include "oxidize/weight_ops.h"
 #include "oxidize/quant.h"
+#include "oxidize/activation.h"
 
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 /* ─── f32 GEMV ────────────────────────────────────────────────────────── */
 
@@ -215,4 +217,163 @@ void oc_add_repeating_bias(float *buf, size_t buf_len,
     if (!buf || !bias || bias_len == 0) return;
     for (size_t i = 0; i < buf_len; i++)
         buf[i] += bias[i % bias_len];
+}
+
+/* ─── MoE FFN forward ─────────────────────────────────────────────────── */
+
+static int compare_expert_scores(const void *a, const void *b)
+{
+    const OcExpertScore *sa = a, *sb = b;
+    if (sa->weight > sb->weight) return -1;
+    if (sa->weight < sb->weight) return 1;
+    return 0;
+}
+
+OcError oc_moe_ffn_forward(const OcWeightStorage *gate_inp,
+                             const OcWeightStorage *gate_exps,
+                             const OcWeightStorage *up_exps,
+                             const OcWeightStorage *down_exps,
+                             const float *exp_probs_b,
+                             const OcInferenceConfig *cfg,
+                             const float *normed, float *ffn_out,
+                             float *gate_scratch, float *up_scratch,
+                             float *expert_out,
+                             float *router_logits,
+                             OcExpertScore *expert_scores)
+{
+    if (!gate_inp || !gate_exps || !up_exps || !down_exps || !cfg ||
+        !normed || !ffn_out || !gate_scratch || !up_scratch || !expert_out ||
+        !router_logits || !expert_scores)
+        return OC_ERR_INVALID_ARG;
+
+    size_t h = cfg->hidden_size;
+    size_t i_size = cfg->expert_intermediate_size > 0 ? cfg->expert_intermediate_size : cfg->intermediate_size;
+    size_t n_experts = cfg->num_experts;
+    size_t n_per_tok = cfg->num_experts_per_tok;
+    if (n_per_tok == 0) n_per_tok = 1;
+    if (n_per_tok > n_experts) n_per_tok = n_experts;
+    bool sigmoid_gating = cfg->expert_gating_sigmoid;
+
+    /* Zero output. */
+    memset(ffn_out, 0, h * sizeof(float));
+
+    /* 1. Router logits: [n_experts] */
+    memset(router_logits, 0, n_experts * sizeof(float));
+    OcError e = oc_gemv_weight(gate_inp, n_experts, h, normed, router_logits);
+    if (e != OC_OK) return e;
+
+    /* 2. Gating: softmax (Mixtral) or sigmoid + bias (LFM2MoE). */
+    if (sigmoid_gating) {
+        for (size_t i = 0; i < n_experts; i++)
+            router_logits[i] = 1.0f / (1.0f + expf(-router_logits[i]));
+        for (size_t i = 0; i < n_experts; i++) {
+            float bias = exp_probs_b ? exp_probs_b[i] : 0.0f;
+            expert_scores[i].idx = i;
+            expert_scores[i].weight = router_logits[i] + bias;
+        }
+    } else {
+        float max_logit = router_logits[0];
+        for (size_t i = 1; i < n_experts; i++)
+            if (router_logits[i] > max_logit) max_logit = router_logits[i];
+        float sum_exp = 0.0f;
+        for (size_t i = 0; i < n_experts; i++) {
+            router_logits[i] = expf(router_logits[i] - max_logit);
+            sum_exp += router_logits[i];
+        }
+        if (sum_exp > 0.0f) {
+            for (size_t i = 0; i < n_experts; i++)
+                router_logits[i] /= sum_exp;
+        }
+        for (size_t i = 0; i < n_experts; i++) {
+            expert_scores[i].idx = i;
+            expert_scores[i].weight = router_logits[i];
+        }
+    }
+
+    /* 2b. DeepSeek group-limited routing (skip if n_group <= 1). */
+    if (cfg->expert_group_count > 1 &&
+        cfg->expert_group_used_count > 0 &&
+        cfg->expert_group_used_count < cfg->expert_group_count &&
+        n_experts % cfg->expert_group_count == 0)
+    {
+        size_t n_group = cfg->expert_group_count;
+        size_t group_size = n_experts / n_group;
+        size_t n_group_used = cfg->expert_group_used_count;
+
+        /* Compute per-group max score. */
+        float *group_max = calloc(n_group, sizeof(float));
+        if (!group_max) return OC_ERR_OOM;
+        for (size_t i = 0; i < n_experts; i++) {
+            size_t g = i / group_size;
+            if (expert_scores[i].weight > group_max[g])
+                group_max[g] = expert_scores[i].weight;
+        }
+        /* Find top n_group_used groups. */
+        /* Simple: mark groups as selected or not. */
+        bool *group_selected = calloc(n_group, sizeof(bool));
+        if (!group_selected) { free(group_max); return OC_ERR_OOM; }
+        for (size_t sel = 0; sel < n_group_used; sel++) {
+            float best_score = -1e30f;
+            size_t best_g = 0;
+            for (size_t g = 0; g < n_group; g++) {
+                if (!group_selected[g] && group_max[g] > best_score) {
+                    best_score = group_max[g];
+                    best_g = g;
+                }
+            }
+            group_selected[best_g] = true;
+        }
+        /* Mask out experts in non-selected groups. */
+        for (size_t i = 0; i < n_experts; i++) {
+            size_t g = i / group_size;
+            if (!group_selected[g])
+                expert_scores[i].weight = -1e30f;
+        }
+        free(group_max);
+        free(group_selected);
+    }
+
+    /* 3. Sort experts by score (descending). */
+    qsort(expert_scores, n_experts, sizeof(OcExpertScore), compare_expert_scores);
+
+    /* 4. Renormalize weights over top-k. */
+    float weight_sum = 0.0f;
+    for (size_t k = 0; k < n_per_tok; k++)
+        weight_sum += expert_scores[k].weight;
+    /* Apply expert_weights_scale. */
+    float scale = cfg->expert_weights_scale;
+
+    /* 5. Run top-k experts and accumulate. */
+    for (size_t k = 0; k < n_per_tok; k++) {
+        size_t expert_idx = expert_scores[k].idx;
+        float weight = expert_scores[k].weight;
+        if (weight <= -1e29f) continue;  /* masked out */
+
+        float normalized_weight = (weight_sum > 0.0f)
+            ? (weight / weight_sum) * scale : 0.0f;
+
+        /* gate = gate_exps[expert_idx] @ normed  -> [i_size] */
+        e = oc_gemv_expert_weight(gate_exps, expert_idx, n_experts,
+                                   i_size, h, normed, gate_scratch);
+        if (e != OC_OK) return e;
+
+        /* up = up_exps[expert_idx] @ normed -> [i_size] */
+        e = oc_gemv_expert_weight(up_exps, expert_idx, n_experts,
+                                   i_size, h, normed, up_scratch);
+        if (e != OC_OK) return e;
+
+        /* SwiGLU: gate[i] = silu(gate[i]) * up[i] */
+        oc_swiglu_inplace_f32(gate_scratch, up_scratch, i_size);
+
+        /* down = down_exps[expert_idx] @ gate -> [h] */
+        e = oc_gemv_expert_weight(down_exps, expert_idx, n_experts,
+                                   h, i_size, gate_scratch, expert_out);
+        if (e != OC_OK) return e;
+
+        /* Accumulate: ffn_out += weight * expert_out */
+        for (size_t i = 0; i < h; i++)
+            ffn_out[i] += normalized_weight * expert_out[i];
+    }
+
+    return OC_OK;
 }

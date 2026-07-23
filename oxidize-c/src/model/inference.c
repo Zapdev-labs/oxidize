@@ -129,6 +129,17 @@ uint32_t oc_inference_config_layer_sliding_window(const OcInferenceConfig *cfg, 
     return 0;
 }
 
+void oc_inference_config_apply_rope_head(const OcInferenceConfig *cfg,
+                                          const float *input, float *output,
+                                          size_t head_dim, size_t rope_len,
+                                          int64_t position, float theta)
+{
+    if (!cfg || !input || !output) return;
+    oc_apply_rope_yarn_f32(input, output, head_dim, rope_len,
+                           position, theta,
+                           cfg->yarn_factor, (uint32_t)cfg->yarn_orig_ctx);
+}
+
 OcError oc_inf_engine_init(OcInfEngine *engine, const OcInfConfig *cfg)
 {
     if (!engine) return OC_ERR_INVALID_ARG;

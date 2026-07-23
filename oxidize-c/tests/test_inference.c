@@ -3,6 +3,7 @@
 #include "oxidize/inference.h"
 #include "oxidize/model.h"
 #include <string.h>
+#include <math.h>
 
 Test(inf, config_init)
 {
@@ -464,6 +465,45 @@ Test(inf_cfg, layer_sliding_window_interleaved)
 Test(inf_cfg, layer_sliding_window_null)
 {
     cr_assert_eq(oc_inference_config_layer_sliding_window(NULL, 0), 0);
+}
+
+Test(inf_cfg, apply_rope_head_basic)
+{
+    OcInferenceConfig cfg;
+    oc_inference_config_init(&cfg);
+    /* No YaRN by default -> just RoPE. */
+    float in[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+    float out[4];
+    oc_inference_config_apply_rope_head(&cfg, in, out, 4, 4, 0, 10000.0f);
+    /* Position 0 -> no rotation -> copy. */
+    cr_assert_float_eq(out[0], 1.0f, 0.001f);
+    cr_assert_float_eq(out[1], 2.0f, 0.001f);
+    cr_assert_float_eq(out[2], 3.0f, 0.001f);
+    cr_assert_float_eq(out[3], 4.0f, 0.001f);
+}
+
+Test(inf_cfg, apply_rope_head_position1)
+{
+    OcInferenceConfig cfg;
+    oc_inference_config_init(&cfg);
+    float in[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+    float out[4];
+    oc_inference_config_apply_rope_head(&cfg, in, out, 4, 4, 1, 10000.0f);
+    /* At position 1 with theta=10000, the angles should be small.
+     * The output should not be identical to input. */
+    bool changed = false;
+    for (int i = 0; i < 4; i++) {
+        if (fabsf(out[i] - in[i]) > 0.001f) changed = true;
+    }
+    cr_assert(changed);
+}
+
+Test(inf_cfg, apply_rope_head_null)
+{
+    OcInferenceConfig cfg;
+    oc_inference_config_init(&cfg);
+    oc_inference_config_apply_rope_head(&cfg, NULL, NULL, 4, 4, 0, 10000.0f);
+    /* Should not crash. */
 }
 
 /* ─── Model arch trait method tests ───────────────────────────────────── */
