@@ -1,0 +1,23 @@
+oxidize-c/src/mesh/topology.c
+  s_96ddc277ba047e::t_ac169fbc3f57ce 1-190
+oxidize-c/tests/test_topology.c
+  s_96ddc277ba047e::t_ddb1e54a23b805 1-192
+oxidize-c/include/oxidize/topology.h
+  s_96ddc277ba047e::t_074e972dbb14cb 1-74
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "ac716a70e16e600d90d2abfdbccf741f5f3e6052",
+  "prompts": {},
+  "sessions": {
+    "s_96ddc277ba047e": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "ea8ad242-b091-46af-96e0-114c0c67fea4",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
