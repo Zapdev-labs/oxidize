@@ -7,6 +7,7 @@
 #include <string.h>
 #include <stdio.h>
 
+__attribute__((unused))
 static void copy_str(char *dst, size_t cap, const char *src)
 {
     if (!dst || cap == 0 || !src) { if (dst && cap > 0) dst[0] = '\0'; return; }
@@ -53,7 +54,7 @@ OcError oc_inf_engine_load(OcInfEngine *engine, const char *model_path)
     engine->config.model_path = model_path;
     engine->loaded = true;
     engine->n_loaded_layers = 32;
-    engine->model_size_bytes = 4096 * 1024 * 1024; /* 4 GB stub */
+    engine->model_size_bytes = (size_t)4096 * 1024 * 1024; /* 4 GB stub */
     return OC_OK;
 }
 
@@ -62,6 +63,7 @@ OcError oc_inf_engine_generate(OcInfEngine *engine, const char *prompt,
                               char *out_text, size_t out_size,
                               OcGenResult *result)
 {
+    (void)gen_cfg;
     if (!engine || !prompt || !out_text) return OC_ERR_INVALID_ARG;
     if (!engine->loaded) return OC_ERR_MODEL;
 
