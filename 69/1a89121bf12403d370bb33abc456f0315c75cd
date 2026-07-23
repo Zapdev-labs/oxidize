@@ -1,0 +1,23 @@
+oxidize-c/include/oxidize/workspace.h
+  s_96ddc277ba047e::t_3e0a059fd4e191 1-91
+oxidize-c/src/model/workspace.c
+  s_96ddc277ba047e::t_4d2f986502c486 1-166
+oxidize-c/tests/test_workspace.c
+  s_96ddc277ba047e::t_e635d24d2762e8 1-164
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "691a89121bf12403d370bb33abc456f0315c75cd",
+  "prompts": {},
+  "sessions": {
+    "s_96ddc277ba047e": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "ea8ad242-b091-46af-96e0-114c0c67fea4",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
