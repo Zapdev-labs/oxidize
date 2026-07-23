@@ -56,6 +56,7 @@ float oc_oxk_dot_q8_0_q8_0_avx512_vnni(const uint8_t *row, size_t blocks,
                                         const uint8_t *q8)
 {
     int32_t isum = 0;
+    (void)isum; /* VNNI dot products computed in second loop for scaling. */
     for (size_t b = 0; b < blocks; b++) {
         const uint8_t *wb = row + b * OC_OXK_BLOCK_Q8_0_SIZE;
         const uint8_t *qb = q8  + b * OC_OXK_BLOCK_Q8_0_SIZE;

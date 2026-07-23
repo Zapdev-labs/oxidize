@@ -63,7 +63,7 @@ OcError oc_turboquant_calibrate(OcTurboQuant *tq, const float *data, size_t n)
         /* Compute the mean absolute value to detect skew. */
         double sum_abs = 0.0;
         for (size_t i = 0; i < tq->calibration_count; i++) {
-            sum_abs += fabsf((double)tq->calibration_data[i]);
+            sum_abs += fabs((double)tq->calibration_data[i]);
         }
         double mean_abs = sum_abs / (double)tq->calibration_count;
         /* If the data is highly skewed (mean << max), boost scales to

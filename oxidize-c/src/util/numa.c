@@ -71,10 +71,11 @@ OcError oc_numa_detect(OcNumaTopology *out)
         node->node_id = (uint32_t)atoi(ent->d_name + 4);
 
         /* Read CPU list. */
-        char path[256];
+        char path[512];
         char buf[8192];
-        snprintf(path, sizeof(path),
+        int n = snprintf(path, sizeof(path),
                  "/sys/devices/system/node/%s/cpulist", ent->d_name);
+        if (n < 0 || (size_t)n >= sizeof(path)) continue;
         if (read_file_to_buf(path, buf, sizeof(buf))) {
             /* Parse comma-separated ranges (e.g., "0-15,32-47"). */
             const char *p = buf;
@@ -97,8 +98,9 @@ OcError oc_numa_detect(OcNumaTopology *out)
         }
 
         /* Read memory info. */
-        snprintf(path, sizeof(path),
+        n = snprintf(path, sizeof(path),
                  "/sys/devices/system/node/%s/meminfo", ent->d_name);
+        if (n < 0 || (size_t)n >= sizeof(path)) continue;
         if (read_file_to_buf(path, buf, sizeof(buf))) {
             char *line = strtok(buf, "\n");
             while (line) {

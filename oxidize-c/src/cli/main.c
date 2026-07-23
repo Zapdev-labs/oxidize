@@ -302,7 +302,10 @@ static OcError run_generation(const OcCliArgs *args)
         if (decode_start > 0 && emitted > 0) {
             double elapsed = wall_now() - decode_start;
             if (elapsed > 0) {
-                oc_log(OC_LOG_INFO, "speed: %.2f tok/s", (double)emitted / elapsed);
+                double tps = (double)emitted / elapsed;
+                fprintf(stderr, "\n%.2f tok/s (%zu tokens in %.3fs)\n",
+                        tps, emitted, elapsed);
+                oc_log(OC_LOG_INFO, "speed: %.2f tok/s", tps);
             }
         }
     }

@@ -290,7 +290,7 @@ OcError oc_chat_tpl_add_generation_prompt(const OcChatTemplate *tpl,
         snprintf(out, cap, "<|assistant|>\n");
         break;
     default:
-        snprintf(out, cap, "");
+        if (cap > 0) out[0] = '\0';
         break;
     }
     return OC_OK;

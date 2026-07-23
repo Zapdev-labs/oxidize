@@ -199,6 +199,7 @@ float oc_grad_get_lr(const OcGradientState *state)
  * activation.c so the gradient path stays bit-exact with the forward path. */
 float oc_gelu_exact_f32(float x);
 
+__attribute__((unused))
 static float oc_silu_f32(float x)
 {
     return x / (1.0f + expf(-x));
