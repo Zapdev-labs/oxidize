@@ -1,0 +1,184 @@
+/*
+ * inference.c — High-level inference engine implementation.
+ */
+#include "oxidize/inference.h"
+
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+
+static void copy_str(char *dst, size_t cap, const char *src)
+{
+    if (!dst || cap == 0 || !src) { if (dst && cap > 0) dst[0] = '\0'; return; }
+    size_t n = strlen(src);
+    if (n >= cap) n = cap - 1;
+    memcpy(dst, src, n);
+    dst[n] = '\0';
+}
+
+OcError oc_inf_config_init(OcInfConfig *cfg)
+{
+    if (!cfg) return OC_ERR_INVALID_ARG;
+    memset(cfg, 0, sizeof(*cfg));
+    cfg->model_type = OC_INF_MODEL_LLAMA;
+    cfg->model_path = NULL;
+    cfg->n_threads = 0; /* 0 = auto */
+    cfg->n_ctx = 4096;
+    cfg->n_batch = 512;
+    cfg->use_gpu = false;
+    cfg->use_numa = false;
+    cfg->verbose = false;
+    return OC_OK;
+}
+
+OcError oc_inf_engine_init(OcInfEngine *engine, const OcInfConfig *cfg)
+{
+    if (!engine) return OC_ERR_INVALID_ARG;
+    memset(engine, 0, sizeof(*engine));
+    if (cfg) {
+        engine->config = *cfg;
+    } else {
+        oc_inf_config_init(&engine->config);
+    }
+    engine->loaded = false;
+    engine->n_loaded_layers = 0;
+    engine->model_size_bytes = 0;
+    return OC_OK;
+}
+
+OcError oc_inf_engine_load(OcInfEngine *engine, const char *model_path)
+{
+    if (!engine || !model_path) return OC_ERR_INVALID_ARG;
+    /* Stub: in real implementation, load GGUF model. */
+    engine->config.model_path = model_path;
+    engine->loaded = true;
+    engine->n_loaded_layers = 32;
+    engine->model_size_bytes = 4096 * 1024 * 1024; /* 4 GB stub */
+    return OC_OK;
+}
+
+OcError oc_inf_engine_generate(OcInfEngine *engine, const char *prompt,
+                              const OcGenConfig *gen_cfg,
+                              char *out_text, size_t out_size,
+                              OcGenResult *result)
+{
+    if (!engine || !prompt || !out_text) return OC_ERR_INVALID_ARG;
+    if (!engine->loaded) return OC_ERR_MODEL;
+
+    if (out_size > 0) out_text[0] = '\0';
+    if (result) {
+        memset(result, 0, sizeof(*result));
+        result->n_prompt_tokens = strlen(prompt);
+        result->stopped_on_eos = true;
+    }
+    return OC_OK;
+}
+
+OcError oc_inf_engine_encode(OcInfEngine *engine, const char *text,
+                            uint32_t **out_tokens, size_t *out_n)
+{
+    if (!engine || !text || !out_tokens || !out_n) return OC_ERR_INVALID_ARG;
+    if (!engine->loaded) return OC_ERR_MODEL;
+
+    size_t len = strlen(text);
+    if (len > OC_INF_MAX_CONTEXT) len = OC_INF_MAX_CONTEXT;
+
+    uint32_t *tokens = malloc(len * sizeof(uint32_t));
+    if (!tokens) return OC_ERR_OOM;
+    for (size_t i = 0; i < len; i++)
+        tokens[i] = (uint32_t)(unsigned char)text[i];
+
+    *out_tokens = tokens;
+    *out_n = len;
+    return OC_OK;
+}
+
+OcError oc_inf_engine_decode(OcInfEngine *engine, const uint32_t *tokens,
+                           size_t n, char *out, size_t out_size)
+{
+    if (!engine || !tokens || !out) return OC_ERR_INVALID_ARG;
+    if (!engine->loaded) return OC_ERR_MODEL;
+
+    size_t copy_n = n < out_size - 1 ? n : out_size - 1;
+    for (size_t i = 0; i < copy_n; i++)
+        out[i] = (char)(tokens[i] & 0xFF);
+    out[copy_n] = '\0';
+    return OC_OK;
+}
+
+OcError oc_inf_engine_stats(const OcInfEngine *engine,
+                           char *out, size_t out_size)
+{
+    if (!engine || !out || out_size == 0) return OC_ERR_INVALID_ARG;
+    snprintf(out, out_size,
+        "=== Inference Engine Stats ===\n"
+        "Model type: %s\n"
+        "Loaded: %s\n"
+        "Layers: %u\n"
+        "Model size: %zu MB\n"
+        "Context: %u\n"
+        "Threads: %u\n"
+        "GPU: %s\n"
+        "NUMA: %s\n",
+        oc_inf_model_type_name(engine->config.model_type),
+        engine->loaded ? "yes" : "no",
+        engine->n_loaded_layers,
+        engine->model_size_bytes / (1024 * 1024),
+        engine->config.n_ctx,
+        engine->config.n_threads,
+        engine->config.use_gpu ? "yes" : "no",
+        engine->config.use_numa ? "yes" : "no");
+    return OC_OK;
+}
+
+bool oc_inf_engine_is_loaded(const OcInfEngine *engine)
+{
+    return engine ? engine->loaded : false;
+}
+
+OcInfModelType oc_inf_model_type_from_arch(const char *arch_name)
+{
+    if (!arch_name) return OC_INF_MODEL_LLAMA;
+    if (strcmp(arch_name, "llama") == 0) return OC_INF_MODEL_LLAMA;
+    if (strcmp(arch_name, "mistral") == 0) return OC_INF_MODEL_MISTRAL;
+    if (strcmp(arch_name, "gemma") == 0) return OC_INF_MODEL_GEMMA;
+    if (strcmp(arch_name, "phi") == 0 || strcmp(arch_name, "phi2") == 0 ||
+        strcmp(arch_name, "phi3") == 0) return OC_INF_MODEL_PHI;
+    if (strcmp(arch_name, "glm") == 0 || strcmp(arch_name, "chatglm") == 0)
+        return OC_INF_MODEL_GLM;
+    if (strcmp(arch_name, "qwen") == 0 || strcmp(arch_name, "qwen2") == 0)
+        return OC_INF_MODEL_QWEN;
+    return OC_INF_MODEL_LLAMA;
+}
+
+const char *oc_inf_model_type_name(OcInfModelType type)
+{
+    switch (type) {
+    case OC_INF_MODEL_LLAMA:   return "llama";
+    case OC_INF_MODEL_MISTRAL: return "mistral";
+    case OC_INF_MODEL_GEMMA:   return "gemma";
+    case OC_INF_MODEL_PHI:     return "phi";
+    case OC_INF_MODEL_GLM:     return "glm";
+    case OC_INF_MODEL_QWEN:    return "qwen";
+    default: return "unknown";
+    }
+}
+
+const char *oc_inf_model_type_arch(OcInfModelType type)
+{
+    switch (type) {
+    case OC_INF_MODEL_LLAMA:   return "llama";
+    case OC_INF_MODEL_MISTRAL: return "mistral";
+    case OC_INF_MODEL_GEMMA:   return "gemma";
+    case OC_INF_MODEL_PHI:     return "phi3";
+    case OC_INF_MODEL_GLM:     return "chatglm";
+    case OC_INF_MODEL_QWEN:    return "qwen2";
+    default: return "llama";
+    }
+}
+
+void oc_inf_engine_free(OcInfEngine *engine)
+{
+    if (!engine) return;
+    memset(engine, 0, sizeof(*engine));
+}
