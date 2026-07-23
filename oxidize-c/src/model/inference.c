@@ -32,6 +32,79 @@ OcError oc_inf_config_init(OcInfConfig *cfg)
     return OC_OK;
 }
 
+/* ─── OcInferenceConfig (full model config) ────────────────────────────── */
+
+void oc_inference_config_init(OcInferenceConfig *cfg)
+{
+    if (!cfg) return;
+    memset(cfg, 0, sizeof(*cfg));
+    cfg->vocab_size          = 32000;
+    cfg->context_size        = 4096;
+    cfg->layer_count         = 32;
+    cfg->hidden_size         = 4096;
+    cfg->intermediate_size   = 11008;
+    cfg->num_attention_heads  = 32;
+    cfg->num_key_value_heads  = 32;
+    cfg->key_value_head_dim   = 0;  /* 0 = hidden/num_heads */
+    cfg->kv_cache_dtype       = 0;  /* f32 */
+    cfg->rms_norm_eps         = 1e-5f;
+    cfg->rope_theta           = 10000.0f;
+    cfg->model_type           = OC_INF_MODEL_LLAMA;
+    cfg->sliding_window       = 0;
+    cfg->alibi_num_heads      = 0;
+    cfg->rope_dim             = 0;
+    cfg->rope_theta_swa       = 0.0f;
+    cfg->sliding_window_pattern = 0;
+    cfg->num_experts          = 0;
+    cfg->num_experts_per_tok  = 0;
+    cfg->expert_intermediate_size = 0;
+    cfg->expert_gating_sigmoid = false;
+    cfg->expert_weights_scale = 1.0f;
+    cfg->expert_group_count   = 0;
+    cfg->expert_group_used_count = 0;
+    cfg->leading_dense_layers = 0;
+    cfg->shortconv_l_cache    = 0;
+    cfg->embedding_scale      = 1.0f;
+    cfg->gelu_ffn             = false;
+    cfg->sandwich_norm        = false;
+    cfg->rms_norm_weight_plus_one = false;
+    cfg->nextn_predict_layers = 0;
+    cfg->yarn_factor          = 0.0f;
+    cfg->yarn_orig_ctx        = 0.0f;
+}
+
+uint32_t oc_inference_config_head_dim(const OcInferenceConfig *cfg)
+{
+    if (!cfg || cfg->num_attention_heads == 0) return 0;
+    return cfg->hidden_size / cfg->num_attention_heads;
+}
+
+uint32_t oc_inference_config_effective_rope_dim(const OcInferenceConfig *cfg)
+{
+    if (!cfg) return 0;
+    uint32_t hd = oc_inference_config_head_dim(cfg);
+    return cfg->rope_dim > 0 ? cfg->rope_dim : hd;
+}
+
+uint32_t oc_inference_config_kv_head_dim(const OcInferenceConfig *cfg)
+{
+    if (!cfg) return 0;
+    if (cfg->key_value_head_dim > 0) return cfg->key_value_head_dim;
+    return oc_inference_config_head_dim(cfg);
+}
+
+OcError oc_inference_config_validate(const OcInferenceConfig *cfg)
+{
+    if (!cfg) return OC_ERR_INVALID_ARG;
+    if (cfg->hidden_size == 0) return OC_ERR_INVALID_ARG;
+    if (cfg->num_attention_heads == 0) return OC_ERR_INVALID_ARG;
+    if (cfg->vocab_size == 0) return OC_ERR_INVALID_ARG;
+    if (cfg->layer_count == 0) return OC_ERR_INVALID_ARG;
+    if (cfg->hidden_size % cfg->num_attention_heads != 0)
+        return OC_ERR_INVALID_ARG;
+    return OC_OK;
+}
+
 OcError oc_inf_engine_init(OcInfEngine *engine, const OcInfConfig *cfg)
 {
     if (!engine) return OC_ERR_INVALID_ARG;

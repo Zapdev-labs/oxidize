@@ -29,6 +29,70 @@ typedef enum {
     OC_INF_MODEL_QWEN = 5,
 } OcInfModelType;
 
+/* Full inference configuration mirroring Rust InferenceConfig.
+ * Used by the engine to configure model architecture parameters. */
+typedef struct {
+    /* Basic dimensions. */
+    uint32_t vocab_size;
+    uint32_t context_size;
+    uint32_t layer_count;
+    uint32_t hidden_size;
+    uint32_t intermediate_size;
+    uint32_t num_attention_heads;
+    uint32_t num_key_value_heads;
+    uint32_t key_value_head_dim;       /* 0 = hidden/num_heads */
+    uint32_t kv_cache_dtype;           /* 0=f32, 1=f16 */
+    float    rms_norm_eps;
+    float    rope_theta;
+    OcInfModelType model_type;
+
+    /* Attention / positional. */
+    uint32_t sliding_window;           /* 0 = full attention */
+    uint32_t alibi_num_heads;           /* 0 = not used */
+    uint32_t rope_dim;                  /* 0 = full head_dim */
+    float    rope_theta_swa;            /* 0 = use rope_theta */
+    uint32_t sliding_window_pattern;    /* 0 = no interleaving */
+
+    /* MoE. */
+    uint32_t num_experts;
+    uint32_t num_experts_per_tok;
+    uint32_t expert_intermediate_size;   /* 0 = intermediate_size */
+    bool     expert_gating_sigmoid;
+    float    expert_weights_scale;
+    uint32_t expert_group_count;
+    uint32_t expert_group_used_count;
+    uint32_t leading_dense_layers;
+
+    /* Architecture-specific. */
+    uint32_t shortconv_l_cache;         /* LFM2 conv kernel width */
+    float    embedding_scale;           /* Gemma: sqrt(hidden) */
+    bool     gelu_ffn;                  /* Gemma: GeGLU vs SwiGLU */
+    bool     sandwich_norm;             /* Gemma: pre-residual norms */
+    bool     rms_norm_weight_plus_one;  /* Qwen: (1+w) norm */
+    uint32_t nextn_predict_layers;      /* MTP/nextn draft layers */
+
+    /* YaRN rope extension. */
+    float    yarn_factor;               /* 0 = disabled */
+    float    yarn_orig_ctx;             /* original context length */
+} OcInferenceConfig;
+
+/* Initialize with Rust Default values. */
+void oc_inference_config_init(OcInferenceConfig *cfg);
+
+/* Compute head_dim = hidden_size / num_attention_heads. */
+uint32_t oc_inference_config_head_dim(const OcInferenceConfig *cfg);
+
+/* Compute effective RoPE dimension (rope_dim or head_dim). */
+uint32_t oc_inference_config_effective_rope_dim(const OcInferenceConfig *cfg);
+
+/* Compute KV head dim (key_value_head_dim or head_dim). */
+uint32_t oc_inference_config_kv_head_dim(const OcInferenceConfig *cfg);
+
+/* Validate config: check hidden_size > 0, num_heads > 0, etc. */
+OcError oc_inference_config_validate(const OcInferenceConfig *cfg);
+
+/* ─── Legacy CLI config (still used by the CLI) ────────────────────────── */
+
 typedef struct {
     OcInfModelType model_type;
     const char *model_path;

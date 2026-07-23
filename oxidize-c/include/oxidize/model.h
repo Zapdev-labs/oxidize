@@ -81,6 +81,18 @@ bool oc_model_arch_uses_mla(OcModelArchitecture arch);
 /* Whether this architecture uses Alibi positional encoding (no RoPE). */
 bool oc_model_arch_uses_alibi(OcModelArchitecture arch);
 
+/* Whether this architecture uses sliding window attention.
+ * Qwen and Mistral use SWA. */
+bool oc_model_arch_uses_sliding_window(OcModelArchitecture arch);
+
+/* Whether this architecture uses LFM2 short-convolution token mixing on
+ * non-attention layers (in addition to interleaved GQA attention layers). */
+bool oc_model_arch_uses_shortconv(OcModelArchitecture arch);
+
+/* Whether this architecture uses parallel attention + FFN (fused residual).
+ * Gemma and Phi use this pattern. */
+bool oc_model_arch_uses_parallel_attn_ffn(OcModelArchitecture arch);
+
 /* Map a HuggingFace tensor name to the oxidize canonical form for the given
  * architecture. Returns an arena-owned, NUL-terminated string (so the caller
  * must keep `arena` alive for the lifetime of the result). If the name does

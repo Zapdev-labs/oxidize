@@ -169,6 +169,21 @@ bool oc_model_arch_uses_alibi(OcModelArchitecture arch)
     }
 }
 
+bool oc_model_arch_uses_sliding_window(OcModelArchitecture arch)
+{
+    return arch == OC_ARCH_QWEN || arch == OC_ARCH_MISTRAL;
+}
+
+bool oc_model_arch_uses_shortconv(OcModelArchitecture arch)
+{
+    return arch == OC_ARCH_LFM2 || arch == OC_ARCH_LFM2_MOE;
+}
+
+bool oc_model_arch_uses_parallel_attn_ffn(OcModelArchitecture arch)
+{
+    return arch == OC_ARCH_GEMMA || arch == OC_ARCH_PHI;
+}
+
 /* ─── Tensor name mapping ────────────────────────────────────────────────
  *
  * Mirrors Rust `map_tensor_name(architecture, name)`:

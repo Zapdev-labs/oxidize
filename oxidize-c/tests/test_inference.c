@@ -1,6 +1,7 @@
 /* test_inference.c — Inference engine tests. */
 #include <criterion/criterion.h>
 #include "oxidize/inference.h"
+#include "oxidize/model.h"
 #include <string.h>
 
 Test(inf, config_init)
@@ -189,4 +190,228 @@ Test(inf, encode_decode_roundtrip)
     cr_assert_str_eq(out, text);
     free(tokens);
     oc_inf_engine_free(&engine);
+}
+
+/* ─── OcInferenceConfig tests ─────────────────────────────────────────── */
+
+Test(inf_cfg, init_defaults)
+{
+    OcInferenceConfig cfg;
+    oc_inference_config_init(&cfg);
+    cr_assert_eq(cfg.vocab_size, 32000);
+    cr_assert_eq(cfg.context_size, 4096);
+    cr_assert_eq(cfg.layer_count, 32);
+    cr_assert_eq(cfg.hidden_size, 4096);
+    cr_assert_eq(cfg.intermediate_size, 11008);
+    cr_assert_eq(cfg.num_attention_heads, 32);
+    cr_assert_eq(cfg.num_key_value_heads, 32);
+    cr_assert_eq(cfg.key_value_head_dim, 0);
+    cr_assert_eq(cfg.kv_cache_dtype, 0);
+    cr_assert_float_eq(cfg.rms_norm_eps, 1e-5f, 1e-7f);
+    cr_assert_float_eq(cfg.rope_theta, 10000.0f, 0.01f);
+    cr_assert_eq(cfg.model_type, OC_INF_MODEL_LLAMA);
+    cr_assert_eq(cfg.sliding_window, 0);
+    cr_assert_eq(cfg.num_experts, 0);
+    cr_assert_eq(cfg.expert_weights_scale, 1.0f);
+    cr_assert_eq(cfg.embedding_scale, 1.0f);
+    cr_assert(!cfg.gelu_ffn);
+    cr_assert(!cfg.sandwich_norm);
+    cr_assert(!cfg.rms_norm_weight_plus_one);
+    cr_assert_eq(cfg.nextn_predict_layers, 0);
+    cr_assert_eq(cfg.yarn_factor, 0.0f);
+}
+
+Test(inf_cfg, head_dim)
+{
+    OcInferenceConfig cfg;
+    oc_inference_config_init(&cfg);
+    /* hidden=4096, heads=32 -> head_dim=128 */
+    cr_assert_eq(oc_inference_config_head_dim(&cfg), 128);
+}
+
+Test(inf_cfg, head_dim_custom)
+{
+    OcInferenceConfig cfg;
+    oc_inference_config_init(&cfg);
+    cfg.hidden_size = 2048;
+    cfg.num_attention_heads = 16;
+    cr_assert_eq(oc_inference_config_head_dim(&cfg), 128);
+}
+
+Test(inf_cfg, head_dim_null)
+{
+    cr_assert_eq(oc_inference_config_head_dim(NULL), 0);
+}
+
+Test(inf_cfg, effective_rope_dim_default)
+{
+    OcInferenceConfig cfg;
+    oc_inference_config_init(&cfg);
+    /* rope_dim=0 -> falls back to head_dim=128 */
+    cr_assert_eq(oc_inference_config_effective_rope_dim(&cfg), 128);
+}
+
+Test(inf_cfg, effective_rope_dim_partial)
+{
+    OcInferenceConfig cfg;
+    oc_inference_config_init(&cfg);
+    cfg.rope_dim = 64;  /* MiniMax-style partial RoPE */
+    cr_assert_eq(oc_inference_config_effective_rope_dim(&cfg), 64);
+}
+
+Test(inf_cfg, kv_head_dim_default)
+{
+    OcInferenceConfig cfg;
+    oc_inference_config_init(&cfg);
+    /* key_value_head_dim=0 -> falls back to head_dim=128 */
+    cr_assert_eq(oc_inference_config_kv_head_dim(&cfg), 128);
+}
+
+Test(inf_cfg, kv_head_dim_custom)
+{
+    OcInferenceConfig cfg;
+    oc_inference_config_init(&cfg);
+    cfg.key_value_head_dim = 96;
+    cr_assert_eq(oc_inference_config_kv_head_dim(&cfg), 96);
+}
+
+Test(inf_cfg, validate_ok)
+{
+    OcInferenceConfig cfg;
+    oc_inference_config_init(&cfg);
+    cr_assert_eq(oc_inference_config_validate(&cfg), OC_OK);
+}
+
+Test(inf_cfg, validate_null)
+{
+    cr_assert_neq(oc_inference_config_validate(NULL), OC_OK);
+}
+
+Test(inf_cfg, validate_zero_hidden)
+{
+    OcInferenceConfig cfg;
+    oc_inference_config_init(&cfg);
+    cfg.hidden_size = 0;
+    cr_assert_neq(oc_inference_config_validate(&cfg), OC_OK);
+}
+
+Test(inf_cfg, validate_zero_heads)
+{
+    OcInferenceConfig cfg;
+    oc_inference_config_init(&cfg);
+    cfg.num_attention_heads = 0;
+    cr_assert_neq(oc_inference_config_validate(&cfg), OC_OK);
+}
+
+Test(inf_cfg, validate_mismatch_heads)
+{
+    OcInferenceConfig cfg;
+    oc_inference_config_init(&cfg);
+    cfg.hidden_size = 100;
+    cfg.num_attention_heads = 32;  /* 100 % 32 != 0 */
+    cr_assert_neq(oc_inference_config_validate(&cfg), OC_OK);
+}
+
+Test(inf_cfg, gqa_config)
+{
+    OcInferenceConfig cfg;
+    oc_inference_config_init(&cfg);
+    cfg.num_key_value_heads = 8;  /* GQA: 32 query heads, 8 KV heads */
+    cr_assert_eq(oc_inference_config_kv_head_dim(&cfg), 128);
+}
+
+Test(inf_cfg, gemma_config)
+{
+    OcInferenceConfig cfg;
+    oc_inference_config_init(&cfg);
+    cfg.model_type = OC_INF_MODEL_GEMMA;
+    cfg.gelu_ffn = true;
+    cfg.sandwich_norm = true;
+    cfg.embedding_scale = 64.0f;  /* sqrt(4096) */
+    cfg.rms_norm_weight_plus_one = true;
+    cr_assert(cfg.gelu_ffn);
+    cr_assert(cfg.sandwich_norm);
+    cr_assert(cfg.rms_norm_weight_plus_one);
+    cr_assert_float_eq(cfg.embedding_scale, 64.0f, 0.01f);
+}
+
+Test(inf_cfg, moe_config)
+{
+    OcInferenceConfig cfg;
+    oc_inference_config_init(&cfg);
+    cfg.num_experts = 8;
+    cfg.num_experts_per_tok = 2;
+    cfg.expert_intermediate_size = 1792;
+    cfg.expert_weights_scale = 2.827f;
+    cfg.expert_gating_sigmoid = true;
+    cfg.expert_group_count = 4;
+    cfg.expert_group_used_count = 1;
+    cr_assert_eq(cfg.num_experts, 8);
+    cr_assert_eq(cfg.num_experts_per_tok, 2);
+    cr_assert_eq(cfg.expert_intermediate_size, 1792);
+    cr_assert(cfg.expert_gating_sigmoid);
+}
+
+Test(inf_cfg, yarn_config)
+{
+    OcInferenceConfig cfg;
+    oc_inference_config_init(&cfg);
+    cfg.yarn_factor = 1.5f;
+    cfg.yarn_orig_ctx = 8192.0f;
+    cr_assert_float_eq(cfg.yarn_factor, 1.5f, 0.001f);
+    cr_assert_float_eq(cfg.yarn_orig_ctx, 8192.0f, 0.01f);
+}
+
+/* ─── Model arch trait method tests ───────────────────────────────────── */
+
+Test(arch_traits, sliding_window)
+{
+    cr_assert(oc_model_arch_uses_sliding_window(OC_ARCH_QWEN));
+    cr_assert(oc_model_arch_uses_sliding_window(OC_ARCH_MISTRAL));
+    cr_assert(!oc_model_arch_uses_sliding_window(OC_ARCH_LLAMA));
+    cr_assert(!oc_model_arch_uses_sliding_window(OC_ARCH_GEMMA));
+}
+
+Test(arch_traits, shortconv)
+{
+    cr_assert(oc_model_arch_uses_shortconv(OC_ARCH_LFM2));
+    cr_assert(oc_model_arch_uses_shortconv(OC_ARCH_LFM2_MOE));
+    cr_assert(!oc_model_arch_uses_shortconv(OC_ARCH_LLAMA));
+    cr_assert(!oc_model_arch_uses_shortconv(OC_ARCH_QWEN));
+}
+
+Test(arch_traits, parallel_attn_ffn)
+{
+    cr_assert(oc_model_arch_uses_parallel_attn_ffn(OC_ARCH_GEMMA));
+    cr_assert(oc_model_arch_uses_parallel_attn_ffn(OC_ARCH_PHI));
+    cr_assert(!oc_model_arch_uses_parallel_attn_ffn(OC_ARCH_LLAMA));
+    cr_assert(!oc_model_arch_uses_parallel_attn_ffn(OC_ARCH_MISTRAL));
+}
+
+Test(arch_traits, moe)
+{
+    cr_assert(oc_model_arch_uses_moe(OC_ARCH_MIXTRAL));
+    cr_assert(oc_model_arch_uses_moe(OC_ARCH_DEEPSEEK));
+    cr_assert(oc_model_arch_uses_moe(OC_ARCH_GLM_MOE_DSA));
+    cr_assert(oc_model_arch_uses_moe(OC_ARCH_HUNYUAN_MOE));
+    cr_assert(!oc_model_arch_uses_moe(OC_ARCH_LLAMA));
+    cr_assert(!oc_model_arch_uses_moe(OC_ARCH_QWEN));
+}
+
+Test(arch_traits, mla)
+{
+    cr_assert(oc_model_arch_uses_mla(OC_ARCH_DEEPSEEK));
+    cr_assert(oc_model_arch_uses_mla(OC_ARCH_GLM_MOE_DSA));
+    cr_assert(!oc_model_arch_uses_mla(OC_ARCH_LLAMA));
+    cr_assert(!oc_model_arch_uses_mla(OC_ARCH_MIXTRAL));
+}
+
+Test(arch_traits, alibi)
+{
+    cr_assert(oc_model_arch_uses_alibi(OC_ARCH_FALCON));
+    cr_assert(oc_model_arch_uses_alibi(OC_ARCH_GPT2));
+    cr_assert(oc_model_arch_uses_alibi(OC_ARCH_GPTJ));
+    cr_assert(oc_model_arch_uses_alibi(OC_ARCH_GPTNEOX));
+    cr_assert(!oc_model_arch_uses_alibi(OC_ARCH_LLAMA));
+    cr_assert(!oc_model_arch_uses_alibi(OC_ARCH_QWEN));
 }
