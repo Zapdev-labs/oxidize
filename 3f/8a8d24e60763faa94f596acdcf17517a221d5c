@@ -1,0 +1,32 @@
+oxidize-c/src/model/inference.c
+  s_96ddc277ba047e::t_0b313e185bf03d 1-184
+oxidize-c/include/oxidize/inference.h
+  s_96ddc277ba047e::t_32ef90e9efe2ca 1-75
+oxidize-c/include/oxidize/vision_config.h
+  s_96ddc277ba047e::t_78b536161ac1b2 1-43,52,54-59
+  s_96ddc277ba047e::t_1c536284e850eb 53
+  s_96ddc277ba047e::t_7d5e05e581a912 44-51
+oxidize-c/src/vision/vision_config.c
+  s_96ddc277ba047e::t_7009bf46cef7f5 1-121
+oxidize-c/tests/test_vision_config.c
+  s_96ddc277ba047e::t_521faf8ab7e26f 1,3-135
+  s_96ddc277ba047e::t_7aad481efbaa1f 2
+oxidize-c/tests/test_inference.c
+  s_96ddc277ba047e::t_f315745b1ac94c 1-192
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "3f8a8d24e60763faa94f596acdcf17517a221d5c",
+  "prompts": {},
+  "sessions": {
+    "s_96ddc277ba047e": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "ea8ad242-b091-46af-96e0-114c0c67fea4",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
