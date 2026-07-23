@@ -105,6 +105,30 @@ OcError oc_inference_config_validate(const OcInferenceConfig *cfg)
     return OC_OK;
 }
 
+bool oc_inference_config_layer_is_global(const OcInferenceConfig *cfg, uint32_t layer_idx)
+{
+    if (!cfg) return true;
+    if (cfg->sliding_window == 0) return true;
+    if (cfg->sliding_window_pattern == 0) return false;
+    return ((layer_idx + 1) % cfg->sliding_window_pattern) == 0;
+}
+
+float oc_inference_config_layer_rope_theta(const OcInferenceConfig *cfg, uint32_t layer_idx)
+{
+    if (!cfg) return 10000.0f;
+    if (cfg->rope_theta_swa > 0.0f && !oc_inference_config_layer_is_global(cfg, layer_idx))
+        return cfg->rope_theta_swa;
+    return cfg->rope_theta;
+}
+
+uint32_t oc_inference_config_layer_sliding_window(const OcInferenceConfig *cfg, uint32_t layer_idx)
+{
+    if (!cfg) return 0;
+    if (cfg->sliding_window > 0 && !oc_inference_config_layer_is_global(cfg, layer_idx))
+        return cfg->sliding_window;
+    return 0;
+}
+
 OcError oc_inf_engine_init(OcInfEngine *engine, const OcInfConfig *cfg)
 {
     if (!engine) return OC_ERR_INVALID_ARG;

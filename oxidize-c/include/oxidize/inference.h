@@ -91,6 +91,19 @@ uint32_t oc_inference_config_kv_head_dim(const OcInferenceConfig *cfg);
 /* Validate config: check hidden_size > 0, num_heads > 0, etc. */
 OcError oc_inference_config_validate(const OcInferenceConfig *cfg);
 
+/* Whether the given layer index uses global (full) attention vs sliding-window.
+ * - No SWA (sliding_window == 0): every layer is global.
+ * - Uniform SWA (pattern == 0): no layer is global.
+ * - Interleaved (pattern > 0): every pattern-th layer (1-indexed) is global. */
+bool oc_inference_config_layer_is_global(const OcInferenceConfig *cfg, uint32_t layer_idx);
+
+/* RoPE theta for the given layer: global layers use rope_theta;
+ * SWA layers use rope_theta_swa when set, otherwise rope_theta. */
+float oc_inference_config_layer_rope_theta(const OcInferenceConfig *cfg, uint32_t layer_idx);
+
+/* Effective sliding-window size for the given layer (0 = full attention). */
+uint32_t oc_inference_config_layer_sliding_window(const OcInferenceConfig *cfg, uint32_t layer_idx);
+
 /* ─── Legacy CLI config (still used by the CLI) ────────────────────────── */
 
 typedef struct {

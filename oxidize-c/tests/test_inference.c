@@ -362,6 +362,110 @@ Test(inf_cfg, yarn_config)
     cr_assert_float_eq(cfg.yarn_orig_ctx, 8192.0f, 0.01f);
 }
 
+Test(inf_cfg, layer_is_global_no_swa)
+{
+    OcInferenceConfig cfg;
+    oc_inference_config_init(&cfg);
+    /* No SWA -> all layers are global */
+    cr_assert(oc_inference_config_layer_is_global(&cfg, 0));
+    cr_assert(oc_inference_config_layer_is_global(&cfg, 5));
+    cr_assert(oc_inference_config_layer_is_global(&cfg, 31));
+}
+
+Test(inf_cfg, layer_is_global_uniform_swa)
+{
+    OcInferenceConfig cfg;
+    oc_inference_config_init(&cfg);
+    cfg.sliding_window = 4096;
+    cfg.sliding_window_pattern = 0;  /* uniform SWA: no global layers */
+    cr_assert(!oc_inference_config_layer_is_global(&cfg, 0));
+    cr_assert(!oc_inference_config_layer_is_global(&cfg, 5));
+}
+
+Test(inf_cfg, layer_is_global_interleaved)
+{
+    OcInferenceConfig cfg;
+    oc_inference_config_init(&cfg);
+    cfg.sliding_window = 1024;
+    cfg.sliding_window_pattern = 6;  /* Gemma-style: every 6th layer is global */
+    /* Layer 5 (0-indexed) -> (5+1)%6 == 0 -> global */
+    cr_assert(oc_inference_config_layer_is_global(&cfg, 5));
+    cr_assert(oc_inference_config_layer_is_global(&cfg, 11));
+    cr_assert(oc_inference_config_layer_is_global(&cfg, 17));
+    /* Layer 0 -> (0+1)%6 == 1 -> local */
+    cr_assert(!oc_inference_config_layer_is_global(&cfg, 0));
+    cr_assert(!oc_inference_config_layer_is_global(&cfg, 3));
+}
+
+Test(inf_cfg, layer_is_global_null)
+{
+    cr_assert(oc_inference_config_layer_is_global(NULL, 0));
+}
+
+Test(inf_cfg, layer_rope_theta_default)
+{
+    OcInferenceConfig cfg;
+    oc_inference_config_init(&cfg);
+    /* No SWA theta set -> all layers use rope_theta */
+    cr_assert_float_eq(oc_inference_config_layer_rope_theta(&cfg, 0), 10000.0f, 0.01f);
+    cr_assert_float_eq(oc_inference_config_layer_rope_theta(&cfg, 5), 10000.0f, 0.01f);
+}
+
+Test(inf_cfg, layer_rope_theta_swa)
+{
+    OcInferenceConfig cfg;
+    oc_inference_config_init(&cfg);
+    cfg.sliding_window = 1024;
+    cfg.sliding_window_pattern = 6;
+    cfg.rope_theta = 1000000.0f;       /* global layers */
+    cfg.rope_theta_swa = 10000.0f;     /* local layers */
+    /* Layer 5 is global -> uses rope_theta */
+    cr_assert_float_eq(oc_inference_config_layer_rope_theta(&cfg, 5), 1000000.0f, 0.01f);
+    /* Layer 0 is local -> uses rope_theta_swa */
+    cr_assert_float_eq(oc_inference_config_layer_rope_theta(&cfg, 0), 10000.0f, 0.01f);
+}
+
+Test(inf_cfg, layer_rope_theta_null)
+{
+    cr_assert_float_eq(oc_inference_config_layer_rope_theta(NULL, 0), 10000.0f, 0.01f);
+}
+
+Test(inf_cfg, layer_sliding_window_none)
+{
+    OcInferenceConfig cfg;
+    oc_inference_config_init(&cfg);
+    /* No SWA configured -> all layers return 0 (full attention) */
+    cr_assert_eq(oc_inference_config_layer_sliding_window(&cfg, 0), 0);
+    cr_assert_eq(oc_inference_config_layer_sliding_window(&cfg, 5), 0);
+}
+
+Test(inf_cfg, layer_sliding_window_uniform)
+{
+    OcInferenceConfig cfg;
+    oc_inference_config_init(&cfg);
+    cfg.sliding_window = 4096;
+    cfg.sliding_window_pattern = 0;  /* uniform: all layers are SWA */
+    cr_assert_eq(oc_inference_config_layer_sliding_window(&cfg, 0), 4096);
+    cr_assert_eq(oc_inference_config_layer_sliding_window(&cfg, 10), 4096);
+}
+
+Test(inf_cfg, layer_sliding_window_interleaved)
+{
+    OcInferenceConfig cfg;
+    oc_inference_config_init(&cfg);
+    cfg.sliding_window = 1024;
+    cfg.sliding_window_pattern = 6;
+    /* Layer 5 is global -> SW = 0 */
+    cr_assert_eq(oc_inference_config_layer_sliding_window(&cfg, 5), 0);
+    /* Layer 0 is local -> SW = 1024 */
+    cr_assert_eq(oc_inference_config_layer_sliding_window(&cfg, 0), 1024);
+}
+
+Test(inf_cfg, layer_sliding_window_null)
+{
+    cr_assert_eq(oc_inference_config_layer_sliding_window(NULL, 0), 0);
+}
+
 /* ─── Model arch trait method tests ───────────────────────────────────── */
 
 Test(arch_traits, sliding_window)
