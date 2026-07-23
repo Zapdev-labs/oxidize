@@ -89,6 +89,128 @@ void oc_apply_rope_f32(const float *in, float *out, size_t head_dim,
     }
 }
 
+/* ─── Softmax ──────────────────────────────────────────────────────────── */
+
+void oc_softmax_f32(const float *input, float *output, size_t n)
+{
+    if (n == 0 || !input || !output) return;
+
+    float max_val = input[0];
+    for (size_t i = 1; i < n; i++) {
+        if (input[i] > max_val) max_val = input[i];
+    }
+
+    double sum_exp = 0.0;
+    for (size_t i = 0; i < n; i++) {
+        float e = expf(input[i] - max_val);
+        output[i] = e;
+        sum_exp += (double)e;
+    }
+
+    float inv_sum = (float)(1.0 / sum_exp);
+    for (size_t i = 0; i < n; i++)
+        output[i] *= inv_sum;
+}
+
+/* ─── LayerNorm ────────────────────────────────────────────────────────── */
+
+void oc_layer_norm_f32(const float *input, const float *weight, const float *bias,
+                        float *output, size_t n, float eps)
+{
+    if (n == 0 || !input || !weight || !bias || !output) return;
+
+    float mean = 0.0f;
+    for (size_t i = 0; i < n; i++) mean += input[i];
+    mean /= (float)n;
+
+    float variance = 0.0f;
+    for (size_t i = 0; i < n; i++) {
+        float centered = input[i] - mean;
+        variance += centered * centered;
+    }
+    variance /= (float)n;
+
+    float inv_std = 1.0f / sqrtf(variance + eps);
+    for (size_t i = 0; i < n; i++)
+        output[i] = (input[i] - mean) * inv_std * weight[i] + bias[i];
+}
+
+/* ─── SwiGLU (non-inplace) ────────────────────────────────────────────── */
+
+void oc_swiglu_f32(const float *gate, const float *up, float *output, size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        float g = gate[i];
+        float sigmoid = 1.0f / (1.0f + expf(-g));
+        output[i] = g * sigmoid * up[i];
+    }
+}
+
+/* ─── Scaled Dot-Product Attention ────────────────────────────────────── */
+
+void oc_scaled_dot_product_attention_f32(const float *query,
+                                          const float *key,
+                                          const float *value,
+                                          size_t seq_len, size_t dim,
+                                          float *output)
+{
+    if (!query || !key || !value || !output || dim == 0) return;
+
+    for (size_t i = 0; i < dim; i++) output[i] = 0.0f;
+    if (seq_len == 0) return;
+
+    float scale = 1.0f / sqrtf((float)dim);
+
+    float running_max = -INFINITY;
+    float running_sum = 0.0f;
+    float *acc = output;
+
+    for (size_t t = 0; t < seq_len; t++) {
+        const float *k_row = &key[t * dim];
+        const float *v_row = &value[t * dim];
+
+        float score = 0.0f;
+        for (size_t i = 0; i < dim; i++)
+            score += query[i] * k_row[i];
+        score *= scale;
+
+        float old_max = running_max;
+        if (score > running_max) {
+            running_max = score;
+            float rescale = expf(old_max - running_max);
+            running_sum = running_sum * rescale + 1.0f;
+            for (size_t i = 0; i < dim; i++)
+                acc[i] = acc[i] * rescale + v_row[i];
+        } else {
+            float e = expf(score - running_max);
+            running_sum += e;
+            for (size_t i = 0; i < dim; i++)
+                acc[i] += v_row[i] * e;
+        }
+    }
+
+    float inv_sum = 1.0f / running_sum;
+    for (size_t i = 0; i < dim; i++)
+        acc[i] *= inv_sum;
+}
+
+/* ─── Qwen-style RMSNorm ───────────────────────────────────────────────── */
+
+void oc_rms_norm_f32_qwen(const float *x, const float *weight, float *out,
+                           size_t n, float eps, bool weight_plus_one)
+{
+    if (!x || !weight || !out || n == 0) return;
+
+    float ss = 0.0f;
+    for (size_t i = 0; i < n; i++)
+        ss += x[i] * x[i];
+
+    float inv_rms = 1.0f / sqrtf(ss / (float)n + eps);
+    for (size_t i = 0; i < n; i++) {
+        float w = weight_plus_one ? (1.0f + weight[i]) : weight[i];
+        out[i] = x[i] * inv_rms * w;
+    }
+}
 void oc_apply_rope_yarn_f32(const float *in, float *out, size_t head_dim,
                              size_t rope_len, int64_t position, float theta,
                              float yarn_factor, uint32_t yarn_orig_ctx)

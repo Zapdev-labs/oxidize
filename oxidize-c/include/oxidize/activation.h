@@ -13,6 +13,7 @@
 #ifndef OXIDIZE_ACTIVATION_H
 #define OXIDIZE_ACTIVATION_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -69,6 +70,33 @@ void oc_apply_rope_f32(const float *in, float *out, size_t head_dim,
 void oc_apply_rope_yarn_f32(const float *in, float *out, size_t head_dim,
                              size_t rope_len, int64_t position, float theta,
                              float yarn_factor, uint32_t yarn_orig_ctx);
+
+/* Softmax: out[i] = exp(x[i] - max) / sum(exp(x[j] - max)).
+ * Numerically stable (subtracts max before exp). Uses f64 accumulator. */
+void oc_softmax_f32(const float *input, float *output, size_t n);
+
+/* LayerNorm: out[i] = (x[i] - mean) * inv_std * weight[i] + bias[i],
+ * where mean = sum(x)/n, var = sum((x-mean)^2)/n, inv_std = 1/sqrt(var+eps). */
+void oc_layer_norm_f32(const float *input, const float *weight, const float *bias,
+                        float *output, size_t n, float eps);
+
+/* SwiGLU (non-inplace): out[i] = silu(gate[i]) * up[i].
+ * silu(x) = x * sigmoid(x) = x / (1 + exp(-x)). */
+void oc_swiglu_f32(const float *gate, const float *up, float *output, size_t n);
+
+/* Scaled dot-product attention for a single query against seq_len key/value pairs.
+ * query: [dim], key: [seq_len * dim], value: [seq_len * dim], output: [dim].
+ * scale = 1/sqrt(dim). Uses online softmax for numerical stability. */
+void oc_scaled_dot_product_attention_f32(const float *query,
+                                          const float *key,
+                                          const float *value,
+                                          size_t seq_len, size_t dim,
+                                          float *output);
+
+/* RMSNorm variant for Qwen: out[i] = x[i] * inv_rms * (1 + weight[i]).
+ * When weight_plus_one is false, behaves as standard rms_norm. */
+void oc_rms_norm_f32_qwen(const float *x, const float *weight, float *out,
+                           size_t n, float eps, bool weight_plus_one);
 
 #ifdef __cplusplus
 }
