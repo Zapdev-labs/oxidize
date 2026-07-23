@@ -4,7 +4,7 @@
 #include "oxidize/model.h"
 #include <string.h>
 
-Test(loader, init_free)
+Test(mloader, init_free)
 {
     OcModelLoader loader;
     cr_assert_eq(oc_model_loader_init(&loader, "/tmp/test.gguf"), OC_OK);
@@ -13,13 +13,13 @@ Test(loader, init_free)
     oc_model_loader_free(&loader);
 }
 
-Test(loader, init_null)
+Test(mloader, init_null)
 {
     cr_assert_neq(oc_model_loader_init(NULL, "/tmp/t.gguf"), OC_OK);
     cr_assert_neq(oc_model_loader_init((OcModelLoader[]){0}, NULL), OC_OK);
 }
 
-Test(loader, arch_name)
+Test(mloader, arch_name)
 {
     cr_assert_str_eq(oc_model_arch_name(OC_ARCH_LLAMA), "llama");
     cr_assert_str_eq(oc_model_arch_name(OC_ARCH_GPT2), "gpt2");
@@ -28,7 +28,7 @@ Test(loader, arch_name)
     cr_assert_str_eq(oc_model_arch_name(OC_ARCH_UNKNOWN), "unknown");
 }
 
-Test(loader, arch_parse)
+Test(mloader, arch_parse)
 {
     cr_assert_eq(oc_model_arch_from_str("llama"), OC_ARCH_LLAMA);
     cr_assert_eq(oc_model_arch_from_str("gpt2"), OC_ARCH_GPT2);
@@ -36,7 +36,7 @@ Test(loader, arch_parse)
     cr_assert_eq(oc_model_arch_from_str("unknown"), OC_ARCH_UNKNOWN);
 }
 
-Test(loader, load_nonexistent)
+Test(mloader, load_nonexistent)
 {
     OcModelLoader loader;
     oc_model_loader_init(&loader, "/nonexistent/path/model.gguf");
@@ -44,14 +44,14 @@ Test(loader, load_nonexistent)
     oc_model_loader_free(&loader);
 }
 
-Test(loader, load_empty_path)
+Test(mloader, load_empty_path)
 {
     OcModelLoader loader;
     memset(&loader, 0, sizeof(loader));
     cr_assert_neq(oc_model_loader_load(&loader), OC_OK);
 }
 
-Test(loader, get_tensor_empty)
+Test(mloader, get_tensor_empty)
 {
     OcModelLoader loader;
     oc_model_loader_init(&loader, "/tmp/test.gguf");
@@ -60,12 +60,12 @@ Test(loader, get_tensor_empty)
     oc_model_loader_free(&loader);
 }
 
-Test(loader, get_tensor_null)
+Test(mloader, get_tensor_null)
 {
     cr_assert_neq(oc_model_loader_get_tensor(NULL, "x", NULL), OC_OK);
 }
 
-Test(loader, list_tensors_empty)
+Test(mloader, list_tensors_empty)
 {
     OcModelLoader loader;
     oc_model_loader_init(&loader, "/tmp/test.gguf");
@@ -76,12 +76,12 @@ Test(loader, list_tensors_empty)
     oc_model_loader_free(&loader);
 }
 
-Test(loader, list_tensors_null)
+Test(mloader, list_tensors_null)
 {
     cr_assert_neq(oc_model_loader_list_tensors(NULL, NULL, NULL), OC_OK);
 }
 
-Test(loader, param_count_empty)
+Test(mloader, param_count_empty)
 {
     OcModelLoader loader;
     oc_model_loader_init(&loader, "/tmp/test.gguf");
@@ -89,12 +89,12 @@ Test(loader, param_count_empty)
     oc_model_loader_free(&loader);
 }
 
-Test(loader, param_count_null)
+Test(mloader, param_count_null)
 {
     cr_assert_eq(oc_model_loader_param_count(NULL), 0);
 }
 
-Test(loader, double_load)
+Test(mloader, double_load)
 {
     OcModelLoader loader;
     oc_model_loader_init(&loader, "/nonexistent.gguf");
@@ -104,7 +104,7 @@ Test(loader, double_load)
     oc_model_loader_free(&loader);
 }
 
-Test(loader, arch_name_all)
+Test(mloader, arch_name_all)
 {
     /* Test a subset of architectures. */
     const OcModelArchitecture archs[] = {OC_ARCH_LLAMA, OC_ARCH_GPT2, OC_ARCH_FALCON, OC_ARCH_QWEN};
@@ -115,7 +115,7 @@ Test(loader, arch_name_all)
     }
 }
 
-Test(loader, arch_roundtrip)
+Test(mloader, arch_roundtrip)
 {
     const char *names[] = {"llama", "gpt2", "falcon", "qwen"};
     for (size_t i = 0; i < sizeof(names)/sizeof(names[0]); i++) {
