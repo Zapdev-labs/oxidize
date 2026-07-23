@@ -99,6 +99,70 @@ bool oc_inf_model_is_loaded(const OcInferenceModel *m);
 /* Check if continuous-batching decode is enabled. */
 bool oc_inf_model_batched_decode_enabled(void);
 
+/* ─── Forward pass methods (port of inference/forward.rs) ────────────── */
+
+/* Embed a token into workspace.x[..hidden_size].
+ * Handles F32 and quantized embeddings, embedding_scale. */
+void oc_inf_model_embed_token(OcInferenceModel *m, uint32_t token);
+
+/* Read the current hidden state from workspace.x[..hidden_size]. */
+const float *oc_inf_model_hidden_state(const OcInferenceModel *m);
+
+/* Get config hidden_size. */
+size_t oc_inf_model_config_hidden_size(const OcInferenceModel *m);
+
+/* Overwrite hidden state with `hidden` (len must == hidden_size). */
+OcError oc_inf_model_set_hidden_state(OcInferenceModel *m, const float *hidden, size_t len);
+
+/* Apply final RMSNorm using model's norm_weight and rms_norm_eps. */
+OcError oc_inf_model_apply_final_norm(const OcInferenceModel *m,
+                                       const float *hidden, float *out, size_t len);
+
+/* Get final norm weight pointer (read-only). */
+const float *oc_inf_model_final_norm_weight(const OcInferenceModel *m);
+
+/* Whether this model has a usable MTP/nextn draft block. */
+bool oc_inf_model_has_mtp(const OcInferenceModel *m);
+
+/* Number of nextn predict layers from config. */
+size_t oc_inf_model_nextn_predict_layers(const OcInferenceModel *m);
+
+/* Get last output hidden (final normed row for MTP). */
+const float *oc_inf_model_last_output_hidden(const OcInferenceModel *m);
+
+/* Configure which target layers are snapshotted for EAGLE3 feature fusion. */
+OcError oc_inf_model_set_eagle3_capture_layers(OcInferenceModel *m,
+                                                  const size_t *layers, size_t n);
+
+/* Concatenate EAGLE3 captured hidden rows into a single flat vector.
+ * Returns OC_ERR_NOT_FOUND if any capture layer is missing data.
+ * out must have capacity >= n_capture_layers * hidden_size. */
+OcError oc_inf_model_concat_eagle3_features(const OcInferenceModel *m,
+                                             float *out, size_t out_len);
+
+/* Project already-normalized hidden states through the output (lm_head) matrix.
+ * normed: [hidden_size], logits: [vocab_size]. */
+OcError oc_inf_model_lm_head_logits_from_normed(const OcInferenceModel *m,
+                                                  const float *normed, size_t normed_len,
+                                                  float *logits, size_t logits_len);
+
+/* Apply final RMSNorm + lm_head to workspace.x and return logits.
+ * Uses workspace.hidden_a for normed, workspace.logits for output.
+ * Sets last_output_hidden. Returns logits pointer and length via out/out_len. */
+OcError oc_inf_model_final_head_from_workspace(OcInferenceModel *m,
+                                                 float **out, size_t *out_len);
+
+/* Forward a single token through all layers (no logits).
+ * Updates KV cache, workspace.x, and EAGLE3 captures.
+ * position: absolute position of this token. */
+OcError oc_inf_model_forward_token(OcInferenceModel *m, uint32_t token, size_t position);
+
+/* Forward a single token through all layers and return logits.
+ * Convenience: forward_token + final_head_from_workspace. */
+OcError oc_inf_model_forward_token_logits(OcInferenceModel *m, uint32_t token,
+                                            size_t position,
+                                            float **logits, size_t *logits_len);
+
 #ifdef __cplusplus
 }
 #endif
