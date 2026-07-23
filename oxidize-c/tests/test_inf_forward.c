@@ -444,3 +444,62 @@ Test(inf_fwd, null_safety)
     cr_assert_eq(oc_inf_model_nextn_predict_layers(NULL), 0);
     cr_assert_null(oc_inf_model_last_output_hidden(NULL));
 }
+
+/* ─── MTP draft generation tests ───────────────────────────────────────── */
+
+Test(inf_fwd, mtp_draft_no_mtp)
+{
+    OcInferenceModel m;
+    setup_tiny_model(&m);
+
+    /* Model has no MTP block, should fail. */
+    uint32_t tokens[4];
+    float logits[64]; /* 4 * 16 */
+    size_t n;
+    OcError e = oc_inf_model_draft_mtp_tokens(&m, 0, m.workspace.x, 4,
+                                                 4, tokens, logits, &n);
+    cr_assert_neq(e, OC_OK);
+
+    oc_inf_model_free(&m);
+}
+
+Test(inf_fwd, mtp_draft_max_zero)
+{
+    OcInferenceModel m;
+    setup_tiny_model(&m);
+
+    /* max_tokens=0 should return OK with n=0. */
+    uint32_t tokens[1];
+    float logits[16];
+    size_t n = 999;
+    OcError e = oc_inf_model_draft_mtp_tokens(&m, 0, m.workspace.x, 4,
+                                                 0, tokens, logits, &n);
+    cr_assert_eq(e, OC_OK);
+    cr_assert_eq(n, 0);
+
+    oc_inf_model_free(&m);
+}
+
+Test(inf_fwd, mtp_draft_null_safety)
+{
+    OcInferenceModel m;
+    setup_tiny_model(&m);
+
+    uint32_t tokens[1];
+    float logits[16];
+    size_t n;
+    /* NULL model. */
+    cr_assert_neq(oc_inf_model_draft_mtp_tokens(NULL, 0, NULL, 0, 1,
+                                                   tokens, logits, &n), OC_OK);
+    /* NULL hidden. */
+    cr_assert_neq(oc_inf_model_draft_mtp_tokens(&m, 0, NULL, 4, 1,
+                                                   tokens, logits, &n), OC_OK);
+    /* Wrong hidden len. */
+    cr_assert_neq(oc_inf_model_draft_mtp_tokens(&m, 0, m.workspace.x, 3, 1,
+                                                   tokens, logits, &n), OC_OK);
+    /* NULL outputs. */
+    cr_assert_neq(oc_inf_model_draft_mtp_tokens(&m, 0, m.workspace.x, 4, 1,
+                                                   NULL, logits, &n), OC_OK);
+
+    oc_inf_model_free(&m);
+}

@@ -619,3 +619,279 @@ OcError oc_inf_model_forward_token_logits(OcInferenceModel *m, uint32_t token,
     if (e != OC_OK) return e;
     return oc_inf_model_final_head_from_workspace(m, logits, logits_len);
 }
+
+/* ─── MTP/nextn draft generation ───────────────────────────────────────── */
+
+/* Run one MTP forward step: embed + eh_proj + attn + ffn + lm_head.
+ * Writes the next hidden state to out_hidden [hidden_size].
+ * Writes logits to out_logits [vocab_size]. */
+static OcError mtp_forward_one(OcInferenceModel *m,
+                                 const OcMtpWeights *mtp,
+                                 uint32_t token,
+                                 const float *prev_hidden,
+                                 size_t pos,
+                                 float *out_hidden, size_t out_hidden_len,
+                                 float *out_logits, size_t out_logits_len)
+{
+    if (!m || !mtp || !prev_hidden || !out_hidden || !out_logits)
+        return OC_ERR_INVALID_ARG;
+
+    size_t h = m->config.hidden_size;
+    size_t vocab = m->config.vocab_size;
+    float eps = m->config.rms_norm_eps;
+
+    if (out_hidden_len < h) return OC_ERR_INVALID_ARG;
+    if (out_logits_len < vocab) return OC_ERR_INVALID_ARG;
+
+    /* 1. Token embedding lookup. */
+    float *token_emb = m->workspace.hidden_b;  /* [h] */
+    if (!token_emb) return OC_ERR_MODEL;
+    memset(token_emb, 0, h * sizeof(float));
+
+    const OcWeightStorage *emb_storage = &mtp->embed_tokens;
+    if (oc_weight_storage_is_empty(emb_storage))
+        emb_storage = &m->tok_embeddings;
+
+    uint32_t tok_idx = token;
+    if (tok_idx >= vocab && vocab > 0) tok_idx = vocab - 1;
+    oc_weight_storage_lookup_embedding(emb_storage, h, vocab, tok_idx, token_emb);
+
+    /* 2. Embed norm + hidden norm. */
+    float *embed_normed = m->workspace.intermediate_a;  /* [h] */
+    float *hidden_normed = m->workspace.intermediate_b;  /* [h] */
+    if (!embed_normed || !hidden_normed) return OC_ERR_MODEL;
+
+    if (mtp->enorm) {
+        oc_rms_norm_f32(token_emb, mtp->enorm, embed_normed, h, eps);
+    } else {
+        memcpy(embed_normed, token_emb, h * sizeof(float));
+    }
+    if (mtp->hnorm) {
+        oc_rms_norm_f32(prev_hidden, mtp->hnorm, hidden_normed, h, eps);
+    } else {
+        memcpy(hidden_normed, prev_hidden, h * sizeof(float));
+    }
+
+    /* 3. Concat [embed_normed, hidden_normed] -> eh_proj -> fused [h]. */
+    float *concat = m->workspace.shortconv_bcx;  /* [2*h] */
+    if (!concat) return OC_ERR_MODEL;
+    memcpy(concat, embed_normed, h * sizeof(float));
+    memcpy(concat + h, hidden_normed, h * sizeof(float));
+
+    float *fused = m->workspace.x;  /* [h] - overwrite workspace.x */
+    memset(fused, 0, h * sizeof(float));
+    OcError e = oc_gemv_weight(&mtp->eh_proj, h, h * 2, concat, fused);
+    if (e != OC_OK) return e;
+
+    /* 4. Run MTP attention + FFN layer in-place on workspace.x. */
+    const OcLayerWeights *layer = &mtp->layer;
+    uint32_t n_heads = m->config.num_attention_heads;
+    uint32_t kvh = m->config.num_key_value_heads;
+    uint32_t head_dim = oc_inference_config_head_dim(&m->config);
+    uint32_t kv_head_dim = oc_inference_config_kv_head_dim(&m->config);
+    uint32_t rope_len = oc_inference_config_effective_rope_dim(&m->config);
+    float rope_theta = m->config.rope_theta;
+
+    /* Attn norm. */
+    float *normed = m->workspace.hidden_a;
+    if (layer->attn_norm)
+        oc_rms_norm_f32(fused, layer->attn_norm, normed, h, eps);
+    else
+        memcpy(normed, fused, h * sizeof(float));
+
+    /* Q/K/V projections. */
+    uint32_t q_len = n_heads * head_dim;
+    uint32_t kv_len = kvh * kv_head_dim;
+    float *q_vec = m->workspace.q_full;
+    float *k_vec = m->workspace.k_vec;
+    float *v_vec = m->workspace.v_vec;
+    float *attn_out = m->workspace.attn_result;
+
+    if (!oc_weight_storage_is_empty(&layer->attn_q)) {
+        e = oc_gemv_weight(&layer->attn_q, q_len, h, normed, q_vec);
+        if (e != OC_OK) return e;
+        if (layer->attn_q_bias)
+            oc_add_repeating_bias(q_vec, q_len, layer->attn_q_bias, q_len);
+    }
+    if (!oc_weight_storage_is_empty(&layer->attn_k)) {
+        e = oc_gemv_weight(&layer->attn_k, kv_len, h, normed, k_vec);
+        if (e != OC_OK) return e;
+        if (layer->attn_k_bias)
+            oc_add_repeating_bias(k_vec, kv_len, layer->attn_k_bias, kv_len);
+    }
+    if (!oc_weight_storage_is_empty(&layer->attn_v)) {
+        e = oc_gemv_weight(&layer->attn_v, kv_len, h, normed, v_vec);
+        if (e != OC_OK) return e;
+        if (layer->attn_v_bias)
+            oc_add_repeating_bias(v_vec, kv_len, layer->attn_v_bias, kv_len);
+    }
+
+    /* Apply RoPE. */
+    for (uint32_t hd = 0; hd < n_heads; hd++) {
+        float *qh = q_vec + hd * head_dim;
+        oc_inference_config_apply_rope_head(&m->config, qh, qh, head_dim,
+                                             rope_len, (int64_t)pos, rope_theta);
+    }
+    for (uint32_t hd = 0; hd < kvh; hd++) {
+        float *kh = k_vec + hd * kv_head_dim;
+        oc_inference_config_apply_rope_head(&m->config, kh, kh, kv_head_dim,
+                                             rope_len, (int64_t)pos, rope_theta);
+    }
+
+    /* Attention: use SDPA against the model's KV cache at the MTP layer slot.
+     * For simplicity, we use a separate MTP KV cache appended to the main cache.
+     * The MTP block has its own KV context (pos 0..max_tokens-1). */
+    memset(attn_out, 0, q_len * sizeof(float));
+
+    /* Simple attention: attend against what we have so far.
+     * For the first draft token (pos=0), seq_len=1, attend to self. */
+    uint32_t seq_len = (uint32_t)pos + 1;
+    /* Use workspace scratch as a mini KV cache for MTP. */
+    /* For pos=0, K/V are just the current token's K/V. */
+    /* For pos>0, we would need to store previous K/V. Use workspace.kv_keys_copy. */
+    size_t kv_total = kv_len * seq_len;
+    float *mtp_keys = m->workspace.kv_keys_copy;
+    float *mtp_vals = m->workspace.kv_values_copy;
+    if (mtp_keys && mtp_vals && kv_total <= m->workspace.kv_copy_size) {
+        /* Store current K/V at position pos. */
+        memcpy(mtp_keys + pos * kv_len, k_vec, kv_len * sizeof(float));
+        memcpy(mtp_vals + pos * kv_len, v_vec, kv_len * sizeof(float));
+
+        /* SDPA per Q head. */
+        uint32_t n_rep = n_heads / (kvh > 0 ? kvh : 1);
+        for (uint32_t hd = 0; hd < n_heads; hd++) {
+            uint32_t kv_hd = hd / n_rep;
+            const float *q_head = q_vec + hd * head_dim;
+            const float *k_head = mtp_keys + kv_hd * kv_head_dim;
+            const float *v_head = mtp_vals + kv_hd * kv_head_dim;
+            float *out_head = attn_out + hd * head_dim;
+            oc_scaled_dot_product_attention_f32(
+                q_head, k_head, v_head, seq_len, kv_len, out_head);
+        }
+    }
+
+    /* Attn output projection + residual. */
+    if (!oc_weight_storage_is_empty(&layer->attn_output)) {
+        float *proj = m->workspace.hidden_b;
+        e = oc_gemv_weight(&layer->attn_output, h, q_len, attn_out, proj);
+        if (e != OC_OK) return e;
+        if (layer->attn_output_bias)
+            oc_add_repeating_bias(proj, h, layer->attn_output_bias, h);
+        for (size_t i = 0; i < h; i++)
+            fused[i] += proj[i];
+    }
+
+    /* FFN. */
+    float *ffn_norm_weight = NULL;
+    if (layer->post_attention_norm)
+        ffn_norm_weight = layer->post_attention_norm;
+    else if (layer->ffn_norm)
+        ffn_norm_weight = layer->ffn_norm;
+
+    if (ffn_norm_weight && oc_layer_weights_has_dense_ffn(layer)) {
+        oc_rms_norm_f32(fused, ffn_norm_weight, normed, h, eps);
+        size_t i_size = m->config.intermediate_size;
+        float *gate = m->workspace.intermediate_a;
+        float *up = m->workspace.intermediate_b;
+        e = oc_gemv_weight(&layer->ffn_gate, i_size, h, normed, gate);
+        if (e != OC_OK) return e;
+        e = oc_gemv_weight(&layer->ffn_up, i_size, h, normed, up);
+        if (e != OC_OK) return e;
+        if (m->config.gelu_ffn)
+            oc_geglu_inplace_f32(gate, up, i_size);
+        else
+            oc_swiglu_inplace_f32(gate, up, i_size);
+        float *ffn_out = m->workspace.hidden_b;
+        e = oc_gemv_weight(&layer->ffn_down, h, i_size, gate, ffn_out);
+        if (e != OC_OK) return e;
+        if (layer->ffn_down_bias)
+            oc_add_repeating_bias(ffn_out, h, layer->ffn_down_bias, h);
+        for (size_t i = 0; i < h; i++)
+            fused[i] += ffn_out[i];
+    }
+
+    /* 5. Final norm + lm_head. */
+    const float *norm_w = mtp->shared_head_norm ? mtp->shared_head_norm : m->norm_weight;
+    const OcWeightStorage *head_w = &mtp->shared_head_head;
+    if (oc_weight_storage_is_empty(head_w))
+        head_w = &m->output_weight;
+
+    oc_rms_norm_f32(fused, norm_w, out_hidden, h, eps);
+    memset(out_logits, 0, vocab * sizeof(float));
+    e = oc_gemv_weight(head_w, vocab, h, out_hidden, out_logits);
+    if (e != OC_OK) return e;
+
+    return OC_OK;
+}
+
+OcError oc_inf_model_draft_mtp_tokens(OcInferenceModel *m,
+                                        uint32_t start_token,
+                                        const float *start_hidden, size_t hidden_len,
+                                        size_t max_tokens,
+                                        uint32_t *out_tokens,
+                                        float *out_logits,
+                                        size_t *out_n)
+{
+    if (!m || !start_hidden || !out_tokens || !out_logits || !out_n)
+        return OC_ERR_INVALID_ARG;
+    if (hidden_len != m->config.hidden_size)
+        return OC_ERR_INVALID_ARG;
+    if (max_tokens == 0) {
+        *out_n = 0;
+        return OC_OK;
+    }
+    if (!oc_inf_model_has_mtp(m))
+        return OC_ERR_MODEL;
+
+    const OcMtpWeights *mtp = m->mtp;
+    size_t h = m->config.hidden_size;
+    size_t vocab = m->config.vocab_size;
+
+    /* Buffers for current step. */
+    float *cur_hidden = malloc(h * sizeof(float));
+    if (!cur_hidden) return OC_ERR_OOM;
+    memcpy(cur_hidden, start_hidden, h * sizeof(float));
+
+    uint32_t cur_token = start_token;
+    size_t n_generated = 0;
+
+    /* Allocate hidden buffer for step output. */
+    float *step_hidden = malloc(h * sizeof(float));
+    if (!step_hidden) { free(cur_hidden); return OC_ERR_OOM; }
+
+    for (size_t step = 0; step < max_tokens; step++) {
+        float *step_logits = out_logits + n_generated * vocab;
+
+        OcError e = mtp_forward_one(m, mtp, cur_token, cur_hidden, step,
+                                      step_hidden, h, step_logits, vocab);
+        if (e != OC_OK) {
+            free(cur_hidden);
+            free(step_hidden);
+            *out_n = n_generated;
+            return e;
+        }
+
+        /* Simple argmax sampling (no temperature/top-k for draft). */
+        uint32_t best = 0;
+        float best_v = step_logits[0];
+        for (size_t i = 1; i < vocab; i++) {
+            if (step_logits[i] > best_v) {
+                best_v = step_logits[i];
+                best = (uint32_t)i;
+            }
+        }
+
+        out_tokens[n_generated++] = best;
+        cur_token = best;
+
+        /* Swap hidden buffers. */
+        float *tmp = cur_hidden;
+        cur_hidden = step_hidden;
+        step_hidden = tmp;
+    }
+
+    free(cur_hidden);
+    free(step_hidden);
+    *out_n = n_generated;
+    return OC_OK;
+}

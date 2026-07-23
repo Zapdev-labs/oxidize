@@ -163,6 +163,26 @@ OcError oc_inf_model_forward_token_logits(OcInferenceModel *m, uint32_t token,
                                             size_t position,
                                             float **logits, size_t *logits_len);
 
+/* ─── MTP/nextn draft generation ──────────────────────────────────────── */
+
+/* Generate draft tokens using the native MTP/nextn block.
+ *
+ * start_token: the last committed target token.
+ * start_hidden: the final normed hidden state for start_token [hidden_size].
+ * max_tokens: maximum number of draft tokens to generate.
+ * out_tokens: output array (caller-allocated, size >= max_tokens).
+ * out_logits: output array of logits (caller-allocated, size >= max_tokens * vocab_size).
+ * out_n: actual number of draft tokens generated.
+ *
+ * Returns OC_ERR_MODEL if no usable MTP block is present. */
+OcError oc_inf_model_draft_mtp_tokens(OcInferenceModel *m,
+                                        uint32_t start_token,
+                                        const float *start_hidden, size_t hidden_len,
+                                        size_t max_tokens,
+                                        uint32_t *out_tokens,
+                                        float *out_logits,
+                                        size_t *out_n);
+
 #ifdef __cplusplus
 }
 #endif
