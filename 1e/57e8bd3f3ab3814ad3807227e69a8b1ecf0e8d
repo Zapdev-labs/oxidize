@@ -1,0 +1,29 @@
+oxidize-c/src/model/sampling.c
+  s_96ddc277ba047e::t_1d9b0e35b6d541 607
+  s_96ddc277ba047e::t_21287191b86f45 541-606,608-634,637-645,650-668,673-749
+  s_96ddc277ba047e::t_4233fbc3080cc3 635-636
+  s_96ddc277ba047e::t_74f1cd92208929 646-649
+  s_96ddc277ba047e::t_4d9d06fcd6a9bd 669-672
+oxidize-c/include/oxidize/sampling.h
+  s_96ddc277ba047e::t_7f08eeff77f09f 20-21
+  s_96ddc277ba047e::t_a6eb1286cf07bb 114-144
+oxidize-c/tests/test_beam_search.c
+  s_96ddc277ba047e::t_3250b59fcb2d92 1-3,5-100
+  s_96ddc277ba047e::t_1b5f70519e484d 4
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "1e57e8bd3f3ab3814ad3807227e69a8b1ecf0e8d",
+  "prompts": {},
+  "sessions": {
+    "s_96ddc277ba047e": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "ea8ad242-b091-46af-96e0-114c0c67fea4",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
