@@ -1,0 +1,58 @@
+oxidize-c/src/paged/block_pool.c
+  s_813a29d3105dfe::t_81d4f26d45bb42 1-12,14-67,69-79,81,83-87,89-97,99-107,109-120,122-126,128-132,134-138
+  s_813a29d3105dfe::t_86fe181f1cdacc 13,68,80,82,88,98,108,121,127,133
+oxidize-c/include/oxidize/frame_sampler.h
+  s_96ddc277ba047e::t_28956ba904595e 1-59
+oxidize-c/tests/test_kv_cache.c
+  s_813a29d3105dfe::t_bf31f35cdcc355 272-273
+  s_813a29d3105dfe::t_b5061bc316beb0 1-61,64-258,261-271,274-313
+  s_813a29d3105dfe::t_fbe24c65f7fe80 62-63
+  s_813a29d3105dfe::t_ad1d2849e8d24c 259-260
+oxidize-c/include/oxidize/block_pool.h
+  s_813a29d3105dfe::t_808ffc88c0585a 1-7,12,14-29,32,34-40,42-45,47-48,51-54,56-58,60-61,63-64,66-68,70-71,73-74,76-81
+  s_813a29d3105dfe::t_d8b9fd8d9f8dba 8-11,13,30-31,33,41,46,49-50,55,59,62,65,69,72,75
+oxidize-c/include/oxidize/web_worker.h
+  s_96ddc277ba047e::t_c7832b23e2f114 1-76
+oxidize-c/tests/test_block_pool.c
+  s_813a29d3105dfe::t_261e244071a694 10-11,19,28,33-35,40-43,45-46,51-58,64-65,70-77,79,84,89-91,93,95,97-99,104-106,108-110,115-118,125,130-132,134-136,141-150,155-160,163-167,172-175,178-179,181,183,186,193,198,204,210-215,221
+  s_813a29d3105dfe::t_fb75d87fa413e1 1-9,12-18,20-27,29-32,36-39,44,47-50,59-63,66-69,78,80-83,85-88,92,94,96,100-103,107,111-114,119-124,126-129,133,137-140,151-154,161-162,168-171,176-177,180,182,184-185,187-192,194-197,199-203,205-209,216-220,222
+oxidize-c/src/util/web_worker.c
+  s_96ddc277ba047e::t_bbc2ba5e14e7d3 1-153
+oxidize-c/src/compute/kv_cache.c
+  s_96ddc277ba047e::t_48d5479bd23868 156,158-159
+  s_813a29d3105dfe::t_9dc7c62013a1d3 1-101,115-119,121-155,157,160-184
+  s_813a29d3105dfe::t_9ea385f591922f 102-114,120
+oxidize-c/tests/test_web_worker.c
+  s_96ddc277ba047e::t_5d3beb9d5af26d 1-199
+oxidize-c/include/oxidize/kv_cache.h
+  s_813a29d3105dfe::t_8441a678656801 1-101
+oxidize-c/src/vision/frame_sampler.c
+  s_96ddc277ba047e::t_f8ccaaafe27064 1-137,139-183
+  s_96ddc277ba047e::t_195f65a6ab9d1b 138
+oxidize-c/tests/test_frame_sampler.c
+  s_96ddc277ba047e::t_0f3bbbc27d4ef2 1-151
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "09eb2e2abdce224e798e3b190d481d2e5495bd20",
+  "prompts": {},
+  "sessions": {
+    "s_813a29d3105dfe": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "f99b555b-0e63-41da-be1a-af6e795299ab",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_96ddc277ba047e": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "ea8ad242-b091-46af-96e0-114c0c67fea4",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
