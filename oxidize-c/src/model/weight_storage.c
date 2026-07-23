@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "oxidize/weight_storage.h"
+#include "oxidize/quant.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -131,4 +132,51 @@ void oc_weight_storage_free(OcWeightStorage *ws)
         break;
     }
     memset(ws, 0, sizeof(*ws));
+}
+
+OcError oc_weight_storage_lookup_embedding(const OcWeightStorage *ws,
+                                            size_t hidden_size,
+                                            size_t vocab_size,
+                                            uint32_t token_idx,
+                                            float *out)
+{
+    if (!ws || !out || hidden_size == 0 || vocab_size == 0)
+        return OC_ERR_INVALID_ARG;
+
+    /* Zero output. */
+    memset(out, 0, hidden_size * sizeof(float));
+
+    /* Clamp token to valid range. */
+    if (token_idx >= vocab_size)
+        token_idx = (uint32_t)(vocab_size - 1);
+
+    switch (ws->type) {
+    case OC_WEIGHT_F32: {
+        size_t start = (size_t)token_idx * hidden_size;
+        size_t end = start + hidden_size;
+        if (end <= ws->f32_len)
+            memcpy(out, &ws->f32_data[start], hidden_size * sizeof(float));
+        return OC_OK;
+    }
+    case OC_WEIGHT_QUANTIZED:
+    case OC_WEIGHT_MMAP_QUANTIZED: {
+        size_t sz;
+        const uint8_t *data = oc_weight_storage_quant_bytes(ws, &sz);
+        if (!data) return OC_ERR_INVALID_ARG;
+        /* Dequantize the specific token row. */
+        size_t offset = (size_t)token_idx * oc_quantized_size(ws->qtype, hidden_size);
+        /* Use the quant dequant API if the row fits. */
+        /* For Q8_0: block_width=32, block_size=34. */
+        /* Fall back to scalar dequant for the row. */
+        /* We call oc_quant_dequant_row_scalar which expects the full row. */
+        if (offset + oc_quantized_size(ws->qtype, hidden_size) <= sz) {
+            size_t row_sz = oc_quantized_size(ws->qtype, hidden_size);
+            return oc_quant_dequant_row_scalar(ws->qtype,
+                                                data + offset, row_sz,
+                                                out, hidden_size);
+        }
+        return OC_ERR_INVALID_ARG;
+    }
+    }
+    return OC_ERR_INVALID_ARG;
 }

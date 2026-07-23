@@ -85,6 +85,16 @@ OcGgufQuantizationType oc_weight_storage_qtype(const OcWeightStorage *ws);
 /* Free owned buffers (f32_data and quant_data). Does not free mmap data. */
 void oc_weight_storage_free(OcWeightStorage *ws);
 
+/* Lookup a token embedding from weight storage.
+ * For F32: copies hidden_size floats starting at token_idx * hidden_size.
+ * For Quantized/MmapQuantized: dequantizes the row for token_idx.
+ * out must have at least hidden_size floats. */
+OcError oc_weight_storage_lookup_embedding(const OcWeightStorage *ws,
+                                            size_t hidden_size,
+                                            size_t vocab_size,
+                                            uint32_t token_idx,
+                                            float *out);
+
 #ifdef __cplusplus
 }
 #endif
