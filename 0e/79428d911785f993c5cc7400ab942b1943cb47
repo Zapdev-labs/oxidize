@@ -1,0 +1,29 @@
+oxidize-c/tests/test_mtp_weights.c
+  s_96ddc277ba047e::t_2748e555d0329b 1-128
+oxidize-c/src/model/inf_model.c
+  s_96ddc277ba047e::t_ffee4ec5299805 1-171
+oxidize-c/src/model/mtp_weights.c
+  s_96ddc277ba047e::t_94c6aba4a4aca4 1-49
+oxidize-c/include/oxidize/mtp_weights.h
+  s_96ddc277ba047e::t_b8d37ab29e5890 1-49
+oxidize-c/tests/test_inf_model.c
+  s_96ddc277ba047e::t_b23e49c0c56ca8 1-205
+oxidize-c/include/oxidize/inf_model.h
+  s_96ddc277ba047e::t_c5b4e8510deed3 1-106
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "0e79428d911785f993c5cc7400ab942b1943cb47",
+  "prompts": {},
+  "sessions": {
+    "s_96ddc277ba047e": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "ea8ad242-b091-46af-96e0-114c0c67fea4",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
