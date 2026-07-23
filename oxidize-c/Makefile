@@ -25,6 +25,7 @@ LIB_SRCS := $(wildcard src/core/*.c src/util/*.c src/format/*.c src/model/*.c \
                        src/compute/*.c src/autotune/*.c src/server/*.c \
                        src/paged/*.c src/backends/cuda_stub.c \
                        src/backends/gpu_dispatch.c \
+                       src/backends/backend.c \
                        src/vision/*.c src/mesh/*.c) src/cli/args.c
 LIB_OBJS := $(LIB_SRCS:.c=.o)
 
