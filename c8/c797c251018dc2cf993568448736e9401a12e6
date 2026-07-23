@@ -1,0 +1,23 @@
+oxidize-c/include/oxidize/inference.h
+  s_96ddc277ba047e::t_2772abcc8704b8 94-106
+oxidize-c/tests/test_inference.c
+  s_96ddc277ba047e::t_b72c7e3d514dda 365-468
+oxidize-c/src/model/inference.c
+  s_96ddc277ba047e::t_10be1f947d7ae0 108-131
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "c8c797c251018dc2cf993568448736e9401a12e6",
+  "prompts": {},
+  "sessions": {
+    "s_96ddc277ba047e": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "ea8ad242-b091-46af-96e0-114c0c67fea4",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
