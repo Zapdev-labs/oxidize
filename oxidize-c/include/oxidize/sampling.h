@@ -17,6 +17,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "oxidize/error.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -108,6 +110,37 @@ void oc_apply_repeat_penalty(float *logits, size_t vocab_size,
 uint32_t oc_mirostat_v2_sample(const float *logits, size_t vocab_size,
                                const OcSamplerConfig *cfg,
                                float *mu, uint64_t *rng_state);
+
+/* ─── Beam search ─────────────────────────────────────────────────────── */
+
+/* Beam search result. tokens is caller-freed. */
+typedef struct {
+    uint32_t *tokens;  /* owned, caller must free */
+    size_t    n_tokens;
+    float     score;
+} OcBeamSearchResult;
+
+/* Run beam search over per-step logits.
+ *
+ * logits_per_step: array of pointers to logit arrays (one per step).
+ * n_steps: number of steps.
+ * vocab_size: vocabulary dimension.
+ * beam_width: number of beams to keep (must be > 0).
+ * eos_token: 0xFFFFFFFF = no EOS.
+ * out: result (tokens are malloc'd, caller frees).
+ */
+OcError oc_beam_search(float * const *logits_per_step, size_t n_steps,
+                        size_t vocab_size, size_t beam_width,
+                        uint32_t eos_token, OcBeamSearchResult *out);
+
+void oc_beam_search_result_free(OcBeamSearchResult *result);
+
+/* ─── Softmax probabilities ────────────────────────────────────────────── */
+
+/* Compute softmax(logits/T) into out. Returns OC_ERR_INVALID_ARG for bad args
+ * or empty logits. out must have vocab_size floats. */
+OcError oc_softmax_probs(const float *logits, size_t vocab_size,
+                          float temperature, float *out);
 
 #ifdef __cplusplus
 }

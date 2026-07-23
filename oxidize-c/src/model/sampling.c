@@ -538,3 +538,212 @@ uint32_t oc_sample(const float *logits_in, size_t vocab_size,
     free(idx);
     return result;
 }
+
+/* ─── Softmax probabilities ────────────────────────────────────────────── */
+
+OcError oc_softmax_probs(const float *logits, size_t vocab_size,
+                          float temperature, float *out)
+{
+    if (!logits || !out || vocab_size == 0)
+        return OC_ERR_INVALID_ARG;
+
+    if (temperature <= 0.0f)
+        temperature = 1.0f;
+
+    /* Find max for numerical stability. */
+    float max_val = logits[0];
+    for (size_t i = 1; i < vocab_size; i++) {
+        if (logits[i] > max_val)
+            max_val = logits[i];
+    }
+
+    /* Compute exp((x - max) / T) and sum. */
+    double sum = 0.0;
+    for (size_t i = 0; i < vocab_size; i++) {
+        float v = expf((logits[i] - max_val) / temperature);
+        out[i] = v;
+        sum += v;
+    }
+
+    /* Normalize. */
+    if (sum > 0.0) {
+        float inv_sum = (float)(1.0 / sum);
+        for (size_t i = 0; i < vocab_size; i++)
+            out[i] *= inv_sum;
+    }
+
+    return OC_OK;
+}
+
+/* ─── Beam search ──────────────────────────────────────────────────────── */
+
+typedef struct {
+    uint32_t *tokens;
+    size_t    n_tokens;
+    float     score;
+    bool      finished;
+} OcBeam;
+
+static void beam_free(OcBeam *b)
+{
+    if (b->tokens) free(b->tokens);
+    b->tokens = NULL;
+    b->n_tokens = 0;
+}
+
+static int compare_beams(const void *a, const void *b)
+{
+    const OcBeam *ba = (const OcBeam *)a;
+    const OcBeam *bb = (const OcBeam *)b;
+    if (ba->score > bb->score) return -1;
+    if (ba->score < bb->score) return 1;
+    return 0;
+}
+
+OcError oc_beam_search(float * const *logits_per_step, size_t n_steps,
+                        size_t vocab_size, size_t beam_width,
+                        uint32_t eos_token, OcBeamSearchResult *out)
+{
+    OcError e = OC_OK;
+    if (!logits_per_step || !out) return OC_ERR_INVALID_ARG;
+    if (beam_width == 0) return OC_ERR_INVALID_ARG;
+    if (n_steps == 0 || vocab_size == 0) return OC_ERR_INVALID_ARG;
+
+    /* Check for empty logits. */
+    for (size_t i = 0; i < n_steps; i++) {
+        if (!logits_per_step[i]) return OC_ERR_INVALID_ARG;
+    }
+
+    /* Allocate working beams. */
+    OcBeam *beams = calloc(beam_width, sizeof(OcBeam));
+    if (!beams) return OC_ERR_OOM;
+    beams[0].tokens = NULL;
+    beams[0].n_tokens = 0;
+    beams[0].score = 0.0f;
+    beams[0].finished = false;
+
+    size_t n_active_beams = 1;
+    float *probs = malloc(vocab_size * sizeof(float));
+    if (!probs) { free(beams); return OC_ERR_OOM; }
+
+    /* Maximum candidates: n_active_beams * vocab_size. */
+    size_t max_candidates = beam_width * vocab_size;
+    OcBeam *candidates = malloc(max_candidates * sizeof(OcBeam));
+    if (!candidates) { free(probs); free(beams); return OC_ERR_OOM; }
+
+    for (size_t step = 0; step < n_steps; step++) {
+        OcError se = oc_softmax_probs(logits_per_step[step], vocab_size, 1.0f, probs);
+        if (se != OC_OK) { e = se; goto cleanup; }
+
+        size_t n_candidates = 0;
+
+        for (size_t bi = 0; bi < n_active_beams; bi++) {
+            OcBeam *beam = &beams[bi];
+            if (beam->finished) {
+                if (n_candidates < max_candidates) {
+                    candidates[n_candidates].tokens = malloc((beam->n_tokens + 1) * sizeof(uint32_t));
+                    if (candidates[n_candidates].tokens) {
+                        if (beam->n_tokens > 0) {
+                            memcpy(candidates[n_candidates].tokens, beam->tokens,
+                                   beam->n_tokens * sizeof(uint32_t));
+                        }
+                        candidates[n_candidates].n_tokens = beam->n_tokens;
+                        candidates[n_candidates].score = beam->score;
+                        candidates[n_candidates].finished = true;
+                        n_candidates++;
+                    }
+                }
+                continue;
+            }
+
+            for (size_t ti = 0; ti < vocab_size; ti++) {
+                float prob = probs[ti];
+                if (prob <= 0.0f || !isfinite(prob)) continue;
+
+                if (n_candidates >= max_candidates) break;
+
+                size_t new_len = beam->n_tokens + 1;
+                candidates[n_candidates].tokens = malloc(new_len * sizeof(uint32_t));
+                if (!candidates[n_candidates].tokens) continue;
+
+                if (beam->n_tokens > 0) {
+                    memcpy(candidates[n_candidates].tokens, beam->tokens,
+                           beam->n_tokens * sizeof(uint32_t));
+                }
+                candidates[n_candidates].tokens[beam->n_tokens] = (uint32_t)ti;
+                candidates[n_candidates].n_tokens = new_len;
+                candidates[n_candidates].score = beam->score + logf(prob);
+                candidates[n_candidates].finished = (eos_token != 0xFFFFFFFFu && (uint32_t)ti == eos_token);
+                n_candidates++;
+            }
+        }
+
+        if (n_candidates == 0) {
+            e = OC_ERR_INVALID_ARG;
+            goto cleanup;
+        }
+
+        /* Sort by score descending. */
+        qsort(candidates, n_candidates, sizeof(OcBeam), compare_beams);
+
+        /* Free old beams. */
+        for (size_t bi = 0; bi < n_active_beams; bi++)
+            beam_free(&beams[bi]);
+
+        /* Take top beam_width beams. */
+        size_t take = n_candidates < beam_width ? n_candidates : beam_width;
+        for (size_t bi = 0; bi < take; bi++) {
+            beams[bi] = candidates[bi];
+        }
+        n_active_beams = take;
+
+        /* Clear candidates pointers (moved to beams). */
+        memset(candidates, 0, max_candidates * sizeof(OcBeam));
+
+        /* Check if all finished. */
+        bool all_finished = true;
+        for (size_t bi = 0; bi < n_active_beams; bi++) {
+            if (!beams[bi].finished) { all_finished = false; break; }
+        }
+        if (all_finished) break;
+    }
+
+    /* Find best beam. */
+    size_t best_idx = 0;
+    float best_score = beams[0].score;
+    for (size_t bi = 1; bi < n_active_beams; bi++) {
+        if (beams[bi].score > best_score) {
+            best_score = beams[bi].score;
+            best_idx = bi;
+        }
+    }
+
+    out->tokens = beams[best_idx].tokens;
+    out->n_tokens = beams[best_idx].n_tokens;
+    out->score = beams[best_idx].score;
+
+    /* Mark as moved so cleanup doesn't free it. */
+    beams[best_idx].tokens = NULL;
+    beams[best_idx].n_tokens = 0;
+
+    e = OC_OK;
+
+cleanup:
+    for (size_t bi = 0; bi < n_active_beams; bi++)
+        beam_free(&beams[bi]);
+    for (size_t ci = 0; ci < max_candidates; ci++)
+        beam_free(&candidates[ci]);
+    free(candidates);
+    free(probs);
+    free(beams);
+    return e;
+}
+
+void oc_beam_search_result_free(OcBeamSearchResult *result)
+{
+    if (!result) return;
+    if (result->tokens) free(result->tokens);
+    result->tokens = NULL;
+    result->n_tokens = 0;
+    result->score = 0.0f;
+}
