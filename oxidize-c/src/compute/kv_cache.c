@@ -153,10 +153,11 @@ void oc_kv_cache_clear(OcKvCache *cache)
 OcError oc_kv_cache_truncate(OcKvCache *cache, uint32_t n)
 {
     if (!cache) return OC_ERR_INVALID_ARG;
+    /* n must be within capacity. */
+    if (n > cache->capacity) return OC_ERR_INVALID_ARG;
     /* If n >= n_tokens, it's a no-op (truncating to >= current is OK). */
     if (n >= cache->n_tokens) return OC_OK;
-    /* n < n_tokens: actually truncate. n must be <= capacity. */
-    if (n > cache->capacity) return OC_ERR_INVALID_ARG;
+    /* n < n_tokens: actually truncate. */
     cache->n_tokens = n;
     return OC_OK;
 }
