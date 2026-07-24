@@ -428,8 +428,15 @@ OcError oc_safetensors_to_gguf(const OcConvertConfig *cfg)
             }
         } else if (strcmp(tensors[i].dtype, "F16") == 0) {
             uint8_t *raw = malloc(tsize);
-            if (raw) {
-                fread(raw, 1, tsize, st_file);
+            /* A short read would leave `raw` partly uninitialized and write
+             * that garbage into the GGUF, so skip the tensor instead — same
+             * behavior as the F32 branch above. */
+            if (!raw || fread(raw, 1, tsize, st_file) != tsize) {
+                free(raw);
+                free(f32_data);
+                continue;
+            }
+            {
                 for (size_t j = 0; j < n_elements; j++) {
                     uint16_t bits = (uint16_t)raw[2*j] | ((uint16_t)raw[2*j+1] << 8);
                     uint32_t f32_bits = ((uint32_t)(bits & 0x8000) << 16) |
@@ -441,8 +448,12 @@ OcError oc_safetensors_to_gguf(const OcConvertConfig *cfg)
             }
         } else if (strcmp(tensors[i].dtype, "BF16") == 0) {
             uint8_t *raw = malloc(tsize);
-            if (raw) {
-                fread(raw, 1, tsize, st_file);
+            if (!raw || fread(raw, 1, tsize, st_file) != tsize) {
+                free(raw);
+                free(f32_data);
+                continue;
+            }
+            {
                 for (size_t j = 0; j < n_elements; j++) {
                     uint16_t bits = (uint16_t)raw[2*j] | ((uint16_t)raw[2*j+1] << 8);
                     uint32_t f32_bits = (uint32_t)bits << 16;

@@ -361,6 +361,12 @@ static OcError dequant_f64(const uint8_t *src, size_t src_len,
 
 /* ─── Q4_0 / Q4_1 / Q5_0 / Q5_1 / Q8_0 dequant ────────────────────────── */
 
+/* ggml packs 4/5-bit blocks as interleaved halves: element j takes the LOW
+ * nibble of qs[j] and element j + QK/2 the HIGH nibble (see llama.cpp
+ * dequantize_row_q4_0). Reading them as sequential pairs is a permutation
+ * that cancels out in a pack->dequant round trip but scrambles every real
+ * model's weights. */
+
 static OcError dequant_q4_0(const uint8_t *src, size_t src_len,
                             float *dst, size_t value_count)
 {
@@ -395,10 +401,10 @@ static OcError dequant_q4_1(const uint8_t *src, size_t src_len,
         float *out = dst + b * OC_QK4_1;
         float d = f16_le_to_f32(block[0], block[1]);
         float m = f16_le_to_f32(block[2], block[3]);
-        for (size_t i = 0; i < 16; i++) {
-            uint8_t packed = block[4 + i];
-            out[2 * i]     = (float)(packed & 0x0Fu) * d + m;
-            out[2 * i + 1] = (float)((packed >> 4) & 0x0Fu) * d + m;
+        for (size_t j = 0; j < 16; j++) {
+            uint8_t packed = block[4 + j];
+            out[j]      = (float)(packed & 0x0Fu) * d + m;
+            out[j + 16] = (float)((packed >> 4) & 0x0Fu) * d + m;
         }
     }
     return OC_OK;
@@ -418,13 +424,15 @@ static OcError dequant_q5_0(const uint8_t *src, size_t src_len,
         float d = f16_le_to_f32(block[0], block[1]);
         const uint8_t *qh = &block[2];
         const uint8_t *qs = &block[6];
-        for (size_t i = 0; i < OC_QK5_0; i++) {
-            uint8_t low = (i % 2 == 0)
-                ? (uint8_t)(qs[i / 2] & 0x0Fu)
-                : (uint8_t)((qs[i / 2] >> 4) & 0x0Fu);
-            uint8_t high = (uint8_t)((qh[i / 8] >> (i % 8)) & 0x01u);
-            uint8_t q = (uint8_t)(low | (high << 4));
-            out[i] = (float)((int8_t)q - 16) * d;
+        uint32_t qh_bits = (uint32_t)qh[0] | ((uint32_t)qh[1] << 8)
+                         | ((uint32_t)qh[2] << 16) | ((uint32_t)qh[3] << 24);
+        for (size_t j = 0; j < OC_QK5_0 / 2; j++) {
+            uint32_t x0 = (uint32_t)(qs[j] & 0x0Fu)
+                        | (((qh_bits >> j) & 1u) << 4);
+            uint32_t x1 = (uint32_t)(qs[j] >> 4)
+                        | (((qh_bits >> (j + OC_QK5_0 / 2)) & 1u) << 4);
+            out[j]                = (float)((int32_t)x0 - 16) * d;
+            out[j + OC_QK5_0 / 2] = (float)((int32_t)x1 - 16) * d;
         }
     }
     return OC_OK;
@@ -445,13 +453,15 @@ static OcError dequant_q5_1(const uint8_t *src, size_t src_len,
         float m = f16_le_to_f32(block[2], block[3]);
         const uint8_t *qh = &block[4];
         const uint8_t *qs = &block[8];
-        for (size_t i = 0; i < OC_QK5_1; i++) {
-            uint8_t low = (i % 2 == 0)
-                ? (uint8_t)(qs[i / 2] & 0x0Fu)
-                : (uint8_t)((qs[i / 2] >> 4) & 0x0Fu);
-            uint8_t high = (uint8_t)((qh[i / 8] >> (i % 8)) & 0x01u);
-            uint8_t q = (uint8_t)(low | (high << 4));
-            out[i] = (float)q * d + m;
+        uint32_t qh_bits = (uint32_t)qh[0] | ((uint32_t)qh[1] << 8)
+                         | ((uint32_t)qh[2] << 16) | ((uint32_t)qh[3] << 24);
+        for (size_t j = 0; j < OC_QK5_1 / 2; j++) {
+            uint32_t x0 = (uint32_t)(qs[j] & 0x0Fu)
+                        | (((qh_bits >> j) & 1u) << 4);
+            uint32_t x1 = (uint32_t)(qs[j] >> 4)
+                        | (((qh_bits >> (j + OC_QK5_1 / 2)) & 1u) << 4);
+            out[j]                = (float)x0 * d + m;
+            out[j + OC_QK5_1 / 2] = (float)x1 * d + m;
         }
     }
     return OC_OK;
@@ -921,9 +931,12 @@ static OcError dequant_iq1_m(const uint8_t *src, size_t src_len,
 
         size_t out_ptr = 0;
         for (size_t ib = 0; ib < OC_QK_K / 32; ib++) {
-            uint8_t sc_ib = scales[ib / 2];
-            /* Note: Rust reads two 3-bit scales from sc_ib at offsets 6*(ib%2)
-             * and 6*(ib%2)+3, both masked with 0x7. */
+            /* The two 3-bit sub-scales sit at bit offsets 6*(ib%2) and
+             * 6*(ib%2)+3 of the *16-bit* scale word sc[ib/2]. Reading an
+             * 8-bit scales[ib/2] instead made the +3 field of odd `ib`
+             * shift past the end (always 0) and left scales[4] and
+             * scales[6] unread entirely. */
+            uint16_t sc_ib = sc[ib / 2];
             uint32_t dl1_bits = (sc_ib >> (6u * (ib % 2u))) & 0x7u;
             uint32_t dl2_bits = (sc_ib >> (6u * (ib % 2u) + 3u)) & 0x7u;
             float dl1 = d * (2.0f * (float)dl1_bits + 1.0f);
@@ -975,14 +988,20 @@ static OcError dequant_iq2_xxs(const uint8_t *src, size_t src_len,
         const uint8_t *qs = &block[2];
         size_t out_ptr = 0;
         for (size_t ib32 = 0; ib32 < OC_QK_K / 32; ib32++) {
-            uint32_t aux0 = (uint32_t)qs[4 * ib32]
-                          | ((uint32_t)qs[4 * ib32 + 1] << 8)
-                          | ((uint32_t)qs[4 * ib32 + 2] << 16)
-                          | ((uint32_t)qs[4 * ib32 + 3] << 24);
-            uint32_t aux1 = (uint32_t)qs[4 * ib32 + 4]
-                          | ((uint32_t)qs[4 * ib32 + 5] << 8)
-                          | ((uint32_t)qs[4 * ib32 + 6] << 16)
-                          | ((uint32_t)qs[4 * ib32 + 7] << 24);
+            /* Each 32-element group consumes 8 bytes: 4 grid indices then a
+             * 32-bit word holding four 7-bit sign indices plus the 4-bit
+             * scale. llama.cpp advances `q2` by 4 uint16 (= 8 bytes) per
+             * group — striding 4 bytes here re-read overlapping windows and
+             * left qs[36..63] of every block unused. */
+            const uint8_t *g = &qs[8 * ib32];
+            uint32_t aux0 = (uint32_t)g[0]
+                          | ((uint32_t)g[1] << 8)
+                          | ((uint32_t)g[2] << 16)
+                          | ((uint32_t)g[3] << 24);
+            uint32_t aux1 = (uint32_t)g[4]
+                          | ((uint32_t)g[5] << 8)
+                          | ((uint32_t)g[6] << 16)
+                          | ((uint32_t)g[7] << 24);
             uint8_t aux_bytes[4];
             aux_bytes[0] = (uint8_t)(aux0 & 0xFFu);
             aux_bytes[1] = (uint8_t)((aux0 >> 8) & 0xFFu);
@@ -1496,12 +1515,12 @@ static OcError pack_q4_1(const float *src, size_t value_count,
         float d = (mx > mn) ? ((mx - mn) / 15.0f) : 0.0f;
         f16_le_write(&out_block[0], d);
         f16_le_write(&out_block[2], mn);
-        for (size_t i = 0; i < OC_QK4_1 / 2; i++) {
+        for (size_t j = 0; j < OC_QK4_1 / 2; j++) {
             uint8_t q_low  = (d == 0.0f) ? 0u
-                           : (uint8_t)fminf(fmaxf(roundf((in_block[2 * i] - mn) / d), 0.0f), 15.0f);
+                           : (uint8_t)fminf(fmaxf(roundf((in_block[j] - mn) / d), 0.0f), 15.0f);
             uint8_t q_high = (d == 0.0f) ? 0u
-                           : (uint8_t)fminf(fmaxf(roundf((in_block[2 * i + 1] - mn) / d), 0.0f), 15.0f);
-            out_block[4 + i] = (uint8_t)(q_low | (q_high << 4));
+                           : (uint8_t)fminf(fmaxf(roundf((in_block[j + OC_QK4_1 / 2] - mn) / d), 0.0f), 15.0f);
+            out_block[4 + j] = (uint8_t)(q_low | (q_high << 4));
         }
     }
     return OC_OK;
@@ -1525,19 +1544,16 @@ static OcError pack_q5_0(const float *src, size_t value_count,
         float d = (max_abs == 0.0f) ? 0.0f : (max_abs / 16.0f);
         f16_le_write(&out_block[0], d);
         out_block[2] = out_block[3] = out_block[4] = out_block[5] = 0u;
-        for (size_t i = 0; i < OC_QK5_0; i++) {
-            uint8_t q = (d == 0.0f) ? 16u
-                      : (uint8_t)fminf(fmaxf((float)((int32_t)roundf(in_block[i] / d) + 16), 0.0f), 31.0f);
-            if ((q & 0x10u) != 0u) {
-                out_block[2 + i / 8] |= (uint8_t)(1u << (i % 8));
-            }
-            uint8_t low = q & 0x0Fu;
-            size_t qs_index = 6 + i / 2;
-            if (i % 2 == 0) {
-                out_block[qs_index] = low;
-            } else {
-                out_block[qs_index] |= (uint8_t)(low << 4);
-            }
+        out_block[6 + 0] = 0u; /* qs is fully overwritten below */
+        for (size_t j = 0; j < OC_QK5_0 / 2; j++) {
+            uint32_t q0 = (d == 0.0f) ? 16u
+                        : (uint32_t)fminf(fmaxf((float)((int32_t)roundf(in_block[j] / d) + 16), 0.0f), 31.0f);
+            uint32_t q1 = (d == 0.0f) ? 16u
+                        : (uint32_t)fminf(fmaxf((float)((int32_t)roundf(in_block[j + OC_QK5_0 / 2] / d) + 16), 0.0f), 31.0f);
+            if (q0 & 0x10u) out_block[2 + (j / 8)] |= (uint8_t)(1u << (j % 8));
+            size_t hb1 = j + OC_QK5_0 / 2;
+            if (q1 & 0x10u) out_block[2 + (hb1 / 8)] |= (uint8_t)(1u << (hb1 % 8));
+            out_block[6 + j] = (uint8_t)((q0 & 0x0Fu) | ((q1 & 0x0Fu) << 4));
         }
     }
     return OC_OK;
@@ -1562,19 +1578,15 @@ static OcError pack_q5_1(const float *src, size_t value_count,
         f16_le_write(&out_block[0], d);
         f16_le_write(&out_block[2], mn);
         out_block[4] = out_block[5] = out_block[6] = out_block[7] = 0u;
-        for (size_t i = 0; i < OC_QK5_1; i++) {
-            uint8_t q = (d == 0.0f) ? 0u
-                      : (uint8_t)fminf(fmaxf(roundf((in_block[i] - mn) / d), 0.0f), 31.0f);
-            if ((q & 0x10u) != 0u) {
-                out_block[4 + i / 8] |= (uint8_t)(1u << (i % 8));
-            }
-            uint8_t low = q & 0x0Fu;
-            size_t qs_index = 8 + i / 2;
-            if (i % 2 == 0) {
-                out_block[qs_index] = low;
-            } else {
-                out_block[qs_index] |= (uint8_t)(low << 4);
-            }
+        for (size_t j = 0; j < OC_QK5_1 / 2; j++) {
+            uint32_t q0 = (d == 0.0f) ? 0u
+                        : (uint32_t)fminf(fmaxf(roundf((in_block[j] - mn) / d), 0.0f), 31.0f);
+            uint32_t q1 = (d == 0.0f) ? 0u
+                        : (uint32_t)fminf(fmaxf(roundf((in_block[j + OC_QK5_1 / 2] - mn) / d), 0.0f), 31.0f);
+            if (q0 & 0x10u) out_block[4 + (j / 8)] |= (uint8_t)(1u << (j % 8));
+            size_t hb1 = j + OC_QK5_1 / 2;
+            if (q1 & 0x10u) out_block[4 + (hb1 / 8)] |= (uint8_t)(1u << (hb1 % 8));
+            out_block[8 + j] = (uint8_t)((q0 & 0x0Fu) | ((q1 & 0x0Fu) << 4));
         }
     }
     return OC_OK;
@@ -2270,27 +2282,27 @@ static void pack_block_al6(const float *in_block, uint8_t *out_block)
     float inv_d = (d != 0.0f) ? 1.0f / d : 0.0f;
     f16_le_write(&out_block[0], d);
     for (size_t i = 2; i < 6; i++) out_block[i] = 0u;
+    /* AL6 shares the Q5_0 container and dequantizes through dequant_q5_0,
+     * so it must use the same interleaved-half nibble layout. */
+    uint8_t q_levels[OC_QK_AL];
     for (size_t i = 0; i < OC_QK_AL; i++) {
-        uint8_t q;
         if (d == 0.0f) {
-            q = 16u;
+            q_levels[i] = 16u;
         } else {
             float v = in_block[i] * inv_d + 16.5f;
             float r = truncf(v);
             if (r < 0.0f) r = 0.0f;
             if (r > 31.0f) r = 31.0f;
-            q = (uint8_t)r;
+            q_levels[i] = (uint8_t)r;
         }
-        if (q & 0x10u) {
+        if (q_levels[i] & 0x10u) {
             out_block[2 + i / 8] |= (uint8_t)(1u << (i % 8));
         }
-        uint8_t low = (uint8_t)(q & 0x0Fu);
-        size_t qs_index = 6 + i / 2;
-        if (i % 2 == 0) {
-            out_block[qs_index] = low;
-        } else {
-            out_block[qs_index] |= (uint8_t)(low << 4);
-        }
+    }
+    for (size_t j = 0; j < OC_QK_AL / 2; j++) {
+        uint8_t low = (uint8_t)(q_levels[j] & 0x0Fu);
+        uint8_t high = (uint8_t)(q_levels[j + OC_QK_AL / 2] & 0x0Fu);
+        out_block[6 + j] = (uint8_t)(low | (high << 4));
     }
 }
 

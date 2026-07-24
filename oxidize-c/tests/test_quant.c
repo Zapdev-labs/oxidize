@@ -502,6 +502,68 @@ Test(quant, ggml_id_round_trip, .description = "oc_quant_type_from_ggml_id round
     cr_assert_eq(oc_quant_type_to_ggml_id(OC_QUANT_UNKNOWN), 0xffffffffu, "UNKNOWN ggml id");
 }
 
+/* ─── Golden vectors: interleaved-half nibble layout ───────────────────
+ *
+ * The ggml 4/5-bit block layout puts element j in the LOW nibble of qs[j]
+ * and element j + QK/2 in the HIGH nibble. Reading them as sequential
+ * pairs is a pure permutation: pack and dequant agree with each other, so
+ * every round-trip test passes while real GGUF weights decode scrambled.
+ * That is exactly how Q4_1/Q5_0/Q5_1 shipped broken, so these expectations
+ * are fixed vectors derived from the llama.cpp semantics rather than from
+ * anything this file computes.
+ */
+static const uint8_t GOLDEN_Q5_1[] = {
+    0x00, 0x34, 0x00, 0xBE, 0xA5, 0x3C, 0x0F, 0xF0, 0x03, 0x0A, 0x11, 0x18,
+    0x1F, 0x26, 0x2D, 0x34, 0x3B, 0x42, 0x49, 0x50, 0x57, 0x5E, 0x65, 0x6C};
+static const float GOLDEN_Q5_1_WANT[32] = {
+    3.25f, 1.0f, 2.75f, 0.5f, 2.25f, 4.0f, 1.75f, 3.5f, 1.25f, -1.0f, 4.75f,
+    2.5f, 4.25f, 6.0f, -0.25f, 1.5f, 2.5f, 2.5f, 2.75f, 2.75f, -1.25f, -1.0f,
+    -1.0f, -0.75f, -0.75f, -0.5f, -0.5f, -0.25f, 3.75f, 3.75f, 4.0f, 4.0f};
+
+static const uint8_t GOLDEN_Q5_0[] = {
+    0x00, 0x34, 0xA5, 0x3C, 0x0F, 0xF0, 0x03, 0x0A, 0x11, 0x18, 0x1F, 0x26,
+    0x2D, 0x34, 0x3B, 0x42, 0x49, 0x50, 0x57, 0x5E, 0x65, 0x6C};
+static const float GOLDEN_Q5_0_WANT[32] = {
+    0.75f, -1.5f, 0.25f, -2.0f, -0.25f, 1.5f, -0.75f, 1.0f, -1.25f, -3.5f,
+    2.25f, 0.0f, 1.75f, 3.5f, -2.75f, -1.0f, 0.0f, 0.0f, 0.25f, 0.25f, -3.75f,
+    -3.5f, -3.5f, -3.25f, -3.25f, -3.0f, -3.0f, -2.75f, 1.25f, 1.25f, 1.5f,
+    1.5f};
+
+static const uint8_t GOLDEN_Q4_1[] = {
+    0x00, 0x34, 0x00, 0xBE, 0x03, 0x0A, 0x11, 0x18, 0x1F, 0x26, 0x2D, 0x34,
+    0x3B, 0x42, 0x49, 0x50, 0x57, 0x5E, 0x65, 0x6C};
+static const float GOLDEN_Q4_1_WANT[32] = {
+    -0.75f, 1.0f, -1.25f, 0.5f, 2.25f, 0.0f, 1.75f, -0.5f, 1.25f, -1.0f,
+    0.75f, -1.5f, 0.25f, 2.0f, -0.25f, 1.5f, -1.5f, -1.5f, -1.25f, -1.25f,
+    -1.25f, -1.0f, -1.0f, -0.75f, -0.75f, -0.5f, -0.5f, -0.25f, -0.25f,
+    -0.25f, 0.0f, 0.0f};
+
+Test(quant, golden_interleaved_nibble_layout,
+     .description = "Q4_1/Q5_0/Q5_1 decode to llama.cpp's element order") {
+    struct {
+        OcGgufQuantizationType t;
+        const uint8_t *blk;
+        size_t bytes;
+        const float *want;
+    } cases[] = {
+        { OC_QUANT_Q5_1, GOLDEN_Q5_1, sizeof(GOLDEN_Q5_1), GOLDEN_Q5_1_WANT },
+        { OC_QUANT_Q5_0, GOLDEN_Q5_0, sizeof(GOLDEN_Q5_0), GOLDEN_Q5_0_WANT },
+        { OC_QUANT_Q4_1, GOLDEN_Q4_1, sizeof(GOLDEN_Q4_1), GOLDEN_Q4_1_WANT },
+    };
+    for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+        const char *name = oc_quant_type_name(cases[c].t);
+        float got[32];
+        cr_assert_eq(oc_quant_dequant_row(cases[c].t, cases[c].blk,
+                                          cases[c].bytes, got, 32), OC_OK,
+                     "%s dequant failed", name);
+        for (size_t i = 0; i < 32; i++) {
+            cr_assert_float_eq(got[i], cases[c].want[i], 1e-5f,
+                "%s element %zu: got %f want %f (element order wrong?)",
+                name, i, got[i], cases[c].want[i]);
+        }
+    }
+}
+
 /* ─── Encoder accuracy + payload coverage ──────────────────────────────
  *
  * Two properties that a finiteness check cannot see, and whose absence let
@@ -580,44 +642,51 @@ Test(quant, encoder_roundtrip_error_scales_with_bit_width,
 
 Test(quant, dequant_reads_every_payload_byte,
      .description = "no dequantizer ignores part of its block") {
-    struct { OcGgufQuantizationType t; size_t vals; size_t bytes; } cases[] = {
-        { OC_QUANT_Q2_K,   256, OC_BLOCK_Q2_K_SIZE   },
-        { OC_QUANT_Q3_K_M, 256, OC_BLOCK_Q3_K_SIZE   },
-        { OC_QUANT_Q4_K_M, 256, OC_BLOCK_Q4_K_SIZE   },
-        { OC_QUANT_Q5_K_M, 256, OC_BLOCK_Q5_K_SIZE   },
-        { OC_QUANT_Q6_K,   256, OC_BLOCK_Q6_K_SIZE   },
-        { OC_QUANT_IQ4_XS, 256, OC_BLOCK_IQ4_XS_SIZE },
-        { OC_QUANT_IQ4_NL, 32,  OC_BLOCK_IQ4_NL_SIZE },
-        { OC_QUANT_NVFP4,  64,  OC_BLOCK_NVFP4_SIZE  },
+    /* Every block-quantized type, including the dequant-only IQ family. */
+    static const OcGgufQuantizationType types[] = {
+        OC_QUANT_Q4_0, OC_QUANT_Q4_1, OC_QUANT_Q5_0, OC_QUANT_Q5_1,
+        OC_QUANT_Q8_0,
+        OC_QUANT_Q2_K, OC_QUANT_Q3_K_M, OC_QUANT_Q4_K_M, OC_QUANT_Q5_K_M,
+        OC_QUANT_Q6_K,
+        OC_QUANT_AL5, OC_QUANT_AL5_XS, OC_QUANT_AL6, OC_QUANT_AL8,
+        OC_QUANT_IQ1_S, OC_QUANT_IQ1_M, OC_QUANT_IQ2_XXS, OC_QUANT_IQ2_XS,
+        OC_QUANT_IQ2_S, OC_QUANT_IQ3_XXS, OC_QUANT_IQ3_S,
+        OC_QUANT_IQ4_NL, OC_QUANT_IQ4_XS, OC_QUANT_NVFP4,
     };
 
-    for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
-        const char *name = oc_quant_type_name(cases[c].t);
+    for (size_t c = 0; c < sizeof(types) / sizeof(types[0]); c++) {
+        const char *name = oc_quant_type_name(types[c]);
+        OcQuantBlockLayout bs = oc_quant_block_size(types[c]);
+        cr_assert_gt(bs.bytes_per_block, 0, "%s has no block layout", name);
+        cr_assert_gt(bs.elements_per_block, 0, "%s has no block layout", name);
+
+        size_t bytes = bs.bytes_per_block;
+        size_t vals = bs.elements_per_block;
         uint8_t buf[256];
         float base[256], probe[256];
-        cr_assert_leq(cases[c].bytes, sizeof(buf));
+        cr_assert_leq(bytes, sizeof(buf), "%s buf overflow", name);
+        cr_assert_leq(vals, 256, "%s val overflow", name);
 
         lcg_state = 999u;
-        for (size_t i = 0; i < cases[c].bytes; i++)
+        for (size_t i = 0; i < bytes; i++)
             buf[i] = (uint8_t)(uint32_t)next_float(0.0f, 255.9f);
 
-        cr_assert_eq(oc_quant_dequant_row(cases[c].t, buf, cases[c].bytes,
-                                          base, cases[c].vals), OC_OK,
-                     "%s dequant failed", name);
+        cr_assert_eq(oc_quant_dequant_row(types[c], buf, bytes, base, vals),
+                     OC_OK, "%s dequant failed", name);
 
         /* Flipping any payload byte must move at least one output. */
-        for (size_t i = 0; i < cases[c].bytes; i++) {
+        for (size_t i = 0; i < bytes; i++) {
             uint8_t saved = buf[i];
             buf[i] = (uint8_t)~saved;
-            cr_assert_eq(oc_quant_dequant_row(cases[c].t, buf, cases[c].bytes,
-                                              probe, cases[c].vals), OC_OK);
+            cr_assert_eq(oc_quant_dequant_row(types[c], buf, bytes, probe, vals),
+                         OC_OK);
             buf[i] = saved;
 
             bool moved = false;
-            for (size_t k = 0; k < cases[c].vals && !moved; k++)
+            for (size_t k = 0; k < vals && !moved; k++)
                 if (base[k] != probe[k]) moved = true;
             cr_assert(moved, "%s ignores payload byte %zu of %zu",
-                      name, i, cases[c].bytes);
+                      name, i, bytes);
         }
     }
 }

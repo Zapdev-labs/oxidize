@@ -109,14 +109,12 @@ bool oc_simd_dequant_q4_1_avx512(const uint8_t *src, size_t src_len,
         __m128i lo = _mm_and_si128(packed, lo_mask);
         __m128i hi = _mm_and_si128(_mm_srli_epi16(packed, 4), lo_mask);
 
-        /* Interleaved layout: out[2i]=low, out[2i+1]=high (see scalar). */
-        __m128i int_lo = _mm_unpacklo_epi8(lo, hi); /* [l0,h0,...,l7,h7]   */
-        __m128i int_hi = _mm_unpackhi_epi8(lo, hi); /* [l8,h8,...,l15,h15] */
-
+        /* ggml layout: out[j] = low nibble of byte j, out[j + 16] = high
+         * nibble (see the scalar dequantizer). */
         __m512 il = _mm512_add_ps(_mm512_mul_ps(
-            _mm512_cvtepi32_ps(_mm512_cvtepu8_epi32(int_lo)), d), m);
+            _mm512_cvtepi32_ps(_mm512_cvtepu8_epi32(lo)), d), m);
         __m512 ih = _mm512_add_ps(_mm512_mul_ps(
-            _mm512_cvtepi32_ps(_mm512_cvtepu8_epi32(int_hi)), d), m);
+            _mm512_cvtepi32_ps(_mm512_cvtepu8_epi32(hi)), d), m);
 
         _mm512_storeu_ps(out + 0,  il);
         _mm512_storeu_ps(out + 16, ih);

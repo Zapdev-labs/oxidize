@@ -140,16 +140,14 @@ bool oc_simd_dequant_q4_1_avx2(const uint8_t *src, size_t src_len,
         __m128i lo = _mm_and_si128(packed, lo_mask);
         __m128i hi = _mm_and_si128(_mm_srli_epi16(packed, 4), lo_mask);
 
-        /* Q4_1 layout is INTERLEAVED: out[2i]=low(byte i), out[2i+1]=high.
-         * Interleave lo/hi via punpcklbw (low 8 pairs) + punpckhbw (high 8). */
-        __m128i int_lo = _mm_unpacklo_epi8(lo, hi); /* [l0,h0,...,l7,h7]   */
-        __m128i int_hi = _mm_unpackhi_epi8(lo, hi); /* [l8,h8,...,l15,h15] */
-
+        /* ggml layout: out[j] = low nibble of byte j, out[j + 16] = high
+         * nibble — the same half-split the Q4_0 kernel above uses. No
+         * byte interleave is involved. */
         /* out = nibble*d + m  — separate vmulps + vaddps (NO FMA) for parity. */
-        __m256 il0 = _mm256_add_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(cvtepu8_low(int_lo)),  d), m);
-        __m256 il1 = _mm256_add_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(cvtepu8_high(int_lo)), d), m);
-        __m256 ih0 = _mm256_add_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(cvtepu8_low(int_hi)),  d), m);
-        __m256 ih1 = _mm256_add_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(cvtepu8_high(int_hi)), d), m);
+        __m256 il0 = _mm256_add_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(cvtepu8_low(lo)),  d), m);
+        __m256 il1 = _mm256_add_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(cvtepu8_high(lo)), d), m);
+        __m256 ih0 = _mm256_add_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(cvtepu8_low(hi)),  d), m);
+        __m256 ih1 = _mm256_add_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(cvtepu8_high(hi)), d), m);
 
         _mm256_storeu_ps(out + 0,  il0);
         _mm256_storeu_ps(out + 8,  il1);
