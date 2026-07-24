@@ -106,14 +106,70 @@ OcError oc_vision_prompt_render_tokens(const OcVisionPrompt *vp,
     if (!vp || !out_tokens || !out_n) return OC_ERR_INVALID_ARG;
     *out_n = 0;
 
-    /* Stub: render image placeholders as token 1, text as token 0. */
-    for (uint32_t i = 0; i < vp->n_images && *out_n < max_tokens; i++) {
-        out_tokens[(*out_n)++] = 1; /* IMAGE token */
+    /* Image placeholder tokens: use special token IDs that don't collide
+     * with typical vocabulary (most vocabularies use 0-32000+ for text).
+     * We use IDs starting from 0x7FFFFFF0 to indicate image placeholders. */
+    const uint32_t IMAGE_TOKEN_BASE = 0x7FFFFFF0;
+
+    /* Format-specific image token placement. */
+    switch (vp->format) {
+    case OC_VP_FORMAT_LLAVA:
+        /* LLaVA: <image> token before text. */
+        if (vp->n_images > 0 && *out_n < max_tokens) {
+            out_tokens[(*out_n)++] = IMAGE_TOKEN_BASE;
+        }
+        break;
+    case OC_VP_FORMAT_QWEN_VL:
+        /* Qwen-VL: numbered image tokens before text. */
+        for (uint32_t i = 0; i < vp->n_images && *out_n < max_tokens; i++) {
+            out_tokens[(*out_n)++] = IMAGE_TOKEN_BASE + i;
+        }
+        break;
+    case OC_VP_FORMAT_INTERNVL:
+        /* InternVL: single <image> token before text. */
+        if (vp->n_images > 0 && *out_n < max_tokens) {
+            out_tokens[(*out_n)++] = IMAGE_TOKEN_BASE;
+        }
+        break;
+    case OC_VP_FORMAT_MPLUG_OWL:
+        /* mPLUG-Owl: image tokens after text (handled below). */
+        break;
     }
-    /* Tokenize text simply (one token per char). */
-    for (size_t i = 0; vp->text[i] && *out_n < max_tokens; i++) {
-        out_tokens[(*out_n)++] = (uint32_t)(unsigned char)vp->text[i];
+
+    /* Tokenize text: use simple word-level tokenization.
+     * Each word becomes a token (hash of the word), spaces are separate tokens.
+     * This is a basic tokenizer for prompt construction; real inference should
+     * use the model's actual tokenizer. */
+    size_t i = 0;
+    while (vp->text[i] && *out_n < max_tokens) {
+        if (vp->text[i] == ' ' || vp->text[i] == '\t') {
+            /* Space token. */
+            out_tokens[(*out_n)++] = 0;  /* space = token 0 in most vocabularies */
+            i++;
+        } else if (vp->text[i] == '\n') {
+            /* Newline token. */
+            out_tokens[(*out_n)++] = 13;  /* newline = common token ID */
+            i++;
+        } else {
+            /* Collect a word and hash it to a token ID. */
+            uint32_t hash = 5381;
+            while (vp->text[i] && vp->text[i] != ' ' &&
+                   vp->text[i] != '\t' && vp->text[i] != '\n') {
+                hash = ((hash << 5) + hash) + (uint32_t)(unsigned char)vp->text[i];
+                i++;
+            }
+            /* Map hash to a reasonable token range (1-31999, avoiding 0 and special tokens). */
+            out_tokens[(*out_n)++] = (hash % 31999) + 1;
+        }
     }
+
+    /* mPLUG-Owl: image tokens at end. */
+    if (vp->format == OC_VP_FORMAT_MPLUG_OWL) {
+        for (uint32_t j = 0; j < vp->n_images && *out_n < max_tokens; j++) {
+            out_tokens[(*out_n)++] = IMAGE_TOKEN_BASE;
+        }
+    }
+
     return OC_OK;
 }
 

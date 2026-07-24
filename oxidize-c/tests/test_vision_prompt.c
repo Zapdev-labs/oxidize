@@ -125,8 +125,70 @@ Test(vp, render_tokens)
     uint32_t tokens[100];
     size_t n;
     cr_assert_eq(oc_vision_prompt_render_tokens(&vp, tokens, 100, &n), OC_OK);
-    cr_assert_eq(n, 3); /* 1 image + 2 text chars */
-    cr_assert_eq(tokens[0], 1); /* image token */
+    /* LLaVA: 1 image token + 1 word token ("hi") = 2 tokens. */
+    cr_assert_eq(n, 2);
+    /* Image token should be in the special range. */
+    cr_assert(tokens[0] >= 0x7FFFFFF0);
+    /* Text token should be in normal vocabulary range (1-32000). */
+    cr_assert(tokens[1] >= 1 && tokens[1] <= 32000);
+    oc_vision_prompt_free(&vp);
+}
+
+Test(vp, render_tokens_multi_word)
+{
+    OcVisionPrompt vp;
+    oc_vision_prompt_init(&vp, OC_VP_FORMAT_LLAVA);
+    float f[] = {1.0f};
+    oc_vision_prompt_add_image(&vp, f, 1);
+    oc_vision_prompt_set_text(&vp, "hello world foo");
+    uint32_t tokens[100];
+    size_t n;
+    cr_assert_eq(oc_vision_prompt_render_tokens(&vp, tokens, 100, &n), OC_OK);
+    /* 1 image + 3 words + 2 spaces = 6 tokens. */
+    cr_assert_eq(n, 6, "expected 6 tokens, got %zu", n);
+    /* First token is image. */
+    cr_assert(tokens[0] >= 0x7FFFFFF0);
+    /* Word tokens (djb2 hash) should be non-zero. */
+    cr_assert(tokens[1] > 0);  /* "hello" */
+    /* Space tokens should be 0. */
+    cr_assert_eq(tokens[2], 0);  /* space */
+    cr_assert(tokens[3] > 0);  /* "world" */
+    oc_vision_prompt_free(&vp);
+}
+
+Test(vp, render_tokens_qwen_vl)
+{
+    OcVisionPrompt vp;
+    oc_vision_prompt_init(&vp, OC_VP_FORMAT_QWEN_VL);
+    float f[] = {1.0f, 2.0f};
+    oc_vision_prompt_add_image(&vp, f, 2);
+    oc_vision_prompt_add_image(&vp, f, 2);
+    oc_vision_prompt_set_text(&vp, "test");
+    uint32_t tokens[100];
+    size_t n;
+    cr_assert_eq(oc_vision_prompt_render_tokens(&vp, tokens, 100, &n), OC_OK);
+    /* Qwen-VL: 2 numbered image tokens + 1 word = 3 tokens. */
+    cr_assert_eq(n, 3);
+    /* Image tokens should be sequential (IMAGE_TOKEN_BASE + 0, +1). */
+    cr_assert_eq(tokens[0], 0x7FFFFFF0);
+    cr_assert_eq(tokens[1], 0x7FFFFFF1);
+    oc_vision_prompt_free(&vp);
+}
+
+Test(vp, render_tokens_mplug_owl)
+{
+    OcVisionPrompt vp;
+    oc_vision_prompt_init(&vp, OC_VP_FORMAT_MPLUG_OWL);
+    float f[] = {1.0f};
+    oc_vision_prompt_add_image(&vp, f, 1);
+    oc_vision_prompt_set_text(&vp, "test");
+    uint32_t tokens[100];
+    size_t n;
+    cr_assert_eq(oc_vision_prompt_render_tokens(&vp, tokens, 100, &n), OC_OK);
+    /* mPLUG-Owl: text first, then image at end. */
+    cr_assert_eq(n, 2);  /* 1 word + 1 image */
+    cr_assert(tokens[0] > 0 && tokens[0] <= 32000);  /* word */
+    cr_assert(tokens[1] >= 0x7FFFFFF0);  /* image */
     oc_vision_prompt_free(&vp);
 }
 
