@@ -72,6 +72,14 @@ __global__ void k_rms_norm(const float *x, const float *weight, float *out,
         out[i] = x[i] * inv_rms * weight[i] * norm_scale;
 }
 
+/* Elementwise bias add: out[i] += bias[i]. Used for the Qwen2-family QKV
+ * projection biases. */
+__global__ void k_add_bias(float *out, const float *bias, size_t n)
+{
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] += bias[i];
+}
+
 /* Matvec: out[row] = sum(W[row, col] * x[col]) for col in [0, cols).
  * One block per row; each thread accumulates a partial sum. */
 __global__ void k_matvec_f32(const float *W, size_t rows, size_t cols,
@@ -352,6 +360,9 @@ OcError oc_cuda_init(OcCudaContext *ctx, const OcLlamaModel *model)
     }
 
     /* Upload per-layer weights. */
+    ctx->d_attn_q_bias = (float **)calloc(c->n_layer, sizeof(float *));
+    ctx->d_attn_k_bias = (float **)calloc(c->n_layer, sizeof(float *));
+    ctx->d_attn_v_bias = (float **)calloc(c->n_layer, sizeof(float *));
     ctx->d_attn_q = (float **)calloc(c->n_layer, sizeof(float *));
     ctx->d_attn_k = (float **)calloc(c->n_layer, sizeof(float *));
     ctx->d_attn_v = (float **)calloc(c->n_layer, sizeof(float *));
@@ -361,7 +372,8 @@ OcError oc_cuda_init(OcCudaContext *ctx, const OcLlamaModel *model)
     ctx->d_ffn_down = (float **)calloc(c->n_layer, sizeof(float *));
     ctx->d_attn_norm = (float **)calloc(c->n_layer, sizeof(float *));
     ctx->d_ffn_norm = (float **)calloc(c->n_layer, sizeof(float *));
-    if (!ctx->d_attn_q || !ctx->d_attn_k || !ctx->d_attn_v ||
+    if (!ctx->d_attn_q_bias || !ctx->d_attn_k_bias || !ctx->d_attn_v_bias ||
+        !ctx->d_attn_q || !ctx->d_attn_k || !ctx->d_attn_v ||
         !ctx->d_attn_output || !ctx->d_ffn_gate || !ctx->d_ffn_up ||
         !ctx->d_ffn_down || !ctx->d_attn_norm || !ctx->d_ffn_norm) {
         free(host_temp);
@@ -392,6 +404,29 @@ OcError oc_cuda_init(OcCudaContext *ctx, const OcLlamaModel *model)
         }
         cudaMemcpy(ctx->d_attn_norm[l], L->attn_norm, embd * sizeof(float),
                   cudaMemcpyHostToDevice);
+
+        /* Optional QKV projection biases (Qwen2-family). Uploaded per layer;
+         * a NULL host pointer leaves the device pointer NULL and the forward
+         * pass skips the add. */
+        {
+            struct { const float *host; float **dev; size_t n; } bs[] = {
+                { L->attn_q_bias, &ctx->d_attn_q_bias[l],
+                  (size_t)c->n_head * c->head_dim },
+                { L->attn_k_bias, &ctx->d_attn_k_bias[l],
+                  (size_t)c->n_head_kv * c->head_dim },
+                { L->attn_v_bias, &ctx->d_attn_v_bias[l],
+                  (size_t)c->n_head_kv * c->head_dim },
+            };
+            for (size_t bi = 0; bi < 3; bi++) {
+                if (bs[bi].host == NULL) continue;
+                if (cudaMalloc((void **)bs[bi].dev,
+                               bs[bi].n * sizeof(float)) != cudaSuccess) {
+                    free(host_temp); oc_cuda_free(ctx); return OC_ERR_BACKEND;
+                }
+                cudaMemcpy(*bs[bi].dev, bs[bi].host, bs[bi].n * sizeof(float),
+                           cudaMemcpyHostToDevice);
+            }
+        }
         if (cudaMalloc((void **)&ctx->d_ffn_norm[l], embd * sizeof(float)) != cudaSuccess) {
             free(host_temp); oc_cuda_free(ctx); return OC_ERR_BACKEND;
         }
@@ -449,6 +484,28 @@ OcError oc_cuda_forward(OcCudaContext *ctx, uint32_t token, uint32_t pos,
             ctx->d_attn_v[l], (size_t)n_head_kv * head_dim, embd,
             ctx->d_normed, ctx->d_v);
         OC_CUDA_CHECK(cudaGetLastError());
+
+        /* Qwen2-family QKV projection biases, added before RoPE to match the
+         * CPU forward in llama.c (and llama.cpp's build_qkv). */
+        {
+            size_t nq = (size_t)n_head * head_dim;
+            size_t nkv = (size_t)n_head_kv * head_dim;
+            if (ctx->d_attn_q_bias[l]) {
+                k_add_bias<<<(unsigned)((nq + block - 1) / block), block>>>(
+                    ctx->d_q, ctx->d_attn_q_bias[l], nq);
+                OC_CUDA_CHECK(cudaGetLastError());
+            }
+            if (ctx->d_attn_k_bias[l]) {
+                k_add_bias<<<(unsigned)((nkv + block - 1) / block), block>>>(
+                    ctx->d_k, ctx->d_attn_k_bias[l], nkv);
+                OC_CUDA_CHECK(cudaGetLastError());
+            }
+            if (ctx->d_attn_v_bias[l]) {
+                k_add_bias<<<(unsigned)((nkv + block - 1) / block), block>>>(
+                    ctx->d_v, ctx->d_attn_v_bias[l], nkv);
+                OC_CUDA_CHECK(cudaGetLastError());
+            }
+        }
 
         /* RoPE on Q. */
         k_apply_rope<<<n_head, block>>>(
@@ -563,6 +620,9 @@ void oc_cuda_free(OcCudaContext *ctx)
     cudaFree(ctx->d_kv_k); cudaFree(ctx->d_kv_v);
 
     for (uint32_t l = 0; l < ctx->n_layer; l++) {
+        if (ctx->d_attn_q_bias && ctx->d_attn_q_bias[l]) cudaFree(ctx->d_attn_q_bias[l]);
+        if (ctx->d_attn_k_bias && ctx->d_attn_k_bias[l]) cudaFree(ctx->d_attn_k_bias[l]);
+        if (ctx->d_attn_v_bias && ctx->d_attn_v_bias[l]) cudaFree(ctx->d_attn_v_bias[l]);
         if (ctx->d_attn_q) cudaFree(ctx->d_attn_q[l]);
         if (ctx->d_attn_k) cudaFree(ctx->d_attn_k[l]);
         if (ctx->d_attn_v) cudaFree(ctx->d_attn_v[l]);
@@ -573,6 +633,7 @@ void oc_cuda_free(OcCudaContext *ctx)
         if (ctx->d_attn_norm) cudaFree(ctx->d_attn_norm[l]);
         if (ctx->d_ffn_norm) cudaFree(ctx->d_ffn_norm[l]);
     }
+    free(ctx->d_attn_q_bias); free(ctx->d_attn_k_bias); free(ctx->d_attn_v_bias);
     free(ctx->d_attn_q); free(ctx->d_attn_k); free(ctx->d_attn_v);
     free(ctx->d_attn_output);
     free(ctx->d_ffn_gate); free(ctx->d_ffn_up); free(ctx->d_ffn_down);

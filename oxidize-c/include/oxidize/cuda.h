@@ -32,6 +32,11 @@ typedef struct OcCudaContext {
     float **d_attn_q;           /* [n_layer] [n_head*head_dim, n_embd]     */
     float **d_attn_k;
     float **d_attn_v;
+    /* Optional Q/K/V projection biases (Qwen2-family). Entry is NULL for
+     * layers/models without them. */
+    float **d_attn_q_bias;
+    float **d_attn_k_bias;
+    float **d_attn_v_bias;
     float **d_attn_output;
     float **d_ffn_gate;
     float **d_ffn_up;
