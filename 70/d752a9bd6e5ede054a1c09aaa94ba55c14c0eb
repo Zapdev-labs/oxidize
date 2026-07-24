@@ -1,0 +1,36 @@
+oxidize-c/src/model/inf_model.c
+  s_96ddc277ba047e::t_cd787e5bc9f494 1456-1714
+oxidize-c/src/model/speculative.c
+  s_96ddc277ba047e::t_ef47777fc4d4a2 375-377,379-383,385-389,391,393-406,408-424
+  s_96ddc277ba047e::t_a1c4056f72beb2 407
+  s_96ddc277ba047e::t_978dcbf9ba8315 378,384,390,392
+oxidize-c/tests/test_layer_range.c
+  s_96ddc277ba047e::t_d887543c53e2d3 180
+  s_96ddc277ba047e::t_a1da5173f811dd 206
+  s_96ddc277ba047e::t_56b3ca5863bce7 1-137,140-173,175-179,181-192,194-205,207-210,214-219
+  s_96ddc277ba047e::t_f53a13438a1a5e 211-213
+  s_96ddc277ba047e::t_a197e74492e194 174
+  s_96ddc277ba047e::t_d43326637037ae 138-139
+  s_96ddc277ba047e::t_ef5b59d3ca2d60 193
+oxidize-c/include/oxidize/inf_model.h
+  s_96ddc277ba047e::t_ffb22c7f1ad9ed 185-191
+oxidize-c/include/oxidize/speculative.h
+  s_96ddc277ba047e::t_d2650d4e7767d5 104,107,109-110
+  s_96ddc277ba047e::t_d4166d61a8c604 101-103,105-106,108,111-120
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "70d752a9bd6e5ede054a1c09aaa94ba55c14c0eb",
+  "prompts": {},
+  "sessions": {
+    "s_96ddc277ba047e": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "ea8ad242-b091-46af-96e0-114c0c67fea4",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
