@@ -22,10 +22,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-22.04
+          # ubuntu-24.04 (glibc 2.39): the vendored tests/criterion/lib/
+          # libcriterion.a is built against glibc >= 2.38 (references
+          # __isoc23_strtol), so it will not link on ubuntu-22.04's glibc 2.35.
+          - os: ubuntu-24.04
             cc: gcc
             cxx: g++
-          - os: ubuntu-22.04
+          - os: ubuntu-24.04
             cc: clang
             cxx: clang++
     defaults:

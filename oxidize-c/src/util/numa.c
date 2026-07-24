@@ -138,9 +138,15 @@ OcError oc_numa_node_for_cpu(uint32_t cpu, uint32_t *out_node)
 OcError oc_numa_current_node(uint32_t *out_node)
 {
     if (!out_node) return OC_ERR_INVALID_ARG;
+#if defined(__linux__)
     int cpu = sched_getcpu();
     if (cpu < 0) return OC_ERR_IO;
     return oc_numa_node_for_cpu((uint32_t)cpu, out_node);
+#else
+    /* No sched_getcpu / NUMA topology outside Linux — report node 0. */
+    *out_node = 0;
+    return OC_OK;
+#endif
 }
 
 OcError oc_numa_set_policy(OcNumaPolicy policy, uint32_t node)
@@ -161,6 +167,7 @@ OcError oc_numa_bind_thread(uint32_t node)
 
     if (node >= topo.n_nodes) return OC_ERR_INVALID_ARG;
 
+#if defined(__linux__)
     cpu_set_t cpuset;
     CPU_ZERO(&cpuset);
     OcNumaNode *n = &topo.nodes[node];
@@ -170,16 +177,25 @@ OcError oc_numa_bind_thread(uint32_t node)
     if (sched_setaffinity(0, sizeof(cpuset), &cpuset) != 0)
         return OC_ERR_IO;
     return OC_OK;
+#else
+    /* CPU affinity (sched_setaffinity/cpu_set_t) is Linux-only; no-op. */
+    return OC_OK;
+#endif
 }
 
 OcError oc_numa_pin_cpu(uint32_t cpu)
 {
+#if defined(__linux__)
     cpu_set_t cpuset;
     CPU_ZERO(&cpuset);
     CPU_SET(cpu, &cpuset);
     if (sched_setaffinity(0, sizeof(cpuset), &cpuset) != 0)
         return OC_ERR_IO;
     return OC_OK;
+#else
+    (void)cpu;  /* CPU affinity is Linux-only; no-op elsewhere. */
+    return OC_OK;
+#endif
 }
 
 void *oc_numa_alloc(size_t size, uint32_t node)

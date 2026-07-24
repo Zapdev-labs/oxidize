@@ -367,9 +367,10 @@ OcError oc_safetensors_to_gguf(const OcConvertConfig *cfg)
 
     /* Determine architecture. */
     const char *names[512];
-    for (size_t i = 0; i < n_tensors && i < 512; i++)
+    size_t n_names = n_tensors < 512 ? n_tensors : 512;
+    for (size_t i = 0; i < n_names; i++)
         names[i] = tensors[i].name;
-    const char *arch = oc_detect_arch_from_tensors(names, n_tensors);
+    const char *arch = oc_detect_arch_from_tensors(names, n_names);
 
     if (cfg->verbose) {
         fprintf(stderr, "  detected architecture: %s\n", arch);
