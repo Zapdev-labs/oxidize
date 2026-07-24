@@ -372,3 +372,53 @@ cleanup:
     free(target_buf); free(draft_buf);
     return status;
 }
+
+/* ─── Speculative stats accessors ─────────────────────────────────────── */
+
+double oc_speculative_acceptance_rate(const OcSpeculativeStats *stats)
+{
+    if (!stats || stats->total_draft_tokens == 0) return 0.0;
+    return (double)stats->accepted_draft_tokens / (double)stats->total_draft_tokens;
+}
+
+double oc_speculative_tokens_per_target_forward(const OcSpeculativeStats *stats)
+{
+    if (!stats || stats->target_forward_passes == 0) return 0.0;
+    return (double)stats->emitted_tokens / (double)stats->target_forward_passes;
+}
+
+double oc_speculative_estimated_speedup(const OcSpeculativeStats *stats)
+{
+    return oc_speculative_tokens_per_target_forward(stats);
+}
+
+/* ─── Draft model loader ──────────────────────────────────────────────── */
+
+OcError oc_speculative_load_draft(const char *path,
+                                    OcLlamaModel **out_model,
+                                    OcLlamaSession **out_sess)
+{
+    if (!path || !out_model || !out_sess) return OC_ERR_INVALID_ARG;
+
+    OcLlamaModel *model = malloc(sizeof(OcLlamaModel));
+    if (!model) return OC_ERR_OOM;
+    memset(model, 0, sizeof(*model));
+
+    OcError e = oc_llama_load(path, model);
+    if (e != OC_OK) {
+        free(model);
+        return e;
+    }
+
+    OcLlamaSession *sess = malloc(sizeof(OcLlamaSession));
+    if (!sess) {
+        oc_llama_free(model);
+        free(model);
+        return OC_ERR_OOM;
+    }
+    memset(sess, 0, sizeof(*sess));
+
+    *out_model = model;
+    *out_sess = sess;
+    return OC_OK;
+}

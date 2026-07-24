@@ -182,6 +182,13 @@ OcError oc_inf_model_forward_token_logits(OcInferenceModel *m, uint32_t token,
                                             size_t position,
                                             float **logits, size_t *logits_len);
 
+/* Run layers [start, end) against the hidden state in workspace.x.
+ * Mutates workspace.x in place. pos is the absolute position for KV/RoPE.
+ * Used by MTP draft path and pipeline-parallel stages. */
+OcError oc_inf_model_run_layer_range(OcInferenceModel *m,
+                                       size_t start, size_t end,
+                                       size_t pos);
+
 /* ─── MTP/nextn draft generation ──────────────────────────────────────── */
 
 /* Generate draft tokens using the native MTP/nextn block.

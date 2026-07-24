@@ -98,6 +98,26 @@ OcError oc_speculative_generate(
     uint32_t *out_tokens, size_t *out_len, size_t out_cap,
     OcSpeculativeStats *stats);
 
+/* ─── Speculative stats accessors (port of speculative.rs) ────────────── */
+
+/* Acceptance rate: accepted / total_draft (0.0 if no drafts). */
+double oc_speculative_acceptance_rate(const OcSpeculativeStats *stats);
+
+/* Tokens per target forward: emitted_tokens / target_forward_passes (0.0 if none). */
+double oc_speculative_tokens_per_target_forward(const OcSpeculativeStats *stats);
+
+/* Estimated speedup vs plain decoding (1.0 = no speedup). */
+double oc_speculative_estimated_speedup(const OcSpeculativeStats *stats);
+
+/* ─── Draft model loader convenience ──────────────────────────────────── */
+
+/* Load a GGUF file as a draft model for speculative decoding.
+ * The caller owns the returned OcLlamaModel and must free it.
+ * Returns OC_ERR_MODEL if the GGUF is not a valid draft model. */
+OcError oc_speculative_load_draft(const char *path,
+                                    OcLlamaModel **out_model,
+                                    OcLlamaSession **out_sess);
+
 #ifdef __cplusplus
 }
 #endif

@@ -1453,6 +1453,265 @@ OcError oc_inf_model_draft_mtp_tokens(OcInferenceModel *m,
     return OC_OK;
 }
 
+/* ─── Run a range of layers ────────────────────────────────────────────── */
+
+OcError oc_inf_model_run_layer_range(OcInferenceModel *m,
+                                       size_t start, size_t end,
+                                       size_t pos)
+{
+    if (!m) return OC_ERR_INVALID_ARG;
+    if (start >= m->n_layers || end > m->n_layers) return OC_ERR_INVALID_ARG;
+    if (start >= end) return OC_OK;
+
+    OcInferenceConfig *cfg = &m->config;
+    size_t h = cfg->hidden_size;
+    uint32_t n_heads = cfg->num_attention_heads;
+    uint32_t kvh = cfg->num_key_value_heads;
+    uint32_t head_dim = oc_inference_config_head_dim(cfg);
+    uint32_t kv_head_dim = oc_inference_config_kv_head_dim(cfg);
+    uint32_t rope_len = oc_inference_config_effective_rope_dim(cfg);
+    float eps = cfg->rms_norm_eps;
+
+    float *normed = m->workspace.hidden_a;
+    float *q_vec = m->workspace.q_full;
+    float *k_vec = m->workspace.k_vec;
+    float *v_vec = m->workspace.v_vec;
+    float *attn_out = m->workspace.attn_result;
+    float *ffn_gate = m->workspace.intermediate_a;
+    float *ffn_up = m->workspace.intermediate_b;
+    float *ffn_down = m->workspace.hidden_b;
+
+    for (size_t li = start; li < end && li < cfg->layer_count; li++) {
+        OcLayerWeights *layer = &m->layers[li];
+        float rope_theta = oc_inference_config_layer_rope_theta(cfg, (uint32_t)li);
+        uint32_t layer_window = oc_inference_config_layer_sliding_window(cfg, (uint32_t)li);
+
+        /* MLA layer. */
+        if (oc_layer_weights_has_mla(layer)) {
+            OcError e = forward_mla_layer(m, layer, li, pos);
+            if (e != OC_OK) return e;
+            goto lr_ffn;
+        }
+
+        /* ShortConv layer. */
+        if (!oc_weight_storage_is_empty(&layer->shortconv_in_proj)) {
+            OcError e = forward_shortconv_layer(m, layer, li, pos);
+            if (e != OC_OK) return e;
+            goto lr_ffn;
+        }
+
+        /* Mamba/SSM layer. */
+        if (!oc_weight_storage_is_empty(&layer->attn_qkv) &&
+            oc_weight_storage_is_empty(&layer->attn_q)) {
+            OcError e = forward_mamba_layer(m, layer, li, pos);
+            if (e != OC_OK) return e;
+            continue;
+        }
+
+        /* Standard attention. */
+        if (oc_layer_weights_has_attention(layer)) {
+            if (layer->attn_norm)
+                oc_rms_norm_f32(m->workspace.x, layer->attn_norm, normed, h, eps);
+            else
+                memcpy(normed, m->workspace.x, h * sizeof(float));
+
+            uint32_t q_len = n_heads * head_dim;
+            uint32_t kv_len = kvh * kv_head_dim;
+
+            OcError e = oc_gemv_weight(&layer->attn_q, q_len, h, normed, q_vec);
+            if (e != OC_OK) return e;
+            if (layer->attn_q_bias)
+                oc_add_repeating_bias(q_vec, q_len, layer->attn_q_bias, q_len);
+
+            if (!oc_weight_storage_is_empty(&layer->attn_k)) {
+                e = oc_gemv_weight(&layer->attn_k, kv_len, h, normed, k_vec);
+                if (e != OC_OK) return e;
+                if (layer->attn_k_bias)
+                    oc_add_repeating_bias(k_vec, kv_len, layer->attn_k_bias, kv_len);
+            }
+            if (!oc_weight_storage_is_empty(&layer->attn_v)) {
+                e = oc_gemv_weight(&layer->attn_v, kv_len, h, normed, v_vec);
+                if (e != OC_OK) return e;
+                if (layer->attn_v_bias)
+                    oc_add_repeating_bias(v_vec, kv_len, layer->attn_v_bias, kv_len);
+            }
+
+            /* Per-head Q norm. */
+            if (layer->attn_q_norm) {
+                for (uint32_t hd = 0; hd < n_heads; hd++) {
+                    float *qh = q_vec + hd * head_dim;
+                    float tmp[256];
+                    if (head_dim <= 256) {
+                        oc_rms_norm_f32(qh, layer->attn_q_norm, tmp, head_dim, eps);
+                        memcpy(qh, tmp, head_dim * sizeof(float));
+                    }
+                }
+            }
+            /* Per-head K norm. */
+            if (layer->attn_k_norm) {
+                for (uint32_t hd = 0; hd < kvh; hd++) {
+                    float *kh = k_vec + hd * kv_head_dim;
+                    float tmp[256];
+                    if (kv_head_dim <= 256) {
+                        oc_rms_norm_f32(kh, layer->attn_k_norm, tmp, kv_head_dim, eps);
+                        memcpy(kh, tmp, kv_head_dim * sizeof(float));
+                    }
+                }
+            }
+
+            /* RoPE. */
+            for (uint32_t hd = 0; hd < n_heads; hd++) {
+                float *qh = q_vec + hd * head_dim;
+                oc_inference_config_apply_rope_head(cfg, qh, qh, head_dim,
+                                                     rope_len, (int64_t)pos, rope_theta);
+            }
+            for (uint32_t hd = 0; hd < kvh; hd++) {
+                float *kh = k_vec + hd * kv_head_dim;
+                oc_inference_config_apply_rope_head(cfg, kh, kh, kv_head_dim,
+                                                     rope_len, (int64_t)pos, rope_theta);
+            }
+
+            /* KV cache. */
+            int32_t kv_idx = -1;
+            if (li < m->kv_layer_map_len)
+                kv_idx = m->kv_layer_map[li];
+
+            if (kv_idx >= 0 && kv_len > 0) {
+                e = oc_kv_cache_append(&m->kv_cache, (uint32_t)kv_idx,
+                                       k_vec, v_vec, 1);
+                if (e != OC_OK) return e;
+            }
+
+            /* Attention. */
+            memset(attn_out, 0, q_len * sizeof(float));
+            if (kv_idx >= 0 && kv_len > 0) {
+                uint32_t seq_len = oc_kv_cache_n_tokens(&m->kv_cache);
+                uint32_t eff_seq = seq_len;
+                const float *key_cache = NULL;
+                const float *val_cache = NULL;
+
+                if (layer_window > 0 && seq_len > layer_window) {
+                    uint32_t skip = seq_len - layer_window;
+                    oc_kv_cache_get(&m->kv_cache, (uint32_t)kv_idx, skip,
+                                    &key_cache, &val_cache);
+                    eff_seq = layer_window;
+                } else {
+                    oc_kv_cache_get(&m->kv_cache, (uint32_t)kv_idx, 0,
+                                    &key_cache, &val_cache);
+                }
+
+                if (key_cache && val_cache) {
+                    uint32_t n_rep = n_heads / (kvh > 0 ? kvh : 1);
+                    for (uint32_t hd = 0; hd < n_heads; hd++) {
+                        uint32_t kv_hd = hd / n_rep;
+                        const float *q_head = q_vec + hd * head_dim;
+                        const float *k_head = key_cache + kv_hd * kv_head_dim;
+                        const float *v_head = val_cache + kv_hd * kv_head_dim;
+                        float *out_head = attn_out + hd * head_dim;
+                        oc_scaled_dot_product_attention_f32(
+                            q_head, k_head, v_head, eff_seq,
+                            kv_head_dim, out_head);
+                    }
+                }
+            }
+
+            /* Attn output projection + residual. */
+            if (!oc_weight_storage_is_empty(&layer->attn_output)) {
+                e = oc_gemv_weight(&layer->attn_output, h, q_len, attn_out, ffn_down);
+                if (e != OC_OK) return e;
+                if (layer->attn_output_bias)
+                    oc_add_repeating_bias(ffn_down, h, layer->attn_output_bias, h);
+
+                if (cfg->sandwich_norm && layer->post_attention_norm) {
+                    oc_rms_norm_f32(ffn_down, layer->post_attention_norm, attn_out, h, eps);
+                    memcpy(ffn_down, attn_out, h * sizeof(float));
+                }
+
+                for (size_t i = 0; i < h; i++)
+                    m->workspace.x[i] += ffn_down[i];
+            }
+        }
+
+    lr_ffn:
+        {
+            /* FFN block. */
+            float *ffn_norm_weight = NULL;
+            if (cfg->sandwich_norm)
+                ffn_norm_weight = layer->ffn_norm;
+            else if (layer->post_attention_norm)
+                ffn_norm_weight = layer->post_attention_norm;
+            else if (layer->ffn_norm)
+                ffn_norm_weight = layer->ffn_norm;
+
+            if (oc_layer_weights_has_moe(layer)) {
+                if (ffn_norm_weight) {
+                    oc_rms_norm_f32(m->workspace.x, ffn_norm_weight, normed, h, eps);
+                } else {
+                    memcpy(normed, m->workspace.x, h * sizeof(float));
+                }
+                float ffn_out_buf[4096];
+                memset(ffn_out_buf, 0, h * sizeof(float));
+                if (h <= 4096) {
+                    float *gate_scratch = m->workspace.intermediate_c;
+                    OcError e = oc_moe_ffn_forward(
+                        &layer->ffn_gate_inp, &layer->ffn_gate_exps,
+                        &layer->ffn_up_exps, &layer->ffn_down_exps,
+                        layer->ffn_exp_probs_b, cfg, normed, ffn_out_buf,
+                        ffn_gate, ffn_up, gate_scratch,
+                        m->workspace.moe_router_logits,
+                        (OcExpertScore *)m->workspace.moe_gate_all);
+                    if (e != OC_OK) return e;
+                    for (size_t i = 0; i < h; i++)
+                        m->workspace.x[i] += ffn_out_buf[i];
+                }
+            } else if (oc_layer_weights_has_dense_ffn(layer) && ffn_norm_weight) {
+                oc_rms_norm_f32(m->workspace.x, ffn_norm_weight, normed, h, eps);
+
+                size_t i_size = cfg->intermediate_size;
+                OcError e = oc_gemv_weight(&layer->ffn_gate, i_size, h, normed, ffn_gate);
+                if (e != OC_OK) return e;
+                e = oc_gemv_weight(&layer->ffn_up, i_size, h, normed, ffn_up);
+                if (e != OC_OK) return e;
+
+                if (cfg->gelu_ffn)
+                    oc_geglu_inplace_f32(ffn_gate, ffn_up, i_size);
+                else
+                    oc_swiglu_inplace_f32(ffn_gate, ffn_up, i_size);
+
+                e = oc_gemv_weight(&layer->ffn_down, h, i_size, ffn_gate, ffn_down);
+                if (e != OC_OK) return e;
+                if (layer->ffn_down_bias)
+                    oc_add_repeating_bias(ffn_down, h, layer->ffn_down_bias, h);
+
+                if (cfg->sandwich_norm && layer->post_ffn_norm) {
+                    float tmp[4096];
+                    if (h <= 4096) {
+                        oc_rms_norm_f32(ffn_down, layer->post_ffn_norm, tmp, h, eps);
+                        memcpy(ffn_down, tmp, h * sizeof(float));
+                    }
+                }
+
+                for (size_t i = 0; i < h; i++)
+                    m->workspace.x[i] += ffn_down[i];
+            }
+        }
+
+        /* EAGLE3 capture. */
+        for (size_t ei = 0; ei < m->eagle3_n_capture_layers; ei++) {
+            if (m->eagle3_capture_layers[ei] == li) {
+                if (!m->eagle3_layer_hiddens[ei])
+                    m->eagle3_layer_hiddens[ei] = malloc(h * sizeof(float));
+                if (m->eagle3_layer_hiddens[ei])
+                    memcpy(m->eagle3_layer_hiddens[ei], m->workspace.x,
+                           h * sizeof(float));
+                break;
+            }
+        }
+    }
+
+    return OC_OK;
+}
+
 /* ─── Batched forward (prefill + cross-sequence decode) ───────────────── */
 
 bool oc_inf_model_layers_supported_for_batched(const OcInferenceModel *m)
