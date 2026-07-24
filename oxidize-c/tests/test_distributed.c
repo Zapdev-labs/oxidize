@@ -17,6 +17,13 @@
 #include "oxidize/distributed.h"
 #include "oxidize/error.h"
 
+#include <pthread.h>
+
+/* Fixed loopback port for the two-node tests (and PORT+1 for the
+ * timeout test). Kept out of the ephemeral range to avoid collisions. */
+#define OC_TEST_PORT      52930
+#define OC_TEST_PORT_STR "52930"
+
 /* ------------------------------------------------------------------ */
 /* Helpers                                                            */
 /* ------------------------------------------------------------------ */
@@ -84,10 +91,9 @@ Test(distributed, init_multi_node_pipeline)
     cfg.coordinator_addr = NULL;
     cfg.listen_port = 0;
     OcError e = oc_distributed_init(&sched, &cfg);
-    /* Multi-node init is rejected until peer endpoint configuration and
-     * connection acceptance exist. */
+    /* A worker with no coordinator address has nothing to connect to. */
     cr_assert_eq(e, OC_ERR_NETWORK,
-                 "multi-node init should be rejected as unsupported");
+                 "worker init without a coordinator address must fail");
     cr_assert(!sched.initialized);
     oc_distributed_free(&sched);
 }
@@ -535,17 +541,70 @@ Test(distributed, reconnect_null_scheduler)
 /* Multi-node pipeline edge cases                                     */
 /* ------------------------------------------------------------------ */
 
-Test(distributed, multi_node_init_rejected_unsupported)
+Test(distributed, multi_node_init_times_out_without_peers)
 {
-    /* Multi-node configs validate, but init rejects them until real peer
-     * endpoint configuration and connection acceptance exist. */
+    /* Rank 0 listens but nobody connects: init must give up at the
+     * configured deadline rather than blocking forever. */
     OcDistributedScheduler sched;
     OcDistributedConfig cfg = make_multinode_config(4, 0, 4, 1);
     cfg.coordinator_addr = NULL;
-    cfg.listen_port = 0;
+    cfg.listen_port = OC_TEST_PORT + 1;
+    cfg.connect_timeout_ms = 200;
     cr_assert_eq(oc_distributed_validate_config(&cfg), OC_OK);
     cr_assert_eq(oc_distributed_init(&sched, &cfg), OC_ERR_NETWORK);
     cr_assert(!sched.initialized);
+    oc_distributed_free(&sched);
+}
+
+/* Worker half of the two-node round-trip test below. */
+static void *worker_thread_main(void *arg)
+{
+    (void)arg;
+    static OcError result;
+    OcDistributedScheduler sched;
+    OcDistributedConfig cfg = make_multinode_config(2, 1, 2, 1);
+    cfg.coordinator_addr = "127.0.0.1:" OC_TEST_PORT_STR;
+    cfg.connect_timeout_ms = 5000;
+
+    result = oc_distributed_init(&sched, &cfg);
+    if (result != OC_OK) return &result;
+
+    float buf[4] = {0};
+    result = oc_distributed_recv_activations(&sched, buf, 4);
+    if (result == OC_OK) {
+        for (int i = 0; i < 4; i++) {
+            if (buf[i] != (float)(i + 1)) result = OC_ERR_NETWORK;
+        }
+    }
+    oc_distributed_free(&sched);
+    return &result;
+}
+
+Test(distributed, multi_node_pipeline_round_trip)
+{
+    /* Real two-node pipeline: rank 0 accepts, rank 1 connects, and one
+     * activation vector crosses the wire intact. */
+    pthread_t worker;
+    cr_assert_eq(pthread_create(&worker, NULL, worker_thread_main, NULL), 0);
+
+    OcDistributedScheduler sched;
+    OcDistributedConfig cfg = make_multinode_config(2, 0, 2, 1);
+    cfg.listen_port = OC_TEST_PORT;
+    cfg.connect_timeout_ms = 5000;
+
+    cr_assert_eq(oc_distributed_init(&sched, &cfg), OC_OK);
+    cr_assert(sched.initialized);
+    cr_assert(sched.peers[1].online);
+
+    float send[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+    cr_assert_eq(oc_distributed_send_activations(&sched, send, 4), OC_OK);
+    cr_assert_eq(sched.stats.bytes_sent, sizeof(send));
+
+    void *wres = NULL;
+    cr_assert_eq(pthread_join(worker, &wres), 0);
+    cr_assert_not_null(wres);
+    cr_assert_eq(*(OcError *)wres, OC_OK, "worker side failed");
+
     oc_distributed_free(&sched);
 }
 

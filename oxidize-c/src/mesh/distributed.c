@@ -38,6 +38,7 @@
 #include <unistd.h>
 #include <time.h>
 #include <errno.h>
+#include <sys/time.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -330,12 +331,6 @@ OcError oc_distributed_init(OcDistributedScheduler *sched,
     OcError ve = oc_distributed_validate_config(cfg);
     if (ve != OC_OK) return ve;
 
-    /* Multi-node initialization is not yet supported: there is no peer
-     * endpoint map, connection acceptance, or rank handshake, so peers
-     * could never actually communicate. Reject rather than advertise a
-     * scheduler that cannot transfer activations. */
-    if (cfg->n_nodes > 1) return OC_ERR_NETWORK;
-
     sched->config = *cfg;
     sched->role = oc_distributed_resolve_role(cfg);
     sched->listen_fd = -1;
@@ -343,8 +338,7 @@ OcError oc_distributed_init(OcDistributedScheduler *sched,
     sched->recv_buf = NULL;
     sched->buf_capacity = 0;
 
-    /* Initialize peer table. In single-node mode we have 1 peer (self).
-     * n_nodes <= OC_DIST_MAX_NODES is guaranteed by config validation. */
+    /* Initialize peer table. */
     sched->n_peers = cfg->n_nodes;
 
     for (uint32_t i = 0; i < sched->n_peers; i++) {
@@ -360,7 +354,137 @@ OcError oc_distributed_init(OcDistributedScheduler *sched,
         p->bytes_recv_from = 0;
     }
 
-    /* Single-node mode: no network setup, no communication buffers. */
+    /* Multi-node mode: set up TCP connections for pipeline parallelism.
+     * The pipeline master (node_rank 0) listens and accepts connections
+     * from workers. Workers connect to the coordinator address. */
+    if (cfg->n_nodes > 1) {
+        /* Mark initialized up front so oc_distributed_free() closes any
+         * sockets opened below when a failure path aborts init. The final
+         * memset in free() clears the flag again. */
+        sched->initialized = true;
+
+        uint32_t timeout_ms = cfg->connect_timeout_ms
+                            ? cfg->connect_timeout_ms
+                            : OC_DIST_CONNECT_TIMEOUT_MS;
+        double deadline = now_ms() + (double)timeout_ms;
+
+        if (cfg->node_rank == 0) {
+            /* Pipeline master: listen on listen_port (or default). */
+            uint16_t port = cfg->listen_port ? cfg->listen_port : OC_DIST_PORT_DEFAULT;
+            int lfd = socket(AF_INET, SOCK_STREAM, 0);
+            if (lfd < 0) { oc_distributed_free(sched); return OC_ERR_NETWORK; }
+
+            int opt = 1;
+            setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+            struct sockaddr_in addr;
+            memset(&addr, 0, sizeof(addr));
+            addr.sin_family = AF_INET;
+            addr.sin_addr.s_addr = INADDR_ANY;
+            addr.sin_port = htons(port);
+
+            if (bind(lfd, (struct sockaddr *)&addr, sizeof(addr)) < 0 ||
+                listen(lfd, (int)(cfg->n_nodes - 1)) < 0) {
+                close(lfd);
+                oc_distributed_free(sched);
+                return OC_ERR_NETWORK;
+            }
+            sched->listen_fd = lfd;
+
+            /* Bound the accept loop: a worker that never shows up must not
+             * hang init forever. SO_RCVTIMEO applies to accept(). */
+            struct timeval tv;
+            tv.tv_sec = (time_t)(timeout_ms / 1000u);
+            tv.tv_usec = (suseconds_t)((timeout_ms % 1000u) * 1000u);
+            setsockopt(lfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+            /* Accept connections from workers (nodes 1..n_nodes-1).
+             * Each worker connects and sends its rank as a 4-byte uint32.
+             * A worker may reconnect after a failed handshake, so keep
+             * accepting until every rank is online or the deadline passes. */
+            uint32_t connected = 0;
+            while (connected + 1 < cfg->n_nodes && now_ms() < deadline) {
+                struct sockaddr_in caddr;
+                socklen_t clen = sizeof(caddr);
+                int cfd = accept(lfd, (struct sockaddr *)&caddr, &clen);
+                if (cfd < 0) {
+                    if (errno == EINTR) continue;
+                    break; /* timeout or hard error */
+                }
+
+                /* Read the worker's rank. Rank 0 is us, so reject it. */
+                uint32_t rank = 0;
+                if (recv_all(cfd, &rank, sizeof(rank)) == OC_OK &&
+                    rank > 0 && rank < cfg->n_nodes &&
+                    !sched->peers[rank].online) {
+                    OcDistPeer *p = &sched->peers[rank];
+                    p->socket_fd = cfd;
+                    p->online = true;
+                    connected++;
+                    /* Store the peer's address. */
+                    char ip[INET_ADDRSTRLEN];
+                    inet_ntop(AF_INET, &caddr.sin_addr, ip, sizeof(ip));
+                    snprintf(p->addr, sizeof(p->addr), "%s:%u",
+                             ip, ntohs(caddr.sin_port));
+                } else {
+                    close(cfd);
+                }
+            }
+            /* Close listen socket; all peer traffic uses the accepted fds. */
+            close(sched->listen_fd);
+            sched->listen_fd = -1;
+            if (connected + 1 < cfg->n_nodes) {
+                oc_distributed_free(sched);
+                return OC_ERR_NETWORK;
+            }
+        } else {
+            /* Worker: connect to coordinator. The master may not be
+             * listening yet, so retry until the deadline. */
+            if (!cfg->coordinator_addr) {
+                oc_distributed_free(sched);
+                return OC_ERR_NETWORK;
+            }
+
+            int fd = -1;
+            for (;;) {
+                fd = tcp_connect(cfg->coordinator_addr);
+                if (fd >= 0) break;
+                if (now_ms() >= deadline) {
+                    oc_distributed_free(sched);
+                    return OC_ERR_NETWORK;
+                }
+                struct timespec req = { 0, 20 * 1000 * 1000 }; /* 20 ms */
+                nanosleep(&req, NULL);
+            }
+
+            /* Send our rank so the master knows who we are. */
+            uint32_t rank = cfg->node_rank;
+            if (send_all(fd, &rank, sizeof(rank)) != OC_OK) {
+                close(fd);
+                oc_distributed_free(sched);
+                return OC_ERR_NETWORK;
+            }
+
+            /* Store coordinator as peer 0. */
+            OcDistPeer *p = &sched->peers[0];
+            if (p->socket_fd >= 0) close(p->socket_fd);
+            p->socket_fd = fd;
+            p->online = true;
+            snprintf(p->addr, sizeof(p->addr), "%s", cfg->coordinator_addr);
+        }
+    }
+
+    /* Allocate communication buffers for multi-node. */
+    if (cfg->n_nodes > 1) {
+        sched->send_buf = malloc(OC_DIST_BUF_SIZE);
+        sched->recv_buf = malloc(OC_DIST_BUF_SIZE);
+        if (!sched->send_buf || !sched->recv_buf) {
+            oc_distributed_free(sched);
+            return OC_ERR_OOM;
+        }
+        sched->buf_capacity = OC_DIST_BUF_SIZE;
+    }
+
     sched->initialized = true;
     return OC_OK;
 }

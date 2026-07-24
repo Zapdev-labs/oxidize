@@ -88,8 +88,58 @@ Test(rdma, receive)
     char buf[1024];
     OcRdmaRegion region;
     oc_rdma_register_memory(&dev, buf, 1024, &region);
+    /* A receive needs a staged payload to complete against. */
+    cr_assert_eq(oc_rdma_send(&dev, &region, 0, 256), OC_OK);
     cr_assert_eq(oc_rdma_receive(&dev, &region, 0, 256), OC_OK);
     cr_assert_eq(dev.bytes_received, 256);
+    oc_rdma_free(&dev);
+}
+
+Test(rdma, receive_without_send)
+{
+    OcRdmaDevice dev;
+    oc_rdma_init(&dev, "ib0");
+    char buf[128];
+    OcRdmaRegion region;
+    oc_rdma_register_memory(&dev, buf, 128, &region);
+    cr_assert_eq(oc_rdma_receive(&dev, &region, 0, 64), OC_ERR_NETWORK);
+    oc_rdma_free(&dev);
+}
+
+Test(rdma, send_receive_moves_bytes)
+{
+    OcRdmaDevice dev;
+    oc_rdma_init(&dev, "ib0");
+    /* Source and destination windows in one registered region. */
+    unsigned char buf[512];
+    for (size_t i = 0; i < sizeof(buf); i++) buf[i] = (unsigned char)(i & 0xFF);
+    memset(buf + 256, 0, 256);
+
+    OcRdmaRegion region;
+    cr_assert_eq(oc_rdma_register_memory(&dev, buf, sizeof(buf), &region), OC_OK);
+    cr_assert_eq(oc_rdma_send(&dev, &region, 0, 256), OC_OK);
+    cr_assert_eq(oc_rdma_receive(&dev, &region, 256, 256), OC_OK);
+    cr_assert_eq(memcmp(buf, buf + 256, 256), 0,
+                 "receive must reproduce the sent payload byte for byte");
+
+    /* Staged payload survives being overwritten in the source window. */
+    memset(buf, 0xAA, 256);
+    cr_assert_eq(oc_rdma_receive(&dev, &region, 0, 256), OC_OK);
+    for (size_t i = 0; i < 256; i++)
+        cr_assert_eq(buf[i], (unsigned char)(i & 0xFF));
+
+    oc_rdma_free(&dev);
+}
+
+Test(rdma, send_invalid_region)
+{
+    OcRdmaDevice dev;
+    oc_rdma_init(&dev, "ib0");
+    char buf[64];
+    OcRdmaRegion region;
+    oc_rdma_register_memory(&dev, buf, 64, &region);
+    oc_rdma_deregister_memory(&dev, &region);
+    cr_assert_eq(oc_rdma_send(&dev, &region, 0, 8), OC_ERR_INVALID_ARG);
     oc_rdma_free(&dev);
 }
 
@@ -146,6 +196,7 @@ Test(rdma, bytes_received)
     char buf[1024];
     OcRdmaRegion r;
     oc_rdma_register_memory(&dev, buf, 1024, &r);
+    oc_rdma_send(&dev, &r, 0, 50); /* stage a payload to receive */
     oc_rdma_receive(&dev, &r, 0, 50);
     cr_assert_eq(oc_rdma_bytes_received(&dev), 50);
     oc_rdma_free(&dev);

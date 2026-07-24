@@ -169,7 +169,6 @@ Test(llama, sessions_reject_unsupported_architecture_paths)
     OcBatchSession batch;
     model.cfg.uses_mla = true;
     cr_assert_eq(oc_llama_session_init(&model, &session), OC_ERR_MODEL);
-    cr_assert_eq(oc_batch_session_init(&model, 2, &batch), OC_ERR_MODEL);
     /* uses_geglu is a supported activation (forward_dense_ffn handles it)
      * and no longer rejects session init. LayerNorm architectures
      * (GPT-2/NeoX/Falcon) are rejected by batch init only — single-token
@@ -179,6 +178,39 @@ Test(llama, sessions_reject_unsupported_architecture_paths)
     cr_assert_eq(oc_batch_session_init(&model, 2, &batch), OC_ERR_MODEL);
     model.arch = OC_ARCH_FALCON;
     cr_assert_eq(oc_batch_session_init(&model, 2, &batch), OC_ERR_MODEL);
+}
+
+Test(llama, batch_allocates_mla_workspace)
+{
+    /* MLA models are supported by batch decode: the compressed-KV
+     * temporaries are allocated once and shared across sequences. */
+    OcLlamaModel model;
+    memset(&model, 0, sizeof(model));
+    model.cfg.n_ctx = 4;
+    model.cfg.n_layer = 1;
+    model.cfg.n_embd = 8;
+    model.cfg.n_ff = 8;
+    model.cfg.n_head = 2;
+    model.cfg.n_head_kv = 2;
+    model.cfg.head_dim = 4;
+    model.cfg.kv_head_dim = 4;
+    model.cfg.vocab_size = 4;
+    model.cfg.uses_mla = true;
+    model.cfg.mla_q_lora_dim = 8;
+    model.cfg.mla_kv_lora_dim = 8;
+    model.cfg.mla_q_rope_dim = 2;
+
+    OcBatchSession batch;
+    cr_assert_eq(oc_batch_session_init(&model, 2, &batch), OC_OK);
+    cr_assert_not_null(batch.mla_c_q);
+    cr_assert_not_null(batch.mla_c_kv);
+    cr_assert_not_null(batch.mla_q_full);
+    cr_assert_not_null(batch.mla_kv_compressed);
+    /* MLA keys/values are stored per attention head, not per KV head. */
+    cr_assert_eq(batch.kv_row_floats,
+                 (size_t)model.cfg.n_head * model.cfg.head_dim);
+    oc_batch_session_free(&batch);
+    cr_assert_null(batch.mla_c_q);
 }
 
 Test(llama, batch_validates_context_and_moe_workspace)

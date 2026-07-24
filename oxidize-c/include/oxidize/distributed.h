@@ -68,6 +68,10 @@ typedef struct OcDistributedConfig {
     uint16_t    listen_port;
     const char *coordinator_addr;
     uint32_t    activation_dtype_size;
+    /* Bound on how long oc_distributed_init() waits for peers to show up:
+     * the master's accept loop and the worker's connect retry both give up
+     * after this many milliseconds. 0 = OC_DIST_CONNECT_TIMEOUT_MS. */
+    uint32_t    connect_timeout_ms;
 } OcDistributedConfig;
 
 /* Sensible defaults for a single-node deployment (no communication). */
@@ -81,7 +85,11 @@ typedef struct OcDistributedConfig {
     .listen_port          = 0,    \
     .coordinator_addr     = NULL, \
     .activation_dtype_size = 4,   \
+    .connect_timeout_ms   = 0,    \
 })
+
+/* Default peer rendezvous timeout used when connect_timeout_ms == 0. */
+#define OC_DIST_CONNECT_TIMEOUT_MS 30000u
 
 /* ------------------------------------------------------------------ */
 /* Node role                                                          */
@@ -167,15 +175,15 @@ typedef struct OcDistributedScheduler {
  * (n_nodes == 1), no sockets are opened and all communication functions
  * are no-ops that return OC_OK.
  *
- * Multi-node mode (n_nodes > 1) is NOT yet supported: peer endpoint
- * configuration, connection acceptance, and rank handshakes are not
- * implemented, so init rejects such configs with OC_ERR_NETWORK rather
- * than advertising a scheduler whose peers can never communicate.
+ * Multi-node mode (n_nodes > 1): the pipeline master (node_rank 0) listens
+ * on listen_port and accepts connections from workers. Workers connect to
+ * coordinator_addr and send their rank. After init, pipeline send/recv and
+ * all-reduce operate over the established TCP connections.
  *
  * Returns:
  *   OC_OK              — scheduler ready.
  *   OC_ERR_INVALID_ARG — NULL scheduler or invalid config (see below).
- *   OC_ERR_NETWORK     — multi-node config (unsupported, see above).
+ *   OC_ERR_NETWORK     — socket/bind/listen/connect failure.
  *
  * Config validation rules:
  *   - n_nodes >= 1 && n_nodes <= OC_DIST_MAX_NODES

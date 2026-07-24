@@ -1,8 +1,15 @@
-/* test_k8s.c — Kubernetes stub tests. */
+/* test_k8s.c — Kubernetes integration tests. */
+#define _POSIX_C_SOURCE 200809L
 #include <criterion/criterion.h>
 #include "oxidize/k8s.h"
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <pthread.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 Test(k8s, init)
 {
@@ -114,9 +121,79 @@ Test(k8s, scale)
     oc_k8s_init(&cluster, "default", "svc");
     /* Not available, should return error. */
     cr_assert_neq(oc_k8s_scale(&cluster, 3), OC_OK);
+    /* Available but no API endpoint configured: scaling cannot succeed. */
+    unsetenv("OC_K8S_API_URL");
+    unsetenv("KUBERNETES_SERVICE_HOST");
     cluster.available = true;
-    cr_assert_eq(oc_k8s_scale(&cluster, 3), OC_OK);
+    cr_assert_eq(oc_k8s_scale(&cluster, 3), OC_ERR_NETWORK);
     oc_k8s_free(&cluster);
+}
+
+/* Fake API server: accepts one request, records it, replies 200. */
+typedef struct {
+    int      listen_fd;
+    char     request[8192];
+    size_t   request_len;
+} FakeApi;
+
+static void *fake_api_main(void *arg)
+{
+    FakeApi *api = (FakeApi *)arg;
+    int cfd = accept(api->listen_fd, NULL, NULL);
+    if (cfd < 0) return NULL;
+    ssize_t n = read(cfd, api->request, sizeof(api->request) - 1);
+    if (n > 0) {
+        api->request_len = (size_t)n;
+        api->request[n] = '\0';
+    }
+    const char *resp = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+    ssize_t w = write(cfd, resp, strlen(resp));
+    (void)w;
+    close(cfd);
+    return NULL;
+}
+
+Test(k8s, scale_issues_merge_patch_to_api)
+{
+    /* Bind an ephemeral port and point the client at it. */
+    int lfd = socket(AF_INET, SOCK_STREAM, 0);
+    cr_assert_geq(lfd, 0);
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    cr_assert_eq(bind(lfd, (struct sockaddr *)&addr, sizeof(addr)), 0);
+    cr_assert_eq(listen(lfd, 1), 0);
+    socklen_t alen = sizeof(addr);
+    cr_assert_eq(getsockname(lfd, (struct sockaddr *)&addr, &alen), 0);
+
+    char url[64];
+    snprintf(url, sizeof(url), "http://127.0.0.1:%u", ntohs(addr.sin_port));
+    setenv("OC_K8S_API_URL", url, 1);
+
+    FakeApi api;
+    memset(&api, 0, sizeof(api));
+    api.listen_fd = lfd;
+    pthread_t server;
+    cr_assert_eq(pthread_create(&server, NULL, fake_api_main, &api), 0);
+
+    OcK8sCluster cluster;
+    oc_k8s_init(&cluster, "infer", "oxidize");
+    cluster.available = true;
+    cr_assert_eq(oc_k8s_scale(&cluster, 7), OC_OK);
+    oc_k8s_free(&cluster);
+
+    cr_assert_eq(pthread_join(server, NULL), 0);
+    close(lfd);
+    unsetenv("OC_K8S_API_URL");
+
+    cr_assert_gt(api.request_len, 0);
+    cr_assert_not_null(strstr(api.request,
+        "PATCH /apis/apps/v1/namespaces/infer/deployments/oxidize/scale"));
+    cr_assert_not_null(strstr(api.request,
+        "Content-Type: application/merge-patch+json"));
+    cr_assert_not_null(strstr(api.request, "{\"spec\":{\"replicas\":7}}"));
 }
 
 Test(k8s, mark_pod_ready)

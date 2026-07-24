@@ -128,3 +128,39 @@ Test(ck, matvec_via_function_ptr)
     cr_assert_float_eq(out[0], 3.0f, 0.001f);
     cr_assert_float_eq(out[1], 4.0f, 0.001f);
 }
+
+/* SIMD dispatch parity: whatever level this CPU dispatches to must agree
+ * with the scalar reference, including the non-multiple-of-16 tail. */
+Test(ck, dispatch_matches_scalar)
+{
+    enum { N = 37, ROWS = 5 };
+    float a[N], b[N], w[ROWS * N];
+    for (int i = 0; i < N; i++) {
+        a[i] = (float)(i % 7) - 3.0f;
+        b[i] = (float)(i % 5) * 0.5f;
+    }
+    for (int i = 0; i < ROWS * N; i++) w[i] = (float)(i % 11) * 0.25f - 1.0f;
+
+    OcCpuKernels k;
+    cr_assert_eq(oc_cpu_kernels_init_best(&k), OC_OK);
+
+    cr_assert_float_eq(k.dot_f32(a, b, N),
+                       oc_cpu_dot_f32_scalar(a, b, N), 1e-4f);
+
+    float got[ROWS], want[ROWS];
+    k.matvec_f32(w, a, got, ROWS, N);
+    oc_cpu_matvec_f32_scalar(w, a, want, ROWS, N);
+    for (int r = 0; r < ROWS; r++)
+        cr_assert_float_eq(got[r], want[r], 1e-4f);
+}
+
+/* A requested level above what the CPU supports must be clamped, not
+ * dispatched to an illegal instruction. */
+Test(ck, init_clamps_unsupported_level)
+{
+    OcCpuKernels k;
+    cr_assert_eq(oc_cpu_kernels_init(&k, OC_CPU_KERNEL_AVX512_VNNI), OC_OK);
+    cr_assert_leq(k.level, oc_cpu_kernels_best_level());
+    float a[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+    cr_assert_float_eq(k.dot_f32(a, a, 4), 30.0f, 1e-4f);
+}

@@ -1,5 +1,6 @@
 /*
- * rdma.c — RDMA stub implementation.
+ * rdma.c — RDMA transport implementation. See rdma.h for the loopback
+ * staging-buffer design note.
  */
 #include "oxidize/rdma.h"
 
@@ -54,11 +55,31 @@ OcError oc_rdma_deregister_memory(OcRdmaDevice *dev, OcRdmaRegion *region)
     return OC_OK;
 }
 
+/* Bounds check shared by send and receive: the window must be valid and
+ * must not wrap size_t. */
+static bool region_window_ok(const OcRdmaRegion *region, size_t offset,
+                             size_t length)
+{
+    if (!region->valid || !region->addr) return false;
+    if (offset > region->length) return false;
+    return length <= region->length - offset;
+}
+
 OcError oc_rdma_send(OcRdmaDevice *dev, const OcRdmaRegion *region,
                      size_t offset, size_t length)
 {
     if (!dev || !region) return OC_ERR_INVALID_ARG;
-    if (offset + length > region->length) return OC_ERR_INVALID_ARG;
+    if (!region_window_ok(region, offset, length)) return OC_ERR_INVALID_ARG;
+
+    if (length > dev->staging_cap) {
+        void *grown = realloc(dev->staging, length);
+        if (!grown) return OC_ERR_OOM;
+        dev->staging = grown;
+        dev->staging_cap = length;
+    }
+    if (length > 0)
+        memcpy(dev->staging, (const char *)region->addr + offset, length);
+    dev->staging_len = length;
     dev->bytes_sent += length;
     return OC_OK;
 }
@@ -67,7 +88,11 @@ OcError oc_rdma_receive(OcRdmaDevice *dev, OcRdmaRegion *region,
                         size_t offset, size_t length)
 {
     if (!dev || !region) return OC_ERR_INVALID_ARG;
-    if (offset + length > region->length) return OC_ERR_INVALID_ARG;
+    if (!region_window_ok(region, offset, length)) return OC_ERR_INVALID_ARG;
+    if (length > dev->staging_len) return OC_ERR_NETWORK;
+
+    if (length > 0)
+        memcpy((char *)region->addr + offset, dev->staging, length);
     dev->bytes_received += length;
     return OC_OK;
 }
@@ -95,5 +120,6 @@ uint64_t oc_rdma_bytes_received(const OcRdmaDevice *dev)
 void oc_rdma_free(OcRdmaDevice *dev)
 {
     if (!dev) return;
+    free(dev->staging);
     memset(dev, 0, sizeof(*dev));
 }

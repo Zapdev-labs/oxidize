@@ -14,8 +14,8 @@
  *
  * Flag set mirrors the Rust `oxidize-cli` conventions and the learned user
  * preferences (--numa, --auto/--no-auto, --print-plan, --serve-api,
- * --threads). Threads/numa/autotune are accepted as flags; their effect is
- * applied by later features (autotune-plan-apply, server-http-core).
+ * --threads). --threads/--numa override the autotune plan and are applied
+ * by apply_thread_numa_policy() below.
  */
 #include "oxidize/activation.h"   /* ensure link for forward deps */
 #include "oxidize/autotune.h"
@@ -87,6 +87,52 @@ static void print_help(void)
 
 /* ─── Generation ──────────────────────────────────────────────────────── */
 
+/* Apply the thread + NUMA half of a tuning plan, honoring explicit CLI
+ * overrides. NUMA policy binds this process to a socket; the thread count
+ * drives the parallel weight prefault (the forward pass itself is
+ * single-threaded, so that is the one place threads currently pay off). */
+static void apply_thread_numa_policy(const OcCliArgs *args,
+                                     const OcTuningPlan *plan,
+                                     const OcCpuInfo *cpu,
+                                     const OcGgufMmappedFile *weights)
+{
+    /* --threads N overrides the plan; 0 means "use the plan". */
+    uint32_t threads = args->threads > 0 ? (uint32_t)args->threads
+                                         : plan->threads;
+    if (threads == 0) threads = 1;
+
+    /* --numa MODE overrides the plan. "none" is also the default value of
+     * the flag, so it cannot be told apart from "unset" and leaves the plan
+     * (or, without --auto, OC_NUMA_NONE) in place. */
+    OcNumaPolicy numa = args->auto_tune ? plan->numa : OC_NUMA_NONE;
+    if (args->numa) {
+        if (strcmp(args->numa, "single") == 0)          numa = OC_NUMA_SINGLE;
+        else if (strcmp(args->numa, "interleave") == 0) numa = OC_NUMA_INTERLEAVE;
+    }
+
+    if (numa == OC_NUMA_SINGLE) {
+        /* Bind to node 0: the plan picks SINGLE only when the model fits in
+         * one socket's memory, so any single node works and 0 always exists. */
+        if (oc_autotune_bind_to_numa_node(0) == OC_OK) {
+            oc_log(OC_LOG_INFO, "autotune: bound to NUMA node 0");
+        }
+    } else if (numa == OC_NUMA_INTERLEAVE && cpu->numa_nodes > 1) {
+        /* Interleaving is the kernel default for a process that is not
+         * bound, so there is nothing to set — just don't bind. */
+        oc_log(OC_LOG_INFO, "autotune: leaving memory interleaved across %u "
+               "NUMA nodes", cpu->numa_nodes);
+    }
+
+    oc_log(OC_LOG_INFO, "autotune: applying %u threads, numa=%s, simd=%s",
+           threads, oc_autotune_numa_name(numa), cpu->simd.name);
+
+    /* Fault the weights in with the resolved thread count so the first
+     * tokens don't pay page-fault cost serially. */
+    if (weights != NULL && threads > 1) {
+        (void)oc_gguf_map_prefault_parallel(weights, (size_t)threads);
+    }
+}
+
 static OcError run_generation(const OcCliArgs *args)
 {
     if (args->model_path == NULL) {
@@ -143,20 +189,20 @@ static OcError run_generation(const OcCliArgs *args)
         }
     }
 
-    /* If --auto: detect CPU, fingerprint the model, plan, and apply the
-     * memory-side policy (hugepages/mlock) to the mmap'd weights. Thread
-     * and NUMA policy are read from the plan by the caller's worker pool
-     * (not yet wired — single-threaded forward for now). */
-    if (args->auto_tune) {
+    /* Autotune: detect CPU, fingerprint the model, plan, and apply. The
+     * memory-side policy (hugepages/mlock) goes to the mmap'd weights;
+     * thread and NUMA policy are applied here (see apply_thread_numa_policy).
+     * Explicit --threads/--numa always win over the plan, so the policy runs
+     * even without --auto when the user asked for something specific. */
+    if (args->auto_tune || args->threads > 0 ||
+        (args->numa && strcmp(args->numa, "none") != 0)) {
         OcCpuInfo cpu;
         OcModelFingerprint fp;
         if (oc_autotune_detect_cpu(&cpu) == OC_OK &&
             oc_autotune_fingerprint_gguf(&model.gguf, &fp) == OC_OK) {
             OcTuningPlan plan = oc_autotune_plan(&cpu, &fp);
-            oc_log(OC_LOG_INFO, "autotune: %u threads, numa=%s, simd=%s",
-                   plan.threads, oc_autotune_numa_name(plan.numa),
-                   cpu.simd.name);
-            oc_autotune_apply(&plan, &model.gguf);
+            if (args->auto_tune) oc_autotune_apply(&plan, &model.gguf);
+            apply_thread_numa_policy(args, &plan, &cpu, &model.gguf);
         }
     }
 

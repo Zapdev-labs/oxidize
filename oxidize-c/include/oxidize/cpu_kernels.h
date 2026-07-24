@@ -68,6 +68,21 @@ float oc_cpu_dot_f32_scalar(const float *a, const float *b, size_t n);
 void oc_cpu_matvec_f32_scalar(const float *w, const float *x, float *out,
                                size_t n_rows, size_t n_cols);
 
+/* SIMD implementations. Only defined on x86-64 with a compiler that
+ * supports the corresponding __attribute__((target(...))); use
+ * oc_cpu_kernels_init()/init_best() rather than calling these directly,
+ * since they fault on CPUs lacking the instruction set. */
+#if defined(__x86_64__) || defined(__i386__)
+#define OC_CPU_KERNELS_HAVE_AVX2 1
+float oc_cpu_dot_f32_avx2(const float *a, const float *b, size_t n);
+void oc_cpu_matvec_f32_avx2(const float *w, const float *x, float *out,
+                             size_t n_rows, size_t n_cols);
+#define OC_CPU_KERNELS_HAVE_AVX512 1
+float oc_cpu_dot_f32_avx512(const float *a, const float *b, size_t n);
+void oc_cpu_matvec_f32_avx512(const float *w, const float *x, float *out,
+                               size_t n_rows, size_t n_cols);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

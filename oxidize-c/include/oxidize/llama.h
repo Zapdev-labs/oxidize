@@ -205,6 +205,11 @@ typedef struct OcBatchSession {
     float *shexp_gate;
     float *shexp_up;
     float *shexp_out;
+    /* MLA temporaries (shared; NULL unless model->cfg.uses_mla). */
+    float *mla_c_q;
+    float *mla_c_kv;
+    float *mla_q_full;
+    float *mla_kv_compressed;
 } OcBatchSession;
 
 OcError oc_batch_session_init(OcLlamaModel *model, size_t max_seqs,

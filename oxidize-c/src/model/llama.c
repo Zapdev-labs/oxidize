@@ -1038,7 +1038,6 @@ OcError oc_batch_session_init(OcLlamaModel *model, size_t max_seqs,
                                OcBatchSession *out)
 {
     if (model == NULL || out == NULL) return OC_ERR_INVALID_ARG;
-    if (model->cfg.uses_mla) return OC_ERR_MODEL;
     /* Batch decode only implements the RMSNorm Llama-family layer; reject
      * LayerNorm architectures (they use oc_llama_forward's dispatch). */
     if (model->arch == OC_ARCH_GPT2 || model->arch == OC_ARCH_GPTNEOX ||
@@ -1082,6 +1081,21 @@ OcError oc_batch_session_init(OcLlamaModel *model, size_t max_seqs,
         out->shexp_gate = xcalloc(model->cfg.expert_intermediate_size, sizeof(float));
         out->shexp_up = xcalloc(model->cfg.expert_intermediate_size, sizeof(float));
         out->shexp_out = xcalloc(model->cfg.n_embd, sizeof(float));
+    }
+    /* MLA workspace: same shapes as oc_llama_session_init. Shared across
+     * sequences, so it must be sized for one sequence only. */
+    if (model->cfg.uses_mla) {
+        out->mla_c_q = xcalloc(model->cfg.mla_q_lora_dim, sizeof(float));
+        out->mla_c_kv = xcalloc(model->cfg.mla_kv_lora_dim, sizeof(float));
+        out->mla_q_full = xcalloc((size_t)model->cfg.n_head * model->cfg.head_dim,
+                                  sizeof(float));
+        out->mla_kv_compressed = xcalloc(model->cfg.mla_kv_lora_dim +
+                                         model->cfg.mla_q_rope_dim, sizeof(float));
+        if (!out->mla_c_q || !out->mla_c_kv || !out->mla_q_full ||
+            !out->mla_kv_compressed) {
+            oc_batch_session_free(out);
+            return OC_ERR_OOM;
+        }
     }
     if (!out->kv_k || !out->kv_v || !out->x || !out->normed || !out->q ||
         !out->k || !out->v || !out->attn_out || !out->ffn_gate ||
@@ -1133,10 +1147,10 @@ OcError oc_batch_forward(OcBatchSession *bs, OcBatchSeq *seqs)
         tmp.shexp_gate = bs->shexp_gate;
         tmp.shexp_up = bs->shexp_up;
         tmp.shexp_out = bs->shexp_out;
-        tmp.mla_c_q = NULL; /* MLA not supported in batch mode yet */
-        tmp.mla_c_kv = NULL;
-        tmp.mla_q_full = NULL;
-        tmp.mla_kv_compressed = NULL;
+        tmp.mla_c_q = bs->mla_c_q;
+        tmp.mla_c_kv = bs->mla_c_kv;
+        tmp.mla_q_full = bs->mla_q_full;
+        tmp.mla_kv_compressed = bs->mla_kv_compressed;
 
         /* Embed and forward. */
         embed_token(&tmp, seqs[s].token);
@@ -1177,5 +1191,7 @@ void oc_batch_session_free(OcBatchSession *bs)
     free(bs->router_logits);
     free(bs->expert_gate); free(bs->expert_up); free(bs->expert_out);
     free(bs->shexp_gate); free(bs->shexp_up); free(bs->shexp_out);
+    free(bs->mla_c_q); free(bs->mla_c_kv);
+    free(bs->mla_q_full); free(bs->mla_kv_compressed);
     memset(bs, 0, sizeof(*bs));
 }
