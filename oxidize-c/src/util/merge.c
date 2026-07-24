@@ -98,6 +98,60 @@ const char *oc_merge_strategy_name(OcMergeStrategy s)
     }
 }
 
+/* Write a merged F32 buffer to the GGUF writer, re-quantizing to the
+ * original tensor's quantization type when possible. Falls back to F32
+ * for unsupported types or block-size mismatches. */
+static OcError write_merged_tensor(OcGgufWriter *w,
+                                   const OcGgufTensorInfo *ti,
+                                   const float *merged, size_t n)
+{
+    OcGgufQuantizationType orig_qtype =
+        oc_quant_type_from_ggml_id(ti->ggml_type);
+
+    if (orig_qtype == OC_QUANT_F16) {
+        uint8_t *packed = malloc(n * 2);
+        if (!packed) return OC_ERR_OOM;
+        oc_quant_pack_row(OC_QUANT_F16, merged, n, packed, n * 2);
+        OcError e = oc_gguf_writer_add_tensor(w, ti->name, ti->n_dims,
+            ti->dims, 1, packed, (uint64_t)n * 2);
+        free(packed);
+        return e;
+    }
+    if (orig_qtype == OC_QUANT_BF16) {
+        uint8_t *packed = malloc(n * 2);
+        if (!packed) return OC_ERR_OOM;
+        oc_quant_pack_row(OC_QUANT_BF16, merged, n, packed, n * 2);
+        OcError e = oc_gguf_writer_add_tensor(w, ti->name, ti->n_dims,
+            ti->dims, 30, packed, (uint64_t)n * 2);
+        free(packed);
+        return e;
+    }
+    if (orig_qtype != OC_QUANT_F32 && orig_qtype != OC_QUANT_UNKNOWN) {
+        /* Quantized type: compute packed size and re-quantize. */
+        OcQuantBlockLayout bs = oc_quant_block_size(orig_qtype);
+        if (bs.elements_per_block > 0 && n % bs.elements_per_block == 0) {
+            size_t n_blocks = n / bs.elements_per_block;
+            size_t packed_size = n_blocks * bs.bytes_per_block;
+            uint8_t *packed = malloc(packed_size);
+            if (!packed) return OC_ERR_OOM;
+            OcError qe = oc_quant_pack_row(orig_qtype, merged, n,
+                                          packed, packed_size);
+            if (qe == OC_OK) {
+                OcError e = oc_gguf_writer_add_tensor(w, ti->name,
+                    ti->n_dims, ti->dims, ti->ggml_type,
+                    packed, (uint64_t)packed_size);
+                free(packed);
+                return e;
+            }
+            free(packed);
+            /* Fall back to F32. */
+        }
+    }
+    /* F32 or fallback. */
+    return oc_gguf_writer_add_tensor(w, ti->name, ti->n_dims,
+        ti->dims, 0, merged, (uint64_t)n * sizeof(float));
+}
+
 /* ─── Linear merge ────────────────────────────────────────────────────── */
 
 OcError oc_merge_linear(const OcMergeInput *inputs, size_t n_inputs,
@@ -166,10 +220,8 @@ OcError oc_merge_linear(const OcMergeInput *inputs, size_t n_inputs,
                     for (size_t j = 0; j < n; j++)
                         merged[j] += wgt * bufs[i][j];
                 }
-                /* Write as F32 (simplified: no re-quantization). */
-                we = oc_gguf_writer_add_tensor(&w, ti->name, ti->n_dims,
-                                               ti->dims, 0, merged,
-                                               (uint64_t)n * sizeof(float));
+                /* Re-quantize to original quant type, fall back to F32. */
+                we = write_merged_tensor(&w, ti, merged, n);
                 free(merged);
             } else {
                 we = OC_ERR_OOM;
@@ -252,9 +304,7 @@ OcError oc_merge_slerp(const char *path_a, const char *path_b,
                     }
                 }
             }
-            e = oc_gguf_writer_add_tensor(&w, ta->name, ta->n_dims, ta->dims,
-                                          0, merged,
-                                          (uint64_t)n * sizeof(float));
+            e = write_merged_tensor(&w, ta, merged, n);
             free(merged);
         } else {
             e = OC_ERR_OOM;
@@ -352,9 +402,7 @@ OcError oc_merge_ties(const OcMergeInput *inputs, size_t n_inputs,
                     merged[j] = neg_sum / (float)neg_count;
                 }
             }
-            we = oc_gguf_writer_add_tensor(&w, ti->name, ti->n_dims, ti->dims,
-                                           0, merged,
-                                           (uint64_t)n * sizeof(float));
+            we = write_merged_tensor(&w, ti, merged, n);
             free(merged);
         } else {
             we = OC_ERR_OOM;
@@ -442,9 +490,7 @@ OcError oc_merge_dare(const OcMergeInput *inputs, size_t n_inputs,
             float inv = 1.0f / (float)n_inputs;
             for (size_t j = 0; j < n; j++)
                 merged[j] *= inv;
-            we = oc_gguf_writer_add_tensor(&w, ti->name, ti->n_dims, ti->dims,
-                                           0, merged,
-                                           (uint64_t)n * sizeof(float));
+            we = write_merged_tensor(&w, ti, merged, n);
             free(merged);
         } else {
             we = OC_ERR_OOM;
