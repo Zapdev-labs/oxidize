@@ -48,6 +48,7 @@ typedef struct OcLlamaConfig {
     uint32_t num_experts;          /* 0 = dense FFN                       */
     uint32_t num_experts_per_tok;  /* top-k (0 → 1 when num_experts>0)    */
     uint32_t expert_intermediate_size;  /* 0 → falls back to n_ff          */
+    uint32_t moe_layer_start;       /* first MoE layer (0 = all layers MoE) */
     bool     expert_gating_sigmoid;     /* false = softmax (Qwen3-MoE)     */
     float    expert_weights_scale;      /* 1.0 = no routed scaling          */
     bool     uses_geglu;                /* true = Gemma GeGLU FFN (vs SwiGLU) */

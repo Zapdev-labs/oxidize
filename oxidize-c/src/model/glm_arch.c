@@ -1151,7 +1151,7 @@ OcError oc_arch_forward_hunyuan(OcLlamaSession *sess, uint32_t token,
             for (size_t i = 0; i < n_embd; i++) sess->x[i] += sess->normed[i];
 
             /* FFN (MoE or dense). */
-            if (c->num_experts > 0 && l >= c->num_experts) {
+            if (c->num_experts > 0 && l >= c->moe_layer_start) {
                 /* MoE FFN only (skip the attention part of hunyuan_moe_layer
                  * since we already did MLA attention above). We replicate
                  * the FFN portion. */
@@ -1185,11 +1185,8 @@ OcError oc_arch_forward_hunyuan(OcLlamaSession *sess, uint32_t token,
                     sess->x[i] += sess->normed[i];
                 }
             }
-        } else if (c->num_experts > 0) {
-            /* MoE layer. The moe_layer_start is stored in the HunyuanConfig
-             * which is not directly accessible from OcLlamaConfig. For the
-             * scalar reference, we treat all layers as MoE when num_experts
-             * > 0. A full implementation would check moe_layer_start. */
+        } else if (c->num_experts > 0 && l >= c->moe_layer_start) {
+            /* MoE layer (at or after moe_layer_start). */
             hunyuan_moe_layer(sess, l);
         } else {
             /* Dense layer (pre-MoE). */

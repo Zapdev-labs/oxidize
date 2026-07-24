@@ -251,6 +251,7 @@ static OcError parse_config(const OcGgufFile *f, const char *arch_str,
     if (cfg->rope_dim > cfg->kv_head_dim) cfg->rope_dim = cfg->kv_head_dim;
     if (no_rope) cfg->rope_dim = 0;   /* preserve arch-specific no-RoPE */
     cfg->tied_embeddings = false;
+    cfg->moe_layer_start = 0;
     /* MoE per-token top-k: default to 1 when experts exist but no top-k set. */
     if (cfg->num_experts > 0) {
         if (cfg->num_experts_per_tok == 0) cfg->num_experts_per_tok = 1;
@@ -258,6 +259,16 @@ static OcError parse_config(const OcGgufFile *f, const char *arch_str,
             cfg->num_experts_per_tok = cfg->num_experts;
         }
         if (cfg->expert_intermediate_size == 0) cfg->expert_intermediate_size = cfg->n_ff;
+        /* Parse moe_layer_start (default 0 = all layers are MoE). */
+        snprintf(key, sizeof(key), "%smoe_layer_start", prefix);
+        cfg->moe_layer_start = cfg_u32(f, key, 0);
+        if (cfg->moe_layer_start == 0) {
+            cfg->moe_layer_start = cfg_u32(f, "moe_layer_start", 0);
+        }
+        /* Also check hunyuan-specific key. */
+        snprintf(key, sizeof(key), "%smoe_layer_start", prefix);
+        uint32_t mlstart = cfg_u32(f, key, 0);
+        if (mlstart > 0) cfg->moe_layer_start = mlstart;
     }
     return OC_OK;
 }
