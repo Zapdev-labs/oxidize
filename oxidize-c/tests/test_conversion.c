@@ -31,15 +31,15 @@ Test(conv, run_no_input)
     cr_assert_neq(oc_conv_run(&cfg, NULL), OC_OK);
 }
 
-Test(conv, run_stub)
+Test(conv, run_nonexistent_file)
 {
     OcConvConfig cfg;
     oc_conv_config_init(&cfg);
-    cfg.input_path = "/tmp/input.safetensors";
+    cfg.input_path = "/tmp/nonexistent_input.safetensors";
     cfg.output_path = "/tmp/output.gguf";
     OcConvResult result;
-    cr_assert_eq(oc_conv_run(&cfg, &result), OC_OK);
-    cr_assert_eq(result.target, OC_CONV_Q_Q4_K_M);
+    /* Real conversion should fail on non-existent input file. */
+    cr_assert_neq(oc_conv_run(&cfg, &result), OC_OK);
 }
 
 Test(conv, quant_from_str)
