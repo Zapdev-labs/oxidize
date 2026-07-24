@@ -203,7 +203,7 @@ OcError oc_vision_encoder_encode(OcVisionEncoder *encoder,
                 }
             }
 
-            /* Multi-head self-attention (simplified: per-head QKV). */
+            /* Multi-head self-attention with scaled dot-product attention. */
             float *attn_out = calloc(seq_len * h, sizeof(float));
             if (!attn_out) { free(hidden); return OC_ERR_OOM; }
 

@@ -1,9 +1,9 @@
 /*
- * vision.c — CLIP-style vision encoder stub implementation.
+ * vision.c — CLIP-style vision encoder implementation.
  *
- * Provides the API surface for multimodal image encoding. Currently returns
- * placeholder embeddings (zeros) — the full CLIP ViT implementation will be
- * added when a real vision GGUF model is available for testing.
+ * Provides the API surface for multimodal image encoding. Real patch
+ * embedding extraction, layer normalization, and CLS token prepending
+ * are implemented. Full ViT transformer blocks live in vision_encoder.c.
  */
 #include "oxidize/vision.h"
 
