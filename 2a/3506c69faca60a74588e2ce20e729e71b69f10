@@ -1,0 +1,24 @@
+oxidize-c/tests/test_eagle3.c
+  s_96ddc277ba047e::t_4874d6df2941e3 160-421
+oxidize-c/include/oxidize/eagle3.h
+  s_96ddc277ba047e::t_264c70445fb9c6 54-161
+oxidize-c/src/model/eagle3.c
+  s_96ddc277ba047e::t_1bb8b7864ccfa2 5,9
+  s_96ddc277ba047e::t_e1bc30a83784ff 136-573
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "2a3506c69faca60a74588e2ce20e729e71b69f10",
+  "prompts": {},
+  "sessions": {
+    "s_96ddc277ba047e": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "ea8ad242-b091-46af-96e0-114c0c67fea4",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
