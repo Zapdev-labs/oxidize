@@ -109,6 +109,12 @@ typedef struct OcLlamaLayer {
      * architectures (Llama-family has no norm bias). Owned f32, n_embd. */
     float *attn_norm_bias;
     float *ffn_norm_bias;
+    /* Attention Q/K/V projection biases. Present in Qwen2-family models
+     * (and any arch whose GGUF carries attn_{q,k,v}.bias); NULL otherwise.
+     * Owned f32, lengths n_head*head_dim / n_head_kv*kv_head_dim. */
+    float *attn_q_bias;
+    float *attn_k_bias;
+    float *attn_v_bias;
 } OcLlamaLayer;
 
 typedef struct OcLlamaModel {

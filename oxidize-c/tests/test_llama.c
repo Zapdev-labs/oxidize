@@ -380,3 +380,130 @@ Test(llama, yarn_factor_changes_angles)
     oc_apply_rope_yarn_f32(in, factor_two, 4, 4, 8192, 10000.0f, 2.0f, 4096);
     cr_assert_arr_neq(factor_one, factor_two, sizeof(factor_one));
 }
+
+/* ─── QKV projection bias (Qwen2-family) ───────────────────────────────
+ *
+ * Qwen2 carries attn_{q,k,v}.bias on every layer. The port ignored them
+ * entirely, which silently produced garbage output on every Qwen2 model
+ * while all unit tests stayed green — nothing here ever ran a forward pass.
+ * This builds a minimal single-layer F32 model and asserts the bias reaches
+ * the result.
+ */
+#define TB_EMBD 4u
+#define TB_FF   4u
+#define TB_VOCAB 4u
+
+typedef struct {
+    OcLlamaModel model;
+    OcLlamaLayer layer;
+    float embd[TB_VOCAB * TB_EMBD];
+    float ident[TB_EMBD * TB_EMBD];
+    float ffn_w[TB_FF * TB_EMBD];
+    float norm_ones[TB_EMBD];
+    float qb[TB_EMBD], kb[TB_EMBD], vb[TB_EMBD];
+} TinyBiasModel;
+
+static OcWeightView tb_view(const float *p, size_t rows, size_t cols)
+{
+    OcWeightView v = {0};
+    v.data = (const uint8_t *)p;
+    v.qtype = OC_QUANT_F32;
+    v.rows = rows;
+    v.cols = cols;
+    v.row_bytes = cols * sizeof(float);
+    return v;
+}
+
+/* Build a 1-layer model: identity-ish projections, zeroed FFN so the FFN
+ * contributes nothing, and an embedding that depends on the token. */
+static void tiny_bias_model_init(TinyBiasModel *t, bool with_bias)
+{
+    memset(t, 0, sizeof(*t));
+    OcLlamaConfig *c = &t->model.cfg;
+    c->n_layer = 1; c->n_embd = TB_EMBD; c->n_ff = TB_FF;
+    c->n_head = 1; c->n_head_kv = 1;
+    c->head_dim = TB_EMBD; c->kv_head_dim = TB_EMBD;
+    c->vocab_size = TB_VOCAB; c->n_ctx = 8;
+    c->rms_norm_eps = 1e-6f; c->norm_scale = 1.0f;
+    c->rope_theta = 10000.0f; c->rope_dim = 0; /* no RoPE rotation */
+
+    for (size_t i = 0; i < TB_VOCAB * TB_EMBD; i++)
+        t->embd[i] = 0.1f * (float)(i + 1);
+    for (size_t r = 0; r < TB_EMBD; r++)
+        for (size_t cc = 0; cc < TB_EMBD; cc++)
+            t->ident[r * TB_EMBD + cc] = (r == cc) ? 1.0f : 0.0f;
+    for (size_t i = 0; i < TB_EMBD; i++) t->norm_ones[i] = 1.0f;
+    /* ffn_w stays zero: the dense FFN adds nothing, isolating attention. */
+
+    t->model.tok_embeddings = tb_view(t->embd, TB_VOCAB, TB_EMBD);
+    t->model.output = tb_view(t->ident, TB_VOCAB, TB_EMBD);
+    t->model.final_norm = t->norm_ones;
+    t->model.layers = &t->layer;
+
+    t->layer.attn_norm = t->norm_ones;
+    t->layer.ffn_norm = t->norm_ones;
+    t->layer.attn_q = tb_view(t->ident, TB_EMBD, TB_EMBD);
+    t->layer.attn_k = tb_view(t->ident, TB_EMBD, TB_EMBD);
+    t->layer.attn_v = tb_view(t->ident, TB_EMBD, TB_EMBD);
+    t->layer.attn_output = tb_view(t->ident, TB_EMBD, TB_EMBD);
+    t->layer.ffn_gate = tb_view(t->ffn_w, TB_FF, TB_EMBD);
+    t->layer.ffn_up = tb_view(t->ffn_w, TB_FF, TB_EMBD);
+    t->layer.ffn_down = tb_view(t->ffn_w, TB_EMBD, TB_FF);
+
+    if (with_bias) {
+        for (size_t i = 0; i < TB_EMBD; i++) {
+            t->qb[i] = 0.5f + 0.25f * (float)i;
+            t->kb[i] = -0.5f;
+            t->vb[i] = 2.0f + (float)i;
+        }
+        t->layer.attn_q_bias = t->qb;
+        t->layer.attn_k_bias = t->kb;
+        t->layer.attn_v_bias = t->vb;
+    }
+}
+
+Test(llama, qkv_bias_is_applied_in_forward)
+{
+    TinyBiasModel plain, biased;
+    tiny_bias_model_init(&plain, false);
+    tiny_bias_model_init(&biased, true);
+
+    OcLlamaSession sp, sb;
+    cr_assert_eq(oc_llama_session_init(&plain.model, &sp), OC_OK);
+    cr_assert_eq(oc_llama_session_init(&biased.model, &sb), OC_OK);
+
+    float lp[TB_VOCAB], lb[TB_VOCAB];
+    cr_assert_eq(oc_llama_forward(&sp, 1u, lp), OC_OK);
+    cr_assert_eq(oc_llama_forward(&sb, 1u, lb), OC_OK);
+
+    /* With a single position, attention returns V exactly, so the bias on V
+     * must show up in the result; q/k bias cannot cancel it out. */
+    bool differs = false;
+    for (size_t i = 0; i < TB_VOCAB; i++)
+        if (fabsf(lp[i] - lb[i]) > 1e-6f) differs = true;
+    cr_assert(differs, "QKV bias had no effect on the forward pass");
+
+    /* The V bias is a constant offset on the attention output, and with
+     * n_head == 1 and one position the attention output is v verbatim. */
+    oc_llama_session_free(&sp);
+    oc_llama_session_free(&sb);
+}
+
+Test(llama, qkv_bias_absent_is_a_noop)
+{
+    /* A model without bias tensors must behave exactly as before: the
+     * NULL checks in forward_layer must not read through them. */
+    TinyBiasModel a, b;
+    tiny_bias_model_init(&a, false);
+    tiny_bias_model_init(&b, false);
+    OcLlamaSession sa, sb;
+    cr_assert_eq(oc_llama_session_init(&a.model, &sa), OC_OK);
+    cr_assert_eq(oc_llama_session_init(&b.model, &sb), OC_OK);
+    float la[TB_VOCAB], lb[TB_VOCAB];
+    cr_assert_eq(oc_llama_forward(&sa, 2u, la), OC_OK);
+    cr_assert_eq(oc_llama_forward(&sb, 2u, lb), OC_OK);
+    for (size_t i = 0; i < TB_VOCAB; i++)
+        cr_assert_float_eq(la[i], lb[i], 0.0f, "bias-free forward not deterministic");
+    oc_llama_session_free(&sa);
+    oc_llama_session_free(&sb);
+}

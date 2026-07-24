@@ -325,6 +325,12 @@ static bool assign_tensor(OcLlamaModel *m, const char *cname,
             L->attn_k = view_from_info(mm, info);
         } else if (strcmp(suf, "attn_v.weight") == 0) {
             L->attn_v = view_from_info(mm, info);
+        } else if (strcmp(suf, "attn_q.bias") == 0) {
+            L->attn_q_bias = load_norm(mm, info, (size_t)info->dims[0]);
+        } else if (strcmp(suf, "attn_k.bias") == 0) {
+            L->attn_k_bias = load_norm(mm, info, (size_t)info->dims[0]);
+        } else if (strcmp(suf, "attn_v.bias") == 0) {
+            L->attn_v_bias = load_norm(mm, info, (size_t)info->dims[0]);
         } else if (strcmp(suf, "attn_output.weight") == 0) {
             L->attn_output = view_from_info(mm, info);
         } else if (strcmp(suf, "ffn_gate.weight") == 0) {
@@ -579,6 +585,9 @@ void oc_llama_free(OcLlamaModel *model)
             free(model->layers[i].ffn_norm);
             free(model->layers[i].attn_norm_bias);
             free(model->layers[i].ffn_norm_bias);
+            free(model->layers[i].attn_q_bias);
+            free(model->layers[i].attn_k_bias);
+            free(model->layers[i].attn_v_bias);
             free(model->layers[i].mla_q_a_norm);
             free(model->layers[i].mla_kv_a_norm);
         }
@@ -935,10 +944,24 @@ static void forward_layer(OcLlamaSession *s, uint32_t layer)
     if (c->uses_mla && L->mla_kv_a_mqa.data != NULL) {
         forward_mla_attention(s, layer);
     } else {
-        /* Q/K/V projections. */
+        /* Q/K/V projections, plus the optional projection biases that
+         * Qwen2-family models carry. The bias is added before RoPE, as in
+         * llama.cpp's build_qkv / HF's q_proj(x) + b_q. */
         matvec(&L->attn_q, s->normed, s->q, s->dequant_temp);
         matvec(&L->attn_k, s->normed, s->k, s->dequant_temp);
         matvec(&L->attn_v, s->normed, s->v, s->dequant_temp);
+        if (L->attn_q_bias != NULL) {
+            size_t nq = (size_t)c->n_head * hd;
+            for (size_t i = 0; i < nq; i++) s->q[i] += L->attn_q_bias[i];
+        }
+        if (L->attn_k_bias != NULL) {
+            for (size_t i = 0; i < s->kv_row_floats; i++)
+                s->k[i] += L->attn_k_bias[i];
+        }
+        if (L->attn_v_bias != NULL) {
+            for (size_t i = 0; i < s->kv_row_floats; i++)
+                s->v[i] += L->attn_v_bias[i];
+        }
 
         /* RoPE on Q (per head) and K (per kv head). YaRN when configured. */
         for (uint32_t h = 0; h < c->n_head; h++) {
