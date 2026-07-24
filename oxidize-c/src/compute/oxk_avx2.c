@@ -11,12 +11,15 @@
  */
 #include "oxidize/oxk.h"
 
-/* We include immintrin for AVX2 intrinsics. */
-#if defined(__GNUC__) || defined(__clang__)
-#include <immintrin.h>
-#endif
-
 #include <string.h>
+
+/* AVX2/AVX-512 intrinsics are x86-only. On other targets (e.g. aarch64
+ * cross-compile) the real bodies are replaced by scalar-forwarding stubs at
+ * the bottom of this file so the OXK symbols still link — the dispatcher in
+ * oxk.c never selects them there (oc_simd_caps() reports SCALAR). */
+#if defined(__x86_64__) || defined(__i386__)
+
+#include <immintrin.h>
 
 /* ─── AVX2 Q8_0 × Q8_0 dot product ─────────────────────────────────────── */
 
@@ -214,3 +217,45 @@ void oc_oxk_matvec_q8_0_f32_avx512(const uint8_t *w, size_t n_rows,
 {
     oc_oxk_matvec_q8_0_f32_scalar(w, n_rows, row_bytes, x, out);
 }
+
+#else  /* non-x86: forward every AVX symbol to the scalar reference. */
+
+float oc_oxk_dot_q8_0_q8_0_avx2(const uint8_t *row, size_t blocks, const uint8_t *q8)
+{ return oc_oxk_dot_q8_0_q8_0_scalar(row, blocks, q8); }
+float oc_oxk_dot_q4_0_q8_0_avx2(const uint8_t *row, size_t blocks, const uint8_t *q8)
+{ return oc_oxk_dot_q4_0_q8_0_scalar(row, blocks, q8); }
+float oc_oxk_dot_q4_1_q8_0_avx2(const uint8_t *row, size_t blocks, const uint8_t *q8)
+{ return oc_oxk_dot_q4_1_q8_0_scalar(row, blocks, q8); }
+float oc_oxk_dot_q4_k_q8_k_avx2(const uint8_t *row, size_t blocks, const uint8_t *q8)
+{ return oc_oxk_dot_q4_k_q8_k_scalar(row, blocks, q8); }
+float oc_oxk_dot_q5_k_q8_k_avx2(const uint8_t *row, size_t blocks, const uint8_t *q8)
+{ return oc_oxk_dot_q5_k_q8_k_scalar(row, blocks, q8); }
+float oc_oxk_dot_q6_k_q8_k_avx2(const uint8_t *row, size_t blocks, const uint8_t *q8)
+{ return oc_oxk_dot_q6_k_q8_k_scalar(row, blocks, q8); }
+void oc_oxk_matvec_q4_0_f32_avx2(const uint8_t *w, size_t n_rows, size_t row_bytes, const float *x, float *out)
+{ oc_oxk_matvec_q4_0_f32_scalar(w, n_rows, row_bytes, x, out); }
+void oc_oxk_matvec_q4_k_f32_avx2(const uint8_t *w, size_t n_rows, size_t row_bytes, const float *x, float *out)
+{ oc_oxk_matvec_q4_k_f32_scalar(w, n_rows, row_bytes, x, out); }
+void oc_oxk_matvec_q8_0_f32_avx2(const uint8_t *w, size_t n_rows, size_t row_bytes, const float *x, float *out)
+{ oc_oxk_matvec_q8_0_f32_scalar(w, n_rows, row_bytes, x, out); }
+
+float oc_oxk_dot_q4_0_q8_0_avx512(const uint8_t *row, size_t blocks, const uint8_t *q8)
+{ return oc_oxk_dot_q4_0_q8_0_scalar(row, blocks, q8); }
+float oc_oxk_dot_q4_1_q8_0_avx512(const uint8_t *row, size_t blocks, const uint8_t *q8)
+{ return oc_oxk_dot_q4_1_q8_0_scalar(row, blocks, q8); }
+float oc_oxk_dot_q8_0_q8_0_avx512(const uint8_t *row, size_t blocks, const uint8_t *q8)
+{ return oc_oxk_dot_q8_0_q8_0_scalar(row, blocks, q8); }
+float oc_oxk_dot_q4_k_q8_k_avx512(const uint8_t *row, size_t blocks, const uint8_t *q8)
+{ return oc_oxk_dot_q4_k_q8_k_scalar(row, blocks, q8); }
+float oc_oxk_dot_q5_k_q8_k_avx512(const uint8_t *row, size_t blocks, const uint8_t *q8)
+{ return oc_oxk_dot_q5_k_q8_k_scalar(row, blocks, q8); }
+float oc_oxk_dot_q6_k_q8_k_avx512(const uint8_t *row, size_t blocks, const uint8_t *q8)
+{ return oc_oxk_dot_q6_k_q8_k_scalar(row, blocks, q8); }
+void oc_oxk_matvec_q4_0_f32_avx512(const uint8_t *w, size_t n_rows, size_t row_bytes, const float *x, float *out)
+{ oc_oxk_matvec_q4_0_f32_scalar(w, n_rows, row_bytes, x, out); }
+void oc_oxk_matvec_q4_k_f32_avx512(const uint8_t *w, size_t n_rows, size_t row_bytes, const float *x, float *out)
+{ oc_oxk_matvec_q4_k_f32_scalar(w, n_rows, row_bytes, x, out); }
+void oc_oxk_matvec_q8_0_f32_avx512(const uint8_t *w, size_t n_rows, size_t row_bytes, const float *x, float *out)
+{ oc_oxk_matvec_q8_0_f32_scalar(w, n_rows, row_bytes, x, out); }
+
+#endif  /* __x86_64__ || __i386__ */
