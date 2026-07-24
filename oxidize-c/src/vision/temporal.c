@@ -2,11 +2,12 @@
  * temporal.c — Video temporal aggregation.
  *
  * Combines per-frame features into video-level representations via pooling
- * (mean / max / last). Attention and LSTM modes fall back to mean pooling
- * (stubs). Port concept: oxidize-core/src/video/temporal.rs.
+ * (mean / max / last), temporal self-attention, or weighted averaging.
+ * Port concept: oxidize-core/src/video/temporal.rs.
  */
 #include "oxidize/temporal.h"
 
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -102,10 +103,68 @@ OcError oc_temporal_aggregate(OcTemporalState *state,
 
     switch (state->config.agg_type) {
     case OC_TEMPORAL_MEAN:
-    case OC_TEMPORAL_ATTENTION: /* stub: fall back to mean */
-    case OC_TEMPORAL_LSTM:      /* stub: fall back to mean */
         oc_temporal_aggregate_mean(frame_features, n_frames, dim, dst);
         break;
+    case OC_TEMPORAL_ATTENTION: {
+        /* Temporal self-attention: weight each frame by its similarity
+         * to the mean feature, then weighted-average. */
+        /* Compute mean feature. */
+        float *mean = calloc(dim, sizeof(float));
+        if (mean) {
+            oc_temporal_aggregate_mean(frame_features, n_frames, dim, mean);
+            /* Compute attention scores (dot product of each frame with mean). */
+            float *scores = calloc(n_frames, sizeof(float));
+            if (scores) {
+                float max_score = -1e30f;
+                for (uint32_t f = 0; f < n_frames; f++) {
+                    float dot = 0.0f;
+                    const float *frame = frame_features + f * dim;
+                    for (uint32_t i = 0; i < dim; i++)
+                        dot += frame[i] * mean[i];
+                    scores[f] = dot;
+                    if (scores[f] > max_score) max_score = scores[f];
+                }
+                /* Softmax. */
+                float sum_exp = 0.0f;
+                for (uint32_t f = 0; f < n_frames; f++) {
+                    scores[f] = expf(scores[f] - max_score);
+                    sum_exp += scores[f];
+                }
+                /* Weighted average. */
+                if (sum_exp > 0.0f) {
+                    for (uint32_t i = 0; i < dim; i++) dst[i] = 0.0f;
+                    for (uint32_t f = 0; f < n_frames; f++) {
+                        float w = scores[f] / sum_exp;
+                        const float *frame = frame_features + f * dim;
+                        for (uint32_t i = 0; i < dim; i++)
+                            dst[i] += w * frame[i];
+                    }
+                } else {
+                    oc_temporal_aggregate_mean(frame_features, n_frames, dim, dst);
+                }
+                free(scores);
+            } else {
+                oc_temporal_aggregate_mean(frame_features, n_frames, dim, dst);
+            }
+            free(mean);
+        } else {
+            oc_temporal_aggregate_mean(frame_features, n_frames, dim, dst);
+        }
+        break;
+    }
+    case OC_TEMPORAL_LSTM: {
+        /* Simplified temporal recurrence: weighted exponential decay
+         * across frames (emulates LSTM hidden state propagation). */
+        float decay = 0.9f;
+        for (uint32_t i = 0; i < dim; i++) dst[i] = 0.0f;
+        for (uint32_t f = 0; f < n_frames; f++) {
+            const float *frame = frame_features + f * dim;
+            for (uint32_t i = 0; i < dim; i++) {
+                dst[i] = dst[i] * decay + frame[i] * (1.0f - decay);
+            }
+        }
+        break;
+    }
     case OC_TEMPORAL_MAX:
         oc_temporal_aggregate_max(frame_features, n_frames, dim, dst);
         break;

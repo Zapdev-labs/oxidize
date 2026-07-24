@@ -36,6 +36,12 @@ typedef struct {
     float    *draft_logits;
     size_t    n_draft;
     float    *hidden_buf;   /* working hidden state */
+    /* Optional weight pointers (NULL = use heuristic logits). */
+    float    *eh_proj;      /* [hidden, 2*hidden] embedding-hidden fusion */
+    float    *attn_norm;    /* [hidden] */
+    float    *ffn_norm;     /* [hidden] */
+    float    *lm_head;      /* [vocab, hidden] */
+    float    *tok_emb;      /* [vocab, hidden] */
     bool      has_mtp;
 } OcMtpEngine;
 

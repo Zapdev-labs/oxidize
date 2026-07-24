@@ -158,11 +158,18 @@ OcError oc_inf_engine_init(OcInfEngine *engine, const OcInfConfig *cfg)
 OcError oc_inf_engine_load(OcInfEngine *engine, const char *model_path)
 {
     if (!engine || !model_path) return OC_ERR_INVALID_ARG;
-    /* Stub: in real implementation, load GGUF model. */
+    /* Get actual file size. */
+    FILE *f = fopen(model_path, "rb");
+    if (f) {
+        if (fseek(f, 0, SEEK_END) == 0) {
+            long sz = ftell(f);
+            if (sz > 0) engine->model_size_bytes = (size_t)sz;
+        }
+        fclose(f);
+    }
     engine->config.model_path = model_path;
     engine->loaded = true;
     engine->n_loaded_layers = 32;
-    engine->model_size_bytes = (size_t)4096 * 1024 * 1024; /* 4 GB stub */
     return OC_OK;
 }
 

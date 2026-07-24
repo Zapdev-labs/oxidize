@@ -116,22 +116,70 @@ OcError oc_mtp_draft(OcMtpEngine *engine,
     uint32_t cur_tok = start_token;
 
     for (size_t step = 0; step < max_tokens; step++) {
-        /* Norm hidden state. */
+        /* RMSNorm hidden state. */
         float normed[OC_MTP_MAX_HIDDEN];
-        rms_norm(hidden, NULL, engine->config.rms_norm_eps, normed, h);
+        rms_norm(hidden, engine->attn_norm, engine->config.rms_norm_eps, normed, h);
 
-        /* Compute logits (stub: simulate next-token prediction). */
+        /* Compute logits via lm_head GEMV if available. */
         float *logits = engine->draft_logits + step * v;
-        simple_logits(logits, v, cur_tok, rng);
+        if (engine->lm_head) {
+            /* Real GEMV: logits = lm_head @ normed. */
+            for (size_t r = 0; r < v; r++) {
+                const float *wrow = engine->lm_head + r * h;
+                float dot = 0.0f;
+                for (size_t c = 0; c < h; c++)
+                    dot += wrow[c] * normed[c];
+                logits[r] = dot;
+            }
+        } else if (engine->tok_emb) {
+            /* Cosine similarity with token embeddings as logits. */
+            for (size_t r = 0; r < v; r++) {
+                const float *emb = engine->tok_emb + r * h;
+                float dot = 0.0f;
+                for (size_t c = 0; c < h; c++)
+                    dot += emb[c] * normed[c];
+                logits[r] = dot;
+            }
+        } else {
+            /* Heuristic fallback: place mass near current token. */
+            simple_logits(logits, v, cur_tok, rng);
+        }
 
         /* Argmax sample. */
         cur_tok = argmax(logits, v);
         engine->draft_tokens[step] = cur_tok;
         engine->n_draft++;
 
-        /* Update hidden: simple decay (stub for actual MTP forward). */
-        for (size_t i = 0; i < h; i++)
-            hidden[i] = hidden[i] * 0.99f + normed[i] * 0.01f;
+        /* Update hidden state. */
+        if (engine->eh_proj) {
+            /* Real eh_proj: concat(embed(cur_tok), normed) → hidden. */
+            float concat[OC_MTP_MAX_HIDDEN * 2];
+            if (engine->tok_emb && cur_tok < v) {
+                memcpy(concat, engine->tok_emb + cur_tok * h, h * sizeof(float));
+            } else {
+                memset(concat, 0, h * sizeof(float));
+            }
+            memcpy(concat + h, normed, h * sizeof(float));
+
+            for (size_t i = 0; i < h; i++) {
+                const float *wrow = engine->eh_proj + i * (2 * h);
+                float dot = 0.0f;
+                for (size_t c = 0; c < 2 * h; c++)
+                    dot += wrow[c] * concat[c];
+                hidden[i] = dot;
+            }
+        } else {
+            /* Heuristic: blend embedding + decayed hidden. */
+            if (engine->tok_emb && cur_tok < v) {
+                const float *emb = engine->tok_emb + cur_tok * h;
+                for (size_t i = 0; i < h; i++)
+                    hidden[i] = hidden[i] * 0.5f + emb[i] * 0.5f;
+            } else {
+                /* Simple decay. */
+                for (size_t i = 0; i < h; i++)
+                    hidden[i] = hidden[i] * 0.9f + normed[i] * 0.1f;
+            }
+        }
     }
     return OC_OK;
 }

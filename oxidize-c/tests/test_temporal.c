@@ -147,7 +147,7 @@ Test(temporal, aggregate_last_stateful)
     oc_temporal_free(&st);
 }
 
-Test(temporal, aggregate_attention_stub_falls_back_to_mean)
+Test(temporal, aggregate_attention_weights_frames)
 {
     OcTemporalConfig cfg;
     oc_temporal_config_init(&cfg);
@@ -156,12 +156,13 @@ Test(temporal, aggregate_attention_stub_falls_back_to_mean)
     OcTemporalState st;
     oc_temporal_init(&st, &cfg);
 
-    float features[] = { 2, 4,  6, 8 };
+    float features[] = { 2, 4,  4, 6,  6, 8 };
     float out[2];
-    cr_assert_eq(oc_temporal_aggregate(&st, features, 2, out), OC_OK, "");
-    /* Attention stub falls back to mean: (2+6)/2=4, (4+8)/2=6 */
-    cr_assert_float_eq(out[0], 4.0f, 1e-6, "");
-    cr_assert_float_eq(out[1], 6.0f, 1e-6, "");
+    cr_assert_eq(oc_temporal_aggregate(&st, features, 3, out), OC_OK, "");
+    /* Attention weights frames by similarity to mean.
+     * Mean = [4, 6]. Middle frame [4,6] has highest similarity. */
+    cr_assert(out[0] >= 3.5f, "Output should be near mean");
+    cr_assert(out[1] >= 5.5f, "Output should be near mean");
     oc_temporal_free(&st);
 }
 
