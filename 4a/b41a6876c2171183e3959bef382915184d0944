@@ -1,0 +1,24 @@
+oxidize-c/src/util/benchmark.c
+  s_96ddc277ba047e::t_084e9c49b98a9e 46
+  s_96ddc277ba047e::t_2976074db88728 68-70,75-81,83
+oxidize-c/src/server/openai.c
+  s_96ddc277ba047e::t_a6c98bab981660 623-624
+oxidize-c/src/vision/vision.c
+  s_96ddc277ba047e::t_76c3fcf02eb3fa 138-149
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "4ab41a6876c2171183e3959bef382915184d0944",
+  "prompts": {},
+  "sessions": {
+    "s_96ddc277ba047e": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "ea8ad242-b091-46af-96e0-114c0c67fea4",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
