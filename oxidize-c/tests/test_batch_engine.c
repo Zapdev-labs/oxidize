@@ -212,3 +212,101 @@ Test(batch, free_null)
 {
     oc_batch_engine_free(NULL);
 }
+
+/* ─── Forward callback tests ─────────────────────────────────────────── */
+
+static OcError test_forward_fn(void *ctx, uint32_t token, size_t pos,
+                                OcSeqId seq_id, uint32_t *out_token)
+{
+    (void)ctx; (void)seq_id;
+    /* Simple test: next token = current * 2 + 1, with position influence. */
+    *out_token = (uint32_t)(token * 2 + 1 + pos);
+    return OC_OK;
+}
+
+Test(batch, forward_callback_generates_tokens)
+{
+    OcBatchEngine *engine = NULL;
+    oc_batch_engine_init(&engine, NULL, 32, 4096);
+    OcBatchForward fwd = { .ctx = NULL, .fn = test_forward_fn };
+    cr_assert_eq(oc_batch_set_forward(engine, fwd), OC_OK);
+
+    uint32_t prompt[] = {10, 20, 30};
+    OcSeqId id;
+    oc_batch_submit(engine, prompt, 3, 3, 0, false, &id);
+
+    OcBatchStepOutput out[16];
+    size_t n_out;
+
+    /* First step: admit + generate first token.
+     * admit_pending sets last_token=30, pos=3, generated=1.
+     * forward_fn(30, 3, ...) = 30*2 + 1 + 3 = 64 */
+    oc_batch_step(engine, out, 16, &n_out);
+    cr_assert_eq(n_out, 1);
+    cr_assert_eq(out[0].token, 64);
+    cr_assert(!out[0].finished);  /* generated=2 < max_new=3 */
+
+    /* Second step: forward_fn(64, 4, ...) = 64*2 + 1 + 4 = 133 */
+    oc_batch_step(engine, out, 16, &n_out);
+    cr_assert_eq(n_out, 1);
+    cr_assert_eq(out[0].token, 133);
+    /* generated=3 == max_new=3 → finished */
+    cr_assert(out[0].finished);
+
+    /* Third step: no active sequences. */
+    oc_batch_step(engine, out, 16, &n_out);
+    cr_assert_eq(n_out, 0);
+
+    oc_batch_engine_free(engine);
+}
+
+Test(batch, forward_null_falls_back_to_simulated)
+{
+    OcBatchEngine *engine = NULL;
+    oc_batch_engine_init(&engine, NULL, 32, 4096);
+    /* No forward callback set. */
+    uint32_t prompt[] = {42};
+    OcSeqId id;
+    oc_batch_submit(engine, prompt, 1, 2, 0, false, &id);
+
+    OcBatchStepOutput out[16];
+    size_t n_out;
+    oc_batch_step(engine, out, 16, &n_out);
+    cr_assert_eq(n_out, 1);
+    /* Simulated: last_token + 1 = 43. */
+    cr_assert_eq(out[0].token, 43);
+    oc_batch_engine_free(engine);
+}
+
+Test(batch, set_forward_null_engine)
+{
+    cr_assert_neq(oc_batch_set_forward(NULL, (OcBatchForward){0}), OC_OK);
+}
+
+static OcError test_forward_err(void *ctx, uint32_t token, size_t pos,
+                                OcSeqId seq_id, uint32_t *out_token)
+{
+    (void)ctx; (void)token; (void)pos; (void)seq_id; (void)out_token;
+    return OC_ERR_MODEL;
+}
+
+Test(batch, forward_callback_error_finishes_seq)
+{
+    OcBatchEngine *engine = NULL;
+    oc_batch_engine_init(&engine, NULL, 32, 4096);
+    OcBatchForward fwd = { .ctx = NULL, .fn = test_forward_err };
+    oc_batch_set_forward(engine, fwd);
+
+    uint32_t prompt[] = {1, 2, 3};
+    OcSeqId id;
+    oc_batch_submit(engine, prompt, 3, 10, 0, false, &id);
+
+    OcBatchStepOutput out[16];
+    size_t n_out;
+    oc_batch_step(engine, out, 16, &n_out);
+    cr_assert_eq(n_out, 1);
+    cr_assert(out[0].finished);  /* error → finished */
+    cr_assert_eq(out[0].token, 0);  /* error → token = 0 */
+
+    oc_batch_engine_free(engine);
+}

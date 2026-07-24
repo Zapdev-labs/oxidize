@@ -38,6 +38,7 @@ struct OcBatchEngine {
     size_t         active_cap;
     OcSeqId        next_id;
     size_t         total_submitted;
+    OcBatchForward forward;  /* optional forward callback */
 };
 
 /* ─── Config ───────────────────────────────────────────────────────────── */
@@ -217,6 +218,13 @@ static void compact_active(OcBatchEngine *engine)
     engine->active_count = w;
 }
 
+OcError oc_batch_set_forward(OcBatchEngine *engine, OcBatchForward forward)
+{
+    if (!engine) return OC_ERR_INVALID_ARG;
+    engine->forward = forward;
+    return OC_OK;
+}
+
 OcError oc_batch_step(OcBatchEngine *engine,
                       OcBatchStepOutput *out, size_t max_out, size_t *n_out)
 {
@@ -233,8 +241,21 @@ OcError oc_batch_step(OcBatchEngine *engine,
         OcActiveMeta *a = &engine->active_meta[i];
         if (a->finished) continue;
 
-        /* Simulate token generation (stub: increment last token). */
-        a->last_token = a->last_token + 1;
+        if (engine->forward.fn) {
+            /* Real token generation via callback. */
+            uint32_t next_token = 0;
+            OcError e = engine->forward.fn(engine->forward.ctx, a->last_token,
+                                           a->pos, a->id, &next_token);
+            if (e != OC_OK) {
+                a->finished = true;
+                a->last_token = 0;
+            } else {
+                a->last_token = next_token;
+            }
+        } else {
+            /* Fallback: simulate token generation (increment last token). */
+            a->last_token = a->last_token + 1;
+        }
         a->pos++;
         a->generated++;
 

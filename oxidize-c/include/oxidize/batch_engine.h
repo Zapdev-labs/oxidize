@@ -38,6 +38,18 @@ typedef struct {
 
 typedef struct OcBatchEngine OcBatchEngine;
 
+/* Forward callback: given a token and position, produce the next token.
+ * Returns OC_OK on success. The callback should set *out_token to the
+ * predicted next token ID. */
+typedef OcError (*OcBatchForwardFn)(void *ctx, uint32_t token, size_t pos,
+                                    OcSeqId seq_id, uint32_t *out_token);
+
+/* Optional context for the forward callback (e.g. OcInferenceModel*). */
+typedef struct {
+    void             *ctx;
+    OcBatchForwardFn  fn;
+} OcBatchForward;
+
 /* Initialize config with defaults. */
 void oc_batch_config_init(OcBatchConfig *cfg);
 
@@ -66,8 +78,14 @@ bool oc_batch_has_work(const OcBatchEngine *engine);
 /* Cancel a sequence (pending or active). Returns true if it was present. */
 bool oc_batch_cancel(OcBatchEngine *engine, OcSeqId id);
 
+/* Set the forward callback used by oc_batch_step. If set, the engine
+ * calls the callback to produce real tokens instead of simulating. */
+OcError oc_batch_set_forward(OcBatchEngine *engine, OcBatchForward forward);
+
 /* Execute one decode step. Outputs up to max_out results in out.
- * Returns OC_OK on success. *n_out is set to the number of outputs produced. */
+ * Returns OC_OK on success. *n_out is set to the number of outputs produced.
+ * If a forward callback is set, uses it for real token generation;
+ * otherwise falls back to simulated incrementing tokens. */
 OcError oc_batch_step(OcBatchEngine *engine,
                       OcBatchStepOutput *out, size_t max_out, size_t *n_out);
 
