@@ -135,7 +135,18 @@ OcError oc_vision_encode(OcVisionEncoder *enc, const OcImage *img,
     } else {
         memset(out_embeddings, 0, total * sizeof(float));
     }
-    *out_len = total;
+
+    /* If CLS embedding is provided, prepend it and shift patch embeddings. */
+    if (enc->cls_emb != NULL) {
+        uint32_t hidden = enc->config.hidden_size;
+        /* Shift patch embeddings right by one position to make room for CLS. */
+        memmove(out_embeddings + hidden, out_embeddings, total * sizeof(float));
+        /* Copy CLS embedding to position 0. */
+        memcpy(out_embeddings, enc->cls_emb, hidden * sizeof(float));
+        *out_len = total + hidden;
+    } else {
+        *out_len = total;
+    }
     return OC_OK;
 }
 
@@ -147,10 +158,6 @@ OcError oc_vision_set_weights(OcVisionEncoder *enc,
                                const float *cls_emb)
 {
     if (!enc) return OC_ERR_INVALID_ARG;
-    /* CLS-token prepending is not implemented: the encode output contract is
-     * exactly n_patches * hidden_size floats. Reject rather than silently
-     * dropping the CLS embedding. */
-    if (cls_emb != NULL) return OC_ERR_INVALID_ARG;
     enc->patch_proj = patch_proj;
     enc->pos_emb = pos_emb;
     enc->ln_weight = ln_weight;

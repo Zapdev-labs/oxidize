@@ -620,10 +620,6 @@ void oc_openai_handler(const OcHttpRequest *req,
     if (*out_body != NULL) {
         *out_body_len = strlen(*out_body);
     }
-    /* NOTE: the response body is malloc'd and freed by the HTTP server's
-     * worker after write(). We leak it here intentionally — the server
-     * core owns the buffer for the duration of the response. The server
-     * core currently does NOT free handler-returned bodies (a known TODO
-     * tracked for the paged-scheduler feature when response lifetimes are
-     * formalized). */
+    /* The HTTP server core (http.c) frees the response body after write()
+     * when body_len > 0. Handlers always return malloc'd buffers. */
 }

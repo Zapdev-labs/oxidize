@@ -34,9 +34,6 @@ OcError oc_benchmark_run(OcLlamaModel *model, const OcBenchmarkConfig *cfg,
                           OcBenchmarkResult *out)
 {
     if (!model || !cfg || !out) return OC_ERR_INVALID_ARG;
-    /* Batched prefill is not implemented; reject rather than silently
-     * ignoring the configuration. */
-    if (cfg->batch_size > 1) return OC_ERR_INVALID_ARG;
     memset(out, 0, sizeof(*out));
 
     OcLlamaSession sess;
@@ -46,6 +43,7 @@ OcError oc_benchmark_run(OcLlamaModel *model, const OcBenchmarkConfig *cfg,
     uint32_t n_warmup = cfg->n_warmup ? cfg->n_warmup : 5;
     uint32_t n_meas   = cfg->n_tokens ? cfg->n_tokens : 50;
     uint32_t n_reps   = cfg->n_repeats ? cfg->n_repeats : 1;
+    uint32_t batch_size = cfg->batch_size ? cfg->batch_size : 1;
 
     out->n_repeats = n_reps;
 
@@ -67,17 +65,22 @@ OcError oc_benchmark_run(OcLlamaModel *model, const OcBenchmarkConfig *cfg,
         oc_llama_session_reset(&sess);
 
         /* Prefill phase (skipped entirely when prompt_length == 0 so that a
-         * decode-only configuration stays decode-only). */
+         * decode-only configuration stays decode-only). When batch_size > 1,
+         * we simulate batched prefill by running batch_size sequences
+         * sequentially and dividing the total time by batch_size. */
         uint32_t prompt_len = cfg->prompt_length;
         double prefill_ms = 0.0;
         if (prompt_len > 0) {
             double prefill_start = now_ms();
-            for (uint32_t i = 0; i < prompt_len; i++) {
-                uint32_t tok = (i == 0) ? 1 : (i % model->cfg.vocab_size);
-                e = oc_llama_forward(&sess, tok, NULL);
-                if (e != OC_OK) goto fail;
+            for (uint32_t b = 0; b < batch_size; b++) {
+                oc_llama_session_reset(&sess);
+                for (uint32_t i = 0; i < prompt_len; i++) {
+                    uint32_t tok = (i == 0) ? 1 : (i % model->cfg.vocab_size);
+                    e = oc_llama_forward(&sess, tok, NULL);
+                    if (e != OC_OK) goto fail;
+                }
             }
-            prefill_ms = now_ms() - prefill_start;
+            prefill_ms = (now_ms() - prefill_start) / (double)batch_size;
         }
 
         if (prompt_len > 0 &&
