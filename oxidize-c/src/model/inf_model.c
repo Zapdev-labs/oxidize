@@ -658,7 +658,6 @@ static OcError forward_mla_layer(OcInferenceModel *m, OcLayerWeights *layer,
 static OcError forward_shortconv_layer(OcInferenceModel *m, OcLayerWeights *layer,
                                         size_t li, size_t pos)
 {
-    (void)li;
     (void)pos;
     OcInferenceConfig *cfg = &m->config;
     size_t h = cfg->hidden_size;
@@ -690,17 +689,34 @@ static OcError forward_shortconv_layer(OcInferenceModel *m, OcLayerWeights *laye
     for (size_t i = 0; i < d; i++)
         bx[i] = bcx[i] * bcx[2 * d + i];
 
-    /* 4. Causal depthwise conv1d. Weights [l_cache, d] (tap-major).
-     * Last tap = current token. */
+    /* 4. Causal depthwise conv1d. Weights [d, l_cache] (channel-major, taps per channel).
+     * Last tap = current token. Use SSM conv ring buffer for past frames. */
     float *conv_out = m->workspace.conv_out;  /* [d] */
     bool have_conv = layer->shortconv_conv && layer->n_shortconv_conv == l_cache * d;
     if (have_conv) {
+        /* Use SSM engine conv ring buffer for past frames if available. */
+        OcSsmConvRing *ring = NULL;
+        if (m->ssm_engine.conv_buffers && li < m->ssm_engine.n_layers &&
+            m->ssm_engine.conv_buffers[li].dim == d) {
+            ring = &m->ssm_engine.conv_buffers[li];
+        }
         for (size_t c = 0; c < d; c++) {
-            size_t base = c * l_cache;
-            float sum = layer->shortconv_conv[base + (l_cache - 1)] * bx[c];
-            /* Past frames from SSM conv buffer. */
-            /* TODO: integrate with SSM engine conv buffers. */
+            float sum = layer->shortconv_conv[c * l_cache + (l_cache - 1)] * bx[c];
+            /* Add past frames from conv ring buffer. */
+            if (ring) {
+                for (size_t t = 1; t < l_cache && t <= ring->len; t++) {
+                    const float *past;
+                    size_t past_len;
+                    if (oc_ssm_conv_ring_past(ring, t, &past, &past_len) == OC_OK) {
+                        sum += layer->shortconv_conv[c * l_cache + (l_cache - 1 - t)] * past[c];
+                    }
+                }
+            }
             conv_out[c] = sum;
+        }
+        /* Push current bx to ring buffer for next token. */
+        if (ring) {
+            oc_ssm_conv_ring_push(ring, bx, d);
         }
     } else {
         memcpy(conv_out, bx, d * sizeof(float));
@@ -728,7 +744,6 @@ static OcError forward_shortconv_layer(OcInferenceModel *m, OcLayerWeights *laye
 static OcError forward_mamba_layer(OcInferenceModel *m, OcLayerWeights *layer,
                                     size_t li, size_t pos)
 {
-    (void)li;
     (void)pos;
     OcInferenceConfig *cfg = &m->config;
     size_t h = cfg->hidden_size;
@@ -752,16 +767,35 @@ static OcError forward_mamba_layer(OcInferenceModel *m, OcLayerWeights *layer,
     OcError e = oc_gemv_weight(&layer->attn_qkv, qkv_out_len, h, normed, x_proj);
     if (e != OC_OK) return e;
 
-    /* 3. Causal conv1d (kernel=4). */
+    /* 3. Causal conv1d (kernel=4). Use SSM conv ring buffer for past frames. */
     size_t conv_kernel = 4;
     float *conv_out = m->workspace.conv_out;
     memset(conv_out, 0, qkv_out_len * sizeof(float));
     if (layer->ssm_conv1d && layer->n_ssm_conv1d == conv_kernel * qkv_out_len) {
+        /* Use SSM engine conv ring buffer for past frames. */
+        OcSsmConvRing *ring = NULL;
+        if (m->ssm_engine.conv_buffers && li < m->ssm_engine.n_layers &&
+            m->ssm_engine.conv_buffers[li].dim == qkv_out_len) {
+            ring = &m->ssm_engine.conv_buffers[li];
+        }
         /* Tap-major [kernel, channels]; newest uses last tap. */
         for (size_t c = 0; c < qkv_out_len; c++) {
             float sum = layer->ssm_conv1d[(conv_kernel - 1) * qkv_out_len + c] * x_proj[c];
-            /* TODO: integrate with SSM engine conv buffers for past frames. */
+            /* Add past frames from conv ring buffer. */
+            if (ring) {
+                for (size_t t = 1; t < conv_kernel && t <= ring->len; t++) {
+                    const float *past;
+                    size_t past_len;
+                    if (oc_ssm_conv_ring_past(ring, t, &past, &past_len) == OC_OK) {
+                        sum += layer->ssm_conv1d[(conv_kernel - 1 - t) * qkv_out_len + c] * past[c];
+                    }
+                }
+            }
             conv_out[c] = sum;
+        }
+        /* Push current x_proj to ring buffer for next token. */
+        if (ring) {
+            oc_ssm_conv_ring_push(ring, x_proj, qkv_out_len);
         }
     } else {
         memcpy(conv_out, x_proj, qkv_out_len * sizeof(float));
