@@ -1,12 +1,13 @@
 /*
- * vision_encoder.c — CLIP-style vision encoder (stub).
+ * vision_encoder.c — CLIP-style vision encoder.
  *
- * Provides the API surface for image → feature encoding. Real computation
- * is deferred; this module returns deterministic placeholder vectors so
- * callers can wire up the multimodal pipeline end-to-end.
+ * Implements patch embedding + ViT transformer blocks + CLS projection.
+ * When weights are not loaded, falls back to deterministic placeholder
+ * vectors so callers can wire up the multimodal pipeline end-to-end.
  */
 #include "oxidize/vision_encoder.h"
 
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -57,6 +58,12 @@ OcError oc_vision_encoder_init(OcVisionEncoder **encoder,
     e->weight_data  = NULL;
     e->weight_size  = 0;
     e->initialized  = true;
+
+    /* Allocate layer structs (weights are NULL until loaded). */
+    if (cfg.n_layers > 0) {
+        e->layers = calloc(cfg.n_layers, sizeof(OcViTLayer));
+        if (!e->layers) { free(e); return OC_ERR_OOM; }
+    }
 
     *encoder = e;
     return OC_OK;
@@ -110,21 +117,247 @@ OcError oc_vision_encoder_encode(OcVisionEncoder *encoder,
     *out_features = NULL;
     *out_n_features = 0;
 
-    uint32_t n_patches = vision_n_patches(&encoder->config);
-    size_t n = (size_t)n_patches * encoder->config.hidden_dim;
-    float *out = malloc(n * sizeof(float));
-    if (!out) return OC_ERR_OOM;
+    OcVisionEncoderConfig *cfg = &encoder->config;
+    uint32_t n_patches = vision_n_patches(cfg);
+    size_t h = cfg->hidden_dim;
+    size_t seq_len = 1 + n_patches; /* CLS + patches */
+    size_t patch_dim = (size_t)cfg->patch_size * cfg->patch_size * cfg->n_channels;
 
-    /* Stub: fill with a small deterministic constant derived from image
-     * dimensions so different images produce different (but reproducible)
-     * features. */
-    float seed = (float)((image->width * 31u + image->height) & 0xFF) / 255.0f;
-    for (size_t i = 0; i < n; i++) {
-        out[i] = seed * 1e-3f;
+    /* Allocate hidden states: [seq_len, hidden_dim]. */
+    float *hidden = calloc(seq_len * h, sizeof(float));
+    if (!hidden) return OC_ERR_OOM;
+
+    if (encoder->patch_embed_weight && encoder->patch_embed_bias) {
+        /* Real patch embedding: conv2d-like (im2col + GEMV per patch). */
+        for (uint32_t p = 0; p < n_patches; p++) {
+            uint32_t py = (p / (cfg->image_size / cfg->patch_size)) * cfg->patch_size;
+            uint32_t px = (p % (cfg->image_size / cfg->patch_size)) * cfg->patch_size;
+
+            /* Extract patch pixels into a flat vector. */
+            float *patch_vec = calloc(patch_dim, sizeof(float));
+            if (!patch_vec) { free(hidden); return OC_ERR_OOM; }
+
+            for (uint32_t c = 0; c < cfg->n_channels; c++) {
+                for (uint32_t dy = 0; dy < cfg->patch_size; dy++) {
+                    for (uint32_t dx = 0; dx < cfg->patch_size; dx++) {
+                        uint32_t ix = px + dx;
+                        uint32_t iy = py + dy;
+                        if (ix < image->width && iy < image->height) {
+                            size_t img_idx = ((size_t)iy * image->width + ix) * image->channels + c;
+                            size_t patch_idx = (c * cfg->patch_size + dy) * cfg->patch_size + dx;
+                            if (img_idx < (size_t)image->width * image->height * image->channels)
+                                patch_vec[patch_idx] = image->pixels[img_idx];
+                        }
+                    }
+                }
+            }
+
+            /* GEMV: hidden[p+1] = patch_embed_weight @ patch_vec + bias. */
+            float *out = hidden + (p + 1) * h;
+            for (size_t r = 0; r < h; r++) {
+                float dot = encoder->patch_embed_bias[r];
+                const float *wrow = encoder->patch_embed_weight + r * patch_dim;
+                for (size_t c = 0; c < patch_dim; c++)
+                    dot += wrow[c] * patch_vec[c];
+                out[r] = dot;
+            }
+            free(patch_vec);
+        }
+
+        /* Set CLS token. */
+        if (encoder->cls_token)
+            memcpy(hidden, encoder->cls_token, h * sizeof(float));
+
+        /* Add positional embeddings. */
+        if (encoder->pos_embed)
+            for (size_t i = 0; i < seq_len * h; i++)
+                hidden[i] += encoder->pos_embed[i];
+    } else {
+        /* No weights: fill with deterministic placeholder. */
+        float seed = (float)((image->width * 31u + image->height) & 0xFF) / 255.0f;
+        for (size_t i = 0; i < seq_len * h; i++)
+            hidden[i] = seed * 1e-3f;
     }
 
+    /* ViT transformer blocks. */
+    if (encoder->layers) {
+        size_t n_heads = cfg->n_heads;
+        size_t head_dim = h / n_heads;
+
+        for (uint32_t li = 0; li < cfg->n_layers; li++) {
+            OcViTLayer *layer = &encoder->layers[li];
+
+            /* LayerNorm1. */
+            if (layer->layer_norm1) {
+                for (size_t s = 0; s < seq_len; s++) {
+                    float *x = hidden + s * h;
+                    float mean = 0.0f;
+                    for (size_t i = 0; i < h; i++) mean += x[i];
+                    mean /= h;
+                    float var = 0.0f;
+                    for (size_t i = 0; i < h; i++) { float d = x[i] - mean; var += d * d; }
+                    var /= h;
+                    float inv = 1.0f / sqrtf(var + 1e-5f);
+                    for (size_t i = 0; i < h; i++)
+                        x[i] = (x[i] - mean) * inv * layer->layer_norm1[i];
+                }
+            }
+
+            /* Multi-head self-attention (simplified: per-head QKV). */
+            float *attn_out = calloc(seq_len * h, sizeof(float));
+            if (!attn_out) { free(hidden); return OC_ERR_OOM; }
+
+            if (layer->q_proj && layer->k_proj && layer->v_proj) {
+                float *q = malloc(seq_len * h * sizeof(float));
+                float *k = malloc(seq_len * h * sizeof(float));
+                float *v = malloc(seq_len * h * sizeof(float));
+                if (!q || !k || !v) {
+                    free(hidden); free(attn_out); free(q); free(k); free(v);
+                    return OC_ERR_OOM;
+                }
+
+                /* QKV projections. */
+                for (size_t s = 0; s < seq_len; s++) {
+                    const float *x = hidden + s * h;
+                    for (size_t r = 0; r < h; r++) {
+                        float dq = 0, dk = 0, dv = 0;
+                        for (size_t c = 0; c < h; c++) {
+                            dq += layer->q_proj[r * h + c] * x[c];
+                            dk += layer->k_proj[r * h + c] * x[c];
+                            dv += layer->v_proj[r * h + c] * x[c];
+                        }
+                        q[s * h + r] = dq;
+                        k[s * h + r] = dk;
+                        v[s * h + r] = dv;
+                    }
+                }
+
+                /* Per-head attention. */
+                float scale = 1.0f / sqrtf((float)head_dim);
+                float *scores = malloc(seq_len * sizeof(float));
+                if (!scores) { free(hidden); free(q); free(k); free(v); free(attn_out); return OC_ERR_OOM; }
+                for (size_t hh = 0; hh < n_heads; hh++) {
+                    for (size_t qi = 0; qi < seq_len; qi++) {
+                        float *qh = q + qi * h + hh * head_dim;
+                        float max_score = -INFINITY;
+                        for (size_t ki = 0; ki < seq_len; ki++) {
+                            float *kh = k + ki * h + hh * head_dim;
+                            float dot = 0;
+                            for (size_t d = 0; d < head_dim; d++)
+                                dot += qh[d] * kh[d];
+                            scores[ki] = dot * scale;
+                            if (scores[ki] > max_score) max_score = scores[ki];
+                        }
+                        float sum_exp = 0;
+                        for (size_t ki = 0; ki < seq_len; ki++) {
+                            scores[ki] = expf(scores[ki] - max_score);
+                            sum_exp += scores[ki];
+                        }
+                        if (sum_exp > 0) {
+                            float inv = 1.0f / sum_exp;
+                            float *out = attn_out + qi * h + hh * head_dim;
+                            for (size_t d = 0; d < head_dim; d++) out[d] = 0;
+                            for (size_t ki = 0; ki < seq_len; ki++) {
+                                float *vh = v + ki * h + hh * head_dim;
+                                float w = scores[ki] * inv;
+                                for (size_t d = 0; d < head_dim; d++)
+                                    out[d] += w * vh[d];
+                            }
+                        }
+                    }
+                }
+                free(scores);
+
+                /* Output projection + residual. */
+                if (layer->out_proj) {
+                    for (size_t s = 0; s < seq_len; s++) {
+                        const float *a = attn_out + s * h;
+                        float *x = hidden + s * h;
+                        for (size_t r = 0; r < h; r++) {
+                            float dot = 0;
+                            for (size_t c = 0; c < h; c++)
+                                dot += layer->out_proj[r * h + c] * a[c];
+                            x[r] += dot;
+                        }
+                    }
+                } else {
+                    for (size_t i = 0; i < seq_len * h; i++)
+                        hidden[i] += attn_out[i];
+                }
+
+                free(q); free(k); free(v);
+            }
+            free(attn_out);
+
+            /* LayerNorm2 + MLP. */
+            if (layer->layer_norm2) {
+                for (size_t s = 0; s < seq_len; s++) {
+                    float *x = hidden + s * h;
+                    float mean = 0;
+                    for (size_t i = 0; i < h; i++) mean += x[i];
+                    mean /= h;
+                    float var = 0;
+                    for (size_t i = 0; i < h; i++) { float d = x[i] - mean; var += d * d; }
+                    var /= h;
+                    float inv = 1.0f / sqrtf(var + 1e-5f);
+                    for (size_t i = 0; i < h; i++)
+                        x[i] = (x[i] - mean) * inv * layer->layer_norm2[i];
+                }
+            }
+
+            if (layer->mlp_fc1 && layer->mlp_fc2) {
+                size_t inter = 4 * h;
+                float *inter_buf = malloc(inter * sizeof(float));
+                if (!inter_buf) { free(hidden); return OC_ERR_OOM; }
+                for (size_t s = 0; s < seq_len; s++) {
+                    const float *x = hidden + s * h;
+                    for (size_t r = 0; r < inter; r++) {
+                        float dot = 0;
+                        for (size_t c = 0; c < h; c++)
+                            dot += layer->mlp_fc1[r * h + c] * x[c];
+                        /* GELU activation. */
+                        inter_buf[r] = 0.5f * dot * (1.0f + tanhf(0.7978845608028654f * (dot + 0.044715f * dot * dot * dot)));
+                    }
+                    float *x_out = hidden + s * h;
+                    for (size_t r = 0; r < h; r++) {
+                        float dot = 0;
+                        for (size_t c = 0; c < inter; c++)
+                            dot += layer->mlp_fc2[r * inter + c] * inter_buf[c];
+                        x_out[r] += dot;
+                    }
+                }
+                free(inter_buf);
+            }
+        }
+    }
+
+    /* Final LayerNorm. */
+    if (encoder->final_norm) {
+        for (size_t s = 0; s < seq_len; s++) {
+            float *x = hidden + s * h;
+            float mean = 0;
+            for (size_t i = 0; i < h; i++) mean += x[i];
+            mean /= h;
+            float var = 0;
+            for (size_t i = 0; i < h; i++) { float d = x[i] - mean; var += d * d; }
+            var /= h;
+            float inv = 1.0f / sqrtf(var + 1e-5f);
+            for (size_t i = 0; i < h; i++)
+                x[i] = (x[i] - mean) * inv * encoder->final_norm[i];
+        }
+    }
+
+    /* Output: patch features [n_patches, hidden_dim]. */
+    size_t out_dim = n_patches * h;
+
+    float *out = malloc(out_dim * sizeof(float));
+    if (!out) { free(hidden); return OC_ERR_OOM; }
+    /* Skip CLS token (first row), copy patch features. */
+    memcpy(out, hidden + h, out_dim * sizeof(float));
+
+    free(hidden);
     *out_features = out;
-    *out_n_features = n;
+    *out_n_features = out_dim;
     return OC_OK;
 }
 
@@ -167,6 +400,25 @@ void oc_vision_encoder_free(OcVisionEncoder *encoder)
 {
     if (!encoder) return;
     free(encoder->weight_data);
+    free(encoder->patch_embed_weight);
+    free(encoder->patch_embed_bias);
+    free(encoder->cls_token);
+    free(encoder->pos_embed);
+    free(encoder->final_norm);
+    free(encoder->proj);
+    if (encoder->layers) {
+        for (uint32_t i = 0; i < encoder->config.n_layers; i++) {
+            free(encoder->layers[i].layer_norm1);
+            free(encoder->layers[i].q_proj);
+            free(encoder->layers[i].k_proj);
+            free(encoder->layers[i].v_proj);
+            free(encoder->layers[i].out_proj);
+            free(encoder->layers[i].layer_norm2);
+            free(encoder->layers[i].mlp_fc1);
+            free(encoder->layers[i].mlp_fc2);
+        }
+        free(encoder->layers);
+    }
     memset(encoder, 0, sizeof(*encoder));
     free(encoder);
 }

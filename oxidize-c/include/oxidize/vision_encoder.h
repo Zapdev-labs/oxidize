@@ -52,10 +52,30 @@ typedef struct OcImagePatch {
 
 /* ─── Encoder ────────────────────────────────────────────────────────── */
 
+/* Per-layer weights for ViT transformer blocks. */
+typedef struct OcViTLayer {
+    float *layer_norm1;        /* [hidden_dim] */
+    float *q_proj;             /* [hidden_dim, hidden_dim] */
+    float *k_proj;             /* [hidden_dim, hidden_dim] */
+    float *v_proj;             /* [hidden_dim, hidden_dim] */
+    float *out_proj;           /* [hidden_dim, hidden_dim] */
+    float *layer_norm2;        /* [hidden_dim] */
+    float *mlp_fc1;            /* [4*hidden_dim, hidden_dim] */
+    float *mlp_fc2;            /* [hidden_dim, 4*hidden_dim] */
+} OcViTLayer;
+
 typedef struct OcVisionEncoder {
     OcVisionEncoderConfig config;
     void     *weight_data;     /* owned copy of caller-supplied weights */
     size_t    weight_size;     /* bytes                                            */
+    /* ViT weights (NULL until loaded). */
+    float    *patch_embed_weight;  /* [hidden_dim, patch_dim] */
+    float    *patch_embed_bias;    /* [hidden_dim] */
+    float    *cls_token;           /* [hidden_dim] */
+    float    *pos_embed;           /* [1+n_patches, hidden_dim] */
+    float    *final_norm;          /* [hidden_dim] */
+    float    *proj;               /* [proj_dim, hidden_dim] (optional) */
+    OcViTLayer *layers;            /* [n_layers] */
     bool      initialized;
 } OcVisionEncoder;
 

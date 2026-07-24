@@ -23,6 +23,7 @@
 #include "oxidize/error.h"
 #include "oxidize/finetune.h"
 #include "oxidize/gguf.h"
+#include "oxidize/hf_hub.h"
 #include "oxidize/http.h"
 #include "oxidize/inspect.h"
 #include "oxidize/llama.h"
@@ -1006,32 +1007,93 @@ OcError oc_cli_run_download(OcCliContext *ctx)
 
     const char *cache = ctx->cache_dir ? ctx->cache_dir : default_cache_dir();
 
-    /* The C port does not yet have a full HF Hub client (the Rust CLI
-     * uses the oxidize-hf resolver). We provide a stub that prints
-     * the intended command and suggests using the Rust CLI or
-     * huggingface-cli for now. */
+    /* Build HF config. */
+    OcHfConfig hcfg;
+    oc_hf_config_init(&hcfg, cache);
+    snprintf(hcfg.repo_id, sizeof(hcfg.repo_id), "%s", ctx->hf_repo);
     if (ctx->hf_file) {
+        /* User specified a specific file — resolve and download it. */
+        OcHfModel model;
+        memset(&model, 0, sizeof(model));
+        snprintf(model.repo_id, sizeof(model.repo_id), "%s", ctx->hf_repo);
+        snprintf(model.filename, sizeof(model.filename), "%s", ctx->hf_file);
+
+        /* Build download URL. */
+        snprintf(model.download_url, sizeof(model.download_url),
+                 "%s/%s/resolve/main/%s",
+                 hcfg.api_base[0] ? hcfg.api_base : OC_HF_DEFAULT_API_BASE,
+                 ctx->hf_repo, ctx->hf_file);
+
+        progress(ctx, "downloading: %s/%s → %s", ctx->hf_repo, ctx->hf_file, cache);
+
+        OcError e = oc_hf_download(&hcfg, &model, NULL, NULL);
+        if (e != OC_OK) {
+            cli_error("download failed (%s)", oc_error_msg(e));
+            return e;
+        }
+
+        /* Get the local cache path. */
+        char local_path[1024];
+        oc_hf_cache_path(&hcfg, ctx->hf_repo, ctx->hf_file,
+                         local_path, sizeof(local_path));
+
         if (ctx->output_format == OC_CLI_OUTPUT_JSON) {
             printf("{\"command\":\"download\",\"repo\":\"%s\",\"file\":\"%s\","
-                   "\"cache_dir\":\"%s\",\"status\":\"stub\"}\n",
-                   ctx->hf_repo, ctx->hf_file, cache);
+                   "\"cache_dir\":\"%s\",\"local_path\":\"%s\",\"status\":\"ok\"}\n",
+                   ctx->hf_repo, ctx->hf_file, cache, local_path);
         } else {
-            printf("download stub: %s/%s → %s\n",
-                   ctx->hf_repo, ctx->hf_file, cache);
-            printf("(HF Hub download not yet implemented in the C port; "
-                   "use `huggingface-cli download %s %s --local-dir %s`)\n",
-                   ctx->hf_repo, ctx->hf_file, cache);
+            printf("downloaded: %s/%s → %s\n",
+                   ctx->hf_repo, ctx->hf_file, local_path);
         }
     } else {
+        /* No specific file — list available .gguf files and download the best match. */
+        progress(ctx, "listing models in %s...", ctx->hf_repo);
+
+        OcHfModel models[OC_HF_MAX_MODELS];
+        size_t n_models = OC_HF_MAX_MODELS;
+        OcError e = oc_hf_list_models(&hcfg, models, &n_models);
+        if (e != OC_OK) {
+            cli_error("failed to list models (%s)", oc_error_msg(e));
+            return e;
+        }
+
+        if (n_models == 0) {
+            cli_error("no .gguf files found in repo %s", ctx->hf_repo);
+            return OC_ERR_MODEL;
+        }
+
+        /* If quant_type is specified, filter for it. Otherwise pick the first. */
+        size_t pick = 0;
+        if (hcfg.quant_type[0]) {
+            for (size_t i = 0; i < n_models; i++) {
+                if (strcmp(models[i].quant_type, hcfg.quant_type) == 0) {
+                    pick = i;
+                    break;
+                }
+            }
+        }
+
+        progress(ctx, "downloading: %s/%s → %s",
+                 ctx->hf_repo, models[pick].filename, cache);
+
+        e = oc_hf_download(&hcfg, &models[pick], NULL, NULL);
+        if (e != OC_OK) {
+            cli_error("download failed (%s)", oc_error_msg(e));
+            return e;
+        }
+
+        char local_path[1024];
+        oc_hf_cache_path(&hcfg, ctx->hf_repo, models[pick].filename,
+                         local_path, sizeof(local_path));
+
         if (ctx->output_format == OC_CLI_OUTPUT_JSON) {
             printf("{\"command\":\"download\",\"repo\":\"%s\","
-                   "\"cache_dir\":\"%s\",\"status\":\"stub\"}\n",
-                   ctx->hf_repo, cache);
+                   "\"file\":\"%s\",\"cache_dir\":\"%s\","
+                   "\"local_path\":\"%s\",\"status\":\"ok\"}\n",
+                   ctx->hf_repo, models[pick].filename, cache, local_path);
         } else {
-            printf("download stub: repo=%s → %s\n", ctx->hf_repo, cache);
-            printf("(HF Hub download not yet implemented in the C port; "
-                   "use `huggingface-cli download %s --local-dir %s`)\n",
-                   ctx->hf_repo, cache);
+            printf("downloaded: %s/%s → %s\n",
+                   ctx->hf_repo, models[pick].filename, local_path);
         }
     }
     return OC_OK;
