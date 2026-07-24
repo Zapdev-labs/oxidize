@@ -1,11 +1,21 @@
 /*
  * llama_swap.c — Llama-family model swap implementation.
+ *
+ * Uses mmap to load GGUF files into memory for fast model switching.
  */
+#define _POSIX_C_SOURCE 200809L
 #include "oxidize/llama_swap.h"
 
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+
+/* mmap headers */
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/mman.h>
 
 OcError oc_model_swap_init(OcModelSwap *sw)
 {
@@ -51,14 +61,42 @@ OcError oc_model_swap_load(OcModelSwap *sw, int idx)
     OcSwapModelEntry *e = &sw->models[idx];
     if (e->loaded) return OC_OK;
 
-    /* Simulate loading: allocate a dummy buffer based on file size. */
-    /* In a real implementation, this would mmap the GGUF file. */
-    e->model_data_size = 1024; /* placeholder */
-    e->model_data = malloc(e->model_data_size);
-    if (!e->model_data) return OC_ERR_OOM;
-    memset(e->model_data, 0, e->model_data_size);
+    /* Open the file. */
+    int fd = open(e->path, O_RDONLY);
+    if (fd < 0) {
+        return OC_ERR_IO;
+    }
+
+    /* Get file size. */
+    struct stat st;
+    if (fstat(fd, &st) != 0) {
+        close(fd);
+        return OC_ERR_IO;
+    }
+    if (st.st_size <= 0) {
+        close(fd);
+        return OC_ERR_MODEL;
+    }
+
+    /* mmap the file. */
+    void *mapped = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (mapped == MAP_FAILED) {
+        close(fd);
+        return OC_ERR_OOM;
+    }
+
+    /* Store the mapping. The fd stays open for the lifetime of the mapping. */
+    e->model_data = mapped;
+    e->model_data_size = (size_t)st.st_size;
+    e->size_bytes = (uint64_t)st.st_size;
     e->loaded = true;
     sw->total_loaded_bytes += e->model_data_size;
+
+    /* We can close fd after mmap on most Unix systems, but keeping it open
+     * is safer for portability. Store fd in name field padding? No, use
+     * a separate approach: close fd since MAP_PRIVATE keeps the mapping. */
+    close(fd);
+
     return OC_OK;
 }
 
@@ -70,7 +108,10 @@ OcError oc_model_swap_unload(OcModelSwap *sw, int idx)
     OcSwapModelEntry *e = &sw->models[idx];
     if (!e->loaded) return OC_OK;
 
-    free(e->model_data);
+    /* Unmap the file from memory. */
+    if (e->model_data) {
+        munmap(e->model_data, e->model_data_size);
+    }
     e->model_data = NULL;
     sw->total_loaded_bytes -= e->model_data_size;
     e->model_data_size = 0;
@@ -125,8 +166,8 @@ void oc_model_swap_free(OcModelSwap *sw)
 {
     if (!sw) return;
     for (size_t i = 0; i < sw->n_models; i++) {
-        if (sw->models[i].loaded) {
-            free(sw->models[i].model_data);
+        if (sw->models[i].loaded && sw->models[i].model_data) {
+            munmap(sw->models[i].model_data, sw->models[i].model_data_size);
         }
     }
     memset(sw, 0, sizeof(*sw));
