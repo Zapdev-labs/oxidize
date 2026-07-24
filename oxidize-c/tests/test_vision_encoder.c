@@ -191,6 +191,47 @@ Test(vision_encoder, patch_embed_returns_patches)
     oc_vision_encoder_free(e);
 }
 
+Test(vision_encoder, patch_embed_extracts_real_pixels)
+{
+    OcVisionEncoder *e = NULL;
+    cr_assert_eq(oc_vision_encoder_init(&e, NULL), OC_OK);
+    /* Create a 32x32 image with 3 channels, fill with known values. */
+    OcImagePatch *img = NULL;
+    cr_assert_eq(oc_image_patch_init(32, 32, 3, &img), OC_OK);
+    /* Fill with pattern: pixel(x,y,c) = (x + y + c) / 10.0. */
+    for (uint32_t y = 0; y < 32; y++) {
+        for (uint32_t x = 0; x < 32; x++) {
+            for (uint32_t c = 0; c < 3; c++) {
+                img->pixels[(y * 32 + x) * 3 + c] = (float)(x + y + c) / 10.0f;
+            }
+        }
+    }
+    float *patches = NULL;
+    size_t n = 0;
+    cr_assert_eq(oc_vision_encoder_patch_embed(e, img, &patches, &n), OC_OK);
+    /* Default: image_size=224, patch_size=16 → n_patches=196.
+     * But image is only 32x32, so many patches will be zero. */
+    uint32_t n_patches = (224 / 16) * (224 / 16);
+    size_t patch_dim = 16 * 16 * 3;
+    cr_assert_eq(n, (size_t)n_patches * patch_dim);
+    /* Verify first patch (px=0, py=0) extracts pixel data correctly.
+     * patch[0] = pixel(0,0,0) = 0.0. */
+    cr_assert_float_eq(patches[0], 0.0f, 0.001f);
+    /* patch[1] = pixel(1,0,0) = 1/10 = 0.1. */
+    cr_assert_float_eq(patches[1], 0.1f, 0.001f);
+    /* patch[256] = pixel(0,0,1) = 1/10 = 0.1 (channel 1, dy=0, dx=0). */
+    cr_assert_float_eq(patches[256], 0.1f, 0.001f);
+    /* Verify non-zero data exists (not all zeros like the old stub). */
+    bool has_nonzero = false;
+    for (size_t i = 0; i < n; i++) {
+        if (patches[i] != 0.0f) { has_nonzero = true; break; }
+    }
+    cr_assert(has_nonzero, "patch_embed should extract real pixel data");
+    free(patches);
+    oc_image_patch_free(img);
+    oc_vision_encoder_free(e);
+}
+
 /* ─── Image patch helpers ──────────────────────────────────────────── */
 
 Test(vision_encoder, image_patch_init_allocates)

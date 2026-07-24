@@ -377,18 +377,39 @@ OcError oc_vision_encoder_patch_embed(OcVisionEncoder *encoder,
     *out_patches = NULL;
     *out_n_patches = 0;
 
-    uint32_t n_patches = vision_n_patches(&encoder->config);
-    size_t patch_dim = (size_t)encoder->config.patch_size
-                     * encoder->config.patch_size
-                     * encoder->config.n_channels;
+    OcVisionEncoderConfig *cfg = &encoder->config;
+    uint32_t n_patches = vision_n_patches(cfg);
+    size_t patch_dim = (size_t)cfg->patch_size * cfg->patch_size * cfg->n_channels;
     size_t n = (size_t)n_patches * patch_dim;
     float *out = malloc(n * sizeof(float));
     if (!out) return OC_ERR_OOM;
+    memset(out, 0, n * sizeof(float));
 
-    /* Stub: fill with a small deterministic constant. */
-    float seed = (float)((image->width + image->height * 7u) & 0xFF) / 255.0f;
-    for (size_t i = 0; i < n; i++) {
-        out[i] = seed * 1e-3f;
+    /* Extract real patch pixels from the image.
+     * For each patch, extract pixel values into a flat vector
+     * [n_patches, patch_dim] where patch_dim = patch_size^2 * n_channels. */
+    uint32_t patches_per_row = cfg->image_size / cfg->patch_size;
+    if (patches_per_row == 0) patches_per_row = 1;
+
+    for (uint32_t p = 0; p < n_patches; p++) {
+        uint32_t py = (p / patches_per_row) * cfg->patch_size;
+        uint32_t px = (p % patches_per_row) * cfg->patch_size;
+        float *patch = out + (size_t)p * patch_dim;
+
+        for (uint32_t c = 0; c < cfg->n_channels; c++) {
+            for (uint32_t dy = 0; dy < cfg->patch_size; dy++) {
+                for (uint32_t dx = 0; dx < cfg->patch_size; dx++) {
+                    uint32_t ix = px + dx;
+                    uint32_t iy = py + dy;
+                    size_t patch_idx = (size_t)(c * cfg->patch_size + dy) * cfg->patch_size + dx;
+                    if (ix < image->width && iy < image->height &&
+                        c < image->channels) {
+                        size_t img_idx = ((size_t)iy * image->width + ix) * image->channels + c;
+                        patch[patch_idx] = image->pixels[img_idx];
+                    }
+                }
+            }
+        }
     }
 
     *out_patches = out;
