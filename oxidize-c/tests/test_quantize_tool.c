@@ -114,7 +114,7 @@ Test(quantize_tool, rejects_target_without_encoder)
     OcQuantizeConfig cfg = {
         .input_path = "missing.gguf",
         .output_path = "unused.gguf",
-        .target_type = "BF16",
+        .target_type = "IQ2_XXS",
     };
     cr_assert_eq(oc_quantize_model(&cfg), OC_ERR_QUANT);
 }

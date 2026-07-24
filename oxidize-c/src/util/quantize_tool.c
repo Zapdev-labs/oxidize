@@ -38,6 +38,7 @@ static bool target_type_supported(OcGgufQuantizationType type)
     switch (type) {
     case OC_QUANT_F32:
     case OC_QUANT_F16:
+    case OC_QUANT_BF16:
     case OC_QUANT_I8:
     case OC_QUANT_I16:
     case OC_QUANT_I32:

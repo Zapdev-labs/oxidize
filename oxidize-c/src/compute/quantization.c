@@ -128,6 +128,35 @@ static void f16_le_write(uint8_t *dst, float value)
     dst[1] = (uint8_t)((bits >> 8) & 0xFFu);
 }
 
+/* BF16: bfloat16 format = sign(1) + exponent(8) + mantissa(7).
+ * Conversion from f32: truncate the low 16 mantissa bits of the f32,
+ * with round-to-nearest-even. */
+static uint16_t f32_to_bf16_bits(float value)
+{
+    uint32_t bits;
+    memcpy(&bits, &value, sizeof(bits));
+    /* Round to nearest even: add 0x7FFF + (LSB of result) before truncating. */
+    uint32_t rounding_bias = 0x7FFFu + ((bits >> 16) & 1u);
+    uint16_t bf16 = (uint16_t)((bits + rounding_bias) >> 16);
+    return bf16;
+}
+
+static void bf16_le_write(uint8_t *dst, float value)
+{
+    uint16_t bits = f32_to_bf16_bits(value);
+    dst[0] = (uint8_t)(bits & 0xFFu);
+    dst[1] = (uint8_t)((bits >> 8) & 0xFFu);
+}
+
+static float bf16_le_to_f32(uint8_t b0, uint8_t b1)
+{
+    uint16_t bits = (uint16_t)b0 | ((uint16_t)b1 << 8);
+    uint32_t f32_bits = (uint32_t)bits << 16;
+    float result;
+    memcpy(&result, &f32_bits, sizeof(result));
+    return result;
+}
+
 /* llama.cpp `nearest_int` — fast round-to-nearest for quant heuristics. */
 static int32_t nearest_int_f(float fval)
 {
@@ -1342,6 +1371,16 @@ static OcError pack_f16(const float *src, size_t value_count,
     return OC_OK;
 }
 
+static OcError pack_bf16(const float *src, size_t value_count,
+                         uint8_t *dst, size_t dst_len)
+{
+    if (dst_len != value_count * 2) return OC_ERR_INVALID_ARG;
+    for (size_t i = 0; i < value_count; i++) {
+        bf16_le_write(&dst[2 * i], src[i]);
+    }
+    return OC_OK;
+}
+
 static OcError pack_i8(const float *src, size_t value_count,
                        uint8_t *dst, size_t dst_len)
 {
@@ -2034,6 +2073,7 @@ OcError oc_quant_pack_row(OcGgufQuantizationType qtype,
     switch (qtype) {
     case OC_QUANT_F32:    return pack_f32(src, value_count, dst, dst_len);
     case OC_QUANT_F16:    return pack_f16(src, value_count, dst, dst_len);
+    case OC_QUANT_BF16:   return pack_bf16(src, value_count, dst, dst_len);
     case OC_QUANT_I8:     return pack_i8(src, value_count, dst, dst_len);
     case OC_QUANT_I16:    return pack_i16(src, value_count, dst, dst_len);
     case OC_QUANT_I32:    return pack_i32(src, value_count, dst, dst_len);
@@ -2060,9 +2100,8 @@ OcError oc_quant_pack_row(OcGgufQuantizationType qtype,
     case OC_QUANT_AL6:    return pack_al6(src, value_count, dst, dst_len);
     case OC_QUANT_AL8:    return pack_al8(src, value_count, dst, dst_len);
     default:
-        /* BF16 pack + IQ/NVFP4 pack — encoders not implemented in this
-         * feature (parity is on dequant direction). Unknown types return
-         * OC_ERR_QUANT (no crash). */
+        /* IQ/NVFP4 pack encoders not implemented (parity is on dequant
+         * direction). Unknown types return OC_ERR_QUANT (no crash). */
         return OC_ERR_QUANT;
     }
 }

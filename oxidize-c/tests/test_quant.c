@@ -158,6 +158,43 @@ Test(quant, dequant_bf16, .description = "VAL-QUANT-008: BF16 dequant bit-exact"
     }
 }
 
+Test(quant, pack_bf16_round_trip, .description = "BF16 pack-then-dequant round-trip") {
+    float src[8] = { 1.0f, -2.0f, 0.5f, -0.25f, 3.14159f, -1e10f, 0.0f, 42.0f };
+    uint8_t buf[16];
+    OcError e = oc_quant_pack_row(OC_QUANT_BF16, src, 8, buf, sizeof(buf));
+    cr_assert_eq(e, OC_OK, "BF16 pack should succeed");
+    float dst[8];
+    e = oc_quant_dequant_row(OC_QUANT_BF16, buf, sizeof(buf), dst, 8);
+    cr_assert_eq(e, OC_OK, "BF16 dequant should succeed");
+    /* BF16 has ~7 bits of mantissa, so relative error should be < 1%. */
+    for (int i = 0; i < 8; i++) {
+        if (src[i] == 0.0f) {
+            cr_assert_float_eq(dst[i], 0.0f, 1e-7f, "BF16 zero at %d", i);
+        } else {
+            float rel_err = fabsf((dst[i] - src[i]) / src[i]);
+            cr_assert(rel_err < 0.01f, "BF16 round-trip error too high at %d: %f vs %f (rel=%f)",
+                      i, dst[i], src[i], rel_err);
+        }
+    }
+}
+
+Test(quant, pack_bf16_basic_values) {
+    /* Test known BF16 values: 1.0 = 0x3F80, -2.0 = 0xC000, 0.5 = 0x3F00 */
+    float src[3] = { 1.0f, -2.0f, 0.5f };
+    uint8_t buf[6];
+    cr_assert_eq(oc_quant_pack_row(OC_QUANT_BF16, src, 3, buf, sizeof(buf)), OC_OK);
+    /* Check BF16 bit pattern (little-endian). */
+    cr_assert_eq(buf[0], 0x80); cr_assert_eq(buf[1], 0x3F);  /* 1.0 = 0x3F80 */
+    cr_assert_eq(buf[2], 0x00); cr_assert_eq(buf[3], 0xC0);  /* -2.0 = 0xC000 */
+    cr_assert_eq(buf[4], 0x00); cr_assert_eq(buf[5], 0x3F);  /* 0.5 = 0x3F00 */
+}
+
+Test(quant, pack_bf16_wrong_size) {
+    float src[4] = {0};
+    uint8_t buf[7]; /* too small */
+    cr_assert_neq(oc_quant_pack_row(OC_QUANT_BF16, src, 4, buf, sizeof(buf)), OC_OK);
+}
+
 Test(quant, dequant_int_and_f64, .description = "I8/I16/I32/I64/F64 dequant bit-exact") {
     int8_t i8[5] = { -1, 0, 1, 127, -128 };
     float i8_exp[5] = { -1.0f, 0.0f, 1.0f, 127.0f, -128.0f };
