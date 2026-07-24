@@ -79,13 +79,21 @@ OcError oc_k8s_get_pods(const OcK8sCluster *cluster, const OcK8sPod **out, uint3
     return OC_OK;
 }
 
-OcError oc_k8s_get_ready_pods(const OcK8sCluster *cluster, const OcK8sPod **out, uint32_t *count)
+OcError oc_k8s_get_ready_pods(const OcK8sCluster *cluster, OcK8sPod *out,
+                              uint32_t cap, uint32_t *count)
 {
     if (!cluster || !out || !count) return OC_ERR_INVALID_ARG;
-    /* Return all pods since we can't filter a const array in-place.
-     * In a real implementation we'd copy to a caller-provided buffer. */
-    *out = cluster->pods;
-    *count = cluster->n_pods;
+    uint32_t n_ready = oc_k8s_n_ready(cluster);
+    if (n_ready > cap) {
+        /* Report the required size so the caller can size a buffer. */
+        *count = n_ready;
+        return OC_ERR_OOM;
+    }
+    uint32_t w = 0;
+    for (uint32_t i = 0; i < cluster->n_pods; i++) {
+        if (cluster->pods[i].ready) out[w++] = cluster->pods[i];
+    }
+    *count = w;
     return OC_OK;
 }
 

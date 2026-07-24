@@ -502,6 +502,126 @@ Test(quant, ggml_id_round_trip, .description = "oc_quant_type_from_ggml_id round
     cr_assert_eq(oc_quant_type_to_ggml_id(OC_QUANT_UNKNOWN), 0xffffffffu, "UNKNOWN ggml id");
 }
 
+/* ─── Encoder accuracy + payload coverage ──────────────────────────────
+ *
+ * Two properties that a finiteness check cannot see, and whose absence let
+ * four broken K-quant encoders and two broken K-quant dequantizers ship:
+ *
+ *   1. Round-trip error must actually scale with the format's bit width. An
+ *      encoder writing to the wrong offsets still produces finite output —
+ *      it just produces noise, which shows up here as relative RMSE near or
+ *      above 1.0 (output uncorrelated with input).
+ *   2. Every payload byte must influence the result. A dequantizer that
+ *      forgets to advance its nibble pointer silently ignores most of each
+ *      super-block, which no round-trip average reliably catches.
+ */
+
+/* Deterministic bell-shaped sample: real weight tensors are not uniform,
+ * and nonlinear codebooks (IQ4/NVFP4) are tuned for this shape. */
+static float next_gaussian(float sigma)
+{
+    float u1 = (next_float(0.0f, 1.0f) + 1e-7f);
+    float u2 = next_float(0.0f, 1.0f);
+    return sigma * sqrtf(-2.0f * logf(u1)) * cosf(6.2831853f * u2);
+}
+
+Test(quant, encoder_roundtrip_error_scales_with_bit_width,
+     .description = "pack→dequant relative RMSE stays within the format's budget") {
+    struct {
+        OcGgufQuantizationType t;
+        size_t vals_per_block;
+        size_t bytes_per_block;
+        float  max_rel_rmse;   /* generous bound; noise would score ~1.0+ */
+    } cases[] = {
+        { OC_QUANT_Q8_0,   32,  OC_BLOCK_Q8_0_SIZE,   0.02f },
+        { OC_QUANT_Q6_K,   256, OC_BLOCK_Q6_K_SIZE,   0.04f },
+        { OC_QUANT_Q5_K_M, 256, OC_BLOCK_Q5_K_SIZE,   0.07f },
+        { OC_QUANT_Q4_K_M, 256, OC_BLOCK_Q4_K_SIZE,   0.13f },
+        { OC_QUANT_Q4_0,   32,  OC_BLOCK_Q4_0_SIZE,   0.15f },
+        { OC_QUANT_IQ4_NL, 32,  OC_BLOCK_IQ4_NL_SIZE, 0.13f },
+        { OC_QUANT_IQ4_XS, 256, OC_BLOCK_IQ4_XS_SIZE, 0.13f },
+        { OC_QUANT_NVFP4,  64,  OC_BLOCK_NVFP4_SIZE,  0.16f },
+        { OC_QUANT_Q3_K_M, 256, OC_BLOCK_Q3_K_SIZE,   0.26f },
+        { OC_QUANT_Q2_K,   256, OC_BLOCK_Q2_K_SIZE,   0.45f },
+    };
+
+    const size_t n_blocks = 8;
+    for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+        size_t n_vals = cases[c].vals_per_block * n_blocks;
+        size_t n_bytes = cases[c].bytes_per_block * n_blocks;
+        float src[256 * 8], dst[256 * 8];
+        uint8_t buf[256 * 8];
+        cr_assert_leq(n_vals, 256 * 8, "src overflow");
+        cr_assert_leq(n_bytes, sizeof(buf), "buf overflow");
+
+        lcg_state = 12345u;   /* deterministic per type */
+        for (size_t i = 0; i < n_vals; i++) src[i] = next_gaussian(0.6f);
+
+        const char *name = oc_quant_type_name(cases[c].t);
+        cr_assert_eq(oc_quant_pack_row(cases[c].t, src, n_vals, buf, n_bytes),
+                     OC_OK, "%s pack failed", name);
+        cr_assert_eq(oc_quant_dequant_row(cases[c].t, buf, n_bytes, dst, n_vals),
+                     OC_OK, "%s dequant failed", name);
+
+        double sse = 0.0, ss = 0.0;
+        for (size_t i = 0; i < n_vals; i++) {
+            cr_assert(isfinite(dst[i]), "%s non-finite at %zu", name, i);
+            double e = (double)dst[i] - (double)src[i];
+            sse += e * e;
+            ss += (double)src[i] * (double)src[i];
+        }
+        cr_assert_gt(ss, 0.0);
+        float rel_rmse = (float)sqrt(sse / ss);
+        cr_assert_leq(rel_rmse, cases[c].max_rel_rmse,
+                      "%s round-trip rel RMSE %.4f exceeds budget %.4f",
+                      name, rel_rmse, cases[c].max_rel_rmse);
+    }
+}
+
+Test(quant, dequant_reads_every_payload_byte,
+     .description = "no dequantizer ignores part of its block") {
+    struct { OcGgufQuantizationType t; size_t vals; size_t bytes; } cases[] = {
+        { OC_QUANT_Q2_K,   256, OC_BLOCK_Q2_K_SIZE   },
+        { OC_QUANT_Q3_K_M, 256, OC_BLOCK_Q3_K_SIZE   },
+        { OC_QUANT_Q4_K_M, 256, OC_BLOCK_Q4_K_SIZE   },
+        { OC_QUANT_Q5_K_M, 256, OC_BLOCK_Q5_K_SIZE   },
+        { OC_QUANT_Q6_K,   256, OC_BLOCK_Q6_K_SIZE   },
+        { OC_QUANT_IQ4_XS, 256, OC_BLOCK_IQ4_XS_SIZE },
+        { OC_QUANT_IQ4_NL, 32,  OC_BLOCK_IQ4_NL_SIZE },
+        { OC_QUANT_NVFP4,  64,  OC_BLOCK_NVFP4_SIZE  },
+    };
+
+    for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+        const char *name = oc_quant_type_name(cases[c].t);
+        uint8_t buf[256];
+        float base[256], probe[256];
+        cr_assert_leq(cases[c].bytes, sizeof(buf));
+
+        lcg_state = 999u;
+        for (size_t i = 0; i < cases[c].bytes; i++)
+            buf[i] = (uint8_t)(uint32_t)next_float(0.0f, 255.9f);
+
+        cr_assert_eq(oc_quant_dequant_row(cases[c].t, buf, cases[c].bytes,
+                                          base, cases[c].vals), OC_OK,
+                     "%s dequant failed", name);
+
+        /* Flipping any payload byte must move at least one output. */
+        for (size_t i = 0; i < cases[c].bytes; i++) {
+            uint8_t saved = buf[i];
+            buf[i] = (uint8_t)~saved;
+            cr_assert_eq(oc_quant_dequant_row(cases[c].t, buf, cases[c].bytes,
+                                              probe, cases[c].vals), OC_OK);
+            buf[i] = saved;
+
+            bool moved = false;
+            for (size_t k = 0; k < cases[c].vals && !moved; k++)
+                if (base[k] != probe[k]) moved = true;
+            cr_assert(moved, "%s ignores payload byte %zu of %zu",
+                      name, i, cases[c].bytes);
+        }
+    }
+}
+
 Test(quant, k_encoders_pack_and_roundtrip) {
     /* K-quant pack encoders are now implemented. Verify they succeed and
      * produce finite output on round-trip. */

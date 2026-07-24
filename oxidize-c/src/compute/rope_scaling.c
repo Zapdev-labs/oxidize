@@ -125,8 +125,7 @@ float oc_rope_apply_yarn(float freq, uint32_t pos,
 
     /* Compute correction range. */
     int corr_lo, corr_hi;
-    OcRopeScalingConfig tmp_fast = *cfg;
-    tmp_fast.beta_fast = cfg->beta_fast;
+    /* cfg already carries beta_fast, so the low end needs no copy. */
     corr_lo = oc_rope_yarn_find_correction_dim((int)dim, cfg);
     OcRopeScalingConfig tmp_slow = *cfg;
     tmp_slow.beta_fast = cfg->beta_slow;

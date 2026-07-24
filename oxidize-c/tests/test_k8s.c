@@ -79,10 +79,47 @@ Test(k8s, get_ready_pods)
     oc_k8s_init(&cluster, "default", "svc");
     oc_k8s_add_pod(&cluster, "p1", "ip1", 80);
     oc_k8s_mark_pod_ready(&cluster, "p1");
-    const OcK8sPod *pods;
+    OcK8sPod pods[4];
     uint32_t count;
-    cr_assert_eq(oc_k8s_get_ready_pods(&cluster, &pods, &count), OC_OK);
+    cr_assert_eq(oc_k8s_get_ready_pods(&cluster, pods, 4, &count), OC_OK);
     cr_assert_eq(count, 1);
+    cr_assert_str_eq(pods[0].name, "p1");
+    oc_k8s_free(&cluster);
+}
+
+Test(k8s, get_ready_pods_excludes_not_ready)
+{
+    /* The ready filter must actually filter: routing a request to a pod
+     * that has not passed its readiness probe is a dropped request. */
+    OcK8sCluster cluster;
+    oc_k8s_init(&cluster, "default", "svc");
+    oc_k8s_add_pod(&cluster, "cold", "ip1", 80);
+    oc_k8s_add_pod(&cluster, "warm", "ip2", 80);
+    oc_k8s_add_pod(&cluster, "colder", "ip3", 80);
+    oc_k8s_mark_pod_ready(&cluster, "warm");
+
+    OcK8sPod pods[8];
+    uint32_t count = 0;
+    cr_assert_eq(oc_k8s_get_ready_pods(&cluster, pods, 8, &count), OC_OK);
+    cr_assert_eq(count, 1);
+    cr_assert_str_eq(pods[0].name, "warm");
+    cr_assert(pods[0].ready);
+    oc_k8s_free(&cluster);
+}
+
+Test(k8s, get_ready_pods_reports_required_capacity)
+{
+    OcK8sCluster cluster;
+    oc_k8s_init(&cluster, "default", "svc");
+    oc_k8s_add_pod(&cluster, "p1", "ip1", 80);
+    oc_k8s_add_pod(&cluster, "p2", "ip2", 80);
+    oc_k8s_mark_pod_ready(&cluster, "p1");
+    oc_k8s_mark_pod_ready(&cluster, "p2");
+
+    OcK8sPod one[1];
+    uint32_t count = 0;
+    cr_assert_eq(oc_k8s_get_ready_pods(&cluster, one, 1, &count), OC_ERR_OOM);
+    cr_assert_eq(count, 2, "must report how many entries are needed");
     oc_k8s_free(&cluster);
 }
 

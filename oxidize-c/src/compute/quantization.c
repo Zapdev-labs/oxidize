@@ -148,15 +148,6 @@ static void bf16_le_write(uint8_t *dst, float value)
     dst[1] = (uint8_t)((bits >> 8) & 0xFFu);
 }
 
-static float bf16_le_to_f32(uint8_t b0, uint8_t b1)
-{
-    uint16_t bits = (uint16_t)b0 | ((uint16_t)b1 << 8);
-    uint32_t f32_bits = (uint32_t)bits << 16;
-    float result;
-    memcpy(&result, &f32_bits, sizeof(result));
-    return result;
-}
-
 /* llama.cpp `nearest_int` — fast round-to-nearest for quant heuristics. */
 static int32_t nearest_int_f(float fval)
 {
@@ -586,19 +577,22 @@ static OcError dequant_q3_k(const uint8_t *src, size_t src_len,
         size_t is = 0;
         uint8_t m = 1u;
         for (size_t outer = 0; outer < 2; outer++) {
+            /* llama.cpp advances `q` by 32 per 128-element group, and the
+             * 2-bit shift restarts at 0 within each group. */
+            const uint8_t *q = &qs[outer * 32];
             for (size_t inner = 0; inner < 4; inner++) {
+                size_t shift = inner * 2;
                 float dl = d_all * (float)((int32_t)(int8_t)scale_bytes[is] - 32);
                 is += 1;
-                size_t shift = ((is - 1) % 4) * 2;
                 for (size_t l = 0; l < 16; l++) {
-                    int32_t qv = (int32_t)((qs[l] >> shift) & 3u);
+                    int32_t qv = (int32_t)((q[l] >> shift) & 3u);
                     int32_t hbit = ((hmask[l] & m) != 0) ? 0 : 4;
                     out[q_ptr + l] = dl * (float)(qv - hbit);
                 }
                 float dl2 = d_all * (float)((int32_t)(int8_t)scale_bytes[is] - 32);
                 is += 1;
                 for (size_t l = 0; l < 16; l++) {
-                    int32_t qv = (int32_t)((qs[l + 16] >> shift) & 3u);
+                    int32_t qv = (int32_t)((q[l + 16] >> shift) & 3u);
                     int32_t hbit = ((hmask[l + 16] & m) != 0) ? 0 : 4;
                     out[q_ptr + 16 + l] = dl2 * (float)(qv - hbit);
                 }
@@ -677,13 +671,17 @@ static OcError dequant_q5_k(const uint8_t *src, size_t src_len,
             float min1 = min * (float)m1;
             float d2 = d * (float)sc2;
             float min2 = min * (float)m2;
+            /* Each 64-element group consumes its own 32 low-nibble bytes
+             * (llama.cpp advances `ql` by 32 per group); the 32 qh bytes are
+             * reused with the u1/u2 bit masks stepping instead. */
+            const uint8_t *ql = &qs[outer * 32];
             for (size_t l = 0; l < 32; l++) {
-                uint32_t qv1 = (uint32_t)(qs[l] & 0x0Fu)
+                uint32_t qv1 = (uint32_t)(ql[l] & 0x0Fu)
                              + (((qh[l] & u1) != 0) ? 16u : 0u);
                 out[q_ptr + l] = d1 * (float)qv1 - min1;
             }
             for (size_t l = 0; l < 32; l++) {
-                uint32_t qv2 = (uint32_t)(qs[l] >> 4)
+                uint32_t qv2 = (uint32_t)(ql[l] >> 4)
                              + (((qh[l] & u2) != 0) ? 16u : 0u);
                 out[q_ptr + 32 + l] = d2 * (float)qv2 - min2;
             }
@@ -1608,11 +1606,12 @@ static OcError pack_q8_0(const float *src, size_t value_count,
     return OC_OK;
 }
 
-/* llama.cpp `make_qkx1_quants` — used by Q4_K pack. */
+/* llama.cpp `make_qkx1_quants` — affine (scale + min) fit for the
+ * K-family packers. `nmax` is the top quantized level: 3 for Q2_K,
+ * 15 for Q4_K, 31 for Q5_K. */
 static float make_qkx1_quants(const float *x, size_t n, uint8_t *l,
-                             float *out_min, int ntry, float alpha)
+                             float *out_min, size_t nmax, int ntry, float alpha)
 {
-    size_t nmax = 15;
     float mn = x[0];
     float mx = x[0];
     for (size_t i = 1; i < n; i++) {
@@ -1674,7 +1673,7 @@ static OcError pack_q4_k(const float *src, size_t value_count,
         float max_scale = 0.0f, max_min = 0.0f;
         for (size_t j = 0; j < OC_QK_K / 32; j++) {
             scales[j] = make_qkx1_quants(&in_block[32 * j], 32,
-                                          &l[32 * j], &mins[j], 5, 0.5f);
+                                          &l[32 * j], &mins[j], 15, 5, 0.5f);
             if (scales[j] > max_scale) max_scale = scales[j];
             if (mins[j] > max_min) max_min = mins[j];
         }
@@ -1827,6 +1826,19 @@ static void pack_block_al5(const float *in_block, uint8_t *out_block)
 
 /* ─── K-quant pack encoders (Q2_K, Q3_K, Q5_K, Q6_K) ────────────────── */
 
+/* Value of the block element with the largest magnitude (sign preserved). */
+static float extreme_value(const float *x, size_t n)
+{
+    float best = 0.0f;
+    float amax = 0.0f;
+    for (size_t i = 0; i < n; i++) {
+        float ax = fabsf(x[i]);
+        if (ax > amax) { amax = ax; best = x[i]; }
+    }
+    return best;
+}
+
+
 /* Q2_K pack: 2-bit quantization with per-sub-block scale + min.
  * Block layout (84 bytes): 16 bytes scales, 64 bytes 2-bit qs, 4 bytes f16 d/min. */
 static OcError pack_q2_k(const float *src, size_t value_count,
@@ -1837,63 +1849,67 @@ static OcError pack_q2_k(const float *src, size_t value_count,
     if (dst_len != expected) return OC_ERR_INVALID_ARG;
     size_t n_blocks = value_count / OC_QK_K;
 
+    /* Q2_K carries 16 scale/min nibble pairs, one per 16 elements — matching
+     * dequant_q2_k, which consumes two scale bytes per 32-element step. */
+    const size_t n_sub = OC_QK_K / 16;   /* 16 sub-blocks of 16 */
+
     for (size_t b = 0; b < n_blocks; b++) {
         const float *in_block = src + b * OC_QK_K;
         uint8_t *out_block = dst + b * OC_BLOCK_Q2_K_SIZE;
+        memset(out_block, 0, OC_BLOCK_Q2_K_SIZE);
 
         uint8_t l[OC_QK_K];
-        float scales[OC_QK_K / 32];
-        float mins[OC_QK_K / 32];
+        float scales[OC_QK_K / 16];
+        float mins[OC_QK_K / 16];
 
         float max_scale = 0.0f, max_min = 0.0f;
-        for (size_t j = 0; j < OC_QK_K / 32; j++) {
-            /* 2-bit: 4 levels (0-3), use make_qkx1_quants with nmax=3 */
-            scales[j] = make_qkx1_quants(&in_block[32 * j], 32,
-                                          &l[32 * j], &mins[j], 5, 0.5f);
-            if (scales[j] > max_scale) max_scale = scales[j];
-            if (mins[j] > max_min) max_min = mins[j];
+        for (size_t i = 0; i < n_sub; i++) {
+            scales[i] = make_qkx1_quants(&in_block[16 * i], 16,
+                                         &l[16 * i], &mins[i], 3, 5, 0.5f);
+            if (scales[i] > max_scale) max_scale = scales[i];
+            if (mins[i] > max_min) max_min = mins[i];
         }
 
-        if (max_scale > 0.0f) {
-            float iscale = 15.0f / max_scale;
-            for (size_t j = 0; j < OC_QK_K / 32; j++) {
-                int32_t ls = nearest_int_f(iscale * scales[j]);
-                if (ls < 0) ls = 0;
-                if (ls > 15) ls = 15;
-                int32_t lm = nearest_int_f(iscale * mins[j]);
-                if (lm < 0) lm = 0;
-                if (lm > 15) lm = 15;
-                out_block[j] = (uint8_t)(ls | (lm << 4));
-            }
-        } else {
-            for (size_t j = 0; j < OC_QK_K / 32; j++)
-                out_block[j] = 0;
+        /* Scale and min each get a 4-bit field, so the super-block scales
+         * are max/15. */
+        float d    = max_scale / 15.0f;
+        float dmin = max_min / 15.0f;
+        f16_le_write(&out_block[80], d);
+        f16_le_write(&out_block[82], dmin);
+        /* Re-read what f16 rounding actually stored, so the value loop
+         * quantizes against the scales the decoder will see. */
+        d    = f16_le_to_f32(out_block[80], out_block[81]);
+        dmin = f16_le_to_f32(out_block[82], out_block[83]);
+
+        for (size_t i = 0; i < n_sub; i++) {
+            int32_t ls = (d > 0.0f) ? nearest_int_f(scales[i] / d) : 0;
+            if (ls < 0) ls = 0;
+            if (ls > 15) ls = 15;
+            int32_t lm = (dmin > 0.0f) ? nearest_int_f(mins[i] / dmin) : 0;
+            if (lm < 0) lm = 0;
+            if (lm > 15) lm = 15;
+            out_block[i] = (uint8_t)(ls | (lm << 4));
         }
 
-        f16_le_write(&out_block[80], max_scale / 15.0f);
-        f16_le_write(&out_block[82], max_min / 15.0f);
-
-        /* Pack 2-bit values into 64 bytes. */
+        /* Pack 2-bit values into the 64-byte qs area. Sub-block i sits at
+         * qs[outer * 32 + half * 16 + t] with a (inner * 2) bit shift, where
+         * k = i / 2, half = i % 2, outer = k / 4, inner = k % 4 — the exact
+         * addressing dequant_q2_k walks. */
         uint8_t *qs = &out_block[16];
-        memset(qs, 0, 64);
-        for (size_t j = 0; j < OC_QK_K / 32; j++) {
-            float d = f16_le_to_f32(out_block[80], out_block[81]) * (float)(out_block[j] & 0x0F);
-            float m = f16_le_to_f32(out_block[82], out_block[83]) * (float)(out_block[j] >> 4);
-            size_t qs_base = (j / 4) * 32;
-            size_t shift = (j % 4) * 2;
-            for (size_t ii = 0; ii < 32; ii++) {
-                if (d != 0.0f) {
-                    int32_t ql = nearest_int_f((in_block[32 * j + ii] + m) / d);
-                    if (ql < 0) ql = 0;
-                    if (ql > 3) ql = 3;
-                    l[32 * j + ii] = (uint8_t)ql;
-                } else {
-                    l[32 * j + ii] = 0;
+        for (size_t i = 0; i < n_sub; i++) {
+            float dl = d * (float)(out_block[i] & 0x0Fu);
+            float ml = dmin * (float)(out_block[i] >> 4);
+            size_t k = i / 2, half = i % 2;
+            size_t qs_base = (k / 4) * 32 + half * 16;
+            size_t shift = (k % 4) * 2;
+            for (size_t t = 0; t < 16; t++) {
+                int32_t q = 0;
+                if (dl > 0.0f) {
+                    q = nearest_int_f((in_block[16 * i + t] + ml) / dl);
+                    if (q < 0) q = 0;
+                    if (q > 3) q = 3;
                 }
-            }
-            for (size_t ii = 0; ii < 16; ii++) {
-                qs[qs_base + ii] |= (uint8_t)(l[32 * j + ii] << shift);
-                qs[qs_base + 16 + ii] |= (uint8_t)(l[32 * j + 16 + ii] << shift);
+                qs[qs_base + t] |= (uint8_t)((uint32_t)q << shift);
             }
         }
     }
@@ -1902,6 +1918,31 @@ static OcError pack_q2_k(const float *src, size_t value_count,
 
 /* Q3_K pack: 3-bit quantization with per-sub-block scale.
  * Block layout (110 bytes): 32 bytes hmask, 64 bytes 3-bit qs, 12 bytes scales, 2 bytes f16 d. */
+/* Write the 16 six-bit Q3_K sub-block scales into the 12-byte packed field,
+ * as the exact inverse of the unpacking in dequant_q3_k. Sub-block i lands in
+ * group g = i / 4 and lane k = i % 4:
+ *   g 0: low nibble of S[k],     high 2 bits at S[8+k] bits 0-1
+ *   g 1: low nibble of S[4+k],   high 2 bits at S[8+k] bits 2-3
+ *   g 2: high nibble of S[k],    high 2 bits at S[8+k] bits 4-5
+ *   g 3: high nibble of S[4+k],  high 2 bits at S[8+k] bits 6-7 */
+static void q3k_write_scales(uint8_t *s12, const int32_t *mult, size_t n_sub)
+{
+    memset(s12, 0, 12);
+    for (size_t i = 0; i < n_sub; i++) {
+        uint32_t v = (uint32_t)(mult[i] + 32) & 0x3Fu;   /* 6-bit, bias 32 */
+        uint32_t lo = v & 0x0Fu;
+        uint32_t hi = (v >> 4) & 0x03u;
+        size_t k = i % 4, g = i / 4;
+        switch (g) {
+        case 0: s12[k]     |= (uint8_t)lo;         break;
+        case 1: s12[4 + k] |= (uint8_t)lo;         break;
+        case 2: s12[k]     |= (uint8_t)(lo << 4);  break;
+        default: s12[4 + k] |= (uint8_t)(lo << 4); break;
+        }
+        s12[8 + k] |= (uint8_t)(hi << (2 * g));
+    }
+}
+
 static OcError pack_q3_k(const float *src, size_t value_count,
                          uint8_t *dst, size_t dst_len)
 {
@@ -1910,70 +1951,63 @@ static OcError pack_q3_k(const float *src, size_t value_count,
     if (dst_len != expected) return OC_ERR_INVALID_ARG;
     size_t n_blocks = value_count / OC_QK_K;
 
+    /* 16 sub-blocks of 16, each with a 6-bit signed scale multiplier.
+     * Levels are 3-bit signed: qs holds a 2-bit magnitude and hmask the
+     * high bit, reconstructing q in [-4, 3]. */
+    const size_t n_sub = OC_QK_K / 16;
+
     for (size_t b = 0; b < n_blocks; b++) {
         const float *in_block = src + b * OC_QK_K;
         uint8_t *out_block = dst + b * OC_BLOCK_Q3_K_SIZE;
+        memset(out_block, 0, OC_BLOCK_Q3_K_SIZE);
 
-        /* Find per-sub-block scale using min/max. */
-        float scales[OC_QK_K / 32];
-        float max_scale = 0.0f;
-        for (size_t j = 0; j < OC_QK_K / 32; j++) {
-            float amax = 0.0f;
-            for (size_t ii = 0; ii < 32; ii++) {
-                float ax = fabsf(in_block[32 * j + ii]);
-                if (ax > amax) amax = ax;
-            }
-            scales[j] = amax / 3.0f;  /* 3-bit: max value 3 (0-3, with sign bit in mask) */
-            if (scales[j] > max_scale) max_scale = scales[j];
+        /* Place each sub-block's extreme element on level -4 (the widest
+         * side of the signed range) so nothing clips, whatever its sign. */
+        float sub_scale[OC_QK_K / 16];
+        float max_abs = 0.0f;
+        for (size_t i = 0; i < n_sub; i++) {
+            float ext = extreme_value(&in_block[16 * i], 16);
+            sub_scale[i] = ext / -4.0f;
+            float a = fabsf(sub_scale[i]);
+            if (a > max_abs) max_abs = a;
         }
 
-        /* Quantize scales to 6-bit (0-63), stored as signed (scale - 32). */
-        float d_all = max_scale / 31.0f;
-        int8_t q_scales[OC_QK_K / 32];
-        for (size_t j = 0; j < OC_QK_K / 32; j++) {
-            int32_t qs = nearest_int_f(scales[j] / d_all) + 32;
-            if (qs < 0) qs = 0;
-            if (qs > 63) qs = 63;
-            q_scales[j] = (int8_t)qs;
+        float d_all = max_abs / 31.0f;
+        int32_t mult[OC_QK_K / 16];
+        for (size_t i = 0; i < n_sub; i++) {
+            int32_t m = (d_all > 0.0f) ? nearest_int_f(sub_scale[i] / d_all) : 0;
+            if (m < -32) m = -32;
+            if (m > 31) m = 31;
+            mult[i] = m;
         }
 
         f16_le_write(&out_block[108], d_all);
+        d_all = f16_le_to_f32(out_block[108], out_block[109]);
+        q3k_write_scales(&out_block[96], mult, n_sub);
 
-        /* Pack scales (12 bytes at offset 96). */
-        uint8_t *scales_out = &out_block[96];
-        for (size_t i = 0; i < 12; i++) scales_out[i] = 0;
-        for (size_t i = 0; i < OC_QK_K / 32; i++) {
-            uint8_t val = (uint8_t)q_scales[i];
-            if (i < 8) {
-                scales_out[i] |= (val & 0x0F);
-                scales_out[i + 1] |= ((val >> 4) & 0x0F);
-            } else {
-                scales_out[i - 4] |= ((val & 0x0F) << 4);
-                scales_out[i - 3] |= ((val >> 4) & 0x0F);
-            }
-        }
-
-        /* Quantize values: 3-bit (0-3) + 1 bit in hmask for sign extension. */
-        uint8_t *qs = &out_block[32];
         uint8_t *hmask = &out_block[0];
-        memset(qs, 0, 64);
-        memset(hmask, 0, 32);
-
-        for (size_t j = 0; j < OC_QK_K / 32; j++) {
-            float dl = d_all * (float)(q_scales[j] - 32);
-            if (dl == 0.0f) continue;
-            size_t qs_base = (j / 4) * 32;
-            size_t shift = (j % 4) * 2;
-            uint8_t m = (uint8_t)(1u << (j / 4));
-            for (size_t ii = 0; ii < 32; ii++) {
-                float val = in_block[32 * j + ii] / dl;
-                int32_t q = nearest_int_f(val) + 4;
-                if (q < 0) q = 0;
-                if (q > 7) q = 7;
-                uint8_t ql = (uint8_t)(q & 3u);
-                uint8_t hbit = (q >= 4) ? 0 : 1;
-                qs[qs_base + (ii % 16) + (ii / 16) * 16] |= (uint8_t)(ql << shift);
-                if (hbit) hmask[ii] |= m;
+        uint8_t *qs = &out_block[32];
+        for (size_t i = 0; i < n_sub; i++) {
+            float dl = d_all * (float)mult[i];
+            /* Addressing mirrors dequant_q3_k: k = i / 2, half = i % 2,
+             * outer = k / 4, inner = k % 4. */
+            size_t k = i / 2, half = i % 2;
+            size_t outer = k / 4, inner = k % 4;
+            size_t qs_base = outer * 32 + half * 16;
+            size_t shift = inner * 2;
+            uint8_t m = (uint8_t)(1u << k);
+            for (size_t t = 0; t < 16; t++) {
+                int32_t q = 0;
+                if (dl != 0.0f) {
+                    q = nearest_int_f(in_block[16 * i + t] / dl);
+                    if (q < -4) q = -4;
+                    if (q > 3) q = 3;
+                }
+                /* The decoder computes q = qv - (hmask bit set ? 0 : 4), so a
+                 * set bit means a non-negative level. */
+                uint32_t qv = (q >= 0) ? (uint32_t)q : (uint32_t)(q + 4);
+                if (q >= 0) hmask[half * 16 + t] |= m;
+                qs[qs_base + t] |= (uint8_t)((qv & 3u) << shift);
             }
         }
     }
@@ -1990,18 +2024,23 @@ static OcError pack_q5_k(const float *src, size_t value_count,
     if (dst_len != expected) return OC_ERR_INVALID_ARG;
     size_t n_blocks = value_count / OC_QK_K;
 
+    /* Same shape as Q4_K — 8 sub-blocks of 32 with 6-bit scale/min pairs —
+     * but 5-bit levels: the low 4 bits live in qs, the 5th in qh. */
+    const size_t n_sub = OC_QK_K / 32;
+
     for (size_t b = 0; b < n_blocks; b++) {
         const float *in_block = src + b * OC_QK_K;
         uint8_t *out_block = dst + b * OC_BLOCK_Q5_K_SIZE;
+        memset(out_block, 0, OC_BLOCK_Q5_K_SIZE);
 
         uint8_t l[OC_QK_K];
         float scales[OC_QK_K / 32];
         float mins[OC_QK_K / 32];
 
         float max_scale = 0.0f, max_min = 0.0f;
-        for (size_t j = 0; j < OC_QK_K / 32; j++) {
+        for (size_t j = 0; j < n_sub; j++) {
             scales[j] = make_qkx1_quants(&in_block[32 * j], 32,
-                                          &l[32 * j], &mins[j], 5, 0.5f);
+                                         &l[32 * j], &mins[j], 31, 5, 0.5f);
             if (scales[j] > max_scale) max_scale = scales[j];
             if (mins[j] > max_min) max_min = mins[j];
         }
@@ -2009,8 +2048,8 @@ static OcError pack_q5_k(const float *src, size_t value_count,
         float inv_scale = (max_scale > 0.0f) ? (63.0f / max_scale) : 0.0f;
         float inv_min   = (max_min   > 0.0f) ? (63.0f / max_min)   : 0.0f;
 
-        for (size_t k = 4; k < 16; k++) out_block[k] = 0;
-        for (size_t j = 0; j < OC_QK_K / 32; j++) {
+        /* 6-bit scale/min fields, packed exactly as get_scale_min_k4 reads. */
+        for (size_t j = 0; j < n_sub; j++) {
             int32_t ls = nearest_int_f(inv_scale * scales[j]);
             if (ls < 0) ls = 0;
             if (ls > 63) ls = 63;
@@ -2018,45 +2057,40 @@ static OcError pack_q5_k(const float *src, size_t value_count,
             if (lm < 0) lm = 0;
             if (lm > 63) lm = 63;
             if (j < 4) {
-                out_block[4 + j]      = (uint8_t)ls;
-                out_block[4 + j + 4]  = (uint8_t)lm;
+                out_block[4 + j]     = (uint8_t)ls;
+                out_block[4 + j + 4] = (uint8_t)lm;
             } else {
                 out_block[4 + j + 4]  = (uint8_t)((ls & 0x0Fu) | ((lm & 0x0Fu) << 4));
                 out_block[4 + j - 4] |= (uint8_t)((ls >> 4) << 6);
                 out_block[4 + j]     |= (uint8_t)((lm >> 4) << 6);
             }
         }
-        f16_le_write(&out_block[0], max_scale / 63.0f);
-        f16_le_write(&out_block[2], max_min / 63.0f);
 
-        /* Quantize values to 5-bit (4 in qs + 1 in qh). */
+        f16_le_write(&out_block[0], max_scale / 63.0f);
+        f16_le_write(&out_block[2], max_min   / 63.0f);
+        float d    = f16_le_to_f32(out_block[0], out_block[1]);
+        float dmin = f16_le_to_f32(out_block[2], out_block[3]);
+
         uint8_t *qh = &out_block[16];
         uint8_t *qs = &out_block[48];
-        memset(qh, 0, 32);
-        memset(qs, 0, 128);
-
-        for (size_t j = 0; j < OC_QK_K / 32; j++) {
+        for (size_t j = 0; j < n_sub; j++) {
             uint8_t sc, m;
             get_scale_min_k4(j, &out_block[4], &sc, &m);
-            float d = (max_scale / 63.0f) * (float)sc;
-            float dm = (max_min / 63.0f) * (float)m;
-            size_t qs_base = (j / 2) * 32;
-            uint8_t u1 = (uint8_t)(1u << (2 * (j % 2)));
-            uint8_t u2 = (uint8_t)(2u << (2 * (j % 2)));
-            if (d == 0.0f) continue;
-            for (size_t ii = 0; ii < 16; ii++) {
-                int32_t ql = nearest_int_f((in_block[32 * j + ii] + dm) / d);
-                if (ql < 0) ql = 0;
-                if (ql > 31) ql = 31;
-                qs[qs_base + ii] |= (uint8_t)(ql & 0x0F);
-                if (ql & 16) qh[qs_base + ii] |= u1;
-            }
-            for (size_t ii = 0; ii < 16; ii++) {
-                int32_t ql = nearest_int_f((in_block[32 * j + 16 + ii] + dm) / d);
-                if (ql < 0) ql = 0;
-                if (ql > 31) ql = 31;
-                qs[qs_base + ii] |= (uint8_t)((ql & 0x0F) << 4);
-                if (ql & 16) qh[qs_base + ii] |= u2;
+            float dl = d * (float)sc;
+            float ml = dmin * (float)m;
+            /* Sub-block j = 2 * outer + half: its 32 low nibbles live in
+             * qs[outer * 32 + t], and its 5th bits in qh[t] bit (2*outer+half). */
+            size_t outer = j / 2, half = j % 2;
+            uint8_t hbit = (uint8_t)(1u << (2 * outer + half));
+            for (size_t t = 0; t < 32; t++) {
+                int32_t q = 0;
+                if (dl > 0.0f) {
+                    q = nearest_int_f((in_block[32 * j + t] + ml) / dl);
+                    if (q < 0) q = 0;
+                    if (q > 31) q = 31;
+                }
+                qs[outer * 32 + t] |= (uint8_t)(((uint32_t)q & 0x0Fu) << (4 * half));
+                if (q & 16) qh[t] |= hbit;
             }
         }
     }
@@ -2090,7 +2124,10 @@ static OcError pack_q6_k(const float *src, size_t value_count,
             if (scales[j] > max_scale) max_scale = scales[j];
         }
 
-        float d = max_scale / 31.0f;
+        /* dequant_q6_k reads each sub-block scale as a plain int8 and
+         * multiplies by d, so the super-block scale must span the full
+         * int8 range — and the stored byte carries no +32 bias. */
+        float d = max_scale / 127.0f;
         if (d == 0.0f) d = 1.0f;
         f16_le_write(&out_block[208], d);
 
@@ -2098,16 +2135,19 @@ static OcError pack_q6_k(const float *src, size_t value_count,
         uint8_t *sc_out = &out_block[192];
         for (size_t j = 0; j < 16; j++) {
             int32_t qs = nearest_int_f(scales[j] / d);
-            if (qs < -32) qs = -32;
-            if (qs > 31) qs = 31;
-            sc_out[j] = (uint8_t)(int8_t)(qs + 32);  /* store as unsigned, decode subtracts 32 */
+            if (qs < -128) qs = -128;
+            if (qs > 127) qs = 127;
+            sc_out[j] = (uint8_t)(int8_t)qs;
         }
 
         /* Quantize values: 6-bit signed (4 in ql + 2 in qh). */
         uint8_t *ql = &out_block[0];
         uint8_t *qh = &out_block[128];
         memset(ql, 0, 128);
-        memset(qh, 0, 32);
+        /* qh is 64 bytes (two 32-byte groups), not 32: the loop below ORs
+         * into qh[group * 32 + l], so clearing only the first group left
+         * the second reading uninitialized memory. */
+        memset(qh, 0, 64);
 
         for (size_t group = 0; group < 2; group++) {
             size_t ql_off = group * 64;
@@ -2313,6 +2353,250 @@ static OcError pack_al5_xs(const float *src, size_t value_count,
     return OC_OK;
 }
 
+/* ─── IQ4 / NVFP4 pack encoders ───────────────────────────────────────
+ *
+ * These three types quantize against a fixed 16-entry codebook rather than
+ * a learned grid, so encoding is a nearest-codebook search plus a scale
+ * choice — no lattice lookup like IQ1/IQ2/IQ3 need.
+ *
+ * Scale choice, in both IQ4 encoders: map the largest-magnitude element of
+ * the block onto KVALUES_IQ4NL[0] == -127, the codebook's extreme entry.
+ * That guarantees no element clips, whatever its sign. A least-squares pass
+ * over the chosen indices then rescales to minimize squared error. */
+
+/* Index of the KVALUES_IQ4NL entry closest to `v` (v already divided by
+ * the block scale). The table is sorted ascending, but a 16-entry linear
+ * scan is cheap and keeps the tie-breaking obvious. */
+static size_t iq4_nearest(float v)
+{
+    size_t best = 0;
+    float best_err = fabsf(v - (float)KVALUES_IQ4NL[0]);
+    for (size_t i = 1; i < 16; i++) {
+        float err = fabsf(v - (float)KVALUES_IQ4NL[i]);
+        if (err < best_err) { best_err = err; best = i; }
+    }
+    return best;
+}
+
+/* Least-squares rescale: given fixed codebook indices, the scale that
+ * minimizes sum (x - d*kv)^2 is sum(x*kv)/sum(kv*kv). Returns `fallback`
+ * when the denominator vanishes (an all-zero block). */
+static float iq4_lsq_scale(const float *x, const size_t *idx, size_t n,
+                           const float *weight, float fallback)
+{
+    float num = 0.0f, den = 0.0f;
+    for (size_t i = 0; i < n; i++) {
+        float kv = (float)KVALUES_IQ4NL[idx[i]];
+        float w = weight ? weight[i] : 1.0f;
+        num += w * x[i] * kv;
+        den += w * kv * kv;
+    }
+    if (den <= 0.0f) return fallback;
+    return num / den;
+}
+
+static OcError pack_iq4_nl(const float *src, size_t value_count,
+                           uint8_t *dst, size_t dst_len)
+{
+    if (value_count % OC_QK4_NL != 0) return OC_ERR_INVALID_ARG;
+    size_t expected = (value_count / OC_QK4_NL) * OC_BLOCK_IQ4_NL_SIZE;
+    if (dst_len != expected) return OC_ERR_INVALID_ARG;
+    size_t n_blocks = value_count / OC_QK4_NL;
+
+    for (size_t b = 0; b < n_blocks; b++) {
+        const float *in = src + b * OC_QK4_NL;
+        uint8_t *out = dst + b * OC_BLOCK_IQ4_NL_SIZE;
+
+        float ext = extreme_value(in, OC_QK4_NL);
+        float d = ext / (float)KVALUES_IQ4NL[0];   /* maps ext -> -127 */
+
+        size_t idx[OC_QK4_NL];
+        if (d == 0.0f) {
+            /* All-zero block: any index reconstructs to 0 with d == 0. */
+            memset(idx, 0, sizeof(idx));
+        } else {
+            for (size_t i = 0; i < OC_QK4_NL; i++)
+                idx[i] = iq4_nearest(in[i] / d);
+            d = iq4_lsq_scale(in, idx, OC_QK4_NL, NULL, d);
+        }
+
+        f16_le_write(&out[0], d);
+        /* Nibble layout mirrors the dequantizer: element j in the low
+         * nibble of qs[j], element j + 16 in the high nibble. */
+        for (size_t j = 0; j < OC_QK4_NL / 2; j++) {
+            out[2 + j] = (uint8_t)((idx[j] & 0x0Fu)
+                                   | ((idx[j + OC_QK4_NL / 2] & 0x0Fu) << 4));
+        }
+    }
+    return OC_OK;
+}
+
+static OcError pack_iq4_xs(const float *src, size_t value_count,
+                           uint8_t *dst, size_t dst_len)
+{
+    if (value_count % OC_QK_K != 0) return OC_ERR_INVALID_ARG;
+    size_t expected = (value_count / OC_QK_K) * OC_BLOCK_IQ4_XS_SIZE;
+    if (dst_len != expected) return OC_ERR_INVALID_ARG;
+    size_t n_blocks = value_count / OC_QK_K;
+
+    const size_t n_sub = OC_QK_K / 32;   /* 8 sub-blocks of 32 elements */
+
+    for (size_t b = 0; b < n_blocks; b++) {
+        const float *in = src + b * OC_QK_K;
+        uint8_t *out = dst + b * OC_BLOCK_IQ4_XS_SIZE;
+        memset(out, 0, OC_BLOCK_IQ4_XS_SIZE);
+
+        /* Per-sub-block scale that places its extreme element on -127. */
+        float sub_scale[OC_QK_K / 32];
+        float max_abs_scale = 0.0f;
+        for (size_t ib = 0; ib < n_sub; ib++) {
+            float ext = extreme_value(in + ib * 32, 32);
+            sub_scale[ib] = ext / (float)KVALUES_IQ4NL[0];
+            float a = fabsf(sub_scale[ib]);
+            if (a > max_abs_scale) max_abs_scale = a;
+        }
+
+        /* Sub-block scales are stored as a 6-bit field ls, decoded as
+         * d * (ls - 32), so the integer multiplier spans [-32, 31]. */
+        float d = max_abs_scale / 31.0f;
+        int32_t mult[OC_QK_K / 32];
+        for (size_t ib = 0; ib < n_sub; ib++) {
+            int32_t m = (d > 0.0f) ? nearest_int_f(sub_scale[ib] / d) : 0;
+            if (m < -32) m = -32;
+            if (m > 31) m = 31;
+            mult[ib] = m;
+        }
+
+        /* Pick codebook indices against the quantized sub-block scales. */
+        size_t idx[OC_QK_K];
+        for (size_t ib = 0; ib < n_sub; ib++) {
+            float dl = d * (float)mult[ib];
+            for (size_t j = 0; j < 32; j++) {
+                size_t i = ib * 32 + j;
+                idx[i] = (dl != 0.0f) ? iq4_nearest(in[i] / dl) : 0;
+            }
+        }
+
+        /* Refine d by least squares over the whole block. Each element's
+         * reconstruction is d * mult[ib] * kv, so mult[ib] folds into the
+         * per-element weight of the fit. */
+        if (d > 0.0f) {
+            float num = 0.0f, den = 0.0f;
+            for (size_t ib = 0; ib < n_sub; ib++) {
+                float m = (float)mult[ib];
+                for (size_t j = 0; j < 32; j++) {
+                    size_t i = ib * 32 + j;
+                    float basis = m * (float)KVALUES_IQ4NL[idx[i]];
+                    num += in[i] * basis;
+                    den += basis * basis;
+                }
+            }
+            if (den > 0.0f) d = num / den;
+        }
+
+        f16_le_write(&out[0], d);
+
+        /* ls = mult + 32, split into 4 low bits (scales_l, nibble per
+         * sub-block) and 2 high bits (scales_h, 2 bits per sub-block). */
+        uint16_t scales_h = 0;
+        uint8_t *scales_l = &out[4];
+        for (size_t ib = 0; ib < n_sub; ib++) {
+            uint32_t ls = (uint32_t)(mult[ib] + 32);   /* 0..63 */
+            scales_l[ib / 2] |= (uint8_t)((ls & 0x0Fu) << (4 * (ib % 2)));
+            scales_h |= (uint16_t)(((ls >> 4) & 3u) << (2 * ib));
+        }
+        out[2] = (uint8_t)(scales_h & 0xFFu);
+        out[3] = (uint8_t)((scales_h >> 8) & 0xFFu);
+
+        /* Nibbles: element j of a sub-block low, element j + 16 high. */
+        uint8_t *qs = &out[8];
+        for (size_t ib = 0; ib < n_sub; ib++) {
+            for (size_t j = 0; j < 16; j++) {
+                size_t lo = ib * 32 + j;
+                size_t hi = lo + 16;
+                qs[ib * 16 + j] = (uint8_t)((idx[lo] & 0x0Fu)
+                                            | ((idx[hi] & 0x0Fu) << 4));
+            }
+        }
+    }
+    return OC_OK;
+}
+
+/* Nearest UE4M3 code for a non-negative scale. Only the low 7 bits are
+ * meaningful (4-bit exponent + 3-bit mantissa, no sign), so an exhaustive
+ * 128-entry search is both exact and cheap — it runs once per 16 values. */
+static uint8_t f32_to_ue4m3(float v)
+{
+    if (!(v > 0.0f)) return 0;   /* also catches NaN */
+    uint8_t best = 0;
+    float best_err = fabsf(v - ue4m3_to_f32(0));
+    for (uint32_t code = 1; code < 128u; code++) {
+        float err = fabsf(v - ue4m3_to_f32((uint8_t)code));
+        if (err < best_err) { best_err = err; best = (uint8_t)code; }
+    }
+    return best;
+}
+
+/* Index of the E2M1 codebook entry closest to `v`. Entry 8 is -0.0, which
+ * compares equal to entry 0, so the scan naturally prefers +0. */
+static size_t e2m1_nearest(float v)
+{
+    size_t best = 0;
+    float best_err = fabsf(v - E2M1_DOUBLED_VALUES[0]);
+    for (size_t i = 1; i < 16; i++) {
+        float err = fabsf(v - E2M1_DOUBLED_VALUES[i]);
+        if (err < best_err) { best_err = err; best = i; }
+    }
+    return best;
+}
+
+static OcError pack_nvfp4(const float *src, size_t value_count,
+                          uint8_t *dst, size_t dst_len)
+{
+    if (value_count % OC_QK_NVFP4 != 0) return OC_ERR_INVALID_ARG;
+    size_t expected = (value_count / OC_QK_NVFP4) * OC_BLOCK_NVFP4_SIZE;
+    if (dst_len != expected) return OC_ERR_INVALID_ARG;
+    size_t n_blocks = value_count / OC_QK_NVFP4;
+
+    const size_t n_sub = OC_QK_NVFP4 / OC_QK_NVFP4_SUB;   /* 4 sub-blocks */
+    /* Largest magnitude in the E2M1 codebook. */
+    const float e2m1_max = 12.0f;
+
+    for (size_t b = 0; b < n_blocks; b++) {
+        const float *in = src + b * OC_QK_NVFP4;
+        uint8_t *out = dst + b * OC_BLOCK_NVFP4_SIZE;
+        uint8_t *scales = &out[0];
+        uint8_t *qs = &out[n_sub];
+
+        for (size_t sub = 0; sub < n_sub; sub++) {
+            const float *x = in + sub * OC_QK_NVFP4_SUB;
+
+            float amax = 0.0f;
+            for (size_t j = 0; j < OC_QK_NVFP4_SUB; j++) {
+                float ax = fabsf(x[j]);
+                if (ax > amax) amax = ax;
+            }
+
+            /* Scale so the largest element lands on the codebook extreme,
+             * then round the scale itself to the UE4M3 grid. Quantizing
+             * against the *decoded* scale keeps encoder and decoder in
+             * agreement even when rounding moved it. */
+            scales[sub] = f32_to_ue4m3(amax / e2m1_max);
+            float scale = ue4m3_to_f32(scales[sub]);
+
+            size_t base_q = sub * (OC_QK_NVFP4_SUB / 2);
+            for (size_t j = 0; j < OC_QK_NVFP4_SUB / 2; j++) {
+                size_t lo_i = j;
+                size_t hi_i = j + OC_QK_NVFP4_SUB / 2;
+                size_t lo = (scale > 0.0f) ? e2m1_nearest(x[lo_i] / scale) : 0;
+                size_t hi = (scale > 0.0f) ? e2m1_nearest(x[hi_i] / scale) : 0;
+                qs[base_q + j] = (uint8_t)((lo & 0x0Fu) | ((hi & 0x0Fu) << 4));
+            }
+        }
+    }
+    return OC_OK;
+}
+
 /* ─── Public dispatch ────────────────────────────────────────────────── */
 
 OcQuantBlockLayout oc_quant_block_size(OcGgufQuantizationType qtype)
@@ -2434,9 +2718,14 @@ OcError oc_quant_pack_row(OcGgufQuantizationType qtype,
     case OC_QUANT_AL5_XS: return pack_al5_xs(src, value_count, dst, dst_len);
     case OC_QUANT_AL6:    return pack_al6(src, value_count, dst, dst_len);
     case OC_QUANT_AL8:    return pack_al8(src, value_count, dst, dst_len);
+    /* Codebook-quantized types (fixed 16-entry tables, no lattice). */
+    case OC_QUANT_IQ4_NL: return pack_iq4_nl(src, value_count, dst, dst_len);
+    case OC_QUANT_IQ4_XS: return pack_iq4_xs(src, value_count, dst, dst_len);
+    case OC_QUANT_NVFP4:  return pack_nvfp4(src, value_count, dst, dst_len);
     default:
-        /* IQ/NVFP4 pack encoders not implemented (parity is on dequant
-         * direction). Unknown types return OC_ERR_QUANT (no crash). */
+        /* IQ1/IQ2/IQ3 encoders need a search over the E8 lattice grids in
+         * quant_tables.h, which is not implemented — those types stay
+         * dequant-only. Unknown types return OC_ERR_QUANT (no crash). */
         return OC_ERR_QUANT;
     }
 }
