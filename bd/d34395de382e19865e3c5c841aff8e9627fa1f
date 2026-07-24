@@ -1,0 +1,24 @@
+.github/workflows/oxidize-c-ci.yml
+  s_4d9882d5eb019d::t_eb4c40a9c94878 25-28,31
+oxidize-c/src/util/safetensors_to_gguf.c
+  s_4d9882d5eb019d::t_4debd6082adb28 370-371,373
+oxidize-c/src/util/numa.c
+  s_4d9882d5eb019d::t_0c014e733b5803 141,145-149
+  s_4d9882d5eb019d::t_4a73730b5bfbf8 170,180-183,188,195-198
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "bdd34395de382e19865e3c5c841aff8e9627fa1f",
+  "prompts": {},
+  "sessions": {
+    "s_4d9882d5eb019d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "360e0e71-f928-4fe7-91c9-8eb28e4b3dda",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
