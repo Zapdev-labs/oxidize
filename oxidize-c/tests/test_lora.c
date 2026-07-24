@@ -100,3 +100,154 @@ Test(lora, set_invalid_weight_name)
         dummy, dummy, 1, 1, 1, 1.0f), OC_OK);
     oc_lora_model_free(&lm);
 }
+
+/* ─── LoRA plan tests ───────────────────────────────────────────────── */
+
+Test(lora_plan, basic_match)
+{
+    const char *base[] = {"blk.0.attn_q.weight", "blk.0.attn_v.weight"};
+    const char *adapter[] = {
+        "blk.0.attn_q.weight.lora_a.weight",
+        "blk.0.attn_q.weight.lora_b.weight",
+    };
+
+    OcLoraPlan plan;
+    OcLoraPlanError e = oc_lora_plan_application(base, 2, adapter, 2, 0, &plan);
+    cr_assert_eq(e, OC_LORA_PLAN_OK);
+    cr_assert_eq(plan.kind, OC_ADAPTER_LORA);
+    cr_assert_eq(plan.n_targets, 1);
+    cr_assert_str_eq(plan.targets[0].base_tensor, "blk.0.attn_q.weight");
+    cr_assert_eq(plan.n_missing, 0);
+    oc_lora_plan_free(&plan);
+}
+
+Test(lora_plan, qlora_kind)
+{
+    const char *base[] = {"blk.0.attn_q.weight"};
+    const char *adapter[] = {
+        "blk.0.attn_q.weight.lora_a.weight",
+        "blk.0.attn_q.weight.lora_b.weight",
+    };
+
+    OcLoraPlan plan;
+    /* base_qtype=1 means quantized -> Qlora */
+    OcLoraPlanError e = oc_lora_plan_application(base, 1, adapter, 2, 1, &plan);
+    cr_assert_eq(e, OC_LORA_PLAN_OK);
+    cr_assert_eq(plan.kind, OC_ADAPTER_QLORA);
+    oc_lora_plan_free(&plan);
+}
+
+Test(lora_plan, missing_base_tensor)
+{
+    const char *base[] = {"blk.0.attn_q.weight"};
+    const char *adapter[] = {
+        "blk.0.attn_q.weight.lora_a.weight",
+        "blk.0.attn_q.weight.lora_b.weight",
+        "blk.0.attn_v.weight.lora_a.weight",
+        "blk.0.attn_v.weight.lora_b.weight",
+    };
+
+    OcLoraPlan plan;
+    OcLoraPlanError e = oc_lora_plan_application(base, 1, adapter, 4, 0, &plan);
+    cr_assert_eq(e, OC_LORA_PLAN_OK);
+    cr_assert_eq(plan.n_targets, 2);
+    cr_assert_eq(plan.n_missing, 1);
+    cr_assert_str_eq(plan.missing_base_tensors[0], "blk.0.attn_v.weight");
+    oc_lora_plan_free(&plan);
+}
+
+Test(lora_plan, missing_pair_for_a)
+{
+    const char *base[] = {"blk.0.attn_q.weight"};
+    const char *adapter[] = {
+        "blk.0.attn_q.weight.lora_a.weight",
+        /* no lora_b */
+    };
+
+    OcLoraPlan plan;
+    OcLoraPlanError e = oc_lora_plan_application(base, 1, adapter, 1, 0, &plan);
+    cr_assert_eq(e, OC_LORA_PLAN_MISSING_PAIR_FOR_A);
+}
+
+Test(lora_plan, missing_pair_for_b)
+{
+    const char *base[] = {"blk.0.attn_q.weight"};
+    const char *adapter[] = {
+        "blk.0.attn_q.weight.lora_b.weight",
+        /* no lora_a */
+    };
+
+    OcLoraPlan plan;
+    OcLoraPlanError e = oc_lora_plan_application(base, 1, adapter, 1, 0, &plan);
+    cr_assert_eq(e, OC_LORA_PLAN_MISSING_PAIR_FOR_B);
+}
+
+Test(lora_plan, duplicate_pair)
+{
+    const char *base[] = {"blk.0.attn_q.weight"};
+    const char *adapter[] = {
+        "blk.0.attn_q.weight.lora_a.weight",
+        "blk.0.attn_q.weight.lora_a.weight",
+        "blk.0.attn_q.weight.lora_b.weight",
+    };
+
+    OcLoraPlan plan;
+    OcLoraPlanError e = oc_lora_plan_application(base, 1, adapter, 3, 0, &plan);
+    cr_assert_eq(e, OC_LORA_PLAN_DUPLICATE_PAIR);
+}
+
+Test(lora_plan, multi_pair)
+{
+    const char *base[] = {
+        "blk.0.attn_q.weight",
+        "blk.0.attn_v.weight",
+        "blk.1.ffn_gate.weight",
+    };
+    const char *adapter[] = {
+        "blk.0.attn_q.weight.lora_a.weight",
+        "blk.0.attn_q.weight.lora_b.weight",
+        "blk.0.attn_v.weight.lora_a.weight",
+        "blk.0.attn_v.weight.lora_b.weight",
+        "blk.1.ffn_gate.weight.lora_a.weight",
+        "blk.1.ffn_gate.weight.lora_b.weight",
+    };
+
+    OcLoraPlan plan;
+    OcLoraPlanError e = oc_lora_plan_application(base, 3, adapter, 6, 0, &plan);
+    cr_assert_eq(e, OC_LORA_PLAN_OK);
+    cr_assert_eq(plan.n_targets, 3);
+    cr_assert_eq(plan.n_missing, 0);
+    oc_lora_plan_free(&plan);
+}
+
+Test(lora_plan, empty_adapters)
+{
+    const char *base[] = {"blk.0.attn_q.weight"};
+
+    OcLoraPlan plan;
+    OcLoraPlanError e = oc_lora_plan_application(base, 1, NULL, 0, 0, &plan);
+    cr_assert_eq(e, OC_LORA_PLAN_OK);
+    cr_assert_eq(plan.n_targets, 0);
+    oc_lora_plan_free(&plan);
+}
+
+Test(lora_plan, null_safety)
+{
+    OcLoraPlan plan;
+    cr_assert_eq(oc_lora_plan_application(NULL, 0, NULL, 0, 0, NULL), OC_LORA_PLAN_INVALID_ARG);
+    const char *base[] = {"x"};
+    cr_assert_eq(oc_lora_plan_application(base, 1, NULL, 0, 0, NULL), OC_LORA_PLAN_INVALID_ARG);
+}
+
+Test(lora_plan, no_adapters_on_base)
+{
+    /* adapter has no lora tensors, should produce empty plan. */
+    const char *base[] = {"blk.0.attn_q.weight"};
+    const char *adapter[] = {"blk.0.attn_q.weight"};
+
+    OcLoraPlan plan;
+    OcLoraPlanError e = oc_lora_plan_application(base, 1, adapter, 1, 0, &plan);
+    cr_assert_eq(e, OC_LORA_PLAN_OK);
+    cr_assert_eq(plan.n_targets, 0);
+    oc_lora_plan_free(&plan);
+}

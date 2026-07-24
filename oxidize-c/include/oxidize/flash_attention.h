@@ -91,6 +91,70 @@ OcError oc_attention_scores(const float *q,
                              size_t head_dim,
                              float *scores);
 
+/* ─── Multi-head decode kernels (Rust flash_attention.rs port) ─────── */
+
+#define OC_FLASH_BLOCK_SIZE 64
+#define OC_PARALLEL_FLASH_MIN_SEQ 16
+
+/* f32-to-f16 bit conversion (IEEE 754 half precision). */
+uint16_t oc_f32_to_f16_bits(float value);
+
+/* f16-to-f32 bit conversion. */
+float oc_f16_to_f32_bits(uint16_t h);
+
+/* Parallel multi-head flash attention decode over f32 KV cache.
+ *
+ * Each head is processed independently with online-softmax block tiling.
+ * GQA is handled via kv_heads < num_heads (group_size = num_heads / kv_heads).
+ *
+ * Parameters:
+ *   query_heads  - [num_heads * head_dim]
+ *   key_layer    - [seq_len * kv_len]  where kv_len = kv_heads * head_dim
+ *   value_layer  - same layout as key_layer
+ *   seq_len      - number of cached positions
+ *   head_dim     - dimension per head
+ *   kv_len       - stride between positions = kv_heads * head_dim
+ *   num_heads    - number of query heads
+ *   kv_heads     - number of KV heads (GQA)
+ *   output_heads - [num_heads * head_dim] (output)
+ */
+OcError oc_flash_attention_decode_heads_f32(const float *query_heads,
+                                             const float *key_layer,
+                                             const float *value_layer,
+                                             size_t seq_len,
+                                             size_t head_dim,
+                                             size_t kv_len,
+                                             size_t num_heads,
+                                             size_t kv_heads,
+                                             float *output_heads);
+
+/* Same as above but K/V are in f16 (stored as uint16_t bits). */
+OcError oc_flash_attention_decode_heads_f16(const float *query_heads,
+                                             const uint16_t *key_layer,
+                                             const uint16_t *value_layer,
+                                             size_t seq_len,
+                                             size_t head_dim,
+                                             size_t kv_len,
+                                             size_t num_heads,
+                                             size_t kv_heads,
+                                             float *output_heads);
+
+/* Prefill-phase flash attention: many queries attend to many keys/values.
+ *
+ * Parameters:
+ *   query    - [q_seq_len * head_dim]
+ *   key      - [kv_seq_len * head_dim]
+ *   value    - [kv_seq_len * head_dim]
+ *   output   - [q_seq_len * head_dim]
+ */
+OcError oc_flash_attention_prefill_f32(const float *query,
+                                        const float *key,
+                                        const float *value,
+                                        size_t q_seq_len,
+                                        size_t kv_seq_len,
+                                        size_t head_dim,
+                                        float *output);
+
 #ifdef __cplusplus
 }
 #endif
