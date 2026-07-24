@@ -1,0 +1,23 @@
+oxidize-c/src/model/advanced_sampling.c
+  s_4d9882d5eb019d::t_a83be2b61db6fb 132,197,351,409
+oxidize-c/src/util/inspect.c
+  s_4d9882d5eb019d::t_9744af39e7f092 15-19
+oxidize-c/tests/test_oxk_extended.c
+  s_4d9882d5eb019d::t_996b61bfaca6ec 546-548,550-553
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "7753da8cd94b69966b56ef61f202efe393b56754",
+  "prompts": {},
+  "sessions": {
+    "s_4d9882d5eb019d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "360e0e71-f928-4fe7-91c9-8eb28e4b3dda",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
