@@ -1055,7 +1055,7 @@ OcError oc_inf_model_forward_token(OcInferenceModel *m, uint32_t token, size_t p
                         float *out_head = attn_out + hd * head_dim;
                         oc_scaled_dot_product_attention_f32(
                             q_head, k_head, v_head, eff_seq,
-                            kv_len, out_head);
+                            kv_head_dim, out_head);
                     }
                 }
             }
@@ -1451,4 +1451,657 @@ OcError oc_inf_model_draft_mtp_tokens(OcInferenceModel *m,
     free(step_hidden);
     *out_n = n_generated;
     return OC_OK;
+}
+
+/* ─── Batched forward (prefill + cross-sequence decode) ───────────────── */
+
+bool oc_inf_model_layers_supported_for_batched(const OcInferenceModel *m)
+{
+    if (!m || m->n_layers == 0) return false;
+
+    for (size_t i = 0; i < m->n_layers && i < m->config.layer_count; i++) {
+        const OcLayerWeights *layer = &m->layers[i];
+
+        /* Mamba layers have attn_qkv but no attn_q. */
+        bool is_mamba = !oc_weight_storage_is_empty(&layer->attn_qkv) &&
+                        oc_weight_storage_is_empty(&layer->attn_q);
+        if (is_mamba) return false;
+
+        /* MoE layers. */
+        if (oc_layer_weights_has_moe(layer)) return false;
+
+        /* ShortConv layers. */
+        if (!oc_weight_storage_is_empty(&layer->shortconv_in_proj)) return false;
+
+        /* MLA layers. */
+        if (oc_layer_weights_has_mla(layer)) return false;
+
+        /* Must have standard attention. */
+        if (oc_weight_storage_is_empty(&layer->attn_q)) return false;
+    }
+    return true;
+}
+
+OcError oc_inf_model_forward_tokens(OcInferenceModel *m,
+                                      const uint32_t *tokens, size_t n_tokens,
+                                      size_t start_pos, bool need_logits,
+                                      float **out_logits, size_t *out_logits_len)
+{
+    if (!m || !tokens || n_tokens == 0)
+        return OC_ERR_INVALID_ARG;
+
+    /* If not batched-capable, fall back to per-token. */
+    if (!oc_inf_model_layers_supported_for_batched(m)) {
+        for (size_t i = 0; i < n_tokens; i++) {
+            OcError e = oc_inf_model_forward_token(m, tokens[i], start_pos + i);
+            if (e != OC_OK) return e;
+        }
+        if (need_logits)
+            return oc_inf_model_final_head_from_workspace(m, out_logits, out_logits_len);
+        return OC_OK;
+    }
+
+    OcInferenceConfig *cfg = &m->config;
+    size_t h = cfg->hidden_size;
+    uint32_t n_heads = cfg->num_attention_heads;
+    uint32_t kvh = cfg->num_key_value_heads;
+    uint32_t head_dim = oc_inference_config_head_dim(cfg);
+    uint32_t kv_head_dim = oc_inference_config_kv_head_dim(cfg);
+    uint32_t rope_len = oc_inference_config_effective_rope_dim(cfg);
+    float eps = cfg->rms_norm_eps;
+    size_t i_size = cfg->intermediate_size;
+    size_t batch = n_tokens;
+
+    /* Allocate batch buffers. */
+    float *x_batch = malloc(batch * h * sizeof(float));
+    float *normed_batch = malloc(batch * h * sizeof(float));
+    if (!x_batch || !normed_batch) {
+        free(x_batch); free(normed_batch);
+        return OC_ERR_OOM;
+    }
+
+    /* 1. Embedding lookup for each position. */
+    for (size_t i = 0; i < batch; i++) {
+        uint32_t tok = tokens[i];
+        if (tok >= cfg->vocab_size && cfg->vocab_size > 0)
+            tok = cfg->vocab_size - 1;
+        oc_weight_storage_lookup_embedding(&m->tok_embeddings, h,
+                                            cfg->vocab_size, tok,
+                                            x_batch + i * h);
+        if (cfg->embedding_scale != 1.0f) {
+            for (size_t j = 0; j < h; j++)
+                x_batch[i * h + j] *= cfg->embedding_scale;
+        }
+    }
+
+    /* Determine dimensions from first layer. */
+    uint32_t q_len = n_heads * head_dim;
+    uint32_t kv_len = kvh * kv_head_dim;
+
+    /* Allocate per-layer scratch. */
+    float *q_batch = malloc(batch * q_len * sizeof(float));
+    float *k_batch = malloc(batch * kv_len * sizeof(float));
+    float *v_batch = malloc(batch * kv_len * sizeof(float));
+    float *attn_batch = malloc(batch * q_len * sizeof(float));
+    float *proj_batch = malloc(batch * h * sizeof(float));
+    float *gate_batch = malloc(batch * i_size * sizeof(float));
+    float *up_batch = malloc(batch * i_size * sizeof(float));
+    float *ffn_batch = malloc(batch * h * sizeof(float));
+    if (!q_batch || !k_batch || !v_batch || !attn_batch || !proj_batch ||
+        !gate_batch || !up_batch || !ffn_batch) {
+        free(x_batch); free(normed_batch); free(q_batch); free(k_batch);
+        free(v_batch); free(attn_batch); free(proj_batch);
+        free(gate_batch); free(up_batch); free(ffn_batch);
+        return OC_ERR_OOM;
+    }
+
+    /* 2. Process each layer. */
+    for (size_t li = 0; li < m->n_layers && li < cfg->layer_count; li++) {
+        OcLayerWeights *layer = &m->layers[li];
+        float rope_theta = oc_inference_config_layer_rope_theta(cfg, (uint32_t)li);
+        uint32_t layer_window = oc_inference_config_layer_sliding_window(cfg, (uint32_t)li);
+
+        /* --- Attn norm --- */
+        for (size_t i = 0; i < batch; i++) {
+            if (layer->attn_norm)
+                oc_rms_norm_f32(x_batch + i * h, layer->attn_norm,
+                                normed_batch + i * h, h, eps);
+            else
+                memcpy(normed_batch + i * h, x_batch + i * h, h * sizeof(float));
+        }
+
+        /* --- Batched Q/K/V GEMM --- */
+        memset(q_batch, 0, batch * q_len * sizeof(float));
+        memset(k_batch, 0, batch * kv_len * sizeof(float));
+        memset(v_batch, 0, batch * kv_len * sizeof(float));
+
+        OcError e = oc_gemm_weight(&layer->attn_q, q_len, h,
+                                    normed_batch, q_batch, batch);
+        if (e != OC_OK) goto batch_fail;
+        if (layer->attn_q_bias)
+            oc_add_repeating_bias(q_batch, batch * q_len, layer->attn_q_bias, q_len);
+
+        if (!oc_weight_storage_is_empty(&layer->attn_k)) {
+            e = oc_gemm_weight(&layer->attn_k, kv_len, h,
+                                normed_batch, k_batch, batch);
+            if (e != OC_OK) goto batch_fail;
+            if (layer->attn_k_bias)
+                oc_add_repeating_bias(k_batch, batch * kv_len, layer->attn_k_bias, kv_len);
+        }
+
+        if (!oc_weight_storage_is_empty(&layer->attn_v)) {
+            e = oc_gemm_weight(&layer->attn_v, kv_len, h,
+                                normed_batch, v_batch, batch);
+            if (e != OC_OK) goto batch_fail;
+            if (layer->attn_v_bias)
+                oc_add_repeating_bias(v_batch, batch * kv_len, layer->attn_v_bias, kv_len);
+        }
+
+        /* --- Per-token: RoPE, KV cache, attention --- */
+        for (size_t i = 0; i < batch; i++) {
+            size_t pos = start_pos + i;
+            float *q = q_batch + i * q_len;
+            float *k = k_batch + i * kv_len;
+            float *v = v_batch + i * kv_len;
+
+            /* Per-head Q norm. */
+            if (layer->attn_q_norm && layer->n_q_norm == head_dim) {
+                for (uint32_t hd = 0; hd < n_heads; hd++) {
+                    float *qh = q + hd * head_dim;
+                    float tmp[256];
+                    if (head_dim <= 256) {
+                        oc_rms_norm_f32(qh, layer->attn_q_norm, tmp, head_dim, eps);
+                        memcpy(qh, tmp, head_dim * sizeof(float));
+                    }
+                }
+            }
+
+            /* Per-head K norm. */
+            if (layer->attn_k_norm && layer->n_k_norm == kv_head_dim) {
+                for (uint32_t hd = 0; hd < kvh; hd++) {
+                    float *kh = k + hd * kv_head_dim;
+                    float tmp[256];
+                    if (kv_head_dim <= 256) {
+                        oc_rms_norm_f32(kh, layer->attn_k_norm, tmp, kv_head_dim, eps);
+                        memcpy(kh, tmp, kv_head_dim * sizeof(float));
+                    }
+                }
+            }
+
+            /* RoPE on Q heads. */
+            for (uint32_t hd = 0; hd < n_heads; hd++) {
+                float *qh = q + hd * head_dim;
+                oc_inference_config_apply_rope_head(cfg, qh, qh, head_dim,
+                                                     rope_len, (int64_t)pos, rope_theta);
+            }
+
+            /* RoPE on K heads. */
+            for (uint32_t hd = 0; hd < kvh; hd++) {
+                float *kh = k + hd * kv_head_dim;
+                oc_inference_config_apply_rope_head(cfg, kh, kh, kv_head_dim,
+                                                     rope_len, (int64_t)pos, rope_theta);
+            }
+
+            /* KV cache append. */
+            int32_t kv_idx = -1;
+            if (li < m->kv_layer_map_len)
+                kv_idx = m->kv_layer_map[li];
+
+            if (kv_idx >= 0 && kv_len > 0) {
+                e = oc_kv_cache_append(&m->kv_cache, (uint32_t)kv_idx, k, v, 1);
+                if (e != OC_OK) goto batch_fail;
+            }
+
+            /* Attention. */
+            float *attn_out = attn_batch + i * q_len;
+            memset(attn_out, 0, q_len * sizeof(float));
+
+            if (kv_idx >= 0 && kv_len > 0) {
+                uint32_t seq_len = (uint32_t)(pos + 1);
+                uint32_t eff_seq = seq_len;
+                const float *key_cache = NULL;
+                const float *val_cache = NULL;
+
+                if (layer_window > 0 && seq_len > layer_window) {
+                    uint32_t skip = seq_len - layer_window;
+                    oc_kv_cache_get(&m->kv_cache, (uint32_t)kv_idx, skip,
+                                    &key_cache, &val_cache);
+                    eff_seq = layer_window;
+                } else {
+                    oc_kv_cache_get(&m->kv_cache, (uint32_t)kv_idx, 0,
+                                    &key_cache, &val_cache);
+                }
+
+                if (key_cache && val_cache) {
+                    uint32_t n_rep = n_heads / (kvh > 0 ? kvh : 1);
+                    for (uint32_t hd = 0; hd < n_heads; hd++) {
+                        uint32_t kv_hd = hd / n_rep;
+                        const float *q_head = q + hd * head_dim;
+                        const float *k_head = key_cache + kv_hd * kv_head_dim;
+                        const float *v_head = val_cache + kv_hd * kv_head_dim;
+                        float *out_head = attn_out + hd * head_dim;
+                        oc_scaled_dot_product_attention_f32(
+                            q_head, k_head, v_head, eff_seq,
+                            kv_head_dim, out_head);
+                    }
+                }
+            }
+        }
+
+        /* --- Batched attn output projection --- */
+        if (!oc_weight_storage_is_empty(&layer->attn_output)) {
+            e = oc_gemm_weight(&layer->attn_output, h, q_len,
+                                attn_batch, proj_batch, batch);
+            if (e != OC_OK) goto batch_fail;
+            if (layer->attn_output_bias)
+                oc_add_repeating_bias(proj_batch, batch * h, layer->attn_output_bias, h);
+
+            /* Sandwich norm. */
+            if (cfg->sandwich_norm && layer->post_attention_norm) {
+                for (size_t i = 0; i < batch; i++) {
+                    float tmp[4096];
+                    if (h <= 4096) {
+                        oc_rms_norm_f32(proj_batch + i * h, layer->post_attention_norm,
+                                        tmp, h, eps);
+                        memcpy(proj_batch + i * h, tmp, h * sizeof(float));
+                    }
+                }
+            }
+        } else {
+            memset(proj_batch, 0, batch * h * sizeof(float));
+        }
+
+        /* Residual add. */
+        for (size_t i = 0; i < batch * h; i++)
+            x_batch[i] += proj_batch[i];
+
+        /* --- FFN --- */
+        float *ffn_norm_w = NULL;
+        if (cfg->sandwich_norm)
+            ffn_norm_w = layer->ffn_norm;
+        else if (layer->post_attention_norm)
+            ffn_norm_w = layer->post_attention_norm;
+        else if (layer->ffn_norm)
+            ffn_norm_w = layer->ffn_norm;
+
+        if (oc_layer_weights_has_dense_ffn(layer) && ffn_norm_w) {
+            for (size_t i = 0; i < batch; i++)
+                oc_rms_norm_f32(x_batch + i * h, ffn_norm_w,
+                                normed_batch + i * h, h, eps);
+
+            e = oc_gemm_weight(&layer->ffn_gate, i_size, h,
+                                normed_batch, gate_batch, batch);
+            if (e != OC_OK) goto batch_fail;
+            e = oc_gemm_weight(&layer->ffn_up, i_size, h,
+                                normed_batch, up_batch, batch);
+            if (e != OC_OK) goto batch_fail;
+
+            if (cfg->gelu_ffn)
+                for (size_t i = 0; i < batch * i_size; i++)
+                    oc_geglu_inplace_f32(gate_batch + i, up_batch + i, 1);
+            else
+                for (size_t i = 0; i < batch * i_size; i++)
+                    oc_swiglu_inplace_f32(gate_batch + i, up_batch + i, 1);
+
+            /* Actually need to call swiglu/geglu on full vectors, not per-element. */
+            /* Redo properly: */
+            for (size_t i = 0; i < batch; i++) {
+                if (cfg->gelu_ffn)
+                    oc_geglu_inplace_f32(gate_batch + i * i_size,
+                                          up_batch + i * i_size, i_size);
+                else
+                    oc_swiglu_inplace_f32(gate_batch + i * i_size,
+                                          up_batch + i * i_size, i_size);
+            }
+
+            e = oc_gemm_weight(&layer->ffn_down, h, i_size,
+                                gate_batch, ffn_batch, batch);
+            if (e != OC_OK) goto batch_fail;
+            if (layer->ffn_down_bias)
+                oc_add_repeating_bias(ffn_batch, batch * h, layer->ffn_down_bias, h);
+
+            /* Sandwich norm post-FFN. */
+            if (cfg->sandwich_norm && layer->post_ffn_norm) {
+                for (size_t i = 0; i < batch; i++) {
+                    float tmp[4096];
+                    if (h <= 4096) {
+                        oc_rms_norm_f32(ffn_batch + i * h, layer->post_ffn_norm,
+                                        tmp, h, eps);
+                        memcpy(ffn_batch + i * h, tmp, h * sizeof(float));
+                    }
+                }
+            }
+
+            /* Residual add. */
+            for (size_t i = 0; i < batch * h; i++)
+                x_batch[i] += ffn_batch[i];
+        }
+
+        /* EAGLE3 capture. */
+        for (size_t ei = 0; ei < m->eagle3_n_capture_layers; ei++) {
+            if (m->eagle3_capture_layers[ei] == li) {
+                if (!m->eagle3_layer_hiddens[ei])
+                    m->eagle3_layer_hiddens[ei] = malloc(h * sizeof(float));
+                if (m->eagle3_layer_hiddens[ei])
+                    memcpy(m->eagle3_layer_hiddens[ei],
+                           x_batch + (batch - 1) * h, h * sizeof(float));
+                break;
+            }
+        }
+    }
+
+    /* Copy last token's hidden to workspace.x. */
+    memcpy(m->workspace.x, x_batch + (batch - 1) * h, h * sizeof(float));
+
+    /* Final head. */
+    if (need_logits) {
+        oc_rms_norm_f32(m->workspace.x, m->norm_weight,
+                        m->workspace.hidden_a, h, eps);
+        if (m->last_output_hidden && m->last_output_hidden_len >= h)
+            memcpy(m->last_output_hidden, m->workspace.hidden_a, h * sizeof(float));
+        memset(m->workspace.logits, 0, cfg->vocab_size * sizeof(float));
+        OcError e = oc_gemv_weight(&m->output_weight, cfg->vocab_size, h,
+                                    m->workspace.hidden_a, m->workspace.logits);
+        if (e != OC_OK) goto batch_fail;
+        if (out_logits) *out_logits = m->workspace.logits;
+        if (out_logits_len) *out_logits_len = cfg->vocab_size;
+    }
+
+    free(x_batch); free(normed_batch); free(q_batch); free(k_batch);
+    free(v_batch); free(attn_batch); free(proj_batch);
+    free(gate_batch); free(up_batch); free(ffn_batch);
+    return OC_OK;
+
+batch_fail:
+    free(x_batch); free(normed_batch); free(q_batch); free(k_batch);
+    free(v_batch); free(attn_batch); free(proj_batch);
+    free(gate_batch); free(up_batch); free(ffn_batch);
+    return OC_ERR_INTERNAL;
+}
+
+OcError oc_inf_model_forward_batch(OcInferenceModel *m,
+                                     const uint32_t *tokens,
+                                     const size_t *positions,
+                                     OcSeqKv *kvs, size_t n_seqs,
+                                     bool need_logits,
+                                     float *out_logits)
+{
+    if (!m || !tokens || !positions || !kvs || n_seqs == 0)
+        return OC_ERR_INVALID_ARG;
+
+    if (!oc_inf_model_layers_supported_for_batched(m))
+        return OC_ERR_MODEL;
+
+    OcInferenceConfig *cfg = &m->config;
+    size_t h = cfg->hidden_size;
+    uint32_t n_heads = cfg->num_attention_heads;
+    uint32_t kvh = cfg->num_key_value_heads;
+    uint32_t head_dim = oc_inference_config_head_dim(cfg);
+    uint32_t kv_head_dim = oc_inference_config_kv_head_dim(cfg);
+    uint32_t rope_len = oc_inference_config_effective_rope_dim(cfg);
+    float eps = cfg->rms_norm_eps;
+    size_t i_size = cfg->intermediate_size;
+    size_t batch = n_seqs;
+    uint32_t q_len = n_heads * head_dim;
+    uint32_t kv_len = kvh * kv_head_dim;
+
+    /* Allocate batch buffers. */
+    float *x_batch = malloc(batch * h * sizeof(float));
+    float *normed_batch = malloc(batch * h * sizeof(float));
+    float *q_batch = malloc(batch * q_len * sizeof(float));
+    float *k_batch = malloc(batch * kv_len * sizeof(float));
+    float *v_batch = malloc(batch * kv_len * sizeof(float));
+    float *attn_batch = malloc(batch * q_len * sizeof(float));
+    float *proj_batch = malloc(batch * h * sizeof(float));
+    float *gate_batch = malloc(batch * i_size * sizeof(float));
+    float *up_batch = malloc(batch * i_size * sizeof(float));
+    float *ffn_batch = malloc(batch * h * sizeof(float));
+    if (!x_batch || !normed_batch || !q_batch || !k_batch || !v_batch ||
+        !attn_batch || !proj_batch || !gate_batch || !up_batch || !ffn_batch) {
+        free(x_batch); free(normed_batch); free(q_batch); free(k_batch);
+        free(v_batch); free(attn_batch); free(proj_batch);
+        free(gate_batch); free(up_batch); free(ffn_batch);
+        return OC_ERR_OOM;
+    }
+
+    /* 1. Embedding lookup for each sequence. */
+    for (size_t i = 0; i < batch; i++) {
+        uint32_t tok = tokens[i];
+        if (tok >= cfg->vocab_size && cfg->vocab_size > 0)
+            tok = cfg->vocab_size - 1;
+        oc_weight_storage_lookup_embedding(&m->tok_embeddings, h,
+                                            cfg->vocab_size, tok,
+                                            x_batch + i * h);
+        if (cfg->embedding_scale != 1.0f) {
+            for (size_t j = 0; j < h; j++)
+                x_batch[i * h + j] *= cfg->embedding_scale;
+        }
+    }
+
+    /* 2. Process each layer. */
+    for (size_t li = 0; li < m->n_layers && li < cfg->layer_count; li++) {
+        OcLayerWeights *layer = &m->layers[li];
+        float rope_theta = oc_inference_config_layer_rope_theta(cfg, (uint32_t)li);
+        uint32_t layer_window = oc_inference_config_layer_sliding_window(cfg, (uint32_t)li);
+
+        int32_t kv_idx = -1;
+        if (li < m->kv_layer_map_len)
+            kv_idx = m->kv_layer_map[li];
+
+        /* Attn norm. */
+        for (size_t i = 0; i < batch; i++) {
+            if (layer->attn_norm)
+                oc_rms_norm_f32(x_batch + i * h, layer->attn_norm,
+                                normed_batch + i * h, h, eps);
+            else
+                memcpy(normed_batch + i * h, x_batch + i * h, h * sizeof(float));
+        }
+
+        /* Batched Q/K/V GEMM. */
+        memset(q_batch, 0, batch * q_len * sizeof(float));
+        memset(k_batch, 0, batch * kv_len * sizeof(float));
+        memset(v_batch, 0, batch * kv_len * sizeof(float));
+
+        OcError e = oc_gemm_weight(&layer->attn_q, q_len, h,
+                                    normed_batch, q_batch, batch);
+        if (e != OC_OK) goto batch2_fail;
+        if (!oc_weight_storage_is_empty(&layer->attn_k)) {
+            e = oc_gemm_weight(&layer->attn_k, kv_len, h,
+                                normed_batch, k_batch, batch);
+            if (e != OC_OK) goto batch2_fail;
+        }
+        if (!oc_weight_storage_is_empty(&layer->attn_v)) {
+            e = oc_gemm_weight(&layer->attn_v, kv_len, h,
+                                normed_batch, v_batch, batch);
+            if (e != OC_OK) goto batch2_fail;
+        }
+
+        /* Per-sequence: RoPE, KV write to SeqKv, attention. */
+        for (size_t i = 0; i < batch; i++) {
+            size_t pos = positions[i];
+            float *q = q_batch + i * q_len;
+            float *k = k_batch + i * kv_len;
+            float *v = v_batch + i * kv_len;
+
+            /* RoPE. */
+            for (uint32_t hd = 0; hd < n_heads; hd++) {
+                float *qh = q + hd * head_dim;
+                oc_inference_config_apply_rope_head(cfg, qh, qh, head_dim,
+                                                     rope_len, (int64_t)pos, rope_theta);
+            }
+            for (uint32_t hd = 0; hd < kvh; hd++) {
+                float *kh = k + hd * kv_head_dim;
+                oc_inference_config_apply_rope_head(cfg, kh, kh, kv_head_dim,
+                                                     rope_len, (int64_t)pos, rope_theta);
+            }
+
+            /* KV write to SeqKv. */
+            if (kv_idx >= 0 && kv_len > 0) {
+                oc_seq_kv_put(&kvs[i], (size_t)kv_idx, kvs[i].len, k, v);
+            }
+        }
+
+        /* Per-sequence attention against each sequence's own KV. */
+        memset(attn_batch, 0, batch * q_len * sizeof(float));
+        if (kv_idx >= 0 && kv_len > 0) {
+            for (size_t i = 0; i < batch; i++) {
+                size_t seq_len = kvs[i].len + 1;  /* current token now written */
+                float *q = q_batch + i * q_len;
+                float *attn_out = attn_batch + i * q_len;
+
+                const float *key_cache = NULL;
+                const float *val_cache = NULL;
+                oc_seq_kv_get(&kvs[i], (size_t)kv_idx, 0, &key_cache, &val_cache);
+
+                if (key_cache && val_cache) {
+                    uint32_t eff_seq = (uint32_t)seq_len;
+                    const float *eff_k = key_cache;
+                    const float *eff_v = val_cache;
+
+                    if (layer_window > 0 && seq_len > layer_window) {
+                        size_t skip = (seq_len - layer_window) * kv_len;
+                        eff_k = key_cache + skip;
+                        eff_v = val_cache + skip;
+                        eff_seq = layer_window;
+                    }
+
+                    uint32_t n_rep = n_heads / (kvh > 0 ? kvh : 1);
+                    for (uint32_t hd = 0; hd < n_heads; hd++) {
+                        uint32_t kv_hd = hd / n_rep;
+                        const float *q_head = q + hd * head_dim;
+                        const float *k_head = eff_k + kv_hd * kv_head_dim;
+                        const float *v_head = eff_v + kv_hd * kv_head_dim;
+                        float *out_head = attn_out + hd * head_dim;
+                        oc_scaled_dot_product_attention_f32(
+                            q_head, k_head, v_head, eff_seq,
+                            kv_head_dim, out_head);
+                    }
+                }
+            }
+        }
+
+        /* Per-sequence attention against each sequence's own KV. */
+        memset(attn_batch, 0, batch * q_len * sizeof(float));
+        if (kv_idx >= 0 && kv_len > 0) {
+            for (size_t i = 0; i < batch; i++) {
+                size_t seq_len = kvs[i].len + 1;  /* current token now written */
+                float *q = q_batch + i * q_len;
+                float *attn_out = attn_batch + i * q_len;
+
+                const float *key_cache = NULL;
+                const float *val_cache = NULL;
+                oc_seq_kv_get(&kvs[i], (size_t)kv_idx, 0, &key_cache, &val_cache);
+
+                if (key_cache && val_cache) {
+                    uint32_t eff_seq = (uint32_t)seq_len;
+                    const float *eff_k = key_cache;
+                    const float *eff_v = val_cache;
+
+                    if (layer_window > 0 && seq_len > layer_window) {
+                        size_t skip = (seq_len - layer_window) * kv_len;
+                        eff_k = key_cache + skip;
+                        eff_v = val_cache + skip;
+                        eff_seq = layer_window;
+                    }
+
+                    uint32_t n_rep = n_heads / (kvh > 0 ? kvh : 1);
+                    for (uint32_t hd = 0; hd < n_heads; hd++) {
+                        uint32_t kv_hd = hd / n_rep;
+                        const float *q_head = q + hd * head_dim;
+                        const float *k_head = eff_k + kv_hd * kv_head_dim;
+                        const float *v_head = eff_v + kv_hd * kv_head_dim;
+                        float *out_head = attn_out + hd * head_dim;
+                        oc_scaled_dot_product_attention_f32(
+                            q_head, k_head, v_head, eff_seq,
+                            kv_head_dim, out_head);
+                    }
+                }
+            }
+        }
+
+        /* Attn output projection. */
+        if (!oc_weight_storage_is_empty(&layer->attn_output)) {
+            e = oc_gemm_weight(&layer->attn_output, h, q_len,
+                                attn_batch, proj_batch, batch);
+            if (e != OC_OK) goto batch2_fail;
+            if (layer->attn_output_bias)
+                oc_add_repeating_bias(proj_batch, batch * h, layer->attn_output_bias, h);
+        } else {
+            memset(proj_batch, 0, batch * h * sizeof(float));
+        }
+
+        /* Residual add. */
+        for (size_t i = 0; i < batch * h; i++)
+            x_batch[i] += proj_batch[i];
+
+        /* FFN. */
+        float *ffn_norm_w = NULL;
+        if (cfg->sandwich_norm)
+            ffn_norm_w = layer->ffn_norm;
+        else if (layer->post_attention_norm)
+            ffn_norm_w = layer->post_attention_norm;
+        else if (layer->ffn_norm)
+            ffn_norm_w = layer->ffn_norm;
+
+        if (oc_layer_weights_has_dense_ffn(layer) && ffn_norm_w) {
+            for (size_t i = 0; i < batch; i++)
+                oc_rms_norm_f32(x_batch + i * h, ffn_norm_w,
+                                normed_batch + i * h, h, eps);
+
+            e = oc_gemm_weight(&layer->ffn_gate, i_size, h,
+                                normed_batch, gate_batch, batch);
+            if (e != OC_OK) goto batch2_fail;
+            e = oc_gemm_weight(&layer->ffn_up, i_size, h,
+                                normed_batch, up_batch, batch);
+            if (e != OC_OK) goto batch2_fail;
+
+            for (size_t i = 0; i < batch; i++) {
+                if (cfg->gelu_ffn)
+                    oc_geglu_inplace_f32(gate_batch + i * i_size,
+                                          up_batch + i * i_size, i_size);
+                else
+                    oc_swiglu_inplace_f32(gate_batch + i * i_size,
+                                          up_batch + i * i_size, i_size);
+            }
+
+            e = oc_gemm_weight(&layer->ffn_down, h, i_size,
+                                gate_batch, ffn_batch, batch);
+            if (e != OC_OK) goto batch2_fail;
+            if (layer->ffn_down_bias)
+                oc_add_repeating_bias(ffn_batch, batch * h, layer->ffn_down_bias, h);
+
+            for (size_t i = 0; i < batch * h; i++)
+                x_batch[i] += ffn_batch[i];
+        }
+    }
+
+    /* Advance each SeqKv by 1 (after all layers processed). */
+    for (size_t i = 0; i < batch; i++)
+        oc_seq_kv_advance(&kvs[i], 1);
+
+    /* Final head for each sequence. */
+    if (need_logits && out_logits) {
+        float *normed = m->workspace.hidden_a;
+        for (size_t i = 0; i < batch; i++) {
+            oc_rms_norm_f32(x_batch + i * h, m->norm_weight, normed, h, eps);
+            memset(out_logits + i * cfg->vocab_size, 0,
+                   cfg->vocab_size * sizeof(float));
+            oc_gemv_weight(&m->output_weight, cfg->vocab_size, h,
+                           normed, out_logits + i * cfg->vocab_size);
+        }
+    }
+
+    /* Copy last seq's hidden to workspace.x for compatibility. */
+    memcpy(m->workspace.x, x_batch + (batch - 1) * h, h * sizeof(float));
+
+    free(x_batch); free(normed_batch); free(q_batch); free(k_batch);
+    free(v_batch); free(attn_batch); free(proj_batch);
+    free(gate_batch); free(up_batch); free(ffn_batch);
+    return OC_OK;
+
+batch2_fail:
+    free(x_batch); free(normed_batch); free(q_batch); free(k_batch);
+    free(v_batch); free(attn_batch); free(proj_batch);
+    free(gate_batch); free(up_batch); free(ffn_batch);
+    return OC_ERR_INTERNAL;
 }

@@ -202,6 +202,48 @@ OcError oc_inf_model_draft_mtp_tokens(OcInferenceModel *m,
                                         float *out_logits,
                                         size_t *out_n);
 
+/* ─── Batched forward (prefill + cross-sequence decode) ───────────────── */
+
+/* Check if all layers support the batched GEMM path (no Mamba/SSM/MoE).
+ * Returns true when the model can use forward_tokens / forward_batch. */
+bool oc_inf_model_layers_supported_for_batched(const OcInferenceModel *m);
+
+/* Batched prefill: process multiple tokens of ONE sequence via GEMM.
+ * Mirrors Rust forward_batched. Each weight matrix is read once and
+ * applied to all positions via oc_gemm_weight.
+ *
+ * tokens:    array of token IDs to process.
+ * n_tokens:  number of tokens.
+ * start_pos: absolute position of the first token.
+ * need_logits: if true, compute final norm + lm_head for the last token.
+ * out_logits: if need_logits, set to logits buffer (vocab_size floats).
+ * out_logits_len: set to vocab_size.
+ *
+ * The model's KV cache is updated for all tokens. workspace.x contains
+ * the last token's hidden state on return. */
+OcError oc_inf_model_forward_tokens(OcInferenceModel *m,
+                                      const uint32_t *tokens, size_t n_tokens,
+                                      size_t start_pos, bool need_logits,
+                                      float **out_logits, size_t *out_logits_len);
+
+/* Cross-sequence batched decode: process N sequences (one token each) via GEMM.
+ * Mirrors Rust forward_batch. Each weight matrix is read once and fanned out
+ * across all N sequences. Each sequence reads its own caller-owned OcSeqKv.
+ *
+ * tokens:    array of token IDs (one per sequence).
+ * positions: array of absolute positions (one per sequence).
+ * kvs:       array of caller-owned SeqKv buffers (one per sequence).
+ * n_seqs:    number of sequences.
+ * out_logits: caller-allocated array of n_seqs * vocab_size floats.
+ *             Filled with logits for each sequence (only if need_logits).
+ * need_logits: if true, compute logits for each sequence. */
+OcError oc_inf_model_forward_batch(OcInferenceModel *m,
+                                     const uint32_t *tokens,
+                                     const size_t *positions,
+                                     OcSeqKv *kvs, size_t n_seqs,
+                                     bool need_logits,
+                                     float *out_logits);
+
 #ifdef __cplusplus
 }
 #endif

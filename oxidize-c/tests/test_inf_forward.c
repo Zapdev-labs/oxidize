@@ -601,3 +601,115 @@ Test(inf_fwd, gemv_weight_head_null)
     cr_assert_neq(oc_gemv_weight_head(NULL, 1, 1, 0, 1, input, output), OC_OK);
     cr_assert_neq(oc_gemv_weight_head(NULL, 1, 1, 0, 0, input, output), OC_OK);
 }
+
+/* ─── Batched forward tests ───────────────────────────────────────────── */
+
+Test(inf_fwd, layers_supported_for_batched)
+{
+    OcInferenceModel m;
+    setup_tiny_model(&m);
+    /* Standard attention + dense FFN -> should be supported. */
+    cr_assert(oc_inf_model_layers_supported_for_batched(&m));
+    oc_inf_model_free(&m);
+}
+
+Test(inf_fwd, layers_supported_null)
+{
+    cr_assert_eq(oc_inf_model_layers_supported_for_batched(NULL), false);
+}
+
+Test(inf_fwd, forward_tokens_batched)
+{
+    OcInferenceModel m;
+    setup_tiny_model(&m);
+
+    uint32_t tokens[] = {1, 2, 3};
+    float *logits = NULL;
+    size_t logits_len = 0;
+    OcError e = oc_inf_model_forward_tokens(&m, tokens, 3, 0, true,
+                                               &logits, &logits_len);
+    cr_assert_eq(e, OC_OK);
+    cr_assert_eq(logits_len, 16);
+    cr_assert_not_null(logits);
+
+    /* KV cache should have 3 tokens. */
+    cr_assert_eq(oc_kv_cache_n_tokens(&m.kv_cache), 3);
+
+    /* Logits should be non-zero. */
+    bool nonzero = false;
+    for (size_t i = 0; i < logits_len; i++)
+        if (fabsf(logits[i]) > 0.001f) nonzero = true;
+    cr_assert(nonzero);
+
+    oc_inf_model_free(&m);
+}
+
+Test(inf_fwd, forward_tokens_no_logits)
+{
+    OcInferenceModel m;
+    setup_tiny_model(&m);
+
+    uint32_t tokens[] = {5, 3};
+    OcError e = oc_inf_model_forward_tokens(&m, tokens, 2, 0, false, NULL, NULL);
+    cr_assert_eq(e, OC_OK);
+    cr_assert_eq(oc_kv_cache_n_tokens(&m.kv_cache), 2);
+
+    oc_inf_model_free(&m);
+}
+
+Test(inf_fwd, forward_tokens_null)
+{
+    OcInferenceModel m;
+    setup_tiny_model(&m);
+    cr_assert_neq(oc_inf_model_forward_tokens(&m, NULL, 3, 0, false, NULL, NULL), OC_OK);
+    cr_assert_neq(oc_inf_model_forward_tokens(NULL, (uint32_t[]){1}, 1, 0, false, NULL, NULL), OC_OK);
+    oc_inf_model_free(&m);
+}
+
+Test(inf_fwd, forward_batch_basic)
+{
+    OcInferenceModel m;
+    setup_tiny_model(&m);
+
+    /* Create 2 sequences with their own SeqKv buffers. */
+    size_t kv_layer_count = m.config.layer_count;
+    size_t kv_len = m.config.num_key_value_heads * oc_inference_config_kv_head_dim(&m.config);
+    size_t cap = 32;
+
+    OcSeqKv kv0, kv1;
+    oc_seq_kv_init(&kv0, kv_layer_count, cap, kv_len);
+    oc_seq_kv_init(&kv1, kv_layer_count, cap, kv_len);
+
+    uint32_t tokens[] = {3, 5};
+    size_t positions[] = {0, 0};
+    OcSeqKv kvs[] = {kv0, kv1};
+
+    float *logits = malloc(2 * 16 * sizeof(float));
+    OcError e = oc_inf_model_forward_batch(&m, tokens, positions, kvs, 2,
+                                              true, logits);
+    cr_assert_eq(e, OC_OK);
+
+    /* Each SeqKv should have 1 token written. */
+    cr_assert_eq(kvs[0].len, 1);
+    cr_assert_eq(kvs[1].len, 1);
+
+    /* Logits should be non-zero. */
+    bool nonzero = false;
+    for (size_t i = 0; i < 2 * 16; i++)
+        if (fabsf(logits[i]) > 0.001f) nonzero = true;
+    cr_assert(nonzero);
+
+    free(logits);
+    oc_seq_kv_free(&kvs[0]);
+    oc_seq_kv_free(&kvs[1]);
+    oc_inf_model_free(&m);
+}
+
+Test(inf_fwd, forward_batch_null)
+{
+    OcInferenceModel m;
+    setup_tiny_model(&m);
+    cr_assert_neq(oc_inf_model_forward_batch(&m, NULL, NULL, NULL, 0, false, NULL), OC_OK);
+    cr_assert_neq(oc_inf_model_forward_batch(NULL, NULL, NULL, NULL, 0, false, NULL), OC_OK);
+    oc_inf_model_free(&m);
+}
