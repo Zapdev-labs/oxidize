@@ -1286,25 +1286,21 @@ OcError oc_hf_cache_clean(const OcHfConfig *cfg, uint64_t max_age_seconds,
         DIR *sd = opendir(repo_dir);
         if (!sd) continue;
         struct dirent *sent;
+        int dfd = dirfd(sd);
         while ((sent = readdir(sd)) != NULL) {
             if (sent->d_name[0] == '.') continue;
-            char full[OC_HF_MAX_CACHE_DIR];
-            int sn = snprintf(full, sizeof(full), "%s/%s", repo_dir,
-                              sent->d_name);
-            if (sn < 0 || (size_t)sn >= sizeof(full)) continue;
-            /* fstat on an open fd (not stat-by-path) so the age check and
-             * the file we inspected cannot diverge (TOCTOU). */
-            int fd = open(full, O_RDONLY);
-            if (fd < 0) continue;
+            /* Stat and unlink relative to the open directory fd (with
+             * AT_SYMLINK_NOFOLLOW) so a concurrent swap of a path component
+             * between the check and the unlink cannot redirect the delete
+             * outside the cache directory (TOCTOU). */
             struct stat st;
-            if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
-                close(fd);
+            if (dfd < 0 ||
+                fstatat(dfd, sent->d_name, &st, AT_SYMLINK_NOFOLLOW) != 0 ||
+                !S_ISREG(st.st_mode))
                 continue;
-            }
-            close(fd);
             time_t age = now - st.st_mtime;
             if (max_age_seconds == 0 || (uint64_t)age >= max_age_seconds) {
-                if (unlink(full) == 0) removed++;
+                if (unlinkat(dfd, sent->d_name, 0) == 0) removed++;
             }
         }
         closedir(sd);

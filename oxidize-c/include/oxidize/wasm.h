@@ -120,6 +120,27 @@ typedef struct OcWasmStats {
 typedef bool (*OcWasmTokenCallback)(uint32_t token, uint32_t index,
                                     void *userdata);
 
+/* ─── Host hooks ────────────────────────────────────────────────────────── */
+
+/* A host hook table is invoked by the bridge to perform the actual model
+ * load and forward pass. In a real WASM deployment the host (JS) registers
+ * these via an emscripten addFunction table; when no hooks are installed a
+ * built-in stub generator produces deterministic synthetic tokens (tests
+ * only). */
+typedef struct OcWasmHostHooks {
+    /* Load model bytes into the host. Returns true on success. */
+    bool (*load_model_bytes)(const uint8_t *data, size_t len,
+                             const char *path, void *userdata);
+    /* Sample the next token given the prompt + generated-so-far tokens.
+     * Returns a token id (0 signals end-of-stream / host failure). */
+    uint32_t (*sample_token)(const char *prompt,
+                             const uint32_t *generated, size_t n_generated,
+                             uint32_t max_tokens, float temperature,
+                             void *userdata);
+    /* Release any host-side state. May be NULL. */
+    void (*release)(void *userdata);
+} OcWasmHostHooks;
+
 /* ─── Bridge handle ─────────────────────────────────────────────────────── */
 
 /* Opaque bridge state. The full struct is defined in src/util/wasm_bridge.c;
@@ -165,7 +186,9 @@ OcError oc_wasm_bridge_load_model_bytes(OcWasmBridge *br,
  * The response (the full generated text, NUL-terminated) is written into
  * `out_buf` (up to `out_cap-1` chars + NUL). If `out_buf` is NULL, no text
  * is assembled (useful for pure token-stream consumers). Returns the number
- * of bytes written excluding NUL, or 0 on error / overflow. */
+ * of bytes written excluding NUL, or 0 on error / overflow. On overflow the
+ * buffer holds the NUL-terminated partial text, but the 0 return tells the
+ * caller the generation did not fit and must not be treated as complete. */
 size_t oc_wasm_bridge_generate(OcWasmBridge *br,
                                const char *prompt,
                                uint32_t max_tokens,
@@ -173,9 +196,12 @@ size_t oc_wasm_bridge_generate(OcWasmBridge *br,
                                void *userdata,
                                char *out_buf, size_t out_cap);
 
-/* Request cancellation of any in-flight generation. The next callback tick
- * (or the next forward step) will observe the cancel flag and stop. Returns
- * OC_OK or OC_ERR_INVALID_ARG. */
+/* Request cancellation of any in-flight generation. The cancel flag is
+ * atomic, so this is the one bridge call that is safe to make concurrently
+ * (e.g. from another thread when `enable_threads` is set) while
+ * oc_wasm_bridge_generate() runs; the generate loop observes the flag on
+ * its next token step and stops. All other bridge calls must still be
+ * serialized per instance. Returns OC_OK or OC_ERR_INVALID_ARG. */
 OcError oc_wasm_bridge_cancel(OcWasmBridge *br);
 
 /* ─── Stats ─────────────────────────────────────────────────────────────── */
@@ -183,6 +209,17 @@ OcError oc_wasm_bridge_cancel(OcWasmBridge *br);
 /* Copy the current stats snapshot into `*out`. Returns OC_OK or
  * OC_ERR_INVALID_ARG if `br`/`out` is NULL. */
 OcError oc_wasm_bridge_get_stats(OcWasmBridge *br, OcWasmStats *out);
+
+/* ─── Host hook installation ────────────────────────────────────────────── */
+
+/* Install a host hook table so model loading and token sampling run the
+ * host's real forward-pass implementation instead of the built-in stub.
+ * The previous hooks' release() is called first. The bridge stores a copy
+ * of `*hooks`; `userdata` is passed to every hook. Returns OC_OK or
+ * OC_ERR_INVALID_ARG. */
+OcError oc_wasm_bridge_install_hooks(OcWasmBridge *br,
+                                     const OcWasmHostHooks *hooks,
+                                     void *userdata);
 
 /* ─── Message queue (async-style API) ───────────────────────────────────── */
 

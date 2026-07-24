@@ -77,12 +77,12 @@ jobs:
             echo "**Compiler:** ${{ matrix.cc }}"
             echo ""
             echo "### Build log"
-            echo '```'"
+            echo '```'
             make clean && make -j"$(nproc)" build 2>&1 || echo "build failed"
             echo '```'
             echo ""
             echo "### Test log"
-            echo '```'"
+            echo '```'
             make test 2>&1 || echo "tests failed"
             echo '```'
           } > test-results/summary.md || true

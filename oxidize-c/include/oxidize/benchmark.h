@@ -96,11 +96,13 @@ void oc_benchmark_print(const OcBenchmarkResult *r);
 
 /* ─── Micro-benchmarks ────────────────────────────────────────────────── */
 
-/* Benchmark a specific quantized matvec kernel. Returns tok/s. */
+/* FP32 scalar-loop matvec reference microbenchmark. Returns rows/sec. This
+ * does NOT exercise quantized kernels — use oc_benchmark_oxk for those. */
 double oc_benchmark_matvec(uint32_t n_rows, uint32_t n_cols,
                            uint32_t n_iters);
 
-/* Benchmark the OXK kernels. Returns tok/s for each quant type. */
+/* Benchmark the dispatched OXK quantized matvec kernels. Returns rows/sec
+ * per quant type. Q5_K/Q6_K have no OXK matvec entry point and report 0. */
 typedef struct OcOxkBenchResult {
     double q4_0_tok_per_sec;
     double q4_k_tok_per_sec;

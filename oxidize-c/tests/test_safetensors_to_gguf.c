@@ -41,7 +41,7 @@ Test(st_to_gguf, detect_arch_gemma)
 Test(st_to_gguf, detect_arch_default)
 {
     const char *names[] = {"some_unknown_tensor"};
-    cr_assert_str_eq(oc_detect_arch_from_tensors(names, 1), "llama");
+    cr_assert_str_eq(oc_detect_arch_from_tensors(names, 1), "unknown");
 }
 
 Test(st_to_gguf, map_tensor_name_embed)

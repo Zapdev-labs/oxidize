@@ -30,7 +30,7 @@ jobs:
           workspaces: "."
 
       - name: Build core crates
-        run: cargo build -p oxidize-cli -p oxidize-server -p oxidize-quantize -p oxidize-convert
+        run: cargo build --release -p oxidize-cli -p oxidize-server -p oxidize-quantize -p oxidize-convert
 
   test:
     name: Test core crates

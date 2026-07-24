@@ -82,7 +82,7 @@ const char *oc_detect_arch_from_tensors(const char *const *names, size_t n)
         if (contains(names[i], "model.layers") && contains(names[i], "self_attn")) return "llama";
         if (contains(names[i], "model.layers") && contains(names[i], "mlp")) return "llama";
     }
-    return "llama"; /* default */
+    return "unknown"; /* no recognized pattern — surface detection failure */
 }
 
 /* ─── Tensor name mapping ─────────────────────────────────────────────── */

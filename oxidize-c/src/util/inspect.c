@@ -307,14 +307,17 @@ static OcError inspect_from_gguf(const OcGgufFile *f, uint64_t file_size,
 
     /* ─── Tensor analysis ──────────────────────────────────────────────── */
 
-    out->n_tensors = (uint32_t)f->tensor_count;
     out->file_size = file_size;
     out->size_gb = (file_size > 0) ? (double)file_size / 1e9 : 0.0;
 
     /* Allocate per-tensor summaries (cap at a reasonable max to avoid OOM
-     * on pathological files). */
+     * on pathological files). `n_tensors` is clamped to the allocated count
+     * so consumers iterating it never read past the array. */
     uint32_t max_tensors = 100000;
-    uint32_t n_copy = (out->n_tensors < max_tensors) ? out->n_tensors : max_tensors;
+    uint32_t total = (f->tensor_count < UINT32_MAX)
+        ? (uint32_t)f->tensor_count : UINT32_MAX;
+    uint32_t n_copy = (total < max_tensors) ? total : max_tensors;
+    out->n_tensors = n_copy;
 
     if (n_copy > 0) {
         out->tensors = (OcTensorSummary *)calloc(n_copy, sizeof(OcTensorSummary));
@@ -344,8 +347,10 @@ static OcError inspect_from_gguf(const OcGgufFile *f, uint64_t file_size,
         }
 
         s->type = t->ggml_type;
-        s->n_dims = t->n_dims;
-        for (uint32_t d = 0; d < t->n_dims && d < 4; d++) {
+        /* OcTensorSummary.dims holds 4 entries; clamp n_dims so consumers
+         * never index past the copied dimensions. */
+        s->n_dims = (t->n_dims < 4) ? t->n_dims : 4;
+        for (uint32_t d = 0; d < s->n_dims; d++) {
             s->dims[d] = t->dims[d];
         }
 
@@ -525,16 +530,33 @@ static size_t append_line(char *buf, size_t cap, size_t off, const char *fmt, ..
     return off + (size_t)n;
 }
 
+/* Compute the exact rendered length of a formatter by rendering into a
+ * temporary buffer, growing until it fits. Returns 0 on OOM. */
+static size_t exact_render_len(size_t (*fmt)(const OcModelInfo *, char *, size_t),
+                               const OcModelInfo *info, size_t initial_cap)
+{
+    size_t cap = initial_cap;
+    for (int tries = 0; tries < 16; tries++) {
+        char *tmp = malloc(cap);
+        if (!tmp) return 0;
+        size_t n = fmt(info, tmp, cap);
+        free(tmp);
+        if (n > 0) return n;      /* formatter returns 0 only on truncation */
+        if (cap > SIZE_MAX / 2) return 0;
+        cap *= 2;
+    }
+    return 0;
+}
+
 size_t oc_inspect_format(const OcModelInfo *info, char *buf, size_t cap)
 {
     if (!info) return 0;
 
-    /* If buf is NULL or cap is 0, compute the length needed (we estimate
-     * generously and return the estimate). */
+    /* If buf is NULL or cap is 0, return the exact rendered length so the
+     * caller can allocate len + 1 and format once. */
     if (!buf || cap == 0) {
-        /* Rough estimate: header (512) + per-tensor (128) + footer (512). */
-        size_t est = 1024 + (info->tensors ? (size_t)info->n_tensors * 128 : 0);
-        return est;
+        return exact_render_len(oc_inspect_format, info,
+                                4096 + (size_t)info->n_tensors * 128);
     }
 
     size_t off = 0;
@@ -712,8 +734,10 @@ size_t oc_inspect_format_json(const OcModelInfo *info, char *buf, size_t cap)
     if (!info) return 0;
 
     if (!buf || cap == 0) {
-        /* Estimate: ~2KB base + 200 per tensor. */
-        return 2048 + (info->tensors ? (size_t)info->n_tensors * 200 : 0);
+        /* Return the exact rendered length (long/escaped tensor names make
+         * any fixed estimate unsafe for the query-then-format pattern). */
+        return exact_render_len(oc_inspect_format_json, info,
+                                4096 + (size_t)info->n_tensors * 200);
     }
 
     size_t off = 0;

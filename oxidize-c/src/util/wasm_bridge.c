@@ -37,6 +37,7 @@
 #include "oxidize/mem_util.h"
 
 #include <math.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -50,23 +51,9 @@
 
 /* ─── Host hook table ───────────────────────────────────────────────────── */
 
-/* A host hook is invoked by the bridge to perform the actual forward pass.
- * In a real WASM deployment the host (JS) registers these via an emscripten
- * addFunction table; on the native dev box the built-in stub generator is
- * used. This indirection keeps the bridge .c file dependency-free. */
-typedef struct OcWasmHostHooks {
-    /* Load model bytes into the host. Returns true on success. */
-    bool (*load_model_bytes)(const uint8_t *data, size_t len,
-                             const char *path, void *userdata);
-    /* Sample the next token given the prompt + generated-so-far tokens.
-     * Returns a token id (0 on host failure). */
-    uint32_t (*sample_token)(const char *prompt,
-                             const uint32_t *generated, size_t n_generated,
-                             uint32_t max_tokens, float temperature,
-                             void *userdata);
-    /* Release any host-side state. May be NULL. */
-    void (*release)(void *userdata);
-} OcWasmHostHooks;
+/* The OcWasmHostHooks table and oc_wasm_bridge_install_hooks() are declared
+ * in the public header (wasm.h) so downstream WASM users can attach a real
+ * forward-pass implementation. */
 
 /* ─── Bridge state ──────────────────────────────────────────────────────── */
 
@@ -83,8 +70,9 @@ struct OcWasmBridge {
     uint32_t            queue_head;    /* pop index                          */
     uint32_t            queue_tail;    /* push index                         */
     uint32_t            next_token_id; /* monotonic seq for enqueued msgs    */
-    /* Cancellation flag observed by the generate loop. */
-    volatile bool       cancel_requested;
+    /* Cancellation flag observed by the generate loop. Atomic so a
+     * concurrent cancel (threads enabled) is race-free. */
+    atomic_bool         cancel_requested;
     /* Allocated bytes tracked by this bridge (for memory_used in pure WASM). */
     uint64_t            alloc_bytes;
 };
@@ -211,6 +199,13 @@ OcWasmBridge *oc_wasm_bridge_init(const OcWasmBridgeConfig *cfg)
         qcap = v == 0 ? OC_WASM_MSG_QUEUE_CAP : v;
     }
     br->queue_cap = qcap;
+    /* Enforce the caller's memory budget before allocating the queue. */
+    uint64_t budget = br->cfg.max_memory ? br->cfg.max_memory
+                                         : OC_WASM_DEFAULT_MAX_MEMORY;
+    if (sizeof(*br) + (uint64_t)qcap * sizeof(OcWasmMessage) > budget) {
+        free(br);
+        return NULL;
+    }
     br->queue = calloc(qcap, sizeof(OcWasmMessage));
     if (!br->queue) {
         free(br);
@@ -327,6 +322,7 @@ size_t oc_wasm_bridge_generate(OcWasmBridge *br,
 
     /* Output buffer cursor. */
     size_t out_written = 0;
+    bool truncated = false;
     if (out_buf && out_cap > 0) {
         out_buf[0] = '\0';
     }
@@ -337,6 +333,13 @@ size_t oc_wasm_bridge_generate(OcWasmBridge *br,
     uint32_t *generated = stack_buf;
     size_t generated_cap = 64;
     bool heap_buf = false;
+    uint64_t budget = br->cfg.max_memory ? br->cfg.max_memory
+                                         : OC_WASM_DEFAULT_MAX_MEMORY;
+    if ((size_t)max_tokens > generated_cap &&
+        br->alloc_bytes + (uint64_t)max_tokens * sizeof(uint32_t) > budget) {
+        /* Would exceed the memory budget: stay on the stack buffer. */
+        max_tokens = (uint32_t)generated_cap;
+    }
     if ((size_t)max_tokens > generated_cap) {
         generated = malloc((size_t)max_tokens * sizeof(uint32_t));
         if (!generated) {
@@ -375,22 +378,28 @@ size_t oc_wasm_bridge_generate(OcWasmBridge *br,
         produced++;
         br->stats.tokens_generated++;
 
-        /* Invoke the per-token callback. If it returns false, stop. */
-        if (on_token && !on_token(tok, i, userdata)) {
-            break;
-        }
-
         /* Append a textual representation of the token to the output
-         * buffer. The stub generator emits ASCII token-id strings for
-         * determinism; a real host hook would decode the token to text. */
+         * buffer BEFORE consulting the callback, so an early stop still
+         * includes the token that was generated and delivered. The stub
+         * generator emits ASCII token-id strings for determinism; a real
+         * host hook would decode the token to text. */
         if (out_buf && out_cap > 0) {
             char tok_str[16];
             int n = snprintf(tok_str, sizeof(tok_str), "%u ", tok);
-            if (n > 0 && out_written + (size_t)n + 1 < out_cap) {
-                memcpy(out_buf + out_written, tok_str, (size_t)n);
-                out_written += (size_t)n;
-                out_buf[out_written] = '\0';
+            if (n > 0) {
+                if (out_written + (size_t)n + 1 <= out_cap) {
+                    memcpy(out_buf + out_written, tok_str, (size_t)n);
+                    out_written += (size_t)n;
+                    out_buf[out_written] = '\0';
+                } else {
+                    truncated = true;
+                }
             }
+        }
+
+        /* Invoke the per-token callback. If it returns false, stop. */
+        if (on_token && !on_token(tok, i, userdata)) {
+            break;
         }
     }
 
@@ -410,7 +419,9 @@ size_t oc_wasm_bridge_generate(OcWasmBridge *br,
         free(generated);
     }
     refresh_memory_used(br);
-    return out_written;
+    /* Per the API contract, overflow (truncated output) returns 0; the
+     * buffer still holds the NUL-terminated partial text. */
+    return truncated ? 0 : out_written;
 }
 
 OcError oc_wasm_bridge_cancel(OcWasmBridge *br)
@@ -534,7 +545,11 @@ static uint32_t stub_sample_token(const char *prompt,
         }
         return generated[n_generated - 1];
     }
-    /* Non-greedy: deterministic pseudo-random walk seeded by prompt. */
+    /* Non-greedy: deterministic pseudo-random walk seeded by prompt.
+     * Clamp temperature first: NaN/inf/huge values would be undefined
+     * behavior in the float→uint32_t conversion. */
+    if (!isfinite(temperature) || temperature > 1000.0f)
+        temperature = 1000.0f;
     uint32_t h = prompt_hash(prompt);
     uint32_t t = (uint32_t)(temperature * 1000.0f) + 1;
     uint32_t tok = (h ^ (uint32_t)n_generated * t) % 1000;
@@ -665,11 +680,8 @@ const char *oc_wasm_bridge_interface_string(void)
     return WASM_INTERFACE_STRING;
 }
 
-/* ─── Host hook installation (extension for real WASM runtimes) ───────── */
+/* ─── Host hook installation (public API, declared in wasm.h) ─────────── */
 
-/* This function is not in the public header (it's an internal escape hatch
- * for tests and emscripten bindings that need to swap in real hooks). It
- * is declared here so the symbol exists for downstream linkers. */
 OcError oc_wasm_bridge_install_hooks(OcWasmBridge *br,
                                      const OcWasmHostHooks *hooks,
                                      void *userdata)
