@@ -1,0 +1,23 @@
+oxidize-c/include/oxidize/llama.h
+  s_da97e7ccfd189d::t_9d11047aacad9d 112-117
+oxidize-c/src/model/llama.c
+  s_da97e7ccfd189d::t_9d11047aacad9d 328-333,588-590,947-949,953-964
+oxidize-c/tests/test_llama.c
+  s_da97e7ccfd189d::t_0cf7b2c65b0ba6 383-509
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "6e82ccae06c20bd7b13a5c23f51d65ce4b6af8da",
+  "prompts": {},
+  "sessions": {
+    "s_da97e7ccfd189d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3417b4aa-226f-4cb6-b3e3-31cf9ed6e6c7",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
