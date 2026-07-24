@@ -215,8 +215,8 @@ void oc_apply_rope_yarn_f32(const float *in, float *out, size_t head_dim,
                              size_t rope_len, int64_t position, float theta,
                              float yarn_factor, uint32_t yarn_orig_ctx)
 {
-    if (yarn_factor <= 0.0f || yarn_orig_ctx == 0 ||
-        (uint64_t)position <= (uint64_t)yarn_orig_ctx) {
+    bool yarn = yarn_factor > 1.0f && yarn_orig_ctx > 0;
+    if (!yarn) {
         oc_apply_rope_f32(in, out, head_dim, rope_len, position, theta);
         return;
     }
@@ -233,24 +233,36 @@ void oc_apply_rope_yarn_f32(const float *in, float *out, size_t head_dim,
     float freq_mul = powf(theta, -2.0f / (float)rope_len);
     float freq = 1.0f;
 
-    /* YaRN: scale position beyond orig_ctx.
-     * ramp = smooth interpolation between [orig_ctx * 0.8, orig_ctx * 1.2].
-     * Beyond orig_ctx * 1.2, use full YaRN scaling: scale = orig_ctx / position. */
+    /* YaRN parameters (matching Rust apply_rope_f32_yarn). */
+    float freq_scale = 1.0f / yarn_factor;
+    float mscale = 1.0f + 0.1f * logf(yarn_factor);
+
+    /* Compute correction range.
+     * corr_dim(n_dims, orig_ctx, n_rot, base) =
+     *   n_dims * ln(orig_ctx / (n_rot * 2*PI)) / (2 * ln(base)) */
+    float base_log = 2.0f * logf(theta);
+    float ratio_fast = (float)yarn_orig_ctx / (32.0f * 2.0f * 3.14159265f);
+    float ratio_slow = (float)yarn_orig_ctx / (1.0f * 2.0f * 3.14159265f);
+    float corr_lo = floorf((float)rope_len * logf(ratio_fast) / base_log);
+    float corr_hi = ceilf((float)rope_len * logf(ratio_slow) / base_log);
+    if (corr_lo < 0.0f) corr_lo = 0.0f;
+    if (corr_hi > (float)rope_len - 1.0f) corr_hi = (float)rope_len - 1.0f;
+    float denom = corr_hi - corr_lo;
+
     float pos_f = (float)position;
-    float orig_f = (float)yarn_orig_ctx;
-    float scale = 1.0f;
-    if (pos_f > orig_f * 0.8f) {
-        float ramp = (pos_f - orig_f * 0.8f) / (orig_f * 0.4f);
-        if (ramp > 1.0f) ramp = 1.0f;
-        scale = 1.0f - ramp + ramp * (yarn_factor * orig_f / pos_f);
-    }
 
     for (size_t i = 0; i < half; i++) {
         float x0 = in[i];
         float x1 = in[half + i];
-        float angle = pos_f * scale * freq;
-        float c = cosf(angle);
-        float s = sinf(angle);
+        float theta_extrap = pos_f * freq;
+        float theta_interp = theta_extrap * freq_scale;
+        float ramp = 1.0f - ((float)i - corr_lo) /
+                     (denom > 0.001f ? denom : 0.001f);
+        if (ramp < 0.0f) ramp = 0.0f;
+        if (ramp > 1.0f) ramp = 1.0f;
+        float angle = theta_interp * (1.0f - ramp) + theta_extrap * ramp;
+        float c = cosf(angle) * mscale;
+        float s = sinf(angle) * mscale;
         out[i]        = x0 * c - x1 * s;
         out[half + i] = x0 * s + x1 * c;
         freq *= freq_mul;

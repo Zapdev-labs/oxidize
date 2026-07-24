@@ -58,8 +58,8 @@ float oc_gelu_exact_f32(float x);
  *
  * Position 0 fast path: copies input unchanged (no rotation needed).
  *
- * YaRN scaling is NOT yet ported (yarn_factor/yarn_orig_ctx paths); this is
- * the no-scaling path only. TODO: add YaRN when porting DeepSeek/long-context. */
+ * YaRN scaling is available via oc_rope_apply() in rope_scaling.h and
+ * oc_apply_rope_yarn_f32() below. */
 void oc_apply_rope_f32(const float *in, float *out, size_t head_dim,
                       size_t rope_len, int64_t position, float theta);
 

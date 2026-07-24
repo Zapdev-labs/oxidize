@@ -6,6 +6,7 @@
  */
 #define _POSIX_C_SOURCE 200809L
 #include "oxidize/oxk.h"
+#include "oxidize/simd.h"
 
 #include <string.h>
 #include <threads.h>
@@ -357,20 +358,22 @@ static void oc_oxk_init_once(void)
     bool has_f16c = false, has_fma = false, has_vnni = false;
     const char *name = "scalar";
 
-#if defined(__GNUC__) || defined(__clang__)
-    if (__builtin_cpu_supports("avx512bw") && __builtin_cpu_supports("avx512dq")) {
+    /* Reuse core/simd.c's cpuid-based detection: __builtin_cpu_supports
+     * rejects some feature strings on older clang and doesn't exist for
+     * aarch64 targets. */
+    const OcSimdCaps *sc = oc_simd_caps();
+    if (sc->level == OC_SIMD_AVX512) {
         level = OC_OXK_AVX512;
         has_f16c = true;
         has_fma  = true;
-        has_vnni = __builtin_cpu_supports("avx512vnni");
+        has_vnni = sc->has_vnni;
         name = "avx512";
-    } else if (__builtin_cpu_supports("avx2")) {
+    } else if (sc->level == OC_SIMD_AVX2) {
         level = OC_OXK_AVX2;
-        has_f16c = __builtin_cpu_supports("f16c");
-        has_fma  = __builtin_cpu_supports("fma");
+        has_f16c = sc->has_f16c;
+        has_fma  = sc->has_fma;
         name = "avx2";
     }
-#endif
 
     g_ctx.caps.level    = level;
     g_ctx.caps.has_f16c = has_f16c;

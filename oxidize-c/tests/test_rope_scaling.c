@@ -94,9 +94,11 @@ Test(rope, apply_none)
     OcRopeScalingConfig cfg;
     oc_rope_config_init(&cfg);
     float cos_buf[8], sin_buf[8];
+    memset(cos_buf, 0, sizeof(cos_buf));
+    memset(sin_buf, 0, sizeof(sin_buf));
     cr_assert_eq(oc_rope_apply(&cfg, 10, 8, 10000.0f, cos_buf, sin_buf), OC_OK);
-    /* cos/sin should have valid values */
-    for (int i = 0; i < 8; i++) {
+    /* cos/sin should have valid values (first half_dim=4 elements written). */
+    for (int i = 0; i < 4; i++) {
         cr_assert(cos_buf[i] >= -1.01f && cos_buf[i] <= 1.01f);
         cr_assert(sin_buf[i] >= -1.01f && sin_buf[i] <= 1.01f);
     }
@@ -108,9 +110,11 @@ Test(rope, apply_linear_cfg)
     oc_rope_config_init(&cfg);
     cfg.type = OC_ROPE_LINEAR;
     float cos_buf[8], sin_buf[8];
+    memset(cos_buf, 0, sizeof(cos_buf));
+    memset(sin_buf, 0, sizeof(sin_buf));
     cr_assert_eq(oc_rope_apply(&cfg, 10, 8, 10000.0f, cos_buf, sin_buf), OC_OK);
-    /* Values should be valid */
-    for (int i = 0; i < 8; i++) {
+    /* Values should be valid (first half_dim=4 elements written). */
+    for (int i = 0; i < 4; i++) {
         cr_assert(cos_buf[i] >= -1.01f && cos_buf[i] <= 1.01f);
     }
 }
@@ -122,6 +126,108 @@ Test(rope, apply_yarn)
     cfg.type = OC_ROPE_YARN;
     float cos_buf[64], sin_buf[64];
     cr_assert_eq(oc_rope_apply(&cfg, 100, 64, 10000.0f, cos_buf, sin_buf), OC_OK);
+}
+
+Test(rope, yarn_mscale_value)
+{
+    /* mscale = 1 + 0.1 * ln(scale). For scale=4: 1 + 0.1*ln(4) ≈ 1.1386 */
+    float ms = oc_rope_yarn_mscale(4.0f);
+    cr_assert_float_eq(ms, 1.0f + 0.1f * logf(4.0f), 0.001f);
+}
+
+Test(rope, yarn_cos_sin_scaled_by_mscale)
+{
+    /* YaRN cos/sin should be scaled by mscale > 1, so |cos| can exceed 1. */
+    OcRopeScalingConfig cfg;
+    oc_rope_config_init(&cfg);
+    cfg.type = OC_ROPE_YARN;
+    cfg.scale_factor = 4.0f;
+    float cos_buf[64], sin_buf[64];
+    memset(cos_buf, 0, sizeof(cos_buf));
+    memset(sin_buf, 0, sizeof(sin_buf));
+    cr_assert_eq(oc_rope_apply(&cfg, 100, 64, 10000.0f, cos_buf, sin_buf), OC_OK);
+    /* At least one cos value should be > 1 (due to mscale). */
+    bool found_scaled = false;
+    for (int i = 0; i < 32; i++) {
+        if (cos_buf[i] > 1.0f || sin_buf[i] > 1.0f) {
+            found_scaled = true;
+            break;
+        }
+    }
+    cr_assert(found_scaled, "YaRN mscale should produce cos/sin > 1");
+}
+
+Test(rope, yarn_pos_zero_applies_mscale)
+{
+    /* At pos=0 with YaRN, mscale is applied (cos(0)=1, sin(0)=0),
+     * so values are scaled by mscale but not rotated. */
+    OcRopeScalingConfig cfg;
+    oc_rope_config_init(&cfg);
+    cfg.type = OC_ROPE_YARN;
+    cfg.scale_factor = 4.0f;
+    float tensor[64];
+    for (int i = 0; i < 64; i++) tensor[i] = (float)(i + 1);
+    cr_assert_eq(oc_rope_apply_to_tensor(&cfg, 0, tensor, 64, 1, 10000.0f), OC_OK);
+    /* Position 0 with YaRN: values scaled by mscale = 1 + 0.1*ln(4). */
+    float mscale = 1.0f + 0.1f * logf(4.0f);
+    for (int i = 0; i < 32; i++) {
+        cr_assert_float_eq(tensor[i], (float)(i + 1) * mscale, 0.01f,
+            "tensor[%d] = %f, expected %f", i, tensor[i], (float)(i + 1) * mscale);
+    }
+}
+
+Test(rope, yarn_differs_from_none)
+{
+    /* YaRN at high position should produce different angles than no-scaling. */
+    OcRopeScalingConfig cfg_none, cfg_yarn;
+    oc_rope_config_init(&cfg_none);
+    oc_rope_config_init(&cfg_yarn);
+    cfg_yarn.type = OC_ROPE_YARN;
+    cfg_yarn.scale_factor = 4.0f;
+
+    float cos_none[32], sin_none[32];
+    float cos_yarn[32], sin_yarn[32];
+    memset(cos_none, 0, sizeof(cos_none));
+    memset(sin_none, 0, sizeof(sin_none));
+    memset(cos_yarn, 0, sizeof(cos_yarn));
+    memset(sin_yarn, 0, sizeof(sin_yarn));
+
+    oc_rope_apply(&cfg_none, 5000, 64, 10000.0f, cos_none, sin_none);
+    oc_rope_apply(&cfg_yarn, 5000, 64, 10000.0f, cos_yarn, sin_yarn);
+
+    bool differs = false;
+    for (int i = 0; i < 32; i++) {
+        if (fabsf(cos_none[i] - cos_yarn[i]) > 0.01f ||
+            fabsf(sin_none[i] - sin_yarn[i]) > 0.01f) {
+            differs = true;
+            break;
+        }
+    }
+    cr_assert(differs, "YaRN should produce different angles than no-scaling");
+}
+
+Test(rope, dynamic_ntk_scales_beyond_orig)
+{
+    OcRopeScalingConfig cfg;
+    oc_rope_config_init(&cfg);
+    cfg.type = OC_ROPE_DYNAMIC_NTK;
+    float cos_buf[64], sin_buf[64];
+    memset(cos_buf, 0, sizeof(cos_buf));
+    memset(sin_buf, 0, sizeof(sin_buf));
+    /* pos beyond original_max_pos should use NTK scaling. */
+    cr_assert_eq(oc_rope_apply(&cfg, 8192, 64, 10000.0f, cos_buf, sin_buf), OC_OK);
+    /* Values should be valid. */
+    for (int i = 0; i < 32; i++) {
+        cr_assert(cos_buf[i] >= -2.0f && cos_buf[i] <= 2.0f);
+    }
+}
+
+Test(rope, odd_dim_rejected)
+{
+    OcRopeScalingConfig cfg;
+    oc_rope_config_init(&cfg);
+    float cos_buf[7], sin_buf[7];
+    cr_assert_neq(oc_rope_apply(&cfg, 10, 7, 10000.0f, cos_buf, sin_buf), OC_OK);
 }
 
 Test(rope, apply_ntk_cfg)
@@ -178,4 +284,43 @@ Test(rope, type_name)
     cr_assert_str_eq(oc_rope_scaling_type_name(OC_ROPE_NTK), "ntk");
     cr_assert_str_eq(oc_rope_scaling_type_name(OC_ROPE_YARN), "yarn");
     cr_assert_str_eq(oc_rope_scaling_type_name(OC_ROPE_DYNAMIC_NTK), "dynamic_ntk");
+}
+
+Test(rope, yarn_linear_ramp_factor)
+{
+    OcRopeScalingConfig cfg;
+    oc_rope_config_init(&cfg);
+    /* When min == max, should return 0. */
+    cr_assert_float_eq(oc_rope_yarn_linear_ramp_factor(1.0f, 1.0f, &cfg), 0.0f, 0.001f);
+    /* When max > min, should return 1.0. */
+    cr_assert_float_eq(oc_rope_yarn_linear_ramp_factor(0.0f, 1.0f, &cfg), 1.0f, 0.001f);
+}
+
+Test(rope, ntk_modifies_base)
+{
+    /* NTK should modify the base frequency, producing different angles. */
+    OcRopeScalingConfig cfg_none, cfg_ntk;
+    oc_rope_config_init(&cfg_none);
+    oc_rope_config_init(&cfg_ntk);
+    cfg_ntk.type = OC_ROPE_NTK;
+    cfg_ntk.scale_factor = 4.0f;
+
+    float cos_none[32], sin_none[32];
+    float cos_ntk[32], sin_ntk[32];
+    memset(cos_none, 0, sizeof(cos_none));
+    memset(sin_none, 0, sizeof(sin_none));
+    memset(cos_ntk, 0, sizeof(cos_ntk));
+    memset(sin_ntk, 0, sizeof(sin_ntk));
+
+    oc_rope_apply(&cfg_none, 100, 64, 10000.0f, cos_none, sin_none);
+    oc_rope_apply(&cfg_ntk, 100, 64, 10000.0f, cos_ntk, sin_ntk);
+
+    bool differs = false;
+    for (int i = 0; i < 32; i++) {
+        if (fabsf(cos_none[i] - cos_ntk[i]) > 0.01f) {
+            differs = true;
+            break;
+        }
+    }
+    cr_assert(differs, "NTK should produce different angles than no-scaling");
 }

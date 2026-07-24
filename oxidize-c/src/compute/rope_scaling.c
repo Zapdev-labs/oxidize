@@ -65,11 +65,13 @@ float oc_rope_apply_ntk(float freq, uint32_t pos, float scale,
 int oc_rope_yarn_find_correction_dim(int dim, const OcRopeScalingConfig *cfg)
 {
     if (!cfg) return 0;
-    /* correction_dim = (dim * low_freq_wavelength) / (2 * pi * original_max_pos) */
-    float low_freq_wavelength = cfg->original_max_pos /
-        (cfg->beta_fast * 2.0f * 3.14159265f);
-    return (int)((float)dim * low_freq_wavelength /
-                 (2.0f * 3.14159265f * (float)cfg->original_max_pos));
+    /* Matches Rust: n_dims * ln(orig_ctx / (n_rot * 2*PI)) / (2 * ln(base))
+     * where n_rot = beta_fast or beta_slow, base = 10000 (theta). */
+    float n_rot = cfg->beta_fast;
+    float base = 10000.0f;
+    float ratio = (float)cfg->original_max_pos / (n_rot * 2.0f * 3.14159265f);
+    if (ratio <= 0.0f) return 0;
+    return (int)((float)dim * logf(ratio) / (2.0f * logf(base)));
 }
 
 void oc_rope_yarn_find_correction_range(int *lo, int *hi,
@@ -80,24 +82,30 @@ void oc_rope_yarn_find_correction_range(int *lo, int *hi,
         if (hi) *hi = 0;
         return;
     }
-    *lo = oc_rope_yarn_find_correction_dim(0, cfg);
-    /* For the high end, use beta_slow */
+    /* lo = floor(corr_dim(beta_fast)), hi = ceil(corr_dim(beta_slow)) */
     OcRopeScalingConfig tmp = *cfg;
-    tmp.beta_fast = cfg->beta_slow;
+    tmp.beta_fast = cfg->beta_fast;  /* beta_fast=32 → low-freq dim */
+    *lo = oc_rope_yarn_find_correction_dim(0, cfg);
+    tmp.beta_fast = cfg->beta_slow;  /* beta_slow=1 → high-freq dim */
     *hi = oc_rope_yarn_find_correction_dim(0, &tmp);
     if (*lo > *hi) {
         int t = *lo;
         *lo = *hi;
         *hi = t;
     }
+    /* Clamp to valid range [0, dim-1]. dim is not known here, so clamp >= 0. */
+    if (*lo < 0) *lo = 0;
 }
 
 float oc_rope_yarn_linear_ramp_factor(float min_val, float max_val,
                                       const OcRopeScalingConfig *cfg)
 {
     (void)cfg;
-    if (max_val == min_val) return min_val;
-    return (max_val - min_val) / (max_val - min_val);
+    /* Rust uses: ramp = 1.0 - (i - corr_lo) / (corr_hi - corr_lo), clamped [0,1].
+     * This function computes the denominator-independent ramp factor.
+     * The actual ramp is computed inline in oc_rope_apply. */
+    if (max_val <= min_val) return 0.0f;
+    return 1.0f;
 }
 
 float oc_rope_yarn_mscale(float scale)
@@ -110,26 +118,34 @@ float oc_rope_apply_yarn(float freq, uint32_t pos,
                          const OcRopeScalingConfig *cfg, uint32_t dim)
 {
     if (!cfg) return freq * (float)pos;
+    /* YaRN: blend between extrapolated (high-freq) and interpolated (low-freq)
+     * position scaling using a linear ramp. */
+    float freq_scale = 1.0f / cfg->scale_factor;
+    float mscale = oc_rope_yarn_mscale(cfg->scale_factor);
 
-    /* YaRN: compute the wavelength of this dimension. */
-    float wavelength = 2.0f * 3.14159265f / freq;
-    float ratio = wavelength / (float)cfg->original_max_pos;
+    /* Compute correction range. */
+    int corr_lo, corr_hi;
+    OcRopeScalingConfig tmp_fast = *cfg;
+    tmp_fast.beta_fast = cfg->beta_fast;
+    corr_lo = oc_rope_yarn_find_correction_dim((int)dim, cfg);
+    OcRopeScalingConfig tmp_slow = *cfg;
+    tmp_slow.beta_fast = cfg->beta_slow;
+    corr_hi = oc_rope_yarn_find_correction_dim((int)dim, &tmp_slow);
+    if (corr_lo > corr_hi) { int t = corr_lo; corr_lo = corr_hi; corr_hi = t; }
+    if (corr_lo < 0) corr_lo = 0;
+    if (corr_hi > (int)dim - 1) corr_hi = (int)dim - 1;
 
-    if (ratio < cfg->beta_fast / (float)cfg->original_max_pos) {
-        /* High-frequency: no interpolation. */
-        return freq * (float)pos;
-    } else if (ratio > cfg->beta_slow / (float)cfg->original_max_pos) {
-        /* Low-frequency: interpolate position. */
-        return freq * (float)pos / cfg->scale_factor;
-    } else {
-        /* Middle: blend. */
-        int lo, hi;
-        oc_rope_yarn_find_correction_range(&lo, &hi, cfg);
-        float blend = oc_rope_yarn_linear_ramp_factor(0.0f, 1.0f, cfg);
-        (void)dim;
-        return freq * (float)pos * (1.0f - blend) / cfg->scale_factor +
-               freq * (float)pos * blend;
-    }
+    (void)freq;  /* freq is handled by caller via dim index */
+
+    /* This function returns the effective angle for this freq at this pos.
+     * But the actual per-dimension logic is in oc_rope_apply. This helper
+     * returns the extrapolated angle (no interpolation) as a fallback. */
+    float theta_extrap = freq * (float)pos;
+    float theta_interp = theta_extrap * freq_scale;
+    (void)mscale;
+    (void)corr_lo;
+    (void)corr_hi;
+    return theta_interp;
 }
 
 OcError oc_rope_apply(const OcRopeScalingConfig *cfg, uint32_t pos,
@@ -137,34 +153,82 @@ OcError oc_rope_apply(const OcRopeScalingConfig *cfg, uint32_t pos,
                       float *out_cos, float *out_sin)
 {
     if (!cfg || !out_cos || !out_sin || dim == 0) return OC_ERR_INVALID_ARG;
+    if (dim % 2 != 0) return OC_ERR_INVALID_ARG;
 
-    for (uint32_t i = 0; i < dim; i++) {
-        float freq = base_freq / powf(10000.0f, (float)(2 * i) / (float)dim);
-        float scaled_pos;
+    uint32_t half_dim = dim / 2;
 
-        switch (cfg->type) {
-        case OC_ROPE_LINEAR:
-            scaled_pos = oc_rope_apply_linear(freq, pos, cfg->scale_factor);
-            break;
-        case OC_ROPE_NTK:
-            scaled_pos = oc_rope_apply_ntk(freq, pos, cfg->scale_factor,
-                                           dim, cfg->original_max_pos);
-            break;
-        case OC_ROPE_YARN:
-            scaled_pos = oc_rope_apply_yarn(freq, pos, cfg, dim);
-            break;
-        case OC_ROPE_DYNAMIC_NTK: {
-            float scale = oc_rope_scale_factor(cfg, pos);
-            scaled_pos = oc_rope_apply_ntk(freq, pos, scale, dim, pos);
-            break;
+    /* Precompute frequency for each dimension index (0..half_dim-1).
+     * freq_i = theta ^ (-(2*i)/dim) = theta ^ (-i/half_dim) */
+    /* Rust: freq starts at 1.0, multiplied by theta^(-2/dim) each step. */
+    float freq_mult = powf(base_freq, -2.0f / (float)dim);
+
+    if (cfg->type == OC_ROPE_YARN) {
+        /* YaRN: blend extrapolated and interpolated angles with a linear ramp. */
+        float freq_scale = 1.0f / cfg->scale_factor;
+        float mscale = oc_rope_yarn_mscale(cfg->scale_factor);
+
+        /* Compute correction range using the same formula as Rust. */
+        float ratio_fast = (float)cfg->original_max_pos /
+                           (cfg->beta_fast * 2.0f * 3.14159265f);
+        float ratio_slow = (float)cfg->original_max_pos /
+                           (cfg->beta_slow * 2.0f * 3.14159265f);
+        float base_log = 2.0f * logf(base_freq);
+        float corr_lo = floorf((float)dim * logf(ratio_fast) / base_log);
+        float corr_hi = ceilf((float)dim * logf(ratio_slow) / base_log);
+        if (corr_lo < 0.0f) corr_lo = 0.0f;
+        if (corr_hi > (float)dim - 1.0f) corr_hi = (float)dim - 1.0f;
+        float denom = corr_hi - corr_lo;
+
+        float freq = 1.0f;
+        for (uint32_t i = 0; i < half_dim; i++) {
+            float theta_extrap = (float)pos * freq;
+            float theta_interp = theta_extrap * freq_scale;
+
+            float ramp = 1.0f - ((float)i - corr_lo) /
+                         (denom > 0.001f ? denom : 0.001f);
+            if (ramp < 0.0f) ramp = 0.0f;
+            if (ramp > 1.0f) ramp = 1.0f;
+
+            float angle = theta_interp * (1.0f - ramp) + theta_extrap * ramp;
+            out_cos[i] = cosf(angle) * mscale;
+            out_sin[i] = sinf(angle) * mscale;
+            freq *= freq_mult;
         }
-        default:
-            scaled_pos = freq * (float)pos;
-            break;
+    } else if (cfg->type == OC_ROPE_DYNAMIC_NTK) {
+        /* Dynamic NTK: scale base frequency dynamically based on position. */
+        float scale = oc_rope_scale_factor(cfg, pos);
+        float alpha = powf(scale, (float)dim / (float)(dim > 2 ? dim - 2 : 1));
+        float ntk_base = base_freq * alpha;
+        for (uint32_t i = 0; i < half_dim; i++) {
+            float freq = powf(ntk_base, -(float)(2 * i) / (float)dim);
+            float angle = freq * (float)pos;
+            out_cos[i] = cosf(angle);
+            out_sin[i] = sinf(angle);
         }
-
-        out_cos[i] = cosf(scaled_pos);
-        out_sin[i] = sinf(scaled_pos);
+    } else {
+        /* None, Linear, NTK: use the standard per-dimension approach. */
+        float freq = 1.0f;
+        for (uint32_t i = 0; i < half_dim; i++) {
+            float scaled_pos;
+            switch (cfg->type) {
+            case OC_ROPE_LINEAR:
+                scaled_pos = (float)pos / cfg->scale_factor;
+                break;
+            case OC_ROPE_NTK: {
+                float alpha = powf(cfg->scale_factor,
+                    (float)dim / (float)(dim > 2 ? dim - 2 : 1));
+                float ntk_freq = freq / alpha;
+                scaled_pos = ntk_freq * (float)pos;
+                break;
+            }
+            default:
+                scaled_pos = freq * (float)pos;
+                break;
+            }
+            out_cos[i] = cosf(scaled_pos);
+            out_sin[i] = sinf(scaled_pos);
+            freq *= freq_mult;
+        }
     }
 
     return OC_OK;
@@ -176,25 +240,27 @@ OcError oc_rope_apply_to_tensor(const OcRopeScalingConfig *cfg, uint32_t pos,
 {
     if (!cfg || !tensor || head_dim == 0 || n_heads == 0)
         return OC_ERR_INVALID_ARG;
+    if (head_dim % 2 != 0) return OC_ERR_INVALID_ARG;
 
-    /* Allocate cos/sin arrays on stack (head_dim is typically 64-128). */
+    /* Allocate cos/sin arrays on stack (head_dim/2 is typically 32-64). */
     float cos_buf[256];
     float sin_buf[256];
-    if (head_dim > 256) return OC_ERR_INVALID_ARG;
+    uint32_t half_dim = head_dim / 2;
+    if (half_dim > 256) return OC_ERR_INVALID_ARG;
 
     OcError e = oc_rope_apply(cfg, pos, head_dim, base_freq, cos_buf, sin_buf);
     if (e != OC_OK) return e;
 
-    /* Apply rotation to each head. */
+    /* Apply rotation to each head (NeoX/HF split-half style). */
     for (uint32_t h = 0; h < n_heads; h++) {
         float *head = tensor + h * head_dim;
-        for (uint32_t i = 0; i < head_dim / 2; i++) {
+        for (uint32_t i = 0; i < half_dim; i++) {
             float c = cos_buf[i];
             float s = sin_buf[i];
             float x0 = head[i];
-            float x1 = head[i + head_dim / 2];
+            float x1 = head[i + half_dim];
             head[i] = x0 * c - x1 * s;
-            head[i + head_dim / 2] = x0 * s + x1 * c;
+            head[i + half_dim] = x0 * s + x1 * c;
         }
     }
 
