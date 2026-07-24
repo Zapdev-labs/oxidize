@@ -176,7 +176,7 @@ OcLoraPlanError oc_lora_plan_application(const char *const *base_tensor_names,
             if (n_a >= 256) return OC_LORA_PLAN_INVALID_ARG;
             /* Check for duplicate. */
             for (size_t j = 0; j < n_a; j++) {
-                size_t existing_len;
+                size_t existing_len = 0;
                 strip_suffix(a_names[j], suffix_a, &existing_len);
                 if (existing_len == base_len &&
                     strncmp(a_bases[j], base, base_len) == 0)
@@ -191,7 +191,7 @@ OcLoraPlanError oc_lora_plan_application(const char *const *base_tensor_names,
         if (base) {
             if (n_b >= 256) return OC_LORA_PLAN_INVALID_ARG;
             for (size_t j = 0; j < n_b; j++) {
-                size_t existing_len;
+                size_t existing_len = 0;
                 strip_suffix(b_names[j], suffix_b, &existing_len);
                 if (existing_len == base_len &&
                     strncmp(b_bases[j], base, base_len) == 0)
@@ -221,13 +221,13 @@ OcLoraPlanError oc_lora_plan_application(const char *const *base_tensor_names,
 
     /* For each lora_a, find the matching lora_b. */
     for (size_t i = 0; i < n_a; i++) {
-        size_t a_base_len;
+        size_t a_base_len = 0;
         strip_suffix(a_names[i], suffix_a, &a_base_len);
         const char *a_base = a_bases[i];
 
         bool found_b = false;
         for (size_t j = 0; j < n_b; j++) {
-            size_t b_base_len;
+            size_t b_base_len = 0;
             strip_suffix(b_names[j], suffix_b, &b_base_len);
             if (b_base_len == a_base_len &&
                 strncmp(b_bases[j], a_base, a_base_len) == 0) {
@@ -252,13 +252,13 @@ OcLoraPlanError oc_lora_plan_application(const char *const *base_tensor_names,
 
     /* Check for lora_b without matching lora_a. */
     for (size_t j = 0; j < n_b; j++) {
-        size_t b_base_len;
+        size_t b_base_len = 0;
         strip_suffix(b_names[j], suffix_b, &b_base_len);
         const char *b_base = b_bases[j];
 
         bool found_a = false;
         for (size_t i = 0; i < n_a; i++) {
-            size_t a_base_len;
+            size_t a_base_len = 0;
             strip_suffix(a_names[i], suffix_a, &a_base_len);
             if (a_base_len == b_base_len &&
                 strncmp(a_bases[i], b_base, b_base_len) == 0) {

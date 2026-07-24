@@ -104,6 +104,10 @@ typedef struct OcLlamaLayer {
     float *mla_kv_a_norm;               /* owned f32, length kv_lora_dim */
     float *attn_norm;       /* owned f32, length n_embd              */
     float *ffn_norm;       /* owned f32, length n_embd              */
+    /* LayerNorm biases (beta) for GPT-2/NeoX/Falcon; NULL for RMSNorm
+     * architectures (Llama-family has no norm bias). Owned f32, n_embd. */
+    float *attn_norm_bias;
+    float *ffn_norm_bias;
 } OcLlamaLayer;
 
 typedef struct OcLlamaModel {
@@ -112,8 +116,14 @@ typedef struct OcLlamaModel {
     OcWeightView     tok_embeddings;
     OcWeightView     output;        /* aliases tok_embeddings if tied */
     float           *final_norm;    /* owned f32, length n_embd       */
+    float           *final_norm_bias; /* LayerNorm beta (GPT-2/NeoX/Falcon),
+                                       * NULL for RMSNorm archs. Owned.  */
     OcLlamaLayer    *layers;        /* n_layer entries                */
     OcModelArchitecture arch;
+    /* GPT-2 learned positional embeddings (wpe), resolved lazily on first
+     * forward. Per-model (views into this model's mmap). */
+    OcWeightView     gpt2_pos_embed;
+    bool             gpt2_pos_resolved;
 } OcLlamaModel;
 
 /* Per-sequence KV cache + scratch workspace. One session = one sequence. */

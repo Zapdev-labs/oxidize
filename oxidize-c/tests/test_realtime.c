@@ -70,7 +70,7 @@ Test(realtime, format_speech_started)
     size_t n = oc_realtime_format_event(OC_RT_SPEECH_STARTED, NULL,
                                         buf, sizeof(buf));
     cr_assert_gt(n, 0);
-    cr_assert_str_eq(buf, "{\"type\":\"speech.started\",\"delta\":}");
+    cr_assert_str_eq(buf, "{\"type\":\"speech.started\",\"delta\":null}");
 }
 
 Test(realtime, format_text_delta)

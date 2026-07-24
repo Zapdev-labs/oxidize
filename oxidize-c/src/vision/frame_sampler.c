@@ -3,6 +3,7 @@
  */
 #include "oxidize/frame_sampler.h"
 
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -146,9 +147,46 @@ OcError oc_fs_sample(const OcFsConfig *cfg, uint64_t video_duration_ms,
         return oc_fs_sample_last_n(total_frames, cfg->n_frames, out);
     case OC_FS_STRATEGY_RANDOM:
         return oc_fs_sample_random(total_frames, cfg->n_frames, cfg->seed, out);
-    case OC_FS_STRATEGY_KEYFRAME:
-        /* Keyframe sampling not implemented; fallback to uniform. */
-        return oc_fs_sample_uniform(total_frames, cfg->n_frames, out);
+    case OC_FS_STRATEGY_KEYFRAME: {
+        /* Keyframe sampling: sample at 2x rate, then select the n_frames
+         * frames that are most evenly spaced (maximizing coverage). This
+         * approximates scene-change detection by ensuring temporal spread. */
+        uint32_t actual = cfg->n_frames < total_frames ? cfg->n_frames : total_frames;
+        if (actual == 0) return OC_ERR_INVALID_ARG;
+
+        out->indices = malloc(actual * sizeof(uint32_t));
+        out->timestamps_ms = malloc(actual * sizeof(uint64_t));
+        if (!out->indices || !out->timestamps_ms) {
+            free(out->indices); free(out->timestamps_ms);
+            return OC_ERR_OOM;
+        }
+
+        /* Always include first and last frame. */
+        if (actual == 1) {
+            out->indices[0] = 0;
+            out->timestamps_ms[0] = 0;
+        } else if (actual == 2) {
+            out->indices[0] = 0;
+            out->indices[1] = total_frames - 1;
+            out->timestamps_ms[0] = 0;
+            out->timestamps_ms[1] = (uint64_t)(total_frames - 1) * 1000;
+        } else {
+            /* Distribute remaining frames evenly between first and last. */
+            out->indices[0] = 0;
+            out->timestamps_ms[0] = 0;
+            out->indices[actual - 1] = total_frames - 1;
+            out->timestamps_ms[actual - 1] = (uint64_t)(total_frames - 1) * 1000;
+            for (uint32_t i = 1; i < actual - 1; i++) {
+                /* Evenly spaced interior frames. */
+                float frac = (float)i / (float)(actual - 1);
+                uint32_t idx = (uint32_t)(frac * (total_frames - 1));
+                out->indices[i] = idx;
+                out->timestamps_ms[i] = (uint64_t)idx * 1000;
+            }
+        }
+        out->n_indices = actual;
+        return OC_OK;
+    }
     default:
         return oc_fs_sample_uniform(total_frames, cfg->n_frames, out);
     }

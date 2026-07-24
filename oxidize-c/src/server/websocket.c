@@ -18,10 +18,12 @@
 #define _POSIX_C_SOURCE 200809L   /* snprintf */
 #include "oxidize/websocket.h"
 
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 /* ─── SHA-1 (FIPS 180-4) ──────────────────────────────────────────────────── */
@@ -213,12 +215,14 @@ size_t oc_ws_parse_frame(const uint8_t *buf, size_t len, OcWsFrame *frame)
         }
         hdr = 10u;
     }
+    /* Reject lengths that cannot fit size_t / would wrap hdr + payload_len. */
+    if (payload_len > (uint64_t)(SIZE_MAX - hdr - 4u)) return 0;
     if (frame->masked) {
         if (len < hdr + 4u) return 0;
         memcpy(frame->mask, buf + hdr, 4);
         hdr += 4u;
     }
-    if (len < hdr + payload_len) return 0;
+    if (len < hdr + (size_t)payload_len) return 0;
     frame->payload = buf + hdr;
     frame->payload_len = (size_t)payload_len;
     frame->frame_len = hdr + (size_t)payload_len;
@@ -232,6 +236,7 @@ size_t oc_ws_build_frame(uint8_t opcode, bool fin, bool masked,
                          size_t payload_len, uint8_t *out, size_t cap)
 {
     if (out == NULL) return 0;
+    if (payload == NULL && payload_len > 0) return 0;
     size_t hdr = 2u;
     if (payload_len < 126u) {
         /* nothing */
@@ -312,32 +317,136 @@ void oc_ws_session_free(OcWsSession *sess)
 
 /* ─── Socket-level read/send ───────────────────────────────────────────────── */
 
+/* ponytail: 16 MiB cap on a single (possibly fragmented) message — bump if a
+ * legitimate use case ever needs more. */
+#define OC_WS_MAX_MESSAGE (16u * 1024u * 1024u)
+
+/* Ensure frag_buf can hold at least `need` bytes. */
+static OcError frag_reserve(OcWsSession *sess, size_t need)
+{
+    if (need <= sess->frag_cap) return OC_OK;
+    size_t cap = sess->frag_cap ? sess->frag_cap : 65536u;
+    while (cap < need) cap *= 2u;
+    uint8_t *nb = realloc(sess->frag_buf, cap);
+    if (nb == NULL) return OC_ERR_OOM;
+    sess->frag_buf = nb;
+    sess->frag_cap = cap;
+    return OC_OK;
+}
+
+/* Read exactly one complete wire frame into *frame, buffering partial and
+ * coalesced TCP reads in recv_buf. On return the frame's raw bytes are
+ * still at the front of recv_buf. */
+static OcError read_one_frame(OcWsSession *sess, OcWsFrame *frame)
+{
+    for (;;) {
+        if (sess->recv_len >= 2u) {
+            size_t consumed = oc_ws_parse_frame(sess->recv_buf, sess->recv_len,
+                                                frame);
+            if (consumed > 0) return OC_OK;
+        }
+        if (sess->recv_len >= OC_WS_MAX_MESSAGE) return OC_ERR_FORMAT;
+        if (sess->recv_len == sess->recv_cap) {
+            size_t cap = sess->recv_cap * 2u;
+            uint8_t *nb = realloc(sess->recv_buf, cap);
+            if (nb == NULL) return OC_ERR_OOM;
+            sess->recv_buf = nb;
+            sess->recv_cap = cap;
+        }
+        ssize_t n = read(sess->fd, sess->recv_buf + sess->recv_len,
+                         sess->recv_cap - sess->recv_len);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) return OC_ERR_IO;
+        sess->recv_len += (size_t)n;
+    }
+}
+
+/* Drop the first `consumed` bytes of recv_buf (compact leftover bytes). */
+static void recv_consume(OcWsSession *sess, size_t consumed)
+{
+    memmove(sess->recv_buf, sess->recv_buf + consumed,
+            sess->recv_len - consumed);
+    sess->recv_len -= consumed;
+}
+
 OcError oc_ws_read_frame(OcWsSession *sess, OcWsFrame *frame)
 {
     if (sess == NULL || frame == NULL) return OC_ERR_INVALID_ARG;
     if (sess->state == OC_WS_CLOSED) return OC_ERR_IO;
-    /* Read at least 2 bytes for the header, then peek the rest. */
-    ssize_t n = read(sess->fd, sess->recv_buf, sess->recv_cap);
-    if (n <= 0) return OC_ERR_IO;
-    size_t consumed = oc_ws_parse_frame(sess->recv_buf, (size_t)n, frame);
-    if (consumed == 0) return OC_ERR_FORMAT;
-    /* Unmask payload in-place if needed. */
-    if (frame->masked && frame->payload_len > 0) {
-        /* payload aliases recv_buf; we unmask into frag_buf to avoid mutating
-         * the receive buffer (which may contain more bytes). */
-        if (frame->payload_len > sess->frag_cap) {
-            uint8_t *nb = realloc(sess->frag_buf, frame->payload_len);
-            if (nb == NULL) return OC_ERR_OOM;
-            sess->frag_buf = nb;
-            sess->frag_cap = frame->payload_len;
+
+    for (;;) {
+        OcError e = read_one_frame(sess, frame);
+        if (e != OC_OK) return e;
+        /* RFC 6455 §5.1: a server MUST reject unmasked client frames. */
+        if (!frame->masked) return OC_ERR_FORMAT;
+
+        /* Copy + unmask the payload out of recv_buf into frag_buf so the
+         * receive buffer can be compacted immediately. Fragment payloads
+         * accumulate at frag_len; control/whole-message payloads land just
+         * past any in-progress fragment data. */
+        bool is_control = (frame->opcode & 0x8u) != 0;
+        bool is_data_start = frame->opcode == OC_WS_OPCODE_TEXT ||
+                             frame->opcode == OC_WS_OPCODE_BINARY;
+        bool is_cont = frame->opcode == OC_WS_OPCODE_CONTINUATION;
+        size_t plen = frame->payload_len;
+
+        if (is_control) {
+            e = frag_reserve(sess, sess->frag_len + plen);
+            if (e != OC_OK) return e;
+            uint8_t *dst = sess->frag_buf + sess->frag_len;
+            for (size_t i = 0; i < plen; i++) {
+                dst[i] = frame->payload[i] ^ frame->mask[i % 4];
+            }
+            recv_consume(sess, frame->frame_len);
+            frame->payload = dst;
+            frame->masked = false;
+            return OC_OK;
         }
-        for (size_t i = 0; i < frame->payload_len; i++) {
-            sess->frag_buf[i] = frame->payload[i] ^ frame->mask[i % 4];
+
+        if (is_data_start && frame->fin && !sess->frag_in_progress) {
+            /* Whole unfragmented message. */
+            e = frag_reserve(sess, plen);
+            if (e != OC_OK) return e;
+            for (size_t i = 0; i < plen; i++) {
+                sess->frag_buf[i] = frame->payload[i] ^ frame->mask[i % 4];
+            }
+            recv_consume(sess, frame->frame_len);
+            frame->payload = sess->frag_buf;
+            frame->masked = false;
+            return OC_OK;
         }
-        frame->payload = sess->frag_buf;
-        frame->masked = false;
+
+        /* Fragmented path. */
+        if (is_data_start) {
+            if (sess->frag_in_progress) return OC_ERR_FORMAT;
+            sess->frag_in_progress = true;
+            sess->frag_opcode = frame->opcode;
+            sess->frag_len = 0;
+        } else if (is_cont) {
+            if (!sess->frag_in_progress) return OC_ERR_FORMAT;
+        } else {
+            return OC_ERR_FORMAT;   /* reserved opcode */
+        }
+        if (sess->frag_len + plen > OC_WS_MAX_MESSAGE) return OC_ERR_FORMAT;
+        e = frag_reserve(sess, sess->frag_len + plen);
+        if (e != OC_OK) return e;
+        for (size_t i = 0; i < plen; i++) {
+            sess->frag_buf[sess->frag_len + i] =
+                frame->payload[i] ^ frame->mask[i % 4];
+        }
+        sess->frag_len += plen;
+        recv_consume(sess, frame->frame_len);
+        if (frame->fin) {
+            frame->opcode = sess->frag_opcode;
+            frame->payload = sess->frag_buf;
+            frame->payload_len = sess->frag_len;
+            frame->masked = false;
+            sess->frag_in_progress = false;
+            sess->frag_len = 0;   /* buffer contents stay valid until next read */
+            return OC_OK;
+        }
+        /* Not final: keep reading frames until the message completes. */
     }
-    return OC_OK;
 }
 
 OcError oc_ws_send_frame(OcWsSession *sess, uint8_t opcode, bool fin,
@@ -357,7 +466,13 @@ OcError oc_ws_send_frame(OcWsSession *sess, uint8_t opcode, bool fin,
     }
     size_t off = 0;
     while (off < n) {
-        ssize_t w = write(sess->fd, buf + off, n - off);
+        /* Use send() so a peer disconnect yields EPIPE instead of SIGPIPE. */
+#ifdef MSG_NOSIGNAL
+        ssize_t w = send(sess->fd, buf + off, n - off, MSG_NOSIGNAL);
+#else
+        ssize_t w = send(sess->fd, buf + off, n - off, 0);
+#endif
+        if (w < 0 && errno == EINTR) continue;
         if (w <= 0) {
             free(buf);
             return OC_ERR_IO;

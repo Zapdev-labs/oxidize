@@ -143,16 +143,18 @@ bool oc_cuda_argmax(
 /* ─── Top-k partial sort ──────────────────────────────────────────────────
  *
  * Returns the indices of the top-k logits in descending order of logit
- * value. Uses a per-thread bitonic selection pass followed by a block
- * reduction; k must be ≤ 1024 (one block). Suitable for typical
- * top-k sampling values (k = 40, 50, 100).
+ * value. Uses a per-thread selection pass followed by a block merge.
+ * The block staging area lives in shared memory (blockDim.x * k * 8
+ * bytes), which limits k to 192; the wrapper shrinks the block size as
+ * k grows so typical sampling values (k = 40, 50, 100) fit. Requires
+ * k ≤ vocab_size (returns false otherwise — no fabricated entries).
  *
  * Parameters:
  *   d_logits   — F32 logits [vocab_size]
  *   d_out_idx  — uint32 output indices [k]
  *   d_out_val  — F32 output logits [k]
- *   vocab_size — number of logits
- *   k          — number of top elements to return (≤ 1024)
+ *   vocab_size — number of logits (must be ≥ k)
+ *   k          — number of top elements to return (≤ 192)
  */
 bool oc_cuda_topk(
     const float *d_logits, uint32_t *d_out_idx, float *d_out_val,

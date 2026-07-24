@@ -38,7 +38,9 @@ typedef struct OcChatHistory {
 /* Initialize chat history. */
 void oc_chat_history_init(OcChatHistory *h, OcChatTemplate tmpl);
 
-/* Append a message to the history. Takes ownership of role/content. */
+/* Append a message to the history. Takes ownership of role/content only on
+ * OC_OK; on error (e.g. OC_ERR_OOM) the caller retains ownership and must
+ * free both. */
 OcError oc_chat_history_append(OcChatHistory *h, char *role, char *content);
 
 /* Render the full conversation history as a prompt string using the

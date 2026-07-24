@@ -84,11 +84,11 @@ Test(distributed, init_multi_node_pipeline)
     cfg.coordinator_addr = NULL;
     cfg.listen_port = 0;
     OcError e = oc_distributed_init(&sched, &cfg);
-    /* Multi-node init may fail to bind/connect but should return OK. */
-    cr_assert_eq(e, OC_OK, "multi-node init should succeed even without network");
-    cr_assert(sched.initialized);
-    cr_assert_eq(sched.role, OC_NODE_ROLE_PIPELINE_WORKER);
-    cr_assert_eq(sched.n_peers, 4);
+    /* Multi-node init is rejected until peer endpoint configuration and
+     * connection acceptance exist. */
+    cr_assert_eq(e, OC_ERR_NETWORK,
+                 "multi-node init should be rejected as unsupported");
+    cr_assert(!sched.initialized);
     oc_distributed_free(&sched);
 }
 
@@ -535,38 +535,32 @@ Test(distributed, reconnect_null_scheduler)
 /* Multi-node pipeline edge cases                                     */
 /* ------------------------------------------------------------------ */
 
-Test(distributed, multi_node_first_stage_recv_noop)
+Test(distributed, multi_node_init_rejected_unsupported)
 {
-    /* On the first pipeline stage, recv is a no-op even in multi-node. */
+    /* Multi-node configs validate, but init rejects them until real peer
+     * endpoint configuration and connection acceptance exist. */
     OcDistributedScheduler sched;
     OcDistributedConfig cfg = make_multinode_config(4, 0, 4, 1);
     cfg.coordinator_addr = NULL;
     cfg.listen_port = 0;
-    cr_assert_eq(oc_distributed_init(&sched, &cfg), OC_OK);
-
-    float out[4] = {0};
-    cr_assert_eq(oc_distributed_recv_activations(&sched, out, 4), OC_OK);
-    /* bytes_received should still be 0 (no-op). */
-    const OcDistributedStats *st = oc_distributed_get_stats(&sched);
-    cr_assert_eq(st->bytes_received, 0);
-
+    cr_assert_eq(oc_distributed_validate_config(&cfg), OC_OK);
+    cr_assert_eq(oc_distributed_init(&sched, &cfg), OC_ERR_NETWORK);
+    cr_assert(!sched.initialized);
     oc_distributed_free(&sched);
 }
 
-Test(distributed, multi_node_last_stage_send_noop)
+Test(distributed, validate_config_reject_too_many_nodes)
 {
-    /* On the last pipeline stage, send is a no-op even in multi-node. */
-    OcDistributedScheduler sched;
+    OcDistributedConfig cfg = make_multinode_config(4, 0, 4, 1);
+    cfg.n_nodes = OC_DIST_MAX_NODES + 1;
+    cr_assert_eq(oc_distributed_validate_config(&cfg), OC_ERR_INVALID_ARG);
+}
+
+Test(distributed, validate_config_reject_inconsistent_rank_tuple)
+{
+    /* rank 3 claiming pipeline/tensor rank 0/0 must be rejected. */
     OcDistributedConfig cfg = make_multinode_config(4, 3, 4, 1);
-    cfg.coordinator_addr = NULL;
-    cfg.listen_port = 0;
-    cr_assert_eq(oc_distributed_init(&sched, &cfg), OC_OK);
-
-    float data[] = {1.0f, 2.0f, 3.0f, 4.0f};
-    cr_assert_eq(oc_distributed_send_activations(&sched, data, 4), OC_OK);
-    /* bytes_sent should still be 0 (no-op). */
-    const OcDistributedStats *st = oc_distributed_get_stats(&sched);
-    cr_assert_eq(st->bytes_sent, 0);
-
-    oc_distributed_free(&sched);
+    cfg.pipeline_rank = 0;
+    cfg.tensor_rank = 0;
+    cr_assert_eq(oc_distributed_validate_config(&cfg), OC_ERR_INVALID_ARG);
 }

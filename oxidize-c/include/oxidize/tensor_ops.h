@@ -167,14 +167,17 @@ void oc_tensor_gemm_batch_f32(const float *A, const float *B, float *C,
 
 /* Scaled dot-product attention for a single head.
  * Q: [d_head], K: [seq_len × d_head], V: [seq_len × d_head]
- * out: [d_head], scale: 1/sqrt(d_head) */
+ * out: [d_head], scale: 1/sqrt(d_head)
+ * On internal allocation failure, out is zero-filled. */
 void oc_tensor_attention_head_f32(const float *Q, const float *K,
                                     const float *V, float *out,
                                     size_t seq_len, size_t d_head, float scale);
 
 /* Multi-head attention with GQA.
  * Q: [n_head_q × d_head], K: [n_head_kv × seq_len × d_head], V: same.
- * out: [n_head_q × d_head] */
+ * out: [n_head_q × d_head]
+ * n_head_kv must be > 0; a zero value yields a zero-filled out.
+ * On internal allocation failure, out is zero-filled. */
 void oc_tensor_attention_mha_f32(const float *Q, const float *K,
                                    const float *V, float *out,
                                    size_t n_head_q, size_t n_head_kv,

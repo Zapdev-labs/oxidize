@@ -167,13 +167,18 @@ typedef struct OcDistributedScheduler {
  * (n_nodes == 1), no sockets are opened and all communication functions
  * are no-ops that return OC_OK.
  *
+ * Multi-node mode (n_nodes > 1) is NOT yet supported: peer endpoint
+ * configuration, connection acceptance, and rank handshakes are not
+ * implemented, so init rejects such configs with OC_ERR_NETWORK rather
+ * than advertising a scheduler whose peers can never communicate.
+ *
  * Returns:
  *   OC_OK              — scheduler ready.
  *   OC_ERR_INVALID_ARG — NULL scheduler or invalid config (see below).
- *   OC_ERR_NETWORK     — could not bind/connect (multi-node only).
+ *   OC_ERR_NETWORK     — multi-node config (unsupported, see above).
  *
  * Config validation rules:
- *   - n_nodes >= 1
+ *   - n_nodes >= 1 && n_nodes <= OC_DIST_MAX_NODES
  *   - node_rank < n_nodes
  *   - pipeline_stages >= 1 && pipeline_stages <= n_nodes
  *   - tensor_parallel_size >= 1
@@ -181,6 +186,9 @@ typedef struct OcDistributedScheduler {
  *   - pipeline_rank < pipeline_stages
  *   - tensor_rank < tensor_parallel_size
  *   - activation_dtype_size > 0
+ *   - multi-node, node_rank < pipeline_stages * tensor_parallel_size:
+ *     node_rank == pipeline_rank * tensor_parallel_size + tensor_rank
+ *     (nodes at or beyond the grid are unused and only need valid bounds)
  */
 OcError oc_distributed_init(OcDistributedScheduler *sched,
                             const OcDistributedConfig *cfg);

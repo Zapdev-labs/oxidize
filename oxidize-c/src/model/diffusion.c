@@ -116,7 +116,7 @@ OcError oc_diff_scheduler_step(OcDiffScheduler *sched, OcDiffState *state,
     /* DDIM step: x_{t-1} = (x_t - sigma * model_output) / sqrt(1 + sigma^2) * sqrt(1 + next_sigma^2) + next_sigma * noise */
     float scale = sqrtf(1.0f + next_sigma * next_sigma) / sqrtf(1.0f + sigma * sigma);
 
-    for (uint32_t i = 0; i < state->latent_dim * state->batch_size; i++) {
+    for (size_t i = 0; i < (size_t)state->latent_dim * state->batch_size; i++) {
         float x = state->latents[i];
         float m = model_output[i];
         state->latents[i] = (x - sigma * m) * scale;
@@ -167,13 +167,14 @@ OcError oc_diff_state_init(OcDiffState *state, uint32_t latent_dim,
     memset(state, 0, sizeof(*state));
     state->latent_dim = latent_dim;
     state->batch_size = batch_size > 0 ? batch_size : 1;
-    state->latents = calloc(state->latent_dim * state->batch_size, sizeof(float));
+    size_t n_latents = (size_t)state->latent_dim * (size_t)state->batch_size;
+    state->latents = calloc(n_latents, sizeof(float));
     if (!state->latents) return OC_ERR_OOM;
     state->current_sigma = 0.0f;
 
     /* Initialize with random noise. */
     uint32_t rng = seed;
-    for (uint32_t i = 0; i < state->latent_dim * state->batch_size; i++)
+    for (size_t i = 0; i < n_latents; i++)
         state->latents[i] = gaussian_rand(&rng);
 
     return OC_OK;

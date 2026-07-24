@@ -25,9 +25,13 @@ OcError oc_safetensors_parse_header(const char *path,
     FILE *f = fopen(path, "rb");
     if (!f) return OC_ERR_IO;
 
-    /* Read 8-byte header length. */
+    /* Read 8-byte header length (explicit little-endian decode for
+     * portability to big-endian hosts). */
+    uint8_t len_bytes[8];
+    if (fread(len_bytes, 1, 8, f) != 8) { fclose(f); return OC_ERR_FORMAT; }
     uint64_t header_len = 0;
-    if (fread(&header_len, 8, 1, f) != 1) { fclose(f); return OC_ERR_FORMAT; }
+    for (int i = 7; i >= 0; i--)
+        header_len = (header_len << 8) | len_bytes[i];
     if (header_len == 0 || header_len > (1ULL << 30)) {
         fclose(f);
         return OC_ERR_FORMAT;
@@ -104,7 +108,9 @@ const char *oc_map_tensor_name(const char *st_name, const char *arch)
         char *end = NULL;
         unsigned long layer = strtoul(p, &end, 10);
         if (end && *end == '.') {
-            static char buf[256];
+            /* Thread-local: results are stable across threads, but a second
+             * call on the same thread reuses this buffer (see header). */
+            static _Thread_local char buf[256];
             const char *suffix = end + 1;
 
             /* Attention weights. */
@@ -176,24 +182,16 @@ OcError oc_safetensors_to_gguf(const OcConvertConfig *cfg)
         return e;
     }
 
-    /* TODO: Parse the JSON header to extract tensor names, dtypes, shapes, and offsets.
-     * For now, this is a placeholder that demonstrates the API. */
-
     if (cfg->verbose) {
         fprintf(stderr, "convert: %s → %s\n", cfg->input_path, cfg->output_path);
         fprintf(stderr, "  header size: %zu bytes\n", header_len);
     }
 
-    /* The full implementation would:
-     * 1. Parse the JSON header to get tensor list (name, dtype, shape, offset, length).
-     * 2. Detect architecture from tensor names.
-     * 3. Map tensor names to GGUF canonical names.
-     * 4. Open the SafeTensors file, read tensor data.
-     * 5. Optionally quantize F32/F16 weights to the target type.
-     * 6. Write GGUF file with mapped tensor names and data.
-     * 7. Read model config from config.json if available.
-     */
-
+    /* Full conversion (JSON tensor-table parsing, name mapping, quantization,
+     * GGUF write via oc_gguf_writer) is not implemented yet. Return an error
+     * rather than reporting success without producing an output file. */
+    oc_log(OC_LOG_ERROR,
+           "safetensors_to_gguf: conversion not implemented; no output written");
     free(header_json);
-    return OC_OK;
+    return OC_ERR_MODEL;
 }

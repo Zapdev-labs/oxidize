@@ -35,27 +35,50 @@ OcError oc_vision_encode(OcVisionEncoder *enc, const OcImage *img,
     if (enc->patch_proj != NULL) {
         uint32_t p = enc->config.patch_size;
         uint32_t c = img->channels;
-        uint32_t patch_dim = p * p * c;
         uint32_t n_side = enc->config.image_size / p;
         uint32_t hidden = enc->config.hidden_size;
 
-        uint8_t *resized = NULL;
+        uint8_t *rgb = NULL;
+        OcImage rgb_img;
         const OcImage *eff_img = img;
-        if (img->width != enc->config.image_size ||
-            img->height != enc->config.image_size) {
+        if (c == 4) {
+            /* Projections are trained on RGB; drop the alpha channel so
+             * patch_dim matches the weight layout instead of reading past
+             * patch_proj. */
+            size_t npix = (size_t)img->width * img->height;
+            rgb = malloc(npix * 3);
+            if (!rgb) return OC_ERR_OOM;
+            for (size_t i = 0; i < npix; i++) {
+                rgb[i * 3 + 0] = img->data[i * 4 + 0];
+                rgb[i * 3 + 1] = img->data[i * 4 + 1];
+                rgb[i * 3 + 2] = img->data[i * 4 + 2];
+            }
+            rgb_img = (OcImage){ .data=rgb, .width=img->width,
+                                 .height=img->height, .channels=3,
+                                 .format=OC_IMAGE_RGB };
+            eff_img = &rgb_img;
+            c = 3;
+        }
+        uint32_t patch_dim = p * p * c;
+
+        uint8_t *resized = NULL;
+        if (eff_img->width != enc->config.image_size ||
+            eff_img->height != enc->config.image_size) {
             resized = malloc((size_t)enc->config.image_size *
                              enc->config.image_size * c);
-            if (!resized) return OC_ERR_OOM;
-            oc_vision_resize(img, enc->config.image_size,
+            if (!resized) { free(rgb); return OC_ERR_OOM; }
+            oc_vision_resize(eff_img, enc->config.image_size,
                             enc->config.image_size, resized);
-            OcImage ri = { .data=resized, .width=enc->config.image_size,
+            rgb_img = (OcImage){ .data=resized, .width=enc->config.image_size,
                           .height=enc->config.image_size, .channels=c,
-                          .format=img->format };
-            eff_img = &ri;
+                          .format=eff_img->format };
+            free(rgb);
+            rgb = NULL;
+            eff_img = &rgb_img;
         }
 
         float *patch_pixels = malloc(patch_dim * sizeof(float));
-        if (!patch_pixels) { free(resized); return OC_ERR_OOM; }
+        if (!patch_pixels) { free(resized); free(rgb); return OC_ERR_OOM; }
 
         for (uint32_t py = 0; py < n_side; py++) {
             for (uint32_t px = 0; px < n_side; px++) {
@@ -88,16 +111,25 @@ OcError oc_vision_encode(OcVisionEncoder *enc, const OcImage *img,
         }
         free(patch_pixels);
         free(resized);
+        free(rgb);
 
         if (enc->ln_weight != NULL && enc->ln_bias != NULL) {
             for (uint32_t pi = 0; pi < enc->config.n_patches; pi++) {
                 float *emb = out_embeddings + (size_t)pi * hidden;
+                /* True LayerNorm: center by per-patch mean, then scale by
+                 * the standard deviation. */
+                float mean = 0.0f;
+                for (uint32_t h = 0; h < hidden; h++) mean += emb[h];
+                mean /= hidden;
                 float ss = 0.0f;
-                for (uint32_t h = 0; h < hidden; h++) ss += emb[h] * emb[h];
-                float rms = sqrtf(ss / hidden + 1e-6f);
-                float inv = 1.0f / rms;
+                for (uint32_t h = 0; h < hidden; h++) {
+                    float d = emb[h] - mean;
+                    ss += d * d;
+                }
+                float inv = 1.0f / sqrtf(ss / hidden + 1e-6f);
                 for (uint32_t h = 0; h < hidden; h++)
-                    emb[h] = emb[h] * inv * enc->ln_weight[h] + enc->ln_bias[h];
+                    emb[h] = (emb[h] - mean) * inv * enc->ln_weight[h] +
+                             enc->ln_bias[h];
             }
         }
     } else {
@@ -115,6 +147,10 @@ OcError oc_vision_set_weights(OcVisionEncoder *enc,
                                const float *cls_emb)
 {
     if (!enc) return OC_ERR_INVALID_ARG;
+    /* CLS-token prepending is not implemented: the encode output contract is
+     * exactly n_patches * hidden_size floats. Reject rather than silently
+     * dropping the CLS embedding. */
+    if (cls_emb != NULL) return OC_ERR_INVALID_ARG;
     enc->patch_proj = patch_proj;
     enc->pos_emb = pos_emb;
     enc->ln_weight = ln_weight;

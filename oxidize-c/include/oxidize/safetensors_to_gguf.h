@@ -31,8 +31,9 @@ typedef struct OcConvertConfig {
 OcError oc_safetensors_to_gguf(const OcConvertConfig *cfg);
 
 /* Parse SafeTensors metadata header (JSON at the start of the file).
- * Returns a pointer to the metadata JSON string and its length.
- * The pointer is valid until the file is closed. */
+ * On success, `*out_json` receives a heap-allocated, NUL-terminated copy of
+ * the metadata JSON and `*out_len` its length. The caller owns the buffer
+ * and must free() it. */
 OcError oc_safetensors_parse_header(const char *path,
                                      char **out_json, size_t *out_len);
 
@@ -42,7 +43,10 @@ const char *oc_detect_arch_from_tensors(const char *const *tensor_names,
                                          size_t n_tensors);
 
 /* Map a SafeTensors tensor name to a GGUF canonical name.
- * e.g. "model.layers.0.self_attn.q_proj.weight" → "blk.0.attn_q.weight" */
+ * e.g. "model.layers.0.self_attn.q_proj.weight" → "blk.0.attn_q.weight"
+ * For per-layer names, the returned pointer aliases a thread-local buffer
+ * that is overwritten by the next call on the same thread — copy the result
+ * before mapping another name. Unmapped names return `st_name` itself. */
 const char *oc_map_tensor_name(const char *st_name, const char *arch);
 
 #ifdef __cplusplus

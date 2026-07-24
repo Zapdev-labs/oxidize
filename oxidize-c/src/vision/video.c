@@ -68,9 +68,14 @@ bool oc_video_sampler_process(OcVideoFrameSampler *s, const OcVideoFrame *frame)
     if (s->frames_selected >= s->cfg.max_frames) return false;
 
     switch (s->cfg.strategy) {
-    case OC_FRAME_SAMPLE_UNIFORM:
+    case OC_FRAME_SAMPLE_UNIFORM: {
         /* For uniform sampling, we need the total count upfront.
-         * If we don't know it, accept every Nth frame. */
+         * If we don't know it, accept every Nth frame — but never more than
+         * the requested target (use oc_video_sampler_plan for exact uniform
+         * spacing when the total frame count is known). */
+        uint32_t target = s->cfg.n_frames ? s->cfg.n_frames : 8;
+        if (target > s->cfg.max_frames) target = s->cfg.max_frames;
+        if (s->frames_selected >= target) return false;
         if (s->cfg.n_frames > 0 && s->total_frames_seen > 0) {
             /* Approximate: accept roughly n_frames spread across. */
             uint32_t stride = 1;
@@ -90,11 +95,24 @@ bool oc_video_sampler_process(OcVideoFrameSampler *s, const OcVideoFrame *frame)
         }
         s->frames_selected++;
         return true;
+    }
 
     case OC_FRAME_SAMPLE_FPS:
-        /* Select every (total_fps / target_fps)th frame. */
-        if (s->cfg.fps > 0 && s->total_frames_seen > 0) {
-            if (s->total_frames_seen % s->cfg.fps == 0) {
+        /* Time-based selection: accept a frame when at least 1000/fps ms of
+         * presentation time has elapsed since the last selected frame, so
+         * the output rate is independent of the source frame rate. */
+        if (s->cfg.fps > 0) {
+            /* ponytail: FPS state reuses prev_hist[0..1] (unused outside the
+             * SCENE strategy) as the last-selected timestamp; move to a
+             * dedicated field when video.h can grow one. */
+            uint64_t interval_ms = 1000ull / s->cfg.fps;
+            if (interval_ms == 0) interval_ms = 1;
+            uint64_t last = ((uint64_t)s->prev_hist[1] << 32) | s->prev_hist[0];
+            if (!s->has_prev_hist ||
+                frame->timestamp_ms >= last + interval_ms) {
+                s->prev_hist[0] = (uint32_t)frame->timestamp_ms;
+                s->prev_hist[1] = (uint32_t)(frame->timestamp_ms >> 32);
+                s->has_prev_hist = true;
                 s->frames_selected++;
                 return true;
             }
@@ -180,9 +198,10 @@ float oc_video_histogram_diff(const uint32_t a[64], const uint32_t b[64])
             diff += d * d / (fa + fb);
         }
     }
-    /* Normalize: chi-squared can be up to 2 for disjoint distributions. */
-    if (diff > 1.0f) diff = 1.0f;
-    return diff * 0.5f; /* Scale to [0, 0.5] */
+    /* Normalize: chi-squared distance is at most 2 for disjoint
+     * distributions; scale to the documented [0, 1] range. */
+    if (diff > 2.0f) diff = 2.0f;
+    return diff * 0.5f;
 }
 
 /* ─── Frame-to-embedding aggregation ───────────────────────────────────── */
@@ -279,6 +298,9 @@ OcError oc_video_aggregate(const float *frame_embeddings,
     }
 
     case OC_TEMPORAL_CONCAT: {
+        /* Guard dim * n_frames * sizeof(float) against size_t overflow. */
+        if (dim > (SIZE_MAX / sizeof(float)) / n_frames)
+            return OC_ERR_INVALID_ARG;
         out->dim = dim * n_frames;
         out->data = malloc(out->dim * sizeof(float));
         if (!out->data) return OC_ERR_OOM;

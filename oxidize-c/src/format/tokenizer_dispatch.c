@@ -345,34 +345,64 @@ OcError oc_tokenizer_heal_tokens(const OcTokenizer *tok,
 
     if (n_ids < 2) return OC_OK;
 
-    /* Try healing windows of size 2 and 3 (last 2 or 3 tokens). */
-    for (size_t window = 2; window <= 3 && window <= n_ids; window++) {
-        char *text = NULL;
-        OcError e = oc_tokenizer_decode(tok, ids + (n_ids - window),
-                                        window, &text);
-        if (e != OC_OK || !text) continue;
+    /* Re-encode each maximal non-special span (special ids pass through
+     * unchanged), mirroring the Rust implementation. This reaches the
+     * canonical tokenization even for long fragmented suffixes (e.g. five
+     * one-byte fragments of "hello"), which a fixed 2/3-token window
+     * cannot. Spans that fail to decode/encode are kept verbatim. */
+    size_t cap = n_ids + 8;
+    uint32_t *result = malloc(cap * sizeof(uint32_t));
+    if (!result) return OC_ERR_OOM;
+    size_t total = 0;
 
+    size_t i = 0;
+    while (i < n_ids) {
+        if (oc_tokenizer_is_special(tok, ids[i])) {
+            if (total + 1 > cap) {
+                cap = cap * 2 + 1;
+                uint32_t *grown = realloc(result, cap * sizeof(uint32_t));
+                if (!grown) { free(result); return OC_ERR_OOM; }
+                result = grown;
+            }
+            result[total++] = ids[i++];
+            continue;
+        }
+        /* Maximal non-special span [i, j). */
+        size_t j = i;
+        while (j < n_ids && !oc_tokenizer_is_special(tok, ids[j])) j++;
+
+        const uint32_t *span = ids + i;
+        size_t span_len = j - i;
         uint32_t *healed = NULL;
         size_t n_healed = 0;
-        e = oc_tokenizer_encode(tok, text, OC_TOK_DISALLOW_SPECIAL,
-                                &healed, &n_healed);
-        free(text);
-        if (e != OC_OK) continue;
-
-        if (n_healed > 0 && n_healed < window) {
-            size_t prefix_len = n_ids - window;
-            size_t total = prefix_len + n_healed;
-            uint32_t *result = malloc(total * sizeof(uint32_t));
-            if (!result) { free(healed); continue; }
-            memcpy(result, ids, prefix_len * sizeof(uint32_t));
-            memcpy(result + prefix_len, healed, n_healed * sizeof(uint32_t));
-            free(healed);
-            *out_ids = result;
-            *out_count = total;
-            return OC_OK;
+        char *text = NULL;
+        OcError e = oc_tokenizer_decode(tok, span, span_len, &text);
+        if (e == OC_OK && text) {
+            e = oc_tokenizer_encode(tok, text, OC_TOK_DISALLOW_SPECIAL,
+                                    &healed, &n_healed);
+            free(text);
+            if (e != OC_OK || n_healed == 0) { free(healed); healed = NULL; }
         }
+        const uint32_t *emit = healed ? healed : span;
+        size_t emit_len = healed ? n_healed : span_len;
+        if (total + emit_len > cap) {
+            cap = (total + emit_len) * 2;
+            uint32_t *grown = realloc(result, cap * sizeof(uint32_t));
+            if (!grown) { free(healed); free(result); return OC_ERR_OOM; }
+            result = grown;
+        }
+        memcpy(result + total, emit, emit_len * sizeof(uint32_t));
+        total += emit_len;
         free(healed);
+        i = j;
     }
 
+    /* No change → report "no healing needed" (out stays NULL). */
+    if (total == n_ids && memcmp(result, ids, total * sizeof(uint32_t)) == 0) {
+        free(result);
+        return OC_OK;
+    }
+    *out_ids = result;
+    *out_count = total;
     return OC_OK;
 }

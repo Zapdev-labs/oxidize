@@ -32,6 +32,9 @@ typedef struct OcPruneConfig {
     float           sparsity;      /* fraction of weights to prune [0,1)  */
     const char     *input_path;    /* input GGUF path                      */
     const char     *output_path;   /* output GGUF path                     */
+    /* Calibration activation stats for OC_PRUNE_WANDA (may be NULL, in
+     * which case Wanda falls back to magnitude pruning). */
+    const OcActivationStats *activation_stats;
     bool            verbose;
 } OcPruneConfig;
 

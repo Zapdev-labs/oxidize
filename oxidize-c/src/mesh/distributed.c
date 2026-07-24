@@ -42,6 +42,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
+#include <netdb.h>
 
 /* ------------------------------------------------------------------ */
 /* Constants                                                          */
@@ -131,59 +132,37 @@ static void parse_addr(const char *addr, char *host, size_t host_cap,
     }
 }
 
-/* Connect to a "host:port" address. Returns fd >= 0 on success, -1 on fail. */
+/* Connect to a "host:port" address (IPv4 literal or hostname).
+ * Returns fd >= 0 on success, -1 on fail. */
 static int tcp_connect(const char *addr)
 {
     char host[256];
     uint16_t port;
     parse_addr(addr, host, sizeof(host), &port);
 
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    char portstr[8];
+    snprintf(portstr, sizeof(portstr), "%u", (unsigned)port);
+
+    struct addrinfo hints, *res = NULL;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    if (getaddrinfo(host, portstr, &hints, &res) != 0 || !res) return -1;
+
+    int fd = -1;
+    for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
+        fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (fd < 0) continue;
+        if (connect(fd, ai->ai_addr, ai->ai_addrlen) == 0) break;
+        close(fd);
+        fd = -1;
+    }
+    freeaddrinfo(res);
     if (fd < 0) return -1;
-
-    struct sockaddr_in sa;
-    memset(&sa, 0, sizeof(sa));
-    sa.sin_family = AF_INET;
-    sa.sin_port = htons(port);
-    if (inet_pton(AF_INET, host, &sa.sin_addr) <= 0) {
-        close(fd);
-        return -1;
-    }
-
-    if (connect(fd, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
-        close(fd);
-        return -1;
-    }
 
     /* Disable Nagle for low-latency activation transfer. */
     int one = 1;
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
-    return fd;
-}
-
-/* Create a listening TCP socket on the given port. Returns fd >= 0, or -1. */
-static int tcp_listen(uint16_t port)
-{
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return -1;
-
-    int opt = 1;
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
-    addr.sin_port = htons(port > 0 ? port : OC_DIST_PORT_DEFAULT);
-
-    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        close(fd);
-        return -1;
-    }
-    if (listen(fd, OC_DIST_MAX_NODES) < 0) {
-        close(fd);
-        return -1;
-    }
     return fd;
 }
 
@@ -195,6 +174,7 @@ OcError oc_distributed_validate_config(const OcDistributedConfig *cfg)
 {
     if (!cfg) return OC_ERR_INVALID_ARG;
     if (cfg->n_nodes == 0) return OC_ERR_INVALID_ARG;
+    if (cfg->n_nodes > OC_DIST_MAX_NODES) return OC_ERR_INVALID_ARG;
     if (cfg->node_rank >= cfg->n_nodes) return OC_ERR_INVALID_ARG;
     if (cfg->pipeline_stages == 0) return OC_ERR_INVALID_ARG;
     if (cfg->tensor_parallel_size == 0) return OC_ERR_INVALID_ARG;
@@ -224,6 +204,14 @@ OcError oc_distributed_validate_config(const OcDistributedConfig *cfg)
     if (cfg->pipeline_rank >= cfg->pipeline_stages)
         return OC_ERR_INVALID_ARG;
     if (cfg->tensor_rank >= cfg->tensor_parallel_size)
+        return OC_ERR_INVALID_ARG;
+    /* The rank tuple must be consistent with the linear rank mapping so a
+     * node cannot claim another stage/group's slot. Nodes beyond the used
+     * grid (node_rank >= pp * tp) are unused and only need valid bounds. */
+    uint64_t used = (uint64_t)cfg->pipeline_stages * cfg->tensor_parallel_size;
+    if ((uint64_t)cfg->node_rank < used &&
+        cfg->node_rank != cfg->pipeline_rank * cfg->tensor_parallel_size +
+                          cfg->tensor_rank)
         return OC_ERR_INVALID_ARG;
     return OC_OK;
 }
@@ -342,6 +330,12 @@ OcError oc_distributed_init(OcDistributedScheduler *sched,
     OcError ve = oc_distributed_validate_config(cfg);
     if (ve != OC_OK) return ve;
 
+    /* Multi-node initialization is not yet supported: there is no peer
+     * endpoint map, connection acceptance, or rank handshake, so peers
+     * could never actually communicate. Reject rather than advertise a
+     * scheduler that cannot transfer activations. */
+    if (cfg->n_nodes > 1) return OC_ERR_NETWORK;
+
     sched->config = *cfg;
     sched->role = oc_distributed_resolve_role(cfg);
     sched->listen_fd = -1;
@@ -349,11 +343,9 @@ OcError oc_distributed_init(OcDistributedScheduler *sched,
     sched->recv_buf = NULL;
     sched->buf_capacity = 0;
 
-    /* Initialize peer table. In single-node mode we have 1 peer (self). */
+    /* Initialize peer table. In single-node mode we have 1 peer (self).
+     * n_nodes <= OC_DIST_MAX_NODES is guaranteed by config validation. */
     sched->n_peers = cfg->n_nodes;
-    if (sched->n_peers > OC_DIST_MAX_NODES) {
-        sched->n_peers = OC_DIST_MAX_NODES;
-    }
 
     for (uint32_t i = 0; i < sched->n_peers; i++) {
         OcDistPeer *p = &sched->peers[i];
@@ -368,54 +360,7 @@ OcError oc_distributed_init(OcDistributedScheduler *sched,
         p->bytes_recv_from = 0;
     }
 
-    /* In single-node mode, skip all network setup. */
-    if (cfg->n_nodes > 1) {
-        /* Pipeline master (and intermediate stages) listen for incoming
-         * connections from previous stages. */
-        if (sched->role == OC_NODE_ROLE_PIPELINE_MASTER ||
-            sched->role == OC_NODE_ROLE_PIPELINE_WORKER ||
-            sched->role == OC_NODE_ROLE_TENSOR_PARALLEL) {
-            if (cfg->pipeline_rank > 0 || cfg->tensor_parallel_size > 1) {
-                /* Need to accept incoming from previous stage / TP peers. */
-                int lfd = tcp_listen(cfg->listen_port);
-                if (lfd < 0) {
-                    /* Non-fatal: peers will reconnect later. */
-                } else {
-                    sched->listen_fd = lfd;
-                }
-            }
-        }
-
-        /* Connect to coordinator if specified (non-master nodes). */
-        if (cfg->coordinator_addr && cfg->coordinator_addr[0] != '\0') {
-            int fd = tcp_connect(cfg->coordinator_addr);
-            if (fd >= 0) {
-                /* Find the peer matching the coordinator (rank 0 of our
-                 * TP group's previous stage, or just rank 0). */
-                uint32_t target = 0;
-                if (cfg->tensor_parallel_size > 1 && cfg->pipeline_rank > 0) {
-                    target = (cfg->pipeline_rank - 1) * cfg->tensor_parallel_size;
-                }
-                if (target < sched->n_peers) {
-                    sched->peers[target].socket_fd = fd;
-                    sched->peers[target].online = true;
-                } else {
-                    close(fd);
-                }
-            }
-            /* Connection failure is non-fatal at init; reconnect later. */
-        }
-    }
-
-    /* Allocate communication buffers lazily (only needed when communicating). */
-    if (cfg->n_nodes > 1) {
-        OcError be = ensure_buffers(sched);
-        if (be != OC_OK) {
-            oc_distributed_free(sched);
-            return be;
-        }
-    }
-
+    /* Single-node mode: no network setup, no communication buffers. */
     sched->initialized = true;
     return OC_OK;
 }
@@ -424,18 +369,20 @@ void oc_distributed_free(OcDistributedScheduler *sched)
 {
     if (!sched) return;
 
-    /* Close all peer sockets. */
-    for (uint32_t i = 0; i < sched->n_peers; i++) {
-        if (sched->peers[i].socket_fd >= 0) {
-            close(sched->peers[i].socket_fd);
-            sched->peers[i].socket_fd = -1;
+    /* Only close descriptors this scheduler created: a zero-initialized
+     * struct has socket_fd/listen_fd == 0, and closing fd 0 would close
+     * the process's stdin. Sockets exist only after a successful init. */
+    if (sched->initialized) {
+        for (uint32_t i = 0; i < sched->n_peers; i++) {
+            if (sched->peers[i].socket_fd >= 0) {
+                close(sched->peers[i].socket_fd);
+                sched->peers[i].socket_fd = -1;
+            }
         }
-    }
-
-    /* Close listen socket. */
-    if (sched->listen_fd >= 0) {
-        close(sched->listen_fd);
-        sched->listen_fd = -1;
+        if (sched->listen_fd >= 0) {
+            close(sched->listen_fd);
+            sched->listen_fd = -1;
+        }
     }
 
     /* Free buffers. */
@@ -493,13 +440,11 @@ static OcError send_chunked(OcDistributedScheduler *sched, OcDistPeer *p,
 {
     if (!p || p->socket_fd < 0) return OC_ERR_NETWORK;
 
-    /* Send length header first (uint64_t, network byte order). */
-    uint64_t hdr = (uint64_t)len;
-    uint64_t hdr_n = htonl((uint32_t)(hdr >> 32));
-    hdr_n = ((uint64_t)htonl((uint32_t)hdr) << 32) | (uint64_t)htonl((uint32_t)(hdr >> 32));
-    /* Simpler: send raw 8 bytes in host order (both ends are same arch). */
-    memcpy(&hdr_n, &hdr, sizeof(hdr));
-    OcError e = send_all(p->socket_fd, &hdr_n, sizeof(hdr_n));
+    /* Send length header first (uint64_t, big-endian/network byte order). */
+    uint8_t hdr_n[8];
+    for (int i = 0; i < 8; i++)
+        hdr_n[i] = (uint8_t)((uint64_t)len >> (56 - 8 * i));
+    OcError e = send_all(p->socket_fd, hdr_n, sizeof(hdr_n));
     if (e != OC_OK) {
         mark_peer_disconnected(sched, p);
         return e;
@@ -529,13 +474,16 @@ static OcError recv_chunked(OcDistributedScheduler *sched, OcDistPeer *p,
 {
     if (!p || p->socket_fd < 0) return OC_ERR_NETWORK;
 
-    /* Receive length header. */
-    uint64_t hdr;
-    OcError e = recv_all(p->socket_fd, &hdr, sizeof(hdr));
+    /* Receive length header (big-endian/network byte order). */
+    uint8_t hdr_n[8];
+    OcError e = recv_all(p->socket_fd, hdr_n, sizeof(hdr_n));
     if (e != OC_OK) {
         mark_peer_disconnected(sched, p);
         return e;
     }
+    uint64_t hdr = 0;
+    for (int i = 0; i < 8; i++)
+        hdr = (hdr << 8) | hdr_n[i];
     if (hdr != expected_len) return OC_ERR_NETWORK; /* size mismatch */
 
     /* Receive payload in chunks. */
@@ -644,9 +592,11 @@ OcError oc_distributed_all_reduce(OcDistributedScheduler *sched,
 
     size_t byte_len = count * sizeof(float);
 
-    /* Ring-reduce: each node sends its data to the next TP peer, receives
-     * and accumulates, then forwards. After (TP-1) steps, each node has the
-     * full sum. */
+    /* NOTE: this ring exchange is known-incomplete (receives from the next
+     * peer instead of the previous, and re-adds accumulated buffers for
+     * TP >= 3). It is unreachable today because init rejects multi-node
+     * configs; a proper reduce-scatter/all-gather is required before
+     * multi-node init is enabled. */
     OcDistPeer *next = find_next_tp_peer(sched);
     if (!next) return OC_OK;
 
@@ -708,9 +658,10 @@ OcError oc_distributed_barrier(OcDistributedScheduler *sched)
     /* Single-node: no-op. */
     if (sched->config.n_nodes <= 1) return OC_OK;
 
-    /* Simple barrier: send a 1-byte ping to the next peer and receive a
-     * 1-byte pong from the previous peer. This ensures all nodes have
-     * reached the barrier before proceeding. */
+    /* NOTE: this ping/pong is NOT a global barrier (the first stage exits
+     * after its outbound ping without waiting for later stages). It is
+     * unreachable today because init rejects multi-node configs; a proper
+     * arrival + release protocol is required before enabling multi-node. */
     uint8_t ping = 0x42;
 
     /* Send to next pipeline peer (or TP peer). */

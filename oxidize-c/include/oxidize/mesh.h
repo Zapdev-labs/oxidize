@@ -35,6 +35,7 @@ typedef struct OcPeer {
     uint32_t n_gpus;                /* GPU count on this peer              */
     uint32_t memory_mb;            /* total GPU memory in MB              */
     bool online;
+    int socket_fd;                 /* TCP socket to this peer, -1 if none */
 } OcPeer;
 
 typedef struct OcMeshConfig {
@@ -54,6 +55,7 @@ typedef struct OcMesh {
     size_t n_peers;
     uint32_t self_id;
     bool initialized;
+    int listen_fd;                 /* listening socket, -1 if not listening */
 } OcMesh;
 
 /* Initialize the mesh node. */

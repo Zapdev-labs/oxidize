@@ -11,6 +11,12 @@
  * Threading: metrics use atomics; the rate-limit table and audit ring
  * buffer are protected by mutexes. Safe to call from multiple worker
  * threads concurrently.
+ *
+ * NOTE: this stack is NOT yet wired into the `--serve-api` HTTP path; the
+ * server core must call oc_middleware_process_request/_response around each
+ * dispatched request (with the Authorization header and peer IP captured
+ * into OcRequestContext) for auth/rate-limit/metrics/audit/CORS to take
+ * effect. Until then it is a standalone, tested component.
  */
 #define _POSIX_C_SOURCE 200809L   /* strdup, snprintf */
 #include "oxidize/middleware.h"
@@ -256,6 +262,27 @@ size_t oc_audit_get(const OcAuditLog *log, OcAuditEntry *out, size_t count)
     return copy_n;
 }
 
+/* JSON-escape `src` into `dst` (cap bytes, NUL-terminated). Escapes quote,
+ * backslash, and control characters so audit output stays valid JSON. */
+static void json_escape_into(const char *src, char *dst, size_t cap)
+{
+    size_t o = 0;
+    for (const char *s = src; *s != '\0' && o + 7 < cap; s++) {
+        unsigned char c = (unsigned char)*s;
+        if (c == '"' || c == '\\') {
+            dst[o++] = '\\';
+            dst[o++] = (char)c;
+        } else if (c < 0x20u) {
+            int w = snprintf(dst + o, cap - o, "\\u%04x", (unsigned)c);
+            if (w < 0) break;
+            o += (size_t)w;
+        } else {
+            dst[o++] = (char)c;
+        }
+    }
+    dst[o] = '\0';
+}
+
 size_t oc_audit_format(const OcAuditLog *log, char *buf, size_t cap)
 {
     OcAuditEntry entries[OC_AUDIT_RING_SIZE];
@@ -265,12 +292,18 @@ size_t oc_audit_format(const OcAuditLog *log, char *buf, size_t cap)
     size_t off = (size_t)w;
     for (size_t i = 0; i < n; i++) {
         const OcAuditEntry *e = &entries[i];
+        char esc_method[sizeof(e->method) * 6];
+        char esc_path[sizeof(e->path) * 6];
+        char esc_ip[sizeof(e->client_ip) * 6];
+        json_escape_into(e->method, esc_method, sizeof(esc_method));
+        json_escape_into(e->path, esc_path, sizeof(esc_path));
+        json_escape_into(e->client_ip, esc_ip, sizeof(esc_ip));
         int w2 = snprintf(buf + off, cap - off,
             "%s{\"timestamp\":%llu,\"method\":\"%s\",\"path\":\"%s\","
             "\"status\":%d,\"duration_ms\":%llu,\"client_ip\":\"%s\"}",
             (i == 0) ? "" : ",",
-            (unsigned long long)e->timestamp, e->method, e->path,
-            e->status, (unsigned long long)e->duration_ms, e->client_ip);
+            (unsigned long long)e->timestamp, esc_method, esc_path,
+            e->status, (unsigned long long)e->duration_ms, esc_ip);
         if (w2 < 0 || (size_t)w2 >= cap - off) return 0;
         off += (size_t)w2;
     }

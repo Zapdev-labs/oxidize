@@ -10,6 +10,10 @@ OcError oc_offload_init(OcOffloadPipeline *pipe, OcLlamaModel *model,
                         const OcOffloadConfig *cfg)
 {
     if (!pipe || !model || !cfg) return OC_ERR_INVALID_ARG;
+    /* Partial GPU offload is not implemented: per-layer forward is not
+     * exposed, so gpu_layers > 0 would run the whole model on GPU and
+     * then again on CPU. Reject it until a real split path exists. */
+    if (cfg->gpu_layers > 0) return OC_ERR_INVALID_ARG;
     memset(pipe, 0, sizeof(*pipe));
     pipe->config = *cfg;
     pipe->model = model;
@@ -18,20 +22,8 @@ OcError oc_offload_init(OcOffloadPipeline *pipe, OcLlamaModel *model,
     pipe->transfer_buf = calloc(cfg->n_embd, sizeof(float));
     if (!pipe->transfer_buf) return OC_ERR_OOM;
 
-    /* Check if CUDA is available. */
+    /* Check if CUDA is available (informational; gpu_layers must be 0). */
     pipe->cuda_active = oc_cuda_available();
-
-    if (pipe->cuda_active && cfg->gpu_layers > 0) {
-        /* Initialize CUDA context for GPU layers. */
-        OcError e = oc_cuda_init(&pipe->cuda_ctx, model);
-        if (e != OC_OK) {
-            /* Fall back to CPU-only. */
-            pipe->cuda_active = false;
-            pipe->cuda_ptr = NULL;
-        } else {
-            pipe->cuda_ptr = &pipe->cuda_ctx;
-        }
-    }
 
     /* Initialize CPU session for CPU layers (or full model if no GPU). */
     pipe->cpu_sess = calloc(1, sizeof(OcLlamaSession));
@@ -57,32 +49,7 @@ OcError oc_offload_forward(OcOffloadPipeline *pipe, uint32_t token,
 {
     if (!pipe || !pipe->initialized) return OC_ERR_INVALID_ARG;
 
-    uint32_t gpu_layers = pipe->config.gpu_layers;
-    if (pipe->cuda_active && gpu_layers > 0) {
-        /* Run GPU layers first. */
-        OcError e = oc_cuda_forward(pipe->cuda_ptr, token,
-                                    (uint32_t)pipe->cpu_sess->pos,
-                                    pipe->transfer_buf);
-        if (e != OC_OK) return e;
-
-        /* Run remaining CPU layers starting from the GPU output. */
-        /* Copy transfer_buf into CPU session's x. */
-        memcpy(pipe->cpu_sess->x, pipe->transfer_buf,
-               pipe->config.n_embd * sizeof(float));
-
-        /* Run CPU layers [gpu_layers, n_layer). */
-        for (uint32_t l = gpu_layers; l < pipe->config.n_layer; l++) {
-            /* We need to call forward_layer, but it's static in llama.c.
-             * For now, we use oc_llama_forward which processes all layers.
-             * A proper implementation would expose per-layer forward. */
-            /* TODO: expose per-layer forward for offload. */
-        }
-
-        /* Fall through to CPU-only path for now. */
-    }
-
-    /* CPU-only path: run full forward. */
-    pipe->cpu_sess->pos++;
+    /* CPU-only path: oc_llama_forward advances sess->pos itself. */
     return oc_llama_forward(pipe->cpu_sess, token, logits_out);
 }
 

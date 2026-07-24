@@ -353,8 +353,7 @@ OcError oc_gen_run_mtp(void *model_ptr,
 
             if (cfg->stop_on_eos && token == 0) {
                 result->stopped_on_eos = true;
-                free(draft_logits);
-                goto mtp_done;
+                goto mtp_done;  /* mtp_done frees draft_logits */
             }
         }
 

@@ -19,9 +19,20 @@
 
 /* ─── Capability detection ────────────────────────────────────────────── */
 
+/* Raw cpuid instead of __builtin_cpu_supports: older clang rejects feature
+ * strings like "f16c" and "avx512vnni", so builtin-based detection does not
+ * compile portably. <cpuid.h> ships with both gcc and clang. */
 #if (defined(__x86_64__) || defined(__i386__)) && \
     (defined(__GNUC__) || defined(__clang__))
 #  define OC_HAVE_BUILTIN_CPU 1
+#  include <cpuid.h>
+
+static uint64_t oc_xgetbv0(void)
+{
+    uint32_t eax, edx;
+    __asm__ volatile("xgetbv" : "=a"(eax), "=d"(edx) : "c"(0));
+    return ((uint64_t)edx << 32) | eax;
+}
 #else
 #  define OC_HAVE_BUILTIN_CPU 0
 #endif
@@ -32,17 +43,33 @@ static OcSimdCaps detect_caps(void)
     memset(&c, 0, sizeof(c));
 
 #if OC_HAVE_BUILTIN_CPU
-    c.has_f16c = __builtin_cpu_supports("f16c");
-    c.has_fma  = __builtin_cpu_supports("fma");
+    uint32_t eax, ebx, ecx, edx;
+    if (!__get_cpuid(1, &eax, &ebx, &ecx, &edx)) {
+        c.level = OC_SIMD_SCALAR;
+        c.name  = "scalar";
+        return c;
+    }
+    bool osxsave = (ecx >> 27) & 1;
+    /* XCR0: bits 1|2 = XMM+YMM state; bits 5|6|7 = AVX-512 opmask/ZMM. */
+    uint64_t xcr0 = osxsave ? oc_xgetbv0() : 0;
+    bool os_avx    = (xcr0 & 0x06) == 0x06;
+    bool os_avx512 = (xcr0 & 0xE6) == 0xE6;
+
+    c.has_f16c = os_avx && ((ecx >> 29) & 1);
+    c.has_fma  = os_avx && ((ecx >> 12) & 1);
+
+    uint32_t b7 = 0, c7 = 0, d7 = 0, a7 = 0;
+    if (__get_cpuid_count(7, 0, &a7, &b7, &c7, &d7) == 0) { b7 = 0; c7 = 0; }
+
     /* AVX-512 BW + DQ + VNNI together define the "useful for quant" tier
      * (skylake-x without VNNI is intentionally not preferred over AVX2
      * because VNNI is the win for int8 dot products; plain AVX-512 F is
      * rarely worth the frequency penalty). */
-    bool avx512bw   = __builtin_cpu_supports("avx512bw");
-    bool avx512dq   = __builtin_cpu_supports("avx512dq");
-    bool avx512vnni = __builtin_cpu_supports("avx512vnni");
-    bool avx512f    = __builtin_cpu_supports("avx512f");
-    bool avx2       = __builtin_cpu_supports("avx2");
+    bool avx512bw   = os_avx512 && ((b7 >> 30) & 1);
+    bool avx512dq   = os_avx512 && ((b7 >> 17) & 1);
+    bool avx512vnni = os_avx512 && ((c7 >> 11) & 1);
+    bool avx512f    = os_avx512 && ((b7 >> 16) & 1);
+    bool avx2       = os_avx && ((b7 >> 5) & 1);
 
     if (avx512f && avx512bw && avx512dq && avx512vnni) {
         c.level    = OC_SIMD_AVX512;

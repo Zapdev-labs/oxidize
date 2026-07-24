@@ -112,7 +112,7 @@ Test(vision, set_weights)
     OcVisionEncoder enc;
     OcVisionConfig cfg = { .image_size=4, .patch_size=2, .hidden_size=4,
                            .n_layers=1, .n_heads=1, .n_patches=0 };
-    oc_vision_init(&enc, &cfg);
+    cr_assert_eq(oc_vision_init(&enc, &cfg), OC_OK);
     cr_assert_null(enc.patch_proj);
     float proj[1] = {1.0f};
     oc_vision_set_weights(&enc, proj, NULL, NULL, NULL, NULL);

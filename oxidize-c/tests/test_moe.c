@@ -56,8 +56,11 @@ Test(moe, router_init_bad_config)
     OcMoeConfig c0 = default_config(); c0.n_experts = 0;
     cr_assert_neq(oc_moe_router_init(&r, &c0), OC_OK);
 
+    /* n_active_experts == 0 is the documented "default to 1" case. */
     OcMoeConfig c1 = default_config(); c1.n_active_experts = 0;
-    cr_assert_neq(oc_moe_router_init(&r, &c1), OC_OK);
+    cr_assert_eq(oc_moe_router_init(&r, &c1), OC_OK);
+    cr_assert_eq(r.config.n_active_experts, 1);
+    oc_moe_router_free(&r);
 
     OcMoeConfig c2 = default_config(); c2.n_active_experts = 100; /* > n_experts */
     cr_assert_neq(oc_moe_router_init(&r, &c2), OC_OK);
@@ -200,9 +203,9 @@ Test(moe, route_top_p)
     float temp[4];
     cr_assert_eq(oc_moe_route(&r, hidden, &res, temp), OC_OK);
 
-    /* Expert 0 should be selected and dominate. */
+    /* Expert 0 dominates (logit 40 vs 0), so top_p=0.9 selects exactly it. */
     cr_assert_eq(res.expert_indices[0], 0);
-    cr_assert_geq(res.n_selected, 1);
+    cr_assert_eq(res.n_selected, 1);
 
     oc_moe_router_free(&r);
 }

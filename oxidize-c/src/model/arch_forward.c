@@ -135,21 +135,19 @@ static void arch_matvec(const OcWeightView *w, const float *in, float *out,
 
 /* ─── LayerNorm ──────────────────────────────────────────────────────────
  *
- * out[i] = (x[i] - mean) / sqrt(var + eps) * weight[i]
+ * out[i] = (x[i] - mean) / sqrt(var + eps) * weight[i] + bias[i]
  *
  * LayerNorm computes the mean and variance over the hidden dimension
  * (axis=-1), unlike RMSNorm which only uses the mean of squares. The
  * `weight` array has the same length as the hidden dimension (n_embd) and
- * is the learned scale (gamma). Bias (beta) is omitted here for simplicity;
- * GGUF converters for GPT-2/NeoX/Falcon typically fold the bias into the
- * weight or store it as a separate tensor. When bias is not provided we
- * treat it as zero.
+ * is the learned scale (gamma). `bias` is the learned beta (loaded from
+ * the GGUF's *.bias norm tensors); NULL means zero bias.
  *
  * The computation uses f32 accumulation throughout (matching the Rust scalar
  * reference). `eps` defaults to rms_norm_eps from the config (which the GGUF
  * converter populates with the architecture's layer_norm_epsilon). */
-static void arch_layer_norm(const float *x, const float *weight, float *out,
-                            size_t n, float eps)
+static void arch_layer_norm(const float *x, const float *weight,
+                            const float *bias, float *out, size_t n, float eps)
 {
     /* Compute mean. */
     float mean = 0.0f;
@@ -166,9 +164,10 @@ static void arch_layer_norm(const float *x, const float *weight, float *out,
 
     float inv_std = 1.0f / sqrtf(var + eps);
 
-    /* Normalize and scale. */
+    /* Normalize, scale, shift. */
     for (size_t i = 0; i < n; i++) {
-        out[i] = (x[i] - mean) * inv_std * weight[i];
+        out[i] = (x[i] - mean) * inv_std * weight[i]
+               + (bias ? bias[i] : 0.0f);
     }
 }
 
@@ -177,8 +176,8 @@ static void arch_layer_norm(const float *x, const float *weight, float *out,
  * GPT-2's original implementation uses the tanh approximation of GeLU:
  *   gelu(x) = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
  *
- * GPT-NeoX and Falcon use SwiGLU (silu-based gating), not GeLU, so this
- * is only used by the GPT-2 path. We use the approximation variant
+ * GPT-NeoX and Falcon also use a single-projection GeLU MLP when no gate
+ * tensor is present (the standard checkpoints). We use the approximation variant
  * (oc_gelu_approx_f32) to match the original GPT-2 reference implementation
  * (HuggingFace transformers GPT2MLP uses gelu_new which is the tanh
  * approximation). */
@@ -282,7 +281,8 @@ static void arch_gpt2_layer(OcLlamaSession *s, uint32_t layer)
     size_t n_embd = c->n_embd;
 
     /* 1. Pre-attention LayerNorm (ln_1). */
-    arch_layer_norm(s->x, L->attn_norm, s->normed, n_embd, c->rms_norm_eps);
+    arch_layer_norm(s->x, L->attn_norm, L->attn_norm_bias, s->normed,
+                    n_embd, c->rms_norm_eps);
 
     /* 2. Q/K/V projections (separate weights in the GGUF). */
     arch_matvec(&L->attn_q, s->normed, s->q, s->dequant_temp);
@@ -312,7 +312,8 @@ static void arch_gpt2_layer(OcLlamaSession *s, uint32_t layer)
     for (size_t i = 0; i < n_embd; i++) s->x[i] += s->normed[i];
 
     /* 7. Pre-FFN LayerNorm (ln_2). */
-    arch_layer_norm(s->x, L->ffn_norm, s->normed, n_embd, c->rms_norm_eps);
+    arch_layer_norm(s->x, L->ffn_norm, L->ffn_norm_bias, s->normed,
+                    n_embd, c->rms_norm_eps);
 
     /* 8. FFN: up-projection → GeLU → down-projection + residual.
      *    GPT-2 uses the tanh-approx GeLU. */
@@ -357,7 +358,8 @@ static void arch_neox_layer(OcLlamaSession *s, uint32_t layer)
     size_t n_embd = c->n_embd;
 
     /* 1. Pre-attention LayerNorm. */
-    arch_layer_norm(s->x, L->attn_norm, s->normed, n_embd, c->rms_norm_eps);
+    arch_layer_norm(s->x, L->attn_norm, L->attn_norm_bias, s->normed,
+                    n_embd, c->rms_norm_eps);
 
     /* 2. Q/K/V projections. */
     arch_matvec(&L->attn_q, s->normed, s->q, s->dequant_temp);
@@ -391,15 +393,23 @@ static void arch_neox_layer(OcLlamaSession *s, uint32_t layer)
     for (size_t i = 0; i < n_embd; i++) s->x[i] += s->normed[i];
 
     /* 6. Pre-FFN LayerNorm. */
-    arch_layer_norm(s->x, L->ffn_norm, s->normed, n_embd, c->rms_norm_eps);
+    arch_layer_norm(s->x, L->ffn_norm, L->ffn_norm_bias, s->normed,
+                    n_embd, c->rms_norm_eps);
 
-    /* 7. FFN: SwiGLU gated activation.
-     *    gate = silu(W_gate · normed); up = W_up · normed;
-     *    intermediate = gate * up; out = W_down · intermediate; x += out. */
-    arch_matvec(&L->ffn_gate, s->normed, s->ffn_gate, s->dequant_temp);
-    arch_matvec(&L->ffn_up,   s->normed, s->ffn_up,   s->dequant_temp);
-    oc_swiglu_inplace_f32(s->ffn_gate, s->ffn_up, c->n_ff);
-    arch_matvec(&L->ffn_down, s->ffn_gate, s->normed, s->dequant_temp);
+    /* 7. FFN. Standard NeoX checkpoints have a single-projection GeLU MLP:
+     *    dense_4h_to_h(GELU(dense_h_to_4h(x))). No gate tensor exists, so
+     *    the GeLU path is the default; the gated SwiGLU variant is only
+     *    taken when a real ffn_gate tensor was loaded. */
+    if (L->ffn_gate.data != NULL) {
+        arch_matvec(&L->ffn_gate, s->normed, s->ffn_gate, s->dequant_temp);
+        arch_matvec(&L->ffn_up,   s->normed, s->ffn_up,   s->dequant_temp);
+        oc_swiglu_inplace_f32(s->ffn_gate, s->ffn_up, c->n_ff);
+        arch_matvec(&L->ffn_down, s->ffn_gate, s->normed, s->dequant_temp);
+    } else {
+        arch_matvec(&L->ffn_up, s->normed, s->ffn_up, s->dequant_temp);
+        arch_gelu_inplace_f32(s->ffn_up, c->n_ff);
+        arch_matvec(&L->ffn_down, s->ffn_up, s->normed, s->dequant_temp);
+    }
     for (size_t i = 0; i < n_embd; i++) s->x[i] += s->normed[i];
 }
 
@@ -443,13 +453,44 @@ static void arch_falcon_layer(OcLlamaSession *s, uint32_t layer)
     size_t hd = c->head_dim;
     size_t n_embd = c->n_embd;
 
-    /* 1. Pre-attention LayerNorm. */
-    arch_layer_norm(s->x, L->attn_norm, s->normed, n_embd, c->rms_norm_eps);
+    /* 1. Pre-attention LayerNorm (shared by attention and MLP in the
+     *    Falcon parallel block). */
+    arch_layer_norm(s->x, L->attn_norm, L->attn_norm_bias, s->normed,
+                    n_embd, c->rms_norm_eps);
 
-    /* 2. Q/K/V projections. */
+    /* 2. Q/K/V projections from the normalized input. */
     arch_matvec(&L->attn_q, s->normed, s->q, s->dequant_temp);
     arch_matvec(&L->attn_k, s->normed, s->k, s->dequant_temp);
     arch_matvec(&L->attn_v, s->normed, s->v, s->dequant_temp);
+
+    /* 2b. Parallel MLP branch. Falcon's block computes attention and the
+     *     MLP from the same layer-normalized input, then adds both to the
+     *     residual: x = x + attn(ln) + mlp(ln). Q/K/V are already
+     *     projected, so `normed` is free to be consumed/overwritten here.
+     *     Falcon-40B has a second LayerNorm (ln_mlp) applied to the layer
+     *     INPUT for the MLP branch; when present we use it. Standard
+     *     Falcon checkpoints use a single-projection GeLU MLP
+     *     (dense_4h_to_h(GELU(dense_h_to_4h(x)))); the gated variant is
+     *     only taken when a real ffn_gate tensor was loaded.
+     *     The MLP residual is added to x before attention runs — the two
+     *     residual adds commute, and doing the MLP first lets `normed`
+     *     serve as both MLP input and output buffer. */
+    if (L->ffn_norm != NULL) {
+        /* x is still the layer input here (no residuals added yet). */
+        arch_layer_norm(s->x, L->ffn_norm, L->ffn_norm_bias, s->normed,
+                        n_embd, c->rms_norm_eps);
+    }
+    if (L->ffn_gate.data != NULL) {
+        arch_matvec(&L->ffn_gate, s->normed, s->ffn_gate, s->dequant_temp);
+        arch_matvec(&L->ffn_up,   s->normed, s->ffn_up,   s->dequant_temp);
+        oc_swiglu_inplace_f32(s->ffn_gate, s->ffn_up, c->n_ff);
+        arch_matvec(&L->ffn_down, s->ffn_gate, s->normed, s->dequant_temp);
+    } else {
+        arch_matvec(&L->ffn_up, s->normed, s->ffn_up, s->dequant_temp);
+        arch_gelu_inplace_f32(s->ffn_up, c->n_ff);
+        arch_matvec(&L->ffn_down, s->ffn_up, s->normed, s->dequant_temp);
+    }
+    for (size_t i = 0; i < n_embd; i++) s->x[i] += s->normed[i];
 
     /* 3. RoPE on Q (per head) and K (per kv head; for Falcon n_head_kv==1). */
     for (uint32_t h = 0; h < c->n_head; h++) {
@@ -474,26 +515,9 @@ static void arch_falcon_layer(OcLlamaSession *s, uint32_t layer)
                             s->attn_out + h * hd);
     }
 
-    /* Output projection + residual. */
+    /* 6. Output projection + attention residual (MLP residual was already
+     *    added in step 2b). */
     arch_matvec(&L->attn_output, s->attn_out, s->normed, s->dequant_temp);
-    for (size_t i = 0; i < n_embd; i++) s->x[i] += s->normed[i];
-
-    /* 6. FFN on the post-attention residual (no second LayerNorm in
-     *    Falcon-7B/40B; if ffn_norm is present we apply it, otherwise
-     *    operate on x directly). */
-    if (L->ffn_norm != NULL) {
-        arch_layer_norm(s->x, L->ffn_norm, s->normed, n_embd,
-                        c->rms_norm_eps);
-    } else {
-        memcpy(s->normed, s->x, n_embd * sizeof(float));
-    }
-
-    /* SwiGLU FFN: gate = silu(W_gate · normed); up = W_up · normed;
-     * intermediate = gate * up; out = W_down · intermediate; x += out. */
-    arch_matvec(&L->ffn_gate, s->normed, s->ffn_gate, s->dequant_temp);
-    arch_matvec(&L->ffn_up,   s->normed, s->ffn_up,   s->dequant_temp);
-    oc_swiglu_inplace_f32(s->ffn_gate, s->ffn_up, c->n_ff);
-    arch_matvec(&L->ffn_down, s->ffn_gate, s->normed, s->dequant_temp);
     for (size_t i = 0; i < n_embd; i++) s->x[i] += s->normed[i];
 }
 
@@ -514,8 +538,8 @@ static OcError arch_final_norm_and_logits(OcLlamaSession *s, float *logits_out)
     size_t n_embd = m->cfg.n_embd;
 
     /* Final LayerNorm (GPT-2/NeoX/Falcon use LayerNorm, not RMSNorm). */
-    arch_layer_norm(s->x, m->final_norm, s->normed, n_embd,
-                    m->cfg.rms_norm_eps);
+    arch_layer_norm(s->x, m->final_norm, m->final_norm_bias, s->normed,
+                    n_embd, m->cfg.rms_norm_eps);
 
     /* lm_head projection → logits. */
     if (logits_out != NULL) {
@@ -547,24 +571,21 @@ static OcError arch_final_norm_and_logits(OcLlamaSession *s, float *logits_out)
  * warning — the model will produce garbage for multi-token sequences but
  * will not crash.
  *
- * To keep this file self-contained (no changes to the OcLlamaModel struct
- * or the loader), we resolve the position embedding tensor on first use
- * and cache it in a static. This is acceptable for the C port's
- * single-model-at-a-time usage pattern.
+ * The resolved view is cached per model (`m->gpt2_pos_embed`), so multiple
+ * models never share each other's mmap and freeing one model cannot leave
+ * a dangling cache for another.
  *
  * For NeoX and Falcon, positional encoding is RoPE (applied per layer),
  * so no learned positional embedding lookup is needed. */
-static OcWeightView g_gpt2_pos_embed = {0};
-static bool g_gpt2_pos_resolved = false;
 
 /* Resolve the GPT-2 position embedding tensor from the model's GGUF.
  * Returns a pointer to the weight view, or NULL if not found. */
 static OcWeightView *arch_gpt2_get_pos_embed(OcLlamaModel *m)
 {
-    if (g_gpt2_pos_resolved) {
-        return (g_gpt2_pos_embed.data != NULL) ? &g_gpt2_pos_embed : NULL;
+    if (m->gpt2_pos_resolved) {
+        return (m->gpt2_pos_embed.data != NULL) ? &m->gpt2_pos_embed : NULL;
     }
-    g_gpt2_pos_resolved = true;
+    m->gpt2_pos_resolved = true;
 
     /* Scan the GGUF tensor list for the position embedding tensor.
      * We use the GGUF map's tensor info iterator to find a tensor named
@@ -587,30 +608,30 @@ static OcWeightView *arch_gpt2_get_pos_embed(OcLlamaModel *m)
         if (strcmp(cname, "position_embeddings.weight") == 0 ||
             strcmp(cname, "wpe.weight") == 0 ||
             strcmp(cname, "position_embd.weight") == 0) {
-            g_gpt2_pos_embed = (OcWeightView){
+            m->gpt2_pos_embed = (OcWeightView){
                 .data = oc_gguf_map_tensor_data(&m->gguf, &infos[i]),
                 .qtype = oc_quant_type_from_ggml_id(infos[i].ggml_type),
                 .rows = (infos[i].n_dims >= 2) ? infos[i].dims[1] : 1,
                 .cols = infos[i].dims[0],
             };
-            g_gpt2_pos_embed.row_bytes =
-                oc_quantized_size(g_gpt2_pos_embed.qtype, g_gpt2_pos_embed.cols);
-            if (g_gpt2_pos_embed.row_bytes == 0) {
-                g_gpt2_pos_embed.row_bytes =
-                    g_gpt2_pos_embed.cols * sizeof(float);
+            m->gpt2_pos_embed.row_bytes =
+                oc_quantized_size(m->gpt2_pos_embed.qtype, m->gpt2_pos_embed.cols);
+            if (m->gpt2_pos_embed.row_bytes == 0) {
+                m->gpt2_pos_embed.row_bytes =
+                    m->gpt2_pos_embed.cols * sizeof(float);
             }
             break;
         }
     }
     oc_arena_free(arena);
 
-    if (g_gpt2_pos_embed.data == NULL) {
+    if (m->gpt2_pos_embed.data == NULL) {
         oc_log(OC_LOG_WARN,
                "arch_forward: GPT-2 position_embeddings.weight not found; "
                "multi-token sequences will be incorrect");
         return NULL;
     }
-    return &g_gpt2_pos_embed;
+    return &m->gpt2_pos_embed;
 }
 
 /* Add the GPT-2 learned positional embedding for position `pos` to `s->x`. */

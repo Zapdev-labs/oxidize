@@ -210,7 +210,6 @@ OcError oc_dflash_model_init(OcDFlashDraftModel *m, const OcDFlashModelConfig *c
     memset(m, 0, sizeof(*m));
     m->config = *cfg;
 
-    size_t h = cfg->hidden_size;
     size_t n_layers = cfg->num_hidden_layers;
     size_t hd = oc_dflash_config_head_dim(cfg);
     size_t kv_len = cfg->num_key_value_heads * hd;

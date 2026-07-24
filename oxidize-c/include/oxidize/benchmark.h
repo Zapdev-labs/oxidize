@@ -29,11 +29,14 @@ extern "C" {
 typedef struct OcBenchmarkConfig {
     uint32_t n_warmup;          /* warmup tokens (not measured)            */
     uint32_t n_tokens;          /* measured tokens                          */
-    uint32_t batch_size;        /* prefill batch size (1 for pure decode)   */
+    uint32_t batch_size;        /* must be 0 or 1; batched prefill is not
+                                   implemented and >1 is rejected            */
     uint32_t n_repeats;         /* repeat the whole benchmark N times        */
     bool     verbose;           /* print progress to stderr                  */
     bool     track_memory;      /* measure RSS before/after                   */
-    uint32_t prompt_length;     /* prefill prompt length (0 = decode-only)    */
+    uint32_t prompt_length;     /* prefill prompt length; 0 = decode-only
+                                   (no prefill token is processed and the
+                                   prefill_* result fields stay 0)           */
 } OcBenchmarkConfig;
 
 #define OC_BENCHMARK_DEFAULT ((OcBenchmarkConfig){ \
@@ -76,7 +79,9 @@ OcError oc_benchmark_run(OcLlamaModel *model, const OcBenchmarkConfig *cfg,
                           OcBenchmarkResult *out);
 
 /* Run a throughput scaling benchmark: measure tok/s at multiple context
- * lengths. Fills the throughput_at_* fields. */
+ * lengths. Fills the throughput_at_* fields. Context lengths larger than the
+ * model's n_ctx are skipped (field stays 0); a failed run returns its error
+ * instead of reporting success. */
 OcError oc_benchmark_scaling(OcLlamaModel *model,
                               OcBenchmarkResult *out);
 

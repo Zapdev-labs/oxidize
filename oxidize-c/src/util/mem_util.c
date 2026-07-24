@@ -13,6 +13,7 @@
 #elif defined(__APPLE__)
 #include <sys/types.h>
 #include <sys/sysctl.h>
+#include <sys/resource.h>
 #include <mach/mach.h>
 #endif
 
@@ -35,19 +36,35 @@ OcError oc_mem_usage_get(OcMemUsage *out)
                 unsigned long kb = 0;
                 sscanf(line + 7, "%lu", &kb);
                 out->virtual = (uint64_t)kb * 1024;
-            } else if (strncmp(line, "VmPeak:", 7) == 0) {
+            } else if (strncmp(line, "VmHWM:", 6) == 0) {
+                /* RSS high-water mark (VmPeak is peak *virtual* size). */
                 unsigned long kb = 0;
-                sscanf(line + 7, "%lu", &kb);
+                sscanf(line + 6, "%lu", &kb);
                 out->peak_rss = (uint64_t)kb * 1024;
             }
         }
         fclose(f);
     }
-    /* System memory via sysinfo. */
+    /* System memory: total via sysinfo, available via /proc/meminfo
+     * MemAvailable (freeram excludes reclaimable page cache and badly
+     * underestimates what is actually allocatable). */
     struct sysinfo si;
     if (sysinfo(&si) == 0) {
         out->total = (uint64_t)si.totalram * si.mem_unit;
         out->available = (uint64_t)si.freeram * si.mem_unit;
+    }
+    f = fopen("/proc/meminfo", "r");
+    if (f) {
+        char line[256];
+        while (fgets(line, sizeof(line), f)) {
+            if (strncmp(line, "MemAvailable:", 13) == 0) {
+                unsigned long kb = 0;
+                sscanf(line + 13, "%lu", &kb);
+                if (kb != 0) out->available = (uint64_t)kb * 1024;
+                break;
+            }
+        }
+        fclose(f);
     }
 #elif defined(__APPLE__)
     /* macOS: use mach API. */
@@ -58,6 +75,10 @@ OcError oc_mem_usage_get(OcMemUsage *out)
         out->rss = t_info.resident_size;
         out->virtual = t_info.virtual_size;
     }
+    /* Peak RSS via getrusage (ru_maxrss is in bytes on macOS). */
+    struct rusage ru;
+    if (getrusage(RUSAGE_SELF, &ru) == 0)
+        out->peak_rss = (uint64_t)ru.ru_maxrss;
     /* System memory via sysctl. */
     int mib[2] = {CTL_HW, HW_MEMSIZE};
     uint64_t memsize = 0;

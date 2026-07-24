@@ -38,7 +38,11 @@
 /* ─── Compile-time constants (must match oxidize-c/include/oxidize/quant.h) ── */
 #define CK_QK_K             256u
 #define CK_BLOCK_Q4_K_SIZE  144u
-#define CK_MAX_TOPK         1024u
+/* Top-k limit: the block staging area needs blockDim.x * k * 8 bytes of
+ * shared memory; with the minimum 32-thread block that caps k at
+ * 48 KiB / (32 * 8) = 192. */
+#define CK_MAX_TOPK         192u
+#define CK_TOPK_SMEM_MAX    (48u * 1024u)
 
 /* ─── CUDA error checking macro ───────────────────────────────────────────── */
 #define CK_CUDA_CHECK(call)                                              \
@@ -166,11 +170,13 @@ __global__ void k_rmsnorm_rope_fused(const float *x,
     float *oh = out + head * head_dim;
     const float *wh = weight + head * head_dim;
 
-    /* Step 1: per-head RMS reduction in shared memory. */
+    /* Step 1: full-vector RMS reduction in shared memory. RMSNorm is
+     * defined over the whole hidden vector, so every block redundantly
+     * computes the same sum over all hidden_dim elements. */
     extern __shared__ float sdata[];
     float v = 0.0f;
-    for (uint32_t i = tid; i < head_dim; i += blockSize)
-        v += xh[i] * xh[i];
+    for (uint32_t i = tid; i < hidden_dim; i += blockSize)
+        v += x[i] * x[i];
     sdata[tid] = v;
     __syncthreads();
 
@@ -178,7 +184,7 @@ __global__ void k_rmsnorm_rope_fused(const float *x,
         if (tid < s) sdata[tid] += sdata[tid + s];
         __syncthreads();
     }
-    float inv_rms = norm_scale / sqrtf(sdata[0] / (float)head_dim + eps);
+    float inv_rms = norm_scale / sqrtf(sdata[0] / (float)hidden_dim + eps);
 
     /* Step 2: normalize + apply RoPE (split-halves). */
     uint32_t half = rope_dim / 2u;
@@ -186,7 +192,8 @@ __global__ void k_rmsnorm_rope_fused(const float *x,
     for (uint32_t i = tid; i < half; i += blockSize) {
         float xn = xh[i] * inv_rms * wh[i];
         float xn2 = xh[i + half] * inv_rms * wh[i + half];
-        float freq = powf(theta, -2.0f * (float)i / (float)rope_dim);
+        /* Match activation.c::oc_apply_rope_f32: theta^(-2i/head_dim). */
+        float freq = powf(theta, -2.0f * (float)i / (float)head_dim);
         float angle = (float)pos * freq;
         float c = cosf(angle);
         float s = sinf(angle);
@@ -203,7 +210,8 @@ __global__ void k_rmsnorm_rope_fused(const float *x,
  *
  * silu(gate) * up, where silu(x) = x * sigmoid(x). One element per thread.
  */
-__global__ void k_swiglu(float *gate, const float *up, size_t n)
+/* Named k_swiglu_fused to avoid a duplicate symbol with cuda.cu's k_swiglu. */
+__global__ void k_swiglu_fused(float *gate, const float *up, size_t n)
 {
     size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) {
@@ -421,8 +429,8 @@ __global__ void k_argmax(const float *logits, uint32_t *out_idx,
  * scanning a strided slice of the vocab. A shared-memory bitonic merge
  * then produces the final top-k.
  *
- * Constraints: k ≤ CK_MAX_TOPK (1024) and blockDim.x must be a power of
- * two ≤ 1024.
+ * Constraints: k ≤ CK_MAX_TOPK (192), k ≤ vocab_size, and blockDim.x must
+ * be a power of two ≤ 1024 with blockDim.x * k * 8 bytes of shared memory.
  */
 __global__ void k_topk(const float *logits,
                        uint32_t *out_idx,
@@ -432,7 +440,8 @@ __global__ void k_topk(const float *logits,
 {
     extern __shared__ float smem[];
     float  *s_val = smem;
-    uint32_t *s_idx = (uint32_t *)(s_val + CK_MAX_TOPK);
+    /* Index buffer starts after the full value buffer (blockDim.x * k). */
+    uint32_t *s_idx = (uint32_t *)(s_val + (size_t)blockDim.x * k);
 
     uint32_t tid = threadIdx.x;
     uint32_t blockSize = blockDim.x;
@@ -564,7 +573,7 @@ bool oc_cuda_swiglu(float *d_gate, const float *d_up, size_t n)
 
     uint32_t block = 256u;
     size_t grid = (n + block - 1u) / block;
-    k_swiglu<<<grid, block>>>(d_gate, d_up, n);
+    k_swiglu_fused<<<grid, block>>>(d_gate, d_up, n);
     CK_CUDA_CHECK(cudaGetLastError());
     CK_CUDA_CHECK(cudaDeviceSynchronize());
     return true;
@@ -675,12 +684,16 @@ bool oc_cuda_topk(const float *d_logits, uint32_t *d_out_idx,
     if (!d_logits || !d_out_idx || !d_out_val) return false;
     if (vocab_size == 0u || k == 0u) return false;
     if (k > CK_MAX_TOPK) return false;
+    if (k > vocab_size) return false;  /* would fabricate entries */
 
-    /* Use a single block of 1024 threads (power of two). */
+    /* Pick the largest power-of-two block whose staging area
+     * (blockSize * k * 8 bytes) fits in shared memory. */
+    size_t per_thread = (size_t)k * (sizeof(float) + sizeof(uint32_t));
     uint32_t block = 1024u;
-    /* Shared memory: blockSize * k floats + blockSize * k uint32. */
-    size_t smem = (size_t)block * k * sizeof(float)
-                + (size_t)block * k * sizeof(uint32_t);
+    while (block > 32u && (size_t)block * per_thread > CK_TOPK_SMEM_MAX)
+        block >>= 1u;
+    if ((size_t)block * per_thread > CK_TOPK_SMEM_MAX) return false;
+    size_t smem = (size_t)block * per_thread;
 
     k_topk<<<1, block, smem>>>(d_logits, d_out_idx, d_out_val,
                                 vocab_size, k);

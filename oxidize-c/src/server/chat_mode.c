@@ -55,8 +55,14 @@ OcError oc_chat_history_render(const OcChatHistory *h, char **out_text)
         contents[i] = h->entries[i].content;
     }
 
-    /* Render into a buffer. */
+    /* Render into a buffer sized from the actual history so long
+     * conversations are never silently truncated by a fixed cap. */
     size_t buf_cap = 1 << 16;
+    size_t needed = 1024;
+    for (size_t i = 0; i < h->n_entries; i++) {
+        needed += strlen(h->entries[i].role) + strlen(h->entries[i].content) + 128;
+    }
+    if (needed > buf_cap) buf_cap = needed;
     char *buf = malloc(buf_cap);
     if (!buf) { free(roles); free(contents); return OC_ERR_OOM; }
 
@@ -134,9 +140,17 @@ OcError oc_chat_process_input(OcLlamaModel *model, OcTokenizer *tok,
     e = oc_llama_session_init(model, &sess);
     if (e != OC_OK) { free(ids); return e; }
 
-    for (size_t i = 0; i < n_ids; i++) {
+    if (n_ids == 0) { free(ids); oc_llama_session_free(&sess); return OC_ERR_TOKENIZER; }
+
+    /* Prefill: all but the last prompt token without logits, then the last
+     * one with logits so sampling starts from the prompt's next-token
+     * distribution. */
+    for (size_t i = 0; i + 1 < n_ids; i++) {
         e = oc_llama_forward(&sess, ids[i], NULL);
         if (e != OC_OK) break;
+    }
+    if (e == OC_OK) {
+        e = oc_llama_forward(&sess, ids[n_ids - 1], sess.logits);
     }
     free(ids);
     if (e != OC_OK) { oc_llama_session_free(&sess); return e; }
@@ -150,11 +164,6 @@ OcError oc_chat_process_input(OcLlamaModel *model, OcTokenizer *tok,
     response[0] = '\0';
 
     for (uint32_t t = 0; t < n_predict; t++) {
-        e = oc_llama_forward(&sess,
-            t == 0 ? oc_argmax(logits, model->cfg.vocab_size) : 0,
-            logits);
-        if (e != OC_OK) break;
-
         uint32_t token = oc_sample(logits, model->cfg.vocab_size, (OcSamplerConfig *)scfg, NULL, 0);
         if (tok->has_eos && token == tok->eos_id) break;
 
@@ -164,7 +173,12 @@ OcError oc_chat_process_input(OcLlamaModel *model, OcTokenizer *tok,
             if (resp_len + pl + 1 >= resp_cap) {
                 resp_cap = resp_cap * 2 + pl;
                 char *tmp = realloc(response, resp_cap);
-                if (!tmp) { free(piece); break; }
+                if (!tmp) {
+                    free(piece);
+                    free(response);
+                    oc_llama_session_free(&sess);
+                    return OC_ERR_OOM;
+                }
                 response = tmp;
             }
             memcpy(response + resp_len, piece, pl);
@@ -172,6 +186,10 @@ OcError oc_chat_process_input(OcLlamaModel *model, OcTokenizer *tok,
             response[resp_len] = '\0';
             free(piece);
         }
+
+        /* Feed the sampled token back for the next step. */
+        e = oc_llama_forward(&sess, token, logits);
+        if (e != OC_OK) break;
     }
 
     oc_llama_session_free(&sess);

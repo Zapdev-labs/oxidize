@@ -8,6 +8,7 @@
 #include "oxidize/oxk.h"
 
 #include <string.h>
+#include <threads.h>
 
 /* ─── f16 → f32 (bit-twiddle, no libm) ──────────────────────────────────── */
 
@@ -23,11 +24,12 @@ float oc_oxk_f16_le_to_f32(const uint8_t p[2])
         if (mant == 0) {
             bits = sign << 31;
         } else {
-            /* Subnormal: normalize. */
-            uint32_t e = 1;
+            /* Subnormal: normalize. Each left shift halves the effective
+             * exponent, so it decreases as we normalize. */
+            uint32_t e = 0;
             while ((mant & 0x400) == 0) { mant <<= 1; e++; }
             mant &= 0x3FF;
-            exp = 127 - 15 + e;
+            exp = 127 - 15 + 1 - e;
             bits = (sign << 31) | (exp << 23) | (mant << 13);
         }
     } else if (exp == 31) {
@@ -347,12 +349,10 @@ void oc_oxk_matvec_q8_0_f32_scalar(const uint8_t *w, size_t n_rows,
 /* ─── Capability detection + dispatcher ──────────────────────────────────── */
 
 static OcOxkContext g_ctx;
-static int g_initialized = 0;
+static once_flag g_once = ONCE_FLAG_INIT;
 
-const OcOxkContext *oc_oxk_init(void)
+static void oc_oxk_init_once(void)
 {
-    if (g_initialized) return &g_ctx;
-
     OcOxkLevel level = OC_OXK_SCALAR;
     bool has_f16c = false, has_fma = false, has_vnni = false;
     const char *name = "scalar";
@@ -389,8 +389,11 @@ const OcOxkContext *oc_oxk_init(void)
     g_ctx.matvec_q4_0_f32 = oc_oxk_matvec_q4_0_f32_scalar;
     g_ctx.matvec_q4_k_f32 = oc_oxk_matvec_q4_k_f32_scalar;
     g_ctx.matvec_q8_0_f32 = oc_oxk_matvec_q8_0_f32_scalar;
+}
 
-    g_initialized = 1;
+const OcOxkContext *oc_oxk_init(void)
+{
+    call_once(&g_once, oc_oxk_init_once);
     return &g_ctx;
 }
 

@@ -16,7 +16,7 @@ Test(lora, model_init_free)
 Test(lora, set_adapter)
 {
     OcLoraModel lm;
-    oc_lora_model_init(&lm, 2);
+    cr_assert_eq(oc_lora_model_init(&lm, 2), OC_OK);
 
     /* Create a simple rank-2 adapter for q_proj of layer 0.
      * a: [2, 4] (rank=2, cols=4)
@@ -29,6 +29,8 @@ Test(lora, set_adapter)
     /* We need to malloc since lora takes ownership. */
     float *a_copy = malloc(sizeof(a));
     float *b_copy = malloc(sizeof(b));
+    cr_assert_not_null(a_copy, "malloc");
+    cr_assert_not_null(b_copy, "malloc");
     memcpy(a_copy, a, sizeof(a));
     memcpy(b_copy, b, sizeof(b));
 
@@ -94,7 +96,7 @@ Test(lora, apply_null_safety)
 Test(lora, set_invalid_weight_name)
 {
     OcLoraModel lm;
-    oc_lora_model_init(&lm, 1);
+    cr_assert_eq(oc_lora_model_init(&lm, 1), OC_OK);
     float dummy[1] = {0};
     cr_assert_neq(oc_lora_set_adapter(&lm, 0, "invalid_proj",
         dummy, dummy, 1, 1, 1, 1.0f), OC_OK);

@@ -44,7 +44,9 @@ typedef struct OcOffloadPipeline {
     bool            initialized;
 } OcOffloadPipeline;
 
-/* Initialize the offload pipeline. */
+/* Initialize the offload pipeline.
+ * gpu_layers > 0 is currently rejected with OC_ERR_INVALID_ARG: per-layer
+ * forward is not exposed yet, so a real CPU/GPU split cannot be run. */
 OcError oc_offload_init(OcOffloadPipeline *pipe, OcLlamaModel *model,
                         const OcOffloadConfig *cfg);
 
@@ -63,7 +65,8 @@ void oc_offload_free(OcOffloadPipeline *pipe);
 bool oc_offload_cuda_available(void);
 
 /* Suggest the optimal number of GPU layers based on available VRAM.
- * Returns 0 if CUDA is not available. */
+ * Pure size-based estimate independent of CUDA availability; callers
+ * should check oc_offload_cuda_available() before acting on it. */
 uint32_t oc_offload_suggest_gpu_layers(uint64_t model_size_bytes,
                                        uint64_t available_vram_bytes);
 

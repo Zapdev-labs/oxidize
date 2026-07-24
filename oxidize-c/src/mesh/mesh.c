@@ -12,9 +12,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <netdb.h>
 #include <errno.h>
 
 #define OC_MESH_PORT_DEFAULT 51920
@@ -32,8 +34,62 @@ OcError oc_mesh_init(OcMesh *mesh, const OcMeshConfig *cfg)
     mesh->peers[0].online = true;
     mesh->peers[0].n_gpus = 0;
     mesh->peers[0].memory_mb = 0;
+    mesh->peers[0].socket_fd = -1;
+    mesh->listen_fd = -1;
     mesh->initialized = true;
     return OC_OK;
+}
+
+/* Resolve host (IPv4 literal or hostname) and connect. Returns fd or -1. */
+static int mesh_tcp_connect(const char *host, uint16_t port)
+{
+    char portstr[8];
+    snprintf(portstr, sizeof(portstr), "%u", (unsigned)port);
+
+    struct addrinfo hints, *res = NULL;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    if (getaddrinfo(host, portstr, &hints, &res) != 0 || !res) return -1;
+
+    int fd = -1;
+    for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
+        fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (fd < 0) continue;
+        if (connect(fd, ai->ai_addr, ai->ai_addrlen) == 0) break;
+        close(fd);
+        fd = -1;
+    }
+    freeaddrinfo(res);
+    return fd;
+}
+
+/* Accept any pending inbound connections and register them as peers.
+ * The listen socket is non-blocking, so this drains the backlog without
+ * stalling. ponytail: poll-on-use instead of an accept thread; add a
+ * dedicated accept loop if latency-sensitive discovery is ever needed. */
+static void mesh_accept_pending(OcMesh *mesh)
+{
+    if (mesh->listen_fd < 0) return;
+    for (;;) {
+        struct sockaddr_in sa;
+        socklen_t sl = sizeof(sa);
+        int fd = accept(mesh->listen_fd, (struct sockaddr *)&sa, &sl);
+        if (fd < 0) break; /* EAGAIN/EWOULDBLOCK: nothing pending */
+        if (mesh->n_peers >= OC_MESH_MAX_PEERS) {
+            close(fd);
+            break;
+        }
+        OcPeer *p = &mesh->peers[mesh->n_peers];
+        memset(p, 0, sizeof(*p));
+        p->id = (uint32_t)mesh->n_peers;
+        snprintf(p->addr, sizeof(p->addr), "%s:%u",
+                 inet_ntoa(sa.sin_addr), (unsigned)ntohs(sa.sin_port));
+        p->role = OC_PEER_FOLLOWER;
+        p->online = true;
+        p->socket_fd = fd;
+        mesh->n_peers++;
+    }
 }
 
 OcError oc_mesh_listen(OcMesh *mesh)
@@ -62,10 +118,11 @@ OcError oc_mesh_listen(OcMesh *mesh)
         close(fd);
         return OC_ERR_IO;
     }
-    /* Store the listen socket fd in the first peer's memory_mb field
-     * (reuse as a socket descriptor holder). This is a hack for the
-     * simplified implementation. */
-    mesh->peers[0].memory_mb = (uint32_t)fd;
+    /* Non-blocking so pending connections can be drained opportunistically. */
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags >= 0) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    if (mesh->listen_fd >= 0) close(mesh->listen_fd);
+    mesh->listen_fd = fd;
     return OC_OK;
 }
 
@@ -73,7 +130,6 @@ OcError oc_mesh_connect(OcMesh *mesh, const char *addr)
 {
     if (!mesh || !mesh->initialized || !addr || addr[0] == '\0')
         return OC_ERR_INVALID_ARG;
-    if (mesh->n_peers >= OC_MESH_MAX_PEERS) return OC_ERR_OOM;
 
     /* Parse "host:port" address. */
     char host[256];
@@ -89,38 +145,36 @@ OcError oc_mesh_connect(OcMesh *mesh, const char *addr)
         snprintf(host, sizeof(host), "%s", addr);
     }
 
-    /* Create TCP socket and connect. */
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return OC_ERR_IO;
-
-    struct sockaddr_in sa;
-    memset(&sa, 0, sizeof(sa));
-    sa.sin_family = AF_INET;
-    sa.sin_port = htons(port);
-    if (inet_pton(AF_INET, host, &sa.sin_addr) <= 0) {
-        close(fd);
-        return OC_ERR_INVALID_ARG;
+    /* Retry an existing peer with the same address instead of consuming a
+     * new slot on every attempt. */
+    OcPeer *p = NULL;
+    for (size_t i = 1; i < mesh->n_peers; i++) {
+        if (strcmp(mesh->peers[i].addr, addr) == 0) {
+            p = &mesh->peers[i];
+            break;
+        }
     }
-
-    if (connect(fd, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
-        close(fd);
-        /* Connection failed - add peer as offline. */
-        OcPeer *p = &mesh->peers[mesh->n_peers];
+    if (!p) {
+        if (mesh->n_peers >= OC_MESH_MAX_PEERS) return OC_ERR_OOM;
+        p = &mesh->peers[mesh->n_peers];
+        memset(p, 0, sizeof(*p));
         p->id = (uint32_t)mesh->n_peers;
         snprintf(p->addr, sizeof(p->addr), "%s", addr);
         p->role = OC_PEER_LEADER;
         p->online = false;
+        p->socket_fd = -1;
         mesh->n_peers++;
+    }
+    if (p->online && p->socket_fd >= 0) return OC_OK; /* already connected */
+
+    int fd = mesh_tcp_connect(host, port);
+    if (fd < 0) {
+        /* Connection failed; peer stays registered offline for retry. */
         return OC_ERR_IO;
     }
 
-    OcPeer *p = &mesh->peers[mesh->n_peers];
-    p->id = (uint32_t)mesh->n_peers;
-    snprintf(p->addr, sizeof(p->addr), "%s", addr);
-    p->role = OC_PEER_LEADER;
     p->online = true;
-    p->memory_mb = (uint32_t)fd; /* Store socket fd. */
-    mesh->n_peers++;
+    p->socket_fd = fd;
     return OC_OK;
 }
 
@@ -130,6 +184,7 @@ OcError oc_mesh_broadcast(OcMesh *mesh, const void *data, size_t len,
     (void)data; (void)len; (void)layer_idx;
     if (!mesh || !mesh->initialized || (!data && len > 0))
         return OC_ERR_INVALID_ARG;
+    mesh_accept_pending(mesh);
     return OC_OK;
 }
 
@@ -138,6 +193,7 @@ OcError oc_mesh_allreduce(OcMesh *mesh, float *data, size_t len)
     (void)data; (void)len;
     if (!mesh || !mesh->initialized || (!data && len > 0))
         return OC_ERR_INVALID_ARG;
+    mesh_accept_pending(mesh);
     /* Single-node: no-op (data is already the full result). */
     return OC_OK;
 }
@@ -156,14 +212,15 @@ const OcPeer *oc_mesh_get_peer(const OcMesh *mesh, size_t idx)
 void oc_mesh_free(OcMesh *mesh)
 {
     if (!mesh) return;
-    /* Close any open sockets stored in memory_mb fields. */
-    for (size_t i = 0; i < mesh->n_peers; i++) {
-        if (mesh->peers[i].memory_mb > 0) {
-            int fd = (int)mesh->peers[i].memory_mb;
-            if (fd > 2) close(fd);
+    if (mesh->initialized) {
+        for (size_t i = 0; i < mesh->n_peers; i++) {
+            if (mesh->peers[i].socket_fd >= 0)
+                close(mesh->peers[i].socket_fd);
         }
+        if (mesh->listen_fd >= 0) close(mesh->listen_fd);
     }
     memset(mesh, 0, sizeof(*mesh));
+    mesh->listen_fd = -1;
 }
 
 OcError oc_mesh_shard_for_layer(const OcMesh *mesh, uint32_t layer_idx,

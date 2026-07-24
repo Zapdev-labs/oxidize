@@ -17,7 +17,6 @@
 #include <stdint.h>
 
 #include "oxidize/error.h"
-#include "oxidize/llama.h"
 
 #ifdef __cplusplus
 extern "C" {

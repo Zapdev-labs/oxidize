@@ -201,11 +201,11 @@ void oc_tensor_softmax_online_f32(const float *a, float *out, size_t n)
     float sum = 1.0f;
     out[0] = 1.0f;
     for (size_t i = 1; i < n; i++) {
-        float e = expf(a[i] - max_val);
         float new_max = a[i] > max_val ? a[i] : max_val;
+        float e = expf(a[i] - new_max);
         float rescale = expf(max_val - new_max);
         sum = sum * rescale + e;
-        for (size_t j = 0; j <= i; j++)
+        for (size_t j = 0; j < i; j++)
             out[j] *= rescale;
         out[i] = e;
         max_val = new_max;
@@ -275,9 +275,8 @@ void oc_tensor_rope_neox_f32(float *x, size_t head_dim,
                               uint32_t position, float freq_base)
 {
     size_t half = head_dim / 2;
-    float inv_freq = 1.0f / freq_base;
     for (size_t i = 0; i < half; i++) {
-        float freq = inv_freq * powf(freq_base, (float)i / (float)half);
+        float freq = powf(freq_base, -(float)i / (float)half);
         float angle = (float)position * freq;
         float cos_a = cosf(angle);
         float sin_a = sinf(angle);
@@ -292,9 +291,8 @@ void oc_tensor_rope_gptj_f32(float *x, size_t head_dim,
                               uint32_t position, float freq_base)
 {
     size_t half = head_dim / 2;
-    float inv_freq = 1.0f / freq_base;
     for (size_t i = 0; i < half; i++) {
-        float freq = inv_freq * powf(freq_base, (float)i / (float)half);
+        float freq = powf(freq_base, -(float)i / (float)half);
         float angle = (float)position * freq;
         float cos_a = cosf(angle);
         float sin_a = sinf(angle);
@@ -358,7 +356,11 @@ void oc_tensor_attention_head_f32(const float *Q, const float *K,
 {
     /* Compute attention scores: scores[i] = Q · K[i] * scale. */
     float *scores = malloc(seq_len * sizeof(float));
-    if (!scores) return;
+    if (!scores) {
+        /* Defined fallback: zero output so callers never consume stale data. */
+        memset(out, 0, d_head * sizeof(float));
+        return;
+    }
 
     for (size_t i = 0; i < seq_len; i++) {
         float dot = 0.0f;
@@ -386,6 +388,12 @@ void oc_tensor_attention_mha_f32(const float *Q, const float *K,
                                    size_t n_head_q, size_t n_head_kv,
                                    size_t seq_len, size_t d_head)
 {
+    if (n_head_kv == 0) {
+        /* Invalid GQA config: defined fallback of zero output. */
+        memset(out, 0, n_head_q * d_head * sizeof(float));
+        return;
+    }
+
     float scale = 1.0f / sqrtf((float)d_head);
 
     for (size_t h = 0; h < n_head_q; h++) {

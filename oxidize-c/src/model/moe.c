@@ -22,9 +22,14 @@ static bool config_valid(const OcMoeConfig *c)
     if (!c) return false;
     if (c->n_experts == 0) return false;
     if (c->hidden_dim == 0) return false;
-    if (c->n_active_experts == 0) return false;
+    /* n_active_experts == 0 means "use the default of 1" (see moe.h). */
     if (c->n_active_experts > c->n_experts) return false;
     if (c->n_active_experts > OC_MOE_MAX_EXPERTS_PER_TOKEN) return false;
+    /* TOP_P/SOFTMAX may select every expert, but OcMoeRouteResult only
+     * holds OC_MOE_MAX_EXPERTS_PER_TOKEN entries; reject configs that
+     * would silently drop experts. */
+    if (c->routing_method != OC_MOE_ROUTE_TOP_K &&
+        c->n_experts > OC_MOE_MAX_EXPERTS_PER_TOKEN) return false;
     if (c->expert_size == 0) return false;
     if (c->routing_method >= OC_MOE_ROUTE__COUNT) return false;
     if (c->top_p < 0.0f || c->top_p > 1.0f) return false;
@@ -105,6 +110,8 @@ OcError oc_moe_router_init(OcMoeRouter *r, const OcMoeConfig *config)
     if (!config_valid(config)) return OC_ERR_INVALID_ARG;
 
     r->config = *config;
+    /* Documented default: n_active_experts == 0 means 1. */
+    if (r->config.n_active_experts == 0) r->config.n_active_experts = 1;
     /* Sensible defaults for top_p when using TOP_P without explicit setting. */
     if (r->config.routing_method == OC_MOE_ROUTE_TOP_P && r->config.top_p == 0.0f) {
         r->config.top_p = 0.9f;
@@ -159,12 +166,34 @@ OcError oc_moe_router_set_experts(OcMoeRouter *r,
                                   const float *up_proj,
                                   const float *down_proj)
 {
-    if (!r) return OC_ERR_INVALID_ARG;
+    if (!r || !r->expert_weights) return OC_ERR_INVALID_ARG;
     size_t n = (size_t)r->config.n_experts * r->config.expert_size * r->config.hidden_dim;
 
     if (gate_proj) memcpy(r->expert_weights, gate_proj, n * sizeof(float));
-    if (up_proj)   memcpy(r->expert_up,      up_proj,   n * sizeof(float));
-    if (down_proj) memcpy(r->expert_down,    down_proj, n * sizeof(float));
+
+    /* Optional projections: an omitted projection drops its buffer so
+     * expert_forward selects the single-projection path instead of a
+     * zero-weight SwiGLU. */
+    if (up_proj) {
+        if (!r->expert_up) {
+            r->expert_up = malloc(n * sizeof(float));
+            if (!r->expert_up) return OC_ERR_OOM;
+        }
+        memcpy(r->expert_up, up_proj, n * sizeof(float));
+    } else {
+        free(r->expert_up);
+        r->expert_up = NULL;
+    }
+    if (down_proj) {
+        if (!r->expert_down) {
+            r->expert_down = malloc(n * sizeof(float));
+            if (!r->expert_down) return OC_ERR_OOM;
+        }
+        memcpy(r->expert_down, down_proj, n * sizeof(float));
+    } else {
+        free(r->expert_down);
+        r->expert_down = NULL;
+    }
     return OC_OK;
 }
 
@@ -476,14 +505,7 @@ size_t oc_moe_stats_format(const OcMoeStats *stats, char *buf, size_t cap)
     APPEND_FMT("  \"n_experts\": %u,\n", stats->n_experts);
     APPEND_FMT("  \"n_active_experts\": %u,\n", stats->n_active_experts);
 
-    if (buf && off + 1 < cap) {
-        size_t before = off;
-        memcpy(buf + off, "  \"expert_usage_counts\": ", 24);
-        off += 24;
-        (void)before;
-    } else {
-        off += 24;
-    }
+    APPEND_STR("  \"expert_usage_counts\": ");
     if (stats->expert_usage_counts && stats->n_experts > 0) {
         if (buf) {
             format_u64_array(buf, cap, &off,

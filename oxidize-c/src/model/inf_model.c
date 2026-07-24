@@ -157,7 +157,7 @@ size_t oc_inf_model_kv_layer_count(const OcInferenceModel *m)
 size_t oc_inf_model_kv_row_len(const OcInferenceModel *m)
 {
     if (!m) return 0;
-    return m->kv_cache.config.n_heads * m->kv_cache.config.head_dim;
+    return (size_t)m->kv_cache.config.n_heads * m->kv_cache.config.head_dim;
 }
 
 bool oc_inf_model_is_loaded(const OcInferenceModel *m)
@@ -413,17 +413,6 @@ OcError oc_gemv_weight_head(const OcWeightStorage *ws,
         return oc_gemv_f32(ws->f32_data + start, rows, cols, input, output);
     }
 
-    /* For quantized: compute per-head byte offset. */
-    const uint8_t *data;
-    size_t data_len;
-    if (ws->type == OC_WEIGHT_QUANTIZED) {
-        data = ws->quant_data;
-        data_len = ws->quant_size;
-    } else {
-        data = ws->mmap_data + ws->mmap_offset;
-        data_len = ws->mmap_size;
-    }
-
     /* For quantized, fall back to dequantizing the whole matrix then slicing.
      * This is not optimal but correct. A production implementation would
      * compute the per-head byte offset from block info. */
@@ -669,6 +658,8 @@ static OcError forward_mla_layer(OcInferenceModel *m, OcLayerWeights *layer,
 static OcError forward_shortconv_layer(OcInferenceModel *m, OcLayerWeights *layer,
                                         size_t li, size_t pos)
 {
+    (void)li;
+    (void)pos;
     OcInferenceConfig *cfg = &m->config;
     size_t h = cfg->hidden_size;
     float eps = cfg->rms_norm_eps;
@@ -737,6 +728,8 @@ static OcError forward_shortconv_layer(OcInferenceModel *m, OcLayerWeights *laye
 static OcError forward_mamba_layer(OcInferenceModel *m, OcLayerWeights *layer,
                                     size_t li, size_t pos)
 {
+    (void)li;
+    (void)pos;
     OcInferenceConfig *cfg = &m->config;
     size_t h = cfg->hidden_size;
     float eps = cfg->rms_norm_eps;
@@ -1081,7 +1074,7 @@ OcError oc_inf_model_forward_token(OcInferenceModel *m, uint32_t token, size_t p
         }
 
         /* --- FFN block --- */
-        ffn_block:
+        ffn_block:;
         float *ffn_norm_weight;
         if (cfg->sandwich_norm)
             ffn_norm_weight = layer->ffn_norm;
@@ -1306,7 +1299,7 @@ static OcError mtp_forward_one(OcInferenceModel *m,
     /* Use workspace scratch as a mini KV cache for MTP. */
     /* For pos=0, K/V are just the current token's K/V. */
     /* For pos>0, we would need to store previous K/V. Use workspace.kv_keys_copy. */
-    size_t kv_total = kv_len * seq_len;
+    size_t kv_total = (size_t)kv_len * seq_len;
     float *mtp_keys = m->workspace.kv_keys_copy;
     float *mtp_vals = m->workspace.kv_values_copy;
     if (mtp_keys && mtp_vals && kv_total <= m->workspace.kv_copy_size) {

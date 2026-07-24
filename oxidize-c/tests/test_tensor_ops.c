@@ -11,6 +11,7 @@ Test(tensor, add)
     float out[3];
     oc_tensor_add_f32(a, b, out, 3);
     cr_assert_float_eq(out[0], 5.0f, 1e-6f);
+    cr_assert_float_eq(out[1], 7.0f, 1e-6f);
     cr_assert_float_eq(out[2], 9.0f, 1e-6f);
 }
 
@@ -21,6 +22,7 @@ Test(tensor, mul)
     float out[3];
     oc_tensor_mul_f32(a, b, out, 3);
     cr_assert_float_eq(out[0], 10.0f, 1e-6f);
+    cr_assert_float_eq(out[1], 18.0f, 1e-6f);
     cr_assert_float_eq(out[2], 28.0f, 1e-6f);
 }
 
@@ -30,6 +32,7 @@ Test(tensor, scale)
     float out[3];
     oc_tensor_scale_f32(a, 2.5f, out, 3);
     cr_assert_float_eq(out[0], 2.5f, 1e-6f);
+    cr_assert_float_eq(out[1], 5.0f, 1e-6f);
     cr_assert_float_eq(out[2], 7.5f, 1e-6f);
 }
 
@@ -161,9 +164,8 @@ Test(tensor, concat)
     float b[] = {5.0f, 6.0f};            /* 1×2 */
     float out[6];
     oc_tensor_concat_f32(a, b, out, 1, 4, 2);
-    cr_assert_float_eq(out[0], 1.0f, 1e-6f);
-    cr_assert_float_eq(out[4], 5.0f, 1e-6f);
-    cr_assert_float_eq(out[5], 6.0f, 1e-6f);
+    for (int i = 0; i < 6; i++)
+        cr_assert_float_eq(out[i], (float)(i + 1), 1e-6f, "out[%d]", i);
 }
 
 Test(tensor, gemm)
@@ -213,9 +215,12 @@ Test(tensor, iadd_imul)
     float b[] = {4.0f, 5.0f, 6.0f};
     oc_tensor_iadd_f32(a, b, 3);
     cr_assert_float_eq(a[0], 5.0f, 1e-6f);
+    cr_assert_float_eq(a[1], 7.0f, 1e-6f);
     cr_assert_float_eq(a[2], 9.0f, 1e-6f);
     oc_tensor_imul_f32(a, b, 3);
     cr_assert_float_eq(a[0], 20.0f, 1e-6f);
+    cr_assert_float_eq(a[1], 35.0f, 1e-6f);
+    cr_assert_float_eq(a[2], 54.0f, 1e-6f);
 }
 
 Test(tensor, attention_head)
@@ -227,9 +232,16 @@ Test(tensor, attention_head)
     float out[2];
     float scale = 1.0f / sqrtf(2.0f);
     oc_tensor_attention_head_f32(Q, K, V, out, 3, 2, scale);
-    /* Output should be a weighted sum of V rows. */
-    /* Q is aligned with K[0], so V[0] should have highest weight. */
-    cr_assert(out[0] > 0.0f && out[1] > 0.0f);
+    /* Expected: scores = {1, 0, 0.5} * scale, softmax weights
+     * w = {0.455527, 0.224606, 0.319866}; out = sum(w[i] * V[i]). */
+    float s0 = 1.0f * scale, s1 = 0.0f, s2 = 0.5f * scale;
+    float e0 = expf(s0), e1 = expf(s1), e2 = expf(s2);
+    float wsum = e0 + e1 + e2;
+    float w0 = e0 / wsum, w1 = e1 / wsum, w2 = e2 / wsum;
+    float exp0 = w0 * V[0] + w1 * V[2] + w2 * V[4];
+    float exp1 = w0 * V[1] + w1 * V[3] + w2 * V[5];
+    cr_assert_float_eq(out[0], exp0, 1e-5f); /* ≈ 2.72868 */
+    cr_assert_float_eq(out[1], exp1, 1e-5f); /* ≈ 3.72868 */
 }
 
 Test(tensor, copy)
@@ -246,7 +258,8 @@ Test(tensor, repeat_row)
     float row[] = {1.0f, 2.0f, 3.0f};
     float out[9]; /* 3 × 3 */
     oc_tensor_repeat_row_f32(row, out, 3, 3);
-    cr_assert_float_eq(out[0], 1.0f, 1e-6f);
-    cr_assert_float_eq(out[3], 1.0f, 1e-6f);
-    cr_assert_float_eq(out[6], 1.0f, 1e-6f);
+    for (int r = 0; r < 3; r++)
+        for (int c = 0; c < 3; c++)
+            cr_assert_float_eq(out[r * 3 + c], row[c], 1e-6f,
+                               "out[%d][%d]", r, c);
 }

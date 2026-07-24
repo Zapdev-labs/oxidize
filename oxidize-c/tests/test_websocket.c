@@ -216,11 +216,11 @@ Test(websocket, parse_unmasked_text_frame)
 Test(websocket, parse_masked_text_frame)
 {
     /* Mask 0x37 0xfa 0x21 0x3d, payload "Hello" masked.
-     * "Hello" ^ mask: H^0x37=0x7F, e^0xfa=0x9F, l^0x21=0x6D, l^0x3d=0x51, o^0x37=0x5E */
+     * "Hello" ^ mask: H^0x37=0x7F, e^0xfa=0x9F, l^0x21=0x4D, l^0x3d=0x51, o^0x37=0x58 */
     uint8_t buf[] = {
         0x81, 0x85,
         0x37, 0xfa, 0x21, 0x3d,
-        0x7f, 0x9f, 0x6d, 0x51, 0x5e,
+        0x7f, 0x9f, 0x4d, 0x51, 0x58,
     };
     OcWsFrame f;
     size_t n = oc_ws_parse_frame(buf, sizeof(buf), &f);
@@ -318,4 +318,77 @@ Test(websocket, session_init_sets_open_state)
     oc_ws_session_free(&sess);
     cr_assert(sess.recv_buf == NULL);
     cr_assert_eq(sess.recv_cap, 0u);
+}
+
+/* ─── Socket-level read: fragmentation + coalescing + unmasked rejection ─── */
+
+#include <sys/socket.h>
+#include <unistd.h>
+
+Test(websocket, read_frame_reassembles_fragments)
+{
+    int fds[2];
+    cr_assert_eq(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+    OcWsSession sess;
+    cr_assert_eq(oc_ws_session_init(&sess, fds[0]), OC_OK);
+
+    const uint8_t mask[4] = { 0x11, 0x22, 0x33, 0x44 };
+    uint8_t wire[64];
+    /* TEXT "Hel" FIN=0, then CONTINUATION "lo" FIN=1, both masked;
+     * written in one coalesced burst. */
+    size_t n1 = oc_ws_build_frame(OC_WS_OPCODE_TEXT, false, true, mask,
+                                  (const uint8_t *)"Hel", 3, wire, sizeof(wire));
+    cr_assert_gt(n1, 0);
+    size_t n2 = oc_ws_build_frame(OC_WS_OPCODE_CONTINUATION, true, true, mask,
+                                  (const uint8_t *)"lo", 2,
+                                  wire + n1, sizeof(wire) - n1);
+    cr_assert_gt(n2, 0);
+    cr_assert_eq(write(fds[1], wire, n1 + n2), (ssize_t)(n1 + n2));
+
+    OcWsFrame f;
+    cr_assert_eq(oc_ws_read_frame(&sess, &f), OC_OK);
+    cr_assert_eq(f.opcode, OC_WS_OPCODE_TEXT);
+    cr_assert_eq(f.payload_len, 5u);
+    cr_assert(memcmp(f.payload, "Hello", 5) == 0);
+
+    oc_ws_session_free(&sess);
+    close(fds[0]);
+    close(fds[1]);
+}
+
+Test(websocket, read_frame_rejects_unmasked_client_frame)
+{
+    int fds[2];
+    cr_assert_eq(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+    OcWsSession sess;
+    cr_assert_eq(oc_ws_session_init(&sess, fds[0]), OC_OK);
+
+    uint8_t wire[16];
+    size_t n = oc_ws_build_frame(OC_WS_OPCODE_TEXT, true, false, NULL,
+                                 (const uint8_t *)"hi", 2, wire, sizeof(wire));
+    cr_assert_eq(write(fds[1], wire, n), (ssize_t)n);
+
+    OcWsFrame f;
+    cr_assert_eq(oc_ws_read_frame(&sess, &f), OC_ERR_FORMAT);
+
+    oc_ws_session_free(&sess);
+    close(fds[0]);
+    close(fds[1]);
+}
+
+Test(websocket, parse_rejects_u64_length_wrap)
+{
+    /* 127-marker with a length near UINT64_MAX must not wrap into a tiny
+     * frame; parser must not report a complete frame. */
+    uint8_t buf[16] = { 0x81, 0xFF,
+                        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xF6 };
+    OcWsFrame f;
+    cr_assert_eq(oc_ws_parse_frame(buf, sizeof(buf), &f), 0u);
+}
+
+Test(websocket, build_rejects_null_payload_with_length)
+{
+    uint8_t out[32];
+    cr_assert_eq(oc_ws_build_frame(OC_WS_OPCODE_TEXT, true, false, NULL,
+                                   NULL, 3, out, sizeof(out)), 0u);
 }

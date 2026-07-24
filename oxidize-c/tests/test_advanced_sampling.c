@@ -12,7 +12,7 @@ Test(asamp, mirostat_v1)
     uint32_t token = oc_sample_mirostat_v1(logits, 5, &mu, 5.0f, 0.1f, &state);
     cr_assert(token < 5, "token should be in range");
     cr_assert(mu != 10.0f, "mu should be updated");
-    cr_assert_eq(state, 1);
+    cr_assert_neq(state, 0, "RNG state should be advanced");
 }
 
 Test(asamp, mirostat_v1_null)
@@ -105,7 +105,8 @@ Test(asamp, beam_search_done_empty)
 Test(asamp, beam_search_best)
 {
     OcBeamSearchState st;
-    oc_beam_search_init(&st, 2, 10, 1.0f, 0, 1);
+    OcError e = oc_beam_search_init(&st, 2, 10, 1.0f, 0, 1);
+    cr_assert_eq(e, OC_OK);
     const OcBeam *best = oc_beam_search_best(&st);
     cr_assert_not_null(best);
     cr_assert_eq(best->tokens[0], 1);

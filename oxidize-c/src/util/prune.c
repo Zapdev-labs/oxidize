@@ -5,12 +5,57 @@
 #include "oxidize/prune.h"
 
 #include "oxidize/quant.h"
+#include "oxidize/gguf_writer.h"
 #include "oxidize/log.h"
 
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* Open a GGUF writer for `output_path` and copy scalar/string metadata from
+ * the source file so the output is a loadable GGUF, not raw tensor bytes.
+ * ponytail: array metadata (e.g. tokenizer vocab) is not copied — the writer
+ * only supports string arrays; extend when pruned models must retokenize. */
+static OcError open_writer_copy_meta(const OcGgufFile *gf,
+                                     const char *output_path, OcGgufWriter *w)
+{
+    char arch[64] = "llama";
+    const char *arch_p = NULL;
+    size_t arch_len = 0;
+    if (oc_gguf_metadata_get_str(gf, "general.architecture", &arch_p, &arch_len) &&
+        arch_len > 0 && arch_len < sizeof(arch)) {
+        memcpy(arch, arch_p, arch_len);
+        arch[arch_len] = '\0';
+    }
+    OcError e = oc_gguf_writer_init(output_path, arch, w);
+    if (e != OC_OK) return e;
+
+    for (uint64_t i = 0; i < gf->metadata_kv_count; i++) {
+        const OcGgufMetadataKV *kv = &gf->metadata[i];
+        if (!kv->key || strcmp(kv->key, "general.architecture") == 0) continue;
+        switch (kv->value.type) {
+        case OC_GGUF_MT_UINT32:
+            oc_gguf_writer_add_uint32(w, kv->key, kv->value.v.u32); break;
+        case OC_GGUF_MT_UINT64:
+            oc_gguf_writer_add_uint64(w, kv->key, kv->value.v.u64); break;
+        case OC_GGUF_MT_FLOAT32:
+            oc_gguf_writer_add_float32(w, kv->key, kv->value.v.f32); break;
+        case OC_GGUF_MT_STRING: {
+            char *s = malloc(kv->value.v.str.len + 1);
+            if (!s) { oc_gguf_writer_free(w); return OC_ERR_OOM; }
+            memcpy(s, kv->value.v.str.data, kv->value.v.str.len);
+            s[kv->value.v.str.len] = '\0';
+            oc_gguf_writer_add_string(w, kv->key, s);
+            free(s);
+            break;
+        }
+        default:
+            break; /* skipped: unsupported KV types */
+        }
+    }
+    return OC_OK;
+}
 
 const char *oc_prune_strategy_name(OcPruneStrategy s)
 {
@@ -74,11 +119,13 @@ static void prune_magnitude_inplace(float *data, size_t n, float sparsity)
 }
 
 /* Wanda pruning: zero weights where |W| * ||X||_2 is below threshold.
+ * `l2_norms` has `n_norms` entries (the layer's input dimension); weights are
+ * laid out row-major so column index = i % n_norms.
  * If activation_stats is NULL, falls back to magnitude pruning. */
 static void prune_wanda_inplace(float *data, size_t n, float sparsity,
-                                 const float *l2_norms)
+                                 const float *l2_norms, size_t n_norms)
 {
-    if (!l2_norms) {
+    if (!l2_norms || n_norms == 0) {
         prune_magnitude_inplace(data, n, sparsity);
         return;
     }
@@ -88,7 +135,7 @@ static void prune_wanda_inplace(float *data, size_t n, float sparsity,
     if (!importance) { prune_magnitude_inplace(data, n, sparsity); return; }
 
     for (size_t i = 0; i < n; i++) {
-        importance[i] = fabsf(data[i]) * l2_norms[i % n];
+        importance[i] = fabsf(data[i]) * l2_norms[i % n_norms];
     }
 
     /* Find threshold for importance. */
@@ -97,7 +144,7 @@ static void prune_wanda_inplace(float *data, size_t n, float sparsity,
 
     /* Zero weights below the importance threshold. */
     for (size_t i = 0; i < n; i++) {
-        float imp = fabsf(data[i]) * l2_norms[i % n];
+        float imp = fabsf(data[i]) * l2_norms[i % n_norms];
         if (imp < threshold) data[i] = 0.0f;
     }
 }
@@ -114,22 +161,20 @@ OcError oc_prune_magnitude(const char *input_path, const char *output_path,
 
     const OcGgufFile *gf = &mf.unified;
 
-    FILE *out = fopen(output_path, "wb");
-    if (!out) { oc_gguf_map_free(&mf); return OC_ERR_IO; }
-
-    /* Write header. */
-    uint32_t magic = 0x46554747, version = 3;
-    fwrite(&magic, 4, 1, out);
-    fwrite(&version, 4, 1, out);
-    fwrite(&gf->tensor_count, 8, 1, out);
-    fwrite(&gf->metadata_kv_count, 8, 1, out);
+    OcGgufWriter w;
+    e = open_writer_copy_meta(gf, output_path, &w);
+    if (e != OC_OK) { oc_gguf_map_free(&mf); return e; }
 
     /* Prune each tensor. */
     for (uint64_t i = 0; i < gf->tensor_count; i++) {
         const OcGgufTensorInfo *ti = &gf->tensors[i];
         size_t n = 0;
         float *data = dequant_tensor(&mf, ti, &n);
-        if (!data) continue;
+        if (!data) {
+            oc_gguf_writer_free(&w);
+            oc_gguf_map_free(&mf);
+            return OC_ERR_FORMAT;
+        }
 
         /* Only prune weight tensors (skip norms, embeddings). */
         const char *name = ti->name;
@@ -140,14 +185,21 @@ OcError oc_prune_magnitude(const char *input_path, const char *output_path,
             prune_magnitude_inplace(data, n, sparsity);
         }
 
-        /* Write as F32. */
-        fwrite(data, sizeof(float), n, out);
+        /* Write as F32 (ggml type 0). */
+        e = oc_gguf_writer_add_tensor(&w, name, ti->n_dims, ti->dims, 0,
+                                      data, (uint64_t)n * sizeof(float));
         free(data);
+        if (e != OC_OK) {
+            oc_gguf_writer_free(&w);
+            oc_gguf_map_free(&mf);
+            return e;
+        }
     }
 
-    fclose(out);
+    e = oc_gguf_writer_finalize(&w);
+    oc_gguf_writer_free(&w);
     oc_gguf_map_free(&mf);
-    return OC_OK;
+    return e;
 }
 
 OcError oc_prune_wanda(const char *input_path, const char *output_path,
@@ -161,21 +213,20 @@ OcError oc_prune_wanda(const char *input_path, const char *output_path,
     if (e != OC_OK) return e;
 
     const OcGgufFile *gf = &mf.unified;
-    FILE *out = fopen(output_path, "wb");
-    if (!out) { oc_gguf_map_free(&mf); return OC_ERR_IO; }
-
-    uint32_t magic = 0x46554747, version = 3;
-    fwrite(&magic, 4, 1, out);
-    fwrite(&version, 4, 1, out);
-    fwrite(&gf->tensor_count, 8, 1, out);
-    fwrite(&gf->metadata_kv_count, 8, 1, out);
+    OcGgufWriter w;
+    e = open_writer_copy_meta(gf, output_path, &w);
+    if (e != OC_OK) { oc_gguf_map_free(&mf); return e; }
 
     size_t layer_idx = 0;
     for (uint64_t i = 0; i < gf->tensor_count; i++) {
         const OcGgufTensorInfo *ti = &gf->tensors[i];
         size_t n = 0;
         float *data = dequant_tensor(&mf, ti, &n);
-        if (!data) continue;
+        if (!data) {
+            oc_gguf_writer_free(&w);
+            oc_gguf_map_free(&mf);
+            return OC_ERR_FORMAT;
+        }
 
         const char *name = ti->name;
         bool is_weight = strstr(name, ".weight") != NULL &&
@@ -184,8 +235,9 @@ OcError oc_prune_wanda(const char *input_path, const char *output_path,
         if (is_weight && stats) {
             /* Get L2 norms for this layer. */
             float *norms = NULL;
+            size_t dim = 0;
             if (layer_idx < stats->n_layers && stats->layers[layer_idx].active) {
-                size_t dim = stats->layers[layer_idx].input_dim;
+                dim = stats->layers[layer_idx].input_dim;
                 if (dim > 0) {
                     norms = malloc(dim * sizeof(float));
                     if (norms) {
@@ -193,17 +245,25 @@ OcError oc_prune_wanda(const char *input_path, const char *output_path,
                     }
                 }
             }
-            prune_wanda_inplace(data, n, sparsity, norms);
+            prune_wanda_inplace(data, n, sparsity, norms, norms ? dim : 0);
             free(norms);
+            layer_idx++; /* keep stats aligned with successive weight tensors */
         }
 
-        fwrite(data, sizeof(float), n, out);
+        e = oc_gguf_writer_add_tensor(&w, name, ti->n_dims, ti->dims, 0,
+                                      data, (uint64_t)n * sizeof(float));
         free(data);
+        if (e != OC_OK) {
+            oc_gguf_writer_free(&w);
+            oc_gguf_map_free(&mf);
+            return e;
+        }
     }
 
-    fclose(out);
+    e = oc_gguf_writer_finalize(&w);
+    oc_gguf_writer_free(&w);
     oc_gguf_map_free(&mf);
-    return OC_OK;
+    return e;
 }
 
 OcError oc_prune_model(const OcPruneConfig *cfg)
@@ -213,7 +273,8 @@ OcError oc_prune_model(const OcPruneConfig *cfg)
     case OC_PRUNE_MAGNITUDE:
         return oc_prune_magnitude(cfg->input_path, cfg->output_path, cfg->sparsity);
     case OC_PRUNE_WANDA:
-        return oc_prune_wanda(cfg->input_path, cfg->output_path, cfg->sparsity, NULL);
+        return oc_prune_wanda(cfg->input_path, cfg->output_path, cfg->sparsity,
+                              cfg->activation_stats);
     default:
         return OC_ERR_INVALID_ARG;
     }

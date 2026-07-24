@@ -8,11 +8,11 @@
  *
  *   - GPT-2:     LayerNorm + GeLU FFN, learned positional embeddings, no
  *                RoPE, parallel attention/FFN per layer.
- *   - GPT-NeoX:  LayerNorm + SwiGLU FFN, rotary positional embeddings,
- *                parallel attention/FFN per layer.
- *   - Falcon:    LayerNorm + SwiGLU FFN, rotary positional embeddings,
- *                parallel attention/FFN per layer, multi-query attention
- *                (single KV head, n_head_kv == 1).
+ *   - GPT-NeoX:  LayerNorm + single-projection GeLU FFN, rotary positional
+ *                embeddings.
+ *   - Falcon:    LayerNorm + single-projection GeLU FFN, rotary positional
+ *                embeddings, parallel attention/FFN per layer, multi-query
+ *                attention (single KV head, n_head_kv == 1).
  *
  * Each function processes a single token, advances `sess->pos`, and writes
  * logits to `logits_out` (length model->cfg.vocab_size). The caller is
@@ -57,7 +57,7 @@ OcError oc_arch_forward_gpt2(OcLlamaSession *sess, uint32_t token,
  *   1. LayerNorm(x) → ln (input_layernorm)
  *   2. attn = o_proj(query_key_value(ln)) + x; (RoPE applied to Q/K)
  *   3. LayerNorm(x) → ln (post_attention_layernorm)
- *   4. mlp = mlp_down(SwiGLU(mlp_up(ln) , mlp_gate(ln))); x += mlp
+ *   4. mlp = dense_4h_to_h(GELU(dense_h_to_4h(ln))); x += mlp
  * Rotary embeddings are applied to Q and K (split-halves NeoX layout). */
 OcError oc_arch_forward_gpt_neox(OcLlamaSession *sess, uint32_t token,
                                   float *logits_out);
@@ -67,8 +67,9 @@ OcError oc_arch_forward_gpt_neox(OcLlamaSession *sess, uint32_t token,
  * Pipeline per layer (Falcon parallel layout):
  *   1. LayerNorm(x) → ln (input_layernorm)
  *   2. attn = o_proj(query_key_value(ln)); x += attn
- *   3. mlp = mlp_down(SwiGLU(mlp_up(x) , mlp_gate(x))); x += mlp
- * with RoPE applied to Q/K and multi-query attention (single KV head). */
+ *   3. mlp = dense_4h_to_h(GELU(dense_h_to_4h(ln))); x += mlp
+ * with RoPE applied to Q/K, multi-query attention (single KV head), and
+ * the MLP fed from the shared layer-normalized input (parallel block). */
 OcError oc_arch_forward_falcon(OcLlamaSession *sess, uint32_t token,
                                 float *logits_out);
 

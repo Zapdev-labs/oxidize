@@ -484,9 +484,17 @@ static void handle_embeddings(OcOpenaiState *st, const OcHttpRequest *req,
         return;
     }
 
-    for (size_t i = 0; i < n_ids - 1; i++)
-        oc_llama_forward(&sess, ids[i], NULL);
-    oc_llama_forward(&sess, ids[n_ids - 1], NULL);
+    for (size_t i = 0; i < n_ids; i++) {
+        e = oc_llama_forward(&sess, ids[i], NULL);
+        if (e != OC_OK) break;
+    }
+    if (e != OC_OK) {
+        oc_llama_session_free(&sess);
+        free(ids);
+        *out_body = oc_openai_error_json("forward pass failed", "server_error");
+        *out_status = 500;
+        return;
+    }
 
     uint32_t n_embd = st->model->cfg.n_embd;
     float *embedding = calloc(n_embd, sizeof(float));
@@ -508,9 +516,11 @@ static void handle_embeddings(OcOpenaiState *st, const OcHttpRequest *req,
         for (uint32_t i = 0; i < n_embd; i++) embedding[i] *= inv;
     }
 
-    size_t cap = (size_t)n_embd * 16 + 512;
+    char *escaped_model = json_escape(st->model_id ? st->model_id : "unknown");
+    if (!escaped_model) { free(embedding); *out_status = 500; return; }
+    size_t cap = (size_t)n_embd * 16 + strlen(escaped_model) + 512;
     char *buf = malloc(cap);
-    if (!buf) { free(embedding); *out_status = 500; return; }
+    if (!buf) { free(embedding); free(escaped_model); *out_status = 500; return; }
     size_t pos = 0;
     pos += snprintf(buf + pos, cap - pos,
         "{\"object\":\"list\",\"data\":[{\"object\":\"embedding\",\"index\":0,\"embedding\":[");
@@ -519,7 +529,8 @@ static void handle_embeddings(OcOpenaiState *st, const OcHttpRequest *req,
     }
     pos += snprintf(buf + pos, cap - pos,
         "]}],\"model\":\"%s\",\"usage\":{\"prompt_tokens\":%zu,\"total_tokens\":%zu}}",
-        st->model_id ? st->model_id : "unknown", n_ids, n_ids);
+        escaped_model, n_ids, n_ids);
+    free(escaped_model);
     free(embedding);
     *out_status = 200;
     *out_body = buf;
@@ -553,18 +564,22 @@ static void handle_responses(OcOpenaiState *st, const OcHttpRequest *req,
         *out_status = 500; return;
     }
     char *escaped = json_escape(text);
+    char *escaped_model = json_escape(st->model_id ? st->model_id : "unknown");
     free(text);
-    if (!escaped) { *out_status = 500; return; }
-    size_t cap = strlen(escaped) + 512;
+    if (!escaped || !escaped_model) {
+        free(escaped); free(escaped_model); *out_status = 500; return;
+    }
+    size_t cap = strlen(escaped) + strlen(escaped_model) + 512;
     char *buf = malloc(cap);
-    if (!buf) { free(escaped); *out_status = 500; return; }
+    if (!buf) { free(escaped); free(escaped_model); *out_status = 500; return; }
     snprintf(buf, cap,
         "{\"id\":\"resp-oxidize\",\"object\":\"response\",\"created\":0,"
         "\"model\":\"%s\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\","
         "\"content\":[{\"type\":\"output_text\",\"text\":\"%s\"}]}],"
         "\"status\":\"completed\",\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}",
-        st->model_id ? st->model_id : "unknown", escaped);
+        escaped_model, escaped);
     free(escaped);
+    free(escaped_model);
     *out_status = 200;
     *out_body = buf;
 }

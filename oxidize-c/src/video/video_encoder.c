@@ -1,10 +1,9 @@
 /*
- * video_encoder.c — Per-frame vision encoding + temporal pooling stub.
+ * video_encoder.c — Per-frame vision encoding + temporal projection.
  *
- * Port of oxidize-core/src/video/encoder.rs. The C port is a stub:
- * it copies per-frame embeddings into the output buffer, padding /
- * truncating each frame to llm_hidden. No real vision backbone or
- * learned temporal projection is present.
+ * Port of oxidize-core/src/video/encoder.rs. When projection weights
+ * are loaded, performs a real GEMV projection from vision_hidden to
+ * llm_hidden. Without weights, falls back to copy/pad.
  */
 #define _POSIX_C_SOURCE 200809L
 
@@ -42,6 +41,8 @@ OcError oc_video_encoder_init(OcVideoEncoder *enc,
     enc->config       = *cfg;
     enc->output_tokens = NULL;
     enc->n_tokens      = 0;
+    enc->proj_weight   = NULL;
+    enc->proj_bias     = NULL;
     return OC_OK;
 }
 
@@ -51,7 +52,11 @@ void oc_video_encoder_free(OcVideoEncoder *enc)
         return;
     }
     free(enc->output_tokens);
+    free(enc->proj_weight);
+    free(enc->proj_bias);
     enc->output_tokens = NULL;
+    enc->proj_weight   = NULL;
+    enc->proj_bias     = NULL;
     enc->n_tokens      = 0;
 }
 
@@ -76,18 +81,34 @@ OcError oc_video_encoder_encode(OcVideoEncoder *enc,
     enc->output_tokens = buf;
     enc->n_tokens      = n_frames;
 
-    /* Stub projection: copy frame_dim values into the first
-     * min(frame_dim, llm_hidden) slots of each token; zero-fill the rest. */
-    size_t copy_n = frame_dim;
-    if (copy_n > enc->config.llm_hidden) {
-        copy_n = enc->config.llm_hidden;
-    }
-    for (size_t i = 0; i < n_frames; ++i) {
-        float *dst = buf + i * enc->config.llm_hidden;
-        const float *src = frame_embeddings + i * frame_dim;
-        memcpy(dst, src, copy_n * sizeof(float));
-        for (size_t j = copy_n; j < enc->config.llm_hidden; ++j) {
-            dst[j] = 0.f;
+    /* Projection: if proj_weight is available, do real GEMV;
+     * otherwise copy/pad. */
+    if (enc->proj_weight) {
+        /* GEMV: out[llm_hidden] = proj_weight[llm_hidden, vision_hidden] @ frame[vision_hidden] + bias */
+        for (size_t i = 0; i < n_frames; ++i) {
+            float *dst = buf + i * enc->config.llm_hidden;
+            const float *src = frame_embeddings + i * frame_dim;
+            for (size_t r = 0; r < enc->config.llm_hidden; r++) {
+                const float *wrow = enc->proj_weight + r * frame_dim;
+                float dot = enc->proj_bias ? enc->proj_bias[r] : 0.0f;
+                for (size_t c = 0; c < frame_dim; c++)
+                    dot += wrow[c] * src[c];
+                dst[r] = dot;
+            }
+        }
+    } else {
+        /* Copy/pad fallback. */
+        size_t copy_n = frame_dim;
+        if (copy_n > enc->config.llm_hidden) {
+            copy_n = enc->config.llm_hidden;
+        }
+        for (size_t i = 0; i < n_frames; ++i) {
+            float *dst = buf + i * enc->config.llm_hidden;
+            const float *src = frame_embeddings + i * frame_dim;
+            memcpy(dst, src, copy_n * sizeof(float));
+            for (size_t j = copy_n; j < enc->config.llm_hidden; ++j) {
+                dst[j] = 0.f;
+            }
         }
     }
     return OC_OK;

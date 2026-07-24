@@ -130,7 +130,9 @@ size_t oc_realtime_format_event(OcRealtimeEvent ev, const char *data,
     case OC_RT_ERROR:          type = "error"; break;
     default:                   type = "unknown"; break;
     }
-    const char *payload = (data != NULL) ? data : "";
+    /* An absent payload serializes as JSON null (an empty value would make
+     * the frame invalid JSON). */
+    const char *payload = (data != NULL) ? data : "null";
     int n = snprintf(buf, cap, "{\"type\":\"%s\",\"delta\":%s}",
                      type, payload);
     if (n < 0 || (size_t)n >= cap) return 0;
@@ -197,14 +199,26 @@ OcError oc_realtime_send_event(OcRealtimeSession *sess,
         const char *p = data;
         while (*p == ' ' || *p == '\t') p++;
         if (*p != '"') {
-            /* Escape + quote the raw string. */
+            /* Escape + quote the raw string (JSON-special + control chars). */
             size_t oi = 0;
             quoted[oi++] = '"';
-            for (const char *s = data; *s && oi + 2 < sizeof(quoted); s++) {
-                if (*s == '"' || *s == '\\') {
+            for (const char *s = data; *s && oi + 7 < sizeof(quoted); s++) {
+                unsigned char c = (unsigned char)*s;
+                if (c == '"' || c == '\\') {
                     quoted[oi++] = '\\';
+                    quoted[oi++] = (char)c;
+                } else if (c == '\n') {
+                    quoted[oi++] = '\\'; quoted[oi++] = 'n';
+                } else if (c == '\t') {
+                    quoted[oi++] = '\\'; quoted[oi++] = 't';
+                } else if (c == '\r') {
+                    quoted[oi++] = '\\'; quoted[oi++] = 'r';
+                } else if (c < 0x20u) {
+                    oi += (size_t)snprintf(quoted + oi, sizeof(quoted) - oi,
+                                           "\\u%04x", (unsigned)c);
+                } else {
+                    quoted[oi++] = (char)c;
                 }
-                quoted[oi++] = *s;
             }
             quoted[oi++] = '"';
             quoted[oi] = '\0';
@@ -227,11 +241,24 @@ static OcError generate_text_response(OcRealtimeSession *sess,
                                "{\"message\":\"no model loaded\"}");
         return OC_ERR_MODEL;
     }
+    /* Prepend session instructions (session.update) to the prompt so they
+     * actually influence the response. */
+    char *combined = NULL;
+    if (sess->cfg.instructions[0] != '\0') {
+        size_t need = strlen(sess->cfg.instructions) + strlen(prompt_text) + 3u;
+        combined = malloc(need);
+        if (combined != NULL) {
+            snprintf(combined, need, "%s\n\n%s", sess->cfg.instructions,
+                     prompt_text);
+            prompt_text = combined;
+        }
+    }
     /* Tokenize prompt. */
     uint32_t *ids = NULL;
     size_t n_ids = 0;
     OcError e = oc_tokenizer_encode(sess->tokenizer, prompt_text,
                                     OC_TOK_DEFAULT, &ids, &n_ids);
+    free(combined);
     if (e != OC_OK || ids == NULL || n_ids == 0) {
         oc_realtime_send_event(sess, OC_RT_ERROR,
                                "{\"message\":\"tokenization failed\"}");
@@ -330,7 +357,11 @@ OcError oc_realtime_process_message(OcRealtimeSession *sess,
     case OC_RT_MSG_INPUT_AUDIO_BUFFER_COMMIT:
         return OC_OK;
     case OC_RT_MSG_RESPONSE_CANCEL:
-        /* No in-flight generation tracking in this minimal port. */
+        /* Generation is synchronous: by the time this frame is read, no
+         * response is in flight. Tell the client rather than silently
+         * acknowledging an unsupported operation. */
+        oc_realtime_send_event(sess, OC_RT_ERROR,
+                               "{\"message\":\"no active response to cancel\"}");
         return OC_OK;
     case OC_RT_MSG_UNKNOWN:
     default:

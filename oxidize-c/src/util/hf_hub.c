@@ -24,6 +24,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <fcntl.h>
 #include <unistd.h>
 
 #include <netdb.h>
@@ -1291,8 +1292,16 @@ OcError oc_hf_cache_clean(const OcHfConfig *cfg, uint64_t max_age_seconds,
             int sn = snprintf(full, sizeof(full), "%s/%s", repo_dir,
                               sent->d_name);
             if (sn < 0 || (size_t)sn >= sizeof(full)) continue;
+            /* fstat on an open fd (not stat-by-path) so the age check and
+             * the file we inspected cannot diverge (TOCTOU). */
+            int fd = open(full, O_RDONLY);
+            if (fd < 0) continue;
             struct stat st;
-            if (stat(full, &st) != 0 || !S_ISREG(st.st_mode)) continue;
+            if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+                close(fd);
+                continue;
+            }
+            close(fd);
             time_t age = now - st.st_mtime;
             if (max_age_seconds == 0 || (uint64_t)age >= max_age_seconds) {
                 if (unlink(full) == 0) removed++;

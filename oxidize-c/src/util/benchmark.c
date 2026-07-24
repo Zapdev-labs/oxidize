@@ -34,6 +34,9 @@ OcError oc_benchmark_run(OcLlamaModel *model, const OcBenchmarkConfig *cfg,
                           OcBenchmarkResult *out)
 {
     if (!model || !cfg || !out) return OC_ERR_INVALID_ARG;
+    /* Batched prefill is not implemented; reject rather than silently
+     * ignoring the configuration. */
+    if (cfg->batch_size > 1) return OC_ERR_INVALID_ARG;
     memset(out, 0, sizeof(*out));
 
     OcLlamaSession sess;
@@ -58,22 +61,27 @@ OcError oc_benchmark_run(OcLlamaModel *model, const OcBenchmarkConfig *cfg,
     if (!tok_latencies) { oc_llama_session_free(&sess); return OC_ERR_OOM; }
 
     double min_tps = 1e18, max_tps = 0.0, sum_tps = 0.0;
+    double sum_decode_ms = 0.0;
 
     for (uint32_t rep = 0; rep < n_reps; rep++) {
         oc_llama_session_reset(&sess);
 
-        /* Prefill phase. */
-        uint32_t prompt_len = cfg->prompt_length ? cfg->prompt_length : 1;
-        double prefill_start = now_ms();
-        for (uint32_t i = 0; i < prompt_len; i++) {
-            uint32_t tok = (i == 0) ? 1 : (i % model->cfg.vocab_size);
-            e = oc_llama_forward(&sess, tok, NULL);
-            if (e != OC_OK) break;
+        /* Prefill phase (skipped entirely when prompt_length == 0 so that a
+         * decode-only configuration stays decode-only). */
+        uint32_t prompt_len = cfg->prompt_length;
+        double prefill_ms = 0.0;
+        if (prompt_len > 0) {
+            double prefill_start = now_ms();
+            for (uint32_t i = 0; i < prompt_len; i++) {
+                uint32_t tok = (i == 0) ? 1 : (i % model->cfg.vocab_size);
+                e = oc_llama_forward(&sess, tok, NULL);
+                if (e != OC_OK) goto fail;
+            }
+            prefill_ms = now_ms() - prefill_start;
         }
-        double prefill_end = now_ms();
-        double prefill_ms = prefill_end - prefill_start;
 
-        if (rep == 0 || prefill_ms < out->prefill_latency_ms) {
+        if (prompt_len > 0 &&
+            (rep == 0 || prefill_ms < out->prefill_latency_ms)) {
             out->prefill_latency_ms = prefill_ms;
             out->prefill_tokens = prompt_len;
             out->prefill_tok_per_sec = (prefill_ms > 0)
@@ -84,7 +92,7 @@ OcError oc_benchmark_run(OcLlamaModel *model, const OcBenchmarkConfig *cfg,
         /* Warmup decode. */
         for (uint32_t i = 0; i < n_warmup; i++) {
             e = oc_llama_forward(&sess, 1, sess.logits);
-            if (e != OC_OK) break;
+            if (e != OC_OK) goto fail;
         }
 
         /* Measured decode. */
@@ -92,11 +100,12 @@ OcError oc_benchmark_run(OcLlamaModel *model, const OcBenchmarkConfig *cfg,
         for (uint32_t i = 0; i < n_meas; i++) {
             double t0 = now_ms();
             e = oc_llama_forward(&sess, 1, sess.logits);
-            if (e != OC_OK) break;
+            if (e != OC_OK) goto fail;
             tok_latencies[i] = now_ms() - t0;
         }
         double decode_end = now_ms();
         double decode_ms = decode_end - decode_start;
+        sum_decode_ms += decode_ms;
 
         double tps = (decode_ms > 0)
             ? (double)n_meas / (decode_ms / 1000.0)
@@ -118,7 +127,10 @@ OcError oc_benchmark_run(OcLlamaModel *model, const OcBenchmarkConfig *cfg,
     out->decode_tok_per_sec_min = min_tps;
     out->decode_tok_per_sec_max = max_tps;
     out->decode_tok_per_sec_mean = out->decode_tok_per_sec;
-    out->decode_latency_ms = (n_meas > 0) ? sum_tps / (double)(n_meas * n_reps) : 0.0;
+    /* Average wall-clock milliseconds per decoded token. */
+    out->decode_latency_ms = (n_meas > 0 && n_reps > 0)
+        ? sum_decode_ms / (double)((uint64_t)n_meas * n_reps)
+        : 0.0;
 
     /* Latency stddev. */
     if (n_meas > 1) {
@@ -146,6 +158,11 @@ OcError oc_benchmark_run(OcLlamaModel *model, const OcBenchmarkConfig *cfg,
 
     oc_llama_session_free(&sess);
     return OC_OK;
+
+fail:
+    free(tok_latencies);
+    oc_llama_session_free(&sess);
+    return e;
 }
 
 OcError oc_benchmark_scaling(OcLlamaModel *model, OcBenchmarkResult *out)
@@ -160,6 +177,10 @@ OcError oc_benchmark_scaling(OcLlamaModel *model, OcBenchmarkResult *out)
     };
 
     for (size_t i = 0; i < sizeof(tests) / sizeof(tests[0]); i++) {
+        /* Skip contexts the model cannot hold (prefill + measured decode);
+         * their fields stay 0 (= not measured). */
+        if (tests[i].ctx + 20u + 3u > model->cfg.n_ctx) continue;
+
         OcBenchmarkConfig cfg = OC_BENCHMARK_DEFAULT;
         cfg.n_warmup = 3;
         cfg.n_tokens = 20;
@@ -170,9 +191,8 @@ OcError oc_benchmark_scaling(OcLlamaModel *model, OcBenchmarkResult *out)
 
         OcBenchmarkResult r;
         OcError e = oc_benchmark_run(model, &cfg, &r);
-        if (e == OC_OK) {
-            *tests[i].out_field = r.decode_tok_per_sec;
-        }
+        if (e != OC_OK) return e;
+        *tests[i].out_field = r.decode_tok_per_sec;
     }
     return OC_OK;
 }
@@ -292,19 +312,60 @@ double oc_benchmark_matvec(uint32_t n_rows, uint32_t n_cols, uint32_t n_iters)
     return (double)n_rows * n_iters / (elapsed / 1000.0);
 }
 
+/* Time one OXK quantized matvec entry point over `n_iters` iterations.
+ * Weight/input buffers are zero-initialized but correctly packed/sized for
+ * the block format, so the kernel exercises its real code path.
+ * Returns rows/sec, or 0.0 on allocation failure or zero elapsed time. */
+static double bench_oxk_matvec(void (*matvec)(const uint8_t *, size_t, size_t,
+                                              const float *, float *),
+                               uint32_t n_rows, uint32_t n_cols,
+                               uint32_t n_iters, uint32_t elems_per_block,
+                               uint32_t block_bytes)
+{
+    size_t blocks = (n_cols + elems_per_block - 1) / elems_per_block;
+    size_t row_bytes = blocks * block_bytes;
+    size_t x_len = blocks * elems_per_block;
+
+    uint8_t *w = calloc((size_t)n_rows, row_bytes);
+    float *x = calloc(x_len, sizeof(float));
+    float *y = calloc(n_rows, sizeof(float));
+    if (!w || !x || !y) { free(w); free(x); free(y); return 0.0; }
+    for (size_t i = 0; i < x_len; i++) x[i] = (float)(i % 5) * 0.1f;
+
+    double start = now_ms();
+    for (uint32_t it = 0; it < n_iters; it++)
+        matvec(w, n_rows, row_bytes, x, y);
+    double elapsed = now_ms() - start;
+
+    free(w); free(x); free(y);
+    if (elapsed <= 0.0) return 0.0;
+    return (double)n_rows * n_iters / (elapsed / 1000.0);
+}
+
 OcError oc_benchmark_oxk(uint32_t n_rows, uint32_t n_cols,
                          uint32_t n_iters, OcOxkBenchResult *out)
 {
-    if (!out) return OC_ERR_INVALID_ARG;
+    if (!out || n_rows == 0 || n_cols == 0 || n_iters == 0)
+        return OC_ERR_INVALID_ARG;
     memset(out, 0, sizeof(*out));
 
-    /* For now, just run the generic matvec benchmark. */
-    double tps = oc_benchmark_matvec(n_rows, n_cols, n_iters);
-    out->q4_0_tok_per_sec = tps;
-    out->q4_k_tok_per_sec = tps * 0.8;  /* estimated */
-    out->q8_0_tok_per_sec = tps * 1.2;  /* Q8 is simpler */
-    out->q5_k_tok_per_sec = tps * 0.7;
-    out->q6_k_tok_per_sec = tps * 0.6;
+    oc_oxk_init();
+
+    /* Time the real dispatched OXK matvec kernels. Q5_K/Q6_K have no OXK
+     * matvec entry point; their fields stay 0 (unavailable) rather than
+     * being estimated. */
+    out->q4_0_tok_per_sec = bench_oxk_matvec(oc_oxk_matvec_q4_0_f32,
+                                             n_rows, n_cols, n_iters,
+                                             OC_OXK_QK4_0,
+                                             OC_OXK_BLOCK_Q4_0_SIZE);
+    out->q4_k_tok_per_sec = bench_oxk_matvec(oc_oxk_matvec_q4_k_f32,
+                                             n_rows, n_cols, n_iters,
+                                             OC_OXK_QK_K,
+                                             OC_OXK_BLOCK_Q4_K_SIZE);
+    out->q8_0_tok_per_sec = bench_oxk_matvec(oc_oxk_matvec_q8_0_f32,
+                                             n_rows, n_cols, n_iters,
+                                             OC_OXK_QK8_0,
+                                             OC_OXK_BLOCK_Q8_0_SIZE);
 
     return OC_OK;
 }

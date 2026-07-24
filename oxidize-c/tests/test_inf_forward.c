@@ -673,7 +673,7 @@ Test(inf_fwd, forward_batch_basic)
 
     /* Create 2 sequences with their own SeqKv buffers. */
     size_t kv_layer_count = m.config.layer_count;
-    size_t kv_len = m.config.num_key_value_heads * oc_inference_config_kv_head_dim(&m.config);
+    size_t kv_len = (size_t)m.config.num_key_value_heads * oc_inference_config_kv_head_dim(&m.config);
     size_t cap = 32;
 
     OcSeqKv kv0, kv1;

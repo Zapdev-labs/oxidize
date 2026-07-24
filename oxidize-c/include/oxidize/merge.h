@@ -39,7 +39,8 @@ typedef struct OcMergeConfig {
     const char     *output_path;  /* output GGUF path                    */
     float           slerp_t;      /* SLERP interpolation parameter        */
     float           ties_density;  /* TIES: fraction of params to keep    */
-    bool            verbose;
+    float           dare_drop_rate; /* DARE: fraction of params to drop [0,1] */
+    bool            verbose;       /* log merge progress at INFO level     */
 } OcMergeConfig;
 
 /* Merge multiple GGUF checkpoints into one. */

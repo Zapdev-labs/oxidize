@@ -38,6 +38,10 @@ typedef struct OcVideoEncoder {
     OcVideoEncoderConfig config;
     float   *output_tokens;  /* owned; [n_tokens * llm_hidden] */
     size_t   n_tokens;
+    /* Optional projection weight: [llm_hidden, vision_hidden] for
+     * linear projection from vision_hidden to llm_hidden. NULL = copy/pad. */
+    float   *proj_weight;
+    float   *proj_bias;      /* [llm_hidden] or NULL */
 } OcVideoEncoder;
 
 /* Initialize an encoder. Validates the config: all dims must be > 0.

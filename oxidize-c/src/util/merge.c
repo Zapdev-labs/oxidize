@@ -9,6 +9,7 @@
 #include "oxidize/merge.h"
 
 #include "oxidize/quant.h"
+#include "oxidize/gguf_writer.h"
 #include "oxidize/log.h"
 
 #include <math.h>
@@ -41,27 +42,49 @@ static float *dequant_tensor(const OcGgufMmappedFile *mf,
     return out;
 }
 
-/* Write a merged f32 tensor as f32 (simple, not re-quantized). */
-__attribute__((unused))
-static void write_tensor_f32(FILE *f, const char *name,
-                             const float *data, size_t n,
-                             uint32_t n_dims, const uint64_t *dims)
+/* Open a GGUF writer for `output_path` and copy scalar/string metadata from
+ * the template file so the output is a loadable GGUF (real KV records +
+ * tensor-info table, not raw tensor bytes).
+ * ponytail: array metadata (e.g. tokenizer vocab) is not copied — extend when
+ * merged models must retokenize. */
+static OcError open_writer_copy_meta(const OcGgufFile *gf,
+                                     const char *output_path, OcGgufWriter *w)
 {
-    (void)data; (void)n;
-    /* name */
-    uint64_t name_len = strlen(name);
-    fwrite(&name_len, 8, 1, f);
-    fwrite(name, 1, name_len, f);
-    /* n_dims */
-    fwrite(&n_dims, 4, 1, f);
-    /* dims */
-    for (uint32_t d = 0; d < n_dims; d++)
-        fwrite(&dims[d], 8, 1, f);
-    /* ggml_type = 0 (F32) */
-    uint32_t ggml_type = 0;
-    fwrite(&ggml_type, 4, 1, f);
-    /* offset placeholder (will be fixed up) */
-    /* Actually we compute offsets as we go */
+    char arch[64] = "llama";
+    const char *arch_p = NULL;
+    size_t arch_len = 0;
+    if (oc_gguf_metadata_get_str(gf, "general.architecture", &arch_p, &arch_len) &&
+        arch_len > 0 && arch_len < sizeof(arch)) {
+        memcpy(arch, arch_p, arch_len);
+        arch[arch_len] = '\0';
+    }
+    OcError e = oc_gguf_writer_init(output_path, arch, w);
+    if (e != OC_OK) return e;
+
+    for (uint64_t i = 0; i < gf->metadata_kv_count; i++) {
+        const OcGgufMetadataKV *kv = &gf->metadata[i];
+        if (!kv->key || strcmp(kv->key, "general.architecture") == 0) continue;
+        switch (kv->value.type) {
+        case OC_GGUF_MT_UINT32:
+            oc_gguf_writer_add_uint32(w, kv->key, kv->value.v.u32); break;
+        case OC_GGUF_MT_UINT64:
+            oc_gguf_writer_add_uint64(w, kv->key, kv->value.v.u64); break;
+        case OC_GGUF_MT_FLOAT32:
+            oc_gguf_writer_add_float32(w, kv->key, kv->value.v.f32); break;
+        case OC_GGUF_MT_STRING: {
+            char *s = malloc(kv->value.v.str.len + 1);
+            if (!s) { oc_gguf_writer_free(w); return OC_ERR_OOM; }
+            memcpy(s, kv->value.v.str.data, kv->value.v.str.len);
+            s[kv->value.v.str.len] = '\0';
+            oc_gguf_writer_add_string(w, kv->key, s);
+            free(s);
+            break;
+        }
+        default:
+            break; /* skipped: unsupported KV types */
+        }
+    }
+    return OC_OK;
 }
 
 const char *oc_merge_strategy_name(OcMergeStrategy s)
@@ -106,42 +129,31 @@ OcError oc_merge_linear(const OcMergeInput *inputs, size_t n_inputs,
     if (total_weight <= 0.0) total_weight = 1.0;
 
     /* Open output. */
-    FILE *out = fopen(output_path, "wb");
-    if (!out) {
+    OcGgufWriter w;
+    OcError we = open_writer_copy_meta(tmpl, output_path, &w);
+    if (we != OC_OK) {
         for (size_t i = 0; i < n_inputs; i++) oc_gguf_map_free(&mfs[i]);
         free(mfs);
-        return OC_ERR_IO;
+        return we;
     }
 
-    /* Write GGUF header (copy from template). */
-    uint32_t magic = 0x46554747;
-    uint32_t version = 3;
-    fwrite(&magic, 4, 1, out);
-    fwrite(&version, 4, 1, out);
-    fwrite(&tmpl->tensor_count, 8, 1, out);
-    fwrite(&tmpl->metadata_kv_count, 8, 1, out);
-
-    /* Copy metadata KV pairs (simplified: just copy raw). */
-    /* For a proper implementation we'd serialize each KV, but for now
-     * we skip metadata and just write tensor data. */
-    /* TODO: proper metadata serialization. */
-
     /* Merge each tensor. */
-    for (uint64_t t = 0; t < tmpl->tensor_count; t++) {
+    for (uint64_t t = 0; t < tmpl->tensor_count && we == OC_OK; t++) {
         const OcGgufTensorInfo *ti = &tmpl->tensors[t];
         size_t n = 1;
         for (uint32_t d = 0; d < ti->n_dims; d++) n *= ti->dims[d];
 
         /* Dequantize all inputs for this tensor. */
         float **bufs = calloc(n_inputs, sizeof(float *));
-        bool ok = true;
-        for (size_t i = 0; i < n_inputs; i++) {
+        bool ok = bufs != NULL;
+        for (size_t i = 0; ok && i < n_inputs; i++) {
             const OcGgufTensorInfo *src_ti = oc_gguf_map_tensor_get(&mfs[i], ti->name);
             if (src_ti) {
                 bufs[i] = dequant_tensor(&mfs[i], src_ti);
-                if (!bufs[i]) { ok = false; break; }
+                if (!bufs[i]) ok = false;
             } else {
                 bufs[i] = calloc(n, sizeof(float));
+                if (!bufs[i]) ok = false;
             }
         }
 
@@ -150,24 +162,33 @@ OcError oc_merge_linear(const OcMergeInput *inputs, size_t n_inputs,
             float *merged = calloc(n, sizeof(float));
             if (merged) {
                 for (size_t i = 0; i < n_inputs; i++) {
-                    float w = (float)(inputs[i].weight / total_weight);
+                    float wgt = (float)(inputs[i].weight / total_weight);
                     for (size_t j = 0; j < n; j++)
-                        merged[j] += w * bufs[i][j];
+                        merged[j] += wgt * bufs[i][j];
                 }
                 /* Write as F32 (simplified: no re-quantization). */
-                fwrite(merged, sizeof(float), n, out);
+                we = oc_gguf_writer_add_tensor(&w, ti->name, ti->n_dims,
+                                               ti->dims, 0, merged,
+                                               (uint64_t)n * sizeof(float));
                 free(merged);
+            } else {
+                we = OC_ERR_OOM;
             }
+        } else {
+            we = OC_ERR_FORMAT;
         }
 
-        for (size_t i = 0; i < n_inputs; i++) free(bufs[i]);
-        free(bufs);
+        if (bufs) {
+            for (size_t i = 0; i < n_inputs; i++) free(bufs[i]);
+            free(bufs);
+        }
     }
 
-    fclose(out);
+    if (we == OC_OK) we = oc_gguf_writer_finalize(&w);
+    oc_gguf_writer_free(&w);
     for (size_t i = 0; i < n_inputs; i++) oc_gguf_map_free(&mfs[i]);
     free(mfs);
-    return OC_OK;
+    return we;
 }
 
 /* ─── SLERP merge ──────────────────────────────────────────────────────── */
@@ -188,28 +209,22 @@ OcError oc_merge_slerp(const char *path_a, const char *path_b,
     const OcGgufFile *fa = &mfa.unified;
     /* fb not needed — we look up tensors from mfb directly. */
 
-    FILE *out = fopen(output_path, "wb");
-    if (!out) { oc_gguf_map_free(&mfa); oc_gguf_map_free(&mfb); return OC_ERR_IO; }
-
-    /* Write header. */
-    uint32_t magic = 0x46554747, version = 3;
-    fwrite(&magic, 4, 1, out);
-    fwrite(&version, 4, 1, out);
-    fwrite(&fa->tensor_count, 8, 1, out);
-    fwrite(&fa->metadata_kv_count, 8, 1, out);
+    OcGgufWriter w;
+    e = open_writer_copy_meta(fa, output_path, &w);
+    if (e != OC_OK) { oc_gguf_map_free(&mfa); oc_gguf_map_free(&mfb); return e; }
 
     /* Merge each tensor via SLERP. */
-    for (uint64_t ti_idx = 0; ti_idx < fa->tensor_count; ti_idx++) {
+    for (uint64_t ti_idx = 0; ti_idx < fa->tensor_count && e == OC_OK; ti_idx++) {
         const OcGgufTensorInfo *ta = &fa->tensors[ti_idx];
         const OcGgufTensorInfo *tb = oc_gguf_map_tensor_get(&mfb, ta->name);
-        if (!tb) continue;
+        if (!tb) { e = OC_ERR_FORMAT; break; }
 
         size_t n = 1;
         for (uint32_t d = 0; d < ta->n_dims; d++) n *= ta->dims[d];
 
         float *va = dequant_tensor(&mfa, ta);
         float *vb = dequant_tensor(&mfb, tb);
-        if (!va || !vb) { free(va); free(vb); continue; }
+        if (!va || !vb) { free(va); free(vb); e = OC_ERR_FORMAT; break; }
 
         /* SLERP: result = va + vb * sin(t * theta) / sin(theta) - va * sin((1-t) * theta) / sin(theta)
          * Simplified: for small angles, use linear interpolation as fallback. */
@@ -237,17 +252,22 @@ OcError oc_merge_slerp(const char *path_a, const char *path_b,
                     }
                 }
             }
-            fwrite(merged, sizeof(float), n, out);
+            e = oc_gguf_writer_add_tensor(&w, ta->name, ta->n_dims, ta->dims,
+                                          0, merged,
+                                          (uint64_t)n * sizeof(float));
             free(merged);
+        } else {
+            e = OC_ERR_OOM;
         }
         free(va);
         free(vb);
     }
 
-    fclose(out);
+    if (e == OC_OK) e = oc_gguf_writer_finalize(&w);
+    oc_gguf_writer_free(&w);
     oc_gguf_map_free(&mfa);
     oc_gguf_map_free(&mfb);
-    return OC_OK;
+    return e;
 }
 
 /* ─── TIES merge ──────────────────────────────────────────────────────── */
@@ -278,25 +298,21 @@ OcError oc_merge_ties(const OcMergeInput *inputs, size_t n_inputs,
     }
 
     const OcGgufFile *tmpl = &mfs[0].unified;
-    FILE *out = fopen(output_path, "wb");
-    if (!out) {
+    OcGgufWriter w;
+    OcError we = open_writer_copy_meta(tmpl, output_path, &w);
+    if (we != OC_OK) {
         for (size_t i = 0; i < n_inputs; i++) oc_gguf_map_free(&mfs[i]);
         free(mfs);
-        return OC_ERR_IO;
+        return we;
     }
 
-    uint32_t magic = 0x46554747, version = 3;
-    fwrite(&magic, 4, 1, out);
-    fwrite(&version, 4, 1, out);
-    fwrite(&tmpl->tensor_count, 8, 1, out);
-    fwrite(&tmpl->metadata_kv_count, 8, 1, out);
-
-    for (uint64_t ti_idx = 0; ti_idx < tmpl->tensor_count; ti_idx++) {
+    for (uint64_t ti_idx = 0; ti_idx < tmpl->tensor_count && we == OC_OK; ti_idx++) {
         const OcGgufTensorInfo *ti = &tmpl->tensors[ti_idx];
         size_t n = 1;
         for (uint32_t d = 0; d < ti->n_dims; d++) n *= ti->dims[d];
 
         float **bufs = calloc(n_inputs, sizeof(float *));
+        if (!bufs) { we = OC_ERR_OOM; break; }
         for (size_t i = 0; i < n_inputs; i++) {
             const OcGgufTensorInfo *src = oc_gguf_map_tensor_get(&mfs[i], ti->name);
             bufs[i] = src ? dequant_tensor(&mfs[i], src) : calloc(n, sizeof(float));
@@ -336,18 +352,23 @@ OcError oc_merge_ties(const OcMergeInput *inputs, size_t n_inputs,
                     merged[j] = neg_sum / (float)neg_count;
                 }
             }
-            fwrite(merged, sizeof(float), n, out);
+            we = oc_gguf_writer_add_tensor(&w, ti->name, ti->n_dims, ti->dims,
+                                           0, merged,
+                                           (uint64_t)n * sizeof(float));
             free(merged);
+        } else {
+            we = OC_ERR_OOM;
         }
 
         for (size_t i = 0; i < n_inputs; i++) free(bufs[i]);
         free(bufs);
     }
 
-    fclose(out);
+    if (we == OC_OK) we = oc_gguf_writer_finalize(&w);
+    oc_gguf_writer_free(&w);
     for (size_t i = 0; i < n_inputs; i++) oc_gguf_map_free(&mfs[i]);
     free(mfs);
-    return OC_OK;
+    return we;
 }
 
 /* ─── DARE merge ──────────────────────────────────────────────────────── */
@@ -376,28 +397,24 @@ OcError oc_merge_dare(const OcMergeInput *inputs, size_t n_inputs,
     }
 
     const OcGgufFile *tmpl = &mfs[0].unified;
-    FILE *out = fopen(output_path, "wb");
-    if (!out) {
+    OcGgufWriter w;
+    OcError we = open_writer_copy_meta(tmpl, output_path, &w);
+    if (we != OC_OK) {
         for (size_t i = 0; i < n_inputs; i++) oc_gguf_map_free(&mfs[i]);
         free(mfs);
-        return OC_ERR_IO;
+        return we;
     }
-
-    uint32_t magic = 0x46554747, version = 3;
-    fwrite(&magic, 4, 1, out);
-    fwrite(&version, 4, 1, out);
-    fwrite(&tmpl->tensor_count, 8, 1, out);
-    fwrite(&tmpl->metadata_kv_count, 8, 1, out);
 
     float rescale = (drop_rate < 1.0f) ? 1.0f / (1.0f - drop_rate) : 1.0f;
     uint64_t rng = 0x1234567890abcdefULL;
 
-    for (uint64_t ti_idx = 0; ti_idx < tmpl->tensor_count; ti_idx++) {
+    for (uint64_t ti_idx = 0; ti_idx < tmpl->tensor_count && we == OC_OK; ti_idx++) {
         const OcGgufTensorInfo *ti = &tmpl->tensors[ti_idx];
         size_t n = 1;
         for (uint32_t d = 0; d < ti->n_dims; d++) n *= ti->dims[d];
 
         float **bufs = calloc(n_inputs, sizeof(float *));
+        if (!bufs) { we = OC_ERR_OOM; break; }
         for (size_t i = 0; i < n_inputs; i++) {
             const OcGgufTensorInfo *src = oc_gguf_map_tensor_get(&mfs[i], ti->name);
             bufs[i] = src ? dequant_tensor(&mfs[i], src) : calloc(n, sizeof(float));
@@ -425,18 +442,23 @@ OcError oc_merge_dare(const OcMergeInput *inputs, size_t n_inputs,
             float inv = 1.0f / (float)n_inputs;
             for (size_t j = 0; j < n; j++)
                 merged[j] *= inv;
-            fwrite(merged, sizeof(float), n, out);
+            we = oc_gguf_writer_add_tensor(&w, ti->name, ti->n_dims, ti->dims,
+                                           0, merged,
+                                           (uint64_t)n * sizeof(float));
             free(merged);
+        } else {
+            we = OC_ERR_OOM;
         }
 
         for (size_t i = 0; i < n_inputs; i++) free(bufs[i]);
         free(bufs);
     }
 
-    fclose(out);
+    if (we == OC_OK) we = oc_gguf_writer_finalize(&w);
+    oc_gguf_writer_free(&w);
     for (size_t i = 0; i < n_inputs; i++) oc_gguf_map_free(&mfs[i]);
     free(mfs);
-    return OC_OK;
+    return we;
 }
 
 /* ─── Top-level merge dispatch ────────────────────────────────────────── */
@@ -444,6 +466,15 @@ OcError oc_merge_dare(const OcMergeInput *inputs, size_t n_inputs,
 OcError oc_merge_models(const OcMergeConfig *cfg)
 {
     if (!cfg || !cfg->inputs || cfg->n_inputs < 2) return OC_ERR_INVALID_ARG;
+
+    if (cfg->verbose) {
+        oc_log(OC_LOG_INFO, "merge: strategy=%s inputs=%zu output=%s",
+               oc_merge_strategy_name(cfg->strategy), cfg->n_inputs,
+               cfg->output_path ? cfg->output_path : "(null)");
+        for (size_t i = 0; i < cfg->n_inputs; i++)
+            oc_log(OC_LOG_INFO, "merge: input[%zu]=%s weight=%.3f",
+                   i, cfg->inputs[i].path, (double)cfg->inputs[i].weight);
+    }
 
     switch (cfg->strategy) {
     case OC_MERGE_LINEAR:
@@ -456,7 +487,8 @@ OcError oc_merge_models(const OcMergeConfig *cfg)
         return oc_merge_ties(cfg->inputs, cfg->n_inputs, cfg->ties_density,
                              cfg->output_path);
     case OC_MERGE_DARE:
-        return oc_merge_dare(cfg->inputs, cfg->n_inputs, 0.1f, cfg->output_path);
+        return oc_merge_dare(cfg->inputs, cfg->n_inputs,
+                             cfg->dare_drop_rate, cfg->output_path);
     default:
         return OC_ERR_INVALID_ARG;
     }

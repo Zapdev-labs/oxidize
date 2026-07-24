@@ -15,6 +15,7 @@
 #include "oxidize/llama.h"
 
 #include "oxidize/activation.h"
+#include "oxidize/arch_forward.h"
 #include "oxidize/arena.h"
 #include "oxidize/gguf.h"
 #include "oxidize/log.h"
@@ -155,6 +156,7 @@ static OcError parse_config(const OcGgufFile *f, const char *arch_str,
     cfg->expert_weights_scale = (scale > 0.0f) ? scale : 1.0f;
 
     /* Gemma-specific: GeGLU FFN + norm scaling. */
+    bool no_rope = false;   /* GPT-2/J: learned positional embeddings */
     cfg->uses_geglu = false;
     cfg->norm_scale = 1.0f;
     cfg->sliding_window = 0;
@@ -178,20 +180,20 @@ static OcError parse_config(const OcGgufFile *f, const char *arch_str,
             cfg->uses_geglu = true;
             cfg->norm_scale = 1.0f;
         } else if (strncmp(arch_str, "gpt2", 4) == 0 ||
-                   strncmp(arch_str, "gptj", 4) == 0 ||
-                   strncmp(arch_str, "gpt-neox", 8) == 0) {
-            /* GPT-2/J/NeoX: GELU FFN, parallel attention (QKV fused),
-             * no RoPE (learned positional embeddings). */
+                   strncmp(arch_str, "gptj", 4) == 0) {
+            /* GPT-2/J: GELU FFN (handled by the arch_forward path), no
+             * RoPE — learned positional embeddings. uses_geglu is NOT set:
+             * these run the dedicated forward pass in arch_forward.c. */
             cfg->uses_gpt2 = true;
             cfg->uses_par_attn = true;
-            cfg->uses_geglu = true; /* GELU activation */
             cfg->norm_scale = 1.0f;
-            cfg->rope_dim = 0; /* no RoPE */
-        } else if (strncmp(arch_str, "falcon", 6) == 0) {
-            /* Falcon: parallel QKV, GELU FFN, no RoPE (uses alibi). */
+            no_rope = true;
+        } else if (strncmp(arch_str, "gptneox", 7) == 0 ||
+                   strncmp(arch_str, "falcon", 6) == 0) {
+            /* NeoX/Falcon: LayerNorm + GeLU MLP with (partial) RoPE.
+             * Dispatched to arch_forward.c; rope_dim comes from
+             * rope.dimension_count metadata (falls back to head_dim). */
             cfg->uses_par_attn = true;
-            cfg->uses_geglu = true;
-            cfg->rope_dim = 0;
         }
     }
     /* YaRN: read from GGUF metadata if present. */
@@ -247,6 +249,7 @@ static OcError parse_config(const OcGgufFile *f, const char *arch_str,
                                          * applies to both. */
     cfg->rope_dim   = (rope_dim > 0) ? rope_dim : cfg->kv_head_dim;
     if (cfg->rope_dim > cfg->kv_head_dim) cfg->rope_dim = cfg->kv_head_dim;
+    if (no_rope) cfg->rope_dim = 0;   /* preserve arch-specific no-RoPE */
     cfg->tied_embeddings = false;
     /* MoE per-token top-k: default to 1 when experts exist but no top-k set. */
     if (cfg->num_experts > 0) {
@@ -283,6 +286,12 @@ static bool assign_tensor(OcLlamaModel *m, const char *cname,
         m->final_norm = load_norm(mm, info, m->cfg.n_embd);
         return true;
     }
+    /* Final-LayerNorm bias (GPT-2/NeoX/Falcon). */
+    if (strcmp(cname, "norm.bias") == 0 ||
+        strcmp(cname, "output_norm.bias") == 0) {
+        m->final_norm_bias = load_norm(mm, info, m->cfg.n_embd);
+        return true;
+    }
     /* Per-layer: blk.<N>.<suffix> */
     if (strncmp(cname, "blk.", 4) == 0) {
         char *end = NULL;
@@ -295,6 +304,10 @@ static bool assign_tensor(OcLlamaModel *m, const char *cname,
             L->attn_norm = load_norm(mm, info, m->cfg.n_embd);
         } else if (strcmp(suf, "ffn_norm.weight") == 0) {
             L->ffn_norm = load_norm(mm, info, m->cfg.n_embd);
+        } else if (strcmp(suf, "attn_norm.bias") == 0) {
+            L->attn_norm_bias = load_norm(mm, info, m->cfg.n_embd);
+        } else if (strcmp(suf, "ffn_norm.bias") == 0) {
+            L->ffn_norm_bias = load_norm(mm, info, m->cfg.n_embd);
         } else if (strcmp(suf, "attn_q.weight") == 0) {
             L->attn_q = view_from_info(mm, info);
         } else if (strcmp(suf, "attn_k.weight") == 0) {
@@ -412,7 +425,8 @@ OcError oc_llama_load(const char *path, OcLlamaModel *out)
     }
     if (arch_str == NULL) arch_str = "llama";
     if (strcmp(arch_str, "llama") != 0 && strcmp(arch_str, "mistral") != 0 &&
-        strcmp(arch_str, "qwen2") != 0) {
+        strcmp(arch_str, "qwen2") != 0 && strcmp(arch_str, "gpt2") != 0 &&
+        strcmp(arch_str, "gptneox") != 0 && strcmp(arch_str, "falcon") != 0) {
         oc_gguf_map_free(&out->gguf);
         return OC_ERR_MODEL;
     }
@@ -445,7 +459,9 @@ OcError oc_llama_load(const char *path, OcLlamaModel *out)
 OcError oc_llama_session_init(OcLlamaModel *model, OcLlamaSession *out)
 {
     if (model == NULL || out == NULL) return OC_ERR_INVALID_ARG;
-    if (model->cfg.uses_mla || model->cfg.uses_geglu) return OC_ERR_MODEL;
+    /* uses_geglu is fully handled by forward_dense_ffn (GeGLU vs SwiGLU),
+     * so it is NOT rejected here. MLA still lacks a complete session path. */
+    if (model->cfg.uses_mla) return OC_ERR_MODEL;
     if (model->cfg.num_experts > 0 && model->cfg.expert_intermediate_size == 0) {
         if (model->cfg.n_ff == 0) return OC_ERR_MODEL;
         model->cfg.expert_intermediate_size = model->cfg.n_ff;
@@ -550,12 +566,15 @@ void oc_llama_free(OcLlamaModel *model)
         for (uint32_t i = 0; i < model->cfg.n_layer; i++) {
             free(model->layers[i].attn_norm);
             free(model->layers[i].ffn_norm);
+            free(model->layers[i].attn_norm_bias);
+            free(model->layers[i].ffn_norm_bias);
             free(model->layers[i].mla_q_a_norm);
             free(model->layers[i].mla_kv_a_norm);
         }
         free(model->layers);
     }
     free(model->final_norm);
+    free(model->final_norm_bias);
     oc_gguf_map_free(&model->gguf);
     memset(model, 0, sizeof(*model));
 }
@@ -968,6 +987,15 @@ OcError oc_llama_forward(OcLlamaSession *sess, uint32_t token, float *logits_out
     if (sess == NULL || sess->model == NULL) return OC_ERR_INVALID_ARG;
     if ((uint64_t)sess->pos >= sess->model->cfg.n_ctx) return OC_ERR_INVALID_ARG;
 
+    /* Architecture dispatch: LayerNorm-family models use the dedicated
+     * forward passes in arch_forward.c. */
+    switch (sess->model->arch) {
+    case OC_ARCH_GPT2:    return oc_arch_forward_gpt2(sess, token, logits_out);
+    case OC_ARCH_GPTNEOX: return oc_arch_forward_gpt_neox(sess, token, logits_out);
+    case OC_ARCH_FALCON:  return oc_arch_forward_falcon(sess, token, logits_out);
+    default: break;
+    }
+
     embed_token(sess, token);
     for (uint32_t l = 0; l < sess->model->cfg.n_layer; l++) {
         forward_layer(sess, l);
@@ -999,7 +1027,12 @@ OcError oc_batch_session_init(OcLlamaModel *model, size_t max_seqs,
                                OcBatchSession *out)
 {
     if (model == NULL || out == NULL) return OC_ERR_INVALID_ARG;
-    if (model->cfg.uses_mla || model->cfg.uses_geglu) return OC_ERR_MODEL;
+    if (model->cfg.uses_mla) return OC_ERR_MODEL;
+    /* Batch decode only implements the RMSNorm Llama-family layer; reject
+     * LayerNorm architectures (they use oc_llama_forward's dispatch). */
+    if (model->arch == OC_ARCH_GPT2 || model->arch == OC_ARCH_GPTNEOX ||
+        model->arch == OC_ARCH_FALCON)
+        return OC_ERR_MODEL;
     if (model->cfg.num_experts > 0 && model->cfg.expert_intermediate_size == 0) {
         if (model->cfg.n_ff == 0) return OC_ERR_MODEL;
         model->cfg.expert_intermediate_size = model->cfg.n_ff;

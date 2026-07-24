@@ -6,27 +6,25 @@
 #include <math.h>
 #include <string.h>
 
-OcError oc_flash_attention_head(const float *q,
-                                 const float *k_cache,
-                                 const float *v_cache,
+/* Shared online-softmax attention core.
+ * Attends q over K/V rows [start, seq_len), where row t lives at
+ * k + t * kv_stride (same for v). Writes the normalized result to out. */
+static void flash_online_softmax(const float *q,
+                                 const float *k,
+                                 const float *v,
+                                 size_t start,
                                  size_t seq_len,
                                  size_t head_dim,
-                                 float *out,
-                                 float *temp)
+                                 size_t kv_stride,
+                                 float *out)
 {
-    if (!q || !k_cache || !v_cache || !out) return OC_ERR_INVALID_ARG;
-    (void)temp; /* not needed in the scalar implementation */
-
     float scale = 1.0f / sqrtf((float)head_dim);
-
-    /* Online softmax: maintain running max and sum. */
     float run_max = -INFINITY;
     float run_sum = 0.0f;
     memset(out, 0, head_dim * sizeof(float));
 
-    for (size_t t = 0; t < seq_len; t++) {
-        const float *k_t = k_cache + t * head_dim;
-        /* QK dot product. */
+    for (size_t t = start; t < seq_len; t++) {
+        const float *k_t = k + t * kv_stride;
         float dot = 0.0f;
         for (size_t i = 0; i < head_dim; i++) {
             dot += q[i] * k_t[i];
@@ -40,7 +38,7 @@ OcError oc_flash_attention_head(const float *q,
             out[i] *= exp_factor;
         }
         /* Add new V contribution. */
-        const float *v_t = v_cache + t * head_dim;
+        const float *v_t = v + t * kv_stride;
         for (size_t i = 0; i < head_dim; i++) {
             out[i] += exp_score * v_t[i];
         }
@@ -48,13 +46,27 @@ OcError oc_flash_attention_head(const float *q,
         run_max = new_max;
     }
 
-    /* Normalize. */
     if (run_sum > 0.0f) {
         float inv = 1.0f / run_sum;
         for (size_t i = 0; i < head_dim; i++) {
             out[i] *= inv;
         }
     }
+}
+
+OcError oc_flash_attention_head(const float *q,
+                                 const float *k_cache,
+                                 const float *v_cache,
+                                 size_t seq_len,
+                                 size_t head_dim,
+                                 float *out,
+                                 float *temp)
+{
+    if (!q || !k_cache || !v_cache || !out) return OC_ERR_INVALID_ARG;
+    (void)temp; /* not needed in the scalar implementation */
+
+    flash_online_softmax(q, k_cache, v_cache, 0, seq_len, head_dim,
+                         head_dim, out);
     return OC_OK;
 }
 
@@ -85,40 +97,10 @@ OcError oc_flash_attention_multi_head(const float *q,
          * k_cache layout: [seq_len, n_heads_kv, head_dim]
          * So k_cache[t * kv_row_floats + kv_head * head_dim + i] = K[t][kv_head][i]
          *
-         * For the flash attention call, we need a contiguous [seq_len, head_dim]
-         * view. Since the data is strided, we compute manually. */
-        float scale = 1.0f / sqrtf((float)head_dim);
-        float run_max = -INFINITY;
-        float run_sum = 0.0f;
-        memset(out_h, 0, head_dim * sizeof(float));
-
-        for (size_t t = 0; t < seq_len; t++) {
-            const float *k_t = k_h + t * kv_row_floats;
-            float dot = 0.0f;
-            for (size_t i = 0; i < head_dim; i++) {
-                dot += q_h[i] * k_t[i];
-            }
-            float score = dot * scale;
-            float new_max = (score > run_max) ? score : run_max;
-            float exp_factor = expf(run_max - new_max);
-            float exp_score = expf(score - new_max);
-            for (size_t i = 0; i < head_dim; i++) {
-                out_h[i] *= exp_factor;
-            }
-            const float *v_t = v_h + t * kv_row_floats;
-            for (size_t i = 0; i < head_dim; i++) {
-                out_h[i] += exp_score * v_t[i];
-            }
-            run_sum = run_sum * exp_factor + exp_score;
-            run_max = new_max;
-        }
-
-        if (run_sum > 0.0f) {
-            float inv = 1.0f / run_sum;
-            for (size_t i = 0; i < head_dim; i++) {
-                out_h[i] *= inv;
-            }
-        }
+         * For the flash attention call, we need a strided view; the shared
+         * helper handles the per-position stride. */
+        flash_online_softmax(q_h, k_h, v_h, 0, seq_len, head_dim,
+                             kv_row_floats, out_h);
     }
     (void)temp;
     return OC_OK;
@@ -137,38 +119,8 @@ OcError oc_flash_attention_sliding(const float *q,
     (void)temp;
 
     size_t start = (window_start < seq_len) ? window_start : seq_len;
-    float scale = 1.0f / sqrtf((float)head_dim);
-    float run_max = -INFINITY;
-    float run_sum = 0.0f;
-    memset(out, 0, head_dim * sizeof(float));
-
-    for (size_t t = start; t < seq_len; t++) {
-        const float *k_t = k_cache + t * head_dim;
-        float dot = 0.0f;
-        for (size_t i = 0; i < head_dim; i++) {
-            dot += q[i] * k_t[i];
-        }
-        float score = dot * scale;
-        float new_max = (score > run_max) ? score : run_max;
-        float exp_factor = expf(run_max - new_max);
-        float exp_score = expf(score - new_max);
-        for (size_t i = 0; i < head_dim; i++) {
-            out[i] *= exp_factor;
-        }
-        const float *v_t = v_cache + t * head_dim;
-        for (size_t i = 0; i < head_dim; i++) {
-            out[i] += exp_score * v_t[i];
-        }
-        run_sum = run_sum * exp_factor + exp_score;
-        run_max = new_max;
-    }
-
-    if (run_sum > 0.0f) {
-        float inv = 1.0f / run_sum;
-        for (size_t i = 0; i < head_dim; i++) {
-            out[i] *= inv;
-        }
-    }
+    flash_online_softmax(q, k_cache, v_cache, start, seq_len, head_dim,
+                         head_dim, out);
     return OC_OK;
 }
 

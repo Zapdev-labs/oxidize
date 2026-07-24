@@ -61,6 +61,15 @@ static float simple_rng(void)
     return (float)(state >> 8) / (float)(1u << 24);
 }
 
+/* Draw from a caller-owned RNG state when provided (reproducible and
+ * race-free); fall back to the global RNG otherwise. */
+static float rng_from_state(uint32_t *state)
+{
+    if (!state) return simple_rng();
+    *state = *state * 1103515245u + 12345u;
+    return (float)(*state >> 8) / (float)(1u << 24);
+}
+
 /* ─── Mirostat v1 ──────────────────────────────────────────────────────── */
 
 uint32_t oc_sample_mirostat_v1(const float *logits, size_t vocab_size,
@@ -93,8 +102,8 @@ uint32_t oc_sample_mirostat_v1(const float *logits, size_t vocab_size,
     if (sum == 0.0f) sum = 1.0f;
     for (size_t i = 0; i < top_k; i++) probs[i] /= sum;
 
-    /* Sample. */
-    float u = simple_rng();
+    /* Sample, driving the draw from the caller's RNG state. */
+    float u = rng_from_state(state);
     size_t selected = sample_from_probs(probs, top_k, u);
     uint32_t token = (uint32_t)sorted[selected].idx;
 
@@ -102,8 +111,6 @@ uint32_t oc_sample_mirostat_v1(const float *logits, size_t vocab_size,
     float observed_surprise = -logf(probs[selected] + 1e-10f);
     float error = observed_surprise - tau;
     *mu = *mu - eta * error;
-
-    if (state) *state = state[0] + 1;
 
     free(probs);
     free(sorted);
@@ -133,18 +140,17 @@ uint32_t oc_sample_mirostat_v2(const float *logits, size_t vocab_size,
     if (sum == 0.0f) sum = 1.0f;
     for (size_t i = 0; i < vocab_size; i++) probs[i] /= sum;
 
-    /* Compute threshold based on mu. */
-    float threshold = expf(-*mu);
-    float cum = 0.0f;
+    /* Truncate: keep tokens whose individual surprise -log(p) <= mu,
+     * i.e. p >= exp(-mu). Always keep at least the top token. */
+    float min_p = expf(-*mu);
     size_t top_k = 0;
 
     LogitIndex *sorted = sort_logits(logits, vocab_size);
     if (!sorted) { free(probs); return 0; }
 
     for (size_t i = 0; i < vocab_size; i++) {
-        cum += probs[sorted[i].idx];
+        if (probs[sorted[i].idx] < min_p && top_k > 0) break;
         top_k = i + 1;
-        if (cum >= threshold) break;
     }
 
     /* Normalize and sample. */
@@ -163,8 +169,8 @@ uint32_t oc_sample_mirostat_v2(const float *logits, size_t vocab_size,
     size_t selected = sample_from_probs(top_probs, top_k, u);
     uint32_t token = (uint32_t)sorted[selected].idx;
 
-    /* Update mu. */
-    float observed_surprise = -logf(top_probs[selected] + 1e-10f);
+    /* Update mu using the surprise from the pre-truncation distribution. */
+    float observed_surprise = -logf(probs[sorted[selected].idx] + 1e-10f);
     float error = observed_surprise - tau;
     *mu = *mu - eta * error;
 
@@ -561,6 +567,20 @@ OcError oc_beam_search_step(OcBeamSearchState *st,
     if (!new_beams) { free(candidates); return OC_ERR_OOM; }
 
     size_t selected = 0;
+
+    /* Carry finished hypotheses forward so they are not lost. */
+    for (size_t b = 0; b < st->beam_width && selected < st->beam_width; b++) {
+        if (!st->beams[b].finished) continue;
+        new_beams[selected].tokens = malloc((st->max_length + 1) * sizeof(uint32_t));
+        if (!new_beams[selected].tokens) continue;
+        memcpy(new_beams[selected].tokens, st->beams[b].tokens,
+               st->beams[b].n_tokens * sizeof(uint32_t));
+        new_beams[selected].n_tokens = st->beams[b].n_tokens;
+        new_beams[selected].log_prob = st->beams[b].log_prob;
+        new_beams[selected].finished = true;
+        selected++;
+    }
+
     for (size_t i = 0; i < n_cands && selected < st->beam_width; i++) {
         size_t src = candidates[i].beam_idx;
         uint32_t token = candidates[i].token;
@@ -575,7 +595,6 @@ OcError oc_beam_search_step(OcBeamSearchState *st,
         new_beams[selected].tokens[new_beams[selected].n_tokens++] = token;
         new_beams[selected].log_prob = candidates[i].score;
         new_beams[selected].finished = (token == st->eos_token);
-        if (new_beams[selected].finished) st->n_finished++;
         selected++;
     }
 
@@ -599,6 +618,11 @@ OcError oc_beam_search_step(OcBeamSearchState *st,
         free(st->beams[i].tokens);
     free(st->beams);
     st->beams = new_beams;
+
+    /* Recompute finished count from the retained beams. */
+    st->n_finished = 0;
+    for (size_t i = 0; i < st->beam_width; i++)
+        if (st->beams[i].finished) st->n_finished++;
 
     free(candidates);
     return OC_OK;
@@ -631,6 +655,7 @@ const OcBeam *oc_beam_search_best(const OcBeamSearchState *st)
 void oc_beam_search_free(OcBeamSearchState *st)
 {
     if (!st) return;
+    if (!st->beams) { st->n_finished = 0; return; } /* idempotent free */
     for (size_t i = 0; i < st->beam_width; i++)
         free(st->beams[i].tokens);
     free(st->beams);
@@ -660,32 +685,44 @@ uint32_t oc_sample_contrastive(const float *logits, size_t vocab_size,
     if (top_k > vocab_size) top_k = vocab_size;
     if (top_k > 10) top_k = 10; /* limit for performance */
 
+    /* Softmax probabilities over the top-k candidates. */
+    float max_logit = sorted[0].logit;
+    float sum = 0.0f;
+    float cand_probs[10];
+    for (size_t i = 0; i < top_k; i++) {
+        cand_probs[i] = expf(sorted[i].logit - max_logit);
+        sum += cand_probs[i];
+    }
+    if (sum == 0.0f) sum = 1.0f;
+    for (size_t i = 0; i < top_k; i++) cand_probs[i] /= sum;
+
+    /* Degeneration penalty: max cosine similarity between the current
+     * representation and past keys.
+     * ponytail: the API exposes a single current_key, so the similarity term
+     * is candidate-independent; per-candidate reps would need an API change. */
+    float max_sim = 0.0f;
+    if (past_keys && current_key) {
+        for (size_t t = 0; t < seq_len; t++) {
+            float dot = 0.0f, norm_a = 0.0f, norm_b = 0.0f;
+            for (size_t d = 0; d < hidden_dim; d++) {
+                dot += current_key[d] * past_keys[t * hidden_dim + d];
+                norm_a += current_key[d] * current_key[d];
+                norm_b += past_keys[t * hidden_dim + d] * past_keys[t * hidden_dim + d];
+            }
+            float sim = dot / (sqrtf(norm_a) * sqrtf(norm_b) + 1e-10f);
+            if (sim > max_sim) max_sim = sim;
+        }
+    }
+
     float best_score = -INFINITY;
     uint32_t best_token = (uint32_t)sorted[0].idx;
 
     for (size_t i = 0; i < top_k; i++) {
-        uint32_t token = (uint32_t)sorted[i].idx;
-
-        /* Compute cosine similarity between current_key and each past key. */
-        float max_sim = 0.0f;
-        if (past_keys && current_key) {
-            for (size_t t = 0; t < seq_len; t++) {
-                float dot = 0.0f, norm_a = 0.0f, norm_b = 0.0f;
-                for (size_t d = 0; d < hidden_dim; d++) {
-                    dot += current_key[d] * past_keys[t * hidden_dim + d];
-                    norm_a += current_key[d] * current_key[d];
-                    norm_b += past_keys[t * hidden_dim + d] * past_keys[t * hidden_dim + d];
-                }
-                float sim = dot / (sqrtf(norm_a) * sqrtf(norm_b) + 1e-10f);
-                if (sim > max_sim) max_sim = sim;
-            }
-        }
-
-        /* Score = log_prob * beta - max_sim * (1 - beta). */
-        float score = (float)i * beta - max_sim * (1.0f - beta);
+        /* Score = prob * beta - max_sim * (1 - beta). */
+        float score = cand_probs[i] * beta - max_sim * (1.0f - beta);
         if (score > best_score) {
             best_score = score;
-            best_token = token;
+            best_token = (uint32_t)sorted[i].idx;
         }
     }
 
@@ -722,6 +759,41 @@ OcError oc_sampler_chain_add(OcSamplerChain *chain,
     return OC_OK;
 }
 
+/* Mask all but the k highest logits to -inf. */
+static void filter_top_k(float *logits, size_t vocab_size, size_t k)
+{
+    if (k == 0 || k >= vocab_size) return;
+    LogitIndex *sorted = sort_logits(logits, vocab_size);
+    if (!sorted) return;
+    for (size_t i = k; i < vocab_size; i++)
+        logits[sorted[i].idx] = -INFINITY;
+    free(sorted);
+}
+
+/* Mask tokens outside the smallest set with cumulative probability >= p. */
+static void filter_top_p(float *logits, size_t vocab_size, float p)
+{
+    if (p <= 0.0f || p >= 1.0f) return;
+    LogitIndex *sorted = sort_logits(logits, vocab_size);
+    if (!sorted) return;
+
+    float max_logit = sorted[0].logit;
+    float sum = 0.0f;
+    for (size_t i = 0; i < vocab_size; i++)
+        sum += expf(sorted[i].logit - max_logit);
+    if (sum == 0.0f) sum = 1.0f;
+
+    float cum = 0.0f;
+    size_t keep = vocab_size;
+    for (size_t i = 0; i < vocab_size; i++) {
+        cum += expf(sorted[i].logit - max_logit) / sum;
+        if (cum >= p) { keep = i + 1; break; }
+    }
+    for (size_t i = keep; i < vocab_size; i++)
+        logits[sorted[i].idx] = -INFINITY;
+    free(sorted);
+}
+
 uint32_t oc_sampler_chain_sample(OcSamplerChain *chain,
                                   float *logits, size_t vocab_size,
                                   const uint32_t *recent_tokens,
@@ -730,41 +802,65 @@ uint32_t oc_sampler_chain_sample(OcSamplerChain *chain,
 {
     if (!chain || !logits || vocab_size == 0) return 0;
 
+    /* Apply every transform step in order; a terminal sampling step is
+     * deferred until all transforms have run, so chain order cannot
+     * silently skip configured steps. Only the first terminal step is
+     * honored. */
+    const OcSamplerStep *terminal = NULL;
+    bool greedy = false;
+
     for (size_t i = 0; i < chain->n_steps; i++) {
         OcSamplerStep *step = &chain->steps[i];
         switch (step->type) {
         case OC_SAMPLER_STEP_TEMPERATURE:
-            for (size_t j = 0; j < vocab_size; j++)
-                logits[j] /= step->param1;
+            if (step->param1 > 0.0f) {
+                for (size_t j = 0; j < vocab_size; j++)
+                    logits[j] /= step->param1;
+            } else {
+                greedy = true; /* temperature <= 0 means greedy */
+            }
             break;
         case OC_SAMPLER_STEP_PENALTIES:
             oc_apply_penalties(logits, vocab_size,
                                recent_tokens, n_recent,
                                step->param1, step->param2);
             break;
+        case OC_SAMPLER_STEP_TOP_K:
+            filter_top_k(logits, vocab_size, (size_t)step->param1);
+            break;
+        case OC_SAMPLER_STEP_TOP_P:
+            filter_top_p(logits, vocab_size, step->param1);
+            break;
+        default:
+            /* Terminal sampling step. */
+            if (!terminal) terminal = step;
+            break;
+        }
+    }
+
+    if (terminal && !greedy) {
+        switch (terminal->type) {
         case OC_SAMPLER_STEP_MIROSTAT_V1:
             if (mirostat_mu)
                 return oc_sample_mirostat_v1(logits, vocab_size,
-                                             mirostat_mu, step->param1,
-                                             step->param2, NULL);
+                                             mirostat_mu, terminal->param1,
+                                             terminal->param2, NULL);
             break;
         case OC_SAMPLER_STEP_MIROSTAT_V2:
             if (mirostat_mu)
                 return oc_sample_mirostat_v2(logits, vocab_size,
-                                             mirostat_mu, step->param1,
-                                             step->param2);
+                                             mirostat_mu, terminal->param1,
+                                             terminal->param2);
             break;
         case OC_SAMPLER_STEP_TFS:
-            return oc_sample_tfs(logits, vocab_size, step->param1, step->param2);
+            return oc_sample_tfs(logits, vocab_size, terminal->param1, terminal->param2);
         case OC_SAMPLER_STEP_TYPICAL:
-            return oc_sample_typical(logits, vocab_size, step->param1, step->param2);
+            return oc_sample_typical(logits, vocab_size, terminal->param1, terminal->param2);
         case OC_SAMPLER_STEP_TOP_A:
-            return oc_sample_top_a(logits, vocab_size, step->param1, step->param2);
+            return oc_sample_top_a(logits, vocab_size, terminal->param1, terminal->param2);
         case OC_SAMPLER_STEP_ETA:
-            return oc_sample_eta_cutoff(logits, vocab_size, step->param1, step->param2);
-        case OC_SAMPLER_STEP_TOP_K:
-        case OC_SAMPLER_STEP_TOP_P:
-            /* These modify logits but don't return a token. */
+            return oc_sample_eta_cutoff(logits, vocab_size, terminal->param1, terminal->param2);
+        default:
             break;
         }
     }
