@@ -1065,34 +1065,52 @@ static void hunyuan_mla_attention(OcLlamaSession *s, uint32_t layer)
 
         float run_max = -INFINITY;
         float run_sum = 0.0f;
-        for (size_t i = 0; i < q_nope + q_rope; i++) out_h[i] = 0.0f;
+        for (size_t i = 0; i < c->mla_v_head_dim; i++) out_h[i] = 0.0f;
 
         for (int64_t t = 0; t < seq_len; t++) {
-            /* Decompress position t: k_nope from k_b_proj of c_kv_nope(t),
-             * kv_pe from the cache. For the scalar reference, we re-run
-             * k_b_proj on the cached compressed nope portion. This is
-             * expensive but correct; a fused kernel would cache k_b. */
+            /* Decompress position t from the compressed cache.
+             * c_kv(t) = [kv_lora_dim nope | kv_pe_dim rope]. */
             const float *c_kv_t = s->kv_k
                 + ((size_t)layer * c->n_ctx + (size_t)t) * mla_row_floats;
-            /* k_b_proj(c_kv_nope) → k_nope for this position. We reuse the
-             * s->k buffer (overwriting current head's k). In a production
-             * implementation we'd cache the decompressed k per position. */
-            /* For correctness in the scalar reference, we skip the full
-             * per-position k_b decompression and use a simplified attention
-             * that treats the compressed cache as the key. This is
-             * architecturally incorrect for production but compiles and
-             * runs for testing. A full MLA implementation would decompress
-             * here. */
-            (void)c_kv_t;
+            const float *c_kv_nope_t = c_kv_t;          /* [kv_lora_dim] */
+            const float *kv_pe_t = c_kv_t + kv_lora;    /* [kv_pe_dim] */
 
-            /* Simplified: use the current head's k (just projected) as a
-             * single-position key. This is a placeholder; the real MLA
-             * path requires per-position k_b decompression. */
-            const float *k_h = s->k + h * q_nope;
-            const float *v_h = s->v + h * c->mla_v_head_dim;
+            /* k_b_proj on c_kv_nope gives [n_head * kv_nope_dim].
+             * We only need the h-th head's slice. For the scalar reference,
+             * we compute the full projection into a temp buffer and extract
+             * the head's portion. This is O(n_head * kv_nope * kv_lora) per
+             * position, which is expensive but correct. */
+            float *k_nope_full = s->dequant_temp;  /* [n_head * kv_nope] */
+            /* Reuse mla_k_b weight view to project c_kv_nope → k_nope. */
+            /* For the current position (t == s->pos), we already computed
+             * k_b_proj above; reuse it instead of recomputing. */
+            const float *k_h;
+            const float *v_h;
+            if (t == (int64_t)s->pos) {
+                /* Current position: use already-projected k and v. */
+                k_h = s->k + h * q_nope;
+                v_h = s->v + h * c->mla_v_head_dim;
+            } else {
+                /* Past position: decompress by re-running k_b/v_b projections. */
+                /* Project c_kv_nope through k_b for this position. */
+                glm_matvec(&L->mla_k_b, c_kv_nope_t, k_nope_full,
+                           s->dequant_temp);
+                k_h = k_nope_full + h * q_nope;
+                /* Project through v_b. */
+                float *v_full = k_nope_full;  /* reuse buffer (k no longer needed) */
+                glm_matvec(&L->mla_v_b, c_kv_nope_t, v_full,
+                           s->dequant_temp);
+                v_h = v_full + h * c->mla_v_head_dim;
+            }
+
+            /* Compute attention score: dot(q, [k_nope | kv_pe]).
+             * q = [q_nope | q_rope], k = [k_nope | kv_pe_t]. */
             float dot = 0.0f;
             for (size_t i = 0; i < q_nope; i++) {
                 dot += q_h[i] * k_h[i];
+            }
+            for (size_t i = 0; i < q_rope; i++) {
+                dot += q_h[q_nope + i] * kv_pe_t[i];
             }
             float score = dot * scale;
             float new_max = (score > run_max) ? score : run_max;
@@ -1106,8 +1124,6 @@ static void hunyuan_mla_attention(OcLlamaSession *s, uint32_t layer)
             }
             run_sum = run_sum * exp_factor + exp_score;
             run_max = new_max;
-            /* Only one position in this simplified path. */
-            break;
         }
         float inv = 1.0f / run_sum;
         for (size_t i = 0; i < c->mla_v_head_dim; i++) out_h[i] *= inv;
