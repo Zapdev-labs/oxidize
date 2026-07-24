@@ -1,0 +1,35 @@
+oxidize-c/tests/test_flash_attention.c
+  s_96ddc277ba047e::t_74dd5a7ce5d716 86,89,93-115,117-125,128-311
+  s_96ddc277ba047e::t_5a02c01c383d48 116,126-127
+oxidize-c/src/compute/flash_attention.c
+  s_96ddc277ba047e::t_5fe1a2bd643c50 194-497
+oxidize-c/include/oxidize/lora.h
+  s_96ddc277ba047e::t_88d2806fa2a2e0 76-130
+oxidize-c/tests/test_lora.c
+  s_96ddc277ba047e::t_7133f0fbbc0ff8 103-236,240-253
+  s_96ddc277ba047e::t_ac977f21641d89 237-239
+oxidize-c/include/oxidize/flash_attention.h
+  s_96ddc277ba047e::t_45dd98784f1c20 94-157
+oxidize-c/src/model/lora.c
+  s_96ddc277ba047e::t_45a67fa9eac2e8 181
+  s_96ddc277ba047e::t_88771b8675e9c5 4
+  s_96ddc277ba047e::t_7787c6a71a2a1c 129-149,151-180,182-195,197-313
+  s_96ddc277ba047e::t_ce07a456b77cb8 196
+  s_96ddc277ba047e::t_0f8b491dc8753f 150
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "53c19b2b45ad42c36c7904217ccf2892b269749a",
+  "prompts": {},
+  "sessions": {
+    "s_96ddc277ba047e": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "ea8ad242-b091-46af-96e0-114c0c67fea4",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
