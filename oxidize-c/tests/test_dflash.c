@@ -197,3 +197,218 @@ Test(dflash, multiple_rounds)
     cr_assert(state.total_proposed >= 5);
     oc_dflash_state_free(&state);
 }
+
+/* ─── Real DFlash draft model tests ─────────────────────────────────── */
+
+Test(dflash_model, config_init)
+{
+    OcDFlashModelConfig cfg;
+    oc_dflash_model_config_init(&cfg);
+    cr_assert_eq(cfg.hidden_size, 2048);
+    cr_assert_eq(cfg.num_hidden_layers, 8);
+    cr_assert_eq(cfg.num_target_layers, 40);
+    cr_assert_eq(cfg.vocab_size, 248320);
+}
+
+Test(dflash_model, head_dim)
+{
+    OcDFlashModelConfig cfg;
+    oc_dflash_model_config_init(&cfg);
+    /* 2048 / 32 = 64 */
+    cr_assert_eq(oc_dflash_config_head_dim(&cfg), 64);
+}
+
+Test(dflash_model, target_hidden_width)
+{
+    OcDFlashModelConfig cfg;
+    oc_dflash_model_config_init(&cfg);
+    /* 2048 * 40 = 81920 */
+    cr_assert_eq(oc_dflash_config_target_hidden_width(&cfg), 2048 * 40);
+}
+
+Test(dflash_model, init_free)
+{
+    OcDFlashModelConfig cfg;
+    oc_dflash_model_config_init(&cfg);
+    cfg.hidden_size = 8;
+    cfg.num_hidden_layers = 2;
+    cfg.num_attention_heads = 2;
+    cfg.num_key_value_heads = 2;
+    cfg.intermediate_size = 16;
+    cfg.vocab_size = 16;
+    cfg.num_target_layers = 2;
+
+    OcDFlashDraftModel m;
+    cr_assert_eq(oc_dflash_model_init(&m, &cfg), OC_OK);
+    cr_assert(m.loaded);
+    cr_assert_not_null(m.layers);
+    cr_assert_not_null(m.kv_cache);
+    cr_assert_eq(m.position_offset, 0);
+
+    oc_dflash_model_free(&m);
+    cr_assert(!m.loaded);
+}
+
+Test(dflash_model, forward_token_no_weights)
+{
+    OcDFlashModelConfig cfg;
+    oc_dflash_model_config_init(&cfg);
+    cfg.hidden_size = 4;
+    cfg.num_hidden_layers = 2;
+    cfg.num_attention_heads = 2;
+    cfg.num_key_value_heads = 2;
+    cfg.intermediate_size = 8;
+    cfg.vocab_size = 8;
+    cfg.num_target_layers = 1;
+
+    OcDFlashDraftModel m;
+    cr_assert_eq(oc_dflash_model_init(&m, &cfg), OC_OK);
+
+    float hidden[4] = {0};
+    OcError e = oc_dflash_forward_token(&m, 1, NULL, 0, hidden, 4);
+    cr_assert_eq(e, OC_OK);
+    cr_assert_eq(m.position_offset, 1);
+    cr_assert_eq(m.kv_cache[0].seq_len, 1);
+    cr_assert_eq(m.kv_cache[1].seq_len, 1);
+
+    oc_dflash_model_free(&m);
+}
+
+Test(dflash_model, forward_multiple_tokens)
+{
+    OcDFlashModelConfig cfg;
+    oc_dflash_model_config_init(&cfg);
+    cfg.hidden_size = 4;
+    cfg.num_hidden_layers = 1;
+    cfg.num_attention_heads = 2;
+    cfg.num_key_value_heads = 2;
+    cfg.intermediate_size = 8;
+    cfg.vocab_size = 8;
+    cfg.num_target_layers = 1;
+
+    OcDFlashDraftModel m;
+    cr_assert_eq(oc_dflash_model_init(&m, &cfg), OC_OK);
+
+    float hidden[4];
+    for (int t = 0; t < 5; t++) {
+        OcError e = oc_dflash_forward_token(&m, (uint32_t)t, NULL, 0, hidden, 4);
+        cr_assert_eq(e, OC_OK);
+        cr_assert_eq(m.position_offset, (size_t)(t + 1));
+        cr_assert_eq(m.kv_cache[0].seq_len, (size_t)(t + 1));
+    }
+
+    oc_dflash_model_free(&m);
+}
+
+Test(dflash_model, cache_target_hidden)
+{
+    OcDFlashModelConfig cfg;
+    oc_dflash_model_config_init(&cfg);
+    cfg.hidden_size = 4;
+    cfg.num_hidden_layers = 1;
+    cfg.num_attention_heads = 2;
+    cfg.num_key_value_heads = 2;
+    cfg.intermediate_size = 8;
+    cfg.vocab_size = 8;
+    cfg.num_target_layers = 2;
+
+    OcDFlashDraftModel m;
+    oc_dflash_model_init(&m, &cfg);
+
+    /* target_hidden_width = 4 * 2 = 8 */
+    float hidden[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    cr_assert_eq(oc_dflash_cache_target_hidden(&m, hidden, 8), OC_OK);
+    cr_assert_eq(m.target_hidden_cache_len, 8);
+    cr_assert_not_null(m.target_hidden_cache);
+
+    /* Wrong length should fail. */
+    cr_assert_neq(oc_dflash_cache_target_hidden(&m, hidden, 4), OC_OK);
+
+    oc_dflash_model_free(&m);
+}
+
+Test(dflash_model, clear_speculative_caches)
+{
+    OcDFlashModelConfig cfg;
+    oc_dflash_model_config_init(&cfg);
+    cfg.hidden_size = 4;
+    cfg.num_hidden_layers = 1;
+    cfg.num_attention_heads = 2;
+    cfg.num_key_value_heads = 2;
+    cfg.intermediate_size = 8;
+    cfg.vocab_size = 8;
+    cfg.num_target_layers = 1;
+
+    OcDFlashDraftModel m;
+    oc_dflash_model_init(&m, &cfg);
+
+    float hidden[4];
+    oc_dflash_forward_token(&m, 0, NULL, 0, hidden, 4);
+    cr_assert_eq(m.kv_cache[0].seq_len, 1);
+    cr_assert_eq(m.position_offset, 1);
+
+    oc_dflash_clear_speculative_caches(&m);
+    cr_assert_eq(m.kv_cache[0].seq_len, 0);
+    cr_assert_eq(m.position_offset, 0);
+    cr_assert_null(m.target_hidden_cache);
+
+    oc_dflash_model_free(&m);
+}
+
+Test(dflash_model, logits)
+{
+    OcDFlashModelConfig cfg;
+    oc_dflash_model_config_init(&cfg);
+    cfg.hidden_size = 4;
+    cfg.num_hidden_layers = 1;
+    cfg.num_attention_heads = 2;
+    cfg.num_key_value_heads = 2;
+    cfg.intermediate_size = 8;
+    cfg.vocab_size = 8;
+    cfg.num_target_layers = 1;
+
+    OcDFlashDraftModel m;
+    oc_dflash_model_init(&m, &cfg);
+
+    float hidden[4] = {1.0f, 0.5f, -0.3f, 0.2f};
+    float logits[8] = {0};
+    /* Without output weights, logits should be zero. */
+    OcError e = oc_dflash_logits(&m, hidden, 4, logits, 8);
+    cr_assert_eq(e, OC_OK);
+
+    oc_dflash_model_free(&m);
+}
+
+Test(dflash_model, null_safety)
+{
+    cr_assert_neq(oc_dflash_model_init(NULL, NULL), OC_OK);
+    cr_assert_neq(oc_dflash_cache_target_hidden(NULL, NULL, 0), OC_OK);
+    cr_assert_neq(oc_dflash_forward_token(NULL, 0, NULL, 0, NULL, 0), OC_OK);
+    cr_assert_neq(oc_dflash_logits(NULL, NULL, 0, NULL, 0), OC_OK);
+    oc_dflash_clear_speculative_caches(NULL);
+    oc_dflash_model_free(NULL);
+}
+
+Test(dflash_model, forward_with_target_hidden)
+{
+    OcDFlashModelConfig cfg;
+    oc_dflash_model_config_init(&cfg);
+    cfg.hidden_size = 4;
+    cfg.num_hidden_layers = 1;
+    cfg.num_attention_heads = 2;
+    cfg.num_key_value_heads = 2;
+    cfg.intermediate_size = 8;
+    cfg.vocab_size = 8;
+    cfg.num_target_layers = 2;
+
+    OcDFlashDraftModel m;
+    oc_dflash_model_init(&m, &cfg);
+
+    /* Without fc weights, target_hidden is ignored. */
+    float target_hidden[8] = {0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 0.7f, 0.8f};
+    float hidden[4] = {0};
+    OcError e = oc_dflash_forward_token(&m, 1, target_hidden, 8, hidden, 4);
+    cr_assert_eq(e, OC_OK);
+
+    oc_dflash_model_free(&m);
+}
