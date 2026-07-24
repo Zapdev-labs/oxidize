@@ -1,0 +1,26 @@
+oxidize-c/include/oxidize/inf_model.h
+  s_96ddc277ba047e::t_0d90b3e24b17b9 102-120
+oxidize-c/src/model/inf_model.c
+  s_96ddc277ba047e::t_2d548809cb5a78 353-822,825-880
+  s_96ddc277ba047e::t_9bf31a1aa1da1f 823-824
+  s_96ddc277ba047e::t_94a32940d8d6d5 915-943
+  s_96ddc277ba047e::t_473fb4caeb58d6 1084
+oxidize-c/tests/test_inf_forward.c
+  s_96ddc277ba047e::t_a689ad2a0852e1 506-603
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "fda34a468ab2cca15966232a2f5187b8ee8c4293",
+  "prompts": {},
+  "sessions": {
+    "s_96ddc277ba047e": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "ea8ad242-b091-46af-96e0-114c0c67fea4",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
