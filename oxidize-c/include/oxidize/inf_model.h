@@ -99,6 +99,25 @@ bool oc_inf_model_is_loaded(const OcInferenceModel *m);
 /* Check if continuous-batching decode is enabled. */
 bool oc_inf_model_batched_decode_enabled(void);
 
+/* ─── Attention head dimension helpers (port of inference.rs) ────────── */
+
+/* Compute (q_head_dim, q_heads, kv_head_dim, kv_heads) from config, layer
+ * norms, and projection output sizes. Mirrors Rust attention_head_dims(). */
+void oc_attention_head_dims(const OcInferenceConfig *cfg,
+                             const OcLayerWeights *layer,
+                             size_t q_len, size_t kv_len,
+                             uint32_t *out_q_head_dim,
+                             uint32_t *out_q_heads,
+                             uint32_t *out_kv_head_dim,
+                             uint32_t *out_kv_heads);
+
+/* GEMV for a single head's slice of a per-head weight matrix.
+ * storage is logically [n_heads, rows, cols]; computes the head-th slice. */
+OcError oc_gemv_weight_head(const OcWeightStorage *ws,
+                             size_t rows, size_t cols,
+                             uint32_t head, uint32_t n_heads,
+                             const float *input, float *output);
+
 /* ─── Forward pass methods (port of inference/forward.rs) ────────────── */
 
 /* Embed a token into workspace.x[..hidden_size].

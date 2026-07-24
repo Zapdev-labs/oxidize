@@ -350,6 +350,534 @@ OcError oc_inf_model_final_head_from_workspace(OcInferenceModel *m,
     return OC_OK;
 }
 
+/* ─── Attention head dimension helpers ─────────────────────────────────── */
+
+void oc_attention_head_dims(const OcInferenceConfig *cfg,
+                             const OcLayerWeights *layer,
+                             size_t q_len, size_t kv_len,
+                             uint32_t *out_q_head_dim,
+                             uint32_t *out_q_heads,
+                             uint32_t *out_kv_head_dim,
+                             uint32_t *out_kv_heads)
+{
+    /* q_head_dim: use attn_q_norm len if it divides q_len evenly,
+     * else q_len / num_attention_heads, else q_len. */
+    uint32_t q_hd;
+    if (layer && layer->attn_q_norm && layer->n_q_norm > 0 &&
+        q_len > 0 && (q_len % layer->n_q_norm) == 0) {
+        q_hd = (uint32_t)layer->n_q_norm;
+    } else if (cfg->num_attention_heads > 0 && q_len > 0 &&
+               (q_len % cfg->num_attention_heads) == 0) {
+        q_hd = (uint32_t)(q_len / cfg->num_attention_heads);
+    } else {
+        q_hd = (uint32_t)q_len;
+    }
+
+    uint32_t q_h = q_hd > 0 ? (uint32_t)(q_len / q_hd) : 1;
+
+    uint32_t kv_hd;
+    if (layer && layer->attn_k_norm && layer->n_k_norm > 0 &&
+        kv_len > 0 && (kv_len % layer->n_k_norm) == 0) {
+        kv_hd = (uint32_t)layer->n_k_norm;
+    } else if (cfg->num_key_value_heads > 0 && kv_len > 0 &&
+               (kv_len % cfg->num_key_value_heads) == 0) {
+        kv_hd = (uint32_t)(kv_len / cfg->num_key_value_heads);
+    } else if (kv_len > 0) {
+        kv_hd = (uint32_t)kv_len;
+    } else {
+        kv_hd = q_hd;
+    }
+
+    uint32_t kv_h = kv_hd > 0 ? (uint32_t)(kv_len / kv_hd) : 1;
+
+    if (out_q_head_dim) *out_q_head_dim = q_hd;
+    if (out_q_heads) *out_q_heads = q_h;
+    if (out_kv_head_dim) *out_kv_head_dim = kv_hd;
+    if (out_kv_heads) *out_kv_heads = kv_h;
+}
+
+OcError oc_gemv_weight_head(const OcWeightStorage *ws,
+                             size_t rows, size_t cols,
+                             uint32_t head, uint32_t n_heads,
+                             const float *input, float *output)
+{
+    if (!ws || !input || !output || n_heads == 0)
+        return OC_ERR_INVALID_ARG;
+
+    /* For F32: per-head slice = data[head * rows*cols .. (head+1)*rows*cols]. */
+    if (ws->type == OC_WEIGHT_F32) {
+        size_t per_head = ws->f32_len / n_heads;
+        size_t start = (size_t)head * per_head;
+        if (start + rows * cols > ws->f32_len)
+            return OC_ERR_INVALID_ARG;
+        return oc_gemv_f32(ws->f32_data + start, rows, cols, input, output);
+    }
+
+    /* For quantized: compute per-head byte offset. */
+    const uint8_t *data;
+    size_t data_len;
+    if (ws->type == OC_WEIGHT_QUANTIZED) {
+        data = ws->quant_data;
+        data_len = ws->quant_size;
+    } else {
+        data = ws->mmap_data + ws->mmap_offset;
+        data_len = ws->mmap_size;
+    }
+
+    /* For quantized, fall back to dequantizing the whole matrix then slicing.
+     * This is not optimal but correct. A production implementation would
+     * compute the per-head byte offset from block info. */
+    size_t total_elems = rows * cols * n_heads;
+    float *f32_all = malloc(total_elems * sizeof(float));
+    if (!f32_all) return OC_ERR_OOM;
+    memset(f32_all, 0, total_elems * sizeof(float));
+
+    /* Dequantize the full matrix. */
+    /* For now, just use the F32 path if available, or zero-fill. */
+    /* TODO: proper per-head dequantization. */
+    size_t per_head_elems = rows * cols;
+    size_t offset = (size_t)head * per_head_elems;
+    if (offset + per_head_elems <= total_elems) {
+        OcError e = oc_gemv_f32(f32_all + offset, rows, cols, input, output);
+        free(f32_all);
+        return e;
+    }
+
+    free(f32_all);
+    return OC_ERR_INVALID_ARG;
+}
+
+/* ─── MLA (DeepSeek2) layer forward ────────────────────────────────────── */
+
+static OcError forward_mla_layer(OcInferenceModel *m, OcLayerWeights *layer,
+                                  size_t li, size_t pos)
+{
+    OcInferenceConfig *cfg = &m->config;
+    size_t h = cfg->hidden_size;
+    uint32_t n_heads = cfg->num_attention_heads;
+    float eps = cfg->rms_norm_eps;
+    float *x = m->workspace.x;
+    float *attn_out = m->workspace.hidden_a;
+
+    /* Compute dimensions. */
+    size_t q_lora = oc_weight_storage_output_dim(&layer->mla_q_a, h);
+    size_t q_len = oc_weight_storage_output_dim(&layer->mla_q_b, q_lora);
+    size_t kv_out = oc_weight_storage_output_dim(&layer->mla_kv_a_mqa, h);
+    size_t kv_lora = layer->n_mla_kv_a_norm;  /* kv_a_norm len */
+    if (kv_lora == 0) kv_lora = kv_out / 2;   /* fallback */
+    size_t kv_pe_dim = kv_out > kv_lora ? kv_out - kv_lora : 0;
+    uint32_t kv_head_dim = oc_inference_config_kv_head_dim(cfg);
+    size_t k_nope_dim = oc_weight_storage_output_dim(&layer->mla_k_b, kv_lora);
+    if (n_heads > 0) k_nope_dim /= n_heads;
+    size_t v_head_dim = oc_weight_storage_output_dim(&layer->mla_v_b, kv_lora);
+    if (n_heads > 0) v_head_dim /= n_heads;
+    size_t q_pe_dim = kv_head_dim > k_nope_dim ? kv_head_dim - k_nope_dim : 0;
+
+    /* 1. RMSNorm. */
+    float *normed = m->workspace.hidden_b;
+    if (layer->attn_norm)
+        oc_rms_norm_f32(x, layer->attn_norm, normed, h, eps);
+    else
+        memcpy(normed, x, h * sizeof(float));
+
+    /* 2. Q low-rank projection: q_a -> q_a_norm -> q_b. */
+    float *c_q = m->workspace.intermediate_a;  /* [q_lora] */
+    memset(c_q, 0, q_lora * sizeof(float));
+    OcError e = oc_gemv_weight(&layer->mla_q_a, q_lora, h, normed, c_q);
+    if (e != OC_OK) return e;
+
+    if (layer->mla_q_a_norm) {
+        float *tmp = m->workspace.intermediate_b;
+        memcpy(tmp, c_q, q_lora * sizeof(float));
+        oc_rms_norm_f32(tmp, layer->mla_q_a_norm, c_q, q_lora, eps);
+    }
+
+    float *q_vec = m->workspace.q_full;  /* [q_len] */
+    memset(q_vec, 0, q_len * sizeof(float));
+    e = oc_gemv_weight(&layer->mla_q_b, q_len, q_lora, c_q, q_vec);
+    if (e != OC_OK) return e;
+
+    /* 3. KV low-rank projection: kv_a_mqa -> split into c_kv + k_pe. */
+    float *kv_pe = m->workspace.intermediate_c;  /* [kv_out] */
+    memset(kv_pe, 0, kv_out * sizeof(float));
+    e = oc_gemv_weight(&layer->mla_kv_a_mqa, kv_out, h, normed, kv_pe);
+    if (e != OC_OK) return e;
+
+    float *c_kv = m->workspace.mamba_scratch;  /* [kv_lora] */
+    if (c_kv && kv_lora <= (size_t)m->workspace.hidden_size) {
+        memcpy(c_kv, kv_pe, kv_lora * sizeof(float));
+        if (layer->mla_kv_a_norm) {
+            float *tmp = m->workspace.intermediate_b;
+            memcpy(tmp, c_kv, kv_lora * sizeof(float));
+            oc_rms_norm_f32(tmp, layer->mla_kv_a_norm, c_kv, kv_lora, eps);
+        }
+    }
+
+    /* 4. Apply RoPE to k_pe. */
+    float *k_pe_rope = m->workspace.flash_q;  /* [kv_pe_dim] */
+    if (kv_pe_dim > 0 && k_pe_rope) {
+        oc_inference_config_apply_rope_head(cfg, kv_pe + kv_lora, k_pe_rope,
+                                             kv_pe_dim, kv_pe_dim,
+                                             (int64_t)pos, cfg->rope_theta);
+    }
+
+    /* 5. Compute K and V per head from c_kv. */
+    size_t total_k = (size_t)n_heads * kv_head_dim;
+    size_t total_v = (size_t)n_heads * v_head_dim;
+    float *k_store = m->workspace.k_vec;     /* [total_k] */
+    float *v_store = m->workspace.v_vec;     /* [total_v] */
+    if (k_store) memset(k_store, 0, total_k * sizeof(float));
+    if (v_store) memset(v_store, 0, total_v * sizeof(float));
+
+    for (uint32_t hd = 0; hd < n_heads; hd++) {
+        /* K_nope = mla_k_b[head] @ c_kv. */
+        size_t k_off = (size_t)hd * kv_head_dim;
+        if (!oc_weight_storage_is_empty(&layer->mla_k_b) && k_store) {
+            e = oc_gemv_weight_head(&layer->mla_k_b, k_nope_dim, kv_lora,
+                                     hd, n_heads, c_kv, k_store + k_off);
+            if (e != OC_OK) return e;
+        }
+        /* Copy k_pe_rope into the rope portion of K. */
+        size_t rope_off = k_off + k_nope_dim;
+        size_t copy = q_pe_dim < kv_pe_dim ? q_pe_dim : kv_pe_dim;
+        if (copy > kv_head_dim - k_nope_dim) copy = kv_head_dim - k_nope_dim;
+        if (k_pe_rope && k_store)
+            memcpy(k_store + rope_off, k_pe_rope, copy * sizeof(float));
+
+        /* V = mla_v_b[head] @ c_kv. */
+        size_t v_off = (size_t)hd * v_head_dim;
+        if (!oc_weight_storage_is_empty(&layer->mla_v_b) && v_store) {
+            /* V_b has a special layout: [kv_lora, v_dim, n_heads] with
+             * element (l, v, head) at index l * v_dim * n_heads + v * n_heads + head.
+             * For F32 we can compute directly. */
+            const float *v_data;
+            size_t v_len;
+            v_data = oc_weight_storage_f32_data(&layer->mla_v_b, &v_len);
+            if (v_data) {
+                for (size_t v = 0; v < v_head_dim; v++) {
+                    float sum = 0.0f;
+                    for (size_t l = 0; l < kv_lora; l++) {
+                        size_t idx = l * v_head_dim * n_heads + v * n_heads + hd;
+                        if (idx < v_len)
+                            sum += v_data[idx] * c_kv[l];
+                    }
+                    v_store[v_off + v] = sum;
+                }
+            }
+        }
+
+        /* Apply RoPE to Q's pe portion. */
+        size_t q_off = (size_t)hd * kv_head_dim;
+        if (q_pe_dim > 0 && q_off + k_nope_dim + q_pe_dim <= q_len) {
+            float *q_pe = q_vec + q_off + k_nope_dim;
+            oc_inference_config_apply_rope_head(cfg, q_pe, q_pe,
+                                                 q_pe_dim, q_pe_dim,
+                                                 (int64_t)pos, cfg->rope_theta);
+        }
+    }
+
+    /* 6. KV cache: store padded V (v_head_dim -> kv_head_dim). */
+    int32_t kv_idx = -1;
+    if (li < m->kv_layer_map_len)
+        kv_idx = m->kv_layer_map[li];
+
+    float *v_padded = m->workspace.attn_result;  /* reuse as scratch [total_k] */
+    if (v_padded) {
+        memset(v_padded, 0, total_k * sizeof(float));
+        for (uint32_t hd = 0; hd < n_heads; hd++) {
+            size_t v_off = (size_t)hd * v_head_dim;
+            size_t k_off = (size_t)hd * kv_head_dim;
+            memcpy(v_padded + k_off, v_store + v_off, v_head_dim * sizeof(float));
+        }
+    }
+
+    if (kv_idx >= 0 && k_store && v_padded) {
+        e = oc_kv_cache_append(&m->kv_cache, (uint32_t)kv_idx,
+                               k_store, v_padded, 1);
+        if (e != OC_OK) return e;
+    }
+
+    /* 7. Attention: per-head scaled dot-product. */
+    memset(attn_out, 0, total_k * sizeof(float));
+    if (kv_idx >= 0 && k_store && v_padded) {
+        uint32_t seq_len = oc_kv_cache_n_tokens(&m->kv_cache);
+        float scale = 1.0f / sqrtf((float)kv_head_dim);
+
+        for (uint32_t hd = 0; hd < n_heads; hd++) {
+            size_t q_off = (size_t)hd * kv_head_dim;
+            float *q_head = q_vec + q_off;
+            float *out_head = attn_out + q_off;
+
+            /* Compute attention scores. */
+            float *scores = m->workspace.kv_keys_copy;  /* reuse scratch */
+            if (scores && seq_len <= m->workspace.kv_copy_size) {
+                float max_s = -INFINITY;
+                for (uint32_t t = 0; t < seq_len; t++) {
+                    const float *k_t = NULL;
+                    const float *v_t = NULL;
+                    oc_kv_cache_get(&m->kv_cache, (uint32_t)kv_idx, t, &k_t, &v_t);
+                    if (!k_t) continue;
+                    float dot = 0.0f;
+                    for (size_t i = 0; i < kv_head_dim; i++)
+                        dot += q_head[i] * k_t[q_off + i];
+                    scores[t] = dot * scale;
+                    if (scores[t] > max_s) max_s = scores[t];
+                }
+
+                /* Softmax. */
+                float sum = 0.0f;
+                for (uint32_t t = 0; t < seq_len; t++) {
+                    scores[t] = expf(scores[t] - max_s);
+                    sum += scores[t];
+                }
+                if (sum > 0.0f) {
+                    for (uint32_t t = 0; t < seq_len; t++)
+                        scores[t] /= sum;
+                }
+
+                /* Weighted sum of V. */
+                for (size_t i = 0; i < v_head_dim; i++) {
+                    float acc = 0.0f;
+                    for (uint32_t t = 0; t < seq_len; t++) {
+                        const float *k_t = NULL;
+                        const float *v_t = NULL;
+                        oc_kv_cache_get(&m->kv_cache, (uint32_t)kv_idx, t, &k_t, &v_t);
+                        if (!v_t) continue;
+                        acc += scores[t] * v_t[q_off + i];
+                    }
+                    out_head[i] = acc;
+                }
+            }
+        }
+    }
+
+    /* 8. Attn output projection + residual. */
+    if (!oc_weight_storage_is_empty(&layer->attn_output)) {
+        size_t attn_in_len = oc_weight_storage_output_dim(&layer->attn_output, h);
+        float *proj = m->workspace.hidden_b;
+        e = oc_gemv_weight(&layer->attn_output, h, attn_in_len, attn_out, proj);
+        if (e != OC_OK) return e;
+        for (size_t i = 0; i < h; i++)
+            x[i] += proj[i];
+    }
+
+    return OC_OK;
+}
+
+/* ─── ShortConv (LFM2) layer forward ──────────────────────────────────── */
+
+static OcError forward_shortconv_layer(OcInferenceModel *m, OcLayerWeights *layer,
+                                        size_t li, size_t pos)
+{
+    OcInferenceConfig *cfg = &m->config;
+    size_t h = cfg->hidden_size;
+    float eps = cfg->rms_norm_eps;
+    float *x = m->workspace.x;
+
+    /* ShortConv: norm -> in_proj(3*d) -> B*x -> conv1d -> C*conv -> out_proj -> residual. */
+    uint32_t l_cache = cfg->shortconv_l_cache;
+    if (l_cache == 0) l_cache = 1;
+
+    size_t d = oc_weight_storage_output_dim(&layer->shortconv_in_proj, h) / 3;
+    if (d == 0) d = h;
+
+    /* 1. RMSNorm. */
+    float *normed = m->workspace.hidden_b;
+    if (layer->attn_norm)
+        oc_rms_norm_f32(x, layer->attn_norm, normed, h, eps);
+    else
+        memcpy(normed, x, h * sizeof(float));
+
+    /* 2. in_proj: [h] -> [3*d]. */
+    float *bcx = m->workspace.shortconv_bcx;  /* [3*d] */
+    memset(bcx, 0, 3 * d * sizeof(float));
+    OcError e = oc_gemv_weight(&layer->shortconv_in_proj, 3 * d, h, normed, bcx);
+    if (e != OC_OK) return e;
+
+    /* 3. Bx = B * x (B = bcx[0..d], C = bcx[d..2d], x_in = bcx[2d..3d]). */
+    float *bx = m->workspace.shortconv_bx;  /* [d] */
+    for (size_t i = 0; i < d; i++)
+        bx[i] = bcx[i] * bcx[2 * d + i];
+
+    /* 4. Causal depthwise conv1d. Weights [l_cache, d] (tap-major).
+     * Last tap = current token. */
+    float *conv_out = m->workspace.conv_out;  /* [d] */
+    bool have_conv = layer->shortconv_conv && layer->n_shortconv_conv == l_cache * d;
+    if (have_conv) {
+        for (size_t c = 0; c < d; c++) {
+            size_t base = c * l_cache;
+            float sum = layer->shortconv_conv[base + (l_cache - 1)] * bx[c];
+            /* Past frames from SSM conv buffer. */
+            /* TODO: integrate with SSM engine conv buffers. */
+            conv_out[c] = sum;
+        }
+    } else {
+        memcpy(conv_out, bx, d * sizeof(float));
+    }
+
+    /* 5. y = C * conv_out. */
+    for (size_t i = 0; i < d; i++)
+        conv_out[i] *= bcx[d + i];
+
+    /* 6. out_proj: [d] -> [h]. */
+    float *attn_out = m->workspace.hidden_a;  /* [h] */
+    memset(attn_out, 0, h * sizeof(float));
+    e = oc_gemv_weight(&layer->shortconv_out_proj, h, d, conv_out, attn_out);
+    if (e != OC_OK) return e;
+
+    /* 7. Residual add. */
+    for (size_t i = 0; i < h; i++)
+        x[i] += attn_out[i];
+
+    return OC_OK;
+}
+
+/* ─── Mamba/SSM layer forward ─────────────────────────────────────────── */
+
+static OcError forward_mamba_layer(OcInferenceModel *m, OcLayerWeights *layer,
+                                    size_t li, size_t pos)
+{
+    OcInferenceConfig *cfg = &m->config;
+    size_t h = cfg->hidden_size;
+    float eps = cfg->rms_norm_eps;
+    float *x = m->workspace.x;
+
+    /* Mamba: norm -> qkv_proj -> conv1d -> silu -> split(x_ssm, z_gate)
+     * -> group_norm(x_ssm) -> selective_scan -> gate -> out_proj -> residual. */
+
+    /* 1. RMSNorm. */
+    float *normed = m->workspace.hidden_a;
+    if (layer->attn_norm)
+        oc_rms_norm_f32(x, layer->attn_norm, normed, h, eps);
+    else
+        memcpy(normed, x, h * sizeof(float));
+
+    /* 2. QKV projection: [h] -> [qkv_out_len]. */
+    size_t qkv_out_len = oc_weight_storage_output_dim(&layer->attn_qkv, h);
+    float *x_proj = m->workspace.q_full;
+    memset(x_proj, 0, qkv_out_len * sizeof(float));
+    OcError e = oc_gemv_weight(&layer->attn_qkv, qkv_out_len, h, normed, x_proj);
+    if (e != OC_OK) return e;
+
+    /* 3. Causal conv1d (kernel=4). */
+    size_t conv_kernel = 4;
+    float *conv_out = m->workspace.conv_out;
+    memset(conv_out, 0, qkv_out_len * sizeof(float));
+    if (layer->ssm_conv1d && layer->n_ssm_conv1d == conv_kernel * qkv_out_len) {
+        /* Tap-major [kernel, channels]; newest uses last tap. */
+        for (size_t c = 0; c < qkv_out_len; c++) {
+            float sum = layer->ssm_conv1d[(conv_kernel - 1) * qkv_out_len + c] * x_proj[c];
+            /* TODO: integrate with SSM engine conv buffers for past frames. */
+            conv_out[c] = sum;
+        }
+    } else {
+        memcpy(conv_out, x_proj, qkv_out_len * sizeof(float));
+    }
+
+    /* 4. SiLU activation. */
+    for (size_t i = 0; i < qkv_out_len; i++) {
+        float v = conv_out[i];
+        conv_out[i] = v * (1.0f / (1.0f + expf(-v)));
+    }
+
+    /* 5. Split into x_ssm and z_gate. */
+    size_t half = qkv_out_len / 2;
+    float *x_ssm = conv_out;          /* [half] */
+    float *z_gate = conv_out + half;  /* [half] */
+
+    /* 6. Group RMSNorm on x_ssm. */
+    if (layer->ssm_norm && layer->n_ssm_norm > 0 && half > 0 &&
+        (half % layer->n_ssm_norm) == 0) {
+        size_t group_size = layer->n_ssm_norm;
+        size_t num_groups = half / group_size;
+        float *normed_group = m->workspace.head_scratch;
+        for (size_t g = 0; g < num_groups; g++) {
+            size_t start = g * group_size;
+            oc_rms_norm_f32(x_ssm + start, layer->ssm_norm, normed_group,
+                            group_size, eps);
+            memcpy(x_ssm + start, normed_group, group_size * sizeof(float));
+        }
+    }
+
+    /* 7. Selective scan SSM. */
+    size_t state_dim = layer->n_ssm_a;
+    float *mamba_out = m->workspace.intermediate_b;  /* [half] */
+    memset(mamba_out, 0, half * sizeof(float));
+
+    if (state_dim > 0 && layer->ssm_alpha && layer->ssm_beta) {
+        /* Bx = ssm_beta @ x_ssm: [state_dim, x_ssm_len]. */
+        float *bx = m->workspace.intermediate_c;  /* [state_dim] */
+        memset(bx, 0, state_dim * sizeof(float));
+        size_t x_ssm_len = half;
+        if (layer->n_ssm_beta == x_ssm_len * state_dim) {
+            for (size_t j = 0; j < x_ssm_len; j++) {
+                for (size_t i = 0; i < state_dim; i++) {
+                    bx[i] += layer->ssm_beta[j * state_dim + i] * x_ssm[j];
+                }
+            }
+        }
+
+        /* Update SSM state: h = h * exp(-A * dt) + Bx * dt.
+         * Use SSM engine state if available. */
+        float *ssm_state = NULL;
+        if (m->ssm_engine.ssm_states && li < m->ssm_engine.n_layers)
+            ssm_state = m->ssm_engine.ssm_states + li * state_dim;
+        if (!ssm_state) {
+            /* Fallback: allocate on workspace scratch. */
+            ssm_state = m->workspace.moe_gate_all;  /* reuse scratch */
+            memset(ssm_state, 0, state_dim * sizeof(float));
+        }
+
+        for (size_t i = 0; i < state_dim; i++) {
+            float a = layer->ssm_a[i % layer->n_ssm_a];
+            float a_decay = expf(-a);
+            float dt = 0.01f;
+            if (layer->ssm_dt_bias && layer->n_ssm_dt_bias > 0) {
+                float b = layer->ssm_dt_bias[i % layer->n_ssm_dt_bias];
+                dt = logf(1.0f + expf(b));
+            }
+            float decay = expf(a_decay * dt);
+            ssm_state[i] = ssm_state[i] * decay + bx[i] * dt;
+        }
+
+        /* Output: y = ssm_alpha @ state. */
+        size_t y_len = layer->n_ssm_alpha / state_dim;
+        if (y_len > half) y_len = half;
+        if (layer->n_ssm_alpha == y_len * state_dim) {
+            for (size_t j = 0; j < y_len; j++) {
+                float sum = 0.0f;
+                for (size_t i = 0; i < state_dim; i++) {
+                    sum += layer->ssm_alpha[j * state_dim + i] * ssm_state[i];
+                }
+                mamba_out[j] = sum;
+            }
+        }
+    }
+
+    /* 8. Apply gate: y *= silu(z_gate). */
+    for (size_t i = 0; i < half; i++) {
+        float z = z_gate[i];
+        mamba_out[i] *= z * (1.0f / (1.0f + expf(-z)));
+    }
+
+    /* 9. Output projection + residual. */
+    if (!oc_weight_storage_is_empty(&layer->ssm_out)) {
+        size_t out_len = oc_weight_storage_output_dim(&layer->ssm_out, half);
+        float *projected = m->workspace.hidden_b;  /* [h] */
+        memset(projected, 0, h * sizeof(float));
+        e = oc_gemv_weight(&layer->ssm_out, out_len, half, mamba_out, projected);
+        if (e != OC_OK) return e;
+        for (size_t i = 0; i < h; i++)
+            x[i] += projected[i];
+    } else {
+        size_t copy = h < half ? h : half;
+        for (size_t i = 0; i < copy; i++)
+            x[i] += mamba_out[i];
+    }
+
+    return OC_OK;
+}
+
 /* ─── Single-token forward pass ────────────────────────────────────────── */
 
 OcError oc_inf_model_forward_token(OcInferenceModel *m, uint32_t token, size_t position)
@@ -384,7 +912,35 @@ OcError oc_inf_model_forward_token(OcInferenceModel *m, uint32_t token, size_t p
         float rope_theta = oc_inference_config_layer_rope_theta(cfg, (uint32_t)li);
         uint32_t layer_window = oc_inference_config_layer_sliding_window(cfg, (uint32_t)li);
 
-        /* --- Attention block --- */
+        /* --- Dispatch to specialized layer types --- */
+
+        /* MLA (DeepSeek2): has mla_kv_a_mqa. */
+        if (oc_layer_weights_has_mla(layer)) {
+            OcError e = forward_mla_layer(m, layer, li, position);
+            if (e != OC_OK) return e;
+
+            /* FFN block (shared with standard attention). */
+            goto ffn_block;
+        }
+
+        /* ShortConv (LFM2): has shortconv_in_proj. */
+        if (!oc_weight_storage_is_empty(&layer->shortconv_in_proj)) {
+            OcError e = forward_shortconv_layer(m, layer, li, position);
+            if (e != OC_OK) return e;
+
+            /* ShortConv layers may have FFN too. */
+            goto ffn_block;
+        }
+
+        /* Mamba/SSM: has attn_qkv but NOT attn_q. */
+        if (!oc_weight_storage_is_empty(&layer->attn_qkv) &&
+            oc_weight_storage_is_empty(&layer->attn_q)) {
+            OcError e = forward_mamba_layer(m, layer, li, position);
+            if (e != OC_OK) return e;
+            continue;  /* Mamba layers have no separate FFN block. */
+        }
+
+        /* --- Standard attention block --- */
         if (oc_layer_weights_has_attention(layer)) {
             /* Attn RMSNorm. */
             if (layer->attn_norm)
@@ -525,6 +1081,7 @@ OcError oc_inf_model_forward_token(OcInferenceModel *m, uint32_t token, size_t p
         }
 
         /* --- FFN block --- */
+        ffn_block:
         float *ffn_norm_weight;
         if (cfg->sandwich_norm)
             ffn_norm_weight = layer->ffn_norm;

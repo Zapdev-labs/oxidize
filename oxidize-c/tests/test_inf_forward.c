@@ -503,3 +503,101 @@ Test(inf_fwd, mtp_draft_null_safety)
 
     oc_inf_model_free(&m);
 }
+
+/* ─── attention_head_dims + gemv_weight_head tests ───────────────────── */
+
+Test(inf_fwd, attention_head_dims_basic)
+{
+    OcInferenceConfig cfg;
+    oc_inference_config_init(&cfg);
+    cfg.hidden_size = 8;
+    cfg.num_attention_heads = 4;
+    cfg.num_key_value_heads = 2;
+    cfg.key_value_head_dim = 0;
+
+    OcLayerWeights layer;
+    oc_layer_weights_init(&layer);
+
+    uint32_t q_hd, q_h, kv_hd, kv_h;
+    oc_attention_head_dims(&cfg, &layer, 8, 4, &q_hd, &q_h, &kv_hd, &kv_h);
+    /* q_len=8, n_heads=4 -> q_head_dim=2, q_heads=4.
+     * kv_len=4, kvh=2 -> kv_head_dim=2, kv_heads=2. */
+    cr_assert_eq(q_hd, 2);
+    cr_assert_eq(q_h, 4);
+    cr_assert_eq(kv_hd, 2);
+    cr_assert_eq(kv_h, 2);
+}
+
+Test(inf_fwd, attention_head_dims_with_q_norm)
+{
+    OcInferenceConfig cfg;
+    oc_inference_config_init(&cfg);
+    cfg.hidden_size = 8;
+    cfg.num_attention_heads = 4;
+    cfg.num_key_value_heads = 4;
+
+    OcLayerWeights layer;
+    oc_layer_weights_init(&layer);
+    /* q_norm of len 2 divides q_len=8 -> q_head_dim=2. */
+    layer.attn_q_norm = malloc(2 * sizeof(float));
+    layer.n_q_norm = 2;
+
+    uint32_t q_hd, q_h, kv_hd, kv_h;
+    oc_attention_head_dims(&cfg, &layer, 8, 8, &q_hd, &q_h, &kv_hd, &kv_h);
+    cr_assert_eq(q_hd, 2);
+    cr_assert_eq(q_h, 4);
+
+    free(layer.attn_q_norm);
+}
+
+Test(inf_fwd, attention_head_dims_null_layer)
+{
+    OcInferenceConfig cfg;
+    oc_inference_config_init(&cfg);
+    cfg.num_attention_heads = 2;
+    cfg.num_key_value_heads = 2;
+
+    uint32_t q_hd, q_h, kv_hd, kv_h;
+    oc_attention_head_dims(&cfg, NULL, 4, 4, &q_hd, &q_h, &kv_hd, &kv_h);
+    cr_assert_eq(q_hd, 2);
+    cr_assert_eq(q_h, 2);
+    cr_assert_eq(kv_hd, 2);
+    cr_assert_eq(kv_h, 2);
+}
+
+Test(inf_fwd, gemv_weight_head_basic)
+{
+    /* 2 heads, each [2, 2] = identity. */
+    OcWeightStorage ws;
+    oc_weight_storage_init(&ws);
+    float *data = malloc(8 * sizeof(float));
+    /* head 0: identity [1,0,0,1], head 1: identity [1,0,0,1] */
+    data[0]=1; data[1]=0; data[2]=0; data[3]=1;
+    data[4]=1; data[5]=0; data[6]=0; data[7]=1;
+    oc_weight_storage_f32(&ws, data, 8);
+
+    float input[] = {3.0f, 4.0f};
+    float output[2];
+
+    /* Head 0: identity @ [3,4] = [3,4]. */
+    OcError e = oc_gemv_weight_head(&ws, 2, 2, 0, 2, input, output);
+    cr_assert_eq(e, OC_OK);
+    cr_assert_float_eq(output[0], 3.0f, 0.01f);
+    cr_assert_float_eq(output[1], 4.0f, 0.01f);
+
+    /* Head 1: identity @ [3,4] = [3,4]. */
+    e = oc_gemv_weight_head(&ws, 2, 2, 1, 2, input, output);
+    cr_assert_eq(e, OC_OK);
+    cr_assert_float_eq(output[0], 3.0f, 0.01f);
+    cr_assert_float_eq(output[1], 4.0f, 0.01f);
+
+    oc_weight_storage_free(&ws);
+}
+
+Test(inf_fwd, gemv_weight_head_null)
+{
+    float input[] = {1.0f};
+    float output[1];
+    cr_assert_neq(oc_gemv_weight_head(NULL, 1, 1, 0, 1, input, output), OC_OK);
+    cr_assert_neq(oc_gemv_weight_head(NULL, 1, 1, 0, 0, input, output), OC_OK);
+}
