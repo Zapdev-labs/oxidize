@@ -39,8 +39,19 @@ typedef struct {
 
 typedef struct {
     OcDiffGemmaConfig config;
-    float *embedding;
-    float *output;
+    float *embedding;    /* [vocab_size, hidden_dim] */
+    float *output;       /* [vocab_size, hidden_dim] */
+    /* Per-layer weight pointers (allocated, zeroed). */
+    float *attn_norm;    /* [n_layers * hidden_dim] */
+    float *wq;           /* [n_layers * hidden_dim * hidden_dim] */
+    float *wk;           /* [n_layers * hidden_dim * hidden_dim] */
+    float *wv;           /* [n_layers * hidden_dim * hidden_dim] */
+    float *wo;           /* [n_layers * hidden_dim * hidden_dim] */
+    float *ffn_norm;     /* [n_layers * hidden_dim] */
+    float *w_gate;       /* [n_layers * hidden_dim * hidden_dim] */
+    float *w_up;         /* [n_layers * hidden_dim * hidden_dim] */
+    float *w_down;       /* [n_layers * hidden_dim * hidden_dim] */
+    float *final_norm;   /* [hidden_dim] */
     bool initialized;
 } OcDiffGemmaModel;
 

@@ -413,27 +413,63 @@ OcError oc_gemv_weight_head(const OcWeightStorage *ws,
         return oc_gemv_f32(ws->f32_data + start, rows, cols, input, output);
     }
 
-    /* For quantized, fall back to dequantizing the whole matrix then slicing.
-     * This is not optimal but correct. A production implementation would
-     * compute the per-head byte offset from block info. */
-    size_t total_elems = rows * cols * n_heads;
-    float *f32_all = malloc(total_elems * sizeof(float));
-    if (!f32_all) return OC_ERR_OOM;
-    memset(f32_all, 0, total_elems * sizeof(float));
-
-    /* Dequantize the full matrix. */
-    /* For now, just use the F32 path if available, or zero-fill. */
-    /* TODO: proper per-head dequantization. */
+    /* For quantized: dequantize only this head's rows, not the whole matrix.
+     * Each head has `rows` rows of `cols` elements each. The per-head byte
+     * offset is head * (rows * bytes_per_row). */
     size_t per_head_elems = rows * cols;
-    size_t offset = (size_t)head * per_head_elems;
-    if (offset + per_head_elems <= total_elems) {
-        OcError e = oc_gemv_f32(f32_all + offset, rows, cols, input, output);
-        free(f32_all);
+    float *f32_head = malloc(per_head_elems * sizeof(float));
+    if (!f32_head) return OC_ERR_OOM;
+
+    OcGgufQuantizationType qt = oc_weight_storage_qtype(ws);
+    OcQuantBlockLayout bs = oc_quant_block_size(qt);
+    if (bs.elements_per_block == 0 || bs.bytes_per_block == 0) {
+        free(f32_head);
+        return OC_ERR_QUANT;
+    }
+
+    /* Bytes per row = (cols / elements_per_block) * bytes_per_block. */
+    if (cols % bs.elements_per_block != 0) {
+        free(f32_head);
+        return OC_ERR_INVALID_ARG;
+    }
+    size_t bytes_per_row = (cols / bs.elements_per_block) * bs.bytes_per_block;
+    size_t per_head_bytes = rows * bytes_per_row;
+
+    /* Get the raw data pointer and total size. */
+    const uint8_t *raw = NULL;
+    size_t raw_size = 0;
+    if (ws->type == OC_WEIGHT_QUANTIZED) {
+        raw = ws->quant_data;
+        raw_size = ws->quant_size;
+    } else if (ws->type == OC_WEIGHT_MMAP_QUANTIZED) {
+        raw = ws->mmap_data + ws->mmap_offset;
+        raw_size = ws->mmap_size;
+    }
+
+    if (!raw) {
+        free(f32_head);
+        return OC_ERR_INVALID_ARG;
+    }
+
+    /* Compute byte offset for this head. */
+    size_t head_byte_offset = (size_t)head * per_head_bytes;
+    if (head_byte_offset + per_head_bytes > raw_size) {
+        free(f32_head);
+        return OC_ERR_INVALID_ARG;
+    }
+
+    /* Dequantize only this head's rows. */
+    OcError e = oc_quant_dequant_row(qt, raw + head_byte_offset,
+                                     per_head_bytes, f32_head, per_head_elems);
+    if (e != OC_OK) {
+        free(f32_head);
         return e;
     }
 
-    free(f32_all);
-    return OC_ERR_INVALID_ARG;
+    /* GEMV on the dequantized per-head data. */
+    e = oc_gemv_f32(f32_head, rows, cols, input, output);
+    free(f32_head);
+    return e;
 }
 
 /* ─── MLA (DeepSeek2) layer forward ────────────────────────────────────── */

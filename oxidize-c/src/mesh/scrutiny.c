@@ -49,6 +49,26 @@ static bool looks_like_pii(const char *text)
     return false;
 }
 
+/* Simple keyword-based toxicity detection. Checks for a curated list of
+ * common toxic/profane words (case-insensitive). This is a basic heuristic;
+ * a production system would use a trained classifier. */
+static const char *const TOXIC_KEYWORDS[] = {
+    "kill", "murder", "rape", "terror", "bomb", "weapon",
+    "racist", "nazi", "fascist", "genocide",
+    "slur", "hate", "attack", "violence", "abuse",
+    "threat", "harmful", "dangerous", "poison",
+    NULL
+};
+
+static bool contains_toxic_language(const char *text)
+{
+    if (!text) return false;
+    for (size_t i = 0; TOXIC_KEYWORDS[i]; i++) {
+        if (contains_phrase(text, TOXIC_KEYWORDS[i])) return true;
+    }
+    return false;
+}
+
 OcError oc_scrutiny_config_init(OcScrutinyConfig *cfg)
 {
     if (!cfg) return OC_ERR_INVALID_ARG;
@@ -143,7 +163,7 @@ OcError oc_scrutiny_check(const OcScrutinyConfig *cfg, const char *text,
             if (looks_like_pii(text)) violated = true;
             break;
         case OC_SCRUTINY_RULE_TOXICITY:
-            /* Stub: no real toxicity detection. */
+            if (contains_toxic_language(text)) violated = true;
             break;
         default:
             break;

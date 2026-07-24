@@ -38,17 +38,37 @@ OcError oc_diff_gemma_model_init(OcDiffGemmaModel *model, const OcDiffGemmaConfi
     memset(model, 0, sizeof(*model));
     model->config = *cfg;
 
-    model->embedding = calloc((size_t)cfg->vocab_size * cfg->hidden_dim, sizeof(float));
+    size_t h = cfg->hidden_dim;
+    size_t nl = cfg->n_layers;
+    size_t hh = h * h;
+
+    model->embedding = calloc((size_t)cfg->vocab_size * h, sizeof(float));
     if (!model->embedding) return OC_ERR_OOM;
 
-    model->output = calloc((size_t)cfg->vocab_size * cfg->hidden_dim, sizeof(float));
-    if (!model->output) {
-        free(model->embedding);
-        return OC_ERR_OOM;
-    }
+    model->output = calloc((size_t)cfg->vocab_size * h, sizeof(float));
+    if (!model->output) goto fail;
+
+    model->attn_norm = calloc(nl * h, sizeof(float));
+    model->wq = calloc(nl * hh, sizeof(float));
+    model->wk = calloc(nl * hh, sizeof(float));
+    model->wv = calloc(nl * hh, sizeof(float));
+    model->wo = calloc(nl * hh, sizeof(float));
+    model->ffn_norm = calloc(nl * h, sizeof(float));
+    model->w_gate = calloc(nl * hh, sizeof(float));
+    model->w_up = calloc(nl * hh, sizeof(float));
+    model->w_down = calloc(nl * hh, sizeof(float));
+    model->final_norm = calloc(h, sizeof(float));
+    if (!model->attn_norm || !model->wq || !model->wk || !model->wv ||
+        !model->wo || !model->ffn_norm || !model->w_gate ||
+        !model->w_up || !model->w_down || !model->final_norm)
+        goto fail;
 
     model->initialized = true;
     return OC_OK;
+
+fail:
+    oc_diff_gemma_free(model);
+    return OC_ERR_OOM;
 }
 
 OcError oc_diff_gemma_forward(OcDiffGemmaModel *model, uint32_t token, float sigma, float *logits)
@@ -61,6 +81,7 @@ OcError oc_diff_gemma_forward(OcDiffGemmaModel *model, uint32_t token, float sig
     size_t vocab = cfg->vocab_size;
     size_t tok_idx = (size_t)token;
     if (tok_idx >= vocab) tok_idx = vocab - 1;
+    float eps = 1e-6f;
 
     /* Embed token, scale by sigma (noise level conditioning). */
     float *hidden = malloc(h * sizeof(float));
@@ -71,18 +92,117 @@ OcError oc_diff_gemma_forward(OcDiffGemmaModel *model, uint32_t token, float sig
     else
         memset(hidden, 0, h * sizeof(float));
 
-    /* Scale hidden by sigma (simple noise-level conditioning). */
+    /* Scale hidden by sigma (noise-level conditioning). */
     float sigma_val = (sigma > 0.0f) ? sigma : 1.0f;
     for (size_t i = 0; i < h; i++)
         hidden[i] *= sigma_val;
 
-    /* RMSNorm + output projection (simplified: no transformer layers). */
+    /* Transformer layers: attention + FFN with residual connections. */
+    for (uint32_t li = 0; li < cfg->n_layers; li++) {
+        /* Attention RMSNorm. */
+        float *normed = malloc(h * sizeof(float));
+        if (!normed) { free(hidden); return OC_ERR_OOM; }
+        float *a_norm = model->attn_norm + li * h;
+        float ss = 0.0f;
+        for (size_t i = 0; i < h; i++) ss += hidden[i] * hidden[i];
+        float rms = 1.0f / sqrtf(ss / h + eps);
+        for (size_t i = 0; i < h; i++)
+            normed[i] = hidden[i] * rms * a_norm[i];
+
+        /* QKV projections (single-head for simplicity). */
+        float *q = calloc(h, sizeof(float));
+        float *k = calloc(h, sizeof(float));
+        float *v = calloc(h, sizeof(float));
+        float *wq = model->wq + li * h * h;
+        float *wk = model->wk + li * h * h;
+        float *wv = model->wv + li * h * h;
+        if (!q || !k || !v) { free(hidden); free(normed); free(q); free(k); free(v); return OC_ERR_OOM; }
+        for (size_t r = 0; r < h; r++) {
+            float dq = 0.0f, dk = 0.0f, dv = 0.0f;
+            for (size_t c = 0; c < h; c++) {
+                float n = normed[c];
+                dq += wq[r * h + c] * n;
+                dk += wk[r * h + c] * n;
+                dv += wv[r * h + c] * n;
+            }
+            q[r] = dq; k[r] = dk; v[r] = dv;
+        }
+
+        /* Self-attention: single-token, so just use V directly (no KV cache). */
+        float *attn_out = calloc(h, sizeof(float));
+        if (!attn_out) { free(hidden); free(normed); free(q); free(k); free(v); return OC_ERR_OOM; }
+        /* Scale Q by 1/sqrt(h) and compute attention over single position. */
+        float scale = 1.0f / sqrtf((float)h);
+        (void)scale; /* single-token attention: score * v = v */
+        /* Softmax over single position = 1.0, so attn_out = v. */
+        memcpy(attn_out, v, h * sizeof(float));
+
+        /* Output projection. */
+        float *attn_resid = calloc(h, sizeof(float));
+        if (!attn_resid) { free(hidden); free(normed); free(q); free(k); free(v); free(attn_out); return OC_ERR_OOM; }
+        float *wo = model->wo + li * h * h;
+        for (size_t r = 0; r < h; r++) {
+            float dot = 0.0f;
+            for (size_t c = 0; c < h; c++) dot += wo[r * h + c] * attn_out[c];
+            attn_resid[r] = dot;
+        }
+        /* Residual. */
+        for (size_t i = 0; i < h; i++) hidden[i] += attn_resid[i];
+
+        /* FFN RMSNorm. */
+        float *f_norm = model->ffn_norm + li * h;
+        ss = 0.0f;
+        for (size_t i = 0; i < h; i++) ss += hidden[i] * hidden[i];
+        rms = 1.0f / sqrtf(ss / h + eps);
+        for (size_t i = 0; i < h; i++)
+            normed[i] = hidden[i] * rms * f_norm[i];
+
+        /* SwiGLU FFN: gate * up -> down. */
+        float *gate_out = calloc(h, sizeof(float));
+        float *up_out = calloc(h, sizeof(float));
+        float *w_gate = model->w_gate + li * h * h;
+        float *w_up = model->w_up + li * h * h;
+        if (!gate_out || !up_out) { free(hidden); free(normed); free(q); free(k); free(v); free(attn_out); free(attn_resid); free(gate_out); free(up_out); return OC_ERR_OOM; }
+        for (size_t r = 0; r < h; r++) {
+            float dg = 0.0f, du = 0.0f;
+            for (size_t c = 0; c < h; c++) {
+                float n = normed[c];
+                dg += w_gate[r * h + c] * n;
+                du += w_up[r * h + c] * n;
+            }
+            gate_out[r] = dg; up_out[r] = du;
+        }
+        /* SiLU(gate) * up. */
+        float *act = calloc(h, sizeof(float));
+        if (!act) { /* cleanup */ free(hidden); free(normed); free(q); free(k); free(v); free(attn_out); free(attn_resid); free(gate_out); free(up_out); return OC_ERR_OOM; }
+        for (size_t i = 0; i < h; i++) {
+            float silu = gate_out[i] / (1.0f + expf(-gate_out[i]));
+            act[i] = silu * up_out[i];
+        }
+        /* Down projection. */
+        float *w_down = model->w_down + li * h * h;
+        float *mlp_out = calloc(h, sizeof(float));
+        if (!mlp_out) { free(hidden); free(normed); free(q); free(k); free(v); free(attn_out); free(attn_resid); free(gate_out); free(up_out); free(act); return OC_ERR_OOM; }
+        for (size_t r = 0; r < h; r++) {
+            float dot = 0.0f;
+            for (size_t c = 0; c < h; c++) dot += w_down[r * h + c] * act[c];
+            mlp_out[r] = dot;
+        }
+        /* Residual. */
+        for (size_t i = 0; i < h; i++) hidden[i] += mlp_out[i];
+
+        free(normed); free(q); free(k); free(v); free(attn_out); free(attn_resid);
+        free(gate_out); free(up_out); free(act); free(mlp_out);
+    }
+
+    /* Final RMSNorm. */
     float ss = 0.0f;
     for (size_t i = 0; i < h; i++) ss += hidden[i] * hidden[i];
-    float rms = 1.0f / sqrtf(ss / h + 1e-6f);
+    float rms = 1.0f / sqrtf(ss / h + eps);
     for (size_t i = 0; i < h; i++)
-        hidden[i] *= rms;
+        hidden[i] *= rms * model->final_norm[i];
 
+    /* LM head. */
     if (model->output) {
         for (size_t r = 0; r < vocab; r++) {
             float dot = 0.0f;
@@ -205,5 +325,15 @@ void oc_diff_gemma_free(OcDiffGemmaModel *model)
     if (!model) return;
     free(model->embedding);
     free(model->output);
+    free(model->attn_norm);
+    free(model->wq);
+    free(model->wk);
+    free(model->wv);
+    free(model->wo);
+    free(model->ffn_norm);
+    free(model->w_gate);
+    free(model->w_up);
+    free(model->w_down);
+    free(model->final_norm);
     memset(model, 0, sizeof(*model));
 }
