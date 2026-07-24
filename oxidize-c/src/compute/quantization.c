@@ -1825,6 +1825,338 @@ static void pack_block_al5(const float *in_block, uint8_t *out_block)
     }
 }
 
+/* ─── K-quant pack encoders (Q2_K, Q3_K, Q5_K, Q6_K) ────────────────── */
+
+/* Q2_K pack: 2-bit quantization with per-sub-block scale + min.
+ * Block layout (84 bytes): 16 bytes scales, 64 bytes 2-bit qs, 4 bytes f16 d/min. */
+static OcError pack_q2_k(const float *src, size_t value_count,
+                         uint8_t *dst, size_t dst_len)
+{
+    if (value_count % OC_QK_K != 0) return OC_ERR_INVALID_ARG;
+    size_t expected = (value_count / OC_QK_K) * OC_BLOCK_Q2_K_SIZE;
+    if (dst_len != expected) return OC_ERR_INVALID_ARG;
+    size_t n_blocks = value_count / OC_QK_K;
+
+    for (size_t b = 0; b < n_blocks; b++) {
+        const float *in_block = src + b * OC_QK_K;
+        uint8_t *out_block = dst + b * OC_BLOCK_Q2_K_SIZE;
+
+        uint8_t l[OC_QK_K];
+        float scales[OC_QK_K / 32];
+        float mins[OC_QK_K / 32];
+
+        float max_scale = 0.0f, max_min = 0.0f;
+        for (size_t j = 0; j < OC_QK_K / 32; j++) {
+            /* 2-bit: 4 levels (0-3), use make_qkx1_quants with nmax=3 */
+            scales[j] = make_qkx1_quants(&in_block[32 * j], 32,
+                                          &l[32 * j], &mins[j], 5, 0.5f);
+            if (scales[j] > max_scale) max_scale = scales[j];
+            if (mins[j] > max_min) max_min = mins[j];
+        }
+
+        if (max_scale > 0.0f) {
+            float iscale = 15.0f / max_scale;
+            for (size_t j = 0; j < OC_QK_K / 32; j++) {
+                int32_t ls = nearest_int_f(iscale * scales[j]);
+                if (ls < 0) ls = 0;
+                if (ls > 15) ls = 15;
+                int32_t lm = nearest_int_f(iscale * mins[j]);
+                if (lm < 0) lm = 0;
+                if (lm > 15) lm = 15;
+                out_block[j] = (uint8_t)(ls | (lm << 4));
+            }
+        } else {
+            for (size_t j = 0; j < OC_QK_K / 32; j++)
+                out_block[j] = 0;
+        }
+
+        f16_le_write(&out_block[80], max_scale / 15.0f);
+        f16_le_write(&out_block[82], max_min / 15.0f);
+
+        /* Pack 2-bit values into 64 bytes. */
+        uint8_t *qs = &out_block[16];
+        memset(qs, 0, 64);
+        for (size_t j = 0; j < OC_QK_K / 32; j++) {
+            float d = f16_le_to_f32(out_block[80], out_block[81]) * (float)(out_block[j] & 0x0F);
+            float m = f16_le_to_f32(out_block[82], out_block[83]) * (float)(out_block[j] >> 4);
+            size_t qs_base = (j / 4) * 32;
+            size_t shift = (j % 4) * 2;
+            for (size_t ii = 0; ii < 32; ii++) {
+                if (d != 0.0f) {
+                    int32_t ql = nearest_int_f((in_block[32 * j + ii] + m) / d);
+                    if (ql < 0) ql = 0;
+                    if (ql > 3) ql = 3;
+                    l[32 * j + ii] = (uint8_t)ql;
+                } else {
+                    l[32 * j + ii] = 0;
+                }
+            }
+            for (size_t ii = 0; ii < 16; ii++) {
+                qs[qs_base + ii] |= (uint8_t)(l[32 * j + ii] << shift);
+                qs[qs_base + 16 + ii] |= (uint8_t)(l[32 * j + 16 + ii] << shift);
+            }
+        }
+    }
+    return OC_OK;
+}
+
+/* Q3_K pack: 3-bit quantization with per-sub-block scale.
+ * Block layout (110 bytes): 32 bytes hmask, 64 bytes 3-bit qs, 12 bytes scales, 2 bytes f16 d. */
+static OcError pack_q3_k(const float *src, size_t value_count,
+                         uint8_t *dst, size_t dst_len)
+{
+    if (value_count % OC_QK_K != 0) return OC_ERR_INVALID_ARG;
+    size_t expected = (value_count / OC_QK_K) * OC_BLOCK_Q3_K_SIZE;
+    if (dst_len != expected) return OC_ERR_INVALID_ARG;
+    size_t n_blocks = value_count / OC_QK_K;
+
+    for (size_t b = 0; b < n_blocks; b++) {
+        const float *in_block = src + b * OC_QK_K;
+        uint8_t *out_block = dst + b * OC_BLOCK_Q3_K_SIZE;
+
+        /* Find per-sub-block scale using min/max. */
+        float scales[OC_QK_K / 32];
+        float max_scale = 0.0f;
+        for (size_t j = 0; j < OC_QK_K / 32; j++) {
+            float amax = 0.0f;
+            for (size_t ii = 0; ii < 32; ii++) {
+                float ax = fabsf(in_block[32 * j + ii]);
+                if (ax > amax) amax = ax;
+            }
+            scales[j] = amax / 3.0f;  /* 3-bit: max value 3 (0-3, with sign bit in mask) */
+            if (scales[j] > max_scale) max_scale = scales[j];
+        }
+
+        /* Quantize scales to 6-bit (0-63), stored as signed (scale - 32). */
+        float d_all = max_scale / 31.0f;
+        int8_t q_scales[OC_QK_K / 32];
+        for (size_t j = 0; j < OC_QK_K / 32; j++) {
+            int32_t qs = nearest_int_f(scales[j] / d_all) + 32;
+            if (qs < 0) qs = 0;
+            if (qs > 63) qs = 63;
+            q_scales[j] = (int8_t)qs;
+        }
+
+        f16_le_write(&out_block[108], d_all);
+
+        /* Pack scales (12 bytes at offset 96). */
+        uint8_t *scales_out = &out_block[96];
+        for (size_t i = 0; i < 12; i++) scales_out[i] = 0;
+        for (size_t i = 0; i < OC_QK_K / 32; i++) {
+            uint8_t val = (uint8_t)q_scales[i];
+            if (i < 8) {
+                scales_out[i] |= (val & 0x0F);
+                scales_out[i + 1] |= ((val >> 4) & 0x0F);
+            } else {
+                scales_out[i - 4] |= ((val & 0x0F) << 4);
+                scales_out[i - 3] |= ((val >> 4) & 0x0F);
+            }
+        }
+
+        /* Quantize values: 3-bit (0-3) + 1 bit in hmask for sign extension. */
+        uint8_t *qs = &out_block[32];
+        uint8_t *hmask = &out_block[0];
+        memset(qs, 0, 64);
+        memset(hmask, 0, 32);
+
+        for (size_t j = 0; j < OC_QK_K / 32; j++) {
+            float dl = d_all * (float)(q_scales[j] - 32);
+            if (dl == 0.0f) continue;
+            size_t qs_base = (j / 4) * 32;
+            size_t shift = (j % 4) * 2;
+            uint8_t m = (uint8_t)(1u << (j / 4));
+            for (size_t ii = 0; ii < 32; ii++) {
+                float val = in_block[32 * j + ii] / dl;
+                int32_t q = nearest_int_f(val) + 4;
+                if (q < 0) q = 0;
+                if (q > 7) q = 7;
+                uint8_t ql = (uint8_t)(q & 3u);
+                uint8_t hbit = (q >= 4) ? 0 : 1;
+                qs[qs_base + (ii % 16) + (ii / 16) * 16] |= (uint8_t)(ql << shift);
+                if (hbit) hmask[ii] |= m;
+            }
+        }
+    }
+    return OC_OK;
+}
+
+/* Q5_K pack: 5-bit quantization with per-sub-block scale + min.
+ * Block layout (176 bytes): 4 bytes f16 d/min, 12 bytes scales, 32 bytes qh, 128 bytes qs. */
+static OcError pack_q5_k(const float *src, size_t value_count,
+                         uint8_t *dst, size_t dst_len)
+{
+    if (value_count % OC_QK_K != 0) return OC_ERR_INVALID_ARG;
+    size_t expected = (value_count / OC_QK_K) * OC_BLOCK_Q5_K_SIZE;
+    if (dst_len != expected) return OC_ERR_INVALID_ARG;
+    size_t n_blocks = value_count / OC_QK_K;
+
+    for (size_t b = 0; b < n_blocks; b++) {
+        const float *in_block = src + b * OC_QK_K;
+        uint8_t *out_block = dst + b * OC_BLOCK_Q5_K_SIZE;
+
+        uint8_t l[OC_QK_K];
+        float scales[OC_QK_K / 32];
+        float mins[OC_QK_K / 32];
+
+        float max_scale = 0.0f, max_min = 0.0f;
+        for (size_t j = 0; j < OC_QK_K / 32; j++) {
+            scales[j] = make_qkx1_quants(&in_block[32 * j], 32,
+                                          &l[32 * j], &mins[j], 5, 0.5f);
+            if (scales[j] > max_scale) max_scale = scales[j];
+            if (mins[j] > max_min) max_min = mins[j];
+        }
+
+        float inv_scale = (max_scale > 0.0f) ? (63.0f / max_scale) : 0.0f;
+        float inv_min   = (max_min   > 0.0f) ? (63.0f / max_min)   : 0.0f;
+
+        for (size_t k = 4; k < 16; k++) out_block[k] = 0;
+        for (size_t j = 0; j < OC_QK_K / 32; j++) {
+            int32_t ls = nearest_int_f(inv_scale * scales[j]);
+            if (ls < 0) ls = 0;
+            if (ls > 63) ls = 63;
+            int32_t lm = nearest_int_f(inv_min * mins[j]);
+            if (lm < 0) lm = 0;
+            if (lm > 63) lm = 63;
+            if (j < 4) {
+                out_block[4 + j]      = (uint8_t)ls;
+                out_block[4 + j + 4]  = (uint8_t)lm;
+            } else {
+                out_block[4 + j + 4]  = (uint8_t)((ls & 0x0Fu) | ((lm & 0x0Fu) << 4));
+                out_block[4 + j - 4] |= (uint8_t)((ls >> 4) << 6);
+                out_block[4 + j]     |= (uint8_t)((lm >> 4) << 6);
+            }
+        }
+        f16_le_write(&out_block[0], max_scale / 63.0f);
+        f16_le_write(&out_block[2], max_min / 63.0f);
+
+        /* Quantize values to 5-bit (4 in qs + 1 in qh). */
+        uint8_t *qh = &out_block[16];
+        uint8_t *qs = &out_block[48];
+        memset(qh, 0, 32);
+        memset(qs, 0, 128);
+
+        for (size_t j = 0; j < OC_QK_K / 32; j++) {
+            uint8_t sc, m;
+            get_scale_min_k4(j, &out_block[4], &sc, &m);
+            float d = (max_scale / 63.0f) * (float)sc;
+            float dm = (max_min / 63.0f) * (float)m;
+            size_t qs_base = (j / 2) * 32;
+            uint8_t u1 = (uint8_t)(1u << (2 * (j % 2)));
+            uint8_t u2 = (uint8_t)(2u << (2 * (j % 2)));
+            if (d == 0.0f) continue;
+            for (size_t ii = 0; ii < 16; ii++) {
+                int32_t ql = nearest_int_f((in_block[32 * j + ii] + dm) / d);
+                if (ql < 0) ql = 0;
+                if (ql > 31) ql = 31;
+                qs[qs_base + ii] |= (uint8_t)(ql & 0x0F);
+                if (ql & 16) qh[qs_base + ii] |= u1;
+            }
+            for (size_t ii = 0; ii < 16; ii++) {
+                int32_t ql = nearest_int_f((in_block[32 * j + 16 + ii] + dm) / d);
+                if (ql < 0) ql = 0;
+                if (ql > 31) ql = 31;
+                qs[qs_base + ii] |= (uint8_t)((ql & 0x0F) << 4);
+                if (ql & 16) qh[qs_base + ii] |= u2;
+            }
+        }
+    }
+    return OC_OK;
+}
+
+/* Q6_K pack: 6-bit quantization with per-sub-block scale (signed).
+ * Block layout (210 bytes): 128 bytes ql, 32 bytes qh, 16 bytes scales, 2 bytes f16 d. */
+static OcError pack_q6_k(const float *src, size_t value_count,
+                         uint8_t *dst, size_t dst_len)
+{
+    if (value_count % OC_QK_K != 0) return OC_ERR_INVALID_ARG;
+    size_t expected = (value_count / OC_QK_K) * OC_BLOCK_Q6_K_SIZE;
+    if (dst_len != expected) return OC_ERR_INVALID_ARG;
+    size_t n_blocks = value_count / OC_QK_K;
+
+    for (size_t b = 0; b < n_blocks; b++) {
+        const float *in_block = src + b * OC_QK_K;
+        uint8_t *out_block = dst + b * OC_BLOCK_Q6_K_SIZE;
+
+        /* Compute per-sub-block scale (16 sub-blocks of 16 elements each). */
+        float scales[16];
+        float max_scale = 0.0f;
+        for (size_t j = 0; j < 16; j++) {
+            float amax = 0.0f;
+            for (size_t ii = 0; ii < 16; ii++) {
+                float ax = fabsf(in_block[j * 16 + ii]);
+                if (ax > amax) amax = ax;
+            }
+            scales[j] = amax / 31.0f;
+            if (scales[j] > max_scale) max_scale = scales[j];
+        }
+
+        float d = max_scale / 31.0f;
+        if (d == 0.0f) d = 1.0f;
+        f16_le_write(&out_block[208], d);
+
+        /* Pack scales as signed 8-bit values at offset 192. */
+        uint8_t *sc_out = &out_block[192];
+        for (size_t j = 0; j < 16; j++) {
+            int32_t qs = nearest_int_f(scales[j] / d);
+            if (qs < -32) qs = -32;
+            if (qs > 31) qs = 31;
+            sc_out[j] = (uint8_t)(int8_t)(qs + 32);  /* store as unsigned, decode subtracts 32 */
+        }
+
+        /* Quantize values: 6-bit signed (4 in ql + 2 in qh). */
+        uint8_t *ql = &out_block[0];
+        uint8_t *qh = &out_block[128];
+        memset(ql, 0, 128);
+        memset(qh, 0, 32);
+
+        for (size_t group = 0; group < 2; group++) {
+            size_t ql_off = group * 64;
+            size_t qh_off = group * 32;
+            size_t sc_off = group * 8;
+            for (size_t l = 0; l < 32; l++) {
+                size_t is_idx = l / 16;
+                float dl1 = d * (float)(int8_t)sc_out[sc_off + is_idx];
+                float dl2 = d * (float)(int8_t)sc_out[sc_off + is_idx + 2];
+                float dl3 = d * (float)(int8_t)sc_out[sc_off + is_idx + 4];
+                float dl4 = d * (float)(int8_t)sc_out[sc_off + is_idx + 6];
+
+                /* 4 values per output position, each 6-bit signed (-32..31). */
+                size_t base = group * 128 + l;
+
+                if (dl1 != 0.0f) {
+                    int32_t q1 = nearest_int_f(in_block[base] / dl1) + 32;
+                    if (q1 < 0) q1 = 0;
+                    if (q1 > 63) q1 = 63;
+                    ql[ql_off + l] |= (uint8_t)(q1 & 0x0F);
+                    qh[qh_off + l] |= (uint8_t)(((q1 >> 4) & 3u));
+                }
+                if (dl2 != 0.0f) {
+                    int32_t q2 = nearest_int_f(in_block[base + 32] / dl2) + 32;
+                    if (q2 < 0) q2 = 0;
+                    if (q2 > 63) q2 = 63;
+                    ql[ql_off + l + 32] |= (uint8_t)(q2 & 0x0F);
+                    qh[qh_off + l] |= (uint8_t)(((q2 >> 4) & 3u) << 2);
+                }
+                if (dl3 != 0.0f) {
+                    int32_t q3 = nearest_int_f(in_block[base + 64] / dl3) + 32;
+                    if (q3 < 0) q3 = 0;
+                    if (q3 > 63) q3 = 63;
+                    ql[ql_off + l] |= (uint8_t)((q3 & 0x0F) << 4);
+                    qh[qh_off + l] |= (uint8_t)(((q3 >> 4) & 3u) << 4);
+                }
+                if (dl4 != 0.0f) {
+                    int32_t q4 = nearest_int_f(in_block[base + 96] / dl4) + 32;
+                    if (q4 < 0) q4 = 0;
+                    if (q4 > 63) q4 = 63;
+                    ql[ql_off + l + 32] |= (uint8_t)((q4 & 0x0F) << 4);
+                    qh[qh_off + l] |= (uint8_t)(((q4 >> 4) & 3u) << 6);
+                }
+            }
+        }
+    }
+    return OC_OK;
+}
+
 static OcError pack_al5(const float *src, size_t value_count,
                         uint8_t *dst, size_t dst_len)
 {
@@ -2087,13 +2419,16 @@ OcError oc_quant_pack_row(OcGgufQuantizationType qtype,
     case OC_QUANT_Q4_K_S:
     case OC_QUANT_Q4_K_M: return pack_q4_k(src, value_count, dst, dst_len);
     case OC_QUANT_Q2_K:
+        return pack_q2_k(src, value_count, dst, dst_len);
     case OC_QUANT_Q3_K_S:
     case OC_QUANT_Q3_K_M:
     case OC_QUANT_Q3_K_L:
+        return pack_q3_k(src, value_count, dst, dst_len);
     case OC_QUANT_Q5_K_S:
     case OC_QUANT_Q5_K_M:
+        return pack_q5_k(src, value_count, dst, dst_len);
     case OC_QUANT_Q6_K:
-        return OC_ERR_QUANT;
+        return pack_q6_k(src, value_count, dst, dst_len);
     /* AL-family (MSE-optimized encoders). */
     case OC_QUANT_AL5:    return pack_al5(src, value_count, dst, dst_len);
     case OC_QUANT_AL5_XS: return pack_al5_xs(src, value_count, dst, dst_len);

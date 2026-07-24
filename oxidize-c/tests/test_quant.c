@@ -502,19 +502,38 @@ Test(quant, ggml_id_round_trip, .description = "oc_quant_type_from_ggml_id round
     cr_assert_eq(oc_quant_type_to_ggml_id(OC_QUANT_UNKNOWN), 0xffffffffu, "UNKNOWN ggml id");
 }
 
-Test(quant, unsupported_k_encoders_fail_without_writing) {
-    float src[256] = {0};
-    uint8_t dst[OC_BLOCK_Q6_K_SIZE];
-    memset(dst, 0xA5, sizeof(dst));
-    cr_assert_eq(oc_quant_pack_row(OC_QUANT_Q2_K, src, 256, dst,
-                                   OC_BLOCK_Q2_K_SIZE), OC_ERR_QUANT);
-    cr_assert_eq(oc_quant_pack_row(OC_QUANT_Q3_K_M, src, 256, dst,
-                                   OC_BLOCK_Q3_K_SIZE), OC_ERR_QUANT);
-    cr_assert_eq(oc_quant_pack_row(OC_QUANT_Q5_K_M, src, 256, dst,
-                                   OC_BLOCK_Q5_K_SIZE), OC_ERR_QUANT);
-    cr_assert_eq(oc_quant_pack_row(OC_QUANT_Q6_K, src, 256, dst,
-                                   OC_BLOCK_Q6_K_SIZE), OC_ERR_QUANT);
-    for (size_t i = 0; i < sizeof(dst); i++) cr_assert_eq(dst[i], 0xA5);
+Test(quant, k_encoders_pack_and_roundtrip) {
+    /* K-quant pack encoders are now implemented. Verify they succeed and
+     * produce finite output on round-trip. */
+    float src[256];
+    for (size_t i = 0; i < 256; i++)
+        src[i] = (float)((int)(i * 37 % 100) - 50) * 0.01f;
+
+    struct { OcGgufQuantizationType t; size_t block_size; float tol; } types[] = {
+        { OC_QUANT_Q2_K,   OC_BLOCK_Q2_K_SIZE, 0.5f },
+        { OC_QUANT_Q3_K_M, OC_BLOCK_Q3_K_SIZE, 0.3f },
+        { OC_QUANT_Q5_K_M, OC_BLOCK_Q5_K_SIZE, 0.1f },
+        { OC_QUANT_Q6_K,   OC_BLOCK_Q6_K_SIZE, 0.05f },
+    };
+
+    for (size_t t = 0; t < sizeof(types) / sizeof(types[0]); t++) {
+        uint8_t buf[OC_BLOCK_Q6_K_SIZE];  /* largest block size */
+        size_t total_bytes = types[t].block_size;
+
+        OcError pe = oc_quant_pack_row(types[t].t, src, 256, buf, total_bytes);
+        cr_assert_eq(pe, OC_OK, "%s pack failed",
+            oc_quant_type_name(types[t].t));
+
+        float dst[256];
+        OcError de = oc_quant_dequant_row(types[t].t, buf, total_bytes, dst, 256);
+        cr_assert_eq(de, OC_OK, "%s dequant failed",
+            oc_quant_type_name(types[t].t));
+
+        for (size_t i = 0; i < 256; i++) {
+            cr_assert(isfinite(dst[i]), "%s non-finite at idx %zu",
+                oc_quant_type_name(types[t].t), i);
+        }
+    }
 }
 
 /* ─── VAL-QUANT-015: pack-then-dequant round-trip ──────────────────────── */
