@@ -129,7 +129,7 @@ uint32_t oc_sample_mirostat_v2(const float *logits, size_t vocab_size,
     for (size_t i = 1; i < vocab_size; i++)
         if (logits[i] > max_logit) max_logit = logits[i];
 
-    float *probs = malloc(vocab_size * sizeof(float));
+    float *probs = calloc(vocab_size, sizeof(float));
     if (!probs) return 0;
 
     float sum = 0.0f;
@@ -194,7 +194,7 @@ uint32_t oc_sample_tfs(const float *logits, size_t vocab_size,
 
     /* Apply temperature and compute softmax. */
     float max_logit = sorted[0].logit / temperature;
-    float *probs = malloc(vocab_size * sizeof(float));
+    float *probs = calloc(vocab_size, sizeof(float));
     if (!probs) { free(sorted); return 0; }
 
     float sum = 0.0f;
@@ -348,7 +348,7 @@ uint32_t oc_sample_top_a(const float *logits, size_t vocab_size,
     float inv_t = 1.0f / temperature;
     float max_logit = sorted[0].logit * inv_t;
     float sum = 0.0f;
-    float *probs = malloc(vocab_size * sizeof(float));
+    float *probs = calloc(vocab_size, sizeof(float));
     if (!probs) { free(sorted); return 0; }
 
     for (size_t i = 0; i < vocab_size; i++) {
@@ -406,7 +406,7 @@ uint32_t oc_sample_eta_cutoff(const float *logits, size_t vocab_size,
     float inv_t = 1.0f / temperature;
     float max_logit = sorted[0].logit * inv_t;
     float sum = 0.0f;
-    float *probs = malloc(vocab_size * sizeof(float));
+    float *probs = calloc(vocab_size, sizeof(float));
     if (!probs) { free(sorted); return 0; }
 
     for (size_t i = 0; i < vocab_size; i++) {

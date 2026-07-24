@@ -543,8 +543,14 @@ Test(oxk_ext, parity_q4_0_matvec_scalar_vs_avx512_bw)
     float x[BLOCKS * 32];
     float out_s[ROWS], out_a[ROWS];
 
-    /* Fill with deterministic data. */
+    /* Fill with deterministic data, then overwrite each block's f16 scale
+     * with 1.0 (0x3C00) — arbitrary bytes can decode to NaN/Inf scales,
+     * and NaN outputs make the parity assertions below meaningless. */
     for (size_t i = 0; i < sizeof(w); i++) w[i] = (uint8_t)(i * 7 + 3);
+    for (size_t b = 0; b < ROWS * BLOCKS; b++) {
+        w[b * OC_OXK_BLOCK_Q4_0_SIZE]     = 0x00;
+        w[b * OC_OXK_BLOCK_Q4_0_SIZE + 1] = 0x3C;
+    }
     for (size_t i = 0; i < BLOCKS * 32; i++) x[i] = (float)((int)i % 10) * 0.5f;
 
     oc_oxk_matvec_q4_0_f32_scalar(w, ROWS, row_bytes, x, out_s);

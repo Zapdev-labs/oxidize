@@ -12,6 +12,11 @@
  * total byte share, and produces memory/threading heuristics.
  */
 #define _POSIX_C_SOURCE 200809L
+/* macOS hides non-POSIX sysconf names (_SC_NPROCESSORS_ONLN) under a strict
+ * _POSIX_C_SOURCE; _DARWIN_C_SOURCE restores them. */
+#ifdef __APPLE__
+#define _DARWIN_C_SOURCE 1
+#endif
 #include "oxidize/inspect.h"
 
 #include "oxidize/gguf.h"
