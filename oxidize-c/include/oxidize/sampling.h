@@ -142,6 +142,34 @@ void oc_beam_search_result_free(OcBeamSearchResult *result);
 OcError oc_softmax_probs(const float *logits, size_t vocab_size,
                           float temperature, float *out);
 
+/* ─── Speculative decode probability helpers ──────────────────────────── */
+
+/* Compute residual probs: max(0, target - draft), normalized.
+ * target_probs and draft_probs must be vocab_size floats.
+ * out must be vocab_size floats. */
+void oc_residual_probs(const float *target_probs, const float *draft_probs,
+                        float *out, size_t vocab_size);
+
+/* Sample from a probability distribution via CDF.
+ * Returns the sampled index, or vocab_size on error.
+ * If sum <= 0, returns argmax of probs. */
+size_t oc_sample_probabilities(const float *probs, size_t vocab_size, float random);
+
+/* ─── Repetition penalties ────────────────────────────────────────────── */
+
+typedef struct {
+    float frequency_penalty;   /* subtracted per occurrence (0=no-op) */
+    float presence_penalty;     /* subtracted once if token appears (0=no-op) */
+    uint32_t newline_token_id; /* 0xFFFFFFFF = no newline penalty */
+    float newline_penalty;     /* subtracted from newline_token_id */
+} OcRepetitionPenaltyConfig;
+
+/* Apply repetition penalties in place: subtracts frequency*freq + presence
+ * for each recent token, and newline penalty if configured. */
+void oc_apply_repetition_penalties(float *logits, size_t vocab_size,
+                                    const uint32_t *recent, size_t n_recent,
+                                    const OcRepetitionPenaltyConfig *cfg);
+
 #ifdef __cplusplus
 }
 #endif

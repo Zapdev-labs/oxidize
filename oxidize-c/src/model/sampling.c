@@ -575,6 +575,96 @@ OcError oc_softmax_probs(const float *logits, size_t vocab_size,
     return OC_OK;
 }
 
+/* ─── Speculative decode probability helpers ───────────────────────────── */
+
+void oc_residual_probs(const float *target_probs, const float *draft_probs,
+                        float *out, size_t vocab_size)
+{
+    if (!target_probs || !draft_probs || !out || vocab_size == 0) return;
+
+    float sum = 0.0f;
+    for (size_t i = 0; i < vocab_size; i++) {
+        float diff = target_probs[i] - draft_probs[i];
+        out[i] = diff > 0.0f ? diff : 0.0f;
+        sum += out[i];
+    }
+
+    if (sum > 0.0f && isfinite(sum)) {
+        float inv_sum = 1.0f / sum;
+        for (size_t i = 0; i < vocab_size; i++)
+            out[i] *= inv_sum;
+    }
+}
+
+size_t oc_sample_probabilities(const float *probs, size_t vocab_size, float random)
+{
+    if (!probs || vocab_size == 0) return 0;
+    if (!isfinite(random) || random < 0.0f || random >= 1.0f) return 0;
+
+    float sum = 0.0f;
+    for (size_t i = 0; i < vocab_size; i++)
+        sum += probs[i];
+
+    if (sum <= 0.0f || !isfinite(sum)) {
+        /* Fall back to argmax. */
+        size_t best = 0;
+        float best_v = probs[0];
+        for (size_t i = 1; i < vocab_size; i++) {
+            if (probs[i] > best_v) {
+                best_v = probs[i];
+                best = i;
+            }
+        }
+        return best;
+    }
+
+    float target = random * sum;
+    float cumulative = 0.0f;
+    for (size_t i = 0; i < vocab_size; i++) {
+        cumulative += probs[i];
+        if (target <= cumulative)
+            return i;
+    }
+    return vocab_size - 1;
+}
+
+/* ─── Repetition penalties ────────────────────────────────────────────── */
+
+void oc_apply_repetition_penalties(float *logits, size_t vocab_size,
+                                    const uint32_t *recent, size_t n_recent,
+                                    const OcRepetitionPenaltyConfig *cfg)
+{
+    if (!logits || !cfg || vocab_size == 0) return;
+    if (cfg->frequency_penalty == 0.0f && cfg->presence_penalty == 0.0f &&
+        cfg->newline_token_id == 0xFFFFFFFFu) return;
+    if (!recent || n_recent == 0) return;
+
+    /* Count frequencies. */
+    uint32_t *freqs = calloc(vocab_size, sizeof(uint32_t));
+    if (!freqs) return;
+
+    for (size_t i = 0; i < n_recent; i++) {
+        size_t idx = recent[i];
+        if (idx < vocab_size)
+            freqs[idx]++;
+    }
+
+    for (size_t i = 0; i < vocab_size; i++) {
+        if (freqs[i] == 0) continue;
+        logits[i] -= cfg->frequency_penalty * (float)freqs[i];
+        logits[i] -= cfg->presence_penalty;
+    }
+
+    /* Newline penalty. */
+    if (cfg->newline_token_id != 0xFFFFFFFFu) {
+        size_t nl = cfg->newline_token_id;
+        if (nl < vocab_size)
+            logits[nl] -= cfg->newline_penalty;
+    }
+
+    free(freqs);
+}
+
 /* ─── Beam search ──────────────────────────────────────────────────────── */
 
 typedef struct {
