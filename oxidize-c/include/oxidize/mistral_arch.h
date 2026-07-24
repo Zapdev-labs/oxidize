@@ -74,13 +74,20 @@ typedef struct OcMistralLayer {
 /* Owning model struct. `layers` is heap-allocated (n_layers entries) and
  * freed by oc_mistral_free(). The weight buffers (tok_emb, output_norm,
  * output, and per-layer weights) are owned by the model and freed together
- * with the struct. */
+ * with the struct. The KV cache fields (kv_cache_k, kv_cache_v,
+ * kv_cache_cap, kv_seq_len) provide per-session state for multi-token
+ * generation. */
 typedef struct OcMistralModel {
     OcMistralConfig  config;
     OcMistralLayer  *layers;     /* heap array, length config.n_layers */
     float           *tok_emb;    /* [vocab_size, hidden_dim]            */
     float           *output_norm; /* [hidden_dim]                       */
     float           *output;     /* [vocab_size, hidden_dim]            */
+    /* Session-scoped KV cache (per-layer, replaces static globals). */
+    float           **kv_cache_k; /* [n_layers][cap * kv_len] */
+    float           **kv_cache_v; /* [n_layers][cap * kv_len] */
+    size_t           kv_cache_cap;
+    size_t           kv_seq_len;
     bool             initialized;
 } OcMistralModel;
 

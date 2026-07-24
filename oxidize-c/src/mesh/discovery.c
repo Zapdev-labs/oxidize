@@ -1,10 +1,18 @@
 /*
  * discovery.c — Mesh node discovery protocol implementation.
+ *
+ * Uses UDP multicast to announce node presence on the mesh.
  */
+#define _POSIX_C_SOURCE 200809L
 #include "oxidize/discovery.h"
 
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
 
 static void copy_str(char *dst, size_t cap, const char *src)
 {
@@ -55,8 +63,37 @@ OcError oc_discovery_add_seed(OcDiscoveryState *state, uint64_t id,
 
 OcError oc_discovery_announce(OcDiscoveryState *state)
 {
-    /* Stub: in a real implementation, send UDP multicast packet. */
     if (!state) return OC_ERR_INVALID_ARG;
+
+    /* Create UDP socket. */
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0) return OC_ERR_IO;
+
+    /* Set TTL for multicast. */
+    unsigned char ttl = 1;
+    setsockopt(sock, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl));
+
+    /* Build announce packet: "OXIDIZE:<self_id>:<port>". */
+    char buf[128];
+    int len = snprintf(buf, sizeof(buf), "OXIDIZE:%llu:%u",
+                       (unsigned long long)state->self_id, state->port);
+    if (len < 0 || (size_t)len >= sizeof(buf)) {
+        close(sock);
+        return OC_ERR_INVALID_ARG;
+    }
+
+    /* Send to multicast address. */
+    struct sockaddr_in dst;
+    memset(&dst, 0, sizeof(dst));
+    dst.sin_family = AF_INET;
+    dst.sin_port = htons(state->port);
+    inet_pton(AF_INET, state->multicast_addr, &dst.sin_addr);
+
+    ssize_t sent = sendto(sock, buf, (size_t)len, 0,
+                          (struct sockaddr *)&dst, sizeof(dst));
+    close(sock);
+
+    if (sent < 0) return OC_ERR_IO;
     return OC_OK;
 }
 

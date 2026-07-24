@@ -107,19 +107,27 @@ OcError oc_mistral_forward(OcMistralModel *model, uint32_t token, float *logits)
     else
         memset(hidden, 0, h * sizeof(float));
 
-    /* Static KV cache for single-token decode (allocated once, persists across calls).
-     * This is a simplified per-call attention; a real implementation would
-     * have a persistent cache. For now we just do single-position attention. */
-    static float *s_keys = NULL;
-    static float *s_values = NULL;
-    static size_t s_kv_cap = 0;
-    static size_t s_seq_len = 0;
-
-    if (s_kv_cap == 0) {
-        s_kv_cap = 256;
-        s_keys = calloc(s_kv_cap * kv_len, sizeof(float));
-        s_values = calloc(s_kv_cap * kv_len, sizeof(float));
-        s_seq_len = 0;
+    /* Session-scoped KV cache (stored on the model, not static globals). */
+    if (model->kv_cache_cap == 0) {
+        model->kv_cache_cap = 256;
+        size_t kv_bytes = model->kv_cache_cap * kv_len * sizeof(float);
+        model->kv_cache_k = calloc(cfg->n_layers, sizeof(float *));
+        model->kv_cache_v = calloc(cfg->n_layers, sizeof(float *));
+        if (!model->kv_cache_k || !model->kv_cache_v) {
+            free(hidden);
+            return OC_ERR_OOM;
+        }
+        for (uint32_t li = 0; li < cfg->n_layers; li++) {
+            model->kv_cache_k[li] = malloc(kv_bytes);
+            model->kv_cache_v[li] = malloc(kv_bytes);
+            if (!model->kv_cache_k[li] || !model->kv_cache_v[li]) {
+                free(hidden);
+                return OC_ERR_OOM;
+            }
+            memset(model->kv_cache_k[li], 0, kv_bytes);
+            memset(model->kv_cache_v[li], 0, kv_bytes);
+        }
+        model->kv_seq_len = 0;
     }
 
     /* Process each layer. */
@@ -167,7 +175,7 @@ OcError oc_mistral_forward(OcMistralModel *model, uint32_t token, float *logits)
         }
 
         /* RoPE on Q and K. */
-        size_t pos = s_seq_len;
+        size_t pos = model->kv_seq_len;
         float theta = cfg->rope_theta;
         for (size_t hh = 0; hh < n_heads; hh++) {
             float *qh = q + hh * hd;
@@ -190,28 +198,27 @@ OcError oc_mistral_forward(OcMistralModel *model, uint32_t token, float *logits)
             }
         }
 
-        /* Append to KV cache. */
-        if (s_seq_len < s_kv_cap) {
-            size_t off = s_seq_len * kv_len;
-            memcpy(s_keys + off, k, kv_size * sizeof(float));
-            memcpy(s_values + off, v, kv_size * sizeof(float));
-            s_seq_len++;
+        /* Append to per-layer KV cache. */
+        if (model->kv_seq_len < model->kv_cache_cap) {
+            size_t off = model->kv_seq_len * kv_len;
+            memcpy(model->kv_cache_k[li] + off, k, kv_size * sizeof(float));
+            memcpy(model->kv_cache_v[li] + off, v, kv_size * sizeof(float));
         }
 
         /* Flash attention decode with sliding window. */
         float *attn_out = calloc(q_size, sizeof(float));
         if (!attn_out) { free(hidden); free(normed); free(q); free(k); free(v); return OC_ERR_OOM; }
 
-        if (s_seq_len > 0) {
+        if (model->kv_seq_len > 0) {
             /* Apply sliding window: only attend to positions within window. */
             size_t window_start = 0;
-            if (cfg->sliding_window > 0 && s_seq_len > cfg->sliding_window)
-                window_start = s_seq_len - cfg->sliding_window;
+            if (cfg->sliding_window > 0 && model->kv_seq_len > cfg->sliding_window)
+                window_start = model->kv_seq_len - cfg->sliding_window;
 
             /* Use flash attention with offset. */
-            size_t attend_len = s_seq_len - window_start;
-            const float *k_ptr = s_keys + window_start * kv_len;
-            const float *v_ptr = s_values + window_start * kv_len;
+            size_t attend_len = model->kv_seq_len - window_start;
+            const float *k_ptr = model->kv_cache_k[li] + window_start * kv_len;
+            const float *v_ptr = model->kv_cache_v[li] + window_start * kv_len;
 
             oc_flash_attention_decode_heads_f32(
                 q, k_ptr, v_ptr, attend_len, hd, kv_len,
@@ -281,6 +288,10 @@ OcError oc_mistral_forward(OcMistralModel *model, uint32_t token, float *logits)
         free(gate_out); free(up_out); free(act); free(mlp_out);
     }
 
+    /* Advance sequence position after all layers processed. */
+    if (model->kv_seq_len < model->kv_cache_cap)
+        model->kv_seq_len++;
+
     /* Final norm + output projection. */
     float *normed = malloc(h * sizeof(float));
     if (!normed) { free(hidden); return OC_ERR_OOM; }
@@ -316,5 +327,15 @@ void oc_mistral_free(OcMistralModel *model)
     free(model->tok_emb);
     free(model->output_norm);
     free(model->output);
+    if (model->kv_cache_k) {
+        for (uint32_t i = 0; i < model->config.n_layers; i++)
+            free(model->kv_cache_k[i]);
+        free(model->kv_cache_k);
+    }
+    if (model->kv_cache_v) {
+        for (uint32_t i = 0; i < model->config.n_layers; i++)
+            free(model->kv_cache_v[i]);
+        free(model->kv_cache_v);
+    }
     memset(model, 0, sizeof(*model));
 }
