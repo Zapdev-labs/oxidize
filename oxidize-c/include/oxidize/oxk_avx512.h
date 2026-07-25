@@ -28,6 +28,15 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* target("avx512...") is an x86-only function attribute; gcc rejects it when
+ * cross-compiling for aarch64. Off-x86 these symbols are scalar-forwarding
+ * stubs (see oxk_avx512.c), so the attribute must be empty there. */
+#if defined(__x86_64__) || defined(__i386__)
+#define OC_OXK_AVX512_TARGET __attribute__((target("avx512bw,avx512dq,avx512vnni")))
+#else
+#define OC_OXK_AVX512_TARGET
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -41,7 +50,7 @@ extern "C" {
  * fed directly to VNNI while negative weights are negated, fed to VNNI, and
  * their contribution subtracted. The final f32 scale multiply (`dw * dq`)
  * matches the scalar path exactly. */
-__attribute__((target("avx512bw,avx512dq,avx512vnni")))
+OC_OXK_AVX512_TARGET
 float oc_oxk_dot_q8_0_q8_0_avx512_vnni(const uint8_t *row, size_t blocks,
                                         const uint8_t *q8);
 
@@ -50,7 +59,7 @@ float oc_oxk_dot_q8_0_q8_0_avx512_vnni(const uint8_t *row, size_t blocks,
  * Unpacks 4-bit nibbles into bytes using AVX-512BW mask + shift, applies the
  * Q4_0 bias (-8) in the int8 domain, then accumulates with the Q8_0 values
  * via AVX-512VNNI. The final f32 scale multiply matches the scalar path. */
-__attribute__((target("avx512bw,avx512dq,avx512vnni")))
+OC_OXK_AVX512_TARGET
 float oc_oxk_dot_q4_0_q8_0_avx512_bw(const uint8_t *row, size_t blocks,
                                       const uint8_t *q8);
 
@@ -59,7 +68,7 @@ float oc_oxk_dot_q4_0_q8_0_avx512_bw(const uint8_t *row, size_t blocks,
  * Same as Q4_0 BW but includes the Q4_1 min offset (m) contribution.
  * Uses `_mm512_dpbusd_epi32` for the nibble × q8 accumulation and a separate
  * integer sum of q8 values for the `mw * dq * q8_sum` term. */
-__attribute__((target("avx512bw,avx512dq,avx512vnni")))
+OC_OXK_AVX512_TARGET
 float oc_oxk_dot_q4_1_q8_0_avx512_bw(const uint8_t *row, size_t blocks,
                                       const uint8_t *q8);
 
@@ -70,7 +79,7 @@ float oc_oxk_dot_q4_1_q8_0_avx512_bw(const uint8_t *row, size_t blocks,
  * Uses VNNI for the int8 × int8 portion when the f32 input is first
  * quantized to Q8_0 (caller passes a pre-quantized Q8 vector via `x_q8`; if
  * `x_q8` is NULL, the function falls back to a scalar f32 inner loop). */
-__attribute__((target("avx512bw,avx512dq,avx512vnni")))
+OC_OXK_AVX512_TARGET
 void oc_oxk_matvec_q8_0_f32_avx512_vnni(const uint8_t *w, size_t n_rows,
                                         size_t row_bytes, const float *x,
                                         float *out);
@@ -80,7 +89,7 @@ void oc_oxk_matvec_q8_0_f32_avx512_vnni(const uint8_t *w, size_t n_rows,
  * Iterates `n_rows` weight rows; each row is `row_bytes` of Q4_0 blocks.
  * Unpacks nibbles with AVX-512BW and multiplies by the f32 input directly
  * (no VNNI for the f32 path — the nibble unpack is the speedup). */
-__attribute__((target("avx512bw,avx512dq,avx512vnni")))
+OC_OXK_AVX512_TARGET
 void oc_oxk_matvec_q4_0_f32_avx512_bw(const uint8_t *w, size_t n_rows,
                                       size_t row_bytes, const float *x,
                                       float *out);

@@ -1,4 +1,8 @@
 #define _POSIX_C_SOURCE 200809L
+/* macOS hides _SC_NPROCESSORS_ONLN under strict _POSIX_C_SOURCE; restore it. */
+#ifdef __APPLE__
+#define _DARWIN_C_SOURCE 1
+#endif
 /*
  * spinpool.c — Spin-waiting thread pool for low-latency parallel compute.
  *
