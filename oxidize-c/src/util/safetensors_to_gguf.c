@@ -366,7 +366,7 @@ OcError oc_safetensors_to_gguf(const OcConvertConfig *cfg)
     }
 
     /* Determine architecture. */
-    const char *names[512];
+    const char *names[512] = {0};  /* zero-init: silences -Werror=maybe-uninitialized when n_tensors==0 */
     size_t n_names = n_tensors < 512 ? n_tensors : 512;
     for (size_t i = 0; i < n_names; i++)
         names[i] = tensors[i].name;

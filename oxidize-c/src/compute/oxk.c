@@ -9,7 +9,9 @@
 #include "oxidize/simd.h"
 
 #include <string.h>
-#include <threads.h>
+/* pthread_once, not C11 <threads.h>: Apple's libc does not ship <threads.h>,
+ * so call_once/once_flag break the macOS build. pthread is already linked. */
+#include <pthread.h>
 
 /* ─── f16 → f32 (bit-twiddle, no libm) ──────────────────────────────────── */
 
@@ -350,7 +352,7 @@ void oc_oxk_matvec_q8_0_f32_scalar(const uint8_t *w, size_t n_rows,
 /* ─── Capability detection + dispatcher ──────────────────────────────────── */
 
 static OcOxkContext g_ctx;
-static once_flag g_once = ONCE_FLAG_INIT;
+static pthread_once_t g_once = PTHREAD_ONCE_INIT;
 
 static void oc_oxk_init_once(void)
 {
@@ -396,7 +398,7 @@ static void oc_oxk_init_once(void)
 
 const OcOxkContext *oc_oxk_init(void)
 {
-    call_once(&g_once, oc_oxk_init_once);
+    pthread_once(&g_once, oc_oxk_init_once);
     return &g_ctx;
 }
 
