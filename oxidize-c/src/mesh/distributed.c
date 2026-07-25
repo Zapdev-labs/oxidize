@@ -30,6 +30,9 @@
  *   detection; reconnects stat is incremented on successful reconnection.
  */
 #define _POSIX_C_SOURCE 200809L
+#ifdef __APPLE__
+#define _DARWIN_C_SOURCE 1  /* BSD socket opts (IP_MULTICAST_TTL, etc.) on macOS */
+#endif
 #include "oxidize/distributed.h"
 
 #include <stdio.h>
@@ -44,6 +47,12 @@
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+
+/* MSG_NOSIGNAL is Linux-only; macOS suppresses SIGPIPE via the SO_NOSIGPIPE
+ * socket option instead. Fall back to 0 (matching oxidize-server/http.c). */
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
 
 /* ------------------------------------------------------------------ */
 /* Constants                                                          */
