@@ -1,0 +1,23 @@
+oxidize-c/src/compute/oxk.c
+  s_4d9882d5eb019d::t_4cfe901a93d899 355
+  s_4d9882d5eb019d::t_6d0e28e5b831ea 401
+  s_4d9882d5eb019d::t_356eb769ae3d36 12-14
+oxidize-c/src/util/safetensors_to_gguf.c
+  s_4d9882d5eb019d::t_f9808f1edc9e30 369
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "da716160c1972151c1762f9666dd09dc8a3882a3",
+  "prompts": {},
+  "sessions": {
+    "s_4d9882d5eb019d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "360e0e71-f928-4fe7-91c9-8eb28e4b3dda",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
