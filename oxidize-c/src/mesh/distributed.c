@@ -20,8 +20,8 @@
  *     - Within a pipeline stage, `tensor_parallel_size` nodes each compute
  *       a shard of the weight matrix. After the matmul, they call
  *       oc_distributed_all_reduce() to sum partial results.
- *     - All-reduce uses a simple ring-reduce over TCP: each node sends its
- *       data to the next TP peer, accumulates, and forwards.
+ *     - All-reduce uses a coordinator gather followed by broadcast over the
+ *       connections established during initialization.
  *
  * Reconnection:
  *   If a peer's socket is disconnected (send/recv returns 0 or error), the
@@ -315,12 +315,13 @@ static OcDistPeer *find_prev_pipeline_peer(OcDistributedScheduler *sched)
     return &sched->peers[prev_rank];
 }
 
-/* Find the next tensor-parallel peer (ring topology). */
 static OcDistPeer *find_next_tp_peer(OcDistributedScheduler *sched)
 {
     if (sched->config.tensor_parallel_size <= 1) return NULL;
-    uint32_t tp_base = sched->config.pipeline_rank * sched->config.tensor_parallel_size;
-    uint32_t tp_next = tp_base + (sched->config.tensor_rank + 1) % sched->config.tensor_parallel_size;
+    uint32_t tp_base = sched->config.pipeline_rank *
+                       sched->config.tensor_parallel_size;
+    uint32_t tp_next = tp_base + (sched->config.tensor_rank + 1) %
+                       sched->config.tensor_parallel_size;
     if (tp_next >= sched->n_peers) return NULL;
     return &sched->peers[tp_next];
 }
@@ -704,7 +705,7 @@ OcError oc_distributed_recv_activations(OcDistributedScheduler *sched,
 }
 
 /* ------------------------------------------------------------------ */
-/* Tensor parallelism: all-reduce (ring topology)                      */
+/* Tensor parallelism: all-reduce                                     */
 /* ------------------------------------------------------------------ */
 
 OcError oc_distributed_all_reduce(OcDistributedScheduler *sched,
@@ -719,29 +720,17 @@ OcError oc_distributed_all_reduce(OcDistributedScheduler *sched,
     if (sched->config.n_nodes <= 1) return OC_OK;
     if (sched->config.tensor_parallel_size <= 1) return OC_OK;
 
-    /* Ensure we have buffers. */
+    size_t byte_len = count * sizeof(float);
+    if (byte_len == 0) return OC_OK;
+
+    /* OcDistributedConfig supplies only one coordinator rendezvous, so a
+     * later pipeline stage cannot form an independent TP collective. */
+    if (sched->config.pipeline_stages != 1) return OC_ERR_INVALID_ARG;
+
     OcError be = ensure_buffers(sched);
     if (be != OC_OK) return be;
 
-    size_t byte_len = count * sizeof(float);
-
-    /* NOTE: this ring exchange is known-incomplete (receives from the next
-     * peer instead of the previous, and re-adds accumulated buffers for
-     * TP >= 3). It is unreachable today because init rejects multi-node
-     * configs; a proper reduce-scatter/all-gather is required before
-     * multi-node init is enabled. */
-    OcDistPeer *next = find_next_tp_peer(sched);
-    if (!next) return OC_OK;
-
-    /* Ensure next TP peer is connected. */
-    if (!next->online || next->socket_fd < 0) {
-        OcError re = oc_distributed_reconnect(sched, next->rank);
-        if (re != OC_OK) return OC_ERR_NETWORK;
-    }
-
-    /* Use recv buffer as scratch for incoming data. */
     if (byte_len > sched->buf_capacity) {
-        /* Resize buffer. */
         free(sched->recv_buf);
         sched->recv_buf = malloc(byte_len);
         if (!sched->recv_buf) {
@@ -751,28 +740,29 @@ OcError oc_distributed_all_reduce(OcDistributedScheduler *sched,
         sched->buf_capacity = byte_len;
     }
 
+    if (sched->config.node_rank != 0) {
+        OcDistPeer *coordinator = &sched->peers[0];
+        if (!coordinator->online || coordinator->socket_fd < 0)
+            return OC_ERR_NETWORK;
+        OcError e = send_chunked(sched, coordinator, data, byte_len);
+        if (e != OC_OK) return e;
+        return recv_chunked(sched, coordinator, data, byte_len);
+    }
+
     uint32_t tp = sched->config.tensor_parallel_size;
-    for (uint32_t step = 0; step < tp - 1; step++) {
-        /* Send our current data to the next peer. */
-        OcError se = send_chunked(sched, next, data, byte_len);
-        if (se != OC_OK) return se;
-
-        /* Receive from previous peer (which is `next`'s predecessor = us
-         * in ring; but in ring topology we receive from the previous node).
-         * For simplicity in a 2-node ring, next == prev. */
-        OcDistPeer *prev = find_next_tp_peer(sched); /* same as next in ring */
-        /* Actually, in a ring, the node we receive from is the one whose
-         * socket we're connected to as "incoming". For this simplified
-         * implementation, we assume bidirectional connections. */
-
-        /* Receive into scratch buffer. */
-        OcError re = recv_chunked(sched, prev, sched->recv_buf, byte_len);
+    for (uint32_t rank = 1; rank < tp; rank++) {
+        OcDistPeer *peer = &sched->peers[rank];
+        if (!peer->online || peer->socket_fd < 0) return OC_ERR_NETWORK;
+        OcError re = recv_chunked(sched, peer, sched->recv_buf, byte_len);
         if (re != OC_OK) return re;
-
-        /* Accumulate. */
         for (size_t i = 0; i < count; i++) {
             data[i] += ((float *)sched->recv_buf)[i];
         }
+    }
+
+    for (uint32_t rank = 1; rank < tp; rank++) {
+        OcError se = send_chunked(sched, &sched->peers[rank], data, byte_len);
+        if (se != OC_OK) return se;
     }
 
     return OC_OK;

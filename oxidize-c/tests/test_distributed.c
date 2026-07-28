@@ -23,6 +23,8 @@
  * timeout test). Kept out of the ephemeral range to avoid collisions. */
 #define OC_TEST_PORT      52930
 #define OC_TEST_PORT_STR "52930"
+#define OC_TEST_TP_PORT      52932
+#define OC_TEST_TP_PORT_STR "52932"
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                            */
@@ -605,6 +607,73 @@ Test(distributed, multi_node_pipeline_round_trip)
     cr_assert_not_null(wres);
     cr_assert_eq(*(OcError *)wres, OC_OK, "worker side failed");
 
+    oc_distributed_free(&sched);
+}
+
+typedef struct TpWorkerArgs {
+    uint32_t rank;
+    float data[4];
+    OcError result;
+} TpWorkerArgs;
+
+static void *tp_worker_thread_main(void *arg)
+{
+    TpWorkerArgs *worker = arg;
+    OcDistributedScheduler sched;
+    OcDistributedConfig cfg = make_multinode_config(3, worker->rank, 1, 3);
+    cfg.coordinator_addr = "127.0.0.1:" OC_TEST_TP_PORT_STR;
+    cfg.connect_timeout_ms = 5000;
+
+    worker->result = oc_distributed_init(&sched, &cfg);
+    if (worker->result == OC_OK) {
+        worker->result = oc_distributed_all_reduce(&sched, worker->data, 4);
+        oc_distributed_free(&sched);
+    }
+    return worker;
+}
+
+Test(distributed, three_node_all_reduce)
+{
+    TpWorkerArgs workers[2] = {
+        {.rank = 1, .data = {10.0f, 20.0f, 30.0f, 40.0f},
+         .result = OC_ERR_NETWORK},
+        {.rank = 2, .data = {100.0f, 200.0f, 300.0f, 400.0f},
+         .result = OC_ERR_NETWORK},
+    };
+    pthread_t threads[2];
+    cr_assert_eq(pthread_create(&threads[0], NULL, tp_worker_thread_main,
+                                &workers[0]), 0);
+    cr_assert_eq(pthread_create(&threads[1], NULL, tp_worker_thread_main,
+                                &workers[1]), 0);
+
+    OcDistributedScheduler sched;
+    OcDistributedConfig cfg = make_multinode_config(3, 0, 1, 3);
+    cfg.listen_port = OC_TEST_TP_PORT;
+    cfg.connect_timeout_ms = 5000;
+    cr_assert_eq(oc_distributed_init(&sched, &cfg), OC_OK);
+
+    float master[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+    cr_assert_eq(oc_distributed_all_reduce(&sched, master, 4), OC_OK);
+
+    for (size_t i = 0; i < 2; i++) {
+        void *thread_result = NULL;
+        cr_assert_eq(pthread_join(threads[i], &thread_result), 0);
+        cr_assert_eq(thread_result, &workers[i]);
+        cr_assert_eq(workers[i].result, OC_OK,
+                     "tensor-parallel worker %zu failed", i + 1);
+    }
+
+    const float expected[4] = {111.0f, 222.0f, 333.0f, 444.0f};
+    for (size_t i = 0; i < 4; i++) {
+        cr_assert_float_eq(master[i], expected[i], 1e-6f,
+                           "master all-reduce mismatch at %zu", i);
+        cr_assert_float_eq(workers[0].data[i], expected[i], 1e-6f,
+                           "rank 1 all-reduce mismatch at %zu", i);
+        cr_assert_float_eq(workers[1].data[i], expected[i], 1e-6f,
+                           "rank 2 all-reduce mismatch at %zu", i);
+    }
+
+    cr_assert_eq(sched.stats.allreduce_calls, 1);
     oc_distributed_free(&sched);
 }
 

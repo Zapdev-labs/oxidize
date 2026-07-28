@@ -255,7 +255,8 @@ OcError oc_distributed_recv_activations(OcDistributedScheduler *sched,
  *   count — number of float elements.
  *
  * In single-node or TP=1 mode, this is a no-op (data is already the full
- * result). Both bytes_sent and bytes_received are incremented.
+ * result). Multi-node TP currently supports one pipeline stage and uses
+ * rank zero to gather contributions and broadcast the completed sum.
  *
  * Returns OC_OK, OC_ERR_INVALID_ARG, or OC_ERR_NETWORK.
  */
