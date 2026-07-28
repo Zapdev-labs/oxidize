@@ -18,6 +18,7 @@ CC       ?= gcc
 CPPFLAGS += -Iinclude
 CFLAGS   ?= -std=c11 -Wall -Wextra -Werror -O2
 LDFLAGS  ?= -lm -lpthread
+DEPFLAGS := -MMD -MP
 
 # Library sources for the core, utilities, formats, model, compute, server,
 # paged attention, backends, vision, mesh, and testable CLI arguments.
@@ -81,20 +82,24 @@ TEST_LDFLAGS := $(TEST_SYSTEM_LIBS) -fsanitize=address,undefined
 
 # ASan-instrumented library objects (stems: src/core/error.c -> src/core/error.asan.o).
 LIB_ASAN_OBJS := $(LIB_SRCS:.c=.asan.o)
+DEP_FILES := $(LIB_OBJS:.o=.d) $(BIN_OBJS:.o=.d) \
+             $(TEST_OBJS:.o=.d) $(LIB_ASAN_OBJS:.o=.d)
 
 test_runner: $(TEST_OBJS) $(LIB_ASAN_OBJS) $(CRITERION_DEPS)
 	$(CC) $(CPPFLAGS) $(TEST_CFLAGS) -o $@ $(TEST_OBJS) $(LIB_ASAN_OBJS) $(CRITERION_LINK) $(TEST_LDFLAGS)
 
 # Build library objects with ASan for the test_runner.
 src/%.asan.o: src/%.c
-	$(CC) $(CPPFLAGS) $(TEST_CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(TEST_CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 tests/%.o: tests/%.c
-	$(CC) $(CPPFLAGS) $(TEST_CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(TEST_CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 # Default object rule (no ASan).
 src/%.o: src/%.c
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
+
+-include $(DEP_FILES)
 
 # Test filtering: `make test TEST_FILTER=<pattern>` runs only matching tests.
 # Pattern conventions (validated by scrutiny + the validation contract):
@@ -161,6 +166,7 @@ cuda: $(CUDA_LIB_OBJS) $(CUDA_OBJS) $(BIN_OBJS)
 clean:
 	rm -f $(LIB_OBJS) $(BIN_OBJS) $(TEST_OBJS) \
 	      $(LIB_ASAN_OBJS) \
+	      $(DEP_FILES) \
 	      oxidize-c test_runner liboxidize-c.a
 
 .PHONY: build lib test lint clean avx512 cuda

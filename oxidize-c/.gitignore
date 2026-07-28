@@ -1,6 +1,7 @@
 # Build artifacts
 *.o
 *.asan.o
+*.d
 *.a
 oxidize-c
 test_runner
