@@ -12,6 +12,7 @@
 #include <stdint.h>
 
 #include "oxidize/error.h"
+#include "oxidize/gguf.h"
 #include "oxidize/model.h"
 
 #ifdef __cplusplus
@@ -29,6 +30,7 @@ typedef struct OcLoadedTensor {
     uint32_t n_dims;
     uint64_t dims[4];
     uint32_t type;
+    uint32_t shard_index;
     uint64_t offset;
     uint64_t size;
 } OcLoadedTensor;
@@ -54,6 +56,7 @@ typedef struct OcModelLoader {
     OcLoadedTensor tensors[OC_LOADER_MAX_TENSORS];
     size_t n_tensors;
     uint64_t file_size;
+    OcGgufMmappedFile mapped;
     bool loaded;
 } OcModelLoader;
 
@@ -62,6 +65,12 @@ OcError oc_model_loader_load(OcModelLoader *loader);
 OcError oc_model_loader_get_tensor(const OcModelLoader *loader,
                                    const char *name,
                                    const OcLoadedTensor **out);
+/* Return a read-only view of a tensor's exact encoded bytes. The pointer is
+ * valid until oc_model_loader_free(loader); no tensor copy is performed. */
+OcError oc_model_loader_get_tensor_data(const OcModelLoader *loader,
+                                        const char *name,
+                                        const uint8_t **out_data,
+                                        size_t *out_size);
 OcError oc_model_loader_list_tensors(const OcModelLoader *loader,
                                     const OcLoadedTensor **out_array,
                                     size_t *out_count);
