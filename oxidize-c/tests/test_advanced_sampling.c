@@ -15,6 +15,27 @@ Test(asamp, mirostat_v1)
     cr_assert_neq(state, 0, "RNG state should be advanced");
 }
 
+Test(asamp, mirostat_v1_uses_caller_rng_state)
+{
+    const float logits[] = {0.0f, 0.1f, 0.2f, 0.3f};
+    float mu_a = 8.0f;
+    float mu_b = 8.0f;
+    uint32_t state_a = 0x12345678u;
+    uint32_t state_b = 0x12345678u;
+
+    uint32_t token_a = oc_sample_mirostat_v1(logits, 4, &mu_a, 5.0f,
+                                              0.1f, &state_a);
+    uint32_t token_b = oc_sample_mirostat_v1(logits, 4, &mu_b, 5.0f,
+                                              0.1f, &state_b);
+
+    cr_assert_eq(state_a, 0x12345678u * 1103515245u + 12345u,
+                 "caller RNG state must advance exactly once");
+    cr_assert_eq(state_a, state_b);
+    cr_assert_eq(token_a, token_b,
+                 "identical caller RNG states must reproduce the draw");
+    cr_assert_float_eq(mu_a, mu_b, 1e-6f);
+}
+
 Test(asamp, mirostat_v1_null)
 {
     cr_assert_eq(oc_sample_mirostat_v1(NULL, 5, NULL, 5.0f, 0.1f, NULL), 0);
@@ -156,6 +177,27 @@ Test(asamp, chain_sample)
     uint32_t token = oc_sampler_chain_sample(&chain, logits, 5, NULL, 0, NULL);
     cr_assert(token < 5);
     /* With temperature 0.5, the highest logit (index 1) should likely win. */
+    oc_sampler_chain_free(&chain);
+}
+
+Test(asamp, chain_applies_transforms_after_terminal_step)
+{
+    OcSamplerChain chain;
+    oc_sampler_chain_init(&chain);
+    cr_assert_eq(oc_sampler_chain_add(&chain, OC_SAMPLER_STEP_TFS,
+                                      0.95f, 1.0f), OC_OK);
+    cr_assert_eq(oc_sampler_chain_add(&chain, OC_SAMPLER_STEP_TEMPERATURE,
+                                      0.5f, 0.0f), OC_OK);
+
+    float logits[] = {1.0f, 4.0f, -2.0f};
+    (void)oc_sampler_chain_sample(&chain, logits, 3, NULL, 0, NULL);
+
+    cr_assert_float_eq(logits[0], 2.0f, 1e-6f,
+                       "transform after terminal step was skipped");
+    cr_assert_float_eq(logits[1], 8.0f, 1e-6f,
+                       "transform after terminal step was skipped");
+    cr_assert_float_eq(logits[2], -4.0f, 1e-6f,
+                       "transform after terminal step was skipped");
     oc_sampler_chain_free(&chain);
 }
 
