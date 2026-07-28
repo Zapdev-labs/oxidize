@@ -22,9 +22,8 @@ OcError oc_bytes_init(OcBytes *b)
 OcError oc_bytes_from_data(OcBytes *b, const uint8_t *data, size_t size, bool copy)
 {
     if (!b) return OC_ERR_INVALID_ARG;
+    oc_bytes_init(b);
     if (size > 0 && !data) return OC_ERR_INVALID_ARG;
-
-    oc_bytes_free(b);
 
     if (copy) {
         if (size == 0) {

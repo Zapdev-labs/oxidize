@@ -32,9 +32,9 @@ typedef struct OcBytes {
 /* Initialize an empty, zero-capacity buffer (no allocation). */
 OcError oc_bytes_init(OcBytes *b);
 
-/* Wrap or copy external data. If `copy` is true, allocates a new buffer and
- * copies `size` bytes from `data` (owned=true). If false, borrows the pointer
- * (owned=false; caller retains ownership of `data`). */
+/* Initialize a buffer by wrapping or copying external data. If `copy` is
+ * true, allocates and copies; otherwise the caller retains data ownership.
+ * Free an existing initialized buffer before reusing its storage here. */
 OcError oc_bytes_from_data(OcBytes *b, const uint8_t *data, size_t size, bool copy);
 
 /* Ensure at least `capacity` bytes of capacity. If the buffer borrows external
