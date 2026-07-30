@@ -245,7 +245,8 @@ __global__ void k_attention_softmax(const float *q,
 
     extern __shared__ float smem[];
     float *acc = smem;                 /* head_dim accumulators */
-    float *score_buf = smem + head_dim; /* not used; reserved */
+    /* The caller reserves a second head_dim span after `acc` for a future
+     * two-pass softmax; the online formulation below does not need it. */
 
     float inv_sqrt_d = 1.0f / sqrtf((float)head_dim);
 

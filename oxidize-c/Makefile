@@ -150,22 +150,41 @@ avx512: clean oxidize-c
 CUDA_LIB_SRCS := $(filter-out src/backends/cuda_stub.c,$(LIB_SRCS))
 CUDA_LIB_OBJS := $(CUDA_LIB_SRCS:.c=.o)
 CUDA_SRCS := $(wildcard src/backends/*.cu)
-CUDA_OBJS := $(CUDA_SRCS:.cu=.cu.o)
+# `.cuo`, not `.cu.o`: the latter collides with make's builtin `%: %.o` link
+# rule and produces "Circular src/backends/cuda.cu <- ...cu.o" warnings.
+CUDA_OBJS := $(CUDA_SRCS:.cu=.cuo)
 
 CUDA_HOME ?= /usr/local/cuda
 
+# Target architectures. Without -gencode, nvcc emits sm_52 only, so every
+# kernel is JIT-recompiled at load on a modern card and sm_61+ intrinsics
+# (notably __dp4a, which the quantized matvec wants) are unavailable. Ship a
+# fatbin covering the cards we actually run on: Pascal (61), T4 (75),
+# A100 (80), L4/L40S/Ada (89), H100 (90).
+# Override with e.g. `make cuda CUDA_ARCHS=89` for a faster single-arch build.
+CUDA_ARCHS ?= 61 75 80 89 90
+NVCC_GENCODE := $(foreach a,$(CUDA_ARCHS),-gencode arch=compute_$(a),code=sm_$(a))
+# PTX from the *lowest* arch, not the highest: PTX JITs forward onto any newer
+# card, so compute_61 PTX covers everything above it. Emitting it for the
+# highest arch instead would only help cards newer than our newest target.
+NVCC_GENCODE += -gencode arch=compute_$(firstword $(CUDA_ARCHS)),code=compute_$(firstword $(CUDA_ARCHS))
+
 cuda: CFLAGS := -std=c11 -Wall -Wextra -Werror -O2 -DOC_CUDA
-cuda: NVCC_FLAGS := -O2 -Iinclude -DOC_CUDA -Xcompiler -Wall,-Wextra,-std=c11
+# -std=c11 deliberately omitted from -Xcompiler: nvcc drives a C++ host
+# compiler for .cu files, which warns that c11 is not a valid C++ standard.
+# -Werror applies to the host side so `make cuda` is as strict as `make build`.
+cuda: NVCC_FLAGS := -O2 -Iinclude -DOC_CUDA $(NVCC_GENCODE) \
+                    -Xcompiler -Wall,-Wextra,-Werror
 cuda: LDFLAGS := -lm -lpthread -L$(CUDA_HOME)/lib64 -lcudart -lstdc++
 cuda: $(CUDA_LIB_OBJS) $(CUDA_OBJS) $(BIN_OBJS)
 	gcc $(CPPFLAGS) $(CFLAGS) -o oxidize-c $(CUDA_LIB_OBJS) $(CUDA_OBJS) $(BIN_OBJS) $(LDFLAGS)
 
-%.cu.o: %.cu
+%.cuo: %.cu
 	nvcc $(NVCC_FLAGS) -c -o $@ $<
 
 clean:
 	rm -f $(LIB_OBJS) $(BIN_OBJS) $(TEST_OBJS) \
-	      $(LIB_ASAN_OBJS) \
+	      $(LIB_ASAN_OBJS) $(CUDA_OBJS) \
 	      $(DEP_FILES) \
 	      oxidize-c test_runner liboxidize-c.a
 
