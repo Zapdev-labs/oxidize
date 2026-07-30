@@ -507,3 +507,59 @@ Test(llama, qkv_bias_absent_is_a_noop)
     oc_llama_session_free(&sa);
     oc_llama_session_free(&sb);
 }
+
+/* ─── Q8 KV cache ────────────────────────────────────────────────────────
+ *
+ * oc_llama_kv_cache_bytes() reads only cfg, so it can be exercised against a
+ * hand-built model without any weights.
+ */
+static OcLlamaModel kv_stub_model(uint32_t n_layer, uint32_t n_ctx,
+                                  uint32_t n_head_kv, uint32_t kv_head_dim)
+{
+    OcLlamaModel m;
+    memset(&m, 0, sizeof(m));
+    m.cfg.n_layer = n_layer;
+    m.cfg.n_ctx = n_ctx;
+    m.cfg.n_head_kv = n_head_kv;
+    m.cfg.kv_head_dim = kv_head_dim;
+    m.cfg.head_dim = kv_head_dim;
+    m.cfg.n_head = n_head_kv;
+    return m;
+}
+
+Test(llama, kv_cache_bytes_f32_matches_layout)
+{
+    OcLlamaModel m = kv_stub_model(4, 1024, 8, 128);
+    size_t elems = (size_t)4 * 1024 * 8 * 128;
+    cr_assert_eq(oc_llama_kv_cache_bytes(&m, OC_KV_F32),
+                 2 * elems * sizeof(float));
+}
+
+/* Q8 must be close to 4x smaller: one byte per element instead of four, plus
+ * one f32 scale per (layer, pos, kv head) — 1/kv_head_dim of the elements. */
+Test(llama, kv_cache_bytes_q8_is_about_four_times_smaller)
+{
+    OcLlamaModel m = kv_stub_model(4, 1024, 8, 128);
+    size_t f32 = oc_llama_kv_cache_bytes(&m, OC_KV_F32);
+    size_t q8  = oc_llama_kv_cache_bytes(&m, OC_KV_Q8);
+    cr_assert_lt(q8, f32);
+    double ratio = (double)f32 / (double)q8;
+    /* 4x minus the scale overhead (4 bytes per 128 elements => ~3%). */
+    cr_assert(ratio > 3.7 && ratio < 4.0,
+              "expected ~3.88x saving, got %.3fx", ratio);
+}
+
+Test(llama, kv_cache_bytes_null_is_zero)
+{
+    cr_assert_eq(oc_llama_kv_cache_bytes(NULL, OC_KV_Q8), 0);
+}
+
+/* A long-context model is exactly where this matters: 128k context on a
+ * 28-layer model wants tens of GB of f32 KV. */
+Test(llama, kv_cache_bytes_long_context_saving_is_gigabytes)
+{
+    OcLlamaModel m = kv_stub_model(28, 131072, 8, 128);
+    size_t f32 = oc_llama_kv_cache_bytes(&m, OC_KV_F32);
+    size_t q8  = oc_llama_kv_cache_bytes(&m, OC_KV_Q8);
+    cr_assert_gt(f32 - q8, 10ull * 1024 * 1024 * 1024);
+}

@@ -473,7 +473,70 @@ OcError oc_llama_load(const char *path, OcLlamaModel *out)
 
 /* ─── Session ─────────────────────────────────────────────────────────── */
 
+/* ─── Q8 KV cache helpers ─────────────────────────────────────────────────
+ *
+ * Symmetric per-group int8, the same scheme as Q8_0 weights: one f32 scale
+ * per (layer, position, kv head), codes in [-127, 127]. 127 rather than 128
+ * keeps it symmetric so negation is exact and there is no asymmetric overflow.
+ */
+#define OC_KV_Q8_QMAX 127.0f
+
+static void kv_q8_encode(const float *src, int8_t *codes, float *scale_out,
+                         size_t n)
+{
+    float amax = 0.0f;
+    for (size_t i = 0; i < n; i++) {
+        float a = fabsf(src[i]);
+        if (a > amax) amax = a;
+    }
+    if (amax == 0.0f) {
+        /* All-zero group: any nonzero scale reconstructs zeros exactly. */
+        *scale_out = 1.0f;
+        memset(codes, 0, n);
+        return;
+    }
+    const float scale = amax / OC_KV_Q8_QMAX;
+    const float inv = 1.0f / scale;
+    for (size_t i = 0; i < n; i++) {
+        float q = roundf(src[i] * inv);
+        if (q >  OC_KV_Q8_QMAX) q =  OC_KV_Q8_QMAX;
+        if (q < -OC_KV_Q8_QMAX) q = -OC_KV_Q8_QMAX;
+        codes[i] = (int8_t)q;
+    }
+    *scale_out = scale;
+}
+
+/* Environment default for the KV type; F32 unless OX_KV_TYPE=q8. */
+static OcKvCacheType kv_type_from_env(void)
+{
+    const char *v = getenv("OX_KV_TYPE");
+    if (v == NULL) return OC_KV_F32;
+    if (strcmp(v, "q8") == 0 || strcmp(v, "Q8") == 0) return OC_KV_Q8;
+    return OC_KV_F32;
+}
+
+size_t oc_llama_kv_cache_bytes(const OcLlamaModel *model, OcKvCacheType kv_type)
+{
+    if (model == NULL) return 0;
+    size_t row = model->cfg.uses_mla
+               ? (size_t)model->cfg.n_head * model->cfg.head_dim
+               : (size_t)model->cfg.n_head_kv * model->cfg.kv_head_dim;
+    size_t elems = (size_t)model->cfg.n_layer * model->cfg.n_ctx * row;
+    if (kv_type == OC_KV_Q8) {
+        size_t groups = (size_t)model->cfg.n_layer * model->cfg.n_ctx
+                      * model->cfg.n_head_kv;
+        return 2 * (elems * sizeof(int8_t) + groups * sizeof(float));
+    }
+    return 2 * elems * sizeof(float);
+}
+
 OcError oc_llama_session_init(OcLlamaModel *model, OcLlamaSession *out)
+{
+    return oc_llama_session_init_kv(model, out, kv_type_from_env());
+}
+
+OcError oc_llama_session_init_kv(OcLlamaModel *model, OcLlamaSession *out,
+                                 OcKvCacheType kv_type)
 {
     if (model == NULL || out == NULL) return OC_ERR_INVALID_ARG;
     /* uses_geglu is fully handled by forward_dense_ffn (GeGLU vs SwiGLU),
@@ -493,8 +556,35 @@ OcError oc_llama_session_init(OcLlamaModel *model, OcLlamaSession *out)
     }
     size_t per_layer = (size_t)model->cfg.n_ctx * out->kv_row_floats;
     size_t total = (size_t)model->cfg.n_layer * per_layer;
-    out->kv_k = xcalloc(total, sizeof(float));
-    out->kv_v = xcalloc(total, sizeof(float));
+
+    /* The Q8 quantization group is one kv head's row; the attention read
+     * strides by head_dim. If those disagree the offsets would not line up,
+     * so fall back to f32 rather than compute the wrong thing. */
+    out->kv_group = model->cfg.kv_head_dim;
+    if (kv_type == OC_KV_Q8 && model->cfg.head_dim != model->cfg.kv_head_dim) {
+        oc_log(OC_LOG_WARN, "llama: Q8 KV needs head_dim == kv_head_dim "
+               "(%u vs %u); using f32 KV",
+               model->cfg.head_dim, model->cfg.kv_head_dim);
+        kv_type = OC_KV_F32;
+    }
+    out->kv_type = kv_type;
+
+    if (kv_type == OC_KV_Q8) {
+        size_t groups = (size_t)model->cfg.n_layer * model->cfg.n_ctx
+                      * model->cfg.n_head_kv;
+        out->kv_k_q = xcalloc(total, sizeof(int8_t));
+        out->kv_v_q = xcalloc(total, sizeof(int8_t));
+        out->kv_k_scale = xcalloc(groups, sizeof(float));
+        out->kv_v_scale = xcalloc(groups, sizeof(float));
+        if (!out->kv_k_q || !out->kv_v_q || !out->kv_k_scale ||
+            !out->kv_v_scale) {
+            oc_llama_session_free(out);
+            return OC_ERR_OOM;
+        }
+    } else {
+        out->kv_k = xcalloc(total, sizeof(float));
+        out->kv_v = xcalloc(total, sizeof(float));
+    }
     size_t maxw = model->cfg.n_embd > model->cfg.n_ff ? model->cfg.n_embd
                                                      : model->cfg.n_ff;
     if (model->cfg.expert_intermediate_size > maxw) {
@@ -520,7 +610,14 @@ OcError oc_llama_session_init(OcLlamaModel *model, OcLlamaSession *out)
         out->shexp_up    = xcalloc(model->cfg.expert_intermediate_size, sizeof(float));
         out->shexp_out   = xcalloc(model->cfg.n_embd, sizeof(float));
     }
-    if (!out->kv_k || !out->kv_v || !out->x || !out->normed || !out->q ||
+    oc_log(OC_LOG_INFO, "llama: KV cache %s, %.1f MB (%.1f MB as f32)",
+           out->kv_type == OC_KV_Q8 ? "int8" : "f32",
+           (double)oc_llama_kv_cache_bytes(model, out->kv_type) / 1e6,
+           (double)oc_llama_kv_cache_bytes(model, OC_KV_F32) / 1e6);
+
+    /* Q8 leaves kv_k/kv_v NULL; its buffers were checked at allocation. */
+    if ((out->kv_type == OC_KV_F32 && (!out->kv_k || !out->kv_v)) ||
+        !out->x || !out->normed || !out->q ||
         !out->k || !out->v || !out->attn_out || !out->ffn_gate ||
         !out->ffn_up || !out->dequant_temp || !out->logits) {
         oc_llama_session_free(out);
@@ -562,6 +659,8 @@ void oc_llama_session_free(OcLlamaSession *sess)
 {
     if (sess == NULL) return;
     free(sess->kv_k); free(sess->kv_v);
+    free(sess->kv_k_q); free(sess->kv_v_q);
+    free(sess->kv_k_scale); free(sess->kv_v_scale);
     free(sess->x); free(sess->normed);
     free(sess->q); free(sess->k); free(sess->v);
     free(sess->attn_out);
@@ -663,17 +762,40 @@ static void attention_head(const OcLlamaSession *s, uint32_t head,
         }
     }
 
+    /* Q8: the dot product runs against the int8 codes and is scaled once at
+     * the end, and the V accumulation folds the scale into exp_score — so
+     * neither K nor V is ever materialized back to f32. */
+    const bool q8 = (s->kv_type == OC_KV_Q8);
+    const size_t sc_stride = c->n_head_kv;
+    const size_t sc_base = (size_t)layer * c->n_ctx * sc_stride + kv_head;
+
     for (int64_t t = start; t < seq_len; t++) {
-        const float *k_t = k_layer + kv_off + (size_t)t * s->kv_row_floats;
         float dot = 0.0f;
-        for (size_t i = 0; i < hd; i++) dot += q_vec[i] * k_t[i];
+        const int8_t *kq_t = NULL;
+        const int8_t *vq_t = NULL;
+        float v_scale = 0.0f;
+        if (q8) {
+            kq_t = s->kv_k_q + kv_off + (size_t)t * s->kv_row_floats;
+            vq_t = s->kv_v_q + kv_off + (size_t)t * s->kv_row_floats;
+            for (size_t i = 0; i < hd; i++) dot += q_vec[i] * (float)kq_t[i];
+            dot *= s->kv_k_scale[sc_base + (size_t)t * sc_stride];
+            v_scale = s->kv_v_scale[sc_base + (size_t)t * sc_stride];
+        } else {
+            const float *k_t = k_layer + kv_off + (size_t)t * s->kv_row_floats;
+            for (size_t i = 0; i < hd; i++) dot += q_vec[i] * k_t[i];
+        }
         float score = dot * scale;
         float new_max = (score > run_max) ? score : run_max;
         float exp_factor = expf(run_max - new_max);
         float exp_score = expf(score - new_max);
         for (size_t i = 0; i < hd; i++) out_vec[i] *= exp_factor;
-        const float *v_t = v_layer + kv_off + (size_t)t * s->kv_row_floats;
-        for (size_t i = 0; i < hd; i++) out_vec[i] += exp_score * v_t[i];
+        if (q8) {
+            const float w = exp_score * v_scale;
+            for (size_t i = 0; i < hd; i++) out_vec[i] += w * (float)vq_t[i];
+        } else {
+            const float *v_t = v_layer + kv_off + (size_t)t * s->kv_row_floats;
+            for (size_t i = 0; i < hd; i++) out_vec[i] += exp_score * v_t[i];
+        }
         run_sum = run_sum * exp_factor + exp_score;
         run_max = new_max;
     }
@@ -987,8 +1109,22 @@ static void forward_layer(OcLlamaSession *s, uint32_t layer)
 
         /* KV cache write at position `pos`. */
         size_t kv_off = ((size_t)layer * c->n_ctx + (size_t)s->pos) * s->kv_row_floats;
-        memcpy(s->kv_k + kv_off, s->k, s->kv_row_floats * sizeof(float));
-        memcpy(s->kv_v + kv_off, s->v, s->kv_row_floats * sizeof(float));
+        if (s->kv_type == OC_KV_Q8) {
+            /* One scale per kv head, so each head's row quantizes against its
+             * own magnitude rather than the whole row's. */
+            size_t g = s->kv_group;
+            size_t sc_off = ((size_t)layer * c->n_ctx + (size_t)s->pos)
+                          * c->n_head_kv;
+            for (uint32_t h = 0; h < c->n_head_kv; h++) {
+                kv_q8_encode(s->k + h * g, s->kv_k_q + kv_off + h * g,
+                             &s->kv_k_scale[sc_off + h], g);
+                kv_q8_encode(s->v + h * g, s->kv_v_q + kv_off + h * g,
+                             &s->kv_v_scale[sc_off + h], g);
+            }
+        } else {
+            memcpy(s->kv_k + kv_off, s->k, s->kv_row_floats * sizeof(float));
+            memcpy(s->kv_v + kv_off, s->v, s->kv_row_floats * sizeof(float));
+        }
 
         /* Attention per head → s->attn_out. */
         for (uint32_t h = 0; h < c->n_head; h++) {

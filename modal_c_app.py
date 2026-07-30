@@ -311,6 +311,75 @@ def parity(model: str = "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
 
 @app.function(
     image=cuda_image,
+    volumes={"/root/.cache/oxidize": model_cache},
+    cpu=8.0,
+    memory=65536,
+    timeout=3600,
+)
+def kv_quant(model: str = "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
+             hf_file: str = "qwen2.5-1.5b-instruct-q4_k_m.gguf",
+             prompt: str = "The capital of France is",
+             max_tokens: int = 48) -> str:
+    """Compare the f32 and int8 CPU KV caches on a real model.
+
+    Runs the same greedy generation twice, once per KV type, and reports both
+    outputs plus peak RSS. Q8 is lossy by construction, so identical text is a
+    strong result rather than a requirement — the failure mode to catch is
+    output that degrades into incoherence, which would mean the quantization
+    or the scale indexing is wrong, not merely imprecise.
+    """
+    import resource
+    import subprocess as sp
+
+    rc = _run(f"make -C {REPO_ROOT}/oxidize-c build")
+    if rc != 0:
+        raise SystemExit(f"CPU build failed (exit {rc})")
+    binary = f"{REPO_ROOT}/oxidize-c/oxidize-c"
+
+    sp.run("pip install -q huggingface_hub", shell=True, check=True)
+    from huggingface_hub import hf_hub_download
+    gguf = hf_hub_download(model, hf_file, cache_dir="/root/.cache/oxidize/hf")
+    model_cache.commit()
+
+    def run(kv: str) -> tuple[str, float]:
+        env = {**os.environ, "OX_KV_TYPE": kv}
+        before = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
+        cmd = [binary, "--model", gguf, "--prompt", prompt,
+               "--n-predict", str(max_tokens), "--temperature", "0",
+               "--seed", "1", "--backend", "cpu"]
+        print(f"\n\033[1;36m$ OX_KV_TYPE={kv} {' '.join(cmd)}\033[0m", flush=True)
+        out = sp.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True, env=env)
+        after = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
+        if out.returncode != 0:
+            print(out.stdout, out.stderr, flush=True)
+            raise SystemExit(f"OX_KV_TYPE={kv} failed (exit {out.returncode})")
+        return (out.stdout or "").strip(), max(after - before, 0) / 1024.0
+
+    f32_out, _ = run("f32")
+    q8_out, _ = run("q8")
+
+    same = f32_out == q8_out
+    report = [
+        "\n=== CPU KV cache: f32 vs int8 ===",
+        f"model:  {model} ({hf_file})",
+        f"prompt: {prompt!r}   max_tokens: {max_tokens}",
+        f"\n--- f32 KV ---\n{f32_out}",
+        f"\n--- q8  KV ---\n{q8_out}",
+        f"\nidentical greedy output: {same}",
+    ]
+    if not same:
+        for i, (a, b) in enumerate(zip(f32_out, q8_out)):
+            if a != b:
+                report.append(f"first divergence at char {i}:")
+                report.append(f"  f32: ...{f32_out[max(0, i-40):i+40]!r}")
+                report.append(f"  q8 : ...{q8_out[max(0, i-40):i+40]!r}")
+                break
+    print("\n".join(report), flush=True)
+    return "\n".join(report)
+
+
+@app.function(
+    image=cuda_image,
     volumes={f"{REPO_ROOT}/build-cuda": cuda_cache},
     cpu=8.0,
     memory=16384,

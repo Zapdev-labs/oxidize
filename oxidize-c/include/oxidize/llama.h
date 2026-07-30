@@ -133,12 +133,38 @@ typedef struct OcLlamaModel {
     bool             gpt2_pos_resolved;
 } OcLlamaModel;
 
+/* KV cache element type.
+ *
+ * The cache is allocated for the full n_ctx up front, so on long-context
+ * models it can dwarf the weights — a 128k-context model can want tens of GB
+ * of f32 KV. Q8 stores one int8 per element plus one f32 scale per
+ * (layer, position, kv head), cutting that ~4x for a quantization error far
+ * below the model's own weight quantization.
+ *
+ * F32 is the default so existing behaviour is bit-for-bit unchanged; select
+ * Q8 explicitly with oc_llama_session_init_kv(), or set OX_KV_TYPE=q8. */
+typedef enum {
+    OC_KV_F32 = 0,
+    OC_KV_Q8  = 1,
+} OcKvCacheType;
+
 /* Per-sequence KV cache + scratch workspace. One session = one sequence. */
 typedef struct OcLlamaSession {
     OcLlamaModel *model;
-    /* KV cache: [n_layer][n_ctx][n_head_kv * kv_head_dim], f32. */
+    /* KV cache: [n_layer][n_ctx][n_head_kv * kv_head_dim].
+     * kv_type == OC_KV_F32: kv_k/kv_v hold f32 values; the quantized code
+     *   and scale pointers are NULL.
+     * kv_type == OC_KV_Q8:  kv_k_q/kv_v_q hold int8 codes with the same
+     *   indexing, kv_k_scale/kv_v_scale hold one f32 per
+     *   (layer, pos, kv_head), and kv_k/kv_v are NULL. */
     float *kv_k;
     float *kv_v;
+    OcKvCacheType kv_type;
+    int8_t *kv_k_q;
+    int8_t *kv_v_q;
+    float  *kv_k_scale;      /* [n_layer][n_ctx][n_head_kv]         */
+    float  *kv_v_scale;
+    size_t kv_group;         /* elements per scale (kv_head_dim)    */
     size_t kv_row_floats;     /* n_head_kv * kv_head_dim             */
     int64_t pos;              /* next position to fill               */
     /* Scratch workspace (sized to the model, owned). */
@@ -234,7 +260,20 @@ void oc_batch_session_free(OcBatchSession *bs);
 OcError oc_llama_load(const char *path, OcLlamaModel *out);
 
 /* Initialize a session with a fresh KV cache for `model`. */
+/* Initialize a session with an f32 KV cache, unless OX_KV_TYPE=q8 is set in
+ * the environment. Equivalent to oc_llama_session_init_kv() with the
+ * environment-derived default. */
 OcError oc_llama_session_init(OcLlamaModel *model, OcLlamaSession *out);
+
+/* Initialize a session with an explicit KV cache type. Q8 is refused (falls
+ * back to f32) when head_dim != kv_head_dim, since the quantization group and
+ * the attention read stride must agree. */
+OcError oc_llama_session_init_kv(OcLlamaModel *model, OcLlamaSession *out,
+                                 OcKvCacheType kv_type);
+
+/* Bytes the KV cache occupies for `model` under `kv_type`. Useful for
+ * reporting and for deciding whether a context length is affordable. */
+size_t oc_llama_kv_cache_bytes(const OcLlamaModel *model, OcKvCacheType kv_type);
 
 /* Run one forward step: embed `token`, advance position, write logits_out
  * (length model->cfg.vocab_size). Returns OC_OK or OC_ERR_INVALID_ARG.
