@@ -19,6 +19,50 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#if defined(__linux__)
+#include <sys/syscall.h>
+#endif
+
+/* ─── Kernel NUMA memory policy (raw syscalls, no libnuma) ──────────────
+ *
+ * set_mempolicy(2)/mbind(2) are not exposed by glibc, so call them through
+ * syscall(). Keeping this dependency-free matters: the whole point of the C
+ * port is that it builds with nothing but a libc.
+ *
+ * These MPOL_* values are the kernel ABI (include/uapi/linux/mempolicy.h) and
+ * deliberately do NOT match the OcNumaMemPolicy enum — map explicitly.
+ */
+#if defined(__linux__)
+#define OC_MPOL_DEFAULT    0
+#define OC_MPOL_PREFERRED  1
+#define OC_MPOL_BIND       2
+#define OC_MPOL_INTERLEAVE 3
+
+/* nodemask word count. The kernel wants `maxnode` = the number of BITS the
+ * mask can hold, and rejects a value that would read past the buffer. */
+#define OC_NODEMASK_WORDS \
+    ((OC_NUMA_MAX_NODES + (8 * sizeof(unsigned long)) - 1) / (8 * sizeof(unsigned long)))
+#define OC_NODEMASK_BITS  (OC_NODEMASK_WORDS * 8 * sizeof(unsigned long))
+
+static void nodemask_set(unsigned long *mask, uint32_t node)
+{
+    mask[node / (8 * sizeof(unsigned long))] |=
+        1UL << (node % (8 * sizeof(unsigned long)));
+}
+
+static long sys_set_mempolicy(int mode, const unsigned long *nmask,
+                              unsigned long maxnode)
+{
+    return syscall(SYS_set_mempolicy, mode, nmask, maxnode);
+}
+
+static long sys_mbind(void *addr, unsigned long len, int mode,
+                      const unsigned long *nmask, unsigned long maxnode,
+                      unsigned int flags)
+{
+    return syscall(SYS_mbind, addr, len, mode, nmask, maxnode, flags);
+}
+#endif /* __linux__ */
 
 /* ─── Helpers ──────────────────────────────────────────────────────────── */
 
@@ -152,14 +196,53 @@ OcError oc_numa_current_node(uint32_t *out_node)
 #endif
 }
 
-OcError oc_numa_set_policy(OcNumaPolicy policy, uint32_t node)
+/* Set this thread's memory policy for SUBSEQUENT allocations and page faults.
+ *
+ * Call before faulting in the weights: set_mempolicy does not migrate pages
+ * that already exist, so ordering is the whole game. In particular the kernel
+ * default is MPOL_DEFAULT — first touch allocates node-LOCAL, not interleaved
+ * — so a large model faulted in by threads that happen to sit on one socket
+ * ends up with its pages on that socket and every read from the other socket
+ * crosses the interconnect. Interleave has to be requested explicitly. */
+OcError oc_numa_set_policy(OcNumaMemPolicy policy, uint32_t node)
 {
-    (void)policy;
-    (void)node;
-    /* numa_set_* functions require libnuma. We use the syscall interface
-     * via set_mempolicy for interleave/bind. */
-    /* For now, this is a no-op on systems without libnuma. */
+#if defined(__linux__)
+    OcNumaTopology topo;
+    if (oc_numa_detect(&topo) != OC_OK || !topo.available || topo.n_nodes <= 1)
+        return OC_OK;  /* single node: nothing to place */
+
+    unsigned long mask[OC_NODEMASK_WORDS];
+    memset(mask, 0, sizeof(mask));
+    int mode;
+
+    switch (policy) {
+    case OC_NUMA_POLICY_INTERLEAVE:
+        mode = OC_MPOL_INTERLEAVE;
+        for (uint32_t i = 0; i < topo.n_nodes && i < OC_NUMA_MAX_NODES; i++)
+            nodemask_set(mask, i);
+        break;
+    case OC_NUMA_POLICY_BIND:
+    case OC_NUMA_POLICY_PREFERRED:
+        if (node >= topo.n_nodes) return OC_ERR_INVALID_ARG;
+        mode = (policy == OC_NUMA_POLICY_BIND) ? OC_MPOL_BIND
+                                               : OC_MPOL_PREFERRED;
+        nodemask_set(mask, node);
+        break;
+    case OC_NUMA_POLICY_DEFAULT:
+    default:
+        /* MPOL_DEFAULT requires an empty nodemask. */
+        if (sys_set_mempolicy(OC_MPOL_DEFAULT, NULL, 0) != 0)
+            return OC_ERR_IO;
+        return OC_OK;
+    }
+
+    if (sys_set_mempolicy(mode, mask, OC_NODEMASK_BITS) != 0)
+        return OC_ERR_IO;
     return OC_OK;
+#else
+    (void)policy; (void)node;  /* NUMA policy is Linux-only. */
+    return OC_OK;
+#endif
 }
 
 OcError oc_numa_bind_thread(uint32_t node)
@@ -201,28 +284,54 @@ OcError oc_numa_pin_cpu(uint32_t cpu)
 #endif
 }
 
+/* Large allocations go through mmap so mbind() can place them; small ones
+ * fall back to malloc, where per-node placement is not worth a syscall.
+ * `mode`/`node` are applied with mbind before any page is touched, so the
+ * placement takes effect on first fault. */
+static void *numa_alloc_bound(size_t size, int mode, const unsigned long *mask)
+{
+    if (size < (1u << 20)) return malloc(size);
+
+    void *ptr = mmap(NULL, size, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (ptr == MAP_FAILED) return NULL;
+#if defined(__linux__)
+    /* Best-effort: an mbind failure leaves the mapping usable with default
+     * placement, which is slower but correct. */
+    (void)sys_mbind(ptr, size, mode, mask, OC_NODEMASK_BITS, 0);
+#else
+    (void)mode; (void)mask;
+#endif
+    return ptr;
+}
+
 void *oc_numa_alloc(size_t size, uint32_t node)
 {
+#if defined(__linux__)
+    unsigned long mask[OC_NODEMASK_WORDS];
+    memset(mask, 0, sizeof(mask));
+    if (node < OC_NUMA_MAX_NODES) nodemask_set(mask, node);
+    return numa_alloc_bound(size, OC_MPOL_BIND, mask);
+#else
     (void)node;
-    /* Use mmap for large allocations, malloc for small. */
-    if (size >= (1u << 20)) {
-        void *ptr = mmap(NULL, size, PROT_READ | PROT_WRITE,
-                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        if (ptr == MAP_FAILED) return NULL;
-        return ptr;
-    }
-    return malloc(size);
+    return numa_alloc_bound(size, 0, NULL);
+#endif
 }
 
 void *oc_numa_alloc_interleaved(size_t size)
 {
-    if (size >= (1u << 20)) {
-        void *ptr = mmap(NULL, size, PROT_READ | PROT_WRITE,
-                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        if (ptr == MAP_FAILED) return NULL;
-        return ptr;
+#if defined(__linux__)
+    OcNumaTopology topo;
+    unsigned long mask[OC_NODEMASK_WORDS];
+    memset(mask, 0, sizeof(mask));
+    if (oc_numa_detect(&topo) == OC_OK && topo.available) {
+        for (uint32_t i = 0; i < topo.n_nodes && i < OC_NUMA_MAX_NODES; i++)
+            nodemask_set(mask, i);
     }
-    return malloc(size);
+    return numa_alloc_bound(size, OC_MPOL_INTERLEAVE, mask);
+#else
+    return numa_alloc_bound(size, 0, NULL);
+#endif
 }
 
 void oc_numa_free(void *ptr, size_t size)

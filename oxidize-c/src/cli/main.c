@@ -19,6 +19,7 @@
  */
 #include "oxidize/activation.h"   /* ensure link for forward deps */
 #include "oxidize/autotune.h"
+#include "oxidize/numa.h"
 #include "oxidize/cuda.h"
 #include "oxidize/error.h"
 #include "oxidize/gguf.h"
@@ -110,17 +111,33 @@ static void apply_thread_numa_policy(const OcCliArgs *args,
         else if (strcmp(args->numa, "interleave") == 0) numa = OC_NUMA_INTERLEAVE;
     }
 
+    /* Memory policy must be set BEFORE the weights are faulted in below:
+     * set_mempolicy applies to future faults and does not migrate pages that
+     * already exist. */
     if (numa == OC_NUMA_SINGLE) {
         /* Bind to node 0: the plan picks SINGLE only when the model fits in
-         * one socket's memory, so any single node works and 0 always exists. */
+         * one socket's memory, so any single node works and 0 always exists.
+         * Bind both the threads (affinity) and the pages (mempolicy) — CPU
+         * affinity alone still lets pages land on the far node. */
         if (oc_autotune_bind_to_numa_node(0) == OC_OK) {
             oc_log(OC_LOG_INFO, "autotune: bound to NUMA node 0");
         }
+        if (oc_numa_set_policy(OC_NUMA_POLICY_BIND, 0) == OC_OK) {
+            oc_log(OC_LOG_INFO, "autotune: memory bound to NUMA node 0");
+        }
     } else if (numa == OC_NUMA_INTERLEAVE && cpu->numa_nodes > 1) {
-        /* Interleaving is the kernel default for a process that is not
-         * bound, so there is nothing to set — just don't bind. */
-        oc_log(OC_LOG_INFO, "autotune: leaving memory interleaved across %u "
-               "NUMA nodes", cpu->numa_nodes);
+        /* Interleave is NOT the kernel default — MPOL_DEFAULT allocates on
+         * the first-touching thread's local node, so a model faulted in by
+         * threads sitting on one socket lands entirely on that socket and
+         * every read from the other socket crosses the interconnect. Request
+         * it explicitly. */
+        if (oc_numa_set_policy(OC_NUMA_POLICY_INTERLEAVE, 0) == OC_OK) {
+            oc_log(OC_LOG_INFO, "autotune: memory interleaved across %u "
+                   "NUMA nodes", cpu->numa_nodes);
+        } else {
+            oc_log(OC_LOG_WARN, "autotune: could not set interleave policy; "
+                   "falling back to first-touch placement");
+        }
     }
 
     oc_log(OC_LOG_INFO, "autotune: applying %u threads, numa=%s, simd=%s",

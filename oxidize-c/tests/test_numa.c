@@ -45,6 +45,63 @@ Test(numa, set_policy)
     cr_assert_eq(oc_numa_set_policy(OC_NUMA_POLICY_DEFAULT, 0), OC_OK);
 }
 
+/* Every policy must be accepted, and the process must be left on a usable
+ * policy afterwards. On a single-node box these are no-ops that still have to
+ * return OC_OK rather than an error. */
+Test(numa, set_policy_all_modes)
+{
+    cr_assert_eq(oc_numa_set_policy(OC_NUMA_POLICY_INTERLEAVE, 0), OC_OK);
+    cr_assert_eq(oc_numa_set_policy(OC_NUMA_POLICY_BIND, 0), OC_OK);
+    cr_assert_eq(oc_numa_set_policy(OC_NUMA_POLICY_PREFERRED, 0), OC_OK);
+    cr_assert_eq(oc_numa_set_policy(OC_NUMA_POLICY_DEFAULT, 0), OC_OK);
+}
+
+/* A node id past the end of the topology is rejected, not silently applied to
+ * the wrong node. Only meaningful on a real multi-node box; on a single-node
+ * system the call short-circuits to OC_OK before validating. */
+Test(numa, set_policy_bad_node)
+{
+    OcNumaTopology topo;
+    cr_assert_eq(oc_numa_detect(&topo), OC_OK);
+    OcError e = oc_numa_set_policy(OC_NUMA_POLICY_BIND, topo.n_nodes + 8);
+    if (topo.available && topo.n_nodes > 1) {
+        cr_assert_eq(e, OC_ERR_INVALID_ARG);
+    } else {
+        cr_assert_eq(e, OC_OK);
+    }
+    (void)oc_numa_set_policy(OC_NUMA_POLICY_DEFAULT, 0);
+}
+
+/* Node-bound and interleaved allocations must be usable memory regardless of
+ * whether the kernel honored the placement (mbind is best-effort). */
+Test(numa, alloc_bound_and_interleaved_are_writable)
+{
+    const size_t big = 4u << 20;  /* above the mmap threshold */
+    unsigned char *a = (unsigned char *)oc_numa_alloc(big, 0);
+    cr_assert_neq(a, NULL);
+    memset(a, 0xA5, big);
+    cr_assert_eq(a[0], 0xA5);
+    cr_assert_eq(a[big - 1], 0xA5);
+    oc_numa_free(a, big);
+
+    unsigned char *b = (unsigned char *)oc_numa_alloc_interleaved(big);
+    cr_assert_neq(b, NULL);
+    memset(b, 0x5A, big);
+    cr_assert_eq(b[0], 0x5A);
+    cr_assert_eq(b[big - 1], 0x5A);
+    oc_numa_free(b, big);
+}
+
+/* Small allocations take the malloc path; they must still round-trip. */
+Test(numa, alloc_small_uses_malloc_path)
+{
+    unsigned char *p = (unsigned char *)oc_numa_alloc(128, 0);
+    cr_assert_neq(p, NULL);
+    memset(p, 0x11, 128);
+    cr_assert_eq(p[127], 0x11);
+    oc_numa_free(p, 128);
+}
+
 Test(numa, describe)
 {
     OcNumaTopology topo;

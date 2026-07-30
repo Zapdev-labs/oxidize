@@ -44,7 +44,7 @@ typedef enum {
     OC_NUMA_POLICY_BIND = 1,      /* bind to specific node */
     OC_NUMA_POLICY_INTERLEAVE = 2, /* interleave across nodes */
     OC_NUMA_POLICY_PREFERRED = 3,  /* prefer a node */
-} OcNumaPolicy;
+} OcNumaMemPolicy;
 
 /* ─── API ────────────────────────────────────────────────────────────── */
 
@@ -58,7 +58,7 @@ OcError oc_numa_node_for_cpu(uint32_t cpu, uint32_t *out_node);
 OcError oc_numa_current_node(uint32_t *out_node);
 
 /* Set the NUMA memory policy for the calling thread. */
-OcError oc_numa_set_policy(OcNumaPolicy policy, uint32_t node);
+OcError oc_numa_set_policy(OcNumaMemPolicy policy, uint32_t node);
 
 /* Bind the calling thread to a specific NUMA node's CPUs. */
 OcError oc_numa_bind_thread(uint32_t node);
