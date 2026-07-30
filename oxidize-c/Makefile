@@ -160,9 +160,11 @@ CUDA_HOME ?= /usr/local/cuda
 # kernel is JIT-recompiled at load on a modern card and sm_61+ intrinsics
 # (notably __dp4a, which the quantized matvec wants) are unavailable. Ship a
 # fatbin covering the cards we actually run on: Pascal (61), T4 (75),
-# A100 (80), L4/L40S/Ada (89), H100 (90).
+# A100 (80), A10G/A10 (86), L4/L40S/Ada (89), H100 (90). sm_86 would otherwise
+# fall back to the sm_80 cubin via minor-version compatibility, which works but
+# is not tuned for it.
 # Override with e.g. `make cuda CUDA_ARCHS=89` for a faster single-arch build.
-CUDA_ARCHS ?= 61 75 80 89 90
+CUDA_ARCHS ?= 61 75 80 86 89 90
 NVCC_GENCODE := $(foreach a,$(CUDA_ARCHS),-gencode arch=compute_$(a),code=sm_$(a))
 # PTX from the *lowest* arch, not the highest: PTX JITs forward onto any newer
 # card, so compute_61 PTX covers everything above it. Emitting it for the
