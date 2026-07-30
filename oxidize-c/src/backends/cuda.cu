@@ -273,6 +273,73 @@ __global__ void k_kv_cache_write(__half *kv_k, __half *kv_v,
     }
 }
 
+/* MoE routing: gate the router logits, pick top-k, renormalize.
+ *
+ * A deliberate single-thread kernel. It is ~128 exp() calls plus a k-pass
+ * selection sort over 128 candidates — microseconds — and running it serially
+ * reproduces llama.c::forward_moe_ffn exactly, including its `double`
+ * accumulators and its strict-greater tie-breaking (first index wins). Getting
+ * that bit-for-bit matters more than speed here: a different tie-break picks a
+ * different expert, which is a far larger output deviation than a rounding
+ * difference. Results stay on the device so routing never syncs to the host.
+ */
+__global__ void k_moe_route(const float *logits_in, float *logits,
+                            uint32_t *sel, float *weights,
+                            uint32_t n_exp, uint32_t k,
+                            bool sigmoid_gating, float routed_scale)
+{
+    if (threadIdx.x != 0 || blockIdx.x != 0) return;
+
+    if (!sigmoid_gating) {
+        float mx = logits_in[0];
+        for (uint32_t i = 1; i < n_exp; i++)
+            if (logits_in[i] > mx) mx = logits_in[i];
+        double sum = 0.0;
+        for (uint32_t i = 0; i < n_exp; i++) {
+            logits[i] = expf(logits_in[i] - mx);
+            sum += (double)logits[i];
+        }
+        if (sum > 0.0) {
+            const float inv = (float)(1.0 / sum);
+            for (uint32_t i = 0; i < n_exp; i++) logits[i] *= inv;
+        }
+    } else {
+        for (uint32_t i = 0; i < n_exp; i++)
+            logits[i] = 1.0f / (1.0f + expf(-logits_in[i]));
+    }
+
+    /* Partial selection sort over an identity permutation, as on the CPU. */
+    for (uint32_t i = 0; i < n_exp; i++) sel[i] = i;
+    for (uint32_t i = 0; i < k; i++) {
+        uint32_t best = i;
+        for (uint32_t j = i + 1; j < n_exp; j++)
+            if (logits[sel[j]] > logits[sel[best]]) best = j;
+        const uint32_t t = sel[i]; sel[i] = sel[best]; sel[best] = t;
+    }
+
+    double weight_norm = 0.0;
+    for (uint32_t i = 0; i < k; i++) weight_norm += (double)logits[sel[i]];
+    if (weight_norm <= 0.0) weight_norm = 1.0;
+    for (uint32_t i = 0; i < k; i++)
+        weights[i] = routed_scale * (float)((double)logits[sel[i]] / weight_norm);
+}
+
+/* out[i] += weights[slot] * src[i] — accumulate one expert's contribution. */
+__global__ void k_moe_accum(float *out, const float *src,
+                            const float *weights, uint32_t slot, size_t n)
+{
+    const size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] += weights[slot] * src[i];
+}
+
+/* Scale by sigmoid(gate_logit) — the Qwen2-MoE shared_expert_gate. */
+__global__ void k_sigmoid_scale(float *x, const float *gate_logit, size_t n)
+{
+    const float s = 1.0f / (1.0f + expf(-gate_logit[0]));
+    const size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) x[i] *= s;
+}
+
 /* Residual add: x[i] += y[i]. */
 __global__ void k_residual_add(float *x, const float *y, size_t n)
 {
@@ -300,10 +367,14 @@ __global__ void k_scale(float *x, float scale, size_t n)
  * every type, but costs 8x the memory of Q4_K — used only where no device
  * kernel applies (e.g. n_embd = 896 is not a multiple of the 256-element
  * K-quant super-block). */
-static OcError upload_weight(const OcWeightView *view, OcCudaWeight *out,
-                             float *host_temp, OcCudaContext *ctx)
+static OcError upload_weight_rows(const OcWeightView *view, OcCudaWeight *out,
+                                  float *host_temp, OcCudaContext *ctx,
+                                  size_t rows_override)
 {
-    const size_t rows = view->rows;
+    /* Stacked MoE tensors are 3-D: view_from_info() reports rows = dims[1]
+     * (one expert's rows) and drops dims[2], the expert count. Callers pass
+     * num_experts * view->rows so the whole stack is uploaded. */
+    const size_t rows = rows_override ? rows_override : view->rows;
     const size_t cols = view->cols;
 
     memset(out, 0, sizeof(*out));
@@ -366,6 +437,12 @@ static OcError upload_weight(const OcWeightView *view, OcCudaWeight *out,
     return OC_OK;
 }
 
+static OcError upload_weight(const OcWeightView *view, OcCudaWeight *out,
+                             float *host_temp, OcCudaContext *ctx)
+{
+    return upload_weight_rows(view, out, host_temp, ctx, 0);
+}
+
 /* ─── Matvec dispatch ────────────────────────────────────────────────────── */
 
 /* out[0..rows) = W . x, picking the packed-quant kernel or the f32 kernel
@@ -384,6 +461,106 @@ static OcError cuda_matvec(const OcCudaWeight *w, const float *d_x,
     }
     k_matvec_f32<<<rows, block, block * sizeof(float)>>>(
         (const float *)w->data, rows, cols, d_x, d_out);
+    OC_CUDA_CHECK(cudaGetLastError());
+    return OC_OK;
+}
+
+/* Expert-indexed matvec: same dispatch as cuda_matvec, but the stacked expert
+ * tensor is offset on the device by the routed expert id in slot `slot`.
+ * `rows` is the per-expert row count, not the stacked total. */
+static OcError cuda_matvec_expert(const OcCudaWeight *w, const float *d_x,
+                                  float *d_out, size_t rows,
+                                  const uint32_t *d_sel, uint32_t slot,
+                                  uint32_t block)
+{
+    if (!w->packed) {
+        /* f32 fallback: slice the stacked buffer directly. Only reachable for
+         * shapes/types without a device kernel, which for MoE means a very
+         * large f32 upload — correct, but the packed path is the real one. */
+        (void)block;
+        return OC_ERR_BACKEND;
+    }
+    if (!oc_cuda_mmq_matvec_expert(w->qtype, w->data, d_x, d_out, rows,
+                                   w->cols, d_sel, slot, NULL))
+        return OC_ERR_BACKEND;
+    return OC_OK;
+}
+
+/* MoE FFN for one layer. Mirrors llama.c::forward_moe_ffn step for step:
+ * router matvec, gating + top-k + renormalize, per-expert SwiGLU accumulated
+ * with the routed weight, then the optional shared expert. Everything is
+ * enqueued asynchronously — the routing decision is consumed on the device. */
+static OcError cuda_moe_ffn(OcCudaContext *ctx, uint32_t l, uint32_t block)
+{
+    const uint32_t embd = ctx->n_embd;
+    const uint32_t n_exp = ctx->num_experts;
+    const uint32_t k = ctx->num_experts_per_tok;
+    const uint32_t i_size = ctx->expert_intermediate_size;
+    const uint32_t egrid = (i_size + block - 1) / block;
+    const uint32_t xgrid = (embd + block - 1) / block;
+
+    /* 1. Router logits, then gating + top-k on device. */
+    OcError e = cuda_matvec(&ctx->d_ffn_gate_inp[l], ctx->d_normed,
+                            ctx->d_router_logits, block);
+    if (e != OC_OK) return e;
+    k_moe_route<<<1, 1>>>(ctx->d_router_logits, ctx->d_router_logits,
+                          ctx->d_expert_sel, ctx->d_expert_w,
+                          n_exp, k, ctx->expert_gating_sigmoid,
+                          ctx->expert_weights_scale);
+    OC_CUDA_CHECK(cudaGetLastError());
+
+    /* 2. Per-expert SwiGLU FFN, weighted into the accumulator. */
+    OC_CUDA_CHECK(cudaMemsetAsync(ctx->d_expert_out, 0,
+                                  (size_t)embd * sizeof(float)));
+    for (uint32_t slot = 0; slot < k; slot++) {
+        e = cuda_matvec_expert(&ctx->d_ffn_gate_exps[l], ctx->d_normed,
+                               ctx->d_expert_gate, i_size,
+                               ctx->d_expert_sel, slot, block);
+        if (e != OC_OK) return e;
+        e = cuda_matvec_expert(&ctx->d_ffn_up_exps[l], ctx->d_normed,
+                               ctx->d_expert_up, i_size,
+                               ctx->d_expert_sel, slot, block);
+        if (e != OC_OK) return e;
+        k_swiglu<<<egrid, block>>>(ctx->d_expert_gate, ctx->d_expert_up, i_size);
+        OC_CUDA_CHECK(cudaGetLastError());
+        e = cuda_matvec_expert(&ctx->d_ffn_down_exps[l], ctx->d_expert_gate,
+                               ctx->d_expert_tmp, embd,
+                               ctx->d_expert_sel, slot, block);
+        if (e != OC_OK) return e;
+        k_moe_accum<<<xgrid, block>>>(ctx->d_expert_out, ctx->d_expert_tmp,
+                                      ctx->d_expert_w, slot, embd);
+        OC_CUDA_CHECK(cudaGetLastError());
+    }
+
+    /* 3. Shared expert, always active with weight 1.0. */
+    if (ctx->d_ffn_gate_shexp[l].data && ctx->d_ffn_up_shexp[l].data &&
+        ctx->d_ffn_down_shexp[l].data) {
+        e = cuda_matvec(&ctx->d_ffn_gate_shexp[l], ctx->d_normed,
+                        ctx->d_expert_gate, block);
+        if (e != OC_OK) return e;
+        e = cuda_matvec(&ctx->d_ffn_up_shexp[l], ctx->d_normed,
+                        ctx->d_expert_up, block);
+        if (e != OC_OK) return e;
+        k_swiglu<<<egrid, block>>>(ctx->d_expert_gate, ctx->d_expert_up, i_size);
+        OC_CUDA_CHECK(cudaGetLastError());
+        e = cuda_matvec(&ctx->d_ffn_down_shexp[l], ctx->d_expert_gate,
+                        ctx->d_expert_tmp, block);
+        if (e != OC_OK) return e;
+        if (ctx->d_ffn_gate_inp_shexp[l].data) {
+            e = cuda_matvec(&ctx->d_ffn_gate_inp_shexp[l], ctx->d_normed,
+                            ctx->d_shexp_gate_logit, block);
+            if (e != OC_OK) return e;
+            k_sigmoid_scale<<<xgrid, block>>>(ctx->d_expert_tmp,
+                                              ctx->d_shexp_gate_logit, embd);
+            OC_CUDA_CHECK(cudaGetLastError());
+        }
+        k_residual_add<<<xgrid, block>>>(ctx->d_expert_out,
+                                         ctx->d_expert_tmp, embd);
+        OC_CUDA_CHECK(cudaGetLastError());
+    }
+
+    /* 4. Residual. */
+    k_residual_add<<<xgrid, block>>>(ctx->d_x, ctx->d_expert_out, embd);
     OC_CUDA_CHECK(cudaGetLastError());
     return OC_OK;
 }
@@ -433,6 +610,12 @@ OcError oc_cuda_init(OcCudaContext *ctx, const OcLlamaModel *model)
     ctx->rms_norm_eps = c->rms_norm_eps;
     ctx->norm_scale = c->norm_scale;
     ctx->uses_geglu = c->uses_geglu;
+    ctx->num_experts = c->num_experts;
+    ctx->num_experts_per_tok = c->num_experts_per_tok;
+    ctx->expert_intermediate_size = c->expert_intermediate_size
+                                  ? c->expert_intermediate_size : c->n_ff;
+    ctx->expert_gating_sigmoid = c->expert_gating_sigmoid;
+    ctx->expert_weights_scale = c->expert_weights_scale;
 
     /* Allocate workspace. */
     size_t embd = c->n_embd;
@@ -458,6 +641,17 @@ OcError oc_cuda_init(OcCudaContext *ctx, const OcLlamaModel *model)
     CUDA_INIT_ALLOC(&ctx->d_logits, c->vocab_size * sizeof(float));
     CUDA_INIT_ALLOC(&ctx->d_attn_scores,
                     (size_t)c->n_head * c->n_ctx * sizeof(float));
+    if (ctx->num_experts > 0) {
+        const size_t isz = ctx->expert_intermediate_size;
+        CUDA_INIT_ALLOC(&ctx->d_router_logits, ctx->num_experts * sizeof(float));
+        CUDA_INIT_ALLOC(&ctx->d_expert_sel, ctx->num_experts * sizeof(uint32_t));
+        CUDA_INIT_ALLOC(&ctx->d_expert_w, ctx->num_experts_per_tok * sizeof(float));
+        CUDA_INIT_ALLOC(&ctx->d_expert_gate, isz * sizeof(float));
+        CUDA_INIT_ALLOC(&ctx->d_expert_up, isz * sizeof(float));
+        CUDA_INIT_ALLOC(&ctx->d_expert_tmp, embd * sizeof(float));
+        CUDA_INIT_ALLOC(&ctx->d_expert_out, embd * sizeof(float));
+        CUDA_INIT_ALLOC(&ctx->d_shexp_gate_logit, sizeof(float));
+    }
     /* f16 KV cache: half the footprint of f32 for the same context. */
     CUDA_INIT_ALLOC(&ctx->d_kv_k, kv_total * sizeof(__half));
     CUDA_INIT_ALLOC(&ctx->d_kv_v, kv_total * sizeof(__half));
@@ -507,6 +701,22 @@ OcError oc_cuda_init(OcCudaContext *ctx, const OcLlamaModel *model)
     ctx->d_ffn_down = (OcCudaWeight *)calloc(c->n_layer, sizeof(OcCudaWeight));
     ctx->d_attn_norm = (float **)calloc(c->n_layer, sizeof(float *));
     ctx->d_ffn_norm = (float **)calloc(c->n_layer, sizeof(float *));
+    if (ctx->num_experts > 0) {
+        ctx->d_ffn_gate_inp = (OcCudaWeight *)calloc(c->n_layer, sizeof(OcCudaWeight));
+        ctx->d_ffn_gate_exps = (OcCudaWeight *)calloc(c->n_layer, sizeof(OcCudaWeight));
+        ctx->d_ffn_up_exps = (OcCudaWeight *)calloc(c->n_layer, sizeof(OcCudaWeight));
+        ctx->d_ffn_down_exps = (OcCudaWeight *)calloc(c->n_layer, sizeof(OcCudaWeight));
+        ctx->d_ffn_gate_shexp = (OcCudaWeight *)calloc(c->n_layer, sizeof(OcCudaWeight));
+        ctx->d_ffn_up_shexp = (OcCudaWeight *)calloc(c->n_layer, sizeof(OcCudaWeight));
+        ctx->d_ffn_down_shexp = (OcCudaWeight *)calloc(c->n_layer, sizeof(OcCudaWeight));
+        ctx->d_ffn_gate_inp_shexp = (OcCudaWeight *)calloc(c->n_layer, sizeof(OcCudaWeight));
+        if (!ctx->d_ffn_gate_inp || !ctx->d_ffn_gate_exps || !ctx->d_ffn_up_exps ||
+            !ctx->d_ffn_down_exps || !ctx->d_ffn_gate_shexp ||
+            !ctx->d_ffn_up_shexp || !ctx->d_ffn_down_shexp ||
+            !ctx->d_ffn_gate_inp_shexp) {
+            free(host_temp); oc_cuda_free(ctx); return OC_ERR_OOM;
+        }
+    }
     if (!ctx->d_attn_q_bias || !ctx->d_attn_k_bias || !ctx->d_attn_v_bias ||
         !ctx->d_attn_q || !ctx->d_attn_k || !ctx->d_attn_v ||
         !ctx->d_attn_output || !ctx->d_ffn_gate || !ctx->d_ffn_up ||
@@ -522,17 +732,34 @@ OcError oc_cuda_init(OcCudaContext *ctx, const OcLlamaModel *model)
                "cuda: uploading layer %u/%u (q rows=%zu cols=%zu qtype=%s)",
                l, c->n_layer, L->attn_q.rows, L->attn_q.cols,
                oc_quant_type_name(L->attn_q.qtype));
-        struct { const OcWeightView *view; OcCudaWeight *dst; } ws[] = {
-            { &L->attn_q,      &ctx->d_attn_q[l]      },
-            { &L->attn_k,      &ctx->d_attn_k[l]      },
-            { &L->attn_v,      &ctx->d_attn_v[l]      },
-            { &L->attn_output, &ctx->d_attn_output[l] },
-            { &L->ffn_gate,    &ctx->d_ffn_gate[l]    },
-            { &L->ffn_up,      &ctx->d_ffn_up[l]      },
-            { &L->ffn_down,    &ctx->d_ffn_down[l]    },
+        /* `stacked` marks the 3-D MoE expert tensors whose row count must be
+         * multiplied by num_experts (see upload_weight_rows). */
+        const uint32_t nx = ctx->num_experts;
+        struct { const OcWeightView *view; OcCudaWeight *dst; bool stacked; } ws[] = {
+            { &L->attn_q,      &ctx->d_attn_q[l],      false },
+            { &L->attn_k,      &ctx->d_attn_k[l],      false },
+            { &L->attn_v,      &ctx->d_attn_v[l],      false },
+            { &L->attn_output, &ctx->d_attn_output[l], false },
+            /* Dense FFN; empty views on a MoE layer, skipped below. */
+            { &L->ffn_gate,    &ctx->d_ffn_gate[l],    false },
+            { &L->ffn_up,      &ctx->d_ffn_up[l],      false },
+            { &L->ffn_down,    &ctx->d_ffn_down[l],    false },
+            /* MoE; all NULL on a dense layer, skipped below. */
+            { &L->ffn_gate_inp,       ctx->d_ffn_gate_inp       ? &ctx->d_ffn_gate_inp[l]       : NULL, false },
+            { &L->ffn_gate_exps,      ctx->d_ffn_gate_exps      ? &ctx->d_ffn_gate_exps[l]      : NULL, true  },
+            { &L->ffn_up_exps,        ctx->d_ffn_up_exps        ? &ctx->d_ffn_up_exps[l]        : NULL, true  },
+            { &L->ffn_down_exps,      ctx->d_ffn_down_exps      ? &ctx->d_ffn_down_exps[l]      : NULL, true  },
+            { &L->ffn_gate_shexp,     ctx->d_ffn_gate_shexp     ? &ctx->d_ffn_gate_shexp[l]     : NULL, false },
+            { &L->ffn_up_shexp,       ctx->d_ffn_up_shexp       ? &ctx->d_ffn_up_shexp[l]       : NULL, false },
+            { &L->ffn_down_shexp,     ctx->d_ffn_down_shexp     ? &ctx->d_ffn_down_shexp[l]     : NULL, false },
+            { &L->ffn_gate_inp_shexp, ctx->d_ffn_gate_inp_shexp ? &ctx->d_ffn_gate_inp_shexp[l] : NULL, false },
         };
         for (size_t wi = 0; wi < sizeof(ws) / sizeof(ws[0]); wi++) {
-            e = upload_weight(ws[wi].view, ws[wi].dst, host_temp, ctx);
+            /* A tensor absent from this model (dense FFN on a MoE layer, or
+             * the optional shared expert) has a NULL data pointer. */
+            if (ws[wi].dst == NULL || ws[wi].view->data == NULL) continue;
+            const size_t ro = ws[wi].stacked ? (size_t)nx * ws[wi].view->rows : 0;
+            e = upload_weight_rows(ws[wi].view, ws[wi].dst, host_temp, ctx, ro);
             if (e != OC_OK) { free(host_temp); oc_cuda_free(ctx); return e; }
         }
         if (cudaMalloc((void **)&ctx->d_attn_norm[l], embd * sizeof(float)) != cudaSuccess) {
@@ -694,6 +921,13 @@ OcError oc_cuda_forward(OcCudaContext *ctx, uint32_t token, uint32_t pos,
             eps, ctx->norm_scale);
         OC_CUDA_CHECK(cudaGetLastError());
 
+        /* FFN: MoE (router + top-k experts + shared) or dense. */
+        if (ctx->num_experts > 0) {
+            OcError e = cuda_moe_ffn(ctx, l, block);
+            if (e != OC_OK) return e;
+            continue;
+        }
+
         /* FFN: gate, up, SwiGLU, down. */
         {
             OcError e = cuda_matvec(&ctx->d_ffn_gate[l], ctx->d_normed,
@@ -762,6 +996,10 @@ void oc_cuda_free(OcCudaContext *ctx)
     cudaFree(ctx->d_ffn_gate_buf); cudaFree(ctx->d_ffn_up_buf);
     cudaFree(ctx->d_logits); cudaFree(ctx->d_attn_scores);
     cudaFree(ctx->d_kv_k); cudaFree(ctx->d_kv_v);
+    cudaFree(ctx->d_router_logits); cudaFree(ctx->d_expert_sel);
+    cudaFree(ctx->d_expert_w); cudaFree(ctx->d_expert_gate);
+    cudaFree(ctx->d_expert_up); cudaFree(ctx->d_expert_tmp);
+    cudaFree(ctx->d_expert_out); cudaFree(ctx->d_shexp_gate_logit);
 
     for (uint32_t l = 0; l < ctx->n_layer; l++) {
         if (ctx->d_attn_q_bias && ctx->d_attn_q_bias[l]) cudaFree(ctx->d_attn_q_bias[l]);
@@ -774,6 +1012,14 @@ void oc_cuda_free(OcCudaContext *ctx)
         if (ctx->d_ffn_gate) cudaFree(ctx->d_ffn_gate[l].data);
         if (ctx->d_ffn_up) cudaFree(ctx->d_ffn_up[l].data);
         if (ctx->d_ffn_down) cudaFree(ctx->d_ffn_down[l].data);
+        if (ctx->d_ffn_gate_inp) cudaFree(ctx->d_ffn_gate_inp[l].data);
+        if (ctx->d_ffn_gate_exps) cudaFree(ctx->d_ffn_gate_exps[l].data);
+        if (ctx->d_ffn_up_exps) cudaFree(ctx->d_ffn_up_exps[l].data);
+        if (ctx->d_ffn_down_exps) cudaFree(ctx->d_ffn_down_exps[l].data);
+        if (ctx->d_ffn_gate_shexp) cudaFree(ctx->d_ffn_gate_shexp[l].data);
+        if (ctx->d_ffn_up_shexp) cudaFree(ctx->d_ffn_up_shexp[l].data);
+        if (ctx->d_ffn_down_shexp) cudaFree(ctx->d_ffn_down_shexp[l].data);
+        if (ctx->d_ffn_gate_inp_shexp) cudaFree(ctx->d_ffn_gate_inp_shexp[l].data);
         if (ctx->d_attn_norm) cudaFree(ctx->d_attn_norm[l]);
         if (ctx->d_ffn_norm) cudaFree(ctx->d_ffn_norm[l]);
     }
@@ -782,6 +1028,10 @@ void oc_cuda_free(OcCudaContext *ctx)
     free(ctx->d_attn_output);
     free(ctx->d_ffn_gate); free(ctx->d_ffn_up); free(ctx->d_ffn_down);
     free(ctx->d_attn_norm); free(ctx->d_ffn_norm);
+    free(ctx->d_ffn_gate_inp); free(ctx->d_ffn_gate_exps);
+    free(ctx->d_ffn_up_exps); free(ctx->d_ffn_down_exps);
+    free(ctx->d_ffn_gate_shexp); free(ctx->d_ffn_up_shexp);
+    free(ctx->d_ffn_down_shexp); free(ctx->d_ffn_gate_inp_shexp);
 
     memset(ctx, 0, sizeof(*ctx));
 }

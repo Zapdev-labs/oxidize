@@ -58,6 +58,16 @@ bool oc_cuda_mmq_matvec(uint32_t qtype, const void *d_weights,
                         const float *d_x, float *d_out,
                         size_t rows, size_t cols, void *stream);
 
+/* MoE variant of the above for a stacked expert tensor: expert `e` occupies
+ * rows [e*rows, (e+1)*rows). The expert index is read on the device from
+ * `d_expert_sel[slot]`, so router output never round-trips to the host and the
+ * per-token work stays a single asynchronous submission. */
+bool oc_cuda_mmq_matvec_expert(uint32_t qtype, const void *d_weights,
+                               const float *d_x, float *d_out,
+                               size_t rows, size_t cols,
+                               const uint32_t *d_expert_sel,
+                               uint32_t slot, void *stream);
+
 /* Dequantize a single packed row (`token`) into `d_out` (cols floats).
  * Used for the embedding lookup so the token-embedding table — often the
  * largest single tensor in the model — can stay quantized on the device. */

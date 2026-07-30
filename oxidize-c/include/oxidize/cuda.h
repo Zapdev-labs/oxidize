@@ -61,6 +61,19 @@ typedef struct OcCudaContext {
     OcCudaWeight *d_ffn_down;
     float **d_attn_norm;
     float **d_ffn_norm;
+    /* MoE (Qwen3-MoE / Mixtral / MiniMax-style). Present only when
+     * num_experts > 0; the dense d_ffn_* above are then unused. Expert
+     * tensors are stacked — expert i occupies rows [i*i_size, (i+1)*i_size)
+     * in gate/up and [i*n_embd, (i+1)*n_embd) in down. */
+    OcCudaWeight *d_ffn_gate_inp;    /* router: [num_experts, n_embd]      */
+    OcCudaWeight *d_ffn_gate_exps;
+    OcCudaWeight *d_ffn_up_exps;
+    OcCudaWeight *d_ffn_down_exps;
+    /* Shared expert (always active, weight 1.0), optional per layer. */
+    OcCudaWeight *d_ffn_gate_shexp;
+    OcCudaWeight *d_ffn_up_shexp;
+    OcCudaWeight *d_ffn_down_shexp;
+    OcCudaWeight *d_ffn_gate_inp_shexp;  /* optional sigmoid gate          */
     /* KV cache on GPU: [n_layer][n_ctx][n_head_kv*head_dim] for K and V,
      * stored as __half (opaque here to keep this header C11-clean). f16
      * halves the cache footprint versus f32 at no measurable quality cost —
@@ -74,11 +87,25 @@ typedef struct OcCudaContext {
      * memory rather than shared: a full context of scores exceeds the 48 KB
      * shared-memory budget well before n_ctx reaches its typical 32768. */
     float *d_attn_scores;
+    /* MoE scratch (allocated only when num_experts > 0). The routing result
+     * lives on the device so no per-layer host sync is needed. */
+    float    *d_router_logits;   /* [num_experts]                          */
+    uint32_t *d_expert_sel;      /* [k] chosen expert ids                  */
+    float    *d_expert_w;        /* [k] renormalized, scaled gate weights  */
+    float    *d_expert_gate;     /* [expert_intermediate_size]             */
+    float    *d_expert_up;       /* [expert_intermediate_size]             */
+    float    *d_expert_tmp;      /* [n_embd] one expert's down output      */
+    float    *d_expert_out;      /* [n_embd] accumulator                   */
+    float    *d_shexp_gate_logit;/* [1] shared-expert sigmoid gate logit   */
     /* Model dimensions. */
     uint32_t n_embd, n_head, n_head_kv, n_ff, head_dim, n_layer, vocab_size;
     uint32_t n_ctx, rope_dim;
     float rope_theta, rms_norm_eps, norm_scale;
     bool uses_geglu;
+    /* MoE config mirror (0 experts = dense FFN). */
+    uint32_t num_experts, num_experts_per_tok, expert_intermediate_size;
+    bool  expert_gating_sigmoid;
+    float expert_weights_scale;
     bool initialized;
     /* Device memory accounting, filled during init (for --verbose reporting). */
     size_t vram_weight_bytes;   /* all weight tensors                       */

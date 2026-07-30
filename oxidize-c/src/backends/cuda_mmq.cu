@@ -251,6 +251,29 @@ MQ_DEFINE_MATVEC(k_mmq_matvec_q4k,  mq_q4k_group_dot)
 MQ_DEFINE_MATVEC(k_mmq_matvec_q6k,  mq_q6k_group_dot)
 MQ_DEFINE_MATVEC(k_mmq_matvec_q8_0, mq_q8_0_group_dot)
 
+/* MoE variant: the expert to use is read from device memory, so routing never
+ * round-trips to the host and the whole token stays one async submission.
+ * Expert `e` occupies rows [e*rows, (e+1)*rows) of the stacked tensor. */
+#define MQ_DEFINE_MATVEC_EXPERT(NAME, DOT)                                   \
+__global__ void NAME(const uint8_t *w, const float *x, float *out,           \
+                     size_t rows, uint32_t n_groups, size_t row_bytes,       \
+                     const uint32_t *expert_sel, uint32_t slot)              \
+{                                                                            \
+    const uint32_t lane = threadIdx.x & 31u;                                 \
+    const size_t r = (size_t)blockIdx.x * MQ_WARPS + (threadIdx.x >> 5);     \
+    if (r >= rows) return;                                                   \
+    const uint8_t *rw = w + ((size_t)expert_sel[slot] * rows + r) * row_bytes;\
+    float partial = 0.0f;                                                    \
+    for (uint32_t g = lane; g < n_groups; g += 32u)                          \
+        partial += DOT(rw, g, x + (size_t)g * 32u);                          \
+    partial = mq_warp_reduce(partial);                                       \
+    if (lane == 0u) out[r] = partial;                                        \
+}
+
+MQ_DEFINE_MATVEC_EXPERT(k_mmq_matvec_exp_q4k,  mq_q4k_group_dot)
+MQ_DEFINE_MATVEC_EXPERT(k_mmq_matvec_exp_q6k,  mq_q6k_group_dot)
+MQ_DEFINE_MATVEC_EXPERT(k_mmq_matvec_exp_q8_0, mq_q8_0_group_dot)
+
 /* ─── Single-row dequantize (embedding lookup) ────────────────────────────── */
 
 #define MQ_DEFINE_GETROW(NAME, BLOCK_BYTES, VALS, EXPAND)                    \
@@ -412,6 +435,42 @@ extern "C" bool oc_cuda_mmq_matvec(uint32_t qtype, const void *d_weights,
     case OC_QUANT_Q8_0:
         k_mmq_matvec_q8_0<<<grid, block, 0, s>>>(w, d_x, d_out, rows,
                                                  n_groups, row_bytes);
+        break;
+    default:
+        return false;
+    }
+    return cudaGetLastError() == cudaSuccess;
+}
+
+extern "C" bool oc_cuda_mmq_matvec_expert(uint32_t qtype, const void *d_weights,
+                                          const float *d_x, float *d_out,
+                                          size_t rows, size_t cols,
+                                          const uint32_t *d_expert_sel,
+                                          uint32_t slot, void *stream)
+{
+    if (!d_weights || !d_x || !d_out || !d_expert_sel || rows == 0) return false;
+    const size_t row_bytes = oc_cuda_mmq_row_bytes(qtype, cols);
+    if (row_bytes == 0) return false;
+
+    const uint32_t n_groups = (uint32_t)(cols / 32u);
+    const uint32_t block = MQ_WARPS * 32u;
+    const size_t grid = (rows + MQ_WARPS - 1u) / MQ_WARPS;
+    cudaStream_t s = (cudaStream_t)stream;
+    const uint8_t *w = (const uint8_t *)d_weights;
+
+    switch ((OcGgufQuantizationType)qtype) {
+    case OC_QUANT_Q4_K_S:
+    case OC_QUANT_Q4_K_M:
+        k_mmq_matvec_exp_q4k<<<grid, block, 0, s>>>(w, d_x, d_out, rows,
+            n_groups, row_bytes, d_expert_sel, slot);
+        break;
+    case OC_QUANT_Q6_K:
+        k_mmq_matvec_exp_q6k<<<grid, block, 0, s>>>(w, d_x, d_out, rows,
+            n_groups, row_bytes, d_expert_sel, slot);
+        break;
+    case OC_QUANT_Q8_0:
+        k_mmq_matvec_exp_q8_0<<<grid, block, 0, s>>>(w, d_x, d_out, rows,
+            n_groups, row_bytes, d_expert_sel, slot);
         break;
     default:
         return false;
