@@ -83,6 +83,39 @@ __global__ void k_rms_norm(const float *x, const float *weight, float *out,
         out[i] = x[i] * inv_rms * weight[i] * norm_scale;
 }
 
+/* Gemma per-head RMSNorm over Q or K, one block per head.
+ *
+ * Applied after projection and before RoPE. `weight` is head_dim long and is
+ * shared by every head of the layer. Mirrors the CPU path in llama.c, which
+ * calls oc_rms_norm_f32 per head with the layer's own head_dim. */
+__global__ void k_rms_norm_heads(float *x, const float *weight,
+                                 uint32_t head_dim, float eps)
+{
+    extern __shared__ float red[];
+    const uint32_t tid = threadIdx.x;
+    const uint32_t nthreads = blockDim.x;
+    float *h = x + (size_t)blockIdx.x * head_dim;
+
+    float sum = 0.0f;
+    for (uint32_t i = tid; i < head_dim; i += nthreads) sum += h[i] * h[i];
+    red[tid] = sum;
+    __syncthreads();
+    for (uint32_t s = nthreads / 2; s > 0; s >>= 1) {
+        if (tid < s) red[tid] += red[tid + s];
+        __syncthreads();
+    }
+    const float inv = rsqrtf(red[0] / (float)head_dim + eps);
+    for (uint32_t i = tid; i < head_dim; i += nthreads)
+        h[i] = h[i] * inv * weight[i];
+}
+
+/* Final logit softcap: l = tanh(l/c) * c. */
+__global__ void k_softcap(float *x, float cap, size_t n)
+{
+    const size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) x[i] = tanhf(x[i] / cap) * cap;
+}
+
 /* Elementwise bias add: out[i] += bias[i]. Used for the Qwen2-family QKV
  * projection biases. */
 __global__ void k_add_bias(float *out, const float *bias, size_t n)
@@ -186,7 +219,14 @@ __global__ void k_attention_all_heads(
     uint32_t n_head,
     uint32_t n_head_kv,
     uint32_t head_dim,
-    uint32_t n_past)
+    uint32_t n_past,
+    /* Element stride between cached positions. NOT n_head_kv*head_dim: the
+     * cache is indexed at one uniform stride across layers, which on Gemma 4
+     * is the max over its two geometries. */
+    size_t kv_row,
+    /* First position to attend to. Non-zero on a sliding-window layer, where
+     * only the last `sliding_window` positions are in scope. */
+    uint32_t kv_start)
 {
     const uint32_t h = blockIdx.x;
     if (h >= n_head) return;
@@ -194,7 +234,6 @@ __global__ void k_attention_all_heads(
     const uint32_t tid = threadIdx.x;
     const uint32_t nthreads = blockDim.x;
     const uint32_t kv_head = h / (n_head / n_head_kv);
-    const size_t kv_row = (size_t)n_head_kv * head_dim;
     const size_t kv_off = (size_t)kv_head * head_dim;
 
     extern __shared__ float smem[];
@@ -210,7 +249,7 @@ __global__ void k_attention_all_heads(
 
     /* 1. Scores, parallel over past positions. */
     const float inv_sqrt_d = rsqrtf((float)head_dim);
-    for (uint32_t p = tid; p < n_past; p += nthreads) {
+    for (uint32_t p = kv_start + tid; p < n_past; p += nthreads) {
         const __half *k = kv_k + (size_t)p * kv_row + kv_off;
         float s = 0.0f;
         for (uint32_t d = 0; d < head_dim; d++)
@@ -221,7 +260,7 @@ __global__ void k_attention_all_heads(
 
     /* 2. Max, tree-reduced across threads. */
     float m = -INFINITY;
-    for (uint32_t p = tid; p < n_past; p += nthreads) m = fmaxf(m, sc[p]);
+    for (uint32_t p = kv_start + tid; p < n_past; p += nthreads) m = fmaxf(m, sc[p]);
     red[tid] = m;
     __syncthreads();
     for (uint32_t s = nthreads / 2u; s > 0u; s >>= 1) {
@@ -233,7 +272,7 @@ __global__ void k_attention_all_heads(
 
     /* 3. exp in place, sum tree-reduced. */
     float local_sum = 0.0f;
-    for (uint32_t p = tid; p < n_past; p += nthreads) {
+    for (uint32_t p = kv_start + tid; p < n_past; p += nthreads) {
         const float e = __expf(sc[p] - max_score);
         sc[p] = e;
         local_sum += e;
@@ -251,7 +290,7 @@ __global__ void k_attention_all_heads(
      * a given position, so the f16 V loads coalesce. */
     for (uint32_t d = tid; d < head_dim; d += nthreads) {
         float acc = 0.0f;
-        for (uint32_t p = 0; p < n_past; p++)
+        for (uint32_t p = kv_start; p < n_past; p++)
             acc += sc[p] * __half2float(kv_v[(size_t)p * kv_row + kv_off + d]);
         out[(size_t)h * head_dim + d] = acc * inv_denom;
     }
@@ -261,13 +300,19 @@ __global__ void k_attention_all_heads(
 __global__ void k_kv_cache_write(__half *kv_k, __half *kv_v,
                                   const float *k, const float *v,
                                   size_t pos, size_t n_head_kv,
-                                  uint32_t head_dim, size_t n_ctx)
+                                  uint32_t head_dim, size_t n_ctx,
+                                  /* Uniform element stride between positions;
+                                   * see k_attention_all_heads. Only the first
+                                   * n_head_kv*head_dim of each row is used —
+                                   * a global Gemma 4 layer leaves the rest
+                                   * untouched, and never reads it. */
+                                  size_t kv_row)
 {
     (void)n_ctx;
     size_t i = blockIdx.x * blockDim.x + threadIdx.x;
     size_t total = (size_t)n_head_kv * head_dim;
     if (i < total) {
-        size_t offset = pos * n_head_kv * head_dim + i;
+        size_t offset = pos * kv_row + i;
         kv_k[offset] = __float2half(k[i]);
         kv_v[offset] = __float2half(v[i]);
     }
@@ -616,11 +661,45 @@ OcError oc_cuda_init(OcCudaContext *ctx, const OcLlamaModel *model)
                                   ? c->expert_intermediate_size : c->n_ff;
     ctx->expert_gating_sigmoid = c->expert_gating_sigmoid;
     ctx->expert_weights_scale = c->expert_weights_scale;
+    ctx->uses_gemma4 = c->uses_gemma4;
+    ctx->logit_softcap = c->logit_softcap;
 
-    /* Allocate workspace. */
+    /* Mirror the loader's resolved per-layer geometry onto the host side of
+     * the context, so the forward loop reads it instead of re-deriving it.
+     * These are small host arrays, not device memory. */
+    if (c->uses_gemma4) {
+        ctx->l_head_dim   = (uint32_t *)calloc(c->n_layer, sizeof(uint32_t));
+        ctx->l_n_head_kv  = (uint32_t *)calloc(c->n_layer, sizeof(uint32_t));
+        ctx->l_rope_dim   = (uint32_t *)calloc(c->n_layer, sizeof(uint32_t));
+        ctx->l_rope_theta = (float *)calloc(c->n_layer, sizeof(float));
+        ctx->l_sliding    = (uint32_t *)calloc(c->n_layer, sizeof(uint32_t));
+        if (!ctx->l_head_dim || !ctx->l_n_head_kv || !ctx->l_rope_dim ||
+            !ctx->l_rope_theta || !ctx->l_sliding) {
+            oc_cuda_free(ctx);
+            return OC_ERR_OOM;
+        }
+        for (uint32_t l = 0; l < c->n_layer; l++) {
+            const OcLlamaLayer *L = &model->layers[l];
+            ctx->l_head_dim[l]   = L->head_dim ? L->head_dim : c->head_dim;
+            ctx->l_n_head_kv[l]  = L->n_head_kv ? L->n_head_kv : c->n_head_kv;
+            ctx->l_rope_dim[l]   = L->head_dim ? L->rope_dim : c->rope_dim;
+            ctx->l_rope_theta[l] = L->head_dim ? L->rope_theta : c->rope_theta;
+            ctx->l_sliding[l]    = L->sliding_window;
+        }
+    }
+
+    /* Allocate workspace. Every per-token buffer is sized for the LARGEST
+     * layer geometry, since one allocation serves all layers. */
     size_t embd = c->n_embd;
-    size_t q_size = (size_t)c->n_head * c->head_dim;
+    size_t max_head_dim = c->head_dim;
     size_t kv_row = (size_t)c->n_head_kv * c->head_dim;
+    if (c->uses_gemma4) {
+        if (c->head_dim_swa > max_head_dim) max_head_dim = c->head_dim_swa;
+        const size_t swa_row = (size_t)c->n_head_kv_swa * c->head_dim_swa;
+        if (swa_row > kv_row) kv_row = swa_row;
+    }
+    size_t q_size = (size_t)c->n_head * max_head_dim;
+    ctx->kv_row = kv_row;
     size_t kv_total = (size_t)c->n_layer * c->n_ctx * kv_row;
 
 #define CUDA_INIT_ALLOC(ptr, bytes) \
@@ -701,6 +780,10 @@ OcError oc_cuda_init(OcCudaContext *ctx, const OcLlamaModel *model)
     ctx->d_ffn_down = (OcCudaWeight *)calloc(c->n_layer, sizeof(OcCudaWeight));
     ctx->d_attn_norm = (float **)calloc(c->n_layer, sizeof(float *));
     ctx->d_ffn_norm = (float **)calloc(c->n_layer, sizeof(float *));
+    ctx->d_attn_q_norm = (float **)calloc(c->n_layer, sizeof(float *));
+    ctx->d_attn_k_norm = (float **)calloc(c->n_layer, sizeof(float *));
+    ctx->d_post_attn_norm = (float **)calloc(c->n_layer, sizeof(float *));
+    ctx->d_post_ffw_norm = (float **)calloc(c->n_layer, sizeof(float *));
     if (ctx->num_experts > 0) {
         ctx->d_ffn_gate_inp = (OcCudaWeight *)calloc(c->n_layer, sizeof(OcCudaWeight));
         ctx->d_ffn_gate_exps = (OcCudaWeight *)calloc(c->n_layer, sizeof(OcCudaWeight));
@@ -720,7 +803,9 @@ OcError oc_cuda_init(OcCudaContext *ctx, const OcLlamaModel *model)
     if (!ctx->d_attn_q_bias || !ctx->d_attn_k_bias || !ctx->d_attn_v_bias ||
         !ctx->d_attn_q || !ctx->d_attn_k || !ctx->d_attn_v ||
         !ctx->d_attn_output || !ctx->d_ffn_gate || !ctx->d_ffn_up ||
-        !ctx->d_ffn_down || !ctx->d_attn_norm || !ctx->d_ffn_norm) {
+        !ctx->d_ffn_down || !ctx->d_attn_norm || !ctx->d_ffn_norm ||
+        !ctx->d_attn_q_norm || !ctx->d_attn_k_norm ||
+        !ctx->d_post_attn_norm || !ctx->d_post_ffw_norm) {
         free(host_temp);
         oc_cuda_free(ctx);
         return OC_ERR_OOM;
@@ -793,6 +878,29 @@ OcError oc_cuda_init(OcCudaContext *ctx, const OcLlamaModel *model)
         if (cudaMalloc((void **)&ctx->d_ffn_norm[l], embd * sizeof(float)) != cudaSuccess) {
             free(host_temp); oc_cuda_free(ctx); return OC_ERR_BACKEND;
         }
+        /* Gemma extra norms. Q/K norms are the LAYER's head_dim long; the
+         * post norms are n_embd. Absent tensors leave a NULL entry, which the
+         * forward pass treats as "skip". */
+        {
+            const size_t hd_l = ctx->l_head_dim ? ctx->l_head_dim[l]
+                                                : ctx->head_dim;
+            const struct { float **dev; const float *host; size_t n; } ns[] = {
+                { &ctx->d_attn_q_norm[l],    L->attn_q_norm,        hd_l },
+                { &ctx->d_attn_k_norm[l],    L->attn_k_norm,        hd_l },
+                { &ctx->d_post_attn_norm[l], L->post_attention_norm, embd },
+                { &ctx->d_post_ffw_norm[l],  L->post_ffw_norm,       embd },
+            };
+            for (size_t ni = 0; ni < 4; ni++) {
+                if (ns[ni].host == NULL) continue;
+                if (cudaMalloc((void **)ns[ni].dev,
+                               ns[ni].n * sizeof(float)) != cudaSuccess) {
+                    oc_cuda_free(ctx);
+                    return OC_ERR_BACKEND;
+                }
+                cudaMemcpy(*ns[ni].dev, ns[ni].host, ns[ni].n * sizeof(float),
+                           cudaMemcpyHostToDevice);
+            }
+        }
         cudaMemcpy(ctx->d_ffn_norm[l], L->ffn_norm, embd * sizeof(float),
                   cudaMemcpyHostToDevice);
     }
@@ -835,10 +943,24 @@ OcError oc_cuda_forward(OcCudaContext *ctx, uint32_t token, uint32_t pos,
 
     /* 2. Per-layer forward. */
     for (uint32_t l = 0; l < ctx->n_layer; l++) {
-        /* Pre-attention RMSNorm. */
+        /* Geometry is per-layer on Gemma 4 (sliding: head_dim 256 / 16 KV
+         * heads / theta 1e4; global: 512 / 4 / 1e6). For every other model
+         * these resolve to the model-wide scalars. */
+        const uint32_t hd_l   = ctx->l_head_dim ? ctx->l_head_dim[l] : head_dim;
+        const uint32_t nkv_l  = ctx->l_n_head_kv ? ctx->l_n_head_kv[l]
+                                                 : n_head_kv;
+        const uint32_t rd_l   = ctx->l_rope_dim ? ctx->l_rope_dim[l]
+                                                : ctx->rope_dim;
+        const float    rth_l  = ctx->l_rope_theta ? ctx->l_rope_theta[l]
+                                                  : ctx->rope_theta;
+        const uint32_t win_l  = ctx->l_sliding ? ctx->l_sliding[l] : 0u;
+
+        /* Pre-attention RMSNorm. Gemma 4 folds its sqrt(n_embd) factor into
+         * the embedding instead, so norm_scale must not be reapplied here —
+         * matching embed_token in llama.c. */
         k_rms_norm<<<1, block, block * sizeof(float)>>>(
             ctx->d_x, ctx->d_attn_norm[l], ctx->d_normed, embd,
-            eps, ctx->norm_scale);
+            eps, ctx->uses_gemma4 ? 1.0f : ctx->norm_scale);
         OC_CUDA_CHECK(cudaGetLastError());
 
         /* Q/K/V projections. */
@@ -874,34 +996,54 @@ OcError oc_cuda_forward(OcCudaContext *ctx, uint32_t token, uint32_t pos,
             }
         }
 
+        /* Gemma per-head Q/K RMSNorm, after projection and before RoPE. */
+        if (ctx->d_attn_q_norm[l] != NULL) {
+            k_rms_norm_heads<<<n_head, block, block * sizeof(float)>>>(
+                ctx->d_q, ctx->d_attn_q_norm[l], hd_l, eps);
+            OC_CUDA_CHECK(cudaGetLastError());
+        }
+        if (ctx->d_attn_k_norm[l] != NULL) {
+            k_rms_norm_heads<<<nkv_l, block, block * sizeof(float)>>>(
+                ctx->d_k, ctx->d_attn_k_norm[l], hd_l, eps);
+            OC_CUDA_CHECK(cudaGetLastError());
+        }
+
         /* RoPE on Q. */
         k_apply_rope<<<n_head, block>>>(
-            ctx->d_q, head_dim, ctx->rope_dim, pos, ctx->rope_theta, n_head);
+            ctx->d_q, hd_l, rd_l, pos, rth_l, n_head);
         OC_CUDA_CHECK(cudaGetLastError());
         /* RoPE on K. */
-        k_apply_rope<<<n_head_kv, block>>>(
-            ctx->d_k, head_dim, ctx->rope_dim, pos, ctx->rope_theta, n_head_kv);
+        k_apply_rope<<<nkv_l, block>>>(
+            ctx->d_k, hd_l, rd_l, pos, rth_l, nkv_l);
         OC_CUDA_CHECK(cudaGetLastError());
 
         /* KV cache write. */
-        size_t kv_total = (size_t)n_head_kv * head_dim;
+        /* Layer base uses the UNIFORM stride, not this layer's own row size,
+         * so layers stay at fixed offsets regardless of geometry. */
+        size_t kv_live = (size_t)nkv_l * hd_l;
         __half *kv_k_layer = (__half *)ctx->d_kv_k
-                           + (size_t)l * ctx->n_ctx * kv_total;
+                           + (size_t)l * ctx->n_ctx * ctx->kv_row;
         __half *kv_v_layer = (__half *)ctx->d_kv_v
-                           + (size_t)l * ctx->n_ctx * kv_total;
-        k_kv_cache_write<<<(kv_total + block - 1) / block, block>>>(
+                           + (size_t)l * ctx->n_ctx * ctx->kv_row;
+        k_kv_cache_write<<<(kv_live + block - 1) / block, block>>>(
             kv_k_layer, kv_v_layer,
-            ctx->d_k, ctx->d_v, pos, n_head_kv, head_dim, ctx->n_ctx);
+            ctx->d_k, ctx->d_v, pos, nkv_l, hd_l, ctx->n_ctx, ctx->kv_row);
         OC_CUDA_CHECK(cudaGetLastError());
 
         /* Attention: all heads in one launch. */
         {
             const uint32_t athreads = OC_CUDA_ATTN_THREADS;
-            const size_t asmem = ((size_t)head_dim + athreads) * sizeof(float);
+            const size_t asmem = ((size_t)hd_l + athreads) * sizeof(float);
+            /* Sliding layers attend only to the last `win_l` positions. This
+             * is what keeps 50 of Gemma 4's 60 layers nearly independent of
+             * context length. */
+            const uint32_t n_past = pos + 1;
+            const uint32_t kv_start =
+                (win_l > 0 && n_past > win_l) ? (n_past - win_l) : 0u;
             k_attention_all_heads<<<n_head, athreads, asmem>>>(
                 ctx->d_q, kv_k_layer, kv_v_layer, ctx->d_attn_out,
                 ctx->d_attn_scores, ctx->n_ctx,
-                n_head, n_head_kv, head_dim, pos + 1);
+                n_head, nkv_l, hd_l, n_past, ctx->kv_row, kv_start);
             OC_CUDA_CHECK(cudaGetLastError());
         }
 
@@ -911,14 +1053,24 @@ OcError oc_cuda_forward(OcCudaContext *ctx, uint32_t token, uint32_t pos,
                                     ctx->d_normed, block);
             if (e != OC_OK) return e;
         }
+        /* Gemma sandwich norm: the attention branch output is normed again
+         * before rejoining the residual stream. */
+        if (ctx->d_post_attn_norm[l] != NULL) {
+            k_rms_norm<<<1, block, block * sizeof(float)>>>(
+                ctx->d_normed, ctx->d_post_attn_norm[l], ctx->d_attn_out,
+                embd, eps, 1.0f);
+            OC_CUDA_CHECK(cudaGetLastError());
+            OC_CUDA_CHECK(cudaMemcpyAsync(ctx->d_normed, ctx->d_attn_out,
+                embd * sizeof(float), cudaMemcpyDeviceToDevice, 0));
+        }
         k_residual_add<<<(embd + block - 1) / block, block>>>(
             ctx->d_x, ctx->d_normed, embd);
         OC_CUDA_CHECK(cudaGetLastError());
 
-        /* Pre-FFN RMSNorm. */
+        /* Pre-FFN RMSNorm (see the pre-attention norm on norm_scale). */
         k_rms_norm<<<1, block, block * sizeof(float)>>>(
             ctx->d_x, ctx->d_ffn_norm[l], ctx->d_normed, embd,
-            eps, ctx->norm_scale);
+            eps, ctx->uses_gemma4 ? 1.0f : ctx->norm_scale);
         OC_CUDA_CHECK(cudaGetLastError());
 
         /* FFN: MoE (router + top-k experts + shared) or dense. */
@@ -950,6 +1102,14 @@ OcError oc_cuda_forward(OcCudaContext *ctx, uint32_t token, uint32_t pos,
                                     ctx->d_normed, block);
             if (e != OC_OK) return e;
         }
+        if (ctx->d_post_ffw_norm[l] != NULL) {
+            k_rms_norm<<<1, block, block * sizeof(float)>>>(
+                ctx->d_normed, ctx->d_post_ffw_norm[l], ctx->d_attn_out,
+                embd, eps, 1.0f);
+            OC_CUDA_CHECK(cudaGetLastError());
+            OC_CUDA_CHECK(cudaMemcpyAsync(ctx->d_normed, ctx->d_attn_out,
+                embd * sizeof(float), cudaMemcpyDeviceToDevice, 0));
+        }
         k_residual_add<<<(embd + block - 1) / block, block>>>(
             ctx->d_x, ctx->d_normed, embd);
         OC_CUDA_CHECK(cudaGetLastError());
@@ -958,13 +1118,20 @@ OcError oc_cuda_forward(OcCudaContext *ctx, uint32_t token, uint32_t pos,
     /* 3. Final norm + lm_head. */
     k_rms_norm<<<1, block, block * sizeof(float)>>>(
         ctx->d_x, ctx->d_final_norm, ctx->d_normed, embd,
-        eps, ctx->norm_scale);
+        eps, ctx->uses_gemma4 ? 1.0f : ctx->norm_scale);
     OC_CUDA_CHECK(cudaGetLastError());
 
     if (logits_out != NULL) {
         OcError e = cuda_matvec(&ctx->d_output, ctx->d_normed, ctx->d_logits,
                                 block);
         if (e != OC_OK) return e;
+        /* Gemma 4 softcaps the final logits; it reshapes the sampling
+         * distribution, so it is part of the model. */
+        if (ctx->logit_softcap > 0.0f) {
+            k_softcap<<<(ctx->vocab_size + block - 1) / block, block>>>(
+                ctx->d_logits, ctx->logit_softcap, ctx->vocab_size);
+            OC_CUDA_CHECK(cudaGetLastError());
+        }
         OC_CUDA_CHECK(cudaDeviceSynchronize());
         OC_CUDA_CHECK(cudaMemcpy(logits_out, ctx->d_logits,
             ctx->vocab_size * sizeof(float), cudaMemcpyDeviceToHost));
@@ -1022,12 +1189,20 @@ void oc_cuda_free(OcCudaContext *ctx)
         if (ctx->d_ffn_gate_inp_shexp) cudaFree(ctx->d_ffn_gate_inp_shexp[l].data);
         if (ctx->d_attn_norm) cudaFree(ctx->d_attn_norm[l]);
         if (ctx->d_ffn_norm) cudaFree(ctx->d_ffn_norm[l]);
+        if (ctx->d_attn_q_norm) cudaFree(ctx->d_attn_q_norm[l]);
+        if (ctx->d_attn_k_norm) cudaFree(ctx->d_attn_k_norm[l]);
+        if (ctx->d_post_attn_norm) cudaFree(ctx->d_post_attn_norm[l]);
+        if (ctx->d_post_ffw_norm) cudaFree(ctx->d_post_ffw_norm[l]);
     }
     free(ctx->d_attn_q_bias); free(ctx->d_attn_k_bias); free(ctx->d_attn_v_bias);
     free(ctx->d_attn_q); free(ctx->d_attn_k); free(ctx->d_attn_v);
     free(ctx->d_attn_output);
     free(ctx->d_ffn_gate); free(ctx->d_ffn_up); free(ctx->d_ffn_down);
     free(ctx->d_attn_norm); free(ctx->d_ffn_norm);
+    free(ctx->d_attn_q_norm); free(ctx->d_attn_k_norm);
+    free(ctx->d_post_attn_norm); free(ctx->d_post_ffw_norm);
+    free(ctx->l_head_dim); free(ctx->l_n_head_kv); free(ctx->l_rope_dim);
+    free(ctx->l_rope_theta); free(ctx->l_sliding);
     free(ctx->d_ffn_gate_inp); free(ctx->d_ffn_gate_exps);
     free(ctx->d_ffn_up_exps); free(ctx->d_ffn_down_exps);
     free(ctx->d_ffn_gate_shexp); free(ctx->d_ffn_up_shexp);

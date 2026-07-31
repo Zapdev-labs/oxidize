@@ -61,6 +61,14 @@ typedef struct OcCudaContext {
     OcCudaWeight *d_ffn_down;
     float **d_attn_norm;
     float **d_ffn_norm;
+    /* Gemma-family extra norms, per layer; entry is NULL when the model has
+     * no such tensor. attn_q/k_norm are per-head and are the LAYER's head_dim
+     * long (256 on Gemma 4 sliding layers, 512 on global), so they are not
+     * interchangeable between layers. */
+    float **d_attn_q_norm;
+    float **d_attn_k_norm;
+    float **d_post_attn_norm;
+    float **d_post_ffw_norm;
     /* MoE (Qwen3-MoE / Mixtral / MiniMax-style). Present only when
      * num_experts > 0; the dense d_ffn_* above are then unused. Expert
      * tensors are stacked — expert i occupies rows [i*i_size, (i+1)*i_size)
@@ -102,6 +110,27 @@ typedef struct OcCudaContext {
     uint32_t n_ctx, rope_dim;
     float rope_theta, rms_norm_eps, norm_scale;
     bool uses_geglu;
+    /* ── Gemma 4 dual-geometry attention ──────────────────────────────────
+     *
+     * Sliding and global layers have different attention shapes (see
+     * OcLlamaConfig). The scalar n_head_kv/head_dim/rope_dim/rope_theta above
+     * carry the GLOBAL values; these host-side arrays carry the resolved
+     * per-layer geometry, mirroring OcLlamaLayer so the forward pass never
+     * re-derives it. Each is n_layer entries, or NULL for non-Gemma-4 models
+     * (in which case the scalars apply to every layer). */
+    bool      uses_gemma4;
+    uint32_t *l_head_dim;
+    uint32_t *l_n_head_kv;
+    uint32_t *l_rope_dim;
+    float    *l_rope_theta;
+    uint32_t *l_sliding;        /* window size, 0 = global attention        */
+    /* KV cache stride in elements per position per layer. The cache is
+     * indexed uniformly, so on Gemma 4 this is the MAX over both geometries
+     * (sliding 16*256 = 4096 beats global 4*512 = 2048); sizing it from
+     * n_head_kv*head_dim would under-allocate every sliding layer. */
+    size_t   kv_row;
+    /* Final logit softcap: logits = tanh(l/c)*c. 0 = disabled (Gemma 4: 30). */
+    float    logit_softcap;
     /* MoE config mirror (0 experts = dense FFN). */
     uint32_t num_experts, num_experts_per_tok, expert_intermediate_size;
     bool  expert_gating_sigmoid;
