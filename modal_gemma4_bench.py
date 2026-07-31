@@ -47,7 +47,9 @@ image = (
 )
 
 # `make cuda` links its output as ./oxidize-c — the same name as the CPU
-# target, not a separate oxidize-c-cuda binary.
+# target, not a separate oxidize-c-cuda binary. It also still defaults to the
+# CPU forward path unless --backend cuda is passed explicitly, so every
+# invocation below sets it.
 BIN = "/src/oxidize-c/oxidize-c"
 
 # Gemma 4's chat template wraps turns in <|turn>...<turn|> and opens an empty
@@ -119,8 +121,8 @@ def smoke(max_tokens: int = 48, kv_ctx: int = 1024):
                     "--format=csv"], check=True)
     _build()
     subprocess.run(
-        [BIN, "--model", GGUF, "--prompt", PROMPT,
-         "--max-tokens", str(max_tokens), "--ctx", str(kv_ctx), "--verbose"],
+        [BIN, "--model", GGUF, "--prompt", PROMPT, "--backend", "cuda",
+         "--n-predict", str(max_tokens), "--ctx", str(kv_ctx), "--verbose"],
         env=dict(os.environ, OC_PROF="1"), check=True,
     )
 
@@ -133,8 +135,8 @@ def _bench(max_tokens: int, kv_ctx: int) -> None:
                     "--format=csv"], check=True)
     _build()
     subprocess.run(
-        [BIN, "--model", GGUF, "--prompt", PROMPT,
-         "--max-tokens", str(max_tokens), "--ctx", str(kv_ctx), "--stream"],
+        [BIN, "--model", GGUF, "--prompt", PROMPT, "--backend", "cuda",
+         "--n-predict", str(max_tokens), "--ctx", str(kv_ctx), "--stream"],
         check=True,
     )
 

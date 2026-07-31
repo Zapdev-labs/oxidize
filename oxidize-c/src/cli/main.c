@@ -66,6 +66,7 @@ static void print_help(void)
 "  --prompt TEXT          Prompt text (also accepted as positional arg)\n"
 "  --prompt-file PATH     Read prompt from a file\n"
 "  --n-predict N          Max tokens to generate (default 128)\n"
+"  --ctx N                Cap KV context below the model's advertised length\n"
 "  --threads N            CPU thread hint (0 = auto)\n"
 "  --numa MODE            single | interleave | none (default none)\n"
 "  --auto                 Enable autotune (detect + plan)\n"
@@ -184,6 +185,17 @@ static OcError run_generation(const OcCliArgs *args)
         fprintf(stderr, "error: failed to load model (%s)\n", oc_error_msg(e));
         free(file_prompt);
         return e;
+    }
+
+    /* Clamp the context before anything sizes a KV cache off it. Models now
+     * advertise context lengths far beyond what their cache can occupy:
+     * Gemma 4 reports 262144, which at its 4096-element KV row needs 515 GB
+     * of f32 cache. Never raise it above the model's own value — the RoPE
+     * tables and the cache indexing both assume positions stay in range. */
+    if (args->n_ctx > 0 && args->n_ctx < model.cfg.n_ctx) {
+        oc_log(OC_LOG_INFO, "ctx: capping context %u -> %u",
+               model.cfg.n_ctx, args->n_ctx);
+        model.cfg.n_ctx = args->n_ctx;
     }
 
     /* CUDA backend: upload weights to GPU and use GPU forward path. */

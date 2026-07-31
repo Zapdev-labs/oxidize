@@ -15,6 +15,12 @@ typedef struct OcCliArgs {
     const char *prompt;
     const char *prompt_file;
     uint32_t   n_predict;
+    /* --ctx N: cap the KV cache context below the model's advertised
+     * context_length. Long-context models make this mandatory rather than a
+     * tuning knob — Gemma 4 advertises 262144, which at its 4096-element KV
+     * row is 515 GB of f32 cache, so the default allocation cannot succeed on
+     * any machine. 0 = use the model's own value. */
+    uint32_t   n_ctx;
     int        threads;
     const char *numa;
     bool       auto_tune;
