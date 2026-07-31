@@ -96,6 +96,42 @@ static float *load_norm(const OcGgufMmappedFile *m, const OcGgufTensorInfo *info
 
 /* ─── Config parsing ──────────────────────────────────────────────────── */
 
+/* Read element `idx` of a u32-ish metadata array, falling back to `def` when
+ * the key is missing, is not an array, or is too short.
+ *
+ * Gemma 4 stores attention.head_count_kv and attention.sliding_window_pattern
+ * as per-layer arrays rather than scalars, which the cfg_u32 getters cannot
+ * see at all — they ask for a scalar and get nothing. GGUF writers are not
+ * consistent about the integer width used for such arrays, so accept any of
+ * the unsigned/signed 32-and-under types rather than requiring UINT32. */
+static uint32_t cfg_u32_at(const OcGgufFile *f, const char *key, size_t idx,
+                           uint32_t def)
+{
+    const OcGgufMetadataValue *val = oc_gguf_metadata_get(f, key);
+    if (val == NULL || val->type != OC_GGUF_MT_ARRAY) return def;
+    const OcGgufMetadataArray *arr = &val->v.arr;
+    if (idx >= arr->len || arr->values == NULL) return def;
+    const OcGgufMetadataValue *e = &arr->values[idx];
+    switch (e->type) {
+    case OC_GGUF_MT_UINT8:  return (uint32_t)e->v.u8;
+    case OC_GGUF_MT_INT8:   return (uint32_t)e->v.i8;
+    case OC_GGUF_MT_UINT16: return (uint32_t)e->v.u16;
+    case OC_GGUF_MT_INT16:  return (uint32_t)e->v.i16;
+    case OC_GGUF_MT_UINT32: return e->v.u32;
+    case OC_GGUF_MT_INT32:  return (uint32_t)e->v.i32;
+    case OC_GGUF_MT_BOOL:   return e->v.b ? 1u : 0u;
+    default:                return def;
+    }
+}
+
+/* Length of a metadata array, or 0 if the key is absent or not an array. */
+static size_t cfg_array_len(const OcGgufFile *f, const char *key)
+{
+    const OcGgufMetadataValue *val = oc_gguf_metadata_get(f, key);
+    if (val == NULL || val->type != OC_GGUF_MT_ARRAY) return 0;
+    return val->v.arr.len;
+}
+
 static OcError parse_config(const OcGgufFile *f, const char *arch_str,
                             OcLlamaConfig *cfg)
 {
@@ -164,8 +200,80 @@ static OcError parse_config(const OcGgufFile *f, const char *arch_str,
     /* YaRN long-context scaling. */
     cfg->yarn_factor = 0.0f;
     cfg->yarn_orig_ctx = 0;
+    cfg->uses_gemma4 = false;
+    cfg->head_dim_swa = 0;
+    cfg->n_head_kv_swa = 0;
+    cfg->rope_dim_swa = 0;
+    cfg->rope_theta_swa = 0.0f;
+    cfg->layer_is_swa = NULL;
+    cfg->logit_softcap = 0.0f;
+    cfg->k_eq_v = false;
     if (arch_str) {
-        if (strncmp(arch_str, "gemma", 5) == 0) {
+        /* Checked before the generic "gemma" prefix below, which would
+         * otherwise match "gemma4" and apply the Gemma-2 single-geometry
+         * interpretation to a dual-geometry model. */
+        if (strcmp(arch_str, "gemma4") == 0) {
+            cfg->uses_geglu = true;
+            cfg->uses_gemma4 = true;
+            /* Gemma scales the token embedding by sqrt(n_embd); it is applied
+             * once after the embedding lookup, not inside each RMSNorm. */
+            cfg->norm_scale = sqrtf((float)cfg->n_embd);
+
+            snprintf(key, sizeof(key), "%sfinal_logit_softcapping", prefix);
+            cfg->logit_softcap = cfg_f32(f, key, 0.0f);
+            snprintf(key, sizeof(key), "%sattention.sliding_window", prefix);
+            cfg->sliding_window = cfg_u32(f, key, 0);
+
+            /* Sliding geometry. The *_swa metadata keys are the sliding-layer
+             * values; the unsuffixed ones already parsed above are global. */
+            snprintf(key, sizeof(key), "%sattention.key_length_swa", prefix);
+            cfg->head_dim_swa = cfg_u32(f, key, 0);
+            snprintf(key, sizeof(key), "%srope.dimension_count_swa", prefix);
+            cfg->rope_dim_swa = cfg_u32(f, key, 0);
+            snprintf(key, sizeof(key), "%srope.freq_base_swa", prefix);
+            cfg->rope_theta_swa = cfg_f32(f, key, cfg->rope_theta);
+
+            /* Per-layer attention kind. The pattern is an explicit array
+             * (1 = sliding, 0 = global) — read it rather than assuming the
+             * documented 5:1 repeat, so an unusual layout still loads. */
+            snprintf(key, sizeof(key), "%sattention.sliding_window_pattern",
+                     prefix);
+            const size_t pat_len = cfg_array_len(f, key);
+            cfg->layer_is_swa = xcalloc(cfg->n_layer, sizeof(uint8_t));
+            if (cfg->layer_is_swa == NULL) return OC_ERR_OOM;
+            for (uint32_t l = 0; l < cfg->n_layer; l++) {
+                /* Absent pattern → treat every layer as sliding, which is the
+                 * majority kind and keeps the window bound in play. */
+                cfg->layer_is_swa[l] =
+                    (uint8_t)(pat_len > 0 ? (cfg_u32_at(f, key, l, 1u) != 0u)
+                                          : 1u);
+            }
+
+            /* KV head counts are a per-layer array. Take the global and
+             * sliding values from the first layer of each kind actually
+             * present rather than assuming which index is which. */
+            char kvkey[128];
+            snprintf(kvkey, sizeof(kvkey), "%sattention.head_count_kv", prefix);
+            uint32_t kv_swa = 0, kv_glb = 0;
+            for (uint32_t l = 0; l < cfg->n_layer; l++) {
+                const uint32_t kv = cfg_u32_at(f, kvkey, l, 0);
+                if (kv == 0) continue;
+                if (cfg->layer_is_swa[l]) { if (!kv_swa) kv_swa = kv; }
+                else                      { if (!kv_glb) kv_glb = kv; }
+            }
+            /* Scalar fallback for a writer that emitted one value. */
+            if (kv_swa == 0 && kv_glb == 0)
+                kv_swa = kv_glb = cfg_u32(f, kvkey, cfg->n_head);
+            if (kv_glb == 0) kv_glb = kv_swa;
+            if (kv_swa == 0) kv_swa = kv_glb;
+            cfg->n_head_kv     = kv_glb;
+            cfg->n_head_kv_swa = kv_swa;
+
+            /* Global layers carry no attn_v tensor: V is the K projection
+             * (config.json attention_k_eq_v). resolve_weights() aliases them
+             * and asserts the tensor really is absent. */
+            cfg->k_eq_v = true;
+        } else if (strncmp(arch_str, "gemma", 5) == 0) {
             cfg->uses_geglu = true;
             cfg->norm_scale = sqrtf((float)cfg->n_embd);
             /* Gemma2 sliding window: alternating global/sliding layers. */
@@ -249,6 +357,28 @@ static OcError parse_config(const OcGgufFile *f, const char *arch_str,
                                          * applies to both. */
     cfg->rope_dim   = (rope_dim > 0) ? rope_dim : cfg->kv_head_dim;
     if (cfg->rope_dim > cfg->kv_head_dim) cfg->rope_dim = cfg->kv_head_dim;
+
+    /* Gemma 4: fill in any sliding-geometry field the metadata left unset, and
+     * validate both geometries. Done here because head_dim/rope_dim above are
+     * the global values these fall back to. */
+    if (cfg->uses_gemma4) {
+        if (cfg->head_dim_swa == 0)   cfg->head_dim_swa = cfg->head_dim;
+        if (cfg->n_head_kv_swa == 0)  cfg->n_head_kv_swa = cfg->n_head_kv;
+        if (cfg->rope_theta_swa == 0.0f) cfg->rope_theta_swa = cfg->rope_theta;
+        if (cfg->rope_dim_swa == 0)   cfg->rope_dim_swa = cfg->head_dim_swa;
+        if (cfg->rope_dim_swa > cfg->head_dim_swa)
+            cfg->rope_dim_swa = cfg->head_dim_swa;
+        /* Both KV head counts must divide the (shared) query head count, or
+         * the GQA grouping in the attention kernels is undefined. */
+        if (cfg->n_head_kv == 0 || cfg->n_head_kv_swa == 0 ||
+            cfg->n_head_kv > cfg->n_head || cfg->n_head_kv_swa > cfg->n_head ||
+            cfg->n_head % cfg->n_head_kv != 0 ||
+            cfg->n_head % cfg->n_head_kv_swa != 0) {
+            free(cfg->layer_is_swa);
+            cfg->layer_is_swa = NULL;
+            return OC_ERR_MODEL;
+        }
+    }
     if (no_rope) cfg->rope_dim = 0;   /* preserve arch-specific no-RoPE */
     cfg->tied_embeddings = false;
     cfg->moe_layer_start = 0;
@@ -325,6 +455,21 @@ static bool assign_tensor(OcLlamaModel *m, const char *cname,
             L->attn_k = view_from_info(mm, info);
         } else if (strcmp(suf, "attn_v.weight") == 0) {
             L->attn_v = view_from_info(mm, info);
+        } else if (strcmp(suf, "attn_q_norm.weight") == 0) {
+            /* Gemma per-head Q/K RMSNorm. Length is the LAYER's head_dim, not
+             * the model-wide one — 256 on sliding layers and 512 on global
+             * ones — so take it from the tensor's own shape. */
+            L->attn_q_norm = load_norm(mm, info, (size_t)info->dims[0]);
+        } else if (strcmp(suf, "attn_k_norm.weight") == 0) {
+            L->attn_k_norm = load_norm(mm, info, (size_t)info->dims[0]);
+        } else if (strcmp(suf, "post_attention_norm.weight") == 0) {
+            L->post_attention_norm = load_norm(mm, info, m->cfg.n_embd);
+        } else if (strcmp(suf, "post_ffw_norm.weight") == 0) {
+            L->post_ffw_norm = load_norm(mm, info, m->cfg.n_embd);
+        } else if (strcmp(suf, "layer_output_scale.weight") == 0) {
+            /* Single f32 scalar per layer. */
+            float *s = load_norm(mm, info, 1);
+            if (s != NULL) { L->layer_output_scale = s[0]; free(s); }
         } else if (strcmp(suf, "attn_q.bias") == 0) {
             L->attn_q_bias = load_norm(mm, info, (size_t)info->dims[0]);
         } else if (strcmp(suf, "attn_k.bias") == 0) {
@@ -386,6 +531,13 @@ static OcError resolve_weights(OcLlamaModel *m)
     OcError e = oc_gguf_map_mapped_tensor_infos(&m->gguf, arena, &infos, &n);
     if (e != OC_OK) { oc_arena_free(arena); return e; }
 
+    /* Per-layer defaults, applied before binding so a tensor that is present
+     * simply overwrites them. layer_output_scale must start at 1.0 (identity),
+     * not the 0.0 that calloc gives — a zero scale silently zeroes the layer. */
+    for (uint32_t l = 0; l < m->cfg.n_layer; l++) {
+        m->layers[l].layer_output_scale = 1.0f;
+    }
+
     for (size_t i = 0; i < n; i++) {
         const char *cname = infos[i].name;   /* already canonical-mapped */
         assign_tensor(m, cname, &m->gguf, &infos[i]);
@@ -409,6 +561,44 @@ static OcError resolve_weights(OcLlamaModel *m)
     /* Infer n_ff from ffn_gate if metadata was absent. */
     if (m->cfg.n_ff == 0 && m->layers[0].ffn_gate.rows > 0) {
         m->cfg.n_ff = (uint32_t)m->layers[0].ffn_gate.rows;
+    }
+
+    /* Resolve each layer's attention geometry once, here, so neither forward
+     * pass has to re-derive it from the layer index. For everything except
+     * Gemma 4 this is just the model-wide values copied down. */
+    for (uint32_t l = 0; l < m->cfg.n_layer; l++) {
+        OcLlamaLayer *L = &m->layers[l];
+        const bool swa = m->cfg.uses_gemma4 && m->cfg.layer_is_swa != NULL &&
+                         m->cfg.layer_is_swa[l];
+        L->head_dim   = swa ? m->cfg.head_dim_swa   : m->cfg.head_dim;
+        L->n_head_kv  = swa ? m->cfg.n_head_kv_swa  : m->cfg.n_head_kv;
+        L->rope_dim   = swa ? m->cfg.rope_dim_swa   : m->cfg.rope_dim;
+        L->rope_theta = swa ? m->cfg.rope_theta_swa : m->cfg.rope_theta;
+        L->sliding_window = swa ? m->cfg.sliding_window : 0u;
+
+        /* Gemma 4 global layers reuse the K projection as V, and so ship no
+         * attn_v tensor. Alias rather than special-casing every consumer.
+         * Only do this when attn_v is genuinely absent: a model that has both
+         * must keep them distinct even if the flag is set. */
+        if (m->cfg.k_eq_v && L->attn_v.data == NULL && L->attn_k.data != NULL) {
+            L->attn_v = L->attn_k;
+        }
+
+        /* Every layer must now have a coherent shape, or the forward passes
+         * would read past a projection. Catch it at load with a clear
+         * message rather than as a segfault mid-generation. */
+        if (L->attn_q.data != NULL) {
+            if (L->head_dim == 0 || L->n_head_kv == 0 ||
+                L->attn_q.rows != (size_t)m->cfg.n_head * L->head_dim ||
+                L->attn_k.rows != (size_t)L->n_head_kv * L->head_dim) {
+                oc_log(OC_LOG_ERROR,
+                       "llama: layer %u geometry mismatch: attn_q rows=%zu "
+                       "(expected %u*%u), attn_k rows=%zu (expected %u*%u)",
+                       l, L->attn_q.rows, m->cfg.n_head, L->head_dim,
+                       L->attn_k.rows, L->n_head_kv, L->head_dim);
+                return OC_ERR_MODEL;
+            }
+        }
     }
     if (m->tok_embeddings.rows == 0 || m->tok_embeddings.rows > UINT32_MAX ||
         m->tok_embeddings.cols != m->cfg.n_embd ||
@@ -443,7 +633,8 @@ OcError oc_llama_load(const char *path, OcLlamaModel *out)
     if (arch_str == NULL) arch_str = "llama";
     if (strcmp(arch_str, "llama") != 0 && strcmp(arch_str, "mistral") != 0 &&
         strcmp(arch_str, "qwen2") != 0 && strcmp(arch_str, "gpt2") != 0 &&
-        strcmp(arch_str, "gptneox") != 0 && strcmp(arch_str, "falcon") != 0) {
+        strcmp(arch_str, "gptneox") != 0 && strcmp(arch_str, "falcon") != 0 &&
+        strcmp(arch_str, "gemma4") != 0) {
         oc_gguf_map_free(&out->gguf);
         return OC_ERR_MODEL;
     }
@@ -515,12 +706,35 @@ static OcKvCacheType kv_type_from_env(void)
     return OC_KV_F32;
 }
 
+/* Floats per cached position per layer.
+ *
+ * The cache is indexed at a single uniform stride across layers, so on a model
+ * whose layers disagree it must be the MAXIMUM, not any one layer's value.
+ * Gemma 4 is exactly that case: sliding layers hold 16 KV heads x 256 = 4096
+ * floats while global layers hold 4 x 512 = 2048. Sizing from cfg.n_head_kv
+ * (the global count) would under-allocate every sliding layer by 2x and
+ * corrupt the cache. Global layers leave the upper half of their row unused,
+ * which is the price of a uniform stride. */
+static size_t kv_row_floats_for(const OcLlamaModel *model)
+{
+    if (model->cfg.uses_mla)
+        return (size_t)model->cfg.n_head * model->cfg.head_dim;
+
+    size_t row = (size_t)model->cfg.n_head_kv * model->cfg.kv_head_dim;
+    if (model->cfg.uses_gemma4) {
+        const size_t swa_row =
+            (size_t)model->cfg.n_head_kv_swa * model->cfg.head_dim_swa;
+        const size_t glb_row =
+            (size_t)model->cfg.n_head_kv * model->cfg.head_dim;
+        row = (swa_row > glb_row) ? swa_row : glb_row;
+    }
+    return row;
+}
+
 size_t oc_llama_kv_cache_bytes(const OcLlamaModel *model, OcKvCacheType kv_type)
 {
     if (model == NULL) return 0;
-    size_t row = model->cfg.uses_mla
-               ? (size_t)model->cfg.n_head * model->cfg.head_dim
-               : (size_t)model->cfg.n_head_kv * model->cfg.kv_head_dim;
+    size_t row = kv_row_floats_for(model);
     size_t elems = (size_t)model->cfg.n_layer * model->cfg.n_ctx * row;
     if (kv_type == OC_KV_Q8) {
         size_t groups = (size_t)model->cfg.n_layer * model->cfg.n_ctx
@@ -548,12 +762,9 @@ OcError oc_llama_session_init_kv(OcLlamaModel *model, OcLlamaSession *out,
     }
     memset(out, 0, sizeof(*out));
     out->model = model;
-    /* For MLA, each head has its own K/V (no GQA sharing). */
-    if (model->cfg.uses_mla) {
-        out->kv_row_floats = (size_t)model->cfg.n_head * model->cfg.head_dim;
-    } else {
-        out->kv_row_floats = (size_t)model->cfg.n_head_kv * model->cfg.kv_head_dim;
-    }
+    /* For MLA, each head has its own K/V (no GQA sharing); for Gemma 4 this is
+     * the max over the two layer geometries. See kv_row_floats_for(). */
+    out->kv_row_floats = kv_row_floats_for(model);
     size_t per_layer = (size_t)model->cfg.n_ctx * out->kv_row_floats;
     size_t total = (size_t)model->cfg.n_layer * per_layer;
 
@@ -561,6 +772,16 @@ OcError oc_llama_session_init_kv(OcLlamaModel *model, OcLlamaSession *out,
      * strides by head_dim. If those disagree the offsets would not line up,
      * so fall back to f32 rather than compute the wrong thing. */
     out->kv_group = model->cfg.kv_head_dim;
+    /* Q8 KV indexes its scale array at a single (n_head_kv, kv_head_dim)
+     * stride. Gemma 4's two layer geometries give two different strides, so
+     * the scales for sliding and global layers would alias. Rather than carry
+     * a per-layer scale layout for a path that is not the bottleneck, use f32
+     * KV there. */
+    if (kv_type == OC_KV_Q8 && model->cfg.uses_gemma4) {
+        oc_log(OC_LOG_WARN, "llama: Q8 KV does not support Gemma 4's "
+               "per-layer KV geometry; using f32 KV");
+        kv_type = OC_KV_F32;
+    }
     if (kv_type == OC_KV_Q8 && model->cfg.head_dim != model->cfg.kv_head_dim) {
         oc_log(OC_LOG_WARN, "llama: Q8 KV needs head_dim == kv_head_dim "
                "(%u vs %u); using f32 KV",
@@ -689,11 +910,16 @@ void oc_llama_free(OcLlamaModel *model)
             free(model->layers[i].attn_v_bias);
             free(model->layers[i].mla_q_a_norm);
             free(model->layers[i].mla_kv_a_norm);
+            free(model->layers[i].attn_q_norm);
+            free(model->layers[i].attn_k_norm);
+            free(model->layers[i].post_attention_norm);
+            free(model->layers[i].post_ffw_norm);
         }
         free(model->layers);
     }
     free(model->final_norm);
     free(model->final_norm_bias);
+    free(model->cfg.layer_is_swa);
     oc_gguf_map_free(&model->gguf);
     memset(model, 0, sizeof(*model));
 }
@@ -712,6 +938,15 @@ static void embed_token(OcLlamaSession *s, uint32_t token)
         oc_quant_dequant_row(w->qtype,
             w->data + (size_t)token * w->row_bytes, w->row_bytes,
             s->x, s->model->cfg.n_embd);
+    }
+    /* Gemma scales the token embedding by sqrt(n_embd) once, here — it is a
+     * property of the embedding, not of each RMSNorm. The pre-existing
+     * `norm_scale` handling in forward_layer multiplies every normed
+     * activation instead, which is a different (and for Gemma 4, wrong)
+     * computation; uses_gemma4 takes this path and leaves that one alone. */
+    if (s->model->cfg.uses_gemma4 && s->model->cfg.norm_scale != 1.0f) {
+        const float sc = s->model->cfg.norm_scale;
+        for (size_t i = 0; i < s->model->cfg.n_embd; i++) s->x[i] *= sc;
     }
 }
 
@@ -735,8 +970,13 @@ static void attention_head(const OcLlamaSession *s, uint32_t head,
                            uint32_t layer, const float *q_vec, float *out_vec)
 {
     const OcLlamaConfig *c = &s->model->cfg;
-    size_t hd = c->head_dim;
-    uint32_t group = c->n_head / c->n_head_kv;
+    /* Geometry is per-layer: on Gemma 4 a sliding layer has head_dim 256 with
+     * 16 KV heads while a global layer has 512 with 4. The loader resolved
+     * both into the layer, so read them rather than the model-wide config. */
+    const OcLlamaLayer *GL = &s->model->layers[layer];
+    size_t hd = GL->head_dim ? (size_t)GL->head_dim : (size_t)c->head_dim;
+    uint32_t n_kv = GL->n_head_kv ? GL->n_head_kv : c->n_head_kv;
+    uint32_t group = c->n_head / n_kv;
     uint32_t kv_head = head / group;
     size_t kv_off = ((size_t)layer * c->n_ctx + 0) * s->kv_row_floats
                   + (size_t)kv_head * hd;
@@ -754,7 +994,14 @@ static void attention_head(const OcLlamaSession *s, uint32_t head,
      * window when (L % pattern) == 1 (i.e., every other layer for pattern=2). */
     int64_t seq_len = s->pos + 1;
     int64_t start = 0;
-    if (c->sliding_window > 0 && c->sliding_window_pattern > 1) {
+    if (GL->sliding_window > 0) {
+        /* Gemma 4 (and any model whose loader filled in a per-layer window):
+         * the pattern came from metadata, so trust the resolved value rather
+         * than re-deriving it from a modulus. */
+        int64_t sw = (int64_t)GL->sliding_window;
+        start = (seq_len > sw) ? (seq_len - sw) : 0;
+    } else if (!c->uses_gemma4 && c->sliding_window > 0 &&
+               c->sliding_window_pattern > 1) {
         if (layer % c->sliding_window_pattern == 1) {
             /* Sliding window layer: only attend to recent tokens. */
             int64_t sw = (int64_t)c->sliding_window;
@@ -818,6 +1065,13 @@ static void forward_dense_ffn(OcLlamaSession *s, const OcLlamaLayer *L)
         oc_swiglu_inplace_f32(s->ffn_gate, s->ffn_up, c->n_ff);
     }
     matvec(&L->ffn_down, s->ffn_gate, s->normed, s->dequant_temp);
+    /* Gemma sandwich norm on the FFN branch output, mirroring the attention
+     * branch in forward_layer. */
+    if (L->post_ffw_norm != NULL) {
+        oc_rms_norm_f32(s->normed, L->post_ffw_norm, s->attn_out,
+                        c->n_embd, c->rms_norm_eps);
+        memcpy(s->normed, s->attn_out, c->n_embd * sizeof(float));
+    }
     /* Residual add. */
     for (size_t i = 0; i < c->n_embd; i++) s->x[i] += s->normed[i];
 }
@@ -1054,11 +1308,17 @@ static void forward_layer(OcLlamaSession *s, uint32_t layer)
 {
     const OcLlamaConfig *c = &s->model->cfg;
     OcLlamaLayer *L = &s->model->layers[layer];
-    size_t hd = c->head_dim;
+    /* Per-layer geometry (see attention_head). */
+    size_t hd = L->head_dim ? (size_t)L->head_dim : (size_t)c->head_dim;
+    const uint32_t n_kv = L->n_head_kv ? L->n_head_kv : c->n_head_kv;
+    const uint32_t rope_dim = L->head_dim ? L->rope_dim : c->rope_dim;
+    const float rope_theta = L->head_dim ? L->rope_theta : c->rope_theta;
 
-    /* Pre-attention RMSNorm (+ Gemma scaling). */
+    /* Pre-attention RMSNorm (+ Gemma scaling).
+     * Gemma 4 folds its sqrt(n_embd) factor into the embedding instead (see
+     * embed_token), so norm_scale must not be applied again per layer. */
     oc_rms_norm_f32(s->x, L->attn_norm, s->normed, c->n_embd, c->rms_norm_eps);
-    if (c->norm_scale != 1.0f) {
+    if (!c->uses_gemma4 && c->norm_scale != 1.0f) {
         for (size_t i = 0; i < c->n_embd; i++) s->normed[i] *= c->norm_scale;
     }
 
@@ -1085,25 +1345,44 @@ static void forward_layer(OcLlamaSession *s, uint32_t layer)
                 s->v[i] += L->attn_v_bias[i];
         }
 
-        /* RoPE on Q (per head) and K (per kv head). YaRN when configured. */
+        /* Gemma Q/K RMSNorm: applied per head, after projection and BEFORE
+         * RoPE. The norm weight is the layer's own head_dim long. */
+        if (L->attn_q_norm != NULL) {
+            for (uint32_t h = 0; h < c->n_head; h++) {
+                oc_rms_norm_f32(s->q + h * hd, L->attn_q_norm,
+                                s->dequant_temp, hd, c->rms_norm_eps);
+                memcpy(s->q + h * hd, s->dequant_temp, hd * sizeof(float));
+            }
+        }
+        if (L->attn_k_norm != NULL) {
+            for (uint32_t h = 0; h < n_kv; h++) {
+                oc_rms_norm_f32(s->k + h * hd, L->attn_k_norm,
+                                s->dequant_temp, hd, c->rms_norm_eps);
+                memcpy(s->k + h * hd, s->dequant_temp, hd * sizeof(float));
+            }
+        }
+
+        /* RoPE on Q (per head) and K (per kv head). YaRN when configured.
+         * rope_dim/rope_theta are the layer's: Gemma 4 rotates 256 dims at
+         * base 1e4 on sliding layers and 512 at 1e6 on global ones. */
         for (uint32_t h = 0; h < c->n_head; h++) {
             if (c->yarn_factor > 0.0f) {
                 oc_apply_rope_yarn_f32(s->q + h * hd, s->q + h * hd, hd,
-                                       c->rope_dim, s->pos, c->rope_theta,
+                                       rope_dim, s->pos, rope_theta,
                                        c->yarn_factor, c->yarn_orig_ctx);
             } else {
-                oc_apply_rope_f32(s->q + h * hd, s->q + h * hd, hd, c->rope_dim,
-                                  s->pos, c->rope_theta);
+                oc_apply_rope_f32(s->q + h * hd, s->q + h * hd, hd, rope_dim,
+                                  s->pos, rope_theta);
             }
         }
-        for (uint32_t h = 0; h < c->n_head_kv; h++) {
+        for (uint32_t h = 0; h < n_kv; h++) {
             if (c->yarn_factor > 0.0f) {
                 oc_apply_rope_yarn_f32(s->k + h * hd, s->k + h * hd, hd,
-                                       c->rope_dim, s->pos, c->rope_theta,
+                                       rope_dim, s->pos, rope_theta,
                                        c->yarn_factor, c->yarn_orig_ctx);
             } else {
-                oc_apply_rope_f32(s->k + h * hd, s->k + h * hd, hd, c->rope_dim,
-                                  s->pos, c->rope_theta);
+                oc_apply_rope_f32(s->k + h * hd, s->k + h * hd, hd, rope_dim,
+                                  s->pos, rope_theta);
             }
         }
 
@@ -1133,13 +1412,22 @@ static void forward_layer(OcLlamaSession *s, uint32_t layer)
 
         /* Output projection. */
         matvec(&L->attn_output, s->attn_out, s->normed, s->dequant_temp);
+        /* Gemma "sandwich" norm: the attention branch output is normed again
+         * before it rejoins the residual stream (HF post_attention_layernorm
+         * on the branch, not on the input). Skipped when the tensor is absent,
+         * which is every non-Gemma model. */
+        if (L->post_attention_norm != NULL) {
+            oc_rms_norm_f32(s->normed, L->post_attention_norm,
+                            s->attn_out, c->n_embd, c->rms_norm_eps);
+            memcpy(s->normed, s->attn_out, c->n_embd * sizeof(float));
+        }
         /* Residual add (reusing normed as the projection output buffer). */
         for (size_t i = 0; i < c->n_embd; i++) s->x[i] += s->normed[i];
     }
 
-    /* Pre-FFN RMSNorm (+ Gemma scaling). */
+    /* Pre-FFN RMSNorm (+ Gemma scaling; see the pre-attention norm above). */
     oc_rms_norm_f32(s->x, L->ffn_norm, s->normed, c->n_embd, c->rms_norm_eps);
-    if (c->norm_scale != 1.0f) {
+    if (!c->uses_gemma4 && c->norm_scale != 1.0f) {
         for (size_t i = 0; i < c->n_embd; i++) s->normed[i] *= c->norm_scale;
     }
 
@@ -1174,7 +1462,7 @@ OcError oc_llama_forward(OcLlamaSession *sess, uint32_t token, float *logits_out
     OcLlamaModel *m = sess->model;
     oc_rms_norm_f32(sess->x, m->final_norm, sess->normed, m->cfg.n_embd,
                     m->cfg.rms_norm_eps);
-    if (m->cfg.norm_scale != 1.0f) {
+    if (!m->cfg.uses_gemma4 && m->cfg.norm_scale != 1.0f) {
         for (size_t i = 0; i < m->cfg.n_embd; i++) sess->normed[i] *= m->cfg.norm_scale;
     }
     if (logits_out != NULL) {
@@ -1185,6 +1473,15 @@ OcError oc_llama_forward(OcLlamaSession *sess, uint32_t token, float *logits_out
             oc_matvec_quantized(m->output.qtype, m->output.data, m->output.rows,
                                  m->output.cols, m->output.row_bytes,
                                  sess->normed, logits_out, sess->dequant_temp);
+        }
+        /* Gemma 4 softcaps the final logits: l = tanh(l/c) * c. This bounds
+         * them to (-c, c) and materially reshapes the sampling distribution,
+         * so it is part of the model, not an optional nicety. */
+        if (m->cfg.logit_softcap > 0.0f) {
+            const float cap = m->cfg.logit_softcap;
+            const float inv = 1.0f / cap;
+            for (size_t i = 0; i < m->cfg.vocab_size; i++)
+                logits_out[i] = tanhf(logits_out[i] * inv) * cap;
         }
     }
     sess->pos++;

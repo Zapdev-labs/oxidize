@@ -61,6 +61,42 @@ typedef struct OcLlamaConfig {
      * window size in tokens (0 = no sliding window). */
     uint32_t sliding_window;            /* 0 = disabled                         */
     uint32_t sliding_window_pattern;   /* 1 = all global, 2 = alternating     */
+    /* ── Gemma 4 dual-geometry attention ──────────────────────────────────
+     *
+     * Gemma 4 does not merely alternate *window size* between layers the way
+     * Gemma 2 does — sliding and global layers have genuinely different
+     * attention shapes, so a single head_dim/n_head_kv cannot describe the
+     * model. In gemma-4-31B-it, 50 sliding layers use head_dim 256 with 16 KV
+     * heads and rope theta 1e4, while 10 global layers use head_dim 512 with
+     * 4 KV heads and rope theta 1e6. The GGUF reflects this by storing
+     * attention.head_count_kv as a 60-element ARRAY rather than a scalar.
+     *
+     * The non-suffixed fields above (head_dim, n_head_kv, rope_dim,
+     * rope_theta) carry the GLOBAL-layer geometry; the _swa fields here carry
+     * the sliding-layer geometry. `layer_is_swa` gives the per-layer pattern
+     * directly from metadata rather than inferring it from a modulus, because
+     * the pattern is data, not arithmetic.
+     *
+     * When uses_gemma4 is false every _swa field mirrors its base field, so
+     * geometry lookups are uniform for all other architectures. */
+    bool     uses_gemma4;
+    uint32_t head_dim_swa;             /* sliding-layer head dim (256)         */
+    uint32_t n_head_kv_swa;            /* sliding-layer KV heads (16)          */
+    uint32_t rope_dim_swa;             /* sliding-layer rotary dims (256)      */
+    float    rope_theta_swa;           /* sliding-layer rope base (1e4)        */
+    /* Per-layer attention kind, n_layer entries: 1 = sliding, 0 = global.
+     * Owned by the model (freed in oc_llama_free); NULL when uses_gemma4 is
+     * false. */
+    uint8_t *layer_is_swa;
+    /* Softcap applied to the final logits: logits = tanh(l/c)*c. 0 = off.
+     * Gemma 4 uses 30.0; skipping it measurably distorts the sampling
+     * distribution, so it is correctness, not a tuning knob. */
+    float    logit_softcap;
+    /* Global layers ship no attn_v tensor at all — V is the same projection
+     * as K (config.json `attention_k_eq_v`). The loader aliases attn_v onto
+     * attn_k for those layers, and the KV cache stores one buffer instead of
+     * two, halving global-layer cache footprint. */
+    bool     k_eq_v;
     /* YaRN long-context RoPE scaling. */
     float    yarn_factor;               /* scaling factor (0 = no YaRN)            */
     uint32_t yarn_orig_ctx;             /* original context length (for YaRN)      */
@@ -115,6 +151,28 @@ typedef struct OcLlamaLayer {
     float *attn_q_bias;
     float *attn_k_bias;
     float *attn_v_bias;
+    /* ── Gemma-family extra norms (all owned f32, NULL when absent) ────────
+     *
+     * Gemma applies RMSNorm to Q and K per head *after* projection and before
+     * RoPE (lengths are the layer's own head_dim — 256 on sliding layers, 512
+     * on global ones, so these are not interchangeable between layers), and
+     * wraps each residual branch in a second "sandwich" norm applied to the
+     * branch output before it is added back. */
+    float *attn_q_norm;         /* length = this layer's head_dim   */
+    float *attn_k_norm;         /* length = this layer's head_dim   */
+    float *post_attention_norm; /* length n_embd, applied to attn branch out */
+    float *post_ffw_norm;       /* length n_embd, applied to FFN branch out  */
+    /* Gemma 4 per-layer output scale (blk.N.layer_output_scale.weight, a
+     * single f32). Multiplies the layer's contribution; 1.0 when absent. */
+    float  layer_output_scale;
+    /* Resolved geometry for this layer, filled by the loader so the forward
+     * passes never re-derive it from the layer index. For non-Gemma-4 models
+     * every layer gets the model-wide values. */
+    uint32_t head_dim;      /* per-head query/key width               */
+    uint32_t n_head_kv;     /* KV heads in this layer                 */
+    uint32_t rope_dim;      /* rotary dims in this layer              */
+    float    rope_theta;    /* rope base in this layer                */
+    uint32_t sliding_window;/* 0 = global (full) attention            */
 } OcLlamaLayer;
 
 typedef struct OcLlamaModel {
