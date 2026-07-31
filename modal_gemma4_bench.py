@@ -1,7 +1,9 @@
 """Benchmark oxidize-c (quantized-resident CUDA) on Gemma 4 31B IQ4_XS.
 
-    modal run modal_gemma4_bench.py::smoke       # correctness first
-    modal run modal_gemma4_bench.py::bench_l40s  # then speed
+    modal run modal_gemma4_bench.py::smoke   # correctness first
+    modal run modal_gemma4_bench.py::bench   # then speed
+
+Set OX_GPU to pick the card (default A10G; L40S needs a payment method).
 
 The model already lives in the `gemma4-gguf` volume; `download` only refetches
 if it is missing. The container compiles oxidize-c with the CUDA backend and
@@ -13,9 +15,21 @@ Decode at batch 1 is bandwidth-bound, so the ceiling is roughly
 16.4 GB / GPU-bandwidth: ~52 tok/s on an L40S, ~36 on an A10G.
 """
 
+import os
+
 import modal
 
 app = modal.App("oxidize-c-gemma4-bench")
+
+# GPU is chosen at import time, not per-function: Modal validates every
+# function's GPU when the app is created, so merely *defining* a function for a
+# GPU the account cannot use fails the whole app — including runs targeting a
+# different one. Override with OX_GPU=L40S once a payment method is on file.
+#
+#   A10G  24 GB  ~600 GB/s   ceiling ~36 tok/s on this model
+#   L4    24 GB  ~300 GB/s   ceiling ~18 tok/s
+#   L40S  48 GB  ~864 GB/s   ceiling ~52 tok/s
+GPU = os.environ.get("OX_GPU", "A10G")
 
 GGUF_URL = (
     "https://huggingface.co/unsloth/gemma-4-31B-it-GGUF/resolve/main/"
@@ -71,11 +85,13 @@ def _fetch() -> None:
 
 def _build() -> None:
     """Compile only for the GPU we are on. The default fatbin covers six
-    architectures and dominates container startup; sm_89 is L40S/L4/Ada."""
+    architectures and dominates container startup."""
     import subprocess
 
+    arch = {"A10G": "86", "A10": "86", "L4": "89", "L40S": "89",
+            "A100": "80", "H100": "90", "T4": "75"}.get(GPU, "86")
     subprocess.run(
-        ["make", "cuda", "-j", "8", "CUDA_ARCHS=89"],
+        ["make", "cuda", "-j", "8", "CUDA_ARCHS=" + arch],
         cwd="/src/oxidize-c", check=True,
     )
 
@@ -87,16 +103,15 @@ def download():
     print("size:", os.path.getsize(GGUF))
 
 
-@app.function(gpu="L40S", image=image, volumes={"/vol": vol},
+@app.function(gpu=GPU, image=image, volumes={"/vol": vol},
               timeout=3600, memory=32768, cpu=8)
-def smoke(max_tokens: int = 48, ctx: int = 2048):
+def smoke(max_tokens: int = 48, kv_ctx: int = 1024):
     """Correctness before speed: a fast model that emits garbage is worthless.
 
     Read the output — it should be coherent English on the requested topic. A
     wrong dual-geometry mapping, a missed Q/K norm, or a bad IQ4_XS unpack can
     all still produce fluent-looking token streams, so this wants eyes on it,
     not just an exit code."""
-    import os
     import subprocess
 
     _fetch()
@@ -105,12 +120,12 @@ def smoke(max_tokens: int = 48, ctx: int = 2048):
     _build()
     subprocess.run(
         [BIN, "--model", GGUF, "--prompt", PROMPT,
-         "--max-tokens", str(max_tokens), "--ctx", str(ctx), "--verbose"],
+         "--max-tokens", str(max_tokens), "--ctx", str(kv_ctx), "--verbose"],
         env=dict(os.environ, OC_PROF="1"), check=True,
     )
 
 
-def _bench(max_tokens: int, ctx: int) -> None:
+def _bench(max_tokens: int, kv_ctx: int) -> None:
     import subprocess
 
     _fetch()
@@ -119,25 +134,19 @@ def _bench(max_tokens: int, ctx: int) -> None:
     _build()
     subprocess.run(
         [BIN, "--model", GGUF, "--prompt", PROMPT,
-         "--max-tokens", str(max_tokens), "--ctx", str(ctx), "--stream"],
+         "--max-tokens", str(max_tokens), "--ctx", str(kv_ctx), "--stream"],
         check=True,
     )
 
 
-@app.function(gpu="L40S", image=image, volumes={"/vol": vol},
+@app.function(gpu=GPU, image=image, volumes={"/vol": vol},
               timeout=3600, memory=32768, cpu=8)
-def bench_l40s(max_tokens: int = 256, ctx: int = 4096):
-    _bench(max_tokens, ctx)
-
-
-@app.function(gpu="A10G", image=image, volumes={"/vol": vol},
-              timeout=3600, memory=32768, cpu=8)
-def bench_a10g(max_tokens: int = 256, ctx: int = 4096):
-    _bench(max_tokens, ctx)
+def bench(max_tokens: int = 256, kv_ctx: int = 2048):
+    _bench(max_tokens, kv_ctx)
 
 
 @app.local_entrypoint()
 def main():
     download.remote()
     smoke.remote()
-    bench_l40s.remote()
+    bench.remote()

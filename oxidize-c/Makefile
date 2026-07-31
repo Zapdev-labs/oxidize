@@ -177,9 +177,17 @@ cuda: CFLAGS := -std=c11 -Wall -Wextra -Werror -O2 -DOC_CUDA
 # -Werror applies to the host side so `make cuda` is as strict as `make build`.
 cuda: NVCC_FLAGS := -O2 -Iinclude -DOC_CUDA $(NVCC_GENCODE) \
                     -Xcompiler -Wall,-Wextra,-Werror
-cuda: LDFLAGS := -lm -lpthread -L$(CUDA_HOME)/lib64 -lcudart -lstdc++
+# -no-pie: nvcc emits non-PIC device-stub objects, but distributions that
+# default gcc to PIE (Ubuntu 22.04, which the CUDA images are built on) then
+# refuse to link them against the PIE C objects:
+#   relocation R_X86_64_32 against `.rodata.str1.1' can not be used when
+#   making a PIE object
+# Linking the executable non-PIE is the right side to fix: it costs only ASLR
+# on the binary itself, whereas rebuilding every C object as -fPIE just to
+# accommodate the device stubs would apply to the CPU build too.
+cuda: LDFLAGS := -lm -lpthread -L$(CUDA_HOME)/lib64 -lcudart -lstdc++ -no-pie
 cuda: $(CUDA_LIB_OBJS) $(CUDA_OBJS) $(BIN_OBJS)
-	gcc $(CPPFLAGS) $(CFLAGS) -o oxidize-c $(CUDA_LIB_OBJS) $(CUDA_OBJS) $(BIN_OBJS) $(LDFLAGS)
+	gcc $(CPPFLAGS) $(CFLAGS) -no-pie -o oxidize-c $(CUDA_LIB_OBJS) $(CUDA_OBJS) $(BIN_OBJS) $(LDFLAGS)
 
 %.cuo: %.cu
 	nvcc $(NVCC_FLAGS) -c -o $@ $<
