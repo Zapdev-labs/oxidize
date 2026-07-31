@@ -21,14 +21,16 @@
 #include "oxidize/cuda_mmq.h"
 #include "oxidize/quant.h"
 
+#include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
 /* Must match include/oxidize/quant.h. */
 #define MQ_QK_K            256u
 #define MQ_QK8_0            32u
-#define MQ_BLOCK_Q4_K_SIZE 144u
-#define MQ_BLOCK_Q6_K_SIZE 210u
-#define MQ_BLOCK_Q8_0_SIZE  34u
+#define MQ_BLOCK_Q4_K_SIZE  144u
+#define MQ_BLOCK_Q6_K_SIZE  210u
+#define MQ_BLOCK_Q8_0_SIZE   34u
+#define MQ_BLOCK_IQ4_XS_SIZE 136u
 
 /* Device-side block strides. These may exceed the on-disk stride to buy
  * alignment: Q6_K's 210 bytes is only 2-aligned, which forbids 16-byte vector
@@ -40,38 +42,41 @@
 #define MQ_DEV_Q4_K_SIZE   144u
 #define MQ_DEV_Q6_K_SIZE   224u
 #define MQ_DEV_Q8_0_SIZE    34u
+/* IQ4_XS needs no padding: 136 is a multiple of 8, so every block start is
+ * 8-aligned, and each group's 16-byte `qs` span sits at blk + 8 + 16*ib —
+ * also 8-aligned. That is enough for the uint2 loads the group dot uses.
+ * Padding to 144 for uint4 loads would cost 5.9% VRAM on every weight in a
+ * Gemma 4 file (410 of its 833 tensors are IQ4_XS) to halve an already
+ * vectorized load count, which is not the bottleneck here. */
+#define MQ_DEV_IQ4_XS_SIZE 136u
 
 #define MQ_BLOCK_THREADS   256u   /* threads per block on the get_row path */
 
 /* ─── Device helpers ──────────────────────────────────────────────────────── */
 
-/* f16 (little-endian pair) → f32. Mirrors quantization.c::f16_le_to_f32. */
+/* f16 (little-endian pair) → f32.
+ *
+ * Semantically identical to quantization.c::f16_le_to_f32, but a single
+ * hardware conversion instead of the scalar bit-twiddling that function needs
+ * on the host. This runs once per 32-element group per lane on the hottest
+ * path in the model, and the portable version's denormal branch is a
+ * data-dependent `while` loop — the last thing you want inside a warp. */
 __device__ __forceinline__ float mq_f16(uint8_t b0, uint8_t b1)
 {
-    uint32_t bits = (uint32_t)b0 | ((uint32_t)b1 << 8);
-    uint32_t sign = (bits >> 15) & 1u;
-    uint32_t exp  = (bits >> 10) & 0x1Fu;
-    uint32_t frac = bits & 0x03FFu;
-    uint32_t f;
-
-    if (exp == 0u) {
-        if (frac == 0u) {
-            f = sign << 31;
-        } else {
-            uint32_t fn = frac;
-            int32_t e = -14;
-            while ((fn & 0x0400u) == 0u) { fn <<= 1; e -= 1; }
-            fn &= 0x03FFu;
-            f = (sign << 31) | (((uint32_t)(e + 127)) << 23) | (fn << 13);
-        }
-    } else if (exp == 0x1Fu) {
-        f = (sign << 31) | 0x7F800000u | (frac << 13);
-    } else {
-        int32_t e = (int32_t)exp - 15 + 127;
-        f = (sign << 31) | (((uint32_t)e) << 23) | (frac << 13);
-    }
-    return __uint_as_float(f);
+    const unsigned short bits =
+        (unsigned short)((unsigned)b0 | ((unsigned)b1 << 8));
+    return __half2float(__ushort_as_half(bits));
 }
+
+/* IQ4_NL nonlinear 4-bit codebook. Mirrors quant_tables.h::KVALUES_IQ4NL,
+ * which is itself generated from ggml-common.h. Held in constant memory: every
+ * lane of a warp indexes it with unrelated nibbles, but the table is 16 bytes
+ * and stays resident in the constant cache, so the broadcast-vs-gather
+ * distinction costs nothing at this size. */
+__device__ __constant__ int8_t MQ_KVALUES_IQ4NL[16] = {
+    -127, -104, -83, -65, -49, -35, -22, -10,
+    1, 13, 25, 38, 53, 69, 89, 113
+};
 
 /* Q4_K 6-bit scale/min unpack. Mirrors quantization.c::get_scale_min_k4. */
 __device__ __forceinline__ void mq_scale_min_k4(uint32_t j,
@@ -212,6 +217,59 @@ __device__ __forceinline__ float mq_q8_0_group_dot(const uint8_t *row,
     return acc * d;
 }
 
+/* IQ4_XS: 8 groups per super-block, and the 32-element group maps exactly onto
+ * one ib32 sub-block — the natural unit here, unlike the K-quants where a
+ * group is half a scale span. Layout per quantization.c::dequant_iq4_xs:
+ *   d[0..2] f16, scales_h[2..4] u16 LE, scales_l[4..8], qs[8..136].
+ *
+ * Sub-block ib owns 16 bytes at qs + ib*16 and a 6-bit signed scale split
+ * across scales_l (low nibble) and scales_h (high 2 bits). Within the group,
+ * byte j's low nibble is value j and its high nibble is value j+16 — so the
+ * two halves of x are read as separate 16-float spans rather than
+ * interleaved. Values are codebook indices, not magnitudes, which is why this
+ * cannot reuse the K-quant "sum(x*q), sum(x)" factoring: there is no additive
+ * min term, but the dequantized value is a table lookup, so only the single
+ * `dl` scale factors out. */
+__device__ __forceinline__ float mq_iq4_xs_group_dot(const uint8_t *row,
+                                                     uint32_t g, const float *x)
+{
+    const uint8_t *blk = row + (size_t)(g >> 3) * MQ_DEV_IQ4_XS_SIZE;
+    const uint32_t ib = g & 7u;
+
+    const float d = mq_f16(blk[0], blk[1]);
+    const uint32_t scales_h = (uint32_t)blk[2] | ((uint32_t)blk[3] << 8);
+    const uint8_t *scales_l = blk + 4;
+
+    const int32_t ls_l = (int32_t)((scales_l[ib >> 1] >> (4u * (ib & 1u))) & 0x0Fu);
+    const int32_t ls_h = (int32_t)((scales_h >> (2u * ib)) & 3u) << 4;
+    const float dl = d * (float)((ls_l | ls_h) - 32);
+
+    /* 8-byte loads: blk is 8-aligned (136 = 17*8) and qs sits at blk + 8, so
+     * qs + ib*16 is 8-aligned. uint4 would need 16 and is not guaranteed. */
+    const uint8_t *qs = blk + 8 + (size_t)ib * 16u;
+    const uint2 p0 = *reinterpret_cast<const uint2 *>(qs);
+    const uint2 p1 = *reinterpret_cast<const uint2 *>(qs + 8);
+    const uint32_t words[4] = { p0.x, p0.y, p1.x, p1.y };
+
+    float acc = 0.0f;
+    #pragma unroll
+    for (uint32_t wi = 0u; wi < 4u; wi++) {
+        const uint32_t word = words[wi];
+        /* x + g*32 is 128-byte aligned, so both spans are 16-aligned. */
+        const float4 xlo = *reinterpret_cast<const float4 *>(x + wi * 4u);
+        const float4 xhi = *reinterpret_cast<const float4 *>(x + 16u + wi * 4u);
+        const float ls[4] = { xlo.x, xlo.y, xlo.z, xlo.w };
+        const float hs[4] = { xhi.x, xhi.y, xhi.z, xhi.w };
+        #pragma unroll
+        for (uint32_t b = 0u; b < 4u; b++) {
+            const uint32_t byte = (word >> (b * 8u)) & 0xFFu;
+            acc += (float)MQ_KVALUES_IQ4NL[byte & 0x0Fu] * ls[b];
+            acc += (float)MQ_KVALUES_IQ4NL[byte >> 4]    * hs[b];
+        }
+    }
+    return dl * acc;
+}
+
 /* ─── Reduction ──────────────────────────────────────────────────────────── */
 
 /* Sum across a warp with shuffles: no shared memory and no __syncthreads.
@@ -247,9 +305,10 @@ __global__ void NAME(const uint8_t *w, const float *x, float *out,           \
     if (lane == 0u) out[row] = partial;                                      \
 }
 
-MQ_DEFINE_MATVEC(k_mmq_matvec_q4k,  mq_q4k_group_dot)
-MQ_DEFINE_MATVEC(k_mmq_matvec_q6k,  mq_q6k_group_dot)
-MQ_DEFINE_MATVEC(k_mmq_matvec_q8_0, mq_q8_0_group_dot)
+MQ_DEFINE_MATVEC(k_mmq_matvec_q4k,    mq_q4k_group_dot)
+MQ_DEFINE_MATVEC(k_mmq_matvec_q6k,    mq_q6k_group_dot)
+MQ_DEFINE_MATVEC(k_mmq_matvec_q8_0,   mq_q8_0_group_dot)
+MQ_DEFINE_MATVEC(k_mmq_matvec_iq4_xs, mq_iq4_xs_group_dot)
 
 /* MoE variant: the expert to use is read from device memory, so routing never
  * round-trips to the host and the whole token stays one async submission.
@@ -270,9 +329,10 @@ __global__ void NAME(const uint8_t *w, const float *x, float *out,           \
     if (lane == 0u) out[r] = partial;                                        \
 }
 
-MQ_DEFINE_MATVEC_EXPERT(k_mmq_matvec_exp_q4k,  mq_q4k_group_dot)
-MQ_DEFINE_MATVEC_EXPERT(k_mmq_matvec_exp_q6k,  mq_q6k_group_dot)
-MQ_DEFINE_MATVEC_EXPERT(k_mmq_matvec_exp_q8_0, mq_q8_0_group_dot)
+MQ_DEFINE_MATVEC_EXPERT(k_mmq_matvec_exp_q4k,    mq_q4k_group_dot)
+MQ_DEFINE_MATVEC_EXPERT(k_mmq_matvec_exp_q6k,    mq_q6k_group_dot)
+MQ_DEFINE_MATVEC_EXPERT(k_mmq_matvec_exp_q8_0,   mq_q8_0_group_dot)
+MQ_DEFINE_MATVEC_EXPERT(k_mmq_matvec_exp_iq4_xs, mq_iq4_xs_group_dot)
 
 /* ─── Single-row dequantize (embedding lookup) ────────────────────────────── */
 
@@ -350,9 +410,33 @@ __device__ __forceinline__ void mq_q8_0_expand(const uint8_t *blk, float *out)
     for (uint32_t i = 0u; i < MQ_QK8_0; i++) out[i] = (float)q[i] * d;
 }
 
-MQ_DEFINE_GETROW(k_mmq_getrow_q4k,  MQ_DEV_Q4_K_SIZE, MQ_QK_K,  mq_q4k_expand)
-MQ_DEFINE_GETROW(k_mmq_getrow_q6k,  MQ_DEV_Q6_K_SIZE, MQ_QK_K,  mq_q6k_expand)
-MQ_DEFINE_GETROW(k_mmq_getrow_q8_0, MQ_DEV_Q8_0_SIZE, MQ_QK8_0, mq_q8_0_expand)
+/* IQ4_XS full-block expansion. Same layout walk as mq_iq4_xs_group_dot, but
+ * writing all 256 values instead of contracting them against x. */
+__device__ __forceinline__ void mq_iq4_xs_expand(const uint8_t *blk, float *out)
+{
+    const float d = mq_f16(blk[0], blk[1]);
+    const uint32_t scales_h = (uint32_t)blk[2] | ((uint32_t)blk[3] << 8);
+    const uint8_t *scales_l = blk + 4;
+    const uint8_t *qs = blk + 8;
+
+    for (uint32_t ib = 0u; ib < 8u; ib++) {
+        const int32_t ls_l =
+            (int32_t)((scales_l[ib >> 1] >> (4u * (ib & 1u))) & 0x0Fu);
+        const int32_t ls_h = (int32_t)((scales_h >> (2u * ib)) & 3u) << 4;
+        const float dl = d * (float)((ls_l | ls_h) - 32);
+        const uint8_t *q = qs + (size_t)ib * 16u;
+        float *o = out + (size_t)ib * 32u;
+        for (uint32_t j = 0u; j < 16u; j++) {
+            o[j]       = dl * (float)MQ_KVALUES_IQ4NL[q[j] & 0x0Fu];
+            o[j + 16u] = dl * (float)MQ_KVALUES_IQ4NL[q[j] >> 4];
+        }
+    }
+}
+
+MQ_DEFINE_GETROW(k_mmq_getrow_q4k,    MQ_DEV_Q4_K_SIZE,   MQ_QK_K,  mq_q4k_expand)
+MQ_DEFINE_GETROW(k_mmq_getrow_q6k,    MQ_DEV_Q6_K_SIZE,   MQ_QK_K,  mq_q6k_expand)
+MQ_DEFINE_GETROW(k_mmq_getrow_q8_0,   MQ_DEV_Q8_0_SIZE,   MQ_QK8_0, mq_q8_0_expand)
+MQ_DEFINE_GETROW(k_mmq_getrow_iq4_xs, MQ_DEV_IQ4_XS_SIZE, MQ_QK_K,  mq_iq4_xs_expand)
 
 /* ─── Host API ───────────────────────────────────────────────────────────── */
 
@@ -372,6 +456,9 @@ static void mq_layout(uint32_t qtype, size_t *src_block, size_t *dev_block,
     case OC_QUANT_Q8_0:
         *src_block = MQ_BLOCK_Q8_0_SIZE; *dev_block = MQ_DEV_Q8_0_SIZE;
         *vals = MQ_QK8_0; return;
+    case OC_QUANT_IQ4_XS:
+        *src_block = MQ_BLOCK_IQ4_XS_SIZE; *dev_block = MQ_DEV_IQ4_XS_SIZE;
+        *vals = MQ_QK_K;  return;
     default:
         *src_block = 0; *dev_block = 0; *vals = 0; return;
     }
@@ -436,6 +523,10 @@ extern "C" bool oc_cuda_mmq_matvec(uint32_t qtype, const void *d_weights,
         k_mmq_matvec_q8_0<<<grid, block, 0, s>>>(w, d_x, d_out, rows,
                                                  n_groups, row_bytes);
         break;
+    case OC_QUANT_IQ4_XS:
+        k_mmq_matvec_iq4_xs<<<grid, block, 0, s>>>(w, d_x, d_out, rows,
+                                                   n_groups, row_bytes);
+        break;
     default:
         return false;
     }
@@ -472,6 +563,10 @@ extern "C" bool oc_cuda_mmq_matvec_expert(uint32_t qtype, const void *d_weights,
         k_mmq_matvec_exp_q8_0<<<grid, block, 0, s>>>(w, d_x, d_out, rows,
             n_groups, row_bytes, d_expert_sel, slot);
         break;
+    case OC_QUANT_IQ4_XS:
+        k_mmq_matvec_exp_iq4_xs<<<grid, block, 0, s>>>(w, d_x, d_out, rows,
+            n_groups, row_bytes, d_expert_sel, slot);
+        break;
     default:
         return false;
     }
@@ -504,6 +599,9 @@ extern "C" bool oc_cuda_mmq_get_row(uint32_t qtype, const void *d_weights,
         break;
     case OC_QUANT_Q8_0:
         k_mmq_getrow_q8_0<<<grid, block, 0, s>>>(w, token, d_out, cols, row_bytes);
+        break;
+    case OC_QUANT_IQ4_XS:
+        k_mmq_getrow_iq4_xs<<<grid, block, 0, s>>>(w, token, d_out, cols, row_bytes);
         break;
     default:
         return false;
