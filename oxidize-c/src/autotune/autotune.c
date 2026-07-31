@@ -300,7 +300,12 @@ OcTuningPlan oc_autotune_plan(const OcCpuInfo *cpu,
     OcTuningPlan p;
     memset(&p, 0, sizeof(p));
     p.simd_level = cpu ? cpu->simd.level : OC_SIMD_SCALAR;
-    p.use_simd_dequant = (p.simd_level >= OC_SIMD_AVX2);
+    /* Tested by equality, not `>=`: OC_SIMD_NEON sorts above the x86 tiers
+     * numerically but is a different architecture, and there is no NEON
+     * dequant kernel — oc_simd_try_dequant() returns false there. An ordered
+     * test would promise a SIMD dequant path that silently falls back. */
+    p.use_simd_dequant = (p.simd_level == OC_SIMD_AVX2 ||
+                          p.simd_level == OC_SIMD_AVX512);
 
     /* Memory headroom: model fits in RAM with 2x headroom? */
     uint64_t avail = cpu ? cpu->available_ram_bytes : 0;
@@ -333,6 +338,7 @@ OcTuningPlan oc_autotune_plan(const OcCpuInfo *cpu,
 
     p.rationale_simd = (p.simd_level == OC_SIMD_AVX512) ? "AVX-512 BW+DQ+VNNI detected → use AVX-512 dequant kernels"
                        : (p.simd_level == OC_SIMD_AVX2) ? "AVX2+FMA+F16C detected → use AVX2 dequant kernels"
+                       : (p.simd_level == OC_SIMD_NEON) ? "AArch64 NEON detected → use NEON GEMV kernels (dequant stays scalar)"
                        : "no SIMD acceleration available → scalar fallback";
     if (fits_2x) {
         p.rationale_memory = "available RAM >= 2x model → enable hugepages + mlock";
@@ -380,7 +386,8 @@ void oc_autotune_plan_dump(const OcTuningPlan *plan,
             plan->rationale_numa ? plan->rationale_numa : "");
     fprintf(stderr, "  simd:        %s   (%s)\n",
             plan->simd_level == OC_SIMD_AVX512 ? "avx512"
-            : plan->simd_level == OC_SIMD_AVX2 ? "avx2" : "scalar",
+            : plan->simd_level == OC_SIMD_AVX2 ? "avx2"
+            : plan->simd_level == OC_SIMD_NEON ? "neon" : "scalar",
             plan->rationale_simd ? plan->rationale_simd : "");
     fprintf(stderr, "  hugepages:   %s\n", plan->use_hugepages ? "yes" : "no");
     fprintf(stderr, "  mlock:       %s\n", plan->mlock_weights ? "yes" : "no");

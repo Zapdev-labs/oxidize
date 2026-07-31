@@ -69,6 +69,9 @@ typedef enum {
     OC_OXK_SCALAR  = 0,   /* no usable SIMD acceleration                */
     OC_OXK_AVX2    = 1,   /* AVX2 + FMA + F16C (Haswell+, Zen2+)        */
     OC_OXK_AVX512  = 2,   /* AVX-512 BW + DQ + VNNI (Cascade Lake+, Zen4) */
+    OC_OXK_NEON    = 3,   /* AArch64 Advanced SIMD — see oxk_neon.h. Not
+                           * ordered against the x86 tiers; compare for
+                           * equality, never `>=`. */
 } OcOxkLevel;
 
 typedef struct OcOxkCaps {
@@ -76,7 +79,8 @@ typedef struct OcOxkCaps {
     bool has_f16c;    /* f16 → f32 hardware conversion (needed by AVX2+)   */
     bool has_fma;    /* FMA3 (available on every AVX2 host in practice)   */
     bool has_vnni;   /* AVX-512 VNNI (VPDPBUSD)                           */
-    const char *name; /* "scalar" | "avx2" | "avx512"                     */
+    bool has_neon;   /* AArch64 Advanced SIMD                             */
+    const char *name; /* "scalar" | "avx2" | "avx512" | "neon"            */
 } OcOxkCaps;
 
 /* Function-pointer types for each kernel family. The dot products take a

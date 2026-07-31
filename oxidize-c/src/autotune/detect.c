@@ -63,8 +63,14 @@ OcError oc_detect_cpu(OcDetectInfo *info)
                           ((strstr(info->model_name, "Xeon") != NULL) &&
                            (strstr(info->model_name, "Gold") != NULL ||
                             strstr(info->model_name, "Platinum") != NULL));
-#else
+#elif defined(__aarch64__)
+    /* NEON (Advanced SIMD) is mandatory in the AArch64 base architecture, so
+     * this is a compile-time fact rather than a runtime probe. Optional
+     * extensions (dotprod / i8mm) would need getauxval(AT_HWCAP); OXK's NEON
+     * kernels use only the baseline, so nothing else is probed here. */
     info->has_neon = true;
+    strcpy(info->model_name, "aarch64");
+#else
     strcpy(info->model_name, "unknown");
 #endif
 
@@ -202,7 +208,7 @@ void oc_detect_print(const OcDetectInfo *info, char *out, size_t out_size)
         "Cores: %u physical, %u logical, %u sockets\n"
         "RAM: %.1f GB\n"
         "SIMD: %s\n"
-        "AVX2: %s, AVX-512: %s, VNNI: %s, FMA: %s\n"
+        "AVX2: %s, AVX-512: %s, VNNI: %s, FMA: %s, NEON: %s\n"
         "Skylake-SP: %s\n"
         "NUMA nodes: %u\n"
         "Recommended threads: %u\n",
@@ -214,6 +220,7 @@ void oc_detect_print(const OcDetectInfo *info, char *out, size_t out_size)
         info->has_avx512f ? "yes" : "no",
         info->has_avx512_vnni ? "yes" : "no",
         info->has_fma ? "yes" : "no",
+        info->has_neon ? "yes" : "no",
         info->is_skylake_sp ? "yes" : "no",
         info->n_numa_nodes,
         oc_detect_recommended_threads(info));

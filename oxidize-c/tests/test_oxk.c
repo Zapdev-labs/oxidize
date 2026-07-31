@@ -50,7 +50,7 @@ Test(oxk, caps_init)
 {
     const OcOxkCaps *caps = oc_oxk_caps();
     cr_assert_not_null(caps);
-    cr_assert(caps->level >= OC_OXK_SCALAR && caps->level <= OC_OXK_AVX512);
+    cr_assert(caps->level >= OC_OXK_SCALAR && caps->level <= OC_OXK_NEON);
     cr_assert_not_null(caps->name);
 }
 

@@ -82,6 +82,14 @@ static OcSimdCaps detect_caps(void)
         c.level = OC_SIMD_SCALAR;
         c.name  = "scalar";
     }
+#elif defined(__aarch64__)
+    /* NEON (Advanced SIMD) is mandatory in the AArch64 base architecture —
+     * there is no HWCAP bit worth testing, so detection is compile-time.
+     * Optional extensions (dotprod / i8mm) would need getauxval(AT_HWCAP);
+     * the OXK NEON kernels deliberately do not use them. */
+    c.level    = OC_SIMD_NEON;
+    c.has_neon = true;
+    c.name     = "neon";
 #else
     c.level = OC_SIMD_SCALAR;
     c.name  = "scalar";
@@ -118,8 +126,20 @@ bool oc_simd_try_dequant(OcGgufQuantizationType qtype,
         return false;
     }
 
+#if !defined(__x86_64__) && !defined(__i386__)
+    /* Off x86 there is no SIMD dequant kernel, so qtype goes unread and the
+     * caller always takes the scalar path. */
+    (void)qtype;
+#endif
+
     const OcSimdCaps *caps = oc_simd_caps();
     switch (caps->level) {
+/* The AVX kernels are only *defined* on x86 (simd_avx2.c / simd_avx512.c are
+ * wholly inside an `#if defined(__x86_64__) || defined(__i386__)`). These
+ * branches are unreachable elsewhere — caps->level can never report an x86
+ * tier on another architecture — but an unguarded call still needs the symbol
+ * at link time, which is what broke the aarch64 link. */
+#if defined(__x86_64__) || defined(__i386__)
     case OC_SIMD_AVX512:
         switch (qtype) {
         case OC_QUANT_Q4_0: return oc_simd_dequant_q4_0_avx512(src, src_len, dst, value_count);
@@ -140,6 +160,7 @@ bool oc_simd_try_dequant(OcGgufQuantizationType qtype,
         default: return false;
         }
         break;
+#endif /* x86 */
     case OC_SIMD_SCALAR:
     default:
         return false;

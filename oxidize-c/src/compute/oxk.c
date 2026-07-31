@@ -6,6 +6,7 @@
  */
 #define _POSIX_C_SOURCE 200809L
 #include "oxidize/oxk.h"
+#include "oxidize/oxk_neon.h"
 #include "oxidize/simd.h"
 
 #include <string.h>
@@ -357,7 +358,7 @@ static pthread_once_t g_once = PTHREAD_ONCE_INIT;
 static void oc_oxk_init_once(void)
 {
     OcOxkLevel level = OC_OXK_SCALAR;
-    bool has_f16c = false, has_fma = false, has_vnni = false;
+    bool has_f16c = false, has_fma = false, has_vnni = false, has_neon = false;
     const char *name = "scalar";
 
     /* Reuse core/simd.c's cpuid-based detection: __builtin_cpu_supports
@@ -375,21 +376,40 @@ static void oc_oxk_init_once(void)
         has_f16c = sc->has_f16c;
         has_fma  = sc->has_fma;
         name = "avx2";
+    } else if (sc->level == OC_SIMD_NEON) {
+        level = OC_OXK_NEON;
+        has_neon = true;
+        name = "neon";
     }
 
     g_ctx.caps.level    = level;
     g_ctx.caps.has_f16c = has_f16c;
     g_ctx.caps.has_fma  = has_fma;
     g_ctx.caps.has_vnni = has_vnni;
+    g_ctx.caps.has_neon = has_neon;
     g_ctx.caps.name     = name;
 
-    /* Dispatch table — all forward to scalar for now. */
+    /* Dispatch table — x86 SIMD variants still forward to scalar; the
+     * AArch64 NEON dot products below are real implementations. */
     g_ctx.dot_q4_0_q8_0 = oc_oxk_dot_q4_0_q8_0_scalar;
     g_ctx.dot_q4_1_q8_0 = oc_oxk_dot_q4_1_q8_0_scalar;
     g_ctx.dot_q4_k_q8_k = oc_oxk_dot_q4_k_q8_k_scalar;
     g_ctx.dot_q5_k_q8_k = oc_oxk_dot_q5_k_q8_k_scalar;
     g_ctx.dot_q6_k_q8_k = oc_oxk_dot_q6_k_q8_k_scalar;
     g_ctx.dot_q8_0_q8_0 = oc_oxk_dot_q8_0_q8_0_scalar;
+
+#if defined(__aarch64__)
+    if (level == OC_OXK_NEON) {
+        g_ctx.dot_q4_0_q8_0 = oc_oxk_dot_q4_0_q8_0_neon;
+        g_ctx.dot_q4_1_q8_0 = oc_oxk_dot_q4_1_q8_0_neon;
+        g_ctx.dot_q4_k_q8_k = oc_oxk_dot_q4_k_q8_k_neon;
+        g_ctx.dot_q5_k_q8_k = oc_oxk_dot_q5_k_q8_k_neon;
+        g_ctx.dot_q6_k_q8_k = oc_oxk_dot_q6_k_q8_k_neon;
+        g_ctx.dot_q8_0_q8_0 = oc_oxk_dot_q8_0_q8_0_neon;
+    }
+    /* Matvecs stay scalar on NEON too: their reference accumulates f32
+     * per element, and vectorizing reassociates that sum (see oxk_neon.h). */
+#endif
 
     g_ctx.matvec_q4_0_f32 = oc_oxk_matvec_q4_0_f32_scalar;
     g_ctx.matvec_q4_k_f32 = oc_oxk_matvec_q4_k_f32_scalar;

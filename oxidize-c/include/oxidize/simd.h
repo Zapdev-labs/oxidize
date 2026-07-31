@@ -43,6 +43,10 @@ typedef enum {
     OC_SIMD_SCALAR  = 0,   /* no usable SIMD acceleration                */
     OC_SIMD_AVX2    = 1,   /* AVX2 + FMA + F16C (Haswell+, Zen2+)        */
     OC_SIMD_AVX512  = 2,   /* AVX-512 BW + DQ + VNNI (Cascade Lake+, Zen4) */
+    OC_SIMD_NEON    = 3,   /* AArch64 Advanced SIMD (Apple Silicon, Graviton,
+                            * Ampere). Disjoint from the x86 tiers — the
+                            * ordering is NOT monotonic across ISAs, so
+                            * callers must compare for equality, never `>=`. */
 } OcSimdLevel;
 
 typedef struct OcSimdCaps {
@@ -50,7 +54,8 @@ typedef struct OcSimdCaps {
     bool has_f16c;    /* f16 → f32 hardware conversion (needed by AVX2+)   */
     bool has_fma;    /* FMA3 (available on every AVX2 host in practice)   */
     bool has_vnni;   /* AVX-512 VNNI (DP4A / VPDPBUSD)                    */
-    const char *name; /* "scalar" | "avx2" | "avx512"                     */
+    bool has_neon;   /* AArch64 Advanced SIMD (architecturally guaranteed) */
+    const char *name; /* "scalar" | "avx2" | "avx512" | "neon"            */
 } OcSimdCaps;
 
 /* Returns a pointer to the cached capability struct. Triggers detection on
