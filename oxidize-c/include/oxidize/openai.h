@@ -2,10 +2,15 @@
  * openai.h — OpenAI-compatible HTTP route handlers.
  *
  * Implements the `server-openai-routes` feature on top of server-http-core.
- * Exposes the three canonical endpoints:
+ * Exposes the OpenAI-compatible endpoints:
  *   GET  /v1/models               → list loaded model(s)
  *   POST /v1/completions           → text completion
  *   POST /v1/chat/completions      → chat with message array
+ *   POST /v1/embeddings            → embedding vectors
+ *   POST /v1/responses             → Responses API
+ *   POST /v1/mesh/chat/completions → chat routed across the mesh cluster
+ * plus the operational routes documented further down (/healthz, /livez,
+ * /readyz, /metrics, /openapi.json).
  *
  * JSON parsing is dependency-free and tailored to the OpenAI request shape.
  *
@@ -22,6 +27,7 @@
 
 #include "oxidize/http.h"
 #include "oxidize/llama.h"
+#include "oxidize/middleware.h"
 #include "oxidize/tokenizer.h"
 
 #ifdef __cplusplus
@@ -37,7 +43,30 @@ typedef struct OcOpenaiState {
     OcTokenizer *tokenizer;
     char         *model_id;     /* e.g. "qwen2.5-7b-instruct" (owned)    */
     bool          model_loaded;
+    /* Optional middleware stack (auth, rate limit, metrics, audit, CORS).
+     * NULL disables all of it — the handler then behaves exactly as before.
+     * Not owned; the caller initializes and frees it. */
+    OcMiddleware *mw;
 } OcOpenaiState;
+
+/* ─── Operational endpoints ───────────────────────────────────────────────
+ *
+ * Beyond the OpenAI surface, the handler serves the probe/observability
+ * routes a Kubernetes deployment needs, matching the Rust server's router:
+ *
+ *   GET /healthz      → 200 always (process is up)
+ *   GET /livez        → 200 always (process is not wedged)
+ *   GET /readyz       → 200 once a model is loaded, else 503
+ *   GET /metrics      → Prometheus text exposition (503 without middleware)
+ *   GET /openapi.json → OpenAPI 3.1 description of the above
+ *
+ * `readyz` is deliberately distinct from `healthz`: it gates traffic until
+ * the (slow) model load finishes, so a pod is not sent requests it would
+ * answer with 503. */
+
+/* Build the OpenAPI 3.1 spec as a malloc'd JSON string. Caller frees.
+ * Returns NULL on OOM. */
+char *oc_openai_openapi_json(void);
 
 /* The HTTP handler entry point. Pass this to oc_http_server_start as the
  * handler with an OcOpenaiState* as user_data. */

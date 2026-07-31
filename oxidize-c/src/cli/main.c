@@ -20,6 +20,8 @@
 #include "oxidize/activation.h"   /* ensure link for forward deps */
 #include "oxidize/autotune.h"
 #include "oxidize/numa.h"
+#include "oxidize/version.h"
+#include "oxidize/cli_commands.h"
 #include "oxidize/cuda.h"
 #include "oxidize/error.h"
 #include "oxidize/gguf.h"
@@ -42,7 +44,9 @@
 #include <string.h>
 #include <time.h>
 
-#define OC_CLI_VERSION "0.2.0"
+/* Kept as an alias so the existing call sites read unchanged; the value
+ * itself lives in version.h, shared with the server's /openapi.json. */
+#define OC_CLI_VERSION OC_VERSION
 
 static double wall_now(void)
 {
@@ -75,6 +79,9 @@ static void print_help(void)
 "  --serve-api            Start the OpenAI-compatible HTTP server\n"
 "  --host HOST            Server bind host (default 127.0.0.1)\n"
 "  --port PORT            Server bind port (default 8080)\n"
+"  --api-key KEY          Require `Authorization: Bearer KEY` (default off)\n"
+"  --rate-limit N         Per-IP request/minute cap (default off)\n"
+"  --cors-origin ORIGIN   Send CORS headers for ORIGIN (default off)\n"
 "  --temperature T        Sampling temperature (0 = greedy, default 0)\n"
 "  --top-k K              Top-K sampling (default 40, 0 = disabled)\n"
 "  --top-p P              Top-P / nucleus (default 0.95)\n"
@@ -430,6 +437,16 @@ int main(int argc, char **argv)
 {
     oc_log_init_from_env();
 
+    /* Subcommand form (`oxidize-c quantize --input ... --output ...`) takes
+     * precedence. Falls through to the flag-only form when argv[1] is not a
+     * known subcommand, so the original `--model/--prompt` invocation and
+     * every existing script keep working. */
+    OcCliContext ctx;
+    if (oc_cli_context_parse(argc, argv, &ctx)) {
+        OcError ce = oc_cli_command_run(&ctx);
+        return ce == OC_OK ? 0 : 1;
+    }
+
     OcCliArgs args;
     oc_cli_parse_args(argc, argv, &args);
 
@@ -490,20 +507,55 @@ int main(int argc, char **argv)
             oc_log(OC_LOG_INFO, "serve: no model — starting placeholder server on %s:%d",
                    args.host, args.port);
         }
+        /* Middleware stack. Metrics + audit are always on so /metrics has
+         * something to serve; auth and rate limiting engage only when their
+         * flag is given, leaving the default local invocation unchanged. */
+        OcMiddleware mw;
+        uint32_t mw_enabled = OC_MW_METRICS | OC_MW_AUDIT;
+        if (args.api_key != NULL)       mw_enabled |= OC_MW_AUTH;
+        if (args.rate_limit_rpm > 0)    mw_enabled |= OC_MW_RATE_LIMIT;
+        if (args.cors_origin != NULL)   mw_enabled |= OC_MW_CORS;
+        OcRateLimitConfig rl = {
+            .requests_per_minute = (uint32_t)(args.rate_limit_rpm > 0
+                                              ? args.rate_limit_rpm : 0),
+            /* One second's worth of burst (min 1), so a browser opening
+             * several connections at once is not throttled. */
+            .burst_size = (uint32_t)(args.rate_limit_rpm > 0
+                                     ? args.rate_limit_rpm / 60 + 1 : 1),
+            .per_ip = true,
+        };
+        OcError me = oc_middleware_init(&mw, mw_enabled, args.api_key, &rl,
+                                        args.cors_origin);
+        if (me != OC_OK) {
+            fprintf(stderr, "error: middleware init failed (%s)\n",
+                    oc_error_msg(me));
+            return 1;
+        }
+        st.mw = &mw;
+
         OcHttpServer srv;
         OcError e = oc_http_server_start(args.host, (uint16_t)args.port, 4,
                                          oc_openai_handler, &st, &srv);
         if (e != OC_OK) {
             fprintf(stderr, "error: server start failed (%s)\n", oc_error_msg(e));
+            oc_middleware_free(&mw);
             return 1;
         }
         printf("oxidize-c server listening on http://%s:%u\n"
+               "  GET  /healthz  /livez  /readyz\n"
+               "  GET  /metrics  /openapi.json\n"
                "  GET  /v1/models\n"
                "  POST /v1/completions\n"
                "  POST /v1/chat/completions\n"
-               "(Ctrl+C to stop)\n", args.host, srv.port);
+               "  POST /v1/embeddings\n"
+               "  POST /v1/responses\n"
+               "%s%s"
+               "(Ctrl+C to stop)\n", args.host, srv.port,
+               args.api_key ? "  auth: enabled (Bearer token required)\n" : "",
+               args.rate_limit_rpm > 0 ? "  rate limit: enabled (per-IP)\n" : "");
         fflush(stdout);
         oc_http_server_join(&srv);
+        oc_middleware_free(&mw);
         /* Cleanup (only reached after stop). */
         if (st.model_loaded) {
             free(st.model_id);

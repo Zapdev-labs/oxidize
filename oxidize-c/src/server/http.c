@@ -167,6 +167,18 @@ static bool parse_request(char *buf, size_t buf_len, OcHttpRequest *req,
         content_length = (size_t)strtoull(cl.data, NULL, 10);
     }
 
+    /* Authorization, for the auth middleware. Extracted LAST among the
+     * headers: terminating the value in place clobbers that line's '\r', so
+     * find_header's line walk must already be done. */
+    HeaderValue auth = find_header(line_end + 2, sep, "Authorization");
+    if (auth.data != NULL) {
+        auth.data[auth.len] = '\0';
+        req->auth_header = auth.data;
+    } else {
+        req->auth_header = NULL;
+    }
+    req->client_ip = NULL;   /* filled in by the worker from the peer addr */
+
     /* Body starts after the "\r\n\r\n" separator. */
     char *body = sep + 4;
     size_t body_avail = buf_len - header_len - 4;
@@ -257,13 +269,25 @@ static void *worker_main(void *arg)
     }
     while (!atomic_load_explicit(&srv->stop,
                                 memory_order_acquire)) {
-        int fd = accept(srv->listen_fd, NULL, NULL);
+        struct sockaddr_storage peer;
+        socklen_t peer_len = sizeof(peer);
+        char peer_ip[INET6_ADDRSTRLEN] = {0};
+        int fd = accept(srv->listen_fd, (struct sockaddr *)&peer, &peer_len);
         if (fd < 0) {
             if (errno == EINTR) continue;
             if (atomic_load_explicit(&srv->stop,
                                      memory_order_acquire)) break;
             oc_log(OC_LOG_WARN, "http: accept failed: %s", strerror(errno));
             continue;
+        }
+        /* Numeric peer address, for the rate limiter's per-IP buckets and the
+         * audit log. Best-effort: an unsupported family leaves it empty. */
+        if (peer.ss_family == AF_INET) {
+            (void)inet_ntop(AF_INET, &((struct sockaddr_in *)&peer)->sin_addr,
+                            peer_ip, sizeof(peer_ip));
+        } else if (peer.ss_family == AF_INET6) {
+            (void)inet_ntop(AF_INET6, &((struct sockaddr_in6 *)&peer)->sin6_addr,
+                            peer_ip, sizeof(peer_ip));
         }
 #ifdef SO_NOSIGPIPE
         int no_sigpipe = 1;
@@ -332,6 +356,7 @@ static void *worker_main(void *arg)
             close(fd);
             continue;
         }
+        req.client_ip = peer_ip[0] != '\0' ? peer_ip : NULL;
 
         /* Handle CORS preflight (OPTIONS) inline. */
         if (req.method == OC_HTTP_OPTIONS) {

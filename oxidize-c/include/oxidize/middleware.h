@@ -187,6 +187,15 @@ void oc_metrics_record(OcMetrics *m, int status, uint64_t duration_ms,
  * bytes written excluding the NUL, or 0 on overflow. */
 size_t oc_metrics_format(const OcMetrics *m, char *buf, size_t cap);
 
+/* Format metrics in the Prometheus text exposition format (version 0.0.4)
+ * into `buf` (NUL-terminated). This is what `GET /metrics` serves, matching
+ * the Rust server's `TextEncoder` output so existing scrape configs and
+ * dashboards keep working. The latency histogram is emitted as a proper
+ * Prometheus cumulative histogram (`_bucket`/`_sum`/`_count` with `le`
+ * labels), which requires running the bucket counts into a running total.
+ * Returns bytes written excluding the NUL, or 0 on overflow. */
+size_t oc_metrics_format_prometheus(const OcMetrics *m, char *buf, size_t cap);
+
 /* ─── Audit helpers ─────────────────────────────────────────────────────── */
 
 /* Append an entry to the audit ring buffer. */

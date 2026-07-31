@@ -101,6 +101,9 @@ typedef struct OcCliContext {
     /* Server. */
     const char        *host;           /* --host (default 127.0.0.1)        */
     int                port;           /* --port (default 8080)             */
+    const char        *api_key;        /* --api-key KEY (NULL = no auth)    */
+    uint32_t           rate_limit_rpm; /* --rate-limit N (0 = unlimited)    */
+    const char        *cors_origin;    /* --cors-origin ORIGIN (NULL = off) */
 
     /* Benchmark. */
     int                bench_iterations; /* --bench-iters (default 3)       */

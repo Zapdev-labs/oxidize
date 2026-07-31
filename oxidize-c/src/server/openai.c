@@ -18,9 +18,11 @@
 #include "oxidize/llama.h"
 #include "oxidize/log.h"
 #include "oxidize/sampling.h"
+#include "oxidize/version.h"
 #include "oxidize/tokenizer.h"
 
 #include <math.h>
+#include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -584,6 +586,78 @@ static void handle_responses(OcOpenaiState *st, const OcHttpRequest *req,
     *out_body = buf;
 }
 
+/* ─── Operational endpoints ─────────────────────────────────────────────── */
+
+/* A 200/503 probe reply. Bodies are always malloc'd — http.c frees them. */
+static void handle_probe(bool ready, int *out_status, const char **out_body)
+{
+    *out_status = ready ? 200 : 503;
+    *out_body = strdup(ready ? "{\"status\":\"ok\"}"
+                                : "{\"status\":\"not ready\"}");
+}
+
+static void handle_metrics(OcOpenaiState *st, int *out_status,
+                           const char **out_content_type,
+                           const char **out_body)
+{
+    if (st->mw == NULL) {
+        /* No middleware stack means nothing is recording. Say so rather than
+         * serving an all-zero scrape, which would look like a healthy but
+         * idle server. */
+        *out_status = 503;
+        *out_body = oc_openai_error_json("metrics not enabled", "server_error");
+        return;
+    }
+    /* Sized for the fixed set of counters plus 8 histogram buckets. */
+    char *buf = malloc(4096);
+    if (!buf) { *out_status = 500; return; }
+    size_t n = oc_metrics_format_prometheus(&st->mw->metrics, buf, 4096);
+    if (n == 0) { free(buf); *out_status = 500; return; }
+    *out_status = 200;
+    /* The version parameter is part of the Prometheus text format contract;
+     * scrapers use it to pick a parser. */
+    *out_content_type = "text/plain; version=0.0.4; charset=utf-8";
+    *out_body = buf;
+}
+
+char *oc_openai_openapi_json(void)
+{
+    static const char spec[] =
+    "{\"openapi\":\"3.1.0\","
+    "\"info\":{\"title\":\"oxidize-c API\",\"version\":\"" OC_VERSION "\","
+    "\"description\":\"OpenAI-compatible endpoints exposed by oxidize-c.\"},"
+    "\"servers\":[{\"url\":\"/\"}],"
+    "\"paths\":{"
+    "\"/healthz\":{\"get\":{\"summary\":\"Health check\","
+        "\"responses\":{\"200\":{\"description\":\"OK\"}}}},"
+    "\"/livez\":{\"get\":{\"summary\":\"Liveness check\","
+        "\"responses\":{\"200\":{\"description\":\"OK\"}}}},"
+    "\"/readyz\":{\"get\":{\"summary\":\"Readiness check\","
+        "\"responses\":{\"200\":{\"description\":\"Model loaded\"},"
+        "\"503\":{\"description\":\"No model loaded\"}}}},"
+    "\"/metrics\":{\"get\":{\"summary\":\"Prometheus metrics\","
+        "\"responses\":{\"200\":{\"description\":\"Exposition text\"},"
+        "\"503\":{\"description\":\"Metrics not enabled\"}}}},"
+    "\"/v1/models\":{\"get\":{\"summary\":\"List models\","
+        "\"responses\":{\"200\":{\"description\":\"Model list\"}}}},"
+    "\"/v1/completions\":{\"post\":{\"summary\":\"Create completion\","
+        "\"responses\":{\"200\":{\"description\":\"Completion\"},"
+        "\"503\":{\"description\":\"No model loaded\"}}}},"
+    "\"/v1/chat/completions\":{\"post\":{\"summary\":\"Create chat completion\","
+        "\"responses\":{\"200\":{\"description\":\"Chat completion\"},"
+        "\"503\":{\"description\":\"No model loaded\"}}}},"
+    "\"/v1/embeddings\":{\"post\":{\"summary\":\"Create embeddings\","
+        "\"responses\":{\"200\":{\"description\":\"Embedding vectors\"}}}},"
+    "\"/v1/responses\":{\"post\":{\"summary\":\"Create response\","
+        "\"responses\":{\"200\":{\"description\":\"Response\"}}}},"
+    "\"/v1/mesh/chat/completions\":{\"post\":{"
+        "\"summary\":\"Chat completion routed across the mesh cluster\","
+        "\"responses\":{\"200\":{\"description\":\"Chat completion\"},"
+        "\"503\":{\"description\":\"Mesh not configured\"}}}}"
+    "}}";
+    return strdup(spec);
+}
+
 void oc_openai_handler(const OcHttpRequest *req,
                        int *out_status,
                        const char **out_content_type,
@@ -597,7 +671,44 @@ void oc_openai_handler(const OcHttpRequest *req,
     *out_body = NULL;
     *out_body_len = 0;
 
-    if (req->method == OC_HTTP_GET && strcmp(req->path, "/v1/models") == 0) {
+    /* Pre-handler middleware: auth, then rate limit. A rejection short-circuits
+     * the route table but still falls through to the post-handler block below,
+     * so 401s and 429s show up in metrics and the audit log. */
+    struct timespec t_start;
+    (void)clock_gettime(CLOCK_MONOTONIC, &t_start);
+    OcRequestContext rctx = {
+        .method      = req->method,
+        .path        = req->path,
+        .auth_header = req->auth_header,
+        .client_ip   = req->client_ip,
+    };
+    int reject = 0;
+    if (st->mw != NULL) {
+        reject = oc_middleware_process_request(st->mw, &rctx);
+    }
+
+    if (reject != 0) {
+        *out_status = reject;
+        *out_body = oc_openai_error_json(
+            reject == 401 ? "unauthorized" : "rate limit exceeded",
+            reject == 401 ? "authentication_error" : "rate_limit_error");
+    } else if (req->method == OC_HTTP_GET &&
+               strcmp(req->path, "/healthz") == 0) {
+        handle_probe(true, out_status, out_body);
+    } else if (req->method == OC_HTTP_GET &&
+               strcmp(req->path, "/livez") == 0) {
+        handle_probe(true, out_status, out_body);
+    } else if (req->method == OC_HTTP_GET &&
+               strcmp(req->path, "/readyz") == 0) {
+        handle_probe(st->model_loaded, out_status, out_body);
+    } else if (req->method == OC_HTTP_GET &&
+               strcmp(req->path, "/metrics") == 0) {
+        handle_metrics(st, out_status, out_content_type, out_body);
+    } else if (req->method == OC_HTTP_GET &&
+               strcmp(req->path, "/openapi.json") == 0) {
+        *out_status = 200;
+        *out_body = oc_openai_openapi_json();
+    } else if (req->method == OC_HTTP_GET && strcmp(req->path, "/v1/models") == 0) {
         handle_list_models(st, out_status, out_body);
     } else if (req->method == OC_HTTP_POST &&
                strcmp(req->path, "/v1/completions") == 0) {
@@ -619,6 +730,25 @@ void oc_openai_handler(const OcHttpRequest *req,
     /* Compute body length if a body was set. */
     if (*out_body != NULL) {
         *out_body_len = strlen(*out_body);
+    }
+
+    /* Post-handler middleware: record metrics + audit. Runs for every path
+     * including rejections and 404s, so the counters match what the socket
+     * actually saw. */
+    if (st->mw != NULL) {
+        struct timespec t_end;
+        (void)clock_gettime(CLOCK_MONOTONIC, &t_end);
+        uint64_t ms = (uint64_t)((t_end.tv_sec - t_start.tv_sec) * 1000 +
+                                 (t_end.tv_nsec - t_start.tv_nsec) / 1000000);
+        OcResponseContext resp = {
+            .status           = *out_status,
+            .duration_ms      = ms,
+            /* Token accounting is owned by the generation path; the handler
+             * does not see a count, so this stays 0 until generate_completion
+             * reports one. */
+            .tokens_generated = 0,
+        };
+        oc_middleware_process_response(st->mw, &rctx, &resp);
     }
     /* The HTTP server core (http.c) frees the response body after write()
      * when body_len > 0. Handlers always return malloc'd buffers. */

@@ -1018,11 +1018,19 @@ OcError oc_cli_run_download(OcCliContext *ctx)
         snprintf(model.repo_id, sizeof(model.repo_id), "%s", ctx->hf_repo);
         snprintf(model.filename, sizeof(model.filename), "%s", ctx->hf_file);
 
-        /* Build download URL. */
-        snprintf(model.download_url, sizeof(model.download_url),
-                 "%s/%s/resolve/main/%s",
-                 hcfg.api_base[0] ? hcfg.api_base : OC_HF_DEFAULT_API_BASE,
-                 ctx->hf_repo, ctx->hf_file);
+        /* Build download URL. repo_id and filename are already clamped to
+         * their own field sizes above, but the compiler cannot see that the
+         * concatenation fits, so check the result explicitly rather than
+         * letting a silent truncation produce a wrong URL. */
+        int url_len = snprintf(model.download_url, sizeof(model.download_url),
+                               "%s/%s/resolve/main/%s",
+                               hcfg.api_base[0] ? hcfg.api_base
+                                                : OC_HF_DEFAULT_API_BASE,
+                               ctx->hf_repo, ctx->hf_file);
+        if (url_len < 0 || (size_t)url_len >= sizeof(model.download_url)) {
+            cli_error("repo/file name too long for a download URL");
+            return OC_ERR_INVALID_ARG;
+        }
 
         progress(ctx, "downloading: %s/%s → %s", ctx->hf_repo, ctx->hf_file, cache);
 
@@ -1378,11 +1386,42 @@ OcError oc_cli_run_serve(OcCliContext *ctx)
                  ctx->host, ctx->port);
     }
 
+    /* Middleware stack. Metrics + audit are always on so /metrics has
+     * something to serve; auth and rate limiting turn on only when the
+     * corresponding flag is given, so the default local-dev invocation is
+     * unchanged. */
+    OcMiddleware mw;
+    uint32_t mw_enabled = OC_MW_METRICS | OC_MW_AUDIT;
+    if (ctx->api_key != NULL)        mw_enabled |= OC_MW_AUTH;
+    if (ctx->rate_limit_rpm > 0)     mw_enabled |= OC_MW_RATE_LIMIT;
+    if (ctx->cors_origin != NULL)    mw_enabled |= OC_MW_CORS;
+    OcRateLimitConfig rl = {
+        .requests_per_minute = ctx->rate_limit_rpm,
+        /* Allow a short burst of one second's worth of traffic (min 1) so
+         * a browser opening several connections at once isn't throttled. */
+        .burst_size = ctx->rate_limit_rpm / 60u + 1u,
+        .per_ip = true,
+    };
+    e = oc_middleware_init(&mw, mw_enabled, ctx->api_key, &rl, ctx->cors_origin);
+    if (e != OC_OK) {
+        cli_error("middleware init failed (%s)", oc_error_msg(e));
+        if (st.model_loaded) {
+            free(st.model_id);
+            oc_tokenizer_free(st.tokenizer);
+            oc_llama_free(st.model);
+            free(st.tokenizer);
+            free(st.model);
+        }
+        return e;
+    }
+    st.mw = &mw;
+
     OcHttpServer srv;
     e = oc_http_server_start(ctx->host, (uint16_t)ctx->port, 4,
                              oc_openai_handler, &st, &srv);
     if (e != OC_OK) {
         cli_error("server start failed (%s)", oc_error_msg(e));
+        oc_middleware_free(&mw);
         if (st.model_loaded) {
             free(st.model_id);
             oc_tokenizer_free(st.tokenizer);
@@ -1401,14 +1440,22 @@ OcError oc_cli_run_serve(OcCliContext *ctx)
                st.model_id ? st.model_id : "");
     } else {
         printf("oxidize-c server listening on http://%s:%u\n"
+               "  GET  /healthz  /livez  /readyz\n"
+               "  GET  /metrics  /openapi.json\n"
                "  GET  /v1/models\n"
                "  POST /v1/completions\n"
                "  POST /v1/chat/completions\n"
-               "(Ctrl+C to stop)\n", ctx->host, srv.port);
+               "  POST /v1/embeddings\n"
+               "  POST /v1/responses\n"
+               "%s%s"
+               "(Ctrl+C to stop)\n", ctx->host, srv.port,
+               ctx->api_key ? "  auth: enabled (Bearer token required)\n" : "",
+               ctx->rate_limit_rpm ? "  rate limit: enabled (per-IP)\n" : "");
     }
     fflush(stdout);
     oc_http_server_join(&srv);
 
+    oc_middleware_free(&mw);
     if (st.model_loaded) {
         free(st.model_id);
         oc_tokenizer_free(st.tokenizer);

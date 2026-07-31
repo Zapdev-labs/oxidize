@@ -54,6 +54,12 @@ typedef struct OcHttpRequest {
     const char *query;            /* after '?' or NULL                       */
     const char *body;             /* NUL-terminated request body             */
     size_t      content_length;
+    /* Authorization header value ("Bearer sk-..."), or NULL when absent.
+     * Points into the request buffer — do not retain past the handler. */
+    const char *auth_header;
+    /* Peer address as a numeric string ("127.0.0.1"), or NULL if it could
+     * not be determined. Points at worker-thread stack storage. */
+    const char *client_ip;
 } OcHttpRequest;
 
 /* Caller-provided handler. Writes the response status code, Content-Type

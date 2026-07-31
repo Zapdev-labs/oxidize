@@ -6,6 +6,8 @@
  */
 #include "args.h"
 
+#include "oxidize/cli_commands.h"
+
 #include <stdlib.h>
 #include <string.h>
 
@@ -52,6 +54,9 @@ static bool parse_value_flag(OcCliArgs *a, const char *arg, const char *val,
     else if (match(arg, "--seed"))        { a->seed = strtoull(val, NULL, 10); *consumed_val = true; }
     else if (match(arg, "--host"))        { a->host = val; *consumed_val = true; }
     else if (match(arg, "--port"))        { a->port = atoi(val); *consumed_val = true; }
+    else if (match(arg, "--api-key"))     { a->api_key = val; *consumed_val = true; }
+    else if (match(arg, "--rate-limit"))  { a->rate_limit_rpm = atoi(val); *consumed_val = true; }
+    else if (match(arg, "--cors-origin")) { a->cors_origin = val; *consumed_val = true; }
     else if (match(arg, "--draft-model"))  { a->draft_model = val; *consumed_val = true; }
     else if (match(arg, "--draft-tokens")) { a->draft_tokens = atoi(val); *consumed_val = true; }
     else if (match(arg, "--quantize"))     { a->quantize_input = val; *consumed_val = true; }
@@ -96,4 +101,99 @@ void oc_cli_parse_args(int argc, char **argv, OcCliArgs *a)
             a->prompt = arg;
         }
     }
+}
+
+/* ─── Subcommand parsing ──────────────────────────────────────────────────
+ *
+ * `oxidize-c <subcommand> [flags]` populates an OcCliContext directly rather
+ * than going through OcCliArgs, which only carries the flags the legacy
+ * flag-only invocation needs. The two paths coexist: main() tries the
+ * subcommand form first and falls back to the flag form when argv[1] is not
+ * a recognized subcommand name, so `oxidize-c --model m.gguf --prompt hi`
+ * keeps working unchanged. */
+
+bool oc_cli_context_parse(int argc, char **argv, OcCliContext *ctx)
+{
+    oc_cli_context_defaults(ctx);
+    if (argc < 2 || argv[1][0] == '-') return false;
+    OcCliCommand cmd = oc_cli_command_parse(argv[1]);
+    if (cmd == OC_CLI_CMD_NONE) return false;
+    ctx->command = cmd;
+
+    for (int i = 2; i < argc; i++) {
+        const char *arg = argv[i];
+        /* Valueless flags. */
+        if (match(arg, "--auto"))       { ctx->auto_tune = true; continue; }
+        if (match(arg, "--no-auto"))    { ctx->no_auto = true; continue; }
+        if (match(arg, "--json"))       { ctx->output_format = OC_CLI_OUTPUT_JSON; continue; }
+        if (match(arg, "--no-special")) { ctx->tokens_no_special = true; continue; }
+        if (match(arg, "--verbose") || match(arg, "-v")) { ctx->verbose = true; continue; }
+
+        const char *val = (i + 1 < argc) ? argv[i + 1] : NULL;
+        if (val == NULL) {
+            /* A trailing bare word is the prompt for generation commands. */
+            if (arg[0] != '-' && ctx->prompt == NULL) ctx->prompt = arg;
+            continue;
+        }
+
+        /* Model + generation. */
+        if      (match(arg, "--model"))          { ctx->model_path = val; i++; }
+        else if (match(arg, "--prompt"))         { ctx->prompt = val; i++; }
+        else if (match(arg, "--prompt-file"))    { ctx->prompt_file = val; i++; }
+        else if (match(arg, "--n-predict"))      { ctx->n_predict = (uint32_t)strtoul(val, NULL, 10); i++; }
+        else if (match(arg, "--threads"))        { ctx->threads = atoi(val); i++; }
+        else if (match(arg, "--numa"))           { ctx->numa = val; i++; }
+        else if (match(arg, "--backend"))        { ctx->backend = val; i++; }
+        /* Sampling. */
+        else if (match(arg, "--temperature") || match(arg, "--temp")) { ctx->temperature = (float)atof(val); i++; }
+        else if (match(arg, "--top-k"))          { ctx->top_k = (uint32_t)strtoul(val, NULL, 10); i++; }
+        else if (match(arg, "--top-p"))          { ctx->top_p = (float)atof(val); i++; }
+        else if (match(arg, "--repeat-penalty")) { ctx->repeat_penalty = (float)atof(val); i++; }
+        else if (match(arg, "--seed"))           { ctx->seed = strtoull(val, NULL, 10); i++; }
+        else if (match(arg, "--min-p"))          { ctx->min_p = (float)atof(val); i++; }
+        else if (match(arg, "--mirostat-tau"))   { ctx->mirostat_tau = (float)atof(val); i++; }
+        else if (match(arg, "--mirostat-eta"))   { ctx->mirostat_eta = (float)atof(val); i++; }
+        /* Server. */
+        else if (match(arg, "--host"))           { ctx->host = val; i++; }
+        else if (match(arg, "--port"))           { ctx->port = atoi(val); i++; }
+        else if (match(arg, "--api-key"))        { ctx->api_key = val; i++; }
+        else if (match(arg, "--rate-limit"))     { ctx->rate_limit_rpm = (uint32_t)strtoul(val, NULL, 10); i++; }
+        else if (match(arg, "--cors-origin"))    { ctx->cors_origin = val; i++; }
+        /* Benchmark. */
+        else if (match(arg, "--bench-iters"))    { ctx->bench_iterations = atoi(val); i++; }
+        else if (match(arg, "--bench-warmup"))   { ctx->bench_warmup = (uint32_t)strtoul(val, NULL, 10); i++; }
+        else if (match(arg, "--bench-tokens"))   { ctx->bench_tokens = (uint32_t)strtoul(val, NULL, 10); i++; }
+        /* Quantize / convert / merge / prune. */
+        else if (match(arg, "--input"))          { ctx->input_path = val; i++; }
+        else if (match(arg, "--output"))         { ctx->output_path = val; i++; }
+        else if (match(arg, "--quant-type") || match(arg, "--target")) { ctx->target_type = val; i++; }
+        else if (match(arg, "--arch"))           { ctx->arch = val; i++; }
+        else if (match(arg, "--strategy")) {
+            /* Shared spelling: merge, prune, and finetune each read it into
+             * their own field, and only one of them runs per invocation. */
+            ctx->merge_strategy = val; ctx->prune_strategy = val;
+            ctx->ft_strategy = val; i++;
+        }
+        else if (match(arg, "--slerp-t"))        { ctx->merge_slerp_t = (float)atof(val); i++; }
+        else if (match(arg, "--density"))        { ctx->merge_density = (float)atof(val); i++; }
+        else if (match(arg, "--sparsity"))       { ctx->prune_sparsity = (float)atof(val); i++; }
+        /* Finetune. */
+        else if (match(arg, "--dataset"))        { ctx->dataset_path = val; i++; }
+        else if (match(arg, "--output-dir"))     { ctx->output_dir = val; i++; }
+        else if (match(arg, "--resume-from"))    { ctx->resume_from = val; i++; }
+        else if (match(arg, "--lora-rank"))      { ctx->lora_rank = (uint32_t)strtoul(val, NULL, 10); i++; }
+        else if (match(arg, "--lora-alpha"))     { ctx->lora_alpha = (uint32_t)strtoul(val, NULL, 10); i++; }
+        else if (match(arg, "--epochs"))         { ctx->epochs = (uint32_t)strtoul(val, NULL, 10); i++; }
+        else if (match(arg, "--batch-size"))     { ctx->batch_size = (uint32_t)strtoul(val, NULL, 10); i++; }
+        else if (match(arg, "--lr"))             { ctx->learning_rate = (float)atof(val); i++; }
+        /* Download. */
+        else if (match(arg, "--repo"))           { ctx->hf_repo = val; i++; }
+        else if (match(arg, "--file"))           { ctx->hf_file = val; i++; }
+        else if (match(arg, "--cache-dir"))      { ctx->cache_dir = val; i++; }
+        /* Perplexity / tokenize. */
+        else if (match(arg, "--max-tokens"))     { ctx->ppl_max_tokens = (size_t)strtoull(val, NULL, 10); i++; }
+        else if (match(arg, "--ids"))            { ctx->token_ids_str = val; i++; }
+        else if (arg[0] != '-' && ctx->prompt == NULL) { ctx->prompt = arg; }
+    }
+    return true;
 }

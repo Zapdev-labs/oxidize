@@ -24,6 +24,7 @@
 #include "oxidize/log.h"
 
 #include <math.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -201,6 +202,78 @@ size_t oc_metrics_format(const OcMetrics *m, char *buf, size_t cap)
     int w2 = snprintf(buf + off, cap - off, "}");
     if (w2 < 0 || (size_t)w2 >= cap - off) return 0;
     off += (size_t)w2;
+    return off;
+}
+
+/* Upper edge of each latency bucket in seconds, matching latency_bucket()
+ * above. The final bucket is +Inf. */
+static const char *const k_bucket_le[OC_METRICS_HIST_BUCKETS] = {
+    "0.01", "0.05", "0.1", "0.25", "0.5", "1", "5", "+Inf"
+};
+
+/* Append to `buf` at `*off`, returning false on overflow. */
+static bool pfmt(char *buf, size_t cap, size_t *off, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf + *off, cap - *off, fmt, ap);
+    va_end(ap);
+    if (n < 0 || (size_t)n >= cap - *off) return false;
+    *off += (size_t)n;
+    return true;
+}
+
+size_t oc_metrics_format_prometheus(const OcMetrics *m, char *buf, size_t cap)
+{
+    if (!m || !buf || cap == 0) return 0;
+    uint64_t req  = atomic_load_explicit(&m->request_count, memory_order_relaxed);
+    uint64_t err  = atomic_load_explicit(&m->error_count, memory_order_relaxed);
+    uint64_t toks = atomic_load_explicit(&m->tokens_generated, memory_order_relaxed);
+    uint64_t sum  = atomic_load_explicit(&m->total_latency_ms, memory_order_relaxed);
+
+    size_t off = 0;
+    if (!pfmt(buf, cap, &off,
+              "# HELP oxidize_requests_total Total HTTP requests handled.\n"
+              "# TYPE oxidize_requests_total counter\n"
+              "oxidize_requests_total %llu\n"
+              "# HELP oxidize_request_errors_total Requests answered with status >= 400.\n"
+              "# TYPE oxidize_request_errors_total counter\n"
+              "oxidize_request_errors_total %llu\n"
+              "# HELP oxidize_tokens_generated_total Tokens produced by the model.\n"
+              "# TYPE oxidize_tokens_generated_total counter\n"
+              "oxidize_tokens_generated_total %llu\n",
+              (unsigned long long)req, (unsigned long long)err,
+              (unsigned long long)toks)) {
+        return 0;
+    }
+
+    if (!pfmt(buf, cap, &off,
+              "# HELP oxidize_request_duration_seconds Request latency.\n"
+              "# TYPE oxidize_request_duration_seconds histogram\n")) {
+        return 0;
+    }
+    /* Prometheus buckets are cumulative: each `le` bucket counts every
+     * observation at or below that edge, so run a total across the
+     * non-cumulative internal histogram. */
+    uint64_t cumulative = 0;
+    for (size_t i = 0; i < OC_METRICS_HIST_BUCKETS; i++) {
+        cumulative += atomic_load_explicit(&m->latency_hist[i],
+                                           memory_order_relaxed);
+        if (!pfmt(buf, cap, &off,
+                  "oxidize_request_duration_seconds_bucket{le=\"%s\"} %llu\n",
+                  k_bucket_le[i], (unsigned long long)cumulative)) {
+            return 0;
+        }
+    }
+    /* `_count` must equal the +Inf bucket; both derive from the same
+     * histogram rather than from request_count, which a concurrent
+     * oc_metrics_record() could have advanced past the histogram write. */
+    if (!pfmt(buf, cap, &off,
+              "oxidize_request_duration_seconds_sum %.3f\n"
+              "oxidize_request_duration_seconds_count %llu\n",
+              (double)sum / 1000.0, (unsigned long long)cumulative)) {
+        return 0;
+    }
     return off;
 }
 
