@@ -105,8 +105,14 @@ __global__ void k_rms_norm_heads(float *x, const float *weight,
         __syncthreads();
     }
     const float inv = rsqrtf(red[0] / (float)head_dim + eps);
-    for (uint32_t i = tid; i < head_dim; i += nthreads)
-        h[i] = h[i] * inv * weight[i];
+    /* weight == NULL is a plain (weightless) normalization — Gemma 4
+     * normalizes V that way, with no learned scale. */
+    if (weight == NULL) {
+        for (uint32_t i = tid; i < head_dim; i += nthreads) h[i] *= inv;
+    } else {
+        for (uint32_t i = tid; i < head_dim; i += nthreads)
+            h[i] = h[i] * inv * weight[i];
+    }
 }
 
 /* Final logit softcap: l = tanh(l/c) * c. */
@@ -220,6 +226,9 @@ __global__ void k_attention_all_heads(
     uint32_t n_head_kv,
     uint32_t head_dim,
     uint32_t n_past,
+    /* Pre-attention score scale. Passed in rather than computed as
+     * rsqrtf(head_dim): Gemma 4 uses 1.0. */
+    float attn_scale,
     /* Element stride between cached positions. NOT n_head_kv*head_dim: the
      * cache is indexed at one uniform stride across layers, which on Gemma 4
      * is the max over its two geometries. */
@@ -248,7 +257,7 @@ __global__ void k_attention_all_heads(
     __syncthreads();
 
     /* 1. Scores, parallel over past positions. */
-    const float inv_sqrt_d = rsqrtf((float)head_dim);
+    const float inv_sqrt_d = attn_scale;
     for (uint32_t p = kv_start + tid; p < n_past; p += nthreads) {
         const __half *k = kv_k + (size_t)p * kv_row + kv_off;
         float s = 0.0f;
@@ -663,6 +672,8 @@ OcError oc_cuda_init(OcCudaContext *ctx, const OcLlamaModel *model)
     ctx->expert_weights_scale = c->expert_weights_scale;
     ctx->uses_gemma4 = c->uses_gemma4;
     ctx->logit_softcap = c->logit_softcap;
+    ctx->attn_scale = c->attn_scale;
+    ctx->v_rms_norm = c->v_rms_norm;
 
     /* Mirror the loader's resolved per-layer geometry onto the host side of
      * the context, so the forward loop reads it instead of re-deriving it.
@@ -678,8 +689,11 @@ OcError oc_cuda_init(OcCudaContext *ctx, const OcLlamaModel *model)
             oc_cuda_free(ctx);
             return OC_ERR_OOM;
         }
+        ctx->l_out_scale = (float *)calloc(c->n_layer, sizeof(float));
+        if (!ctx->l_out_scale) { oc_cuda_free(ctx); return OC_ERR_OOM; }
         for (uint32_t l = 0; l < c->n_layer; l++) {
             const OcLlamaLayer *L = &model->layers[l];
+            ctx->l_out_scale[l]  = L->layer_output_scale;
             ctx->l_head_dim[l]   = L->head_dim ? L->head_dim : c->head_dim;
             ctx->l_n_head_kv[l]  = L->n_head_kv ? L->n_head_kv : c->n_head_kv;
             ctx->l_rope_dim[l]   = L->head_dim ? L->rope_dim : c->rope_dim;
@@ -1008,6 +1022,14 @@ OcError oc_cuda_forward(OcCudaContext *ctx, uint32_t token, uint32_t pos,
             OC_CUDA_CHECK(cudaGetLastError());
         }
 
+        /* Gemma 4 also RMS-normalizes V (weightless), before the cache
+         * write. V never gets RoPE, so this is the last touch. */
+        if (ctx->v_rms_norm) {
+            k_rms_norm_heads<<<nkv_l, block, block * sizeof(float)>>>(
+                ctx->d_v, NULL, hd_l, eps);
+            OC_CUDA_CHECK(cudaGetLastError());
+        }
+
         /* RoPE on Q. */
         k_apply_rope<<<n_head, block>>>(
             ctx->d_q, hd_l, rd_l, pos, rth_l, n_head);
@@ -1043,7 +1065,10 @@ OcError oc_cuda_forward(OcCudaContext *ctx, uint32_t token, uint32_t pos,
             k_attention_all_heads<<<n_head, athreads, asmem>>>(
                 ctx->d_q, kv_k_layer, kv_v_layer, ctx->d_attn_out,
                 ctx->d_attn_scores, ctx->n_ctx,
-                n_head, nkv_l, hd_l, n_past, ctx->kv_row, kv_start);
+                n_head, nkv_l, hd_l, n_past,
+                ctx->attn_scale > 0.0f ? ctx->attn_scale
+                                       : rsqrtf((float)hd_l),
+                ctx->kv_row, kv_start);
             OC_CUDA_CHECK(cudaGetLastError());
         }
 
@@ -1113,6 +1138,14 @@ OcError oc_cuda_forward(OcCudaContext *ctx, uint32_t token, uint32_t pos,
         k_residual_add<<<(embd + block - 1) / block, block>>>(
             ctx->d_x, ctx->d_normed, embd);
         OC_CUDA_CHECK(cudaGetLastError());
+
+        /* Gemma 4 per-layer output scale: multiplies the whole running
+         * residual stream, not one branch. */
+        if (ctx->l_out_scale && ctx->l_out_scale[l] != 1.0f) {
+            k_scale<<<(embd + block - 1) / block, block>>>(
+                ctx->d_x, ctx->l_out_scale[l], embd);
+            OC_CUDA_CHECK(cudaGetLastError());
+        }
     }
 
     /* 3. Final norm + lm_head. */
@@ -1202,7 +1235,7 @@ void oc_cuda_free(OcCudaContext *ctx)
     free(ctx->d_attn_q_norm); free(ctx->d_attn_k_norm);
     free(ctx->d_post_attn_norm); free(ctx->d_post_ffw_norm);
     free(ctx->l_head_dim); free(ctx->l_n_head_kv); free(ctx->l_rope_dim);
-    free(ctx->l_rope_theta); free(ctx->l_sliding);
+    free(ctx->l_rope_theta); free(ctx->l_sliding); free(ctx->l_out_scale);
     free(ctx->d_ffn_gate_inp); free(ctx->d_ffn_gate_exps);
     free(ctx->d_ffn_up_exps); free(ctx->d_ffn_down_exps);
     free(ctx->d_ffn_gate_shexp); free(ctx->d_ffn_up_shexp);

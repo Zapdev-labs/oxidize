@@ -97,6 +97,16 @@ typedef struct OcLlamaConfig {
      * attn_k for those layers, and the KV cache stores one buffer instead of
      * two, halving global-layer cache footprint. */
     bool     k_eq_v;
+    /* Pre-attention score scale. Gemma 4 sets this to 1.0 — it applies NO
+     * 1/sqrt(head_dim) factor (llama.cpp: hparams.f_attention_scale = 1.0f,
+     * "Gemma4 uses self.scaling = 1.0"). 0 means "use the usual
+     * 1/sqrt(head_dim)", which is every other architecture. Getting this wrong
+     * is not subtle: dividing scores by sqrt(512) flattens the softmax toward
+     * uniform, so attention returns roughly the mean of V. */
+    float    attn_scale;
+    /* Gemma 4 RMS-normalizes V after projection with NO weight tensor —
+     * a plain normalization, not a learned one. */
+    bool     v_rms_norm;
     /* YaRN long-context RoPE scaling. */
     float    yarn_factor;               /* scaling factor (0 = no YaRN)            */
     uint32_t yarn_orig_ctx;             /* original context length (for YaRN)      */

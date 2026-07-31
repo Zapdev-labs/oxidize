@@ -208,6 +208,8 @@ static OcError parse_config(const OcGgufFile *f, const char *arch_str,
     cfg->layer_is_swa = NULL;
     cfg->logit_softcap = 0.0f;
     cfg->k_eq_v = false;
+    cfg->attn_scale = 0.0f;
+    cfg->v_rms_norm = false;
     if (arch_str) {
         /* Checked before the generic "gemma" prefix below, which would
          * otherwise match "gemma4" and apply the Gemma-2 single-geometry
@@ -273,6 +275,11 @@ static OcError parse_config(const OcGgufFile *f, const char *arch_str,
              * (config.json attention_k_eq_v). resolve_weights() aliases them
              * and asserts the tensor really is absent. */
             cfg->k_eq_v = true;
+            /* Gemma 4 applies no 1/sqrt(head_dim) factor, and RMS-normalizes
+             * V (weightless) after projection. Both come from llama.cpp's
+             * gemma4 builder; neither is expressible in GGUF metadata. */
+            cfg->attn_scale = 1.0f;
+            cfg->v_rms_norm = true;
         } else if (strncmp(arch_str, "gemma", 5) == 0) {
             cfg->uses_geglu = true;
             cfg->norm_scale = sqrtf((float)cfg->n_embd);
@@ -982,7 +989,10 @@ static void attention_head(const OcLlamaSession *s, uint32_t head,
                   + (size_t)kv_head * hd;
     const float *k_layer = s->kv_k;
     const float *v_layer = s->kv_v;
-    float scale = 1.0f / sqrtf((float)hd);
+    /* Gemma 4 uses no pre-attention scaling; everything else uses the usual
+     * 1/sqrt(head_dim). */
+    float scale = (c->attn_scale > 0.0f) ? c->attn_scale
+                                         : (1.0f / sqrtf((float)hd));
 
     /* Online softmax (Milakov & Gimelshein 2018). seq_len = pos+1. */
     float run_max = -INFINITY;
@@ -1362,6 +1372,20 @@ static void forward_layer(OcLlamaSession *s, uint32_t layer)
             }
         }
 
+        /* Gemma 4 RMS-normalizes V too, with no weight — a plain
+         * normalization applied per KV head, before the cache write. V never
+         * gets RoPE, so this is the last thing that touches it. */
+        if (c->v_rms_norm) {
+            for (uint32_t h = 0; h < n_kv; h++) {
+                float *vh = s->v + (size_t)h * hd;
+                double ss = 0.0;
+                for (size_t i = 0; i < hd; i++) ss += (double)vh[i] * vh[i];
+                const float inv =
+                    1.0f / sqrtf((float)(ss / (double)hd) + c->rms_norm_eps);
+                for (size_t i = 0; i < hd; i++) vh[i] *= inv;
+            }
+        }
+
         /* RoPE on Q (per head) and K (per kv head). YaRN when configured.
          * rope_dim/rope_theta are the layer's: Gemma 4 rotates 256 dims at
          * base 1e4 on sliding layers and 512 at 1e6 on global ones. */
@@ -1437,6 +1461,15 @@ static void forward_layer(OcLlamaSession *s, uint32_t layer)
         forward_moe_ffn(s, L);
     } else {
         forward_dense_ffn(s, L);
+    }
+
+    /* Gemma 4 per-layer output scale. It multiplies the layer's whole output
+     * — the running residual stream after the FFN residual add — not just one
+     * branch. (llama.cpp gemma4.cpp: `cur = ggml_mul(cur, out_scale)` right
+     * before `inpL = cur`.) 1.0 when the tensor is absent. */
+    if (L->layer_output_scale != 1.0f) {
+        const float os = L->layer_output_scale;
+        for (size_t i = 0; i < c->n_embd; i++) s->x[i] *= os;
     }
 }
 

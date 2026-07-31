@@ -131,6 +131,14 @@ typedef struct OcCudaContext {
     size_t   kv_row;
     /* Final logit softcap: logits = tanh(l/c)*c. 0 = disabled (Gemma 4: 30). */
     float    logit_softcap;
+    /* Pre-attention score scale; 0 = the usual 1/sqrt(head_dim). Gemma 4
+     * uses 1.0 (no scaling at all). See OcLlamaConfig::attn_scale. */
+    float    attn_scale;
+    /* Gemma 4 RMS-normalizes V after projection, with no weight tensor. */
+    bool     v_rms_norm;
+    /* Per-layer output scale (blk.N.layer_output_scale.weight), host-side,
+     * n_layer entries; NULL when the model has none. */
+    float   *l_out_scale;
     /* MoE config mirror (0 experts = dense FFN). */
     uint32_t num_experts, num_experts_per_tok, expert_intermediate_size;
     bool  expert_gating_sigmoid;
