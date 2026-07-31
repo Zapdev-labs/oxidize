@@ -1140,8 +1140,10 @@ OcError oc_cuda_forward(OcCudaContext *ctx, uint32_t token, uint32_t pos,
         OC_CUDA_CHECK(cudaGetLastError());
 
         /* Gemma 4 per-layer output scale: multiplies the whole running
-         * residual stream, not one branch. */
-        if (ctx->l_out_scale && ctx->l_out_scale[l] != 1.0f) {
+         * residual stream, not one branch. 0 means "unset" rather than
+         * "scale by zero" — see the matching guard in llama.c. */
+        if (ctx->l_out_scale && ctx->l_out_scale[l] != 0.0f &&
+            ctx->l_out_scale[l] != 1.0f) {
             k_scale<<<(embd + block - 1) / block, block>>>(
                 ctx->d_x, ctx->l_out_scale[l], embd);
             OC_CUDA_CHECK(cudaGetLastError());

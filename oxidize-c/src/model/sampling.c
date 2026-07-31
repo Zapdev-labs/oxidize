@@ -787,6 +787,13 @@ OcError oc_beam_search(float * const *logits_per_step, size_t n_steps,
         }
         n_active_beams = take;
 
+        /* The top `take` candidates were moved into `beams` above and are now
+         * owned there. Everything past `take` lost the cut and still owns a
+         * tokens allocation — free it before the memset below erases the
+         * pointer, or it leaks once per round. */
+        for (size_t bi = take; bi < n_candidates; bi++)
+            beam_free(&candidates[bi]);
+
         /* Clear candidates pointers (moved to beams). */
         memset(candidates, 0, max_candidates * sizeof(OcBeam));
 

@@ -1467,7 +1467,11 @@ static void forward_layer(OcLlamaSession *s, uint32_t layer)
      * — the running residual stream after the FFN residual add — not just one
      * branch. (llama.cpp gemma4.cpp: `cur = ggml_mul(cur, out_scale)` right
      * before `inpL = cur`.) 1.0 when the tensor is absent. */
-    if (L->layer_output_scale != 1.0f) {
+    /* 0 means "unset", not "scale by zero". resolve_weights() seeds this to
+     * 1.0, but a hand-built OcLlamaModel (tests, embedders) is typically
+     * memset to zero, and treating that as a real scale silently zeroes the
+     * whole residual stream — all-zero logits with no error anywhere. */
+    if (L->layer_output_scale != 0.0f && L->layer_output_scale != 1.0f) {
         const float os = L->layer_output_scale;
         for (size_t i = 0; i < c->n_embd; i++) s->x[i] *= os;
     }
