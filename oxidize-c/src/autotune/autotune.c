@@ -200,13 +200,55 @@ static void read_model_name(char *buf, size_t cap)
 #endif
 }
 
+/* Physical (non-SMT) core count.
+ *
+ * Derived from /proc/cpuinfo's per-socket "siblings" (logical) and "cpu cores"
+ * (physical): their ratio is the SMT factor, and logical / factor is the
+ * machine's physical core count. Counting unique (physical id, core id) pairs
+ * would also work but needs a set; this needs two integers.
+ *
+ * Returns `logical` unchanged when the fields are missing or implausible.
+ * That was the previous unconditional behaviour and it is the safe direction
+ * to fail — the thread count merely stops excluding SMT siblings.
+ *
+ * This matters more than it looks: the tuning plan sizes the compute pool
+ * from it, and on a 2x24-core box reporting 96 instead of 48 costs about
+ * half the throughput (96 threads measured slower than 16). */
+static uint32_t count_physical_cores(uint32_t logical)
+{
+#if OC_LINUX
+    FILE *f = fopen("/proc/cpuinfo", "r");
+    if (f == NULL) return logical;
+    char line[256];
+    long siblings = 0, cores = 0;
+    while (fgets(line, sizeof(line), f) != NULL) {
+        if (siblings == 0 && strncmp(line, "siblings", 8) == 0) {
+            const char *c = strchr(line, ':');
+            if (c != NULL) siblings = strtol(c + 1, NULL, 10);
+        } else if (cores == 0 && strncmp(line, "cpu cores", 9) == 0) {
+            const char *c = strchr(line, ':');
+            if (c != NULL) cores = strtol(c + 1, NULL, 10);
+        }
+        if (siblings > 0 && cores > 0) break;
+    }
+    fclose(f);
+    if (siblings <= 0 || cores <= 0 || siblings % cores != 0) return logical;
+    const long threads_per_core = siblings / cores;
+    if (threads_per_core <= 0) return logical;
+    const long phys = (long)logical / threads_per_core;
+    if (phys <= 0 || phys > (long)logical) return logical;
+    return (uint32_t)phys;
+#else
+    return logical;
+#endif
+}
+
 OcError oc_autotune_detect_cpu(OcCpuInfo *out)
 {
     if (out == NULL) return OC_ERR_INVALID_ARG;
     memset(out, 0, sizeof(*out));
     out->logical_cores = count_logical_cores();
-    out->physical_cores = out->logical_cores;  /* conservative; /proc/cpuinfo
-                                                * core id counting is fiddly */
+    out->physical_cores = count_physical_cores(out->logical_cores);
     out->numa_nodes = count_numa_nodes();
     out->is_dual_socket = (out->numa_nodes >= 2);
     out->total_ram_bytes = read_meminfo_field("MemTotal");
