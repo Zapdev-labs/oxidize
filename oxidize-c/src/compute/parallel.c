@@ -60,6 +60,10 @@ static struct {
     _Atomic uint64_t generation;   /* bumped once per region                */
     _Atomic size_t   n_remaining;  /* slices not yet finished               */
     _Atomic bool     shutdown;
+    /* Workers currently blocked on the condvar. The dispatch path reads this
+     * to decide whether waking anyone is necessary at all — see the comment
+     * in oc_parallel_for(). */
+    _Atomic uint32_t n_parked;
 
     /* Parking. Only touched once a worker has spun without seeing work. */
     pthread_mutex_t lock;
@@ -118,6 +122,11 @@ static void *worker_main(void *arg)
                 continue;
             }
             pthread_mutex_lock(&g_pool.lock);
+            /* Publish that we are about to park BEFORE re-checking, so a
+             * dispatcher that sees a zero count cannot have missed us: it
+             * would then also have published its generation, which the
+             * re-check below observes while we still hold the lock. */
+            atomic_fetch_add_explicit(&g_pool.n_parked, 1u, memory_order_seq_cst);
             /* Re-check under the lock: the region may have been published
              * between the load above and taking the lock, and the signal
              * would then already have been sent. */
@@ -126,6 +135,7 @@ static void *worker_main(void *arg)
                                         memory_order_acquire) == seen) {
                 pthread_cond_wait(&g_pool.wake, &g_pool.lock);
             }
+            atomic_fetch_sub_explicit(&g_pool.n_parked, 1u, memory_order_seq_cst);
             pthread_mutex_unlock(&g_pool.lock);
             spins = 0;
         }
@@ -141,7 +151,9 @@ void oc_parallel_shutdown(void)
 {
     if (!g_pool.started) return;
 
-    atomic_store_explicit(&g_pool.shutdown, true, memory_order_release);
+    atomic_store_explicit(&g_pool.shutdown, true, memory_order_seq_cst);
+    /* Unconditional here, unlike the dispatch path: shutdown must reach
+     * workers that are already parked. */
     pthread_mutex_lock(&g_pool.lock);
     pthread_cond_broadcast(&g_pool.wake);
     pthread_mutex_unlock(&g_pool.lock);
@@ -194,6 +206,7 @@ OcError oc_parallel_set_threads(size_t n_threads)
     atomic_store_explicit(&g_pool.shutdown, false, memory_order_relaxed);
     atomic_store_explicit(&g_pool.generation, 0, memory_order_relaxed);
     atomic_store_explicit(&g_pool.n_remaining, 0, memory_order_relaxed);
+    atomic_store_explicit(&g_pool.n_parked, 0u, memory_order_relaxed);
     g_pool.started = true;
 
     for (size_t i = 1; i < n_threads; i++) {
@@ -235,13 +248,26 @@ void oc_parallel_for(size_t n, OcParallelFn fn, void *user_data)
     g_pool.user_data = user_data;
     g_pool.n_items = n;
     atomic_store_explicit(&g_pool.n_remaining, nt, memory_order_relaxed);
-    atomic_fetch_add_explicit(&g_pool.generation, 1u, memory_order_release);
+    atomic_fetch_add_explicit(&g_pool.generation, 1u, memory_order_seq_cst);
 
-    /* Wake anyone who parked. Taking the lock here is what makes the
-     * re-check in worker_main race-free. */
-    pthread_mutex_lock(&g_pool.lock);
-    pthread_cond_broadcast(&g_pool.wake);
-    pthread_mutex_unlock(&g_pool.lock);
+    /* Wake anyone who parked — but only if anyone actually did.
+     *
+     * A forward pass opens on the order of 200 regions per token, and between
+     * consecutive regions the workers are still spinning, so the common case
+     * is that nothing is parked and the mutex round trip is pure overhead.
+     * Taking a lock and broadcasting 200 times per token across 48 threads was
+     * limiting how far this scaled: throughput peaked at 40 threads and fell
+     * off at 48, where llama.cpp's stays flat.
+     *
+     * The generation store above is seq_cst, and a parking worker increments
+     * n_parked under the lock before re-checking the generation, so the two
+     * orderings interleave safely: either we see its increment and signal, or
+     * it sees our new generation and does not sleep. */
+    if (atomic_load_explicit(&g_pool.n_parked, memory_order_seq_cst) != 0) {
+        pthread_mutex_lock(&g_pool.lock);
+        pthread_cond_broadcast(&g_pool.wake);
+        pthread_mutex_unlock(&g_pool.lock);
+    }
 
     /* The calling thread is participant 0 rather than a spectator. */
     run_slice(0);
