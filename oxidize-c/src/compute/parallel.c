@@ -13,7 +13,14 @@
  * normally finds the next region before it ever parks; the condvar only
  * matters between tokens or while the model is loading.
  */
+/* _SC_NPROCESSORS_ONLN is a POSIX extension that Darwin's headers hide under
+ * strict _POSIX_C_SOURCE, so asking for strict POSIX there loses it and the
+ * build fails. _DARWIN_C_SOURCE exposes the full BSD/POSIX surface instead. */
+#if defined(__APPLE__)
+#define _DARWIN_C_SOURCE
+#else
 #define _POSIX_C_SOURCE 200809L
+#endif
 #include "oxidize/parallel.h"
 
 #include "oxidize/log.h"
