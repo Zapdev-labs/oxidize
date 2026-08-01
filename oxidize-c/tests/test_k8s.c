@@ -1,5 +1,8 @@
 /* test_k8s.c — Kubernetes integration tests. */
 #define _POSIX_C_SOURCE 200809L
+#ifdef __APPLE__
+#define _DARWIN_C_SOURCE 1  /* INADDR_LOOPBACK is behind the BSD surface on macOS */
+#endif
 #include <criterion/criterion.h>
 #include "oxidize/k8s.h"
 #include <arpa/inet.h>
