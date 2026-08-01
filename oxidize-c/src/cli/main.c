@@ -20,6 +20,7 @@
 #include "oxidize/activation.h"   /* ensure link for forward deps */
 #include "oxidize/autotune.h"
 #include "oxidize/numa.h"
+#include "oxidize/parallel.h"
 #include "oxidize/version.h"
 #include "oxidize/cli_commands.h"
 #include "oxidize/cuda.h"
@@ -47,6 +48,50 @@
 /* Kept as an alias so the existing call sites read unchanged; the value
  * itself lives in version.h, shared with the server's /openapi.json. */
 #define OC_CLI_VERSION OC_VERSION
+
+/* Apply the context cap to an already-loaded model. `requested` is the --ctx
+ * value (0 = use the default cap). Shared by every path in this file that
+ * loads a model; the server especially needs it, because a session — and so a
+ * full KV cache — is created per request. */
+static void cap_model_ctx(OcLlamaModel *model, uint32_t requested)
+{
+    if (model == NULL || model->cfg.n_ctx == 0) return;
+    uint32_t want = requested > 0 ? requested : OC_CLI_DEFAULT_MAX_CTX;
+    if (want >= model->cfg.n_ctx) return;
+    oc_log(OC_LOG_INFO, "ctx: capping context %u -> %u%s",
+           model->cfg.n_ctx, want,
+           requested > 0 ? "" : " (default; --ctx N to change)");
+    model->cfg.n_ctx = want;
+}
+
+/* Size and start the compute pool. Called once, early, so that every mode —
+ * generation, bench, serve, and the subcommands — gets a threaded forward
+ * pass; previously only the autotune path touched threading and the forward
+ * pass ran on a single core regardless.
+ *
+ * Default is physical cores, not logical: these kernels are memory-bandwidth
+ * bound, so the second SMT thread on a core mostly adds contention. --threads
+ * overrides, and --auto may refine it later once the model is fingerprinted. */
+static void init_compute_threads(int requested)
+{
+    size_t n;
+    if (requested > 0) {
+        n = (size_t)requested;
+    } else {
+        OcCpuInfo cpu;
+        if (oc_autotune_detect_cpu(&cpu) == OC_OK && cpu.physical_cores > 0) {
+            n = cpu.physical_cores;
+        } else {
+            n = 0;   /* let the pool ask the OS */
+        }
+    }
+    if (oc_parallel_set_threads(n) != OC_OK) {
+        oc_log(OC_LOG_WARN, "parallel: pool init failed; running inline");
+        return;
+    }
+    oc_log(OC_LOG_INFO, "parallel: %zu compute threads",
+           oc_parallel_n_threads());
+}
 
 static double wall_now(void)
 {
@@ -98,8 +143,8 @@ static void print_help(void)
 
 /* Apply the thread + NUMA half of a tuning plan, honoring explicit CLI
  * overrides. NUMA policy binds this process to a socket; the thread count
- * drives the parallel weight prefault (the forward pass itself is
- * single-threaded, so that is the one place threads currently pay off). */
+ * resizes the compute pool (already started by init_compute_threads) and
+ * drives the parallel weight prefault. */
 static void apply_thread_numa_policy(const OcCliArgs *args,
                                      const OcTuningPlan *plan,
                                      const OcCpuInfo *cpu,
@@ -151,6 +196,13 @@ static void apply_thread_numa_policy(const OcCliArgs *args,
     oc_log(OC_LOG_INFO, "autotune: applying %u threads, numa=%s, simd=%s",
            threads, oc_autotune_numa_name(numa), cpu->simd.name);
 
+    /* Start the compute pool. Until this call the forward pass runs inline on
+     * one core no matter what --threads said, which is what made an 8B model
+     * crawl on a 96-core box. */
+    if (oc_parallel_set_threads(threads) != OC_OK) {
+        oc_log(OC_LOG_WARN, "parallel: pool init failed; running inline");
+    }
+
     /* Fault the weights in with the resolved thread count so the first
      * tokens don't pay page-fault cost serially. */
     if (weights != NULL && threads > 1) {
@@ -199,10 +251,18 @@ static OcError run_generation(const OcCliArgs *args)
      * Gemma 4 reports 262144, which at its 4096-element KV row needs 515 GB
      * of f32 cache. Never raise it above the model's own value — the RoPE
      * tables and the cache indexing both assume positions stay in range. */
-    if (args->n_ctx > 0 && args->n_ctx < model.cfg.n_ctx) {
-        oc_log(OC_LOG_INFO, "ctx: capping context %u -> %u",
-               model.cfg.n_ctx, args->n_ctx);
-        model.cfg.n_ctx = args->n_ctx;
+    /* Without --ctx, fall back to OC_CLI_DEFAULT_MAX_CTX rather than the
+     * advertised value. Defaulting to the model's own number means an 8B
+     * Llama-3.1 tries to allocate 34 GB of KV cache before emitting a token,
+     * which is the difference between "slow" and "unusable". */
+    {
+        uint32_t want = args->n_ctx > 0 ? args->n_ctx : OC_CLI_DEFAULT_MAX_CTX;
+        if (want < model.cfg.n_ctx) {
+            oc_log(OC_LOG_INFO, "ctx: capping context %u -> %u%s",
+                   model.cfg.n_ctx, want,
+                   args->n_ctx > 0 ? "" : " (default; --ctx N to change)");
+            model.cfg.n_ctx = want;
+        }
     }
 
     /* CUDA backend: upload weights to GPU and use GPU forward path. */
@@ -443,15 +503,20 @@ int main(int argc, char **argv)
      * every existing script keep working. */
     OcCliContext ctx;
     if (oc_cli_context_parse(argc, argv, &ctx)) {
+        init_compute_threads(ctx.threads);
         OcError ce = oc_cli_command_run(&ctx);
+        oc_parallel_shutdown();
         return ce == OC_OK ? 0 : 1;
     }
 
     OcCliArgs args;
     oc_cli_parse_args(argc, argv, &args);
 
+    /* After the early exits: neither help nor --version does any compute, and
+     * starting a pool only to tear it down would just add startup latency. */
     if (args.show_help)    { print_help(); return 0; }
     if (args.show_version) { printf("oxidize-c v%s\n", OC_CLI_VERSION); return 0; }
+    init_compute_threads(args.threads);
 
     if (args.print_plan) {
         OcCpuInfo cpu;
@@ -489,6 +554,7 @@ int main(int argc, char **argv)
             OcTokenizer *tok = calloc(1, sizeof(OcTokenizer));
             if (model && tok &&
                 oc_llama_load(args.model_path, model) == OC_OK &&
+                (cap_model_ctx(model, args.n_ctx), true) &&
                 oc_tokenizer_load_from_gguf(&model->gguf.unified, tok) == OC_OK) {
                 st.model = model;
                 st.tokenizer = tok;
@@ -642,6 +708,7 @@ int main(int argc, char **argv)
             fprintf(stderr, "error: failed to load model (%s)\n", oc_error_msg(e));
             return 1;
         }
+        cap_model_ctx(&model, args.n_ctx);
         OcTokenizer tok;
         e = oc_tokenizer_load_from_gguf(&model.gguf.unified, &tok);
         if (e != OC_OK) {
@@ -707,6 +774,7 @@ int main(int argc, char **argv)
             fprintf(stderr, "error: failed to load model (%s)\n", oc_error_msg(e));
             return 1;
         }
+        cap_model_ctx(&model, args.n_ctx);
         OcTokenizer tok;
         e = oc_tokenizer_load_from_gguf(&model.gguf.unified, &tok);
         if (e != OC_OK) {

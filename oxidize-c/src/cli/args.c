@@ -141,6 +141,7 @@ bool oc_cli_context_parse(int argc, char **argv, OcCliContext *ctx)
         else if (match(arg, "--prompt"))         { ctx->prompt = val; i++; }
         else if (match(arg, "--prompt-file"))    { ctx->prompt_file = val; i++; }
         else if (match(arg, "--n-predict"))      { ctx->n_predict = (uint32_t)strtoul(val, NULL, 10); i++; }
+        else if (match(arg, "--ctx"))            { ctx->n_ctx = (uint32_t)strtoul(val, NULL, 10); i++; }
         else if (match(arg, "--threads"))        { ctx->threads = atoi(val); i++; }
         else if (match(arg, "--numa"))           { ctx->numa = val; i++; }
         else if (match(arg, "--backend"))        { ctx->backend = val; i++; }

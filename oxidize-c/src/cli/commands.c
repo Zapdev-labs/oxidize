@@ -122,6 +122,32 @@ static void cli_error(const char *fmt, ...)
     va_end(ap);
 }
 
+void oc_cli_apply_ctx(const OcCliContext *ctx, struct OcLlamaModel *model)
+{
+    if (ctx == NULL || model == NULL) return;
+    OcLlamaModel *m = (OcLlamaModel *)model;
+    const uint32_t advertised = m->cfg.n_ctx;
+    if (advertised == 0) return;
+
+    uint32_t want;
+    if (ctx->n_ctx > 0) {
+        want = ctx->n_ctx;                       /* explicit --ctx N       */
+    } else {
+        want = OC_CLI_DEFAULT_MAX_CTX;           /* default cap            */
+    }
+    /* Never extend past what the model was trained for — a larger KV cache
+     * than the advertised context buys nothing and the position encodings
+     * are undefined out there. */
+    if (want > advertised) want = advertised;
+    if (want == advertised) return;
+
+    oc_log(OC_LOG_INFO,
+           "llama: context capped to %u (model advertises %u); "
+           "pass --ctx N to change, --ctx %u for the full context",
+           want, advertised, advertised);
+    m->cfg.n_ctx = want;
+}
+
 /* Read entire file into a malloc'd buffer. Returns NULL on error. */
 static char *read_file_text(const char *path)
 {
@@ -497,6 +523,7 @@ OcError oc_cli_run_bench(OcCliContext *ctx)
         cli_error("failed to load model (%s)", oc_error_msg(e));
         return e;
     }
+    oc_cli_apply_ctx(ctx, &model);
 
     OcTokenizer tok;
     e = oc_tokenizer_load_from_gguf(&model.gguf.unified, &tok);
@@ -1140,6 +1167,7 @@ OcError oc_cli_run_tokenize(OcCliContext *ctx)
         free(file_text);
         return e;
     }
+    oc_cli_apply_ctx(ctx, &model);
 
     OcTokenizer tok;
     e = oc_tokenizer_load_from_gguf(&model.gguf.unified, &tok);
@@ -1216,6 +1244,7 @@ OcError oc_cli_run_detokenize(OcCliContext *ctx)
         cli_error("failed to load model (%s)", oc_error_msg(e));
         return e;
     }
+    oc_cli_apply_ctx(ctx, &model);
 
     OcTokenizer tok;
     e = oc_tokenizer_load_from_gguf(&model.gguf.unified, &tok);
@@ -1305,6 +1334,7 @@ OcError oc_cli_run_perplexity(OcCliContext *ctx)
         free(file_text);
         return e;
     }
+    oc_cli_apply_ctx(ctx, &model);
 
     OcTokenizer tok;
     e = oc_tokenizer_load_from_gguf(&model.gguf.unified, &tok);
@@ -1367,6 +1397,7 @@ OcError oc_cli_run_serve(OcCliContext *ctx)
             free(model); free(tok);
             return e;
         }
+        oc_cli_apply_ctx(ctx, model);
         e = oc_tokenizer_load_from_gguf(&model->gguf.unified, tok);
         if (e != OC_OK) {
             cli_error("tokenizer load failed (%s)", oc_error_msg(e));
@@ -1490,6 +1521,7 @@ OcError oc_cli_run_serve_realtime(OcCliContext *ctx)
         free(model); free(tok);
         return e;
     }
+    oc_cli_apply_ctx(ctx, model);
     e = oc_tokenizer_load_from_gguf(&model->gguf.unified, tok);
     if (e != OC_OK) {
         cli_error("tokenizer load failed (%s)", oc_error_msg(e));

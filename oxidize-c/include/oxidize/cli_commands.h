@@ -80,6 +80,10 @@ typedef struct OcCliContext {
     const char        *prompt;         /* --prompt TEXT / positional       */
     const char        *prompt_file;    /* --prompt-file PATH                */
     uint32_t           n_predict;      /* --n-predict N (default 128)       */
+    /* --ctx N: KV context length. 0 means "use the default cap"; see
+     * OC_CLI_DEFAULT_MAX_CTX below. Pass a value larger than the cap to
+     * request it explicitly. */
+    uint32_t           n_ctx;
     int                threads;        /* --threads N (0 = auto)            */
     const char        *numa;           /* --numa single|interleave|none     */
     bool               auto_tune;      /* --auto                            */
@@ -144,6 +148,24 @@ typedef struct OcCliContext {
     const char        *token_ids_str;   /* --ids "1,2,3" (for detokenize)    */
     bool               tokens_no_special; /* --no-special (disallow special) */
 } OcCliContext;
+
+/* Default cap on the KV context when --ctx is not given.
+ *
+ * The KV cache is allocated eagerly for the whole context, so using the
+ * model's advertised context_length as the default is not viable on modern
+ * long-context models: Llama-3.1-8B advertises 131072, which at its 1024-float
+ * KV row is 34 GB of f32 cache for an 8B model. That allocation dominates
+ * startup and thrashes memory before a single token is produced. llama.cpp
+ * makes the same choice for the same reason.
+ *
+ * Capping is announced at INFO. `--ctx 0` restores the model's own value. */
+#define OC_CLI_DEFAULT_MAX_CTX 4096u
+
+/* Resolve the effective context for `model` under `ctx` and write it into the
+ * model config, logging whenever the advertised value is reduced. Call once
+ * after loading, before creating a session. */
+struct OcLlamaModel;
+void oc_cli_apply_ctx(const OcCliContext *ctx, struct OcLlamaModel *model);
 
 /* ─── Enum ↔ string ───────────────────────────────────────────────────── */
 
