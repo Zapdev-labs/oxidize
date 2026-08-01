@@ -167,6 +167,7 @@ float oc_oxk_dot_q4_k_q8_k_scalar(const uint8_t *row, size_t blocks,
         const int8_t  *q8v    = (const int8_t *)(qb + 4);
         const uint8_t *bsums  = qb + 4 + 256; /* 16 i16 = 32 bytes */
 
+        int32_t pos = 0, min_acc = 0;
         for (int gp = 0; gp < 4; gp++) {
             uint8_t sc1, m1, sc2, m2;
             oc_oxk_get_scale_min_k4(gp * 2,     scales, &sc1, &m1);
@@ -184,15 +185,23 @@ float oc_oxk_dot_q4_k_q8_k_scalar(const uint8_t *row, size_t blocks,
             int32_t bs2 = oc_oxk_read_q8_k_bsum(bsums, gp * 4 + 2) +
                           oc_oxk_read_q8_k_bsum(bsums, gp * 4 + 3);
 
-            /* The offset term is scaled by dmin alone, NOT by dw*dmin: the
-             * dequantized weight is d*sc*q - dmin*m, so the minimum has its
-             * own scale. Multiplying it by dw as well (as this did) leaves
-             * the positive term correct and the correction term off by a
-             * factor of dw, which decorrelates the result entirely. */
-            float term1 = dw * dq * (float)sc1 * (float)sum1 - dmin * dq * (float)m1 * (float)bs1;
-            float term2 = dw * dq * (float)sc2 * (float)sum2 - dmin * dq * (float)m2 * (float)bs2;
-            sum += term1 + term2;
+            /* Accumulate the scaled sums in int32 across the whole block and
+             * convert once, rather than two float multiply-adds per group.
+             * This matches the Rust reference in oxidize-kernels, and it is
+             * what lets a vectorized kernel be bit-exact against this one:
+             * the SIMD version accumulates integers too, so there is no float
+             * reassociation for the two to disagree about. Bounds are
+             * comfortable — scale and min are 6-bit and each group sum is at
+             * most 32*15*127, so block totals stay well inside int32. */
+            pos     += (int32_t)sc1 * sum1 + (int32_t)sc2 * sum2;
+            min_acc += (int32_t)m1  * bs1  + (int32_t)m2  * bs2;
         }
+
+        /* The offset term is scaled by dmin alone, NOT by dw*dmin: the
+         * dequantized weight is d*sc*q - dmin*m, so the minimum carries its
+         * own scale. Multiplying it by dw as well left the positive term
+         * right and the correction term wrong by a factor of dw. */
+        sum += dw * dq * (float)pos - dmin * dq * (float)min_acc;
     }
     return sum;
 }
@@ -216,6 +225,7 @@ float oc_oxk_dot_q5_k_q8_k_scalar(const uint8_t *row, size_t blocks,
         const int8_t  *q8v   = (const int8_t *)(qb + 4);
         const uint8_t *bsums = qb + 4 + 256;
 
+        int32_t pos = 0, min_acc = 0;
         for (int gp = 0; gp < 4; gp++) {
             uint8_t sc1, m1, sc2, m2;
             oc_oxk_get_scale_min_k4(gp * 2,     scales, &sc1, &m1);
@@ -235,15 +245,23 @@ float oc_oxk_dot_q5_k_q8_k_scalar(const uint8_t *row, size_t blocks,
             int32_t bs2 = oc_oxk_read_q8_k_bsum(bsums, gp * 4 + 2) +
                           oc_oxk_read_q8_k_bsum(bsums, gp * 4 + 3);
 
-            /* The offset term is scaled by dmin alone, NOT by dw*dmin: the
-             * dequantized weight is d*sc*q - dmin*m, so the minimum has its
-             * own scale. Multiplying it by dw as well (as this did) leaves
-             * the positive term correct and the correction term off by a
-             * factor of dw, which decorrelates the result entirely. */
-            float term1 = dw * dq * (float)sc1 * (float)sum1 - dmin * dq * (float)m1 * (float)bs1;
-            float term2 = dw * dq * (float)sc2 * (float)sum2 - dmin * dq * (float)m2 * (float)bs2;
-            sum += term1 + term2;
+            /* Accumulate the scaled sums in int32 across the whole block and
+             * convert once, rather than two float multiply-adds per group.
+             * This matches the Rust reference in oxidize-kernels, and it is
+             * what lets a vectorized kernel be bit-exact against this one:
+             * the SIMD version accumulates integers too, so there is no float
+             * reassociation for the two to disagree about. Bounds are
+             * comfortable — scale and min are 6-bit and each group sum is at
+             * most 32*15*127, so block totals stay well inside int32. */
+            pos     += (int32_t)sc1 * sum1 + (int32_t)sc2 * sum2;
+            min_acc += (int32_t)m1  * bs1  + (int32_t)m2  * bs2;
         }
+
+        /* The offset term is scaled by dmin alone, NOT by dw*dmin: the
+         * dequantized weight is d*sc*q - dmin*m, so the minimum carries its
+         * own scale. Multiplying it by dw as well left the positive term
+         * right and the correction term wrong by a factor of dw. */
+        sum += dw * dq * (float)pos - dmin * dq * (float)min_acc;
     }
     return sum;
 }
