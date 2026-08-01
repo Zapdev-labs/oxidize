@@ -264,14 +264,68 @@ float oc_oxk_dot_q8_0_q8_0_avx512(const uint8_t *row, size_t blocks,
 }
 
 __attribute__((target("avx512bw,avx512dq,avx512vnni")))
+/* Same kernel as the AVX2 one, but the nibble products use VNNI's dpbusd,
+ * which folds the maddubs + madd pair into a single instruction: it multiplies
+ * unsigned bytes by signed bytes and accumulates groups of four into int32
+ * lanes directly. Operates on 256-bit vectors (avx512vl) rather than 512-bit,
+ * because a Q4_K group half is 32 bytes — a 512-bit register would run
+ * half-empty and gain nothing.
+ *
+ * Bit-exact against the scalar reference for the same reason the AVX2 kernel
+ * is: everything stays in integers, so the different grouping of the partial
+ * sums cannot change the total. */
+__attribute__((target("avx512f,avx512bw,avx512dq,avx512vl,avx512vnni")))
 float oc_oxk_dot_q4_k_q8_k_avx512(const uint8_t *row, size_t blocks,
                                   const uint8_t *q8)
 {
-    /* Forward to the AVX2 kernel rather than to scalar. A dedicated 512-bit
-     * (or VNNI) version would be faster still, but an AVX-512 host running
-     * the scalar path — which is what this did — is the worst of both, and
-     * AVX2 is available on every machine that has AVX-512. */
-    return oc_oxk_dot_q4_k_q8_k_avx2(row, blocks, q8);
+    const __m256i lownib = _mm256_set1_epi8(0x0F);
+    const __m256i zero   = _mm256_setzero_si256();
+    float sum = 0.0f;
+
+    for (size_t b = 0; b < blocks; b++) {
+        const uint8_t *wb = row + b * OC_OXK_BLOCK_Q4_K_SIZE;
+        const uint8_t *qb = q8  + b * OC_OXK_BLOCK_Q8_K_SIZE;
+        const float dw   = oc_oxk_f16_le_to_f32(wb);
+        const float dmin = oc_oxk_f16_le_to_f32(wb + 2);
+        const uint8_t *scales = wb + 4;
+        const uint8_t *qs     = wb + 16;
+        float dq;
+        memcpy(&dq, qb, 4);
+        const int8_t  *q8v   = (const int8_t *)(qb + 4);
+        const uint8_t *bsums = qb + 4 + 256;
+
+        __m256i pos_v = _mm256_setzero_si256();
+        int32_t min_acc = 0;
+        for (int gp = 0; gp < 4; gp++) {
+            uint8_t sc1, m1, sc2, m2;
+            oc_oxk_get_scale_min_k4((unsigned)(gp * 2),     scales, &sc1, &m1);
+            oc_oxk_get_scale_min_k4((unsigned)(gp * 2 + 1), scales, &sc2, &m2);
+
+            const __m256i packed = _mm256_loadu_si256((const __m256i *)(qs + gp * 32));
+            const __m256i nib_lo = _mm256_and_si256(packed, lownib);
+            const __m256i nib_hi = _mm256_and_si256(_mm256_srli_epi16(packed, 4), lownib);
+
+            const __m256i a_lo = _mm256_loadu_si256((const __m256i *)(q8v + gp * 64));
+            const __m256i a_hi = _mm256_loadu_si256((const __m256i *)(q8v + gp * 64 + 32));
+
+            const __m256i p1 = _mm256_dpbusd_epi32(zero, nib_lo, a_lo);
+            const __m256i p2 = _mm256_dpbusd_epi32(zero, nib_hi, a_hi);
+
+            pos_v = _mm256_add_epi32(pos_v,
+                        _mm256_mullo_epi32(p1, _mm256_set1_epi32((int32_t)sc1)));
+            pos_v = _mm256_add_epi32(pos_v,
+                        _mm256_mullo_epi32(p2, _mm256_set1_epi32((int32_t)sc2)));
+
+            const int32_t bs1 = oc_oxk_read_q8_k_bsum(bsums, (size_t)(gp * 4)) +
+                                oc_oxk_read_q8_k_bsum(bsums, (size_t)(gp * 4 + 1));
+            const int32_t bs2 = oc_oxk_read_q8_k_bsum(bsums, (size_t)(gp * 4 + 2)) +
+                                oc_oxk_read_q8_k_bsum(bsums, (size_t)(gp * 4 + 3));
+
+            min_acc += (int32_t)m1 * bs1 + (int32_t)m2 * bs2;
+        }
+        sum += dw * dq * (float)hsum_i32_8(pos_v) - dmin * dq * (float)min_acc;
+    }
+    return sum;
 }
 
 __attribute__((target("avx512bw,avx512dq,avx512vnni")))

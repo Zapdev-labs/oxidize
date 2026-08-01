@@ -314,26 +314,42 @@ OcTuningPlan oc_autotune_plan(const OcCpuInfo *cpu,
     p.use_hugepages = fits_2x;
     p.mlock_weights = (msize > 0 && avail >= (msize * 10) / 7);  /* 30% headroom */
 
-    /* Threads + NUMA: mirror the learned dual-socket Cascade Lake rules. */
+    /* Threads + NUMA.
+     *
+     * The old rule capped dense models at 16 threads. That was measured when
+     * the forward pass dequantized every weight row to f32 and was bound on
+     * scratch traffic, where extra threads bought nothing. With the fused
+     * integer kernels the work is compute-bound and the optimum moved a long
+     * way up. Measured on 2x Xeon Gold 5220R (24 cores/socket, 96 logical),
+     * Llama-3.1-8B-Q4_K_M, tokens/sec:
+     *
+     *     16 threads  2.94      40 threads  5.43
+     *     24 threads  4.09      64 threads  5.41
+     *     32 threads  5.09      96 threads  2.92
+     *
+     * So: scale with physical cores, and stay off the logical (SMT) count —
+     * 96 threads is worse than 16. Physical cores lands at 48 here, inside
+     * the flat 40-64 optimum. */
     bool big_model = (msize > (192ULL << 30));   /* > 192 GB */
+    const uint32_t phys = (cpu && cpu->physical_cores > 0)
+                        ? cpu->physical_cores : 1u;
     if (cpu && cpu->is_dual_socket) {
         if (big_model) {
             p.numa = OC_NUMA_INTERLEAVE;
-            p.threads = 48;
+            p.threads = phys;
             p.rationale_numa = "dual-socket + model >192GB → interleave across sockets";
-            p.rationale_threads = "large model on dual-socket → 48 threads";
+            p.rationale_threads = "large model on dual-socket → one thread per physical core";
         } else {
             p.numa = OC_NUMA_SINGLE;
-            p.threads = (cpu->logical_cores >= 16) ? 16 : cpu->logical_cores;
+            p.threads = phys;
             p.rationale_numa = "dual-socket + model <=192GB → single-socket binding";
-            p.rationale_threads = "dense model <=192GB → 16 threads (single socket)";
+            p.rationale_threads = "compute-bound fused kernels → one thread per physical core";
         }
     } else {
         p.numa = OC_NUMA_NONE;
-        uint32_t lc = cpu ? cpu->logical_cores : 1;
-        p.threads = (lc >= 16) ? 16 : lc;
+        p.threads = phys;
         p.rationale_numa = "UMA or single-socket → no NUMA policy";
-        p.rationale_threads = "UMA → up to 16 threads";
+        p.rationale_threads = "one thread per physical core (SMT threads hurt)";
     }
 
     p.rationale_simd = (p.simd_level == OC_SIMD_AVX512) ? "AVX-512 BW+DQ+VNNI detected → use AVX-512 dequant kernels"

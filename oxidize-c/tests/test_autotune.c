@@ -62,25 +62,35 @@ Test(autotune, plan_threads_match_learned_heuristics)
     OcCpuInfo cpu;
     oc_autotune_detect_cpu(&cpu);
 
-    /* Small model (8 GB): on dual-socket → 16 threads; on UMA → up to 16. */
+    /* One thread per physical core. The plan used to cap at 16, which was
+     * measured against the old dequant-to-f32 forward pass; the fused integer
+     * kernels are compute-bound and 16 leaves most of the machine idle
+     * (2.94 vs 5.43 tok/s on a 48-core dual socket). SMT threads are excluded
+     * deliberately — 96 threads measured worse than 16. */
     OcModelFingerprint small;
     memset(&small, 0, sizeof(small));
     small.file_bytes = 8ULL << 30;
     OcTuningPlan p = oc_autotune_plan(&cpu, &small);
+    cr_assert_eq(p.threads, cpu.physical_cores,
+                 "expected one thread per physical core (%u), got %u",
+                 cpu.physical_cores, p.threads);
+    cr_assert_leq(p.threads, cpu.logical_cores,
+                  "never more threads than logical cores");
     if (cpu.is_dual_socket) {
-        cr_assert_eq(p.threads, 16u, "small model on dual-socket → 16 threads");
         cr_assert_eq(p.numa, OC_NUMA_SINGLE, "small model → single-socket");
-    } else {
-        cr_assert(p.threads <= 16u, "UMA → at most 16 threads");
     }
 
-    /* Large model (>192 GB): on dual-socket → 48 threads + interleave. */
+    /* Large model (>192 GB): interleave across sockets, same thread rule.
+     * 48 was previously hardcoded here because that is the physical core
+     * count of the box it was tuned on; deriving it keeps the plan right on
+     * other machines. */
     OcModelFingerprint big;
     memset(&big, 0, sizeof(big));
     big.file_bytes = 256ULL << 30;   /* 256 GB */
     p = oc_autotune_plan(&cpu, &big);
+    cr_assert_eq(p.threads, cpu.physical_cores,
+                 "large model: one thread per physical core");
     if (cpu.is_dual_socket) {
-        cr_assert_eq(p.threads, 48u, "large model on dual-socket → 48 threads");
         cr_assert_eq(p.numa, OC_NUMA_INTERLEAVE, "large model → interleave");
     }
 }
