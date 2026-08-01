@@ -156,7 +156,18 @@ float oc_oxk_dot_q4_k_q8_k_avx2(const uint8_t *row, size_t blocks,
         const int8_t  *q8v   = (const int8_t *)(qb + 4);
         const uint8_t *bsums = qb + 4 + 256;
 
-        int32_t pos = 0, min_acc = 0;
+        /* Scale each group's lane-wise products in vector form and reduce ONCE
+         * per block. Reducing per group instead costs eight horizontal sums
+         * per block, and a horizontal sum is a serial dependency chain that
+         * stalls the pipeline — it was the dominant cost in the first version
+         * of this kernel.
+         *
+         * Summation order still matches the scalar reference exactly: the
+         * lane totals are integers, so regrouping them cannot change the
+         * result the way it would in floating point. That is what keeps this
+         * bit-exact while being reassociated. */
+        __m256i pos_v = _mm256_setzero_si256();
+        int32_t min_acc = 0;
         for (int gp = 0; gp < 4; gp++) {
             uint8_t sc1, m1, sc2, m2;
             oc_oxk_get_scale_min_k4((unsigned)(gp * 2),     scales, &sc1, &m1);
@@ -173,18 +184,19 @@ float oc_oxk_dot_q4_k_q8_k_avx2(const uint8_t *row, size_t blocks,
             const __m256i p1 = _mm256_madd_epi16(_mm256_maddubs_epi16(nib_lo, a_lo), ones16);
             const __m256i p2 = _mm256_madd_epi16(_mm256_maddubs_epi16(nib_hi, a_hi), ones16);
 
-            const int32_t sum1 = hsum_i32_8(p1);
-            const int32_t sum2 = hsum_i32_8(p2);
+            pos_v = _mm256_add_epi32(pos_v,
+                        _mm256_mullo_epi32(p1, _mm256_set1_epi32((int32_t)sc1)));
+            pos_v = _mm256_add_epi32(pos_v,
+                        _mm256_mullo_epi32(p2, _mm256_set1_epi32((int32_t)sc2)));
 
             const int32_t bs1 = oc_oxk_read_q8_k_bsum(bsums, (size_t)(gp * 4)) +
                                 oc_oxk_read_q8_k_bsum(bsums, (size_t)(gp * 4 + 1));
             const int32_t bs2 = oc_oxk_read_q8_k_bsum(bsums, (size_t)(gp * 4 + 2)) +
                                 oc_oxk_read_q8_k_bsum(bsums, (size_t)(gp * 4 + 3));
 
-            pos     += (int32_t)sc1 * sum1 + (int32_t)sc2 * sum2;
-            min_acc += (int32_t)m1  * bs1  + (int32_t)m2  * bs2;
+            min_acc += (int32_t)m1 * bs1 + (int32_t)m2 * bs2;
         }
-        sum += dw * dq * (float)pos - dmin * dq * (float)min_acc;
+        sum += dw * dq * (float)hsum_i32_8(pos_v) - dmin * dq * (float)min_acc;
     }
     return sum;
 }
