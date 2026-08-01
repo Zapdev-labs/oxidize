@@ -53,12 +53,17 @@ float oc_oxk_f16_le_to_f32(const uint8_t p[2])
 void oc_oxk_get_scale_min_k4(unsigned j, const uint8_t scales[12],
                               uint8_t *scale, uint8_t *min)
 {
+    /* Must match quantization.c's get_scale_min_k4, which is bit-identical to
+     * ggml's. The j >= 4 branch here previously assembled the 6-bit values
+     * from the wrong bit positions AND the wrong source byte (scales[j]
+     * rather than scales[j+4]), so the upper four scale/min pairs of every
+     * Q4_K and Q5_K block were decoded wrong. */
     if (j < 4) {
         *scale = scales[j] & 63;
         *min   = scales[j + 4] & 63;
     } else {
-        *scale = (scales[j - 4] >> 6) | ((scales[j] << 2) & 0x3C);
-        *min   = (scales[j] >> 6) | ((scales[j + 4] << 2) & 0x3C);
+        *scale = (uint8_t)((scales[j + 4] & 0x0Fu) | ((scales[j - 4] >> 6) << 4));
+        *min   = (uint8_t)(((scales[j + 4] >> 4) & 0x0Fu) | ((scales[j] >> 6) << 4));
     }
 }
 
@@ -85,11 +90,15 @@ float oc_oxk_dot_q4_0_q8_0_scalar(const uint8_t *row, size_t blocks,
         const uint8_t *qs = wb + 2; /* 16 packed bytes → 32 nibbles */
         const int8_t  *qv = (const int8_t *)(qb + 2); /* 32 int8 values */
         int32_t isum = 0;
+        /* GGUF Q4_0 splits a block into halves: the low nibble of byte i is
+         * element i, the high nibble is element i+16. Pairing them with
+         * activation elements 2i and 2i+1 (as this did) shuffles the whole
+         * dot product. */
         for (int i = 0; i < 16; i++) {
             int lo = qs[i] & 0x0F;
             int hi = qs[i] >> 4;
-            isum += (lo - 8) * (int)qv[i * 2];
-            isum += (hi - 8) * (int)qv[i * 2 + 1];
+            isum += (lo - 8) * (int)qv[i];
+            isum += (hi - 8) * (int)qv[i + 16];
         }
         sum += dw * dq * (float)isum;
     }
@@ -110,11 +119,12 @@ float oc_oxk_dot_q4_1_q8_0_scalar(const uint8_t *row, size_t blocks,
         const int8_t  *qv = (const int8_t *)(qb + 2);
         int32_t dot_prod = 0;
         int32_t q8_sum   = 0;
+        /* Same half-split layout as Q4_0 — see the note there. */
         for (int i = 0; i < 16; i++) {
             int lo = qs[i] & 0x0F;
             int hi = qs[i] >> 4;
-            dot_prod += lo * (int)qv[i * 2] + hi * (int)qv[i * 2 + 1];
-            q8_sum   += (int)qv[i * 2] + (int)qv[i * 2 + 1];
+            dot_prod += lo * (int)qv[i] + hi * (int)qv[i + 16];
+            q8_sum   += (int)qv[i] + (int)qv[i + 16];
         }
         sum += dw * dq * (float)dot_prod + mw * dq * (float)q8_sum;
     }
@@ -174,8 +184,13 @@ float oc_oxk_dot_q4_k_q8_k_scalar(const uint8_t *row, size_t blocks,
             int32_t bs2 = oc_oxk_read_q8_k_bsum(bsums, gp * 4 + 2) +
                           oc_oxk_read_q8_k_bsum(bsums, gp * 4 + 3);
 
-            float term1 = dw * dq * (float)sc1 * (float)sum1 - dw * dmin * dq * (float)m1 * (float)bs1;
-            float term2 = dw * dq * (float)sc2 * (float)sum2 - dw * dmin * dq * (float)m2 * (float)bs2;
+            /* The offset term is scaled by dmin alone, NOT by dw*dmin: the
+             * dequantized weight is d*sc*q - dmin*m, so the minimum has its
+             * own scale. Multiplying it by dw as well (as this did) leaves
+             * the positive term correct and the correction term off by a
+             * factor of dw, which decorrelates the result entirely. */
+            float term1 = dw * dq * (float)sc1 * (float)sum1 - dmin * dq * (float)m1 * (float)bs1;
+            float term2 = dw * dq * (float)sc2 * (float)sum2 - dmin * dq * (float)m2 * (float)bs2;
             sum += term1 + term2;
         }
     }
@@ -220,8 +235,13 @@ float oc_oxk_dot_q5_k_q8_k_scalar(const uint8_t *row, size_t blocks,
             int32_t bs2 = oc_oxk_read_q8_k_bsum(bsums, gp * 4 + 2) +
                           oc_oxk_read_q8_k_bsum(bsums, gp * 4 + 3);
 
-            float term1 = dw * dq * (float)sc1 * (float)sum1 - dw * dmin * dq * (float)m1 * (float)bs1;
-            float term2 = dw * dq * (float)sc2 * (float)sum2 - dw * dmin * dq * (float)m2 * (float)bs2;
+            /* The offset term is scaled by dmin alone, NOT by dw*dmin: the
+             * dequantized weight is d*sc*q - dmin*m, so the minimum has its
+             * own scale. Multiplying it by dw as well (as this did) leaves
+             * the positive term correct and the correction term off by a
+             * factor of dw, which decorrelates the result entirely. */
+            float term1 = dw * dq * (float)sc1 * (float)sum1 - dmin * dq * (float)m1 * (float)bs1;
+            float term2 = dw * dq * (float)sc2 * (float)sum2 - dmin * dq * (float)m2 * (float)bs2;
             sum += term1 + term2;
         }
     }

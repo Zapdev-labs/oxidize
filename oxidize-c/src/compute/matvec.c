@@ -44,30 +44,23 @@ bool oc_matvec_fused_enabled(void)     { return g_fused_enabled; }
 /* Which Q8 flavour a weight type pairs with. */
 typedef enum { ACT_NONE = 0, ACT_Q8_0, ACT_Q8_K } ActKind;
 
-/* Only the OXK kernels that have been verified against the real GGUF weight
- * layout are used here.
+/* Every OXK kernel here is verified against the GGUF layout by
+ * test_oxk_gguf_layout.c, which dots the dequantized weights with the same
+ * dequantized activation the kernel consumes — that removes int8 error from
+ * the comparison, so any difference is a real disagreement.
  *
- * Q4_0, Q4_1 and Q4_K are deliberately NOT in this list: their OXK kernels
- * unpack nibbles in a different order than the GGUF layout the loader and
- * oc_quant_dequant_row use. Q4_0's kernel pairs the low/high nibble of byte i
- * with activation elements 2i and 2i+1, where GGUF puts them at i and i+16.
- * Feeding real weights through them produces uncorrelated output (measured
- * relative error 0.47 for Q4_0, 2.20 for Q4_K against the dequant reference
- * with activation quantization error removed).
- *
- * That is a pre-existing bug in those kernels, not in this dispatch: the OXK
- * parity tests only ever compared the SIMD variants against the OXK scalar
- * reference, so every variant shares the same wrong convention and the
- * disagreement with GGUF never showed up. test_oxk_gguf_layout.c now checks
- * each kernel against the dequant path and documents which ones fail.
- *
- * Q5_K has no verification either way here because oc_quant_pack_row cannot
- * produce Q5_K, so it stays off until it can be checked. */
+ * Q5_K is absent only because oc_quant_pack_row cannot produce it, so there
+ * is nothing to verify it against yet; its kernel shares the scale decoding
+ * that Q4_K needed fixed, so it is likely fine but stays off until checked. */
 static ActKind fused_act_kind(OcGgufQuantizationType qtype, size_t cols)
 {
     switch (qtype) {
+    case OC_QUANT_Q4_0:
+    case OC_QUANT_Q4_1:
     case OC_QUANT_Q8_0:
         return (cols % OC_OXK_QK8_0 == 0) ? ACT_Q8_0 : ACT_NONE;
+    case OC_QUANT_Q4_K_S:
+    case OC_QUANT_Q4_K_M:
     case OC_QUANT_Q6_K:
         return (cols % OC_OXK_QK_K == 0) ? ACT_Q8_K : ACT_NONE;
     default:

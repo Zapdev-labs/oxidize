@@ -12,11 +12,7 @@
  * error from the comparison: both sides then see identical numbers, so any
  * meaningful difference is a disagreement about where the weight bits live.
  *
- * Q4_0/Q4_1/Q4_K currently FAIL that comparison — their kernels pair the
- * low/high nibble of byte i with activation elements 2i and 2i+1, while GGUF
- * puts them at i and i+16. Those cases are asserted as known-broken so the
- * suite records the defect rather than hiding it; flip them to the agreement
- * assertion once the kernels are fixed.
+ * This caught three real defects in Q4_0, Q4_1 and Q4_K, all now fixed.
  */
 #include <criterion/criterion.h>
 
@@ -160,36 +156,29 @@ Test(oxk_gguf, q6_k_matches_dequant_reference)
     cr_assert_lt(rel, 1e-4, "Q6_K kernel disagrees with GGUF layout (rel=%g)", rel);
 }
 
-/* ─── kernels that do NOT (known defect) ─────────────────────────────── */
+/* ─── kernels fixed in this change ───────────────────────────────────── */
 
-/* These assert the CURRENT broken behaviour on purpose. When the nibble
- * order is fixed, each of these will start failing — that is the signal to
- * replace it with the `< 1e-4` agreement assertion above and to add the type
- * back to fused_act_kind() in matvec.c. */
+/* Q4_0 and Q4_1 had the wrong nibble-to-element mapping; Q4_K additionally
+ * scaled its offset term by dw*dmin instead of dmin, and decoded the upper
+ * four scale/min pairs from the wrong bits. All three now agree exactly. */
 
-Test(oxk_gguf, q4_0_layout_is_known_broken)
+Test(oxk_gguf, q4_0_matches_dequant_reference)
 {
     double rel = kernel_vs_gguf(OC_QUANT_Q4_0, 0, oc_oxk_dot_q4_0_q8_0);
     cr_assert_geq(rel, 0.0, "Q4_0 packing unavailable");
-    cr_assert_gt(rel, 1e-2,
-                 "Q4_0 kernel now agrees with GGUF (rel=%g) — fix the nibble "
-                 "order expectation and re-enable Q4_0 in fused_act_kind()", rel);
+    cr_assert_lt(rel, 1e-4, "Q4_0 kernel disagrees with GGUF layout (rel=%g)", rel);
 }
 
-Test(oxk_gguf, q4_1_layout_is_known_broken)
+Test(oxk_gguf, q4_1_matches_dequant_reference)
 {
     double rel = kernel_vs_gguf(OC_QUANT_Q4_1, 0, oc_oxk_dot_q4_1_q8_0);
     cr_assert_geq(rel, 0.0, "Q4_1 packing unavailable");
-    cr_assert_gt(rel, 1e-2,
-                 "Q4_1 kernel now agrees with GGUF (rel=%g) — fix the nibble "
-                 "order expectation and re-enable Q4_1 in fused_act_kind()", rel);
+    cr_assert_lt(rel, 1e-4, "Q4_1 kernel disagrees with GGUF layout (rel=%g)", rel);
 }
 
-Test(oxk_gguf, q4_k_layout_is_known_broken)
+Test(oxk_gguf, q4_k_matches_dequant_reference)
 {
     double rel = kernel_vs_gguf(OC_QUANT_Q4_K_M, 1, oc_oxk_dot_q4_k_q8_k);
     cr_assert_geq(rel, 0.0, "Q4_K packing unavailable");
-    cr_assert_gt(rel, 1e-2,
-                 "Q4_K kernel now agrees with GGUF (rel=%g) — fix the nibble "
-                 "order expectation and re-enable Q4_K in fused_act_kind()", rel);
+    cr_assert_lt(rel, 1e-4, "Q4_K kernel disagrees with GGUF layout (rel=%g)", rel);
 }

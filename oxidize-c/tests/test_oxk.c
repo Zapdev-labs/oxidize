@@ -80,15 +80,26 @@ Test(oxk, get_scale_min_k4_low)
     cr_assert_eq(m, 17);
 }
 
+/* j >= 4 packs the 6-bit scale and min across three bytes, per ggml:
+ *   scale = (scales[j+4] & 0x0F) | ((scales[j-4] >> 6) << 4)
+ *   min   = ((scales[j+4] >> 4) & 0x0F) | ((scales[j] >> 6) << 4)
+ *
+ * This previously asserted a different assembly — the wrong bit positions and
+ * the wrong source byte — which is why every Q4_K and Q5_K block decoded its
+ * upper four scale/min pairs incorrectly while the test still passed. The
+ * expected values below are computed from the formula above, and match
+ * quantization.c, which is bit-identical to the ggml reference. */
 Test(oxk, get_scale_min_k4_high)
 {
     uint8_t scales[12] = {0};
-    /* j=4: scale = (scales[0] >> 6) | ((scales[4] << 2) & 0x3C) */
-    scales[0] = 0xC0;  /* >> 6 = 3 */
-    scales[4] = 0x0F;  /* << 2 = 0x3C, & 0x3C = 0x3C = 60 */
+    scales[0] = 0xC0;  /* j-4 = 0: >> 6 = 3  -> scale bits [5:4] */
+    scales[4] = 0x80;  /* j   = 4: >> 6 = 2  -> min   bits [5:4] */
+    scales[8] = 0x9A;  /* j+4 = 8: low nibble 0xA -> scale [3:0]
+                        *          high nibble 0x9 -> min   [3:0] */
     uint8_t sc, m;
     oc_oxk_get_scale_min_k4(4, scales, &sc, &m);
-    cr_assert_eq(sc, 3 | 0x3C);  /* 3 | 60 = 63 */
+    cr_assert_eq(sc, 0x0A | (3 << 4), "scale: got %u want %u", sc, 0x0A | (3 << 4));
+    cr_assert_eq(m,  0x09 | (2 << 4), "min: got %u want %u",  m,  0x09 | (2 << 4));
 }
 
 Test(oxk, dot_q8_0_q8_0_basic)
