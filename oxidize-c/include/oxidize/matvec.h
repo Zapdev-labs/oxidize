@@ -18,6 +18,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <stdbool.h>
+
 #include "oxidize/error.h"
 #include "oxidize/quant.h"
 
@@ -50,6 +52,16 @@ void oc_matvec_quantized_fused(OcGgufQuantizationType qtype,
                                size_t cols, const size_t *row_bytes,
                                size_t n_outs, const float *input,
                                float *const *outs, float *temp);
+
+/* Enable or disable the fused integer GEMV path (default: enabled).
+ *
+ * When enabled, oc_matvec_quantized() quantizes the activation to Q8 once and
+ * uses the OXK integer kernels instead of dequantizing each weight row to f32.
+ * That is substantially faster but introduces int8 activation quantization
+ * error, so results differ from the dequant reference. Disable it to get the
+ * exact dequant-path numbers (used by the parity tests). */
+void oc_matvec_set_fused(bool enabled);
+bool oc_matvec_fused_enabled(void);
 
 #ifdef __cplusplus
 }
