@@ -14,6 +14,7 @@
 
 #include <math.h>
 #include <stdbool.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* ─── Fused integer GEMV ─────────────────────────────────────────────────
@@ -37,9 +38,27 @@
  */
 
 static bool g_fused_enabled = true;
+static bool g_fused_env_checked = false;
 
-void oc_matvec_set_fused(bool enabled) { g_fused_enabled = enabled; }
-bool oc_matvec_fused_enabled(void)     { return g_fused_enabled; }
+void oc_matvec_set_fused(bool enabled)
+{
+    g_fused_enabled = enabled;
+    g_fused_env_checked = true;   /* explicit call wins over the environment */
+}
+
+bool oc_matvec_fused_enabled(void)
+{
+    /* OC_NO_FUSED=1 forces the dequant reference path. This exists so the
+     * fused and reference paths can be compared in one binary — an A/B on a
+     * real model is the only way to tell a kernel that is exact on synthetic
+     * dot products from one that is wrong on real weights. */
+    if (!g_fused_env_checked) {
+        const char *e = getenv("OC_NO_FUSED");
+        if (e != NULL && e[0] != '\0' && e[0] != '0') g_fused_enabled = false;
+        g_fused_env_checked = true;
+    }
+    return g_fused_enabled;
+}
 
 /* Which Q8 flavour a weight type pairs with. */
 typedef enum { ACT_NONE = 0, ACT_Q8_0, ACT_Q8_K } ActKind;
@@ -242,7 +261,8 @@ void oc_matvec_quantized(OcGgufQuantizationType qtype, const uint8_t *data,
     /* Fused integer path, when the weight type has an OXK kernel and the row
      * divides evenly into blocks. The activation is quantized once here and
      * then shared by every row and every thread. */
-    ActKind act_kind = g_fused_enabled ? fused_act_kind(qtype, cols) : ACT_NONE;
+    ActKind act_kind = oc_matvec_fused_enabled()
+                     ? fused_act_kind(qtype, cols) : ACT_NONE;
     if (act_kind != ACT_NONE) {
         const size_t blocks = (act_kind == ACT_Q8_K)
                             ? cols / OC_OXK_QK_K : cols / OC_OXK_QK8_0;
