@@ -114,6 +114,44 @@ float oc_rope_yarn_mscale(float scale)
     return 0.1f * logf(scale) + 1.0f;
 }
 
+float oc_rope_yarn_mscale_m(float scale, float m)
+{
+    if (scale <= 1.0f) return 1.0f;
+    return 0.1f * m * logf(scale) + 1.0f;
+}
+
+/* deepseek_yarn splits mscale into two knobs, and the split is not cosmetic:
+ * `mscale` scales the RoPE'd dimensions while `mscale_all_dim` scales every
+ * dimension, so only their RATIO survives on cos/sin and the all-dim term
+ * reappears (squared) on the attention logits.
+ *
+ * DeepSeek-V3 ships mscale=1, mscale_all_dim=0, which gives the familiar
+ * "scale cos/sin by 1 + 0.1*ln(factor)" behaviour. LongCat-2.0 ships
+ * mscale = mscale_all_dim = 1, which is the opposite: the RoPE factor
+ * cancels to exactly 1.0 and the entire correction lands on the softmax
+ * scale as get_mscale(factor)^2.
+ *
+ * Applying the DeepSeek convention to LongCat inflates the 64 RoPE dims by
+ * 1.4787x against the 128 nope dims in every q.k dot product AND leaves the
+ * logits 2.1867x too small, flattening the softmax across all 76 sub-layers.
+ * That is a whole-model correctness bug, not a tuning detail. */
+void oc_rope_deepseek_yarn_scales(float scale_factor, float mscale,
+                                  float mscale_all_dim, uint32_t head_dim,
+                                  float *rope_attn_factor,
+                                  float *softmax_scale)
+{
+    float m_rope = oc_rope_yarn_mscale_m(scale_factor, mscale);
+    float m_all  = oc_rope_yarn_mscale_m(scale_factor, mscale_all_dim);
+
+    if (rope_attn_factor) {
+        *rope_attn_factor = (m_all != 0.0f) ? (m_rope / m_all) : 1.0f;
+    }
+    if (softmax_scale) {
+        float base = (head_dim > 0) ? (1.0f / sqrtf((float)head_dim)) : 1.0f;
+        *softmax_scale = base * m_all * m_all;
+    }
+}
+
 float oc_rope_apply_yarn(float freq, uint32_t pos,
                          const OcRopeScalingConfig *cfg, uint32_t dim)
 {

@@ -339,7 +339,53 @@ static OcError parse_config(const OcGgufFile *f, const char *arch_str,
     cfg->mla_q_rope_dim = 0;
     cfg->mla_kv_nope_head_dim = 0;
     cfg->mla_v_head_dim = 0;
-    if (arch_str && (strncmp(arch_str, "deepseek", 8) == 0)) {
+    cfg->is_longcat = false;
+    cfg->zero_expert_count = 0;
+    cfg->yarn_beta_fast = 0.0f;
+    cfg->yarn_beta_slow = 0.0f;
+    cfg->yarn_mscale = 0.0f;
+    cfg->yarn_mscale_all_dim = 0.0f;
+    cfg->ngram_n_grams = 0;
+    cfg->ngram_split_num = 0;
+    if (arch_str && strcmp(arch_str, "longcat") == 0) {
+        /* LongCat states its MLA geometry directly rather than through
+         * DeepSeek's key_length_mla, and splits each block into two
+         * sub-blocks. */
+        cfg->uses_mla   = true;
+        cfg->is_longcat = true;
+
+        snprintf(key, sizeof(key), "%sattention.q_lora_rank", prefix);
+        cfg->mla_q_lora_dim = cfg_u32(f, key, 1536);
+        snprintf(key, sizeof(key), "%sattention.kv_lora_rank", prefix);
+        cfg->mla_kv_lora_dim = cfg_u32(f, key, 512);
+        cfg->mla_q_rope_dim = (rope_dim > 0) ? rope_dim : 64;
+        /* key_length (192) = nope (128) + rope (64). */
+        cfg->mla_kv_nope_head_dim =
+            (key_len > cfg->mla_q_rope_dim) ? key_len - cfg->mla_q_rope_dim : 128;
+        snprintf(key, sizeof(key), "%sattention.value_length", prefix);
+        cfg->mla_v_head_dim = cfg_u32(f, key, cfg->mla_kv_nope_head_dim);
+        cfg->n_head_kv = 1;             /* MLA caches one shared latent */
+
+        /* Each GGUF block holds two sub-blocks. */
+        cfg->n_layer *= 2;
+
+        snprintf(key, sizeof(key), "%szero_expert_count", prefix);
+        cfg->zero_expert_count = cfg_u32(f, key, 0);
+
+        /* deepseek_yarn constants are not written to GGUF metadata; these are
+         * LongCat's config.json values. */
+        cfg->yarn_beta_fast      = 32.0f;
+        cfg->yarn_beta_slow      = 1.0f;
+        cfg->yarn_mscale         = 1.0f;
+        cfg->yarn_mscale_all_dim = 1.0f;
+
+        snprintf(key, sizeof(key), "%sngram.neighbor_num", prefix);
+        uint32_t nn = cfg_u32(f, key, 0);
+        snprintf(key, sizeof(key), "%sngram.split_num", prefix);
+        uint32_t sn = cfg_u32(f, key, 0);
+        cfg->ngram_split_num = sn;
+        cfg->ngram_n_grams   = (nn > 1 && sn > 0) ? (nn - 1) * sn : 0;
+    } else if (arch_str && (strncmp(arch_str, "deepseek", 8) == 0)) {
         snprintf(key, sizeof(key), "%sattention.key_length_mla", prefix);
         uint32_t mla_key_len = cfg_u32(f, key, 0);
         if (mla_key_len > 0) {

@@ -117,6 +117,25 @@ typedef struct OcLlamaConfig {
     uint32_t mla_q_rope_dim;           /* RoPE dim for q_pe                        */
     uint32_t mla_kv_nope_head_dim;     /* per-head nope dim (k_b output / n_heads) */
     uint32_t mla_v_head_dim;           /* per-head v dim (v_b output / n_heads)    */
+    /* LongCat (ScMoE + MLA + n-gram over-embedding).
+     *
+     * LongCat packs TWO attention+FFN sub-blocks into each GGUF `blk.N`, so
+     * `n_layer` is 2 * longcat.block_count and per-sub-block tensors carry a
+     * `_0`/`_1` suffix. Router, expert pool and indexer appear once per
+     * `blk.N` and attach to the even sub-layer 2N. */
+    bool     is_longcat;
+    uint32_t zero_expert_count;        /* identity experts appended after routed  */
+    /* deepseek_yarn parameters. Absent from GGUF metadata — LongCat's
+     * config.json sets all four, and both mscale terms are 1, which makes
+     * the RoPE attn factor exactly 1.0 and folds a 1.4787^2 term into the
+     * softmax scale instead. See oc_llama_yarn_scales(). */
+    float    yarn_beta_fast;
+    float    yarn_beta_slow;
+    float    yarn_mscale;
+    float    yarn_mscale_all_dim;
+    /* n-gram over-embedding: (neighbor_num - 1) * split_num tables. */
+    uint32_t ngram_n_grams;
+    uint32_t ngram_split_num;
 } OcLlamaConfig;
 
 /* Non-owning view over a mmap'd GGUF tensor. */
