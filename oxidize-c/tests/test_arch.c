@@ -6,8 +6,8 @@
  *   - VAL-FOUND-009: Qwen2-MoE tensor name mapping (block_sparse_moe.experts.M.*)
  *   - VAL-FOUND-010: Qwen3-MoE shared+routed expert tensor mapping
  *   - VAL-FOUND-011: DeepSeek MLA tensor name mapping
- *   - VAL-FOUND-012: All 17 architecture strings detected (16 recognized +
- *     OC_ARCH_UNKNOWN = 17 enum values).
+ *   - VAL-FOUND-012: All 18 architecture strings detected (17 recognized +
+ *     OC_ARCH_UNKNOWN = 18 enum values).
  *
  * Reference: Rust oxidize-core/src/format/gguf.rs::map_tensor_name +
  * oxidize-core/src/model/inference.rs::ModelArchitecture::from_gguf.
@@ -33,9 +33,9 @@ static void check_map(OcModelArchitecture arch, const char *name,
     oc_arena_free(a);
 }
 
-/* ─── VAL-FOUND-012: All 17 architecture strings detected ───────────────── */
+/* ─── VAL-FOUND-012: All 18 architecture strings detected ───────────────── */
 
-Test(arch, all_17_arch_strings_detected)
+Test(arch, all_18_arch_strings_detected)
 {
     /* Each line: input string → expected OcModelArchitecture variant.
      * Mirrors Rust `ModelArchitecture::from_gguf`. */
@@ -109,7 +109,14 @@ Test(arch, all_17_arch_strings_detected)
         { "hyv3",                           OC_ARCH_HUNYUAN_MOE },
         { "hunyuan_v3",                     OC_ARCH_HUNYUAN_MOE },
         { "hunyuan-moe",                    OC_ARCH_HUNYUAN_MOE },
-        /* Unknown → OC_ARCH_UNKNOWN (17th variant). */
+        /* LongCat (all variants) */
+        { "longcat",                        OC_ARCH_LONGCAT },
+        { "longcat2",                       OC_ARCH_LONGCAT },
+        { "longcat_2",                      OC_ARCH_LONGCAT },
+        { "longcat-2",                      OC_ARCH_LONGCAT },
+        { "longcat_flash",                  OC_ARCH_LONGCAT },
+        { "longcatflash",                   OC_ARCH_LONGCAT },
+        /* Unknown → OC_ARCH_UNKNOWN (18th variant). */
         { "not-a-real-arch",                OC_ARCH_UNKNOWN },
         { "",                               OC_ARCH_UNKNOWN },
         { NULL,                             OC_ARCH_UNKNOWN },
@@ -123,9 +130,9 @@ Test(arch, all_17_arch_strings_detected)
             oc_model_arch_name(got), oc_model_arch_name(cases[i].a));
     }
 
-    /* Verify the enum has exactly 17 variants (16 recognized + 1 unknown). */
-    cr_assert_eq((int)OC_ARCH__COUNT, 17,
-        "OcModelArchitecture should have 17 variants (16 + UNKNOWN), got %d",
+    /* Verify the enum has exactly 18 variants (17 recognized + 1 unknown). */
+    cr_assert_eq((int)OC_ARCH__COUNT, 18,
+        "OcModelArchitecture should have 18 variants (17 + UNKNOWN), got %d",
         (int)OC_ARCH__COUNT);
 }
 
@@ -148,6 +155,7 @@ Test(arch, uses_moe_classification)
     cr_assert(oc_model_arch_uses_moe(OC_ARCH_DEEPSEEK),   "deepseek is MoE");
     cr_assert(oc_model_arch_uses_moe(OC_ARCH_GLM_MOE_DSA), "glm_moe_dsa is MoE");
     cr_assert(oc_model_arch_uses_moe(OC_ARCH_HUNYUAN_MOE), "hunyuan_moe is MoE");
+    cr_assert(oc_model_arch_uses_moe(OC_ARCH_LONGCAT),     "longcat is MoE");
 
     cr_assert_not(oc_model_arch_uses_moe(OC_ARCH_LLAMA),   "llama is dense");
     cr_assert_not(oc_model_arch_uses_moe(OC_ARCH_QWEN),    "qwen dense is not MoE (Qwen2-MoE is, but mapped to OC_ARCH_QWEN — Rust uses_moe() checks the enum variant not the GGUF string. For MoE-specific behavior, callers should inspect the GGUF tensor table for `experts` substrings.)");
@@ -157,10 +165,11 @@ Test(arch, uses_moe_classification)
 
 Test(arch, uses_mla_classification)
 {
-    /* Mirrors Rust `ModelArchitecture::uses_mla()`. Only DeepSeek and
-     * GlmMoeDsa use MLA (compressed KV cache). */
+    /* Mirrors Rust `ModelArchitecture::uses_mla()`. DeepSeek, GlmMoeDsa and
+     * LongCat use MLA (compressed KV cache). */
     cr_assert(oc_model_arch_uses_mla(OC_ARCH_DEEPSEEK),     "deepseek uses MLA");
     cr_assert(oc_model_arch_uses_mla(OC_ARCH_GLM_MOE_DSA),  "glm_moe_dsa uses MLA");
+    cr_assert(oc_model_arch_uses_mla(OC_ARCH_LONGCAT),      "longcat uses MLA");
     cr_assert_not(oc_model_arch_uses_mla(OC_ARCH_LLAMA),     "llama does not use MLA");
     cr_assert_not(oc_model_arch_uses_mla(OC_ARCH_QWEN),      "qwen does not use MLA");
     cr_assert_not(oc_model_arch_uses_mla(OC_ARCH_HUNYUAN_MOE), "hunyuan does not use MLA (standard attention)");

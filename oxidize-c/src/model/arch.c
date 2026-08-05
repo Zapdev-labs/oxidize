@@ -16,8 +16,10 @@
  * The mapping is architecture-driven but name-table-driven: Llama, Mistral,
  * Mixtral, Qwen (all variants), DeepSeek (all variants), Gemma, Phi, and
  * GLM-MoE-DSA share the HF decoder mapping; Falcon, GPT2, GPTJ, GPTNeoX have
- * their own (smaller) mapping tables. LFM2/Lfm2Moe/HunyuanMoe/MiniMax use
- * the HF decoder mapping (their HF names follow the model.layers.N.* pattern).
+ * their own (smaller) mapping tables. LFM2/Lfm2Moe/HunyuanMoe/MiniMax/LongCat
+ * use the HF decoder mapping (their HF names follow the model.layers.N.*
+ * pattern; LongCat's ScMoE sub-block suffixes are resolved later, in
+ * llama.c's assign_tensor).
  */
 #include "oxidize/model.h"
 
@@ -109,6 +111,11 @@ OcModelArchitecture oc_model_arch_from_str(const char *s)
         || strcmp(norm, "hy_v3") == 0
         || strcmp(norm, "hyv3") == 0
         || strcmp(norm, "hunyuan_v3") == 0)                 return OC_ARCH_HUNYUAN_MOE;
+    if (strcmp(norm, "longcat") == 0
+        || strcmp(norm, "longcat2") == 0
+        || strcmp(norm, "longcat_2") == 0
+        || strcmp(norm, "longcat_flash") == 0
+        || strcmp(norm, "longcatflash") == 0)               return OC_ARCH_LONGCAT;
 
     return OC_ARCH_UNKNOWN;
 }
@@ -132,6 +139,7 @@ const char *oc_model_arch_name(OcModelArchitecture arch)
     case OC_ARCH_LFM2_MOE:     return "lfm2moe";
     case OC_ARCH_GLM_MOE_DSA:  return "glm_moe_dsa";
     case OC_ARCH_HUNYUAN_MOE:  return "hunyuan_moe";
+    case OC_ARCH_LONGCAT:      return "longcat";
     default:                   return "unknown";   /* covers OC_ARCH_UNKNOWN + out-of-range */
     }
 }
@@ -145,6 +153,7 @@ bool oc_model_arch_uses_moe(OcModelArchitecture arch)
     case OC_ARCH_DEEPSEEK:
     case OC_ARCH_GLM_MOE_DSA:
     case OC_ARCH_HUNYUAN_MOE:
+    case OC_ARCH_LONGCAT:
         return true;
     default:
         return false;
@@ -153,7 +162,8 @@ bool oc_model_arch_uses_moe(OcModelArchitecture arch)
 
 bool oc_model_arch_uses_mla(OcModelArchitecture arch)
 {
-    return arch == OC_ARCH_DEEPSEEK || arch == OC_ARCH_GLM_MOE_DSA;
+    return arch == OC_ARCH_DEEPSEEK || arch == OC_ARCH_GLM_MOE_DSA
+        || arch == OC_ARCH_LONGCAT;
 }
 
 bool oc_model_arch_uses_alibi(OcModelArchitecture arch)
@@ -228,6 +238,7 @@ const char *oc_gguf_map_tensor_name(OcModelArchitecture arch, const char *name,
     case OC_ARCH_LFM2_MOE:
     case OC_ARCH_MINIMAX:
     case OC_ARCH_HUNYUAN_MOE:
+    case OC_ARCH_LONGCAT:
         mapped = map_hf_decoder_name(name, arena);
         break;
     case OC_ARCH_FALCON:

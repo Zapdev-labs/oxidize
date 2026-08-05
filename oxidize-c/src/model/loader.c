@@ -23,14 +23,14 @@
 
 /* ─── Supported architectures table ───────────────────────────────────
  *
- * Mirrors the 16 architectures recognized in oc_model_arch_from_str()
+ * Mirrors the 17 architectures recognized in oc_model_arch_from_str()
  * (arch.c). These are the canonical names returned by oc_model_arch_name()
  * for each recognized OcModelArchitecture variant (excluding UNKNOWN).
  */
 static const char *const OC_LOADER_ARCHS[] = {
     "llama", "mistral", "mixtral", "deepseek", "qwen", "gemma",
     "phi", "falcon", "gpt2", "gptj", "gptneox", "minimax",
-    "lfm2", "lfm2moe", "glm_moe_dsa", "hunyuan_moe",
+    "lfm2", "lfm2moe", "glm_moe_dsa", "hunyuan_moe", "longcat",
 };
 #define OC_LOADER_N_ARCHS \
     (sizeof(OC_LOADER_ARCHS) / sizeof(OC_LOADER_ARCHS[0]))
