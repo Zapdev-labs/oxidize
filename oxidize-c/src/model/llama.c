@@ -13,6 +13,7 @@
  * mirror Rust's `x.iter().map(|v| v*v).sum::<f32>()`.
  */
 #include "oxidize/llama.h"
+#include "oxidize/rope_scaling.h"
 
 #include "oxidize/activation.h"
 #include "oxidize/arch_forward.h"
@@ -852,8 +853,13 @@ OcError oc_llama_session_init_kv(OcLlamaModel *model, OcLlamaSession *out,
 {
     if (model == NULL || out == NULL) return OC_ERR_INVALID_ARG;
     /* uses_geglu is fully handled by forward_dense_ffn (GeGLU vs SwiGLU),
-     * so it is NOT rejected here. MLA still lacks a complete session path. */
-    if (model->cfg.uses_mla) return OC_ERR_MODEL;
+     * so it is NOT rejected here. MLA is handled by forward_mla_attention.
+     *
+     * The MLA KV cache is still the EXPANDED per-head K/V, n_head * head_dim
+     * floats per row rather than the kv_lora + rope latent it decompresses
+     * from. That is 24x larger than it needs to be (7.5 MB/token on
+     * LongCat-2.0 against 88 KB), which caps usable context well below the
+     * model's 256k. Correct, but the obvious thing to fix next. */
     if (model->cfg.num_experts > 0 && model->cfg.expert_intermediate_size == 0) {
         if (model->cfg.n_ff == 0) return OC_ERR_MODEL;
         model->cfg.expert_intermediate_size = model->cfg.n_ff;
@@ -1340,9 +1346,19 @@ static void forward_mla_attention(OcLlamaSession *s, uint32_t layer)
                     s->mla_c_kv, kv_lora, c->rms_norm_eps);
     memcpy(s->mla_kv_compressed, s->mla_c_kv, kv_lora * sizeof(float));
 
-    /* 6. RoPE on k_pe (the trailing q_rope slots of kv_compressed). */
+    /* 6. RoPE on k_pe (the trailing q_rope slots of kv_compressed).
+     *
+     * YaRN changes the ROTATION FREQUENCIES, not just an amplitude, so it is
+     * still required here even for LongCat where the mscale ratio cancels to
+     * 1.0 -- a 120x context extension without the frequency ramp would place
+     * every position wrong. */
     float *k_pe = s->mla_kv_compressed + kv_lora;
-    oc_apply_rope_f32(k_pe, k_pe, q_rope, q_rope, s->pos, c->rope_theta);
+    if (c->yarn_factor > 1.0f) {
+        oc_apply_rope_yarn_f32(k_pe, k_pe, q_rope, q_rope, s->pos,
+                               c->rope_theta, c->yarn_factor, c->yarn_orig_ctx);
+    } else {
+        oc_apply_rope_f32(k_pe, k_pe, q_rope, q_rope, s->pos, c->rope_theta);
+    }
 
     /* 7. Per-head K and V up-projection. */
     size_t kv_off = ((size_t)layer * c->n_ctx + (size_t)s->pos) * s->kv_row_floats;
@@ -1364,23 +1380,47 @@ static void forward_mla_attention(OcLlamaSession *s, uint32_t layer)
         matvec(&v_b_h, s->mla_c_kv, v_out, s->dequant_temp);
     }
 
-    /* 8. RoPE on q_pe (the trailing q_rope slots of each q head). */
+    /* 8. RoPE on q_pe (the trailing q_rope slots of each q head). Must match
+     * the k_pe treatment above exactly, or Q and K rotate apart. */
     for (uint32_t h = 0; h < n_head; h++) {
         float *q_pe = s->mla_q_full + h * q_hd + k_nope_hd;
-        oc_apply_rope_f32(q_pe, q_pe, q_rope, q_rope, s->pos, c->rope_theta);
+        if (c->yarn_factor > 1.0f) {
+            oc_apply_rope_yarn_f32(q_pe, q_pe, q_rope, q_rope, s->pos,
+                                   c->rope_theta, c->yarn_factor,
+                                   c->yarn_orig_ctx);
+        } else {
+            oc_apply_rope_f32(q_pe, q_pe, q_rope, q_rope, s->pos, c->rope_theta);
+        }
     }
 
-    /* 9. Attention per head (MLA: each head has own K/V, group=1). */
+    /* 9. Attention per head (MLA: each head has own K/V, group=1).
+     *
+     * Q and K are q_hd wide (nope + rope, 192 for LongCat) but V is only
+     * v_hd (128). The cache strides both by q_hd for a uniform layout, so V
+     * rows carry q_hd - v_hd trailing slots that were never written; the
+     * accumulation must stop at v_hd rather than read them.
+     *
+     * The output is written PACKED at v_hd, not at the Q stride: o_proj
+     * takes n_head * v_hd inputs, so a q_hd-strided buffer would feed it
+     * every head interleaved with dead floats and run out of input a third
+     * of the way through the heads. */
     float scale = 1.0f / sqrtf((float)q_hd);
+    if (c->yarn_factor > 1.0f && c->yarn_mscale_all_dim > 0.0f) {
+        /* deepseek_yarn moves the mscale correction onto the logits; see
+         * oc_rope_deepseek_yarn_scales(). */
+        oc_rope_deepseek_yarn_scales(c->yarn_factor, c->yarn_mscale,
+                                      c->yarn_mscale_all_dim, q_hd,
+                                      NULL, &scale);
+    }
     for (uint32_t h = 0; h < n_head; h++) {
         float *q_vec = s->mla_q_full + h * q_hd;
-        float *out_vec = s->attn_out + h * q_hd;
+        float *out_vec = s->attn_out + (size_t)h * v_hd;
         const float *k_head = k_cache + (size_t)h * q_hd;
         const float *v_head = v_cache + (size_t)h * q_hd;
 
         float run_max = -INFINITY;
         float run_sum = 0.0f;
-        for (size_t i = 0; i < q_hd; i++) out_vec[i] = 0.0f;
+        for (size_t i = 0; i < v_hd; i++) out_vec[i] = 0.0f;
 
         int64_t seq_len = s->pos + 1;
         for (int64_t t = 0; t < seq_len; t++) {
@@ -1391,14 +1431,14 @@ static void forward_mla_attention(OcLlamaSession *s, uint32_t layer)
             float new_max = (score > run_max) ? score : run_max;
             float exp_factor = expf(run_max - new_max);
             float exp_score = expf(score - new_max);
-            for (size_t i = 0; i < q_hd; i++) out_vec[i] *= exp_factor;
+            for (size_t i = 0; i < v_hd; i++) out_vec[i] *= exp_factor;
             const float *v_t = v_head + (size_t)t * s->kv_row_floats;
-            for (size_t i = 0; i < q_hd; i++) out_vec[i] += exp_score * v_t[i];
+            for (size_t i = 0; i < v_hd; i++) out_vec[i] += exp_score * v_t[i];
             run_sum = run_sum * exp_factor + exp_score;
             run_max = new_max;
         }
-        float inv = 1.0f / run_sum;
-        for (size_t i = 0; i < q_hd; i++) out_vec[i] *= inv;
+        float inv = (run_sum > 0.0f) ? 1.0f / run_sum : 0.0f;
+        for (size_t i = 0; i < v_hd; i++) out_vec[i] *= inv;
     }
 
     /* 10. Output projection. */
