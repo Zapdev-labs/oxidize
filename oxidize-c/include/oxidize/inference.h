@@ -62,6 +62,11 @@ typedef struct {
     float    expert_weights_scale;
     uint32_t expert_group_count;
     uint32_t expert_group_used_count;
+    /* LongCat: identity ("zero") experts occupying router slots
+     * [num_experts, num_experts + zero_expert_count). They hold no weights
+     * and contribute their input unchanged, scaled by the gate. 0 disables
+     * the whole zero-expert path. */
+    uint32_t zero_expert_count;
     uint32_t leading_dense_layers;
 
     /* Architecture-specific. */

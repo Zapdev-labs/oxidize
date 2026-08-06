@@ -64,10 +64,16 @@ void oc_add_repeating_bias(float *buf, size_t buf_len,
 OcError oc_gemv_f32(const float *weights, size_t rows, size_t cols,
                      const float *input, float *output);
 
-/* MoE routing result: expert index + weight. */
-typedef struct {
+/* MoE routing result: expert index, the score top-k is chosen by, and the
+ * gate actually applied to that expert's output.
+ *
+ * These differ only where a router bias steers SELECTION without changing
+ * the weight -- LongCat's exp_probs_b works that way. Everywhere else the
+ * two are set to the same value and the distinction costs nothing. */
+typedef struct OcExpertScore {
     size_t idx;
-    float  weight;
+    float  weight;   /* multiplies the expert's output          */
+    float  select;   /* ranked by top-k; usually == weight      */
 } OcExpertScore;
 
 /* MoE FFN forward: routes input through top-k experts and combines results.

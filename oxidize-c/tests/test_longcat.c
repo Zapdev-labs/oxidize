@@ -19,6 +19,9 @@
 #include "oxidize/inf_model.h"
 #include "oxidize/weight_storage.h"
 #include "oxidize/quant.h"
+#include "oxidize/weight_ops.h"
+#include "oxidize/inference.h"
+#include <math.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -433,4 +436,165 @@ Test(longcat, mla_v_projection_nonzero_for_quantized_storage)
 
     free(ref);
     oc_weight_storage_free(&ws);
+}
+
+/* ─── Zero-expert (identity) MoE routing ─────────────────────────────────
+ *
+ * LongCat appends `zero_expert_count` identity experts after the routed
+ * ones. They hold no weights and return their input unchanged. Three
+ * properties distinguish this from ordinary top-k MoE, and all three are
+ * silent if wrong:
+ *   - the router spans routed + zero slots, so top-k can pick "do nothing";
+ *   - exp_probs_b steers SELECTION only, never the applied gate;
+ *   - there is NO renormalization over top-k, because routed mass summing
+ *     to less than 1 is the mechanism by which a token skips work.
+ */
+
+#define ZE_H       2u
+#define ZE_IFF     2u
+#define ZE_ROUTED  1u
+#define ZE_ZERO    1u
+#define ZE_SLOTS   (ZE_ROUTED + ZE_ZERO)
+
+typedef struct {
+    OcWeightStorage gate_inp, gate_exps, up_exps, down_exps;
+} ZeExperts;
+
+/* Router that produces logits [l0, l1] from a fixed input of all ones. */
+static void ze_build(ZeExperts *z, float l0, float l1)
+{
+    float *router = malloc(ZE_SLOTS * ZE_H * sizeof(float));
+    /* input is {1,1}, so each row must sum to the wanted logit. */
+    router[0] = l0 * 0.5f; router[1] = l0 * 0.5f;
+    router[2] = l1 * 0.5f; router[3] = l1 * 0.5f;
+    oc_weight_storage_init(&z->gate_inp);
+    cr_assert_eq(oc_weight_storage_f32(&z->gate_inp, router, ZE_SLOTS * ZE_H),
+                 OC_OK, "router");
+
+    /* One routed expert. gate=identity, up=all ones, down=identity. */
+    size_t n = (size_t)ZE_ROUTED * ZE_IFF * ZE_H;
+    float *g = calloc(n, sizeof(float));
+    float *u = calloc(n, sizeof(float));
+    float *d = calloc(n, sizeof(float));
+    for (size_t i = 0; i < ZE_IFF; i++) { g[i * ZE_H + i] = 1.0f; d[i * ZE_H + i] = 1.0f; }
+    for (size_t i = 0; i < n; i++) u[i] = 1.0f;
+    oc_weight_storage_init(&z->gate_exps);
+    oc_weight_storage_init(&z->up_exps);
+    oc_weight_storage_init(&z->down_exps);
+    cr_assert_eq(oc_weight_storage_f32(&z->gate_exps, g, n), OC_OK, "gate");
+    cr_assert_eq(oc_weight_storage_f32(&z->up_exps,   u, n), OC_OK, "up");
+    cr_assert_eq(oc_weight_storage_f32(&z->down_exps, d, n), OC_OK, "down");
+}
+
+static void ze_free(ZeExperts *z)
+{
+    oc_weight_storage_free(&z->gate_inp);
+    oc_weight_storage_free(&z->gate_exps);
+    oc_weight_storage_free(&z->up_exps);
+    oc_weight_storage_free(&z->down_exps);
+}
+
+static void ze_cfg(OcInferenceConfig *cfg, float scale)
+{
+    oc_inference_config_init(cfg);
+    cfg->hidden_size = ZE_H;
+    cfg->intermediate_size = ZE_IFF;
+    cfg->expert_intermediate_size = ZE_IFF;
+    cfg->num_experts = ZE_ROUTED;
+    cfg->zero_expert_count = ZE_ZERO;
+    cfg->num_experts_per_tok = 1;
+    cfg->expert_weights_scale = scale;
+    cfg->expert_gating_sigmoid = false;
+}
+
+/* Run the MoE with the given router logits and bias; return ffn_out. */
+static void ze_run(float l0, float l1, const float *bias, float scale,
+                   float *out)
+{
+    ZeExperts z;
+    ze_build(&z, l0, l1);
+    OcInferenceConfig cfg;
+    ze_cfg(&cfg, scale);
+
+    float normed[ZE_H] = { 1.0f, 1.0f };
+    float gate_s[ZE_IFF], up_s[ZE_IFF], exp_out[ZE_H];
+    float logits[ZE_SLOTS];
+    OcExpertScore scores[ZE_SLOTS];
+
+    OcError e = oc_moe_ffn_forward(&z.gate_inp, &z.gate_exps, &z.up_exps,
+                                    &z.down_exps, bias, &cfg, normed, out,
+                                    gate_s, up_s, exp_out, logits, scores);
+    cr_assert_eq(e, OC_OK, "moe forward failed: %d", (int)e);
+    ze_free(&z);
+}
+
+Test(longcat, zero_expert_contributes_identity)
+{
+    /* Slot 1 is the zero expert. Give it the larger logit so it wins top-1.
+     * softmax([0, 4]) -> p1 = 1/(1+e^-4) = 0.98201379.
+     * Expected output = p1 * scale * normed = 0.98201379 * 9 * 1. */
+    float out[ZE_H] = {0};
+    ze_run(0.0f, 4.0f, NULL, 9.0f, out);
+
+    float p1 = 1.0f / (1.0f + expf(-4.0f));
+    float want = p1 * 9.0f * 1.0f;
+    for (size_t i = 0; i < ZE_H; i++)
+        cr_assert_float_eq(out[i], want, 1e-4f,
+            "zero expert should pass input through scaled: got %.6f want %.6f",
+            out[i], want);
+}
+
+Test(longcat, zero_expert_output_is_not_renormalized)
+{
+    /* If top-k were renormalized to sum 1, the single selected expert would
+     * always get weight 1.0 and the output would be exactly `scale`,
+     * regardless of how confident the router was. That would erase the
+     * "skip work" mechanism entirely. Two different logit gaps must give
+     * two different magnitudes. */
+    float lo[ZE_H] = {0}, hi[ZE_H] = {0};
+    ze_run(0.0f, 1.0f, NULL, 1.0f, lo);
+    ze_run(0.0f, 6.0f, NULL, 1.0f, hi);
+
+    cr_assert(hi[0] > lo[0] + 0.1f,
+        "a more confident router must route more mass: %.6f vs %.6f",
+        hi[0], lo[0]);
+    cr_assert(lo[0] < 0.95f,
+        "weight %.6f looks renormalized to 1.0", lo[0]);
+}
+
+Test(longcat, exp_probs_b_biases_selection_not_weight)
+{
+    /* Routed expert (slot 0) has the higher probability, but a large bias on
+     * slot 1 flips WHICH expert wins. The applied gate must still be slot
+     * 1's UNBIASED probability -- folding the bias into the weight would
+     * inflate the contribution far past 1.0. */
+    float bias[ZE_SLOTS] = { 0.0f, 10.0f };
+    float out[ZE_H] = {0};
+    ze_run(4.0f, 0.0f, bias, 1.0f, out);
+
+    /* softmax([4,0]) -> p1 = 1/(1+e^4) = 0.01798621. The zero expert wins
+     * selection on bias, and contributes identity * p1. */
+    float p1 = 1.0f / (1.0f + expf(4.0f));
+    cr_assert_float_eq(out[0], p1, 1e-4f,
+        "gate should be the unbiased probability %.6f, got %.6f", p1, out[0]);
+    cr_assert(out[0] < 1.0f,
+        "bias leaked into the weight: %.6f", out[0]);
+}
+
+Test(longcat, routed_expert_still_runs_when_it_wins)
+{
+    /* Sanity: with the routed expert winning, the zero-expert path must not
+     * swallow it. For x = {1,1}: gate is the identity so gate[i] = 1 and
+     * silu(1) = 0.7310586; up is an all-ones [2,2] matrix, so it sums both
+     * input lanes to 2.0; down is the identity. Per lane that is
+     * silu(1) * 2, gated by the router probability. */
+    float out[ZE_H] = {0};
+    ze_run(4.0f, 0.0f, NULL, 1.0f, out);
+
+    float p0 = 1.0f / (1.0f + expf(-4.0f));
+    float silu1 = 1.0f / (1.0f + expf(-1.0f));
+    float want = p0 * silu1 * (float)ZE_H;
+    for (size_t i = 0; i < ZE_H; i++)
+        cr_assert_float_eq(out[i], want, 1e-4f,
+            "routed expert output: got %.6f want %.6f", out[i], want);
 }

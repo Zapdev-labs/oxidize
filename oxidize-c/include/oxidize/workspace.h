@@ -47,7 +47,11 @@ typedef struct {
     /* Final logits buffer. */
     float    *logits;           /* [vocab_size] */
     /* MoE router scratch. */
-    float    *moe_router_logits;  /* [num_experts] */
+    float    *moe_router_logits;  /* [n_experts] -- spans zero-expert slots */
+    /* [n_experts] routing scratch. Previously this aliased moe_gate_all,
+     * which is sized for the FFN and can be far SMALLER than the router on
+     * narrow-expert models. Owned separately so the two cannot collide. */
+    struct OcExpertScore *moe_expert_scores;
     /* Mamba/SSM scratch. */
     float    *mamba_scratch;   /* [max(hidden, 576)] */
     float    *conv_out;         /* [max_qkv] */

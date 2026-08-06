@@ -1193,7 +1193,7 @@ OcError oc_inf_model_forward_token(OcInferenceModel *m, uint32_t token, size_t p
                     layer->ffn_exp_probs_b, cfg, normed, ffn_out,
                     ffn_gate, ffn_up, gate_scratch,
                     m->workspace.moe_router_logits,
-                    (OcExpertScore *)m->workspace.moe_gate_all);
+                    m->workspace.moe_expert_scores);
                 if (e != OC_OK) return e;
                 for (size_t i = 0; i < h; i++)
                     m->workspace.x[i] += ffn_out[i];
@@ -1743,7 +1743,7 @@ OcError oc_inf_model_run_layer_range(OcInferenceModel *m,
                         layer->ffn_exp_probs_b, cfg, normed, ffn_out_buf,
                         ffn_gate, ffn_up, gate_scratch,
                         m->workspace.moe_router_logits,
-                        (OcExpertScore *)m->workspace.moe_gate_all);
+                        m->workspace.moe_expert_scores);
                     if (e != OC_OK) return e;
                     for (size_t i = 0; i < h; i++)
                         m->workspace.x[i] += ffn_out_buf[i];
