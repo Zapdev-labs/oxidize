@@ -138,6 +138,10 @@ typedef struct OcLlamaConfig {
     uint32_t ngram_split_num;
 } OcLlamaConfig;
 
+/* Upper bound on LongCat n-gram tables. LongCat-2.0 has
+ * (neighbor_num - 1) * split_num = (5-1)*4 = 16. */
+#define OC_LONGCAT_MAX_NGRAM 32
+
 /* Non-owning view over a mmap'd GGUF tensor. */
 typedef struct OcWeightView {
     const uint8_t *data;
@@ -168,6 +172,11 @@ typedef struct OcLlamaLayer {
     OcWeightView mla_v_b;               /* v_b_proj: [n_heads*v_head_dim, kv_lora_dim] */
     float *mla_q_a_norm;                /* owned f32, length q_lora_dim */
     float *mla_kv_a_norm;               /* owned f32, length kv_lora_dim */
+    /* LongCat router bias (`blk.N.exp_probs_b.bias`), owned f32 of length
+     * num_experts + zero_expert_count. Added to the router logits for
+     * SELECTION only — the gate weight applied to an expert's output is the
+     * unbiased probability. NULL when absent. */
+    float *exp_probs_b;
     float *attn_norm;       /* owned f32, length n_embd              */
     float *ffn_norm;       /* owned f32, length n_embd              */
     /* LayerNorm biases (beta) for GPT-2/NeoX/Falcon; NULL for RMSNorm
@@ -218,6 +227,13 @@ typedef struct OcLlamaModel {
      * forward. Per-model (views into this model's mmap). */
     OcWeightView     gpt2_pos_embed;
     bool             gpt2_pos_resolved;
+    /* LongCat n-gram over-embedding. `cfg.ngram_n_grams` tables (16 for
+     * LongCat-2.0), each a hashed embedding of width mla_kv_lora_dim (512)
+     * projected back up to n_embd. Row counts differ per table and are read
+     * from each tensor's own shape, never recomputed. Unused views are
+     * zeroed. */
+    OcWeightView     ngram_embd[OC_LONGCAT_MAX_NGRAM];
+    OcWeightView     ngram_proj[OC_LONGCAT_MAX_NGRAM];
 } OcLlamaModel;
 
 /* KV cache element type.

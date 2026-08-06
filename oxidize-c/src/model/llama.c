@@ -486,14 +486,54 @@ static bool assign_tensor(OcLlamaModel *m, const char *cname,
         m->final_norm_bias = load_norm(mm, info, m->cfg.n_embd);
         return true;
     }
+    /* LongCat n-gram over-embedding: ngram_embd_<i>.weight / ngram_proj_<i>. */
+    if (m->cfg.is_longcat && strncmp(cname, "ngram_", 6) == 0) {
+        const char *rest = cname + 6;
+        bool is_embd = strncmp(rest, "embd_", 5) == 0;
+        bool is_proj = strncmp(rest, "proj_", 5) == 0;
+        if (is_embd || is_proj) {
+            char *nend = NULL;
+            unsigned long ti = strtoul(rest + 5, &nend, 10);
+            if (nend != rest + 5 && strcmp(nend, ".weight") == 0 &&
+                ti < OC_LONGCAT_MAX_NGRAM) {
+                if (is_embd) m->ngram_embd[ti] = view_from_info(mm, info);
+                else         m->ngram_proj[ti] = view_from_info(mm, info);
+                return true;
+            }
+        }
+        return false;
+    }
     /* Per-layer: blk.<N>.<suffix> */
     if (strncmp(cname, "blk.", 4) == 0) {
         char *end = NULL;
         unsigned long layer_idx = strtoul(cname + 4, &end, 10);
         if (end == cname + 4 || *end != '.') return false;
+        const char *suf = end + 1;
+        /* LongCat ScMoE: one GGUF block holds two attention+FFN sub-blocks.
+         * Sub-block tensors carry a `_0`/`_1` marker on the stem (before
+         * `.weight`/`.bias`); everything else in the block — router, router
+         * bias, expert pool, indexer — exists once and belongs to the even
+         * sub-layer. */
+        char stem[96];
+        if (m->cfg.is_longcat) {
+            const char *dot = strrchr(suf, '.');
+            size_t base = dot ? (size_t)(dot - suf) : strlen(suf);
+            if (base >= 2 && suf[base - 2] == '_' &&
+                (suf[base - 1] == '0' || suf[base - 1] == '1')) {
+                size_t keep = base - 2;
+                size_t tail = dot ? strlen(dot) : 0;
+                if (keep + tail + 1 > sizeof stem) return false;
+                memcpy(stem, suf, keep);
+                if (dot) memcpy(stem + keep, dot, tail);
+                stem[keep + tail] = '\0';
+                layer_idx = layer_idx * 2 + (unsigned long)(suf[base - 1] - '0');
+                suf = stem;
+            } else {
+                layer_idx = layer_idx * 2;
+            }
+        }
         if (layer_idx >= m->cfg.n_layer) return false;
         OcLlamaLayer *L = &m->layers[layer_idx];
-        const char *suf = end + 1;
         if (strcmp(suf, "attn_norm.weight") == 0) {
             L->attn_norm = load_norm(mm, info, m->cfg.n_embd);
         } else if (strcmp(suf, "ffn_norm.weight") == 0) {
@@ -567,6 +607,11 @@ static bool assign_tensor(OcLlamaModel *m, const char *cname,
             L->mla_k_b = view_from_info(mm, info);
         } else if (strcmp(suf, "attn_v_b.weight") == 0) {
             L->mla_v_b = view_from_info(mm, info);
+        } else if (strcmp(suf, "exp_probs_b.bias") == 0) {
+            /* Length is num_experts + zero_expert_count; take it from the
+             * tensor rather than recomputing, so a model with a different
+             * zero-expert split still binds. */
+            L->exp_probs_b = load_norm(mm, info, (size_t)info->dims[0]);
         } else {
             return false;   /* unrecognized suffix; not an error */
         }
@@ -687,7 +732,7 @@ OcError oc_llama_load(const char *path, OcLlamaModel *out)
     if (strcmp(arch_str, "llama") != 0 && strcmp(arch_str, "mistral") != 0 &&
         strcmp(arch_str, "qwen2") != 0 && strcmp(arch_str, "gpt2") != 0 &&
         strcmp(arch_str, "gptneox") != 0 && strcmp(arch_str, "falcon") != 0 &&
-        strcmp(arch_str, "gemma4") != 0) {
+        strcmp(arch_str, "gemma4") != 0 && strcmp(arch_str, "longcat") != 0) {
         oc_gguf_map_free(&out->gguf);
         return OC_ERR_MODEL;
     }
@@ -963,6 +1008,7 @@ void oc_llama_free(OcLlamaModel *model)
             free(model->layers[i].attn_v_bias);
             free(model->layers[i].mla_q_a_norm);
             free(model->layers[i].mla_kv_a_norm);
+            free(model->layers[i].exp_probs_b);
             free(model->layers[i].attn_q_norm);
             free(model->layers[i].attn_k_norm);
             free(model->layers[i].post_attention_norm);
