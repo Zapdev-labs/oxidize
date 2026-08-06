@@ -294,8 +294,12 @@ typedef struct OcLlamaSession {
     float *mla_c_kv;         /* kv_lora_dim                          */
     float *mla_q_full;       /* n_heads * q_head_dim                */
     float *mla_kv_compressed; /* kv_lora + kv_pe                     */
-    float *mla_q_absorbed;   /* kv_lora_dim: k_b[h]^T @ q_nope       */
-    float *mla_ctx_latent;   /* kv_lora_dim: attention-weighted c_kv */
+    /* Per-head, held concurrently so the cache can be swept once for all
+     * heads rather than once per head. n_head * kv_lora_dim each. */
+    float *mla_q_absorbed;   /* k_b[h]^T @ q_nope, per head          */
+    float *mla_ctx_latent;   /* attention-weighted c_kv, per head    */
+    float *mla_run_max;      /* n_head online-softmax running max    */
+    float *mla_run_sum;      /* n_head online-softmax running sum    */
 } OcLlamaSession;
 
 /* ─── Batched decode ─────────────────────────────────────────────────────
@@ -349,6 +353,8 @@ typedef struct OcBatchSession {
     float *mla_kv_compressed;
     float *mla_q_absorbed;
     float *mla_ctx_latent;
+    float *mla_run_max;
+    float *mla_run_sum;
 } OcBatchSession;
 
 OcError oc_batch_session_init(OcLlamaModel *model, size_t max_seqs,

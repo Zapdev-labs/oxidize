@@ -925,7 +925,13 @@ OcError oc_llama_session_init_kv(OcLlamaModel *model, OcLlamaSession *out,
         }
     } else {
         out->kv_k = xcalloc(total, sizeof(float));
-        out->kv_v = xcalloc(total, sizeof(float));
+        /* MLA has no separate V cache: forward_mla_attention stores the
+         * [c_kv | k_pe] latent in kv_k and reconstructs V from it via v_b at
+         * the end of each head. Allocating kv_v would silently double the
+         * cache for a buffer nothing reads -- 171 KB per token on
+         * LongCat-2.0, i.e. 22 GB at a 128k context. */
+        if (!model->cfg.uses_mla)
+            out->kv_v = xcalloc(total, sizeof(float));
     }
     size_t maxw = model->cfg.n_embd > model->cfg.n_ff ? model->cfg.n_embd
                                                      : model->cfg.n_ff;
@@ -963,7 +969,8 @@ OcError oc_llama_session_init_kv(OcLlamaModel *model, OcLlamaSession *out,
            (double)oc_llama_kv_cache_bytes(model, OC_KV_F32) / 1e6);
 
     /* Q8 leaves kv_k/kv_v NULL; its buffers were checked at allocation. */
-    if ((out->kv_type == OC_KV_F32 && (!out->kv_k || !out->kv_v)) ||
+    if ((out->kv_type == OC_KV_F32 &&
+         (!out->kv_k || (!out->kv_v && !model->cfg.uses_mla))) ||
         !out->x || !out->normed || !out->q ||
         !out->k || !out->v || !out->attn_out || !out->ffn_gate ||
         !out->ffn_up || !out->dequant_temp || !out->logits) {
@@ -982,11 +989,14 @@ OcError oc_llama_session_init_kv(OcLlamaModel *model, OcLlamaSession *out,
         out->mla_c_kv = xcalloc(model->cfg.mla_kv_lora_dim, sizeof(float));
         out->mla_q_full = xcalloc((size_t)model->cfg.n_head * model->cfg.head_dim, sizeof(float));
         out->mla_kv_compressed = xcalloc(model->cfg.mla_kv_lora_dim + model->cfg.mla_q_rope_dim, sizeof(float));
-        out->mla_q_absorbed = xcalloc(model->cfg.mla_kv_lora_dim, sizeof(float));
-        out->mla_ctx_latent = xcalloc(model->cfg.mla_kv_lora_dim, sizeof(float));
+        size_t mla_per_head = (size_t)model->cfg.n_head * model->cfg.mla_kv_lora_dim;
+        out->mla_q_absorbed = xcalloc(mla_per_head, sizeof(float));
+        out->mla_ctx_latent = xcalloc(mla_per_head, sizeof(float));
+        out->mla_run_max = xcalloc(model->cfg.n_head, sizeof(float));
+        out->mla_run_sum = xcalloc(model->cfg.n_head, sizeof(float));
         if (!out->mla_c_q || !out->mla_c_kv || !out->mla_q_full ||
             !out->mla_kv_compressed || !out->mla_q_absorbed ||
-            !out->mla_ctx_latent) {
+            !out->mla_ctx_latent || !out->mla_run_max || !out->mla_run_sum) {
             oc_llama_session_free(out);
             return OC_ERR_OOM;
         }
@@ -1024,6 +1034,7 @@ void oc_llama_session_free(OcLlamaSession *sess)
     free(sess->mla_c_q); free(sess->mla_c_kv);
     free(sess->mla_q_full); free(sess->mla_kv_compressed);
     free(sess->mla_q_absorbed); free(sess->mla_ctx_latent);
+    free(sess->mla_run_max); free(sess->mla_run_sum);
     memset(sess, 0, sizeof(*sess));
 }
 
@@ -1498,52 +1509,73 @@ static void forward_mla_attention(OcLlamaSession *s, uint32_t layer)
         }
     }
 
-    /* 9. Attention per head, scoring against the cached latent. */
+    /* 9. Attention, scoring against the cached latent.
+     *
+     * The position loop is OUTER and the head loop INNER. That ordering is
+     * the whole point: all 64 heads score against the SAME cached row, so a
+     * head-outer loop re-reads the entire layer cache once per head. At an
+     * 8k context that is 76 * 64 * 8192 * 2304 B = 92 GB of KV traffic per
+     * token, five times the ~18.5 GB of weight traffic the model itself
+     * moves. Read each row once and fan it out across heads instead: 1.4 GB.
+     *
+     * The cost is carrying per-head online-softmax state (running max, sum,
+     * and a kv_lora accumulator) concurrently rather than one head at a
+     * time -- 64 * 512 floats each for the absorbed queries and the
+     * accumulators, 256 KB total. */
     const float scale = attn_scale;
     const size_t layer_base = (size_t)layer * c->n_ctx * s->kv_row_floats;
     const int64_t seq_len = s->pos + 1;
 
+    /* Absorb k_b into every head's query up front: q_abs[h] = k_b[h]^T @ q_nope. */
     for (uint32_t h = 0; h < n_head; h++) {
         const float *q_nope = s->mla_q_full + (size_t)h * q_hd;
-        const float *q_pe   = q_nope + k_nope_hd;
-
-        /* Absorb k_b[h] into the query: q_abs = k_b[h]^T @ q_nope. */
         OcWeightView k_b_h = L->mla_k_b;
         k_b_h.data = L->mla_k_b.data + (size_t)h * k_nope_hd * L->mla_k_b.row_bytes;
         k_b_h.rows = k_nope_hd;
-        matvec_transpose_acc(&k_b_h, q_nope, s->mla_q_absorbed, s->dequant_temp);
+        matvec_transpose_acc(&k_b_h, q_nope,
+                             s->mla_q_absorbed + (size_t)h * kv_lora,
+                             s->dequant_temp);
+        s->mla_run_max[h] = -INFINITY;
+        s->mla_run_sum[h] = 0.0f;
+        float *ctx = s->mla_ctx_latent + (size_t)h * kv_lora;
+        for (size_t i = 0; i < kv_lora; i++) ctx[i] = 0.0f;
+    }
 
-        float run_max = -INFINITY;
-        float run_sum = 0.0f;
-        for (size_t i = 0; i < kv_lora; i++) s->mla_ctx_latent[i] = 0.0f;
-
-        for (int64_t t = 0; t < seq_len; t++) {
-            const float *row = s->kv_k + layer_base + (size_t)t * s->kv_row_floats;
+    for (int64_t t = 0; t < seq_len; t++) {
+        const float *row = s->kv_k + layer_base + (size_t)t * s->kv_row_floats;
+        const float *row_pe = row + kv_lora;
+        for (uint32_t h = 0; h < n_head; h++) {
+            const float *q_abs = s->mla_q_absorbed + (size_t)h * kv_lora;
+            const float *q_pe  = s->mla_q_full + (size_t)h * q_hd + k_nope_hd;
             float dot = 0.0f;
-            for (size_t i = 0; i < kv_lora; i++) dot += s->mla_q_absorbed[i] * row[i];
-            for (size_t i = 0; i < q_rope; i++) dot += q_pe[i] * row[kv_lora + i];
+            for (size_t i = 0; i < kv_lora; i++) dot += q_abs[i] * row[i];
+            for (size_t i = 0; i < q_rope; i++) dot += q_pe[i] * row_pe[i];
 
-            float score = dot * scale;
-            float new_max = (score > run_max) ? score : run_max;
-            float exp_factor = expf(run_max - new_max);
-            float exp_score = expf(score - new_max);
+            const float score = dot * scale;
+            float *ctx = s->mla_ctx_latent + (size_t)h * kv_lora;
+            const float run_max = s->mla_run_max[h];
+            const float new_max = (score > run_max) ? score : run_max;
+            const float exp_factor = expf(run_max - new_max);
+            const float exp_score = expf(score - new_max);
             for (size_t i = 0; i < kv_lora; i++)
-                s->mla_ctx_latent[i] = s->mla_ctx_latent[i] * exp_factor
-                                     + exp_score * row[i];
-            run_sum = run_sum * exp_factor + exp_score;
-            run_max = new_max;
+                ctx[i] = ctx[i] * exp_factor + exp_score * row[i];
+            s->mla_run_sum[h] = s->mla_run_sum[h] * exp_factor + exp_score;
+            s->mla_run_max[h] = new_max;
         }
-        const float inv = (run_sum > 0.0f) ? 1.0f / run_sum : 0.0f;
-        for (size_t i = 0; i < kv_lora; i++) s->mla_ctx_latent[i] *= inv;
+    }
 
-        /* out[h] = v_b[h] @ context_latent. Packed at v_hd, because o_proj
-         * takes n_head * v_hd inputs -- writing at the Q stride would feed
-         * it every head interleaved with dead floats. */
+    /* out[h] = v_b[h] @ context_latent. Packed at v_hd, because o_proj takes
+     * n_head * v_hd inputs -- writing at the Q stride would feed it every
+     * head interleaved with dead floats. */
+    for (uint32_t h = 0; h < n_head; h++) {
+        float *ctx = s->mla_ctx_latent + (size_t)h * kv_lora;
+        const float inv = (s->mla_run_sum[h] > 0.0f) ? 1.0f / s->mla_run_sum[h] : 0.0f;
+        for (size_t i = 0; i < kv_lora; i++) ctx[i] *= inv;
+
         OcWeightView v_b_h = L->mla_v_b;
         v_b_h.data = L->mla_v_b.data + (size_t)h * v_hd * L->mla_v_b.row_bytes;
         v_b_h.rows = v_hd;
-        matvec(&v_b_h, s->mla_ctx_latent, s->attn_out + (size_t)h * v_hd,
-               s->dequant_temp);
+        matvec(&v_b_h, ctx, s->attn_out + (size_t)h * v_hd, s->dequant_temp);
     }
 
     /* 10. Output projection. */
@@ -1794,7 +1826,9 @@ OcError oc_batch_session_init(OcLlamaModel *model, size_t max_seqs,
     size_t per_layer = (size_t)model->cfg.n_ctx * out->kv_row_floats * max_seqs;
     size_t total = (size_t)model->cfg.n_layer * per_layer;
     out->kv_k = xcalloc(total, sizeof(float));
-    out->kv_v = xcalloc(total, sizeof(float));
+    /* MLA reconstructs V from the cached latent; see the session path. */
+    if (!model->cfg.uses_mla)
+        out->kv_v = xcalloc(total, sizeof(float));
     size_t maxw = model->cfg.n_embd > model->cfg.n_ff ? model->cfg.n_embd : model->cfg.n_ff;
     if (model->cfg.expert_intermediate_size > maxw)
         maxw = model->cfg.expert_intermediate_size;
@@ -1830,16 +1864,20 @@ OcError oc_batch_session_init(OcLlamaModel *model, size_t max_seqs,
                                   sizeof(float));
         out->mla_kv_compressed = xcalloc(model->cfg.mla_kv_lora_dim +
                                          model->cfg.mla_q_rope_dim, sizeof(float));
-        out->mla_q_absorbed = xcalloc(model->cfg.mla_kv_lora_dim, sizeof(float));
-        out->mla_ctx_latent = xcalloc(model->cfg.mla_kv_lora_dim, sizeof(float));
+        size_t mla_per_head = (size_t)model->cfg.n_head * model->cfg.mla_kv_lora_dim;
+        out->mla_q_absorbed = xcalloc(mla_per_head, sizeof(float));
+        out->mla_ctx_latent = xcalloc(mla_per_head, sizeof(float));
+        out->mla_run_max = xcalloc(model->cfg.n_head, sizeof(float));
+        out->mla_run_sum = xcalloc(model->cfg.n_head, sizeof(float));
         if (!out->mla_c_q || !out->mla_c_kv || !out->mla_q_full ||
             !out->mla_kv_compressed || !out->mla_q_absorbed ||
-            !out->mla_ctx_latent) {
+            !out->mla_ctx_latent || !out->mla_run_max || !out->mla_run_sum) {
             oc_batch_session_free(out);
             return OC_ERR_OOM;
         }
     }
-    if (!out->kv_k || !out->kv_v || !out->x || !out->normed || !out->q ||
+    if (!out->kv_k || (!out->kv_v && !model->cfg.uses_mla) ||
+        !out->x || !out->normed || !out->q ||
         !out->k || !out->v || !out->attn_out || !out->ffn_gate ||
         !out->ffn_up || !out->dequant_temp ||
         (model->cfg.num_experts > 0 &&
@@ -1875,7 +1913,7 @@ OcError oc_batch_forward(OcBatchSession *bs, OcBatchSeq *seqs)
         size_t sequence_stride = (size_t)m->cfg.n_layer * m->cfg.n_ctx *
                                  bs->kv_row_floats;
         tmp.kv_k = bs->kv_k + s * sequence_stride;
-        tmp.kv_v = bs->kv_v + s * sequence_stride;
+        tmp.kv_v = bs->kv_v ? bs->kv_v + s * sequence_stride : NULL;
         tmp.kv_row_floats = bs->kv_row_floats;
         tmp.pos = seqs[s].pos;
         tmp.x = bs->x;
@@ -1901,6 +1939,8 @@ OcError oc_batch_forward(OcBatchSession *bs, OcBatchSeq *seqs)
         tmp.mla_kv_compressed = bs->mla_kv_compressed;
         tmp.mla_q_absorbed = bs->mla_q_absorbed;
         tmp.mla_ctx_latent = bs->mla_ctx_latent;
+        tmp.mla_run_max = bs->mla_run_max;
+        tmp.mla_run_sum = bs->mla_run_sum;
 
         /* Embed and forward. */
         embed_token(&tmp, seqs[s].token);
@@ -1944,5 +1984,6 @@ void oc_batch_session_free(OcBatchSession *bs)
     free(bs->mla_c_q); free(bs->mla_c_kv);
     free(bs->mla_q_full); free(bs->mla_kv_compressed);
     free(bs->mla_q_absorbed); free(bs->mla_ctx_latent);
+    free(bs->mla_run_max); free(bs->mla_run_sum);
     memset(bs, 0, sizeof(*bs));
 }
