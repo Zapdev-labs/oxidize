@@ -816,8 +816,14 @@ static OcKvCacheType kv_type_from_env(void)
  * which is the price of a uniform stride. */
 static size_t kv_row_floats_for(const OcLlamaModel *model)
 {
+    /* MLA caches the COMPRESSED latent [c_kv | k_pe], not the expanded
+     * per-head K/V. Every head's K and V are linear in these same numbers,
+     * so forward_mla_attention folds k_b into the query and applies v_b to
+     * the attention-weighted latent. On LongCat-2.0 that is 576 floats per
+     * row instead of 64*192 = 12288 -- 21x less cache, and less arithmetic
+     * per step besides. */
     if (model->cfg.uses_mla)
-        return (size_t)model->cfg.n_head * model->cfg.head_dim;
+        return (size_t)model->cfg.mla_kv_lora_dim + model->cfg.mla_q_rope_dim;
 
     size_t row = (size_t)model->cfg.n_head_kv * model->cfg.kv_head_dim;
     if (model->cfg.uses_gemma4) {
@@ -884,6 +890,17 @@ OcError oc_llama_session_init_kv(OcLlamaModel *model, OcLlamaSession *out,
     if (kv_type == OC_KV_Q8 && model->cfg.uses_gemma4) {
         oc_log(OC_LOG_WARN, "llama: Q8 KV does not support Gemma 4's "
                "per-layer KV geometry; using f32 KV");
+        kv_type = OC_KV_F32;
+    }
+    /* MLA does not store per-head K/V at all -- it caches the [c_kv | k_pe]
+     * latent, which has no kv-head structure for Q8's per-head scales to key
+     * off, and forward_mla_attention writes s->kv_k directly rather than
+     * going through kv_q8_encode. Q8 here would dereference the NULL kv_k
+     * that the Q8 path leaves behind. The latent is already 21x smaller than
+     * the expanded cache, so there is little left for Q8 to win. */
+    if (kv_type == OC_KV_Q8 && model->cfg.uses_mla) {
+        oc_log(OC_LOG_WARN, "llama: Q8 KV does not apply to MLA's compressed "
+               "latent cache; using f32 KV");
         kv_type = OC_KV_F32;
     }
     if (kv_type == OC_KV_Q8 && model->cfg.head_dim != model->cfg.kv_head_dim) {
@@ -960,7 +977,11 @@ OcError oc_llama_session_init_kv(OcLlamaModel *model, OcLlamaSession *out,
         out->mla_c_kv = xcalloc(model->cfg.mla_kv_lora_dim, sizeof(float));
         out->mla_q_full = xcalloc((size_t)model->cfg.n_head * model->cfg.head_dim, sizeof(float));
         out->mla_kv_compressed = xcalloc(model->cfg.mla_kv_lora_dim + model->cfg.mla_q_rope_dim, sizeof(float));
-        if (!out->mla_c_q || !out->mla_c_kv || !out->mla_q_full || !out->mla_kv_compressed) {
+        out->mla_q_absorbed = xcalloc(model->cfg.mla_kv_lora_dim, sizeof(float));
+        out->mla_ctx_latent = xcalloc(model->cfg.mla_kv_lora_dim, sizeof(float));
+        if (!out->mla_c_q || !out->mla_c_kv || !out->mla_q_full ||
+            !out->mla_kv_compressed || !out->mla_q_absorbed ||
+            !out->mla_ctx_latent) {
             oc_llama_session_free(out);
             return OC_ERR_OOM;
         }
@@ -997,6 +1018,7 @@ void oc_llama_session_free(OcLlamaSession *sess)
     free(sess->shexp_gate); free(sess->shexp_up); free(sess->shexp_out);
     free(sess->mla_c_q); free(sess->mla_c_kv);
     free(sess->mla_q_full); free(sess->mla_kv_compressed);
+    free(sess->mla_q_absorbed); free(sess->mla_ctx_latent);
     memset(sess, 0, sizeof(*sess));
 }
 
@@ -1064,6 +1086,32 @@ static void matvec(const OcWeightView *w, const float *in, float *out,
     } else {
         oc_matvec_quantized(w->qtype, w->data, w->rows, w->cols, w->row_bytes,
                             in, out, temp);
+    }
+}
+
+/* out[0..cols) = W^T @ in, i.e. sum over rows of in[r] * W[r][:].
+ *
+ * This is the "absorption" step of MLA: folding k_b into the query so that
+ * scoring can run against the cached latent directly instead of
+ * reconstructing per-head K for every past position. Row-major access, so a
+ * quantized W is walked exactly as matvec() walks it. `out` must be `cols`
+ * long, `in` must be `rows` long. */
+static void matvec_transpose_acc(const OcWeightView *w, const float *in,
+                                 float *out, float *temp)
+{
+    for (size_t c = 0; c < w->cols; c++) out[c] = 0.0f;
+    for (size_t r = 0; r < w->rows; r++) {
+        const float x = in[r];
+        if (x == 0.0f) continue;
+        const float *row;
+        if (w->qtype == OC_QUANT_F32) {
+            row = (const float *)w->data + r * w->cols;
+        } else {
+            oc_quant_dequant_row_scalar(w->qtype, w->data + r * w->row_bytes,
+                                        w->row_bytes, temp, w->cols);
+            row = temp;
+        }
+        for (size_t c = 0; c < w->cols; c++) out[c] += x * row[c];
     }
 }
 
@@ -1360,25 +1408,28 @@ static void forward_mla_attention(OcLlamaSession *s, uint32_t layer)
         oc_apply_rope_f32(k_pe, k_pe, q_rope, q_rope, s->pos, c->rope_theta);
     }
 
-    /* 7. Per-head K and V up-projection. */
+    /* 7. Cache the LATENT, not the expanded per-head K/V.
+     *
+     * The obvious implementation decompresses c_kv into 64 heads of K and V
+     * and caches those: 64 * 192 floats for K plus the same for V, i.e.
+     * 7.5 MB per token on LongCat-2.0, which puts even an 8k context out of
+     * reach. But every head's K and V are linear functions of the SAME 576
+     * cached numbers, so storing [c_kv | k_pe] and folding the projections
+     * into the query instead costs 576 floats per token per layer -- 21x
+     * smaller -- and is also less arithmetic per step, because k_b and v_b
+     * are then applied once per token rather than once per cached position.
+     *
+     *   score_t = q_nope . (k_b[h] @ c_kv_t) + q_pe . k_pe_t
+     *           = (k_b[h]^T @ q_nope) . c_kv_t + q_pe . k_pe_t
+     *   out     = v_b[h] @ (sum_t p_t * c_kv_t)
+     *
+     * so k_b is absorbed into the query up front and v_b is applied once to
+     * the attention-weighted latent at the end. Both are exact -- this is a
+     * re-association, not an approximation. */
     size_t kv_off = ((size_t)layer * c->n_ctx + (size_t)s->pos) * s->kv_row_floats;
-    float *k_cache = s->kv_k + kv_off;
-    float *v_cache = s->kv_v + kv_off;
-
-    for (uint32_t h = 0; h < n_head; h++) {
-        OcWeightView k_b_h = L->mla_k_b;
-        k_b_h.data = L->mla_k_b.data + (size_t)h * k_nope_hd * L->mla_k_b.row_bytes;
-        k_b_h.rows = k_nope_hd;
-        float *k_nope = k_cache + (size_t)h * q_hd;
-        matvec(&k_b_h, s->mla_c_kv, k_nope, s->dequant_temp);
-        memcpy(k_nope + k_nope_hd, k_pe, q_rope * sizeof(float));
-
-        OcWeightView v_b_h = L->mla_v_b;
-        v_b_h.data = L->mla_v_b.data + (size_t)h * v_hd * L->mla_v_b.row_bytes;
-        v_b_h.rows = v_hd;
-        float *v_out = v_cache + (size_t)h * q_hd;
-        matvec(&v_b_h, s->mla_c_kv, v_out, s->dequant_temp);
-    }
+    float *latent_row = s->kv_k + kv_off;
+    memcpy(latent_row, s->mla_c_kv, kv_lora * sizeof(float));
+    memcpy(latent_row + kv_lora, k_pe, q_rope * sizeof(float));
 
     /* 8. RoPE on q_pe (the trailing q_rope slots of each q head). Must match
      * the k_pe treatment above exactly, or Q and K rotate apart. */
@@ -1393,17 +1444,7 @@ static void forward_mla_attention(OcLlamaSession *s, uint32_t layer)
         }
     }
 
-    /* 9. Attention per head (MLA: each head has own K/V, group=1).
-     *
-     * Q and K are q_hd wide (nope + rope, 192 for LongCat) but V is only
-     * v_hd (128). The cache strides both by q_hd for a uniform layout, so V
-     * rows carry q_hd - v_hd trailing slots that were never written; the
-     * accumulation must stop at v_hd rather than read them.
-     *
-     * The output is written PACKED at v_hd, not at the Q stride: o_proj
-     * takes n_head * v_hd inputs, so a q_hd-strided buffer would feed it
-     * every head interleaved with dead floats and run out of input a third
-     * of the way through the heads. */
+    /* 9. Attention per head, scoring against the cached latent. */
     float scale = 1.0f / sqrtf((float)q_hd);
     if (c->yarn_factor > 1.0f && c->yarn_mscale_all_dim > 0.0f) {
         /* deepseek_yarn moves the mscale correction onto the logits; see
@@ -1412,33 +1453,50 @@ static void forward_mla_attention(OcLlamaSession *s, uint32_t layer)
                                       c->yarn_mscale_all_dim, q_hd,
                                       NULL, &scale);
     }
+    const size_t layer_base = (size_t)layer * c->n_ctx * s->kv_row_floats;
+    const int64_t seq_len = s->pos + 1;
+
     for (uint32_t h = 0; h < n_head; h++) {
-        float *q_vec = s->mla_q_full + h * q_hd;
-        float *out_vec = s->attn_out + (size_t)h * v_hd;
-        const float *k_head = k_cache + (size_t)h * q_hd;
-        const float *v_head = v_cache + (size_t)h * q_hd;
+        const float *q_nope = s->mla_q_full + (size_t)h * q_hd;
+        const float *q_pe   = q_nope + k_nope_hd;
+
+        /* Absorb k_b[h] into the query: q_abs = k_b[h]^T @ q_nope. */
+        OcWeightView k_b_h = L->mla_k_b;
+        k_b_h.data = L->mla_k_b.data + (size_t)h * k_nope_hd * L->mla_k_b.row_bytes;
+        k_b_h.rows = k_nope_hd;
+        matvec_transpose_acc(&k_b_h, q_nope, s->mla_q_absorbed, s->dequant_temp);
 
         float run_max = -INFINITY;
         float run_sum = 0.0f;
-        for (size_t i = 0; i < v_hd; i++) out_vec[i] = 0.0f;
+        for (size_t i = 0; i < kv_lora; i++) s->mla_ctx_latent[i] = 0.0f;
 
-        int64_t seq_len = s->pos + 1;
         for (int64_t t = 0; t < seq_len; t++) {
-            const float *k_t = k_head + (size_t)t * s->kv_row_floats;
+            const float *row = s->kv_k + layer_base + (size_t)t * s->kv_row_floats;
             float dot = 0.0f;
-            for (size_t i = 0; i < q_hd; i++) dot += q_vec[i] * k_t[i];
+            for (size_t i = 0; i < kv_lora; i++) dot += s->mla_q_absorbed[i] * row[i];
+            for (size_t i = 0; i < q_rope; i++) dot += q_pe[i] * row[kv_lora + i];
+
             float score = dot * scale;
             float new_max = (score > run_max) ? score : run_max;
             float exp_factor = expf(run_max - new_max);
             float exp_score = expf(score - new_max);
-            for (size_t i = 0; i < v_hd; i++) out_vec[i] *= exp_factor;
-            const float *v_t = v_head + (size_t)t * s->kv_row_floats;
-            for (size_t i = 0; i < v_hd; i++) out_vec[i] += exp_score * v_t[i];
+            for (size_t i = 0; i < kv_lora; i++)
+                s->mla_ctx_latent[i] = s->mla_ctx_latent[i] * exp_factor
+                                     + exp_score * row[i];
             run_sum = run_sum * exp_factor + exp_score;
             run_max = new_max;
         }
-        float inv = (run_sum > 0.0f) ? 1.0f / run_sum : 0.0f;
-        for (size_t i = 0; i < v_hd; i++) out_vec[i] *= inv;
+        const float inv = (run_sum > 0.0f) ? 1.0f / run_sum : 0.0f;
+        for (size_t i = 0; i < kv_lora; i++) s->mla_ctx_latent[i] *= inv;
+
+        /* out[h] = v_b[h] @ context_latent. Packed at v_hd, because o_proj
+         * takes n_head * v_hd inputs -- writing at the Q stride would feed
+         * it every head interleaved with dead floats. */
+        OcWeightView v_b_h = L->mla_v_b;
+        v_b_h.data = L->mla_v_b.data + (size_t)h * v_hd * L->mla_v_b.row_bytes;
+        v_b_h.rows = v_hd;
+        matvec(&v_b_h, s->mla_ctx_latent, s->attn_out + (size_t)h * v_hd,
+               s->dequant_temp);
     }
 
     /* 10. Output projection. */

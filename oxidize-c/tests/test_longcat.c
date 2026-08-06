@@ -627,16 +627,13 @@ Test(longcat, mla_session_initializes)
     remove(p);
 }
 
-Test(longcat, mla_kv_row_is_expanded_per_head)
+Test(longcat, mla_kv_row_is_the_compressed_latent)
 {
-    /* Documents today's cost rather than blessing it: the MLA cache holds
-     * the EXPANDED per-head K/V (n_head * head_dim) instead of the
-     * kv_lora + rope latent it decompresses from. On LongCat-2.0 that is
-     * 64*192 = 12288 floats per K row against the 576 the latent needs.
-     *
-     * When the cache is switched to the latent, this test should be updated
-     * to assert the smaller row -- it exists so that change is deliberate
-     * and visible, not silent. */
+    /* MLA caches [c_kv | k_pe] -- the compressed latent every head's K and V
+     * decompress from -- rather than the expanded per-head K/V. On real
+     * LongCat-2.0 that is 576 floats per row against 64*192 = 12288, which
+     * is the difference between 8k context costing 61 GB and 64k costing
+     * about 11 GB. */
     const char *p = FIXTURE("kvrow");
     build_longcat_gguf(p);
 
@@ -647,14 +644,36 @@ Test(longcat, mla_kv_row_is_expanded_per_head)
     OcLlamaSession s;
     cr_assert_eq(oc_llama_session_init(&m, &s), OC_OK, "session");
 
-    size_t expanded = (size_t)m.cfg.n_head * m.cfg.head_dim;
     size_t latent   = (size_t)m.cfg.mla_kv_lora_dim + m.cfg.mla_q_rope_dim;
-    cr_assert_eq(s.kv_row_floats, expanded,
-        "MLA kv row is currently the expanded per-head K/V (%zu), got %zu",
-        expanded, s.kv_row_floats);
-    cr_assert_gt(expanded, latent,
-        "sanity: the expanded row should exceed the latent (%zu vs %zu)",
-        expanded, latent);
+    size_t expanded = (size_t)m.cfg.n_head * m.cfg.head_dim;
+    cr_assert_eq(s.kv_row_floats, latent,
+        "MLA kv row should be the latent (%zu), got %zu",
+        latent, s.kv_row_floats);
+    cr_assert_lt(latent, expanded,
+        "the latent must be smaller than the expanded K/V (%zu vs %zu)",
+        latent, expanded);
+
+    oc_llama_session_free(&s);
+    oc_llama_free(&m);
+    remove(p);
+}
+
+Test(longcat, mla_forces_f32_kv)
+{
+    /* Q8 KV keys its scales per kv head, which the latent has no notion of,
+     * and the Q8 path leaves kv_k NULL while forward_mla_attention writes it
+     * directly. Asking for Q8 on an MLA model must fall back, not crash. */
+    const char *p = FIXTURE("kvq8");
+    build_longcat_gguf(p);
+
+    OcLlamaModel m;
+    memset(&m, 0, sizeof m);
+    cr_assert_eq(oc_llama_load(p, &m), OC_OK, "load");
+
+    OcLlamaSession s;
+    cr_assert_eq(oc_llama_session_init_kv(&m, &s, OC_KV_Q8), OC_OK, "session");
+    cr_assert_eq(s.kv_type, OC_KV_F32, "MLA must fall back to f32 KV");
+    cr_assert_not_null(s.kv_k, "f32 fallback must allocate kv_k");
 
     oc_llama_session_free(&s);
     oc_llama_free(&m);

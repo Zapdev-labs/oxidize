@@ -294,6 +294,8 @@ typedef struct OcLlamaSession {
     float *mla_c_kv;         /* kv_lora_dim                          */
     float *mla_q_full;       /* n_heads * q_head_dim                */
     float *mla_kv_compressed; /* kv_lora + kv_pe                     */
+    float *mla_q_absorbed;   /* kv_lora_dim: k_b[h]^T @ q_nope       */
+    float *mla_ctx_latent;   /* kv_lora_dim: attention-weighted c_kv */
 } OcLlamaSession;
 
 /* ─── Batched decode ─────────────────────────────────────────────────────
@@ -345,6 +347,8 @@ typedef struct OcBatchSession {
     float *mla_c_kv;
     float *mla_q_full;
     float *mla_kv_compressed;
+    float *mla_q_absorbed;
+    float *mla_ctx_latent;
 } OcBatchSession;
 
 OcError oc_batch_session_init(OcLlamaModel *model, size_t max_seqs,
