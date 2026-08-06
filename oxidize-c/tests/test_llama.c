@@ -206,9 +206,14 @@ Test(llama, batch_allocates_mla_workspace)
     cr_assert_not_null(batch.mla_c_kv);
     cr_assert_not_null(batch.mla_q_full);
     cr_assert_not_null(batch.mla_kv_compressed);
-    /* MLA keys/values are stored per attention head, not per KV head. */
+    cr_assert_not_null(batch.mla_q_absorbed);
+    cr_assert_not_null(batch.mla_ctx_latent);
+    /* MLA caches the compressed [c_kv | k_pe] latent, and the batch path
+     * must agree with the single-sequence path exactly — they index the same
+     * rows through the same forward code. Sizing this the old expanded way
+     * (n_head * head_dim) allocated ~21x more per sequence. */
     cr_assert_eq(batch.kv_row_floats,
-                 (size_t)model.cfg.n_head * model.cfg.head_dim);
+                 (size_t)model.cfg.mla_kv_lora_dim + model.cfg.mla_q_rope_dim);
     oc_batch_session_free(&batch);
     cr_assert_null(batch.mla_c_q);
 }

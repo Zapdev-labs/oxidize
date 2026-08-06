@@ -622,7 +622,16 @@ static OcError forward_mla_layer(OcInferenceModel *m, OcLayerWeights *layer,
     }
 
     /* 7. Attention: per-head scaled dot-product. */
-    memset(attn_out, 0, total_k * sizeof(float));
+    /* attn_out aliases workspace.hidden_a, which is hidden_size long.
+     * total_k is n_heads * kv_head_dim -- 12288 on LongCat against an 8192
+     * buffer, 24576 on DeepSeek-V3 against 7168 -- so clearing total_k here
+     * ran 16 KB past the end. Only n_heads * v_head_dim is ever written now
+     * that the output is packed, and that is what needs clearing. */
+    {
+        size_t attn_out_len = (size_t)n_heads * v_head_dim;
+        if (attn_out_len > cfg->hidden_size) attn_out_len = cfg->hidden_size;
+        memset(attn_out, 0, attn_out_len * sizeof(float));
+    }
     if (kv_idx >= 0 && k_store && v_padded) {
         uint32_t seq_len = oc_kv_cache_n_tokens(&m->kv_cache);
         /* deepseek_yarn folds a get_mscale(factor, mscale_all_dim)^2 term

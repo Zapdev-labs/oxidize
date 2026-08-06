@@ -944,7 +944,12 @@ OcError oc_llama_session_init_kv(OcLlamaModel *model, OcLlamaSession *out,
     out->logits = xcalloc(model->cfg.vocab_size, sizeof(float));
     /* MoE temporaries (only allocated when num_experts > 0). */
     if (model->cfg.num_experts > 0) {
-        out->router_logits = xcalloc(model->cfg.num_experts, sizeof(float));
+        /* The router spans routed AND zero-expert slots. Sizing this to
+         * num_experts alone overruns it by zero_expert_count floats on every
+         * MoE layer of every token -- 512 bytes per layer on LongCat-2.0. */
+        out->router_logits = xcalloc((size_t)model->cfg.num_experts
+                                     + model->cfg.zero_expert_count,
+                                     sizeof(float));
         out->expert_gate = xcalloc(model->cfg.expert_intermediate_size, sizeof(float));
         out->expert_up   = xcalloc(model->cfg.expert_intermediate_size, sizeof(float));
         out->expert_out  = xcalloc(model->cfg.n_embd, sizeof(float));
@@ -1251,52 +1256,76 @@ static void forward_moe_ffn(OcLlamaSession *s, const OcLlamaLayer *L)
 {
     const OcLlamaConfig *c = &s->model->cfg;
     uint32_t n_exp = c->num_experts;
+    /* LongCat appends identity ("zero") experts after the routed ones. They
+     * hold no weights and return their input unchanged, so the expert pool
+     * stays n_exp wide but the router spans every slot and top-k may pick
+     * "do nothing". */
+    uint32_t n_zero = c->zero_expert_count;
+    uint32_t n_slots = n_exp + n_zero;
     uint32_t k = c->num_experts_per_tok;
+    if (k > n_slots) k = n_slots;
     uint32_t i_size = c->expert_intermediate_size;
     if (i_size == 0) i_size = c->n_ff;
 
-    /* 1. Router logits: ffn_gate_inp @ normed → [num_experts]. */
+    /* 1. Router logits: ffn_gate_inp @ normed → [n_slots]. */
     matvec(&L->ffn_gate_inp, s->normed, s->router_logits, s->dequant_temp);
 
     /* 2. Gating: softmax (Qwen3-MoE) or sigmoid (DeepSeek). */
     if (!c->expert_gating_sigmoid) {
         float mx = s->router_logits[0];
-        for (uint32_t i = 1; i < n_exp; i++) {
+        for (uint32_t i = 1; i < n_slots; i++) {
             if (s->router_logits[i] > mx) mx = s->router_logits[i];
         }
         double sum = 0.0;
-        for (uint32_t i = 0; i < n_exp; i++) {
+        for (uint32_t i = 0; i < n_slots; i++) {
             s->router_logits[i] = expf(s->router_logits[i] - mx);
             sum += (double)s->router_logits[i];
         }
         if (sum > 0.0) {
             float inv = (float)(1.0 / sum);
-            for (uint32_t i = 0; i < n_exp; i++) s->router_logits[i] *= inv;
+            for (uint32_t i = 0; i < n_slots; i++) s->router_logits[i] *= inv;
         }
     } else {
-        for (uint32_t i = 0; i < n_exp; i++) {
+        for (uint32_t i = 0; i < n_slots; i++) {
             s->router_logits[i] = 1.0f / (1.0f + expf(-s->router_logits[i]));
         }
     }
 
     /* 3. Top-k selection by descending weight (partial selection sort). */
     uint32_t sel_buf[256];
-    uint32_t *sel = (n_exp <= 256) ? sel_buf
-                                   : (uint32_t *)malloc(n_exp * sizeof(uint32_t));
+    uint32_t *sel = (n_slots <= 256) ? sel_buf
+                                   : (uint32_t *)malloc(n_slots * sizeof(uint32_t));
     if (sel == NULL) { forward_dense_ffn(s, L); return; }
-    for (uint32_t i = 0; i < n_exp; i++) sel[i] = i;
+    for (uint32_t i = 0; i < n_slots; i++) sel[i] = i;
+    /* exp_probs_b steers WHICH slots win top-k without changing how much
+     * their output counts, so ranking uses logit + bias while the applied
+     * gate below stays the unbiased probability. */
     for (uint32_t i = 0; i < k; i++) {
         uint32_t best = i;
-        for (uint32_t j = i + 1; j < n_exp; j++) {
-            if (s->router_logits[sel[j]] > s->router_logits[sel[best]]) best = j;
+        for (uint32_t j = i + 1; j < n_slots; j++) {
+            float sj = s->router_logits[sel[j]];
+            float sb = s->router_logits[sel[best]];
+            if (L->exp_probs_b) {
+                sj += L->exp_probs_b[sel[j]];
+                sb += L->exp_probs_b[sel[best]];
+            }
+            if (sj > sb) best = j;
         }
         uint32_t tmp = sel[i]; sel[i] = sel[best]; sel[best] = tmp;
     }
 
-    /* 4. Renormalize top-k weights (norm_topk_prob). */
-    double weight_norm = 0.0;
-    for (uint32_t i = 0; i < k; i++) weight_norm += (double)s->router_logits[sel[i]];
-    if (weight_norm <= 0.0) weight_norm = 1.0;
+    /* 4. Renormalize top-k weights (norm_topk_prob).
+     *
+     * NOT for zero-expert models: their softmax already spans every slot and
+     * routed mass summing to less than 1 is exactly how a token skips work.
+     * Rescaling to 1 would force every token through a full-strength FFN. */
+    double weight_norm = 1.0;
+    if (n_zero == 0) {
+        weight_norm = 0.0;
+        for (uint32_t i = 0; i < k; i++)
+            weight_norm += (double)s->router_logits[sel[i]];
+        if (weight_norm <= 0.0) weight_norm = 1.0;
+    }
     float routed_scale = c->expert_weights_scale;
 
     /* 5. Per-expert SwiGLU FFN, accumulated into s->expert_out (zeroed).
@@ -1310,6 +1339,15 @@ static void forward_moe_ffn(OcLlamaSession *s, const OcLlamaLayer *L)
     for (uint32_t ei = 0; ei < k; ei++) {
         uint32_t idx = sel[ei];
         float w = routed_scale * (float)(s->router_logits[idx] / weight_norm);
+
+        /* Zero experts are the identity: they contribute their own input,
+         * gated like any other expert, and touch no weights. The scale
+         * applies to them too. */
+        if (idx >= n_exp) {
+            for (size_t i = 0; i < c->n_embd; i++)
+                s->expert_out[i] += w * s->normed[i];
+            continue;
+        }
 
         OcWeightView gate_v = L->ffn_gate_exps;
         gate_v.data = L->ffn_gate_exps.data + (size_t)idx * i_size * gate_row_bytes;
@@ -1394,16 +1432,32 @@ static void forward_mla_attention(OcLlamaSession *s, uint32_t layer)
                     s->mla_c_kv, kv_lora, c->rms_norm_eps);
     memcpy(s->mla_kv_compressed, s->mla_c_kv, kv_lora * sizeof(float));
 
+    /* Resolve the deepseek_yarn split ONCE: how much of the correction rides
+     * on cos/sin (rope_amp) versus the attention logits (attn_scale).
+     * DeepSeek-V3 (mscale_all_dim 0) puts it on cos/sin; LongCat (both terms
+     * 1) cancels the RoPE share to exactly 1.0 and puts it all on the
+     * logits. Applying the standard YaRN mscale here as well would
+     * double-count -- inflating the 64 rope dims against the 128 nope dims
+     * AND scaling the logits. */
+    float rope_amp = -1.0f;   /* < 0 = standard YaRN mscale */
+    float attn_scale = 1.0f / sqrtf((float)q_hd);
+    if (c->yarn_factor > 1.0f && c->yarn_mscale_all_dim > 0.0f) {
+        oc_rope_deepseek_yarn_scales(c->yarn_factor, c->yarn_mscale,
+                                      c->yarn_mscale_all_dim, q_hd,
+                                      &rope_amp, &attn_scale);
+    }
+
     /* 6. RoPE on k_pe (the trailing q_rope slots of kv_compressed).
      *
      * YaRN changes the ROTATION FREQUENCIES, not just an amplitude, so it is
-     * still required here even for LongCat where the mscale ratio cancels to
+     * still required here even for LongCat where the amplitude cancels to
      * 1.0 -- a 120x context extension without the frequency ramp would place
      * every position wrong. */
     float *k_pe = s->mla_kv_compressed + kv_lora;
     if (c->yarn_factor > 1.0f) {
-        oc_apply_rope_yarn_f32(k_pe, k_pe, q_rope, q_rope, s->pos,
-                               c->rope_theta, c->yarn_factor, c->yarn_orig_ctx);
+        oc_apply_rope_yarn_scaled_f32(k_pe, k_pe, q_rope, q_rope, s->pos,
+                                      c->rope_theta, c->yarn_factor,
+                                      c->yarn_orig_ctx, rope_amp);
     } else {
         oc_apply_rope_f32(k_pe, k_pe, q_rope, q_rope, s->pos, c->rope_theta);
     }
@@ -1436,23 +1490,16 @@ static void forward_mla_attention(OcLlamaSession *s, uint32_t layer)
     for (uint32_t h = 0; h < n_head; h++) {
         float *q_pe = s->mla_q_full + h * q_hd + k_nope_hd;
         if (c->yarn_factor > 1.0f) {
-            oc_apply_rope_yarn_f32(q_pe, q_pe, q_rope, q_rope, s->pos,
-                                   c->rope_theta, c->yarn_factor,
-                                   c->yarn_orig_ctx);
+            oc_apply_rope_yarn_scaled_f32(q_pe, q_pe, q_rope, q_rope, s->pos,
+                                          c->rope_theta, c->yarn_factor,
+                                          c->yarn_orig_ctx, rope_amp);
         } else {
             oc_apply_rope_f32(q_pe, q_pe, q_rope, q_rope, s->pos, c->rope_theta);
         }
     }
 
     /* 9. Attention per head, scoring against the cached latent. */
-    float scale = 1.0f / sqrtf((float)q_hd);
-    if (c->yarn_factor > 1.0f && c->yarn_mscale_all_dim > 0.0f) {
-        /* deepseek_yarn moves the mscale correction onto the logits; see
-         * oc_rope_deepseek_yarn_scales(). */
-        oc_rope_deepseek_yarn_scales(c->yarn_factor, c->yarn_mscale,
-                                      c->yarn_mscale_all_dim, q_hd,
-                                      NULL, &scale);
-    }
+    const float scale = attn_scale;
     const size_t layer_base = (size_t)layer * c->n_ctx * s->kv_row_floats;
     const int64_t seq_len = s->pos + 1;
 
@@ -1736,7 +1783,11 @@ OcError oc_batch_session_init(OcLlamaModel *model, size_t max_seqs,
     out->model = model;
     out->max_seqs = max_seqs;
     if (model->cfg.uses_mla) {
-        out->kv_row_floats = (size_t)model->cfg.n_head * model->cfg.head_dim;
+        /* Must agree with kv_row_floats_for(): the latent, not the expanded
+         * per-head K/V. Sizing this the old way allocated 12288 floats per
+         * row per sequence -- about 76 GB for a 2-sequence 8k-context
+         * LongCat batch, against the 3.6 GB the latent needs. */
+        out->kv_row_floats = kv_row_floats_for(model);
     } else {
         out->kv_row_floats = (size_t)model->cfg.n_head_kv * model->cfg.kv_head_dim;
     }
@@ -1757,7 +1808,12 @@ OcError oc_batch_session_init(OcLlamaModel *model, size_t max_seqs,
     out->ffn_up = xcalloc(model->cfg.n_ff, sizeof(float));
     out->dequant_temp = xcalloc(maxw, sizeof(float));
     if (model->cfg.num_experts > 0) {
-        out->router_logits = xcalloc(model->cfg.num_experts, sizeof(float));
+        /* The router spans routed AND zero-expert slots. Sizing this to
+         * num_experts alone overruns it by zero_expert_count floats on every
+         * MoE layer of every token -- 512 bytes per layer on LongCat-2.0. */
+        out->router_logits = xcalloc((size_t)model->cfg.num_experts
+                                     + model->cfg.zero_expert_count,
+                                     sizeof(float));
         out->expert_gate = xcalloc(model->cfg.expert_intermediate_size, sizeof(float));
         out->expert_up = xcalloc(model->cfg.expert_intermediate_size, sizeof(float));
         out->expert_out = xcalloc(model->cfg.n_embd, sizeof(float));
@@ -1774,8 +1830,11 @@ OcError oc_batch_session_init(OcLlamaModel *model, size_t max_seqs,
                                   sizeof(float));
         out->mla_kv_compressed = xcalloc(model->cfg.mla_kv_lora_dim +
                                          model->cfg.mla_q_rope_dim, sizeof(float));
+        out->mla_q_absorbed = xcalloc(model->cfg.mla_kv_lora_dim, sizeof(float));
+        out->mla_ctx_latent = xcalloc(model->cfg.mla_kv_lora_dim, sizeof(float));
         if (!out->mla_c_q || !out->mla_c_kv || !out->mla_q_full ||
-            !out->mla_kv_compressed) {
+            !out->mla_kv_compressed || !out->mla_q_absorbed ||
+            !out->mla_ctx_latent) {
             oc_batch_session_free(out);
             return OC_ERR_OOM;
         }
@@ -1805,7 +1864,13 @@ OcError oc_batch_forward(OcBatchSession *bs, OcBatchSeq *seqs)
         if (seqs[s].pos < 0 || (uint64_t)seqs[s].pos >= m->cfg.n_ctx)
             return OC_ERR_INVALID_ARG;
         /* Set up a temporary session view sharing the workspace. */
+        /* Zeroed, not just field-by-field assigned: this struct has grown
+         * several times (MLA scratch, Q8 KV code/scale pointers) and each
+         * time the un-assigned tail became stack garbage that the forward
+         * pass then wrote through. kv_type 0 is OC_KV_F32, which is what the
+         * batch path uses. */
         OcLlamaSession tmp;
+        memset(&tmp, 0, sizeof tmp);
         tmp.model = m;
         size_t sequence_stride = (size_t)m->cfg.n_layer * m->cfg.n_ctx *
                                  bs->kv_row_floats;
@@ -1834,6 +1899,8 @@ OcError oc_batch_forward(OcBatchSession *bs, OcBatchSeq *seqs)
         tmp.mla_c_kv = bs->mla_c_kv;
         tmp.mla_q_full = bs->mla_q_full;
         tmp.mla_kv_compressed = bs->mla_kv_compressed;
+        tmp.mla_q_absorbed = bs->mla_q_absorbed;
+        tmp.mla_ctx_latent = bs->mla_ctx_latent;
 
         /* Embed and forward. */
         embed_token(&tmp, seqs[s].token);
@@ -1876,5 +1943,6 @@ void oc_batch_session_free(OcBatchSession *bs)
     free(bs->shexp_gate); free(bs->shexp_up); free(bs->shexp_out);
     free(bs->mla_c_q); free(bs->mla_c_kv);
     free(bs->mla_q_full); free(bs->mla_kv_compressed);
+    free(bs->mla_q_absorbed); free(bs->mla_ctx_latent);
     memset(bs, 0, sizeof(*bs));
 }

@@ -215,6 +215,16 @@ void oc_apply_rope_yarn_f32(const float *in, float *out, size_t head_dim,
                              size_t rope_len, int64_t position, float theta,
                              float yarn_factor, uint32_t yarn_orig_ctx)
 {
+    /* Default amplitude: 1 + 0.1*ln(factor), the standard YaRN mscale. */
+    oc_apply_rope_yarn_scaled_f32(in, out, head_dim, rope_len, position, theta,
+                                  yarn_factor, yarn_orig_ctx, -1.0f);
+}
+
+void oc_apply_rope_yarn_scaled_f32(const float *in, float *out, size_t head_dim,
+                                    size_t rope_len, int64_t position,
+                                    float theta, float yarn_factor,
+                                    uint32_t yarn_orig_ctx, float attn_factor)
+{
     bool yarn = yarn_factor > 1.0f && yarn_orig_ctx > 0;
     if (!yarn) {
         oc_apply_rope_f32(in, out, head_dim, rope_len, position, theta);
@@ -235,7 +245,14 @@ void oc_apply_rope_yarn_f32(const float *in, float *out, size_t head_dim,
 
     /* YaRN parameters (matching Rust apply_rope_f32_yarn). */
     float freq_scale = 1.0f / yarn_factor;
-    float mscale = 1.0f + 0.1f * logf(yarn_factor);
+    /* attn_factor < 0 means "use the standard YaRN mscale". deepseek_yarn
+     * passes an explicit value instead, because its mscale/mscale_all_dim
+     * pair decides how much of the correction rides on cos/sin versus the
+     * softmax scale -- and for LongCat (both terms 1) the RoPE share is
+     * exactly 1.0, so baking 1.4787 in here would double-count against the
+     * mscale_all_dim^2 already folded into the attention scale. */
+    float mscale = (attn_factor >= 0.0f) ? attn_factor
+                                         : (1.0f + 0.1f * logf(yarn_factor));
 
     /* Compute correction range.
      * corr_dim(n_dims, orig_ctx, n_rot, base) =

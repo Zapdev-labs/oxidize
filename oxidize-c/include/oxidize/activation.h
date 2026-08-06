@@ -67,6 +67,15 @@ void oc_apply_rope_f32(const float *in, float *out, size_t head_dim,
  * YaRN: scale = yarn_factor * (orig_ctx / position) when position > orig_ctx,
  * with a smooth interpolation between [orig_ctx * 0.8, orig_ctx * 1.2].
  * When yarn_factor == 0 or position <= yarn_orig_ctx, behaves as normal RoPE. */
+/* As oc_apply_rope_yarn_f32, but with an explicit cos/sin amplitude.
+ * `attn_factor` < 0 selects the standard YaRN mscale (1 + 0.1*ln(factor));
+ * deepseek_yarn models pass the value from oc_rope_deepseek_yarn_scales(),
+ * which is 1.0 whenever mscale == mscale_all_dim. */
+void oc_apply_rope_yarn_scaled_f32(const float *in, float *out, size_t head_dim,
+                                    size_t rope_len, int64_t position,
+                                    float theta, float yarn_factor,
+                                    uint32_t yarn_orig_ctx, float attn_factor);
+
 void oc_apply_rope_yarn_f32(const float *in, float *out, size_t head_dim,
                              size_t rope_len, int64_t position, float theta,
                              float yarn_factor, uint32_t yarn_orig_ctx);
