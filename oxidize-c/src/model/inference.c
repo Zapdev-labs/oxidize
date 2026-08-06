@@ -71,6 +71,8 @@ void oc_inference_config_init(OcInferenceConfig *cfg)
     cfg->nextn_predict_layers = 0;
     cfg->yarn_factor          = 0.0f;
     cfg->yarn_orig_ctx        = 0.0f;
+    cfg->yarn_mscale          = 0.0f;
+    cfg->yarn_mscale_all_dim  = 0.0f;
 }
 
 uint32_t oc_inference_config_head_dim(const OcInferenceConfig *cfg)

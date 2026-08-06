@@ -16,6 +16,9 @@
 #include <criterion/criterion.h>
 #include "oxidize/gguf_writer.h"
 #include "oxidize/llama.h"
+#include "oxidize/inf_model.h"
+#include "oxidize/weight_storage.h"
+#include "oxidize/quant.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -318,4 +321,116 @@ Test(longcat, ngram_tables_bind_with_per_table_row_counts)
 
     oc_llama_free(&m);
     remove(p);
+}
+
+/* ─── MLA V projection ───────────────────────────────────────────────────
+ *
+ * v_b is stored exactly like k_b: HF's kv_b_proj [n_heads*(nope+v), kv_lora]
+ * is split so head h contributes rows [h*(nope+v)+nope, h*(nope+v)+nope+v),
+ * leaving head h's V block as `v_head_dim` contiguous rows of `kv_lora`
+ * columns. That is head-major, which is what oc_gemv_weight_head expects.
+ *
+ * Two things used to be wrong here, and both silently produced garbage
+ * rather than an error:
+ *   - the GEMV was hand-rolled with a [kv_lora, v_dim, n_heads] index, which
+ *     is neither the file's layout nor self-consistent; and
+ *   - it read through oc_weight_storage_f32_data(), which returns NULL for
+ *     mmap-backed quantized storage. BF16 counts as quantized, so V was
+ *     identically zero for every real model.
+ */
+
+#define VB_HEADS   3u
+#define VB_VDIM    4u
+#define VB_LORA    8u
+
+/* Reference: head-major (head, v, l) -> ((head*v_dim) + v) * kv_lora + l. */
+static float vb_ref(size_t head, size_t v, size_t l)
+{
+    return (float)((head * VB_VDIM + v) * VB_LORA + l) * 0.03125f - 1.0f;
+}
+
+Test(longcat, mla_v_projection_is_head_major)
+{
+    size_t total = (size_t)VB_HEADS * VB_VDIM * VB_LORA;
+    float *w = malloc(total * sizeof(float));
+    cr_assert_not_null(w, "alloc");
+    for (size_t hd = 0; hd < VB_HEADS; hd++)
+        for (size_t v = 0; v < VB_VDIM; v++)
+            for (size_t l = 0; l < VB_LORA; l++)
+                w[(hd * VB_VDIM + v) * VB_LORA + l] = vb_ref(hd, v, l);
+
+    OcWeightStorage ws;
+    oc_weight_storage_init(&ws);
+    cr_assert_eq(oc_weight_storage_f32(&ws, w, total), OC_OK, "f32 storage");
+
+    float c_kv[VB_LORA];
+    for (size_t l = 0; l < VB_LORA; l++) c_kv[l] = (float)(l + 1) * 0.5f;
+
+    for (uint32_t hd = 0; hd < VB_HEADS; hd++) {
+        float out[VB_VDIM];
+        memset(out, 0, sizeof out);
+        OcError e = oc_gemv_weight_head(&ws, VB_VDIM, VB_LORA, hd, VB_HEADS,
+                                        c_kv, out);
+        cr_assert_eq(e, OC_OK, "gemv head %u", hd);
+        for (size_t v = 0; v < VB_VDIM; v++) {
+            float want = 0.0f;
+            for (size_t l = 0; l < VB_LORA; l++) want += vb_ref(hd, v, l) * c_kv[l];
+            cr_assert_float_eq(out[v], want, 1e-4f,
+                "head %u v %zu: got %.6f want %.6f", hd, v, out[v], want);
+        }
+    }
+    oc_weight_storage_free(&ws);
+}
+
+Test(longcat, mla_v_projection_nonzero_for_quantized_storage)
+{
+    /* The regression that made V vanish: quantized storage returned NULL
+     * from the f32 accessor and the projection was skipped, leaving the
+     * output buffer at its memset zero. Any real model hits this path,
+     * because BF16 is a quantized type here. */
+    size_t total = (size_t)VB_HEADS * VB_VDIM * VB_LORA;
+    float *ref = malloc(total * sizeof(float));
+    cr_assert_not_null(ref, "alloc");
+    for (size_t i = 0; i < total; i++) ref[i] = (float)((i % 11) + 1) * 0.125f;
+
+    /* Store the same values as BF16 (top 16 bits of the f32 pattern). */
+    uint8_t *bf16 = malloc(total * 2);
+    cr_assert_not_null(bf16, "alloc bf16");
+    for (size_t i = 0; i < total; i++) {
+        uint32_t bits;
+        memcpy(&bits, &ref[i], 4);
+        uint16_t hi = (uint16_t)(bits >> 16);
+        memcpy(bf16 + i * 2, &hi, 2);
+    }
+
+    OcWeightStorage ws;
+    oc_weight_storage_init(&ws);
+    cr_assert_eq(oc_weight_storage_quantized(&ws, OC_QUANT_BF16, bf16,
+                                             total * 2), OC_OK, "bf16 storage");
+
+    float c_kv[VB_LORA];
+    for (size_t l = 0; l < VB_LORA; l++) c_kv[l] = 1.0f;
+
+    bool any_nonzero = false;
+    for (uint32_t hd = 0; hd < VB_HEADS; hd++) {
+        float out[VB_VDIM];
+        memset(out, 0, sizeof out);
+        OcError e = oc_gemv_weight_head(&ws, VB_VDIM, VB_LORA, hd, VB_HEADS,
+                                        c_kv, out);
+        cr_assert_eq(e, OC_OK, "gemv head %u on quantized storage", hd);
+        for (size_t v = 0; v < VB_VDIM; v++) {
+            float want = 0.0f;
+            for (size_t l = 0; l < VB_LORA; l++)
+                want += ref[(hd * VB_VDIM + v) * VB_LORA + l];
+            /* BF16 keeps 8 mantissa bits, so allow ~1% per summed term. */
+            cr_assert_float_eq(out[v], want, 0.05f * (float)VB_LORA,
+                "head %u v %zu: got %.6f want %.6f", hd, v, out[v], want);
+            if (out[v] != 0.0f) any_nonzero = true;
+        }
+    }
+    cr_assert(any_nonzero,
+        "V projection must not be identically zero for quantized storage");
+
+    free(ref);
+    oc_weight_storage_free(&ws);
 }

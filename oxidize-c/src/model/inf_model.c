@@ -7,6 +7,7 @@
 
 #include "oxidize/activation.h"
 #include "oxidize/weight_ops.h"
+#include "oxidize/rope_scaling.h"
 
 OcError oc_inf_model_init(OcInferenceModel *m, const OcInferenceConfig *cfg)
 {
@@ -569,26 +570,24 @@ static OcError forward_mla_layer(OcInferenceModel *m, OcLayerWeights *layer,
         if (k_pe_rope && k_store)
             memcpy(k_store + rope_off, k_pe_rope, copy * sizeof(float));
 
-        /* V = mla_v_b[head] @ c_kv. */
+        /* V = mla_v_b[head] @ c_kv.
+         *
+         * v_b is laid out exactly like k_b: the converter splits HF's
+         * kv_b_proj [n_heads*(nope+v), kv_lora] by taking rows
+         * [h*256+128, h*256+256) for each head, so head h's block is
+         * `v_head_dim` contiguous rows of `kv_lora` columns — head-major,
+         * which is precisely what oc_gemv_weight_head expects.
+         *
+         * This used to hand-roll the GEMV with a [kv_lora, v_dim, n_heads]
+         * index AND read through oc_weight_storage_f32_data(), which returns
+         * NULL for OC_WEIGHT_MMAP_QUANTIZED. Since BF16 is a quantized type
+         * here, that made V identically zero for every real model, not just
+         * quantized ones — attention returned nothing but its own bias. */
         size_t v_off = (size_t)hd * v_head_dim;
         if (!oc_weight_storage_is_empty(&layer->mla_v_b) && v_store) {
-            /* V_b has a special layout: [kv_lora, v_dim, n_heads] with
-             * element (l, v, head) at index l * v_dim * n_heads + v * n_heads + head.
-             * For F32 we can compute directly. */
-            const float *v_data;
-            size_t v_len;
-            v_data = oc_weight_storage_f32_data(&layer->mla_v_b, &v_len);
-            if (v_data) {
-                for (size_t v = 0; v < v_head_dim; v++) {
-                    float sum = 0.0f;
-                    for (size_t l = 0; l < kv_lora; l++) {
-                        size_t idx = l * v_head_dim * n_heads + v * n_heads + hd;
-                        if (idx < v_len)
-                            sum += v_data[idx] * c_kv[l];
-                    }
-                    v_store[v_off + v] = sum;
-                }
-            }
+            e = oc_gemv_weight_head(&layer->mla_v_b, v_head_dim, kv_lora,
+                                     hd, n_heads, c_kv, v_store + v_off);
+            if (e != OC_OK) return e;
         }
 
         /* Apply RoPE to Q's pe portion. */
@@ -626,12 +625,31 @@ static OcError forward_mla_layer(OcInferenceModel *m, OcLayerWeights *layer,
     memset(attn_out, 0, total_k * sizeof(float));
     if (kv_idx >= 0 && k_store && v_padded) {
         uint32_t seq_len = oc_kv_cache_n_tokens(&m->kv_cache);
+        /* deepseek_yarn folds a get_mscale(factor, mscale_all_dim)^2 term
+         * into the attention scale. For LongCat (factor 120, both mscale
+         * terms 1) that is 1.4787^2 = 2.1867, so the plain 1/sqrt(192)
+         * would leave every logit 2.19x too small and flatten the softmax
+         * across all 76 sub-layers. Architectures without deepseek_yarn
+         * leave yarn_mscale_all_dim at 0 and get the usual 1/sqrt(d). */
         float scale = 1.0f / sqrtf((float)kv_head_dim);
+        if (cfg->yarn_factor > 1.0f && cfg->yarn_mscale_all_dim > 0.0f) {
+            oc_rope_deepseek_yarn_scales(cfg->yarn_factor, cfg->yarn_mscale,
+                                          cfg->yarn_mscale_all_dim,
+                                          (uint32_t)kv_head_dim,
+                                          NULL, &scale);
+        }
 
         for (uint32_t hd = 0; hd < n_heads; hd++) {
             size_t q_off = (size_t)hd * kv_head_dim;
             float *q_head = q_vec + q_off;
-            float *out_head = attn_out + q_off;
+            /* Q, K and the cached V are strided by kv_head_dim (nope + rope,
+             * 192 for LongCat), but the attention OUTPUT is only v_head_dim
+             * (128) wide per head and o_proj expects it densely packed.
+             * Writing it at the Q stride leaves 64 dead floats per head, so
+             * o_proj reads heads interleaved with padding and runs out of
+             * input 42 heads in — the last 22 heads never reach it. */
+            size_t v_off_out = (size_t)hd * v_head_dim;
+            float *out_head = attn_out + v_off_out;
 
             /* Compute attention scores. */
             float *scores = m->workspace.kv_keys_copy;  /* reuse scratch */
@@ -668,6 +686,9 @@ static OcError forward_mla_layer(OcInferenceModel *m, OcLayerWeights *layer,
                         const float *v_t = NULL;
                         oc_kv_cache_get(&m->kv_cache, (uint32_t)kv_idx, t, &k_t, &v_t);
                         if (!v_t) continue;
+                        /* The cache holds V re-strided to kv_head_dim by the
+                         * v_padded step above, so this reads at the Q stride
+                         * even though V is only v_head_dim wide. */
                         acc += scores[t] * v_t[q_off + i];
                     }
                     out_head[i] = acc;
