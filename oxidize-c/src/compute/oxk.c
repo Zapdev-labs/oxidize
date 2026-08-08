@@ -1,11 +1,15 @@
 /*
  * oxk.c — OXK (Oxidize Kernels) scalar reference implementations + dispatcher.
  *
- * All SIMD variants (AVX2/AVX-512) currently forward to these scalar
- * implementations for correctness. They can be optimized later.
+ * Scalar implementations are the reference every SIMD variant must match
+ * bit-for-bit. Most x86 variants still forward here; the ones that do not
+ * (the Q4_K and Q8_0 dots) are installed by the dispatcher below. Check a
+ * variant's body, not its name, before wiring it up — several _avx2 symbols
+ * are forwarding stubs.
  */
 #define _POSIX_C_SOURCE 200809L
 #include "oxidize/oxk.h"
+#include "oxidize/log.h"
 #include "oxidize/oxk_neon.h"
 #include "oxidize/simd.h"
 
@@ -427,14 +431,35 @@ static void oc_oxk_init_once(void)
     g_ctx.caps.has_neon = has_neon;
     g_ctx.caps.name     = name;
 
-    /* Dispatch table — x86 SIMD variants still forward to scalar; the
-     * AArch64 NEON dot products below are real implementations. */
+    /* Dispatch table. Scalar is the baseline every architecture falls back
+     * to; the SIMD variants below replace the entries they actually
+     * implement. Each is bit-exact against the scalar reference
+     * (test_oxk_avx2_parity.c, test_oxk_gguf_layout.c) — that is the hard
+     * invariant here, so installing them changes speed and nothing else. */
     g_ctx.dot_q4_0_q8_0 = oc_oxk_dot_q4_0_q8_0_scalar;
     g_ctx.dot_q4_1_q8_0 = oc_oxk_dot_q4_1_q8_0_scalar;
     g_ctx.dot_q4_k_q8_k = oc_oxk_dot_q4_k_q8_k_scalar;
     g_ctx.dot_q5_k_q8_k = oc_oxk_dot_q5_k_q8_k_scalar;
     g_ctx.dot_q6_k_q8_k = oc_oxk_dot_q6_k_q8_k_scalar;
     g_ctx.dot_q8_0_q8_0 = oc_oxk_dot_q8_0_q8_0_scalar;
+
+#if defined(__x86_64__) || defined(__i386__)
+    /* oxk_avx2.c carries real AVX2 implementations of the Q4_K and Q8_0
+     * dots, but nothing ever installed them: this table was written when
+     * every x86 variant forwarded to scalar and was not revisited when the
+     * kernels landed. The effect was that an AVX-512 host ran the SLOWEST
+     * kernel available for Q4_K — which is the dominant weight type for
+     * K-quant models, so the whole OXK fast path was silently off.
+     *
+     * Only these two are installed because only these two are implemented;
+     * q4_0 / q4_1 / q5_k / q6_k still have scalar-forwarding _avx2 symbols,
+     * and routing through them would add a call for no gain. Check the body
+     * before adding an entry here, not just the symbol name. */
+    if (level >= OC_OXK_AVX2) {
+        g_ctx.dot_q4_k_q8_k = oc_oxk_dot_q4_k_q8_k_avx2;
+        g_ctx.dot_q8_0_q8_0 = oc_oxk_dot_q8_0_q8_0_avx2;
+    }
+#endif
 
 #if defined(__aarch64__)
     if (level == OC_OXK_NEON) {
@@ -448,6 +473,11 @@ static void oc_oxk_init_once(void)
     /* Matvecs stay scalar on NEON too: their reference accumulates f32
      * per element, and vectorizing reassociates that sum (see oxk_neon.h). */
 #endif
+
+    oc_log(OC_LOG_DEBUG, "oxk: level=%s vnni=%d q4_k_dot=%s", name,
+           (int)has_vnni,
+           g_ctx.dot_q4_k_q8_k == oc_oxk_dot_q4_k_q8_k_scalar ? "scalar"
+                                                              : "simd");
 
     g_ctx.matvec_q4_0_f32 = oc_oxk_matvec_q4_0_f32_scalar;
     g_ctx.matvec_q4_k_f32 = oc_oxk_matvec_q4_k_f32_scalar;
