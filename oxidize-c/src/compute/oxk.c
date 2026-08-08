@@ -10,6 +10,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "oxidize/oxk.h"
 #include "oxidize/log.h"
+#include "oxidize/oxk_avx512.h"
 #include "oxidize/oxk_neon.h"
 #include "oxidize/simd.h"
 
@@ -279,6 +280,138 @@ void oc_oxk_q4_k_prep_row(const uint8_t *row, size_t blocks, void *scratch)
     }
 }
 
+/* Q5_K prep into the SAME layout as Q4_K: codes are the 5-bit values
+ * (0..31), which still fit an unsigned byte, and the scale/min decode is
+ * identical — so a prepared Q5_K row is consumed by the very same
+ * oc_oxk_dot_q4_k_prepped()/_multi() kernels, bit-exact against
+ * oc_oxk_dot_q5_k_q8_k_scalar(). */
+void oc_oxk_q5_k_prep_row(const uint8_t *row, size_t blocks, void *scratch)
+{
+    float *d, *dmin;
+    uint8_t *codes, *sc, *mn;
+    q4k_prep_ptrs(scratch, blocks, &d, &dmin, &codes, &sc, &mn);
+
+    for (size_t b = 0; b < blocks; b++) {
+        const uint8_t *wb = row + b * OC_OXK_BLOCK_Q5_K_SIZE;
+        d[b]    = oc_oxk_f16_le_to_f32(wb);
+        dmin[b] = oc_oxk_f16_le_to_f32(wb + 2);
+        const uint8_t *scales = wb + 4;
+        const uint8_t *qh     = wb + 16;
+        const uint8_t *qs     = wb + 48;
+
+        for (unsigned j = 0; j < OC_Q4K_SUBGROUPS; j++) {
+            oc_oxk_get_scale_min_k4(j, scales, &sc[b * OC_Q4K_SUBGROUPS + j],
+                                    &mn[b * OC_Q4K_SUBGROUPS + j]);
+        }
+
+        /* qh[l] carries one high bit per 64-element group: bit 2*gp for the
+         * low-nibble half, bit 2*gp+1 for the high-nibble half. */
+        uint8_t *c = codes + b * OC_OXK_QK_K;
+        for (unsigned gp = 0; gp < 4; gp++) {
+            const uint8_t *src = qs + gp * 32;
+            uint8_t *lo = c + gp * 64;
+            uint8_t *hi = lo + 32;
+            for (unsigned l = 0; l < 32; l++) {
+                lo[l] = (uint8_t)((src[l] & 0x0Fu) |
+                                  (((qh[l] >> (2 * gp)) & 1u) << 4));
+                hi[l] = (uint8_t)((src[l] >> 4) |
+                                  (((qh[l] >> (2 * gp + 1)) & 1u) << 4));
+            }
+        }
+    }
+}
+
+/* ─── Prepared Q6_K rows ────────────────────────────────────────────────
+ *
+ * Layout (floats first, so float alignment suffices):
+ *   float  d[blocks]          per-block weight scale
+ *   uint8  codes[blocks*256]  6-bit values 0..63, in element order
+ *   int8   sc[blocks*16]      signed scale per 16-element group
+ *
+ * The -32 value offset is not applied to the codes (they stay unsigned for
+ * VNNI); the dot folds it out through the activation's block sums exactly
+ * like the packed kernels do. */
+size_t oc_oxk_q6_k_prep_bytes(size_t blocks)
+{
+    return blocks * (sizeof(float) + OC_OXK_QK_K + 16u);
+}
+
+static void q6k_prep_ptrs(void *scratch, size_t blocks, float **d,
+                          uint8_t **codes, int8_t **sc)
+{
+    float *f = (float *)scratch;
+    *d     = f;
+    *codes = (uint8_t *)(f + blocks);
+    *sc    = (int8_t *)(*codes + blocks * OC_OXK_QK_K);
+}
+
+void oc_oxk_q6_k_prep_row(const uint8_t *row, size_t blocks, void *scratch)
+{
+    float *d;
+    uint8_t *codes;
+    int8_t *sc;
+    q6k_prep_ptrs(scratch, blocks, &d, &codes, &sc);
+
+    for (size_t b = 0; b < blocks; b++) {
+        const uint8_t *wb = row + b * OC_OXK_BLOCK_Q6_K_SIZE;
+        const uint8_t *ql = wb;
+        const uint8_t *qh = wb + 128;
+        memcpy(sc + b * 16, wb + 192, 16);
+        d[b] = oc_oxk_f16_le_to_f32(wb + 208);
+
+        uint8_t *c = codes + b * OC_OXK_QK_K;
+        for (int n = 0; n < 2; n++) {
+            const uint8_t *ql_chunk = ql + n * 64;
+            const uint8_t *qh_chunk = qh + n * 32;
+            uint8_t *base = c + n * 128;
+            for (int l = 0; l < 32; l++) {
+                base[l]      = (uint8_t)((ql_chunk[l] & 0x0F) |
+                                         (((qh_chunk[l] >> 0) & 3) << 4));
+                base[l + 32] = (uint8_t)((ql_chunk[l + 32] & 0x0F) |
+                                         (((qh_chunk[l] >> 2) & 3) << 4));
+                base[l + 64] = (uint8_t)((ql_chunk[l] >> 4) |
+                                         (((qh_chunk[l] >> 4) & 3) << 4));
+                base[l + 96] = (uint8_t)((ql_chunk[l + 32] >> 4) |
+                                         (((qh_chunk[l] >> 6) & 3) << 4));
+            }
+        }
+    }
+}
+
+float oc_oxk_dot_q6_k_prepped(const void *scratch, size_t blocks,
+                              const uint8_t *q8)
+{
+    float *d;
+    uint8_t *codes;
+    int8_t *sc;
+    q6k_prep_ptrs((void *)(uintptr_t)scratch, blocks, &d, &codes, &sc);
+
+    float sum = 0.0f;
+    for (size_t b = 0; b < blocks; b++) {
+        const uint8_t *qb = q8 + b * OC_OXK_BLOCK_Q8_K_SIZE;
+        float dq;
+        memcpy(&dq, qb, 4);
+        const int8_t  *q8v   = (const int8_t *)(qb + 4);
+        const uint8_t *bsums = qb + 4 + OC_OXK_QK_K;
+        const uint8_t *c     = codes + b * OC_OXK_QK_K;
+        const int8_t  *scb   = sc + b * 16;
+
+        int32_t pos = 0, minc = 0;
+        for (unsigned g = 0; g < 16; g++) {
+            const uint8_t *cg = c + g * 16;
+            const int8_t  *qg = q8v + g * 16;
+            int32_t s = 0;
+            for (unsigned l = 0; l < 16; l++)
+                s += (int32_t)cg[l] * (int32_t)qg[l];
+            pos  += (int32_t)scb[g] * s;
+            minc += (int32_t)scb[g] *
+                    (int32_t)oc_oxk_read_q8_k_bsum(bsums, g);
+        }
+        sum += d[b] * dq * (float)(pos - 32 * minc);
+    }
+    return sum;
+}
+
 float oc_oxk_dot_q4_k_prepped(const void *scratch, size_t blocks,
                               const uint8_t *q8)
 {
@@ -319,6 +452,28 @@ float oc_oxk_dot_q4_k_prepped(const void *scratch, size_t blocks,
     return sum;
 }
 
+static void dot_q4_k_prepped_multi_scalar(const void *scratch, size_t blocks,
+                                          const uint8_t *acts,
+                                          size_t act_stride, size_t n_act,
+                                          float *out)
+{
+    for (size_t v = 0; v < n_act; v++) {
+        out[v] = oc_oxk_dot_q4_k_prepped(scratch, blocks,
+                                         acts + v * act_stride);
+    }
+}
+
+static void dot_q6_k_prepped_multi_scalar(const void *scratch, size_t blocks,
+                                          const uint8_t *acts,
+                                          size_t act_stride, size_t n_act,
+                                          float *out)
+{
+    for (size_t v = 0; v < n_act; v++) {
+        out[v] = oc_oxk_dot_q6_k_prepped(scratch, blocks,
+                                         acts + v * act_stride);
+    }
+}
+
 float oc_oxk_dot_q5_k_q8_k_scalar(const uint8_t *row, size_t blocks,
                                    const uint8_t *q8)
 {
@@ -347,8 +502,12 @@ float oc_oxk_dot_q5_k_q8_k_scalar(const uint8_t *row, size_t blocks,
             int32_t sum1 = 0, sum2 = 0;
             for (int l = 0; l < 32; l++) {
                 uint8_t byte = qs[gp * 32 + l];
-                int lo = (byte & 0x0F) + (((qh[(gp * 64 + l) / 8] >> ((gp * 64 + l) % 8)) & 1) << 4);
-                int hi = (byte >> 4)   + (((qh[(gp * 64 + 32 + l) / 8] >> ((gp * 64 + 32 + l) % 8)) & 1) << 4);
+                /* qh[l] carries one high bit per 64-element group: bit 2*gp
+                 * for the low-nibble half, bit 2*gp+1 for the high-nibble
+                 * half (the u1/u2 stepping masks in dequant_q5_k). A flat
+                 * 256-bit indexing here is what kept this kernel off. */
+                int lo = (byte & 0x0F) + (((qh[l] >> (2 * gp))     & 1) << 4);
+                int hi = (byte >> 4)   + (((qh[l] >> (2 * gp + 1)) & 1) << 4);
                 sum1 += lo * (int)q8v[gp * 64 + l];
                 sum2 += hi * (int)q8v[gp * 64 + 32 + l];
             }
@@ -395,31 +554,39 @@ float oc_oxk_dot_q6_k_q8_k_scalar(const uint8_t *row, size_t blocks,
         float dq;
         memcpy(&dq, qb, 4);
         const int8_t  *q8v   = (const int8_t *)(qb + 4);
-        /* bsums not needed for Q6_K dot (we compute per-element). */
+        const uint8_t *bsums = qb + 4 + 256;
 
+        /* Integer accumulation per 16-element scale group, one float
+         * multiply per block. Restructured from per-product float
+         * accumulation so the SIMD kernels can be bit-exact against this
+         * reference (the same restructure Q4_K got): all sub-group products
+         * stay in int32, where reassociation is exact. The -32 value offset
+         * is folded out through the activation's stored block sums:
+         * sum(sc*(q-32)*a) = sum(sc*q*a) - 32*sum(sc*bsum). */
+        int32_t grp[16] = {0};
         for (int n = 0; n < 2; n++) {
             const uint8_t *ql_chunk = ql + n * 64;
             const uint8_t *qh_chunk = qh + n * 32;
-            const int8_t  *sc_chunk = sc + n * 8;
             for (int l = 0; l < 32; l++) {
-                int is = l / 16;
-                int q1 = ((ql_chunk[l] & 0x0F) | (((qh_chunk[l] >> 0) & 3) << 4)) - 32;
-                int q2 = ((ql_chunk[l + 32] & 0x0F) | (((qh_chunk[l] >> 2) & 3) << 4)) - 32;
-                int q3 = ((ql_chunk[l] >> 4) | (((qh_chunk[l] >> 4) & 3) << 4)) - 32;
-                int q4 = ((ql_chunk[l + 32] >> 4) | (((qh_chunk[l] >> 6) & 3) << 4)) - 32;
+                int q1 = (ql_chunk[l] & 0x0F) | (((qh_chunk[l] >> 0) & 3) << 4);
+                int q2 = (ql_chunk[l + 32] & 0x0F) | (((qh_chunk[l] >> 2) & 3) << 4);
+                int q3 = (ql_chunk[l] >> 4) | (((qh_chunk[l] >> 4) & 3) << 4);
+                int q4 = (ql_chunk[l + 32] >> 4) | (((qh_chunk[l] >> 6) & 3) << 4);
 
                 int base = n * 128 + l;
-                int g1 = base;
-                int g2 = base + 32;
-                int g3 = base + 64;
-                int g4 = base + 96;
-
-                sum += dw * dq * (float)sc_chunk[is + 0] * (float)(q1 * (int)q8v[g1]);
-                sum += dw * dq * (float)sc_chunk[is + 2] * (float)(q2 * (int)q8v[g2]);
-                sum += dw * dq * (float)sc_chunk[is + 4] * (float)(q3 * (int)q8v[g3]);
-                sum += dw * dq * (float)sc_chunk[is + 6] * (float)(q4 * (int)q8v[g4]);
+                grp[base / 16]        += q1 * (int)q8v[base];
+                grp[(base + 32) / 16] += q2 * (int)q8v[base + 32];
+                grp[(base + 64) / 16] += q3 * (int)q8v[base + 64];
+                grp[(base + 96) / 16] += q4 * (int)q8v[base + 96];
             }
         }
+        int32_t pos = 0, minc = 0;
+        for (int g = 0; g < 16; g++) {
+            pos  += (int32_t)sc[g] * grp[g];
+            minc += (int32_t)sc[g] *
+                    (int32_t)oc_oxk_read_q8_k_bsum(bsums, (size_t)g);
+        }
+        sum += dw * dq * (float)(pos - 32 * minc);
     }
     return sum;
 }
@@ -551,6 +718,8 @@ static void oc_oxk_init_once(void)
     g_ctx.dot_q5_k_q8_k = oc_oxk_dot_q5_k_q8_k_scalar;
     g_ctx.dot_q6_k_q8_k = oc_oxk_dot_q6_k_q8_k_scalar;
     g_ctx.dot_q8_0_q8_0 = oc_oxk_dot_q8_0_q8_0_scalar;
+    g_ctx.dot_q4_k_prepped_multi = dot_q4_k_prepped_multi_scalar;
+    g_ctx.dot_q6_k_prepped_multi = dot_q6_k_prepped_multi_scalar;
 
 #if defined(__x86_64__) || defined(__i386__)
     /* oxk_avx2.c carries real AVX2 implementations of the Q4_K and Q8_0
@@ -567,6 +736,14 @@ static void oc_oxk_init_once(void)
     if (level >= OC_OXK_AVX2) {
         g_ctx.dot_q4_k_q8_k = oc_oxk_dot_q4_k_q8_k_avx2;
         g_ctx.dot_q8_0_q8_0 = oc_oxk_dot_q8_0_q8_0_avx2;
+    }
+    /* The VNNI kernels use _mm*_dpbusd_epi32, so AVX-512 alone is not
+     * enough — Skylake-SP has AVX-512F/BW but no VNNI. */
+    if (level >= OC_OXK_AVX512 && has_vnni) {
+        g_ctx.dot_q5_k_q8_k = oc_oxk_dot_q5_k_q8_k_avx512vnni;
+        g_ctx.dot_q6_k_q8_k = oc_oxk_dot_q6_k_q8_k_avx512vnni;
+        g_ctx.dot_q4_k_prepped_multi = oc_oxk_dot_q4_k_prepped_multi_avx512;
+        g_ctx.dot_q6_k_prepped_multi = oc_oxk_dot_q6_k_prepped_multi_avx512;
     }
 #endif
 
@@ -624,6 +801,18 @@ float oc_oxk_dot_q6_k_q8_k(const uint8_t *row, size_t blocks, const uint8_t *q8)
 
 float oc_oxk_dot_q8_0_q8_0(const uint8_t *row, size_t blocks, const uint8_t *q8)
 { oc_oxk_init(); return g_ctx.dot_q8_0_q8_0(row, blocks, q8); }
+
+void oc_oxk_dot_q4_k_prepped_multi(const void *scratch, size_t blocks,
+                                   const uint8_t *acts, size_t act_stride,
+                                   size_t n_act, float *out)
+{ oc_oxk_init(); g_ctx.dot_q4_k_prepped_multi(scratch, blocks, acts,
+                                              act_stride, n_act, out); }
+
+void oc_oxk_dot_q6_k_prepped_multi(const void *scratch, size_t blocks,
+                                   const uint8_t *acts, size_t act_stride,
+                                   size_t n_act, float *out)
+{ oc_oxk_init(); g_ctx.dot_q6_k_prepped_multi(scratch, blocks, acts,
+                                              act_stride, n_act, out); }
 
 void oc_oxk_matvec_q4_0_f32(const uint8_t *w, size_t n_rows, size_t row_bytes, const float *x, float *out)
 { oc_oxk_init(); g_ctx.matvec_q4_0_f32(w, n_rows, row_bytes, x, out); }

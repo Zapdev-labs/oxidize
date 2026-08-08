@@ -19,7 +19,7 @@
 
 /* ─── Helper: horizontal sum of __m512i (16 int32 lanes) ──────────────── */
 
-__attribute__((target("avx512bw,avx512dq,avx512vnni")))
+__attribute__((target("avx512bw,avx512dq,avx512vl,avx512vnni")))
 static inline int32_t mm512_hsum_epi32(__m512i v)
 {
     return _mm512_reduce_add_epi32(v);
@@ -32,7 +32,7 @@ static inline int32_t mm512_hsum_epi32(__m512i v)
  *   w_s8 * q_s8 = w_pos * q - w_neg * q
  * where w_pos = max(0, w) and w_neg = max(0, -w), both as uint8.
  */
-__attribute__((target("avx512bw,avx512dq,avx512vnni")))
+__attribute__((target("avx512bw,avx512dq,avx512vl,avx512vnni")))
 static inline int32_t vnni_dot_s8x32(const int8_t *w, const int8_t *q)
 {
     __m256i w_raw = _mm256_loadu_si256((const __m256i *)w);
@@ -54,7 +54,7 @@ static inline int32_t vnni_dot_s8x32(const int8_t *w, const int8_t *q)
 
 /* ─── Q8_0 × Q8_0 VNNI ────────────────────────────────────────────────── */
 
-__attribute__((target("avx512bw,avx512dq,avx512vnni")))
+__attribute__((target("avx512bw,avx512dq,avx512vl,avx512vnni")))
 float oc_oxk_dot_q8_0_q8_0_avx512_vnni(const uint8_t *row, size_t blocks,
                                         const uint8_t *q8)
 {
@@ -93,7 +93,7 @@ float oc_oxk_dot_q8_0_q8_0_avx512_vnni(const uint8_t *row, size_t blocks,
 
 /* ─── Q4_0 × Q8_0 BW (forward to scalar for correctness) ─────────────── */
 
-__attribute__((target("avx512bw,avx512dq,avx512vnni")))
+__attribute__((target("avx512bw,avx512dq,avx512vl,avx512vnni")))
 float oc_oxk_dot_q4_0_q8_0_avx512_bw(const uint8_t *row, size_t blocks,
                                       const uint8_t *q8)
 {
@@ -102,7 +102,7 @@ float oc_oxk_dot_q4_0_q8_0_avx512_bw(const uint8_t *row, size_t blocks,
 
 /* ─── Q4_1 × Q8_0 BW (forward to scalar) ──────────────────────────────── */
 
-__attribute__((target("avx512bw,avx512dq,avx512vnni")))
+__attribute__((target("avx512bw,avx512dq,avx512vl,avx512vnni")))
 float oc_oxk_dot_q4_1_q8_0_avx512_bw(const uint8_t *row, size_t blocks,
                                       const uint8_t *q8)
 {
@@ -111,7 +111,7 @@ float oc_oxk_dot_q4_1_q8_0_avx512_bw(const uint8_t *row, size_t blocks,
 
 /* ─── Matvec variants (forward to scalar for now) ─────────────────────── */
 
-__attribute__((target("avx512bw,avx512dq,avx512vnni")))
+__attribute__((target("avx512bw,avx512dq,avx512vl,avx512vnni")))
 void oc_oxk_matvec_q8_0_f32_avx512_vnni(const uint8_t *w, size_t n_rows,
                                         size_t row_bytes, const float *x,
                                         float *out)
@@ -119,12 +119,370 @@ void oc_oxk_matvec_q8_0_f32_avx512_vnni(const uint8_t *w, size_t n_rows,
     oc_oxk_matvec_q8_0_f32_scalar(w, n_rows, row_bytes, x, out);
 }
 
-__attribute__((target("avx512bw,avx512dq,avx512vnni")))
+__attribute__((target("avx512bw,avx512dq,avx512vl,avx512vnni")))
 void oc_oxk_matvec_q4_0_f32_avx512_bw(const uint8_t *w, size_t n_rows,
                                       size_t row_bytes, const float *x,
                                       float *out)
 {
     oc_oxk_matvec_q4_0_f32_scalar(w, n_rows, row_bytes, x, out);
+}
+
+/* ─── VNNI prepared-Q4_K multi-activation dot ─────────────────────────────
+ *
+ * Pointer math must mirror oxk.c::q4k_prep_ptrs exactly; the layout is part
+ * of oc_oxk_q4_k_prep_row()'s contract and test_oxk_gguf_layout.c catches
+ * drift. */
+__attribute__((target("avx512bw,avx512dq,avx512vl,avx512vnni")))
+void oc_oxk_dot_q4_k_prepped_multi_avx512(const void *prep, size_t blocks,
+                                          const uint8_t *acts,
+                                          size_t act_stride, size_t n_act,
+                                          float *out)
+{
+    const float   *d     = (const float *)prep;
+    const float   *dmin  = d + blocks;
+    const uint8_t *codes = (const uint8_t *)(d + 2 * blocks);
+    const uint8_t *sc    = codes + blocks * 256;
+    const uint8_t *mn    = sc + blocks * 8;
+
+    /* Lane j of chunk gp holds sub-group 2gp (lanes 0-7) / 2gp+1 (8-15). */
+    const __m512i idx0 = _mm512_set_epi32(1,1,1,1,1,1,1,1, 0,0,0,0,0,0,0,0);
+    const __m512i idx1 = _mm512_set_epi32(3,3,3,3,3,3,3,3, 2,2,2,2,2,2,2,2);
+    const __m512i idx2 = _mm512_set_epi32(5,5,5,5,5,5,5,5, 4,4,4,4,4,4,4,4);
+    const __m512i idx3 = _mm512_set_epi32(7,7,7,7,7,7,7,7, 6,6,6,6,6,6,6,6);
+
+    size_t a0 = 0;
+    for (; a0 + 4 <= n_act; a0 += 4) {
+        const uint8_t *act0 = acts + (a0 + 0) * act_stride;
+        const uint8_t *act1 = acts + (a0 + 1) * act_stride;
+        const uint8_t *act2 = acts + (a0 + 2) * act_stride;
+        const uint8_t *act3 = acts + (a0 + 3) * act_stride;
+        float s0 = 0.0f, s1 = 0.0f, s2 = 0.0f, s3 = 0.0f;
+
+        for (size_t b = 0; b < blocks; b++) {
+            const uint8_t *cb  = codes + b * 256;
+            const uint8_t *scb = sc + b * 8;
+            const uint8_t *mnb = mn + b * 8;
+
+            /* 16-byte load spans this block's sc and the mn array head /
+             * next block's sc — always inside the prep scratch. Only the
+             * low 8 bytes are used. */
+            __m512i scz = _mm512_cvtepu8_epi32(
+                _mm_loadu_si128((const __m128i *)scb));
+
+            __m512i acc0 = _mm512_setzero_si512();
+            __m512i acc1 = _mm512_setzero_si512();
+            __m512i acc2 = _mm512_setzero_si512();
+            __m512i acc3 = _mm512_setzero_si512();
+            const __m512i idx[4] = { idx0, idx1, idx2, idx3 };
+            for (int gp = 0; gp < 4; gp++) {
+                const __m512i cz = _mm512_loadu_si512(
+                    (const void *)(cb + (size_t)gp * 64));
+                const __m512i scv = _mm512_permutexvar_epi32(idx[gp], scz);
+                const size_t qoff = b * OC_OXK_BLOCK_Q8_K_SIZE + 4 +
+                                    (size_t)gp * 64;
+                __m512i p;
+                p = _mm512_dpbusd_epi32(_mm512_setzero_si512(), cz,
+                        _mm512_loadu_si512((const void *)(act0 + qoff)));
+                acc0 = _mm512_add_epi32(acc0, _mm512_mullo_epi32(p, scv));
+                p = _mm512_dpbusd_epi32(_mm512_setzero_si512(), cz,
+                        _mm512_loadu_si512((const void *)(act1 + qoff)));
+                acc1 = _mm512_add_epi32(acc1, _mm512_mullo_epi32(p, scv));
+                p = _mm512_dpbusd_epi32(_mm512_setzero_si512(), cz,
+                        _mm512_loadu_si512((const void *)(act2 + qoff)));
+                acc2 = _mm512_add_epi32(acc2, _mm512_mullo_epi32(p, scv));
+                p = _mm512_dpbusd_epi32(_mm512_setzero_si512(), cz,
+                        _mm512_loadu_si512((const void *)(act3 + qoff)));
+                acc3 = _mm512_add_epi32(acc3, _mm512_mullo_epi32(p, scv));
+            }
+
+            const uint8_t *qb[4] = {
+                act0 + b * OC_OXK_BLOCK_Q8_K_SIZE,
+                act1 + b * OC_OXK_BLOCK_Q8_K_SIZE,
+                act2 + b * OC_OXK_BLOCK_Q8_K_SIZE,
+                act3 + b * OC_OXK_BLOCK_Q8_K_SIZE,
+            };
+            int32_t pos[4] = {
+                _mm512_reduce_add_epi32(acc0), _mm512_reduce_add_epi32(acc1),
+                _mm512_reduce_add_epi32(acc2), _mm512_reduce_add_epi32(acc3),
+            };
+            float *sums[4] = { &s0, &s1, &s2, &s3 };
+            for (int a = 0; a < 4; a++) {
+                const uint8_t *bsums = qb[a] + 4 + OC_OXK_QK_K;
+                int32_t min_acc = 0;
+                for (unsigned j = 0; j < 8; j++) {
+                    min_acc += (int32_t)mnb[j] *
+                        ((int32_t)oc_oxk_read_q8_k_bsum(bsums, j * 2) +
+                         (int32_t)oc_oxk_read_q8_k_bsum(bsums, j * 2 + 1));
+                }
+                float dq;
+                memcpy(&dq, qb[a], 4);
+                *sums[a] += d[b] * dq * (float)pos[a]
+                          - dmin[b] * dq * (float)min_acc;
+            }
+        }
+        out[a0 + 0] = s0; out[a0 + 1] = s1;
+        out[a0 + 2] = s2; out[a0 + 3] = s3;
+    }
+    for (; a0 < n_act; a0++) {
+        out[a0] = oc_oxk_dot_q4_k_prepped(prep, blocks,
+                                          acts + a0 * act_stride);
+    }
+}
+
+/* ─── VNNI prepared-Q6_K multi-activation dot ─────────────────────────────
+ *
+ * Layout must mirror oxk.c::q6k_prep_ptrs. Each 64-code chunk covers four
+ * 16-element scale groups: dpbusd lane i sums elements 4i..4i+3, so lanes
+ * 0-3 belong to group 4gp, 4-7 to 4gp+1, 8-11 to 4gp+2, 12-15 to 4gp+3. */
+__attribute__((target("avx512bw,avx512dq,avx512vl,avx512vnni")))
+void oc_oxk_dot_q6_k_prepped_multi_avx512(const void *prep, size_t blocks,
+                                          const uint8_t *acts,
+                                          size_t act_stride, size_t n_act,
+                                          float *out)
+{
+    const float   *d     = (const float *)prep;
+    const uint8_t *codes = (const uint8_t *)(d + blocks);
+    const int8_t  *sc    = (const int8_t *)(codes + blocks * 256);
+
+    const __m512i idx0 = _mm512_set_epi32(3,3,3,3, 2,2,2,2, 1,1,1,1, 0,0,0,0);
+    const __m512i idx1 = _mm512_set_epi32(7,7,7,7, 6,6,6,6, 5,5,5,5, 4,4,4,4);
+    const __m512i idx2 = _mm512_set_epi32(11,11,11,11, 10,10,10,10,
+                                          9,9,9,9, 8,8,8,8);
+    const __m512i idx3 = _mm512_set_epi32(15,15,15,15, 14,14,14,14,
+                                          13,13,13,13, 12,12,12,12);
+
+    size_t a0 = 0;
+    for (; a0 + 4 <= n_act; a0 += 4) {
+        const uint8_t *act[4] = {
+            acts + (a0 + 0) * act_stride, acts + (a0 + 1) * act_stride,
+            acts + (a0 + 2) * act_stride, acts + (a0 + 3) * act_stride,
+        };
+        float sums[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+
+        for (size_t b = 0; b < blocks; b++) {
+            const uint8_t *cb  = codes + b * 256;
+            const int8_t  *scb = sc + b * 16;
+            /* Signed 8 → 32 widen of all 16 group scales. */
+            const __m512i scz = _mm512_cvtepi8_epi32(
+                _mm_loadu_si128((const __m128i *)scb));
+
+            __m512i acc0 = _mm512_setzero_si512();
+            __m512i acc1 = _mm512_setzero_si512();
+            __m512i acc2 = _mm512_setzero_si512();
+            __m512i acc3 = _mm512_setzero_si512();
+            const __m512i idx[4] = { idx0, idx1, idx2, idx3 };
+            for (int gp = 0; gp < 4; gp++) {
+                const __m512i cz = _mm512_loadu_si512(
+                    (const void *)(cb + (size_t)gp * 64));
+                const __m512i scv = _mm512_permutexvar_epi32(idx[gp], scz);
+                const size_t qoff = b * OC_OXK_BLOCK_Q8_K_SIZE + 4 +
+                                    (size_t)gp * 64;
+                __m512i p;
+                p = _mm512_dpbusd_epi32(_mm512_setzero_si512(), cz,
+                        _mm512_loadu_si512((const void *)(act[0] + qoff)));
+                acc0 = _mm512_add_epi32(acc0, _mm512_mullo_epi32(p, scv));
+                p = _mm512_dpbusd_epi32(_mm512_setzero_si512(), cz,
+                        _mm512_loadu_si512((const void *)(act[1] + qoff)));
+                acc1 = _mm512_add_epi32(acc1, _mm512_mullo_epi32(p, scv));
+                p = _mm512_dpbusd_epi32(_mm512_setzero_si512(), cz,
+                        _mm512_loadu_si512((const void *)(act[2] + qoff)));
+                acc2 = _mm512_add_epi32(acc2, _mm512_mullo_epi32(p, scv));
+                p = _mm512_dpbusd_epi32(_mm512_setzero_si512(), cz,
+                        _mm512_loadu_si512((const void *)(act[3] + qoff)));
+                acc3 = _mm512_add_epi32(acc3, _mm512_mullo_epi32(p, scv));
+            }
+
+            const int32_t pos[4] = {
+                _mm512_reduce_add_epi32(acc0), _mm512_reduce_add_epi32(acc1),
+                _mm512_reduce_add_epi32(acc2), _mm512_reduce_add_epi32(acc3),
+            };
+            for (int a = 0; a < 4; a++) {
+                const uint8_t *qb = act[a] + b * OC_OXK_BLOCK_Q8_K_SIZE;
+                const uint8_t *bsums = qb + 4 + OC_OXK_QK_K;
+                int32_t minc = 0;
+                for (unsigned g = 0; g < 16; g++) {
+                    minc += (int32_t)scb[g] *
+                            (int32_t)oc_oxk_read_q8_k_bsum(bsums, g);
+                }
+                float dq;
+                memcpy(&dq, qb, 4);
+                sums[a] += d[b] * dq * (float)(pos[a] - 32 * minc);
+            }
+        }
+        out[a0 + 0] = sums[0]; out[a0 + 1] = sums[1];
+        out[a0 + 2] = sums[2]; out[a0 + 3] = sums[3];
+    }
+    for (; a0 < n_act; a0++) {
+        out[a0] = oc_oxk_dot_q6_k_prepped(prep, blocks,
+                                          acts + a0 * act_stride);
+    }
+}
+
+/* ─── VNNI Q6_K × Q8_K dot ──────────────────────────────────────────────── */
+
+__attribute__((target("avx512bw,avx512dq,avx512vl,avx512vnni")))
+static inline int32_t hsum_i32_8_avx512(__m256i v)
+{
+    __m128i lo = _mm256_castsi256_si128(v);
+    __m128i hi = _mm256_extracti128_si256(v, 1);
+    __m128i s  = _mm_add_epi32(lo, hi);
+    s = _mm_add_epi32(s, _mm_shuffle_epi32(s, _MM_SHUFFLE(1, 0, 3, 2)));
+    s = _mm_add_epi32(s, _mm_shuffle_epi32(s, _MM_SHUFFLE(2, 3, 0, 1)));
+    return _mm_cvtsi128_si32(s);
+}
+
+__attribute__((target("avx512bw,avx512dq,avx512vl,avx512vnni")))
+float oc_oxk_dot_q6_k_q8_k_avx512vnni(const uint8_t *row, size_t blocks,
+                                      const uint8_t *q8)
+{
+    const __m256i lownib = _mm256_set1_epi8(0x0F);
+    const __m256i two    = _mm256_set1_epi8(0x03);
+    float sum = 0.0f;
+
+    for (size_t b = 0; b < blocks; b++) {
+        const uint8_t *wb = row + b * OC_OXK_BLOCK_Q6_K_SIZE;
+        const uint8_t *qb = q8  + b * OC_OXK_BLOCK_Q8_K_SIZE;
+        const uint8_t *ql = wb;
+        const uint8_t *qh = wb + 128;
+        const int8_t  *sc = (const int8_t *)(wb + 192);
+        const float dw = oc_oxk_f16_le_to_f32(wb + 208);
+        float dq;
+        memcpy(&dq, qb, 4);
+        const int8_t  *q8v   = (const int8_t *)(qb + 4);
+        const uint8_t *bsums = qb + 4 + 256;
+
+        /* -32 offset folded out through the activation's block sums:
+         * sum(sc*(q-32)*a) = sum(sc*q*a) - 32*sum(sc*bsum). Integers, so
+         * this matches the scalar reference exactly. */
+        int32_t minc = 0;
+        for (unsigned g = 0; g < 16; g++) {
+            minc += (int32_t)sc[g] *
+                    (int32_t)oc_oxk_read_q8_k_bsum(bsums, g);
+        }
+
+        __m256i acc = _mm256_setzero_si256();
+        for (int n = 0; n < 2; n++) {
+            const __m256i ql0 = _mm256_loadu_si256(
+                (const __m256i *)(ql + n * 64));
+            const __m256i ql1 = _mm256_loadu_si256(
+                (const __m256i *)(ql + n * 64 + 32));
+            const __m256i qhv = _mm256_loadu_si256(
+                (const __m256i *)(qh + n * 32));
+
+            /* q1..q4 as unsigned 0..63, exactly the scalar unpack minus
+             * the -32. */
+            const __m256i q1 = _mm256_or_si256(
+                _mm256_and_si256(ql0, lownib),
+                _mm256_slli_epi16(_mm256_and_si256(qhv, two), 4));
+            const __m256i q2 = _mm256_or_si256(
+                _mm256_and_si256(ql1, lownib),
+                _mm256_slli_epi16(
+                    _mm256_and_si256(_mm256_srli_epi16(qhv, 2), two), 4));
+            const __m256i q3 = _mm256_or_si256(
+                _mm256_and_si256(_mm256_srli_epi16(ql0, 4), lownib),
+                _mm256_slli_epi16(
+                    _mm256_and_si256(_mm256_srli_epi16(qhv, 4), two), 4));
+            const __m256i q4 = _mm256_or_si256(
+                _mm256_and_si256(_mm256_srli_epi16(ql1, 4), lownib),
+                _mm256_slli_epi16(
+                    _mm256_and_si256(_mm256_srli_epi16(qhv, 6), two), 4));
+
+            const __m256i qv[4] = { q1, q2, q3, q4 };
+            for (int k = 0; k < 4; k++) {
+                const int base = n * 128 + k * 32;
+                const __m256i a = _mm256_loadu_si256(
+                    (const __m256i *)(q8v + base));
+                const __m256i p = _mm256_dpbusd_epi32(
+                    _mm256_setzero_si256(), qv[k], a);
+                /* dpbusd lane i covers elements 4i..4i+3: lanes 0-3 are the
+                 * first 16 elements (scale group base/16), lanes 4-7 the
+                 * next. */
+                const int g0 = base / 16;
+                const __m256i scv = _mm256_set_m128i(
+                    _mm_set1_epi32((int32_t)sc[g0 + 1]),
+                    _mm_set1_epi32((int32_t)sc[g0]));
+                acc = _mm256_add_epi32(acc, _mm256_mullo_epi32(p, scv));
+            }
+        }
+        const int32_t pos = hsum_i32_8_avx512(acc);
+        sum += dw * dq * (float)(pos - 32 * minc);
+    }
+    return sum;
+}
+
+/* ─── VNNI Q5_K × Q8_K dot ──────────────────────────────────────────────── */
+
+__attribute__((target("avx512bw,avx512dq,avx512vl,avx512vnni")))
+float oc_oxk_dot_q5_k_q8_k_avx512vnni(const uint8_t *row, size_t blocks,
+                                      const uint8_t *q8)
+{
+    const __m256i lownib = _mm256_set1_epi8(0x0F);
+    float sum = 0.0f;
+
+    for (size_t b = 0; b < blocks; b++) {
+        const uint8_t *wb = row + b * OC_OXK_BLOCK_Q5_K_SIZE;
+        const uint8_t *qb = q8  + b * OC_OXK_BLOCK_Q8_K_SIZE;
+        const float dw   = oc_oxk_f16_le_to_f32(wb);
+        const float dmin = oc_oxk_f16_le_to_f32(wb + 2);
+        const uint8_t *scales = wb + 4;
+        const uint8_t *qh     = wb + 16;
+        const uint8_t *qs     = wb + 48;
+        float dq;
+        memcpy(&dq, qb, 4);
+        const int8_t  *q8v   = (const int8_t *)(qb + 4);
+        const uint8_t *bsums = qb + 4 + 256;
+
+        __m256i acc = _mm256_setzero_si256();
+        int32_t min_acc = 0;
+        for (int gp = 0; gp < 4; gp++) {
+            uint8_t sc1, m1, sc2, m2;
+            oc_oxk_get_scale_min_k4((unsigned)(gp * 2),     scales, &sc1, &m1);
+            oc_oxk_get_scale_min_k4((unsigned)(gp * 2 + 1), scales, &sc2, &m2);
+
+            const __m256i packed = _mm256_loadu_si256(
+                (const __m256i *)(qs + gp * 32));
+
+            /* qh[l] carries one high bit per 64-element group: bit 2*gp for
+             * the low-nibble half, bit 2*gp+1 for the high-nibble half —
+             * the u1/u2 stepping masks of dequant_q5_k, NOT a flat 256-bit
+             * field. */
+            const __m256i qhv = _mm256_loadu_si256((const __m256i *)qh);
+            const __m256i one = _mm256_set1_epi8(0x01);
+            const __m256i h_lo = _mm256_and_si256(
+                _mm256_srli_epi16(qhv, 2 * gp), one);
+            const __m256i h_hi = _mm256_and_si256(
+                _mm256_srli_epi16(qhv, 2 * gp + 1), one);
+            const __m256i w_lo = _mm256_or_si256(
+                _mm256_and_si256(packed, lownib),
+                _mm256_slli_epi16(h_lo, 4));
+            const __m256i w_hi = _mm256_or_si256(
+                _mm256_and_si256(_mm256_srli_epi16(packed, 4), lownib),
+                _mm256_slli_epi16(h_hi, 4));
+
+            const __m256i a_lo = _mm256_loadu_si256(
+                (const __m256i *)(q8v + gp * 64));
+            const __m256i a_hi = _mm256_loadu_si256(
+                (const __m256i *)(q8v + gp * 64 + 32));
+
+            const __m256i p1 = _mm256_dpbusd_epi32(_mm256_setzero_si256(),
+                                                   w_lo, a_lo);
+            const __m256i p2 = _mm256_dpbusd_epi32(_mm256_setzero_si256(),
+                                                   w_hi, a_hi);
+            acc = _mm256_add_epi32(acc,
+                      _mm256_mullo_epi32(p1, _mm256_set1_epi32((int32_t)sc1)));
+            acc = _mm256_add_epi32(acc,
+                      _mm256_mullo_epi32(p2, _mm256_set1_epi32((int32_t)sc2)));
+
+            const int32_t bs1 = oc_oxk_read_q8_k_bsum(bsums, (size_t)(gp * 4)) +
+                                oc_oxk_read_q8_k_bsum(bsums, (size_t)(gp * 4 + 1));
+            const int32_t bs2 = oc_oxk_read_q8_k_bsum(bsums, (size_t)(gp * 4 + 2)) +
+                                oc_oxk_read_q8_k_bsum(bsums, (size_t)(gp * 4 + 3));
+            min_acc += (int32_t)m1 * bs1 + (int32_t)m2 * bs2;
+        }
+        sum += dw * dq * (float)hsum_i32_8_avx512(acc)
+             - dmin * dq * (float)min_acc;
+    }
+    return sum;
 }
 
 #else  /* non-x86: forward every AVX-512 symbol to the scalar reference. */
@@ -139,5 +497,19 @@ void oc_oxk_matvec_q8_0_f32_avx512_vnni(const uint8_t *w, size_t n_rows, size_t 
 { oc_oxk_matvec_q8_0_f32_scalar(w, n_rows, row_bytes, x, out); }
 void oc_oxk_matvec_q4_0_f32_avx512_bw(const uint8_t *w, size_t n_rows, size_t row_bytes, const float *x, float *out)
 { oc_oxk_matvec_q4_0_f32_scalar(w, n_rows, row_bytes, x, out); }
+void oc_oxk_dot_q4_k_prepped_multi_avx512(const void *prep, size_t blocks, const uint8_t *acts, size_t act_stride, size_t n_act, float *out)
+{
+    for (size_t v = 0; v < n_act; v++)
+        out[v] = oc_oxk_dot_q4_k_prepped(prep, blocks, acts + v * act_stride);
+}
+float oc_oxk_dot_q6_k_q8_k_avx512vnni(const uint8_t *row, size_t blocks, const uint8_t *q8)
+{ return oc_oxk_dot_q6_k_q8_k_scalar(row, blocks, q8); }
+void oc_oxk_dot_q6_k_prepped_multi_avx512(const void *prep, size_t blocks, const uint8_t *acts, size_t act_stride, size_t n_act, float *out)
+{
+    for (size_t v = 0; v < n_act; v++)
+        out[v] = oc_oxk_dot_q6_k_prepped(prep, blocks, acts + v * act_stride);
+}
+float oc_oxk_dot_q5_k_q8_k_avx512vnni(const uint8_t *row, size_t blocks, const uint8_t *q8)
+{ return oc_oxk_dot_q5_k_q8_k_scalar(row, blocks, q8); }
 
 #endif  /* __x86_64__ || __i386__ */

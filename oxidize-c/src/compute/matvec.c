@@ -68,9 +68,9 @@ typedef enum { ACT_NONE = 0, ACT_Q8_0, ACT_Q8_K } ActKind;
  * dequantized activation the kernel consumes — that removes int8 error from
  * the comparison, so any difference is a real disagreement.
  *
- * Q5_K is absent only because oc_quant_pack_row cannot produce it, so there
- * is nothing to verify it against yet; its kernel shares the scale decoding
- * that Q4_K needed fixed, so it is likely fine but stays off until checked. */
+ * Q5_K shares the scale decoding Q4_K needed fixed; it is verified against
+ * the dequant reference on a real model (OC_NO_FUSED=1 A/B) rather than by
+ * test_oxk_gguf_layout, because oc_quant_pack_row cannot produce Q5_K. */
 static ActKind fused_act_kind(OcGgufQuantizationType qtype, size_t cols)
 {
     switch (qtype) {
@@ -80,6 +80,8 @@ static ActKind fused_act_kind(OcGgufQuantizationType qtype, size_t cols)
         return (cols % OC_OXK_QK8_0 == 0) ? ACT_Q8_0 : ACT_NONE;
     case OC_QUANT_Q4_K_S:
     case OC_QUANT_Q4_K_M:
+    case OC_QUANT_Q5_K_S:
+    case OC_QUANT_Q5_K_M:
     case OC_QUANT_Q6_K:
         return (cols % OC_OXK_QK_K == 0) ? ACT_Q8_K : ACT_NONE;
     default:
@@ -398,6 +400,14 @@ typedef struct {
     size_t         out_stride;
     size_t         tile;        /* activations handled by this region */
     float         *temp;        /* tid 0 dequant buffer (dequant path) */
+    /* Prep path (K-quants with a prepared-row kernel): decode each weight
+     * row once into per-thread scratch, then dot the prepared form against
+     * the whole activation tile. */
+    size_t         prep_bytes;
+    void         (*prep_fn)(const uint8_t *row, size_t blocks, void *scratch);
+    void         (*multi_fn)(const void *prep, size_t blocks,
+                             const uint8_t *acts, size_t act_stride,
+                             size_t n_act, float *out);
 } BatchJob;
 
 static void matvec_batch_fused_slice(size_t begin, size_t end, size_t tid,
@@ -416,18 +426,19 @@ static void matvec_batch_fused_slice(size_t begin, size_t end, size_t tid,
     }
 }
 
-/* Q4_K with the row decode hoisted out of the activation loop.
+/* K-quants with the row decode hoisted out of the activation loop.
  *
- * The generic slice above still pays the full unpack — 256 nibbles and 8
- * six-bit scale/min pairs per block — once per (row, activation) pair, so a
- * 112-wide tile decodes every row 112 times. Decoding once per row and
- * dotting the prepared form against the tile removes all but 1/tile of that
- * work. Bit-exact with the packed kernel; see oc_oxk_dot_q4_k_prepped(). */
-static void matvec_batch_q4k_slice(size_t begin, size_t end, size_t tid,
-                                   void *ud)
+ * The generic slice above still pays the full unpack — 256 codes and the
+ * scale decode per block — once per (row, activation) pair, so a 112-wide
+ * tile decodes every row 112 times. Decoding once per row and dotting the
+ * prepared form against the tile removes all but 1/tile of that work.
+ * Bit-exact with the packed kernels; see oc_oxk_dot_q4_k_prepped() /
+ * oc_oxk_dot_q6_k_prepped(). */
+static void matvec_batch_prep_slice(size_t begin, size_t end, size_t tid,
+                                    void *ud)
 {
     const BatchJob *j = (const BatchJob *)ud;
-    void *prep = oc_parallel_scratch(tid, oc_oxk_q4_k_prep_bytes(j->blocks));
+    void *prep = oc_parallel_scratch(tid, j->prep_bytes);
     if (prep == NULL) {
         /* Pre-reserved by the caller, so this should not happen; fall back
          * rather than leave the slice's outputs unwritten. */
@@ -435,11 +446,18 @@ static void matvec_batch_q4k_slice(size_t begin, size_t end, size_t tid,
         return;
     }
     for (size_t r = begin; r < end; r++) {
-        oc_oxk_q4_k_prep_row(j->data + r * j->row_bytes, j->blocks, prep);
-        for (size_t v = 0; v < j->tile; v++) {
-            j->outputs[v * j->out_stride + r] =
-                oc_oxk_dot_q4_k_prepped(prep, j->blocks,
-                                        j->acts + v * j->act_stride);
+        j->prep_fn(j->data + r * j->row_bytes, j->blocks, prep);
+        /* The multi-activation kernel writes contiguous results; the output
+         * layout is activation-major, so gather into a small buffer and
+         * scatter. 128 comfortably covers the L2-budget tile widths. */
+        float res[128];
+        for (size_t v0 = 0; v0 < j->tile; v0 += 128) {
+            const size_t m = (j->tile - v0 < 128) ? (j->tile - v0) : 128;
+            j->multi_fn(prep, j->blocks, j->acts + v0 * j->act_stride,
+                        j->act_stride, m, res);
+            for (size_t v = 0; v < m; v++) {
+                j->outputs[(v0 + v) * j->out_stride + r] = res[v];
+            }
         }
     }
 }
@@ -494,15 +512,45 @@ void oc_matvec_quantized_batch(OcGgufQuantizationType qtype,
                             ? act_bytes : OC_ACT_TILE_BYTES;
         const size_t tile = act_tile_for(abytes, n_vec, budget);
 
+        /* Prepared-row kernels per weight type. Q5_K shares the Q4_K prep
+         * layout (codes 0..31 fit the same unsigned bytes), so it reuses
+         * the Q4_K multi kernel outright. */
+        size_t prep_bytes = 0;
+        void (*prep_fn)(const uint8_t *, size_t, void *) = NULL;
+        void (*multi_fn)(const void *, size_t, const uint8_t *, size_t,
+                         size_t, float *) = NULL;
+        switch (qtype) {
+        case OC_QUANT_Q4_K_S:
+        case OC_QUANT_Q4_K_M:
+            prep_bytes = oc_oxk_q4_k_prep_bytes(blocks);
+            prep_fn    = oc_oxk_q4_k_prep_row;
+            multi_fn   = oc_oxk_dot_q4_k_prepped_multi;
+            break;
+        case OC_QUANT_Q5_K_S:
+        case OC_QUANT_Q5_K_M:
+            prep_bytes = oc_oxk_q4_k_prep_bytes(blocks);
+            prep_fn    = oc_oxk_q5_k_prep_row;
+            multi_fn   = oc_oxk_dot_q4_k_prepped_multi;
+            break;
+        case OC_QUANT_Q6_K:
+            prep_bytes = oc_oxk_q6_k_prep_bytes(blocks);
+            prep_fn    = oc_oxk_q6_k_prep_row;
+            multi_fn   = oc_oxk_dot_q6_k_prepped_multi;
+            break;
+        default:
+            break;
+        }
+
         /* Reserve every worker's prep buffer up front. Doing it inside the
          * region would let an allocation failure silently skip a slice's
          * outputs, and the function cannot report OOM. */
-        bool prep_q4k = (qtype == OC_QUANT_Q4_K_S || qtype == OC_QUANT_Q4_K_M);
-        if (prep_q4k) {
-            const size_t need = oc_oxk_q4_k_prep_bytes(blocks);
+        if (prep_fn != NULL) {
             const size_t nthreads = oc_parallel_n_threads();
             for (size_t t = 0; t < nthreads; t++) {
-                if (oc_parallel_scratch(t, need) == NULL) { prep_q4k = false; break; }
+                if (oc_parallel_scratch(t, prep_bytes) == NULL) {
+                    prep_fn = NULL;
+                    break;
+                }
             }
         }
 
@@ -519,12 +567,12 @@ void oc_matvec_quantized_batch(OcGgufQuantizationType qtype,
             BatchJob job = { qtype, data, cols, row_bytes, blocks,
                              act_scratch, abytes, NULL, in_stride,
                              outputs + base * out_stride, out_stride, m,
-                             temp };
-            /* Hoisting the Q4_K row decode only pays once there is more than
+                             temp, prep_bytes, prep_fn, multi_fn };
+            /* Hoisting the row decode only pays once there is more than
              * one activation to amortize it over; at m == 1 it is pure
              * overhead. */
-            if (prep_q4k && m > 1) {
-                oc_parallel_for(rows, matvec_batch_q4k_slice, &job);
+            if (prep_fn != NULL && m > 1) {
+                oc_parallel_for(rows, matvec_batch_prep_slice, &job);
             } else {
                 oc_parallel_for(rows, matvec_batch_fused_slice, &job);
             }
@@ -550,7 +598,8 @@ void oc_matvec_quantized_batch(OcGgufQuantizationType qtype,
      * there is no tiling benefit to be had here — `temp` is the only
      * per-row working set and it is already small. */
     BatchJob job = { qtype, data, cols, row_bytes, 0, NULL, 0,
-                     inputs, in_stride, outputs, out_stride, n_vec, temp };
+                     inputs, in_stride, outputs, out_stride, n_vec, temp,
+                     0, NULL, NULL };
     if (serial) matvec_batch_dequant_slice(0, rows, 0, &job);
     else        oc_parallel_for(rows, matvec_batch_dequant_slice, &job);
 }

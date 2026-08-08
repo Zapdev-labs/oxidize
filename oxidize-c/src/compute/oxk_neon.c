@@ -189,21 +189,6 @@ float oc_oxk_dot_q4_k_q8_k_neon(const uint8_t *row, size_t blocks,
 
 /* ─── Q5_K × Q8_K ───────────────────────────────────────────────────────── */
 
-/* Expand 16 consecutive bits (2 bytes, LSB-first) into one lane each,
- * pre-shifted into bit position 4 — i.e. lane i receives
- * ((p[i / 8] >> (i % 8)) & 1) << 4, exactly the scalar 5th-bit term. */
-static inline uint8x16_t oc_neon_q5k_high_bits(const uint8_t *p)
-{
-    static const int8_t k_shifts[16] = {
-        0, -1, -2, -3, -4, -5, -6, -7,
-        0, -1, -2, -3, -4, -5, -6, -7,
-    };
-    uint8x16_t bytes = vcombine_u8(vdup_n_u8(p[0]), vdup_n_u8(p[1]));
-    uint8x16_t bits  = vandq_u8(vshlq_u8(bytes, vld1q_s8(k_shifts)),
-                                vdupq_n_u8(1));
-    return vshlq_n_u8(bits, 4);
-}
-
 float oc_oxk_dot_q5_k_q8_k_neon(const uint8_t *row, size_t blocks,
                                 const uint8_t *q8)
 {
@@ -232,13 +217,23 @@ float oc_oxk_dot_q5_k_q8_k_neon(const uint8_t *row, size_t blocks,
             uint8x16_t p0 = vld1q_u8(qs + gp * 32);
             uint8x16_t p1 = vld1q_u8(qs + gp * 32 + 16);
 
-            /* Bit index gp*64 + l for the low nibbles and gp*64 + 32 + l for
-             * the high nibbles → byte offsets gp*8 and gp*8 + 4. */
-            const uint8_t *qhl = qh + gp * 8;
-            uint8x16_t h_lo0 = oc_neon_q5k_high_bits(qhl);
-            uint8x16_t h_lo1 = oc_neon_q5k_high_bits(qhl + 2);
-            uint8x16_t h_hi0 = oc_neon_q5k_high_bits(qhl + 4);
-            uint8x16_t h_hi1 = oc_neon_q5k_high_bits(qhl + 6);
+            /* qh[l] carries one high bit per 64-element group: bit 2*gp for
+             * the low-nibble half, bit 2*gp+1 for the high-nibble half (the
+             * u1/u2 stepping masks in dequant_q5_k), NOT a flat 256-bit
+             * field. */
+            const uint8x16_t qh0v = vld1q_u8(qh);
+            const uint8x16_t qh1v = vld1q_u8(qh + 16);
+            const uint8x16_t onev = vdupq_n_u8(1);
+            const int8x16_t sh_lo = vdupq_n_s8((int8_t)-(2 * gp));
+            const int8x16_t sh_hi = vdupq_n_s8((int8_t)-(2 * gp + 1));
+            uint8x16_t h_lo0 = vshlq_n_u8(
+                vandq_u8(vshlq_u8(qh0v, sh_lo), onev), 4);
+            uint8x16_t h_lo1 = vshlq_n_u8(
+                vandq_u8(vshlq_u8(qh1v, sh_lo), onev), 4);
+            uint8x16_t h_hi0 = vshlq_n_u8(
+                vandq_u8(vshlq_u8(qh0v, sh_hi), onev), 4);
+            uint8x16_t h_hi1 = vshlq_n_u8(
+                vandq_u8(vshlq_u8(qh1v, sh_hi), onev), 4);
 
             /* 0..31 — still representable as a non-negative int8. */
             int8x16_t v_lo0 = vreinterpretq_s8_u8(vaddq_u8(vandq_u8(p0, nib), h_lo0));
