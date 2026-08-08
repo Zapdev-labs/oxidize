@@ -28,6 +28,7 @@
 #define MQ_QK_K            256u
 #define MQ_QK8_0            32u
 #define MQ_BLOCK_Q4_K_SIZE  144u
+#define MQ_BLOCK_Q5_K_SIZE  176u
 #define MQ_BLOCK_Q6_K_SIZE  210u
 #define MQ_BLOCK_Q8_0_SIZE   34u
 #define MQ_BLOCK_IQ4_XS_SIZE 136u
@@ -40,6 +41,8 @@
  * Q4_K's 144 (= 9*16) and Q8_0's 34 need no padding — 144 is already aligned,
  * and Q8_0 keeps scalar loads. */
 #define MQ_DEV_Q4_K_SIZE   144u
+/* Q5_K's 176 = 11*16 is already 16-aligned; no padding needed. */
+#define MQ_DEV_Q5_K_SIZE   176u
 #define MQ_DEV_Q6_K_SIZE   224u
 #define MQ_DEV_Q8_0_SIZE    34u
 /* IQ4_XS needs no padding: 136 is a multiple of 8, so every block start is
@@ -144,6 +147,58 @@ __device__ __forceinline__ float mq_q4k_group_dot(const uint8_t *row,
              * pairs with x[wi*4 + b]. */
             const uint32_t byte = (word >> (b * 8u)) & 0xFFu;
             const uint32_t q = hi ? (byte >> 4) : (byte & 0x0Fu);
+            qx += xs[b] * (float)q;
+            sx += xs[b];
+        }
+    }
+    return d * (float)sc * qx - mn * (float)m * sx;
+}
+
+/* Q5_K: 8 groups per super-block. Layout per quantization.c::dequant_q5_k:
+ *   d:f16, min:f16, 12 B scale table, 32 B qh, 128 B nibbles.
+ * Group g's nibbles are qs[(g/2)*32 ..+31] (low nibbles for even g, high for
+ * odd), and its fifth bit for byte l is bit g of qh[l] — one bit per
+ * 64-element group, the u1/u2 stepping masks of the dequant, NOT a flat
+ * 256-bit field. Same `d*sc*sum(x*q) - min*m*sum(x)` factoring as Q4_K. */
+__device__ __forceinline__ float mq_q5k_group_dot(const uint8_t *row,
+                                                  uint32_t g, const float *x)
+{
+    const uint8_t *blk = row + (size_t)(g >> 3) * MQ_DEV_Q5_K_SIZE;
+    const uint32_t gw = g & 7u;
+
+    const float d  = mq_f16(blk[0], blk[1]);
+    const float mn = mq_f16(blk[2], blk[3]);
+    uint8_t sc, m;
+    mq_scale_min_k4(gw, blk + 4, &sc, &m);
+
+    const uint8_t *qh = blk + 16;
+    const uint8_t *qs = blk + 48 + (size_t)(gw >> 1) * 32u;
+    const bool hi = (gw & 1u) != 0u;
+
+    /* 176 = 11*16 keeps blk 16-aligned; qh (blk+16) and qs (blk+48+32k) are
+     * both 16-aligned spans. */
+    const uint4 w0 = *reinterpret_cast<const uint4 *>(qs);
+    const uint4 w1 = *reinterpret_cast<const uint4 *>(qs + 16);
+    const uint4 h0 = *reinterpret_cast<const uint4 *>(qh);
+    const uint4 h1 = *reinterpret_cast<const uint4 *>(qh + 16);
+    const uint32_t words[8] = { w0.x, w0.y, w0.z, w0.w,
+                                w1.x, w1.y, w1.z, w1.w };
+    const uint32_t hbits[8] = { h0.x, h0.y, h0.z, h0.w,
+                                h1.x, h1.y, h1.z, h1.w };
+
+    float qx = 0.0f, sx = 0.0f;
+    #pragma unroll
+    for (uint32_t wi = 0u; wi < 8u; wi++) {
+        const uint32_t word = words[wi];
+        const uint32_t hw   = hbits[wi];
+        const float4 xv = *reinterpret_cast<const float4 *>(x + wi * 4u);
+        const float xs[4] = { xv.x, xv.y, xv.z, xv.w };
+        #pragma unroll
+        for (uint32_t b = 0u; b < 4u; b++) {
+            const uint32_t byte  = (word >> (b * 8u)) & 0xFFu;
+            const uint32_t hbyte = (hw   >> (b * 8u)) & 0xFFu;
+            const uint32_t nib = hi ? (byte >> 4) : (byte & 0x0Fu);
+            const uint32_t q = nib | (((hbyte >> gw) & 1u) << 4);
             qx += xs[b] * (float)q;
             sx += xs[b];
         }
@@ -306,9 +361,59 @@ __global__ void NAME(const uint8_t *w, const float *x, float *out,           \
 }
 
 MQ_DEFINE_MATVEC(k_mmq_matvec_q4k,    mq_q4k_group_dot)
+MQ_DEFINE_MATVEC(k_mmq_matvec_q5k,    mq_q5k_group_dot)
 MQ_DEFINE_MATVEC(k_mmq_matvec_q6k,    mq_q6k_group_dot)
 MQ_DEFINE_MATVEC(k_mmq_matvec_q8_0,   mq_q8_0_group_dot)
 MQ_DEFINE_MATVEC(k_mmq_matvec_iq4_xs, mq_iq4_xs_group_dot)
+
+/* ─── Batched matmul (prefill: many activations per weight sweep) ──────────
+ *
+ * The CUDA analog of the CPU prepped-multi path: one warp still owns one
+ * output row, but dots it against MQ_MM_TILE activations before moving on.
+ * The row's packed bytes are fetched once from DRAM and served from L1 for
+ * the remaining tile — prefill's whole point is not re-streaming 18 GB of
+ * weights per prompt token.
+ *
+ * x is `n_vec` activation vectors of `x_stride` floats; out is `n_vec`
+ * output vectors of `out_stride` floats (both row-major, activation-major
+ * like the CPU batch path). grid.y tiles the activations. */
+#define MQ_MM_TILE 4u
+
+#define MQ_DEFINE_MATMUL(NAME, DOT)                                          \
+__global__ void NAME(const uint8_t *w, const float *x, float *out,           \
+                     size_t rows, uint32_t n_groups, size_t row_bytes,       \
+                     uint32_t n_vec, size_t x_stride, size_t out_stride)     \
+{                                                                            \
+    const uint32_t lane = threadIdx.x & 31u;                                 \
+    const size_t row = (size_t)blockIdx.x * MQ_WARPS + (threadIdx.x >> 5);   \
+    if (row >= rows) return;                                                 \
+    const uint32_t v0 = blockIdx.y * MQ_MM_TILE;                             \
+    const uint32_t nv = (n_vec - v0 < MQ_MM_TILE) ? (n_vec - v0)             \
+                                                  : MQ_MM_TILE;              \
+    const uint8_t *rw = w + row * row_bytes;                                 \
+    float acc[MQ_MM_TILE] = { 0.0f, 0.0f, 0.0f, 0.0f };                     \
+    for (uint32_t g = lane; g < n_groups; g += 32u) {                        \
+        _Pragma("unroll")                                                    \
+        for (uint32_t t = 0u; t < MQ_MM_TILE; t++) {                         \
+            if (t < nv)                                                      \
+                acc[t] += DOT(rw, g,                                         \
+                              x + (size_t)(v0 + t) * x_stride +              \
+                              (size_t)g * 32u);                              \
+        }                                                                    \
+    }                                                                        \
+    _Pragma("unroll")                                                        \
+    for (uint32_t t = 0u; t < MQ_MM_TILE; t++) {                             \
+        const float r = mq_warp_reduce(acc[t]);                              \
+        if (lane == 0u && t < nv)                                            \
+            out[(size_t)(v0 + t) * out_stride + row] = r;                    \
+    }                                                                        \
+}
+
+MQ_DEFINE_MATMUL(k_mmq_matmul_q4k,    mq_q4k_group_dot)
+MQ_DEFINE_MATMUL(k_mmq_matmul_q5k,    mq_q5k_group_dot)
+MQ_DEFINE_MATMUL(k_mmq_matmul_q6k,    mq_q6k_group_dot)
+MQ_DEFINE_MATMUL(k_mmq_matmul_q8_0,   mq_q8_0_group_dot)
+MQ_DEFINE_MATMUL(k_mmq_matmul_iq4_xs, mq_iq4_xs_group_dot)
 
 /* MoE variant: the expert to use is read from device memory, so routing never
  * round-trips to the host and the whole token stays one async submission.
@@ -330,6 +435,7 @@ __global__ void NAME(const uint8_t *w, const float *x, float *out,           \
 }
 
 MQ_DEFINE_MATVEC_EXPERT(k_mmq_matvec_exp_q4k,    mq_q4k_group_dot)
+MQ_DEFINE_MATVEC_EXPERT(k_mmq_matvec_exp_q5k,    mq_q5k_group_dot)
 MQ_DEFINE_MATVEC_EXPERT(k_mmq_matvec_exp_q6k,    mq_q6k_group_dot)
 MQ_DEFINE_MATVEC_EXPERT(k_mmq_matvec_exp_q8_0,   mq_q8_0_group_dot)
 MQ_DEFINE_MATVEC_EXPERT(k_mmq_matvec_exp_iq4_xs, mq_iq4_xs_group_dot)
@@ -366,6 +472,34 @@ __device__ __forceinline__ void mq_q4k_expand(const uint8_t *blk, float *out)
         for (uint32_t l = 0u; l < 32u; l++) {
             out[off + l]       = d1 * (float)(qs[q_base + l] & 0x0Fu) - min1;
             out[off + 32u + l] = d2 * (float)(qs[q_base + l] >> 4)    - min2;
+        }
+        off += 64u;
+        is  += 2u;
+    }
+}
+
+__device__ __forceinline__ void mq_q5k_expand(const uint8_t *blk, float *out)
+{
+    const float d  = mq_f16(blk[0], blk[1]);
+    const float mn = mq_f16(blk[2], blk[3]);
+    const uint8_t *scales = blk + 4;
+    const uint8_t *qh     = blk + 16;
+    const uint8_t *qs     = blk + 48;
+    uint32_t is = 0u, off = 0u;
+    for (uint32_t gp = 0u; gp < 4u; gp++) {
+        const uint8_t *ql = qs + gp * 32u;
+        uint8_t sc1, m1, sc2, m2;
+        mq_scale_min_k4(is,      scales, &sc1, &m1);
+        mq_scale_min_k4(is + 1u, scales, &sc2, &m2);
+        const float d1 = d * (float)sc1, min1 = mn * (float)m1;
+        const float d2 = d * (float)sc2, min2 = mn * (float)m2;
+        for (uint32_t l = 0u; l < 32u; l++) {
+            const uint32_t q1 = (uint32_t)(ql[l] & 0x0Fu)
+                              | (((uint32_t)(qh[l] >> (2u * gp)) & 1u) << 4);
+            const uint32_t q2 = (uint32_t)(ql[l] >> 4)
+                              | (((uint32_t)(qh[l] >> (2u * gp + 1u)) & 1u) << 4);
+            out[off + l]       = d1 * (float)q1 - min1;
+            out[off + 32u + l] = d2 * (float)q2 - min2;
         }
         off += 64u;
         is  += 2u;
@@ -434,6 +568,7 @@ __device__ __forceinline__ void mq_iq4_xs_expand(const uint8_t *blk, float *out)
 }
 
 MQ_DEFINE_GETROW(k_mmq_getrow_q4k,    MQ_DEV_Q4_K_SIZE,   MQ_QK_K,  mq_q4k_expand)
+MQ_DEFINE_GETROW(k_mmq_getrow_q5k,    MQ_DEV_Q5_K_SIZE,   MQ_QK_K,  mq_q5k_expand)
 MQ_DEFINE_GETROW(k_mmq_getrow_q6k,    MQ_DEV_Q6_K_SIZE,   MQ_QK_K,  mq_q6k_expand)
 MQ_DEFINE_GETROW(k_mmq_getrow_q8_0,   MQ_DEV_Q8_0_SIZE,   MQ_QK8_0, mq_q8_0_expand)
 MQ_DEFINE_GETROW(k_mmq_getrow_iq4_xs, MQ_DEV_IQ4_XS_SIZE, MQ_QK_K,  mq_iq4_xs_expand)
@@ -449,6 +584,10 @@ static void mq_layout(uint32_t qtype, size_t *src_block, size_t *dev_block,
     case OC_QUANT_Q4_K_S:
     case OC_QUANT_Q4_K_M:
         *src_block = MQ_BLOCK_Q4_K_SIZE; *dev_block = MQ_DEV_Q4_K_SIZE;
+        *vals = MQ_QK_K;  return;
+    case OC_QUANT_Q5_K_S:
+    case OC_QUANT_Q5_K_M:
+        *src_block = MQ_BLOCK_Q5_K_SIZE; *dev_block = MQ_DEV_Q5_K_SIZE;
         *vals = MQ_QK_K;  return;
     case OC_QUANT_Q6_K:
         *src_block = MQ_BLOCK_Q6_K_SIZE; *dev_block = MQ_DEV_Q6_K_SIZE;
@@ -515,6 +654,11 @@ extern "C" bool oc_cuda_mmq_matvec(uint32_t qtype, const void *d_weights,
         k_mmq_matvec_q4k<<<grid, block, 0, s>>>(w, d_x, d_out, rows,
                                                 n_groups, row_bytes);
         break;
+    case OC_QUANT_Q5_K_S:
+    case OC_QUANT_Q5_K_M:
+        k_mmq_matvec_q5k<<<grid, block, 0, s>>>(w, d_x, d_out, rows,
+                                                n_groups, row_bytes);
+        break;
     case OC_QUANT_Q6_K:
         k_mmq_matvec_q6k<<<grid, block, 0, s>>>(w, d_x, d_out, rows,
                                                 n_groups, row_bytes);
@@ -526,6 +670,52 @@ extern "C" bool oc_cuda_mmq_matvec(uint32_t qtype, const void *d_weights,
     case OC_QUANT_IQ4_XS:
         k_mmq_matvec_iq4_xs<<<grid, block, 0, s>>>(w, d_x, d_out, rows,
                                                    n_groups, row_bytes);
+        break;
+    default:
+        return false;
+    }
+    return cudaGetLastError() == cudaSuccess;
+}
+
+extern "C" bool oc_cuda_mmq_matmul(uint32_t qtype, const void *d_weights,
+                                   const float *d_x, float *d_out,
+                                   size_t rows, size_t cols, size_t n_vec,
+                                   size_t x_stride, size_t out_stride,
+                                   void *stream)
+{
+    if (!d_weights || !d_x || !d_out || rows == 0 || n_vec == 0) return false;
+    const size_t row_bytes = oc_cuda_mmq_row_bytes(qtype, cols);
+    if (row_bytes == 0) return false;
+
+    const uint32_t n_groups = (uint32_t)(cols / 32u);
+    const uint32_t block = MQ_WARPS * 32u;
+    dim3 grid((unsigned)((rows + MQ_WARPS - 1u) / MQ_WARPS),
+              (unsigned)((n_vec + MQ_MM_TILE - 1u) / MQ_MM_TILE));
+    cudaStream_t s = (cudaStream_t)stream;
+    const uint8_t *w = (const uint8_t *)d_weights;
+
+    switch ((OcGgufQuantizationType)qtype) {
+    case OC_QUANT_Q4_K_S:
+    case OC_QUANT_Q4_K_M:
+        k_mmq_matmul_q4k<<<grid, block, 0, s>>>(w, d_x, d_out, rows,
+            n_groups, row_bytes, (uint32_t)n_vec, x_stride, out_stride);
+        break;
+    case OC_QUANT_Q5_K_S:
+    case OC_QUANT_Q5_K_M:
+        k_mmq_matmul_q5k<<<grid, block, 0, s>>>(w, d_x, d_out, rows,
+            n_groups, row_bytes, (uint32_t)n_vec, x_stride, out_stride);
+        break;
+    case OC_QUANT_Q6_K:
+        k_mmq_matmul_q6k<<<grid, block, 0, s>>>(w, d_x, d_out, rows,
+            n_groups, row_bytes, (uint32_t)n_vec, x_stride, out_stride);
+        break;
+    case OC_QUANT_Q8_0:
+        k_mmq_matmul_q8_0<<<grid, block, 0, s>>>(w, d_x, d_out, rows,
+            n_groups, row_bytes, (uint32_t)n_vec, x_stride, out_stride);
+        break;
+    case OC_QUANT_IQ4_XS:
+        k_mmq_matmul_iq4_xs<<<grid, block, 0, s>>>(w, d_x, d_out, rows,
+            n_groups, row_bytes, (uint32_t)n_vec, x_stride, out_stride);
         break;
     default:
         return false;
@@ -553,6 +743,11 @@ extern "C" bool oc_cuda_mmq_matvec_expert(uint32_t qtype, const void *d_weights,
     case OC_QUANT_Q4_K_S:
     case OC_QUANT_Q4_K_M:
         k_mmq_matvec_exp_q4k<<<grid, block, 0, s>>>(w, d_x, d_out, rows,
+            n_groups, row_bytes, d_expert_sel, slot);
+        break;
+    case OC_QUANT_Q5_K_S:
+    case OC_QUANT_Q5_K_M:
+        k_mmq_matvec_exp_q5k<<<grid, block, 0, s>>>(w, d_x, d_out, rows,
             n_groups, row_bytes, d_expert_sel, slot);
         break;
     case OC_QUANT_Q6_K:
@@ -593,6 +788,10 @@ extern "C" bool oc_cuda_mmq_get_row(uint32_t qtype, const void *d_weights,
     case OC_QUANT_Q4_K_S:
     case OC_QUANT_Q4_K_M:
         k_mmq_getrow_q4k<<<grid, block, 0, s>>>(w, token, d_out, cols, row_bytes);
+        break;
+    case OC_QUANT_Q5_K_S:
+    case OC_QUANT_Q5_K_M:
+        k_mmq_getrow_q5k<<<grid, block, 0, s>>>(w, token, d_out, cols, row_bytes);
         break;
     case OC_QUANT_Q6_K:
         k_mmq_getrow_q6k<<<grid, block, 0, s>>>(w, token, d_out, cols, row_bytes);
