@@ -46,6 +46,7 @@ static bool parse_value_flag(OcCliArgs *a, const char *arg, const char *val,
     else if (match(arg, "--n-predict"))  { a->n_predict = val[0] == '-' ? 0u : (uint32_t)strtoul(val, NULL, 10); *consumed_val = true; }
     else if (match(arg, "--ctx"))        { a->n_ctx = val[0] == '-' ? 0u : (uint32_t)strtoul(val, NULL, 10); *consumed_val = true; }
     else if (match(arg, "--threads"))    { a->threads = atoi(val); *consumed_val = true; }
+    else if (match(arg, "--batch-size")) { a->batch_size = val[0] == '-' ? 0u : (uint32_t)strtoul(val, NULL, 10); *consumed_val = true; }
     else if (match(arg, "--numa"))       { a->numa = val; *consumed_val = true; }
     else if (match(arg, "--temperature")||match(arg,"--temp")){a->temperature=(float)atof(val);*consumed_val=true; }
     else if (match(arg, "--top-k"))       { a->top_k = val[0] == '-' ? 0u : (uint32_t)strtoul(val, NULL, 10); *consumed_val = true; }

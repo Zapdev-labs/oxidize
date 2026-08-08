@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 200809L
 /*
  * llama.c — Llama-family dense forward pass (CPU).
  *
@@ -22,9 +23,11 @@
 #include "oxidize/log.h"
 #include "oxidize/matvec.h"
 #include "oxidize/model.h"
+#include "oxidize/parallel.h"
 #include "oxidize/quant.h"
 
 #include <math.h>
+#include <time.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -733,7 +736,8 @@ OcError oc_llama_load(const char *path, OcLlamaModel *out)
     if (strcmp(arch_str, "llama") != 0 && strcmp(arch_str, "mistral") != 0 &&
         strcmp(arch_str, "qwen2") != 0 && strcmp(arch_str, "gpt2") != 0 &&
         strcmp(arch_str, "gptneox") != 0 && strcmp(arch_str, "falcon") != 0 &&
-        strcmp(arch_str, "gemma4") != 0 && strcmp(arch_str, "longcat") != 0) {
+        strcmp(arch_str, "gemma4") != 0 && strcmp(arch_str, "longcat") != 0 &&
+        strcmp(arch_str, "qwen3moe") != 0) {
         oc_gguf_map_free(&out->gguf);
         return OC_ERR_MODEL;
     }
@@ -1070,17 +1074,17 @@ void oc_llama_free(OcLlamaModel *model)
 /* ─── Forward pass ─────────────────────────────────────────────────────── */
 
 /* Embed one token: dequantize row `token` of tok_embeddings into `dst`. */
-static void embed_token(OcLlamaSession *s, uint32_t token)
+static void embed_token_into(OcLlamaSession *s, uint32_t token, float *dst)
 {
     OcWeightView *w = &s->model->tok_embeddings;
     if (token >= s->model->cfg.vocab_size) token = s->model->cfg.vocab_size - 1;
     if (w->qtype == OC_QUANT_F32) {
-        memcpy(s->x, w->data + (size_t)token * w->row_bytes,
+        memcpy(dst, w->data + (size_t)token * w->row_bytes,
                s->model->cfg.n_embd * sizeof(float));
     } else {
         oc_quant_dequant_row(w->qtype,
             w->data + (size_t)token * w->row_bytes, w->row_bytes,
-            s->x, s->model->cfg.n_embd);
+            dst, s->model->cfg.n_embd);
     }
     /* Gemma scales the token embedding by sqrt(n_embd) once, here — it is a
      * property of the embedding, not of each RMSNorm. The pre-existing
@@ -1089,8 +1093,13 @@ static void embed_token(OcLlamaSession *s, uint32_t token)
      * computation; uses_gemma4 takes this path and leaves that one alone. */
     if (s->model->cfg.uses_gemma4 && s->model->cfg.norm_scale != 1.0f) {
         const float sc = s->model->cfg.norm_scale;
-        for (size_t i = 0; i < s->model->cfg.n_embd; i++) s->x[i] *= sc;
+        for (size_t i = 0; i < s->model->cfg.n_embd; i++) dst[i] *= sc;
     }
+}
+
+static void embed_token(OcLlamaSession *s, uint32_t token)
+{
+    embed_token_into(s, token, s->x);
 }
 
 /* matvec wrapper: pick f32 or quantized path based on qtype. */
@@ -1135,8 +1144,13 @@ static void matvec_transpose_acc(const OcWeightView *w, const float *in,
  * GQA: Q head h attends to KV head (h / group_size). */
 static void forward_layer(OcLlamaSession *s, uint32_t layer);
 static void forward_dense_ffn(OcLlamaSession *s, const OcLlamaLayer *L);
-static void attention_head(const OcLlamaSession *s, uint32_t head,
-                           uint32_t layer, const float *q_vec, float *out_vec)
+/* `query_pos` is the position of the query token: attention runs over cached
+ * positions [start, query_pos]. Split out from attention_head() so batched
+ * prefill can drive many query positions concurrently — the single-token
+ * path always passes s->pos. */
+static void attention_head_at(const OcLlamaSession *s, uint32_t head,
+                              uint32_t layer, int64_t query_pos,
+                              const float *q_vec, float *out_vec)
 {
     const OcLlamaConfig *c = &s->model->cfg;
     /* Geometry is per-layer: on Gemma 4 a sliding layer has head_dim 256 with
@@ -1164,7 +1178,7 @@ static void attention_head(const OcLlamaSession *s, uint32_t head,
     /* Sliding window: only attend to the last `sliding_window` tokens
      * for layers matching the alternating pattern. Layer L uses sliding
      * window when (L % pattern) == 1 (i.e., every other layer for pattern=2). */
-    int64_t seq_len = s->pos + 1;
+    int64_t seq_len = query_pos + 1;
     int64_t start = 0;
     if (GL->sliding_window > 0) {
         /* Gemma 4 (and any model whose loader filled in a per-layer window):
@@ -1220,6 +1234,12 @@ static void attention_head(const OcLlamaSession *s, uint32_t head,
     }
     float inv = 1.0f / run_sum;
     for (size_t i = 0; i < hd; i++) out_vec[i] *= inv;
+}
+
+static void attention_head(const OcLlamaSession *s, uint32_t head,
+                           uint32_t layer, const float *q_vec, float *out_vec)
+{
+    attention_head_at(s, head, layer, s->pos, q_vec, out_vec);
 }
 
 /* ─── Dense FFN (Llama/Mistral/Qwen2-dense path) ──────────────────────── */
@@ -1791,6 +1811,678 @@ OcError oc_llama_forward(OcLlamaSession *sess, uint32_t token, float *logits_out
         }
     }
     sess->pos++;
+    return OC_OK;
+}
+
+/* ─── Batched prefill ────────────────────────────────────────────────────
+ *
+ * Prompt processing is throughput work, not latency work: every prompt token
+ * is known up front, so they can share one pass over the weights instead of
+ * each dragging the whole model through DRAM. The per-token path costs one
+ * full weight sweep per token — on Qwen3-30B-A3B that is ~1.5 GB per token,
+ * which measured 2.9 tok/s against llama.cpp's 129 tok/s for the same file.
+ *
+ * The arithmetic here is deliberately IDENTICAL to forward_layer(): same
+ * norms, same RoPE, same online-softmax attention (reused verbatim, one
+ * token at a time), same routing. Only the *matmuls* change shape — they go
+ * through oc_matvec_*_batch(), which dots each weight row against a tile of
+ * activations while the row is in cache. Attention itself is left per-token
+ * because it touches the KV cache, not the weights, so it was never the
+ * bottleneck.
+ *
+ * For the MoE FFN the win needs one extra step: tokens are grouped BY EXPERT
+ * (a counting sort over the top-k choices) so each expert's weights are read
+ * once for all the tokens that routed to it. Without that grouping a batch
+ * of 512 tokens would still touch 512 * 8 expert weight sets independently
+ * and nothing would be amortized.
+ */
+
+/* Tokens per prefill chunk. Larger amortizes the weight sweep further —
+ * especially for MoE, where the win scales with tokens-per-expert — at a
+ * linear cost in scratch (~127 KB/token on a 30B MoE, so ~65 MB here). */
+#define OC_PREFILL_CHUNK 512u
+
+/* Per-phase prefill timers. Prefill is a mix of weight-bound matmuls,
+ * cache-bound attention and plain memory shuffling, and which one dominates
+ * is not guessable — it moves with chunk size, expert count and thread
+ * count. Accumulated per oc_llama_prefill() call and reported at DEBUG. */
+typedef struct {
+    double norm, qkv, rope_kv, attn, proj, router, gather, expert_mm, scatter;
+} PrefillTimers;
+
+static PrefillTimers g_pf_t;
+
+static double pf_now(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+}
+
+
+typedef struct {
+    size_t cap;             /* tokens per chunk                          */
+    size_t n_embd, n_qo, kv_row, ffw, n_slots, k;
+    float *x, *normed, *q, *k_buf, *v_buf, *attn_out, *proj;
+    float *ffn_a, *ffn_b, *gath, *expert_out, *router;
+    float *dequant_temp;
+    uint8_t *act;           /* oc_matvec_quantized_batch scratch         */
+    size_t   act_bytes;
+    uint32_t *sel;          /* [cap][k] chosen expert slots              */
+    float    *sel_w;        /* [cap][k] applied gate weights             */
+    uint32_t *ex_tok;       /* [cap*k] token ids, grouped by expert      */
+    float    *ex_w;         /* [cap*k] matching gate weights             */
+    uint32_t *ex_off;       /* [n_slots+1] group offsets                 */
+    uint32_t *ex_fill;      /* [n_slots] cursor while filling            */
+} PrefillBuf;
+
+static void prefill_buf_free(PrefillBuf *b)
+{
+    free(b->x); free(b->normed); free(b->q); free(b->k_buf); free(b->v_buf);
+    free(b->attn_out); free(b->proj); free(b->ffn_a); free(b->ffn_b);
+    free(b->gath); free(b->expert_out); free(b->router);
+    free(b->dequant_temp); free(b->act);
+    free(b->sel); free(b->sel_w); free(b->ex_tok); free(b->ex_w);
+    free(b->ex_off); free(b->ex_fill);
+    memset(b, 0, sizeof(*b));
+}
+
+static OcError prefill_buf_init(const OcLlamaModel *m, size_t cap,
+                                PrefillBuf *b)
+{
+    const OcLlamaConfig *c = &m->cfg;
+    memset(b, 0, sizeof(*b));
+    b->cap     = cap;
+    b->n_embd  = c->n_embd;
+    b->n_qo    = (size_t)c->n_head * c->head_dim;
+    b->kv_row  = (size_t)c->n_head_kv * c->kv_head_dim;
+    size_t i_size = c->expert_intermediate_size ? c->expert_intermediate_size
+                                                : c->n_ff;
+    b->ffw     = c->n_ff > i_size ? c->n_ff : i_size;
+    b->n_slots = (size_t)c->num_experts + c->zero_expert_count;
+    b->k       = c->num_experts_per_tok;
+    if (b->k > b->n_slots) b->k = b->n_slots;
+
+    /* Widest matmul input across the pass — the dequant buffer and the fused
+     * activation scratch must both cover it. attn_output's input is n_qo,
+     * which on a GQA model exceeds n_embd. */
+    size_t max_cols = b->n_embd;
+    if (b->n_qo > max_cols) max_cols = b->n_qo;
+    if (b->ffw  > max_cols) max_cols = b->ffw;
+
+    b->x          = xcalloc(cap * b->n_embd, sizeof(float));
+    b->normed     = xcalloc(cap * b->n_embd, sizeof(float));
+    b->proj       = xcalloc(cap * b->n_embd, sizeof(float));
+    b->gath       = xcalloc(cap * b->n_embd, sizeof(float));
+    b->q          = xcalloc(cap * b->n_qo, sizeof(float));
+    b->attn_out   = xcalloc(cap * b->n_qo, sizeof(float));
+    b->k_buf      = xcalloc(cap * b->kv_row, sizeof(float));
+    b->v_buf      = xcalloc(cap * b->kv_row, sizeof(float));
+    b->ffn_a      = xcalloc(cap * b->ffw, sizeof(float));
+    b->ffn_b      = xcalloc(cap * b->ffw, sizeof(float));
+    b->dequant_temp = xcalloc(max_cols, sizeof(float));
+    if (!b->x || !b->normed || !b->proj || !b->gath || !b->q || !b->attn_out ||
+        !b->k_buf || !b->v_buf || !b->ffn_a || !b->ffn_b || !b->dequant_temp) {
+        prefill_buf_free(b);
+        return OC_ERR_OOM;
+    }
+
+    /* One fused-activation buffer covering every matmul in the pass. Its size
+     * is a function of the widest input only — the kernel clamps its tile to
+     * fit — so it does not grow with `cap`. */
+    b->act_bytes = oc_matvec_batch_scratch_bytes(max_cols);
+    if (b->act_bytes > 0) {
+        b->act = (uint8_t *)malloc(b->act_bytes);
+        if (b->act == NULL) { prefill_buf_free(b); return OC_ERR_OOM; }
+    }
+
+    if (b->n_slots > 0) {
+        b->expert_out = xcalloc(cap * b->n_embd, sizeof(float));
+        b->router     = xcalloc(cap * b->n_slots, sizeof(float));
+        b->sel        = xcalloc(cap * (b->k ? b->k : 1), sizeof(uint32_t));
+        b->sel_w      = xcalloc(cap * (b->k ? b->k : 1), sizeof(float));
+        b->ex_tok     = xcalloc(cap * (b->k ? b->k : 1), sizeof(uint32_t));
+        b->ex_w       = xcalloc(cap * (b->k ? b->k : 1), sizeof(float));
+        b->ex_off     = xcalloc(b->n_slots + 1, sizeof(uint32_t));
+        b->ex_fill    = xcalloc(b->n_slots, sizeof(uint32_t));
+        if (!b->expert_out || !b->router || !b->sel || !b->sel_w ||
+            !b->ex_tok || !b->ex_w || !b->ex_off || !b->ex_fill) {
+            prefill_buf_free(b);
+            return OC_ERR_OOM;
+        }
+    }
+    return OC_OK;
+}
+
+/* Batched weight × activations. Mirrors matvec()'s f32/quantized dispatch. */
+static void mm_batch(const OcWeightView *w, const float *in, size_t in_stride,
+                     float *out, size_t out_stride, size_t n, PrefillBuf *b)
+{
+    if (w->qtype == OC_QUANT_F32) {
+        oc_matvec_f32_batch((const float *)w->data, w->rows, w->cols,
+                            in, in_stride, out, out_stride, n);
+    } else {
+        oc_matvec_quantized_batch(w->qtype, w->data, w->rows, w->cols,
+                                  w->row_bytes, in, in_stride, out, out_stride,
+                                  n, b->dequant_temp, b->act, b->act_bytes);
+    }
+}
+
+/* Batched MoE FFN. Same routing decision per token as forward_moe_ffn(); the
+ * difference is that the expert matmuls run once per expert over all of its
+ * tokens instead of once per (token, expert) pair. */
+static void prefill_moe_ffn(OcLlamaSession *s, const OcLlamaLayer *L,
+                            PrefillBuf *b, size_t n)
+{
+    const OcLlamaConfig *c = &s->model->cfg;
+    const uint32_t n_exp = c->num_experts;
+    const uint32_t n_zero = c->zero_expert_count;
+    const uint32_t n_slots = n_exp + n_zero;
+    const uint32_t k = (uint32_t)b->k;
+    uint32_t i_size = c->expert_intermediate_size;
+    if (i_size == 0) i_size = c->n_ff;
+    const float routed_scale = c->expert_weights_scale;
+
+    /* 1. Router logits for every token in one matmul. */
+    double t_r0 = pf_now();
+    mm_batch(&L->ffn_gate_inp, b->normed, b->n_embd, b->router, b->n_slots,
+             n, b);
+
+    g_pf_t.router += pf_now() - t_r0;
+    memset(b->expert_out, 0, n * b->n_embd * sizeof(float));
+    memset(b->ex_fill, 0, n_slots * sizeof(uint32_t));
+    for (uint32_t e = 0; e <= n_slots; e++) b->ex_off[e] = 0;
+
+    /* 2-4. Gating, top-k and weight normalization, per token. Identical to
+     *      the single-token path — this is cheap and touches no weights. */
+    for (size_t j = 0; j < n; j++) {
+        float *rl = b->router + j * b->n_slots;
+        if (!c->expert_gating_sigmoid) {
+            float mx = rl[0];
+            for (uint32_t i = 1; i < n_slots; i++) if (rl[i] > mx) mx = rl[i];
+            double sum = 0.0;
+            for (uint32_t i = 0; i < n_slots; i++) {
+                rl[i] = expf(rl[i] - mx);
+                sum += (double)rl[i];
+            }
+            if (sum > 0.0) {
+                float inv = (float)(1.0 / sum);
+                for (uint32_t i = 0; i < n_slots; i++) rl[i] *= inv;
+            }
+        } else {
+            for (uint32_t i = 0; i < n_slots; i++)
+                rl[i] = 1.0f / (1.0f + expf(-rl[i]));
+        }
+
+        uint32_t *sel = b->sel + j * k;
+        for (uint32_t i = 0; i < n_slots && i < k; i++) sel[i] = i;
+        /* Partial selection sort over a scratch index list, matching the
+         * single-token path's ordering exactly (including exp_probs_b
+         * steering selection but not the applied gate). */
+        uint32_t idx_buf[256];
+        uint32_t *idx = (n_slots <= 256)
+                      ? idx_buf
+                      : (uint32_t *)malloc(n_slots * sizeof(uint32_t));
+        if (idx == NULL) { /* fall back to no routing for this token */
+            for (uint32_t i = 0; i < k; i++) { b->sel[j * k + i] = 0; }
+            continue;
+        }
+        for (uint32_t i = 0; i < n_slots; i++) idx[i] = i;
+        for (uint32_t i = 0; i < k; i++) {
+            uint32_t best = i;
+            for (uint32_t jj = i + 1; jj < n_slots; jj++) {
+                float sj = rl[idx[jj]];
+                float sb = rl[idx[best]];
+                if (L->exp_probs_b) {
+                    sj += L->exp_probs_b[idx[jj]];
+                    sb += L->exp_probs_b[idx[best]];
+                }
+                if (sj > sb) best = jj;
+            }
+            uint32_t tmp = idx[i]; idx[i] = idx[best]; idx[best] = tmp;
+            sel[i] = idx[i];
+        }
+        if (idx != idx_buf) free(idx);
+
+        double weight_norm = 1.0;
+        if (n_zero == 0) {
+            weight_norm = 0.0;
+            for (uint32_t i = 0; i < k; i++) weight_norm += (double)rl[sel[i]];
+            if (weight_norm <= 0.0) weight_norm = 1.0;
+        }
+        for (uint32_t i = 0; i < k; i++) {
+            b->sel_w[j * k + i] =
+                routed_scale * (float)(rl[sel[i]] / weight_norm);
+            b->ex_off[sel[i] + 1]++;      /* histogram for the counting sort */
+        }
+    }
+
+    /* 5. Counting sort of (token, weight) pairs into per-expert groups. */
+    for (uint32_t e = 0; e < n_slots; e++) b->ex_off[e + 1] += b->ex_off[e];
+    for (size_t j = 0; j < n; j++) {
+        for (uint32_t i = 0; i < k; i++) {
+            uint32_t e = b->sel[j * k + i];
+            uint32_t at = b->ex_off[e] + b->ex_fill[e]++;
+            b->ex_tok[at] = (uint32_t)j;
+            b->ex_w[at]   = b->sel_w[j * k + i];
+        }
+    }
+
+    /* 6. One pass per expert over all of its tokens. */
+    const size_t gate_rb = L->ffn_gate_exps.row_bytes;
+    const size_t up_rb   = L->ffn_up_exps.row_bytes;
+    const size_t down_rb = L->ffn_down_exps.row_bytes;
+
+    for (uint32_t e = 0; e < n_slots; e++) {
+        const uint32_t m = b->ex_off[e + 1] - b->ex_off[e];
+        if (m == 0) continue;
+        const uint32_t *toks = b->ex_tok + b->ex_off[e];
+        const float    *ws   = b->ex_w   + b->ex_off[e];
+
+        /* Zero ("identity") experts hold no weights: they return their input,
+         * gated like any other expert. */
+        if (e >= n_exp) {
+            for (uint32_t t = 0; t < m; t++) {
+                const float *src = b->normed + (size_t)toks[t] * b->n_embd;
+                float *dst = b->expert_out + (size_t)toks[t] * b->n_embd;
+                const float w = ws[t];
+                for (size_t i = 0; i < b->n_embd; i++) dst[i] += w * src[i];
+            }
+            continue;
+        }
+
+        /* Gather this expert's tokens so the matmul sees them contiguously. */
+        double t_g0 = pf_now();
+        for (uint32_t t = 0; t < m; t++) {
+            memcpy(b->gath + (size_t)t * b->n_embd,
+                   b->normed + (size_t)toks[t] * b->n_embd,
+                   b->n_embd * sizeof(float));
+        }
+        g_pf_t.gather += pf_now() - t_g0;
+
+        OcWeightView gate_v = L->ffn_gate_exps;
+        gate_v.data = L->ffn_gate_exps.data + (size_t)e * i_size * gate_rb;
+        gate_v.rows = i_size;
+        OcWeightView up_v = L->ffn_up_exps;
+        up_v.data = L->ffn_up_exps.data + (size_t)e * i_size * up_rb;
+        up_v.rows = i_size;
+        OcWeightView down_v = L->ffn_down_exps;
+        down_v.data = L->ffn_down_exps.data + (size_t)e * b->n_embd * down_rb;
+        down_v.rows = b->n_embd;
+
+        double t_m0 = pf_now();
+        mm_batch(&gate_v, b->gath, b->n_embd, b->ffn_a, b->ffw, m, b);
+        mm_batch(&up_v,   b->gath, b->n_embd, b->ffn_b, b->ffw, m, b);
+        for (uint32_t t = 0; t < m; t++) {
+            oc_swiglu_inplace_f32(b->ffn_a + (size_t)t * b->ffw,
+                                  b->ffn_b + (size_t)t * b->ffw, i_size);
+        }
+        /* down → gath (free again now that gate/up have consumed it). */
+        mm_batch(&down_v, b->ffn_a, b->ffw, b->gath, b->n_embd, m, b);
+        g_pf_t.expert_mm += pf_now() - t_m0;
+        double t_s0 = pf_now();
+        for (uint32_t t = 0; t < m; t++) {
+            const float *src = b->gath + (size_t)t * b->n_embd;
+            float *dst = b->expert_out + (size_t)toks[t] * b->n_embd;
+            const float w = ws[t];
+            for (size_t i = 0; i < b->n_embd; i++) dst[i] += w * src[i];
+        }
+        g_pf_t.scatter += pf_now() - t_s0;
+    }
+
+    /* 7. Shared expert (always active), batched over every token. */
+    if (L->ffn_gate_shexp.data != NULL && L->ffn_up_shexp.data != NULL &&
+        L->ffn_down_shexp.data != NULL) {
+        mm_batch(&L->ffn_gate_shexp, b->normed, b->n_embd, b->ffn_a, b->ffw,
+                 n, b);
+        mm_batch(&L->ffn_up_shexp,   b->normed, b->n_embd, b->ffn_b, b->ffw,
+                 n, b);
+        for (size_t j = 0; j < n; j++) {
+            oc_swiglu_inplace_f32(b->ffn_a + j * b->ffw,
+                                  b->ffn_b + j * b->ffw, i_size);
+        }
+        mm_batch(&L->ffn_down_shexp, b->ffn_a, b->ffw, b->gath, b->n_embd,
+                 n, b);
+        if (L->ffn_gate_inp_shexp.data != NULL) {
+            /* One logit per token; rows == 1, so this is a cheap batched dot. */
+            mm_batch(&L->ffn_gate_inp_shexp, b->normed, b->n_embd,
+                     b->ffn_a, 1, n, b);
+            for (size_t j = 0; j < n; j++) {
+                const float sc = 1.0f / (1.0f + expf(-b->ffn_a[j]));
+                float *g = b->gath + j * b->n_embd;
+                for (size_t i = 0; i < b->n_embd; i++) g[i] *= sc;
+            }
+        }
+        for (size_t j = 0; j < n; j++) {
+            const float *src = b->gath + j * b->n_embd;
+            float *dst = b->expert_out + j * b->n_embd;
+            for (size_t i = 0; i < b->n_embd; i++) dst[i] += src[i];
+        }
+    }
+
+    /* 8. Residual add. */
+    for (size_t j = 0; j < n; j++) {
+        const float *src = b->expert_out + j * b->n_embd;
+        float *dst = b->x + j * b->n_embd;
+        for (size_t i = 0; i < b->n_embd; i++) dst[i] += src[i];
+    }
+}
+
+static void prefill_dense_ffn(OcLlamaSession *s, const OcLlamaLayer *L,
+                              PrefillBuf *b, size_t n)
+{
+    const OcLlamaConfig *c = &s->model->cfg;
+    mm_batch(&L->ffn_gate, b->normed, b->n_embd, b->ffn_a, b->ffw, n, b);
+    mm_batch(&L->ffn_up,   b->normed, b->n_embd, b->ffn_b, b->ffw, n, b);
+    for (size_t j = 0; j < n; j++) {
+        if (c->uses_geglu) {
+            oc_geglu_inplace_f32(b->ffn_a + j * b->ffw,
+                                 b->ffn_b + j * b->ffw, c->n_ff);
+        } else {
+            oc_swiglu_inplace_f32(b->ffn_a + j * b->ffw,
+                                  b->ffn_b + j * b->ffw, c->n_ff);
+        }
+    }
+    mm_batch(&L->ffn_down, b->ffn_a, b->ffw, b->proj, b->n_embd, n, b);
+    for (size_t j = 0; j < n; j++) {
+        float *p = b->proj + j * b->n_embd;
+        if (L->post_ffw_norm != NULL) {
+            oc_rms_norm_f32(p, L->post_ffw_norm, b->gath, c->n_embd,
+                            c->rms_norm_eps);
+            memcpy(p, b->gath, c->n_embd * sizeof(float));
+        }
+        float *x = b->x + j * b->n_embd;
+        for (size_t i = 0; i < c->n_embd; i++) x[i] += p[i];
+    }
+}
+
+/* Parallel region body for batched attention: index i encodes the (token,
+ * head) pair as token = i / n_head, head = i % n_head. */
+typedef struct {
+    OcLlamaSession *s;
+    PrefillBuf     *b;
+    uint32_t        layer;
+    int64_t         pos0;
+    size_t          hd;
+    uint32_t        n_head;
+} AttnJob;
+
+static void attention_slice(size_t begin, size_t end, size_t tid, void *ud)
+{
+    (void)tid;
+    const AttnJob *j = (const AttnJob *)ud;
+    for (size_t i = begin; i < end; i++) {
+        const size_t tok = i / j->n_head;
+        const uint32_t h = (uint32_t)(i % j->n_head);
+        attention_head_at(j->s, h, j->layer, j->pos0 + (int64_t)tok,
+                          j->b->q + tok * j->b->n_qo + h * j->hd,
+                          j->b->attn_out + tok * j->b->n_qo + h * j->hd);
+    }
+}
+
+static void prefill_layer(OcLlamaSession *s, uint32_t layer, PrefillBuf *b,
+                          size_t n, int64_t pos0)
+{
+    const OcLlamaConfig *c = &s->model->cfg;
+    OcLlamaLayer *L = &s->model->layers[layer];
+    const size_t hd = L->head_dim ? (size_t)L->head_dim : (size_t)c->head_dim;
+    const uint32_t n_kv = L->n_head_kv ? L->n_head_kv : c->n_head_kv;
+    const uint32_t rope_dim = L->head_dim ? L->rope_dim : c->rope_dim;
+    const float rope_theta = L->head_dim ? L->rope_theta : c->rope_theta;
+
+    /* Pre-attention RMSNorm. */
+    for (size_t j = 0; j < n; j++) {
+        oc_rms_norm_f32(b->x + j * b->n_embd, L->attn_norm,
+                        b->normed + j * b->n_embd, c->n_embd, c->rms_norm_eps);
+        if (!c->uses_gemma4 && c->norm_scale != 1.0f) {
+            float *nm = b->normed + j * b->n_embd;
+            for (size_t i = 0; i < c->n_embd; i++) nm[i] *= c->norm_scale;
+        }
+    }
+
+    /* Q/K/V for the whole chunk. */
+    double t_qkv0 = pf_now();
+    mm_batch(&L->attn_q, b->normed, b->n_embd, b->q,     b->n_qo,   n, b);
+    mm_batch(&L->attn_k, b->normed, b->n_embd, b->k_buf, b->kv_row, n, b);
+    mm_batch(&L->attn_v, b->normed, b->n_embd, b->v_buf, b->kv_row, n, b);
+    g_pf_t.qkv += pf_now() - t_qkv0;
+    double t_rk0 = pf_now();
+
+    /* Per-token: biases, Q/K norms, RoPE, KV cache write. */
+    for (size_t j = 0; j < n; j++) {
+        float *qj = b->q + j * b->n_qo;
+        float *kj = b->k_buf + j * b->kv_row;
+        float *vj = b->v_buf + j * b->kv_row;
+        const int64_t pos = pos0 + (int64_t)j;
+
+        if (L->attn_q_bias != NULL) {
+            const size_t nq = (size_t)c->n_head * hd;
+            for (size_t i = 0; i < nq; i++) qj[i] += L->attn_q_bias[i];
+        }
+        if (L->attn_k_bias != NULL)
+            for (size_t i = 0; i < b->kv_row; i++) kj[i] += L->attn_k_bias[i];
+        if (L->attn_v_bias != NULL)
+            for (size_t i = 0; i < b->kv_row; i++) vj[i] += L->attn_v_bias[i];
+
+        if (L->attn_q_norm != NULL) {
+            for (uint32_t h = 0; h < c->n_head; h++) {
+                oc_rms_norm_f32(qj + h * hd, L->attn_q_norm, b->dequant_temp,
+                                hd, c->rms_norm_eps);
+                memcpy(qj + h * hd, b->dequant_temp, hd * sizeof(float));
+            }
+        }
+        if (L->attn_k_norm != NULL) {
+            for (uint32_t h = 0; h < n_kv; h++) {
+                oc_rms_norm_f32(kj + h * hd, L->attn_k_norm, b->dequant_temp,
+                                hd, c->rms_norm_eps);
+                memcpy(kj + h * hd, b->dequant_temp, hd * sizeof(float));
+            }
+        }
+        if (c->v_rms_norm) {
+            for (uint32_t h = 0; h < n_kv; h++) {
+                float *vh = vj + (size_t)h * hd;
+                double ss = 0.0;
+                for (size_t i = 0; i < hd; i++) ss += (double)vh[i] * vh[i];
+                const float inv =
+                    1.0f / sqrtf((float)(ss / (double)hd) + c->rms_norm_eps);
+                for (size_t i = 0; i < hd; i++) vh[i] *= inv;
+            }
+        }
+
+        for (uint32_t h = 0; h < c->n_head; h++) {
+            if (c->yarn_factor > 0.0f)
+                oc_apply_rope_yarn_f32(qj + h * hd, qj + h * hd, hd, rope_dim,
+                                       pos, rope_theta, c->yarn_factor,
+                                       c->yarn_orig_ctx);
+            else
+                oc_apply_rope_f32(qj + h * hd, qj + h * hd, hd, rope_dim, pos,
+                                  rope_theta);
+        }
+        for (uint32_t h = 0; h < n_kv; h++) {
+            if (c->yarn_factor > 0.0f)
+                oc_apply_rope_yarn_f32(kj + h * hd, kj + h * hd, hd, rope_dim,
+                                       pos, rope_theta, c->yarn_factor,
+                                       c->yarn_orig_ctx);
+            else
+                oc_apply_rope_f32(kj + h * hd, kj + h * hd, hd, rope_dim, pos,
+                                  rope_theta);
+        }
+
+        /* Every token's K/V must land in the cache before ANY token attends:
+         * token j attends over 0..j, which includes tokens later in this
+         * same chunk's prefix. */
+        const size_t kv_off = ((size_t)layer * c->n_ctx + (size_t)pos)
+                            * s->kv_row_floats;
+        if (s->kv_type == OC_KV_Q8) {
+            const size_t g = s->kv_group;
+            const size_t sc_off = ((size_t)layer * c->n_ctx + (size_t)pos)
+                                * c->n_head_kv;
+            for (uint32_t h = 0; h < c->n_head_kv; h++) {
+                kv_q8_encode(kj + h * g, s->kv_k_q + kv_off + h * g,
+                             &s->kv_k_scale[sc_off + h], g);
+                kv_q8_encode(vj + h * g, s->kv_v_q + kv_off + h * g,
+                             &s->kv_v_scale[sc_off + h], g);
+            }
+        } else {
+            memcpy(s->kv_k + kv_off, kj, s->kv_row_floats * sizeof(float));
+            memcpy(s->kv_v + kv_off, vj, s->kv_row_floats * sizeof(float));
+        }
+    }
+
+    g_pf_t.rope_kv += pf_now() - t_rk0;
+
+    /* Attention over the whole chunk, parallel across (token, head).
+     *
+     * This has to be threaded, not just looped: prefill attention is
+     * quadratic in the chunk length, and every (token, head) pair sweeps its
+     * own slice of the KV cache. Left serial it dominates everything the
+     * batched matmuls just saved — for a 500-token chunk it is ~200 GB of
+     * cache reads on one core. Each pair writes only its own head slice of
+     * attn_out, so there is nothing to synchronize. */
+    double t0 = pf_now();
+    AttnJob ajob = { s, b, layer, pos0, hd, c->n_head };
+    oc_parallel_for(n * c->n_head, attention_slice, &ajob);
+    g_pf_t.attn += pf_now() - t0;
+
+    /* Output projection + residual. */
+    double t_pr0 = pf_now();
+    mm_batch(&L->attn_output, b->attn_out, b->n_qo, b->proj, b->n_embd, n, b);
+    g_pf_t.proj += pf_now() - t_pr0;
+    for (size_t j = 0; j < n; j++) {
+        float *p = b->proj + j * b->n_embd;
+        if (L->post_attention_norm != NULL) {
+            oc_rms_norm_f32(p, L->post_attention_norm, b->gath, c->n_embd,
+                            c->rms_norm_eps);
+            memcpy(p, b->gath, c->n_embd * sizeof(float));
+        }
+        float *x = b->x + j * b->n_embd;
+        for (size_t i = 0; i < c->n_embd; i++) x[i] += p[i];
+    }
+
+    /* Pre-FFN RMSNorm. */
+    for (size_t j = 0; j < n; j++) {
+        oc_rms_norm_f32(b->x + j * b->n_embd, L->ffn_norm,
+                        b->normed + j * b->n_embd, c->n_embd, c->rms_norm_eps);
+        if (!c->uses_gemma4 && c->norm_scale != 1.0f) {
+            float *nm = b->normed + j * b->n_embd;
+            for (size_t i = 0; i < c->n_embd; i++) nm[i] *= c->norm_scale;
+        }
+    }
+
+    if (c->num_experts > 0 && L->ffn_gate_inp.data != NULL &&
+        L->ffn_gate_exps.data != NULL) {
+        prefill_moe_ffn(s, L, b, n);
+    } else {
+        prefill_dense_ffn(s, L, b, n);
+    }
+
+    if (L->layer_output_scale != 0.0f && L->layer_output_scale != 1.0f) {
+        const float os = L->layer_output_scale;
+        for (size_t j = 0; j < n; j++) {
+            float *x = b->x + j * b->n_embd;
+            for (size_t i = 0; i < c->n_embd; i++) x[i] *= os;
+        }
+    }
+}
+
+/* Whether the batched path covers this model. Everything it does not cover
+ * falls back to the per-token loop, which is unchanged. MLA, Gemma 4's dual
+ * geometry (per-layer head_dim / k_eq_v aliasing) and the LayerNorm archs
+ * with their own forward passes each need their own batched form; none of
+ * them is the MoE prefill case this targets. */
+static bool prefill_batch_supported(const OcLlamaModel *m)
+{
+    if (m->arch == OC_ARCH_GPT2 || m->arch == OC_ARCH_GPTNEOX ||
+        m->arch == OC_ARCH_FALCON) return false;
+    if (m->cfg.uses_mla || m->cfg.is_longcat) return false;
+    if (m->cfg.uses_gemma4) return false;
+    return true;
+}
+
+OcError oc_llama_prefill(OcLlamaSession *sess, const uint32_t *tokens,
+                         size_t n_tokens, size_t chunk, float *logits_out)
+{
+    if (sess == NULL || sess->model == NULL || tokens == NULL)
+        return OC_ERR_INVALID_ARG;
+    if (n_tokens == 0) return OC_OK;
+
+    OcLlamaModel *m = sess->model;
+    if ((uint64_t)sess->pos + n_tokens > m->cfg.n_ctx) return OC_ERR_INVALID_ARG;
+
+    /* Fall back to the per-token path when batching cannot help or is not
+     * supported: identical results, just the old speed. */
+    if (!prefill_batch_supported(m) || n_tokens < 2) {
+        for (size_t i = 0; i < n_tokens; i++) {
+            float *lg = (i + 1 == n_tokens) ? logits_out : NULL;
+            OcError e = oc_llama_forward(sess, tokens[i], lg);
+            if (e != OC_OK) return e;
+        }
+        return OC_OK;
+    }
+
+    if (chunk == 0) chunk = OC_PREFILL_CHUNK;
+    if (chunk > n_tokens) chunk = n_tokens;
+    memset(&g_pf_t, 0, sizeof(g_pf_t));
+
+    PrefillBuf buf;
+    OcError e = prefill_buf_init(m, chunk, &buf);
+    if (e != OC_OK) {
+        /* Out of scratch — the per-token path needs none, so use it. */
+        for (size_t i = 0; i < n_tokens; i++) {
+            float *lg = (i + 1 == n_tokens) ? logits_out : NULL;
+            OcError e2 = oc_llama_forward(sess, tokens[i], lg);
+            if (e2 != OC_OK) return e2;
+        }
+        return OC_OK;
+    }
+
+    for (size_t base = 0; base < n_tokens; base += chunk) {
+        const size_t n = (n_tokens - base < chunk) ? (n_tokens - base) : chunk;
+        const int64_t pos0 = sess->pos;
+
+        for (size_t j = 0; j < n; j++)
+            embed_token_into(sess, tokens[base + j], buf.x + j * buf.n_embd);
+
+        for (uint32_t l = 0; l < m->cfg.n_layer; l++)
+            prefill_layer(sess, l, &buf, n, pos0);
+
+        sess->pos = pos0 + (int64_t)n;
+
+        /* Logits only for the very last token of the prompt: the lm_head is a
+         * vocab_size × n_embd matmul and nothing reads the others. */
+        const bool last_chunk = (base + n == n_tokens);
+        if (last_chunk && logits_out != NULL) {
+            const float *xl = buf.x + (n - 1) * buf.n_embd;
+            oc_rms_norm_f32(xl, m->final_norm, sess->normed, m->cfg.n_embd,
+                            m->cfg.rms_norm_eps);
+            if (!m->cfg.uses_gemma4 && m->cfg.norm_scale != 1.0f) {
+                for (size_t i = 0; i < m->cfg.n_embd; i++)
+                    sess->normed[i] *= m->cfg.norm_scale;
+            }
+            if (m->output.qtype == OC_QUANT_F32) {
+                oc_matvec_f32((const float *)m->output.data, m->output.rows,
+                              m->output.cols, sess->normed, logits_out);
+            } else {
+                oc_matvec_quantized(m->output.qtype, m->output.data,
+                                    m->output.rows, m->output.cols,
+                                    m->output.row_bytes, sess->normed,
+                                    logits_out, sess->dequant_temp);
+            }
+            if (m->cfg.logit_softcap > 0.0f) {
+                const float cap = m->cfg.logit_softcap;
+                const float inv = 1.0f / cap;
+                for (size_t i = 0; i < m->cfg.vocab_size; i++)
+                    logits_out[i] = tanhf(logits_out[i] * inv) * cap;
+            }
+        }
+    }
+
+    prefill_buf_free(&buf);
+    oc_log(OC_LOG_DEBUG,
+           "prefill phases (s): norm=%.2f qkv=%.2f rope_kv=%.2f attn=%.2f "
+           "proj=%.2f router=%.2f gather=%.2f expert_mm=%.2f scatter=%.2f",
+           g_pf_t.norm, g_pf_t.qkv, g_pf_t.rope_kv, g_pf_t.attn, g_pf_t.proj,
+           g_pf_t.router, g_pf_t.gather, g_pf_t.expert_mm, g_pf_t.scatter);
     return OC_OK;
 }
 

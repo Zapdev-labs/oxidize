@@ -314,6 +314,236 @@ void oc_matvec_quantized(OcGgufQuantizationType qtype, const uint8_t *data,
     oc_parallel_for(rows, matvec_quant_slice, &job);
 }
 
+/* ─── Batched matvec ─────────────────────────────────────────────────────
+ *
+ * Prefill reads the same weight matrix once per prompt token. At 18 GB of
+ * weights and ~1.5 GB touched per token on a 30B MoE, a 500-token prompt
+ * moves ~750 GB through DRAM — which is why per-token prefill measured 2.9
+ * tok/s against llama.cpp's 129. Dotting each weight row against a TILE of
+ * activations while it is still in L1 cuts that by the tile width.
+ *
+ * Why tile rather than loop over all n_vec inside the row loop: the row is
+ * ~1 KB but n_vec activations are ~2.3 KB each, so an untiled inner loop
+ * streams 1.2 MB of activations per row and simply swaps which operand is
+ * DRAM-bound. Tiling to ACT_TILE_BYTES keeps the activation tile in L2 and
+ * leaves the weights as the only streamed operand.
+ */
+
+/* Target footprint for one activation tile. Sized to sit comfortably inside
+ * a typical 1 MB private L2 alongside the streaming weight rows. */
+#define OC_ACT_TILE_BYTES (256u * 1024u)
+
+static size_t act_block_bytes(ActKind kind)
+{
+    return (kind == ACT_Q8_K) ? OC_OXK_BLOCK_Q8_K_SIZE : OC_OXK_BLOCK_Q8_0_SIZE;
+}
+
+static size_t act_blocks_for(ActKind kind, size_t cols)
+{
+    return (kind == ACT_Q8_K) ? cols / OC_OXK_QK_K : cols / OC_OXK_QK8_0;
+}
+
+/* The stride check from oc_matvec_quantized(): only trust a fused kernel when
+ * the weight row stride is exactly the packed size it assumes. */
+static bool fused_stride_ok(OcGgufQuantizationType qtype, size_t blocks,
+                            size_t row_bytes)
+{
+    const size_t expect = blocks * ((qtype == OC_QUANT_Q4_0) ? OC_OXK_BLOCK_Q4_0_SIZE
+                        : (qtype == OC_QUANT_Q4_1) ? OC_OXK_BLOCK_Q4_1_SIZE
+                        : (qtype == OC_QUANT_Q8_0) ? OC_OXK_BLOCK_Q8_0_SIZE
+                        : (qtype == OC_QUANT_Q5_K_S ||
+                           qtype == OC_QUANT_Q5_K_M) ? OC_OXK_BLOCK_Q5_K_SIZE
+                        : (qtype == OC_QUANT_Q6_K) ? OC_OXK_BLOCK_Q6_K_SIZE
+                                                   : OC_OXK_BLOCK_Q4_K_SIZE);
+    return row_bytes == expect;
+}
+
+/* Activations per tile, clamped so the tile always fits `budget` bytes. */
+static size_t act_tile_for(size_t abytes, size_t n_vec, size_t budget)
+{
+    if (abytes == 0) return 1;
+    size_t tile = budget / abytes;
+    if (tile == 0) tile = 1;      /* one activation always has to fit */
+    if (tile > n_vec) tile = n_vec;
+    return tile;
+}
+
+size_t oc_matvec_batch_scratch_bytes(size_t max_cols)
+{
+    /* Largest single-activation encoding at this width, over both Q8
+     * flavours. Computed from the block sizes directly rather than from
+     * fused_act_kind(), so the bound does not depend on `max_cols` itself
+     * being block-aligned. */
+    const size_t q8k = (max_cols / OC_OXK_QK_K) * OC_OXK_BLOCK_Q8_K_SIZE;
+    const size_t q80 = (max_cols / OC_OXK_QK8_0) * OC_OXK_BLOCK_Q8_0_SIZE;
+    const size_t abytes_max = q8k > q80 ? q8k : q80;
+    /* tile*abytes <= OC_ACT_TILE_BYTES whenever one activation fits the
+     * budget, and exactly abytes when it does not (tile clamps to 1). */
+    return abytes_max > OC_ACT_TILE_BYTES ? abytes_max : OC_ACT_TILE_BYTES;
+}
+
+typedef struct {
+    OcGgufQuantizationType qtype;
+    const uint8_t *data;
+    size_t         cols;
+    size_t         row_bytes;
+    size_t         blocks;
+    /* Fused path: `tile` activations packed back-to-back, `act_stride` bytes
+     * apart. NULL selects the dequant path, which reads `inputs` directly. */
+    const uint8_t *acts;
+    size_t         act_stride;
+    const float   *inputs;      /* dequant path only */
+    size_t         in_stride;
+    float         *outputs;
+    size_t         out_stride;
+    size_t         tile;        /* activations handled by this region */
+    float         *temp;        /* tid 0 dequant buffer (dequant path) */
+} BatchJob;
+
+static void matvec_batch_fused_slice(size_t begin, size_t end, size_t tid,
+                                     void *ud)
+{
+    (void)tid;
+    const BatchJob *j = (const BatchJob *)ud;
+    for (size_t r = begin; r < end; r++) {
+        const uint8_t *row = j->data + r * j->row_bytes;
+        /* Row loaded once, reused across the whole activation tile. */
+        for (size_t v = 0; v < j->tile; v++) {
+            j->outputs[v * j->out_stride + r] =
+                fused_row_dot(j->qtype, row, j->blocks,
+                              j->acts + v * j->act_stride);
+        }
+    }
+}
+
+static void matvec_batch_dequant_slice(size_t begin, size_t end, size_t tid,
+                                       void *ud)
+{
+    const BatchJob *j = (const BatchJob *)ud;
+    float *temp = j->temp;
+    if (tid != 0) {
+        temp = (float *)oc_parallel_scratch(tid, j->cols * sizeof(float));
+        if (temp == NULL) return;   /* pre-reserved by the caller */
+    }
+    for (size_t r = begin; r < end; r++) {
+        /* Dequantize the row once, then dot it against every activation —
+         * the same amortization the fused path gets, for types with no
+         * integer kernel. */
+        oc_quant_dequant_row(j->qtype, j->data + r * j->row_bytes,
+                             j->row_bytes, temp, j->cols);
+        for (size_t v = 0; v < j->tile; v++) {
+            const float *in = j->inputs + v * j->in_stride;
+            float acc = 0.0f;
+            for (size_t i = 0; i < j->cols; i++) acc += temp[i] * in[i];
+            j->outputs[v * j->out_stride + r] = acc;
+        }
+    }
+}
+
+void oc_matvec_quantized_batch(OcGgufQuantizationType qtype,
+                               const uint8_t *data, size_t rows, size_t cols,
+                               size_t row_bytes,
+                               const float *inputs, size_t in_stride,
+                               float *outputs, size_t out_stride,
+                               size_t n_vec, float *temp,
+                               uint8_t *act_scratch, size_t act_bytes)
+{
+    if (n_vec == 0 || rows == 0) return;
+
+    ActKind act_kind = oc_matvec_fused_enabled()
+                     ? fused_act_kind(qtype, cols) : ACT_NONE;
+    const size_t blocks = (act_kind != ACT_NONE)
+                        ? act_blocks_for(act_kind, cols) : 0;
+    const size_t abytes = (act_kind != ACT_NONE)
+                        ? blocks * act_block_bytes(act_kind) : 0;
+    /* A buffer too small for even one activation cannot use the fused path. */
+    const bool use_fused = (act_kind != ACT_NONE) && act_scratch != NULL &&
+                           abytes > 0 && act_bytes >= abytes &&
+                           fused_stride_ok(qtype, blocks, row_bytes);
+
+    if (use_fused) {
+        const size_t budget = act_bytes < OC_ACT_TILE_BYTES
+                            ? act_bytes : OC_ACT_TILE_BYTES;
+        const size_t tile = act_tile_for(abytes, n_vec, budget);
+
+        for (size_t base = 0; base < n_vec; base += tile) {
+            const size_t m = (n_vec - base < tile) ? (n_vec - base) : tile;
+            /* Quantize this tile of activations once; every row and every
+             * thread then reads them read-only. */
+            for (size_t v = 0; v < m; v++) {
+                const float *in = inputs + (base + v) * in_stride;
+                uint8_t *dst = act_scratch + v * abytes;
+                if (act_kind == ACT_Q8_K) quantize_act_q8_k(in, cols, dst);
+                else                      quantize_act_q8_0(in, cols, dst);
+            }
+            BatchJob job = { qtype, data, cols, row_bytes, blocks,
+                             act_scratch, abytes, NULL, in_stride,
+                             outputs + base * out_stride, out_stride, m,
+                             temp };
+            oc_parallel_for(rows, matvec_batch_fused_slice, &job);
+        }
+        return;
+    }
+
+    /* Dequant reference path. Pre-reserve worker scratch for the same reason
+     * oc_matvec_quantized() does: a failure inside a slice would silently
+     * leave that slice's outputs unwritten, and this function cannot report
+     * OOM. Falling back to serial is correct, just slower. */
+    const size_t nt = oc_parallel_n_threads();
+    bool serial = false;
+    if (nt > 1 && rows >= 8) {
+        for (size_t t = 1; t < nt; t++) {
+            if (oc_parallel_scratch(t, cols * sizeof(float)) == NULL) {
+                serial = true;
+                break;
+            }
+        }
+    }
+    /* One region over all n_vec: the row is dequantized once per call, so
+     * there is no tiling benefit to be had here — `temp` is the only
+     * per-row working set and it is already small. */
+    BatchJob job = { qtype, data, cols, row_bytes, 0, NULL, 0,
+                     inputs, in_stride, outputs, out_stride, n_vec, temp };
+    if (serial) matvec_batch_dequant_slice(0, rows, 0, &job);
+    else        oc_parallel_for(rows, matvec_batch_dequant_slice, &job);
+}
+
+typedef struct {
+    const float *data;
+    size_t       cols;
+    const float *inputs;
+    size_t       in_stride;
+    float       *outputs;
+    size_t       out_stride;
+    size_t       n_vec;
+} F32BatchJob;
+
+static void matvec_f32_batch_slice(size_t begin, size_t end, size_t tid,
+                                   void *ud)
+{
+    (void)tid;
+    const F32BatchJob *j = (const F32BatchJob *)ud;
+    for (size_t r = begin; r < end; r++) {
+        const float *row = j->data + r * j->cols;
+        for (size_t v = 0; v < j->n_vec; v++) {
+            const float *in = j->inputs + v * j->in_stride;
+            float acc = 0.0f;
+            for (size_t i = 0; i < j->cols; i++) acc += row[i] * in[i];
+            j->outputs[v * j->out_stride + r] = acc;
+        }
+    }
+}
+
+void oc_matvec_f32_batch(const float *data, size_t rows, size_t cols,
+                         const float *inputs, size_t in_stride,
+                         float *outputs, size_t out_stride, size_t n_vec)
+{
+    if (n_vec == 0 || rows == 0) return;
+    F32BatchJob job = { data, cols, inputs, in_stride, outputs, out_stride,
+                        n_vec };
+    oc_parallel_for(rows, matvec_f32_batch_slice, &job);
+}
+
 void oc_matvec_quantized_fused(OcGgufQuantizationType qtype,
                                const uint8_t *const *datas, const size_t *rows,
                                size_t cols, const size_t *row_bytes,

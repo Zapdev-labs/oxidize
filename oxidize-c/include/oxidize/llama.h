@@ -394,6 +394,28 @@ size_t oc_llama_kv_cache_bytes(const OcLlamaModel *model, OcKvCacheType kv_type)
  * prompt prefill where only the KV cache matters). */
 OcError oc_llama_forward(OcLlamaSession *sess, uint32_t token, float *logits_out);
 
+/* Prefill a whole prompt, processing `chunk` tokens per pass so they share
+ * one sweep over the weights instead of one sweep each.
+ *
+ * Equivalent to calling oc_llama_forward() for tokens[0..n_tokens), with
+ * `logits_out` receiving the LAST token's logits (NULL to skip the lm_head).
+ * KV cache entries are written for positions sess->pos .. sess->pos+n-1 and
+ * the position advances by n_tokens.
+ *
+ * `chunk` of 0 selects the default. Models the batched path does not cover
+ * (MLA, LongCat, Gemma 4, and the LayerNorm architectures with their own
+ * forward passes) fall back to the per-token loop transparently, as does a
+ * scratch allocation failure — the result is the same either way.
+ *
+ * Numerics: every matmul quantizes each activation exactly as the
+ * single-vector path does (tiling changes only how many are in flight), so
+ * dense models come out bit-identical. MoE models differ at float-rounding
+ * level and only there: grouping tokens by expert means a token's expert
+ * contributions are summed in expert-index order rather than in descending
+ * gate order, and float addition is not associative. */
+OcError oc_llama_prefill(OcLlamaSession *sess, const uint32_t *tokens,
+                         size_t n_tokens, size_t chunk, float *logits_out);
+
 /* Reset position to 0 (start a new sequence; KV cache is overwritten on
  * subsequent forwards). Does NOT zero the cache. */
 void oc_llama_session_reset(OcLlamaSession *sess);

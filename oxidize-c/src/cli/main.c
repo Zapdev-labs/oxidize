@@ -370,32 +370,48 @@ static OcError run_generation(const OcCliArgs *args)
     uint32_t recent[RECENT_CAP];
     size_t recent_len = 0;
 
-    /* Prefill: forward all but the last prompt token (no sampling needed for
-     * those). The last prompt token's logits seed the generation loop. */
+    /* Prefill. Every prompt token is known up front, so on CPU they go
+     * through oc_llama_prefill(), which pushes a chunk of them through each
+     * weight matrix together instead of sweeping the whole model once per
+     * token. The last token's logits seed the generation loop.
+     *
+     * The CUDA path keeps the per-token loop: its forward already uploads the
+     * weights once and the batched CPU scratch would not help it. */
     float *logits = sess.logits;
-    for (size_t i = 0; i + 1 < n_ids; i++) {
-        if (use_cuda)
+    uint32_t next_tok = ids[n_ids - 1];
+    const double prefill_start = wall_now();
+    if (use_cuda) {
+        for (size_t i = 0; i + 1 < n_ids; i++) {
             e = oc_cuda_forward(&cuda_ctx, ids[i], sess.pos, NULL);
-        else
-            e = oc_llama_forward(&sess, ids[i], NULL);   /* KV cache only */
-        if (e != OC_OK) {
-            fprintf(stderr, "error: prefill forward failed at token %zu (%s)\n",
-                    i, oc_error_msg(e));
-            break;
+            if (e != OC_OK) {
+                fprintf(stderr,
+                        "error: prefill forward failed at token %zu (%s)\n",
+                        i, oc_error_msg(e));
+                break;
+            }
+            sess.pos++;
         }
-        if (use_cuda) sess.pos++;
+        if (e == OC_OK) {
+            e = oc_cuda_forward(&cuda_ctx, next_tok, sess.pos, logits);
+            sess.pos++;
+        }
+    } else {
+        e = oc_llama_prefill(&sess, ids, n_ids, args->batch_size, logits);
+        if (e != OC_OK) {
+            fprintf(stderr, "error: prefill failed (%s)\n", oc_error_msg(e));
+        }
+    }
+    if (e == OC_OK) {
+        const double pf = wall_now() - prefill_start;
+        if (pf > 0.0) {
+            oc_log(OC_LOG_INFO, "prefill: %zu tokens in %.3fs = %.2f tok/s",
+                   n_ids, pf, (double)n_ids / pf);
+        }
+    }
+    /* Seed the repeat-penalty ring with the prompt. */
+    for (size_t i = 0; i + 1 < n_ids && e == OC_OK; i++) {
         if (recent_len < RECENT_CAP) recent[recent_len++] = ids[i];
         else recent[i % RECENT_CAP] = ids[i];
-    }
-
-    /* Forward the last prompt token WITH logits to start generation. */
-    uint32_t next_tok = ids[n_ids - 1];
-    if (e == OC_OK) {
-        if (use_cuda)
-            e = oc_cuda_forward(&cuda_ctx, next_tok, sess.pos, logits);
-        else
-            e = oc_llama_forward(&sess, next_tok, logits);
-        if (use_cuda) sess.pos++;
     }
     if (e != OC_OK) {
         fprintf(stderr, "error: seed forward failed (%s)\n", oc_error_msg(e));
