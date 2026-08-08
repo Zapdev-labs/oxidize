@@ -210,6 +210,115 @@ float oc_oxk_dot_q4_k_q8_k_scalar(const uint8_t *row, size_t blocks,
     return sum;
 }
 
+/* ─── Prepared Q4_K rows ────────────────────────────────────────────────
+ *
+ * Layout of the prep scratch, one contiguous block (floats first so the
+ * whole thing only needs float alignment):
+ *
+ *   float d[blocks]           per-block weight scale
+ *   float dmin[blocks]        per-block minimum scale
+ *   uint8 codes[blocks*256]   nibbles expanded to bytes, in element order
+ *   uint8 sc[blocks*8]        6-bit scale per 32-element sub-group
+ *   uint8 mn[blocks*8]        6-bit min   per 32-element sub-group
+ *
+ * Sub-group j covers elements [j*32, j*32+32) of the block, matching the
+ * activation's own layout, so the dot is a straight elementwise product
+ * with no index arithmetic.
+ */
+#define OC_Q4K_SUBGROUPS 8u
+
+size_t oc_oxk_q4_k_prep_bytes(size_t blocks)
+{
+    return blocks * (2u * sizeof(float) + OC_OXK_QK_K + 2u * OC_Q4K_SUBGROUPS);
+}
+
+static void q4k_prep_ptrs(void *scratch, size_t blocks, float **d, float **dmin,
+                          uint8_t **codes, uint8_t **sc, uint8_t **mn)
+{
+    float *f = (float *)scratch;
+    *d    = f;
+    *dmin = f + blocks;
+    uint8_t *u = (uint8_t *)(f + 2 * blocks);
+    *codes = u;
+    *sc    = u + blocks * OC_OXK_QK_K;
+    *mn    = *sc + blocks * OC_Q4K_SUBGROUPS;
+}
+
+void oc_oxk_q4_k_prep_row(const uint8_t *row, size_t blocks, void *scratch)
+{
+    float *d, *dmin;
+    uint8_t *codes, *sc, *mn;
+    q4k_prep_ptrs(scratch, blocks, &d, &dmin, &codes, &sc, &mn);
+
+    for (size_t b = 0; b < blocks; b++) {
+        const uint8_t *wb = row + b * OC_OXK_BLOCK_Q4_K_SIZE;
+        d[b]    = oc_oxk_f16_le_to_f32(wb);
+        dmin[b] = oc_oxk_f16_le_to_f32(wb + 2);
+        const uint8_t *scales = wb + 4;
+        const uint8_t *qs     = wb + 16;
+
+        for (unsigned j = 0; j < OC_Q4K_SUBGROUPS; j++) {
+            oc_oxk_get_scale_min_k4(j, scales, &sc[b * OC_Q4K_SUBGROUPS + j],
+                                    &mn[b * OC_Q4K_SUBGROUPS + j]);
+        }
+
+        /* Nibble order: within group gp, the low nibble of qs[gp*32+l] is
+         * element gp*64+l and the high nibble is element gp*64+32+l — i.e.
+         * sub-groups 2gp and 2gp+1. Same unpacking the scalar dot does
+         * inline, hoisted out of the activation loop. */
+        uint8_t *c = codes + b * OC_OXK_QK_K;
+        for (unsigned gp = 0; gp < 4; gp++) {
+            const uint8_t *src = qs + gp * 32;
+            uint8_t *lo = c + gp * 64;
+            uint8_t *hi = lo + 32;
+            for (unsigned l = 0; l < 32; l++) {
+                lo[l] = (uint8_t)(src[l] & 0x0Fu);
+                hi[l] = (uint8_t)(src[l] >> 4);
+            }
+        }
+    }
+}
+
+float oc_oxk_dot_q4_k_prepped(const void *scratch, size_t blocks,
+                              const uint8_t *q8)
+{
+    float *d, *dmin;
+    uint8_t *codes, *sc, *mn;
+    q4k_prep_ptrs((void *)(uintptr_t)scratch, blocks, &d, &dmin, &codes, &sc,
+                  &mn);
+
+    float sum = 0.0f;
+    for (size_t b = 0; b < blocks; b++) {
+        const uint8_t *qb = q8 + b * OC_OXK_BLOCK_Q8_K_SIZE;
+        float dq;
+        memcpy(&dq, qb, 4);
+        const int8_t  *q8v   = (const int8_t *)(qb + 4);
+        const uint8_t *bsums = qb + 4 + OC_OXK_QK_K;
+        const uint8_t *c     = codes + b * OC_OXK_QK_K;
+        const uint8_t *scb   = sc + b * OC_Q4K_SUBGROUPS;
+        const uint8_t *mnb   = mn + b * OC_Q4K_SUBGROUPS;
+
+        int32_t pos = 0, min_acc = 0;
+        for (unsigned j = 0; j < OC_Q4K_SUBGROUPS; j++) {
+            const uint8_t *cj = c + j * 32;
+            const int8_t  *qj = q8v + j * 32;
+            /* Unsigned code x signed activation, widening to int32 — the
+             * exact shape of VNNI's vpdpbusd, and a pattern gcc vectorizes
+             * on its own when the build allows it. */
+            int32_t s = 0;
+            for (unsigned l = 0; l < 32; l++) s += (int32_t)cj[l] * (int32_t)qj[l];
+            pos += (int32_t)scb[j] * s;
+            min_acc += (int32_t)mnb[j] *
+                       ((int32_t)oc_oxk_read_q8_k_bsum(bsums, j * 2) +
+                        (int32_t)oc_oxk_read_q8_k_bsum(bsums, j * 2 + 1));
+        }
+        /* Same per-block float accumulation as the packed kernel, so the
+         * two agree bit-for-bit rather than merely closely. */
+        sum += d[b] * dq * (float)pos - dmin[b] * dq * (float)min_acc;
+    }
+    return sum;
+}
+
 float oc_oxk_dot_q5_k_q8_k_scalar(const uint8_t *row, size_t blocks,
                                    const uint8_t *q8)
 {

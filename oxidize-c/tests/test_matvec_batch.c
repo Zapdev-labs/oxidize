@@ -18,6 +18,7 @@
 #include <criterion/criterion.h>
 
 #include "oxidize/matvec.h"
+#include "oxidize/oxk.h"
 #include "oxidize/quant.h"
 
 #include <math.h>
@@ -226,6 +227,51 @@ Test(matvec_batch, scratch_size_is_a_bound)
         cr_assert_leq(oc_matvec_batch_scratch_bytes(cols), bound,
                       "cols=%zu needs more scratch than the bound for %zu",
                       cols, widest);
+    }
+}
+
+/* The prepared-row Q4_K kernel is what the batched path actually runs. It
+ * hoists the nibble unpack and scale decode out of the activation loop, so
+ * it must agree with the packed kernel to the bit — the integer sums are the
+ * same values in a different (associative) order and the per-block float
+ * accumulation order is unchanged, so "close" would mean a real bug. */
+Test(matvec_batch, q4k_prepped_matches_packed)
+{
+    uint32_t seed = 31337u;
+    for (size_t blocks = 1; blocks <= 16; blocks++) {
+        const size_t cols = blocks * 256;
+        const size_t row_bytes = oc_quantized_size(OC_QUANT_Q4_K_M, cols);
+        uint8_t *row = malloc(row_bytes);
+        float *src = malloc(cols * sizeof(float));
+        float *act_f = malloc(cols * sizeof(float));
+        uint8_t *act = malloc(oc_matvec_batch_scratch_bytes(cols));
+        void *prep = malloc(oc_oxk_q4_k_prep_bytes(blocks));
+        cr_assert(row && src && act_f && act && prep);
+
+        for (size_t i = 0; i < cols; i++) src[i] = frand(&seed);
+        cr_assert_eq(oc_quant_pack_row(OC_QUANT_Q4_K_M, src, cols, row,
+                                       row_bytes), OC_OK);
+        oc_oxk_q4_k_prep_row(row, blocks, prep);
+
+        /* Several activations against the one prepared row — the reuse the
+         * batched path depends on. */
+        for (int t = 0; t < 4; t++) {
+            for (size_t i = 0; i < cols; i++) act_f[i] = frand(&seed);
+            /* Pack it exactly as the matvec would, by round-tripping through
+             * a 1-vector batch call and comparing the two kernels' dots. */
+            float packed_out = 0.0f, prepped_out = 0.0f;
+            oc_matvec_quantized_batch(OC_QUANT_Q4_K_M, row, 1, cols, row_bytes,
+                                      act_f, cols, &packed_out, 1, 1, src,
+                                      act, oc_matvec_batch_scratch_bytes(cols));
+            /* n_vec == 1 takes the packed kernel; drive the prepared one by
+             * hand off the same packed activation the batch just built. */
+            prepped_out = oc_oxk_dot_q4_k_prepped(prep, blocks, act);
+            cr_assert_float_eq(prepped_out, packed_out, 0.0f,
+                               "blocks=%zu t=%d: prepped %.9g != packed %.9g",
+                               blocks, t, (double)prepped_out,
+                               (double)packed_out);
+        }
+        free(row); free(src); free(act_f); free(act); free(prep);
     }
 }
 

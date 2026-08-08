@@ -416,6 +416,34 @@ static void matvec_batch_fused_slice(size_t begin, size_t end, size_t tid,
     }
 }
 
+/* Q4_K with the row decode hoisted out of the activation loop.
+ *
+ * The generic slice above still pays the full unpack — 256 nibbles and 8
+ * six-bit scale/min pairs per block — once per (row, activation) pair, so a
+ * 112-wide tile decodes every row 112 times. Decoding once per row and
+ * dotting the prepared form against the tile removes all but 1/tile of that
+ * work. Bit-exact with the packed kernel; see oc_oxk_dot_q4_k_prepped(). */
+static void matvec_batch_q4k_slice(size_t begin, size_t end, size_t tid,
+                                   void *ud)
+{
+    const BatchJob *j = (const BatchJob *)ud;
+    void *prep = oc_parallel_scratch(tid, oc_oxk_q4_k_prep_bytes(j->blocks));
+    if (prep == NULL) {
+        /* Pre-reserved by the caller, so this should not happen; fall back
+         * rather than leave the slice's outputs unwritten. */
+        matvec_batch_fused_slice(begin, end, tid, ud);
+        return;
+    }
+    for (size_t r = begin; r < end; r++) {
+        oc_oxk_q4_k_prep_row(j->data + r * j->row_bytes, j->blocks, prep);
+        for (size_t v = 0; v < j->tile; v++) {
+            j->outputs[v * j->out_stride + r] =
+                oc_oxk_dot_q4_k_prepped(prep, j->blocks,
+                                        j->acts + v * j->act_stride);
+        }
+    }
+}
+
 static void matvec_batch_dequant_slice(size_t begin, size_t end, size_t tid,
                                        void *ud)
 {
@@ -466,6 +494,18 @@ void oc_matvec_quantized_batch(OcGgufQuantizationType qtype,
                             ? act_bytes : OC_ACT_TILE_BYTES;
         const size_t tile = act_tile_for(abytes, n_vec, budget);
 
+        /* Reserve every worker's prep buffer up front. Doing it inside the
+         * region would let an allocation failure silently skip a slice's
+         * outputs, and the function cannot report OOM. */
+        bool prep_q4k = (qtype == OC_QUANT_Q4_K_S || qtype == OC_QUANT_Q4_K_M);
+        if (prep_q4k) {
+            const size_t need = oc_oxk_q4_k_prep_bytes(blocks);
+            const size_t nthreads = oc_parallel_n_threads();
+            for (size_t t = 0; t < nthreads; t++) {
+                if (oc_parallel_scratch(t, need) == NULL) { prep_q4k = false; break; }
+            }
+        }
+
         for (size_t base = 0; base < n_vec; base += tile) {
             const size_t m = (n_vec - base < tile) ? (n_vec - base) : tile;
             /* Quantize this tile of activations once; every row and every
@@ -480,7 +520,14 @@ void oc_matvec_quantized_batch(OcGgufQuantizationType qtype,
                              act_scratch, abytes, NULL, in_stride,
                              outputs + base * out_stride, out_stride, m,
                              temp };
-            oc_parallel_for(rows, matvec_batch_fused_slice, &job);
+            /* Hoisting the Q4_K row decode only pays once there is more than
+             * one activation to amortize it over; at m == 1 it is pure
+             * overhead. */
+            if (prep_q4k && m > 1) {
+                oc_parallel_for(rows, matvec_batch_q4k_slice, &job);
+            } else {
+                oc_parallel_for(rows, matvec_batch_fused_slice, &job);
+            }
         }
         return;
     }

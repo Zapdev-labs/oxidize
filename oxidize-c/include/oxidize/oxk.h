@@ -157,6 +157,34 @@ float oc_oxk_dot_q6_k_q8_k(const uint8_t *row, size_t blocks_per_row,
 float oc_oxk_dot_q8_0_q8_0(const uint8_t *row, size_t blocks_per_row,
                             const uint8_t *q8);
 
+/* ─── Prepared Q4_K rows (batched matmul) ────────────────────────────────
+ *
+ * oc_oxk_dot_q4_k_q8_k() re-derives the weight row on every call: it
+ * unpacks 256 nibbles and decodes 8 six-bit scale/min pairs per block. For
+ * a single dot that is unavoidable, but batched prefill dots one row
+ * against a whole tile of activations, and repeating that decode per
+ * activation is the dominant cost — with a 112-wide tile the same row is
+ * unpacked 112 times.
+ *
+ * Splitting it lets the decode happen once per row: prep expands the
+ * nibbles to bytes and lifts out the scales, then each dot is a plain
+ * unsigned×signed integer product, which is also the shape VNNI wants.
+ *
+ * oc_oxk_dot_q4_k_prepped() is bit-exact with oc_oxk_dot_q4_k_q8_k(): the
+ * integer accumulation is the same values in a different (associative)
+ * order, and the per-block float accumulation order is unchanged. */
+
+/* Scratch bytes oc_oxk_q4_k_prep_row() needs for a row of `blocks`. */
+size_t oc_oxk_q4_k_prep_bytes(size_t blocks);
+
+/* Decode one packed Q4_K row into `scratch` (>= oc_oxk_q4_k_prep_bytes()).
+ * `scratch` must be suitably aligned for float — malloc'd memory is. */
+void oc_oxk_q4_k_prep_row(const uint8_t *row, size_t blocks, void *scratch);
+
+/* Dot a prepared row against one packed Q8_K activation. */
+float oc_oxk_dot_q4_k_prepped(const void *scratch, size_t blocks,
+                              const uint8_t *q8);
+
 /* Quantized weight × f32-input matvec. `w` is `n_rows` rows of `row_bytes`
  * each, laid out back-to-back; `x` is the f32 activation vector of length
  * `row_bytes / block_size * elements_per_block`; `out` receives `n_rows`
