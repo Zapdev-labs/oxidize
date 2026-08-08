@@ -199,9 +199,25 @@ static OcError inspect_from_gguf(const OcGgufFile *f, uint64_t file_size,
     /* General name. */
     copy_meta_str(f, "general.name", out->name, sizeof(out->name));
 
-    /* Core dimensions — try architecture-specific keys. */
+    /* Core dimensions — try architecture-specific keys.
+     *
+     * The prefix must be the RAW `general.architecture` string, not the
+     * normalized enum name: a qwen3moe GGUF namespaces its keys under
+     * "qwen3moe.", but oc_model_arch_name() folds every Qwen variant to
+     * "qwen", so building the prefix from out->arch missed every lookup and
+     * reported a model with 0 layers, 0 heads and 0 embedding width. Fall
+     * back to the enum name only when the file carries no architecture key.
+     * (llama.c and config.c already key off the raw string; only this
+     * reporting path did not.) */
     char arch_prefix[80];
-    snprintf(arch_prefix, sizeof(arch_prefix), "%s.", out->arch);
+    const char *raw_arch = NULL;
+    size_t raw_arch_len = 0;
+    if (oc_gguf_metadata_get_str(f, "general.architecture", &raw_arch,
+                                 &raw_arch_len) && raw_arch && *raw_arch) {
+        snprintf(arch_prefix, sizeof(arch_prefix), "%s.", raw_arch);
+    } else {
+        snprintf(arch_prefix, sizeof(arch_prefix), "%s.", out->arch);
+    }
 
     /* Build prefixed key lookup. We try both "arch.key" and common
      * HuggingFace-style keys. */
@@ -216,10 +232,14 @@ static OcError inspect_from_gguf(const OcGgufFile *f, uint64_t file_size,
     snprintf(key_buf, sizeof(key_buf), "%sblock_count", arch_prefix);
     out->n_layer = get_meta_u32(f, key_buf, 0);
 
-    snprintf(key_buf, sizeof(key_buf), "%shead_count", arch_prefix);
+    /* GGUF namespaces these under `<arch>.attention.`, not `<arch>.` — the
+     * unqualified spellings below never matched any real file, so head counts
+     * always fell back to their defaults (0, and then n_head_kv = n_head,
+     * which also silently reported GQA models as non-GQA). */
+    snprintf(key_buf, sizeof(key_buf), "%sattention.head_count", arch_prefix);
     out->n_head = get_meta_u32(f, key_buf, 0);
 
-    snprintf(key_buf, sizeof(key_buf), "%shead_count_kv", arch_prefix);
+    snprintf(key_buf, sizeof(key_buf), "%sattention.head_count_kv", arch_prefix);
     /* If kv heads not specified, default to n_head (no GQA). */
     out->n_head_kv = get_meta_u32(f, key_buf, out->n_head);
 
@@ -231,16 +251,29 @@ static OcError inspect_from_gguf(const OcGgufFile *f, uint64_t file_size,
     /* Some GGUFs store it as a model-level key without the arch prefix. */
     out->vocab_size = get_meta_u32(f, key_buf, 0);
     if (out->vocab_size == 0) {
-        out->vocab_size = get_meta_u32(f, "tokenizer.ggml.tokens.size", 0);
+        out->vocab_size = get_meta_u32(f, "general.vocab_size", 0);
+    }
+    if (out->vocab_size == 0) {
+        /* No scalar key: take it from the length of the token array itself.
+         * (There is no "tokenizer.ggml.tokens.size" key in GGUF — the old
+         * lookup for it always returned 0, so every model whose vocab size
+         * was implicit reported 0 tokens.) */
+        const OcGgufMetadataValue *toks =
+            oc_gguf_metadata_get(f, "tokenizer.ggml.tokens");
+        if (toks != NULL && toks->type == OC_GGUF_MT_ARRAY) {
+            out->vocab_size = (uint32_t)toks->v.arr.len;
+        }
     }
 
-    /* RoPE. */
-    snprintf(key_buf, sizeof(key_buf), "%srope_freq_base", arch_prefix);
+    /* RoPE. The GGUF key is `<arch>.rope.freq_base`; the old `rope_freq_base`
+     * spelling matched nothing, so every model reported the 10000.0 default
+     * (Qwen3-30B-A3B actually uses 1e6). */
+    snprintf(key_buf, sizeof(key_buf), "%srope.freq_base", arch_prefix);
     out->rope_freq_base = get_meta_f32(f, key_buf, 10000.0f);
     out->uses_rope = !oc_model_arch_uses_alibi(arch);
 
-    /* Sliding window attention. */
-    snprintf(key_buf, sizeof(key_buf), "%ssliding_window", arch_prefix);
+    /* Sliding window attention (`<arch>.attention.sliding_window`). */
+    snprintf(key_buf, sizeof(key_buf), "%sattention.sliding_window", arch_prefix);
     out->sliding_window = get_meta_u32(f, key_buf, 0);
 
     /* Architecture-specific feature flags. */
