@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from "react"
+import { useMemo } from "react"
 
-import { readGgufHeader, formatValue, ggmlTypeName, type GgufHeader } from "../engine/gguf.js"
+import { formatValue, ggmlTypeName, type GgufHeader } from "../engine/gguf.js"
 import { useStore, type State } from "../state/store.js"
 import { c, glyph } from "../theme.js"
 import { bytes, ellipsizeStart, fuzzy, pad, padStart, params as fmtParams } from "../util/format.js"
@@ -33,10 +33,9 @@ function Row({
       <span fg={selected ? c.bg : loaded ? c.accent : c.faint}>{loaded ? " ▸ " : "   "}</span>
       {cells.map((cell, i) => {
         const w = cols[i]!
-        const clipped = cell.length > w ? cell.slice(0, w - 1) + "…" : cell
         return (
           <span key={i} fg={selected ? c.bg : i === 0 ? fg : c.dim}>
-            {(i === 0 ? "" : " ") + (i === 0 ? pad(clipped, w) : padStart(clipped, w))}
+            {(i === 0 ? "" : " ") + (i === 0 ? pad(cell, w) : padStart(cell, w))}
           </span>
         )
       })}
@@ -44,20 +43,7 @@ function Row({
   )
 }
 
-function Inspect({ path, onClose }: { path: string; onClose: () => void }) {
-  const [header, setHeader] = useState<GgufHeader | null>(null)
-  const [error, setError] = useState<string | null>(null)
-
-  useEffect(() => {
-    let live = true
-    readGgufHeader(path)
-      .then((h) => live && setHeader(h))
-      .catch((e) => live && setError(String(e)))
-    return () => {
-      live = false
-    }
-  }, [path])
-
+function Inspect({ path, header, error }: { path: string; header?: GgufHeader; error?: string }) {
   const meta = header ? [...header.metadata.entries()] : []
 
   return (
@@ -119,8 +105,6 @@ export function ModelsView({ height, width }: { height: number; width: number })
   const loadedPath = useStore((s) => s.server.modelPath)
   const rows = useStore(filteredModels)
 
-  // Columns are dropped right-to-left as the terminal narrows so the name column
-  // never falls below a readable width. Widths cover "▸ " + name + " " per cell.
   const { cols, keys, headers } = useMemo(() => {
     const all = [
       { key: "size", header: "SIZE", w: 7 },
@@ -130,20 +114,21 @@ export function ModelsView({ height, width }: { height: number; width: number })
       { key: "ctx", header: "CTX", w: 9 },
       { key: "source", header: "SOURCE", w: 10 },
     ] as const
-    const budget = width - 2 - 3 - 28 // 28 = minimum name column
+    const content = Math.max(1, width - 2 - 3)
+    const minName = Math.min(28, Math.max(8, content))
     let kept = all.length
-    while (kept > 1 && all.slice(0, kept).reduce((a, x) => a + x.w + 1, 0) > budget) kept--
+    while (kept > 0 && content - all.slice(0, kept).reduce((a, x) => a + x.w + 1, 0) < minName) kept--
     const shown = all.slice(0, kept)
     const tail = shown.reduce((a, x) => a + x.w + 1, 0)
     return {
-      cols: [Math.max(18, width - 2 - 3 - tail), ...shown.map((x) => x.w)],
+      cols: [Math.max(1, content - tail), ...shown.map((x) => x.w)],
       keys: shown.map((x) => x.key as string),
       headers: ["NAME", ...shown.map((x) => x.header)],
     }
   }, [width])
 
   if (models.inspect) {
-    return <Inspect path={models.inspect} onClose={() => {}} />
+    return <Inspect {...models.inspect} />
   }
 
   const bodyHeight = Math.max(1, height - 4)

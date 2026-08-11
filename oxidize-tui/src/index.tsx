@@ -113,11 +113,14 @@ createRoot(renderer).render(<App />)
 const launcher = resolveLauncher()
 log("tui", `engine: ${launcher.cmd} (${launcher.label})`)
 
-void rescanModels().then(() => {
-  if (cli.api) return attach(cli.api)
-  if (cli.model) return loadModel(resolve(cli.model))
+if (cli.api) {
+  void attach(cli.api)
+} else if (cli.model) {
+  void loadModel(resolve(cli.model))
+} else {
   set({ view: "models" })
-})
+}
+void rescanModels()
 
 const bye = () => {
   shutdown()

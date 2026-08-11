@@ -61,16 +61,6 @@ bool oc_cuda_mmq_matvec(uint32_t qtype, const void *d_weights,
                         const float *d_x, float *d_out,
                         size_t rows, size_t cols, void *stream);
 
-/* Batched form for prefill: `n_vec` activation vectors of `x_stride` floats
- * in `d_x`, `n_vec` output vectors of `out_stride` floats in `d_out` (both
- * activation-major, matching the CPU batch path). One warp dots each weight
- * row against a tile of activations, so packed weights are fetched from DRAM
- * once per tile instead of once per token. */
-bool oc_cuda_mmq_matmul(uint32_t qtype, const void *d_weights,
-                        const float *d_x, float *d_out,
-                        size_t rows, size_t cols, size_t n_vec,
-                        size_t x_stride, size_t out_stride, void *stream);
-
 /* MoE variant of the above for a stacked expert tensor: expert `e` occupies
  * rows [e*rows, (e+1)*rows). The expert index is read on the device from
  * `d_expert_sel[slot]`, so router output never round-trips to the host and the

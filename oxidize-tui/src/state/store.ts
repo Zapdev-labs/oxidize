@@ -2,6 +2,7 @@
 import { useCallback, useRef, useSyncExternalStore } from "react"
 
 import type { MetricsSnapshot } from "../engine/metrics.js"
+import type { GgufHeader } from "../engine/gguf.js"
 import type { ModelEntry } from "../engine/models.js"
 
 export type View = "chat" | "models" | "monitor" | "logs"
@@ -49,7 +50,7 @@ export interface State {
     cursor: number
     filter: string
     filtering: boolean
-    inspect: string | null
+    inspect: { path: string; header?: GgufHeader; error?: string } | null
   }
 
   chat: {

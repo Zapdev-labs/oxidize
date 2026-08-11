@@ -8,6 +8,7 @@ oxidize_tokens_per_second 42.5
 oxidize_tokens_generated_total 1200
 oxidize_requests_total{method="POST",path="/v1/chat/completions",status="200"} 3
 oxidize_requests_total{method="GET",path="/v1/models",status="200"} 4
+oxidize_requests_total{method="GET",path="/metrics",status="200"} 99
 oxidize_kv_cache_blocks_used 12
 oxidize_kv_cache_blocks_total 64
 oxidize_model_inference_duration_seconds_sum 2.5
@@ -24,7 +25,7 @@ describe("metrics scrape", () => {
       const snap = await scrape(`http://127.0.0.1:${server.port}`)
       expect(snap.tokensPerSecond).toBe(42.5)
       expect(snap.tokensGenerated).toBe(1200)
-      expect(snap.requestsTotal).toBe(7) // both label sets
+      expect(snap.requestsTotal).toBe(7)
       expect(snap.kvBlocksUsed).toBe(12)
       expect(snap.kvBlocksTotal).toBe(64)
       expect(snap.inferenceMean).toBeCloseTo(0.5)

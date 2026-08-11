@@ -104,4 +104,15 @@ describe("gguf reader", () => {
     expect(ggmlTypeName(243)).toBe("AL5_XS")
     expect(ggmlTypeName(999)).toBe("T999")
   })
+
+  test("rejects an implausibly large metadata array before traversing it", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "oxidize-tui-"))
+    const path = join(dir, "bad-array.gguf")
+    const w = new Writer()
+    w.push(Buffer.from("GGUF", "ascii")).u32(3).u64(0).u64(1)
+    w.str("tokenizer.ggml.tokens").u32(9).u32(8).u64(1_000_001)
+    await writeFile(path, w.done())
+
+    await expect(readGgufHeader(path)).rejects.toThrow(/absurd array length/)
+  })
 })

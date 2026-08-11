@@ -17,6 +17,16 @@ Test(act, softmax_basic)
     cr_assert(out[1] > out[0]);
 }
 
+Test(act, yarn_scaled_position_zero_uses_explicit_amplitude)
+{
+    float input[] = {1.0f, -2.0f, 3.0f, -4.0f};
+    float output[4] = {0};
+    oc_apply_rope_yarn_scaled_f32(input, output, 4, 4, 0, 10000.0f,
+                                  4.0f, 2048, 1.25f);
+    for (size_t i = 0; i < 4; i++)
+        cr_assert_float_eq(output[i], input[i] * 1.25f, 1e-6f);
+}
+
 Test(act, softmax_uniform)
 {
     float in[] = {5.0f, 5.0f, 5.0f};

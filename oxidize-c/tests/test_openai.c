@@ -261,3 +261,24 @@ Test(openai, stream_request_returns_sse)
     oc_http_server_stop(&srv);
     oc_http_server_join(&srv);
 }
+
+Test(openai, invalid_stream_request_returns_json_error_before_sse)
+{
+    OcHttpServer srv;
+    memset(&g_state, 0, sizeof(g_state));
+    start_server(&srv);
+    oc_http_server_set_stream_authorizer(&srv, oc_openai_stream_authorize);
+    const char *body = "{\"prompt\":\"hello\",\"stream\":true}";
+    char req[512];
+    int n = snprintf(req, sizeof(req),
+        "POST /v1/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: %zu\r\n\r\n%s",
+        strlen(body), body);
+    size_t len;
+    char *resp = send_raw(srv.port, req, (size_t)n, &len);
+    cr_assert(strstr(resp, "503 Service Unavailable") != NULL);
+    cr_assert(strstr(resp, "text/event-stream") == NULL);
+    cr_assert(strstr(resp, "no model loaded") != NULL);
+    free(resp);
+    oc_http_server_stop(&srv);
+    oc_http_server_join(&srv);
+}

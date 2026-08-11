@@ -18,6 +18,7 @@ export interface ServerHandle {
   url: string
   pid?: number
   kill: () => void
+  exited: Promise<number>
 }
 
 type LogSink = (stream: "out" | "err" | "tui", line: string) => void
@@ -104,7 +105,8 @@ export async function startServer(
   pumpLines(proc.stdout as ReadableStream<Uint8Array>, (l) => log("out", l))
   pumpLines(proc.stderr as ReadableStream<Uint8Array>, (l) => log("err", l))
 
-  const url = `http://${host}:${port}`
+  const urlHost = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host
+  const url = `http://${urlHost}:${port}`
   const kill = () => {
     try {
       proc.kill("SIGTERM")
@@ -117,9 +119,10 @@ export async function startServer(
   }
 
   let exited = false
-  proc.exited.then((code) => {
+  const exitedPromise = proc.exited.then((code) => {
     exited = true
     log("tui", `server exited with code ${code}`)
+    return code
   })
 
   signal.addEventListener("abort", kill, { once: true })
@@ -134,5 +137,5 @@ export async function startServer(
     await Bun.sleep(300)
   }
 
-  return { url, pid: proc.pid, kill }
+  return { url, pid: proc.pid, kill, exited: exitedPromise }
 }

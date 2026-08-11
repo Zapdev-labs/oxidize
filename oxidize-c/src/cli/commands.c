@@ -535,7 +535,6 @@ OcError oc_cli_run_bench(OcCliContext *ctx)
         oc_llama_free(&model);
         return e;
     }
-
     const char *prompt = ctx->prompt;
     if (!prompt) prompt = "The quick brown fox jumps over the lazy dog.";
 
@@ -585,8 +584,9 @@ OcError oc_cli_run_bench(OcCliContext *ctx)
                n_ids, ctx->bench_iterations, ctx->bench_tokens);
     }
 
-    uint32_t total_iterations = ctx->bench_warmup + (uint32_t)ctx->bench_iterations;
-    for (uint32_t iter = 0; iter < total_iterations; iter++) {
+    const uint64_t total_iterations =
+        (uint64_t)ctx->bench_warmup + (uint64_t)ctx->bench_iterations;
+    for (uint64_t iter = 0; iter < total_iterations; iter++) {
         OcLlamaSession sess;
         if (oc_llama_session_init(&model, &sess) != OC_OK) break;
         float *logits = sess.logits;
@@ -614,7 +614,8 @@ OcError oc_cli_run_bench(OcCliContext *ctx)
         double pf_start = wall_now();
         OcLlamaSession pf_sess;
         memset(&pf_sess, 0, sizeof(pf_sess));
-        if (oc_llama_session_init(&model, &pf_sess) == OC_OK)
+        e = oc_llama_session_init(&model, &pf_sess);
+        if (e == OC_OK)
             e = oc_llama_prefill(&pf_sess, bench_ids, n_ids, 0, NULL);
         double pf_elapsed = wall_now() - pf_start;
         double pf_tps = (e == OC_OK && pf_elapsed > 0)
@@ -675,7 +676,6 @@ OcError oc_cli_run_inspect(OcCliContext *ctx)
         cli_error("inspect failed (%s)", oc_error_msg(e));
         return e;
     }
-
     if (ctx->output_format == OC_CLI_OUTPUT_JSON) {
         char buf[8192];
         size_t n = oc_inspect_format_json(&info, buf, sizeof(buf));
@@ -727,7 +727,6 @@ OcError oc_cli_run_quantize(OcCliContext *ctx)
         cli_error("quantization failed (%s)", oc_error_msg(e));
         return e;
     }
-
     if (ctx->output_format == OC_CLI_OUTPUT_JSON) {
         printf("{\"command\":\"quantize\",\"input\":\"%s\",\"output\":\"%s\","
                "\"target_type\":\"%s\",\"status\":\"ok\"}\n",
@@ -1483,6 +1482,7 @@ OcError oc_cli_run_serve(OcCliContext *ctx)
         }
         return e;
     }
+    oc_http_server_set_stream_authorizer(&srv, oc_openai_stream_authorize);
 
     if (ctx->output_format == OC_CLI_OUTPUT_JSON) {
         printf("{\"command\":\"serve\",\"host\":\"%s\",\"port\":%u,"
@@ -1578,6 +1578,7 @@ OcError oc_cli_run_serve_realtime(OcCliContext *ctx)
         free(tok); free(model);
         return e;
     }
+    oc_http_server_set_stream_authorizer(&srv, oc_openai_stream_authorize);
 
     if (ctx->output_format == OC_CLI_OUTPUT_JSON) {
         printf("{\"command\":\"serve-realtime\",\"host\":\"%s\",\"port\":%u,"

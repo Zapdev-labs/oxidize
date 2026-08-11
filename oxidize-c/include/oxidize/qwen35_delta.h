@@ -29,8 +29,11 @@ typedef struct {
     const float *conv_weight;
     size_t conv_weight_len;
     const float *ssm_a;
+    size_t ssm_a_len;
     const float *dt_bias;
+    size_t dt_bias_len;
     const float *norm_weight;
+    size_t norm_weight_len;
     float norm_eps;
 } OcQwen35DeltaParams;
 

@@ -366,55 +366,6 @@ MQ_DEFINE_MATVEC(k_mmq_matvec_q6k,    mq_q6k_group_dot)
 MQ_DEFINE_MATVEC(k_mmq_matvec_q8_0,   mq_q8_0_group_dot)
 MQ_DEFINE_MATVEC(k_mmq_matvec_iq4_xs, mq_iq4_xs_group_dot)
 
-/* ─── Batched matmul (prefill: many activations per weight sweep) ──────────
- *
- * The CUDA analog of the CPU prepped-multi path: one warp still owns one
- * output row, but dots it against MQ_MM_TILE activations before moving on.
- * The row's packed bytes are fetched once from DRAM and served from L1 for
- * the remaining tile — prefill's whole point is not re-streaming 18 GB of
- * weights per prompt token.
- *
- * x is `n_vec` activation vectors of `x_stride` floats; out is `n_vec`
- * output vectors of `out_stride` floats (both row-major, activation-major
- * like the CPU batch path). grid.y tiles the activations. */
-#define MQ_MM_TILE 4u
-
-#define MQ_DEFINE_MATMUL(NAME, DOT)                                          \
-__global__ void NAME(const uint8_t *w, const float *x, float *out,           \
-                     size_t rows, uint32_t n_groups, size_t row_bytes,       \
-                     uint32_t n_vec, size_t x_stride, size_t out_stride)     \
-{                                                                            \
-    const uint32_t lane = threadIdx.x & 31u;                                 \
-    const size_t row = (size_t)blockIdx.x * MQ_WARPS + (threadIdx.x >> 5);   \
-    if (row >= rows) return;                                                 \
-    const uint32_t v0 = blockIdx.y * MQ_MM_TILE;                             \
-    const uint32_t nv = (n_vec - v0 < MQ_MM_TILE) ? (n_vec - v0)             \
-                                                  : MQ_MM_TILE;              \
-    const uint8_t *rw = w + row * row_bytes;                                 \
-    float acc[MQ_MM_TILE] = { 0.0f, 0.0f, 0.0f, 0.0f };                     \
-    for (uint32_t g = lane; g < n_groups; g += 32u) {                        \
-        _Pragma("unroll")                                                    \
-        for (uint32_t t = 0u; t < MQ_MM_TILE; t++) {                         \
-            if (t < nv)                                                      \
-                acc[t] += DOT(rw, g,                                         \
-                              x + (size_t)(v0 + t) * x_stride +              \
-                              (size_t)g * 32u);                              \
-        }                                                                    \
-    }                                                                        \
-    _Pragma("unroll")                                                        \
-    for (uint32_t t = 0u; t < MQ_MM_TILE; t++) {                             \
-        const float r = mq_warp_reduce(acc[t]);                              \
-        if (lane == 0u && t < nv)                                            \
-            out[(size_t)(v0 + t) * out_stride + row] = r;                    \
-    }                                                                        \
-}
-
-MQ_DEFINE_MATMUL(k_mmq_matmul_q4k,    mq_q4k_group_dot)
-MQ_DEFINE_MATMUL(k_mmq_matmul_q5k,    mq_q5k_group_dot)
-MQ_DEFINE_MATMUL(k_mmq_matmul_q6k,    mq_q6k_group_dot)
-MQ_DEFINE_MATMUL(k_mmq_matmul_q8_0,   mq_q8_0_group_dot)
-MQ_DEFINE_MATMUL(k_mmq_matmul_iq4_xs, mq_iq4_xs_group_dot)
-
 /* MoE variant: the expert to use is read from device memory, so routing never
  * round-trips to the host and the whole token stays one async submission.
  * Expert `e` occupies rows [e*rows, (e+1)*rows) of the stacked tensor. */
@@ -670,52 +621,6 @@ extern "C" bool oc_cuda_mmq_matvec(uint32_t qtype, const void *d_weights,
     case OC_QUANT_IQ4_XS:
         k_mmq_matvec_iq4_xs<<<grid, block, 0, s>>>(w, d_x, d_out, rows,
                                                    n_groups, row_bytes);
-        break;
-    default:
-        return false;
-    }
-    return cudaGetLastError() == cudaSuccess;
-}
-
-extern "C" bool oc_cuda_mmq_matmul(uint32_t qtype, const void *d_weights,
-                                   const float *d_x, float *d_out,
-                                   size_t rows, size_t cols, size_t n_vec,
-                                   size_t x_stride, size_t out_stride,
-                                   void *stream)
-{
-    if (!d_weights || !d_x || !d_out || rows == 0 || n_vec == 0) return false;
-    const size_t row_bytes = oc_cuda_mmq_row_bytes(qtype, cols);
-    if (row_bytes == 0) return false;
-
-    const uint32_t n_groups = (uint32_t)(cols / 32u);
-    const uint32_t block = MQ_WARPS * 32u;
-    dim3 grid((unsigned)((rows + MQ_WARPS - 1u) / MQ_WARPS),
-              (unsigned)((n_vec + MQ_MM_TILE - 1u) / MQ_MM_TILE));
-    cudaStream_t s = (cudaStream_t)stream;
-    const uint8_t *w = (const uint8_t *)d_weights;
-
-    switch ((OcGgufQuantizationType)qtype) {
-    case OC_QUANT_Q4_K_S:
-    case OC_QUANT_Q4_K_M:
-        k_mmq_matmul_q4k<<<grid, block, 0, s>>>(w, d_x, d_out, rows,
-            n_groups, row_bytes, (uint32_t)n_vec, x_stride, out_stride);
-        break;
-    case OC_QUANT_Q5_K_S:
-    case OC_QUANT_Q5_K_M:
-        k_mmq_matmul_q5k<<<grid, block, 0, s>>>(w, d_x, d_out, rows,
-            n_groups, row_bytes, (uint32_t)n_vec, x_stride, out_stride);
-        break;
-    case OC_QUANT_Q6_K:
-        k_mmq_matmul_q6k<<<grid, block, 0, s>>>(w, d_x, d_out, rows,
-            n_groups, row_bytes, (uint32_t)n_vec, x_stride, out_stride);
-        break;
-    case OC_QUANT_Q8_0:
-        k_mmq_matmul_q8_0<<<grid, block, 0, s>>>(w, d_x, d_out, rows,
-            n_groups, row_bytes, (uint32_t)n_vec, x_stride, out_stride);
-        break;
-    case OC_QUANT_IQ4_XS:
-        k_mmq_matmul_iq4_xs<<<grid, block, 0, s>>>(w, d_x, d_out, rows,
-            n_groups, row_bytes, (uint32_t)n_vec, x_stride, out_stride);
         break;
     default:
         return false;

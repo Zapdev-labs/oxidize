@@ -181,6 +181,22 @@ Test(speculative, generate_rejects_zero_capacity)
         OC_ERR_INVALID_ARG);
 }
 
+Test(speculative, generate_rejects_qwen35_sessions)
+{
+    OcLlamaModel target = {0}, draft = {0};
+    target.cfg.vocab_size = draft.cfg.vocab_size = 1;
+    target.cfg.is_qwen35 = true;
+    OcLlamaSession target_sess = { .model = &target };
+    OcLlamaSession draft_sess = { .model = &draft };
+    OcSpeculativeConfig cfg = OC_SPECULATIVE_DEFAULT;
+    uint32_t prompt = 0, output = 0;
+    size_t output_len = 0;
+    cr_assert_eq(oc_speculative_generate(&target, &target_sess,
+        &draft, &draft_sess, &prompt, 1, &cfg, &output, &output_len, 1, NULL),
+        OC_ERR_INVALID_ARG);
+    cr_assert_eq(output_len, 0);
+}
+
 Test(speculative, generate_propagates_prefill_failure)
 {
     OcLlamaModel target = {0}, draft = {0};

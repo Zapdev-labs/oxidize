@@ -84,6 +84,16 @@ export async function scanModels(): Promise<ModelEntry[]> {
       } catch {
         continue
       }
+      if (shard) {
+        for (const sibling of files) {
+          if (sibling === path) continue
+          const siblingShard = SHARD_RE.exec(basename(sibling))
+          if (!siblingShard || siblingShard[1] !== shard[1] || siblingShard[3] !== shard[3]) continue
+          try {
+            size += (await stat(sibling)).size
+          } catch {}
+        }
+      }
       entries.push({
         path,
         name: shard ? `${shard[1]}.gguf` : name,

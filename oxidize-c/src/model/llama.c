@@ -2188,8 +2188,11 @@ static OcError forward_qwen35_recurrent(OcLlamaSession *s, uint32_t layer)
         .conv_weight_len = weights->ssm_conv1d.rows *
                            weights->ssm_conv1d.cols,
         .ssm_a = (const float *)weights->ssm_a.data,
+        .ssm_a_len = weights->ssm_a.rows * weights->ssm_a.cols,
         .dt_bias = (const float *)weights->ssm_dt_bias.data,
+        .dt_bias_len = weights->ssm_dt_bias.rows * weights->ssm_dt_bias.cols,
         .norm_weight = (const float *)weights->ssm_norm.data,
+        .norm_weight_len = weights->ssm_norm.rows * weights->ssm_norm.cols,
         .norm_eps = c->rms_norm_eps,
     };
     OcQwen35DeltaInput input = {
@@ -3091,8 +3094,11 @@ static OcError prefill_qwen35_recurrent(OcLlamaSession *s, uint32_t layer,
         .conv_weight = (const float *)L->ssm_conv1d.data,
         .conv_weight_len = L->ssm_conv1d.rows * L->ssm_conv1d.cols,
         .ssm_a = (const float *)L->ssm_a.data,
+        .ssm_a_len = L->ssm_a.rows * L->ssm_a.cols,
         .dt_bias = (const float *)L->ssm_dt_bias.data,
+        .dt_bias_len = L->ssm_dt_bias.rows * L->ssm_dt_bias.cols,
         .norm_weight = (const float *)L->ssm_norm.data,
+        .norm_weight_len = L->ssm_norm.rows * L->ssm_norm.cols,
         .norm_eps = c->rms_norm_eps,
     };
     double t_d0 = pf_now();

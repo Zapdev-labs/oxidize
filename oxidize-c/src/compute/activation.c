@@ -278,9 +278,12 @@ void oc_apply_rope_yarn_scaled_f32(const float *in, float *out, size_t head_dim,
         return;
     }
     if (rope_len > head_dim) rope_len = head_dim;
+    float mscale = (attn_factor >= 0.0f) ? attn_factor
+                                         : (1.0f + 0.1f * logf(yarn_factor));
     if (position == 0) {
         if (in != out)
             for (size_t i = 0; i < head_dim; i++) out[i] = in[i];
+        for (size_t i = 0; i < rope_len; i++) out[i] *= mscale;
         return;
     }
     /* Copy unrotated tail. */
@@ -298,9 +301,6 @@ void oc_apply_rope_yarn_scaled_f32(const float *in, float *out, size_t head_dim,
      * softmax scale -- and for LongCat (both terms 1) the RoPE share is
      * exactly 1.0, so baking 1.4787 in here would double-count against the
      * mscale_all_dim^2 already folded into the attention scale. */
-    float mscale = (attn_factor >= 0.0f) ? attn_factor
-                                         : (1.0f + 0.1f * logf(yarn_factor));
-
     /* Compute correction range.
      * corr_dim(n_dims, orig_ctx, n_rot, base) =
      *   n_dims * ln(orig_ctx / (n_rot * 2*PI)) / (2 * ln(base)) */

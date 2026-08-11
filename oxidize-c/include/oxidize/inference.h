@@ -81,10 +81,10 @@ typedef struct {
     float    yarn_mscale;
     float    yarn_mscale_all_dim;
 
-    /* LongCat: zero-computation experts occupying router slots
+    /* LongCat: identity experts occupying router slots
      * [num_experts, num_experts + zero_expert_count). They hold no weights
-     * and contribute no FFN branch output. Appended to preserve the layout
-     * of the pre-existing configuration fields. */
+     * and contribute their weighted normalized input to the FFN output.
+     * Appended to preserve the layout of the pre-existing configuration fields. */
     uint32_t zero_expert_count;
 } OcInferenceConfig;
 

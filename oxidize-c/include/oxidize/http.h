@@ -77,12 +77,18 @@ typedef void (*OcHttpHandler)(const OcHttpRequest *req,
                               size_t *out_body_len,
                               void *user_data);
 
+typedef bool (*OcHttpStreamAuthorize)(const OcHttpRequest *req,
+                                      int *out_status,
+                                      const char **out_body,
+                                      void *user_data);
+
 typedef struct OcHttpServer {
     int          listen_fd;
     uint16_t     port;
     size_t       n_threads;
     pthread_t   *threads;       /* worker pool                            */
     OcHttpHandler handler;
+    OcHttpStreamAuthorize stream_authorize;
     void        *user_data;
     _Atomic bool stop;           /* set by oc_http_server_stop              */
     bool         joined;        /* true after oc_http_server_join          */
@@ -95,6 +101,9 @@ typedef struct OcHttpServer {
 OcError oc_http_server_start(const char *host, uint16_t port, size_t n_threads,
                              OcHttpHandler handler, void *user_data,
                              OcHttpServer *out);
+
+void oc_http_server_set_stream_authorizer(OcHttpServer *s,
+                                          OcHttpStreamAuthorize authorize);
 
 /* Block until the server stops (or returns immediately if already stopped).
  * Internally joins all worker threads. */
@@ -110,6 +119,11 @@ OcError oc_http_server_stop(OcHttpServer *s);
 size_t oc_http_format_response(char *buf, size_t cap,
                                int status, const char *content_type,
                                const char *body, size_t body_len);
+
+/* Read a boolean at the top level of a JSON object. Keys inside strings or
+ * nested values are ignored. Returns `def` when the key is absent or is not
+ * a JSON boolean. */
+bool oc_http_json_bool_field(const char *json, const char *key, bool def);
 
 /* Human-readable status line for a code ("200 OK", "404 Not Found", ...). */
 const char *oc_http_status_line(int status);

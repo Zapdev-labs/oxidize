@@ -12,6 +12,7 @@ import { Prompt } from "./components/Prompt.js"
 import {
   cancelGeneration,
   clearChat,
+  inspectModel,
   loadModel,
   pullModel,
   rescanModels,
@@ -71,6 +72,11 @@ export function App() {
   useKeyboard((key: KeyEvent) => {
     const s = getState()
 
+    if (key.ctrl && key.name === "c") {
+      shutdown()
+      process.exit(0)
+    }
+
     if (s.overlay?.kind === "palette") {
       const matches = paletteMatches(s.overlay.query)
       if (key.name === "escape") return set({ overlay: null })
@@ -102,10 +108,6 @@ export function App() {
       return
     }
 
-    if (key.ctrl && key.name === "c") {
-      shutdown()
-      process.exit(0)
-    }
     if (key.ctrl && key.name === "k") {
       return set({ overlay: { kind: "palette", query: "", cursor: 0 } })
     }
@@ -175,7 +177,7 @@ export function App() {
         }
         case "i": {
           const entry = rows[Math.min(s.models.cursor, rows.length - 1)]
-          if (entry) setIn("models", { inspect: entry.path })
+          if (entry) void inspectModel(entry.path)
           return
         }
         case "/":

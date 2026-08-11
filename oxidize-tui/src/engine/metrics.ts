@@ -31,13 +31,22 @@ function parseFlat(text: string): Map<string, number> {
     // Sum across label sets: `foo{a="b"} 1` and `foo{a="c"} 2` -> foo = 3
     const brace = key.indexOf("{")
     const name = brace < 0 ? key : key.slice(0, brace)
+    if (name === "oxidize_requests_total" && /(?:^|,)path="\/metrics"(?:,|})/.test(key.slice(brace))) {
+      continue
+    }
     out.set(name, (out.get(name) ?? 0) + value)
   }
   return out
 }
 
-export async function scrape(url: string, timeoutMs = 2000): Promise<MetricsSnapshot> {
-  const res = await fetch(`${url}/metrics`, { signal: AbortSignal.timeout(timeoutMs) })
+export async function scrape(
+  url: string,
+  timeoutMs = 2000,
+  signal?: AbortSignal,
+): Promise<MetricsSnapshot> {
+  const timeout = AbortSignal.timeout(timeoutMs)
+  const combined = signal ? AbortSignal.any([signal, timeout]) : timeout
+  const res = await fetch(`${url}/metrics`, { signal: combined })
   if (!res.ok) throw new Error(`GET /metrics -> ${res.status}`)
   const m = parseFlat(await res.text())
   const g = (k: string) => m.get(k) ?? 0

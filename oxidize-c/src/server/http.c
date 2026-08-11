@@ -118,6 +118,8 @@ static bool parse_request(char *buf, size_t buf_len, OcHttpRequest *req,
                           int *out_status)
 {
     *out_status = 400;
+    req->stream_write = NULL;
+    req->stream_context = NULL;
     /* Find the header/body separator. */
     char *sep = memmem(buf, buf_len, "\r\n\r\n", 4);
     if (sep == NULL) {
@@ -193,21 +195,44 @@ static bool parse_request(char *buf, size_t buf_len, OcHttpRequest *req,
     return true;
 }
 
+bool oc_http_json_bool_field(const char *json, const char *key, bool def)
+{
+    size_t key_len = strlen(key);
+    size_t depth = 0;
+    bool in_string = false;
+    bool escaped = false;
+    for (const char *p = json; *p; p++) {
+        if (in_string) {
+            if (escaped) escaped = false;
+            else if (*p == '\\') escaped = true;
+            else if (*p == '"') in_string = false;
+            continue;
+        }
+        if (*p == '{' || *p == '[') { depth++; continue; }
+        if (*p == '}' || *p == ']') { if (depth > 0) depth--; continue; }
+        if (*p != '"') continue;
+        if (depth == 1 && strncmp(p + 1, key, key_len) == 0 &&
+            p[1 + key_len] == '"') {
+            const char *value = p + key_len + 2;
+            while (*value == ' ' || *value == '\t' || *value == '\r' || *value == '\n') value++;
+            if (*value++ != ':') return def;
+            while (*value == ' ' || *value == '\t' || *value == '\r' || *value == '\n') value++;
+            if (strncmp(value, "true", 4) == 0) return true;
+            if (strncmp(value, "false", 5) == 0) return false;
+            return def;
+        }
+        in_string = true;
+    }
+    return def;
+}
+
 static bool request_wants_completion_stream(const OcHttpRequest *req)
 {
     if (req->method != OC_HTTP_POST || req->body == NULL) return false;
     if (strcmp(req->path, "/v1/completions") != 0 &&
         strcmp(req->path, "/v1/chat/completions") != 0)
         return false;
-    const char *value = strstr(req->body, "\"stream\"");
-    if (value == NULL) return false;
-    value += strlen("\"stream\"");
-    while (*value == ' ' || *value == '\t' || *value == '\r' ||
-           *value == '\n') value++;
-    if (*value++ != ':') return false;
-    while (*value == ' ' || *value == '\t' || *value == '\r' ||
-           *value == '\n') value++;
-    return strncmp(value, "true", 4) == 0;
+    return oc_http_json_bool_field(req->body, "stream", false);
 }
 
 /* ─── Worker thread ────────────────────────────────────────────────────── */
@@ -421,6 +446,16 @@ static void *worker_main(void *arg)
         }
 
         const bool stream_started = request_wants_completion_stream(&req);
+        if (stream_started && srv->stream_authorize != NULL) {
+            int status = 400;
+            const char *body = NULL;
+            if (!srv->stream_authorize(&req, &status, &body, srv->user_data)) {
+                send_simple_response(fd, status, body);
+                free((void *)body);
+                close(fd);
+                continue;
+            }
+        }
         OcStreamHeartbeat heartbeat = { .fd = fd };
         pthread_t heartbeat_thread;
         bool heartbeat_running = false;
@@ -429,6 +464,7 @@ static void *worker_main(void *arg)
                 "HTTP/1.1 200 OK\r\n"
                 "Content-Type: text/event-stream\r\n"
                 "Cache-Control: no-cache\r\n"
+                "Access-Control-Allow-Origin: *\r\n"
                 "Connection: close\r\n\r\n"
                 ": oxidize\n\n";
             atomic_init(&heartbeat.stop, false);
@@ -572,6 +608,12 @@ OcError oc_http_server_start(const char *host, uint16_t port, size_t n_threads,
     oc_log(OC_LOG_INFO, "http: server listening on %s:%u (%zu threads)",
            host ? host : "0.0.0.0", out->port, n_threads);
     return OC_OK;
+}
+
+void oc_http_server_set_stream_authorizer(OcHttpServer *s,
+                                          OcHttpStreamAuthorize authorize)
+{
+    if (s != NULL) s->stream_authorize = authorize;
 }
 
 OcError oc_http_server_join(OcHttpServer *s)

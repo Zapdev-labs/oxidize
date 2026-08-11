@@ -4,6 +4,7 @@ import { basename } from "node:path"
 import { listModelIds, streamChat, type ChatMessage } from "../engine/api.js"
 import { scrape } from "../engine/metrics.js"
 import { enrich, scanModels } from "../engine/models.js"
+import { readGgufHeader, type GgufHeader } from "../engine/gguf.js"
 import { probe, startServer, type ServerHandle } from "../engine/server.js"
 import { resolveLauncher } from "../engine/binary.js"
 import { getState, nextId, set, setIn, toast, type Message } from "./store.js"
@@ -38,6 +39,19 @@ export async function rescanModels() {
       entries: m.entries.map((e) => (e.path === path ? { ...e, facts, factsError: error } : e)),
     }))
   })
+}
+
+export async function inspectModel(path: string): Promise<GgufHeader> {
+  setIn("models", { inspect: { path } })
+  try {
+    const header = await readGgufHeader(path)
+    if (getState().models.inspect?.path === path) setIn("models", { inspect: { path, header } })
+    return header
+  } catch (err) {
+    const error = err instanceof Error ? err.message : String(err)
+    if (getState().models.inspect?.path === path) setIn("models", { inspect: { path, error } })
+    throw err
+  }
 }
 
 /** `oxidize pull <repo>` into the HF cache, streaming progress into the log view. */
@@ -87,15 +101,24 @@ export function stopServer(quiet = false) {
     handle = null
   }
   stopMetrics()
-  setIn("server", { status: "stopped", url: null, pid: null, startedAt: null, detail: "" })
+  setIn("server", { status: "stopped", url: null, pid: null, startedAt: null, detail: "", external: false })
   if (!quiet) toast("server stopped")
 }
 
 export async function attach(url: string) {
+  stopServer(true)
   const clean = url.replace(/\/+$/, "")
+  startAbort = new AbortController()
   setIn("server", { status: "starting", url: clean, external: true, detail: `attaching to ${clean}` })
-  const status = await probe(clean, 3000)
-  if (status === "down") {
+  for (;;) {
+    const status = await probe(clean, 3000)
+    if (startAbort?.signal.aborted) return
+    if (status === "ready") break
+    if (status !== "down") {
+      setIn("server", { status: "loading", detail: "waiting for model" })
+      await Bun.sleep(300)
+      continue
+    }
     setIn("server", { status: "error", detail: `no server at ${clean}` })
     toast(`no server at ${clean}`, "err")
     return
@@ -105,7 +128,7 @@ export async function attach(url: string) {
     modelId = (await listModelIds(clean))[0] ?? modelId
   } catch {}
   setIn("server", {
-    status: status === "ready" ? "ready" : "loading",
+    status: "ready",
     url: clean,
     modelId,
     modelPath: modelId,
@@ -159,6 +182,16 @@ export async function loadModel(path: string) {
     toast(`${name} ready`, "ok")
     log("tui", `ready on ${handle.url}`)
     startMetrics()
+    const activeHandle = handle
+    void activeHandle.exited.then((code) => {
+      if (handle !== activeHandle) return
+      handle = null
+      cancelGeneration()
+      stopMetrics()
+      const detail = `server exited with code ${code}`
+      setIn("server", { status: "error", url: null, pid: null, detail })
+      toast(detail, "err")
+    })
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err)
     if (detail === "cancelled") return
@@ -180,28 +213,44 @@ export function restartServer() {
 // --------------------------------------------------------------- metrics ---
 
 let metricsTimer: ReturnType<typeof setInterval> | null = null
+let metricsAbort: AbortController | null = null
+let metricsRunning = false
 
 export function startMetrics() {
   stopMetrics()
-  metricsTimer = setInterval(async () => {
+  const poll = async () => {
+    if (metricsRunning) return
     const url = getState().server.url
     if (!url) return
+    metricsRunning = true
+    const abort = new AbortController()
+    metricsAbort = abort
     try {
-      const snap = await scrape(url)
+      const snap = await scrape(url, 2000, abort.signal)
+      if (getState().server.url !== url || abort.signal.aborted) return
       setIn("metrics", (m) => ({
         latest: snap,
         error: null,
         history: [...m.history, snap].slice(-MAX_METRIC_SAMPLES),
       }))
     } catch (err) {
-      setIn("metrics", { error: err instanceof Error ? err.message : String(err) })
+      if (!abort.signal.aborted) {
+        setIn("metrics", { error: err instanceof Error ? err.message : String(err) })
+      }
+    } finally {
+      metricsRunning = false
+      if (metricsAbort === abort) metricsAbort = null
     }
-  }, 1000)
+  }
+  void poll()
+  metricsTimer = setInterval(() => void poll(), 1000)
 }
 
 export function stopMetrics() {
   if (metricsTimer) clearInterval(metricsTimer)
   metricsTimer = null
+  metricsAbort?.abort()
+  metricsAbort = null
 }
 
 // ------------------------------------------------------------------ chat ---
@@ -315,7 +364,7 @@ export async function send(text: string) {
               ...m,
               streaming: false,
               error: !aborted,
-              content: aborted ? m.content + "\n\n_[cancelled]_" : detail,
+              content: aborted ? m.content + "\n\n_[cancelled]_" : `${m.content}\n\n_[error: ${detail}]_`,
             }
           : m,
       ),

@@ -186,6 +186,35 @@ describe("app frames", () => {
     expect(frame).not.toContain("Clear conversation")
   })
 
+  test("ctrl+c quits while a prompt overlay is open", async () => {
+    const t = await render()
+    set({ overlay: { kind: "prompt", label: "pull", placeholder: "owner/model", submit: () => {} } })
+    let exited = false
+    const exit = process.exit
+    Object.defineProperty(process, "exit", { configurable: true, value: () => { exited = true } })
+    try {
+      t.mockInput.pressKey("c", { ctrl: true })
+      await t.flush()
+      expect(exited).toBe(true)
+    } finally {
+      Object.defineProperty(process, "exit", { configurable: true, value: exit })
+    }
+  })
+
+  test("rejected chat submission preserves the input buffer", async () => {
+    seed()
+    setIn("server", { status: "idle", url: "" })
+    const t = await testRender(<App />, { width: 120, height: 32 })
+    teardown = () => t.renderer.destroy()
+    await t.flush()
+
+    t.mockInput.typeText("keep this prompt")
+    t.mockInput.pressKey("return")
+    await t.flush()
+
+    expect(t.captureCharFrame()).toContain("keep this prompt")
+  })
+
   test("number keys switch views outside the chat input", async () => {
     seed()
     set({ view: "models" })

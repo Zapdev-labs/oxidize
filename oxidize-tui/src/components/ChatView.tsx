@@ -174,6 +174,10 @@ export function ChatView({ focused, width, spin }: { focused: boolean; width: nu
             onSubmit={(submitted) => {
               const value = typeof submitted === "string" ? submitted : (inputRef.current?.value ?? "")
               if (!value.trim()) return
+              if (!ready || generating) {
+                void send(value)
+                return
+              }
               if (inputRef.current) inputRef.current.value = ""
               void send(value)
             }}

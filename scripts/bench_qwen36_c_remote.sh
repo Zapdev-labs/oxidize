@@ -53,7 +53,7 @@ emit_contract() {
         prompt_tokens=${case_name#pp}
         prompt_tokens=${prompt_tokens%/tg32}
         decode_tokens=${case_name##*/tg}
-        printf 'oxidize case=%s command=taskset -c %s numactl --membind=%s ./oxidize-c bench --model %s --threads 16 --no-auto --bench-prompt-tokens %s --bench-decode-tokens %s --bench-no-eos --bench-warmup %s --bench-iters %s --json\n' \
+        printf 'oxidize case=%s command=taskset -c %s numactl --membind=%s ./oxidize-c bench --model %s --threads 16 --no-auto --bench-prompt-tokens %s --bench-decode-tokens %s --bench-no-eos --bench-warmup 0 --bench-iters 1 --json (external warmup=%s repetitions=%s)\n' \
             "$case_name" "$CPU_LIST" "$NUMA_NODE" "$model" "$prompt_tokens" "$decode_tokens" "$warmup" "$repetitions"
         printf 'llama case=%s command=taskset -c %s numactl --membind=%s <isolated-pinned-build>/llama-bench -m %s -p %s -n %s -t 16 --no-warmup -r 1 -mmp 1 -o jsonl (external warmup=%s repetitions=%s)\n' \
             "$case_name" "$CPU_LIST" "$NUMA_NODE" "$model" "$prompt_tokens" "$decode_tokens" "$warmup" "$repetitions"
@@ -69,7 +69,10 @@ self_test() {
     local schema
     schema='{"schema":"qwen36-cpu-benchmark-v1","command":"taskset -c 0,2,4,6,8,10,12,14,16,18,20,22,24,26,28,30 numactl --membind=0 engine","engine":"oxidize-c","case":"pp64/tg32","phase":"measure","run":1,"model_path":"/model.gguf","model_sha256":"sha","model_size_bytes":1,"revision":"6e67975","llama_commit":"c588c4f","affinity":"0,2,4,6,8,10,12,14,16,18,20,22,24,26,28,30","numa_node":0,"threads":16,"mmap":true,"load_before":1.0,"load_after":1.0,"rss_kb":1,"prefill_tok_per_s":2.0,"decode_tok_per_s":1.0,"timing":{"elapsed_s":1.0}}'
     python3 -c 'import json,sys; d=json.loads(sys.stdin.read()); required={"schema","command","engine","case","phase","run","model_path","model_sha256","model_size_bytes","revision","llama_commit","affinity","numa_node","threads","mmap","load_before","load_after","rss_kb","prefill_tok_per_s","decode_tok_per_s","timing"}; assert required <= d.keys(); assert d["case"] == "pp64/tg32"; assert d["timing"]["elapsed_s"] > 0; assert d["prefill_tok_per_s"] > 0; assert d["decode_tok_per_s"] > 0' <<<"$schema"
-    emit_contract "$remote_dir" "$DEFAULT_MODEL" "$DEFAULT_REVISION" 2 5 self-test
+    local contract
+    contract=$(emit_contract "$remote_dir" "$DEFAULT_MODEL" "$DEFAULT_REVISION" 2 5 self-test)
+    [[ "$contract" == *'--bench-warmup 0 --bench-iters 1 --json (external warmup=2 repetitions=5)'* ]]
+    printf '%s\n' "$contract"
     printf '%s\n' "$schema"
 }
 
@@ -162,7 +165,11 @@ if "$busy"; then
     exit 75
 fi
 
-[[ "$(git -C "$llama_repo" rev-parse --verify HEAD)" == "$llama_commit" ]] || {
+expected_llama_commit=$(git -C "$llama_repo" rev-parse --verify "${llama_commit}^{commit}") || {
+    printf 'error: pinned llama.cpp commit %s is required\n' "$llama_commit" >&2
+    exit 1
+}
+[[ "$(git -C "$llama_repo" rev-parse --verify HEAD)" == "$expected_llama_commit" ]] || {
     printf 'error: pinned llama.cpp commit %s is required\n' "$llama_commit" >&2
     exit 1
 }
@@ -198,8 +205,31 @@ fi
 model_sha=$(sha256sum "$model" | awk '{print $1}')
 model_size=$(stat -c '%s' "$model")
 oxidize_sha=$(sha256sum "$oxidize_bin" | awk '{print $1}')
-printf '{"schema":"qwen36-cpu-benchmark-v1","run_dir":"%s","revision":"%s","oxidize_binary":"%s","oxidize_sha256":"%s","llama_commit":"%s","model_path":"%s","model_sha256":"%s","model_size_bytes":%s,"affinity":"%s","numa_node":%s,"threads":%s,"warmup":%s,"repetitions":%s,"label":"%s"}\n' \
-    "$run_dir" "$revision" "$oxidize_bin" "$oxidize_sha" "$llama_commit" "$model" "$model_sha" "$model_size" "$cpus" "$numa_node" "$threads" "$warmup" "$repetitions" "$label" >"$manifest"
+python3 - "$run_dir" "$revision" "$oxidize_bin" "$oxidize_sha" "$llama_commit" "$model" "$model_sha" "$model_size" "$cpus" "$numa_node" "$threads" "$warmup" "$repetitions" "$label" >"$manifest" <<'PY'
+import json
+import sys
+
+(run_dir, revision, oxidize_binary, oxidize_sha256, llama_commit, model_path,
+ model_sha256, model_size_bytes, affinity, numa_node, threads, warmup,
+ repetitions, label) = sys.argv[1:]
+print(json.dumps({
+    'schema': 'qwen36-cpu-benchmark-v1',
+    'run_dir': run_dir,
+    'revision': revision,
+    'oxidize_binary': oxidize_binary,
+    'oxidize_sha256': oxidize_sha256,
+    'llama_commit': llama_commit,
+    'model_path': model_path,
+    'model_sha256': model_sha256,
+    'model_size_bytes': int(model_size_bytes),
+    'affinity': affinity,
+    'numa_node': int(numa_node),
+    'threads': int(threads),
+    'warmup': int(warmup),
+    'repetitions': int(repetitions),
+    'label': label,
+}, sort_keys=True))
+PY
 
 record() {
     local engine=$1 case_name=$2 phase=$3 run=$4 command=$5 timing=$6 stdout=$7

@@ -74,6 +74,7 @@ typedef struct TestState {
     int last_status;
     char last_body[256];
     int call_count;
+    bool non_stream_callbacks_null;
 } TestState;
 
 static void test_handler(const OcHttpRequest *req,
@@ -97,6 +98,8 @@ static void test_handler(const OcHttpRequest *req,
         *out_body = strdup(req->body);
         *out_body_len = req->content_length;
         st->last_status = 200;
+        st->non_stream_callbacks_null = req->stream_write == NULL &&
+                                        req->stream_context == NULL;
         size_t cpy = req->content_length < sizeof(st->last_body) - 1
                    ? req->content_length : sizeof(st->last_body) - 1;
         memcpy(st->last_body, req->body, cpy);
@@ -193,6 +196,8 @@ Test(http, end_to_end_post_body_reaches_handler)
     cr_assert(strstr(resp, "200 OK") != NULL, "should be 200");
     cr_assert(strstr(resp, "hello") != NULL, "echo body should be in response");
     cr_assert_str_eq(st.last_body, body, "handler saw the body intact");
+    cr_assert(st.non_stream_callbacks_null,
+              "non-stream requests must not expose stream callbacks");
     free(resp);
     oc_http_server_stop(&srv);
     oc_http_server_join(&srv);
@@ -238,6 +243,7 @@ Test(http, streaming_response_sends_heartbeats_while_handler_runs)
         }
     }
     cr_assert(strstr(response, "text/event-stream") != NULL);
+    cr_assert(strstr(response, "Access-Control-Allow-Origin: *") != NULL);
     cr_assert_geq(heartbeats, 2,
                   "stream needs repeated heartbeats during generation");
     close(fd);

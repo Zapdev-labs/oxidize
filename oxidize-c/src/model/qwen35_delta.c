@@ -178,7 +178,9 @@ static void delta_heads(size_t begin, size_t end, size_t tid, void *user_data)
     size_t key_total = ctx->g->n_key_heads * dk;
     const float *values = ctx->conv_output + 2 * key_total;
     for (size_t head = begin; head < end; head++) {
-        size_t key_head = head % ctx->g->n_key_heads;
+        size_t value_heads_per_key =
+            ctx->g->n_value_heads / ctx->g->n_key_heads;
+        size_t key_head = head / value_heads_per_key;
         const float *q = ctx->conv_output + key_head * dk;
         const float *k = ctx->conv_output + key_total + key_head * dk;
         const float *v = values + head * dv;
@@ -248,6 +250,9 @@ OcError oc_qwen35_delta_step(OcQwen35DeltaState *state,
         params->dt_bias == NULL || params->norm_weight == NULL ||
         !isfinite(params->norm_eps) || params->norm_eps <= 0.0f ||
         params->conv_weight_len / state->geometry.conv_kernel < conv_dim ||
+        params->ssm_a_len < state->geometry.n_value_heads ||
+        params->dt_bias_len < state->geometry.n_value_heads ||
+        params->norm_weight_len < state->geometry.value_head_dim ||
         input->qkv == NULL || input->gate == NULL || input->beta == NULL ||
         input->alpha == NULL || input->qkv_len < conv_dim ||
         input->gate_len < value_dim ||

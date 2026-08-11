@@ -51,7 +51,7 @@ export function Header({ width, spin }: { width: number; spin: string }) {
         flexShrink: 0,
       }}
     >
-      <text>
+      <text wrapMode="none" truncate>
         <strong fg={c.accent}>OXIDIZE</strong>
         <span fg={c.faint}>{"  " + glyph.bar + " "}</span>
         <span fg={c.text}>{model}</span>
@@ -130,7 +130,15 @@ export function StatusBar({ hints, width }: { hints: [string, string][]; width: 
           </span>
         ))}
       </text>
-      {fresh ? <text fg={tone}>{toast!.text}</text> : <text fg={c.faint}>ctrl+k commands</text>}
+      {fresh ? (
+        <text fg={tone} wrapMode="none" truncate>
+          {toast!.text}
+        </text>
+      ) : (
+        <text fg={c.faint} wrapMode="none" truncate>
+          ctrl+k commands
+        </text>
+      )}
     </box>
   )
 }

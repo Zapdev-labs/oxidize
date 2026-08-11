@@ -113,37 +113,6 @@ static double find_json_double_field(const char *json, const char *key, double d
     return strtod(p, NULL);
 }
 
-static bool find_json_bool_field(const char *json, const char *key, bool def)
-{
-    size_t key_len = strlen(key);
-    size_t depth = 0;
-    bool in_string = false;
-    bool escaped = false;
-    for (const char *p = json; *p; p++) {
-        if (in_string) {
-            if (escaped) escaped = false;
-            else if (*p == '\\') escaped = true;
-            else if (*p == '"') in_string = false;
-            continue;
-        }
-        if (*p == '{' || *p == '[') { depth++; continue; }
-        if (*p == '}' || *p == ']') { if (depth > 0) depth--; continue; }
-        if (*p != '"') continue;
-        if (depth == 1 && strncmp(p + 1, key, key_len) == 0 &&
-            p[1 + key_len] == '"') {
-            const char *value = p + key_len + 2;
-            while (*value == ' ' || *value == '\t') value++;
-            if (*value++ != ':') return def;
-            while (*value == ' ' || *value == '\t') value++;
-            if (strncmp(value, "true", 4) == 0) return true;
-            if (strncmp(value, "false", 5) == 0) return false;
-            return def;
-        }
-        in_string = true;
-    }
-    return def;
-}
-
 /* Extract the content of the LAST "assistant"/"user"/"system" message's
  * "content" field. For chat completions we render the full message array
  * as plain text (a real chat-template renderer is wired by the tokenizer
@@ -486,6 +455,7 @@ static char *generate_completion_unlocked(OcOpenaiState *st,
                                           const char *prompt,
                                           size_t system_prefix_chars,
                                           int max_tokens, float temperature,
+                                          float top_p,
                                           bool (*on_text)(const char *, void *),
                                           void *on_text_context)
 {
@@ -510,7 +480,7 @@ static char *generate_completion_unlocked(OcOpenaiState *st,
     scfg.repeat_penalty = 1.1f;
     if (temperature > 0.0f) {
         scfg.type = OC_SAMPLER_TOP_P;
-        scfg.top_p = 0.95f;
+        scfg.top_p = top_p > 0.0f && top_p <= 1.0f ? top_p : 0.95f;
     }
 
     size_t consumed = 0;
@@ -570,14 +540,14 @@ static char *generate_completion_unlocked(OcOpenaiState *st,
 
 static char *generate_completion(OcOpenaiState *st, const char *prompt,
                                  size_t system_prefix_chars,
-                                 int max_tokens, float temperature,
+                                 int max_tokens, float temperature, float top_p,
                                  bool (*on_text)(const char *, void *),
                                  void *on_text_context)
 {
     pthread_mutex_lock(&g_generation_mutex);
     char *result = generate_completion_unlocked(st, prompt,
                                                 system_prefix_chars,
-                                                max_tokens, temperature,
+                                                max_tokens, temperature, top_p,
                                                 on_text, on_text_context);
     pthread_mutex_unlock(&g_generation_mutex);
     return result;
@@ -603,6 +573,43 @@ static void handle_list_models(OcOpenaiState *st, int *out_status,
     *out_body = buf;
 }
 
+bool oc_openai_stream_authorize(const OcHttpRequest *req, int *out_status,
+                                const char **out_body, void *user_data)
+{
+    OcOpenaiState *st = user_data;
+    if (st == NULL || !st->model_loaded || st->model == NULL || st->tokenizer == NULL) {
+        *out_status = 503;
+        *out_body = oc_openai_error_json("no model loaded", "server_error");
+        return false;
+    }
+    if (strcmp(req->path, "/v1/completions") == 0) {
+        char prompt[8192];
+        if (find_json_string_field(req->body, "prompt", prompt, sizeof(prompt)) == NULL) {
+            *out_status = 400;
+            *out_body = oc_openai_error_json("missing 'prompt' field", "invalid_request_error");
+            return false;
+        }
+    } else if (strcmp(req->path, "/v1/chat/completions") == 0) {
+        char *prompt = calloc(OC_OPENAI_MAX_PROMPT_BYTES, 1);
+        if (prompt == NULL) {
+            *out_status = 500;
+            *out_body = oc_openai_error_json("out of memory", "server_error");
+            return false;
+        }
+        size_t prefix = 0;
+        const bool valid = extract_messages_content(req->body,
+            oc_chat_detect(oc_model_arch_name(st->model->arch)), prompt,
+            OC_OPENAI_MAX_PROMPT_BYTES, &prefix);
+        free(prompt);
+        if (!valid) {
+            *out_status = 400;
+            *out_body = oc_openai_error_json("invalid or oversized messages", "invalid_request_error");
+            return false;
+        }
+    }
+    return true;
+}
+
 static void handle_completion(OcOpenaiState *st, const OcHttpRequest *req,
                               int *out_status, const char **out_body)
 {
@@ -619,13 +626,14 @@ static void handle_completion(OcOpenaiState *st, const OcHttpRequest *req,
     }
     int max_tokens = find_json_int_field(req->body, "max_tokens", 128);
     double temp = find_json_double_field(req->body, "temperature", 0.0);
-    bool stream = find_json_bool_field(req->body, "stream", false);
+    double top_p = find_json_double_field(req->body, "top_p", 0.95);
+    bool stream = oc_http_json_bool_field(req->body, "stream", false);
 
     OcCompletionStream stream_ctx = {
         .request = req, .model = st->model_id, .chat = false,
         .connected = stream && req->stream_write != NULL,
     };
-    char *text = generate_completion(st, prompt, 0, max_tokens, (float)temp,
+    char *text = generate_completion(st, prompt, 0, max_tokens, (float)temp, (float)top_p,
                                      stream_ctx.connected
                                          ? send_completion_delta : NULL,
                                      &stream_ctx);
@@ -676,7 +684,7 @@ static void handle_chat_completion(OcOpenaiState *st, const OcHttpRequest *req,
         *out_status = 503;
         return;
     }
-    bool stream = find_json_bool_field(req->body, "stream", false);
+    bool stream = oc_http_json_bool_field(req->body, "stream", false);
     char *prompt = calloc(OC_OPENAI_MAX_PROMPT_BYTES, 1);
     if (prompt == NULL) {
         *out_body = oc_openai_error_json("out of memory", "server_error");
@@ -695,12 +703,13 @@ static void handle_chat_completion(OcOpenaiState *st, const OcHttpRequest *req,
     }
     int max_tokens = find_json_int_field(req->body, "max_tokens", 128);
     double temp = find_json_double_field(req->body, "temperature", 0.0);
+    double top_p = find_json_double_field(req->body, "top_p", 0.95);
     OcCompletionStream stream_ctx = {
         .request = req, .model = st->model_id, .chat = true,
         .connected = stream && req->stream_write != NULL,
     };
     char *text = generate_completion(st, prompt, system_prefix_chars,
-                                     max_tokens, (float)temp,
+                                     max_tokens, (float)temp, (float)top_p,
                                      stream_ctx.connected
                                          ? send_completion_delta : NULL,
                                      &stream_ctx);
@@ -773,9 +782,11 @@ static void handle_embeddings(OcOpenaiState *st, const OcHttpRequest *req,
         return;
     }
 
+    pthread_mutex_lock(&g_generation_mutex);
     OcLlamaSession sess;
     e = oc_llama_session_init(st->model, &sess);
     if (e != OC_OK) {
+        pthread_mutex_unlock(&g_generation_mutex);
         free(ids);
         *out_body = oc_openai_error_json("session init failed", "server_error");
         *out_status = 500;
@@ -788,6 +799,7 @@ static void handle_embeddings(OcOpenaiState *st, const OcHttpRequest *req,
     }
     if (e != OC_OK) {
         oc_llama_session_free(&sess);
+        pthread_mutex_unlock(&g_generation_mutex);
         free(ids);
         *out_body = oc_openai_error_json("forward pass failed", "server_error");
         *out_status = 500;
@@ -798,11 +810,13 @@ static void handle_embeddings(OcOpenaiState *st, const OcHttpRequest *req,
     float *embedding = calloc(n_embd, sizeof(float));
     if (!embedding) {
         oc_llama_session_free(&sess); free(ids);
+        pthread_mutex_unlock(&g_generation_mutex);
         *out_body = oc_openai_error_json("allocation failed", "server_error");
         *out_status = 500; return;
     }
     for (uint32_t i = 0; i < n_embd; i++) embedding[i] = sess.x[i];
     oc_llama_session_free(&sess);
+    pthread_mutex_unlock(&g_generation_mutex);
     free(ids);
 
     /* L2 normalize. */
@@ -856,7 +870,7 @@ static void handle_responses(OcOpenaiState *st, const OcHttpRequest *req,
     if (max_tokens == 128)
         max_tokens = find_json_int_field(req->body, "max_tokens", 128);
     double temp = find_json_double_field(req->body, "temperature", 0.0);
-    char *text = generate_completion(st, prompt, 0, max_tokens, (float)temp,
+    char *text = generate_completion(st, prompt, 0, max_tokens, (float)temp, 0.95f,
                                      NULL, NULL);
     if (!text) {
         *out_body = oc_openai_error_json("generation failed", "server_error");
@@ -1025,7 +1039,7 @@ void oc_openai_handler(const OcHttpRequest *req,
     }
 
     if (*out_status == 200 && req->method == OC_HTTP_POST &&
-        find_json_bool_field(req->body, "stream", false) &&
+        oc_http_json_bool_field(req->body, "stream", false) &&
         (strcmp(req->path, "/v1/completions") == 0 ||
          strcmp(req->path, "/v1/chat/completions") == 0))
         *out_content_type = "text/event-stream";

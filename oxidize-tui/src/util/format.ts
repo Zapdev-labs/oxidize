@@ -38,16 +38,54 @@ export function clock(t: number): string {
 }
 
 export function pad(s: string, width: number): string {
-  return s.length >= width ? s.slice(0, width) : s + " ".repeat(width - s.length)
+  const clipped = ellipsizeEnd(s, width)
+  return clipped + " ".repeat(Math.max(0, width - displayWidth(clipped)))
 }
 
 export function padStart(s: string, width: number): string {
-  return s.length >= width ? s.slice(0, width) : " ".repeat(width - s.length) + s
+  const clipped = ellipsizeEnd(s, width)
+  return " ".repeat(Math.max(0, width - displayWidth(clipped))) + clipped
 }
 
 export function ellipsizeStart(s: string, width: number): string {
-  if (s.length <= width) return s
-  return "…" + s.slice(s.length - width + 1)
+  if (displayWidth(s) <= width) return s
+  if (width <= 0) return ""
+  if (width === 1) return "…"
+  const tail: string[] = []
+  let used = 1
+  for (const grapheme of [...new Intl.Segmenter().segment(s)].map((part) => part.segment).reverse()) {
+    const cells = graphemeWidth(grapheme)
+    if (used + cells > width) break
+    tail.unshift(grapheme)
+    used += cells
+  }
+  return "…" + tail.join("")
+}
+
+function ellipsizeEnd(s: string, width: number): string {
+  if (displayWidth(s) <= width) return s
+  if (width <= 0) return ""
+  if (width === 1) return "…"
+  const head: string[] = []
+  let used = 1
+  for (const part of new Intl.Segmenter().segment(s)) {
+    const cells = graphemeWidth(part.segment)
+    if (used + cells > width) break
+    head.push(part.segment)
+    used += cells
+  }
+  return head.join("") + "…"
+}
+
+function displayWidth(s: string): number {
+  return [...new Intl.Segmenter().segment(s)].reduce((width, part) => width + graphemeWidth(part.segment), 0)
+}
+
+function graphemeWidth(grapheme: string): number {
+  if (/^[\p{Mark}\p{Control}\u200d\ufe0f]*$/u.test(grapheme)) return 0
+  return /[\p{Extended_Pictographic}\p{Script=Han}\p{Script=Hangul}\p{Script=Hiragana}\p{Script=Katakana}]/u.test(grapheme)
+    ? 2
+    : 1
 }
 
 /** Subsequence fuzzy match; returns a score (lower = better) or null. */

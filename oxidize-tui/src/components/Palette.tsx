@@ -22,6 +22,22 @@ export interface Command {
   run: () => void
 }
 
+async function copyToClipboard(content: string): Promise<void> {
+  try {
+    const proc = Bun.spawn(["sh", "-c", "command -v wl-copy >/dev/null && wl-copy || xclip -selection clipboard"], {
+      stdin: new TextEncoder().encode(content),
+    })
+    if ((await proc.exited) === 0) {
+      toast("copied")
+      return
+    }
+  } catch (error) {
+    toast(error instanceof Error ? `clipboard copy failed: ${error.message}` : "clipboard copy failed", "err")
+    return
+  }
+  toast("clipboard copy failed", "err")
+}
+
 const bump = (key: "temperature" | "topP", delta: number) => () => {
   const cur = getState().params[key]
   const next = Math.min(2, Math.max(0, Number((cur + delta).toFixed(2))))
@@ -52,10 +68,7 @@ export function commands(s: State): Command[] {
       run: () => {
         const last = [...s.chat.messages].reverse().find((m) => m.role === "assistant")
         if (!last) return toast("nothing to copy", "err")
-        Bun.spawn(["sh", "-c", "command -v wl-copy >/dev/null && wl-copy || xclip -selection clipboard"], {
-          stdin: new TextEncoder().encode(last.content),
-        })
-        toast("copied")
+        void copyToClipboard(last.content)
       },
     },
 

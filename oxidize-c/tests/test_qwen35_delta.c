@@ -64,8 +64,15 @@ static void fixture_init(Fixture *f)
                                             f->conv_state, CONV_STATE_LEN,
                                             f->recurrent, RECURRENT_LEN), OC_OK);
     f->params = (OcQwen35DeltaParams){
-        f->conv_weight, CONV_DIM * KW, f->ssm_a, f->dt_bias,
-        f->norm_weight, 1e-6f
+        .conv_weight = f->conv_weight,
+        .conv_weight_len = CONV_DIM * KW,
+        .ssm_a = f->ssm_a,
+        .ssm_a_len = NV,
+        .dt_bias = f->dt_bias,
+        .dt_bias_len = NV,
+        .norm_weight = f->norm_weight,
+        .norm_weight_len = DV,
+        .norm_eps = 1e-6f,
     };
     f->input = (OcQwen35DeltaInput){
         f->qkv, CONV_DIM, f->gate, VALUE_DIM,
@@ -121,7 +128,7 @@ static void scalar_step(float *conv_state, float *recurrent,
         }
     }
     for (size_t h = 0; h < NV; h++) {
-        const size_t key_head = h % NK;
+        const size_t key_head = h / (NV / NK);
         const float *q = conv + key_head * DK;
         const float *k = conv + KEY_DIM + key_head * DK;
         const float *v = conv + 2u * KEY_DIM + h * DV;
@@ -242,6 +249,28 @@ Test(qwen35_delta, rejects_invalid_geometry)
                                       f.conv_output, CONV_DIM,
                                       f.output, VALUE_DIM), OC_ERR_INVALID_ARG);
     cr_assert_arr_eq(f.conv_state, state_before, sizeof(state_before));
+}
+
+Test(qwen35_delta, rejects_short_parameter_buffers)
+{
+    Fixture f;
+    fixture_init(&f);
+    f.params.ssm_a_len--;
+    cr_assert_eq(oc_qwen35_delta_step(&f.state, &f.params, &f.input,
+                                      f.conv_output, CONV_DIM,
+                                      f.output, VALUE_DIM), OC_ERR_INVALID_ARG);
+
+    fixture_init(&f);
+    f.params.dt_bias_len--;
+    cr_assert_eq(oc_qwen35_delta_step(&f.state, &f.params, &f.input,
+                                      f.conv_output, CONV_DIM,
+                                      f.output, VALUE_DIM), OC_ERR_INVALID_ARG);
+
+    fixture_init(&f);
+    f.params.norm_weight_len--;
+    cr_assert_eq(oc_qwen35_delta_step(&f.state, &f.params, &f.input,
+                                      f.conv_output, CONV_DIM,
+                                      f.output, VALUE_DIM), OC_ERR_INVALID_ARG);
 }
 
 Test(qwen35_delta, one_and_sixteen_threads_match)

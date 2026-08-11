@@ -89,7 +89,7 @@ class Cursor {
   constructor(
     private fh: FileHandle,
     private fileSize: number,
-    initial = 1 << 20,
+    initial = 64 << 10,
   ) {
     this.buf = Buffer.alloc(Math.min(initial, Math.max(fileSize, 1)))
   }
@@ -205,7 +205,11 @@ async function readValue(cur: Cursor, type: number, depth = 0): Promise<GgufValu
     case 9: {
       if (depth > 4) throw new Error("gguf: array nesting too deep")
       const inner = await cur.u32()
-      const count = Number(await cur.u64())
+      const rawCount = await cur.u64()
+      if (rawCount > BigInt(Number.MAX_SAFE_INTEGER) || rawCount > 1_000_000n) {
+        throw new Error("gguf: absurd array length")
+      }
+      const count = Number(rawCount)
       const out: GgufValue[] = []
       // Tokenizer vocabularies run to hundreds of thousands of entries; we must
       // walk them to reach later keys but there is no reason to retain them.

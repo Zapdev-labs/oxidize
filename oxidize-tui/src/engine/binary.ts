@@ -47,7 +47,7 @@ export function resolveLauncher(): Launcher {
 
   const explicit = process.env.OXIDIZE_BIN
   if (explicit && isExec(explicit)) {
-    return { cmd: explicit, prefix: [], label: "OXIDIZE_BIN", cwd }
+    return { cmd: resolve(explicit), prefix: [], label: "OXIDIZE_BIN", cwd }
   }
 
   if (root) {
@@ -63,7 +63,7 @@ export function resolveLauncher(): Launcher {
   if (root) {
     return {
       cmd: "cargo",
-      prefix: ["run", "-q", "--release", "-p", "oxidize-cli", "--"],
+      prefix: ["run", "-q", "--release", "-p", "oxidize-cli", "--bin", "oxidize", "--"],
       label: "cargo run (will compile)",
       cwd: root,
     }

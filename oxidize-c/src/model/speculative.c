@@ -183,6 +183,8 @@ OcError oc_speculative_generate(
     if (out_cap == 0) return OC_ERR_INVALID_ARG;
     if (target->cfg.vocab_size != draft->cfg.vocab_size)
         return OC_ERR_INVALID_ARG;
+    if (target->cfg.is_qwen35 || draft->cfg.is_qwen35)
+        return OC_ERR_INVALID_ARG;
 
     uint32_t k = cfg->draft_tokens_per_step;
     if (k == 0) k = 4;
