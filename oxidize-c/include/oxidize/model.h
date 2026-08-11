@@ -34,9 +34,10 @@
 extern "C" {
 #endif
 
-/* Detected model architecture from GGUF metadata. 18 variants — the 17
- * architectures recognized in oxidize-core::ModelArchitecture plus
- * OC_ARCH_UNKNOWN for unrecognized strings. Values MUST stay stable. */
+/* Detected model architecture from GGUF metadata. 19 variants — the 17
+ * architectures recognized in oxidize-core::ModelArchitecture, plus
+ * OC_ARCH_UNKNOWN for unrecognized strings and OC_ARCH_MUSE_GLIMMER, which
+ * has no oxidize-core counterpart yet. Values MUST stay stable. */
 typedef enum {
     OC_ARCH_LLAMA         = 0,
     OC_ARCH_MISTRAL       = 1,
@@ -56,6 +57,8 @@ typedef enum {
     OC_ARCH_HUNYUAN_MOE   = 15,
     OC_ARCH_LONGCAT       = 16,
     OC_ARCH_UNKNOWN       = 17,
+    /* Appended after UNKNOWN so the values above stay stable. */
+    OC_ARCH_MUSE_GLIMMER  = 18,
     OC_ARCH__COUNT,
 } OcModelArchitecture;
 

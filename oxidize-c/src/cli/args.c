@@ -67,7 +67,7 @@ static bool parse_value_flag(OcCliArgs *a, const char *arg, const char *val,
     else if (match(arg, "--min-p"))         { a->min_p = (float)atof(val); *consumed_val = true; }
     else if (match(arg, "--mirostat-tau"))  { a->mirostat_tau = (float)atof(val); *consumed_val = true; }
     else if (match(arg, "--mirostat-eta"))  { a->mirostat_eta = (float)atof(val); *consumed_val = true; }
-    else if (match(arg, "--bench-iters"))   { a->bench_iterations = atoi(val); *consumed_val = true; }
+    else if (match(arg, "--bench-iters"))   { a->bench_iterations = val[0] == '-' ? 0 : atoi(val); *consumed_val = true; }
     else return false;
     return true;
 }
@@ -128,6 +128,7 @@ bool oc_cli_context_parse(int argc, char **argv, OcCliContext *ctx)
         if (match(arg, "--no-auto"))    { ctx->no_auto = true; continue; }
         if (match(arg, "--json"))       { ctx->output_format = OC_CLI_OUTPUT_JSON; continue; }
         if (match(arg, "--no-special")) { ctx->tokens_no_special = true; continue; }
+        if (match(arg, "--bench-no-eos")) { ctx->bench_no_eos = true; continue; }
         if (match(arg, "--verbose") || match(arg, "-v")) { ctx->verbose = true; continue; }
 
         const char *val = (i + 1 < argc) ? argv[i + 1] : NULL;
@@ -162,9 +163,11 @@ bool oc_cli_context_parse(int argc, char **argv, OcCliContext *ctx)
         else if (match(arg, "--rate-limit"))     { ctx->rate_limit_rpm = (uint32_t)strtoul(val, NULL, 10); i++; }
         else if (match(arg, "--cors-origin"))    { ctx->cors_origin = val; i++; }
         /* Benchmark. */
-        else if (match(arg, "--bench-iters"))    { ctx->bench_iterations = atoi(val); i++; }
+        else if (match(arg, "--bench-iters"))    { ctx->bench_iterations = val[0] == '-' ? 0 : atoi(val); i++; }
         else if (match(arg, "--bench-warmup"))   { ctx->bench_warmup = (uint32_t)strtoul(val, NULL, 10); i++; }
         else if (match(arg, "--bench-tokens"))   { ctx->bench_tokens = (uint32_t)strtoul(val, NULL, 10); i++; }
+        else if (match(arg, "--bench-prompt-tokens")) { ctx->bench_prompt_tokens = (uint32_t)strtoul(val, NULL, 10); i++; }
+        else if (match(arg, "--bench-decode-tokens")) { ctx->bench_decode_tokens = (uint32_t)strtoul(val, NULL, 10); i++; }
         /* Quantize / convert / merge / prune. */
         else if (match(arg, "--input"))          { ctx->input_path = val; i++; }
         else if (match(arg, "--output"))         { ctx->output_path = val; i++; }

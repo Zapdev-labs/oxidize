@@ -44,14 +44,38 @@ void oc_matvec_quantized(OcGgufQuantizationType qtype, const uint8_t *data,
 /* Fused multi-projection variant: computes several matvecs that share the
  * SAME input vector in one call (so the input is read once from cache).
  * Used for the fused Q/K/V (or gate/up) projections. `n_outs` is the number
- * of outputs; `datas[i]`, `rows[i]`, `row_bytes[i]` describe each weight
- * matrix; results are written to `outs[i]`. `temp` must hold `cols` f32.
- * All matrices share that input dimension. */
-void oc_matvec_quantized_fused(OcGgufQuantizationType qtype,
+ * of outputs; `qtypes[i]`, `datas[i]`, `rows[i]`, `row_bytes[i]` describe
+ * each weight matrix; results are written to `outs[i]`. `temp` must hold
+ * `cols` f32. All matrices share that input dimension. Compatible qtypes
+ * share one activation quantization and one worker region; mixed qtypes use
+ * the exact individual-matvec fallback. */
+void oc_matvec_quantized_fused(const OcGgufQuantizationType *qtypes,
                                const uint8_t *const *datas, const size_t *rows,
                                size_t cols, const size_t *row_bytes,
                                size_t n_outs, const float *input,
                                float *const *outs, float *temp);
+
+/* Multi-input counterpart used by grouped MoE down projections. Each matrix
+ * has its own activation vector, but compatible quantized matrices still run
+ * in one worker region. Mixed/unsupported qtypes fall back to the individual
+ * matvec path. */
+void oc_matvec_quantized_multi_input(
+    const OcGgufQuantizationType *qtypes,
+    const uint8_t *const *datas, const size_t *rows, size_t cols,
+    const size_t *row_bytes, size_t n_outs,
+    const float *const *inputs, float *const *outs, float *temp);
+
+/* Test instrumentation for oc_matvec_quantized_fused(). These counters are
+ * process-global and intended only for focused dispatch tests; reset them
+ * immediately before the call under test. */
+typedef struct {
+    size_t activation_quantizations;
+    size_t parallel_dispatches;
+    size_t fallback_calls;
+} OcMatvecFusedTestStats;
+
+void oc_matvec_fused_test_reset(void);
+OcMatvecFusedTestStats oc_matvec_fused_test_stats(void);
 
 /* ─── Batched matvec (prefill) ───────────────────────────────────────────
  *

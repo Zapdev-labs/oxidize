@@ -35,7 +35,7 @@ static void check_map(OcModelArchitecture arch, const char *name,
 
 /* ─── VAL-FOUND-012: All 18 architecture strings detected ───────────────── */
 
-Test(arch, all_18_arch_strings_detected)
+Test(arch, all_19_arch_strings_detected)
 {
     /* Each line: input string → expected OcModelArchitecture variant.
      * Mirrors Rust `ModelArchitecture::from_gguf`. */
@@ -116,7 +116,12 @@ Test(arch, all_18_arch_strings_detected)
         { "longcat-2",                      OC_ARCH_LONGCAT },
         { "longcat_flash",                  OC_ARCH_LONGCAT },
         { "longcatflash",                   OC_ARCH_LONGCAT },
-        /* Unknown → OC_ARCH_UNKNOWN (18th variant). */
+        /* Muse Glimmer (Meta). The GGUF spells it with a hyphen. */
+        { "muse-glimmer",                   OC_ARCH_MUSE_GLIMMER },
+        { "muse_glimmer",                   OC_ARCH_MUSE_GLIMMER },
+        { "museglimmer",                    OC_ARCH_MUSE_GLIMMER },
+        { "muse",                           OC_ARCH_MUSE_GLIMMER },
+        /* Unknown → OC_ARCH_UNKNOWN. */
         { "not-a-real-arch",                OC_ARCH_UNKNOWN },
         { "",                               OC_ARCH_UNKNOWN },
         { NULL,                             OC_ARCH_UNKNOWN },
@@ -130,9 +135,11 @@ Test(arch, all_18_arch_strings_detected)
             oc_model_arch_name(got), oc_model_arch_name(cases[i].a));
     }
 
-    /* Verify the enum has exactly 18 variants (17 recognized + 1 unknown). */
-    cr_assert_eq((int)OC_ARCH__COUNT, 18,
-        "OcModelArchitecture should have 18 variants (17 + UNKNOWN), got %d",
+    /* Verify the enum has exactly 19 variants (18 recognized + 1 unknown).
+     * OC_ARCH_MUSE_GLIMMER is appended AFTER OC_ARCH_UNKNOWN so the older
+     * values stay stable. */
+    cr_assert_eq((int)OC_ARCH__COUNT, 19,
+        "OcModelArchitecture should have 19 variants (18 + UNKNOWN), got %d",
         (int)OC_ARCH__COUNT);
 }
 

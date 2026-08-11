@@ -44,6 +44,8 @@ typedef enum {
     OC_HTTP_OTHER,
 } OcHttpMethod;
 
+typedef bool (*OcHttpStreamWrite)(void *context, const char *data, size_t len);
+
 /* A parsed HTTP request. `body` is NUL-terminated for convenience (the
  * additional NUL is appended beyond content_length). All string fields
  * alias into the request buffer owned by the server (valid for the duration
@@ -60,6 +62,8 @@ typedef struct OcHttpRequest {
     /* Peer address as a numeric string ("127.0.0.1"), or NULL if it could
      * not be determined. Points at worker-thread stack storage. */
     const char *client_ip;
+    OcHttpStreamWrite stream_write;
+    void             *stream_context;
 } OcHttpRequest;
 
 /* Caller-provided handler. Writes the response status code, Content-Type

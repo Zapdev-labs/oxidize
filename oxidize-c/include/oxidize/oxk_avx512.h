@@ -129,6 +129,28 @@ float oc_oxk_dot_q6_k_q8_k_avx512vnni(const uint8_t *row, size_t blocks,
  * signed 16-element scale groups per block and the -32 offset folded out
  * through the activation block sums. */
 OC_OXK_AVX512_TARGET
+/* Multi-activation dots over prepared Q3_K / Q2_K rows. Q3_K consumes the
+ * Q6_K prepared layout (oc_oxk_q3_k_prep_row writes it); Q2_K consumes its
+ * own (oc_oxk_q2_k_prep_row). Both fall back to the scalar prepped dot when
+ * built without VNNI. */
+/* Single-activation VNNI dots over the prepared rows — what decode uses,
+ * where there is no activation tile to amortize a wider kernel over. */
+float oc_oxk_dot_q2_k_prepped_avx512(const void *prep, size_t blocks,
+                                     const uint8_t *act);
+float oc_oxk_dot_q3_k_prepped_avx512(const void *prep, size_t blocks,
+                                     const uint8_t *act);
+float oc_oxk_dot_q6_k_prepped_avx512(const void *prep, size_t blocks,
+                                     const uint8_t *act);
+
+void oc_oxk_dot_q3_k_prepped_multi_avx512(const void *prep, size_t blocks,
+                                          const uint8_t *acts,
+                                          size_t act_stride, size_t n_act,
+                                          float *out);
+void oc_oxk_dot_q2_k_prepped_multi_avx512(const void *prep, size_t blocks,
+                                          const uint8_t *acts,
+                                          size_t act_stride, size_t n_act,
+                                          float *out);
+
 void oc_oxk_dot_q6_k_prepped_multi_avx512(const void *prep, size_t blocks,
                                           const uint8_t *acts,
                                           size_t act_stride, size_t n_act,

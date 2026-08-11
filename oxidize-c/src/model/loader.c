@@ -31,6 +31,8 @@ static const char *const OC_LOADER_ARCHS[] = {
     "llama", "mistral", "mixtral", "deepseek", "qwen", "gemma",
     "phi", "falcon", "gpt2", "gptj", "gptneox", "minimax",
     "lfm2", "lfm2moe", "glm_moe_dsa", "hunyuan_moe", "longcat",
+    "qwen35moe", "qwen35", "qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen35_text",
+    "qwen3_5_moe_text", "muse-glimmer", "muse_glimmer",
 };
 #define OC_LOADER_N_ARCHS \
     (sizeof(OC_LOADER_ARCHS) / sizeof(OC_LOADER_ARCHS[0]))

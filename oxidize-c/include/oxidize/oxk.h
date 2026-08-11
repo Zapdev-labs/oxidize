@@ -51,6 +51,8 @@ extern "C" {
 #define OC_OXK_BLOCK_Q4_0_SIZE   18u   /* f16 d + 16 packed 4-bit values      */
 #define OC_OXK_BLOCK_Q4_1_SIZE   20u   /* f16 d + f16 m + 16 packed 4-bit     */
 #define OC_OXK_BLOCK_Q8_0_SIZE   34u   /* f16 d + 32 int8 values              */
+#define OC_OXK_BLOCK_Q2_K_SIZE   84u   /* 16 scale/min bytes + 64 packed 2-bit + f16 d + f16 dmin */
+#define OC_OXK_BLOCK_Q3_K_SIZE  110u  /* 32 hmask + 64 packed 2-bit + 12 packed 6-bit scales + f16 d */
 #define OC_OXK_BLOCK_Q4_K_SIZE  144u  /* f16 d + f16 dmin + 12 scales + 128 nibbles */
 #define OC_OXK_BLOCK_Q5_K_SIZE  176u  /* f16 d + f16 dmin + 12 scales + 128 nibbles + 32qh */
 #define OC_OXK_BLOCK_Q6_K_SIZE  210u  /* f16 d + 16 ql_scales + 192 packed (4+4-bit) */
@@ -99,6 +101,10 @@ typedef float (*OcOxkDotQ6_KQ8_K_fn)(const uint8_t *row, size_t blocks,
                                     const uint8_t *q8);
 typedef float (*OcOxkDotQ8_0Q8_0_fn)(const uint8_t *row, size_t blocks,
                                      const uint8_t *q8);
+typedef float (*OcOxkDotQ2_KQ8_K_fn)(const uint8_t *row, size_t blocks,
+                                     const uint8_t *q8);
+typedef float (*OcOxkDotQ3_KQ8_K_fn)(const uint8_t *row, size_t blocks,
+                                     const uint8_t *q8);
 
 typedef void (*OcOxkMatvecQ4_0F32_fn)(const uint8_t *w, size_t n_rows,
                                      size_t row_bytes, const float *x,
@@ -112,6 +118,10 @@ typedef void (*OcOxkMatvecQ8_0F32_fn)(const uint8_t *w, size_t n_rows,
 
 /* One prepared Q4_K row dotted against `n_act` Q8_K activations spaced
  * `act_stride` bytes apart; `out` receives `n_act` f32 results. */
+/* One prepared row dotted against a single Q8_K activation. */
+typedef float (*OcOxkDotPrepped1_fn)(const void *prep, size_t blocks,
+                                     const uint8_t *act);
+
 typedef void (*OcOxkDotQ4_KPreppedMulti_fn)(const void *prep, size_t blocks,
                                             const uint8_t *acts,
                                             size_t act_stride, size_t n_act,
@@ -126,9 +136,20 @@ typedef struct OcOxkContext {
     OcOxkDotQ5_KQ8_K_fn dot_q5_k_q8_k;
     OcOxkDotQ6_KQ8_K_fn dot_q6_k_q8_k;
     OcOxkDotQ8_0Q8_0_fn dot_q8_0_q8_0;
+    OcOxkDotQ2_KQ8_K_fn dot_q2_k_q8_k;
+    OcOxkDotQ3_KQ8_K_fn dot_q3_k_q8_k;
     OcOxkDotQ4_KPreppedMulti_fn dot_q4_k_prepped_multi;
     /* Same signature; prep layout is the Q6_K one (oc_oxk_q6_k_prep_row). */
     OcOxkDotQ4_KPreppedMulti_fn dot_q6_k_prepped_multi;
+    /* Q3_K shares the Q6_K prep layout — both decode to unsigned codes with
+     * one signed int8 scale per 16-element group, differing only in the
+     * constant the codes are offset by (4 vs 32). Q2_K needs its own layout
+     * because it carries a per-group minimum as well. */
+    OcOxkDotQ4_KPreppedMulti_fn dot_q3_k_prepped_multi;
+    OcOxkDotQ4_KPreppedMulti_fn dot_q2_k_prepped_multi;
+    /* Single-activation form of the two above, for decode. */
+    OcOxkDotPrepped1_fn dot_q2_k_prepped_1;
+    OcOxkDotPrepped1_fn dot_q3_k_prepped_1;
     /* Matvec dispatch table — one slot per quant type. */
     OcOxkMatvecQ4_0F32_fn matvec_q4_0_f32;
     OcOxkMatvecQ4_KF32_fn matvec_q4_k_f32;
@@ -214,6 +235,51 @@ void oc_oxk_q5_k_prep_row(const uint8_t *row, size_t blocks, void *scratch);
  * Bit-exact against oc_oxk_dot_q6_k_q8_k(). */
 size_t oc_oxk_q6_k_prep_bytes(size_t blocks);
 void oc_oxk_q6_k_prep_row(const uint8_t *row, size_t blocks, void *scratch);
+
+/* ─── Q2_K / Q3_K ────────────────────────────────────────────────────────
+ *
+ * Both are "16 groups of 16" K-quants, so they reuse the same machinery as
+ * Q6_K rather than inventing a third shape:
+ *
+ *   Q3_K decodes to unsigned codes 0..7 with a signed int8 scale per group
+ *         and a constant -4 offset — bit-for-bit the Q6_K prepared layout
+ *         (whose offset is -32), so it shares oc_oxk_q6_k_prep_bytes().
+ *   Q2_K decodes to unsigned codes 0..3 with an unsigned 4-bit scale AND an
+ *         unsigned 4-bit minimum per group, so it gets its own layout:
+ *         d[blocks], dmin[blocks], codes[blocks*256], sc[blocks*16],
+ *         mn[blocks*16].
+ *
+ * As everywhere else in OXK, the offset/minimum terms are folded out through
+ * the activation's per-16 block sums, which is why the codes can stay
+ * unsigned and feed VNNI's vpdpbusd directly. */
+float oc_oxk_dot_q2_k_q8_k(const uint8_t *row, size_t blocks,
+                           const uint8_t *q8);
+float oc_oxk_dot_q3_k_q8_k(const uint8_t *row, size_t blocks,
+                           const uint8_t *q8);
+float oc_oxk_dot_q2_k_q8_k_scalar(const uint8_t *row, size_t blocks,
+                                  const uint8_t *q8);
+float oc_oxk_dot_q3_k_q8_k_scalar(const uint8_t *row, size_t blocks,
+                                  const uint8_t *q8);
+
+size_t oc_oxk_q2_k_prep_bytes(size_t blocks);
+void oc_oxk_q2_k_prep_row(const uint8_t *row, size_t blocks, void *scratch);
+void oc_oxk_q3_k_prep_row(const uint8_t *row, size_t blocks, void *scratch);
+float oc_oxk_dot_q2_k_prepped(const void *scratch, size_t blocks,
+                              const uint8_t *q8);
+float oc_oxk_dot_q3_k_prepped(const void *scratch, size_t blocks,
+                              const uint8_t *q8);
+void oc_oxk_dot_q2_k_prepped_multi(const void *scratch, size_t blocks,
+                                   const uint8_t *acts, size_t act_stride,
+                                   size_t n_act, float *out);
+void oc_oxk_dot_q3_k_prepped_multi(const void *scratch, size_t blocks,
+                                   const uint8_t *acts, size_t act_stride,
+                                   size_t n_act, float *out);
+/* Single-activation dots over the prepared rows: what decode uses. Same
+ * results as the _prepped functions, dispatched to SIMD where available. */
+float oc_oxk_dot_q2_k_prepped_1(const void *prep, size_t blocks,
+                                const uint8_t *act);
+float oc_oxk_dot_q3_k_prepped_1(const void *prep, size_t blocks,
+                                const uint8_t *act);
 float oc_oxk_dot_q6_k_prepped(const void *scratch, size_t blocks,
                               const uint8_t *q8);
 void oc_oxk_dot_q6_k_prepped_multi(const void *scratch, size_t blocks,

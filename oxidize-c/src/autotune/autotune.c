@@ -383,9 +383,11 @@ OcTuningPlan oc_autotune_plan(const OcCpuInfo *cpu,
             p.rationale_threads = "large model on dual-socket → one thread per physical core";
         } else {
             p.numa = OC_NUMA_SINGLE;
-            p.threads = phys;
+            const uint32_t sockets = cpu->numa_nodes > 0 ? cpu->numa_nodes : 2u;
+            p.threads = phys / sockets;
+            if (p.threads == 0) p.threads = 1;
             p.rationale_numa = "dual-socket + model <=192GB → single-socket binding";
-            p.rationale_threads = "compute-bound fused kernels → one thread per physical core";
+            p.rationale_threads = "single-socket binding → physical cores on one NUMA node";
         }
     } else {
         p.numa = OC_NUMA_NONE;

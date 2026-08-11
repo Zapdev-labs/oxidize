@@ -116,6 +116,9 @@ OcModelArchitecture oc_model_arch_from_str(const char *s)
         || strcmp(norm, "longcat_2") == 0
         || strcmp(norm, "longcat_flash") == 0
         || strcmp(norm, "longcatflash") == 0)               return OC_ARCH_LONGCAT;
+    if (strcmp(norm, "muse_glimmer") == 0
+        || strcmp(norm, "museglimmer") == 0
+        || strcmp(norm, "muse") == 0)                       return OC_ARCH_MUSE_GLIMMER;
 
     return OC_ARCH_UNKNOWN;
 }
@@ -140,6 +143,7 @@ const char *oc_model_arch_name(OcModelArchitecture arch)
     case OC_ARCH_GLM_MOE_DSA:  return "glm_moe_dsa";
     case OC_ARCH_HUNYUAN_MOE:  return "hunyuan_moe";
     case OC_ARCH_LONGCAT:      return "longcat";
+    case OC_ARCH_MUSE_GLIMMER: return "muse-glimmer";
     default:                   return "unknown";   /* covers OC_ARCH_UNKNOWN + out-of-range */
     }
 }

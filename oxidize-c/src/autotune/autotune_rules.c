@@ -60,6 +60,8 @@ OcError oc_plan_compute(const OcHwCaps *hw, const OcModelFp *model, OcPlan *plan
         plan->n_threads = hw->n_logical > 0 ? hw->n_logical * 3 / 4 : 48;
     } else if (hw->n_sockets > 1) {
         plan->numa = OC_NUMA_SINGLE;
+        if (hw->n_cores >= hw->n_sockets)
+            plan->n_threads = hw->n_cores / hw->n_sockets;
     } else {
         plan->numa = OC_NUMA_NONE;
     }

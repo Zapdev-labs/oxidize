@@ -23,6 +23,7 @@
 #include "oxidize/error.h"
 #include "oxidize/gguf.h"
 #include "oxidize/quant.h"
+#include "oxidize/qwen35_delta.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -136,6 +137,50 @@ typedef struct OcLlamaConfig {
     /* n-gram over-embedding: (neighbor_num - 1) * split_num tables. */
     uint32_t ngram_n_grams;
     uint32_t ngram_split_num;
+    /* Qwen3.5 hybrid attention. block_count includes optional trailing MTP
+     * blocks; n_layer is the executable transformer-layer count. */
+    bool     is_qwen35;
+    uint32_t nextn_predict_layers;
+    uint32_t full_attention_interval;
+    uint32_t n_full_attention_layers;
+    uint32_t n_recurrent_layers;
+    uint32_t ssm_conv_kernel;
+    uint32_t ssm_state_size;
+    uint32_t ssm_group_count;
+    uint32_t ssm_value_heads;
+    uint32_t ssm_inner_size;
+    uint32_t shared_expert_intermediate_size;
+    /* ── Muse Glimmer ─────────────────────────────────────────────────────
+     *
+     * Meta's Muse-Glimmer-30B (GGUF arch "muse-glimmer") is a dense
+     * transformer that reuses pieces already present here — Gemma's sandwich
+     * norms, Gemma 4's per-layer sliding-window pattern, Gemma's per-head
+     * QK-norm, Gemma's final-logit softcap — plus four things nothing else
+     * needed. They are expressed as behaviour flags rather than an
+     * `is_muse` switch so each one reads as what it does. */
+    /* The token embedding is RMS-normalized (no weight) before layer 0.
+     * llama.cpp: build_norm(inpL, nullptr, nullptr, LLM_NORM_RMS, -1). */
+    bool     embd_rms_norm;
+    /* sigmoid(W_gate · attn_norm(x)) gates the attention output elementwise
+     * before the output projection. The gate is n_head*head_dim wide and is
+     * computed from the PRE-attention normed hidden state, not from the
+     * attention output. */
+    bool     attn_out_gate;
+    /* RoPE runs only on sliding-window layers; global layers are NoPE.
+     * Resolved per layer into OcLlamaLayer.use_rope. */
+    bool     rope_swa_only;
+    /* The sandwich (post-attention / post-FFN) norms use their own epsilon,
+     * 1e-8, not attention.layer_norm_rms_epsilon. 0 → use rms_norm_eps,
+     * which is what every other architecture wants. */
+    float    post_norm_eps;
+    /* Final logits are multiplied by this before the softcap. 0 = 1.0. */
+    float    logit_scale;
+    /* RoPE pairs dimensions (2i, 2i+1) instead of (i, i + rope_dim/2) —
+     * llama.cpp's LLAMA_ROPE_TYPE_NORM. The two conventions assign different
+     * frequencies to the same dimension, so this is correctness, not style:
+     * with the wrong one the model stays locally fluent and drifts within a
+     * couple of dozen tokens. */
+    bool     rope_norm_pairs;
 } OcLlamaConfig;
 
 /* Upper bound on LongCat n-gram tables. LongCat-2.0 has
@@ -151,8 +196,19 @@ typedef struct OcWeightView {
     size_t row_bytes;       /* bytes per row (quantized or f32 stride) */
 } OcWeightView;
 
+typedef enum OcLlamaLayerKind {
+    OC_LLAMA_LAYER_FULL_ATTENTION = 0,
+    OC_LLAMA_LAYER_QWEN35_RECURRENT = 1,
+} OcLlamaLayerKind;
+
 typedef struct OcLlamaLayer {
+    OcLlamaLayerKind kind;
+    uint32_t state_index;
+    uint32_t kv_cache_index;
     OcWeightView attn_q, attn_k, attn_v, attn_output;
+    OcWeightView attn_gate, attn_qkv;
+    OcWeightView ssm_a, ssm_alpha, ssm_beta, ssm_conv1d;
+    OcWeightView ssm_dt_bias, ssm_norm, ssm_out;
     OcWeightView ffn_gate, ffn_up, ffn_down;     /* dense FFN (when num_experts==0) */
     /* MoE (Qwen3-MoE / Mixtral). Stacked expert tensors: expert i occupies
      * bytes [i * per_expert_row_bytes, (i+1) * per_expert_row_bytes) per row.
@@ -211,6 +267,9 @@ typedef struct OcLlamaLayer {
     uint32_t rope_dim;      /* rotary dims in this layer              */
     float    rope_theta;    /* rope base in this layer                */
     uint32_t sliding_window;/* 0 = global (full) attention            */
+    /* Whether RoPE applies in this layer. False only on Muse Glimmer's
+     * global (NoPE) layers; true everywhere else. */
+    bool     use_rope;
 } OcLlamaLayer;
 
 typedef struct OcLlamaModel {
@@ -286,6 +345,10 @@ typedef struct OcLlamaSession {
     float *expert_gate;      /* expert_intermediate_size            */
     float *expert_up;        /* expert_intermediate_size            */
     float *expert_out;       /* n_embd                              */
+    float *expert_gate_all;
+    float *expert_up_all;
+    float *expert_down_all;
+    uint32_t *selected_experts;
     float *shexp_gate;       /* expert_intermediate_size (shared)   */
     float *shexp_up;         /* expert_intermediate_size (shared)   */
     float *shexp_out;        /* n_embd                             */
@@ -300,6 +363,20 @@ typedef struct OcLlamaSession {
     float *mla_ctx_latent;   /* attention-weighted c_kv, per head    */
     float *mla_run_max;      /* n_head online-softmax running max    */
     float *mla_run_sum;      /* n_head online-softmax running sum    */
+    /* Qwen3.5 persistent state. Entries correspond to model layers; only
+     * recurrent entries are bound to the contiguous backing stores. */
+    OcQwen35DeltaState *qwen35_delta;
+    float *qwen35_conv_state;
+    float *qwen35_recurrent_state;
+    float *qwen35_qkv;
+    float *qwen35_gate;
+    float *qwen35_beta;
+    float *qwen35_alpha;
+    float *qwen35_conv_output;
+    float *qwen35_delta_output;
+    /* Muse Glimmer attention-output gate, n_head * head_dim. Allocated only
+     * when cfg.attn_out_gate is set. */
+    float *muse_gate;
 } OcLlamaSession;
 
 /* ─── Batched decode ─────────────────────────────────────────────────────
@@ -415,6 +492,11 @@ OcError oc_llama_forward(OcLlamaSession *sess, uint32_t token, float *logits_out
  * gate order, and float addition is not associative. */
 OcError oc_llama_prefill(OcLlamaSession *sess, const uint32_t *tokens,
                          size_t n_tokens, size_t chunk, float *logits_out);
+
+/* Copy the already-prefilled prefix state from `src` into `dst`. Both
+ * sessions must belong to the same model and use the same KV type. */
+OcError oc_llama_session_copy_prefix(OcLlamaSession *dst,
+                                     const OcLlamaSession *src);
 
 /* Reset position to 0 (start a new sequence; KV cache is overwritten on
  * subsequent forwards). Does NOT zero the cache. */

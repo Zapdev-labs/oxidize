@@ -14,8 +14,16 @@
 
 #include <math.h>
 #include <stdbool.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+
+static bool size_mul(size_t a, size_t b, size_t *out)
+{
+    if (a != 0 && b > SIZE_MAX / a) return false;
+    *out = a * b;
+    return true;
+}
 
 /* ─── Fused integer GEMV ─────────────────────────────────────────────────
  *
@@ -37,13 +45,24 @@
  * dequant path stays as the reference the parity tests compare against.
  */
 
-static bool g_fused_enabled = true;
-static bool g_fused_env_checked = false;
+static atomic_bool g_fused_enabled = true;
+static atomic_bool g_fused_env_checked = false;
+static _Thread_local OcMatvecFusedTestStats g_fused_test_stats;
+
+void oc_matvec_fused_test_reset(void)
+{
+    g_fused_test_stats = (OcMatvecFusedTestStats){0};
+}
+
+OcMatvecFusedTestStats oc_matvec_fused_test_stats(void)
+{
+    return g_fused_test_stats;
+}
 
 void oc_matvec_set_fused(bool enabled)
 {
-    g_fused_enabled = enabled;
-    g_fused_env_checked = true;   /* explicit call wins over the environment */
+    atomic_store(&g_fused_enabled, enabled);
+    atomic_store(&g_fused_env_checked, true);
 }
 
 bool oc_matvec_fused_enabled(void)
@@ -52,12 +71,13 @@ bool oc_matvec_fused_enabled(void)
      * fused and reference paths can be compared in one binary — an A/B on a
      * real model is the only way to tell a kernel that is exact on synthetic
      * dot products from one that is wrong on real weights. */
-    if (!g_fused_env_checked) {
+    if (!atomic_load(&g_fused_env_checked)) {
         const char *e = getenv("OC_NO_FUSED");
-        if (e != NULL && e[0] != '\0' && e[0] != '0') g_fused_enabled = false;
-        g_fused_env_checked = true;
+        if (e != NULL && e[0] != '\0' && e[0] != '0')
+            atomic_store(&g_fused_enabled, false);
+        atomic_store(&g_fused_env_checked, true);
     }
-    return g_fused_enabled;
+    return atomic_load(&g_fused_enabled);
 }
 
 /* Which Q8 flavour a weight type pairs with. */
@@ -78,6 +98,10 @@ static ActKind fused_act_kind(OcGgufQuantizationType qtype, size_t cols)
     case OC_QUANT_Q4_1:
     case OC_QUANT_Q8_0:
         return (cols % OC_OXK_QK8_0 == 0) ? ACT_Q8_0 : ACT_NONE;
+    case OC_QUANT_Q2_K:
+    case OC_QUANT_Q3_K_S:
+    case OC_QUANT_Q3_K_M:
+    case OC_QUANT_Q3_K_L:
     case OC_QUANT_Q4_K_S:
     case OC_QUANT_Q4_K_M:
     case OC_QUANT_Q5_K_S:
@@ -165,9 +189,18 @@ static float fused_row_dot(OcGgufQuantizationType qtype, const uint8_t *row,
     case OC_QUANT_Q5_K_S:
     case OC_QUANT_Q5_K_M: return oc_oxk_dot_q5_k_q8_k(row, blocks, act);
     case OC_QUANT_Q6_K:   return oc_oxk_dot_q6_k_q8_k(row, blocks, act);
+    case OC_QUANT_Q2_K:   return oc_oxk_dot_q2_k_q8_k(row, blocks, act);
+    case OC_QUANT_Q3_K_S:
+    case OC_QUANT_Q3_K_M:
+    case OC_QUANT_Q3_K_L: return oc_oxk_dot_q3_k_q8_k(row, blocks, act);
     default:              return 0.0f;
     }
 }
+
+static bool fused_stride_ok(OcGgufQuantizationType qtype, size_t blocks,
+                            size_t row_bytes);
+static size_t act_block_bytes(ActKind kind);
+static size_t act_blocks_for(ActKind kind, size_t cols);
 
 /* These matvecs are the bulk of a forward pass, and each output row is an
  * independent dot product, so the row loop is split across the worker pool.
@@ -219,7 +252,39 @@ typedef struct {
      * shared read-only by every thread. NULL selects the dequant path. */
     const uint8_t *act;
     size_t         blocks;
+    /* Prepared-row path: types whose only integer kernel works off a decoded
+     * row (Q2_K / Q3_K). The row is decoded into per-thread scratch and
+     * dotted once — decode has a single activation, so there is nothing to
+     * amortize a wider kernel over, but this still beats dequantizing to f32
+     * and doing the dot in floating point. */
+    size_t         prep_bytes;
+    void         (*prep_fn)(const uint8_t *row, size_t blocks, void *scratch);
+    float        (*prep_dot)(const void *prep, size_t blocks,
+                             const uint8_t *act);
 } QuantJob;
+
+typedef struct {
+    OcGgufQuantizationType qtype;
+    const uint8_t *const *datas;
+    const size_t *rows;
+    const size_t *row_bytes;
+    float *const *outs;
+    size_t n_outs;
+    size_t blocks;
+    const uint8_t *act;
+} FusedMultiJob;
+
+typedef struct {
+    OcGgufQuantizationType qtype;
+    const uint8_t *const *datas;
+    const size_t *rows;
+    const size_t *row_bytes;
+    float *const *outs;
+    const size_t *act_offsets;
+    size_t n_outs;
+    size_t blocks;
+    const uint8_t *acts;
+} FusedMultiInputJob;
 
 static void matvec_fused_slice(size_t begin, size_t end, size_t tid, void *ud)
 {
@@ -228,6 +293,100 @@ static void matvec_fused_slice(size_t begin, size_t end, size_t tid, void *ud)
     for (size_t r = begin; r < end; r++) {
         j->output[r] = fused_row_dot(j->qtype, j->data + r * j->row_bytes,
                                      j->blocks, j->act);
+    }
+}
+
+static void matvec_prep_slice(size_t begin, size_t end, size_t tid, void *ud)
+{
+    const QuantJob *j = (const QuantJob *)ud;
+    void *prep = oc_parallel_scratch(tid, j->prep_bytes);
+    if (prep == NULL) {
+        /* Pre-reserved by the caller; fall back rather than leave this
+         * slice's outputs unwritten. */
+        matvec_fused_slice(begin, end, tid, ud);
+        return;
+    }
+    for (size_t r = begin; r < end; r++) {
+        j->prep_fn(j->data + r * j->row_bytes, j->blocks, prep);
+        j->output[r] = j->prep_dot(prep, j->blocks, j->act);
+    }
+}
+
+/* The prepared-row kernels for a single activation, or all-NULL for types
+ * whose packed kernel is already the best single-activation form. */
+static bool prep_kernels_for(OcGgufQuantizationType qtype, size_t blocks,
+                             size_t *prep_bytes,
+                             void (**prep_fn)(const uint8_t *, size_t, void *),
+                             float (**prep_dot)(const void *, size_t,
+                                                const uint8_t *))
+{
+    switch (qtype) {
+    case OC_QUANT_Q2_K:
+        *prep_bytes = oc_oxk_q2_k_prep_bytes(blocks);
+        *prep_fn    = oc_oxk_q2_k_prep_row;
+        *prep_dot   = oc_oxk_dot_q2_k_prepped_1;
+        return true;
+    case OC_QUANT_Q3_K_S:
+    case OC_QUANT_Q3_K_M:
+    case OC_QUANT_Q3_K_L:
+        *prep_bytes = oc_oxk_q6_k_prep_bytes(blocks);
+        *prep_fn    = oc_oxk_q3_k_prep_row;
+        *prep_dot   = oc_oxk_dot_q3_k_prepped_1;
+        return true;
+    default:
+        return false;
+    }
+}
+
+static void matvec_fused_multi_slice(size_t begin, size_t end, size_t tid,
+                                     void *ud)
+{
+    (void)tid;
+    const FusedMultiJob *j = (const FusedMultiJob *)ud;
+    size_t part = 0;
+    size_t row = begin;
+
+    while (part < j->n_outs && row >= j->rows[part]) {
+        row -= j->rows[part];
+        part++;
+    }
+    for (size_t global = begin; global < end; ) {
+        const size_t part_end = j->rows[part];
+        while (row < part_end && global < end) {
+            j->outs[part][row] = fused_row_dot(
+                j->qtype, j->datas[part] + row * j->row_bytes[part],
+                j->blocks, j->act);
+            row++;
+            global++;
+        }
+        part++;
+        row = 0;
+    }
+}
+
+static void matvec_fused_multi_input_slice(size_t begin, size_t end,
+                                           size_t tid, void *ud)
+{
+    (void)tid;
+    const FusedMultiInputJob *j = (const FusedMultiInputJob *)ud;
+    size_t part = 0;
+    size_t row = begin;
+
+    while (part < j->n_outs && row >= j->rows[part]) {
+        row -= j->rows[part];
+        part++;
+    }
+    for (size_t global = begin; global < end; ) {
+        const size_t part_end = j->rows[part];
+        while (row < part_end && global < end) {
+            j->outs[part][row] = fused_row_dot(
+                j->qtype, j->datas[part] + row * j->row_bytes[part],
+                j->blocks, j->acts + j->act_offsets[part]);
+            row++;
+            global++;
+        }
+        part++;
+        row = 0;
     }
 }
 
@@ -240,7 +399,9 @@ static void matvec_quant_slice(size_t begin, size_t end, size_t tid, void *ud)
      * path allocates nothing); the others take per-thread scratch. */
     float *temp = j->temp;
     if (tid != 0) {
-        temp = (float *)oc_parallel_scratch(tid, j->cols * sizeof(float));
+        size_t bytes;
+        if (!size_mul(j->cols, sizeof(float), &bytes)) return;
+        temp = (float *)oc_parallel_scratch(tid, bytes);
         if (temp == NULL) return;   /* see the OOM note in the caller */
     }
 
@@ -260,6 +421,8 @@ void oc_matvec_quantized(OcGgufQuantizationType qtype, const uint8_t *data,
                          size_t rows, size_t cols, size_t row_bytes,
                          const float *input, float *output, float *temp)
 {
+    size_t temp_bytes;
+    if (!size_mul(cols, sizeof(float), &temp_bytes)) return;
     /* Fused integer path, when the weight type has an OXK kernel and the row
      * divides evenly into blocks. The activation is quantized once here and
      * then shared by every row and every thread. */
@@ -268,27 +431,45 @@ void oc_matvec_quantized(OcGgufQuantizationType qtype, const uint8_t *data,
     if (act_kind != ACT_NONE) {
         const size_t blocks = (act_kind == ACT_Q8_K)
                             ? cols / OC_OXK_QK_K : cols / OC_OXK_QK8_0;
-        const size_t act_bytes = blocks * ((act_kind == ACT_Q8_K)
-                            ? OC_OXK_BLOCK_Q8_K_SIZE : OC_OXK_BLOCK_Q8_0_SIZE);
+        size_t act_bytes;
+        if (!size_mul(blocks, (act_kind == ACT_Q8_K)
+                            ? OC_OXK_BLOCK_Q8_K_SIZE : OC_OXK_BLOCK_Q8_0_SIZE,
+                      &act_bytes))
+            act_kind = ACT_NONE;
         /* Only trust the fused kernel when the weight stride is exactly what
          * it assumes; a padded or interleaved row would be read wrong. */
-        const size_t expect = blocks * ((qtype == OC_QUANT_Q4_0) ? OC_OXK_BLOCK_Q4_0_SIZE
-                            : (qtype == OC_QUANT_Q4_1) ? OC_OXK_BLOCK_Q4_1_SIZE
-                            : (qtype == OC_QUANT_Q8_0) ? OC_OXK_BLOCK_Q8_0_SIZE
-                            : (qtype == OC_QUANT_Q5_K_S ||
-                               qtype == OC_QUANT_Q5_K_M) ? OC_OXK_BLOCK_Q5_K_SIZE
-                            : (qtype == OC_QUANT_Q6_K) ? OC_OXK_BLOCK_Q6_K_SIZE
-                                                       : OC_OXK_BLOCK_Q4_K_SIZE);
-        if (row_bytes == expect) {
-            /* Thread 0's scratch holds the activation; it is written before
-             * the region opens and only read inside it. */
-            uint8_t *act = (uint8_t *)oc_parallel_scratch(0, act_bytes);
-            if (act != NULL) {
+        if (act_kind != ACT_NONE &&
+            fused_stride_ok(qtype, blocks, row_bytes)) {
+            /* The activation lives in the caller's dequant buffer, not in
+             * thread 0's scratch: the prepared-row path below hands every
+             * worker — thread 0 included — its scratch for the decoded row,
+             * and there is only one scratch per thread, so sharing it would
+             * let the row decode overwrite the activation mid-region.
+             * `temp` is cols floats, always at least the ~1.14 bytes per
+             * column a Q8_K/Q8_0 encoding needs. */
+            uint8_t *act = (uint8_t *)temp;
+            if (act != NULL && temp_bytes >= act_bytes) {
                 if (act_kind == ACT_Q8_K) quantize_act_q8_k(input, cols, act);
                 else                      quantize_act_q8_0(input, cols, act);
                 QuantJob job = { qtype, data, cols, row_bytes, input, output,
-                                 temp, act, blocks };
-                oc_parallel_for(rows, matvec_fused_slice, &job);
+                                 temp, act, blocks, 0, NULL, NULL };
+                /* Reserve every worker's decode buffer before opening the
+                 * region — an allocation failure inside it could not be
+                 * reported and would drop a slice's outputs. */
+                if (prep_kernels_for(qtype, blocks, &job.prep_bytes,
+                                     &job.prep_fn, &job.prep_dot)) {
+                    const size_t nthreads = oc_parallel_n_threads();
+                    for (size_t t = 0; t < nthreads; t++) {
+                        if (oc_parallel_scratch(t, job.prep_bytes) == NULL) {
+                            job.prep_fn = NULL;
+                            break;
+                        }
+                    }
+                }
+                if (job.prep_fn != NULL)
+                    oc_parallel_for(rows, matvec_prep_slice, &job);
+                else
+                    oc_parallel_for(rows, matvec_fused_slice, &job);
                 return;
             }
         }
@@ -301,18 +482,18 @@ void oc_matvec_quantized(OcGgufQuantizationType qtype, const uint8_t *data,
     const size_t nt = oc_parallel_n_threads();
     if (nt > 1 && rows >= 8) {
         for (size_t t = 1; t < nt; t++) {
-            if (oc_parallel_scratch(t, cols * sizeof(float)) == NULL) {
+            if (oc_parallel_scratch(t, temp_bytes) == NULL) {
                 /* Fall back to the serial path rather than produce a
                  * partially-written output vector. */
                 QuantJob job = { qtype, data, cols, row_bytes, input,
-                                 output, temp, NULL, 0 };
+                                 output, temp, NULL, 0, 0, NULL, NULL };
                 matvec_quant_slice(0, rows, 0, &job);
                 return;
             }
         }
     }
     QuantJob job = { qtype, data, cols, row_bytes, input, output, temp,
-                     NULL, 0 };
+                     NULL, 0, 0, NULL, NULL };
     oc_parallel_for(rows, matvec_quant_slice, &job);
 }
 
@@ -333,7 +514,28 @@ void oc_matvec_quantized(OcGgufQuantizationType qtype, const uint8_t *data,
 
 /* Target footprint for one activation tile. Sized to sit comfortably inside
  * a typical 1 MB private L2 alongside the streaming weight rows. */
-#define OC_ACT_TILE_BYTES (256u * 1024u)
+#define OC_ACT_TILE_BYTES (oc_act_tile_bytes())
+
+/* Overridable with OXC_ACT_TILE_KB so the tile can be retuned per machine
+ * without a rebuild: a wider tile sweeps the weights fewer times (the win
+ * grows with chunk size) at the cost of spilling the tile out of L2. */
+static size_t oc_act_tile_bytes(void)
+{
+    static size_t cached = 0;
+    if (cached != 0) return cached;
+    /* 4 MB measured on 2x Xeon Gold 5220R / 32 threads, Qwen3.6-27B prefill of
+     * 515 tokens: 256 KB 4.09 tok/s, 1 MB 4.56, 4 MB 4.82, 16 MB 4.90. Past
+     * 4 MB the extra weight-sweep savings stop paying for the L2 spill. */
+    size_t bytes = 4u * 1024u * 1024u;
+    const char *env = getenv("OXC_ACT_TILE_KB");
+    if (env != NULL) {
+        char *end = NULL;
+        unsigned long kb = strtoul(env, &end, 10);
+        if (end != env && kb > 0 && kb <= (1u << 20)) bytes = (size_t)kb * 1024u;
+    }
+    cached = bytes;
+    return cached;
+}
 
 static size_t act_block_bytes(ActKind kind)
 {
@@ -350,14 +552,19 @@ static size_t act_blocks_for(ActKind kind, size_t cols)
 static bool fused_stride_ok(OcGgufQuantizationType qtype, size_t blocks,
                             size_t row_bytes)
 {
-    const size_t expect = blocks * ((qtype == OC_QUANT_Q4_0) ? OC_OXK_BLOCK_Q4_0_SIZE
+    size_t expect;
+    const size_t block_bytes = ((qtype == OC_QUANT_Q4_0) ? OC_OXK_BLOCK_Q4_0_SIZE
                         : (qtype == OC_QUANT_Q4_1) ? OC_OXK_BLOCK_Q4_1_SIZE
                         : (qtype == OC_QUANT_Q8_0) ? OC_OXK_BLOCK_Q8_0_SIZE
                         : (qtype == OC_QUANT_Q5_K_S ||
                            qtype == OC_QUANT_Q5_K_M) ? OC_OXK_BLOCK_Q5_K_SIZE
                         : (qtype == OC_QUANT_Q6_K) ? OC_OXK_BLOCK_Q6_K_SIZE
+                        : (qtype == OC_QUANT_Q2_K) ? OC_OXK_BLOCK_Q2_K_SIZE
+                        : (qtype == OC_QUANT_Q3_K_S ||
+                           qtype == OC_QUANT_Q3_K_M ||
+                           qtype == OC_QUANT_Q3_K_L) ? OC_OXK_BLOCK_Q3_K_SIZE
                                                    : OC_OXK_BLOCK_Q4_K_SIZE);
-    return row_bytes == expect;
+    return size_mul(blocks, block_bytes, &expect) && row_bytes == expect;
 }
 
 /* Activations per tile, clamped so the tile always fits `budget` bytes. */
@@ -376,8 +583,10 @@ size_t oc_matvec_batch_scratch_bytes(size_t max_cols)
      * flavours. Computed from the block sizes directly rather than from
      * fused_act_kind(), so the bound does not depend on `max_cols` itself
      * being block-aligned. */
-    const size_t q8k = (max_cols / OC_OXK_QK_K) * OC_OXK_BLOCK_Q8_K_SIZE;
-    const size_t q80 = (max_cols / OC_OXK_QK8_0) * OC_OXK_BLOCK_Q8_0_SIZE;
+    size_t q8k, q80;
+    if (!size_mul(max_cols / OC_OXK_QK_K, OC_OXK_BLOCK_Q8_K_SIZE, &q8k) ||
+        !size_mul(max_cols / OC_OXK_QK8_0, OC_OXK_BLOCK_Q8_0_SIZE, &q80))
+        return SIZE_MAX;
     const size_t abytes_max = q8k > q80 ? q8k : q80;
     /* tile*abytes <= OC_ACT_TILE_BYTES whenever one activation fits the
      * budget, and exactly abytes when it does not (tile clamps to 1). */
@@ -468,7 +677,9 @@ static void matvec_batch_dequant_slice(size_t begin, size_t end, size_t tid,
     const BatchJob *j = (const BatchJob *)ud;
     float *temp = j->temp;
     if (tid != 0) {
-        temp = (float *)oc_parallel_scratch(tid, j->cols * sizeof(float));
+        size_t bytes;
+        if (!size_mul(j->cols, sizeof(float), &bytes)) return;
+        temp = (float *)oc_parallel_scratch(tid, bytes);
         if (temp == NULL) return;   /* pre-reserved by the caller */
     }
     for (size_t r = begin; r < end; r++) {
@@ -495,13 +706,17 @@ void oc_matvec_quantized_batch(OcGgufQuantizationType qtype,
                                uint8_t *act_scratch, size_t act_bytes)
 {
     if (n_vec == 0 || rows == 0) return;
+    size_t temp_bytes;
+    if (!size_mul(cols, sizeof(float), &temp_bytes)) return;
 
     ActKind act_kind = oc_matvec_fused_enabled()
                      ? fused_act_kind(qtype, cols) : ACT_NONE;
     const size_t blocks = (act_kind != ACT_NONE)
                         ? act_blocks_for(act_kind, cols) : 0;
-    const size_t abytes = (act_kind != ACT_NONE)
-                        ? blocks * act_block_bytes(act_kind) : 0;
+    size_t abytes = 0;
+    if (act_kind != ACT_NONE &&
+        !size_mul(blocks, act_block_bytes(act_kind), &abytes))
+        act_kind = ACT_NONE;
     /* A buffer too small for even one activation cannot use the fused path. */
     const bool use_fused = (act_kind != ACT_NONE) && act_scratch != NULL &&
                            abytes > 0 && act_bytes >= abytes &&
@@ -536,6 +751,20 @@ void oc_matvec_quantized_batch(OcGgufQuantizationType qtype,
             prep_bytes = oc_oxk_q6_k_prep_bytes(blocks);
             prep_fn    = oc_oxk_q6_k_prep_row;
             multi_fn   = oc_oxk_dot_q6_k_prepped_multi;
+            break;
+        /* Q3_K decodes into the Q6_K prepared layout, so it borrows that
+         * layout's scratch size. */
+        case OC_QUANT_Q3_K_S:
+        case OC_QUANT_Q3_K_M:
+        case OC_QUANT_Q3_K_L:
+            prep_bytes = oc_oxk_q6_k_prep_bytes(blocks);
+            prep_fn    = oc_oxk_q3_k_prep_row;
+            multi_fn   = oc_oxk_dot_q3_k_prepped_multi;
+            break;
+        case OC_QUANT_Q2_K:
+            prep_bytes = oc_oxk_q2_k_prep_bytes(blocks);
+            prep_fn    = oc_oxk_q2_k_prep_row;
+            multi_fn   = oc_oxk_dot_q2_k_prepped_multi;
             break;
         default:
             break;
@@ -588,7 +817,7 @@ void oc_matvec_quantized_batch(OcGgufQuantizationType qtype,
     bool serial = false;
     if (nt > 1 && rows >= 8) {
         for (size_t t = 1; t < nt; t++) {
-            if (oc_parallel_scratch(t, cols * sizeof(float)) == NULL) {
+            if (oc_parallel_scratch(t, temp_bytes) == NULL) {
                 serial = true;
                 break;
             }
@@ -640,14 +869,136 @@ void oc_matvec_f32_batch(const float *data, size_t rows, size_t cols,
     oc_parallel_for(rows, matvec_f32_batch_slice, &job);
 }
 
-void oc_matvec_quantized_fused(OcGgufQuantizationType qtype,
+void oc_matvec_quantized_fused(const OcGgufQuantizationType *qtypes,
                                const uint8_t *const *datas, const size_t *rows,
                                size_t cols, const size_t *row_bytes,
                                size_t n_outs, const float *input,
                                float *const *outs, float *temp)
 {
+    if (n_outs == 0) return;
+
+    const OcGgufQuantizationType qtype = qtypes[0];
+    const ActKind act_kind = oc_matvec_fused_enabled()
+                           ? fused_act_kind(qtype, cols) : ACT_NONE;
+    const size_t blocks = (act_kind != ACT_NONE)
+                        ? act_blocks_for(act_kind, cols) : 0;
+    bool compatible = act_kind != ACT_NONE;
+    size_t total_rows = 0;
     for (size_t k = 0; k < n_outs; k++) {
-        oc_matvec_quantized(qtype, datas[k], rows[k], cols, row_bytes[k],
+        if (qtypes[k] != qtype || !fused_stride_ok(qtype, blocks, row_bytes[k])) {
+            compatible = false;
+            break;
+        }
+        if (rows[k] > SIZE_MAX - total_rows) {
+            compatible = false;
+            break;
+        }
+        total_rows += rows[k];
+    }
+
+    if (compatible && total_rows != 0) {
+        size_t act_bytes;
+        if (!size_mul(blocks, act_block_bytes(act_kind), &act_bytes))
+            compatible = false;
+        if (!compatible) goto fused_fallback;
+        uint8_t *act = (uint8_t *)oc_parallel_scratch(0, act_bytes);
+        if (act != NULL) {
+            if (act_kind == ACT_Q8_K) quantize_act_q8_k(input, cols, act);
+            else                      quantize_act_q8_0(input, cols, act);
+            FusedMultiJob job = { qtype, datas, rows, row_bytes, outs, n_outs,
+                                  blocks, act };
+            g_fused_test_stats.activation_quantizations++;
+            g_fused_test_stats.parallel_dispatches++;
+            oc_parallel_for(total_rows, matvec_fused_multi_slice, &job);
+            return;
+        }
+    }
+
+fused_fallback:
+    for (size_t k = 0; k < n_outs; k++) {
+        oc_matvec_quantized(qtypes[k], datas[k], rows[k], cols, row_bytes[k],
                             input, outs[k], temp);
+        const ActKind fallback_kind = oc_matvec_fused_enabled()
+                                    ? fused_act_kind(qtypes[k], cols) : ACT_NONE;
+        const size_t fallback_blocks = (fallback_kind != ACT_NONE)
+                                     ? act_blocks_for(fallback_kind, cols) : 0;
+        if (fallback_kind != ACT_NONE &&
+            fused_stride_ok(qtypes[k], fallback_blocks, row_bytes[k])) {
+            g_fused_test_stats.activation_quantizations++;
+        }
+        g_fused_test_stats.parallel_dispatches++;
+        g_fused_test_stats.fallback_calls++;
+    }
+}
+
+
+void oc_matvec_quantized_multi_input(
+    const OcGgufQuantizationType *qtypes,
+    const uint8_t *const *datas, const size_t *rows, size_t cols,
+    const size_t *row_bytes, size_t n_outs,
+    const float *const *inputs, float *const *outs, float *temp)
+{
+    if (n_outs == 0) return;
+
+    const OcGgufQuantizationType qtype = qtypes[0];
+    const ActKind act_kind = oc_matvec_fused_enabled()
+                           ? fused_act_kind(qtype, cols) : ACT_NONE;
+    const size_t blocks = (act_kind != ACT_NONE)
+                        ? act_blocks_for(act_kind, cols) : 0;
+    bool compatible = act_kind != ACT_NONE;
+    size_t total_rows = 0;
+    for (size_t k = 0; k < n_outs; k++) {
+        if (qtypes[k] != qtype || !fused_stride_ok(qtype, blocks, row_bytes[k])) {
+            compatible = false;
+            break;
+        }
+        if (rows[k] > SIZE_MAX - total_rows) {
+            compatible = false;
+            break;
+        }
+        total_rows += rows[k];
+    }
+
+    if (compatible && total_rows != 0) {
+        size_t one_act_bytes;
+        if (size_mul(blocks, act_block_bytes(act_kind), &one_act_bytes) &&
+            one_act_bytes != 0 && n_outs <= SIZE_MAX / one_act_bytes) {
+            const size_t act_bytes = n_outs * one_act_bytes;
+            uint8_t *acts = (uint8_t *)oc_parallel_scratch(0, act_bytes);
+            if (acts != NULL) {
+                size_t act_offsets[n_outs];
+                for (size_t k = 0; k < n_outs; k++) {
+                    act_offsets[k] = k * one_act_bytes;
+                    if (act_kind == ACT_Q8_K)
+                        quantize_act_q8_k(inputs[k], cols, acts + act_offsets[k]);
+                    else
+                        quantize_act_q8_0(inputs[k], cols, acts + act_offsets[k]);
+                }
+                FusedMultiInputJob job = {
+                    qtype, datas, rows, row_bytes, outs, act_offsets,
+                    n_outs, blocks, acts,
+                };
+                g_fused_test_stats.activation_quantizations += n_outs;
+                g_fused_test_stats.parallel_dispatches++;
+                oc_parallel_for(total_rows, matvec_fused_multi_input_slice,
+                                &job);
+                return;
+            }
+        }
+    }
+
+    for (size_t k = 0; k < n_outs; k++) {
+        oc_matvec_quantized(qtypes[k], datas[k], rows[k], cols, row_bytes[k],
+                            inputs[k], outs[k], temp);
+        const ActKind fallback_kind = oc_matvec_fused_enabled()
+                                    ? fused_act_kind(qtypes[k], cols) : ACT_NONE;
+        const size_t fallback_blocks = (fallback_kind != ACT_NONE)
+                                     ? act_blocks_for(fallback_kind, cols) : 0;
+        if (fallback_kind != ACT_NONE &&
+            fused_stride_ok(qtypes[k], fallback_blocks, row_bytes[k])) {
+            g_fused_test_stats.activation_quantizations++;
+        }
+        g_fused_test_stats.parallel_dispatches++;
+        g_fused_test_stats.fallback_calls++;
     }
 }

@@ -101,6 +101,18 @@ static void test_handler(const OcHttpRequest *req,
                    ? req->content_length : sizeof(st->last_body) - 1;
         memcpy(st->last_body, req->body, cpy);
         st->last_body[cpy] = '\0';
+    } else if (strcmp(req->path, "/v1/chat/completions") == 0 &&
+               req->method == OC_HTTP_POST) {
+        usleep(200 * 1000);
+        if (req->stream_write != NULL)
+            (void)req->stream_write(req->stream_context,
+                                    "data: token\n\n", 13);
+        usleep(1300 * 1000);
+        *out_status = 200;
+        *out_content_type = "text/event-stream";
+        *out_body = strdup("data: [DONE]\n\n");
+        *out_body_len = strlen(*out_body);
+        st->last_status = 200;
     } else {
         *out_status = 404;
         *out_content_type = "application/json";
@@ -182,6 +194,90 @@ Test(http, end_to_end_post_body_reaches_handler)
     cr_assert(strstr(resp, "hello") != NULL, "echo body should be in response");
     cr_assert_str_eq(st.last_body, body, "handler saw the body intact");
     free(resp);
+    oc_http_server_stop(&srv);
+    oc_http_server_join(&srv);
+}
+
+Test(http, streaming_response_sends_heartbeats_while_handler_runs)
+{
+    TestState st = {0};
+    OcHttpServer srv;
+    cr_assert_eq(oc_http_server_start("127.0.0.1", 0, 1,
+                                      test_handler, &st, &srv), OC_OK);
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    cr_assert_geq(fd, 0);
+    struct timeval timeout = { .tv_sec = 1, .tv_usec = 200 * 1000 };
+    cr_assert_eq(setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout,
+                            sizeof(timeout)), 0);
+    struct sockaddr_in addr = {0};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(srv.port);
+    inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+    cr_assert_eq(connect(fd, (struct sockaddr *)&addr, sizeof(addr)), 0);
+    const char *body = "{\"stream\":true}";
+    char request[256];
+    int n = snprintf(request, sizeof(request),
+        "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\n"
+        "Content-Type: application/json\r\nContent-Length: %zu\r\n\r\n%s",
+        strlen(body), body);
+    cr_assert_eq(write(fd, request, (size_t)n), n);
+    char response[1024] = {0};
+    size_t used = 0;
+    size_t heartbeats = 0;
+    while (heartbeats < 2 && used < sizeof(response) - 1) {
+        ssize_t got = read(fd, response + used, sizeof(response) - used - 1);
+        cr_assert_gt(got, 0,
+                     "stream must stay active while slow generation runs");
+        used += (size_t)got;
+        response[used] = '\0';
+        heartbeats = 0;
+        const char *p = response;
+        while ((p = strstr(p, ": oxidize\n\n")) != NULL) {
+            heartbeats++;
+            p += strlen(": oxidize\n\n");
+        }
+    }
+    cr_assert(strstr(response, "text/event-stream") != NULL);
+    cr_assert_geq(heartbeats, 2,
+                  "stream needs repeated heartbeats during generation");
+    close(fd);
+    oc_http_server_stop(&srv);
+    oc_http_server_join(&srv);
+}
+
+Test(http, streaming_handler_can_send_data_before_returning)
+{
+    TestState st = {0};
+    OcHttpServer srv;
+    cr_assert_eq(oc_http_server_start("127.0.0.1", 0, 1,
+                                      test_handler, &st, &srv), OC_OK);
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    cr_assert_geq(fd, 0);
+    struct timeval timeout = { .tv_sec = 0, .tv_usec = 500 * 1000 };
+    cr_assert_eq(setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout,
+                            sizeof(timeout)), 0);
+    struct sockaddr_in addr = {0};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(srv.port);
+    inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+    cr_assert_eq(connect(fd, (struct sockaddr *)&addr, sizeof(addr)), 0);
+    const char *body = "{\"stream\":true}";
+    char request[256];
+    int n = snprintf(request, sizeof(request),
+        "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\n"
+        "Content-Type: application/json\r\nContent-Length: %zu\r\n\r\n%s",
+        strlen(body), body);
+    cr_assert_eq(write(fd, request, (size_t)n), n);
+    char response[1024] = {0};
+    size_t used = 0;
+    while (strstr(response, "data: token\n\n") == NULL &&
+           used < sizeof(response) - 1) {
+        ssize_t got = read(fd, response + used, sizeof(response) - used - 1);
+        cr_assert_gt(got, 0, "streamed handler data must arrive before return");
+        used += (size_t)got;
+        response[used] = '\0';
+    }
+    close(fd);
     oc_http_server_stop(&srv);
     oc_http_server_join(&srv);
 }

@@ -385,8 +385,11 @@ void oc_cli_command_help_for(OcCliCommand cmd)
                "USAGE: oxidize-c bench --model <path> [OPTIONS]\n\n"
                "OPTIONS:\n"
                "  --bench-iters N       Number of iterations (default 3)\n"
-               "  --bench-warmup N      Warmup tokens (default 5)\n"
+               "  --bench-warmup N      Unreported warmup iterations (default 5)\n"
                "  --bench-tokens N      Measured tokens per iteration (default 50)\n"
+               "  --bench-prompt-tokens N  Exact synthetic prompt-token count\n"
+               "  --bench-decode-tokens N  Exact decode-token count\n"
+               "  --bench-no-eos        Do not stop decode at EOS\n"
                "  --prompt TEXT          Prompt to use for benchmarking\n");
         break;
     case OC_CLI_CMD_INSPECT:
@@ -548,6 +551,24 @@ OcError oc_cli_run_bench(OcCliContext *ctx)
         return e != OC_OK ? e : OC_ERR_TOKENIZER;
     }
 
+    uint32_t *synthetic_ids = NULL;
+    const uint32_t *bench_ids = ids;
+    if (ctx->bench_prompt_tokens > 0) {
+        synthetic_ids = malloc((size_t)ctx->bench_prompt_tokens * sizeof(*synthetic_ids));
+        if (synthetic_ids == NULL) {
+            free(ids);
+            oc_tokenizer_free(&tok);
+            oc_llama_free(&model);
+            return OC_ERR_OOM;
+        }
+        for (uint32_t i = 0; i < ctx->bench_prompt_tokens; i++)
+            synthetic_ids[i] = ids[i % n_ids];
+        bench_ids = synthetic_ids;
+        n_ids = ctx->bench_prompt_tokens;
+    }
+    uint32_t decode_tokens = ctx->bench_decode_tokens > 0
+        ? ctx->bench_decode_tokens : ctx->bench_tokens;
+
     progress(ctx, "prompt: %zu tokens, %d iterations, %u max tokens",
              n_ids, ctx->bench_iterations, ctx->bench_tokens);
 
@@ -564,15 +585,13 @@ OcError oc_cli_run_bench(OcCliContext *ctx)
                n_ids, ctx->bench_iterations, ctx->bench_tokens);
     }
 
-    for (int iter = 0; iter < ctx->bench_iterations; iter++) {
+    uint32_t total_iterations = ctx->bench_warmup + (uint32_t)ctx->bench_iterations;
+    for (uint32_t iter = 0; iter < total_iterations; iter++) {
         OcLlamaSession sess;
         if (oc_llama_session_init(&model, &sess) != OC_OK) break;
         float *logits = sess.logits;
 
-        /* Prefill. */
-        for (size_t i = 0; i + 1 < n_ids; i++)
-            e = oc_llama_forward(&sess, ids[i], NULL);
-        if (e == OC_OK) e = oc_llama_forward(&sess, ids[n_ids - 1], logits);
+        e = oc_llama_prefill(&sess, bench_ids, n_ids, 0, logits);
         if (e != OC_OK) {
             cli_error("benchmark prefill failed (%s)", oc_error_msg(e));
             oc_llama_session_free(&sess);
@@ -582,9 +601,9 @@ OcError oc_cli_run_bench(OcCliContext *ctx)
         /* Decode. */
         double start = wall_now();
         size_t emitted = 0;
-        while (emitted < ctx->bench_tokens) {
+        while (emitted < decode_tokens) {
             uint32_t sampled = oc_argmax(logits, model.cfg.vocab_size);
-            if (tok.has_eos && sampled == tok.eos_id) break;
+            if (!ctx->bench_no_eos && tok.has_eos && sampled == tok.eos_id) break;
             emitted++;
             if (oc_llama_forward(&sess, sampled, logits) != OC_OK) break;
         }
@@ -595,32 +614,34 @@ OcError oc_cli_run_bench(OcCliContext *ctx)
         double pf_start = wall_now();
         OcLlamaSession pf_sess;
         memset(&pf_sess, 0, sizeof(pf_sess));
-        if (oc_llama_session_init(&model, &pf_sess) == OC_OK) {
-            for (size_t i = 0; i < n_ids; i++)
-                oc_llama_forward(&pf_sess, ids[i], NULL);
-        }
+        if (oc_llama_session_init(&model, &pf_sess) == OC_OK)
+            e = oc_llama_prefill(&pf_sess, bench_ids, n_ids, 0, NULL);
         double pf_elapsed = wall_now() - pf_start;
-        double pf_tps = (pf_elapsed > 0) ? (double)n_ids / pf_elapsed : 0.0;
+        double pf_tps = (e == OC_OK && pf_elapsed > 0)
+                      ? (double)n_ids / pf_elapsed : 0.0;
         oc_llama_session_free(&pf_sess);
 
-        if (ctx->output_format == OC_CLI_OUTPUT_JSON) {
-            if (iter > 0) printf(",");
+        if (iter >= ctx->bench_warmup && ctx->output_format == OC_CLI_OUTPUT_JSON) {
+            if (completed > 0) printf(",");
             printf("{\"iter\":%d,\"decode_tokens\":%zu,\"decode_time_s\":%.6f,"
                    "\"decode_tok_per_s\":%.2f,\"prefill_tok_per_s\":%.2f}",
-                   iter + 1, emitted, elapsed, tps, pf_tps);
-        } else {
+                   completed + 1, emitted, elapsed, tps, pf_tps);
+        } else if (iter >= ctx->bench_warmup) {
             printf("  iter %d: %zu tokens in %.3fs = %.2f tok/s (prefill: %.2f tok/s)\n",
-                   iter + 1, emitted, elapsed, tps, pf_tps);
+                   completed + 1, emitted, elapsed, tps, pf_tps);
         }
 
-        if (tps > best_tps) best_tps = tps;
-        if (pf_tps > best_pf) best_pf = pf_tps;
-        sum_tps += tps;
-        sum_pf += pf_tps;
-        completed++;
+        if (iter >= ctx->bench_warmup) {
+            if (tps > best_tps) best_tps = tps;
+            if (pf_tps > best_pf) best_pf = pf_tps;
+            sum_tps += tps;
+            sum_pf += pf_tps;
+            completed++;
+        }
         oc_llama_session_free(&sess);
     }
 
+    free(synthetic_ids);
     free(ids);
     oc_tokenizer_free(&tok);
     oc_llama_free(&model);

@@ -15,7 +15,47 @@
  * symbols still link (the dispatcher never selects them off-x86). */
 #if defined(__x86_64__) || defined(__i386__)
 
+
+
 #include <immintrin.h>
+
+__attribute__((target("avx512bw,avx512dq,avx512vl,avx512vnni")))
+static inline int32_t hsum_i32_8_avx512(__m256i v)
+{
+    __m128i lo = _mm256_castsi256_si128(v);
+    __m128i hi = _mm256_extracti128_si256(v, 1);
+    __m128i s  = _mm_add_epi32(lo, hi);
+    s = _mm_add_epi32(s, _mm_shuffle_epi32(s, _MM_SHUFFLE(1, 0, 3, 2)));
+    s = _mm_add_epi32(s, _mm_shuffle_epi32(s, _MM_SHUFFLE(2, 3, 0, 1)));
+    return _mm_cvtsi128_si32(s);
+}
+
+/* Vectorized replacement for the per-(block, activation) scalar loop that
+ * folds the activation's 16 block sums against the row's per-group scales.
+ *
+ * That loop was the real cost of these kernels: 16 scalar iterations of
+ * load / sign-extend / multiply / add against just FOUR vpdpbusd of actual
+ * work per block, so the epilogue outweighed the dot by an order of
+ * magnitude. vpmaddwd does the same reduction in one instruction — and
+ * because the whole term is exact int32 arithmetic, reassociating it cannot
+ * change the result, so the float accumulation below stays bit-identical to
+ * the scalar reference.
+ *
+ * `w16` holds the 16 per-group weights already widened to int16, laid out to
+ * match the bsums: for the 16-group types (Q6_K, Q3_K, Q2_K) that is one
+ * weight per group; for Q4_K's 8 groups of 32 each weight is duplicated, so
+ * lane k of the result is w_k * (bsum_2k + bsum_2k+1). */
+__attribute__((target("avx512bw,avx512dq,avx512vl,avx512vnni")))
+static inline int32_t fold_bsums(__m256i w16, const uint8_t *bsums)
+{
+    const __m256i bs = _mm256_loadu_si256((const __m256i *)bsums);
+    return hsum_i32_8_avx512(_mm256_madd_epi16(w16, bs));
+}
+
+
+
+
+
 
 /* ─── Helper: horizontal sum of __m512i (16 int32 lanes) ──────────────── */
 
@@ -206,14 +246,15 @@ void oc_oxk_dot_q4_k_prepped_multi_avx512(const void *prep, size_t blocks,
                 _mm512_reduce_add_epi32(acc2), _mm512_reduce_add_epi32(acc3),
             };
             float *sums[4] = { &s0, &s1, &s2, &s3 };
+            /* Duplicate each of the 8 mins so lane k of the fold is
+             * mn_k * (bsum_2k + bsum_2k+1) — Q4_K's groups are 32 wide and
+             * so span two of the activation's 16-element block sums. */
+            const __m256i mn16 = _mm256_cvtepu8_epi16(
+                _mm_shuffle_epi8(_mm_loadl_epi64((const __m128i *)mnb),
+                    _mm_setr_epi8(0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7)));
             for (int a = 0; a < 4; a++) {
                 const uint8_t *bsums = qb[a] + 4 + OC_OXK_QK_K;
-                int32_t min_acc = 0;
-                for (unsigned j = 0; j < 8; j++) {
-                    min_acc += (int32_t)mnb[j] *
-                        ((int32_t)oc_oxk_read_q8_k_bsum(bsums, j * 2) +
-                         (int32_t)oc_oxk_read_q8_k_bsum(bsums, j * 2 + 1));
-                }
+                const int32_t min_acc = fold_bsums(mn16, bsums);
                 float dq;
                 memcpy(&dq, qb[a], 4);
                 *sums[a] += d[b] * dq * (float)pos[a]
@@ -296,14 +337,11 @@ void oc_oxk_dot_q6_k_prepped_multi_avx512(const void *prep, size_t blocks,
                 _mm512_reduce_add_epi32(acc0), _mm512_reduce_add_epi32(acc1),
                 _mm512_reduce_add_epi32(acc2), _mm512_reduce_add_epi32(acc3),
             };
+            const __m256i sc16 = _mm256_cvtepi8_epi16(
+                _mm_loadu_si128((const __m128i *)scb));
             for (int a = 0; a < 4; a++) {
                 const uint8_t *qb = act[a] + b * OC_OXK_BLOCK_Q8_K_SIZE;
-                const uint8_t *bsums = qb + 4 + OC_OXK_QK_K;
-                int32_t minc = 0;
-                for (unsigned g = 0; g < 16; g++) {
-                    minc += (int32_t)scb[g] *
-                            (int32_t)oc_oxk_read_q8_k_bsum(bsums, g);
-                }
+                const int32_t minc = fold_bsums(sc16, qb + 4 + OC_OXK_QK_K);
                 float dq;
                 memcpy(&dq, qb, 4);
                 sums[a] += d[b] * dq * (float)(pos[a] - 32 * minc);
@@ -318,18 +356,279 @@ void oc_oxk_dot_q6_k_prepped_multi_avx512(const void *prep, size_t blocks,
     }
 }
 
-/* ─── VNNI Q6_K × Q8_K dot ──────────────────────────────────────────────── */
+
+/* Single-activation VNNI form of the bodies above.
+ *
+ * Decode has exactly one activation per matmul, so it never reaches the
+ * 4-wide loop and used to drop to the scalar prepared dot — 256 scalar
+ * multiply-adds per block against four vpdpbusd. Sharing the same prepared
+ * layout means decode and prefill still agree bit-for-bit on the integer
+ * terms; only the float accumulation order (identical here) matters. */
+__attribute__((target("avx512bw,avx512dq,avx512vl,avx512vnni")))
+static inline float dot_q3q6_prepped_one(const void *prep, size_t blocks,
+                                         const uint8_t *act, int32_t offset)
+{
+    const float   *d     = (const float *)prep;
+    const uint8_t *codes = (const uint8_t *)(d + blocks);
+    const int8_t  *sc    = (const int8_t *)(codes + blocks * OC_OXK_QK_K);
+
+    const __m512i idx[4] = {
+        _mm512_set_epi32(3,3,3,3, 2,2,2,2, 1,1,1,1, 0,0,0,0),
+        _mm512_set_epi32(7,7,7,7, 6,6,6,6, 5,5,5,5, 4,4,4,4),
+        _mm512_set_epi32(11,11,11,11, 10,10,10,10, 9,9,9,9, 8,8,8,8),
+        _mm512_set_epi32(15,15,15,15, 14,14,14,14, 13,13,13,13, 12,12,12,12),
+    };
+
+    float sum = 0.0f;
+    for (size_t b = 0; b < blocks; b++) {
+        const uint8_t *cb  = codes + b * OC_OXK_QK_K;
+        const int8_t  *scb = sc + b * 16;
+        const __m512i scz = _mm512_cvtepi8_epi32(
+            _mm_loadu_si128((const __m128i *)scb));
+        __m512i acc = _mm512_setzero_si512();
+        for (int gp = 0; gp < 4; gp++) {
+            const __m512i cz = _mm512_loadu_si512(
+                (const void *)(cb + (size_t)gp * 64));
+            const __m512i p = _mm512_dpbusd_epi32(_mm512_setzero_si512(), cz,
+                _mm512_loadu_si512((const void *)(act +
+                    b * OC_OXK_BLOCK_Q8_K_SIZE + 4 + (size_t)gp * 64)));
+            acc = _mm512_add_epi32(acc,
+                _mm512_mullo_epi32(p, _mm512_permutexvar_epi32(idx[gp], scz)));
+        }
+        const uint8_t *qb = act + b * OC_OXK_BLOCK_Q8_K_SIZE;
+        const int32_t off = fold_bsums(
+            _mm256_cvtepi8_epi16(_mm_loadu_si128((const __m128i *)scb)),
+            qb + 4 + OC_OXK_QK_K);
+        float dq;
+        memcpy(&dq, qb, 4);
+        sum += d[b] * dq * (float)(_mm512_reduce_add_epi32(acc) -
+                                   offset * off);
+    }
+    return sum;
+}
 
 __attribute__((target("avx512bw,avx512dq,avx512vl,avx512vnni")))
-static inline int32_t hsum_i32_8_avx512(__m256i v)
+float oc_oxk_dot_q3_k_prepped_avx512(const void *prep, size_t blocks,
+                                     const uint8_t *act)
 {
-    __m128i lo = _mm256_castsi256_si128(v);
-    __m128i hi = _mm256_extracti128_si256(v, 1);
-    __m128i s  = _mm_add_epi32(lo, hi);
-    s = _mm_add_epi32(s, _mm_shuffle_epi32(s, _MM_SHUFFLE(1, 0, 3, 2)));
-    s = _mm_add_epi32(s, _mm_shuffle_epi32(s, _MM_SHUFFLE(2, 3, 0, 1)));
-    return _mm_cvtsi128_si32(s);
+    return dot_q3q6_prepped_one(prep, blocks, act, 4);
 }
+
+__attribute__((target("avx512bw,avx512dq,avx512vl,avx512vnni")))
+float oc_oxk_dot_q6_k_prepped_avx512(const void *prep, size_t blocks,
+                                     const uint8_t *act)
+{
+    return dot_q3q6_prepped_one(prep, blocks, act, 32);
+}
+
+__attribute__((target("avx512bw,avx512dq,avx512vl,avx512vnni")))
+float oc_oxk_dot_q2_k_prepped_avx512(const void *prep, size_t blocks,
+                                     const uint8_t *act)
+{
+    const float   *d     = (const float *)prep;
+    const float   *dmin  = d + blocks;
+    const uint8_t *codes = (const uint8_t *)(d + 2 * blocks);
+    const uint8_t *sc    = codes + blocks * OC_OXK_QK_K;
+    const uint8_t *mn    = sc + blocks * 16;
+
+    const __m512i idx[4] = {
+        _mm512_set_epi32(3,3,3,3, 2,2,2,2, 1,1,1,1, 0,0,0,0),
+        _mm512_set_epi32(7,7,7,7, 6,6,6,6, 5,5,5,5, 4,4,4,4),
+        _mm512_set_epi32(11,11,11,11, 10,10,10,10, 9,9,9,9, 8,8,8,8),
+        _mm512_set_epi32(15,15,15,15, 14,14,14,14, 13,13,13,13, 12,12,12,12),
+    };
+
+    float sum = 0.0f;
+    for (size_t b = 0; b < blocks; b++) {
+        const uint8_t *cb  = codes + b * OC_OXK_QK_K;
+        const uint8_t *scb = sc + b * 16;
+        const uint8_t *mnb = mn + b * 16;
+        const __m512i scz = _mm512_cvtepu8_epi32(
+            _mm_loadu_si128((const __m128i *)scb));
+        __m512i acc = _mm512_setzero_si512();
+        for (int gp = 0; gp < 4; gp++) {
+            const __m512i cz = _mm512_loadu_si512(
+                (const void *)(cb + (size_t)gp * 64));
+            const __m512i p = _mm512_dpbusd_epi32(_mm512_setzero_si512(), cz,
+                _mm512_loadu_si512((const void *)(act +
+                    b * OC_OXK_BLOCK_Q8_K_SIZE + 4 + (size_t)gp * 64)));
+            acc = _mm512_add_epi32(acc,
+                _mm512_mullo_epi32(p, _mm512_permutexvar_epi32(idx[gp], scz)));
+        }
+        const uint8_t *qb = act + b * OC_OXK_BLOCK_Q8_K_SIZE;
+        const int32_t min_acc = fold_bsums(
+            _mm256_cvtepu8_epi16(_mm_loadu_si128((const __m128i *)mnb)),
+            qb + 4 + OC_OXK_QK_K);
+        float dq;
+        memcpy(&dq, qb, 4);
+        sum += dq * (d[b] * (float)_mm512_reduce_add_epi32(acc) -
+                     dmin[b] * (float)min_acc);
+    }
+    return sum;
+}
+
+/* ─── VNNI Q3_K / Q2_K prepared-row multi dots ───────────────────────────
+ *
+ * Both are 16 groups of 16 weights, so one 64-byte code load spans FOUR
+ * groups — lanes 0-3 of the vpdpbusd result belong to group 4gp, lanes 4-7 to
+ * 4gp+1, and so on. That is the only structural difference from the Q4_K
+ * kernel above, whose groups are 32 wide and so span two per load.
+ *
+ * Q3_K reuses the Q6_K prepared layout, so the body is shared and the code
+ * offset (-4 for Q3_K, -32 for Q6_K) is a parameter the compiler folds. */
+__attribute__((target("avx512bw,avx512dq,avx512vl,avx512vnni")))
+static inline void dot_q3q6_prepped_multi_body(const void *prep, size_t blocks,
+                                               const uint8_t *acts,
+                                               size_t act_stride, size_t n_act,
+                                               float *out, int32_t offset)
+{
+    const float   *d     = (const float *)prep;
+    const uint8_t *codes = (const uint8_t *)(d + blocks);
+    const int8_t  *sc    = (const int8_t *)(codes + blocks * OC_OXK_QK_K);
+
+    /* Lane j of chunk gp holds group 4gp + j/4. */
+    const __m512i idx0 = _mm512_set_epi32(3,3,3,3, 2,2,2,2, 1,1,1,1, 0,0,0,0);
+    const __m512i idx1 = _mm512_set_epi32(7,7,7,7, 6,6,6,6, 5,5,5,5, 4,4,4,4);
+    const __m512i idx2 = _mm512_set_epi32(11,11,11,11, 10,10,10,10,
+                                          9,9,9,9, 8,8,8,8);
+    const __m512i idx3 = _mm512_set_epi32(15,15,15,15, 14,14,14,14,
+                                          13,13,13,13, 12,12,12,12);
+    const __m512i idx[4] = { idx0, idx1, idx2, idx3 };
+
+    size_t a0 = 0;
+    for (; a0 + 4 <= n_act; a0 += 4) {
+        const uint8_t *act[4] = {
+            acts + (a0 + 0) * act_stride, acts + (a0 + 1) * act_stride,
+            acts + (a0 + 2) * act_stride, acts + (a0 + 3) * act_stride,
+        };
+        float sums[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+
+        for (size_t b = 0; b < blocks; b++) {
+            const uint8_t *cb  = codes + b * OC_OXK_QK_K;
+            const int8_t  *scb = sc + b * 16;
+            const __m512i scz = _mm512_cvtepi8_epi32(
+                _mm_loadu_si128((const __m128i *)scb));
+
+            __m512i acc[4] = { _mm512_setzero_si512(), _mm512_setzero_si512(),
+                               _mm512_setzero_si512(), _mm512_setzero_si512() };
+            for (int gp = 0; gp < 4; gp++) {
+                const __m512i cz = _mm512_loadu_si512(
+                    (const void *)(cb + (size_t)gp * 64));
+                const __m512i scv = _mm512_permutexvar_epi32(idx[gp], scz);
+                const size_t qoff = b * OC_OXK_BLOCK_Q8_K_SIZE + 4 +
+                                    (size_t)gp * 64;
+                for (int a = 0; a < 4; a++) {
+                    const __m512i p = _mm512_dpbusd_epi32(
+                        _mm512_setzero_si512(), cz,
+                        _mm512_loadu_si512((const void *)(act[a] + qoff)));
+                    acc[a] = _mm512_add_epi32(acc[a],
+                                              _mm512_mullo_epi32(p, scv));
+                }
+            }
+
+            const __m256i sc16 = _mm256_cvtepi8_epi16(
+                _mm_loadu_si128((const __m128i *)scb));
+            for (int a = 0; a < 4; a++) {
+                const uint8_t *qb = act[a] + b * OC_OXK_BLOCK_Q8_K_SIZE;
+                const int32_t off = fold_bsums(sc16, qb + 4 + OC_OXK_QK_K);
+                float dq;
+                memcpy(&dq, qb, 4);
+                sums[a] += d[b] * dq *
+                           (float)(_mm512_reduce_add_epi32(acc[a]) -
+                                   offset * off);
+            }
+        }
+        for (int a = 0; a < 4; a++) out[a0 + a] = sums[a];
+    }
+    for (; a0 < n_act; a0++) {
+        out[a0] = dot_q3q6_prepped_one(prep, blocks, acts + a0 * act_stride,
+                                       offset);
+    }
+}
+
+__attribute__((target("avx512bw,avx512dq,avx512vl,avx512vnni")))
+void oc_oxk_dot_q3_k_prepped_multi_avx512(const void *prep, size_t blocks,
+                                          const uint8_t *acts,
+                                          size_t act_stride, size_t n_act,
+                                          float *out)
+{
+    dot_q3q6_prepped_multi_body(prep, blocks, acts, act_stride, n_act, out, 4);
+}
+
+__attribute__((target("avx512bw,avx512dq,avx512vl,avx512vnni")))
+void oc_oxk_dot_q2_k_prepped_multi_avx512(const void *prep, size_t blocks,
+                                          const uint8_t *acts,
+                                          size_t act_stride, size_t n_act,
+                                          float *out)
+{
+    const float   *d     = (const float *)prep;
+    const float   *dmin  = d + blocks;
+    const uint8_t *codes = (const uint8_t *)(d + 2 * blocks);
+    const uint8_t *sc    = codes + blocks * OC_OXK_QK_K;
+    const uint8_t *mn    = sc + blocks * 16;
+
+    const __m512i idx0 = _mm512_set_epi32(3,3,3,3, 2,2,2,2, 1,1,1,1, 0,0,0,0);
+    const __m512i idx1 = _mm512_set_epi32(7,7,7,7, 6,6,6,6, 5,5,5,5, 4,4,4,4);
+    const __m512i idx2 = _mm512_set_epi32(11,11,11,11, 10,10,10,10,
+                                          9,9,9,9, 8,8,8,8);
+    const __m512i idx3 = _mm512_set_epi32(15,15,15,15, 14,14,14,14,
+                                          13,13,13,13, 12,12,12,12);
+    const __m512i idx[4] = { idx0, idx1, idx2, idx3 };
+
+    size_t a0 = 0;
+    for (; a0 + 4 <= n_act; a0 += 4) {
+        const uint8_t *act[4] = {
+            acts + (a0 + 0) * act_stride, acts + (a0 + 1) * act_stride,
+            acts + (a0 + 2) * act_stride, acts + (a0 + 3) * act_stride,
+        };
+        float sums[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+
+        for (size_t b = 0; b < blocks; b++) {
+            const uint8_t *cb  = codes + b * OC_OXK_QK_K;
+            const uint8_t *scb = sc + b * 16;
+            const uint8_t *mnb = mn + b * 16;
+            const __m512i scz = _mm512_cvtepu8_epi32(
+                _mm_loadu_si128((const __m128i *)scb));
+
+            __m512i acc[4] = { _mm512_setzero_si512(), _mm512_setzero_si512(),
+                               _mm512_setzero_si512(), _mm512_setzero_si512() };
+            for (int gp = 0; gp < 4; gp++) {
+                const __m512i cz = _mm512_loadu_si512(
+                    (const void *)(cb + (size_t)gp * 64));
+                const __m512i scv = _mm512_permutexvar_epi32(idx[gp], scz);
+                const size_t qoff = b * OC_OXK_BLOCK_Q8_K_SIZE + 4 +
+                                    (size_t)gp * 64;
+                for (int a = 0; a < 4; a++) {
+                    const __m512i p = _mm512_dpbusd_epi32(
+                        _mm512_setzero_si512(), cz,
+                        _mm512_loadu_si512((const void *)(act[a] + qoff)));
+                    acc[a] = _mm512_add_epi32(acc[a],
+                                              _mm512_mullo_epi32(p, scv));
+                }
+            }
+
+            const __m256i mn16 = _mm256_cvtepu8_epi16(
+                _mm_loadu_si128((const __m128i *)mnb));
+            for (int a = 0; a < 4; a++) {
+                const uint8_t *qb = act[a] + b * OC_OXK_BLOCK_Q8_K_SIZE;
+                const int32_t min_acc = fold_bsums(mn16, qb + 4 + OC_OXK_QK_K);
+                float dq;
+                memcpy(&dq, qb, 4);
+                sums[a] += dq *
+                    (d[b] * (float)_mm512_reduce_add_epi32(acc[a]) -
+                     dmin[b] * (float)min_acc);
+            }
+        }
+        for (int a = 0; a < 4; a++) out[a0 + a] = sums[a];
+    }
+    for (; a0 < n_act; a0++) {
+        out[a0] = oc_oxk_dot_q2_k_prepped_avx512(prep, blocks,
+                                                 acts + a0 * act_stride);
+    }
+}
+
+/* ─── VNNI Q6_K × Q8_K dot ──────────────────────────────────────────────── */
+
 
 __attribute__((target("avx512bw,avx512dq,avx512vl,avx512vnni")))
 float oc_oxk_dot_q6_k_q8_k_avx512vnni(const uint8_t *row, size_t blocks,
@@ -508,6 +807,22 @@ void oc_oxk_dot_q6_k_prepped_multi_avx512(const void *prep, size_t blocks, const
 {
     for (size_t v = 0; v < n_act; v++)
         out[v] = oc_oxk_dot_q6_k_prepped(prep, blocks, acts + v * act_stride);
+}
+float oc_oxk_dot_q2_k_prepped_avx512(const void *prep, size_t blocks, const uint8_t *act)
+{ return oc_oxk_dot_q2_k_prepped(prep, blocks, act); }
+float oc_oxk_dot_q3_k_prepped_avx512(const void *prep, size_t blocks, const uint8_t *act)
+{ return oc_oxk_dot_q3_k_prepped(prep, blocks, act); }
+float oc_oxk_dot_q6_k_prepped_avx512(const void *prep, size_t blocks, const uint8_t *act)
+{ return oc_oxk_dot_q6_k_prepped(prep, blocks, act); }
+void oc_oxk_dot_q3_k_prepped_multi_avx512(const void *prep, size_t blocks, const uint8_t *acts, size_t act_stride, size_t n_act, float *out)
+{
+    for (size_t v = 0; v < n_act; v++)
+        out[v] = oc_oxk_dot_q3_k_prepped(prep, blocks, acts + v * act_stride);
+}
+void oc_oxk_dot_q2_k_prepped_multi_avx512(const void *prep, size_t blocks, const uint8_t *acts, size_t act_stride, size_t n_act, float *out)
+{
+    for (size_t v = 0; v < n_act; v++)
+        out[v] = oc_oxk_dot_q2_k_prepped(prep, blocks, acts + v * act_stride);
 }
 float oc_oxk_dot_q5_k_q8_k_avx512vnni(const uint8_t *row, size_t blocks, const uint8_t *q8)
 { return oc_oxk_dot_q5_k_q8_k_scalar(row, blocks, q8); }

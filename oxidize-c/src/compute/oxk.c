@@ -412,6 +412,293 @@ float oc_oxk_dot_q6_k_prepped(const void *scratch, size_t blocks,
     return sum;
 }
 
+/* ─── Q2_K / Q3_K ────────────────────────────────────────────────────────
+ *
+ * Both pack 256 weights as 16 groups of 16, and both decode to a small
+ * unsigned code plus a per-group affine correction. Writing the unpack once
+ * per type and sharing it between the packed dot and the row prep keeps the
+ * two in lockstep — a divergence there is exactly the kind of bug that shows
+ * up only as slightly-wrong logits.
+ *
+ * Group g addresses its 2-bit codes as qs[(g/8)*32 + (g%2)*16 + l] shifted
+ * right by ((g%8)/2)*2, which is the traversal order dequant_q2_k /
+ * dequant_q3_k walk with their outer/inner/is loops.
+ */
+
+/* Q2_K block: scales[16] (4-bit scale | 4-bit min), qs[64], f16 d, f16 dmin.
+ * codes are the raw 2-bit values 0..3; the group minimum is returned
+ * separately and folded out through the activation block sums. */
+static void q2k_unpack_block(const uint8_t *wb, uint8_t *codes, uint8_t *sc,
+                             uint8_t *mn, float *d, float *dmin)
+{
+    const uint8_t *scales = wb;
+    const uint8_t *qs     = wb + 16;
+    *d    = oc_oxk_f16_le_to_f32(wb + 80);
+    *dmin = oc_oxk_f16_le_to_f32(wb + 82);
+    for (unsigned g = 0; g < 16; g++) {
+        sc[g] = (uint8_t)(scales[g] & 0x0Fu);
+        mn[g] = (uint8_t)(scales[g] >> 4);
+    }
+    /* Groups 2k and 2k+1 are adjacent in `codes` and their source bytes are
+     * the same 32-byte run of qs at the same shift, so the decode is 8
+     * contiguous 32-byte passes rather than 16 strided 16-byte ones. Written
+     * this way (contiguous, branchless) so the compiler vectorizes it: this
+     * loop is the whole cost of a decode-time matvec, where there is no
+     * activation tile to amortize it over. */
+    for (unsigned outer = 0; outer < 2; outer++) {
+        for (unsigned inner = 0; inner < 4; inner++) {
+            const uint8_t *q = qs + outer * 32;
+            uint8_t *c = codes + (outer * 8 + inner * 2) * 16;
+            const unsigned shift = inner * 2;
+            for (unsigned l = 0; l < 32; l++)
+                c[l] = (uint8_t)((q[l] >> shift) & 3u);
+        }
+    }
+}
+
+/* Q3_K block: hmask[32], qs[64], 12 packed 6-bit scales, f16 d.
+ * The third bit lives in hmask and is INVERTED relative to the value: a set
+ * mask bit means "no -4". Folding that into the code gives raw = q | (bit ? 4
+ * : 0) in 0..7 with a uniform -4 offset, which is the Q6_K shape. */
+static void q3k_unpack_block(const uint8_t *wb, uint8_t *codes, int8_t *sc,
+                             float *d)
+{
+    const uint8_t *hmask = wb;
+    const uint8_t *qs    = wb + 32;
+    *d = oc_oxk_f16_le_to_f32(wb + 108);
+
+    /* 6-bit scales: 16 values packed into 12 bytes, low 4 bits in the first
+     * 8 bytes and the high 2 bits spread across the last 4. Same shuffle as
+     * dequant_q3_k. */
+    uint32_t aux[4];
+    for (unsigned i = 0; i < 3; i++) {
+        const uint8_t *p = wb + 96 + i * 4;
+        aux[i] = (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+                 ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+    }
+    const uint32_t tmp = aux[2];
+    aux[2] = ((aux[0] >> 4) & 0x0F0F0F0Fu) | (((tmp >> 4) & 0x03030303u) << 4);
+    aux[3] = ((aux[1] >> 4) & 0x0F0F0F0Fu) | (((tmp >> 6) & 0x03030303u) << 4);
+    aux[0] = (aux[0] & 0x0F0F0F0Fu) | ((tmp & 0x03030303u) << 4);
+    aux[1] = (aux[1] & 0x0F0F0F0Fu) | (((tmp >> 2) & 0x03030303u) << 4);
+    for (unsigned i = 0; i < 4; i++) {
+        for (unsigned j = 0; j < 4; j++)
+            sc[i * 4 + j] = (int8_t)(int32_t)
+                (((aux[i] >> (j * 8)) & 0xFFu) - 32u);
+    }
+
+    /* Same contiguous 32-byte decode as Q2_K (see the note there), with the
+     * third bit pulled out of hmask arithmetically rather than with a branch
+     * so the loop stays vectorizable. */
+    for (unsigned outer = 0; outer < 2; outer++) {
+        for (unsigned inner = 0; inner < 4; inner++) {
+            const uint8_t *q = qs + outer * 32;
+            uint8_t *c = codes + (outer * 8 + inner * 2) * 16;
+            const unsigned shift = inner * 2;
+            const unsigned bit = outer * 4 + inner;
+            for (unsigned l = 0; l < 32; l++) {
+                c[l] = (uint8_t)(((q[l] >> shift) & 3u) |
+                                 (((hmask[l] >> bit) & 1u) << 2));
+            }
+        }
+    }
+}
+
+float oc_oxk_dot_q2_k_q8_k_scalar(const uint8_t *row, size_t blocks,
+                                  const uint8_t *q8)
+{
+    float sum = 0.0f;
+    for (size_t b = 0; b < blocks; b++) {
+        uint8_t codes[OC_OXK_QK_K], sc[16], mn[16];
+        float dw, dmin;
+        q2k_unpack_block(row + b * OC_OXK_BLOCK_Q2_K_SIZE, codes, sc, mn,
+                         &dw, &dmin);
+
+        const uint8_t *qb = q8 + b * OC_OXK_BLOCK_Q8_K_SIZE;
+        float dq;
+        memcpy(&dq, qb, 4);
+        const int8_t  *q8v   = (const int8_t *)(qb + 4);
+        const uint8_t *bsums = qb + 4 + OC_OXK_QK_K;
+
+        int32_t pos = 0, min_acc = 0;
+        for (unsigned g = 0; g < 16; g++) {
+            const uint8_t *cg = codes + g * 16;
+            const int8_t  *qg = q8v + g * 16;
+            int32_t acc = 0;
+            for (unsigned l = 0; l < 16; l++)
+                acc += (int32_t)cg[l] * (int32_t)qg[l];
+            pos     += (int32_t)sc[g] * acc;
+            min_acc += (int32_t)mn[g] *
+                       (int32_t)oc_oxk_read_q8_k_bsum(bsums, g);
+        }
+        sum += dq * (dw * (float)pos - dmin * (float)min_acc);
+    }
+    return sum;
+}
+
+float oc_oxk_dot_q3_k_q8_k_scalar(const uint8_t *row, size_t blocks,
+                                  const uint8_t *q8)
+{
+    float sum = 0.0f;
+    for (size_t b = 0; b < blocks; b++) {
+        uint8_t codes[OC_OXK_QK_K];
+        int8_t sc[16];
+        float dw;
+        q3k_unpack_block(row + b * OC_OXK_BLOCK_Q3_K_SIZE, codes, sc, &dw);
+
+        const uint8_t *qb = q8 + b * OC_OXK_BLOCK_Q8_K_SIZE;
+        float dq;
+        memcpy(&dq, qb, 4);
+        const int8_t  *q8v   = (const int8_t *)(qb + 4);
+        const uint8_t *bsums = qb + 4 + OC_OXK_QK_K;
+
+        int32_t pos = 0, off = 0;
+        for (unsigned g = 0; g < 16; g++) {
+            const uint8_t *cg = codes + g * 16;
+            const int8_t  *qg = q8v + g * 16;
+            int32_t acc = 0;
+            for (unsigned l = 0; l < 16; l++)
+                acc += (int32_t)cg[l] * (int32_t)qg[l];
+            pos += (int32_t)sc[g] * acc;
+            off += (int32_t)sc[g] *
+                   (int32_t)oc_oxk_read_q8_k_bsum(bsums, g);
+        }
+        sum += dw * dq * (float)(pos - 4 * off);
+    }
+    return sum;
+}
+
+/* Q2_K prepared row: d[blocks], dmin[blocks], codes[blocks*256],
+ * sc[blocks*16], mn[blocks*16]. */
+size_t oc_oxk_q2_k_prep_bytes(size_t blocks)
+{
+    return blocks * (2u * sizeof(float) + OC_OXK_QK_K + 32u);
+}
+
+static void q2k_prep_ptrs(void *scratch, size_t blocks, float **d, float **dmin,
+                          uint8_t **codes, uint8_t **sc, uint8_t **mn)
+{
+    float *f = (float *)scratch;
+    *d     = f;
+    *dmin  = f + blocks;
+    *codes = (uint8_t *)(f + 2 * blocks);
+    *sc    = *codes + blocks * OC_OXK_QK_K;
+    *mn    = *sc + blocks * 16u;
+}
+
+void oc_oxk_q2_k_prep_row(const uint8_t *row, size_t blocks, void *scratch)
+{
+    float *d, *dmin;
+    uint8_t *codes, *sc, *mn;
+    q2k_prep_ptrs(scratch, blocks, &d, &dmin, &codes, &sc, &mn);
+    for (size_t b = 0; b < blocks; b++) {
+        q2k_unpack_block(row + b * OC_OXK_BLOCK_Q2_K_SIZE,
+                         codes + b * OC_OXK_QK_K, sc + b * 16, mn + b * 16,
+                         &d[b], &dmin[b]);
+    }
+}
+
+/* Q3_K prepared row uses the Q6_K layout verbatim (see oc_oxk_q6_k_prep_row):
+ * d[blocks], codes[blocks*256], int8 sc[blocks*16]. */
+void oc_oxk_q3_k_prep_row(const uint8_t *row, size_t blocks, void *scratch)
+{
+    float *f = (float *)scratch;
+    uint8_t *codes = (uint8_t *)(f + blocks);
+    int8_t  *sc    = (int8_t *)(codes + blocks * OC_OXK_QK_K);
+    for (size_t b = 0; b < blocks; b++) {
+        q3k_unpack_block(row + b * OC_OXK_BLOCK_Q3_K_SIZE,
+                         codes + b * OC_OXK_QK_K, sc + b * 16, &f[b]);
+    }
+}
+
+float oc_oxk_dot_q2_k_prepped(const void *scratch, size_t blocks,
+                              const uint8_t *q8)
+{
+    float *d, *dmin;
+    uint8_t *codes, *sc, *mn;
+    q2k_prep_ptrs((void *)(uintptr_t)scratch, blocks, &d, &dmin, &codes, &sc,
+                  &mn);
+
+    float sum = 0.0f;
+    for (size_t b = 0; b < blocks; b++) {
+        const uint8_t *qb = q8 + b * OC_OXK_BLOCK_Q8_K_SIZE;
+        float dq;
+        memcpy(&dq, qb, 4);
+        const int8_t  *q8v   = (const int8_t *)(qb + 4);
+        const uint8_t *bsums = qb + 4 + OC_OXK_QK_K;
+        const uint8_t *c     = codes + b * OC_OXK_QK_K;
+        const uint8_t *scb   = sc + b * 16;
+        const uint8_t *mnb   = mn + b * 16;
+
+        int32_t pos = 0, min_acc = 0;
+        for (unsigned g = 0; g < 16; g++) {
+            const uint8_t *cg = c + g * 16;
+            const int8_t  *qg = q8v + g * 16;
+            int32_t acc = 0;
+            for (unsigned l = 0; l < 16; l++)
+                acc += (int32_t)cg[l] * (int32_t)qg[l];
+            pos     += (int32_t)scb[g] * acc;
+            min_acc += (int32_t)mnb[g] *
+                       (int32_t)oc_oxk_read_q8_k_bsum(bsums, g);
+        }
+        sum += dq * (d[b] * (float)pos - dmin[b] * (float)min_acc);
+    }
+    return sum;
+}
+
+float oc_oxk_dot_q3_k_prepped(const void *scratch, size_t blocks,
+                              const uint8_t *q8)
+{
+    const float   *d     = (const float *)scratch;
+    const uint8_t *codes = (const uint8_t *)(d + blocks);
+    const int8_t  *sc    = (const int8_t *)(codes + blocks * OC_OXK_QK_K);
+
+    float sum = 0.0f;
+    for (size_t b = 0; b < blocks; b++) {
+        const uint8_t *qb = q8 + b * OC_OXK_BLOCK_Q8_K_SIZE;
+        float dq;
+        memcpy(&dq, qb, 4);
+        const int8_t  *q8v   = (const int8_t *)(qb + 4);
+        const uint8_t *bsums = qb + 4 + OC_OXK_QK_K;
+        const uint8_t *c     = codes + b * OC_OXK_QK_K;
+        const int8_t  *scb   = sc + b * 16;
+
+        int32_t pos = 0, off = 0;
+        for (unsigned g = 0; g < 16; g++) {
+            const uint8_t *cg = c + g * 16;
+            const int8_t  *qg = q8v + g * 16;
+            int32_t acc = 0;
+            for (unsigned l = 0; l < 16; l++)
+                acc += (int32_t)cg[l] * (int32_t)qg[l];
+            pos += (int32_t)scb[g] * acc;
+            off += (int32_t)scb[g] *
+                   (int32_t)oc_oxk_read_q8_k_bsum(bsums, g);
+        }
+        sum += d[b] * dq * (float)(pos - 4 * off);
+    }
+    return sum;
+}
+
+static void dot_q2_k_prepped_multi_scalar(const void *scratch, size_t blocks,
+                                          const uint8_t *acts,
+                                          size_t act_stride, size_t n_act,
+                                          float *out)
+{
+    for (size_t v = 0; v < n_act; v++)
+        out[v] = oc_oxk_dot_q2_k_prepped(scratch, blocks,
+                                         acts + v * act_stride);
+}
+
+static void dot_q3_k_prepped_multi_scalar(const void *scratch, size_t blocks,
+                                          const uint8_t *acts,
+                                          size_t act_stride, size_t n_act,
+                                          float *out)
+{
+    for (size_t v = 0; v < n_act; v++)
+        out[v] = oc_oxk_dot_q3_k_prepped(scratch, blocks,
+                                         acts + v * act_stride);
+}
+
 float oc_oxk_dot_q4_k_prepped(const void *scratch, size_t blocks,
                               const uint8_t *q8)
 {
@@ -718,8 +1005,14 @@ static void oc_oxk_init_once(void)
     g_ctx.dot_q5_k_q8_k = oc_oxk_dot_q5_k_q8_k_scalar;
     g_ctx.dot_q6_k_q8_k = oc_oxk_dot_q6_k_q8_k_scalar;
     g_ctx.dot_q8_0_q8_0 = oc_oxk_dot_q8_0_q8_0_scalar;
+    g_ctx.dot_q2_k_q8_k = oc_oxk_dot_q2_k_q8_k_scalar;
+    g_ctx.dot_q3_k_q8_k = oc_oxk_dot_q3_k_q8_k_scalar;
     g_ctx.dot_q4_k_prepped_multi = dot_q4_k_prepped_multi_scalar;
     g_ctx.dot_q6_k_prepped_multi = dot_q6_k_prepped_multi_scalar;
+    g_ctx.dot_q2_k_prepped_multi = dot_q2_k_prepped_multi_scalar;
+    g_ctx.dot_q3_k_prepped_multi = dot_q3_k_prepped_multi_scalar;
+    g_ctx.dot_q2_k_prepped_1 = oc_oxk_dot_q2_k_prepped;
+    g_ctx.dot_q3_k_prepped_1 = oc_oxk_dot_q3_k_prepped;
 
 #if defined(__x86_64__) || defined(__i386__)
     /* oxk_avx2.c carries real AVX2 implementations of the Q4_K and Q8_0
@@ -744,6 +1037,10 @@ static void oc_oxk_init_once(void)
         g_ctx.dot_q6_k_q8_k = oc_oxk_dot_q6_k_q8_k_avx512vnni;
         g_ctx.dot_q4_k_prepped_multi = oc_oxk_dot_q4_k_prepped_multi_avx512;
         g_ctx.dot_q6_k_prepped_multi = oc_oxk_dot_q6_k_prepped_multi_avx512;
+        g_ctx.dot_q2_k_prepped_multi = oc_oxk_dot_q2_k_prepped_multi_avx512;
+        g_ctx.dot_q3_k_prepped_multi = oc_oxk_dot_q3_k_prepped_multi_avx512;
+        g_ctx.dot_q2_k_prepped_1 = oc_oxk_dot_q2_k_prepped_avx512;
+        g_ctx.dot_q3_k_prepped_1 = oc_oxk_dot_q3_k_prepped_avx512;
     }
 #endif
 
@@ -813,6 +1110,34 @@ void oc_oxk_dot_q6_k_prepped_multi(const void *scratch, size_t blocks,
                                    size_t n_act, float *out)
 { oc_oxk_init(); g_ctx.dot_q6_k_prepped_multi(scratch, blocks, acts,
                                               act_stride, n_act, out); }
+
+float oc_oxk_dot_q2_k_q8_k(const uint8_t *row, size_t blocks,
+                           const uint8_t *q8)
+{ oc_oxk_init(); return g_ctx.dot_q2_k_q8_k(row, blocks, q8); }
+
+float oc_oxk_dot_q3_k_q8_k(const uint8_t *row, size_t blocks,
+                           const uint8_t *q8)
+{ oc_oxk_init(); return g_ctx.dot_q3_k_q8_k(row, blocks, q8); }
+
+void oc_oxk_dot_q2_k_prepped_multi(const void *scratch, size_t blocks,
+                                   const uint8_t *acts, size_t act_stride,
+                                   size_t n_act, float *out)
+{ oc_oxk_init(); g_ctx.dot_q2_k_prepped_multi(scratch, blocks, acts,
+                                              act_stride, n_act, out); }
+
+void oc_oxk_dot_q3_k_prepped_multi(const void *scratch, size_t blocks,
+                                   const uint8_t *acts, size_t act_stride,
+                                   size_t n_act, float *out)
+{ oc_oxk_init(); g_ctx.dot_q3_k_prepped_multi(scratch, blocks, acts,
+                                              act_stride, n_act, out); }
+
+float oc_oxk_dot_q2_k_prepped_1(const void *prep, size_t blocks,
+                                const uint8_t *act)
+{ oc_oxk_init(); return g_ctx.dot_q2_k_prepped_1(prep, blocks, act); }
+
+float oc_oxk_dot_q3_k_prepped_1(const void *prep, size_t blocks,
+                                const uint8_t *act)
+{ oc_oxk_init(); return g_ctx.dot_q3_k_prepped_1(prep, blocks, act); }
 
 void oc_oxk_matvec_q4_0_f32(const uint8_t *w, size_t n_rows, size_t row_bytes, const float *x, float *out)
 { oc_oxk_init(); g_ctx.matvec_q4_0_f32(w, n_rows, row_bytes, x, out); }
