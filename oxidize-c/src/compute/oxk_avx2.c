@@ -115,7 +115,7 @@ float oc_oxk_dot_q4_1_q8_0_avx2(const uint8_t *row, size_t blocks,
 /* ─── AVX2 Q4_K × Q8_K dot product ─────────────────────────────────────── */
 
 /* Horizontal sum of eight int32 lanes. */
-__attribute__((target("avx2,fma,f16c")))
+__attribute__((target("avx2,f16c")))
 static inline int32_t hsum_i32_8(__m256i v)
 {
     __m128i lo = _mm256_castsi256_si128(v);
@@ -136,7 +136,7 @@ static inline int32_t hsum_i32_8(__m256i v)
  * Everything stays integer until one multiply-add per block, exactly as the
  * scalar reference does since it was restructured to accumulate pos/min_acc —
  * so this is bit-exact against it, not merely close. */
-__attribute__((target("avx2,fma,f16c")))
+__attribute__((target("avx2,f16c")))
 float oc_oxk_dot_q4_k_q8_k_avx2(const uint8_t *row, size_t blocks,
                                 const uint8_t *q8)
 {
