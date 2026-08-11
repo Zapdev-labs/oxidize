@@ -502,7 +502,12 @@ void oc_llama_session_reset(OcLlamaSession *sess);
 
 /* Rewind position to `pos` (for speculative decoding cache rollback).
  * KV cache entries at positions >= pos will be overwritten on subsequent
- * forwards. Does NOT zero the cache. */
+ * forwards. Does NOT zero the cache.
+ *
+ * Only the KV position is restored. Recurrent state (Qwen3.5 DeltaNet conv
+ * and recurrent matrices) has already absorbed every token stepped through,
+ * and no snapshot of it is kept, so a rewind cannot undo it. That is why
+ * oc_speculative_generate() refuses is_qwen35 models outright. */
 void oc_llama_session_rewind(OcLlamaSession *sess, uint32_t pos);
 
 void oc_llama_session_free(OcLlamaSession *sess);

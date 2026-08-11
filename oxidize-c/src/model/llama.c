@@ -1910,6 +1910,12 @@ static void forward_moe_ffn(OcLlamaSession *s, const OcLlamaLayer *L)
                 for (size_t i = 0; i < c->n_embd; i++)
                     s->expert_out[i] += w * down[i];
                 routed++;
+            } else {
+                /* Identity ("zero") expert: holds no weights and returns its
+                 * input, gated like any other expert. Same contract as the
+                 * batched path in prefill_moe_ffn(). */
+                for (size_t i = 0; i < c->n_embd; i++)
+                    s->expert_out[i] += w * s->normed[i];
             }
         }
     } else {
@@ -1917,7 +1923,12 @@ static void forward_moe_ffn(OcLlamaSession *s, const OcLlamaLayer *L)
             uint32_t idx = sel[ei];
             float w = routed_scale *
                 (float)(s->router_logits[idx] / weight_norm);
-            if (idx >= n_exp) continue;
+            if (idx >= n_exp) {
+                /* Identity ("zero") expert: passthrough, gated. */
+                for (size_t i = 0; i < c->n_embd; i++)
+                    s->expert_out[i] += w * s->normed[i];
+                continue;
+            }
             OcWeightView gate_v = L->ffn_gate_exps;
             gate_v.data += (size_t)idx * i_size * gate_row_bytes;
             gate_v.rows = i_size;

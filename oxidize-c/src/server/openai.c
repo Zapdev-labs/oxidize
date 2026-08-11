@@ -870,7 +870,8 @@ static void handle_responses(OcOpenaiState *st, const OcHttpRequest *req,
     if (max_tokens == 128)
         max_tokens = find_json_int_field(req->body, "max_tokens", 128);
     double temp = find_json_double_field(req->body, "temperature", 0.0);
-    char *text = generate_completion(st, prompt, 0, max_tokens, (float)temp, 0.95f,
+    double top_p = find_json_double_field(req->body, "top_p", 0.95);
+    char *text = generate_completion(st, prompt, 0, max_tokens, (float)temp, (float)top_p,
                                      NULL, NULL);
     if (!text) {
         *out_body = oc_openai_error_json("generation failed", "server_error");

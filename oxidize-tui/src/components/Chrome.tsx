@@ -59,7 +59,7 @@ export function Header({ width, spin }: { width: number; spin: string }) {
           <span fg={c.faint}>{`  ${server.backend}${server.threads ? `/${server.threads}t` : ""}`}</span>
         ) : null}
       </text>
-      <text>
+      <text wrapMode="none" truncate>
         {generating || tps > 0 ? (
           <span fg={c.accent}>{`${num(tps, 1)} tok/s  `}</span>
         ) : null}
