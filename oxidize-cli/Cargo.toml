@@ -45,8 +45,8 @@ vulkan = ["oxidize-core/vulkan"]
 
 [dependencies]
 clap.workspace = true
-oxidize-core = { path = "../oxidize-core", default-features = false }
-oxidize-server = { path = "../oxidize-server", default-features = false }
+oxidize-core = { path = "../oxidize-core" }
+oxidize-server = { path = "../oxidize-server" }
 futures-core = "0.3"
 libc = "0.2"
 rand = "0.8"

@@ -381,10 +381,9 @@ OcError oc_moe_ffn_forward(const OcWeightStorage *gate_inp,
             normalized_weight = weight * scale;
         }
 
-        /* Zero-computation experts are router slots without an FFN branch.
-         * The residual carries the input, so adding `normed` here would
-         * incorrectly create a second residual-like path. */
         if (expert_idx >= n_experts) {
+            for (size_t i = 0; i < h; i++)
+                ffn_out[i] += normalized_weight * normed[i];
             continue;
         }
 
