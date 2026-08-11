@@ -154,6 +154,14 @@ static bool is_qwen35_arch(const char *arch)
          strcmp(arch, "qwen3_5_moe_text") == 0);
 }
 
+static bool is_longcat_arch(const char *arch)
+{
+    return arch != NULL &&
+        (strcmp(arch, "longcat") == 0 || strcmp(arch, "longcat2") == 0 ||
+         strcmp(arch, "longcat_2") == 0 || strcmp(arch, "longcat_flash") == 0 ||
+         strcmp(arch, "longcatflash") == 0);
+}
+
 static OcError parse_config(const OcGgufFile *f, const char *arch_str,
                             OcLlamaConfig *cfg)
 {
@@ -408,8 +416,6 @@ static OcError parse_config(const OcGgufFile *f, const char *arch_str,
     cfg->mla_v_head_dim = 0;
     cfg->is_longcat = false;
     cfg->zero_expert_count = 0;
-    cfg->yarn_beta_fast = 0.0f;
-    cfg->yarn_beta_slow = 0.0f;
     cfg->yarn_mscale = 0.0f;
     cfg->yarn_mscale_all_dim = 0.0f;
     cfg->ngram_n_grams = 0;
@@ -456,7 +462,7 @@ static OcError parse_config(const OcGgufFile *f, const char *arch_str,
             return OC_ERR_MODEL;
         }
     }
-    if (arch_str && strcmp(arch_str, "longcat") == 0) {
+    if (is_longcat_arch(arch_str)) {
         /* LongCat states its MLA geometry directly rather than through
          * DeepSeek's key_length_mla, and splits each block into two
          * sub-blocks. */
@@ -481,10 +487,8 @@ static OcError parse_config(const OcGgufFile *f, const char *arch_str,
         snprintf(key, sizeof(key), "%szero_expert_count", prefix);
         cfg->zero_expert_count = cfg_u32(f, key, 0);
 
-        /* deepseek_yarn constants are not written to GGUF metadata; these are
-         * LongCat's config.json values. */
-        cfg->yarn_beta_fast      = 32.0f;
-        cfg->yarn_beta_slow      = 1.0f;
+        /* deepseek_yarn mscale constants are not written to GGUF metadata;
+         * these are LongCat's config.json values. */
         cfg->yarn_mscale         = 1.0f;
         cfg->yarn_mscale_all_dim = 1.0f;
 
@@ -494,6 +498,7 @@ static OcError parse_config(const OcGgufFile *f, const char *arch_str,
         uint32_t sn = cfg_u32(f, key, 0);
         cfg->ngram_split_num = sn;
         cfg->ngram_n_grams   = (nn > 1 && sn > 0) ? (nn - 1) * sn : 0;
+        if (cfg->ngram_n_grams > OC_LONGCAT_MAX_NGRAM) return OC_ERR_MODEL;
     } else if (arch_str && (strncmp(arch_str, "deepseek", 8) == 0)) {
         snprintf(key, sizeof(key), "%sattention.key_length_mla", prefix);
         uint32_t mla_key_len = cfg_u32(f, key, 0);
@@ -1024,7 +1029,7 @@ OcError oc_llama_load(const char *path, OcLlamaModel *out)
     if (strcmp(arch_str, "llama") != 0 && strcmp(arch_str, "mistral") != 0 &&
         strcmp(arch_str, "qwen2") != 0 && strcmp(arch_str, "gpt2") != 0 &&
         strcmp(arch_str, "gptneox") != 0 && strcmp(arch_str, "falcon") != 0 &&
-        strcmp(arch_str, "gemma4") != 0 && strcmp(arch_str, "longcat") != 0 &&
+        strcmp(arch_str, "gemma4") != 0 && !is_longcat_arch(arch_str) &&
         strcmp(arch_str, "qwen3moe") != 0 &&
         strcmp(arch_str, "muse-glimmer") != 0 &&
         strcmp(arch_str, "muse_glimmer") != 0 &&
@@ -1153,8 +1158,9 @@ size_t oc_llama_kv_cache_bytes(const OcLlamaModel *model, OcKvCacheType kv_type)
             return SIZE_MAX;
         return bytes;
     }
+    size_t buffers = model->cfg.uses_mla ? 1u : 2u;
     size_t bytes;
-    return size_mul(elems, 2u * sizeof(float), &bytes) ? bytes : SIZE_MAX;
+    return size_mul(elems, buffers * sizeof(float), &bytes) ? bytes : SIZE_MAX;
 }
 
 OcError oc_llama_session_init(OcLlamaModel *model, OcLlamaSession *out)
@@ -1167,13 +1173,8 @@ OcError oc_llama_session_init_kv(OcLlamaModel *model, OcLlamaSession *out,
 {
     if (model == NULL || out == NULL) return OC_ERR_INVALID_ARG;
     /* uses_geglu is fully handled by forward_dense_ffn (GeGLU vs SwiGLU),
-     * so it is NOT rejected here. MLA is handled by forward_mla_attention.
-     *
-     * The MLA KV cache is still the EXPANDED per-head K/V, n_head * head_dim
-     * floats per row rather than the kv_lora + rope latent it decompresses
-     * from. That is 24x larger than it needs to be (7.5 MB/token on
-     * LongCat-2.0 against 88 KB), which caps usable context well below the
-     * model's 256k. Correct, but the obvious thing to fix next. */
+     * so it is NOT rejected here. MLA is handled by forward_mla_attention
+     * with its compressed [c_kv | k_pe] cache. */
     if (model->cfg.num_experts > 0 && model->cfg.expert_intermediate_size == 0) {
         if (model->cfg.n_ff == 0) return OC_ERR_MODEL;
         model->cfg.expert_intermediate_size = model->cfg.n_ff;
@@ -1746,10 +1747,6 @@ static void forward_moe_ffn(OcLlamaSession *s, const OcLlamaLayer *L)
 {
     const OcLlamaConfig *c = &s->model->cfg;
     uint32_t n_exp = c->num_experts;
-    /* LongCat appends identity ("zero") experts after the routed ones. They
-     * hold no weights and return their input unchanged, so the expert pool
-     * stays n_exp wide but the router spans every slot and top-k may pick
-     * "do nothing". */
     uint32_t n_zero = c->zero_expert_count;
     uint32_t n_slots = n_exp + n_zero;
     uint32_t k = c->num_experts_per_tok;
@@ -1907,10 +1904,7 @@ static void forward_moe_ffn(OcLlamaSession *s, const OcLlamaLayer *L)
             const uint32_t idx = sel[ei];
             const float w = routed_scale *
                 (float)(s->router_logits[idx] / weight_norm);
-            if (idx >= n_exp) {
-                for (size_t i = 0; i < c->n_embd; i++)
-                    s->expert_out[i] += w * s->normed[i];
-            } else {
+            if (idx < n_exp) {
                 const float *down = s->expert_down_all +
                     (size_t)routed * c->n_embd;
                 for (size_t i = 0; i < c->n_embd; i++)
@@ -1923,11 +1917,7 @@ static void forward_moe_ffn(OcLlamaSession *s, const OcLlamaLayer *L)
             uint32_t idx = sel[ei];
             float w = routed_scale *
                 (float)(s->router_logits[idx] / weight_norm);
-            if (idx >= n_exp) {
-                for (size_t i = 0; i < c->n_embd; i++)
-                    s->expert_out[i] += w * s->normed[i];
-                continue;
-            }
+            if (idx >= n_exp) continue;
             OcWeightView gate_v = L->ffn_gate_exps;
             gate_v.data += (size_t)idx * i_size * gate_row_bytes;
             gate_v.rows = i_size;

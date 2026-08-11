@@ -170,5 +170,5 @@ size_t oc_workspace_size_bytes(const OcWorkspace *ws)
     total += ws->hidden_size;      /* shortconv_bx */
     total += ws->n_experts_per_tok * ws->expert_inter * 2;  /* moe_gate_all, moe_up_all */
     total += ws->n_experts_per_tok * ws->hidden_size;       /* moe_down_all */
-    return total * sizeof(float);
+    return total * sizeof(float) + ws->n_experts * sizeof(OcExpertScore);
 }

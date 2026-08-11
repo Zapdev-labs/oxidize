@@ -314,6 +314,8 @@ static const char *match_hf_layer_suffix(const char *suffix)
     if (strcmp(suffix, "self_attn.q_b_proj.weight") == 0)           return "attn_q_b.weight";
     if (strcmp(suffix, "self_attn.kv_a_proj_with_mqa.weight") == 0) return "attn_kv_a_mqa.weight";
     if (strcmp(suffix, "self_attn.kv_a_layernorm.weight") == 0)     return "attn_kv_a_norm.weight";
+    if (strcmp(suffix, "self_attn.k_b_proj.weight") == 0)           return "attn_k_b.weight";
+    if (strcmp(suffix, "self_attn.v_b_proj.weight") == 0)           return "attn_v_b.weight";
     /* FFN — dense. */
     if (strcmp(suffix, "mlp.up_proj.weight") == 0)                  return "ffn_up.weight";
     if (strcmp(suffix, "mlp.gate_proj.weight") == 0)                return "ffn_gate.weight";

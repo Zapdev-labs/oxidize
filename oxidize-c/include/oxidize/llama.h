@@ -127,11 +127,9 @@ typedef struct OcLlamaConfig {
     bool     is_longcat;
     uint32_t zero_expert_count;        /* identity experts appended after routed  */
     /* deepseek_yarn parameters. Absent from GGUF metadata — LongCat's
-     * config.json sets all four, and both mscale terms are 1, which makes
+     * config.json sets both mscale terms to 1, which makes
      * the RoPE attn factor exactly 1.0 and folds a 1.4787^2 term into the
-     * softmax scale instead. See oc_llama_yarn_scales(). */
-    float    yarn_beta_fast;
-    float    yarn_beta_slow;
+     * softmax scale instead. See oc_rope_deepseek_yarn_scales(). */
     float    yarn_mscale;
     float    yarn_mscale_all_dim;
     /* n-gram over-embedding: (neighbor_num - 1) * split_num tables. */

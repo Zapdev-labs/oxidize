@@ -540,6 +540,16 @@ Test(llama, kv_cache_bytes_f32_matches_layout)
                  2 * elems * sizeof(float));
 }
 
+Test(llama, mla_kv_cache_bytes_counts_one_latent_buffer)
+{
+    OcLlamaModel m = kv_stub_model(4, 1024, 1, 576);
+    m.cfg.uses_mla = true;
+    m.cfg.mla_kv_lora_dim = 512;
+    m.cfg.mla_q_rope_dim = 64;
+    cr_assert_eq(oc_llama_kv_cache_bytes(&m, OC_KV_F32),
+                 (size_t)4 * 1024 * 576 * sizeof(float));
+}
+
 /* Q8 must be close to 4x smaller: one byte per element instead of four, plus
  * one f32 scale per (layer, pos, kv head) — 1/kv_head_dim of the elements. */
 Test(llama, kv_cache_bytes_q8_is_about_four_times_smaller)

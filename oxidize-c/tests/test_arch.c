@@ -316,6 +316,8 @@ Test(arch_mapping, deepseek_mla_attention_tensors)
     check_map(OC_ARCH_DEEPSEEK, "model.layers.1.self_attn.q_b_proj.weight",           "blk.1.attn_q_b.weight");
     check_map(OC_ARCH_DEEPSEEK, "model.layers.1.self_attn.kv_a_proj_with_mqa.weight", "blk.1.attn_kv_a_mqa.weight");
     check_map(OC_ARCH_DEEPSEEK, "model.layers.1.self_attn.kv_a_layernorm.weight",     "blk.1.attn_kv_a_norm.weight");
+    check_map(OC_ARCH_LONGCAT, "model.layers.1.self_attn.k_b_proj.weight",             "blk.1.attn_k_b.weight");
+    check_map(OC_ARCH_LONGCAT, "model.layers.1.self_attn.v_b_proj.weight",             "blk.1.attn_v_b.weight");
 
     /* Standard attention tensors should also map (DeepSeek uses the same
      * map_hf_decoder_name table for the non-MLA tensors). */

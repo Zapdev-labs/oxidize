@@ -483,7 +483,7 @@ static OcError forward_mla_layer(OcInferenceModel *m, OcLayerWeights *layer,
     uint32_t n_heads = cfg->num_attention_heads;
     float eps = cfg->rms_norm_eps;
     float *x = m->workspace.x;
-    float *attn_out = m->workspace.hidden_a;
+    float *attn_out = m->workspace.attn_result;
 
     /* Compute dimensions. */
     size_t q_lora = oc_weight_storage_output_dim(&layer->mla_q_a, h);
@@ -542,9 +542,22 @@ static OcError forward_mla_layer(OcInferenceModel *m, OcLayerWeights *layer,
     /* 4. Apply RoPE to k_pe. */
     float *k_pe_rope = m->workspace.flash_q;  /* [kv_pe_dim] */
     if (kv_pe_dim > 0 && k_pe_rope) {
-        oc_inference_config_apply_rope_head(cfg, kv_pe + kv_lora, k_pe_rope,
-                                             kv_pe_dim, kv_pe_dim,
-                                             (int64_t)pos, cfg->rope_theta);
+        float rope_amp = -1.0f;
+        if (cfg->yarn_factor > 1.0f && cfg->yarn_mscale_all_dim > 0.0f) {
+            oc_rope_deepseek_yarn_scales(cfg->yarn_factor, cfg->yarn_mscale,
+                                          cfg->yarn_mscale_all_dim,
+                                          (uint32_t)kv_head_dim, &rope_amp, NULL);
+        }
+        if (cfg->yarn_factor > 1.0f) {
+            oc_apply_rope_yarn_scaled_f32(kv_pe + kv_lora, k_pe_rope,
+                                          kv_pe_dim, kv_pe_dim, (int64_t)pos,
+                                          cfg->rope_theta, cfg->yarn_factor,
+                                          (uint32_t)cfg->yarn_orig_ctx, rope_amp);
+        } else {
+            oc_inference_config_apply_rope_head(cfg, kv_pe + kv_lora, k_pe_rope,
+                                                 kv_pe_dim, kv_pe_dim,
+                                                 (int64_t)pos, cfg->rope_theta);
+        }
     }
 
     /* 5. Compute K and V per head from c_kv. */
@@ -594,9 +607,22 @@ static OcError forward_mla_layer(OcInferenceModel *m, OcLayerWeights *layer,
         size_t q_off = (size_t)hd * kv_head_dim;
         if (q_pe_dim > 0 && q_off + k_nope_dim + q_pe_dim <= q_len) {
             float *q_pe = q_vec + q_off + k_nope_dim;
-            oc_inference_config_apply_rope_head(cfg, q_pe, q_pe,
-                                                 q_pe_dim, q_pe_dim,
-                                                 (int64_t)pos, cfg->rope_theta);
+            float rope_amp = -1.0f;
+            if (cfg->yarn_factor > 1.0f && cfg->yarn_mscale_all_dim > 0.0f) {
+                oc_rope_deepseek_yarn_scales(cfg->yarn_factor, cfg->yarn_mscale,
+                                              cfg->yarn_mscale_all_dim,
+                                              (uint32_t)kv_head_dim, &rope_amp, NULL);
+            }
+            if (cfg->yarn_factor > 1.0f) {
+                oc_apply_rope_yarn_scaled_f32(q_pe, q_pe, q_pe_dim, q_pe_dim,
+                                              (int64_t)pos, cfg->rope_theta,
+                                              cfg->yarn_factor,
+                                              (uint32_t)cfg->yarn_orig_ctx, rope_amp);
+            } else {
+                oc_inference_config_apply_rope_head(cfg, q_pe, q_pe,
+                                                     q_pe_dim, q_pe_dim,
+                                                     (int64_t)pos, cfg->rope_theta);
+            }
         }
     }
 
@@ -622,16 +648,7 @@ static OcError forward_mla_layer(OcInferenceModel *m, OcLayerWeights *layer,
     }
 
     /* 7. Attention: per-head scaled dot-product. */
-    /* attn_out aliases workspace.hidden_a, which is hidden_size long.
-     * total_k is n_heads * kv_head_dim -- 12288 on LongCat against an 8192
-     * buffer, 24576 on DeepSeek-V3 against 7168 -- so clearing total_k here
-     * ran 16 KB past the end. Only n_heads * v_head_dim is ever written now
-     * that the output is packed, and that is what needs clearing. */
-    {
-        size_t attn_out_len = (size_t)n_heads * v_head_dim;
-        if (attn_out_len > cfg->hidden_size) attn_out_len = cfg->hidden_size;
-        memset(attn_out, 0, attn_out_len * sizeof(float));
-    }
+    memset(attn_out, 0, (size_t)n_heads * v_head_dim * sizeof(float));
     if (kv_idx >= 0 && k_store && v_padded) {
         uint32_t seq_len = oc_kv_cache_n_tokens(&m->kv_cache);
         /* deepseek_yarn folds a get_mscale(factor, mscale_all_dim)^2 term

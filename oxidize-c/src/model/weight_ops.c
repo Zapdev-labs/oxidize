@@ -316,8 +316,9 @@ OcError oc_moe_ffn_forward(const OcWeightStorage *gate_inp,
         size_t n_group_used = cfg->expert_group_used_count;
 
         /* Compute per-group max score. */
-        float *group_max = calloc(n_group, sizeof(float));
+        float *group_max = malloc(n_group * sizeof(float));
         if (!group_max) return OC_ERR_OOM;
+        for (size_t g = 0; g < n_group; g++) group_max[g] = -INFINITY;
         for (size_t i = 0; i < n_slots; i++) {
             size_t g = i / group_size;
             if (expert_scores[i].select > group_max[g])
@@ -380,13 +381,10 @@ OcError oc_moe_ffn_forward(const OcWeightStorage *gate_inp,
             normalized_weight = weight * scale;
         }
 
-        /* Zero experts are the identity: they contribute their own input,
-         * gated like any other expert, and touch no weights. The scale
-         * applies to them too -- the reference scales the whole top-k weight
-         * vector before dispatch, not just the routed part. */
+        /* Zero-computation experts are router slots without an FFN branch.
+         * The residual carries the input, so adding `normed` here would
+         * incorrectly create a second residual-like path. */
         if (expert_idx >= n_experts) {
-            for (size_t i = 0; i < h; i++)
-                ffn_out[i] += normalized_weight * normed[i];
             continue;
         }
 
