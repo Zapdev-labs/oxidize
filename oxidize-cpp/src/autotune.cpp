@@ -1,12 +1,16 @@
 #include "oxidize/autotune.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstdio>
+#include <exception>
 #include <fstream>
 #include <sstream>
 #include <sys/stat.h>
 #include <thread>
 #include <unistd.h>
+
+#include "oxidize/gpu_config.hpp"
 
 namespace oxidize {
 
@@ -43,6 +47,43 @@ int physical_core_count() {
   return static_cast<int>(n);
 }
 
+std::string lower_ascii(std::string s) {
+  for (char& c : s) {
+    if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+  }
+  return s;
+}
+
+bool is_h100_name(const std::string& name) {
+  return lower_ascii(name).find("h100") != std::string::npos;
+}
+
+uint64_t mib_to_bytes(uint64_t mib) {
+  return mib * 1024ULL * 1024ULL;
+}
+
+void probe_nvidia_smi(HardwareInventory& inv) {
+  FILE* pipe = popen(
+      "nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits 2>/dev/null",
+      "r");
+  if (!pipe) return;
+  std::array<char, 512> buf{};
+  if (fgets(buf.data(), static_cast<int>(buf.size()), pipe) != nullptr) {
+    std::string line(buf.data());
+    auto comma = line.find(',');
+    if (comma != std::string::npos) {
+      inv.gpu_name = line.substr(0, comma);
+      std::string mem = line.substr(comma + 1);
+      unsigned long long mib = 0;
+      if (std::sscanf(mem.c_str(), "%llu", &mib) == 1) {
+        inv.gpu_vram_bytes = mib_to_bytes(mib);
+      }
+      inv.has_cuda = true;
+    }
+  }
+  pclose(pipe);
+}
+
 std::string json_escape(const std::string& s) {
   std::string out;
   out.reserve(s.size() + 8);
@@ -72,6 +113,10 @@ HardwareInventory detect_hardware(int numa_nodes_discovered) {
     inv.total_ram_bytes = 4ULL << 30;
   }
   inv.hugepages_2mib_avail = detect_hugepages_2mib();
+#ifdef OXIDIZE_CUDA
+  inv.has_cuda = true;
+#endif
+  probe_nvidia_smi(inv);
   return inv;
 }
 
@@ -132,6 +177,26 @@ TuningPlan plan_cpu(const HardwareInventory& inv, const ModelFingerprint& model)
         "consider sysctl vm.nr_hugepages");
   }
 
+  if (inv.has_cuda && is_h100_name(inv.gpu_name) &&
+      inv.gpu_vram_bytes >= (70ULL << 30)) {
+    plan.use_cuda = true;
+    plan.pipeline = "paged";
+    plan.kv_cache_dtype = "q4";
+    plan.kv_quantization = "turboquant";
+    plan.weight_plan = "w4a16";
+    plan.attention_kernel = "flash_attention_3";
+    plan.cuda_graphs = true;
+    plan.persistent_decode_kernels = true;
+    plan.tensor_parallelism = 1;
+    plan.pipeline_parallelism = 1;
+    plan.chunked_prefill_tokens = 512;
+    plan.max_decode_batch = 16;
+    plan.expected_decode_tps = 1150.0;
+    plan.rationale.push_back(
+        "single H100 throughput profile -> CUDA, paged KV, Q4 TurboQuant KV, "
+        "chunked prefill, CUDA graphs, persistent decode kernels");
+  }
+
   {
     char buf[128];
     std::snprintf(buf, sizeof(buf), "model=%.1f GiB ram=%.1f GiB numa=%d",
@@ -150,6 +215,23 @@ std::string plan_to_json(const TuningPlan& plan) {
   os << "  \"threads\": " << plan.threads << ",\n";
   os << "  \"mmap_hugepages\": " << (plan.mmap_hugepages ? "true" : "false")
      << ",\n";
+  os << "  \"use_cuda\": " << (plan.use_cuda ? "true" : "false") << ",\n";
+  os << "  \"pipeline\": \"" << json_escape(plan.pipeline) << "\",\n";
+  os << "  \"kv_cache_dtype\": \"" << json_escape(plan.kv_cache_dtype) << "\",\n";
+  os << "  \"kv_quantization\": \"" << json_escape(plan.kv_quantization)
+     << "\",\n";
+  os << "  \"weight_plan\": \"" << json_escape(plan.weight_plan) << "\",\n";
+  os << "  \"attention_kernel\": \"" << json_escape(plan.attention_kernel)
+     << "\",\n";
+  os << "  \"cuda_graphs\": " << (plan.cuda_graphs ? "true" : "false")
+     << ",\n";
+  os << "  \"persistent_decode_kernels\": "
+     << (plan.persistent_decode_kernels ? "true" : "false") << ",\n";
+  os << "  \"tensor_parallelism\": " << plan.tensor_parallelism << ",\n";
+  os << "  \"pipeline_parallelism\": " << plan.pipeline_parallelism << ",\n";
+  os << "  \"chunked_prefill_tokens\": " << plan.chunked_prefill_tokens << ",\n";
+  os << "  \"max_decode_batch\": " << plan.max_decode_batch << ",\n";
+  os << "  \"expected_decode_tps\": " << plan.expected_decode_tps << ",\n";
   os << "  \"rationale\": [";
   for (size_t i = 0; i < plan.rationale.size(); ++i) {
     if (i) os << ", ";
@@ -166,6 +248,21 @@ std::string plan_summary(const TuningPlan& plan) {
   os << "threads           : " << plan.threads << "\n";
   os << "mmap_hugepages    : " << (plan.mmap_hugepages ? "true" : "false")
      << "\n";
+  os << "use_cuda          : " << (plan.use_cuda ? "true" : "false") << "\n";
+  os << "pipeline          : " << plan.pipeline << "\n";
+  os << "kv_cache_dtype    : " << plan.kv_cache_dtype << " ("
+     << plan.kv_quantization << ")\n";
+  os << "weight_plan       : " << plan.weight_plan << "\n";
+  os << "attention_kernel  : " << plan.attention_kernel << "\n";
+  os << "cuda_graphs       : " << (plan.cuda_graphs ? "true" : "false")
+     << "\n";
+  os << "persistent_decode : "
+     << (plan.persistent_decode_kernels ? "true" : "false") << "\n";
+  os << "parallelism       : tensor=" << plan.tensor_parallelism
+     << " pipeline=" << plan.pipeline_parallelism << "\n";
+  os << "chunked_prefill   : " << plan.chunked_prefill_tokens
+     << " tokens  max_decode_batch=" << plan.max_decode_batch << "\n";
+  os << "expected_decode_tps: " << plan.expected_decode_tps << "\n";
   if (!plan.rationale.empty()) {
     os << "\nRationale:\n";
     for (const auto& r : plan.rationale) {

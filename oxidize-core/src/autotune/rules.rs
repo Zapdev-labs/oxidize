@@ -36,6 +36,22 @@ pub enum SpeculativeSpec {
     Mtp,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WeightPlan {
+    Native,
+    Fp8,
+    W8A8,
+    W4A16,
+    W4A8Kv4,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttentionKernel {
+    Default,
+    FlashAttention,
+    FlashAttention3,
+}
+
 /// What the user has explicitly set, vs. what the autotuner
 /// proposes. The CLI resolves this into a final flag value.
 #[derive(Debug, Clone, PartialEq)]
@@ -55,6 +71,14 @@ pub struct TuningPlan {
     pub layer_cache: usize,
     pub pipeline: PipelineMode,
     pub speculative: SpeculativeSpec,
+    pub weight_plan: WeightPlan,
+    pub attention_kernel: AttentionKernel,
+    pub cuda_graphs: bool,
+    pub persistent_decode_kernels: bool,
+    pub tensor_parallelism: usize,
+    pub pipeline_parallelism: usize,
+    pub chunked_prefill_tokens: usize,
+    pub max_decode_batch: usize,
     pub decode_tile_tokens: usize,
     pub oxk_isa: OxkIsa,
     pub oxk_tile: OxkTile,
@@ -107,6 +131,23 @@ impl TuningPlan {
         ));
         s.push_str(&format!("pipeline          : {:?}\n", self.pipeline));
         s.push_str(&format!("speculative       : {:?}\n", self.speculative));
+        s.push_str(&format!("weight_plan       : {:?}\n", self.weight_plan));
+        s.push_str(&format!(
+            "attention_kernel  : {:?}\n",
+            self.attention_kernel
+        ));
+        s.push_str(&format!(
+            "cuda_graphs={} persistent_decode_kernels={}\n",
+            self.cuda_graphs, self.persistent_decode_kernels
+        ));
+        s.push_str(&format!(
+            "parallelism       : tensor={} pipeline={}\n",
+            self.tensor_parallelism, self.pipeline_parallelism
+        ));
+        s.push_str(&format!(
+            "chunked_prefill   : {} tokens  max_decode_batch={}\n",
+            self.chunked_prefill_tokens, self.max_decode_batch
+        ));
         s.push_str(&format!(
             "decode_tile_tokens: {}\n",
             self.decode_tile_tokens
@@ -147,6 +188,14 @@ pub fn plan(inv: &HardwareInventory, model: &ModelFingerprint) -> TuningPlan {
         layer_cache: 0,
         pipeline: PipelineMode::Sequential,
         speculative: SpeculativeSpec::None,
+        weight_plan: WeightPlan::Native,
+        attention_kernel: AttentionKernel::Default,
+        cuda_graphs: false,
+        persistent_decode_kernels: false,
+        tensor_parallelism: 1,
+        pipeline_parallelism: 1,
+        chunked_prefill_tokens: 0,
+        max_decode_batch: 1,
         decode_tile_tokens: 0,
         oxk_isa: OxkIsa::Scalar,
         oxk_tile: OxkTile::T1,
@@ -164,6 +213,7 @@ pub fn plan(inv: &HardwareInventory, model: &ModelFingerprint) -> TuningPlan {
     tier6_threads(inv, &mut plan);
     tier7_decode_tile(&mut plan);
     tier8_pipeline(inv, model, &mut plan);
+    tier9_hopper_throughput(inv, model, &mut plan);
     estimate_tps(inv, model, &mut plan);
 
     plan
@@ -501,6 +551,67 @@ fn tier8_pipeline(inv: &HardwareInventory, model: &ModelFingerprint, plan: &mut 
         .push("low-resource or MoE → sequential (default)".to_string());
 }
 
+fn tier9_hopper_throughput(
+    inv: &HardwareInventory,
+    model: &ModelFingerprint,
+    plan: &mut TuningPlan,
+) {
+    if inv.gpu_family != Some(crate::gpu_cluster::GpuFamily::H100) || plan.n_gpu_layers == 0 {
+        return;
+    }
+
+    plan.tensor_parallelism = 1;
+    plan.pipeline_parallelism = 1;
+    plan.pipeline = PipelineMode::Paged;
+    plan.attention_kernel = AttentionKernel::FlashAttention3;
+    plan.cuda_graphs = true;
+    plan.persistent_decode_kernels = true;
+    plan.chunked_prefill_tokens = if plan.ctx_size >= 8192 { 1024 } else { 512 };
+    plan.max_decode_batch = 16;
+
+    match model.quant {
+        GgufQuantizationType::Q2_K
+        | GgufQuantizationType::Q3_K_S
+        | GgufQuantizationType::Q4_0
+        | GgufQuantizationType::Q4_K_S
+        | GgufQuantizationType::Q4_K_M
+        | GgufQuantizationType::IQ1_S
+        | GgufQuantizationType::IQ1_M
+        | GgufQuantizationType::IQ4_XS
+        | GgufQuantizationType::NVFP4 => {
+            plan.weight_plan = WeightPlan::W4A16;
+            plan.kv_cache_dtype = DType::I16;
+            plan.kv_quantization = KvQuantization::TurboQuant;
+        }
+        GgufQuantizationType::Q8_0 => {
+            plan.weight_plan = WeightPlan::W8A8;
+            plan.kv_cache_dtype = DType::I8;
+            plan.kv_quantization = KvQuantization::TurboQuant;
+        }
+        GgufQuantizationType::F16 | GgufQuantizationType::BF16 => {
+            plan.weight_plan = WeightPlan::Fp8;
+            plan.kv_cache_dtype = DType::I8;
+            plan.kv_quantization = KvQuantization::TurboQuant;
+        }
+        _ => {
+            plan.weight_plan = WeightPlan::Native;
+        }
+    }
+
+    if matches!(plan.weight_plan, WeightPlan::W4A16) && model.layer_count >= 48 {
+        plan.max_decode_batch = 16;
+    }
+
+    plan.rationale.push(
+        "single H100 throughput profile -> TP=1 PP=1, paged KV, chunked prefill, FlashAttention-3-class decode, CUDA graphs, persistent decode kernels"
+            .to_string(),
+    );
+    plan.rationale.push(format!(
+        "Hopper memory plan -> weights={:?}, kv={:?}+{:?}, target decode batch={}",
+        plan.weight_plan, plan.kv_cache_dtype, plan.kv_quantization, plan.max_decode_batch
+    ));
+}
+
 // ---------- tps estimates ----------
 
 fn estimate_tps(inv: &HardwareInventory, model: &ModelFingerprint, plan: &mut TuningPlan) {
@@ -516,6 +627,11 @@ fn estimate_tps(inv: &HardwareInventory, model: &ModelFingerprint, plan: &mut Tu
     let gpu_tps = match (inv.has_gpu, inv.gpu_family) {
         (true, Some(family)) => match family {
             crate::gpu_cluster::GpuFamily::B200 => 200.0,
+            crate::gpu_cluster::GpuFamily::H100 => match plan.weight_plan {
+                WeightPlan::W4A16 | WeightPlan::W4A8Kv4 => 1_150.0,
+                WeightPlan::W8A8 | WeightPlan::Fp8 => 650.0,
+                WeightPlan::Native => 300.0,
+            },
             crate::gpu_cluster::GpuFamily::A100 => 90.0,
             crate::gpu_cluster::GpuFamily::RtxPro6000 => 70.0,
         },
@@ -624,6 +740,14 @@ mod tests {
         inv
     }
 
+    fn inv_h100() -> HardwareInventory {
+        let mut inv = inv_a100();
+        inv.gpu_family = Some(GpuFamily::H100);
+        inv.gpu_vram_bytes = 80u64 << 30;
+        inv.has_cuda = true;
+        inv
+    }
+
     #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
     fn inv_macbook() -> HardwareInventory {
         HardwareInventory {
@@ -674,6 +798,21 @@ mod tests {
             13_824,
             151_936,
             20_000_000_000,
+            GgufQuantizationType::Q4_K_M,
+        )
+    }
+
+    fn model_31b_throughput_target() -> ModelFingerprint {
+        fingerprint_from_parts(
+            "qwen2",
+            60,
+            5120,
+            40,
+            8,
+            128,
+            13_824,
+            151_936,
+            18_000_000_000,
             GgufQuantizationType::Q4_K_M,
         )
     }
@@ -760,6 +899,31 @@ mod tests {
         assert_eq!(p.n_gpu_layers, m.layer_count);
         assert!(!p.mmap, "fully on GPU → no mmap");
         assert!(matches!(p.pipeline, PipelineMode::Paged));
+    }
+
+    #[test]
+    fn h100_31b_uses_single_gpu_throughput_stack() {
+        let inv = inv_h100();
+        let m = model_31b_throughput_target();
+        let p = plan(&inv, &m);
+
+        assert_eq!(p.n_gpu_layers, m.layer_count);
+        assert!(matches!(p.pipeline, PipelineMode::Paged));
+        assert!(matches!(p.kv_cache_dtype, DType::I16));
+        assert!(matches!(p.kv_quantization, KvQuantization::TurboQuant));
+        assert!(matches!(p.weight_plan, WeightPlan::W4A16));
+        assert!(matches!(
+            p.attention_kernel,
+            AttentionKernel::FlashAttention3
+        ));
+        assert!(p.cuda_graphs);
+        assert!(p.persistent_decode_kernels);
+        assert_eq!(p.tensor_parallelism, 1);
+        assert_eq!(p.pipeline_parallelism, 1);
+        assert!(p.chunked_prefill_tokens >= 512);
+        assert!(p.max_decode_batch >= 16);
+        assert!(p.expected_decode_tps >= 1000.0);
+        assert!(p.rationale.iter().any(|r| r.contains("single H100")));
     }
 
     #[test]

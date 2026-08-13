@@ -86,9 +86,28 @@ pub(super) fn run_api_server_blocking(server_args: oxidize_server::Args) -> io::
             server_args.host,
             server_args.port
         );
-        let model = oxidize_server::load_model_runtime(&server_args).map_err(|error| {
-            io::Error::other(format!("failed to initialize server model: {error}"))
-        })?;
+        let loaded_model =
+            oxidize_server::load_model_runtime_with_plan(&server_args).map_err(|error| {
+                io::Error::other(format!("failed to initialize server model: {error}"))
+            })?;
+        let batch_mode =
+            oxidize_server::effective_batch_mode(&server_args, loaded_model.autotune_plan.as_ref());
+        let (model, paged) = if batch_mode == oxidize_server::BatchMode::Paged {
+            if let Some(runtime) = loaded_model.runtime {
+                (
+                    None,
+                    Some(oxidize_server::build_paged_runtime(
+                        &server_args,
+                        runtime,
+                        loaded_model.autotune_plan.as_ref(),
+                    )),
+                )
+            } else {
+                (None, None)
+            }
+        } else {
+            (loaded_model.runtime, None)
+        };
         let api_key = std::env::var("OXIDIZE_API_KEY")
             .ok()
             .filter(|value| !value.is_empty());
@@ -101,7 +120,7 @@ pub(super) fn run_api_server_blocking(server_args: oxidize_server::Args) -> io::
                 .map(|key| oxidize_server::AuthConfig::from_keys([key]))
                 .unwrap_or_else(oxidize_server::AuthConfig::disabled),
             model,
-            paged: None,
+            paged,
             mesh: None,
             audit: Arc::new(oxidize_server::audit::AuditLogger::new()),
             metrics: Arc::new(
@@ -183,6 +202,7 @@ pub(super) fn server_args_from_cli(args: &Args) -> io::Result<oxidize_server::Ar
         top_k: args.top_k,
         ctx_size: args.ctx_size,
         prefill_batch_size: 512,
+        prefill_chunk_size: 16,
         cpu_optimized: args.cpu_optimized,
         ram_offload: args.ram_offload,
         mmap_prefetch: args.mmap_prefetch,

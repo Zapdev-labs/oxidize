@@ -20,7 +20,7 @@ use oxidize_core::{
     },
 };
 
-use crate::cli::Args;
+use crate::cli::{Args, BatchMode, KvCacheDType, effective_batch_mode};
 
 pub struct ModelRuntime {
     pub id: String,
@@ -142,17 +142,31 @@ impl LoadedModel {
     }
 }
 
+#[derive(Clone)]
+pub struct ModelRuntimeLoad {
+    pub runtime: Option<Arc<ModelRuntime>>,
+    pub autotune_plan: Option<oxidize_core::autotune::TuningPlan>,
+}
+
 pub fn load_model_runtime(args: &Args) -> Result<Option<Arc<ModelRuntime>>, String> {
-    let Some(model_path) = args.model.as_ref() else {
-        return Ok(None);
+    Ok(load_model_runtime_with_plan(args)?.runtime)
+}
+
+pub fn load_model_runtime_with_plan(args: &Args) -> Result<ModelRuntimeLoad, String> {
+    let mut effective_args = args.clone();
+    let Some(model_path) = effective_args.model.clone() else {
+        return Ok(ModelRuntimeLoad {
+            runtime: None,
+            autotune_plan: None,
+        });
     };
-    let (effective_backend, warning) = args.backend.to_core_backend().effective();
+    let (effective_backend, warning) = effective_args.backend.to_core_backend().effective();
     if let Some(msg) = warning {
         tracing::warn!("{msg}");
     }
     let loader = GgufModelLoader;
     let mapped = loader
-        .load_with_progress(model_path, |progress| {
+        .load_with_progress(&model_path, |progress| {
             tracing::info!(
                 stage = progress.stage,
                 percent = progress.percent,
@@ -160,7 +174,8 @@ pub fn load_model_runtime(args: &Args) -> Result<Option<Arc<ModelRuntime>>, Stri
             );
         })
         .map_err(|error| format!("failed to load model: {error:?}"))?;
-    if args.auto && !args.no_auto {
+    let mut autotune_plan = None;
+    if effective_args.auto && !effective_args.no_auto {
         let inv = oxidize_core::autotune::detect();
         let model = oxidize_core::autotune::fingerprint(&mapped);
         let mut plan = oxidize_core::autotune::plan(&inv, &model);
@@ -177,12 +192,13 @@ pub fn load_model_runtime(args: &Args) -> Result<Option<Arc<ModelRuntime>>, Stri
             plan.rationale
                 .push("layer_wise disabled: not supported by the DFlash model path".to_string());
         }
-        match args.print_plan.as_str() {
+        match effective_args.print_plan.as_str() {
             "json" => {
                 use oxidize_core::autotune::OxkIsa;
                 use oxidize_core::autotune::OxkTile;
                 use oxidize_core::autotune::PipelineMode;
                 use oxidize_core::autotune::SpeculativeSpec;
+                use oxidize_core::autotune::{AttentionKernel, WeightPlan};
                 let pipe = match plan.pipeline {
                     PipelineMode::Sequential => "sequential",
                     PipelineMode::Continuous => "continuous",
@@ -205,10 +221,23 @@ pub fn load_model_runtime(args: &Args) -> Result<Option<Arc<ModelRuntime>>, Stri
                     SpeculativeSpec::DFlash => "dflash",
                     SpeculativeSpec::Mtp => "mtp",
                 };
+                let weight_plan = match plan.weight_plan {
+                    WeightPlan::Native => "native",
+                    WeightPlan::Fp8 => "fp8",
+                    WeightPlan::W8A8 => "w8a8",
+                    WeightPlan::W4A16 => "w4a16",
+                    WeightPlan::W4A8Kv4 => "w4a8kv4",
+                };
+                let attention_kernel = match plan.attention_kernel {
+                    AttentionKernel::Default => "default",
+                    AttentionKernel::FlashAttention => "flash_attention",
+                    AttentionKernel::FlashAttention3 => "flash_attention_3",
+                };
                 let value = serde_json::json!({
                     "threads": plan.threads,
                     "ctx_size": plan.ctx_size,
                     "kv_cache_dtype": format!("{:?}", plan.kv_cache_dtype),
+                    "kv_quantization": format!("{:?}", plan.kv_quantization),
                     "n_gpu_layers": plan.n_gpu_layers,
                     "mmap": plan.mmap,
                     "mlock": plan.mlock,
@@ -219,6 +248,14 @@ pub fn load_model_runtime(args: &Args) -> Result<Option<Arc<ModelRuntime>>, Stri
                     "layer_cache": plan.layer_cache,
                     "pipeline": pipe,
                     "speculative": spec,
+                    "weight_plan": weight_plan,
+                    "attention_kernel": attention_kernel,
+                    "cuda_graphs": plan.cuda_graphs,
+                    "persistent_decode_kernels": plan.persistent_decode_kernels,
+                    "tensor_parallelism": plan.tensor_parallelism,
+                    "pipeline_parallelism": plan.pipeline_parallelism,
+                    "chunked_prefill_tokens": plan.chunked_prefill_tokens,
+                    "max_decode_batch": plan.max_decode_batch,
                     "decode_tile_tokens": plan.decode_tile_tokens,
                     "oxk_isa": isa,
                     "oxk_tile": tile,
@@ -246,7 +283,10 @@ pub fn load_model_runtime(args: &Args) -> Result<Option<Arc<ModelRuntime>>, Stri
             expected_decode_tps = plan.expected_decode_tps,
             "autotune plan summary"
         );
+        apply_autotune_plan_to_server_args(&mut effective_args, &plan);
+        autotune_plan = Some(plan);
     }
+    let args = &effective_args;
     optimize_mapped_model_memory(&mapped, args);
     let metadata = &mapped.parsed().metadata;
     let is_dflash = matches!(
@@ -375,21 +415,65 @@ pub fn load_model_runtime(args: &Args) -> Result<Option<Arc<ModelRuntime>>, Stri
         target_layer_count,
     )?;
 
-    Ok(Some(Arc::new(ModelRuntime {
-        id: args.model_id.clone(),
-        tokenizer,
-        chat_template,
-        model: Mutex::new(model),
-        draft,
-        draft_tokens,
-        defaults: GenerationDefaults {
-            max_tokens: args.max_tokens,
-            temperature: args.temperature,
-            top_p: args.top_p,
-            top_k: args.top_k,
-            prefill_batch_size: args.prefill_batch_size,
-        },
-    })))
+    Ok(ModelRuntimeLoad {
+        runtime: Some(Arc::new(ModelRuntime {
+            id: args.model_id.clone(),
+            tokenizer,
+            chat_template,
+            model: Mutex::new(model),
+            draft,
+            draft_tokens,
+            defaults: GenerationDefaults {
+                max_tokens: args.max_tokens,
+                temperature: args.temperature,
+                top_p: args.top_p,
+                top_k: args.top_k,
+                prefill_batch_size: args.prefill_batch_size,
+            },
+        })),
+        autotune_plan,
+    })
+}
+
+fn apply_autotune_plan_to_server_args(args: &mut Args, plan: &oxidize_core::autotune::TuningPlan) {
+    if args.no_auto || !args.auto {
+        return;
+    }
+    if args.threads == 0 && plan.threads > 0 {
+        args.threads = plan.threads;
+    }
+    if args.ctx_size.is_none() && plan.ctx_size > 0 {
+        args.ctx_size = Some(plan.ctx_size);
+    }
+    if args.batch_mode == BatchMode::Sequential {
+        args.batch_mode = effective_batch_mode(args, Some(plan));
+    }
+    if args.kv_cache_dtype == KvCacheDType::F32 {
+        args.kv_cache_dtype = match plan.kv_cache_dtype {
+            oxidize_core::tensor::DType::F16 => KvCacheDType::F16,
+            oxidize_core::tensor::DType::I8 => KvCacheDType::Q8,
+            oxidize_core::tensor::DType::I16 => KvCacheDType::Q4,
+            _ => args.kv_cache_dtype,
+        };
+    }
+    if !args.no_turboquant_kv
+        && !args.turboquant_kv
+        && matches!(
+            plan.kv_quantization,
+            oxidize_core::kv_cache::KvQuantization::TurboQuant
+        )
+    {
+        args.turboquant_kv = true;
+    }
+    if !args.layer_wise && plan.layer_wise {
+        args.layer_wise = true;
+    }
+    if args.layer_cache == 1 && plan.layer_cache > 0 {
+        args.layer_cache = plan.layer_cache;
+    }
+    if args.prefill_chunk_size == 16 && plan.chunked_prefill_tokens > 0 {
+        args.prefill_chunk_size = plan.chunked_prefill_tokens;
+    }
 }
 
 fn optimize_mapped_model_memory(mapped: &MappedGgufFile, args: &Args) {
@@ -578,4 +662,61 @@ pub fn first_layer_tensor_dims(mapped: &MappedGgufFile, suffix: &str) -> Option<
         .iter()
         .find(|tensor| tensor.name.starts_with("blk.") && tensor.name.ends_with(suffix))
         .map(|tensor| tensor.dimensions.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::{BatchMode, KvCacheDType};
+    use clap::Parser;
+    use oxidize_core::autotune::{
+        AttentionKernel, OxkIsa, OxkTile, PipelineMode, SpeculativeSpec, TuningPlan, WeightPlan,
+    };
+    use oxidize_core::kv_cache::KvQuantization;
+    use oxidize_core::tensor::DType;
+
+    #[test]
+    fn server_autotune_plan_promotes_paged_q4_turboquant_runtime() {
+        let mut args = Args::parse_from(["oxidize-server"]);
+        let plan = TuningPlan {
+            threads: 16,
+            ctx_size: 8192,
+            kv_cache_dtype: DType::I16,
+            kv_quantization: KvQuantization::TurboQuant,
+            n_gpu_layers: 60,
+            gpu_split: vec![],
+            mmap: false,
+            mlock: false,
+            mmap_hugepages: false,
+            mmap_prefetch: false,
+            numa_replicate_dense: false,
+            layer_wise: false,
+            layer_cache: 0,
+            pipeline: PipelineMode::Paged,
+            speculative: SpeculativeSpec::None,
+            weight_plan: WeightPlan::W4A16,
+            attention_kernel: AttentionKernel::FlashAttention3,
+            cuda_graphs: true,
+            persistent_decode_kernels: true,
+            tensor_parallelism: 1,
+            pipeline_parallelism: 1,
+            chunked_prefill_tokens: 512,
+            max_decode_batch: 16,
+            decode_tile_tokens: 0,
+            oxk_isa: OxkIsa::Avx2,
+            oxk_tile: OxkTile::T8,
+            expected_prompt_tps: 6_900.0,
+            expected_decode_tps: 1_150.0,
+            rationale: vec![],
+        };
+
+        apply_autotune_plan_to_server_args(&mut args, &plan);
+
+        assert_eq!(args.threads, 16);
+        assert_eq!(args.ctx_size, Some(8192));
+        assert_eq!(args.batch_mode, BatchMode::Paged);
+        assert_eq!(args.kv_cache_dtype, KvCacheDType::Q4);
+        assert!(args.turboquant_kv);
+        assert_eq!(args.prefill_chunk_size, 512);
+    }
 }

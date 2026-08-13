@@ -147,7 +147,9 @@ pub(super) fn apply_plan_to_args(
 
 /// JSON-friendly snapshot of a `TuningPlan` for tooling.
 pub(super) fn plan_to_json(plan: &oxidize_core::autotune::TuningPlan) -> serde_json::Value {
-    use oxidize_core::autotune::{OxkIsa, OxkTile, PipelineMode, SpeculativeSpec};
+    use oxidize_core::autotune::{
+        AttentionKernel, OxkIsa, OxkTile, PipelineMode, SpeculativeSpec, WeightPlan,
+    };
     let isa = match plan.oxk_isa {
         OxkIsa::Scalar => "scalar",
         OxkIsa::Avx2 => "avx2",
@@ -170,10 +172,23 @@ pub(super) fn plan_to_json(plan: &oxidize_core::autotune::TuningPlan) -> serde_j
         SpeculativeSpec::DFlash => "dflash",
         SpeculativeSpec::Mtp => "mtp",
     };
+    let weight_plan = match plan.weight_plan {
+        WeightPlan::Native => "native",
+        WeightPlan::Fp8 => "fp8",
+        WeightPlan::W8A8 => "w8a8",
+        WeightPlan::W4A16 => "w4a16",
+        WeightPlan::W4A8Kv4 => "w4a8kv4",
+    };
+    let attention_kernel = match plan.attention_kernel {
+        AttentionKernel::Default => "default",
+        AttentionKernel::FlashAttention => "flash_attention",
+        AttentionKernel::FlashAttention3 => "flash_attention_3",
+    };
     serde_json::json!({
         "threads": plan.threads,
         "ctx_size": plan.ctx_size,
         "kv_cache_dtype": format!("{:?}", plan.kv_cache_dtype),
+        "kv_quantization": format!("{:?}", plan.kv_quantization),
         "n_gpu_layers": plan.n_gpu_layers,
         "mmap": plan.mmap,
         "mlock": plan.mlock,
@@ -184,6 +199,14 @@ pub(super) fn plan_to_json(plan: &oxidize_core::autotune::TuningPlan) -> serde_j
         "layer_cache": plan.layer_cache,
         "pipeline": pipe,
         "speculative": spec,
+        "weight_plan": weight_plan,
+        "attention_kernel": attention_kernel,
+        "cuda_graphs": plan.cuda_graphs,
+        "persistent_decode_kernels": plan.persistent_decode_kernels,
+        "tensor_parallelism": plan.tensor_parallelism,
+        "pipeline_parallelism": plan.pipeline_parallelism,
+        "chunked_prefill_tokens": plan.chunked_prefill_tokens,
+        "max_decode_batch": plan.max_decode_batch,
         "decode_tile_tokens": plan.decode_tile_tokens,
         "oxk_isa": isa,
         "oxk_tile": tile,

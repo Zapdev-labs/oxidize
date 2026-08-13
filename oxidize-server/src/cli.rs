@@ -68,7 +68,23 @@ impl BatchMode {
     }
 }
 
-#[derive(Debug, Parser)]
+pub fn effective_batch_mode(
+    args: &Args,
+    plan: Option<&oxidize_core::autotune::TuningPlan>,
+) -> BatchMode {
+    if args.no_auto || !args.auto {
+        return args.batch_mode;
+    }
+    match plan.map(|plan| plan.pipeline) {
+        Some(oxidize_core::autotune::PipelineMode::Paged) => BatchMode::Paged,
+        Some(oxidize_core::autotune::PipelineMode::Sequential)
+        | Some(oxidize_core::autotune::PipelineMode::Continuous)
+        | Some(oxidize_core::autotune::PipelineMode::Asymmetric)
+        | None => args.batch_mode,
+    }
+}
+
+#[derive(Debug, Clone, Parser)]
 #[command(name = "oxidize-server")]
 pub struct Args {
     #[arg(long, default_value_t = IpAddr::V4(Ipv4Addr::LOCALHOST))]
@@ -95,6 +111,9 @@ pub struct Args {
     pub ctx_size: Option<usize>,
     #[arg(long, default_value_t = 512)]
     pub prefill_batch_size: usize,
+    /// Token chunk size used by the PagedAttention prefill scheduler.
+    #[arg(long, default_value_t = 16)]
+    pub prefill_chunk_size: usize,
     #[arg(long, default_value_t = false)]
     pub cpu_optimized: bool,
     #[arg(long, default_value_t = false)]
@@ -155,6 +174,44 @@ pub struct Args {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use oxidize_core::autotune::{
+        AttentionKernel, OxkIsa, OxkTile, PipelineMode, SpeculativeSpec, TuningPlan, WeightPlan,
+    };
+    use oxidize_core::kv_cache::KvQuantization;
+
+    fn plan_with_pipeline(pipeline: PipelineMode) -> TuningPlan {
+        TuningPlan {
+            threads: 8,
+            ctx_size: 4096,
+            kv_cache_dtype: DType::I16,
+            kv_quantization: KvQuantization::TurboQuant,
+            n_gpu_layers: 60,
+            gpu_split: Vec::new(),
+            mmap: false,
+            mlock: false,
+            mmap_hugepages: false,
+            mmap_prefetch: false,
+            numa_replicate_dense: false,
+            layer_wise: false,
+            layer_cache: 0,
+            pipeline,
+            speculative: SpeculativeSpec::DFlash,
+            weight_plan: WeightPlan::W4A16,
+            attention_kernel: AttentionKernel::FlashAttention3,
+            cuda_graphs: true,
+            persistent_decode_kernels: true,
+            tensor_parallelism: 1,
+            pipeline_parallelism: 1,
+            chunked_prefill_tokens: 512,
+            max_decode_batch: 16,
+            decode_tile_tokens: 0,
+            oxk_isa: OxkIsa::Avx2,
+            oxk_tile: OxkTile::T8,
+            expected_prompt_tps: 6_000.0,
+            expected_decode_tps: 1_150.0,
+            rationale: Vec::new(),
+        }
+    }
 
     #[test]
     fn args_use_expected_defaults() {
@@ -168,5 +225,24 @@ mod tests {
         let args = Args::parse_from(["oxidize-server", "--host", "0.0.0.0", "--port", "3000"]);
         assert_eq!(args.host, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
         assert_eq!(args.port, 3000);
+    }
+
+    #[test]
+    fn effective_batch_mode_uses_paged_autotune_plan() {
+        let args = Args::parse_from(["oxidize-server"]);
+        let plan = plan_with_pipeline(PipelineMode::Paged);
+
+        assert_eq!(effective_batch_mode(&args, Some(&plan)), BatchMode::Paged);
+    }
+
+    #[test]
+    fn effective_batch_mode_respects_no_auto() {
+        let args = Args::parse_from(["oxidize-server", "--no-auto"]);
+        let plan = plan_with_pipeline(PipelineMode::Paged);
+
+        assert_eq!(
+            effective_batch_mode(&args, Some(&plan)),
+            BatchMode::Sequential
+        );
     }
 }

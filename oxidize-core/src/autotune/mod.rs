@@ -19,4 +19,6 @@ pub use fingerprint::{
     ModelFingerprint, fingerprint, fingerprint_from_parts, kv_bytes_per_token,
     per_layer_weight_bytes, summary as model_summary,
 };
-pub use rules::{OxkIsa, OxkTile, PipelineMode, SpeculativeSpec, TuningPlan, plan};
+pub use rules::{
+    AttentionKernel, OxkIsa, OxkTile, PipelineMode, SpeculativeSpec, TuningPlan, WeightPlan, plan,
+};

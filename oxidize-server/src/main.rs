@@ -9,8 +9,8 @@ use clap::Parser;
 
 use oxidize_server::{
     AppState, Args, AuthConfig, BatchMode, ContinuousBatcher, RequestLimitConfig, RequestLimiter,
-    audit::AuditLogger, build_app_with_state, build_paged_runtime, load_model_runtime,
-    mesh_cluster::MeshClusterState, metrics::MetricsRegistry,
+    audit::AuditLogger, build_app_with_state, build_paged_runtime, effective_batch_mode,
+    load_model_runtime_with_plan, mesh_cluster::MeshClusterState, metrics::MetricsRegistry,
     shutdown::serve_with_graceful_shutdown,
 };
 
@@ -33,8 +33,8 @@ async fn main() {
         "starting oxidize-server"
     );
 
-    let model = match load_model_runtime(&args) {
-        Ok(m) => m,
+    let loaded_model = match load_model_runtime_with_plan(&args) {
+        Ok(loaded) => loaded,
         Err(error) => {
             tracing::error!("failed to initialize model runtime: {error}");
             std::process::exit(1);
@@ -42,15 +42,17 @@ async fn main() {
     };
     let auth = AuthConfig::from_env();
 
-    let (model_opt, paged_opt) = if args.batch_mode == BatchMode::Paged {
-        if let Some(runtime) = model {
-            let paged = build_paged_runtime(&args, runtime.clone());
+    let batch_mode = effective_batch_mode(&args, loaded_model.autotune_plan.as_ref());
+    let (model_opt, paged_opt) = if batch_mode == BatchMode::Paged {
+        if let Some(runtime) = loaded_model.runtime {
+            let paged =
+                build_paged_runtime(&args, runtime.clone(), loaded_model.autotune_plan.as_ref());
             (None, Some(paged))
         } else {
             (None, None)
         }
     } else {
-        (model, None)
+        (loaded_model.runtime, None)
     };
 
     let mesh = if args.mesh {

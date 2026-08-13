@@ -4,7 +4,7 @@
 //! (`docs/gpu_cluster_spec.md`) as code. It provides two cooperating halves:
 //!
 //! 1. **Manifest generation** — typed [`GpuProfile`]s for the three target GPU
-//!    tiers (B200 / A100 / RTX Pro 6000) and pure functions that render the
+//!    tiers (B200 / H100 / A100 / RTX Pro 6000) and pure functions that render the
 //!    Kubernetes / Helm YAML the spec describes (node pools, taints & labels,
 //!    NVIDIA device-plugin time-slicing, MIG strategy, Prometheus rules, and
 //!    GPU-Operator Helm values).
@@ -25,6 +25,8 @@ use std::process::Command;
 pub enum GpuFamily {
     /// NVIDIA B200 (Blackwell) — HPC / large-scale training.
     B200,
+    /// NVIDIA H100 (Hopper) — single-GPU high-throughput inference.
+    H100,
     /// NVIDIA A100 (Ampere) — datacenter inference & training, MIG-capable.
     A100,
     /// NVIDIA RTX Pro 6000 — professional workstation / edge inference.
@@ -33,15 +35,21 @@ pub enum GpuFamily {
 
 impl GpuFamily {
     /// All known families, in spec order.
-    pub fn all() -> [GpuFamily; 3] {
-        [GpuFamily::B200, GpuFamily::A100, GpuFamily::RtxPro6000]
+    pub fn all() -> [GpuFamily; 4] {
+        [
+            GpuFamily::B200,
+            GpuFamily::H100,
+            GpuFamily::A100,
+            GpuFamily::RtxPro6000,
+        ]
     }
 
     /// Relative capability rank (higher = higher-end). Used to pick the
     /// best GPU on mixed-family hosts independent of enumeration order.
     pub fn rank(self) -> u8 {
         match self {
-            GpuFamily::B200 => 3,
+            GpuFamily::B200 => 4,
+            GpuFamily::H100 => 3,
             GpuFamily::A100 => 2,
             GpuFamily::RtxPro6000 => 1,
         }
@@ -51,6 +59,7 @@ impl GpuFamily {
     pub fn slug(self) -> &'static str {
         match self {
             GpuFamily::B200 => "b200",
+            GpuFamily::H100 => "h100",
             GpuFamily::A100 => "a100",
             GpuFamily::RtxPro6000 => "rtx-pro-6000",
         }
@@ -60,6 +69,7 @@ impl GpuFamily {
     pub fn from_slug(s: &str) -> Option<GpuFamily> {
         match s.trim().to_ascii_lowercase().as_str() {
             "b200" => Some(GpuFamily::B200),
+            "h100" => Some(GpuFamily::H100),
             "a100" => Some(GpuFamily::A100),
             "rtx-pro-6000" | "rtx-pro6000" | "rtxpro6000" => Some(GpuFamily::RtxPro6000),
             _ => None,
@@ -113,6 +123,18 @@ pub fn profile(family: GpuFamily) -> GpuProfile {
             time_slice_replicas: 1, // full-GPU only; failRequestsGreaterThanOne
             network_class: "infiniband",
             workload_type: "training",
+        },
+        GpuFamily::H100 => GpuProfile {
+            family,
+            product: "NVIDIA-H100-SXM5-80GB",
+            generation: "hopper",
+            memory_mib: 81_920,
+            tdp_watts: 700,
+            nvlink: true,
+            mig_capable: false,
+            time_slice_replicas: 1,
+            network_class: "infiniband",
+            workload_type: "throughput-inference",
         },
         GpuFamily::A100 => GpuProfile {
             family,
@@ -175,6 +197,7 @@ pub fn node_pool_yaml(spec: &NodePoolSpec) -> String {
     let p = profile(spec.family);
     let pool_name = match spec.family {
         GpuFamily::B200 => "b200-training",
+        GpuFamily::H100 => "h100-throughput",
         GpuFamily::A100 => "a100-mixed",
         GpuFamily::RtxPro6000 => "rtx-pro6000",
     };
@@ -459,6 +482,8 @@ pub fn classify_product(name: &str) -> Option<GpuFamily> {
     let n = name.to_ascii_lowercase();
     if n.contains("b200") {
         Some(GpuFamily::B200)
+    } else if n.contains("h100") {
+        Some(GpuFamily::H100)
     } else if n.contains("a100") {
         Some(GpuFamily::A100)
     } else if n.contains("rtx") && n.contains("pro") && n.contains("6000") {
@@ -563,6 +588,14 @@ mod tests {
         assert!(!b200.mig_capable);
         assert_eq!(b200.time_slice_replicas, 1);
 
+        let h100 = profile(GpuFamily::H100);
+        assert_eq!(h100.product, "NVIDIA-H100-SXM5-80GB");
+        assert_eq!(h100.generation, "hopper");
+        assert_eq!(h100.memory_mib, 81_920);
+        assert!(h100.nvlink);
+        assert!(!h100.mig_capable);
+        assert_eq!(h100.workload_type, "throughput-inference");
+
         let a100 = profile(GpuFamily::A100);
         assert!(a100.mig_capable);
         assert_eq!(a100.time_slice_replicas, 2);
@@ -589,12 +622,14 @@ mod tests {
     fn node_pools_yaml_lists_all() {
         let specs = vec![
             NodePoolSpec::new(GpuFamily::B200, 8, 8),
+            NodePoolSpec::new(GpuFamily::H100, 4, 8),
             NodePoolSpec::new(GpuFamily::A100, 16, 8),
             NodePoolSpec::new(GpuFamily::RtxPro6000, 4, 2),
         ];
         let y = node_pools_yaml(&specs);
         assert!(y.starts_with("nodePools:\n"));
         assert!(y.contains("b200-training:"));
+        assert!(y.contains("h100-throughput:"));
         assert!(y.contains("a100-mixed:"));
         assert!(y.contains("rtx-pro6000:"));
     }
@@ -668,6 +703,11 @@ mod tests {
     fn classify_product_handles_sku_variants() {
         assert_eq!(classify_product("NVIDIA B200"), Some(GpuFamily::B200));
         assert_eq!(
+            classify_product("NVIDIA H100 80GB HBM3"),
+            Some(GpuFamily::H100)
+        );
+        assert_eq!(classify_product("NVIDIA H100 PCIe"), Some(GpuFamily::H100));
+        assert_eq!(
             classify_product("NVIDIA A100-SXM4-80GB"),
             Some(GpuFamily::A100)
         );
@@ -689,15 +729,17 @@ mod tests {
         let out = "0, NVIDIA A100-SXM4-80GB, 81920, Enabled\n\
                    1, NVIDIA B200, 196608, Disabled\n\
                    garbage line\n\
-                   2, Tesla V100, 16384, [N/A]\n";
+                   2, NVIDIA H100 80GB HBM3, 81920, Disabled\n\
+                   3, Tesla V100, 16384, [N/A]\n";
         let gpus = parse_nvidia_smi_csv(out);
-        assert_eq!(gpus.len(), 3);
+        assert_eq!(gpus.len(), 4);
         assert_eq!(gpus[0].family, Some(GpuFamily::A100));
         assert!(gpus[0].mig_enabled);
         assert_eq!(gpus[1].family, Some(GpuFamily::B200));
         assert!(!gpus[1].mig_enabled);
-        assert_eq!(gpus[2].family, None);
-        assert_eq!(gpus[2].memory_total_mib, 16384);
+        assert_eq!(gpus[2].family, Some(GpuFamily::H100));
+        assert_eq!(gpus[3].family, None);
+        assert_eq!(gpus[3].memory_total_mib, 16384);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 /// Handle the `oxidize gpu-cluster <subcommand>` family.
 ///
 /// Subcommands:
-///   generate [--family b200|a100|rtx-pro-6000] [--nodes N] [--gpus-per-node N]
+///   generate [--family b200|h100|a100|rtx-pro-6000] [--nodes N] [--gpus-per-node N]
 ///            Emit the Kubernetes/Helm manifests from the GPU cluster spec.
 ///   detect   Probe the local node for NVIDIA GPUs via nvidia-smi.
 ///   profiles List the known GPU tier profiles.
@@ -58,7 +58,7 @@ pub(super) fn run_gpu_cluster(args: &[String]) -> i32 {
                         match args.get(i).and_then(|v| gc::GpuFamily::from_slug(v)) {
                             Some(f) => family = Some(f),
                             None => {
-                                eprintln!("error: --family expects b200|a100|rtx-pro-6000");
+                                eprintln!("error: --family expects b200|h100|a100|rtx-pro-6000");
                                 return 2;
                             }
                         }
@@ -125,6 +125,7 @@ pub(super) fn run_gpu_cluster(args: &[String]) -> i32 {
                 }
                 None => vec![
                     gc::NodePoolSpec::new(gc::GpuFamily::B200, 8, 8),
+                    gc::NodePoolSpec::new(gc::GpuFamily::H100, 4, 8),
                     gc::NodePoolSpec::new(gc::GpuFamily::A100, 16, 8),
                     gc::NodePoolSpec::new(gc::GpuFamily::RtxPro6000, 4, 2),
                 ],
@@ -152,7 +153,7 @@ pub(super) fn run_gpu_cluster(args: &[String]) -> i32 {
             eprintln!(
                 "usage: oxidize gpu-cluster <generate|detect|profiles>\n\
                  \n\
-                 generate [--family b200|a100|rtx-pro-6000] [--nodes N] [--gpus-per-node N]\n\
+                 generate [--family b200|h100|a100|rtx-pro-6000] [--nodes N] [--gpus-per-node N]\n\
                  detect   probe local NVIDIA GPUs via nvidia-smi\n\
                  profiles list known GPU tier profiles"
             );
@@ -165,6 +166,7 @@ pub(super) fn default_node_count(f: oxidize_core::gpu_cluster::GpuFamily) -> u32
     use oxidize_core::gpu_cluster::GpuFamily::*;
     match f {
         B200 => 8,
+        H100 => 4,
         A100 => 16,
         RtxPro6000 => 4,
     }
@@ -173,7 +175,7 @@ pub(super) fn default_node_count(f: oxidize_core::gpu_cluster::GpuFamily) -> u32
 pub(super) fn default_gpus_per_node(f: oxidize_core::gpu_cluster::GpuFamily) -> u32 {
     use oxidize_core::gpu_cluster::GpuFamily::*;
     match f {
-        B200 | A100 => 8,
+        B200 | H100 | A100 => 8,
         RtxPro6000 => 2,
     }
 }
