@@ -76,6 +76,7 @@ extern "C" {
 #define OC_BLOCK_AL5_XS_SIZE   14u
 #define OC_BLOCK_IQ1_S_SIZE   50u
 #define OC_BLOCK_IQ1_M_SIZE   56u
+#define OC_BLOCK_IQ1_XXXS_SIZE 38u
 #define OC_BLOCK_IQ2_XXS_SIZE 66u
 #define OC_BLOCK_IQ2_XS_SIZE  74u
 #define OC_BLOCK_IQ2_S_SIZE   82u
@@ -129,6 +130,7 @@ typedef enum {
     OC_QUANT_I32      = 33,
     OC_QUANT_I64      = 34,
     OC_QUANT_F64      = 35,
+    OC_QUANT_IQ1_XXXS = 36,
     OC_QUANT__COUNT,
     OC_QUANT_UNKNOWN  = 0xffffffffu,
 } OcGgufQuantizationType;
@@ -185,6 +187,9 @@ OcError oc_quant_pack_row(OcGgufQuantizationType qtype,
  * `dst` points to `bytes_per_block` bytes. Returns OC_OK or an error code. */
 OcError oc_quant_pack_block(OcGgufQuantizationType qtype,
                             const float *src, uint8_t *dst);
+
+float oc_quant_dot_iq1_xxxs_q8_k(const uint8_t *row, size_t blocks,
+                                  const uint8_t *q8);
 
 /* Human-readable name ("F32", "Q4_K_M", ...). Returns "?" for unknown. */
 const char *oc_quant_type_name(OcGgufQuantizationType qtype);

@@ -34,6 +34,9 @@
 #include <math.h>
 #include <stdint.h>
 #include <string.h>
+#ifdef OC_AVX512
+#include <immintrin.h>
+#endif
 
 /* ─── Bit-exact f16/bf16 helpers (port of quant_utils.rs) ─────────────── */
 
@@ -201,6 +204,7 @@ static LayoutInfo layout_for(OcGgufQuantizationType qtype)
      * except IQ4_NL which uses QK4_NL=32, and NVFP4 which uses QK_NVFP4=64). */
     case OC_QUANT_IQ1_S:   return (LayoutInfo){ OC_BLOCK_IQ1_S_SIZE,   OC_QK_K };
     case OC_QUANT_IQ1_M:   return (LayoutInfo){ OC_BLOCK_IQ1_M_SIZE,   OC_QK_K };
+    case OC_QUANT_IQ1_XXXS: return (LayoutInfo){ OC_BLOCK_IQ1_XXXS_SIZE, OC_QK_K };
     case OC_QUANT_IQ2_XXS: return (LayoutInfo){ OC_BLOCK_IQ2_XXS_SIZE, OC_QK_K };
     case OC_QUANT_IQ2_XS:  return (LayoutInfo){ OC_BLOCK_IQ2_XS_SIZE,  OC_QK_K };
     case OC_QUANT_IQ2_S:   return (LayoutInfo){ OC_BLOCK_IQ2_S_SIZE,   OC_QK_K };
@@ -870,6 +874,116 @@ static OcError dequant_iq1_s(const uint8_t *src, size_t src_len,
         }
     }
     return OC_OK;
+}
+
+static const uint16_t IQ1_XXXS_TO_IQ1S[256] = {
+    0, 6, 20, 52, 82, 95, 99, 101, 102, 159, 164, 193, 225, 229, 234, 236,
+    239, 259, 279, 286, 298, 300, 302, 314, 315, 316, 317, 319, 320, 321, 324, 328,
+    335, 352, 359, 364, 367, 369, 378, 404, 407, 412, 473, 510, 519, 523, 533, 540,
+    555, 590, 603, 652, 661, 663, 666, 698, 702, 703, 720, 722, 723, 728, 735, 738,
+    739, 740, 742, 746, 749, 751, 752, 755, 757, 772, 776, 777, 822, 828, 834, 840,
+    853, 872, 873, 874, 888, 892, 897, 902, 904, 907, 908, 910, 913, 916, 921, 924,
+    928, 941, 942, 943, 951, 955, 959, 960, 963, 968, 971, 973, 974, 978, 981, 983,
+    985, 991, 992, 995, 1004, 1006, 1008, 1010, 1011, 1013, 1018, 1020, 1021, 1022, 1024, 1026,
+    1028, 1029, 1030, 1032, 1034, 1036, 1037, 1038, 1039, 1042, 1047, 1050, 1051, 1052, 1054, 1058,
+    1060, 1063, 1067, 1068, 1072, 1076, 1086, 1089, 1091, 1093, 1096, 1102, 1105, 1109, 1117, 1125,
+    1127, 1138, 1144, 1149, 1151, 1155, 1158, 1159, 1160, 1161, 1164, 1172, 1175, 1179, 1180, 1183,
+    1189, 1194, 1196, 1237, 1239, 1242, 1244, 1267, 1275, 1276, 1282, 1302, 1306, 1312, 1315, 1316,
+    1317, 1319, 1323, 1328, 1331, 1333, 1344, 1347, 1349, 1360, 1391, 1394, 1398, 1400, 1417, 1436,
+    1442, 1493, 1498, 1518, 1523, 1526, 1542, 1573, 1593, 1646, 1662, 1663, 1664, 1684, 1706, 1729,
+    1732, 1738, 1739, 1741, 1742, 1748, 1752, 1754, 1759, 1760, 1761, 1764, 1783, 1784, 1795, 1802,
+    1821, 1834, 1836, 1853, 1859, 1863, 1869, 1883, 1920, 1935, 1941, 1950, 1957, 1964, 1972, 2004,
+};
+
+static OcError dequant_iq1_xxxs(const uint8_t *src, size_t src_len,
+                                float *dst, size_t value_count)
+{
+    if (!validate_layout(OC_QUANT_IQ1_XXXS, src_len, value_count,
+                         OC_BLOCK_IQ1_XXXS_SIZE, OC_QK_K)) {
+        return OC_ERR_INVALID_ARG;
+    }
+    size_t n_blocks = src_len / OC_BLOCK_IQ1_XXXS_SIZE;
+    for (size_t b = 0; b < n_blocks; b++) {
+        const uint8_t *block = src + b * OC_BLOCK_IQ1_XXXS_SIZE;
+        float *out = dst + b * OC_QK_K;
+        float d = f16_le_to_f32(block[0], block[1]);
+        const uint8_t *qs = block + 2;
+        const uint8_t *sc = block + 34;
+        size_t out_pos = 0;
+        for (size_t ib = 0; ib < 8; ib++) {
+            uint8_t nibble = (uint8_t)((sc[ib / 2] >> (4 * (ib & 1))) & 0x0fu);
+            float dl = d * (float)(2 * (nibble & 7u) + 1);
+            float delta = (nibble & 8u) ? -0.125f : 0.125f;
+            for (size_t l = 0; l < 4; l++) {
+                uint64_t packed = IQ1S_GRID[IQ1_XXXS_TO_IQ1S[qs[4 * ib + l]]];
+                for (size_t j = 0; j < 8; j++) {
+                    int8_t value = (int8_t)(packed >> (8 * j));
+                    out[out_pos++] = dl * ((float)value + delta);
+                }
+            }
+        }
+    }
+    return OC_OK;
+}
+
+float oc_quant_dot_iq1_xxxs_q8_k(const uint8_t *row, size_t blocks,
+                                  const uint8_t *q8)
+{
+    float sum = 0.0f;
+    for (size_t b = 0; b < blocks; b++) {
+        const uint8_t *wb = row + b * OC_BLOCK_IQ1_XXXS_SIZE;
+        const uint8_t *ab = q8 + b * OC_BLOCK_Q8_K_SIZE;
+        float dw = f16_le_to_f32(wb[0], wb[1]);
+        float da;
+        memcpy(&da, ab, sizeof(da));
+        const uint8_t *qs = wb + 2;
+        const uint8_t *sc = wb + 34;
+        const int8_t *av = (const int8_t *)(ab + 4);
+        const uint8_t *bsums = ab + 260;
+        int32_t main_sum = 0;
+        int32_t delta_sum = 0;
+        for (size_t ib = 0; ib < 8; ib++) {
+            uint8_t nibble = (uint8_t)((sc[ib / 2] >> (4 * (ib & 1))) & 0x0fu);
+            int32_t scale = 2 * (int32_t)(nibble & 7u) + 1;
+            int32_t grid_sum = 0;
+#ifdef OC_AVX512
+            uint64_t grids[4];
+            for (size_t l = 0; l < 4; l++)
+                grids[l] = IQ1S_GRID[IQ1_XXXS_TO_IQ1S[qs[4 * ib + l]]];
+            __m256i gv = _mm256_loadu_si256((const __m256i *)grids);
+            __m256i uv = _mm256_add_epi8(gv, _mm256_set1_epi8(1));
+            __m256i xv = _mm256_loadu_si256((const __m256i *)(av + ib * 32));
+            __m256i pairs = _mm256_maddubs_epi16(uv, xv);
+            __m256i sums = _mm256_madd_epi16(pairs, _mm256_set1_epi16(1));
+            __m128i lo = _mm256_castsi256_si128(sums);
+            __m128i hi = _mm256_extracti128_si256(sums, 1);
+            __m128i total = _mm_add_epi32(lo, hi);
+            total = _mm_hadd_epi32(total, total);
+            total = _mm_hadd_epi32(total, total);
+            grid_sum = _mm_cvtsi128_si32(total);
+#else
+            for (size_t l = 0; l < 4; l++) {
+                uint64_t packed = IQ1S_GRID[IQ1_XXXS_TO_IQ1S[qs[4 * ib + l]]];
+                for (size_t j = 0; j < 8; j++) {
+                    int8_t value = (int8_t)(packed >> (8 * j));
+                    grid_sum += (int32_t)value * (int32_t)av[ib * 32 + l * 8 + j];
+                }
+            }
+#endif
+            int16_t bsum0 = (int16_t)((uint16_t)bsums[4 * ib]
+                          | ((uint16_t)bsums[4 * ib + 1] << 8));
+            int16_t bsum1 = (int16_t)((uint16_t)bsums[4 * ib + 2]
+                          | ((uint16_t)bsums[4 * ib + 3] << 8));
+#ifdef OC_AVX512
+            grid_sum -= (int32_t)bsum0 + (int32_t)bsum1;
+#endif
+            main_sum += scale * grid_sum;
+            delta_sum += scale * ((nibble & 8u) ? -1 : 1)
+                       * ((int32_t)bsum0 + (int32_t)bsum1);
+        }
+        sum += dw * da * ((float)main_sum + 0.125f * (float)delta_sum);
+    }
+    return sum;
 }
 
 /* IQ1_M dequant: 20-byte block, 256 values. Port of
@@ -2679,6 +2793,7 @@ OcError oc_quant_dequant_row_scalar(OcGgufQuantizationType qtype,
     /* IQ-family — lookup-table-based importance quants. */
     case OC_QUANT_IQ1_S:   return dequant_iq1_s(src, src_len, dst, value_count);
     case OC_QUANT_IQ1_M:   return dequant_iq1_m(src, src_len, dst, value_count);
+    case OC_QUANT_IQ1_XXXS: return dequant_iq1_xxxs(src, src_len, dst, value_count);
     case OC_QUANT_IQ2_XXS: return dequant_iq2_xxs(src, src_len, dst, value_count);
     case OC_QUANT_IQ2_XS:  return dequant_iq2_xs(src, src_len, dst, value_count);
     case OC_QUANT_IQ2_S:   return dequant_iq2_s(src, src_len, dst, value_count);
@@ -2792,6 +2907,7 @@ static const struct {
     { OC_QUANT_IQ4_XS,  "IQ4_XS",  23 },
     { OC_QUANT_IQ1_S,   "IQ1_S",   19 },
     { OC_QUANT_IQ1_M,   "IQ1_M",   29 },
+    { OC_QUANT_IQ1_XXXS, "IQ1_XXXS", 66 },
     { OC_QUANT_NVFP4,   "NVFP4",   40 },
     { OC_QUANT_I8,      "I8",      24 },
     { OC_QUANT_I16,     "I16",     25 },

@@ -134,3 +134,27 @@ Test(matvec, fused_multi_projection_mixed_type_fallback)
     run_fused_case(qtypes, 2, rows, 256, 1, expected);
     run_fused_case(qtypes, 2, rows, 256, 16, expected);
 }
+
+Test(matvec, fused_iq1_xxxs)
+{
+    uint8_t row[38] = {0};
+    float input[256];
+    float output = 0.0f;
+    float temp[256];
+    const uint8_t *datas[] = {row};
+    const size_t rows[] = {1};
+    const size_t strides[] = {sizeof(row)};
+    const OcGgufQuantizationType qtypes[] = {OC_QUANT_IQ1_XXXS};
+    float *outputs[] = {&output};
+
+    row[1] = 0x3c;
+    for (size_t i = 0; i < 256; i++) input[i] = 1.0f;
+    oc_matvec_fused_test_reset();
+    oc_matvec_quantized_fused(qtypes, datas, rows, 256, strides, 1,
+                              input, outputs, temp);
+    cr_assert_float_eq(output, -224.0f, 0.0f);
+    const OcMatvecFusedTestStats stats = oc_matvec_fused_test_stats();
+    cr_assert_eq(stats.activation_quantizations, 1);
+    cr_assert_eq(stats.parallel_dispatches, 1);
+    cr_assert_eq(stats.fallback_calls, 0);
+}
