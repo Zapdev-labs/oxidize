@@ -1,0 +1,42 @@
+#version 450
+// One workgroup per page, one thread per head dim: softmax-weighted int4
+// value accumulate in rotated space. The host applies the inverse rotation.
+
+layout(local_size_x = 128) in;
+
+layout(std430, binding = 0) readonly buffer ValueCodes { uint value_codes[]; };
+layout(std430, binding = 1) readonly buffer ValueScales { float value_scales[]; };
+layout(std430, binding = 2) readonly buffer Weights { float weights[]; };
+layout(std430, binding = 3) writeonly buffer PageOut { float page_out[]; };
+layout(std430, binding = 4) readonly buffer PageTokenOffset { uint page_off[]; };
+
+layout(push_constant) uniform Push {
+  uint head_dim;
+  uint blocks;
+} pc;
+
+void main() {
+  const uint page = gl_WorkGroupID.x;
+  const uint i = gl_LocalInvocationID.x;
+  if (i >= pc.head_dim) {
+    return;
+  }
+  const uint t0 = page_off[page];
+  const uint t1 = page_off[page + 1u];
+  const uint words_per_row = pc.head_dim / 8u;
+  const uint b = i / 32u;
+  const uint shift = (i & 7u) * 4u;
+  const uint word_in_row = i / 8u;
+
+  float acc = 0.0;
+  for (uint t = t0; t < t1; ++t) {
+    const float w = weights[t];
+    if (w == 0.0) {
+      continue;
+    }
+    const uint word = value_codes[t * words_per_row + word_in_row];
+    const float q = float((word >> shift) & 15u) - 7.0;
+    acc += w * value_scales[t * pc.blocks + b] * q;
+  }
+  page_out[page * pc.head_dim + i] = acc;
+}

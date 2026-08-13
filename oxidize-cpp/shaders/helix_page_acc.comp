@@ -1,0 +1,61 @@
+#version 450
+// One workgroup per page, one thread per head dim. Accumulates softmax-
+// weighted 3-bit value codes in code space, then applies the inverse
+// Hadamard (linear, so once per page) and the per-group scale.
+
+layout(local_size_x = 128) in;
+
+layout(std430, binding = 0) readonly buffer ValueCodes { uint value_codes[]; };
+layout(std430, binding = 1) readonly buffer ValueScales { float value_scales[]; };
+layout(std430, binding = 2) readonly buffer Weights { float weights[]; };
+layout(std430, binding = 3) writeonly buffer PageOut { float page_out[]; };
+layout(std430, binding = 4) readonly buffer PageTokenOffset { uint page_off[]; };
+
+layout(push_constant) uniform Push {
+  uint head_dim;
+} pc;
+
+shared float sh[128];
+
+uint code3(uint bit) {
+  const uint word = value_codes[bit >> 5];
+  const uint off = bit & 31u;
+  // 3-bit codes at bit offsets that are multiples of 3; a code can straddle
+  // a word boundary.
+  if (off <= 29u) {
+    return (word >> off) & 7u;
+  }
+  const uint next = value_codes[(bit >> 5) + 1u];
+  return ((word >> off) | (next << (32u - off))) & 7u;
+}
+
+void main() {
+  const uint page = gl_WorkGroupID.x;
+  const uint i = gl_LocalInvocationID.x;
+  if (i >= pc.head_dim) {
+    return;
+  }
+  const uint t0 = page_off[page];
+  const uint t1 = page_off[page + 1u];
+  const uint groups = pc.head_dim / 8u;
+
+  float acc = 0.0;
+  float sumw = 0.0;
+  for (uint t = t0; t < t1; ++t) {
+    const float w = weights[t] * 0.125;
+    sumw += w;
+    acc += w * float(code3(t * pc.head_dim * 3u + i * 3u));
+  }
+  sh[i] = acc - 3.0 * sumw;
+  barrier();
+
+  // out_i = scale_g * sum_j H8[i][j] * sh[g*8+j], H8[i][j] = (-1)^popcount(i&j)
+  const uint g = i >> 3u;
+  const uint li = i & 7u;
+  float outv = 0.0;
+  for (uint j = 0u; j < 8u; ++j) {
+    const float sign = (bitCount(li & j) & 1u) != 0u ? -1.0 : 1.0;
+    outv += sign * sh[g * 8u + j];
+  }
+  page_out[page * pc.head_dim + i] = value_scales[page * groups + g] * outv;
+}

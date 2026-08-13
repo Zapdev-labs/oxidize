@@ -7,6 +7,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(OXIDIZE_CUDA "Build the CUDA backend (requires nvcc + cuBLAS)" OFF)
 option(OXIDIZE_ROCM "Build the ROCm/HIP backend (requires hipcc + hipBLAS)" OFF)
+option(OXIDIZE_VULKAN "Build the Vulkan KV-cache backend (any GPU vendor)" OFF)
 
 if(OXIDIZE_CUDA AND OXIDIZE_ROCM)
   message(FATAL_ERROR "OXIDIZE_CUDA and OXIDIZE_ROCM are mutually exclusive")
@@ -87,6 +88,34 @@ if(OXIDIZE_CUDA OR OXIDIZE_ROCM)
   endif()
 endif()
 
+# ---- Vulkan KV-cache backend (vendor-agnostic: NVIDIA/AMD/Intel/iGPU) ------
+if(OXIDIZE_VULKAN)
+  find_package(Vulkan REQUIRED)
+  if(NOT Vulkan_GLSLC_EXECUTABLE)
+    message(FATAL_ERROR "OXIDIZE_VULKAN needs glslc (install shaderc / Vulkan SDK)")
+  endif()
+  set(SHADER_GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}/shaders_gen")
+  file(MAKE_DIRECTORY "${SHADER_GEN_DIR}")
+  file(GLOB SHADER_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.comp")
+  set(SHADER_HEADERS)
+  foreach(shader ${SHADER_SOURCES})
+    get_filename_component(shader_name ${shader} NAME_WE)
+    set(out "${SHADER_GEN_DIR}/${shader_name}.spv.h")
+    add_custom_command(OUTPUT ${out}
+      COMMAND ${Vulkan_GLSLC_EXECUTABLE} -O -mfmt=c ${shader} -o ${out}
+      DEPENDS ${shader}
+      COMMENT "Compiling ${shader_name}.comp to SPIR-V")
+    list(APPEND SHADER_HEADERS ${out})
+  endforeach()
+  add_library(oxidize_vulkan src/vulkan/kv_cache_vk.cpp ${SHADER_HEADERS})
+  target_include_directories(oxidize_vulkan
+    PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    PRIVATE "${SHADER_GEN_DIR}")
+  target_compile_definitions(oxidize_vulkan PUBLIC OXIDIZE_VULKAN=1)
+  target_link_libraries(oxidize_vulkan PUBLIC Vulkan::Vulkan)
+  target_link_libraries(oxidize_core PUBLIC oxidize_vulkan)
+endif()
+
 # ---- CLI binary -----------------------------------------------------------
 add_executable(oxidize-cpp src/cli/main.cpp)
 target_link_libraries(oxidize-cpp PRIVATE oxidize_core)
@@ -114,6 +143,9 @@ target_link_libraries(oxidize-cpp-train PRIVATE oxidize_train)
 enable_testing()
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests")
   file(GLOB TEST_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp")
+  if(NOT OXIDIZE_VULKAN)
+    list(FILTER TEST_SOURCES EXCLUDE REGEX ".*kv_cache_vk_test\\.cpp$")
+  endif()
   foreach(test_src ${TEST_SOURCES})
     get_filename_component(test_name ${test_src} NAME_WE)
     add_executable(${test_name} ${test_src})
