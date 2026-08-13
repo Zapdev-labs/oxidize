@@ -940,28 +940,48 @@ float oc_quant_dot_iq1_xxxs_q8_k(const uint8_t *row, size_t blocks,
         const uint8_t *sc = wb + 34;
         const int8_t *av = (const int8_t *)(ab + 4);
         const uint8_t *bsums = ab + 260;
+#ifdef OC_AVX512
+        __m512i block_sums = _mm512_setzero_si512();
+        int32_t main_correction = 0;
+        int32_t delta_sum = 0;
+        for (size_t ib = 0; ib < 8; ib += 2) {
+            uint8_t nibble0 = (uint8_t)((sc[ib / 2] >> (4 * (ib & 1))) & 0x0fu);
+            uint8_t nibble1 = (uint8_t)((sc[(ib + 1) / 2] >> (4 * ((ib + 1) & 1))) & 0x0fu);
+            int32_t scale0 = 2 * (int32_t)(nibble0 & 7u) + 1;
+            int32_t scale1 = 2 * (int32_t)(nibble1 & 7u) + 1;
+            uint64_t grids[8];
+            for (size_t l = 0; l < 8; l++)
+                grids[l] = IQ1S_GRID[IQ1_XXXS_TO_IQ1S[qs[4 * ib + l]]];
+            __m512i gv = _mm512_loadu_si512((const void *)grids);
+            __m512i uv = _mm512_add_epi8(gv, _mm512_set1_epi8(1));
+            __m512i xv = _mm512_loadu_si512((const void *)(av + ib * 32));
+            __m512i dots = _mm512_dpbusd_epi32(_mm512_setzero_si512(), uv, xv);
+            __m512i scales = _mm512_mask_blend_epi32(0xff00,
+                                                     _mm512_set1_epi32(scale0),
+                                                     _mm512_set1_epi32(scale1));
+            block_sums = _mm512_add_epi32(block_sums, _mm512_mullo_epi32(dots, scales));
+
+            for (size_t k = 0; k < 2; k++) {
+                size_t group = ib + k;
+                int32_t scale = k ? scale1 : scale0;
+                uint8_t nibble = k ? nibble1 : nibble0;
+                int16_t bsum0 = (int16_t)((uint16_t)bsums[4 * group]
+                              | ((uint16_t)bsums[4 * group + 1] << 8));
+                int16_t bsum1 = (int16_t)((uint16_t)bsums[4 * group + 2]
+                              | ((uint16_t)bsums[4 * group + 3] << 8));
+                int32_t bsum = (int32_t)bsum0 + (int32_t)bsum1;
+                main_correction += scale * bsum;
+                delta_sum += scale * ((nibble & 8u) ? -1 : 1) * bsum;
+            }
+        }
+        int32_t main_sum = _mm512_reduce_add_epi32(block_sums) - main_correction;
+#else
         int32_t main_sum = 0;
         int32_t delta_sum = 0;
         for (size_t ib = 0; ib < 8; ib++) {
             uint8_t nibble = (uint8_t)((sc[ib / 2] >> (4 * (ib & 1))) & 0x0fu);
             int32_t scale = 2 * (int32_t)(nibble & 7u) + 1;
             int32_t grid_sum = 0;
-#ifdef OC_AVX512
-            uint64_t grids[4];
-            for (size_t l = 0; l < 4; l++)
-                grids[l] = IQ1S_GRID[IQ1_XXXS_TO_IQ1S[qs[4 * ib + l]]];
-            __m256i gv = _mm256_loadu_si256((const __m256i *)grids);
-            __m256i uv = _mm256_add_epi8(gv, _mm256_set1_epi8(1));
-            __m256i xv = _mm256_loadu_si256((const __m256i *)(av + ib * 32));
-            __m256i pairs = _mm256_maddubs_epi16(uv, xv);
-            __m256i sums = _mm256_madd_epi16(pairs, _mm256_set1_epi16(1));
-            __m128i lo = _mm256_castsi256_si128(sums);
-            __m128i hi = _mm256_extracti128_si256(sums, 1);
-            __m128i total = _mm_add_epi32(lo, hi);
-            total = _mm_hadd_epi32(total, total);
-            total = _mm_hadd_epi32(total, total);
-            grid_sum = _mm_cvtsi128_si32(total);
-#else
             for (size_t l = 0; l < 4; l++) {
                 uint64_t packed = IQ1S_GRID[IQ1_XXXS_TO_IQ1S[qs[4 * ib + l]]];
                 for (size_t j = 0; j < 8; j++) {
@@ -969,18 +989,15 @@ float oc_quant_dot_iq1_xxxs_q8_k(const uint8_t *row, size_t blocks,
                     grid_sum += (int32_t)value * (int32_t)av[ib * 32 + l * 8 + j];
                 }
             }
-#endif
             int16_t bsum0 = (int16_t)((uint16_t)bsums[4 * ib]
                           | ((uint16_t)bsums[4 * ib + 1] << 8));
             int16_t bsum1 = (int16_t)((uint16_t)bsums[4 * ib + 2]
                           | ((uint16_t)bsums[4 * ib + 3] << 8));
-#ifdef OC_AVX512
-            grid_sum -= (int32_t)bsum0 + (int32_t)bsum1;
-#endif
             main_sum += scale * grid_sum;
             delta_sum += scale * ((nibble & 8u) ? -1 : 1)
                        * ((int32_t)bsum0 + (int32_t)bsum1);
         }
+#endif
         sum += dw * da * ((float)main_sum + 0.125f * (float)delta_sum);
     }
     return sum;
