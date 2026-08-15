@@ -63,6 +63,8 @@ Test(arch, all_19_arch_strings_detected)
         { "qwen2moe",                       OC_ARCH_QWEN },
         { "qwen3",                          OC_ARCH_QWEN },
         { "qwen3moe",                       OC_ARCH_QWEN },
+        { "qwen36",                         OC_ARCH_QWEN },
+        { "qwen3_6",                        OC_ARCH_QWEN },
         { "qwen35",                         OC_ARCH_QWEN },
         { "qwen3_5",                        OC_ARCH_QWEN },
         { "qwen3_5_text",                   OC_ARCH_QWEN },

@@ -31,6 +31,9 @@
 #define MQ_BLOCK_Q5_K_SIZE  176u
 #define MQ_BLOCK_Q6_K_SIZE  210u
 #define MQ_BLOCK_Q8_0_SIZE   34u
+#define MQ_BLOCK_Q4_0_SIZE   18u
+#define MQ_BLOCK_Q5_0_SIZE   22u
+#define MQ_BLOCK_AL5_XS_SIZE 14u
 #define MQ_BLOCK_IQ4_XS_SIZE 136u
 
 /* Device-side block strides. These may exceed the on-disk stride to buy
@@ -45,12 +48,9 @@
 #define MQ_DEV_Q5_K_SIZE   176u
 #define MQ_DEV_Q6_K_SIZE   224u
 #define MQ_DEV_Q8_0_SIZE    34u
-/* IQ4_XS needs no padding: 136 is a multiple of 8, so every block start is
- * 8-aligned, and each group's 16-byte `qs` span sits at blk + 8 + 16*ib —
- * also 8-aligned. That is enough for the uint2 loads the group dot uses.
- * Padding to 144 for uint4 loads would cost 5.9% VRAM on every weight in a
- * Gemma 4 file (410 of its 833 tensors are IQ4_XS) to halve an already
- * vectorized load count, which is not the bottleneck here. */
+#define MQ_DEV_Q4_0_SIZE    18u
+#define MQ_DEV_Q5_0_SIZE    22u
+#define MQ_DEV_AL5_XS_SIZE  14u
 #define MQ_DEV_IQ4_XS_SIZE 136u
 
 #define MQ_BLOCK_THREADS   256u   /* threads per block on the get_row path */
@@ -266,9 +266,89 @@ __device__ __forceinline__ float mq_q8_0_group_dot(const uint8_t *row,
     const uint8_t *blk = row + (size_t)g * MQ_DEV_Q8_0_SIZE;
     const float d = mq_f16(blk[0], blk[1]);
     const int8_t *q = (const int8_t *)(blk + 2);
+    const float4 *x4 = reinterpret_cast<const float4 *>(x);
     float acc = 0.0f;
     #pragma unroll
-    for (uint32_t l = 0u; l < 32u; l++) acc += (float)q[l] * x[l];
+    for (uint32_t i = 0u; i < 8u; i++) {
+        const float4 xv = x4[i];
+        const uint32_t b = i * 4u;
+        acc += (float)q[b] * xv.x + (float)q[b + 1u] * xv.y
+             + (float)q[b + 2u] * xv.z + (float)q[b + 3u] * xv.w;
+    }
+    return acc * d;
+}
+
+/* Q4_0 / AL5: 18-byte block is one 32-element group.
+ * out[i] = ((nibble)-8)*d with low nibble → i, high nibble → i+16. */
+__device__ __forceinline__ float mq_q4_0_group_dot(const uint8_t *row,
+                                                   uint32_t g, const float *x)
+{
+    const uint8_t *blk = row + (size_t)g * MQ_DEV_Q4_0_SIZE;
+    const float d = mq_f16(blk[0], blk[1]);
+    const uint8_t *qs = blk + 2;
+    const float4 *x0 = reinterpret_cast<const float4 *>(x);
+    const float4 *x1 = reinterpret_cast<const float4 *>(x + 16);
+    float acc = 0.0f;
+    #pragma unroll
+    for (uint32_t i = 0; i < 4u; i++) {
+        const float4 a = x0[i];
+        const float4 b = x1[i];
+        const uint32_t base = i * 4u;
+        const uint8_t p0 = qs[base], p1 = qs[base + 1u];
+        const uint8_t p2 = qs[base + 2u], p3 = qs[base + 3u];
+        acc += (float)((int32_t)(p0 & 0x0Fu) - 8) * a.x
+             + (float)((int32_t)(p1 & 0x0Fu) - 8) * a.y
+             + (float)((int32_t)(p2 & 0x0Fu) - 8) * a.z
+             + (float)((int32_t)(p3 & 0x0Fu) - 8) * a.w;
+        acc += (float)((int32_t)(p0 >> 4) - 8) * b.x
+             + (float)((int32_t)(p1 >> 4) - 8) * b.y
+             + (float)((int32_t)(p2 >> 4) - 8) * b.z
+             + (float)((int32_t)(p3 >> 4) - 8) * b.w;
+    }
+    return acc * d;
+}
+
+/* Q5_0 / AL6: 22-byte block. High bits in a 32-bit field at blk+2. */
+__device__ __forceinline__ float mq_q5_0_group_dot(const uint8_t *row,
+                                                   uint32_t g, const float *x)
+{
+    const uint8_t *blk = row + (size_t)g * MQ_DEV_Q5_0_SIZE;
+    const float d = mq_f16(blk[0], blk[1]);
+    const uint32_t qh = (uint32_t)blk[2] | ((uint32_t)blk[3] << 8)
+                      | ((uint32_t)blk[4] << 16) | ((uint32_t)blk[5] << 24);
+    const uint8_t *qs = blk + 6;
+    float acc = 0.0f;
+    #pragma unroll
+    for (uint32_t j = 0; j < 16u; j++) {
+        const uint32_t x0 = (uint32_t)(qs[j] & 0x0Fu) | (((qh >> j) & 1u) << 4);
+        const uint32_t x1 = (uint32_t)(qs[j] >> 4)
+                          | (((qh >> (j + 16u)) & 1u) << 4);
+        acc += (float)((int32_t)x0 - 16) * x[j];
+        acc += (float)((int32_t)x1 - 16) * x[j + 16u];
+    }
+    return acc * d;
+}
+
+/* AL5_XS: 14-byte block, 32 × 3-bit levels, (l-4)*d. */
+__device__ __forceinline__ float mq_al5_xs_group_dot(const uint8_t *row,
+                                                     uint32_t g, const float *x)
+{
+    const uint8_t *blk = row + (size_t)g * MQ_DEV_AL5_XS_SIZE;
+    const float d = mq_f16(blk[0], blk[1]);
+    const uint8_t *packed = blk + 2;
+    float acc = 0.0f;
+    uint32_t bitpos = 0u;
+    for (uint32_t i = 0; i < 32u; i++) {
+        uint32_t v = 0u;
+        #pragma unroll
+        for (int b = 0; b < 3; b++) {
+            const uint32_t byte_idx = bitpos / 8u;
+            const uint32_t bit_idx = bitpos % 8u;
+            if ((packed[byte_idx] >> bit_idx) & 1u) v |= (1u << b);
+            bitpos += 1u;
+        }
+        acc += (float)((int32_t)v - 4) * x[i];
+    }
     return acc * d;
 }
 
@@ -364,6 +444,9 @@ MQ_DEFINE_MATVEC(k_mmq_matvec_q4k,    mq_q4k_group_dot)
 MQ_DEFINE_MATVEC(k_mmq_matvec_q5k,    mq_q5k_group_dot)
 MQ_DEFINE_MATVEC(k_mmq_matvec_q6k,    mq_q6k_group_dot)
 MQ_DEFINE_MATVEC(k_mmq_matvec_q8_0,   mq_q8_0_group_dot)
+MQ_DEFINE_MATVEC(k_mmq_matvec_q4_0,   mq_q4_0_group_dot)
+MQ_DEFINE_MATVEC(k_mmq_matvec_q5_0,   mq_q5_0_group_dot)
+MQ_DEFINE_MATVEC(k_mmq_matvec_al5_xs, mq_al5_xs_group_dot)
 MQ_DEFINE_MATVEC(k_mmq_matvec_iq4_xs, mq_iq4_xs_group_dot)
 
 /* MoE variant: the expert to use is read from device memory, so routing never
@@ -389,6 +472,9 @@ MQ_DEFINE_MATVEC_EXPERT(k_mmq_matvec_exp_q4k,    mq_q4k_group_dot)
 MQ_DEFINE_MATVEC_EXPERT(k_mmq_matvec_exp_q5k,    mq_q5k_group_dot)
 MQ_DEFINE_MATVEC_EXPERT(k_mmq_matvec_exp_q6k,    mq_q6k_group_dot)
 MQ_DEFINE_MATVEC_EXPERT(k_mmq_matvec_exp_q8_0,   mq_q8_0_group_dot)
+MQ_DEFINE_MATVEC_EXPERT(k_mmq_matvec_exp_q4_0,   mq_q4_0_group_dot)
+MQ_DEFINE_MATVEC_EXPERT(k_mmq_matvec_exp_q5_0,   mq_q5_0_group_dot)
+MQ_DEFINE_MATVEC_EXPERT(k_mmq_matvec_exp_al5_xs, mq_al5_xs_group_dot)
 MQ_DEFINE_MATVEC_EXPERT(k_mmq_matvec_exp_iq4_xs, mq_iq4_xs_group_dot)
 
 /* ─── Single-row dequantize (embedding lookup) ────────────────────────────── */
@@ -495,6 +581,49 @@ __device__ __forceinline__ void mq_q8_0_expand(const uint8_t *blk, float *out)
     for (uint32_t i = 0u; i < MQ_QK8_0; i++) out[i] = (float)q[i] * d;
 }
 
+__device__ __forceinline__ void mq_q4_0_expand(const uint8_t *blk, float *out)
+{
+    const float d = mq_f16(blk[0], blk[1]);
+    const uint8_t *qs = blk + 2;
+    for (uint32_t i = 0; i < 16u; i++) {
+        const uint8_t p = qs[i];
+        out[i]      = (float)((int32_t)(p & 0x0Fu) - 8) * d;
+        out[i + 16] = (float)((int32_t)(p >> 4) - 8) * d;
+    }
+}
+
+__device__ __forceinline__ void mq_q5_0_expand(const uint8_t *blk, float *out)
+{
+    const float d = mq_f16(blk[0], blk[1]);
+    const uint32_t qh = (uint32_t)blk[2] | ((uint32_t)blk[3] << 8)
+                      | ((uint32_t)blk[4] << 16) | ((uint32_t)blk[5] << 24);
+    const uint8_t *qs = blk + 6;
+    for (uint32_t j = 0; j < 16u; j++) {
+        const uint32_t x0 = (uint32_t)(qs[j] & 0x0Fu) | (((qh >> j) & 1u) << 4);
+        const uint32_t x1 = (uint32_t)(qs[j] >> 4)
+                          | (((qh >> (j + 16u)) & 1u) << 4);
+        out[j]      = (float)((int32_t)x0 - 16) * d;
+        out[j + 16] = (float)((int32_t)x1 - 16) * d;
+    }
+}
+
+__device__ __forceinline__ void mq_al5_xs_expand(const uint8_t *blk, float *out)
+{
+    const float d = mq_f16(blk[0], blk[1]);
+    const uint8_t *packed = blk + 2;
+    uint32_t bitpos = 0u;
+    for (uint32_t i = 0; i < 32u; i++) {
+        uint32_t v = 0u;
+        for (int b = 0; b < 3; b++) {
+            const uint32_t byte_idx = bitpos / 8u;
+            const uint32_t bit_idx = bitpos % 8u;
+            if ((packed[byte_idx] >> bit_idx) & 1u) v |= (1u << b);
+            bitpos += 1u;
+        }
+        out[i] = (float)((int32_t)v - 4) * d;
+    }
+}
+
 /* IQ4_XS full-block expansion. Same layout walk as mq_iq4_xs_group_dot, but
  * writing all 256 values instead of contracting them against x. */
 __device__ __forceinline__ void mq_iq4_xs_expand(const uint8_t *blk, float *out)
@@ -522,6 +651,9 @@ MQ_DEFINE_GETROW(k_mmq_getrow_q4k,    MQ_DEV_Q4_K_SIZE,   MQ_QK_K,  mq_q4k_expan
 MQ_DEFINE_GETROW(k_mmq_getrow_q5k,    MQ_DEV_Q5_K_SIZE,   MQ_QK_K,  mq_q5k_expand)
 MQ_DEFINE_GETROW(k_mmq_getrow_q6k,    MQ_DEV_Q6_K_SIZE,   MQ_QK_K,  mq_q6k_expand)
 MQ_DEFINE_GETROW(k_mmq_getrow_q8_0,   MQ_DEV_Q8_0_SIZE,   MQ_QK8_0, mq_q8_0_expand)
+MQ_DEFINE_GETROW(k_mmq_getrow_q4_0,   MQ_DEV_Q4_0_SIZE,   MQ_QK8_0, mq_q4_0_expand)
+MQ_DEFINE_GETROW(k_mmq_getrow_q5_0,   MQ_DEV_Q5_0_SIZE,   MQ_QK8_0, mq_q5_0_expand)
+MQ_DEFINE_GETROW(k_mmq_getrow_al5_xs, MQ_DEV_AL5_XS_SIZE, MQ_QK8_0, mq_al5_xs_expand)
 MQ_DEFINE_GETROW(k_mmq_getrow_iq4_xs, MQ_DEV_IQ4_XS_SIZE, MQ_QK_K,  mq_iq4_xs_expand)
 
 /* ─── Host API ───────────────────────────────────────────────────────────── */
@@ -544,7 +676,19 @@ static void mq_layout(uint32_t qtype, size_t *src_block, size_t *dev_block,
         *src_block = MQ_BLOCK_Q6_K_SIZE; *dev_block = MQ_DEV_Q6_K_SIZE;
         *vals = MQ_QK_K;  return;
     case OC_QUANT_Q8_0:
+    case OC_QUANT_AL8:
         *src_block = MQ_BLOCK_Q8_0_SIZE; *dev_block = MQ_DEV_Q8_0_SIZE;
+        *vals = MQ_QK8_0; return;
+    case OC_QUANT_Q4_0:
+    case OC_QUANT_AL5:
+        *src_block = MQ_BLOCK_Q4_0_SIZE; *dev_block = MQ_DEV_Q4_0_SIZE;
+        *vals = MQ_QK8_0; return;
+    case OC_QUANT_Q5_0:
+    case OC_QUANT_AL6:
+        *src_block = MQ_BLOCK_Q5_0_SIZE; *dev_block = MQ_DEV_Q5_0_SIZE;
+        *vals = MQ_QK8_0; return;
+    case OC_QUANT_AL5_XS:
+        *src_block = MQ_BLOCK_AL5_XS_SIZE; *dev_block = MQ_DEV_AL5_XS_SIZE;
         *vals = MQ_QK8_0; return;
     case OC_QUANT_IQ4_XS:
         *src_block = MQ_BLOCK_IQ4_XS_SIZE; *dev_block = MQ_DEV_IQ4_XS_SIZE;
@@ -615,8 +759,23 @@ extern "C" bool oc_cuda_mmq_matvec(uint32_t qtype, const void *d_weights,
                                                 n_groups, row_bytes);
         break;
     case OC_QUANT_Q8_0:
+    case OC_QUANT_AL8:
         k_mmq_matvec_q8_0<<<grid, block, 0, s>>>(w, d_x, d_out, rows,
                                                  n_groups, row_bytes);
+        break;
+    case OC_QUANT_Q4_0:
+    case OC_QUANT_AL5:
+        k_mmq_matvec_q4_0<<<grid, block, 0, s>>>(w, d_x, d_out, rows,
+                                                 n_groups, row_bytes);
+        break;
+    case OC_QUANT_Q5_0:
+    case OC_QUANT_AL6:
+        k_mmq_matvec_q5_0<<<grid, block, 0, s>>>(w, d_x, d_out, rows,
+                                                 n_groups, row_bytes);
+        break;
+    case OC_QUANT_AL5_XS:
+        k_mmq_matvec_al5_xs<<<grid, block, 0, s>>>(w, d_x, d_out, rows,
+                                                   n_groups, row_bytes);
         break;
     case OC_QUANT_IQ4_XS:
         k_mmq_matvec_iq4_xs<<<grid, block, 0, s>>>(w, d_x, d_out, rows,
@@ -660,7 +819,22 @@ extern "C" bool oc_cuda_mmq_matvec_expert(uint32_t qtype, const void *d_weights,
             n_groups, row_bytes, d_expert_sel, slot);
         break;
     case OC_QUANT_Q8_0:
+    case OC_QUANT_AL8:
         k_mmq_matvec_exp_q8_0<<<grid, block, 0, s>>>(w, d_x, d_out, rows,
+            n_groups, row_bytes, d_expert_sel, slot);
+        break;
+    case OC_QUANT_Q4_0:
+    case OC_QUANT_AL5:
+        k_mmq_matvec_exp_q4_0<<<grid, block, 0, s>>>(w, d_x, d_out, rows,
+            n_groups, row_bytes, d_expert_sel, slot);
+        break;
+    case OC_QUANT_Q5_0:
+    case OC_QUANT_AL6:
+        k_mmq_matvec_exp_q5_0<<<grid, block, 0, s>>>(w, d_x, d_out, rows,
+            n_groups, row_bytes, d_expert_sel, slot);
+        break;
+    case OC_QUANT_AL5_XS:
+        k_mmq_matvec_exp_al5_xs<<<grid, block, 0, s>>>(w, d_x, d_out, rows,
             n_groups, row_bytes, d_expert_sel, slot);
         break;
     case OC_QUANT_IQ4_XS:
@@ -702,7 +876,19 @@ extern "C" bool oc_cuda_mmq_get_row(uint32_t qtype, const void *d_weights,
         k_mmq_getrow_q6k<<<grid, block, 0, s>>>(w, token, d_out, cols, row_bytes);
         break;
     case OC_QUANT_Q8_0:
+    case OC_QUANT_AL8:
         k_mmq_getrow_q8_0<<<grid, block, 0, s>>>(w, token, d_out, cols, row_bytes);
+        break;
+    case OC_QUANT_Q4_0:
+    case OC_QUANT_AL5:
+        k_mmq_getrow_q4_0<<<grid, block, 0, s>>>(w, token, d_out, cols, row_bytes);
+        break;
+    case OC_QUANT_Q5_0:
+    case OC_QUANT_AL6:
+        k_mmq_getrow_q5_0<<<grid, block, 0, s>>>(w, token, d_out, cols, row_bytes);
+        break;
+    case OC_QUANT_AL5_XS:
+        k_mmq_getrow_al5_xs<<<grid, block, 0, s>>>(w, token, d_out, cols, row_bytes);
         break;
     case OC_QUANT_IQ4_XS:
         k_mmq_getrow_iq4_xs<<<grid, block, 0, s>>>(w, token, d_out, cols, row_bytes);

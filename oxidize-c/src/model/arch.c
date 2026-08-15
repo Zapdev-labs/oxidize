@@ -76,6 +76,8 @@ OcModelArchitecture oc_model_arch_from_str(const char *s)
         || strcmp(norm, "qwen2moe") == 0
         || strcmp(norm, "qwen3") == 0
         || strcmp(norm, "qwen3moe") == 0
+        || strcmp(norm, "qwen36") == 0
+        || strcmp(norm, "qwen3_6") == 0
         || strcmp(norm, "qwen35") == 0
         || strcmp(norm, "qwen3_5") == 0
         || strcmp(norm, "qwen3_5_text") == 0

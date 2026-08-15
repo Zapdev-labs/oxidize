@@ -270,6 +270,19 @@ typedef struct OcLlamaLayer {
     bool     use_rope;
 } OcLlamaLayer;
 
+#define OC_MTP_DEFAULT_DRAFT 3u
+
+typedef struct OcLlamaMtp {
+    bool present;
+    OcLlamaLayer layer;
+    OcWeightView eh_proj;
+    OcWeightView embed_tokens;
+    OcWeightView shared_head_head;
+    float *enorm;
+    float *hnorm;
+    float *shared_head_norm;
+} OcLlamaMtp;
+
 typedef struct OcLlamaModel {
     OcLlamaConfig    cfg;
     OcGgufMmappedFile gguf;   /* owns the mmap + per-shard arenas    */
@@ -279,6 +292,7 @@ typedef struct OcLlamaModel {
     float           *final_norm_bias; /* LayerNorm beta (GPT-2/NeoX/Falcon),
                                        * NULL for RMSNorm archs. Owned.  */
     OcLlamaLayer    *layers;        /* n_layer entries                */
+    OcLlamaMtp       mtp;
     OcModelArchitecture arch;
     /* GPT-2 learned positional embeddings (wpe), resolved lazily on first
      * forward. Per-model (views into this model's mmap). */
@@ -375,6 +389,11 @@ typedef struct OcLlamaSession {
     /* Muse Glimmer attention-output gate, n_head * head_dim. Allocated only
      * when cfg.attn_out_gate is set. */
     float *muse_gate;
+    float *last_hidden;
+    float *mtp_hidden;
+    float *mtp_concat;
+    uint32_t last_token;
+    uint32_t mtp_pos;
 } OcLlamaSession;
 
 /* ─── Batched decode ─────────────────────────────────────────────────────
@@ -459,6 +478,10 @@ OcError oc_llama_session_init(OcLlamaModel *model, OcLlamaSession *out);
 OcError oc_llama_session_init_kv(OcLlamaModel *model, OcLlamaSession *out,
                                  OcKvCacheType kv_type);
 
+/* Resolve KV type from `--kv` / OX_KV_TYPE / context length.
+ * explicit: "q8", "f32", or NULL. Contexts >= 8192 default to Q8. */
+OcKvCacheType oc_llama_select_kv_type(uint32_t n_ctx, const char *explicit);
+
 /* Bytes the KV cache occupies for `model` under `kv_type`. Useful for
  * reporting and for deciding whether a context length is affordable. */
 size_t oc_llama_kv_cache_bytes(const OcLlamaModel *model, OcKvCacheType kv_type);
@@ -468,6 +491,19 @@ size_t oc_llama_kv_cache_bytes(const OcLlamaModel *model, OcKvCacheType kv_type)
  * `logits_out` may be NULL to skip the lm_head projection (useful for
  * prompt prefill where only the KV cache matters). */
 OcError oc_llama_forward(OcLlamaSession *sess, uint32_t token, float *logits_out);
+
+bool oc_llama_mtp_present(const OcLlamaModel *model);
+
+/* Greedy MTP: emit 1 + accepted drafts. Updates session and logits. */
+OcError oc_llama_mtp_greedy_advance(OcLlamaSession *sess, float *logits,
+                                    uint32_t *out_tokens, size_t max_out,
+                                    size_t *n_out);
+
+/* Draft up to `k` MTP tokens from last_token/last_hidden. Does not touch the
+ * backbone KV. Writes pairwise confidence per draft into out_conf (nullable). */
+OcError oc_llama_mtp_draft_tokens(OcLlamaSession *sess, uint32_t k,
+                                  uint32_t *out_tokens, float *out_conf,
+                                  uint32_t *n_out);
 
 /* Prefill a whole prompt, processing `chunk` tokens per pass so they share
  * one sweep over the weights instead of one sweep each.

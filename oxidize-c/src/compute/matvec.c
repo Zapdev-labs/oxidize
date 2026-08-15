@@ -7,14 +7,19 @@
  * AVX2/AVX-512 speedups on capable hosts.
  */
 #include "oxidize/matvec.h"
+#include "oxidize/attn_kernels.h"
 #include "oxidize/flash_attention.h"
 #include "oxidize/oxk.h"
 #include "oxidize/parallel.h"
 #include "oxidize/quant.h"
 
+#if defined(__x86_64__) || defined(__i386__)
+#include <immintrin.h>
+#endif
 #include <math.h>
 #include <stdbool.h>
 #include <stdatomic.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -146,9 +151,61 @@ static void quantize_act_q8_0(const float *x, size_t n, uint8_t *out)
  * [f32 d][256 int8][16 int16 bsums], bsums[i] summing q[i*16 .. i*16+15].
  * The K-quant kernels fold the block minimum out using those partial sums,
  * so they must match the stored q exactly or the correction term is wrong. */
+#if defined(__x86_64__) || defined(__i386__)
+__attribute__((target("avx512f,avx512bw,avx512dq,avx512vl")))
+static void quantize_act_q8_k_avx512(const float *x, size_t n, uint8_t *out)
+{
+    const size_t nb = n / OC_OXK_QK_K;
+    const __m512 sign = _mm512_set1_ps(-0.0f);
+    for (size_t b = 0; b < nb; b++) {
+        const float *src = x + b * OC_OXK_QK_K;
+        __m512 vmax = _mm512_setzero_ps();
+        for (size_t i = 0; i < OC_OXK_QK_K; i += 16) {
+            __m512 v = _mm512_loadu_ps(src + i);
+            vmax = _mm512_max_ps(vmax, _mm512_andnot_ps(sign, v));
+        }
+        const float amax = _mm512_reduce_max_ps(vmax);
+        const float d = amax / 127.0f;
+        const float id = (d != 0.0f) ? 1.0f / d : 0.0f;
+        uint8_t *dst = out + b * OC_OXK_BLOCK_Q8_K_SIZE;
+        memcpy(dst, &d, 4);
+        int8_t *q = (int8_t *)(dst + 4);
+        const __m512 vid = _mm512_set1_ps(id);
+        for (size_t i = 0; i < OC_OXK_QK_K; i += 16) {
+            __m512 v = _mm512_mul_ps(_mm512_loadu_ps(src + i), vid);
+            __m512i qi = _mm512_cvtps_epi32(v);
+            qi = _mm512_max_epi32(_mm512_set1_epi32(-128),
+                                  _mm512_min_epi32(_mm512_set1_epi32(127), qi));
+            _mm_storeu_si128((__m128i *)(q + i), _mm512_cvtepi32_epi8(qi));
+        }
+        uint8_t *bsums = dst + 4 + OC_OXK_QK_K;
+        for (size_t g = 0; g < OC_OXK_QK_K / 16u; g++) {
+            __m128i qq = _mm_loadu_si128((const __m128i *)(q + g * 16));
+            __m256i w = _mm256_cvtepi8_epi16(qq);
+            __m256i sum2 = _mm256_madd_epi16(w, _mm256_set1_epi16(1));
+            __m128i lo = _mm256_castsi256_si128(sum2);
+            __m128i hi = _mm256_extracti128_si256(sum2, 1);
+            lo = _mm_add_epi32(lo, hi);
+            lo = _mm_add_epi32(lo, _mm_shuffle_epi32(lo, 0x4e));
+            lo = _mm_add_epi32(lo, _mm_shuffle_epi32(lo, 0xb1));
+            int16_t s16 = (int16_t)_mm_cvtsi128_si32(lo);
+            memcpy(bsums + g * 2, &s16, 2);
+        }
+    }
+}
+#endif
+
 static void quantize_act_q8_k(const float *x, size_t n, uint8_t *out)
 {
     const size_t nb = n / OC_OXK_QK_K;
+#if defined(__x86_64__) || defined(__i386__)
+    if (n >= OC_OXK_QK_K && (n % OC_OXK_QK_K) == 0 &&
+        __builtin_cpu_supports("avx512f") &&
+        __builtin_cpu_supports("avx512bw")) {
+        quantize_act_q8_k_avx512(x, n, out);
+        return;
+    }
+#endif
     for (size_t b = 0; b < nb; b++) {
         const float *src = x + b * OC_OXK_QK_K;
         float amax = 0.0f;
@@ -172,7 +229,7 @@ static void quantize_act_q8_k(const float *x, size_t n, uint8_t *out)
         for (size_t g = 0; g < OC_OXK_QK_K / 16u; g++) {
             int32_t s = 0;
             for (size_t i = 0; i < 16; i++) s += q[g * 16 + i];
-            int16_t s16 = (int16_t)s;   /* |s| <= 16*127 = 2032, always fits */
+            int16_t s16 = (int16_t)s;
             memcpy(bsums + g * 2, &s16, 2);
         }
     }
@@ -196,6 +253,27 @@ static float fused_row_dot(OcGgufQuantizationType qtype, const uint8_t *row,
     case OC_QUANT_Q3_K_L: return oc_oxk_dot_q3_k_q8_k(row, blocks, act);
     case OC_QUANT_IQ1_XXXS: return oc_quant_dot_iq1_xxxs_q8_k(row, blocks, act);
     default:              return 0.0f;
+    }
+}
+
+static float (*fused_dot_fn(OcGgufQuantizationType qtype))(const uint8_t *,
+                                                           size_t,
+                                                           const uint8_t *)
+{
+    switch (qtype) {
+    case OC_QUANT_Q4_0:   return oc_oxk_dot_q4_0_q8_0;
+    case OC_QUANT_Q4_1:   return oc_oxk_dot_q4_1_q8_0;
+    case OC_QUANT_Q8_0:   return oc_oxk_dot_q8_0_q8_0;
+    case OC_QUANT_Q4_K_S:
+    case OC_QUANT_Q4_K_M: return oc_oxk_dot_q4_k_q8_k;
+    case OC_QUANT_Q5_K_S:
+    case OC_QUANT_Q5_K_M: return oc_oxk_dot_q5_k_q8_k;
+    case OC_QUANT_Q6_K:   return oc_oxk_dot_q6_k_q8_k;
+    case OC_QUANT_Q2_K:   return oc_oxk_dot_q2_k_q8_k;
+    case OC_QUANT_Q3_K_S:
+    case OC_QUANT_Q3_K_M:
+    case OC_QUANT_Q3_K_L: return oc_oxk_dot_q3_k_q8_k;
+    default:              return NULL;
     }
 }
 
@@ -227,11 +305,7 @@ static void matvec_f32_slice(size_t begin, size_t end, size_t tid, void *ud)
     const F32Job *j = (const F32Job *)ud;
     for (size_t r = begin; r < end; r++) {
         const float *row = j->data + r * j->cols;
-        float acc = 0.0f;
-        for (size_t i = 0; i < j->cols; i++) {
-            acc += row[i] * j->input[i];
-        }
-        j->output[r] = acc;
+        j->output[r] = oc_attn_dot_f32(row, j->input, j->cols);
     }
 }
 
@@ -240,6 +314,95 @@ void oc_matvec_f32(const float *data, size_t rows, size_t cols,
 {
     F32Job job = { data, cols, input, output };
     oc_parallel_for(rows, matvec_f32_slice, &job);
+}
+
+#if defined(__x86_64__) || defined(__i386__)
+__attribute__((target("avx512f,avx512bw")))
+static float bf16_row_dot_avx512(const uint16_t *w, const float *x, size_t n)
+{
+    __m512 acc = _mm512_setzero_ps();
+    size_t i = 0;
+    for (; i + 16 <= n; i += 16) {
+        __m256i h = _mm256_loadu_si256((const __m256i *)(w + i));
+        __m512i w32 = _mm512_slli_epi32(_mm512_cvtepu16_epi32(h), 16);
+        acc = _mm512_fmadd_ps(_mm512_castsi512_ps(w32),
+                              _mm512_loadu_ps(x + i), acc);
+    }
+    float sum = _mm512_reduce_add_ps(acc);
+    for (; i < n; i++) {
+        uint32_t bits = (uint32_t)w[i] << 16;
+        float f;
+        memcpy(&f, &bits, 4);
+        sum += f * x[i];
+    }
+    return sum;
+}
+
+__attribute__((target("avx2,fma")))
+static float bf16_row_dot_avx2(const uint16_t *w, const float *x, size_t n)
+{
+    __m256 acc = _mm256_setzero_ps();
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        __m128i h = _mm_loadu_si128((const __m128i *)(w + i));
+        __m256i w32 = _mm256_slli_epi32(_mm256_cvtepu16_epi32(h), 16);
+        acc = _mm256_fmadd_ps(_mm256_castsi256_ps(w32),
+                              _mm256_loadu_ps(x + i), acc);
+    }
+    __m128 lo = _mm256_castps256_ps128(acc);
+    __m128 hi = _mm256_extractf128_ps(acc, 1);
+    __m128 s = _mm_add_ps(lo, hi);
+    s = _mm_add_ps(s, _mm_movehdup_ps(s));
+    s = _mm_add_ss(s, _mm_movehl_ps(s, s));
+    float sum = _mm_cvtss_f32(s);
+    for (; i < n; i++) {
+        uint32_t bits = (uint32_t)w[i] << 16;
+        float f;
+        memcpy(&f, &bits, 4);
+        sum += f * x[i];
+    }
+    return sum;
+}
+#endif
+
+static float bf16_row_dot(const uint16_t *w, const float *x, size_t n)
+{
+#if defined(__x86_64__) || defined(__i386__)
+    if (__builtin_cpu_supports("avx512f") && __builtin_cpu_supports("avx512bw"))
+        return bf16_row_dot_avx512(w, x, n);
+    if (__builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma"))
+        return bf16_row_dot_avx2(w, x, n);
+#endif
+    float sum = 0.0f;
+    for (size_t i = 0; i < n; i++) {
+        uint32_t bits = (uint32_t)w[i] << 16;
+        float f;
+        memcpy(&f, &bits, 4);
+        sum += f * x[i];
+    }
+    return sum;
+}
+
+typedef struct {
+    const uint16_t *data;
+    size_t          cols;
+    const float    *input;
+    float          *output;
+} Bf16Job;
+
+static void matvec_bf16_slice(size_t begin, size_t end, size_t tid, void *ud)
+{
+    (void)tid;
+    const Bf16Job *j = (const Bf16Job *)ud;
+    for (size_t r = begin; r < end; r++)
+        j->output[r] = bf16_row_dot(j->data + r * j->cols, j->input, j->cols);
+}
+
+static void oc_matvec_bf16(const uint16_t *data, size_t rows, size_t cols,
+                           const float *input, float *output)
+{
+    Bf16Job job = { data, cols, input, output };
+    oc_parallel_for(rows, matvec_bf16_slice, &job);
 }
 
 typedef struct {
@@ -254,6 +417,7 @@ typedef struct {
      * shared read-only by every thread. NULL selects the dequant path. */
     const uint8_t *act;
     size_t         blocks;
+    float        (*row_dot)(const uint8_t *row, size_t blocks, const uint8_t *act);
     /* Prepared-row path: types whose only integer kernel works off a decoded
      * row (Q2_K / Q3_K). The row is decoded into per-thread scratch and
      * dotted once — decode has a single activation, so there is nothing to
@@ -293,8 +457,16 @@ static void matvec_fused_slice(size_t begin, size_t end, size_t tid, void *ud)
     (void)tid;
     const QuantJob *j = (const QuantJob *)ud;
     for (size_t r = begin; r < end; r++) {
-        j->output[r] = fused_row_dot(j->qtype, j->data + r * j->row_bytes,
-                                     j->blocks, j->act);
+#if defined(__x86_64__) || defined(__i386__)
+        if (r + 2 < end) {
+            _mm_prefetch((const char *)(j->data + (r + 2) * j->row_bytes),
+                         _MM_HINT_T0);
+        }
+#endif
+        j->output[r] = j->row_dot
+            ? j->row_dot(j->data + r * j->row_bytes, j->blocks, j->act)
+            : fused_row_dot(j->qtype, j->data + r * j->row_bytes,
+                            j->blocks, j->act);
     }
 }
 
@@ -411,11 +583,7 @@ static void matvec_quant_slice(size_t begin, size_t end, size_t tid, void *ud)
         const uint8_t *row = j->data + r * j->row_bytes;
         /* Dequantize this weight row into `temp` (SIMD on capable hosts). */
         oc_quant_dequant_row(j->qtype, row, j->row_bytes, temp, j->cols);
-        float acc = 0.0f;
-        for (size_t i = 0; i < j->cols; i++) {
-            acc += temp[i] * j->input[i];
-        }
-        j->output[r] = acc;
+        j->output[r] = oc_attn_dot_f32(temp, j->input, j->cols);
     }
 }
 
@@ -423,6 +591,10 @@ void oc_matvec_quantized(OcGgufQuantizationType qtype, const uint8_t *data,
                          size_t rows, size_t cols, size_t row_bytes,
                          const float *input, float *output, float *temp)
 {
+    if (qtype == OC_QUANT_BF16 && row_bytes == cols * 2u) {
+        oc_matvec_bf16((const uint16_t *)data, rows, cols, input, output);
+        return;
+    }
     size_t temp_bytes;
     if (!size_mul(cols, sizeof(float), &temp_bytes)) return;
     /* Fused integer path, when the weight type has an OXK kernel and the row
@@ -454,7 +626,8 @@ void oc_matvec_quantized(OcGgufQuantizationType qtype, const uint8_t *data,
                 if (act_kind == ACT_Q8_K) quantize_act_q8_k(input, cols, act);
                 else                      quantize_act_q8_0(input, cols, act);
                 QuantJob job = { qtype, data, cols, row_bytes, input, output,
-                                 temp, act, blocks, 0, NULL, NULL };
+                                 temp, act, blocks, fused_dot_fn(qtype),
+                                 0, NULL, NULL };
                 /* Reserve every worker's decode buffer before opening the
                  * region — an allocation failure inside it could not be
                  * reported and would drop a slice's outputs. */
@@ -488,14 +661,14 @@ void oc_matvec_quantized(OcGgufQuantizationType qtype, const uint8_t *data,
                 /* Fall back to the serial path rather than produce a
                  * partially-written output vector. */
                 QuantJob job = { qtype, data, cols, row_bytes, input,
-                                 output, temp, NULL, 0, 0, NULL, NULL };
+                                 output, temp, NULL, 0, NULL, 0, NULL, NULL };
                 matvec_quant_slice(0, rows, 0, &job);
                 return;
             }
         }
     }
     QuantJob job = { qtype, data, cols, row_bytes, input, output, temp,
-                     NULL, 0, 0, NULL, NULL };
+                     NULL, 0, NULL, 0, NULL, NULL };
     oc_parallel_for(rows, matvec_quant_slice, &job);
 }
 
@@ -620,6 +793,9 @@ typedef struct {
     void         (*multi_fn)(const void *prep, size_t blocks,
                              const uint8_t *acts, size_t act_stride,
                              size_t n_act, float *out);
+    void         (*packed_multi)(const uint8_t *row, size_t blocks,
+                                 const uint8_t *acts, size_t act_stride,
+                                 size_t n_act, float *out);
 } BatchJob;
 
 static void matvec_batch_fused_slice(size_t begin, size_t end, size_t tid,
@@ -634,6 +810,24 @@ static void matvec_batch_fused_slice(size_t begin, size_t end, size_t tid,
             j->outputs[v * j->out_stride + r] =
                 fused_row_dot(j->qtype, row, j->blocks,
                               j->acts + v * j->act_stride);
+        }
+    }
+}
+
+static void matvec_batch_packed_slice(size_t begin, size_t end, size_t tid,
+                                      void *ud)
+{
+    (void)tid;
+    const BatchJob *j = (const BatchJob *)ud;
+    float res[128];
+    for (size_t r = begin; r < end; r++) {
+        for (size_t v0 = 0; v0 < j->tile; v0 += 128) {
+            const size_t m = (j->tile - v0 < 128) ? (j->tile - v0) : 128;
+            j->packed_multi(j->data + r * j->row_bytes, j->blocks,
+                            j->acts + v0 * j->act_stride, j->act_stride,
+                            m, res);
+            for (size_t v = 0; v < m; v++)
+                j->outputs[(v0 + v) * j->out_stride + r] = res[v];
         }
     }
 }
@@ -693,9 +887,8 @@ static void matvec_batch_dequant_slice(size_t begin, size_t end, size_t tid,
                              j->row_bytes, temp, j->cols);
         for (size_t v = 0; v < j->tile; v++) {
             const float *in = j->inputs + v * j->in_stride;
-            float acc = 0.0f;
-            for (size_t i = 0; i < j->cols; i++) acc += temp[i] * in[i];
-            j->outputs[v * j->out_stride + r] = acc;
+            j->outputs[v * j->out_stride + r] =
+                oc_attn_dot_f32(temp, in, j->cols);
         }
     }
 }
@@ -737,18 +930,25 @@ void oc_matvec_quantized_batch(OcGgufQuantizationType qtype,
         void (*prep_fn)(const uint8_t *, size_t, void *) = NULL;
         void (*multi_fn)(const void *, size_t, const uint8_t *, size_t,
                          size_t, float *) = NULL;
+        void (*packed_multi)(const uint8_t *, size_t, const uint8_t *, size_t,
+                             size_t, float *) = NULL;
+        const OcOxkCaps *caps = oc_oxk_caps();
+        const bool vnni = caps != NULL && caps->level >= OC_OXK_AVX512 &&
+                          caps->has_vnni;
         switch (qtype) {
         case OC_QUANT_Q4_K_S:
         case OC_QUANT_Q4_K_M:
             prep_bytes = oc_oxk_q4_k_prep_bytes(blocks);
             prep_fn    = oc_oxk_q4_k_prep_row;
             multi_fn   = oc_oxk_dot_q4_k_prepped_multi;
+            if (vnni) packed_multi = oc_oxk_dot_q4_k_q8_k_multi;
             break;
         case OC_QUANT_Q5_K_S:
         case OC_QUANT_Q5_K_M:
             prep_bytes = oc_oxk_q4_k_prep_bytes(blocks);
             prep_fn    = oc_oxk_q5_k_prep_row;
             multi_fn   = oc_oxk_dot_q4_k_prepped_multi;
+            if (vnni) packed_multi = oc_oxk_dot_q5_k_q8_k_multi;
             break;
         case OC_QUANT_Q6_K:
             prep_bytes = oc_oxk_q6_k_prep_bytes(blocks);
@@ -799,12 +999,11 @@ void oc_matvec_quantized_batch(OcGgufQuantizationType qtype,
             BatchJob job = { qtype, data, cols, row_bytes, blocks,
                              act_scratch, abytes, NULL, in_stride,
                              outputs + base * out_stride, out_stride, m,
-                             temp, prep_bytes, prep_fn, multi_fn };
-            /* Hoisting the row decode only pays once there is more than
-             * one activation to amortize it over; at m == 1 it is pure
-             * overhead. */
+                             temp, prep_bytes, prep_fn, multi_fn, packed_multi };
             if (prep_fn != NULL && m > 1) {
                 oc_parallel_for(rows, matvec_batch_prep_slice, &job);
+            } else if (packed_multi != NULL && m > 1) {
+                oc_parallel_for(rows, matvec_batch_packed_slice, &job);
             } else {
                 oc_parallel_for(rows, matvec_batch_fused_slice, &job);
             }
@@ -831,7 +1030,7 @@ void oc_matvec_quantized_batch(OcGgufQuantizationType qtype,
      * per-row working set and it is already small. */
     BatchJob job = { qtype, data, cols, row_bytes, 0, NULL, 0,
                      inputs, in_stride, outputs, out_stride, n_vec, temp,
-                     0, NULL, NULL };
+                     0, NULL, NULL, NULL };
     if (serial) matvec_batch_dequant_slice(0, rows, 0, &job);
     else        oc_parallel_for(rows, matvec_batch_dequant_slice, &job);
 }
@@ -855,8 +1054,7 @@ static void matvec_f32_batch_slice(size_t begin, size_t end, size_t tid,
         const float *row = j->data + r * j->cols;
         for (size_t v = 0; v < j->n_vec; v++) {
             const float *in = j->inputs + v * j->in_stride;
-            float acc = 0.0f;
-            for (size_t i = 0; i < j->cols; i++) acc += row[i] * in[i];
+            float acc = oc_attn_dot_f32(row, in, j->cols);
             j->outputs[v * j->out_stride + r] = acc;
         }
     }

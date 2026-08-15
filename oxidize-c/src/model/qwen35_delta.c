@@ -1,11 +1,133 @@
 #include "oxidize/qwen35_delta.h"
 
-#include "oxidize/parallel.h"
+#include "oxidize/attn_kernels.h"
 
 #include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
+
+#if defined(__x86_64__) || defined(__i386__)
+#include <immintrin.h>
+#endif
+
+#if defined(__x86_64__) || defined(__i386__)
+__attribute__((target("avx512f")))
+static void delta_head_avx512(float *matrix, const float *q, const float *k,
+                              const float *v, float *out, size_t dv, size_t dk,
+                              float beta, float decay)
+{
+    const __m512 vdec = _mm512_set1_ps(decay);
+    size_t i = 0;
+    for (; i + 4 <= dv; i += 4) {
+        float *row0 = matrix + (i + 0) * dk;
+        float *row1 = matrix + (i + 1) * dk;
+        float *row2 = matrix + (i + 2) * dk;
+        float *row3 = matrix + (i + 3) * dk;
+        __m512 acc0 = _mm512_setzero_ps();
+        __m512 acc1 = _mm512_setzero_ps();
+        __m512 acc2 = _mm512_setzero_ps();
+        __m512 acc3 = _mm512_setzero_ps();
+        size_t j = 0;
+        for (; j + 16 <= dk; j += 16) {
+            __m512 kv = _mm512_loadu_ps(k + j);
+            __m512 r0 = _mm512_mul_ps(_mm512_loadu_ps(row0 + j), vdec);
+            __m512 r1 = _mm512_mul_ps(_mm512_loadu_ps(row1 + j), vdec);
+            __m512 r2 = _mm512_mul_ps(_mm512_loadu_ps(row2 + j), vdec);
+            __m512 r3 = _mm512_mul_ps(_mm512_loadu_ps(row3 + j), vdec);
+            _mm512_storeu_ps(row0 + j, r0);
+            _mm512_storeu_ps(row1 + j, r1);
+            _mm512_storeu_ps(row2 + j, r2);
+            _mm512_storeu_ps(row3 + j, r3);
+            acc0 = _mm512_fmadd_ps(r0, kv, acc0);
+            acc1 = _mm512_fmadd_ps(r1, kv, acc1);
+            acc2 = _mm512_fmadd_ps(r2, kv, acc2);
+            acc3 = _mm512_fmadd_ps(r3, kv, acc3);
+        }
+        float sk0 = _mm512_reduce_add_ps(acc0);
+        float sk1 = _mm512_reduce_add_ps(acc1);
+        float sk2 = _mm512_reduce_add_ps(acc2);
+        float sk3 = _mm512_reduce_add_ps(acc3);
+        for (; j < dk; j++) {
+            row0[j] *= decay; sk0 += row0[j] * k[j];
+            row1[j] *= decay; sk1 += row1[j] * k[j];
+            row2[j] *= decay; sk2 += row2[j] * k[j];
+            row3[j] *= decay; sk3 += row3[j] * k[j];
+        }
+        const float d0 = (v[i + 0] - sk0) * beta;
+        const float d1 = (v[i + 1] - sk1) * beta;
+        const float d2 = (v[i + 2] - sk2) * beta;
+        const float d3 = (v[i + 3] - sk3) * beta;
+        const __m512 vd0 = _mm512_set1_ps(d0);
+        const __m512 vd1 = _mm512_set1_ps(d1);
+        const __m512 vd2 = _mm512_set1_ps(d2);
+        const __m512 vd3 = _mm512_set1_ps(d3);
+        acc0 = acc1 = acc2 = acc3 = _mm512_setzero_ps();
+        j = 0;
+        for (; j + 16 <= dk; j += 16) {
+            __m512 kv = _mm512_loadu_ps(k + j);
+            __m512 qv = _mm512_loadu_ps(q + j);
+            __m512 r0 = _mm512_fmadd_ps(vd0, kv, _mm512_loadu_ps(row0 + j));
+            __m512 r1 = _mm512_fmadd_ps(vd1, kv, _mm512_loadu_ps(row1 + j));
+            __m512 r2 = _mm512_fmadd_ps(vd2, kv, _mm512_loadu_ps(row2 + j));
+            __m512 r3 = _mm512_fmadd_ps(vd3, kv, _mm512_loadu_ps(row3 + j));
+            _mm512_storeu_ps(row0 + j, r0);
+            _mm512_storeu_ps(row1 + j, r1);
+            _mm512_storeu_ps(row2 + j, r2);
+            _mm512_storeu_ps(row3 + j, r3);
+            acc0 = _mm512_fmadd_ps(r0, qv, acc0);
+            acc1 = _mm512_fmadd_ps(r1, qv, acc1);
+            acc2 = _mm512_fmadd_ps(r2, qv, acc2);
+            acc3 = _mm512_fmadd_ps(r3, qv, acc3);
+        }
+        float o0 = _mm512_reduce_add_ps(acc0);
+        float o1 = _mm512_reduce_add_ps(acc1);
+        float o2 = _mm512_reduce_add_ps(acc2);
+        float o3 = _mm512_reduce_add_ps(acc3);
+        for (; j < dk; j++) {
+            row0[j] += d0 * k[j]; o0 += row0[j] * q[j];
+            row1[j] += d1 * k[j]; o1 += row1[j] * q[j];
+            row2[j] += d2 * k[j]; o2 += row2[j] * q[j];
+            row3[j] += d3 * k[j]; o3 += row3[j] * q[j];
+        }
+        out[i + 0] = o0;
+        out[i + 1] = o1;
+        out[i + 2] = o2;
+        out[i + 3] = o3;
+    }
+    for (; i < dv; i++) {
+        float *row = matrix + i * dk;
+        __m512 acc_k = _mm512_setzero_ps();
+        size_t j = 0;
+        for (; j + 16 <= dk; j += 16) {
+            __m512 r = _mm512_mul_ps(_mm512_loadu_ps(row + j), vdec);
+            acc_k = _mm512_fmadd_ps(r, _mm512_loadu_ps(k + j), acc_k);
+            _mm512_storeu_ps(row + j, r);
+        }
+        float state_k = _mm512_reduce_add_ps(acc_k);
+        for (; j < dk; j++) {
+            row[j] *= decay;
+            state_k += row[j] * k[j];
+        }
+        float delta = (v[i] - state_k) * beta;
+        __m512 vd = _mm512_set1_ps(delta);
+        __m512 acc_q = _mm512_setzero_ps();
+        j = 0;
+        for (; j + 16 <= dk; j += 16) {
+            __m512 r = _mm512_fmadd_ps(vd, _mm512_loadu_ps(k + j),
+                                       _mm512_loadu_ps(row + j));
+            _mm512_storeu_ps(row + j, r);
+            acc_q = _mm512_fmadd_ps(r, _mm512_loadu_ps(q + j), acc_q);
+        }
+        float o = _mm512_reduce_add_ps(acc_q);
+        for (; j < dk; j++) {
+            row[j] += delta * k[j];
+            o += row[j] * q[j];
+        }
+        out[i] = o;
+    }
+}
+#endif
 
 static bool checked_mul(size_t a, size_t b, size_t *out)
 {
@@ -190,20 +312,22 @@ static void delta_heads(size_t begin, size_t end, size_t tid, void *user_data)
         float decay = expf(ctx->params->ssm_a[head] *
                            softplus_stable(ctx->input->alpha[head] +
                                            ctx->params->dt_bias[head]));
+#if defined(__x86_64__) || defined(__i386__)
+        static int has_avx512 = -1;
+        if (has_avx512 < 0)
+            has_avx512 = __builtin_cpu_supports("avx512f") ? 1 : 0;
+        if (dk >= 16 && has_avx512) {
+            delta_head_avx512(matrix, q, k, v, out, dv, dk, beta, decay);
+            continue;
+        }
+#endif
         for (size_t i = 0; i < dv; i++) {
             float *row = matrix + i * dk;
-            float state_k = 0.0f;
-            for (size_t j = 0; j < dk; j++) {
-                row[j] *= decay;
-                state_k += row[j] * k[j];
-            }
+            oc_attn_scale_f32(row, decay, dk);
+            float state_k = oc_attn_dot_f32(row, k, dk);
             float delta = (v[i] - state_k) * beta;
-            float value = 0.0f;
-            for (size_t j = 0; j < dk; j++) {
-                row[j] += delta * k[j];
-                value += row[j] * q[j];
-            }
-            out[i] = value;
+            oc_attn_axpy_f32(row, k, delta, dk);
+            out[i] = oc_attn_dot_f32(row, q, dk);
         }
     }
 }
@@ -223,8 +347,7 @@ static void gate_heads(size_t begin, size_t end, size_t tid, void *user_data)
     for (size_t head = begin; head < end; head++) {
         float *out = ctx->output + head * dv;
         const float *gate = ctx->gate + head * dv;
-        float sum = 0.0f;
-        for (size_t i = 0; i < dv; i++) sum += out[i] * out[i];
+        float sum = oc_attn_dot_f32(out, out, dv);
         float inv = 1.0f / sqrtf(sum / (float)dv + ctx->params->norm_eps);
         for (size_t i = 0; i < dv; i++) {
             out[i] = out[i] * inv * ctx->params->norm_weight[i] *
@@ -262,18 +385,20 @@ OcError oc_qwen35_delta_step(OcQwen35DeltaState *state,
         output == NULL || output_len < value_dim) {
         return OC_ERR_INVALID_ARG;
     }
+    /* Prefill calls this once per token. Nested pool dispatches (4 per
+     * token × ~48 recurrent layers) cost more than the DeltaNet work. */
     ConvCtx conv = {&state->geometry, state->conv_state,
                     params->conv_weight, input->qkv, conv_output};
-    oc_parallel_for(conv_dim, conv_channels, &conv);
+    conv_channels(0, conv_dim, 0, &conv);
 
     NormalizeCtx normalize = {&state->geometry, conv_output, params->norm_eps};
-    oc_parallel_for(state->geometry.n_key_heads, normalize_key_heads, &normalize);
+    normalize_key_heads(0, state->geometry.n_key_heads, 0, &normalize);
 
     DeltaCtx delta = {&state->geometry, state->recurrent_state, conv_output,
                       params, input, output};
-    oc_parallel_for(state->geometry.n_value_heads, delta_heads, &delta);
+    delta_heads(0, state->geometry.n_value_heads, 0, &delta);
 
     GateCtx gate = {&state->geometry, params, input->gate, output};
-    oc_parallel_for(state->geometry.n_value_heads, gate_heads, &gate);
+    gate_heads(0, state->geometry.n_value_heads, 0, &gate);
     return OC_OK;
 }

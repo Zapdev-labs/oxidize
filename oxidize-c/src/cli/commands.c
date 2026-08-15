@@ -27,6 +27,7 @@
 #include "oxidize/http.h"
 #include "oxidize/inspect.h"
 #include "oxidize/llama.h"
+#include "oxidize/dspark.h"
 #include "oxidize/log.h"
 #include "oxidize/merge.h"
 #include "oxidize/openai.h"
@@ -120,6 +121,13 @@ static void cli_error(const char *fmt, ...)
     vfprintf(stderr, fmt, ap);
     fprintf(stderr, "\n");
     va_end(ap);
+}
+
+static OcError cli_session_init(const OcCliContext *ctx, OcLlamaModel *model,
+                                OcLlamaSession *sess)
+{
+    OcKvCacheType kv = oc_llama_select_kv_type(model->cfg.n_ctx, ctx->kv_type);
+    return oc_llama_session_init_kv(model, sess, kv);
 }
 
 void oc_cli_apply_ctx(const OcCliContext *ctx, struct OcLlamaModel *model)
@@ -347,6 +355,8 @@ void oc_cli_command_help(void)
 "  --model PATH          GGUF model file\n"
 "  --output text|json    Output format (default: text)\n"
 "  --threads N           CPU thread hint (0 = auto)\n"
+"  --kv f32|q8           KV cache dtype (q8 auto when ctx>=8192)\n"
+"  --ctx N               KV context length (default cap 4096)\n"
 "  --verbose, -v         Verbose logging to stderr\n"
 "  --help, -h            Show help\n"
 "  --version             Print version\n"
@@ -588,39 +598,45 @@ OcError oc_cli_run_bench(OcCliContext *ctx)
         (uint64_t)ctx->bench_warmup + (uint64_t)ctx->bench_iterations;
     for (uint64_t iter = 0; iter < total_iterations; iter++) {
         OcLlamaSession sess;
-        if (oc_llama_session_init(&model, &sess) != OC_OK) break;
+        if (cli_session_init(ctx, &model, &sess) != OC_OK) break;
         float *logits = sess.logits;
 
+        double pf_start = wall_now();
         e = oc_llama_prefill(&sess, bench_ids, n_ids, 0, logits);
+        double pf_elapsed = wall_now() - pf_start;
         if (e != OC_OK) {
             cli_error("benchmark prefill failed (%s)", oc_error_msg(e));
             oc_llama_session_free(&sess);
             break;
         }
+        double pf_tps = (pf_elapsed > 0)
+                      ? (double)n_ids / pf_elapsed : 0.0;
 
-        /* Decode. */
         double start = wall_now();
         size_t emitted = 0;
         while (emitted < decode_tokens) {
-            uint32_t sampled = oc_argmax(logits, model.cfg.vocab_size);
-            if (!ctx->bench_no_eos && tok.has_eos && sampled == tok.eos_id) break;
-            emitted++;
-            if (oc_llama_forward(&sess, sampled, logits) != OC_OK) break;
+            uint32_t toks[8];
+            size_t n = 0;
+            size_t want = decode_tokens - emitted;
+            if (want > 8) want = 8;
+            OcDsparkConfig dcfg;
+            oc_dspark_config_init(&dcfg);
+            if (oc_dspark_advance(&sess, logits, &dcfg, toks, want, &n, NULL) != OC_OK)
+                break;
+            if (n == 0) break;
+            if (!ctx->bench_no_eos && tok.has_eos) {
+                size_t keep = 0;
+                for (; keep < n; keep++) {
+                    if (toks[keep] == tok.eos_id) break;
+                }
+                emitted += keep;
+                if (keep < n) break;
+            } else {
+                emitted += n;
+            }
         }
         double elapsed = wall_now() - start;
         double tps = (elapsed > 0) ? (double)emitted / elapsed : 0.0;
-
-        /* Prefill speed. */
-        double pf_start = wall_now();
-        OcLlamaSession pf_sess;
-        memset(&pf_sess, 0, sizeof(pf_sess));
-        e = oc_llama_session_init(&model, &pf_sess);
-        if (e == OC_OK)
-            e = oc_llama_prefill(&pf_sess, bench_ids, n_ids, 0, NULL);
-        double pf_elapsed = wall_now() - pf_start;
-        double pf_tps = (e == OC_OK && pf_elapsed > 0)
-                      ? (double)n_ids / pf_elapsed : 0.0;
-        oc_llama_session_free(&pf_sess);
 
         if (iter >= ctx->bench_warmup && ctx->output_format == OC_CLI_OUTPUT_JSON) {
             if (completed > 0) printf(",");

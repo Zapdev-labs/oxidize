@@ -349,3 +349,123 @@ Test(cuda_mmq_layout, q5k_group_dot_matches_reference)
     }
     free(packed); free(ref); free(x);
 }
+
+#define MIRROR_Q4_0_BLOCK 18u
+
+static float mirror_q4_0_group_dot(const uint8_t *row, uint32_t g,
+                                   const float *x)
+{
+    const uint8_t *blk = row + (size_t)g * MIRROR_Q4_0_BLOCK;
+    const float d = mirror_f16(blk[0], blk[1]);
+    const uint8_t *qs = blk + 2;
+    float acc = 0.0f;
+    for (uint32_t i = 0; i < 16u; i++) {
+        const uint8_t p = qs[i];
+        acc += (float)((int32_t)(p & 0x0Fu) - 8) * x[i];
+        acc += (float)((int32_t)(p >> 4) - 8) * x[i + 16u];
+    }
+    return acc * d;
+}
+
+Test(cuda_mmq_layout, q4_0_group_dot_matches_reference)
+{
+    const size_t cols = 32u * 8u;
+    float *src = malloc(cols * sizeof(float));
+    cr_assert_not_null(src);
+    for (size_t i = 0; i < cols; i++) src[i] = gen((uint32_t)i, 13u);
+
+    size_t packed_len = oc_quantized_size(OC_QUANT_Q4_0, cols);
+    uint8_t *packed = malloc(packed_len);
+    float *ref = malloc(cols * sizeof(float));
+    cr_assert_not_null(packed);
+    cr_assert_not_null(ref);
+    cr_assert_eq(oc_quant_pack_row(OC_QUANT_Q4_0, src, cols, packed, packed_len),
+                 OC_OK);
+    cr_assert_eq(oc_quant_dequant_row_scalar(OC_QUANT_Q4_0, packed, packed_len,
+                                             ref, cols), OC_OK);
+
+    float *x = malloc(cols * sizeof(float));
+    cr_assert_not_null(x);
+    for (size_t i = 0; i < cols; i++) x[i] = gen((uint32_t)i, 17u);
+
+    for (uint32_t g = 0; g < cols / 32u; g++) {
+        float want = 0.0f;
+        for (uint32_t j = 0; j < 32u; j++)
+            want += ref[(size_t)g * 32u + j] * x[(size_t)g * 32u + j];
+        const float got = mirror_q4_0_group_dot(packed, g, x + (size_t)g * 32u);
+        const float tol = 1e-4f * (fabsf(want) + 1.0f);
+        cr_assert_float_eq(got, want, tol,
+                           "Q4_0 group %u: got %g want %g",
+                           g, (double)got, (double)want);
+    }
+    free(src); free(packed); free(ref); free(x);
+}
+
+Test(cuda_mmq_layout, al_family_aliases_standard_block_sizes)
+{
+    cr_assert_eq(oc_quantized_size(OC_QUANT_AL5, 256),
+                 oc_quantized_size(OC_QUANT_Q4_0, 256));
+    cr_assert_eq(oc_quantized_size(OC_QUANT_AL8, 256),
+                 oc_quantized_size(OC_QUANT_Q8_0, 256));
+    cr_assert_eq(oc_quantized_size(OC_QUANT_AL6, 256),
+                 oc_quantized_size(OC_QUANT_Q5_0, 256));
+    cr_assert_eq(oc_quantized_size(OC_QUANT_AL5_XS, 32), 14u);
+}
+
+#define MIRROR_AL5_XS_BLOCK 14u
+
+static float mirror_al5_xs_group_dot(const uint8_t *row, uint32_t g,
+                                     const float *x)
+{
+    const uint8_t *blk = row + (size_t)g * MIRROR_AL5_XS_BLOCK;
+    const float d = mirror_f16(blk[0], blk[1]);
+    const uint8_t *packed = blk + 2;
+    float acc = 0.0f;
+    uint32_t bitpos = 0u;
+    for (uint32_t i = 0; i < 32u; i++) {
+        uint32_t v = 0u;
+        for (int b = 0; b < 3; b++) {
+            uint32_t byte_idx = bitpos / 8u;
+            uint32_t bit_idx = bitpos % 8u;
+            if ((packed[byte_idx] >> bit_idx) & 1u) v |= (1u << b);
+            bitpos += 1u;
+        }
+        acc += (float)((int32_t)v - 4) * x[i];
+    }
+    return acc * d;
+}
+
+Test(cuda_mmq_layout, al5_xs_group_dot_matches_reference)
+{
+    const size_t cols = 32u * 6u;
+    float *src = malloc(cols * sizeof(float));
+    cr_assert_not_null(src);
+    for (size_t i = 0; i < cols; i++) src[i] = gen((uint32_t)i, 41u);
+
+    size_t packed_len = oc_quantized_size(OC_QUANT_AL5_XS, cols);
+    uint8_t *packed = malloc(packed_len);
+    float *ref = malloc(cols * sizeof(float));
+    cr_assert_not_null(packed);
+    cr_assert_not_null(ref);
+    cr_assert_eq(oc_quant_pack_row(OC_QUANT_AL5_XS, src, cols, packed,
+                                   packed_len), OC_OK);
+    cr_assert_eq(oc_quant_dequant_row_scalar(OC_QUANT_AL5_XS, packed, packed_len,
+                                             ref, cols), OC_OK);
+
+    float *x = malloc(cols * sizeof(float));
+    cr_assert_not_null(x);
+    for (size_t i = 0; i < cols; i++) x[i] = gen((uint32_t)i, 3u);
+
+    for (uint32_t g = 0; g < cols / 32u; g++) {
+        float want = 0.0f;
+        for (uint32_t j = 0; j < 32u; j++)
+            want += ref[(size_t)g * 32u + j] * x[(size_t)g * 32u + j];
+        const float got = mirror_al5_xs_group_dot(packed, g,
+                                                  x + (size_t)g * 32u);
+        const float tol = 1e-4f * (fabsf(want) + 1.0f);
+        cr_assert_float_eq(got, want, tol,
+                           "AL5_XS group %u: got %g want %g",
+                           g, (double)got, (double)want);
+    }
+    free(src); free(packed); free(ref); free(x);
+}

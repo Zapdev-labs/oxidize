@@ -19,6 +19,7 @@
 #include "oxidize/activation.h"
 #include "oxidize/llama.h"
 #include "oxidize/matvec.h"
+#include "oxidize/quant.h"
 
 #include <math.h>
 #include <stdint.h>
@@ -121,6 +122,28 @@ Test(llama, matvec_f32_basic)
     oc_matvec_f32(data, 2, 3, in, out);
     cr_assert_float_eq(out[0], 6.0f, 1e-6f, "row 0 dot");
     cr_assert_float_eq(out[1], 15.0f, 1e-6f, "row 1 dot");
+}
+
+Test(llama, matvec_bf16_matches_dequant)
+{
+    const size_t rows = 4, cols = 32;
+    float src[4 * 32], in[32], want[4], got[4], temp[32];
+    uint8_t packed[4 * 64];
+    for (size_t i = 0; i < rows * cols; i++)
+        src[i] = 0.05f * (float)((int)(i % 17) - 8);
+    for (size_t i = 0; i < cols; i++)
+        in[i] = 0.1f * (float)((int)(i % 7) - 3);
+    for (size_t r = 0; r < rows; r++) {
+        cr_assert_eq(oc_quant_pack_row(OC_QUANT_BF16, src + r * cols, cols,
+                                       packed + r * 64, 64), OC_OK);
+        cr_assert_eq(oc_quant_dequant_row(OC_QUANT_BF16, packed + r * 64, 64,
+                                          temp, cols), OC_OK);
+        want[r] = 0.0f;
+        for (size_t c = 0; c < cols; c++) want[r] += temp[c] * in[c];
+    }
+    oc_matvec_quantized(OC_QUANT_BF16, packed, rows, cols, 64, in, got, temp);
+    for (size_t r = 0; r < rows; r++)
+        cr_assert_float_eq(got[r], want[r], 1e-4f, "bf16 row %zu", r);
 }
 
 Test(llama, matvec_f32_zero_input)
@@ -577,4 +600,11 @@ Test(llama, kv_cache_bytes_long_context_saving_is_gigabytes)
     size_t f32 = oc_llama_kv_cache_bytes(&m, OC_KV_F32);
     size_t q8  = oc_llama_kv_cache_bytes(&m, OC_KV_Q8);
     cr_assert_gt(f32 - q8, 10ull * 1024 * 1024 * 1024);
+}
+
+Test(llama, select_kv_type_explicit)
+{
+    cr_assert_eq(oc_llama_select_kv_type(32768, "f32"), OC_KV_F32);
+    cr_assert_eq(oc_llama_select_kv_type(64, "q8"), OC_KV_Q8);
+    cr_assert_eq(oc_llama_select_kv_type(4096, "Q8"), OC_KV_Q8);
 }

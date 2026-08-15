@@ -160,6 +160,40 @@ bool oc_cuda_topk(
     const float *d_logits, uint32_t *d_out_idx, float *d_out_val,
     uint32_t vocab_size, uint32_t k);
 
+/* ─── Per-head QK-norm + RoPE (Qwen3 / Qwen3.5 / Gemma) ─────────────────
+ *
+ * RMSNorm over each head independently (weight is head_dim long and shared
+ * across heads), then NeoX split-half RoPE. Frequency ladder uses rope_dim,
+ * matching oc_apply_rope_f32 (partial RoPE on Qwen3.5). `stream` may be NULL.
+ */
+bool oc_cuda_qk_norm_rope(
+    float *d_x, const float *d_weight,
+    uint32_t n_heads, uint32_t head_dim, uint32_t rope_dim,
+    int64_t pos, float theta, float eps,
+    float yarn_factor, uint32_t yarn_orig_ctx, void *stream);
+
+/* Packed Qwen3.5 Q projection is [n_head, 2, head_dim] = concat(Q, gate). */
+bool oc_cuda_qwen35_unpack_qgate(
+    const float *d_packed, float *d_q, float *d_gate,
+    uint32_t n_heads, uint32_t head_dim, void *stream);
+
+/* attn_out[i] *= sigmoid(gate[i]) — Qwen3.5 full-attention output gate. */
+bool oc_cuda_sigmoid_gate(float *d_x, const float *d_gate, size_t n,
+                          void *stream);
+
+/* One Gated-DeltaNet token step. Persistent conv/recurrent state lives on
+ * the device; scratch `d_conv_out` / `d_out` are overwritten. */
+bool oc_cuda_qwen35_delta_step(
+    float *d_conv_state, float *d_recurrent,
+    const float *d_qkv, const float *d_gate,
+    const float *d_beta, const float *d_alpha,
+    const float *d_conv_w, const float *d_ssm_a,
+    const float *d_dt_bias, const float *d_norm_w,
+    float *d_conv_out, float *d_out,
+    uint32_t n_key_heads, uint32_t n_value_heads,
+    uint32_t key_head_dim, uint32_t value_head_dim,
+    uint32_t conv_kernel, float eps, void *stream);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

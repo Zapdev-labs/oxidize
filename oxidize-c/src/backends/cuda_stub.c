@@ -28,3 +28,5 @@ OcError oc_cuda_forward(OcCudaContext *ctx, uint32_t token, uint32_t pos,
 void oc_cuda_reset(OcCudaContext *ctx) { (void)ctx; }
 
 void oc_cuda_free(OcCudaContext *ctx) { (void)ctx; }
+
+OcError oc_cuda_selftest(void) { return OC_ERR_BACKEND; }

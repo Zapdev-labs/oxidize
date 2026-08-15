@@ -5,32 +5,26 @@
  * with the Rust scalar reference (VAL-FWD-001..004).
  */
 #include "oxidize/activation.h"
+#include "oxidize/attn_kernels.h"
 
 #include <math.h>
+
+#if defined(__x86_64__) || defined(__i386__)
+#include <immintrin.h>
+#endif
 
 void oc_rms_norm_f32(const float *x, const float *weight, float *out,
                     size_t n, float eps)
 {
-    /* Rust computes mean over n as f32 accumulate (the reference uses
-     * `x.iter().map(|v| v*v).sum::<f32>()` then `/ n as f32`). To stay
-     * bit-exact we mirror that: accumulate in f32, not f64. */
-    float ss = 0.0f;
-    for (size_t i = 0; i < n; i++) {
-        ss += x[i] * x[i];
-    }
+    float ss = oc_attn_dot_f32(x, x, n);
     float inv_rms = 1.0f / sqrtf(ss / (float)n + eps);
-    for (size_t i = 0; i < n; i++) {
-        out[i] = x[i] * inv_rms * weight[i];
-    }
+    oc_attn_rms_apply_f32(x, weight, inv_rms, out, n);
 }
 
 void oc_swiglu_inplace_f32(float *gate, const float *up, size_t n)
 {
     for (size_t i = 0; i < n; i++) {
         float g = gate[i];
-        /* sigmoid(g) = 1 / (1 + exp(-g)). Rust uses the Schraudolph fast-exp
-         * in the AVX2 path but the scalar path uses expf; we use expf for
-         * parity with the scalar reference. */
         float sig = 1.0f / (1.0f + expf(-g));
         gate[i] = g * sig * up[i];
     }

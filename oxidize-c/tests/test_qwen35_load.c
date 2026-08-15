@@ -226,6 +226,16 @@ static void build_dense_fixture(const char *path)
         add_layer_2d(&w, layer, "ffn_up.weight", N_EMBD, N_FF);
         add_layer_2d(&w, layer, "ffn_down.weight", N_FF, N_EMBD);
     }
+    add_layer_1d(&w, 2, "attn_norm.weight", N_EMBD);
+    add_layer_1d(&w, 2, "post_attention_norm.weight", N_EMBD);
+    add_full(&w, 2);
+    add_layer_2d(&w, 2, "ffn_gate.weight", N_EMBD, N_FF);
+    add_layer_2d(&w, 2, "ffn_up.weight", N_EMBD, N_FF);
+    add_layer_2d(&w, 2, "ffn_down.weight", N_FF, N_EMBD);
+    add_layer_2d(&w, 2, "nextn.eh_proj.weight", 2 * N_EMBD, N_EMBD);
+    add_layer_1d(&w, 2, "nextn.enorm.weight", N_EMBD);
+    add_layer_1d(&w, 2, "nextn.hnorm.weight", N_EMBD);
+    add_layer_1d(&w, 2, "nextn.shared_head_norm.weight", N_EMBD);
     cr_assert_eq(oc_gguf_writer_finalize(&w), OC_OK);
     oc_gguf_writer_free(&w);
 }
@@ -295,6 +305,10 @@ Test(qwen35_load, loads_dense_attention_model_with_trailing_mtp)
     cr_assert_eq(model.cfg.n_layer, 2);
     cr_assert_eq(model.cfg.n_recurrent_layers, 0);
     cr_assert_eq(model.cfg.n_full_attention_layers, 2);
+    cr_assert(model.mtp.present);
+    cr_assert_not_null(model.mtp.eh_proj.data);
+    cr_assert_not_null(model.mtp.enorm);
+    cr_assert_not_null(model.mtp.layer.attn_q.data);
     oc_llama_free(&model);
     remove(path);
 }

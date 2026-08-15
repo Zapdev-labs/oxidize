@@ -21,6 +21,7 @@ typedef struct OcCliArgs {
      * row is 515 GB of f32 cache, so the default allocation cannot succeed on
      * any machine. 0 = use the model's own value. */
     uint32_t   n_ctx;
+    const char *kv_type;       /* --kv f32|q8; NULL = auto (q8 if ctx>=8192) */
     int        threads;
     const char *numa;
     bool       auto_tune;
@@ -40,6 +41,7 @@ typedef struct OcCliArgs {
     /* Speculative decoding. */
     const char *draft_model;       /* path to draft model GGUF            */
     int        draft_tokens;       /* K draft tokens per step (0=default 4) */
+    const char *spec_type;         /* none|mtp|dspark (NULL = auto)       */
     /* Quantization mode. */
     const char *quantize_input;   /* input GGUF path                      */
     const char *quantize_output;  /* output GGUF path                     */
@@ -64,6 +66,7 @@ typedef struct OcCliArgs {
     bool       verbose;
     bool       inspect;           /* print model info and exit             */
     bool       perplexity;        /* compute perplexity on input text       */
+    bool       cuda_selftest;     /* run CUDA kernel self-test and exit     */
     bool       show_help;
     bool       show_version;
 } OcCliArgs;
