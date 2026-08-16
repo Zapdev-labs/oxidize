@@ -82,6 +82,7 @@ typedef struct OcHttpServer {
     void        *user_data;
     _Atomic bool stop;           /* set by oc_http_server_stop              */
     bool         joined;        /* true after oc_http_server_join          */
+    char         extra_headers[384]; /* CORS etc. Empty means omit.       */
 } OcHttpServer;
 
 /* Start a server bound to `host`:`port` with `n_threads` worker threads.
@@ -100,12 +101,17 @@ OcError oc_http_server_join(OcHttpServer *s);
  * to call from any thread. */
 OcError oc_http_server_stop(OcHttpServer *s);
 
+/* Extra response headers (typically CORS). Empty string omits them.
+ * Call after start, before serving traffic. */
+void oc_http_server_set_extra_headers(OcHttpServer *s, const char *headers);
+
 /* Build a canonical HTTP/1.1 response string for `status` + `body`. Writes
  * into `buf` (cap bytes); returns the bytes written (0 on overflow). The
  * caller owns `buf`. Used internally by the worker; exposed for tests. */
 size_t oc_http_format_response(char *buf, size_t cap,
                                int status, const char *content_type,
-                               const char *body, size_t body_len);
+                               const char *body, size_t body_len,
+                               const char *extra_headers);
 
 /* Human-readable status line for a code ("200 OK", "404 Not Found", ...). */
 const char *oc_http_status_line(int status);

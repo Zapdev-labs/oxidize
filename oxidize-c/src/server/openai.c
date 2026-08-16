@@ -262,11 +262,11 @@ static char *generate_completion(OcOpenaiState *st, const char *prompt,
                                  int max_tokens, float temperature)
 {
     if (st == NULL || !st->model_loaded || st->model == NULL || st->tokenizer == NULL) {
-        return strdup("");
+        return NULL;
     }
     OcLlamaSession sess;
     if (oc_llama_session_init(st->model, &sess) != OC_OK) {
-        return strdup("");
+        return NULL;
     }
     uint32_t *ids = NULL;
     size_t n_ids = 0;
@@ -274,8 +274,16 @@ static char *generate_completion(OcOpenaiState *st, const char *prompt,
         ? OC_TOK_ADD_BOS : OC_TOK_DEFAULT;
     if (oc_tokenizer_encode(st->tokenizer, prompt, pol, &ids, &n_ids) != OC_OK || n_ids == 0) {
         oc_llama_session_free(&sess);
-        return strdup("");
+        return NULL;
     }
+    if (max_tokens < 0) max_tokens = 0;
+    uint32_t *grown = realloc(ids, (n_ids + (size_t)max_tokens) * sizeof(*ids));
+    if (grown == NULL) {
+        free(ids);
+        oc_llama_session_free(&sess);
+        return NULL;
+    }
+    ids = grown;
 
     OcSamplerConfig scfg = OC_SAMPLER_DEFAULT;
     scfg.temperature = temperature;
@@ -293,7 +301,7 @@ static char *generate_completion(OcOpenaiState *st, const char *prompt,
     uint32_t next = ids[n_ids - 1];
     if (oc_llama_forward(&sess, next, sess.logits) != OC_OK) {
         free(ids); oc_llama_session_free(&sess);
-        return strdup("");
+        return NULL;
     }
 
     /* Generate. Use a dynamic string builder. */
@@ -302,9 +310,12 @@ static char *generate_completion(OcOpenaiState *st, const char *prompt,
     if (result == NULL) { free(ids); oc_llama_session_free(&sess); return NULL; }
     result[0] = '\0';
 
+    size_t n_hist = n_ids;
     for (int t = 0; t < max_tokens; t++) {
-        uint32_t tok = oc_sample(sess.logits, st->model->cfg.vocab_size, &scfg, NULL, 0);
+        uint32_t tok = oc_sample(sess.logits, st->model->cfg.vocab_size, &scfg,
+                                 ids, n_hist);
         if (st->tokenizer->has_eos && tok == st->tokenizer->eos_id) break;
+        ids[n_hist++] = tok;
         char *piece = NULL;
         if (oc_tokenizer_decode(st->tokenizer, &tok, 1, &piece) == OC_OK && piece) {
             size_t plen = strlen(piece);
@@ -752,4 +763,12 @@ void oc_openai_handler(const OcHttpRequest *req,
     }
     /* The HTTP server core (http.c) frees the response body after write()
      * when body_len > 0. Handlers always return malloc'd buffers. */
+}
+
+void oc_openai_attach_http(OcHttpServer *srv, OcOpenaiState *st)
+{
+    if (srv == NULL || st == NULL || st->mw == NULL) return;
+    char cors[384];
+    if (oc_middleware_cors_headers(st->mw, cors, sizeof(cors)) > 0)
+        oc_http_server_set_extra_headers(srv, cors);
 }

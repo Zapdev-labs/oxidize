@@ -607,6 +607,7 @@ int main(int argc, char **argv)
             oc_middleware_free(&mw);
             return 1;
         }
+        oc_openai_attach_http(&srv, &st);
         printf("oxidize-c server listening on http://%s:%u\n"
                "  GET  /healthz  /livez  /readyz\n"
                "  GET  /metrics  /openapi.json\n"

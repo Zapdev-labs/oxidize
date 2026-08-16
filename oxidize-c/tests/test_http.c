@@ -31,20 +31,24 @@ Test(http, format_response_basic)
     char buf[1024];
     const char *body = "{\"hello\":\"world\"}";
     size_t n = oc_http_format_response(buf, sizeof(buf), 200,
-                                       "application/json", body, strlen(body));
+                                       "application/json", body, strlen(body),
+                                       NULL);
     cr_assert(n > 0, "should produce a response");
     cr_assert(strstr(buf, "HTTP/1.1 200 OK") == buf, "starts with status line");
     cr_assert(strstr(buf, "Content-Type: application/json") != NULL,
               "includes content-type");
     cr_assert(strstr(buf, "Content-Length: 17") != NULL, "includes length");
     cr_assert(strstr(buf, "Connection: close") != NULL, "connection close");
+    cr_assert(strstr(buf, "Access-Control-Allow-Origin") == NULL,
+              "CORS omitted unless extra headers are supplied");
     cr_assert(strstr(buf + n - 17, body) != NULL, "body is at the end");
 }
 
 Test(http, format_response_handles_null_body)
 {
     char buf[256];
-    size_t n = oc_http_format_response(buf, sizeof(buf), 204, NULL, NULL, 0);
+    size_t n = oc_http_format_response(buf, sizeof(buf), 204, NULL, NULL, 0,
+                                       NULL);
     cr_assert(n > 0, "should produce a 204 response");
     cr_assert(strstr(buf, "204 No Content") != NULL, "204 status line");
     cr_assert(strstr(buf, "Content-Length: 0") != NULL, "zero length");
@@ -54,7 +58,7 @@ Test(http, format_response_overflow_returns_zero)
 {
     char buf[32];   /* too small for any response */
     size_t n = oc_http_format_response(buf, sizeof(buf), 200, "application/json",
-                                       "{}", 2);
+                                       "{}", 2, NULL);
     cr_assert_eq(n, 0u, "overflow returns 0");
 }
 

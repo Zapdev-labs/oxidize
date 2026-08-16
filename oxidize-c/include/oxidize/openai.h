@@ -77,6 +77,8 @@ void oc_openai_handler(const OcHttpRequest *req,
                        size_t *out_body_len,
                        void *user_data);
 
+void oc_openai_attach_http(OcHttpServer *srv, OcOpenaiState *st);
+
 /* Convenience: build a JSON error response body (malloc'd, caller frees). */
 char *oc_openai_error_json(const char *message, const char *type);
 

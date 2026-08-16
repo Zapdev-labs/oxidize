@@ -65,20 +65,20 @@ const char *oc_http_status_line(int status)
 
 size_t oc_http_format_response(char *buf, size_t cap,
                                int status, const char *content_type,
-                               const char *body, size_t body_len)
+                               const char *body, size_t body_len,
+                               const char *extra_headers)
 {
     if (content_type == NULL) content_type = "application/json";
     if (body == NULL) body_len = 0;
+    if (extra_headers == NULL) extra_headers = "";
     int n = snprintf(buf, cap,
         "HTTP/1.1 %s\r\n"
         "Content-Type: %s\r\n"
         "Content-Length: %zu\r\n"
         "Connection: close\r\n"
-        "Access-Control-Allow-Origin: *\r\n"
-        "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
-        "Access-Control-Allow-Headers: Content-Type, Authorization\r\n"
+        "%s"
         "\r\n",
-        oc_http_status_line(status), content_type, body_len);
+        oc_http_status_line(status), content_type, body_len, extra_headers);
     if (n < 0 || (size_t)n >= cap) return 0;
     size_t header_len = (size_t)n;
     if (header_len + body_len > cap) return 0;
@@ -199,12 +199,19 @@ typedef struct OcWorkerCtx {
     OcHttpServer *srv;
 } OcWorkerCtx;
 
-static void send_simple_response(int fd, int status, const char *body)
+static const char *server_extra(const OcHttpServer *srv)
 {
-    char hdr[512];
+    if (srv == NULL || srv->extra_headers[0] == '\0') return "";
+    return srv->extra_headers;
+}
+
+static void send_simple_response(OcHttpServer *srv, int fd, int status, const char *body)
+{
+    char hdr[768];
     size_t body_len = body ? strlen(body) : 0;
     size_t n = oc_http_format_response(hdr, sizeof(hdr), status,
-                                       "application/json", body, body_len);
+                                       "application/json", body, body_len,
+                                       server_extra(srv));
     if (n == 0) return;
     size_t sent = 0;
     while (sent < n) {
@@ -337,12 +344,12 @@ static void *worker_main(void *arg)
             continue;
         }
         if (too_large || total >= OC_HTTP_MAX_REQUEST_BYTES) {
-            send_simple_response(fd, 413, "{\"error\":\"payload too large\"}");
+            send_simple_response(srv, fd, 413, "{\"error\":\"payload too large\"}");
             close(fd);
             continue;
         }
         if (timed_out) {
-            send_simple_response(fd, 408, "{\"error\":\"request timeout\"}");
+            send_simple_response(srv, fd, 408, "{\"error\":\"request timeout\"}");
             close(fd);
             continue;
         }
@@ -351,7 +358,7 @@ static void *worker_main(void *arg)
         OcHttpRequest req;
         int parse_status = 400;
         if (!parse_request(buf, total, &req, &parse_status)) {
-            send_simple_response(fd, parse_status,
+            send_simple_response(srv, fd, parse_status,
                                  "{\"error\":\"malformed request\"}");
             close(fd);
             continue;
@@ -360,7 +367,7 @@ static void *worker_main(void *arg)
 
         /* Handle CORS preflight (OPTIONS) inline. */
         if (req.method == OC_HTTP_OPTIONS) {
-            send_simple_response(fd, 204, "");
+            send_simple_response(srv, fd, 204, "");
             close(fd);
             continue;
         }
@@ -374,7 +381,8 @@ static void *worker_main(void *arg)
 
         char resp[8192];
         size_t resp_len = oc_http_format_response(resp, sizeof(resp), status,
-                                                  ctype, body, body_len);
+                                                  ctype, body, body_len,
+                                                  server_extra(srv));
         if (resp_len > 0) {
             (void)send_all(fd, resp, resp_len);
         } else if (body_len > 0) {
@@ -384,7 +392,8 @@ static void *worker_main(void *arg)
             char *big = malloc(cap);
             if (big != NULL) {
                 size_t n = oc_http_format_response(big, cap, status, ctype,
-                                                  body, body_len);
+                                                  body, body_len,
+                                                  server_extra(srv));
                 if (n > 0) {
                     (void)send_all(fd, big, n);
                 }
@@ -477,6 +486,14 @@ OcError oc_http_server_start(const char *host, uint16_t port, size_t n_threads,
     oc_log(OC_LOG_INFO, "http: server listening on %s:%u (%zu threads)",
            host ? host : "0.0.0.0", out->port, n_threads);
     return OC_OK;
+}
+
+void oc_http_server_set_extra_headers(OcHttpServer *s, const char *headers)
+{
+    if (s == NULL) return;
+    if (headers == NULL) headers = "";
+    strncpy(s->extra_headers, headers, sizeof(s->extra_headers) - 1);
+    s->extra_headers[sizeof(s->extra_headers) - 1] = '\0';
 }
 
 OcError oc_http_server_join(OcHttpServer *s)
