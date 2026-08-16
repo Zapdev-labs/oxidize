@@ -44,14 +44,87 @@ void oc_matvec_quantized(OcGgufQuantizationType qtype, const uint8_t *data,
 /* Fused multi-projection variant: computes several matvecs that share the
  * SAME input vector in one call (so the input is read once from cache).
  * Used for the fused Q/K/V (or gate/up) projections. `n_outs` is the number
- * of outputs; `datas[i]`, `rows[i]`, `row_bytes[i]` describe each weight
- * matrix; results are written to `outs[i]`. `temp` must hold `cols` f32.
- * All matrices share that input dimension. */
-void oc_matvec_quantized_fused(OcGgufQuantizationType qtype,
+ * of outputs; `qtypes[i]`, `datas[i]`, `rows[i]`, `row_bytes[i]` describe
+ * each weight matrix; results are written to `outs[i]`. `temp` must hold
+ * `cols` f32. All matrices share that input dimension. Compatible qtypes
+ * share one activation quantization and one worker region; mixed qtypes use
+ * the exact individual-matvec fallback. */
+void oc_matvec_quantized_fused(const OcGgufQuantizationType *qtypes,
                                const uint8_t *const *datas, const size_t *rows,
                                size_t cols, const size_t *row_bytes,
                                size_t n_outs, const float *input,
                                float *const *outs, float *temp);
+
+/* Multi-input counterpart used by grouped MoE down projections. Each matrix
+ * has its own activation vector, but compatible quantized matrices still run
+ * in one worker region. Mixed/unsupported qtypes fall back to the individual
+ * matvec path. */
+void oc_matvec_quantized_multi_input(
+    const OcGgufQuantizationType *qtypes,
+    const uint8_t *const *datas, const size_t *rows, size_t cols,
+    const size_t *row_bytes, size_t n_outs,
+    const float *const *inputs, float *const *outs, float *temp);
+
+/* Test instrumentation for oc_matvec_quantized_fused(). These counters are
+ * process-global and intended only for focused dispatch tests; reset them
+ * immediately before the call under test. */
+typedef struct {
+    size_t activation_quantizations;
+    size_t parallel_dispatches;
+    size_t fallback_calls;
+} OcMatvecFusedTestStats;
+
+void oc_matvec_fused_test_reset(void);
+OcMatvecFusedTestStats oc_matvec_fused_test_stats(void);
+
+/* ─── Batched matvec (prefill) ───────────────────────────────────────────
+ *
+ * Same product as oc_matvec_quantized(), but against `n_vec` activation
+ * vectors at once. This is what makes prompt prefill fast: a single-vector
+ * GEMV re-reads the entire weight matrix from DRAM for every token, so a
+ * 500-token prompt streamed 500 copies of the model through memory. Sharing
+ * one pass over the weights across a tile of tokens turns that into
+ * ceil(n_vec / tile) passes.
+ *
+ * The activations are tiled (not the whole batch at once) so that the tile
+ * stays resident in L2 while the weight rows stream past it — with an
+ * untiled inner loop the activations, not the weights, become the streamed
+ * operand and the amortization is lost.
+ *
+ * Layout: `inputs` is n_vec vectors of `cols` floats at stride `in_stride`;
+ * `outputs` is n_vec vectors of `rows` floats at stride `out_stride`.
+ * Strides are in floats and may exceed the vector length (so callers can
+ * point into a padded [n_vec][max_dim] scratch block).
+ *
+ * `act_scratch` / `act_bytes` describe the fused-path activation buffer;
+ * pass NULL/0 to force the dequant path. The tile is clamped to whatever
+ * `act_bytes` allows, so an undersized buffer costs speed, never memory
+ * safety. Size it with oc_matvec_batch_scratch_bytes(). `temp` is the usual
+ * per-call dequant buffer of `cols` floats.
+ *
+ * Results are bit-identical to calling oc_matvec_quantized() once per vector:
+ * each output element is still one row dotted with one activation, in the
+ * same order, and rows are still split across threads without reduction. */
+void oc_matvec_quantized_batch(OcGgufQuantizationType qtype,
+                               const uint8_t *data, size_t rows, size_t cols,
+                               size_t row_bytes,
+                               const float *inputs, size_t in_stride,
+                               float *outputs, size_t out_stride,
+                               size_t n_vec, float *temp,
+                               uint8_t *act_scratch, size_t act_bytes);
+
+/* Worst-case `act_scratch` size for ANY oc_matvec_quantized_batch() call whose
+ * input width is at most `max_cols`. One buffer sized by this covers every
+ * matmul in a forward pass — including narrow ones: the tile count is derived
+ * from `cols` by integer division, so a narrower matrix can need marginally
+ * MORE scratch than a wide one, and taking the max over a few sampled widths
+ * is not a bound. This returns a true bound. */
+size_t oc_matvec_batch_scratch_bytes(size_t max_cols);
+
+/* f32-weight counterpart of oc_matvec_quantized_batch(). */
+void oc_matvec_f32_batch(const float *data, size_t rows, size_t cols,
+                         const float *inputs, size_t in_stride,
+                         float *outputs, size_t out_stride, size_t n_vec);
 
 /* Enable or disable the fused integer GEMV path (default: enabled).
  *

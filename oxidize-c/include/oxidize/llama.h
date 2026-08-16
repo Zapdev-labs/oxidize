@@ -23,6 +23,7 @@
 #include "oxidize/error.h"
 #include "oxidize/gguf.h"
 #include "oxidize/quant.h"
+#include "oxidize/qwen35_delta.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -117,7 +118,72 @@ typedef struct OcLlamaConfig {
     uint32_t mla_q_rope_dim;           /* RoPE dim for q_pe                        */
     uint32_t mla_kv_nope_head_dim;     /* per-head nope dim (k_b output / n_heads) */
     uint32_t mla_v_head_dim;           /* per-head v dim (v_b output / n_heads)    */
+    /* LongCat (ScMoE + MLA + n-gram over-embedding).
+     *
+     * LongCat packs TWO attention+FFN sub-blocks into each GGUF `blk.N`, so
+     * `n_layer` is 2 * longcat.block_count and per-sub-block tensors carry a
+     * `_0`/`_1` suffix. Router, expert pool and indexer appear once per
+     * `blk.N` and attach to the even sub-layer 2N. */
+    bool     is_longcat;
+    uint32_t zero_expert_count;        /* identity experts appended after routed  */
+    /* deepseek_yarn parameters. Absent from GGUF metadata — LongCat's
+     * config.json sets both mscale terms to 1, which makes
+     * the RoPE attn factor exactly 1.0 and folds a 1.4787^2 term into the
+     * softmax scale instead. See oc_rope_deepseek_yarn_scales(). */
+    float    yarn_mscale;
+    float    yarn_mscale_all_dim;
+    /* n-gram over-embedding: (neighbor_num - 1) * split_num tables. */
+    uint32_t ngram_n_grams;
+    uint32_t ngram_split_num;
+    /* Qwen3.5 hybrid attention. block_count includes optional trailing MTP
+     * blocks; n_layer is the executable transformer-layer count. */
+    bool     is_qwen35;
+    uint32_t nextn_predict_layers;
+    uint32_t full_attention_interval;
+    uint32_t n_full_attention_layers;
+    uint32_t n_recurrent_layers;
+    uint32_t ssm_conv_kernel;
+    uint32_t ssm_state_size;
+    uint32_t ssm_group_count;
+    uint32_t ssm_value_heads;
+    uint32_t ssm_inner_size;
+    uint32_t shared_expert_intermediate_size;
+    /* ── Muse Glimmer ─────────────────────────────────────────────────────
+     *
+     * Meta's Muse-Glimmer-30B (GGUF arch "muse-glimmer") is a dense
+     * transformer that reuses pieces already present here — Gemma's sandwich
+     * norms, Gemma 4's per-layer sliding-window pattern, Gemma's per-head
+     * QK-norm, Gemma's final-logit softcap — plus four things nothing else
+     * needed. They are expressed as behaviour flags rather than an
+     * `is_muse` switch so each one reads as what it does. */
+    /* The token embedding is RMS-normalized (no weight) before layer 0.
+     * llama.cpp: build_norm(inpL, nullptr, nullptr, LLM_NORM_RMS, -1). */
+    bool     embd_rms_norm;
+    /* sigmoid(W_gate · attn_norm(x)) gates the attention output elementwise
+     * before the output projection. The gate is n_head*head_dim wide and is
+     * computed from the PRE-attention normed hidden state, not from the
+     * attention output. */
+    bool     attn_out_gate;
+    /* RoPE runs only on sliding-window layers; global layers are NoPE.
+     * Resolved per layer into OcLlamaLayer.use_rope. */
+    bool     rope_swa_only;
+    /* The sandwich (post-attention / post-FFN) norms use their own epsilon,
+     * 1e-8, not attention.layer_norm_rms_epsilon. 0 → use rms_norm_eps,
+     * which is what every other architecture wants. */
+    float    post_norm_eps;
+    /* Final logits are multiplied by this before the softcap. 0 = 1.0. */
+    float    logit_scale;
+    /* RoPE pairs dimensions (2i, 2i+1) instead of (i, i + rope_dim/2) —
+     * llama.cpp's LLAMA_ROPE_TYPE_NORM. The two conventions assign different
+     * frequencies to the same dimension, so this is correctness, not style:
+     * with the wrong one the model stays locally fluent and drifts within a
+     * couple of dozen tokens. */
+    bool     rope_norm_pairs;
 } OcLlamaConfig;
+
+/* Upper bound on LongCat n-gram tables. LongCat-2.0 has
+ * (neighbor_num - 1) * split_num = (5-1)*4 = 16. */
+#define OC_LONGCAT_MAX_NGRAM 32
 
 /* Non-owning view over a mmap'd GGUF tensor. */
 typedef struct OcWeightView {
@@ -128,8 +194,19 @@ typedef struct OcWeightView {
     size_t row_bytes;       /* bytes per row (quantized or f32 stride) */
 } OcWeightView;
 
+typedef enum OcLlamaLayerKind {
+    OC_LLAMA_LAYER_FULL_ATTENTION = 0,
+    OC_LLAMA_LAYER_QWEN35_RECURRENT = 1,
+} OcLlamaLayerKind;
+
 typedef struct OcLlamaLayer {
+    OcLlamaLayerKind kind;
+    uint32_t state_index;
+    uint32_t kv_cache_index;
     OcWeightView attn_q, attn_k, attn_v, attn_output;
+    OcWeightView attn_gate, attn_qkv;
+    OcWeightView ssm_a, ssm_alpha, ssm_beta, ssm_conv1d;
+    OcWeightView ssm_dt_bias, ssm_norm, ssm_out;
     OcWeightView ffn_gate, ffn_up, ffn_down;     /* dense FFN (when num_experts==0) */
     /* MoE (Qwen3-MoE / Mixtral). Stacked expert tensors: expert i occupies
      * bytes [i * per_expert_row_bytes, (i+1) * per_expert_row_bytes) per row.
@@ -149,6 +226,11 @@ typedef struct OcLlamaLayer {
     OcWeightView mla_v_b;               /* v_b_proj: [n_heads*v_head_dim, kv_lora_dim] */
     float *mla_q_a_norm;                /* owned f32, length q_lora_dim */
     float *mla_kv_a_norm;               /* owned f32, length kv_lora_dim */
+    /* LongCat router bias (`blk.N.exp_probs_b.bias`), owned f32 of length
+     * num_experts + zero_expert_count. Added to the router logits for
+     * SELECTION only — the gate weight applied to an expert's output is the
+     * unbiased probability. NULL when absent. */
+    float *exp_probs_b;
     float *attn_norm;       /* owned f32, length n_embd              */
     float *ffn_norm;       /* owned f32, length n_embd              */
     /* LayerNorm biases (beta) for GPT-2/NeoX/Falcon; NULL for RMSNorm
@@ -183,7 +265,23 @@ typedef struct OcLlamaLayer {
     uint32_t rope_dim;      /* rotary dims in this layer              */
     float    rope_theta;    /* rope base in this layer                */
     uint32_t sliding_window;/* 0 = global (full) attention            */
+    /* Whether RoPE applies in this layer. False only on Muse Glimmer's
+     * global (NoPE) layers; true everywhere else. */
+    bool     use_rope;
 } OcLlamaLayer;
+
+#define OC_MTP_DEFAULT_DRAFT 3u
+
+typedef struct OcLlamaMtp {
+    bool present;
+    OcLlamaLayer layer;
+    OcWeightView eh_proj;
+    OcWeightView embed_tokens;
+    OcWeightView shared_head_head;
+    float *enorm;
+    float *hnorm;
+    float *shared_head_norm;
+} OcLlamaMtp;
 
 typedef struct OcLlamaModel {
     OcLlamaConfig    cfg;
@@ -194,11 +292,19 @@ typedef struct OcLlamaModel {
     float           *final_norm_bias; /* LayerNorm beta (GPT-2/NeoX/Falcon),
                                        * NULL for RMSNorm archs. Owned.  */
     OcLlamaLayer    *layers;        /* n_layer entries                */
+    OcLlamaMtp       mtp;
     OcModelArchitecture arch;
     /* GPT-2 learned positional embeddings (wpe), resolved lazily on first
      * forward. Per-model (views into this model's mmap). */
     OcWeightView     gpt2_pos_embed;
     bool             gpt2_pos_resolved;
+    /* LongCat n-gram over-embedding. `cfg.ngram_n_grams` tables (16 for
+     * LongCat-2.0), each a hashed embedding of width mla_kv_lora_dim (512)
+     * projected back up to n_embd. Row counts differ per table and are read
+     * from each tensor's own shape, never recomputed. Unused views are
+     * zeroed. */
+    OcWeightView     ngram_embd[OC_LONGCAT_MAX_NGRAM];
+    OcWeightView     ngram_proj[OC_LONGCAT_MAX_NGRAM];
 } OcLlamaModel;
 
 /* KV cache element type.
@@ -251,6 +357,10 @@ typedef struct OcLlamaSession {
     float *expert_gate;      /* expert_intermediate_size            */
     float *expert_up;        /* expert_intermediate_size            */
     float *expert_out;       /* n_embd                              */
+    float *expert_gate_all;
+    float *expert_up_all;
+    float *expert_down_all;
+    uint32_t *selected_experts;
     float *shexp_gate;       /* expert_intermediate_size (shared)   */
     float *shexp_up;         /* expert_intermediate_size (shared)   */
     float *shexp_out;        /* n_embd                             */
@@ -259,6 +369,31 @@ typedef struct OcLlamaSession {
     float *mla_c_kv;         /* kv_lora_dim                          */
     float *mla_q_full;       /* n_heads * q_head_dim                */
     float *mla_kv_compressed; /* kv_lora + kv_pe                     */
+    /* Per-head, held concurrently so the cache can be swept once for all
+     * heads rather than once per head. n_head * kv_lora_dim each. */
+    float *mla_q_absorbed;   /* k_b[h]^T @ q_nope, per head          */
+    float *mla_ctx_latent;   /* attention-weighted c_kv, per head    */
+    float *mla_run_max;      /* n_head online-softmax running max    */
+    float *mla_run_sum;      /* n_head online-softmax running sum    */
+    /* Qwen3.5 persistent state. Entries correspond to model layers; only
+     * recurrent entries are bound to the contiguous backing stores. */
+    OcQwen35DeltaState *qwen35_delta;
+    float *qwen35_conv_state;
+    float *qwen35_recurrent_state;
+    float *qwen35_qkv;
+    float *qwen35_gate;
+    float *qwen35_beta;
+    float *qwen35_alpha;
+    float *qwen35_conv_output;
+    float *qwen35_delta_output;
+    /* Muse Glimmer attention-output gate, n_head * head_dim. Allocated only
+     * when cfg.attn_out_gate is set. */
+    float *muse_gate;
+    float *last_hidden;
+    float *mtp_hidden;
+    float *mtp_concat;
+    uint32_t last_token;
+    uint32_t mtp_pos;
 } OcLlamaSession;
 
 /* ─── Batched decode ─────────────────────────────────────────────────────
@@ -310,6 +445,10 @@ typedef struct OcBatchSession {
     float *mla_c_kv;
     float *mla_q_full;
     float *mla_kv_compressed;
+    float *mla_q_absorbed;
+    float *mla_ctx_latent;
+    float *mla_run_max;
+    float *mla_run_sum;
 } OcBatchSession;
 
 OcError oc_batch_session_init(OcLlamaModel *model, size_t max_seqs,
@@ -339,6 +478,10 @@ OcError oc_llama_session_init(OcLlamaModel *model, OcLlamaSession *out);
 OcError oc_llama_session_init_kv(OcLlamaModel *model, OcLlamaSession *out,
                                  OcKvCacheType kv_type);
 
+/* Resolve KV type from `--kv` / OX_KV_TYPE / context length.
+ * explicit: "q8", "f32", or NULL. Contexts >= 8192 default to Q8. */
+OcKvCacheType oc_llama_select_kv_type(uint32_t n_ctx, const char *explicit);
+
 /* Bytes the KV cache occupies for `model` under `kv_type`. Useful for
  * reporting and for deciding whether a context length is affordable. */
 size_t oc_llama_kv_cache_bytes(const OcLlamaModel *model, OcKvCacheType kv_type);
@@ -349,13 +492,58 @@ size_t oc_llama_kv_cache_bytes(const OcLlamaModel *model, OcKvCacheType kv_type)
  * prompt prefill where only the KV cache matters). */
 OcError oc_llama_forward(OcLlamaSession *sess, uint32_t token, float *logits_out);
 
+bool oc_llama_mtp_present(const OcLlamaModel *model);
+
+/* Greedy MTP: emit 1 + accepted drafts. Updates session and logits. */
+OcError oc_llama_mtp_greedy_advance(OcLlamaSession *sess, float *logits,
+                                    uint32_t *out_tokens, size_t max_out,
+                                    size_t *n_out);
+
+/* Draft up to `k` MTP tokens from last_token/last_hidden. Does not touch the
+ * backbone KV. Writes pairwise confidence per draft into out_conf (nullable). */
+OcError oc_llama_mtp_draft_tokens(OcLlamaSession *sess, uint32_t k,
+                                  uint32_t *out_tokens, float *out_conf,
+                                  uint32_t *n_out);
+
+/* Prefill a whole prompt, processing `chunk` tokens per pass so they share
+ * one sweep over the weights instead of one sweep each.
+ *
+ * Equivalent to calling oc_llama_forward() for tokens[0..n_tokens), with
+ * `logits_out` receiving the LAST token's logits (NULL to skip the lm_head).
+ * KV cache entries are written for positions sess->pos .. sess->pos+n-1 and
+ * the position advances by n_tokens.
+ *
+ * `chunk` of 0 selects the default. Models the batched path does not cover
+ * (MLA, LongCat, Gemma 4, and the LayerNorm architectures with their own
+ * forward passes) fall back to the per-token loop transparently, as does a
+ * scratch allocation failure — the result is the same either way.
+ *
+ * Numerics: every matmul quantizes each activation exactly as the
+ * single-vector path does (tiling changes only how many are in flight), so
+ * dense models come out bit-identical. MoE models differ at float-rounding
+ * level and only there: grouping tokens by expert means a token's expert
+ * contributions are summed in expert-index order rather than in descending
+ * gate order, and float addition is not associative. */
+OcError oc_llama_prefill(OcLlamaSession *sess, const uint32_t *tokens,
+                         size_t n_tokens, size_t chunk, float *logits_out);
+
+/* Copy the already-prefilled prefix state from `src` into `dst`. Both
+ * sessions must belong to the same model and use the same KV type. */
+OcError oc_llama_session_copy_prefix(OcLlamaSession *dst,
+                                     const OcLlamaSession *src);
+
 /* Reset position to 0 (start a new sequence; KV cache is overwritten on
  * subsequent forwards). Does NOT zero the cache. */
 void oc_llama_session_reset(OcLlamaSession *sess);
 
 /* Rewind position to `pos` (for speculative decoding cache rollback).
  * KV cache entries at positions >= pos will be overwritten on subsequent
- * forwards. Does NOT zero the cache. */
+ * forwards. Does NOT zero the cache.
+ *
+ * Only the KV position is restored. Recurrent state (Qwen3.5 DeltaNet conv
+ * and recurrent matrices) has already absorbed every token stepped through,
+ * and no snapshot of it is kept, so a rewind cannot undo it. That is why
+ * oc_speculative_generate() refuses is_qwen35 models outright. */
 void oc_llama_session_rewind(OcLlamaSession *sess, uint32_t pos);
 
 void oc_llama_session_free(OcLlamaSession *sess);

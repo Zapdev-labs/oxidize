@@ -22,10 +22,32 @@
 #include "oxidize/tokenizer.h"
 
 #include <math.h>
+#include <pthread.h>
 #include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+typedef struct {
+    pthread_mutex_t mutex;
+    OcLlamaModel *model;
+    OcLlamaSession session;
+    uint32_t *tokens;
+    size_t n_tokens;
+    bool valid;
+} OcPromptPrefixCache;
+
+static OcPromptPrefixCache g_prompt_prefix_cache = {
+    .mutex = PTHREAD_MUTEX_INITIALIZER,
+};
+
+/* The model workspace and persistent compute pool are process-global. HTTP
+ * workers must not enter inference concurrently: a second dispatch replaces
+ * the first region's function and stack-backed job pointer while its compute
+ * workers are still using them. */
+static pthread_mutex_t g_generation_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+#define OC_OPENAI_MAX_PROMPT_BYTES (1024u * 1024u)
 
 /* ─── Minimal JSON field extraction ──────────────────────────────────────
  *
@@ -38,14 +60,19 @@
 static const char *find_json_string_field(const char *json, const char *key,
                                           char *out, size_t out_cap)
 {
-    /* Search for "key" : "value" */
     char pattern[128];
     snprintf(pattern, sizeof(pattern), "\"%s\"", key);
-    const char *p = strstr(json, pattern);
-    if (p == NULL) return NULL;
-    p += strlen(pattern);
-    while (*p == ' ' || *p == '\t' || *p == ':') p++;
-    if (*p != '"') return NULL;
+    const char *p = json;
+    for (;;) {
+        p = strstr(p, pattern);
+        if (p == NULL) return NULL;
+        p += strlen(pattern);
+        while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+        if (*p != ':') continue;
+        p++;
+        while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+        if (*p == '"') break;
+    }
     p++;   /* skip opening quote */
     size_t i = 0;
     while (*p && *p != '"' && i + 1 < out_cap) {
@@ -86,37 +113,6 @@ static double find_json_double_field(const char *json, const char *key, double d
     return strtod(p, NULL);
 }
 
-static bool find_json_bool_field(const char *json, const char *key, bool def)
-{
-    size_t key_len = strlen(key);
-    size_t depth = 0;
-    bool in_string = false;
-    bool escaped = false;
-    for (const char *p = json; *p; p++) {
-        if (in_string) {
-            if (escaped) escaped = false;
-            else if (*p == '\\') escaped = true;
-            else if (*p == '"') in_string = false;
-            continue;
-        }
-        if (*p == '{' || *p == '[') { depth++; continue; }
-        if (*p == '}' || *p == ']') { if (depth > 0) depth--; continue; }
-        if (*p != '"') continue;
-        if (depth == 1 && strncmp(p + 1, key, key_len) == 0 &&
-            p[1 + key_len] == '"') {
-            const char *value = p + key_len + 2;
-            while (*value == ' ' || *value == '\t') value++;
-            if (*value++ != ':') return def;
-            while (*value == ' ' || *value == '\t') value++;
-            if (strncmp(value, "true", 4) == 0) return true;
-            if (strncmp(value, "false", 5) == 0) return false;
-            return def;
-        }
-        in_string = true;
-    }
-    return def;
-}
-
 /* Extract the content of the LAST "assistant"/"user"/"system" message's
  * "content" field. For chat completions we render the full message array
  * as plain text (a real chat-template renderer is wired by the tokenizer
@@ -150,30 +146,74 @@ static bool next_message_object(const char **cursor, const char **start,
     return false;
 }
 
+static bool find_message_content(const char *object, char *out, size_t out_cap)
+{
+    if (find_json_string_field(object, "content", out, out_cap) != NULL)
+        return true;
+    const char *field = strstr(object, "\"content\"");
+    const char *cursor = field ? strchr(field, '[') : NULL;
+    if (cursor == NULL) return false;
+    cursor++;
+    size_t used = 0;
+    const char *part_start;
+    const char *part_end;
+    while (next_message_object(&cursor, &part_start, &part_end)) {
+        const size_t part_len = (size_t)(part_end - part_start);
+        char *part = malloc(part_len + 1u);
+        if (part == NULL) return false;
+        memcpy(part, part_start, part_len);
+        part[part_len] = '\0';
+        char type[32];
+        char *text = malloc(out_cap - used);
+        const bool text_part = text != NULL &&
+            find_json_string_field(part, "type", type, sizeof(type)) != NULL &&
+            (strcmp(type, "text") == 0 || strcmp(type, "input_text") == 0) &&
+            find_json_string_field(part, "text", text, out_cap - used) != NULL;
+        free(part);
+        if (text_part) {
+            const size_t n = strlen(text);
+            memcpy(out + used, text, n);
+            used += n;
+        }
+        free(text);
+    }
+    if (used == 0) return false;
+    out[used] = '\0';
+    return true;
+}
+
 static bool extract_messages_content(const char *json, OcChatTemplate template,
-                                     char *out, size_t out_cap)
+                                     char *out, size_t out_cap,
+                                     size_t *system_prefix_chars)
 {
     size_t out_i = 0;
     size_t message_count = 0;
+    if (system_prefix_chars != NULL) *system_prefix_chars = 0;
     const char *messages = strstr(json, "\"messages\"");
     const char *p = messages ? strchr(messages, '[') : NULL;
     if (!p) return false;
     p++;
     char role[64];
-    char content[16384];
+    char *content = malloc(out_cap);
+    if (content == NULL) return false;
     const char *object_start;
     const char *object_end;
     while (next_message_object(&p, &object_start, &object_end)) {
         size_t object_len = (size_t)(object_end - object_start);
         char *object = malloc(object_len + 1);
-        if (!object) return false;
+        if (!object) {
+            free(content);
+            return false;
+        }
         memcpy(object, object_start, object_len);
         object[object_len] = '\0';
         bool parsed = find_json_string_field(object, "role", role, sizeof(role)) &&
-                      find_json_string_field(object, "content", content, sizeof(content));
+                      find_message_content(object, content, out_cap);
         free(object);
-        if (!parsed)
+        if (!parsed) {
+            free(content);
             return false;
+        }
         const char *lookahead = p;
         const char *next_start;
         const char *next_end;
@@ -182,11 +222,17 @@ static bool extract_messages_content(const char *json, OcChatTemplate template,
                                                 out + out_i, out_cap - out_i,
                                                 message_count == 0,
                                                 is_last);
-        if (written == 0) return false;
+        if (written == 0) {
+            free(content);
+            return false;
+        }
         out_i += written;
+        if (!is_last && system_prefix_chars != NULL)
+            *system_prefix_chars = out_i;
         message_count++;
     }
     out[out_i] = '\0';
+    free(content);
     return message_count > 0;
 }
 
@@ -231,6 +277,115 @@ static char *json_escape(const char *src)
     return out;
 }
 
+static char *completion_stream_body(const char *text, const char *model,
+                                    bool chat)
+{
+    char *escaped_text = json_escape(text);
+    char *escaped_model = json_escape(model ? model : "unknown");
+    if (escaped_text == NULL || escaped_model == NULL) {
+        free(escaped_text);
+        free(escaped_model);
+        return NULL;
+    }
+    size_t cap = strlen(escaped_text) + strlen(escaped_model) * 2u + 1024u;
+    char *body = malloc(cap);
+    if (body == NULL) {
+        free(escaped_text);
+        free(escaped_model);
+        return NULL;
+    }
+    if (chat) {
+        snprintf(body, cap,
+            "data: {\"id\":\"chatcmpl-oxidize\",\"object\":\"chat.completion.chunk\","
+            "\"created\":0,\"model\":\"%s\",\"choices\":[{\"index\":0,"
+            "\"delta\":{\"role\":\"assistant\",\"content\":\"%s\"},"
+            "\"finish_reason\":null}]}\n\n"
+            "data: {\"id\":\"chatcmpl-oxidize\",\"object\":\"chat.completion.chunk\","
+            "\"created\":0,\"model\":\"%s\",\"choices\":[{\"index\":0,"
+            "\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+            "data: [DONE]\n\n",
+            escaped_model, escaped_text, escaped_model);
+    } else {
+        snprintf(body, cap,
+            "data: {\"id\":\"cmpl-oxidize\",\"object\":\"text_completion\","
+            "\"created\":0,\"model\":\"%s\",\"choices\":[{\"index\":0,"
+            "\"text\":\"%s\",\"finish_reason\":null}]}\n\n"
+            "data: {\"id\":\"cmpl-oxidize\",\"object\":\"text_completion\","
+            "\"created\":0,\"model\":\"%s\",\"choices\":[{\"index\":0,"
+            "\"text\":\"\",\"finish_reason\":\"stop\"}]}\n\n"
+            "data: [DONE]\n\n",
+            escaped_model, escaped_text, escaped_model);
+    }
+    free(escaped_text);
+    free(escaped_model);
+    return body;
+}
+
+typedef struct OcCompletionStream {
+    const OcHttpRequest *request;
+    const char *model;
+    bool chat;
+    bool sent_role;
+    bool connected;
+} OcCompletionStream;
+
+static bool send_completion_delta(const char *text, void *context)
+{
+    OcCompletionStream *stream = context;
+    char *escaped_text = json_escape(text);
+    char *escaped_model = json_escape(stream->model ? stream->model : "unknown");
+    if (escaped_text == NULL || escaped_model == NULL) {
+        free(escaped_text);
+        free(escaped_model);
+        return false;
+    }
+    size_t cap = strlen(escaped_text) + strlen(escaped_model) + 512u;
+    char *event = malloc(cap);
+    if (event == NULL) {
+        free(escaped_text);
+        free(escaped_model);
+        return false;
+    }
+    if (stream->chat) {
+        snprintf(event, cap,
+            "data: {\"id\":\"chatcmpl-oxidize\",\"object\":\"chat.completion.chunk\","
+            "\"created\":0,\"model\":\"%s\",\"choices\":[{\"index\":0,"
+            "\"delta\":{%s\"content\":\"%s\"},\"finish_reason\":null}]}\n\n",
+            escaped_model,
+            stream->sent_role ? "" : "\"role\":\"assistant\",",
+            escaped_text);
+        stream->sent_role = true;
+    } else {
+        snprintf(event, cap,
+            "data: {\"id\":\"cmpl-oxidize\",\"object\":\"text_completion\","
+            "\"created\":0,\"model\":\"%s\",\"choices\":[{\"index\":0,"
+            "\"text\":\"%s\",\"finish_reason\":null}]}\n\n",
+            escaped_model, escaped_text);
+    }
+    stream->connected = stream->request->stream_write(
+        stream->request->stream_context, event, strlen(event));
+    free(event);
+    free(escaped_text);
+    free(escaped_model);
+    return stream->connected;
+}
+
+static void finish_completion_stream(OcCompletionStream *stream)
+{
+    const char *finish = stream->chat
+        ? "data: {\"id\":\"chatcmpl-oxidize\",\"object\":\"chat.completion.chunk\","
+          "\"created\":0,\"model\":\"oxidize\",\"choices\":[{\"index\":0,"
+          "\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+          "data: [DONE]\n\n"
+        : "data: {\"id\":\"cmpl-oxidize\",\"object\":\"text_completion\","
+          "\"created\":0,\"model\":\"oxidize\",\"choices\":[{\"index\":0,"
+          "\"text\":\"\",\"finish_reason\":\"stop\"}]}\n\n"
+          "data: [DONE]\n\n";
+    if (stream->connected)
+        stream->connected = stream->request->stream_write(
+            stream->request->stream_context, finish, strlen(finish));
+}
+
 char *oc_openai_error_json(const char *message, const char *type)
 {
     if (type == NULL) type = "invalid_request_error";
@@ -258,8 +413,51 @@ char *oc_openai_error_json(const char *message, const char *type)
 /* ─── Generation core ──────────────────────────────────────────────────── */
 
 /* Run generation for `prompt` and return a malloc'd completion string. */
-static char *generate_completion(OcOpenaiState *st, const char *prompt,
-                                 int max_tokens, float temperature)
+static bool restore_system_prefix(OcOpenaiState *st, OcLlamaSession *sess,
+                                  const uint32_t *tokens, size_t n_tokens)
+{
+    if (n_tokens < 32) return false;
+    OcPromptPrefixCache *cache = &g_prompt_prefix_cache;
+    pthread_mutex_lock(&cache->mutex);
+    bool match = cache->valid && cache->model == st->model &&
+                 cache->n_tokens == n_tokens &&
+                 memcmp(cache->tokens, tokens,
+                        n_tokens * sizeof(*tokens)) == 0;
+    if (!match) {
+        if (cache->valid) {
+            oc_llama_session_free(&cache->session);
+            free(cache->tokens);
+            memset(&cache->session, 0, sizeof(cache->session));
+            cache->tokens = NULL;
+            cache->valid = false;
+        }
+        if (oc_llama_session_init(st->model, &cache->session) == OC_OK &&
+            oc_llama_prefill(&cache->session, tokens, n_tokens, 0,
+                             cache->session.logits) == OC_OK) {
+            cache->tokens = malloc(n_tokens * sizeof(*tokens));
+            if (cache->tokens != NULL) {
+                memcpy(cache->tokens, tokens, n_tokens * sizeof(*tokens));
+                cache->model = st->model;
+                cache->n_tokens = n_tokens;
+                cache->valid = true;
+                match = true;
+            }
+        }
+        if (!match) oc_llama_session_free(&cache->session);
+    }
+    const bool restored = match &&
+        oc_llama_session_copy_prefix(sess, &cache->session) == OC_OK;
+    pthread_mutex_unlock(&cache->mutex);
+    return restored;
+}
+
+static char *generate_completion_unlocked(OcOpenaiState *st,
+                                          const char *prompt,
+                                          size_t system_prefix_chars,
+                                          int max_tokens, float temperature,
+                                          float top_p,
+                                          bool (*on_text)(const char *, void *),
+                                          void *on_text_context)
 {
     if (st == NULL || !st->model_loaded || st->model == NULL || st->tokenizer == NULL) {
         return NULL;
@@ -290,21 +488,31 @@ static char *generate_completion(OcOpenaiState *st, const char *prompt,
     scfg.repeat_penalty = 1.1f;
     if (temperature > 0.0f) {
         scfg.type = OC_SAMPLER_TOP_P;
-        scfg.top_p = 0.95f;
+        scfg.top_p = top_p > 0.0f && top_p <= 1.0f ? top_p : 0.95f;
     }
 
-    /* Prefill all but the last token. */
-    for (size_t i = 0; i + 1 < n_ids; i++) {
-        if (oc_llama_forward(&sess, ids[i], NULL) != OC_OK) break;
+    size_t consumed = 0;
+    if (system_prefix_chars > 0 && system_prefix_chars <= strlen(prompt)) {
+        char *prefix = strndup(prompt, system_prefix_chars);
+        uint32_t *prefix_ids = NULL;
+        size_t n_prefix_ids = 0;
+        if (prefix != NULL &&
+            oc_tokenizer_encode(st->tokenizer, prefix, pol, &prefix_ids,
+                                &n_prefix_ids) == OC_OK &&
+            n_prefix_ids <= n_ids &&
+            memcmp(prefix_ids, ids, n_prefix_ids * sizeof(*ids)) == 0 &&
+            restore_system_prefix(st, &sess, prefix_ids, n_prefix_ids))
+            consumed = n_prefix_ids;
+        free(prefix_ids);
+        free(prefix);
     }
-    /* Forward the last prompt token WITH logits. */
-    uint32_t next = ids[n_ids - 1];
-    if (oc_llama_forward(&sess, next, sess.logits) != OC_OK) {
+    if (consumed < n_ids &&
+        oc_llama_prefill(&sess, ids + consumed, n_ids - consumed, 0,
+                         sess.logits) != OC_OK) {
         free(ids); oc_llama_session_free(&sess);
         return NULL;
     }
 
-    /* Generate. Use a dynamic string builder. */
     size_t cap = 4096, len = 0;
     char *result = malloc(cap);
     if (result == NULL) { free(ids); oc_llama_session_free(&sess); return NULL; }
@@ -328,12 +536,30 @@ static char *generate_completion(OcOpenaiState *st, const char *prompt,
             memcpy(result + len, piece, plen);
             len += plen;
             result[len] = '\0';
+            bool keep_generating = on_text == NULL || plen == 0 ||
+                                   on_text(piece, on_text_context);
             free(piece);
+            if (!keep_generating) break;
         }
         if (oc_llama_forward(&sess, tok, sess.logits) != OC_OK) break;
     }
     free(ids);
     oc_llama_session_free(&sess);
+    return result;
+}
+
+static char *generate_completion(OcOpenaiState *st, const char *prompt,
+                                 size_t system_prefix_chars,
+                                 int max_tokens, float temperature, float top_p,
+                                 bool (*on_text)(const char *, void *),
+                                 void *on_text_context)
+{
+    pthread_mutex_lock(&g_generation_mutex);
+    char *result = generate_completion_unlocked(st, prompt,
+                                                system_prefix_chars,
+                                                max_tokens, temperature, top_p,
+                                                on_text, on_text_context);
+    pthread_mutex_unlock(&g_generation_mutex);
     return result;
 }
 
@@ -357,6 +583,59 @@ static void handle_list_models(OcOpenaiState *st, int *out_status,
     *out_body = buf;
 }
 
+bool oc_openai_stream_authorize(const OcHttpRequest *req, int *out_status,
+                                const char **out_body, void *user_data)
+{
+    OcOpenaiState *st = user_data;
+    OcRequestContext rctx = {
+        .method      = req->method,
+        .path        = req->path,
+        .auth_header = req->auth_header,
+        .client_ip   = req->client_ip,
+    };
+    if (st != NULL && st->mw != NULL) {
+        int reject = oc_middleware_process_request(st->mw, &rctx);
+        if (reject != 0) {
+            *out_status = reject;
+            *out_body = oc_openai_error_json(
+                reject == 401 ? "unauthorized" : "rate limit exceeded",
+                reject == 401 ? "authentication_error" : "rate_limit_error");
+            return false;
+        }
+    }
+    if (st == NULL || !st->model_loaded || st->model == NULL || st->tokenizer == NULL) {
+        *out_status = 503;
+        *out_body = oc_openai_error_json("no model loaded", "server_error");
+        return false;
+    }
+    if (strcmp(req->path, "/v1/completions") == 0) {
+        char prompt[8192];
+        if (find_json_string_field(req->body, "prompt", prompt, sizeof(prompt)) == NULL) {
+            *out_status = 400;
+            *out_body = oc_openai_error_json("missing 'prompt' field", "invalid_request_error");
+            return false;
+        }
+    } else if (strcmp(req->path, "/v1/chat/completions") == 0) {
+        char *prompt = calloc(OC_OPENAI_MAX_PROMPT_BYTES, 1);
+        if (prompt == NULL) {
+            *out_status = 500;
+            *out_body = oc_openai_error_json("out of memory", "server_error");
+            return false;
+        }
+        size_t prefix = 0;
+        const bool valid = extract_messages_content(req->body,
+            oc_chat_detect(oc_model_arch_name(st->model->arch)), prompt,
+            OC_OPENAI_MAX_PROMPT_BYTES, &prefix);
+        free(prompt);
+        if (!valid) {
+            *out_status = 400;
+            *out_body = oc_openai_error_json("invalid or oversized messages", "invalid_request_error");
+            return false;
+        }
+    }
+    return true;
+}
+
 static void handle_completion(OcOpenaiState *st, const OcHttpRequest *req,
                               int *out_status, const char **out_body)
 {
@@ -373,19 +652,33 @@ static void handle_completion(OcOpenaiState *st, const OcHttpRequest *req,
     }
     int max_tokens = find_json_int_field(req->body, "max_tokens", 128);
     double temp = find_json_double_field(req->body, "temperature", 0.0);
-    bool stream = find_json_bool_field(req->body, "stream", false);
+    double top_p = find_json_double_field(req->body, "top_p", 0.95);
+    bool stream = oc_http_json_bool_field(req->body, "stream", false);
 
-    if (stream) {
-        *out_body = oc_openai_error_json("streaming is not supported by this server",
-                                         "invalid_request_error");
-        *out_status = 400;
-        return;
-    }
-
-    char *text = generate_completion(st, prompt, max_tokens, (float)temp);
+    OcCompletionStream stream_ctx = {
+        .request = req, .model = st->model_id, .chat = false,
+        .connected = stream && req->stream_write != NULL,
+    };
+    char *text = generate_completion(st, prompt, 0, max_tokens, (float)temp, (float)top_p,
+                                     stream_ctx.connected
+                                         ? send_completion_delta : NULL,
+                                     &stream_ctx);
     if (text == NULL) {
         *out_body = oc_openai_error_json("generation failed", "server_error");
         *out_status = 500;
+        return;
+    }
+    if (stream) {
+        if (req->stream_write != NULL) {
+            finish_completion_stream(&stream_ctx);
+            free(text);
+            *out_body = NULL;
+            *out_status = 200;
+            return;
+        }
+        *out_body = completion_stream_body(text, st->model_id, false);
+        free(text);
+        *out_status = *out_body != NULL ? 200 : 500;
         return;
     }
     /* Build the OpenAI completion response JSON. */
@@ -417,25 +710,52 @@ static void handle_chat_completion(OcOpenaiState *st, const OcHttpRequest *req,
         *out_status = 503;
         return;
     }
-    if (find_json_bool_field(req->body, "stream", false)) {
-        *out_body = oc_openai_error_json("streaming is not supported by this server",
-                                         "invalid_request_error");
-        *out_status = 400;
+    bool stream = oc_http_json_bool_field(req->body, "stream", false);
+    char *prompt = calloc(OC_OPENAI_MAX_PROMPT_BYTES, 1);
+    if (prompt == NULL) {
+        *out_body = oc_openai_error_json("out of memory", "server_error");
+        *out_status = 500;
         return;
     }
-    char prompt[16384] = {0};
+    size_t system_prefix_chars = 0;
     OcChatTemplate template = oc_chat_detect(oc_model_arch_name(st->model->arch));
-    if (!extract_messages_content(req->body, template, prompt, sizeof(prompt))) {
+    if (!extract_messages_content(req->body, template, prompt,
+                                  OC_OPENAI_MAX_PROMPT_BYTES,
+                                  &system_prefix_chars)) {
+        free(prompt);
         *out_body = oc_openai_error_json("invalid or oversized messages", "invalid_request_error");
         *out_status = 400;
         return;
     }
     int max_tokens = find_json_int_field(req->body, "max_tokens", 128);
     double temp = find_json_double_field(req->body, "temperature", 0.0);
-    char *text = generate_completion(st, prompt, max_tokens, (float)temp);
+    double top_p = find_json_double_field(req->body, "top_p", 0.95);
+    OcCompletionStream stream_ctx = {
+        .request = req, .model = st->model_id, .chat = true,
+        .connected = stream && req->stream_write != NULL,
+    };
+    char *text = generate_completion(st, prompt, system_prefix_chars,
+                                     max_tokens, (float)temp, (float)top_p,
+                                     stream_ctx.connected
+                                         ? send_completion_delta : NULL,
+                                     &stream_ctx);
+    free(prompt);
     if (text == NULL) {
         *out_body = oc_openai_error_json("generation failed", "server_error");
         *out_status = 500;
+        return;
+    }
+    if (stream) {
+        if (req->stream_write != NULL) {
+            finish_completion_stream(&stream_ctx);
+            free(text);
+            *out_body = NULL;
+            *out_status = 200;
+            return;
+        }
+        *out_body = completion_stream_body(text, st->model_id, true);
+        free(text);
+        *out_status = *out_body != NULL ? 200 : 500;
         return;
     }
     char *escaped_text = json_escape(text);
@@ -488,9 +808,11 @@ static void handle_embeddings(OcOpenaiState *st, const OcHttpRequest *req,
         return;
     }
 
+    pthread_mutex_lock(&g_generation_mutex);
     OcLlamaSession sess;
     e = oc_llama_session_init(st->model, &sess);
     if (e != OC_OK) {
+        pthread_mutex_unlock(&g_generation_mutex);
         free(ids);
         *out_body = oc_openai_error_json("session init failed", "server_error");
         *out_status = 500;
@@ -503,6 +825,7 @@ static void handle_embeddings(OcOpenaiState *st, const OcHttpRequest *req,
     }
     if (e != OC_OK) {
         oc_llama_session_free(&sess);
+        pthread_mutex_unlock(&g_generation_mutex);
         free(ids);
         *out_body = oc_openai_error_json("forward pass failed", "server_error");
         *out_status = 500;
@@ -513,11 +836,13 @@ static void handle_embeddings(OcOpenaiState *st, const OcHttpRequest *req,
     float *embedding = calloc(n_embd, sizeof(float));
     if (!embedding) {
         oc_llama_session_free(&sess); free(ids);
+        pthread_mutex_unlock(&g_generation_mutex);
         *out_body = oc_openai_error_json("allocation failed", "server_error");
         *out_status = 500; return;
     }
     for (uint32_t i = 0; i < n_embd; i++) embedding[i] = sess.x[i];
     oc_llama_session_free(&sess);
+    pthread_mutex_unlock(&g_generation_mutex);
     free(ids);
 
     /* L2 normalize. */
@@ -571,7 +896,9 @@ static void handle_responses(OcOpenaiState *st, const OcHttpRequest *req,
     if (max_tokens == 128)
         max_tokens = find_json_int_field(req->body, "max_tokens", 128);
     double temp = find_json_double_field(req->body, "temperature", 0.0);
-    char *text = generate_completion(st, prompt, max_tokens, (float)temp);
+    double top_p = find_json_double_field(req->body, "top_p", 0.95);
+    char *text = generate_completion(st, prompt, 0, max_tokens, (float)temp, (float)top_p,
+                                     NULL, NULL);
     if (!text) {
         *out_body = oc_openai_error_json("generation failed", "server_error");
         *out_status = 500; return;
@@ -694,7 +1021,7 @@ void oc_openai_handler(const OcHttpRequest *req,
         .client_ip   = req->client_ip,
     };
     int reject = 0;
-    if (st->mw != NULL) {
+    if (st->mw != NULL && req->stream_write == NULL) {
         reject = oc_middleware_process_request(st->mw, &rctx);
     }
 
@@ -738,6 +1065,12 @@ void oc_openai_handler(const OcHttpRequest *req,
         *out_status = 404;
     }
 
+    if (*out_status == 200 && req->method == OC_HTTP_POST &&
+        oc_http_json_bool_field(req->body, "stream", false) &&
+        (strcmp(req->path, "/v1/completions") == 0 ||
+         strcmp(req->path, "/v1/chat/completions") == 0))
+        *out_content_type = "text/event-stream";
+
     /* Compute body length if a body was set. */
     if (*out_body != NULL) {
         *out_body_len = strlen(*out_body);
@@ -767,7 +1100,9 @@ void oc_openai_handler(const OcHttpRequest *req,
 
 void oc_openai_attach_http(OcHttpServer *srv, OcOpenaiState *st)
 {
-    if (srv == NULL || st == NULL || st->mw == NULL) return;
+    if (srv == NULL) return;
+    oc_http_server_set_stream_authorizer(srv, oc_openai_stream_authorize);
+    if (st == NULL || st->mw == NULL) return;
     char cors[384];
     if (oc_middleware_cors_headers(st->mw, cors, sizeof(cors)) > 0)
         oc_http_server_set_extra_headers(srv, cors);

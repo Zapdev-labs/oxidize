@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "oxidize/workspace.h"
+#include "oxidize/weight_ops.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -52,7 +53,10 @@ OcError oc_workspace_for_config(OcWorkspace *ws, const OcInferenceConfig *cfg)
     ws->head_dim = head_dim_max;
     ws->kv_copy_size = kv_copy_size;
     ws->vocab_size = cfg->vocab_size;
-    ws->n_experts = cfg->num_experts > 0 ? cfg->num_experts : 1;
+    /* The router spans routed AND zero-expert slots; sizing this to
+     * num_experts alone would truncate LongCat's 896-wide router to 768. */
+    size_t n_slots = (size_t)cfg->num_experts + (size_t)cfg->zero_expert_count;
+    ws->n_experts = n_slots > 0 ? n_slots : 1;
     ws->n_experts_per_tok = n_experts_per_tok;
     ws->expert_inter = expert_inter;
 
@@ -73,6 +77,7 @@ OcError oc_workspace_for_config(OcWorkspace *ws, const OcInferenceConfig *cfg)
     ws->kv_values_copy = alloc_zeroed(kv_copy_size);
     ws->logits = alloc_zeroed(cfg->vocab_size);
     ws->moe_router_logits = alloc_zeroed(ws->n_experts);
+    ws->moe_expert_scores = calloc(ws->n_experts, sizeof(OcExpertScore));
     ws->mamba_scratch = alloc_zeroed(h > 576 ? h : 576);
     ws->conv_out = alloc_zeroed(max_qkv);
     ws->shortconv_bcx = alloc_zeroed(h * 3);
@@ -88,6 +93,7 @@ OcError oc_workspace_for_config(OcWorkspace *ws, const OcInferenceConfig *cfg)
         ws->kv_values_copy, ws->logits, ws->moe_router_logits, ws->mamba_scratch,
         ws->conv_out, ws->shortconv_bcx, ws->shortconv_bx, ws->moe_gate_all,
         ws->moe_up_all, ws->moe_down_all };
+    if (ws->moe_expert_scores == NULL) { oc_workspace_free(ws); return OC_ERR_OOM; }
     for (size_t i = 0; i < sizeof(ptrs) / sizeof(ptrs[0]); i++) {
         if (!ptrs[i]) {
             oc_workspace_free(ws);
@@ -116,6 +122,7 @@ void oc_workspace_free(OcWorkspace *ws)
     free(ws->kv_values_copy);
     free(ws->logits);
     free(ws->moe_router_logits);
+    free(ws->moe_expert_scores);
     free(ws->mamba_scratch);
     free(ws->conv_out);
     free(ws->shortconv_bcx);
@@ -141,6 +148,7 @@ void oc_workspace_zero(OcWorkspace *ws)
     if (ws->attn_result) memset(ws->attn_result, 0, ws->max_qkv * sizeof(float));
     if (ws->logits) memset(ws->logits, 0, ws->vocab_size * sizeof(float));
     if (ws->moe_router_logits) memset(ws->moe_router_logits, 0, ws->n_experts * sizeof(float));
+    if (ws->moe_expert_scores) memset(ws->moe_expert_scores, 0, ws->n_experts * sizeof(OcExpertScore));
 }
 
 size_t oc_workspace_size_bytes(const OcWorkspace *ws)
@@ -162,5 +170,5 @@ size_t oc_workspace_size_bytes(const OcWorkspace *ws)
     total += ws->hidden_size;      /* shortconv_bx */
     total += ws->n_experts_per_tok * ws->expert_inter * 2;  /* moe_gate_all, moe_up_all */
     total += ws->n_experts_per_tok * ws->hidden_size;       /* moe_down_all */
-    return total * sizeof(float);
+    return total * sizeof(float) + ws->n_experts * sizeof(OcExpertScore);
 }

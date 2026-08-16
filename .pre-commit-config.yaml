@@ -25,6 +25,7 @@ repos:
         entry: cargo clippy --workspace --all-targets -- -D warnings
         language: system
         pass_filenames: false
+        stages: [pre-push]
         types_or: [rust]
 
       - id: cargo-udeps
@@ -34,6 +35,21 @@ repos:
         pass_filenames: false
         stages: [pre-push]
         types_or: [rust]
+
+      - id: c-build
+        name: oxidize-c build (-Werror)
+        entry: bash -c 'make -C oxidize-c build'
+        language: system
+        pass_filenames: false
+        files: ^oxidize-c/.*\.(c|h)$
+
+      - id: c-test
+        name: oxidize-c tests
+        entry: bash -c 'make -C oxidize-c test'
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+        files: ^oxidize-c/.*\.(c|h)$
 
       - id: gofmt
         name: gofmt

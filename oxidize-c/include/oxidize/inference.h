@@ -75,6 +75,17 @@ typedef struct {
     /* YaRN rope extension. */
     float    yarn_factor;               /* 0 = disabled */
     float    yarn_orig_ctx;             /* original context length */
+    /* deepseek_yarn only: the two mscale knobs. Left at 0 by every other
+     * architecture, which keeps the plain 1/sqrt(head_dim) attention scale
+     * and an unscaled RoPE. See oc_rope_deepseek_yarn_scales(). */
+    float    yarn_mscale;
+    float    yarn_mscale_all_dim;
+
+    /* LongCat: identity experts occupying router slots
+     * [num_experts, num_experts + zero_expert_count). They hold no weights
+     * and contribute their weighted normalized input to the FFN output.
+     * Appended to preserve the layout of the pre-existing configuration fields. */
+    uint32_t zero_expert_count;
 } OcInferenceConfig;
 
 /* Initialize with Rust Default values. */

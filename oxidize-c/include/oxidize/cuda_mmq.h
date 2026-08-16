@@ -8,8 +8,8 @@
  * quantized in device memory and are dequantized in registers at use time.
  *
  * Supported types cover everything a Q4_K_M file contains — Q4_K (144B/256),
- * Q6_K (210B/256), Q8_0 (34B/32) — plus IQ4_XS (136B/256), which is what the
- * imatrix-quantized Gemma 4 files use for 410 of their 833 tensors. Anything
+ * Q6_K (210B/256), Q8_0 (34B/32) — plus IQ4_XS (136B/256), Q4_0/Q5_0, and the
+ * AL-family aliases (AL5=Q4_0, AL6=Q5_0, AL8=Q8_0, AL5_XS 3-bit). Anything
  * else falls back to the host dequantize-to-f32 upload path in cuda.cu, which
  * for a 31B model means ~124 GB of f32 weights and does not fit on any single
  * card — so a missing kernel here is a hard load failure, not a slow path.

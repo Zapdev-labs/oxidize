@@ -224,8 +224,8 @@ void oc_add_repeating_bias(float *buf, size_t buf_len,
 static int compare_expert_scores(const void *a, const void *b)
 {
     const OcExpertScore *sa = a, *sb = b;
-    if (sa->weight > sb->weight) return -1;
-    if (sa->weight < sb->weight) return 1;
+    if (sa->select > sb->select) return -1;
+    if (sa->select < sb->select) return 1;
     return 0;
 }
 
@@ -249,44 +249,59 @@ OcError oc_moe_ffn_forward(const OcWeightStorage *gate_inp,
     size_t h = cfg->hidden_size;
     size_t i_size = cfg->expert_intermediate_size > 0 ? cfg->expert_intermediate_size : cfg->intermediate_size;
     size_t n_experts = cfg->num_experts;
+    /* LongCat appends `zero_expert_count` identity experts after the routed
+     * ones. They hold no weights, so the expert pool is still n_experts
+     * wide, but the ROUTER spans every slot and top-k picks across all of
+     * them -- a token can route part of its mass to "do nothing". */
+    size_t n_zero  = cfg->zero_expert_count;
+    size_t n_slots = n_experts + n_zero;
     size_t n_per_tok = cfg->num_experts_per_tok;
     if (n_per_tok == 0) n_per_tok = 1;
-    if (n_per_tok > n_experts) n_per_tok = n_experts;
+    if (n_per_tok > n_slots) n_per_tok = n_slots;
     bool sigmoid_gating = cfg->expert_gating_sigmoid;
 
     /* Zero output. */
     memset(ffn_out, 0, h * sizeof(float));
 
-    /* 1. Router logits: [n_experts] */
-    memset(router_logits, 0, n_experts * sizeof(float));
-    OcError e = oc_gemv_weight(gate_inp, n_experts, h, normed, router_logits);
+    /* 1. Router logits: [n_slots] */
+    memset(router_logits, 0, n_slots * sizeof(float));
+    OcError e = oc_gemv_weight(gate_inp, n_slots, h, normed, router_logits);
     if (e != OC_OK) return e;
 
     /* 2. Gating: softmax (Mixtral) or sigmoid + bias (LFM2MoE). */
     if (sigmoid_gating) {
-        for (size_t i = 0; i < n_experts; i++)
+        for (size_t i = 0; i < n_slots; i++)
             router_logits[i] = 1.0f / (1.0f + expf(-router_logits[i]));
-        for (size_t i = 0; i < n_experts; i++) {
+        for (size_t i = 0; i < n_slots; i++) {
             float bias = exp_probs_b ? exp_probs_b[i] : 0.0f;
             expert_scores[i].idx = i;
+            /* Historically the bias was folded into the weight here. It still
+             * is for sigmoid gating, which is what LFM2MoE expects; only the
+             * softmax path below separates selection from weight. */
             expert_scores[i].weight = router_logits[i] + bias;
+            expert_scores[i].select = expert_scores[i].weight;
         }
     } else {
         float max_logit = router_logits[0];
-        for (size_t i = 1; i < n_experts; i++)
+        for (size_t i = 1; i < n_slots; i++)
             if (router_logits[i] > max_logit) max_logit = router_logits[i];
         float sum_exp = 0.0f;
-        for (size_t i = 0; i < n_experts; i++) {
+        for (size_t i = 0; i < n_slots; i++) {
             router_logits[i] = expf(router_logits[i] - max_logit);
             sum_exp += router_logits[i];
         }
         if (sum_exp > 0.0f) {
-            for (size_t i = 0; i < n_experts; i++)
+            for (size_t i = 0; i < n_slots; i++)
                 router_logits[i] /= sum_exp;
         }
-        for (size_t i = 0; i < n_experts; i++) {
+        for (size_t i = 0; i < n_slots; i++) {
             expert_scores[i].idx = i;
             expert_scores[i].weight = router_logits[i];
+            /* exp_probs_b steers WHICH experts win top-k without changing
+             * how much their output counts. Folding it into the weight
+             * instead would double-count the bias. */
+            float bias = (n_zero > 0 && exp_probs_b) ? exp_probs_b[i] : 0.0f;
+            expert_scores[i].select = router_logits[i] + bias;
         }
     }
 
@@ -294,19 +309,20 @@ OcError oc_moe_ffn_forward(const OcWeightStorage *gate_inp,
     if (cfg->expert_group_count > 1 &&
         cfg->expert_group_used_count > 0 &&
         cfg->expert_group_used_count < cfg->expert_group_count &&
-        n_experts % cfg->expert_group_count == 0)
+        n_slots % cfg->expert_group_count == 0)
     {
         size_t n_group = cfg->expert_group_count;
-        size_t group_size = n_experts / n_group;
+        size_t group_size = n_slots / n_group;
         size_t n_group_used = cfg->expert_group_used_count;
 
         /* Compute per-group max score. */
-        float *group_max = calloc(n_group, sizeof(float));
+        float *group_max = malloc(n_group * sizeof(float));
         if (!group_max) return OC_ERR_OOM;
-        for (size_t i = 0; i < n_experts; i++) {
+        for (size_t g = 0; g < n_group; g++) group_max[g] = -INFINITY;
+        for (size_t i = 0; i < n_slots; i++) {
             size_t g = i / group_size;
-            if (expert_scores[i].weight > group_max[g])
-                group_max[g] = expert_scores[i].weight;
+            if (expert_scores[i].select > group_max[g])
+                group_max[g] = expert_scores[i].select;
         }
         /* Find top n_group_used groups. */
         /* Simple: mark groups as selected or not. */
@@ -324,22 +340,30 @@ OcError oc_moe_ffn_forward(const OcWeightStorage *gate_inp,
             group_selected[best_g] = true;
         }
         /* Mask out experts in non-selected groups. */
-        for (size_t i = 0; i < n_experts; i++) {
+        for (size_t i = 0; i < n_slots; i++) {
             size_t g = i / group_size;
             if (!group_selected[g])
-                expert_scores[i].weight = -1e30f;
+                expert_scores[i].select = -1e30f;
         }
         free(group_max);
         free(group_selected);
     }
 
     /* 3. Sort experts by score (descending). */
-    qsort(expert_scores, n_experts, sizeof(OcExpertScore), compare_expert_scores);
+    qsort(expert_scores, n_slots, sizeof(OcExpertScore), compare_expert_scores);
 
-    /* 4. Renormalize weights over top-k. */
+    /* 4. Renormalize weights over top-k.
+     *
+     * LongCat does NOT renormalize: the softmax already spans all 896 slots
+     * and the routed mass is meant to be less than 1 when zero experts win,
+     * which is exactly how a token skips work. Rescaling to sum 1 would undo
+     * that and force every token through a full-strength FFN. */
+    bool renormalize = (n_zero == 0);
     float weight_sum = 0.0f;
-    for (size_t k = 0; k < n_per_tok; k++)
-        weight_sum += expert_scores[k].weight;
+    if (renormalize) {
+        for (size_t k = 0; k < n_per_tok; k++)
+            weight_sum += expert_scores[k].weight;
+    }
     /* Apply expert_weights_scale. */
     float scale = cfg->expert_weights_scale;
 
@@ -347,10 +371,21 @@ OcError oc_moe_ffn_forward(const OcWeightStorage *gate_inp,
     for (size_t k = 0; k < n_per_tok; k++) {
         size_t expert_idx = expert_scores[k].idx;
         float weight = expert_scores[k].weight;
-        if (weight <= -1e29f) continue;  /* masked out */
+        if (expert_scores[k].select <= -1e29f) continue;  /* masked out */
 
-        float normalized_weight = (weight_sum > 0.0f)
-            ? (weight / weight_sum) * scale : 0.0f;
+        float normalized_weight;
+        if (renormalize) {
+            normalized_weight = (weight_sum > 0.0f)
+                ? (weight / weight_sum) * scale : 0.0f;
+        } else {
+            normalized_weight = weight * scale;
+        }
+
+        if (expert_idx >= n_experts) {
+            for (size_t i = 0; i < h; i++)
+                ffn_out[i] += normalized_weight * normed[i];
+            continue;
+        }
 
         /* gate = gate_exps[expert_idx] @ normed  -> [i_size] */
         e = oc_gemv_expert_weight(gate_exps, expert_idx, n_experts,

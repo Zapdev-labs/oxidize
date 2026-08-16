@@ -494,11 +494,15 @@ Test(quant, ggml_id_round_trip, .description = "oc_quant_type_from_ggml_id round
     cr_assert_eq(oc_quant_type_from_ggml_id(241), OC_QUANT_AL8, "ggml id 241");
     cr_assert_eq(oc_quant_type_from_ggml_id(243), OC_QUANT_AL5_XS, "ggml id 243");
     cr_assert_eq(oc_quant_type_from_ggml_id(30), OC_QUANT_BF16, "ggml id 30");
+    cr_assert_eq(oc_quant_type_from_ggml_id(66), OC_QUANT_IQ1_XXXS,
+                 "ggml id 66");
     cr_assert_eq(oc_quant_type_from_ggml_id(0xff), OC_QUANT_UNKNOWN, "unknown ggml id");
 
     cr_assert_eq(oc_quant_type_to_ggml_id(OC_QUANT_F32),  0u,  "F32 ggml id");
     cr_assert_eq(oc_quant_type_to_ggml_id(OC_QUANT_Q4_K_M), 12u, "Q4_K_M ggml id");
     cr_assert_eq(oc_quant_type_to_ggml_id(OC_QUANT_Q8_0), 8u, "Q8_0 ggml id");
+    cr_assert_eq(oc_quant_type_to_ggml_id(OC_QUANT_IQ1_XXXS), 66u,
+                 "IQ1_XXXS ggml id");
     cr_assert_eq(oc_quant_type_to_ggml_id(OC_QUANT_UNKNOWN), 0xffffffffu, "UNKNOWN ggml id");
 }
 
@@ -892,6 +896,7 @@ Test(quant, al_iq_nvfp4_block_sizes, .description = "VAL-QUANT-001: AL/IQ/NVFP4 
         { OC_QUANT_AL8,      32,  34  },   /* == Q8_0 layout */
         { OC_QUANT_IQ1_S,    256, 50  },
         { OC_QUANT_IQ1_M,    256, 56  },
+        { OC_QUANT_IQ1_XXXS, 256, 38  },
         { OC_QUANT_IQ2_XXS,  256, 66  },
         { OC_QUANT_IQ2_XS,   256, 74  },
         { OC_QUANT_IQ2_S,    256, 82  },
@@ -1032,6 +1037,7 @@ Test(quant, iq_family_zero_blocks, .description = "VAL-QUANT-007: IQ-family zero
     struct { OcGgufQuantizationType t; size_t bytes; size_t els; } cases[] = {
         { OC_QUANT_IQ1_S,   50,  256 },
         { OC_QUANT_IQ1_M,   56,  256 },
+        { OC_QUANT_IQ1_XXXS, 38, 256 },
         { OC_QUANT_IQ2_XXS, 66,  256 },
         { OC_QUANT_IQ2_XS,  74,  256 },
         { OC_QUANT_IQ2_S,   82,  256 },
@@ -1052,6 +1058,57 @@ Test(quant, iq_family_zero_blocks, .description = "VAL-QUANT-007: IQ-family zero
                 oc_quant_type_name(cases[c].t), i, dst[i]);
         }
     }
+}
+
+Test(quant, iq1_xxxs_handcrafted, .description = "IQ1_XXXS decodes scale, grid, and delta") {
+    uint8_t block[38] = {0};
+    float dst[256];
+
+    block[1] = 0x3c;
+    cr_assert_eq(oc_quant_dequant_row_scalar(OC_QUANT_IQ1_XXXS,
+                                             block, sizeof(block), dst, 256),
+                 OC_OK);
+    for (size_t i = 0; i < 256; i++) {
+        cr_assert_float_eq(dst[i], -0.875f, 0.0f, "IQ1_XXXS[%zu]", i);
+    }
+}
+
+Test(quant, iq1_xxxs_q8_k_dot_matches_dequantized_oracle) {
+    uint8_t row[76] = {0};
+    uint8_t q8[584] = {0};
+    float weights[512];
+    float scale = 0.25f;
+    float expected = 0.0f;
+
+    for (size_t block = 0; block < 2; block++) {
+        uint8_t *weight_block = row + block * 38;
+        uint8_t *act_block = q8 + block * 292;
+        weight_block[1] = 0x3c;
+        for (size_t i = 0; i < 32; i++)
+            weight_block[2 + i] = (uint8_t)(block * 113u + i * 7u + 3u);
+        for (size_t i = 0; i < 4; i++)
+            weight_block[34 + i] = (uint8_t)((block * 8u + 2u * i + 1u) << 4
+                                            | (block * 8u + 2u * i));
+        memcpy(act_block, &scale, sizeof(scale));
+        int8_t *values = (int8_t *)(act_block + 4);
+        for (size_t i = 0; i < 256; i++)
+            values[i] = (int8_t)(((block * 17u + i * 29u) % 255u) - 127);
+        for (size_t group = 0; group < 16; group++) {
+            int16_t sum = 0;
+            for (size_t i = 0; i < 16; i++) sum += values[group * 16 + i];
+            memcpy(act_block + 260 + group * 2, &sum, sizeof(sum));
+        }
+    }
+    cr_assert_eq(oc_quant_dequant_row_scalar(OC_QUANT_IQ1_XXXS,
+                                             row, sizeof(row), weights, 512),
+                 OC_OK);
+    for (size_t block = 0; block < 2; block++) {
+        const int8_t *values = (const int8_t *)(q8 + block * 292 + 4);
+        for (size_t i = 0; i < 256; i++)
+            expected += weights[block * 256 + i] * scale * values[i];
+    }
+    float actual = oc_quant_dot_iq1_xxxs_q8_k(row, 2, q8);
+    cr_assert_float_eq(actual, expected, 1e-3f);
 }
 
 Test(quant, iq4_nl_handcrafted, .description = "VAL-QUANT-007: IQ4_NL dequant with d=1.0 matches KVALUES_IQ4NL codebook") {

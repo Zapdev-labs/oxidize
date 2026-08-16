@@ -109,6 +109,8 @@ typedef struct OcCudaContext {
     uint32_t n_embd, n_head, n_head_kv, n_ff, head_dim, n_layer, vocab_size;
     uint32_t n_ctx, rope_dim;
     float rope_theta, rms_norm_eps, norm_scale;
+    float yarn_factor;
+    uint32_t yarn_orig_ctx;
     bool uses_geglu;
     /* ── Gemma 4 dual-geometry attention ──────────────────────────────────
      *
@@ -141,9 +143,44 @@ typedef struct OcCudaContext {
     float   *l_out_scale;
     /* MoE config mirror (0 experts = dense FFN). */
     uint32_t num_experts, num_experts_per_tok, expert_intermediate_size;
+    uint32_t shared_expert_intermediate_size;
     bool  expert_gating_sigmoid;
     float expert_weights_scale;
+    /* Qwen3.5 / Qwen 3.8 hybrid: Gated DeltaNet layers mixed with full GQA.
+     * l_kind[l] is OcLlamaLayerKind. Full-attention layers index the KV cache
+     * by l_kv_index[l], not by the transformer layer id. */
+    bool      is_qwen35;
+    uint8_t  *l_kind;
+    uint32_t *l_kv_index;
+    uint32_t  n_full_attention_layers;
+    uint32_t  n_recurrent_layers;
+    uint32_t  ssm_conv_kernel;
+    uint32_t  ssm_group_count;
+    uint32_t  ssm_state_size;
+    uint32_t  ssm_value_heads;
+    uint32_t  ssm_inner_size;
+    OcCudaWeight *d_attn_qkv;
+    OcCudaWeight *d_attn_gate;
+    OcCudaWeight *d_ssm_alpha;
+    OcCudaWeight *d_ssm_beta;
+    OcCudaWeight *d_ssm_out;
+    float **d_ssm_conv1d;
+    float **d_ssm_a;
+    float **d_ssm_dt_bias;
+    float **d_ssm_norm;
+    float *d_conv_state;
+    float *d_recurrent_state;
+    float *d_qwen35_qkv;
+    float *d_qwen35_gate;
+    float *d_qwen35_beta;
+    float *d_qwen35_alpha;
+    float *d_qwen35_conv_out;
+    float *d_qwen35_delta_out;
+    size_t conv_state_per_layer;
+    size_t recurrent_state_per_layer;
     bool initialized;
+    /* Non-blocking streams for independent GEMVs (Q/K/V or FFN gate/up). */
+    void *compute_streams[3];
     /* Device memory accounting, filled during init (for --verbose reporting). */
     size_t vram_weight_bytes;   /* all weight tensors                       */
     size_t vram_kv_bytes;       /* KV cache                                 */
@@ -171,6 +208,10 @@ void oc_cuda_free(OcCudaContext *ctx);
 
 /* Check if CUDA is available (compiled with OC_CUDA and a GPU is present). */
 bool oc_cuda_available(void);
+
+/* Device-side kernel self-test: Qwen3.5 unpack/QK-norm/RoPE/DeltaNet and
+ * packed Q4_0 GEMV. No GGUF required. Returns OC_OK on pass. */
+OcError oc_cuda_selftest(void);
 
 #ifdef __cplusplus
 }

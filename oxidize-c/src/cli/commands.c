@@ -27,6 +27,7 @@
 #include "oxidize/http.h"
 #include "oxidize/inspect.h"
 #include "oxidize/llama.h"
+#include "oxidize/dspark.h"
 #include "oxidize/log.h"
 #include "oxidize/merge.h"
 #include "oxidize/openai.h"
@@ -120,6 +121,13 @@ static void cli_error(const char *fmt, ...)
     vfprintf(stderr, fmt, ap);
     fprintf(stderr, "\n");
     va_end(ap);
+}
+
+static OcError cli_session_init(const OcCliContext *ctx, OcLlamaModel *model,
+                                OcLlamaSession *sess)
+{
+    OcKvCacheType kv = oc_llama_select_kv_type(model->cfg.n_ctx, ctx->kv_type);
+    return oc_llama_session_init_kv(model, sess, kv);
 }
 
 void oc_cli_apply_ctx(const OcCliContext *ctx, struct OcLlamaModel *model)
@@ -347,6 +355,8 @@ void oc_cli_command_help(void)
 "  --model PATH          GGUF model file\n"
 "  --output text|json    Output format (default: text)\n"
 "  --threads N           CPU thread hint (0 = auto)\n"
+"  --kv f32|q8           KV cache dtype (q8 auto when ctx>=8192)\n"
+"  --ctx N               KV context length (default cap 4096)\n"
 "  --verbose, -v         Verbose logging to stderr\n"
 "  --help, -h            Show help\n"
 "  --version             Print version\n"
@@ -385,8 +395,11 @@ void oc_cli_command_help_for(OcCliCommand cmd)
                "USAGE: oxidize-c bench --model <path> [OPTIONS]\n\n"
                "OPTIONS:\n"
                "  --bench-iters N       Number of iterations (default 3)\n"
-               "  --bench-warmup N      Warmup tokens (default 5)\n"
+               "  --bench-warmup N      Unreported warmup iterations (default 5)\n"
                "  --bench-tokens N      Measured tokens per iteration (default 50)\n"
+               "  --bench-prompt-tokens N  Exact synthetic prompt-token count\n"
+               "  --bench-decode-tokens N  Exact decode-token count\n"
+               "  --bench-no-eos        Do not stop decode at EOS\n"
                "  --prompt TEXT          Prompt to use for benchmarking\n");
         break;
     case OC_CLI_CMD_INSPECT:
@@ -532,7 +545,6 @@ OcError oc_cli_run_bench(OcCliContext *ctx)
         oc_llama_free(&model);
         return e;
     }
-
     const char *prompt = ctx->prompt;
     if (!prompt) prompt = "The quick brown fox jumps over the lazy dog.";
 
@@ -547,6 +559,24 @@ OcError oc_cli_run_bench(OcCliContext *ctx)
         oc_llama_free(&model);
         return e != OC_OK ? e : OC_ERR_TOKENIZER;
     }
+
+    uint32_t *synthetic_ids = NULL;
+    const uint32_t *bench_ids = ids;
+    if (ctx->bench_prompt_tokens > 0) {
+        synthetic_ids = malloc((size_t)ctx->bench_prompt_tokens * sizeof(*synthetic_ids));
+        if (synthetic_ids == NULL) {
+            free(ids);
+            oc_tokenizer_free(&tok);
+            oc_llama_free(&model);
+            return OC_ERR_OOM;
+        }
+        for (uint32_t i = 0; i < ctx->bench_prompt_tokens; i++)
+            synthetic_ids[i] = ids[i % n_ids];
+        bench_ids = synthetic_ids;
+        n_ids = ctx->bench_prompt_tokens;
+    }
+    uint32_t decode_tokens = ctx->bench_decode_tokens > 0
+        ? ctx->bench_decode_tokens : ctx->bench_tokens;
 
     progress(ctx, "prompt: %zu tokens, %d iterations, %u max tokens",
              n_ids, ctx->bench_iterations, ctx->bench_tokens);
@@ -564,63 +594,71 @@ OcError oc_cli_run_bench(OcCliContext *ctx)
                n_ids, ctx->bench_iterations, ctx->bench_tokens);
     }
 
-    for (int iter = 0; iter < ctx->bench_iterations; iter++) {
+    const uint64_t total_iterations =
+        (uint64_t)ctx->bench_warmup + (uint64_t)ctx->bench_iterations;
+    for (uint64_t iter = 0; iter < total_iterations; iter++) {
         OcLlamaSession sess;
-        if (oc_llama_session_init(&model, &sess) != OC_OK) break;
+        if (cli_session_init(ctx, &model, &sess) != OC_OK) break;
         float *logits = sess.logits;
 
-        /* Prefill. */
-        for (size_t i = 0; i + 1 < n_ids; i++)
-            e = oc_llama_forward(&sess, ids[i], NULL);
-        if (e == OC_OK) e = oc_llama_forward(&sess, ids[n_ids - 1], logits);
+        double pf_start = wall_now();
+        e = oc_llama_prefill(&sess, bench_ids, n_ids, 0, logits);
+        double pf_elapsed = wall_now() - pf_start;
         if (e != OC_OK) {
             cli_error("benchmark prefill failed (%s)", oc_error_msg(e));
             oc_llama_session_free(&sess);
             break;
         }
+        double pf_tps = (pf_elapsed > 0)
+                      ? (double)n_ids / pf_elapsed : 0.0;
 
-        /* Decode. */
         double start = wall_now();
         size_t emitted = 0;
-        while (emitted < ctx->bench_tokens) {
-            uint32_t sampled = oc_argmax(logits, model.cfg.vocab_size);
-            if (tok.has_eos && sampled == tok.eos_id) break;
-            emitted++;
-            if (oc_llama_forward(&sess, sampled, logits) != OC_OK) break;
+        while (emitted < decode_tokens) {
+            uint32_t toks[8];
+            size_t n = 0;
+            size_t want = decode_tokens - emitted;
+            if (want > 8) want = 8;
+            OcDsparkConfig dcfg;
+            oc_dspark_config_init(&dcfg);
+            if (oc_dspark_advance(&sess, logits, &dcfg, toks, want, &n, NULL) != OC_OK)
+                break;
+            if (n == 0) break;
+            if (!ctx->bench_no_eos && tok.has_eos) {
+                size_t keep = 0;
+                for (; keep < n; keep++) {
+                    if (toks[keep] == tok.eos_id) break;
+                }
+                emitted += keep;
+                if (keep < n) break;
+            } else {
+                emitted += n;
+            }
         }
         double elapsed = wall_now() - start;
         double tps = (elapsed > 0) ? (double)emitted / elapsed : 0.0;
 
-        /* Prefill speed. */
-        double pf_start = wall_now();
-        OcLlamaSession pf_sess;
-        memset(&pf_sess, 0, sizeof(pf_sess));
-        if (oc_llama_session_init(&model, &pf_sess) == OC_OK) {
-            for (size_t i = 0; i < n_ids; i++)
-                oc_llama_forward(&pf_sess, ids[i], NULL);
-        }
-        double pf_elapsed = wall_now() - pf_start;
-        double pf_tps = (pf_elapsed > 0) ? (double)n_ids / pf_elapsed : 0.0;
-        oc_llama_session_free(&pf_sess);
-
-        if (ctx->output_format == OC_CLI_OUTPUT_JSON) {
-            if (iter > 0) printf(",");
+        if (iter >= ctx->bench_warmup && ctx->output_format == OC_CLI_OUTPUT_JSON) {
+            if (completed > 0) printf(",");
             printf("{\"iter\":%d,\"decode_tokens\":%zu,\"decode_time_s\":%.6f,"
                    "\"decode_tok_per_s\":%.2f,\"prefill_tok_per_s\":%.2f}",
-                   iter + 1, emitted, elapsed, tps, pf_tps);
-        } else {
+                   completed + 1, emitted, elapsed, tps, pf_tps);
+        } else if (iter >= ctx->bench_warmup) {
             printf("  iter %d: %zu tokens in %.3fs = %.2f tok/s (prefill: %.2f tok/s)\n",
-                   iter + 1, emitted, elapsed, tps, pf_tps);
+                   completed + 1, emitted, elapsed, tps, pf_tps);
         }
 
-        if (tps > best_tps) best_tps = tps;
-        if (pf_tps > best_pf) best_pf = pf_tps;
-        sum_tps += tps;
-        sum_pf += pf_tps;
-        completed++;
+        if (iter >= ctx->bench_warmup) {
+            if (tps > best_tps) best_tps = tps;
+            if (pf_tps > best_pf) best_pf = pf_tps;
+            sum_tps += tps;
+            sum_pf += pf_tps;
+            completed++;
+        }
         oc_llama_session_free(&sess);
     }
 
+    free(synthetic_ids);
     free(ids);
     oc_tokenizer_free(&tok);
     oc_llama_free(&model);
@@ -654,7 +692,6 @@ OcError oc_cli_run_inspect(OcCliContext *ctx)
         cli_error("inspect failed (%s)", oc_error_msg(e));
         return e;
     }
-
     if (ctx->output_format == OC_CLI_OUTPUT_JSON) {
         char buf[8192];
         size_t n = oc_inspect_format_json(&info, buf, sizeof(buf));
@@ -706,7 +743,6 @@ OcError oc_cli_run_quantize(OcCliContext *ctx)
         cli_error("quantization failed (%s)", oc_error_msg(e));
         return e;
     }
-
     if (ctx->output_format == OC_CLI_OUTPUT_JSON) {
         printf("{\"command\":\"quantize\",\"input\":\"%s\",\"output\":\"%s\","
                "\"target_type\":\"%s\",\"status\":\"ok\"}\n",

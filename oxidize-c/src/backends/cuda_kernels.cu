@@ -186,14 +186,15 @@ __global__ void k_rmsnorm_rope_fused(const float *x,
     }
     float inv_rms = norm_scale / sqrtf(sdata[0] / (float)hidden_dim + eps);
 
-    /* Step 2: normalize + apply RoPE (split-halves). */
+    /* Step 2: normalize + apply RoPE (split-halves). Frequency ladder uses
+     * rope_dim, matching oc_apply_rope_f32 (partial RoPE on Qwen3.5). */
     uint32_t half = rope_dim / 2u;
-    /* Precompute base frequency multiplier once. */
+    float freq_mul = (rope_dim >= 2u) ? powf(theta, -2.0f / (float)rope_dim)
+                                      : 1.0f;
     for (uint32_t i = tid; i < half; i += blockSize) {
         float xn = xh[i] * inv_rms * wh[i];
         float xn2 = xh[i + half] * inv_rms * wh[i + half];
-        /* Match activation.c::oc_apply_rope_f32: theta^(-2i/head_dim). */
-        float freq = powf(theta, -2.0f * (float)i / (float)head_dim);
+        float freq = powf(freq_mul, (float)i);
         float angle = (float)pos * freq;
         float c = cosf(angle);
         float s = sinf(angle);
@@ -244,48 +245,55 @@ __global__ void k_attention_softmax(const float *q,
     uint32_t blockSize = blockDim.x;
 
     extern __shared__ float smem[];
-    float *acc = smem;                 /* head_dim accumulators */
-    /* The caller reserves a second head_dim span after `acc` for a future
-     * two-pass softmax; the online formulation below does not need it. */
+    float *qs = smem;
+    float *red = smem + head_dim;
+    float *acc = smem + head_dim + blockSize;
 
-    float inv_sqrt_d = 1.0f / sqrtf((float)head_dim);
-
-    /* Zero accumulators. */
-    for (uint32_t d = tid; d < head_dim; d += blockSize) acc[d] = 0.0f;
+    const float inv_sqrt_d = rsqrtf((float)head_dim);
+    for (uint32_t d = tid; d < head_dim; d += blockSize) {
+        qs[d] = q[d];
+        acc[d] = 0.0f;
+    }
     __syncthreads();
 
-    /* Online softmax: maintain running max m and running weighted sum. */
-    float m = -INFINITY;   /* running max */
-    float denom = 0.0f;    /* running sum of exp(score - m) */
+    float m = -INFINITY;
+    for (size_t p = tid; p < n_past; p += blockSize) {
+        const float *k = kv_k + p * head_dim;
+        float score = 0.0f;
+        for (uint32_t d = 0; d < head_dim; d++) score += qs[d] * k[d];
+        m = fmaxf(m, score * inv_sqrt_d);
+    }
+    red[tid] = m;
+    __syncthreads();
+    for (uint32_t s = blockSize / 2; s > 0; s >>= 1) {
+        if (tid < s) red[tid] = fmaxf(red[tid], red[tid + s]);
+        __syncthreads();
+    }
+    const float max_score = red[0];
+    __syncthreads();
 
+    float local_sum = 0.0f;
     for (size_t p = 0; p < n_past; p++) {
         const float *k = kv_k + p * head_dim;
-        const float *v = kv_v + p * head_dim;
-
-        /* Dot product Q·K. */
         float score = 0.0f;
-        for (uint32_t d = 0; d < head_dim; d++)
-            score += q[d] * k[d];
-        score *= inv_sqrt_d;
-
-        /* Update running max; rescale accumulator if max changed. */
-        float m_new = fmaxf(m, score);
-        float rescale = expf(m - m_new);
         for (uint32_t d = tid; d < head_dim; d += blockSize)
-            acc[d] *= rescale;
+            score += qs[d] * k[d];
+        red[tid] = score;
         __syncthreads();
-
-        float w = expf(score - m_new);
-        denom = denom * rescale + w;
-        m = m_new;
-
+        for (uint32_t s = blockSize / 2; s > 0; s >>= 1) {
+            if (tid < s) red[tid] += red[tid + s];
+            __syncthreads();
+        }
+        const float w = expf(red[0] * inv_sqrt_d - max_score);
+        if (tid == 0) local_sum += w;
+        const float *v = kv_v + p * head_dim;
         for (uint32_t d = tid; d < head_dim; d += blockSize)
             acc[d] += w * v[d];
         __syncthreads();
     }
-
-    /* Normalize and write output. */
-    float inv_denom = (denom > 0.0f) ? (1.0f / denom) : 0.0f;
+    if (tid == 0) red[0] = local_sum;
+    __syncthreads();
+    const float inv_denom = (red[0] > 0.0f) ? (1.0f / red[0]) : 0.0f;
     for (uint32_t d = tid; d < head_dim; d += blockSize)
         out[d] = acc[d] * inv_denom;
 }
@@ -592,8 +600,8 @@ bool oc_cuda_attention_softmax(const float *d_q, const float *d_k_cache,
     if (head_dim > block) block = 1024u;
     /* Round to warp. */
     block = ((block + 31u) / 32u) * 32u;
-    /* Shared mem: head_dim accumulators (score_buf reserved). */
-    size_t smem = (size_t)head_dim * sizeof(float) * 2u;
+    /* Shared mem: query + reduction + V accumulators. */
+    size_t smem = ((size_t)head_dim * 2u + (size_t)block) * sizeof(float);
 
     k_attention_softmax<<<1, block, smem>>>(
         d_q, d_k_cache, d_v_cache, d_out, head_dim, n_past);

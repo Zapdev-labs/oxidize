@@ -101,6 +101,7 @@ typedef struct OcCliContext {
 
     /* Backend. */
     const char        *backend;        /* "cpu" | "cuda"                    */
+    const char        *kv_type;         /* "f32" | "q8"; NULL = auto         */
 
     /* Server. */
     const char        *host;           /* --host (default 127.0.0.1)        */
@@ -111,8 +112,11 @@ typedef struct OcCliContext {
 
     /* Benchmark. */
     int                bench_iterations; /* --bench-iters (default 3)       */
-    uint32_t           bench_warmup;     /* --bench-warmup (default 5)      */
+    uint32_t           bench_warmup;     /* unreported warmup iterations     */
     uint32_t           bench_tokens;     /* --bench-tokens (default 50)     */
+    uint32_t           bench_prompt_tokens;
+    uint32_t           bench_decode_tokens;
+    bool               bench_no_eos;
 
     /* Quantize / convert / merge / prune. */
     const char        *input_path;      /* --input PATH (for convert/merge)  */

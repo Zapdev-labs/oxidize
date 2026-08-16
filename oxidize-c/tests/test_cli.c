@@ -12,6 +12,7 @@
 #include <criterion/criterion.h>
 
 #include "../src/cli/args.h"
+#include "oxidize/cli_commands.h"
 
 #include <string.h>
 
@@ -100,6 +101,14 @@ Test(cli, help_and_version_flags)
     cr_assert(a.show_version, "--version sets show_version");
 }
 
+Test(cli, cuda_selftest_flag)
+{
+    char *argv[] = {"oxidize-c", "--cuda-selftest"};
+    OcCliArgs a;
+    oc_cli_parse_args(2, argv, &a);
+    cr_assert(a.cuda_selftest);
+}
+
 Test(cli, unknown_double_dash_flag_is_ignored)
 {
     /* Unknown --foo bar should NOT consume "bar" as a value, and should not
@@ -118,4 +127,27 @@ Test(cli, serve_api_flag)
     cr_assert(a.serve_api, "--serve-api sets serve_api");
     cr_assert_str_eq(a.host, "0.0.0.0");
     cr_assert_eq(a.port, 9999);
+}
+
+Test(cli, bench_parses_fixed_workload_flags)
+{
+    char *argv[] = {"oxidize-c", "bench", "--model", "m.gguf",
+                    "--bench-prompt-tokens", "64",
+                    "--bench-decode-tokens", "32", "--bench-no-eos",
+                    "--bench-warmup", "2", "--bench-iters", "5"};
+    OcCliContext ctx;
+    cr_assert(oc_cli_context_parse(13, argv, &ctx));
+    cr_assert_eq(ctx.bench_prompt_tokens, 64);
+    cr_assert_eq(ctx.bench_decode_tokens, 32);
+    cr_assert(ctx.bench_no_eos);
+    cr_assert_eq(ctx.bench_warmup, 2);
+    cr_assert_eq(ctx.bench_iterations, 5);
+}
+
+Test(cli, parses_kv_type)
+{
+    char *argv[] = {"oxidize-c", "--model", "m.gguf", "--kv", "q8"};
+    OcCliArgs a;
+    oc_cli_parse_args(5, argv, &a);
+    cr_assert_str_eq(a.kv_type, "q8");
 }

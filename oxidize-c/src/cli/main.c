@@ -24,6 +24,7 @@
 #include "oxidize/version.h"
 #include "oxidize/cli_commands.h"
 #include "oxidize/cuda.h"
+#include "oxidize/dspark.h"
 #include "oxidize/error.h"
 #include "oxidize/gguf.h"
 #include "oxidize/http.h"
@@ -116,6 +117,7 @@ static void print_help(void)
 "  --prompt-file PATH     Read prompt from a file\n"
 "  --n-predict N          Max tokens to generate (default 128)\n"
 "  --ctx N                Cap KV context below the model's advertised length\n"
+"  --kv f32|q8            KV cache dtype (default: q8 when ctx>=8192)\n"
 "  --threads N            CPU thread hint (0 = auto)\n"
 "  --numa MODE            single | interleave | none (default none)\n"
 "  --auto                 Enable autotune (detect + plan)\n"
@@ -132,7 +134,10 @@ static void print_help(void)
 "  --top-p P              Top-P / nucleus (default 0.95)\n"
 "  --repeat-penalty P     Repeat penalty (default 1.1)\n"
 "  --seed N               RNG seed (0 = deterministic default)\n"
+"  --spec-type TYPE       none | mtp | dspark (default: dspark if GGUF has MTP)\n"
+"  --draft-tokens N       MTP/DSpark draft block size (default 4)\n"
 "  --backend cpu|cuda     Compute backend (default cpu)\n"
+"  --cuda-selftest        Run CUDA kernel self-test (no GGUF) and exit\n"
 "  -v, --verbose          Verbose logging\n"
 "  -h, --help             Show this help\n"
 "  --version              Print version and exit\n",
@@ -313,7 +318,8 @@ static OcError run_generation(const OcCliArgs *args)
     }
 
     OcLlamaSession sess;
-    e = oc_llama_session_init(&model, &sess);
+    OcKvCacheType kv = oc_llama_select_kv_type(model.cfg.n_ctx, args->kv_type);
+    e = oc_llama_session_init_kv(&model, &sess, kv);
     if (e != OC_OK) {
         fprintf(stderr, "error: session init failed (%s)\n", oc_error_msg(e));
         oc_tokenizer_free(&tok);
@@ -370,32 +376,48 @@ static OcError run_generation(const OcCliArgs *args)
     uint32_t recent[RECENT_CAP];
     size_t recent_len = 0;
 
-    /* Prefill: forward all but the last prompt token (no sampling needed for
-     * those). The last prompt token's logits seed the generation loop. */
+    /* Prefill. Every prompt token is known up front, so on CPU they go
+     * through oc_llama_prefill(), which pushes a chunk of them through each
+     * weight matrix together instead of sweeping the whole model once per
+     * token. The last token's logits seed the generation loop.
+     *
+     * The CUDA path keeps the per-token loop: its forward already uploads the
+     * weights once and the batched CPU scratch would not help it. */
     float *logits = sess.logits;
-    for (size_t i = 0; i + 1 < n_ids; i++) {
-        if (use_cuda)
+    uint32_t next_tok = ids[n_ids - 1];
+    const double prefill_start = wall_now();
+    if (use_cuda) {
+        for (size_t i = 0; i + 1 < n_ids; i++) {
             e = oc_cuda_forward(&cuda_ctx, ids[i], sess.pos, NULL);
-        else
-            e = oc_llama_forward(&sess, ids[i], NULL);   /* KV cache only */
-        if (e != OC_OK) {
-            fprintf(stderr, "error: prefill forward failed at token %zu (%s)\n",
-                    i, oc_error_msg(e));
-            break;
+            if (e != OC_OK) {
+                fprintf(stderr,
+                        "error: prefill forward failed at token %zu (%s)\n",
+                        i, oc_error_msg(e));
+                break;
+            }
+            sess.pos++;
         }
-        if (use_cuda) sess.pos++;
+        if (e == OC_OK) {
+            e = oc_cuda_forward(&cuda_ctx, next_tok, sess.pos, logits);
+            sess.pos++;
+        }
+    } else {
+        e = oc_llama_prefill(&sess, ids, n_ids, args->batch_size, logits);
+        if (e != OC_OK) {
+            fprintf(stderr, "error: prefill failed (%s)\n", oc_error_msg(e));
+        }
+    }
+    if (e == OC_OK) {
+        const double pf = wall_now() - prefill_start;
+        if (pf > 0.0) {
+            oc_log(OC_LOG_INFO, "prefill: %zu tokens in %.3fs = %.2f tok/s",
+                   n_ids, pf, (double)n_ids / pf);
+        }
+    }
+    /* Seed the repeat-penalty ring with the prompt. */
+    for (size_t i = 0; i + 1 < n_ids && e == OC_OK; i++) {
         if (recent_len < RECENT_CAP) recent[recent_len++] = ids[i];
         else recent[i % RECENT_CAP] = ids[i];
-    }
-
-    /* Forward the last prompt token WITH logits to start generation. */
-    uint32_t next_tok = ids[n_ids - 1];
-    if (e == OC_OK) {
-        if (use_cuda)
-            e = oc_cuda_forward(&cuda_ctx, next_tok, sess.pos, logits);
-        else
-            e = oc_llama_forward(&sess, next_tok, logits);
-        if (use_cuda) sess.pos++;
     }
     if (e != OC_OK) {
         fprintf(stderr, "error: seed forward failed (%s)\n", oc_error_msg(e));
@@ -407,7 +429,42 @@ static OcError run_generation(const OcCliArgs *args)
         bool eos_reached = false;
         double decode_start = wall_now();
         while (emitted < (size_t)args->n_predict && !eos_reached && e == OC_OK) {
-            uint32_t sampled = oc_sample(logits, model.cfg.vocab_size, &scfg,
+            uint32_t sampled;
+            if (!use_cuda && scfg.type == OC_SAMPLER_GREEDY &&
+                oc_llama_mtp_present(&model) &&
+                !(args->spec_type && strcmp(args->spec_type, "none") == 0)) {
+                uint32_t toks[8];
+                size_t n = 0;
+                size_t want = (size_t)args->n_predict - emitted;
+                if (want > 8) want = 8;
+                OcDsparkConfig dcfg;
+                oc_dspark_config_init(&dcfg);
+                if (args->draft_tokens > 0) dcfg.block_size = (uint32_t)args->draft_tokens;
+                if (args->spec_type && strcmp(args->spec_type, "mtp") == 0)
+                    dcfg.p_min = 0.0f;
+                OcDsparkStats st;
+                e = oc_dspark_advance(&sess, logits, &dcfg, toks, want, &n, &st);
+                if (e != OC_OK || n == 0) break;
+                for (size_t i = 0; i < n; i++) {
+                    sampled = toks[i];
+                    if (tok.has_eos && sampled == tok.eos_id) {
+                        eos_reached = true;
+                        break;
+                    }
+                    char *piece = NULL;
+                    if (oc_tokenizer_decode(&tok, &sampled, 1, &piece) == OC_OK && piece) {
+                        fputs(piece, stdout);
+                        fflush(stdout);
+                        free(piece);
+                    }
+                    emitted++;
+                    if (recent_len < RECENT_CAP) recent[recent_len++] = sampled;
+                    else recent[emitted % RECENT_CAP] = sampled;
+                    if (emitted >= (size_t)args->n_predict) break;
+                }
+                continue;
+            }
+            sampled = oc_sample(logits, model.cfg.vocab_size, &scfg,
                                         recent, recent_len);
             scfg.seed++;
             if (tok.has_eos && sampled == tok.eos_id) { eos_reached = true; break; }
@@ -516,6 +573,15 @@ int main(int argc, char **argv)
      * starting a pool only to tear it down would just add startup latency. */
     if (args.show_help)    { print_help(); return 0; }
     if (args.show_version) { printf("oxidize-c v%s\n", OC_CLI_VERSION); return 0; }
+    if (args.cuda_selftest) {
+        OcError se = oc_cuda_selftest();
+        if (se != OC_OK) {
+            fprintf(stderr, "error: CUDA self-test failed (%s)\n",
+                    oc_error_msg(se));
+            return 1;
+        }
+        return 0;
+    }
     init_compute_threads(args.threads);
 
     if (args.print_plan) {
@@ -776,6 +842,7 @@ int main(int argc, char **argv)
             return 1;
         }
         cap_model_ctx(&model, args.n_ctx);
+        OcKvCacheType bench_kv = oc_llama_select_kv_type(model.cfg.n_ctx, args.kv_type);
         OcTokenizer tok;
         e = oc_tokenizer_load_from_gguf(&model.gguf.unified, &tok);
         if (e != OC_OK) {
@@ -831,7 +898,7 @@ int main(int argc, char **argv)
         int completed_iterations = 0;
         for (int iter = 0; iter < args.bench_iterations; iter++) {
             OcLlamaSession sess;
-            if (oc_llama_session_init(&model, &sess) != OC_OK) break;
+            if (oc_llama_session_init_kv(&model, &sess, bench_kv) != OC_OK) break;
             float *logits = sess.logits;
             for (size_t i = 0; i + 1 < n_ids && e == OC_OK; i++)
                 e = oc_llama_forward(&sess, ids[i], NULL);
@@ -855,7 +922,7 @@ int main(int argc, char **argv)
             double pf_start = wall_now();
             OcLlamaSession pf_sess;
             memset(&pf_sess, 0, sizeof(pf_sess));
-            if (oc_llama_session_init(&model, &pf_sess) == OC_OK) {
+            if (oc_llama_session_init_kv(&model, &pf_sess, bench_kv) == OC_OK) {
                 for (size_t i = 0; i < n_ids; i++)
                     oc_llama_forward(&pf_sess, ids[i], NULL);
             }

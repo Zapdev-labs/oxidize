@@ -71,9 +71,11 @@ Test(autotune, plan_threads_match_learned_heuristics)
     memset(&small, 0, sizeof(small));
     small.file_bytes = 8ULL << 30;
     OcTuningPlan p = oc_autotune_plan(&cpu, &small);
-    cr_assert_eq(p.threads, cpu.physical_cores,
-                 "expected one thread per physical core (%u), got %u",
-                 cpu.physical_cores, p.threads);
+    const uint32_t expected_small = cpu.is_dual_socket
+        ? cpu.physical_cores / cpu.numa_nodes : cpu.physical_cores;
+    cr_assert_eq(p.threads, expected_small,
+                 "expected physical cores in selected NUMA policy (%u), got %u",
+                 expected_small, p.threads);
     cr_assert_leq(p.threads, cpu.logical_cores,
                   "never more threads than logical cores");
     if (cpu.is_dual_socket) {

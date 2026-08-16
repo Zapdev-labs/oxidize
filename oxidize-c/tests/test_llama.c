@@ -19,6 +19,7 @@
 #include "oxidize/activation.h"
 #include "oxidize/llama.h"
 #include "oxidize/matvec.h"
+#include "oxidize/quant.h"
 
 #include <math.h>
 #include <stdint.h>
@@ -123,6 +124,28 @@ Test(llama, matvec_f32_basic)
     cr_assert_float_eq(out[1], 15.0f, 1e-6f, "row 1 dot");
 }
 
+Test(llama, matvec_bf16_matches_dequant)
+{
+    const size_t rows = 4, cols = 32;
+    float src[4 * 32], in[32], want[4], got[4], temp[32];
+    uint8_t packed[4 * 64];
+    for (size_t i = 0; i < rows * cols; i++)
+        src[i] = 0.05f * (float)((int)(i % 17) - 8);
+    for (size_t i = 0; i < cols; i++)
+        in[i] = 0.1f * (float)((int)(i % 7) - 3);
+    for (size_t r = 0; r < rows; r++) {
+        cr_assert_eq(oc_quant_pack_row(OC_QUANT_BF16, src + r * cols, cols,
+                                       packed + r * 64, 64), OC_OK);
+        cr_assert_eq(oc_quant_dequant_row(OC_QUANT_BF16, packed + r * 64, 64,
+                                          temp, cols), OC_OK);
+        want[r] = 0.0f;
+        for (size_t c = 0; c < cols; c++) want[r] += temp[c] * in[c];
+    }
+    oc_matvec_quantized(OC_QUANT_BF16, packed, rows, cols, 64, in, got, temp);
+    for (size_t r = 0; r < rows; r++)
+        cr_assert_float_eq(got[r], want[r], 1e-4f, "bf16 row %zu", r);
+}
+
 Test(llama, matvec_f32_zero_input)
 {
     float data[] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
@@ -167,13 +190,13 @@ Test(llama, sessions_reject_unsupported_architecture_paths)
     memset(&model, 0, sizeof(model));
     OcLlamaSession session;
     OcBatchSession batch;
-    model.cfg.uses_mla = true;
-    cr_assert_eq(oc_llama_session_init(&model, &session), OC_ERR_MODEL);
-    /* uses_geglu is a supported activation (forward_dense_ffn handles it)
-     * and no longer rejects session init. LayerNorm architectures
-     * (GPT-2/NeoX/Falcon) are rejected by batch init only — single-token
-     * sessions dispatch to arch_forward.c. */
-    model.cfg.uses_mla = false;
+    /* MLA is no longer rejected — forward_mla_attention handles it, and
+     * single-token sessions for DeepSeek/GLM-MoE-DSA/LongCat go through it.
+     * (Batch decode already allocated the MLA workspace; see
+     * batch_allocates_mla_workspace below.) uses_geglu is likewise a
+     * supported activation. LayerNorm architectures (GPT-2/NeoX/Falcon) are
+     * rejected by batch init only — single-token sessions dispatch to
+     * arch_forward.c. */
     model.arch = OC_ARCH_GPT2;
     cr_assert_eq(oc_batch_session_init(&model, 2, &batch), OC_ERR_MODEL);
     model.arch = OC_ARCH_FALCON;
@@ -206,9 +229,14 @@ Test(llama, batch_allocates_mla_workspace)
     cr_assert_not_null(batch.mla_c_kv);
     cr_assert_not_null(batch.mla_q_full);
     cr_assert_not_null(batch.mla_kv_compressed);
-    /* MLA keys/values are stored per attention head, not per KV head. */
+    cr_assert_not_null(batch.mla_q_absorbed);
+    cr_assert_not_null(batch.mla_ctx_latent);
+    /* MLA caches the compressed [c_kv | k_pe] latent, and the batch path
+     * must agree with the single-sequence path exactly — they index the same
+     * rows through the same forward code. Sizing this the old expanded way
+     * (n_head * head_dim) allocated ~21x more per sequence. */
     cr_assert_eq(batch.kv_row_floats,
-                 (size_t)model.cfg.n_head * model.cfg.head_dim);
+                 (size_t)model.cfg.mla_kv_lora_dim + model.cfg.mla_q_rope_dim);
     oc_batch_session_free(&batch);
     cr_assert_null(batch.mla_c_q);
 }
@@ -535,6 +563,16 @@ Test(llama, kv_cache_bytes_f32_matches_layout)
                  2 * elems * sizeof(float));
 }
 
+Test(llama, mla_kv_cache_bytes_counts_one_latent_buffer)
+{
+    OcLlamaModel m = kv_stub_model(4, 1024, 1, 576);
+    m.cfg.uses_mla = true;
+    m.cfg.mla_kv_lora_dim = 512;
+    m.cfg.mla_q_rope_dim = 64;
+    cr_assert_eq(oc_llama_kv_cache_bytes(&m, OC_KV_F32),
+                 (size_t)4 * 1024 * 576 * sizeof(float));
+}
+
 /* Q8 must be close to 4x smaller: one byte per element instead of four, plus
  * one f32 scale per (layer, pos, kv head) — 1/kv_head_dim of the elements. */
 Test(llama, kv_cache_bytes_q8_is_about_four_times_smaller)
@@ -562,4 +600,11 @@ Test(llama, kv_cache_bytes_long_context_saving_is_gigabytes)
     size_t f32 = oc_llama_kv_cache_bytes(&m, OC_KV_F32);
     size_t q8  = oc_llama_kv_cache_bytes(&m, OC_KV_Q8);
     cr_assert_gt(f32 - q8, 10ull * 1024 * 1024 * 1024);
+}
+
+Test(llama, select_kv_type_explicit)
+{
+    cr_assert_eq(oc_llama_select_kv_type(32768, "f32"), OC_KV_F32);
+    cr_assert_eq(oc_llama_select_kv_type(64, "q8"), OC_KV_Q8);
+    cr_assert_eq(oc_llama_select_kv_type(4096, "Q8"), OC_KV_Q8);
 }

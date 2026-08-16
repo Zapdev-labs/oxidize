@@ -13,7 +13,7 @@
  *   glm (+glm4/moe/moe_dsa/dsa/glmmoe/glmmoedsa),
  *   hunyuan (+moe/hunyuanmoe/hy_v3/hyv3/hunyuan_v3),
  *   plus OC_ARCH_UNKNOWN for unrecognized strings (16 recognized + 1 unknown
- *   = 17 enum values).
+ *   = 17 enum values). LongCat is currently implemented by the C port only.
  *
  * `oc_gguf_map_tensor_name()` maps HuggingFace tensor names to the oxidize
  * canonical form (e.g. "model.layers.3.self_attn.q_proj.weight" →
@@ -33,9 +33,9 @@
 extern "C" {
 #endif
 
-/* Detected model architecture from GGUF metadata. 17 variants — the 16
- * architectures recognized in oxidize-core::ModelArchitecture plus
- * OC_ARCH_UNKNOWN for unrecognized strings. Values MUST stay stable. */
+/* Detected model architecture from GGUF metadata. The first 17 values mirror
+ * oxidize-core, including OC_ARCH_UNKNOWN at its historical numeric value.
+ * LongCat and Muse Glimmer are C-port-only extensions. Values MUST stay stable. */
 typedef enum {
     OC_ARCH_LLAMA         = 0,
     OC_ARCH_MISTRAL       = 1,
@@ -54,6 +54,8 @@ typedef enum {
     OC_ARCH_GLM_MOE_DSA   = 14,
     OC_ARCH_HUNYUAN_MOE   = 15,
     OC_ARCH_UNKNOWN       = 16,
+    OC_ARCH_LONGCAT       = 17,
+    OC_ARCH_MUSE_GLIMMER  = 18,
     OC_ARCH__COUNT,
 } OcModelArchitecture;
 

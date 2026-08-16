@@ -100,11 +100,13 @@ Test(ar, plan_numa_single)
 {
     OcHwCaps hw; oc_hw_caps_init(&hw);
     hw.n_sockets = 2;
+    hw.n_cores = 48;
     OcModelFp fp; oc_model_fp_init(&fp);
     fp.file_size_bytes = 4ULL * 1024 * 1024 * 1024;
     OcPlan plan;
     oc_plan_compute(&hw, &fp, &plan);
     cr_assert_eq(plan.numa, OC_NUMA_SINGLE);
+    cr_assert_eq(plan.n_threads, 24);
 }
 
 Test(ar, plan_mlock_small)

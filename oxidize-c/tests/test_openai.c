@@ -47,12 +47,26 @@ static char *send_raw(uint16_t port, const char *raw, size_t raw_len,
     cr_assert(connected, "connect failed");
     write(fd, raw, raw_len);
     shutdown(fd, SHUT_WR);
-    char *resp = malloc(8192);
-    ssize_t rd = read(fd, resp, 8191);
+    size_t cap = 8192;
+    size_t used = 0;
+    char *resp = malloc(cap);
+    cr_assert_not_null(resp);
+    for (;;) {
+        if (used == cap - 1) {
+            cap *= 2;
+            char *grown = realloc(resp, cap);
+            cr_assert_not_null(grown);
+            resp = grown;
+        }
+        ssize_t rd = read(fd, resp + used, cap - used - 1);
+        if (rd == 0) break;
+        cr_assert_gt(rd, 0);
+        used += (size_t)rd;
+    }
     close(fd);
-    cr_assert_geq(rd, 1);
-    *out_len = (size_t)rd;
-    resp[rd] = '\0';
+    cr_assert_gt(used, 0);
+    *out_len = used;
+    resp[used] = '\0';
     return resp;
 }
 
@@ -226,7 +240,7 @@ Test(openai, nested_stream_text_does_not_enable_streaming)
     oc_http_server_join(&srv);
 }
 
-Test(openai, stream_request_is_rejected_honestly)
+Test(openai, stream_request_returns_sse)
 {
     OcHttpServer srv;
     memset(&g_state, 0, sizeof(g_state));
@@ -240,9 +254,30 @@ Test(openai, stream_request_is_rejected_honestly)
         strlen(body), body);
     size_t len;
     char *resp = send_raw(srv.port, req, (size_t)n, &len);
-    cr_assert(strstr(resp, "400 Bad Request") != NULL);
-    cr_assert(strstr(resp, "streaming is not supported") != NULL);
-    cr_assert(strstr(resp, "Content-Type: application/json") != NULL);
+    cr_assert(strstr(resp, "200 OK") != NULL);
+    cr_assert(strstr(resp, "Content-Type: text/event-stream") != NULL);
+    cr_assert(strstr(resp, "data: [DONE]") != NULL);
+    free(resp);
+    oc_http_server_stop(&srv);
+    oc_http_server_join(&srv);
+}
+
+Test(openai, invalid_stream_request_returns_json_error_before_sse)
+{
+    OcHttpServer srv;
+    memset(&g_state, 0, sizeof(g_state));
+    start_server(&srv);
+    oc_openai_attach_http(&srv, &g_state);
+    const char *body = "{\"prompt\":\"hello\",\"stream\":true}";
+    char req[512];
+    int n = snprintf(req, sizeof(req),
+        "POST /v1/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: %zu\r\n\r\n%s",
+        strlen(body), body);
+    size_t len;
+    char *resp = send_raw(srv.port, req, (size_t)n, &len);
+    cr_assert(strstr(resp, "503 Service Unavailable") != NULL);
+    cr_assert(strstr(resp, "text/event-stream") == NULL);
+    cr_assert(strstr(resp, "no model loaded") != NULL);
     free(resp);
     oc_http_server_stop(&srv);
     oc_http_server_join(&srv);

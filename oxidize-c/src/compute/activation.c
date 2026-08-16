@@ -5,32 +5,26 @@
  * with the Rust scalar reference (VAL-FWD-001..004).
  */
 #include "oxidize/activation.h"
+#include "oxidize/attn_kernels.h"
 
 #include <math.h>
+
+#if defined(__x86_64__) || defined(__i386__)
+#include <immintrin.h>
+#endif
 
 void oc_rms_norm_f32(const float *x, const float *weight, float *out,
                     size_t n, float eps)
 {
-    /* Rust computes mean over n as f32 accumulate (the reference uses
-     * `x.iter().map(|v| v*v).sum::<f32>()` then `/ n as f32`). To stay
-     * bit-exact we mirror that: accumulate in f32, not f64. */
-    float ss = 0.0f;
-    for (size_t i = 0; i < n; i++) {
-        ss += x[i] * x[i];
-    }
+    float ss = oc_attn_dot_f32(x, x, n);
     float inv_rms = 1.0f / sqrtf(ss / (float)n + eps);
-    for (size_t i = 0; i < n; i++) {
-        out[i] = x[i] * inv_rms * weight[i];
-    }
+    oc_attn_rms_apply_f32(x, weight, inv_rms, out, n);
 }
 
 void oc_swiglu_inplace_f32(float *gate, const float *up, size_t n)
 {
     for (size_t i = 0; i < n; i++) {
         float g = gate[i];
-        /* sigmoid(g) = 1 / (1 + exp(-g)). Rust uses the Schraudolph fast-exp
-         * in the AVX2 path but the scalar path uses expf; we use expf for
-         * parity with the scalar reference. */
         float sig = 1.0f / (1.0f + expf(-g));
         gate[i] = g * sig * up[i];
     }
@@ -70,10 +64,15 @@ void oc_apply_rope_f32(const float *in, float *out, size_t head_dim,
     for (size_t i = rope_len; i < head_dim; i++) {
         out[i] = in[i];
     }
+    if (rope_len == 0) return;
     size_t half = rope_len / 2;
-    /* freq starts at 1.0 (= theta^0) and is multiplied by theta^(-2/head_dim)
-     * each step. Pair i uses freq = theta^(-2*i/head_dim). */
-    float freq_mul = powf(theta, -2.0f / (float)head_dim);
+    /* freq starts at 1.0 (= theta^0) and is multiplied by theta^(-2/rope_len)
+     * each step. Pair i uses freq = theta^(-2*i/rope_len).
+     * The decay spans the rotary sub-block, not the whole head: under partial
+     * RoPE (qwen35 rotates 64 of 256 dims) normalizing by head_dim would leave
+     * the highest pair at theta^(-62/256) instead of theta^(-62/64). Same
+     * convention as oc_apply_rope_yarn_scaled_f32 below and llama.cpp's n_rot. */
+    float freq_mul = powf(theta, -2.0f / (float)rope_len);
     float freq = 1.0f;
     /* If in/out alias, we must read both halves before writing. Use a local
      * copy of the low half to avoid clobbering reads of the high half. */
@@ -85,6 +84,48 @@ void oc_apply_rope_f32(const float *in, float *out, size_t head_dim,
         float s = sinf(angle);
         out[i]        = x0 * c - x1 * s;
         out[half + i] = x0 * s + x1 * c;
+        freq *= freq_mul;
+    }
+}
+
+/* Interleaved ("NORM") RoPE: rotates the pair (2i, 2i+1) rather than
+ * (i, i + rope_len/2).
+ *
+ * These are the two conventions in the wild and they are NOT interchangeable
+ * — each assigns a different frequency to a given dimension, so using the
+ * wrong one produces text that is locally plausible and globally wrong.
+ * oc_apply_rope_f32 above implements the split-half (GPT-NeoX) form, which is
+ * what Qwen-family GGUFs want; llama.cpp calls this one LLAMA_ROPE_TYPE_NORM
+ * and uses it for the Llama and Muse Glimmer families, whose converters
+ * pre-permute Q/K so that the interleaved form is the correct one.
+ *
+ * Dimensions at or above `rope_len` are copied through (partial RoPE), and
+ * `in` may alias `out`. */
+void oc_apply_rope_norm_f32(const float *in, float *out, size_t head_dim,
+                            size_t rope_len, int64_t position, float theta)
+{
+    if (rope_len > head_dim) rope_len = head_dim;
+    if (position == 0) {
+        if (in != out) {
+            for (size_t i = 0; i < head_dim; i++) out[i] = in[i];
+        }
+        return;
+    }
+    for (size_t i = rope_len; i < head_dim; i++) out[i] = in[i];
+    if (rope_len == 0) return;
+
+    /* Pair p = i/2 uses freq = theta^(-2p/rope_len), the same frequency
+     * ladder as the split-half form — only the pairing differs. */
+    const float freq_mul = powf(theta, -2.0f / (float)rope_len);
+    float freq = 1.0f;
+    for (size_t i = 0; i + 1 < rope_len; i += 2) {
+        const float x0 = in[i];
+        const float x1 = in[i + 1];
+        const float angle = (float)position * freq;
+        const float c = cosf(angle);
+        const float s = sinf(angle);
+        out[i]     = x0 * c - x1 * s;
+        out[i + 1] = x0 * s + x1 * c;
         freq *= freq_mul;
     }
 }
@@ -215,15 +256,28 @@ void oc_apply_rope_yarn_f32(const float *in, float *out, size_t head_dim,
                              size_t rope_len, int64_t position, float theta,
                              float yarn_factor, uint32_t yarn_orig_ctx)
 {
+    /* Default amplitude: 1 + 0.1*ln(factor), the standard YaRN mscale. */
+    oc_apply_rope_yarn_scaled_f32(in, out, head_dim, rope_len, position, theta,
+                                  yarn_factor, yarn_orig_ctx, -1.0f);
+}
+
+void oc_apply_rope_yarn_scaled_f32(const float *in, float *out, size_t head_dim,
+                                    size_t rope_len, int64_t position,
+                                    float theta, float yarn_factor,
+                                    uint32_t yarn_orig_ctx, float attn_factor)
+{
     bool yarn = yarn_factor > 1.0f && yarn_orig_ctx > 0;
     if (!yarn) {
         oc_apply_rope_f32(in, out, head_dim, rope_len, position, theta);
         return;
     }
     if (rope_len > head_dim) rope_len = head_dim;
+    float mscale = (attn_factor >= 0.0f) ? attn_factor
+                                         : (1.0f + 0.1f * logf(yarn_factor));
     if (position == 0) {
         if (in != out)
             for (size_t i = 0; i < head_dim; i++) out[i] = in[i];
+        for (size_t i = 0; i < rope_len; i++) out[i] *= mscale;
         return;
     }
     /* Copy unrotated tail. */
@@ -235,8 +289,12 @@ void oc_apply_rope_yarn_f32(const float *in, float *out, size_t head_dim,
 
     /* YaRN parameters (matching Rust apply_rope_f32_yarn). */
     float freq_scale = 1.0f / yarn_factor;
-    float mscale = 1.0f + 0.1f * logf(yarn_factor);
-
+    /* attn_factor < 0 means "use the standard YaRN mscale". deepseek_yarn
+     * passes an explicit value instead, because its mscale/mscale_all_dim
+     * pair decides how much of the correction rides on cos/sin versus the
+     * softmax scale -- and for LongCat (both terms 1) the RoPE share is
+     * exactly 1.0, so baking 1.4787 in here would double-count against the
+     * mscale_all_dim^2 already folded into the attention scale. */
     /* Compute correction range.
      * corr_dim(n_dims, orig_ctx, n_rot, base) =
      *   n_dims * ln(orig_ctx / (n_rot * 2*PI)) / (2 * ln(base)) */

@@ -129,6 +129,10 @@ test: test_runner
 		esac; \
 	fi
 
+test-avx512: TEST_CFLAGS += -DOC_AVX512 -mavx512f -mavx512bw -mavx512dq \
+                              -mavx512vl -mavx512vnni
+test-avx512: clean test
+
 # Lint: clang-tidy on library sources. Focused on bug-finding checks;
 # stylistic checks (short names, braces-around-statements, etc.) are excluded
 # to match the project's C style. The primary gate is -Wall -Wextra -Werror.

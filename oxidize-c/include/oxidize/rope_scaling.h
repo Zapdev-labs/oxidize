@@ -69,8 +69,29 @@ void oc_rope_yarn_find_correction_range(int *lo, int *hi,
 float oc_rope_yarn_linear_ramp_factor(float min_val, float max_val,
                                       const OcRopeScalingConfig *cfg);
 
-/* YaRN helper: compute mscale. */
+/* YaRN helper: compute mscale. Equivalent to oc_rope_yarn_mscale_m(scale, 1). */
 float oc_rope_yarn_mscale(float scale);
+
+/* YaRN helper: mscale with an explicit exponent multiplier `m`
+ * (get_mscale in the DeepSeek reference): 0.1*m*ln(scale) + 1, or 1 when
+ * scale <= 1. */
+float oc_rope_yarn_mscale_m(float scale, float m);
+
+/* deepseek_yarn: resolve the two derived scales from the mscale pair.
+ *
+ *   rope_attn_factor = get_mscale(f, mscale) / get_mscale(f, mscale_all_dim)
+ *   softmax_scale    = head_dim^-0.5 * get_mscale(f, mscale_all_dim)^2
+ *
+ * `rope_attn_factor` multiplies cos/sin; `softmax_scale` replaces the usual
+ * 1/sqrt(head_dim) on attention logits. Either output pointer may be NULL.
+ *
+ * DeepSeek-V3 (mscale=1, mscale_all_dim=0) yields (1.4787, 1/sqrt(d));
+ * LongCat-2.0 (mscale=mscale_all_dim=1, factor=120, head_dim=192) yields
+ * (1.0, 0.15781034). */
+void oc_rope_deepseek_yarn_scales(float scale_factor, float mscale,
+                                  float mscale_all_dim, uint32_t head_dim,
+                                  float *rope_attn_factor,
+                                  float *softmax_scale);
 
 /* Apply RoPE: compute cos/sin for a given position and frequency.
  * Writes to out_cos and out_sin (arrays of `dim` elements). */

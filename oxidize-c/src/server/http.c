@@ -118,6 +118,8 @@ static bool parse_request(char *buf, size_t buf_len, OcHttpRequest *req,
                           int *out_status)
 {
     *out_status = 400;
+    req->stream_write = NULL;
+    req->stream_context = NULL;
     /* Find the header/body separator. */
     char *sep = memmem(buf, buf_len, "\r\n\r\n", 4);
     if (sep == NULL) {
@@ -193,6 +195,46 @@ static bool parse_request(char *buf, size_t buf_len, OcHttpRequest *req,
     return true;
 }
 
+bool oc_http_json_bool_field(const char *json, const char *key, bool def)
+{
+    size_t key_len = strlen(key);
+    size_t depth = 0;
+    bool in_string = false;
+    bool escaped = false;
+    for (const char *p = json; *p; p++) {
+        if (in_string) {
+            if (escaped) escaped = false;
+            else if (*p == '\\') escaped = true;
+            else if (*p == '"') in_string = false;
+            continue;
+        }
+        if (*p == '{' || *p == '[') { depth++; continue; }
+        if (*p == '}' || *p == ']') { if (depth > 0) depth--; continue; }
+        if (*p != '"') continue;
+        if (depth == 1 && strncmp(p + 1, key, key_len) == 0 &&
+            p[1 + key_len] == '"') {
+            const char *value = p + key_len + 2;
+            while (*value == ' ' || *value == '\t' || *value == '\r' || *value == '\n') value++;
+            if (*value++ != ':') return def;
+            while (*value == ' ' || *value == '\t' || *value == '\r' || *value == '\n') value++;
+            if (strncmp(value, "true", 4) == 0) return true;
+            if (strncmp(value, "false", 5) == 0) return false;
+            return def;
+        }
+        in_string = true;
+    }
+    return def;
+}
+
+static bool request_wants_completion_stream(const OcHttpRequest *req)
+{
+    if (req->method != OC_HTTP_POST || req->body == NULL) return false;
+    if (strcmp(req->path, "/v1/completions") != 0 &&
+        strcmp(req->path, "/v1/chat/completions") != 0)
+        return false;
+    return oc_http_json_bool_field(req->body, "stream", false);
+}
+
 /* ─── Worker thread ────────────────────────────────────────────────────── */
 
 typedef struct OcWorkerCtx {
@@ -205,7 +247,8 @@ static const char *server_extra(const OcHttpServer *srv)
     return srv->extra_headers;
 }
 
-static void send_simple_response(OcHttpServer *srv, int fd, int status, const char *body)
+static void send_simple_response(OcHttpServer *srv, int fd, int status,
+                                 const char *body)
 {
     char hdr[768];
     size_t body_len = body ? strlen(body) : 0;
@@ -263,6 +306,44 @@ static bool send_all(int fd, const char *buf, size_t len)
         else return false;
     }
     return true;
+}
+
+typedef struct OcStreamHeartbeat {
+    int fd;
+    pthread_mutex_t write_mutex;
+    atomic_bool stop;
+    atomic_bool disconnected;
+} OcStreamHeartbeat;
+
+static bool stream_write(void *context, const char *data, size_t len)
+{
+    OcStreamHeartbeat *heartbeat = context;
+    pthread_mutex_lock(&heartbeat->write_mutex);
+    bool sent = !atomic_load_explicit(&heartbeat->disconnected,
+                                      memory_order_acquire) &&
+                send_all(heartbeat->fd, data, len);
+    if (!sent)
+        atomic_store_explicit(&heartbeat->disconnected, true,
+                              memory_order_release);
+    pthread_mutex_unlock(&heartbeat->write_mutex);
+    return sent;
+}
+
+static void *stream_heartbeat_main(void *arg)
+{
+    OcStreamHeartbeat *heartbeat = arg;
+    static const char event[] = ": oxidize\n\n";
+    const struct timespec interval = { .tv_sec = 0, .tv_nsec = 100000000L };
+    for (;;) {
+        for (int tick = 0; tick < 10; tick++) {
+            if (atomic_load_explicit(&heartbeat->stop, memory_order_acquire))
+                return NULL;
+            (void)nanosleep(&interval, NULL);
+        }
+        if (!stream_write(heartbeat, event, sizeof(event) - 1u)) {
+            return NULL;
+        }
+    }
 }
 
 static void *worker_main(void *arg)
@@ -372,20 +453,73 @@ static void *worker_main(void *arg)
             continue;
         }
 
-        /* Dispatch to caller. */
+        const bool stream_started = request_wants_completion_stream(&req);
+        if (stream_started && srv->stream_authorize != NULL) {
+            int status = 400;
+            const char *body = NULL;
+            if (!srv->stream_authorize(&req, &status, &body, srv->user_data)) {
+                send_simple_response(srv, fd, status, body);
+                free((void *)body);
+                close(fd);
+                continue;
+            }
+        }
+        OcStreamHeartbeat heartbeat = { .fd = fd };
+        pthread_t heartbeat_thread;
+        bool heartbeat_running = false;
+        if (stream_started) {
+            char handshake[768];
+            int hn = snprintf(handshake, sizeof(handshake),
+                "HTTP/1.1 200 OK\r\n"
+                "Content-Type: text/event-stream\r\n"
+                "Cache-Control: no-cache\r\n"
+                "Connection: close\r\n"
+                "%s"
+                "\r\n"
+                ": oxidize\n\n",
+                server_extra(srv));
+            atomic_init(&heartbeat.stop, false);
+            atomic_init(&heartbeat.disconnected, false);
+            pthread_mutex_init(&heartbeat.write_mutex, NULL);
+            if (hn < 0 || (size_t)hn >= sizeof(handshake) ||
+                !stream_write(&heartbeat, handshake, (size_t)hn)) {
+                pthread_mutex_destroy(&heartbeat.write_mutex);
+                close(fd);
+                continue;
+            }
+            req.stream_write = stream_write;
+            req.stream_context = &heartbeat;
+            heartbeat_running =
+                pthread_create(&heartbeat_thread, NULL, stream_heartbeat_main,
+                               &heartbeat) == 0;
+        }
+
         int status = 404;
         const char *ctype = NULL;
         const char *body = NULL;
         size_t body_len = 0;
         srv->handler(&req, &status, &ctype, &body, &body_len, srv->user_data);
+        if (heartbeat_running) {
+            atomic_store_explicit(&heartbeat.stop, true, memory_order_release);
+            pthread_join(heartbeat_thread, NULL);
+        }
 
         char resp[8192];
-        size_t resp_len = oc_http_format_response(resp, sizeof(resp), status,
-                                                  ctype, body, body_len,
-                                                  server_extra(srv));
-        if (resp_len > 0) {
+        size_t resp_len = 0;
+        if (stream_started) {
+            const bool disconnected =
+                atomic_load_explicit(&heartbeat.disconnected,
+                                     memory_order_acquire);
+            if (!disconnected && status == 200 && body != NULL && body_len > 0)
+                (void)stream_write(&heartbeat, body, body_len);
+        } else {
+            resp_len = oc_http_format_response(resp, sizeof(resp), status,
+                                               ctype, body, body_len,
+                                               server_extra(srv));
+        }
+        if (!stream_started && resp_len > 0) {
             (void)send_all(fd, resp, resp_len);
-        } else if (body_len > 0) {
+        } else if (!stream_started && body_len > 0) {
             /* Body too big for the inline buffer — fall back to a malloc'd
              * response. */
             size_t cap = body_len + 512;
@@ -412,6 +546,8 @@ static void *worker_main(void *arg)
         if (body != NULL && body_len > 0) {
             free((void *)body);
         }
+        if (stream_started)
+            pthread_mutex_destroy(&heartbeat.write_mutex);
         close(fd);
     }
     free(buf);
@@ -486,6 +622,12 @@ OcError oc_http_server_start(const char *host, uint16_t port, size_t n_threads,
     oc_log(OC_LOG_INFO, "http: server listening on %s:%u (%zu threads)",
            host ? host : "0.0.0.0", out->port, n_threads);
     return OC_OK;
+}
+
+void oc_http_server_set_stream_authorizer(OcHttpServer *s,
+                                          OcHttpStreamAuthorize authorize)
+{
+    if (s != NULL) s->stream_authorize = authorize;
 }
 
 void oc_http_server_set_extra_headers(OcHttpServer *s, const char *headers)

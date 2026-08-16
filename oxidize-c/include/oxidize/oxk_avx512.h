@@ -32,7 +32,7 @@
  * cross-compiling for aarch64. Off-x86 these symbols are scalar-forwarding
  * stubs (see oxk_avx512.c), so the attribute must be empty there. */
 #if defined(__x86_64__) || defined(__i386__)
-#define OC_OXK_AVX512_TARGET __attribute__((target("avx512bw,avx512dq,avx512vnni")))
+#define OC_OXK_AVX512_TARGET __attribute__((target("avx512bw,avx512dq,avx512vl,avx512vnni")))
 #else
 #define OC_OXK_AVX512_TARGET
 #endif
@@ -93,6 +93,78 @@ OC_OXK_AVX512_TARGET
 void oc_oxk_matvec_q4_0_f32_avx512_bw(const uint8_t *w, size_t n_rows,
                                       size_t row_bytes, const float *x,
                                       float *out);
+
+/* ─── AVX-512VNNI prepared-Q4_K × Q8_K multi-activation dot ──────────────
+ *
+ * Dots ONE prepared Q4_K row (oc_oxk_q4_k_prep_row layout) against `n_act`
+ * packed Q8_K activations spaced `act_stride` bytes apart, writing `n_act`
+ * f32 results to `out`. The prepared codes are already unsigned bytes
+ * 0..15, which is exactly the shape `_mm512_dpbusd_epi32` wants, so each
+ * 64-element chunk is one load + one VNNI op per activation. Activations
+ * are processed four at a time so the row's codes and scales are loaded
+ * once per four dots.
+ *
+ * Bit-exact with oc_oxk_dot_q4_k_prepped(): all sub-group products and
+ * scale multiplies stay in int32 (reassociation of integer adds is exact),
+ * and the per-block float accumulation order is unchanged. */
+OC_OXK_AVX512_TARGET
+void oc_oxk_dot_q4_k_prepped_multi_avx512(const void *prep, size_t blocks,
+                                          const uint8_t *acts,
+                                          size_t act_stride, size_t n_act,
+                                          float *out);
+
+/* ─── AVX-512VNNI Q6_K × Q8_K dot ────────────────────────────────────────
+ *
+ * Unpacks the 6-bit values as unsigned 0..63 (low nibble | high 2 bits),
+ * VNNI-accumulates against the Q8_K int8s per 16-element scale group, and
+ * folds the implicit -32 offset out through the activation's stored block
+ * sums: sum((q-32)*a) = sum(q*a) - 32*bsum. Bit-exact with the (integer-
+ * accumulating) scalar reference. */
+OC_OXK_AVX512_TARGET
+float oc_oxk_dot_q6_k_q8_k_avx512vnni(const uint8_t *row, size_t blocks,
+                                      const uint8_t *q8);
+
+/* Multi-activation dot over a prepared Q6_K row (oc_oxk_q6_k_prep_row
+ * layout). Same structure as the Q4_K prepped multi kernel, with 16
+ * signed 16-element scale groups per block and the -32 offset folded out
+ * through the activation block sums. */
+OC_OXK_AVX512_TARGET
+/* Multi-activation dots over prepared Q3_K / Q2_K rows. Q3_K consumes the
+ * Q6_K prepared layout (oc_oxk_q3_k_prep_row writes it); Q2_K consumes its
+ * own (oc_oxk_q2_k_prep_row). Both fall back to the scalar prepped dot when
+ * built without VNNI. */
+/* Single-activation VNNI dots over the prepared rows — what decode uses,
+ * where there is no activation tile to amortize a wider kernel over. */
+float oc_oxk_dot_q2_k_prepped_avx512(const void *prep, size_t blocks,
+                                     const uint8_t *act);
+float oc_oxk_dot_q3_k_prepped_avx512(const void *prep, size_t blocks,
+                                     const uint8_t *act);
+float oc_oxk_dot_q6_k_prepped_avx512(const void *prep, size_t blocks,
+                                     const uint8_t *act);
+
+void oc_oxk_dot_q3_k_prepped_multi_avx512(const void *prep, size_t blocks,
+                                          const uint8_t *acts,
+                                          size_t act_stride, size_t n_act,
+                                          float *out);
+void oc_oxk_dot_q2_k_prepped_multi_avx512(const void *prep, size_t blocks,
+                                          const uint8_t *acts,
+                                          size_t act_stride, size_t n_act,
+                                          float *out);
+
+void oc_oxk_dot_q6_k_prepped_multi_avx512(const void *prep, size_t blocks,
+                                          const uint8_t *acts,
+                                          size_t act_stride, size_t n_act,
+                                          float *out);
+
+/* ─── AVX-512VNNI Q5_K × Q8_K dot ────────────────────────────────────────
+ *
+ * Unpacks nibble | (qh group-bit << 4) as unsigned 0..31 (qh[l] holds one
+ * bit per 64-element group), VNNI-accumulates per 32-element sub-group,
+ * and applies the per-sub-group scale/min exactly as the scalar reference
+ * does (integer until the per-block float multiply). */
+OC_OXK_AVX512_TARGET
+float oc_oxk_dot_q5_k_q8_k_avx512vnni(const uint8_t *row, size_t blocks,
+                                      const uint8_t *q8);
 
 #ifdef __cplusplus
 }
