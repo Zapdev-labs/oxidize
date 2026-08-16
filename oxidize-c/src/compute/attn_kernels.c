@@ -1,5 +1,6 @@
 #include "oxidize/attn_kernels.h"
 
+#include <pthread.h>
 #include <stdint.h>
 
 static float dot_f32_scalar(const float *a, const float *b, size_t n)
@@ -239,19 +240,24 @@ static void axpy_q8_avx512(float *y, const int8_t *x, float alpha, size_t n)
 }
 
 static int g_isa = -1;
+static pthread_once_t g_isa_once = PTHREAD_ONCE_INIT;
 
-static int detect_isa(void)
+static void detect_isa_once(void)
 {
-    if (g_isa >= 0) return g_isa;
     if (__builtin_cpu_supports("avx512f")) {
         g_isa = 2;
-        return g_isa;
+        return;
     }
     if (__builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma")) {
         g_isa = 1;
-        return g_isa;
+        return;
     }
     g_isa = 0;
+}
+
+static int detect_isa(void)
+{
+    pthread_once(&g_isa_once, detect_isa_once);
     return g_isa;
 }
 

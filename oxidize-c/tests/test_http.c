@@ -62,6 +62,14 @@ Test(http, format_response_overflow_returns_zero)
     cr_assert_eq(n, 0u, "overflow returns 0");
 }
 
+Test(http, json_bool_skips_string_values_named_like_the_key)
+{
+    cr_assert(oc_http_json_bool_field(
+        "{\"prompt\":\"stream\",\"stream\":true}", "stream", false));
+    cr_assert_not(oc_http_json_bool_field(
+        "{\"prompt\":\"stream\"}", "stream", false));
+}
+
 Test(http, status_line_covers_common_codes)
 {
     cr_assert_str_eq(oc_http_status_line(200), "200 OK");

@@ -666,6 +666,8 @@ int main(int argc, char **argv)
         st.mw = &mw;
 
         OcHttpServer srv;
+        memset(&srv, 0, sizeof(srv));
+        oc_openai_attach_http(&srv, &st);
         OcError e = oc_http_server_start(args.host, (uint16_t)args.port, 4,
                                          oc_openai_handler, &st, &srv);
         if (e != OC_OK) {
@@ -673,7 +675,6 @@ int main(int argc, char **argv)
             oc_middleware_free(&mw);
             return 1;
         }
-        oc_openai_attach_http(&srv, &st);
         printf("oxidize-c server listening on http://%s:%u\n"
                "  GET  /healthz  /livez  /readyz\n"
                "  GET  /metrics  /openapi.json\n"

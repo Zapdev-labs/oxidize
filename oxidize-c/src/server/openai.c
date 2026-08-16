@@ -475,6 +475,17 @@ static char *generate_completion_unlocked(OcOpenaiState *st,
         return NULL;
     }
     if (max_tokens < 0) max_tokens = 0;
+    {
+        size_t n_ctx = st->model->cfg.n_ctx;
+        size_t remaining = n_ctx > n_ids ? n_ctx - n_ids : 0;
+        if ((size_t)max_tokens > remaining) max_tokens = (int)remaining;
+        if ((size_t)max_tokens > SIZE_MAX - n_ids ||
+            (n_ids + (size_t)max_tokens) > SIZE_MAX / sizeof(*ids)) {
+            free(ids);
+            oc_llama_session_free(&sess);
+            return NULL;
+        }
+    }
     uint32_t *grown = realloc(ids, (n_ids + (size_t)max_tokens) * sizeof(*ids));
     if (grown == NULL) {
         free(ids);
@@ -593,6 +604,7 @@ bool oc_openai_stream_authorize(const OcHttpRequest *req, int *out_status,
         .auth_header = req->auth_header,
         .client_ip   = req->client_ip,
     };
+    bool ok = true;
     if (st != NULL && st->mw != NULL) {
         int reject = oc_middleware_process_request(st->mw, &rctx);
         if (reject != 0) {
@@ -600,40 +612,50 @@ bool oc_openai_stream_authorize(const OcHttpRequest *req, int *out_status,
             *out_body = oc_openai_error_json(
                 reject == 401 ? "unauthorized" : "rate limit exceeded",
                 reject == 401 ? "authentication_error" : "rate_limit_error");
-            return false;
+            ok = false;
         }
     }
-    if (st == NULL || !st->model_loaded || st->model == NULL || st->tokenizer == NULL) {
+    if (ok && (st == NULL || !st->model_loaded || st->model == NULL ||
+               st->tokenizer == NULL)) {
         *out_status = 503;
         *out_body = oc_openai_error_json("no model loaded", "server_error");
-        return false;
+        ok = false;
     }
-    if (strcmp(req->path, "/v1/completions") == 0) {
+    if (ok && strcmp(req->path, "/v1/completions") == 0) {
         char prompt[8192];
         if (find_json_string_field(req->body, "prompt", prompt, sizeof(prompt)) == NULL) {
             *out_status = 400;
             *out_body = oc_openai_error_json("missing 'prompt' field", "invalid_request_error");
-            return false;
+            ok = false;
         }
-    } else if (strcmp(req->path, "/v1/chat/completions") == 0) {
+    } else if (ok && strcmp(req->path, "/v1/chat/completions") == 0) {
         char *prompt = calloc(OC_OPENAI_MAX_PROMPT_BYTES, 1);
         if (prompt == NULL) {
             *out_status = 500;
             *out_body = oc_openai_error_json("out of memory", "server_error");
-            return false;
-        }
-        size_t prefix = 0;
-        const bool valid = extract_messages_content(req->body,
-            oc_chat_detect(oc_model_arch_name(st->model->arch)), prompt,
-            OC_OPENAI_MAX_PROMPT_BYTES, &prefix);
-        free(prompt);
-        if (!valid) {
-            *out_status = 400;
-            *out_body = oc_openai_error_json("invalid or oversized messages", "invalid_request_error");
-            return false;
+            ok = false;
+        } else {
+            size_t prefix = 0;
+            const bool valid = extract_messages_content(req->body,
+                oc_chat_detect(oc_model_arch_name(st->model->arch)), prompt,
+                OC_OPENAI_MAX_PROMPT_BYTES, &prefix);
+            free(prompt);
+            if (!valid) {
+                *out_status = 400;
+                *out_body = oc_openai_error_json("invalid or oversized messages", "invalid_request_error");
+                ok = false;
+            }
         }
     }
-    return true;
+    if (!ok && st != NULL && st->mw != NULL) {
+        OcResponseContext resp = {
+            .status = *out_status,
+            .duration_ms = 0,
+            .tokens_generated = 0,
+        };
+        oc_middleware_process_response(st->mw, &rctx, &resp);
+    }
+    return ok;
 }
 
 static void handle_completion(OcOpenaiState *st, const OcHttpRequest *req,

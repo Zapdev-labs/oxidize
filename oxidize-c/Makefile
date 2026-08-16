@@ -178,7 +178,7 @@ NVCC_GENCODE := $(foreach a,$(CUDA_ARCHS),-gencode arch=compute_$(a),code=sm_$(a
 # highest arch instead would only help cards newer than our newest target.
 NVCC_GENCODE += -gencode arch=compute_$(firstword $(CUDA_ARCHS)),code=compute_$(firstword $(CUDA_ARCHS))
 
-cuda: CFLAGS := -std=c11 -Wall -Wextra -Werror -O2 -DOC_CUDA
+cuda: CFLAGS := -std=c11 -Wall -Wextra -Werror -O2 -ffp-contract=off -DOC_CUDA
 # -std=c11 deliberately omitted from -Xcompiler: nvcc drives a C++ host
 # compiler for .cu files, which warns that c11 is not a valid C++ standard.
 # -Werror applies to the host side so `make cuda` is as strict as `make build`.

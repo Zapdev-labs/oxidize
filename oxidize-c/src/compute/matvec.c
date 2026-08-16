@@ -201,7 +201,9 @@ static void quantize_act_q8_k(const float *x, size_t n, uint8_t *out)
 #if defined(__x86_64__) || defined(__i386__)
     if (n >= OC_OXK_QK_K && (n % OC_OXK_QK_K) == 0 &&
         __builtin_cpu_supports("avx512f") &&
-        __builtin_cpu_supports("avx512bw")) {
+        __builtin_cpu_supports("avx512bw") &&
+        __builtin_cpu_supports("avx512dq") &&
+        __builtin_cpu_supports("avx512vl")) {
         quantize_act_q8_k_avx512(x, n, out);
         return;
     }

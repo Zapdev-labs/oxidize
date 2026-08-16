@@ -104,6 +104,8 @@ static OcOpenaiState g_state = {0};
 
 static void start_server(OcHttpServer *srv)
 {
+    memset(srv, 0, sizeof(*srv));
+    oc_openai_attach_http(srv, &g_state);
     OcError e = oc_http_server_start("127.0.0.1", 0, 1, oc_openai_handler,
                                      &g_state, srv);
     cr_assert_eq(e, OC_OK);
@@ -267,7 +269,6 @@ Test(openai, invalid_stream_request_returns_json_error_before_sse)
     OcHttpServer srv;
     memset(&g_state, 0, sizeof(g_state));
     start_server(&srv);
-    oc_openai_attach_http(&srv, &g_state);
     const char *body = "{\"prompt\":\"hello\",\"stream\":true}";
     char req[512];
     int n = snprintf(req, sizeof(req),

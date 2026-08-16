@@ -215,7 +215,10 @@ bool oc_http_json_bool_field(const char *json, const char *key, bool def)
             p[1 + key_len] == '"') {
             const char *value = p + key_len + 2;
             while (*value == ' ' || *value == '\t' || *value == '\r' || *value == '\n') value++;
-            if (*value++ != ':') return def;
+            if (*value++ != ':') {
+                in_string = true;
+                continue;
+            }
             while (*value == ' ' || *value == '\t' || *value == '\r' || *value == '\n') value++;
             if (strncmp(value, "true", 4) == 0) return true;
             if (strncmp(value, "false", 5) == 0) return false;
@@ -561,7 +564,12 @@ OcError oc_http_server_start(const char *host, uint16_t port, size_t n_threads,
                              OcHttpServer *out)
 {
     if (handler == NULL || out == NULL || n_threads == 0) return OC_ERR_INVALID_ARG;
+    char extra_headers[sizeof(out->extra_headers)];
+    OcHttpStreamAuthorize stream_authorize = out->stream_authorize;
+    memcpy(extra_headers, out->extra_headers, sizeof(extra_headers));
     memset(out, 0, sizeof(*out));
+    memcpy(out->extra_headers, extra_headers, sizeof(extra_headers));
+    out->stream_authorize = stream_authorize;
     out->handler   = handler;
     out->user_data = user_data;
     out->n_threads = n_threads;
@@ -630,12 +638,14 @@ void oc_http_server_set_stream_authorizer(OcHttpServer *s,
     if (s != NULL) s->stream_authorize = authorize;
 }
 
-void oc_http_server_set_extra_headers(OcHttpServer *s, const char *headers)
+OcError oc_http_server_set_extra_headers(OcHttpServer *s, const char *headers)
 {
-    if (s == NULL) return;
+    if (s == NULL) return OC_ERR_INVALID_ARG;
     if (headers == NULL) headers = "";
-    strncpy(s->extra_headers, headers, sizeof(s->extra_headers) - 1);
-    s->extra_headers[sizeof(s->extra_headers) - 1] = '\0';
+    size_t n = strlen(headers);
+    if (n >= sizeof(s->extra_headers)) return OC_ERR_INVALID_ARG;
+    memcpy(s->extra_headers, headers, n + 1);
+    return OC_OK;
 }
 
 OcError oc_http_server_join(OcHttpServer *s)

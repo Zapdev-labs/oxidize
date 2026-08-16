@@ -1484,6 +1484,8 @@ OcError oc_cli_run_serve(OcCliContext *ctx)
     st.mw = &mw;
 
     OcHttpServer srv;
+    memset(&srv, 0, sizeof(srv));
+    oc_openai_attach_http(&srv, &st);
     e = oc_http_server_start(ctx->host, (uint16_t)ctx->port, 4,
                              oc_openai_handler, &st, &srv);
     if (e != OC_OK) {
@@ -1498,7 +1500,6 @@ OcError oc_cli_run_serve(OcCliContext *ctx)
         }
         return e;
     }
-    oc_openai_attach_http(&srv, &st);
 
     if (ctx->output_format == OC_CLI_OUTPUT_JSON) {
         printf("{\"command\":\"serve\",\"host\":\"%s\",\"port\":%u,"
@@ -1573,6 +1574,7 @@ OcError oc_cli_run_serve_realtime(OcCliContext *ctx)
      * via the realtime module. For now, we start the HTTP server and
      * accept connections at /v1/realtime. */
     OcHttpServer srv;
+    memset(&srv, 0, sizeof(srv));
     /* We reuse the OpenAI handler as the base; WebSocket upgrade for
      * realtime is handled within the handler when path == /v1/realtime.
      * A future enhancement will add a dedicated realtime HTTP handler. */
@@ -1584,6 +1586,7 @@ OcError oc_cli_run_serve_realtime(OcCliContext *ctx)
     const char *slash = strrchr(ctx->model_path, '/');
     st.model_id = strdup(slash ? slash + 1 : ctx->model_path);
 
+    oc_openai_attach_http(&srv, &st);
     e = oc_http_server_start(ctx->host, (uint16_t)ctx->port, 4,
                              oc_openai_handler, &st, &srv);
     if (e != OC_OK) {
@@ -1594,7 +1597,6 @@ OcError oc_cli_run_serve_realtime(OcCliContext *ctx)
         free(tok); free(model);
         return e;
     }
-    oc_openai_attach_http(&srv, &st);
 
     if (ctx->output_format == OC_CLI_OUTPUT_JSON) {
         printf("{\"command\":\"serve-realtime\",\"host\":\"%s\",\"port\":%u,"

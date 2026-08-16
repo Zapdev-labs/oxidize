@@ -2837,7 +2837,7 @@ static OcError mtp_forward_one(OcLlamaSession *sess, uint32_t token,
     matvec(&m->mtp.eh_proj, sess->mtp_concat, sess->x, sess->dequant_temp);
 
     const int64_t saved_pos = sess->pos;
-    sess->pos = (int64_t)sess->mtp_pos;
+    sess->pos = saved_pos + (int64_t)sess->mtp_pos;
     oc_rms_norm_f32(sess->x, L->attn_norm, sess->normed, h, m->cfg.rms_norm_eps);
     forward_qwen35_full_attention_w(sess, L, m->cfg.n_layer);
     const float *ffn_norm = L->post_attention_norm ? L->post_attention_norm
@@ -2913,6 +2913,8 @@ OcError oc_llama_mtp_greedy_advance(OcLlamaSession *sess, float *logits,
     if (sess == NULL || logits == NULL || out_tokens == NULL || n_out == NULL)
         return OC_ERR_INVALID_ARG;
     *n_out = 0;
+    if (sess->model == NULL)
+        return OC_ERR_INVALID_ARG;
     if (max_out == 0) return OC_OK;
     OcLlamaModel *m = sess->model;
     const uint32_t vocab = m->cfg.vocab_size;
@@ -3864,10 +3866,12 @@ OcError oc_llama_prefill(OcLlamaSession *sess, const uint32_t *tokens,
         /* Logits only for the very last token of the prompt: the lm_head is a
          * vocab_size × n_embd matmul and nothing reads the others. */
         const bool last_chunk = (base + n == n_tokens);
-        if (last_chunk && logits_out != NULL) {
+        if (last_chunk) {
             const float *xl = buf.x + (n - 1) * buf.n_embd;
             if (sess->last_hidden != NULL)
                 memcpy(sess->last_hidden, xl, m->cfg.n_embd * sizeof(float));
+            sess->last_token = tokens[n_tokens - 1];
+            if (logits_out != NULL) {
             oc_rms_norm_f32(xl, m->final_norm, sess->normed, m->cfg.n_embd,
                             m->cfg.rms_norm_eps);
             if (!m->cfg.uses_gemma4 && m->cfg.norm_scale != 1.0f) {
@@ -3895,6 +3899,7 @@ OcError oc_llama_prefill(OcLlamaSession *sess, const uint32_t *tokens,
                 const float inv = 1.0f / cap;
                 for (size_t i = 0; i < m->cfg.vocab_size; i++)
                     logits_out[i] = tanhf(logits_out[i] * inv) * cap;
+            }
             }
         }
     }
@@ -3957,6 +3962,14 @@ OcError oc_llama_session_copy_prefix(OcLlamaSession *dst,
     }
     memcpy(dst->logits, src->logits, c->vocab_size * sizeof(*src->logits));
     dst->pos = src->pos;
+    dst->last_token = src->last_token;
+    dst->mtp_pos = src->mtp_pos;
+    if (dst->last_hidden != NULL && src->last_hidden != NULL)
+        memcpy(dst->last_hidden, src->last_hidden,
+               c->n_embd * sizeof(*src->last_hidden));
+    if (dst->mtp_hidden != NULL && src->mtp_hidden != NULL)
+        memcpy(dst->mtp_hidden, src->mtp_hidden,
+               c->n_embd * sizeof(*src->mtp_hidden));
     return OC_OK;
 }
 

@@ -14,8 +14,8 @@
  *      exactly with the scalar prepared dot, since the batch path picks
  *      between them purely on activation count.
  *
- * (3) is exact, not approximate: the kernels differ only in how the integer
- * block sums are reduced, and that arithmetic is exact in int32.
+ * (3) compares multi vs prepared within 1 ULP: SIMD and scalar epilogues
+ * can round the final float conversion differently.
  */
 #include <criterion/criterion.h>
 
@@ -165,7 +165,7 @@ static void run_case(const TypeUnderTest *t, uint32_t seed)
         cr_assert_float_eq(prepped, packed, tol,
             "act %d: prepared dot %f != packed dot %f", a,
             (double)prepped, (double)packed);
-        /* Exact: same float accumulation order, integer-only difference. */
+        /* Within 1 ULP: SIMD vs scalar float conversion can differ. */
         cr_assert(float_within_1ulp(multi[a], prepped),
             "act %d: multi kernel %.9g != prepared dot %.9g", a,
             (double)multi[a], (double)prepped);
