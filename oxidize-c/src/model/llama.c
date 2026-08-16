@@ -1110,6 +1110,12 @@ OcError oc_llama_load(const char *path, OcLlamaModel *out)
            out->cfg.vocab_size, out->cfg.n_ctx,
            out->cfg.tied_embeddings ? " (tied)" : "",
            out->mtp.present ? " (MTP)" : "");
+    if (out->cfg.is_longcat && out->cfg.ngram_n_grams > 0)
+        oc_log(OC_LOG_WARN,
+               "llama: LongCat n-gram tables are bound but not applied in forward");
+    if (out->cfg.uses_mla || out->cfg.is_longcat)
+        oc_log(OC_LOG_INFO,
+               "llama: batched prefill unavailable for this architecture; using per-token prefill");
     return OC_OK;
 }
 
@@ -4126,7 +4132,7 @@ OcError oc_batch_forward(OcBatchSession *bs, OcBatchSeq *seqs)
         /* Final RMSNorm + lm_head. */
         oc_rms_norm_f32(tmp.x, m->final_norm, tmp.normed, m->cfg.n_embd,
                         m->cfg.rms_norm_eps);
-        if (m->cfg.norm_scale != 1.0f) {
+        if (!m->cfg.uses_gemma4 && m->cfg.norm_scale != 1.0f) {
             for (size_t i = 0; i < m->cfg.n_embd; i++) tmp.normed[i] *= m->cfg.norm_scale;
         }
         if (seqs[s].logits != NULL) {

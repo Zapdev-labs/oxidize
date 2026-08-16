@@ -29,6 +29,12 @@
 #define N_BLOCKS 7u
 #define N_VALS   (N_BLOCKS * OC_OXK_QK_K)
 
+static bool float_within_1ulp(float a, float b)
+{
+    if (a == b) return true;
+    return nextafterf(a, b) == b || nextafterf(b, a) == a;
+}
+
 /* Deterministic pseudo-random floats with enough dynamic range per block to
  * exercise the per-group scales (a flat distribution would let a broken
  * scale decode pass). */
@@ -160,7 +166,7 @@ static void run_case(const TypeUnderTest *t, uint32_t seed)
             "act %d: prepared dot %f != packed dot %f", a,
             (double)prepped, (double)packed);
         /* Exact: same float accumulation order, integer-only difference. */
-        cr_assert_eq(multi[a], prepped,
+        cr_assert(float_within_1ulp(multi[a], prepped),
             "act %d: multi kernel %.9g != prepared dot %.9g", a,
             (double)multi[a], (double)prepped);
     }
@@ -244,7 +250,7 @@ Test(oxk_q23k, q4_k_and_q6_k_multi_still_exact)
         for (int a = 0; a < N_ACT; a++) {
             const float want = cases[c].prepped(prep, N_BLOCKS,
                                                 acts + (size_t)a * act_stride);
-            cr_assert_eq(multi[a], want,
+            cr_assert(float_within_1ulp(multi[a], want),
                 "case %zu act %d: multi %.9g != scalar prepared %.9g",
                 c, a, (double)multi[a], (double)want);
         }

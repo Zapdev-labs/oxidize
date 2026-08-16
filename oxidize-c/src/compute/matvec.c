@@ -932,23 +932,18 @@ void oc_matvec_quantized_batch(OcGgufQuantizationType qtype,
                          size_t, float *) = NULL;
         void (*packed_multi)(const uint8_t *, size_t, const uint8_t *, size_t,
                              size_t, float *) = NULL;
-        const OcOxkCaps *caps = oc_oxk_caps();
-        const bool vnni = caps != NULL && caps->level >= OC_OXK_AVX512 &&
-                          caps->has_vnni;
         switch (qtype) {
         case OC_QUANT_Q4_K_S:
         case OC_QUANT_Q4_K_M:
             prep_bytes = oc_oxk_q4_k_prep_bytes(blocks);
             prep_fn    = oc_oxk_q4_k_prep_row;
             multi_fn   = oc_oxk_dot_q4_k_prepped_multi;
-            if (vnni) packed_multi = oc_oxk_dot_q4_k_q8_k_multi;
             break;
         case OC_QUANT_Q5_K_S:
         case OC_QUANT_Q5_K_M:
             prep_bytes = oc_oxk_q4_k_prep_bytes(blocks);
             prep_fn    = oc_oxk_q5_k_prep_row;
             multi_fn   = oc_oxk_dot_q4_k_prepped_multi;
-            if (vnni) packed_multi = oc_oxk_dot_q5_k_q8_k_multi;
             break;
         case OC_QUANT_Q6_K:
             prep_bytes = oc_oxk_q6_k_prep_bytes(blocks);

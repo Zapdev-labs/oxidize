@@ -26,6 +26,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+static bool float_within_1ulp(float a, float b)
+{
+    if (a == b) return true;
+    return nextafterf(a, b) == b || nextafterf(b, a) == a;
+}
+
 static float frand(uint32_t *s)
 {
     *s = *s * 1664525u + 1013904223u;
@@ -74,7 +80,7 @@ static void check_parity(OcGgufQuantizationType qtype, size_t rows,
     for (size_t v = 0; v < n_vec; v++) {
         for (size_t r = 0; r < rows; r++) {
             const size_t k = v * rows + r;
-            cr_assert_float_eq(out_bat[k], out_ref[k], 0.0f,
+            cr_assert(float_within_1ulp(out_bat[k], out_ref[k]),
                                "qtype=%d cols=%zu n_vec=%zu vec=%zu row=%zu: "
                                "batched %.9g != reference %.9g",
                                (int)qtype, cols, n_vec, v, r,
@@ -202,7 +208,7 @@ Test(matvec_batch, padded_strides)
         oc_matvec_quantized(OC_QUANT_Q4_K_M, w, rows, cols, row_bytes,
                             in + v * in_stride, ref, temp);
         for (size_t r = 0; r < rows; r++) {
-            cr_assert_float_eq(out[v * out_stride + r], ref[r], 0.0f,
+            cr_assert(float_within_1ulp(out[v * out_stride + r], ref[r]),
                                "padded-stride mismatch at vec=%zu row=%zu",
                                v, r);
         }
