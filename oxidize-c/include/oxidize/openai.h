@@ -77,6 +77,8 @@ void oc_openai_handler(const OcHttpRequest *req,
                        size_t *out_body_len,
                        void *user_data);
 
+void oc_openai_attach_http(OcHttpServer *srv, OcOpenaiState *st);
+
 bool oc_openai_stream_authorize(const OcHttpRequest *req, int *out_status,
                                 const char **out_body, void *user_data);
 

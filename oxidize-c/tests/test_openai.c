@@ -267,7 +267,7 @@ Test(openai, invalid_stream_request_returns_json_error_before_sse)
     OcHttpServer srv;
     memset(&g_state, 0, sizeof(g_state));
     start_server(&srv);
-    oc_http_server_set_stream_authorizer(&srv, oc_openai_stream_authorize);
+    oc_openai_attach_http(&srv, &g_state);
     const char *body = "{\"prompt\":\"hello\",\"stream\":true}";
     char req[512];
     int n = snprintf(req, sizeof(req),

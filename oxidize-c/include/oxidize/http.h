@@ -90,6 +90,7 @@ typedef struct OcHttpServer {
     OcHttpHandler handler;
     OcHttpStreamAuthorize stream_authorize;
     void        *user_data;
+    char         extra_headers[384];
     _Atomic bool stop;           /* set by oc_http_server_stop              */
     bool         joined;        /* true after oc_http_server_join          */
 } OcHttpServer;
@@ -105,6 +106,10 @@ OcError oc_http_server_start(const char *host, uint16_t port, size_t n_threads,
 void oc_http_server_set_stream_authorizer(OcHttpServer *s,
                                           OcHttpStreamAuthorize authorize);
 
+/* Extra response headers (typically CORS). Empty string omits them.
+ * Call after start, before serving traffic. */
+void oc_http_server_set_extra_headers(OcHttpServer *s, const char *headers);
+
 /* Block until the server stops (or returns immediately if already stopped).
  * Internally joins all worker threads. */
 OcError oc_http_server_join(OcHttpServer *s);
@@ -118,7 +123,8 @@ OcError oc_http_server_stop(OcHttpServer *s);
  * caller owns `buf`. Used internally by the worker; exposed for tests. */
 size_t oc_http_format_response(char *buf, size_t cap,
                                int status, const char *content_type,
-                               const char *body, size_t body_len);
+                               const char *body, size_t body_len,
+                               const char *extra_headers);
 
 /* Read a boolean at the top level of a JSON object. Keys inside strings or
  * nested values are ignored. Returns `def` when the key is absent or is not

@@ -460,11 +460,11 @@ static char *generate_completion_unlocked(OcOpenaiState *st,
                                           void *on_text_context)
 {
     if (st == NULL || !st->model_loaded || st->model == NULL || st->tokenizer == NULL) {
-        return strdup("");
+        return NULL;
     }
     OcLlamaSession sess;
     if (oc_llama_session_init(st->model, &sess) != OC_OK) {
-        return strdup("");
+        return NULL;
     }
     uint32_t *ids = NULL;
     size_t n_ids = 0;
@@ -472,8 +472,16 @@ static char *generate_completion_unlocked(OcOpenaiState *st,
         ? OC_TOK_ADD_BOS : OC_TOK_DEFAULT;
     if (oc_tokenizer_encode(st->tokenizer, prompt, pol, &ids, &n_ids) != OC_OK || n_ids == 0) {
         oc_llama_session_free(&sess);
-        return strdup("");
+        return NULL;
     }
+    if (max_tokens < 0) max_tokens = 0;
+    uint32_t *grown = realloc(ids, (n_ids + (size_t)max_tokens) * sizeof(*ids));
+    if (grown == NULL) {
+        free(ids);
+        oc_llama_session_free(&sess);
+        return NULL;
+    }
+    ids = grown;
 
     OcSamplerConfig scfg = OC_SAMPLER_DEFAULT;
     scfg.temperature = temperature;
@@ -502,18 +510,20 @@ static char *generate_completion_unlocked(OcOpenaiState *st,
         oc_llama_prefill(&sess, ids + consumed, n_ids - consumed, 0,
                          sess.logits) != OC_OK) {
         free(ids); oc_llama_session_free(&sess);
-        return strdup("");
+        return NULL;
     }
 
-    /* Generate. Use a dynamic string builder. */
     size_t cap = 4096, len = 0;
     char *result = malloc(cap);
     if (result == NULL) { free(ids); oc_llama_session_free(&sess); return NULL; }
     result[0] = '\0';
 
+    size_t n_hist = n_ids;
     for (int t = 0; t < max_tokens; t++) {
-        uint32_t tok = oc_sample(sess.logits, st->model->cfg.vocab_size, &scfg, NULL, 0);
+        uint32_t tok = oc_sample(sess.logits, st->model->cfg.vocab_size, &scfg,
+                                 ids, n_hist);
         if (st->tokenizer->has_eos && tok == st->tokenizer->eos_id) break;
+        ids[n_hist++] = tok;
         char *piece = NULL;
         if (oc_tokenizer_decode(st->tokenizer, &tok, 1, &piece) == OC_OK && piece) {
             size_t plen = strlen(piece);
@@ -577,6 +587,22 @@ bool oc_openai_stream_authorize(const OcHttpRequest *req, int *out_status,
                                 const char **out_body, void *user_data)
 {
     OcOpenaiState *st = user_data;
+    OcRequestContext rctx = {
+        .method      = req->method,
+        .path        = req->path,
+        .auth_header = req->auth_header,
+        .client_ip   = req->client_ip,
+    };
+    if (st != NULL && st->mw != NULL) {
+        int reject = oc_middleware_process_request(st->mw, &rctx);
+        if (reject != 0) {
+            *out_status = reject;
+            *out_body = oc_openai_error_json(
+                reject == 401 ? "unauthorized" : "rate limit exceeded",
+                reject == 401 ? "authentication_error" : "rate_limit_error");
+            return false;
+        }
+    }
     if (st == NULL || !st->model_loaded || st->model == NULL || st->tokenizer == NULL) {
         *out_status = 503;
         *out_body = oc_openai_error_json("no model loaded", "server_error");
@@ -995,7 +1021,7 @@ void oc_openai_handler(const OcHttpRequest *req,
         .client_ip   = req->client_ip,
     };
     int reject = 0;
-    if (st->mw != NULL) {
+    if (st->mw != NULL && req->stream_write == NULL) {
         reject = oc_middleware_process_request(st->mw, &rctx);
     }
 
@@ -1070,4 +1096,14 @@ void oc_openai_handler(const OcHttpRequest *req,
     }
     /* The HTTP server core (http.c) frees the response body after write()
      * when body_len > 0. Handlers always return malloc'd buffers. */
+}
+
+void oc_openai_attach_http(OcHttpServer *srv, OcOpenaiState *st)
+{
+    if (srv == NULL) return;
+    oc_http_server_set_stream_authorizer(srv, oc_openai_stream_authorize);
+    if (st == NULL || st->mw == NULL) return;
+    char cors[384];
+    if (oc_middleware_cors_headers(st->mw, cors, sizeof(cors)) > 0)
+        oc_http_server_set_extra_headers(srv, cors);
 }

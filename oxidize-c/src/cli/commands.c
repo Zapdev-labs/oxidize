@@ -1498,7 +1498,7 @@ OcError oc_cli_run_serve(OcCliContext *ctx)
         }
         return e;
     }
-    oc_http_server_set_stream_authorizer(&srv, oc_openai_stream_authorize);
+    oc_openai_attach_http(&srv, &st);
 
     if (ctx->output_format == OC_CLI_OUTPUT_JSON) {
         printf("{\"command\":\"serve\",\"host\":\"%s\",\"port\":%u,"
@@ -1594,7 +1594,7 @@ OcError oc_cli_run_serve_realtime(OcCliContext *ctx)
         free(tok); free(model);
         return e;
     }
-    oc_http_server_set_stream_authorizer(&srv, oc_openai_stream_authorize);
+    oc_openai_attach_http(&srv, &st);
 
     if (ctx->output_format == OC_CLI_OUTPUT_JSON) {
         printf("{\"command\":\"serve-realtime\",\"host\":\"%s\",\"port\":%u,"
