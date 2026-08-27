@@ -9,7 +9,13 @@ use crate::{BLOCK_Q8_K_BYTES, QK_K};
 pub fn quantize_q8_k_into(vector: &[f32], n_blocks: usize, out: &mut [u8]) {
     debug_assert_eq!(vector.len(), n_blocks * QK_K);
     debug_assert_eq!(out.len(), n_blocks * BLOCK_Q8_K_BYTES);
-    for (b, block_in) in vector.chunks_exact(QK_K).enumerate().take(n_blocks) {
+    for (b, block_in) in vector
+        .as_chunks::<QK_K>()
+        .0
+        .iter()
+        .enumerate()
+        .take(n_blocks)
+    {
         let block_out = &mut out[b * BLOCK_Q8_K_BYTES..(b + 1) * BLOCK_Q8_K_BYTES];
         quantize_block(block_in, block_out);
     }

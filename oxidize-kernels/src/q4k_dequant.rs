@@ -11,8 +11,10 @@ pub fn dequantize_q4_k_into(input: &[u8], output: &mut [f32]) {
     debug_assert_eq!(input.len(), n_blocks * BLOCK_Q4_K_SIZE);
     debug_assert_eq!(output.len(), n_blocks * QK_K);
     for (block, out) in input
-        .chunks_exact(BLOCK_Q4_K_SIZE)
-        .zip(output.chunks_exact_mut(QK_K))
+        .as_chunks::<BLOCK_Q4_K_SIZE>()
+        .0
+        .iter()
+        .zip(output.as_chunks_mut::<QK_K>().0.iter_mut())
     {
         dequantize_block(block, out);
     }
