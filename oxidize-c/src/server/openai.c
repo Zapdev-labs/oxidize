@@ -668,7 +668,7 @@ bool oc_openai_stream_authorize(const OcHttpRequest *req, int *out_status,
 static void handle_completion(OcOpenaiState *st, const OcHttpRequest *req,
                               int *out_status, const char **out_body)
 {
-    if (!st || !st->model_loaded || st->model == NULL || st->tokenizer == NULL) {
+    if (!st) {
         *out_body = oc_openai_error_json("no model loaded", "server_error");
         *out_status = 503;
         return;
@@ -677,6 +677,11 @@ static void handle_completion(OcOpenaiState *st, const OcHttpRequest *req,
     if (find_json_string_field(req->body, "prompt", prompt, sizeof(prompt)) == NULL) {
         *out_body = oc_openai_error_json("missing 'prompt' field", "invalid_request_error");
         *out_status = 400;
+        return;
+    }
+    if (!st->model_loaded || st->model == NULL || st->tokenizer == NULL) {
+        *out_body = oc_openai_error_json("no model loaded", "server_error");
+        *out_status = 503;
         return;
     }
     int max_tokens = find_json_int_field(req->body, "max_tokens", 128);

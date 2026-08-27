@@ -235,7 +235,7 @@ Test(openai, nested_stream_text_does_not_enable_streaming)
         strlen(body), body);
     size_t len;
     char *resp = send_raw(srv.port, req, (size_t)n, &len);
-    cr_assert(strstr(resp, "500 Internal Server Error") != NULL);
+    cr_assert(strstr(resp, "503 Service Unavailable") != NULL);
     cr_assert(strstr(resp, "text/event-stream") == NULL);
     free(resp);
     oc_http_server_stop(&srv);

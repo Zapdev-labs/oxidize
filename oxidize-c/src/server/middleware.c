@@ -12,11 +12,8 @@
  * buffer are protected by mutexes. Safe to call from multiple worker
  * threads concurrently.
  *
- * NOTE: this stack is NOT yet wired into the `--serve-api` HTTP path; the
- * server core must call oc_middleware_process_request/_response around each
- * dispatched request (with the Authorization header and peer IP captured
- * into OcRequestContext) for auth/rate-limit/metrics/audit/CORS to take
- * effect. Until then it is a standalone, tested component.
+ * Wired into `--serve-api` via oc_openai_handler and
+ * oc_openai_stream_authorize (Authorization plus peer IP on OcRequestContext).
  */
 #define _POSIX_C_SOURCE 200809L   /* strdup, snprintf */
 #include "oxidize/middleware.h"
