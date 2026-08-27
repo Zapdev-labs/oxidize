@@ -261,8 +261,10 @@ mod tests {
         let mapped = crate::index::MappedShard::open(&out).unwrap();
         let data = mapped.tensor_bytes("weight").unwrap();
         let vals: Vec<f32> = data
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| f32::from_le_bytes(*c))
             .collect();
         assert!((vals[0] - 1.0).abs() < 1e-5);
         assert!((vals[1] - 3.0).abs() < 1e-5);

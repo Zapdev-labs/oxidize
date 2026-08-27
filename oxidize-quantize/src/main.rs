@@ -1,3 +1,4 @@
+#![allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File};
 use std::io::{Read, Seek, Write};
@@ -78,8 +79,8 @@ fn load_imatrix(path: &Path) -> Result<Imatrix> {
         }
         let scale = if ncall > 0 { ncall as f32 } else { 1.0 };
         let mut values = Vec::with_capacity(nval);
-        for chunk in bytes[cursor..data_end].chunks_exact(4) {
-            let raw = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        for chunk in bytes[cursor..data_end].as_chunks::<4>().0 {
+            let raw = f32::from_le_bytes(*chunk);
             // Clamp to non-negative finite importance; the encoder requires it.
             let v = if raw.is_finite() && raw > 0.0 {
                 raw / scale
