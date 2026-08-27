@@ -381,6 +381,19 @@ Test(http, start_rejects_bad_args)
                  OC_ERR_INVALID_ARG, "null out rejected");
 }
 
+Test(http, start_does_not_read_uninitialized_configuration)
+{
+    TestState st = {0};
+    OcHttpServer srv;
+    memset(&srv, 0xa5, sizeof(srv));
+    cr_assert_eq(oc_http_server_start("127.0.0.1", 0, 1,
+                                      test_handler, &st, &srv), OC_OK);
+    cr_assert_null(srv.stream_authorize);
+    cr_assert_eq(srv.extra_headers[0], '\0');
+    oc_http_server_stop(&srv);
+    oc_http_server_join(&srv);
+}
+
 Test(http, stop_and_join_are_idempotent)
 {
     TestState st = {0};

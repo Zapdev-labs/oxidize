@@ -1123,6 +1123,7 @@ void oc_openai_handler(const OcHttpRequest *req,
 void oc_openai_attach_http(OcHttpServer *srv, OcOpenaiState *st)
 {
     if (srv == NULL) return;
+    memset(srv, 0, sizeof(*srv));
     oc_http_server_set_stream_authorizer(srv, oc_openai_stream_authorize);
     if (st == NULL || st->mw == NULL) return;
     char cors[384];

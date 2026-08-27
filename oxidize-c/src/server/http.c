@@ -559,17 +559,23 @@ static void *worker_main(void *arg)
 
 /* ─── Server lifecycle ────────────────────────────────────────────────── */
 
-OcError oc_http_server_start(const char *host, uint16_t port, size_t n_threads,
-                             OcHttpHandler handler, void *user_data,
-                             OcHttpServer *out)
+static OcError http_server_start(const char *host, uint16_t port,
+                                 size_t n_threads, OcHttpHandler handler,
+                                 void *user_data, OcHttpServer *out,
+                                 bool preserve_config)
 {
     if (handler == NULL || out == NULL || n_threads == 0) return OC_ERR_INVALID_ARG;
     char extra_headers[sizeof(out->extra_headers)];
-    OcHttpStreamAuthorize stream_authorize = out->stream_authorize;
-    memcpy(extra_headers, out->extra_headers, sizeof(extra_headers));
+    OcHttpStreamAuthorize stream_authorize = NULL;
+    if (preserve_config) {
+        stream_authorize = out->stream_authorize;
+        memcpy(extra_headers, out->extra_headers, sizeof(extra_headers));
+    }
     memset(out, 0, sizeof(*out));
-    memcpy(out->extra_headers, extra_headers, sizeof(extra_headers));
-    out->stream_authorize = stream_authorize;
+    if (preserve_config) {
+        memcpy(out->extra_headers, extra_headers, sizeof(extra_headers));
+        out->stream_authorize = stream_authorize;
+    }
     out->handler   = handler;
     out->user_data = user_data;
     out->n_threads = n_threads;
@@ -630,6 +636,23 @@ OcError oc_http_server_start(const char *host, uint16_t port, size_t n_threads,
     oc_log(OC_LOG_INFO, "http: server listening on %s:%u (%zu threads)",
            host ? host : "0.0.0.0", out->port, n_threads);
     return OC_OK;
+}
+
+OcError oc_http_server_start(const char *host, uint16_t port, size_t n_threads,
+                             OcHttpHandler handler, void *user_data,
+                             OcHttpServer *out)
+{
+    return http_server_start(host, port, n_threads, handler, user_data, out,
+                             false);
+}
+
+OcError oc_http_server_start_configured(const char *host, uint16_t port,
+                                        size_t n_threads,
+                                        OcHttpHandler handler,
+                                        void *user_data, OcHttpServer *out)
+{
+    return http_server_start(host, port, n_threads, handler, user_data, out,
+                             true);
 }
 
 void oc_http_server_set_stream_authorizer(OcHttpServer *s,

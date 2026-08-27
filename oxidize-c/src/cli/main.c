@@ -668,8 +668,8 @@ int main(int argc, char **argv)
         OcHttpServer srv;
         memset(&srv, 0, sizeof(srv));
         oc_openai_attach_http(&srv, &st);
-        OcError e = oc_http_server_start(args.host, (uint16_t)args.port, 4,
-                                         oc_openai_handler, &st, &srv);
+        OcError e = oc_http_server_start_configured(
+            args.host, (uint16_t)args.port, 4, oc_openai_handler, &st, &srv);
         if (e != OC_OK) {
             fprintf(stderr, "error: server start failed (%s)\n", oc_error_msg(e));
             oc_middleware_free(&mw);

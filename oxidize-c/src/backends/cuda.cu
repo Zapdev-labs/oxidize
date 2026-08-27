@@ -404,7 +404,7 @@ __global__ void k_attention_all_heads(
                 const float4 qv = q4[d];
                 const float2 a = __half22float2(__ldg(&k2[2u * d]));
                 const float2 b = __half22float2(__ldg(&k2[2u * d + 1u]));
-                s += qv.x * a.x + qv.y * a.y + qv.z * b.x + qv.w * b.w;
+                s += qv.x * a.x + qv.y * a.y + qv.z * b.x + qv.w * b.y;
             }
         } else if (pair) {
             const __half2 *k2 = reinterpret_cast<const __half2 *>(k);

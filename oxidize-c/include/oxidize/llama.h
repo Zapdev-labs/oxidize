@@ -480,7 +480,8 @@ OcError oc_llama_session_init_kv(OcLlamaModel *model, OcLlamaSession *out,
 
 /* Resolve KV type from `--kv` / OX_KV_TYPE / context length.
  * explicit: "q8", "f32", or NULL. Contexts >= 8192 default to Q8. */
-OcKvCacheType oc_llama_select_kv_type(uint32_t n_ctx, const char *explicit);
+OcKvCacheType oc_llama_select_kv_type(uint32_t n_ctx,
+                                      const char *explicit_value);
 
 /* Bytes the KV cache occupies for `model` under `kv_type`. Useful for
  * reporting and for deciding whether a context length is affordable. */

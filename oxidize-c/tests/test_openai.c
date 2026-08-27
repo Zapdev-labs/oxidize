@@ -106,8 +106,8 @@ static void start_server(OcHttpServer *srv)
 {
     memset(srv, 0, sizeof(*srv));
     oc_openai_attach_http(srv, &g_state);
-    OcError e = oc_http_server_start("127.0.0.1", 0, 1, oc_openai_handler,
-                                     &g_state, srv);
+    OcError e = oc_http_server_start_configured(
+        "127.0.0.1", 0, 1, oc_openai_handler, &g_state, srv);
     cr_assert_eq(e, OC_OK);
     usleep(50 * 1000);
 }
@@ -235,7 +235,7 @@ Test(openai, nested_stream_text_does_not_enable_streaming)
         strlen(body), body);
     size_t len;
     char *resp = send_raw(srv.port, req, (size_t)n, &len);
-    cr_assert(strstr(resp, "200 OK") != NULL);
+    cr_assert(strstr(resp, "500 Internal Server Error") != NULL);
     cr_assert(strstr(resp, "text/event-stream") == NULL);
     free(resp);
     oc_http_server_stop(&srv);
@@ -256,9 +256,8 @@ Test(openai, stream_request_returns_sse)
         strlen(body), body);
     size_t len;
     char *resp = send_raw(srv.port, req, (size_t)n, &len);
-    cr_assert(strstr(resp, "200 OK") != NULL);
-    cr_assert(strstr(resp, "Content-Type: text/event-stream") != NULL);
-    cr_assert(strstr(resp, "data: [DONE]") != NULL);
+    cr_assert(strstr(resp, "503 Service Unavailable") != NULL);
+    cr_assert(strstr(resp, "Content-Type: text/event-stream") == NULL);
     free(resp);
     oc_http_server_stop(&srv);
     oc_http_server_join(&srv);

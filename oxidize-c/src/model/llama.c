@@ -2464,7 +2464,8 @@ static OcError forward_qwen35_recurrent(OcLlamaSession *s, uint32_t layer)
 
 static void forward_qwen35_full_attention_w(OcLlamaSession *s,
                                             OcLlamaLayer *weights,
-                                            uint32_t attn_layer)
+                                            uint32_t attn_layer,
+                                            int64_t rope_pos)
 {
     const OcLlamaConfig *c = &s->model->cfg;
     const size_t head_dim = weights->head_dim;
@@ -2508,7 +2509,7 @@ static void forward_qwen35_full_attention_w(OcLlamaSession *s,
                head_dim * sizeof(float));
         oc_apply_rope_f32(s->q + (size_t)head * head_dim,
                           s->q + (size_t)head * head_dim, head_dim,
-                          weights->rope_dim, s->pos, weights->rope_theta);
+                          weights->rope_dim, rope_pos, weights->rope_theta);
     }
     for (uint32_t head = 0; head < weights->n_head_kv; head++) {
         oc_rms_norm_f32(s->k + (size_t)head * head_dim,
@@ -2518,7 +2519,7 @@ static void forward_qwen35_full_attention_w(OcLlamaSession *s,
                head_dim * sizeof(float));
         oc_apply_rope_f32(s->k + (size_t)head * head_dim,
                           s->k + (size_t)head * head_dim, head_dim,
-                          weights->rope_dim, s->pos, weights->rope_theta);
+                          weights->rope_dim, rope_pos, weights->rope_theta);
     }
 
     const size_t cache_row = s->kv_row_floats;
@@ -2556,7 +2557,8 @@ static void forward_qwen35_full_attention_w(OcLlamaSession *s,
 
 static void forward_qwen35_full_attention(OcLlamaSession *s, uint32_t layer)
 {
-    forward_qwen35_full_attention_w(s, &s->model->layers[layer], layer);
+    forward_qwen35_full_attention_w(s, &s->model->layers[layer], layer,
+                                    s->pos);
 }
 
 static OcError forward_layer(OcLlamaSession *s, uint32_t layer)
@@ -2837,9 +2839,10 @@ static OcError mtp_forward_one(OcLlamaSession *sess, uint32_t token,
     matvec(&m->mtp.eh_proj, sess->mtp_concat, sess->x, sess->dequant_temp);
 
     const int64_t saved_pos = sess->pos;
-    sess->pos = saved_pos + (int64_t)sess->mtp_pos;
+    sess->pos = (int64_t)sess->mtp_pos;
     oc_rms_norm_f32(sess->x, L->attn_norm, sess->normed, h, m->cfg.rms_norm_eps);
-    forward_qwen35_full_attention_w(sess, L, m->cfg.n_layer);
+    forward_qwen35_full_attention_w(sess, L, m->cfg.n_layer,
+                                    saved_pos + (int64_t)sess->mtp_pos);
     const float *ffn_norm = L->post_attention_norm ? L->post_attention_norm
                                                    : L->ffn_norm;
     oc_rms_norm_f32(sess->x, ffn_norm, sess->normed, h, m->cfg.rms_norm_eps);
@@ -2891,6 +2894,10 @@ OcError oc_llama_mtp_draft_tokens(OcLlamaSession *sess, uint32_t k,
     if (k == 0) return OC_OK;
     if (k > 8) k = 8;
     OcLlamaModel *m = sess->model;
+    uint64_t remaining = sess->pos < (int64_t)m->cfg.n_ctx
+        ? (uint64_t)m->cfg.n_ctx - (uint64_t)sess->pos : 0;
+    if ((uint64_t)k > remaining) k = (uint32_t)remaining;
+    if (k == 0) return OC_OK;
     memcpy(sess->mtp_hidden, sess->last_hidden, m->cfg.n_embd * sizeof(float));
     uint32_t cur = sess->last_token;
     sess->mtp_pos = 0;
@@ -2929,6 +2936,10 @@ OcError oc_llama_mtp_greedy_advance(OcLlamaSession *sess, float *logits,
     size_t k = OC_MTP_DEFAULT_DRAFT;
     if (k > 8) k = 8;
     if (k > max_out) k = max_out;
+    uint64_t remaining = sess->pos < (int64_t)m->cfg.n_ctx
+        ? (uint64_t)m->cfg.n_ctx - (uint64_t)sess->pos : 0;
+    if ((uint64_t)k > remaining) k = (size_t)remaining;
+    if (k == 0) return OC_ERR_INVALID_ARG;
 
     memcpy(sess->mtp_hidden, sess->last_hidden, m->cfg.n_embd * sizeof(float));
     uint32_t cur = sess->last_token;

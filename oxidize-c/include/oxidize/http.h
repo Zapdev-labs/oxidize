@@ -103,6 +103,14 @@ OcError oc_http_server_start(const char *host, uint16_t port, size_t n_threads,
                              OcHttpHandler handler, void *user_data,
                              OcHttpServer *out);
 
+/* Start while preserving stream_authorize and extra_headers from a
+ * caller-zeroed `out`. Use this only after pre-start configuration; the
+ * ordinary start entry point accepts an uninitialized output object. */
+OcError oc_http_server_start_configured(const char *host, uint16_t port,
+                                        size_t n_threads,
+                                        OcHttpHandler handler,
+                                        void *user_data, OcHttpServer *out);
+
 void oc_http_server_set_stream_authorizer(OcHttpServer *s,
                                           OcHttpStreamAuthorize authorize);
 

@@ -1486,8 +1486,8 @@ OcError oc_cli_run_serve(OcCliContext *ctx)
     OcHttpServer srv;
     memset(&srv, 0, sizeof(srv));
     oc_openai_attach_http(&srv, &st);
-    e = oc_http_server_start(ctx->host, (uint16_t)ctx->port, 4,
-                             oc_openai_handler, &st, &srv);
+    e = oc_http_server_start_configured(ctx->host, (uint16_t)ctx->port, 4,
+                                        oc_openai_handler, &st, &srv);
     if (e != OC_OK) {
         cli_error("server start failed (%s)", oc_error_msg(e));
         oc_middleware_free(&mw);
@@ -1587,8 +1587,8 @@ OcError oc_cli_run_serve_realtime(OcCliContext *ctx)
     st.model_id = strdup(slash ? slash + 1 : ctx->model_path);
 
     oc_openai_attach_http(&srv, &st);
-    e = oc_http_server_start(ctx->host, (uint16_t)ctx->port, 4,
-                             oc_openai_handler, &st, &srv);
+    e = oc_http_server_start_configured(ctx->host, (uint16_t)ctx->port, 4,
+                                        oc_openai_handler, &st, &srv);
     if (e != OC_OK) {
         cli_error("realtime server start failed (%s)", oc_error_msg(e));
         free(st.model_id);
