@@ -497,12 +497,8 @@ mod tests {
         let h = cfg.hidden_size;
         let head_dim = cfg.head_dim();
         let layer = &mut w.layers[0];
-        for v in &mut layer.q_proj {
-            *v = 0.0;
-        }
-        for v in &mut layer.k_proj {
-            *v = 0.0;
-        }
+        layer.q_proj.fill(0.0);
+        layer.k_proj.fill(0.0);
         // Set Q[0, head_dim] = 1 for every head, rest 0.
         for head in 0..cfg.num_heads {
             layer.q_proj[head * head_dim] = 1.0;
