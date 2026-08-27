@@ -159,6 +159,7 @@ typedef struct OcSamplerChain {
     OcSamplerStep *steps;
     size_t n_steps;
     size_t capacity;
+    uint32_t rng_state;
 } OcSamplerChain;
 
 /* Initialize an empty sampler chain. */

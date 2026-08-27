@@ -738,6 +738,7 @@ void oc_sampler_chain_init(OcSamplerChain *chain)
     chain->steps = NULL;
     chain->n_steps = 0;
     chain->capacity = 0;
+    chain->rng_state = 12345u;
 }
 
 OcError oc_sampler_chain_add(OcSamplerChain *chain,
@@ -844,7 +845,7 @@ uint32_t oc_sampler_chain_sample(OcSamplerChain *chain,
             if (mirostat_mu)
                 return oc_sample_mirostat_v1(logits, vocab_size,
                                              mirostat_mu, terminal->param1,
-                                             terminal->param2, NULL);
+                                             terminal->param2, &chain->rng_state);
             break;
         case OC_SAMPLER_STEP_MIROSTAT_V2:
             if (mirostat_mu)

@@ -201,6 +201,20 @@ Test(asamp, chain_applies_transforms_after_terminal_step)
     oc_sampler_chain_free(&chain);
 }
 
+Test(asamp, chain_mirostat_v1_advances_chain_rng)
+{
+    OcSamplerChain chain;
+    oc_sampler_chain_init(&chain);
+    cr_assert_eq(oc_sampler_chain_add(&chain, OC_SAMPLER_STEP_MIROSTAT_V1,
+                                      5.0f, 0.1f), OC_OK);
+    float logits[] = {0.0f, 0.1f, 0.2f, 0.3f};
+    float mu = 8.0f;
+    uint32_t before = chain.rng_state;
+    (void)oc_sampler_chain_sample(&chain, logits, 4, NULL, 0, &mu);
+    cr_assert_neq(chain.rng_state, before);
+    oc_sampler_chain_free(&chain);
+}
+
 Test(asamp, chain_add_null)
 {
     cr_assert_neq(oc_sampler_chain_add(NULL, OC_SAMPLER_STEP_TEMPERATURE, 0.8f, 0), OC_OK);

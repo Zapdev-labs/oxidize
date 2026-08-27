@@ -1078,6 +1078,7 @@ OcError oc_llama_load(const char *path, OcLlamaModel *out)
     if (arch_str == NULL) arch_str = "llama";
     if (strcmp(arch_str, "llama") != 0 && strcmp(arch_str, "mistral") != 0 &&
         strcmp(arch_str, "qwen2") != 0 && strcmp(arch_str, "gpt2") != 0 &&
+        strcmp(arch_str, "gptj") != 0 &&
         strcmp(arch_str, "gptneox") != 0 && strcmp(arch_str, "falcon") != 0 &&
         strcmp(arch_str, "gemma4") != 0 && !is_longcat_arch(arch_str) &&
         strcmp(arch_str, "qwen3moe") != 0 &&
@@ -2759,7 +2760,9 @@ OcError oc_llama_forward(OcLlamaSession *sess, uint32_t token, float *logits_out
     /* Architecture dispatch: LayerNorm-family models use the dedicated
      * forward passes in arch_forward.c. */
     switch (sess->model->arch) {
-    case OC_ARCH_GPT2:    return oc_arch_forward_gpt2(sess, token, logits_out);
+    case OC_ARCH_GPT2:
+    case OC_ARCH_GPTJ:
+        return oc_arch_forward_gpt2(sess, token, logits_out);
     case OC_ARCH_GPTNEOX: return oc_arch_forward_gpt_neox(sess, token, logits_out);
     case OC_ARCH_FALCON:  return oc_arch_forward_falcon(sess, token, logits_out);
     default: break;
@@ -3813,7 +3816,8 @@ static OcError prefill_layer(OcLlamaSession *s, uint32_t layer, PrefillBuf *b,
  * them is the MoE prefill case this targets. */
 static bool prefill_batch_supported(const OcLlamaModel *m)
 {
-    if (m->arch == OC_ARCH_GPT2 || m->arch == OC_ARCH_GPTNEOX ||
+    if (m->arch == OC_ARCH_GPT2 || m->arch == OC_ARCH_GPTJ ||
+        m->arch == OC_ARCH_GPTNEOX ||
         m->arch == OC_ARCH_FALCON) return false;
     if (m->cfg.uses_mla || m->cfg.is_longcat) return false;
     if (m->cfg.uses_gemma4) return false;
@@ -3992,7 +3996,8 @@ OcError oc_batch_session_init(OcLlamaModel *model, size_t max_seqs,
     if (model == NULL || out == NULL) return OC_ERR_INVALID_ARG;
     /* Batch decode only implements the RMSNorm Llama-family layer; reject
      * LayerNorm architectures (they use oc_llama_forward's dispatch). */
-    if (model->arch == OC_ARCH_GPT2 || model->arch == OC_ARCH_GPTNEOX ||
+    if (model->arch == OC_ARCH_GPT2 || model->arch == OC_ARCH_GPTJ ||
+        model->arch == OC_ARCH_GPTNEOX ||
         model->arch == OC_ARCH_FALCON)
         return OC_ERR_MODEL;
     if (model->cfg.num_experts > 0 && model->cfg.expert_intermediate_size == 0) {

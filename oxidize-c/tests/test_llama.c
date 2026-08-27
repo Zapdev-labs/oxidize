@@ -199,6 +199,8 @@ Test(llama, sessions_reject_unsupported_architecture_paths)
      * arch_forward.c. */
     model.arch = OC_ARCH_GPT2;
     cr_assert_eq(oc_batch_session_init(&model, 2, &batch), OC_ERR_MODEL);
+    model.arch = OC_ARCH_GPTJ;
+    cr_assert_eq(oc_batch_session_init(&model, 2, &batch), OC_ERR_MODEL);
     model.arch = OC_ARCH_FALCON;
     cr_assert_eq(oc_batch_session_init(&model, 2, &batch), OC_ERR_MODEL);
 }
