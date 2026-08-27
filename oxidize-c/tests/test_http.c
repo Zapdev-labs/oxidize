@@ -22,7 +22,16 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
+
+static void http_shutdown(OcHttpServer *srv, int fd)
+{
+    if (fd >= 0)
+        close(fd);
+    oc_http_server_stop(srv);
+    oc_http_server_join(srv);
+}
 
 /* ─── Response formatting ──────────────────────────────────────────────── */
 
@@ -243,8 +252,8 @@ Test(http, streaming_response_sends_heartbeats_while_handler_runs)
     size_t heartbeats = 0;
     while (heartbeats < 2 && used < sizeof(response) - 1) {
         ssize_t got = read(fd, response + used, sizeof(response) - used - 1);
-        cr_assert_gt(got, 0,
-                     "stream must stay active while slow generation runs");
+        if (got <= 0)
+            break;
         used += (size_t)got;
         response[used] = '\0';
         heartbeats = 0;
@@ -254,13 +263,11 @@ Test(http, streaming_response_sends_heartbeats_while_handler_runs)
             p += strlen(": oxidize\n\n");
         }
     }
-    cr_assert(strstr(response, "text/event-stream") != NULL);
-    cr_assert(strstr(response, "Access-Control-Allow-Origin") == NULL);
-    cr_assert_geq(heartbeats, 2,
+    cr_expect(strstr(response, "text/event-stream") != NULL);
+    cr_expect(strstr(response, "Access-Control-Allow-Origin") == NULL);
+    cr_expect_geq(heartbeats, 2,
                   "stream needs repeated heartbeats during generation");
-    close(fd);
-    oc_http_server_stop(&srv);
-    oc_http_server_join(&srv);
+    http_shutdown(&srv, fd);
 }
 
 Test(http, streaming_handler_can_send_data_before_returning)
@@ -291,13 +298,14 @@ Test(http, streaming_handler_can_send_data_before_returning)
     while (strstr(response, "data: token\n\n") == NULL &&
            used < sizeof(response) - 1) {
         ssize_t got = read(fd, response + used, sizeof(response) - used - 1);
-        cr_assert_gt(got, 0, "streamed handler data must arrive before return");
+        if (got <= 0)
+            break;
         used += (size_t)got;
         response[used] = '\0';
     }
-    close(fd);
-    oc_http_server_stop(&srv);
-    oc_http_server_join(&srv);
+    cr_expect(strstr(response, "data: token\n\n") != NULL,
+              "streamed handler data must arrive before return");
+    http_shutdown(&srv, fd);
 }
 
 Test(http, reads_body_split_across_packets)

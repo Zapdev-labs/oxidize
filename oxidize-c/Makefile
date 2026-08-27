@@ -112,10 +112,17 @@ src/%.o: src/%.c
 #   * any other pattern                  → passed through to criterion verbatim
 # When TEST_FILTER is empty (default), all tests run.
 TEST_FILTER ?=
+# Homebrew Criterion on macOS defaults to parallel jobs. That deadlocks
+# under ASan (GitHub macos-latest hung until the 6h job limit).
+ifeq ($(shell uname -s),Darwin)
+TEST_RUNNER_ARGS := --jobs 1
+else
+TEST_RUNNER_ARGS :=
+endif
 
 test: test_runner
 	@if [ -z "$(TEST_FILTER)" ]; then \
-		./test_runner; \
+		./test_runner $(TEST_RUNNER_ARGS); \
 	else \
 		f="$(TEST_FILTER)"; \
 		case "$$f" in \
@@ -123,9 +130,9 @@ test: test_runner
 				s="$${f#test_}"; \
 				suite="$${s%%_*}"; \
 				case_prefix="$${s#*_}"; \
-				./test_runner --filter "$$suite/$$case_prefix*" ;; \
+				./test_runner $(TEST_RUNNER_ARGS) --filter "$$suite/$$case_prefix*" ;; \
 			*) \
-				./test_runner --filter "$$f" ;; \
+				./test_runner $(TEST_RUNNER_ARGS) --filter "$$f" ;; \
 		esac; \
 	fi
 

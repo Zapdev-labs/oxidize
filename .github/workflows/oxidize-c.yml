@@ -60,7 +60,16 @@ jobs:
         run: make clean && make build
 
       - name: Test (ASan + UBSan)
-        run: make test
+        run: |
+          python3 -c '
+          import subprocess, sys
+          try:
+              r = subprocess.run(["make", "test"], timeout=1200)
+              sys.exit(r.returncode)
+          except subprocess.TimeoutExpired:
+              sys.stderr.write("make test exceeded 20 minutes; treating as hang\n")
+              sys.exit(124)
+          '
 
       - name: Verify binary runs
         run: ./oxidize-c --version
