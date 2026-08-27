@@ -1,0 +1,233 @@
+name: oxidize-c CI
+
+on:
+  push:
+    branches: ["master", "oxidize-c-v2"]
+    paths:
+      - "oxidize-c/**"
+      - ".github/workflows/oxidize-c.yml"
+  pull_request:
+    branches: ["master"]
+    paths:
+      - "oxidize-c/**"
+      - ".github/workflows/oxidize-c.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  # ─── CPU build + test (Ubuntu) ──────────────────────────────────────────
+  cpu-build-test:
+    name: CPU Build + Test (Ubuntu)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: oxidize-c
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential
+
+      - name: Build (CPU-only)
+        run: make clean && make build
+
+      - name: Test (ASan + UBSan)
+        run: make test
+
+      - name: Verify binary runs
+        run: ./oxidize-c --version
+
+      - name: Verify binary --help
+        run: ./oxidize-c --help
+
+  # ─── CPU build + test (macOS) ───────────────────────────────────────────
+  cpu-build-test-macos:
+    name: CPU Build + Test (macOS)
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: oxidize-c
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: brew install criterion pkgconf
+
+      - name: Build (CPU-only)
+        run: make clean && make build
+
+      - name: Test (ASan smoke)
+        run: |
+          make test_runner
+          ./test_runner --jobs 1 --filter 'error/*'
+
+      - name: Verify binary runs
+        run: ./oxidize-c --version
+
+  # ─── Static library build ───────────────────────────────────────────────
+  static-lib:
+    name: Static Library
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: oxidize-c
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build static library
+        run: make clean && make lib
+
+      - name: Verify library was created
+        run: |
+          test -f liboxidize-c.a
+          ar t liboxidize-c.a | head -5
+          echo "Library size: $(du -h liboxidize-c.a | cut -f1)"
+
+  # ─── AVX-512 build (matches .121 Cascade Lake) ─────────────────────────
+  avx512-build:
+    name: AVX-512 Build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: oxidize-c
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential
+
+      - name: Build with AVX-512 flags
+        run: make clean && make avx512
+
+      - name: Verify binary exists
+        run: test -f oxidize-c
+
+  # ─── CUDA build (compile-only, no GPU needed for nvcc PTX) ──────────────
+  cuda-build:
+    name: CUDA Build (compile-only)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: oxidize-c
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install CUDA toolkit
+        uses: Jimver/cuda-toolkit@v0.2.35
+        with:
+          cuda: "12.9.1"
+          method: network
+          sub-packages: '["nvcc", "cudart-dev"]'
+
+      - name: Build with CUDA
+        run: |
+          export PATH="/usr/local/cuda/bin:$PATH"
+          export LD_LIBRARY_PATH="/usr/local/cuda/lib64:$LD_LIBRARY_PATH"
+          make clean && make cuda
+
+      - name: Verify binary exists
+        run: test -f oxidize-c
+
+  # ─── GPU test (Modal T4) ────────────────────────────────────────────────
+  gpu-test:
+    name: GPU Test (Modal T4)
+    runs-on: ubuntu-latest
+    needs: [cpu-build-test]
+    if: github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Python + Modal
+        run: |
+          python -m pip install modal
+
+      - name: Run GPU build on Modal
+        env:
+          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+        run: |
+          if [ -z "$MODAL_TOKEN_ID" ] || [ -z "$MODAL_TOKEN_SECRET" ]; then
+            echo "Modal secrets not configured, skipping GPU test"
+            exit 0
+          fi
+          modal run modal_c_app.py::cuda_build
+
+      - name: Run GPU inference test on Modal
+        env:
+          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+        run: |
+          if [ -z "$MODAL_TOKEN_ID" ] || [ -z "$MODAL_TOKEN_SECRET" ]; then
+            echo "Modal secrets not configured, skipping GPU test"
+            exit 0
+          fi
+          modal run modal_c_app.py::gpu_test
+
+  # ─── Code quality ───────────────────────────────────────────────────────
+  lint:
+    name: Code Quality
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: oxidize-c
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang-tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang-tools
+
+      - name: Run clang-tidy (best-effort)
+        run: make lint 2>/dev/null || echo "clang-tidy not available, skipping"
+
+      - name: Check for TODO/FIXME in source
+        run: |
+          if grep -rn "TODO\|FIXME\|HACK" src/ include/ --include="*.c" --include="*.h" | grep -v "test_"; then
+            echo "Warning: TODO/FIXME found in source files"
+          else
+            echo "No TODO/FIXME found"
+          fi
+
+      - name: Check for memory leaks (basic patterns)
+        run: |
+          echo "Checking for malloc without matching free..."
+          LEAKS=$(grep -rn "malloc\|calloc" src/ --include="*.c" | grep -v "test_" | wc -l)
+          FREES=$(grep -rn "free(" src/ --include="*.c" | grep -v "test_" | wc -l)
+          echo "Allocations: $LEAKS, Frees: $FREES"
+          if [ "$LEAKS" -gt 0 ] && [ "$FREES" -eq 0 ]; then
+            echo "Error: allocations found but no frees"
+            exit 1
+          fi
+
+  # ─── Cross-compile (ARM64) ──────────────────────────────────────────────
+  cross-compile-arm64:
+    name: Cross-compile (aarch64)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: oxidize-c
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cross-compiler
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu
+
+      - name: Build for aarch64 (compile-only)
+        run: |
+          make clean
+          CC=aarch64-linux-gnu-gcc CFLAGS="-std=c11 -Wall -Wextra -Werror -O2 -Iinclude" \
+            make -j4 build
+
+      - name: At least compile all .c files
+        run: |
+          for f in src/core/*.c src/util/*.c src/format/*.c src/model/*.c src/compute/*.c src/autotune/*.c src/server/*.c src/paged/*.c src/backends/cuda_stub.c src/cli/args.c; do
+            aarch64-linux-gnu-gcc -std=c11 -Wall -Wextra -Werror -O2 -Iinclude -c -o /dev/null "$f"
+          done

@@ -1058,7 +1058,7 @@ fn iq4_nl_gemv_matches_dequantize_then_gemv_reference() {
     quantize_vector_q8_0_into(&vector, blocks_per_row, &mut q8);
     let row_bytes = blocks_per_row * BLOCK_IQ4_NL_SIZE;
     let mut reference = vec![0.0_f32; rows];
-    for row_idx in 0..rows {
+    for (row_idx, expected) in reference.iter_mut().enumerate() {
         let row_start = row_idx * row_bytes;
         let row = &quantized_matrix[row_start..row_start + row_bytes];
         let mut sum = 0.0_f32;
@@ -1066,7 +1066,7 @@ fn iq4_nl_gemv_matches_dequantize_then_gemv_reference() {
             let q8_off = block_idx * BLOCK_Q8_0_SIZE;
             sum += iq4_nl_q8_dot(iq_block, &q8[q8_off..q8_off + BLOCK_Q8_0_SIZE]);
         }
-        reference[row_idx] = sum;
+        *expected = sum;
     }
 
     for (lhs, rhs) in quantized_out.iter().zip(reference.iter()) {

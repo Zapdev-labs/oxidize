@@ -11,6 +11,8 @@
 //! Keep the plan in sync with oxidize-golang/cmd/bench_oxk/main.go and
 //! bench_oxk.py.
 
+#![allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
+
 use std::hint::black_box;
 use std::time::Instant;
 

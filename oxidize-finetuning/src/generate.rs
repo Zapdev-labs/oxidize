@@ -95,14 +95,13 @@ pub fn generate_with_lora(
     }
 
     let mut out = Vec::with_capacity(config.max_new_tokens);
-    let mut pos = prompt.len();
 
-    for _ in 0..config.max_new_tokens {
+    for pos in (prompt.len()..).take(config.max_new_tokens) {
         let token = if config.temperature <= 1e-6 {
             greedy(&logits).map_err(|e| FinetuneError::Model(format!("{e:?}")))?
         } else {
             let r = next_rand(&mut rng);
-            sample(&logits, samp.clone(), r).map_err(|e| FinetuneError::Model(format!("{e:?}")))?
+            sample(&logits, samp, r).map_err(|e| FinetuneError::Model(format!("{e:?}")))?
         };
 
         if config.eos_token == Some(token) {
@@ -113,7 +112,6 @@ pub fn generate_with_lora(
         let normed = model
             .forward_normed_hidden(&[token], pos)
             .map_err(|e| FinetuneError::Model(format!("{e:?}")))?;
-        pos += 1;
         logits_for_position(model, lora, &normed, &mut logits)?;
     }
 

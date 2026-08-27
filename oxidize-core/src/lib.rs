@@ -4,6 +4,11 @@
 //! used by CLI, server, and WASM integrations.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 #![allow(
+    unknown_lints,
+    clippy::chunks_exact_to_as_chunks,
+    clippy::manual_slice_fill
+)]
+#![allow(
     dead_code,
     private_interfaces,
     unused_imports,

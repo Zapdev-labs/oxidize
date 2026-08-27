@@ -165,42 +165,48 @@ where
 
 fn bytes_to_f32(bytes: &[u8]) -> Vec<f32> {
     bytes
-        .chunks_exact(4)
-        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk))
         .collect()
 }
 
 fn write_f32(out: &mut [u8], values: &[f32]) {
-    for (chunk, value) in out.chunks_exact_mut(4).zip(values) {
+    for (chunk, value) in out.as_chunks_mut::<4>().0.iter_mut().zip(values) {
         chunk.copy_from_slice(&value.to_le_bytes());
     }
 }
 
 fn f16_bytes_to_f32(bytes: &[u8]) -> Vec<f32> {
     bytes
-        .chunks_exact(2)
-        .map(|chunk| f16_to_f32(u16::from_le_bytes([chunk[0], chunk[1]])))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|chunk| f16_to_f32(u16::from_le_bytes(*chunk)))
         .collect()
 }
 
 fn write_f16(out: &mut [u8], values: &[f32]) {
-    for (chunk, value) in out.chunks_exact_mut(2).zip(values) {
+    for (chunk, value) in out.as_chunks_mut::<2>().0.iter_mut().zip(values) {
         chunk.copy_from_slice(&f32_to_f16(*value).to_le_bytes());
     }
 }
 
 fn bf16_bytes_to_f32(bytes: &[u8]) -> Vec<f32> {
     bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|chunk| {
-            let bits = u16::from_le_bytes([chunk[0], chunk[1]]);
+            let bits = u16::from_le_bytes(*chunk);
             f32::from_bits(u32::from(bits) << 16)
         })
         .collect()
 }
 
 fn write_bf16(out: &mut [u8], values: &[f32]) {
-    for (chunk, value) in out.chunks_exact_mut(2).zip(values) {
+    for (chunk, value) in out.as_chunks_mut::<2>().0.iter_mut().zip(values) {
         let bits = (value.to_bits() >> 16) as u16;
         chunk.copy_from_slice(&bits.to_le_bytes());
     }

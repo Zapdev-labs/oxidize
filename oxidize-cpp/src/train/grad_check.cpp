@@ -407,7 +407,7 @@ int test_lora_backward() {
     for (size_t row = 0; row < rows; ++row) {
       double s = 0.0;
       for (size_t r = 0; r < rank; ++r) s += Bd[row * rank + r] * ax[r];
-      loss += dy[row] * scaling * s;
+      loss += static_cast<double>(dy[row]) * scaling * s;
     }
     return loss;
   };

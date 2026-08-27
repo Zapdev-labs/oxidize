@@ -213,16 +213,33 @@ pub fn quantize_iq4_nl(input: &[f32], output: &mut [u8]) -> Result<(), Quantizat
         for &v in in_block {
             amax = amax.max(v.abs());
         }
-        let d = if amax < 1.0e-8 {
+        let mut d = if amax < 1.0e-8 {
             0.0
         } else {
             amax / max_codebook
         };
-        out_block[0..2].copy_from_slice(&f32_to_f16_bits(d).to_le_bytes());
         out_block[2..].fill(0);
         if d == 0.0 {
+            out_block[0..2].copy_from_slice(&f32_to_f16_bits(d).to_le_bytes());
             continue;
         }
+
+        for _ in 0..5 {
+            let mut sum_xq = 0.0_f32;
+            let mut sum_qq = 0.0_f32;
+            for &x in in_block {
+                let q = KVALUES_IQ4NL[best_index_iq4nl(x / d)] as f32;
+                sum_xq += x * q;
+                sum_qq += q * q;
+            }
+            if sum_qq > 0.0 {
+                d = sum_xq / sum_qq;
+            }
+        }
+
+        let scale_bits = f32_to_f16_bits(d);
+        d = crate::tensor::f16_bits_to_f32(scale_bits);
+        out_block[0..2].copy_from_slice(&scale_bits.to_le_bytes());
         for j in 0..(QK4_NL / 2) {
             let lo = best_index_iq4nl(in_block[j] / d);
             let hi = best_index_iq4nl(in_block[j + QK4_NL / 2] / d);

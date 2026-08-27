@@ -13,7 +13,7 @@
 //! benchmarked and tested in isolation; `oxidize-core` consumes it behind the
 //! optional `oxk` cargo feature with runtime selection via `OXIDIZE_GEMV`.
 
-#![allow(dead_code)]
+#![allow(dead_code, unknown_lints, clippy::chunks_exact_to_as_chunks)]
 
 pub mod cpu;
 pub mod prune;

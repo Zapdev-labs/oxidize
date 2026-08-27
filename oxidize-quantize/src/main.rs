@@ -1,3 +1,4 @@
+#![allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File};
 use std::io::{Read, Seek, Write};
@@ -78,8 +79,8 @@ fn load_imatrix(path: &Path) -> Result<Imatrix> {
         }
         let scale = if ncall > 0 { ncall as f32 } else { 1.0 };
         let mut values = Vec::with_capacity(nval);
-        for chunk in bytes[cursor..data_end].chunks_exact(4) {
-            let raw = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        for chunk in bytes[cursor..data_end].as_chunks::<4>().0 {
+            let raw = f32::from_le_bytes(*chunk);
             // Clamp to non-negative finite importance; the encoder requires it.
             let v = if raw.is_finite() && raw > 0.0 {
                 raw / scale
@@ -210,6 +211,7 @@ fn run(args: Args) -> Result<()> {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn quantize_file(
     input_path: &Path,
     output_path: &Path,
@@ -1004,14 +1006,6 @@ fn source_byte_range(
     Ok((input_start, input_len))
 }
 
-fn scalar_source_width(source: GgufQuantizationType) -> Result<usize> {
-    match source {
-        GgufQuantizationType::F32 => Ok(4),
-        GgufQuantizationType::F16 | GgufQuantizationType::BF16 => Ok(2),
-        other => bail!("cannot stream-quantize from source type {other:?}"),
-    }
-}
-
 fn stream_chunk_values(source: GgufQuantizationType, target: GgufQuantizationType) -> usize {
     let source_block = if uses_k_quant_blocks(source) {
         256
@@ -1208,6 +1202,8 @@ mod tests {
             Some(GgufQuantizationType::F16),
             &[],
             None,
+            None,
+            None,
         )
         .expect("quantization should succeed");
 
@@ -1276,6 +1272,8 @@ mod tests {
             None,
             Some(GgufQuantizationType::Q8_0),
             &[],
+            None,
+            None,
             None,
         )
         .expect("GGUF quantization should succeed");
@@ -1379,6 +1377,8 @@ mod tests {
             Some(GgufQuantizationType::Q4_K_M),
             &[],
             None,
+            None,
+            None,
         )
         .expect("GGUF Q4_K_M quantization should succeed");
 
@@ -1412,6 +1412,8 @@ mod tests {
             None,
             Some(GgufQuantizationType::F16),
             &[],
+            None,
+            None,
             None,
         )
         .expect_err("raw input without source should fail");

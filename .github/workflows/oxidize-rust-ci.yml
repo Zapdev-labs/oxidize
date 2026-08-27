@@ -1,0 +1,50 @@
+name: oxidize Rust CI
+
+on:
+  push:
+    branches: ["master", "oxidize-c-v2"]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Avoid the pre-existing borrow-check error in oxidize-finetuning/qlora.rs
+  # which breaks whole-workspace builds. The MUST product (CLI + server) is
+  # unaffected and is what we test here.
+
+jobs:
+  build:
+    name: Build core product
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "."
+
+      - name: Build core crates
+        run: cargo build --release -p oxidize-cli -p oxidize-server -p oxidize-quantize -p oxidize-convert
+
+  test:
+    name: Test core crates
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "."
+
+      - name: Test core crates
+        run: cargo test -p oxidize-core -p oxidize-cli -p oxidize-server -p oxidize-kernels

@@ -520,8 +520,6 @@ pub use al_family::*;
 mod quant_simple;
 pub use quant_simple::*;
 
-pub(crate) use al_family::{BLOCK_AL5_XS_SIZE, QK_AL};
-
 #[path = "quantization/quant_k_blocks.rs"]
 mod quant_k_blocks;
 pub use quant_k_blocks::*;

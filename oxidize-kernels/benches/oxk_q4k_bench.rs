@@ -7,6 +7,8 @@
 //! Env: OXK_BENCH_SECS (default 5, use >=30 for sustained turbo behavior),
 //!      OXK_BENCH_DIMS "rows x cols" pairs, e.g. "4096x4096,6144x2048".
 
+#![allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
+
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 

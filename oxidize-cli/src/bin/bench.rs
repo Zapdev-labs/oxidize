@@ -410,6 +410,8 @@ fn inference_config_from_dflash(
         kv_quantization: Default::default(),
         rms_norm_eps: config.rms_norm_eps,
         rope_theta: config.rope_theta,
+        yarn_factor: 0.0,
+        yarn_orig_ctx: 0.0,
         architecture: Default::default(),
         sliding_window: 0,
         num_experts: 0,

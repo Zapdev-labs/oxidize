@@ -1,0 +1,15 @@
+# Build artifacts
+*.o
+*.asan.o
+*.d
+*.a
+oxidize-c
+test_runner
+
+# Vendored deps are tracked despite the *.a / *.o rules above.
+!tests/criterion/lib/libcriterion.a
+
+# Editor / OS
+*.swp
+*~
+.DS_Store

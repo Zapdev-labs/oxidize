@@ -96,6 +96,7 @@ impl SelfTrainLoop {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn run(
         &self,
         model: &mut LayerWiseModel,
@@ -118,10 +119,10 @@ impl SelfTrainLoop {
         });
 
         let mut pool = seed_dataset.to_vec();
-        if synthetic_path.exists() {
-            if let Ok(extra) = load_jsonl_sft(&synthetic_path) {
-                pool.extend(extra);
-            }
+        if synthetic_path.exists()
+            && let Ok(extra) = load_jsonl_sft(&synthetic_path)
+        {
+            pool.extend(extra);
         }
 
         let start_round = state.completed_rounds;
@@ -179,7 +180,7 @@ impl SelfTrainLoop {
                 self.finetune.lora_scale(),
             )?;
             export_lora_gguf(
-                &self.output_dir.join("adapter"),
+                self.output_dir.join("adapter"),
                 std::slice::from_ref(&trainer.output_lora),
                 self.finetune.rank,
                 self.finetune.lora_scale(),
@@ -236,10 +237,10 @@ impl SelfTrainLoop {
             }
             save_state(&state_path, &state)?;
 
-            if round + 1 < self.self_config.rounds {
-                if let Ok(loaded) = load_output_head_lora(&last_checkpoint) {
-                    trainer.output_lora = loaded;
-                }
+            if round + 1 < self.self_config.rounds
+                && let Ok(loaded) = load_output_head_lora(&last_checkpoint)
+            {
+                trainer.output_lora = loaded;
             }
         }
 
@@ -252,6 +253,7 @@ impl SelfTrainLoop {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn generate_self_dialogues(
         &self,
         model: &mut LayerWiseModel,

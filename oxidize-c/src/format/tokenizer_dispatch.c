@@ -1,0 +1,408 @@
+/* tokenizer_dispatch.c — dispatch tokenizer loading by `tokenizer.ggml.model`.
+ *
+ * Port of oxidize-core/src/format/tokenizer.rs::load_tokenizer_from_gguf_metadata.
+ *
+ *   "gpt2" | "lfm2" | "lfm2moe"  → BPE (byte-level, tiktoken-style)
+ *   "llama" | "gemma" | "gemma4" → SentencePiece (unigram, Viterbi)
+ *   "bert"                       → WordPiece (## continuation)
+ *   "tiktoken"                   → Tiktoken (raw byte-level)
+ *   <other>                      → OC_ERR_TOKENIZER
+ *
+ * After loading the kind-specific implementation, special-token ids are
+ * copied into the `OcTokenizer` wrapper and the optional
+ * `tokenizer.ggml.add_bos_token` bool is read (defaults to false when
+ * absent; SentencePiece models default to adding BOS per Rust
+ * `add_bos_default()`).
+ */
+
+#include "oxidize/tokenizer.h"
+
+#include "oxidize/arena.h"
+#include "oxidize/error.h"
+#include "oxidize/gguf.h"
+#include "oxidize/log.h"
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* Case-sensitive string equals. The GGUF metadata values for
+ * `tokenizer.ggml.model` are lowercase ASCII strings emitted by
+ * convert.py / llama.cpp, so case-sensitive comparison matches Rust's
+ * `match model.as_str()` exactly. */
+static bool str_eq(const char *a, const char *b)
+{
+    return a && b && strcmp(a, b) == 0;
+}
+
+/* Resolve a `tokenizer.ggml.model` string to an OcTokenizerKind. Mirrors
+ * Rust `load_tokenizer_from_gguf_metadata`. Returns OC_TOK_KIND_NONE for
+ * unrecognized strings. */
+static OcTokenizerKind resolve_kind(const char *model)
+{
+    if (str_eq(model, "gpt2") || str_eq(model, "lfm2") || str_eq(model, "lfm2moe")) {
+        return OC_TOK_KIND_BPE;
+    }
+    if (str_eq(model, "llama") || str_eq(model, "gemma") || str_eq(model, "gemma4")) {
+        return OC_TOK_KIND_SENTENCEPIECE;
+    }
+    if (str_eq(model, "bert")) {
+        return OC_TOK_KIND_WORDPIECE;
+    }
+    if (str_eq(model, "tiktoken")) {
+        return OC_TOK_KIND_TIKTOKEN;
+    }
+    return OC_TOK_KIND_NONE;
+}
+
+/* Read `tokenizer.ggml.add_bos_token` (optional bool). When absent, leaves
+ * `has_add_bos_token = false` so `oc_tokenizer_add_bos_default()` falls back
+ * to the kind-specific default (true for SentencePiece, false otherwise). */
+static void load_add_bos_flag(const OcGgufFile *gguf, OcTokenizer *out)
+{
+    bool add_bos = false;
+    if (oc_gguf_metadata_get_bool(gguf, "tokenizer.ggml.add_bos_token", &add_bos)) {
+        out->has_add_bos_token = true;
+        out->add_bos_token = add_bos;
+    }
+}
+
+OcError oc_tokenizer_load_from_gguf(const OcGgufFile *gguf, OcTokenizer *out)
+{
+    if (!gguf || !out) return OC_ERR_INVALID_ARG;
+    memset(out, 0, sizeof(*out));
+
+    const char *model = NULL;
+    size_t model_len = 0;
+    if (!oc_gguf_metadata_get_str(gguf, "tokenizer.ggml.model", &model, &model_len)) {
+        oc_log_error("tokenizer: missing required metadata key "
+                     "\"tokenizer.ggml.model\"");
+        return OC_ERR_TOKENIZER;
+    }
+
+    OcTokenizerKind kind = resolve_kind(model);
+    if (kind == OC_TOK_KIND_NONE) {
+        oc_log_error("tokenizer: unsupported tokenizer.ggml.model=\"%s\"", model);
+        return OC_ERR_TOKENIZER;
+    }
+
+    /* Create an arena for this tokenizer's lifetime allocations. */
+    OcArena *arena = oc_arena_new(0);
+    if (!arena) return OC_ERR_OOM;
+    out->arena = arena;
+
+    if (kind == OC_TOK_KIND_BPE) {
+        OcBpeTokenizer *bpe = NULL;
+        OcError e = oc_bpe_load_from_gguf(gguf, arena, &bpe);
+        if (e != OC_OK) {
+            oc_arena_free(arena);
+            out->arena = NULL;
+            return e;
+        }
+        out->kind = OC_TOK_KIND_BPE;
+        out->bpe = bpe;
+        oc_bpe_fill_special_tokens(bpe, out);
+        load_add_bos_flag(gguf, out);
+        return OC_OK;
+    }
+
+    if (kind == OC_TOK_KIND_SENTENCEPIECE) {
+        OcSentencePieceTokenizer *sp = NULL;
+        OcError e = oc_sp_load_from_gguf(gguf, arena, &sp);
+        if (e != OC_OK) {
+            oc_arena_free(arena);
+            out->arena = NULL;
+            return e;
+        }
+        out->kind = OC_TOK_KIND_SENTENCEPIECE;
+        out->sp = sp;
+        oc_sp_fill_special_tokens(sp, out);
+        load_add_bos_flag(gguf, out);
+        return OC_OK;
+    }
+
+    if (kind == OC_TOK_KIND_WORDPIECE) {
+        OcWordPieceTokenizer *wp = NULL;
+        OcError e = oc_wp_load_from_gguf(gguf, arena, &wp);
+        if (e != OC_OK) {
+            oc_arena_free(arena);
+            out->arena = NULL;
+            return e;
+        }
+        out->kind = OC_TOK_KIND_WORDPIECE;
+        out->wp = wp;
+        oc_wp_fill_special_tokens(wp, out);
+        load_add_bos_flag(gguf, out);
+        return OC_OK;
+    }
+
+    if (kind == OC_TOK_KIND_TIKTOKEN) {
+        OcTiktokenTokenizer *t = NULL;
+        OcError e = oc_tiktoken_load_from_gguf(gguf, arena, &t);
+        if (e != OC_OK) {
+            oc_arena_free(arena);
+            out->arena = NULL;
+            return e;
+        }
+        out->kind = OC_TOK_KIND_TIKTOKEN;
+        out->tiktoken = t;
+        oc_tiktoken_fill_special_tokens(t, out);
+        load_add_bos_flag(gguf, out);
+        return OC_OK;
+    }
+
+    /* Unreachable: resolve_kind returns NONE for unknown strings and we
+     * already returned OC_ERR_TOKENIZER above. */
+    oc_log_error("tokenizer: kind %d (model=\"%s\") not handled",
+                 (int)kind, model);
+    oc_arena_free(arena);
+    out->arena = NULL;
+    return OC_ERR_TOKENIZER;
+}
+
+/* oc_tokenizer_free() is implemented in tokenizer_bpe.c (it needs access to
+ * the per-kind free functions). */
+
+/* ─── Streaming detokenizer ────────────────────────────────────────────── */
+
+void oc_streaming_detok_init(OcStreamingDetokenizer *sd,
+                             const OcTokenizer *tok)
+{
+    if (!sd) return;
+    memset(sd, 0, sizeof(*sd));
+    sd->tokenizer = tok;
+}
+
+/* Count UTF-8 continuation bytes needed after `first_byte`.
+ * Returns the total expected sequence length (1-4), or 0 for an invalid lead. */
+static int utf8_seq_len(uint8_t first_byte)
+{
+    if ((first_byte & 0x80) == 0) return 1;       /* 0xxxxxxx */
+    if ((first_byte & 0xE0) == 0xC0) return 2;    /* 110xxxxx */
+    if ((first_byte & 0xF0) == 0xE0) return 3;    /* 1110xxxx */
+    if ((first_byte & 0xF8) == 0xF0) return 4;    /* 11110xxx */
+    return 0;
+}
+
+static OcError replace_invalid_utf8(OcStreamingDetokenizer *sd,
+                                    size_t *length, size_t pos)
+{
+    if (*length > SIZE_MAX - 2) return OC_ERR_OOM;
+    size_t needed = *length + 2;
+    if (needed > sd->output_cap) {
+        uint8_t *grown = realloc(sd->output, needed);
+        if (!grown) return OC_ERR_OOM;
+        sd->output = grown;
+        sd->output_cap = needed;
+    }
+    memmove(sd->output + pos + 3, sd->output + pos + 1, *length - pos - 1);
+    sd->output[pos] = 0xEF;
+    sd->output[pos + 1] = 0xBF;
+    sd->output[pos + 2] = 0xBD;
+    *length = needed;
+    return OC_OK;
+}
+
+static OcError decode_token_raw(const OcTokenizer *tokenizer, uint32_t token,
+                                uint8_t **out_bytes, size_t *out_len)
+{
+    if (tokenizer->kind == OC_TOK_KIND_BPE)
+        return oc_bpe_decode_raw(tokenizer->bpe, &token, 1, out_bytes, out_len);
+    if (tokenizer->kind == OC_TOK_KIND_TIKTOKEN)
+        return oc_tiktoken_decode_raw(tokenizer->tiktoken, &token, 1,
+                                      out_bytes, out_len);
+    char *text = NULL;
+    OcError e = oc_tokenizer_decode(tokenizer, &token, 1, &text);
+    if (e != OC_OK) return e;
+    *out_bytes = (uint8_t *)text;
+    *out_len = strlen(text);
+    return OC_OK;
+}
+
+OcError oc_streaming_detok_push(OcStreamingDetokenizer *sd, uint32_t token,
+                                const char **out_delta, size_t *out_len)
+{
+    if (!sd || !sd->tokenizer || !out_delta || !out_len)
+        return OC_ERR_INVALID_ARG;
+    *out_delta = NULL;
+    *out_len = 0;
+
+    uint8_t *text = NULL;
+    size_t text_len = 0;
+    OcError e = decode_token_raw(sd->tokenizer, token, &text, &text_len);
+    if (e != OC_OK || text == NULL) return e;
+
+    size_t combined_len = sd->pending_len;
+    if (text_len > SIZE_MAX - combined_len) {
+        free(text);
+        return OC_ERR_OOM;
+    }
+    size_t required = combined_len + text_len;
+    if (required > sd->output_cap) {
+        uint8_t *grown = realloc(sd->output, required);
+        if (!grown) {
+            free(text);
+            return OC_ERR_OOM;
+        }
+        sd->output = grown;
+        sd->output_cap = required;
+    }
+    if (combined_len > 0) memmove(sd->output, sd->pending, combined_len);
+    memcpy(sd->output + combined_len, text, text_len);
+    combined_len += text_len;
+    free(text);
+
+    /* Find the longest complete UTF-8 prefix. */
+    size_t emit_len = 0;
+    size_t pos = 0;
+    while (pos < combined_len) {
+        int seq_len = utf8_seq_len(sd->output[pos]);
+        if (seq_len == 0) {
+            e = replace_invalid_utf8(sd, &combined_len, pos);
+            if (e != OC_OK) return e;
+            pos += 3;
+            emit_len = pos;
+            continue;
+        }
+        if (pos + (size_t)seq_len > combined_len) break;
+        /* Validate continuation bytes. */
+        bool valid = true;
+        for (int i = 1; i < seq_len; i++) {
+            if ((sd->output[pos + i] & 0xC0) != 0x80) { valid = false; break; }
+        }
+        if (!valid) {
+            e = replace_invalid_utf8(sd, &combined_len, pos);
+            if (e != OC_OK) return e;
+            pos += 3;
+            emit_len = pos;
+            continue;
+        }
+        pos += (size_t)seq_len;
+        emit_len = pos;
+    }
+
+    /* Store incomplete tail as pending. */
+    sd->pending_len = combined_len - emit_len;
+    if (sd->pending_len > 0 && sd->pending_len <= sizeof(sd->pending)) {
+        memcpy(sd->pending, sd->output + emit_len, sd->pending_len);
+    } else {
+        sd->pending_len = 0;
+    }
+
+    /* Emit the complete prefix. */
+    if (emit_len > 0) {
+        *out_delta = (const char *)sd->output;
+        *out_len = emit_len;
+    }
+    return OC_OK;
+}
+
+OcError oc_streaming_detok_flush(OcStreamingDetokenizer *sd,
+                                 const char **out_delta, size_t *out_len)
+{
+    if (!sd || !out_delta || !out_len) return OC_ERR_INVALID_ARG;
+    *out_delta = NULL;
+    *out_len = 0;
+    if (sd->pending_len == 0) return OC_OK;
+    if (sd->pending_len > sd->output_cap) {
+        uint8_t *grown = realloc(sd->output, sd->pending_len);
+        if (!grown) return OC_ERR_OOM;
+        sd->output = grown;
+        sd->output_cap = sd->pending_len;
+    }
+    memcpy(sd->output, sd->pending, sd->pending_len);
+    *out_delta = (const char *)sd->output;
+    *out_len = sd->pending_len;
+    sd->pending_len = 0;
+    return OC_OK;
+}
+
+void oc_streaming_detok_reset(OcStreamingDetokenizer *sd)
+{
+    if (!sd) return;
+    sd->pending_len = 0;
+}
+
+void oc_streaming_detok_free(OcStreamingDetokenizer *sd)
+{
+    if (!sd) return;
+    free(sd->output);
+    memset(sd, 0, sizeof(*sd));
+}
+
+/* ─── Token healing ────────────────────────────────────────────────────── */
+
+OcError oc_tokenizer_heal_tokens(const OcTokenizer *tok,
+                                 const uint32_t *ids, size_t n_ids,
+                                 uint32_t **out_ids, size_t *out_count)
+{
+    if (!tok || !ids || !out_ids || !out_count)
+        return OC_ERR_INVALID_ARG;
+    *out_ids = NULL;
+    *out_count = 0;
+
+    if (n_ids < 2) return OC_OK;
+
+    /* Re-encode each maximal non-special span (special ids pass through
+     * unchanged), mirroring the Rust implementation. This reaches the
+     * canonical tokenization even for long fragmented suffixes (e.g. five
+     * one-byte fragments of "hello"), which a fixed 2/3-token window
+     * cannot. Spans that fail to decode/encode are kept verbatim. */
+    size_t cap = n_ids + 8;
+    uint32_t *result = malloc(cap * sizeof(uint32_t));
+    if (!result) return OC_ERR_OOM;
+    size_t total = 0;
+
+    size_t i = 0;
+    while (i < n_ids) {
+        if (oc_tokenizer_is_special(tok, ids[i])) {
+            if (total + 1 > cap) {
+                cap = cap * 2 + 1;
+                uint32_t *grown = realloc(result, cap * sizeof(uint32_t));
+                if (!grown) { free(result); return OC_ERR_OOM; }
+                result = grown;
+            }
+            result[total++] = ids[i++];
+            continue;
+        }
+        /* Maximal non-special span [i, j). */
+        size_t j = i;
+        while (j < n_ids && !oc_tokenizer_is_special(tok, ids[j])) j++;
+
+        const uint32_t *span = ids + i;
+        size_t span_len = j - i;
+        uint32_t *healed = NULL;
+        size_t n_healed = 0;
+        char *text = NULL;
+        OcError e = oc_tokenizer_decode(tok, span, span_len, &text);
+        if (e == OC_OK && text) {
+            e = oc_tokenizer_encode(tok, text, OC_TOK_DISALLOW_SPECIAL,
+                                    &healed, &n_healed);
+            free(text);
+            if (e != OC_OK || n_healed == 0) { free(healed); healed = NULL; }
+        }
+        const uint32_t *emit = healed ? healed : span;
+        size_t emit_len = healed ? n_healed : span_len;
+        if (total + emit_len > cap) {
+            cap = (total + emit_len) * 2;
+            uint32_t *grown = realloc(result, cap * sizeof(uint32_t));
+            if (!grown) { free(healed); free(result); return OC_ERR_OOM; }
+            result = grown;
+        }
+        memcpy(result + total, emit, emit_len * sizeof(uint32_t));
+        total += emit_len;
+        free(healed);
+        i = j;
+    }
+
+    /* No change → report "no healing needed" (out stays NULL). */
+    if (total == n_ids && memcmp(result, ids, total * sizeof(uint32_t)) == 0) {
+        free(result);
+        return OC_OK;
+    }
+    *out_ids = result;
+    *out_count = total;
+    return OC_OK;
+}

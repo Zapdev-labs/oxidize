@@ -13,6 +13,11 @@ members = [
     "oxidize-ffi",
     "oxidize-kernels",
 ]
+exclude = [
+    "vendor/libp2p-dns",
+    "vendor/libp2p-mdns",
+    "vendor/libp2p-yamux",
+]
 resolver = "3"
 
 [workspace.package]
@@ -37,3 +42,8 @@ panic = "abort"
 # (no parallel-codegen boundaries). Slower builds, faster deploy binary — the
 # right trade for a latency-bound inference engine.
 codegen-units = 1
+
+[patch.crates-io]
+libp2p-dns = { path = "vendor/libp2p-dns" }
+libp2p-mdns = { path = "vendor/libp2p-mdns" }
+libp2p-yamux = { path = "vendor/libp2p-yamux" }

@@ -176,8 +176,7 @@ pub fn apply_rope_f32_yarn(
             let theta_extrap = position_f * freq;
             let theta_interp = theta_extrap * freq_scale;
             let denom = corr_hi - corr_lo;
-            let ramp = 1.0
-                - (i as f32 - corr_lo) / if denom > 0.001 { denom } else { 0.001 };
+            let ramp = 1.0 - (i as f32 - corr_lo) / if denom > 0.001 { denom } else { 0.001 };
             let ramp = ramp.clamp(0.0, 1.0);
             let angle = theta_interp * (1.0 - ramp) + theta_extrap * ramp;
             (angle.cos() * mscale, angle.sin() * mscale)

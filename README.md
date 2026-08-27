@@ -88,6 +88,19 @@ cargo run -p oxidize-cli -- --chat
 cargo run -p oxidize-cli -- --model /path/to/model.gguf --n-gpu-layers 20 --gpus 2 --parallelism pipeline
 ```
 
+### Terminal UI
+
+`oxidize-tui` is a full-screen console over the engine: chat with streaming, a GGUF model
+browser, live server metrics, and the server log — with a `ctrl+k` command palette. It
+drives `oxidize serve` for you, or attaches to a server you already have running.
+
+```bash
+cd oxidize-tui && bun install
+bun run start                                   # browse and load a model
+bun run start -- /path/to/model.gguf --backend cuda
+bun run start -- --api http://127.0.0.1:8080    # attach to a running server
+```
+
 ### Server (OpenAI-compatible endpoints)
 
 ```bash
@@ -252,6 +265,7 @@ Practical tuning priorities:
 - **Core compute layer (`oxidize-core`)**: owns GGUF parsing, tensor + quantization primitives, model loading, token generation loop, and backend-specific execution paths (CPU, CUDA, Metal, WASM).
 - **Interface layer (`oxidize-cli`, `oxidize-server`, `oxidize-py`)**: exposes core capabilities through a CLI, OpenAI-compatible HTTP routes, and Python bindings without duplicating inference logic.
 - **Utility layer (`oxidize-quantize`)**: handles offline model weight conversion and quantization workflows.
+- **Terminal UI (`oxidize-tui`)**: an OpenTUI/Bun front end that talks to `oxidize-server` over HTTP/SSE rather than linking the engine, so it stays a pure client.
 
 At runtime, request flow is: input prompt -> interface crate -> `oxidize-core` model/session setup -> token generation + sampling -> streamed or buffered output to the caller.
 

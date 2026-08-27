@@ -1,0 +1,55 @@
+[package]
+edition = "2021"
+rust-version = "1.83.0"
+name = "libp2p-yamux"
+version = "0.47.0"
+authors = ["Parity Technologies <admin@parity.io>"]
+description = "Yamux multiplexing protocol for libp2p"
+license = "MIT"
+repository = "https://github.com/libp2p/rust-libp2p"
+keywords = ["peer-to-peer", "libp2p", "networking"]
+categories = ["network-programming", "asynchronous"]
+
+[package.metadata.docs.rs]
+all-features = true
+
+[lib]
+name = "libp2p_yamux"
+path = "src/lib.rs"
+
+[[test]]
+name = "compliance"
+path = "tests/compliance.rs"
+
+[dependencies.futures]
+version = "0.3.30"
+
+[dependencies.libp2p-core]
+version = "0.43.0"
+
+[dependencies.thiserror]
+version = "2"
+
+[dependencies.tracing]
+version = "0.1.41"
+
+[dependencies.yamux]
+version = "0.13.10"
+
+[dev-dependencies.tokio]
+version = "1.38"
+features = ["macros", "rt-multi-thread"]
+
+[lints.clippy]
+dbg_macro = "warn"
+manual_let_else = "warn"
+type_complexity = "allow"
+unnecessary_wraps = "warn"
+used_underscore_binding = "warn"
+
+[lints.clippy.pedantic]
+level = "allow"
+priority = -1
+
+[lints.rust]
+unreachable_pub = "warn"
