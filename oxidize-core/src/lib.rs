@@ -3,6 +3,7 @@
 //! This crate exposes model/runtime primitives and a small public health surface
 //! used by CLI, server, and WASM integrations.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
 #![allow(
     dead_code,
     private_interfaces,
