@@ -1,0 +1,30 @@
+oxidize-quantize/src/main.rs
+  s_6f9e6600cba259::t_c6b8182c06f1eb 82-83
+  s_6f9e6600cba259::t_b07c163c6d0337 1
+oxidize-kernels/benches/oxk_q4k_bench.rs
+  s_6f9e6600cba259::t_0ddc38bde4d595 10
+oxidize-merge/src/merge.rs
+  s_6f9e6600cba259::t_adb6fc118974c4 264-267
+oxidize-merge/src/blend.rs
+  s_6f9e6600cba259::t_e0a22928c3b9b2 168-171,176,183-186,191,198-200,202,209
+oxidize-merge/src/lib.rs
+  s_6f9e6600cba259::t_4f910621192378 3-4
+oxidize-kernels/benches/oxk_token_bench.rs
+  s_6f9e6600cba259::t_911bcc217f2159 14-15
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "530e9510d0bad03ef216f880bf80a786e00ee116",
+  "prompts": {},
+  "sessions": {
+    "s_6f9e6600cba259": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "bb4086c5-9637-4aae-bfaf-92a612534096",
+        "model": "grok-4.6"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
