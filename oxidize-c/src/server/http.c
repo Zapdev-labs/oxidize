@@ -629,7 +629,14 @@ static OcError http_server_start(const char *host, uint16_t port,
     ctx.srv = out;
     for (size_t i = 0; i < n_threads; i++) {
         if (pthread_create(&out->threads[i], NULL, worker_main, &ctx) != 0) {
-            out->n_threads = i;   /* only join the ones we started */
+            out->n_threads = i;
+            oc_http_server_stop(out);
+            if (i > 0) {
+                oc_http_server_join(out);
+            } else {
+                free(out->threads);
+                out->threads = NULL;
+            }
             return OC_ERR_NETWORK;
         }
     }

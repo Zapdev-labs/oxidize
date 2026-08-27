@@ -75,16 +75,22 @@ static const char *find_json_string_field(const char *json, const char *key,
     }
     p++;   /* skip opening quote */
     size_t i = 0;
-    while (*p && *p != '"' && i + 1 < out_cap) {
-        if (*p == '\\' && *(p+1) == '"') {
-            out[i++] = '"';
+    while (*p && i + 1 < out_cap) {
+        if (*p == '\\' && p[1] != '\0') {
+            char esc = p[1];
+            if (esc == '"' || esc == '\\' || esc == '/')
+                out[i++] = esc;
+            else if (esc == 'n')
+                out[i++] = '\n';
+            else if (esc == 't')
+                out[i++] = '\t';
+            else
+                out[i++] = esc;
             p += 2;
-        } else if (*p == '\\' && *(p+1) == 'n') {
-            out[i++] = '\n';
-            p += 2;
-        } else {
-            out[i++] = *p++;
+            continue;
         }
+        if (*p == '"') break;
+        out[i++] = *p++;
     }
     if (*p != '"') return NULL;
     out[i] = '\0';
@@ -637,7 +643,8 @@ bool oc_openai_stream_authorize(const OcHttpRequest *req, int *out_status,
         } else {
             size_t prefix = 0;
             const bool valid = extract_messages_content(req->body,
-                oc_chat_detect(oc_model_arch_name(st->model->arch)), prompt,
+                oc_chat_detect_named(oc_model_arch_name(st->model->arch),
+                                     st->model_id), prompt,
                 OC_OPENAI_MAX_PROMPT_BYTES, &prefix);
             free(prompt);
             if (!valid) {
@@ -661,7 +668,7 @@ bool oc_openai_stream_authorize(const OcHttpRequest *req, int *out_status,
 static void handle_completion(OcOpenaiState *st, const OcHttpRequest *req,
                               int *out_status, const char **out_body)
 {
-    if (!st || !st->model_loaded) {
+    if (!st || !st->model_loaded || st->model == NULL || st->tokenizer == NULL) {
         *out_body = oc_openai_error_json("no model loaded", "server_error");
         *out_status = 503;
         return;
@@ -740,7 +747,8 @@ static void handle_chat_completion(OcOpenaiState *st, const OcHttpRequest *req,
         return;
     }
     size_t system_prefix_chars = 0;
-    OcChatTemplate template = oc_chat_detect(oc_model_arch_name(st->model->arch));
+    OcChatTemplate template = oc_chat_detect_named(
+        oc_model_arch_name(st->model->arch), st->model_id);
     if (!extract_messages_content(req->body, template, prompt,
                                   OC_OPENAI_MAX_PROMPT_BYTES,
                                   &system_prefix_chars)) {
@@ -1123,7 +1131,6 @@ void oc_openai_handler(const OcHttpRequest *req,
 void oc_openai_attach_http(OcHttpServer *srv, OcOpenaiState *st)
 {
     if (srv == NULL) return;
-    memset(srv, 0, sizeof(*srv));
     oc_http_server_set_stream_authorizer(srv, oc_openai_stream_authorize);
     if (st == NULL || st->mw == NULL) return;
     char cors[384];

@@ -115,8 +115,9 @@ void oc_http_server_set_stream_authorizer(OcHttpServer *s,
                                           OcHttpStreamAuthorize authorize);
 
 /* Extra response headers (typically CORS). Empty string omits them.
- * Configure a zeroed OcHttpServer, then start; start preserves this field
- * and stream_authorize so workers never race with setup. Returns
+ * Configure a zeroed OcHttpServer, then start with
+ * oc_http_server_start_configured. oc_http_server_start memsets `out`
+ * and drops extra_headers and stream_authorize. Returns
  * OC_ERR_INVALID_ARG if the block does not fit (no silent truncation). */
 OcError oc_http_server_set_extra_headers(OcHttpServer *s, const char *headers);
 

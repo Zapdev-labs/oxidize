@@ -36,13 +36,39 @@ OcChatTemplate oc_chat_detect(const char *arch_str)
     if (!arch_str) return OC_CHAT_CHATML;
     if (strncmp(arch_str, "gemma", 5) == 0) return OC_CHAT_GEMMA;
     if (strncmp(arch_str, "llama", 5) == 0) {
-        /* Llama-2 vs Llama-3: check for "3" in arch string.
-         * In practice, the GGUF metadata doesn't distinguish; default to
-         * Llama-3 format (more common in 2024+). */
         return OC_CHAT_LLAMA3;
     }
     /* Qwen, Mistral, others → ChatML. */
     return OC_CHAT_CHATML;
+}
+
+static int ascii_ieq(char a, char b)
+{
+    if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+    if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
+    return a == b;
+}
+
+static int ascii_istrstr(const char *hay, const char *needle)
+{
+    if (!hay || !needle || !*needle) return 0;
+    for (const char *h = hay; *h; h++) {
+        const char *a = h, *b = needle;
+        while (*a && *b && ascii_ieq(*a, *b)) { a++; b++; }
+        if (*b == '\0') return 1;
+    }
+    return 0;
+}
+
+OcChatTemplate oc_chat_detect_named(const char *arch_str, const char *name)
+{
+    OcChatTemplate t = oc_chat_detect(arch_str);
+    if (t != OC_CHAT_LLAMA3) return t;
+    if (ascii_istrstr(name, "llama3") || ascii_istrstr(name, "llama-3"))
+        return OC_CHAT_LLAMA3;
+    if (ascii_istrstr(name, "llama-2") || ascii_istrstr(name, "llama2"))
+        return OC_CHAT_LLAMA2;
+    return t;
 }
 
 size_t oc_chat_render_message(OcChatTemplate template,
@@ -122,8 +148,8 @@ size_t oc_chat_render_messages(OcChatTemplate template,
         size_t n = oc_chat_render_message(template, roles[i], contents[i],
                                           msg, sizeof(msg),
                                           i == 0, i + 1 == n_msgs);
-        if (n == 0) continue;
-        if (total + n + 1 > out_cap) break;
+        if (n == 0) return 0;
+        if (total + n + 1 > out_cap) return 0;
         memcpy(out + total, msg, n);
         total += n;
         out[total] = '\0';

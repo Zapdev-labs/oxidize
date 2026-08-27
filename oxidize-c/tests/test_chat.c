@@ -77,6 +77,17 @@ Test(chat, auto_detect)
     cr_assert_eq(oc_chat_detect("gemma2"), OC_CHAT_GEMMA);
     cr_assert_eq(oc_chat_detect("llama"), OC_CHAT_LLAMA3);
     cr_assert_eq(oc_chat_detect(NULL), OC_CHAT_CHATML);
+    cr_assert_eq(oc_chat_detect_named("llama", "Llama-2-7B.gguf"), OC_CHAT_LLAMA2);
+    cr_assert_eq(oc_chat_detect_named("llama", "Llama-3.1-8B.gguf"), OC_CHAT_LLAMA3);
+}
+
+Test(chat, render_messages_reports_overflow)
+{
+    const char *roles[] = {"user"};
+    const char *contents[] = {"this does not fit"};
+    char out[16];
+    cr_assert_eq(oc_chat_render_messages(OC_CHAT_CHATML, roles, contents, 1,
+                                         out, sizeof(out)), 0);
 }
 
 Test(chat, render_message_reports_overflow)
