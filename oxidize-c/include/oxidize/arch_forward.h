@@ -51,6 +51,13 @@ extern "C" {
 OcError oc_arch_forward_gpt2(OcLlamaSession *sess, uint32_t token,
                               float *logits_out);
 
+/* GPT-J forward pass for a single token.
+ *
+ * Same LayerNorm + GeLU block as GPT-2, but positions use interleaved
+ * GPT-J RoPE on Q/K instead of learned WPE. */
+OcError oc_arch_forward_gptj(OcLlamaSession *sess, uint32_t token,
+                              float *logits_out);
+
 /* GPT-NeoX forward pass for a single token.
  *
  * Pipeline per layer (parallel attention/FFN, NeoX convention):

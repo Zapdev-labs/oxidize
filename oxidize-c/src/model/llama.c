@@ -371,15 +371,16 @@ static OcError parse_config(const OcGgufFile *f, const char *arch_str,
             /* Phi-3 uses GELU activation (same as GeGLU) but no norm scaling. */
             cfg->uses_geglu = true;
             cfg->norm_scale = 1.0f;
-        } else if (strncmp(arch_str, "gpt2", 4) == 0 ||
-                   strncmp(arch_str, "gptj", 4) == 0) {
-            /* GPT-2/J: GELU FFN (handled by the arch_forward path), no
-             * RoPE — learned positional embeddings. uses_geglu is NOT set:
-             * these run the dedicated forward pass in arch_forward.c. */
+        } else if (strncmp(arch_str, "gpt2", 4) == 0) {
+            /* GPT-2: GELU FFN, learned positional embeddings, no RoPE. */
             cfg->uses_gpt2 = true;
             cfg->uses_par_attn = true;
             cfg->norm_scale = 1.0f;
             no_rope = true;
+        } else if (strncmp(arch_str, "gptj", 4) == 0) {
+            /* GPT-J: GELU FFN, interleaved RoPE, no learned WPE. */
+            cfg->uses_par_attn = true;
+            cfg->norm_scale = 1.0f;
         } else if (strncmp(arch_str, "gptneox", 7) == 0 ||
                    strncmp(arch_str, "falcon", 6) == 0) {
             /* NeoX/Falcon: LayerNorm + GeLU MLP with (partial) RoPE.
@@ -2761,8 +2762,9 @@ OcError oc_llama_forward(OcLlamaSession *sess, uint32_t token, float *logits_out
      * forward passes in arch_forward.c. */
     switch (sess->model->arch) {
     case OC_ARCH_GPT2:
-    case OC_ARCH_GPTJ:
         return oc_arch_forward_gpt2(sess, token, logits_out);
+    case OC_ARCH_GPTJ:
+        return oc_arch_forward_gptj(sess, token, logits_out);
     case OC_ARCH_GPTNEOX: return oc_arch_forward_gpt_neox(sess, token, logits_out);
     case OC_ARCH_FALCON:  return oc_arch_forward_falcon(sess, token, logits_out);
     default: break;

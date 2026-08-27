@@ -79,6 +79,12 @@ Test(chat, auto_detect)
     cr_assert_eq(oc_chat_detect(NULL), OC_CHAT_CHATML);
     cr_assert_eq(oc_chat_detect_named("llama", "Llama-2-7B.gguf"), OC_CHAT_LLAMA2);
     cr_assert_eq(oc_chat_detect_named("llama", "Llama-3.1-8B.gguf"), OC_CHAT_LLAMA3);
+    cr_assert_eq(oc_chat_detect_full("llama", "generic.gguf",
+                                    "{{ bos_token }}[INST] {{ message }} [/INST]"),
+                 OC_CHAT_LLAMA2);
+    cr_assert_eq(oc_chat_detect_full("llama", "generic.gguf",
+                                    "<|start_header_id|>user<|end_header_id|>"),
+                 OC_CHAT_LLAMA3);
 }
 
 Test(chat, render_messages_reports_overflow)

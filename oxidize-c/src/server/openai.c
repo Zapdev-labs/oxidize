@@ -15,12 +15,15 @@
 
 #include "oxidize/error.h"
 #include "oxidize/chat.h"
+#include "oxidize/gguf.h"
 #include "oxidize/llama.h"
 #include "oxidize/log.h"
+#include "oxidize/model.h"
 #include "oxidize/sampling.h"
 #include "oxidize/version.h"
 #include "oxidize/tokenizer.h"
 
+#include <ctype.h>
 #include <math.h>
 #include <pthread.h>
 #include <time.h>
@@ -48,6 +51,20 @@ static OcPromptPrefixCache g_prompt_prefix_cache = {
 static pthread_mutex_t g_generation_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 #define OC_OPENAI_MAX_PROMPT_BYTES (1024u * 1024u)
+
+static OcChatTemplate chat_template_for_state(const OcOpenaiState *st)
+{
+    const char *tmpl = NULL;
+    size_t tmpl_len = 0;
+    const char *arch = NULL;
+    if (st != NULL && st->model != NULL) {
+        arch = oc_model_arch_name(st->model->arch);
+        (void)oc_gguf_metadata_get_str(&st->model->gguf.unified,
+                                       "tokenizer.chat_template",
+                                       &tmpl, &tmpl_len);
+    }
+    return oc_chat_detect_full(arch, st != NULL ? st->model_id : NULL, tmpl);
+}
 
 /* ─── Minimal JSON field extraction ──────────────────────────────────────
  *
@@ -84,7 +101,44 @@ static const char *find_json_string_field(const char *json, const char *key,
                 out[i++] = '\n';
             else if (esc == 't')
                 out[i++] = '\t';
-            else
+            else if (esc == 'r')
+                out[i++] = '\r';
+            else if (esc == 'b')
+                out[i++] = '\b';
+            else if (esc == 'f')
+                out[i++] = '\f';
+            else if (esc == 'u') {
+                unsigned cp = 0;
+                int ok_u = 1;
+                for (int d = 0; d < 4; d++) {
+                    char h = p[2 + d];
+                    if (!isxdigit((unsigned char)h)) { ok_u = 0; break; }
+                    cp <<= 4;
+                    if (h >= '0' && h <= '9') cp |= (unsigned)(h - '0');
+                    else if (h >= 'a' && h <= 'f') cp |= (unsigned)(h - 'a' + 10);
+                    else cp |= (unsigned)(h - 'A' + 10);
+                }
+                if (!ok_u) {
+                    out[i++] = 'u';
+                    p += 2;
+                    continue;
+                }
+                if (cp < 0x80) {
+                    if (i + 1 >= out_cap) break;
+                    out[i++] = (char)cp;
+                } else if (cp < 0x800) {
+                    if (i + 2 >= out_cap) break;
+                    out[i++] = (char)(0xC0 | (cp >> 6));
+                    out[i++] = (char)(0x80 | (cp & 0x3F));
+                } else {
+                    if (i + 3 >= out_cap) break;
+                    out[i++] = (char)(0xE0 | (cp >> 12));
+                    out[i++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+                    out[i++] = (char)(0x80 | (cp & 0x3F));
+                }
+                p += 6;
+                continue;
+            } else
                 out[i++] = esc;
             p += 2;
             continue;
@@ -621,12 +675,6 @@ bool oc_openai_stream_authorize(const OcHttpRequest *req, int *out_status,
             ok = false;
         }
     }
-    if (ok && (st == NULL || !st->model_loaded || st->model == NULL ||
-               st->tokenizer == NULL)) {
-        *out_status = 503;
-        *out_body = oc_openai_error_json("no model loaded", "server_error");
-        ok = false;
-    }
     if (ok && strcmp(req->path, "/v1/completions") == 0) {
         char prompt[8192];
         if (find_json_string_field(req->body, "prompt", prompt, sizeof(prompt)) == NULL) {
@@ -643,8 +691,7 @@ bool oc_openai_stream_authorize(const OcHttpRequest *req, int *out_status,
         } else {
             size_t prefix = 0;
             const bool valid = extract_messages_content(req->body,
-                oc_chat_detect_named(oc_model_arch_name(st->model->arch),
-                                     st->model_id), prompt,
+                chat_template_for_state(st), prompt,
                 OC_OPENAI_MAX_PROMPT_BYTES, &prefix);
             free(prompt);
             if (!valid) {
@@ -653,6 +700,12 @@ bool oc_openai_stream_authorize(const OcHttpRequest *req, int *out_status,
                 ok = false;
             }
         }
+    }
+    if (ok && (st == NULL || !st->model_loaded || st->model == NULL ||
+               st->tokenizer == NULL)) {
+        *out_status = 503;
+        *out_body = oc_openai_error_json("no model loaded", "server_error");
+        ok = false;
     }
     if (!ok && st != NULL && st->mw != NULL) {
         OcResponseContext resp = {
@@ -739,7 +792,7 @@ static void handle_completion(OcOpenaiState *st, const OcHttpRequest *req,
 static void handle_chat_completion(OcOpenaiState *st, const OcHttpRequest *req,
                                    int *out_status, const char **out_body)
 {
-    if (!st || !st->model_loaded || !st->model) {
+    if (!st) {
         *out_body = oc_openai_error_json("no model loaded", "server_error");
         *out_status = 503;
         return;
@@ -752,14 +805,19 @@ static void handle_chat_completion(OcOpenaiState *st, const OcHttpRequest *req,
         return;
     }
     size_t system_prefix_chars = 0;
-    OcChatTemplate template = oc_chat_detect_named(
-        oc_model_arch_name(st->model->arch), st->model_id);
+    OcChatTemplate template = chat_template_for_state(st);
     if (!extract_messages_content(req->body, template, prompt,
                                   OC_OPENAI_MAX_PROMPT_BYTES,
                                   &system_prefix_chars)) {
         free(prompt);
         *out_body = oc_openai_error_json("invalid or oversized messages", "invalid_request_error");
         *out_status = 400;
+        return;
+    }
+    if (!st->model_loaded || !st->model || st->tokenizer == NULL) {
+        free(prompt);
+        *out_body = oc_openai_error_json("no model loaded", "server_error");
+        *out_status = 503;
         return;
     }
     int max_tokens = find_json_int_field(req->body, "max_tokens", 128);

@@ -282,3 +282,23 @@ Test(openai, invalid_stream_request_returns_json_error_before_sse)
     oc_http_server_stop(&srv);
     oc_http_server_join(&srv);
 }
+
+Test(openai, chat_missing_messages_returns_400)
+{
+    OcHttpServer srv;
+    memset(&g_state, 0, sizeof(g_state));
+    g_state.model_id = "test";
+    start_server(&srv);
+    const char *body = "{\"max_tokens\":10}";
+    char req[256];
+    int n = snprintf(req, sizeof(req),
+        "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: %zu\r\n\r\n%s",
+        strlen(body), body);
+    size_t len;
+    char *resp = send_raw(srv.port, req, (size_t)n, &len);
+    cr_assert(strstr(resp, "400") != NULL, "should be 400");
+    cr_assert(strstr(resp, "messages") != NULL);
+    free(resp);
+    oc_http_server_stop(&srv);
+    oc_http_server_join(&srv);
+}

@@ -61,9 +61,10 @@ size_t oc_chat_render_messages(OcChatTemplate template,
 /* Auto-detect chat template from architecture string. */
 OcChatTemplate oc_chat_detect(const char *arch_str);
 
-/* Like oc_chat_detect, then Llama-2 filenames (llama-2 / llama2 without llama3)
- * override the Llama-3 default. */
+/* Prefer tokenizer.chat_template contents when present, then filename, then arch. */
 OcChatTemplate oc_chat_detect_named(const char *arch_str, const char *name);
+OcChatTemplate oc_chat_detect_full(const char *arch_str, const char *name,
+                                    const char *chat_template);
 
 #ifdef __cplusplus
 }

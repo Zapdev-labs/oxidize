@@ -62,6 +62,22 @@ static int ascii_istrstr(const char *hay, const char *needle)
 
 OcChatTemplate oc_chat_detect_named(const char *arch_str, const char *name)
 {
+    return oc_chat_detect_full(arch_str, name, NULL);
+}
+
+OcChatTemplate oc_chat_detect_full(const char *arch_str, const char *name,
+                                    const char *chat_template)
+{
+    if (chat_template && *chat_template) {
+        if (strstr(chat_template, "[INST]") != NULL)
+            return OC_CHAT_LLAMA2;
+        if (strstr(chat_template, "<|start_header_id|>") != NULL)
+            return OC_CHAT_LLAMA3;
+        if (strstr(chat_template, "<start_of_turn>") != NULL)
+            return OC_CHAT_GEMMA;
+        if (strstr(chat_template, "<|im_start|>") != NULL)
+            return OC_CHAT_CHATML;
+    }
     OcChatTemplate t = oc_chat_detect(arch_str);
     if (t != OC_CHAT_LLAMA3) return t;
     if (ascii_istrstr(name, "llama3") || ascii_istrstr(name, "llama-3"))

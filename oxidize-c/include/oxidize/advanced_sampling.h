@@ -43,7 +43,8 @@ uint32_t oc_sample_mirostat_v1(const float *logits, size_t vocab_size,
 /* Mirostat v2: directly estimates surprise and adjusts.
  * Simpler than v1, uses top-p instead of top-k. */
 uint32_t oc_sample_mirostat_v2(const float *logits, size_t vocab_size,
-                                float *mu, float tau, float eta);
+                                float *mu, float tau, float eta,
+                                uint32_t *state);
 
 /* ─── Tail-free sampling (TFS) ───────────────────────────────────────────── */
 

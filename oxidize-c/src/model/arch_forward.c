@@ -94,6 +94,7 @@
 #include "oxidize/matvec.h"
 #include "oxidize/model.h"
 #include "oxidize/quant.h"
+#include "oxidize/tensor_ops.h"
 
 /* ─── Forward declarations of static helpers from llama.c ────────────────
  *
@@ -317,6 +318,50 @@ static void arch_gpt2_layer(OcLlamaSession *s, uint32_t layer)
 
     /* 8. FFN: up-projection → GeLU → down-projection + residual.
      *    GPT-2 uses the tanh-approx GeLU. */
+    arch_matvec(&L->ffn_up, s->normed, s->ffn_gate, s->dequant_temp);
+    arch_gelu_inplace_f32(s->ffn_gate, c->n_ff);
+    arch_matvec(&L->ffn_down, s->ffn_gate, s->normed, s->dequant_temp);
+    for (size_t i = 0; i < n_embd; i++) s->x[i] += s->normed[i];
+}
+
+static void arch_gptj_layer(OcLlamaSession *s, uint32_t layer)
+{
+    const OcLlamaConfig *c = &s->model->cfg;
+    OcLlamaLayer *L = &s->model->layers[layer];
+    size_t hd = c->head_dim;
+    size_t n_embd = c->n_embd;
+    float rope_base = c->rope_theta > 0.0f ? c->rope_theta : 10000.0f;
+
+    arch_layer_norm(s->x, L->attn_norm, L->attn_norm_bias, s->normed,
+                    n_embd, c->rms_norm_eps);
+
+    arch_matvec(&L->attn_q, s->normed, s->q, s->dequant_temp);
+    arch_matvec(&L->attn_k, s->normed, s->k, s->dequant_temp);
+    arch_matvec(&L->attn_v, s->normed, s->v, s->dequant_temp);
+
+    for (uint32_t h = 0; h < c->n_head; h++) {
+        oc_tensor_rope_gptj_f32(s->q + h * hd, hd, s->pos, rope_base);
+    }
+    for (uint32_t h = 0; h < c->n_head_kv; h++) {
+        oc_tensor_rope_gptj_f32(s->k + h * hd, hd, s->pos, rope_base);
+    }
+
+    size_t kv_off = ((size_t)layer * c->n_ctx + (size_t)s->pos)
+                  * s->kv_row_floats;
+    memcpy(s->kv_k + kv_off, s->k, s->kv_row_floats * sizeof(float));
+    memcpy(s->kv_v + kv_off, s->v, s->kv_row_floats * sizeof(float));
+
+    for (uint32_t h = 0; h < c->n_head; h++) {
+        arch_attention_head(s, h, layer, s->q + h * hd,
+                            s->attn_out + h * hd);
+    }
+
+    arch_matvec(&L->attn_output, s->attn_out, s->normed, s->dequant_temp);
+    for (size_t i = 0; i < n_embd; i++) s->x[i] += s->normed[i];
+
+    arch_layer_norm(s->x, L->ffn_norm, L->ffn_norm_bias, s->normed,
+                    n_embd, c->rms_norm_eps);
+
     arch_matvec(&L->ffn_up, s->normed, s->ffn_gate, s->dequant_temp);
     arch_gelu_inplace_f32(s->ffn_gate, c->n_ff);
     arch_matvec(&L->ffn_down, s->ffn_gate, s->normed, s->dequant_temp);
@@ -728,6 +773,27 @@ OcError oc_arch_forward_gpt2(OcLlamaSession *sess, uint32_t token,
     return OC_OK;
 }
 
+OcError oc_arch_forward_gptj(OcLlamaSession *sess, uint32_t token,
+                              float *logits_out)
+{
+    OcError e = arch_validate_session(sess);
+    if (e != OC_OK) return e;
+    e = arch_validate_layers(sess->model);
+    if (e != OC_OK) return e;
+
+    arch_embed_token(sess, token);
+
+    for (uint32_t l = 0; l < sess->model->cfg.n_layer; l++) {
+        arch_gptj_layer(sess, l);
+    }
+
+    e = arch_final_norm_and_logits(sess, logits_out);
+    if (e != OC_OK) return e;
+
+    sess->pos++;
+    return OC_OK;
+}
+
 /* ─── GPT-NeoX forward pass ─────────────────────────────────────────────
  *
  * Full GPT-NeoX forward pass for a single token:
@@ -815,12 +881,14 @@ static void arch_forward_test_stubs(void)
 {
     /* Just reference the functions to ensure they're not optimized away. */
     (void)oc_arch_forward_gpt2;
+    (void)oc_arch_forward_gptj;
     (void)oc_arch_forward_gpt_neox;
     (void)oc_arch_forward_falcon;
     (void)arch_layer_norm;
     (void)arch_gelu_inplace_f32;
     (void)arch_attention_head;
     (void)arch_gpt2_layer;
+    (void)arch_gptj_layer;
     (void)arch_neox_layer;
     (void)arch_falcon_layer;
     (void)arch_final_norm_and_logits;

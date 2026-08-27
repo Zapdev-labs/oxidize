@@ -120,7 +120,8 @@ uint32_t oc_sample_mirostat_v1(const float *logits, size_t vocab_size,
 /* ─── Mirostat v2 ──────────────────────────────────────────────────────── */
 
 uint32_t oc_sample_mirostat_v2(const float *logits, size_t vocab_size,
-                                float *mu, float tau, float eta)
+                                float *mu, float tau, float eta,
+                                uint32_t *state)
 {
     if (!logits || vocab_size == 0 || !mu) return 0;
 
@@ -165,7 +166,7 @@ uint32_t oc_sample_mirostat_v2(const float *logits, size_t vocab_size,
     if (top_sum == 0.0f) top_sum = 1.0f;
     for (size_t i = 0; i < top_k; i++) top_probs[i] /= top_sum;
 
-    float u = simple_rng();
+    float u = rng_from_state(state);
     size_t selected = sample_from_probs(top_probs, top_k, u);
     uint32_t token = (uint32_t)sorted[selected].idx;
 
@@ -851,7 +852,7 @@ uint32_t oc_sampler_chain_sample(OcSamplerChain *chain,
             if (mirostat_mu)
                 return oc_sample_mirostat_v2(logits, vocab_size,
                                              mirostat_mu, terminal->param1,
-                                             terminal->param2);
+                                             terminal->param2, &chain->rng_state);
             break;
         case OC_SAMPLER_STEP_TFS:
             return oc_sample_tfs(logits, vocab_size, terminal->param1, terminal->param2);

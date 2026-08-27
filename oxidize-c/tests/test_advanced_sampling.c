@@ -45,7 +45,8 @@ Test(asamp, mirostat_v2)
 {
     float logits[] = {1.0f, 2.0f, 3.0f, 0.5f, -1.0f};
     float mu = 10.0f;
-    uint32_t token = oc_sample_mirostat_v2(logits, 5, &mu, 5.0f, 0.1f);
+    uint32_t state = 0;
+    uint32_t token = oc_sample_mirostat_v2(logits, 5, &mu, 5.0f, 0.1f, &state);
     cr_assert(token < 5);
     cr_assert(mu != 10.0f);
 }
