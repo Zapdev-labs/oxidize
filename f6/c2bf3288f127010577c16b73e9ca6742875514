@@ -1,0 +1,21 @@
+oxidize-kernels/src/lib.rs
+  s_6f9e6600cba259::t_0fbac43a50a00d 16
+oxidize-core/src/lib.rs
+  s_6f9e6600cba259::t_4ffdb4c9e55cdd 6
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "f6c2bf3288f127010577c16b73e9ca6742875514",
+  "prompts": {},
+  "sessions": {
+    "s_6f9e6600cba259": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "bb4086c5-9637-4aae-bfaf-92a612534096",
+        "model": "grok-4.6"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
