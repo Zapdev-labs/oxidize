@@ -1,0 +1,19 @@
+oxidize-py/src/lib.rs
+  s_3582b5342698b9::t_45225c117669eb 630-635,637-638
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "46b0a8c5d195bb6c6db27b7dab73f2a08a2ab2f8",
+  "prompts": {},
+  "sessions": {
+    "s_3582b5342698b9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f1219-02c1-7713-9f8b-d532e4c17a17",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

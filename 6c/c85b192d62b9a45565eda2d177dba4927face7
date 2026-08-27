@@ -1,0 +1,23 @@
+oxidize-c/include/oxidize/offload.h
+  s_96ddc277ba047e::t_5a82da0b5c949a 70-149
+oxidize-c/tests/test_offload_plan.c
+  s_96ddc277ba047e::t_7968fac62b85dc 1-180
+oxidize-c/src/model/offload.c
+  s_96ddc277ba047e::t_882332e08d0475 127-374
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "6cc85b192d62b9a45565eda2d177dba4927face7",
+  "prompts": {},
+  "sessions": {
+    "s_96ddc277ba047e": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "ea8ad242-b091-46af-96e0-114c0c67fea4",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

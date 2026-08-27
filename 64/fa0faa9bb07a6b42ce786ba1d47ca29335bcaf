@@ -1,0 +1,28 @@
+oxidize-cpp/src/cli/main.cpp
+  s_5b078de97b8925::t_9be91bcf06c81b 23-27
+  s_5b078de97b8925::t_c983733244af8e 238-249
+oxidize-cpp/src/model_llama.cpp
+  s_5b078de97b8925::t_aab94aae993e8f 34-39
+oxidize-cpp/src/tensor_cpu.cpp
+  s_5b078de97b8925::t_ada351fa534c59 39-59
+  s_5b078de97b8925::t_bd6847052b2200 88,92
+  s_5b078de97b8925::t_7f3b635f8a3d5b 222-232
+  s_5b078de97b8925::t_d57d2c3202f247 60,63-87,89-90,94
+  s_5b078de97b8925::t_4512e41a2f2f1f 30-34
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "64fa0faa9bb07a6b42ce786ba1d47ca29335bcaf",
+  "prompts": {},
+  "sessions": {
+    "s_5b078de97b8925": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a2fd32be-d532-4929-8226-7967c93996a1",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

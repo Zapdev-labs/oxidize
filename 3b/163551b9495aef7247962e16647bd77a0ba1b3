@@ -1,0 +1,30 @@
+oxidize-c/Makefile
+  s_5bec56e69286b9::t_e5262f819fab55 22-23,30
+oxidize-c/scripts/gen_quant_tables.py
+  s_5bec56e69286b9::t_e5262f819fab55 40-45
+oxidize-c/tests/test_simd.c
+  s_5bec56e69286b9::t_e5262f819fab55 118-145
+  s_5bec56e69286b9::t_5f106d3abd6472 84-87
+oxidize-c/include/oxidize/simd.h
+  s_5bec56e69286b9::t_e5262f819fab55 93-94
+modal_c_app.py
+  s_5bec56e69286b9::t_e5262f819fab55 12,14-16,255-270
+oxidize-c/include/oxidize/matvec.h
+  s_5bec56e69286b9::t_e5262f819fab55 46-47
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "3b163551b9495aef7247962e16647bd77a0ba1b3",
+  "prompts": {},
+  "sessions": {
+    "s_5bec56e69286b9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f86ae-2366-7b80-8a79-8d8524df27c3",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

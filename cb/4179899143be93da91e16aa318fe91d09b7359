@@ -1,0 +1,45 @@
+oxidize-c/src/format/tokenizer_bpe.c
+  s_cc449bd70639f3::t_958ccb2cf4903d 1201-1225,1228,1230,1232-1246,1248,1263-1275
+  s_cc449bd70639f3::t_e8c05841e798c2 1319-1320,1324-1332
+  s_cc449bd70639f3::t_a40a4a31f0719a 1231
+oxidize-c/src/format/tokenizer_tiktoken.c
+  s_cc449bd70639f3::t_5c18e88e31c82a 1-852
+oxidize-c/src/format/tokenizer_sp.c
+  s_cc449bd70639f3::t_678b90bcef88d6 1-41,43,45-629
+  s_cc449bd70639f3::t_11a5628b7751fe 42,44
+oxidize-c/src/format/tokenizer_dispatch.c
+  s_cc449bd70639f3::t_3b5a9691e41767 6-8,11-15,59-70,106-146,148-151,155-157,165
+oxidize-c/include/oxidize/tokenizer.h
+  s_cc449bd70639f3::t_7b250b5b4c042d 62-67,70-71,73
+  s_cc449bd70639f3::t_face6a692ca548 90-115
+  s_cc449bd70639f3::t_8712ab1d95c0e7 9-11,14-19
+  s_cc449bd70639f3::t_fff3c3a32e7282 118-122,124-125,129-132,143
+  s_cc449bd70639f3::t_2b207768a4a838 244-355
+oxidize-c/tests/test_tokenizer_tiktoken.c
+  s_cc449bd70639f3::t_0dbe10f11c99fd 1-263,269-399
+  s_cc449bd70639f3::t_2df6042f85ffa9 264-268
+oxidize-c/src/format/tokenizer_wp.c
+  s_cc449bd70639f3::t_e32a6a6d8a7ff7 1-576
+oxidize-c/tests/test_tokenizer_wp.c
+  s_cc449bd70639f3::t_1cca778d393d8d 1-395
+oxidize-c/tests/test_tokenizer_sp.c
+  s_cc449bd70639f3::t_d3113e8cc0facd 288-293
+  s_cc449bd70639f3::t_2af89cd5e4ede9 1-200,202-205,207-287,294-601
+  s_cc449bd70639f3::t_1176181390e060 201,206
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "cb4179899143be93da91e16aa318fe91d09b7359",
+  "prompts": {},
+  "sessions": {
+    "s_cc449bd70639f3": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "6869742e-7c8a-4d8b-a5d4-d2f8bb1a25f3",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

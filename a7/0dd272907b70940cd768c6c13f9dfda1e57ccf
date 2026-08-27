@@ -1,0 +1,27 @@
+oxidize-core/src/lib.rs
+  s_d8b5af6870ab84::t_8c4ad322c84139 93-94
+oxidize-core/src/compute/tensor.rs
+  s_d8b5af6870ab84::t_8c4ad322c84139 1484-1505,1681-1683,1777-1779
+  s_d8b5af6870ab84::t_0e905b203d767e 1221,1302,1450
+oxidize-core/src/compute/spinpool.rs
+  s_d8b5af6870ab84::t_5614d5a12fdde4 1-5,10-11,13-17,28-29,31-39,49-52,56-57,59-68,70-75,78-82,87-94,100-101,104-105,110-112,114-116,143-145,149-158,163-166,168,175-190,198,200-206,211-222,225-241,243-245,249-260,272-273
+  s_d8b5af6870ab84::t_5551462dde8b72 6-9,18-27,30,40-48,53-55,58,69,76-77,83-86,95-99,102-103,106-109,113,117-142,146-148,159-162,167,169-174,191-197,199,223,242,246-248,261-271
+  s_d8b5af6870ab84::t_d98e57b4709013 224
+  s_d8b5af6870ab84::t_783836287998e4 12,207-210
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "a70dd272907b70940cd768c6c13f9dfda1e57ccf",
+  "prompts": {},
+  "sessions": {
+    "s_d8b5af6870ab84": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "747c40af-74b1-4c68-a8f8-83589cf844b7",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

@@ -1,0 +1,25 @@
+oxidize-c/include/oxidize/chat.h
+  s_96ddc277ba047e::t_e9941c80900c38 1-10,12-68
+  s_96ddc277ba047e::t_e70901a0e629cf 11
+oxidize-c/src/server/chat.c
+  s_96ddc277ba047e::t_49a157403646c7 8
+  s_96ddc277ba047e::t_c8967bc5a10939 1-7,9-129
+oxidize-c/tests/test_chat.c
+  s_96ddc277ba047e::t_2a71aa9c8f7323 1-80
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "781077142004f4406fc48acbcf8641473a27c2b4",
+  "prompts": {},
+  "sessions": {
+    "s_96ddc277ba047e": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "ea8ad242-b091-46af-96e0-114c0c67fea4",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

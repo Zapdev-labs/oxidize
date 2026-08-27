@@ -1,0 +1,37 @@
+Dockerfile.server
+  s_5bec56e69286b9::t_95e61dc8d77235 18-20
+oxidize-c/src/cli/main.c
+  s_5bec56e69286b9::t_95e61dc8d77235 49
+oxidize-c/src/core/simd.c
+  s_5bec56e69286b9::t_95e61dc8d77235 22-23
+oxidize-c/src/core/simd_avx2.c
+  s_5bec56e69286b9::t_d54c41c85f96b6 22-23,250-281
+oxidize-c/src/model/sampling.c
+  s_5bec56e69286b9::t_837345f18709af 381,437,480
+oxidize-cli/src/bin/bench.rs
+  s_5bec56e69286b9::t_95e61dc8d77235 413-414
+oxidize-c/tests/test_prefix_cache.c
+  s_5bec56e69286b9::t_5e248e523c0155 43,58,82
+oxidize-c/src/util/perplexity.c
+  s_5bec56e69286b9::t_95e61dc8d77235 16
+.github/workflows/oxidize-c.yml
+  s_5bec56e69286b9::t_95e61dc8d77235 146,226,231
+oxidize-c/src/core/simd_avx512.c
+  s_5bec56e69286b9::t_d54c41c85f96b6 14-15,198-229
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "ddc225468681883693cd0b5b9703215a88aa2ef1",
+  "prompts": {},
+  "sessions": {
+    "s_5bec56e69286b9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f86ae-2366-7b80-8a79-8d8524df27c3",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

@@ -1,0 +1,25 @@
+oxidize-c/tests/test_paged_attention.c
+  s_5bec56e69286b9::t_90c10bae619a9b 134-144,329-350,353
+  s_5bec56e69286b9::t_461e7427f983c0 351-352
+  s_5bec56e69286b9::t_7f7e3e44dd9939 354
+oxidize-c/include/oxidize/paged_attention.h
+  s_5bec56e69286b9::t_90c10bae619a9b 168
+oxidize-c/src/paged/paged_attention.c
+  s_5bec56e69286b9::t_90c10bae619a9b 207,420,446-459,463-465,469,473,476,600,604,626,713
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "ff509bf34538fe72cd89d93d4be5a0fca17ba017",
+  "prompts": {},
+  "sessions": {
+    "s_5bec56e69286b9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f86ae-2366-7b80-8a79-8d8524df27c3",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

@@ -1,0 +1,21 @@
+oxidize-kernels/src/q4k_avx512.rs
+  s_9977901d17a81e::t_cd080949bdd472 30-34,134-135,156-157,289-290,311-312,417,439
+oxidize-kernels/src/q4k_avx2.rs
+  s_9977901d17a81e::t_cd080949bdd472 175-179,213-214,235-236,262-263,289-290
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.8",
+  "base_commit_sha": "a573c983f7cf1bc97086d9e779e44843039d7227",
+  "prompts": {},
+  "sessions": {
+    "s_9977901d17a81e": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "3cd73ec3-5368-4b64-bd49-5601fc62d824",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

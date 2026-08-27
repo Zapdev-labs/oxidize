@@ -1,0 +1,22 @@
+oxidize-c/src/cli/args.c
+  s_96ddc277ba047e::t_2c3a4b2c92bff3 49-53
+  s_96ddc277ba047e::t_c08a8e61a90753 67
+oxidize-c/src/cli/args.h
+  s_96ddc277ba047e::t_83f1a5410429e1 31-39
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "b6758a534a1cce301942111308c1b2c8cdfa8864",
+  "prompts": {},
+  "sessions": {
+    "s_96ddc277ba047e": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "ea8ad242-b091-46af-96e0-114c0c67fea4",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

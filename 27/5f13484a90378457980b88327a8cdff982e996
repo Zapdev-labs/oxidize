@@ -1,0 +1,45 @@
+oxidize-python/oxidize_python/core/vision/vision.py
+  ai_agent 1-146
+oxidize-python/oxidize_python/core/conversion/conversion.py
+  ai_agent 1-133
+oxidize-python/oxidize_python/core/mesh/mesh.py
+  ai_agent 1-236
+oxidize-python/oxidize_python/core/tokenizer/test_tokenizer.py
+  ai_agent 1-35
+oxidize-python/oxidize_python/core/paged/paged.py
+  ai_agent 1-176
+oxidize-python/oxidize_python/core/turboquant/turboquant.py
+  ai_agent 1-123
+oxidize-python/oxidize_python/core/tokenizer/tokenizer.py
+  ai_agent 1-297
+oxidize-python/oxidize_python/core/tokenizer/__init__.py
+  ai_agent 1-29
+oxidize-python/oxidize_python/core/tokenizer/bpe.py
+  ai_agent 1-74
+oxidize-python/oxidize_python/core/safetensors/__init__.py
+  ai_agent 1-3
+oxidize-python/oxidize_python/core/safetensors/safetensors.py
+  ai_agent 1-149
+oxidize-python/oxidize_python/core/paged/test_paged.py
+  ai_agent 1-9
+oxidize-python/oxidize_python/core/tokenizer/sp.py
+  ai_agent 1-65
+oxidize-python/oxidize_python/core/paged/__init__.py
+  ai_agent 1-15
+oxidize-python/oxidize_python/core/tokenizer/tiktoken.py
+  ai_agent 1-79
+oxidize-python/oxidize_python/core/util/__init__.py
+  ai_agent 1-41
+oxidize-python/oxidize_python/core/util/util.py
+  ai_agent 1-170
+oxidize-python/oxidize_python/core/validation/validation.py
+  ai_agent 1-99
+oxidize-python/oxidize_python/core/tokenizer/wordpiece.py
+  ai_agent 1-89
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "275f13484a90378457980b88327a8cdff982e996",
+  "prompts": {}
+}

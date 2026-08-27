@@ -1,0 +1,37 @@
+oxidize-c/src/cli/args.h
+  s_96ddc277ba047e::t_d3e75da3e9627b 51
+oxidize-c/src/cli/main.c
+  s_96ddc277ba047e::t_c7f109b0a21232 394-396
+  s_96ddc277ba047e::t_94e93f89484a29 391-393,397-442
+oxidize-c/src/model/llama.c
+  s_96ddc277ba047e::t_3f9e476eb6d8cd 497-498
+  s_96ddc277ba047e::t_6f20a443d49d57 848-866,868-876,879-882,884-887,889-893
+  s_96ddc277ba047e::t_2e7b25ab2b44d3 730-835
+  s_96ddc277ba047e::t_197e1df9ab818f 412-417
+  s_96ddc277ba047e::t_05aea497ea1dad 509-510
+  s_96ddc277ba047e::t_aacba8e6c917da 184-210
+  s_96ddc277ba047e::t_1307fe52b1a55c 296-309
+  s_96ddc277ba047e::t_d369b0bb8ed33e 459-469
+oxidize-c/src/cli/args.c
+  s_96ddc277ba047e::t_65f35306036a64 78
+oxidize-c/include/oxidize/llama.h
+  s_96ddc277ba047e::t_39e5fceb2786ab 89-96
+  s_96ddc277ba047e::t_2e3dfa5e6ace5e 138-142
+  s_96ddc277ba047e::t_08a56b1d54b01c 58-64
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "cb7310fd8533aad5bc389157b975ffd9d50cd1fa",
+  "prompts": {},
+  "sessions": {
+    "s_96ddc277ba047e": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "ea8ad242-b091-46af-96e0-114c0c67fea4",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

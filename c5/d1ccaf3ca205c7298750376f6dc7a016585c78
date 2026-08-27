@@ -1,0 +1,77 @@
+oxidize-c/src/model/advanced_features.c
+  s_96ddc277ba047e::t_b658be04dbac1d 1-245
+oxidize-c/include/oxidize/advanced_features.h
+  s_96ddc277ba047e::t_3f922b64c14cdc 71-72
+  s_96ddc277ba047e::t_cfb2cff923def4 1-70,73-103
+oxidize-c/src/model/decoder.c
+  s_8349040a6f6bf0::t_aa9b85a83eadbd 1-50,52-204,207-211,214-271
+  s_8349040a6f6bf0::t_d62c9888ab64e1 205-206,212-213
+  s_96ddc277ba047e::t_bc147ee8def60c 51
+oxidize-c/src/vision/encoder.c
+  s_8349040a6f6bf0::t_86ea96daa69538 1-76,81-149
+  s_8349040a6f6bf0::t_054ffe513ee012 77-80
+oxidize-c/tests/test_backend.c
+  s_87853ef81370f3::t_e634888e669730 1-166
+oxidize-c/tests/test_loader.c
+  s_87853ef81370f3::t_13c2b2757a131a 1-172
+oxidize-c/tests/test_advanced_features.c
+  s_96ddc277ba047e::t_31e17fc7d1bd5b 1-250
+oxidize-c/src/model/loader.c
+  s_87853ef81370f3::t_b288b6aa2aeacd 1-200
+oxidize-c/tests/test_decoder.c
+  s_8349040a6f6bf0::t_65a461b3c58a96 1-196
+oxidize-c/src/paged/scheduler.c
+  s_8349040a6f6bf0::t_2280d975d0db77 1-295
+oxidize-c/src/backends/backend.c
+  s_87853ef81370f3::t_9167cead4b1017 1-199
+oxidize-c/tests/test_scheduler.c
+  s_8349040a6f6bf0::t_a308d1b3d5b27c 1-329
+oxidize-c/include/oxidize/encoder.h
+  s_8349040a6f6bf0::t_0920e816795b92 1-68
+oxidize-c/include/oxidize/backend.h
+  s_87853ef81370f3::t_c3f89745b6b494 1-106
+oxidize-c/include/oxidize/scheduler.h
+  s_8349040a6f6bf0::t_08fcfe469a9db5 1-145
+oxidize-c/include/oxidize/decoder.h
+  s_8349040a6f6bf0::t_afab243a4397d6 1-71
+oxidize-c/include/oxidize/loader.h
+  s_87853ef81370f3::t_744e4dfe84c864 1-83,85-87
+  s_87853ef81370f3::t_cc199075d1ef87 84
+oxidize-c/Makefile
+  s_96ddc277ba047e::t_533226536613b0 28
+oxidize-c/tests/test_encoder.c
+  s_8349040a6f6bf0::t_6fbaefc6485f5c 68,72
+  s_8349040a6f6bf0::t_8f222a42ca043a 1-67,69-71,73-193
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "c5d1ccaf3ca205c7298750376f6dc7a016585c78",
+  "prompts": {},
+  "sessions": {
+    "s_8349040a6f6bf0": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "469d08db-50a9-4dc9-8f8e-1ed27ea88eda",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_87853ef81370f3": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "aee038d0-9a84-4074-b56f-0d093b1d6b0e",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_96ddc277ba047e": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "ea8ad242-b091-46af-96e0-114c0c67fea4",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

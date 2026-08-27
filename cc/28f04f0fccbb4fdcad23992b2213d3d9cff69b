@@ -1,0 +1,19 @@
+oxidize-c/src/compute/kv_cache.c
+  s_813a29d3105dfe::t_a97ec9aa056a03 156-157,160
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "cc28f04f0fccbb4fdcad23992b2213d3d9cff69b",
+  "prompts": {},
+  "sessions": {
+    "s_813a29d3105dfe": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "f99b555b-0e63-41da-be1a-af6e795299ab",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

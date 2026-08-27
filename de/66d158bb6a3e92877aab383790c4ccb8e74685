@@ -1,0 +1,69 @@
+Cargo.lock
+  s_fe8ef742af28ff::t_cd995451dcc152 6-10,509-514,767-775,1189-1197,1219-1228,2003-2017,2658-2667,2773-2782,3236,3240-3242,3366-3378,3571-3576,4205-4210,5932-5946
+oxidize-train/src/video/manifest.rs
+  s_fe8ef742af28ff::t_e53378aa66bf2b 1-221
+oxidize-train/Cargo.toml
+  s_fe8ef742af28ff::t_4f520fca2ad689 10-11,14-16
+oxidize-train/src/main.rs
+  s_fe8ef742af28ff::t_10f50a5590479f 6-7
+  s_fe8ef742af28ff::t_271afb1e2d6ee5 111-113
+  s_fe8ef742af28ff::t_a7be74271c5c92 205
+  s_fe8ef742af28ff::t_e99b728fbae459 4-5,8,12-26,29-32,51-110,114-116,150-152,154-157,178-204,206-237
+  s_fe8ef742af28ff::t_ab846c84a32b27 27-28
+  s_fe8ef742af28ff::t_0eaf66097944f6 119-148,153
+  s_fe8ef742af28ff::t_b74f77031cb679 240-277
+oxidize-train/src/video/config.rs
+  s_fe8ef742af28ff::t_5da840024132b4 68
+  s_fe8ef742af28ff::t_52dd73448ae2f5 1-67,69-111,114-157,159-161
+  s_fe8ef742af28ff::t_647865980ae5c4 112-113
+  s_fe8ef742af28ff::t_990503aba68a63 158
+oxidize-train/src/video/mod.rs
+  s_fe8ef742af28ff::t_63389de9fb2826 15,24
+  s_fe8ef742af28ff::t_9d89e5ff4f755e 1-14,16-23,25
+oxidize-train/src/video/dataset.rs
+  s_fe8ef742af28ff::t_4ef28a987f17e1 1-119,121-133,135-136,142-155,171,174-175,178-181,183-184,186,205-316
+  s_fe8ef742af28ff::t_886358b4b26813 134,140,156-170,172-173,176-177,182,185,187-204
+  s_fe8ef742af28ff::t_af90672036a3ce 120
+  s_fe8ef742af28ff::t_c83e874024e871 137-139,141
+oxidize-train/src/video/frames.rs
+  s_fe8ef742af28ff::t_7d16d4d8163ca7 1-41,64-132,134-136,157-187,190-226
+  s_fe8ef742af28ff::t_aa717bbe43095a 188-189
+  s_fe8ef742af28ff::t_817269b8722352 42-63
+  s_fe8ef742af28ff::t_caa5c7fa15df06 133,137-156
+oxidize-train/src/lib.rs
+  s_fe8ef742af28ff::t_cd4d4212bc0fbd 8-9
+  s_fe8ef742af28ff::t_03efa32bd53ee7 10
+  s_fe8ef742af28ff::t_dee4db764f8e85 281-283,285,287,289,291,293
+oxidize-train/src/video/error.rs
+  s_fe8ef742af28ff::t_8c359405a79f1f 1-48
+oxidize-train/src/video/model.rs
+  s_fe8ef742af28ff::t_24e9be16753976 201-205
+  s_fe8ef742af28ff::t_4e0099cba1f5c4 242
+  s_fe8ef742af28ff::t_eaad063ba8dac8 7-8,17-18,26,38,42-43,50-51,53
+  s_fe8ef742af28ff::t_e5d52b6c03407b 1-6,9-16,19-25,27-37,39-41,44-49,52,54-66,68-71,73-78,83-84,86-93,95-101,108-122,124,126,129-200,206-228,230-241,243-265
+  s_fe8ef742af28ff::t_b630a698e3376a 123,125,127-128
+  s_fe8ef742af28ff::t_17b87eafd7f9e1 67,72,79-82,85,94
+  s_fe8ef742af28ff::t_8c2924b5838e01 102-107
+  s_fe8ef742af28ff::t_6631863de92158 229
+oxidize-train/src/video/prototype.rs
+  s_fe8ef742af28ff::t_c87b50bed100a4 1-177
+oxidize-train/src/video/train.rs
+  s_fe8ef742af28ff::t_35c03a3a3dd7da 1-50,52-227
+  s_fe8ef742af28ff::t_3c8d18585eba97 51
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.8",
+  "base_commit_sha": "de66d158bb6a3e92877aab383790c4ccb8e74685",
+  "prompts": {},
+  "sessions": {
+    "s_fe8ef742af28ff": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "c31c6fc4-49ae-44c1-8203-5919e6ec1663",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

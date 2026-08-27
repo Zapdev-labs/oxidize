@@ -1,0 +1,23 @@
+oxidize-core/src/model/inference/mtp.rs
+  s_1697c02732864d::t_97a14447f9f5c7 17
+  s_1697c02732864d::t_2bd920e6fe8d01 40-49
+oxidize-server/src/runtime/generate.rs
+  s_1697c02732864d::t_a2577cf2398802 133
+  s_1697c02732864d::t_abeef3194a2716 118
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "3ec8b2106bc3104b6c2ecdfda9131cf2580e6181",
+  "prompts": {},
+  "sessions": {
+    "s_1697c02732864d": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "7915669e-551c-4bdd-9a20-841308d4c91a",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

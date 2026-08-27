@@ -1,0 +1,57 @@
+oxidize-core/src/model/inference/load.rs
+  s_f370a470bf91ca::t_e950e8d78983b0 595
+  s_f370a470bf91ca::t_296ac8f663c10d 433-450
+  s_f370a470bf91ca::t_46efff71f6db93 557-576
+oxidize-core/src/model/inference/layers.rs
+  s_f370a470bf91ca::t_c1b09ef0f0a1fb 786
+  s_f370a470bf91ca::t_a5ef4a78bde373 1895-1898,1903-1926,1940
+  s_f370a470bf91ca::t_8f3b9c5802ad5f 2005
+  s_f370a470bf91ca::t_68610ba1b03bf4 2205-2208,2215-2217,2223-2224,2226,2239,2241-2242,2247,2249
+  s_f370a470bf91ca::t_f2a7bfbc80895f 169
+  s_f370a470bf91ca::t_a1ac3fdc729e62 44-58,60-63,67-168,170-219
+  s_f370a470bf91ca::t_58fb4d372db710 2072-2076,2085
+  s_f370a470bf91ca::t_5d30a0d1280ad7 14-18,24-25
+  s_f370a470bf91ca::t_8e2b31f6d2764a 19-23
+  s_f370a470bf91ca::t_cbb9d3cade2af8 59,64-66
+oxidize-cli/src/bin/bench.rs
+  s_f370a470bf91ca::t_83440b14ed1884 433
+oxidize-core/src/format/safetensors_to_gguf.rs
+  s_f370a470bf91ca::t_f940f927921b02 2309-2311
+oxidize-core/src/model/inference.rs
+  s_f370a470bf91ca::t_c9dbdd57e6b899 1046-1052
+  s_f370a470bf91ca::t_943be6dbc6880f 1418-1423
+  s_f370a470bf91ca::t_4837228439d455 231
+  s_f370a470bf91ca::t_dbcaff53169530 3534
+  s_f370a470bf91ca::t_7e9e7a3f799c38 232-234
+  s_f370a470bf91ca::t_7d9a453d571f09 983-992
+  s_f370a470bf91ca::t_4bd05981c74f51 1015-1018
+  s_f370a470bf91ca::t_122ebe601d3eb2 240-247
+  s_f370a470bf91ca::t_3480b45a524efd 769
+  s_f370a470bf91ca::t_4ec0472e278181 1485-1491
+  s_f370a470bf91ca::t_e60f680386b575 2941-3040,3050-3264,3267-3268,3271-3402
+  s_f370a470bf91ca::t_1b6a56cc073ca3 297
+  s_f370a470bf91ca::t_c95151a11e691a 3041-3049
+  s_f370a470bf91ca::t_15e33911771702 3265-3266,3269-3270
+  s_f370a470bf91ca::t_90fee61896bee2 713
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "75564fbc59fe07e86e84dd51f5d1e071f9cda0a2",
+  "prompts": {},
+  "humans": {
+    "h_cf4e3af6880df2": {
+      "author": "Jackson57279 <otdoges@proton.me>"
+    }
+  },
+  "sessions": {
+    "s_f370a470bf91ca": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e5af42c6-a8f0-490a-a118-5425d37244da",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

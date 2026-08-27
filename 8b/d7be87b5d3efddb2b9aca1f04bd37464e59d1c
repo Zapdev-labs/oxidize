@@ -1,0 +1,19 @@
+oxidize-core/src/backends/rocm.rs
+  s_cd586a2897ef61::t_069d5d6c042504 62-67,292-295,299-303,411-415,468-472,497-499,532-534,583-584,600-604
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "8bd7be87b5d3efddb2b9aca1f04bd37464e59d1c",
+  "prompts": {},
+  "sessions": {
+    "s_cd586a2897ef61": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ee77d-c9cf-75f0-83e1-340f811bcb1d",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

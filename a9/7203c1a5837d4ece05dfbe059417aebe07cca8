@@ -1,0 +1,315 @@
+oxidize-python/oxidize_python/cli.py
+  s_88f2f95ac1c2b6::t_aa2500e5742901 201-233,244
+oxidize-golang/internal/cli/bench.go
+  s_88f2f95ac1c2b6::t_9fa0f471c15eed 93-128
+  s_88f2f95ac1c2b6::t_d2509b37862409 11
+oxidize-python/oxidize_python/test_cli.py
+  s_6effa337566465::t_67ccc60537947d 61-71,77,79-96,98-99
+  s_e5bbc3c386c410::t_91365bb72512fd 72-76,78
+  s_6effa337566465::t_723ac2c74d6aaf 97
+oxidize-cli/Cargo.toml
+  s_12a022ab965e55::t_c618e61fef2d3b 35
+oxidize-python/oxidize_python/core/ffi.py
+  s_88f2f95ac1c2b6::t_be01c26b278689 19-20
+  s_88f2f95ac1c2b6::t_2663df5b3d5f92 6-7,13-14,89
+  s_88f2f95ac1c2b6::t_eee18aa04149c1 8-12,15-18,21-31,33-34,40-43,66,82-84,86,88,92-99,101-103,106,108-113,115,118-124
+  s_88f2f95ac1c2b6::t_26114b61e482c5 1-5,32,35-39,44-65,67-81,85,87,90-91,100,104-105,107,114,116-117,125-176
+oxidize-golang/internal/cli/cli.go
+  s_6effa337566465::t_a7a3063733cfe9 62-65
+oxidize-golang/internal/cli/cli_test.go
+  s_e5bbc3c386c410::t_ed8e20b9324ece 29
+  s_6effa337566465::t_588d59136c42f6 19-22
+  s_e5bbc3c386c410::t_97f610aa36e4d4 16
+  s_6effa337566465::t_fe4b6ff6d5e876 25,39
+  s_6effa337566465::t_8b0a500321993d 17,26-28,30-37,44,50-51,54-55
+oxidize-python/oxidize_python/core/tensor/ops.py
+  s_88f2f95ac1c2b6::t_839e3446d9a1f4 7-8
+  s_88f2f95ac1c2b6::t_80377ee4a13560 60-70,80-84
+oxidize-python/oxidize_python/core/tensor/gemv.py
+  s_88f2f95ac1c2b6::t_bff982f53c6300 1-5,12-13,34-37,54-58,77-81,97,100-101,119-122,176-181,195-198,215-218,245,253-254
+oxidize-core/src/compute/tensor.rs
+  s_88f2f95ac1c2b6::t_26aa5a8d099d8d 4416-4468,4553-4556
+  s_be6d997c6084b1::t_1864feb2f00d85 4524-4537
+  s_88f2f95ac1c2b6::t_12aa549d9edde9 1391-1402
+  s_88f2f95ac1c2b6::t_a5134874f26aa0 4469,4471-4474,4479-4484,4521-4523
+  s_88f2f95ac1c2b6::t_32cad471e8fa10 4470,4475-4478,4485-4520
+oxidize-python/oxidize_python/core/model/test_inference_config.py
+  s_e5bbc3c386c410::t_eeb455bca30443 1-14,16-18
+  s_e5bbc3c386c410::t_3d696d1156536f 15
+  s_be6d997c6084b1::t_c9a4d5656dc49f 19-64
+Cargo.toml
+  s_88f2f95ac1c2b6::t_eefbab5ea4e090 11
+oxidize-cli/src/bin/bench.rs
+  s_88f2f95ac1c2b6::t_1caf98fcd34a1a 33-34
+  s_88f2f95ac1c2b6::t_d916650a84792f 51-54
+  s_be6d997c6084b1::t_29c4480c0a2fb4 423-427
+oxidize-ffi/src/lib.rs
+  s_88f2f95ac1c2b6::t_a9a99617b5cfa3 1-13,15,53-60,63-64,73-75,87-88,91,114,116-118,120-123,125,127-133,138-167,169-253
+  s_88f2f95ac1c2b6::t_92df0e7ff764a2 14,61-62,65-72,76-86,89-90,93-113,115,119,254
+  s_88f2f95ac1c2b6::t_83b761ea8d72f2 126
+  s_88f2f95ac1c2b6::t_2b60c03c8df3c1 16-26,30,46-52
+  s_88f2f95ac1c2b6::t_2e5c56ebe8f1df 134-137
+  s_88f2f95ac1c2b6::t_5ed04df2067416 92,124
+  s_88f2f95ac1c2b6::t_f73e947cdfd9f5 27-29,31-45
+  s_88f2f95ac1c2b6::t_0a65889f6b4f94 168
+oxidize-python/oxidize_python/internal/gguf/test_parse.py
+  s_6effa337566465::t_7ff5c72663edd0 34-48
+oxidize-python/oxidize_python/core/model/dflash_weights.py
+  s_88f2f95ac1c2b6::t_8c498af26706aa 73-78,80
+  s_88f2f95ac1c2b6::t_80a33beb73d3a0 7-9
+  s_6effa337566465::t_74a10e9131998c 31-33
+  s_6effa337566465::t_7d9bfc634ff239 151,161
+oxidize-python/oxidize_python/core/model/llama_decoder_forward.py
+  s_be6d997c6084b1::t_226a154c1f7993 341-351,355-359,362,365-366,369,377,381-391,397,401,404
+  s_be6d997c6084b1::t_8cfb69d0fbb6af 241,245,248
+  s_be6d997c6084b1::t_d822b6d8e11465 109-111,119
+  s_be6d997c6084b1::t_2234504838c5ad 14-42
+  s_be6d997c6084b1::t_7cbcb6266c24a3 292,302,305-308,319-322,325-326,328,334
+  s_be6d997c6084b1::t_a9e54455aed18d 219,222-226,236-237
+  s_be6d997c6084b1::t_313a72a354789a 56
+  s_be6d997c6084b1::t_9d96a65c619023 137-140,143-144,146,162-169,173-177,179,187,191-195
+oxidize-python/oxidize_python/core/flash_attention/flash_attention.py
+  s_e5bbc3c386c410::t_2bc71fa68a1d89 10
+  s_88f2f95ac1c2b6::t_df7253cd13622f 52-60
+  s_88f2f95ac1c2b6::t_783c397089809c 91-101
+  s_88f2f95ac1c2b6::t_c32c8256f3a9cc 8-9
+oxidize-python/oxidize_python/core/model/gguf_decoder_load.py
+  s_be6d997c6084b1::t_e92c44db7fd38e 135-148
+  s_6effa337566465::t_f88de41c7b768d 58,62,78,86
+  s_be6d997c6084b1::t_3818cc9ea9d759 161-162
+oxidize-python/oxidize_python/core/model/llama_decoder.py
+  s_6effa337566465::t_4f66f94e419461 82-84
+  s_6effa337566465::t_a2bca2aeb98038 110-111
+  s_be6d997c6084b1::t_25f9e341f70a66 139-146
+  s_be6d997c6084b1::t_9f56e5d04520ca 21-27,39-59
+  s_6effa337566465::t_d74d74aad194d2 64-67
+  s_be6d997c6084b1::t_b934a2ca505e7b 75-77,79-80
+oxidize-golang/core/quantization/gemv_rust.go
+  s_88f2f95ac1c2b6::t_0219e1e6fc1cfb 1-77
+oxidize-golang/scripts/manual_qa.sh
+  s_6effa337566465::t_3979ead6907a84 75-78
+  s_e5bbc3c386c410::t_a5a018a1fe677a 35-37
+  s_6effa337566465::t_d011e2bd0484f7 38-46,51-52,57,62
+oxidize-golang/internal/serviceinfo/serviceinfo_test.go
+  s_6effa337566465::t_fe38ddff73f141 14-15,22,28
+oxidize-python/oxidize_python/core/model/generation.py
+  s_e5bbc3c386c410::t_88e82ed429081f 5,8,68-73,80,82-86,90-121,125,127,129,132-140,145,150-152,154
+oxidize-golang/core/model/inference.go
+  s_e5bbc3c386c410::t_4c4a98178674a1 144
+  s_be6d997c6084b1::t_b2c83d45c7b7d8 54-59
+  s_be6d997c6084b1::t_482d0e8b32aabd 79
+oxidize-python/oxidize_python/core/model/inference_config.py
+  s_be6d997c6084b1::t_2dea5243415c97 5
+  s_be6d997c6084b1::t_a01ea5675b6e75 90
+  s_e5bbc3c386c410::t_81388628c6ad22 174
+  s_be6d997c6084b1::t_7d99dce0c1f592 177-193
+  s_be6d997c6084b1::t_6c4d219a5eabf2 226-231
+  s_be6d997c6084b1::t_5bca2931af2a26 42-47
+  s_e5bbc3c386c410::t_6e8d17521ad6ac 108-117
+oxidize-golang/core/model/generation.go
+  s_e5bbc3c386c410::t_18d55549a6e71a 53-60,69,71-76,82-95,102-130,132-141,143-162,170,173,175,181-197,204,209-212,214
+  s_e5bbc3c386c410::t_f8b599f4e6e867 131
+oxidize-golang/core/model/model.go
+  s_be6d997c6084b1::t_366712fea51cc2 177-178,180,183-189
+oxidize-golang/core/model/decoder_ffn.go
+  s_be6d997c6084b1::t_23c0c563aed390 30-50,54-62,67,70-81
+oxidize-golang/core/model/llama_decoder_forward.go
+  s_be6d997c6084b1::t_a1a179bff35610 141
+  s_be6d997c6084b1::t_56a68a4d83e863 334-341,357-367,372,375,392,399-407
+  s_be6d997c6084b1::t_754a2a56e1e2ad 256-257
+  s_be6d997c6084b1::t_161125c4adcf4e 106,111
+  s_be6d997c6084b1::t_763c94a502beb0 242
+  s_be6d997c6084b1::t_2f93038b462195 192-199
+  s_be6d997c6084b1::t_b45feb8e0f83c7 28
+  s_be6d997c6084b1::t_256d80609e96f7 310,317
+oxidize-python/oxidize_python/core/ggufcore/gguf.py
+  s_6effa337566465::t_5127c31902b551 10
+  s_6effa337566465::t_0a79160a601b08 42
+oxidize-python/oxidize_python/testutil.py
+  s_e5bbc3c386c410::t_e621bea06de9f7 5
+  s_6effa337566465::t_ed22208a56b520 1-4,6-21,31-38
+  s_e5bbc3c386c410::t_adc3e3c720442e 22-30
+  s_6effa337566465::t_dbd7f2bb498de6 39-51
+oxidize-golang/internal/server/server_test.go
+  s_6effa337566465::t_6be4e4e97a5f97 36-37,44-46
+oxidize-golang/core/model/llama_decoder.go
+  s_be6d997c6084b1::t_64ccba23649008 19-27,31,33,37-55
+  s_be6d997c6084b1::t_09d4b9ac07e656 95-99
+  s_be6d997c6084b1::t_5f0f0bc6f32a41 28-30,32,34-36
+  s_be6d997c6084b1::t_0503e2f05036b8 124-128,131
+  s_be6d997c6084b1::t_10f7e0829cacc5 221-232
+oxidize-golang/core/quantization/rust_model.go
+  s_88f2f95ac1c2b6::t_f5ba6d8ab98860 1-100
+oxidize-core/src/model/inference.rs
+  s_be6d997c6084b1::t_c168e53f7cb3dd 1656-1660
+  s_be6d997c6084b1::t_03bf8da901967b 2818-2833
+  s_be6d997c6084b1::t_0e683efb08c430 48
+  s_be6d997c6084b1::t_12069b36fc800c 178-182
+  s_be6d997c6084b1::t_a85ddb1ff9f2e3 2926-2930
+  s_be6d997c6084b1::t_6bb62fe7abf863 1907-1910,1912,1914-1915,1917-1920,1922-1924
+  s_be6d997c6084b1::t_34504b16d7f3bb 2205-2208
+  s_be6d997c6084b1::t_902f96b2059bda 1863-1874,1879
+  s_be6d997c6084b1::t_a0b555505e2564 2066-2071
+  s_be6d997c6084b1::t_95dcbf66862f72 935-936
+  s_be6d997c6084b1::t_0482ac0d81421b 7-8
+  s_be6d997c6084b1::t_564e1e68c1a769 468-472
+  s_be6d997c6084b1::t_78a0a9bc383425 1251-1256
+  s_be6d997c6084b1::t_43654a51ad7b3a 1965-1971,1987-2001
+  s_be6d997c6084b1::t_cce7fe6dbd8950 411-444
+  s_be6d997c6084b1::t_44c683533571b6 1777,1796
+  s_be6d997c6084b1::t_42c15ebfd4493c 1911,1913,1916,1921
+  s_88f2f95ac1c2b6::t_e28cc028b02785 2523-2556,2562-2569
+  s_be6d997c6084b1::t_c6d6147232ffb5 1644-1648,2193-2197
+  s_be6d997c6084b1::t_c181012928960f 1580-1584
+  s_88f2f95ac1c2b6::t_afc859389ef16a 2902
+  s_be6d997c6084b1::t_503f20b6c106d7 2945-2954
+  s_be6d997c6084b1::t_8a43eecbc3b7a1 210-239
+  s_be6d997c6084b1::t_028a4649cbd840 3556-3592
+  s_be6d997c6084b1::t_ccfd81006deaba 2757-2767,2772
+  s_be6d997c6084b1::t_c583e6b81bc1c6 135-150
+  s_be6d997c6084b1::t_28aa909d1cf1b3 2667,2687
+AGENTS.md
+  s_2b684d94ce242f::t_2ea0a3ce2f48d8 126
+  s_2b684d94ce242f::t_3e7b5abb131e52 133,135-136
+oxidize-golang/core/tensor/gemv.go
+  s_88f2f95ac1c2b6::t_0bd8fae43027ee 269
+  s_88f2f95ac1c2b6::t_214bec27badbcf 6
+  s_88f2f95ac1c2b6::t_1ada858184a66f 306,309-324
+.cursor/hooks/state/continual-learning-index.json
+  s_2b684d94ce242f::t_6e4422dd25586f 3-5,15-20,36-44,49-52,55-61,78-80,87-91
+oxidize-golang/core/model/dflash_weights.go
+  s_88f2f95ac1c2b6::t_b72b177da372a3 81
+  s_88f2f95ac1c2b6::t_884e85ab1585a2 78-80,82
+oxidize-golang/core/model/inference_config_test.go
+  s_e5bbc3c386c410::t_eb0c3a7c1d3423 1-25
+  s_be6d997c6084b1::t_7bb99d5681c00e 26-67
+oxidize-ffi/Cargo.toml
+  s_88f2f95ac1c2b6::t_9656cdef3ff618 1-12
+  s_88f2f95ac1c2b6::t_f3cfb13a117bdc 13
+oxidize-golang/core/model/inference_config.go
+  s_be6d997c6084b1::t_f5973252853ae0 126-149
+  s_e5bbc3c386c410::t_8df6201c2b255d 120
+  s_be6d997c6084b1::t_24ff18e0cd4768 165
+  s_be6d997c6084b1::t_4ac586e9a3d9bb 4
+  s_e5bbc3c386c410::t_e9b562f7649d6c 10-23
+oxidize-golang/core/model/gguf_decoder_load.go
+  s_be6d997c6084b1::t_a637fc536679ac 179
+  s_be6d997c6084b1::t_771b09e0931b0c 256-257
+  s_be6d997c6084b1::t_50f0cf30aeb721 166-178,180-184
+oxidize-golang/internal/testutil/testutil.go
+  s_6effa337566465::t_689a2c80eeba17 80-94
+  s_6effa337566465::t_2ce5f464b4b9c0 13-41,55-79
+  s_e5bbc3c386c410::t_25bd584ada73d8 42-54
+  s_6effa337566465::t_8a855641e91430 7
+.cursor/debug-49b0b9.log
+  s_86b2fd23789a38::t_bb29869bd5ecef 231
+  s_86b2fd23789a38::t_5b8b63cf40aa0d 217
+  s_6effa337566465::t_e2bc7ac7ad299a 239
+  s_6effa337566465::t_b6c47744a3b488 241-242
+  s_86b2fd23789a38::t_3963a2f6d5b90b 227
+  s_86b2fd23789a38::t_4fb3ffaa9e379a 210
+  s_86b2fd23789a38::t_e467a0b2a0955f 219
+  s_86b2fd23789a38::t_7c4e3cf4e2ce80 228-229
+  s_6effa337566465::t_1bdeac411606da 238
+  s_86b2fd23789a38::t_b18fe66fc7ad3f 223
+  s_6effa337566465::t_4c3011e71aab55 236
+  s_be6d997c6084b1::t_a1d120283dc5c4 245
+  s_ebebf75be5154e::t_1bc6c8759b17e8 232
+  s_86b2fd23789a38::t_b2e03d00b1a008 214
+  s_86b2fd23789a38::t_e9e2cdbea6214b 226
+  s_be6d997c6084b1::t_585459be7ae416 243-244
+  s_86b2fd23789a38::t_e11e2f0fe46bdb 220-221
+  s_ebebf75be5154e::t_86f3cb2cdb6057 234
+  s_86b2fd23789a38::t_35998ece9110be 215
+  s_86b2fd23789a38::t_70035e54863fe0 222
+  s_b138499838f940::t_11c190ddacbe73 199-209
+  s_86b2fd23789a38::t_0bce6c6af5c1cb 213
+  s_6effa337566465::t_5f8196c20cf6e8 237
+  s_86b2fd23789a38::t_68d6cc94b32ecb 211
+  s_86b2fd23789a38::t_d0b224632a9487 224-225
+  s_ebebf75be5154e::t_65dd58ed0a0573 233
+  s_86b2fd23789a38::t_e0103ad96ac98a 218
+  s_86b2fd23789a38::t_82515cf7381418 230
+  s_86b2fd23789a38::t_e92b8187a9017b 212
+  s_86b2fd23789a38::t_8402d3f4680c83 216
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.3",
+  "base_commit_sha": "a97203c1a5837d4ece05dfbe059417aebe07cca8",
+  "prompts": {},
+  "sessions": {
+    "s_12a022ab965e55": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "8b249e87-1c06-482d-9040-643194d74eff",
+        "model": "default"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_2b684d94ce242f": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "009b6cf6-5763-4fe7-b6fa-10d43b35f294",
+        "model": "default"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_6effa337566465": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "6dbf5c6e-9b77-421b-b405-e84ce9dea3bb",
+        "model": "default"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_86b2fd23789a38": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ed1b8ba7-1ad5-4b99-bfa2-02f64163e479",
+        "model": "claude-sonnet-4-6"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_88f2f95ac1c2b6": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "08f05fad-de10-45d7-a7fb-20cd7f03c9d1",
+        "model": "claude-sonnet-4-6"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_b138499838f940": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d9fdb403-1cbc-4339-afa2-fcd8b1e5171d",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_be6d997c6084b1": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f9909767-ac41-4adf-bfa6-658e5cfffb3e",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_e5bbc3c386c410": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "39c13a73-d227-46c0-b9b0-096071aa5d1c",
+        "model": "default"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_ebebf75be5154e": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_1681da4d0ffeTmZHUXQiYVZ98u",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

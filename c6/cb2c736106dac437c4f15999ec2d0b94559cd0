@@ -1,0 +1,33 @@
+oxidize-c/include/oxidize/http.h
+  s_96ddc277ba047e::t_b226f408942467 23
+  s_96ddc277ba047e::t_86ec0ff8f72ba7 76
+  s_96ddc277ba047e::t_002aa331fcdfcf 1-22,24-32,34-75,77-109
+  s_96ddc277ba047e::t_a75c6bb9d5b1b5 33
+oxidize-c/src/server/http.c
+  s_96ddc277ba047e::t_aeb428d07f4a2a 341,345
+  s_96ddc277ba047e::t_a9111d0fe50871 1-340,342-344,346-359
+oxidize-c/Makefile
+  s_96ddc277ba047e::t_6f1bca38af044e 23
+oxidize-c/tests/test_http.c
+  s_96ddc277ba047e::t_29d9243b4c546f 1-124,135-138,140-141,143-153,155,158-218,222-226
+  s_96ddc277ba047e::t_eb296995b7d57c 156-157
+  s_96ddc277ba047e::t_8e4464999f269d 125-134,139,142
+  s_96ddc277ba047e::t_10965791ef675b 154
+  s_96ddc277ba047e::t_f14422325ae2bf 219-221
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "c6cb2c736106dac437c4f15999ec2d0b94559cd0",
+  "prompts": {},
+  "sessions": {
+    "s_96ddc277ba047e": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "ea8ad242-b091-46af-96e0-114c0c67fea4",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

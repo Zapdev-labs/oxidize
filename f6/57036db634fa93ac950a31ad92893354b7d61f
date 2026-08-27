@@ -1,0 +1,30 @@
+oxidize-core/src/backends/cuda/flash_decode_launch.rs
+  s_7d0d50bc68f118::t_53d5ce9b3f8afe 216-217,222
+oxidize-core/src/backends/cuda/flash_decode.rs
+  s_1b4fa8b8dd024d::t_6025a1f28faebd 42
+  s_1b4fa8b8dd024d::t_4e3a61942ad04a 17,26-41
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "f657036db634fa93ac950a31ad92893354b7d61f",
+  "prompts": {},
+  "sessions": {
+    "s_1b4fa8b8dd024d": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "b5311b11-a9bb-47f1-88a6-444ce4accbe7",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_7d0d50bc68f118": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "574f82cd-95dc-47f4-8725-bdd25dbad482",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

@@ -1,0 +1,407 @@
+oxidize-core/src/model/inference/moe.rs
+  s_30b232a3ef6d6b::t_b0f5038779c0a3 1-32
+oxidize-core/src/compute/tensor/kernels/activation.rs
+  s_30b232a3ef6d6b::t_cf7543083f35b9 1-574
+oxidize-core/src/compute/tensor/kernels/gemv.rs
+  s_30b232a3ef6d6b::t_f0bd808251b6b0 3-15
+  s_30b232a3ef6d6b::t_cf7543083f35b9 1-2,16-1205
+oxidize-core/src/paged_attention/scheduler/core.rs
+  s_30b232a3ef6d6b::t_27d1e13c6578fe 1-323
+oxidize-golang/core/mesh/topology_extended_test.go
+  s_1bbe4678bd45c7::t_9f79ed0ab881b2 1-154
+oxidize-cli/src/main/model_resolution.rs
+  s_30b232a3ef6d6b::t_6a85ecbb80eb9c 1-2,4-13,15-19,21-26,28-32,34-98,100-126,128-141,143-149,151-155,157-169,171-242,244-263,265-278,280-324
+  s_30b232a3ef6d6b::t_afa2ef75ad74e5 3,14,20,27,33,99,127,142,150,156,170,243,264,279
+oxidize-core/src/paged_attention/scheduler/config.rs
+  s_30b232a3ef6d6b::t_fd6d9d9567c107 1-70
+oxidize-core/src/compute/quantization/quant_simple.rs
+  s_30b232a3ef6d6b::t_c6e2777d391c18 1-448
+oxidize-python/oxidize_python/core/backends/cuda/test_cuda.py
+  s_1bbe4678bd45c7::t_995689dc4f02a0 1-112
+oxidize-core/src/backends/cuda/tests.rs
+  s_30b232a3ef6d6b::t_781c6875f19859 1-120
+oxidize-core/src/compute/tensor/kernels/transposed.rs
+  s_30b232a3ef6d6b::t_cf7543083f35b9 1-556
+oxidize-python/oxidize_python/core/flash_attention/__init__.py
+  s_1bbe4678bd45c7::t_1def92c738f588 9-15,19-22,24
+oxidize-golang/core/quantization/gemv_avx2.go
+  s_1bbe4678bd45c7::t_1ed6c18622af56 1-198
+oxidize-python/oxidize_python/core/backends/cuda/gpu_state.py
+  s_1bbe4678bd45c7::t_c3c700d0ec517c 1-258
+.omo/ulw-loop/evidence/inference-regression-green-tests.txt
+  s_fe8ef742af28ff::t_dc64235cecd177 1-112
+.omo/ulw-loop/evidence/oxidize-http-completion-fixed.txt
+  s_fe8ef742af28ff::t_dc64235cecd177 1-6
+.omo/ulw-loop/evidence/oxidize-oxk-forced-completion.txt
+  s_fe8ef742af28ff::t_dc64235cecd177 1-19
+oxidize-core/src/model/layer_wise/forward.rs
+  s_30b232a3ef6d6b::t_39ce5dc0f7ee48 1-569
+oxidize-python/oxidize_python/core/paged/__init__.py
+  s_1bbe4678bd45c7::t_7749f13704d0bd 3-6,10-16,18,23-26,30-36,38
+oxidize-python/oxidize_python/core/backends/cuda/cuda.py
+  s_1bbe4678bd45c7::t_c461bfbedcc3de 221-224,226-228
+  s_1bbe4678bd45c7::t_5c3dccb0225864 1-8,15-24,72-76,78-91,95-100,102-121,125-131,133-177,212-216,219-220,230-233,236-268
+  s_1bbe4678bd45c7::t_d6dafbcb6ca97a 225,234
+  s_1bbe4678bd45c7::t_ea4abbfde499cf 178-211,217-218,229,235
+.omo/ulw-loop/evidence/mixed-width-green-test.txt
+  s_fe8ef742af28ff::t_dc64235cecd177 1-11
+oxidize-cli/src/main/command_rewrite.rs
+  s_30b232a3ef6d6b::t_6a85ecbb80eb9c 1-2,4-7,9-180,182-278
+  s_30b232a3ef6d6b::t_afa2ef75ad74e5 3,8,181
+oxidize-core/src/compute/tensor/kernels/gemm.rs
+  s_30b232a3ef6d6b::t_cf7543083f35b9 1-447
+oxidize-core/src/paged_attention/scheduler/prefix_cache.rs
+  s_30b232a3ef6d6b::t_4fdd5a15d1428e 1-216
+oxidize-golang/core/mesh/ring_collective.go
+  s_1bbe4678bd45c7::t_2d311e5b1ec4d6 1-290
+oxidize-python/oxidize_python/core/flash_attention/flash_attention_f16.py
+  s_1bbe4678bd45c7::t_8b1e7be818c859 103
+  s_1bbe4678bd45c7::t_ddc2668bb26b38 1-102,104-140
+oxidize-golang/internal/cli/genflags.go
+  s_1bbe4678bd45c7::t_456cc8e318b52a 157
+oxidize-core/src/compute/tensor/kernels.rs
+  s_30b232a3ef6d6b::t_5828d50c8480ce 42-60,63
+oxidize-core/src/paged_attention/scheduler/error.rs
+  s_30b232a3ef6d6b::t_b415dfbce8929c 1-39
+oxidize-core/src/backends/cuda/gemv_quantized.rs
+  s_30b232a3ef6d6b::t_6cc3636f5b58c5 1-667
+oxidize-golang/core/tensor/gemv_quantized.go
+  s_1bbe4678bd45c7::t_6fedf13e1024fb 1-104
+oxidize-python/oxidize_python/core/mesh/topology_extended.py
+  s_1bbe4678bd45c7::t_c88c3f99a276f2 1-153
+oxidize-core/src/model/layer_wise/weights.rs
+  s_30b232a3ef6d6b::t_f5325804bc2a59 1-200
+oxidize-golang/core/mesh/fault_tolerance.go
+  s_1bbe4678bd45c7::t_f48090e30a607e 1-115
+oxidize-core/src/compute/kv_cache/tests.rs
+  s_30b232a3ef6d6b::t_a425d555ac9c71 1-1109
+oxidize-python/oxidize_python/core/video/temporal.py
+  s_1bbe4678bd45c7::t_6b66b4bdb51131 1-308
+oxidize-python/oxidize_python/core/model/sampling.py
+  s_1bbe4678bd45c7::t_8e650fba17e681 13
+  s_1bbe4678bd45c7::t_4bc8bd1e1ff026 131
+  s_1bbe4678bd45c7::t_20dc42fb6a6d88 112
+  s_1bbe4678bd45c7::t_2717f772d34b5a 176-197,202-318
+  s_1bbe4678bd45c7::t_a055d805e864fa 388-572
+  s_1bbe4678bd45c7::t_768755a41f4acd 604-658
+oxidize-core/src/paged_attention/scheduler/sequence.rs
+  s_30b232a3ef6d6b::t_5ffcf439341e14 1-168
+oxidize-golang/core/model/sampling_filters_test.go
+  s_1bbe4678bd45c7::t_9e2992c169f62c 1-235
+oxidize-python/oxidize_python/core/video/errors.py
+  s_1bbe4678bd45c7::t_f883ec8741d3f2 1-29
+oxidize-core/src/compute/quantization/quant_utils.rs
+  s_30b232a3ef6d6b::t_e332ff6d4b9ee3 1-123
+oxidize-python/oxidize_python/core/backends/cuda/__init__.py
+  s_1bbe4678bd45c7::t_e457c1ce459e46 18-58,62-64,67-70,75,77-84,88-95,97-104,108
+oxidize-core/src/model/inference/layers.rs
+  s_30b232a3ef6d6b::t_b0f5038779c0a3 1-1499
+.omo/ulw-loop/evidence/oxidize-http-completion-warm.txt
+  s_fe8ef742af28ff::t_dc64235cecd177 1-7
+oxidize-python/oxidize_python/core/mesh/election_priority.py
+  s_1bbe4678bd45c7::t_c1c7b9159be6a8 1-119
+oxidize-core/src/compute/quantization.rs
+  s_30b232a3ef6d6b::t_69d151d6c99c75 450-452,454-456,458-460,462-464,466-468,470-472,475-476
+oxidize-core/src/model/layer_wise/ssm.rs
+  s_30b232a3ef6d6b::t_fe30d3033495f7 1-698
+oxidize-golang/core/video/decoder.go
+  s_1bbe4678bd45c7::t_f3726f26261e54 1-63
+oxidize-python/oxidize_python/internal/generate/paged_run.py
+  s_1bbe4678bd45c7::t_80b947a28458d7 14-21
+  s_1bbe4678bd45c7::t_41aa2bda3c8015 87-171
+oxidize-core/src/backends/cuda/gemv_f32.rs
+  s_30b232a3ef6d6b::t_a2f0d9583d715d 1-184
+.omo/ulw-loop/evidence/oxidize-f16-32threads-completion.txt
+  s_fe8ef742af28ff::t_dc64235cecd177 1-19
+oxidize-python/oxidize_python/core/backends/factory.py
+  s_1bbe4678bd45c7::t_a9222b82548cb5 27-38
+  s_1bbe4678bd45c7::t_3384b9cec7d5c0 9
+.omo/ulw-loop/evidence/oxidize-http-completion-fixed-2.txt
+  s_fe8ef742af28ff::t_dc64235cecd177 1-6
+.omo/ulw-loop/evidence/oxidize-fixed-status.txt
+  s_fe8ef742af28ff::t_dc64235cecd177 1-29
+.omo/ulw-loop/evidence/oxidize-post-gen-status.txt
+  s_fe8ef742af28ff::t_dc64235cecd177 1-37
+oxidize-golang/core/mesh/topology_extended.go
+  s_1bbe4678bd45c7::t_d5f9bcda3173df 1-190
+oxidize-core/src/compute/tensor/kernels/gpu.rs
+  s_30b232a3ef6d6b::t_f0bd808251b6b0 4-5
+  s_30b232a3ef6d6b::t_cf7543083f35b9 2-3,6-69
+  s_30b232a3ef6d6b::t_5d29bd4a1946fa 1
+oxidize-golang/core/tensor/gemv_quantized_test.go
+  s_1bbe4678bd45c7::t_541c99a6032fa8 1-53
+oxidize-core/src/compute/tensor/kernels/core_types.rs
+  s_30b232a3ef6d6b::t_cf7543083f35b9 1-2,4-43
+  s_30b232a3ef6d6b::t_f0bd808251b6b0 3
+oxidize-golang/core/flash_attention/flash_attention_f16.go
+  s_1bbe4678bd45c7::t_47782d02f22bdf 1-101
+oxidize-core/src/model/inference/mtp.rs
+  s_30b232a3ef6d6b::t_b0f5038779c0a3 1-418
+oxidize-core/src/compute/quantization/quant_k_blocks.rs
+  s_30b232a3ef6d6b::t_f0938aa98346b3 1-785
+.omo/ulw-loop/evidence/kv-cache-tests.txt
+  s_fe8ef742af28ff::t_dc64235cecd177 1-122
+oxidize-golang/core/mesh/ring_transport_tcp.go
+  s_1bbe4678bd45c7::t_962356c0e49cc4 1-210
+oxidize-golang/core/backends/cuda/cuda.go
+  s_1bbe4678bd45c7::t_48737b0a48fedd 50-113,116-176
+  s_1bbe4678bd45c7::t_5b71caf7a1170e 3-7
+oxidize-core/src/compute/tensor/kernels/gemm_decode.rs
+  s_30b232a3ef6d6b::t_cf7543083f35b9 1-1124
+oxidize-core/src/model/layer_wise/loading.rs
+  s_30b232a3ef6d6b::t_6bc84c72629216 1-231
+oxidize-golang/core/video/temporal.go
+  s_1bbe4678bd45c7::t_5d2ea5575929b9 1-341
+oxidize-python/oxidize_python/core/tensor/gemv.py
+  s_1bbe4678bd45c7::t_a30dd82584c674 103-194
+  s_1bbe4678bd45c7::t_8f3f660a10f0f9 14
+oxidize-golang/core/video/config.go
+  s_1bbe4678bd45c7::t_6019803854e983 1-221
+oxidize-core/src/compute/kv_cache/cache.rs
+  s_30b232a3ef6d6b::t_41c4d4c2002822 1,5-684
+  s_30b232a3ef6d6b::t_5252104573f717 2-4
+oxidize-cli/src/main.rs
+  s_30b232a3ef6d6b::t_7e650f1eb7b3f1 42-58
+oxidize-golang/core/mesh/election_priority.go
+  s_1bbe4678bd45c7::t_e8eccbf7971e3e 1-139
+oxidize-core/src/compute/quantization/quant_dispatch.rs
+  s_30b232a3ef6d6b::t_153caca15133b3 1-255
+oxidize-core/src/model/layer_wise/attention.rs
+  s_30b232a3ef6d6b::t_d7366134f67d74 1-356
+oxidize-python/oxidize_python/core/backends/cuda/types.py
+  s_1bbe4678bd45c7::t_39ed6e4c34ffe7 1-209
+oxidize-python/oxidize_python/core/backends/cuda/layer_cache.py
+  s_1bbe4678bd45c7::t_37dccc7c5bacc6 1-111
+.omo/ulw-loop/evidence/oxidize-server-log-listener.txt
+  s_fe8ef742af28ff::t_dc64235cecd177 1-23
+oxidize-core/src/compute/tensor/kernels/tests.rs
+  s_30b232a3ef6d6b::t_cf7543083f35b9 1-1842
+oxidize-python/oxidize_python/core/video/config.py
+  s_1bbe4678bd45c7::t_3c36575ee67284 1-172
+oxidize-python/oxidize_python/core/video/prompt.py
+  s_1bbe4678bd45c7::t_66e61a780fdd3b 1-120
+oxidize-python/oxidize_python/core/backends/cuda/gpu_kernels.py
+  s_1bbe4678bd45c7::t_1bdf33cf79306c 1-165
+oxidize-python/oxidize_python/core/quantization/gemv_avx2.py
+  s_1bbe4678bd45c7::t_29bf352e664175 1-143
+oxidize-core/src/backends/cuda/gemm.rs
+  s_30b232a3ef6d6b::t_d696e0c248407a 1-120
+.omo/ulw-loop/evidence/oxidize-oxk-16threads-completion.txt
+  s_fe8ef742af28ff::t_dc64235cecd177 1-7
+oxidize-python/oxidize_python/core/video/preprocess.py
+  s_1bbe4678bd45c7::t_4e1b5d3bd36560 1-141
+oxidize-core/src/compute/quantization/quant_nvfp4.rs
+  s_30b232a3ef6d6b::t_842d53e7ff464a 1-41
+oxidize-golang/core/model/sampling.go
+  s_1bbe4678bd45c7::t_220a7089f7dd29 126
+  s_1bbe4678bd45c7::t_66260881829869 192-214,221-397
+  s_1bbe4678bd45c7::t_b0160751900b44 106
+  s_1bbe4678bd45c7::t_fba5cf2895f7aa 463-625
+  s_1bbe4678bd45c7::t_4b0e19753cc440 694
+  s_1bbe4678bd45c7::t_90ea0623d4cadd 663-693,695-792
+.omo/ulw-loop/gemma4-fix-notepad.md
+  s_fe8ef742af28ff::t_dc64235cecd177 1-3
+oxidize-core/src/model/layer_wise/cache.rs
+  s_30b232a3ef6d6b::t_a9b5c3237e7c94 1-54
+oxidize-python/oxidize_python/core/quantization/__init__.py
+  s_1bbe4678bd45c7::t_8602677894c1c4 2-6,9-17
+oxidize-golang/core/backends/cuda/types.go
+  s_1bbe4678bd45c7::t_5c27dda8a625a5 1-141
+oxidize-golang/core/backends/cuda/layer_cache.go
+  s_1bbe4678bd45c7::t_66241ab1aa7a74 1-81
+oxidize-python/oxidize_python/core/model/speculative.py
+  s_1bbe4678bd45c7::t_3e866086d5d070 66-85,88-96,98-100,103
+  s_1bbe4678bd45c7::t_d8876ab688f1b5 86-87,97,101-102
+oxidize-core/src/model/layer_wise.rs
+  s_30b232a3ef6d6b::t_881a906d01a7f0 21-37
+oxidize-golang/core/model/speculative.go
+  s_1bbe4678bd45c7::t_cb7f29caa78f9c 68-109
+oxidize-core/src/compute/kv_cache/batch.rs
+  s_30b232a3ef6d6b::t_0ebe64f792f466 2-4
+  s_30b232a3ef6d6b::t_7ef18de0c2fa17 1,5-174,176-178
+  s_30b232a3ef6d6b::t_12a8fcabfefc90 175
+oxidize-core/src/model/inference.rs
+  s_30b232a3ef6d6b::t_5204db31675052 1397,1399,1401,1403,1405
+  s_30b232a3ef6d6b::t_cfd05d9c8c5a29 1398,1400,1402,1404,1406
+  s_30b232a3ef6d6b::t_7bfbbf7d9a1254 3-10,15-16
+  s_30b232a3ef6d6b::t_0e39d43f8e524c 621,642,667,687,695,703,738,963,977,987,1050,1080,1117,1132,1367
+  s_30b232a3ef6d6b::t_f8b395379b1c4a 1172-1182,1184,1186-1189,1193-1195,1197-1198,1200-1207,1209-1210,1214-1216,1219,1221-1227,1229,1233-1235,1247-1253,1276-1283,1288,1290-1292,1295
+  s_30b232a3ef6d6b::t_c4797cc77de4d5 861,870,880,890
+  s_30b232a3ef6d6b::t_9565274af15b19 1246,1257
+oxidize-golang/core/flash_attention/flash_attention_f16_test.go
+  s_1bbe4678bd45c7::t_11aac8581061d8 1-108
+.github/CODEOWNERS
+  s_fe8ef742af28ff::t_dc64235cecd177 1-33
+.cursor/hooks/state/continual-learning.json
+  s_fe8ef742af28ff::t_dc64235cecd177 4,6
+oxidize-python/oxidize_python/core/video/__init__.py
+  s_1bbe4678bd45c7::t_3bc8bb5b0f7a69 1-6,12-71,76-77,83-137
+oxidize-core/src/compute/tensor/kernels/types.rs
+  s_30b232a3ef6d6b::t_cf7543083f35b9 1-32
+oxidize-core/src/compute/quantization/quant_iq_series.rs
+  s_30b232a3ef6d6b::t_38a3aa2eb19ef4 1-2,5-160
+  s_30b232a3ef6d6b::t_82b92617c7116f 3-4
+.omo/ulw-loop/evidence/oxidize-http-health-models.txt
+  s_fe8ef742af28ff::t_dc64235cecd177 1-12
+oxidize-core/src/backends/cuda/gpu_state.rs
+  s_30b232a3ef6d6b::t_b6e6cabee3c032 2-150
+  s_30b232a3ef6d6b::t_0f371272107577 1
+oxidize-core/src/compute/kv_cache/storage.rs
+  s_30b232a3ef6d6b::t_36c0e76bbc918f 1,3-339,341-423
+  s_30b232a3ef6d6b::t_73bbb768640025 2
+  s_30b232a3ef6d6b::t_d883e34ebab1af 340
+oxidize-golang/core/flash_attention/dot_product_f16c.go
+  s_1bbe4678bd45c7::t_e640cb185ece81 1-15,18-19,21-22,25-89
+  s_1bbe4678bd45c7::t_45acfe9c01aec3 16-17,20,23-24
+oxidize-cli/src/main/gpu_cluster.rs
+  s_30b232a3ef6d6b::t_afa2ef75ad74e5 8,164,173
+  s_30b232a3ef6d6b::t_6a85ecbb80eb9c 1-7,9-163,165-172,174-179
+oxidize-core/src/backends/cuda/gpu_native_forward.rs
+  s_30b232a3ef6d6b::t_8c07c86c9f5643 2-434
+  s_30b232a3ef6d6b::t_d3d20e69d582b8 1
+oxidize-cli/src/main/conversation.rs
+  s_30b232a3ef6d6b::t_c6a4b14a5a817b 20,24
+  s_30b232a3ef6d6b::t_afa2ef75ad74e5 4,10,15,63,96,134,209
+  s_30b232a3ef6d6b::t_0bd13aaccfb72e 1-3,5-9,11-14,16-19,21-23,25-30,32-37,39-41,43-62,64-95,97-133,135-208,210-358
+  s_30b232a3ef6d6b::t_d26401a3eb45bc 31,38,42
+oxidize-golang/core/paged/paged_test.go
+  s_fe8ef742af28ff::t_dc64235cecd177 67-262
+oxidize-core/src/compute/quantization/tests.rs
+  s_30b232a3ef6d6b::t_8c7132c2a6f06f 1-854
+oxidize-golang/core/mesh/ring_collective_test.go
+  s_1bbe4678bd45c7::t_fa47388fcaffe6 1-178
+.omo/ulw-loop/evidence/final-oxidize-server-status.txt
+  s_fe8ef742af28ff::t_dc64235cecd177 1-11
+oxidize-python/oxidize_python/core/video/frame_sampler.py
+  s_1bbe4678bd45c7::t_410268cb99e273 1-127
+oxidize-golang/core/backends/cuda/backend.go
+  s_fe8ef742af28ff::t_dc64235cecd177 34-36
+  s_1bbe4678bd45c7::t_c53059da64c646 68-76
+oxidize-core/src/compute/tensor/kernels/q_kernels.rs
+  s_30b232a3ef6d6b::t_cf7543083f35b9 1-2048
+oxidize-golang/internal/server/paged_runtime.go
+  s_1bbe4678bd45c7::t_b55d108fce30b1 113-226
+oxidize-cli/src/main/inference.rs
+  s_30b232a3ef6d6b::t_0bd13aaccfb72e 1-2,4-50,52-148,150-197,199-200
+  s_30b232a3ef6d6b::t_afa2ef75ad74e5 3,51,149,198
+.omo/ulw-loop/evidence/mixed-width-red-test.txt
+  s_fe8ef742af28ff::t_dc64235cecd177 1-89
+oxidize-core/src/paged_attention/scheduler.rs
+  s_30b232a3ef6d6b::t_c598e636fde93b 3-10,18-23,26,28-31
+oxidize-python/oxidize_python/core/tensor/__init__.py
+  s_1bbe4678bd45c7::t_a97738e33d090c 97
+  s_1bbe4678bd45c7::t_28fce168bf6820 43
+oxidize-python/oxidize_python/core/paged/paged.py
+  s_1bbe4678bd45c7::t_8cfd74cb5adef5 336-964
+  s_1bbe4678bd45c7::t_08862c35f6e156 39-43,52,56-60,87-238
+oxidize-core/src/backends/cuda/gpu_kernels.rs
+  s_30b232a3ef6d6b::t_4b4a4be2f4a2aa 1
+  s_30b232a3ef6d6b::t_80ad3e326fe646 2-231
+oxidize-core/src/backends/cuda.rs
+  s_30b232a3ef6d6b::t_6010d40b24e9f9 57-66,81-82,85,87,90-91,94-95,98-99,102,104,107,109,113
+  s_30b232a3ef6d6b::t_da9931eb0f5047 103,108
+  s_30b232a3ef6d6b::t_18108cda894529 86
+  s_30b232a3ef6d6b::t_bf21d9482c43c0 80,84,89,93,97,101,106,112
+oxidize-python/oxidize_python/core/video/encoder.py
+  s_1bbe4678bd45c7::t_3bc6eca00d484f 1-235
+.omo/ulw-loop/evidence/oxidize-http-completion.txt
+  s_fe8ef742af28ff::t_dc64235cecd177 1-6
+.omo/ulw-loop/evidence/gemma4-green-test.txt
+  s_fe8ef742af28ff::t_dc64235cecd177 1-97
+oxidize-golang/core/video/encoder.go
+  s_1bbe4678bd45c7::t_e5b952dd51d9db 1-288
+oxidize-golang/core/backends/cuda/gpu_state.go
+  s_1bbe4678bd45c7::t_134bdc5c44b527 1-273
+oxidize-core/src/model/inference/forward.rs
+  s_30b232a3ef6d6b::t_b0f5038779c0a3 1-803
+oxidize-golang/core/quantization/gemv_avx2_test.go
+  s_fe8ef742af28ff::t_dc64235cecd177 66,104
+  s_1bbe4678bd45c7::t_2f1f016e219968 1-65,67-103,105-125
+oxidize-core/src/backends/cuda/types.rs
+  s_30b232a3ef6d6b::t_f3fe34a5a95be1 1-436
+.github/workflows/release.yml
+  s_fe8ef742af28ff::t_dc64235cecd177 1-162
+oxidize-golang/core/paged/paged.go
+  s_1bbe4678bd45c7::t_6cef756c563e43 42-47,52-54,56-59,70-75
+  s_1bbe4678bd45c7::t_4ca1ebe66af837 121-330
+  s_fe8ef742af28ff::t_dc64235cecd177 339-344
+  s_1bbe4678bd45c7::t_b0c88ed31ba0cf 478-482,484-495,497
+oxidize-python/oxidize_python/core/video/decoder.py
+  s_1bbe4678bd45c7::t_31f310931c922d 1-144
+oxidize-golang/core/video/preprocess.go
+  s_1bbe4678bd45c7::t_72e63b8cb183fc 1-52,54-186
+  s_1bbe4678bd45c7::t_c97ddada112a8a 53
+oxidize-cli/src/main/rendering.rs
+  s_30b232a3ef6d6b::t_0bd13aaccfb72e 1-2,4-9,11-17,19-39,41-51,53-65
+  s_30b232a3ef6d6b::t_afa2ef75ad74e5 3,10,18,40,52
+oxidize-core/src/model/inference/load.rs
+  s_30b232a3ef6d6b::t_b0f5038779c0a3 1-538
+oxidize-cli/src/main/generation.rs
+  s_30b232a3ef6d6b::t_0bd13aaccfb72e 1-2,4-10,12-14,16-33,35-46,48-81,83-113,115-124,126-140,142-230,232-319,321-404,406-409
+  s_30b232a3ef6d6b::t_afa2ef75ad74e5 3,11,15,34,47,82,114,125,141,231,320,405
+oxidize-golang/core/video/video_test.go
+  s_1bbe4678bd45c7::t_329e6ca7cf5fe9 5-250
+oxidize-core/src/compute/kv_cache.rs
+  s_30b232a3ef6d6b::t_2dc5d99f84d7d6 5-23,131,139-141,156,170
+oxidize-cli/src/main/server.rs
+  s_30b232a3ef6d6b::t_afa2ef75ad74e5 3,7,11,31,60,67,125,146,158,210,218
+  s_30b232a3ef6d6b::t_0bd13aaccfb72e 1-2,4-6,8-10,12-30,32-59,61-66,68-124,126-145,147-157,159-209,211-217,219-226
+oxidize-golang/core/backends/cuda/cuda_test.go
+  s_1bbe4678bd45c7::t_da0d1c369267a3 44-275
+  s_1bbe4678bd45c7::t_78c9f3258605d8 3-18
+oxidize-python/oxidize_python/core/mesh/ring_transport_tcp.py
+  s_1bbe4678bd45c7::t_1ba2876cf9eca5 1-177
+oxidize-golang/core/backends/cuda/gpu_kernels.go
+  s_1bbe4678bd45c7::t_5edd5adb94c83d 1-147
+oxidize-python/oxidize_python/core/mesh/fault_tolerance.py
+  s_1bbe4678bd45c7::t_4009e8ee9fa77a 1-124
+.omo/ulw-loop/evidence/gemma4-red-test.txt
+  s_fe8ef742af28ff::t_dc64235cecd177 1-79
+.omo/ulw-loop/evidence/head-dim-green-tests.txt
+  s_fe8ef742af28ff::t_dc64235cecd177 1-113
+oxidize-golang/core/paged/scheduler_v2.go
+  s_fe8ef742af28ff::t_dc64235cecd177 216-224
+  s_1bbe4678bd45c7::t_1a5864f659e1dd 1-215,228-838
+  s_1bbe4678bd45c7::t_161c2cba196e67 225-227
+oxidize-python/oxidize_python/core/mesh/ring_collective.py
+  s_1bbe4678bd45c7::t_087947ca05d781 1-221
+oxidize-python/oxidize_python/core/quantization/quantize.py
+  s_1bbe4678bd45c7::t_bddf69b652e7a7 322-383
+  s_1bbe4678bd45c7::t_2c328706e7763d 19
+oxidize-core/src/paged_attention/scheduler/tests.rs
+  s_30b232a3ef6d6b::t_a12c48aee4b1d1 1-1394
+oxidize-core/src/paged_attention/scheduler/lifecycle.rs
+  s_30b232a3ef6d6b::t_5fd92885f2c2ed 1-110
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.8",
+  "base_commit_sha": "87087159e641d8e7d7ffa621c96b865898bed237",
+  "prompts": {},
+  "sessions": {
+    "s_1bbe4678bd45c7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "810efb90-a3c3-4126-95fc-049cc89b3606",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_30b232a3ef6d6b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "db7b95d3-9e20-4508-8ef4-b7627f41ce24",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_fe8ef742af28ff": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "c31c6fc4-49ae-44c1-8203-5919e6ec1663",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

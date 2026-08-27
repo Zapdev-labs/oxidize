@@ -1,0 +1,33 @@
+oxidize-c/src/mesh/discovery.c
+  s_96ddc277ba047e::t_51384d5786390d 3-4,6,11-15
+  s_96ddc277ba047e::t_79305893ee0d77 67-96
+oxidize-c/include/oxidize/mistral_arch.h
+  s_96ddc277ba047e::t_1f5db91f013464 77-79,86-90
+oxidize-c/src/autotune/fingerprint.c
+  s_96ddc277ba047e::t_edd0807b2f624a 63,70
+  s_96ddc277ba047e::t_bffc778461db5f 98
+  s_96ddc277ba047e::t_c4bd87e5d3e5f0 3-5,8,29,36-43,46-62,64-69,71-97,99-126
+oxidize-c/src/model/mistral_arch.c
+  s_96ddc277ba047e::t_5c037e6a5918a7 330-339
+  s_96ddc277ba047e::t_c73bc15f80fcce 212,215-216,219-221
+  s_96ddc277ba047e::t_2c6fe86a58dbfd 178
+  s_96ddc277ba047e::t_d4a9a8006c7151 110-130
+  s_96ddc277ba047e::t_9f749d9e71927a 201-205
+  s_96ddc277ba047e::t_995745e3ba866e 291-294
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "e58d5bf6fcfb5b1de05daa29ea2429e3669bcf4a",
+  "prompts": {},
+  "sessions": {
+    "s_96ddc277ba047e": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "ea8ad242-b091-46af-96e0-114c0c67fea4",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

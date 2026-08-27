@@ -1,0 +1,20 @@
+oxidize-server/Cargo.toml
+  s_fa11e2d5fbcc89::t_7085a326419a49 33-34
+  s_fa11e2d5fbcc89::t_357428cd1e2540 16
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "a1016749abd52f6b250280167b4eff019aefb0e8",
+  "prompts": {},
+  "sessions": {
+    "s_fa11e2d5fbcc89": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f8492c9e-0255-4ddf-ab47-baf23fb46ad2",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

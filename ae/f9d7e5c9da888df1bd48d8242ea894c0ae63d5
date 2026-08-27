@@ -1,0 +1,33 @@
+oxidize-c/test_oc.c
+  s_1f84e407671e0c::t_df4508b9fcf629 109
+  s_1f84e407671e0c::t_2bbbdc40ebc21c 126-140
+oxidize-c/oc.h
+  s_1f84e407671e0c::t_46e98943cb4bbe 20
+oxidize-c/quant.c
+  s_1f84e407671e0c::t_aa46aa58bdc685 67
+  s_1f84e407671e0c::t_09fa840c498fa1 112-113
+  s_1f84e407671e0c::t_77ed451b1d49a5 133
+  s_1f84e407671e0c::t_780a05538a582c 553-595
+  s_1f84e407671e0c::t_be2fdc55b0e87e 628
+  s_1f84e407671e0c::t_d9244ad998cb8d 54-55
+  s_1f84e407671e0c::t_db92eb870a0346 105
+oxidize-c/kernels.c
+  s_1f84e407671e0c::t_ad7a9f25dae400 510-511
+  s_1f84e407671e0c::t_d8c835794e230c 498
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "aef9d7e5c9da888df1bd48d8242ea894c0ae63d5",
+  "prompts": {},
+  "sessions": {
+    "s_1f84e407671e0c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "b93ce11a-21ff-4c69-a290-7e9148494956",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

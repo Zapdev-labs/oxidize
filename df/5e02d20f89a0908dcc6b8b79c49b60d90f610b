@@ -1,0 +1,19 @@
+oxidize-core/kernels/gemv_f32.cu
+  s_ebdea6739e703a::t_f3ba25cd3f6abc 529-530
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "df5e02d20f89a0908dcc6b8b79c49b60d90f610b",
+  "prompts": {},
+  "sessions": {
+    "s_ebdea6739e703a": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "8a8ba380-b3c9-4d0a-8393-a3d777cf6f7f",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

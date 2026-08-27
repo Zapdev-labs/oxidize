@@ -1,0 +1,20 @@
+oxidize-cpp/src/tensor_cpu.cpp
+  s_5b078de97b8925::t_3a7e3870034d33 348-362
+  s_5b078de97b8925::t_868ac416dda235 108-212
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "e49d190d77d27fef45933b5a4a016f96add3c0c3",
+  "prompts": {},
+  "sessions": {
+    "s_5b078de97b8925": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a2fd32be-d532-4929-8226-7967c93996a1",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

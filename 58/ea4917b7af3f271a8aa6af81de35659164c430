@@ -1,0 +1,96 @@
+oxidize-c/tests/test_llama_swap.c
+  s_96ddc277ba047e::t_bee6aa9fb93e02 1-179
+oxidize-c/include/oxidize/llama_swap.h
+  s_96ddc277ba047e::t_e10112c5c94462 1-86
+oxidize-c/tests/test_oxk_extended.c
+  s_b0e6b0e64f0027::t_017c29dbca4046 1-573
+oxidize-c/src/paged/seq_scheduler.c
+  s_c3b66289b5888a::t_c52d757ae6400e 1-284,286-402
+  s_c3b66289b5888a::t_11aa8c06d34e6d 285
+oxidize-c/src/server/chat_template.c
+  s_96ddc277ba047e::t_a779e2b4e1abb8 6
+  s_96ddc277ba047e::t_036e0e42ade1c8 1-5,7-297
+oxidize-c/tests/test_chat_template.c
+  s_96ddc277ba047e::t_9ea51f14ef92f9 1-190
+oxidize-c/include/oxidize/oxk_avx512.h
+  s_b0e6b0e64f0027::t_598814b9198ec5 1-92
+oxidize-c/include/oxidize/spec_tree.h
+  s_1baa6786e22a78::t_87d7176f5f0bfa 1-115
+oxidize-c/include/oxidize/chat_template.h
+  s_96ddc277ba047e::t_0a7daa61fa0b11 1-96
+oxidize-c/src/compute/oxk.c
+  s_b0e6b0e64f0027::t_3d8800d18bb05a 206-207
+oxidize-c/src/model/spec_tree.c
+  s_1baa6786e22a78::t_ce975903f32c3c 1-189,194-197,199-200,202-265
+  s_1baa6786e22a78::t_4aef5dbab76184 190-193,198,201
+oxidize-c/tests/test_seq_scheduler.c
+  s_c3b66289b5888a::t_bbe59d8459f960 1-415
+oxidize-c/src/util/numa.c
+  s_96ddc277ba047e::t_6ac76fb1d47704 1-250
+oxidize-c/include/oxidize/numa.h
+  s_96ddc277ba047e::t_330dc45529aacd 1-95
+oxidize-c/tests/test_gradient.c
+  s_1baa6786e22a78::t_65bc904819fca4 1-310
+oxidize-c/tests/test_spec_tree.c
+  s_1baa6786e22a78::t_2769ce984cf400 1-326
+oxidize-c/include/oxidize/kv_page.h
+  s_c3b66289b5888a::t_92b7eddca9352e 1-139
+oxidize-c/include/oxidize/gradient.h
+  s_1baa6786e22a78::t_1dd3487532e647 1-142
+oxidize-c/src/model/llama_swap.c
+  s_96ddc277ba047e::t_fee3fe7ae4ea8a 1-74,76-134
+  s_96ddc277ba047e::t_14f4cf0bc368d6 75
+oxidize-c/src/paged/kv_page.c
+  s_c3b66289b5888a::t_9d62df05014821 1-249
+oxidize-c/tests/test_numa.c
+  s_96ddc277ba047e::t_1ce4f2b579ec56 1-123
+oxidize-c/include/oxidize/seq_scheduler.h
+  s_c3b66289b5888a::t_64f0d2d1eb1b6d 1-149
+oxidize-c/tests/test_kv_page.c
+  s_c3b66289b5888a::t_2acf34e5431e67 1-286
+oxidize-c/src/compute/oxk_avx512.c
+  s_b0e6b0e64f0027::t_168296f96a1d89 1,7-16,18-24,26,29-30,32-37,40-51,53-57,59-61,64-66,71,78,80-82,86,88-89,91-92,94-95,97-98,100-101,104,106-107,110-114,116-122,124
+  s_96ddc277ba047e::t_c743fa23ffeea2 2-6,17,25,27-28,31,38-39,52,58,62-63,67-70,72-77,79,83-85,87,90,93,96,99,102-103,105,108-109,115,123
+oxidize-c/src/compute/gradient.c
+  s_1baa6786e22a78::t_0b571d2dc2f6a4 1-290
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "58ea4917b7af3f271a8aa6af81de35659164c430",
+  "prompts": {},
+  "sessions": {
+    "s_1baa6786e22a78": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "a75a3ced-e6a5-40be-94c6-8a1ff00bab5a",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_96ddc277ba047e": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "ea8ad242-b091-46af-96e0-114c0c67fea4",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_b0e6b0e64f0027": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "f59714db-002f-47f7-bb86-3e23a99cc384",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_c3b66289b5888a": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "823f44c9-d08e-476f-b8cc-f27adfa3222f",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

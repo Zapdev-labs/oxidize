@@ -1,0 +1,19 @@
+oxidize-c/src/metal/metal_dequant.h
+  s_1485afe700cb15::t_fd00393d775e2b 1-134
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "d5264a8b7d54f4f6edc15be3cda468c25dcc4679",
+  "prompts": {},
+  "sessions": {
+    "s_1485afe700cb15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f08997b4-ac01-46a6-ab7a-a6ac459a0d39",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

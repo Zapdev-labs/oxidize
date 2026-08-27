@@ -1,0 +1,25 @@
+oxidize-core/src/backends/cuda/ffn_fusion_cuda_fixture.rs
+  s_1b37f3c1d1e7b7::t_c9773a1e4e4916 26,237
+  s_1b37f3c1d1e7b7::t_845302cbbfa0f2 59-61
+  s_1b37f3c1d1e7b7::t_856bc7c695352a 126-127,134-141,160-161,165-166,170-171,181-182,218-223
+  s_1b37f3c1d1e7b7::t_7258f1a0eb879d 230,232
+  s_1b37f3c1d1e7b7::t_3a744ab6de8bf2 1,3-4,12-25,27-56,58,62,64-70,72-78,80-85,87-102,224-229,231,233-236,238-242
+  s_1b37f3c1d1e7b7::t_480a1020a83d2d 2,5-11,103-125,128-133,142-151,153-156,158-159,163-164,168-169,172-177,179-180,183-217
+  s_1b37f3c1d1e7b7::t_dd988b843aad27 57,63,71,79,86,152,157,162,167,178
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "cd24a8f8bb4ac01c511198b83d6aae65f3dd53e2",
+  "prompts": {},
+  "sessions": {
+    "s_1b37f3c1d1e7b7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ee600-1957-70f2-b3f9-e51f217a3ee9",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

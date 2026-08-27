@@ -1,0 +1,23 @@
+oxidize-c/src/mesh/mesh.c
+  s_96ddc277ba047e::t_a502ce06e7bc20 159-165
+  s_96ddc277ba047e::t_b81cda4f56f378 2-6,8,14-21,42-68
+  s_96ddc277ba047e::t_ba2ece7e1e5d41 77-116,122
+oxidize-c/tests/test_mesh.c
+  s_96ddc277ba047e::t_439c2f19329b7f 39-42,46
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "02722f93c035cdbd62de102c3f0e4d1e85b30ffd",
+  "prompts": {},
+  "sessions": {
+    "s_96ddc277ba047e": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "ea8ad242-b091-46af-96e0-114c0c67fea4",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

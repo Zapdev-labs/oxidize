@@ -1,0 +1,25 @@
+oxidize-core/src/compute/tensor.rs
+  s_1330dccb364bc7::t_08277a1ffa0cd8 4880-4887
+  s_1330dccb364bc7::t_89f4de08ee2d4c 5212
+  s_1330dccb364bc7::t_7bafa4e9a3dfb0 5498
+  s_1330dccb364bc7::t_d367d55aba3b8d 4940
+  s_1330dccb364bc7::t_274680412a1542 5045
+  s_1330dccb364bc7::t_e97acdc8422dc4 5444
+  s_1330dccb364bc7::t_c79bca5e0a7e66 4980
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.3",
+  "base_commit_sha": "fc9ec3e1eff1507b1c4fb217b4e77d6d9513badf",
+  "prompts": {},
+  "sessions": {
+    "s_1330dccb364bc7": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_1591f6c3cffeJjEJP6ngXiqODO",
+        "model": "k2p6"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

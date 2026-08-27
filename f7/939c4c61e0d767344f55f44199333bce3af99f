@@ -1,0 +1,25 @@
+oxidize-c/src/compute/activation.c
+  s_96ddc277ba047e::t_2e91286dbbe470 92-213
+oxidize-c/tests/test_activation.c
+  s_96ddc277ba047e::t_b7a96f0ae4e2e7 1-92,96-100,106-174
+  s_96ddc277ba047e::t_f73c37090c3e25 93-95,101-105
+oxidize-c/include/oxidize/activation.h
+  s_96ddc277ba047e::t_275f5af26bcac4 74-100
+  s_96ddc277ba047e::t_788ff6c506f69c 16
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "f7939c4c61e0d767344f55f44199333bce3af99f",
+  "prompts": {},
+  "sessions": {
+    "s_96ddc277ba047e": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "ea8ad242-b091-46af-96e0-114c0c67fea4",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

@@ -1,0 +1,42 @@
+oxidize-c/Makefile
+  s_eb0b328098a5fc::t_db1218149df8a7 19-21
+oxidize-c/tests/test_gguf.c
+  s_eb0b328098a5fc::t_19ce1f00b22112 234
+  s_eb0b328098a5fc::t_153b518bb3d1d9 355-356,374,376
+  s_eb0b328098a5fc::t_7de446381b0c5b 142-143,148-149
+  s_eb0b328098a5fc::t_cf28cd4205c359 1-141,144-147,150-233,235-354,357-359,362-368,370-373,375,377-571
+  s_eb0b328098a5fc::t_515ed59fe2ac52 360-361,369
+oxidize-c/include/oxidize/gguf.h
+  s_eb0b328098a5fc::t_9dae7c74a4affd 1-21,23-205
+  s_eb0b328098a5fc::t_32be64fd524161 22
+oxidize-c/src/format/gguf.c
+  s_eb0b328098a5fc::t_6abe2cd22e8c67 360-361
+  s_eb0b328098a5fc::t_b08abb26242966 381-382
+  s_eb0b328098a5fc::t_d63bed9954d76a 390
+  s_eb0b328098a5fc::t_6b307753f182fb 368
+  s_eb0b328098a5fc::t_394371a5f09619 148
+  s_eb0b328098a5fc::t_514b3c73cbc394 1-79,81-91,93-106,108-119,121-124,126-130,132-136,138-147,149-181,183-187,189-196,198-313,315-325,327-337,339-359,362-367,369-380,383-389,391-670
+  s_eb0b328098a5fc::t_9bfc9b0117c030 197
+  s_eb0b328098a5fc::t_ae2e8f335b9b2d 80,92,107,120,125,131,137
+  s_eb0b328098a5fc::t_9f2275d85cd476 314,326,338
+  s_eb0b328098a5fc::t_1b02bc430d91da 188
+  s_eb0b328098a5fc::t_8b61533577d7e5 182
+oxidize-c/include/oxidize/oc.h
+  s_eb0b328098a5fc::t_180e88d7240fd0 20
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "605bd2b97af6328571bc31978727a4af893bde55",
+  "prompts": {},
+  "sessions": {
+    "s_eb0b328098a5fc": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "cb5cb3f8-fccd-4f4a-b450-c68a2dff5224",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

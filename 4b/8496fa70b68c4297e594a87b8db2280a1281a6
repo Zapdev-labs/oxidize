@@ -1,0 +1,19 @@
+scripts/bench_q4o_remote.sh
+  s_a72f83f4acb932::t_5c6c7d17b34437 28-39
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "4b8496fa70b68c4297e594a87b8db2280a1281a6",
+  "prompts": {},
+  "sessions": {
+    "s_a72f83f4acb932": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "f5e01a3f-5914-48bf-9df9-4d5f9288661b",
+        "model": "default"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

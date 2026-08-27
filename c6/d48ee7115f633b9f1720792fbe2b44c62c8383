@@ -1,0 +1,30 @@
+oxidize-c/src/autotune/autotune.c
+  s_96ddc277ba047e::t_a4fadca2190972 1-21,23-25,34-202,209-351
+  s_96ddc277ba047e::t_5d4bc55a79e1fe 22,26-33
+  s_96ddc277ba047e::t_7fcd0c4c26d2f1 203-208
+oxidize-c/tests/test_autotune.c
+  s_96ddc277ba047e::t_11b922c2fa71bd 1-167
+oxidize-c/src/cli/main.c
+  s_96ddc277ba047e::t_139d022ceafa85 17
+  s_96ddc277ba047e::t_5c50e869c5d2a1 246-266
+oxidize-c/include/oxidize/autotune.h
+  s_96ddc277ba047e::t_f292ddedc5b673 1-124
+oxidize-c/Makefile
+  s_96ddc277ba047e::t_b78c46228b58fa 23
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "c6d48ee7115f633b9f1720792fbe2b44c62c8383",
+  "prompts": {},
+  "sessions": {
+    "s_96ddc277ba047e": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "ea8ad242-b091-46af-96e0-114c0c67fea4",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

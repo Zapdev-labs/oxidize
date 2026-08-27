@@ -1,0 +1,22 @@
+oxidize-core/benches/inference_bench.rs
+  s_1330dccb364bc7::t_18cf7ca227c6ee 3-48,50-53,55-57,60-71,73,75-145,147-148,150,153-168
+  s_1330dccb364bc7::t_ac3397d7360795 1-2,49,54,58-59,72,74,146,149,151-152,169-170
+oxidize-core/Cargo.toml
+  s_1330dccb364bc7::t_e047102d7fc1f1 66-69
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.3",
+  "base_commit_sha": "73175721ebaeb9cde4f2cc58bb5714d8f20562c9",
+  "prompts": {},
+  "sessions": {
+    "s_1330dccb364bc7": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_1591f6c3cffeJjEJP6ngXiqODO",
+        "model": "k2p6"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

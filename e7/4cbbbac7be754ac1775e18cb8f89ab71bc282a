@@ -1,0 +1,62 @@
+oxidize-c/cuda.cu
+  s_057fe4dd7540aa::t_f2385f815fb1c2 38-40,42-43,54-62,80-82,134-135,151-174,193-194,201,203,244,252-253,259
+  s_057fe4dd7540aa::t_c9498c320116e7 399-497,500-506,560-569,571,797,806,810-811
+  s_057fe4dd7540aa::t_45bdaff3893b3b 608-613,659-677,683-688,767-772,775-778,781-782,787,789-796,798-805,807,809,814-816,847-850,852-853,855-856,865-866
+modal_gemma4_bench.py
+  s_057fe4dd7540aa::t_9e284e4f125af7 1-76
+oxidize-c/model.c
+  s_2b0aa77df5337c::t_69ddff73d5e4b3 921-947
+  s_057fe4dd7540aa::t_853e50396d5c22 491-498,726-728,731,738-741,759-766,774-775,795-798,801-804,825-833,836-838,843-845,867-871
+  s_057fe4dd7540aa::t_821d06d244ebd9 44,225-285,303-307,350-373,392-393,415,480-481
+oxidize-c/quant.c
+  s_2b0aa77df5337c::t_d0b79d99e1829a 10
+  s_2b0aa77df5337c::t_54924bd03c076b 114-210,213-220,458-459
+  s_2b0aa77df5337c::t_2f21422b045557 211-212
+  s_2b0aa77df5337c::t_d9c66cbbbb9d06 455-457
+  s_2b0aa77df5337c::t_447945b15deec3 460
+  s_2b0aa77df5337c::t_680b9f00d9353b 55-56,76,102,110,438-454
+oxidize-c/tokenizer.c
+  s_057fe4dd7540aa::t_41929a49ff1906 111-112
+oxidize-c/kernels.c
+  s_057fe4dd7540aa::t_2da3234fc49a33 38-39,54,61-62,65,92-99,379-424,502,511-512,572,575
+oxidize-c/oc.h
+  s_057fe4dd7540aa::t_ec4838d9b4f05b 49-50,52-53,55
+  s_2b0aa77df5337c::t_676b4d27676ad9 30,32,35,37-39
+  s_2b0aa77df5337c::t_e0c2c9cce434c5 95,104-107
+  s_057fe4dd7540aa::t_00ad1cc1c29fc0 186-190
+  s_057fe4dd7540aa::t_fa4e737a7b452d 19
+  s_2b0aa77df5337c::t_b81418ba485974 203-207
+  s_057fe4dd7540aa::t_141680ce41c0b6 72,75
+  s_2b0aa77df5337c::t_a2f93fb7c411ab 240-273
+  s_057fe4dd7540aa::t_8360328f757413 135-147
+oxidize-c/gguf.c
+  s_2b0aa77df5337c::t_0dc702fe2b2970 89,91
+  s_2b0aa77df5337c::t_3e9056eed841ae 123,133
+  s_2b0aa77df5337c::t_c3127ea810ef23 145
+oxidize-c/prune.c
+  s_2b0aa77df5337c::t_532d7d7eb7fe3a 1-394
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "e74cbbbac7be754ac1775e18cb8f89ab71bc282a",
+  "prompts": {},
+  "sessions": {
+    "s_057fe4dd7540aa": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8245f960-74db-4735-9ce0-aa30f3077330",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_2b0aa77df5337c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f5880fd5-2bc7-454e-ad4c-5377b3237372",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

@@ -1,0 +1,50 @@
+oxidize-quantize/src/main.rs
+  s_3582b5342698b9::t_4077c874ec4f2a 1261
+oxidize-core/src/autotune/fingerprint.rs
+  s_3582b5342698b9::t_9d8612845c33b8 198
+oxidize-kernels/src/prune.rs
+  s_3582b5342698b9::t_bb76068a36eb60 170-171
+oxidize-server/src/lib.rs
+  s_3582b5342698b9::t_4077c874ec4f2a 5
+oxidize-prune/src/main.rs
+  s_3582b5342698b9::t_8b87df4a7be388 1-2
+oxidize-prune/src/lib.rs
+  s_3582b5342698b9::t_4077c874ec4f2a 9-10
+oxidize-finetuning/src/lib.rs
+  s_3582b5342698b9::t_4077c874ec4f2a 1-6
+oxidize-cli/src/bin/batched_decode_bench.rs
+  s_3582b5342698b9::t_35c4a5665b3b72 18-19
+oxidize-core/src/autotune/rules.rs
+  s_3582b5342698b9::t_9d8612845c33b8 19-21
+oxidize-core/src/compute/tensor/kernels/gpu.rs
+  s_3582b5342698b9::t_9d8612845c33b8 11
+oxidize-kernels/src/lib.rs
+  s_3582b5342698b9::t_9d8612845c33b8 165-166
+oxidize-train/src/lib.rs
+  s_3582b5342698b9::t_49e491f8b80c07 1-2
+oxidize-cli/src/main.rs
+  s_3582b5342698b9::t_35c4a5665b3b72 1-2
+oxidize-core/src/lib.rs
+  s_3582b5342698b9::t_49e491f8b80c07 6-18
+  s_3582b5342698b9::t_9d8612845c33b8 5
+scripts/ci_benchmark_regression.py
+  s_3582b5342698b9::t_9d8612845c33b8 102
+oxidize-core/src/format/gguf.rs
+  s_3582b5342698b9::t_0a75437af6e2d4 8-10,102,110,187,191,514-518,555-559
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "69abf08c84a68041982d0499ee004bd752e6556b",
+  "prompts": {},
+  "sessions": {
+    "s_3582b5342698b9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f1219-02c1-7713-9f8b-d532e4c17a17",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

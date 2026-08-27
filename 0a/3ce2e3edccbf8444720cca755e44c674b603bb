@@ -1,0 +1,42 @@
+oxidize-cpp/tests/autotune_test.cpp
+  s_3f9ff1952e6f4c::t_e3480e5560d09c 31-51,135
+  s_3f9ff1952e6f4c::t_8d2ddee110ea97 135
+  s_3f9ff1952e6f4c::t_8c4cd92c28772c 31-51
+oxidize-cpp/include/oxidize/kernels.hpp
+  s_3f9ff1952e6f4c::t_10e25991ba1638 45-56
+oxidize-cpp/src/model_llama.cpp
+  s_3f9ff1952e6f4c::t_e3480e5560d09c 1167-1168,1175
+oxidize-cpp/src/kernels_avx512.cpp
+  s_3f9ff1952e6f4c::t_90b9567911bf01 1-289,291-299
+  s_3f9ff1952e6f4c::t_895a8530ff35e4 290
+oxidize-cpp/CMakeLists.txt
+  s_3f9ff1952e6f4c::t_8152ae73fa5bee 18-20
+oxidize-cpp/src/tensor_cpu.cpp
+  s_3f9ff1952e6f4c::t_8152ae73fa5bee 25-26,631-638,677,681,843-844
+  s_3f9ff1952e6f4c::t_1ad4415b9840f2 674-676
+  s_3f9ff1952e6f4c::t_c6cb092bdc910a 678-680
+  s_3f9ff1952e6f4c::t_f734ed8f092204 682-684
+  s_3f9ff1952e6f4c::t_5ed4f1c3440b16 840-842
+  s_3f9ff1952e6f4c::t_b1f1b307f34043 845-847
+oxidize-cpp/src/kernels.cpp
+  s_3f9ff1952e6f4c::t_90b9567911bf01 184-189,231-238
+oxidize-cpp/src/autotune.cpp
+  s_3f9ff1952e6f4c::t_e3480e5560d09c 126-147
+  s_3f9ff1952e6f4c::t_f2f662da575ca6 126-147
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.9",
+  "base_commit_sha": "0a3ce2e3edccbf8444720cca755e44c674b603bb",
+  "prompts": {},
+  "sessions": {
+    "s_3f9ff1952e6f4c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f26fa-6373-7f30-a970-ece8eabdc0fa",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

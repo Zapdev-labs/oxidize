@@ -1,0 +1,24 @@
+oxidize-c/src/util/numa.c
+  s_4d9882d5eb019d::t_f8503bca66a2d2 8-10
+oxidize-c/include/oxidize/oxk_avx512.h
+  s_4d9882d5eb019d::t_34697c25337074 53,62,71,82,92
+  s_4d9882d5eb019d::t_690ae941f48651 31-39
+oxidize-c/src/compute/spinpool.c
+  s_4d9882d5eb019d::t_4b3d9132a464f3 2-5
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "9a113c99fb1755fe37c689cb96585ccf24d1b4ea",
+  "prompts": {},
+  "sessions": {
+    "s_4d9882d5eb019d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "360e0e71-f928-4fe7-91c9-8eb28e4b3dda",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

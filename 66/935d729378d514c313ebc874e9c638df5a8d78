@@ -1,0 +1,33 @@
+oxidize-c/src/compute/oxk_avx512.c
+  s_4d9882d5eb019d::t_09a800dd9b2a27 13-18
+  s_4d9882d5eb019d::t_cfe08edee2f273 129-143
+  s_da97e7ccfd189d::t_333e5c1a245557 19
+oxidize-c/src/compute/oxk_avx2.c
+  s_4d9882d5eb019d::t_a25840e34b7842 16-22
+  s_4d9882d5eb019d::t_3b3432eae27ba4 220-261
+  s_da97e7ccfd189d::t_b3b11a2b7101c3 23
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "66935d729378d514c313ebc874e9c638df5a8d78",
+  "prompts": {},
+  "sessions": {
+    "s_4d9882d5eb019d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "360e0e71-f928-4fe7-91c9-8eb28e4b3dda",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_da97e7ccfd189d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3417b4aa-226f-4cb6-b3e3-31cf9ed6e6c7",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

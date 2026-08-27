@@ -1,0 +1,23 @@
+oxidize-c/include/oxidize/tokenizer.h
+  s_96ddc277ba047e::t_bd0d5fa4652d02 233-252
+oxidize-c/src/model/llama.c
+  s_96ddc277ba047e::t_fbf63441ad9915 176-179
+oxidize-c/src/format/tokenizer_dispatch.c
+  s_96ddc277ba047e::t_accc54e9d8a5e4 334-378
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "f3ebe916d75b8f620c0886770caa0dc424cef2f5",
+  "prompts": {},
+  "sessions": {
+    "s_96ddc277ba047e": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "ea8ad242-b091-46af-96e0-114c0c67fea4",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

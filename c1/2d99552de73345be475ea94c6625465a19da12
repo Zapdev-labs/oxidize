@@ -1,0 +1,31 @@
+oxidize-server/src/realtime/mod.rs
+  s_e675cc3f9668c1::t_dc0bf22bb6bf6a 105-108,162-164,252,256-258
+oxidize-server/src/realtime/protocol.rs
+  s_e675cc3f9668c1::t_dc0bf22bb6bf6a 106-110,147-149
+oxidize-server/tests/realtime_ws.rs
+  s_e675cc3f9668c1::t_dc0bf22bb6bf6a 42-44,69-71
+oxidize-server/src/app.rs
+  s_e675cc3f9668c1::t_dc0bf22bb6bf6a 21
+oxidize-server/src/realtime/session.rs
+  s_e675cc3f9668c1::t_dc0bf22bb6bf6a 3,248-252,257-258
+docs/superpowers/specs/2026-06-03-realtime-websocket-design.md
+  s_e675cc3f9668c1::t_7c0448f11174ba 5
+oxidize-server/src/auth.rs
+  s_e675cc3f9668c1::t_dc0bf22bb6bf6a 138-141
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "c12d99552de73345be475ea94c6625465a19da12",
+  "prompts": {},
+  "sessions": {
+    "s_e675cc3f9668c1": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_1724a45bdffe9Bn5jSSnjZhpaG",
+        "model": "moonshotai/kimi-k2.6:free"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

@@ -1,0 +1,271 @@
+oxidize-cpp/CMakeLists.txt
+  s_5b99ae3d7d4197::t_7d0b5702a8fce5 98-101
+oxidize-golang/internal/cli/chat_test.go
+  s_28a0e800962725::t_53e7248d2f8e74 1-5,7-47,49-66
+  s_28a0e800962725::t_a5aec4546ddf48 6,48
+scripts/prime-qwen35-self-train/upload-hf.sh
+  s_d2add3ac9f912a::t_6df2ea552ae5a1 32
+  s_d2add3ac9f912a::t_2c61f2da2bbeea 82-89
+  s_d2add3ac9f912a::t_8ac6f468327ead 53,59,63-71,73
+  s_d2add3ac9f912a::t_92d549f4c70357 28-30,35-36,38
+  s_d2add3ac9f912a::t_4dcbcb5d289f52 90
+oxidize-c/AGENTS.md
+  s_5b99ae3d7d4197::t_d37c333c8bd981 57
+  s_5b99ae3d7d4197::t_d44360a3797018 23
+  s_5b99ae3d7d4197::t_e38899487eeaee 47-49
+oxidize-finetuning/src/trainer.rs
+  s_d2add3ac9f912a::t_da548cb0ad133b 236
+  s_d2add3ac9f912a::t_a1c4283ac34edf 3
+  s_d2add3ac9f912a::t_58990a10b69908 91
+  s_d2add3ac9f912a::t_d8e5228f8fbb62 41
+AGENTS.md
+  s_489592903726db::t_7e5510603d8edf 189
+  s_d76809a38fdc8f::t_e1284c03287944 193,195-197
+  s_d76809a38fdc8f::t_e2b6bd00e2b448 206-207
+  s_489592903726db::t_9b601793227154 203-205
+oxidize-cpp/src/cli/merge_main.cpp
+  s_5b99ae3d7d4197::t_02b941cdd9ba79 17-19
+  s_5b99ae3d7d4197::t_24abb270af197e 107-116
+  s_5b99ae3d7d4197::t_fdff0a05033529 658-662
+  s_5b99ae3d7d4197::t_a6166c5efef806 1-16,20-106,117-657,663-845
+specs/minimax-family-merge/PRODUCT.md
+  s_32b2a98ef4b50f::t_1d0272aa03b9e5 1-35
+scripts/gemma4_31b_al_remote.sh
+  s_f98fb3b5c0a1ac::t_58183d6ce91468 59-60,63
+oxidize-finetuning/src/main.rs
+  s_d2add3ac9f912a::t_9ad5115e5c8553 317
+  s_d2add3ac9f912a::t_7b7fa82d88ee65 21,25-27
+  s_d2add3ac9f912a::t_dc5c6cbeeabba0 300-304,306
+  s_d2add3ac9f912a::t_7c29f378f436af 10
+  s_d2add3ac9f912a::t_46b815c1ecf427 487
+  s_d2add3ac9f912a::t_fa2e4688a80b0b 336-337,514-515
+  s_d2add3ac9f912a::t_2b3f6ae6093676 286,289,294-299,305,307-310
+  s_d2add3ac9f912a::t_8a654f0c76153f 28
+  s_d2add3ac9f912a::t_53a3ab57a48ea4 311-312
+scripts/qwen35-dual-serve.sh
+  s_ad4afe7c53185e::t_3c2e53927d88a9 1-54
+oxidize-cpp/AGENTS.md
+  s_5b99ae3d7d4197::t_bf150ee7d74a77 49-51
+.gitignore
+  h_cf4e3af6880df2 34-35
+oxidize-c/test_oc.c
+  s_28a0e800962725::t_2c7e090bb77bc8 42-59
+  s_28a0e800962725::t_d1d61b575e1e8c 72-79,81-89
+  s_28a0e800962725::t_c49eb3019bae55 80
+  s_28a0e800962725::t_27ddce8be79840 6,20-41,60-71,90-92,887
+oxidize-golang/internal/cli/chat.go
+  s_28a0e800962725::t_a5aec4546ddf48 8,10,25-34,36,47-48,52-62,65-73,77-81,86-142,159
+  s_28a0e800962725::t_aa2157149edf87 160
+scripts/prime-qwen35-self-train/run-gpu-finetune.sh
+  s_d2add3ac9f912a::t_6668e37a1ffd03 1-80
+plans/simple-go-cli-c-sampling.md
+  s_28a0e800962725::t_53e7248d2f8e74 34-35,39
+  s_28a0e800962725::t_34a384bd0a322f 1-33,40-148,151-158
+  s_28a0e800962725::t_adb5e2c8e08538 36-38,149-150
+scripts/prime-qwen35-self-train/run-self-train.sh
+  s_d2add3ac9f912a::t_7fb1258e80b92b 8
+  s_d2add3ac9f912a::t_267d5ce5c887f1 46
+plans/gemma4-31b-single-request-1000-tps.md
+  s_fe448bd84d6ce9::t_c44bb1d0579392 1-55
+scripts/prime-qwen35-self-train/README_lora.md
+  s_d2add3ac9f912a::t_948dfec8f6989d 1-61
+specs/glm-5.1-5.2-merge/PRODUCT.md
+  s_32b2a98ef4b50f::t_1535ea29fc03c1 1-39
+oxidize-c/Makefile
+  s_28a0e800962725::t_27ddce8be79840 17
+oxidize-core/src/model/layer_wise/ssm.rs
+  s_d98862b624f754::t_e79183f1037d35 381,383-384
+  s_d98862b624f754::t_4c9dafbebb5273 331,335-337
+  s_d98862b624f754::t_9c99e3d9fdf641 382
+  s_d98862b624f754::t_24f8bb8cf349ce 332-334
+scripts/prime-qwen35-self-train/merge-and-upload.sh
+  s_d2add3ac9f912a::t_6c983748af5005 1-73
+scripts/prime-qwen35-self-train/run-unsloth-gpu.sh
+  s_d2add3ac9f912a::t_bd5c8d72994d77 1-132
+specs/glm-5.1-5.2-merge/TECH.md
+  s_32b2a98ef4b50f::t_7c6e4df4dfed8d 1-129
+oxidize-c/gen.h
+  s_28a0e800962725::t_271734ecfa6485 13-16
+  s_28a0e800962725::t_27ddce8be79840 25-26
+oxidize-c/gen.c
+  s_28a0e800962725::t_c49eb3019bae55 215,220
+  s_28a0e800962725::t_0567f8771f08da 174-175
+  s_28a0e800962725::t_d1d61b575e1e8c 51,53,75,77-80,102-104,107,176-179,204-206,216-219
+  s_28a0e800962725::t_271734ecfa6485 41-50,52,54-74,83,86,93,97,117,250
+  s_365e1926db0f31::t_eca33b8f3152fb 105-106
+oxidize-c/merge.c
+  s_5b99ae3d7d4197::t_51d04f0779a276 1610-1643
+  s_5b99ae3d7d4197::t_461c95dade7ff8 19,21
+  s_5b99ae3d7d4197::t_3d19062f32ebbd 1260
+  s_5b99ae3d7d4197::t_4593cc446c5649 1-18,20,23-558,560-628,630-749,883-1259,1261-1359,1419-1609,1644-1651
+  s_5b99ae3d7d4197::t_b9796a60404634 559
+  s_5b99ae3d7d4197::t_70d3b5adb9963b 750-882
+  s_5b99ae3d7d4197::t_0ecca4ae11a1b2 629
+  s_5b99ae3d7d4197::t_6317fcc7624bca 1360-1418
+  s_f75de9d8a63a3e::t_c96dda4df55b76 22
+oxidize-finetuning/src/self_train.rs
+  s_d2add3ac9f912a::t_258982ff0ddd47 102,248
+  s_d2add3ac9f912a::t_f4ab071416aad1 11
+oxidize-quantize/src/main.rs
+  s_f98fb3b5c0a1ac::t_01eb4f60d06e7d 882-894,899-905
+  s_f98fb3b5c0a1ac::t_f7b2c03915d93a 796
+  s_f98fb3b5c0a1ac::t_c8c52318ce1d34 842
+  s_f98fb3b5c0a1ac::t_7dfaae341cf8a3 355-356,358-360,371,384,420
+  s_f98fb3b5c0a1ac::t_7776879206cd50 280
+  s_f98fb3b5c0a1ac::t_89e3e6c9d19169 357,361-362
+  s_f98fb3b5c0a1ac::t_c706ff4bfa28d7 331
+oxidize-core/src/format/gguf.rs
+  s_f98fb3b5c0a1ac::t_9f2e6577ac88fb 88-91
+  s_f98fb3b5c0a1ac::t_98f693d7e65f16 86-87,92-93
+oxidize-finetuning/src/train_model.rs
+  s_d2add3ac9f912a::t_c6f7478efd57e2 6,40,50-53,55,64-66
+  s_d2add3ac9f912a::t_19e4eda1d6f661 1-2,5,7-21,23,25-39,41-49,54,56-63,67-70,72-77,79-134
+  s_d2add3ac9f912a::t_d7c75c90fde944 3-4
+  s_d2add3ac9f912a::t_8e4caea98d3c4f 22
+  s_d2add3ac9f912a::t_8521ee9bbbdcd8 24
+  s_d2add3ac9f912a::t_0856848af8e410 71
+  s_d2add3ac9f912a::t_4b18c9014b1967 78
+scripts/prime-qwen35-self-train/README_merged.md
+  s_d2add3ac9f912a::t_a291f81b27b2eb 1-52
+oxidize-finetuning/src/lib.rs
+  s_d2add3ac9f912a::t_7d6a4bed807cb3 21-23
+specs/minimax-family-merge/TECH.md
+  s_32b2a98ef4b50f::t_2ccbf2e9d0bf8d 1-69,81-106
+  s_5b99ae3d7d4197::t_47cdbbcf1bb932 70-80
+oxidize-c/main.c
+  s_28a0e800962725::t_ef6719d7d961e6 242-245,271-281,313,316-317,350-351,353-357,360,363-364,454-457
+  s_28a0e800962725::t_2c7e090bb77bc8 264-265,358-359,361-362
+  s_28a0e800962725::t_84f595872212ae 14
+oxidize-finetuning/Cargo.toml
+  s_d2add3ac9f912a::t_71698244211b3b 22-25
+oxidize-finetuning/src/generate.rs
+  s_d2add3ac9f912a::t_5a4298e635cc5c 66
+  s_d2add3ac9f912a::t_c88b5990002357 51
+  s_d2add3ac9f912a::t_d4456f992b374f 3
+scripts/prime-qwen35-self-train/setup-node.sh
+  s_d2add3ac9f912a::t_f222a6abf5ff75 43-44
+  s_d2add3ac9f912a::t_d2cd50c410811e 66-69,72
+  s_d2add3ac9f912a::t_30f2dc79d6dcda 11
+  s_d2add3ac9f912a::t_13d67ac9339756 81
+.cursor/hooks/state/continual-learning-index.json
+  s_489592903726db::t_3fd6dbf2808a47 5,10-27,34-42,70-87,89,92,98,103-114
+.cursor/hooks/state/continual-learning.json
+  s_197f225b961f39::t_e2e8a2aed51275 3-6
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.12",
+  "base_commit_sha": "69c55ea3cab06d90afd87d27bf3a54f8d4299c44",
+  "prompts": {},
+  "humans": {
+    "h_cf4e3af6880df2": {
+      "author": "Jackson57279 <otdoges@proton.me>"
+    }
+  },
+  "sessions": {
+    "s_197f225b961f39": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0b8c56bbdffel1loqhI2LIc3fX",
+        "model": "k2p7"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_28a0e800962725": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f4f78-03a7-7953-88c4-8a55e3a5ea22",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_32b2a98ef4b50f": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "07d8387a-8c49-4196-9f20-d02e60c6226c",
+        "model": "grok-4.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_365e1926db0f31": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "590912c1-1aad-444c-a07a-3177ba3e2588",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_489592903726db": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "418fbb13-af97-4177-89f0-617aa1741e30",
+        "model": "default"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_5b99ae3d7d4197": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "efb41fee-2f53-4f93-b5cd-f4417e029891",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_ad4afe7c53185e": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "0dd84361-8d2f-4a82-af62-838318732652",
+        "model": "default"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_d2add3ac9f912a": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "4e8f36e6-bed9-4b23-9800-52e5fa6e2e79",
+        "model": "default"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_d76809a38fdc8f": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "41a12e75-9797-42ce-9234-5622841b89f6",
+        "model": "default"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_d98862b624f754": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0c2437573ffe3I15ErplR7nvM9",
+        "model": "k2p7"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_f75de9d8a63a3e": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0b8398620ffe55UxW0Gmn5f2xO",
+        "model": "k2p7"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_f98fb3b5c0a1ac": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "4d6ff7f8-80ac-4cb6-9488-4a4254e92276",
+        "model": "default"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_fe448bd84d6ce9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f48fb-438d-7492-9722-c10be733abb8",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

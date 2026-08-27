@@ -1,0 +1,23 @@
+oxidize-c/tests/test_flash_attention.c
+  s_96ddc277ba047e::t_276d1f20b20956 1-92
+oxidize-c/include/oxidize/flash_attention.h
+  s_96ddc277ba047e::t_ed6250167205e0 1-98
+oxidize-c/src/compute/flash_attention.c
+  s_96ddc277ba047e::t_900619e30fa71c 1-193
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "b4147e2f9748f913e113173a79ddcaf40884b8be",
+  "prompts": {},
+  "sessions": {
+    "s_96ddc277ba047e": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "ea8ad242-b091-46af-96e0-114c0c67fea4",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

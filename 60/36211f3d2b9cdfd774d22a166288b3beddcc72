@@ -1,0 +1,22 @@
+oxidize-c/src/vision/vision_prompt.c
+  s_96ddc277ba047e::t_1a20e1c7a6f650 109-136,138-163,165-172
+oxidize-c/tests/test_vision_prompt.c
+  s_96ddc277ba047e::t_acb7ad6e1a79cf 128-147,149-150,153,156-191
+  s_96ddc277ba047e::t_975f8f773cf038 148,151-152,154-155
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "6036211f3d2b9cdfd774d22a166288b3beddcc72",
+  "prompts": {},
+  "sessions": {
+    "s_96ddc277ba047e": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "ea8ad242-b091-46af-96e0-114c0c67fea4",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

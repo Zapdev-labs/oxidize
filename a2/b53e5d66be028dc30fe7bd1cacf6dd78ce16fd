@@ -1,0 +1,52 @@
+oxidize-cpp/include/oxidize/model_llama.hpp
+  s_d803201cdc43b1::t_4bb999927dbeaa 35,175
+oxidize-cpp/src/tensor_cpu.cpp
+  s_ad278b05fe0623::t_cfc39b1eeac56e 854
+oxidize-cpp/src/cli/main.cpp
+  s_d803201cdc43b1::t_d6b5eb61dcdd51 94-95
+  s_ad278b05fe0623::t_20199143dc21c4 203-210
+  s_ad278b05fe0623::t_549a78cd12cf67 277-303
+  s_d803201cdc43b1::t_5208ca05bc3027 162-163
+  s_d803201cdc43b1::t_dd84b32c8be651 480
+  s_ad278b05fe0623::t_3d8351957f1216 79-83
+  s_d803201cdc43b1::t_90d9a308ef9846 45
+  s_ad278b05fe0623::t_bd330c3ca283ac 109-111
+  s_ad278b05fe0623::t_97a2782d89fcfe 219
+  s_d803201cdc43b1::t_2bd30d9b04b3b5 335,337-338
+  s_d803201cdc43b1::t_804be2da76a650 360,367,370-372,374-376
+  s_ad278b05fe0623::t_cf271dbe732341 36
+oxidize-cpp/src/model_llama.cpp
+  s_d803201cdc43b1::t_2ff5ef6e2430d2 51,168,179,190,201,211,224,237,1181,1255,1291
+oxidize-cpp/src/autotune.cpp
+  s_ad278b05fe0623::t_244416e6bb865f 1-178
+oxidize-cpp/tests/autotune_test.cpp
+  s_ad278b05fe0623::t_b0d6ec80dad500 1-72
+oxidize-cpp/include/oxidize/autotune.hpp
+  s_ad278b05fe0623::t_bf92d55610dd07 1-35
+scripts/bench-ai-box.sh
+  s_ad278b05fe0623::t_3c6927f2f5e0e0 2-3,6,30-38,44,51,53-56,60,62-64,67
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "a2b53e5d66be028dc30fe7bd1cacf6dd78ce16fd",
+  "prompts": {},
+  "sessions": {
+    "s_ad278b05fe0623": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "46b11811-9430-4f88-87f7-df12c9360795",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_d803201cdc43b1": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "eefdb158-8772-40c4-9f85-b0e0fbeb26dd",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

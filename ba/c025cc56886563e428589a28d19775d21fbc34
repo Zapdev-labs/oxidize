@@ -1,0 +1,21 @@
+oxidize-c/src/webgpu/wgsl/prelude.wgsl
+  s_1485afe700cb15::t_ce52685397a079 1-160
+oxidize-c/src/webgpu/wgsl/matvec.wgsl
+  s_1485afe700cb15::t_6e34eb374faaed 1-50
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "bac025cc56886563e428589a28d19775d21fbc34",
+  "prompts": {},
+  "sessions": {
+    "s_1485afe700cb15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f08997b4-ac01-46a6-ab7a-a6ac459a0d39",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

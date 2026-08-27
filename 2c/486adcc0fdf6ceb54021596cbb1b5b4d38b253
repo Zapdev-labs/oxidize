@@ -1,0 +1,131 @@
+oxidize-c/src/compute/oxk.c
+  s_96ddc277ba047e::t_580ea5f40ec3ca 407,413,418
+  s_96ddc277ba047e::t_fb40514b6739ec 1-240,242-406,408-412,414-417,419-476
+  s_96ddc277ba047e::t_c7f32de2d2d5be 241
+oxidize-c/tests/test_realtime.c
+  s_edb1a2c91db7eb::t_6f4f7a655c5c63 1-165
+oxidize-c/include/oxidize/oxk.h
+  s_77b642b0f5f215::t_5117c525388e1d 1-256
+oxidize-c/src/server/realtime.c
+  s_edb1a2c91db7eb::t_d1d33908108714 15
+  s_edb1a2c91db7eb::t_89732405a49d0e 1-14,16-157,159-162,167-178,182-224,226-242,244-249,252-264,266-274,277-381
+  s_edb1a2c91db7eb::t_b68b4406c35397 158,163-166,179-181
+  s_edb1a2c91db7eb::t_9957dac37f9e9c 225,243,250-251,265,275-276
+oxidize-c/src/model/finetune.c
+  s_96ddc277ba047e::t_c06eb8af4fc0ee 255,257-259,262-264,267-269,271
+  s_96ddc277ba047e::t_e4fd859226fd45 1-254,256,260-261,265-266,270,272-273
+oxidize-c/include/oxidize/chat_mode.h
+  s_96ddc277ba047e::t_1771333dba7d04 1-14,16-73
+  s_edb1a2c91db7eb::t_948cee597c6e6f 15
+oxidize-c/tests/test_websocket.c
+  s_edb1a2c91db7eb::t_8dfb89903cf808 2-4,6,8,10-11,17-18,20,22-23,29-30,32,34,36-38,40,43,45-46,50-52,54-56,58-59,61,67-70,72,77-78,80,95-96,98,117-118,120,128-129,131,133,136-137,139,142,146-147,149,204
+  s_96ddc277ba047e::t_10ba77ac465777 1,5,7,9,12-16,19,21,24-28,31,33,35,39,41-42,44,47-49,53,57,60,62-66,71,73-76,79,81-94,97,99-116,119,121-127,130,132,134-135,138,140-141,143-145,148,150-203
+  s_edb1a2c91db7eb::t_f9030cb4fd33f3 205-207
+  s_edb1a2c91db7eb::t_b78c46c46af302 208-321
+oxidize-c/src/util/merge.c
+  s_96ddc277ba047e::t_feb4e7d49f2b9b 45
+  s_96ddc277ba047e::t_ab51b126a9d7c8 50
+  s_96ddc277ba047e::t_d46c8bb2ae5ad8 189
+oxidize-c/include/oxidize/realtime.h
+  s_edb1a2c91db7eb::t_f47df2f6ef8a54 64
+  s_edb1a2c91db7eb::t_0b90efff1e9c20 1-63,65-69,72-119
+  s_edb1a2c91db7eb::t_edf57afc37c70c 71
+  s_edb1a2c91db7eb::t_4c2618d7abda37 70
+oxidize-c/include/oxidize/finetune.h
+  s_edb1a2c91db7eb::t_e73a294b975498 21
+  s_96ddc277ba047e::t_e5d7a2e88c4a9b 1-20,22-76
+oxidize-c/tests/test_oxk.c
+  s_96ddc277ba047e::t_9d4d7281e7fc32 1-205
+oxidize-c/src/server/middleware.c
+  s_96ddc277ba047e::t_3160bdd36db14e 242-243,255
+  s_edb1a2c91db7eb::t_39c093751c0bdd 1-23,25-214,219,224-227,232-239,241,244-254,256-395
+  s_96ddc277ba047e::t_42eb0691b7c326 240
+  s_96ddc277ba047e::t_b6d26d29bcb5ea 215-218,220-223,228-231
+  s_edb1a2c91db7eb::t_6c3e9a74c54478 24
+oxidize-c/tests/test_finetune.c
+  s_96ddc277ba047e::t_114f0ebd71f70e 1-43
+oxidize-c/include/oxidize/middleware.h
+  s_edb1a2c91db7eb::t_2e88d89065d540 1-195,197-212
+  s_96ddc277ba047e::t_5f3db694976b4d 196
+oxidize-c/include/oxidize/websocket.h
+  s_edb1a2c91db7eb::t_a5c6ac295a11d5 1-135
+oxidize-c/tests/test_middleware.c
+  s_edb1a2c91db7eb::t_86a774393398fa 211-218
+  s_96ddc277ba047e::t_8572bc0a95135d 1,11,27,43,106,110-111,114,124,128-129
+  s_edb1a2c91db7eb::t_df76b9fe36f0c2 13-18,22-23,34-36,38-39,50-52,54-55,60,63,66-68,70-71,75,78,81-83,85-86,91,94,97-101,103-104,109,112,116-119,121-122,127,130-132,135-137,139,155-158,160-162,167,173-174,176-177,185,190-191,196-197,207,219-221,223-224,231,239-241,245-246,251-252,257-259,261-262,269-270
+  s_96ddc277ba047e::t_07c6d4f7cec295 2-4,8-10
+  s_edb1a2c91db7eb::t_cd50f6b2a45d0a 19-21
+  s_edb1a2c91db7eb::t_6d711ce08d8d49 37
+  s_edb1a2c91db7eb::t_51db5cb9b068da 53
+  s_edb1a2c91db7eb::t_d0044ee19c3c3c 56-59
+  s_edb1a2c91db7eb::t_af3e93f0a37f91 61-62
+  s_edb1a2c91db7eb::t_ae9e8e0738a5fe 64-65
+  s_edb1a2c91db7eb::t_b8d669574c67da 69
+  s_edb1a2c91db7eb::t_ba073e6e5311b3 72-74
+  s_edb1a2c91db7eb::t_6683b5ab875215 76-77
+  s_edb1a2c91db7eb::t_852710e3059e8a 79-80
+  s_edb1a2c91db7eb::t_73c68603e38010 84
+  s_edb1a2c91db7eb::t_64114bc78c1db9 87-90
+  s_edb1a2c91db7eb::t_74efc854d47314 92-93
+  s_edb1a2c91db7eb::t_73ed2dfd6eb675 95-96
+  s_edb1a2c91db7eb::t_e0299886ba9432 102
+  s_edb1a2c91db7eb::t_6fa3d55413c08f 120
+  s_edb1a2c91db7eb::t_723c7e88074acb 133-134
+  s_edb1a2c91db7eb::t_28201a6a276b85 138
+  s_edb1a2c91db7eb::t_ebebe17bdc7cf7 140-142,152-154
+  s_edb1a2c91db7eb::t_584077be7a2a9e 159
+  s_edb1a2c91db7eb::t_68f6d9a462f1ab 163-166
+  s_edb1a2c91db7eb::t_3e75f046e7fee4 168-172
+  s_edb1a2c91db7eb::t_8deb4d5a80813e 175
+  s_edb1a2c91db7eb::t_116f91f96c0a06 178-180,182-184
+  s_edb1a2c91db7eb::t_b5d29e5c7427a1 186-189
+  s_edb1a2c91db7eb::t_79d8c1c035b4da 192-195
+  s_edb1a2c91db7eb::t_a433482c1377f3 198-200,204-206
+  s_edb1a2c91db7eb::t_6e921ffd04ecc1 208-210
+  s_edb1a2c91db7eb::t_f2a06784dc0835 222
+  s_edb1a2c91db7eb::t_1b1078d5cc21ea 225-230
+  s_edb1a2c91db7eb::t_b70cbf4567d49a 232-234,236-238
+  s_edb1a2c91db7eb::t_145b54361e4bbb 242-244
+  s_edb1a2c91db7eb::t_c3af3908f8f267 247-250
+  s_edb1a2c91db7eb::t_aaecfbafd0aa62 253-256
+  s_edb1a2c91db7eb::t_649c3e8c73f501 260
+  s_edb1a2c91db7eb::t_3b1a5a6dc6a771 263-268
+  s_edb1a2c91db7eb::t_c9fc9a67e23582 5-7,12,24-26,28-33,40-42,44-49,105,107-108,113,115,123,125-126,143-151,181,201-203,235
+oxidize-c/src/server/websocket.c
+  s_edb1a2c91db7eb::t_c3e4f88f4d117c 1-394
+oxidize-c/src/server/chat_mode.c
+  s_96ddc277ba047e::t_d2ab299e985de5 1-157,159-244
+  s_edb1a2c91db7eb::t_a2e0b3b63d7492 158
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "2c486adcc0fdf6ceb54021596cbb1b5b4d38b253",
+  "prompts": {},
+  "sessions": {
+    "s_77b642b0f5f215": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "cb6e73e3-aa59-45d2-a987-b1ad4e9ab80b",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_96ddc277ba047e": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "ea8ad242-b091-46af-96e0-114c0c67fea4",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_edb1a2c91db7eb": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "848d7570-50c6-4de4-b697-7dee0055411a",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

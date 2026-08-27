@@ -1,0 +1,49 @@
+oxidize-c/include/oxidize/tensor_ops.h
+  s_96ddc277ba047e::t_510ba777f50be9 1-205
+oxidize-c/include/oxidize/wasm.h
+  s_740b57616e9b73::t_9d6e98e7f07c12 1-224
+oxidize-c/src/util/wasm_bridge.c
+  s_740b57616e9b73::t_84af545809ea44 1-711
+oxidize-c/tests/test_tensor_ops.c
+  s_96ddc277ba047e::t_08c7798cfe5574 1-252
+oxidize-c/tests/test_wasm.c
+  s_740b57616e9b73::t_2381f596573ef1 1-16,19-94,96-98,102-111,115,121-122,124,128-133,137,139,141-146,150,152-159,161-162,164,167-170,174,177-193,197,200-210,214,217-242,245-246,248,251,256,258-264,267-268,273,276-286,288,290-314,316-319,321-322,324-328,332,334-345,347-350,352-355,359,361-374,376-377,379,381-411,414,416-419,422,424-427,430,432-436
+  s_96ddc277ba047e::t_da0d4fd67f6836 17-18,95,99-101,112-114,116-120,123,125-127,134-136,138,140,147-149,151,160,163,165-166,171-173,175-176,194-196,198-199,211-213,215-216,243-244,247,249-250,252-255,257,265-266,269-272,274-275,287,289,315,320,323,329-331,333,346,351,356-358,360,375,378,380,412-413,415,420-421,423,428-429,431,437
+oxidize-c/src/compute/tensor_ops.c
+  s_96ddc277ba047e::t_b52947f1a4cce9 13
+  s_96ddc277ba047e::t_d4f62cc85aa0b5 1-12,14-451
+oxidize-c/include/oxidize/inspect.h
+  s_7c26d91e840dd4::t_8c22fcb38f2797 1-130
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "171bcc348c3006c80c0b8762963df21fae6907dd",
+  "prompts": {},
+  "sessions": {
+    "s_740b57616e9b73": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "a51e850a-e0ae-42d0-83b3-a80f1bcac4e6",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_7c26d91e840dd4": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "16ca7f7c-b2c7-4da7-99fc-fb20eb4397a1",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_96ddc277ba047e": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "ea8ad242-b091-46af-96e0-114c0c67fea4",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

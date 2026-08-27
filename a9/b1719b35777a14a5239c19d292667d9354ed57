@@ -1,0 +1,49 @@
+oxidize-c/src/cli/args.c
+  s_5bec56e69286b9::t_cd70873ee6805c 79
+oxidize-c/include/oxidize/perplexity.h
+  s_96ddc277ba047e::t_2f8748fa8ee1b5 1-50
+oxidize-c/src/cli/main.c
+  s_96ddc277ba047e::t_0de375a0806b09 559,567,569-580
+  s_96ddc277ba047e::t_3f45c086ca490e 257
+  s_96ddc277ba047e::t_72c559c8142da9 46-53
+  s_96ddc277ba047e::t_f00646a984be46 30
+  s_96ddc277ba047e::t_9359c86163ce48 293
+  s_96ddc277ba047e::t_e73cccdb21ddbc 478-525
+oxidize-c/src/util/perplexity.c
+  s_96ddc277ba047e::t_f523f0b0b6a891 1-3,5-146
+  s_96ddc277ba047e::t_4ce1c6787b4b9f 4
+oxidize-c/src/cli/args.h
+  s_1ce968acdc9694::t_6ad573763ae562 52
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "a9b1719b35777a14a5239c19d292667d9354ed57",
+  "prompts": {},
+  "sessions": {
+    "s_1ce968acdc9694": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "14de8198-1983-42f4-8b15-c568198ee1fd",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_5bec56e69286b9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f86ae-2366-7b80-8a79-8d8524df27c3",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_96ddc277ba047e": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "ea8ad242-b091-46af-96e0-114c0c67fea4",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

@@ -1,0 +1,24 @@
+oxidize-c/src/mesh/discovery.c
+  s_4d9882d5eb019d::t_b83e3a2060fb1e 7-9
+oxidize-c/src/mesh/mesh.c
+  s_4d9882d5eb019d::t_b83e3a2060fb1e 9-11
+oxidize-c/src/mesh/distributed.c
+  s_4d9882d5eb019d::t_b83e3a2060fb1e 33-35
+  s_4d9882d5eb019d::t_f61d4181dc8781 51-56
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "66dac31646823fe685e54e43268e39329e0c21d9",
+  "prompts": {},
+  "sessions": {
+    "s_4d9882d5eb019d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "360e0e71-f928-4fe7-91c9-8eb28e4b3dda",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

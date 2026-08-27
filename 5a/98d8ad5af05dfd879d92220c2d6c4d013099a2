@@ -1,0 +1,29 @@
+oxidize-c/include/oxidize/diffusion_gemma.h
+  s_96ddc277ba047e::t_c6bcfc956c8ac5 42-54
+oxidize-c/src/mesh/scrutiny.c
+  s_96ddc277ba047e::t_0adc8743ddd85c 166
+  s_96ddc277ba047e::t_bae7b9fde6c2bf 52-71
+oxidize-c/src/model/inf_model.c
+  s_96ddc277ba047e::t_8fafba22e41b0e 416-418,420-465,469-472
+oxidize-c/src/model/diffusion_gemma.c
+  s_96ddc277ba047e::t_40e15cf8b70b3a 136
+  s_96ddc277ba047e::t_b59c41486e8a53 41-45,48-64,68-71
+  s_96ddc277ba047e::t_de6d536379e455 328-337
+  s_96ddc277ba047e::t_a9e5744869d05a 84,95,100-135,137-198,201,203,205
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "5a98d8ad5af05dfd879d92220c2d6c4d013099a2",
+  "prompts": {},
+  "sessions": {
+    "s_96ddc277ba047e": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "ea8ad242-b091-46af-96e0-114c0c67fea4",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

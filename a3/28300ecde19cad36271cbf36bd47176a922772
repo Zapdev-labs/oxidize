@@ -1,0 +1,19 @@
+oxidize-c/src/model/llama.c
+  s_5bec56e69286b9::t_841fe31d886138 122-124,184-186,363-368,394-397
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "a328300ecde19cad36271cbf36bd47176a922772",
+  "prompts": {},
+  "sessions": {
+    "s_5bec56e69286b9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f86ae-2366-7b80-8a79-8d8524df27c3",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

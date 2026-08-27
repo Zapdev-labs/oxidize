@@ -1,0 +1,30 @@
+oxidize-c/tests/test_tokenizer_tiktoken.c
+  s_5bec56e69286b9::t_d14ff61da02848 154-195
+oxidize-c/src/format/tokenizer_tiktoken.c
+  s_5bec56e69286b9::t_764947e754ad5d 579-581,583-585,587,590,614-627
+  s_5bec56e69286b9::t_96c4fef7689e0d 628
+oxidize-c/include/oxidize/tokenizer.h
+  s_5bec56e69286b9::t_10240768f22726 212-213,233,271-272,387-389
+oxidize-c/src/format/tokenizer_bpe.c
+  s_5bec56e69286b9::t_32834e6b4000e5 852-853,855-857,883-884,914-927
+  s_5bec56e69286b9::t_7eb435a171a26f 928
+oxidize-c/src/format/tokenizer_dispatch.c
+  s_5bec56e69286b9::t_d14ff61da02848 232
+  s_5bec56e69286b9::t_5c06d6285ee1c9 189-204,212-214,218-220,222-230,233-234,241,246,260,267,280-287,299-304
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "ae67f3f57977d3e29e23c645c7e923480da6c760",
+  "prompts": {},
+  "sessions": {
+    "s_5bec56e69286b9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f86ae-2366-7b80-8a79-8d8524df27c3",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

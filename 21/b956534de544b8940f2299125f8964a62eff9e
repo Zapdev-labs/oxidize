@@ -1,0 +1,57 @@
+oxidize-c/src/format/tokenizer_bpe.c
+  s_b5558e6b5da3e8::t_aa174a5195112d 1108-1110
+  s_b5558e6b5da3e8::t_6eb84595dcb5ff 1052
+  s_b5558e6b5da3e8::t_7a96961d87732c 579
+  s_b5558e6b5da3e8::t_285fbe5b7a3a58 362-368
+  s_b5558e6b5da3e8::t_0041bf8b48b449 395
+  s_b5558e6b5da3e8::t_db1b2669755cad 633
+  s_b5558e6b5da3e8::t_e667078f557fd6 1034
+  s_b5558e6b5da3e8::t_16ca81ae305c6e 486
+  s_b5558e6b5da3e8::t_f35039c4ffd547 947
+  s_b5558e6b5da3e8::t_55b09c7aa14b8c 1179-1190
+  s_b5558e6b5da3e8::t_ebb486f0d095de 1262-1264,1279-1282,1284-1289
+  s_b5558e6b5da3e8::t_3bf079da25c56f 1-361,369-394,396-485,487-511,513-578,580-591,593-629,631-632,634-946,948-951,954-956,958-959,961-972,974-975,977-1033,1035-1041,1043-1051,1053-1107,1111-1135,1137-1178,1191-1261
+  s_b5558e6b5da3e8::t_f43fb1319bcaeb 952-953,957,960,973,976
+  s_b5558e6b5da3e8::t_b0d76be1401091 512
+  s_b5558e6b5da3e8::t_45d115ac6f5dc3 1265-1278,1283
+  s_b5558e6b5da3e8::t_4d440b87d7bc1b 630
+  s_b5558e6b5da3e8::t_f44661759ea191 592
+  s_b5558e6b5da3e8::t_6631a05fe79be3 1136
+  s_b5558e6b5da3e8::t_3e1cfdb4ac174e 1042
+oxidize-c/include/oxidize/oc.h
+  s_b5558e6b5da3e8::t_e67ad6cc58167f 22
+oxidize-c/include/oxidize/tokenizer.h
+  s_b5558e6b5da3e8::t_8cfc8b7363ed68 164-175
+  s_b5558e6b5da3e8::t_d99dc01e5cc43d 199-205
+  s_b5558e6b5da3e8::t_ef3d4b71c8d1b5 1-163,176-198,206-217
+oxidize-c/src/format/tokenizer_dispatch.c
+  s_b5558e6b5da3e8::t_8d3c4d12276d8e 112-114
+  s_b5558e6b5da3e8::t_3d8283fd26b7e1 105-106
+  s_b5558e6b5da3e8::t_843eb5cb31124b 65-66,72
+  s_b5558e6b5da3e8::t_39c2b35fa7fb57 1-64,67-71,73-91,93-104,107-111
+  s_b5558e6b5da3e8::t_c5dbe825501900 92
+oxidize-c/tests/test_tokenizer_bpe.c
+  s_b5558e6b5da3e8::t_1055659ef23a42 134-139
+  s_b5558e6b5da3e8::t_8436aea1e528a4 744-748
+  s_b5558e6b5da3e8::t_1bc2ae2034ce55 146
+  s_b5558e6b5da3e8::t_69ac86441312d3 1-133,140-145,147-427,430-508,511-627,630-743,749-815
+  s_b5558e6b5da3e8::t_f64e5baf393734 428-429
+  s_b5558e6b5da3e8::t_ab3913f970a82b 509-510
+  s_b5558e6b5da3e8::t_efd96bbd4a1c35 628-629
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "21b956534de544b8940f2299125f8964a62eff9e",
+  "prompts": {},
+  "sessions": {
+    "s_b5558e6b5da3e8": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "e9e30e20-28c4-4201-af03-e92bd52230c9",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

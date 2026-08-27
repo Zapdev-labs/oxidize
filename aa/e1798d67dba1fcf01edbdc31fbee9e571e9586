@@ -1,0 +1,21 @@
+modal_app.py
+  s_3582b5342698b9::t_dbc18ae7d767f0 1304,1309
+  s_3582b5342698b9::t_250dbfc1731bea 1248-1303,1305-1308,1310-1324
+  s_3582b5342698b9::t_bc9ba1d7a16035 1325-1326
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "aae1798d67dba1fcf01edbdc31fbee9e571e9586",
+  "prompts": {},
+  "sessions": {
+    "s_3582b5342698b9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f1219-02c1-7713-9f8b-d532e4c17a17",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

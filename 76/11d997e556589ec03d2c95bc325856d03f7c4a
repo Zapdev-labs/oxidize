@@ -1,0 +1,25 @@
+oxidize-c/tests/test_sampling.c
+  s_b88b57ac040f51::t_3f1dc77f16e5f7 116
+  s_b88b57ac040f51::t_666a3d75a16e44 126
+  s_b88b57ac040f51::t_e123ba4137a4c5 140-269
+  s_b88b57ac040f51::t_0cdad7a4f6749b 97
+  s_b88b57ac040f51::t_001ad4ef68d56f 105
+  s_b88b57ac040f51::t_9b4ef993d10a84 36
+  s_b88b57ac040f51::t_070352b407a654 84
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "7611d997e556589ec03d2c95bc325856d03f7c4a",
+  "prompts": {},
+  "sessions": {
+    "s_b88b57ac040f51": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "85d983ad-396f-4fee-963a-ed8e1ab421ee",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

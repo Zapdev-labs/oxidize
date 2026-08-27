@@ -1,0 +1,27 @@
+oxidize-c/tests/test_autotune.c
+  s_96ddc277ba047e::t_fce73ef93aad4d 168-223
+oxidize-c/src/cli/main.c
+  s_96ddc277ba047e::t_f1e50bed470e06 108-124
+oxidize-c/src/autotune/autotune.c
+  s_96ddc277ba047e::t_33900e394982f0 18
+  s_96ddc277ba047e::t_ed7253cc460ac7 358-438
+  s_96ddc277ba047e::t_4781b1404cc196 14-17,19
+oxidize-c/include/oxidize/autotune.h
+  s_96ddc277ba047e::t_84c60fe6a6ee54 112-129
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "3b8b0d5264e50ff8c69fb9ec83aaa790b1f923dc",
+  "prompts": {},
+  "sessions": {
+    "s_96ddc277ba047e": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "ea8ad242-b091-46af-96e0-114c0c67fea4",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

@@ -1,0 +1,21 @@
+Cargo.lock
+  s_56a772afbecc12::t_b5ad114bd594d4 134,136
+oxidize-core/src/compute/helix_cache/runtime.rs
+  s_56a772afbecc12::t_645f8bde548e5e 174-176,207,209
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "f3e129f5064a66a79ba8722f0203fb6406c46891",
+  "prompts": {},
+  "sessions": {
+    "s_56a772afbecc12": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "29a9458d-1ba4-41b2-a837-c0dbfee7bab7",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

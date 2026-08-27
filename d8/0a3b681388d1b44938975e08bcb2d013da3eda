@@ -1,0 +1,34 @@
+oxidize-core/src/format/conversion.rs
+  s_18e991452520ed::t_33c6e531203b77 2,31-32,40-43,45-90,93-94,99-101,116-127,139-148,155-160,169-284,373-416
+oxidize-core/src/format/safetensors_to_gguf.rs
+  s_4ea0c180e3aee4::t_082fbea9e98367 516-524
+  s_18e991452520ed::t_33c6e531203b77 1-4,12,20,29,133-136,138,219-221,333-348,452,455-457,497-506,510-514,754-760,765-767,799-1259
+oxidize-cli/src/bin/gguf_layer_keys.rs
+  s_18e991452520ed::t_33c6e531203b77 1-25
+oxidize-core/src/compute/quantization.rs
+  s_18e991452520ed::t_33c6e531203b77 529,821-973
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "d80a3b681388d1b44938975e08bcb2d013da3eda",
+  "prompts": {},
+  "sessions": {
+    "s_18e991452520ed": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9b009849-d334-433f-b626-4fee84fb4340",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_4ea0c180e3aee4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3fb31a53-3c85-470b-a12e-128cce51631a",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

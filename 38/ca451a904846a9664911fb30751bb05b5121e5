@@ -1,0 +1,69 @@
+oxidize-c/tests/test_paged_attention.c
+  s_5bec56e69286b9::t_2c0b35488589c4 366
+oxidize-c/src/util/mmap.c
+  s_5bec56e69286b9::t_1d5556e0584aae 368-369
+oxidize-c/include/oxidize/grammar.h
+  s_5bec56e69286b9::t_a7efcbd0f6773f 40,45
+oxidize-c/src/model/grammar.c
+  s_5bec56e69286b9::t_a7efcbd0f6773f 70,82-87,94-96,158-161,166-168,170-174,176,195,198,206-207
+oxidize-c/src/model/sampling.c
+  s_5bec56e69286b9::t_2dc2841b0b168f 118-120
+oxidize-c/src/util/quantize_tool.c
+  s_5bec56e69286b9::t_d055c6ae7690a9 15,170-178,337-339
+oxidize-c/include/oxidize/sampling.h
+  s_5bec56e69286b9::t_2dc2841b0b168f 58-59
+oxidize-c/tests/test_grammar.c
+  s_5bec56e69286b9::t_73fe8fa4e69b96 20
+oxidize-c/src/model/llama.c
+  s_5bec56e69286b9::t_2dc2841b0b168f 123,395-396
+oxidize-c/src/cli/main.c
+  s_5bec56e69286b9::t_bd1b3c8d6a56e0 291,523,526-541,543-545,547-549,562
+oxidize-c/src/paged/paged_attention.c
+  s_5bec56e69286b9::t_06654695fa5534 694-695
+  s_5bec56e69286b9::t_2c0b35488589c4 441-455,461-462,551
+oxidize-c/src/format/tokenizer_dispatch.c
+  s_5bec56e69286b9::t_e818492d743f78 179,186,208-209,243-248,256-258
+oxidize-c/tests/test_activation_stats.c
+  s_5bec56e69286b9::t_2dc2841b0b168f 45,47,52,70
+oxidize-c/include/oxidize/openai.h
+  s_5bec56e69286b9::t_2dc2841b0b168f 10
+oxidize-c/src/util/perplexity.c
+  s_5bec56e69286b9::t_2dc2841b0b168f 51-60,64,67,88-96,122,124,134-138
+oxidize-c/include/oxidize/quant.h
+  s_5bec56e69286b9::t_1d5556e0584aae 177-179
+oxidize-c/src/model/speculative.c
+  s_5bec56e69286b9::t_bd1b3c8d6a56e0 254-256,358-360
+oxidize-c/src/autotune/autotune.c
+  s_5bec56e69286b9::t_93ccec2af2dee3 34,151-158
+  s_5bec56e69286b9::t_eaec587d44517f 159
+oxidize-c/tests/test_http.c
+  s_5bec56e69286b9::t_8c95691f3aafd9 201-209
+oxidize-c/src/compute/activation_stats.c
+  s_5bec56e69286b9::t_2dc2841b0b168f 37
+oxidize-c/tests/test_tokenizer_tiktoken.c
+  s_5bec56e69286b9::t_1d5556e0584aae 159
+oxidize-c/src/paged/prefix_cache.c
+  s_5bec56e69286b9::t_2c0b35488589c4 43
+oxidize-c/src/server/openai.c
+  s_5bec56e69286b9::t_934f271e26dc06 17,59,121-122,125,128,137-145,149,375-377
+oxidize-c/src/backends/cuda.cu
+  s_5bec56e69286b9::t_202f9185253d67 298,326,330,343,360,369,371,373,375,377,379,381,538,567
+oxidize-c/src/server/http.c
+  s_5bec56e69286b9::t_d055c6ae7690a9 31,35,200-213,273-275,283-289
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "38ca451a904846a9664911fb30751bb05b5121e5",
+  "prompts": {},
+  "sessions": {
+    "s_5bec56e69286b9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f86ae-2366-7b80-8a79-8d8524df27c3",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

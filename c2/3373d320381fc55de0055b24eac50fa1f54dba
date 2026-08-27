@@ -1,0 +1,19 @@
+oxidize-cpp/src/train/grad_check.cpp
+  s_4d9882d5eb019d::t_7a0a559da926e7 410
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "c23373d320381fc55de0055b24eac50fa1f54dba",
+  "prompts": {},
+  "sessions": {
+    "s_4d9882d5eb019d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "360e0e71-f928-4fe7-91c9-8eb28e4b3dda",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

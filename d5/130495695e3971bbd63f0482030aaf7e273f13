@@ -1,0 +1,19 @@
+oxidize-c/tools/convert.c
+  s_7c0c8631703a40::t_eebba6d019e9cd 1125
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "d5130495695e3971bbd63f0482030aaf7e273f13",
+  "prompts": {},
+  "sessions": {
+    "s_7c0c8631703a40": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "agent-e8d42bb0-2cee-46a8-aff5-89b960515ae5",
+        "model": "unknown"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

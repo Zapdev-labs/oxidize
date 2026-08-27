@@ -1,0 +1,163 @@
+oxidize-c/src/core/vector.c
+  s_ed4e52797cccc6::t_32e05af808b367 71,73-78,81
+  s_ed4e52797cccc6::t_cd76923e1fa52f 38
+  s_ed4e52797cccc6::t_0b88985fc643d6 50-56,59
+oxidize-c/src/backends/cuda.cu
+  s_96ddc277ba047e::t_7e265e783c9a8b 353-368
+  s_96ddc277ba047e::t_d213beb2bcd76c 252,257-259
+  s_96ddc277ba047e::t_01b312a20d2d6a 328
+  s_96ddc277ba047e::t_aaf89e50485d63 300-310
+  s_96ddc277ba047e::t_0521fe814552e4 401,408,414,418,422,427,431,439-442,453,460,463,468,473,476,479,482,485,491,497-498,502-503
+  s_96ddc277ba047e::t_07e8ee059a67d6 311-312
+  s_96ddc277ba047e::t_97b88637fdec28 369
+  s_96ddc277ba047e::t_bc5a1af6a0cb21 30
+  s_96ddc277ba047e::t_44bbb65a94c124 315-319
+  s_96ddc277ba047e::t_f38908def36597 248
+  s_96ddc277ba047e::t_52a91656d216e8 325
+  s_96ddc277ba047e::t_b0737c3fb1a211 24
+  s_96ddc277ba047e::t_6a0d2ee883b474 376
+  s_96ddc277ba047e::t_fef8f1ee1f60c0 165-169
+  s_96ddc277ba047e::t_821560b0111f3e 21
+  s_96ddc277ba047e::t_161633aa3cdc2b 372
+oxidize-c/src/core/arena.c
+  s_ed4e52797cccc6::t_dc3e82aadca19a 89
+  s_ed4e52797cccc6::t_82bef45cf3f813 74-75
+  s_ed4e52797cccc6::t_44d35fd7449f86 111-116,118,124-125
+  s_ed4e52797cccc6::t_0e67f3cab2ba19 58-62
+  s_ed4e52797cccc6::t_2eb3eedc3ef4ed 217
+  s_ed4e52797cccc6::t_195d13eff039b6 173
+oxidize-c/src/format/tokenizer_wp.c
+  s_ed4e52797cccc6::t_1bd54c752aa293 44-45
+  s_ed4e52797cccc6::t_55c5ba4c1e3a63 104,270,298
+  s_ed4e52797cccc6::t_fd71eda232fd87 458
+  s_ed4e52797cccc6::t_4396d142bf2634 72
+oxidize-c/CONTRIBUTING.md
+  s_ed4e52797cccc6::t_bc56fdd3d694e8 140
+oxidize-c/include/oxidize/gguf.h
+  s_ed4e52797cccc6::t_0d848f045d85cb 256-258
+oxidize-c/tests/test_log.c
+  s_ed4e52797cccc6::t_dadae94137029f 37-39,41-45
+oxidize-c/src/format/utf8_utils.h
+  s_ed4e52797cccc6::t_6b6c62bcd26d36 1-153
+oxidize-c/src/cli/main.c
+  s_96ddc277ba047e::t_f30e8b9c567446 40
+  s_ed4e52797cccc6::t_c3db3451003784 247
+  s_96ddc277ba047e::t_52a4b0415df5c4 282-287
+oxidize-c/src/format/tokenizer_sp.c
+  s_ed4e52797cccc6::t_9cfcbf57b20297 392
+  s_ed4e52797cccc6::t_48e5267f78fd33 75
+  s_ed4e52797cccc6::t_e56bfc095dc38d 300-301,304
+  s_ed4e52797cccc6::t_63793b03cfc0e1 325-326
+  s_ed4e52797cccc6::t_2a55361081975f 223
+  s_ed4e52797cccc6::t_93de6bfd849143 180-183
+  s_ed4e52797cccc6::t_d48c40979d151d 286
+  s_ed4e52797cccc6::t_3c8ad8aba6865b 294
+  s_ed4e52797cccc6::t_da4fe1609e35a8 251-255
+  s_ed4e52797cccc6::t_a86de246dc8903 192-195,200,204,211-212
+  s_ed4e52797cccc6::t_ad8cebf8a42096 314
+  s_ed4e52797cccc6::t_a6045bd1e9968d 547
+  s_ed4e52797cccc6::t_d7d53ac1e49a8b 88
+  s_ed4e52797cccc6::t_0ca06674ec14dc 44-45
+  s_ed4e52797cccc6::t_72f139796e3424 357-365
+modal_c_app.py
+  s_96ddc277ba047e::t_47af0af4b4866e 124-128
+  s_96ddc277ba047e::t_fcb9ce418808e3 236,239-240,243,246,250,253
+  s_96ddc277ba047e::t_0bb744f4f43fd7 28
+  s_96ddc277ba047e::t_f0a1e01ef8b596 158
+  s_96ddc277ba047e::t_c6cf7ae61e84df 21
+  s_96ddc277ba047e::t_8985c283df45f2 1-20,22-27,29-97,99-116,122-123,129-157,159-178,184-235,237-238,241-242,244-245,248-249,251-252
+  s_96ddc277ba047e::t_b3ae32e45a6699 117-121
+  s_96ddc277ba047e::t_48e7b9ea2c86e2 179-183
+  s_96ddc277ba047e::t_073b2270f3e3c4 247,254
+  s_96ddc277ba047e::t_c89d9468964e46 98
+oxidize-c/include/oxidize/vector.h
+  s_ed4e52797cccc6::t_548214b0390891 48-49
+oxidize-c/src/format/gguf.c
+  s_ed4e52797cccc6::t_d7c45546d4be7c 1158-1168
+  s_ed4e52797cccc6::t_93f77ecfcd296f 1214
+  s_ed4e52797cccc6::t_846429de513686 794-796
+  s_ed4e52797cccc6::t_331f26b2353857 1076-1080
+  s_ed4e52797cccc6::t_0ef5ea6001c3ac 868-869,871-872
+  s_ed4e52797cccc6::t_4414ee090a6303 1251
+  s_ed4e52797cccc6::t_7be2b22ea6e225 1331-1348
+  s_ed4e52797cccc6::t_b3b682a1a53392 1232-1235
+  s_ed4e52797cccc6::t_0c5d9dfd7aa0fa 1098
+  s_ed4e52797cccc6::t_0c3b2de3f3d9af 1304-1311
+  s_ed4e52797cccc6::t_b040ed3b25ebcc 1053
+oxidize-c/src/core/error.c
+  s_ed4e52797cccc6::t_a75383e3848b97 80-83,86,88-90,93-106,110-111
+oxidize-c/tests/criterion/include/criterion/alloc.h
+  s_ed4e52797cccc6::t_e74090be9a1f7a 219-220
+  s_ed4e52797cccc6::t_c33a1408dff18e 276-280
+oxidize-c/Makefile
+  s_ed4e52797cccc6::t_b88e8abda1531c 38
+  s_ed4e52797cccc6::t_a052bc0546ad27 67,71,74,78
+  s_ed4e52797cccc6::t_2c4ae9e5dd99b3 116
+  s_ed4e52797cccc6::t_d3b5972b86e072 15-20
+  s_ed4e52797cccc6::t_8ccc4d7894e2a5 131-133,135,137
+  s_ed4e52797cccc6::t_c187b7d7225179 60
+  s_96ddc277ba047e::t_70c62ed72331f1 134
+oxidize-c/tests/test_mmap.c
+  s_ed4e52797cccc6::t_c2135b1db71e70 233-236,239-240,242
+oxidize-c/src/util/mmap.c
+  s_ed4e52797cccc6::t_48906a780efff0 177-187
+oxidize-c/src/format/tokenizer_bpe.c
+  s_ed4e52797cccc6::t_71ed268b406073 57-59
+  s_ed4e52797cccc6::t_c2cfafc9a9ced3 459-460
+  s_ed4e52797cccc6::t_e1996b9a4fddde 458,468-474
+  s_ed4e52797cccc6::t_d009be14a5e07f 1208-1212
+  s_ed4e52797cccc6::t_f801ddbd35d2ba 1234-1249
+  s_ed4e52797cccc6::t_5e3655c1f34beb 1114
+  s_ed4e52797cccc6::t_f04d7f9c456e33 105-106,108,112-113,116-133
+  s_ed4e52797cccc6::t_0b2bd40d729c5b 826-827
+  s_ed4e52797cccc6::t_713a7ede38d327 348-354,356,359,377-381,390,393-394
+  s_ed4e52797cccc6::t_1365a7ec0586fd 1051-1056,1063-1067
+  s_ed4e52797cccc6::t_dd73bee443d129 495,498,722,725,894
+  s_ed4e52797cccc6::t_fcdb23bdfc4335 547-556,560-561,569-570,586-595
+  s_ed4e52797cccc6::t_75e38f3491c834 806-807
+  s_ed4e52797cccc6::t_0a0300a78008f4 1033
+  s_ed4e52797cccc6::t_21819592132d8e 911-920
+  s_ed4e52797cccc6::t_8eccb7f0f24e81 481-485,491,502,504,507-508,514-517,527
+  s_ed4e52797cccc6::t_ead53de8882c4d 448,456
+  s_ed4e52797cccc6::t_ed6e65cab00633 1074-1078
+  s_ed4e52797cccc6::t_c556c7e1309914 941-943
+oxidize-c/include/oxidize/arena.h
+  s_ed4e52797cccc6::t_8e54fb3024d4b9 30-31
+oxidize-c/include/oxidize/tokenizer.h
+  s_ed4e52797cccc6::t_414cc709e3d939 48-52
+oxidize-c/tests/test_hashtable.c
+  s_ed4e52797cccc6::t_9653467f23d48f 76-78,82-83
+oxidize-c/src/format/tokenizer_tiktoken.c
+  s_ed4e52797cccc6::t_2d7553f9d8dd7f 617
+  s_ed4e52797cccc6::t_f4a8b0ad260f7c 370
+  s_ed4e52797cccc6::t_c73f5bfec33c0c 734-742
+  s_ed4e52797cccc6::t_76d24204fd6886 753-757
+  s_ed4e52797cccc6::t_66b460a43c61d8 693
+  s_ed4e52797cccc6::t_fa47351468ed44 575-577
+  s_ed4e52797cccc6::t_7a6e3c64bf7b43 705-709,713-718
+  s_ed4e52797cccc6::t_6fbc50d50d50be 47-48
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "e062d53cb0bc3e74c8e687d7f6adf42ce2b41904",
+  "prompts": {},
+  "sessions": {
+    "s_96ddc277ba047e": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "ea8ad242-b091-46af-96e0-114c0c67fea4",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_ed4e52797cccc6": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e087b373-0bfe-4d11-bbf1-465813f1e03b",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

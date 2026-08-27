@@ -1,0 +1,24 @@
+oxidize-c/include/oxidize/grammar.h
+  s_96ddc277ba047e::t_33030f53dc3178 1-78
+oxidize-c/tests/test_grammar.c
+  s_96ddc277ba047e::t_f745cc2d5dd783 1-106
+oxidize-c/src/model/grammar.c
+  s_96ddc277ba047e::t_e0ae2ae023db5f 35,40-41
+  s_96ddc277ba047e::t_2ac3b25c0e124a 1-34,36-39,42-209
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "57d501e56c17cb46274d9fe9d9099a1a178acf69",
+  "prompts": {},
+  "sessions": {
+    "s_96ddc277ba047e": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "ea8ad242-b091-46af-96e0-114c0c67fea4",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

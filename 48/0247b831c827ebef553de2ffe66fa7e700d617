@@ -1,0 +1,19 @@
+oxidize-c/tests/test_tools.c
+  s_3783d3230ec55b::t_04e171c250035c 159,200,203,632-633
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "480247b831c827ebef553de2ffe66fa7e700d617",
+  "prompts": {},
+  "sessions": {
+    "s_3783d3230ec55b": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "agent-9fd1c420-016d-4b51-834b-eee7d5b71e00",
+        "model": "unknown"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

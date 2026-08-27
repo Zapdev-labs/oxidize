@@ -1,0 +1,23 @@
+Cargo.lock
+  s_56a772afbecc12::t_59d9652aa432cc 134,136
+oxidize-cpp/tests/autotune_test.cpp
+  s_56a772afbecc12::t_45cf29f46596fe 25-27,41-42,56,103-104
+oxidize-cpp/tests/gguf_mmap_policy_test.cpp
+  s_56a772afbecc12::t_e875b3850f3f1c 4,7-13,22,26-29,32-37,39-43
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "feaee4080544f66644c11c9a1cd0d0dd1f2207e3",
+  "prompts": {},
+  "sessions": {
+    "s_56a772afbecc12": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "29a9458d-1ba4-41b2-a837-c0dbfee7bab7",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

@@ -1,0 +1,29 @@
+oxidize-cpp/src/server/main.cpp
+  s_5b078de97b8925::t_f9855e7e811070 1-18,22-352
+  s_5b078de97b8925::t_c932c5db36862b 19-21
+oxidize-cpp/CMakeLists.txt
+  s_5b078de97b8925::t_a2c4d136cdcb58 65-68
+oxidize-cpp/src/server/json.hpp
+  s_5b078de97b8925::t_1b0fffe5b3d8da 1-7,9-70
+  s_5b078de97b8925::t_6aa0e3110e351d 8
+oxidize-cpp/src/server/json.cpp
+  s_5b078de97b8925::t_fee4437de8ae5a 3,7
+  s_5b078de97b8925::t_6902d69d427c7e 5
+  s_5b078de97b8925::t_2b55d080ae2f9e 1-2,4,6,8-222
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "247b660f49735dadc9eb4f453eef6e0757f9ad52",
+  "prompts": {},
+  "sessions": {
+    "s_5b078de97b8925": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a2fd32be-d532-4929-8226-7967c93996a1",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

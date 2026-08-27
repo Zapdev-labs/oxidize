@@ -1,0 +1,24 @@
+oxidize-c/src/util/merge.c
+  s_96ddc277ba047e::t_1ea57b8f7f0f42 223-224
+  s_96ddc277ba047e::t_f81dcd43e0c781 131
+  s_96ddc277ba047e::t_34908de67983a9 405
+  s_96ddc277ba047e::t_fbee8e5eb1ce9e 101-130,132-154
+  s_96ddc277ba047e::t_96a2568d3a2594 307
+  s_96ddc277ba047e::t_ff25cfbb74b0f3 493
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "2472cf0bab6870794ed154ca1d4ecc39804e2a01",
+  "prompts": {},
+  "sessions": {
+    "s_96ddc277ba047e": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "ea8ad242-b091-46af-96e0-114c0c67fea4",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

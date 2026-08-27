@@ -1,0 +1,188 @@
+oxidize-quantize/Cargo.toml
+  s_cf79bf9a4b4970::t_2035054a160ca4 11
+oxidize-convert/src/quantization.rs
+  s_9295f4ece6e4e4::t_e861423a469299 1-31
+Dockerfile.server
+  s_0a30b443494469::t_36406b8f9e7697 33-35,39
+docs/superpowers/specs/2026-06-15-kimi-k2-merge-oxidize-plan.html
+  s_2cdb0bb73f5d13::t_db545cdb2481db 6,8-14,16-98,104-220,222-229,232-242,246-248,250-253,256-269,275-282,285,289-313,315-339,341-344
+  s_2cdb0bb73f5d13::t_79513044e12d78 1-5,7,15,99-103,221,230-231,243-245,249,254-255,270-274,283-284,286-288,314,340,345-348
+oxidize-core/src/format/safetensors_to_gguf.rs
+  s_0a30b443494469::t_09f23a8bbf32d7 5,564-570,1142-1148
+Cargo.toml
+  s_9295f4ece6e4e4::t_a47cf7744320e9 11
+oxidize-server/src/routes/health.rs
+  s_0a30b443494469::t_9ac629a1da50a3 1-5,7,10-11,20-25
+oxidize-prune/src/gguf_copy.rs
+  s_9295f4ece6e4e4::t_e861423a469299 1-4,6-8,10-44,49-107,109-111,113-206,213-216
+  s_9295f4ece6e4e4::t_cda6121169692c 207-212
+  s_9295f4ece6e4e4::t_7645b3f8275418 9,108
+  s_9295f4ece6e4e4::t_6b18cf3ba0e80c 5,112
+  s_9295f4ece6e4e4::t_fccf217df3d811 45-48
+oxidize-server/k8s/oxidize-server-optimized.yaml
+  s_0a30b443494469::t_1be3461b521d6a 1-97,102-157,159-221
+  s_0a30b443494469::t_6f98da442fc4e9 98-101
+  s_0a30b443494469::t_0783e186b4475c 158
+llama-qwen7b.yaml
+  s_0a30b443494469::t_bf745a565cd800 72,162
+  s_0a30b443494469::t_9415a0ccae644e 78,81-82,168,171-172
+  s_0a30b443494469::t_488cb1f7d6e933 1-64,73-77,79-80,83-154,163-167,169-170,173-195
+  s_0a30b443494469::t_854561e0adae69 65-71,155-161
+oxidize-convert/src/run.rs
+  s_9295f4ece6e4e4::t_e861423a469299 1-38
+oxidize-core/src/model/inference.rs
+  s_cf79bf9a4b4970::t_89ca06fddbe466 1162-1165,1743-1746,3816-3830
+  s_2cdb0bb73f5d13::t_dceadb54f45b7e 179-189
+  s_cf79bf9a4b4970::t_6ba7eedd243107 4335,4682-4685
+  s_2cdb0bb73f5d13::t_b4063c88bf9edb 4365-4374,4380
+  s_2cdb0bb73f5d13::t_ffdfdf78d6c212 95-98
+  s_2cdb0bb73f5d13::t_bafd65757c4008 612-614
+  s_2cdb0bb73f5d13::t_c58d9adfe86497 224-226
+  s_2cdb0bb73f5d13::t_76a905b490e5c4 499,504-518
+  s_cf79bf9a4b4970::t_a03ae2779b11b5 4673-4681,4686-4778
+  s_2cdb0bb73f5d13::t_11aa69c665f829 4307-4334,4336-4342
+oxidize-core/src/format/gguf.rs
+  s_cf79bf9a4b4970::t_86e2467f5c038d 588
+  s_cf79bf9a4b4970::t_e377c7168f6b12 611-614
+  s_cf79bf9a4b4970::t_5b39db77055e6e 643-654,662-666,670-674
+  s_cf79bf9a4b4970::t_d6f7c09b9f6d72 1211-1226,1270-1299
+oxidize-server/src/auth.rs
+  s_556e1ff042ee5c::t_0704a40b166c34 22-76,88,92-95,201-213
+oxidize-core/benches/layer_bench.rs
+  s_0a30b443494469::t_09f23a8bbf32d7 287-288
+ai2_probe.sh
+  s_f4dd46e5d1baf9::t_87b86685215bfd 1-2
+  s_f4dd46e5d1baf9::t_535e4c8939e9c1 3-6
+oxidize-prune/src/filter.rs
+  s_9295f4ece6e4e4::t_e861423a469299 1-46
+oxidize-core/src/compute/quantization.rs
+  s_0a30b443494469::t_09f23a8bbf32d7 270,664-667,1590,1616-1620,1636-1640,2023-2025
+oxidize-cli/src/bin/bench.rs
+  s_cf79bf9a4b4970::t_59fc976ac8d11c 430-432
+oxidize-server/src/main.rs
+  s_556e1ff042ee5c::t_0dd760fb709142 43,77
+scripts/kimi_k2_ai2_continue_after_k27.sh
+  s_cf79bf9a4b4970::t_794922b5d22fd6 1-46
+kimi-k2-merge-plan-v2.html
+  s_191e25f446b3e3::t_c5578069341420 1-650
+.commandcode/taste/taste.md
+  s_191e25f446b3e3::t_c5578069341420 1-4
+docs/superpowers/specs/2026-06-15-snapprune-m3-flash-prune-spec.md
+  s_d4a9cb7dccfbdb::t_69a60ff60eb781 1-131
+oxidize-quantize/src/main.rs
+  s_cf79bf9a4b4970::t_d386e34ade8939 544-578,581-649,651-652,671-672,701-737
+  s_cf79bf9a4b4970::t_c4b134557a3203 152-169,171-176,182-185,194-234,236-267,273-303,308-311,318-336
+  s_cf79bf9a4b4970::t_f86b7b4b7af24a 993-994,997-998
+  s_cf79bf9a4b4970::t_911f17bb18a19a 101-102,105,107-113,117-118,134-141
+  s_cf79bf9a4b4970::t_ddc98b0022b4ef 2-3,10,14-15
+  s_cf79bf9a4b4970::t_2caa2ae68d1aa7 186-193,579-580,977-978,983-984
+  s_cf79bf9a4b4970::t_c3652769975eec 235,409,468-485
+  s_cf79bf9a4b4970::t_c1547abc59c4d0 271-272,312-317
+  s_cf79bf9a4b4970::t_4cbbb3047ccbc0 1002-1063
+  s_cf79bf9a4b4970::t_b0857019bf2052 268-270,995-996
+  s_cf79bf9a4b4970::t_0a1d2e09fe546f 975-976,979-982,985-992,999-1001,1089-1096
+  s_cf79bf9a4b4970::t_04274cb145675d 13,32-34,75-84,304-307,650,653-670,673-688,691-700
+  s_cf79bf9a4b4970::t_2a4629eab2d383 689-690
+oxidize-core/src/format/conversion.rs
+  s_0a30b443494469::t_09f23a8bbf32d7 78-91,93,220-229,383-387
+  s_cf79bf9a4b4970::t_51e8daac683a13 474-482
+  s_cf79bf9a4b4970::t_b218a8b7118404 12,36-37
+.cursor/hooks/state/continual-learning.json
+  s_0a30b443494469::t_0ac40a2ab305dd 4
+oxidize-core/src/model/diffusion_gemma.rs
+  s_0a30b443494469::t_09f23a8bbf32d7 133-136,151-152,181-186,207-212,216-218,256-264,275-296,309-311,319-326,329-336,340-342,350-357,360-367,371-373,383-386,406-410,501-505,509-515,590-596,625-631,639-645,656-662,700-701,707-715,726-734,793-795,860-867,893-895,911-917,958-962,998-1000
+oxidize-server/src/app.rs
+  s_556e1ff042ee5c::t_b58939c0749dc8 110-121,126
+  s_0a30b443494469::t_52ab43244184bc 180,190
+  s_556e1ff042ee5c::t_28b6ff60721fa4 82-86
+  s_556e1ff042ee5c::t_5196f345eb301d 626-647
+scripts/kimi_k2_ai2_pipeline.sh
+  s_cf79bf9a4b4970::t_26d75e14cab342 1-38,42-43,49-69,71-113,119-122,130,140-148,163-222,224-235,238,257-313
+  s_cf79bf9a4b4970::t_faa258f5bc5d9f 39-41,70
+  s_cf79bf9a4b4970::t_8fad81dd43230e 114-118
+  s_cf79bf9a4b4970::t_2f03af19a9b38e 131,135,139
+  s_cf79bf9a4b4970::t_4749b12b31667f 223
+  s_cf79bf9a4b4970::t_4a3f8626010fd9 236
+  s_cf79bf9a4b4970::t_5a06ae35ae901f 44-48,149-162,237,239
+  s_cf79bf9a4b4970::t_b61db069a6dd15 240-256
+  s_cf79bf9a4b4970::t_e942762bfd2483 123-129
+  s_cf79bf9a4b4970::t_25a7787ef663f3 132-134,136-138
+Cargo.lock
+  s_191e25f446b3e3::t_c5578069341420 3028,3090-3098,3114
+oxidize-cli/src/bin/diffusion_gemma_bench.rs
+  s_0a30b443494469::t_09f23a8bbf32d7 12-22,30-32,47-50
+oxidize-prune/src/writer.rs
+  s_9295f4ece6e4e4::t_7645b3f8275418 1-172
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "18fe8fa76508a7ef57d33a6713c9947104a1e696",
+  "prompts": {},
+  "sessions": {
+    "s_0a30b443494469": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_133425cf8ffee5c1eYiKq5Uc0v",
+        "model": "nex-agi/nex-n2-pro:free"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_191e25f446b3e3": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_12bf087d5ffeAXHavCN1LZTyRP",
+        "model": "gpt-5.4-mini"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_2cdb0bb73f5d13": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "eb3b2cc1-d362-4556-96e6-1ecd3d4bbc48",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_556e1ff042ee5c": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "76082053-2c1a-420b-9386-55fe2510e897",
+        "model": "custom:GPT-5.5-[ChatGPT]-0"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_9295f4ece6e4e4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ececd-a3f0-72f1-9b0d-bc725e4563a4",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_cf79bf9a4b4970": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_131bbb818ffeRpDUoQU2CPwG6v",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_d4a9cb7dccfbdb": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a23e1ec2-b10e-4887-94ca-a8b6cf650222",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_f4dd46e5d1baf9": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "6304a7c5-2ae7-416a-8ffc-bbb494b73265",
+        "model": "custom:GPT-5.5-[ChatGPT]-0"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

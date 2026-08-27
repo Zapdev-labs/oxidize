@@ -1,0 +1,65 @@
+oxidize-c/cuda.cu
+  s_6a9f35c65e1740::t_889cbb43d4ee3b 409,415-422,432-433,986,988
+oxidize-core/src/model/inference/layers.rs
+  s_6a9f35c65e1740::t_d5263489283f1d 494
+  s_6a9f35c65e1740::t_91aedf3ef3163f 490
+oxidize-c/test_oc.c
+  s_6a9f35c65e1740::t_9502714a66d444 351
+oxidize-core/src/compute/quantization.rs
+  s_6a9f35c65e1740::t_91aedf3ef3163f 445,483-492
+scripts/qwen30_bf16_al5_remote.sh
+  s_6a9f35c65e1740::t_1a6a1cb454d32b 30-50
+scripts/publish_gguf_hf.py
+  s_6a9f35c65e1740::t_f458444e5cea93 140
+oxidize-cpp/src/gguf.cpp
+  s_6a9f35c65e1740::t_26c54dc9c63acf 274-275
+oxidize-core/src/compute/quantization/tests.rs
+  s_6a9f35c65e1740::t_91aedf3ef3163f 659-678
+  s_6a9f35c65e1740::t_d875c5f9df38b7 658
+scripts/publish_gguf_remote_hf.sh
+  s_6a9f35c65e1740::t_9608974ada0811 18,23-26
+oxidize-finetuning/src/export.rs
+  s_6a9f35c65e1740::t_91aedf3ef3163f 74-78,161-171
+scripts/prime-qwen35-self-train/build_seed_dataset.py
+  s_6a9f35c65e1740::t_9608974ada0811 13
+scripts/bench_al5_remote.sh
+  s_6a9f35c65e1740::t_9608974ada0811 69-70,72-76
+oxidize-cpp/src/quant.cpp
+  s_6a9f35c65e1740::t_26c54dc9c63acf 953-971,973,981-982
+  s_6a9f35c65e1740::t_98880dfb066470 972
+oxidize-c/model.c
+  s_6a9f35c65e1740::t_889cbb43d4ee3b 725,771-778,799,882
+oxidize-c/kernels.c
+  s_6a9f35c65e1740::t_889cbb43d4ee3b 577-580
+oxidize-core/src/compute/quantization/quant_simple.rs
+  s_6a9f35c65e1740::t_d5263489283f1d 120
+  s_6a9f35c65e1740::t_91aedf3ef3163f 244-253
+scripts/prime-qwen35-self-train/setup-node.sh
+  s_6a9f35c65e1740::t_a101574dd07411 35
+  s_6a9f35c65e1740::t_9608974ada0811 36-40,42
+scripts/prime-gemma4-31b-int4/llamacpp-unsloth.sh
+  s_6a9f35c65e1740::t_9608974ada0811 31,33-35
+scripts/gemma4_31b_al_remote.sh
+  s_6a9f35c65e1740::t_9d426628801483 91
+  s_6a9f35c65e1740::t_c2d71c74ede07e 99,101-109
+scripts/prime-qwen35-self-train/test_build_seed_dataset.py
+  s_6a9f35c65e1740::t_9ab066b35a30a4 1-69
+scripts/bench_iq_remote.sh
+  s_6a9f35c65e1740::t_9608974ada0811 14-15,17-18,33-34,36
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.12",
+  "base_commit_sha": "6d98801e6aad560096975267923187b20694d782",
+  "prompts": {},
+  "sessions": {
+    "s_6a9f35c65e1740": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5788-2550-7560-885a-80686bfe0365",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

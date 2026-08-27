@@ -1,0 +1,29 @@
+oxidize-core/src/format/gguf.rs
+  s_1697c02732864d::t_f2be43a8e4e723 715-716
+  s_1697c02732864d::t_6da56f89aadcac 370-372
+  s_1697c02732864d::t_767ddfb9331701 693
+oxidize-core/src/format/safetensors.rs
+  s_1697c02732864d::t_0f68201e48c56e 49-75,79-118
+  s_1697c02732864d::t_fc5be8cf26cb27 1-2
+  s_1697c02732864d::t_e54d45b6d3b42b 162
+  s_1697c02732864d::t_158932c2cf145f 76-78
+oxidize-core/src/compute/tensor/types.rs
+  s_1697c02732864d::t_dd031030391f90 23
+  s_1697c02732864d::t_51e236821822d3 10
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "218a51388cb1891bca79ec05ebf03b351fee2048",
+  "prompts": {},
+  "sessions": {
+    "s_1697c02732864d": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "7915669e-551c-4bdd-9a20-841308d4c91a",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

@@ -1,0 +1,23 @@
+Dockerfile.server
+  s_94587b4ca2ecd9::t_4c7c8de69c94d7 15
+  s_94587b4ca2ecd9::t_4f2ddc605af6be 27
+Dockerfile.cli
+  s_94587b4ca2ecd9::t_f47ea80c3ead14 15
+  s_94587b4ca2ecd9::t_febf82a0cfb7ca 27
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "ac845f6014032e03d9a3983a09fb8e0fef8f22c3",
+  "prompts": {},
+  "sessions": {
+    "s_94587b4ca2ecd9": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "bdb3edac-bdef-4078-b890-115feb3a457a",
+        "model": "default"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

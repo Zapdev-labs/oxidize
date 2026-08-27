@@ -1,0 +1,89 @@
+oxidize-kernels/src/prune.rs
+  s_fdd3987e8e7e77::t_4f57c883468c81 1-199
+oxidize-server/src/runtime/model.rs
+  s_191e25f446b3e3::t_34e5abf5cfb564 9,29-30,355,457,503
+oxidize-kernels/src/lib.rs
+  s_493663a4a246f9::t_7e58252816961b 21,24,32,35
+oxidize-cli/src/main.rs
+  s_eeb2cfa3e3d631::t_93986ef4dff32d 1-2,5,7
+  s_fdd3987e8e7e77::t_236a66a55ae67c 1762-1764
+oxidize-core/src/compute/quantization.rs
+  s_191e25f446b3e3::t_34e5abf5cfb564 6-13,15-19,31-36,44
+oxidize-prune/Cargo.toml
+  s_493663a4a246f9::t_7e58252816961b 19-20
+oxidize-core/src/backends/cuda.rs
+  s_191e25f446b3e3::t_34e5abf5cfb564 8-10,188-189,318-322,389-391,394-401,403,420-422,425,427-434,445-480,544-546,870-877,879,891,901,917,958-965,967,979,989-1091,1512,1514
+training-data/oxidize-codebase.jsonl
+  s_eeb2cfa3e3d631::t_c769b47321722e 1-80
+oxidize-cli/src/help.rs
+  s_fdd3987e8e7e77::t_75a05b9c69cb8f 1
+  s_fdd3987e8e7e77::t_f67c3384fabf38 2-65,67-69
+  s_fdd3987e8e7e77::t_11221b37245485 66
+oxidize-cli/src/backend.rs
+  s_fdd3987e8e7e77::t_a0aec917db51a8 1-38
+AGENTS.md
+  s_493663a4a246f9::t_7e58252816961b 142
+oxidize-core/kernels/gemv_f32.cu
+  s_191e25f446b3e3::t_34e5abf5cfb564 60,66,71,73-83,255-318
+.cursor/hooks/state/continual-learning-index.json
+  s_493663a4a246f9::t_7e58252816961b 3-4,6-7,9-10,12-13,15-16
+oxidize-server/src/runtime/paged.rs
+  s_191e25f446b3e3::t_34e5abf5cfb564 6-7,25,31,46,89
+oxidize-server/src/runtime/generate.rs
+  s_fdd3987e8e7e77::t_e8514c8959cff3 407,561
+  s_fdd3987e8e7e77::t_2dae04ec4916ee 236,306,360
+  s_fdd3987e8e7e77::t_c739b9d9ac0b7c 442,596
+oxidize-prune/src/wanda.rs
+  s_493663a4a246f9::t_7e58252816961b 30,34,36-37,128,147-167,169-172,176-179,203-212,214-215,218-223,227-300,308-310,332-345,540,760-775
+oxidize-kernels/src/q4k_dequant.rs
+  s_fdd3987e8e7e77::t_4f57c883468c81 1-62
+oxidize-prune/src/mask.rs
+  s_493663a4a246f9::t_7e58252816961b 3-4,7,20,27,140
+Cargo.lock
+  s_fdd3987e8e7e77::t_4f57c883468c81 3110-3111
+.cursor/hooks/state/continual-learning.json
+  s_493663a4a246f9::t_7e58252816961b 3,5
+  s_191e25f446b3e3::t_34e5abf5cfb564 4,6
+oxidize-core/src/compute/tensor.rs
+  s_191e25f446b3e3::t_34e5abf5cfb564 2-5,1662-1676,2430
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "f8026404687a073f8d03b8563ee403217cd2f53e",
+  "prompts": {},
+  "sessions": {
+    "s_191e25f446b3e3": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_12bf087d5ffeAXHavCN1LZTyRP",
+        "model": "gpt-5.4-mini"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_493663a4a246f9": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "9ade1bce-22f9-486b-bab1-e68281074aaf",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_eeb2cfa3e3d631": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "7a2768a0-04f1-4a24-985a-52136fddb086",
+        "model": "default"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_fdd3987e8e7e77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "6f07b192-7862-4156-931f-058f5b30fb38",
+        "model": "composer-2.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

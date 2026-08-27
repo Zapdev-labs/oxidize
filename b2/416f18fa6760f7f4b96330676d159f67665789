@@ -1,0 +1,69 @@
+oxidize-cpp/src/model_llama.cpp
+  s_88c6f2b01b3fdf::t_04df1e54707c71 351-354,514-524,823-827,1335-1336,1338-1339
+oxidize-cpp/include/oxidize/prefetcher.hpp
+  s_88c6f2b01b3fdf::t_2da372fe6e6156 1-57
+oxidize-cpp/tests/autotune_test.cpp
+  s_430248eb416a35::t_ddd6631df9dc24 60-76,91-92,108-109,116
+oxidize-cpp/src/gguf.cpp
+  s_e80dc0f8a061ae::t_ea8f23b17c03b6 230,599,612,619,629,680,695,704,713-714,719,726,733,738,748,785-877
+  s_e80dc0f8a061ae::t_e4d764f38bf8d1 227-229
+  s_e80dc0f8a061ae::t_583efbe48de64f 231-233
+  s_430248eb416a35::t_65de7ceb92e663 224-226
+oxidize-cpp/include/oxidize/model_llama.hpp
+  s_430248eb416a35::t_cea32a33684419 34,131-133,228-230,239-240
+oxidize-cpp/src/cli/main.cpp
+  s_e80dc0f8a061ae::t_e414eae91e3db1 86,88-89,119-121,224-235,340-345,405-406,409
+  s_e80dc0f8a061ae::t_6a4f40a03288ff 85
+oxidize-cpp/include/oxidize/gguf.hpp
+  s_e80dc0f8a061ae::t_a52778ec819657 25-33,129,176-182,191,200-202,208
+oxidize-cpp/tests/gguf_mmap_policy_test.cpp
+  s_430248eb416a35::t_2a38ac69f1d92d 7-17,36
+oxidize-cpp/include/oxidize/autotune.hpp
+  s_430248eb416a35::t_b414d2203b3195 26
+oxidize-cpp/src/autotune.cpp
+  s_430248eb416a35::t_6863aafc87c103 97,102,117-124,170,188
+oxidize-cpp/src/prefetcher.cpp
+  s_430248eb416a35::t_751075cee95cf1 1-95
+oxidize-cpp/tests/prefetch_layer_map_test.cpp
+  s_280f98934b95fa::t_566419e04a629f 1-130
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.9",
+  "base_commit_sha": "b2416f18fa6760f7f4b96330676d159f67665789",
+  "prompts": {},
+  "sessions": {
+    "s_280f98934b95fa": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f249b-f976-77e2-a1cd-f32f7576be2a",
+        "model": "unknown"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_430248eb416a35": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f2496-7343-76c3-b81b-759493bcf109",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_88c6f2b01b3fdf": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f249a-7e6c-79c3-a26f-be88445ddc7c",
+        "model": "unknown"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_e80dc0f8a061ae": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f249a-97a7-7833-b82c-588bd9e0ec71",
+        "model": "unknown"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

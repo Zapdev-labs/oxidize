@@ -1,0 +1,87 @@
+oxidize-c/include/oxidize/batch_engine.h
+  s_96ddc277ba047e::t_04a1d101ba80a8 1-84
+oxidize-c/src/cluster/gpu_cluster.c
+  s_a4a70d38bf534f::t_800a8f32bd4cfc 1-270
+oxidize-c/tests/test_ssm.c
+  s_96ddc277ba047e::t_a047c4696096b4 1-200
+oxidize-c/include/oxidize/mtp.h
+  s_96ddc277ba047e::t_e91d1dd478537a 1-83
+oxidize-c/include/oxidize/mesh_progress.h
+  s_a4a70d38bf534f::t_f4806c44b1308c 1-96
+oxidize-c/tests/test_mtp.c
+  s_96ddc277ba047e::t_6f3fe9971e3d3e 1-196
+oxidize-c/src/model/batch_engine.c
+  s_96ddc277ba047e::t_d978821dc0f472 1-276
+oxidize-c/tests/test_gpu_cluster.c
+  s_a4a70d38bf534f::t_11d8bad7c97085 1-276
+oxidize-c/tests/test_mesh_progress.c
+  s_a4a70d38bf534f::t_62a50b462d37bc 1-4,6-284
+  s_a4a70d38bf534f::t_9fbc43d7dca3cf 5
+oxidize-c/tests/test_cross_validation.c
+  s_96ddc277ba047e::t_60627cc1407727 56
+  s_d8f8933f313623::t_d83bcf26b57649 1-55,57-200
+oxidize-c/src/mesh/mesh_progress.c
+  s_a4a70d38bf534f::t_bff2de32ed2581 1-164
+oxidize-c/include/oxidize/video_error.h
+  s_d8f8933f313623::t_012a763b1f7365 1-59
+oxidize-c/src/model/ssm.c
+  s_96ddc277ba047e::t_cccc8c117f7f40 1-272
+oxidize-c/include/oxidize/cross_validation.h
+  s_d8f8933f313623::t_8b392cbcd675c0 1-80
+oxidize-c/include/oxidize/gpu_cluster.h
+  s_a4a70d38bf534f::t_e8b442ee7b398d 1-99
+oxidize-c/src/video/video_error.c
+  s_d8f8933f313623::t_4442227b433195 82
+  s_d8f8933f313623::t_ce14df4d633e34 1-81,83-90
+oxidize-c/src/model/mtp.c
+  s_96ddc277ba047e::t_a89df1e7244fcd 1-175
+oxidize-c/tests/test_video_error.c
+  s_d8f8933f313623::t_e0484c17f232cd 1-204
+oxidize-c/include/oxidize/mesh_chat.h
+  s_a4a70d38bf534f::t_9d0ad797b1313f 1-91
+oxidize-c/src/validation/cross_validation.c
+  s_d8f8933f313623::t_73c45e5b0b7d5d 1-85
+oxidize-c/src/mesh/mesh_chat.c
+  s_a4a70d38bf534f::t_ed33edff196d5d 1-141
+oxidize-c/include/oxidize/ssm.h
+  s_96ddc277ba047e::t_00536ceb6ba062 1-91
+oxidize-c/tests/test_mesh_chat.c
+  s_a4a70d38bf534f::t_5ead6bf85b9221 1-289
+oxidize-c/tests/test_batch_engine.c
+  s_96ddc277ba047e::t_9f338a5e8a77d6 1-95,97-99,101-103,105-214
+  s_96ddc277ba047e::t_c194efb022eb6f 96,100,104
+oxidize-c/Makefile
+  s_96ddc277ba047e::t_97e812728638ac 29-30
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "6ffa78d0c8ad40d9da0317cdc41dbcc752516fce",
+  "prompts": {},
+  "sessions": {
+    "s_96ddc277ba047e": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "ea8ad242-b091-46af-96e0-114c0c67fea4",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_a4a70d38bf534f": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "26ab06c9-2b7b-43a6-aecd-326475932e75",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_d8f8933f313623": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "83d2d508-4cbb-4cff-a272-611f8c0b7dbd",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

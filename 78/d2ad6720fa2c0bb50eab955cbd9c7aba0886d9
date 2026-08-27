@@ -1,0 +1,26 @@
+oxidize-c/quant.c
+  s_0390e6dafe61ec::t_37a8e2754e5aef 57-60
+oxidize-c/model.c
+  s_0390e6dafe61ec::t_8adeb6f593a851 45-52
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "78d2ad6720fa2c0bb50eab955cbd9c7aba0886d9",
+  "prompts": {},
+  "humans": {
+    "h_cf4e3af6880df2": {
+      "author": "Jackson57279 <otdoges@proton.me>"
+    }
+  },
+  "sessions": {
+    "s_0390e6dafe61ec": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "96133f43-662e-4ded-bb13-a5bbf37ccf70",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

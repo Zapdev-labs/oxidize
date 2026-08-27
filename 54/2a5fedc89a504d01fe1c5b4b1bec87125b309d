@@ -1,0 +1,32 @@
+oxidize-c/tests/test_quantize_tool.c
+  s_5bec56e69286b9::t_de8eeee7faf8ab 64,68,110
+  s_5bec56e69286b9::t_8ed8e0ceb32c7b 5-6
+  s_5bec56e69286b9::t_3a43355705bf18 1-2,7-14,20-21,74
+  s_5bec56e69286b9::t_6a479de42c9e9a 15-19,22-63,65-67,69-73,112,114-119,122,124-160
+  s_5bec56e69286b9::t_e4a565a79e2afc 111
+oxidize-c/include/oxidize/quantize_tool.h
+  s_5bec56e69286b9::t_22c41122176713 2,8-9,11,43
+  s_5bec56e69286b9::t_de8eeee7faf8ab 26
+oxidize-c/src/util/quantize_tool.c
+  s_5bec56e69286b9::t_22c41122176713 141-142,147
+  s_5bec56e69286b9::t_6a479de42c9e9a 35,38-59,84,87-107,109-112,120,123-131,133,137-140,143-144,146,163-164,166-168,195-196,218-222,224-225,234,236-239,252-254,261-264,271,275-278,285-290,293-295,297-298,301-304,306-307,309,317-319,328-331
+  s_5bec56e69286b9::t_8ed8e0ceb32c7b 17,75-76
+  s_5bec56e69286b9::t_de8eeee7faf8ab 37,86,108,145,153,161-162,165,213,216-217,223,227,235,251,272,274,280-281,283,291,299-300,316,322-323,327
+  s_5bec56e69286b9::t_ae54a1e9cf0c0c 148
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "542a5fedc89a504d01fe1c5b4b1bec87125b309d",
+  "prompts": {},
+  "sessions": {
+    "s_5bec56e69286b9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f86ae-2366-7b80-8a79-8d8524df27c3",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

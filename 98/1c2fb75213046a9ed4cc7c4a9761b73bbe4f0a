@@ -1,0 +1,27 @@
+oxidize-c/src/main.c
+  s_1485afe700cb15::t_5d9efde35e0a43 345-346
+  s_1485afe700cb15::t_23de7af30e8b50 39-41
+  s_1485afe700cb15::t_b3e47382c898f3 217-221
+  s_1485afe700cb15::t_7c14f89adfce08 286-296
+  s_1485afe700cb15::t_e72ef28ac17ba3 18
+  s_1485afe700cb15::t_56e371e7c64ce5 310-325
+oxidize-c/tests/test_main.c
+  s_1485afe700cb15::t_1a75b5e79e4119 487
+  s_1485afe700cb15::t_0c775cf5e38907 488
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "981c2fb75213046a9ed4cc7c4a9761b73bbe4f0a",
+  "prompts": {},
+  "sessions": {
+    "s_1485afe700cb15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f08997b4-ac01-46a6-ab7a-a6ac459a0d39",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

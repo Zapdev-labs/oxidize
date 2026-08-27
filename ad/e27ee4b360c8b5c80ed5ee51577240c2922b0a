@@ -1,0 +1,22 @@
+oxidize-cli/Cargo.toml
+  s_7db891e64d27df::t_089764a342a9b3 21-23
+oxidize-cli/src/bin/batched_decode_bench.rs
+  s_7db891e64d27df::t_cd457791dcb345 91-94
+  s_7db891e64d27df::t_c342b676929084 1-90,95-152
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "ade27ee4b360c8b5c80ed5ee51577240c2922b0a",
+  "prompts": {},
+  "sessions": {
+    "s_7db891e64d27df": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d821c29a-5761-4949-8aad-c39dfe26c264",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

@@ -1,0 +1,42 @@
+oxidize-c/src/video/video_encoder.c
+  s_98d3c0165290f5::t_9193bfab1c9d9e 1-126
+oxidize-c/include/oxidize/mlx_inference.h
+  s_98d3c0165290f5::t_dcb122246ffe5a 1-82
+oxidize-c/src/model/mlx_inference.c
+  s_98d3c0165290f5::t_429bc02a4a89a6 1-127
+oxidize-c/src/video/video_config.c
+  s_98d3c0165290f5::t_bac2a651c1d3c0 1-122
+oxidize-c/tests/test_video_config.c
+  s_98d3c0165290f5::t_200d48bdfee1d1 1-157
+oxidize-c/include/oxidize/video_config.h
+  s_98d3c0165290f5::t_c9d3e11830d51d 72
+  s_98d3c0165290f5::t_baacbc07171545 1-71,73-101
+oxidize-c/src/video/video_decoder.c
+  s_98d3c0165290f5::t_ce0bd4729bd9a8 1-206
+oxidize-c/tests/test_mlx_inference.c
+  s_98d3c0165290f5::t_56dc4943d06f5f 1-188
+oxidize-c/include/oxidize/video_decoder.h
+  s_98d3c0165290f5::t_bf0bfb33d86700 1-93
+oxidize-c/tests/test_video_decoder.c
+  s_98d3c0165290f5::t_27e32d0d46fbed 1-211
+oxidize-c/include/oxidize/video_encoder.h
+  s_98d3c0165290f5::t_30397394915f00 1-79
+oxidize-c/tests/test_video_encoder.c
+  s_98d3c0165290f5::t_2f19437d63e03d 1-216
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "63b25f09ad9c6cc055416ed31fca38fd90db6f91",
+  "prompts": {},
+  "sessions": {
+    "s_98d3c0165290f5": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "ba29793a-442e-4dc1-9951-f7005558ff62",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

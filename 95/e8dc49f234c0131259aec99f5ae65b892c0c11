@@ -1,0 +1,26 @@
+oxidize-c/include/oxidize/batch_engine.h
+  s_96ddc277ba047e::t_c6e4514367abe1 41-52
+  s_96ddc277ba047e::t_c13f5eed6abcfd 81-84,86-88
+oxidize-c/src/model/batch_engine.c
+  s_96ddc277ba047e::t_72a88e6853da8e 41
+  s_96ddc277ba047e::t_51d0c2d38b4dd6 221-227,244-258
+oxidize-c/tests/test_batch_engine.c
+  s_96ddc277ba047e::t_0988a7cd7dc59e 215-240,244-246,248,250-252,255,257,259-312
+  s_96ddc277ba047e::t_7dad6c4dc42445 241-243,247,249,253-254,256,258
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "95e8dc49f234c0131259aec99f5ae65b892c0c11",
+  "prompts": {},
+  "sessions": {
+    "s_96ddc277ba047e": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "ea8ad242-b091-46af-96e0-114c0c67fea4",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

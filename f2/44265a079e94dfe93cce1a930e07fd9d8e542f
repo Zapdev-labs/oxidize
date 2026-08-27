@@ -1,0 +1,31 @@
+oxidize-core/src/video/config.rs
+  s_34ac2f46a02c82::t_a364f6979b2fcc 5,105
+oxidize-core/src/compute/tensor.rs
+  s_34ac2f46a02c82::t_a364f6979b2fcc 3226,3426-3427,3431,3436
+oxidize-core/benches/gemv_bench.rs
+  s_34ac2f46a02c82::t_a364f6979b2fcc 89,91-95,97-105,107-112
+oxidize-core/src/format/safetensors_to_gguf.rs
+  s_34ac2f46a02c82::t_a364f6979b2fcc 147-153,174-177,550-558,560-561,565
+oxidize-core/src/video/frame_sampler.rs
+  s_34ac2f46a02c82::t_a364f6979b2fcc 155-159
+oxidize-core/src/backends/cuda.rs
+  s_34ac2f46a02c82::t_a364f6979b2fcc 267
+oxidize-core/src/compute/quantization.rs
+  s_34ac2f46a02c82::t_a364f6979b2fcc 1511,1588-1589,1594,1599
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "f244265a079e94dfe93cce1a930e07fd9d8e542f",
+  "prompts": {},
+  "sessions": {
+    "s_34ac2f46a02c82": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "74ef7c23-ebaa-4408-ae12-87093af648d5",
+        "model": "default"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

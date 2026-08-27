@@ -1,0 +1,39 @@
+oxidize-c/src/core/vector.c
+  s_5bec56e69286b9::t_a318900b66d33f 88-94
+oxidize-c/src/core/simd.c
+  s_5bec56e69286b9::t_f27d3c0e52ec91 67,70-72,74-76
+oxidize-c/src/cli/main.c
+  s_5bec56e69286b9::t_f27d3c0e52ec91 105,107,210,236,248,253-254,262
+oxidize-c/tests/test_llama.c
+  s_5bec56e69286b9::t_bf78e27442d150 96-97
+oxidize-c/tests/test_simd.c
+  s_5bec56e69286b9::t_bf78e27442d150 46,59,129,135
+oxidize-c/src/compute/activation.c
+  s_5bec56e69286b9::t_f27d3c0e52ec91 76
+oxidize-c/include/oxidize/vector.h
+  s_5bec56e69286b9::t_a318900b66d33f 48-52
+oxidize-c/src/format/tokenizer_bpe.c
+  s_5bec56e69286b9::t_a318900b66d33f 559,579,590
+oxidize-c/src/format/tokenizer_tiktoken.c
+  s_5bec56e69286b9::t_a318900b66d33f 703,726
+oxidize-c/src/cli/args.h
+  s_5bec56e69286b9::t_f27d3c0e52ec91 17,27
+oxidize-c/src/cli/args.c
+  s_5bec56e69286b9::t_f27d3c0e52ec91 40,44,48
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "f7995ff44d89fb1ea82a4f26b7d094cffc532ed4",
+  "prompts": {},
+  "sessions": {
+    "s_5bec56e69286b9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f86ae-2366-7b80-8a79-8d8524df27c3",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

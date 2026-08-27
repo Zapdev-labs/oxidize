@@ -1,0 +1,21 @@
+oxidize-c/tests/test_tools.c
+  s_64546e8c0f94b6::t_8a736cc35dba0e 796-903,943
+oxidize-c/tools/convert.c
+  s_64546e8c0f94b6::t_1fa8d52a26efaf 11,14-21,645-649,670-672,678,683-686,1074,1097,1102,1179-1180,1312-1315,1318-1324,1327-1440,1445,1449-1452,1462,1556,1559-1561
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "f281abd361060fb5c82a9c2d2b3db681419b8af2",
+  "prompts": {},
+  "sessions": {
+    "s_64546e8c0f94b6": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "42a286d9-1c74-4405-9ad5-0e3e53c8f92f",
+        "model": "grok-4.5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

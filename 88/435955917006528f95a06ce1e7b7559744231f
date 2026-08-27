@@ -1,0 +1,19 @@
+golang/core/safetensors/safetensors.go
+  s_b884af7059773d::t_c7ae0c4205fc57 130,139
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "88435955917006528f95a06ce1e7b7559744231f",
+  "prompts": {},
+  "sessions": {
+    "s_b884af7059773d": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_17743e93dffecYdtaN3rU3Q2D6",
+        "model": "minimax-m3-free"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

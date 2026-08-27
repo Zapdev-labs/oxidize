@@ -1,0 +1,23 @@
+oxidize-cpp/include/oxidize/config.hpp
+  s_a72f83f4acb932::t_c34b3e500bfe19 34
+oxidize-cpp/src/model_llama.cpp
+  s_a72f83f4acb932::t_1fd57f72b64276 74
+scripts/bench_q4o_remote.sh
+  s_a72f83f4acb932::t_13ddb13865c598 1-160
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "bef47dc4c846cefff6225bd5caabea0f3162ee58",
+  "prompts": {},
+  "sessions": {
+    "s_a72f83f4acb932": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "f5e01a3f-5914-48bf-9df9-4d5f9288661b",
+        "model": "default"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

@@ -1,0 +1,43 @@
+oxidize-cpp/include/oxidize/quant.hpp
+  s_5b078de97b8925::t_8d52ae9cf0108c 69-73
+oxidize-cpp/include/oxidize/model_llama.hpp
+  s_5b078de97b8925::t_a67bab17baa4b4 183-184
+  s_5b078de97b8925::t_66d30d81013ab4 47-48,53-57
+  s_5b078de97b8925::t_0e04149cd001ef 155
+  s_5b078de97b8925::t_1fa0d94cea117b 99-101
+  s_5b078de97b8925::t_c2566159adddd8 148
+oxidize-cpp/src/quant.cpp
+  s_5b078de97b8925::t_ff15d24684a054 290-317
+  s_5b078de97b8925::t_8bf99bf4d233e6 698-721
+oxidize-cpp/src/cli/main.cpp
+  s_5b078de97b8925::t_042c1ea37825a2 147-148
+  s_5b078de97b8925::t_11ad128ba6b0f6 84
+  s_5b078de97b8925::t_0e26ed3c4c5156 66
+  s_5b078de97b8925::t_6913185d1eca63 242-248,251
+oxidize-cpp/src/model_llama.cpp
+  s_5b078de97b8925::t_a92d2519f6a8d2 233
+  s_5b078de97b8925::t_79a1c8188c6978 252-266
+  s_5b078de97b8925::t_e2d21e74ab9c03 185
+  s_5b078de97b8925::t_18e53f0edfad71 100
+  s_5b078de97b8925::t_d4bdc2c9603cde 279-280
+  s_5b078de97b8925::t_576bc14e8970d3 367-370
+  s_5b078de97b8925::t_93fc7ecaead3ee 299-302
+  s_5b078de97b8925::t_753645188465fe 789-790,792
+  s_5b078de97b8925::t_18bfa32ae8c8ff 335-340
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "9f7cac1a21d56362878a0ad67ef11bdad00b1a46",
+  "prompts": {},
+  "sessions": {
+    "s_5b078de97b8925": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a2fd32be-d532-4929-8226-7967c93996a1",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

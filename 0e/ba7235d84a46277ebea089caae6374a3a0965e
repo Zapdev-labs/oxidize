@@ -1,0 +1,19 @@
+oxidize-cpp/patches/numa-replicate-512vnni.patch
+  s_3026819419457c::t_f8761f28c21306 1-561
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.1",
+  "base_commit_sha": "0eba7235d84a46277ebea089caae6374a3a0965e",
+  "prompts": {},
+  "sessions": {
+    "s_3026819419457c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "412091e6-b493-4c08-85d8-c3cb1eb22658",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

@@ -1,0 +1,26 @@
+oxidize-c/tests/test_quant.c
+  s_5bec56e69286b9::t_e47dbc66ddc2e7 454-456,463
+  s_5bec56e69286b9::t_92fc7e702dc099 457-458,468-480
+  s_5bec56e69286b9::t_71cd2987ee62c6 481-482
+oxidize-c/src/compute/quantization.c
+  s_5bec56e69286b9::t_92fc7e702dc099 784
+  s_5bec56e69286b9::t_e47dbc66ddc2e7 2098-2104,2107,2109,2111-2125,2141-2142
+  s_5bec56e69286b9::t_dd744478a4a918 814-815
+  s_5bec56e69286b9::t_97ef2595c599d9 2056
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "222bfb47caeaccd1acdbea22e6980315ec77a9e2",
+  "prompts": {},
+  "sessions": {
+    "s_5bec56e69286b9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f86ae-2366-7b80-8a79-8d8524df27c3",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

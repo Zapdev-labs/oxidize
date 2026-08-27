@@ -1,0 +1,29 @@
+oxidize-core/src/model/layer_wise.rs
+  s_d8b5af6870ab84::t_824f2ad0124dcc 2074,2079-2083,2087
+  s_d8b5af6870ab84::t_3e89c8a651d36d 31-32,34-35
+  s_d8b5af6870ab84::t_73b2498f291541 2151
+  s_d8b5af6870ab84::t_dc8563ed6b20ce 1011
+  s_d8b5af6870ab84::t_f806cc45d4eab1 1283
+  s_d8b5af6870ab84::t_d2518a01ad01ac 2073,2075-2078,2084-2086,2088-2099
+  s_d8b5af6870ab84::t_93647078746547 608
+  s_d8b5af6870ab84::t_42b63aca804187 607
+  s_d8b5af6870ab84::t_4c7c73af06dc94 33,36-38
+  s_d8b5af6870ab84::t_973a69d9abc661 2149-2150
+  s_d8b5af6870ab84::t_c2f52be263e136 426-440
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "bb9ff269193ae550ea146452666327e6753285f1",
+  "prompts": {},
+  "sessions": {
+    "s_d8b5af6870ab84": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "747c40af-74b1-4c68-a8f8-83589cf844b7",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

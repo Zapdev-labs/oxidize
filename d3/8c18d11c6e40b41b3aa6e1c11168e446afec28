@@ -1,0 +1,51 @@
+oxidize-python/oxidize_python/core/model/generation.py
+  ai_agent 1-143
+oxidize-python/oxidize_python/core/model/llama.py
+  ai_agent 1-107
+oxidize-python/oxidize_python/core/model/advanced_features.py
+  ai_agent 1-298
+oxidize-python/oxidize_python/core/model/gguf_decoder_load.py
+  ai_agent 1-162
+oxidize-python/oxidize_python/core/model/inference_config.py
+  ai_agent 1-194
+oxidize-python/oxidize_python/core/model/lora.py
+  ai_agent 1-140
+oxidize-python/oxidize_python/core/model/llama_decoder_forward.py
+  ai_agent 1-321
+oxidize-python/oxidize_python/core/model/dflash.py
+  ai_agent 1-66
+oxidize-python/oxidize_python/core/model/loader.py
+  ai_agent 1-179
+oxidize-python/oxidize_python/core/model/layer_wise.py
+  ai_agent 1-74
+oxidize-python/oxidize_python/core/model/model.py
+  ai_agent 1-124
+oxidize-python/oxidize_python/core/model/offload.py
+  ai_agent 1-139
+oxidize-python/oxidize_python/core/model/test_sampling.py
+  ai_agent 1-10
+oxidize-python/oxidize_python/core/model/dflash_forward.py
+  ai_agent 1-74
+oxidize-python/oxidize_python/core/model/inference.py
+  ai_agent 1-110
+oxidize-python/oxidize_python/core/model/dflash_heuristic.py
+  ai_agent 1-133
+oxidize-python/oxidize_python/core/model/sampling.py
+  ai_agent 1-401
+oxidize-python/oxidize_python/core/model/__init__.py
+  ai_agent 1-91
+oxidize-python/oxidize_python/core/model/llama_decoder.py
+  ai_agent 1-121
+oxidize-python/oxidize_python/core/model/dflash_weights.py
+  ai_agent 1-161
+oxidize-python/oxidize_python/core/model/prefix_cache.py
+  ai_agent 1-112
+oxidize-python/oxidize_python/core/model/speculative.py
+  ai_agent 1-145
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "d38c18d11c6e40b41b3aa6e1c11168e446afec28",
+  "prompts": {}
+}

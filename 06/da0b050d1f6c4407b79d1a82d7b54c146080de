@@ -1,0 +1,52 @@
+oxidize-c/src/util/hf_hub.c
+  s_1951665117ef62::t_45fd119f6d6386 1289,1292-1295,1297-1299,1303
+oxidize-c/src/util/safetensors_to_gguf.c
+  s_1951665117ef62::t_526618dbfc57be 85
+oxidize-c/include/oxidize/benchmark.h
+  s_1951665117ef62::t_f3cb700cfb4e85 99-100,104-105
+oxidize-c/src/util/inspect.c
+  s_1951665117ef62::t_4eef83978e0283 737-740
+  s_1951665117ef62::t_fff55d005efe5c 314-315,317-320
+  s_1951665117ef62::t_16a182792ab966 533-550,555-556,558-559
+  s_1951665117ef62::t_8b18edd3fb1b4b 350-353
+oxidize-c/src/util/wasm_bridge.c
+  s_1951665117ef62::t_2afa477ba534b7 382-385,389-396,399-402
+  s_1951665117ef62::t_e7e7fc5513bc65 548-552
+  s_1951665117ef62::t_bc4dd1953ab2ff 73-75
+  s_1951665117ef62::t_a762e994f92f53 54-56
+  s_1951665117ef62::t_e2ce8ed0eead73 336-342
+  s_1951665117ef62::t_a2379b7497cadc 683
+  s_1951665117ef62::t_eb8ce944bdeba3 202-208
+  s_1951665117ef62::t_f27ae217576741 422-424
+  s_1951665117ef62::t_59c116aa188817 40
+  s_1951665117ef62::t_b4d63bd6615ddb 325
+  s_1951665117ef62::t_9282e2d8a38851 403
+.github/workflows/oxidize-rust-ci.yml
+  s_1951665117ef62::t_2192064a22ce1b 33
+oxidize-c/include/oxidize/wasm.h
+  s_1951665117ef62::t_3a018723761286 189-191
+  s_1951665117ef62::t_7db7c7ebe2fe66 123-143
+  s_1951665117ef62::t_6d1baeff9e377c 213-223
+  s_1951665117ef62::t_165d6beb00ce5e 199-204
+oxidize-c/tests/test_safetensors_to_gguf.c
+  s_1951665117ef62::t_1bfbf394e96aaf 44
+.github/workflows/oxidize-c-ci.yml
+  s_1951665117ef62::t_b4da4affb59075 80
+  s_1951665117ef62::t_0a3774d2ffe48b 85
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "06da0b050d1f6c4407b79d1a82d7b54c146080de",
+  "prompts": {},
+  "sessions": {
+    "s_1951665117ef62": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9bf92e83-64d5-4f0d-84d0-14ba23f93e77",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

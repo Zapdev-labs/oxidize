@@ -1,0 +1,32 @@
+oxidize-c/src/compute/activation.c
+  s_96ddc277ba047e::t_f7c7b910eb4bdc 44-62
+oxidize-c/src/model/llama.c
+  s_96ddc277ba047e::t_f46c0f2e2e93ee 656,658-660
+  s_96ddc277ba047e::t_2bc9f8c49f2407 720-722
+  s_96ddc277ba047e::t_08fc0f92bda091 147-156
+  s_96ddc277ba047e::t_f48c465542e6e5 514-515,518-522
+  s_96ddc277ba047e::t_a76af21d75c3a9 692,694-696
+oxidize-c/include/oxidize/llama.h
+  s_96ddc277ba047e::t_0d452098171c4e 53-54
+oxidize-c/tests/test_llama.c
+  s_96ddc277ba047e::t_6316b19705dc3d 211-213,216-221,223-226,228-236,238-252
+  s_96ddc277ba047e::t_0091cff29abd02 214-215,222,227,237
+oxidize-c/include/oxidize/activation.h
+  s_96ddc277ba047e::t_b87b7a66bbafcc 35-46
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "0d7c44f789e5850ee09cdca2f585b7044dd2e7bb",
+  "prompts": {},
+  "sessions": {
+    "s_96ddc277ba047e": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "ea8ad242-b091-46af-96e0-114c0c67fea4",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

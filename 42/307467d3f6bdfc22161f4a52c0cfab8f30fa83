@@ -1,0 +1,20 @@
+oxidize-core/src/compute/tensor/kernels.rs
+  s_5b078de97b8925::t_26bcc85167aceb 4550-4562
+  s_5b078de97b8925::t_7852316ccc99b1 1898-1901,1904-1936,1938-1944,1948-1970,1972-1997,1999-2007,2009
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "42307467d3f6bdfc22161f4a52c0cfab8f30fa83",
+  "prompts": {},
+  "sessions": {
+    "s_5b078de97b8925": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a2fd32be-d532-4929-8226-7967c93996a1",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

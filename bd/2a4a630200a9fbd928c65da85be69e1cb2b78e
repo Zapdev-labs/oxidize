@@ -1,0 +1,47 @@
+oxidize-cli/src/bin/diffusion_gemma_cpu_bench.rs
+  s_7d5e02439dd5e7::t_547af88065fe25 136
+  s_c4baeebdf6441a::t_45b4a58efda35d 2,34-37,77-78,131-132,141-142,159-160,165,176-177,179
+  s_7d5e02439dd5e7::t_11a77e94a63160 1,3-33,38-76,79-130,133-135,137-140,143-158,161-164,166-175,178
+.firecrawl/g4a.json
+  s_b5a528c60b37ce::t_9dc7eed9996937 1
+.firecrawl/g4dd.json
+  s_b5a528c60b37ce::t_4c28b0e7a5cc00 1
+.firecrawl/lcpp.json
+  s_b5a528c60b37ce::t_1a0ee0e4053274 1
+.firecrawl/g4b.json
+  s_b5a528c60b37ce::t_9dc7eed9996937 1
+.firecrawl/lcpp2.json
+  s_b5a528c60b37ce::t_1a0ee0e4053274 1
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "bd2a4a630200a9fbd928c65da85be69e1cb2b78e",
+  "prompts": {},
+  "sessions": {
+    "s_7d5e02439dd5e7": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "052e1d3b-8bb9-4448-8b3a-f5c3971410c9",
+        "model": "custom:Kimi-K2.7-[Kimi-Code]-9"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_b5a528c60b37ce": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "829165af-fd1f-4897-b8bb-1bc8b1224031",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_c4baeebdf6441a": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "37ebe7c4-a4d2-487c-aacb-1da0aac69b9a",
+        "model": "custom:Kimi-K2.7-[Kimi-Code]-9"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

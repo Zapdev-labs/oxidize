@@ -1,0 +1,101 @@
+oxidize-cpp/include/oxidize/model_llama.hpp
+  s_a72f83f4acb932::t_7286888fca2f05 121,128
+  s_a72f83f4acb932::t_397bf6f2538de3 49,56
+  s_a72f83f4acb932::t_14a6c310c97e81 91-93,122-127
+oxidize-prune/src/wanda.rs
+  s_a72f83f4acb932::t_2c612dd5cede76 513-515
+  s_a72f83f4acb932::t_00d5e51e7cc9e9 512
+oxidize-c/quant.c
+  s_a72f83f4acb932::t_b1b06e366f61ac 57,72-74,125-127,136,163-165,629-632,688,717-735
+oxidize-cpp/src/quant.cpp
+  s_a72f83f4acb932::t_cf2bd6ad0aa89e 1179
+  s_a72f83f4acb932::t_b97a8cbe310ff9 1014-1015
+  s_a72f83f4acb932::t_93bc68ea0d972a 1072-1073
+  s_a72f83f4acb932::t_8c95936b558440 1203-1205
+  s_a72f83f4acb932::t_027be0a2ba620a 1019
+  s_a72f83f4acb932::t_a1f13c4c490623 1166-1168
+  s_a72f83f4acb932::t_0329505283c528 1207-1210,1212-1215
+  s_a72f83f4acb932::t_ea752f97032ac0 1024
+  s_a72f83f4acb932::t_d34522b03af7a2 1082
+  s_a72f83f4acb932::t_ba9344f7178835 1077
+  s_a72f83f4acb932::t_119afe4e3f75e5 1173-1178,1180-1193
+oxidize-quantize/src/main.rs
+  s_a72f83f4acb932::t_1f6708badba908 408-411,414-416,586-588,962-975,981-983
+  s_a72f83f4acb932::t_5aac775d272d55 417
+  s_a72f83f4acb932::t_26ada5d9f0c28d 624-626,652-654
+  s_a72f83f4acb932::t_2306e3c6644dca 412-413
+  s_a72f83f4acb932::t_5b68afc0c50d91 129-131
+  s_a72f83f4acb932::t_40fa1f7d2c7fc5 422,834-840
+  s_a72f83f4acb932::t_157b35f9d6955b 405-407
+  s_a72f83f4acb932::t_f4ee73226bc601 418-421
+  s_a72f83f4acb932::t_3e72d0dd9a8b72 423-424
+  s_a72f83f4acb932::t_f359da0fc5d60c 832-833
+  s_a72f83f4acb932::t_9d2a36fbf5bb56 959-961
+  s_a72f83f4acb932::t_546e079bb7651e 400-404,861,868,885-886,919-944,953-958,993,997-1005
+oxidize-cpp/src/tensor_cpu.cpp
+  s_a72f83f4acb932::t_432012eb78a6b7 389
+  s_a72f83f4acb932::t_2a8638958fa1ff 933,947,1036,1072
+  s_a72f83f4acb932::t_42d17d098781b7 697
+  s_a72f83f4acb932::t_1fe672633b23b8 708-710
+oxidize-c/oc.h
+  s_a72f83f4acb932::t_552d8d3f2bc813 22-24
+oxidize-cpp/include/oxidize/config.hpp
+  s_a72f83f4acb932::t_64c79ffff2ddea 34-37
+oxidize-core/src/compute/quantization/quant_dispatch.rs
+  s_a72f83f4acb932::t_1e67daaa6297de 30-41
+  s_a72f83f4acb932::t_c64bc0e6e0c30a 134-136
+oxidize-c/kernels.c
+  s_a72f83f4acb932::t_6c208f92e930c5 577,593
+oxidize-cpp/src/model_llama.cpp
+  s_a72f83f4acb932::t_b9bec01441c535 75,77,80,335,347,602-609
+  s_a72f83f4acb932::t_3a4ac0cc02eb94 589-599,611-615,667-669,673-683,685-689
+  s_a72f83f4acb932::t_55785e527c6d59 74
+  s_a72f83f4acb932::t_bc89732cc6fd6e 457-480
+oxidize-core/src/compute/quantization.rs
+  s_a72f83f4acb932::t_3587780f59f09f 501,503-504
+  s_a72f83f4acb932::t_3e6f03e218dfd8 255-257
+  s_a72f83f4acb932::t_0971c97f4f829b 502
+  s_a72f83f4acb932::t_9e3c7e84b301e9 311,356,359-368
+  s_a72f83f4acb932::t_96d077a1a5bf62 509
+  s_a72f83f4acb932::t_26965b92451a20 308-310
+  s_a72f83f4acb932::t_076b0b8d25093b 312-314
+  s_a72f83f4acb932::t_4fab01f35809c2 354-355
+  s_a72f83f4acb932::t_1320e9e519c138 357-358
+  s_a72f83f4acb932::t_0142c0fd0718ed 369
+  s_a72f83f4acb932::t_658d48e015dc9d 510
+  s_a72f83f4acb932::t_5b4332ca702915 300-307,342
+oxidize-core/src/compute/quantization/quant_simple.rs
+  s_a72f83f4acb932::t_0f5c0329245fb4 99-109,112,115,117,242,282
+  s_a72f83f4acb932::t_eae6094bb31680 239-241
+  s_a72f83f4acb932::t_0f05bc6b5317aa 243-245,279-281
+  s_a72f83f4acb932::t_1a17255ad48a61 283-285
+  s_a72f83f4acb932::t_63fc9aa0df5805 120-122,124,153,213-238,246-278,286-288
+oxidize-core/src/format/gguf.rs
+  s_a72f83f4acb932::t_b7f4121f630967 401-403
+  s_a72f83f4acb932::t_19a3c862b9eaee 303-305
+scripts/bench_al5_remote.sh
+  s_a72f83f4acb932::t_436e64962f67de 75,77-78
+  s_a72f83f4acb932::t_4a40bdfe219aef 71
+  s_a72f83f4acb932::t_5cb196847edcda 50-61
+oxidize-core/src/compute/quantization/al_family.rs
+  s_a72f83f4acb932::t_00fc065d434f42 224
+  s_a72f83f4acb932::t_fa3909f2a07099 1-223,225-299
+scripts/qwen30_bf16_al5_remote.sh
+  s_a72f83f4acb932::t_75e07ffe2afee7 1-55
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "443d8771379994233d5b3737da38785c0d6ce0ff",
+  "prompts": {},
+  "sessions": {
+    "s_a72f83f4acb932": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "f5e01a3f-5914-48bf-9df9-4d5f9288661b",
+        "model": "default"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

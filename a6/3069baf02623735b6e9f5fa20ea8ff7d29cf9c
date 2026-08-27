@@ -1,0 +1,30 @@
+oxidize-c/src/model/llama_swap.c
+  s_96ddc277ba047e::t_50e0f1e7825006 111-114
+  s_96ddc277ba047e::t_c3beeaa8ad8af4 169-170
+  s_96ddc277ba047e::t_da898b7bdfd732 3-4,6,13-18
+  s_96ddc277ba047e::t_a3b76d3109d0c7 64-91,94-99
+  s_96ddc277ba047e::t_841e0eda7b3624 19
+oxidize-c/tests/test_llama_swap.c
+  s_96ddc277ba047e::t_22a80f2e97a1cc 116-117,121,126,131-132,137,141
+  s_96ddc277ba047e::t_d6411f195ff77b 101-102,106,111
+  s_96ddc277ba047e::t_bf2d5e39110c2c 5-28
+  s_96ddc277ba047e::t_bf7a00dc661c2b 81-82,86,90-94,96
+  s_96ddc277ba047e::t_c704ed54837101 187-188,192,195,199,204-205,209,213,218-219,223,228-238
+  s_96ddc277ba047e::t_964e8e29f17da3 239
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "a63069baf02623735b6e9f5fa20ea8ff7d29cf9c",
+  "prompts": {},
+  "sessions": {
+    "s_96ddc277ba047e": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "ea8ad242-b091-46af-96e0-114c0c67fea4",
+        "model": "custom:GLM-5.2-[TokenRouter]-21"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
