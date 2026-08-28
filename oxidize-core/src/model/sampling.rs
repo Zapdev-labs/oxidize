@@ -324,12 +324,12 @@ pub fn sample_with_repetition_and_grammar(
         .copied()
         .max_by(|a, b| a.total_cmp(b))
         .ok_or(SamplingError::EmptyLogits)?;
-    const MAX_TOP_K: usize = 1024;
-    let top_k_limit = config
-        .top_k
-        .map(|top_k| top_k.min(MAX_TOP_K))
-        .filter(|top_k| *top_k < adjusted_logits.len());
+    const MAX_TOP_K_HEAP: usize = 1_048_576;
+    let top_k_limit = config.top_k.filter(|top_k| *top_k < adjusted_logits.len());
     let mut indexed_probs = if let Some(top_k) = top_k_limit {
+        if top_k > MAX_TOP_K_HEAP {
+            return Err(SamplingError::InvalidTopK);
+        }
         let mut raw_sum = 0.0_f32;
         let mut top_candidates: Vec<(usize, f32)> = Vec::with_capacity(top_k);
         for (idx, logit) in adjusted_logits.iter().copied().enumerate() {
@@ -1018,6 +1018,21 @@ mod tests {
         )
         .expect("sampling should succeed");
         assert!(token <= 1);
+    }
+
+    #[test]
+    fn top_k_rejects_pathological_heap_size() {
+        let logits = vec![1.0; 1_048_578];
+        let err = sample(
+            &logits,
+            SamplingConfig {
+                top_k: Some(1_048_577),
+                ..SamplingConfig::default()
+            },
+            0.5,
+        )
+        .expect_err("pathological top_k must not allocate");
+        assert_eq!(err, SamplingError::InvalidTopK);
     }
 
     #[test]
