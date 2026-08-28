@@ -27,6 +27,13 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#ifndef NI_MAXHOST
+#define NI_MAXHOST 1025
+#endif
+#ifndef NI_MAXSERV
+#define NI_MAXSERV 32
+#endif
+
 static void copy_str(char *dst, size_t cap, const char *src)
 {
     if (!dst || cap == 0 || !src) return;
