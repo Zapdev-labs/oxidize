@@ -1,4 +1,33 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::cmp::{Ordering, Reverse};
+use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
+
+#[derive(Copy, Clone)]
+struct TopKCandidate {
+    idx: usize,
+    prob: f32,
+}
+
+impl PartialEq for TopKCandidate {
+    fn eq(&self, other: &Self) -> bool {
+        self.idx == other.idx && self.prob.total_cmp(&other.prob) == Ordering::Equal
+    }
+}
+
+impl Eq for TopKCandidate {}
+
+impl PartialOrd for TopKCandidate {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for TopKCandidate {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.prob
+            .total_cmp(&other.prob)
+            .then(self.idx.cmp(&other.idx))
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum GrammarSymbol {
@@ -324,27 +353,28 @@ pub fn sample_with_repetition_and_grammar(
         .copied()
         .max_by(|a, b| a.total_cmp(b))
         .ok_or(SamplingError::EmptyLogits)?;
-    let top_k_limit = config.top_k.filter(|top_k| *top_k < adjusted_logits.len());
+    const MAX_PARTIAL_TOP_K: usize = 1024;
+    let top_k_limit = config.top_k.filter(|top_k| {
+        *top_k < adjusted_logits.len() && *top_k <= MAX_PARTIAL_TOP_K
+    });
     let mut indexed_probs = if let Some(top_k) = top_k_limit {
         let mut raw_sum = 0.0_f32;
-        let mut top_candidates: Vec<(usize, f32)> = Vec::with_capacity(top_k);
+        let mut heap: BinaryHeap<Reverse<TopKCandidate>> = BinaryHeap::with_capacity(top_k);
         for (idx, logit) in adjusted_logits.iter().copied().enumerate() {
             let prob = ((logit - max_logit) / config.temperature).exp();
             raw_sum += prob;
-            if top_candidates.len() < top_k {
-                top_candidates.push((idx, prob));
-            } else if let Some((min_idx, _)) = top_candidates
-                .iter()
-                .enumerate()
-                .min_by(|a, b| a.1.1.total_cmp(&b.1.1))
-                && prob > top_candidates[min_idx].1
-            {
-                top_candidates[min_idx] = (idx, prob);
+            heap.push(Reverse(TopKCandidate { idx, prob }));
+            if heap.len() > top_k {
+                heap.pop();
             }
         }
         if raw_sum <= 0.0 || !raw_sum.is_finite() {
             return greedy(logits);
         }
+        let mut top_candidates: Vec<(usize, f32)> = heap
+            .into_iter()
+            .map(|Reverse(c)| (c.idx, c.prob))
+            .collect();
         for (_, p) in &mut top_candidates {
             *p /= raw_sum;
         }
@@ -1014,6 +1044,36 @@ mod tests {
         )
         .expect("sampling should succeed");
         assert!(token <= 1);
+    }
+
+    #[test]
+    fn top_k_above_partial_heap_still_keeps_requested_k() {
+        let mut logits = vec![0.0; 3000];
+        logits[2000] = 12.0;
+        let token = sample(
+            &logits,
+            SamplingConfig {
+                top_k: Some(2048),
+                ..SamplingConfig::default()
+            },
+            0.0,
+        )
+        .expect("sampling should succeed");
+        assert_eq!(token, 2000);
+    }
+
+    #[test]
+    fn top_k_caps_allocation_from_untrusted_config() {
+        let token = sample(
+            &[5.0, 4.0, 3.0, 2.0],
+            SamplingConfig {
+                top_k: Some(usize::MAX),
+                ..SamplingConfig::default()
+            },
+            0.99,
+        )
+        .expect("sampling should succeed");
+        assert!(token <= 3);
     }
 
     #[test]

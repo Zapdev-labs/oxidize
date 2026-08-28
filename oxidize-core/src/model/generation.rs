@@ -49,6 +49,10 @@ impl From<SamplingError> for GenerationError {
     }
 }
 
+/// Upper bound on draft tokens per speculative step.
+/// Untrusted configs must not drive unbounded `Vec::with_capacity`.
+pub const MAX_DRAFT_TOKENS_PER_STEP: usize = 64;
+
 /// Speculative generation configuration.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpeculativeGenerationConfig {
@@ -57,6 +61,12 @@ pub struct SpeculativeGenerationConfig {
     pub draft_tokens_per_step: usize,
     /// QuantSpec: draft with hierarchical I8 TurboQuant KV (self-speculative MTP path).
     pub quantspec_draft_kv: bool,
+}
+
+impl SpeculativeGenerationConfig {
+    fn capped_draft_tokens_per_step(&self) -> usize {
+        self.draft_tokens_per_step.min(MAX_DRAFT_TOKENS_PER_STEP)
+    }
 }
 
 impl Default for SpeculativeGenerationConfig {
@@ -113,7 +123,7 @@ impl<'a, T: Model + ?Sized> SpeculativeGenerationStream<'a, T> {
             .map(Vec::len)
             .max()
             .unwrap_or(0);
-        let draft_tokens_per_step = config.draft_tokens_per_step;
+        let draft_tokens_per_step = config.capped_draft_tokens_per_step();
         Self {
             target_model: Some(target_model),
             draft_model: Some(draft_model),
@@ -127,7 +137,7 @@ impl<'a, T: Model + ?Sized> SpeculativeGenerationStream<'a, T> {
             max_stop_sequence_len,
             random: Box::new(random),
             draft_token_buffer: Vec::with_capacity(draft_tokens_per_step),
-            emit_buffer: VecDeque::with_capacity(draft_tokens_per_step + 1),
+            emit_buffer: VecDeque::with_capacity(draft_tokens_per_step.saturating_add(1)),
             last_token_pending_kv: false,
             pending_target_logits: None,
             drafted_tokens: 0,
@@ -205,7 +215,8 @@ impl<'a, T: Model + ?Sized> SpeculativeGenerationStream<'a, T> {
             self.zero_acceptance_rounds = 0;
         }
 
-        let enough_samples = self.drafted_tokens >= self.config.draft_tokens_per_step.max(1) * 4;
+        let enough_samples =
+            self.drafted_tokens >= self.config.capped_draft_tokens_per_step().max(1) * 4;
         let acceptance_rate = if self.drafted_tokens == 0 {
             1.0
         } else {
@@ -236,7 +247,7 @@ impl<'a, T: Model + ?Sized> SpeculativeGenerationStream<'a, T> {
         })?;
 
         // 1. Draft model generates K tokens autoregressively.
-        let k = self.config.draft_tokens_per_step;
+        let k = self.config.capped_draft_tokens_per_step();
         let mut draft_tokens = std::mem::take(&mut self.draft_token_buffer);
         draft_tokens.clear();
         let mut draft_logits = Vec::with_capacity(k);
@@ -442,7 +453,7 @@ impl<'a> MtpGenerationStream<'a> {
             .map(Vec::len)
             .max()
             .unwrap_or(0);
-        let draft_tokens_per_step = config.draft_tokens_per_step;
+        let draft_tokens_per_step = config.capped_draft_tokens_per_step();
         Self {
             target_model: Some(target_model),
             session: Some(session),
@@ -455,7 +466,7 @@ impl<'a> MtpGenerationStream<'a> {
             max_stop_sequence_len,
             random: Box::new(random),
             draft_token_buffer: Vec::with_capacity(draft_tokens_per_step),
-            emit_buffer: VecDeque::with_capacity(draft_tokens_per_step + 1),
+            emit_buffer: VecDeque::with_capacity(draft_tokens_per_step.saturating_add(1)),
             pending_target_logits: None,
             drafted_tokens: 0,
             accepted_draft_tokens: 0,
@@ -496,7 +507,8 @@ impl<'a> MtpGenerationStream<'a> {
             self.zero_acceptance_rounds = 0;
         }
 
-        let enough_samples = self.drafted_tokens >= self.config.draft_tokens_per_step.max(1) * 4;
+        let enough_samples =
+            self.drafted_tokens >= self.config.capped_draft_tokens_per_step().max(1) * 4;
         let acceptance_rate = if self.drafted_tokens == 0 {
             1.0
         } else {
@@ -558,7 +570,7 @@ impl<'a> MtpGenerationStream<'a> {
             )));
         }
 
-        let k = self.config.draft_tokens_per_step.max(1);
+        let k = self.config.capped_draft_tokens_per_step().max(1);
         let mut draft_tokens = std::mem::take(&mut self.draft_token_buffer);
         draft_tokens.clear();
         let (sampled_draft_tokens, draft_logits) = target_model
@@ -738,7 +750,7 @@ impl<'a> Eagle3GenerationStream<'a> {
             .map(Vec::len)
             .max()
             .unwrap_or(0);
-        let draft_tokens_per_step = config.draft_tokens_per_step;
+        let draft_tokens_per_step = config.capped_draft_tokens_per_step();
         Self {
             target_model: Some(target_model),
             draft_model: Some(draft_model),
@@ -752,7 +764,7 @@ impl<'a> Eagle3GenerationStream<'a> {
             max_stop_sequence_len,
             random: Box::new(random),
             draft_token_buffer: Vec::with_capacity(draft_tokens_per_step),
-            emit_buffer: VecDeque::with_capacity(draft_tokens_per_step + 1),
+            emit_buffer: VecDeque::with_capacity(draft_tokens_per_step.saturating_add(1)),
             last_token_pending_kv: false,
             pending_target_logits: None,
             drafted_tokens: 0,
@@ -793,7 +805,8 @@ impl<'a> Eagle3GenerationStream<'a> {
         } else {
             self.zero_acceptance_rounds = 0;
         }
-        let enough_samples = self.drafted_tokens >= self.config.draft_tokens_per_step.max(1) * 4;
+        let enough_samples =
+            self.drafted_tokens >= self.config.capped_draft_tokens_per_step().max(1) * 4;
         let acceptance_rate = if self.drafted_tokens == 0 {
             1.0
         } else {
@@ -866,7 +879,7 @@ impl<'a> Eagle3GenerationStream<'a> {
             .encode_features(&features)
             .map_err(|e| GenerationError::Model(ModelError::InferenceFailed(e)))?;
 
-        let k = self.config.draft_tokens_per_step;
+        let k = self.config.capped_draft_tokens_per_step();
         let mut draft_tokens = std::mem::take(&mut self.draft_token_buffer);
         draft_tokens.clear();
         let mut draft_logits = Vec::with_capacity(k);
@@ -1422,5 +1435,18 @@ mod tests {
         let items = collect_stream(&mut stream);
         assert_eq!(items, vec![Ok(5)]);
         assert_eq!(*batch_sizes.borrow(), vec![2, 2, 1]);
+    }
+
+    #[test]
+    fn caps_untrusted_draft_tokens_per_step() {
+        let cfg = SpeculativeGenerationConfig {
+            draft_tokens_per_step: usize::MAX,
+            ..SpeculativeGenerationConfig::default()
+        };
+        assert_eq!(
+            cfg.capped_draft_tokens_per_step(),
+            MAX_DRAFT_TOKENS_PER_STEP
+        );
+        assert!(MAX_DRAFT_TOKENS_PER_STEP < 1024);
     }
 }

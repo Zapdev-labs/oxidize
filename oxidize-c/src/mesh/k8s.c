@@ -12,8 +12,12 @@
  * silently claiming success.
  */
 #define _POSIX_C_SOURCE 200809L
+#ifdef __APPLE__
+#define _DARWIN_C_SOURCE 1
+#endif
 #include "oxidize/k8s.h"
 
+#include <arpa/inet.h>
 #include <errno.h>
 #include <netdb.h>
 #include <netinet/in.h>
@@ -22,6 +26,13 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
+
+#ifndef NI_MAXHOST
+#define NI_MAXHOST 1025
+#endif
+#ifndef NI_MAXSERV
+#define NI_MAXSERV 32
+#endif
 
 static void copy_str(char *dst, size_t cap, const char *src)
 {
@@ -116,42 +127,147 @@ bool oc_k8s_is_available(const OcK8sCluster *cluster)
     return cluster ? cluster->available : false;
 }
 
+static bool host_char_ok(unsigned char c)
+{
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+        || (c >= '0' && c <= '9') || c == '.' || c == '-' || c == ':'
+        || c == '[' || c == ']' || c == '%';
+}
+
+static bool copy_validated_host(const char *src, size_t len, char *dst,
+                                  size_t cap)
+{
+    if (!src || len == 0 || !dst || cap == 0 || len >= cap) return false;
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)src[i];
+        if (!host_char_ok(c)) return false;
+        dst[i] = (char)c;
+    }
+    dst[len] = '\0';
+    return true;
+}
+
+static bool copy_validated_port(const char *src, size_t len, char *dst,
+                                  size_t cap)
+{
+    if (!src || len == 0 || !dst || cap < 2) return false;
+    unsigned long v = 0;
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)src[i];
+        if (c < '0' || c > '9') return false;
+        v = v * 10ul + (unsigned)(c - '0');
+        if (v > 65535ul) return false;
+    }
+    if (v == 0) return false;
+    int n = snprintf(dst, cap, "%lu", v);
+    return n > 0 && (size_t)n < cap;
+}
+
+static bool strip_ipv6_brackets(char *host)
+{
+    size_t n = strlen(host);
+    if (n < 2 || host[0] != '[' || host[n - 1] != ']') return host[0] != '\0';
+    memmove(host, host + 1, n - 2);
+    host[n - 2] = '\0';
+    return host[0] != '\0';
+}
+
+static bool parse_url_hostport(const char *p, char *host, size_t host_cap,
+                                 char *port, size_t port_cap)
+{
+    const char *host_start;
+    const char *host_end;
+    const char *port_start = NULL;
+
+    if (*p == '[') {
+        const char *rbr = strchr(p, ']');
+        if (!rbr || rbr == p + 1) return false;
+        host_start = p + 1;
+        host_end = rbr;
+        if (rbr[1] == ':')
+            port_start = rbr + 2;
+        else if (rbr[1] != '\0' && rbr[1] != '/')
+            return false;
+    } else {
+        const char *slash = strchr(p, '/');
+        const char *colon = strchr(p, ':');
+        if (slash && colon && colon > slash) colon = NULL;
+        host_start = p;
+        host_end = colon ? colon : (slash ? slash : p + strlen(p));
+        if (colon) port_start = colon + 1;
+    }
+
+    size_t hlen = (size_t)(host_end - host_start);
+    if (!copy_validated_host(host_start, hlen, host, host_cap)) return false;
+    if (port_start) {
+        size_t plen = 0;
+        while (port_start[plen] && port_start[plen] != '/') plen++;
+        if (!copy_validated_port(port_start, plen, port, port_cap)) return false;
+    } else if (snprintf(port, port_cap, "80") < 0) {
+        return false;
+    }
+    return port[0] != '\0';
+}
+
 /* Resolve the plaintext API base as host + port. Returns false if no
- * endpoint is configured. */
+ * endpoint is configured. Env values are allowlisted so they cannot be
+ * copied into the HTTP request as-is (CodeQL CWE-497). */
 static bool k8s_api_endpoint(char *host, size_t host_cap, char *port,
                              size_t port_cap)
 {
     const char *url = getenv("OC_K8S_API_URL");
     if (url && *url) {
-        /* Accept "http://host:port", "host:port", or "host". */
         const char *p = strstr(url, "://");
         p = p ? p + 3 : url;
-        const char *colon = strrchr(p, ':');
-        const char *slash = strchr(p, '/');
-        if (slash && colon && colon > slash) colon = NULL; /* colon in path */
-        size_t hlen = colon ? (size_t)(colon - p)
-                            : (slash ? (size_t)(slash - p) : strlen(p));
-        if (hlen == 0 || hlen >= host_cap) return false;
-        memcpy(host, p, hlen);
-        host[hlen] = '\0';
-        if (colon) {
-            size_t plen = 0;
-            const char *q = colon + 1;
-            while (q[plen] && q[plen] != '/' && plen + 1 < port_cap) plen++;
-            memcpy(port, q, plen);
-            port[plen] = '\0';
-        } else {
-            snprintf(port, port_cap, "80");
-        }
-        return port[0] != '\0';
+        return parse_url_hostport(p, host, host_cap, port, port_cap);
     }
 
     const char *h = getenv("KUBERNETES_SERVICE_HOST");
     const char *pt = getenv("KUBERNETES_SERVICE_PORT");
     if (!h || !*h) return false;
-    snprintf(host, host_cap, "%s", h);
-    snprintf(port, port_cap, "%s", (pt && *pt) ? pt : "443");
+    if (!copy_validated_host(h, strlen(h), host, host_cap)) return false;
+    if (!strip_ipv6_brackets(host)) return false;
+    if (pt && *pt) {
+        if (!copy_validated_port(pt, strlen(pt), port, port_cap)) return false;
+    } else if (snprintf(port, port_cap, "443") < 0) {
+        return false;
+    }
     return true;
+}
+
+static bool peer_is_loopback(int fd)
+{
+    struct sockaddr_storage ss;
+    socklen_t len = sizeof(ss);
+    if (getpeername(fd, (struct sockaddr *)&ss, &len) != 0) return false;
+    if (ss.ss_family == AF_INET) {
+        const struct sockaddr_in *in = (const struct sockaddr_in *)&ss;
+        return ntohl(in->sin_addr.s_addr) == INADDR_LOOPBACK;
+    }
+    if (ss.ss_family == AF_INET6) {
+        const struct sockaddr_in6 *in6 = (const struct sockaddr_in6 *)&ss;
+        return IN6_IS_ADDR_LOOPBACK(&in6->sin6_addr);
+    }
+    return false;
+}
+
+/* HTTP Host from the connected peer, not from getenv. */
+static bool format_http_host(int fd, char *out, size_t cap)
+{
+    struct sockaddr_storage ss;
+    socklen_t len = sizeof(ss);
+    if (getpeername(fd, (struct sockaddr *)&ss, &len) != 0) return false;
+    char hbuf[NI_MAXHOST], pbuf[NI_MAXSERV];
+    if (getnameinfo((struct sockaddr *)&ss, len, hbuf, sizeof(hbuf), pbuf,
+                    sizeof(pbuf), NI_NUMERICHOST | NI_NUMERICSERV) != 0) {
+        return false;
+    }
+    int n;
+    if (ss.ss_family == AF_INET6)
+        n = snprintf(out, cap, "[%s]:%s", hbuf, pbuf);
+    else
+        n = snprintf(out, cap, "%s:%s", hbuf, pbuf);
+    return n > 0 && (size_t)n < cap;
 }
 
 /* Read the in-cluster service account token, if mounted. Returns the
@@ -206,6 +322,15 @@ static bool write_all(int fd, const char *buf, size_t len)
     return true;
 }
 
+static void secure_wipe(void *p, size_t n)
+{
+    volatile unsigned char *v = (volatile unsigned char *)p;
+    while (n > 0) {
+        *v++ = 0;
+        n--;
+    }
+}
+
 OcError oc_k8s_scale(const OcK8sCluster *cluster, uint32_t target_replicas)
 {
     if (!cluster) return OC_ERR_INVALID_ARG;
@@ -219,20 +344,33 @@ OcError oc_k8s_scale(const OcK8sCluster *cluster, uint32_t target_replicas)
     int fd = k8s_connect(host, port);
     if (fd < 0) return OC_ERR_NETWORK;
 
+    char http_host[NI_MAXHOST + NI_MAXSERV + 8];
+    if (!format_http_host(fd, http_host, sizeof(http_host))) {
+        close(fd);
+        return OC_ERR_NETWORK;
+    }
+
     char body[64];
     int body_len = snprintf(body, sizeof(body),
                             "{\"spec\":{\"replicas\":%u}}",
                             (unsigned)target_replicas);
 
     char token[8192];
-    size_t token_len = k8s_read_token(token, sizeof(token));
+    char req[16384];
+    size_t token_len = 0;
+    OcError err = OC_OK;
+    /* The API server is HTTPS; this client is plaintext HTTP. Only attach
+     * the in-cluster token when talking to a loopback proxy. */
+    if (peer_is_loopback(fd))
+        token_len = k8s_read_token(token, sizeof(token));
+    else
+        token[0] = '\0';
 
     /* Deployment name defaults to the service name — the common 1:1
      * Deployment/Service naming for an inference StatefulSet or Deployment. */
-    char req[16384];
     int n = snprintf(req, sizeof(req),
         "PATCH /apis/apps/v1/namespaces/%s/deployments/%s/scale HTTP/1.1\r\n"
-        "Host: %s:%s\r\n"
+        "Host: %s\r\n"
         "Content-Type: application/merge-patch+json\r\n"
         "Accept: application/json\r\n"
         "Content-Length: %d\r\n"
@@ -240,31 +378,41 @@ OcError oc_k8s_scale(const OcK8sCluster *cluster, uint32_t target_replicas)
         "%s%s%s"
         "\r\n"
         "%s",
-        cluster->namespace, cluster->service_name, host, port, body_len,
+        cluster->namespace, cluster->service_name, http_host, body_len,
         token_len ? "Authorization: Bearer " : "",
         token_len ? token : "",
         token_len ? "\r\n" : "",
         body);
     if (n < 0 || (size_t)n >= sizeof(req)) {
-        close(fd);
-        return OC_ERR_INVALID_ARG;
+        err = OC_ERR_INVALID_ARG;
+        goto wipe;
     }
 
     if (!write_all(fd, req, (size_t)n)) {
-        close(fd);
-        return OC_ERR_NETWORK;
+        err = OC_ERR_NETWORK;
+        goto wipe;
     }
 
     /* Only the status line matters. */
     char resp[256];
     ssize_t got = read(fd, resp, sizeof(resp) - 1);
-    close(fd);
-    if (got <= 0) return OC_ERR_NETWORK;
+    if (got <= 0) {
+        err = OC_ERR_NETWORK;
+        goto wipe;
+    }
     resp[got] = '\0';
 
     unsigned status = 0;
-    if (sscanf(resp, "HTTP/1.%*u %u", &status) != 1) return OC_ERR_NETWORK;
-    return (status >= 200 && status < 300) ? OC_OK : OC_ERR_MODEL;
+    if (sscanf(resp, "HTTP/1.%*u %u", &status) != 1)
+        err = OC_ERR_NETWORK;
+    else
+        err = (status >= 200 && status < 300) ? OC_OK : OC_ERR_MODEL;
+
+wipe:
+    secure_wipe(token, sizeof(token));
+    secure_wipe(req, sizeof(req));
+    close(fd);
+    return err;
 }
 
 OcError oc_k8s_mark_pod_ready(OcK8sCluster *cluster, const char *name)
