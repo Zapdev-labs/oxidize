@@ -163,6 +163,52 @@ static bool copy_validated_port(const char *src, size_t len, char *dst,
     return n > 0 && (size_t)n < cap;
 }
 
+static bool strip_ipv6_brackets(char *host)
+{
+    size_t n = strlen(host);
+    if (n < 2 || host[0] != '[' || host[n - 1] != ']') return host[0] != '\0';
+    memmove(host, host + 1, n - 2);
+    host[n - 2] = '\0';
+    return host[0] != '\0';
+}
+
+static bool parse_url_hostport(const char *p, char *host, size_t host_cap,
+                                 char *port, size_t port_cap)
+{
+    const char *host_start;
+    const char *host_end;
+    const char *port_start = NULL;
+
+    if (*p == '[') {
+        const char *rbr = strchr(p, ']');
+        if (!rbr || rbr == p + 1) return false;
+        host_start = p + 1;
+        host_end = rbr;
+        if (rbr[1] == ':')
+            port_start = rbr + 2;
+        else if (rbr[1] != '\0' && rbr[1] != '/')
+            return false;
+    } else {
+        const char *slash = strchr(p, '/');
+        const char *colon = strchr(p, ':');
+        if (slash && colon && colon > slash) colon = NULL;
+        host_start = p;
+        host_end = colon ? colon : (slash ? slash : p + strlen(p));
+        if (colon) port_start = colon + 1;
+    }
+
+    size_t hlen = (size_t)(host_end - host_start);
+    if (!copy_validated_host(host_start, hlen, host, host_cap)) return false;
+    if (port_start) {
+        size_t plen = 0;
+        while (port_start[plen] && port_start[plen] != '/') plen++;
+        if (!copy_validated_port(port_start, plen, port, port_cap)) return false;
+    } else if (snprintf(port, port_cap, "80") < 0) {
+        return false;
+    }
+    return port[0] != '\0';
+}
+
 /* Resolve the plaintext API base as host + port. Returns false if no
  * endpoint is configured. Env values are allowlisted so they cannot be
  * copied into the HTTP request as-is (CodeQL CWE-497). */
@@ -171,30 +217,16 @@ static bool k8s_api_endpoint(char *host, size_t host_cap, char *port,
 {
     const char *url = getenv("OC_K8S_API_URL");
     if (url && *url) {
-        /* Accept "http://host:port", "host:port", or "host". */
         const char *p = strstr(url, "://");
         p = p ? p + 3 : url;
-        const char *colon = strrchr(p, ':');
-        const char *slash = strchr(p, '/');
-        if (slash && colon && colon > slash) colon = NULL; /* colon in path */
-        size_t hlen = colon ? (size_t)(colon - p)
-                            : (slash ? (size_t)(slash - p) : strlen(p));
-        if (!copy_validated_host(p, hlen, host, host_cap)) return false;
-        if (colon) {
-            size_t plen = 0;
-            const char *q = colon + 1;
-            while (q[plen] && q[plen] != '/') plen++;
-            if (!copy_validated_port(q, plen, port, port_cap)) return false;
-        } else if (snprintf(port, port_cap, "80") < 0) {
-            return false;
-        }
-        return port[0] != '\0';
+        return parse_url_hostport(p, host, host_cap, port, port_cap);
     }
 
     const char *h = getenv("KUBERNETES_SERVICE_HOST");
     const char *pt = getenv("KUBERNETES_SERVICE_PORT");
     if (!h || !*h) return false;
     if (!copy_validated_host(h, strlen(h), host, host_cap)) return false;
+    if (!strip_ipv6_brackets(host)) return false;
     if (pt && *pt) {
         if (!copy_validated_port(pt, strlen(pt), port, port_cap)) return false;
     } else if (snprintf(port, port_cap, "443") < 0) {

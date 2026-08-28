@@ -270,6 +270,51 @@ Test(k8s, scale_rejects_header_injection_in_api_url)
     cr_assert_eq(scaled, OC_ERR_NETWORK);
 }
 
+Test(k8s, scale_accepts_bracketed_ipv6_url)
+{
+    int lfd = socket(AF_INET6, SOCK_STREAM, 0);
+    if (lfd < 0) cr_skip("IPv6 sockets unavailable");
+    int v6only = 1;
+    (void)setsockopt(lfd, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only));
+    struct sockaddr_in6 addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin6_family = AF_INET6;
+    addr.sin6_addr = in6addr_loopback;
+    addr.sin6_port = 0;
+    if (bind(lfd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+        close(lfd);
+        cr_skip("IPv6 loopback bind failed");
+    }
+    cr_assert_eq(listen(lfd, 1), 0);
+    socklen_t alen = sizeof(addr);
+    cr_assert_eq(getsockname(lfd, (struct sockaddr *)&addr, &alen), 0);
+
+    char url[80];
+    snprintf(url, sizeof(url), "http://[::1]:%u", ntohs(addr.sin6_port));
+    char *saved_url = dup_env("OC_K8S_API_URL");
+    setenv("OC_K8S_API_URL", url, 1);
+
+    FakeApi api;
+    memset(&api, 0, sizeof(api));
+    api.listen_fd = lfd;
+    pthread_t server;
+    cr_assert_eq(pthread_create(&server, NULL, fake_api_main, &api), 0);
+
+    OcK8sCluster cluster;
+    oc_k8s_init(&cluster, "infer", "oxidize");
+    cluster.available = true;
+    OcError scaled = oc_k8s_scale(&cluster, 3);
+    oc_k8s_free(&cluster);
+
+    cr_assert_eq(pthread_join(server, NULL), 0);
+    close(lfd);
+    restore_env("OC_K8S_API_URL", saved_url);
+
+    cr_assert_eq(scaled, OC_OK);
+    cr_assert_gt(api.request_len, 0);
+    cr_assert_not_null(strstr(api.request, "Host: [::1]:"));
+}
+
 Test(k8s, mark_pod_ready)
 {
     OcK8sCluster cluster;
