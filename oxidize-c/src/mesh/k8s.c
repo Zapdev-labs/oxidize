@@ -290,6 +290,15 @@ static bool write_all(int fd, const char *buf, size_t len)
     return true;
 }
 
+static void secure_wipe(void *p, size_t n)
+{
+    volatile unsigned char *v = (volatile unsigned char *)p;
+    while (n > 0) {
+        *v++ = 0;
+        n--;
+    }
+}
+
 OcError oc_k8s_scale(const OcK8sCluster *cluster, uint32_t target_replicas)
 {
     if (!cluster) return OC_ERR_INVALID_ARG;
@@ -315,7 +324,9 @@ OcError oc_k8s_scale(const OcK8sCluster *cluster, uint32_t target_replicas)
                             (unsigned)target_replicas);
 
     char token[8192];
+    char req[16384];
     size_t token_len = 0;
+    OcError err = OC_OK;
     /* The API server is HTTPS; this client is plaintext HTTP. Only attach
      * the in-cluster token when talking to a loopback proxy. */
     if (peer_is_loopback(fd))
@@ -325,7 +336,6 @@ OcError oc_k8s_scale(const OcK8sCluster *cluster, uint32_t target_replicas)
 
     /* Deployment name defaults to the service name — the common 1:1
      * Deployment/Service naming for an inference StatefulSet or Deployment. */
-    char req[16384];
     int n = snprintf(req, sizeof(req),
         "PATCH /apis/apps/v1/namespaces/%s/deployments/%s/scale HTTP/1.1\r\n"
         "Host: %s\r\n"
@@ -341,27 +351,36 @@ OcError oc_k8s_scale(const OcK8sCluster *cluster, uint32_t target_replicas)
         token_len ? token : "",
         token_len ? "\r\n" : "",
         body);
-    memset(token, 0, sizeof(token));
     if (n < 0 || (size_t)n >= sizeof(req)) {
-        close(fd);
-        return OC_ERR_INVALID_ARG;
+        err = OC_ERR_INVALID_ARG;
+        goto wipe;
     }
 
     if (!write_all(fd, req, (size_t)n)) {
-        close(fd);
-        return OC_ERR_NETWORK;
+        err = OC_ERR_NETWORK;
+        goto wipe;
     }
 
     /* Only the status line matters. */
     char resp[256];
     ssize_t got = read(fd, resp, sizeof(resp) - 1);
-    close(fd);
-    if (got <= 0) return OC_ERR_NETWORK;
+    if (got <= 0) {
+        err = OC_ERR_NETWORK;
+        goto wipe;
+    }
     resp[got] = '\0';
 
     unsigned status = 0;
-    if (sscanf(resp, "HTTP/1.%*u %u", &status) != 1) return OC_ERR_NETWORK;
-    return (status >= 200 && status < 300) ? OC_OK : OC_ERR_MODEL;
+    if (sscanf(resp, "HTTP/1.%*u %u", &status) != 1)
+        err = OC_ERR_NETWORK;
+    else
+        err = (status >= 200 && status < 300) ? OC_OK : OC_ERR_MODEL;
+
+wipe:
+    secure_wipe(token, sizeof(token));
+    secure_wipe(req, sizeof(req));
+    close(fd);
+    return err;
 }
 
 OcError oc_k8s_mark_pod_ready(OcK8sCluster *cluster, const char *name)

@@ -193,6 +193,22 @@ static void *fake_api_main(void *arg)
     return NULL;
 }
 
+static char *dup_env(const char *name)
+{
+    const char *v = getenv(name);
+    return v ? strdup(v) : NULL;
+}
+
+static void restore_env(const char *name, char *saved)
+{
+    if (saved) {
+        setenv(name, saved, 1);
+        free(saved);
+    } else {
+        unsetenv(name);
+    }
+}
+
 Test(k8s, scale_issues_merge_patch_to_api)
 {
     /* Bind an ephemeral port and point the client at it. */
@@ -210,6 +226,7 @@ Test(k8s, scale_issues_merge_patch_to_api)
 
     char url[64];
     snprintf(url, sizeof(url), "http://127.0.0.1:%u", ntohs(addr.sin_port));
+    char *saved_url = dup_env("OC_K8S_API_URL");
     setenv("OC_K8S_API_URL", url, 1);
 
     FakeApi api;
@@ -226,7 +243,7 @@ Test(k8s, scale_issues_merge_patch_to_api)
 
     cr_assert_eq(pthread_join(server, NULL), 0);
     close(lfd);
-    unsetenv("OC_K8S_API_URL");
+    restore_env("OC_K8S_API_URL", saved_url);
 
     cr_assert_gt(api.request_len, 0);
     cr_assert_not_null(strstr(api.request,
@@ -239,14 +256,18 @@ Test(k8s, scale_issues_merge_patch_to_api)
 
 Test(k8s, scale_rejects_header_injection_in_api_url)
 {
+    char *saved_host = dup_env("KUBERNETES_SERVICE_HOST");
+    char *saved_url = dup_env("OC_K8S_API_URL");
     unsetenv("KUBERNETES_SERVICE_HOST");
     setenv("OC_K8S_API_URL", "http://127.0.0.1\r\nX-Injected: 1:80", 1);
     OcK8sCluster cluster;
     oc_k8s_init(&cluster, "infer", "oxidize");
     cluster.available = true;
-    cr_assert_eq(oc_k8s_scale(&cluster, 1), OC_ERR_NETWORK);
+    OcError scaled = oc_k8s_scale(&cluster, 1);
     oc_k8s_free(&cluster);
-    unsetenv("OC_K8S_API_URL");
+    restore_env("KUBERNETES_SERVICE_HOST", saved_host);
+    restore_env("OC_K8S_API_URL", saved_url);
+    cr_assert_eq(scaled, OC_ERR_NETWORK);
 }
 
 Test(k8s, mark_pod_ready)
