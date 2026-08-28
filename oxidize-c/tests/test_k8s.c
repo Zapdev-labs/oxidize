@@ -234,6 +234,19 @@ Test(k8s, scale_issues_merge_patch_to_api)
     cr_assert_not_null(strstr(api.request,
         "Content-Type: application/merge-patch+json"));
     cr_assert_not_null(strstr(api.request, "{\"spec\":{\"replicas\":7}}"));
+    cr_assert_not_null(strstr(api.request, "Host: 127.0.0.1:"));
+}
+
+Test(k8s, scale_rejects_header_injection_in_api_url)
+{
+    unsetenv("KUBERNETES_SERVICE_HOST");
+    setenv("OC_K8S_API_URL", "http://127.0.0.1\r\nX-Injected: 1:80", 1);
+    OcK8sCluster cluster;
+    oc_k8s_init(&cluster, "infer", "oxidize");
+    cluster.available = true;
+    cr_assert_eq(oc_k8s_scale(&cluster, 1), OC_ERR_NETWORK);
+    oc_k8s_free(&cluster);
+    unsetenv("OC_K8S_API_URL");
 }
 
 Test(k8s, mark_pod_ready)

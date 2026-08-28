@@ -324,7 +324,11 @@ pub fn sample_with_repetition_and_grammar(
         .copied()
         .max_by(|a, b| a.total_cmp(b))
         .ok_or(SamplingError::EmptyLogits)?;
-    let top_k_limit = config.top_k.filter(|top_k| *top_k < adjusted_logits.len());
+    const MAX_TOP_K: usize = 1024;
+    let top_k_limit = config
+        .top_k
+        .map(|top_k| top_k.min(MAX_TOP_K))
+        .filter(|top_k| *top_k < adjusted_logits.len());
     let mut indexed_probs = if let Some(top_k) = top_k_limit {
         let mut raw_sum = 0.0_f32;
         let mut top_candidates: Vec<(usize, f32)> = Vec::with_capacity(top_k);
@@ -1014,6 +1018,20 @@ mod tests {
         )
         .expect("sampling should succeed");
         assert!(token <= 1);
+    }
+
+    #[test]
+    fn top_k_caps_allocation_from_untrusted_config() {
+        let token = sample(
+            &[5.0, 4.0, 3.0, 2.0],
+            SamplingConfig {
+                top_k: Some(usize::MAX),
+                ..SamplingConfig::default()
+            },
+            0.99,
+        )
+        .expect("sampling should succeed");
+        assert!(token <= 3);
     }
 
     #[test]

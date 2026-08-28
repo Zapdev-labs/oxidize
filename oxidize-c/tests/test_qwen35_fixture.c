@@ -7,7 +7,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 
 #define Q35_BLOCKS 4u
 #define Q35_EMBD 8u
@@ -253,9 +252,8 @@ Test(qwen35_fixture, writes_hybrid_tensor_contract)
     cr_assert_null(oc_gguf_tensor_get(&gguf, "blk.0.attn_q.weight"));
     cr_assert_not_null(oc_gguf_tensor_get(&gguf, "blk.3.attn_q.weight"));
     cr_assert_null(oc_gguf_tensor_get(&gguf, "blk.3.ssm_alpha.weight"));
-    struct stat st;
-    cr_assert_eq(stat(path, &st), 0);
-    cr_assert_lt((uint64_t)st.st_size, 2u * 1024u * 1024u);
+    cr_assert_not_null(gguf.backing_buf);
+    cr_assert_lt((uint64_t)gguf.backing_len, 2u * 1024u * 1024u);
     oc_gguf_free(&gguf);
     remove(path);
 }

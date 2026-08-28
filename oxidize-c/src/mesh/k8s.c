@@ -12,8 +12,12 @@
  * silently claiming success.
  */
 #define _POSIX_C_SOURCE 200809L
+#ifdef __APPLE__
+#define _DARWIN_C_SOURCE 1
+#endif
 #include "oxidize/k8s.h"
 
+#include <arpa/inet.h>
 #include <errno.h>
 #include <netdb.h>
 #include <netinet/in.h>
@@ -116,8 +120,45 @@ bool oc_k8s_is_available(const OcK8sCluster *cluster)
     return cluster ? cluster->available : false;
 }
 
+static bool host_char_ok(unsigned char c)
+{
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+        || (c >= '0' && c <= '9') || c == '.' || c == '-' || c == ':'
+        || c == '[' || c == ']' || c == '%';
+}
+
+static bool copy_validated_host(const char *src, size_t len, char *dst,
+                                  size_t cap)
+{
+    if (!src || len == 0 || !dst || cap == 0 || len >= cap) return false;
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)src[i];
+        if (!host_char_ok(c)) return false;
+        dst[i] = (char)c;
+    }
+    dst[len] = '\0';
+    return true;
+}
+
+static bool copy_validated_port(const char *src, size_t len, char *dst,
+                                  size_t cap)
+{
+    if (!src || len == 0 || !dst || cap < 2) return false;
+    unsigned long v = 0;
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)src[i];
+        if (c < '0' || c > '9') return false;
+        v = v * 10ul + (unsigned)(c - '0');
+        if (v > 65535ul) return false;
+    }
+    if (v == 0) return false;
+    int n = snprintf(dst, cap, "%lu", v);
+    return n > 0 && (size_t)n < cap;
+}
+
 /* Resolve the plaintext API base as host + port. Returns false if no
- * endpoint is configured. */
+ * endpoint is configured. Env values are allowlisted so they cannot be
+ * copied into the HTTP request as-is (CodeQL CWE-497). */
 static bool k8s_api_endpoint(char *host, size_t host_cap, char *port,
                              size_t port_cap)
 {
@@ -131,17 +172,14 @@ static bool k8s_api_endpoint(char *host, size_t host_cap, char *port,
         if (slash && colon && colon > slash) colon = NULL; /* colon in path */
         size_t hlen = colon ? (size_t)(colon - p)
                             : (slash ? (size_t)(slash - p) : strlen(p));
-        if (hlen == 0 || hlen >= host_cap) return false;
-        memcpy(host, p, hlen);
-        host[hlen] = '\0';
+        if (!copy_validated_host(p, hlen, host, host_cap)) return false;
         if (colon) {
             size_t plen = 0;
             const char *q = colon + 1;
-            while (q[plen] && q[plen] != '/' && plen + 1 < port_cap) plen++;
-            memcpy(port, q, plen);
-            port[plen] = '\0';
-        } else {
-            snprintf(port, port_cap, "80");
+            while (q[plen] && q[plen] != '/') plen++;
+            if (!copy_validated_port(q, plen, port, port_cap)) return false;
+        } else if (snprintf(port, port_cap, "80") < 0) {
+            return false;
         }
         return port[0] != '\0';
     }
@@ -149,9 +187,48 @@ static bool k8s_api_endpoint(char *host, size_t host_cap, char *port,
     const char *h = getenv("KUBERNETES_SERVICE_HOST");
     const char *pt = getenv("KUBERNETES_SERVICE_PORT");
     if (!h || !*h) return false;
-    snprintf(host, host_cap, "%s", h);
-    snprintf(port, port_cap, "%s", (pt && *pt) ? pt : "443");
+    if (!copy_validated_host(h, strlen(h), host, host_cap)) return false;
+    if (pt && *pt) {
+        if (!copy_validated_port(pt, strlen(pt), port, port_cap)) return false;
+    } else if (snprintf(port, port_cap, "443") < 0) {
+        return false;
+    }
     return true;
+}
+
+static bool peer_is_loopback(int fd)
+{
+    struct sockaddr_storage ss;
+    socklen_t len = sizeof(ss);
+    if (getpeername(fd, (struct sockaddr *)&ss, &len) != 0) return false;
+    if (ss.ss_family == AF_INET) {
+        const struct sockaddr_in *in = (const struct sockaddr_in *)&ss;
+        return ntohl(in->sin_addr.s_addr) == INADDR_LOOPBACK;
+    }
+    if (ss.ss_family == AF_INET6) {
+        const struct sockaddr_in6 *in6 = (const struct sockaddr_in6 *)&ss;
+        return IN6_IS_ADDR_LOOPBACK(&in6->sin6_addr);
+    }
+    return false;
+}
+
+/* HTTP Host from the connected peer, not from getenv. */
+static bool format_http_host(int fd, char *out, size_t cap)
+{
+    struct sockaddr_storage ss;
+    socklen_t len = sizeof(ss);
+    if (getpeername(fd, (struct sockaddr *)&ss, &len) != 0) return false;
+    char hbuf[NI_MAXHOST], pbuf[NI_MAXSERV];
+    if (getnameinfo((struct sockaddr *)&ss, len, hbuf, sizeof(hbuf), pbuf,
+                    sizeof(pbuf), NI_NUMERICHOST | NI_NUMERICSERV) != 0) {
+        return false;
+    }
+    int n;
+    if (ss.ss_family == AF_INET6)
+        n = snprintf(out, cap, "[%s]:%s", hbuf, pbuf);
+    else
+        n = snprintf(out, cap, "%s:%s", hbuf, pbuf);
+    return n > 0 && (size_t)n < cap;
 }
 
 /* Read the in-cluster service account token, if mounted. Returns the
@@ -219,20 +296,32 @@ OcError oc_k8s_scale(const OcK8sCluster *cluster, uint32_t target_replicas)
     int fd = k8s_connect(host, port);
     if (fd < 0) return OC_ERR_NETWORK;
 
+    char http_host[NI_MAXHOST + NI_MAXSERV + 8];
+    if (!format_http_host(fd, http_host, sizeof(http_host))) {
+        close(fd);
+        return OC_ERR_NETWORK;
+    }
+
     char body[64];
     int body_len = snprintf(body, sizeof(body),
                             "{\"spec\":{\"replicas\":%u}}",
                             (unsigned)target_replicas);
 
     char token[8192];
-    size_t token_len = k8s_read_token(token, sizeof(token));
+    size_t token_len = 0;
+    /* The API server is HTTPS; this client is plaintext HTTP. Only attach
+     * the in-cluster token when talking to a loopback proxy. */
+    if (peer_is_loopback(fd))
+        token_len = k8s_read_token(token, sizeof(token));
+    else
+        token[0] = '\0';
 
     /* Deployment name defaults to the service name — the common 1:1
      * Deployment/Service naming for an inference StatefulSet or Deployment. */
     char req[16384];
     int n = snprintf(req, sizeof(req),
         "PATCH /apis/apps/v1/namespaces/%s/deployments/%s/scale HTTP/1.1\r\n"
-        "Host: %s:%s\r\n"
+        "Host: %s\r\n"
         "Content-Type: application/merge-patch+json\r\n"
         "Accept: application/json\r\n"
         "Content-Length: %d\r\n"
@@ -240,11 +329,12 @@ OcError oc_k8s_scale(const OcK8sCluster *cluster, uint32_t target_replicas)
         "%s%s%s"
         "\r\n"
         "%s",
-        cluster->namespace, cluster->service_name, host, port, body_len,
+        cluster->namespace, cluster->service_name, http_host, body_len,
         token_len ? "Authorization: Bearer " : "",
         token_len ? token : "",
         token_len ? "\r\n" : "",
         body);
+    memset(token, 0, sizeof(token));
     if (n < 0 || (size_t)n >= sizeof(req)) {
         close(fd);
         return OC_ERR_INVALID_ARG;
