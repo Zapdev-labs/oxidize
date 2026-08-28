@@ -46,6 +46,7 @@ static bool parse_value_flag(OcCliArgs *a, const char *arg, const char *val,
     else if (match(arg, "--n-predict"))  { a->n_predict = val[0] == '-' ? 0u : (uint32_t)strtoul(val, NULL, 10); *consumed_val = true; }
     else if (match(arg, "--ctx"))        { a->n_ctx = val[0] == '-' ? 0u : (uint32_t)strtoul(val, NULL, 10); *consumed_val = true; }
     else if (match(arg, "--kv"))         { a->kv_type = val; *consumed_val = true; }
+    else if (match(arg, "--kv-compress")){ a->kv_compress = val; *consumed_val = true; }
     else if (match(arg, "--threads"))    { a->threads = atoi(val); *consumed_val = true; }
     else if (match(arg, "--batch-size")) { a->batch_size = val[0] == '-' ? 0u : (uint32_t)strtoul(val, NULL, 10); *consumed_val = true; }
     else if (match(arg, "--numa"))       { a->numa = val; *consumed_val = true; }
@@ -148,6 +149,7 @@ bool oc_cli_context_parse(int argc, char **argv, OcCliContext *ctx)
         else if (match(arg, "--n-predict"))      { ctx->n_predict = (uint32_t)strtoul(val, NULL, 10); i++; }
         else if (match(arg, "--ctx"))            { ctx->n_ctx = (uint32_t)strtoul(val, NULL, 10); i++; }
         else if (match(arg, "--kv"))             { ctx->kv_type = val; i++; }
+        else if (match(arg, "--kv-compress"))    { ctx->kv_compress = val; i++; }
         else if (match(arg, "--threads"))        { ctx->threads = atoi(val); i++; }
         else if (match(arg, "--numa"))           { ctx->numa = val; i++; }
         else if (match(arg, "--backend"))        { ctx->backend = val; i++; }

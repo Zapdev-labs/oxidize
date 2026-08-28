@@ -22,6 +22,7 @@
 
 #include "oxidize/error.h"
 #include "oxidize/gguf.h"
+#include "oxidize/kv_compressed.h"
 #include "oxidize/quant.h"
 #include "oxidize/qwen35_delta.h"
 
@@ -394,6 +395,10 @@ typedef struct OcLlamaSession {
     float *mtp_concat;
     uint32_t last_token;
     uint32_t mtp_pos;
+    /* Optional compressed KV (RotorQuant / Helix). NULL keeps the f32/q8
+     * path. When set, dense decode stores pre-RoPE K/V and attends through
+     * the facade. */
+    OcCompressedKvCache *kv_compress;
 } OcLlamaSession;
 
 /* ─── Batched decode ─────────────────────────────────────────────────────
@@ -477,6 +482,13 @@ OcError oc_llama_session_init(OcLlamaModel *model, OcLlamaSession *out);
  * the attention read stride must agree. */
 OcError oc_llama_session_init_kv(OcLlamaModel *model, OcLlamaSession *out,
                                  OcKvCacheType kv_type);
+
+/* Attach a compressed KV cache. Decode stays on the f32/q8 path until this
+ * is called. `name` is "none" | "rotor" | "helix". */
+OcError oc_llama_session_enable_kv_compress(OcLlamaSession *sess,
+                                            OcKvScheme scheme);
+OcError oc_llama_session_enable_kv_compress_name(OcLlamaSession *sess,
+                                                 const char *name);
 
 /* Resolve KV type from `--kv` / OX_KV_TYPE / context length.
  * explicit: "q8", "f32", or NULL. Contexts >= 8192 default to Q8. */

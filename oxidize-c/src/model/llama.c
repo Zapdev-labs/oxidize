@@ -1509,7 +1509,59 @@ OcError oc_llama_session_init_kv(OcLlamaModel *model, OcLlamaSession *out,
     }
     /* KV cache quantization (Q8_0-style: 32-element blocks with f16 scale). */
     out->pos = 0;
+    out->kv_compress = NULL;
     return OC_OK;
+}
+
+OcError oc_llama_session_enable_kv_compress(OcLlamaSession *sess,
+                                            OcKvScheme scheme)
+{
+    OcCompressedKvCache *cache;
+    OcError e;
+    size_t page_size, head_dim;
+    float theta;
+    if (!sess || !sess->model) return OC_ERR_INVALID_ARG;
+    if (sess->kv_compress) {
+        oc_compressed_kv_free(sess->kv_compress);
+        free(sess->kv_compress);
+        sess->kv_compress = NULL;
+    }
+    head_dim = sess->model->cfg.head_dim;
+    if (head_dim == 0) return OC_ERR_INVALID_ARG;
+    if (scheme == OC_KV_SCHEME_HELIX && (head_dim % 8) != 0)
+        return OC_ERR_INVALID_ARG;
+    if (sess->model->cfg.uses_mla || sess->model->cfg.is_qwen35 ||
+        sess->model->cfg.uses_gemma4)
+        return OC_ERR_INVALID_ARG;
+    page_size = sess->model->cfg.n_ctx;
+    if (page_size == 0) page_size = 64;
+    theta = sess->model->cfg.rope_theta > 0.0f ? sess->model->cfg.rope_theta
+                                               : 10000.0f;
+    cache = (OcCompressedKvCache *)calloc(1, sizeof(*cache));
+    if (!cache) return OC_ERR_OOM;
+    e = oc_compressed_kv_init(cache, head_dim, scheme, page_size, theta);
+    if (e != OC_OK) {
+        free(cache);
+        return e;
+    }
+    oc_compressed_kv_set_rope_layout(
+        cache, sess->model->cfg.rope_norm_pairs ? OC_KV_ROPE_INTERLEAVED
+                                                : OC_KV_ROPE_SPLIT_HALVES);
+    sess->kv_compress = cache;
+    oc_log(OC_LOG_INFO, "llama: compressed KV %s (head_dim=%zu)",
+           scheme == OC_KV_SCHEME_HELIX ? "helix" : "rotor", head_dim);
+    return OC_OK;
+}
+
+OcError oc_llama_session_enable_kv_compress_name(OcLlamaSession *sess,
+                                                 const char *name)
+{
+    if (!name || name[0] == '\0' || strcmp(name, "none") == 0) return OC_OK;
+    if (strcmp(name, "rotor") == 0)
+        return oc_llama_session_enable_kv_compress(sess, OC_KV_SCHEME_ROTOR);
+    if (strcmp(name, "helix") == 0)
+        return oc_llama_session_enable_kv_compress(sess, OC_KV_SCHEME_HELIX);
+    return OC_ERR_INVALID_ARG;
 }
 
 void oc_llama_session_reset(OcLlamaSession *sess)
@@ -1517,6 +1569,7 @@ void oc_llama_session_reset(OcLlamaSession *sess)
     if (sess == NULL) return;
     sess->pos = 0;
     sess->mtp_pos = 0;
+    if (sess->kv_compress) oc_compressed_kv_clear(sess->kv_compress);
     if (sess->qwen35_delta && sess->model) {
         for (uint32_t l = 0; l < sess->model->cfg.n_layer; l++)
             oc_qwen35_delta_state_reset(&sess->qwen35_delta[l]);
@@ -1525,7 +1578,10 @@ void oc_llama_session_reset(OcLlamaSession *sess)
 
 void oc_llama_session_rewind(OcLlamaSession *sess, uint32_t pos)
 {
-    if (sess) sess->pos = pos;
+    if (!sess) return;
+    sess->pos = pos;
+    if (sess->kv_compress)
+        oc_compressed_kv_rewind(sess->kv_compress, (size_t)pos);
 }
 
 void oc_llama_session_free(OcLlamaSession *sess)
@@ -1560,12 +1616,16 @@ void oc_llama_session_free(OcLlamaSession *sess)
     free(sess->qwen35_conv_state);
     free(sess->qwen35_recurrent_state);
     free(sess->qwen35_qkv);
-    free(sess->muse_gate);
     free(sess->qwen35_gate);
     free(sess->qwen35_beta);
     free(sess->qwen35_alpha);
     free(sess->qwen35_conv_output);
     free(sess->qwen35_delta_output);
+    free(sess->muse_gate);
+    if (sess->kv_compress) {
+        oc_compressed_kv_free(sess->kv_compress);
+        free(sess->kv_compress);
+    }
     memset(sess, 0, sizeof(*sess));
 }
 
@@ -1880,6 +1940,29 @@ static void attn_decode_kv_slice(size_t begin, size_t end, size_t tid, void *ud)
     }
 }
 
+static int use_compressed_attn(const OcLlamaSession *s, const OcLlamaLayer *L)
+{
+    const OcLlamaConfig *c;
+    if (!s || !s->kv_compress || !L || !s->model) return 0;
+    c = &s->model->cfg;
+    return L->use_rope && c->yarn_factor <= 0.0f && !c->uses_mla &&
+           !c->is_qwen35 && !c->uses_gemma4 && L->sliding_window == 0;
+}
+
+static OcError store_compressed_token(OcLlamaSession *s, uint32_t layer,
+                                      uint32_t n_kv, size_t hd, const float *k,
+                                      const float *v, size_t pos)
+{
+    uint32_t h;
+    for (h = 0; h < n_kv; h++) {
+        OcError e = oc_compressed_kv_store_page(s->kv_compress, layer, h,
+                                                k + h * hd, v + h * hd, &pos,
+                                                1);
+        if (e != OC_OK) return e;
+    }
+    return OC_OK;
+}
+
 static void attention_decode_layer(OcLlamaSession *s, uint32_t layer)
 {
     const OcLlamaConfig *c = &s->model->cfg;
@@ -1887,6 +1970,19 @@ static void attention_decode_layer(OcLlamaSession *s, uint32_t layer)
     size_t hd = GL->head_dim ? (size_t)GL->head_dim : (size_t)c->head_dim;
     uint32_t n_kv = GL->n_head_kv ? GL->n_head_kv : c->n_head_kv;
     uint32_t group = c->n_head / n_kv;
+    if (use_compressed_attn(s, GL)) {
+        uint32_t kh, g, h;
+        for (kh = 0; kh < n_kv; kh++) {
+            for (g = 0; g < group; g++) {
+                h = kh * group + g;
+                if (h >= c->n_head) break;
+                oc_compressed_kv_attention(s->kv_compress, layer, kh,
+                                           s->q + h * hd, hd, (size_t)s->pos,
+                                           s->attn_out + h * hd);
+            }
+        }
+        return;
+    }
     float scale = (c->attn_scale > 0.0f) ? c->attn_scale
                                          : (1.0f / sqrtf((float)hd));
     int64_t seq_len = s->pos + 1;
@@ -2648,9 +2744,12 @@ static OcError forward_layer(OcLlamaSession *s, uint32_t layer)
         /* RoPE on Q (per head) and K (per kv head). YaRN when configured.
          * rope_dim/rope_theta are the layer's: Gemma 4 rotates 256 dims at
          * base 1e4 on sliding layers and 512 at 1e6 on global ones. */
-        /* L->use_rope is false only on Muse Glimmer's global (NoPE) layers;
-         * their Q/K carry no positional information at all. */
-        if (L->use_rope) {
+        /* Compressed path stores pre-RoPE K/V; the facade owns RoPE. */
+        if (use_compressed_attn(s, L)) {
+            OcError se = store_compressed_token(s, layer, n_kv, hd, s->k, s->v,
+                                                (size_t)s->pos);
+            if (se != OC_OK) return se;
+        } else if (L->use_rope) {
         for (uint32_t h = 0; h < c->n_head; h++) {
             if (c->yarn_factor > 0.0f) {
                 oc_apply_rope_yarn_f32(s->q + h * hd, s->q + h * hd, hd,
@@ -2680,6 +2779,7 @@ static OcError forward_layer(OcLlamaSession *s, uint32_t layer)
         }
 
         /* KV cache write at position `pos`. */
+        if (!use_compressed_attn(s, L)) {
         size_t kv_off = ((size_t)layer * c->n_ctx + (size_t)s->pos) * s->kv_row_floats;
         if (s->kv_type == OC_KV_Q8) {
             /* One scale per kv head, so each head's row quantizes against its
@@ -2696,6 +2796,7 @@ static OcError forward_layer(OcLlamaSession *s, uint32_t layer)
         } else {
             memcpy(s->kv_k + kv_off, s->k, s->kv_row_floats * sizeof(float));
             memcpy(s->kv_v + kv_off, s->v, s->kv_row_floats * sizeof(float));
+        }
         }
 
         /* Attention: KV streamed once per GQA group. */
@@ -3403,12 +3504,29 @@ static void attention_slice(size_t begin, size_t end, size_t tid, void *ud)
 {
     (void)tid;
     const AttnJob *j = (const AttnJob *)ud;
+    const OcLlamaLayer *GL = layer_for_attn(j->s, j->layer);
+    const int compressed = use_compressed_attn(j->s, GL);
+    uint32_t n_kv = 0, group = 1;
+    if (compressed) {
+        n_kv = GL->n_head_kv ? GL->n_head_kv : j->s->model->cfg.n_head_kv;
+        if (n_kv == 0) n_kv = 1;
+        group = j->n_head / n_kv;
+        if (group == 0) group = 1;
+    }
     for (size_t i = begin; i < end; i++) {
         const size_t tok = i / j->n_head;
         const uint32_t h = (uint32_t)(i % j->n_head);
         float *out = j->b->attn_out + tok * j->b->n_qo + h * j->hd;
-        attention_head_at(j->s, h, j->layer, j->pos0 + (int64_t)tok,
-                          j->b->q + tok * j->b->n_qo + h * j->hd, out);
+        if (compressed) {
+            uint32_t kv_head = h / group;
+            oc_compressed_kv_attention(
+                j->s->kv_compress, j->layer, kv_head,
+                j->b->q + tok * j->b->n_qo + h * j->hd, j->hd,
+                (size_t)(j->pos0 + (int64_t)tok), out);
+        } else {
+            attention_head_at(j->s, h, j->layer, j->pos0 + (int64_t)tok,
+                              j->b->q + tok * j->b->n_qo + h * j->hd, out);
+        }
         if (j->qgate != NULL) {
             const float *gate = j->qgate + tok * 2u * (size_t)j->n_head * j->hd
                               + (2u * (size_t)h + 1u) * j->hd;
@@ -3705,6 +3823,13 @@ static OcError prefill_layer(OcLlamaSession *s, uint32_t layer, PrefillBuf *b,
             }
         }
 
+        if (use_compressed_attn(s, L)) {
+            OcError se = store_compressed_token(s, layer, n_kv, hd, kj, vj,
+                                                (size_t)pos);
+            if (se != OC_OK) return se;
+            continue;
+        }
+
         if (L->use_rope) {
         for (uint32_t h = 0; h < c->n_head; h++) {
             if (c->yarn_factor > 0.0f)
@@ -3937,6 +4062,8 @@ OcError oc_llama_session_copy_prefix(OcLlamaSession *dst,
         dst->model != src->model || dst->kv_type != src->kv_type ||
         src->pos < 0 || (uint64_t)src->pos > src->model->cfg.n_ctx ||
         dst->kv_row_floats != src->kv_row_floats)
+        return OC_ERR_INVALID_ARG;
+    if (dst->kv_compress || src->kv_compress)
         return OC_ERR_INVALID_ARG;
 
     const OcLlamaConfig *c = &src->model->cfg;

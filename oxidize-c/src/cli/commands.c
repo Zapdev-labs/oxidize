@@ -127,7 +127,14 @@ static OcError cli_session_init(const OcCliContext *ctx, OcLlamaModel *model,
                                 OcLlamaSession *sess)
 {
     OcKvCacheType kv = oc_llama_select_kv_type(model->cfg.n_ctx, ctx->kv_type);
-    return oc_llama_session_init_kv(model, sess, kv);
+    OcError e = oc_llama_session_init_kv(model, sess, kv);
+    if (e != OC_OK) return e;
+    e = oc_llama_session_enable_kv_compress_name(sess, ctx->kv_compress);
+    if (e != OC_OK) {
+        oc_llama_session_free(sess);
+        return e;
+    }
+    return OC_OK;
 }
 
 void oc_cli_apply_ctx(const OcCliContext *ctx, struct OcLlamaModel *model)
@@ -356,6 +363,7 @@ void oc_cli_command_help(void)
 "  --output text|json    Output format (default: text)\n"
 "  --threads N           CPU thread hint (0 = auto)\n"
 "  --kv f32|q8           KV cache dtype (q8 auto when ctx>=8192)\n"
+"  --kv-compress MODE    none|rotor|helix (default none)\n"
 "  --ctx N               KV context length (default cap 4096)\n"
 "  --verbose, -v         Verbose logging to stderr\n"
 "  --help, -h            Show help\n"
@@ -380,7 +388,8 @@ void oc_cli_command_help_for(OcCliCommand cmd)
                "  --temperature T       Sampling temperature (0 = greedy)\n"
                "  --top-k K             Top-K sampling\n"
                "  --top-p P             Top-P / nucleus sampling\n"
-               "  --seed N              RNG seed\n");
+               "  --seed N              RNG seed\n"
+               "  --kv-compress MODE    none|rotor|helix (default none)\n");
         break;
     case OC_CLI_CMD_CHAT:
         printf("interactive chat session\n\n"
@@ -400,7 +409,8 @@ void oc_cli_command_help_for(OcCliCommand cmd)
                "  --bench-prompt-tokens N  Exact synthetic prompt-token count\n"
                "  --bench-decode-tokens N  Exact decode-token count\n"
                "  --bench-no-eos        Do not stop decode at EOS\n"
-               "  --prompt TEXT          Prompt to use for benchmarking\n");
+               "  --prompt TEXT          Prompt to use for benchmarking\n"
+               "  --kv-compress MODE    none|rotor|helix (default none)\n");
         break;
     case OC_CLI_CMD_INSPECT:
         printf("inspect model metadata and architecture\n\n"

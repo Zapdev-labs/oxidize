@@ -118,6 +118,7 @@ static void print_help(void)
 "  --n-predict N          Max tokens to generate (default 128)\n"
 "  --ctx N                Cap KV context below the model's advertised length\n"
 "  --kv f32|q8            KV cache dtype (default: q8 when ctx>=8192)\n"
+"  --kv-compress MODE     none | rotor | helix (default none)\n"
 "  --threads N            CPU thread hint (0 = auto)\n"
 "  --numa MODE            single | interleave | none (default none)\n"
 "  --auto                 Enable autotune (detect + plan)\n"
@@ -322,6 +323,15 @@ static OcError run_generation(const OcCliArgs *args)
     e = oc_llama_session_init_kv(&model, &sess, kv);
     if (e != OC_OK) {
         fprintf(stderr, "error: session init failed (%s)\n", oc_error_msg(e));
+        oc_tokenizer_free(&tok);
+        oc_llama_free(&model);
+        free(file_prompt);
+        return e;
+    }
+    e = oc_llama_session_enable_kv_compress_name(&sess, args->kv_compress);
+    if (e != OC_OK) {
+        fprintf(stderr, "error: --kv-compress failed (%s)\n", oc_error_msg(e));
+        oc_llama_session_free(&sess);
         oc_tokenizer_free(&tok);
         oc_llama_free(&model);
         free(file_prompt);
@@ -900,6 +910,10 @@ int main(int argc, char **argv)
         for (int iter = 0; iter < args.bench_iterations; iter++) {
             OcLlamaSession sess;
             if (oc_llama_session_init_kv(&model, &sess, bench_kv) != OC_OK) break;
+            if (oc_llama_session_enable_kv_compress_name(&sess, args.kv_compress) != OC_OK) {
+                oc_llama_session_free(&sess);
+                break;
+            }
             float *logits = sess.logits;
             for (size_t i = 0; i + 1 < n_ids && e == OC_OK; i++)
                 e = oc_llama_forward(&sess, ids[i], NULL);
@@ -924,8 +938,12 @@ int main(int argc, char **argv)
             OcLlamaSession pf_sess;
             memset(&pf_sess, 0, sizeof(pf_sess));
             if (oc_llama_session_init_kv(&model, &pf_sess, bench_kv) == OC_OK) {
+                if (oc_llama_session_enable_kv_compress_name(&pf_sess, args.kv_compress) != OC_OK) {
+                    oc_llama_session_free(&pf_sess);
+                } else {
                 for (size_t i = 0; i < n_ids; i++)
                     oc_llama_forward(&pf_sess, ids[i], NULL);
+                }
             }
             double pf_elapsed = wall_now() - pf_start;
             double pf_tps = (pf_elapsed > 0) ? (double)n_ids / pf_elapsed : 0.0;

@@ -22,6 +22,7 @@ typedef struct OcCliArgs {
      * any machine. 0 = use the model's own value. */
     uint32_t   n_ctx;
     const char *kv_type;       /* --kv f32|q8; NULL = auto (q8 if ctx>=8192) */
+    const char *kv_compress;   /* --kv-compress none|rotor|helix; NULL = none */
     int        threads;
     const char *numa;
     bool       auto_tune;

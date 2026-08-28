@@ -151,3 +151,27 @@ Test(cli, parses_kv_type)
     oc_cli_parse_args(5, argv, &a);
     cr_assert_str_eq(a.kv_type, "q8");
 }
+
+Test(cli, parses_kv_compress)
+{
+    char *argv[] = {"oxidize-c", "--model", "m.gguf", "--kv-compress", "rotor"};
+    OcCliArgs a;
+    oc_cli_parse_args(5, argv, &a);
+    cr_assert_str_eq(a.kv_compress, "rotor");
+}
+
+Test(cli, kv_compress_defaults_to_none)
+{
+    OcCliArgs a;
+    oc_cli_args_defaults(&a);
+    cr_assert(a.kv_compress == NULL, "default compressed KV is off");
+}
+
+Test(cli, subcommand_parses_kv_compress)
+{
+    char *argv[] = {"oxidize-c", "bench", "--model", "m.gguf",
+                    "--kv-compress", "helix"};
+    OcCliContext ctx;
+    cr_assert(oc_cli_context_parse(6, argv, &ctx));
+    cr_assert_str_eq(ctx.kv_compress, "helix");
+}
