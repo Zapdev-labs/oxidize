@@ -28,7 +28,7 @@ typedef struct OcQuantMetrics {
     double compression_ratio; /* original / quantized                        */
 } OcQuantMetrics;
 
-/* Compare f32 weights to dequantized `quant_data`, which must be packed for `qtype`. Returns OC_ERR_INVALID_ARG on NULL args or a length mismatch. */
+/* Compare f32 weights to dequantized `quant_data`, which must be packed for `qtype` (size from oc_quantized_size(qtype, n)). Returns OC_ERR_INVALID_ARG on NULL args or n==0. */
 OcError oc_quant_analyze(const float *f32_data, const uint8_t *quant_data,
                           OcGgufQuantizationType qtype, size_t n,
                           OcQuantMetrics *out);

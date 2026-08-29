@@ -1,4 +1,4 @@
-/* parallel.h — persistent worker pool for the inference hot path. */
+/* parallel.h — persistent worker pool for the inference hot path. Not reentrant: a region body must not itself open a region. */
 #ifndef OXIDIZE_PARALLEL_H
 #define OXIDIZE_PARALLEL_H
 
@@ -18,7 +18,7 @@ extern "C" {
 typedef void (*OcParallelFn)(size_t begin, size_t end, size_t tid,
                              void *user_data);
 
-/* Set the worker count. 1 disables threading (regions run inline). 0 means auto (online CPU count). Call once at startup. */
+/* Set the worker count. 1 disables threading (regions run inline). 0 means auto (online CPU count). Call once at startup. If workers cannot be created, falls back to inline and returns OC_ERR_INTERNAL. */
 OcError oc_parallel_set_threads(size_t n_threads);
 
 /* Current worker count, including the calling thread. 1 means inline. */
