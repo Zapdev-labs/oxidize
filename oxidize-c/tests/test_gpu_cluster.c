@@ -1,3 +1,4 @@
+/* test_gpu_cluster.c — GPU family profile + manifest generation tests. */
 #include <criterion/criterion.h>
 #include "oxidize/gpu_cluster.h"
 #include <string.h>

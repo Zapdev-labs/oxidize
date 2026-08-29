@@ -1,3 +1,4 @@
+/* test_lora.c — LoRA adapter inference tests. */
 #include <criterion/criterion.h>
 #include "oxidize/lora.h"
 
@@ -130,7 +131,6 @@ Test(lora_plan, qlora_kind)
     };
 
     OcLoraPlan plan;
-    /* base_qtype=1 means quantized -> Qlora */
     OcLoraPlanError e = oc_lora_plan_application(base, 1, adapter, 2, 1, &plan);
     cr_assert_eq(e, OC_LORA_PLAN_OK);
     cr_assert_eq(plan.kind, OC_ADAPTER_QLORA);
@@ -174,7 +174,6 @@ Test(lora_plan, missing_pair_for_b)
     const char *base[] = {"blk.0.attn_q.weight"};
     const char *adapter[] = {
         "blk.0.attn_q.weight.lora_b.weight",
-        /* no lora_a */
     };
 
     OcLoraPlan plan;
@@ -241,7 +240,6 @@ Test(lora_plan, null_safety)
 
 Test(lora_plan, no_adapters_on_base)
 {
-    /* adapter has no lora tensors, should produce empty plan. */
     const char *base[] = {"blk.0.attn_q.weight"};
     const char *adapter[] = {"blk.0.attn_q.weight"};
 

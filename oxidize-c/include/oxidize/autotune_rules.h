@@ -1,3 +1,4 @@
+/* autotune_rules.h — Hardware-aware tuning rules. */
 #ifndef OXIDIZE_AUTOTUNE_RULES_H
 #define OXIDIZE_AUTOTUNE_RULES_H
 

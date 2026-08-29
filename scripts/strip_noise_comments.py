@@ -57,9 +57,14 @@ KEEP_WORDS = re.compile(
     re.IGNORECASE,
 )
 
+EXTRA_KEEP = re.compile(r"VAL-|bit-exact|invariant", re.IGNORECASE)
+
 KEEP_LICENSE = re.compile(r"Copyright|SPDX|License", re.IGNORECASE)
 
 NUMBERED_STEP = re.compile(r"^\s*/\*\s*\d+\.\s+.+\*/\s*$")
+
+FILE_TITLE = re.compile(r"^\s*/\* \S+\.\w+")
+MASTER_REF = os.environ.get("OXIDIZE_STRIP_REF", "origin/master")
 
 C_EXTS = {".c", ".h", ".cpp", ".hpp", ".cc", ".hh", ".cxx"}
 OTHER_EXTS = {".rs", ".go", ".py"}
@@ -86,7 +91,7 @@ def comment_text_lines(block: list[str]) -> list[str]:
 
 
 HANG_END = re.compile(
-    r"\b(?:the|a|an|of|and|to|for|with|from|by|as|into|on|in|or)\s*$",
+    r"\b(?:the|a|an|of|and|to|for|with|from|by|as|into|on|in|or|is)\s*$",
     re.IGNORECASE,
 )
 
@@ -130,7 +135,8 @@ def collapse_c_blocks(lines: list[str]) -> list[str]:
                     sentence = texts[0].rstrip(".,;:") + "."
                 out.append(indent + "/* " + sentence + " */")
                 for extra in texts[1:]:
-                    if KEEP_WORDS.search(t := extra.strip()) and t not in sentence:
+                    t = extra.strip()
+                    if EXTRA_KEEP.search(t) and t not in sentence:
                         out.append(indent + "/* " + first_sentence(t) + " */")
                 i = j + 1
                 continue
@@ -142,6 +148,9 @@ def collapse_c_blocks(lines: list[str]) -> list[str]:
 def strip_banners(lines: list[str]) -> list[str]:
     out = []
     for line in lines:
+        if FILE_TITLE.match(line):
+            out.append(line)
+            continue
         if BANNER_LINE.match(line) and not KEEP_WORDS.search(line):
             continue
         if NUMBERED_STEP.match(line) and not KEEP_WORDS.search(line):
@@ -183,16 +192,102 @@ def is_bad_oneline(inner: str) -> bool:
     return False
 
 
-def git_head(path: Path) -> str | None:
+def git_show(path: Path, ref: str = MASTER_REF) -> str | None:
     rel = path.relative_to(ROOT).as_posix()
     proc = subprocess.run(
-        ["git", "show", f"HEAD:{rel}"],
+        ["git", "show", f"{ref}:{rel}"],
         cwd=ROOT,
         capture_output=True,
     )
     if proc.returncode != 0:
         return None
     return proc.stdout.decode("utf-8", "replace")
+
+
+def opening_title(source: str) -> str | None:
+    lines = source.splitlines()
+    if not lines:
+        return None
+    if not lines[0].lstrip().startswith("/*"):
+        return None
+    if "*/" in lines[0]:
+        inner = lines[0].split("/*", 1)[1].rsplit("*/", 1)[0].strip()
+        return first_sentence(inner)
+    block = [lines[0]]
+    for line in lines[1:]:
+        block.append(line)
+        if "*/" in line:
+            break
+    texts = comment_text_lines(block)
+    if not texts:
+        return None
+    return first_sentence(" ".join(texts))
+
+
+def is_truncated_comment(inner: str) -> bool:
+    s = inner.strip()
+    if s.endswith((",", "(", ";", "the", "a", "an", "of", "and", "to", "for")):
+        return True
+    if HANG_END.search(s) and len(s) > 55:
+        return True
+    return False
+
+
+def drop_fragments(lines: list[str]) -> list[str]:
+    out = []
+    for line in lines:
+        match = ONELINE.match(line)
+        if not match:
+            out.append(line)
+            continue
+        inner = match.group(2).strip()
+        if FILE_TITLE.match(line) or EXTRA_KEEP.search(inner):
+            out.append(line)
+            continue
+        if inner[:1].islower() and not re.match(r"^[a-z0-9_.]+\.[a-z]{1,3}\b", inner):
+            if len(inner) > 50 or is_truncated_comment(inner):
+                continue
+        out.append(line)
+    return out
+
+
+def restore_title(working: str, master: str) -> str:
+    title = opening_title(master)
+    if not title:
+        return working
+    lines = working.splitlines()
+    first = next((line for line in lines if line.strip()), "")
+    if FILE_TITLE.match(first):
+        return working
+    if first.startswith("#ifndef") or first.startswith("#define") or first.startswith("#include") or first.startswith("#pragma"):
+        return f"/* {title} */\n" + working
+    return working
+
+
+def complete_truncated(working: str, master: str) -> str:
+    comments = re.findall(r"/\*.*?\*/", master, re.S)
+    parsed = [(" ".join(comment_text_lines(c.splitlines())), c) for c in comments]
+    out = []
+    for line in working.splitlines():
+        match = ONELINE.match(line)
+        if not match:
+            out.append(line)
+            continue
+        indent, inner, rest = match.group(1), match.group(2), match.group(3)
+        if not is_truncated_comment(inner):
+            out.append(line)
+            continue
+        prefix = inner.strip()[:32]
+        sentence = None
+        for joined, _comment in parsed:
+            if prefix and joined.startswith(prefix.strip()[:20]):
+                sentence = first_sentence(joined)
+                break
+        if sentence:
+            out.append(f"{indent}/* {sentence} */{rest}")
+        else:
+            out.append(line)
+    return "\n".join(out) + ("\n" if working.endswith("\n") else "")
 
 
 def repair_onelines(working: str, head: str) -> str:
@@ -220,7 +315,7 @@ def repair_onelines(working: str, head: str) -> str:
                 extras = [
                     first_sentence(t)
                     for t in texts[1:]
-                    if KEEP_WORDS.search(t) and t not in sentence
+                    if EXTRA_KEEP.search(t) and t not in sentence
                 ][:1]
                 break
         if not sentence:
@@ -283,7 +378,12 @@ def main() -> int:
     parser.add_argument(
         "--repair",
         action="store_true",
-        help="rewrite mashed/truncated one-line C comments from HEAD first sentences",
+        help="rewrite mashed one-line C comments from origin/master first sentences",
+    )
+    parser.add_argument(
+        "--polish",
+        action="store_true",
+        help="restore file titles, drop fragments, complete truncated comments",
     )
     args = parser.parse_args()
     if not args.write and not args.dry_run:
@@ -304,11 +404,22 @@ def main() -> int:
             except (OSError, UnicodeDecodeError):
                 continue
             new = original
-            if args.repair and ext in C_EXTS:
-                head = git_head(path)
-                if head is not None:
-                    new = repair_onelines(new, head)
-            new = transform(path, new)
+            if args.polish and ext in C_EXTS:
+                master = git_show(path)
+                if master is not None:
+                    new = restore_title(new, master)
+                    new = complete_truncated(new, master)
+                lines = drop_fragments(new.splitlines())
+                new = "\n".join(lines)
+                new = collapse_blank_runs(new.splitlines())
+                new = "\n".join(new)
+            elif args.repair and ext in C_EXTS:
+                master = git_show(path)
+                if master is not None:
+                    new = repair_onelines(new, master)
+                new = transform(path, new)
+            else:
+                new = transform(path, new)
             if new == original:
                 continue
             delta = original.count("\n") - new.count("\n")

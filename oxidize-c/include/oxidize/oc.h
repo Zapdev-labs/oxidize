@@ -1,3 +1,4 @@
+/* oc.h — umbrella public header for the oxidize-c C11 port. */
 #ifndef OXIDIZE_OC_H
 #define OXIDIZE_OC_H
 

@@ -108,7 +108,7 @@ OcError oc_tokenizer_encode(const OcTokenizer *t, const char *text,
                             OcSpecialTokenPolicy policy,
                             uint32_t **out_ids, size_t *out_count);
 
-/* Decode `ids` (array of `count` token ids) back into text. On success, */
+/* Decode `ids` (array of `count` token ids) back into text. */
 OcError oc_tokenizer_decode(const OcTokenizer *t, const uint32_t *ids,
                             size_t count, char **out_text);
 

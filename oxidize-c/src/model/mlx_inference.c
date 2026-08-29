@@ -1,3 +1,4 @@
+/* mlx_inference.c — MLX (Apple Metal) inference engine, macOS stub. */
 #define _POSIX_C_SOURCE 200809L
 
 #include "oxidize/mlx_inference.h"

@@ -1,3 +1,4 @@
+/* test_distributed.c — tests for the distributed inference scheduler. */
 #include <criterion/criterion.h>
 #include <string.h>
 #include <stdio.h>
@@ -350,7 +351,6 @@ Test(distributed, send_null_data_nonzero_count)
     OcDistributedScheduler sched;
     OcDistributedConfig cfg = make_single_node_config();
     cr_assert_eq(oc_distributed_init(&sched, &cfg), OC_OK);
-    /* count > 0 but data == NULL: invalid even in single-node. */
     cr_assert_eq(oc_distributed_send_activations(&sched, NULL, 4),
                  OC_ERR_INVALID_ARG);
     oc_distributed_free(&sched);
@@ -654,7 +654,6 @@ Test(distributed, validate_config_reject_too_many_nodes)
 
 Test(distributed, validate_config_reject_inconsistent_rank_tuple)
 {
-    /* rank 3 claiming pipeline/tensor rank 0/0 must be rejected. */
     OcDistributedConfig cfg = make_multinode_config(4, 3, 4, 1);
     cfg.pipeline_rank = 0;
     cfg.tensor_rank = 0;

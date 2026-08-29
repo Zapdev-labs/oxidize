@@ -1,3 +1,4 @@
+/* test_glm_arch.c — tests for GLM / Hunyuan architecture support. */
 #include <criterion/criterion.h>
 #include <string.h>
 
@@ -409,7 +410,6 @@ Test(glm_arch, config_parse_hunyuan_metadata, .disabled=true)
 
 Test(glm_arch, config_parse_glm_invalid_dims, .disabled=true)
 {
-    /* hidden_size not divisible by num_attention_heads → OC_ERR_MODEL. */
     const char *keys[] = {
         "glm.hidden_size",
         "glm.num_attention_heads",
@@ -509,11 +509,9 @@ Test(glm_arch, config_parse_glm_defaults_for_missing_keys, .disabled=true)
     OcError e = oc_glm_config_parse(&f, "glm", &cfg);
     cr_assert_eq(e, OC_OK, "parse with missing keys should use defaults");
 
-    /* vocab_size falls back to default (32000) since not in GGUF. */
     cr_assert_eq(cfg.vocab_size, 32000, "default vocab_size when missing");
     cr_assert_eq(cfg.hidden_size, 4096, "parsed hidden_size");
     cr_assert_eq(cfg.max_position_embeddings, 4096, "parsed max_position");
-    /* rope_theta defaults to 10000 for GLM version 1 (< 4). */
     cr_assert_float_eq(cfg.rope_theta, 10000.0f, 1e-1f,
         "default rope_theta for ChatGLM");
     cr_assert_eq(cfg.glm_version, OC_GLM_VERSION_1, "version 1 from 'glm'");

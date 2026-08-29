@@ -132,7 +132,6 @@ OcError oc_vision_prompt_render_tokens(const OcVisionPrompt *vp,
         }
         break;
     case OC_VP_FORMAT_MPLUG_OWL:
-        /* mPLUG-Owl: image tokens after text (handled below). */
         break;
     }
 

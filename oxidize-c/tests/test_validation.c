@@ -1,3 +1,4 @@
+/* test_validation.c — cross-validation and quality-assessment tests. */
 #include <criterion/criterion.h>
 #include <math.h>
 #include <string.h>
@@ -371,7 +372,6 @@ Test(validation, perplexity_uniform)
 {
     OcValidationState *s = NULL;
     cr_assert_eq(oc_validation_init(NULL, &s), OC_OK);
-    /* logprob = -ln(N) for each sample -> perplexity = N. */
     add_simple_sample(s, 1, 1, -log(10.0), 1.0f);
     add_simple_sample(s, 2, 2, -log(10.0), 1.0f);
     double ppl = 0.0;

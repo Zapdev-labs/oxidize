@@ -129,7 +129,7 @@ float oc_oxk_dot_q6_k_q8_k(const uint8_t *row, size_t blocks_per_row,
 float oc_oxk_dot_q8_0_q8_0(const uint8_t *row, size_t blocks_per_row,
                             const uint8_t *q8);
 
-/* oc_oxk_dot_q4_k_prepped() is bit-exact with oc_oxk_dot_q4_k_q8_k(): the */
+/* oc_oxk_dot_q4_k_prepped() is bit-exact with oc_oxk_dot_q4_k_q8_k(). */
 
 /* Scratch bytes oc_oxk_q4_k_prep_row() needs for a row of `blocks`. */
 size_t oc_oxk_q4_k_prep_bytes(size_t blocks);

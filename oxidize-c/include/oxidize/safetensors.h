@@ -1,3 +1,4 @@
+/* safetensors.h — HuggingFace SafeTensors file reader. */
 #ifndef OXIDIZE_SAFETENSORS_H
 #define OXIDIZE_SAFETENSORS_H
 

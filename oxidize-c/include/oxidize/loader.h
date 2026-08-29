@@ -1,3 +1,4 @@
+/* loader.h — Universal model loader with architecture detection. */
 #ifndef OXIDIZE_LOADER_H
 #define OXIDIZE_LOADER_H
 

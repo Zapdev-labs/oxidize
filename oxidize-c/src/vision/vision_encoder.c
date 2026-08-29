@@ -1,3 +1,4 @@
+/* vision_encoder.c — CLIP-style vision encoder. */
 #include "oxidize/vision_encoder.h"
 
 #include <math.h>
@@ -34,7 +35,6 @@ OcError oc_vision_encoder_init(OcVisionEncoder **encoder,
         || cfg.hidden_dim == 0) {
         return OC_ERR_INVALID_ARG;
     }
-    /* patch_size must evenly divide image_size for a clean patch grid. */
     if (cfg.image_size % cfg.patch_size != 0) {
         return OC_ERR_INVALID_ARG;
     }

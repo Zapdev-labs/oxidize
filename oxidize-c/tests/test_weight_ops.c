@@ -1,3 +1,4 @@
+/* test_weight_ops.c — Weight matrix operations tests. */
 #include <criterion/criterion.h>
 #include "oxidize/weight_ops.h"
 #include "oxidize/weight_storage.h"
@@ -269,7 +270,6 @@ Test(wops, moe_softmax_gating)
     oc_weight_storage_init(&up_exps);
     oc_weight_storage_init(&down_exps);
 
-    /* gate = identity for all experts, up = ones, down = identity. */
     float *g = malloc(8 * sizeof(float));
     g[0]=1; g[1]=0; g[2]=0; g[3]=1;  /* expert 0: identity */
     g[4]=1; g[5]=0; g[6]=0; g[7]=1;  /* expert 1: identity */

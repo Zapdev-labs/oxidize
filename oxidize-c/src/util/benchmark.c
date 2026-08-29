@@ -1,3 +1,4 @@
+/* benchmark.c — Inference benchmarking implementation. */
 #define _POSIX_C_SOURCE 200809L
 #include "oxidize/benchmark.h"
 

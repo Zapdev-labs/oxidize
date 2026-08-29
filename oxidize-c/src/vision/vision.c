@@ -1,3 +1,4 @@
+/* vision.c — CLIP-style vision encoder implementation. */
 #include "oxidize/vision.h"
 
 #include <math.h>

@@ -1,3 +1,4 @@
+/* realtime.h — OpenAI Realtime API over WebSocket. */
 #ifndef OXIDIZE_REALTIME_H
 #define OXIDIZE_REALTIME_H
 
@@ -44,7 +45,6 @@ typedef struct OcRealtimeSession {
     OcTokenizer            *tokenizer;
     OcLlamaSession          llama_sess;
     OcRealtimeSessionConfig cfg;
-    /* conversation token history (for context continuity) */
     uint32_t              *history;
     size_t                 history_len;
     size_t                 history_cap;

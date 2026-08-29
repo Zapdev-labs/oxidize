@@ -1,3 +1,4 @@
+/* moe.c — Mixture-of-Experts routing and expert forward pass implementation. */
 #include "oxidize/moe.h"
 
 #include <math.h>
@@ -11,7 +12,6 @@ static bool config_valid(const OcMoeConfig *c)
     if (!c) return false;
     if (c->n_experts == 0) return false;
     if (c->hidden_dim == 0) return false;
-    /* n_active_experts == 0 means "use the default of 1" (see moe.h). */
     if (c->n_active_experts > c->n_experts) return false;
     if (c->n_active_experts > OC_MOE_MAX_EXPERTS_PER_TOKEN) return false;
     /* TOP_P/SOFTMAX may select every expert, but OcMoeRouteResult only

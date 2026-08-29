@@ -1,3 +1,4 @@
+/* gguf_writer.h — GGUF v3 file writer (serializer). */
 #ifndef OXIDIZE_GGUF_WRITER_H
 #define OXIDIZE_GGUF_WRITER_H
 
@@ -30,13 +31,13 @@ typedef struct OcGgufWriter {
     uint64_t data_section_start;
     /* Running offset of the next tensor's data (relative to file start). */
     uint64_t next_data_offset;
-    /* Pending tensor data buffer (opaque GwPendingList*). Tensor data is */
+    /* Pending tensor data buffer (opaque GwPendingList*). */
     void *pending;
     bool     finalized;        /* true after finalize() — further writes error */
     bool     owns_fp;          /* true when we fopen'd fp (not caller-provided) */
 } OcGgufWriter;
 
-/* Initialize a writer: open `path` for writing, emit the GGUF header (magic, */
+/* Initialize a writer: open `path` for writing, emit the GGUF header (magic, version=3, tensor_count=0, metadata_kv_count=0), and write the `general.architecture` string metadata (as required by the GGUF spec). */
 OcError oc_gguf_writer_init(const char *path, const char *arch_name,
                             OcGgufWriter *w);
 
@@ -64,7 +65,7 @@ OcError oc_gguf_writer_add_tensor(OcGgufWriter *w, const char *name,
                                   uint32_t type, const void *data,
                                   uint64_t data_size);
 
-/* Finalize the writer: seek back to the header and patch the real */
+/* Finalize the writer: seek back to the header and patch the real tensor_count and metadata_kv_count, then flush the file. */
 OcError oc_gguf_writer_finalize(OcGgufWriter *w);
 
 /* Close the file handle (if owned) and zero the struct. Safe on NULL or

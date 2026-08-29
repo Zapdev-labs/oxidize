@@ -1,3 +1,4 @@
+/* test_hf_hub.c — HuggingFace Hub downloader tests. */
 #define _GNU_SOURCE 1
 #include <criterion/criterion.h>
 #include <criterion/redirect.h>
@@ -15,7 +16,6 @@ Test(hf_hub, config_init_defaults)
 {
     OcHfConfig cfg;
     cr_assert_eq(oc_hf_config_init(&cfg, NULL), OC_OK);
-    /* cache_dir should be non-empty (default ~/.cache/oxidize/hf or /tmp). */
     cr_assert(cfg.cache_dir[0] != '\0', "cache_dir should default");
     cr_assert_str_eq(cfg.revision, "main", "default revision is main");
     cr_assert(cfg.api_token[0] == '\0', "no token by default");

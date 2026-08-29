@@ -1,9 +1,9 @@
+/* continuous_batching.c — continuous batching scheduler implementation. */
 #include "oxidize/continuous_batching.h"
 
 #include <stdlib.h>
 #include <string.h>
 
-/* ssize_t substitute: return value >= 0 means index, -1 means not found. */
 #define SLOT_NOT_FOUND ((size_t)-1)
 
 
@@ -286,7 +286,6 @@ OcError oc_batch_scheduler_stats(const OcBatchScheduler *s,
     } else {
         out_stats->avg_latency_ticks = 0.0;
     }
-    /* throughput: tokens / elapsed ticks. Elapsed = current tick. */
     if (s->tick > 0) {
         out_stats->throughput_tok_per_sec =
             (double)s->total_tokens_generated / (double)s->tick;

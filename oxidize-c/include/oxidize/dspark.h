@@ -1,3 +1,4 @@
+/* dspark.h — DSpark-style block drafting on native Qwen MTP. */
 #ifndef OXIDIZE_DSPARK_H
 #define OXIDIZE_DSPARK_H
 

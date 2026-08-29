@@ -134,7 +134,6 @@ Test(mmap, open_fd_succeeds_and_takes_ownership_of_fd)
 #ifndef __linux__
     cr_skip_test("oc_mmap_open_fd is only supported on Linux");
 #endif
-    /* oc_mmap_open_fd takes ownership of the caller-provided fd: on success */
     int fd = open(FIXTURE("valid-v3.gguf"), O_RDONLY);
     cr_assert_geq(fd, 0, "open() should succeed on the fixture");
 
@@ -161,7 +160,6 @@ Test(mmap, open_fd_invalid_args_rejected_without_closing_caller_fd)
     /* NULL out: must NOT close fd (caller retains ownership). */
     cr_assert_eq(oc_mmap_open_fd(fd, 132, NULL), OC_ERR_INVALID_ARG,
         "NULL out must return OC_ERR_INVALID_ARG");
-    /* fd is still ours — verify it's still a valid open fd by reading. */
     char c = 0;
     ssize_t n = read(fd, &c, 1);
     cr_assert_eq(n, 1, "fd should still be valid after NULL-out rejection");
@@ -187,7 +185,6 @@ Test(mmap, open_fd_map_failure_closes_fd_no_leak)
     cr_skip_test("fd ownership and /proc fdinfo checks are Linux-specific");
 #endif
     /* Scrutiny fix: when mmap() fails inside oc_mmap_open_fd (MAP_FAILED), the function must close(fd) before free(m) — otherwise the caller- provided fd leaks (the caller has no way to reclaim it once ownership has been "handed off" to oc_mmap_open_fd). */
-    /* file descriptors before and after a guaranteed-to-fail mmap call. */
     int fd = open(FIXTURE("valid-v3.gguf"), O_RDONLY);
     cr_assert_geq(fd, 0, "open() should succeed on the fixture");
 
@@ -200,7 +197,6 @@ Test(mmap, open_fd_map_failure_closes_fd_no_leak)
     cr_assert_not_null(fb, "fdinfo/%d should exist before open_fd", fd);
     fclose(fb);
 
-    /* len = 2^62 far exceeds the fixture's size; oc_mmap_open_fd now OC_ERR_INVALID_ARG before ever calling mmap. The fix under test */
     OcMmap *m = NULL;
     OcError e = oc_mmap_open_fd(fd, (size_t)1 << 62, &m);
     cr_assert_eq(e, OC_ERR_INVALID_ARG,
@@ -284,7 +280,6 @@ Test(gguf_map, open_via_mmap_returns_unified_view)
 
 Test(gguf_map, tensor_data_accessible_via_mmap)
 {
-    /* oc_gguf_map_tensor_data() returns a pointer into the mmap'd region. */
     OcGgufMmappedFile m;
     OcError e = oc_gguf_map_open(FIXTURE("valid-v3.gguf"), &m);
     cr_assert_eq(e, OC_OK, "map_open: %s", oc_error_msg(e));
@@ -304,7 +299,6 @@ Test(gguf_map, tensor_data_accessible_via_mmap)
 
 Test(gguf_map, arch_detection_from_mapped_file)
 {
-    /* oc_gguf_arch_from_file() reads general.architecture (or scans metadata */
     OcGgufMmappedFile m;
     OcError e = oc_gguf_map_open(FIXTURE("valid-v3.gguf"), &m);
     cr_assert_eq(e, OC_OK, "map_open: %s", oc_error_msg(e));
@@ -321,7 +315,6 @@ Test(gguf_map, arch_detection_from_mapped_file)
 
 Test(gguf_map, free_is_safe_on_zeroed)
 {
-    /* oc_gguf_map_free should be safe on a zeroed OcGgufMmappedFile. */
     OcGgufMmappedFile m;
     memset(&m, 0, sizeof(m));
     oc_gguf_map_free(&m);

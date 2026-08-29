@@ -1,3 +1,4 @@
+/* arch_forward.h — architecture-specific forward passes (GPT-2, GPT-NeoX, Falcon). */
 #ifndef OXIDIZE_ARCH_FORWARD_H
 #define OXIDIZE_ARCH_FORWARD_H
 

@@ -107,7 +107,6 @@ Test(realtime, session_init_free_without_model)
     cr_assert_eq(sess.cfg.max_response_tokens, 512u);
     cr_assert(sess.history != NULL);
     cr_assert(sess.history_cap > 0);
-    /* process_message with no model should report an error path but not crash */
     const char *msg = "{\"type\":\"input_text_delta\",\"delta\":\"hi\"}";
     /* Returns OC_ERR_MODEL or OC_ERR_FORMAT — both are non-OK; the send path
      * writes to a closed socket (fd=-1) and best-efforts. We only check it

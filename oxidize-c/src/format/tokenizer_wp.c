@@ -22,9 +22,7 @@
 
 
 struct OcWordPieceTokenizer {
-    /* vocab: token string → id. Keys are arena-owned NUL-terminated strings. */
     OcHashtable *vocab;
-    /* id → token string (dense array indexed by id). Arena-owned. */
     char  **id_to_token;
     size_t  vocab_size;
     /* Special-token ids (also mirrored in the OcTokenizer wrapper). */

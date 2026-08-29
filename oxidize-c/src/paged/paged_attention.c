@@ -1,3 +1,4 @@
+/* paged_attention.c — vLLM-style paged KV cache management + scheduling. */
 #include "oxidize/paged_attention.h"
 
 #include <math.h>

@@ -29,7 +29,6 @@ Test(mm_proj, init_valid)
     cr_assert_eq(proj->config.input_dim, 64);
     cr_assert_eq(proj->config.output_dim, 128);
     cr_assert_eq(proj->n_weights, 2);
-    /* layer 0: in=64, out=64 (hidden); layer 1: in=64, out=128 */
     cr_assert_eq(proj->in_dims[0], 64);
     cr_assert_eq(proj->out_dims[0], 64);
     cr_assert_eq(proj->in_dims[1], 64);

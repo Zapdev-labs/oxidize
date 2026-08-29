@@ -1,3 +1,4 @@
+/* scheduler.c — Higher-level request scheduler implementation. */
 #include "oxidize/scheduler.h"
 
 #include <stdlib.h>

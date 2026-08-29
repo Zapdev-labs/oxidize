@@ -1,3 +1,4 @@
+/* gguf.h — GGUF v3/v2 parser types and API. */
 #ifndef OXIDIZE_GGUF_H
 #define OXIDIZE_GGUF_H
 
@@ -14,10 +15,9 @@ extern "C" {
 #endif
 
 /* Opaque forward declaration of OcMmap (defined in oxidize/util/mmap.h). */
-/* public GGUF header; multi-shard callers that need raw mmap access should */
 typedef struct OcMmap OcMmap;
 
-/* GGUF magic bytes "GGUF" interpreted as a little-endian u32. little-endian u32 = 0x46554747 */
+/* GGUF magic bytes "GGUF" interpreted as a little-endian u32. */
 #define OC_GGUF_MAGIC 0x46554747u
 
 /* Supported GGUF versions. v1 (very old) is rejected. */
@@ -165,7 +165,6 @@ const char *oc_gguf_metadata_type_name(OcGgufMetadataType t);
 OcModelArchitecture oc_gguf_arch_from_file(const OcGgufFile *f);
 
 /* ─── mmap-backed multi-shard loading (VAL-FOUND-005, 006, 015) ────────── `oc_gguf_map_open()` is the primary entry point for loading real model weights: it mmaps the file (PROT_READ, MAP_PRIVATE) and parses the GGUF header + metadata + tensor table without copying the weight bytes into userspace memory. */
-/* shards are mmap'd and their tensor tables merged into a single unified */
 
 /* A single shard within an OcGgufMmappedFile. */
 typedef struct OcGgufShard {
@@ -193,7 +192,6 @@ OcError oc_gguf_map_open(const char *path, OcGgufMmappedFile *out);
 /* Apply MADV_HUGEPAGE to every shard (Linux only, best-effort). The caller */
 OcError oc_gguf_map_advise_hugepage(OcGgufMmappedFile *out);
 
-/* mlock every shard into physical RAM, but only if the total mapping fits in MemAvailable with >= 30% headroom (model_bytes < available * 7 / 10). */
 bool oc_gguf_map_mlock_with_headroom(OcGgufMmappedFile *out);
 
 /* Sequential prefault sweep across all shards (touch every 4 KiB page).

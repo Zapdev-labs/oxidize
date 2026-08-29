@@ -1,3 +1,4 @@
+/* inference.h — High-level inference engine. */
 #ifndef OXIDIZE_INFERENCE_H
 #define OXIDIZE_INFERENCE_H
 

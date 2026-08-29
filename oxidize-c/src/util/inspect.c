@@ -1,3 +1,4 @@
+/* inspect.c — Model inspector implementation. */
 #define _POSIX_C_SOURCE 200809L
 /* macOS hides non-POSIX sysconf names (_SC_NPROCESSORS_ONLN) under a strict
  * _POSIX_C_SOURCE; _DARWIN_C_SOURCE restores them. */

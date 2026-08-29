@@ -1,3 +1,4 @@
+/* error.h — OcError codes + OcErrorCtx chain. */
 #ifndef OXIDIZE_ERROR_H
 #define OXIDIZE_ERROR_H
 

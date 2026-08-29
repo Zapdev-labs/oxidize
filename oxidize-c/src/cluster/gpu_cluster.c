@@ -1,3 +1,4 @@
+/* gpu_cluster.c — GPU family profiles and Kubernetes manifest generation. */
 #define _POSIX_C_SOURCE 200809L
 
 #include "oxidize/gpu_cluster.h"

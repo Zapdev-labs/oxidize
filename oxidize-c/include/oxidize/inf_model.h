@@ -1,3 +1,4 @@
+/* inf_model.h — Full inference model struct. */
 #ifndef OXIDIZE_INF_MODEL_H
 #define OXIDIZE_INF_MODEL_H
 

@@ -1,3 +1,4 @@
+/* diffusion_gemma.h — Gemma diffusion model support. */
 #ifndef OXIDIZE_DIFFUSION_GEMMA_H
 #define OXIDIZE_DIFFUSION_GEMMA_H
 

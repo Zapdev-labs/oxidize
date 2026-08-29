@@ -133,7 +133,6 @@ Test(infm, kv_row_len)
 {
     OcInferenceConfig cfg;
     oc_inference_config_init(&cfg);
-    /* num_key_value_heads=32, head_dim=128 -> kv_row_len=32*128=4096 */
     OcInferenceModel m;
     oc_inf_model_init(&m, &cfg);
     size_t rlen = oc_inf_model_kv_row_len(&m);

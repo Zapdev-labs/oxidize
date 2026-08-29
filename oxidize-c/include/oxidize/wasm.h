@@ -1,3 +1,4 @@
+/* wasm.h — WebAssembly bridge for oxidize-c. */
 #ifndef OXIDIZE_WASM_H
 #define OXIDIZE_WASM_H
 
@@ -132,7 +133,7 @@ size_t oc_wasm_bridge_generate(OcWasmBridge *br,
                                void *userdata,
                                char *out_buf, size_t out_cap);
 
-/* Request cancellation of any in-flight generation. The cancel flag is */
+/* Request cancellation of any in-flight generation. */
 OcError oc_wasm_bridge_cancel(OcWasmBridge *br);
 
 
@@ -150,7 +151,7 @@ OcError oc_wasm_bridge_install_hooks(OcWasmBridge *br,
 /* Enqueue a message onto the bridge's internal queue. The caller retains */
 OcError oc_wasm_bridge_enqueue(OcWasmBridge *br, OcWasmMessage *msg);
 
-/* Drain one message from the queue and act on it. LOAD → load model, */
+/* Drain one message from the queue and act on it. */
 OcError oc_wasm_bridge_drain_one(OcWasmBridge *br);
 
 /* Current queue depth (0 if `br` is NULL). */

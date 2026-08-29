@@ -1,3 +1,4 @@
+/* safetensors_to_gguf.h — SafeTensors to GGUF conversion utility. */
 #ifndef OXIDIZE_SAFETENSORS_TO_GGUF_H
 #define OXIDIZE_SAFETENSORS_TO_GGUF_H
 

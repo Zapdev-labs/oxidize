@@ -1,3 +1,4 @@
+/* seq_scheduler.h — vLLM-style sequence scheduler. */
 #ifndef OXIDIZE_SEQ_SCHEDULER_H
 #define OXIDIZE_SEQ_SCHEDULER_H
 

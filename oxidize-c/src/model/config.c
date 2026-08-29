@@ -1,3 +1,4 @@
+/* config.c — Model configuration implementation. */
 #include "oxidize/config.h"
 
 #include <stdio.h>
@@ -161,7 +162,6 @@ OcError oc_model_config_from_gguf(const OcGgufFile *gguf, OcModelConfig *cfg)
     snprintf(key, sizeof(key), "%sattention.sliding_window", prefix);
     {
         uint32_t sw = cfg_u32(gguf, key, 0);
-        /* sliding_window: 0 means full attention; store as int32. */
         cfg->sliding_window = (int32_t)sw;
     }
 
@@ -263,7 +263,7 @@ uint64_t oc_model_config_n_params(const OcModelConfig *cfg)
     uint64_t total = vocab * hidden;
 
     /* Per-layer parameters. */
-    /* Attention: q_proj (hidden -> n_heads*head_dim), */
+    /* Attention: q_proj (hidden -> n_heads*head_dim), k_proj (hidden -> n_kv_heads*head_dim), v_proj (hidden -> n_kv_heads*head_dim), o_proj (n_heads*head_dim -> hidden). */
     uint64_t q_out = (uint64_t)cfg->n_heads * head_dim;
     uint64_t kv_out = (uint64_t)cfg->n_kv_heads * head_dim;
     uint64_t attn = hidden * q_out + hidden * kv_out + hidden * kv_out +

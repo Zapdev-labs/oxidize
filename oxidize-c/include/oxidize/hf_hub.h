@@ -1,3 +1,4 @@
+/* hf_hub.h — HuggingFace Hub GGUF model downloader. */
 #ifndef OXIDIZE_HF_HUB_H
 #define OXIDIZE_HF_HUB_H
 

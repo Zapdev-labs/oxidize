@@ -131,7 +131,6 @@ static OcError reader_read_string(ByteReader *r, OcArena *arena,
     const uint8_t *p = reader_read_exact(r, len, &e2);
     if (!p) return e2;
 
-    /* oc_arena_dup_n allocates len+1 bytes and NUL-terminates. */
     char *dst = oc_arena_dup_n(arena, (const char *)p, len);
     if (!dst) return OC_ERR_OOM;
 
@@ -396,7 +395,6 @@ OcError oc_gguf_parse(const uint8_t *buf, size_t len, OcGgufFile *out)
         return OC_ERR_FORMAT;
     }
 
-    /* data_section_start = align_up(reader.cursor, alignment). */
     bool overflow = false;
     uint64_t data_section_start = align_up_u64((uint64_t)reader_pos(&r), alignment, &overflow);
     if (overflow || data_section_start > (uint64_t)len) {
@@ -785,7 +783,6 @@ static char *extract_split_base_and_dir(const char *path, uint64_t *out_total)
     uint64_t total = 0;
     if (!parse_split_pattern(filename, &total)) return NULL;
 
-    /* filename = <base>-NNNNN-of-MMMMM.gguf. Find the last "-of-". */
     size_t fn_len = strlen(filename);
     const char *gguf_suffix = ".gguf";
     size_t suf_len = strlen(gguf_suffix);

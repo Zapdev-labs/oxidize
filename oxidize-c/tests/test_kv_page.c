@@ -29,7 +29,6 @@ Test(kv_page, config_default)
 Test(kv_page, kv_bytes_nonzero)
 {
     OcKvPageConfig c = small_config();
-    /* page_size=4, n_layers=2, head_dim=2, n_heads=2 -> 4*2*2*2*4 = 128 */
     cr_assert_eq(oc_kv_page_kv_bytes(&c), 128u);
 }
 

@@ -151,7 +151,6 @@ Test(tensor, transpose)
     float a[] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}; /* 2×3 */
     float out[6]; /* 3×2 */
     oc_tensor_transpose_f32(a, out, 2, 3);
-    /* out[0] = a[0] = 1, out[1] = a[3] = 4, out[2] = a[1] = 2 */
     cr_assert_float_eq(out[0], 1.0f, 1e-6f);
     cr_assert_float_eq(out[1], 4.0f, 1e-6f);
     cr_assert_float_eq(out[2], 2.0f, 1e-6f);

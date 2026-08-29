@@ -1,3 +1,4 @@
+/* continuous_batching.h — continuous batching scheduler for inference requests. */
 #ifndef OXIDIZE_CONTINUOUS_BATCHING_H
 #define OXIDIZE_CONTINUOUS_BATCHING_H
 

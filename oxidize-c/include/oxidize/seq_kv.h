@@ -1,3 +1,4 @@
+/* seq_kv.h — Per-sequence KV buffer for continuous batching. */
 #ifndef OXIDIZE_SEQ_KV_H
 #define OXIDIZE_SEQ_KV_H
 

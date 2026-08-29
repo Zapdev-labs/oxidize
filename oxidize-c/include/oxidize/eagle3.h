@@ -1,3 +1,4 @@
+/* eagle3.h — Eagle-3 speculative decoding support. */
 #ifndef OXIDIZE_EAGLE3_H
 #define OXIDIZE_EAGLE3_H
 

@@ -1,3 +1,4 @@
+/* cuda.h — CUDA backend for GPU-accelerated inference. */
 #ifndef OXIDIZE_CUDA_H
 #define OXIDIZE_CUDA_H
 
@@ -57,7 +58,7 @@ typedef struct OcCudaContext {
     OcCudaWeight *d_ffn_up_shexp;
     OcCudaWeight *d_ffn_down_shexp;
     OcCudaWeight *d_ffn_gate_inp_shexp;  /* optional sigmoid gate          */
-    /* KV cache on GPU: [n_layer][n_ctx][n_head_kv*head_dim] for K and V, */
+    /* KV cache on GPU: [n_layer][n_ctx][n_head_kv*head_dim] for K and V, stored as __half (opaque here to keep this header C11-clean). */
     void *d_kv_k;
     void *d_kv_v;
     /* Workspace for activations. */
@@ -90,7 +91,7 @@ typedef struct OcCudaContext {
     uint32_t *l_rope_dim;
     float    *l_rope_theta;
     uint32_t *l_sliding;        /* window size, 0 = global attention        */
-    /* KV cache stride in elements per position per layer. The cache is */
+    /* KV cache stride in elements per position per layer. */
     size_t   kv_row;
     /* Final logit softcap: logits = tanh(l/c)*c. 0 = disabled (Gemma 4: 30). */
     float    logit_softcap;

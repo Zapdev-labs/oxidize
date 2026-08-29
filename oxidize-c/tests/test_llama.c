@@ -60,7 +60,6 @@ Test(llama, rope_position_zero_is_identity)
 
 Test(llama, rope_partial_passthrough_tail)
 {
-    /* rope_len=4 < head_dim=8 → tail [4..8] passes through unchanged. */
     float in[] = {1.0f, 2.0f, 3.0f, 4.0f, 99.0f, 100.0f, 101.0f, 102.0f};
     float out[8];
     oc_apply_rope_f32(in, out, 8, 4, 1, 10000.0f);
@@ -306,7 +305,6 @@ Test(llama, yarn_scales_beyond_ctx)
 {
     float in[] = {1.0f, 2.0f, 3.0f, 4.0f};
     float out_yarn[4], out_normal[4];
-    /* position=8192, orig_ctx=4096, yarn_factor=4.0 → beyond ctx, YaRN should differ. */
     oc_apply_rope_yarn_f32(in, out_yarn, 4, 4, 8192, 10000.0f, 4.0f, 4096);
     oc_apply_rope_f32(in, out_normal, 4, 4, 8192, 10000.0f);
     bool differs = false;
@@ -386,7 +384,6 @@ static void tiny_bias_model_init(TinyBiasModel *t, bool with_bias)
         for (size_t cc = 0; cc < TB_EMBD; cc++)
             t->ident[r * TB_EMBD + cc] = (r == cc) ? 1.0f : 0.0f;
     for (size_t i = 0; i < TB_EMBD; i++) t->norm_ones[i] = 1.0f;
-    /* ffn_w stays zero: the dense FFN adds nothing, isolating attention. */
 
     t->model.tok_embeddings = tb_view(t->embd, TB_VOCAB, TB_EMBD);
     t->model.output = tb_view(t->ident, TB_VOCAB, TB_EMBD);

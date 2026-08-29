@@ -1,3 +1,4 @@
+/* middleware.c — server middleware stack implementation. */
 #define _POSIX_C_SOURCE 200809L   /* strdup, snprintf */
 #include "oxidize/middleware.h"
 

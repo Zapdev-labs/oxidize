@@ -1,3 +1,4 @@
+/* gradient.h — Gradient computation + optimizer stubs for LoRA training. */
 #ifndef OXIDIZE_GRADIENT_H
 #define OXIDIZE_GRADIENT_H
 

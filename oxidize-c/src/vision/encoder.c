@@ -1,3 +1,4 @@
+/* encoder.c — Vision encoder pipeline integration. */
 #include "oxidize/encoder.h"
 
 #include <stdlib.h>

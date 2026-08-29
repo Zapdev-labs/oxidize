@@ -1,3 +1,4 @@
+/* chat_mode.h — Interactive chat mode for the CLI. */
 #ifndef OXIDIZE_CHAT_MODE_H
 #define OXIDIZE_CHAT_MODE_H
 

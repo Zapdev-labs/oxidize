@@ -1,3 +1,4 @@
+/* sharding.h — Mesh model sharding for tensor parallelism. */
 #ifndef OXIDIZE_SHARDING_H
 #define OXIDIZE_SHARDING_H
 

@@ -1,3 +1,4 @@
+/* arena.c — OcArena bump-pointer allocator. */
 #include "oxidize/arena.h"
 
 #include <stdarg.h>

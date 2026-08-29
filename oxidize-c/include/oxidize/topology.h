@@ -1,3 +1,4 @@
+/* topology.h — Network topology discovery and mapping. */
 #ifndef OXIDIZE_TOPOLOGY_H
 #define OXIDIZE_TOPOLOGY_H
 

@@ -1,3 +1,4 @@
+/* attn_dump.h — per-layer attention weight dump for debugging/validation. */
 #ifndef OXIDIZE_ATTN_DUMP_H
 #define OXIDIZE_ATTN_DUMP_H
 

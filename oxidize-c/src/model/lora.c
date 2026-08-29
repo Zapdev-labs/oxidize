@@ -152,7 +152,6 @@ OcLoraPlanError oc_lora_plan_application(const char *const *base_tensor_names,
     memset(out_plan, 0, sizeof(*out_plan));
 
     /* Determine adapter kind. */
-    /* base_qtype: 0 = F32/F16/unknown -> Lora, anything else -> Qlora */
     out_plan->kind = (base_qtype == 0) ? OC_ADAPTER_LORA : OC_ADAPTER_QLORA;
 
     /* Collect lora_a and lora_b base names. */

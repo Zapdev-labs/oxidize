@@ -1,3 +1,4 @@
+/* tensor_ops.c — High-level tensor operations implementation. */
 #define _POSIX_C_SOURCE 200809L
 #include "oxidize/tensor_ops.h"
 
@@ -53,7 +54,6 @@ void oc_tensor_silu_f32(const float *a, float *out, size_t n)
 
 void oc_tensor_gelu_f32(const float *a, float *out, size_t n)
 {
-    /* tanh approximation: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3))) */
     const float c = 0.7978845608f; /* sqrt(2/pi) */
     for (size_t i = 0; i < n; i++) {
         float x = a[i];

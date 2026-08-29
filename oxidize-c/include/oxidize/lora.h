@@ -1,3 +1,4 @@
+/* lora.h — LoRA (Low-Rank Adaptation) adapter inference support. */
 #ifndef OXIDIZE_LORA_H
 #define OXIDIZE_LORA_H
 

@@ -1,3 +1,4 @@
+/* openai.c — OpenAI-compatible HTTP route handlers. */
 #define _POSIX_C_SOURCE 200809L   /* strdup */
 #include "oxidize/openai.h"
 

@@ -1,3 +1,4 @@
+/* advanced_sampling.h — Advanced sampling strategies for LLM generation. */
 #ifndef OXIDIZE_ADVANCED_SAMPLING_H
 #define OXIDIZE_ADVANCED_SAMPLING_H
 

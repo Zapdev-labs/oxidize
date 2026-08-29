@@ -1,3 +1,4 @@
+/* test_decoder.c — text decoder tests. */
 #define _POSIX_C_SOURCE 200809L
 #include <criterion/criterion.h>
 #include <string.h>

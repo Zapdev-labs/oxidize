@@ -1,3 +1,4 @@
+/* arch.c — OcModelArchitecture detection + tensor-name mapping. */
 #include "oxidize/model.h"
 
 #include <ctype.h>

@@ -1,3 +1,4 @@
+/* cuda_stub.c — stub implementation of CUDA API when compiled without OC_CUDA. */
 #include "oxidize/cuda.h"
 
 #include <string.h>

@@ -1,3 +1,4 @@
+/* test_eagle3.c — Eagle-3 speculative decoding tests. */
 #include <criterion/criterion.h>
 #include "oxidize/eagle3.h"
 #include <string.h>

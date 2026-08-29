@@ -1,3 +1,4 @@
+/* detect.h — Hardware detection and fingerprinting. */
 #ifndef OXIDIZE_DETECT_H
 #define OXIDIZE_DETECT_H
 

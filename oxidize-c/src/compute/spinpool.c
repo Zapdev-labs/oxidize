@@ -1,5 +1,4 @@
 #define _POSIX_C_SOURCE 200809L
-/* macOS hides _SC_NPROCESSORS_ONLN under strict _POSIX_C_SOURCE; restore it. */
 #ifdef __APPLE__
 #define _DARWIN_C_SOURCE 1
 #endif
@@ -246,7 +245,7 @@ OcError oc_spinpool_map(OcSpinPool *pool, void *(*fn)(void *),
      * the result. We use a thread-local-ish approach via the arg. */
     /* Since the task fn signature is void *(*fn)(void *arg), and we need C function pointers don't capture closures. So we use a static */
 
-    /* Actually, the simplest correct approach: use the arg as the item, */
+    /* Actually, the simplest correct approach: use the arg as the item, call fn directly, and collect results after wait. */
 
     /* Allocate a results array if caller didn't provide one. */
     void **results = out_results;

@@ -1,3 +1,4 @@
+/* model_registry.h — on-disk model registry for the C port. */
 #ifndef OXIDIZE_MODEL_REGISTRY_H
 #define OXIDIZE_MODEL_REGISTRY_H
 
@@ -77,10 +78,10 @@ OcError oc_model_registry_init(OcModelRegistry *reg, const char *cache_dir,
  * registry is zeroed. */
 void oc_model_registry_free(OcModelRegistry *reg);
 
-/* Scan `dir` for `*.gguf` files (non-recursive) and add each one via */
+/* Scan `dir` for `*.gguf` files (non-recursive) and add each one via oc_model_registry_add. */
 OcError oc_model_registry_scan(OcModelRegistry *reg, const char *dir);
 
-/* Add a single model file. Parses the GGUF header to populate arch, */
+/* Add a single model file. */
 OcError oc_model_registry_add(OcModelRegistry *reg, const char *path);
 
 /* Remove the entry whose path matches `path` exactly. Shifts subsequent

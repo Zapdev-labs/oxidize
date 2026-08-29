@@ -1,3 +1,4 @@
+/* mlx_inference.h — MLX (Apple Metal) inference engine, macOS stub. */
 #ifndef OXIDIZE_MLX_INFERENCE_H
 #define OXIDIZE_MLX_INFERENCE_H
 
@@ -35,7 +36,7 @@ void oc_mlx_config_init(OcMlxConfig *cfg);
 /* Initialize an engine from a config. */
 OcError oc_mlx_engine_init(OcMlxEngine *engine, const OcMlxConfig *cfg);
 
-/* Load a model from `model_path`. On non-macOS (or when use_metal is */
+/* Load a model from `model_path`. On non-macOS this returns OC_ERR_BACKEND. */
 OcError oc_mlx_engine_load(OcMlxEngine *engine, const char *model_path);
 
 /* Generate tokens. */

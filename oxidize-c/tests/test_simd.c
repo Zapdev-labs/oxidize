@@ -1,4 +1,4 @@
-/* test_simd.c — SIMD dispatch parity tests. Invariant (VAL-SIMD-001..004): for every quant type with a SIMD kernel, */
+/* test_simd.c — SIMD dispatch parity tests. */
 #include <criterion/criterion.h>
 
 #include "oxidize/quant.h"

@@ -8,3 +8,4 @@ ts	phase	decision	why	evidence	result
 2026-08-29T02:49:26Z	rust-tests	compacted inference GGUF fixtures behind mapped/s/u/f/t helpers	the tests still assert the same metadata, they just stop repeating BTreeMap noise	oxidize-core/src/model/inference.rs	23 inference tests passed
 2026-08-29T02:49:26Z	gate	loc_count vs baseline prints predicate PASS at 10160 removed	the done check is the script, not a self-report	python3 scripts/loc_count.py --compare scripts/loc_baseline.json	predicate PASS
 2026-08-29T02:49:26Z	skipped	did not rewrite SIMD/CUDA inner loops or delete Criterion	speed and features live there	oxidize-kernels oxidize-c/tests/criterion	left alone
+2026-08-29T03:05:00Z	polish	restored one-line C file titles from origin/master and completed truncated comments	Comment Sicko deleted collapsed titles; mashed leftovers would fail review	scripts/strip_noise_comments.py --polish	C -Werror build green, 67 oxidize-core tests passed, loc 10458 removed

@@ -1,3 +1,4 @@
+/* prefix_cache.h — LRU prefix cache for KV cache reuse. */
 #ifndef OXIDIZE_PREFIX_CACHE_H
 #define OXIDIZE_PREFIX_CACHE_H
 

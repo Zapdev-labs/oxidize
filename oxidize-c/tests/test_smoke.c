@@ -1,3 +1,4 @@
+/* test_smoke.c — placeholder smoke test for the Criterion test harness. */
 #include <criterion/criterion.h>
 
 #include <string.h>

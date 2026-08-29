@@ -1,3 +1,4 @@
+/* benchmark_suite.c — Benchmark suite implementation. */
 #include "oxidize/benchmark_suite.h"
 #include "oxidize/quant.h"
 #include "oxidize/activation.h"

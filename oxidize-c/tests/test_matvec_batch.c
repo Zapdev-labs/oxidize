@@ -253,7 +253,6 @@ Test(matvec_batch, q4k_prepped_matches_packed)
     }
 }
 
-/* f32 weights take a separate kernel; it must match oc_matvec_f32. */
 Test(matvec_batch, f32_weights)
 {
     const size_t rows = 33, cols = 129, n_vec = 7;

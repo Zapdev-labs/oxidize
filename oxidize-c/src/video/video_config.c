@@ -1,3 +1,4 @@
+/* video_config.c — Video pipeline configuration implementation. */
 #define _POSIX_C_SOURCE 200809L
 
 #include "oxidize/video_config.h"

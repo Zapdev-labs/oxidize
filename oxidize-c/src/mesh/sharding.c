@@ -1,3 +1,4 @@
+/* sharding.c — Mesh model sharding for tensor parallelism. */
 #include "oxidize/sharding.h"
 
 #include <stdio.h>

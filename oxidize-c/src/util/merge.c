@@ -1,3 +1,4 @@
+/* merge.c — checkpoint merging implementation. */
 #define _POSIX_C_SOURCE 200809L
 #include "oxidize/merge.h"
 
@@ -204,7 +205,6 @@ OcError oc_merge_slerp(const char *path_a, const char *path_b,
     if (e != OC_OK) { oc_gguf_map_free(&mfa); return e; }
 
     const OcGgufFile *fa = &mfa.unified;
-    /* fb not needed — we look up tensors from mfb directly. */
 
     OcGgufWriter w;
     e = oc_gguf_writer_init_from_file(output_path, fa, &w);

@@ -63,7 +63,6 @@ void oc_cli_args_defaults(OcCliArgs *a);
 void oc_cli_parse_args(int argc, char **argv, OcCliArgs *a);
 
 /* Parse the `oxidize-c <subcommand> [flags]` form into an OcCliContext. */
-/* ready for oc_cli_command_run), false otherwise — in which case the caller */
 struct OcCliContext;
 bool oc_cli_context_parse(int argc, char **argv, struct OcCliContext *ctx);
 

@@ -1,3 +1,4 @@
+/* qwen_arch.h — Qwen architecture forward pass. */
 #ifndef OXIDIZE_QWEN_ARCH_H
 #define OXIDIZE_QWEN_ARCH_H
 

@@ -134,7 +134,6 @@ Test(arch, all_19_arch_strings_detected)
 
 Test(arch, arch_name_round_trip)
 {
-    /* oc_model_arch_name should return a non-NULL string for every variant. */
     for (int i = 0; i < (int)OC_ARCH__COUNT; i++) {
         const char *name = oc_model_arch_name((OcModelArchitecture)i);
         cr_assert_not_null(name, "arch_name(%d) returned NULL", i);

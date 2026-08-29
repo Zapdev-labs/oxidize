@@ -1,3 +1,4 @@
+/* kv_page.c — paged KV cache management implementation. */
 #include "oxidize/kv_page.h"
 
 #include <stdlib.h>

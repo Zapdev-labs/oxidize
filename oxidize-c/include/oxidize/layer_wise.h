@@ -1,3 +1,4 @@
+/* layer_wise.h — Layer-wise inference for large models. */
 #ifndef OXIDIZE_LAYER_WISE_H
 #define OXIDIZE_LAYER_WISE_H
 

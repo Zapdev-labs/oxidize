@@ -147,7 +147,7 @@ OcError oc_mmap_open_fd(int fd, size_t len, OcMmap **out)
     if (!m) return OC_ERR_OOM;
 
 #ifdef __linux__
-    /* Note: oc_mmap_open_fd takes ownership of `fd` (m->fd = fd on success, */
+    /* Note: oc_mmap_open_fd takes ownership of `fd` (m->fd = fd on success, and oc_mmap_close() will close it). */
     /* Reject len > file size: mmap would succeed but touching pages past EOF
      * SIGBUSes. Only enforced for regular files (the only mappable case here). */
     struct stat st;

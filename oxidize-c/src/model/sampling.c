@@ -1,3 +1,4 @@
+/* sampling.c — token sampling from logits. */
 #include "oxidize/sampling.h"
 
 #include <float.h>

@@ -1,3 +1,4 @@
+/* glm_arch.h — GLM (ChatGLM/Zhipu) and Hunyuan architecture support. */
 #ifndef OXIDIZE_GLM_ARCH_H
 #define OXIDIZE_GLM_ARCH_H
 

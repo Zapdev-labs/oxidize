@@ -1,3 +1,4 @@
+/* web_worker.h — Web worker bridge for WASM/browser integration. */
 #ifndef OXIDIZE_WEB_WORKER_H
 #define OXIDIZE_WEB_WORKER_H
 

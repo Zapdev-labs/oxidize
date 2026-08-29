@@ -1,3 +1,4 @@
+/* rotorquant.h — RotorQuant KV-cache compression (PlanarQuant / IsoQuant). */
 #ifndef OXIDIZE_ROTORQUANT_H
 #define OXIDIZE_ROTORQUANT_H
 

@@ -1,3 +1,4 @@
+/* distributed.c — distributed inference scheduler implementation. */
 #define _POSIX_C_SOURCE 200809L
 #ifdef __APPLE__
 #define _DARWIN_C_SOURCE 1  /* BSD socket opts (IP_MULTICAST_TTL, etc.) on macOS */
@@ -716,7 +717,6 @@ OcError oc_distributed_barrier(OcDistributedScheduler *sched)
     if (sched->config.n_nodes <= 1) return OC_OK;
 
     /* NOTE: this ping/pong is NOT a global barrier (the first stage exits after its outbound ping without waiting for later stages). */
-    /* unreachable today because init rejects multi-node configs; a proper */
     uint8_t ping = 0x42;
 
     /* Send to next pipeline peer (or TP peer). */

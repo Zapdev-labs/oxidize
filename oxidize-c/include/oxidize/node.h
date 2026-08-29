@@ -1,3 +1,4 @@
+/* node.h — mesh node identity and state. */
 #ifndef OXIDIZE_NODE_H
 #define OXIDIZE_NODE_H
 

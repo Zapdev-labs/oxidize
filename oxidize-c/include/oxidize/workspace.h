@@ -1,3 +1,4 @@
+/* workspace.h — Inference workspace pre-allocation. */
 #ifndef OXIDIZE_WORKSPACE_H
 #define OXIDIZE_WORKSPACE_H
 

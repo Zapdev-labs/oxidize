@@ -1,3 +1,4 @@
+/* rdma.c — RDMA transport implementation. */
 #include "oxidize/rdma.h"
 
 #include <stdlib.h>

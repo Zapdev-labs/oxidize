@@ -1,3 +1,4 @@
+/* test_moe.c — Mixture-of-Experts routing tests. */
 #include <criterion/criterion.h>
 #include <math.h>
 #include <string.h>
@@ -54,7 +55,6 @@ Test(moe, router_init_bad_config)
     OcMoeConfig c0 = default_config(); c0.n_experts = 0;
     cr_assert_neq(oc_moe_router_init(&r, &c0), OC_OK);
 
-    /* n_active_experts == 0 is the documented "default to 1" case. */
     OcMoeConfig c1 = default_config(); c1.n_active_experts = 0;
     cr_assert_eq(oc_moe_router_init(&r, &c1), OC_OK);
     cr_assert_eq(r.config.n_active_experts, 1);
@@ -300,8 +300,6 @@ Test(moe, expert_forward_swiglu)
     cr_assert_eq(oc_moe_expert_forward(&r, 0, x, out, &out_len, temp), OC_OK);
     cr_assert_eq(out_len, 2);
 
-    /* silu(2) = 2/(1+e^-2) ≈ 1.7616, out[0] = silu(2)*2 ≈ 3.5232 */
-    /* silu(3) = 3/(1+e^-3) ≈ 2.8557, out[1] = silu(3)*3 ≈ 8.5672 */
     float expected0 = (2.0f / (1.0f + expf(-2.0f))) * 2.0f;
     float expected1 = (3.0f / (1.0f + expf(-3.0f))) * 3.0f;
     cr_assert_float_eq(out[0], expected0, 1e-4f);

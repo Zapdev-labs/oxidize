@@ -64,7 +64,6 @@ size_t oc_error_ctx_format(const OcErrorCtx *ctx, char *buf, size_t cap)
         bool first = true;
         while (c) {
             const char *msg = c->msg ? c->msg : "";
-            /* crude: use snprintf to a throwaway buffer to measure */
             char tmp[1];
             int n = snprintf(tmp, 0, "%s%s: %s",
                               first ? "" : " caused by: ",

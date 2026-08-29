@@ -1,3 +1,4 @@
+/* validation.c — cross-validation and model quality assessment utilities. */
 #include "oxidize/validation.h"
 
 #include <math.h>

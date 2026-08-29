@@ -1,3 +1,4 @@
+/* discovery.h — Mesh node discovery protocol. */
 #ifndef OXIDIZE_DISCOVERY_H
 #define OXIDIZE_DISCOVERY_H
 

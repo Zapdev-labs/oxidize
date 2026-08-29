@@ -1,5 +1,4 @@
 /* test_parallel.c — worker pool + threaded matvec. */
-/* raw float bits, not a tolerance, because a tolerance would hide exactly the */
 #include <criterion/criterion.h>
 
 #include "oxidize/matvec.h"

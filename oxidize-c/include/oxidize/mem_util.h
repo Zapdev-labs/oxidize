@@ -1,3 +1,4 @@
+/* mem_util.h — memory usage reporting utilities. */
 #ifndef OXIDIZE_MEM_UTIL_H
 #define OXIDIZE_MEM_UTIL_H
 

@@ -1,3 +1,4 @@
+/* advanced_features.h — Advanced inference features. */
 #ifndef OXIDIZE_ADVANCED_FEATURES_H
 #define OXIDIZE_ADVANCED_FEATURES_H
 

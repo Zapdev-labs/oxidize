@@ -1,3 +1,4 @@
+/* realtime.c — OpenAI Realtime API over WebSocket implementation. */
 #define _GNU_SOURCE 1   /* memmem, strdup */
 #include "oxidize/realtime.h"
 

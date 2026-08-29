@@ -1,3 +1,4 @@
+/* gemma_arch.h — Gemma architecture forward pass. */
 #ifndef OXIDIZE_GEMMA_ARCH_H
 #define OXIDIZE_GEMMA_ARCH_H
 

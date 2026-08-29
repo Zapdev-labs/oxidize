@@ -1,3 +1,4 @@
+/* mistral_arch.h — Mistral architecture forward pass. */
 #ifndef OXIDIZE_MISTRAL_ARCH_H
 #define OXIDIZE_MISTRAL_ARCH_H
 

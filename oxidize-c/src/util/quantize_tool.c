@@ -1,3 +1,4 @@
+/* quantize_tool.c — offline GGUF weight quantization tool. */
 #include "oxidize/quantize_tool.h"
 
 #include <stdio.h>

@@ -1,3 +1,4 @@
+/* cuda_kernels.h — CUDA fused kernels for GPU-accelerated LLM inference. */
 #ifndef OXIDIZE_CUDA_KERNELS_H
 #define OXIDIZE_CUDA_KERNELS_H
 
@@ -35,7 +36,6 @@ bool oc_cuda_embedding_lookup(
 bool oc_cuda_argmax(
     const float *d_logits, uint32_t *d_out_idx, uint32_t vocab_size);
 
-/* k ≤ vocab_size (returns false otherwise — no fabricated entries). */
 bool oc_cuda_topk(
     const float *d_logits, uint32_t *d_out_idx, float *d_out_val,
     uint32_t vocab_size, uint32_t k);
@@ -51,7 +51,6 @@ bool oc_cuda_qwen35_unpack_qgate(
     const float *d_packed, float *d_q, float *d_gate,
     uint32_t n_heads, uint32_t head_dim, void *stream);
 
-/* attn_out[i] *= sigmoid(gate[i]) — Qwen3.5 full-attention output gate. */
 bool oc_cuda_sigmoid_gate(float *d_x, const float *d_gate, size_t n,
                           void *stream);
 

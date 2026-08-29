@@ -1,3 +1,4 @@
+/* context_cache.c — Persistent KV cache storage for fast session resume. */
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif

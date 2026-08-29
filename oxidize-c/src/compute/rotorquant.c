@@ -1,3 +1,4 @@
+/* rotorquant.c — RotorQuant KV-cache compression (PlanarQuant / IsoQuant). */
 #include "oxidize/rotorquant.h"
 
 #include <math.h>

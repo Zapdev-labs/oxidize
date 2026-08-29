@@ -1,3 +1,4 @@
+/* finetune.h — LoRA/SFT finetuning utility stubs. */
 #ifndef OXIDIZE_FINETUNE_H
 #define OXIDIZE_FINETUNE_H
 

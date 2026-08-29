@@ -1,3 +1,4 @@
+/* fault_tolerance.c — Mesh fault tolerance: heartbeat monitoring, failure detection, and failover. */
 #include "oxidize/fault_tolerance.h"
 
 #include <stdlib.h>

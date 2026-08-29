@@ -1,3 +1,4 @@
+/* kv_cache.c — simple per-layer KV cache implementation. */
 #include "oxidize/kv_cache.h"
 
 #include <stdlib.h>

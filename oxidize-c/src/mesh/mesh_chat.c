@@ -1,3 +1,4 @@
+/* mesh_chat.c — Chat message routing over the mesh network. */
 #define _POSIX_C_SOURCE 200809L
 
 #include "oxidize/mesh_chat.h"

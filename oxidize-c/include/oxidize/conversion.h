@@ -1,3 +1,4 @@
+/* conversion.h — Model format conversion. */
 #ifndef OXIDIZE_CONVERSION_H
 #define OXIDIZE_CONVERSION_H
 

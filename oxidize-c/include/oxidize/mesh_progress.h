@@ -1,3 +1,4 @@
+/* mesh_progress.h — Distributed inference task progress tracking. */
 #ifndef OXIDIZE_MESH_PROGRESS_H
 #define OXIDIZE_MESH_PROGRESS_H
 

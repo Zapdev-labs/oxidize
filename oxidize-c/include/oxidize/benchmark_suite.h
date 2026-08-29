@@ -1,3 +1,4 @@
+/* benchmark_suite.h — Comprehensive benchmark suite. */
 #ifndef OXIDIZE_BENCHMARK_SUITE_H
 #define OXIDIZE_BENCHMARK_SUITE_H
 

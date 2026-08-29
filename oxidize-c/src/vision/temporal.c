@@ -1,3 +1,4 @@
+/* temporal.c — Video temporal aggregation. */
 #include "oxidize/temporal.h"
 
 #include <math.h>

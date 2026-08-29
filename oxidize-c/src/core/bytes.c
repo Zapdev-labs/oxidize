@@ -1,3 +1,4 @@
+/* bytes.c — OcBytes byte buffer utilities for serialization. */
 #include "oxidize/bytes.h"
 
 #include <stdlib.h>

@@ -1,5 +1,4 @@
 /* oxk_neon.h — AArch64 Advanced SIMD (NEON) OXK kernel declarations. */
-/* defined, and do not exist at all on x86 builds. */
 #ifndef OXIDIZE_OXK_NEON_H
 #define OXIDIZE_OXK_NEON_H
 

@@ -1,3 +1,4 @@
+/* diffusion.h — Diffusion model support for text-to-image generation. */
 #ifndef OXIDIZE_DIFFUSION_H
 #define OXIDIZE_DIFFUSION_H
 

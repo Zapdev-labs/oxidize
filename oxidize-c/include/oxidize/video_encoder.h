@@ -1,3 +1,4 @@
+/* video_encoder.h — Per-frame vision encoding + temporal pooling stub. */
 #ifndef OXIDIZE_VIDEO_ENCODER_H
 #define OXIDIZE_VIDEO_ENCODER_H
 

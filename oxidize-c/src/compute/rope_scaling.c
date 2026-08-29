@@ -1,3 +1,4 @@
+/* rope_scaling.c — RoPE position scaling implementation. */
 #include "oxidize/rope_scaling.h"
 
 #include <math.h>
@@ -76,7 +77,6 @@ void oc_rope_yarn_find_correction_range(int *lo, int *hi,
         if (hi) *hi = 0;
         return;
     }
-    /* lo = floor(corr_dim(beta_fast)), hi = ceil(corr_dim(beta_slow)) */
     OcRopeScalingConfig tmp = *cfg;
     tmp.beta_fast = cfg->beta_fast;  /* beta_fast=32 → low-freq dim */
     *lo = oc_rope_yarn_find_correction_dim(0, cfg);
@@ -114,7 +114,6 @@ float oc_rope_yarn_mscale_m(float scale, float m)
     return 0.1f * m * logf(scale) + 1.0f;
 }
 
-/* deepseek_yarn splits mscale into two knobs, and the split is not cosmetic: */
 void oc_rope_deepseek_yarn_scales(float scale_factor, float mscale,
                                   float mscale_all_dim, uint32_t head_dim,
                                   float *rope_attn_factor,
@@ -143,7 +142,6 @@ float oc_rope_apply_yarn(float freq, uint32_t pos,
 
     /* Compute correction range. */
     int corr_lo, corr_hi;
-    /* cfg already carries beta_fast, so the low end needs no copy. */
     corr_lo = oc_rope_yarn_find_correction_dim((int)dim, cfg);
     OcRopeScalingConfig tmp_slow = *cfg;
     tmp_slow.beta_fast = cfg->beta_slow;

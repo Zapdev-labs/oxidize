@@ -1,3 +1,4 @@
+/* openai.h — OpenAI-compatible HTTP route handlers. */
 #ifndef OXIDIZE_OPENAI_H
 #define OXIDIZE_OPENAI_H
 

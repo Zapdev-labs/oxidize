@@ -311,7 +311,6 @@ OcError oc_eagle3_logits_from_hidden(const OcEagle3DraftModel *m,
 
     free(normed);
 
-    /* d2t scatter: if d2t map exists, scatter draft logits to target vocab. */
     if (m->d2t && m->n_d2t > 0 && logits_len >= m->config.vocab_size) {
         float *scattered = malloc(m->config.vocab_size * sizeof(float));
         if (!scattered) return OC_ERR_OOM;

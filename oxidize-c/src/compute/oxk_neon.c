@@ -190,7 +190,6 @@ float oc_oxk_dot_q5_k_q8_k_neon(const uint8_t *row, size_t blocks,
             uint8x16_t p0 = vld1q_u8(qs + gp * 32);
             uint8x16_t p1 = vld1q_u8(qs + gp * 32 + 16);
 
-            /* qh[l] carries one high bit per 64-element group: bit 2*gp for the low-nibble half, bit 2*gp+1 for the high-nibble half (the u1/u2 stepping masks in dequant_q5_k), NOT a flat 256-bit field. */
             const uint8x16_t qh0v = vld1q_u8(qh);
             const uint8x16_t qh1v = vld1q_u8(qh + 16);
             const uint8x16_t onev = vdupq_n_u8(1);

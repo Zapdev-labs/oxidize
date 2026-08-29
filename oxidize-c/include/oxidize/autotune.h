@@ -1,3 +1,4 @@
+/* autotune.h — CPU detection, GGUF fingerprint, and tuning plan. */
 #ifndef OXIDIZE_AUTOTUNE_H
 #define OXIDIZE_AUTOTUNE_H
 
@@ -76,7 +77,6 @@ OcTuningPlan oc_autotune_plan(const OcCpuInfo *cpu,
                               const OcModelFingerprint *model);
 
 /* ─── Apply (autotune-plan-apply feature) ──────────────────────────────── Apply a plan to a loaded mmap'd GGUF: applies MADV_HUGEPAGE (if plan->use_hugepages) and mlock (if plan->mlock_weights) to every shard. */
-/* here, because they must be set per-thread by the caller's worker pool. */
 OcError oc_autotune_apply(const OcTuningPlan *plan, OcGgufMmappedFile *m);
 
 /* Bind the calling thread to a single NUMA node (Linux only, best-effort).

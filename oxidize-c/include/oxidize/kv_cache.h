@@ -1,3 +1,4 @@
+/* kv_cache.h — simple per-layer KV cache for transformer inference. */
 #ifndef OXIDIZE_KV_CACHE_H
 #define OXIDIZE_KV_CACHE_H
 

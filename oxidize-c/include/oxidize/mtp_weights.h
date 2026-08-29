@@ -1,3 +1,4 @@
+/* mtp_weights.h — Multi-Token Prediction (MTP/nextn) weight bundle. */
 #ifndef OXIDIZE_MTP_WEIGHTS_H
 #define OXIDIZE_MTP_WEIGHTS_H
 

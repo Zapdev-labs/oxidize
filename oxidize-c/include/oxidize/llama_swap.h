@@ -1,3 +1,4 @@
+/* llama_swap.h — Llama-family model swap support. */
 #ifndef OXIDIZE_LLAMA_SWAP_H
 #define OXIDIZE_LLAMA_SWAP_H
 

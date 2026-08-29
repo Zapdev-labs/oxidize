@@ -1,3 +1,4 @@
+/* file.h — file utility helpers. */
 #ifndef OXIDIZE_UTIL_FILE_H
 #define OXIDIZE_UTIL_FILE_H
 

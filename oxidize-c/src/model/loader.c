@@ -1,3 +1,4 @@
+/* loader.c — Universal model loader with architecture detection. */
 #define _POSIX_C_SOURCE 200809L
 #include "oxidize/loader.h"
 #include "oxidize/gguf.h"

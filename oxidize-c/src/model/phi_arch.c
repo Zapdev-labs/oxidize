@@ -1,3 +1,4 @@
+/* phi_arch.c — Phi-2 / Phi-3 architecture forward pass implementation. */
 #include "oxidize/phi_arch.h"
 #include "oxidize/flash_attention.h"
 #include "oxidize/activation.h"

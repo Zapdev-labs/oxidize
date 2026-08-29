@@ -1,3 +1,4 @@
+/* matvec.c — quantized/f32 matrix-vector products (scalar reference). */
 #include "oxidize/matvec.h"
 #include "oxidize/attn_kernels.h"
 #include "oxidize/flash_attention.h"
@@ -110,7 +111,7 @@ static void quantize_act_q8_0(const float *x, size_t n, uint8_t *out)
     }
 }
 
-/* Quantize an f32 activation to Q8_K: per 256 values, */
+/* Quantize an f32 activation to Q8_0: per 32 values, [f16 d][32 int8]. */
 #if defined(__x86_64__) || defined(__i386__)
 __attribute__((target("avx512f,avx512bw,avx512dq,avx512vl")))
 static void quantize_act_q8_k_avx512(const float *x, size_t n, uint8_t *out)

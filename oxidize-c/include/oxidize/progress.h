@@ -1,3 +1,4 @@
+/* progress.h — Progress tracking for long-running operations. */
 #ifndef OXIDIZE_PROGRESS_H
 #define OXIDIZE_PROGRESS_H
 

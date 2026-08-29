@@ -1,3 +1,4 @@
+/* prune.h — Wanda and magnitude pruning utility. */
 #ifndef OXIDIZE_PRUNE_H
 #define OXIDIZE_PRUNE_H
 

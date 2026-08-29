@@ -1,3 +1,4 @@
+/* hashtable.c — OcHashtable open-addressing string-keyed map (FNV-1a). */
 #include "oxidize/hashtable.h"
 
 #include <stdlib.h>

@@ -1,3 +1,4 @@
+/* chat_template.h — Chat template rendering for various model formats. */
 #ifndef OXIDIZE_CHAT_TEMPLATE_H
 #define OXIDIZE_CHAT_TEMPLATE_H
 

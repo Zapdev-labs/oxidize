@@ -22,12 +22,9 @@
 
 
 struct OcSentencePieceTokenizer {
-    /* vocab: token string → id. Keys are arena-owned NUL-terminated strings. */
     OcHashtable *vocab;
-    /* id → token string (dense array indexed by id). Arena-owned. */
     char  **id_to_token;
     size_t  vocab_size;
-    /* id → piece score (log-probability). Dense array indexed by id. */
     float  *piece_scores;
     /* Special-token ids (also mirrored in the OcTokenizer wrapper). */
     uint32_t  unknown_id;  bool has_unknown;
@@ -42,7 +39,7 @@ struct OcSentencePieceTokenizer {
 
 /* UTF-8 codepoint decoding is shared (utf8_utils.h::oc_utf8_decode_cp). */
 
-/* Compute UTF-8 char boundaries (byte offsets of each codepoint start, */
+/* Compute UTF-8 char boundaries (byte offsets of each codepoint start, followed by `text_len`). */
 static size_t sp_char_boundaries(const char *text, size_t text_len, size_t *out)
 {
     size_t n = 0;
@@ -159,7 +156,6 @@ static OcError sp_best_segmentation(const OcSentencePieceTokenizer *sp,
         return OC_OK;
     }
 
-    /* best_scores[0..=token_count], init to -INFINITY except [0]=0. */
     float *best_scores = (float *)malloc((token_count + 1) * sizeof(float));
     /* backtrack[j] = (prev_idx, id). id is irrelevant when prev_idx is
      * SIZE_MAX (unreachable). */

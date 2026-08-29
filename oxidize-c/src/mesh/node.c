@@ -1,3 +1,4 @@
+/* node.c — mesh node identity and state. */
 #include "oxidize/node.h"
 
 #include <stdio.h>

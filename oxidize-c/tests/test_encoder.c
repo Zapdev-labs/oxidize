@@ -1,3 +1,4 @@
+/* test_encoder.c — vision encoder pipeline tests. */
 #define _POSIX_C_SOURCE 200809L
 #include <criterion/criterion.h>
 #include <string.h>

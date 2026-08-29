@@ -1,3 +1,4 @@
+/* dflash.h — DFlash speculative decoding for C port. */
 #ifndef OXIDIZE_DFLASH_H
 #define OXIDIZE_DFLASH_H
 

@@ -1,3 +1,4 @@
+/* video.c — Video multimodal frame sampling and temporal aggregation. */
 #define _POSIX_C_SOURCE 200809L
 #include "oxidize/video.h"
 
@@ -55,7 +56,7 @@ bool oc_video_sampler_process(OcVideoFrameSampler *s, const OcVideoFrame *frame)
 
     switch (s->cfg.strategy) {
     case OC_FRAME_SAMPLE_UNIFORM: {
-        /* For uniform sampling, we need the total count upfront. If we don't know it, accept every Nth frame — but never more than */
+        /* For uniform sampling, we need the total count upfront. */
         uint32_t target = s->cfg.n_frames ? s->cfg.n_frames : 8;
         if (target > s->cfg.max_frames) target = s->cfg.max_frames;
         if (s->frames_selected >= target) return false;

@@ -1,3 +1,4 @@
+/* qwen_arch.c — Qwen architecture forward pass implementation. */
 #include "oxidize/qwen_arch.h"
 #include "oxidize/flash_attention.h"
 

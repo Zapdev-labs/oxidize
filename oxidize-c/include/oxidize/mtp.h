@@ -1,3 +1,4 @@
+/* mtp.h — Multi-Token Prediction (MTP/nextn) draft generation. */
 #ifndef OXIDIZE_MTP_H
 #define OXIDIZE_MTP_H
 

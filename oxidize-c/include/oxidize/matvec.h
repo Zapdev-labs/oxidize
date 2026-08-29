@@ -1,3 +1,4 @@
+/* matvec.h — quantized/f32 matrix-vector products (weight × activation). */
 #ifndef OXIDIZE_MATVEC_H
 #define OXIDIZE_MATVEC_H
 
@@ -60,7 +61,6 @@ void oc_matvec_quantized_batch(OcGgufQuantizationType qtype,
 /* Worst-case `act_scratch` size for ANY oc_matvec_quantized_batch() call whose */
 size_t oc_matvec_batch_scratch_bytes(size_t max_cols);
 
-/* f32-weight counterpart of oc_matvec_quantized_batch(). */
 void oc_matvec_f32_batch(const float *data, size_t rows, size_t cols,
                          const float *inputs, size_t in_stride,
                          float *outputs, size_t out_stride, size_t n_vec);

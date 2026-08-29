@@ -1,3 +1,4 @@
+/* llama.h — Llama-family dense forward pass (CPU, scalar + SIMD dequant). */
 #ifndef OXIDIZE_LLAMA_H
 #define OXIDIZE_LLAMA_H
 
@@ -79,10 +80,8 @@ typedef struct OcLlamaConfig {
     /* LongCat (ScMoE + MLA + n-gram over-embedding). */
     bool     is_longcat;
     uint32_t zero_expert_count;        /* identity experts appended after routed  */
-    /* deepseek_yarn parameters. Absent from GGUF metadata — LongCat's */
     float    yarn_mscale;
     float    yarn_mscale_all_dim;
-    /* n-gram over-embedding: (neighbor_num - 1) * split_num tables. */
     uint32_t ngram_n_grams;
     uint32_t ngram_split_num;
     /* Qwen3.5 hybrid attention. block_count includes optional trailing MTP
@@ -101,7 +100,6 @@ typedef struct OcLlamaConfig {
     /* The token embedding is RMS-normalized (no weight) before layer 0.
      * llama.cpp: build_norm(inpL, nullptr, nullptr, LLM_NORM_RMS, -1). */
     bool     embd_rms_norm;
-    /* sigmoid(W_gate · attn_norm(x)) gates the attention output elementwise */
     bool     attn_out_gate;
     /* RoPE runs only on sliding-window layers; global layers are NoPE.
      * Resolved per layer into OcLlamaLayer.use_rope. */

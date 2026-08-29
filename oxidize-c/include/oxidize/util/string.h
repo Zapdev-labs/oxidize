@@ -1,3 +1,4 @@
+/* string.h — string utility helpers. */
 #ifndef OXIDIZE_UTIL_STRING_H
 #define OXIDIZE_UTIL_STRING_H
 
@@ -32,7 +33,7 @@ bool oc_starts_with(const char *s, const char *prefix);
 /* Check if `s` ends with `suffix`. NULL `s` or `suffix` returns false. */
 bool oc_ends_with(const char *s, const char *suffix);
 
-/* Split `s` on the first occurrence of `delim`. Writes the left part (malloc'd, */
+/* Split `s` on the first occurrence of `delim`. */
 const char *oc_split_once(const char *s, char delim, char **out_left);
 
 /* Trim leading + trailing ASCII whitespace in place. Returns a pointer into

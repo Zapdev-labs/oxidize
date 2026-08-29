@@ -1,3 +1,4 @@
+/* log.h — oc_log leveled logging with OX_LOG_LEVEL env filter. */
 #ifndef OXIDIZE_LOG_H
 #define OXIDIZE_LOG_H
 

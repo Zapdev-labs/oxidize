@@ -1,3 +1,4 @@
+/* generation.h — Token generation engine. */
 #ifndef OXIDIZE_GENERATION_H
 #define OXIDIZE_GENERATION_H
 

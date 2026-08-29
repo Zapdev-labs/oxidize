@@ -1,3 +1,4 @@
+/* profiler.h — Inference profiler for the C port. */
 #ifndef OXIDIZE_PROFILER_H
 #define OXIDIZE_PROFILER_H
 

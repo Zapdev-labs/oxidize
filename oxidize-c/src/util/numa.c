@@ -1,3 +1,4 @@
+/* numa.c — NUMA awareness implementation. */
 #define _GNU_SOURCE
 #ifdef __APPLE__
 #define _DARWIN_C_SOURCE 1  /* expose _SC_NPROCESSORS_ONLN on macOS */

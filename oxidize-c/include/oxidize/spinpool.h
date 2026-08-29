@@ -1,3 +1,4 @@
+/* spinpool.h — Thread pool with spin-waiting for low-latency parallel compute. */
 #ifndef OXIDIZE_SPINPOOL_H
 #define OXIDIZE_SPINPOOL_H
 

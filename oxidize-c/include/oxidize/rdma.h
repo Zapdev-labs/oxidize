@@ -1,3 +1,4 @@
+/* rdma.h — RDMA (Remote Direct Memory Access) transport. */
 #ifndef OXIDIZE_RDMA_H
 #define OXIDIZE_RDMA_H
 

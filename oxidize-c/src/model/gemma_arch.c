@@ -1,3 +1,4 @@
+/* gemma_arch.c — Gemma architecture forward pass implementation. */
 #include "oxidize/gemma_arch.h"
 #include "oxidize/flash_attention.h"
 #include "oxidize/activation.h"

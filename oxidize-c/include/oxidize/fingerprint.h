@@ -1,3 +1,4 @@
+/* fingerprint.h — Model file fingerprinting. */
 #ifndef OXIDIZE_FINGERPRINT_H
 #define OXIDIZE_FINGERPRINT_H
 

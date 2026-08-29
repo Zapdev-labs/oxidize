@@ -1,3 +1,4 @@
+/* decoder.c — Text decoder implementation. */
 #include "oxidize/decoder.h"
 
 #include <stdlib.h>

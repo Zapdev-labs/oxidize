@@ -1,3 +1,4 @@
+/* test_error.c — OcError enum + OcErrorCtx tests. */
 #include <criterion/criterion.h>
 #include "oxidize/error.h"
 

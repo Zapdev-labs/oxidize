@@ -1,3 +1,4 @@
+/* scheduler.h — Higher-level request scheduler for paged attention. */
 #ifndef OXIDIZE_SCHEDULER_H
 #define OXIDIZE_SCHEDULER_H
 

@@ -1,3 +1,4 @@
+/* test_video_encoder.c — OcVideoEncoder tests. */
 #include <criterion/criterion.h>
 #include <string.h>
 

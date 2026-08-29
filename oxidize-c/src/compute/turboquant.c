@@ -1,3 +1,4 @@
+/* turboquant.c — Fast online quantization with calibration. */
 #include "oxidize/turboquant.h"
 
 #include <math.h>

@@ -410,13 +410,11 @@ void oc_autotune_plan_dump(const OcTuningPlan *plan,
 }
 
 /* ─── Apply (autotune-plan-apply feature) ──────────────────────────────── Applies the memory-side of the plan (hugepages + mlock) to the mmap'd GGUF. */
-/* worker threads) because it must be applied per-thread, not globally. */
 
 OcError oc_autotune_apply(const OcTuningPlan *plan, OcGgufMmappedFile *m)
 {
     if (plan == NULL || m == NULL) return OC_ERR_INVALID_ARG;
     if (plan->use_hugepages) {
-        /* oc_gguf_map_advise_hugepage is best-effort; logs on failure. */
         OcError e = oc_gguf_map_advise_hugepage(m);
         if (e != OC_OK) {
             oc_log(OC_LOG_WARN, "autotune: hugepage advise failed (%s)",

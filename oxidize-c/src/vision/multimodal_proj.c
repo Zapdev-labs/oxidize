@@ -1,3 +1,4 @@
+/* multimodal_proj.c — Multimodal projection layer implementation. */
 #include "oxidize/multimodal_proj.h"
 
 #include <math.h>

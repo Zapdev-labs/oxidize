@@ -1,3 +1,4 @@
+/* apply.h — Apply a tuning plan to the runtime. */
 #ifndef OXIDIZE_APPLY_H
 #define OXIDIZE_APPLY_H
 

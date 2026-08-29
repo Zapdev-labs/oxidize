@@ -1,3 +1,4 @@
+/* arch_forward.c — architecture-specific forward passes (GPT-2, GPT-NeoX, Falcon). */
 #include "oxidize/arch_forward.h"
 
 #include <math.h>
@@ -29,7 +30,6 @@ static void arch_embed_token(OcLlamaSession *s, uint32_t token)
     }
 }
 
-/* matvec wrapper: pick f32 or quantized path based on qtype. */
 static void arch_matvec(const OcWeightView *w, const float *in, float *out,
                         float *temp)
 {

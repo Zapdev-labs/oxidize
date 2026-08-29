@@ -1,3 +1,4 @@
+/* backend.h — Abstract compute backend interface. */
 #ifndef OXIDIZE_BACKEND_H
 #define OXIDIZE_BACKEND_H
 
@@ -60,7 +61,7 @@ OcError oc_backend_detect(OcBackendType type, OcBackendInfo *out);
 OcError oc_backend_detect_all(OcBackendInfo *out, uint32_t *n_out,
                               uint32_t max);
 
-/* Initialize a backend instance for the given type. On success, */
+/* Initialize a backend instance for the given type. */
 OcError oc_backend_init(OcBackend *backend, OcBackendType type);
 
 /* Cleanup: release any resources held by the backend. Safe on NULL or

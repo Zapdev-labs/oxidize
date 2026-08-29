@@ -150,7 +150,6 @@ Test(continuous_batching, next_batch_sjf_order)
     size_t count = 0;
     oc_batch_scheduler_next_batch(s, slots, 4, &count);
     cr_assert_eq(count, 2u);
-    /* r2 has smaller remaining work so it should come first. */
     cr_assert_eq(slots[0]->request_id, 20u);
     cr_assert_eq(slots[1]->request_id, 10u);
     oc_batch_scheduler_free(s);

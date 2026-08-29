@@ -258,10 +258,8 @@ struct OcBpeTokenizer {
      * NUL-terminated strings (the GPT-2 mapping never produces embedded
      * NULs — codepoints 256..323 encode as multi-byte UTF-8). */
     OcHashtable *vocab;          /* string → (void*)(uintptr_t) id */
-    /* id → token string (dense array indexed by id). Arena-owned. */
     char    **id_to_token;
     size_t    vocab_size;
-    /* merge ranks: pair_key → rank (lowest rank wins, matching Rust). */
     OcU64Map *merge_ranks;
     /* merged ids: pair_key → merged_token_id. */
     OcU64Map *merged_ids;

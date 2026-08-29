@@ -1,3 +1,4 @@
+/* encoder.h — Vision encoder pipeline integration. */
 #ifndef OXIDIZE_ENCODER_H
 #define OXIDIZE_ENCODER_H
 

@@ -1,3 +1,4 @@
+/* chat.h — chat template formatting for OpenAI-compatible server. */
 #ifndef OXIDIZE_CHAT_H
 #define OXIDIZE_CHAT_H
 

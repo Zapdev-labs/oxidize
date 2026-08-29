@@ -1,3 +1,4 @@
+/* layer_weights.h — Per-layer weight bundle for inference. */
 #ifndef OXIDIZE_LAYER_WEIGHTS_H
 #define OXIDIZE_LAYER_WEIGHTS_H
 

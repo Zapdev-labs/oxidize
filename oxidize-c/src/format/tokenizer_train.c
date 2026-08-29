@@ -1,3 +1,4 @@
+/* tokenizer_train.c — BPE tokenizer trainer implementation. */
 
 #define _POSIX_C_SOURCE 200809L  /* strdup, strndup */
 

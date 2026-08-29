@@ -1,3 +1,4 @@
+/* chat.c — chat template formatting. */
 #include "oxidize/chat.h"
 
 #include <stdarg.h>

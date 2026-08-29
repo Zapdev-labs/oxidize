@@ -1,3 +1,4 @@
+/* block_pool.c — memory block pool allocator implementation. */
 #include "oxidize/block_pool.h"
 
 #include <stdlib.h>

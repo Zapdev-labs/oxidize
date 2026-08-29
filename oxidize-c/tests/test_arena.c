@@ -1,3 +1,4 @@
+/* test_arena.c — OcArena bump allocator tests. */
 #include <criterion/criterion.h>
 #include "oxidize/arena.h"
 

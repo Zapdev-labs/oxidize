@@ -1,3 +1,4 @@
+/* oxk_avx512.c — AVX-512 OXK kernel implementations. */
 #include "oxidize/oxk.h"
 #include "oxidize/oxk_avx512.h"
 
@@ -23,7 +24,6 @@ static inline int32_t hsum_i32_8_avx512(__m256i v)
 }
 
 /* Vectorized replacement for the per-(block, activation) scalar loop that folds the activation's 16 block sums against the row's per-group scales. */
-/* because the whole term is exact int32 arithmetic, reassociating it cannot */
 __attribute__((target("avx512bw,avx512dq,avx512vl,avx512vnni")))
 static inline int32_t fold_bsums(__m256i w16, const uint8_t *bsums)
 {
@@ -675,7 +675,6 @@ float oc_oxk_dot_q5_k_q8_k_avx512vnni(const uint8_t *row, size_t blocks,
             const __m256i packed = _mm256_loadu_si256(
                 (const __m256i *)(qs + gp * 32));
 
-            /* qh[l] carries one high bit per 64-element group: bit 2*gp for the low-nibble half, bit 2*gp+1 for the high-nibble half — the u1/u2 stepping masks of dequant_q5_k, NOT a flat 256-bit field. */
             const __m256i qhv = _mm256_loadu_si256((const __m256i *)qh);
             const __m256i one = _mm256_set1_epi8(0x01);
             const __m256i h_lo = _mm256_and_si256(

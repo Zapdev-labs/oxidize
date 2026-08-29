@@ -1,3 +1,4 @@
+/* cpu_kernels.h — CPU kernel dispatch. */
 #ifndef OXIDIZE_CPU_KERNELS_H
 #define OXIDIZE_CPU_KERNELS_H
 

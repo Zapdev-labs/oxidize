@@ -1,3 +1,4 @@
+/* ssm.h — State-Space Model (SSM) recurrent state for layer-wise inference. */
 #ifndef OXIDIZE_SSM_H
 #define OXIDIZE_SSM_H
 

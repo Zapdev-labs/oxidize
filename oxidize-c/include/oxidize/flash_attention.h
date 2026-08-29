@@ -1,3 +1,4 @@
+/* flash_attention.h — fused QKV flash attention kernel (CPU scalar). */
 #ifndef OXIDIZE_FLASH_ATTENTION_H
 #define OXIDIZE_FLASH_ATTENTION_H
 
@@ -54,7 +55,6 @@ OcError oc_attention_scores(const float *q,
 #define OC_FLASH_BLOCK_SIZE 64
 #define OC_PARALLEL_FLASH_MIN_SEQ 16
 
-/* f32-to-f16 bit conversion (IEEE 754 half precision). */
 uint16_t oc_f32_to_f16_bits(float value);
 
 /* f16-to-f32 bit conversion. */

@@ -1,3 +1,4 @@
+/* test_wasm.c — WASM bridge tests. */
 #include <criterion/criterion.h>
 #include <string.h>
 

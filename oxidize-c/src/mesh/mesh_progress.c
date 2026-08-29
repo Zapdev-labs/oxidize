@@ -1,3 +1,4 @@
+/* mesh_progress.c — Distributed inference task progress tracking. */
 #define _POSIX_C_SOURCE 200809L
 
 #include "oxidize/mesh_progress.h"

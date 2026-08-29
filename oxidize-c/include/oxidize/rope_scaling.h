@@ -1,3 +1,4 @@
+/* rope_scaling.h — RoPE position scaling for context extension. */
 #ifndef OXIDIZE_ROPE_SCALING_H
 #define OXIDIZE_ROPE_SCALING_H
 
@@ -69,7 +70,6 @@ float oc_rope_yarn_mscale(float scale);
  * scale <= 1. */
 float oc_rope_yarn_mscale_m(float scale, float m);
 
-/* deepseek_yarn: resolve the two derived scales from the mscale pair. */
 void oc_rope_deepseek_yarn_scales(float scale_factor, float mscale,
                                   float mscale_all_dim, uint32_t head_dim,
                                   float *rope_attn_factor,

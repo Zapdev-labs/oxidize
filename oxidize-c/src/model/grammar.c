@@ -1,3 +1,4 @@
+/* grammar.c — grammar constraint implementation. */
 #include "oxidize/grammar.h"
 
 #include <stdlib.h>

@@ -1,3 +1,4 @@
+/* utf8_utils.h — shared UTF-8 helpers for the tokenizer implementations. */
 #ifndef OXIDIZE_FORMAT_UTF8_UTILS_H
 #define OXIDIZE_FORMAT_UTF8_UTILS_H
 

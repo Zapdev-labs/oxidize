@@ -1,3 +1,4 @@
+/* benchmark.h — Inference benchmarking utility. */
 #ifndef OXIDIZE_BENCHMARK_H
 #define OXIDIZE_BENCHMARK_H
 

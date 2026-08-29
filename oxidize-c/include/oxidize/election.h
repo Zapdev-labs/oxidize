@@ -1,3 +1,4 @@
+/* election.h — leader election protocol for distributed inference clusters. */
 #ifndef OXIDIZE_ELECTION_H
 #define OXIDIZE_ELECTION_H
 
@@ -64,7 +65,7 @@ OcError oc_election_request_vote(OcElectionState *state,
                                  uint64_t candidate_id, uint64_t term,
                                  bool *granted);
 
-/* Handle a vote response from `voter_id` at `term`. If we are CANDIDATE, */
+/* Handle a vote response from `voter_id` at `term`. */
 OcError oc_election_receive_vote(OcElectionState *state,
                                 uint64_t voter_id, uint64_t term,
                                 bool granted);

@@ -1,3 +1,4 @@
+/* gossip.c — gossip protocol for cluster node discovery and health checking. */
 #include "oxidize/gossip.h"
 
 #include <stdio.h>
@@ -94,7 +95,6 @@ OcError oc_gossip_add_node(OcGossipState *state, uint64_t id,
         snprintf(n->addr, sizeof(n->addr), "%s", addr);
         n->port    = port;
         n->healthy = true;
-        /* last_seen preserved unless caller updates via tick/merge. */
         return OC_OK;
     }
     if (state->n_nodes >= state->config.max_nodes) return OC_ERR_OOM;

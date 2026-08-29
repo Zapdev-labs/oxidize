@@ -1,3 +1,4 @@
+/* test_election.c — leader election protocol tests. */
 #define _POSIX_C_SOURCE 200809L
 #include <criterion/criterion.h>
 #include <string.h>
@@ -142,7 +143,6 @@ Test(election, request_vote_rejected_for_lower_priority)
     OcElectionState *s = NULL;
     cr_assert_eq(oc_election_init(&cfg, 10, &s), OC_OK);
     bool granted = true;
-    /* candidate_id 5 < self_id 10, same priority 5 → loses tie-break. */
     cr_assert_eq(oc_election_request_vote(s, 5, 1, &granted), OC_OK);
     cr_assert_not(granted);
     cr_assert_eq(s->voted_for, 0u);

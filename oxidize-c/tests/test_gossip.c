@@ -1,3 +1,4 @@
+/* test_gossip.c — gossip protocol tests. */
 #define _POSIX_C_SOURCE 200809L
 #include <criterion/criterion.h>
 #include <stdio.h>

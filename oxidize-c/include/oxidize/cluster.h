@@ -1,3 +1,4 @@
+/* cluster.h — GPU cluster management for distributed inference. */
 #ifndef OXIDIZE_CLUSTER_H
 #define OXIDIZE_CLUSTER_H
 

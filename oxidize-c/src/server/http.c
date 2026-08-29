@@ -1,3 +1,4 @@
+/* http.c — minimal dependency-free HTTP/1.1 server. */
 #define _GNU_SOURCE 1   /* accept4, SO_REUSEPORT on Linux */
 #include "oxidize/http.h"
 

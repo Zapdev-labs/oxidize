@@ -1,3 +1,4 @@
+/* glm_arch.c — GLM (ChatGLM/Zhipu) and Hunyuan architecture forward passes. */
 #include "oxidize/glm_arch.h"
 
 #include <ctype.h>
@@ -52,7 +53,6 @@ static void glm_embed_token(OcLlamaSession *s, uint32_t token)
     }
 }
 
-/* matvec wrapper: pick f32 or quantized path based on qtype. */
 static void glm_matvec(const OcWeightView *w, const float *in, float *out,
                        float *temp)
 {
@@ -526,10 +526,8 @@ static void glm_apply_qk_norm(const OcLlamaSession *s, OcLlamaLayer *L,
     const OcLlamaConfig *c = &s->model->cfg;
     size_t hd = c->head_dim;
 
-    /* q_norm: one weight vector per head (length head_dim) or a single */
     if (L->mla_q_a_norm != NULL) {
         if (c->n_head * hd == c->n_embd) {
-            /* head_dim * n_head == n_embd: apply as a single n_embd pass. */
             oc_rms_norm_f32(q, L->mla_q_a_norm, q, c->n_embd, c->rms_norm_eps);
         } else {
             for (uint32_t h = 0; h < c->n_head; h++) {
@@ -852,7 +850,6 @@ static void hunyuan_mla_attention(OcLlamaSession *s, uint32_t layer)
         oc_rms_norm_f32(s->mla_c_q, L->mla_q_a_norm, s->mla_c_q,
                         c->mla_q_lora_dim, c->rms_norm_eps);
     }
-    /* q_b_proj → q_full [n_head * (q_nope_dim + q_rope_dim)]. */
     glm_matvec(&L->mla_q_b, s->mla_c_q, s->mla_q_full, s->dequant_temp);
 
     glm_matvec(&L->mla_kv_a_mqa, s->normed, s->mla_kv_compressed,
@@ -907,7 +904,6 @@ static void hunyuan_mla_attention(OcLlamaSession *s, uint32_t layer)
             const float *c_kv_nope_t = c_kv_t;          /* [kv_lora_dim] */
             const float *kv_pe_t = c_kv_t + kv_lora;    /* [kv_pe_dim] */
 
-            /* k_b_proj on c_kv_nope gives [n_head * kv_nope_dim]. */
             float *k_nope_full = s->dequant_temp;  /* [n_head * kv_nope] */
             /* Reuse mla_k_b weight view to project c_kv_nope → k_nope. */
             /* For the current position (t == s->pos), we already computed

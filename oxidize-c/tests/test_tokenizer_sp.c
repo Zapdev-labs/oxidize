@@ -363,7 +363,6 @@ Test(tokenizer_sp, load_from_gguf_llama)
     cr_assert(tok.has_unknown, "should have unknown id");
     cr_assert_eq(tok.unknown_id, 3, "unknown id should be 3");
 
-    /* encode("hello") -> [2] (the "hello" piece, id 2, score -0.1) */
     uint32_t *ids = NULL;
     size_t count = 0;
     e = oc_tokenizer_encode(&tok, "hello", OC_TOK_DEFAULT, &ids, &count);
@@ -378,7 +377,6 @@ Test(tokenizer_sp, load_from_gguf_llama)
     free(ids);
     free(decoded);
 
-    /* encode("x") -> [3] (the <unk> id, since 'x' is not in vocab) */
     e = oc_tokenizer_encode(&tok, "x", OC_TOK_DEFAULT, &ids, &count);
     cr_assert_eq(e, OC_OK);
     assert_ids_eq(ids, count, (uint32_t[]){3}, 1);

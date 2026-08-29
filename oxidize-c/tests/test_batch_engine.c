@@ -1,3 +1,4 @@
+/* test_batch_engine.c — Continuous-batching decode engine tests. */
 #include <criterion/criterion.h>
 #include "oxidize/batch_engine.h"
 #include <string.h>
@@ -113,7 +114,6 @@ Test(batch, stop_token)
     oc_batch_engine_init(&engine, NULL, 32, 4096);
     uint32_t prompt[] = {1};
     OcSeqId id;
-    /* stop_token = 2. The stub increments last_token each step. */
     oc_batch_submit(engine, prompt, 1, 100, 2, true, &id);
 
     OcBatchStepOutput out[16];

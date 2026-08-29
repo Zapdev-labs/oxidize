@@ -1,3 +1,4 @@
+/* test_gradient.c — Gradient computation + optimizer tests. */
 #include <criterion/criterion.h>
 #include <math.h>
 #include <string.h>
@@ -109,7 +110,6 @@ Test(grad, clip_above_norm_scales)
 {
     OcGradientState st;
     cr_assert_eq(oc_grad_init(NULL, 2, &st), OC_OK);
-    /* norm = sqrt(3^2 + 4^2) = 5; clip_norm default 1.0 -> scale 0.2 */
     st.gradients[0] = 3.0f;
     st.gradients[1] = 4.0f;
     cr_assert_eq(oc_grad_clip(&st), OC_OK);
@@ -215,7 +215,6 @@ Test(grad, get_lr_null)
 
 Test(grad, linear_backward_grad_input)
 {
-    /* input = [1, 2], weight = [[1,0],[0,1]] (identity 2x2), */
     float input[2]  = {1.0f, 2.0f};
     float weight[4] = {1.0f, 0.0f, 0.0f, 1.0f};
     float grad_out[2] = {3.0f, 4.0f};
@@ -259,7 +258,6 @@ Test(grad, activation_relu_backward)
 
 Test(grad, activation_tanh_backward)
 {
-    /* d/dx tanh(x) = 1 - tanh(x)^2; at x=0 -> 1; grad_out=1 -> out=1 */
     float go[1] = {1.0f};
     float in_[1] = {0.0f};
     float out[1] = {0};

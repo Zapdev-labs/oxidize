@@ -1,3 +1,4 @@
+/* sse.h — Server-Sent Events (SSE) for the C port. */
 #ifndef OXIDIZE_SSE_H
 #define OXIDIZE_SSE_H
 
@@ -34,7 +35,7 @@ typedef struct OcSseEvent {
     const char *id;      /* may be NULL or "" → no id: line          */
 } OcSseEvent;
 
-/* A connected SSE client. The fd is owned by the caller (the HTTP server); */
+/* A connected SSE client. */
 typedef struct OcSseClient {
     int    fd;                       /* socket fd, or -1 if slot is free */
     char   last_event_id[OC_SSE_MAX_EVENT_ID];

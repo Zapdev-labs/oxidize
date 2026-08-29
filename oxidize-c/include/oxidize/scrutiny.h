@@ -1,3 +1,4 @@
+/* scrutiny.h — Output scrutiny / validation module. */
 #ifndef OXIDIZE_SCRUTINY_H
 #define OXIDIZE_SCRUTINY_H
 

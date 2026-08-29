@@ -1,3 +1,4 @@
+/* hashtable.h — OcHashtable open-addressing string-keyed hash map. */
 #ifndef OXIDIZE_HASHTABLE_H
 #define OXIDIZE_HASHTABLE_H
 

@@ -1,3 +1,4 @@
+/* seq_scheduler.c — vLLM-style sequence scheduler implementation. */
 #include "oxidize/seq_scheduler.h"
 
 #include <stdlib.h>

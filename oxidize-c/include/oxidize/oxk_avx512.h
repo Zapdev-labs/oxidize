@@ -40,7 +40,7 @@ void oc_oxk_matvec_q4_0_f32_avx512_bw(const uint8_t *w, size_t n_rows,
                                       size_t row_bytes, const float *x,
                                       float *out);
 
-/* Bit-exact with oc_oxk_dot_q4_k_prepped(): all sub-group products and */
+/* Bit-exact with oc_oxk_dot_q4_k_prepped(): all sub-group products stay in int32. */
 OC_OXK_AVX512_TARGET
 void oc_oxk_dot_q4_k_prepped_multi_avx512(const void *prep, size_t blocks,
                                           const uint8_t *acts,

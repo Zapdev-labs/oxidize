@@ -1,3 +1,4 @@
+/* log.c — oc_log leveled logging with OX_LOG_LEVEL env filter. */
 #define _POSIX_C_SOURCE 200809L  /* for strcasecmp */
 
 #include "oxidize/log.h"

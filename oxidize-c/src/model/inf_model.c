@@ -629,7 +629,6 @@ static OcError forward_mla_layer(OcInferenceModel *m, OcLayerWeights *layer,
     memset(attn_out, 0, (size_t)n_heads * v_head_dim * sizeof(float));
     if (kv_idx >= 0 && k_store && v_padded) {
         uint32_t seq_len = oc_kv_cache_n_tokens(&m->kv_cache);
-        /* deepseek_yarn folds a get_mscale(factor, mscale_all_dim)^2 term */
         float scale = 1.0f / sqrtf((float)kv_head_dim);
         if (cfg->yarn_factor > 1.0f && cfg->yarn_mscale_all_dim > 0.0f) {
             oc_rope_deepseek_yarn_scales(cfg->yarn_factor, cfg->yarn_mscale,
@@ -641,7 +640,7 @@ static OcError forward_mla_layer(OcInferenceModel *m, OcLayerWeights *layer,
         for (uint32_t hd = 0; hd < n_heads; hd++) {
             size_t q_off = (size_t)hd * kv_head_dim;
             float *q_head = q_vec + q_off;
-            /* Q, K and the cached V are strided by kv_head_dim (nope + rope, */
+            /* Q, K and the cached V are strided by kv_head_dim (nope + rope, 192 for LongCat), but the attention OUTPUT is only v_head_dim (128) wide per head and o_proj expects it densely packed. */
             size_t v_off_out = (size_t)hd * v_head_dim;
             float *out_head = attn_out + v_off_out;
 

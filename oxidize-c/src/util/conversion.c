@@ -1,3 +1,4 @@
+/* conversion.c — Model format conversion implementation. */
 #include "oxidize/conversion.h"
 #include "oxidize/safetensors_to_gguf.h"
 

@@ -1,3 +1,4 @@
+/* turboquant.h — Fast online quantization with calibration. */
 #ifndef OXIDIZE_TURBOQUANT_H
 #define OXIDIZE_TURBOQUANT_H
 

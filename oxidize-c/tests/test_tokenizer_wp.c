@@ -163,7 +163,6 @@ Test(tokenizer_wp, empty_input_returns_empty)
 Test(tokenizer_wp, continuation_only_at_nonzero_offset)
 {
     OcArena *arena = oc_arena_new(0);
-    /* vocab: "play", "##ing", "ing" — "ing" is a whole-word token. */
     const char *vocab[] = { "play", "##ing", "ing" };
     OcWordPieceTokenizer *wp = NULL;
     OcError e = oc_wp_new(vocab, 3, arena, &wp);

@@ -36,7 +36,6 @@
 #define OC_CLI_VERSION OC_VERSION
 
 /* Apply the context cap to an already-loaded model. */
-/* loads a model; the server especially needs it, because a session — and so a */
 static void cap_model_ctx(OcLlamaModel *model, uint32_t requested)
 {
     if (model == NULL || model->cfg.n_ctx == 0) return;
@@ -248,7 +247,7 @@ static OcError run_generation(const OcCliArgs *args)
         }
     }
 
-    /* Autotune: detect CPU, fingerprint the model, plan, and apply. The memory-side policy (hugepages/mlock) goes to the mmap'd weights; */
+    /* Autotune: detect CPU, fingerprint the model, plan, and apply. */
     if (args->auto_tune || args->threads > 0 ||
         (args->numa && strcmp(args->numa, "none") != 0)) {
         OcCpuInfo cpu;

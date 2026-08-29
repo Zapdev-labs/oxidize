@@ -1,3 +1,4 @@
+/* mesh_chat.h — Chat message routing over the mesh network. */
 #ifndef OXIDIZE_MESH_CHAT_H
 #define OXIDIZE_MESH_CHAT_H
 

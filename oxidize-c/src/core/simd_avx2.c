@@ -121,7 +121,6 @@ bool oc_simd_dequant_q4_1_avx2(const uint8_t *src, size_t src_len,
         /* ggml layout: out[j] = low nibble of byte j, out[j + 16] = high
          * nibble — the same half-split the Q4_0 kernel above uses. No
          * byte interleave is involved. */
-        /* out = nibble*d + m  — separate vmulps + vaddps (NO FMA) for parity. */
         __m256 il0 = _mm256_add_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(cvtepu8_low(lo)),  d), m);
         __m256 il1 = _mm256_add_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(cvtepu8_high(lo)), d), m);
         __m256 ih0 = _mm256_add_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(cvtepu8_low(hi)),  d), m);
@@ -171,7 +170,6 @@ bool oc_simd_dequant_q4_k_avx2(const uint8_t *src, size_t src_len,
             get_scale_min_k4_scalar(is,     scales, &sc1, &m1);
             get_scale_min_k4_scalar(is + 1, scales, &sc2, &m2);
 
-            /* d_sub = d * sc  (single mul, exact: sc is integer ≤ 63). */
             __m256 d1  = _mm256_mul_ps(d_global,   _mm256_set1_ps((float)sc1));
             __m256 m1v = _mm256_mul_ps(min_global, _mm256_set1_ps((float)m1));
             __m256 d2  = _mm256_mul_ps(d_global,   _mm256_set1_ps((float)sc2));

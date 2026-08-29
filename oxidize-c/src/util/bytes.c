@@ -1,3 +1,4 @@
+/* bytes.c — byte-level read primitives (little-endian). */
 #include "oxidize/util/bytes.h"
 
 #include <string.h>

@@ -1,3 +1,4 @@
+/* gpu_dispatch.h — GPU task dispatch for inference workloads. */
 #ifndef OXIDIZE_GPU_DISPATCH_H
 #define OXIDIZE_GPU_DISPATCH_H
 

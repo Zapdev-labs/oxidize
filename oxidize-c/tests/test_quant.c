@@ -394,7 +394,6 @@ Test(quant, dequant_q4_k_handcrafted, .description = "VAL-QUANT-003: Q4_K dequan
     buf[5] = 0u;
     buf[4] = 1u;  /* scales[0] = 1 → sc1 = 1 */
     buf[5] = 1u;  /* scales[1] = 1 → sc2 = 1 */
-    /* scales[4], scales[5] stay 0 → m1 = 0, m2 = 0. Good. */
     for (int i = 16; i < 48; i++) buf[i] = 0x11u;  /* qs[0..32] = 0x11 */
 
     float dst[256];
@@ -719,7 +718,6 @@ Test(quant, pack_block_helper, .description = "oc_quant_pack_block works on a si
 
 Test(quant, random_corpus_sweep, .description = "VAL-QUANT-014: random-block corpus sweep across standard types") {
     /* For each standard quant type whose Rust encoder IS a true inverse of the dequant (Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q4_K_S, Q4_K_M, F32, F16, I8, I16, I32, I64, F64), generate 5 random blocks, pack → dequant, and verify the round-trip error is within the type's expected tolerance. */
-    /* types (Q2_K/Q3_K/Q5_K/Q6_K) are excluded because their Rust */
     struct {
         OcGgufQuantizationType t;
         float tolerance;
@@ -805,7 +803,6 @@ Test(quant, q4_k_m_pack_is_stable, .description = "Q4_K_M pack produces finite, 
     memset(buf, 0, sizeof(buf));
     OcError e = oc_quant_pack_row(OC_QUANT_Q4_K_M, src, 256, buf, sizeof(buf));
     cr_assert_eq(e, OC_OK, "Q4_K_M pack");
-    /* d field (f16 bits at [0..2]) should be non-zero for non-zero input. */
     cr_assert_neq(buf[0] | buf[1], 0, "Q4_K_M d field should be non-zero");
 }
 

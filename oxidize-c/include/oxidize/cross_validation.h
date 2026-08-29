@@ -1,3 +1,4 @@
+/* cross_validation.h — Output cross-validation suites and result reporting. */
 #ifndef OXIDIZE_CROSS_VALIDATION_H
 #define OXIDIZE_CROSS_VALIDATION_H
 

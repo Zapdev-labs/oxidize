@@ -1,3 +1,4 @@
+/* speculative.h — speculative decoding (draft model + target verification). */
 #ifndef OXIDIZE_SPECULATIVE_H
 #define OXIDIZE_SPECULATIVE_H
 

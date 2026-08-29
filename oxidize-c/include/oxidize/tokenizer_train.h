@@ -1,3 +1,4 @@
+/* tokenizer_train.h — BPE tokenizer trainer. */
 #ifndef OXIDIZE_TOKENIZER_TRAIN_H
 #define OXIDIZE_TOKENIZER_TRAIN_H
 

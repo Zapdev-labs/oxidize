@@ -1,3 +1,4 @@
+/* mmap.h — OcMmap: read-only memory mapping with madvise/mlock/prefault. */
 #ifndef OXIDIZE_UTIL_MMAP_H
 #define OXIDIZE_UTIL_MMAP_H
 
@@ -11,7 +12,7 @@
 extern "C" {
 #endif
 
-/* A read-only memory mapping of a file. Owns the file descriptor and the The struct is opaque (defined in src/util/mmap.c): callers interact via */
+/* A read-only memory mapping of a file. */
 typedef struct OcMmap OcMmap;
 
 /* Memory-map `path` for read-only access (PROT_READ, MAP_PRIVATE). (mmap/malloc failure). On error, `*out` is set to NULL. */

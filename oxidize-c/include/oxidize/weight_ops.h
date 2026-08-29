@@ -1,3 +1,4 @@
+/* weight_ops.h — Weight matrix operations for inference. */
 #ifndef OXIDIZE_WEIGHT_OPS_H
 #define OXIDIZE_WEIGHT_OPS_H
 

@@ -1,4 +1,4 @@
-/* test_gguf.c — Criterion tests for the GGUF v3/v2 parser. Covers VAL-FOUND-001 (v3 header), VAL-FOUND-002 (v2 compat), VAL-FOUND-003 (all 11 metadata KV value types round-trip), */
+/* test_gguf.c — Criterion tests for the GGUF v3/v2 parser. */
 
 /* Expose POSIX helpers used by the multi-shard test (mkdtemp, rmdir, remove). */
 #if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
@@ -626,14 +626,12 @@ static uint8_t *build_minimal_shard(const char *tensor_name,
     /* ggml_type = 0 (F32) */
     uint32_t gt = 0;
     memcpy(buf + off, &gt, 4); off += 4;
-    /* relative_offset = 0 (data starts at data_section_start) */
     uint64_t ro = 0;
     memcpy(buf + off, &ro, 8); off += 8;
     /* pad to data_start */
     while (off < data_start) {
         buf[off++] = 0;
     }
-    /* data */
     memcpy(buf + data_start, data, 4);
 
     *out_len = total;
@@ -743,7 +741,6 @@ Test(gguf, multishard_falls_back_to_single_when_siblings_missing)
 
 Test(gguf, mapped_tensor_infos_returns_mapped_names)
 {
-    /* oc_gguf_map_mapped_tensor_infos() returns a fresh array with mapped */
     OcGgufMmappedFile m;
     OcError e = oc_gguf_map_open(FIXTURE("valid-v3.gguf"), &m);
     cr_assert_eq(e, OC_OK, "map_open: %s", oc_error_msg(e));

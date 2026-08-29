@@ -1,3 +1,4 @@
+/* config.h — Model configuration extracted from GGUF metadata or config.json. */
 #ifndef OXIDIZE_CONFIG_H
 #define OXIDIZE_CONFIG_H
 
@@ -50,7 +51,7 @@ OcError oc_model_config_init(OcModelConfig *cfg);
 /* Populate `cfg` from a parsed GGUF file's metadata. Reads */
 OcError oc_model_config_from_gguf(const OcGgufFile *gguf, OcModelConfig *cfg);
 
-/* Validate the config: required fields present (n_layers, n_heads, */
+/* Validate the config: required fields present (n_layers, n_heads, hidden_dim, vocab_size > 0; head_dim divides hidden_dim; n_kv_heads <= n_heads; n_expert_used <= n_expert when MoE). */
 OcError oc_model_config_validate(const OcModelConfig *cfg);
 
 /* Write a human-readable summary of the config into `out` (up to `out_size-1` */

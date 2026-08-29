@@ -209,7 +209,6 @@ OcError oc_grad_compute_linear_backward(
         return OC_ERR_INVALID_ARG;
     if (in_features == 0 || out_features == 0) return OC_ERR_INVALID_ARG;
 
-    /* grad_input[i] = sum_j(grad_output[j] * weight[j*in + i]) */
     for (size_t i = 0; i < in_features; i++) {
         float acc = 0.0f;
         for (size_t j = 0; j < out_features; j++) {

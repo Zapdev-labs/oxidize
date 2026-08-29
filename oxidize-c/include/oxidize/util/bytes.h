@@ -1,3 +1,4 @@
+/* bytes.h — byte-level read primitives (little-endian). */
 #ifndef OXIDIZE_UTIL_BYTES_H
 #define OXIDIZE_UTIL_BYTES_H
 

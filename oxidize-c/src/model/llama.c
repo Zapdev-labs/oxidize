@@ -300,7 +300,7 @@ static OcError parse_config(const OcGgufFile *f, const char *arch_str,
             cfg->v_rms_norm = true;
         } else if (strcmp(arch_str, "muse-glimmer") == 0 ||
                    strcmp(arch_str, "muse_glimmer") == 0) {
-            /* Muse Glimmer: dense SwiGLU, sandwich norms, per-head QK-norm, */
+            /* Muse Glimmer: dense SwiGLU, sandwich norms, per-head QK-norm, gated attention output, [local,local,local,global] attention with RoPE on the local layers only, and a scaled + softcapped lm_head. */
             cfg->embd_rms_norm = true;
             cfg->attn_out_gate = true;
             cfg->rope_swa_only = true;
@@ -1266,7 +1266,6 @@ OcError oc_llama_session_init_kv(OcLlamaModel *model, OcLlamaSession *out,
     out->q = xcalloc((size_t)model->cfg.n_head * model->cfg.head_dim, sizeof(float));
     out->k = xcalloc(out->kv_row_floats, sizeof(float));
     out->v = xcalloc(out->kv_row_floats, sizeof(float));
-    /* n_head*head_dim is what attention writes, but the Gemma-style sandwich */
     out->attn_out = xcalloc(oc_max_sz((size_t)model->cfg.n_head *
                                       model->cfg.head_dim,
                                       (size_t)model->cfg.n_embd),
@@ -1566,7 +1565,6 @@ static void embed_token(OcLlamaSession *s, uint32_t token)
     embed_token_into(s, token, s->x);
 }
 
-/* matvec wrapper: pick f32 or quantized path based on qtype. */
 static void matvec(const OcWeightView *w, const float *in, float *out,
                    float *temp)
 {
@@ -2783,14 +2781,13 @@ OcError oc_llama_mtp_greedy_advance(OcLlamaSession *sess, float *logits,
     return OC_OK;
 }
 
-/* because it touches the KV cache, not the weights, so it was never the */
 
 /* Tokens per prefill chunk. Larger amortizes the weight sweep further —
  * especially for MoE, where the win scales with tokens-per-expert — at a
  * linear cost in scratch (~127 KB/token on a 30B MoE, so ~65 MB here). */
 #define OC_PREFILL_CHUNK 512u
 
-/* Per-phase prefill timers. Prefill is a mix of weight-bound matmuls, */
+/* Per-phase prefill timers. */
 typedef struct {
     double norm, qkv, rope_kv, attn, proj, router, gather, expert_mm, scatter;
 } PrefillTimers;
@@ -3087,7 +3084,6 @@ static void prefill_moe_ffn(OcLlamaSession *s, const OcLlamaLayer *L,
             oc_swiglu_inplace_f32(b->ffn_a + (size_t)t * b->ffw,
                                   b->ffn_b + (size_t)t * b->ffw, i_size);
         }
-        /* down → gath (free again now that gate/up have consumed it). */
         mm_batch(&down_v, b->ffn_a, b->ffw, b->gath, b->n_embd, m, b);
         g_pf_t.expert_mm += pf_now() - t_m0;
         double t_s0 = pf_now();
@@ -3799,7 +3795,6 @@ OcError oc_batch_session_init(OcLlamaModel *model, size_t max_seqs,
     out->q = xcalloc((size_t)model->cfg.n_head * model->cfg.head_dim, sizeof(float));
     out->k = xcalloc(out->kv_row_floats, sizeof(float));
     out->v = xcalloc(out->kv_row_floats, sizeof(float));
-    /* n_head*head_dim is what attention writes, but the Gemma-style sandwich */
     out->attn_out = xcalloc(oc_max_sz((size_t)model->cfg.n_head *
                                       model->cfg.head_dim,
                                       (size_t)model->cfg.n_embd),

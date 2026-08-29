@@ -1,3 +1,4 @@
+/* frame_sampler.h — Video frame sampling for multimodal models. */
 #ifndef OXIDIZE_FRAME_SAMPLER_H
 #define OXIDIZE_FRAME_SAMPLER_H
 

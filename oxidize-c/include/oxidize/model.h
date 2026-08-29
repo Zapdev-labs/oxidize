@@ -1,3 +1,4 @@
+/* model.h — OcModelArchitecture enum + detection + tensor-name mapping. */
 #ifndef OXIDIZE_MODEL_H
 #define OXIDIZE_MODEL_H
 
@@ -38,7 +39,7 @@ typedef enum {
     OC_ARCH__COUNT,
 } OcModelArchitecture;
 
-/* Map a `general.architecture` string to OcModelArchitecture. The string is */
+/* Map a `general.architecture` string to OcModelArchitecture. */
 OcModelArchitecture oc_model_arch_from_str(const char *s);
 
 /* Inverse of oc_model_arch_from_str: returns a stable canonical name

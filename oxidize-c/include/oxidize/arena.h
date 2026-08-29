@@ -1,3 +1,4 @@
+/* arena.h — OcArena bump-pointer allocator. */
 #ifndef OXIDIZE_ARENA_H
 #define OXIDIZE_ARENA_H
 

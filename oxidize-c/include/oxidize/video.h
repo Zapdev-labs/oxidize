@@ -1,3 +1,4 @@
+/* video.h — Video multimodal frame sampling and temporal aggregation. */
 #ifndef OXIDIZE_VIDEO_H
 #define OXIDIZE_VIDEO_H
 

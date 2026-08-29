@@ -1,3 +1,4 @@
+/* http.h — minimal dependency-free HTTP/1.1 server. */
 #ifndef OXIDIZE_HTTP_H
 #define OXIDIZE_HTTP_H
 

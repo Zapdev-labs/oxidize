@@ -1,3 +1,4 @@
+/* hf_hub.c — HuggingFace Hub GGUF model downloader implementation. */
 #define _POSIX_C_SOURCE 200809L  /* getpwuid, stat, ssize_t */
 
 #include "oxidize/hf_hub.h"

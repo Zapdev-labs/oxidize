@@ -1,3 +1,4 @@
+/* test_audio.c — audio multimodal module tests. */
 #include <criterion/criterion.h>
 #include <math.h>
 #include <stdio.h>
@@ -303,7 +304,6 @@ Test(audio, compute_mel_null)
 
 Test(audio, n_frames_utility)
 {
-    /* n_samples=1000, n_fft=400, hop=160 → (1000-400)/160 = 3, +1 = 4 */
     cr_assert_eq(oc_audio_n_frames(1000, 400, 160), 4);
     /* Too short. */
     cr_assert_eq(oc_audio_n_frames(100, 400, 160), 0);

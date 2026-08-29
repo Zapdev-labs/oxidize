@@ -1,3 +1,4 @@
+/* gossip.h — gossip protocol for cluster node discovery and health checking. */
 #ifndef OXIDIZE_GOSSIP_H
 #define OXIDIZE_GOSSIP_H
 

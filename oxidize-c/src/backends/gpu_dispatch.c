@@ -1,3 +1,4 @@
+/* gpu_dispatch.c — GPU task dispatch for inference workloads. */
 #include "oxidize/gpu_dispatch.h"
 
 #include <stdio.h>

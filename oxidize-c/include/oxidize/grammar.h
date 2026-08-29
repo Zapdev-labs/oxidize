@@ -1,3 +1,4 @@
+/* grammar.h — grammar constraints for structured output (JSON, regex, CFG). */
 #ifndef OXIDIZE_GRAMMAR_H
 #define OXIDIZE_GRAMMAR_H
 

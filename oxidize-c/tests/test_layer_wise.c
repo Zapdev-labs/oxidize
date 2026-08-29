@@ -1,3 +1,4 @@
+/* test_layer_wise.c — Layer-wise inference tests. */
 #include <criterion/criterion.h>
 #include "oxidize/layer_wise.h"
 #include "oxidize/inf_model.h"

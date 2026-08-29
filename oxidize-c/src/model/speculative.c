@@ -1,3 +1,4 @@
+/* speculative.c — speculative decoding implementation. */
 #include "oxidize/speculative.h"
 
 #include <math.h>

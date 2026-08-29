@@ -142,7 +142,7 @@ Test(tokenizer_bpe, gpt2_byte_mapping_space_to_g_dot)
     /* The space byte (0x20) must map to 'Ġ' (U+0120), matching GPT-2's
      * bytes_to_unicode. A regression here drops spaces during BPE
      * encoding and fuses adjacent words into the wrong tokens. */
-    /* We can't directly call byte_to_gpt2_codepoint (static), but we can */
+    /* We can't directly call byte_to_gpt2_codepoint (static), but we can verify the behavior through the trained BPE tokenizer's encode path. */
     /* U+0120 in UTF-8: 0xC4 0xA0 */
     char expected[3] = { (char)0xC4, (char)0xA0, 0 };
     cr_assert_eq((unsigned char)expected[0], 0xC4, "U+0120 high byte");
@@ -522,7 +522,6 @@ Test(tokenizer_bpe, special_tokens_allow_and_disallow)
         EMIT(buf, off, v, strlen(v));
     }
 
-    /* tokens: ["<|im_start|>", "<|im_end|>", "a", "Ġ", "Ġa"] */
     {
         EMIT_KV_STR_KEY(buf, off, "tokenizer.ggml.tokens");
         EMIT_U32(buf, off, OC_GGUF_MT_ARRAY);
@@ -548,7 +547,6 @@ Test(tokenizer_bpe, special_tokens_allow_and_disallow)
         EMIT(buf, off, m, sl);
     }
 
-    /* token_type: [3, 3, 1, 1, 1] (both special tokens are CONTROL=3) */
     {
         EMIT_KV_STR_KEY(buf, off, "tokenizer.ggml.token_type");
         EMIT_U32(buf, off, OC_GGUF_MT_ARRAY);

@@ -1,3 +1,4 @@
+/* quantize_tool.h — offline GGUF weight quantization tool. */
 #ifndef OXIDIZE_QUANTIZE_TOOL_H
 #define OXIDIZE_QUANTIZE_TOOL_H
 

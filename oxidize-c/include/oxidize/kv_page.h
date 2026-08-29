@@ -1,3 +1,4 @@
+/* kv_page.h — paged KV cache management (vLLM-style). */
 #ifndef OXIDIZE_KV_PAGE_H
 #define OXIDIZE_KV_PAGE_H
 

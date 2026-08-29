@@ -1,3 +1,4 @@
+/* paged_attention.h — vLLM-style paged KV cache management + scheduling. */
 #ifndef OXIDIZE_PAGED_ATTENTION_H
 #define OXIDIZE_PAGED_ATTENTION_H
 

@@ -1,3 +1,4 @@
+/* iq_grids.h — Importance matrix quantization grids for IQ2/IQ3/IQ4 types. */
 #ifndef OXIDIZE_IQ_GRIDS_H
 #define OXIDIZE_IQ_GRIDS_H
 

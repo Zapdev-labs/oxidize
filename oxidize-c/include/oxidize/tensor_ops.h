@@ -1,3 +1,4 @@
+/* tensor_ops.h — High-level tensor operations for the C port. */
 #ifndef OXIDIZE_TENSOR_OPS_H
 #define OXIDIZE_TENSOR_OPS_H
 

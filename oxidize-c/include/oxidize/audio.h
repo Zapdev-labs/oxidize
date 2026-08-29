@@ -1,3 +1,4 @@
+/* audio.h — Audio multimodal module for the C port. */
 #ifndef OXIDIZE_AUDIO_H
 #define OXIDIZE_AUDIO_H
 

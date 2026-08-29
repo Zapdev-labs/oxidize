@@ -1,3 +1,4 @@
+/* temporal.h — Video temporal aggregation. */
 #ifndef OXIDIZE_TEMPORAL_H
 #define OXIDIZE_TEMPORAL_H
 

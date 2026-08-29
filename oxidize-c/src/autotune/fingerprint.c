@@ -1,3 +1,4 @@
+/* fingerprint.c — Model file fingerprinting implementation. */
 #include "oxidize/fingerprint.h"
 #include "oxidize/gguf.h"
 

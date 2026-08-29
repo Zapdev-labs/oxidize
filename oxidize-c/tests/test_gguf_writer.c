@@ -1,3 +1,4 @@
+/* test_gguf_writer.c — Criterion tests for the GGUF v3 writer. */
 
 #define _POSIX_C_SOURCE 200809L
 

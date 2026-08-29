@@ -1,3 +1,4 @@
+/* middleware.h — server middleware stack (auth, rate limit, metrics, audit, CORS). */
 #ifndef OXIDIZE_MIDDLEWARE_H
 #define OXIDIZE_MIDDLEWARE_H
 

@@ -1,3 +1,4 @@
+/* vision.h — CLIP-style vision encoder for multimodal inference. */
 #ifndef OXIDIZE_VISION_H
 #define OXIDIZE_VISION_H
 

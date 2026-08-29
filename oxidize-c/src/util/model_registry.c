@@ -1,3 +1,4 @@
+/* model_registry.c — on-disk model registry implementation. */
 #define _POSIX_C_SOURCE 200809L
 
 #include "oxidize/model_registry.h"
@@ -92,7 +93,6 @@ static bool basename_no_gguf(const char *path, char *out, size_t cap)
 }
 
 /* Extract the GGUF metadata "quant_type" string. */
-/* otherwise fall back to "general.file_type" mapped to a short name, and */
 static void extract_quant_type(const OcGgufFile *f, char *out, size_t cap)
 {
     if (!out || cap == 0) return;
@@ -497,7 +497,6 @@ size_t oc_model_registry_format(const OcModelRegistry *reg,
         if (!append_field(buf, cap, &off, "n_layers", "%u", e->n_layers)) return 0;
         if (!append_field(buf, cap, &off, "n_embd", "%u", e->n_embd)) return 0;
         if (!append_field(buf, cap, &off, "vocab_size", "%u", e->vocab_size)) return 0;
-        /* last field: no trailing comma */
         {
             /* strip trailing comma from prior field */
             if (off > 0 && buf[off - 1] == ',') off--;

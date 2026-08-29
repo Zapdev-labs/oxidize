@@ -1,3 +1,4 @@
+/* sse.c — Server-Sent Events implementation. */
 #define _POSIX_C_SOURCE 200809L
 
 #include "oxidize/sse.h"
@@ -86,14 +87,12 @@ size_t oc_sse_format_event(const OcSseEvent *ev, char *buf, size_t cap)
     if (!ev || !buf || cap == 0) return 0;
     size_t off = 0;
 
-    /* event: line (only if event is non-NULL and non-empty). */
     if (ev->event && *ev->event) {
         if (!buf_append(buf, cap, &off, "event: ")) return 0;
         if (!buf_append(buf, cap, &off, ev->event)) return 0;
         if (!buf_append(buf, cap, &off, "\r\n")) return 0;
     }
 
-    /* data: line(s). Multi-line data emits one `data:` per source line. */
     if (ev->data && *ev->data) {
         const char *p = ev->data;
         while (1) {
@@ -301,7 +300,6 @@ OcError oc_sse_server_accept(OcSseServer *s, int fd)
             return OC_OK;
         }
     }
-    /* n_clients said we had room but no free slot found: should not happen. */
     return OC_ERR_OOM;
 }
 

@@ -1,3 +1,4 @@
+/* decoder.h — Text decoder for token IDs to text. */
 #ifndef OXIDIZE_DECODER_H
 #define OXIDIZE_DECODER_H
 

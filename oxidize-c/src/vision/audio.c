@@ -1,3 +1,4 @@
+/* audio.c — Audio multimodal module implementation. */
 #include "oxidize/audio.h"
 
 #include <math.h>
@@ -14,7 +15,6 @@
 #define OC_MEL_F_SP        (200.0f / 3.0f)  /* ~66.667 */
 #define OC_MEL_MIN_LOG_HZ  1000.0f
 #define OC_MEL_MIN_LOG_MEL (1000.0f / OC_MEL_F_SP) /* 15.0 */
-/* logf() is not a constant expression in C11; keep the literal. */
 #define OC_MEL_LOGSTEP     0.06875177742094912f /* logf(6.4f) / 27.0f */
 
 float oc_audio_hz_to_mel(float hz)

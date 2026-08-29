@@ -1,3 +1,4 @@
+/* test_beam_search.c — Beam search tests. */
 #include <criterion/criterion.h>
 #include "oxidize/sampling.h"
 #include "oxidize/error.h"
@@ -105,7 +106,6 @@ Test(beam, residual_probs_basic)
     float draft[]  = {0.2f, 0.5f, 0.2f, 0.1f};
     float out[4];
     oc_residual_probs(target, draft, out, 4);
-    /* residual = max(0, t-d) = [0.3, 0, 0, 0], sum=0.3, normalized = [1, 0, 0, 0]. */
     cr_assert_float_eq(out[0], 1.0f, 0.01f);
     cr_assert_float_eq(out[1], 0.0f, 0.01f);
     cr_assert_float_eq(out[2], 0.0f, 0.01f);
@@ -168,9 +168,7 @@ Test(beam, rep_penalty_basic)
         .newline_penalty = 0.0f,
     };
     oc_apply_repetition_penalties(logits, 4, recent, 3, &cfg);
-    /* token 1: freq=2, penalty = 2*0.1 + 0.5 = 0.7 -> 2.0 - 0.7 = 1.3. */
     cr_assert_float_eq(logits[1], 1.3f, 0.001f);
-    /* token 3: freq=1, penalty = 0.1 + 0.5 = 0.6 -> 4.0 - 0.6 = 3.4. */
     cr_assert_float_eq(logits[3], 3.4f, 0.001f);
     /* token 0 and 2: no change. */
     cr_assert_float_eq(logits[0], 1.0f, 0.001f);

@@ -1,3 +1,4 @@
+/* test_inf_forward.c — Forward pass tests for OcInferenceModel. */
 #include <criterion/criterion.h>
 #include "oxidize/inf_model.h"
 #include "oxidize/weight_storage.h"
@@ -568,7 +569,6 @@ Test(inf_fwd, gemv_weight_head_basic)
     OcWeightStorage ws;
     oc_weight_storage_init(&ws);
     float *data = malloc(8 * sizeof(float));
-    /* head 0: identity [1,0,0,1], head 1: identity [1,0,0,1] */
     data[0]=1; data[1]=0; data[2]=0; data[3]=1;
     data[4]=1; data[5]=0; data[6]=0; data[7]=1;
     oc_weight_storage_f32(&ws, data, 8);

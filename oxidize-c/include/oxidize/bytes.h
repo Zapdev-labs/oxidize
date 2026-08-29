@@ -1,3 +1,4 @@
+/* bytes.h — OcBytes byte buffer utilities for serialization. */
 #ifndef OXIDIZE_BYTES_H
 #define OXIDIZE_BYTES_H
 

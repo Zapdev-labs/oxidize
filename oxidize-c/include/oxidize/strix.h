@@ -1,3 +1,4 @@
+/* strix.h — Structured output (JSON/regex) constrained generation. */
 #ifndef OXIDIZE_STRIX_H
 #define OXIDIZE_STRIX_H
 

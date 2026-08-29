@@ -1,3 +1,4 @@
+/* test_video_config.c — OcVideoConfig tests. */
 #include <criterion/criterion.h>
 #include <string.h>
 

@@ -61,7 +61,6 @@ void oc_apply_rope_f32(const float *in, float *out, size_t head_dim,
     }
     if (rope_len == 0) return;
     size_t half = rope_len / 2;
-    /* freq starts at 1.0 (= theta^0) and is multiplied by theta^(-2/rope_len) */
     float freq_mul = powf(theta, -2.0f / (float)rope_len);
     float freq = 1.0f;
     /* If in/out alias, we must read both halves before writing. Use a local
@@ -78,7 +77,7 @@ void oc_apply_rope_f32(const float *in, float *out, size_t head_dim,
     }
 }
 
-/* Interleaved ("NORM") RoPE: rotates the pair (2i, 2i+1) rather than */
+/* Interleaved ("NORM") RoPE: rotates the pair (2i, 2i+1) rather than (i, i + rope_len/2). */
 void oc_apply_rope_norm_f32(const float *in, float *out, size_t head_dim,
                             size_t rope_len, int64_t position, float theta)
 {
@@ -262,7 +261,6 @@ void oc_apply_rope_yarn_scaled_f32(const float *in, float *out, size_t head_dim,
 
     /* YaRN parameters (matching Rust apply_rope_f32_yarn). */
     float freq_scale = 1.0f / yarn_factor;
-    /* attn_factor < 0 means "use the standard YaRN mscale". deepseek_yarn passes an explicit value instead, because its mscale/mscale_all_dim */
     /* Compute correction range.
      * corr_dim(n_dims, orig_ctx, n_rot, base) =
      *   n_dims * ln(orig_ctx / (n_rot * 2*PI)) / (2 * ln(base)) */

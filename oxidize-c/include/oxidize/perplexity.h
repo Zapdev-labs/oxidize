@@ -1,3 +1,4 @@
+/* perplexity.h — perplexity evaluation over text datasets. */
 #ifndef OXIDIZE_PERPLEXITY_H
 #define OXIDIZE_PERPLEXITY_H
 

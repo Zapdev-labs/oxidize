@@ -1,3 +1,4 @@
+/* video_error.h — Error type for the video multimodal pipeline. */
 #ifndef OXIDIZE_VIDEO_ERROR_H
 #define OXIDIZE_VIDEO_ERROR_H
 
@@ -18,7 +19,6 @@ typedef enum {
     OC_VIDEO_ERR_UNSUPPORTED_FORMAT, /* container/codec not supported      */
     OC_VIDEO_ERR_TIMEOUT,            /* frame extraction timed out         */
     OC_VIDEO_ERR_OOM,                /* allocation failure                 */
-    /* sentinel for bounds checking; not a valid error code */
     OC_VIDEO_ERR__COUNT,
 } OcVideoError;
 

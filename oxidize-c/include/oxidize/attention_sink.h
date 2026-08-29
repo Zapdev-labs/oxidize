@@ -1,3 +1,4 @@
+/* attention_sink.h — StreamingLLM attention sinks. */
 #ifndef OXIDIZE_ATTENTION_SINK_H
 #define OXIDIZE_ATTENTION_SINK_H
 

@@ -1,3 +1,4 @@
+/* tokenizer_dispatch.c — dispatch tokenizer loading by `tokenizer.ggml.model`. */
 
 #include "oxidize/tokenizer.h"
 

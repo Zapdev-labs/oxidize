@@ -1,3 +1,4 @@
+/* test_oxk_gguf_layout.c — do the OXK kernels agree with the GGUF layout? The existing OXK tests compare each SIMD variant against the OXK scalar reference. */
 #include <criterion/criterion.h>
 
 #include "oxidize/flash_attention.h"

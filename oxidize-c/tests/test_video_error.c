@@ -1,3 +1,4 @@
+/* test_video_error.c — video pipeline error type tests. */
 #include <criterion/criterion.h>
 #include <string.h>
 

@@ -1,3 +1,4 @@
+/* fault_tolerance.h — Mesh fault tolerance: heartbeat monitoring, failure detection, and failover. */
 #ifndef OXIDIZE_FAULT_TOLERANCE_H
 #define OXIDIZE_FAULT_TOLERANCE_H
 

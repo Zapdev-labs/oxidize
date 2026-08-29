@@ -1,3 +1,4 @@
+/* numa.h — NUMA awareness for thread affinity and memory allocation. */
 #ifndef OXIDIZE_NUMA_H
 #define OXIDIZE_NUMA_H
 

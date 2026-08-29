@@ -48,7 +48,6 @@ Test(backend, detect_cuda)
     cr_assert_eq(oc_backend_detect(OC_BACKEND_CUDA, &info), OC_OK);
     /* In the dependency-free C11 port (no OC_CUDA), CUDA is unavailable. */
     cr_assert_str_eq(info.name, "cuda");
-    /* available depends on build; just verify the call succeeds. */
 }
 
 Test(backend, detect_all)

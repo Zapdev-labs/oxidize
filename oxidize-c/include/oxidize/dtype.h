@@ -1,3 +1,4 @@
+/* dtype.h — OcDType elementary data type enum. */
 #ifndef OXIDIZE_DTYPE_H
 #define OXIDIZE_DTYPE_H
 

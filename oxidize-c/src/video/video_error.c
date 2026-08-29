@@ -1,3 +1,4 @@
+/* video_error.c — Video pipeline error type implementation. */
 #define _POSIX_C_SOURCE 200809L
 
 #include "oxidize/video_error.h"

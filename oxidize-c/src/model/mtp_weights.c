@@ -34,7 +34,6 @@ bool oc_mtp_weights_is_usable(const OcMtpWeights *mw,
     size_t h = cfg->hidden_size;
     if (h == 0) return false;
 
-    /* eh_proj must be non-empty and output_dim(2*h) == h. */
     if (oc_weight_storage_is_empty(&mw->eh_proj)) return false;
     if (oc_weight_storage_output_dim(&mw->eh_proj, h * 2) != h) return false;
 

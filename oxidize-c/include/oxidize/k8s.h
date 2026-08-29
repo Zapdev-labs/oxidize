@@ -1,3 +1,4 @@
+/* k8s.h — Kubernetes integration stubs. */
 #ifndef OXIDIZE_K8S_H
 #define OXIDIZE_K8S_H
 

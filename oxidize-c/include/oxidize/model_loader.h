@@ -1,3 +1,4 @@
+/* model_loader.h — Universal model loader for GGUF files. */
 #ifndef OXIDIZE_MODEL_LOADER_H
 #define OXIDIZE_MODEL_LOADER_H
 

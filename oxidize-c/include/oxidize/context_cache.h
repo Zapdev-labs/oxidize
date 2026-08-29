@@ -1,3 +1,4 @@
+/* context_cache.h — Persistent KV cache storage for fast session resume. */
 #ifndef OXIDIZE_CONTEXT_CACHE_H
 #define OXIDIZE_CONTEXT_CACHE_H
 

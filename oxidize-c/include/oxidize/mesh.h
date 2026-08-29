@@ -1,3 +1,4 @@
+/* mesh.h — distributed inference mesh (libp2p-style peer discovery + sharding). */
 #ifndef OXIDIZE_MESH_H
 #define OXIDIZE_MESH_H
 

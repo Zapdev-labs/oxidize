@@ -1,3 +1,4 @@
+/* test_vision_encoder.c — vision encoder stub tests. */
 #define _POSIX_C_SOURCE 200809L
 #include <criterion/criterion.h>
 #include <string.h>
@@ -214,7 +215,6 @@ Test(vision_encoder, patch_embed_extracts_real_pixels)
     cr_assert_float_eq(patches[0], 0.0f, 0.001f);
     /* patch[1] = pixel(1,0,0) = 1/10 = 0.1. */
     cr_assert_float_eq(patches[1], 0.1f, 0.001f);
-    /* patch[256] = pixel(0,0,1) = 1/10 = 0.1 (channel 1, dy=0, dx=0). */
     cr_assert_float_eq(patches[256], 0.1f, 0.001f);
     /* Verify non-zero data exists (not all zeros like the old stub). */
     bool has_nonzero = false;

@@ -1,3 +1,4 @@
+/* test_oxk_extended.c — Comprehensive OXK kernel tests. */
 #include <criterion/criterion.h>
 #include "oxidize/oxk.h"
 #include "oxidize/oxk_avx512.h"
@@ -166,7 +167,6 @@ Test(oxk_ext, dot_q4_0_known_result)
 
 Test(oxk_ext, dot_q4_0_zero_when_nibble_is_8)
 {
-    /* nibble=8 → value=0, so dot product = 0 regardless of q8 */
     uint8_t w[18], q[34];
     w[0] = 0x00; w[1] = 0x3C;
     for (int i = 0; i < 16; i++) w[2 + i] = 0x88;  /* nibbles all 8 → 0 */
@@ -288,7 +288,6 @@ Test(oxk_ext, matvec_q8_0_multiple_rows)
         for (int i = 0; i < 32; i++) w[r * 34 + 2 + i] = (int8_t)(r + 1);
     }
     oc_oxk_matvec_q8_0_f32_scalar(w, 3, 34, x, out);
-    /* row 0: sum(1*1) = 32, row 1: sum(2*1) = 64, row 2: sum(3*1) = 96 */
     cr_assert_float_eq(out[0], 32.0f, 0.1f);
     cr_assert_float_eq(out[1], 64.0f, 0.1f);
     cr_assert_float_eq(out[2], 96.0f, 0.1f);

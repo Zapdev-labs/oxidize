@@ -1,3 +1,4 @@
+/* video_config.h — Video pipeline configuration types. */
 #ifndef OXIDIZE_VIDEO_CONFIG_H
 #define OXIDIZE_VIDEO_CONFIG_H
 

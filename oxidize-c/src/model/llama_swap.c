@@ -1,3 +1,4 @@
+/* llama_swap.c — Llama-family model swap implementation. */
 #define _POSIX_C_SOURCE 200809L
 #include "oxidize/llama_swap.h"
 

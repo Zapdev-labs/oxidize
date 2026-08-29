@@ -1,3 +1,4 @@
+/* test_longcat.c — LongCat-2.0 config parse + ScMoE tensor dispatch. */
 #include <criterion/criterion.h>
 #include "oxidize/gguf_writer.h"
 #include "oxidize/llama.h"
@@ -186,7 +187,6 @@ Test(longcat, config_mla_and_moe_geometry)
     cr_assert_eq(m.cfg.mla_kv_nope_head_dim, LC_KEY_LEN - LC_ROPE_DIM,
         "nope head dim should be key_length - rope, got %u",
         m.cfg.mla_kv_nope_head_dim);
-    /* value_length is read explicitly and is NOT assumed equal to nope. */
     cr_assert_eq(m.cfg.mla_v_head_dim, LC_VALUE_LEN,
         "v_head_dim should come from attention.value_length, got %u",
         m.cfg.mla_v_head_dim);
@@ -421,7 +421,6 @@ typedef struct {
 static void ze_build(ZeExperts *z, float l0, float l1)
 {
     float *router = malloc(ZE_SLOTS * ZE_H * sizeof(float));
-    /* input is {1,1}, so each row must sum to the wanted logit. */
     router[0] = l0 * 0.5f; router[1] = l0 * 0.5f;
     router[2] = l1 * 0.5f; router[3] = l1 * 0.5f;
     oc_weight_storage_init(&z->gate_inp);

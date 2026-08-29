@@ -1,3 +1,4 @@
+/* sampling.h — token sampling from logits. */
 #ifndef OXIDIZE_SAMPLING_H
 #define OXIDIZE_SAMPLING_H
 

@@ -1,3 +1,4 @@
+/* test_muse_glimmer.c — Muse Glimmer config parse + forward-path wiring. */
 #include <criterion/criterion.h>
 
 #include "oxidize/gguf_writer.h"

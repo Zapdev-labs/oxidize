@@ -300,7 +300,6 @@ static inline uint64_t tikt_pair_key(uint32_t left, uint32_t right)
 struct OcTiktokenTokenizer {
     /* vocab: byte sequence → id. */
     OcByteMap *vocab;
-    /* id → byte slice (dense array indexed by id). Bytes are arena-owned. */
     uint8_t **id_to_token_data;
     size_t   *id_to_token_len;
     size_t    vocab_size;

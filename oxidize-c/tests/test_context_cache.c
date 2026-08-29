@@ -1,3 +1,4 @@
+/* test_context_cache.c — context cache tests. */
 #define _POSIX_C_SOURCE 200809L
 #include <criterion/criterion.h>
 #include "oxidize/context_cache.h"

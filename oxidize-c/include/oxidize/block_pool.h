@@ -1,3 +1,4 @@
+/* block_pool.h — memory block pool allocator for efficient tensor allocation. */
 #ifndef OXIDIZE_BLOCK_POOL_H
 #define OXIDIZE_BLOCK_POOL_H
 

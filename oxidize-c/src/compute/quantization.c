@@ -3,7 +3,7 @@
 #include "oxidize/log.h"
 #include "oxidize/simd.h"
 
-/* Bit-exact lookup tables for AL/IQ/NVFP4 dequant (port of Generated verbatim from ggml-common.h — do not hand-edit; regenerate via */
+/* Bit-exact lookup tables for AL/IQ/NVFP4 dequant (port of oxidize-core/src/compute/quantization{.rs,/iq_grids.rs, /iq1s_grid_fragment.rs, /iq2s_grid_fragment.rs, /iq2xs_grid_fragment.rs}). */
 #include "quant_tables.h"
 
 #include <math.h>
@@ -333,8 +333,6 @@ static OcError dequant_f64(const uint8_t *src, size_t src_len,
     return OC_OK;
 }
 
-
-/* ggml packs 4/5-bit blocks as interleaved halves: element j takes the LOW */
 
 static OcError dequant_q4_0(const uint8_t *src, size_t src_len,
                             float *dst, size_t value_count)
@@ -973,7 +971,6 @@ static OcError dequant_iq1_m(const uint8_t *src, size_t src_len,
                                        | ((sc[1] >> 8) & 0x00F0u)
                                        | ((sc[2] >> 4) & 0x0F00u)
                                        | (sc[3] & 0xF000u));
-        /* f16_bits_to_f32 — same as f16_le_to_f32 but takes the assembled bits. */
         uint32_t f32_bits;
         {
             uint32_t sign = (uint32_t)((scale_u16 >> 15) & 1u);
@@ -1953,7 +1950,7 @@ static OcError pack_q2_k(const float *src, size_t value_count,
 
 /* Q3_K pack: 3-bit quantization with per-sub-block scale.
  * Block layout (110 bytes): 32 bytes hmask, 64 bytes 3-bit qs, 12 bytes scales, 2 bytes f16 d. */
-/* Write the 16 six-bit Q3_K sub-block scales into the 12-byte packed field, */
+/* Write the 16 six-bit Q3_K sub-block scales into the 12-byte packed field, as the exact inverse of the unpacking in dequant_q3_k. */
 static void q3k_write_scales(uint8_t *s12, const int32_t *mult, size_t n_sub)
 {
     memset(s12, 0, 12);
@@ -2596,7 +2593,7 @@ static OcError pack_nvfp4(const float *src, size_t value_count,
                 if (ax > amax) amax = ax;
             }
 
-            /* Scale so the largest element lands on the codebook extreme, */
+            /* Scale so the largest element lands on the codebook extreme, then round the scale itself to the UE4M3 grid. */
             scales[sub] = f32_to_ue4m3(amax / e2m1_max);
             float scale = ue4m3_to_f32(scales[sub]);
 

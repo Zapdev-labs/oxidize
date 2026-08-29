@@ -1,3 +1,4 @@
+/* test_safetensors.c — Criterion tests for the SafeTensors reader. */
 #define _POSIX_C_SOURCE 200809L
 
 #include <criterion/criterion.h>

@@ -207,7 +207,6 @@ OcError oc_cpu_kernels_init(OcCpuKernels *kernels, OcCpuKernelLevel level)
         return OC_OK;
     }
 #endif
-    /* ponytail: NEON dispatch not wired — add when an ARM build needs it. */
     return OC_OK;
 }
 

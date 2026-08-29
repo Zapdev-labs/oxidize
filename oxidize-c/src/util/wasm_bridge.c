@@ -1,3 +1,4 @@
+/* wasm_bridge.c — WebAssembly bridge implementation. */
 
 #define _POSIX_C_SOURCE 200809L
 

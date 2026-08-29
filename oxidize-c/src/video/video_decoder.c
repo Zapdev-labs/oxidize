@@ -1,3 +1,4 @@
+/* video_decoder.c — Video frame decoding primitives implementation. */
 #define _POSIX_C_SOURCE 200809L
 
 #include "oxidize/video_decoder.h"

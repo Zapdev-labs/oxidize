@@ -1,3 +1,4 @@
+/* offload.h — CPU/GPU layer offload pipeline. */
 #ifndef OXIDIZE_OFFLOAD_H
 #define OXIDIZE_OFFLOAD_H
 

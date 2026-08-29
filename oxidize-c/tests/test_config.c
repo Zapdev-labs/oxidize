@@ -1,3 +1,4 @@
+/* test_config.c — Criterion tests for the model config module. */
 #define _POSIX_C_SOURCE 200809L
 
 #include <criterion/criterion.h>

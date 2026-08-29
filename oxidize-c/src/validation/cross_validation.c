@@ -1,3 +1,4 @@
+/* cross_validation.c — Output cross-validation suite implementation. */
 #define _POSIX_C_SOURCE 200809L
 
 #include "oxidize/cross_validation.h"

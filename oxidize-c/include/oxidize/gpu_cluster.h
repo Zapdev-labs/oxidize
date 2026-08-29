@@ -1,3 +1,4 @@
+/* gpu_cluster.h — GPU family profiles and Kubernetes manifest generation. */
 #ifndef OXIDIZE_GPU_CLUSTER_H
 #define OXIDIZE_GPU_CLUSTER_H
 

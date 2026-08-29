@@ -1,3 +1,4 @@
+/* validation.h — cross-validation and model quality assessment utilities. */
 #ifndef OXIDIZE_VALIDATION_H
 #define OXIDIZE_VALIDATION_H
 

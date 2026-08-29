@@ -1,3 +1,4 @@
+/* test_inference.c — Inference engine tests. */
 #include <criterion/criterion.h>
 #include "oxidize/inference.h"
 #include "oxidize/model.h"

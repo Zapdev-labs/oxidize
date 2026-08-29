@@ -1,3 +1,4 @@
+/* weight_storage.h — Weight storage abstraction for inference. */
 #ifndef OXIDIZE_WEIGHT_STORAGE_H
 #define OXIDIZE_WEIGHT_STORAGE_H
 

@@ -1,3 +1,4 @@
+/* vision_prompt.h — Multimodal prompt construction. */
 #ifndef OXIDIZE_VISION_PROMPT_H
 #define OXIDIZE_VISION_PROMPT_H
 

@@ -1,3 +1,4 @@
+/* batch_engine.h — Continuous-batching decode engine. */
 #ifndef OXIDIZE_BATCH_ENGINE_H
 #define OXIDIZE_BATCH_ENGINE_H
 

@@ -1,3 +1,4 @@
+/* vector.h — OcVector dynamic array of arbitrary element size. */
 #ifndef OXIDIZE_VECTOR_H
 #define OXIDIZE_VECTOR_H
 

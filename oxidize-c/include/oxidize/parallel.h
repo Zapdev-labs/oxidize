@@ -1,3 +1,4 @@
+/* parallel.h — persistent worker pool for the inference hot path. */
 #ifndef OXIDIZE_PARALLEL_H
 #define OXIDIZE_PARALLEL_H
 

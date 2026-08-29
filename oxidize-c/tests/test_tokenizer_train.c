@@ -1,3 +1,4 @@
+/* test_tokenizer_train.c — Criterion tests for the BPE tokenizer trainer. */
 
 #define _POSIX_C_SOURCE 200809L
 

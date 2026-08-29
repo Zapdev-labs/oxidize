@@ -1,3 +1,4 @@
+/* version.h — the single source of truth for the oxidize-c version string. */
 #ifndef OXIDIZE_VERSION_H
 #define OXIDIZE_VERSION_H
 

@@ -1,3 +1,4 @@
+/* test_sse.c — SSE streaming tests. */
 #define _POSIX_C_SOURCE 200809L
 
 #include <criterion/criterion.h>
@@ -378,7 +379,6 @@ Test(sse_server, broadcast_disconnects_dead_client)
     cr_assert_eq(s.n_clients, 1);
 
     OcSseEvent ev = { .event = "x", .data = "y", .id = "z" };
-    /* broadcast should fail to write and disconnect the client. */
     OcError rc = oc_sse_server_broadcast(&s, &ev);
     /* Either all clients failed (OC_ERR_NETWORK) or the SIGPIPE was caught. */
     cr_assert(rc == OC_ERR_NETWORK, "rc=%d", rc);

@@ -1,3 +1,4 @@
+/* distributed.h — distributed inference scheduler for pipeline and tensor parallelism across multiple nodes. */
 #ifndef OXIDIZE_DISTRIBUTED_H
 #define OXIDIZE_DISTRIBUTED_H
 
@@ -145,7 +146,7 @@ OcError oc_distributed_all_reduce(OcDistributedScheduler *sched,
 
 /* Synchronization                                                    */
 
-/* Barrier: block until all nodes have called this. In single-node mode, */
+/* Barrier: block until all nodes have called this. */
 OcError oc_distributed_barrier(OcDistributedScheduler *sched);
 
 /* Latency measurement                                                 */

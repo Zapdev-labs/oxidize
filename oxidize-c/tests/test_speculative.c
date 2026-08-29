@@ -1,3 +1,4 @@
+/* test_speculative.c — speculative decoding component tests. */
 #include <criterion/criterion.h>
 
 #include "oxidize/speculative.h"
@@ -9,11 +10,9 @@
 Test(speculative, greedy_all_accepted)
 {
     uint32_t draft_tokens[] = {1, 2};
-    /* draft logits (not used in greedy acceptance, only target argmax matters) */
     float dl0[] = {0.0f, 10.0f, 0.0f, 0.0f};
     float dl1[] = {0.0f, 0.0f, 10.0f, 0.0f};
     float *draft_l[] = {dl0, dl1};
-    /* target logits: pos 0 argmax=1, pos 1 argmax=2, pos 2 (bonus) argmax=3 */
     float tl0[] = {0.0f, 10.0f, 0.0f, 0.0f};
     float tl1[] = {0.0f, 0.0f, 10.0f, 0.0f};
     float tl2[] = {0.0f, 0.0f, 0.0f, 10.0f};

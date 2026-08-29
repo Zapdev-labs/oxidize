@@ -217,7 +217,6 @@ Test(websocket, parse_masked_text_frame)
     cr_assert_eq(f.mask[0], 0x37u);
     cr_assert_eq(f.mask[3], 0x3du);
     cr_assert_eq(f.payload_len, 5u);
-    /* payload aliases the masked bytes (parser does not unmask; caller does) */
     cr_assert_eq(f.payload[0], 0x7fu);
 }
 

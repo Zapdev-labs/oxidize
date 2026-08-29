@@ -1,3 +1,4 @@
+/* safetensors.c — HuggingFace SafeTensors file reader implementation. */
 #include "oxidize/safetensors.h"
 
 #include <ctype.h>
@@ -467,7 +468,6 @@ void oc_safetensors_close(OcSafetensorsFile *st)
     if (st->mmapped) {
 #if OC_HAVE_MMAP
         if (st->raw_data != NULL) {
-            /* raw_data points at base + data_start; recover the mmap base. */
             void *base = (uint8_t *)st->raw_data - st->data_start;
             munmap(base, (size_t)st->file_size);
         }

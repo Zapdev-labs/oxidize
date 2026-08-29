@@ -1,3 +1,4 @@
+/* activation_stats.h — per-column activation statistics for Wanda pruning. */
 #ifndef OXIDIZE_ACTIVATION_STATS_H
 #define OXIDIZE_ACTIVATION_STATS_H
 

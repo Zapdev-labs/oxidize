@@ -1,3 +1,4 @@
+/* apply.c — Apply a tuning plan to the runtime. */
 #include "oxidize/apply.h"
 
 #include <stdio.h>

@@ -1,3 +1,4 @@
+/* gguf_writer.c — GGUF v3 file writer implementation. */
 
 #define _POSIX_C_SOURCE 200809L
 

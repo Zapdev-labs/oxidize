@@ -1,3 +1,4 @@
+/* moe.h — Mixture-of-Experts routing and expert forward pass. */
 #ifndef OXIDIZE_MOE_H
 #define OXIDIZE_MOE_H
 

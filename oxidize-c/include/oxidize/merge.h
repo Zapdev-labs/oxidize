@@ -1,3 +1,4 @@
+/* merge.h — checkpoint merging utility. */
 #ifndef OXIDIZE_MERGE_H
 #define OXIDIZE_MERGE_H
 

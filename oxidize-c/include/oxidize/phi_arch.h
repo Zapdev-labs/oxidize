@@ -1,3 +1,4 @@
+/* phi_arch.h — Phi-2 / Phi-3 architecture forward pass. */
 #ifndef OXIDIZE_PHI_ARCH_H
 #define OXIDIZE_PHI_ARCH_H
 

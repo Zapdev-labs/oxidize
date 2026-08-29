@@ -1,3 +1,4 @@
+/* mistral_arch.c — Mistral architecture forward pass implementation. */
 #include "oxidize/mistral_arch.h"
 #include "oxidize/flash_attention.h"
 

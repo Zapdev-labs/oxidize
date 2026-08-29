@@ -1,3 +1,4 @@
+/* test_seq_scheduler.c — sequence scheduler tests. */
 #define _POSIX_C_SOURCE 200809L
 #include <criterion/criterion.h>
 #include "oxidize/seq_scheduler.h"
@@ -340,7 +341,6 @@ Test(seq_scheduler, schedule_blocks_when_full)
     c.max_batch_size = 4;
     c.max_total_tokens = 10;
     c.water_level = 0.8f;
-    /* water_mark = 10 * 0.8 = 8; a prompt of 9 tokens won't fit. */
     oc_seq_sched_init(&s, c, NULL);
     uint32_t prompt9[] = {1, 2, 3, 4, 5, 6, 7, 8, 9};
     OcSeqRequest r = make_request(1, prompt9, 9, 5, 0.0f);

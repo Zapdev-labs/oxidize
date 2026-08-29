@@ -1,3 +1,4 @@
+/* cli_commands.h — CLI subcommand dispatch for oxidize-c. */
 #ifndef OXIDIZE_CLI_COMMANDS_H
 #define OXIDIZE_CLI_COMMANDS_H
 

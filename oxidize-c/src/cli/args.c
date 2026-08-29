@@ -1,3 +1,4 @@
+/* args.c — CLI argument parsing (extracted from main.c for testability). */
 #include "args.h"
 
 #include "oxidize/cli_commands.h"

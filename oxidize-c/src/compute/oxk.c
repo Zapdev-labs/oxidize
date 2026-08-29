@@ -1,3 +1,4 @@
+/* oxk.c — OXK (Oxidize Kernels) scalar reference implementations + dispatcher. */
 #define _POSIX_C_SOURCE 200809L
 #include "oxidize/oxk.h"
 #include "oxidize/log.h"
@@ -707,7 +708,6 @@ float oc_oxk_dot_q5_k_q8_k_scalar(const uint8_t *row, size_t blocks,
             int32_t sum1 = 0, sum2 = 0;
             for (int l = 0; l < 32; l++) {
                 uint8_t byte = qs[gp * 32 + l];
-                /* qh[l] carries one high bit per 64-element group: bit 2*gp */
                 int lo = (byte & 0x0F) + (((qh[l] >> (2 * gp))     & 1) << 4);
                 int hi = (byte >> 4)   + (((qh[l] >> (2 * gp + 1)) & 1) << 4);
                 sum1 += lo * (int)q8v[gp * 64 + l];
@@ -908,7 +908,7 @@ static void oc_oxk_init_once(void)
     g_ctx.dot_q3_k_prepped_1 = oc_oxk_dot_q3_k_prepped;
 
 #if defined(__x86_64__) || defined(__i386__)
-    /* oxk_avx2.c carries real AVX2 implementations of the Q4_K and Q8_0 Only these two are installed because only these two are implemented; */
+    /* oxk_avx2.c carries real AVX2 implementations of the Q4_K and Q8_0 dots, but nothing ever installed them: this table was written when every x86 variant forwarded to scalar and was not revisited when the kernels landed. */
     if (level >= OC_OXK_AVX2) {
         g_ctx.dot_q4_k_q8_k = oc_oxk_dot_q4_k_q8_k_avx2;
         g_ctx.dot_q8_0_q8_0 = oc_oxk_dot_q8_0_q8_0_avx2;

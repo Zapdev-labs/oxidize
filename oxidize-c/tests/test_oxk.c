@@ -1,3 +1,4 @@
+/* test_oxk.c — OXK kernel tests. */
 #include <criterion/criterion.h>
 #include "oxidize/oxk.h"
 #include <string.h>
@@ -79,7 +80,6 @@ Test(oxk, get_scale_min_k4_low)
     cr_assert_eq(m, 17);
 }
 
-/* j >= 4 packs the 6-bit scale and min across three bytes, per ggml: scale = (scales[j+4] & 0x0F) | ((scales[j-4] >> 6) << 4) min = ((scales[j+4] >> 4) & 0x0F) | ((scales[j] >> 6) << 4) This previously asserted a different assembly — the wrong bit positions and the wrong source byte — which is why every Q4_K and Q5_K block decoded its upper four scale/min pairs incorrectly while the test still passed. */
 Test(oxk, get_scale_min_k4_high)
 {
     uint8_t scales[12] = {0};
@@ -138,7 +138,6 @@ Test(oxk, dot_q4_0_q8_0_basic)
 
 Test(oxk, dot_q4_0_q8_0_nonzero)
 {
-    /* nibble = 9 → (9-8)=1, q8=1 → dot = 32 * 1 * 1 * 1 = 32 */
     uint8_t w[18], q[34];
     w[0] = 0x00; w[1] = 0x3C;
     for (int i = 0; i < 16; i++) w[2 + i] = 0x99;  /* nibbles all 9 */

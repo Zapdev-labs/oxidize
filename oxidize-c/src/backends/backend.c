@@ -1,3 +1,4 @@
+/* backend.c — Abstract compute backend interface implementation. */
 #include "oxidize/backend.h"
 #include "oxidize/cuda.h"
 

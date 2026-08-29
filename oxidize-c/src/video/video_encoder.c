@@ -1,3 +1,4 @@
+/* video_encoder.c — Per-frame vision encoding + temporal projection. */
 #define _POSIX_C_SOURCE 200809L
 
 #include "oxidize/video_encoder.h"
@@ -62,7 +63,6 @@ OcError oc_video_encoder_encode(OcVideoEncoder *enc,
     if (frame_dim != enc->config.vision_hidden) {
         return OC_ERR_INVALID_ARG;
     }
-    /* n_frames == 0 is allowed: it just produces zero tokens. */
     size_t need = n_frames * (size_t)enc->config.llm_hidden;
     float *buf = (float *)realloc(enc->output_tokens, need * sizeof(float));
     if (need > 0 && buf == NULL) {

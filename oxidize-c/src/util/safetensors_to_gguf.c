@@ -1,3 +1,4 @@
+/* safetensors_to_gguf.c — SafeTensors to GGUF conversion implementation. */
 #define _POSIX_C_SOURCE 200809L
 #include "oxidize/safetensors_to_gguf.h"
 

@@ -1,5 +1,4 @@
 /* test_cuda_mmq_layout.c — host mirror of the device matvec block layouts. */
-/* run on a GPU, so their index math is not otherwise reachable from the test */
 #include <criterion/criterion.h>
 
 #include <math.h>

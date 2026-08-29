@@ -1,3 +1,4 @@
+/* quant_analysis.h — Quantization quality analysis and comparison. */
 #ifndef OXIDIZE_QUANT_ANALYSIS_H
 #define OXIDIZE_QUANT_ANALYSIS_H
 

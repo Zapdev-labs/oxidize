@@ -1,3 +1,4 @@
+/* iq_grids.c — Importance matrix quantization grid implementation. */
 #include "oxidize/iq_grids.h"
 
 #include <math.h>

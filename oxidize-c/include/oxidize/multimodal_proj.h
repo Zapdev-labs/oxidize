@@ -1,3 +1,4 @@
+/* multimodal_proj.h — Projection layer for multimodal inference. */
 #ifndef OXIDIZE_MULTIMODAL_PROJ_H
 #define OXIDIZE_MULTIMODAL_PROJ_H
 

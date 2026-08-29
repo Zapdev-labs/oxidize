@@ -1,3 +1,4 @@
+/* election.c — leader election protocol for distributed inference clusters. */
 #include "oxidize/election.h"
 
 #include <stdlib.h>
