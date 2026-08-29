@@ -693,8 +693,17 @@ OcError oc_helix_cache_append(OcHelixCache *cache,
         if (!page) {
             OcHelixPage *existing = find_page(cache, layer, kv_head, page_id);
             if (existing) {
-                if (existing->n_tokens >= cache->config.page_size)
+                if (existing->n_tokens >= cache->config.page_size) {
+                    /* A prior freeze OOM leaves a full HOT page. Retry
+                     * freeze before treating the slot as permanently full
+                     * so a later append can return OOM instead of arguing
+                     * the page was never meant to grow. */
+                    if (existing->tier == OC_HELIX_PAGE_HOT) {
+                        e = freeze_hot_page(cache, existing);
+                        if (e != OC_OK) return e;
+                    }
                     return OC_ERR_INVALID_ARG;
+                }
                 e = thaw_page_for_append(cache, existing);
                 if (e != OC_OK) return e;
                 page = existing;

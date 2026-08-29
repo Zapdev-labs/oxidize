@@ -297,16 +297,20 @@ Test(rotorquant_cache, rewind_truncates_mid_page)
         const uint8_t *vc = view.value_codes;
         const float *ks = view.key_scales;
         const float *vs = view.value_scales;
+        const size_t snap_tokens = view.tokens;
+        OcRotorQuantPageView fresh;
         cr_assert_eq(oc_rotorquant_cache_rewind(&cache, 2), OC_OK);
         cr_assert_eq(oc_rotorquant_cache_page_count(&cache), (size_t)1);
         cr_assert_eq(oc_rotorquant_cache_n_logits(&cache, 0, 0), (size_t)2);
-        cr_assert(oc_rotorquant_cache_page_view(&cache, 0, &view));
-        cr_assert_eq(view.tokens, (size_t)2);
-        cr_assert_eq(view.first_position, (size_t)0);
-        cr_assert_eq(view.key_codes, kc);
-        cr_assert_eq(view.value_codes, vc);
-        cr_assert_eq(view.key_scales, ks);
-        cr_assert_eq(view.value_scales, vs);
+        cr_assert_eq(snap_tokens, (size_t)4,
+                     "held view.tokens is a snapshot; re-fetch after rewind");
+        cr_assert(oc_rotorquant_cache_page_view(&cache, 0, &fresh));
+        cr_assert_eq(fresh.tokens, (size_t)2);
+        cr_assert_eq(fresh.first_position, (size_t)0);
+        cr_assert_eq(fresh.key_codes, kc);
+        cr_assert_eq(fresh.value_codes, vc);
+        cr_assert_eq(fresh.key_scales, ks);
+        cr_assert_eq(fresh.value_scales, vs);
     }
     oc_rotorquant_cache_free(&cache);
 }
@@ -315,6 +319,7 @@ Test(rotorquant_cache, store_rejects_position_range_overflow)
 {
     OcRotorQuantCacheConfig cfg;
     OcRotorQuantCache cache;
+    OcRotorQuantPageView view;
     float keys[16], values[16];
     size_t i;
     oc_rotorquant_cache_config_init(&cfg);
@@ -324,6 +329,12 @@ Test(rotorquant_cache, store_rejects_position_range_overflow)
         keys[i] = 0.1f;
         values[i] = 0.2f;
     }
+    cr_assert_eq(oc_rotorquant_cache_store_page(&cache, 0, 0, keys, values,
+                                                1, (size_t)-1),
+                 OC_OK);
+    cr_assert(oc_rotorquant_cache_page_view(&cache, 0, &view));
+    cr_assert_eq(view.tokens, (size_t)1);
+    cr_assert_eq(view.first_position, (size_t)-1);
     cr_assert_eq(oc_rotorquant_cache_store_page(&cache, 0, 0, keys, values,
                                                 2, (size_t)-1),
                  OC_ERR_INVALID_ARG);

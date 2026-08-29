@@ -226,7 +226,9 @@ OcError oc_rotorquant_cache_store_page(OcRotorQuantCache *cache,
     float *key_scales = NULL, *value_scales = NULL;
     uint8_t *key_codes = NULL, *value_codes = NULL;
     if (!cache || !keys || !values || n_tokens == 0) return OC_ERR_INVALID_ARG;
-    if (n_tokens > (size_t)-1 - first_position) return OC_ERR_INVALID_ARG;
+    /* Last token lives at first_position + (n_tokens - 1). A 1-token page
+     * at first_position == SIZE_MAX is legal; two tokens there wrap. */
+    if (n_tokens - 1 > (size_t)-1 - first_position) return OC_ERR_INVALID_ARG;
     e = quantize_rows(cache, keys, n_tokens, &key_scales, &key_codes);
     if (e != OC_OK) return e;
     e = quantize_rows(cache, values, n_tokens, &value_scales, &value_codes);

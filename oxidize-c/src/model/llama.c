@@ -2054,6 +2054,12 @@ static int use_compressed_attn(const OcLlamaSession *s, uint32_t layer)
     return layer_qualifies_compressed(s->model, layer);
 }
 
+static void rewind_compressed_to(OcLlamaSession *s, size_t n_keep)
+{
+    if (!s || !s->kv_compress) return;
+    (void)oc_compressed_kv_rewind(s->kv_compress, n_keep);
+}
+
 static OcError store_compressed_token(OcLlamaSession *s, uint32_t layer,
                                       uint32_t n_kv, size_t hd, const float *k,
                                       const float *v, size_t pos)
@@ -2085,7 +2091,10 @@ static OcError attention_decode_layer(OcLlamaSession *s, uint32_t layer)
                 e = oc_compressed_kv_attention(s->kv_compress, layer, kh,
                                                s->q + h * hd, hd, (size_t)s->pos,
                                                s->attn_out + h * hd);
-                if (e != OC_OK) return e;
+                if (e != OC_OK) {
+                    rewind_compressed_to(s, (size_t)s->pos);
+                    return e;
+                }
             }
         }
         return OC_OK;
@@ -2856,7 +2865,10 @@ static OcError forward_layer(OcLlamaSession *s, uint32_t layer)
         if (use_compressed_attn(s, layer)) {
             OcError se = store_compressed_token(s, layer, n_kv, hd, s->k, s->v,
                                                 (size_t)s->pos);
-            if (se != OC_OK) return se;
+            if (se != OC_OK) {
+                rewind_compressed_to(s, (size_t)s->pos);
+                return se;
+            }
         } else if (L->use_rope) {
         for (uint32_t h = 0; h < c->n_head; h++) {
             if (c->yarn_factor > 0.0f) {
@@ -3942,7 +3954,10 @@ static OcError prefill_layer(OcLlamaSession *s, uint32_t layer, PrefillBuf *b,
         if (use_compressed_attn(s, layer)) {
             OcError se = store_compressed_token(s, layer, n_kv, hd, kj, vj,
                                                 (size_t)pos);
-            if (se != OC_OK) return se;
+            if (se != OC_OK) {
+                rewind_compressed_to(s, (size_t)pos0);
+                return se;
+            }
             continue;
         }
 
@@ -4009,8 +4024,12 @@ static OcError prefill_layer(OcLlamaSession *s, uint32_t layer, PrefillBuf *b,
                      c->attn_out_gate ? b->mgate : NULL, OC_OK };
     oc_parallel_for(n * c->n_head, attention_slice, &ajob);
     g_pf_t.attn += pf_now() - t0;
-    if (atomic_load(&ajob.error) != OC_OK)
-        return (OcError)atomic_load(&ajob.error);
+    if (atomic_load(&ajob.error) != OC_OK) {
+        OcError ae = (OcError)atomic_load(&ajob.error);
+        if (use_compressed_attn(s, layer))
+            rewind_compressed_to(s, (size_t)pos0);
+        return ae;
+    }
 
     /* Output projection + residual. */
     double t_pr0 = pf_now();

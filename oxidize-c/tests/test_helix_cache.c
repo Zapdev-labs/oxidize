@@ -346,8 +346,11 @@ Test(helix_cache, rewind_then_append_preserves_prefix)
     const float values[32] = {0};
     const float extra_k[8] = {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f};
     const float extra_v[8] = {0};
+    const float query[8] = {1.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.0f, 0.0f, 0.0f};
     const size_t positions[] = {0, 1, 2, 3};
     const size_t extra_pos[] = {2};
+    float prefix[4], after[4];
+    size_t n_out = 0, i;
     oc_helix_cache_config_init(&cfg);
     cfg.page_size = 4;
     cfg.head_dim = 8;
@@ -357,10 +360,29 @@ Test(helix_cache, rewind_then_append_preserves_prefix)
                  OC_OK);
     cr_assert_eq(oc_helix_cache_rewind(&cache, 2), OC_OK);
     cr_assert_eq(oc_helix_cache_n_logits(&cache, 0, 0), (size_t)2);
+    cr_assert_eq(oc_helix_cache_logits(&cache, 0, 0, query, 8, 1, 10000.0f,
+                                       prefix, 4, &n_out),
+                 OC_OK);
+    cr_assert_eq(n_out, (size_t)2);
     cr_assert_eq(oc_helix_cache_append(&cache, 0, 0, extra_k, extra_v,
                                        extra_pos, 1),
                  OC_OK);
     cr_assert_eq(oc_helix_cache_n_logits(&cache, 0, 0), (size_t)3);
+    /* Append thaws the page, so cold_page_view is the wrong check. Causal
+     * logits at pos 1 must still be the two prefix rows. */
+    cr_assert_eq(oc_helix_cache_logits(&cache, 0, 0, query, 8, 1, 10000.0f,
+                                       after, 4, &n_out),
+                 OC_OK);
+    cr_assert_eq(n_out, (size_t)2);
+    for (i = 0; i < 2; i++) {
+        cr_assert(fabsf(after[i] - prefix[i]) < 1.0e-4f,
+                  "prefix logit %zu drifted after append: %f vs %f",
+                  i, after[i], prefix[i]);
+    }
+    cr_assert_eq(oc_helix_cache_logits(&cache, 0, 0, query, 8, 2, 10000.0f,
+                                       after, 4, &n_out),
+                 OC_OK);
+    cr_assert_eq(n_out, (size_t)3);
     oc_helix_cache_free(&cache);
 }
 
@@ -435,6 +457,41 @@ Test(helix_cache, append_to_full_page_is_rejected)
                  OC_ERR_INVALID_ARG);
     cr_assert_eq(oc_helix_cache_page_count(&cache), (size_t)1);
     cr_assert_eq(oc_helix_cache_n_logits(&cache, 0, 0), (size_t)4);
+    oc_helix_cache_free(&cache);
+}
+
+Test(helix_cache, append_to_full_hot_retries_freeze)
+{
+    OcHelixCacheConfig cfg;
+    OcHelixCache cache;
+    OcHelixColdPageView view;
+    OcHelixCacheStats stats;
+    float keys[32], values[32];
+    size_t pos[] = {0, 1, 2, 3};
+    size_t overflow = 3;
+    size_t i;
+    oc_helix_cache_config_init(&cfg);
+    cfg.page_size = 4;
+    cfg.head_dim = 8;
+    for (i = 0; i < 32; i++) {
+        keys[i] = 1.0f;
+        values[i] = 0.0f;
+    }
+    cr_assert_eq(oc_helix_cache_init(&cache, &cfg), OC_OK);
+    cr_assert_eq(oc_helix_cache_store_hot_page(&cache, 0, 0, 0, keys, values,
+                                               pos, 4),
+                 OC_OK);
+    cr_assert_eq(oc_helix_cache_stats(&cache, &stats), OC_OK);
+    cr_assert_eq(stats.hot_pages, (size_t)1);
+    cr_assert_eq(oc_helix_cache_append(&cache, 0, 0, keys, values, &overflow,
+                                       1),
+                 OC_ERR_INVALID_ARG);
+    cr_assert_eq(oc_helix_cache_stats(&cache, &stats), OC_OK);
+    cr_assert_eq(stats.hot_pages, (size_t)0);
+    cr_assert_eq(stats.cold_pages, (size_t)1);
+    cr_assert_eq(oc_helix_cache_n_logits(&cache, 0, 0), (size_t)4);
+    cr_assert(oc_helix_cache_cold_page_view(&cache, 0, &view));
+    cr_assert_eq(view.tokens, (size_t)4);
     oc_helix_cache_free(&cache);
 }
 

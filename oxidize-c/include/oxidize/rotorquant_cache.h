@@ -41,7 +41,11 @@ typedef struct OcRotorQuantCacheStats {
 } OcRotorQuantCacheStats;
 
 /* Pointers remain valid until the matching page is dropped or the cache
- * is freed. */
+ * is freed. `tokens` (and the other count fields) are a snapshot from
+ * page_view(); rewind may shrink the page's live token count without
+ * moving buffers, so a held view can still report rows rewind dropped.
+ * Re-fetch the view after rewind before iterating, or read `tokens`
+ * from a fresh page_view(). */
 typedef struct OcRotorQuantPageView {
     size_t         layer;
     size_t         kv_head;
@@ -113,9 +117,10 @@ float oc_rotorquant_cache_compression_ratio(const OcRotorQuantCacheStats *st);
 /* Drop pages whose first_position >= n_keep. Pages that straddle n_keep
  * are truncated so tokens at first_position + t >= n_keep are dropped.
  * Backing code/scale buffers keep their original allocation so an
- * OcRotorQuantPageView taken before rewind stays valid; unused tail
- * rows are reclaimed on the next store_page of this slot, or when the
- * page is cleared/freed. */
+ * OcRotorQuantPageView taken before rewind keeps valid pointers; the
+ * view's snapshotted `tokens` is stale. Call page_view() again after
+ * rewind before iterating. Unused tail rows are reclaimed on the next
+ * store_page of this slot, or when the page is cleared/freed. */
 OcError oc_rotorquant_cache_rewind(OcRotorQuantCache *cache, size_t n_keep);
 void oc_rotorquant_cache_clear(OcRotorQuantCache *cache);
 
