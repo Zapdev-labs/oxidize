@@ -25,9 +25,12 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "oxidize/error.h"
+#include "oxidize/autotune.h"
 #include "oxidize/http.h"
 #include "oxidize/llama.h"
 #include "oxidize/middleware.h"
+#include "oxidize/scheduler.h"
 #include "oxidize/tokenizer.h"
 
 #ifdef __cplusplus
@@ -47,6 +50,11 @@ typedef struct OcOpenaiState {
      * NULL disables all of it — the handler then behaves exactly as before.
      * Not owned; the caller initializes and frees it. */
     OcMiddleware *mw;
+    /* Applied autotune plan (has_plan=false until --auto copies one in). */
+    bool           has_plan;
+    OcTuningPlan   plan;
+    OcSchedConfig  sched;
+    OcKvCacheType  kv_type;
 } OcOpenaiState;
 
 /* ─── Operational endpoints ───────────────────────────────────────────────
@@ -84,6 +92,12 @@ bool oc_openai_stream_authorize(const OcHttpRequest *req, int *out_status,
 
 /* Convenience: build a JSON error response body (malloc'd, caller frees). */
 char *oc_openai_error_json(const char *message, const char *type);
+
+/* Copy a tuning plan onto server state: sizes the paged scheduler
+ * (max_decode_batch / chunked prefill) and records the KV type.
+ * explicit_prefill_chunk > 0 wins over the plan. */
+OcError oc_openai_apply_tuning_plan(OcOpenaiState *st, const OcTuningPlan *plan,
+                                      uint32_t explicit_prefill_chunk);
 
 #ifdef __cplusplus
 }

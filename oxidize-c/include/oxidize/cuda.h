@@ -179,6 +179,10 @@ typedef struct OcCudaContext {
     size_t conv_state_per_layer;
     size_t recurrent_state_per_layer;
     bool initialized;
+    /* Autotune-requested CUDA graph / persistent-decode flags. Stored and
+     * logged; this port does not invent a CUDA graph runtime. */
+    bool cuda_graphs;
+    bool persistent_decode_kernels;
     /* Non-blocking streams for independent GEMVs (Q/K/V or FFN gate/up). */
     void *compute_streams[3];
     /* Device memory accounting, filled during init (for --verbose reporting). */

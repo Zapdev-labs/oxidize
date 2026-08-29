@@ -8,6 +8,7 @@
 #include "oxidize/gpu_cluster.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <strings.h> /* strcasecmp */
 
@@ -52,26 +53,41 @@ static const OcGpuProfile OC_PROFILES[] = {
         .network_class = "ethernet",
         .workload_type = "edge",
     },
+    [OC_GPU_FAMILY_H100] = {
+        .family = OC_GPU_FAMILY_H100,
+        .product = "NVIDIA-H100-SXM5-80GB",
+        .generation = "hopper",
+        .memory_mib = 81920u,
+        .tdp_watts = 700u,
+        .nvlink = true,
+        .mig_capable = false,
+        .time_slice_replicas = 1u,
+        .network_class = "infiniband",
+        .workload_type = "throughput-inference",
+    },
 };
 
 static const char *const OC_FAMILY_SLUGS[] = {
     [OC_GPU_FAMILY_B200] = "b200",
     [OC_GPU_FAMILY_A100] = "a100",
     [OC_GPU_FAMILY_RTX_PRO_6000] = "rtx-pro-6000",
+    [OC_GPU_FAMILY_H100] = "h100",
 };
 
 static const char *const OC_FAMILY_NAMES[] = {
     [OC_GPU_FAMILY_B200] = "B200",
     [OC_GPU_FAMILY_A100] = "A100",
     [OC_GPU_FAMILY_RTX_PRO_6000] = "RTX Pro 6000",
+    [OC_GPU_FAMILY_H100] = "H100",
 };
 
-/* Higher rank = more capable. B200 is the flagship, RTX Pro 6000 the
- * entry-level datacenter option. */
+/* Higher rank = more capable. B200 is the flagship, then H100, A100,
+ * RTX Pro 6000. */
 static const uint8_t OC_FAMILY_RANKS[] = {
-    [OC_GPU_FAMILY_B200] = 3u,
+    [OC_GPU_FAMILY_B200] = 4u,
     [OC_GPU_FAMILY_A100] = 2u,
     [OC_GPU_FAMILY_RTX_PRO_6000] = 1u,
+    [OC_GPU_FAMILY_H100] = 3u,
 };
 
 #define OC_N_FAMILIES \
@@ -267,4 +283,150 @@ OcError oc_gpu_cluster_device_plugin_yaml(OcGpuFamily family, char *out, size_t 
     if (n < 0) return OC_ERR_INTERNAL;
     if ((size_t)n >= out_len) return OC_ERR_INTERNAL;
     return OC_OK;
+}
+
+/* ------------------------------------------------------------------ */
+/* Runtime detection (pure classifier + nvidia-smi probe).           */
+/* ------------------------------------------------------------------ */
+
+static void ascii_lower_copy(char *dst, size_t cap, const char *src)
+{
+    size_t i = 0;
+    if (cap == 0) return;
+    if (src == NULL) {
+        dst[0] = '\0';
+        return;
+    }
+    for (; src[i] != '\0' && i + 1 < cap; i++) {
+        char c = src[i];
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        dst[i] = c;
+    }
+    dst[i] = '\0';
+}
+
+OcGpuFamily oc_gpu_family_from_nvidia_name(const char *name)
+{
+    char n[256];
+    if (name == NULL || name[0] == '\0') return OC_GPU_FAMILY__COUNT;
+    ascii_lower_copy(n, sizeof(n), name);
+    if (strstr(n, "b200") != NULL) return OC_GPU_FAMILY_B200;
+    if (strstr(n, "h100") != NULL) return OC_GPU_FAMILY_H100;
+    if (strstr(n, "a100") != NULL) return OC_GPU_FAMILY_A100;
+    if (strstr(n, "rtx") != NULL && strstr(n, "pro") != NULL &&
+        strstr(n, "6000") != NULL)
+        return OC_GPU_FAMILY_RTX_PRO_6000;
+    return OC_GPU_FAMILY__COUNT;
+}
+
+static void trim_copy(char *dst, size_t cap, const char *src, size_t len)
+{
+    while (len > 0 && (*src == ' ' || *src == '\t')) {
+        src++;
+        len--;
+    }
+    while (len > 0 && (src[len - 1] == ' ' || src[len - 1] == '\t' ||
+                       src[len - 1] == '\r' || src[len - 1] == '\n')) {
+        len--;
+    }
+    if (len >= cap) len = cap - 1;
+    if (len > 0) memcpy(dst, src, len);
+    dst[len] = '\0';
+}
+
+OcError oc_gpu_parse_nvidia_smi_csv(const char *output, OcGpuDevice *out,
+                                      size_t cap, size_t *out_n)
+{
+    if (out_n == NULL) return OC_ERR_INVALID_ARG;
+    *out_n = 0;
+    if (output == NULL) return OC_OK;
+    if (cap > 0 && out == NULL) return OC_ERR_INVALID_ARG;
+
+    const char *line = output;
+    while (*line != '\0' && *out_n < cap) {
+        const char *eol = strchr(line, '\n');
+        size_t linelen = eol ? (size_t)(eol - line) : strlen(line);
+        size_t t = 0;
+        while (t < linelen && (line[t] == ' ' || line[t] == '\t' ||
+                                line[t] == '\r'))
+            t++;
+        if (t == linelen) {
+            line = eol ? eol + 1 : line + linelen;
+            continue;
+        }
+
+        const char *fields[4];
+        size_t flen[4];
+        size_t nfields = 0;
+        const char *p = line;
+        const char *end = line + linelen;
+        while (nfields < 4) {
+            const char *comma = p;
+            while (comma < end && *comma != ',') comma++;
+            fields[nfields] = p;
+            flen[nfields] = (size_t)(comma - p);
+            nfields++;
+            if (comma >= end) break;
+            p = comma + 1;
+        }
+        if (nfields < 3) {
+            line = eol ? eol + 1 : line + linelen;
+            continue;
+        }
+
+        char idxbuf[32], namebuf[128], membuf[32], migbuf[32];
+        trim_copy(idxbuf, sizeof(idxbuf), fields[0], flen[0]);
+        trim_copy(namebuf, sizeof(namebuf), fields[1], flen[1]);
+        trim_copy(membuf, sizeof(membuf), fields[2], flen[2]);
+        if (nfields >= 4)
+            trim_copy(migbuf, sizeof(migbuf), fields[3], flen[3]);
+        else
+            migbuf[0] = '\0';
+
+        char *endptr = NULL;
+        unsigned long index = strtoul(idxbuf, &endptr, 10);
+        if (endptr == idxbuf) {
+            line = eol ? eol + 1 : line + linelen;
+            continue;
+        }
+        unsigned long mem = strtoul(membuf, &endptr, 10);
+        if (endptr == membuf) {
+            line = eol ? eol + 1 : line + linelen;
+            continue;
+        }
+
+        OcGpuDevice *d = &out[*out_n];
+        memset(d, 0, sizeof(*d));
+        d->index = (uint32_t)index;
+        memcpy(d->name, namebuf, strlen(namebuf) + 1);
+        d->memory_total_mib = (uint32_t)mem;
+        d->mig_enabled = (strcasecmp(migbuf, "enabled") == 0);
+        d->family = oc_gpu_family_from_nvidia_name(d->name);
+        (*out_n)++;
+
+        line = eol ? eol + 1 : line + linelen;
+    }
+    return OC_OK;
+}
+
+OcError oc_gpu_detect(OcGpuDevice *out, size_t cap, size_t *out_n)
+{
+    if (out_n == NULL) return OC_ERR_INVALID_ARG;
+    *out_n = 0;
+    if (cap > 0 && out == NULL) return OC_ERR_INVALID_ARG;
+
+    FILE *fp = popen("nvidia-smi --query-gpu=index,name,memory.total,mig.mode.current "
+                     "--format=csv,noheader,nounits 2>/dev/null",
+                     "r");
+    if (fp == NULL) return OC_OK;
+
+    char buf[8192];
+    size_t n = 0;
+    while (n + 1 < sizeof(buf)) {
+        if (fgets(buf + n, (int)(sizeof(buf) - n), fp) == NULL) break;
+        n += strlen(buf + n);
+    }
+    int status = pclose(fp);
+    if (status != 0 || n == 0) return OC_OK;
+    return oc_gpu_parse_nvidia_smi_csv(buf, out, cap, out_n);
 }

@@ -102,6 +102,7 @@ typedef struct OcCliContext {
     /* Backend. */
     const char        *backend;        /* "cpu" | "cuda"                    */
     const char        *kv_type;         /* "f32" | "q8"; NULL = auto         */
+    uint32_t           prefill_chunk_size; /* --prefill-chunk-size N (0 = unset) */
 
     /* Server. */
     const char        *host;           /* --host (default 127.0.0.1)        */

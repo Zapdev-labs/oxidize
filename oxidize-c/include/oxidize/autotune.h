@@ -26,6 +26,8 @@
 
 #include "oxidize/error.h"
 #include "oxidize/gguf.h"
+#include "oxidize/gpu_cluster.h"
+#include "oxidize/llama.h"
 #include "oxidize/simd.h"
 
 #ifdef __cplusplus
@@ -42,6 +44,12 @@ typedef struct OcCpuInfo {
     OcSimdCaps simd;             /* copy of oc_simd_caps()               */
     char     model_name[128];    /* /proc/cpuinfo model name             */
     bool     is_dual_socket;     /* numa_nodes >= 2                      */
+    /* GPU inventory (best-effort nvidia-smi). has_gpu=false and
+     * gpu_family=OC_GPU_FAMILY__COUNT when no device is present. */
+    bool         has_gpu;
+    OcGpuFamily  gpu_family;
+    uint32_t     gpu_count;
+    uint64_t     gpu_vram_bytes;
 } OcCpuInfo;
 
 /* ─── Model fingerprint ───────────────────────────────────────────────── */
@@ -73,6 +81,25 @@ typedef enum {
     OC_NUMA_INTERLEAVE = 2, /* spread across sockets                     */
 } OcNumaPolicy;
 
+typedef enum {
+    OC_PIPELINE_SEQUENTIAL = 0,
+    OC_PIPELINE_CONTINUOUS = 1,
+    OC_PIPELINE_PAGED      = 2,
+} OcPipelineMode;
+
+typedef enum {
+    OC_WEIGHT_NATIVE = 0,
+    OC_WEIGHT_FP8    = 1,
+    OC_WEIGHT_W8A8   = 2,
+    OC_WEIGHT_W4A16  = 3,
+} OcWeightPlan;
+
+typedef enum {
+    OC_ATTN_DEFAULT          = 0,
+    OC_ATTN_FLASH           = 1,
+    OC_ATTN_FLASH_ATTENTION3 = 2,
+} OcAttentionKernel;
+
 typedef struct OcTuningPlan {
     uint32_t       threads;          /* 0 = let runtime decide            */
     OcNumaPolicy   numa;             /* NUMA memory policy                */
@@ -85,6 +112,23 @@ typedef struct OcTuningPlan {
     const char    *rationale_numa;
     const char    *rationale_simd;
     const char    *rationale_memory;
+    /* Hopper / GPU throughput fields. Append-only: new fields go at the
+     * end so other ports can also append. 0 / false / Native / Sequential
+     * are the CPU defaults. chunked_prefill_tokens=0 and
+     * max_decode_batch=0 mean "leave the runtime default". */
+    OcPipelineMode     pipeline;
+    OcWeightPlan       weight_plan;
+    OcAttentionKernel  attention_kernel;
+    bool               cuda_graphs;
+    bool               persistent_decode_kernels;
+    uint32_t           n_gpu_layers;           /* 0 = CPU only; UINT32_MAX = all */
+    uint32_t           chunked_prefill_tokens; /* 0 = leave default            */
+    uint32_t           max_decode_batch;       /* 0 = leave default            */
+    OcKvCacheType      kv_cache;
+    bool               kv_turboquant;
+    float              expected_prompt_tps;
+    float              expected_decode_tps;
+    const char        *rationale_gpu;         /* hopper-specific, or NULL    */
 } OcTuningPlan;
 
 /* Detect CPU / NUMA / RAM. Reads /proc and /sys on Linux; fills a
@@ -134,6 +178,22 @@ const char *oc_autotune_numa_name(OcNumaPolicy p);
 void oc_autotune_plan_dump(const OcTuningPlan *plan,
                            const OcCpuInfo *cpu,
                            const OcModelFingerprint *model);
+
+/* Hopper throughput tier. Pure. Fires only when gpu_family==H100 and
+ * plan->n_gpu_layers > 0. Leaves the plan unchanged otherwise. */
+void oc_autotune_tier9_hopper(const OcCpuInfo *cpu,
+                              const OcModelFingerprint *model,
+                              OcTuningPlan *plan);
+
+/* Copy hopper batch/prefill knobs onto a paged scheduler config.
+ * max_decode_batch=0 / chunked_prefill_tokens=0 leave the existing values. */
+struct OcSchedConfig;
+OcError oc_autotune_apply_sched(const OcTuningPlan *plan,
+                                 struct OcSchedConfig *cfg);
+
+const char *oc_autotune_pipeline_name(OcPipelineMode p);
+const char *oc_autotune_weight_plan_name(OcWeightPlan p);
+const char *oc_autotune_attention_kernel_name(OcAttentionKernel k);
 
 #ifdef __cplusplus
 }

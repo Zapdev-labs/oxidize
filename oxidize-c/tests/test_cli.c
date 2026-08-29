@@ -151,3 +151,19 @@ Test(cli, parses_kv_type)
     oc_cli_parse_args(5, argv, &a);
     cr_assert_str_eq(a.kv_type, "q8");
 }
+
+Test(cli, parses_prefill_chunk_size)
+{
+    char *argv[] = {"oxidize-c", "--prefill-chunk-size", "1024"};
+    OcCliArgs a;
+    oc_cli_parse_args(3, argv, &a);
+    cr_assert_eq(a.prefill_chunk_size, 1024u);
+}
+
+Test(cli, context_parses_prefill_chunk_size)
+{
+    char *argv[] = {"oxidize-c", "serve", "--prefill-chunk-size", "1024"};
+    OcCliContext ctx;
+    cr_assert(oc_cli_context_parse(4, argv, &ctx));
+    cr_assert_eq(ctx.prefill_chunk_size, 1024u);
+}

@@ -19,6 +19,7 @@
  */
 #include "oxidize/cli_commands.h"
 
+#include "oxidize/autotune.h"
 #include "oxidize/benchmark.h"
 #include "oxidize/error.h"
 #include "oxidize/finetune.h"
@@ -355,8 +356,9 @@ void oc_cli_command_help(void)
 "  --model PATH          GGUF model file\n"
 "  --output text|json    Output format (default: text)\n"
 "  --threads N           CPU thread hint (0 = auto)\n"
-"  --kv f32|q8           KV cache dtype (q8 auto when ctx>=8192)\n"
-"  --ctx N               KV context length (default cap 4096)\n"
+               "  --kv f32|q8           KV cache dtype (q8 auto when ctx>=8192)\n"
+               "  --prefill-chunk-size N Prefill chunk (0 = unset; --auto may fill)\n"
+               "  --ctx N               KV context length (default cap 4096)\n"
 "  --verbose, -v         Verbose logging to stderr\n"
 "  --help, -h            Show help\n"
 "  --version             Print version\n"
@@ -413,7 +415,9 @@ void oc_cli_command_help_for(OcCliCommand cmd)
                "USAGE: oxidize-c serve --model <path> [OPTIONS]\n\n"
                "OPTIONS:\n"
                "  --host HOST           Bind host (default 127.0.0.1)\n"
-               "  --port PORT           Bind port (default 8080)\n");
+               "  --port PORT           Bind port (default 8080)\n"
+               "  --auto                Apply autotune plan to scheduler/KV\n"
+               "  --prefill-chunk-size N Prefill chunk (overrides plan)\n");
         break;
     case OC_CLI_CMD_SERVE_REALTIME:
         printf("start WebSocket realtime server\n\n"
@@ -1448,6 +1452,16 @@ OcError oc_cli_run_serve(OcCliContext *ctx)
         st.model_id = strdup(slash ? slash + 1 : ctx->model_path);
         progress(ctx, "serve: model loaded, starting server on %s:%d",
                  ctx->host, ctx->port);
+        if (ctx->auto_tune) {
+            OcCpuInfo cpu;
+            OcModelFingerprint fp;
+            if (oc_autotune_detect_cpu(&cpu) == OC_OK &&
+                oc_autotune_fingerprint_gguf(&model->gguf, &fp) == OC_OK) {
+                OcTuningPlan plan = oc_autotune_plan(&cpu, &fp);
+                oc_autotune_apply(&plan, &model->gguf);
+                oc_openai_apply_tuning_plan(&st, &plan, ctx->prefill_chunk_size);
+            }
+        }
     } else {
         progress(ctx, "serve: no model — starting placeholder server on %s:%d",
                  ctx->host, ctx->port);
