@@ -29,5 +29,16 @@ class HangEnd(unittest.TestCase):
         self.assertFalse(_STRIP.is_truncated_comment(text))
 
 
+class QuantTablesBanner(unittest.TestCase):
+    def test_generator_banner_matches_checked_in_header(self):
+        root = Path(__file__).resolve().parents[1]
+        gen_path = root / "oxidize-c" / "scripts" / "gen_quant_tables.py"
+        spec = importlib.util.spec_from_file_location("gen_quant_tables", gen_path)
+        gen = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(gen)
+        header = (root / "oxidize-c" / "src" / "compute" / "quant_tables.h").read_text().splitlines()[0]
+        self.assertEqual(gen.BANNER, header)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -20,6 +20,13 @@ ROOT = Path(__file__).resolve().parents[1]
 RUST_COMPUTE = ROOT.parent / "oxidize-core" / "src" / "compute"
 OUT = ROOT / "src" / "compute" / "quant_tables.h"
 
+BANNER = (
+    "/* Auto-generated from oxidize-core Rust lookup tables. Bit-exact port of "
+    "oxidize-core/src/compute/quantization{.rs,/iq_grids.rs,/iq1s_grid_fragment.rs,"
+    "/iq2s_grid_fragment.rs,/iq2xs_grid_fragment.rs}. Source of truth: ggml-common.h "
+    "(ggml-org/llama.cpp). Do not hand-edit. Regenerate via scripts/gen_quant_tables.py. */"
+)
+
 
 def extract_array(text: str, name: str, ty: str) -> str:
     """Extract `pub ... const NAME: [T; N] = [ ... ];` body as a single string."""
@@ -62,13 +69,7 @@ def main() -> None:
     iq1s = (RUST_COMPUTE / "quantization" / "iq1s_grid_fragment.rs").read_text()
 
     blocks: list[str] = []
-    blocks.append('/* Auto-generated from oxidize-core Rust lookup tables.')
-    blocks.append(' * Bit-exact port of oxidize-core/src/compute/quantization{.rs,/iq_grids.rs,')
-    blocks.append(' * /iq1s_grid_fragment.rs, /iq2s_grid_fragment.rs, /iq2xs_grid_fragment.rs}.')
-    blocks.append(' *')
-    blocks.append(' * Source of truth: ggml-common.h (ggml-org/llama.cpp).')
-    blocks.append(' * Do not hand-edit. Regenerate via scripts/gen_quant_tables.py.')
-    blocks.append(' */')
+    blocks.append(BANNER)
     blocks.append('#ifndef OXIDIZE_QUANT_TABLES_H')
     blocks.append('#define OXIDIZE_QUANT_TABLES_H')
     blocks.append('')

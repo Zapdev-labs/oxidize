@@ -42,7 +42,7 @@ typedef struct OcKvPage {
     uint32_t ref_count;   /* number of sequences referencing this page    */
     uint64_t seq_id;      /* owning sequence id (0 = free)                */
     uint32_t start_pos;   /* starting token position within the sequence  */
-    /* K/V storage: layer_k[layer][token][head_dim * n_heads] layer_v[layer][token][head_dim * n_heads] Allocated lazily by oc_kv_page_init (single contiguous block each). */
+    /* K/V storage: layer_k[layer][token][head_dim * n_heads]; layer_v[layer][token][head_dim * n_heads]. Allocated lazily by oc_kv_page_init (single contiguous block each). */
     float *layer_k;       /* [n_layers * page_size * head_dim * n_heads] */
     float *layer_v;       /* [n_layers * page_size * head_dim * n_heads] */
 } OcKvPage;

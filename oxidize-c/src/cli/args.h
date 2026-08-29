@@ -49,7 +49,7 @@ typedef struct OcCliArgs {
     /* Mirostat. */
     float      mirostat_tau;     /* 0 = disabled; target surprise         */
     float      mirostat_eta;     /* learning rate (default 0.1)           */
-    /* Prompt-prefill chunk: tokens fed through the weights per pass. 0 = library default. */
+    /* Prompt-prefill chunk: tokens fed through the weights per pass. 0 = library default. Larger amortizes the weight sweep (and MoE expert packing) at a linear cost in scratch memory. */
     uint32_t   batch_size;
     bool       verbose;
     bool       inspect;           /* print model info and exit             */
